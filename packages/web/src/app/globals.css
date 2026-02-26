@@ -1,0 +1,195 @@
+@import "tailwindcss";
+
+@theme {
+  /* Core colors - minimal dark palette */
+  --color-background: #0a0a0a;
+  --color-foreground: #fafafa;
+  --color-card: #0a0a0a;
+  --color-card-foreground: #fafafa;
+  --color-popover: #0a0a0a;
+  --color-popover-foreground: #fafafa;
+  --color-primary: #fafafa;
+  --color-primary-foreground: #0a0a0a;
+  --color-secondary: #171717;
+  --color-secondary-foreground: #fafafa;
+  --color-muted: #171717;
+  --color-muted-foreground: #737373;
+  --color-accent: #262626;
+  --color-accent-foreground: #fafafa;
+  --color-destructive: #7f1d1d;
+  --color-destructive-foreground: #fafafa;
+  --color-border: #262626;
+  --color-input: #262626;
+  --color-ring: #404040;
+
+  /* Status colors */
+  --color-status-sent: #f59e0b;
+  --color-status-done: #22c55e;
+  --color-status-error: #ef4444;
+  --color-status-working: #f59e0b;
+  --color-status-idle: #22c55e;
+
+  /* Minimal radius */
+  --radius: 0.125rem;
+
+  /* Animation durations */
+  --duration-fast: 0.15s;
+  --duration-normal: 0.2s;
+  --duration-slow: 0.3s;
+}
+
+.dark {
+  --color-background: #0a0a0a;
+  --color-foreground: #fafafa;
+  --color-card: #0a0a0a;
+  --color-card-foreground: #fafafa;
+  --color-popover: #0a0a0a;
+  --color-popover-foreground: #fafafa;
+  --color-primary: #fafafa;
+  --color-primary-foreground: #0a0a0a;
+  --color-secondary: #171717;
+  --color-secondary-foreground: #fafafa;
+  --color-muted: #171717;
+  --color-muted-foreground: #737373;
+  --color-accent: #262626;
+  --color-accent-foreground: #fafafa;
+  --color-destructive: #7f1d1d;
+  --color-destructive-foreground: #fafafa;
+  --color-border: #262626;
+  --color-input: #262626;
+  --color-ring: #404040;
+}
+
+* {
+  border-color: var(--color-border);
+}
+
+/* Fast animation utilities */
+.transition-fast {
+  transition-duration: var(--duration-fast);
+  transition-timing-function: ease-out;
+}
+
+.transition-normal {
+  transition-duration: var(--duration-normal);
+  transition-timing-function: ease-out;
+}
+
+/* Hide scrollbar utility */
+.scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
+
+/* Hide ALL scrollbars globally */
+* {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+*::-webkit-scrollbar {
+  display: none !important;
+}
+
+body {
+  color: var(--color-foreground);
+  background: var(--color-background);
+}
+
+/* Syntax Highlighting (github-dark inspired) */
+.markdown-content pre {
+  background-color: #09090b;
+  color: #e4e4e7;
+  border: 1px solid #27272a;
+  border-radius: var(--radius);
+  margin-bottom: 1em;
+}
+
+.markdown-content pre code {
+  background-color: transparent !important;
+  color: inherit;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 0.875rem;
+  line-height: 1.5;
+  padding: 0;
+}
+
+.markdown-content pre code.hljs {
+  display: block;
+  overflow-x: auto;
+  padding: 1rem;
+}
+
+.hljs-comment,
+.hljs-quote {
+  color: #71717a;
+  font-style: italic;
+}
+
+.hljs-doctag,
+.hljs-keyword,
+.hljs-formula {
+  color: #f472b6;
+}
+
+.hljs-section,
+.hljs-name,
+.hljs-selector-tag,
+.hljs-deletion,
+.hljs-subst {
+  color: #fb7185;
+}
+
+.hljs-literal {
+  color: #38bdf8;
+}
+
+.hljs-string,
+.hljs-regexp,
+.hljs-addition,
+.hljs-attribute,
+.hljs-meta .hljs-string {
+  color: #4ade80;
+}
+
+.hljs-attr,
+.hljs-variable,
+.hljs-template-variable,
+.hljs-type,
+.hljs-selector-class,
+.hljs-selector-attr,
+.hljs-selector-pseudo,
+.hljs-number {
+  color: #fbbf24;
+}
+
+.hljs-symbol,
+.hljs-bullet,
+.hljs-link,
+.hljs-meta,
+.hljs-selector-id,
+.hljs-title {
+  color: #60a5fa;
+}
+
+.hljs-built_in,
+.hljs-title.class_,
+.hljs-class .hljs-title {
+  color: #fbbf24;
+}
+
+.hljs-emphasis {
+  font-style: italic;
+}
+
+.hljs-strong {
+  font-weight: bold;
+}
+
+.hljs-link {
+  text-decoration: underline;
+}

@@ -1,0 +1,1 @@
+export { WorktreeError, WorktreeManager } from "./WorktreeManager";

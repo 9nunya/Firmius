@@ -1,0 +1,23 @@
+{
+  "name": "Firmius",
+  "short_name": "Firmius",
+  "description": "AI-powered development assistant",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0a0a0a",
+  "theme_color": "#0a0a0a",
+  "orientation": "portrait",
+  "scope": "/",
+  "icons": [
+    {
+      "src": "/logo-white.webp",
+      "sizes": "192x192",
+      "type": "image/webp"
+    },
+    {
+      "src": "/logo-white.webp",
+      "sizes": "512x512",
+      "type": "image/webp"
+    }
+  ]
+}

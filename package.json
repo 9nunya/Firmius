@@ -1,0 +1,67 @@
+{
+  "name": "firmius",
+  "private": true,
+  "packageManager": "bun@1.3.5",
+  "workspaces": [
+    "packages/*"
+  ],
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.2.0",
+    "@types/bun": "latest",
+    "@types/picomatch": "^4.0.2",
+    "@types/turndown": "^5.0.6",
+    "concurrently": "^8.2.2",
+    "tailwindcss": "^4.2.0",
+    "turbo": "^2.0.0"
+  },
+  "peerDependencies": {
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "@opentui/core": "^0.1.79",
+    "@opentui/react": "^0.1.79",
+    "@types/marked": "^6.0.0",
+    "@types/react": "19",
+    "@types/ssh2": "^1.15.5",
+    "framer-motion": "^12.34.0",
+    "lodash": "^4.17.23",
+    "marked": "^17.0.2",
+    "picomatch": "^4.0.3",
+    "react": "19",
+    "react-diff-viewer": "^3.1.1",
+    "react-markdown": "^10.1.0",
+    "react-server-dom-webpack": "^19.2.4",
+    "rehype-highlight": "^7.0.2",
+    "remark-gfm": "^4.0.1",
+    "ssh2": "^1.17.0",
+    "turndown": "^7.2.2",
+    "vercel": "^50.15.1",
+    "yaml": "^2.8.2",
+    "zod": "^4.3.6"
+  },
+  "scripts": {
+    "build:cli": "bun scripts/build-all.ts",
+    "typecheck": "turbo typecheck",
+    "lint": "turbo lint",
+    "dev:server": "bun run packages/api/src/server.ts",
+    "dev:web": "cd packages/web && bunx next dev -p 9817",
+    "dev:serve": "concurrently 'bun run dev:server' 'bun run dev:web'",
+    "test": "turbo test",
+    "test:unit": "bun run --filter @firmius/core test:unit",
+    "test:integration": "bun run --filter @firmius/core test:integration",
+    "test:suites": "bun run --filter @firmius/core test:suites",
+    "build:sandbox": "docker build -f docker/Dockerfile.sandbox -t firmius-sandbox:latest .",
+    "benchmark:swe": "bun run --filter @firmius/core packages/core/src/benchmarks/SWEBench.ts",
+    "benchmark:agentbench": "bun run --filter @firmius/core packages/core/src/benchmarks/AgentBench.ts",
+    "benchmark:mbpp": "bun run --filter @firmius/core packages/core/src/benchmarks/MBPP.ts",
+    "audit:permissions": "bun run --filter @firmius/core packages/core/src/audits/PermissionEscalation.ts",
+    "audit:processes": "bun run --filter @firmius/core packages/core/src/audits/ZombieApocalypse.ts",
+    "audit:context": "bun run --filter @firmius/core packages/core/src/audits/ContextCollapse.ts",
+    "audit:lsp": "bun run --filter @firmius/core packages/core/src/audits/LSPTools.ts",
+    "audit:luau": "bun run --filter @firmius/core packages/core/src/audits/LuauRobloxSupport.ts",
+    "debug:thinking-loop": "bun run --filter @firmius/core packages/core/src/audits/DebugThinkingLoop.ts",
+    "firmius": "bun run packages/cli/src/index.ts",
+    "tui": "bun run --filter @firmius/tui packages/tui/src/index.tsx",
+    "test:runner": "bun packages/core/src/tests/runner.ts"
+  }
+}

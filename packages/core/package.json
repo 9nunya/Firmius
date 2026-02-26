@@ -1,0 +1,19 @@
+{
+  "name": "@firmius/core",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc --noEmit",
+    "test": "bun test",
+    "test:unit": "bun test src/tests/unit",
+    "test:integration": "bun test src/tests/integration",
+    "test:suites": "bun test src/tests/suites"
+  },
+  "dependencies": {
+    "@firmius/shared": "workspace:*"
+  }
+}

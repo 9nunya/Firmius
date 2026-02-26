@@ -1,0 +1,49 @@
+{
+  "compilerOptions": {
+    // Environment setup & latest features
+    "lib": ["dom", "dom.iterable", "ESNext"],
+    "target": "ESNext",
+    "module": "Preserve",
+    "moduleDetection": "force",
+    "jsx": "react-jsx",
+    "allowJs": true,
+
+    // Bundler mode
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "noEmit": true,
+
+    // Path aliases
+    "baseUrl": ".",
+    "paths": {
+      "@firmius/config": ["./packages/config/src/index.ts"],
+      "@firmius/config/*": ["./packages/config/src/*"],
+      "@firmius/shared": ["./packages/shared/src/index.ts"],
+      "@firmius/shared/*": ["./packages/shared/src/*"],
+      "@firmius/core": ["./packages/core/src/index.ts"],
+      "@firmius/core/*": ["./packages/core/src/*"],
+      "@firmius/api": ["./packages/api/src/index.ts"],
+      "@firmius/api/*": ["./packages/api/src/*"],
+      "@firmius/tui": ["./packages/tui/src/index.ts"],
+      "@firmius/tui/*": ["./packages/tui/src/*"],
+      "@firmius/web": ["./packages/web/src/index.ts"],
+      "@firmius/web/*": ["./packages/web/src/*"],
+      "@/*": ["./src/frontend/*"],
+      "@/core/*": ["./src/core/*"],
+      "@/types/*": ["./src/types/*"]
+    },
+
+    // Best practices
+    "strict": true,
+    "skipLibCheck": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+
+    // Some stricter flags (disabled by default)
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noPropertyAccessFromIndexSignature": false
+  }
+}

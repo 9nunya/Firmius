@@ -1,0 +1,22 @@
+{
+  "name": "@firmius/cli",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.tsx",
+  "types": "./src/index.tsx",
+  "bin": {
+    "firmius": "./src/index.tsx"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "prebuild": "bun run ../../scripts/embedPurposes.ts",
+    "build": "bun build src/index.tsx --compile --outfile dist/firmius",
+    "dev": "bun run src/index.tsx"
+  },
+  "dependencies": {
+    "@firmius/tui": "workspace:*",
+    "@firmius/api": "workspace:*",
+    "@firmius/web": "workspace:*"
+  }
+}
