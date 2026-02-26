@@ -5,6 +5,8 @@ WORKDIR /work
 # Layer 1: System dependencies (rarely changes)
 RUN apt-get update && apt-get install -y \
     git curl python3 python3-pip openssh-server bash grep coreutils findutils gawk procps \
+    && curl -LsSf https://astral.sh/uv/install.sh | sh \
+    && mv /root/.local/bin/uv /usr/local/bin/uv \
     && rm -rf /var/lib/apt/lists/*
 
 # Layer 2: LSPs and development tools (changes occasionally)

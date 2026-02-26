@@ -1,0 +1,140 @@
+#ifndef FIRMIUS_SHARED_ITOOL_HPP
+#define FIRMIUS_SHARED_ITOOL_HPP
+
+#include "Context.hpp"
+#include "IHost.hpp"
+#include "utils/JSONSchema.hpp"
+#include <rapidjson/document.h>
+#include <string>
+#include <memory>
+#include <algorithm>
+
+/**
+ * @brief Extensible tool system for agentic actions.
+ */
+namespace firmius::shared {
+
+class IAgent; // Forward declaration
+
+/**
+ * @brief Context passed to tools during execution.
+ */
+struct ToolContext {
+    IHost& host;    ///< The execution host.
+    IAgent& agent;  ///< The agent instance invoking the tool.
+};
+
+/**
+ * @brief Metadata describing a tool.
+ */
+struct ToolMetadata {
+    std::string name;        ///< Unique tool name.
+    std::string description; ///< Human/LLM-readable description.
+    ToolScope scope;         ///< Security scope required to run.
+};
+
+/**
+ * @brief Result of a tool execution turn.
+ */
+struct ToolResult {
+    bool success;              ///< True if tool succeeded.
+    std::string error;         ///< Error message (valid if success is false).
+    rapidjson::Document data;  ///< Success payload (valid if success is true).
+
+    ToolResult() : success(false) {
+        data.SetObject();
+    }
+
+    /**
+     * @brief Creates a successful result with data.
+     */
+    static ToolResult ok(rapidjson::Value&& val) {
+        ToolResult res;
+        res.success = true;
+        res.data.CopyFrom(val, res.data.GetAllocator());
+        return res;
+    }
+
+    /**
+     * @brief Creates a simple successful result.
+     */
+    static ToolResult ok() {
+        ToolResult res;
+        res.success = true;
+        res.data.SetObject();
+        return res;
+    }
+
+    /**
+     * @brief Creates a failed result with an error message.
+     */
+    static ToolResult fail(const std::string& msg) {
+        ToolResult res;
+        res.success = false;
+        res.error = msg;
+        res.data.SetObject();
+        return res;
+    }
+};
+
+/**
+ * @brief Interface for an executable agentic tool.
+ */
+class ITool {
+public:
+    virtual ~ITool() = default;
+
+    /**
+     * @brief Gets the tool's metadata.
+     */
+    virtual ToolMetadata getMetadata() const = 0;
+
+    /**
+     * @brief Gets the JSON Schema for tool input validation.
+     */
+    virtual std::shared_ptr<JSONSchema> getSchema() const = 0;
+
+    /**
+     * @brief Executes the tool with raw JSON input.
+     * @param input The validated JSON arguments.
+     * @param ctx Execution context.
+     * @return Execution result.
+     */
+    virtual ToolResult execute(const rapidjson::Value& input, ToolContext& ctx) = 0;
+};
+
+// Macros for TypedTool mapping
+#define START_MAPPING(type) type transform(const rapidjson::Value& json) override { type input; (void)json;
+#define MAP_STRING(field, json_key) if (json.HasMember(json_key) && json[json_key].IsString()) input.field = json[json_key].GetString(); else if (json.HasMember(json_key)) { if (json[json_key].IsInt()) input.field = std::to_string(json[json_key].GetInt()); else if (json[json_key].IsBool()) input.field = json[json_key].GetBool() ? "true" : "false"; }
+#define MAP_INT(field, json_key) if (json.HasMember(json_key)) { if (json[json_key].IsInt()) input.field = json[json_key].GetInt(); else if (json[json_key].IsString()) try { input.field = std::stoi(json[json_key].GetString()); } catch(...) { input.field = 0; } }
+#define MAP_BOOL(field, json_key) if (json.HasMember(json_key)) { if (json[json_key].IsBool()) input.field = json[json_key].GetBool(); else if (json[json_key].IsString()) { std::string s = json[json_key].GetString(); std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c){ return std::tolower(c); }); input.field = (s == "true" || s == "1" || s == "yes"); } }
+#define END_MAPPING return input; }
+
+/**
+ * @brief Base class for tools with strongly-typed inputs.
+ */
+template<typename T>
+class TypedTool : public ITool {
+public:
+    /**
+     * @brief Transforms raw JSON to the input type T.
+     */
+    virtual T transform(const rapidjson::Value& json) = 0;
+
+    /**
+     * @brief Executes the tool with typed input.
+     */
+    virtual ToolResult execute(const T& input, ToolContext& ctx) = 0;
+
+    /**
+     * @brief Implementation of ITool::execute that handles transformation.
+     */
+    ToolResult execute(const rapidjson::Value& json, ToolContext& ctx) override {
+        T input = transform(json);
+        return execute(input, ctx);
+    }
+};
+
+}
+
+#endif

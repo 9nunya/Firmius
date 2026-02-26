@@ -1,3 +1,0 @@
-$ bun build src/index.ts --compile --outfile dist/firmius
-   [1ms]  bundle  1 modules
-   [0ms] compile  dist/firmius

@@ -1,0 +1,53 @@
+find_package(CURL REQUIRED)
+find_package(Threads REQUIRED)
+
+add_library(firmius_core STATIC)
+add_library(firmius::core ALIAS firmius_core)
+
+target_sources(firmius_core PRIVATE 
+    src/hosts/LocalHost.cpp
+    src/hosts/DockerHost.cpp
+    src/tools/FileReadTool.cpp
+    src/tools/FileEditTool.cpp
+    src/tools/ProcessExecuteTool.cpp
+    src/tools/ToolRegistry.cpp
+    src/agents/PurposeLoader.cpp
+    src/agents/Agent.cpp
+    src/benchmarks/MBPPBenchmark.cpp
+    src/benchmarks/AgentBench.cpp
+    src/benchmarks/SWEBench.cpp
+)
+
+target_sources(firmius_core PUBLIC 
+  FILE_SET HEADERS
+  BASE_DIRS include
+  FILES
+    include/hosts/LocalHost.hpp
+    include/hosts/DockerHost.hpp
+    include/tools/FileReadTool.hpp
+    include/tools/FileEditTool.hpp
+    include/tools/ProcessExecuteTool.hpp
+    include/tools/ToolRegistry.hpp
+    include/agents/PurposeLoader.hpp
+    include/agents/Agent.hpp
+    include/benchmarks/IBenchmark.hpp
+    include/benchmarks/MBPPBenchmark.hpp
+    include/benchmarks/AgentBench.hpp
+    include/benchmarks/SWEBench.hpp
+)
+
+target_include_directories(firmius_core PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/packages/provider/include>
+  $<INSTALL_INTERFACE:include>
+)
+
+target_link_libraries(firmius_core PUBLIC
+    firmius::shared
+    CURL::libcurl
+    Threads::Threads
+)
+
+target_include_directories(firmius_core PRIVATE
+  ${rapidjson_SOURCE_DIR}/include
+)

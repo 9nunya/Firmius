@@ -1,0 +1,100 @@
+#include "providers/NanoGPTProvider.hpp"
+#include "EnvLoader.hpp"
+#include <rapidjson/document.h>
+#include <curl/curl.h>
+#include <sstream>
+#include <iostream>
+
+namespace firmius::provider {
+
+namespace {
+size_t writeCallback(char* ptr, size_t size, size_t nmemb, void* userdata) {
+    auto* s = static_cast<std::string*>(userdata);
+    s->append(ptr, size * nmemb);
+    return size * nmemb;
+}
+}
+
+NanoGPTProvider::NanoGPTProvider(const std::vector<std::string>& initialKeys)
+    : BaseOpenAIProvider("https://nano-gpt.com/api/v1", ""), apiKeys(initialKeys) {
+    
+    if (apiKeys.empty()) {
+        for (int i = 1; i <= 10; ++i) {
+            std::string key = shared::EnvLoader::get("NANOGPT_API_KEY_" + std::to_string(i));
+            if (!key.empty()) apiKeys.push_back(key);
+        }
+        
+        if (apiKeys.empty()) {
+            std::string primary = shared::EnvLoader::get("NANOGPT_API_KEY");
+            if (!primary.empty()) {
+                if (primary.find(',') != std::string::npos) {
+                    std::stringstream ss(primary);
+                    std::string item;
+                    while (std::getline(ss, item, ',')) {
+                        if (!item.empty()) apiKeys.push_back(item);
+                    }
+                } else {
+                    apiKeys.push_back(primary);
+                }
+            }
+        }
+    }
+}
+
+std::map<std::string, std::string> NanoGPTProvider::getHeaders() {
+    std::string key = apiKeys.empty() ? "" : apiKeys[currentKeyIndex];
+    currentKeyIndex = (currentKeyIndex + 1) % (apiKeys.empty() ? 1 : apiKeys.size());
+    
+    return {
+        {"Authorization", "Bearer " + key},
+        {"Content-Type", "application/json"}
+    };
+}
+
+std::string NanoGPTProvider::getReasoningFieldName() const {
+    return "reasoning_content";
+}
+
+std::vector<firmius::shared::ModelInfo> NanoGPTProvider::listModels() {
+    CURL* curl = curl_easy_init();
+    if (!curl) return {};
+
+    std::string url = baseUrl + "/models?detailed=true";
+    std::string response;
+    
+    struct curl_slist* headers = nullptr;
+    auto headerMap = getHeaders();
+    for (const auto& [k, v] : headerMap) headers = curl_slist_append(headers, (k + ": " + v).c_str());
+
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeCallback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+
+    curl_easy_perform(curl);
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+
+    rapidjson::Document d;
+    d.Parse(response.c_str());
+    std::vector<firmius::shared::ModelInfo> models;
+    if (d.IsObject() && d.HasMember("data") && d["data"].IsArray()) {
+        for (const auto& m : d["data"].GetArray()) {
+            firmius::shared::ModelInfo mi;
+            mi.id = m["id"].GetString();
+            mi.provider = "nanogpt";
+            if (m.HasMember("context_length")) mi.contextWindow = m["context_length"].GetUint();
+            else if (m.HasMember("context_window")) mi.contextWindow = m["context_window"].GetUint();
+            mi.modalities = {"text"};
+            if (m.HasMember("capabilities") && m["capabilities"].IsObject()) {
+                const auto& caps = m["capabilities"];
+                if (caps.HasMember("reasoning") && caps["reasoning"].GetBool()) mi.supportsReasoning = true;
+                if (caps.HasMember("vision") && caps["vision"].GetBool()) mi.modalities.push_back("image");
+            }
+            models.push_back(mi);
+        }
+    }
+    return models;
+}
+
+}

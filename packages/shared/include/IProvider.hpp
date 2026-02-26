@@ -1,0 +1,66 @@
+#ifndef FIRMIUS_PROVIDER_IPROVIDER_HPP
+#define FIRMIUS_PROVIDER_IPROVIDER_HPP
+
+#include "Context.hpp"
+#include "Events.hpp"
+#include "Enums.hpp"
+
+#include <vector>
+#include <string>
+#include <functional>
+#include <optional>
+#include <map>
+
+/**
+ * @brief LLM Provider abstraction layer.
+ */
+namespace firmius::provider {
+
+using namespace firmius::shared;
+
+/**
+ * @brief Schema definition for an LLM-compatible tool.
+ */
+struct ToolDefinition {
+    std::string name;        ///< Name of the tool.
+    std::string description; ///< Description for the LLM.
+    std::string inputSchema; ///< JSON Schema for the tool's input.
+};
+
+/**
+ * @brief Configuration options for an LLM generation request.
+ */
+struct ProviderOptions {
+    std::string modelId;                      ///< The ID of the model to use.
+    float temperature = 0.7f;                 ///< Generation temperature.
+    std::optional<std::uint32_t> maxTokens;    ///< Optional maximum token limit.
+    std::vector<std::string> stop;            ///< Optional list of stop sequences.
+    std::vector<ToolDefinition> tools;        ///< List of tools available for this request.
+};
+
+/**
+ * @brief Interface for a specific LLM backend (e.g., OpenAI, Anthropic, OpenRouter).
+ */
+class IProvider {
+public:
+    virtual ~IProvider() = default;
+
+    /**
+     * @brief Streams a response from the LLM based on conversation history.
+     * @param history The full chronological conversation history.
+     * @param opts Generation and tool configuration.
+     * @param onEvent Callback for real-time stream deltas.
+     */
+    virtual void stream(const AgentHistory& history, const ProviderOptions& opts, 
+                        std::function<void(const StreamEvent&)> onEvent) = 0;
+
+    /**
+     * @brief Discovers and lists available models from this provider.
+     * @return A list of supported models.
+     */
+    virtual std::vector<ModelInfo> listModels() = 0;
+};
+
+}
+
+#endif
