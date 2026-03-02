@@ -1,7 +1,9 @@
 #include "tools/FileEditTool.hpp"
 #include "agents/Agent.hpp"
+#include "utils/StringUtil.hpp"
 #include <filesystem>
 #include <iostream>
+#include <rapidjson/document.h>
 
 namespace firmius::core {
 using namespace firmius::shared;
@@ -16,7 +18,8 @@ std::shared_ptr<shared::JSONSchema> FileEditTool::getSchema() const {
         {"content", zString()->describe("Full content to write to the file")->setOptional()},
         {"old_string", zString()->describe("Exact substring to replace")->setOptional()},
         {"new_string", zString()->describe("New content to substitute")->setOptional()},
-        {"replace_all", zBoolean()->describe("If true, replaces all occurrences of old_string")->setOptional()}
+        {"replace_all", zBoolean()->describe("If true, replaces all occurrences of old_string")->setOptional()},
+        {"fuzzy_threshold", zNumber()->describe("Similarity threshold (0.0 to 1.0) for matching old_string")->setOptional()}
     })->required({"path"});
 }
 
@@ -41,22 +44,48 @@ shared::ToolResult FileEditTool::execute(const FileEditInput& input, shared::Too
             auto data = ctx.host.readFile(absolutePath);
             std::string content(data.begin(), data.end());
             
-            size_t pos = content.find(input.old_string);
-            if (pos == std::string::npos) {
-                return shared::ToolResult::fail("old_string not found in file");
-            }
-            
-            if (input.replace_all) {
-                while (pos != std::string::npos) {
-                    content.replace(pos, input.old_string.length(), input.new_string);
-                    pos = content.find(input.old_string, pos + input.new_string.length());
-                }
+            std::vector<size_t> matchIndices;
+            if (input.fuzzy_threshold < 1.0f) {
+                matchIndices = StringUtil::findFuzzy(content, input.old_string, input.fuzzy_threshold);
             } else {
-                content.replace(pos, input.old_string.length(), input.new_string);
+                size_t pos = content.find(input.old_string);
+                while (pos != std::string::npos) {
+                    matchIndices.push_back(pos);
+                    pos = content.find(input.old_string, pos + input.old_string.length());
+                }
+            }
+
+            if (matchIndices.empty()) {
+                return shared::ToolResult::fail("old_string not found in file (threshold=" + std::to_string(input.fuzzy_threshold) + ")");
+            }
+
+            if (matchIndices.size() > 1 && !input.replace_all) {
+                return shared::ToolResult::fail("Multiple matches found for old_string, but replace_all is false. Matches: " + std::to_string(matchIndices.size()));
+            }
+
+            size_t occurrences = 0;
+            // Iterate backwards to keep indices valid during replacement
+            std::reverse(matchIndices.begin(), matchIndices.end());
+            
+            // For non-replace_all, we already checked that size is 1 or we handle multiple as error above
+            // Actually, if replace_all is false and multiple matches, we failed.
+            // If replace_all is false and 1 match, we replace it.
+            // If replace_all is true, we replace all.
+            
+            for (size_t pos : matchIndices) {
+                // If fuzzy, we need to know the length of the match. Sliding window uses pattern length.
+                size_t matchLen = input.old_string.length();
+                content.replace(pos, matchLen, input.new_string);
+                occurrences++;
+                if (!input.replace_all) break;
             }
 
             ctx.host.writeFile(absolutePath, std::vector<uint8_t>(content.begin(), content.end()));
-            return shared::ToolResult::ok();
+            
+            rapidjson::Document resDoc;
+            resDoc.SetObject();
+            resDoc.AddMember("occurrences", static_cast<uint32_t>(occurrences), resDoc.GetAllocator());
+            return shared::ToolResult::ok(resDoc);
         } else if (!input.content.empty()) {
             // Overwrite mode
             ctx.host.writeFile(absolutePath, std::vector<uint8_t>(input.content.begin(), input.content.end()));

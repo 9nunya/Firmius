@@ -41,3 +41,4 @@ packages/shared/.turbo
 packages/tui/.turbo
 packages/web/.turbo
 build
+python_input.txt

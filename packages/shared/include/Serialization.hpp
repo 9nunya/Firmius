@@ -2,6 +2,7 @@
 #define FIRMIUS_SHARED_SERIALIZATION_HPP
 
 #include "Context.hpp"
+#include "Enums.hpp"
 #include "Message.hpp"
 #include "Metrics.hpp"
 #include "Events.hpp"
@@ -73,6 +74,34 @@ rapidjson::Document toJson(const AgentMetrics& metrics);
  * @brief Deserializes AgentMetrics from a RapidJSON value.
  */
 AgentMetrics agentMetricsFromJsonValue(const rapidjson::Value& value);
+
+// ModelInfo standalone serialization
+rapidjson::Document toJson(const ModelInfo& model);
+ModelInfo modelInfoFromJsonValue(const rapidjson::Value& v);
+
+// AgentConfig standalone serialization
+rapidjson::Document toJson(const AgentConfig& config);
+AgentConfig agentConfigFromJsonValue(const rapidjson::Value& v);
+
+/**
+ * @brief Serializes ThreadMetadata to a RapidJSON document.
+ */
+rapidjson::Document toJson(const ThreadMetadata& metadata);
+
+/**
+ * @brief Deserializes ThreadMetadata from a RapidJSON value.
+ */
+ThreadMetadata threadMetadataFromJson(const rapidjson::Value& value);
+
+/**
+ * @brief Serializes an EngineEvent to a RapidJSON document.
+ */
+rapidjson::Document toJson(const EngineEvent& event);
+
+/**
+ * @brief Deserializes an EngineEvent from a RapidJSON value.
+ */
+EngineEvent engineEventFromJson(const rapidjson::Value& value);
 
 /**
  * @brief Convenience function to serialize context to a JSON string.

@@ -64,12 +64,29 @@ struct AgentState {
 };
 
 /**
+ * @brief Generation and lifecycle configuration for an agent.
+ */
+struct AgentConfig {
+    std::string providerId = "nanogpt";        ///< LLM provider identifier.
+    std::string modelId;                       ///< LLM model identifier.
+    std::string personaName = "coder";         ///< Persona to load from prompts/.
+    int maxTurns = 200;                        ///< Maximum autonomous turns before stopping.
+    float temperature = 0.7f;                  ///< LLM generation temperature.
+    std::optional<std::uint32_t> maxTokens;    ///< Optional max output tokens.
+    std::vector<std::string> stop;             ///< Optional stop sequences.
+    bool persistHistory = true;                ///< If false, agent runs detached with no journal.
+
+    bool operator==(const AgentConfig& other) const = default;
+};
+
+/**
  * @brief A single turn in the conversation (Assistant response + following actions).
  */
 struct AgentTurn {
   std::string turnId;            ///< Unique turn ID.
   std::vector<Message> messages; ///< Messages associated with this turn.
   AgentMetrics metrics;          ///< Performance metrics for this turn.
+  StopReason stopReason = StopReason::Stop;  ///< Why this turn's generation ended.
 
   bool operator==(const AgentTurn& other) const = default;
 };
@@ -94,8 +111,22 @@ struct AgentContext {
   AgentHistory history;             ///< What the agent has done.
   AgentState state;                 ///< What the agent is doing now.
   AgentMetrics aggregateMetrics;    ///< Total performance telemetry.
+  AgentConfig config;  ///< Generation and lifecycle configuration.
 
   bool operator==(const AgentContext& other) const = default;
+};
+
+/**
+ * @brief Metadata for a collaborative thread.
+ */
+struct ThreadMetadata {
+    std::string title;
+    HostType hostType;
+    std::string hostIdentifier;
+    std::string cwd;
+    std::string leadPersona;
+
+    bool operator==(const ThreadMetadata& other) const = default;
 };
 
 }

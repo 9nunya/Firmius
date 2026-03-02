@@ -266,3 +266,236 @@ TEST(Serialization, OptionalFields) {
   EXPECT_EQ(msgWithoutParent, roundtrip2);
   EXPECT_FALSE(roundtrip2.parentId.has_value());
 }
+
+TEST(Serialization, TokenMetricsCacheFields) {
+    AgentMetrics original;
+    original.tokens.prompt = 500;
+    original.tokens.completion = 200;
+    original.tokens.reasoning = 50;
+    original.tokens.cacheRead = 150;
+    original.tokens.cacheWrite = 75;
+    original.tokens.total = 975;
+    original.timing.startMs = 1000;
+    original.timing.firstTokenMs = 1050;
+    original.timing.endMs = 2000;
+    original.timing.toolExecutionMs = 300;
+    original.estimatedCostUsd = 0.0042;
+
+    auto doc = toJson(original);
+    auto restored = agentMetricsFromJsonValue(doc);
+
+    EXPECT_EQ(original, restored);
+    EXPECT_EQ(restored.tokens.cacheRead, 150u);
+    EXPECT_EQ(restored.tokens.cacheWrite, 75u);
+}
+
+TEST(Serialization, TokenMetricsBackwardCompat) {
+    // Simulate old-format JSON without cacheRead/cacheWrite
+    rapidjson::Document d;
+    d.SetObject();
+    auto& a = d.GetAllocator();
+
+    rapidjson::Value tokens(rapidjson::kObjectType);
+    tokens.AddMember("prompt", 100u, a);
+    tokens.AddMember("completion", 50u, a);
+    tokens.AddMember("reasoning", 10u, a);
+    tokens.AddMember("total", 160u, a);
+    d.AddMember("tokens", tokens, a);
+
+    rapidjson::Value timing(rapidjson::kObjectType);
+    timing.AddMember("startMs", uint64_t(0), a);
+    timing.AddMember("firstTokenMs", uint64_t(0), a);
+    timing.AddMember("endMs", uint64_t(0), a);
+    timing.AddMember("toolExecutionMs", uint64_t(0), a);
+    d.AddMember("timing", timing, a);
+
+    d.AddMember("estimatedCostUsd", 0.0, a);
+
+    auto restored = agentMetricsFromJsonValue(d);
+
+    EXPECT_EQ(restored.tokens.prompt, 100u);
+    EXPECT_EQ(restored.tokens.cacheRead, 0u);
+    EXPECT_EQ(restored.tokens.cacheWrite, 0u);
+    EXPECT_EQ(restored.tokens.total, 160u);
+}
+
+TEST(Serialization, ImageContentRoundtrip) {
+    MessagePart original = ImageContent{"https://example.com/img.png", "image/png", "high"};
+
+    auto doc = toJson(original);
+    auto restored = messagePartFromJsonValue(doc);
+
+    EXPECT_EQ(original, restored);
+    auto* img = std::get_if<ImageContent>(&restored);
+    ASSERT_NE(img, nullptr);
+    EXPECT_EQ(img->url, "https://example.com/img.png");
+    EXPECT_EQ(img->mediaType, "image/png");
+    EXPECT_EQ(img->detail, "high");
+}
+
+TEST(Serialization, StreamDoneRoundtrip) {
+    StreamEvent original = StreamDone{StopReason::ToolUse};
+
+    auto doc = toJson(original);
+    auto restored = streamEventFromJsonValue(doc);
+
+    EXPECT_EQ(original, restored);
+    auto* done = std::get_if<StreamDone>(&restored);
+    ASSERT_NE(done, nullptr);
+    EXPECT_EQ(done->reason, StopReason::ToolUse);
+}
+
+TEST(Serialization, StreamErrorRoundtrip) {
+    StreamEvent original = StreamError{"Rate limit exceeded", 429};
+
+    auto doc = toJson(original);
+    auto restored = streamEventFromJsonValue(doc);
+
+    EXPECT_EQ(original, restored);
+    auto* err = std::get_if<StreamError>(&restored);
+    ASSERT_NE(err, nullptr);
+    EXPECT_EQ(err->message, "Rate limit exceeded");
+    EXPECT_EQ(err->httpStatus, 429);
+}
+
+TEST(Serialization, StopReasonOnAgentTurn) {
+    AgentTurn original;
+    original.turnId = "turn-sr-1";
+    original.stopReason = StopReason::MaxTokens;
+    Message msg;
+    msg.id = "msg-sr-1";
+    msg.role = Role::Assistant;
+    msg.content.push_back(TextContent{"truncated output"});
+    msg.timestamp = 1700000000000;
+    original.messages.push_back(msg);
+
+    auto doc = toJson(original);
+    auto restored = agentTurnFromJsonValue(doc);
+
+    EXPECT_EQ(restored.stopReason, StopReason::MaxTokens);
+    EXPECT_EQ(restored.turnId, "turn-sr-1");
+}
+
+TEST(Serialization, AgentConfigRoundtrip) {
+    AgentConfig original;
+    original.modelId = "gpt-4o";
+    original.personaName = "architect";
+    original.maxTurns = 50;
+    original.temperature = 0.3f;
+    original.maxTokens = 4096;
+    original.stop = {"<done />", "###"};
+    original.persistHistory = false;
+
+    auto doc = toJson(original);
+    auto restored = agentConfigFromJsonValue(doc);
+
+    EXPECT_EQ(original, restored);
+    EXPECT_EQ(restored.modelId, "gpt-4o");
+    EXPECT_EQ(restored.maxTurns, 50);
+    EXPECT_EQ(restored.persistHistory, false);
+    ASSERT_EQ(restored.stop.size(), 2u);
+    EXPECT_EQ(restored.stop[0], "<done />");
+}
+
+TEST(Serialization, AgentConfigInContext) {
+    AgentContext original;
+    original.identity = {"id1", "TestAgent", "coder", "solve bugs", "You are a coder."};
+    original.permissions.allowedScopes = {ToolScope::FilesystemRead, ToolScope::Process};
+    original.permissions.allowedPaths = {"/work"};
+    original.environment.type = HostType::Local;
+    original.environment.identifier = "local";
+    original.environment.cwd = "/work";
+    original.history.threadId = "thread-cfg-1";
+    original.config.modelId = "claude-opus-4";
+    original.config.personaName = "architect";
+    original.config.maxTurns = 100;
+    original.config.temperature = 0.1f;
+    original.config.maxTokens = 8192;
+    original.config.stop = {"STOP"};
+    original.config.persistHistory = false;
+
+    std::string json = serializeToString(original);
+    auto restored = deserializeFromString(json);
+
+    EXPECT_EQ(restored.config.modelId, "claude-opus-4");
+    EXPECT_EQ(restored.config.personaName, "architect");
+    EXPECT_EQ(restored.config.maxTurns, 100);
+    EXPECT_FLOAT_EQ(restored.config.temperature, 0.1f);
+    ASSERT_TRUE(restored.config.maxTokens.has_value());
+    EXPECT_EQ(restored.config.maxTokens.value(), 8192u);
+    EXPECT_EQ(restored.config.persistHistory, false);
+}
+
+TEST(Serialization, ModelInfoRoundtrip) {
+    ModelInfo original;
+    original.id = "gpt-4o-2024-08-06";
+    original.provider = "openai";
+    original.contextWindow = 128000;
+    original.modalities = {"text", "image"};
+    original.supportsReasoning = true;
+    original.pricePer1MInput = 2.50;
+    original.pricePer1MOutput = 10.0;
+    original.pricePer1MCacheRead = 1.25;
+    original.pricePer1MCacheWrite = 3.75;
+
+    auto doc = toJson(original);
+    auto restored = modelInfoFromJsonValue(doc);
+
+    EXPECT_EQ(original, restored);
+    EXPECT_EQ(restored.id, "gpt-4o-2024-08-06");
+    EXPECT_DOUBLE_EQ(restored.pricePer1MCacheRead, 1.25);
+    EXPECT_DOUBLE_EQ(restored.pricePer1MCacheWrite, 3.75);
+    ASSERT_EQ(restored.modalities.size(), 2u);
+}
+
+TEST(Serialization, AgentMetricsAccumulation) {
+    AgentMetrics turn1;
+    turn1.tokens = {100, 50, 10, 20, 5, 185};
+    turn1.timing = {1000, 1050, 2000, 300};
+    turn1.estimatedCostUsd = 0.005;
+
+    AgentMetrics turn2;
+    turn2.tokens = {200, 100, 20, 40, 10, 370};
+    turn2.timing = {2500, 2520, 3500, 150};
+    turn2.estimatedCostUsd = 0.010;
+
+    AgentMetrics aggregate;
+    aggregate += turn1;
+    aggregate += turn2;
+
+    // Tokens: additive
+    EXPECT_EQ(aggregate.tokens.prompt, 300u);
+    EXPECT_EQ(aggregate.tokens.completion, 150u);
+    EXPECT_EQ(aggregate.tokens.cacheRead, 60u);
+    EXPECT_EQ(aggregate.tokens.cacheWrite, 15u);
+    EXPECT_EQ(aggregate.tokens.total, 555u);
+
+    // Timing: min for start/firstToken, max for end, additive for toolExecution
+    EXPECT_EQ(aggregate.timing.startMs, 1000u);
+    EXPECT_EQ(aggregate.timing.firstTokenMs, 1050u);
+    EXPECT_EQ(aggregate.timing.endMs, 3500u);
+    EXPECT_EQ(aggregate.timing.toolExecutionMs, 450u);
+
+    // Cost: additive
+    EXPECT_DOUBLE_EQ(aggregate.estimatedCostUsd, 0.015);
+}
+
+TEST(Serialization, CancelledStatusRoundtrip) {
+    AgentContext original;
+    original.identity = {"id1", "Test", "coder", "test", "prompt"};
+    original.permissions.allowedScopes = {ToolScope::Process};
+    original.permissions.allowedPaths = {"/work"};
+    original.environment.type = HostType::Local;
+    original.environment.identifier = "local";
+    original.environment.cwd = "/work";
+    original.history.threadId = "thread-cancel-1";
+    original.state.currentStatus = AgentStatus::Cancelled;
+    original.state.fatalError = "User interrupted";
+
+    std::string json = serializeToString(original);
+    auto restored = deserializeFromString(json);
+
+    EXPECT_EQ(restored.state.currentStatus, AgentStatus::Cancelled);
+    ASSERT_TRUE(restored.state.fatalError.has_value());
+    EXPECT_EQ(restored.state.fatalError.value(), "User interrupted");
+}

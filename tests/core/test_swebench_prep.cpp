@@ -1,6 +1,11 @@
 #include "EnvLoader.hpp"
 #include "hosts/DockerHost.hpp"
+#include "providers/ProviderRegistry.hpp"
 #include "providers/NanoGPTProvider.hpp"
+#include "providers/OpenRouterProvider.hpp"
+#include "providers/ZaiProvider.hpp"
+#include "providers/ZenProvider.hpp"
+#include "providers/ChutesProvider.hpp"
 #include "agents/Agent.hpp"
 #include "agents/PurposeLoader.hpp"
 #include "tools/FileReadTool.hpp"
@@ -27,20 +32,27 @@ int main(int argc, char** argv) {
     }
 
     auto host = std::make_unique<DockerHost>(containerId);
-    auto provider = std::make_unique<NanoGPTProvider>(std::vector<std::string>{});
+    
+    ProviderRegistry::instance().registerProvider(std::make_shared<NanoGPTProvider>());
+    ProviderRegistry::instance().registerProvider(std::make_shared<OpenRouterProvider>(""));
+    ProviderRegistry::instance().registerProvider(std::make_shared<ZaiProvider>(""));
+    ProviderRegistry::instance().registerProvider(std::make_shared<ZenProvider>(""));
+    ProviderRegistry::instance().registerProvider(std::make_shared<ChutesProvider>(""));
+
     ToolRegistry registry;
     registry.registerTool(std::make_unique<FileReadTool>());
     registry.registerTool(std::make_unique<FileEditTool>());
     registry.registerTool(std::make_unique<ProcessExecuteTool>());
 
     AgentContext context;
+    context.config.providerId = "nanogpt";
     context.environment.type = HostType::Docker;
     context.environment.identifier = containerId;
     context.environment.cwd = "/work";
     context.permissions.allowedPaths = {"/work", "/tmp"};
     context.permissions.allowedScopes = {ToolScope::FilesystemRead, ToolScope::FilesystemWrite, ToolScope::Process};
 
-    Agent agent(context, *provider, *host, registry);
+    Agent agent(context, *host, registry);
     SWEBench benchmark(agent, *host);
 
     auto tasks = benchmark.listTasks();

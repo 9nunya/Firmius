@@ -4,7 +4,7 @@
 namespace firmius::provider {
 
 ZenProvider::ZenProvider(const std::string& apiKey)
-    : BaseOpenAIProvider("https://opencode.ai/zen/v1", apiKey) {
+    : BaseOpenAIProvider("zen", "https://opencode.ai/zen/v1", apiKey) {
     if (this->apiKey.empty()) {
         for (int i = 1; i <= 10; ++i) {
             std::string key = shared::EnvLoader::get("ZEN_API_KEY_" + std::to_string(i));

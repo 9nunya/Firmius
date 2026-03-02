@@ -2,6 +2,7 @@
 #define FIRMIUS_SHARED_STRING_UTIL_HPP
 
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace firmius::shared {
@@ -48,6 +49,39 @@ public:
      * @return The lowercase string.
      */
     static std::string toLower(const std::string& s);
+
+    /**
+     * @brief Generates a random UUID.
+     * @return A UUID string.
+     */
+    static std::string generateUuid();
+
+    /**
+     * @brief Escapes a string for safe use as a POSIX shell argument.
+     * Wraps in single quotes, escaping embedded single quotes.
+     * @param s The raw string.
+     * @return A shell-safe quoted string.
+     */
+    static std::string shellEscape(const std::string& s);
+
+    /**
+     * @brief Calculates the Levenshtein distance between two strings.
+     */
+    static size_t levenshteinDistance(std::string_view s1, std::string_view s2);
+
+    /**
+     * @brief Performs a fuzzy search using a sliding window and Levenshtein distance.
+     * @param text The text to search in.
+     * @param pattern The pattern to look for.
+     * @param threshold Similarity threshold (0.0 to 1.0).
+     * @return Vector of start indices of matches.
+     */
+    static std::vector<size_t> findFuzzy(std::string_view text, std::string_view pattern, float threshold);
+
+    /**
+     * @brief Basic HTML to Markdown converter.
+     */
+    static std::string htmlToMarkdown(const std::string& html);
 };
 
 }

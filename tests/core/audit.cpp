@@ -1,14 +1,21 @@
 #include "EnvLoader.hpp"
 #include "hosts/DockerHost.hpp"
+#include "providers/ProviderRegistry.hpp"
 #include "providers/NanoGPTProvider.hpp"
 #include "providers/OpenRouterProvider.hpp"
 #include "providers/ZaiProvider.hpp"
 #include "providers/ZenProvider.hpp"
+#include "providers/ChutesProvider.hpp"
 #include "agents/Agent.hpp"
 #include "agents/PurposeLoader.hpp"
 #include "tools/FileReadTool.hpp"
 #include "tools/FileEditTool.hpp"
 #include "tools/ProcessExecuteTool.hpp"
+#include "tools/PythonExecuteTool.hpp"
+#include "tools/ListDirectoryTool.hpp"
+#include "tools/GlobTool.hpp"
+#include "tools/GrepTool.hpp"
+#include "tools/WebFetchTool.hpp"
 #include "tools/ToolRegistry.hpp"
 #include "benchmarks/MBPPBenchmark.hpp"
 #include "benchmarks/AgentBench.hpp"
@@ -29,6 +36,8 @@ int main(int argc, char** argv) {
 
     std::string benchType = "mbpp";
     std::string taskId = "";
+    std::string provId = "zen";
+    std::string modelId = "big-pickle";
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -36,33 +45,49 @@ int main(int argc, char** argv) {
             benchType = argv[++i];
         } else if (arg == "--task" && i + 1 < argc) {
             taskId = argv[++i];
+        } else if (arg == "--provider" && i + 1 < argc) {
+            provId = argv[++i];
+        } else if (arg == "--model" && i + 1 < argc) {
+            modelId = argv[++i];
         }
     }
 
     std::string containerId = EnvLoader::get("DOCKER_AUDIT_CONTAINER");
     if (containerId.empty()) {
-        std::cerr << "DOCKER_AUDIT_CONTAINER not set in .env.local" << std::endl;
-        return 1;
+        std::cerr << "WARN: DOCKER_AUDIT_CONTAINER not set in .env.local" << std::endl;
     }
 
-    auto host = std::make_unique<DockerHost>(containerId);
-    auto provider = std::make_unique<NanoGPTProvider>(std::vector<std::string>{});
+    auto host = !containerId.empty() ? std::make_unique<DockerHost>(containerId) : std::make_unique<DockerHost>();
+
+    auto& providerRegistry = ProviderRegistry::instance();
+    providerRegistry.registerProvider(std::make_shared<NanoGPTProvider>());
+    providerRegistry.registerProvider(std::make_shared<OpenRouterProvider>(""));
+    providerRegistry.registerProvider(std::make_shared<ZaiProvider>(""));
+    providerRegistry.registerProvider(std::make_shared<ZenProvider>(""));
+    providerRegistry.registerProvider(std::make_shared<ChutesProvider>(""));
 
     ToolRegistry registry;
     registry.registerTool(std::make_unique<FileReadTool>());
     registry.registerTool(std::make_unique<FileEditTool>());
     registry.registerTool(std::make_unique<ProcessExecuteTool>());
+    registry.registerTool(std::make_unique<PythonExecuteTool>());
+    registry.registerTool(std::make_unique<ListDirectoryTool>());
+    registry.registerTool(std::make_unique<GlobTool>());
+    registry.registerTool(std::make_unique<GrepTool>());
+    registry.registerTool(std::make_unique<WebFetchTool>());
 
     AgentContext context;
+    context.config.providerId = provId;
+    context.config.modelId = modelId;
     context.environment.type = HostType::Docker;
     context.environment.identifier = containerId;
     context.environment.cwd = "/work";
     context.permissions.allowedPaths = {"/work", "/tmp"};
     context.permissions.allowedScopes = {ToolScope::FilesystemRead, ToolScope::FilesystemWrite, ToolScope::Process};
 
-    Agent agent(context, *provider, *host, registry);
+    Agent agent(context, *host, registry);
 
-    std::unique_ptr<shared::IBenchmark> benchmark;
+    std::unique_ptr<IBenchmark> benchmark;
     if (benchType == "mbpp") {
         benchmark = std::make_unique<MBPPBenchmark>(agent, *host);
     } else if (benchType == "agentbench") {
@@ -87,7 +112,7 @@ int main(int argc, char** argv) {
         std::uniform_int_distribution<> dis(0, (int)tasks.size() - 1);
         taskId = tasks[dis(g)];
     }
-    
+
     std::cout << "Target Task ID: " << taskId << std::endl;
 
     std::cout << "\n[1/2] Preparing task environment..." << std::endl;

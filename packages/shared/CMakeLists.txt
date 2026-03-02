@@ -9,6 +9,7 @@ target_sources(firmius_shared PRIVATE
     src/utils/StringUtil.cpp
     src/utils/FSUtil.cpp
     src/providers/BaseOpenAIProvider.cpp
+    src/providers/ProviderRegistry.cpp
 )
 
 target_sources(firmius_shared PUBLIC 
@@ -45,4 +46,4 @@ target_include_directories(firmius_shared SYSTEM PRIVATE
 )
 
 find_package(CURL REQUIRED)
-target_link_libraries(firmius_shared PRIVATE CURL::libcurl)
+target_link_libraries(firmius_shared PRIVATE CURL::libcurl uuid)

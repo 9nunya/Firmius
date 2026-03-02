@@ -11,8 +11,22 @@ target_sources(firmius_core PRIVATE
     src/tools/FileEditTool.cpp
     src/tools/ProcessExecuteTool.cpp
     src/tools/ToolRegistry.cpp
+    src/tools/SubagentTool.cpp
+    src/tools/SubagentWaitTool.cpp
+    src/tools/PythonExecuteTool.cpp
+    src/tools/ListDirectoryTool.cpp
+    src/tools/GlobTool.cpp
+    src/tools/GrepTool.cpp
+    src/tools/WebFetchTool.cpp
+    src/tools/ProcessSpawnTool.cpp
+    src/tools/ProcessStatusTool.cpp
+    src/tools/ProcessWaitTool.cpp
+    src/tools/ProcessInputTool.cpp
     src/agents/PurposeLoader.cpp
     src/agents/Agent.cpp
+    src/persistence/Journaler.cpp
+    src/persistence/ThreadManager.cpp
+    src/Engine.cpp
     src/benchmarks/MBPPBenchmark.cpp
     src/benchmarks/AgentBench.cpp
     src/benchmarks/SWEBench.cpp
@@ -28,9 +42,23 @@ target_sources(firmius_core PUBLIC
     include/tools/FileEditTool.hpp
     include/tools/ProcessExecuteTool.hpp
     include/tools/ToolRegistry.hpp
+    include/tools/SubagentTool.hpp
+    include/tools/SubagentWaitTool.hpp
+    include/tools/PythonExecuteTool.hpp
+    include/tools/ListDirectoryTool.hpp
+    include/tools/GlobTool.hpp
+    include/tools/GrepTool.hpp
+    include/tools/WebFetchTool.hpp
+    include/tools/ProcessSpawnTool.hpp
+    include/tools/ProcessStatusTool.hpp
+    include/tools/ProcessWaitTool.hpp
+    include/tools/ProcessInputTool.hpp
     include/agents/PurposeLoader.hpp
     include/agents/Agent.hpp
-    include/benchmarks/IBenchmark.hpp
+    include/persistence/Journaler.hpp
+    include/persistence/ThreadManager.hpp
+    include/AgentRegistry.hpp
+    include/Engine.hpp
     include/benchmarks/MBPPBenchmark.hpp
     include/benchmarks/AgentBench.hpp
     include/benchmarks/SWEBench.hpp
@@ -44,8 +72,10 @@ target_include_directories(firmius_core PUBLIC
 
 target_link_libraries(firmius_core PUBLIC
     firmius::shared
+    firmius::provider
     CURL::libcurl
     Threads::Threads
+    uuid
 )
 
 target_include_directories(firmius_core PRIVATE

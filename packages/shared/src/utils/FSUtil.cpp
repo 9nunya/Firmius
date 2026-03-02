@@ -11,12 +11,9 @@ std::string FSUtil::resolvePath(const std::string& path, const std::string& base
         fspath = std::filesystem::path(baseDir) / fspath;
     }
     
-    try {
-        fspath = std::filesystem::weakly_canonical(fspath);
-    } catch (...) {
-        // Fallback to basic normalization if filesystem check fails
-        fspath = fspath.lexically_normal();
-    }
+    // Use lexical normalization to avoid host-side filesystem access
+    // and potential permission/ABI issues with weakly_canonical.
+    fspath = fspath.lexically_normal();
     
     return fspath.string();
 }

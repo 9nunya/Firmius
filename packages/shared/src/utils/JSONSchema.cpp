@@ -197,11 +197,45 @@ void ArraySchema::toJson(rapidjson::Value& output, rapidjson::Document::Allocato
     output.AddMember("items", items, allocator);
 }
 
+// EnumSchema
+EnumSchema::EnumSchema(std::vector<std::string> values) : allowedValues(std::move(values)) {}
+
+ValidationResult EnumSchema::validate(const rapidjson::Value& value, const std::string& path) const {
+    if (!value.IsString()) {
+        return ValidationResult::fail("Expected string (enum value)", path);
+    }
+    std::string val = value.GetString();
+    for (const auto& allowed : allowedValues) {
+        if (val == allowed) return ValidationResult::ok();
+    }
+    std::string msg = "Value \"" + val + "\" not in allowed set: [";
+    for (size_t i = 0; i < allowedValues.size(); ++i) {
+        if (i > 0) msg += ", ";
+        msg += "\"" + allowedValues[i] + "\"";
+    }
+    msg += "]";
+    return ValidationResult::fail(msg, path);
+}
+
+void EnumSchema::toJson(rapidjson::Value& output, rapidjson::Document::AllocatorType& allocator) const {
+    output.SetObject();
+    output.AddMember("type", "string", allocator);
+    if (!description.empty()) {
+        output.AddMember("description", rapidjson::Value(description.c_str(), allocator).Move(), allocator);
+    }
+    rapidjson::Value enumArr(rapidjson::kArrayType);
+    for (const auto& v : allowedValues) {
+        enumArr.PushBack(rapidjson::Value(v.c_str(), allocator).Move(), allocator);
+    }
+    output.AddMember("enum", enumArr, allocator);
+}
+
 // Factory methods
 std::shared_ptr<StringSchema> zString() { return std::make_shared<StringSchema>(); }
 std::shared_ptr<NumberSchema> zNumber() { return std::make_shared<NumberSchema>(NumberSchema::Mode::Float); }
 std::shared_ptr<NumberSchema> zInteger() { return std::make_shared<NumberSchema>(NumberSchema::Mode::Integer); }
 std::shared_ptr<BooleanSchema> zBoolean() { return std::make_shared<BooleanSchema>(); }
+std::shared_ptr<EnumSchema> zEnum(const std::vector<std::string>& values) { return std::make_shared<EnumSchema>(values); }
 std::shared_ptr<ObjectSchema> zObject(const std::map<std::string, std::shared_ptr<JSONSchema>>& props) {
     auto obj = std::make_shared<ObjectSchema>();
     for (const auto& [name, schema] : props) {

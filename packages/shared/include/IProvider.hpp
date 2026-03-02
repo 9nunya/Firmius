@@ -46,6 +46,11 @@ public:
     virtual ~IProvider() = default;
 
     /**
+     * @brief Returns the unique identifier for this provider.
+     */
+    virtual std::string getId() const = 0;
+
+    /**
      * @brief Streams a response from the LLM based on conversation history.
      * @param history The full chronological conversation history.
      * @param opts Generation and tool configuration.
@@ -59,6 +64,16 @@ public:
      * @return A list of supported models.
      */
     virtual std::vector<ModelInfo> listModels() = 0;
+
+    /**
+     * @brief Returns the ModelInfo for a given model ID.
+     */
+    virtual ModelInfo getModelInfo(const std::string& modelId) = 0;
+
+    /**
+     * @brief Generates a synchronous summary of the conversation history.
+     */
+    virtual std::string generateSummary(const AgentHistory& history, const std::string& compactionPrompt) = 0;
 };
 
 }

@@ -3,8 +3,10 @@
 
 #include "Context.hpp"
 #include "Events.hpp"
+#include "IHost.hpp"
 #include <string>
 #include <functional>
+#include <map>
 
 namespace firmius::shared {
 
@@ -46,6 +48,37 @@ public:
      * @return An absolute, normalized path within the sandbox.
      */
     virtual std::string resolvePath(const std::string& path) const = 0;
+
+    /**
+     * @brief Interrupts the current agent execution.
+     */
+    virtual void interrupt() = 0;
+
+    /**
+     * @brief Spawns a background process.
+     * @return A unique process ID.
+     */
+    virtual std::string spawnProcess(const std::string& command, const std::string& cwd = "", const std::map<std::string, std::string>& env = {}) = 0;
+
+    /**
+     * @brief Inspects a background process.
+     * @param id The process ID.
+     * @return A snapshot of the process state.
+     */
+    virtual ProcessSnapshot inspectProcess(const std::string& id) = 0;
+
+    /**
+     * @brief Writes data to a background process's stdin.
+     * @param id The process ID.
+     * @param data The data to write.
+     */
+    virtual void writeToProcess(const std::string& id, const std::string& data) = 0;
+
+    /**
+     * @brief Registers a process ID for agent-owned background processes.
+     * @param id The process ID to register.
+     */
+    virtual void registerProcessId(const std::string& id) = 0;
 };
 
 }

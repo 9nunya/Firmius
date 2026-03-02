@@ -1,13 +1,23 @@
 #include "agents/PurposeLoader.hpp"
+#include "utils/StringUtil.hpp"
 #include <fstream>
 #include <sstream>
 #include <iostream>
 #include <algorithm>
 
 namespace firmius::core {
+
 using namespace firmius::shared;
 
+/**
+ * @file PurposeLoader.cpp
+ * @brief Implementation of agent persona loading and prompt composition.
+ */
+
 namespace {
+/**
+ * @brief Maps a string scope identifier to the ToolScope enum.
+ */
 firmius::shared::ToolScope stringToScope(const std::string& s) {
     using firmius::shared::ToolScope;
     if (s == "fs:read") return ToolScope::FilesystemRead;
@@ -18,23 +28,6 @@ firmius::shared::ToolScope stringToScope(const std::string& s) {
     if (s == "web") return ToolScope::Web;
     if (s == "git") return ToolScope::Git;
     throw std::runtime_error("Unknown scope: " + s);
-}
-
-std::string trim(const std::string& s) {
-    auto first = s.find_first_not_of(" \t\r\n");
-    if (first == std::string::npos) return "";
-    auto last = s.find_last_not_of(" \t\r\n");
-    return s.substr(first, last - first + 1);
-}
-
-std::vector<std::string> split(const std::string& s, char delimiter) {
-    std::vector<std::string> tokens;
-    std::string token;
-    std::istringstream tokenStream(s);
-    while (std::getline(tokenStream, token, delimiter)) {
-        tokens.push_back(trim(token));
-    }
-    return tokens;
 }
 }
 
@@ -62,15 +55,15 @@ Persona PurposeLoader::load(const std::string& purpose) {
     }
 
     Persona persona;
-    persona.identityPrompt = trim(body);
+    persona.identityPrompt = StringUtil::trim(body);
 
     std::stringstream ss_fm(frontmatter);
     while (std::getline(ss_fm, line)) {
         auto colon = line.find(':');
         if (colon == std::string::npos) continue;
         
-        std::string key = trim(line.substr(0, colon));
-        std::string value = trim(line.substr(colon + 1));
+        std::string key = StringUtil::trim(line.substr(0, colon));
+        std::string value = StringUtil::trim(line.substr(colon + 1));
 
         if (key == "name") persona.name = value;
         else if (key == "title") persona.title = value;
@@ -79,10 +72,11 @@ Persona PurposeLoader::load(const std::string& purpose) {
         else if (key == "scopes") {
             if (value.front() == '[' && value.back() == ']') {
                 std::string list = value.substr(1, value.size() - 2);
-                auto parts = split(list, ',');
+                auto parts = StringUtil::split(list, ',');
                 for (auto& p : parts) {
-                    if (p.front() == '"' && p.back() == '"') p = p.substr(1, p.size() - 2);
-                    persona.allowedScopes.push_back(stringToScope(p));
+                    std::string cleaned = p;
+                    if (cleaned.front() == '"' && cleaned.back() == '"') cleaned = cleaned.substr(1, cleaned.size() - 2);
+                    persona.allowedScopes.push_back(stringToScope(cleaned));
                 }
             }
         }
@@ -122,6 +116,14 @@ std::string PurposeLoader::buildToolsBlock(const std::vector<firmius::provider::
         ss << "  Args: " << t.inputSchema << "\n";
     }
     return ss.str();
+}
+
+std::string PurposeLoader::loadCompactionPrompt() {
+    std::ifstream file("prompts/COMPACTION_PROMPT.md");
+    if (!file.is_open()) return "You must summarize the session. Preserve critical state.";
+    std::stringstream buffer;
+    buffer << file.rdbuf();
+    return buffer.str();
 }
 
 }

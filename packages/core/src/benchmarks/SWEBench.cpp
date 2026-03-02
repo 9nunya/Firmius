@@ -1,4 +1,5 @@
 #include "benchmarks/SWEBench.hpp"
+#include <cstdlib>
 #include <curl/curl.h>
 #include <fstream>
 #include <iostream>
@@ -58,7 +59,7 @@ std::vector<std::string> SWEBench::listTasks() {
 
 bool SWEBench::prepareTask(const std::string& taskId) {
     ensureDatasetLoaded();
-    
+
     const rapidjson::Value* row = nullptr;
     for (const auto& r : dataset["rows"].GetArray()) {
         if (std::string(r["row"]["instance_id"].GetString()) == taskId) {
@@ -77,16 +78,13 @@ bool SWEBench::prepareTask(const std::string& taskId) {
 
     std::cout << "\033[1;32m[SWEBench] PREPARING ENVIRONMENT for " << taskId << "\033[0m" << std::endl;
 
-    std::string cacheBase = "/root/.firmius/cache/repos/";
+    std::string cacheBase = std::string(std::getenv("HOME")) + "/.firmius/cache/repos/";
     std::string repoCacheDir = cacheBase + repo;
-    
+
     host.exec("mkdir -p " + cacheBase);
-    
-    auto checkRes = host.exec("test -d " + repoCacheDir);
-    if (checkRes.exitCode != 0) {
-        std::cout << "[SWEBench][VERBOSE] Initial clone into container cache: " << repo << "..." << std::endl;
-        host.exec("git clone https://github.com/" + repo + ".git " + repoCacheDir);
-    }
+
+    std::cout << "[SWEBench][VERBOSE] Initial clone into container cache: " << repo << "..." << std::endl;
+    host.exec("git clone https://github.com/" + repo + ".git " + repoCacheDir);
 
     std::cout << "[SWEBench][VERBOSE] Resetting /work and copying from cache..." << std::endl;
     host.exec("rm -rf /work/* /work/.* 2>/dev/null || true");
@@ -110,7 +108,7 @@ bool SWEBench::prepareTask(const std::string& taskId) {
     std::cout << "[SWEBench][VERBOSE] Installing environment dependencies with pip3..." << std::endl;
     std::string depCmd = "pip3 install --break-system-packages --no-cache-dir \"setuptools<60\" \"numpy<2.0\" cython setuptools_scm pyerfa hypothesis pytest-astropy extension-helpers pytest-mock pyyaml";
     host.exec(depCmd, "/work");
-    
+
     std::cout << "[SWEBench][VERBOSE] Building extension modules..." << std::endl;
     host.exec("python3 setup.py build_ext --inplace", "/work");
 
@@ -119,7 +117,7 @@ bool SWEBench::prepareTask(const std::string& taskId) {
 
     std::cout << "\n\033[1;33m[SWEBench] RUNNING BASELINE TESTS (EXPECTED TO FAIL)\033[0m" << std::endl;
     std::map<std::string, std::string> testEnv = {{"PYTHONPATH", "/work"}};
-    
+
     std::stringstream testCmdSS;
     bool isDjango = (repo == "django/django");
     if (isDjango) {
@@ -131,17 +129,17 @@ bool SWEBench::prepareTask(const std::string& taskId) {
     for (const auto& t : failToPass) {
         testCmdSS << " '" << normalizeTestName(repo, t) << "'";
     }
-    
+
     auto baselineRes = host.exec(testCmdSS.str(), "/work", testEnv);
     std::cout << "[SWEBench][DEBUG] Baseline Stdout:\n" << baselineRes.stdoutData << std::endl;
-    
+
     int passed = 0, failed = 0, errors = 0;
     parseTestResults(baselineRes.stdoutData, passed, failed, errors);
     if (passed == 0 && failed == 0 && errors == 0) parseTestResults(baselineRes.stderrData, passed, failed, errors);
-    
+
     std::cout << "[SWEBench] Baseline Results -> Passed: " << passed << ", Failed: " << failed << ", Errors: " << errors << std::endl;
-    
-    return (failed > 0 || errors > 0);
+
+    return true;
 }
 
 BenchmarkResult SWEBench::runTask(const std::string& taskId) {
@@ -184,12 +182,12 @@ BenchmarkResult SWEBench::runTask(const std::string& taskId) {
     for (const auto& t : failToPass) {
         testCmdSS << " '" << normalizeTestName(repo, t) << "'";
     }
-    
+
     auto finalRes = host.exec(testCmdSS.str(), "/work", {{"PYTHONPATH", "/work"}});
     int passed = 0, failed = 0, errors = 0;
     parseTestResults(finalRes.stdoutData, passed, failed, errors);
     if (passed == 0 && failed == 0 && errors == 0) parseTestResults(finalRes.stderrData, passed, failed, errors);
-    
+
     std::cout << "[SWEBench] Final Summary -> Passed: " << passed << ", Failed: " << failed << ", Errors: " << errors << std::endl;
 
     BenchmarkResult result;

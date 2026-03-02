@@ -152,11 +152,26 @@ private:
     std::shared_ptr<JSONSchema> itemSchema;
 };
 
+/**
+ * @brief Schema for string enums. Validates that value is one of a fixed set of strings.
+ */
+class EnumSchema : public JSONSchema {
+public:
+    explicit EnumSchema(std::vector<std::string> values);
+
+    ValidationResult validate(const rapidjson::Value& value, const std::string& path = "root") const override;
+    void toJson(rapidjson::Value& output, rapidjson::Document::AllocatorType& allocator) const override;
+
+private:
+    std::vector<std::string> allowedValues;
+};
+
 // Factory methods
 std::shared_ptr<StringSchema> zString();
 std::shared_ptr<NumberSchema> zNumber();
 std::shared_ptr<NumberSchema> zInteger();
 std::shared_ptr<BooleanSchema> zBoolean();
+std::shared_ptr<EnumSchema> zEnum(const std::vector<std::string>& values);
 std::shared_ptr<ObjectSchema> zObject(const std::map<std::string, std::shared_ptr<JSONSchema>>& props = {});
 std::shared_ptr<ArraySchema> zArray(std::shared_ptr<JSONSchema> items);
 

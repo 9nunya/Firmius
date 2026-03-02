@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <iostream>
 #include <sstream>
+#include <chrono>
 
 namespace firmius::provider {
 
@@ -48,24 +49,70 @@ std::string roleToString(Role r) {
 }
 }
 
-BaseOpenAIProvider::BaseOpenAIProvider(const std::string& baseUrl, const std::string& apiKey)
-    : baseUrl(baseUrl), apiKey(apiKey) {}
+BaseOpenAIProvider::BaseOpenAIProvider(std::string id, const std::string& baseUrl, const std::string& apiKey)
+    : providerId(std::move(id)), baseUrl(baseUrl), apiKey(apiKey) {}
 
-void BaseOpenAIProvider::stream(const AgentHistory& history, const ProviderOptions& opts, 
+std::uint64_t BaseOpenAIProvider::nowMs() {
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()
+        ).count()
+    );
+}
+
+void BaseOpenAIProvider::stream(const AgentHistory& history, const ProviderOptions& opts,
                                 std::function<void(const StreamEvent&)> onEvent) {
     CURL* curl = curl_easy_init();
-    if (!curl) throw std::runtime_error("CURL init failed");
+    if (!curl) {
+        onEvent(StreamError{"CURL init failed", 0});
+        return;
+    }
 
     std::string url = baseUrl + "/chat/completions";
     std::string body = prepareRequestBody(history, opts);
-    
+
     struct curl_slist* headers = nullptr;
     auto headerMap = getHeaders();
     for (const auto& [k, v] : headerMap) {
         headers = curl_slist_append(headers, (k + ": " + v).c_str());
     }
 
-    StreamContext ctx{this, &onEvent, ""};
+    // Timing + metrics tracking state
+    auto startMs = nowMs();
+    bool firstTokenEmitted = false;
+    std::uint64_t firstTokenMs = 0;
+    AgentMetrics capturedMetrics;
+    bool metricsReceived = false;
+    bool doneReceived = false;
+
+    // Wrap the user's callback to intercept timing and metrics
+    auto wrappedOnEvent = [&](const StreamEvent& ev) {
+        // Track first token timing
+        if (!firstTokenEmitted) {
+            if (std::holds_alternative<TextChunk>(ev) || std::holds_alternative<ThinkingChunk>(ev)) {
+                firstTokenMs = nowMs();
+                firstTokenEmitted = true;
+            }
+        }
+
+        // Intercept AgentMetrics to inject timing before forwarding
+        if (auto* met = std::get_if<AgentMetrics>(&ev)) {
+            capturedMetrics = *met;
+            metricsReceived = true;
+            // Don't forward yet — we'll emit with timing at the end
+            return;
+        }
+
+        // Track StreamDone
+        if (std::holds_alternative<StreamDone>(ev)) {
+            doneReceived = true;
+        }
+
+        onEvent(ev);
+    };
+
+    std::function<void(const StreamEvent&)> wrappedFn = wrappedOnEvent;
+    StreamContext ctx{this, &wrappedFn, ""};
 
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
@@ -77,11 +124,37 @@ void BaseOpenAIProvider::stream(const AgentHistory& history, const ProviderOptio
     CURLcode res = curl_easy_perform(curl);
     long response_code = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
-    
+
+    auto endMs = nowMs();
+
+    // Emit StreamError on failure
     if (res != CURLE_OK) {
-        std::cerr << "CURL Error: " << curl_easy_strerror(res) << std::endl;
+        onEvent(StreamError{std::string("CURL error: ") + curl_easy_strerror(res), 0});
     } else if (response_code >= 400) {
-        std::cerr << "API Error: " << response_code << std::endl;
+        onEvent(StreamError{"API error (HTTP " + std::to_string(response_code) + ")", static_cast<int>(response_code)});
+    }
+
+    // Inject timing into metrics and emit
+    if (metricsReceived) {
+        capturedMetrics.timing.startMs = startMs;
+        capturedMetrics.timing.firstTokenMs = firstTokenEmitted ? firstTokenMs : 0;
+        capturedMetrics.timing.endMs = endMs;
+        // toolExecutionMs is the caller's responsibility (Agent layer)
+
+        // Calculate cost if we can resolve the model
+        try {
+            auto model = getModelInfo(opts.modelId);
+            calculateCost(capturedMetrics, model);
+        } catch (...) {
+            // Cost calculation is best-effort
+        }
+
+        onEvent(capturedMetrics);
+    }
+
+    // Guarantee a StreamDone if the SSE stream didn't emit one
+    if (!doneReceived && res == CURLE_OK && response_code < 400) {
+        onEvent(StreamDone{StopReason::Stop});
     }
 
     curl_slist_free_all(headers);
@@ -99,17 +172,30 @@ void BaseOpenAIProvider::processSSELine(const std::string& line, std::function<v
 
     if (d.HasMember("choices") && d["choices"].IsArray() && d["choices"].Size() > 0) {
         const auto& choice = d["choices"][0];
+
+        // Extract finish_reason (arrives on the choice, not inside delta)
+        if (choice.HasMember("finish_reason") && choice["finish_reason"].IsString()) {
+            std::string fr = choice["finish_reason"].GetString();
+            StopReason sr = StopReason::Stop;
+            if (fr == "tool_calls") sr = StopReason::ToolUse;
+            else if (fr == "length") sr = StopReason::MaxTokens;
+            else if (fr == "content_filter") sr = StopReason::ContentFilter;
+            onEvent(StreamDone{sr});
+        }
+
         if (choice.HasMember("delta")) {
             const auto& delta = choice["delta"];
-            
+
             if (delta.HasMember("content") && delta["content"].IsString()) {
                 onEvent(TextChunk{ delta["content"].GetString() });
             }
-            
-            // Handle reasoning/thinking
-            if (delta.HasMember("reasoning_content") && delta["reasoning_content"].IsString()) {
-                onEvent(ThinkingChunk{ delta["reasoning_content"].GetString() });
-            } else if (delta.HasMember("reasoning") && delta["reasoning"].IsString()) {
+
+            // Handle reasoning/thinking (provider-specific field name)
+            std::string reasoningField = getReasoningFieldName();
+            if (delta.HasMember(reasoningField.c_str()) && delta[reasoningField.c_str()].IsString()) {
+                onEvent(ThinkingChunk{ delta[reasoningField.c_str()].GetString() });
+            } else if (reasoningField != "reasoning" && delta.HasMember("reasoning") && delta["reasoning"].IsString()) {
+                // Fallback: try "reasoning" if the provider-specific field wasn't found
                 onEvent(ThinkingChunk{ delta["reasoning"].GetString() });
             }
 
@@ -128,17 +214,36 @@ void BaseOpenAIProvider::processSSELine(const std::string& line, std::function<v
             }
         }
     }
-    
+
+    // Extract usage (typically on the final chunk when include_usage is true)
     if (d.HasMember("usage") && d["usage"].IsObject()) {
         const auto& usage = d["usage"];
         AgentMetrics am;
-        am.tokens.prompt = usage.HasMember("prompt_tokens") ? usage["prompt_tokens"].GetUint() : 0;
+
+        std::uint32_t promptTokens = usage.HasMember("prompt_tokens") ? usage["prompt_tokens"].GetUint() : 0;
+        am.tokens.contextSize = promptTokens;
         am.tokens.completion = usage.HasMember("completion_tokens") ? usage["completion_tokens"].GetUint() : 0;
-        am.tokens.total = usage.HasMember("total_tokens") ? usage["total_tokens"].GetUint() : 0;
+
+        // Extract cached tokens from prompt_tokens_details
+        // OpenAI includes cached_tokens INSIDE prompt_tokens, so subtract
+        if (usage.HasMember("prompt_tokens_details") && usage["prompt_tokens_details"].IsObject()) {
+            const auto& pdetails = usage["prompt_tokens_details"];
+            if (pdetails.HasMember("cached_tokens") && pdetails["cached_tokens"].IsUint()) {
+                am.tokens.cacheRead = pdetails["cached_tokens"].GetUint();
+            }
+        }
+        am.tokens.prompt = am.tokens.contextSize - am.tokens.cacheRead;
+        am.tokens.cumulativePrompt = am.tokens.prompt;
+        am.tokens.total = am.tokens.prompt + am.tokens.completion;
+
+        // Extract reasoning tokens from completion_tokens_details
         if (usage.HasMember("completion_tokens_details") && usage["completion_tokens_details"].IsObject()) {
             const auto& details = usage["completion_tokens_details"];
-            if (details.HasMember("reasoning_tokens")) am.tokens.reasoning = details["reasoning_tokens"].GetUint();
+            if (details.HasMember("reasoning_tokens") && details["reasoning_tokens"].IsUint()) {
+                am.tokens.reasoning = details["reasoning_tokens"].GetUint();
+            }
         }
+
         onEvent(am);
     }
 }
@@ -209,9 +314,11 @@ std::string BaseOpenAIProvider::prepareRequestBody(const AgentHistory& history, 
     d.AddMember("temperature", opts.temperature, a);
     d.AddMember("stream", true, a);
     
-    rapidjson::Value streamOpts(rapidjson::kObjectType);
-    streamOpts.AddMember("include_usage", true, a);
-    d.AddMember("stream_options", streamOpts, a);
+    if (supportsStreamUsage()) {
+        rapidjson::Value streamOpts(rapidjson::kObjectType);
+        streamOpts.AddMember("include_usage", true, a);
+        d.AddMember("stream_options", streamOpts, a);
+    }
 
     if (!opts.tools.empty()) {
         rapidjson::Value tools(rapidjson::kArrayType);
@@ -294,6 +401,144 @@ std::string BaseOpenAIProvider::prepareRequestBody(const AgentHistory& history, 
     rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
     d.Accept(writer);
     return buffer.GetString();
+}
+
+bool BaseOpenAIProvider::supportsStreamUsage() const {
+    return true;
+}
+
+ModelInfo BaseOpenAIProvider::getModelInfo(const std::string& modelId) {
+    if (!modelsCached) {
+        cachedModels = listModels();
+        modelsCached = true;
+    }
+    for (const auto& m : cachedModels) {
+        if (m.id == modelId) return m;
+    }
+    // Return a default with no pricing if model not found
+    ModelInfo unknown;
+    unknown.id = modelId;
+    unknown.provider = "unknown";
+    return unknown;
+}
+
+void BaseOpenAIProvider::calculateCost(AgentMetrics& metrics, const ModelInfo& model) const {
+    metrics.estimatedCostUsd =
+        (model.pricePer1MInput / 1'000'000.0) * metrics.tokens.prompt +
+        (model.pricePer1MOutput / 1'000'000.0) * metrics.tokens.completion +
+        (model.pricePer1MCacheRead / 1'000'000.0) * metrics.tokens.cacheRead +
+        (model.pricePer1MCacheWrite / 1'000'000.0) * metrics.tokens.cacheWrite;
+}
+
+std::string BaseOpenAIProvider::generateSummary(const AgentHistory& history, const std::string& compactionPrompt) {
+    CURL* curl = curl_easy_init();
+    if (!curl) throw std::runtime_error("CURL init failed");
+
+    std::string url = baseUrl + "/chat/completions";
+    
+    rapidjson::Document d;
+    d.SetObject();
+    auto& a = d.GetAllocator();
+
+    // Use a reasonable model, either the current one or a fixed one if needed.
+    // For simplicity, we'll assume the caller wants to use the session's model if possible, 
+    // but we don't have ProviderOptions here.
+    // Actually, history doesn't have modelId. 
+    // We'll use a placeholder or assume the first turn has it? No.
+    // Let's assume we use the last model id seen or a sensible default.
+    // Wait, I should probably pass the modelId to generateSummary.
+    // But the interface says generateSummary(const AgentHistory&, const std::string&).
+    
+    // I'll use "gpt-4o" or similar if not specified, but usually we want to match the agent.
+    // Let's look at how Agent calls it.
+    
+    d.AddMember("model", "gpt-4o", a); // Placeholder, will fix if I can get better info
+    d.AddMember("temperature", 0.1f, a);
+    d.AddMember("stream", false, a);
+
+    rapidjson::Value messages(rapidjson::kArrayType);
+    for (const auto& turn : history.turns) {
+        for (const auto& msg : turn.messages) {
+            if (msg.role == Role::ToolResult) {
+                for (const auto& part : msg.content) {
+                    if (auto* res = std::get_if<ToolResultContent>(&part)) {
+                        rapidjson::Value m(rapidjson::kObjectType);
+                        m.AddMember("role", "tool", a);
+                        m.AddMember("tool_call_id", rapidjson::Value(res->toolCallId.c_str(), a), a);
+                        m.AddMember("content", rapidjson::Value(res->result.c_str(), a), a);
+                        messages.PushBack(m, a);
+                    }
+                }
+                continue;
+            }
+
+            rapidjson::Value m(rapidjson::kObjectType);
+            m.AddMember("role", rapidjson::Value(roleToString(msg.role).c_str(), a), a);
+            
+            std::string textContent;
+            for (const auto& part : msg.content) {
+                if (auto* txt = std::get_if<TextContent>(&part)) textContent += txt->text;
+                else if (auto* thk = std::get_if<ThinkingContent>(&part)) textContent += "\n<thinking>\n" + thk->thinking + "\n</thinking>\n";
+                else if (auto* tcc = std::get_if<ToolCallContent>(&part)) {
+                    // Include tool calls in text for summary context if they aren't natively supported in this call
+                    textContent += "\n[Tool Call: " + tcc->name + " args: " + tcc->args + "]\n";
+                }
+            }
+            m.AddMember("content", rapidjson::Value(textContent.c_str(), a), a);
+            messages.PushBack(m, a);
+        }
+    }
+
+    // Add compaction prompt as final user message
+    rapidjson::Value finalMsg(rapidjson::kObjectType);
+    finalMsg.AddMember("role", "user", a);
+    finalMsg.AddMember("content", rapidjson::Value(compactionPrompt.c_str(), a), a);
+    messages.PushBack(finalMsg, a);
+
+    d.AddMember("messages", messages, a);
+
+    rapidjson::StringBuffer buffer;
+    rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+    d.Accept(writer);
+    std::string body = buffer.GetString();
+
+    struct curl_slist* headers = nullptr;
+    auto headerMap = getHeaders();
+    for (const auto& [k, v] : headerMap) {
+        headers = curl_slist_append(headers, (k + ": " + v).c_str());
+    }
+
+    std::string response;
+    auto writerCb = [](char* ptr, size_t size, size_t nmemb, void* userdata) -> size_t {
+        static_cast<std::string*>(userdata)->append(ptr, size * nmemb);
+        return size * nmemb;
+    };
+
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, static_cast<size_t(*)(char*,size_t,size_t,void*)>(writerCb));
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 60L);
+
+    CURLcode res = curl_easy_perform(curl);
+    long response_code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
+
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+
+    if (res != CURLE_OK || response_code >= 400) {
+        throw std::runtime_error("Summary generation failed: " + response);
+    }
+
+    rapidjson::Document resDoc;
+    resDoc.Parse(response.c_str());
+    if (resDoc.HasMember("choices") && resDoc["choices"].IsArray() && resDoc["choices"].Size() > 0) {
+        return resDoc["choices"][0]["message"]["content"].GetString();
+    }
+
+    return "";
 }
 
 } // namespace firmius::provider

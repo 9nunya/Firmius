@@ -51,7 +51,7 @@ shared::ToolResult FileReadTool::execute(const FileReadInput& input, shared::Too
         rapidjson::Document res;
         res.SetObject();
         res.AddMember("content", rapidjson::Value(sliced.c_str(), res.GetAllocator()).Move(), res.GetAllocator());
-        return shared::ToolResult::ok(std::move(res));
+        return shared::ToolResult::ok(res);
     } catch (const std::exception& e) {
         return shared::ToolResult::fail(e.what());
     }

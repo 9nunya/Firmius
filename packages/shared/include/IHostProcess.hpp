@@ -6,6 +6,8 @@
 #include <vector>
 #include <cstdint>
 
+#include "Enums.hpp"
+
 /**
  * @brief Process handling and results.
  */
@@ -19,6 +21,8 @@ struct ProcessResult {
     std::string stdoutData;    ///< Full captured stdout stream.
     std::string stderrData;    ///< Full captured stderr stream.
     double durationMs = 0.0;   ///< Total wall-clock duration.
+    ProcessFinishReason finishReason = ProcessFinishReason::Natural;
+    std::string backgroundProcessId;
 };
 
 /**
@@ -61,6 +65,12 @@ public:
      * @brief Forcefully kills the process.
      */
     virtual void kill() = 0;
+
+    /**
+     * @brief Writes data to the process's stdin.
+     * @param data The data to write.
+     */
+    virtual void write(const std::string& data) = 0;
 
     /**
      * @brief Polls the status.

@@ -5,6 +5,8 @@
 #include "IHost.hpp"
 #include "utils/JSONSchema.hpp"
 #include <rapidjson/document.h>
+#include <rapidjson/stringbuffer.h>
+#include <rapidjson/writer.h>
 #include <string>
 #include <memory>
 #include <algorithm>
@@ -39,29 +41,37 @@ struct ToolMetadata {
 struct ToolResult {
     bool success;              ///< True if tool succeeded.
     std::string error;         ///< Error message (valid if success is false).
-    rapidjson::Document data;  ///< Success payload (valid if success is true).
+    std::string data;          ///< JSON string payload (valid if success is true).
 
-    ToolResult() : success(false) {
-        data.SetObject();
-    }
+    ToolResult() : success(false), data("{}") {}
 
     /**
-     * @brief Creates a successful result with data.
+     * @brief Creates a successful result with a JSON string payload.
      */
-    static ToolResult ok(rapidjson::Value&& val) {
+    static ToolResult ok(const std::string& jsonData) {
         ToolResult res;
         res.success = true;
-        res.data.CopyFrom(val, res.data.GetAllocator());
+        res.data = jsonData;
         return res;
     }
 
     /**
-     * @brief Creates a simple successful result.
+     * @brief Creates a successful result from a RapidJSON document (serializes to string).
+     */
+    static ToolResult ok(const rapidjson::Document& doc) {
+        rapidjson::StringBuffer sb;
+        rapidjson::Writer<rapidjson::StringBuffer> writer(sb);
+        doc.Accept(writer);
+        return ok(std::string(sb.GetString()));
+    }
+
+    /**
+     * @brief Creates a simple successful result with empty data.
      */
     static ToolResult ok() {
         ToolResult res;
         res.success = true;
-        res.data.SetObject();
+        res.data = "{}";
         return res;
     }
 
@@ -72,9 +82,11 @@ struct ToolResult {
         ToolResult res;
         res.success = false;
         res.error = msg;
-        res.data.SetObject();
+        res.data = "{}";
         return res;
     }
+
+    bool operator==(const ToolResult&) const = default;
 };
 
 /**
@@ -107,6 +119,7 @@ public:
 #define START_MAPPING(type) type transform(const rapidjson::Value& json) override { type input; (void)json;
 #define MAP_STRING(field, json_key) if (json.HasMember(json_key) && json[json_key].IsString()) input.field = json[json_key].GetString(); else if (json.HasMember(json_key)) { if (json[json_key].IsInt()) input.field = std::to_string(json[json_key].GetInt()); else if (json[json_key].IsBool()) input.field = json[json_key].GetBool() ? "true" : "false"; }
 #define MAP_INT(field, json_key) if (json.HasMember(json_key)) { if (json[json_key].IsInt()) input.field = json[json_key].GetInt(); else if (json[json_key].IsString()) try { input.field = std::stoi(json[json_key].GetString()); } catch(...) { input.field = 0; } }
+#define MAP_FLOAT(field, json_key) if (json.HasMember(json_key)) { if (json[json_key].IsNumber()) input.field = json[json_key].GetFloat(); else if (json[json_key].IsString()) try { input.field = std::stof(json[json_key].GetString()); } catch(...) { input.field = 0.0f; } }
 #define MAP_BOOL(field, json_key) if (json.HasMember(json_key)) { if (json[json_key].IsBool()) input.field = json[json_key].GetBool(); else if (json[json_key].IsString()) { std::string s = json[json_key].GetString(); std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c){ return std::tolower(c); }); input.field = (s == "true" || s == "1" || s == "yes"); } }
 #define END_MAPPING return input; }
 

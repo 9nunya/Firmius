@@ -1,5 +1,10 @@
 #include "EnvLoader.hpp"
-#include "ConcreteProviders.hpp"
+#include "IProvider.hpp"
+#include "providers/NanoGPTProvider.hpp"
+#include "providers/OpenRouterProvider.hpp"
+#include "providers/ZaiProvider.hpp"
+#include "providers/ZenProvider.hpp"
+#include "providers/ChutesProvider.hpp"
 #include <iostream>
 #include <chrono>
 #include <iomanip>
@@ -15,7 +20,7 @@ std::string getTimestamp() {
     auto now = std::chrono::system_clock::now();
     auto in_time_t = std::chrono::system_clock::to_time_t(now);
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
-    
+
     std::stringstream ss;
     ss << std::put_time(std::localtime(&in_time_t), "%H:%M:%S") << "." << std::setfill('0') << std::setw(3) << ms.count();
     return ss.str();
@@ -25,16 +30,18 @@ int main(int argc, char** argv) {
     EnvLoader::load(".env.local");
 
     std::string providerName = argc > 1 ? argv[1] : "nanogpt";
-    std::unique_ptr<IProvider> provider;
+    std::unique_ptr<firmius::provider::IProvider> provider;
 
     if (providerName == "nanogpt") {
-        provider = std::make_unique<NanoGPTProvider>(std::vector<std::string>{});
+        provider = std::make_unique<NanoGPTProvider>();
     } else if (providerName == "openrouter") {
-        provider = std::make_unique<OpenRouterProvider>(EnvLoader::get("OPENROUTER_API_KEY"));
+        provider = std::make_unique<OpenRouterProvider>("");
     } else if (providerName == "zai") {
-        provider = std::make_unique<ZaiProvider>(EnvLoader::get("ZAI_API_KEY"));
+        provider = std::make_unique<ZaiProvider>("");
     } else if (providerName == "zen") {
-        provider = std::make_unique<ZenProvider>(EnvLoader::get("ZEN_API_KEY"));
+        provider = std::make_unique<ZenProvider>("");
+    } else if (providerName == "chutes") {
+        provider = std::make_unique<ChutesProvider>("");
     } else {
         std::cerr << "Unknown provider: " << providerName << std::endl;
         return 1;
@@ -51,10 +58,10 @@ int main(int argc, char** argv) {
     }
 
     std::cout << "\n--- Streaming Audit (Tool Call Latency) ---" << std::endl;
-    
+
     AgentHistory history;
     history.threadId = "audit-thread";
-    
+
     AgentTurn turn;
     Message msg;
     msg.role = Role::User;

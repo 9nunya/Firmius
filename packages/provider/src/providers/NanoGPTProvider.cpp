@@ -16,7 +16,7 @@ size_t writeCallback(char* ptr, size_t size, size_t nmemb, void* userdata) {
 }
 
 NanoGPTProvider::NanoGPTProvider(const std::vector<std::string>& initialKeys)
-    : BaseOpenAIProvider("https://nano-gpt.com/api/v1", ""), apiKeys(initialKeys) {
+    : BaseOpenAIProvider("nanogpt", "https://nano-gpt.com/api/v1", ""), apiKeys(initialKeys) {
     
     if (apiKeys.empty()) {
         for (int i = 1; i <= 10; ++i) {
@@ -90,6 +90,16 @@ std::vector<firmius::shared::ModelInfo> NanoGPTProvider::listModels() {
                 const auto& caps = m["capabilities"];
                 if (caps.HasMember("reasoning") && caps["reasoning"].GetBool()) mi.supportsReasoning = true;
                 if (caps.HasMember("vision") && caps["vision"].GetBool()) mi.modalities.push_back("image");
+            }
+            // Dynamic pricing from NanoGPT API (USD per million tokens)
+            if (m.HasMember("pricing") && m["pricing"].IsObject()) {
+                const auto& pricing = m["pricing"];
+                if (pricing.HasMember("prompt") && pricing["prompt"].IsNumber()) {
+                    mi.pricePer1MInput = pricing["prompt"].GetDouble();
+                }
+                if (pricing.HasMember("completion") && pricing["completion"].IsNumber()) {
+                    mi.pricePer1MOutput = pricing["completion"].GetDouble();
+                }
             }
             models.push_back(mi);
         }

@@ -1,6 +1,6 @@
 ---
 name: coder
-title: Elite Software Engineer
+title: Software Engineer
 description: Specialized in high-performance C++20 and system-level tasks.
 scopes: ["fs:read", "fs:write", "process:exec"]
 canSpawn: true

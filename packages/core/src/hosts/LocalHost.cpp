@@ -3,12 +3,16 @@
 #include <sys/wait.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <pwd.h>
 #include <iostream>
 #include <fstream>
 #include <filesystem>
 #include <chrono>
 #include <cstring>
 #include <signal.h>
+#include <thread>
+#include <optional>
+#include "utils/StringUtil.hpp"
 
 namespace firmius::core {
 
@@ -29,8 +33,8 @@ void setNonBlocking(int fd) {
 }
 }
 
-LocalHostProcess::LocalHostProcess(pid_t pid, int stdoutFd, int stderrFd)
-    : pid(pid), stdoutFd(stdoutFd), stderrFd(stderrFd) {
+LocalHostProcess::LocalHostProcess(pid_t pid, int stdoutFd, int stderrFd, int stdinFd)
+    : pid(pid), stdoutFd(stdoutFd), stderrFd(stderrFd), stdinFd(stdinFd) {
     startTime = std::chrono::steady_clock::now();
     setNonBlocking(stdoutFd);
     setNonBlocking(stderrFd);
@@ -43,6 +47,7 @@ LocalHostProcess::~LocalHostProcess() {
     }
     if (stdoutFd != -1) close(stdoutFd);
     if (stderrFd != -1) close(stderrFd);
+    if (stdinFd != -1) close(stdinFd);
 }
 
 void LocalHostProcess::onOutput(std::function<void(const std::string&, bool isError)> cb) {
@@ -63,7 +68,13 @@ shared::ProcessResult LocalHostProcess::wait() {
     auto end = std::chrono::steady_clock::now();
     double duration = std::chrono::duration<double, std::milli>(end - startTime).count();
 
-    return {exitCode, stdoutBuffer, stderrBuffer, duration};
+    shared::ProcessResult res;
+    res.exitCode = exitCode;
+    res.stdoutData = stdoutBuffer;
+    res.stderrData = stderrBuffer;
+    res.durationMs = duration;
+    res.finishReason = shared::ProcessFinishReason::Natural;
+    return res;
 }
 
 shared::ProcessSnapshot LocalHostProcess::inspect() const {
@@ -82,6 +93,21 @@ shared::ProcessSnapshot LocalHostProcess::inspect() const {
 
 void LocalHostProcess::kill() {
     ::kill(pid, SIGKILL);
+}
+
+void LocalHostProcess::write(const std::string& data) {
+    if (stdinFd == -1 || finished) return;
+    size_t totalWritten = 0;
+    while (totalWritten < data.size()) {
+        ssize_t res = ::write(stdinFd, data.data() + totalWritten, data.size() - totalWritten);
+        if (res < 0) {
+            if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+            throw std::runtime_error("Write to process failed");
+        }
+        if (res == 0) break;
+        totalWritten += res;
+    }
 }
 
 bool LocalHostProcess::isRunning() {
@@ -139,6 +165,18 @@ void LocalHostProcess::captureLoop() {
 void LocalHost::init() {}
 void LocalHost::destroy() {}
 
+void LocalHost::cleanup() {
+    std::lock_guard<std::mutex> lock(bgMutex);
+    for (auto& [id, proc] : backgroundProcesses) {
+        if (proc) proc->kill();
+    }
+    backgroundProcesses.clear();
+}
+
+void LocalHost::setUser(const std::string& user) {
+    currentUser = user;
+}
+
 std::vector<uint8_t> LocalHost::readFile(const std::string& path) {
     std::ifstream file(path, std::ios::binary);
     if (!file.is_open()) throw std::runtime_error("Could not open file: " + path);
@@ -146,6 +184,10 @@ std::vector<uint8_t> LocalHost::readFile(const std::string& path) {
 }
 
 void LocalHost::writeFile(const std::string& path, const std::vector<uint8_t>& data) {
+    auto parent = std::filesystem::path(path).parent_path();
+    if (!parent.empty()) {
+        std::filesystem::create_directories(parent);
+    }
     std::ofstream file(path, std::ios::binary);
     if (!file.is_open()) throw std::runtime_error("Could not open file for writing: " + path);
     file.write(reinterpret_cast<const char*>(data.data()), data.size());
@@ -155,42 +197,182 @@ bool LocalHost::exists(const std::string& path) {
     return std::filesystem::exists(path);
 }
 
-shared::ProcessResult LocalHost::exec(const std::string& command, const std::string& cwd, const std::map<std::string, std::string>& env) {
+std::vector<shared::FileInfo> LocalHost::listDir(const std::string& path) {
+    std::filesystem::path dirPath(path);
+    if (!std::filesystem::is_directory(dirPath)) {
+        throw std::runtime_error("Not a directory: " + path);
+    }
+    std::vector<shared::FileInfo> entries;
+    for (const auto& entry : std::filesystem::directory_iterator(dirPath)) {
+        std::error_code ec;
+        auto status = entry.symlink_status(ec);
+        if (ec) continue;
+        bool isSymlink = std::filesystem::is_symlink(status);
+        bool isDir = entry.is_directory(ec);
+        uint64_t size = 0;
+        if (!isDir && !ec) {
+            size = entry.file_size(ec);
+            if (ec) size = 0;
+        }
+        auto ftime = entry.last_write_time(ec);
+        int64_t modMs = 0;
+        if (!ec) {
+            auto sctp = std::chrono::time_point_cast<std::chrono::milliseconds>(
+                std::chrono::file_clock::to_sys(ftime));
+            modMs = sctp.time_since_epoch().count();
+        }
+        entries.push_back({
+            entry.path().filename().string(),
+            entry.path().string(),
+            size, isDir, isSymlink, modMs
+        });
+    }
+    return entries;
+}
+
+shared::FileInfo LocalHost::stat(const std::string& path) {
+    std::filesystem::path fspath(path);
+    if (!std::filesystem::exists(fspath)) {
+        throw std::runtime_error("Path does not exist: " + path);
+    }
+    std::error_code ec;
+    auto status = std::filesystem::symlink_status(fspath, ec);
+    if (ec) throw std::runtime_error("Failed to stat: " + path + " (" + ec.message() + ")");
+    bool isSymlink = std::filesystem::is_symlink(status);
+    auto resolvedStatus = std::filesystem::status(fspath, ec);
+    bool isDir = std::filesystem::is_directory(resolvedStatus);
+    uint64_t size = 0;
+    if (!isDir) {
+        size = std::filesystem::file_size(fspath, ec);
+        if (ec) size = 0;
+    }
+    auto ftime = std::filesystem::last_write_time(fspath, ec);
+    int64_t modMs = 0;
+    if (!ec) {
+        auto sctp = std::chrono::time_point_cast<std::chrono::milliseconds>(
+            std::chrono::file_clock::to_sys(ftime));
+        modMs = sctp.time_since_epoch().count();
+    }
+    return {fspath.filename().string(), fspath.string(), size, isDir, isSymlink, modMs};
+}
+
+shared::ProcessResult LocalHost::exec(const std::string& command, const std::string& cwd, const std::map<std::string, std::string>& env, std::optional<std::chrono::milliseconds> timeout) {
     auto start = std::chrono::steady_clock::now();
     auto proc = spawn(command, cwd, env);
-    auto res = proc->wait();
-    auto end = std::chrono::steady_clock::now();
-    res.durationMs = std::chrono::duration<double, std::milli>(end - start).count();
-    return res;
+    
+    if (!timeout.has_value()) {
+        auto res = proc->wait();
+        res.finishReason = ProcessFinishReason::Natural;
+        res.durationMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+        return res;
+    }
+    
+    auto deadline = start + *timeout;
+    
+    while (true) {
+        if (!proc->isRunning()) {
+            auto res = proc->wait();
+            res.finishReason = ProcessFinishReason::Natural;
+            res.durationMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+            return res;
+        }
+        
+        auto snapshot = proc->inspect();
+        auto now = std::chrono::steady_clock::now();
+        
+        if (now >= deadline) {
+            auto elapsed = std::chrono::duration<double, std::milli>(now - start).count();
+            std::string bgId = registerBackgroundProcess(std::move(proc));
+            
+            shared::ProcessResult partial;
+            partial.exitCode = -1;
+            partial.stdoutData = snapshot.stdoutData;
+            partial.stderrData = snapshot.stderrData;
+            partial.durationMs = elapsed;
+            partial.finishReason = ProcessFinishReason::Timeout;
+            partial.backgroundProcessId = bgId;
+            
+            return partial;
+        }
+        
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
 }
 
 std::unique_ptr<shared::IHostProcess> LocalHost::spawn(const std::string& command, const std::string& cwd, const std::map<std::string, std::string>& env) {
-    int outPipe[2], errPipe[2];
-    if (pipe(outPipe) != 0 || pipe(errPipe) != 0) throw std::runtime_error("Pipe failed");
+    int outPipe[2], errPipe[2], inPipe[2];
+    if (pipe(outPipe) != 0 || pipe(errPipe) != 0 || pipe(inPipe) != 0) throw std::runtime_error("Pipe failed");
 
     pid_t pid = fork();
     if (pid == 0) {
+        if (!currentUser.empty()) {
+            struct passwd* pw = getpwnam(currentUser.c_str());
+            if (pw) setuid(pw->pw_uid);
+        }
+
         if (!cwd.empty()) {
             std::error_code ec;
             std::filesystem::current_path(cwd, ec);
             if (ec) _exit(127);
         }
-        
+
         for (const auto& [k, v] : env) setenv(k.c_str(), v.c_str(), 1);
 
+        dup2(inPipe[0], STDIN_FILENO);
         dup2(outPipe[1], STDOUT_FILENO);
         dup2(errPipe[1], STDERR_FILENO);
+        close(inPipe[0]); close(inPipe[1]);
         close(outPipe[0]); close(outPipe[1]);
         close(errPipe[0]); close(errPipe[1]);
 
         execl("/bin/sh", "sh", "-c", command.c_str(), nullptr);
         _exit(127);
     } else if (pid > 0) {
+        close(inPipe[0]);
         close(outPipe[1]);
         close(errPipe[1]);
-        return std::make_unique<LocalHostProcess>(pid, outPipe[0], errPipe[0]);
+        return std::make_unique<LocalHostProcess>(pid, outPipe[0], errPipe[0], inPipe[1]);
     } else {
         throw std::runtime_error("Fork failed");
+    }
+}
+
+std::string LocalHost::registerBackgroundProcess(std::unique_ptr<shared::IHostProcess> proc) {
+    std::lock_guard<std::mutex> lock(bgMutex);
+    std::string id = StringUtil::generateUuid();
+    backgroundProcesses[id] = std::move(proc);
+    return id;
+}
+
+shared::ProcessSnapshot LocalHost::inspectBackgroundProcess(const std::string& id) {
+    std::lock_guard<std::mutex> lock(bgMutex);
+    auto it = backgroundProcesses.find(id);
+    if (it == backgroundProcesses.end()) {
+        throw std::runtime_error("Background process not found: " + id);
+    }
+    auto snapshot = it->second->inspect();
+    if (!snapshot.running) {
+        backgroundProcesses.erase(it);
+    }
+    return snapshot;
+}
+
+void LocalHost::writeToBackgroundProcess(const std::string& id, const std::string& data) {
+    std::lock_guard<std::mutex> lock(bgMutex);
+    auto it = backgroundProcesses.find(id);
+    if (it == backgroundProcesses.end()) {
+        throw std::runtime_error("Background process not found: " + id);
+    }
+    it->second->write(data);
+}
+
+void LocalHost::killBackgroundProcess(const std::string& id) {
+    std::lock_guard<std::mutex> lock(bgMutex);
+    auto it = backgroundProcesses.find(id);
+    if (it != backgroundProcesses.end()) {
+        it->second->kill();
+    } else {
+        throw std::runtime_error("Background process not found: " + id);
     }
 }
 

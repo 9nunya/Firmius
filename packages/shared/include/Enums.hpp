@@ -36,10 +36,10 @@ enum class ToolScope : std::uint8_t {
   FilesystemRead,  ///< Reading files from the sandbox.
   FilesystemWrite, ///< Modifying files in the sandbox.
   Process,         ///< Executing shell commands or spawning processes.
-  Semantic,        ///< Using vector search or semantic utilities.
+  Semantic,        ///< Advanced code analysis or semantic search.
   Delegation,      ///< Spawning sub-agents.
   Web,             ///< Performing web searches or fetching URLs.
-  Git              ///< Performing git operations.
+  Git,             ///< Git repository operations.
 };
 
 /**
@@ -50,7 +50,30 @@ enum class AgentStatus : std::uint8_t {
   Streaming,       ///< Currently generating a response from the provider.
   ExecutingTool,   ///< Waiting for a tool execution to complete.
   AwaitingInput,   ///< Waiting for user feedback.
-  Error            ///< Agent encountered a fatal runtime error.
+  Compacting,      ///< Summarizing history to free up context window.
+  Error,            ///< Agent encountered a fatal runtime error.
+  Cancelled  ///< Agent was interrupted/aborted by user or engine.
+};
+
+/**
+ * @brief Reason why an LLM generation stopped.
+ */
+enum class StopReason : std::uint8_t {
+    Stop,           ///< Natural completion (model chose to stop).
+    ToolUse,        ///< Model wants to call one or more tools.
+    MaxTokens,      ///< Output was truncated by the token limit.
+    ContentFilter,  ///< Response was blocked by a safety filter.
+    Error,          ///< Provider or network error during generation.
+    Cancelled       ///< Generation was aborted by the user or engine.
+};
+
+/**
+ * @brief Reason why a process execution finished.
+ */
+enum class ProcessFinishReason : std::uint8_t {
+    Natural,     ///< Process exited on its own.
+    Timeout,     ///< Timeout occurred, process still running.
+    Terminated   ///< Process was killed.
 };
 
 /**
@@ -64,6 +87,8 @@ struct ModelInfo {
   bool supportsReasoning = false;  ///< True if the model supports native reasoning/thinking deltas.
   double pricePer1MInput = 0.0;    ///< Price in USD per 1M input tokens.
   double pricePer1MOutput = 0.0;   ///< Price in USD per 1M output tokens.
+  double pricePer1MCacheRead = 0.0;   ///< Price in USD per 1M cached input tokens read.
+  double pricePer1MCacheWrite = 0.0;  ///< Price in USD per 1M cache creation tokens.
 
   /**
    * @brief Equality operator for ModelInfo.

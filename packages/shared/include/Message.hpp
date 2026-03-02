@@ -50,9 +50,19 @@ struct ToolResultContent {
 };
 
 /**
+ * @brief Image content for multimodal messages.
+ */
+struct ImageContent {
+    std::string url;        ///< Image URL or base64 data URI.
+    std::string mediaType;  ///< MIME type (e.g., "image/png", "image/jpeg").
+    std::string detail;     ///< Vision detail level: "auto", "low", or "high".
+    bool operator==(const ImageContent&) const = default;
+};
+
+/**
  * @brief A variant representing any part of a complex multi-part message.
  */
-using MessagePart = std::variant<TextContent, ThinkingContent, ToolCallContent, ToolResultContent>;
+using MessagePart = std::variant<TextContent, ThinkingContent, ToolCallContent, ToolResultContent, ImageContent>;
 
 /**
  * @brief A full conversation message.

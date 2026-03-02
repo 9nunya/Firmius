@@ -27,6 +27,12 @@ protected:
      * @brief Returns "reasoning" field as expected by OpenRouter.
      */
     std::string getReasoningFieldName() const override;
+
+public:
+    /**
+     * @brief Fetches models from OpenRouter with dynamic pricing.
+     */
+    std::vector<firmius::shared::ModelInfo> listModels() override;
 };
 
 }
