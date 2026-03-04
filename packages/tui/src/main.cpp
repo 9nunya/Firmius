@@ -61,138 +61,178 @@ CliArgs parseCliArgs(int argc, char** argv) {
 
 }
 
+#include <iostream>
+#include <stdexcept>
+#include <sstream>
+#include "Panic.hpp"
+
+namespace {
+constexpr auto PANIC_INFO_TUI_STATE = "tui_state";
+}
+
 int main(int argc, char** argv) {
-    auto cliArgs = parseCliArgs(argc, argv);
+    firmius::shared::Panic::init();
+    try {
+        auto cliArgs = parseCliArgs(argc, argv);
 
-    std::signal(SIGINT, handleSignal);
-    std::signal(SIGTERM, handleSignal);
+        std::signal(SIGINT, handleSignal);
+        std::signal(SIGTERM, handleSignal);
 
-    auto& harness = firmius::core::Harness::instance();
-    harness.init();
+        auto& harness = firmius::core::Harness::instance();
+        harness.init();
 
-    auto appState = std::make_shared<firmius::tui::AppState>();
-    auto screen = ftxui::ScreenInteractive::Fullscreen();
-    g_screen = &screen;
+        auto appState = std::make_shared<firmius::tui::AppState>();
+        auto screen = ftxui::ScreenInteractive::Fullscreen();
+        g_screen = &screen;
 
-    firmius::tui::EventBridge eventBridge(*appState, screen);
-    int subscriptionId = harness.subscribe(
-        [&eventBridge](const firmius::harness::HarnessEvent& event) {
-            eventBridge.push(event);
+        firmius::shared::Panic::addExtraInfo(PANIC_INFO_TUI_STATE, [&appState]() -> std::string {
+            std::stringstream ss;
+            ss << "Focused Agent: " << (appState->getFocusedAgentId().empty() ? "<none>" : appState->getFocusedAgentId()) << "\n";
+            ss << "Message Count: " << appState->getMessages().size() << "\n";
+            ss << "Streaming: " << (appState->getStreamingMessage().has_value() ? "yes" : "no") << "\n";
+            ss << "Exit Requested: " << (g_exitRequested.load() ? "yes" : "no") << "\n";
+            return ss.str();
         });
 
-    if (!cliArgs.threadId.empty()) {
-        harness.switchThread(cliArgs.threadId);
-    } else {
-        harness.resumeLast();
-    }
-
-    firmius::tui::ChatRenderer chatRenderer;
-    firmius::tui::CommandRegistry commandRegistry;
-    firmius::tui::CommandHelper commandHelper(commandRegistry, *appState);
-    firmius::tui::FooterBar footerBar(appState);
-    firmius::tui::WelcomeScreen welcomeScreen(appState);
-    firmius::tui::ModalSystem modalSystem(appState);
-    auto subagentStrip = ftxui::Make<firmius::tui::SubagentStrip>(appState);
-
-    auto inputComponent = firmius::tui::MakeInputComponent({
-        .onSubmit = [&](std::string text) {
-            if (text.empty()) return;
-            if (commandRegistry.execute(text)) return;
-
-            if (harness.currentThreadId().empty()) {
-                harness.newThread(firmius::shared::HostType::Local, cliArgs.cwd);
+        firmius::shared::Panic::setPrePanicCallback([&]() {
+            if (g_screen) {
+                g_screen->Exit();
+                std::cerr << "\n[TUI] Screen exited due to panic." << std::endl;
             }
-            harness.send(text);
-        },
-        .onInterrupt = [&]() {
+        });
+
+        firmius::tui::EventBridge eventBridge(*appState, screen);
+        int subscriptionId = harness.subscribe(
+            [&eventBridge](const firmius::harness::HarnessEvent& event) {
+                eventBridge.push(event);
+            });
+
+        if (!cliArgs.threadId.empty()) {
+            harness.switchThread(cliArgs.threadId);
+        } else {
+            harness.resumeLast();
+        }
+
+        firmius::tui::ChatRenderer chatRenderer;
+        firmius::tui::CommandRegistry commandRegistry;
+        firmius::tui::ModalSystem modalSystem(appState);
+        commandRegistry.init(modalSystem);
+        firmius::tui::CommandHelper commandHelper(commandRegistry, *appState);
+        firmius::tui::FooterBar footerBar(appState);
+        firmius::tui::WelcomeScreen welcomeScreen(appState);
+        auto subagentStrip = ftxui::Make<firmius::tui::SubagentStrip>(appState);
+
+        auto inputComponent = firmius::tui::MakeInputComponent({
+            .onSubmit = [&](std::string text) {
+                if (text.empty()) return;
+                if (commandRegistry.execute(text)) return;
+
+                if (harness.currentThreadId().empty()) {
+                    harness.newThread(firmius::shared::HostType::Local, cliArgs.cwd);
+                }
+                harness.send(text);
+            },
+            .onInterrupt = [&]() {
+                harness.abort();
+            },
+            .isVisionSupported = []() -> bool {
+                return false;
+            },
+            .renderHelper = [&commandHelper](std::string input) -> ftxui::Element {
+                return commandHelper.render(input);
+            },
+        });
+
+        auto container = ftxui::Container::Vertical({
+            subagentStrip,
+            inputComponent,
+        });
+        container->SetActiveChild(inputComponent);
+
+        auto mainComponent = ftxui::Renderer(container, [&]() {
+            auto messages = appState->getMessages();
+            auto streaming = appState->getStreamingMessage();
+
+            auto allMessages = messages;
+            if (streaming.has_value()) {
+                allMessages.push_back(streaming.value());
+            }
+
+            auto dims = ftxui::Terminal::Size();
+            int chatHeight = std::max(1, dims.dimy - 4);
+
+            auto chatElement = allMessages.empty()
+                ? welcomeScreen.Render()
+                : chatRenderer.render(
+                      allMessages, dims.dimx, chatHeight,
+                      appState->getFocusedAgentId());
+
+            auto mainContent = ftxui::vbox({
+                chatElement | ftxui::flex,
+                container->Render(),
+                footerBar.Render(),
+            });
+
+            return modalSystem.Render(mainContent);
+        });
+
+        mainComponent = ftxui::CatchEvent(mainComponent, [&](ftxui::Event event) -> bool {
+            if (event == ftxui::Event::Custom) {
+                eventBridge.drain();
+                return false;
+            }
+
+            if (modalSystem.isActive()) {
+                return modalSystem.HandleEvent(event);
+            }
+
+            return container->OnEvent(event);
+        });
+
+        std::atomic<bool> animationRunning{true};
+        std::thread animationThread([&]() {
+            while (animationRunning.load(std::memory_order_relaxed)) {
+                std::this_thread::sleep_for(ANIMATION_FRAME_INTERVAL);
+                if (g_exitRequested.load(std::memory_order_relaxed)) {
+                    screen.Exit();
+                    break;
+                }
+                screen.PostEvent(ftxui::Event::Custom);
+            }
+        });
+
+        screen.Loop(mainComponent);
+
+        animationRunning.store(false, std::memory_order_relaxed);
+        if (animationThread.joinable()) {
+            animationThread.join();
+        }
+
+        if (g_exitRequested.load()) {
             harness.abort();
-        },
-        .isVisionSupported = []() -> bool {
-            return false;
-        },
-        .renderHelper = [&commandHelper](std::string input) -> ftxui::Element {
-            return commandHelper.render(input);
-        },
-    });
-
-    auto container = ftxui::Container::Vertical({
-        subagentStrip,
-        inputComponent,
-    });
-
-    auto mainComponent = ftxui::Renderer(container, [&]() {
-        auto messages = appState->getMessages();
-        auto streaming = appState->getStreamingMessage();
-
-        auto allMessages = messages;
-        if (streaming.has_value()) {
-            allMessages.push_back(streaming.value());
+            harness.writeInterruptionRecord();
         }
 
-        auto dims = ftxui::Terminal::Size();
-        int chatHeight = std::max(1, dims.dimy - 4);
+        harness.unsubscribe(subscriptionId);
+        harness.shutdown();
+        firmius::shared::Panic::removeExtraInfo(PANIC_INFO_TUI_STATE);
+        g_screen = nullptr;
 
-        auto chatElement = allMessages.empty()
-            ? welcomeScreen.Render()
-            : chatRenderer.render(
-                  allMessages, dims.dimx, chatHeight,
-                  appState->getFocusedAgentId());
-
-        auto subagents = appState->getSubagents();
-        auto subagentElement = subagents.empty()
-            ? ftxui::emptyElement()
-            : subagentStrip->Render();
-
-        auto mainContent = ftxui::vbox({
-            chatElement | ftxui::flex,
-            subagentElement,
-            inputComponent->Render(),
-            footerBar.Render(),
-        });
-
-        return modalSystem.Render(mainContent);
-    });
-
-    mainComponent = ftxui::CatchEvent(mainComponent, [&](ftxui::Event event) -> bool {
-        if (event == ftxui::Event::Custom) {
-            eventBridge.drain();
-            return false;
+        return 0;
+    } catch (const std::exception& e) {
+        if (g_screen) {
+            g_screen->Exit();
         }
-
-        if (modalSystem.isActive()) {
-            return modalSystem.HandleEvent(event);
+        firmius::shared::Panic::removeExtraInfo(PANIC_INFO_TUI_STATE);
+        std::cerr << "\n[FATAL ERROR] Firmius TUI crashed!" << std::endl;
+        std::cerr << "Reason: " << e.what() << std::endl;
+        return 1;
+    } catch (...) {
+        if (g_screen) {
+            g_screen->Exit();
         }
-
-        return false;
-    });
-
-    std::atomic<bool> animationRunning{true};
-    std::thread animationThread([&]() {
-        while (animationRunning.load(std::memory_order_relaxed)) {
-            std::this_thread::sleep_for(ANIMATION_FRAME_INTERVAL);
-            if (g_exitRequested.load(std::memory_order_relaxed)) {
-                screen.Exit();
-                break;
-            }
-            screen.PostEvent(ftxui::Event::Custom);
-        }
-    });
-
-    screen.Loop(mainComponent);
-
-    animationRunning.store(false, std::memory_order_relaxed);
-    if (animationThread.joinable()) {
-        animationThread.join();
+        firmius::shared::Panic::removeExtraInfo(PANIC_INFO_TUI_STATE);
+        std::cerr << "\n[FATAL ERROR] Firmius TUI crashed with unknown exception!" << std::endl;
+        return 1;
     }
-
-    if (g_exitRequested.load()) {
-        harness.abort();
-        harness.writeInterruptionRecord();
-    }
-
-    harness.unsubscribe(subscriptionId);
-    harness.shutdown();
-    g_screen = nullptr;
-
-    return 0;
 }

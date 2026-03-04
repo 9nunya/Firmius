@@ -115,6 +115,8 @@ private:
     void apply(const firmius::harness::MessageDequeued& e);
     void apply(const firmius::harness::AgentRetrying& e);
     void apply(const firmius::harness::AgentRetryFailed& e);
+    void apply(const firmius::harness::UserMessageSent& e);
+    template<typename T> void apply(const T&) {}
 };
 
 } // namespace firmius::tui

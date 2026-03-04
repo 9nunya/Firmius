@@ -46,6 +46,7 @@ public:
 
     ftxui::Element Render() override;
     bool OnEvent(ftxui::Event event) override;
+    bool Focusable() const override { return !options_.isDisabled; }
 
     /// Get the current content of the input.
     std::string GetContent() const { return content_; }

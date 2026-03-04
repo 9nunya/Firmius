@@ -238,6 +238,20 @@ void AppState::apply(const AgentRetryFailed& e) {
     footer_.status = AgentStatus::Error;
 }
 
+void AppState::apply(const firmius::harness::UserMessageSent& e) {
+    ChatMessage msg;
+    msg.message.id = e.messageId;
+    msg.message.role = Role::User;
+    msg.message.timestamp = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()
+        ).count()
+    );
+    msg.message.content.push_back(TextContent{e.text});
+    msg.agentId = "user";
+    messages_.push_back(msg);
+}
+
 // Getters
 
 std::vector<ChatMessage> AppState::getMessages() const {

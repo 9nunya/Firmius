@@ -8,10 +8,13 @@
 #include <cxxabi.h>
 #include <vector>
 #include <sstream>
+#include <functional>
 
 namespace firmius::shared {
 
 namespace {
+std::function<void()> g_prePanicCallback;
+
 std::string getExecutablePath() {
     char buf[1024];
     ssize_t len = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
@@ -59,7 +62,53 @@ void printBacktrace() {
     if (symbols) free(symbols);
 }
 
+std::mutex Panic::registryMutex;
+std::unordered_map<std::string, Panic::DebugInfoEntry> Panic::extraInfoRegistry;
+
+void Panic::addExtraInfo(const std::string& name, const std::string& content) {
+    std::lock_guard<std::mutex> lock(registryMutex);
+    extraInfoRegistry.insert_or_assign(name, DebugInfoEntry(content));
+}
+
+void Panic::addExtraInfo(const std::string& name, DebugInfoCallback callback) {
+    std::lock_guard<std::mutex> lock(registryMutex);
+    extraInfoRegistry.insert_or_assign(name, DebugInfoEntry(std::move(callback)));
+}
+
+void Panic::removeExtraInfo(const std::string& name) {
+    std::lock_guard<std::mutex> lock(registryMutex);
+    extraInfoRegistry.erase(name);
+}
+
+void Panic::printExtraInfo() {
+    std::lock_guard<std::mutex> lock(registryMutex);
+    
+    if (extraInfoRegistry.empty()) {
+        return;
+    }
+    
+    std::cerr << "\n[EXTRA DEBUG INFO]\n";
+    
+    for (const auto& [name, entry] : extraInfoRegistry) {
+        std::cerr << "[" << name << "]\n";
+        
+        try {
+            if (entry.isDynamic && entry.dynamicCallback) {
+                std::string content = entry.dynamicCallback();
+                std::cerr << content << "\n";
+            } else {
+                std::cerr << entry.staticContent << "\n";
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "[Error collecting info: " << e.what() << "]\n";
+        } catch (...) {
+            std::cerr << "[Error collecting info: unknown exception]\n";
+        }
+    }
+}
+
 void terminateHandler() {
+    if (g_prePanicCallback) g_prePanicCallback();
     std::cerr << "\n[FIRMIUS TERMINATE CALLED]\n";
     auto ex = std::current_exception();
     if (ex) {
@@ -75,6 +124,7 @@ void terminateHandler() {
         std::cerr << "No active exception found in terminate handler.\n";
     }
     printBacktrace();
+    Panic::printExtraInfo();
     std::abort();
 }
 
@@ -83,10 +133,16 @@ void Panic::init() {
 }
 
 void Panic::trigger(const std::string& message, const char* file, int line) {
+    if (g_prePanicCallback) g_prePanicCallback();
     std::cerr << "\n[FIRMIUS PANIC] at " << file << ":" << line << "\n";
     std::cerr << "Message: " << message << "\n";
     printBacktrace();
+    printExtraInfo();
     std::abort();
+}
+
+void Panic::setPrePanicCallback(std::function<void()> callback) {
+    g_prePanicCallback = std::move(callback);
 }
 
 }

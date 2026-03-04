@@ -185,6 +185,15 @@ struct AgentRetryFailed {
 };
 
 /**
+ * Emitted when the user sends a message.
+ */
+struct UserMessageSent {
+    std::string messageId;
+    std::string text;
+    std::string threadId;
+};
+
+/**
  * HarnessEvent is a variant of all events that the Harness can emit.
  */
 using HarnessEvent = std::variant<
@@ -207,7 +216,8 @@ using HarnessEvent = std::variant<
     MessageQueued,
     MessageDequeued,
     AgentRetrying,
-    AgentRetryFailed
+    AgentRetryFailed,
+    UserMessageSent
 >;
 
 } // namespace firmius::harness

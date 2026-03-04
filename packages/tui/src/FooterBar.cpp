@@ -22,6 +22,10 @@ Element FooterBar::Render() const {
 
 std::string FooterBar::renderLeftSection() const {
     auto info = state_->getFooterInfo();
+    // Hide thread info if no messages yet (welcome screen)
+    if (state_->getMessages().empty() && !state_->getStreamingMessage().has_value()) {
+        return " Firmius Engine [" + statusToString(info.status) + "]";
+    }
     std::string thread = info.threadTitle.empty() ? info.threadId : info.threadTitle;
     if (thread.size() > 20) {
         thread = thread.substr(0, 17) + "...";

@@ -21,12 +21,27 @@ ftxui::Element WelcomeScreen::Render() const {
     }
 
     auto logo = vbox({
-        text(R"(  _____ _                 _             )") | bold | color(Color::Cyan),
-        text(R"( |  ___(_)               (_)            )") | bold | color(Color::Cyan),
-        text(R"( | |_   _ _ __ _ __ ___  _ _   _ ___    )") | bold | color(Color::Cyan),
-        text(R"( |  _| | | '__| '_ ` _ \ | | | | / __|   )") | bold | color(Color::Cyan),
-        text(R"( | |   | | |  | | | | | | | |_| \__ \   )") | bold | color(Color::Cyan),
-        text(R"( \_|   |_|_|  |_| |_| |_|_|\__,_|___/   )") | bold | color(Color::Cyan),
+        text(R"(                                      ████████                             )") | bold | color(Color::Cyan),
+        text(R"(                                   ██████████████                          )") | bold | color(Color::Cyan),
+        text(R"(                                 █████████████████                         )") | bold | color(Color::Cyan),
+        text(R"(                               ██████      ███████                         )") | bold | color(Color::Cyan),
+        text(R"(                              ████          ██████                         )") | bold | color(Color::Cyan),
+        text(R"(                             ███  ████████ ███████ ██                      )") | bold | color(Color::Cyan),
+        text(R"(                             ███████████   ██████ ██████                   )") | bold | color(Color::Cyan),
+        text(R"(                        ███████████       ████████████████                 )") | bold | color(Color::Cyan),
+        text(R"(                     ██████████         ███████   █████████                )") | bold | color(Color::Cyan),
+        text(R"(                   █████████   ██      ███████      ███████                )") | bold | color(Color::Cyan),
+        text(R"(                 █████████     ███  ████████        ███████                )") | bold | color(Color::Cyan),
+        text(R"(                 ███████      █████ ██████         ████████                )") | bold | color(Color::Cyan),
+        text(R"(                ███████       ██████████         █████████                 )") | bold | color(Color::Cyan),
+        text(R"(                ██████     ███ █████████████████████████                   )") | bold | color(Color::Cyan),
+        text(R"(                 █████   ████   ███████████████████████                    )") | bold | color(Color::Cyan),
+        text(R"(                  █████ █████    ████████████████████                      )") | bold | color(Color::Cyan),
+        text(R"(                     ██ █████              ████████                        )") | bold | color(Color::Cyan),
+        text(R"(                       ███████       ████████████                          )") | bold | color(Color::Cyan),
+        text(R"(                       ██████████████████████                              )") | bold | color(Color::Cyan),
+        text(R"(                        ██████████████████                                 )") | bold | color(Color::Cyan),
+        text(R"(                        ██████████████                                     )"),
     });
 
     return vbox({

@@ -32,6 +32,11 @@ public:
     void registerCommand(Command cmd);
 
     /**
+     * @brief Initialize default commands with dependencies.
+     */
+    void init(class ModalSystem& modalSystem);
+
+    /**
      * @brief Find a command by name.
      */
     std::optional<Command> findCommand(const std::string& name) const;

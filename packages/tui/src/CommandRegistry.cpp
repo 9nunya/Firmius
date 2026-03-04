@@ -3,47 +3,69 @@
 #include <sstream>
 #include <algorithm>
 
+#include "ModalSystem.hpp"
+#include "harness/Harness.hpp"
+#include "Engine.hpp"
+
 namespace firmius::tui {
 
-CommandRegistry::CommandRegistry() {
-    registerCommand({"model", "Switch the current model", "/model <model_id>", [](const std::vector<std::string>& args) {
-        (void)args;
+CommandRegistry::CommandRegistry() {}
+
+void CommandRegistry::init(ModalSystem& modalSystem) {
+    registerCommand({"model", "Switch the current model", "/model <provider>://<model>", [](const std::vector<std::string>& args) {
+        if (args.size() == 1) {
+            std::string full = args[0];
+            size_t pos = full.find("://");
+            if (pos != std::string::npos) {
+                std::string prov = full.substr(0, pos);
+                std::string mod = full.substr(pos + 3);
+                core::Harness::instance().switchModel(prov, mod);
+            }
+        }
     }});
 
-    registerCommand({"models", "List available models", "/models", [](const std::vector<std::string>& args) {
-        (void)args;
+    registerCommand({"models", "List available models", "/models", [&modalSystem](const std::vector<std::string>&) {
+        modalSystem.show(ModalType::ModelSelector);
     }});
 
     registerCommand({"thread", "Switch to a specific thread", "/thread <thread_id>", [](const std::vector<std::string>& args) {
-        (void)args;
+        if (!args.empty()) {
+            core::Harness::instance().switchThread(args[0]);
+        }
     }});
 
-    registerCommand({"threads", "List all threads", "/threads", [](const std::vector<std::string>& args) {
-        (void)args;
+    registerCommand({"threads", "List all threads", "/threads", [&modalSystem](const std::vector<std::string>&) {
+        modalSystem.show(ModalType::ThreadSwitcher);
     }});
 
-    registerCommand({"config", "Show or update configuration", "/config [key] [value]", [](const std::vector<std::string>& args) {
-        (void)args;
+    registerCommand({"config", "Show configuration editor", "/config", [&modalSystem](const std::vector<std::string>&) {
+        // modalSystem.show(ModalType::ConfigEditor); // If implemented
     }});
 
-    registerCommand({"undo", "Undo the last message", "/undo", [](const std::vector<std::string>& args) {
-        (void)args;
+    registerCommand({"undo", "Undo last N turns", "/undo [n]", [](const std::vector<std::string>& args) {
+        int count = 1;
+        if (!args.empty()) {
+            try { count = std::stoi(args[0]); } catch (...) {}
+        }
+        core::Harness::instance().undoTurns(count);
     }});
 
-    registerCommand({"new", "Start a new thread", "/new", [](const std::vector<std::string>& args) {
-        (void)args;
+    registerCommand({"new", "Start a new thread", "/new [cwd]", [](const std::vector<std::string>& args) {
+        std::string cwd = args.empty() ? "." : args[0];
+        core::Harness::instance().newThread(shared::HostType::Local, cwd);
     }});
 
-    registerCommand({"clear", "Clear the current screen", "/clear", [](const std::vector<std::string>& args) {
-        (void)args;
+    registerCommand({"clear", "Clear chat history", "/clear", [](const std::vector<std::string>&) {
+        // TUI level clear handled via AppState if needed
     }});
 
-    registerCommand({"compact", "Manually trigger context compaction", "/compact", [](const std::vector<std::string>& args) {
-        (void)args;
+    registerCommand({"compact", "Force context compaction", "/compact", [](const std::vector<std::string>&) {
     }});
 
     registerCommand({"focus", "Focus on a specific agent", "/focus <agent_id>", [](const std::vector<std::string>& args) {
-        (void)args;
+        if (!args.empty()) {
+            // Logic to find agent by friendly name and focus
+        }
     }});
 }
 

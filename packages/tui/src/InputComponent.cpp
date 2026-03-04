@@ -115,15 +115,12 @@ ftxui::Element InputComponent::Render() {
 
 bool InputComponent::OnEvent(ftxui::Event event) {
     if (options_.isDisabled) {
-        // Requirement 5: Esc to return when viewing subagent.
         if (event == ftxui::Event::Escape) {
             if (options_.onInterrupt) options_.onInterrupt();
             return true;
         }
         return false;
     }
-
-    if (!Focused()) return false;
 
     // Requirement 1: Enter = send (calls onSubmit).
     if (event == ftxui::Event::Return) {
@@ -148,9 +145,8 @@ bool InputComponent::OnEvent(ftxui::Event event) {
         return true;
     }
 
-    // Requirement 4: Ctrl+V detection.
     if (event == ftxui::Event::Special("\x16")) { // Ctrl+V
-        return true; 
+        return false; // Let characters fall through or implement paste later
     }
 
     return handleKeyEvent(event);

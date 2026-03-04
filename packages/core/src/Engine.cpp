@@ -30,14 +30,33 @@
 #include "tools/ProcessWaitTool.hpp"
 #include "tools/ProcessInputTool.hpp"
 #include "utils/StringUtil.hpp"
+#include <Panic.hpp>
 #include <iostream>
 #include <future>
 #include <algorithm>
+#include <sstream>
 
 namespace firmius::core {
 
 Engine::Engine() {
     initProviders();
+
+    shared::Panic::addExtraInfo("active_agents", []() -> std::string {
+        std::stringstream ss;
+        auto agentIds = AgentRegistry::instance().listAll();
+        ss << "Count: " << agentIds.size() << "\n";
+        for (const auto& id : agentIds) {
+            auto agent = AgentRegistry::instance().getAgent(id);
+            if (agent) {
+                const auto& ctx = agent->getContext();
+                ss << "  - " << id << ": "
+                   << ctx.identity.name << " ("
+                   << (agent->isRunning() ? "running" : "idle") << ", "
+                   << ctx.history.threadId << ")\n";
+            }
+        }
+        return ss.str();
+    });
 
     toolRegistry.registerTool(std::make_unique<FileReadTool>());
     toolRegistry.registerTool(std::make_unique<FileEditTool>());

@@ -35,6 +35,10 @@
 #include <rapidjson/stringbuffer.h>
 #include <curl/curl.h>
 
+namespace {
+const std::string PANIC_INFO_HARNESS_STATE = "harness_state";
+}
+
 namespace firmius::core {
 
 using namespace firmius::shared;
@@ -100,6 +104,17 @@ Harness::Harness() : nextSubscriptionId_(0) {}
 void Harness::init() {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
 
+    shared::Panic::addExtraInfo(PANIC_INFO_HARNESS_STATE, [this]() -> std::string {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        std::stringstream ss;
+        ss << "Current Thread: " << (currentThreadId_.empty() ? "<none>" : currentThreadId_) << "\n";
+        ss << "Focused Agent: " << (focusedAgentId_.empty() ? "<none>" : focusedAgentId_) << "\n";
+        ss << "Locked Threads: " << threadLocks_.size() << "\n";
+        ss << "Subscribers: " << subscribers_.size() << "\n";
+        ss << "PID: " << getpid() << "\n";
+        return ss.str();
+    });
+
     // Create firmius directory if it doesn't exist
     std::filesystem::create_directories(getFirmiusHome());
 
@@ -151,6 +166,8 @@ void Harness::init() {
 
 void Harness::shutdown() {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
+
+    shared::Panic::removeExtraInfo(PANIC_INFO_HARNESS_STATE);
 
     // Release all thread locks
     for (auto& [threadId, fd] : threadLocks_) {
@@ -295,8 +312,26 @@ bool Harness::switchThread(const std::string& threadId) {
     auto it = threadAgentMap_.find(threadId);
     if (it != threadAgentMap_.end()) {
         focusedAgentId_ = it->second;
+        // Verify focused agent actually exists in registry after re-hydration
+        if (!AgentRegistry::instance().getAgent(focusedAgentId_)) {
+            focusedAgentId_.clear();
+        }
     } else {
         focusedAgentId_.clear();
+    }
+
+    // If no focused agent, find the "lead" agent for this thread in the registry
+    if (focusedAgentId_.empty()) {
+        auto allAgents = AgentRegistry::instance().listAll();
+        for (const auto& id : allAgents) {
+            auto agent = AgentRegistry::instance().getAgent(id);
+            if (agent && agent->getContext().history.threadId == threadId && 
+                agent->getContext().identity.parentId.empty()) {
+                focusedAgentId_ = id;
+                threadAgentMap_[threadId] = id;
+                break;
+            }
+        }
     }
 
     auto metadata = ThreadManager::getMetadata(threadId);
@@ -326,7 +361,10 @@ void Harness::send(const std::string& text) {
     );
     ThreadManager::updateMetadata(currentThreadId_, metadata);
 
-    if (focusedAgentId_.empty()) {
+    std::string messageId = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+    emitEvent(harness::UserMessageSent{messageId, text, currentThreadId_});
+
+    if (focusedAgentId_.empty() || !AgentRegistry::instance().getAgent(focusedAgentId_)) {
         focusedAgentId_ = Engine::instance().summonAgent(currentThreadId_, metadata.leadPersona, text, true);
         if (focusedAgentId_.empty()) {
             emitEvent(harness::HarnessError{"Failed to summon lead agent"});
@@ -338,7 +376,6 @@ void Harness::send(const std::string& text) {
 
     auto agent = AgentRegistry::instance().getAgent(focusedAgentId_);
     if (agent && agent->isRunning()) {
-        std::string messageId = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
         messageQueue_.push({messageId, text});
         emitEvent(harness::MessageQueued{messageId, text});
         return;
@@ -461,7 +498,11 @@ void Harness::routeEngineEvent(const EngineEvent& event) {
         }
     }, event);
 
-    if (focusedAgentId_.empty() || !isDescendant(agentId, focusedAgentId_)) return;
+    bool isAgentSpawnedEvent = std::holds_alternative<AgentSpawned>(event);
+    bool shouldRouteEvent = focusedAgentId_.empty() 
+        ? isAgentSpawnedEvent 
+        : isDescendant(agentId, focusedAgentId_);
+    if (!shouldRouteEvent) return;
 
     if (auto* e = std::get_if<AgentText>(&event)) {
         emitEvent(harness::MessageChunk{e->agentId, e->delta, false});
