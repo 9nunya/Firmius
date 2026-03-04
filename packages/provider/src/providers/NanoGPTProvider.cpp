@@ -83,8 +83,8 @@ std::vector<firmius::shared::ModelInfo> NanoGPTProvider::listModels() {
             firmius::shared::ModelInfo mi;
             mi.id = m["id"].GetString();
             mi.provider = "nanogpt";
-            if (m.HasMember("context_length")) mi.contextWindow = m["context_length"].GetUint();
-            else if (m.HasMember("context_window")) mi.contextWindow = m["context_window"].GetUint();
+            if (m.HasMember("context_length") && m["context_length"].IsUint()) mi.contextWindow = m["context_length"].GetUint();
+            else if (m.HasMember("context_window") && m["context_window"].IsUint()) mi.contextWindow = m["context_window"].GetUint();
             mi.modalities = {"text"};
             if (m.HasMember("capabilities") && m["capabilities"].IsObject()) {
                 const auto& caps = m["capabilities"];

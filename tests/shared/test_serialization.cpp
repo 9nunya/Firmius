@@ -399,7 +399,7 @@ TEST(Serialization, AgentConfigRoundtrip) {
 
 TEST(Serialization, AgentConfigInContext) {
     AgentContext original;
-    original.identity = {"id1", "TestAgent", "coder", "solve bugs", "You are a coder."};
+    original.identity = {"id1", "TestAgent", "coder", "solve bugs", "You are a coder.", "", ""};
     original.permissions.allowedScopes = {ToolScope::FilesystemRead, ToolScope::Process};
     original.permissions.allowedPaths = {"/work"};
     original.environment.type = HostType::Local;
@@ -450,12 +450,12 @@ TEST(Serialization, ModelInfoRoundtrip) {
 
 TEST(Serialization, AgentMetricsAccumulation) {
     AgentMetrics turn1;
-    turn1.tokens = {100, 50, 10, 20, 5, 185};
+    turn1.tokens = {100, 50, 10, 20, 5, 185, 100, 150}; // prompt, completion, reasoning, cacheRead, cacheWrite, contextSize, cumulativePrompt, total
     turn1.timing = {1000, 1050, 2000, 300};
     turn1.estimatedCostUsd = 0.005;
 
     AgentMetrics turn2;
-    turn2.tokens = {200, 100, 20, 40, 10, 370};
+    turn2.tokens = {200, 100, 20, 40, 10, 370, 200, 300}; // prompt, completion, reasoning, cacheRead, cacheWrite, contextSize, cumulativePrompt, total
     turn2.timing = {2500, 2520, 3500, 150};
     turn2.estimatedCostUsd = 0.010;
 
@@ -468,7 +468,7 @@ TEST(Serialization, AgentMetricsAccumulation) {
     EXPECT_EQ(aggregate.tokens.completion, 150u);
     EXPECT_EQ(aggregate.tokens.cacheRead, 60u);
     EXPECT_EQ(aggregate.tokens.cacheWrite, 15u);
-    EXPECT_EQ(aggregate.tokens.total, 555u);
+    EXPECT_EQ(aggregate.tokens.total, 450u);  // 150 + 300 from accumulated metrics
 
     // Timing: min for start/firstToken, max for end, additive for toolExecution
     EXPECT_EQ(aggregate.timing.startMs, 1000u);
@@ -482,7 +482,7 @@ TEST(Serialization, AgentMetricsAccumulation) {
 
 TEST(Serialization, CancelledStatusRoundtrip) {
     AgentContext original;
-    original.identity = {"id1", "Test", "coder", "test", "prompt"};
+    original.identity = {"id1", "Test", "coder", "test", "prompt", "", ""};
     original.permissions.allowedScopes = {ToolScope::Process};
     original.permissions.allowedPaths = {"/work"};
     original.environment.type = HostType::Local;
@@ -491,6 +491,8 @@ TEST(Serialization, CancelledStatusRoundtrip) {
     original.history.threadId = "thread-cancel-1";
     original.state.currentStatus = AgentStatus::Cancelled;
     original.state.fatalError = "User interrupted";
+    original.state.editedFiles = {"/work/test.py", "/work/README.md"};
+    original.state.completedActions = {"Created test file", "Updated documentation"};
 
     std::string json = serializeToString(original);
     auto restored = deserializeFromString(json);
@@ -498,4 +500,10 @@ TEST(Serialization, CancelledStatusRoundtrip) {
     EXPECT_EQ(restored.state.currentStatus, AgentStatus::Cancelled);
     ASSERT_TRUE(restored.state.fatalError.has_value());
     EXPECT_EQ(restored.state.fatalError.value(), "User interrupted");
+    EXPECT_EQ(restored.state.editedFiles.size(), 2u);
+    EXPECT_EQ(restored.state.editedFiles[0], "/work/test.py");
+    EXPECT_EQ(restored.state.editedFiles[1], "/work/README.md");
+    EXPECT_EQ(restored.state.completedActions.size(), 2u);
+    EXPECT_EQ(restored.state.completedActions[0], "Created test file");
+    EXPECT_EQ(restored.state.completedActions[1], "Updated documentation");
 }

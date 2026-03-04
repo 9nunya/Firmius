@@ -1,5 +1,6 @@
 #include "utils/StringUtil.hpp"
 #include <algorithm>
+#include <numeric>
 #include <sstream>
 #include <uuid/uuid.h>
 #include <regex>
@@ -22,6 +23,12 @@ std::vector<std::string> StringUtil::split(const std::string& s, char delimiter)
         tokens.push_back(trim(token));
     }
     return tokens;
+}
+
+std::string StringUtil::concat(const std::vector<std::string> &arr, const std::string &str) {
+    return std::accumulate(arr.begin(), arr.end(), arr[0], [&](const std::string &total, const std::string &current) {
+       return total + str + current;
+    });
 }
 
 bool StringUtil::startsWith(const std::string& s, const std::string& prefix) {
@@ -53,6 +60,31 @@ std::string StringUtil::shellEscape(const std::string& s) {
         else result += c;
     }
     result += "'";
+    return result;
+}
+
+std::string StringUtil::stripDoneTag(const std::string& input) {
+    std::string result = input;
+    const std::string open = "<done";
+    const std::string close = "/>";
+    size_t pos = 0;
+    while ((pos = result.find(open, pos)) != std::string::npos) {
+        size_t endPos = result.find(close, pos);
+        if (endPos == std::string::npos) break;
+        // Check that everything between is whitespace
+        bool valid = true;
+        for (size_t i = pos + open.length(); i < endPos; ++i) {
+            if (!std::isspace(static_cast<unsigned char>(result[i]))) {
+                valid = false;
+                break;
+            }
+        }
+        if (valid) {
+            result.erase(pos, endPos - pos + close.length());
+        } else {
+            ++pos;
+        }
+    }
     return result;
 }
 

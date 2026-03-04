@@ -9,6 +9,7 @@
 #include <vector>
 #include <map>
 #include <optional>
+#include <cstdint>
 
 /**
  * @brief State and environment context for the agent engine.
@@ -24,6 +25,8 @@ struct AgentIdentity {
   std::string role;          ///< Assigned role (e.g., "coder").
   std::string goal;          ///< High-level mission goal.
   std::string systemPrompt;  ///< Raw persona instructions.
+  std::string parentId;      ///< ID of the parent agent (empty for root agents).
+  std::string friendlyName;  ///< Machine-friendly slug name (e.g., "lead", "auth-finder").
 
   bool operator==(const AgentIdentity& other) const = default;
 };
@@ -58,7 +61,12 @@ struct AgentState {
   AgentStatus currentStatus = AgentStatus::Idle; ///< Current lifecycle status.
   std::vector<std::string> pendingToolCalls;    ///< IDs of tools currently executing.
   std::vector<std::string> ownedProcesses;      ///< IDs of spawned background processes.
+  std::vector<std::string> readFiles;           ///< Paths of files read in this session.
+  std::vector<std::string> editedFiles;         ///< Paths of files successfully edited or written.
+  std::vector<std::string> completedActions;     ///< High-level actions completed (e.g., "Applied null check to _cull").
   std::optional<std::string> fatalError;         ///< Description of fatal failure, if any.
+  std::vector<std::string> blockingProcessIds;          ///< IDs of background processes currently blocking agent execution.
+  std::vector<std::string> recentToolCallSignatures; ///< Hash of "toolName:args" for recent calls (insanity loop detection)
 
   bool operator==(const AgentState& other) const = default;
 };
@@ -75,6 +83,7 @@ struct AgentConfig {
     std::optional<std::uint32_t> maxTokens;    ///< Optional max output tokens.
     std::vector<std::string> stop;             ///< Optional stop sequences.
     bool persistHistory = true;                ///< If false, agent runs detached with no journal.
+    int maxIdenticalToolCalls = 5;             ///< Max consecutive identical tool calls before intervention
 
     bool operator==(const AgentConfig& other) const = default;
 };
@@ -120,11 +129,14 @@ struct AgentContext {
  * @brief Metadata for a collaborative thread.
  */
 struct ThreadMetadata {
+    std::string threadId;
     std::string title;
     HostType hostType;
     std::string hostIdentifier;
     std::string cwd;
     std::string leadPersona;
+    uint64_t createdAt = 0;
+    uint64_t lastActiveAt = 0;
 
     bool operator==(const ThreadMetadata& other) const = default;
 };

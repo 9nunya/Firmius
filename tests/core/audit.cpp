@@ -85,7 +85,7 @@ int main(int argc, char** argv) {
     context.permissions.allowedPaths = {"/work", "/tmp"};
     context.permissions.allowedScopes = {ToolScope::FilesystemRead, ToolScope::FilesystemWrite, ToolScope::Process};
 
-    Agent agent(context, *host, registry);
+    Agent agent(context, std::unique_ptr<firmius::shared::IHost>(host.get()), registry);
 
     std::unique_ptr<IBenchmark> benchmark;
     if (benchType == "mbpp") {

@@ -11,7 +11,7 @@ namespace firmius::core {
 shared::ToolResult GrepTool::execute(const GrepInput& input, shared::ToolContext& ctx) {
     try {
         std::string absPath = ctx.agent.resolvePath(input.path);
-        std::string command = "grep -rnHE " + shared::StringUtil::shellEscape(input.pattern);
+        std::string command = "grep -rnHE --binary-files=without-match " + shared::StringUtil::shellEscape(input.pattern);
         if (input.context_before > 0) command += " -B " + std::to_string(input.context_before);
         if (input.context_after > 0) command += " -A " + std::to_string(input.context_after);
         command += " " + shared::StringUtil::shellEscape(absPath);

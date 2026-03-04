@@ -218,6 +218,10 @@ public:
         return !finished;
     }
 
+    std::string getSystemId() const override {
+        return execId;
+    }
+
 private:
     static size_t readCallback(char* ptr, size_t size, size_t nmemb, void* userdata) {
         auto* self = static_cast<DockerHostProcess*>(userdata);
@@ -245,7 +249,7 @@ private:
         activeCurl = curl;
 
         std::string url = "http://localhost/v1.44/exec/" + execId + "/start";
-        std::string body = R"({"Detach":true,"Tty":false})";
+        std::string body = R"({"Detach":false,"Tty":false})";
 
         struct curl_slist* headers = curl_slist_append(nullptr, "Content-Type: application/json");
 
@@ -259,9 +263,13 @@ private:
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, streamingWriteCallback);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ctx);
         
-        // Stdin support - only enable upload if we actually have stdin to send
+        // Stdin support - only enable upload if we actually have data to send
+        // If AttachStdin is true, we should handle the stream properly
         curl_easy_setopt(curl, CURLOPT_READFUNCTION, readCallback);
         curl_easy_setopt(curl, CURLOPT_READDATA, this);
+        // Do NOT use CURLOPT_UPLOAD here as it forces a PUT/upload-style POST
+        // Docker expects a streaming POST body for stdin.
+        // We'll use CHUNKED encoding if we want to stream data later.
 
         curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
         curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, abortCallback);
@@ -306,20 +314,14 @@ private:
     std::chrono::steady_clock::time_point startTime;
 };
 
-DockerHost::DockerHost(const std::string& containerId) : containerId(containerId) {
+DockerHost::DockerHost(const std::string& id) {
+    if (id.empty()) {
+        containerId = "firmius-sandbox-" + StringUtil::generateUuid();
+    } else {
+        containerId = id;
+    }
     curl = curl_easy_init();
     if (!curl) throw std::runtime_error("CURL init failed");
-}
-
-DockerHost::DockerHost() {
-    containerId = "firmius-sandbox-" + StringUtil::generateUuid();
-
-    // create it
-    std::string createCommand = "docker create --name '"
-    + containerId + "' firmius-sandbox:latest && docker start '" + containerId + "'";
-    system(createCommand.c_str());
-    containerIds.push_back(containerId);
-    curl = curl_easy_init();
 }
 
 DockerHost::~DockerHost() {
@@ -327,7 +329,25 @@ DockerHost::~DockerHost() {
     curl_easy_cleanup(curl);
 }
 
-void DockerHost::init() {}
+std::string DockerHost::init() {
+    containerId = "firmius-sandbox-" + StringUtil::generateUuid();
+    
+    std::string createCommand = "docker create --name '"
+        + containerId + "' firmius-sandbox:latest tail -f /dev/null";
+    int createResult = system(createCommand.c_str());
+    if (createResult != 0) {
+        throw std::runtime_error("Failed to create Docker container: " + containerId);
+    }
+    
+    std::string startCommand = "docker start '" + containerId + "'";
+    int startResult = system(startCommand.c_str());
+    if (startResult != 0) {
+        throw std::runtime_error("Failed to start Docker container: " + containerId);
+    }
+    
+    containerIds.push_back(containerId);
+    return containerId;
+}
 void DockerHost::destroy() {}
 
 void DockerHost::cleanup() {
@@ -473,7 +493,8 @@ ProcessResult DockerHost::exec(const std::string& command, const std::string& cw
         
         if (now >= deadline) {
             auto elapsed = std::chrono::duration<double, std::milli>(now - start).count();
-            std::string bgId = registerBackgroundProcess(std::move(proc));
+            std::string bgId = StringUtil::generateUuid();
+            registerBackgroundProcess(bgId, std::move(proc));
             
             ProcessResult partial;
             partial.exitCode = -1;
@@ -500,7 +521,7 @@ std::unique_ptr<IHostProcess> DockerHost::spawn(const std::string& command, cons
     cmdArray.PushBack("-c", a);
     cmdArray.PushBack(rapidjson::Value(command.c_str(), a), a);
     d.AddMember("Cmd", cmdArray, a);
-    d.AddMember("AttachStdin", true, a);
+    d.AddMember("AttachStdin", false, a);
     d.AddMember("AttachStdout", true, a);
     d.AddMember("AttachStderr", true, a);
     if (!cwd.empty()) d.AddMember("WorkingDir", rapidjson::Value(cwd.c_str(), a), a);
@@ -529,11 +550,9 @@ std::unique_ptr<IHostProcess> DockerHost::spawn(const std::string& command, cons
     return std::make_unique<DockerHostProcess>(containerId, execId);
 }
 
-std::string DockerHost::registerBackgroundProcess(std::unique_ptr<IHostProcess> proc) {
+void DockerHost::registerBackgroundProcess(const std::string& id, std::unique_ptr<IHostProcess> proc) {
     std::lock_guard<std::mutex> lock(bgMutex);
-    std::string id = StringUtil::generateUuid();
     backgroundProcesses[id] = std::move(proc);
-    return id;
 }
 
 ProcessSnapshot DockerHost::inspectBackgroundProcess(const std::string& id) {
@@ -566,6 +585,63 @@ void DockerHost::killBackgroundProcess(const std::string& id) {
     } else {
         throw std::runtime_error("Background process not found: " + id);
     }
+}
+
+std::vector<ContainerInfo> DockerHost::listContainersWithLabel(const std::string& label) {
+    std::vector<ContainerInfo> result;
+
+    // Initialize libcurl for this static method
+    CURL* curl = curl_easy_init();
+    if (!curl) {
+        return result;
+    }
+
+    std::string response;
+    curl_easy_setopt(curl, CURLOPT_UNIX_SOCKET_PATH, "/var/run/docker.sock");
+    curl_easy_setopt(curl, CURLOPT_URL, "http://localhost/containers/json?all=true");
+    curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeCallback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+
+    CURLcode res = curl_easy_perform(curl);
+    curl_easy_cleanup(curl);
+
+    if (res != CURLE_OK) {
+        return result;
+    }
+
+    // Parse response JSON
+    rapidjson::Document doc;
+    doc.Parse(response.c_str());
+    if (!doc.IsArray()) {
+        return result;
+    }
+
+    for (auto& containerObj : doc.GetArray()) {
+        if (!containerObj.IsObject()) continue;
+
+        ContainerInfo info;
+        if (containerObj.HasMember("Id") && containerObj["Id"].IsString()) {
+            info.id = containerObj["Id"].GetString();
+        }
+
+        // Extract labels
+        if (containerObj.HasMember("Labels") && containerObj["Labels"].IsObject()) {
+            const auto& labelsObj = containerObj["Labels"];
+            for (auto it = labelsObj.MemberBegin(); it != labelsObj.MemberEnd(); ++it) {
+                if (it->name.IsString() && it->value.IsString()) {
+                    info.labels[it->name.GetString()] = it->value.GetString();
+                }
+            }
+        }
+
+        // Only include if the container has the specified label
+        if (info.labels.count(label)) {
+            result.push_back(std::move(info));
+        }
+    }
+
+    return result;
 }
 
 } // namespace firmius::core

@@ -29,8 +29,8 @@ std::uint64_t Agent::nowMs() {
     );
 }
 
-Agent::Agent(AgentContext ctx, shared::IHost& h, ToolRegistry& reg, std::shared_ptr<Journaler> jnl)
-    : context(std::move(ctx)), host(h), toolRegistry(reg), journaler(jnl) {
+Agent::Agent(AgentContext ctx, std::unique_ptr<shared::IHost> h, ToolRegistry& reg, std::shared_ptr<Journaler> jnl)
+    : context(std::move(ctx)), host(std::move(h)), toolRegistry(reg), journaler(jnl) {
     provider = firmius::provider::ProviderRegistry::instance().getProvider(context.config.providerId);
     if (!provider) throw std::runtime_error("Unknown provider: " + context.config.providerId);
 
@@ -48,9 +48,10 @@ Agent::Agent(AgentContext ctx, shared::IHost& h, ToolRegistry& reg, std::shared_
 Agent::~Agent() {
     for (const auto& id : backgroundProcessIds) {
         try {
-            host.killBackgroundProcess(id);
+            host->killBackgroundProcess(id);
         } catch (...) {}
     }
+    if (host) host->destroy();
 }
 
 void Agent::reset() {
@@ -59,10 +60,10 @@ void Agent::reset() {
     context.state = {};
     interrupted = false;
     running = false;
-    
+
     for (const auto& id : backgroundProcessIds) {
         try {
-            host.killBackgroundProcess(id);
+            host->killBackgroundProcess(id);
         } catch (...) {}
     }
     backgroundProcessIds.clear();
@@ -76,27 +77,81 @@ void Agent::interrupt() {
     interrupted = true;
 }
 
+void Agent::setModel(const std::string& providerId, const std::string& modelId) {
+    if (running.load()) {
+        throw std::runtime_error("Cannot switch model while agent is running");
+    }
+
+    auto newProvider = firmius::provider::ProviderRegistry::instance().getProvider(providerId);
+    if (!newProvider) {
+        throw std::runtime_error("Unknown provider: " + providerId);
+    }
+
+    context.config.providerId = providerId;
+    context.config.modelId = modelId;
+    provider = newProvider;
+}
+
 std::string Agent::spawnProcess(const std::string& command, const std::string& cwd, const std::map<std::string, std::string>& env) {
-    auto proc = host.spawn(command, cwd, env);
-    std::string id = host.registerBackgroundProcess(std::move(proc));
+    std::string id = StringUtil::generateUuid();
+    auto proc = host->spawn(command, cwd, env);
+    proc->onOutput([this, id](const std::string& output, bool isError) {
+        std::lock_guard<std::mutex> lock(callbackMutex);
+        if (eventCallback) {
+            eventCallback(ProcessOutputDelta{id, output, isError, false});
+        }
+    });
+    host->registerBackgroundProcess(id, std::move(proc));
     backgroundProcessIds.insert(id);
     return id;
 }
 
 shared::ProcessSnapshot Agent::inspectProcess(const std::string& id) {
-    return host.inspectBackgroundProcess(id);
+    return host->inspectBackgroundProcess(id);
 }
 
 void Agent::writeToProcess(const std::string& id, const std::string& data) {
-    host.writeToBackgroundProcess(id, data);
+    host->writeToBackgroundProcess(id, data);
 }
 
 void Agent::registerProcessId(const std::string& id) {
     backgroundProcessIds.insert(id);
 }
 
+void Agent::addBlockingProcessId(const std::string& id) {
+    std::lock_guard<std::mutex> lock(blockingProcessMutex);
+    context.state.blockingProcessIds.push_back(id);
+}
+
+void Agent::removeBlockingProcessId(const std::string& id) {
+    std::lock_guard<std::mutex> lock(blockingProcessMutex);
+    auto& vec = context.state.blockingProcessIds;
+    vec.erase(std::remove(vec.begin(), vec.end(), id), vec.end());
+}
+
+std::vector<std::string> Agent::getBlockingProcessIds() {
+    std::lock_guard<std::mutex> lock(blockingProcessMutex);
+    return context.state.blockingProcessIds; // return copy
+}
+
+bool Agent::hasReadFile(const std::string& path) const {
+    return std::find(context.state.readFiles.begin(), context.state.readFiles.end(), path) != context.state.readFiles.end();
+}
+
+void Agent::markFileAsRead(const std::string& path) {
+    if (!hasReadFile(path)) {
+        context.state.readFiles.push_back(path);
+    }
+}
+
 void Agent::run(const std::string& task, std::function<void(const shared::StreamEvent&)> onEvent) {
-    // Guard against concurrent runs
+    {
+        std::lock_guard<std::mutex> lock(callbackMutex);
+        eventCallback = onEvent;
+    }
+
+    // Guard against concurrent runs with mutex
+    std::lock_guard<std::mutex> lock(runMutex);
     if (running.load()) {
         throw std::runtime_error("Agent is already running");
     }
@@ -134,34 +189,17 @@ void Agent::run(const std::string& task, std::function<void(const shared::Stream
     }
 
     // 2. Add Task as User Message
-    bool hasTask = false;
-    for (const auto& turn : context.history.turns) {
-        for (const auto& msg : turn.messages) {
-            if (msg.role == Role::User) {
-                if (!msg.content.empty()) {
-                    if (auto* txt = std::get_if<TextContent>(&msg.content[0])) {
-                        if (txt->text.find("Please provide the <done /> tag") == std::string::npos) {
-                            hasTask = true;
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    if (!hasTask) {
-        AgentTurn taskTurn;
-        taskTurn.turnId = "user-task-" + std::to_string(context.history.turns.size());
-        Message taskMsg;
-        taskMsg.role = Role::User;
-        taskMsg.content.push_back(TextContent{task});
-        auto now = std::chrono::system_clock::now();
-        taskMsg.timestamp = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count());
-        taskTurn.messages.push_back(taskMsg);
-        context.history.turns.push_back(taskTurn);
-        if (context.config.persistHistory && journaler) journaler->appendTurn(taskTurn);
-    }
+    // Always append the new task as a User message turn (for re-tasking support)
+    AgentTurn taskTurn;
+    taskTurn.turnId = "user-task-" + std::to_string(context.history.turns.size());
+    Message taskMsg;
+    taskMsg.role = Role::User;
+    taskMsg.content.push_back(TextContent{task});
+    auto now = std::chrono::system_clock::now();
+    taskMsg.timestamp = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count());
+    taskTurn.messages.push_back(taskMsg);
+    context.history.turns.push_back(taskTurn);
+    if (context.config.persistHistory && journaler) journaler->appendTurn(taskTurn);
 
     // 3. Autonomous Loop
     bool taskFinished = false;
@@ -172,7 +210,8 @@ void Agent::run(const std::string& task, std::function<void(const shared::Stream
         // --- CHECK FOR CONTEXT COMPACTION ---
         try {
             auto model = provider->getModelInfo(context.config.modelId);
-            if (model.contextWindow > 0 && context.aggregateMetrics.tokens.contextSize > model.contextWindow * 0.8) {
+            bool forceCompact = (std::getenv("FORCE_COMPACTION") != nullptr);
+            if (forceCompact || (model.contextWindow > 0 && context.aggregateMetrics.tokens.contextSize > model.contextWindow * 0.8)) {
                 compactContext(onEvent);
             }
         } catch (...) {
@@ -202,19 +241,44 @@ void Agent::run(const std::string& task, std::function<void(const shared::Stream
             std::string streamError;
 
             if (debugPrettyPrint) {
-                std::cout << "\n\033[1;36m--- Agent Turn " << turnCount
+                std::cout << "\n\033[1;36m--- " << context.identity.id.substr(0, 6) << (!context.identity.parentId.empty() ? " (sub of " + context.identity.parentId.substr(0, 6) + ")" : " LEAD") << " Turn " << turnCount
                           << " (context: " << context.aggregateMetrics.tokens.contextSize
                           << ", total billed: " << context.aggregateMetrics.tokens.total
                           << ", cost: $" << context.aggregateMetrics.estimatedCostUsd
                           << ") ---\033[0m\n";
             }
 
+            // Token repetition detection for hallucination loops
+            bool tokenLoopDetected = false;
+            char lastChar = '\0';
+            int consecutiveRepeatCount = 0;
+            const int MAX_CONSECUTIVE_REPEAT = 15;
+
             provider->stream(context.history, opts, [&](const StreamEvent& ev) {
                 onEvent(ev);
 
                 if (auto* txt = std::get_if<TextChunk>(&ev)) {
-                    fullResponse += txt->delta;
-                    if (debugPrettyPrint) std::cout << txt->delta << std::flush;
+                    // Check for token loop (same character repeated)
+                    for (char c : txt->delta) {
+                        if (c == lastChar && !tokenLoopDetected) {
+                            consecutiveRepeatCount++;
+                            if (consecutiveRepeatCount >= MAX_CONSECUTIVE_REPEAT) {
+                                tokenLoopDetected = true;
+                                if (debugPrettyPrint) {
+                                    std::cerr << "\n\033[1;31m[TOKEN LOOP: repeated '" << c << "' "
+                                              << consecutiveRepeatCount << " times - aborting stream]\033[0m\n";
+                                }
+                            }
+                        } else {
+                            consecutiveRepeatCount = 1;
+                            lastChar = c;
+                        }
+                    }
+
+                    if (!tokenLoopDetected) {
+                        fullResponse += txt->delta;
+                        if (debugPrettyPrint) std::cout << txt->delta << std::flush;
+                    }
                 } else if (auto* thk = std::get_if<ThinkingChunk>(&ev)) {
                     fullThinking += thk->delta;
                     if (debugPrettyPrint) std::cout << "\033[3;37m" << thk->delta << "\033[0m" << std::flush;
@@ -259,6 +323,35 @@ void Agent::run(const std::string& task, std::function<void(const shared::Stream
                 }
             });
 
+            // If token loop was detected, inject a nudge to refocus the agent
+            if (tokenLoopDetected && fullResponse.empty() && accumulatedToolChunks.empty()) {
+                if (debugPrettyPrint) {
+                    std::cerr << "\033[1;33m[Injecting token loop nudge to refocus agent]\033[0m\n";
+                }
+
+                AgentTurn loopNudgeTurn;
+                loopNudgeTurn.turnId = "loop-nudge-" + std::to_string(turnCount);
+                Message loopNudgeMsg;
+                loopNudgeMsg.role = Role::User;
+                loopNudgeMsg.content.push_back(
+                    TextContent{
+                        "Your output was cut off due to token repetition (hallucination loop). "
+                        "Please step back, refocus, and try a different approach. "
+                        "Do NOT repeat the same failed actions."
+                    }
+                );
+                auto nudgeNow = std::chrono::system_clock::now();
+                loopNudgeMsg.timestamp = static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(nudgeNow.time_since_epoch()).count()
+                );
+                loopNudgeTurn.messages.push_back(loopNudgeMsg);
+                context.history.turns.push_back(loopNudgeTurn);
+                if (context.config.persistHistory && journaler) journaler->appendTurn(loopNudgeTurn);
+
+                // Continue to next turn instead of erroring
+                continue;
+            }
+
             if (debugPrettyPrint) std::cout << "\n";
 
             // If there was a stream error and no content came back, treat as error
@@ -294,7 +387,7 @@ void Agent::run(const std::string& task, std::function<void(const shared::Stream
             if (context.config.persistHistory && journaler) journaler->appendTurn(assistantTurn);
 
             // Broadcast turn completion
-            onEvent(AgentTurnCompleted{context.identity.id, assistantTurn, context.aggregateMetrics});
+            onEvent(AgentTurnCompleted{context.identity.id, assistantTurn, context.aggregateMetrics, context.identity.parentId});
 
             // --- Check for termination ---
             if (accumulatedToolChunks.empty() && fullResponse.find("<done />") != std::string::npos) {
@@ -376,6 +469,57 @@ void Agent::run(const std::string& task, std::function<void(const shared::Stream
 }
 
 void Agent::executeTools(const std::vector<ToolCallChunk>& chunks, std::function<void(const StreamEvent&)> onEvent) {
+    // Check for insanity loop BEFORE executing tools
+    for (const auto& chunk : chunks) {
+        // Create signature: "toolName:args"
+        std::string signature = chunk.nameDelta + ":" + chunk.argsDelta;
+
+        // Check if this exact call has been repeated consecutively
+        int repeatCount = 0;
+        for (auto it = context.state.recentToolCallSignatures.rbegin();
+             it != context.state.recentToolCallSignatures.rend(); ++it) {
+            if (*it == signature) {
+                repeatCount++;
+            } else {
+                break; // Only count consecutive repeats from the end
+            }
+        }
+
+        if (repeatCount >= context.config.maxIdenticalToolCalls) {
+            // Inject intervention nudge
+            if (debugPrettyPrint) {
+                std::cerr << "\n\033[1;31m[INSANITY LOOP: " << chunk.nameDelta << " called "
+                          << (repeatCount + 1) << " times with identical args - aborting tool execution]\033[0m\n";
+            }
+
+            AgentTurn interventionTurn;
+            interventionTurn.turnId = "insanity-nudge-" + std::to_string(context.history.turns.size());
+            Message interventionMsg;
+            interventionMsg.role = Role::User;
+            interventionMsg.content.push_back(
+                TextContent{
+                    "You are calling the same tool with identical arguments repeatedly (" +
+                    std::to_string(repeatCount + 1) + " times). This indicates an insanity loop. " +
+                    "Please stop and try a different approach. Do NOT repeat this tool call."
+                }
+            );
+            auto nudgeNow = std::chrono::system_clock::now();
+            interventionMsg.timestamp = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(nudgeNow.time_since_epoch()).count()
+            );
+            interventionTurn.messages.push_back(interventionMsg);
+            context.history.turns.push_back(interventionTurn);
+            if (context.config.persistHistory && journaler) journaler->appendTurn(interventionTurn);
+
+            // Clear the recent signatures to allow recovery
+            context.state.recentToolCallSignatures.clear();
+
+            // Broadcast and return early (don't execute the repeated tool)
+            onEvent(AgentTurnCompleted{context.identity.id, interventionTurn, context.aggregateMetrics, context.identity.parentId});
+            return;
+        }
+    }
+
     AgentTurn toolResultTurn;
     toolResultTurn.turnId = "tools-" + std::to_string(context.history.turns.size());
 
@@ -394,7 +538,7 @@ void Agent::executeTools(const std::vector<ToolCallChunk>& chunks, std::function
                 std::cout << "\033[1;34m[Executing " << chunk.nameDelta << " with " << chunk.argsDelta << "]\033[0m\n";
             }
 
-            ToolContext toolCtx{host, *this};
+            ToolContext toolCtx{*host, *this};
             auto result = toolRegistry.execute(chunk.nameDelta, input, toolCtx);
 
             if (result.success) {
@@ -416,26 +560,146 @@ void Agent::executeTools(const std::vector<ToolCallChunk>& chunks, std::function
         auto now = std::chrono::system_clock::now();
         msg.timestamp = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count());
         toolResultTurn.messages.push_back(msg);
+
+        // Track edited files for file_edit and file_write tools
+        if (success) {
+            if (chunk.nameDelta == "file_edit" || chunk.nameDelta == "file_write") {
+                if (!input.HasParseError()) {
+                    if (input.HasMember("path")) {
+                        std::string filePath = input["path"].GetString();
+                        // Normalize path and add to editedFiles if not already tracked
+                        if (std::find(context.state.editedFiles.begin(), context.state.editedFiles.end(), filePath) == context.state.editedFiles.end()) {
+                            context.state.editedFiles.push_back(filePath);
+                        }
+                        // Add a completed action entry
+                        std::string actionDesc = "Edited file: " + filePath;
+                        context.state.completedActions.push_back(actionDesc);
+                    }
+                }
+            }
+        }
+
+        // Track this tool call signature after successful execution
+        std::string signature = chunk.nameDelta + ":" + chunk.argsDelta;
+        context.state.recentToolCallSignatures.push_back(signature);
+    }
+
+    // Keep only last 20 signatures to prevent unbounded growth
+    if (context.state.recentToolCallSignatures.size() > 20) {
+        context.state.recentToolCallSignatures.erase(
+            context.state.recentToolCallSignatures.begin(),
+            context.state.recentToolCallSignatures.begin() + (context.state.recentToolCallSignatures.size() - 20)
+        );
     }
 
     context.history.turns.push_back(toolResultTurn);
     if (context.config.persistHistory && journaler) journaler->appendTurn(toolResultTurn);
 
     // Broadcast turn completion
-    onEvent(AgentTurnCompleted{context.identity.id, toolResultTurn, context.aggregateMetrics});
+    onEvent(AgentTurnCompleted{context.identity.id, toolResultTurn, context.aggregateMetrics, context.identity.parentId});
 }
 
 void Agent::compactContext(std::function<void(const shared::StreamEvent&)> onEvent) {
     context.state.currentStatus = AgentStatus::Compacting;
-    onEvent(AgentCompacting{context.identity.id});
+    onEvent(AgentCompacting{context.identity.id, context.identity.parentId});
 
     if (debugPrettyPrint) {
-        std::cout << "\n\033[1;35m--- CONTEXT COMPACTION TRIGGERED (Size: " 
+        std::cout << "\n\033[1;35m--- CONTEXT COMPACTION TRIGGERED (Size: "
                   << context.aggregateMetrics.tokens.contextSize << ") ---\033[0m\n";
+        std::cout << "\033[1;35mSummarizing session memory...\033[0m\n";
+    }
+
+    // Build factual state preamble to preserve actual work state
+    std::string factualState = "\n## FACTUAL STATE (GROUND TRUTH)\n\n";
+
+    if (!context.state.readFiles.empty()) {
+        factualState += "**Files Read:** ";
+        for (size_t i = 0; i < context.state.readFiles.size(); ++i) {
+            factualState += context.state.readFiles[i];
+            if (i < context.state.readFiles.size() - 1) factualState += ", ";
+        }
+        factualState += "\n\n";
+    }
+
+    if (!context.state.editedFiles.empty()) {
+        factualState += "**Files Edited:** ";
+        for (size_t i = 0; i < context.state.editedFiles.size(); ++i) {
+            factualState += context.state.editedFiles[i];
+            if (i < context.state.editedFiles.size() - 1) factualState += ", ";
+        }
+        factualState += "\n\n";
+    }
+
+    if (!context.state.completedActions.empty()) {
+        factualState += "**Completed Actions:**\n";
+        for (const auto& action : context.state.completedActions) {
+            factualState += "- " + action + "\n";
+        }
+        factualState += "\n";
+    }
+
+    if (!context.state.ownedProcesses.empty()) {
+        factualState += "**Active Background Processes:** ";
+        for (size_t i = 0; i < context.state.ownedProcesses.size(); ++i) {
+            factualState += context.state.ownedProcesses[i];
+            if (i < context.state.ownedProcesses.size() - 1) factualState += ", ";
+        }
+        factualState += "\n\n";
+    }
+
+    if (context.state.fatalError.has_value()) {
+        factualState += "**Fatal Error:** " + context.state.fatalError.value() + "\n\n";
     }
 
     std::string compactionPrompt = PurposeLoader::loadCompactionPrompt();
-    std::string summary = provider->generateSummary(context.history, compactionPrompt);
+
+    // Prepend factual state to compaction prompt
+    std::string fullCompactionPrompt = factualState + compactionPrompt;
+    std::string fullSummary;
+    std::string fullThinking;
+
+    provider->generateSummary(context.config.modelId, context.history, fullCompactionPrompt, [&](const StreamEvent& ev) {
+        if (auto* act = std::get_if<AgentCompactionText>(&ev)) {
+            fullSummary += act->delta;
+            if (debugPrettyPrint) std::cout << "\033[1;35m" << act->delta << "\033[0m" << std::flush;
+            onEvent(AgentCompactionText{context.identity.id, act->delta, context.identity.parentId});
+        } else if (auto* thk = std::get_if<AgentCompactionThinking>(&ev)) {
+            fullThinking += thk->delta;
+            if (debugPrettyPrint) std::cout << "\033[3;35m" << thk->delta << "\033[0m" << std::flush;
+            onEvent(AgentCompactionThinking{context.identity.id, thk->delta, context.identity.parentId});
+        } else {
+            onEvent(ev);
+        }
+    });
+
+    if (debugPrettyPrint) std::cout << "\n";
+
+    // Validate summary before clearing history
+    if (fullSummary.empty()) {
+        if (debugPrettyPrint) {
+            std::cout << "\033[1;31m--- COMPACTION FAILED: Empty summary generated ---\033[0m\n";
+        }
+        onEvent(StreamError{"Context compaction failed: Empty summary generated", 0});
+        context.state.currentStatus = AgentStatus::Idle;
+        return;
+    }
+
+    // Strip <done /> tags that the model might emit
+    auto stripDoneTag = [](std::string& str, const std::string& tag) {
+        size_t pos = 0;
+        while ((pos = str.find(tag, pos)) != std::string::npos) {
+            str.erase(pos, tag.length());
+        }
+    };
+    stripDoneTag(fullSummary, "<done />");
+    stripDoneTag(fullSummary, "<done/>");
+
+    // Warn if summary seems suspiciously short
+    if (fullSummary.length() < 50) {
+        if (debugPrettyPrint) {
+            std::cout << "\033[1;33m--- COMPACTION WARNING: Summary is very short (" << fullSummary.length() << " chars) ---\033[0m\n";
+        }
+    }
 
     uint32_t oldTokens = context.aggregateMetrics.tokens.contextSize;
 
@@ -454,12 +718,13 @@ void Agent::compactContext(std::function<void(const shared::StreamEvent&)> onEve
     // Create Synthetic Memory Turn
     AgentTurn summaryTurn;
     summaryTurn.turnId = "compaction-summary-" + std::to_string(nowMs());
-    
+
     Message summaryMsg;
     summaryMsg.role = Role::User;
-    summaryMsg.content.push_back(TextContent{"COMPACTION SUMMARY: " + summary});
+    if (!fullThinking.empty()) summaryMsg.content.push_back(ThinkingContent{fullThinking});
+    summaryMsg.content.push_back(TextContent{"COMPACTION SUMMARY: " + fullSummary});
     summaryMsg.timestamp = nowMs();
-    
+
     summaryTurn.messages.push_back(summaryMsg);
     context.history.turns.push_back(summaryTurn);
 
@@ -467,8 +732,12 @@ void Agent::compactContext(std::function<void(const shared::StreamEvent&)> onEve
         journaler->appendTurn(summaryTurn);
     }
 
-    uint32_t tokensSaved = (oldTokens > 1000) ? oldTokens - 1000 : 0; 
-    onEvent(ContextCompacted{context.identity.id, tokensSaved});
+    // Reset context size to conservative estimate (system + task + summary ~1000 tokens)
+    // This prevents immediate re-compaction on next turn
+    context.aggregateMetrics.tokens.contextSize = 1000;
+
+    uint32_t tokensSaved = (oldTokens > 1000) ? oldTokens - 1000 : 0;
+    onEvent(ContextCompacted{context.identity.id, tokensSaved, context.identity.parentId});
 
     if (debugPrettyPrint) {
         std::cout << "\033[1;35m--- CONTEXT COMPACTED. SYNTHETIC MEMORY INJECTED. ---\033[0m\n";

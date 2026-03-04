@@ -7,6 +7,19 @@ namespace firmius::core {
 shared::ToolResult ListDirectoryTool::execute(const ListDirectoryInput& input, shared::ToolContext& ctx) {
     try {
         std::string absPath = ctx.agent.resolvePath(input.path);
+
+        // Security check
+        bool allowed = false;
+        for (const auto& p : ctx.agent.getContext().permissions.allowedPaths) {
+            if (absPath.starts_with(p)) {
+                allowed = true;
+                break;
+            }
+        }
+        if (!allowed && !ctx.agent.getContext().permissions.allowOutsideCwd) {
+            return shared::ToolResult::fail("Access denied: path outside allowed directories: " + absPath);
+        }
+
         auto entries = ctx.host.listDir(absPath);
 
         rapidjson::Document doc;

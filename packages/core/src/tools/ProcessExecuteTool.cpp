@@ -1,9 +1,11 @@
 #include "tools/ProcessExecuteTool.hpp"
+#include "IAgent.hpp"
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
 #include <chrono>
 #include <optional>
+#include <thread>
 
 namespace firmius::core {
 using namespace firmius::shared;
@@ -21,36 +23,70 @@ std::shared_ptr<shared::JSONSchema> ProcessExecuteTool::getSchema() const {
 }
 
 shared::ToolResult ProcessExecuteTool::execute(const ProcessExecuteInput& input, shared::ToolContext& ctx) {
+    std::string processId;
     try {
-        auto timeoutOpt = (input.timeout_ms > 0) ? 
-            std::optional<std::chrono::milliseconds>(std::chrono::milliseconds(input.timeout_ms)) : 
-            std::nullopt;
-        auto res = ctx.host.exec(input.command, input.cwd, {}, timeoutOpt);
-        
+        std::string effectiveCwd = input.cwd.empty() ? ctx.agent.getContext().environment.cwd : input.cwd;
+        processId = ctx.agent.spawnProcess(input.command, effectiveCwd);
+        ctx.agent.addBlockingProcessId(processId);
+
+        auto timeoutMs = (input.timeout_ms > 0) ? input.timeout_ms : 15000;
+        auto start = std::chrono::steady_clock::now();
+
+        ProcessSnapshot snap;
+        while (true) {
+            // Check for interrupt at the top of each iteration
+            if (ctx.agent.isInterrupted()) {
+                ctx.agent.removeBlockingProcessId(processId);
+
+                rapidjson::Document doc;
+                doc.SetObject();
+                auto& a = doc.GetAllocator();
+                doc.AddMember("exit_code", -2, a);
+                doc.AddMember("stdout", rapidjson::Value(snap.stdoutData.c_str(), a).Move(), a);
+                doc.AddMember("stderr", rapidjson::Value(snap.stderrData.c_str(), a).Move(), a);
+                doc.AddMember("duration_ms", snap.elapsedMs, a);
+                doc.AddMember("finish_reason", "Interrupted", a);
+                doc.AddMember("process_id", rapidjson::Value(processId.c_str(), a).Move(), a);
+                return shared::ToolResult::ok(doc);
+            }
+
+            snap = ctx.agent.inspectProcess(processId);
+            if (!snap.running) break;
+
+            auto now = std::chrono::steady_clock::now();
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count();
+            if (elapsed > timeoutMs) {
+                ctx.agent.removeBlockingProcessId(processId);
+
+                rapidjson::Document doc;
+                doc.SetObject();
+                auto& a = doc.GetAllocator();
+                doc.AddMember("exit_code", -1, a);
+                doc.AddMember("stdout", rapidjson::Value(snap.stdoutData.c_str(), a).Move(), a);
+                doc.AddMember("stderr", rapidjson::Value(snap.stderrData.c_str(), a).Move(), a);
+                doc.AddMember("duration_ms", (double)elapsed, a);
+                doc.AddMember("finish_reason", "Timeout", a);
+                doc.AddMember("process_id", rapidjson::Value(processId.c_str(), a).Move(), a);
+                doc.AddMember("message", "Process timed out but continues in background.", a);
+                return shared::ToolResult::ok(doc);
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+
+        ctx.agent.removeBlockingProcessId(processId);
+
         rapidjson::Document doc;
         doc.SetObject();
         auto& a = doc.GetAllocator();
-        doc.AddMember("exit_code", res.exitCode, a);
-        doc.AddMember("stdout", rapidjson::Value(res.stdoutData.c_str(), a).Move(), a);
-        doc.AddMember("stderr", rapidjson::Value(res.stderrData.c_str(), a).Move(), a);
-        doc.AddMember("duration_ms", res.durationMs, a);
-        
-        std::string reasonStr;
-        switch (res.finishReason) {
-            case ProcessFinishReason::Natural: reasonStr = "Natural"; break;
-            case ProcessFinishReason::Timeout: reasonStr = "Timeout"; break;
-            case ProcessFinishReason::Terminated: reasonStr = "Terminated"; break;
-        }
-        doc.AddMember("finish_reason", rapidjson::Value(reasonStr.c_str(), a).Move(), a);
-        
-        if (!res.backgroundProcessId.empty()) {
-            doc.AddMember("process_id", rapidjson::Value(res.backgroundProcessId.c_str(), a).Move(), a);
-            std::string msg = "Process timed out after " + std::to_string(static_cast<int>(res.durationMs)) + " ms and continues running in background. Use process_input, process_status, and process_wait to interact with it.";
-            doc.AddMember("message", rapidjson::Value(msg.c_str(), a).Move(), a);
-        }
-        
+        doc.AddMember("exit_code", snap.exitCode, a);
+        doc.AddMember("stdout", rapidjson::Value(snap.stdoutData.c_str(), a).Move(), a);
+        doc.AddMember("stderr", rapidjson::Value(snap.stderrData.c_str(), a).Move(), a);
+        doc.AddMember("duration_ms", snap.elapsedMs, a);
+        doc.AddMember("finish_reason", "Natural", a);
+
         return shared::ToolResult::ok(doc);
     } catch (const std::exception& e) {
+        if (!processId.empty()) ctx.agent.removeBlockingProcessId(processId);
         return shared::ToolResult::fail(e.what());
     }
 }

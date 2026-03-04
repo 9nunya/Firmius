@@ -22,7 +22,12 @@ int main() {
     auto& engine = Engine::instance();
     
     // 0. Setup threads
-    ThreadMetadata meta{"Test Thread", HostType::Local, "local", "/tmp", "coder"};
+    ThreadMetadata meta;
+    meta.title = "Test Thread";
+    meta.hostType = HostType::Local;
+    meta.hostIdentifier = "local";
+    meta.cwd = "/tmp";
+    meta.leadPersona = "coder";
     std::string thread1 = ThreadManager::createThread(meta);
     std::string thread2 = ThreadManager::createThread(meta);
     std::string thread3 = ThreadManager::createThread(meta);

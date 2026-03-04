@@ -4,7 +4,7 @@ find_package(Threads REQUIRED)
 add_library(firmius_core STATIC)
 add_library(firmius::core ALIAS firmius_core)
 
-target_sources(firmius_core PRIVATE 
+target_sources(firmius_core PRIVATE
     src/hosts/LocalHost.cpp
     src/hosts/DockerHost.cpp
     src/tools/FileReadTool.cpp
@@ -13,6 +13,7 @@ target_sources(firmius_core PRIVATE
     src/tools/ToolRegistry.cpp
     src/tools/SubagentTool.cpp
     src/tools/SubagentWaitTool.cpp
+    src/tools/SubagentTerminateTool.cpp
     src/tools/PythonExecuteTool.cpp
     src/tools/ListDirectoryTool.cpp
     src/tools/GlobTool.cpp
@@ -26,13 +27,15 @@ target_sources(firmius_core PRIVATE
     src/agents/Agent.cpp
     src/persistence/Journaler.cpp
     src/persistence/ThreadManager.cpp
+    src/persistence/HistoryEditor.cpp
     src/Engine.cpp
+    src/Harness.cpp
     src/benchmarks/MBPPBenchmark.cpp
     src/benchmarks/AgentBench.cpp
     src/benchmarks/SWEBench.cpp
 )
 
-target_sources(firmius_core PUBLIC 
+target_sources(firmius_core PUBLIC
   FILE_SET HEADERS
   BASE_DIRS include
   FILES
@@ -44,6 +47,7 @@ target_sources(firmius_core PUBLIC
     include/tools/ToolRegistry.hpp
     include/tools/SubagentTool.hpp
     include/tools/SubagentWaitTool.hpp
+    include/tools/SubagentTerminateTool.hpp
     include/tools/PythonExecuteTool.hpp
     include/tools/ListDirectoryTool.hpp
     include/tools/GlobTool.hpp
@@ -57,8 +61,10 @@ target_sources(firmius_core PUBLIC
     include/agents/Agent.hpp
     include/persistence/Journaler.hpp
     include/persistence/ThreadManager.hpp
+    include/persistence/HistoryEditor.hpp
     include/AgentRegistry.hpp
     include/Engine.hpp
+    include/harness/Harness.hpp
     include/benchmarks/MBPPBenchmark.hpp
     include/benchmarks/AgentBench.hpp
     include/benchmarks/SWEBench.hpp

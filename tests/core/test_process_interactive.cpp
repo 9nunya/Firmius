@@ -41,17 +41,20 @@ protected:
         registry.registerTool(std::make_unique<ProcessWaitTool>());
 
         host = std::make_unique<LocalHost>();
-        agent = std::make_unique<Agent>(ctx, *host, registry);
+        firmius::shared::IHost* hostPtr = host.get();
+        agent = std::make_unique<Agent>(ctx, std::move(host), registry);
+        hostRaw = hostPtr;
     }
 
     ToolRegistry registry;
     std::unique_ptr<LocalHost> host;
+    firmius::shared::IHost* hostRaw = nullptr;
     std::unique_ptr<Agent> agent;
 
     std::string callTool(const std::string& name, const std::string& jsonArgs) {
         rapidjson::Document doc;
         doc.Parse(jsonArgs.c_str());
-        ToolContext ctx{*host, *agent};
+        ToolContext ctx{*hostRaw, *agent};
         auto res = registry.execute(name, doc, ctx);
         if (!res.success) {
             throw std::runtime_error("Tool " + name + " failed: " + res.error);
@@ -112,7 +115,7 @@ TEST_F(ProcessInteractiveTest, PatternWaitTimeout) {
     doc.Parse(R"({"process_id": "placeholder", "pattern": "never", "timeout_ms": 1000})");
     doc["process_id"].SetString(pid.c_str(), doc.GetAllocator());
     
-    ToolContext ctx{*host, *agent};
+    ToolContext ctx{*hostRaw, *agent};
     auto res = registry.execute("process_wait", doc, ctx);
     
     EXPECT_FALSE(res.success);

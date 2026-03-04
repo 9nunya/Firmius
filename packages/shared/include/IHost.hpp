@@ -36,8 +36,9 @@ public:
 
     /**
      * @brief Performs environment-specific initialization (e.g. starting container).
+     * @return The host identifier (e.g., container ID for Docker, "localhost" for Local).
      */
-    virtual void init() = 0;
+    virtual std::string init() = 0;
 
     /**
      * @brief Performs environment-specific cleanup.
@@ -95,6 +96,11 @@ public:
     virtual FileInfo stat(const std::string& path) = 0;
 
     /**
+     * @brief Gets a unique identifier for this host (e.g. container ID).
+     */
+    virtual std::string getId() const = 0;
+
+    /**
      * @brief Executes a command synchronously (blocking).
      * @param command The shell command string.
      * @param cwd Optional working directory.
@@ -115,10 +121,10 @@ public:
 
     /**
      * @brief Registers a process in the host's background process tracking.
+     * @param id The unique process ID to assign.
      * @param proc The process handle to register.
-     * @return A unique process ID.
      */
-    virtual std::string registerBackgroundProcess(std::unique_ptr<IHostProcess> proc) = 0;
+    virtual void registerBackgroundProcess(const std::string& id, std::unique_ptr<IHostProcess> proc) = 0;
 
     /**
      * @brief Inspects a background process.

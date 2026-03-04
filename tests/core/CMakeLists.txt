@@ -8,6 +8,20 @@ target_link_libraries(firmius_core_audit PRIVATE
     firmius::shared
 )
 
+add_executable(p15_audit p15_audit.cpp)
+target_link_libraries(p15_audit PRIVATE
+    firmius::core
+    firmius::provider
+    firmius::shared
+)
+
+add_executable(harness_chaos_audit harness_chaos_audit.cpp)
+target_link_libraries(harness_chaos_audit PRIVATE
+    firmius::core
+    firmius::provider
+    firmius::shared
+)
+
 add_executable(test_swebench_prep test_swebench_prep.cpp)
 target_link_libraries(test_swebench_prep PRIVATE
     firmius::core
@@ -44,6 +58,8 @@ target_link_libraries(test_process_interactive PRIVATE
 gtest_discover_tests(test_process_interactive)
 
 target_include_directories(firmius_core_audit PRIVATE ${rapidjson_SOURCE_DIR}/include)
+target_include_directories(p15_audit PRIVATE ${rapidjson_SOURCE_DIR}/include)
+target_include_directories(harness_chaos_audit PRIVATE ${rapidjson_SOURCE_DIR}/include)
 target_include_directories(test_swebench_prep PRIVATE ${rapidjson_SOURCE_DIR}/include)
 target_include_directories(test_utils PRIVATE ${rapidjson_SOURCE_DIR}/include)
 target_include_directories(test_fleet PRIVATE ${rapidjson_SOURCE_DIR}/include)

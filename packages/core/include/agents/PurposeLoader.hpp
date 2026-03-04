@@ -50,6 +50,19 @@ public:
      * @brief Loads the compaction prompt from the prompts/ directory.
      */
     static std::string loadCompactionPrompt();
+
+    /**
+     * @brief Resolves the prompts directory using the resolution chain:
+     *        $FIRMIUS_PROMPTS_DIR env var → ~/.firmius/prompts/ → ./prompts/
+     * @return The path to the prompts directory with trailing slash.
+     */
+    static std::string resolvePromptsDir();
+
+    /**
+     * @brief Bootstraps default prompts by copying builtin prompts to ~/.firmius/prompts/
+     * @param builtinPromptsDir The path to the builtin prompts directory.
+     */
+    static void bootstrapDefaults(const std::string& builtinPromptsDir);
 };
 
 }

@@ -123,6 +123,10 @@ bool LocalHostProcess::isRunning() {
     return false;
 }
 
+std::string LocalHostProcess::getSystemId() const {
+    return std::to_string(pid);
+}
+
 void LocalHostProcess::captureLoop() {
     struct pollfd fds[2];
     fds[0].fd = stdoutFd;
@@ -162,7 +166,7 @@ void LocalHostProcess::captureLoop() {
     finished = true;
 }
 
-void LocalHost::init() {}
+std::string LocalHost::init() { return "localhost"; }
 void LocalHost::destroy() {}
 
 void LocalHost::cleanup() {
@@ -260,6 +264,10 @@ shared::ProcessResult LocalHost::exec(const std::string& command, const std::str
     auto start = std::chrono::steady_clock::now();
     auto proc = spawn(command, cwd, env);
     
+    // We don't have an ID here, but we can still capture output if needed.
+    // However, exec is usually for synchronous small tasks.
+    // If we want EngineEvents, we need an ID.
+    
     if (!timeout.has_value()) {
         auto res = proc->wait();
         res.finishReason = ProcessFinishReason::Natural;
@@ -282,7 +290,8 @@ shared::ProcessResult LocalHost::exec(const std::string& command, const std::str
         
         if (now >= deadline) {
             auto elapsed = std::chrono::duration<double, std::milli>(now - start).count();
-            std::string bgId = registerBackgroundProcess(std::move(proc));
+            std::string bgId = StringUtil::generateUuid();
+            registerBackgroundProcess(bgId, std::move(proc));
             
             shared::ProcessResult partial;
             partial.exitCode = -1;
@@ -337,11 +346,9 @@ std::unique_ptr<shared::IHostProcess> LocalHost::spawn(const std::string& comman
     }
 }
 
-std::string LocalHost::registerBackgroundProcess(std::unique_ptr<shared::IHostProcess> proc) {
+void LocalHost::registerBackgroundProcess(const std::string& id, std::unique_ptr<IHostProcess> proc) {
     std::lock_guard<std::mutex> lock(bgMutex);
-    std::string id = StringUtil::generateUuid();
     backgroundProcesses[id] = std::move(proc);
-    return id;
 }
 
 shared::ProcessSnapshot LocalHost::inspectBackgroundProcess(const std::string& id) {

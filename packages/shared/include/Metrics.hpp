@@ -56,7 +56,7 @@ struct AgentMetrics {
     tokens.cacheWrite += other.tokens.cacheWrite;
     tokens.contextSize = other.tokens.contextSize; // Latch current window size
     tokens.cumulativePrompt += other.tokens.prompt;
-    tokens.total = tokens.prompt + tokens.completion; // Cumulative total billed
+    tokens.total += other.tokens.total; // Accumulate from other.total
     // Timing: min/max semantics for timestamps, additive for durations
     if (other.timing.startMs != 0) {
         timing.startMs = (timing.startMs == 0)

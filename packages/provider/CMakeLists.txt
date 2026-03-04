@@ -5,6 +5,7 @@ add_library(firmius::provider ALIAS firmius_provider)
 
 target_sources(firmius_provider PRIVATE 
     src/providers/ChutesProvider.cpp
+    src/providers/LMStudioProvider.cpp
     src/providers/NanoGPTProvider.cpp
     src/providers/OpenRouterProvider.cpp
     src/providers/ZaiProvider.cpp
@@ -16,6 +17,7 @@ target_sources(firmius_provider PUBLIC
   BASE_DIRS include
   FILES
     include/providers/ChutesProvider.hpp
+    include/providers/LMStudioProvider.hpp
     include/providers/NanoGPTProvider.hpp
     include/providers/OpenRouterProvider.hpp
     include/providers/ZaiProvider.hpp

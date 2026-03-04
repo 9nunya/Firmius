@@ -35,9 +35,32 @@ void Journaler::appendTurn(const AgentTurn& turn) {
     rapidjson::StringBuffer buffer;
     rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
     d.Accept(writer);
-    
+
     file << buffer.GetString() << "\n";
     file.flush();
+}
+
+void Journaler::rewriteJournal(const std::vector<AgentTurn>& turns) {
+    std::lock_guard<std::mutex> lock(mutex);
+
+    if (file.is_open()) {
+        file.close();
+    }
+
+    file.open(filePath, std::ios::out | std::ios::trunc);
+    if (!file.is_open()) return;
+
+    for (const auto& turn : turns) {
+        rapidjson::Document d = toJson(turn);
+        rapidjson::StringBuffer buffer;
+        rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+        d.Accept(writer);
+        file << buffer.GetString() << "\n";
+    }
+    file.flush();
+
+    file.close();
+    file.open(filePath, std::ios::out | std::ios::app);
 }
 
 }

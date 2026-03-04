@@ -5,6 +5,8 @@
 #include "IHost.hpp"
 #include "IProvider.hpp"
 #include "Events.hpp"
+#include "persistence/HistoryEditor.hpp"
+#include "tools/ToolRegistry.hpp"
 #include <string>
 #include <vector>
 #include <functional>
@@ -31,7 +33,18 @@ public:
     /**
      * @brief Summons a new agent in its own thread.
      */
-    std::string summonAgent(const std::string& threadId, const std::string& personaName, const std::string& task = "", bool persistHistory = true);
+    std::string summonAgent(const std::string& threadId, const std::string& personaName,
+                            const std::string& task = "", bool persistHistory = true,
+                            const std::string& parentId = "", const std::string& friendlyName = "",
+                            const std::string& title = "");
+
+    /**
+     * @brief Resumes an existing agent with pre-loaded history.
+     */
+    std::string resumeAgent(const std::string& threadId, const std::string& agentId,
+                            const std::string& personaName, const std::string& parentId,
+                            const std::string& friendlyName, const std::string& title,
+                            bool persistHistory);
 
     /**
      * @brief Waits for an agent to complete and returns its summary.
@@ -54,15 +67,55 @@ public:
     std::vector<std::string> listActiveAgents() const;
 
     /**
-     * @brief Internal: broadcasts an event to all listeners.
+     * @brief Terminates an existing agent and cleans up its resources.
      */
-    void broadcast(const EngineEvent& event);
+    void terminateAgent(const std::string& agentId);
+
+    /**
+     * @brief Executes a task on an existing agent (re-tasking).
+     */
+    void executeTask(const std::string& agentId, const std::string& task);
+
+    /**
+     * @brief Switches the provider/model for an agent.
+     * @param agentId The agent ID.
+     * @param providerId The new provider ID.
+     * @param modelId The new model ID.
+     */
+    void switchAgentModel(const std::string& agentId, const std::string& providerId, const std::string& modelId);
+
+    /**
+     * @brief Undoes the last N turns for an agent.
+     * @param agentId The agent ID.
+     * @param count Number of turns to undo.
+     * @return Result of the undo operation.
+     */
+    UndoResult undoAgentTurns(const std::string& agentId, int count);
+
+    /**
+     * @brief Undoes the last N messages for an agent.
+     * @param agentId The agent ID.
+     * @param count Number of messages to undo.
+     * @return Result of the undo operation.
+     */
+    UndoResult undoAgentMessages(const std::string& agentId, int count);
+
+    /**
+     * @brief Undoes all turns after a specific timestamp.
+     * @param agentId The agent ID.
+     * @param timestamp The timestamp threshold.
+     * @return Result of the undo operation.
+     */
+    UndoResult undoAgentAfterTimestamp(const std::string& agentId, uint64_t timestamp);
 
 private:
     Engine();
     void initProviders();
     void reap();
+    void broadcast(const EngineEvent& event);
 
+    ToolRegistry toolRegistry;  // Owned by Engine, outlives agents
+    
     std::vector<std::function<void(const EngineEvent&)>> listeners;
     std::mutex listenerMutex;
     std::vector<std::jthread> fleet;

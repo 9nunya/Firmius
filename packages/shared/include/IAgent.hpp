@@ -55,6 +55,25 @@ public:
     virtual void interrupt() = 0;
 
     /**
+     * @brief Checks if the agent has been interrupted.
+     * @return True if interrupt() has been called.
+     */
+    virtual bool isInterrupted() const = 0;
+
+    /**
+     * @brief Sets the provider and model for this agent.
+     * @param providerId The provider ID.
+     * @param modelId The model ID.
+     */
+    virtual void setModel(const std::string& providerId, const std::string& modelId) = 0;
+
+    /**
+     * @brief Checks if the agent is currently running.
+     * @return True if the agent is executing a task.
+     */
+    virtual bool isRunning() const = 0;
+
+    /**
      * @brief Spawns a background process.
      * @return A unique process ID.
      */
@@ -73,12 +92,31 @@ public:
      * @param data The data to write.
      */
     virtual void writeToProcess(const std::string& id, const std::string& data) = 0;
+    virtual void registerProcessId(const std::string& id) = 0;
+
+    virtual void addBlockingProcessId(const std::string& id) = 0;
+    virtual void removeBlockingProcessId(const std::string& id) = 0;
+    virtual std::vector<std::string> getBlockingProcessIds() = 0;
 
     /**
-     * @brief Registers a process ID for agent-owned background processes.
-     * @param id The process ID to register.
+     * @brief Checks if a file has been read in the current session.
+
+     * @param path The absolute path to the file.
+     * @return True if the file has been read.
      */
-    virtual void registerProcessId(const std::string& id) = 0;
+    virtual bool hasReadFile(const std::string& path) const = 0;
+
+    /**
+     * @brief Marks a file as having been read in the current session.
+     * @param path The absolute path to the file.
+     */
+    virtual void markFileAsRead(const std::string& path) = 0;
+
+    /**
+     * @brief Returns the agent's host.
+     */
+    virtual std::shared_ptr<IHost> getHost() = 0;
+
 };
 
 }

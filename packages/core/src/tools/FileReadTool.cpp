@@ -47,6 +47,9 @@ shared::ToolResult FileReadTool::execute(const FileReadInput& input, shared::Too
             }
             current++;
         }
+        if (input.start_line == 1 && input.end_line == -1) {
+            ctx.agent.markFileAsRead(absolutePath);
+        }
         
         rapidjson::Document res;
         res.SetObject();

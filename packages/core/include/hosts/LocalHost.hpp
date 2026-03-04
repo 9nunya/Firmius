@@ -35,6 +35,7 @@ public:
     void kill() override;
     void write(const std::string& data) override;
     bool isRunning() override;
+    std::string getSystemId() const override;
 
 private:
     /**
@@ -62,10 +63,11 @@ private:
  */
 class LocalHost : public shared::IHost {
 public:
-    void init() override;
+    std::string init() override;
     void destroy() override;
     void cleanup() override;
     void setUser(const std::string& user) override;
+    std::string getId() const override { return "localhost"; }
 
     std::vector<uint8_t> readFile(const std::string& path) override;
     void writeFile(const std::string& path, const std::vector<uint8_t>& data) override;
@@ -76,7 +78,7 @@ public:
     shared::ProcessResult exec(const std::string& command, const std::string& cwd = "", const std::map<std::string, std::string>& env = {}, std::optional<std::chrono::milliseconds> timeout = std::nullopt) override;
     std::unique_ptr<shared::IHostProcess> spawn(const std::string& command, const std::string& cwd = "", const std::map<std::string, std::string>& env = {}) override;
 
-    std::string registerBackgroundProcess(std::unique_ptr<shared::IHostProcess> proc) override;
+    void registerBackgroundProcess(const std::string& id, std::unique_ptr<shared::IHostProcess> proc) override;
     shared::ProcessSnapshot inspectBackgroundProcess(const std::string& id) override;
     void writeToBackgroundProcess(const std::string& id, const std::string& data) override;
     void killBackgroundProcess(const std::string& id) override;

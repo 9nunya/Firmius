@@ -4,6 +4,8 @@
 #include <sstream>
 #include <iostream>
 #include <algorithm>
+#include <filesystem>
+#include <cstdlib>
 
 namespace firmius::core {
 
@@ -32,7 +34,7 @@ firmius::shared::ToolScope stringToScope(const std::string& s) {
 }
 
 Persona PurposeLoader::load(const std::string& purpose) {
-    std::string path = "prompts/" + purpose + ".md";
+    std::string path = resolvePromptsDir() + purpose + ".md";
     std::ifstream file(path);
     if (!file.is_open()) throw std::runtime_error("Could not load persona: " + path);
 
@@ -87,7 +89,7 @@ Persona PurposeLoader::load(const std::string& purpose) {
 
 std::string PurposeLoader::composeSystemPrompt(const Persona& persona, const AgentContext& context, const std::string& toolsBlock) {
     std::string basePrompt;
-    std::ifstream baseFile("prompts/base.md");
+    std::ifstream baseFile(resolvePromptsDir() + "base.md");
     if (baseFile.is_open()) {
         std::stringstream buffer;
         buffer << baseFile.rdbuf();
@@ -119,11 +121,51 @@ std::string PurposeLoader::buildToolsBlock(const std::vector<firmius::provider::
 }
 
 std::string PurposeLoader::loadCompactionPrompt() {
-    std::ifstream file("prompts/COMPACTION_PROMPT.md");
+    std::ifstream file(resolvePromptsDir() + "COMPACTION_PROMPT.md");
     if (!file.is_open()) return "You must summarize the session. Preserve critical state.";
     std::stringstream buffer;
     buffer << file.rdbuf();
     return buffer.str();
+}
+
+std::string PurposeLoader::resolvePromptsDir() {
+    const char* envDir = std::getenv("FIRMIUS_PROMPTS_DIR");
+    if (envDir && std::filesystem::exists(envDir)) {
+        std::string dir = envDir;
+        if (dir.back() != '/') dir += '/';
+        return dir;
+    }
+
+    const char* home = std::getenv("HOME");
+    if (home) {
+        std::string userDir = std::string(home) + "/.firmius/prompts/";
+        if (std::filesystem::exists(userDir)) {
+            return userDir;
+        }
+    }
+
+    return "prompts/";
+}
+
+void PurposeLoader::bootstrapDefaults(const std::string& builtinPromptsDir) {
+    const char* home = std::getenv("HOME");
+    if (!home) return;
+
+    std::string userDir = std::string(home) + "/.firmius/prompts";
+    if (std::filesystem::exists(userDir)) return;
+
+    if (!std::filesystem::exists(builtinPromptsDir)) return;
+
+    std::filesystem::create_directories(userDir);
+    for (const auto& entry : std::filesystem::directory_iterator(builtinPromptsDir)) {
+        if (entry.is_regular_file()) {
+            std::filesystem::copy_file(
+                entry.path(),
+                std::string(userDir) + "/" + entry.path().filename().string(),
+                std::filesystem::copy_options::skip_existing
+            );
+        }
+    }
 }
 
 }

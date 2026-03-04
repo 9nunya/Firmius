@@ -29,6 +29,18 @@ public:
      */
     void appendTurn(const AgentTurn& turn);
 
+    /**
+     * @brief Rewrites the entire journal with the provided turns.
+     * @param turns The complete set of turns to write.
+     */
+    void rewriteJournal(const std::vector<AgentTurn>& turns);
+
+    /**
+     * @brief Gets the file path for this journal.
+     * @return The file path.
+     */
+    const std::string& getFilePath() const { return filePath; }
+
 private:
     std::string filePath;
     std::ofstream file;

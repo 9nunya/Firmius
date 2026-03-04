@@ -77,6 +77,11 @@ public:
      * @return True if running.
      */
     virtual bool isRunning() = 0;
+
+    /**
+     * @brief Gets the system identifier for the process (e.g., PID).
+     */
+    virtual std::string getSystemId() const = 0;
 };
 
 }

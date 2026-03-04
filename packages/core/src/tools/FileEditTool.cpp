@@ -26,6 +26,11 @@ std::shared_ptr<shared::JSONSchema> FileEditTool::getSchema() const {
 shared::ToolResult FileEditTool::execute(const FileEditInput& input, shared::ToolContext& ctx) {
     std::string absolutePath = ctx.agent.resolvePath(input.path);
 
+    // Only require reading if file already exists (skip for new files)
+    if (ctx.host.exists(absolutePath) && !ctx.agent.hasReadFile(absolutePath)) {
+        return shared::ToolResult::fail("You MUST READ the ENTIRE file before making any edits to ensure complete context and avoid breaking dependencies or logic. Use 'file_read' on '" + input.path + "' first.");
+    }
+
     // Security check
     bool allowed = false;
     for (const auto& p : ctx.agent.getContext().permissions.allowedPaths) {
@@ -35,7 +40,7 @@ shared::ToolResult FileEditTool::execute(const FileEditInput& input, shared::Too
         }
     }
     if (!allowed && !ctx.agent.getContext().permissions.allowOutsideCwd) {
-        return shared::ToolResult::fail("Access denied: path outside allowed directories: " + absolutePath);
+        return shared::ToolResult::fail("Access denied: path outside allowed directories: " + absolutePath + ". You are allowed to access: " + StringUtil::concat(ctx.agent.getContext().permissions.allowedPaths, ", "));
     }
 
     try {
@@ -43,7 +48,7 @@ shared::ToolResult FileEditTool::execute(const FileEditInput& input, shared::Too
             // Replace mode
             auto data = ctx.host.readFile(absolutePath);
             std::string content(data.begin(), data.end());
-            
+
             std::vector<size_t> matchIndices;
             if (input.fuzzy_threshold < 1.0f) {
                 matchIndices = StringUtil::findFuzzy(content, input.old_string, input.fuzzy_threshold);
@@ -66,12 +71,12 @@ shared::ToolResult FileEditTool::execute(const FileEditInput& input, shared::Too
             size_t occurrences = 0;
             // Iterate backwards to keep indices valid during replacement
             std::reverse(matchIndices.begin(), matchIndices.end());
-            
+
             // For non-replace_all, we already checked that size is 1 or we handle multiple as error above
             // Actually, if replace_all is false and multiple matches, we failed.
             // If replace_all is false and 1 match, we replace it.
             // If replace_all is true, we replace all.
-            
+
             for (size_t pos : matchIndices) {
                 // If fuzzy, we need to know the length of the match. Sliding window uses pattern length.
                 size_t matchLen = input.old_string.length();
@@ -81,7 +86,7 @@ shared::ToolResult FileEditTool::execute(const FileEditInput& input, shared::Too
             }
 
             ctx.host.writeFile(absolutePath, std::vector<uint8_t>(content.begin(), content.end()));
-            
+
             rapidjson::Document resDoc;
             resDoc.SetObject();
             resDoc.AddMember("occurrences", static_cast<uint32_t>(occurrences), resDoc.GetAllocator());
@@ -89,7 +94,7 @@ shared::ToolResult FileEditTool::execute(const FileEditInput& input, shared::Too
         } else if (!input.content.empty()) {
             // Overwrite mode
             ctx.host.writeFile(absolutePath, std::vector<uint8_t>(input.content.begin(), input.content.end()));
-            return shared::ToolResult::ok();
+            return shared::ToolResult::ok("{ message: \"Overwrote " + absolutePath + " successfully with new content.\" }");
         } else {
             return shared::ToolResult::fail("Missing content or replacement strings");
         }

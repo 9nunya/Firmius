@@ -8,10 +8,19 @@
 #include <memory>
 #include <optional>
 #include <chrono>
+#include <vector>
 
 namespace firmius::core {
 
 using namespace firmius::shared;
+
+/**
+ * @brief Information about a Docker container.
+ */
+struct ContainerInfo {
+    std::string id;
+    std::map<std::string, std::string> labels;
+};
 
 /**
  * @brief Host implementation for sandboxed Docker execution.
@@ -19,18 +28,14 @@ using namespace firmius::shared;
  */
 class DockerHost : public shared::IHost {
 public:
-    /**
-     * @brief Constructs a DockerHost.
-     * @param containerId The ID of the container to use.
-     */
-    DockerHost(const std::string& containerId);
-    DockerHost();
+    explicit DockerHost(const std::string& containerId = "");
     ~DockerHost() override;
 
-    void init() override;
+    std::string init() override;
     void destroy() override;
     void cleanup() override;
     void setUser(const std::string& user) override;
+    std::string getId() const override { return containerId; }
 
     std::vector<uint8_t> readFile(const std::string& path) override;
     void writeFile(const std::string& path, const std::vector<uint8_t>& data) override;
@@ -41,10 +46,17 @@ public:
     shared::ProcessResult exec(const std::string& command, const std::string& cwd = "", const std::map<std::string, std::string>& env = {}, std::optional<std::chrono::milliseconds> timeout = std::nullopt) override;
     std::unique_ptr<shared::IHostProcess> spawn(const std::string& command, const std::string& cwd = "", const std::map<std::string, std::string>& env = {}) override;
 
-    std::string registerBackgroundProcess(std::unique_ptr<shared::IHostProcess> proc) override;
+    void registerBackgroundProcess(const std::string& id, std::unique_ptr<shared::IHostProcess> proc) override;
     shared::ProcessSnapshot inspectBackgroundProcess(const std::string& id) override;
     void writeToBackgroundProcess(const std::string& id, const std::string& data) override;
     void killBackgroundProcess(const std::string& id) override;
+
+    /**
+     * @brief Lists all containers that have the specified label.
+     * @param label The label key to search for.
+     * @return Vector of ContainerInfo for matching containers.
+     */
+    static std::vector<ContainerInfo> listContainersWithLabel(const std::string& label);
 
 private:
     /**

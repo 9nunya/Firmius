@@ -2,6 +2,14 @@
 
 You are performing a recursive context consolidation. The conversation history is reaching its limit, and you must now summarize the entire session into a single "Synthetic Memory" to free up space while preserving all critical state.
 
+## FACTUAL STATE INJECTION (READ CAREFULLY)
+
+The following section contains **ground truth state** about the session. You MUST incorporate this information into your summary. Do NOT guess or assume - use the actual data provided below.
+
+(Actual factual state will be provided above this prompt when compaction occurs.)
+
+Your summary must accurately reflect this factual state. For example, if the state shows "Files Edited: /work/django/core/cache/backends/db.py", then your "WORLD STATE" section must reflect this. If "Modified Files: None yet (fix pending)" appears in your summary but files WERE edited, you are NOT following this instruction correctly.
+
 ## REQUIRED SUMMARY STRUCTURE
 
 ### 1. MISSION STATUS

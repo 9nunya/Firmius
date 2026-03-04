@@ -73,7 +73,7 @@ public:
     /**
      * @brief Generates a synchronous summary of the conversation history.
      */
-    virtual std::string generateSummary(const AgentHistory& history, const std::string& compactionPrompt) = 0;
+    virtual void generateSummary(const std::string& modelId, const AgentHistory& history, const std::string& compactionPrompt, std::function<void(const StreamEvent&)> onEvent) = 0;
 };
 
 }

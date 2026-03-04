@@ -28,6 +28,14 @@ public:
     static std::vector<std::string> split(const std::string& s, char delimiter);
 
     /**
+     * @brief Concatenates a string using a specified string.
+     * @param arr The array of strings to concatenate.
+     * @param str The string to use when concatenating.
+     * @return The concatenated string.
+     */
+    static std::string concat(const std::vector<std::string> &arr, const std::string &str);
+
+    /**
      * @brief Checks if a string starts with a prefix.
      * @param s The string to check.
      * @param prefix The prefix.
@@ -63,6 +71,16 @@ public:
      * @return A shell-safe quoted string.
      */
     static std::string shellEscape(const std::string& s);
+
+    /**
+     * @brief Strips all <done /> tags from a string.
+     * Removes occurrences of <done />, <done/>, <done  /> (with any whitespace between "done" and "/>")
+     * from the input string. Returns a copy with tags removed.
+     *
+     * @param input The input string.
+     * @return The string with all <done /> tags removed.
+     */
+    static std::string stripDoneTag(const std::string& input);
 
     /**
      * @brief Calculates the Levenshtein distance between two strings.

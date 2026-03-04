@@ -12,7 +12,7 @@ shared::ToolResult GlobTool::execute(const GlobInput& input, shared::ToolContext
         std::string command = "find " + shared::StringUtil::shellEscape(absPath) + " -name " + shared::StringUtil::shellEscape(input.pattern);
         
         auto res = ctx.host.exec(command);
-        if (res.exitCode != 0) {
+        if (res.exitCode != 0 && res.exitCode != 1) {
             return shared::ToolResult::fail("Glob failed: " + res.stderrData);
         }
 

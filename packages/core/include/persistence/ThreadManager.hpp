@@ -11,6 +11,17 @@ namespace firmius::core {
 using namespace firmius::shared;
 
 /**
+ * @brief Entry in the agent manifest for a thread.
+ */
+struct AgentManifestEntry {
+    std::string persona;
+    std::string parentId;
+    std::string friendlyName;
+    std::string title;
+    bool persistHistory;
+};
+
+/**
  * @brief Manages thread directory structure and metadata.
  */
 class ThreadManager {
@@ -41,6 +52,22 @@ public:
      * @brief Discovers all agent IDs associated with a thread.
      */
     static std::vector<std::string> listAgents(const std::string& threadId);
+
+    static void updateHostIdentifier(const std::string& threadId, const std::string& hostIdentifier);
+    static void deleteThread(const std::string& threadId);
+    static void updateMetadata(const std::string& threadId, const ThreadMetadata& metadata);
+    static std::vector<ThreadMetadata> listThreadsWithMetadata();
+
+    /**
+     * @brief Reads the agent manifest for a thread.
+     * @return Map of agentId to manifest entry.
+     */
+    static std::map<std::string, AgentManifestEntry> readAgentManifest(const std::string& threadId);
+
+    /**
+     * @brief Writes the agent manifest for a thread.
+     */
+    static void writeAgentManifest(const std::string& threadId, const std::map<std::string, AgentManifestEntry>& manifest);
 };
 
 }
