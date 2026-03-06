@@ -17,7 +17,6 @@ public:
     explicit ScrollableBoxComponent(ftxui::Component child);
 
     void RequestScrollToBottom();
-    void SetContentLength(int length);
 
     ftxui::Element Render() override;
     bool OnEvent(ftxui::Event event) override;
@@ -29,6 +28,7 @@ private:
     ftxui::Box box_;
     ftxui::Component child_;
     bool at_bottom_ = true;
+    int viewport_width_ = 0;
 };
 
 std::shared_ptr<ScrollableBoxComponent> ScrollableBox(ftxui::Component child);

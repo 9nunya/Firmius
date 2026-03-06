@@ -1,12 +1,13 @@
 #include "components/ScrollableBox.hpp"
 
 #include <ftxui/component/mouse.hpp>
+#include <ftxui/dom/elements.hpp>
 #include <algorithm>
 
 namespace firmius::tui {
 
-ScrollableBoxComponent::ScrollableBoxComponent(ftxui::Component child) {
-    child_ = std::move(child);
+ScrollableBoxComponent::ScrollableBoxComponent(ftxui::Component child)
+    : child_(std::move(child)) {
     if (child_) Add(child_);
 }
 
@@ -14,29 +15,28 @@ void ScrollableBoxComponent::RequestScrollToBottom() {
     at_bottom_ = true;
 }
 
-void ScrollableBoxComponent::SetContentLength(int length) {
-    size_ = std::max(0, length);
-    if (selected_ > size_) {
-        selected_ = size_;
-    }
-    if (at_bottom_) {
-        selected_ = size_;
-    }
-}
-
 ftxui::Element ScrollableBoxComponent::Render() {
     if (!child_) return ftxui::text("");
 
     auto background = child_->Render();
+    if (viewport_width_ > 0) {
+        background = background | ftxui::size(ftxui::WIDTH, ftxui::EQUAL, viewport_width_);
+    }
+    background->ComputeRequirement();
+    size_ = background->requirement().min_y;
     if (at_bottom_) {
         selected_ = size_;
     }
-    return background
+    auto frame = background
         | ftxui::focusPosition(0, selected_)
         | ftxui::frame
         | ftxui::vscroll_indicator
         | ftxui::yflex
         | ftxui::reflect(box_);
+    if (box_.x_max >= box_.x_min) {
+        viewport_width_ = box_.x_max - box_.x_min + 1;
+    }
+    return frame;
 }
 
 bool ScrollableBoxComponent::OnEvent(ftxui::Event event) {
@@ -46,22 +46,22 @@ bool ScrollableBoxComponent::OnEvent(ftxui::Event event) {
 
     int previous = selected_;
     bool scroll_handled = false;
+    int wheel_step = std::max(1, (box_.y_max - box_.y_min) / 2);
 
-        auto wheel_step = std::max(1, (box_.y_max - box_.y_min) / 2);
-        if (event == ftxui::Event::ArrowUp ||
-            (event.is_mouse() && event.mouse().button == ftxui::Mouse::WheelUp)) {
-            selected_ -= wheel_step;
-            scroll_handled = true;
-        }
-        if (event == ftxui::Event::ArrowDown ||
-            (event.is_mouse() && event.mouse().button == ftxui::Mouse::WheelDown)) {
-            selected_ += wheel_step;
-            scroll_handled = true;
-        }
-        if (event == ftxui::Event::PageDown) {
-            selected_ += box_.y_max - box_.y_min;
-            scroll_handled = true;
-        }
+    if (event == ftxui::Event::ArrowUp ||
+        (event.is_mouse() && event.mouse().button == ftxui::Mouse::WheelUp)) {
+        selected_ -= wheel_step;
+        scroll_handled = true;
+    }
+    if (event == ftxui::Event::ArrowDown ||
+        (event.is_mouse() && event.mouse().button == ftxui::Mouse::WheelDown)) {
+        selected_ += wheel_step;
+        scroll_handled = true;
+    }
+    if (event == ftxui::Event::PageDown) {
+        selected_ += box_.y_max - box_.y_min;
+        scroll_handled = true;
+    }
     if (event == ftxui::Event::PageUp) {
         selected_ -= box_.y_max - box_.y_min;
         scroll_handled = true;

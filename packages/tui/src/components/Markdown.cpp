@@ -57,6 +57,95 @@ static std::string padRight(const std::string& s, size_t width) {
     return s + std::string(width - s.size(), ' ');
 }
 
+static std::vector<std::string> wrapTokens(const std::string& text) {
+    std::vector<std::string> out;
+    std::string cur;
+    auto flush = [&] {
+        if (!cur.empty()) {
+            out.push_back(cur);
+            cur.clear();
+        }
+    };
+
+    auto is_break = [](char c) {
+        switch (c) {
+            case '/': case '\\': case '-': case '_': case '.': case ':':
+            case '?': case '&': case '=': case '#': case '@': case '~':
+                return true;
+            default:
+                return false;
+        }
+    };
+
+    for (char c : text) {
+        if (c == '\n') {
+            // Paragraphs are already handled outside; treat newlines as spaces.
+            flush();
+            if (out.empty() || out.back() != " ") out.push_back(" ");
+            continue;
+        }
+        if (std::isspace(static_cast<unsigned char>(c))) {
+            flush();
+            if (out.empty() || out.back() != " ") out.push_back(" ");
+            continue;
+        }
+        if (is_break(c)) {
+            flush();
+            out.push_back(std::string(1, c));
+            continue;
+        }
+        cur.push_back(c);
+    }
+    flush();
+
+    // Soft-wrap long unbroken tokens into smaller chunks to avoid overflow.
+    const size_t kChunk = 16;
+    std::vector<std::string> wrapped;
+    for (const auto& t : out) {
+        if (t.size() <= kChunk || t == " ") {
+            wrapped.push_back(t);
+            continue;
+        }
+        for (size_t i = 0; i < t.size(); i += kChunk) {
+            wrapped.push_back(t.substr(i, kChunk));
+        }
+    }
+    return wrapped;
+}
+
+static std::vector<std::string> wrapToWidth(const std::string& text, size_t width) {
+    std::vector<std::string> lines;
+    if (width == 0) return lines;
+    auto tokens = wrapTokens(text);
+    std::string line;
+    auto flush = [&] {
+        if (!line.empty()) {
+            lines.push_back(line);
+            line.clear();
+        }
+    };
+    for (const auto& tok : tokens) {
+        if (tok == " ") {
+            if (!line.empty() && line.back() != ' ') line.push_back(' ');
+            continue;
+        }
+        if (tok.size() > width) {
+            flush();
+            for (size_t i = 0; i < tok.size(); i += width) {
+                lines.push_back(tok.substr(i, width));
+            }
+            continue;
+        }
+        if (line.size() + tok.size() > width) {
+            flush();
+        }
+        line += tok;
+    }
+    flush();
+    if (lines.empty()) lines.push_back("");
+    return lines;
+}
+
 static ftxui::Element renderInline(const std::string& text, bool dim) {
     struct Span {
         std::string text;
@@ -103,12 +192,15 @@ static ftxui::Element renderInline(const std::string& text, bool dim) {
 
     ftxui::Elements elems;
     for (const auto& sp : spans) {
-        auto e = ftxui::text(sp.text);
-        if (sp.bold) e = e | ftxui::bold;
-        if (sp.italic) e = e | ftxui::dim;
-        if (sp.code) e = e | ftxui::inverted;
-        if (dim) e = e | ftxui::dim;
-        elems.push_back(e);
+        auto tokens = wrapTokens(sp.text);
+        for (const auto& tok : tokens) {
+            auto e = ftxui::text(tok);
+            if (sp.bold) e = e | ftxui::bold;
+            if (sp.italic) e = e | ftxui::dim;
+            if (sp.code) e = e | ftxui::inverted;
+            if (dim) e = e | ftxui::dim;
+            elems.push_back(e);
+        }
     }
     if (elems.empty()) return ftxui::text("");
     return ftxui::hflow(std::move(elems));
@@ -131,9 +223,18 @@ ftxui::Element RenderMarkdown(const std::string& text, bool dim) {
         if (code_lines.empty()) return;
         std::vector<ftxui::Element> code_elems;
         for (const auto& l : code_lines) {
-            auto e = ftxui::text(l);
-            if (dim) e = e | ftxui::dim;
-            code_elems.push_back(e);
+            const size_t kCodeWrap = 80;
+            if (l.size() <= kCodeWrap) {
+                auto e = ftxui::text(l);
+                if (dim) e = e | ftxui::dim;
+                code_elems.push_back(e);
+                continue;
+            }
+            for (size_t i = 0; i < l.size(); i += kCodeWrap) {
+                auto e = ftxui::text(l.substr(i, kCodeWrap));
+                if (dim) e = e | ftxui::dim;
+                code_elems.push_back(e);
+            }
         }
         out.push_back(ftxui::vbox(std::move(code_elems)) | ftxui::border);
         code_lines.clear();
@@ -168,22 +269,34 @@ ftxui::Element RenderMarkdown(const std::string& text, bool dim) {
             }
             i = j - 1;
 
+            const size_t kMaxCellWidth = 24;
             std::vector<size_t> widths(header.size(), 0);
             for (size_t c = 0; c < header.size(); ++c) widths[c] = std::max(widths[c], header[c].size());
             for (const auto& r : rows) {
                 for (size_t c = 0; c < r.size(); ++c) widths[c] = std::max(widths[c], r[c].size());
             }
+            for (auto& w : widths) w = std::min(w, kMaxCellWidth);
 
             auto renderRow = [&](const std::vector<std::string>& r, bool is_header) {
-                std::string line_out = "|";
+                std::vector<std::vector<std::string>> cell_lines;
+                size_t max_lines = 1;
                 for (size_t c = 0; c < widths.size(); ++c) {
                     std::string cell = c < r.size() ? r[c] : "";
-                    line_out += " " + padRight(cell, widths[c]) + " |";
+                    auto lines = wrapToWidth(cell, widths[c]);
+                    max_lines = std::max(max_lines, lines.size());
+                    cell_lines.push_back(std::move(lines));
                 }
-                auto e = ftxui::text(line_out);
-                if (is_header) e = e | ftxui::bold;
-                if (dim) e = e | ftxui::dim;
-                out.push_back(e);
+                for (size_t line_i = 0; line_i < max_lines; ++line_i) {
+                    std::string line_out = "|";
+                    for (size_t c = 0; c < widths.size(); ++c) {
+                        std::string cell = line_i < cell_lines[c].size() ? cell_lines[c][line_i] : "";
+                        line_out += " " + padRight(cell, widths[c]) + " |";
+                    }
+                    auto e = ftxui::text(line_out);
+                    if (is_header) e = e | ftxui::bold;
+                    if (dim) e = e | ftxui::dim;
+                    out.push_back(e);
+                }
             };
 
             renderRow(header, true);
@@ -212,12 +325,12 @@ ftxui::Element RenderMarkdown(const std::string& text, bool dim) {
             auto content = line.substr(2);
             out.push_back(ftxui::hbox({
                 ftxui::text("• "),
-                renderInline(content, dim),
+                renderInline(content, dim) | ftxui::flex,
             }));
             continue;
         }
 
-        if (!para_buf.empty()) para_buf += "\n";
+        if (!para_buf.empty()) para_buf += " ";
         para_buf += line;
     }
 

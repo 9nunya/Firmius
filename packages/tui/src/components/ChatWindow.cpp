@@ -147,7 +147,6 @@ private:
         // Keep view anchored to bottom on new content.
         if (scrollable_) {
             scrollable_->RequestScrollToBottom();
-            scrollable_->SetContentLength(static_cast<int>(rows_.size()) + 1);
         }
     }
 
