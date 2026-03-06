@@ -282,7 +282,7 @@ BenchmarkResult SWEBench::runTask(const std::string& taskId) {
            << "The relevant tests have been added to the codebase.\n"
            << "The following tests are currently FAILING. You must fix the code so they PASS:\n";
     for (const auto& t : failToPass) prompt << "- " << t << "\n";
-    prompt << "\nFix the issue in the codebase. When done, provide a summary and end with <done />.";
+    prompt << "\nFix the issue in the codebase. After finishing, provide a summary of your changes.";
 
     agent.reset();
     agent.run(prompt.str(), [](const StreamEvent&) {});

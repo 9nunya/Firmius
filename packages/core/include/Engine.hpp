@@ -36,7 +36,7 @@ public:
     std::string summonAgent(const std::string& threadId, const std::string& personaName,
                             const std::string& task = "", bool persistHistory = true,
                             const std::string& parentId = "", const std::string& friendlyName = "",
-                            const std::string& title = "");
+                            const std::string& title = "", const std::string& requestedAgentId = "");
 
     /**
      * @brief Resumes an existing agent with pre-loaded history.

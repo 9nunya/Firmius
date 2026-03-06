@@ -51,6 +51,7 @@ enum class AgentStatus : std::uint8_t {
   ExecutingTool,   ///< Waiting for a tool execution to complete.
   AwaitingInput,   ///< Waiting for user feedback.
   Compacting,      ///< Summarizing history to free up context window.
+  ProviderWaiting, ///< Waiting for initial response from LLM provider.
   Error,            ///< Agent encountered a fatal runtime error.
   Cancelled  ///< Agent was interrupted/aborted by user or engine.
 };

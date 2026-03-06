@@ -24,7 +24,7 @@ std::shared_ptr<shared::JSONSchema> SubagentTool::getSchema() const {
 }
 
 shared::ToolResult SubagentTool::execute(const SubagentInput& input, shared::ToolContext& ctx) {
-    std::string threadId = ctx.agent.getContext().history.threadId;
+    std::string threadId = ctx.agent.getContext().history->threadId;
 
     auto existingAgents = AgentRegistry::instance().listAll();
     for (const auto& agentId : existingAgents) {

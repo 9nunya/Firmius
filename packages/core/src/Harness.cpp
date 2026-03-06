@@ -293,11 +293,15 @@ bool Harness::switchThread(const std::string& threadId) {
     threadLocks_[threadId] = newFd;
     currentThreadId_ = threadId;
 
-    // Re-hydrate agents from manifest for this thread
+    auto metadata = ThreadManager::getMetadata(threadId);
+    emitEvent(harness::ThreadChanged{threadId, metadata});
+
+    std::unordered_map<std::string, std::string> agentTitles;
+    std::map<std::string, AgentManifestEntry> manifest;
     try {
-        auto manifest = ThreadManager::readAgentManifest(threadId);
+        manifest = ThreadManager::readAgentManifest(threadId);
         for (const auto& [agentId, entry] : manifest) {
-            // Skip if agent already exists in registry (e.g., from previous session still alive)
+            agentTitles[agentId] = entry.title;
             if (!AgentRegistry::instance().getAgent(agentId)) {
                 Engine::instance().resumeAgent(
                     threadId, agentId, entry.persona, entry.parentId,
@@ -305,14 +309,29 @@ bool Harness::switchThread(const std::string& threadId) {
                 );
             }
         }
-    } catch (...) {
-        // Ignore manifest errors; proceed with thread switch
+    } catch (...) {}
+
+    // Emit SubagentSpawned for all agents in the manifest to restore UI state
+    for (const auto& [agentId, entry] : manifest) {
+        auto agent = AgentRegistry::instance().getAgent(agentId);
+        std::string providerId;
+        std::string modelId;
+        uint32_t maxTokens = 0;
+        if (agent) {
+            const auto& config = agent->getContext().config;
+            providerId = config.providerId;
+            modelId = config.modelId;
+            maxTokens = config.maxTokens.value_or(0);
+        }
+        emitEvent(harness::SubagentSpawned{
+            entry.parentId, agentId, entry.persona, entry.friendlyName,
+            entry.title, providerId, modelId, maxTokens
+        });
     }
 
     auto it = threadAgentMap_.find(threadId);
     if (it != threadAgentMap_.end()) {
         focusedAgentId_ = it->second;
-        // Verify focused agent actually exists in registry after re-hydration
         if (!AgentRegistry::instance().getAgent(focusedAgentId_)) {
             focusedAgentId_.clear();
         }
@@ -320,12 +339,11 @@ bool Harness::switchThread(const std::string& threadId) {
         focusedAgentId_.clear();
     }
 
-    // If no focused agent, find the "lead" agent for this thread in the registry
     if (focusedAgentId_.empty()) {
         auto allAgents = AgentRegistry::instance().listAll();
         for (const auto& id : allAgents) {
             auto agent = AgentRegistry::instance().getAgent(id);
-            if (agent && agent->getContext().history.threadId == threadId && 
+            if (agent && agent->getContext().history->threadId == threadId && 
                 agent->getContext().identity.parentId.empty()) {
                 focusedAgentId_ = id;
                 threadAgentMap_[threadId] = id;
@@ -334,14 +352,36 @@ bool Harness::switchThread(const std::string& threadId) {
         }
     }
 
-    auto metadata = ThreadManager::getMetadata(threadId);
-    emitEvent(harness::ThreadChanged{threadId, metadata});
+    for (const auto& [agentId, entry] : manifest) {
+        auto history = ThreadManager::loadAgentHistory(threadId, agentId);
+        for (const auto& turn : history.turns) {
+            for (const auto& message : turn.messages) {
+                emitEvent(harness::MessageCompleted{agentId, message, turn.metrics});
+            }
+        }
+    }
 
     return true;
 }
 
 bool Harness::resumeLast() {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
+
+    if (currentThreadId_.empty()) {
+        std::ifstream sessionFile(getSessionPath());
+        if (sessionFile.is_open()) {
+            std::string content((std::istreambuf_iterator<char>(sessionFile)),
+                                std::istreambuf_iterator<char>());
+            sessionFile.close();
+
+            rapidjson::Document doc;
+            doc.Parse(content.c_str());
+            if (!doc.HasParseError() && doc.HasMember("threadId") && doc["threadId"].IsString()) {
+                currentThreadId_ = doc["threadId"].GetString();
+            }
+        }
+    }
+
     if (currentThreadId_.empty()) return false;
     return switchThread(currentThreadId_);
 }
@@ -365,12 +405,11 @@ void Harness::send(const std::string& text) {
     emitEvent(harness::UserMessageSent{messageId, text, currentThreadId_});
 
     if (focusedAgentId_.empty() || !AgentRegistry::instance().getAgent(focusedAgentId_)) {
-        focusedAgentId_ = Engine::instance().summonAgent(currentThreadId_, metadata.leadPersona, text, true);
-        if (focusedAgentId_.empty()) {
-            emitEvent(harness::HarnessError{"Failed to summon lead agent"});
-            return;
-        }
-        threadAgentMap_[currentThreadId_] = focusedAgentId_;
+        std::string requestedId = shared::StringUtil::generateUuid();
+        focusedAgentId_ = requestedId;
+        threadAgentMap_[currentThreadId_] = requestedId;
+        
+        Engine::instance().summonAgent(currentThreadId_, metadata.leadPersona, text, true, "", "lead", "", requestedId);
         return;
     }
 
@@ -482,6 +521,7 @@ void Harness::routeEngineEvent(const EngineEvent& event) {
 
     std::string agentId;
     std::string parentId;
+    std::string agentThreadId;
 
     std::visit([&](auto&& ev) {
         using T = std::decay_t<decltype(ev)>;
@@ -498,10 +538,23 @@ void Harness::routeEngineEvent(const EngineEvent& event) {
         }
     }, event);
 
+    // Check if this agent belongs to the current thread
+    bool isAgentInCurrentThread = false;
+    if (!agentId.empty()) {
+        auto agent = AgentRegistry::instance().getAgent(agentId);
+        if (agent) {
+            agentThreadId = agent->getContext().history->threadId;
+            isAgentInCurrentThread = (agentThreadId == currentThreadId_);
+        }
+    }
+
+    // Allow events from:
+    // 1. Agents in the current thread
+    // 2. Descendants of the focused agent (for subagent chains)
+    // 3. AgentSpawned events (to register new agents)
     bool isAgentSpawnedEvent = std::holds_alternative<AgentSpawned>(event);
-    bool shouldRouteEvent = focusedAgentId_.empty() 
-        ? isAgentSpawnedEvent 
-        : isDescendant(agentId, focusedAgentId_);
+    bool isDescendantOfFocused = !focusedAgentId_.empty() && isDescendant(agentId, focusedAgentId_);
+    bool shouldRouteEvent = isAgentInCurrentThread || isDescendantOfFocused || isAgentSpawnedEvent;
     if (!shouldRouteEvent) return;
 
     if (auto* e = std::get_if<AgentText>(&event)) {
@@ -510,6 +563,8 @@ void Harness::routeEngineEvent(const EngineEvent& event) {
         emitEvent(harness::MessageChunk{e->agentId, e->delta, true});
     } else if (auto* e = std::get_if<AgentToolCall>(&event)) {
         emitEvent(harness::ToolCallStarted{e->agentId, e->toolCallId, e->toolName, e->toolArgs});
+    } else if (auto* e = std::get_if<shared::AgentToolCallChunk>(&event)) {
+        emitEvent(harness::ToolCallArgsChunk{e->agentId, e->toolCallId, e->nameDelta, e->argsDelta});
     } else if (auto* e = std::get_if<AgentTurnCompleted>(&event)) {
         if (!e->turn.messages.empty()) {
             const auto& msg = e->turn.messages.back();
@@ -544,7 +599,17 @@ void Harness::routeEngineEvent(const EngineEvent& event) {
             drainQueue();
         }
     } else if (auto* e = std::get_if<AgentSpawned>(&event)) {
-        emitEvent(harness::SubagentSpawned{e->parentId, e->agentId, e->personaName, e->friendlyName, e->title});
+        auto agent = AgentRegistry::instance().getAgent(e->agentId);
+        std::string providerId;
+        std::string modelId;
+        uint32_t maxTokens = 0;
+        if (agent) {
+            const auto& config = agent->getContext().config;
+            providerId = config.providerId;
+            modelId = config.modelId;
+            maxTokens = config.maxTokens.value_or(0);
+        }
+        emitEvent(harness::SubagentSpawned{e->parentId, e->agentId, e->personaName, e->friendlyName, e->title, providerId, modelId, maxTokens});
 
         // Write agent manifest entry for current thread
         if (!currentThreadId_.empty()) {
@@ -563,6 +628,7 @@ void Harness::routeEngineEvent(const EngineEvent& event) {
             }
         }
     } else if (auto* e = std::get_if<AgentCompleted>(&event)) {
+        emitEvent(harness::AgentFinished{e->agentId});
         // Drain one message from queue if this is the focused agent
         if (e->agentId == focusedAgentId_) {
             drainQueue();
@@ -573,16 +639,30 @@ void Harness::routeEngineEvent(const EngineEvent& event) {
         emitEvent(harness::HarnessError{e->message});
     } else if (auto* e = std::get_if<AgentCompacting>(&event)) {
         emitEvent(harness::AgentCompactingEvent{e->agentId});
+    } else if (auto* e = std::get_if<AgentCompactionThinking>(&event)) {
+        emitEvent(harness::CompactionThinkingChunk{e->agentId, e->delta});
+    } else if (auto* e = std::get_if<AgentCompactionText>(&event)) {
+        emitEvent(harness::CompactionTextChunk{e->agentId, e->delta});
     } else if (auto* e = std::get_if<ContextCompacted>(&event)) {
         emitEvent(harness::ContextCompactedEvent{e->agentId, e->tokensSaved});
     } else if (auto* e = std::get_if<ModelSwitched>(&event)) {
-        emitEvent(harness::ModelSwitchedEvent{e->agentId, e->oldProviderId, e->oldModelId, e->newProviderId, e->newModelId});
+        uint32_t maxTokens = 0;
+        auto provider = provider::ProviderRegistry::instance().getProvider(e->newProviderId);
+        if (provider) {
+            try {
+                auto model = provider->getModelInfo(e->newModelId);
+                maxTokens = model.contextWindow;
+            } catch (...) {}
+        }
+        emitEvent(harness::ModelSwitchedEvent{e->agentId, e->oldProviderId, e->oldModelId, e->newProviderId, e->newModelId, maxTokens});
     } else if (auto* e = std::get_if<AgentRetrying>(&event)) {
         emitEvent(harness::AgentRetrying{e->agentId, e->attempt, e->maxAttempts, e->httpStatus, e->delayMs, e->reason});
     } else if (auto* e = std::get_if<AgentRetryFailed>(&event)) {
         emitEvent(harness::AgentRetryFailed{e->agentId, e->httpStatus, e->reason});
     } else if (auto* e = std::get_if<HistoryUndone>(&event)) {
         emitEvent(harness::HistoryUndoneEvent{e->threadId, e->agentId, e->turnsRemoved, e->compactionReversed});
+    } else if (auto* e = std::get_if<AgentProviderWaiting>(&event)) {
+        emitEvent(harness::AgentProviderWaiting{e->agentId});
     }
 }
 
@@ -795,6 +875,24 @@ void Harness::writeInterruptionRecord() {
     if (file.is_open()) {
         file << buffer.GetString();
     }
+}
+
+shared::AgentHistory Harness::getAgentHistory(const std::string& agentId) const {
+    std::lock_guard<std::recursive_mutex> lock(const_cast<std::recursive_mutex&>(mutex_));
+    if (currentThreadId_.empty()) return {};
+    return ThreadManager::loadAgentHistory(currentThreadId_, agentId);
+}
+
+std::shared_ptr<shared::AgentHistory> Harness::getAgentHistoryPtr(const std::string& agentId) const {
+    std::lock_guard<std::recursive_mutex> lock(const_cast<std::recursive_mutex&>(mutex_));
+    if (!agentId.empty()) {
+        auto agent = AgentRegistry::instance().getAgent(agentId);
+        if (agent) {
+            return agent->getContext().history;
+        }
+    }
+    if (currentThreadId_.empty()) return std::make_shared<shared::AgentHistory>();
+    return std::make_shared<shared::AgentHistory>(ThreadManager::loadAgentHistory(currentThreadId_, agentId));
 }
 
 } // namespace firmius::core

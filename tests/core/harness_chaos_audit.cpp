@@ -242,7 +242,7 @@ int phase2_thread_switch(Harness& harnessInst, TestState& state, const std::stri
         return EXIT_PHASE2_FAILED;
     }
 
-    size_t turnsBefore = agent->getContext().history.turns.size();
+    size_t turnsBefore = agent->getContext().history->turns.size();
     std::cout << "[Phase 2] History turns before follow-up: " << turnsBefore << std::endl;
 
     harnessInst.send("What was the result of the fibonacci test? Just confirm the number.");
@@ -255,7 +255,7 @@ int phase2_thread_switch(Harness& harnessInst, TestState& state, const std::stri
         return EXIT_PHASE2_FAILED;
     }
 
-    size_t turnsAfter = agent->getContext().history.turns.size();
+    size_t turnsAfter = agent->getContext().history->turns.size();
     std::cout << "[Phase 2] History turns after follow-up: " << turnsAfter << std::endl;
 
     if (turnsAfter <= turnsBefore) {

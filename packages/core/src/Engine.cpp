@@ -52,7 +52,7 @@ Engine::Engine() {
                 ss << "  - " << id << ": "
                    << ctx.identity.name << " ("
                    << (agent->isRunning() ? "running" : "idle") << ", "
-                   << ctx.history.threadId << ")\n";
+                   << ctx.history->threadId << ")\n";
             }
         }
         return ss.str();
@@ -86,25 +86,19 @@ void Engine::initProviders() {
 
 void Engine::reap() {
     std::lock_guard<std::mutex> lock(listenerMutex);
-    // std::jthread cleans up itself but we should remove finished ones from our list
-    // Actually fleet is std::vector<std::jthread>, so we can just check if they are finished.
-    // However jthread doesn't have an easy "is_finished" but we can check if it's joinable.
-    // But jthread is always joinable until joined.
-    // A better way is to use a map of futures or similar.
-    // For now, let's just leave them in fleet as they are jthreads.
 }
 
 std::string Engine::summonAgent(const std::string& threadId, const std::string& personaName,
                                 const std::string& task, bool persistHistory,
                                 const std::string& parentId, const std::string& friendlyName,
-                                const std::string& title) {
+                                const std::string& title, const std::string& requestedAgentId) {
     reap();
 
     if (AgentRegistry::instance().listAll().size() >= maxConcurrentAgents) {
         throw std::runtime_error("Maximum concurrent agents reached");
     }
 
-    std::string agentId = shared::StringUtil::generateUuid();
+    std::string agentId = requestedAgentId.empty() ? shared::StringUtil::generateUuid() : requestedAgentId;
 
     auto prom = std::make_shared<std::promise<std::string>>();
     {
@@ -112,7 +106,6 @@ std::string Engine::summonAgent(const std::string& threadId, const std::string& 
         agentFutures[agentId] = prom->get_future().share();
     }
 
-    // Create agent and register BEFORE spawning thread to avoid race condition
     std::unique_ptr<IHost> host;
     try {
         auto metadata = ThreadManager::getMetadata(threadId);
@@ -137,7 +130,8 @@ std::string Engine::summonAgent(const std::string& threadId, const std::string& 
         ctx.environment.cwd = metadata.cwd;
         ctx.environment.identifier = metadata.hostIdentifier;
         ctx.environment.type = metadata.hostType;
-        ctx.history.threadId = threadId;
+        ctx.history = std::make_shared<AgentHistory>();
+        ctx.history->threadId = threadId;
 
         if (metadata.hostType == HostType::Docker) {
             host = std::make_unique<DockerHost>();
@@ -159,7 +153,6 @@ std::string Engine::summonAgent(const std::string& threadId, const std::string& 
 
         auto agent = std::make_shared<Agent>(ctx, std::move(host), toolRegistry, jnl);
 
-        // Register BEFORE spawning thread - ensures agent is available immediately
         AgentRegistry::instance().registerAgent(agentId, agent);
         std::string agentTitle = title.empty() ? persona.title : title;
         broadcast(AgentSpawned{agentId, personaName, parentId, ctx.identity.friendlyName, agentTitle, persistHistory});
@@ -171,6 +164,10 @@ std::string Engine::summonAgent(const std::string& threadId, const std::string& 
 
     std::lock_guard<std::mutex> lock(listenerMutex);
     fleet.emplace_back([this, threadId, agentId, personaName, task, prom, persistHistory, parentId]() {
+        // Track if we already broadcast an error from the stream
+        bool errorBroadcast = false;
+        std::string lastErrorMessage;
+        
         try {
             auto agent = AgentRegistry::instance().getAgent(agentId);
             if (!agent) {
@@ -179,7 +176,7 @@ std::string Engine::summonAgent(const std::string& threadId, const std::string& 
 
             std::string finalSummary = "No summary provided.";
 
-            agent->run(task, [this, agentId, parentId](const StreamEvent& ev) {
+            agent->run(task, [this, agentId, parentId, &errorBroadcast, &lastErrorMessage](const StreamEvent& ev) {
                 if (auto* txt = std::get_if<TextChunk>(&ev)) {
                     broadcast(AgentText{agentId, txt->delta, parentId});
                 } else if (auto* thk = std::get_if<ThinkingChunk>(&ev)) {
@@ -202,11 +199,17 @@ std::string Engine::summonAgent(const std::string& threadId, const std::string& 
                     broadcast(AgentRetrying{agentId, sr->attempt, sr->maxAttempts, sr->httpStatus, sr->delayMs, sr->reason, parentId});
                 } else if (auto* sre = std::get_if<StreamRetryExhausted>(&ev)) {
                     broadcast(AgentRetryFailed{agentId, sre->httpStatus, sre->reason, parentId});
+                } else if (auto* serr = std::get_if<StreamError>(&ev)) {
+                    // Mark that we've broadcast an error - don't broadcast again in catch block
+                    errorBroadcast = true;
+                    lastErrorMessage = serr->message;
+                    broadcast(AgentError{agentId, serr->message, parentId});
+                } else if (std::holds_alternative<ProviderWaiting>(ev)) {
+                    broadcast(AgentProviderWaiting{agentId, parentId});
                 }
             });
 
-            // Extract last message for summary
-            const auto& turns = agent->getContext().history.turns;
+            const auto& turns = agent->getContext().history->turns;
             if (!turns.empty() && !turns.back().messages.empty()) {
                 const auto& lastMsg = turns.back().messages.back();
                 std::string content;
@@ -220,7 +223,10 @@ std::string Engine::summonAgent(const std::string& threadId, const std::string& 
             prom->set_value(finalSummary);
 
         } catch (const std::exception& e) {
-            broadcast(AgentError{agentId, e.what(), parentId});
+            // Only broadcast error if we haven't already done so from StreamError
+            if (!errorBroadcast) {
+                broadcast(AgentError{agentId, e.what(), parentId});
+            }
             prom->set_exception(std::make_exception_ptr(e));
         }
     });
@@ -261,7 +267,7 @@ std::string Engine::resumeAgent(const std::string& threadId, const std::string& 
     ctx.environment.cwd = metadata.cwd;
     ctx.environment.identifier = metadata.hostIdentifier;
     ctx.environment.type = metadata.hostType;
-    ctx.history = std::move(history);
+    ctx.history = std::make_shared<AgentHistory>(std::move(history));
 
     std::unique_ptr<IHost> host;
     if (metadata.hostType == HostType::Docker) {
@@ -334,9 +340,6 @@ void Engine::broadcast(const EngineEvent& event) {
 void Engine::terminateAgent(const std::string& agentId) {
     auto agent = AgentRegistry::instance().getAgent(agentId);
     if (agent) {
-        // Unregister from registry - this removes the shared_ptr reference
-        // When all references are gone, the Agent destructor will be called
-        // which will destroy the host (cleanup Docker containers, etc.)
         AgentRegistry::instance().unregisterAgent(agentId);
     }
 }
@@ -369,13 +372,16 @@ void Engine::executeTask(const std::string& agentId, const std::string& task) {
 
     std::thread([this, agentId, task, agent, prom]() mutable {
         std::string parentId = "";
+        // Track if we already broadcast an error from the stream
+        bool errorBroadcast = false;
+        
         try {
             if (agent) {
                 parentId = agent->getContext().identity.parentId;
             }
             std::string finalSummary = "No summary provided.";
 
-            agent->run(task, [this, agentId, parentId](const StreamEvent& ev) {
+            agent->run(task, [this, agentId, parentId, &errorBroadcast](const StreamEvent& ev) {
                 if (auto* txt = std::get_if<TextChunk>(&ev)) {
                     broadcast(AgentText{agentId, txt->delta, parentId});
                 } else if (auto* thk = std::get_if<ThinkingChunk>(&ev)) {
@@ -398,11 +404,16 @@ void Engine::executeTask(const std::string& agentId, const std::string& task) {
                     broadcast(AgentRetrying{agentId, sr->attempt, sr->maxAttempts, sr->httpStatus, sr->delayMs, sr->reason, parentId});
                 } else if (auto* sre = std::get_if<StreamRetryExhausted>(&ev)) {
                     broadcast(AgentRetryFailed{agentId, sre->httpStatus, sre->reason, parentId});
+                } else if (auto* serr = std::get_if<StreamError>(&ev)) {
+                    // Mark that we've broadcast an error - don't broadcast again in catch block
+                    errorBroadcast = true;
+                    broadcast(AgentError{agentId, serr->message, parentId});
+                } else if (std::holds_alternative<ProviderWaiting>(ev)) {
+                    broadcast(AgentProviderWaiting{agentId, parentId});
                 }
             });
 
-            // Extract last message for summary
-            const auto& turns = agent->getContext().history.turns;
+            const auto& turns = agent->getContext().history->turns;
             if (!turns.empty() && !turns.back().messages.empty()) {
                 const auto& lastMsg = turns.back().messages.back();
                 std::string content;
@@ -416,7 +427,10 @@ void Engine::executeTask(const std::string& agentId, const std::string& task) {
             prom->set_value(finalSummary);
 
         } catch (const std::exception& e) {
-            broadcast(AgentError{agentId, e.what(), parentId});
+            // Only broadcast error if we haven't already done so from StreamError
+            if (!errorBroadcast) {
+                broadcast(AgentError{agentId, e.what(), parentId});
+            }
             prom->set_exception(std::make_exception_ptr(e));
         }
     }).detach();
@@ -428,9 +442,9 @@ UndoResult Engine::undoAgentTurns(const std::string& agentId, int count) {
     if (agent->isRunning()) throw std::runtime_error("Cannot undo while agent is running");
 
     auto& ctx = agent->getMutableContext();
-    auto result = HistoryEditor::undoTurns(ctx.history.turns, count);
+    auto result = HistoryEditor::undoTurns(ctx.history->turns, count);
 
-    broadcast(HistoryUndone{agentId, ctx.history.threadId, result.turnsRemoved, result.compactionReversed, ctx.identity.parentId});
+    broadcast(HistoryUndone{agentId, ctx.history->threadId, result.turnsRemoved, result.compactionReversed, ctx.identity.parentId});
     return result;
 }
 
@@ -440,9 +454,9 @@ UndoResult Engine::undoAgentMessages(const std::string& agentId, int count) {
     if (agent->isRunning()) throw std::runtime_error("Cannot undo while agent is running");
 
     auto& ctx = agent->getMutableContext();
-    auto result = HistoryEditor::undoMessages(ctx.history.turns, count);
+    auto result = HistoryEditor::undoMessages(ctx.history->turns, count);
 
-    broadcast(HistoryUndone{agentId, ctx.history.threadId, result.turnsRemoved, result.compactionReversed, ctx.identity.parentId});
+    broadcast(HistoryUndone{agentId, ctx.history->threadId, result.turnsRemoved, result.compactionReversed, ctx.identity.parentId});
     return result;
 }
 
@@ -452,9 +466,9 @@ UndoResult Engine::undoAgentAfterTimestamp(const std::string& agentId, uint64_t 
     if (agent->isRunning()) throw std::runtime_error("Cannot undo while agent is running");
 
     auto& ctx = agent->getMutableContext();
-    auto result = HistoryEditor::undoAfterTimestamp(ctx.history.turns, timestamp);
+    auto result = HistoryEditor::undoAfterTimestamp(ctx.history->turns, timestamp);
 
-    broadcast(HistoryUndone{agentId, ctx.history.threadId, result.turnsRemoved, result.compactionReversed, ctx.identity.parentId});
+    broadcast(HistoryUndone{agentId, ctx.history->threadId, result.turnsRemoved, result.compactionReversed, ctx.identity.parentId});
     return result;
 }
 

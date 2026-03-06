@@ -40,7 +40,7 @@ AgentContext createTestContext() {
     {"USER", "nunya"}
   };
 
-  context.history.threadId = "thread-123";
+  context.history->threadId = "thread-123";
 
   AgentTurn turn1;
   turn1.turnId = "turn-001";
@@ -125,8 +125,8 @@ AgentContext createTestContext() {
   turn2.messages.push_back(msg5);
   turn2.messages.push_back(msg6);
 
-  context.history.turns.push_back(turn1);
-  context.history.turns.push_back(turn2);
+  context.history->turns.push_back(turn1);
+  context.history->turns.push_back(turn2);
 
   context.state.currentStatus = AgentStatus::Idle;
   context.state.pendingToolCalls = {"call-002", "call-003"};
@@ -383,7 +383,7 @@ TEST(Serialization, AgentConfigRoundtrip) {
     original.maxTurns = 50;
     original.temperature = 0.3f;
     original.maxTokens = 4096;
-    original.stop = {"<done />", "###"};
+    original.stop = {"<stop />", "###"};
     original.persistHistory = false;
 
     auto doc = toJson(original);
@@ -394,7 +394,7 @@ TEST(Serialization, AgentConfigRoundtrip) {
     EXPECT_EQ(restored.maxTurns, 50);
     EXPECT_EQ(restored.persistHistory, false);
     ASSERT_EQ(restored.stop.size(), 2u);
-    EXPECT_EQ(restored.stop[0], "<done />");
+    EXPECT_EQ(restored.stop[0], "<stop />");
 }
 
 TEST(Serialization, AgentConfigInContext) {
@@ -405,7 +405,7 @@ TEST(Serialization, AgentConfigInContext) {
     original.environment.type = HostType::Local;
     original.environment.identifier = "local";
     original.environment.cwd = "/work";
-    original.history.threadId = "thread-cfg-1";
+    original.history->threadId = "thread-cfg-1";
     original.config.modelId = "claude-opus-4";
     original.config.personaName = "architect";
     original.config.maxTurns = 100;
@@ -488,7 +488,7 @@ TEST(Serialization, CancelledStatusRoundtrip) {
     original.environment.type = HostType::Local;
     original.environment.identifier = "local";
     original.environment.cwd = "/work";
-    original.history.threadId = "thread-cancel-1";
+    original.history->threadId = "thread-cancel-1";
     original.state.currentStatus = AgentStatus::Cancelled;
     original.state.fatalError = "User interrupted";
     original.state.editedFiles = {"/work/test.py", "/work/README.md"};

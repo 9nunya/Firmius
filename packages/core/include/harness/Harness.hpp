@@ -157,10 +157,22 @@ public:
     UndoResult undoAfterTimestamp(uint64_t timestamp);
 
     /**
-     * Writes an interruption record to the current thread's journal directory.
+     * @brief Writes an interruption record to the current thread's journal directory.
      * Serializes in-flight tool calls and active subagents for crash recovery.
      */
     void writeInterruptionRecord();
+
+    /**
+     * @brief Gets the history for a specific agent.
+     */
+    shared::AgentHistory getAgentHistory(const std::string& agentId) const;
+
+    /**
+     * @brief Gets a shared history pointer for a specific agent.
+     * If the agent is active, this returns the live in-memory history.
+     * Otherwise, it returns a new shared_ptr loaded from disk.
+     */
+    std::shared_ptr<shared::AgentHistory> getAgentHistoryPtr(const std::string& agentId) const;
 
 private:
     Harness();

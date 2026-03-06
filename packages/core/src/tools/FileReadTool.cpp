@@ -47,8 +47,11 @@ shared::ToolResult FileReadTool::execute(const FileReadInput& input, shared::Too
             }
             current++;
         }
-        if (input.start_line == 1 && input.end_line == -1) {
-            ctx.agent.markFileAsRead(absolutePath);
+        // Mark file as read if the entire file was read (start_line == 1 and either end_line == -1 or we read to the end)
+        if (input.start_line == 1) {
+            if (input.end_line == -1 || input.end_line >= current - 1) {
+                ctx.agent.markFileAsRead(absolutePath);
+            }
         }
         
         rapidjson::Document res;

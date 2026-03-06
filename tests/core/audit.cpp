@@ -58,6 +58,9 @@ int main(int argc, char** argv) {
     }
 
     auto host = !containerId.empty() ? std::make_unique<DockerHost>(containerId) : std::make_unique<DockerHost>();
+    if (containerId.empty()) {
+        host->init();
+    }
 
     auto& providerRegistry = ProviderRegistry::instance();
     providerRegistry.registerProvider(std::make_shared<NanoGPTProvider>());

@@ -63,31 +63,6 @@ std::string StringUtil::shellEscape(const std::string& s) {
     return result;
 }
 
-std::string StringUtil::stripDoneTag(const std::string& input) {
-    std::string result = input;
-    const std::string open = "<done";
-    const std::string close = "/>";
-    size_t pos = 0;
-    while ((pos = result.find(open, pos)) != std::string::npos) {
-        size_t endPos = result.find(close, pos);
-        if (endPos == std::string::npos) break;
-        // Check that everything between is whitespace
-        bool valid = true;
-        for (size_t i = pos + open.length(); i < endPos; ++i) {
-            if (!std::isspace(static_cast<unsigned char>(result[i]))) {
-                valid = false;
-                break;
-            }
-        }
-        if (valid) {
-            result.erase(pos, endPos - pos + close.length());
-        } else {
-            ++pos;
-        }
-    }
-    return result;
-}
-
 size_t StringUtil::levenshteinDistance(std::string_view s1, std::string_view s2) {
     if (s1.empty()) return s2.size();
     if (s2.empty()) return s1.size();

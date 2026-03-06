@@ -9,6 +9,7 @@
 #include <vector>
 #include <map>
 #include <optional>
+#include <memory>
 #include <cstdint>
 
 /**
@@ -117,12 +118,24 @@ struct AgentContext {
   AgentIdentity identity;           ///< Who the agent is.
   AgentPermissions permissions;     ///< What the agent can do.
   HostEnvironment environment;      ///< Where the agent lives.
-  AgentHistory history;             ///< What the agent has done.
+  std::shared_ptr<AgentHistory> history = std::make_shared<AgentHistory>();             ///< What the agent has done.
   AgentState state;                 ///< What the agent is doing now.
   AgentMetrics aggregateMetrics;    ///< Total performance telemetry.
   AgentConfig config;  ///< Generation and lifecycle configuration.
 
-  bool operator==(const AgentContext& other) const = default;
+  bool operator==(const AgentContext& other) const {
+    if (history && other.history) {
+      if (!(*history == *other.history)) return false;
+    } else if (history || other.history) {
+      return false;
+    }
+    return identity == other.identity &&
+           permissions == other.permissions &&
+           environment == other.environment &&
+           state == other.state &&
+           aggregateMetrics == other.aggregateMetrics &&
+           config == other.config;
+  }
 };
 
 /**

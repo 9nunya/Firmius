@@ -75,7 +75,7 @@ BenchmarkResult AgentBench::runTask(const std::string& taskId) {
     const auto& task = dataset[index];
     std::string description = task["description"].GetString();
 
-    std::string fullPrompt = "Task: " + description + "\n\nWhen done, provide your final answer and end with <done />. Do not call tools after you have found the answer.";
+    std::string fullPrompt = "Task: " + description + "\n\nProvide your final answer after you have found it. Do not call tools after you have found the answer.";
 
     agent.reset();
     agent.run(fullPrompt, [](const StreamEvent&) {});
@@ -353,38 +353,16 @@ void AgentBench::terminateBackgroundProcesses() {
 }
 
 std::string AgentBench::extractAgentAnswer() {
-    const auto& turns = agent.getContext().history.turns;
+    const auto& turns = agent.getContext().history->turns;
     if (turns.empty()) {
         std::cout << "DEBUG: No turns in history" << std::endl;
         return "";
-    }
-
-    std::cout << "DEBUG: Total turns: " << turns.size() << std::endl;
-    int turnIdx = 0;
-    for (const auto& turn : turns) {
-        std::cout << "DEBUG: Turn " << turnIdx << " has " << turn.messages.size() << " messages" << std::endl;
-        int msgIdx = 0;
-        for (const auto& msg : turn.messages) {
-            std::string content;
-            for (const auto& part : msg.content) {
-                if (auto* txt = std::get_if<TextContent>(&part)) {
-                    content += txt->text;
-                }
-            }
-            if (!content.empty() && content.find("<done") != std::string::npos) {
-                std::cout << "DEBUG: Found <done> in turn " << turnIdx << " msg " << msgIdx 
-                          << " role=" << static_cast<int>(msg.role) << std::endl;
-            }
-            msgIdx++;
-        }
-        turnIdx++;
     }
 
     for (auto it = turns.rbegin(); it != turns.rend(); ++it) {
         const auto& turn = *it;
         for (auto msgIt = turn.messages.rbegin(); msgIt != turn.messages.rend(); ++msgIt) {
             const auto& msg = *msgIt;
-            // Only look at assistant messages for the answer
             if (msg.role != Role::Assistant) continue;
             
             std::string content;
@@ -394,54 +372,55 @@ std::string AgentBench::extractAgentAnswer() {
                 }
             }
 
-            std::regex doneRegex("<done\\s*/>");
-            if (std::regex_search(content, doneRegex)) {
-                std::string cleaned = std::regex_replace(content, doneRegex, "");
-                
-                // Robust trim
-                auto first = cleaned.find_first_not_of(" \t\n\r");
-                if (first == std::string::npos) {
-                    cleaned.clear();
-                } else {
-                    cleaned.erase(0, first);
-                    auto last = cleaned.find_last_not_of(" \t\n\r");
-                    if (last != std::string::npos) {
-                        cleaned.erase(last + 1);
-                    }
-                }
-                
-                // Prioritize "Answer: X" or "Final Answer: X"
-                std::regex answerPrefixRegex(R"((?:[Aa]nswer|[Ff]inal [Aa]nswer)\s*[:\-]?\s*(\d+))");
-                std::smatch match;
-                std::string searchTarget = cleaned;
-                std::string foundNumber;
-                
-                while (std::regex_search(searchTarget, match, answerPrefixRegex)) {
-                    foundNumber = match[1];
-                    searchTarget = match.suffix();
-                }
-                if (!foundNumber.empty()) return foundNumber;
+            if (content.empty()) continue;
 
-                // Then try bolded numbers
-                std::regex boldNumRegex(R"(\*\*(\d+)\*\*)");
-                searchTarget = cleaned;
-                while (std::regex_search(searchTarget, match, boldNumRegex)) {
-                    foundNumber = match[1];
-                    searchTarget = match.suffix();
+            std::string cleaned = content;
+            
+            // Robust trim
+            auto first = cleaned.find_first_not_of(" \t\n\r");
+            if (first == std::string::npos) {
+                cleaned.clear();
+            } else {
+                cleaned.erase(0, first);
+                auto last = cleaned.find_last_not_of(" \t\n\r");
+                if (last != std::string::npos) {
+                    cleaned.erase(last + 1);
                 }
-                if (!foundNumber.empty()) return foundNumber;
-
-                // Then just the last number
-                std::regex numRegex(R"((\d+))");
-                searchTarget = cleaned;
-                while (std::regex_search(searchTarget, match, numRegex)) {
-                    foundNumber = match[1];
-                    searchTarget = match.suffix();
-                }
-                if (!foundNumber.empty()) return foundNumber;
-
-                return cleaned;
             }
+
+            if (cleaned.empty()) continue;
+            
+            // Prioritize "Answer: X" or "Final Answer: X"
+            std::regex answerPrefixRegex(R"((?:[Aa]nswer|[Ff]inal [Aa]nswer)\s*[:\-]?\s*(\d+))");
+            std::smatch match;
+            std::string searchTarget = cleaned;
+            std::string foundNumber;
+            
+            while (std::regex_search(searchTarget, match, answerPrefixRegex)) {
+                foundNumber = match[1];
+                searchTarget = match.suffix();
+            }
+            if (!foundNumber.empty()) return foundNumber;
+
+            // Then try bolded numbers
+            std::regex boldNumRegex(R"(\*\*(\d+)\*\*)");
+            searchTarget = cleaned;
+            while (std::regex_search(searchTarget, match, boldNumRegex)) {
+                foundNumber = match[1];
+                searchTarget = match.suffix();
+            }
+            if (!foundNumber.empty()) return foundNumber;
+
+            // Then just the last number
+            std::regex numRegex(R"((\d+))");
+            searchTarget = cleaned;
+            while (std::regex_search(searchTarget, match, numRegex)) {
+                foundNumber = match[1];
+                searchTarget = match.suffix();
+            }
+            if (!foundNumber.empty()) return foundNumber;
+
+            return cleaned;
         }
     }
 

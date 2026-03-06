@@ -28,7 +28,14 @@ struct MessageChunk {
 };
 
 /**
- * Emitted when an agent completes a full message.
+ * @brief Emitted when an agent is waiting for a provider response.
+ */
+struct AgentProviderWaiting {
+    std::string agentId;
+};
+
+/**
+ * @brief Emitted when an agent completes a full message.
  */
 struct MessageCompleted {
     std::string agentId;
@@ -65,6 +72,9 @@ struct SubagentSpawned {
     std::string persona;
     std::string friendlyName;
     std::string title;
+    std::string providerId;
+    std::string modelId;
+    uint32_t maxTokens = 0;
 };
 
 /**
@@ -128,6 +138,7 @@ struct ModelSwitchedEvent {
     std::string oldModelId;
     std::string newProviderId;
     std::string newModelId;
+    uint32_t newMaxTokens = 0;
 };
 
 /**
@@ -193,11 +204,42 @@ struct UserMessageSent {
     std::string threadId;
 };
 
+struct AgentFinished {
+    std::string agentId;
+};
+
+/**
+ * Emitted when a chunk of tool arguments arrives.
+ */
+struct ToolCallArgsChunk {
+    std::string agentId;
+    std::string toolCallId;
+    std::string nameDelta;
+    std::string delta;
+};
+
+/**
+ * Emitted when a chunk of compaction thinking arrives.
+ */
+struct CompactionThinkingChunk {
+    std::string agentId;
+    std::string delta;
+};
+
+/**
+ * Emitted when a chunk of compaction text arrives.
+ */
+struct CompactionTextChunk {
+    std::string agentId;
+    std::string delta;
+};
+
 /**
  * HarnessEvent is a variant of all events that the Harness can emit.
  */
 using HarnessEvent = std::variant<
     ThreadChanged,
+    AgentProviderWaiting,
     MessageChunk,
     MessageCompleted,
     ToolCallStarted,
@@ -217,7 +259,11 @@ using HarnessEvent = std::variant<
     MessageDequeued,
     AgentRetrying,
     AgentRetryFailed,
-    UserMessageSent
+    UserMessageSent,
+    AgentFinished,
+    ToolCallArgsChunk,
+    CompactionThinkingChunk,
+    CompactionTextChunk
 >;
 
 } // namespace firmius::harness

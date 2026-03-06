@@ -73,16 +73,6 @@ public:
     static std::string shellEscape(const std::string& s);
 
     /**
-     * @brief Strips all <done /> tags from a string.
-     * Removes occurrences of <done />, <done/>, <done  /> (with any whitespace between "done" and "/>")
-     * from the input string. Returns a copy with tags removed.
-     *
-     * @param input The input string.
-     * @return The string with all <done /> tags removed.
-     */
-    static std::string stripDoneTag(const std::string& input);
-
-    /**
      * @brief Calculates the Levenshtein distance between two strings.
      */
     static size_t levenshteinDistance(std::string_view s1, std::string_view s2);

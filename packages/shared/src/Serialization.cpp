@@ -75,6 +75,7 @@ std::string agentStatusToString(AgentStatus value) {
         case AgentStatus::ExecutingTool: return "ExecutingTool";
         case AgentStatus::AwaitingInput: return "AwaitingInput";
         case AgentStatus::Compacting: return "Compacting";
+        case AgentStatus::ProviderWaiting: return "ProviderWaiting";
         case AgentStatus::Error: return "Error";
         case AgentStatus::Cancelled: return "Cancelled";
     }
@@ -261,10 +262,12 @@ rapidjson::Document toJson(const AgentContext& ctx) {
     env.AddMember("envVars", envVars, a);
     d.AddMember("environment", env, a);
 
+    const AgentHistory emptyHistory{};
+    const AgentHistory* historyPtr = ctx.history ? ctx.history.get() : &emptyHistory;
     rapidjson::Value history(rapidjson::kObjectType);
-    history.AddMember("threadId", rapidjson::Value(ctx.history.threadId.c_str(), a), a);
+    history.AddMember("threadId", rapidjson::Value(historyPtr->threadId.c_str(), a), a);
     rapidjson::Value turns(rapidjson::kArrayType);
-    for (const auto& t : ctx.history.turns) {
+    for (const auto& t : historyPtr->turns) {
         rapidjson::Value turn(rapidjson::kObjectType);
         turn.AddMember("turnId", rapidjson::Value(t.turnId.c_str(), a), a);
         rapidjson::Value msgs(rapidjson::kArrayType);
@@ -341,7 +344,8 @@ AgentContext fromJson(const rapidjson::Value& v) {
     ctx.environment.identifier = v["environment"]["identifier"].GetString();
     ctx.environment.cwd = v["environment"]["cwd"].GetString();
     for (auto it = v["environment"]["envVars"].MemberBegin(); it != v["environment"]["envVars"].MemberEnd(); ++it) ctx.environment.envVars[it->name.GetString()] = it->value.GetString();
-    ctx.history.threadId = v["history"]["threadId"].GetString();
+    ctx.history = std::make_shared<AgentHistory>();
+    ctx.history->threadId = v["history"]["threadId"].GetString();
     for (const auto& t : v["history"]["turns"].GetArray()) {
         AgentTurn turn;
         turn.turnId = t["turnId"].GetString();
@@ -350,7 +354,7 @@ AgentContext fromJson(const rapidjson::Value& v) {
         if (t.HasMember("stopReason") && t["stopReason"].IsString()) {
             turn.stopReason = stringToStopReason(t["stopReason"].GetString());
         }
-        ctx.history.turns.push_back(turn);
+        ctx.history->turns.push_back(turn);
     }
     ctx.state.currentStatus = stringToAgentStatus(v["state"]["currentStatus"].GetString());
     for (const auto& p : v["state"]["pendingToolCalls"].GetArray()) ctx.state.pendingToolCalls.push_back(p.GetString());

@@ -43,14 +43,18 @@ public:
         : context_(context)
         , host_(host ? host : std::make_shared<MockHost>())
         , interrupted_(false)
-        , nextProcessId_(1) {}
+        , nextProcessId_(1) {
+        if (!context_.history) {
+            context_.history = std::make_shared<AgentHistory>();
+        }
+    }
 
     /**
      * @brief Resets the agent's history and state.
      */
     void reset() override {
         recordCall("reset", {});
-        context_.history.turns.clear();
+        context_.history->turns.clear();
         context_.state = AgentState();
         interrupted_ = false;
     }
@@ -267,7 +271,7 @@ public:
         } else if (field == "environment.identifier") {
             context_.environment.identifier = value;
         } else if (field == "history.threadId") {
-            context_.history.threadId = value;
+            context_.history->threadId = value;
         }
     }
 

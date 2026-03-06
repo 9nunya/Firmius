@@ -10,6 +10,7 @@
 #include <functional>
 #include <optional>
 #include <map>
+#include <atomic>
 
 /**
  * @brief LLM Provider abstraction layer.
@@ -36,6 +37,7 @@ struct ProviderOptions {
     std::optional<std::uint32_t> maxTokens;    ///< Optional maximum token limit.
     std::vector<std::string> stop;            ///< Optional list of stop sequences.
     std::vector<ToolDefinition> tools;        ///< List of tools available for this request.
+    std::atomic<bool>* abortSignal = nullptr; ///< Optional signal to abort the request immediately.
 };
 
 /**

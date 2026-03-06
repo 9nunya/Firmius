@@ -83,6 +83,13 @@ struct StreamError {
 };
 
 /**
+ * @brief Emitted when a stream request is sent but no response has arrived.
+ */
+struct ProviderWaiting {
+    bool operator==(const ProviderWaiting&) const = default;
+};
+
+/**
  * @brief Emitted when retrying a failed stream request.
  */
 struct StreamRetrying {
@@ -108,6 +115,15 @@ struct StreamRetryExhausted {
  * @brief Events emitted by the Engine regarding fleet orchestration.
  */
 struct AgentSpawned { std::string agentId; std::string personaName; std::string parentId; std::string friendlyName; std::string title; bool persistHistory; bool operator==(const AgentSpawned&) const = default; };
+
+/**
+ * @brief Emitted when an agent is waiting for a provider response.
+ */
+struct AgentProviderWaiting {
+    std::string agentId;
+    std::string parentId;
+    bool operator==(const AgentProviderWaiting&) const = default;
+};
 
 /**
  * @brief Emitted when an agent's stream request is being retried.
@@ -136,6 +152,7 @@ struct AgentRetryFailed {
 struct AgentThinking { std::string agentId; std::string delta; std::string parentId; bool operator==(const AgentThinking&) const = default; };
 struct AgentText { std::string agentId; std::string delta; std::string parentId; bool operator==(const AgentText&) const = default; };
 struct AgentToolCall { std::string agentId; std::string toolCallId; std::string toolName; std::string toolArgs; std::string parentId; bool operator==(const AgentToolCall&) const = default; };
+struct AgentToolCallChunk { std::uint32_t index; std::string agentId; std::string toolCallId; std::string nameDelta; std::string argsDelta; std::string parentId; bool operator==(const AgentToolCallChunk&) const = default; };
 struct AgentTurnCompleted { 
     std::string agentId; 
     AgentTurn turn;
@@ -182,6 +199,7 @@ using StreamEvent = std::variant<
   AgentMetrics,
   StreamDone,
   StreamError,
+  ProviderWaiting,
   StreamRetrying,
   StreamRetryExhausted,
   AgentTurnCompleted,
@@ -194,11 +212,13 @@ using StreamEvent = std::variant<
 
 using EngineEvent = std::variant<
   AgentSpawned,
+  AgentProviderWaiting,
   AgentRetrying,
   AgentRetryFailed,
   AgentThinking,
   AgentText,
   AgentToolCall,
+  AgentToolCallChunk,
   AgentTurnCompleted,
   AgentCompleted,
   AgentError,

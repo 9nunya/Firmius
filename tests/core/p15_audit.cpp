@@ -61,7 +61,7 @@ int main(int /*argc*/, char** /*argv*/) {
     // Test 1: Create a subagent and get its ID
     std::cout << "[TEST 1] Creating new subagent via summonAgent..." << std::endl;
     std::string persona = "researcher";
-    std::string task1 = "Say 'hello' and then output <done />";
+    std::string task1 = "Say 'hello'.";
 
     std::string agentId = Engine::instance().summonAgent(threadId, persona, task1, false);
     std::cout << "  -> Agent created with ID: " << agentId << std::endl;
@@ -88,8 +88,8 @@ int main(int /*argc*/, char** /*argv*/) {
     auto agent = AgentRegistry::instance().getAgent(agentId);
     if (agent) {
         std::cout << "  -> Agent found in registry: YES" << std::endl;
-        std::cout << "  -> Agent thread ID: " << agent->getContext().history.threadId << std::endl;
-        std::cout << "  -> History turns count: " << agent->getContext().history.turns.size() << std::endl;
+        std::cout << "  -> Agent thread ID: " << agent->getContext().history->threadId << std::endl;
+        std::cout << "  -> History turns count: " << agent->getContext().history->turns.size() << std::endl;
     } else {
         std::cout << "  -> Agent found in registry: NO (FAIL)" << std::endl;
         return 1;
@@ -126,7 +126,7 @@ int main(int /*argc*/, char** /*argv*/) {
 
     // Create a mock agent context for the tool context
     AgentContext ctx;
-    ctx.history.threadId = threadId;
+    ctx.history->threadId = threadId;
     ctx.config.providerId = "zen";
     ctx.config.modelId = "big-pickle";
 
