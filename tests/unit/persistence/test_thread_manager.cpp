@@ -49,7 +49,7 @@ protected:
     ThreadMetadata createTestMetadata() {
         ThreadMetadata metadata;
         metadata.title = "Test Thread";
-        metadata.hostType = HostType::Local;
+        metadata.hostOptions.type = HostType::Local;
         metadata.hostIdentifier = "test-host";
         metadata.cwd = "/home/test";
         metadata.leadPersona = "test-coder";
@@ -86,7 +86,7 @@ TEST_F(ThreadManagerTest, createThread_roundtrip) {
     ThreadMetadata loaded = tm->getMetadata(threadId);
 
     EXPECT_EQ(loaded.title, metadata.title);
-    EXPECT_EQ(loaded.hostType, metadata.hostType);
+    EXPECT_EQ(loaded.hostOptions, metadata.hostOptions);
     EXPECT_EQ(loaded.hostIdentifier, metadata.hostIdentifier);
     EXPECT_EQ(loaded.cwd, metadata.cwd);
     EXPECT_EQ(loaded.leadPersona, metadata.leadPersona);

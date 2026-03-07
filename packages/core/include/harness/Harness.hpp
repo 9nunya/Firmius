@@ -59,12 +59,12 @@ public:
 
   /**
    * Create a new thread and establish PID lock.
-   * @param hostType The type of host (Local, Docker)
+   * @param hostOptions Options for host creation (Type, Image, etc.)
    * @param cwd Working directory for the thread
    * @param leadPersona Persona name for the lead agent
    * @return The new thread ID, or empty string if locking failed
    */
-  std::string newThread(shared::HostType hostType, const std::string &cwd,
+  std::string newThread(shared::HostCreationOptions hostOptions, const std::string &cwd,
                         const std::string &leadPersona = "firmius");
 
   /**

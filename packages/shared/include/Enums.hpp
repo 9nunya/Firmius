@@ -29,6 +29,15 @@ enum class HostType : std::uint8_t {
   RemoteSSH    ///< Execution on a remote host via SSH.
 };
 
+struct HostCreationOptions {
+    HostType type = HostType::Local;
+    std::string containerName = "";
+    bool connectToExisting = false;
+    bool deleteOnExit = true;
+
+    bool operator==(const HostCreationOptions& other) const = default;
+};
+
 /**
  * @brief Scopes of operation for tool security and permissioning.
  */

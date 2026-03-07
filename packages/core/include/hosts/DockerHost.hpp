@@ -28,7 +28,7 @@ struct ContainerInfo {
  */
 class DockerHost : public shared::IHost {
 public:
-    explicit DockerHost(const std::string& containerId = "");
+    explicit DockerHost(const shared::HostCreationOptions& options);
     ~DockerHost() override;
 
     std::string init() override;
@@ -69,6 +69,7 @@ private:
     std::string request(const std::string& method, const std::string& url, const std::string& body = "");
 
     std::string containerId;
+    shared::HostCreationOptions options;
     CURL* curl;
     std::string currentUser;
     std::vector<std::string> containerIds;

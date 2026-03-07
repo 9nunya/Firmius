@@ -57,7 +57,11 @@ int main(int argc, char** argv) {
         std::cerr << "WARN: DOCKER_AUDIT_CONTAINER not set in .env.local" << std::endl;
     }
 
-    auto host = !containerId.empty() ? std::make_unique<DockerHost>(containerId) : std::make_unique<DockerHost>();
+    HostCreationOptions opts;
+    opts.type = HostType::Docker;
+    opts.containerName = containerId;
+    opts.connectToExisting = !containerId.empty();
+    auto host = std::make_unique<DockerHost>(opts);
     if (containerId.empty()) {
         host->init();
     }

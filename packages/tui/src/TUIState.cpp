@@ -184,6 +184,10 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
           if (chat_component_) {
             chat_component_->OnEvent(ftxui::Event::Special("ThreadChanged"));
           }
+        } else if constexpr (std::is_same_v<T, HistoryUndone>) {
+          if (chat_component_) {
+            chat_component_->OnEvent(ftxui::Event::Special("ThreadChanged"));
+          }
         }
       },
       ev);
@@ -236,7 +240,7 @@ ftxui::Component TuiState::root() {
       if (harness_) {
         // Auto-create thread in current directory with default lead persona
         std::string cwd = std::filesystem::current_path().string();
-        harness_->newThread(firmius::shared::HostType::Docker, cwd, "firmius");
+        harness_->newThread({}, cwd, "firmius");
         harness_->send(text);
       }
       setViewMode(ViewMode::Chat);

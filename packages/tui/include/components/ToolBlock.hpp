@@ -4,6 +4,7 @@
 #include <ftxui/component/component_base.hpp>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace firmius::tui {
 
@@ -24,6 +25,9 @@ struct ToolCallView {
   bool show_result = false;
   std::string toggle_label = "show";
   std::string live_process_output;
+  std::vector<std::string>
+      subagent_tool_log;      // Rolling log of subagent tool summaries
+  std::string subagent_title; // Title from summon_subagent args
 };
 
 ftxui::Component ToolBlock(const std::shared_ptr<ToolCallView> &view);

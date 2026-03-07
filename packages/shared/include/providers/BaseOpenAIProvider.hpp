@@ -43,7 +43,10 @@ public:
 
     void processSSELine(const std::string& line, std::function<void(const StreamEvent&)>& onEvent);
 
-    void generateSummary(const std::string& modelId, const AgentHistory& history, const std::string& compactionPrompt, std::function<void(const StreamEvent&)> onEvent) override;
+    void generateSummary(const std::string &modelId, const AgentHistory &history,
+                         const std::string &compactionPrompt,
+                         std::function<void(const StreamEvent &)> onEvent,
+                         std::atomic<bool> *abortSignal = nullptr) override;
 
 protected:
     std::string providerId;

@@ -52,7 +52,7 @@ int main(int /*argc*/, char** /*argv*/) {
     // Create a thread first (required for summonAgent to work)
     ThreadMetadata meta;
     meta.title = "P15 Test Thread";
-    meta.hostType = HostType::Local;
+    meta.hostOptions.type = HostType::Local;
     meta.hostIdentifier = "";
     meta.cwd = "/tmp";
     meta.leadPersona = "researcher";

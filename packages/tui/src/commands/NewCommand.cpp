@@ -9,7 +9,7 @@ void NewCommand::execute(CommandCtx &ctx, const std::vector<ParsedArg> &args) {
   (void)args;
   auto &h = firmius::core::Harness::instance();
   std::string cwd = std::filesystem::current_path().string();
-  h.newThread(firmius::shared::HostType::Docker, cwd, "firmius");
+  h.newThread({}, cwd, "firmius");
 }
 
 } // namespace firmius::tui

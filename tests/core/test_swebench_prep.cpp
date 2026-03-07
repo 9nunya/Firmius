@@ -31,7 +31,11 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    auto host = std::make_unique<DockerHost>(containerId);
+    HostCreationOptions opts;
+    opts.type = HostType::Docker;
+    opts.containerName = containerId;
+    opts.connectToExisting = true;
+    auto host = std::make_unique<DockerHost>(opts);
     
     ProviderRegistry::instance().registerProvider(std::make_shared<NanoGPTProvider>());
     ProviderRegistry::instance().registerProvider(std::make_shared<OpenRouterProvider>(""));

@@ -548,11 +548,15 @@ void BaseOpenAIProvider::calculateCost(AgentMetrics& metrics, const ModelInfo& m
         (model.pricePer1MCacheWrite / 1'000'000.0) * metrics.tokens.cacheWrite;
 }
 
-void BaseOpenAIProvider::generateSummary(const std::string& modelId, const AgentHistory& history, const std::string& compactionPrompt, std::function<void(const StreamEvent&)> onEvent) {
-    if (modelId.empty()) {
-        onEvent(StreamError{"Summary generation failed: No modelId provided.", 0});
-        return;
-    }
+void BaseOpenAIProvider::generateSummary(
+    const std::string &modelId, const AgentHistory &history,
+    const std::string &compactionPrompt,
+    std::function<void(const StreamEvent &)> onEvent,
+    std::atomic<bool> *abortSignal) {
+  if (modelId.empty()) {
+    onEvent(StreamError{"Summary generation failed: No modelId provided.", 0});
+    return;
+  }
 
     std::string url = baseUrl + "/chat/completions";
 
@@ -642,8 +646,8 @@ void BaseOpenAIProvider::generateSummary(const std::string& modelId, const Agent
             }
         };
 
-        std::function<void(const StreamEvent&)> wrappedFn = wrappedOnEvent;
-        StreamContext ctx{this, &wrappedFn, "", 0, nullptr};
+        std::function<void(const StreamEvent &)> wrappedFn = wrappedOnEvent;
+        StreamContext ctx{this, &wrappedFn, "", 0, abortSignal};
         HeaderCaptureContext currentHeaderCtx;
 
         curl_easy_setopt(curl, CURLOPT_URL, url.c_str());

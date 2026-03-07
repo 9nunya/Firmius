@@ -203,7 +203,7 @@ int phase2_thread_switch(Harness& harnessInst, TestState& state, const std::stri
     std::string dirB = tempDir + "/thread_b";
     std::filesystem::create_directories(dirB);
 
-    state.threadB = harnessInst.newThread(HostType::Docker, dirB, "firmius");
+    state.threadB = harnessInst.newThread({HostType::Docker}, dirB, "firmius");
     if (state.threadB.empty()) {
         std::cerr << "Phase 2 FAILED: Thread-B creation failed" << std::endl;
         return EXIT_PHASE2_FAILED;
@@ -295,7 +295,7 @@ int phase3_abort_mid_process(Harness& harnessInst, TestState& state, const std::
         }, ev);
     });
 
-    std::string prompt = "Run this command: sleep 300";
+    std::string prompt = "Run this command and wait for it to finish: sleep 300. Use process_execute, do NOT background it.";
     std::cout << "[Phase 3] Sending sleep task..." << std::endl;
 
     harnessInst.send(prompt);
@@ -572,7 +572,19 @@ bool checkSandboxImage() {
     return result == 0;
 }
 
-int main() {
+int main(int argc, char** argv) {
+    std::string providerId = "";
+    std::string modelId = "";
+
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--provider" && i + 1 < argc) {
+            providerId = argv[++i];
+        } else if (arg == "--model" && i + 1 < argc) {
+            modelId = argv[++i];
+        }
+    }
+
     std::cout << "🚀 STARTING HARNESS CHAOS AUDIT (Adversarial Design)" << std::endl;
     std::cout << "Design: LLM is LOAD GENERATOR, testing harness integrity" << std::endl;
     std::cout << "========================================================" << std::endl;
@@ -614,10 +626,18 @@ int main() {
     std::cout << "Initializing harness..." << std::endl;
     harnessInst.init();
 
+    if (!providerId.empty() || !modelId.empty()) {
+        auto config = harnessInst.getConfig();
+        if (providerId.empty()) providerId = config.defaultProviderId;
+        if (modelId.empty()) modelId = config.defaultModelId;
+        std::cout << "Switching model to " << providerId << ":" << modelId << std::endl;
+        harnessInst.switchModel(providerId, modelId);
+    }
+
     std::string dirA = tempDir.path() + "/thread_a";
     std::filesystem::create_directories(dirA);
 
-    state.threadA = harnessInst.newThread(HostType::Docker, dirA, "firmius");
+    state.threadA = harnessInst.newThread({HostType::Docker}, dirA, "firmius");
     if (state.threadA.empty()) {
         std::cerr << "FAILED: Thread-A creation failed" << std::endl;
         return EXIT_GENERAL_FAILURE;

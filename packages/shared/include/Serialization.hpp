@@ -83,6 +83,10 @@ ModelInfo modelInfoFromJsonValue(const rapidjson::Value& v);
 rapidjson::Document toJson(const AgentConfig& config);
 AgentConfig agentConfigFromJsonValue(const rapidjson::Value& v);
 
+// HostCreationOptions standalone serialization
+rapidjson::Document toJson(const HostCreationOptions& options);
+HostCreationOptions hostCreationOptionsFromJsonValue(const rapidjson::Value& v);
+
 /**
  * @brief Serializes ThreadMetadata to a RapidJSON document.
  */

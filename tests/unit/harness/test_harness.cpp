@@ -43,11 +43,11 @@ protected:
 };
 
 TEST_F(HarnessTest, switchThread_preservesAgent) {
-    std::string threadA = Harness::instance().newThread(HostType::Local, "/tmp", "test");
+    std::string threadA = Harness::instance().newThread({}, "/tmp", "test");
     ASSERT_FALSE(threadA.empty()) << "Failed to create thread A";
     EXPECT_EQ(Harness::instance().currentThreadId(), threadA);
     
-    std::string threadB = Harness::instance().newThread(HostType::Local, "/tmp", "test");
+    std::string threadB = Harness::instance().newThread({}, "/tmp", "test");
     ASSERT_FALSE(threadB.empty()) << "Failed to create thread B";
     EXPECT_EQ(Harness::instance().currentThreadId(), threadB);
     EXPECT_NE(threadA, threadB);
@@ -58,11 +58,11 @@ TEST_F(HarnessTest, switchThread_preservesAgent) {
 }
 
 TEST_F(HarnessTest, newThread_savesPreviousAgent) {
-    std::string threadA = Harness::instance().newThread(HostType::Local, "/tmp", "test");
+    std::string threadA = Harness::instance().newThread({}, "/tmp", "test");
     ASSERT_FALSE(threadA.empty()) << "Failed to create thread A";
     EXPECT_EQ(Harness::instance().currentThreadId(), threadA);
     
-    std::string threadB = Harness::instance().newThread(HostType::Local, "/tmp", "test");
+    std::string threadB = Harness::instance().newThread({}, "/tmp", "test");
     ASSERT_FALSE(threadB.empty()) << "Failed to create thread B";
     EXPECT_EQ(Harness::instance().currentThreadId(), threadB);
     
@@ -72,7 +72,7 @@ TEST_F(HarnessTest, newThread_savesPreviousAgent) {
 }
 
 TEST_F(HarnessTest, isDescendant_directChild) {
-    std::string thread = Harness::instance().newThread(HostType::Local, "/tmp", "test");
+    std::string thread = Harness::instance().newThread({}, "/tmp", "test");
     ASSERT_FALSE(thread.empty());
     
     std::string parentId = "parent-agent-001";
@@ -112,7 +112,7 @@ TEST_F(HarnessTest, isDescendant_cycleProtection) {
 }
 
 TEST_F(HarnessTest, routeEngineEvent_filtersNonDescendants) {
-    std::string thread = Harness::instance().newThread(HostType::Local, "/tmp", "test");
+    std::string thread = Harness::instance().newThread({}, "/tmp", "test");
     ASSERT_FALSE(thread.empty());
     
     std::string focusedAgent = "focused-agent";
@@ -141,7 +141,7 @@ TEST_F(HarnessTest, routeEngineEvent_filtersNonDescendants) {
 }
 
 TEST_F(HarnessTest, routeEngineEvent_passesDescendants) {
-    std::string thread = Harness::instance().newThread(HostType::Local, "/tmp", "test");
+    std::string thread = Harness::instance().newThread({}, "/tmp", "test");
     ASSERT_FALSE(thread.empty());
     
     std::string parentAgent = "parent-agent";
@@ -151,7 +151,7 @@ TEST_F(HarnessTest, routeEngineEvent_passesDescendants) {
 }
 
 TEST_F(HarnessTest, shutdown_savesSession) {
-    std::string threadId = Harness::instance().newThread(HostType::Local, "/tmp", "test");
+    std::string threadId = Harness::instance().newThread({}, "/tmp", "test");
     ASSERT_FALSE(threadId.empty());
     
     Harness::instance().shutdown();
@@ -171,16 +171,16 @@ TEST_F(HarnessTest, shutdown_savesSession) {
 }
 
 TEST_F(HarnessTest, threadLocking_preventsConcurrentAccess) {
-    std::string threadId = Harness::instance().newThread(HostType::Local, "/tmp", "test");
+    std::string threadId = Harness::instance().newThread({}, "/tmp", "test");
     ASSERT_FALSE(threadId.empty());
     
-    std::string threadId2 = Harness::instance().newThread(HostType::Local, "/tmp", "test2");
+    std::string threadId2 = Harness::instance().newThread({}, "/tmp", "test2");
     EXPECT_FALSE(threadId2.empty());
     EXPECT_NE(threadId, threadId2);
 }
 
 TEST_F(HarnessTest, resumeLast_restoresSession) {
-    std::string threadId = Harness::instance().newThread(HostType::Local, "/tmp", "test");
+    std::string threadId = Harness::instance().newThread({}, "/tmp", "test");
     ASSERT_FALSE(threadId.empty());
     
     Harness::instance().shutdown();

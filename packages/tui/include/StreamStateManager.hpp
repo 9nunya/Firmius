@@ -52,6 +52,8 @@ private:
       current_process_for_agent_; // agentId -> pid
   std::unordered_map<std::string, std::string>
       current_subagent_for_agent_; // agentId -> subagentId
+  std::unordered_map<std::string, std::string>
+      subagent_to_parent_tool_; // subagentAgentId -> parent toolCallId
 };
 
 } // namespace firmius::tui

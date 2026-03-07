@@ -314,12 +314,7 @@ private:
     std::chrono::steady_clock::time_point startTime;
 };
 
-DockerHost::DockerHost(const std::string& id) {
-    if (id.empty()) {
-        containerId = "firmius-sandbox-" + StringUtil::generateUuid();
-    } else {
-        containerId = id;
-    }
+DockerHost::DockerHost(const HostCreationOptions& opts) : options(opts) {
     curl = curl_easy_init();
     if (!curl) throw std::runtime_error("CURL init failed");
 }
@@ -330,33 +325,65 @@ DockerHost::~DockerHost() {
 }
 
 std::string DockerHost::init() {
-    containerId = "firmius-sandbox-" + StringUtil::generateUuid();
-    
-    std::string createCommand = "docker create --name '"
-        + containerId + "' firmius-sandbox:latest tail -f /dev/null > /dev/null 2>&1";
-    int createResult = system(createCommand.c_str());
-    if (createResult != 0) {
-        throw std::runtime_error("Failed to create Docker container: " + containerId);
+    std::string name = options.containerName;
+    if (name.empty()) {
+        name = "firmius-sandbox-" + StringUtil::generateUuid();
+    }
+
+    bool exists = false;
+    bool running = false;
+
+    if (options.connectToExisting) {
+        try {
+            std::string inspectRes = request("GET", "/containers/" + name + "/json");
+            rapidjson::Document doc;
+            doc.Parse(inspectRes.c_str());
+            if (!doc.HasParseError() && doc.IsObject() && doc.HasMember("Id")) {
+                exists = true;
+                containerId = doc["Id"].GetString();
+                if (doc.HasMember("State") && doc["State"].IsObject() && doc["State"].HasMember("Running")) {
+                    running = doc["State"]["Running"].GetBool();
+                }
+            }
+        } catch (...) {
+        }
+    }
+
+    if (!exists) {
+        containerId = name;
+        std::string createCommand = "docker create --name '"
+            + containerId + "' -v /tmp:/tmp firmius-sandbox:latest tail -f /dev/null > /dev/null 2>&1";
+        int createResult = system(createCommand.c_str());
+        if (createResult != 0) {
+            throw std::runtime_error("Failed to create Docker container: " + containerId);
+        }
+    }
+
+    if (!running) {
+        std::string startCommand = "docker start '" + containerId + "' > /dev/null 2>&1";
+        int startResult = system(startCommand.c_str());
+        if (startResult != 0) {
+            throw std::runtime_error("Failed to start Docker container: " + containerId);
+        }
+    }
+
+    if (options.deleteOnExit) {
+        containerIds.push_back(containerId);
     }
     
-    std::string startCommand = "docker start '" + containerId + "' > /dev/null 2>&1";
-    int startResult = system(startCommand.c_str());
-    if (startResult != 0) {
-        throw std::runtime_error("Failed to start Docker container: " + containerId);
-    }
-    
-    containerIds.push_back(containerId);
     return containerId;
 }
 void DockerHost::destroy() {}
 
 void DockerHost::cleanup() {
-    for (const auto& id : containerIds) {
-        try {
-            request("DELETE", "/containers/" + id + "?force=true", "");
-        } catch (...) {}
+    if (options.deleteOnExit) {
+        for (const auto& id : containerIds) {
+            try {
+                request("DELETE", "/containers/" + id + "?force=true", "");
+            } catch (...) {}
+        }
+        containerIds.clear();
     }
-    containerIds.clear();
     
     std::lock_guard<std::mutex> lock(bgMutex);
     for (auto& [id, proc] : backgroundProcesses) {

@@ -2,25 +2,14 @@
 #include "components/FileEditToolBlock.hpp"
 #include "components/FileReadToolBlock.hpp"
 #include "components/ListDirectoryToolBlock.hpp"
-#include "components/Markdown.hpp"
 #include "components/ProcessExecuteToolBlock.hpp"
+#include "components/SubagentToolBlock.hpp"
+#include "components/ToolWindow.hpp"
 #include <ftxui/component/component.hpp>
 #include <ftxui/dom/elements.hpp>
 #include <vector>
 
 namespace firmius::tui {
-
-static std::string phaseLabel(ToolPhase phase) {
-  switch (phase) {
-  case ToolPhase::Preparing:
-    return "preparing";
-  case ToolPhase::Called:
-    return "called";
-  case ToolPhase::Finished:
-    return "finished";
-  }
-  return "unknown";
-}
 
 ftxui::Component ToolBlock(const std::shared_ptr<ToolCallView> &view) {
   if (view) {
@@ -33,9 +22,12 @@ ftxui::Component ToolBlock(const std::shared_ptr<ToolCallView> &view) {
     } else if (view->name == "process_execute" ||
                view->name == "process_spawn") {
       return ProcessExecuteToolBlock(view);
+    } else if (view->name == "summon_subagent") {
+      return SubagentToolBlock(view);
     }
   }
 
+  // ── Generic fallback for unhandled tools ──
   auto opt = ftxui::ButtonOption::Simple();
   opt.transform = [](const ftxui::EntryState &s) {
     auto e = ftxui::text(s.label) | ftxui::dim;
@@ -61,40 +53,51 @@ ftxui::Component ToolBlock(const std::shared_ptr<ToolCallView> &view) {
       return ftxui::text("[tool] <null>") | ftxui::dim;
     }
 
-    std::string head =
-        "[tool] " + view->name + " (" + phaseLabel(view->phase) + ")";
-    if (view->phase == ToolPhase::Finished) {
-      head += view->success ? " ✓" : " ✗";
+    // Use SummarizeToolCall for a compact description
+    std::string summary = SummarizeToolCall(view->name, view->args);
+
+    if (view->phase == ToolPhase::Preparing ||
+        view->phase == ToolPhase::Called) {
+      return ftxui::text("[~] " + summary + "...") | ftxui::dim;
     }
 
-    std::vector<ftxui::Element> body_lines;
-    if (!view->args.empty()) {
-      body_lines.push_back(firmius::tui::RenderMarkdown(view->args));
+    // Finished
+    if (view->success) {
+      view->toggle_label = view->show_result ? "hide" : "show";
+      bool can_toggle = !view->result.empty();
+
+      std::vector<ftxui::Element> rows;
+      if (can_toggle) {
+        rows.push_back(
+            ftxui::hbox({ftxui::text("[+] " + summary) | ftxui::bold,
+                         ftxui::text(" [") | ftxui::dim, toggle->Render(),
+                         ftxui::text("]") | ftxui::dim}));
+      } else {
+        rows.push_back(ftxui::text("[+] " + summary) | ftxui::bold);
+      }
+
+      if (view->show_result && !view->result.empty()) {
+        // Show result in a small tool window (last 5 lines)
+        auto tail = TailLines(view->result, 5);
+        std::vector<ftxui::Element> out_lines;
+        for (const auto &line : tail) {
+          out_lines.push_back(ftxui::text(line) | ftxui::dim);
+        }
+        rows.push_back(ToolWindow(out_lines, view->name));
+      }
+
+      return ftxui::vbox(rows);
     }
 
-    bool can_toggle =
-        (view->phase == ToolPhase::Finished && !view->result.empty());
-    view->toggle_label = view->show_result ? "hide" : "show";
-    if (can_toggle && view->show_result) {
-      body_lines.push_back(firmius::tui::RenderMarkdown(view->result));
-    }
-
-    if (body_lines.empty()) {
-      return ftxui::text(head);
-    }
-
-    std::vector<ftxui::Element> rows;
-    if (can_toggle || (view->phase == ToolPhase::Called)) {
-      rows.push_back(ftxui::hbox(
-          {ftxui::text(head) | ftxui::bold, ftxui::text(" [") | ftxui::dim,
-           toggle->Render(), ftxui::text("]") | ftxui::dim}));
-    } else {
-      rows.push_back(ftxui::text(head) | ftxui::bold);
-    }
-    for (auto &line : body_lines)
-      rows.push_back(line);
-
-    return ftxui::vbox(rows);
+    // Error
+    std::string err = view->result;
+    if (err.empty())
+      err = "unknown error";
+    // Truncate error to first 80 chars
+    if (err.size() > 80)
+      err = err.substr(0, 77) + "...";
+    return ftxui::text("[x] " + summary + " failed: " + err) |
+           ftxui::color(ftxui::Color::Red);
   });
 }
 

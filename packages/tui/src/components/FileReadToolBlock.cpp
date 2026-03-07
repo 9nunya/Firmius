@@ -1,22 +1,10 @@
 #include "components/FileReadToolBlock.hpp"
-#include "components/Markdown.hpp"
+#include "components/ToolWindow.hpp"
 #include <ftxui/dom/elements.hpp>
 #include <rapidjson/document.h>
 #include <sstream>
 
 namespace firmius::tui {
-
-static std::string phaseLabel(ToolPhase phase) {
-  switch (phase) {
-  case ToolPhase::Preparing:
-    return "preparing";
-  case ToolPhase::Called:
-    return "called";
-  case ToolPhase::Finished:
-    return "finished";
-  }
-  return "unknown";
-}
 
 ftxui::Component FileReadToolBlock(const std::shared_ptr<ToolCallView> &view) {
   auto opt = ftxui::ButtonOption::Simple();
@@ -44,25 +32,20 @@ ftxui::Component FileReadToolBlock(const std::shared_ptr<ToolCallView> &view) {
     if (!view)
       return ftxui::text("[file_read] <null>") | ftxui::dim;
 
-    std::string head = "[file_read] " + phaseLabel(view->phase);
-
-    std::string path_arg = "";
+    // Parse args
+    std::string path_arg;
     int start_line = -1;
     int end_line = -1;
-
-    if (view->args.length() > 0) {
+    if (!view->args.empty()) {
       rapidjson::Document doc;
       doc.Parse(view->args.c_str());
       if (!doc.HasParseError() && doc.IsObject()) {
-        if (doc.HasMember("path") && doc["path"].IsString()) {
+        if (doc.HasMember("path") && doc["path"].IsString())
           path_arg = doc["path"].GetString();
-        }
-        if (doc.HasMember("start_line") && doc["start_line"].IsInt()) {
+        if (doc.HasMember("start_line") && doc["start_line"].IsInt())
           start_line = doc["start_line"].GetInt();
-        }
-        if (doc.HasMember("end_line") && doc["end_line"].IsInt()) {
+        if (doc.HasMember("end_line") && doc["end_line"].IsInt())
           end_line = doc["end_line"].GetInt();
-        }
       }
     }
 
@@ -72,55 +55,82 @@ ftxui::Component FileReadToolBlock(const std::shared_ptr<ToolCallView> &view) {
                  std::to_string(end_line) + ")";
     }
 
+    // ── Preparing / Called ──
     if (view->phase == ToolPhase::Preparing ||
         view->phase == ToolPhase::Called) {
-      head = head + " " + loc_str;
-    } else if (view->phase == ToolPhase::Finished) {
-      if (view->success) {
-        head = "Read " + loc_str + " ✓";
-      } else {
-        head = head + " " + loc_str + " ✗";
+      return ftxui::text("[~] Reading " + loc_str + "...") | ftxui::dim;
+    }
+
+    // ── Finished + error ──
+    if (!view->success) {
+      std::string err_msg = view->result;
+      if (err_msg.empty())
+        err_msg = "unknown error";
+      return ftxui::text("[x] Read " + loc_str + " failed: " + err_msg) |
+             ftxui::color(ftxui::Color::Red);
+    }
+
+    // ── Finished + success: code window ──
+    std::string content = view->result;
+    {
+      rapidjson::Document res;
+      res.Parse(view->result.c_str());
+      if (!res.HasParseError() && res.IsObject() && res.HasMember("content") &&
+          res["content"].IsString()) {
+        content = res["content"].GetString();
       }
     }
 
-    bool can_toggle = (view->phase == ToolPhase::Finished && view->success &&
-                       !view->result.empty());
-    view->toggle_label = view->show_result ? "hide" : "show";
+    // Split into lines
+    std::vector<std::string> all_lines;
+    {
+      std::istringstream ss(content);
+      std::string line;
+      while (std::getline(ss, line)) {
+        all_lines.push_back(line);
+      }
+    }
+
+    int total_lines = static_cast<int>(all_lines.size());
+    int preview_count = 5;
+    bool has_more = total_lines > preview_count;
+    int remaining = has_more ? total_lines - preview_count : 0;
+
+    view->toggle_label =
+        view->show_result ? "hide"
+                          : ("show +" + std::to_string(remaining) + " lines");
+
+    int lines_to_show =
+        view->show_result ? total_lines : std::min(preview_count, total_lines);
+    int line_num_start = (start_line != -1) ? start_line : 1;
+
+    std::vector<ftxui::Element> code_lines;
+    for (int i = 0; i < lines_to_show; i++) {
+      int ln = line_num_start + i;
+      std::string gutter = std::to_string(ln);
+      // Pad gutter to consistent width
+      while (gutter.size() < 3)
+        gutter = " " + gutter;
+
+      code_lines.push_back(ftxui::hbox({ftxui::text(gutter + "| ") | ftxui::dim,
+                                        ftxui::text(all_lines[i])}));
+    }
+
+    if (has_more && !view->show_result) {
+      code_lines.push_back(
+          ftxui::text("   .. " + std::to_string(remaining) + " more lines..") |
+          ftxui::dim);
+    }
+
+    // Footer
+    std::string footer = "read " + path_arg;
 
     std::vector<ftxui::Element> rows;
-    if (can_toggle) {
-      rows.push_back(ftxui::hbox(
-          {ftxui::text(head) | ftxui::bold, ftxui::text(" [") | ftxui::dim,
-           toggle->Render(), ftxui::text("]") | ftxui::dim}));
-
-      if (view->show_result) {
-        std::string content = view->result;
-        rapidjson::Document res;
-        res.Parse(view->result.c_str());
-        if (!res.HasParseError() && res.IsObject() &&
-            res.HasMember("content") && res["content"].IsString()) {
-          content = res["content"].GetString();
-        }
-
-        std::stringstream ss(content);
-        std::string line;
-        int current_line = start_line != -1 ? start_line : 1;
-        std::vector<ftxui::Element> code_lines;
-
-        while (std::getline(ss, line)) {
-          code_lines.push_back(ftxui::hbox(
-              {ftxui::text(std::to_string(current_line) + " | ") | ftxui::dim,
-               ftxui::text(line)}));
-          current_line++;
-        }
-        rows.push_back(ftxui::vbox(std::move(code_lines)) | ftxui::border);
-      }
-    } else {
-      rows.push_back(ftxui::text(head) | ftxui::bold);
-      if (view->phase == ToolPhase::Finished && !view->success) {
-        rows.push_back(firmius::tui::RenderMarkdown(view->result) |
-                       ftxui::color(ftxui::Color::Red));
-      }
+    rows.push_back(ToolWindow(code_lines, footer, view->toggle_label));
+    if (has_more || view->show_result) {
+      rows.push_back(
+          ftxui::hbox({ftxui::text("[") | ftxui::dim, toggle->Render(),
+                       ftxui::text("]") | ftxui::dim}));
     }
 
     return ftxui::vbox(rows);

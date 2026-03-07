@@ -1,5 +1,7 @@
 #include "StreamStateManager.hpp"
 #include "components/ToolBlock.hpp"
+#include "components/ToolWindow.hpp"
+#include <rapidjson/document.h>
 
 namespace firmius::tui {
 
@@ -52,6 +54,22 @@ void StreamStateManager::handleAgentToolCallChunk(
   view->args += e.argsDelta;
   if (!view->args.empty()) {
     view->phase = ToolPhase::Called;
+  }
+
+  // If this agent is a subagent, push summarized tool into parent's log
+  auto it_sub = subagent_to_parent_tool_.find(e.agentId);
+  if (it_sub != subagent_to_parent_tool_.end()) {
+    auto it_parent = tool_calls_.find(it_sub->second);
+    if (it_parent != tool_calls_.end() && it_parent->second) {
+      std::string summary = SummarizeToolCall(view->name, view->args);
+      auto &log = it_parent->second->subagent_tool_log;
+      // Only push if this is a new summary (avoid duplicates from streaming)
+      if (log.empty() || log.back() != summary) {
+        log.push_back(summary);
+        if (log.size() > 3)
+          log.erase(log.begin());
+      }
+    }
   }
 }
 
@@ -112,8 +130,15 @@ void StreamStateManager::handleAgentSpawned(
   for (auto &pair : tool_calls_) {
     if (pair.second && pair.second->agentId == e.parentId &&
         pair.second->phase == ToolPhase::Called) {
-      pair.second->live_process_output +=
-          "[subagent spawned: " + e.personaName + "]\n";
+      // Track the subagent -> parent tool mapping
+      subagent_to_parent_tool_[e.agentId] = pair.first;
+
+      // Set the title on the parent tool view
+      if (!e.title.empty()) {
+        pair.second->subagent_title = e.title;
+      } else {
+        pair.second->subagent_title = e.personaName;
+      }
       break;
     }
   }

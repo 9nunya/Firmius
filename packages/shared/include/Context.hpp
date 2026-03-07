@@ -144,7 +144,7 @@ struct AgentContext {
 struct ThreadMetadata {
     std::string threadId;
     std::string title;
-    HostType hostType;
+    HostCreationOptions hostOptions;
     std::string hostIdentifier;
     std::string cwd;
     std::string leadPersona;

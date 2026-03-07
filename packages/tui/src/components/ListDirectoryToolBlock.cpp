@@ -1,21 +1,8 @@
 #include "components/ListDirectoryToolBlock.hpp"
-#include "components/Markdown.hpp"
 #include <ftxui/dom/elements.hpp>
 #include <rapidjson/document.h>
 
 namespace firmius::tui {
-
-static std::string phaseLabel(ToolPhase phase) {
-  switch (phase) {
-  case ToolPhase::Preparing:
-    return "preparing";
-  case ToolPhase::Called:
-    return "called";
-  case ToolPhase::Finished:
-    return "finished";
-  }
-  return "unknown";
-}
 
 ftxui::Component
 ListDirectoryToolBlock(const std::shared_ptr<ToolCallView> &view) {
@@ -44,10 +31,9 @@ ListDirectoryToolBlock(const std::shared_ptr<ToolCallView> &view) {
     if (!view)
       return ftxui::text("[list_directory] <null>") | ftxui::dim;
 
-    std::string head = "[list_directory] " + phaseLabel(view->phase);
-
-    std::string path_arg = "";
-    if (view->args.length() > 0) {
+    // Parse path from args
+    std::string path_arg;
+    if (!view->args.empty()) {
       rapidjson::Document doc;
       doc.Parse(view->args.c_str());
       if (!doc.HasParseError() && doc.IsObject() && doc.HasMember("path") &&
@@ -56,41 +42,37 @@ ListDirectoryToolBlock(const std::shared_ptr<ToolCallView> &view) {
       }
     }
 
+    // ── Preparing / Called: one-liner ──
     if (view->phase == ToolPhase::Preparing ||
         view->phase == ToolPhase::Called) {
-      head = head + " " + path_arg;
-    } else if (view->phase == ToolPhase::Finished) {
-      if (view->success) {
-        size_t num_items = 0;
-        rapidjson::Document res;
-        res.Parse(view->result.c_str());
-        if (!res.HasParseError() && res.IsArray()) {
-          num_items = res.Size();
-        }
-        head = "Listed " + path_arg + " (" + std::to_string(num_items) +
-               " items) ✓";
-      } else {
-        head = head + " ✗";
-      }
+      return ftxui::text("[~] Listing " + path_arg + "...") | ftxui::dim;
     }
 
-    bool can_toggle = (view->phase == ToolPhase::Finished && view->success &&
-                       !view->result.empty());
-    view->toggle_label = view->show_result ? "hide" : "show";
+    // ── Finished ──
+    if (view->success) {
+      // Count items
+      size_t num_items = 0;
+      rapidjson::Document res;
+      res.Parse(view->result.c_str());
+      if (!res.HasParseError() && res.IsArray()) {
+        num_items = res.Size();
+      }
 
-    std::vector<ftxui::Element> rows;
-    if (can_toggle) {
-      rows.push_back(ftxui::hbox(
-          {ftxui::text(head) | ftxui::bold, ftxui::text(" [") | ftxui::dim,
-           toggle->Render(), ftxui::text("]") | ftxui::dim}));
+      view->toggle_label = view->show_result ? "hide" : "show";
+
+      std::vector<ftxui::Element> rows;
+      rows.push_back(
+          ftxui::hbox({ftxui::text("[+] Listed " + path_arg + " (" +
+                                   std::to_string(num_items) + " items)") |
+                           ftxui::bold,
+                       ftxui::text(" [") | ftxui::dim, toggle->Render(),
+                       ftxui::text("]") | ftxui::dim}));
 
       if (view->show_result) {
-        rapidjson::Document res;
-        res.Parse(view->result.c_str());
         if (!res.HasParseError() && res.IsArray()) {
           for (rapidjson::SizeType i = 0; i < res.Size(); i++) {
             const auto &item = res[i];
-            std::string prefix = "- ";
+            std::string prefix = "  ";
             if (item.HasMember("is_directory") &&
                 item["is_directory"].GetBool()) {
               prefix = "d ";
@@ -100,19 +82,18 @@ ListDirectoryToolBlock(const std::shared_ptr<ToolCallView> &view) {
                              ftxui::dim);
             }
           }
-        } else {
-          rows.push_back(firmius::tui::RenderMarkdown(view->result));
         }
       }
-    } else {
-      rows.push_back(ftxui::text(head) | ftxui::bold);
-      if (view->phase == ToolPhase::Finished && !view->success) {
-        rows.push_back(firmius::tui::RenderMarkdown(view->result) |
-                       ftxui::color(ftxui::Color::Red));
-      }
+
+      return ftxui::vbox(rows);
     }
 
-    return ftxui::vbox(rows);
+    // Error state
+    std::string err_msg = view->result;
+    if (err_msg.empty())
+      err_msg = "unknown error";
+    return ftxui::text("[x] List " + path_arg + " failed: " + err_msg) |
+           ftxui::color(ftxui::Color::Red);
   });
 }
 

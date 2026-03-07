@@ -6,7 +6,7 @@ namespace firmius::tui {
 
 class ModelCommand : public ICommand {
 public:
-  std::string name() const override { return "model"; }
+  std::string name() const override { return "models"; }
   std::string description() const override {
     return "Switch the active LLM model";
   }

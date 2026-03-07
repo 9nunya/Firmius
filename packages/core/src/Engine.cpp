@@ -129,12 +129,12 @@ std::string Engine::summonAgent(const std::string& threadId, const std::string& 
         ctx.permissions.allowedPaths = {metadata.cwd, "/tmp"};
         ctx.environment.cwd = metadata.cwd;
         ctx.environment.identifier = metadata.hostIdentifier;
-        ctx.environment.type = metadata.hostType;
+        ctx.environment.type = metadata.hostOptions.type;
         ctx.history = std::make_shared<AgentHistory>();
         ctx.history->threadId = threadId;
 
-        if (metadata.hostType == HostType::Docker) {
-            host = std::make_unique<DockerHost>();
+        if (metadata.hostOptions.type == HostType::Docker) {
+            host = std::make_unique<DockerHost>(metadata.hostOptions);
         } else {
             host = std::make_unique<LocalHost>();
         }
@@ -240,12 +240,12 @@ std::string Engine::resumeAgent(const std::string& threadId, const std::string& 
     ctx.permissions.allowedPaths = {metadata.cwd, "/tmp"};
     ctx.environment.cwd = metadata.cwd;
     ctx.environment.identifier = metadata.hostIdentifier;
-    ctx.environment.type = metadata.hostType;
+    ctx.environment.type = metadata.hostOptions.type;
     ctx.history = std::make_shared<AgentHistory>(std::move(history));
 
     std::unique_ptr<IHost> host;
-    if (metadata.hostType == HostType::Docker) {
-        host = std::make_unique<DockerHost>();
+    if (metadata.hostOptions.type == HostType::Docker) {
+        host = std::make_unique<DockerHost>(metadata.hostOptions);
     } else {
         host = std::make_unique<LocalHost>();
     }
@@ -479,6 +479,13 @@ UndoResult Engine::undoAgentAfterTimestamp(const std::string& agentId, uint64_t 
 }
 
 void Engine::shutdown() {
+    auto activeAgents = AgentRegistry::instance().listAll();
+    for (const auto& id : activeAgents) {
+        auto agent = AgentRegistry::instance().getAgent(id);
+        if (agent) {
+            agent->interrupt();
+        }
+    }
     {
         std::lock_guard<std::mutex> lock(taskThreadsMutex_);
         taskThreads_.clear();

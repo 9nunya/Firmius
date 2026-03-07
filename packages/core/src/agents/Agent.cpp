@@ -257,9 +257,11 @@ void Agent::run(const std::string &task,
       bool forceCompact = (std::getenv("FORCE_COMPACTION") != nullptr);
       if (forceCompact || (model.contextWindow > 0 &&
                            context.aggregateMetrics.tokens.contextSize >
-                               model.contextWindow * 0.8)) {
+                                model.contextWindow * 0.8)) {
         compactContext(onEvent);
       }
+      if (interrupted.load())
+        break;
     } catch (...) {
       // Compaction is best-effort
     }
@@ -590,9 +592,12 @@ void Agent::run(const std::string &task,
   running = false;
 
   if (debugPrettyPrint) {
-    std::cout << "\n\033[1;36m--- Agent Finished ---\033[0m\n";
+    std::cout << "\n\033[1;36m--- Agent " << context.identity.id.substr(0, 6)
+              << " Finished ---\033[0m\n";
     std::cout << "Turns: " << turnCount << "\n";
-    std::cout << "Cumulative Tokens: " << context.aggregateMetrics.tokens.total
+    std::cout << "Cumulative Tokens: "
+              << (context.aggregateMetrics.tokens.prompt +
+                  context.aggregateMetrics.tokens.completion)
               << "\n";
     std::cout << "  Prompt (billed): " << context.aggregateMetrics.tokens.prompt
               << " (cached: " << context.aggregateMetrics.tokens.cacheRead
@@ -604,8 +609,17 @@ void Agent::run(const std::string &task,
               << context.aggregateMetrics.tokens.contextSize << "\n";
     std::cout << "Total Cost: $" << context.aggregateMetrics.estimatedCostUsd
               << "\n";
-    std::cout << "TTFT (first turn): "
-              << context.aggregateMetrics.timing.firstTokenMs << "ms\n";
+    // TTFT: firstTokenMs and startMs are absolute steady_clock timestamps;
+    // subtract to get actual duration.
+    if (context.aggregateMetrics.timing.firstTokenMs > 0 &&
+        context.aggregateMetrics.timing.startMs > 0) {
+      std::cout << "TTFT (first turn): "
+                << (context.aggregateMetrics.timing.firstTokenMs -
+                    context.aggregateMetrics.timing.startMs)
+                << "ms\n";
+    } else {
+      std::cout << "TTFT (first turn): N/A\n";
+    }
     std::cout << "Tool execution: "
               << context.aggregateMetrics.timing.toolExecutionMs << "ms\n";
   }
@@ -834,9 +848,14 @@ void Agent::compactContext(
   std::string fullSummary;
   std::string fullThinking;
 
+  if (interrupted.load())
+    return;
+
   provider->generateSummary(
       context.config.modelId, *context.history, fullCompactionPrompt,
       [&](const StreamEvent &ev) {
+        if (interrupted.load())
+          return;
         if (auto *act = std::get_if<AgentCompactionText>(&ev)) {
           fullSummary += act->delta;
           if (debugPrettyPrint)
@@ -852,7 +871,8 @@ void Agent::compactContext(
         } else {
           onEvent(ev);
         }
-      });
+      },
+      &interrupted);
 
   if (debugPrettyPrint)
     std::cout << "\n";

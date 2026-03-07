@@ -155,6 +155,7 @@ void Harness::init() {
 }
 
 void Harness::shutdown() {
+  Engine::instance().shutdown();
   std::vector<std::jthread> toJoin;
   {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -190,7 +191,7 @@ void Harness::shutdown() {
   toJoin.clear();
 }
 
-std::string Harness::newThread(HostType hostType, const std::string &cwd,
+std::string Harness::newThread(HostCreationOptions hostOptions, const std::string &cwd,
                                const std::string &leadPersona) {
   std::string threadId;
   int ownerPid = -1;
@@ -201,9 +202,10 @@ std::string Harness::newThread(HostType hostType, const std::string &cwd,
     std::lock_guard<std::recursive_mutex> lock(mutex_);
 
     ThreadMetadata newMeta;
-    newMeta.title = "Thread-" + StringUtil::generateUuid().substr(0, 8);
-    newMeta.hostType = hostType;
-    newMeta.hostIdentifier = (hostType == HostType::Docker) ? "" : "localhost";
+    newMeta.title = "New Thread";
+    newMeta.hostOptions = hostOptions;
+    newMeta.hostIdentifier =
+        (hostOptions.type == HostType::Docker) ? "" : "localhost";
     newMeta.cwd = cwd;
     newMeta.leadPersona = leadPersona;
 

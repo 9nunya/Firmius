@@ -6,6 +6,7 @@
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/screen.hpp>
 #include <string>
+#include <filesystem>
 
 #include "commands/CommandManager.hpp"
 #include "commands/ConfigCommand.hpp"
@@ -23,9 +24,13 @@ using namespace ftxui;
 
 int main(int argc, char **argv) {
   bool continue_last = false;
+  bool debugging_mode = false;
   for (int i = 1; i < argc; ++i) {
-    if (std::string(argv[i]) == "-c") {
+    std::string arg = argv[i];
+    if (arg == "-c") {
       continue_last = true;
+    } else if (arg == "--i-am-debugging") {
+      debugging_mode = true;
     }
   }
 
@@ -59,7 +64,18 @@ int main(int argc, char **argv) {
   state.init(h, dummy_thread, "");
 
   bool thread_loaded = false;
-  if (continue_last) {
+  if (debugging_mode) {
+    firmius::shared::HostCreationOptions opts;
+    opts.type = firmius::shared::HostType::Docker;
+    opts.containerName = "firmius-debugging";
+    opts.connectToExisting = true;
+    opts.deleteOnExit = false;
+
+    std::string cwd = std::filesystem::current_path().string();
+    if (!h.newThread(opts, cwd, "firmius").empty()) {
+      thread_loaded = true;
+    }
+  } else if (continue_last) {
     if (h.resumeLast()) {
       thread_loaded = true;
     }

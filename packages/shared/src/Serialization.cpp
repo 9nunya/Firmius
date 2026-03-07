@@ -242,6 +242,33 @@ AgentMetrics agentMetricsFromJson(const rapidjson::Value &v) {
           v["estimatedCostUsd"].GetDouble()};
 }
 
+rapidjson::Value hostCreationOptionsToJson(const HostCreationOptions &o,
+                                           rapidjson::Document::AllocatorType &a) {
+  rapidjson::Value v(rapidjson::kObjectType);
+  v.AddMember("type", rapidjson::Value(hostTypeToString(o.type).c_str(), a), a);
+  v.AddMember("containerName", rapidjson::Value(o.containerName.c_str(), a), a);
+  v.AddMember("connectToExisting", o.connectToExisting, a);
+  v.AddMember("deleteOnExit", o.deleteOnExit, a);
+  return v;
+}
+
+HostCreationOptions hostCreationOptionsFromJson(const rapidjson::Value &v) {
+  HostCreationOptions o;
+  if (v.HasMember("type")) {
+    o.type = stringToHostType(v["type"].GetString());
+  }
+  if (v.HasMember("containerName")) {
+    o.containerName = v["containerName"].GetString();
+  }
+  if (v.HasMember("connectToExisting")) {
+    o.connectToExisting = v["connectToExisting"].GetBool();
+  }
+  if (v.HasMember("deleteOnExit")) {
+    o.deleteOnExit = v["deleteOnExit"].GetBool();
+  }
+  return o;
+}
+
 rapidjson::Value messagePartToJson(const MessagePart &p,
                                    rapidjson::Document::AllocatorType &a) {
   rapidjson::Value v(rapidjson::kObjectType);
@@ -323,6 +350,17 @@ Message messageFromJson(const rapidjson::Value &v) {
 }
 
 } // namespace
+
+rapidjson::Document toJson(const HostCreationOptions &o) {
+  rapidjson::Document d;
+  auto &a = d.GetAllocator();
+  d.CopyFrom(hostCreationOptionsToJson(o, a), a);
+  return d;
+}
+
+HostCreationOptions hostCreationOptionsFromJsonValue(const rapidjson::Value &v) {
+  return hostCreationOptionsFromJson(v);
+}
 
 rapidjson::Document toJson(const AgentContext &ctx) {
   rapidjson::Document d;
@@ -722,8 +760,7 @@ rapidjson::Document toJson(const ThreadMetadata &m) {
   auto &a = d.GetAllocator();
   d.AddMember("threadId", rapidjson::Value(m.threadId.c_str(), a), a);
   d.AddMember("title", rapidjson::Value(m.title.c_str(), a), a);
-  d.AddMember("hostType",
-              rapidjson::Value(hostTypeToString(m.hostType).c_str(), a), a);
+  d.AddMember("hostOptions", hostCreationOptionsToJson(m.hostOptions, a), a);
   d.AddMember("hostIdentifier", rapidjson::Value(m.hostIdentifier.c_str(), a),
               a);
   d.AddMember("cwd", rapidjson::Value(m.cwd.c_str(), a), a);
@@ -739,7 +776,11 @@ ThreadMetadata threadMetadataFromJson(const rapidjson::Value &v) {
                    ? v["threadId"].GetString()
                    : "";
   m.title = v["title"].GetString();
-  m.hostType = stringToHostType(v["hostType"].GetString());
+  if (v.HasMember("hostOptions") && v["hostOptions"].IsObject()) {
+    m.hostOptions = hostCreationOptionsFromJson(v["hostOptions"]);
+  } else if (v.HasMember("hostType") && v["hostType"].IsString()) {
+    m.hostOptions.type = stringToHostType(v["hostType"].GetString());
+  }
   m.hostIdentifier = v["hostIdentifier"].GetString();
   m.cwd = v["cwd"].GetString();
   m.leadPersona = v["leadPersona"].GetString();

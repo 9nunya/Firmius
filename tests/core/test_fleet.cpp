@@ -24,7 +24,7 @@ int main() {
     // 0. Setup threads
     ThreadMetadata meta;
     meta.title = "Test Thread";
-    meta.hostType = HostType::Local;
+    meta.hostOptions.type = HostType::Local;
     meta.hostIdentifier = "local";
     meta.cwd = "/tmp";
     meta.leadPersona = "coder";

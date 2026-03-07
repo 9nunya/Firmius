@@ -1,21 +1,10 @@
 #include "components/ProcessExecuteToolBlock.hpp"
-#include "components/Markdown.hpp"
+#include "components/ToolWindow.hpp"
 #include <ftxui/dom/elements.hpp>
 #include <rapidjson/document.h>
+#include <sstream>
 
 namespace firmius::tui {
-
-static std::string phaseLabel(ToolPhase phase) {
-  switch (phase) {
-  case ToolPhase::Preparing:
-    return "preparing";
-  case ToolPhase::Called:
-    return "running";
-  case ToolPhase::Finished:
-    return "finished";
-  }
-  return "unknown";
-}
 
 ftxui::Component
 ProcessExecuteToolBlock(const std::shared_ptr<ToolCallView> &view) {
@@ -29,7 +18,7 @@ ProcessExecuteToolBlock(const std::shared_ptr<ToolCallView> &view) {
   if (view) {
     opt.label = &view->toggle_label;
   } else {
-    opt.label = "show";
+    opt.label = "expand";
   }
   opt.on_click = [view] {
     if (!view)
@@ -44,12 +33,9 @@ ProcessExecuteToolBlock(const std::shared_ptr<ToolCallView> &view) {
     if (!view)
       return ftxui::text("[process] <null>") | ftxui::dim;
 
-    std::string tool_type =
-        view->name == "process_spawn" ? "process_spawn" : "process_execute";
-    std::string head = "[" + tool_type + "] " + phaseLabel(view->phase);
-
-    std::string command_arg = "";
-    if (view->args.length() > 0) {
+    // Parse command from args
+    std::string command_arg;
+    if (!view->args.empty()) {
       rapidjson::Document doc;
       doc.Parse(view->args.c_str());
       if (!doc.HasParseError() && doc.IsObject() && doc.HasMember("command") &&
@@ -58,84 +44,121 @@ ProcessExecuteToolBlock(const std::shared_ptr<ToolCallView> &view) {
       }
     }
 
-    if (view->phase == ToolPhase::Preparing ||
-        view->phase == ToolPhase::Called) {
-      head = head + " `$ " + command_arg + "`";
-    } else if (view->phase == ToolPhase::Finished) {
-      if (view->success) {
-        head = "Ran `$ " + command_arg + "` ✓";
+    std::string cmd_display = "$ " + command_arg;
+
+    // ── Preparing ──
+    if (view->phase == ToolPhase::Preparing) {
+      return ftxui::text("[~] Running " + cmd_display + "...") | ftxui::dim;
+    }
+
+    // ── Called: show rolling last 5 lines of live output ──
+    if (view->phase == ToolPhase::Called) {
+      std::vector<ftxui::Element> rows;
+
+      auto tail = TailLines(view->live_process_output, 5);
+      if (tail.empty()) {
+        tail.push_back("running...");
+      }
+
+      std::vector<ftxui::Element> out_lines;
+      for (const auto &line : tail) {
+        out_lines.push_back(ftxui::text("| " + line) | ftxui::dim);
+      }
+
+      std::string footer = cmd_display;
+      rows.push_back(ToolWindow(out_lines, footer));
+      return ftxui::vbox(rows);
+    }
+
+    // ── Finished + error ──
+    if (!view->success) {
+      std::string err_msg = view->result;
+      if (err_msg.empty())
+        err_msg = "unknown error";
+      return ftxui::text("[x] " + cmd_display + " failed: " + err_msg) |
+             ftxui::color(ftxui::Color::Red);
+    }
+
+    // ── Finished + success: parse result ──
+    std::string output_str;
+    std::string exit_code_str;
+    std::string finish_reason;
+    {
+      rapidjson::Document res;
+      res.Parse(view->result.c_str());
+      if (!res.HasParseError() && res.IsObject()) {
+        // Process execute returns "stdout"/"stderr" keys
+        if (res.HasMember("stdout") && res["stdout"].IsString()) {
+          output_str = res["stdout"].GetString();
+          if (res.HasMember("stderr") && res["stderr"].IsString()) {
+            std::string err = res["stderr"].GetString();
+            if (!err.empty())
+              output_str += "\n[stderr]\n" + err;
+          }
+        }
+        if (res.HasMember("exit_code") && res["exit_code"].IsInt()) {
+          exit_code_str = std::to_string(res["exit_code"].GetInt());
+        }
+        if (res.HasMember("finish_reason") && res["finish_reason"].IsString()) {
+          finish_reason = res["finish_reason"].GetString();
+        }
+        // Process spawn returns "process_id"
+        if (view->name == "process_spawn" && res.HasMember("process_id") &&
+            res["process_id"].IsString()) {
+          output_str = "Spawned process ID: " +
+                       std::string(res["process_id"].GetString());
+        }
       } else {
-        head = head + " `$ " + command_arg + "` ✗";
+        output_str = view->result;
       }
     }
 
-    bool can_toggle =
-        (view->phase == ToolPhase::Finished && !view->result.empty());
-    view->toggle_label = view->show_result ? "hide" : "show";
+    view->toggle_label = view->show_result ? "collapse" : "expand";
 
-    std::vector<ftxui::Element> rows;
-    if (can_toggle || (view->phase == ToolPhase::Called)) {
-      rows.push_back(ftxui::hbox(
-          {ftxui::text(head) | ftxui::bold, ftxui::text(" [") | ftxui::dim,
-           toggle->Render(), ftxui::text("]") | ftxui::dim}));
+    // Show last 5 lines, or all lines if expanded
+    auto all_tail = TailLines(output_str, 5);
+    int total_lines = 0;
+    {
+      std::istringstream ss(output_str);
+      std::string line;
+      while (std::getline(ss, line))
+        total_lines++;
+    }
+    bool has_more = total_lines > 5;
 
-      if (view->show_result || view->phase == ToolPhase::Called) {
-        // Determine output string. Either from live view or from result
-        std::string output_str = "";
-        if (view->phase == ToolPhase::Finished && !view->result.empty()) {
-          rapidjson::Document res;
-          res.Parse(view->result.c_str());
-          if (!res.HasParseError() && res.IsObject() &&
-              res.HasMember("stdout_output") &&
-              res["stdout_output"].IsString()) {
-            output_str = res["stdout_output"].GetString();
-            if (res.HasMember("stderr_output") &&
-                res["stderr_output"].IsString()) {
-              std::string err_str = res["stderr_output"].GetString();
-              if (!err_str.empty()) {
-                output_str += "\n[stderr]\n" + err_str;
-              }
-            }
-          } else if (view->name == "process_spawn") {
-            if (!res.HasParseError() && res.IsObject() &&
-                res.HasMember("process_id") && res["process_id"].IsString()) {
-              output_str = "Spawned process ID: " +
-                           std::string(res["process_id"].GetString());
-            } else {
-              output_str = view->result;
-            }
-          } else {
-            output_str = view->result;
-          }
-        }
-        // Note: live streaming of process output requires a connection between
-        // the runtime and the TUI. It is very complex without a direct
-        // websocket/stream. For now, the "Called" phase will just show
-        // 'Running...' or last output known to UI state if streamed.
-
-        if (output_str.empty() && view->phase == ToolPhase::Called) {
-          output_str = "Running...";
-        }
-
-        if (!output_str.empty()) {
-          // Primitive ANSI stripped renderer (could be improved with ftxui text
-          // color parsing)
-          std::stringstream ss(output_str);
-          std::string line;
-          std::vector<ftxui::Element> out_lines;
-          while (std::getline(ss, line)) {
-            // TODO: Strip ANSI or parse it fully.
-            out_lines.push_back(ftxui::text(line) | ftxui::dim);
-          }
-          rows.push_back(ftxui::vbox(std::move(out_lines)) | ftxui::border);
-        }
+    std::vector<ftxui::Element> out_lines;
+    if (view->show_result) {
+      // Show all lines
+      std::istringstream ss(output_str);
+      std::string line;
+      while (std::getline(ss, line)) {
+        out_lines.push_back(ftxui::text("| " + line) | ftxui::dim);
       }
     } else {
-      rows.push_back(ftxui::text(head) | ftxui::bold);
-      if (view->phase == ToolPhase::Finished && !view->success) {
-        rows.push_back(firmius::tui::RenderMarkdown(view->result) |
-                       ftxui::color(ftxui::Color::Red));
+      for (const auto &line : all_tail) {
+        out_lines.push_back(ftxui::text("| " + line) | ftxui::dim);
       }
+    }
+
+    if (out_lines.empty()) {
+      out_lines.push_back(ftxui::text("| (no output)") | ftxui::dim);
+    }
+
+    std::string footer = cmd_display;
+    if (!exit_code_str.empty()) {
+      footer += " [exit " + exit_code_str + "]";
+    }
+    if (!finish_reason.empty() && finish_reason != "Natural") {
+      footer += " (" + finish_reason + ")";
+    }
+
+    std::vector<ftxui::Element> rows;
+    rows.push_back(
+        ToolWindow(out_lines, footer, has_more ? view->toggle_label : ""));
+    if (has_more) {
+      rows.push_back(
+          ftxui::hbox({ftxui::text("[") | ftxui::dim, toggle->Render(),
+                       ftxui::text("]") | ftxui::dim}));
     }
 
     return ftxui::vbox(rows);
