@@ -5,6 +5,10 @@
 #include <string>
 #include <fstream>
 #include <mutex>
+#include <queue>
+#include <thread>
+#include <condition_variable>
+#include <variant>
 
 namespace firmius::core {
 
@@ -42,9 +46,28 @@ public:
     const std::string& getFilePath() const { return filePath; }
 
 private:
+    struct AppendOp {
+        AgentTurn turn;
+    };
+
+    struct RewriteOp {
+        std::vector<AgentTurn> turns;
+    };
+
+    using JournalOp = std::variant<AppendOp, RewriteOp>;
+
+    void processQueue();
+    void writeTurn(const AgentTurn& turn);
+    void performRewrite(const std::vector<AgentTurn>& turns);
+
     std::string filePath;
     std::ofstream file;
-    std::mutex mutex;
+    
+    std::queue<JournalOp> queue;
+    std::mutex queueMutex;
+    std::condition_variable queueCv;
+    std::jthread workerThread;
+    bool stopWorker = false;
 };
 
 }

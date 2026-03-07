@@ -6,29 +6,24 @@
 #include <ftxui/dom/elements.hpp>
 #include <string>
 #include <vector>
+#include <thread>
 
 namespace firmius::tui {
 
 ftxui::Component ModelPickerModal::create(TuiState &state) {
-  auto models = firmius::core::Harness::instance().listAllModels();
-
+  auto models = std::make_shared<std::vector<firmius::core::ModelInfo>>();
   auto entries = std::make_shared<std::vector<std::string>>();
   auto filtered_indices = std::make_shared<std::vector<int>>();
   auto filter_text = std::make_shared<std::string>("");
   auto selected = std::make_shared<int>(0);
-
-  // Build initial entries
-  for (int i = 0; i < (int)models.size(); ++i) {
-    entries->push_back(models[i].provider + "/" + models[i].id);
-    filtered_indices->push_back(i);
-  }
+  auto isLoading = std::make_shared<bool>(true);
 
   auto rebuild_filtered = [entries, filtered_indices, models, filter_text,
                            selected]() {
     filtered_indices->clear();
     std::string q = *filter_text;
     std::transform(q.begin(), q.end(), q.begin(), ::tolower);
-    for (int i = 0; i < (int)models.size(); ++i) {
+    for (int i = 0; i < (int)models->size(); ++i) {
       std::string label = (*entries)[i];
       std::string lower_label = label;
       std::transform(lower_label.begin(), lower_label.end(),
@@ -43,8 +38,30 @@ ftxui::Component ModelPickerModal::create(TuiState &state) {
     }
   };
 
+  std::thread([models, entries, filtered_indices, isLoading, &state]() {
+      auto fetched = firmius::core::Harness::instance().listAllModels();
+      *models = std::move(fetched);
+      for (int i = 0; i < (int)models->size(); ++i) {
+          entries->push_back((*models)[i].provider + "/" + (*models)[i].id);
+          filtered_indices->push_back(i);
+      }
+      *isLoading = false;
+      state.postEvent(ftxui::Event::Custom);
+  }).detach();
+
   auto component = ftxui::Renderer([entries, filtered_indices, filter_text,
-                                    selected, rebuild_filtered]() {
+                                    selected, rebuild_filtered, isLoading]() {
+    if (*isLoading) {
+        return ftxui::window(
+                   ftxui::text(" Select Model ") | ftxui::bold |
+                       ftxui::color(ftxui::Color::Cyan),
+                   ftxui::vbox({
+                       ftxui::text("Loading models...") | ftxui::center,
+                       ftxui::text("") | ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, 5)
+                   })) |
+               ftxui::clear_under | ftxui::center;
+    }
+
     rebuild_filtered();
     ftxui::Elements rows;
     for (int i = 0; i < (int)filtered_indices->size() && i < 20; ++i) {
@@ -79,7 +96,15 @@ ftxui::Component ModelPickerModal::create(TuiState &state) {
 
   return ftxui::CatchEvent(component, [models, entries, filtered_indices,
                                        filter_text, selected, rebuild_filtered,
-                                       &state](ftxui::Event event) {
+                                       isLoading, &state](ftxui::Event event) {
+    if (*isLoading) {
+        if (event == ftxui::Event::Escape) {
+            state.popModal();
+            return true;
+        }
+        return false;
+    }
+
     if (event == ftxui::Event::Escape) {
       state.popModal();
       return true;
@@ -89,7 +114,7 @@ ftxui::Component ModelPickerModal::create(TuiState &state) {
       if (!filtered_indices->empty() &&
           *selected < (int)filtered_indices->size()) {
         int idx = (*filtered_indices)[*selected];
-        const auto &m = models[idx];
+        const auto &m = (*models)[idx];
         firmius::core::Harness::instance().switchModel(m.provider, m.id);
       }
       state.popModal();

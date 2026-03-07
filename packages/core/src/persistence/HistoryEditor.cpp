@@ -53,14 +53,18 @@ UndoResult HistoryEditor::undoMessages(std::vector<AgentTurn>& turns, int count)
             if (it->turnId.find("compaction-summary-") == 0) {
                 result.compactionReversed = true;
             }
-            it = decltype(it)(turns.erase(turns.begin() + originalIndex));
-            ++turnsRemoved;
             messagesRemoved += messagesInTurn;
+            ++turnsRemoved;
+            ++it;
         } else {
             it->messages.erase(it->messages.end() - remaining, it->messages.end());
             messagesRemoved = count;
             ++it;
         }
+    }
+
+    if (turnsRemoved > 0) {
+        turns.erase(turns.end() - turnsRemoved, turns.end());
     }
 
     result.turnsRemoved = turnsRemoved;
@@ -78,18 +82,18 @@ UndoResult HistoryEditor::undoAfterTimestamp(std::vector<AgentTurn>& turns, uint
     UndoResult result;
     int turnsRemoved = 0;
 
-    auto it = turns.begin() + 2;
-    while (it != turns.end()) {
-        if (!it->messages.empty() && it->messages[0].timestamp > timestamp) {
-            if (it->turnId.find("compaction-summary-") == 0) {
+    auto it = std::remove_if(turns.begin() + 2, turns.end(), [&](const AgentTurn& turn) {
+        if (!turn.messages.empty() && turn.messages[0].timestamp > timestamp) {
+            if (turn.turnId.find("compaction-summary-") == 0) {
                 result.compactionReversed = true;
             }
-            it = turns.erase(it);
             ++turnsRemoved;
-        } else {
-            ++it;
+            return true;
         }
-    }
+        return false;
+    });
+
+    turns.erase(it, turns.end());
 
     result.turnsRemoved = turnsRemoved;
     result.restoredTurns = turnsRemoved;

@@ -13,7 +13,7 @@
 #include <unordered_map>
 #include <vector>
 
-bool isSystemTurn(firmius::shared::AgentTurn turn) {
+bool isSystemTurn(const firmius::shared::AgentTurn &turn) {
   return turn.messages.front().role == firmius::shared::Role::System;
 }
 
@@ -111,18 +111,29 @@ public:
     if (event == ftxui::Event::Special("ThreadChanged")) {
       last_turns_size_ = static_cast<size_t>(-1);
       RebuildIfNeeded();
+      user_scrolled_up_ = false;
       return true;
     }
 
     RebuildIfNeeded();
+
+    if (event == ftxui::Event::ArrowUp || event == ftxui::Event::PageUp) {
+      user_scrolled_up_ = true;
+    }
+
+    if (event == ftxui::Event::ArrowDown || event == ftxui::Event::PageDown) {
+      user_scrolled_up_ = false;
+    }
+
     if (event == ftxui::Event::Custom) {
-      if (scrollable_)
+      if (scrollable_ && !user_scrolled_up_)
         scrollable_->RequestScrollToBottom();
     }
     return scrollable_ ? scrollable_->OnEvent(event) : false;
   }
 
 private:
+  bool user_scrolled_up_ = false;
   void RebuildIfNeeded() {
     auto* history = history_getter_ ? history_getter_() : nullptr;
     size_t turns_size = history ? history->turns.size() : 0;

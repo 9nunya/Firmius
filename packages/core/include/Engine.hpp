@@ -15,6 +15,8 @@
 #include <thread>
 #include <future>
 #include <map>
+#include <optional>
+#include <chrono>
 
 namespace firmius::core {
 
@@ -48,8 +50,10 @@ public:
 
     /**
      * @brief Waits for an agent to complete and returns its summary.
+     * @param agentId The agent ID.
+     * @param timeout Optional timeout. If timed out, returns std::nullopt.
      */
-    std::string waitForAgent(const std::string& agentId);
+    std::optional<std::string> waitForAgent(const std::string& agentId, std::optional<std::chrono::milliseconds> timeout = std::nullopt);
 
     /**
      * @brief Adds a listener for all engine events.

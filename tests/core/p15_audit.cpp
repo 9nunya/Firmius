@@ -70,7 +70,8 @@ int main(int /*argc*/, char** /*argv*/) {
 
     // Wait for agent to complete
     std::cout << "  -> Waiting for agent to complete..." << std::endl;
-    std::string result1 = Engine::instance().waitForAgent(agentId);
+    auto optResult1 = Engine::instance().waitForAgent(agentId);
+    std::string result1 = optResult1.value_or("Timeout");
     std::cout << "  -> Task 1 result: " << result1.substr(0, 100) << (result1.size() > 100 ? "..." : "") << std::endl;
     std::cout << std::endl;
 
@@ -81,7 +82,8 @@ int main(int /*argc*/, char** /*argv*/) {
     Engine::instance().executeTask(agentId, task2);
     std::cout << "  -> Re-tasking agent " << agentId << std::endl;
 
-    std::string result2 = Engine::instance().waitForAgent(agentId);
+    auto optResult2 = Engine::instance().waitForAgent(agentId);
+    std::string result2 = optResult2.value_or("Timeout");
     std::cout << "  -> Task 2 result: " << result2.substr(0, 100) << (result2.size() > 100 ? "..." : "") << std::endl;
     std::cout << std::endl;
 
@@ -150,7 +152,7 @@ int main(int /*argc*/, char** /*argv*/) {
     Engine::instance().executeTask(activeAgents.front(), "If you remember doing a task, please output directly what was originally tasked for you.");
     auto result3 = Engine::instance().waitForAgent(activeAgents.front());
 
-    std::cout << "  -> Result: " << result3 << std::endl;
+    std::cout << "  -> Result: " << result3.value_or("Timeout") << std::endl;
 
     // Cleanup
     std::cout << "[TEST 8] Cleanup - terminating remaining agents..." << std::endl;

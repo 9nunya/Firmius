@@ -25,10 +25,13 @@ shared::ToolResult PythonExecuteTool::execute(const PythonExecuteInput& input, s
     try {
         ctx.host.writeFile(tempFile, std::vector<uint8_t>(input.code.begin(), input.code.end()));
 
-        processId = ctx.agent.spawnProcess("python3 " + tempFile, ctx.agent.getContext().environment.cwd);
+        processId = ctx.agent.spawnProcess("python3 " + tempFile, ctx.currentToolCallId, ctx.agent.getContext().environment.cwd);
         ctx.agent.addBlockingProcessId(processId);
 
         shared::ProcessSnapshot snap;
+        auto sleepDuration = std::chrono::milliseconds(1);
+        const auto maxSleep = std::chrono::milliseconds(100);
+
         while (true) {
             // Check for interrupt
             if (ctx.agent.isInterrupted()) {
@@ -46,7 +49,11 @@ shared::ToolResult PythonExecuteTool::execute(const PythonExecuteInput& input, s
 
             snap = ctx.agent.inspectProcess(processId);
             if (!snap.running) break;
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+            std::this_thread::sleep_for(sleepDuration);
+            if (sleepDuration < maxSleep) {
+                sleepDuration = std::min(maxSleep, sleepDuration * 2);
+            }
         }
 
         ctx.agent.removeBlockingProcessId(processId);

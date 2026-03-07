@@ -57,7 +57,19 @@ shared::ToolResult SubagentTool::execute(const SubagentInput& input, shared::Too
             d.AddMember("status", "re-tasked", a);
             return shared::ToolResult::ok(d);
         } else {
-            std::string resultSummary = Engine::instance().waitForAgent(input.agent_id.value());
+            std::string resultSummary;
+            while (true) {
+                auto res = Engine::instance().waitForAgent(input.agent_id.value(), std::chrono::milliseconds(100));
+                if (res.has_value()) {
+                    resultSummary = *res;
+                    break;
+                }
+                if (ctx.agent.isInterrupted()) {
+                    Engine::instance().cancelAgent(input.agent_id.value());
+                    return shared::ToolResult::fail("Parent agent interrupted while waiting for subagent.");
+                }
+            }
+
             rapidjson::Document d;
             d.SetObject();
             auto& a = d.GetAllocator();
@@ -80,8 +92,19 @@ shared::ToolResult SubagentTool::execute(const SubagentInput& input, shared::Too
     } else {
         std::string subagentId = Engine::instance().summonAgent(threadId, input.persona, input.task, true, ctx.agent.getContext().identity.id, input.name, input.title);
         
-        // Blocking wait using the Engine's future-based mechanism
-        std::string resultSummary = Engine::instance().waitForAgent(subagentId);
+        // Polling wait to support heartbeats and interrupts
+        std::string resultSummary;
+        while (true) {
+            auto res = Engine::instance().waitForAgent(subagentId, std::chrono::milliseconds(100));
+            if (res.has_value()) {
+                resultSummary = *res;
+                break;
+            }
+            if (ctx.agent.isInterrupted()) {
+                Engine::instance().cancelAgent(subagentId);
+                return shared::ToolResult::fail("Parent agent interrupted while waiting for subagent.");
+            }
+        }
 
         rapidjson::Document d;
         d.SetObject();

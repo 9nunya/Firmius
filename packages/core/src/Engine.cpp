@@ -152,10 +152,7 @@ std::string Engine::summonAgent(const std::string& threadId, const std::string& 
         }
 
         auto agent = std::make_shared<Agent>(ctx, std::move(host), toolRegistry, jnl);
-
         AgentRegistry::instance().registerAgent(agentId, agent);
-        std::string agentTitle = title.empty() ? persona.title : title;
-        broadcast(AgentSpawned{agentId, personaName, parentId, ctx.identity.friendlyName, agentTitle, persistHistory});
 
     } catch (...) {
         prom->set_exception(std::current_exception());
@@ -163,16 +160,28 @@ std::string Engine::summonAgent(const std::string& threadId, const std::string& 
     }
 
     std::lock_guard<std::mutex> lock(listenerMutex);
-    fleet.emplace_back([this, threadId, agentId, personaName, task, prom, persistHistory, parentId]() {
+    fleet.emplace_back([this, threadId, agentId, personaName, task, prom, persistHistory, parentId, title]() {
         // Track if we already broadcast an error from the stream
         bool errorBroadcast = false;
-        std::string lastErrorMessage;
         
         try {
             auto agent = AgentRegistry::instance().getAgent(agentId);
             if (!agent) {
                 throw std::runtime_error("Agent not found in registry");
             }
+
+            // Initialize host in background thread
+            std::string actualHostId = agent->getHost()->init();
+            
+            auto metadata = ThreadManager(std::string(getenv("HOME") ? getenv("HOME") : "/root") + "/.firmius/threads").getMetadata(threadId);
+            if (metadata.hostIdentifier != actualHostId) {
+                ThreadManager(std::string(getenv("HOME") ? getenv("HOME") : "/root") + "/.firmius/threads").updateHostIdentifier(threadId, actualHostId);
+                agent->getMutableContext().environment.identifier = actualHostId;
+            }
+
+            auto persona = PurposeLoader::load(personaName);
+            std::string agentTitle = title.empty() ? persona.title : title;
+            broadcast(AgentSpawned{agentId, personaName, parentId, agent->getContext().identity.friendlyName, agentTitle, persistHistory});
 
             std::string finalSummary = "No summary provided.";
 
@@ -246,11 +255,6 @@ std::string Engine::resumeAgent(const std::string& threadId, const std::string& 
     } else {
         host = std::make_unique<LocalHost>();
     }
-    std::string actualHostId = host->init();
-    if (metadata.hostIdentifier != actualHostId) {
-        ThreadManager(std::string(getenv("HOME") ? getenv("HOME") : "/root") + "/.firmius/threads").updateHostIdentifier(threadId, actualHostId);
-        ctx.environment.identifier = actualHostId;
-    }
 
     std::shared_ptr<Journaler> jnl = nullptr;
     if (ctx.config.persistHistory) {
@@ -260,13 +264,33 @@ std::string Engine::resumeAgent(const std::string& threadId, const std::string& 
     auto agent = std::make_shared<Agent>(ctx, std::move(host), toolRegistry, jnl);
     AgentRegistry::instance().registerAgent(agentId, agent);
 
-    std::string agentTitle = title.empty() ? persona.title : title;
-    broadcast(AgentSpawned{agentId, personaName, parentId, ctx.identity.friendlyName, agentTitle, persistHistory});
+    std::lock_guard<std::mutex> lock(listenerMutex);
+    fleet.emplace_back([this, threadId, agentId, personaName, parentId, title, persistHistory]() {
+        try {
+            auto agent = AgentRegistry::instance().getAgent(agentId);
+            if (!agent) throw std::runtime_error("Agent not found in registry");
+
+            std::string actualHostId = agent->getHost()->init();
+            
+            auto metadata = ThreadManager(std::string(getenv("HOME") ? getenv("HOME") : "/root") + "/.firmius/threads").getMetadata(threadId);
+            if (metadata.hostIdentifier != actualHostId) {
+                ThreadManager(std::string(getenv("HOME") ? getenv("HOME") : "/root") + "/.firmius/threads").updateHostIdentifier(threadId, actualHostId);
+                agent->getMutableContext().environment.identifier = actualHostId;
+            }
+
+            auto persona = PurposeLoader::load(personaName);
+            std::string agentTitle = title.empty() ? persona.title : title;
+            broadcast(AgentSpawned{agentId, personaName, parentId, agent->getContext().identity.friendlyName, agentTitle, persistHistory});
+
+        } catch (const std::exception& e) {
+            broadcast(AgentError{agentId, e.what(), parentId});
+        }
+    });
 
     return agentId;
 }
 
-std::string Engine::waitForAgent(const std::string& agentId) {
+std::optional<std::string> Engine::waitForAgent(const std::string& agentId, std::optional<std::chrono::milliseconds> timeout) {
     std::shared_future<std::string> fut;
     {
         std::lock_guard<std::mutex> lock(futuresMutex);
@@ -276,10 +300,20 @@ std::string Engine::waitForAgent(const std::string& agentId) {
     }
 
     try {
-        std::string res = fut.get();
-        std::lock_guard<std::mutex> lock(futuresMutex);
-        agentFutures.erase(agentId);
-        return res;
+        if (timeout.has_value()) {
+            if (fut.wait_for(*timeout) == std::future_status::ready) {
+                std::string res = fut.get();
+                std::lock_guard<std::mutex> lock(futuresMutex);
+                agentFutures.erase(agentId);
+                return res;
+            }
+            return std::nullopt;
+        } else {
+            std::string res = fut.get();
+            std::lock_guard<std::mutex> lock(futuresMutex);
+            agentFutures.erase(agentId);
+            return res;
+        }
     } catch (const std::exception& e) {
         return "Error: " + std::string(e.what());
     }

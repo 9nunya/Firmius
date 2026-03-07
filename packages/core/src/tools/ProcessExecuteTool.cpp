@@ -44,6 +44,9 @@ shared::ToolResult ProcessExecuteTool::execute(const ProcessExecuteInput &input,
     auto timeoutMs = (input.timeout_ms > 0) ? input.timeout_ms : 15000;
     auto start = std::chrono::steady_clock::now();
 
+    auto sleepDuration = std::chrono::milliseconds(1);
+    const auto maxSleep = std::chrono::milliseconds(50);
+
     while (true) {
       // Check for interrupt at the top of each iteration
       if (ctx.agent.isInterrupted()) {
@@ -71,7 +74,7 @@ shared::ToolResult ProcessExecuteTool::execute(const ProcessExecuteInput &input,
       auto now = std::chrono::steady_clock::now();
       auto elapsed =
           std::chrono::duration_cast<std::chrono::milliseconds>(now - start)
-              .count();
+               .count();
       if (elapsed > timeoutMs) {
         ctx.agent.removeBlockingProcessId(processId);
 
@@ -91,7 +94,11 @@ shared::ToolResult ProcessExecuteTool::execute(const ProcessExecuteInput &input,
                       "Process timed out but continues in background.", a);
         return shared::ToolResult::ok(doc, processId);
       }
-      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+      std::this_thread::sleep_for(sleepDuration);
+      if (sleepDuration < maxSleep) {
+          sleepDuration = std::min(maxSleep, sleepDuration * 2);
+      }
     }
 
     ctx.agent.removeBlockingProcessId(processId);

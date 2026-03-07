@@ -9,6 +9,8 @@ namespace firmius::tui {
 
 ftxui::Component ConfigDisplayModal::create(TuiState &state) {
   auto &h = firmius::core::Harness::instance();
+  auto offset = std::make_shared<int>(0);
+
   auto component = ftxui::Renderer([=, &h]() {
     const auto &config = h.getConfig();
     std::string providerId = config.defaultProviderId;
@@ -47,15 +49,19 @@ ftxui::Component ConfigDisplayModal::create(TuiState &state) {
                                 ftxui::text(temperature)}));
     rows.push_back(ftxui::hbox(
         {ftxui::text("Max Tokens:  ") | ftxui::bold, ftxui::text(maxTokens)}));
-    rows.push_back(ftxui::separator());
-    rows.push_back(ftxui::hbox(
-        {ftxui::text("Thread:      ") | ftxui::bold,
-         ftxui::text(currentThread.empty() ? "<none>"
-                                           : currentThread.substr(0, 12))}));
-    rows.push_back(ftxui::hbox(
-        {ftxui::text("Agent:       ") | ftxui::bold,
-         ftxui::text(focusedAgent.empty() ? "<none>"
-                                          : focusedAgent.substr(0, 12))}));
+
+    if (!currentThread.empty()) {
+      rows.push_back(ftxui::separator());
+      rows.push_back(ftxui::hbox({ftxui::text("Thread:      ") | ftxui::bold,
+                                  ftxui::text(currentThread.substr(0, 12))}));
+    }
+
+    if (!focusedAgent.empty()) {
+      if (currentThread.empty())
+        rows.push_back(ftxui::separator());
+      rows.push_back(ftxui::hbox({ftxui::text("Agent:       ") | ftxui::bold,
+                                  ftxui::text(focusedAgent.substr(0, 12))}));
+    }
 
     if (!apiKeyNames.empty()) {
       rows.push_back(ftxui::separator());
@@ -78,14 +84,24 @@ ftxui::Component ConfigDisplayModal::create(TuiState &state) {
 
     return ftxui::window(ftxui::text(" Configuration ") | ftxui::bold |
                              ftxui::color(ftxui::Color::Cyan),
-                         ftxui::vbox(rows) |
-                             ftxui::size(ftxui::WIDTH, ftxui::LESS_THAN, 60)) |
+                         ftxui::vbox(rows) | ftxui::yframe |
+                             ftxui::vscroll_indicator | ftxui::yflex |
+                             ftxui::size(ftxui::WIDTH, ftxui::LESS_THAN, 60) |
+                             ftxui::size(ftxui::HEIGHT, ftxui::LESS_THAN, 20)) |
            ftxui::clear_under | ftxui::center;
   });
 
-  return ftxui::CatchEvent(component, [&state](ftxui::Event event) {
+  return ftxui::CatchEvent(component, [offset, &state](ftxui::Event event) {
     if (event == ftxui::Event::Escape || event == ftxui::Event::Return) {
       state.popModal();
+      return true;
+    }
+    if (event == ftxui::Event::ArrowUp) {
+      (*offset)--;
+      return true;
+    }
+    if (event == ftxui::Event::ArrowDown) {
+      (*offset)++;
       return true;
     }
     return false;

@@ -70,10 +70,10 @@ int main() {
     std::string ephemeralId = engine.summonAgent(ephemeralThread, "coder", "echo ephemeral", false);
     
     // Let's wait for them
-    engine.waitForAgent(id1);
-    engine.waitForAgent(id2);
-    engine.waitForAgent(id3);
-    engine.waitForAgent(ephemeralId);
+    engine.waitForAgent(id1).value();
+    engine.waitForAgent(id2).value();
+    engine.waitForAgent(id3).value();
+    engine.waitForAgent(ephemeralId).value();
 
     // Verify ephemeral agent has no journal
     std::string journalPath = home + "/.firmius/threads/" + ephemeralThread + "/" + ephemeralId + ".jsonl";

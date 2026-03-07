@@ -13,8 +13,19 @@ std::shared_ptr<shared::JSONSchema> SubagentWaitTool::getSchema() const {
     })->required({"agent_id"});
 }
 
-shared::ToolResult SubagentWaitTool::execute(const SubagentWaitInput& input, shared::ToolContext&) {
-    std::string result = Engine::instance().waitForAgent(input.agent_id);
+shared::ToolResult SubagentWaitTool::execute(const SubagentWaitInput& input, shared::ToolContext& ctx) {
+    std::string result;
+    while (true) {
+        auto res = Engine::instance().waitForAgent(input.agent_id, std::chrono::milliseconds(100));
+        if (res.has_value()) {
+            result = *res;
+            break;
+        }
+        if (ctx.agent.isInterrupted()) {
+            Engine::instance().cancelAgent(input.agent_id);
+            return shared::ToolResult::fail("Parent agent interrupted while waiting for subagent.");
+        }
+    }
     
     rapidjson::Document d;
     d.SetObject();

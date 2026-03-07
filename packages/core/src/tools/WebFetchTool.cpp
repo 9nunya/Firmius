@@ -1,4 +1,5 @@
 #include "tools/WebFetchTool.hpp"
+#include "IAgent.hpp"
 #include "utils/StringUtil.hpp"
 #include <curl/curl.h>
 #include <rapidjson/document.h>
@@ -11,6 +12,18 @@ size_t writeCallback(char* ptr, size_t size, size_t nmemb, void* userdata) {
     auto* s = static_cast<std::string*>(userdata);
     s->append(ptr, size * nmemb);
     return size * nmemb;
+}
+
+int progressCallback(void* clientp, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal, curl_off_t ulnow) {
+    (void)dltotal;
+    (void)dlnow;
+    (void)ultotal;
+    (void)ulnow;
+    auto* ctx = static_cast<shared::ToolContext*>(clientp);
+    if (ctx && ctx->agent.isInterrupted()) {
+        return 1;
+    }
+    return 0;
 }
 }
 
@@ -25,6 +38,9 @@ shared::ToolResult WebFetchTool::execute(const WebFetchInput& input, shared::Too
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "Firmius/1.0");
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 60L);
+    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, progressCallback);
+    curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &ctx);
+    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
 
     CURLcode res = curl_easy_perform(curl);
     long httpCode = 0;

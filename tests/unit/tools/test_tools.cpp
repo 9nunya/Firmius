@@ -9,6 +9,8 @@
 #include "tools/ProcessExecuteTool.hpp"
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include <fstream>
+#include <filesystem>
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
@@ -137,9 +139,9 @@ protected:
   AgentContext agentContext;
 
   void SetUp() override {
-    agentContext.environment.cwd = "/work";
+    agentContext.environment.cwd = "/tmp/work";
     agentContext.permissions.allowOutsideCwd = false;
-    agentContext.permissions.allowedPaths = {"/work", "/tmp"};
+    agentContext.permissions.allowedPaths = {"/tmp/work", "/tmp"};
 
     ON_CALL(mockAgent, getContext()).WillByDefault(ReturnRef(agentContext));
     ON_CALL(mockAgent, getMutableContext())
@@ -148,16 +150,17 @@ protected:
         .WillByDefault(Invoke([](const std::string &path) {
           if (path.starts_with("/"))
             return path;
-          return "/work/" + path;
+          return "/tmp/work/" + path;
         }));
   }
 };
 
 TEST_F(FileReadToolTest, allowedPaths_permitsInside) {
   std::string content = "Line 1\nLine 2\nLine 3\n";
-  std::vector<uint8_t> data(content.begin(), content.end());
-
-  EXPECT_CALL(mockHost, readFile("/work/file.txt")).WillOnce(Return(data));
+  std::filesystem::create_directories("/tmp/work");
+  std::ofstream out("/tmp/work/file.txt");
+  out << content;
+  out.close();
 
   auto json = createJsonInput({{"path", "file.txt"}});
   ToolContext ctx{mockHost, mockAgent, "test_call"};
@@ -185,9 +188,10 @@ TEST_F(FileReadToolTest, allowedPaths_blocksOutside) {
 
 TEST_F(FileReadToolTest, lineSlicing) {
   std::string content = "Line 1\nLine 2\nLine 3\nLine 4\nLine 5\n";
-  std::vector<uint8_t> data(content.begin(), content.end());
-
-  EXPECT_CALL(mockHost, readFile("/work/file.txt")).WillOnce(Return(data));
+  std::filesystem::create_directories("/tmp/work");
+  std::ofstream out("/tmp/work/file.txt");
+  out << content;
+  out.close();
 
   auto json = createJsonInput({{"path", "file.txt"}},
                               {{"start_line", 2}, {"end_line", 4}});
@@ -341,7 +345,7 @@ protected:
   AgentContext agentContext;
 
   void SetUp() override {
-    agentContext.environment.cwd = "/work";
+    agentContext.environment.cwd = "/tmp/work";
     ON_CALL(mockAgent, getContext()).WillByDefault(ReturnRef(agentContext));
     ON_CALL(mockAgent, getMutableContext())
         .WillByDefault(ReturnRef(agentContext));
@@ -369,7 +373,7 @@ TEST_F(ProcessExecuteToolTest, cwdDefaultsToAgentCwd) {
   ITool *itool = &tool;
   itool->execute(json, ctx);
 
-  EXPECT_EQ(capturedCwd, "/work");
+  EXPECT_EQ(capturedCwd, "/tmp/work");
 }
 
 TEST_F(ProcessExecuteToolTest, timeoutHandling) {
@@ -397,7 +401,7 @@ protected:
   AgentContext agentContext;
 
   void SetUp() override {
-    agentContext.environment.cwd = "/work";
+    agentContext.environment.cwd = "/tmp/work";
     agentContext.permissions.allowOutsideCwd = false;
     agentContext.permissions.allowedPaths = {"/work"};
 
@@ -408,7 +412,7 @@ protected:
         .WillByDefault(Invoke([](const std::string &path) {
           if (path.starts_with("/"))
             return path;
-          return "/work/" + path;
+          return "/tmp/work/" + path;
         }));
   }
 };

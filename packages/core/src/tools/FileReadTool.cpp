@@ -1,6 +1,7 @@
 #include "tools/FileReadTool.hpp"
 #include "agents/Agent.hpp"
 #include <filesystem>
+#include <fstream>
 #include <sstream>
 
 namespace firmius::core {
@@ -34,24 +35,34 @@ shared::ToolResult FileReadTool::execute(const FileReadInput& input, shared::Too
     }
 
     try {
-        auto data = ctx.host.readFile(absolutePath);
-        std::string content(data.begin(), data.end());
+        std::ifstream file(absolutePath);
+        if (!file.is_open()) {
+            return shared::ToolResult::fail("Could not open file: " + absolutePath);
+        }
 
-        std::stringstream ss(content);
         std::string line;
         std::string sliced;
         int current = 1;
-        while (std::getline(ss, line)) {
+        bool reachedEnd = false;
+        while (std::getline(file, line)) {
             if (current >= input.start_line && (input.end_line == -1 || current <= input.end_line)) {
                 sliced += line + "\n";
             }
-            current++;
-        }
-        // Mark file as read if the entire file was read (start_line == 1 and either end_line == -1 or we read to the end)
-        if (input.start_line == 1) {
-            if (input.end_line == -1 || input.end_line >= current - 1) {
-                ctx.agent.markFileAsRead(absolutePath);
+            if (input.end_line != -1 && current >= input.end_line) {
+                // Peek to see if there's anything else in the file
+                file.peek();
+                reachedEnd = file.eof();
+                current++;
+                break;
             }
+            current++;
+            if (file.eof()) reachedEnd = true;
+        }
+        if (file.eof()) reachedEnd = true;
+
+        // Mark file as read if the entire file was read (start_line == 1 and we reached EOF)
+        if (input.start_line == 1 && reachedEnd) {
+            ctx.agent.markFileAsRead(absolutePath);
         }
         
         rapidjson::Document res;

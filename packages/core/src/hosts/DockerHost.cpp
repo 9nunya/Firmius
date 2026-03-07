@@ -333,13 +333,13 @@ std::string DockerHost::init() {
     containerId = "firmius-sandbox-" + StringUtil::generateUuid();
     
     std::string createCommand = "docker create --name '"
-        + containerId + "' firmius-sandbox:latest tail -f /dev/null";
+        + containerId + "' firmius-sandbox:latest tail -f /dev/null > /dev/null 2>&1";
     int createResult = system(createCommand.c_str());
     if (createResult != 0) {
         throw std::runtime_error("Failed to create Docker container: " + containerId);
     }
     
-    std::string startCommand = "docker start '" + containerId + "'";
+    std::string startCommand = "docker start '" + containerId + "' > /dev/null 2>&1";
     int startResult = system(startCommand.c_str());
     if (startResult != 0) {
         throw std::runtime_error("Failed to start Docker container: " + containerId);

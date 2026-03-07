@@ -5,6 +5,7 @@
 #include <rapidjson/writer.h>
 #include <filesystem>
 #include <iostream>
+#include <variant>
 
 namespace firmius::core {
 
@@ -18,17 +19,67 @@ Journaler::Journaler(const std::string& threadId, const std::string& agentId) {
 
     filePath = dir + "/" + agentId + ".jsonl";
     file.open(filePath, std::ios::out | std::ios::app);
+
+    workerThread = std::jthread([this](std::stop_token) { processQueue(); });
 }
 
 Journaler::~Journaler() {
+    {
+        std::lock_guard<std::mutex> lock(queueMutex);
+        stopWorker = true;
+    }
+    queueCv.notify_all();
+
+    if (workerThread.joinable()) {
+        workerThread.join();
+    }
+
     if (file.is_open()) {
-        file.flush();
         file.close();
     }
 }
 
 void Journaler::appendTurn(const AgentTurn& turn) {
-    std::lock_guard<std::mutex> lock(mutex);
+    {
+        std::lock_guard<std::mutex> lock(queueMutex);
+        queue.push(AppendOp{turn});
+    }
+    queueCv.notify_one();
+}
+
+void Journaler::rewriteJournal(const std::vector<AgentTurn>& turns) {
+    {
+        std::lock_guard<std::mutex> lock(queueMutex);
+        queue.push(RewriteOp{turns});
+    }
+    queueCv.notify_one();
+}
+
+void Journaler::processQueue() {
+    while (true) {
+        std::unique_lock<std::mutex> lock(queueMutex);
+        queueCv.wait(lock, [this]() { return !queue.empty() || stopWorker; });
+
+        if (stopWorker && queue.empty()) {
+            break;
+        }
+
+        auto op = std::move(queue.front());
+        queue.pop();
+        lock.unlock();
+
+        std::visit([this](auto&& arg) {
+            using T = std::decay_t<decltype(arg)>;
+            if constexpr (std::is_same_v<T, AppendOp>) {
+                writeTurn(arg.turn);
+            } else if constexpr (std::is_same_v<T, RewriteOp>) {
+                performRewrite(arg.turns);
+            }
+        }, op);
+    }
+}
+
+void Journaler::writeTurn(const AgentTurn& turn) {
     if (!file.is_open()) return;
 
     rapidjson::Document d = toJson(turn);
@@ -40,9 +91,7 @@ void Journaler::appendTurn(const AgentTurn& turn) {
     file.flush();
 }
 
-void Journaler::rewriteJournal(const std::vector<AgentTurn>& turns) {
-    std::lock_guard<std::mutex> lock(mutex);
-
+void Journaler::performRewrite(const std::vector<AgentTurn>& turns) {
     if (file.is_open()) {
         file.close();
     }

@@ -69,6 +69,12 @@ void TuiState::popModal() {
 
 void TuiState::clearModals() { modals_.clear(); }
 
+void TuiState::postEvent(ftxui::Event event) {
+  if (screen_) {
+    screen_->PostEvent(event);
+  }
+}
+
 void TuiState::init(firmius::core::Harness &harness,
                     const shared::ThreadMetadata &thread,
                     const std::string &focused_agent_id) {

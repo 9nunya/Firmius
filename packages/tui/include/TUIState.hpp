@@ -51,6 +51,8 @@ public:
   void popModal();
   void clearModals();
 
+  void postEvent(ftxui::Event event);
+
 private:
   TuiState();
   ~TuiState() = default;
