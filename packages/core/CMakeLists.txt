@@ -29,6 +29,7 @@ target_sources(firmius_core PRIVATE
     src/persistence/ThreadManager.cpp
     src/persistence/HistoryEditor.cpp
     src/Engine.cpp
+    src/harness/ThreadLockManager.cpp
     src/Harness.cpp
     src/benchmarks/MBPPBenchmark.cpp
     src/benchmarks/AgentBench.cpp
@@ -65,6 +66,7 @@ target_sources(firmius_core PUBLIC
     include/AgentRegistry.hpp
     include/Engine.hpp
     include/harness/Harness.hpp
+    include/harness/ThreadLockManager.hpp
     include/benchmarks/MBPPBenchmark.hpp
     include/benchmarks/AgentBench.hpp
     include/benchmarks/SWEBench.hpp

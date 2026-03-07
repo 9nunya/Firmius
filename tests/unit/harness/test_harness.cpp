@@ -5,7 +5,6 @@
 #include "persistence/ThreadManager.hpp"
 #include "utils/StringUtil.hpp"
 #include "Events.hpp"
-#include "HarnessEvents.hpp"
 
 #include <filesystem>
 #include <fstream>
@@ -14,7 +13,6 @@
 
 using namespace firmius::core;
 using namespace firmius::shared;
-using namespace firmius::harness;
 
 namespace {
 
@@ -82,9 +80,9 @@ TEST_F(HarnessTest, isDescendant_directChild) {
     
     bool childReceivedEvent = false;
     
-    int subId = Harness::instance().subscribe([&childReceivedEvent, childId](const HarnessEvent& event) {
-        if (std::holds_alternative<MessageChunk>(event)) {
-            const auto& chunk = std::get<MessageChunk>(event);
+    int subId = Harness::instance().subscribe([&childReceivedEvent, childId](const AppEvent& event) {
+        if (std::holds_alternative<AgentText>(event)) {
+            const auto& chunk = std::get<AgentText>(event);
             if (chunk.agentId == childId) {
                 childReceivedEvent = true;
             }
@@ -122,17 +120,17 @@ TEST_F(HarnessTest, routeEngineEvent_filtersNonDescendants) {
     
     std::vector<std::string> receivedAgentIds;
     
-    int subId = Harness::instance().subscribe([&receivedAgentIds](const HarnessEvent& event) {
+    int subId = Harness::instance().subscribe([&receivedAgentIds](const AppEvent& event) {
         std::visit([&receivedAgentIds](auto&& ev) {
             using T = std::decay_t<decltype(ev)>;
-            if constexpr (std::is_same_v<T, MessageChunk> ||
-                          std::is_same_v<T, ToolCallStarted> ||
-                          std::is_same_v<T, MessageCompleted> ||
-                          std::is_same_v<T, ToolCallResult> ||
-                          std::is_same_v<T, SubagentSpawned> ||
-                          std::is_same_v<T, ProcessOutputChunk> ||
-                          std::is_same_v<T, AgentCompactingEvent> ||
-                          std::is_same_v<T, ContextCompactedEvent>) {
+            if constexpr (std::is_same_v<T, AgentText> ||
+                          std::is_same_v<T, AgentThinking> ||
+                          std::is_same_v<T, AgentToolCall> ||
+                          std::is_same_v<T, AgentTurnCompleted> ||
+                          std::is_same_v<T, AgentSpawned> ||
+                          std::is_same_v<T, AgentProcessOutput> ||
+                          std::is_same_v<T, AgentCompacting> ||
+                          std::is_same_v<T, ContextCompacted>) {
                 receivedAgentIds.push_back(ev.agentId);
             }
         }, event);

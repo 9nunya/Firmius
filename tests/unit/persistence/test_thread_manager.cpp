@@ -31,7 +31,10 @@ protected:
         setenv("HOME", tempDir.c_str(), 1);
 
         std::filesystem::create_directories(tempDir + "/.firmius/threads");
+        tm = std::make_unique<ThreadManager>(tempDir + "/.firmius/threads");
     }
+
+    std::unique_ptr<ThreadManager> tm;
 
     void TearDown() override {
         if (!originalHome.empty()) {
@@ -76,11 +79,11 @@ protected:
 TEST_F(ThreadManagerTest, createThread_roundtrip) {
     ThreadMetadata metadata = createTestMetadata();
 
-    std::string threadId = ThreadManager::createThread(metadata);
+    std::string threadId = tm->createThread(metadata);
 
     EXPECT_FALSE(threadId.empty());
 
-    ThreadMetadata loaded = ThreadManager::getMetadata(threadId);
+    ThreadMetadata loaded = tm->getMetadata(threadId);
 
     EXPECT_EQ(loaded.title, metadata.title);
     EXPECT_EQ(loaded.hostType, metadata.hostType);
@@ -91,13 +94,13 @@ TEST_F(ThreadManagerTest, createThread_roundtrip) {
 
 TEST_F(ThreadManagerTest, getMetadata_missingFile) {
     EXPECT_THROW({
-        ThreadManager::getMetadata("nonexistent-thread-id");
+        tm->getMetadata("nonexistent-thread-id");
     }, std::runtime_error);
 }
 
 TEST_F(ThreadManagerTest, getMetadata_corruptJson) {
     ThreadMetadata metadata = createTestMetadata();
-    std::string threadId = ThreadManager::createThread(metadata);
+    std::string threadId = tm->createThread(metadata);
 
     std::string metadataPath = tempDir + "/.firmius/threads/" + threadId + "/metadata.json";
     std::ofstream file(metadataPath);
@@ -105,12 +108,12 @@ TEST_F(ThreadManagerTest, getMetadata_corruptJson) {
     file.close();
 
     EXPECT_THROW({
-        ThreadManager::getMetadata(threadId);
+        tm->getMetadata(threadId);
     }, std::runtime_error);
 }
 
 TEST_F(ThreadManagerTest, listThreads_empty) {
-    std::vector<std::string> threads = ThreadManager::listThreads();
+    std::vector<std::string> threads = tm->listThreads();
 
     EXPECT_TRUE(threads.empty());
 }
@@ -125,11 +128,11 @@ TEST_F(ThreadManagerTest, listThreads_multiple) {
     ThreadMetadata metadata3 = createTestMetadata();
     metadata3.title = "Thread 3";
 
-    std::string id1 = ThreadManager::createThread(metadata1);
-    std::string id2 = ThreadManager::createThread(metadata2);
-    std::string id3 = ThreadManager::createThread(metadata3);
+    std::string id1 = tm->createThread(metadata1);
+    std::string id2 = tm->createThread(metadata2);
+    std::string id3 = tm->createThread(metadata3);
 
-    std::vector<std::string> threads = ThreadManager::listThreads();
+    std::vector<std::string> threads = tm->listThreads();
 
     EXPECT_EQ(threads.size(), 3u);
 
@@ -140,10 +143,10 @@ TEST_F(ThreadManagerTest, listThreads_multiple) {
 
 TEST_F(ThreadManagerTest, loadAgentHistory_empty) {
     ThreadMetadata metadata = createTestMetadata();
-    std::string threadId = ThreadManager::createThread(metadata);
+    std::string threadId = tm->createThread(metadata);
     std::string agentId = "test-agent";
 
-    AgentHistory history = ThreadManager::loadAgentHistory(threadId, agentId);
+    AgentHistory history = tm->loadAgentHistory(threadId, agentId);
 
     EXPECT_EQ(history.threadId, threadId);
     EXPECT_TRUE(history.turns.empty());
@@ -151,7 +154,7 @@ TEST_F(ThreadManagerTest, loadAgentHistory_empty) {
 
 TEST_F(ThreadManagerTest, loadAgentHistory_withTurns) {
     ThreadMetadata metadata = createTestMetadata();
-    std::string threadId = ThreadManager::createThread(metadata);
+    std::string threadId = tm->createThread(metadata);
     std::string agentId = "test-agent";
 
     {
@@ -162,7 +165,7 @@ TEST_F(ThreadManagerTest, loadAgentHistory_withTurns) {
         journaler.appendTurn(turn2);
     }
 
-    AgentHistory history = ThreadManager::loadAgentHistory(threadId, agentId);
+    AgentHistory history = tm->loadAgentHistory(threadId, agentId);
 
     EXPECT_EQ(history.threadId, threadId);
     EXPECT_EQ(history.turns.size(), 2u);

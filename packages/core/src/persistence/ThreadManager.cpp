@@ -10,16 +10,12 @@
 
 namespace firmius::core {
 
-namespace {
-std::string getThreadsDir() {
-    std::string home = getenv("HOME") ? getenv("HOME") : "/root";
-    return home + "/.firmius/threads";
-}
-}
+ThreadManager::ThreadManager(std::string basePath)
+    : basePath_(std::move(basePath)) {}
 
-std::vector<std::string> ThreadManager::listThreads() {
+std::vector<std::string> ThreadManager::listThreads() const {
     std::vector<std::string> threads;
-    std::string dir = getThreadsDir();
+    std::string dir = basePath_;
     if (!std::filesystem::exists(dir)) return {};
 
     for (const auto& entry : std::filesystem::directory_iterator(dir)) {
@@ -32,7 +28,7 @@ std::vector<std::string> ThreadManager::listThreads() {
 
 std::string ThreadManager::createThread(const ThreadMetadata& metadata) {
     std::string threadId = shared::StringUtil::generateUuid();
-    std::string dir = getThreadsDir() + "/" + threadId;
+    std::string dir = basePath_ + "/" + threadId;
     std::filesystem::create_directories(dir);
 
     ThreadMetadata meta = metadata;
@@ -54,8 +50,8 @@ std::string ThreadManager::createThread(const ThreadMetadata& metadata) {
     return threadId;
 }
 
-ThreadMetadata ThreadManager::getMetadata(const std::string& threadId) {
-    std::string path = getThreadsDir() + "/" + threadId + "/metadata.json";
+ThreadMetadata ThreadManager::getMetadata(const std::string& threadId) const {
+    std::string path = basePath_ + "/" + threadId + "/metadata.json";
     std::ifstream file(path);
     if (!file.is_open()) throw std::runtime_error("Cannot open thread metadata: " + path);
     std::stringstream buffer;
@@ -71,8 +67,8 @@ ThreadMetadata ThreadManager::getMetadata(const std::string& threadId) {
     return meta;
 }
 
-AgentHistory ThreadManager::loadAgentHistory(const std::string& threadId, const std::string& agentId) {
-    std::string path = getThreadsDir() + "/" + threadId + "/" + agentId + ".jsonl";
+AgentHistory ThreadManager::loadAgentHistory(const std::string& threadId, const std::string& agentId) const {
+    std::string path = basePath_ + "/" + threadId + "/" + agentId + ".jsonl";
     std::ifstream file(path);
     std::string line;
     AgentHistory history;
@@ -87,9 +83,9 @@ AgentHistory ThreadManager::loadAgentHistory(const std::string& threadId, const 
     return history;
 }
 
-std::vector<std::string> ThreadManager::listAgents(const std::string& threadId) {
+std::vector<std::string> ThreadManager::listAgents(const std::string& threadId) const {
     std::vector<std::string> agents;
-    std::string dir = getThreadsDir() + "/" + threadId;
+    std::string dir = basePath_ + "/" + threadId;
     if (!std::filesystem::exists(dir)) return {};
 
     for (const auto& entry : std::filesystem::directory_iterator(dir)) {
@@ -104,7 +100,7 @@ void ThreadManager::updateHostIdentifier(const std::string& threadId, const std:
     auto metadata = getMetadata(threadId);
     metadata.hostIdentifier = hostIdentifier;
     
-    std::string dir = getThreadsDir() + "/" + threadId;
+    std::string dir = basePath_ + "/" + threadId;
     rapidjson::Document d = toJson(metadata);
     rapidjson::StringBuffer buffer;
     rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
@@ -115,7 +111,7 @@ void ThreadManager::updateHostIdentifier(const std::string& threadId, const std:
 }
 
 void ThreadManager::deleteThread(const std::string& threadId) {
-    std::string dir = getThreadsDir() + "/" + threadId;
+    std::string dir = basePath_ + "/" + threadId;
     if (!std::filesystem::exists(dir)) {
         throw std::runtime_error("Thread not found: " + threadId);
     }
@@ -123,7 +119,7 @@ void ThreadManager::deleteThread(const std::string& threadId) {
 }
 
 void ThreadManager::updateMetadata(const std::string& threadId, const ThreadMetadata& metadata) {
-    std::string dir = getThreadsDir() + "/" + threadId;
+    std::string dir = basePath_ + "/" + threadId;
     if (!std::filesystem::exists(dir)) {
         throw std::runtime_error("Thread not found: " + threadId);
     }
@@ -135,9 +131,9 @@ void ThreadManager::updateMetadata(const std::string& threadId, const ThreadMeta
     file << buffer.GetString();
 }
 
-std::vector<ThreadMetadata> ThreadManager::listThreadsWithMetadata() {
+std::vector<ThreadMetadata> ThreadManager::listThreadsWithMetadata() const {
     std::vector<ThreadMetadata> result;
-    std::string dir = getThreadsDir();
+    std::string dir = basePath_;
     if (!std::filesystem::exists(dir)) return {};
     for (const auto& entry : std::filesystem::directory_iterator(dir)) {
         if (entry.is_directory()) {
@@ -154,8 +150,8 @@ std::vector<ThreadMetadata> ThreadManager::listThreadsWithMetadata() {
     return result;
 }
 
-std::map<std::string, AgentManifestEntry> ThreadManager::readAgentManifest(const std::string& threadId) {
-    std::string path = getThreadsDir() + "/" + threadId + "/agents.json";
+std::map<std::string, AgentManifestEntry> ThreadManager::readAgentManifest(const std::string& threadId) const {
+    std::string path = basePath_ + "/" + threadId + "/agents.json";
     std::map<std::string, AgentManifestEntry> manifest;
 
     if (!std::filesystem::exists(path)) {
@@ -208,7 +204,7 @@ std::map<std::string, AgentManifestEntry> ThreadManager::readAgentManifest(const
 }
 
 void ThreadManager::writeAgentManifest(const std::string& threadId, const std::map<std::string, AgentManifestEntry>& manifest) {
-    std::string dir = getThreadsDir() + "/" + threadId;
+    std::string dir = basePath_ + "/" + threadId;
     std::filesystem::create_directories(dir);
     std::string path = dir + "/agents.json";
 

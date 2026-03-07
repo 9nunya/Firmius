@@ -1,54 +1,93 @@
 #include "TUIState.hpp"
+#include "Engine.hpp"
 #include "harness/Harness.hpp"
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/screen_interactive.hpp>
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/screen.hpp>
-#include <iostream>
 #include <string>
- 
+
+#include "commands/CommandManager.hpp"
+#include "commands/ConfigCommand.hpp"
+#include "commands/ModelCommand.hpp"
+#include "commands/NewCommand.hpp"
+#include "commands/ThreadsCommand.hpp"
+#include "commands/UndoCommand.hpp"
+#include "modals/ConfigDisplayModal.hpp"
+#include "modals/ModalRegistry.hpp"
+#include "modals/ModelPickerModal.hpp"
+#include "modals/ThreadLockedModal.hpp"
+#include "modals/ThreadPickerModal.hpp"
 
 using namespace ftxui;
 
-int main() {
-    auto &h = firmius::core::Harness::instance();
-    h.init();
-
-    auto threads = h.listThreads();
-    if (threads.empty()) {
-        std::cerr << "No threads found. Create a thread in another client first." << std::endl;
-        return 1;
+int main(int argc, char **argv) {
+  bool continue_last = false;
+  for (int i = 1; i < argc; ++i) {
+    if (std::string(argv[i]) == "-c") {
+      continue_last = true;
     }
+  }
 
-    const auto &thread = threads.front();
-    if (!h.switchThread(thread.threadId)) {
-        std::cerr << "Failed to switch to thread: " << thread.threadId << std::endl;
-        return 1;
+  // Register Commands
+  firmius::tui::CommandManager::instance().registerCommand(
+      std::make_shared<firmius::tui::NewCommand>());
+  firmius::tui::CommandManager::instance().registerCommand(
+      std::make_shared<firmius::tui::ThreadsCommand>());
+  firmius::tui::CommandManager::instance().registerCommand(
+      std::make_shared<firmius::tui::ModelCommand>());
+  firmius::tui::CommandManager::instance().registerCommand(
+      std::make_shared<firmius::tui::UndoCommand>());
+  firmius::tui::CommandManager::instance().registerCommand(
+      std::make_shared<firmius::tui::ConfigCommand>());
+
+  // Register Modals
+  firmius::tui::ModalRegistry::instance().registerModal(
+      std::make_shared<firmius::tui::ThreadPickerModal>());
+  firmius::tui::ModalRegistry::instance().registerModal(
+      std::make_shared<firmius::tui::ModelPickerModal>());
+  firmius::tui::ModalRegistry::instance().registerModal(
+      std::make_shared<firmius::tui::ConfigDisplayModal>());
+
+  auto &h = firmius::core::Harness::instance();
+  h.init();
+
+  auto &state = firmius::tui::TuiState::instance();
+
+  // We attach dummy thread/focused initially
+  firmius::shared::ThreadMetadata dummy_thread;
+  state.init(h, dummy_thread, "");
+
+  bool thread_loaded = false;
+  if (continue_last) {
+    if (h.resumeLast()) {
+      thread_loaded = true;
     }
+  }
 
-    const auto focused = h.focusedAgentId();
-    if (focused.empty()) {
-        std::cerr << "No focused agent for thread: " << thread.threadId << std::endl;
-        return 1;
+  if (!thread_loaded) {
+    state.setViewMode(firmius::tui::TuiState::ViewMode::Welcome);
+  } else {
+    state.setViewMode(firmius::tui::TuiState::ViewMode::Chat);
+  }
+
+  auto screen = ftxui::ScreenInteractive::Fullscreen();
+  screen.TrackMouse(true);
+  state.attachScreen(&screen);
+
+  auto renderer = state.root();
+  renderer = CatchEvent(renderer, [&](Event event) {
+    if (event.is_character() && event.character() == std::string(1, '\x03')) {
+      screen.ExitLoopClosure()();
+      return true;
     }
+    return false;
+  });
 
-    auto screen = ScreenInteractive::Fullscreen();
-    screen.TrackMouse(true);
-    auto& state = firmius::tui::TuiState::instance();
-    state.init(h, thread, focused);
-    state.attachScreen(&screen);
+  screen.Loop(renderer);
+  state.shutdown();
+  h.shutdown();
+  firmius::core::Engine::instance().shutdown();
 
-    auto renderer = state.root();
-    renderer = CatchEvent(renderer, [&](Event event) {
-        if (event.is_character() && event.character() == std::string(1, '\x03')) {
-            screen.ExitLoopClosure()();
-            return true;
-        }
-        return false;
-    });
-
-    screen.Loop(renderer);
-    state.shutdown();
-
-    return 0;
+  return 0;
 }

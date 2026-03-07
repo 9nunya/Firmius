@@ -2,13 +2,13 @@
 #define FIRMIUS_TUI_STATE_HPP
 
 #include "Context.hpp"
-#include "HarnessEvents.hpp"
+#include "Events.hpp"
+#include "EventQueue.hpp"
+#include "StreamStateManager.hpp"
 #include <ftxui/component/component_base.hpp>
 #include <ftxui/component/screen_interactive.hpp>
 #include <memory>
-#include <mutex>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 namespace firmius::core {
@@ -17,66 +17,76 @@ class Harness;
 
 namespace firmius::tui {
 
-struct ToolCallView;
 struct TitleBarModel;
 struct StatusBarModel;
 struct InputBarModel;
 
 class TuiState {
 public:
-    static TuiState& instance();
+  static TuiState &instance();
 
-    TuiState(const TuiState&) = delete;
-    TuiState& operator=(const TuiState&) = delete;
+  TuiState(const TuiState &) = delete;
+  TuiState &operator=(const TuiState &) = delete;
 
-    TuiState(TuiState&&) = delete;
-    TuiState& operator=(TuiState&&) = delete;
+  TuiState(TuiState &&) = delete;
+  TuiState &operator=(TuiState &&) = delete;
 
-    void init(firmius::core::Harness& harness,
-              const shared::ThreadMetadata& thread,
-              const std::string& focused_agent_id);
-    void attachScreen(ftxui::ScreenInteractive* screen);
-    ftxui::Component root();
-    void shutdown();
+  void init(firmius::core::Harness &harness,
+            const shared::ThreadMetadata &thread,
+            const std::string &focused_agent_id);
+  void attachScreen(ftxui::ScreenInteractive *screen);
+  void shutdown();
+
+  std::string getProcessOutput(const std::string &pid);
+  std::string getSubagentOutput(const std::string &subagentId);
+
+  ftxui::Component root();
+
+  enum class ViewMode { Welcome, Chat };
+  void setViewMode(ViewMode mode);
+  ViewMode getViewMode() const;
+
+  void openModal(const std::string &name);
+  void openModalDirect(ftxui::Component modal);
+  void popModal();
+  void clearModals();
 
 private:
-    TuiState();
-    ~TuiState() = default;
+  TuiState();
+  ~TuiState() = default;
 
-    struct StreamState {
-        std::string thinking;
-        std::string text;
-        std::string compaction_thinking;
-        std::string compaction_text;
-        bool provider_waiting = false;
-    };
+  void onEvent(const shared::AppEvent &ev);
+  std::string statusText() const;
+  void updateStatusModel();
 
-    void onEvent(const harness::HarnessEvent& ev);
-    std::string statusText() const;
+  firmius::core::Harness *harness_ = nullptr;
+  shared::ThreadMetadata thread_;
+  std::string focused_agent_id_;
+  std::shared_ptr<shared::AgentHistory> history_;
+  int subscription_id_ = -1;
+  ftxui::ScreenInteractive *screen_ = nullptr;
 
-    firmius::core::Harness* harness_ = nullptr;
-    shared::ThreadMetadata thread_;
-    std::string focused_agent_id_;
-    std::shared_ptr<shared::AgentHistory> history_;
-    int subscription_id_ = -1;
-    ftxui::ScreenInteractive* screen_ = nullptr;
+  firmius::shared::EventQueue<shared::AppEvent> event_queue_;
+  void drainEvents();
 
-    std::mutex mu_;
-    std::unordered_map<std::string, StreamState> streams_;
-    std::unordered_map<std::string, std::shared_ptr<ToolCallView>> tool_calls_;
-    std::vector<std::string> tool_order_;
+  StreamStateManager stream_state_;
 
-    std::string input_;
-    int cursor_ = 0;
+  std::string input_;
+  int cursor_ = 0;
 
-    std::shared_ptr<TitleBarModel> title_model_;
-    std::shared_ptr<StatusBarModel> status_model_;
-    std::shared_ptr<InputBarModel> input_model_;
+  std::shared_ptr<TitleBarModel> title_model_;
+  std::shared_ptr<StatusBarModel> status_model_;
+  std::shared_ptr<InputBarModel> input_model_;
 
-    ftxui::Component root_component_;
-    ftxui::Component chat_component_;
+  ViewMode view_mode_ = ViewMode::Chat;
+  std::vector<ftxui::Component> modals_; // Used as a stack
+  bool pending_modal_clear_ =
+      false; // Deferred clear to avoid UB in modal handlers
+
+  ftxui::Component root_component_;
+  ftxui::Component chat_component_;
 };
 
-}
+} // namespace firmius::tui
 
 #endif

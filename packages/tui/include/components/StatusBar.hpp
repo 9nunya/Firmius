@@ -8,11 +8,13 @@
 namespace firmius::tui {
 
 struct StatusBarModel {
-    std::string status_text;
+  std::string status_text; // e.g. "IDLE", "STREAMING", etc.
+  std::string model_name;  // e.g. "nanogpt/gpt-4"
+  std::string purpose;     // e.g. "orchestrator"
 };
 
-ftxui::Component StatusBar(const std::shared_ptr<StatusBarModel>& model);
+ftxui::Component StatusBar(const std::shared_ptr<StatusBarModel> &model);
 
-}
+} // namespace firmius::tui
 
 #endif

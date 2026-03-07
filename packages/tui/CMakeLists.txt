@@ -3,9 +3,24 @@ add_executable(firmius)
 target_sources(firmius PRIVATE
     src/main.cpp
     src/TUIState.cpp
+    src/StreamStateManager.cpp
+    src/commands/CommandManager.cpp
+    src/commands/NewCommand.cpp
+    src/commands/ThreadsCommand.cpp
+    src/commands/ModelCommand.cpp
+    src/commands/UndoCommand.cpp
+    src/commands/ConfigCommand.cpp
+    src/modals/ModalRegistry.cpp
+    src/modals/ThreadPickerModal.cpp
+    src/modals/ThreadLockedModal.cpp
+    src/modals/ModelPickerModal.cpp
+    src/modals/ConfigDisplayModal.cpp
     src/components/ChatWindow.cpp
-    src/components/TurnBlock.cpp
     src/components/ToolBlock.cpp
+    src/components/FileEditToolBlock.cpp
+    src/components/FileReadToolBlock.cpp
+    src/components/ListDirectoryToolBlock.cpp
+    src/components/ProcessExecuteToolBlock.cpp
     src/components/Markdown.cpp
     src/components/ScrollableBox.cpp
     src/components/TitleBar.cpp

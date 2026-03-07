@@ -1,266 +1,448 @@
 #include "TUIState.hpp"
 #include "AgentRegistry.hpp"
+#include "commands/CommandManager.hpp"
 #include "components/ChatWindow.hpp"
 #include "components/InputBar.hpp"
+#include "components/Markdown.hpp"
 #include "components/StatusBar.hpp"
 #include "components/TitleBar.hpp"
 #include "components/ToolBlock.hpp"
-#include "components/Markdown.hpp"
 #include "harness/Harness.hpp"
+#include "modals/ModalRegistry.hpp"
+#include "modals/ThreadLockedModal.hpp"
 #include <algorithm>
+#include <filesystem>
 #include <ftxui/component/component.hpp>
 #include <ftxui/dom/elements.hpp>
 
 namespace firmius::tui {
 
+using namespace firmius::shared;
+
 static std::string statusToString(shared::AgentStatus status) {
-    using shared::AgentStatus;
-    switch (status) {
-        case AgentStatus::Idle: return "idle";
-        case AgentStatus::Streaming: return "streaming";
-        case AgentStatus::ExecutingTool: return "executing_tool";
-        case AgentStatus::AwaitingInput: return "awaiting_input";
-        case AgentStatus::Compacting: return "compacting";
-        case AgentStatus::ProviderWaiting: return "provider_waiting";
-        case AgentStatus::Error: return "error";
-        case AgentStatus::Cancelled: return "cancelled";
-    }
-    return "unknown";
+  using shared::AgentStatus;
+  switch (status) {
+  case AgentStatus::Idle:
+    return "idle";
+  case AgentStatus::Streaming:
+    return "streaming";
+  case AgentStatus::ExecutingTool:
+    return "executing_tool";
+  case AgentStatus::AwaitingInput:
+    return "awaiting_input";
+  case AgentStatus::Compacting:
+    return "compacting";
+  case AgentStatus::ProviderWaiting:
+    return "provider_waiting";
+  case AgentStatus::Error:
+    return "error";
+  case AgentStatus::Cancelled:
+    return "cancelled";
+  }
+  return "unknown";
 }
 
-TuiState& TuiState::instance() {
-    static TuiState inst;
-    return inst;
+TuiState &TuiState::instance() {
+  static TuiState inst;
+  return inst;
 }
 
 TuiState::TuiState() = default;
 
-void TuiState::init(firmius::core::Harness& harness,
-                    const shared::ThreadMetadata& thread,
-                    const std::string& focused_agent_id) {
-    harness_ = &harness;
-    thread_ = thread;
-    focused_agent_id_ = focused_agent_id;
-    history_ = harness_->getAgentHistoryPtr(focused_agent_id_);
+void TuiState::setViewMode(ViewMode mode) { view_mode_ = mode; }
 
-    title_model_ = std::make_shared<TitleBarModel>();
-    title_model_->title = thread_.title;
-    title_model_->thread_id = thread_.threadId;
+TuiState::ViewMode TuiState::getViewMode() const { return view_mode_; }
 
-    status_model_ = std::make_shared<StatusBarModel>();
-    status_model_->status_text = "status=unknown";
-
-    input_model_ = std::make_shared<InputBarModel>();
-    input_model_->buffer = &input_;
-    input_model_->cursor = &cursor_;
-    input_model_->placeholder = "Type a message...";
-
-    subscription_id_ = harness_->subscribe([this](const harness::HarnessEvent& ev) {
-        this->onEvent(ev);
-    });
+void TuiState::openModal(const std::string &name) {
+  firmius::tui::ModalRegistry::instance().openModal(name, *this);
 }
 
-void TuiState::attachScreen(ftxui::ScreenInteractive* screen) {
-    screen_ = screen;
+void TuiState::openModalDirect(ftxui::Component modal) {
+  modals_.push_back(modal);
+}
+
+void TuiState::popModal() {
+  if (!modals_.empty()) {
+    modals_.pop_back();
+  }
+}
+
+void TuiState::clearModals() { modals_.clear(); }
+
+void TuiState::init(firmius::core::Harness &harness,
+                    const shared::ThreadMetadata &thread,
+                    const std::string &focused_agent_id) {
+  harness_ = &harness;
+  thread_ = thread;
+  focused_agent_id_ = focused_agent_id;
+  history_ = harness_->getAgentHistoryPtr(focused_agent_id_);
+
+  title_model_ = std::make_shared<TitleBarModel>();
+  title_model_->title = thread_.title;
+  title_model_->thread_id = thread_.threadId;
+
+  status_model_ = std::make_shared<StatusBarModel>();
+  status_model_->status_text = "status=unknown";
+
+  input_model_ = std::make_shared<InputBarModel>();
+  input_model_->buffer = &input_;
+  input_model_->cursor = &cursor_;
+  input_model_->placeholder = "Type a message...";
+
+  subscription_id_ = harness_->subscribe(
+      [this](const firmius::shared::AppEvent &ev) { 
+        event_queue_.push(ev);
+        if (screen_) {
+          screen_->PostEvent(ftxui::Event::Custom);
+        }
+      });
+}
+
+void TuiState::attachScreen(ftxui::ScreenInteractive *screen) {
+  screen_ = screen;
 }
 
 void TuiState::shutdown() {
-    if (harness_ && subscription_id_ >= 0) {
-        harness_->unsubscribe(subscription_id_);
-        subscription_id_ = -1;
-    }
+  if (harness_ && subscription_id_ >= 0) {
+    harness_->unsubscribe(subscription_id_);
+    subscription_id_ = -1;
+  }
 }
 
-void TuiState::onEvent(const harness::HarnessEvent& ev) {
-    {
-        std::lock_guard<std::mutex> lock(mu_);
-        if (auto* e = std::get_if<harness::MessageChunk>(&ev)) {
-            auto& s = streams_[e->agentId];
-            if (e->isThinking) {
-                s.thinking += e->delta;
-            } else {
-                s.text += e->delta;
-            }
-            s.provider_waiting = false;
-        } else if (auto* e = std::get_if<harness::MessageCompleted>(&ev)) {
-            auto& s = streams_[e->agentId];
-            s.thinking.clear();
-            s.text.clear();
-            s.provider_waiting = false;
-            for (auto it = tool_order_.begin(); it != tool_order_.end();) {
-                auto it_tool = tool_calls_.find(*it);
-                if (it_tool != tool_calls_.end() && it_tool->second &&
-                    it_tool->second->agentId == e->agentId) {
-                    tool_calls_.erase(it_tool);
-                    it = tool_order_.erase(it);
-                } else {
-                    ++it;
-                }
-            }
-        } else if (auto* e = std::get_if<harness::AgentProviderWaiting>(&ev)) {
-            streams_[e->agentId].provider_waiting = true;
-        } else if (auto* e = std::get_if<harness::ToolCallArgsChunk>(&ev)) {
-            auto& view = tool_calls_[e->toolCallId];
-            if (!view) {
-                view = std::make_shared<ToolCallView>();
-                view->toolCallId = e->toolCallId;
-                view->agentId = e->agentId;
-                tool_order_.push_back(e->toolCallId);
-            }
-            view->phase = ToolPhase::Preparing;
-            view->name += e->nameDelta;
-            view->args += e->delta;
-            if (!view->args.empty()) {
-                view->phase = ToolPhase::Called;
-            }
-        } else if (auto* e = std::get_if<harness::ToolCallStarted>(&ev)) {
-            auto& view = tool_calls_[e->toolCallId];
-            if (!view) {
-                view = std::make_shared<ToolCallView>();
-                view->toolCallId = e->toolCallId;
-                tool_order_.push_back(e->toolCallId);
-            }
-            view->agentId = e->agentId;
-            if (!e->name.empty()) view->name = e->name;
-            if (!e->args.empty()) view->args = e->args;
-            view->phase = view->args.empty() ? ToolPhase::Preparing : ToolPhase::Called;
-        } else if (auto* e = std::get_if<harness::ToolCallResult>(&ev)) {
-            auto it_tool = tool_calls_.find(e->toolCallId);
-            if (it_tool != tool_calls_.end()) {
-                tool_calls_.erase(it_tool);
-            }
-            tool_order_.erase(
-                std::remove(tool_order_.begin(), tool_order_.end(), e->toolCallId),
-                tool_order_.end()
-            );
-        } else if (auto* e = std::get_if<harness::CompactionThinkingChunk>(&ev)) {
-            streams_[e->agentId].compaction_thinking += e->delta;
-        } else if (auto* e = std::get_if<harness::CompactionTextChunk>(&ev)) {
-            streams_[e->agentId].compaction_text += e->delta;
-        } else if (auto* e = std::get_if<harness::ContextCompactedEvent>(&ev)) {
-            auto& s = streams_[e->agentId];
-            s.compaction_thinking.clear();
-            s.compaction_text.clear();
-        }
-    }
-
-    if (screen_) {
-        screen_->PostEvent(ftxui::Event::Custom);
-    }
+void TuiState::drainEvents() {
+  for (const auto& ev : event_queue_.drainAll()) {
+    onEvent(ev);
+  }
 }
 
-std::string TuiState::statusText() const {
-    std::string status_line = "status=unknown";
-    if (!focused_agent_id_.empty()) {
-        auto agent = firmius::core::AgentRegistry::instance().getAgent(focused_agent_id_);
-        if (agent) {
-            const auto& ctx = agent->getContext();
-            status_line = "status=" + statusToString(ctx.state.currentStatus) +
-                          " | model=" + ctx.config.providerId + "/" + ctx.config.modelId +
-                          " | purpose=" + ctx.identity.role;
+void TuiState::onEvent(const shared::AppEvent &ev) {
+  std::visit(
+      [&](auto &&e) {
+        using T = std::decay_t<decltype(e)>;
+
+        if constexpr (std::is_same_v<T, AgentThinking>) {
+          stream_state_.handleAgentThinking(e);
+        } else if constexpr (std::is_same_v<T, AgentText>) {
+          stream_state_.handleAgentText(e);
+        } else if constexpr (std::is_same_v<T, AgentTurnCompleted>) {
+          stream_state_.handleAgentTurnCompleted(e);
+        } else if constexpr (std::is_same_v<T, AgentProviderWaiting>) {
+          stream_state_.handleAgentProviderWaiting(e);
+        } else if constexpr (std::is_same_v<T, AgentToolCallChunk>) {
+          stream_state_.handleAgentToolCallChunk(e);
+        } else if constexpr (std::is_same_v<T, AgentToolCall>) {
+          stream_state_.handleAgentToolCall(e);
+        } else if constexpr (std::is_same_v<T, ThreadChanged>) {
+          thread_ = e.metadata;
+          focused_agent_id_ = harness_->focusedAgentId();
+          pending_modal_clear_ = true;
+
+          if (chat_component_) {
+            chat_component_->OnEvent(ftxui::Event::Special("ThreadChanged"));
+          }
+        } else if constexpr (std::is_same_v<T, ThreadLocked>) {
+          auto locked_modal =
+              ThreadLockedModal::create(*this, e.threadId, e.ownerPid);
+          openModalDirect(locked_modal);
+        } else if constexpr (std::is_same_v<T, AgentCompactionThinking>) {
+          stream_state_.handleAgentCompactionThinking(e);
+        } else if constexpr (std::is_same_v<T, AgentCompactionText>) {
+          stream_state_.handleAgentCompactionText(e);
+        } else if constexpr (std::is_same_v<T, ContextCompacted>) {
+          stream_state_.handleContextCompacted(e);
+        } else if constexpr (std::is_same_v<T, AgentProcessSpawned>) {
+          stream_state_.handleAgentProcessSpawned(e);
+        } else if constexpr (std::is_same_v<T, AgentProcessOutput>) {
+          stream_state_.handleAgentProcessOutput(e);
+        } else if constexpr (std::is_same_v<T, AgentSpawned>) {
+          if (e.parentId.empty() && focused_agent_id_.empty()) {
+            focused_agent_id_ = e.agentId;
+            if (chat_component_) {
+              chat_component_->OnEvent(ftxui::Event::Special("ThreadChanged"));
+            }
+          }
+          stream_state_.handleAgentSpawned(e, focused_agent_id_);
         }
+      },
+      ev);
+
+  if (screen_) {
+    screen_->PostEvent(ftxui::Event::Custom);
+  }
+}
+
+std::string TuiState::statusText() const { return "unknown"; }
+
+void TuiState::updateStatusModel() {
+  if (!status_model_)
+    return;
+  if (!focused_agent_id_.empty()) {
+    auto agent =
+        firmius::core::AgentRegistry::instance().getAgent(focused_agent_id_);
+    if (agent) {
+      const auto &ctx = agent->getContext();
+      status_model_->status_text = statusToString(ctx.state.currentStatus);
+      status_model_->model_name =
+          ctx.config.providerId + "/" + ctx.config.modelId;
+      status_model_->purpose = ctx.identity.role;
+      return;
     }
-    return status_line;
+  }
+  status_model_->status_text = "idle";
+  status_model_->model_name = "";
+  status_model_->purpose = "";
 }
 
 ftxui::Component TuiState::root() {
-    if (root_component_) return root_component_;
+  if (root_component_)
+    return root_component_;
 
-    auto title_bar = TitleBar(title_model_);
-    auto status_bar = StatusBar(status_model_);
-    auto input_bar = InputBar(input_model_, [this](const std::string& text) {
-        if (harness_) harness_->send(text);
-    });
-    auto chat = ChatWindow(history_);
-    chat_component_ = chat;
+  auto title_bar = TitleBar(title_model_);
+  auto status_bar = StatusBar(status_model_);
 
-    auto container = ftxui::Container::Vertical({
-        input_bar,
-        chat,
-    });
+  auto input_bar = InputBar(input_model_, [this](const std::string &text) {
+    if (!text.empty() && text[0] == '/') {
+      CommandCtx ctx{this};
+      if (firmius::tui::CommandManager::instance().executeCommand(ctx, text)) {
+        return; // Command handled successfully
+      }
+    }
 
-    root_component_ = ftxui::Renderer(container, [this, title_bar, status_bar, input_bar, chat] {
-        status_model_->status_text = statusText();
+    if (view_mode_ == ViewMode::Welcome) {
+      // If we are on the welcome screen, typing a message automatically starts
+      // a thread
+      if (harness_) {
+        // Auto-create thread in current directory with default lead persona
+        std::string cwd = std::filesystem::current_path().string();
+        harness_->newThread(firmius::shared::HostType::Docker, cwd, "firmius");
+        harness_->send(text);
+      }
+      setViewMode(ViewMode::Chat);
+    } else {
+      if (harness_) {
+        harness_->send(text);
+      }
+    }
+  });
+  auto chat = ChatWindow([this]() -> const firmius::shared::AgentHistory* {
+    if (focused_agent_id_.empty()) return nullptr;
+    auto agent = firmius::core::AgentRegistry::instance().getAgent(focused_agent_id_);
+    if (!agent) return history_.get();
+    return agent->getContext().history.get();
+  }, [this]() {
+    std::vector<ftxui::Element> live_rows;
+    const auto *s = stream_state_.getStream(focused_agent_id_);
 
-        std::vector<ftxui::Element> live_rows;
-        {
-            std::lock_guard<std::mutex> lock(mu_);
-            auto it = streams_.find(focused_agent_id_);
-            if (it != streams_.end()) {
-                const auto& s = it->second;
-                if (!s.thinking.empty()) {
-                    live_rows.push_back(ftxui::text("[thinking]") | ftxui::dim);
-                    live_rows.push_back(RenderMarkdown(s.thinking, true));
-                }
-                if (!s.text.empty()) {
-                    live_rows.push_back(RenderMarkdown(s.text));
-                }
-                if (!s.compaction_thinking.empty()) {
-                    live_rows.push_back(ftxui::text("[compacting:thinking]") | ftxui::dim);
-                    live_rows.push_back(RenderMarkdown(s.compaction_thinking, true));
-                }
-                if (!s.compaction_text.empty()) {
-                    live_rows.push_back(ftxui::text("[compacting]") | ftxui::dim);
-                    live_rows.push_back(RenderMarkdown(s.compaction_text, true));
-                }
-                if (s.provider_waiting) {
-                    live_rows.push_back(ftxui::text("[provider waiting]") | ftxui::dim);
-                }
-            }
+    auto decorateMsg = [](const ftxui::Element &content) {
+      return ftxui::hbox({ftxui::text("* ") | ftxui::bold |
+                              ftxui::color(ftxui::Color::Yellow),
+                          content | ftxui::flex}) |
+             ftxui::size(ftxui::WIDTH, ftxui::LESS_THAN, 120);
+    };
 
-            for (const auto& id : tool_order_) {
-                auto it_tool = tool_calls_.find(id);
-                if (it_tool == tool_calls_.end()) continue;
-                const auto& view = it_tool->second;
-                if (!view || view->agentId != focused_agent_id_) continue;
-                live_rows.push_back(ToolBlock(view)->Render());
-            }
+    if (s) {
+      if (!s->thinking.empty()) {
+        live_rows.push_back(
+            decorateMsg(ftxui::vbox({ftxui::text("[thinking]") | ftxui::dim,
+                                     RenderMarkdown(s->thinking, true)})));
+      }
+      if (!s->text.empty()) {
+        live_rows.push_back(decorateMsg(RenderMarkdown(s->text)));
+      }
+      if (!s->compaction_thinking.empty()) {
+        live_rows.push_back(decorateMsg(
+            ftxui::vbox({ftxui::text("[compacting:thinking]") | ftxui::dim,
+                         RenderMarkdown(s->compaction_thinking, true)})));
+      }
+      if (!s->compaction_text.empty()) {
+        live_rows.push_back(decorateMsg(
+            ftxui::vbox({ftxui::text("[compacting]") | ftxui::dim,
+                         RenderMarkdown(s->compaction_text, true)})));
+      }
+      if (s->provider_waiting) {
+        live_rows.push_back(
+            decorateMsg(ftxui::text("[provider waiting]") | ftxui::dim));
+      }
+    }
+
+    const auto &tool_order = stream_state_.getToolOrder();
+    const auto &tool_calls = stream_state_.getToolCalls();
+    for (const auto &id : tool_order) {
+      auto it_tool = tool_calls.find(id);
+      if (it_tool == tool_calls.end())
+        continue;
+      const auto &view = it_tool->second;
+      if (!view || view->agentId != focused_agent_id_)
+        continue;
+      live_rows.push_back(decorateMsg(ToolBlock(view)->Render()));
+    }
+
+    return live_rows;
+  });
+  chat_component_ = chat;
+
+  auto container = ftxui::Container::Vertical({
+      input_bar,
+      chat,
+  });
+
+  auto welcome_screen = ftxui::Renderer([] {
+    return ftxui::vbox({
+               ftxui::text("Welcome to Firmius") | ftxui::bold | ftxui::center,
+               ftxui::text("Type a message to start a new thread, or use "
+                           "/threads to resume.") |
+                   ftxui::dim | ftxui::center,
+           }) |
+           ftxui::flex | ftxui::center;
+  });
+
+  auto base_view =
+      ftxui::Renderer(container, [this, title_bar, status_bar, input_bar, chat,
+                                  welcome_screen] {
+        drainEvents();
+        // Deferred modal clearing: drain here where it's safe
+        if (pending_modal_clear_) {
+          modals_.clear();
+          pending_modal_clear_ = false;
         }
 
-        auto history_block = chat->Render() | ftxui::flex;
-        if (!live_rows.empty()) {
-            live_rows.insert(live_rows.begin(), ftxui::separator());
-        }
+        updateStatusModel();
 
-        auto chat_area = ftxui::vbox({
-            history_block,
-            ftxui::vbox(std::move(live_rows)),
-        }) | ftxui::flex;
+        auto chat_area = (view_mode_ == ViewMode::Chat)
+                             ? (chat->Render() | ftxui::flex)
+                             : welcome_screen->Render();
+
+        auto bottom_bar = ftxui::vbox({
+            ftxui::separatorLight(),
+            input_bar->Render(),
+            ftxui::separatorLight(),
+            status_bar->Render(),
+        });
+
+        if (view_mode_ == ViewMode::Welcome) {
+          // Hide title bar context in welcome
+          return ftxui::vbox({
+                     chat_area,
+                     bottom_bar,
+                 }) |
+                 ftxui::flex;
+        }
 
         return ftxui::vbox({
-            title_bar->Render(),
-            chat_area,
-            ftxui::separator(),
-            input_bar->Render(),
-            status_bar->Render(),
-        }) | ftxui::flex;
-    });
+                   title_bar->Render(),
+                   chat_area,
+                   bottom_bar,
+               }) |
+               ftxui::flex;
+      });
 
-    root_component_ = ftxui::CatchEvent(root_component_, [this, chat](ftxui::Event event) {
-        if (event.is_mouse()) {
-            auto& m = event.mouse();
-            if (m.button == ftxui::Mouse::WheelUp || m.button == ftxui::Mouse::WheelDown) {
-                if (chat_component_) {
-                    return chat_component_->OnEvent(event);
-                }
-            }
-        }
-        if (event == ftxui::Event::PageUp ||
-            event == ftxui::Event::PageDown ||
-            event == ftxui::Event::Home ||
-            event == ftxui::Event::End) {
-            if (chat_component_) {
-                return chat_component_->OnEvent(event);
-            }
-        }
-        if (event == ftxui::Event::Escape) {
-            if (harness_) harness_->abort();
-            return true;
-        }
-        return false;
-    });
+  // Layer modals using dbox
+  auto modal_renderer = ftxui::Renderer(base_view, [this, base_view]() {
+    ftxui::Element current = base_view->Render();
+    for (const auto &modal : modals_) {
+      current = ftxui::dbox(
+          {current, modal->Render() | ftxui::clear_under | ftxui::center});
+    }
+    return current;
+  });
 
-    return root_component_;
+  root_component_ = ftxui::CatchEvent(modal_renderer, [this, chat](
+                                                          ftxui::Event event) {
+    if (!modals_.empty()) {
+      // Forward event to the top modal
+      bool handled = modals_.back()->OnEvent(event);
+      if (handled)
+        return true;
+
+      // Block background interaction if a modal is up
+      if (event.is_mouse() || event.is_character()) {
+        return true;
+      }
+    }
+
+    if (event.is_mouse()) {
+      auto &m = event.mouse();
+      if (m.button == ftxui::Mouse::WheelUp ||
+          m.button == ftxui::Mouse::WheelDown) {
+        if (chat_component_) {
+          return chat_component_->OnEvent(event);
+        }
+      }
+    }
+    if (event == ftxui::Event::PageUp || event == ftxui::Event::PageDown ||
+        event == ftxui::Event::Home || event == ftxui::Event::End) {
+      if (chat_component_) {
+        return chat_component_->OnEvent(event);
+      }
+    }
+    if (event == ftxui::Event::Escape) {
+      if (!modals_.empty()) {
+        popModal();
+        return true;
+      }
+      if (harness_)
+        harness_->abort();
+      return true;
+    }
+    if (event == ftxui::Event::Special("\x10")) { // Ctrl+P (Parent)
+      if (harness_) {
+        auto agent = firmius::core::AgentRegistry::instance().getAgent(
+            focused_agent_id_);
+        if (agent && !agent->getContext().identity.parentId.empty()) {
+          std::string parentId = agent->getContext().identity.parentId;
+          if (harness_->setFocusedAgent(parentId)) {
+            focused_agent_id_ = parentId;
+            if (history_) {
+              *history_ = harness_->getAgentHistory(focused_agent_id_);
+            } else {
+              history_ = harness_->getAgentHistoryPtr(focused_agent_id_);
+            }
+            if (chat_component_)
+              chat_component_->OnEvent(ftxui::Event::Special("ThreadChanged"));
+          }
+        }
+      }
+      return true;
+    }
+
+    if (event == ftxui::Event::Special("\x0E") ||
+        event ==
+            ftxui::Event::Special("\x02")) { // Ctrl+N (Next), Ctrl+B (Prev)
+      if (harness_) {
+        auto agents = harness_->listAgents();
+        if (!agents.empty()) {
+          auto it = std::find(agents.begin(), agents.end(), focused_agent_id_);
+          if (it != agents.end()) {
+            if (event == ftxui::Event::Special("\x0E")) { // Next
+              ++it;
+              if (it == agents.end())
+                it = agents.begin();
+            } else { // Prev
+              if (it == agents.begin())
+                it = agents.end();
+              --it;
+            }
+            if (harness_->setFocusedAgent(*it)) {
+              focused_agent_id_ = *it;
+              if (history_) {
+                *history_ = harness_->getAgentHistory(focused_agent_id_);
+              } else {
+                history_ = harness_->getAgentHistoryPtr(focused_agent_id_);
+              }
+              if (chat_component_)
+                chat_component_->OnEvent(
+                    ftxui::Event::Special("ThreadChanged"));
+            }
+          }
+        }
+      }
+      return true;
+    }
+
+    return false;
+  });
+
+  return root_component_;
 }
 
-}
+} // namespace firmius::tui

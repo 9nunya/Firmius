@@ -28,14 +28,16 @@ int main() {
     meta.hostIdentifier = "local";
     meta.cwd = "/tmp";
     meta.leadPersona = "coder";
-    std::string thread1 = ThreadManager::createThread(meta);
-    std::string thread2 = ThreadManager::createThread(meta);
-    std::string thread3 = ThreadManager::createThread(meta);
+    std::string home = getenv("HOME") ? getenv("HOME") : "/root";
+    ThreadManager tm(home + "/.firmius/threads");
+    std::string thread1 = tm.createThread(meta);
+    std::string thread2 = tm.createThread(meta);
+    std::string thread3 = tm.createThread(meta);
 
     // 1. Multi-listener test
     std::atomic<int> eventCount{0};
     std::atomic<int> turnCount{0};
-    engine.addEventListener([&](const EngineEvent& ev) {
+    engine.addEventListener([&](const AppEvent& ev) {
         eventCount++;
         if (std::holds_alternative<AgentTurnCompleted>(ev)) {
             turnCount++;
@@ -64,7 +66,7 @@ int main() {
     
     // 4. Persistence Test (ephemeral)
     std::cout << "Summoning ephemeral agent..." << std::endl;
-    std::string ephemeralThread = ThreadManager::createThread(meta);
+    std::string ephemeralThread = tm.createThread(meta);
     std::string ephemeralId = engine.summonAgent(ephemeralThread, "coder", "echo ephemeral", false);
     
     // Let's wait for them
@@ -74,7 +76,6 @@ int main() {
     engine.waitForAgent(ephemeralId);
 
     // Verify ephemeral agent has no journal
-    std::string home = getenv("HOME") ? getenv("HOME") : "/root";
     std::string journalPath = home + "/.firmius/threads/" + ephemeralThread + "/" + ephemeralId + ".jsonl";
     if (std::filesystem::exists(journalPath)) {
         std::cerr << "FAILURE: Journal file exists for ephemeral agent!" << std::endl;

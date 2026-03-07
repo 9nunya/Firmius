@@ -108,7 +108,7 @@ std::string Engine::summonAgent(const std::string& threadId, const std::string& 
 
     std::unique_ptr<IHost> host;
     try {
-        auto metadata = ThreadManager::getMetadata(threadId);
+        auto metadata = ThreadManager(std::string(getenv("HOME") ? getenv("HOME") : "/root") + "/.firmius/threads").getMetadata(threadId);
         auto persona = PurposeLoader::load(personaName);
 
         AgentContext ctx;
@@ -141,7 +141,7 @@ std::string Engine::summonAgent(const std::string& threadId, const std::string& 
         std::string actualHostId = host->init();
         
         if (metadata.hostIdentifier != actualHostId) {
-            ThreadManager::updateHostIdentifier(threadId, actualHostId);
+            ThreadManager(std::string(getenv("HOME") ? getenv("HOME") : "/root") + "/.firmius/threads").updateHostIdentifier(threadId, actualHostId);
             metadata.hostIdentifier = actualHostId;
             ctx.environment.identifier = actualHostId;
         }
@@ -176,37 +176,8 @@ std::string Engine::summonAgent(const std::string& threadId, const std::string& 
 
             std::string finalSummary = "No summary provided.";
 
-            agent->run(task, [this, agentId, parentId, &errorBroadcast, &lastErrorMessage](const StreamEvent& ev) {
-                if (auto* txt = std::get_if<TextChunk>(&ev)) {
-                    broadcast(AgentText{agentId, txt->delta, parentId});
-                } else if (auto* thk = std::get_if<ThinkingChunk>(&ev)) {
-                    broadcast(AgentThinking{agentId, thk->delta, parentId});
-                } else if (auto* tcc = std::get_if<ToolCallChunk>(&ev)) {
-                    broadcast(AgentToolCall{agentId, tcc->id, tcc->nameDelta, tcc->argsDelta, parentId});
-                } else if (auto* tc = std::get_if<AgentTurnCompleted>(&ev)) {
-                    broadcast(*tc);
-                } else if (auto* ac = std::get_if<AgentCompacting>(&ev)) {
-                    broadcast(*ac);
-                } else if (auto* act = std::get_if<AgentCompactionThinking>(&ev)) {
-                    broadcast(*act);
-                } else if (auto* acx = std::get_if<AgentCompactionText>(&ev)) {
-                    broadcast(*acx);
-                } else if (auto* cc = std::get_if<ContextCompacted>(&ev)) {
-                    broadcast(*cc);
-                } else if (auto* pod = std::get_if<ProcessOutputDelta>(&ev)) {
-                    broadcast(AgentProcessOutput{agentId, pod->processId, pod->output, pod->isStderr, pod->finished, parentId});
-                } else if (auto* sr = std::get_if<StreamRetrying>(&ev)) {
-                    broadcast(AgentRetrying{agentId, sr->attempt, sr->maxAttempts, sr->httpStatus, sr->delayMs, sr->reason, parentId});
-                } else if (auto* sre = std::get_if<StreamRetryExhausted>(&ev)) {
-                    broadcast(AgentRetryFailed{agentId, sre->httpStatus, sre->reason, parentId});
-                } else if (auto* serr = std::get_if<StreamError>(&ev)) {
-                    // Mark that we've broadcast an error - don't broadcast again in catch block
-                    errorBroadcast = true;
-                    lastErrorMessage = serr->message;
-                    broadcast(AgentError{agentId, serr->message, parentId});
-                } else if (std::holds_alternative<ProviderWaiting>(ev)) {
-                    broadcast(AgentProviderWaiting{agentId, parentId});
-                }
+            agent->run(task, [this, agentId, parentId, &errorBroadcast](const StreamEvent& ev) {
+                handleStreamEvent(agentId, parentId, ev, errorBroadcast);
             });
 
             const auto& turns = agent->getContext().history->turns;
@@ -244,9 +215,9 @@ std::string Engine::resumeAgent(const std::string& threadId, const std::string& 
         throw std::runtime_error("Agent already exists: " + agentId);
     }
 
-    auto metadata = ThreadManager::getMetadata(threadId);
+    auto metadata = ThreadManager(std::string(getenv("HOME") ? getenv("HOME") : "/root") + "/.firmius/threads").getMetadata(threadId);
     auto persona = PurposeLoader::load(personaName);
-    auto history = ThreadManager::loadAgentHistory(threadId, agentId);
+    auto history = ThreadManager(std::string(getenv("HOME") ? getenv("HOME") : "/root") + "/.firmius/threads").loadAgentHistory(threadId, agentId);
 
     AgentContext ctx;
     ctx.identity.id = agentId;
@@ -277,7 +248,7 @@ std::string Engine::resumeAgent(const std::string& threadId, const std::string& 
     }
     std::string actualHostId = host->init();
     if (metadata.hostIdentifier != actualHostId) {
-        ThreadManager::updateHostIdentifier(threadId, actualHostId);
+        ThreadManager(std::string(getenv("HOME") ? getenv("HOME") : "/root") + "/.firmius/threads").updateHostIdentifier(threadId, actualHostId);
         ctx.environment.identifier = actualHostId;
     }
 
@@ -314,7 +285,7 @@ std::string Engine::waitForAgent(const std::string& agentId) {
     }
 }
 
-void Engine::addEventListener(std::function<void(const EngineEvent&)> listener) {
+void Engine::addEventListener(std::function<void(const AppEvent&)> listener) {
     std::lock_guard<std::mutex> lock(listenerMutex);
     listeners.push_back(listener);
 }
@@ -330,10 +301,41 @@ std::vector<std::string> Engine::listActiveAgents() const {
     return AgentRegistry::instance().listAll();
 }
 
-void Engine::broadcast(const EngineEvent& event) {
+void Engine::broadcast(const AppEvent& event) {
     std::lock_guard<std::mutex> lock(listenerMutex);
     for (const auto& listener : listeners) {
         listener(event);
+    }
+}
+
+void Engine::handleStreamEvent(const std::string& agentId, const std::string& parentId, const firmius::shared::StreamEvent& ev, bool& errorBroadcast) {
+    if (auto* txt = std::get_if<TextChunk>(&ev)) {
+        broadcast(AgentText{agentId, txt->delta, parentId});
+    } else if (auto* thk = std::get_if<ThinkingChunk>(&ev)) {
+        broadcast(AgentThinking{agentId, thk->delta, parentId});
+    } else if (auto* tcc = std::get_if<ToolCallChunk>(&ev)) {
+        broadcast(AgentToolCall{agentId, tcc->id, tcc->nameDelta, tcc->argsDelta, parentId});
+    } else if (auto* tc = std::get_if<AgentTurnCompleted>(&ev)) {
+        broadcast(*tc);
+    } else if (auto* ac = std::get_if<AgentCompacting>(&ev)) {
+        broadcast(*ac);
+    } else if (auto* act = std::get_if<AgentCompactionThinking>(&ev)) {
+        broadcast(*act);
+    } else if (auto* acx = std::get_if<AgentCompactionText>(&ev)) {
+        broadcast(*acx);
+    } else if (auto* cc = std::get_if<ContextCompacted>(&ev)) {
+        broadcast(*cc);
+    } else if (auto* pod = std::get_if<ProcessOutputDelta>(&ev)) {
+        broadcast(AgentProcessOutput{agentId, pod->processId, pod->output, pod->isStderr, pod->finished, parentId});
+    } else if (auto* sr = std::get_if<StreamRetrying>(&ev)) {
+        broadcast(AgentRetrying{agentId, sr->attempt, sr->maxAttempts, sr->httpStatus, sr->delayMs, sr->reason, parentId});
+    } else if (auto* sre = std::get_if<StreamRetryExhausted>(&ev)) {
+        broadcast(AgentRetryFailed{agentId, sre->httpStatus, sre->reason, parentId});
+    } else if (auto* serr = std::get_if<StreamError>(&ev)) {
+        errorBroadcast = true;
+        broadcast(AgentError{agentId, serr->message, parentId});
+    } else if (std::holds_alternative<ProviderWaiting>(ev)) {
+        broadcast(AgentProviderWaiting{agentId, parentId});
     }
 }
 
@@ -370,70 +372,45 @@ void Engine::executeTask(const std::string& agentId, const std::string& task) {
         agentFutures[agentId] = prom->get_future().share();
     }
 
-    std::thread([this, agentId, task, agent, prom]() mutable {
-        std::string parentId = "";
-        // Track if we already broadcast an error from the stream
-        bool errorBroadcast = false;
-        
-        try {
-            if (agent) {
-                parentId = agent->getContext().identity.parentId;
-            }
-            std::string finalSummary = "No summary provided.";
-
-            agent->run(task, [this, agentId, parentId, &errorBroadcast](const StreamEvent& ev) {
-                if (auto* txt = std::get_if<TextChunk>(&ev)) {
-                    broadcast(AgentText{agentId, txt->delta, parentId});
-                } else if (auto* thk = std::get_if<ThinkingChunk>(&ev)) {
-                    broadcast(AgentThinking{agentId, thk->delta, parentId});
-                } else if (auto* tcc = std::get_if<ToolCallChunk>(&ev)) {
-                    broadcast(AgentToolCall{agentId, tcc->id, tcc->nameDelta, tcc->argsDelta, parentId});
-                } else if (auto* tc = std::get_if<AgentTurnCompleted>(&ev)) {
-                    broadcast(*tc);
-                } else if (auto* ac = std::get_if<AgentCompacting>(&ev)) {
-                    broadcast(*ac);
-                } else if (auto* act = std::get_if<AgentCompactionThinking>(&ev)) {
-                    broadcast(*act);
-                } else if (auto* acx = std::get_if<AgentCompactionText>(&ev)) {
-                    broadcast(*acx);
-                } else if (auto* cc = std::get_if<ContextCompacted>(&ev)) {
-                    broadcast(*cc);
-                } else if (auto* pod = std::get_if<ProcessOutputDelta>(&ev)) {
-                    broadcast(AgentProcessOutput{agentId, pod->processId, pod->output, pod->isStderr, pod->finished, parentId});
-                } else if (auto* sr = std::get_if<StreamRetrying>(&ev)) {
-                    broadcast(AgentRetrying{agentId, sr->attempt, sr->maxAttempts, sr->httpStatus, sr->delayMs, sr->reason, parentId});
-                } else if (auto* sre = std::get_if<StreamRetryExhausted>(&ev)) {
-                    broadcast(AgentRetryFailed{agentId, sre->httpStatus, sre->reason, parentId});
-                } else if (auto* serr = std::get_if<StreamError>(&ev)) {
-                    // Mark that we've broadcast an error - don't broadcast again in catch block
-                    errorBroadcast = true;
-                    broadcast(AgentError{agentId, serr->message, parentId});
-                } else if (std::holds_alternative<ProviderWaiting>(ev)) {
-                    broadcast(AgentProviderWaiting{agentId, parentId});
+    {
+        std::lock_guard<std::mutex> lock(taskThreadsMutex_);
+        taskThreads_.emplace_back([this, agentId, task, agent, prom]() mutable {
+            std::string parentId = "";
+            // Track if we already broadcast an error from the stream
+            bool errorBroadcast = false;
+            
+            try {
+                if (agent) {
+                    parentId = agent->getContext().identity.parentId;
                 }
-            });
+                std::string finalSummary = "No summary provided.";
 
-            const auto& turns = agent->getContext().history->turns;
-            if (!turns.empty() && !turns.back().messages.empty()) {
-                const auto& lastMsg = turns.back().messages.back();
-                std::string content;
-                for (const auto& part : lastMsg.content) {
-                    if (auto* txt = std::get_if<TextContent>(&part)) content += txt->text;
+                agent->run(task, [this, agentId, parentId, &errorBroadcast](const StreamEvent& ev) {
+                    handleStreamEvent(agentId, parentId, ev, errorBroadcast);
+                });
+
+                const auto& turns = agent->getContext().history->turns;
+                if (!turns.empty() && !turns.back().messages.empty()) {
+                    const auto& lastMsg = turns.back().messages.back();
+                    std::string content;
+                    for (const auto& part : lastMsg.content) {
+                        if (auto* txt = std::get_if<TextContent>(&part)) content += txt->text;
+                    }
+                    if (!content.empty()) finalSummary = content;
                 }
-                if (!content.empty()) finalSummary = content;
-            }
 
-            broadcast(AgentCompleted{agentId, finalSummary, parentId});
-            prom->set_value(finalSummary);
+                broadcast(AgentCompleted{agentId, finalSummary, parentId});
+                prom->set_value(finalSummary);
 
-        } catch (const std::exception& e) {
-            // Only broadcast error if we haven't already done so from StreamError
-            if (!errorBroadcast) {
-                broadcast(AgentError{agentId, e.what(), parentId});
+            } catch (const std::exception& e) {
+                // Only broadcast error if we haven't already done so from StreamError
+                if (!errorBroadcast) {
+                    broadcast(AgentError{agentId, e.what(), parentId});
+                }
+                prom->set_exception(std::make_exception_ptr(e));
             }
-            prom->set_exception(std::make_exception_ptr(e));
-        }
-    }).detach();
+        });
+    }
 }
 
 UndoResult Engine::undoAgentTurns(const std::string& agentId, int count) {
@@ -470,6 +447,17 @@ UndoResult Engine::undoAgentAfterTimestamp(const std::string& agentId, uint64_t 
 
     broadcast(HistoryUndone{agentId, ctx.history->threadId, result.turnsRemoved, result.compactionReversed, ctx.identity.parentId});
     return result;
+}
+
+void Engine::shutdown() {
+    {
+        std::lock_guard<std::mutex> lock(taskThreadsMutex_);
+        taskThreads_.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lock(listenerMutex);
+        fleet.clear();
+    }
 }
 
 }

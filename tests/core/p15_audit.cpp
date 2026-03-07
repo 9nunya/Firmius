@@ -56,7 +56,9 @@ int main(int /*argc*/, char** /*argv*/) {
     meta.hostIdentifier = "";
     meta.cwd = "/tmp";
     meta.leadPersona = "researcher";
-    std::string threadId = ThreadManager::createThread(meta);
+    std::string home = getenv("HOME") ? getenv("HOME") : "/root";
+    ThreadManager tm(home + "/.firmius/threads");
+    std::string threadId = tm.createThread(meta);
 
     // Test 1: Create a subagent and get its ID
     std::cout << "[TEST 1] Creating new subagent via summonAgent..." << std::endl;

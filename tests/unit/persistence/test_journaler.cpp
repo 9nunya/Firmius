@@ -38,7 +38,11 @@ protected:
 
         threadId = "test-thread-" + std::to_string(getpid());
         agentId = "test-agent";
+
+        tm = std::make_unique<ThreadManager>(tempDir + "/.firmius/threads");
     }
+
+    std::unique_ptr<ThreadManager> tm;
 
     void TearDown() override {
         if (!originalHome.empty()) {
@@ -78,7 +82,7 @@ TEST_F(JournalerTest, appendTurn_roundtrip) {
         journaler.appendTurn(turn);
     }
 
-    AgentHistory history = ThreadManager::loadAgentHistory(threadId, agentId);
+    AgentHistory history = tm->loadAgentHistory(threadId, agentId);
 
     EXPECT_EQ(history.turns.size(), 1u);
     EXPECT_EQ(history.turns[0].turnId, turn.turnId);
@@ -96,7 +100,7 @@ TEST_F(JournalerTest, appendTurn_multiple) {
         journaler.appendTurn(turn3);
     }
 
-    AgentHistory history = ThreadManager::loadAgentHistory(threadId, agentId);
+    AgentHistory history = tm->loadAgentHistory(threadId, agentId);
 
     EXPECT_EQ(history.turns.size(), 3u);
     EXPECT_EQ(history.turns[0].turnId, "turn-001");
@@ -139,7 +143,7 @@ TEST_F(JournalerTest, appendTurn_concurrent) {
         t.join();
     }
 
-    AgentHistory history = ThreadManager::loadAgentHistory(threadId, agentId);
+    AgentHistory history = tm->loadAgentHistory(threadId, agentId);
 
     EXPECT_EQ(history.turns.size(), static_cast<size_t>(numThreads * turnsPerThread));
 }

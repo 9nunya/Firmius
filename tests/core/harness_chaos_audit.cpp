@@ -1,6 +1,6 @@
 #include "harness/Harness.hpp"
 #include "AgentRegistry.hpp"
-#include "HarnessEvents.hpp"
+#include "Events.hpp"
 
 #include <Panic.hpp>
 #include <EnvLoader.hpp>
@@ -18,7 +18,6 @@
 
 using namespace firmius::core;
 using namespace firmius::shared;
-using namespace firmius::harness;
 using namespace std::chrono_literals;
 
 constexpr int EXIT_SUCCESS_ALL = 0;
@@ -90,25 +89,25 @@ int phase1_event_routing(Harness& harnessInst, TestState& state, const std::stri
 
     state.events.reset();
 
-    int subId = harnessInst.subscribe([&state](const HarnessEvent& ev) {
+    int subId = harnessInst.subscribe([&state](const AppEvent& ev) {
         std::visit([&state](auto&& e) {
             using T = std::decay_t<decltype(e)>;
 
-            if constexpr (std::is_same_v<T, ToolCallStarted>) {
+            if constexpr (std::is_same_v<T, AgentToolCall>) {
                 std::lock_guard<std::mutex> lk(state.events.mtx);
                 state.events.gotToolCall = true;
                 state.events.capturedToolCallId = e.toolCallId;
                 state.events.cv.notify_one();
             }
-            else if constexpr (std::is_same_v<T, ProcessOutputChunk>) {
+            else if constexpr (std::is_same_v<T, AgentProcessOutput>) {
                 std::lock_guard<std::mutex> lk(state.events.mtx);
                 state.events.gotProcessOutput = true;
                 if (state.events.capturedProcessPid.empty()) {
-                    state.events.capturedProcessPid = e.pid;
+                    state.events.capturedProcessPid = e.processId;
                 }
                 state.events.cv.notify_one();
             }
-            else if constexpr (std::is_same_v<T, MessageChunk>) {
+            else if constexpr (std::is_same_v<T, AgentText> || std::is_same_v<T, AgentThinking>) {
                 std::lock_guard<std::mutex> lk(state.events.mtx);
                 state.events.gotMessageChunk = true;
                 state.events.messageChunkCount++;
@@ -283,11 +282,11 @@ int phase3_abort_mid_process(Harness& harnessInst, TestState& state, const std::
     state.events.reset();
     std::atomic<bool> gotSleepToolCall{false};
 
-    int subId = harnessInst.subscribe([&](const HarnessEvent& ev) {
+    int subId = harnessInst.subscribe([&](const AppEvent& ev) {
         std::visit([&](auto&& e) {
             using T = std::decay_t<decltype(e)>;
-            if constexpr (std::is_same_v<T, ToolCallStarted>) {
-                if (e.name == "process_execute" || e.args.find("sleep") != std::string::npos) {
+            if constexpr (std::is_same_v<T, AgentToolCall>) {
+                if (e.toolName == "process_execute" || e.toolArgs.find("sleep") != std::string::npos) {
                     std::lock_guard<std::mutex> lk(state.events.mtx);
                     gotSleepToolCall = true;
                     state.events.cv.notify_one();
@@ -468,10 +467,10 @@ int phase5_forced_compaction(Harness& harnessInst, TestState& state, const std::
 
     state.events.reset();
 
-    int subId = harnessInst.subscribe([&state](const HarnessEvent& ev) {
+    int subId = harnessInst.subscribe([&state](const AppEvent& ev) {
         std::visit([&state](auto&& e) {
             using T = std::decay_t<decltype(e)>;
-            if constexpr (std::is_same_v<T, AgentCompactingEvent>) {
+            if constexpr (std::is_same_v<T, AgentCompacting>) {
                 std::lock_guard<std::mutex> lk(state.events.mtx);
                 state.events.gotCompaction = true;
                 state.events.cv.notify_one();

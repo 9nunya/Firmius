@@ -54,7 +54,7 @@ public:
     /**
      * @brief Adds a listener for all engine events.
      */
-    void addEventListener(std::function<void(const EngineEvent&)> listener);
+    void addEventListener(std::function<void(const AppEvent&)> listener);
 
     /**
      * @brief Cancels a running agent.
@@ -108,17 +108,26 @@ public:
      */
     UndoResult undoAgentAfterTimestamp(const std::string& agentId, uint64_t timestamp);
 
+    /**
+     * @brief Shuts down the engine and waits for all threads to finish.
+     */
+    void shutdown();
+
 private:
     Engine();
     void initProviders();
     void reap();
-    void broadcast(const EngineEvent& event);
+    void broadcast(const AppEvent& event);
+    void handleStreamEvent(const std::string& agentId, const std::string& parentId, const firmius::shared::StreamEvent& ev, bool& errorBroadcast);
 
     ToolRegistry toolRegistry;  // Owned by Engine, outlives agents
     
-    std::vector<std::function<void(const EngineEvent&)>> listeners;
+    std::vector<std::function<void(const AppEvent&)>> listeners;
     std::mutex listenerMutex;
     std::vector<std::jthread> fleet;
+    
+    std::vector<std::jthread> taskThreads_;
+    std::mutex taskThreadsMutex_;
     
     std::map<std::string, std::shared_future<std::string>> agentFutures;
     std::mutex futuresMutex;
