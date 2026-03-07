@@ -184,6 +184,7 @@ void Agent::run(const std::string &task,
     throw std::runtime_error("Agent is already running");
   }
   running = true;
+  booting = false;
   interrupted = false;
   context.state.currentStatus = AgentStatus::Idle;
   context.state.fatalError = std::nullopt;

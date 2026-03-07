@@ -43,6 +43,7 @@ public:
         : context_(context)
         , host_(host ? host : std::make_shared<MockHost>())
         , interrupted_(false)
+        , booting_(false)
         , nextProcessId_(1) {
         if (!context_.history) {
             context_.history = std::make_shared<AgentHistory>();
@@ -57,6 +58,7 @@ public:
         context_.history->turns.clear();
         context_.state = AgentState();
         interrupted_ = false;
+        booting_ = false;
     }
 
     /**
@@ -122,6 +124,39 @@ public:
     }
 
     /**
+     * @brief Checks if the agent is currently running.
+     * @return True if the agent is executing a task.
+     */
+    bool isRunning() const override {
+        return context_.state.currentStatus != AgentStatus::Idle;
+    }
+
+    bool isBooting() const override {
+        return booting_;
+    }
+
+    void setBooting(bool b) override {
+        booting_ = b;
+    }
+
+    void setModel(const std::string& providerId,
+                  const std::string& modelId) override {
+        recordCall("setModel", {{"providerId", providerId}, {"modelId", modelId}});
+        context_.config.providerId = providerId;
+        context_.config.modelId = modelId;
+    }
+
+    void emitProcessSpawned(const std::string& processId,
+                            const std::string& toolCallId,
+                            const std::string& command) override {
+        recordCall("emitProcessSpawned", {
+            {"processId", processId},
+            {"toolCallId", toolCallId},
+            {"command", command}
+        });
+    }
+
+    /**
      * @brief Spawns a background process.
      * @param command The command to spawn.
      * @param cwd Optional working directory.
@@ -129,11 +164,13 @@ public:
      * @return A unique process ID.
      */
     std::string spawnProcess(const std::string& command,
+                             const std::string& toolCallId = "",
                              const std::string& cwd = "",
                              const std::map<std::string, std::string>& env = {}) override {
         (void)env;
         recordCall("spawnProcess", {
             {"command", command},
+            {"toolCallId", toolCallId},
             {"cwd", cwd}
         });
         
@@ -396,6 +433,7 @@ private:
     AgentContext context_;
     std::shared_ptr<MockHost> host_;
     bool interrupted_;
+    bool booting_;
     int nextProcessId_;
     std::vector<MockAgentCall> calls_;
     std::map<std::string, ProcessResult> spawnResults_;

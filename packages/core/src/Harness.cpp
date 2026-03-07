@@ -413,7 +413,7 @@ void Harness::send(const std::string &text) {
         threadAgentMap_[tid] = requestedId;
       } else {
         auto agent = AgentRegistry::instance().getAgent(fid);
-        if (agent && agent->isRunning()) {
+        if (agent && (agent->isRunning() || agent->isBooting())) {
           agentRunning = true;
           messageQueue_.push({messageId, text});
         }

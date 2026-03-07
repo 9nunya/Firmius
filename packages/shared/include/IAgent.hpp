@@ -74,6 +74,8 @@ public:
    * @return True if the agent is executing a task.
    */
   virtual bool isRunning() const = 0;
+  virtual bool isBooting() const = 0;
+  virtual void setBooting(bool b) = 0;
 
   /**
    * @brief Spawns a background process.

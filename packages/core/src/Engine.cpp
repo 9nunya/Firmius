@@ -152,6 +152,7 @@ std::string Engine::summonAgent(const std::string& threadId, const std::string& 
         }
 
         auto agent = std::make_shared<Agent>(ctx, std::move(host), toolRegistry, jnl);
+        agent->setBooting(true);
         AgentRegistry::instance().registerAgent(agentId, agent);
 
     } catch (...) {
@@ -262,6 +263,7 @@ std::string Engine::resumeAgent(const std::string& threadId, const std::string& 
     }
 
     auto agent = std::make_shared<Agent>(ctx, std::move(host), toolRegistry, jnl);
+    agent->setBooting(true);
     AgentRegistry::instance().registerAgent(agentId, agent);
 
     std::lock_guard<std::mutex> lock(listenerMutex);

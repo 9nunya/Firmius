@@ -74,6 +74,8 @@ public:
   MOCK_METHOD(void, setModel, (const std::string &, const std::string &),
               (override));
   MOCK_METHOD(bool, isRunning, (), (const, override));
+  MOCK_METHOD(bool, isBooting, (), (const, override));
+  MOCK_METHOD(void, setBooting, (bool), (override));
   MOCK_METHOD(void, emitProcessSpawned,
               (const std::string &, const std::string &, const std::string &),
               (override));

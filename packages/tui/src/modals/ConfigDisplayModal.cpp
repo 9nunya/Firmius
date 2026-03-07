@@ -1,6 +1,7 @@
 #include "modals/ConfigDisplayModal.hpp"
 #include "TUIState.hpp"
 #include "harness/Harness.hpp"
+#include "AgentRegistry.hpp"
 #include <ftxui/component/component.hpp>
 #include <ftxui/dom/elements.hpp>
 #include <string>
@@ -13,15 +14,30 @@ ftxui::Component ConfigDisplayModal::create(TuiState &state) {
 
   auto component = ftxui::Renderer([=, &h]() {
     const auto &config = h.getConfig();
+    std::string focusedAgent = h.focusedAgentId();
+    std::string currentThread = h.currentThreadId();
+
     std::string providerId = config.defaultProviderId;
     std::string modelId = config.defaultModelId;
-    std::string temperature = std::to_string(config.defaultTemperature);
+    float tempVal = config.defaultTemperature;
+    std::optional<uint32_t> maxTokensVal = config.defaultMaxTokens;
+
+    auto agent = firmius::core::AgentRegistry::instance().getAgent(focusedAgent);
+    if (agent) {
+      const auto &agentConfig = agent->getContext().config;
+      providerId = agentConfig.providerId;
+      modelId = agentConfig.modelId;
+      tempVal = agentConfig.temperature;
+      maxTokensVal = agentConfig.maxTokens;
+    }
+
+    std::string temperature = std::to_string(tempVal);
     temperature.erase(temperature.find_last_not_of('0') + 1, std::string::npos);
     if (temperature.back() == '.')
       temperature += '0';
 
-    std::string maxTokens = config.defaultMaxTokens.has_value()
-                                ? std::to_string(config.defaultMaxTokens.value())
+    std::string maxTokens = maxTokensVal.has_value()
+                                ? std::to_string(maxTokensVal.value())
                                 : "default";
 
     std::vector<std::string> apiKeyNames;
@@ -37,9 +53,6 @@ ftxui::Component ConfigDisplayModal::create(TuiState &state) {
       provOptLines.push_back(key + " = " + val);
     }
 
-    std::string focusedAgent = h.focusedAgentId();
-    std::string currentThread = h.currentThreadId();
-
     ftxui::Elements rows;
     rows.push_back(ftxui::hbox(
         {ftxui::text("Provider:    ") | ftxui::bold, ftxui::text(providerId)}));
@@ -54,13 +67,10 @@ ftxui::Component ConfigDisplayModal::create(TuiState &state) {
       rows.push_back(ftxui::separator());
       rows.push_back(ftxui::hbox({ftxui::text("Thread:      ") | ftxui::bold,
                                   ftxui::text(currentThread.substr(0, 12))}));
-    }
-
-    if (!focusedAgent.empty()) {
-      if (currentThread.empty())
-        rows.push_back(ftxui::separator());
-      rows.push_back(ftxui::hbox({ftxui::text("Agent:       ") | ftxui::bold,
-                                  ftxui::text(focusedAgent.substr(0, 12))}));
+      if (!focusedAgent.empty()) {
+        rows.push_back(ftxui::hbox({ftxui::text("Agent:       ") | ftxui::bold,
+                                    ftxui::text(focusedAgent.substr(0, 12))}));
+      }
     }
 
     if (!apiKeyNames.empty()) {

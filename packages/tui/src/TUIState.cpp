@@ -143,6 +143,12 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
           focused_agent_id_ = harness_->focusedAgentId();
           pending_modal_clear_ = true;
 
+          if (title_model_) {
+            title_model_->title = thread_.title;
+            title_model_->thread_id = thread_.threadId;
+          }
+          setViewMode(ViewMode::Chat);
+
           if (chat_component_) {
             chat_component_->OnEvent(ftxui::Event::Special("ThreadChanged"));
           }

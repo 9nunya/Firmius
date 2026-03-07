@@ -63,9 +63,10 @@ public:
     /**
      * @brief Performs environment-specific initialization.
      */
-    void init() override {
+    std::string init() override {
         recordCall("init", {});
         initialized_ = true;
+        return config_.hostId;
     }
 
     /**

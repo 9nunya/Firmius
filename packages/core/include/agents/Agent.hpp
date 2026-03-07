@@ -40,6 +40,8 @@ public:
   void setModel(const std::string &providerId,
                 const std::string &modelId) override;
   bool isRunning() const override { return running.load(); }
+  bool isBooting() const override { return booting.load(); }
+  void setBooting(bool b) override { booting = b; }
 
   std::string
   spawnProcess(const std::string &command, const std::string &toolCallId = "",
@@ -78,6 +80,7 @@ private:
   bool debugPrettyPrint = false;
   std::atomic<bool> interrupted{false};
   std::atomic<bool> running{false};
+  std::atomic<bool> booting{false};
   std::mutex runMutex;
   std::function<void(const shared::StreamEvent &)> eventCallback;
   std::mutex callbackMutex;
