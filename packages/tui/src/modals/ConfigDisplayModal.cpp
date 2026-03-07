@@ -5,6 +5,7 @@
 #include <ftxui/component/component.hpp>
 #include <ftxui/dom/elements.hpp>
 #include <string>
+#include <memory>
 
 namespace firmius::tui {
 
@@ -12,66 +13,41 @@ ftxui::Component ConfigDisplayModal::create(TuiState &state) {
   auto &h = firmius::core::Harness::instance();
   auto offset = std::make_shared<int>(0);
 
-  auto component = ftxui::Renderer([=, &h]() {
-    const auto &config = h.getConfig();
-    std::string focusedAgent = h.focusedAgentId();
-    std::string currentThread = h.currentThreadId();
+  // We capture everything by value to avoid referencing locals in the renderer
+  // and we perform the data gathering once here to avoid calling Harness::getConfig()
+  // every frame, which prevents the deadlock.
+  
+  const auto config = h.getConfig();
+  std::string providerId = config.defaultProviderId;
+  std::string modelId = config.defaultModelId;
 
-    std::string providerId = config.defaultProviderId;
-    std::string modelId = config.defaultModelId;
-    float tempVal = config.defaultTemperature;
-    std::optional<uint32_t> maxTokensVal = config.defaultMaxTokens;
+  auto agentId = h.focusedAgentId();
+  auto agent = agentId.empty() ? nullptr : firmius::core::AgentRegistry::instance().getAgent(agentId);
+  if (agent) {
+    const auto &agentConfig = agent->getContext().config;
+    providerId = agentConfig.providerId;
+    modelId = agentConfig.modelId;
+  }
 
-    auto agent = firmius::core::AgentRegistry::instance().getAgent(focusedAgent);
-    if (agent) {
-      const auto &agentConfig = agent->getContext().config;
-      providerId = agentConfig.providerId;
-      modelId = agentConfig.modelId;
-      tempVal = agentConfig.temperature;
-      maxTokensVal = agentConfig.maxTokens;
-    }
+  std::vector<std::string> apiKeyNames;
+  for (const auto &[key, val] : config.apiKeys) {
+    std::string masked =
+        val.size() > 8 ? val.substr(0, 4) + "..." + val.substr(val.size() - 4)
+                       : "****";
+    apiKeyNames.push_back(key + " = " + masked);
+  }
 
-    std::string temperature = std::to_string(tempVal);
-    temperature.erase(temperature.find_last_not_of('0') + 1, std::string::npos);
-    if (temperature.back() == '.')
-      temperature += '0';
+  std::vector<std::string> provOptLines;
+  for (const auto &[key, val] : config.providerOptions) {
+    provOptLines.push_back(key + " = " + val);
+  }
 
-    std::string maxTokens = maxTokensVal.has_value()
-                                ? std::to_string(maxTokensVal.value())
-                                : "default";
-
-    std::vector<std::string> apiKeyNames;
-    for (const auto &[key, val] : config.apiKeys) {
-      std::string masked =
-          val.size() > 8 ? val.substr(0, 4) + "..." + val.substr(val.size() - 4)
-                         : "****";
-      apiKeyNames.push_back(key + " = " + masked);
-    }
-
-    std::vector<std::string> provOptLines;
-    for (const auto &[key, val] : config.providerOptions) {
-      provOptLines.push_back(key + " = " + val);
-    }
-
+  auto component = ftxui::Renderer([=]() {
     ftxui::Elements rows;
     rows.push_back(ftxui::hbox(
         {ftxui::text("Provider:    ") | ftxui::bold, ftxui::text(providerId)}));
     rows.push_back(ftxui::hbox(
         {ftxui::text("Model:       ") | ftxui::bold, ftxui::text(modelId)}));
-    rows.push_back(ftxui::hbox({ftxui::text("Temperature: ") | ftxui::bold,
-                                ftxui::text(temperature)}));
-    rows.push_back(ftxui::hbox(
-        {ftxui::text("Max Tokens:  ") | ftxui::bold, ftxui::text(maxTokens)}));
-
-    if (!currentThread.empty()) {
-      rows.push_back(ftxui::separator());
-      rows.push_back(ftxui::hbox({ftxui::text("Thread:      ") | ftxui::bold,
-                                  ftxui::text(currentThread.substr(0, 12))}));
-      if (!focusedAgent.empty()) {
-        rows.push_back(ftxui::hbox({ftxui::text("Agent:       ") | ftxui::bold,
-                                    ftxui::text(focusedAgent.substr(0, 12))}));
-      }
-    }
 
     if (!apiKeyNames.empty()) {
       rows.push_back(ftxui::separator());

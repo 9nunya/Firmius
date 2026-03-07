@@ -138,13 +138,6 @@ std::string Engine::summonAgent(const std::string& threadId, const std::string& 
         } else {
             host = std::make_unique<LocalHost>();
         }
-        std::string actualHostId = host->init();
-        
-        if (metadata.hostIdentifier != actualHostId) {
-            ThreadManager(std::string(getenv("HOME") ? getenv("HOME") : "/root") + "/.firmius/threads").updateHostIdentifier(threadId, actualHostId);
-            metadata.hostIdentifier = actualHostId;
-            ctx.environment.identifier = actualHostId;
-        }
 
         std::shared_ptr<Journaler> jnl = nullptr;
         if (ctx.config.persistHistory) {

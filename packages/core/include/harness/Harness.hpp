@@ -218,7 +218,7 @@ private:
   std::string focusedAgentId_;
   ThreadManager threadManager_;
   ThreadLockManager lockManager_;
-  std::mutex mutex_;
+  std::recursive_mutex mutex_;
 
   // Subscribers
   std::map<int, std::function<void(const firmius::shared::AppEvent &)>>

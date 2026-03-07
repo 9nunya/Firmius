@@ -141,6 +141,7 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
         } else if constexpr (std::is_same_v<T, ThreadChanged>) {
           thread_ = e.metadata;
           focused_agent_id_ = harness_->focusedAgentId();
+          history_ = harness_->getAgentHistoryPtr(focused_agent_id_);
           pending_modal_clear_ = true;
 
           if (title_model_) {
@@ -169,11 +170,20 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
         } else if constexpr (std::is_same_v<T, AgentSpawned>) {
           if (e.parentId.empty() && focused_agent_id_.empty()) {
             focused_agent_id_ = e.agentId;
+            history_ = harness_->getAgentHistoryPtr(focused_agent_id_);
             if (chat_component_) {
               chat_component_->OnEvent(ftxui::Event::Special("ThreadChanged"));
             }
           }
           stream_state_.handleAgentSpawned(e, focused_agent_id_);
+        } else if constexpr (std::is_same_v<T, UserMessageSent>) {
+          if (focused_agent_id_.empty()) {
+            focused_agent_id_ = harness_->focusedAgentId();
+            history_ = harness_->getAgentHistoryPtr(focused_agent_id_);
+          }
+          if (chat_component_) {
+            chat_component_->OnEvent(ftxui::Event::Special("ThreadChanged"));
+          }
         }
       },
       ev);
@@ -319,6 +329,10 @@ ftxui::Component TuiState::root() {
         }
 
         updateStatusModel();
+
+        if (modals_.empty()) {
+          input_bar->TakeFocus();
+        }
 
         auto chat_area = (view_mode_ == ViewMode::Chat)
                              ? (chat->Render() | ftxui::flex)

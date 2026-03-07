@@ -21,7 +21,7 @@ ftxui::Component ThreadPickerModal::create(TuiState &state) {
       *threads_ptr = current_threads;
       entries->clear();
       for (const auto &t : *threads_ptr) {
-        entries->push_back(t.title + " (" + t.threadId.substr(0, 8) + ")");
+        entries->push_back(t.title);
       }
     }
     

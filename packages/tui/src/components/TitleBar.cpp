@@ -11,8 +11,7 @@ ftxui::Component TitleBar(const std::shared_ptr<TitleBarModel>& model) {
         }
         return ftxui::hbox(
             ftxui::text(model->title) | ftxui::bold,
-            ftxui::filler(),
-            ftxui::text(model->thread_id)
+            ftxui::filler()
         ) | ftxui::border;
     });
 }

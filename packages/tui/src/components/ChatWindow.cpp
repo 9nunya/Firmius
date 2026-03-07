@@ -14,7 +14,13 @@
 #include <vector>
 
 bool isSystemTurn(const firmius::shared::AgentTurn &turn) {
-  return turn.messages.front().role == firmius::shared::Role::System;
+  if (turn.messages.empty())
+    return false;
+  for (const auto &msg : turn.messages) {
+    if (msg.role != firmius::shared::Role::System)
+      return false;
+  }
+  return true;
 }
 
 static std::string rolePrefix(firmius::shared::Role role) {
@@ -43,7 +49,7 @@ public:
   }
 
   ftxui::Element Render() override { return render_(); }
-  bool Focusable() const override { return true; }
+  bool Focusable() const override { return false; }
   bool OnEvent(ftxui::Event event) override {
     if (child_)
       return child_->OnEvent(event);
@@ -63,7 +69,14 @@ public:
       : history_getter_(std::move(history_getter)),
         live_rows_provider_(std::move(live_rows_provider)) {
 
-    history_container_ = ftxui::Container::Vertical({});
+    history_inner_ = ftxui::Container::Vertical({});
+    history_container_ = ftxui::Renderer(history_inner_, [this] {
+      ftxui::Elements elements;
+      for (size_t i = 0; i < history_inner_->ChildCount(); ++i) {
+        elements.push_back(history_inner_->ChildAt(i)->Render());
+      }
+      return ftxui::vbox(std::move(elements));
+    });
 
     auto live_rows_cmp = ftxui::Make<RowComponent>(nullptr, [this] {
       if (!live_rows_provider_)
@@ -97,6 +110,13 @@ public:
 
     container_ = ftxui::Container::Vertical(
         {history_container_, live_rows_cmp, tail_spacer_});
+    container_ = ftxui::Renderer(container_, [this, live_rows_cmp] {
+      return ftxui::vbox({
+          history_container_->Render(),
+          live_rows_cmp->Render(),
+          tail_spacer_->Render(),
+      });
+    });
 
     scrollable_ = firmius::tui::ScrollableBox(container_);
     Add(scrollable_);
@@ -106,6 +126,8 @@ public:
     RebuildIfNeeded();
     return scrollable_ ? scrollable_->Render() : ftxui::text("");
   }
+
+  bool Focusable() const override { return false; }
 
   bool OnEvent(ftxui::Event event) override {
     if (event == ftxui::Event::Special("ThreadChanged")) {
@@ -142,7 +164,7 @@ private:
     last_turns_size_ = turns_size;
 
     rows_.clear();
-    history_container_->DetachAllChildren();
+    history_inner_->DetachAllChildren();
 
     if (history) {
       std::unordered_map<std::string, bool> seen_tool_call;
@@ -176,17 +198,21 @@ private:
 
           for (const auto &part : msg.content) {
             if (auto *txt = std::get_if<firmius::shared::TextContent>(&part)) {
-              auto row = ftxui::Make<RowComponent>(nullptr, [decorateMsg, txt] {
-                return decorateMsg(firmius::tui::RenderMarkdown(txt->text));
-              });
+              std::string text = txt->text;
+              auto row = ftxui::Make<RowComponent>(
+                  nullptr, [decorateMsg, text = std::move(text)] {
+                    return decorateMsg(firmius::tui::RenderMarkdown(text));
+                  });
               rows_.push_back(row);
             } else if (auto *thk =
                            std::get_if<firmius::shared::ThinkingContent>(
                                &part)) {
-              auto row = ftxui::Make<RowComponent>(nullptr, [decorateMsg, thk] {
-                return decorateMsg(
-                    firmius::tui::RenderMarkdown(thk->thinking, true));
-              });
+              std::string thinking = thk->thinking;
+              auto row = ftxui::Make<RowComponent>(
+                  nullptr, [decorateMsg, thinking = std::move(thinking)] {
+                    return decorateMsg(
+                        firmius::tui::RenderMarkdown(thinking, true));
+                  });
               rows_.push_back(row);
             } else if (auto *tc = std::get_if<firmius::shared::ToolCallContent>(
                            &part)) {
@@ -231,7 +257,12 @@ private:
     }
 
     for (auto &row : rows_)
-      history_container_->Add(row);
+      history_inner_->Add(row);
+
+    if (history_inner_->ChildCount() == 0) {
+      history_inner_->Add(
+          ftxui::Make<RowComponent>(nullptr, [] { return ftxui::text(""); }));
+    }
 
     if (scrollable_) {
       scrollable_->RequestScrollToBottom();
@@ -240,8 +271,9 @@ private:
 
   std::function<const firmius::shared::AgentHistory*()> history_getter_;
   std::function<std::vector<ftxui::Element>()> live_rows_provider_;
-  size_t last_turns_size_ = 0;
+  size_t last_turns_size_ = static_cast<size_t>(-1);
   std::vector<ftxui::Component> rows_;
+  ftxui::Component history_inner_;
   ftxui::Component history_container_;
   ftxui::Component container_;
   ftxui::Component tail_spacer_;

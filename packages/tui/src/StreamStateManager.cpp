@@ -113,7 +113,7 @@ void StreamStateManager::handleAgentSpawned(
     if (pair.second && pair.second->agentId == e.parentId &&
         pair.second->phase == ToolPhase::Called) {
       pair.second->live_process_output +=
-          "[subagent spawned: " + e.personaName + " (" + e.agentId + ")]\n";
+          "[subagent spawned: " + e.personaName + "]\n";
       break;
     }
   }

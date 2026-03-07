@@ -93,11 +93,11 @@ Harness &Harness::instance() {
 Harness::Harness() : threadManager_(getFirmiusHome() + "/threads"), nextSubscriptionId_(0) {}
 
 void Harness::init() {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
 
   shared::Panic::addExtraInfo(
       PANIC_INFO_HARNESS_STATE, [this]() -> std::string {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         std::stringstream ss;
         ss << "Current Thread: "
            << (currentThreadId_.empty() ? "<none>" : currentThreadId_) << "\n";
@@ -157,7 +157,7 @@ void Harness::init() {
 void Harness::shutdown() {
   std::vector<std::jthread> toJoin;
   {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     toJoin = std::move(backgroundThreads_);
 
     shared::Panic::removeExtraInfo(PANIC_INFO_HARNESS_STATE);
@@ -198,7 +198,7 @@ std::string Harness::newThread(HostType hostType, const std::string &cwd,
   ThreadMetadata metadata;
 
   {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
 
     ThreadMetadata newMeta;
     newMeta.title = "Thread-" + StringUtil::generateUuid().substr(0, 8);
@@ -245,7 +245,7 @@ bool Harness::switchThread(const std::string &threadId) {
   int ownerPid = -1;
 
   {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
 
     if (lockManager_.isLocked(threadId)) {
       alreadyLocked = true;
@@ -354,7 +354,7 @@ bool Harness::switchThread(const std::string &threadId) {
 bool Harness::resumeLast() {
   std::string threadId;
   {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (currentThreadId_.empty()) {
       std::ifstream sessionFile(getSessionPath());
       if (sessionFile.is_open()) {
@@ -389,7 +389,7 @@ void Harness::send(const std::string &text) {
   bool noThread = false;
 
   {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (currentThreadId_.empty()) {
       noThread = true;
     } else {
@@ -443,7 +443,7 @@ void Harness::send(const std::string &text) {
 }
 
 void Harness::abort() {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (focusedAgentId_.empty())
     return;
 
@@ -467,24 +467,24 @@ void Harness::abort() {
 
 int Harness::subscribe(
     std::function<void(const firmius::shared::AppEvent &)> callback) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   int id = nextSubscriptionId_++;
   subscribers_[id] = std::move(callback);
   return id;
 }
 
 void Harness::unsubscribe(const int &subscriptionId) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   subscribers_.erase(subscriptionId);
 }
 
 std::string Harness::currentThreadId() {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   return currentThreadId_;
 }
 
 std::string Harness::focusedAgentId() {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   return focusedAgentId_;
 }
 
@@ -506,7 +506,7 @@ bool Harness::isDescendant(const std::string &agentId,
 void Harness::emitEvent(const firmius::shared::AppEvent &event) {
   std::vector<std::function<void(const firmius::shared::AppEvent &)>> cbs;
   {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     for (auto &[id, cb] : subscribers_) {
       cbs.push_back(cb);
     }
@@ -517,125 +517,132 @@ void Harness::emitEvent(const firmius::shared::AppEvent &event) {
 }
 
 void Harness::routeEngineEvent(const firmius::shared::AppEvent &event) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::vector<AppEvent> toEmit;
+  {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
 
-  std::string agentId;
-  std::string parentId;
+    std::string agentId;
+    std::string parentId;
 
-  std::visit(
-      [&](auto &&ev) {
-        using T = std::decay_t<decltype(ev)>;
-        if constexpr (std::is_same_v<T, AgentSpawned>) {
-          agentId = ev.agentId;
-          parentId = ev.parentId;
-        } else if constexpr (requires { ev.agentId; }) {
-          agentId = ev.agentId;
-        }
+    std::visit(
+        [&](auto &&ev) {
+          using T = std::decay_t<decltype(ev)>;
+          if constexpr (std::is_same_v<T, AgentSpawned>) {
+            agentId = ev.agentId;
+            parentId = ev.parentId;
+          } else if constexpr (requires { ev.agentId; }) {
+            agentId = ev.agentId;
+          }
 
-        if constexpr (requires { ev.parentId; }) {
-          parentId = ev.parentId;
-        }
-      },
-      event);
+          if constexpr (requires { ev.parentId; }) {
+            parentId = ev.parentId;
+          }
+        },
+        event);
 
-  bool isAgentInCurrentThread = false;
-  if (!agentId.empty()) {
-    auto agent = AgentRegistry::instance().getAgent(agentId);
-    if (agent) {
-      std::string agentThreadId = agent->getContext().history->threadId;
-      isAgentInCurrentThread = (agentThreadId == currentThreadId_);
+    bool isAgentInCurrentThread = false;
+    if (!agentId.empty()) {
+      auto agent = AgentRegistry::instance().getAgent(agentId);
+      if (agent) {
+        std::string agentThreadId = agent->getContext().history->threadId;
+        isAgentInCurrentThread = (agentThreadId == currentThreadId_);
+      }
     }
-  }
 
-  bool isAgentSpawnedEvent = std::holds_alternative<AgentSpawned>(event);
-  bool isDescendantOfFocused =
-      !focusedAgentId_.empty() && isDescendant(agentId, focusedAgentId_);
-  bool shouldRouteEvent =
-      isAgentInCurrentThread || isDescendantOfFocused || isAgentSpawnedEvent;
-  if (!shouldRouteEvent)
-    return;
+    bool isAgentSpawnedEvent = std::holds_alternative<AgentSpawned>(event);
+    bool isDescendantOfFocused =
+        !focusedAgentId_.empty() && isDescendant(agentId, focusedAgentId_);
+    bool shouldRouteEvent =
+        isAgentInCurrentThread || isDescendantOfFocused || isAgentSpawnedEvent;
+    if (!shouldRouteEvent)
+      return;
 
-  std::visit(
-      [&](auto &&ev) {
-        using T = std::decay_t<decltype(ev)>;
-        if constexpr (std::is_same_v<T, AgentSpawned>) {
-          auto agent = AgentRegistry::instance().getAgent(ev.agentId);
-          std::string providerId;
-          std::string modelId;
-          uint32_t maxTokens = 0;
-          if (agent) {
-            const auto &config = agent->getContext().config;
-            providerId = config.providerId;
-            modelId = config.modelId;
-            maxTokens = config.maxTokens.value_or(0);
-          }
-
-          AgentSpawned enriched = ev;
-          enriched.providerId = providerId;
-          enriched.modelId = modelId;
-          enriched.maxTokens = maxTokens;
-          emitEvent(enriched);
-
-          if (!currentThreadId_.empty()) {
-            try {
-              auto manifest = threadManager_.readAgentManifest(currentThreadId_);
-              AgentManifestEntry entry;
-              entry.persona = ev.personaName;
-              entry.parentId = ev.parentId;
-              entry.friendlyName = ev.friendlyName;
-              entry.title = ev.title;
-              entry.persistHistory = ev.persistHistory;
-              manifest[ev.agentId] = entry;
-              threadManager_.writeAgentManifest(currentThreadId_, manifest);
-            } catch (...) {
+    std::visit(
+        [&](auto &&ev) {
+          using T = std::decay_t<decltype(ev)>;
+          if constexpr (std::is_same_v<T, AgentSpawned>) {
+            auto agent = AgentRegistry::instance().getAgent(ev.agentId);
+            std::string providerId;
+            std::string modelId;
+            uint32_t maxTokens = 0;
+            if (agent) {
+              const auto &config = agent->getContext().config;
+              providerId = config.providerId;
+              modelId = config.modelId;
+              maxTokens = config.maxTokens.value_or(0);
             }
-          }
-        } else if constexpr (std::is_same_v<T, AgentTurnCompleted>) {
-          emitEvent(ev);
-          if (!currentThreadId_.empty() &&
-              titleGeneratedThreads_.find(currentThreadId_) ==
-                  titleGeneratedThreads_.end()) {
-            std::string firstMessage;
-            for (const auto &turnMsg : ev.turn.messages) {
-              for (const auto &part : turnMsg.content) {
-                if (auto *txt = std::get_if<TextContent>(&part)) {
-                  firstMessage += txt->text;
-                }
+
+            AgentSpawned enriched = ev;
+            enriched.providerId = providerId;
+            enriched.modelId = modelId;
+            enriched.maxTokens = maxTokens;
+            toEmit.push_back(enriched);
+
+            if (!currentThreadId_.empty()) {
+              try {
+                auto manifest = threadManager_.readAgentManifest(currentThreadId_);
+                AgentManifestEntry entry;
+                entry.persona = ev.personaName;
+                entry.parentId = ev.parentId;
+                entry.friendlyName = ev.friendlyName;
+                entry.title = ev.title;
+                entry.persistHistory = ev.persistHistory;
+                manifest[ev.agentId] = entry;
+                threadManager_.writeAgentManifest(currentThreadId_, manifest);
+              } catch (...) {
               }
             }
-            if (!firstMessage.empty()) {
-              titleGeneratedThreads_.insert(currentThreadId_);
-              maybeGenerateTitle(currentThreadId_, firstMessage);
+          } else if constexpr (std::is_same_v<T, AgentTurnCompleted>) {
+            toEmit.push_back(ev);
+            if (!currentThreadId_.empty() &&
+                titleGeneratedThreads_.find(currentThreadId_) ==
+                    titleGeneratedThreads_.end()) {
+              std::string firstMessage;
+              for (const auto &turnMsg : ev.turn.messages) {
+                for (const auto &part : turnMsg.content) {
+                  if (auto *txt = std::get_if<TextContent>(&part)) {
+                    firstMessage += txt->text;
+                  }
+                }
+              }
+              if (!firstMessage.empty()) {
+                titleGeneratedThreads_.insert(currentThreadId_);
+                maybeGenerateTitle(currentThreadId_, firstMessage);
+              }
             }
+            if (ev.agentId == focusedAgentId_) {
+              drainQueue();
+            }
+          } else if constexpr (std::is_same_v<T, AgentCompleted>) {
+            toEmit.push_back(ev);
+            if (ev.agentId == focusedAgentId_) {
+              drainQueue();
+            }
+          } else if constexpr (std::is_same_v<T, AgentFinished>) {
+            toEmit.push_back(ev);
+          } else if constexpr (std::is_same_v<T, ThreadChanged> ||
+                               std::is_same_v<T, ThreadLocked> ||
+                               std::is_same_v<T, ThreadDeleted> ||
+                               std::is_same_v<T, ConfigUpdated> ||
+                               std::is_same_v<T, ThreadTitleUpdated> ||
+                               std::is_same_v<T, MessageQueued> ||
+                               std::is_same_v<T, MessageDequeued> ||
+                               std::is_same_v<T, UserMessageSent>) {
+            toEmit.push_back(ev);
+          } else {
+            toEmit.push_back(ev);
           }
-          if (ev.agentId == focusedAgentId_) {
-            drainQueue();
-          }
-        } else if constexpr (std::is_same_v<T, AgentCompleted>) {
-          emitEvent(ev);
-          if (ev.agentId == focusedAgentId_) {
-            drainQueue();
-          }
-        } else if constexpr (std::is_same_v<T, AgentFinished>) {
-          emitEvent(ev);
-        } else if constexpr (std::is_same_v<T, ThreadChanged> ||
-                             std::is_same_v<T, ThreadLocked> ||
-                             std::is_same_v<T, ThreadDeleted> ||
-                             std::is_same_v<T, ConfigUpdated> ||
-                             std::is_same_v<T, ThreadTitleUpdated> ||
-                             std::is_same_v<T, MessageQueued> ||
-                             std::is_same_v<T, MessageDequeued> ||
-                             std::is_same_v<T, UserMessageSent>) {
-          emitEvent(ev);
-        } else {
-          emitEvent(ev);
-        }
-      },
-      event);
+        },
+        event);
+  }
+
+  for (const auto &ev : toEmit) {
+    emitEvent(ev);
+  }
 }
 
 void Harness::deleteThread(const std::string &threadId) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
 
   if (threadId == currentThreadId_) {
     emitEvent(firmius::shared::AgentError{"", "Cannot delete the currently active thread"});
@@ -650,12 +657,12 @@ void Harness::deleteThread(const std::string &threadId) {
 }
 
 std::vector<ThreadMetadata> Harness::listThreads() {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   return threadManager_.listThreadsWithMetadata();
 }
 
 std::vector<std::string> Harness::listAgents(const std::string &threadId) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   std::string tid = threadId.empty() ? currentThreadId_ : threadId;
   if (tid.empty())
     return {};
@@ -672,7 +679,7 @@ std::vector<std::string> Harness::listAgents(const std::string &threadId) {
 }
 
 bool Harness::setFocusedAgent(const std::string &agentId) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (currentThreadId_.empty() ||
       !AgentRegistry::instance().getAgent(agentId)) {
     return false;
@@ -710,7 +717,7 @@ void Harness::updateConfig(const UserConfig &config) {
 
 void Harness::switchModel(const std::string &providerId,
                           const std::string &modelId) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
 
   auto agent = focusedAgentId_.empty()
                    ? nullptr
@@ -729,7 +736,7 @@ void Harness::switchModel(const std::string &providerId,
 
 void Harness::interruptAndSwitchModel(const std::string &providerId,
                                       const std::string &modelId) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (focusedAgentId_.empty()) {
     emitEvent(firmius::shared::AgentError{"", "No focused agent to switch model on"});
     return;
@@ -754,7 +761,7 @@ void Harness::interruptAndSwitchModel(const std::string &providerId,
 }
 
 UndoResult Harness::undoTurns(int count) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (focusedAgentId_.empty()) {
     emitEvent(firmius::shared::AgentError{"", "No focused agent for undo"});
     return {};
@@ -764,7 +771,7 @@ UndoResult Harness::undoTurns(int count) {
 }
 
 UndoResult Harness::undoMessages(int count) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (focusedAgentId_.empty()) {
     emitEvent(firmius::shared::AgentError{"", "No focused agent for undo"});
     return {};
@@ -774,7 +781,7 @@ UndoResult Harness::undoMessages(int count) {
 }
 
 UndoResult Harness::undoAfterTimestamp(uint64_t timestamp) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (focusedAgentId_.empty()) {
     emitEvent(firmius::shared::AgentError{"", "No focused agent for undo"});
     return {};
@@ -788,9 +795,14 @@ void Harness::maybeGenerateTitle(const std::string &threadId,
                                  const std::string &firstMessage) {
   backgroundThreads_.emplace_back([this, threadId, firstMessage]() {
     try {
+      std::string agentId;
+      {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        agentId = threadAgentMap_[threadId];
+      }
+
       auto metadata = threadManager_.getMetadata(threadId);
-      auto agent =
-          AgentRegistry::instance().getAgent(threadAgentMap_[threadId]);
+      auto agent = AgentRegistry::instance().getAgent(agentId);
       if (!agent)
         return;
 
@@ -857,7 +869,7 @@ void Harness::drainQueue() {
 }
 
 void Harness::writeInterruptionRecord() {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (currentThreadId_.empty())
     return;
 
@@ -920,7 +932,7 @@ void Harness::writeInterruptionRecord() {
 
 shared::AgentHistory
 Harness::getAgentHistory(const std::string &agentId) const {
-  std::lock_guard<std::mutex> lock(const_cast<std::mutex &>(mutex_));
+  std::lock_guard<std::recursive_mutex> lock(const_cast<std::recursive_mutex &>(mutex_));
   if (currentThreadId_.empty())
     return {};
   return threadManager_.loadAgentHistory(currentThreadId_, agentId);
@@ -928,7 +940,7 @@ Harness::getAgentHistory(const std::string &agentId) const {
 
 std::shared_ptr<shared::AgentHistory>
 Harness::getAgentHistoryPtr(const std::string &agentId) const {
-  std::lock_guard<std::mutex> lock(const_cast<std::mutex &>(mutex_));
+  std::lock_guard<std::recursive_mutex> lock(const_cast<std::recursive_mutex &>(mutex_));
   if (!agentId.empty()) {
     auto agent = AgentRegistry::instance().getAgent(agentId);
     if (agent) {
