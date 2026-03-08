@@ -873,16 +873,15 @@ void AntigravityProvider::processSSELine(
     // Handle Usage Metadata
     if (resp.HasMember("usageMetadata") && resp["usageMetadata"].IsObject()) {
       const auto &usage = resp["usageMetadata"];
-      UsageMetadata meta;
+      AgentMetrics metrics;
       if (usage.HasMember("promptTokenCount"))
-        meta.promptTokens = usage["promptTokenCount"].GetInt();
+        metrics.tokens.prompt = usage["promptTokenCount"].GetUint();
       if (usage.HasMember("candidatesTokenCount"))
-        meta.completionTokens = usage["candidatesTokenCount"].GetInt();
+        metrics.tokens.completion = usage["candidatesTokenCount"].GetUint();
       if (usage.HasMember("totalTokenCount"))
-        meta.totalTokens = usage["totalTokenCount"].GetInt();
-      onEvent(meta);
+        metrics.tokens.total = usage["totalTokenCount"].GetUint();
+      onEvent(metrics);
     }
-    const auto &resp = d["response"];
 
     if (resp.HasMember("candidates") && resp["candidates"].IsArray() &&
         resp["candidates"].Size() > 0) {
@@ -909,6 +908,12 @@ void AntigravityProvider::processSSELine(
             } else if (part.HasMember("thinking") &&
                        part["thinking"].IsString()) {
               onEvent(ThinkingChunk{part["thinking"].GetString()});
+            } else if (part.HasMember("thought") &&
+                       part["thought"].IsString()) {
+              onEvent(ThinkingChunk{part["thought"].GetString()});
+            } else if (part.HasMember("reasoning") &&
+                       part["reasoning"].IsString()) {
+              onEvent(ThinkingChunk{part["reasoning"].GetString()});
             } else if (part.HasMember("functionCall") &&
                        part["functionCall"].IsObject()) {
               const auto &fc = part["functionCall"];
