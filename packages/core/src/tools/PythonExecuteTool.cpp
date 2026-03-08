@@ -1,5 +1,6 @@
 #include "tools/PythonExecuteTool.hpp"
 #include "IAgent.hpp"
+#include "utils/FSUtil.hpp"
 #include "utils/StringUtil.hpp"
 #include <filesystem>
 #include <thread>
@@ -23,9 +24,24 @@ shared::ToolResult PythonExecuteTool::execute(const PythonExecuteInput& input, s
     std::string processId;
 
     try {
+        std::string effectiveCwd = ctx.agent.getContext().environment.cwd;
+        effectiveCwd = ctx.agent.resolvePath(effectiveCwd);
+
+        // Security check
+        bool allowed = false;
+        for (const auto& p : ctx.agent.getContext().permissions.allowedPaths) {
+            if (FSUtil::isSubpath(effectiveCwd, p)) {
+                allowed = true;
+                break;
+            }
+        }
+        if (!allowed && !ctx.agent.getContext().permissions.allowOutsideCwd) {
+            return shared::ToolResult::fail("Access denied: cwd outside allowed directories: " + effectiveCwd);
+        }
+
         ctx.host.writeFile(tempFile, std::vector<uint8_t>(input.code.begin(), input.code.end()));
 
-        processId = ctx.agent.spawnProcess("python3 " + tempFile, ctx.currentToolCallId, ctx.agent.getContext().environment.cwd);
+        processId = ctx.agent.spawnProcess("python3 " + tempFile, ctx.currentToolCallId, effectiveCwd);
         ctx.agent.addBlockingProcessId(processId);
 
         shared::ProcessSnapshot snap;

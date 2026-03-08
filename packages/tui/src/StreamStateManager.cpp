@@ -38,6 +38,8 @@ void StreamStateManager::handleAgentTurnCompleted(
 void StreamStateManager::handleAgentProviderWaiting(
     const shared::AgentProviderWaiting &e) {
   streams_[e.agentId].provider_waiting = true;
+  // Provider started a new request — any retry is resolved
+  retry_status_.clear();
 }
 
 void StreamStateManager::handleAgentToolCallChunk(
@@ -160,6 +162,32 @@ const std::vector<std::string> &StreamStateManager::getToolOrder() const {
 const std::unordered_map<std::string, std::shared_ptr<ToolCallView>> &
 StreamStateManager::getToolCalls() const {
   return tool_calls_;
+}
+
+void StreamStateManager::handleAgentError(const shared::AgentError &e) {
+  error_messages_.push_back("[ERROR] " + e.message);
+}
+
+void StreamStateManager::handleAgentRetrying(const shared::AgentRetrying &e) {
+  retry_status_ = "Retrying (" + std::to_string(e.attempt) + "/" +
+                  std::to_string(e.maxAttempts) + ", HTTP " +
+                  std::to_string(e.httpStatus) + ", " + e.reason + ", ~" +
+                  std::to_string(e.delayMs / 1000) + "s)...";
+}
+
+void StreamStateManager::handleAgentRetryFailed(
+    const shared::AgentRetryFailed &e) {
+  retry_status_.clear();
+  error_messages_.push_back("[ERROR] Retries exhausted (HTTP " +
+                            std::to_string(e.httpStatus) + "): " + e.reason);
+}
+
+const std::vector<std::string> &StreamStateManager::getErrorMessages() const {
+  return error_messages_;
+}
+
+const std::string &StreamStateManager::getRetryStatus() const {
+  return retry_status_;
 }
 
 } // namespace firmius::tui

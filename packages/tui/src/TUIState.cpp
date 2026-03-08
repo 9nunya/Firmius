@@ -95,8 +95,8 @@ void TuiState::init(firmius::core::Harness &harness,
   input_model_->cursor = &cursor_;
   input_model_->placeholder = "Type a message...";
 
-  subscription_id_ = harness_->subscribe(
-      [this](const firmius::shared::AppEvent &ev) { 
+  subscription_id_ =
+      harness_->subscribe([this](const firmius::shared::AppEvent &ev) {
         event_queue_.push(ev);
         if (screen_) {
           screen_->PostEvent(ftxui::Event::Custom);
@@ -116,7 +116,7 @@ void TuiState::shutdown() {
 }
 
 void TuiState::drainEvents() {
-  for (const auto& ev : event_queue_.drainAll()) {
+  for (const auto &ev : event_queue_.drainAll()) {
     onEvent(ev);
   }
 }
@@ -188,6 +188,12 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
           if (chat_component_) {
             chat_component_->OnEvent(ftxui::Event::Special("ThreadChanged"));
           }
+        } else if constexpr (std::is_same_v<T, AgentError>) {
+          stream_state_.handleAgentError(e);
+        } else if constexpr (std::is_same_v<T, AgentRetrying>) {
+          stream_state_.handleAgentRetrying(e);
+        } else if constexpr (std::is_same_v<T, AgentRetryFailed>) {
+          stream_state_.handleAgentRetryFailed(e);
         }
       },
       ev);
@@ -250,61 +256,80 @@ ftxui::Component TuiState::root() {
       }
     }
   });
-  auto chat = ChatWindow([this]() -> const firmius::shared::AgentHistory* {
-    if (focused_agent_id_.empty()) return nullptr;
-    auto agent = firmius::core::AgentRegistry::instance().getAgent(focused_agent_id_);
-    if (!agent) return history_.get();
-    return agent->getContext().history.get();
-  }, [this]() {
-    std::vector<ftxui::Element> live_rows;
-    const auto *s = stream_state_.getStream(focused_agent_id_);
+  auto chat = ChatWindow(
+      [this]() -> const firmius::shared::AgentHistory * {
+        if (focused_agent_id_.empty())
+          return nullptr;
+        auto agent = firmius::core::AgentRegistry::instance().getAgent(
+            focused_agent_id_);
+        if (!agent)
+          return history_.get();
+        return agent->getContext().history.get();
+      },
+      [this]() {
+        std::vector<ftxui::Element> live_rows;
+        const auto *s = stream_state_.getStream(focused_agent_id_);
 
-    auto decorateMsg = [](const ftxui::Element &content) {
-      return ftxui::hbox({ftxui::text("* ") | ftxui::bold |
-                              ftxui::color(ftxui::Color::Yellow),
-                          content | ftxui::flex}) |
-             ftxui::size(ftxui::WIDTH, ftxui::LESS_THAN, 120);
-    };
+        auto decorateMsg = [](const ftxui::Element &content) {
+          return ftxui::hbox({ftxui::text("* ") | ftxui::bold |
+                                  ftxui::color(ftxui::Color::Yellow),
+                              content | ftxui::flex}) |
+                 ftxui::size(ftxui::WIDTH, ftxui::LESS_THAN, 120);
+        };
 
-    if (s) {
-      if (!s->thinking.empty()) {
-        live_rows.push_back(
-            decorateMsg(ftxui::vbox({ftxui::text("[thinking]") | ftxui::dim,
-                                     RenderMarkdown(s->thinking, true)})));
-      }
-      if (!s->text.empty()) {
-        live_rows.push_back(decorateMsg(RenderMarkdown(s->text)));
-      }
-      if (!s->compaction_thinking.empty()) {
-        live_rows.push_back(decorateMsg(
-            ftxui::vbox({ftxui::text("[compacting:thinking]") | ftxui::dim,
-                         RenderMarkdown(s->compaction_thinking, true)})));
-      }
-      if (!s->compaction_text.empty()) {
-        live_rows.push_back(decorateMsg(
-            ftxui::vbox({ftxui::text("[compacting]") | ftxui::dim,
-                         RenderMarkdown(s->compaction_text, true)})));
-      }
-      if (s->provider_waiting) {
-        live_rows.push_back(
-            decorateMsg(ftxui::text("[provider waiting]") | ftxui::dim));
-      }
-    }
+        if (s) {
+          if (!s->thinking.empty()) {
+            live_rows.push_back(
+                decorateMsg(ftxui::vbox({ftxui::text("[thinking]") | ftxui::dim,
+                                         RenderMarkdown(s->thinking, true)})));
+          }
+          if (!s->text.empty()) {
+            live_rows.push_back(decorateMsg(RenderMarkdown(s->text)));
+          }
+          if (!s->compaction_thinking.empty()) {
+            live_rows.push_back(decorateMsg(
+                ftxui::vbox({ftxui::text("[compacting:thinking]") | ftxui::dim,
+                             RenderMarkdown(s->compaction_thinking, true)})));
+          }
+          if (!s->compaction_text.empty()) {
+            live_rows.push_back(decorateMsg(
+                ftxui::vbox({ftxui::text("[compacting]") | ftxui::dim,
+                             RenderMarkdown(s->compaction_text, true)})));
+          }
+          if (s->provider_waiting) {
+            live_rows.push_back(
+                decorateMsg(ftxui::text("[provider waiting]") | ftxui::dim));
+          }
+        }
 
-    const auto &tool_order = stream_state_.getToolOrder();
-    const auto &tool_calls = stream_state_.getToolCalls();
-    for (const auto &id : tool_order) {
-      auto it_tool = tool_calls.find(id);
-      if (it_tool == tool_calls.end())
-        continue;
-      const auto &view = it_tool->second;
-      if (!view || view->agentId != focused_agent_id_)
-        continue;
-      live_rows.push_back(decorateMsg(ToolBlock(view)->Render()));
-    }
+        const auto &tool_order = stream_state_.getToolOrder();
+        const auto &tool_calls = stream_state_.getToolCalls();
+        for (const auto &id : tool_order) {
+          auto it_tool = tool_calls.find(id);
+          if (it_tool == tool_calls.end())
+            continue;
+          const auto &view = it_tool->second;
+          if (!view || view->agentId != focused_agent_id_)
+            continue;
+          live_rows.push_back(decorateMsg(ToolBlock(view)->Render()));
+        }
 
-    return live_rows;
-  });
+        // Persistent error messages (rendered in red)
+        for (const auto &err : stream_state_.getErrorMessages()) {
+          live_rows.push_back(ftxui::text(err) | ftxui::bold |
+                              ftxui::color(ftxui::Color::Red));
+        }
+
+        // Ephemeral retry status (rendered dim yellow, disappears when
+        // resolved)
+        const auto &retry = stream_state_.getRetryStatus();
+        if (!retry.empty()) {
+          live_rows.push_back(ftxui::text(retry) | ftxui::dim |
+                              ftxui::color(ftxui::Color::Yellow));
+        }
+
+        return live_rows;
+      });
   chat_component_ = chat;
 
   auto container = ftxui::Container::Vertical({

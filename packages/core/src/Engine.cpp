@@ -125,8 +125,17 @@ std::string Engine::summonAgent(const std::string& threadId, const std::string& 
         ctx.config.persistHistory = persistHistory;
         ctx.identity.name = persona.name;
         ctx.identity.role = persona.title;
+        ctx.config.stop = persona.stopSequences;
         ctx.permissions.allowedScopes = persona.allowedScopes;
-        ctx.permissions.allowedPaths = {metadata.cwd, "/tmp"};
+        
+        std::string home = getenv("HOME") ? getenv("HOME") : "/root";
+        ctx.permissions.allowedPaths = {
+            metadata.cwd + "/**",
+            "/tmp/**",
+            home + "/.agent/skills/**",
+            home + "/.firmius/**"
+        };
+
         ctx.environment.cwd = metadata.cwd;
         ctx.environment.identifier = metadata.hostIdentifier;
         ctx.environment.type = metadata.hostOptions.type;
@@ -228,6 +237,7 @@ std::string Engine::resumeAgent(const std::string& threadId, const std::string& 
     ctx.identity.friendlyName = parentId.empty() ? "lead" : friendlyName;
     ctx.identity.name = persona.name;
     ctx.identity.role = title.empty() ? persona.title : title;
+    ctx.config.stop = persona.stopSequences;
     const auto& userCfg = shared::ConfigLoader::instance().getConfig();
     ctx.config.providerId = userCfg.defaultProviderId;
     ctx.config.modelId = userCfg.defaultModelId;
@@ -237,7 +247,15 @@ std::string Engine::resumeAgent(const std::string& threadId, const std::string& 
     }
     ctx.config.persistHistory = persistHistory;
     ctx.permissions.allowedScopes = persona.allowedScopes;
-    ctx.permissions.allowedPaths = {metadata.cwd, "/tmp"};
+
+    std::string home = getenv("HOME") ? getenv("HOME") : "/root";
+    ctx.permissions.allowedPaths = {
+        metadata.cwd + "/**",
+        "/tmp/**",
+        home + "/.agent/skills/**",
+        home + "/.firmius/**"
+    };
+
     ctx.environment.cwd = metadata.cwd;
     ctx.environment.identifier = metadata.hostIdentifier;
     ctx.environment.type = metadata.hostOptions.type;

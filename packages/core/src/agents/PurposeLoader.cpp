@@ -33,10 +33,34 @@ firmius::shared::ToolScope stringToScope(const std::string& s) {
 }
 }
 
+std::map<std::string, std::string> PurposeLoader::customPlaceholders;
+
+void PurposeLoader::registerPlaceholder(const std::string& key, const std::string& value) {
+    customPlaceholders[key] = value;
+}
+
 Persona PurposeLoader::load(const std::string& purpose) {
-    std::string path = resolvePromptsDir() + purpose + ".md";
+    std::string promptsDir = resolvePromptsDir();
+    std::string path = promptsDir + purpose + ".md";
     std::ifstream file(path);
-    if (!file.is_open()) throw std::runtime_error("Could not load persona: " + path);
+    if (!file.is_open()) {
+        std::vector<std::string> purposes;
+        if (std::filesystem::exists(promptsDir)) {
+            for (const auto& entry : std::filesystem::directory_iterator(promptsDir)) {
+                if (entry.path().extension() == ".md" && 
+                    entry.path().stem() != "base" && 
+                    entry.path().stem() != "COMPACTION_PROMPT") {
+                    purposes.push_back(entry.path().stem().string());
+                }
+            }
+        }
+        std::string purposeList;
+        for (size_t i = 0; i < purposes.size(); ++i) {
+            purposeList += "'" + purposes[i] + "'";
+            if (i < purposes.size() - 1) purposeList += ", ";
+        }
+        throw std::runtime_error("Could not load persona '" + purpose + "'. Available purposes are: " + purposeList);
+    }
 
     std::string line;
     std::string frontmatter;
@@ -81,6 +105,16 @@ Persona PurposeLoader::load(const std::string& purpose) {
                     persona.allowedScopes.push_back(stringToScope(cleaned));
                 }
             }
+        } else if (key == "stop") {
+            if (value.front() == '[' && value.back() == ']') {
+                std::string list = value.substr(1, value.size() - 2);
+                auto parts = StringUtil::split(list, ',');
+                for (auto& p : parts) {
+                    std::string cleaned = p;
+                    if (cleaned.front() == '"' && cleaned.back() == '"') cleaned = cleaned.substr(1, cleaned.size() - 2);
+                    persona.stopSequences.push_back(cleaned);
+                }
+            }
         }
     }
 
@@ -94,6 +128,45 @@ std::string PurposeLoader::composeSystemPrompt(const Persona& persona, const Age
         std::stringstream buffer;
         buffer << baseFile.rdbuf();
         basePrompt = buffer.str();
+    }
+
+    // Dynamic placeholders
+    std::map<std::string, std::string> placeholders;
+    placeholders["{{AGENT_NAME}}"] = persona.name;
+    placeholders["{{AGENT_TITLE}}"] = persona.title;
+    placeholders["{{CWD}}"] = context.environment.cwd;
+
+    std::string promptsDir = resolvePromptsDir();
+    std::vector<std::string> purposes;
+    if (std::filesystem::exists(promptsDir)) {
+        for (const auto& entry : std::filesystem::directory_iterator(promptsDir)) {
+            if (entry.path().extension() == ".md" && 
+                entry.path().stem() != "base" && 
+                entry.path().stem() != "COMPACTION_PROMPT") {
+                purposes.push_back(entry.path().stem().string());
+            }
+        }
+    }
+    std::string purposeList;
+    std::sort(purposes.begin(), purposes.end());
+    purposes.erase(std::unique(purposes.begin(), purposes.end()), purposes.end());
+    for (size_t i = 0; i < purposes.size(); ++i) {
+        purposeList += purposes[i];
+        if (i < purposes.size() - 1) purposeList += ", ";
+    }
+    placeholders["{{REGISTERED_PURPOSES}}"] = purposeList;
+
+    // Custom placeholders
+    for (const auto& [key, value] : customPlaceholders) {
+        placeholders[key] = value;
+    }
+
+    for (const auto& [key, value] : placeholders) {
+        size_t pos = 0;
+        while ((pos = basePrompt.find(key, pos)) != std::string::npos) {
+            basePrompt.replace(pos, key.length(), value);
+            pos += value.length();
+        }
     }
 
     std::stringstream ss;

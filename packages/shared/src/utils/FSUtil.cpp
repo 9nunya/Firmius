@@ -20,6 +20,13 @@ std::string FSUtil::resolvePath(const std::string& path, const std::string& base
 
 bool FSUtil::isSubpath(const std::string& path, const std::string& allowedRoot) {
     std::string normPath = path;
+    std::string pattern = allowedRoot;
+    
+    if (pattern.size() >= 3 && pattern.substr(pattern.size() - 3) == "/**") {
+        std::string prefix = pattern.substr(0, pattern.size() - 2); 
+        return normPath.compare(0, prefix.size(), prefix) == 0;
+    }
+
     std::string normRoot = allowedRoot;
     
     // Ensure trailing slash for root comparison

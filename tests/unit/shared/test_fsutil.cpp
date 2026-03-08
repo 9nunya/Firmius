@@ -121,12 +121,21 @@ TEST_F(FSUtilTest, resolvePath_emptyPath) {
     EXPECT_EQ(result, "/home/user");
 }
 
-TEST_F(FSUtilTest, isSubpath_emptyRoot) {
-    std::string path = "/any/path";
-    std::string emptyRoot = "";
+TEST_F(FSUtilTest, isSubpath_wildcard) {
+    std::string path = "/tmp/foo/bar";
+    std::string root = "/tmp/**";
     
-    // Empty root matches any path (empty prefix matches everything)
-    EXPECT_TRUE(FSUtil::isSubpath(path, emptyRoot));
+    EXPECT_TRUE(FSUtil::isSubpath(path, root));
+    
+    std::string path2 = "/other/path";
+    EXPECT_FALSE(FSUtil::isSubpath(path2, root));
+}
+
+TEST_F(FSUtilTest, isSubpath_wildcard_nested) {
+    std::string path = "/home/user/.agent/skills/git.js";
+    std::string root = "/home/user/.agent/skills/**";
+    
+    EXPECT_TRUE(FSUtil::isSubpath(path, root));
 }
 
 } // namespace

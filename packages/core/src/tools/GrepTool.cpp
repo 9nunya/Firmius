@@ -1,5 +1,6 @@
 #include "tools/GrepTool.hpp"
 #include "IAgent.hpp"
+#include "utils/FSUtil.hpp"
 #include "utils/StringUtil.hpp"
 #include <rapidjson/document.h>
 #include <sstream>
@@ -7,10 +8,24 @@
 #include <iostream>
 
 namespace firmius::core {
+using namespace firmius::shared;
 
 shared::ToolResult GrepTool::execute(const GrepInput& input, shared::ToolContext& ctx) {
     try {
         std::string absPath = ctx.agent.resolvePath(input.path);
+
+        // Security check
+        bool allowed = false;
+        for (const auto& p : ctx.agent.getContext().permissions.allowedPaths) {
+            if (FSUtil::isSubpath(absPath, p)) {
+                allowed = true;
+                break;
+            }
+        }
+        if (!allowed && !ctx.agent.getContext().permissions.allowOutsideCwd) {
+            return shared::ToolResult::fail("Access denied: path outside allowed directories: " + absPath);
+        }
+
         std::string command = "grep -rnHE --binary-files=without-match " + shared::StringUtil::shellEscape(input.pattern);
         if (input.context_before > 0) command += " -B " + std::to_string(input.context_before);
         if (input.context_after > 0) command += " -A " + std::to_string(input.context_after);

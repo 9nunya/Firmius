@@ -257,7 +257,7 @@ void Agent::run(const std::string &task,
       bool forceCompact = (std::getenv("FORCE_COMPACTION") != nullptr);
       if (forceCompact || (model.contextWindow > 0 &&
                            context.aggregateMetrics.tokens.contextSize >
-                                model.contextWindow * 0.8)) {
+                               model.contextWindow * 0.8)) {
         compactContext(onEvent);
       }
       if (interrupted.load())
@@ -571,6 +571,20 @@ void Agent::run(const std::string &task,
       // --- State: Error ---
       context.state.currentStatus = AgentStatus::Error;
       context.state.fatalError = e.what();
+
+      // Persist error as a system turn in history for journal survival
+      AgentTurn errorTurn;
+      errorTurn.turnId =
+          "error-" + std::to_string(context.history->turns.size());
+      Message errorMsg;
+      errorMsg.role = Role::System;
+      errorMsg.content.push_back(
+          TextContent{"[AGENT ERROR] " + std::string(e.what())});
+      errorMsg.timestamp = nowMs();
+      errorTurn.messages.push_back(errorMsg);
+      context.history->turns.push_back(errorTurn);
+      if (context.config.persistHistory && journaler)
+        journaler->appendTurn(errorTurn);
 
       if (debugPrettyPrint) {
         std::cerr << "\033[1;31m[FATAL ERROR] " << e.what() << "\033[0m\n";

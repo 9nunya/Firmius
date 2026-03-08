@@ -86,6 +86,20 @@ target_include_directories(test_harness PRIVATE
 )
 gtest_discover_tests(test_harness)
 
+# PurposeLoader tests
+add_executable(test_purpose_loader
+    core/test_purpose_loader.cpp
+)
+target_link_libraries(test_purpose_loader PRIVATE
+    firmius::core
+    firmius::shared
+    GTest::gtest_main
+)
+target_include_directories(test_purpose_loader PRIVATE
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_purpose_loader)
+
 # FSUtil tests
 add_executable(test_fsutil
     shared/test_fsutil.cpp

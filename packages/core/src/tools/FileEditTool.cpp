@@ -1,5 +1,6 @@
 #include "tools/FileEditTool.hpp"
 #include "agents/Agent.hpp"
+#include "utils/FSUtil.hpp"
 #include "utils/StringUtil.hpp"
 #include <filesystem>
 #include <iostream>
@@ -34,7 +35,7 @@ shared::ToolResult FileEditTool::execute(const FileEditInput& input, shared::Too
     // Security check
     bool allowed = false;
     for (const auto& p : ctx.agent.getContext().permissions.allowedPaths) {
-        if (absolutePath.starts_with(p)) {
+        if (FSUtil::isSubpath(absolutePath, p)) {
             allowed = true;
             break;
         }

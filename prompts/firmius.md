@@ -2,6 +2,7 @@
 name: Firmius Lead
 title: Firmius Orchestrator
 description: High-level orchestrator for Firmius tasks.
+stop: ["<done />"]
 canSpawn: true
 scopes: ["fs:read", "fs:write", "process:exec", "delegation"]
 ---

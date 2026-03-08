@@ -20,6 +20,7 @@ struct Persona {
     std::string title;                  ///< Display title.
     std::string description;            ///< High-level description.
     std::vector<ToolScope> allowedScopes; ///< Tools the persona is allowed to use.
+    std::vector<std::string> stopSequences; ///< Optional stop sequences.
     bool canSpawn = false;              ///< Whether this persona can spawn sub-agents.
     std::string identityPrompt;         ///< The core instructions for the persona.
 };
@@ -59,10 +60,20 @@ public:
     static std::string resolvePromptsDir();
 
     /**
+     * @brief Registers a custom placeholder for system prompt composition.
+     * @param key The placeholder key (e.g., "{{MY_VAR}}").
+     * @param value The value to replace it with.
+     */
+    static void registerPlaceholder(const std::string& key, const std::string& value);
+
+    /**
      * @brief Bootstraps default prompts by copying builtin prompts to ~/.firmius/prompts/
      * @param builtinPromptsDir The path to the builtin prompts directory.
      */
     static void bootstrapDefaults(const std::string& builtinPromptsDir);
+
+private:
+    static std::map<std::string, std::string> customPlaceholders;
 };
 
 }

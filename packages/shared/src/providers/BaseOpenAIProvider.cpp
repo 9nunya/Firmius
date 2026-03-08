@@ -423,6 +423,18 @@ std::string BaseOpenAIProvider::prepareRequestBody(const AgentHistory& history, 
     d.AddMember("model", rapidjson::Value(opts.modelId.c_str(), a), a);
     d.AddMember("temperature", opts.temperature, a);
     d.AddMember("stream", true, a);
+    
+    if (opts.maxTokens) {
+        d.AddMember("max_tokens", opts.maxTokens.value(), a);
+    }
+
+    if (!opts.stop.empty()) {
+        rapidjson::Value stopSeqs(rapidjson::kArrayType);
+        for (const auto& s : opts.stop) {
+            stopSeqs.PushBack(rapidjson::Value(s.c_str(), a), a);
+        }
+        d.AddMember("stop", stopSeqs, a);
+    }
 
     if (supportsStreamUsage()) {
         rapidjson::Value streamOpts(rapidjson::kObjectType);

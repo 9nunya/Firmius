@@ -71,7 +71,7 @@ int main(int argc, char **argv) {
     opts.connectToExisting = true;
     opts.deleteOnExit = false;
 
-    std::string cwd = std::filesystem::current_path().string();
+    std::string cwd = "/work";
     if (!h.newThread(opts, cwd, "firmius").empty()) {
       thread_loaded = true;
     }

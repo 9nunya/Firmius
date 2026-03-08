@@ -21,8 +21,9 @@ public:
 
     /**
      * @brief Checks if a path is within an allowed root directory.
+     * Supports basic wildcard prefix matching (e.g. "/tmp/" followed by double-asterisk).
      * @param path The absolute path to check.
-     * @param allowedRoot The allowed root directory.
+     * @param allowedRoot The allowed root directory or wildcard pattern.
      * @return True if path is within allowedRoot.
      */
     static bool isSubpath(const std::string& path, const std::string& allowedRoot);

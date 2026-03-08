@@ -1,5 +1,6 @@
 #include "tools/ProcessExecuteTool.hpp"
 #include "IAgent.hpp"
+#include "utils/FSUtil.hpp"
 #include <chrono>
 #include <optional>
 #include <rapidjson/document.h>
@@ -36,6 +37,18 @@ shared::ToolResult ProcessExecuteTool::execute(const ProcessExecuteInput &input,
         input.cwd.empty() ? ctx.agent.getContext().environment.cwd : input.cwd;
     // Normalize path first
     effectiveCwd = ctx.agent.resolvePath(effectiveCwd);
+
+    // Security check
+    bool allowed = false;
+    for (const auto& p : ctx.agent.getContext().permissions.allowedPaths) {
+        if (shared::FSUtil::isSubpath(effectiveCwd, p)) {
+            allowed = true;
+            break;
+        }
+    }
+    if (!allowed && !ctx.agent.getContext().permissions.allowOutsideCwd) {
+        return shared::ToolResult::fail("Access denied: cwd outside allowed directories: " + effectiveCwd);
+    }
 
     processId = ctx.agent.spawnProcess(input.command, ctx.currentToolCallId,
                                        effectiveCwd, {});

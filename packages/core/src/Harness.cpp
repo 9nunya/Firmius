@@ -206,7 +206,13 @@ std::string Harness::newThread(HostCreationOptions hostOptions, const std::strin
     newMeta.hostOptions = hostOptions;
     newMeta.hostIdentifier =
         (hostOptions.type == HostType::Docker) ? "" : "localhost";
-    newMeta.cwd = cwd;
+
+    std::string finalCwd = cwd;
+    if (hostOptions.type == HostType::Docker &&
+        (finalCwd.find("/home/") == 0 || finalCwd.find("/Users/") == 0)) {
+      finalCwd = "/work";
+    }
+    newMeta.cwd = finalCwd;
     newMeta.leadPersona = leadPersona;
 
     threadId = threadManager_.createThread(newMeta);

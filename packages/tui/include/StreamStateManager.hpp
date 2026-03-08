@@ -34,11 +34,16 @@ public:
   void handleAgentProcessOutput(const shared::AgentProcessOutput &e);
   void handleAgentSpawned(const shared::AgentSpawned &e,
                           const std::string &focused_agent_id);
+  void handleAgentError(const shared::AgentError &e);
+  void handleAgentRetrying(const shared::AgentRetrying &e);
+  void handleAgentRetryFailed(const shared::AgentRetryFailed &e);
 
   const StreamState *getStream(const std::string &agentId) const;
   const std::vector<std::string> &getToolOrder() const;
   const std::unordered_map<std::string, std::shared_ptr<ToolCallView>> &
   getToolCalls() const;
+  const std::vector<std::string> &getErrorMessages() const;
+  const std::string &getRetryStatus() const;
 
 private:
   std::unordered_map<std::string, StreamState> streams_;
@@ -54,6 +59,9 @@ private:
       current_subagent_for_agent_; // agentId -> subagentId
   std::unordered_map<std::string, std::string>
       subagent_to_parent_tool_; // subagentAgentId -> parent toolCallId
+
+  std::vector<std::string> error_messages_;
+  std::string retry_status_;
 };
 
 } // namespace firmius::tui

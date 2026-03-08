@@ -1,5 +1,6 @@
 #include "tools/ListDirectoryTool.hpp"
 #include "IAgent.hpp"
+#include "utils/FSUtil.hpp"
 #include <rapidjson/document.h>
 
 namespace firmius::core {
@@ -11,7 +12,7 @@ shared::ToolResult ListDirectoryTool::execute(const ListDirectoryInput& input, s
         // Security check
         bool allowed = false;
         for (const auto& p : ctx.agent.getContext().permissions.allowedPaths) {
-            if (absPath.starts_with(p)) {
+            if (FSUtil::isSubpath(absPath, p)) {
                 allowed = true;
                 break;
             }
