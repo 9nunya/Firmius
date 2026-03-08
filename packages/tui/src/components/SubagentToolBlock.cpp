@@ -1,5 +1,5 @@
 #include "components/SubagentToolBlock.hpp"
-#include "components/ToolWindow.hpp"
+#include "components/LogWindow.hpp"
 #include <ftxui/dom/elements.hpp>
 #include <rapidjson/document.h>
 
@@ -35,6 +35,7 @@ ftxui::Component SubagentToolBlock(const std::shared_ptr<ToolCallView> &view) {
     std::string title = view->subagent_title;
     std::string task;
     std::string persona;
+    bool is_async = false;
     if (!view->args.empty()) {
       rapidjson::Document doc;
       doc.Parse(view->args.c_str());
@@ -47,6 +48,8 @@ ftxui::Component SubagentToolBlock(const std::shared_ptr<ToolCallView> &view) {
           persona = doc["persona"].GetString();
         if (title.empty() && doc.HasMember("name") && doc["name"].IsString())
           title = doc["name"].GetString();
+        if (doc.HasMember("async") && doc["async"].IsBool())
+          is_async = doc["async"].GetBool();
       }
     }
 
@@ -64,11 +67,22 @@ ftxui::Component SubagentToolBlock(const std::shared_ptr<ToolCallView> &view) {
       return ftxui::text("[>] Summoning \"" + title + "\"...") | ftxui::dim;
     }
 
+    bool status_spawned = false;
+    if (view->phase == ToolPhase::Finished && view->success && !view->result.empty()) {
+      rapidjson::Document res;
+      res.Parse(view->result.c_str());
+      if (!res.HasParseError() && res.IsObject() && res.HasMember("status") && res["status"].IsString()) {
+        std::string status = res["status"].GetString();
+        if (status == "spawned" || status == "re-tasked") {
+          status_spawned = true;
+        }
+      }
+    }
+
     // ── Called state: show title + task + rolling tool log ──
-    if (view->phase == ToolPhase::Called) {
+    if (view->phase == ToolPhase::Called || view->subagent_running || status_spawned) {
       std::vector<ftxui::Element> rows;
 
-      // Header line
       auto header = ftxui::hbox({ftxui::text("[>] ") | ftxui::bold |
                                      ftxui::color(ftxui::Color::Magenta),
                                  ftxui::text(title) | ftxui::bold,
@@ -76,17 +90,21 @@ ftxui::Component SubagentToolBlock(const std::shared_ptr<ToolCallView> &view) {
                                  ftxui::text(task_short) | ftxui::dim});
       rows.push_back(header);
 
-      // Tool window with rolling 3-line log
+      std::string footer = title;
+      if (!persona.empty()) footer += " [" + persona;
+      if (is_async) footer += (persona.empty() ? " [async]" : ", async]");
+      else if (!persona.empty()) footer += "]";
+
       if (!view->subagent_tool_log.empty()) {
         std::vector<ftxui::Element> log_lines;
         for (const auto &entry : view->subagent_tool_log) {
           log_lines.push_back(ftxui::text(entry) | ftxui::dim);
         }
-        rows.push_back(ToolWindow(log_lines, "subagent"));
+        rows.push_back(LogWindow(log_lines, footer));
       } else {
         std::vector<ftxui::Element> log_lines;
         log_lines.push_back(ftxui::text("running...") | ftxui::dim);
-        rows.push_back(ToolWindow(log_lines, "subagent"));
+        rows.push_back(LogWindow(log_lines, footer));
       }
 
       return ftxui::vbox(rows);
@@ -121,7 +139,13 @@ ftxui::Component SubagentToolBlock(const std::shared_ptr<ToolCallView> &view) {
 
         std::vector<ftxui::Element> result_lines;
         result_lines.push_back(ftxui::text(display_result) | ftxui::dim);
-        rows.push_back(ToolWindow(result_lines, "result"));
+
+        std::string footer = title;
+        if (!persona.empty()) footer += " [" + persona;
+        if (is_async) footer += (persona.empty() ? " [async]" : ", async]");
+        else if (!persona.empty()) footer += "]";
+
+        rows.push_back(LogWindow(result_lines, footer));
       }
     } else {
       // Error state

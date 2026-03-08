@@ -8,6 +8,7 @@ target_sources(firmius_shared PRIVATE
     src/utils/JSONSchema.cpp
     src/utils/StringUtil.cpp
     src/utils/FSUtil.cpp
+    src/utils/ToolSummaries.cpp
     src/providers/BaseOpenAIProvider.cpp
     src/providers/ProviderRegistry.cpp
     src/ConfigLoader.cpp
@@ -36,6 +37,8 @@ target_sources(firmius_shared PUBLIC
     include/utils/JSONSchema.hpp
     include/utils/StringUtil.hpp
     include/utils/FSUtil.hpp
+    include/utils/ToolSummaries.hpp
+    include/utils/ToolView.hpp
     include/providers/BaseOpenAIProvider.hpp
     include/ConfigLoader.hpp
 )

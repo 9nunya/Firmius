@@ -1,6 +1,7 @@
 #include "components/Markdown.hpp"
 #include <cctype>
 #include <ftxui/dom/elements.hpp>
+#include <ftxui/dom/table.hpp>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -58,12 +59,6 @@ static std::vector<std::string> splitTableRow(const std::string &line) {
   if (!cells.empty() && cells.back().empty())
     cells.pop_back();
   return cells;
-}
-
-static std::string padRight(const std::string &s, size_t width) {
-  if (s.size() >= width)
-    return s;
-  return s + std::string(width - s.size(), ' ');
 }
 
 static std::vector<std::string> wrapTokens(const std::string &text) {
@@ -132,43 +127,6 @@ static std::vector<std::string> wrapTokens(const std::string &text) {
     }
   }
   return wrapped;
-}
-
-static std::vector<std::string> wrapToWidth(const std::string &text,
-                                            size_t width) {
-  std::vector<std::string> lines;
-  if (width == 0)
-    return lines;
-  auto tokens = wrapTokens(text);
-  std::string line;
-  auto flush = [&] {
-    if (!line.empty()) {
-      lines.push_back(line);
-      line.clear();
-    }
-  };
-  for (const auto &tok : tokens) {
-    if (tok == " ") {
-      if (!line.empty() && line.back() != ' ')
-        line.push_back(' ');
-      continue;
-    }
-    if (tok.size() > width) {
-      flush();
-      for (size_t i = 0; i < tok.size(); i += width) {
-        lines.push_back(tok.substr(i, width));
-      }
-      continue;
-    }
-    if (line.size() + tok.size() > width) {
-      flush();
-    }
-    line += tok;
-  }
-  flush();
-  if (lines.empty())
-    lines.push_back("");
-  return lines;
 }
 
 static ftxui::Element renderInline(const std::string &text, bool dim) {
@@ -304,54 +262,50 @@ ftxui::Element RenderMarkdown(const std::string &text, bool dim) {
         isTableSeparator(lines[i + 1])) {
       flush_para();
       auto header = splitTableRow(line);
-      std::vector<std::vector<std::string>> rows;
+      std::vector<std::vector<std::string>> raw_rows;
       size_t j = i + 2;
       for (; j < lines.size(); ++j) {
         if (lines[j].find('|') == std::string::npos || lines[j].empty())
           break;
-        rows.push_back(splitTableRow(lines[j]));
+        raw_rows.push_back(splitTableRow(lines[j]));
       }
       i = j - 1;
 
-      const size_t kMaxCellWidth = 24;
-      std::vector<size_t> widths(header.size(), 0);
-      for (size_t c = 0; c < header.size(); ++c)
-        widths[c] = std::max(widths[c], header[c].size());
-      for (const auto &r : rows) {
-        for (size_t c = 0; c < r.size(); ++c)
-          widths[c] = std::max(widths[c], r[c].size());
-      }
-      for (auto &w : widths)
-        w = std::min(w, kMaxCellWidth);
+      // Build Element grid: header row + data rows
+      size_t num_cols = header.size();
+      std::vector<std::vector<ftxui::Element>> table_data;
 
-      auto renderRow = [&](const std::vector<std::string> &r, bool is_header) {
-        std::vector<std::vector<std::string>> cell_lines;
-        size_t max_lines = 1;
-        for (size_t c = 0; c < widths.size(); ++c) {
+      // Header row
+      std::vector<ftxui::Element> header_elems;
+      for (const auto& cell : header)
+        header_elems.push_back(renderInline(cell, dim) | ftxui::bold);
+      header_elems.resize(num_cols, ftxui::text(""));
+      table_data.push_back(std::move(header_elems));
+
+      // Data rows
+      for (const auto& r : raw_rows) {
+        std::vector<ftxui::Element> row_elems;
+        for (size_t c = 0; c < num_cols; ++c) {
           std::string cell = c < r.size() ? r[c] : "";
-          auto lines = wrapToWidth(cell, widths[c]);
-          max_lines = std::max(max_lines, lines.size());
-          cell_lines.push_back(std::move(lines));
+          auto elem = renderInline(cell, dim);
+          row_elems.push_back(std::move(elem));
         }
-        for (size_t line_i = 0; line_i < max_lines; ++line_i) {
-          std::string line_out = "|";
-          for (size_t c = 0; c < widths.size(); ++c) {
-            std::string cell =
-                line_i < cell_lines[c].size() ? cell_lines[c][line_i] : "";
-            line_out += " " + padRight(cell, widths[c]) + " |";
-          }
-          auto e = ftxui::text(line_out);
-          if (is_header)
-            e = e | ftxui::bold;
-          if (dim)
-            e = e | ftxui::dim;
-          out.push_back(e);
-        }
-      };
+        table_data.push_back(std::move(row_elems));
+      }
 
-      renderRow(header, true);
-      for (const auto &r : rows)
-        renderRow(r, false);
+      auto table = ftxui::Table(std::move(table_data));
+      table.SelectAll().Border(ftxui::LIGHT);
+      table.SelectAll().SeparatorHorizontal(ftxui::LIGHT);
+      table.SelectAll().SeparatorVertical(ftxui::LIGHT);
+      
+      // Decorate header specifically, but only the cells (not the separators)
+      table.SelectRow(0).Decorate(ftxui::bold);
+
+      if (dim) {
+        table.SelectAll().Decorate(ftxui::dim);
+      }
+
+      out.push_back(table.Render());
       continue;
     }
 

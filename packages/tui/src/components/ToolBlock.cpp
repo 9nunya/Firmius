@@ -4,12 +4,104 @@
 #include "components/ListDirectoryToolBlock.hpp"
 #include "components/ProcessExecuteToolBlock.hpp"
 #include "components/SubagentToolBlock.hpp"
-#include "components/ToolWindow.hpp"
+#include "components/LogWindow.hpp"
+#include "components/GlintEffect.hpp"
+#include "utils/ToolSummaries.hpp"
 #include <ftxui/component/component.hpp>
 #include <ftxui/dom/elements.hpp>
+#include <rapidjson/document.h>
 #include <vector>
 
 namespace firmius::tui {
+
+using firmius::shared::SummarizeToolCall;
+using firmius::shared::TailLines;
+
+static ftxui::Component SubagentWaitBlock(const std::shared_ptr<ToolCallView> &view) {
+  auto opt = ftxui::ButtonOption::Simple();
+  opt.transform = [](const ftxui::EntryState &s) {
+    auto e = ftxui::text(s.label) | ftxui::dim;
+    if (s.focused) e = e | ftxui::underlined;
+    return e;
+  };
+  if (view) {
+    opt.label = &view->toggle_label;
+  } else {
+    opt.label = "show";
+  }
+  opt.on_click = [view] {
+    if (!view) return;
+    view->show_result = !view->show_result;
+  };
+
+  auto toggle = ftxui::Button(opt);
+  auto container = ftxui::Container::Horizontal({toggle});
+
+  GlintConfig glint_cfg;
+  glint_cfg.target = GlintConfig::Target::Text;
+  glint_cfg.gradientColors = {
+    ftxui::Color::Blue,
+    ftxui::Color::White
+  };
+  glint_cfg.glintSize = 14;
+  glint_cfg.intervalSeconds = 3;
+  glint_cfg.durationSeconds = 1.2f;
+  glint_cfg.easing = GlintEasing::EaseInOut;
+
+  std::string agent_id;
+  if (view && !view->args.empty()) {
+    rapidjson::Document doc;
+    doc.Parse(view->args.c_str());
+    if (!doc.HasParseError() && doc.IsObject() && doc.HasMember("agent_id") && doc["agent_id"].IsString()) {
+      agent_id = doc["agent_id"].GetString();
+    }
+  }
+
+  auto glint = GlintEffect(
+    ftxui::text("Awaiting subagent " + agent_id),
+    glint_cfg
+  );
+
+  auto full_container = ftxui::Container::Vertical({container, glint});
+
+  return ftxui::Renderer(full_container, [view, toggle, glint, agent_id] {
+    if (!view) return ftxui::text("[subagent_wait] <null>") | ftxui::dim;
+
+    if (view->phase == ToolPhase::Preparing || view->phase == ToolPhase::Called) {
+      return glint->Render();
+    }
+
+    if (view->success) {
+      view->toggle_label = view->show_result ? "hide" : "show result";
+      std::vector<ftxui::Element> rows;
+      rows.push_back(ftxui::hbox({
+        ftxui::text("[+] Subagent completed") | ftxui::bold,
+        ftxui::text(" [") | ftxui::dim,
+        toggle->Render(),
+        ftxui::text("]") | ftxui::dim,
+      }));
+
+      if (view->show_result && !view->result.empty()) {
+        std::string display = view->result;
+        rapidjson::Document res;
+        res.Parse(view->result.c_str());
+        if (!res.HasParseError() && res.IsObject() && res.HasMember("result") && res["result"].IsString()) {
+          display = res["result"].GetString();
+        }
+        if (display.size() > 200) display = display.substr(0, 197) + "...";
+
+        std::vector<ftxui::Element> result_lines;
+        result_lines.push_back(ftxui::text(display) | ftxui::dim);
+        rows.push_back(LogWindow(result_lines, "await result"));
+      }
+      return ftxui::vbox(rows);
+    }
+
+    std::string err = view->result;
+    if (err.empty()) err = "unknown error";
+    return ftxui::text("[x] Await subagent failed: " + err) | ftxui::color(ftxui::Color::Red);
+  });
+}
 
 ftxui::Component ToolBlock(const std::shared_ptr<ToolCallView> &view) {
   if (view) {
@@ -24,6 +116,8 @@ ftxui::Component ToolBlock(const std::shared_ptr<ToolCallView> &view) {
       return ProcessExecuteToolBlock(view);
     } else if (view->name == "summon_subagent") {
       return SubagentToolBlock(view);
+    } else if (view->name == "subagent_wait") {
+      return SubagentWaitBlock(view);
     }
   }
 
@@ -54,7 +148,7 @@ ftxui::Component ToolBlock(const std::shared_ptr<ToolCallView> &view) {
     }
 
     // Use SummarizeToolCall for a compact description
-    std::string summary = SummarizeToolCall(view->name, view->args);
+    std::string summary = SummarizeToolCall(view->name, view->args, view->phase);
 
     if (view->phase == ToolPhase::Preparing ||
         view->phase == ToolPhase::Called) {
@@ -83,7 +177,7 @@ ftxui::Component ToolBlock(const std::shared_ptr<ToolCallView> &view) {
         for (const auto &line : tail) {
           out_lines.push_back(ftxui::text(line) | ftxui::dim);
         }
-        rows.push_back(ToolWindow(out_lines, view->name));
+        rows.push_back(LogWindow(out_lines, view->name));
       }
 
       return ftxui::vbox(rows);

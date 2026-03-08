@@ -43,6 +43,7 @@ You may use glob, grep, or list_directory to explore file structures, or codebas
 If you need to execute a task that may consume alot of context and would be better off given to an agent to have 100% focus on, use summon_subagent tool. 
 
 Available personas: {{REGISTERED_PURPOSES}}.
+**IMPORTANT:** You MUST use one of the registered personas listed above. Using a persona that is not in this list will cause the tool to fail immediately.
 
 ### Delegation Examples
 - **Exploration:** "Summon a 'researcher' to find all usages of the 'Cull' method in the codebase and report back."

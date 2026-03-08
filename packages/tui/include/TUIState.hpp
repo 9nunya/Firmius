@@ -20,6 +20,7 @@ namespace firmius::tui {
 struct TitleBarModel;
 struct StatusBarModel;
 struct InputBarModel;
+struct AgentStripModel;
 
 class TuiState {
 public:
@@ -60,6 +61,7 @@ private:
   void onEvent(const shared::AppEvent &ev);
   std::string statusText() const;
   void updateStatusModel();
+  void updateAgentStripModel();
 
   firmius::core::Harness *harness_ = nullptr;
   shared::ThreadMetadata thread_;
@@ -79,6 +81,7 @@ private:
   std::shared_ptr<TitleBarModel> title_model_;
   std::shared_ptr<StatusBarModel> status_model_;
   std::shared_ptr<InputBarModel> input_model_;
+  std::shared_ptr<AgentStripModel> agent_strip_model_;
 
   ViewMode view_mode_ = ViewMode::Chat;
   std::vector<ftxui::Component> modals_; // Used as a stack

@@ -1,5 +1,5 @@
 #include "components/FileReadToolBlock.hpp"
-#include "components/ToolWindow.hpp"
+#include "components/LogWindow.hpp"
 #include <ftxui/dom/elements.hpp>
 #include <rapidjson/document.h>
 #include <sstream>
@@ -126,7 +126,7 @@ ftxui::Component FileReadToolBlock(const std::shared_ptr<ToolCallView> &view) {
     std::string footer = "read " + path_arg;
 
     std::vector<ftxui::Element> rows;
-    rows.push_back(ToolWindow(code_lines, footer, view->toggle_label));
+    rows.push_back(LogWindow(code_lines, footer, view->toggle_label));
     if (has_more || view->show_result) {
       rows.push_back(
           ftxui::hbox({ftxui::text("[") | ftxui::dim, toggle->Render(),

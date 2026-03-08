@@ -1,4 +1,5 @@
 #include "tools/SubagentTool.hpp"
+#include "agents/PurposeLoader.hpp"
 #include "AgentRegistry.hpp"
 #include "Engine.hpp"
 #include "Events.hpp"
@@ -37,6 +38,11 @@ std::shared_ptr<shared::JSONSchema> SubagentTool::getSchema() const {
 
 shared::ToolResult SubagentTool::execute(const SubagentInput &input,
                                          shared::ToolContext &ctx) {
+  if (!PurposeLoader::isValid(input.persona)) {
+    return shared::ToolResult::fail("Invalid persona: '" + input.persona +
+                                    "'. Check available personas in base.md or prompts/ directory.");
+  }
+
   std::string threadId = ctx.agent.getContext().history->threadId;
 
   auto existingAgents = AgentRegistry::instance().listAll();

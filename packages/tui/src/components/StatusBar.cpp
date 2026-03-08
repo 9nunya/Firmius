@@ -1,20 +1,24 @@
 #include "components/StatusBar.hpp"
+#include "components/GlintEffect.hpp"
 #include <ftxui/component/component.hpp>
 #include <ftxui/dom/elements.hpp>
 
 namespace firmius::tui {
 
-ftxui::Component StatusBar(const std::shared_ptr<StatusBarModel> &model) {
-  return ftxui::Renderer([model] {
-    if (!model) {
+namespace {
+
+class StatusBarComponentBase : public ftxui::ComponentBase {
+public:
+  explicit StatusBarComponentBase(std::shared_ptr<StatusBarModel> model)
+      : model_(std::move(model)) {}
+
+  ftxui::Element Render() override {
+    if (!model_) {
       return ftxui::text("");
     }
-
-    // -- Left section: mode badge --
-    std::string mode = model->status_text;
+    std::string mode = model_->status_text;
     ftxui::Color badge_bg = ftxui::Color::RGB(80, 80, 120);
     ftxui::Color badge_fg = ftxui::Color::RGB(220, 220, 255);
-
     if (mode == "streaming" || mode == "executing_tool") {
       badge_bg = ftxui::Color::RGB(40, 140, 80);
       badge_fg = ftxui::Color::RGB(220, 255, 220);
@@ -28,39 +32,85 @@ ftxui::Component StatusBar(const std::shared_ptr<StatusBarModel> &model) {
       badge_bg = ftxui::Color::RGB(140, 120, 40);
       badge_fg = ftxui::Color::RGB(255, 240, 180);
     }
-
-    // Uppercase the mode for display
     std::string mode_upper;
     for (char c : mode)
       mode_upper += static_cast<char>(toupper(c));
-
     auto mode_badge = ftxui::text(" " + mode_upper + " ") | ftxui::bold |
                       ftxui::color(badge_fg) | ftxui::bgcolor(badge_bg);
-
-    // -- Center section: model name --
+    syncGlint();
+    ftxui::Element agent_name_el;
+    if (model_->is_active && glint_) {
+      agent_name_el = glint_->Render();
+    } else {
+      agent_name_el = ftxui::text(" " + model_->agent_name + " ") |
+                      ftxui::bold |
+                      ftxui::color(ftxui::Color::RGB(180, 160, 220));
+    }
     auto model_section = ftxui::text("");
-    if (!model->model_name.empty()) {
-      model_section = ftxui::text(" " + model->model_name + " ") |
+    if (!model_->model_name.empty()) {
+      model_section = ftxui::text(" " + model_->model_name + " ") |
                       ftxui::color(ftxui::Color::RGB(160, 160, 200));
     }
-
-    // -- Right section: purpose / role --
     auto purpose_section = ftxui::text("");
-    if (!model->purpose.empty()) {
-      purpose_section = ftxui::text(" " + model->purpose + " ") |
+    if (!model_->purpose.empty()) {
+      purpose_section = ftxui::text(" " + model_->purpose + " ") |
                         ftxui::color(ftxui::Color::RGB(120, 120, 160));
     }
-    // -- Brand --
-    auto brand = ftxui::text(" firmius ") | ftxui::bold |
-                 ftxui::color(ftxui::Color::RGB(140, 120, 200));
-
-    // Compose: [MODE] <filler> model <filler> purpose  firmius
-    return ftxui::hbox(
-               {mode_badge,
-                ftxui::text(" ") | ftxui::color(ftxui::Color::RGB(60, 60, 80)),
-                model_section, ftxui::filler(), purpose_section}) |
+    ftxui::Element ctx_section = ftxui::text("");
+    if (model_->context_max > 0) {
+      float ratio =
+          static_cast<float>(model_->context_used) / model_->context_max;
+      ftxui::Color bar_color = ftxui::Color::RGB(80, 200, 120);
+      if (ratio > 0.85f)
+        bar_color = ftxui::Color::RGB(200, 60, 60);
+      else if (ratio > 0.60f)
+        bar_color = ftxui::Color::RGB(220, 180, 60);
+      std::string used_k = std::to_string(model_->context_used / 1000) + "K";
+      std::string max_k = std::to_string(model_->context_max / 1000) + "K";
+      std::string pct = std::to_string(static_cast<int>(ratio * 100)) + "%";
+      auto bar = ftxui::gauge(ratio) | ftxui::color(bar_color);
+      ctx_section =
+          ftxui::hbox({
+              ftxui::text(" "),
+              bar | ftxui::size(ftxui::WIDTH, ftxui::EQUAL, 10),
+              ftxui::text(" " + used_k + "/" + max_k + " (" + pct + ")"),
+          }) |
+          ftxui::color(ftxui::Color::RGB(160, 160, 180));
+    }
+    return ftxui::hbox({mode_badge, agent_name_el,
+                        ftxui::text(" ") |
+                            ftxui::color(ftxui::Color::RGB(60, 60, 80)),
+                        model_section, ftxui::filler(), purpose_section,
+                        ctx_section}) |
            ftxui::bgcolor(ftxui::Color::RGB(30, 30, 50));
-  });
+  }
+
+private:
+  void syncGlint() {
+    if (model_->agent_name == cached_name_ && glint_)
+      return;
+    cached_name_ = model_->agent_name;
+    GlintConfig cfg;
+    cfg.target = GlintConfig::Target::Text;
+    cfg.gradientColors = {ftxui::Color::Blue, ftxui::Color::White};
+    cfg.glintSize = 14;
+    cfg.intervalSeconds = 3;
+    cfg.durationSeconds = 1.2f;
+    cfg.easing = GlintEasing::EaseInOut;
+    glint_ = GlintEffect(ftxui::text(" " + cached_name_ + " ") | ftxui::bold |
+                              ftxui::color(ftxui::Color::RGB(180, 160, 220)),
+                          cfg);
+  }
+
+  std::shared_ptr<StatusBarModel> model_;
+  ftxui::Component glint_;
+  std::string cached_name_;
+};
+
+} // namespace
+
+ftxui::Component StatusBar(const std::shared_ptr<StatusBarModel> &model) {
+  return std::make_shared<StatusBarComponentBase>(model);
 }
 
 } // namespace firmius::tui

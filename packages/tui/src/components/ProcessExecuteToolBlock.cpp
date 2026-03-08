@@ -1,10 +1,13 @@
 #include "components/ProcessExecuteToolBlock.hpp"
-#include "components/ToolWindow.hpp"
+#include "components/LogWindow.hpp"
+#include "utils/ToolSummaries.hpp"
 #include <ftxui/dom/elements.hpp>
 #include <rapidjson/document.h>
 #include <sstream>
 
 namespace firmius::tui {
+
+using firmius::shared::TailLines;
 
 ftxui::Component
 ProcessExecuteToolBlock(const std::shared_ptr<ToolCallView> &view) {
@@ -66,7 +69,7 @@ ProcessExecuteToolBlock(const std::shared_ptr<ToolCallView> &view) {
       }
 
       std::string footer = cmd_display;
-      rows.push_back(ToolWindow(out_lines, footer));
+      rows.push_back(LogWindow(out_lines, footer));
       return ftxui::vbox(rows);
     }
 
@@ -154,7 +157,7 @@ ProcessExecuteToolBlock(const std::shared_ptr<ToolCallView> &view) {
 
     std::vector<ftxui::Element> rows;
     rows.push_back(
-        ToolWindow(out_lines, footer, has_more ? view->toggle_label : ""));
+        LogWindow(out_lines, footer, has_more ? view->toggle_label : ""));
     if (has_more) {
       rows.push_back(
           ftxui::hbox({ftxui::text("[") | ftxui::dim, toggle->Render(),

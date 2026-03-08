@@ -65,9 +65,11 @@ class ChatWindowComponent : public ftxui::ComponentBase {
 public:
   explicit ChatWindowComponent(
       std::function<const firmius::shared::AgentHistory*()> history_getter,
-      std::function<std::vector<ftxui::Element>()> live_rows_provider)
+      std::function<std::vector<ftxui::Element>()> live_rows_provider,
+      firmius::tui::ToolViewProvider tool_view_provider)
       : history_getter_(std::move(history_getter)),
-        live_rows_provider_(std::move(live_rows_provider)) {
+        live_rows_provider_(std::move(live_rows_provider)),
+        tool_view_provider_(std::move(tool_view_provider)) {
 
     history_inner_ = ftxui::Container::Vertical({});
     history_container_ = ftxui::Renderer(history_inner_, [this] {
@@ -105,8 +107,9 @@ public:
       return ftxui::vbox(std::move(rows));
     });
 
-    tail_spacer_ =
-        ftxui::Make<RowComponent>(nullptr, [] { return ftxui::text(""); });
+    tail_spacer_ = ftxui::Make<RowComponent>(nullptr, [] {
+      return ftxui::text("") | ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, 3);
+    });
 
     container_ = ftxui::Container::Vertical(
         {history_container_, live_rows_cmp, tail_spacer_});
@@ -217,15 +220,18 @@ private:
             } else if (auto *tc = std::get_if<firmius::shared::ToolCallContent>(
                            &part)) {
               auto &view = tool_views_[tc->id];
+              if (!view && tool_view_provider_)
+                view = tool_view_provider_(tc->id);
               if (!view)
                 view = std::make_shared<firmius::tui::ToolCallView>();
               view->toolCallId = tc->id;
               view->name = tc->name;
               view->args = tc->args;
-              view->phase = firmius::tui::ToolPhase::Called;
+              if (view->phase != firmius::tui::ToolPhase::Finished)
+                view->phase = firmius::tui::ToolPhase::Called;
               seen_tool_call[tc->id] = true;
 
-              auto block = ToolBlock(view);
+              auto block = firmius::tui::ToolBlock(view);
               auto row = ftxui::Make<RowComponent>(block, [decorateMsg, block] {
                 return decorateMsg(block->Render());
               });
@@ -234,6 +240,8 @@ private:
                            std::get_if<firmius::shared::ToolResultContent>(
                                &part)) {
               auto &view = tool_views_[tr->toolCallId];
+              if (!view && tool_view_provider_)
+                view = tool_view_provider_(tr->toolCallId);
               if (!view)
                 view = std::make_shared<firmius::tui::ToolCallView>();
               view->toolCallId = tr->toolCallId;
@@ -242,7 +250,7 @@ private:
               view->phase = firmius::tui::ToolPhase::Finished;
 
               if (!seen_tool_call[tr->toolCallId]) {
-                auto block = ToolBlock(view);
+                auto block = firmius::tui::ToolBlock(view);
                 auto row =
                     ftxui::Make<RowComponent>(block, [decorateMsg, block] {
                       return decorateMsg(block->Render());
@@ -271,6 +279,7 @@ private:
 
   std::function<const firmius::shared::AgentHistory*()> history_getter_;
   std::function<std::vector<ftxui::Element>()> live_rows_provider_;
+  firmius::tui::ToolViewProvider tool_view_provider_;
   size_t last_turns_size_ = static_cast<size_t>(-1);
   std::vector<ftxui::Component> rows_;
   ftxui::Component history_inner_;
@@ -286,7 +295,9 @@ private:
 
 ftxui::Component firmius::tui::ChatWindow(
     std::function<const shared::AgentHistory*()> history_getter,
-    std::function<std::vector<ftxui::Element>()> live_rows_provider) {
+    std::function<std::vector<ftxui::Element>()> live_rows_provider,
+    ToolViewProvider tool_view_provider) {
   return ftxui::Make<ChatWindowComponent>(std::move(history_getter),
-                                          std::move(live_rows_provider));
+                                          std::move(live_rows_provider),
+                                          std::move(tool_view_provider));
 }

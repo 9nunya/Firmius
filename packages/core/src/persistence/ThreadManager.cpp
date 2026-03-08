@@ -8,6 +8,8 @@
 #include <rapidjson/writer.h>
 #include <chrono>
 
+#include <iostream>
+
 namespace firmius::core {
 
 ThreadManager::ThreadManager(std::string basePath)

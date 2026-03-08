@@ -775,15 +775,21 @@ ThreadMetadata threadMetadataFromJson(const rapidjson::Value &v) {
   m.threadId = v.HasMember("threadId") && v["threadId"].IsString()
                    ? v["threadId"].GetString()
                    : "";
-  m.title = v["title"].GetString();
+  m.title = v.HasMember("title") && v["title"].IsString()
+                ? v["title"].GetString()
+                : "Untitled Thread";
   if (v.HasMember("hostOptions") && v["hostOptions"].IsObject()) {
     m.hostOptions = hostCreationOptionsFromJson(v["hostOptions"]);
   } else if (v.HasMember("hostType") && v["hostType"].IsString()) {
     m.hostOptions.type = stringToHostType(v["hostType"].GetString());
   }
-  m.hostIdentifier = v["hostIdentifier"].GetString();
-  m.cwd = v["cwd"].GetString();
-  m.leadPersona = v["leadPersona"].GetString();
+  m.hostIdentifier = v.HasMember("hostIdentifier") && v["hostIdentifier"].IsString()
+                         ? v["hostIdentifier"].GetString()
+                         : "";
+  m.cwd = v.HasMember("cwd") && v["cwd"].IsString() ? v["cwd"].GetString() : "";
+  m.leadPersona = v.HasMember("leadPersona") && v["leadPersona"].IsString()
+                      ? v["leadPersona"].GetString()
+                      : "";
   m.createdAt = v.HasMember("createdAt") && v["createdAt"].IsUint64()
                     ? v["createdAt"].GetUint64()
                     : 0;

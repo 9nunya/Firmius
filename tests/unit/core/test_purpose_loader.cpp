@@ -33,6 +33,11 @@ protected:
     std::filesystem::path testPromptsDir;
 };
 
+TEST_F(PurposeLoaderTest, isValid_check) {
+    EXPECT_TRUE(PurposeLoader::isValid("test_coder"));
+    EXPECT_FALSE(PurposeLoader::isValid("non_existent"));
+}
+
 TEST_F(PurposeLoaderTest, load_persona_stop) {
     Persona persona = PurposeLoader::load("test_coder");
     EXPECT_EQ(persona.name, "test_coder");

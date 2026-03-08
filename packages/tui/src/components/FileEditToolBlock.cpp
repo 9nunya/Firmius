@@ -1,5 +1,5 @@
 #include "components/FileEditToolBlock.hpp"
-#include "components/ToolWindow.hpp"
+#include "components/LogWindow.hpp"
 #include <ftxui/dom/elements.hpp>
 #include <rapidjson/document.h>
 #include <sstream>
@@ -89,7 +89,7 @@ ftxui::Component FileEditToolBlock(const std::shared_ptr<ToolCallView> &view) {
                              std::to_string(added) + " -" +
                              std::to_string(removed);
 
-        return ftxui::vbox({header, ToolWindow(diff_lines, footer)});
+        return ftxui::vbox({header, LogWindow(diff_lines, footer)});
       }
 
       return header;
@@ -150,7 +150,7 @@ ftxui::Component FileEditToolBlock(const std::shared_ptr<ToolCallView> &view) {
       }
 
       std::string footer = "edited " + path_arg;
-      rows.push_back(ToolWindow(diff_lines, footer));
+      rows.push_back(LogWindow(diff_lines, footer));
     }
 
     return ftxui::vbox(rows);

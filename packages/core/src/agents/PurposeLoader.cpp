@@ -39,6 +39,17 @@ void PurposeLoader::registerPlaceholder(const std::string& key, const std::strin
     customPlaceholders[key] = value;
 }
 
+bool PurposeLoader::isValid(const std::string& purpose) {
+    if (purpose.empty()) return false;
+    std::string promptsDir = resolvePromptsDir();
+    try {
+        std::string path = promptsDir + purpose + ".md";
+        return std::filesystem::exists(path);
+    } catch (...) {
+        return false;
+    }
+}
+
 Persona PurposeLoader::load(const std::string& purpose) {
     std::string promptsDir = resolvePromptsDir();
     std::string path = promptsDir + purpose + ".md";

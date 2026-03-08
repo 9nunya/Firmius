@@ -31,6 +31,11 @@ struct Persona {
 class PurposeLoader {
 public:
     /**
+     * @brief Checks if a persona exists.
+     */
+    static bool isValid(const std::string& purpose);
+
+    /**
      * @brief Loads a persona from the prompts/ directory.
      * @param purpose The name of the persona file (without .md).
      * @return The loaded Persona struct.

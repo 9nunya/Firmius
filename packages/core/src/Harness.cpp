@@ -32,6 +32,8 @@
 #include <sstream>
 #include <thread>
 
+#include <iostream>
+
 namespace {
 const std::string PANIC_INFO_HARNESS_STATE = "harness_state";
 }
@@ -310,15 +312,16 @@ bool Harness::switchThread(const std::string &threadId) {
         }
 
         if (focusedAgentId_.empty()) {
-          auto allAgents = AgentRegistry::instance().listAll();
-          for (const auto &id : allAgents) {
-            auto agent = AgentRegistry::instance().getAgent(id);
-            if (agent && agent->getContext().history->threadId == threadId &&
-                agent->getContext().identity.parentId.empty()) {
-              focusedAgentId_ = id;
-              threadAgentMap_[threadId] = id;
-              break;
+          try {
+            auto manifest = threadManager_.readAgentManifest(threadId);
+            for (const auto &[agentId, entry] : manifest) {
+              if (entry.parentId.empty()) {
+                focusedAgentId_ = agentId;
+                threadAgentMap_[threadId] = agentId;
+                break;
+              }
             }
+          } catch (...) {
           }
         }
 

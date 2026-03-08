@@ -22,12 +22,14 @@ target_sources(firmius PRIVATE
     src/components/ListDirectoryToolBlock.cpp
     src/components/ProcessExecuteToolBlock.cpp
     src/components/SubagentToolBlock.cpp
-    src/components/ToolWindow.cpp
+    src/components/LogWindow.cpp
     src/components/Markdown.cpp
     src/components/ScrollableBox.cpp
     src/components/TitleBar.cpp
     src/components/StatusBar.cpp
+    src/components/AgentStrip.cpp
     src/components/InputBar.cpp
+    src/components/GlintEffect.cpp
 )
 
 target_include_directories(firmius PRIVATE src include)

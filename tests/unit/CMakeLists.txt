@@ -100,6 +100,21 @@ target_include_directories(test_purpose_loader PRIVATE
 )
 gtest_discover_tests(test_purpose_loader)
 
+# SubagentTool tests
+add_executable(test_subagent_tool
+    tools/test_subagent_tool.cpp
+)
+target_link_libraries(test_subagent_tool PRIVATE
+    firmius::core
+    firmius::shared
+    GTest::gtest_main
+    GTest::gmock
+)
+target_include_directories(test_subagent_tool PRIVATE
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_subagent_tool)
+
 # FSUtil tests
 add_executable(test_fsutil
     shared/test_fsutil.cpp
@@ -112,3 +127,20 @@ target_include_directories(test_fsutil PRIVATE
     ${rapidjson_SOURCE_DIR}/include
 )
 gtest_discover_tests(test_fsutil)
+
+# TUI Markdown tests
+add_executable(test_markdown
+    tui/test_markdown.cpp
+    ../../packages/tui/src/components/Markdown.cpp
+)
+target_link_libraries(test_markdown PRIVATE
+    firmius::shared
+    GTest::gtest_main
+    ftxui::dom
+    ftxui::screen
+)
+target_include_directories(test_markdown PRIVATE
+    ../../packages/tui/include
+    ../../packages/tui/src
+)
+gtest_discover_tests(test_markdown)

@@ -5,11 +5,13 @@
 #include "components/InputBar.hpp"
 #include "components/Markdown.hpp"
 #include "components/StatusBar.hpp"
+#include "components/AgentStrip.hpp"
 #include "components/TitleBar.hpp"
 #include "components/ToolBlock.hpp"
 #include "harness/Harness.hpp"
 #include "modals/ModalRegistry.hpp"
 #include "modals/ThreadLockedModal.hpp"
+#include "providers/ProviderRegistry.hpp"
 #include <algorithm>
 #include <filesystem>
 #include <ftxui/component/component.hpp>
@@ -59,6 +61,9 @@ void TuiState::openModal(const std::string &name) {
 
 void TuiState::openModalDirect(ftxui::Component modal) {
   modals_.push_back(modal);
+  if (modal) {
+    modal->TakeFocus();
+  }
 }
 
 void TuiState::popModal() {
@@ -94,6 +99,8 @@ void TuiState::init(firmius::core::Harness &harness,
   input_model_->buffer = &input_;
   input_model_->cursor = &cursor_;
   input_model_->placeholder = "Type a message...";
+
+  agent_strip_model_ = std::make_shared<AgentStripModel>();
 
   subscription_id_ =
       harness_->subscribe([this](const firmius::shared::AppEvent &ev) {
@@ -141,6 +148,14 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
         } else if constexpr (std::is_same_v<T, ThreadChanged>) {
           thread_ = e.metadata;
           focused_agent_id_ = harness_->focusedAgentId();
+          
+          if (focused_agent_id_.empty()) {
+            auto agents = harness_->listAgents(thread_.threadId);
+            if (!agents.empty()) {
+              focused_agent_id_ = agents.front();
+            }
+          }
+
           history_ = harness_->getAgentHistoryPtr(focused_agent_id_);
           pending_modal_clear_ = true;
 
@@ -194,9 +209,19 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
           stream_state_.handleAgentRetrying(e);
         } else if constexpr (std::is_same_v<T, AgentRetryFailed>) {
           stream_state_.handleAgentRetryFailed(e);
+        } else if constexpr (std::is_same_v<T, AgentCompleted>) {
+          stream_state_.handleAgentCompleted(e);
+        } else if constexpr (std::is_same_v<T, ThreadTitleUpdated>) {
+          if (title_model_) {
+            title_model_->title = e.title;
+          }
+          thread_.title = e.title;
         }
       },
       ev);
+
+  updateStatusModel();
+  updateAgentStripModel();
 
   if (screen_) {
     screen_->PostEvent(ftxui::Event::Custom);
@@ -217,12 +242,69 @@ void TuiState::updateStatusModel() {
       status_model_->model_name =
           ctx.config.providerId + "/" + ctx.config.modelId;
       status_model_->purpose = ctx.identity.role;
+      status_model_->agent_name = ctx.identity.friendlyName.empty()
+                                      ? ctx.identity.name
+                                      : ctx.identity.friendlyName;
+      status_model_->context_used = ctx.aggregateMetrics.tokens.contextSize;
+      auto provider = firmius::provider::ProviderRegistry::instance()
+                          .getProvider(ctx.config.providerId);
+      if (provider) {
+        auto info = provider->getModelInfo(ctx.config.modelId);
+        status_model_->context_max = info.contextWindow;
+      }
+      status_model_->is_active =
+          ctx.state.currentStatus == AgentStatus::Streaming ||
+          ctx.state.currentStatus == AgentStatus::ExecutingTool;
       return;
     }
   }
   status_model_->status_text = "idle";
   status_model_->model_name = "";
   status_model_->purpose = "";
+  status_model_->agent_name = "";
+  status_model_->context_used = 0;
+  status_model_->context_max = 0;
+  status_model_->is_active = false;
+}
+
+void TuiState::updateAgentStripModel() {
+  if (!agent_strip_model_)
+    return;
+  agent_strip_model_->items.clear();
+  if (focused_agent_id_.empty())
+    return;
+  auto all_ids = firmius::core::AgentRegistry::instance().listAll();
+  size_t added = 0;
+  for (const auto &id : all_ids) {
+    if (added >= 3)
+      break;
+    auto child = firmius::core::AgentRegistry::instance().getAgent(id);
+    if (!child)
+      continue;
+    const auto &ctx = child->getContext();
+    if (ctx.identity.parentId != focused_agent_id_)
+      continue;
+    AgentStripItem item;
+    item.id = id;
+    item.title = ctx.identity.friendlyName.empty() ? ctx.identity.name
+                                                   : ctx.identity.friendlyName;
+    item.purpose = ctx.identity.role;
+    item.status_text = statusToString(ctx.state.currentStatus);
+    item.is_busy = ctx.state.currentStatus == AgentStatus::Streaming ||
+                   ctx.state.currentStatus == AgentStatus::ExecutingTool;
+    auto provider = firmius::provider::ProviderRegistry::instance().getProvider(
+        ctx.config.providerId);
+    if (provider) {
+      auto info = provider->getModelInfo(ctx.config.modelId);
+      if (info.contextWindow > 0) {
+        item.context_percent = static_cast<float>(
+                                   ctx.aggregateMetrics.tokens.contextSize) /
+                               info.contextWindow;
+      }
+    }
+    agent_strip_model_->items.push_back(std::move(item));
+    ++added;
+  }
 }
 
 ftxui::Component TuiState::root() {
@@ -231,6 +313,7 @@ ftxui::Component TuiState::root() {
 
   auto title_bar = TitleBar(title_model_);
   auto status_bar = StatusBar(status_model_);
+  auto agent_strip = AgentStrip(agent_strip_model_);
 
   auto input_bar = InputBar(input_model_, [this](const std::string &text) {
     if (!text.empty() && text[0] == '/') {
@@ -289,7 +372,7 @@ ftxui::Component TuiState::root() {
           if (!s->compaction_thinking.empty()) {
             live_rows.push_back(decorateMsg(
                 ftxui::vbox({ftxui::text("[compacting:thinking]") | ftxui::dim,
-                             RenderMarkdown(s->compaction_thinking, true)})));
+                                         RenderMarkdown(s->compaction_thinking, true)})));
           }
           if (!s->compaction_text.empty()) {
             live_rows.push_back(decorateMsg(
@@ -302,22 +385,21 @@ ftxui::Component TuiState::root() {
           }
         }
 
-        const auto &tool_order = stream_state_.getToolOrder();
+        const auto &timeline = stream_state_.getTimeline();
         const auto &tool_calls = stream_state_.getToolCalls();
-        for (const auto &id : tool_order) {
-          auto it_tool = tool_calls.find(id);
-          if (it_tool == tool_calls.end())
+        for (const auto &entry : timeline) {
+          if (entry.agentId != focused_agent_id_)
             continue;
-          const auto &view = it_tool->second;
-          if (!view || view->agentId != focused_agent_id_)
-            continue;
-          live_rows.push_back(decorateMsg(ToolBlock(view)->Render()));
-        }
-
-        // Persistent error messages (rendered in red)
-        for (const auto &err : stream_state_.getErrorMessages()) {
-          live_rows.push_back(ftxui::text(err) | ftxui::bold |
-                              ftxui::color(ftxui::Color::Red));
+          if (entry.kind == TimelineEntry::Kind::ToolCall) {
+            auto it_tool = tool_calls.find(entry.id);
+            if (it_tool == tool_calls.end() || !it_tool->second)
+              continue;
+            live_rows.push_back(decorateMsg(ToolBlock(it_tool->second)->Render()));
+          } else {
+            live_rows.push_back(
+                ftxui::text("[ERROR] " + entry.message) | ftxui::bold |
+                ftxui::color(ftxui::Color::Red));
+          }
         }
 
         // Ephemeral retry status (rendered dim yellow, disappears when
@@ -329,12 +411,16 @@ ftxui::Component TuiState::root() {
         }
 
         return live_rows;
+      },
+      [this](const std::string &toolCallId) {
+        return stream_state_.getToolView(toolCallId);
       });
   chat_component_ = chat;
 
   auto container = ftxui::Container::Vertical({
       input_bar,
       chat,
+      agent_strip,
   });
 
   auto welcome_screen = ftxui::Renderer([] {
@@ -348,19 +434,12 @@ ftxui::Component TuiState::root() {
   });
 
   auto base_view =
-      ftxui::Renderer(container, [this, title_bar, status_bar, input_bar, chat,
-                                  welcome_screen] {
-        drainEvents();
+      ftxui::Renderer(container, [this, title_bar, status_bar, agent_strip,
+                                  input_bar, chat, welcome_screen] {
         // Deferred modal clearing: drain here where it's safe
         if (pending_modal_clear_) {
           modals_.clear();
           pending_modal_clear_ = false;
-        }
-
-        updateStatusModel();
-
-        if (modals_.empty()) {
-          input_bar->TakeFocus();
         }
 
         auto chat_area = (view_mode_ == ViewMode::Chat)
@@ -369,6 +448,7 @@ ftxui::Component TuiState::root() {
 
         auto bottom_bar = ftxui::vbox({
             ftxui::separatorLight(),
+            agent_strip->Render(),
             input_bar->Render(),
             ftxui::separatorLight(),
             status_bar->Render(),
@@ -403,6 +483,11 @@ ftxui::Component TuiState::root() {
 
   root_component_ = ftxui::CatchEvent(modal_renderer, [this, chat](
                                                           ftxui::Event event) {
+    if (event == ftxui::Event::Custom) {
+      drainEvents();
+      return true;
+    }
+
     if (!modals_.empty()) {
       // Forward event to the top modal
       bool handled = modals_.back()->OnEvent(event);
@@ -501,3 +586,5 @@ ftxui::Component TuiState::root() {
 }
 
 } // namespace firmius::tui
+
+
