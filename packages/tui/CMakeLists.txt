@@ -10,11 +10,18 @@ target_sources(firmius PRIVATE
     src/commands/ModelCommand.cpp
     src/commands/UndoCommand.cpp
     src/commands/ConfigCommand.cpp
+    src/commands/ConnectCommand.cpp
+    src/commands/QuotasCommand.cpp
+    src/commands/AccountsCommand.cpp
     src/modals/ModalRegistry.cpp
     src/modals/ThreadPickerModal.cpp
     src/modals/ThreadLockedModal.cpp
     src/modals/ModelPickerModal.cpp
     src/modals/ConfigDisplayModal.cpp
+    src/modals/OAuthWizardModal.cpp
+    src/modals/ConfirmationModal.cpp
+    src/modals/QuotasModal.cpp
+    src/modals/AccountsModal.cpp
     src/components/ChatWindow.cpp
     src/components/ToolBlock.cpp
     src/components/FileEditToolBlock.cpp

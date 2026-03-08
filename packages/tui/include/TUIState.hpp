@@ -2,8 +2,8 @@
 #define FIRMIUS_TUI_STATE_HPP
 
 #include "Context.hpp"
-#include "Events.hpp"
 #include "EventQueue.hpp"
+#include "Events.hpp"
 #include "StreamStateManager.hpp"
 #include <ftxui/component/component_base.hpp>
 #include <ftxui/component/screen_interactive.hpp>
@@ -50,6 +50,8 @@ public:
   void openModal(const std::string &name);
   void openModalDirect(ftxui::Component modal);
   void popModal();
+  void popModalImmediate();
+  void replaceModalDirect(ftxui::Component modal);
   void clearModals();
 
   void postEvent(ftxui::Event event);
@@ -90,6 +92,7 @@ private:
 
   ftxui::Component root_component_;
   ftxui::Component chat_component_;
+  ftxui::Component input_component_;
 };
 
 } // namespace firmius::tui

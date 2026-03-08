@@ -27,13 +27,4 @@ FetchContent_Declare(
   GIT_SHALLOW TRUE
 )
 
-FetchContent_Declare(
-  imtui
-  GIT_REPOSITORY https://github.com/ggerganov/imtui.git
-  GIT_TAG master
-  GIT_SHALLOW TRUE
-)
-
-set(IMTUI_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-
-FetchContent_MakeAvailable(rapidjson googletest ftxui imtui)
+FetchContent_MakeAvailable(rapidjson googletest ftxui)

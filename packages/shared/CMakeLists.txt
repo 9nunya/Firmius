@@ -9,6 +9,9 @@ target_sources(firmius_shared PRIVATE
     src/utils/StringUtil.cpp
     src/utils/FSUtil.cpp
     src/utils/ToolSummaries.cpp
+    src/utils/TempOAuthServer.cpp
+    src/providers/oauth/BaseOAuthProvider.cpp
+    src/providers/antigravity/AntigravityProvider.cpp
     src/providers/BaseOpenAIProvider.cpp
     src/providers/ProviderRegistry.cpp
     src/ConfigLoader.cpp
@@ -39,6 +42,10 @@ target_sources(firmius_shared PUBLIC
     include/utils/FSUtil.hpp
     include/utils/ToolSummaries.hpp
     include/utils/ToolView.hpp
+    include/utils/TempOAuthServer.hpp
+    include/providers/oauth/OAuthWizard.hpp
+    include/providers/oauth/BaseOAuthProvider.hpp
+    include/providers/antigravity/AntigravityProvider.hpp
     include/providers/BaseOpenAIProvider.hpp
     include/ConfigLoader.hpp
 )

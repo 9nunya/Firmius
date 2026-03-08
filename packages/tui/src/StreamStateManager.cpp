@@ -1,28 +1,19 @@
 #include "StreamStateManager.hpp"
 #include "components/ToolBlock.hpp"
 #include "utils/ToolSummaries.hpp"
-#include <rapidjson/document.h>
 #include <chrono>
+#include <rapidjson/document.h>
 
 namespace firmius::tui {
 
 static std::string formatDuration(float seconds) {
-  if (seconds < 0.1f) return "<0.1s";
+  if (seconds < 0.1f)
+    return "<0.1s";
   int tenths = static_cast<int>(seconds * 10 + 0.5f);
   return std::to_string(tenths / 10) + "." + std::to_string(tenths % 10) + "s";
 }
 
-static std::string formatTokens(uint32_t count) {
-  if (count >= 1000) {
-    return std::to_string(count / 1000) + "." +
-           std::to_string((count % 1000) / 100) + "k";
-  }
-  return std::to_string(count);
-}
-
-void StreamStateManager::clearRetryStatus() {
-  retry_status_.clear();
-}
+void StreamStateManager::clearRetryStatus() { retry_status_.clear(); }
 
 void StreamStateManager::handleAgentThinking(const shared::AgentThinking &e) {
   auto &s = streams_[e.agentId];
@@ -64,14 +55,14 @@ void StreamStateManager::handleAgentTurnCompleted(
       ++it;
     }
   }
-  timeline_.erase(
-      std::remove_if(timeline_.begin(), timeline_.end(),
-                     [&](const TimelineEntry &entry) {
-                       if (entry.kind != TimelineEntry::Kind::ToolCall)
-                         return false;
-                       return entry.agentId == e.agentId;
-                     }),
-      timeline_.end());
+  timeline_.erase(std::remove_if(timeline_.begin(), timeline_.end(),
+                                 [&](const TimelineEntry &entry) {
+                                   if (entry.kind !=
+                                       TimelineEntry::Kind::ToolCall)
+                                     return false;
+                                   return entry.agentId == e.agentId;
+                                 }),
+                  timeline_.end());
 }
 
 void StreamStateManager::handleAgentProviderWaiting(
@@ -84,7 +75,8 @@ void StreamStateManager::handleAgentToolCallChunk(
     const shared::AgentToolCallChunk &e) {
   auto it_stream = streams_.find(e.agentId);
   if (it_stream != streams_.end() && it_stream->second.is_thinking) {
-    auto elapsed = std::chrono::steady_clock::now() - it_stream->second.thinking_start;
+    auto elapsed =
+        std::chrono::steady_clock::now() - it_stream->second.thinking_start;
     float secs = std::chrono::duration<float>(elapsed).count();
     it_stream->second.is_thinking = false;
     pushThinkingDuration(e.agentId, secs);
@@ -95,8 +87,8 @@ void StreamStateManager::handleAgentToolCallChunk(
     view = std::make_shared<ToolCallView>();
     view->toolCallId = e.toolCallId;
     view->agentId = e.agentId;
-    timeline_.push_back({TimelineEntry::Kind::ToolCall, e.toolCallId, "",
-                         e.agentId});
+    timeline_.push_back(
+        {TimelineEntry::Kind::ToolCall, e.toolCallId, "", e.agentId});
   }
   view->phase = ToolPhase::Preparing;
   view->name += e.nameDelta;
@@ -109,12 +101,19 @@ void StreamStateManager::handleAgentToolCallChunk(
   if (it_sub != subagent_to_parent_tool_.end()) {
     auto it_parent = tool_calls_.find(it_sub->second);
     if (it_parent != tool_calls_.end() && it_parent->second) {
-      std::string summary = firmius::shared::SummarizeToolCall(view->name, view->args, firmius::shared::ToolPhase::Called);
+      std::string summary = firmius::shared::SummarizeToolCall(
+          view->name, view->args, firmius::shared::ToolPhase::Called);
       auto &log = it_parent->second->subagent_tool_log;
-      if (log.empty() || log.back() != summary) {
-        log.push_back(summary);
-        while (log.size() > 8)
-          log.erase(log.begin());
+      if (!summary.empty()) {
+        if (it_parent->second->last_subagent_tool_id == e.toolCallId &&
+            !log.empty()) {
+          log.back() = summary;
+        } else {
+          log.push_back(summary);
+          it_parent->second->last_subagent_tool_id = e.toolCallId;
+          while (log.size() > 8)
+            log.erase(log.begin());
+        }
       }
     }
   }
@@ -125,8 +124,8 @@ void StreamStateManager::handleAgentToolCall(const shared::AgentToolCall &e) {
   if (!view) {
     view = std::make_shared<ToolCallView>();
     view->toolCallId = e.toolCallId;
-    timeline_.push_back({TimelineEntry::Kind::ToolCall, e.toolCallId, "",
-                         e.agentId});
+    timeline_.push_back(
+        {TimelineEntry::Kind::ToolCall, e.toolCallId, "", e.agentId});
   }
   view->agentId = e.agentId;
   if (!e.toolName.empty())
@@ -134,6 +133,27 @@ void StreamStateManager::handleAgentToolCall(const shared::AgentToolCall &e) {
   if (!e.toolArgs.empty())
     view->args = e.toolArgs;
   view->phase = view->args.empty() ? ToolPhase::Preparing : ToolPhase::Called;
+
+  auto it_sub = subagent_to_parent_tool_.find(e.agentId);
+  if (it_sub != subagent_to_parent_tool_.end()) {
+    auto it_parent = tool_calls_.find(it_sub->second);
+    if (it_parent != tool_calls_.end() && it_parent->second) {
+      std::string summary = firmius::shared::SummarizeToolCall(
+          view->name, view->args, view->phase);
+      auto &log = it_parent->second->subagent_tool_log;
+      if (!summary.empty()) {
+        if (it_parent->second->last_subagent_tool_id == e.toolCallId &&
+            !log.empty()) {
+          log.back() = summary;
+        } else {
+          log.push_back(summary);
+          it_parent->second->last_subagent_tool_id = e.toolCallId;
+          while (log.size() > 8)
+            log.erase(log.begin());
+        }
+      }
+    }
+  }
 }
 
 void StreamStateManager::handleAgentCompactionThinking(
@@ -204,39 +224,24 @@ void StreamStateManager::handleAgentSpawned(
   (void)focused_agent_id;
 }
 
-void StreamStateManager::pushThinkingDuration(const std::string &agentId, float seconds) {
+void StreamStateManager::pushThinkingDuration(const std::string &agentId,
+                                              float seconds) {
   auto it_sub = subagent_to_parent_tool_.find(agentId);
-  if (it_sub == subagent_to_parent_tool_.end()) return;
+  if (it_sub == subagent_to_parent_tool_.end())
+    return;
   auto it_parent = tool_calls_.find(it_sub->second);
-  if (it_parent == tool_calls_.end() || !it_parent->second) return;
+  if (it_parent == tool_calls_.end() || !it_parent->second)
+    return;
 
   std::string label = "Thought for " + formatDuration(seconds);
   auto &log = it_parent->second->subagent_tool_log;
   log.push_back(label);
-  while (log.size() > 8) log.erase(log.begin());
+  while (log.size() > 8)
+    log.erase(log.begin());
 }
 
-void StreamStateManager::pushTokenUsage(const std::string &agentId,
-                                         const shared::AgentMetrics &metrics) {
-  auto it_sub = subagent_to_parent_tool_.find(agentId);
-  if (it_sub == subagent_to_parent_tool_.end()) return;
-  auto it_parent = tool_calls_.find(it_sub->second);
-  if (it_parent == tool_calls_.end() || !it_parent->second) return;
-
-  auto total = metrics.tokens.total;
-  if (total == 0) return;
-
-  std::string label = formatTokens(total) + " tokens";
-  if (metrics.estimatedCostUsd > 0.0) {
-    int cents = static_cast<int>(metrics.estimatedCostUsd * 100 + 0.5);
-    if (cents > 0) {
-      label += std::string(" ($0.") + (cents < 10 ? "0" : "") + std::to_string(cents) + ")";
-    }
-  }
-  auto &log = it_parent->second->subagent_tool_log;
-  log.push_back(label);
-  while (log.size() > 8) log.erase(log.begin());
-}
+void StreamStateManager::pushTokenUsage(const std::string &,
+                                        const shared::AgentMetrics &) {}
 
 void StreamStateManager::handleAgentCompleted(const shared::AgentCompleted &e) {
   auto it_sub = subagent_to_parent_tool_.find(e.agentId);
@@ -306,6 +311,27 @@ void StreamStateManager::handleAgentRetryFailed(
 
 const std::string &StreamStateManager::getRetryStatus() const {
   return retry_status_;
+}
+
+void StreamStateManager::handleMessageQueued(const shared::MessageQueued &e) {
+  queued_messages_.emplace_back(e.messageId, e.text);
+}
+
+void StreamStateManager::handleMessageDequeued(
+    const shared::MessageDequeued &e) {
+  queued_messages_.erase(std::remove_if(queued_messages_.begin(),
+                                        queued_messages_.end(),
+                                        [&](const auto &pair) {
+                                          return pair.first == e.messageId;
+                                        }),
+                         queued_messages_.end());
+}
+
+void StreamStateManager::handleThreadChanged() { queued_messages_.clear(); }
+
+const std::vector<std::pair<std::string, std::string>> &
+StreamStateManager::getQueuedMessages() const {
+  return queued_messages_;
 }
 
 } // namespace firmius::tui

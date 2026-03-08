@@ -5,8 +5,8 @@
 #include <ftxui/component/component.hpp>
 #include <ftxui/dom/elements.hpp>
 #include <string>
-#include <vector>
 #include <thread>
+#include <vector>
 
 namespace firmius::tui {
 
@@ -18,18 +18,42 @@ ftxui::Component ModelPickerModal::create(TuiState &state) {
   auto selected = std::make_shared<int>(0);
   auto isLoading = std::make_shared<bool>(true);
 
+  auto display_entries = std::make_shared<std::vector<std::string>>();
+
   auto rebuild_filtered = [entries, filtered_indices, models, filter_text,
-                           selected]() {
+                           selected, display_entries]() {
     filtered_indices->clear();
+    display_entries->clear();
     std::string q = *filter_text;
     std::transform(q.begin(), q.end(), q.begin(), ::tolower);
+
+    // Split query into tokens for "AND" search
+    std::vector<std::string> tokens;
+    size_t start = 0, end = 0;
+    while ((end = q.find(' ', start)) != std::string::npos) {
+      if (end != start)
+        tokens.push_back(q.substr(start, end - start));
+      start = end + 1;
+    }
+    if (start < q.size())
+      tokens.push_back(q.substr(start));
+
     for (int i = 0; i < (int)models->size(); ++i) {
-      std::string label = (*entries)[i];
-      std::string lower_label = label;
+      std::string lower_label = (*entries)[i];
       std::transform(lower_label.begin(), lower_label.end(),
                      lower_label.begin(), ::tolower);
-      if (q.empty() || lower_label.find(q) != std::string::npos) {
+
+      bool all_tokens_match = true;
+      for (const auto &token : tokens) {
+        if (lower_label.find(token) == std::string::npos) {
+          all_tokens_match = false;
+          break;
+        }
+      }
+
+      if (all_tokens_match) {
         filtered_indices->push_back(i);
+        display_entries->push_back((*entries)[i]);
       }
     }
     if (*selected >= (int)filtered_indices->size()) {
@@ -38,42 +62,64 @@ ftxui::Component ModelPickerModal::create(TuiState &state) {
     }
   };
 
-  std::thread([models, entries, filtered_indices, isLoading, &state]() {
-      auto fetched = firmius::core::Harness::instance().listAllModels();
-      *models = std::move(fetched);
-      for (int i = 0; i < (int)models->size(); ++i) {
-          entries->push_back((*models)[i].provider + "/" + (*models)[i].id);
-          filtered_indices->push_back(i);
-      }
-      *isLoading = false;
-      state.postEvent(ftxui::Event::Custom);
-  }).detach();
+  auto refresh = [models, entries, filtered_indices, isLoading, selected,
+                  rebuild_filtered, &state]() {
+    auto &h = firmius::core::Harness::instance();
+    auto fetched = h.listAllModels();
+    *models = std::move(fetched);
+    entries->clear();
+    for (int i = 0; i < (int)models->size(); ++i) {
+      entries->push_back((*models)[i].provider + "/" + (*models)[i].id);
+    }
+    *isLoading = !h.isModelsLoaded();
+    rebuild_filtered();
+    state.postEvent(ftxui::Event::Custom);
+  };
 
-  auto component = ftxui::Renderer([entries, filtered_indices, filter_text,
-                                    selected, rebuild_filtered, isLoading]() {
+  // Initial load
+  refresh();
+
+  // Subscribe to refreshes
+  int subId = firmius::core::Harness::instance().subscribe(
+      [refresh](const firmius::shared::AppEvent &event) {
+        if (std::holds_alternative<firmius::shared::ModelsRefreshed>(event)) {
+          refresh();
+        }
+      });
+
+  auto menu = ftxui::Menu(display_entries.get(), selected.get());
+
+  auto component = ftxui::Renderer(menu, [entries, filtered_indices,
+                                          filter_text, selected,
+                                          rebuild_filtered, isLoading,
+                                          display_entries, menu]() {
     if (*isLoading) {
-        return ftxui::window(
-                   ftxui::text(" Select Model ") | ftxui::bold |
-                       ftxui::color(ftxui::Color::Cyan),
-                   ftxui::vbox({
-                       ftxui::text("Loading models...") | ftxui::center,
-                       ftxui::text("") | ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, 5)
-                   })) |
-               ftxui::clear_under | ftxui::center;
+      return ftxui::window(
+                 ftxui::text(" Select Model ") | ftxui::bold |
+                     ftxui::color(ftxui::Color::Cyan),
+                 ftxui::vbox(
+                     {ftxui::text("Loading models...") | ftxui::center,
+                      ftxui::text("") |
+                          ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, 5)})) |
+             ftxui::clear_under | ftxui::center;
     }
 
     rebuild_filtered();
-    ftxui::Elements rows;
-    for (int i = 0; i < (int)filtered_indices->size() && i < 20; ++i) {
-      int idx = (*filtered_indices)[i];
-      auto label = ftxui::text((*entries)[idx]);
-      if (i == *selected) {
-        label = label | ftxui::inverted;
-      }
-      rows.push_back(label);
-    }
-    if (rows.empty()) {
-      rows.push_back(ftxui::text("No matching models") | ftxui::dim);
+
+    if (display_entries->empty()) {
+      return ftxui::window(
+                 ftxui::text(" Select Model ") | ftxui::bold |
+                     ftxui::color(ftxui::Color::Cyan),
+                 ftxui::vbox({ftxui::hbox({ftxui::text("Filter: "),
+                                           ftxui::text(*filter_text) |
+                                               ftxui::underlined}),
+                              ftxui::separator(),
+                              ftxui::text("No matching models") | ftxui::dim |
+                                  ftxui::center,
+                              ftxui::text(""),
+                              ftxui::text(" ESC cancel, type to filter ") |
+                                  ftxui::dim | ftxui::center})) |
+             ftxui::clear_under | ftxui::center;
     }
 
     return ftxui::window(
@@ -83,32 +129,36 @@ ftxui::Component ModelPickerModal::create(TuiState &state) {
                    ftxui::hbox({ftxui::text("Filter: "),
                                 ftxui::text(*filter_text) | ftxui::underlined}),
                    ftxui::separator(),
-                   ftxui::vbox(rows) | ftxui::vscroll_indicator |
-                       ftxui::yframe |
+                   menu->Render() | ftxui::vscroll_indicator | ftxui::frame |
                        ftxui::size(ftxui::HEIGHT, ftxui::LESS_THAN, 15),
                    ftxui::text(""),
-                   ftxui::text("↑↓ navigate, Enter select, ESC cancel, type to "
-                               "filter") |
-                       ftxui::dim,
+                   ftxui::text("↑↓ navigate, Enter select, ESC cancel, "
+                               "type/mouse click to "
+                               "filter/select") |
+                       ftxui::dim | ftxui::center,
                })) |
            ftxui::clear_under | ftxui::center;
   });
 
   return ftxui::CatchEvent(component, [models, entries, filtered_indices,
                                        filter_text, selected, rebuild_filtered,
-                                       isLoading, &state](ftxui::Event event) {
+                                       isLoading, subId, menu,
+                                       &state](ftxui::Event event) {
     if (*isLoading) {
-        if (event == ftxui::Event::Escape) {
-            state.popModal();
-            return true;
-        }
-        return false;
+      if (event == ftxui::Event::Escape) {
+        firmius::core::Harness::instance().unsubscribe(subId);
+        state.popModalImmediate();
+        return true;
+      }
+      return false;
     }
 
     if (event == ftxui::Event::Escape) {
-      state.popModal();
+      firmius::core::Harness::instance().unsubscribe(subId);
+      state.popModalImmediate();
       return true;
     }
+
     if (event == ftxui::Event::Return) {
       rebuild_filtered();
       if (!filtered_indices->empty() &&
@@ -117,20 +167,19 @@ ftxui::Component ModelPickerModal::create(TuiState &state) {
         const auto &m = (*models)[idx];
         firmius::core::Harness::instance().switchModel(m.provider, m.id);
       }
-      state.popModal();
+      firmius::core::Harness::instance().unsubscribe(subId);
+      state.popModalImmediate();
       return true;
     }
-    if (event == ftxui::Event::ArrowUp) {
-      if (*selected > 0)
-        (*selected)--;
-      return true;
+
+    if (event == ftxui::Event::ArrowUp || event == ftxui::Event::ArrowDown) {
+      return menu->OnEvent(event);
     }
-    if (event == ftxui::Event::ArrowDown) {
-      rebuild_filtered();
-      if (*selected < (int)filtered_indices->size() - 1)
-        (*selected)++;
-      return true;
+
+    if (event.is_mouse()) {
+      return menu->OnEvent(event);
     }
+
     if (event == ftxui::Event::Backspace) {
       if (!filter_text->empty()) {
         filter_text->pop_back();

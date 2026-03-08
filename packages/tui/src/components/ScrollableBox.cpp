@@ -19,11 +19,11 @@ ftxui::Element ScrollableBoxComponent::Render() {
     if (!child_) return ftxui::text("");
 
     auto background = child_->Render();
-    if (viewport_width_ > 0) {
-        background = background | ftxui::size(ftxui::WIDTH, ftxui::EQUAL, viewport_width_);
-    }
+    // if (viewport_width_ > 0) {
+    //     background = background | ftxui::size(ftxui::WIDTH, ftxui::EQUAL, viewport_width_);
+    // }
     background->ComputeRequirement();
-    size_ = background->requirement().min_y;
+    size_ = background->requirement().flex_grow_y + background->requirement().min_y + background->requirement().flex_shrink_y + 300;
     if (at_bottom_) {
         selected_ = size_;
     }
@@ -55,6 +55,7 @@ bool ScrollableBoxComponent::OnEvent(ftxui::Event event) {
     }
     if (event == ftxui::Event::ArrowDown ||
         (event.is_mouse() && event.mouse().button == ftxui::Mouse::WheelDown)) {
+            if (at_bottom_ && event.mouse().button == ftxui::Mouse::WheelDown) return scroll_handled;
         selected_ += wheel_step;
         scroll_handled = true;
     }

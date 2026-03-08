@@ -7,6 +7,7 @@
 #include "hosts/LocalHost.hpp"
 #include "persistence/ThreadManager.hpp"
 #include "providers/ProviderRegistry.hpp"
+#include "providers/oauth/BaseOAuthProvider.hpp"
 #include "utils/StringUtil.hpp"
 #include <Context.hpp>
 #include <EnvLoader.hpp>
@@ -92,7 +93,8 @@ Harness &Harness::instance() {
   return instance;
 }
 
-Harness::Harness() : threadManager_(getFirmiusHome() + "/threads"), nextSubscriptionId_(0) {}
+Harness::Harness()
+    : threadManager_(getFirmiusHome() + "/threads"), nextSubscriptionId_(0) {}
 
 void Harness::init() {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -131,7 +133,9 @@ void Harness::init() {
   }
 
   Engine::instance().addEventListener(
-      [this](const firmius::shared::AppEvent &event) { this->routeEngineEvent(event); });
+      [this](const firmius::shared::AppEvent &event) {
+        this->routeEngineEvent(event);
+      });
 
   std::ifstream sessionFile(getSessionPath());
   if (sessionFile.is_open()) {
@@ -154,6 +158,9 @@ void Harness::init() {
       threadAgentMap_[currentThreadId_] = focusedAgentId_;
     }
   }
+
+  // Trigger initial background model fetch
+  listAllModels();
 }
 
 void Harness::shutdown() {
@@ -193,7 +200,8 @@ void Harness::shutdown() {
   toJoin.clear();
 }
 
-std::string Harness::newThread(HostCreationOptions hostOptions, const std::string &cwd,
+std::string Harness::newThread(HostCreationOptions hostOptions,
+                               const std::string &cwd,
                                const std::string &leadPersona) {
   std::string threadId;
   int ownerPid = -1;
@@ -229,6 +237,7 @@ std::string Harness::newThread(HostCreationOptions hostOptions, const std::strin
       }
       currentThreadId_ = threadId;
       focusedAgentId_.clear();
+      clearQueue();
       metadata = threadManager_.getMetadata(threadId);
     }
   }
@@ -243,15 +252,8 @@ std::string Harness::newThread(HostCreationOptions hostOptions, const std::strin
 }
 
 bool Harness::switchThread(const std::string &threadId) {
-  struct ResumeParams {
-    std::string agentId;
-    AgentManifestEntry entry;
-  };
-  std::vector<ResumeParams> toResume;
-  std::vector<AgentSpawned> toSpawn;
   ThreadMetadata threadMeta;
   bool alreadyLocked = false;
-  int acquireRes = 0;
   int ownerPid = -1;
 
   {
@@ -259,106 +261,47 @@ bool Harness::switchThread(const std::string &threadId) {
 
     if (lockManager_.isLocked(threadId)) {
       alreadyLocked = true;
-      if (!currentThreadId_.empty() && !focusedAgentId_.empty()) {
-        threadAgentMap_[currentThreadId_] = focusedAgentId_;
-      }
+    }
+  }
 
-      currentThreadId_ = threadId;
+  if (!alreadyLocked) {
+    int fd = lockManager_.acquire(threadId);
+    if (fd < 0) {
+      ownerPid = lockManager_.getOwnerPid(threadId);
+      emitEvent(firmius::shared::ThreadLocked{threadId, ownerPid});
+      return false;
+    }
+  }
 
-      auto it = threadAgentMap_.find(threadId);
-      if (it != threadAgentMap_.end()) {
-        focusedAgentId_ = it->second;
-      } else {
-        focusedAgentId_.clear();
-      }
+  {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (!currentThreadId_.empty() && !focusedAgentId_.empty()) {
+      threadAgentMap_[currentThreadId_] = focusedAgentId_;
+    }
 
-      threadMeta = threadManager_.getMetadata(threadId);
+    currentThreadId_ = threadId;
+
+    auto manifest = threadManager_.readAgentManifest(threadId);
+    for (const auto &[agentId, entry] : manifest) {
+      Engine::instance().resumeAgent(threadId, agentId, entry.persona,
+                                     entry.parentId, entry.friendlyName,
+                                     entry.title, entry.persistHistory);
+    }
+
+    auto it = threadAgentMap_.find(threadId);
+    if (it != threadAgentMap_.end()) {
+      focusedAgentId_ = it->second;
+    } else if (!manifest.empty()) {
+      focusedAgentId_ = manifest.begin()->first;
     } else {
-      acquireRes = lockManager_.acquire(threadId);
-      if (acquireRes < 0) {
-        ownerPid = (acquireRes == -2) ? lockManager_.getOwnerPid(threadId) : -1;
-      } else {
-        if (!currentThreadId_.empty() && !focusedAgentId_.empty()) {
-          threadAgentMap_[currentThreadId_] = focusedAgentId_;
-        }
-
-        if (!currentThreadId_.empty()) {
-          lockManager_.release(currentThreadId_);
-        }
-
-        currentThreadId_ = threadId;
-
-        try {
-          auto manifest = threadManager_.readAgentManifest(threadId);
-          for (const auto &[agentId, entry] : manifest) {
-            if (!AgentRegistry::instance().getAgent(agentId)) {
-              toResume.push_back({agentId, entry});
-            }
-            toSpawn.push_back(AgentSpawned{
-                agentId, entry.persona, entry.parentId, entry.friendlyName,
-                entry.title, entry.persistHistory, "", "", 0});
-          }
-        } catch (...) {
-        }
-
-        auto it = threadAgentMap_.find(threadId);
-        if (it != threadAgentMap_.end()) {
-          focusedAgentId_ = it->second;
-          if (!AgentRegistry::instance().getAgent(focusedAgentId_)) {
-            focusedAgentId_.clear();
-          }
-        } else {
-          focusedAgentId_.clear();
-        }
-
-        if (focusedAgentId_.empty()) {
-          try {
-            auto manifest = threadManager_.readAgentManifest(threadId);
-            for (const auto &[agentId, entry] : manifest) {
-              if (entry.parentId.empty()) {
-                focusedAgentId_ = agentId;
-                threadAgentMap_[threadId] = agentId;
-                break;
-              }
-            }
-          } catch (...) {
-          }
-        }
-
-        threadMeta = threadManager_.getMetadata(threadId);
-      }
+      focusedAgentId_.clear();
     }
-  }
 
-  if (alreadyLocked) {
-    emitEvent(firmius::shared::ThreadChanged{threadId, threadMeta});
-    return true;
-  }
-
-  if (acquireRes < 0) {
-    emitEvent(firmius::shared::ThreadLocked{threadId, ownerPid});
-    return false;
-  }
-
-  for (const auto &p : toResume) {
-    Engine::instance().resumeAgent(threadId, p.agentId, p.entry.persona,
-                                   p.entry.parentId, p.entry.friendlyName,
-                                   p.entry.title, p.entry.persistHistory);
-  }
-
-  for (auto &ev : toSpawn) {
-    auto agent = AgentRegistry::instance().getAgent(ev.agentId);
-    if (agent) {
-      const auto &config = agent->getContext().config;
-      ev.providerId = config.providerId;
-      ev.modelId = config.modelId;
-      ev.maxTokens = config.maxTokens.value_or(0);
-    }
-    emitEvent(ev);
+    clearQueue();
+    threadMeta = threadManager_.getMetadata(threadId);
   }
 
   emitEvent(firmius::shared::ThreadChanged{threadId, threadMeta});
-
   return true;
 }
 
@@ -591,7 +534,8 @@ void Harness::routeEngineEvent(const firmius::shared::AppEvent &event) {
 
             if (!currentThreadId_.empty()) {
               try {
-                auto manifest = threadManager_.readAgentManifest(currentThreadId_);
+                auto manifest =
+                    threadManager_.readAgentManifest(currentThreadId_);
                 AgentManifestEntry entry;
                 entry.persona = ev.personaName;
                 entry.parentId = ev.parentId;
@@ -656,7 +600,8 @@ void Harness::deleteThread(const std::string &threadId) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
 
   if (threadId == currentThreadId_) {
-    emitEvent(firmius::shared::AgentError{"", "Cannot delete the currently active thread"});
+    emitEvent(firmius::shared::AgentError{
+        "", "Cannot delete the currently active thread"});
     return;
   }
 
@@ -701,19 +646,43 @@ bool Harness::setFocusedAgent(const std::string &agentId) {
 }
 
 std::vector<ModelInfo> Harness::listAllModels() {
-  std::vector<ModelInfo> all;
-  auto providerIds = provider::ProviderRegistry::instance().listProviderIds();
-  for (const auto &pid : providerIds) {
-    auto prov = provider::ProviderRegistry::instance().getProvider(pid);
-    if (prov) {
-      try {
-        auto models = prov->listModels();
-        all.insert(all.end(), models.begin(), models.end());
-      } catch (...) {
+  std::lock_guard<std::mutex> lock(modelsMutex_);
+
+  if (modelsLoaded_) {
+    return cachedModels_;
+  }
+
+  if (isRefreshingModels_) {
+    return {}; // Still loading...
+  }
+
+  isRefreshingModels_ = true;
+  std::thread([this]() {
+    std::vector<ModelInfo> all;
+    auto providerIds = provider::ProviderRegistry::instance().listProviderIds();
+    for (const auto &pid : providerIds) {
+      auto prov = provider::ProviderRegistry::instance().getProvider(pid);
+      if (prov) {
+        try {
+          auto models = prov->listModels();
+          all.insert(all.end(), models.begin(), models.end());
+        } catch (...) {
+        }
       }
     }
-  }
-  return all;
+
+    {
+      std::lock_guard<std::mutex> innerLock(modelsMutex_);
+      cachedModels_ = std::move(all);
+      isRefreshingModels_ = false;
+      modelsLoaded_ = true;
+    }
+
+    // Emit event so TUI knows models are ready
+    emitEvent(firmius::shared::AppEvent(firmius::shared::ModelsRefreshed{}));
+  }).detach();
+
+  return {};
 }
 
 const UserConfig &Harness::getConfig() {
@@ -749,7 +718,8 @@ void Harness::interruptAndSwitchModel(const std::string &providerId,
                                       const std::string &modelId) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (focusedAgentId_.empty()) {
-    emitEvent(firmius::shared::AgentError{"", "No focused agent to switch model on"});
+    emitEvent(
+        firmius::shared::AgentError{"", "No focused agent to switch model on"});
     return;
   }
 
@@ -859,7 +829,8 @@ void Harness::maybeGenerateTitle(const std::string &threadId,
                 std::chrono::system_clock::now().time_since_epoch())
                 .count());
         threadManager_.updateMetadata(threadId, metadata);
-        emitEvent(firmius::shared::ThreadTitleUpdated{threadId, generatedTitle});
+        emitEvent(
+            firmius::shared::ThreadTitleUpdated{threadId, generatedTitle});
       }
     } catch (...) {
     }
@@ -877,6 +848,12 @@ void Harness::drainQueue() {
 
   emitEvent(firmius::shared::MessageDequeued{id});
   Engine::instance().executeTask(agentId, text);
+}
+
+void Harness::clearQueue() {
+  while (!messageQueue_.empty()) {
+    messageQueue_.pop();
+  }
 }
 
 void Harness::writeInterruptionRecord() {
@@ -943,7 +920,8 @@ void Harness::writeInterruptionRecord() {
 
 shared::AgentHistory
 Harness::getAgentHistory(const std::string &agentId) const {
-  std::lock_guard<std::recursive_mutex> lock(const_cast<std::recursive_mutex &>(mutex_));
+  std::lock_guard<std::recursive_mutex> lock(
+      const_cast<std::recursive_mutex &>(mutex_));
   if (currentThreadId_.empty())
     return {};
   return threadManager_.loadAgentHistory(currentThreadId_, agentId);
@@ -951,7 +929,8 @@ Harness::getAgentHistory(const std::string &agentId) const {
 
 std::shared_ptr<shared::AgentHistory>
 Harness::getAgentHistoryPtr(const std::string &agentId) const {
-  std::lock_guard<std::recursive_mutex> lock(const_cast<std::recursive_mutex &>(mutex_));
+  std::lock_guard<std::recursive_mutex> lock(
+      const_cast<std::recursive_mutex &>(mutex_));
   if (!agentId.empty()) {
     auto agent = AgentRegistry::instance().getAgent(agentId);
     if (agent) {
@@ -962,6 +941,36 @@ Harness::getAgentHistoryPtr(const std::string &agentId) const {
     return std::make_shared<shared::AgentHistory>();
   return std::make_shared<shared::AgentHistory>(
       threadManager_.loadAgentHistory(currentThreadId_, agentId));
+}
+
+std::vector<shared::OAuthAccount>
+Harness::getAccounts(const std::string &providerId) {
+  auto prov = provider::ProviderRegistry::instance().getProvider(providerId);
+  auto oauthProv = dynamic_cast<provider::BaseOAuthProvider *>(prov.get());
+  if (oauthProv) {
+    return oauthProv->getAccounts();
+  }
+  return {};
+}
+
+void Harness::deleteAccount(const std::string &providerId,
+                            const std::string &identifier) {
+  auto prov = provider::ProviderRegistry::instance().getProvider(providerId);
+  auto oauthProv = dynamic_cast<provider::BaseOAuthProvider *>(prov.get());
+  if (oauthProv) {
+    oauthProv->deleteAccount(identifier);
+  }
+}
+
+std::map<std::string, std::vector<shared::QuotaBucket>>
+Harness::getAllQuotas(const std::string &providerId) {
+  auto prov = provider::ProviderRegistry::instance().getProvider(providerId);
+  auto oauthProv = dynamic_cast<provider::BaseOAuthProvider *>(prov.get());
+  if (oauthProv) {
+    oauthProv->refreshQuotas();
+    return oauthProv->getAllQuotas();
+  }
+  return {};
 }
 
 } // namespace firmius::core

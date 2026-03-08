@@ -17,7 +17,7 @@ public:
   explicit AgentStripComponentBase(std::shared_ptr<AgentStripModel> model)
       : model_(std::move(model)) {}
 
-  ftxui::Element Render() override {
+  ftxui::Element Render() {
     if (!model_ || model_->items.empty()) {
       return ftxui::text("");
     }

@@ -26,6 +26,7 @@ struct ToolCallView {
   std::vector<std::string> subagent_tool_log;
   std::string subagent_title;
   bool subagent_running = false;
+  std::string last_subagent_tool_id;
 };
 
 } // namespace firmius::shared

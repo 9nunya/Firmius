@@ -277,7 +277,8 @@ struct ThreadChanged {
 };
 
 /**
- * @brief Emitted when a thread cannot be locked (already in use by another process).
+ * @brief Emitted when a thread cannot be locked (already in use by another
+ * process).
  */
 struct ThreadLocked {
   std::string threadId;
@@ -298,6 +299,13 @@ struct ThreadDeleted {
  */
 struct ConfigUpdated {
   bool operator==(const ConfigUpdated &) const = default;
+};
+
+/**
+ * @brief Emitted when the model cache has been refreshed.
+ */
+struct ModelsRefreshed {
+  bool operator==(const ModelsRefreshed &) const = default;
 };
 
 /**
@@ -373,8 +381,8 @@ using AppEvent =
                  AgentCompactionText, ContextCompacted, AgentProcessOutput,
                  AgentProcessSpawned, ModelSwitched, HistoryUndone,
                  ThreadChanged, ThreadLocked, ThreadDeleted, ConfigUpdated,
-                 ThreadTitleUpdated, MessageQueued, MessageDequeued,
-                 UserMessageSent, AgentFinished>;
+                 ModelsRefreshed, ThreadTitleUpdated, MessageQueued,
+                 MessageDequeued, UserMessageSent, AgentFinished>;
 } // namespace firmius::shared
 
 #endif

@@ -297,7 +297,7 @@ ftxui::Element RenderMarkdown(const std::string &text, bool dim) {
       table.SelectAll().Border(ftxui::LIGHT);
       table.SelectAll().SeparatorHorizontal(ftxui::LIGHT);
       table.SelectAll().SeparatorVertical(ftxui::LIGHT);
-      
+
       // Decorate header specifically, but only the cells (not the separators)
       table.SelectRow(0).Decorate(ftxui::bold);
 

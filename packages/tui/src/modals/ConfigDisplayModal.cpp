@@ -1,11 +1,11 @@
 #include "modals/ConfigDisplayModal.hpp"
+#include "AgentRegistry.hpp"
 #include "TUIState.hpp"
 #include "harness/Harness.hpp"
-#include "AgentRegistry.hpp"
 #include <ftxui/component/component.hpp>
 #include <ftxui/dom/elements.hpp>
-#include <string>
 #include <memory>
+#include <string>
 
 namespace firmius::tui {
 
@@ -14,15 +14,17 @@ ftxui::Component ConfigDisplayModal::create(TuiState &state) {
   auto offset = std::make_shared<int>(0);
 
   // We capture everything by value to avoid referencing locals in the renderer
-  // and we perform the data gathering once here to avoid calling Harness::getConfig()
-  // every frame, which prevents the deadlock.
-  
+  // and we perform the data gathering once here to avoid calling
+  // Harness::getConfig() every frame, which prevents the deadlock.
+
   const auto config = h.getConfig();
   std::string providerId = config.defaultProviderId;
   std::string modelId = config.defaultModelId;
 
   auto agentId = h.focusedAgentId();
-  auto agent = agentId.empty() ? nullptr : firmius::core::AgentRegistry::instance().getAgent(agentId);
+  auto agent = agentId.empty()
+                   ? nullptr
+                   : firmius::core::AgentRegistry::instance().getAgent(agentId);
   if (agent) {
     const auto &agentConfig = agent->getContext().config;
     providerId = agentConfig.providerId;
@@ -42,24 +44,12 @@ ftxui::Component ConfigDisplayModal::create(TuiState &state) {
     provOptLines.push_back(key + " = " + val);
   }
 
-  auto change_btn = ftxui::Button("Change Model", [&state] {
-    state.popModal();
-    state.openModal("model_picker");
-  }, ftxui::ButtonOption::Simple());
-
-  auto container = ftxui::Container::Vertical({
-    change_btn,
-  });
-
-  auto component = ftxui::Renderer(container, [=]() {
+  auto component = ftxui::Renderer([=]() {
     ftxui::Elements rows;
     rows.push_back(ftxui::hbox(
         {ftxui::text("Provider:    ") | ftxui::bold, ftxui::text(providerId)}));
     rows.push_back(ftxui::hbox(
         {ftxui::text("Model:       ") | ftxui::bold, ftxui::text(modelId)}));
-    
-    rows.push_back(ftxui::separator());
-    rows.push_back(change_btn->Render() | ftxui::size(ftxui::WIDTH, ftxui::EQUAL, 20));
 
     if (!apiKeyNames.empty()) {
       rows.push_back(ftxui::separator());
@@ -78,23 +68,35 @@ ftxui::Component ConfigDisplayModal::create(TuiState &state) {
     }
 
     rows.push_back(ftxui::text(""));
-    rows.push_back(ftxui::text("Press ESC to close.") | ftxui::dim);
+    rows.push_back(ftxui::hbox({ftxui::text(" [C] ") | ftxui::bold |
+                                    ftxui::color(ftxui::Color::Blue),
+                                ftxui::text("Change Model   "),
+                                ftxui::text(" [ESC] ") | ftxui::bold |
+                                    ftxui::color(ftxui::Color::GrayDark),
+                                ftxui::text("Close")}) |
+                   ftxui::center);
 
     return ftxui::window(ftxui::text(" Configuration ") | ftxui::bold |
                              ftxui::color(ftxui::Color::Cyan),
-                          ftxui::vbox(rows) | ftxui::yframe |
-                              ftxui::vscroll_indicator | ftxui::yflex |
-                              ftxui::size(ftxui::WIDTH, ftxui::LESS_THAN, 60) |
-                              ftxui::size(ftxui::HEIGHT, ftxui::LESS_THAN, 20)) |
+                         ftxui::vbox(rows) | ftxui::yframe |
+                             ftxui::vscroll_indicator | ftxui::yflex |
+                             ftxui::size(ftxui::WIDTH, ftxui::LESS_THAN, 60) |
+                             ftxui::size(ftxui::HEIGHT, ftxui::LESS_THAN, 20)) |
            ftxui::clear_under | ftxui::center;
   });
 
-  return ftxui::CatchEvent(component, [container, &state](ftxui::Event event) {
+  return ftxui::CatchEvent(component, [&state](ftxui::Event event) {
     if (event == ftxui::Event::Escape) {
-      state.popModal();
+      state.popModalImmediate();
       return true;
     }
-    return container->OnEvent(event);
+    if (event == ftxui::Event::Character('c') ||
+        event == ftxui::Event::Character('C')) {
+      state.popModalImmediate();
+      state.openModal("model_picker");
+      return true;
+    }
+    return false;
   });
 }
 

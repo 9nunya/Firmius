@@ -108,7 +108,7 @@ public:
     });
 
     tail_spacer_ = ftxui::Make<RowComponent>(nullptr, [] {
-      return ftxui::text("") | ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, 3);
+      return ftxui::text("");
     });
 
     container_ = ftxui::Container::Vertical(

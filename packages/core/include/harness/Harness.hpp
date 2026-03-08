@@ -64,7 +64,8 @@ public:
    * @param leadPersona Persona name for the lead agent
    * @return The new thread ID, or empty string if locking failed
    */
-  std::string newThread(shared::HostCreationOptions hostOptions, const std::string &cwd,
+  std::string newThread(shared::HostCreationOptions hostOptions,
+                        const std::string &cwd,
                         const std::string &leadPersona = "firmius");
 
   /**
@@ -100,7 +101,8 @@ public:
    * @param callback The callback function to invoke on events
    * @return A unique subscription ID for unsubscribing
    */
-  int subscribe(std::function<void(const firmius::shared::AppEvent &)> callback);
+  int subscribe(
+      std::function<void(const firmius::shared::AppEvent &)> callback);
 
   /**
    * Unsubscribe from Harness events.
@@ -128,9 +130,16 @@ public:
   std::vector<ThreadMetadata> listThreads();
   std::vector<std::string> listAgents(const std::string &threadId = "");
   std::vector<shared::ModelInfo> listAllModels();
+  bool isModelsLoaded() const { return modelsLoaded_; }
 
   const UserConfig &getConfig();
   void updateConfig(const UserConfig &config);
+
+  std::vector<shared::OAuthAccount> getAccounts(const std::string &providerId);
+  void deleteAccount(const std::string &providerId,
+                     const std::string &identifier);
+  std::map<std::string, std::vector<shared::QuotaBucket>>
+  getAllQuotas(const std::string &providerId);
 
   /**
    * Switches the model for the focused agent (idle-only).
@@ -241,8 +250,16 @@ private:
    */
   void drainQueue();
 
+  void clearQueue();
+
   // Message queue for sending while agent is running
   std::queue<std::pair<std::string, std::string>> messageQueue_; // id, text
+
+  // Background model caching
+  std::vector<shared::ModelInfo> cachedModels_;
+  std::mutex modelsMutex_;
+  bool isRefreshingModels_ = false;
+  bool modelsLoaded_ = false;
 
   // Tracking for detached background tasks (e.g. title generation)
   std::vector<std::jthread> backgroundThreads_;

@@ -7,6 +7,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace firmius::tui {
@@ -50,6 +51,9 @@ public:
   void handleAgentError(const shared::AgentError &e);
   void handleAgentRetrying(const shared::AgentRetrying &e);
   void handleAgentRetryFailed(const shared::AgentRetryFailed &e);
+  void handleMessageQueued(const shared::MessageQueued &e);
+  void handleMessageDequeued(const shared::MessageDequeued &e);
+  void handleThreadChanged();
 
   const StreamState *getStream(const std::string &agentId) const;
   const std::vector<TimelineEntry> &getTimeline() const;
@@ -57,6 +61,7 @@ public:
   getToolCalls() const;
   std::shared_ptr<ToolCallView> getToolView(const std::string &toolCallId) const;
   const std::string &getRetryStatus() const;
+  const std::vector<std::pair<std::string, std::string>> &getQueuedMessages() const;
 
 private:
   void pushThinkingDuration(const std::string &agentId, float seconds);
@@ -77,6 +82,7 @@ private:
   std::unordered_map<std::string, std::string> agent_provider_model_;
 
   std::string retry_status_;
+  std::vector<std::pair<std::string, std::string>> queued_messages_; // id, text
 };
 
 } // namespace firmius::tui

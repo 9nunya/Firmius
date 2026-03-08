@@ -43,9 +43,12 @@ ftxui::Component ThreadPickerModal::create(TuiState &state) {
       modal_renderer, [threads_ptr, selected, entries, &state, &h](ftxui::Event event) {
         if (event == ftxui::Event::Return) {
           if (*selected >= 0 && *selected < (int)threads_ptr->size()) {
-            h.switchThread((*threads_ptr)[*selected].threadId);
+            if (h.switchThread((*threads_ptr)[*selected].threadId)) {
+              state.popModal();
+            }
+          } else {
+            state.popModal();
           }
-          state.popModal();
           return true;
         }
         if (event == ftxui::Event::Escape) {

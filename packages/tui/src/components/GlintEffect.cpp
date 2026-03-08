@@ -11,15 +11,15 @@ namespace firmius::tui {
 
 namespace GlintEasing {
   float Linear(float t) { return t; }
-  
+
   float EaseInOut(float t) {
     return t < 0.5f ? 4.0f * t * t * t : 1.0f - std::pow(-2.0f * t + 2.0f, 3.0f) / 2.0f;
   }
-  
+
   float EaseIn(float t) {
     return t * t * t;
   }
-  
+
   float EaseOut(float t) {
     return 1.0f - std::pow(1.0f - t, 3.0f);
   }
@@ -59,7 +59,7 @@ public:
 
     float start_x = static_cast<float>(box_.x_min - 1);
     float end_x = static_cast<float>(box_.x_max + config_.glintSize);
-    
+
     float exact_pos = start_x + (end_x - start_x) * progress_;
     int leading_x = static_cast<int>(std::round(exact_pos));
 
@@ -71,9 +71,9 @@ public:
           if (config_.glintSize > 1) {
             color_t = static_cast<float>(i) / (config_.glintSize - 1);
           }
-          
+
           ftxui::Color c = InterpolateGradient(config_.gradientColors, color_t);
-          
+
           auto& pixel = screen.PixelAt(x, y);
           if (config_.target == GlintConfig::Target::Text) {
             pixel.foreground_color = c;
@@ -92,12 +92,12 @@ private:
   ftxui::Color InterpolateGradient(const std::vector<ftxui::Color>& colors, float t) {
     if (colors.empty()) return ftxui::Color::Default;
     if (colors.size() == 1) return colors[0];
-    
+
     t = std::max(0.0f, std::min(1.0f, t));
     float scaled_t = t * (colors.size() - 1);
     int idx = static_cast<int>(scaled_t);
     if (idx >= static_cast<int>(colors.size()) - 1) return colors.back();
-    
+
     float frac = scaled_t - idx;
     return ftxui::Color::Interpolate(frac, colors[idx], colors[idx + 1]);
   }
@@ -110,11 +110,11 @@ public:
     start_time_ = std::chrono::steady_clock::now();
   }
 
-  ftxui::Element Render() override {
+  ftxui::Element Render() {
     auto now = std::chrono::steady_clock::now();
     float elapsed = std::chrono::duration<float>(now - start_time_).count();
     float cycle_duration = config_.durationSeconds + config_.intervalSeconds;
-    
+
     if (cycle_duration <= 0.0f || config_.durationSeconds <= 0.0f) {
       return child_;
     }

@@ -1,17 +1,19 @@
-#include "TUIState.hpp"
 #include "Engine.hpp"
+#include "TUIState.hpp"
 #include "harness/Harness.hpp"
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/screen_interactive.hpp>
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/screen.hpp>
 #include <string>
-#include <filesystem>
 
+#include "commands/AccountsCommand.hpp"
 #include "commands/CommandManager.hpp"
 #include "commands/ConfigCommand.hpp"
+#include "commands/ConnectCommand.hpp"
 #include "commands/ModelCommand.hpp"
 #include "commands/NewCommand.hpp"
+#include "commands/QuotasCommand.hpp"
 #include "commands/ThreadsCommand.hpp"
 #include "commands/UndoCommand.hpp"
 #include "modals/ConfigDisplayModal.hpp"
@@ -45,6 +47,12 @@ int main(int argc, char **argv) {
       std::make_shared<firmius::tui::UndoCommand>());
   firmius::tui::CommandManager::instance().registerCommand(
       std::make_shared<firmius::tui::ConfigCommand>());
+  firmius::tui::CommandManager::instance().registerCommand(
+      std::make_shared<firmius::tui::ConnectCommand>());
+  firmius::tui::CommandManager::instance().registerCommand(
+      std::make_shared<firmius::tui::QuotasCommand>());
+  firmius::tui::CommandManager::instance().registerCommand(
+      std::make_shared<firmius::tui::AccountsCommand>());
 
   // Register Modals
   firmius::tui::ModalRegistry::instance().registerModal(
@@ -58,10 +66,6 @@ int main(int argc, char **argv) {
   h.init();
 
   auto &state = firmius::tui::TuiState::instance();
-
-  // We attach dummy thread/focused initially
-  firmius::shared::ThreadMetadata dummy_thread;
-  state.init(h, dummy_thread, "");
 
   bool thread_loaded = false;
   if (debugging_mode) {
@@ -81,10 +85,21 @@ int main(int argc, char **argv) {
     }
   }
 
-  if (!thread_loaded) {
-    state.setViewMode(firmius::tui::TuiState::ViewMode::Welcome);
-  } else {
+  if (thread_loaded) {
+    auto current_id = h.currentThreadId();
+    firmius::shared::ThreadMetadata current_metadata;
+    for (const auto &m : h.listThreads()) {
+      if (m.threadId == current_id) {
+        current_metadata = m;
+        break;
+      }
+    }
+    state.init(h, current_metadata, h.focusedAgentId());
     state.setViewMode(firmius::tui::TuiState::ViewMode::Chat);
+  } else {
+    firmius::shared::ThreadMetadata dummy_thread;
+    state.init(h, dummy_thread, "");
+    state.setViewMode(firmius::tui::TuiState::ViewMode::Welcome);
   }
 
   auto screen = ftxui::ScreenInteractive::Fullscreen();

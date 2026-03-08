@@ -1,11 +1,11 @@
 #include "TUIState.hpp"
 #include "AgentRegistry.hpp"
 #include "commands/CommandManager.hpp"
+#include "components/AgentStrip.hpp"
 #include "components/ChatWindow.hpp"
 #include "components/InputBar.hpp"
 #include "components/Markdown.hpp"
 #include "components/StatusBar.hpp"
-#include "components/AgentStrip.hpp"
 #include "components/TitleBar.hpp"
 #include "components/ToolBlock.hpp"
 #include "harness/Harness.hpp"
@@ -66,9 +66,28 @@ void TuiState::openModalDirect(ftxui::Component modal) {
   }
 }
 
-void TuiState::popModal() {
+void TuiState::popModal() { postEvent(ftxui::Event::Special("PopModal")); }
+
+void TuiState::popModalImmediate() {
   if (!modals_.empty()) {
     modals_.pop_back();
+  }
+  if (modals_.empty()) {
+    if (input_component_) {
+      input_component_->TakeFocus();
+    }
+  } else {
+    modals_.back()->TakeFocus();
+  }
+}
+
+void TuiState::replaceModalDirect(ftxui::Component modal) {
+  if (!modals_.empty()) {
+    modals_.pop_back();
+  }
+  modals_.push_back(modal);
+  if (modal) {
+    modal->TakeFocus();
   }
 }
 
@@ -86,14 +105,29 @@ void TuiState::init(firmius::core::Harness &harness,
   harness_ = &harness;
   thread_ = thread;
   focused_agent_id_ = focused_agent_id;
-  history_ = harness_->getAgentHistoryPtr(focused_agent_id_);
+
+  if (!focused_agent_id_.empty()) {
+    history_ = harness_->getAgentHistoryPtr(focused_agent_id_);
+    if (!history_) {
+      // Agent is not active or hasn't spawned in the current harness lifecycle.
+      // Load history from persistence as a fallback for viewing.
+      auto fallback_hist =
+          firmius::core::ThreadManager(
+              std::string(std::getenv("HOME") ? std::getenv("HOME") : "/tmp") +
+              "/.firmius/threads")
+              .loadAgentHistory(thread_.threadId, focused_agent_id_);
+      history_ = std::make_shared<firmius::shared::AgentHistory>(fallback_hist);
+    }
+  } else {
+    history_ = nullptr;
+  }
 
   title_model_ = std::make_shared<TitleBarModel>();
   title_model_->title = thread_.title;
   title_model_->thread_id = thread_.threadId;
 
   status_model_ = std::make_shared<StatusBarModel>();
-  status_model_->status_text = "status=unknown";
+  status_model_->status_text = "idle";
 
   input_model_ = std::make_shared<InputBarModel>();
   input_model_->buffer = &input_;
@@ -133,6 +167,7 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
       [&](auto &&e) {
         using T = std::decay_t<decltype(e)>;
 
+        updateStatusModel();
         if constexpr (std::is_same_v<T, AgentThinking>) {
           stream_state_.handleAgentThinking(e);
         } else if constexpr (std::is_same_v<T, AgentText>) {
@@ -148,7 +183,7 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
         } else if constexpr (std::is_same_v<T, ThreadChanged>) {
           thread_ = e.metadata;
           focused_agent_id_ = harness_->focusedAgentId();
-          
+
           if (focused_agent_id_.empty()) {
             auto agents = harness_->listAgents(thread_.threadId);
             if (!agents.empty()) {
@@ -156,14 +191,33 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
             }
           }
 
-          history_ = harness_->getAgentHistoryPtr(focused_agent_id_);
+          if (!focused_agent_id_.empty()) {
+            history_ = harness_->getAgentHistoryPtr(focused_agent_id_);
+            if (!history_) {
+              auto fallback_hist =
+                  firmius::core::ThreadManager(
+                      std::string(std::getenv("HOME") ? std::getenv("HOME")
+                                                      : "/tmp") +
+                      "/.firmius/threads")
+                      .loadAgentHistory(thread_.threadId, focused_agent_id_);
+              history_ = std::make_shared<firmius::shared::AgentHistory>(
+                  fallback_hist);
+            }
+          } else {
+            history_ = nullptr;
+          }
+
           pending_modal_clear_ = true;
+          stream_state_.handleThreadChanged();
 
           if (title_model_) {
             title_model_->title = thread_.title;
             title_model_->thread_id = thread_.threadId;
           }
           setViewMode(ViewMode::Chat);
+
+          updateStatusModel();
+          updateAgentStripModel();
 
           if (chat_component_) {
             chat_component_->OnEvent(ftxui::Event::Special("ThreadChanged"));
@@ -216,6 +270,10 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
             title_model_->title = e.title;
           }
           thread_.title = e.title;
+        } else if constexpr (std::is_same_v<T, MessageQueued>) {
+          stream_state_.handleMessageQueued(e);
+        } else if constexpr (std::is_same_v<T, MessageDequeued>) {
+          stream_state_.handleMessageDequeued(e);
         }
       },
       ev);
@@ -246,15 +304,17 @@ void TuiState::updateStatusModel() {
                                       ? ctx.identity.name
                                       : ctx.identity.friendlyName;
       status_model_->context_used = ctx.aggregateMetrics.tokens.contextSize;
-      auto provider = firmius::provider::ProviderRegistry::instance()
-                          .getProvider(ctx.config.providerId);
+      auto provider =
+          firmius::provider::ProviderRegistry::instance().getProvider(
+              ctx.config.providerId);
       if (provider) {
         auto info = provider->getModelInfo(ctx.config.modelId);
         status_model_->context_max = info.contextWindow;
       }
       status_model_->is_active =
           ctx.state.currentStatus == AgentStatus::Streaming ||
-          ctx.state.currentStatus == AgentStatus::ExecutingTool;
+          ctx.state.currentStatus == AgentStatus::ExecutingTool ||
+          ctx.state.currentStatus == AgentStatus::ProviderWaiting;
       return;
     }
   }
@@ -291,15 +351,16 @@ void TuiState::updateAgentStripModel() {
     item.purpose = ctx.identity.role;
     item.status_text = statusToString(ctx.state.currentStatus);
     item.is_busy = ctx.state.currentStatus == AgentStatus::Streaming ||
-                   ctx.state.currentStatus == AgentStatus::ExecutingTool;
+                   ctx.state.currentStatus == AgentStatus::ExecutingTool ||
+                   ctx.state.currentStatus == AgentStatus::ProviderWaiting;
     auto provider = firmius::provider::ProviderRegistry::instance().getProvider(
         ctx.config.providerId);
     if (provider) {
       auto info = provider->getModelInfo(ctx.config.modelId);
       if (info.contextWindow > 0) {
-        item.context_percent = static_cast<float>(
-                                   ctx.aggregateMetrics.tokens.contextSize) /
-                               info.contextWindow;
+        item.context_percent =
+            static_cast<float>(ctx.aggregateMetrics.tokens.contextSize) /
+            info.contextWindow;
       }
     }
     agent_strip_model_->items.push_back(std::move(item));
@@ -329,8 +390,18 @@ ftxui::Component TuiState::root() {
       if (harness_) {
         // Auto-create thread in current directory with default lead persona
         std::string cwd = std::filesystem::current_path().string();
-        harness_->newThread({}, cwd, "firmius");
+        std::string newThreadId = harness_->newThread({}, cwd, "firmius");
         harness_->send(text);
+
+        // Immediately sync UI with the newly created lead agent
+        auto agents = harness_->listAgents(newThreadId);
+        if (!agents.empty()) {
+          focused_agent_id_ = agents.front();
+          history_ = harness_->getAgentHistoryPtr(focused_agent_id_);
+          if (chat_component_) {
+            chat_component_->OnEvent(ftxui::Event::Special("ThreadChanged"));
+          }
+        }
       }
       setViewMode(ViewMode::Chat);
     } else {
@@ -372,7 +443,7 @@ ftxui::Component TuiState::root() {
           if (!s->compaction_thinking.empty()) {
             live_rows.push_back(decorateMsg(
                 ftxui::vbox({ftxui::text("[compacting:thinking]") | ftxui::dim,
-                                         RenderMarkdown(s->compaction_thinking, true)})));
+                             RenderMarkdown(s->compaction_thinking, true)})));
           }
           if (!s->compaction_text.empty()) {
             live_rows.push_back(decorateMsg(
@@ -394,11 +465,11 @@ ftxui::Component TuiState::root() {
             auto it_tool = tool_calls.find(entry.id);
             if (it_tool == tool_calls.end() || !it_tool->second)
               continue;
-            live_rows.push_back(decorateMsg(ToolBlock(it_tool->second)->Render()));
-          } else {
             live_rows.push_back(
-                ftxui::text("[ERROR] " + entry.message) | ftxui::bold |
-                ftxui::color(ftxui::Color::Red));
+                decorateMsg(ToolBlock(it_tool->second)->Render()));
+          } else {
+            live_rows.push_back(ftxui::text("[ERROR] " + entry.message) |
+                                ftxui::bold | ftxui::color(ftxui::Color::Red));
           }
         }
 
@@ -410,12 +481,24 @@ ftxui::Component TuiState::root() {
                               ftxui::color(ftxui::Color::Yellow));
         }
 
+        const auto &queued = stream_state_.getQueuedMessages();
+        for (const auto &[id, text] : queued) {
+          std::string preview = text.substr(0, 80);
+          if (text.size() > 80)
+            preview += "...";
+          live_rows.push_back(ftxui::hbox({ftxui::text("> ") | ftxui::bold |
+                                               ftxui::color(ftxui::Color::Cyan),
+                                           ftxui::text(preview) | ftxui::dim}) |
+                              ftxui::size(ftxui::WIDTH, ftxui::LESS_THAN, 120));
+        }
+
         return live_rows;
       },
       [this](const std::string &toolCallId) {
         return stream_state_.getToolView(toolCallId);
       });
   chat_component_ = chat;
+  input_component_ = input_bar;
 
   auto container = ftxui::Container::Vertical({
       input_bar,
@@ -440,6 +523,9 @@ ftxui::Component TuiState::root() {
         if (pending_modal_clear_) {
           modals_.clear();
           pending_modal_clear_ = false;
+          if (input_component_) {
+            input_component_->TakeFocus();
+          }
         }
 
         auto chat_area = (view_mode_ == ViewMode::Chat)
@@ -447,8 +533,8 @@ ftxui::Component TuiState::root() {
                              : welcome_screen->Render();
 
         auto bottom_bar = ftxui::vbox({
-            ftxui::separatorLight(),
             agent_strip->Render(),
+            ftxui::separatorLight(),
             input_bar->Render(),
             ftxui::separatorLight(),
             status_bar->Render(),
@@ -485,6 +571,20 @@ ftxui::Component TuiState::root() {
                                                           ftxui::Event event) {
     if (event == ftxui::Event::Custom) {
       drainEvents();
+      return true;
+    }
+
+    if (event == ftxui::Event::Special("PopModal")) {
+      if (!modals_.empty()) {
+        modals_.pop_back();
+      }
+      if (modals_.empty()) {
+        if (input_component_) {
+          input_component_->TakeFocus();
+        }
+      } else {
+        modals_.back()->TakeFocus();
+      }
       return true;
     }
 
@@ -586,5 +686,3 @@ ftxui::Component TuiState::root() {
 }
 
 } // namespace firmius::tui
-
-
