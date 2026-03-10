@@ -31,13 +31,16 @@ constexpr char kProviderId[] = "codex";
 constexpr char kClientId[] = "app_EMoamEEZ73f0CkXaXp7hrann";
 constexpr char kAuthorizeUrl[] = "https://auth.openai.com/oauth/authorize";
 constexpr char kTokenUrl[] = "https://auth.openai.com/oauth/token";
-constexpr char kRedirectUri[] = "http://localhost:51121/oauth-callback";
+constexpr char kRedirectUri[] = "http://localhost:1455/auth/callback";
 constexpr char kScope[] = "openid profile email offline_access";
 constexpr char kOriginator[] = "codex_cli_rs";
 constexpr char kBetaHeaderValue[] = "responses=experimental";
 constexpr char kBaseUrl[] = "https://chatgpt.com/backend-api";
 constexpr char kResponsesPath[] = "/codex/responses";
 constexpr char kDefaultModelId[] = "gpt-5.2-codex";
+constexpr char kDefaultInstructions[] =
+    "You are Codex. Follow the user's instructions carefully and produce "
+    "high-quality outputs.";
 constexpr std::uint32_t kDefaultContextWindow = 272000;
 constexpr int kQuotaRefreshSeconds = 3600;
 constexpr int kAccountRetryLimit = 5;
@@ -488,10 +491,23 @@ int calculateRetryDelay(int attempt) {
   return static_cast<int>(capped * dis(gen));
 }
 
+float normalizeQuotaFraction(double value) {
+  if (!std::isfinite(value))
+    return 0.0f;
+  double normalized = value;
+  if (normalized > 1.0)
+    normalized = normalized / 100.0;
+  if (normalized < 0.0)
+    normalized = 0.0;
+  if (normalized > 1.0)
+    normalized = 1.0;
+  return static_cast<float>(normalized);
+}
+
 std::string roleToString(firmius::shared::Role role) {
   switch (role) {
   case firmius::shared::Role::System:
-    return "system";
+    return "developer";
   case firmius::shared::Role::User:
     return "user";
   case firmius::shared::Role::Assistant:
@@ -507,11 +523,13 @@ std::string roleToString(firmius::shared::Role role) {
 void appendMessageInput(rapidjson::Value &input,
                         const firmius::shared::Message &msg,
                         rapidjson::Document::AllocatorType &a) {
+  std::string role = roleToString(msg.role);
+  std::string textType = (role == "assistant") ? "output_text" : "input_text";
   rapidjson::Value content(rapidjson::kArrayType);
   for (const auto &part : msg.content) {
     if (auto *txt = std::get_if<firmius::shared::TextContent>(&part)) {
       rapidjson::Value item(rapidjson::kObjectType);
-      item.AddMember("type", "input_text", a);
+      item.AddMember("type", rapidjson::Value(textType.c_str(), a), a);
       item.AddMember("text", rapidjson::Value(txt->text.c_str(), a), a);
       content.PushBack(item, a);
     } else if (auto *img =
@@ -533,7 +551,6 @@ void appendMessageInput(rapidjson::Value &input,
 
   rapidjson::Value message(rapidjson::kObjectType);
   message.AddMember("type", "message", a);
-  std::string role = roleToString(msg.role);
   message.AddMember("role", rapidjson::Value(role.c_str(), a), a);
   message.AddMember("content", content, a);
   input.PushBack(message, a);
@@ -642,6 +659,7 @@ std::string buildRequestBody(const firmius::shared::AgentHistory &history,
   d.AddMember("model", rapidjson::Value(modelId.c_str(), a), a);
   d.AddMember("stream", true, a);
   d.AddMember("store", false, a);
+  d.AddMember("instructions", rapidjson::Value(kDefaultInstructions, a), a);
 
   rapidjson::Value input(rapidjson::kArrayType);
   for (const auto &turn : history.turns) {
@@ -731,7 +749,8 @@ public:
   explicit CodexOAuthWizard(CodexProvider *provider)
       : provider_(provider), verifier_(generateVerifier()),
         challenge_(generateCodeChallenge(verifier_)),
-        state_(StringUtil::generateUuid()) {
+        state_(StringUtil::generateUuid()),
+        server_(1455, "/auth/callback") {
     std::string url = buildAuthorizeUrl(state_, challenge_);
     prompt_ = "Please open this URL in your browser:\n\n" + url +
               "\n\nWaiting for authorization response...";
@@ -980,7 +999,7 @@ CodexProvider::getAllQuotas() const {
         std::string model = key.substr(6);
         float remaining = 0.0f;
         try {
-          remaining = std::stof(val);
+          remaining = normalizeQuotaFraction(std::stod(val));
         } catch (...) {
           remaining = 0.0f;
         }
@@ -1019,7 +1038,9 @@ std::optional<OAuthAccount *> CodexProvider::getAvailableAccount(
         auto it = acc.metadata.find("quota:" + group);
         if (it != acc.metadata.end()) {
           try {
-            hasQuota = std::stof(it->second) > 0.01f;
+            float remaining =
+                normalizeQuotaFraction(std::stod(it->second));
+            hasQuota = remaining > 0.01f;
           } catch (...) {
             hasQuota = true;
           }

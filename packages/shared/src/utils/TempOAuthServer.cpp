@@ -8,8 +8,9 @@ struct TempOAuthServer::ServerImpl {
   httplib::Server srv;
 };
 
-TempOAuthServer::TempOAuthServer(int port)
-    : port_(port), impl_(std::make_unique<ServerImpl>()) {}
+TempOAuthServer::TempOAuthServer(int port, std::string callbackPath)
+    : port_(port), callbackPath_(std::move(callbackPath)),
+      impl_(std::make_unique<ServerImpl>()) {}
 
 TempOAuthServer::~TempOAuthServer() { stop(); }
 
@@ -32,7 +33,7 @@ bool TempOAuthServer::startAsync(const std::string &successHtml) {
     return false;
 
   impl_->srv.Get(
-      "/oauth-callback",
+      callbackPath_,
       [this, successHtml](const httplib::Request &req, httplib::Response &res) {
         if (req.has_param("code")) {
           receivedCode_ = req.get_param_value("code");

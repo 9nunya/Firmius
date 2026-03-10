@@ -4,6 +4,7 @@
 #include "utils/TempOAuthServer.hpp"
 #include <atomic>
 #include <chrono>
+#include <cmath>
 
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
@@ -15,6 +16,19 @@ namespace firmius::provider {
 using namespace firmius::utils;
 
 namespace {
+
+float normalizeQuotaFraction(double value) {
+  if (!std::isfinite(value))
+    return 0.0f;
+  double normalized = value;
+  if (normalized > 1.0)
+    normalized = normalized / 100.0;
+  if (normalized < 0.0)
+    normalized = 0.0;
+  if (normalized > 1.0)
+    normalized = 1.0;
+  return static_cast<float>(normalized);
+}
 
 struct StreamContext {
   AntigravityProvider *provider;
@@ -672,8 +686,10 @@ void AntigravityProvider::fetchAndStoreQuotas(OAuthAccount &acc) {
            it != doc["models"].MemberEnd(); ++it) {
         if (it->value.HasMember("quotaInfo")) {
           const auto &q = it->value["quotaInfo"];
+          float remaining =
+              normalizeQuotaFraction(q["remainingFraction"].GetDouble());
           acc.metadata["quota:" + std::string(it->name.GetString())] =
-              std::to_string(q["remainingFraction"].GetDouble());
+              std::to_string(remaining);
           if (q.HasMember("resetTime"))
             acc.metadata["quota_reset:" + std::string(it->name.GetString())] =
                 q["resetTime"].GetString();

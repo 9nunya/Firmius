@@ -12,7 +12,8 @@ namespace firmius::shared {
 // A simple localhost HTTP server designed to intercept an OAuth callback
 class TempOAuthServer {
 public:
-  TempOAuthServer(int port = 51121);
+  TempOAuthServer(int port = 51121,
+                  std::string callbackPath = "/oauth-callback");
   ~TempOAuthServer();
 
   // Start the server asynchronously. It will handle exactly one request
@@ -30,6 +31,7 @@ public:
 
 private:
   int port_;
+  std::string callbackPath_;
   std::atomic<bool> isRunning_{false};
   std::atomic<bool> codeReceived_{false};
   std::string receivedCode_;
