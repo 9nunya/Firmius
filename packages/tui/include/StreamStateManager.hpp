@@ -48,9 +48,9 @@ public:
   void handleAgentCompleted(const shared::AgentCompleted &e);
   void handleAgentSpawned(const shared::AgentSpawned &e,
                           const std::string &focused_agent_id);
-  void handleAgentError(const shared::AgentError &e);
   void handleAgentRetrying(const shared::AgentRetrying &e);
   void handleAgentRetryFailed(const shared::AgentRetryFailed &e);
+  void handleAgentAccountSwitched(const shared::AgentAccountSwitched &e);
   void handleMessageQueued(const shared::MessageQueued &e);
   void handleMessageDequeued(const shared::MessageDequeued &e);
   void handleThreadChanged();
@@ -59,9 +59,12 @@ public:
   const std::vector<TimelineEntry> &getTimeline() const;
   const std::unordered_map<std::string, std::shared_ptr<ToolCallView>> &
   getToolCalls() const;
-  std::shared_ptr<ToolCallView> getToolView(const std::string &toolCallId) const;
+  std::shared_ptr<ToolCallView>
+  getToolView(const std::string &toolCallId) const;
   const std::string &getRetryStatus() const;
-  const std::vector<std::pair<std::string, std::string>> &getQueuedMessages() const;
+  const std::vector<std::string> &getAccountSwaps() const;
+  const std::vector<std::pair<std::string, std::string>> &
+  getQueuedMessages() const;
 
 private:
   void pushThinkingDuration(const std::string &agentId, float seconds);
@@ -82,6 +85,7 @@ private:
   std::unordered_map<std::string, std::string> agent_provider_model_;
 
   std::string retry_status_;
+  std::vector<std::string> account_swaps_;
   std::vector<std::pair<std::string, std::string>> queued_messages_; // id, text
 };
 

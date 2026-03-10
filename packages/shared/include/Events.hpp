@@ -76,6 +76,8 @@ struct StreamDone {
 struct StreamError {
   std::string message; ///< Human-readable error description.
   int httpStatus = 0;  ///< HTTP status code (0 if not an HTTP error).
+  std::string
+      accountLocator; ///< Account identifier/email that produced the error.
   bool operator==(const StreamError &other) const = default;
 };
 
@@ -90,12 +92,22 @@ struct ProviderWaiting {
  * @brief Emitted when retrying a failed stream request.
  */
 struct StreamRetrying {
-  int attempt = 0;     ///< Current retry attempt (1-based).
-  int maxAttempts = 0; ///< Maximum retry attempts allowed.
-  int httpStatus = 0;  ///< HTTP status code that triggered retry.
-  int delayMs = 0;     ///< Delay before next attempt in milliseconds.
-  std::string reason;  ///< Reason for retry (e.g., "rate limited").
+  int attempt = 0;            ///< Current retry attempt (1-based).
+  int maxAttempts = 0;        ///< Maximum retry attempts allowed.
+  int httpStatus = 0;         ///< HTTP status code that triggered retry.
+  int delayMs = 0;            ///< Delay before next attempt in milliseconds.
+  std::string reason;         ///< Reason for retry (e.g., "rate limited").
+  std::string accountLocator; ///< Account identifier/email attempting retry.
   bool operator==(const StreamRetrying &other) const = default;
+};
+
+/**
+ * @brief Emitted when the provider switches accounts (e.g., OAuth account
+ * rotation).
+ */
+struct StreamAccountSwitched {
+  std::string accountLocator; ///< The new account identifier/email being used.
+  bool operator==(const StreamAccountSwitched &other) const = default;
 };
 
 /**
@@ -137,14 +149,25 @@ struct AgentProviderWaiting {
  * @brief Emitted when an agent's stream request is being retried.
  */
 struct AgentRetrying {
-  std::string agentId;  ///< Agent ID attempting the retry.
-  int attempt = 0;      ///< Current retry attempt (1-based).
-  int maxAttempts = 0;  ///< Maximum retry attempts allowed.
-  int httpStatus = 0;   ///< HTTP status code that triggered retry.
-  int delayMs = 0;      ///< Delay before next attempt in milliseconds.
-  std::string reason;   ///< Reason for retry.
-  std::string parentId; ///< Parent agent ID.
+  std::string agentId;        ///< Agent ID attempting the retry.
+  int attempt = 0;            ///< Current retry attempt (1-based).
+  int maxAttempts = 0;        ///< Maximum retry attempts allowed.
+  int httpStatus = 0;         ///< HTTP status code that triggered retry.
+  int delayMs = 0;            ///< Delay before next attempt in milliseconds.
+  std::string reason;         ///< Reason for retry.
+  std::string parentId;       ///< Parent agent ID.
+  std::string accountLocator; ///< Account identifier/email attempting retry.
   bool operator==(const AgentRetrying &) const = default;
+};
+
+/**
+ * @brief Emitted when an agent's provider switches accounts.
+ */
+struct AgentAccountSwitched {
+  std::string agentId;        ///< Agent ID whose stream switched accounts.
+  std::string accountLocator; ///< The new account identifier/email being used.
+  std::string parentId;       ///< Parent agent ID.
+  bool operator==(const AgentAccountSwitched &) const = default;
 };
 
 /**
@@ -358,9 +381,10 @@ struct AgentFinished {
 using StreamEvent =
     std::variant<TextChunk, ThinkingChunk, ToolCallChunk, AgentMetrics,
                  StreamDone, StreamError, ProviderWaiting, StreamRetrying,
-                 StreamRetryExhausted, AgentTurnCompleted, AgentCompacting,
-                 AgentCompactionThinking, AgentCompactionText, ContextCompacted,
-                 ProcessOutputDelta, AgentProcessSpawned>;
+                 StreamRetryExhausted, StreamAccountSwitched,
+                 AgentTurnCompleted, AgentCompacting, AgentCompactionThinking,
+                 AgentCompactionText, ContextCompacted, ProcessOutputDelta,
+                 AgentProcessSpawned>;
 
 using EngineEvent =
     std::variant<AgentSpawned, AgentProviderWaiting, AgentRetrying,
@@ -368,21 +392,21 @@ using EngineEvent =
                  AgentToolCallChunk, AgentTurnCompleted, AgentCompleted,
                  AgentError, AgentCompacting, AgentCompactionThinking,
                  AgentCompactionText, ContextCompacted, AgentProcessOutput,
-                 AgentProcessSpawned, ModelSwitched, HistoryUndone>;
+                 AgentProcessSpawned, ModelSwitched, HistoryUndone,
+                 AgentAccountSwitched>;
 
 /**
  * @brief Unified event type for the entire application.
  */
-using AppEvent =
-    std::variant<AgentSpawned, AgentProviderWaiting, AgentRetrying,
-                 AgentRetryFailed, AgentThinking, AgentText, AgentToolCall,
-                 AgentToolCallChunk, AgentTurnCompleted, AgentCompleted,
-                 AgentError, AgentCompacting, AgentCompactionThinking,
-                 AgentCompactionText, ContextCompacted, AgentProcessOutput,
-                 AgentProcessSpawned, ModelSwitched, HistoryUndone,
-                 ThreadChanged, ThreadLocked, ThreadDeleted, ConfigUpdated,
-                 ModelsRefreshed, ThreadTitleUpdated, MessageQueued,
-                 MessageDequeued, UserMessageSent, AgentFinished>;
+using AppEvent = std::variant<
+    AgentSpawned, AgentProviderWaiting, AgentRetrying, AgentRetryFailed,
+    AgentThinking, AgentText, AgentToolCall, AgentToolCallChunk,
+    AgentTurnCompleted, AgentCompleted, AgentError, AgentCompacting,
+    AgentCompactionThinking, AgentCompactionText, ContextCompacted,
+    AgentProcessOutput, AgentProcessSpawned, ModelSwitched, HistoryUndone,
+    AgentAccountSwitched, ThreadChanged, ThreadLocked, ThreadDeleted,
+    ConfigUpdated, ModelsRefreshed, ThreadTitleUpdated, MessageQueued,
+    MessageDequeued, UserMessageSent, AgentFinished>;
 } // namespace firmius::shared
 
 #endif

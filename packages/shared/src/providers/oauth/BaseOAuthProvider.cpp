@@ -3,7 +3,6 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
-#include <iostream>
 #include <pwd.h>
 #include <rapidjson/document.h>
 #include <rapidjson/error/en.h>
@@ -58,6 +57,7 @@ void BaseOAuthProvider::markAccountRateLimited(OAuthAccount &acc,
 
 std::optional<OAuthAccount *> BaseOAuthProvider::getAvailableAccount(
     const std::optional<std::string> & /*modelId*/) {
+  std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
   if (accounts_.empty()) {
     return std::nullopt;
   }
@@ -91,11 +91,13 @@ std::optional<OAuthAccount *> BaseOAuthProvider::getAvailableAccount(
 }
 
 void BaseOAuthProvider::addAccount(const OAuthAccount &acc) {
+  std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
   accounts_.push_back(acc);
   saveAccounts();
 }
 
 void BaseOAuthProvider::loadAccounts() {
+  std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
   accounts_.clear();
   std::string path = getOAuthJsonPath();
   if (!std::filesystem::exists(std::filesystem::path(path))) {
@@ -153,6 +155,7 @@ void BaseOAuthProvider::loadAccounts() {
 }
 
 void BaseOAuthProvider::saveAccounts() {
+  std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
   std::string path = getOAuthJsonPath();
   rapidjson::Document doc;
 
@@ -216,6 +219,7 @@ void BaseOAuthProvider::saveAccounts() {
 }
 
 void BaseOAuthProvider::deleteAccount(const std::string &identifier) {
+  std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
   auto it = std::remove_if(accounts_.begin(), accounts_.end(),
                            [&](const OAuthAccount &acc) {
                              return acc.getIdentifier() == identifier;

@@ -34,6 +34,8 @@ static std::string rolePrefix(firmius::shared::Role role) {
     return "# ";
   case Role::ToolResult:
     return "+ ";
+  case Role::Error:
+    return "! ";
   }
   return "? ";
 }
@@ -64,7 +66,7 @@ private:
 class ChatWindowComponent : public ftxui::ComponentBase {
 public:
   explicit ChatWindowComponent(
-      std::function<const firmius::shared::AgentHistory*()> history_getter,
+      std::function<const firmius::shared::AgentHistory *()> history_getter,
       std::function<std::vector<ftxui::Element>()> live_rows_provider,
       firmius::tui::ToolViewProvider tool_view_provider)
       : history_getter_(std::move(history_getter)),
@@ -87,29 +89,11 @@ public:
       if (rows.empty())
         return ftxui::text("");
 
-      bool prepend_gap = false;
-      auto* history = history_getter_ ? history_getter_() : nullptr;
-      if (history && !history->turns.empty()) {
-        const auto &last_turn = history->turns.back();
-        if (!last_turn.messages.empty()) {
-          if (last_turn.messages.front().role == firmius::shared::Role::User) {
-            prepend_gap = true;
-          }
-        }
-      }
-
-      if (prepend_gap) {
-        rows.insert(rows.begin(),
-                    ftxui::text("") |
-                        ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, 1));
-      }
-
       return ftxui::vbox(std::move(rows));
     });
 
-    tail_spacer_ = ftxui::Make<RowComponent>(nullptr, [] {
-      return ftxui::text("");
-    });
+    tail_spacer_ =
+        ftxui::Make<RowComponent>(nullptr, [] { return ftxui::text(""); });
 
     container_ = ftxui::Container::Vertical(
         {history_container_, live_rows_cmp, tail_spacer_});
@@ -160,7 +144,7 @@ public:
 private:
   bool user_scrolled_up_ = false;
   void RebuildIfNeeded() {
-    auto* history = history_getter_ ? history_getter_() : nullptr;
+    auto *history = history_getter_ ? history_getter_() : nullptr;
     size_t turns_size = history ? history->turns.size() : 0;
     if (turns_size == last_turns_size_)
       return;
@@ -171,19 +155,9 @@ private:
 
     if (history) {
       std::unordered_map<std::string, bool> seen_tool_call;
-      bool first_turn = true;
       for (const auto &t : history->turns) {
         if (t.messages.empty() || isSystemTurn(t))
           continue;
-
-        if (!first_turn) {
-          // Space between turns
-          rows_.push_back(ftxui::Make<RowComponent>(nullptr, [] {
-            return ftxui::text("") |
-                   ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, 1);
-          }));
-        }
-        first_turn = false;
 
         for (const auto &msg : t.messages) {
           const std::string prefix = rolePrefix(msg.role);
@@ -258,6 +232,30 @@ private:
                 rows_.push_back(row);
                 seen_tool_call[tr->toolCallId] = true;
               }
+            } else if (auto *err =
+                           std::get_if<firmius::shared::ErrorContent>(&part)) {
+              std::string title =
+                  "[!] " + err->errorName + ": " + err->description;
+              std::string details = err->details;
+
+              auto details_cmp = ftxui::Renderer([details] {
+                std::stringstream ss(details);
+                std::string line;
+                ftxui::Elements lines;
+                while (std::getline(ss, line)) {
+                  lines.push_back(ftxui::text(line));
+                }
+                return ftxui::vbox(std::move(lines)) |
+                       ftxui::color(ftxui::Color::RedLight);
+              });
+
+              auto coll_cmp = ftxui::Collapsible(title, details_cmp);
+              auto row =
+                  ftxui::Make<RowComponent>(coll_cmp, [decorateMsg, coll_cmp] {
+                    return decorateMsg(coll_cmp->Render() |
+                                       ftxui::color(ftxui::Color::Red));
+                  });
+              rows_.push_back(row);
             }
           }
         }
@@ -277,7 +275,7 @@ private:
     }
   }
 
-  std::function<const firmius::shared::AgentHistory*()> history_getter_;
+  std::function<const firmius::shared::AgentHistory *()> history_getter_;
   std::function<std::vector<ftxui::Element>()> live_rows_provider_;
   firmius::tui::ToolViewProvider tool_view_provider_;
   size_t last_turns_size_ = static_cast<size_t>(-1);
@@ -294,7 +292,7 @@ private:
 } // namespace
 
 ftxui::Component firmius::tui::ChatWindow(
-    std::function<const shared::AgentHistory*()> history_getter,
+    std::function<const shared::AgentHistory *()> history_getter,
     std::function<std::vector<ftxui::Element>()> live_rows_provider,
     ToolViewProvider tool_view_provider) {
   return ftxui::Make<ChatWindowComponent>(std::move(history_getter),

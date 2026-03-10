@@ -83,7 +83,7 @@ shared::ToolResult SubagentTool::execute(const SubagentInput &input,
       std::string resultSummary;
       while (true) {
         auto res = Engine::instance().waitForAgent(
-            input.agent_id.value(), std::chrono::milliseconds(100));
+            input.agent_id.value(), std::chrono::milliseconds(20));
         if (res.has_value()) {
           resultSummary = *res;
           break;
@@ -131,7 +131,7 @@ shared::ToolResult SubagentTool::execute(const SubagentInput &input,
     std::string resultSummary;
     while (true) {
       auto res = Engine::instance().waitForAgent(
-          subagentId, std::chrono::milliseconds(100));
+          subagentId, std::chrono::milliseconds(20));
       if (res.has_value()) {
         resultSummary = *res;
         break;

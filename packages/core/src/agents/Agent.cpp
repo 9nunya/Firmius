@@ -275,6 +275,16 @@ void Agent::run(const std::string &task,
 
       firmius::provider::ProviderOptions opts;
       opts.modelId = context.config.modelId;
+      try {
+        auto modelInfo = provider->getModelInfo(context.config.modelId);
+        for (const auto &v : modelInfo.variants) {
+          if (v.variantName == context.config.modelVariant) {
+            opts.modelVariantJson = v.extraMetadataJson;
+            break;
+          }
+        }
+      } catch (...) {
+      }
       opts.temperature = context.config.temperature;
       if (context.config.maxTokens.has_value()) {
         opts.maxTokens = context.config.maxTokens;
@@ -577,9 +587,11 @@ void Agent::run(const std::string &task,
       errorTurn.turnId =
           "error-" + std::to_string(context.history->turns.size());
       Message errorMsg;
-      errorMsg.role = Role::System;
+      errorMsg.role = Role::Error;
       errorMsg.content.push_back(
-          TextContent{"[AGENT ERROR] " + std::string(e.what())});
+          ErrorContent{"Agent Runtime Error",
+                       "The agent encountered a fatal runtime exception.",
+                       std::string(e.what())});
       errorMsg.timestamp = nowMs();
       errorTurn.messages.push_back(errorMsg);
       context.history->turns.push_back(errorTurn);
@@ -591,7 +603,7 @@ void Agent::run(const std::string &task,
       }
 
       // Emit error as a StreamError event
-      onEvent(StreamError{e.what(), 0});
+      onEvent(StreamError{e.what(), 0, ""});
       break;
     }
   }
@@ -897,8 +909,8 @@ void Agent::compactContext(
       std::cout << "\033[1;31m--- COMPACTION FAILED: Empty summary generated "
                    "---\033[0m\n";
     }
-    onEvent(
-        StreamError{"Context compaction failed: Empty summary generated", 0});
+    onEvent(StreamError{"Context compaction failed: Empty summary generated", 0,
+                        ""});
     context.state.currentStatus = AgentStatus::Idle;
     return;
   }

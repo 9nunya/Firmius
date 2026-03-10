@@ -51,6 +51,9 @@ void ConfigLoader::loadImpl() {
     if (doc.HasMember("defaultTemperature") && doc["defaultTemperature"].IsFloat()) {
         config_.defaultTemperature = doc["defaultTemperature"].GetFloat();
     }
+    if (doc.HasMember("dangerouslySkipPermissions") && doc["dangerouslySkipPermissions"].IsBool()) {
+        config_.dangerouslySkipPermissions = doc["dangerouslySkipPermissions"].GetBool();
+    }
     if (doc.HasMember("defaultMaxTokens")) {
         if (doc["defaultMaxTokens"].IsUint()) {
             config_.defaultMaxTokens = doc["defaultMaxTokens"].GetUint();
@@ -99,6 +102,7 @@ void ConfigLoader::save() const {
     doc.AddMember("defaultProviderId", rapidjson::Value(config_.defaultProviderId.c_str(), allocator), allocator);
     doc.AddMember("defaultModelId", rapidjson::Value(config_.defaultModelId.c_str(), allocator), allocator);
     doc.AddMember("defaultTemperature", config_.defaultTemperature, allocator);
+    doc.AddMember("dangerouslySkipPermissions", config_.dangerouslySkipPermissions, allocator);
 
     if (config_.defaultMaxTokens.has_value()) {
         doc.AddMember("defaultMaxTokens", config_.defaultMaxTokens.value(), allocator);

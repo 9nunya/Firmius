@@ -12,6 +12,7 @@ struct StatusBarModel {
   std::string model_name;  // e.g. "nanogpt/gpt-4"
   std::string purpose;     // e.g. "orchestrator"
   std::string agent_name;
+  std::string model_variant;
   uint32_t context_used = 0;
   uint32_t context_max = 0;
   bool is_active = false;

@@ -5,7 +5,6 @@
 #include <ftxui/component/component.hpp>
 #include <ftxui/dom/elements.hpp>
 #include <string>
-#include <thread>
 #include <vector>
 
 namespace firmius::tui {
@@ -63,7 +62,7 @@ ftxui::Component ModelPickerModal::create(TuiState &state) {
   };
 
   auto refresh = [models, entries, filtered_indices, isLoading, selected,
-                  rebuild_filtered, &state]() {
+                  rebuild_filtered]() {
     auto &h = firmius::core::Harness::instance();
     auto fetched = h.listAllModels();
     *models = std::move(fetched);
@@ -73,17 +72,18 @@ ftxui::Component ModelPickerModal::create(TuiState &state) {
     }
     *isLoading = !h.isModelsLoaded();
     rebuild_filtered();
-    state.postEvent(ftxui::Event::Custom);
   };
 
   // Initial load
   refresh();
 
-  // Subscribe to refreshes
+  // Subscribe to refreshes safely
+  auto needs_refresh = std::make_shared<std::atomic<bool>>(false);
   int subId = firmius::core::Harness::instance().subscribe(
-      [refresh](const firmius::shared::AppEvent &event) {
+      [needs_refresh, &state](const firmius::shared::AppEvent &event) {
         if (std::holds_alternative<firmius::shared::ModelsRefreshed>(event)) {
-          refresh();
+          *needs_refresh = true;
+          state.postEvent(ftxui::Event::Custom);
         }
       });
 
@@ -92,7 +92,12 @@ ftxui::Component ModelPickerModal::create(TuiState &state) {
   auto component = ftxui::Renderer(menu, [entries, filtered_indices,
                                           filter_text, selected,
                                           rebuild_filtered, isLoading,
-                                          display_entries, menu]() {
+                                          display_entries, menu, needs_refresh,
+                                          refresh]() {
+    if (*needs_refresh) {
+      *needs_refresh = false;
+      refresh();
+    }
     if (*isLoading) {
       return ftxui::window(
                  ftxui::text(" Select Model ") | ftxui::bold |

@@ -13,7 +13,10 @@ static std::string formatDuration(float seconds) {
   return std::to_string(tenths / 10) + "." + std::to_string(tenths % 10) + "s";
 }
 
-void StreamStateManager::clearRetryStatus() { retry_status_.clear(); }
+void StreamStateManager::clearRetryStatus() {
+  retry_status_.clear();
+  account_swaps_.clear();
+}
 
 void StreamStateManager::handleAgentThinking(const shared::AgentThinking &e) {
   auto &s = streams_[e.agentId];
@@ -279,38 +282,36 @@ StreamStateManager::getToolView(const std::string &toolCallId) const {
   return nullptr;
 }
 
-void StreamStateManager::handleAgentError(const shared::AgentError &e) {
-  std::string label = e.message;
-  auto it_model = agent_provider_model_.find(e.agentId);
-  if (it_model != agent_provider_model_.end()) {
-    label += " (" + it_model->second + ")";
-  }
-  std::string error_id = "err_" + std::to_string(timeline_.size());
-  timeline_.push_back({TimelineEntry::Kind::Error, error_id, label, e.agentId});
-}
+// Transient error rendering is disabled; errors are now rendered
+// persistently via ChatWindow using AgentHistory ErrorContent.
 
 void StreamStateManager::handleAgentRetrying(const shared::AgentRetrying &e) {
   retry_status_ = "Retrying (" + std::to_string(e.attempt) + "/" +
                   std::to_string(e.maxAttempts) + ", HTTP " +
                   std::to_string(e.httpStatus) + ", " + e.reason + ", ~" +
-                  std::to_string(e.delayMs / 1000) + "s)...";
+                  std::to_string(e.delayMs / 1000) + "s)";
+  if (!e.accountLocator.empty()) {
+    retry_status_ += " [Account: " + e.accountLocator + "]";
+  }
+}
+
+void StreamStateManager::handleAgentAccountSwitched(
+    const shared::AgentAccountSwitched &e) {
+  account_swaps_.push_back("[Account Switch] -> " + e.accountLocator);
 }
 
 void StreamStateManager::handleAgentRetryFailed(
-    const shared::AgentRetryFailed &e) {
+    const shared::AgentRetryFailed &) {
   clearRetryStatus();
-  std::string label = "Retries exhausted (HTTP " +
-                      std::to_string(e.httpStatus) + "): " + e.reason;
-  auto it_model = agent_provider_model_.find(e.agentId);
-  if (it_model != agent_provider_model_.end()) {
-    label += " (" + it_model->second + ")";
-  }
-  std::string error_id = "err_" + std::to_string(timeline_.size());
-  timeline_.push_back({TimelineEntry::Kind::Error, error_id, label, e.agentId});
+  // Transient error rendering is disabled.
 }
 
 const std::string &StreamStateManager::getRetryStatus() const {
   return retry_status_;
+}
+
+const std::vector<std::string> &StreamStateManager::getAccountSwaps() const {
+  return account_swaps_;
 }
 
 void StreamStateManager::handleMessageQueued(const shared::MessageQueued &e) {

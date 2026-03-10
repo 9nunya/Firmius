@@ -2,13 +2,10 @@
 #include <cctype>
 #include <chrono>
 #include <curl/curl.h>
-#include <iostream>
 #include <random>
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
-#include <sstream>
-#include <stdexcept>
 #include <string_view>
 #include <thread>
 
@@ -68,6 +65,8 @@ std::string roleToString(Role r) {
     return "assistant";
   case Role::ToolResult:
     return "tool";
+  case Role::Error:
+    return "system";
   }
   return "user";
 }
@@ -209,7 +208,7 @@ void BaseOpenAIProvider::stream(
   if (!curl) {
     if (headers)
       curl_slist_free_all(headers);
-    onEvent(StreamError{"CURL init failed", 0});
+    onEvent(StreamError{"CURL init failed", 0, ""});
     return;
   }
 
@@ -237,7 +236,7 @@ void BaseOpenAIProvider::stream(
         break;
       }
       onEvent(StreamError{std::string("CURL error: ") + curl_easy_strerror(res),
-                          0});
+                          0, ""});
       break;
     }
 
@@ -250,8 +249,8 @@ void BaseOpenAIProvider::stream(
       std::string errMsg =
           "API error (HTTP " + std::to_string(responseCode) + ")";
       if (!ctx.buffer.empty())
-        errMsg += ": " + ctx.buffer;
-      onEvent(StreamError{errMsg, static_cast<int>(responseCode)});
+        errMsg += "\n" + ctx.buffer;
+      onEvent(StreamError{errMsg, static_cast<int>(responseCode), ""});
       break;
     }
 
@@ -261,12 +260,12 @@ void BaseOpenAIProvider::stream(
                              ") after " + std::to_string(attempt + 1) +
                              " attempts";
         if (!ctx.buffer.empty())
-          errMsg += ": " + ctx.buffer;
+          errMsg += "\n" + ctx.buffer;
 
         onEvent(StreamRetryExhausted{static_cast<int>(responseCode),
                                      attempt + 1,
                                      "Maximum retry attempts exceeded"});
-        onEvent(StreamError{errMsg, static_cast<int>(responseCode)});
+        onEvent(StreamError{errMsg, static_cast<int>(responseCode), ""});
         break;
       }
 
@@ -274,7 +273,8 @@ void BaseOpenAIProvider::stream(
       std::string reason =
           responseCode == 429 ? "rate limited" : "server error";
       onEvent(StreamRetrying{attempt + 1, RetryConstants::MAX_RETRIES,
-                             static_cast<int>(responseCode), delayMs, reason});
+                             static_cast<int>(responseCode), delayMs, reason,
+                             ""});
 
       std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
       attempt++;
@@ -282,8 +282,8 @@ void BaseOpenAIProvider::stream(
       std::string errMsg =
           "API error (HTTP " + std::to_string(responseCode) + ")";
       if (!ctx.buffer.empty())
-        errMsg += ": " + ctx.buffer;
-      onEvent(StreamError{errMsg, static_cast<int>(responseCode)});
+        errMsg += "\n" + ctx.buffer;
+      onEvent(StreamError{errMsg, static_cast<int>(responseCode), ""});
       break;
     }
   }
@@ -547,6 +547,9 @@ BaseOpenAIProvider::prepareRequestBody(const AgentHistory &history,
   rapidjson::Value messages(rapidjson::kArrayType);
   for (const auto &turn : history.turns) {
     for (const auto &msg : turn.messages) {
+      if (msg.role == Role::Error) {
+        continue;
+      }
       if (msg.role == Role::ToolResult) {
         // Tool result is a separate message with role: "tool" and tool_call_id
         for (const auto &part : msg.content) {
@@ -647,7 +650,8 @@ void BaseOpenAIProvider::generateSummary(
     std::function<void(const StreamEvent &)> onEvent,
     std::atomic<bool> *abortSignal) {
   if (modelId.empty()) {
-    onEvent(StreamError{"Summary generation failed: No modelId provided.", 0});
+    onEvent(
+        StreamError{"Summary generation failed: No modelId provided.", 0, ""});
     return;
   }
 
@@ -735,7 +739,7 @@ void BaseOpenAIProvider::generateSummary(
   if (!curl) {
     if (headers)
       curl_slist_free_all(headers);
-    onEvent(StreamError{"CURL init failed", 0});
+    onEvent(StreamError{"CURL init failed", 0, ""});
     return;
   }
 
@@ -776,9 +780,11 @@ void BaseOpenAIProvider::generateSummary(
 
     if (isNonRetriableStatus(static_cast<int>(responseCode)) ||
         attempt >= RetryConstants::MAX_RETRIES) {
-      onEvent(StreamError{"Summary generation API error (HTTP " +
-                              std::to_string(responseCode) + ")",
-                          static_cast<int>(responseCode)});
+      std::string errMsg = "Summary generation API error (HTTP " +
+                           std::to_string(responseCode) + ")";
+      if (!ctx.buffer.empty())
+        errMsg += "\n" + ctx.buffer;
+      onEvent(StreamError{errMsg, static_cast<int>(responseCode), ""});
       break;
     }
 
@@ -787,9 +793,11 @@ void BaseOpenAIProvider::generateSummary(
       std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
       attempt++;
     } else {
-      onEvent(StreamError{"Summary generation failed (HTTP " +
-                              std::to_string(responseCode) + ")",
-                          static_cast<int>(responseCode)});
+      std::string errMsg = "Summary generation failed (HTTP " +
+                           std::to_string(responseCode) + ")";
+      if (!ctx.buffer.empty())
+        errMsg += "\n" + ctx.buffer;
+      onEvent(StreamError{errMsg, static_cast<int>(responseCode), ""});
       break;
     }
   }

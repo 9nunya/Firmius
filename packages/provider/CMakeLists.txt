@@ -4,6 +4,7 @@ add_library(firmius_provider STATIC)
 add_library(firmius::provider ALIAS firmius_provider)
 
 target_sources(firmius_provider PRIVATE 
+    src/providers/CodexProvider.cpp
     src/providers/ChutesProvider.cpp
     src/providers/LMStudioProvider.cpp
     src/providers/NanoGPTProvider.cpp
@@ -16,6 +17,7 @@ target_sources(firmius_provider PUBLIC
   FILE_SET HEADERS
   BASE_DIRS include
   FILES
+    include/providers/CodexProvider.hpp
     include/providers/ChutesProvider.hpp
     include/providers/LMStudioProvider.hpp
     include/providers/NanoGPTProvider.hpp

@@ -275,10 +275,10 @@ void PurposeLoader::bootstrapDefaults(const std::string &builtinPromptsDir) {
   for (const auto &entry :
        std::filesystem::directory_iterator(builtinPromptsDir)) {
     if (entry.is_regular_file()) {
-      std::filesystem::copy_file(entry.path(),
-                                 std::string(userDir) + "/" +
-                                     entry.path().filename().string(),
-                                 std::filesystem::copy_options::skip_existing);
+      std::filesystem::copy_file(
+          entry.path(),
+          std::string(userDir) + "/" + entry.path().filename().string(),
+          std::filesystem::copy_options::overwrite_existing);
     }
   }
 }

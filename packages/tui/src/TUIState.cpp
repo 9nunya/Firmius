@@ -257,8 +257,10 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
           if (chat_component_) {
             chat_component_->OnEvent(ftxui::Event::Special("ThreadChanged"));
           }
+        } else if constexpr (std::is_same_v<T, AgentAccountSwitched>) {
+          stream_state_.handleAgentAccountSwitched(e);
         } else if constexpr (std::is_same_v<T, AgentError>) {
-          stream_state_.handleAgentError(e);
+          // Errors are handled persistently via ChatWindow history rendering
         } else if constexpr (std::is_same_v<T, AgentRetrying>) {
           stream_state_.handleAgentRetrying(e);
         } else if constexpr (std::is_same_v<T, AgentRetryFailed>) {
@@ -299,6 +301,7 @@ void TuiState::updateStatusModel() {
       status_model_->status_text = statusToString(ctx.state.currentStatus);
       status_model_->model_name =
           ctx.config.providerId + "/" + ctx.config.modelId;
+      status_model_->model_variant = ctx.config.modelVariant;
       status_model_->purpose = ctx.identity.role;
       status_model_->agent_name = ctx.identity.friendlyName.empty()
                                       ? ctx.identity.name
@@ -432,27 +435,13 @@ ftxui::Component TuiState::root() {
         };
 
         if (s) {
-          if (!s->thinking.empty()) {
-            live_rows.push_back(
-                decorateMsg(ftxui::vbox({ftxui::text("[thinking]") | ftxui::dim,
-                                         RenderMarkdown(s->thinking, true)})));
-          }
           if (!s->text.empty()) {
-            live_rows.push_back(decorateMsg(RenderMarkdown(s->text)));
-          }
-          if (!s->compaction_thinking.empty()) {
-            live_rows.push_back(decorateMsg(
-                ftxui::vbox({ftxui::text("[compacting:thinking]") | ftxui::dim,
-                             RenderMarkdown(s->compaction_thinking, true)})));
-          }
-          if (!s->compaction_text.empty()) {
-            live_rows.push_back(decorateMsg(
-                ftxui::vbox({ftxui::text("[compacting]") | ftxui::dim,
-                             RenderMarkdown(s->compaction_text, true)})));
-          }
-          if (s->provider_waiting) {
             live_rows.push_back(
-                decorateMsg(ftxui::text("[provider waiting]") | ftxui::dim));
+                decorateMsg(firmius::tui::RenderMarkdown(s->text)));
+          }
+
+          if (s->provider_waiting) {
+            // Eliminated diagnostic provider waiting text
           }
         }
 
@@ -467,18 +456,29 @@ ftxui::Component TuiState::root() {
               continue;
             live_rows.push_back(
                 decorateMsg(ToolBlock(it_tool->second)->Render()));
-          } else {
-            live_rows.push_back(ftxui::text("[ERROR] " + entry.message) |
-                                ftxui::bold | ftxui::color(ftxui::Color::Red));
           }
         }
 
-        // Ephemeral retry status (rendered dim yellow, disappears when
-        // resolved)
+        auto renderTransientError = [](const std::string &prefix,
+                                       const std::string &msg,
+                                       ftxui::Color color) {
+          return ftxui::hbox(
+                     {ftxui::text(prefix) | ftxui::bold | ftxui::color(color),
+                      ftxui::paragraph(msg) | ftxui::color(color) |
+                          ftxui::flex}) |
+                 ftxui::size(ftxui::WIDTH, ftxui::LESS_THAN, 120);
+        };
+
+        const auto &swaps = stream_state_.getAccountSwaps();
+        for (const auto &swap : swaps) {
+          live_rows.push_back(
+              renderTransientError("! ", swap, ftxui::Color::YellowLight));
+        }
+
         const auto &retry = stream_state_.getRetryStatus();
         if (!retry.empty()) {
-          live_rows.push_back(ftxui::text(retry) | ftxui::dim |
-                              ftxui::color(ftxui::Color::Yellow));
+          live_rows.push_back(
+              renderTransientError("! ", retry, ftxui::Color::RedLight));
         }
 
         const auto &queued = stream_state_.getQueuedMessages();
@@ -672,6 +672,46 @@ ftxui::Component TuiState::root() {
               if (chat_component_)
                 chat_component_->OnEvent(
                     ftxui::Event::Special("ThreadChanged"));
+            }
+          }
+        }
+      }
+      return true;
+    }
+
+    if (event ==
+        ftxui::Event::Special("\x14")) { // Ctrl+T (Cycle model variant)
+      if (harness_ && !focused_agent_id_.empty()) {
+        auto agent = firmius::core::AgentRegistry::instance().getAgent(
+            focused_agent_id_);
+        if (agent) {
+          auto &ctx =
+              const_cast<firmius::shared::AgentContext &>(agent->getContext());
+          auto provider =
+              firmius::provider::ProviderRegistry::instance().getProvider(
+                  ctx.config.providerId);
+          if (provider) {
+            auto info = provider->getModelInfo(ctx.config.modelId);
+            if (!info.variants.empty()) {
+              std::string current = ctx.config.modelVariant;
+              std::string next = "";
+              if (current.empty()) {
+                next = info.variants.front().variantName;
+              } else {
+                auto it = std::find_if(
+                    info.variants.begin(), info.variants.end(),
+                    [&](const auto &v) { return v.variantName == current; });
+                if (it != info.variants.end() &&
+                    std::next(it) != info.variants.end()) {
+                  next = std::next(it)->variantName;
+                }
+              }
+              ctx.config.modelVariant = next;
+              updateStatusModel();
+              if (chat_component_) {
+                chat_component_->OnEvent(
+                    ftxui::Event::Special("ThreadChanged"));
+              }
             }
           }
         }

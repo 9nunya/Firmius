@@ -50,6 +50,11 @@ ftxui::Component ConfigDisplayModal::create(TuiState &state) {
         {ftxui::text("Provider:    ") | ftxui::bold, ftxui::text(providerId)}));
     rows.push_back(ftxui::hbox(
         {ftxui::text("Model:       ") | ftxui::bold, ftxui::text(modelId)}));
+    rows.push_back(ftxui::hbox(
+        {ftxui::text("Unrestricted Paths: ") | ftxui::bold,
+         ftxui::text(config.dangerouslySkipPermissions ? "[ENABLED]" : "[DISABLED]") |
+             ftxui::color(config.dangerouslySkipPermissions ? ftxui::Color::Red
+                                                            : ftxui::Color::Green)}));
 
     if (!apiKeyNames.empty()) {
       rows.push_back(ftxui::separator());
@@ -71,6 +76,9 @@ ftxui::Component ConfigDisplayModal::create(TuiState &state) {
     rows.push_back(ftxui::hbox({ftxui::text(" [C] ") | ftxui::bold |
                                     ftxui::color(ftxui::Color::Blue),
                                 ftxui::text("Change Model   "),
+                                ftxui::text(" [P] ") | ftxui::bold |
+                                    ftxui::color(ftxui::Color::Yellow),
+                                ftxui::text("Toggle Permissions   "),
                                 ftxui::text(" [ESC] ") | ftxui::bold |
                                     ftxui::color(ftxui::Color::GrayDark),
                                 ftxui::text("Close")}) |
@@ -94,6 +102,18 @@ ftxui::Component ConfigDisplayModal::create(TuiState &state) {
         event == ftxui::Event::Character('C')) {
       state.popModalImmediate();
       state.openModal("model_picker");
+      return true;
+    }
+    if (event == ftxui::Event::Character('p') ||
+        event == ftxui::Event::Character('P')) {
+      auto &h = firmius::core::Harness::instance();
+      auto cfg = h.getConfig();
+      cfg.dangerouslySkipPermissions = !cfg.dangerouslySkipPermissions;
+      h.updateConfig(cfg);
+      h.saveConfig();
+      // Re-trigger modal to refresh view
+      state.popModalImmediate();
+      state.openModal("config_display");
       return true;
     }
     return false;

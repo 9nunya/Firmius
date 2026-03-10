@@ -32,8 +32,10 @@ struct ToolDefinition {
  * @brief Configuration options for an LLM generation request.
  */
 struct ProviderOptions {
-  std::string modelId;                    ///< The ID of the model to use.
-  float temperature = 0.7f;               ///< Generation temperature.
+  std::string modelId; ///< The ID of the model to use.
+  std::string
+      modelVariantJson;     ///< Optional JSON payload for the selected variant.
+  float temperature = 0.7f; ///< Generation temperature.
   std::optional<std::uint32_t> maxTokens; ///< Optional maximum token limit.
   std::vector<std::string> stop;          ///< Optional list of stop sequences.
   std::vector<ToolDefinition>

@@ -15,11 +15,10 @@ using namespace firmius::shared;
 using namespace std::chrono_literals;
 
 int main() {
-  std::cout << "Starting Antigravity Provider Audit..." << std::endl;
+  std::cout << "Starting Codex Provider Audit..." << std::endl;
   Panic::init();
   EnvLoader::load(".env.local");
 
-  // Enable pretty printing for better visibility of tool calls/results
   setenv("FIRMIUS_PRETTY_PRINT", "1", 1);
 
   auto &harness = Harness::instance();
@@ -27,7 +26,7 @@ int main() {
 
   HostCreationOptions opts;
   opts.type = HostType::Docker;
-  opts.containerName = "antigravity-audit-sandbox";
+  opts.containerName = "codex-audit-sandbox";
   opts.deleteOnExit = true;
 
   std::string threadId = harness.newThread(opts, "/work", "firmius");
@@ -37,7 +36,7 @@ int main() {
   }
   std::cout << "Docker thread created: " << threadId << std::endl;
 
-  harness.switchModel("antigravity", "gemini-3-flash");
+  harness.switchModel("codex", "gpt-5.2-codex");
 
   auto runTurn = [&](const std::string &prompt) -> bool {
     std::mutex mtx;
@@ -68,16 +67,16 @@ int main() {
             } else if constexpr (std::is_same_v<T, AgentToolCall>) {
               std::cout << "\n[Tool Call] " << e.toolName << "(" << e.toolArgs
                         << ")" << std::endl;
-              std::ofstream out("/tmp/antigravity_request.json", std::ios::app);
-              out << "\n--- TOOL CALL ---\n"
-                  << e.toolName << "(" << e.toolArgs << ")\n";
+              std::ofstream out("/tmp/codex_request.json", std::ios::app);
+              out << "\n--- TOOL CALL ---\n" << e.toolName << "(" << e.toolArgs
+                  << ")\n";
             } else if constexpr (std::is_same_v<T, AgentProcessSpawned>) {
               std::cout << "[Process Spawned] " << e.command << std::endl;
-              std::ofstream out("/tmp/antigravity_request.json", std::ios::app);
+              std::ofstream out("/tmp/codex_request.json", std::ios::app);
               out << "\n--- PROCESS SPAWNED ---\n" << e.command << "\n";
             } else if constexpr (std::is_same_v<T, AgentProcessOutput>) {
               std::cout << e.output << std::flush;
-              std::ofstream out("/tmp/antigravity_request.json", std::ios::app);
+              std::ofstream out("/tmp/codex_request.json", std::ios::app);
               out << "\n--- PROCESS OUTPUT ---\n" << e.output << "\n";
             }
           },
@@ -86,7 +85,7 @@ int main() {
 
     std::cout << "\n> User: " << prompt << std::endl;
     {
-      std::ofstream out("/tmp/antigravity_request.json", std::ios::app);
+      std::ofstream out("/tmp/codex_request.json", std::ios::app);
       out << "\n--- PROMPT ---\n" << prompt << "\n";
     }
     harness.send(prompt);
@@ -96,19 +95,18 @@ int main() {
     harness.unsubscribe(subId);
     std::cout << std::endl;
     {
-      std::ofstream out("/tmp/antigravity_request.json", std::ios::app);
+      std::ofstream out("/tmp/codex_request.json", std::ios::app);
       out << "\n--- FULL RESPONSE ---\n" << agentResponse << "\n";
     }
     return hadOutput;
   };
 
   std::cout << "--- Phase 1: Host-Side Environment Setup ---" << std::endl;
-  // Use runTurn for warmup to ensure we wait for it.
   runTurn("Prepare to audit.");
 
   std::cout << "Creating audit environment via docker exec..." << std::endl;
   std::string setupCmd =
-      "docker exec antigravity-audit-sandbox sh -c '"
+      "docker exec codex-audit-sandbox sh -c '"
       "mkdir -p /work/audit_dir1 /work/audit_dir2 /work/audit_dir3 && "
       "echo \"TOKEN_1_1\" > /work/audit_dir1/file1.txt && "
       "echo \"TOKEN_1_2\" > /work/audit_dir1/file2.txt && "

@@ -6,6 +6,7 @@
 #include <map> // Added for std::map
 #include <memory>
 #include <string>
+#include <mutex>
 #include <vector>
 
 namespace firmius::provider {
@@ -71,6 +72,7 @@ public:
 protected:
   std::string providerId_;
   std::vector<OAuthAccount> accounts_;
+  mutable std::recursive_mutex accountsMutex_;
   int lastUsedIndex_ = -1;
 
   bool isTokenExpired(const OAuthAccount &acc) const;

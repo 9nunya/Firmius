@@ -134,6 +134,7 @@ public:
 
   const UserConfig &getConfig();
   void updateConfig(const UserConfig &config);
+  void saveConfig();
 
   std::vector<shared::OAuthAccount> getAccounts(const std::string &providerId);
   void deleteAccount(const std::string &providerId,

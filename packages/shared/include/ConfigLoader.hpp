@@ -12,6 +12,7 @@ struct UserConfig {
     std::string defaultModelId = "zai-org/glm-4.6:thinking";
     float defaultTemperature = 0.7f;
     std::optional<uint32_t> defaultMaxTokens;
+    bool dangerouslySkipPermissions = false;
     std::map<std::string, std::string> apiKeys;           // providerId -> apiKey
     std::map<std::string, std::string> providerOptions;   // key -> value for provider-specific settings
 };

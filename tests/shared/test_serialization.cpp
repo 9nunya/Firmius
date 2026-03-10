@@ -349,7 +349,7 @@ TEST(Serialization, StreamDoneRoundtrip) {
 }
 
 TEST(Serialization, StreamErrorRoundtrip) {
-  StreamEvent original = StreamError{"Rate limit exceeded", 429};
+  StreamEvent original = StreamError{"Rate limit exceeded", 429, ""};
 
   auto doc = toJson(original);
   auto restored = streamEventFromJsonValue(doc);

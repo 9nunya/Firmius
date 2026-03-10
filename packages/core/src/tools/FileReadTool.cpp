@@ -1,6 +1,7 @@
 #include "tools/FileReadTool.hpp"
 #include "agents/Agent.hpp"
 #include "utils/FSUtil.hpp"
+#include "utils/Hashline.hpp"
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -77,10 +78,13 @@ shared::ToolResult FileReadTool::execute(const FileReadInput &input,
       ctx.agent.markFileAsRead(absolutePath);
     }
 
+    std::string enhancedContent = 
+        shared::utils::HashlineReadEnhancer::enhance(sliced);
+
     rapidjson::Document res;
     res.SetObject();
     res.AddMember("content",
-                  rapidjson::Value(sliced.c_str(), res.GetAllocator()).Move(),
+                  rapidjson::Value(enhancedContent.c_str(), res.GetAllocator()).Move(),
                   res.GetAllocator());
     return shared::ToolResult::ok(res);
   } catch (const std::exception &e) {

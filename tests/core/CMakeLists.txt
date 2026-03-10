@@ -22,6 +22,13 @@ target_link_libraries(antigravity_provider_audit PRIVATE
     firmius::shared
 )
 
+add_executable(codex_provider_audit codex_provider_audit.cpp)
+target_link_libraries(codex_provider_audit PRIVATE
+    firmius::core
+    firmius::provider
+    firmius::shared
+)
+
 add_executable(harness_chaos_audit harness_chaos_audit.cpp)
 target_link_libraries(harness_chaos_audit PRIVATE
     firmius::core
@@ -71,13 +78,21 @@ target_link_libraries(antigravity_quota_audit PRIVATE
     firmius::shared
 )
 
+add_executable(codex_quota_audit codex_quota_audit.cpp)
+target_link_libraries(codex_quota_audit PRIVATE
+    firmius::core
+    firmius::provider
+    firmius::shared
+)
+
 target_include_directories(firmius_core_audit PRIVATE ${rapidjson_SOURCE_DIR}/include)
 target_include_directories(p15_audit PRIVATE ${rapidjson_SOURCE_DIR}/include)
 target_include_directories(antigravity_provider_audit PRIVATE ${rapidjson_SOURCE_DIR}/include)
 target_include_directories(antigravity_quota_audit PRIVATE ${rapidjson_SOURCE_DIR}/include)
+target_include_directories(codex_provider_audit PRIVATE ${rapidjson_SOURCE_DIR}/include)
+target_include_directories(codex_quota_audit PRIVATE ${rapidjson_SOURCE_DIR}/include)
 target_include_directories(harness_chaos_audit PRIVATE ${rapidjson_SOURCE_DIR}/include)
 target_include_directories(test_swebench_prep PRIVATE ${rapidjson_SOURCE_DIR}/include)
 target_include_directories(test_utils PRIVATE ${rapidjson_SOURCE_DIR}/include)
 target_include_directories(test_fleet PRIVATE ${rapidjson_SOURCE_DIR}/include)
 target_include_directories(test_process_interactive PRIVATE ${rapidjson_SOURCE_DIR}/include)
-

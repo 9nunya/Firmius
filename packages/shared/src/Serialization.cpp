@@ -20,6 +20,8 @@ std::string roleToString(Role value) {
     return "Assistant";
   case Role::ToolResult:
     return "ToolResult";
+  case Role::Error:
+    return "Error";
   }
   return "Unknown";
 }
@@ -33,6 +35,8 @@ Role stringToRole(const std::string &str) {
     return Role::Assistant;
   if (str == "ToolResult")
     return Role::ToolResult;
+  if (str == "Error")
+    return Role::Error;
   throw std::runtime_error("Unknown Role: " + str);
 }
 
@@ -242,8 +246,9 @@ AgentMetrics agentMetricsFromJson(const rapidjson::Value &v) {
           v["estimatedCostUsd"].GetDouble()};
 }
 
-rapidjson::Value hostCreationOptionsToJson(const HostCreationOptions &o,
-                                           rapidjson::Document::AllocatorType &a) {
+rapidjson::Value
+hostCreationOptionsToJson(const HostCreationOptions &o,
+                          rapidjson::Document::AllocatorType &a) {
   rapidjson::Value v(rapidjson::kObjectType);
   v.AddMember("type", rapidjson::Value(hostTypeToString(o.type).c_str(), a), a);
   v.AddMember("containerName", rapidjson::Value(o.containerName.c_str(), a), a);
@@ -295,6 +300,12 @@ rapidjson::Value messagePartToJson(const MessagePart &p,
     v.AddMember("url", rapidjson::Value(img->url.c_str(), a), a);
     v.AddMember("mediaType", rapidjson::Value(img->mediaType.c_str(), a), a);
     v.AddMember("detail", rapidjson::Value(img->detail.c_str(), a), a);
+  } else if (auto *err = std::get_if<ErrorContent>(&p)) {
+    v.AddMember("type", "error", a);
+    v.AddMember("errorName", rapidjson::Value(err->errorName.c_str(), a), a);
+    v.AddMember("description", rapidjson::Value(err->description.c_str(), a),
+                a);
+    v.AddMember("details", rapidjson::Value(err->details.c_str(), a), a);
   }
   return v;
 }
@@ -317,6 +328,9 @@ MessagePart messagePartFromJson(const rapidjson::Value &v) {
   if (type == "image")
     return ImageContent{v["url"].GetString(), v["mediaType"].GetString(),
                         v["detail"].GetString()};
+  if (type == "error")
+    return ErrorContent{v["errorName"].GetString(),
+                        v["description"].GetString(), v["details"].GetString()};
   throw std::runtime_error("Unknown MessagePart type: " + type);
 }
 
@@ -358,7 +372,8 @@ rapidjson::Document toJson(const HostCreationOptions &o) {
   return d;
 }
 
-HostCreationOptions hostCreationOptionsFromJsonValue(const rapidjson::Value &v) {
+HostCreationOptions
+hostCreationOptionsFromJsonValue(const rapidjson::Value &v) {
   return hostCreationOptionsFromJson(v);
 }
 
@@ -468,6 +483,8 @@ rapidjson::Document toJson(const AgentContext &ctx) {
   rapidjson::Value config(rapidjson::kObjectType);
   config.AddMember("modelId", rapidjson::Value(ctx.config.modelId.c_str(), a),
                    a);
+  config.AddMember("modelVariant",
+                   rapidjson::Value(ctx.config.modelVariant.c_str(), a), a);
   config.AddMember("personaName",
                    rapidjson::Value(ctx.config.personaName.c_str(), a), a);
   config.AddMember("maxTurns", ctx.config.maxTurns, a);
@@ -566,6 +583,8 @@ AgentContext fromJson(const rapidjson::Value &v) {
     const auto &cfg = v["config"];
     if (cfg.HasMember("modelId"))
       ctx.config.modelId = cfg["modelId"].GetString();
+    if (cfg.HasMember("modelVariant"))
+      ctx.config.modelVariant = cfg["modelVariant"].GetString();
     if (cfg.HasMember("personaName"))
       ctx.config.personaName = cfg["personaName"].GetString();
     if (cfg.HasMember("maxTurns"))
@@ -701,9 +720,9 @@ StreamEvent streamEventFromJsonValue(const rapidjson::Value &v) {
   if (type == "done")
     return StreamDone{stringToStopReason(v["reason"].GetString())};
   if (type == "error")
-    return StreamError{v["message"].GetString(), v.HasMember("httpStatus")
-                                                     ? v["httpStatus"].GetInt()
-                                                     : 0};
+    return StreamError{v["message"].GetString(),
+                       v.HasMember("httpStatus") ? v["httpStatus"].GetInt() : 0,
+                       ""};
   if (type == "turnCompleted")
     return AgentTurnCompleted{
         v["agentId"].GetString(), agentTurnFromJsonValue(v["turn"]),
@@ -783,9 +802,10 @@ ThreadMetadata threadMetadataFromJson(const rapidjson::Value &v) {
   } else if (v.HasMember("hostType") && v["hostType"].IsString()) {
     m.hostOptions.type = stringToHostType(v["hostType"].GetString());
   }
-  m.hostIdentifier = v.HasMember("hostIdentifier") && v["hostIdentifier"].IsString()
-                         ? v["hostIdentifier"].GetString()
-                         : "";
+  m.hostIdentifier =
+      v.HasMember("hostIdentifier") && v["hostIdentifier"].IsString()
+          ? v["hostIdentifier"].GetString()
+          : "";
   m.cwd = v.HasMember("cwd") && v["cwd"].IsString() ? v["cwd"].GetString() : "";
   m.leadPersona = v.HasMember("leadPersona") && v["leadPersona"].IsString()
                       ? v["leadPersona"].GetString()
@@ -947,6 +967,16 @@ rapidjson::Document toJson(const ModelInfo &model) {
   for (const auto &m : model.modalities)
     mods.PushBack(rapidjson::Value(m.c_str(), a), a);
   d.AddMember("modalities", mods, a);
+  rapidjson::Value vars(rapidjson::kArrayType);
+  for (const auto &v : model.variants) {
+    rapidjson::Value variant(rapidjson::kObjectType);
+    variant.AddMember("variantName", rapidjson::Value(v.variantName.c_str(), a),
+                      a);
+    variant.AddMember("extraMetadataJson",
+                      rapidjson::Value(v.extraMetadataJson.c_str(), a), a);
+    vars.PushBack(variant, a);
+  }
+  d.AddMember("variants", vars, a);
   d.AddMember("supportsReasoning", model.supportsReasoning, a);
   d.AddMember("pricePer1MInput", model.pricePer1MInput, a);
   d.AddMember("pricePer1MOutput", model.pricePer1MOutput, a);
@@ -964,6 +994,14 @@ ModelInfo modelInfoFromJsonValue(const rapidjson::Value &v) {
   if (v.HasMember("modalities") && v["modalities"].IsArray()) {
     for (const auto &m : v["modalities"].GetArray())
       mi.modalities.push_back(m.GetString());
+  }
+  if (v.HasMember("variants") && v["variants"].IsArray()) {
+    for (const auto &var : v["variants"].GetArray()) {
+      ModelVariant mv;
+      mv.variantName = var["variantName"].GetString();
+      mv.extraMetadataJson = var["extraMetadataJson"].GetString();
+      mi.variants.push_back(mv);
+    }
   }
   if (v.HasMember("supportsReasoning"))
     mi.supportsReasoning = v["supportsReasoning"].GetBool();
@@ -984,6 +1022,8 @@ rapidjson::Document toJson(const AgentConfig &config) {
   auto &a = d.GetAllocator();
   d.AddMember("providerId", rapidjson::Value(config.providerId.c_str(), a), a);
   d.AddMember("modelId", rapidjson::Value(config.modelId.c_str(), a), a);
+  d.AddMember("modelVariant", rapidjson::Value(config.modelVariant.c_str(), a),
+              a);
   d.AddMember("personaName", rapidjson::Value(config.personaName.c_str(), a),
               a);
   d.AddMember("maxTurns", config.maxTurns, a);
@@ -1007,6 +1047,8 @@ AgentConfig agentConfigFromJsonValue(const rapidjson::Value &v) {
     cfg.providerId = v["providerId"].GetString();
   if (v.HasMember("modelId"))
     cfg.modelId = v["modelId"].GetString();
+  if (v.HasMember("modelVariant"))
+    cfg.modelVariant = v["modelVariant"].GetString();
   if (v.HasMember("personaName"))
     cfg.personaName = v["personaName"].GetString();
   if (v.HasMember("maxTurns"))

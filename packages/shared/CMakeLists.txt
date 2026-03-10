@@ -8,10 +8,13 @@ target_sources(firmius_shared PRIVATE
     src/utils/JSONSchema.cpp
     src/utils/StringUtil.cpp
     src/utils/FSUtil.cpp
+    src/utils/Hashline.cpp
     src/utils/ToolSummaries.cpp
     src/utils/TempOAuthServer.cpp
+    src/utils/GCPHttpClient.cpp
     src/providers/oauth/BaseOAuthProvider.cpp
     src/providers/antigravity/AntigravityProvider.cpp
+    src/providers/antigravity/AntigravityProtocol.cpp
     src/providers/BaseOpenAIProvider.cpp
     src/providers/ProviderRegistry.cpp
     src/ConfigLoader.cpp
@@ -40,12 +43,15 @@ target_sources(firmius_shared PUBLIC
     include/utils/JSONSchema.hpp
     include/utils/StringUtil.hpp
     include/utils/FSUtil.hpp
+    include/utils/Hashline.hpp
     include/utils/ToolSummaries.hpp
     include/utils/ToolView.hpp
     include/utils/TempOAuthServer.hpp
+    include/utils/GCPHttpClient.hpp
     include/providers/oauth/OAuthWizard.hpp
     include/providers/oauth/BaseOAuthProvider.hpp
     include/providers/antigravity/AntigravityProvider.hpp
+    include/providers/antigravity/AntigravityProtocol.hpp
     include/providers/BaseOpenAIProvider.hpp
     include/ConfigLoader.hpp
 )

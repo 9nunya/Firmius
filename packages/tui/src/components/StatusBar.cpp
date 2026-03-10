@@ -34,8 +34,15 @@ public:
 
     auto model_section = ftxui::text("");
     if (!model_->model_name.empty()) {
-      model_section = ftxui::text(" " + model_->model_name + " ") |
-                      ftxui::color(ftxui::Color::RGB(160, 160, 200));
+      auto name_el = ftxui::text(" " + model_->model_name + " ") |
+                     ftxui::color(ftxui::Color::RGB(160, 160, 200));
+      if (!model_->model_variant.empty()) {
+        auto variant_el = ftxui::text(" " + model_->model_variant + " ") |
+                          ftxui::bold | ftxui::color(ftxui::Color::Orange1);
+        model_section = ftxui::hbox({name_el, variant_el});
+      } else {
+        model_section = name_el;
+      }
     }
     auto purpose_section = ftxui::text("");
     if (!model_->purpose.empty()) {

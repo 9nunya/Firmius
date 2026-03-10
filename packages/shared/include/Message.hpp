@@ -62,10 +62,20 @@ struct ImageContent {
 };
 
 /**
+ * @brief Error content for agent or engine failures.
+ */
+struct ErrorContent {
+  std::string errorName; ///< Short title of the error (e.g., "Provider Error").
+  std::string description; ///< Brief description.
+  std::string details;     ///< Comprehensive details or trace.
+  bool operator==(const ErrorContent &other) const = default;
+};
+
+/**
  * @brief A variant representing any part of a complex multi-part message.
  */
 using MessagePart = std::variant<TextContent, ThinkingContent, ToolCallContent,
-                                 ToolResultContent, ImageContent>;
+                                 ToolResultContent, ImageContent, ErrorContent>;
 
 /**
  * @brief A full conversation message.

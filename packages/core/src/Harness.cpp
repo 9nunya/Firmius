@@ -58,10 +58,6 @@ std::string getFirmiusHome() {
 
 std::string getSessionPath() { return getFirmiusHome() + "/" + SESSION_FILE; }
 
-std::string getThreadDir(const std::string &threadId) {
-  return getFirmiusHome() + "/threads/" + threadId;
-}
-
 bool isPidAlive(pid_t pid) { return kill(pid, 0) == 0 || errno == EPERM; }
 
 size_t curlWriteCallback(char *ptr, size_t size, size_t nmemb, void *userdata) {
@@ -691,9 +687,9 @@ const UserConfig &Harness::getConfig() {
 
 void Harness::updateConfig(const UserConfig &config) {
   shared::ConfigLoader::instance().updateConfig(config);
-  shared::ConfigLoader::instance().save();
-  emitEvent(firmius::shared::ConfigUpdated{});
 }
+
+void Harness::saveConfig() { shared::ConfigLoader::instance().save(); }
 
 void Harness::switchModel(const std::string &providerId,
                           const std::string &modelId) {
@@ -815,6 +811,16 @@ void Harness::maybeGenerateTitle(const std::string &threadId,
 
       firmius::provider::ProviderOptions opts;
       opts.modelId = config.modelId;
+      try {
+        auto modelInfo = provider->getModelInfo(config.modelId);
+        for (const auto &v : modelInfo.variants) {
+          if (v.variantName == config.modelVariant) {
+            opts.modelVariantJson = v.extraMetadataJson;
+            break;
+          }
+        }
+      } catch (...) {
+      }
       provider->stream(history, opts, [&](const shared::StreamEvent &ev) {
         if (auto *txt = std::get_if<shared::TextChunk>(&ev)) {
           generatedTitle += txt->delta;
@@ -868,7 +874,8 @@ void Harness::writeInterruptionRecord() {
     return;
   }
 
-  std::string journalDir = getThreadDir(currentThreadId_) + "/journal";
+  std::string journalDir =
+      getFirmiusHome() + "/threads/" + currentThreadId_ + "/journal";
   std::filesystem::create_directories(journalDir);
 
   auto now = std::chrono::duration_cast<std::chrono::milliseconds>(

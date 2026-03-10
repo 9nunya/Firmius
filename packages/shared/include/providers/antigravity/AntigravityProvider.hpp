@@ -3,6 +3,7 @@
 #include "providers/oauth/BaseOAuthProvider.hpp"
 #include <map>
 #include <rapidjson/document.h>
+#include <memory>
 
 namespace firmius::provider {
 
@@ -39,13 +40,11 @@ public:
   std::optional<OAuthAccount *> getAvailableAccount(
       const std::optional<std::string> &modelId = std::nullopt) override;
 
-  // Parses chunks arriving from the CURL callback. The payload is heavily
-  // nested in `response`
+  // Parses chunks arriving from the CURL callback.
   void processSSELine(const std::string &line,
                       std::function<void(const StreamEvent &)> &onEvent);
 
-  // Queries Antigravity to get quota definitions for the given account and
-  // stores them in acc.metadata
+  // Queries Antigravity to get quota definitions for the given account
   void fetchAndStoreQuotas(OAuthAccount &acc);
 
 private:
@@ -54,25 +53,12 @@ private:
 
   static std::map<std::string, ModelInfo> getStaticModels();
 
-  // Sends the internal Antigravity proxy request
-  // (v1internal:streamGenerateContent)
+  // Sends the internal Antigravity proxy request (v1internal:streamGenerateContent)
   void executeStreamRequest(OAuthAccount &acc, const AgentHistory &history,
                             const ProviderOptions &opts,
                             std::function<void(const StreamEvent &)> &onEvent);
 
-  std::string prepareRequestBody(const AgentHistory &history,
-                                 const ProviderOptions &opts,
-                                 const OAuthAccount &acc,
-                                 const std::string &effectiveModel,
-                                 const std::string &effectiveProjectId,
-                                 const std::string &signatureSessionKey,
-                                 rapidjson::Document::AllocatorType &a);
-
-  static rapidjson::Value toGeminiSchema(const std::string &inputSchema,
-                                         rapidjson::Document::AllocatorType &a);
-
-  static size_t headerCallback(char *ptr, size_t size, size_t nmemb,
-                               void *userdata);
+  static size_t sseWriteCallback(char *ptr, size_t size, size_t nmemb, void *userdata);
 };
 
 } // namespace firmius::provider

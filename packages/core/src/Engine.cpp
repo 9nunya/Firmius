@@ -9,6 +9,7 @@
 #include "persistence/Journaler.hpp"
 #include "persistence/ThreadManager.hpp"
 #include "providers/ChutesProvider.hpp"
+#include "providers/CodexProvider.hpp"
 #include "providers/NanoGPTProvider.hpp"
 #include "providers/OpenRouterProvider.hpp"
 #include "providers/ProviderRegistry.hpp"
@@ -83,6 +84,7 @@ void Engine::initProviders() {
   reg.registerProvider(std::make_shared<firmius::provider::ZaiProvider>(""));
   reg.registerProvider(std::make_shared<firmius::provider::ZenProvider>(""));
   reg.registerProvider(std::make_shared<firmius::provider::ChutesProvider>(""));
+  reg.registerProvider(std::make_shared<firmius::provider::CodexProvider>());
   reg.registerProvider(
       std::make_shared<firmius::provider::AntigravityProvider>());
 }
@@ -112,94 +114,90 @@ std::string Engine::summonAgent(const std::string &threadId,
     agentFutures[agentId] = prom->get_future().share();
   }
 
-  std::unique_ptr<IHost> host;
-  try {
-    auto metadata =
-        ThreadManager(std::string(getenv("HOME") ? getenv("HOME") : "/root") +
-                      "/.firmius/threads")
-            .getMetadata(threadId);
-    auto persona = PurposeLoader::load(personaName);
-
-    AgentContext ctx;
-    ctx.identity.id = agentId;
-    ctx.identity.parentId = parentId;
-    ctx.identity.friendlyName = parentId.empty() ? "lead" : friendlyName;
-    const auto &userCfg = shared::ConfigLoader::instance().getConfig();
-    ctx.config.providerId = userCfg.defaultProviderId;
-    ctx.config.modelId = userCfg.defaultModelId;
-    ctx.config.temperature = userCfg.defaultTemperature;
-    if (userCfg.defaultMaxTokens.has_value()) {
-      ctx.config.maxTokens = userCfg.defaultMaxTokens.value();
-    }
-    ctx.config.persistHistory = persistHistory;
-    ctx.identity.name = persona.name;
-    ctx.identity.role = persona.title;
-    ctx.config.stop = persona.stopSequences;
-    ctx.permissions.allowedScopes = persona.allowedScopes;
-
-    std::string home = getenv("HOME") ? getenv("HOME") : "/root";
-    ctx.permissions.allowedPaths = {metadata.cwd + "/**", "/tmp/**", "/work/**",
-                                    home + "/.agent/skills/**",
-                                    home + "/.firmius/**"};
-    // Explicitly allow CWD and . (which resolves to CWD)
-    ctx.permissions.allowedPaths.push_back(metadata.cwd);
-
-    ctx.environment.cwd = metadata.cwd;
-    ctx.environment.identifier = metadata.hostIdentifier;
-    ctx.environment.type = metadata.hostOptions.type;
-    ctx.history = std::make_shared<AgentHistory>();
-    ctx.history->threadId = threadId;
-
-    if (metadata.hostOptions.type == HostType::Docker) {
-      host = std::make_unique<DockerHost>(metadata.hostOptions);
-    } else {
-      host = std::make_unique<LocalHost>();
-    }
-
-    std::shared_ptr<Journaler> jnl = nullptr;
-    if (ctx.config.persistHistory) {
-      jnl = std::make_shared<Journaler>(threadId, agentId);
-    }
-
-    auto agent =
-        std::make_shared<Agent>(ctx, std::move(host), toolRegistry, jnl);
-    agent->setBooting(true);
-    AgentRegistry::instance().registerAgent(agentId, agent);
-
-  } catch (...) {
-    prom->set_exception(std::current_exception());
-    return agentId;
-  }
-
   {
     std::lock_guard<std::mutex> lock(listenerMutex);
     fleet.emplace_back([this, threadId, agentId, personaName, task, prom,
-                        persistHistory, parentId, title]() {
-      // Track if we already broadcast an error from the stream
+                        persistHistory, parentId, friendlyName, title]() {
       bool errorBroadcast = false;
-
       try {
-        auto agent = AgentRegistry::instance().getAgent(agentId);
-        if (!agent) {
-          throw std::runtime_error("Agent not found in registry");
-        }
-
-        // Initialize host in background thread
-        std::string actualHostId = agent->getHost()->init();
-
+        // 1. Loading metadata in background thread
         auto metadata =
             ThreadManager(
                 std::string(getenv("HOME") ? getenv("HOME") : "/root") +
                 "/.firmius/threads")
                 .getMetadata(threadId);
-        if (metadata.hostIdentifier != actualHostId) {
+        auto persona = PurposeLoader::load(personaName);
+
+        AgentContext ctx;
+        ctx.identity.id = agentId;
+        ctx.identity.parentId = parentId;
+        ctx.identity.friendlyName = parentId.empty() ? "lead" : friendlyName;
+
+        const auto &userCfg = shared::ConfigLoader::instance().getConfig();
+        ctx.config.providerId = userCfg.defaultProviderId;
+        ctx.config.modelId = userCfg.defaultModelId;
+        ctx.config.temperature = userCfg.defaultTemperature;
+        if (userCfg.defaultMaxTokens.has_value()) {
+          ctx.config.maxTokens = userCfg.defaultMaxTokens.value();
+        }
+        ctx.config.persistHistory = persistHistory;
+        ctx.identity.name = persona.name;
+        ctx.identity.role = persona.title;
+        ctx.config.stop = persona.stopSequences;
+        ctx.permissions.allowedScopes = persona.allowedScopes;
+
+        std::string home = getenv("HOME") ? getenv("HOME") : "/root";
+        if (userCfg.dangerouslySkipPermissions) {
+          ctx.permissions.allowedPaths = {"/**"};
+        } else {
+          ctx.permissions.allowedPaths = {metadata.cwd + "/**",
+                                          "/tmp/**",
+                                          "/work/**",
+                                          home + "/.agent/skills/**",
+                                          home + "/.firmius/**",
+                                          home + "/.gemini/**"};
+          ctx.permissions.allowedPaths.push_back(metadata.cwd);
+        }
+
+        ctx.environment.cwd = metadata.cwd;
+        ctx.environment.identifier = metadata.hostIdentifier;
+        ctx.environment.type = metadata.hostOptions.type;
+        ctx.history = std::make_shared<AgentHistory>();
+        ctx.history->threadId = threadId;
+
+        std::unique_ptr<IHost> host;
+        if (metadata.hostOptions.type == HostType::Docker) {
+          host = std::make_unique<DockerHost>(metadata.hostOptions);
+        } else {
+          host = std::make_unique<LocalHost>();
+        }
+
+        std::shared_ptr<Journaler> jnl = nullptr;
+        if (ctx.config.persistHistory) {
+          jnl = std::make_shared<Journaler>(threadId, agentId);
+        }
+
+        auto agent =
+            std::make_shared<Agent>(ctx, std::move(host), toolRegistry, jnl);
+        agent->setBooting(true);
+        AgentRegistry::instance().registerAgent(agentId, agent);
+
+        // 2. Initialize host
+        std::string actualHostId = agent->getHost()->init();
+
+        // Refresh metadata for potential host update
+        auto currentMeta =
+            ThreadManager(
+                std::string(getenv("HOME") ? getenv("HOME") : "/root") +
+                "/.firmius/threads")
+                .getMetadata(threadId);
+        if (currentMeta.hostIdentifier != actualHostId) {
           ThreadManager(std::string(getenv("HOME") ? getenv("HOME") : "/root") +
                         "/.firmius/threads")
               .updateHostIdentifier(threadId, actualHostId);
           agent->getMutableContext().environment.identifier = actualHostId;
         }
 
-        auto persona = PurposeLoader::load(personaName);
         std::string agentTitle = title.empty() ? persona.title : title;
         broadcast(AgentSpawned{agentId, personaName, parentId,
                                agent->getContext().identity.friendlyName,
@@ -207,6 +205,7 @@ std::string Engine::summonAgent(const std::string &threadId,
 
         std::string finalSummary = "No summary provided.";
 
+        // 3. Execution
         agent->run(task, [this, agentId, parentId,
                           &errorBroadcast](const StreamEvent &ev) {
           handleStreamEvent(agentId, parentId, ev, errorBroadcast);
@@ -228,8 +227,29 @@ std::string Engine::summonAgent(const std::string &threadId,
         prom->set_value(finalSummary);
 
       } catch (const std::exception &e) {
-        // Only broadcast error if we haven't already done so from StreamError
         if (!errorBroadcast) {
+          auto agent =
+              firmius::core::AgentRegistry::instance().getAgent(agentId);
+          if (agent && agent->getContext().history) {
+            firmius::shared::AgentTurn errorTurn;
+            errorTurn.turnId =
+                "error-" +
+                std::to_string(agent->getContext().history->turns.size());
+            firmius::shared::Message errorMsg;
+            errorMsg.role = firmius::shared::Role::Error;
+            errorMsg.content.push_back(firmius::shared::ErrorContent{
+                "Engine Error", "Summon agent failed.", std::string(e.what())});
+            errorMsg.timestamp = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch())
+                    .count());
+            errorTurn.messages.push_back(errorMsg);
+            agent->getMutableContext().history->turns.push_back(errorTurn);
+            if (agent->getContext().config.persistHistory) {
+              firmius::core::Journaler jnl(threadId, agentId);
+              jnl.appendTurn(errorTurn);
+            }
+          }
           broadcast(AgentError{agentId, e.what(), parentId});
         }
         prom->set_exception(std::make_exception_ptr(e));
@@ -342,6 +362,27 @@ std::string Engine::resumeAgent(const std::string &threadId,
                                agentTitle, persistHistory});
 
       } catch (const std::exception &e) {
+        auto agent = firmius::core::AgentRegistry::instance().getAgent(agentId);
+        if (agent && agent->getContext().history) {
+          firmius::shared::AgentTurn errorTurn;
+          errorTurn.turnId =
+              "error-" +
+              std::to_string(agent->getContext().history->turns.size());
+          firmius::shared::Message errorMsg;
+          errorMsg.role = firmius::shared::Role::Error;
+          errorMsg.content.push_back(firmius::shared::ErrorContent{
+              "Engine Error", "Resume agent failed.", std::string(e.what())});
+          errorMsg.timestamp = static_cast<uint64_t>(
+              std::chrono::duration_cast<std::chrono::milliseconds>(
+                  std::chrono::system_clock::now().time_since_epoch())
+                  .count());
+          errorTurn.messages.push_back(errorMsg);
+          agent->getMutableContext().history->turns.push_back(errorTurn);
+          if (agent->getContext().config.persistHistory) {
+            firmius::core::Journaler jnl(threadId, agentId);
+            jnl.appendTurn(errorTurn);
+          }
+        }
         broadcast(AgentError{agentId, e.what(), parentId});
       }
     });
@@ -435,13 +476,20 @@ void Engine::handleStreamEvent(const std::string &agentId,
                                  pod->isStderr, pod->finished, parentId});
   } else if (auto *sr = std::get_if<StreamRetrying>(&ev)) {
     broadcast(AgentRetrying{agentId, sr->attempt, sr->maxAttempts,
-                            sr->httpStatus, sr->delayMs, sr->reason, parentId});
+                            sr->httpStatus, sr->delayMs, sr->reason, parentId,
+                            sr->accountLocator});
   } else if (auto *sre = std::get_if<StreamRetryExhausted>(&ev)) {
     broadcast(
         AgentRetryFailed{agentId, sre->httpStatus, sre->reason, parentId});
   } else if (auto *serr = std::get_if<StreamError>(&ev)) {
     errorBroadcast = true;
-    broadcast(AgentError{agentId, serr->message, parentId});
+    std::string msg = serr->message;
+    if (!serr->accountLocator.empty()) {
+      msg += "\n\n[Account Used]: " + serr->accountLocator;
+    }
+    broadcast(AgentError{agentId, msg, parentId});
+  } else if (auto *sw = std::get_if<StreamAccountSwitched>(&ev)) {
+    broadcast(AgentAccountSwitched{agentId, sw->accountLocator, parentId});
   } else if (std::holds_alternative<ProviderWaiting>(ev)) {
     broadcast(AgentProviderWaiting{agentId, parentId});
   }
@@ -519,6 +567,28 @@ void Engine::executeTask(const std::string &agentId, const std::string &task) {
       } catch (const std::exception &e) {
         // Only broadcast error if we haven't already done so from StreamError
         if (!errorBroadcast) {
+          if (agent && agent->getContext().history) {
+            firmius::shared::AgentTurn errorTurn;
+            errorTurn.turnId =
+                "error-" +
+                std::to_string(agent->getContext().history->turns.size());
+            firmius::shared::Message errorMsg;
+            errorMsg.role = firmius::shared::Role::Error;
+            errorMsg.content.push_back(firmius::shared::ErrorContent{
+                "Engine Error", "Task execution failed.",
+                std::string(e.what())});
+            errorMsg.timestamp = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch())
+                    .count());
+            errorTurn.messages.push_back(errorMsg);
+            agent->getMutableContext().history->turns.push_back(errorTurn);
+            if (agent->getContext().config.persistHistory) {
+              firmius::core::Journaler jnl(
+                  agent->getContext().history->threadId, agentId);
+              jnl.appendTurn(errorTurn);
+            }
+          }
           broadcast(AgentError{agentId, e.what(), parentId});
         }
         prom->set_exception(std::make_exception_ptr(e));
