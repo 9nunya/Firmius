@@ -15,7 +15,7 @@
 #include "providers/ProviderRegistry.hpp"
 #include "providers/ZaiProvider.hpp"
 #include "providers/ZenProvider.hpp"
-#include "providers/antigravity/AntigravityProvider.hpp"
+#include "providers/AntigravityProvider.hpp"
 #include "tools/FileEditTool.hpp"
 #include "tools/FileReadTool.hpp"
 #include "tools/GlobTool.hpp"
@@ -391,6 +391,17 @@ std::string Engine::resumeAgent(const std::string &threadId,
   }
 
   return agentId;
+}
+
+std::string Engine::createAgent(const std::string &threadId,
+                                const std::string &personaName,
+                                bool persistHistory,
+                                const std::string &parentId,
+                                const std::string &friendlyName,
+                                const std::string &title) {
+  std::string agentId = shared::StringUtil::generateUuid();
+  return resumeAgent(threadId, agentId, personaName, parentId, friendlyName,
+                     title, persistHistory);
 }
 
 std::optional<std::string>

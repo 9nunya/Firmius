@@ -31,33 +31,16 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    HostCreationOptions opts;
-    opts.type = HostType::Docker;
-    opts.containerName = containerId;
-    opts.connectToExisting = true;
-    auto host = std::make_unique<DockerHost>(opts);
-    
-    ProviderRegistry::instance().registerProvider(std::make_shared<NanoGPTProvider>());
-    ProviderRegistry::instance().registerProvider(std::make_shared<OpenRouterProvider>(""));
-    ProviderRegistry::instance().registerProvider(std::make_shared<ZaiProvider>(""));
-    ProviderRegistry::instance().registerProvider(std::make_shared<ZenProvider>(""));
-    ProviderRegistry::instance().registerProvider(std::make_shared<ChutesProvider>(""));
+    BenchmarkConfig config;
+    config.hostOptions.type = HostType::Docker;
+    config.hostOptions.containerName = containerId;
+    config.hostOptions.connectToExisting = true;
+    config.cwd = "/work";
+    config.personaName = "firmius";
+    config.providerId = "nanogpt";
+    config.modelId = "gpt-4";
 
-    ToolRegistry registry;
-    registry.registerTool(std::make_unique<FileReadTool>());
-    registry.registerTool(std::make_unique<FileEditTool>());
-    registry.registerTool(std::make_unique<ProcessExecuteTool>());
-
-    AgentContext context;
-    context.config.providerId = "nanogpt";
-    context.environment.type = HostType::Docker;
-    context.environment.identifier = containerId;
-    context.environment.cwd = "/work";
-    context.permissions.allowedPaths = {"/work", "/tmp"};
-    context.permissions.allowedScopes = {ToolScope::FilesystemRead, ToolScope::FilesystemWrite, ToolScope::Process};
-
-    Agent agent(context, std::unique_ptr<firmius::shared::IHost>(host.get()), registry);
-    SWEBench benchmark(agent, *host);
+    SWEBench benchmark(config);
 
     auto tasks = benchmark.listTasks();
     if (tasks.empty()) {

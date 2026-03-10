@@ -2,7 +2,7 @@
 #define FIRMIUS_CORE_AGENT_BENCH_HPP
 
 #include "IBenchmark.hpp"
-#include "agents/Agent.hpp"
+#include "benchmarks/BenchmarkSession.hpp"
 #include <rapidjson/document.h>
 #include <unordered_set>
 
@@ -15,12 +15,7 @@ using namespace firmius::shared;
  */
 class AgentBench : public shared::IBenchmark {
 public:
-    /**
-     * @brief Constructs an AgentBench runner.
-     * @param agent The agent instance to evaluate.
-     * @param host The host environment to use for execution.
-     */
-    AgentBench(Agent& agent, shared::IHost& host);
+    explicit AgentBench(BenchmarkConfig config);
     
     std::vector<std::string> listTasks() override;
     bool prepareTask(const std::string& taskId) override;
@@ -52,8 +47,7 @@ private:
     std::string cleanTerminalOutput(const std::string& raw);
     std::string truncateOutput(const std::string& output);
     
-    Agent& agent;
-    shared::IHost& host;
+    BenchmarkSession session;
     rapidjson::Document dataset;
     bool datasetLoaded = false;
     std::vector<std::string> backgroundProcessPids;

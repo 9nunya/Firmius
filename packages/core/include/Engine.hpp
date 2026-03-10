@@ -48,6 +48,11 @@ public:
                             const std::string& friendlyName, const std::string& title,
                             bool persistHistory);
 
+    std::string createAgent(const std::string& threadId, const std::string& personaName,
+                            bool persistHistory = true, const std::string& parentId = "",
+                            const std::string& friendlyName = "",
+                            const std::string& title = "");
+
     /**
      * @brief Waits for an agent to complete and returns its summary.
      * @param agentId The agent ID.

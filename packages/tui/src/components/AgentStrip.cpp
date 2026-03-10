@@ -10,8 +10,6 @@ namespace firmius::tui {
 
 namespace {
 
-static constexpr size_t MAX_STRIP_ITEMS = 3;
-
 class AgentStripComponentBase : public ftxui::ComponentBase {
 public:
   explicit AgentStripComponentBase(std::shared_ptr<AgentStripModel> model)
@@ -23,7 +21,7 @@ public:
     }
     syncGlints();
     std::vector<ftxui::Element> rows;
-    size_t count = std::min(model_->items.size(), MAX_STRIP_ITEMS);
+    size_t count = std::min(model_->items.size(), kAgentStripVisibleRows);
     for (size_t i = 0; i < count; ++i) {
       const auto &item = model_->items[i];
       auto bullet = ftxui::text(" ┄ ") | ftxui::dim |
@@ -79,7 +77,7 @@ public:
 private:
   void syncGlints() {
     std::set<std::string> current_ids;
-    size_t count = std::min(model_->items.size(), MAX_STRIP_ITEMS);
+    size_t count = std::min(model_->items.size(), kAgentStripVisibleRows);
     for (size_t i = 0; i < count; ++i) {
       const auto &item = model_->items[i];
       if (!item.is_busy)

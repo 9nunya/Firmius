@@ -1,6 +1,6 @@
 #pragma once
 
-#include "providers/oauth/BaseOAuthProvider.hpp"
+#include "providers/BaseOAuthProvider.hpp"
 #include <map>
 #include <rapidjson/document.h>
 #include <memory>

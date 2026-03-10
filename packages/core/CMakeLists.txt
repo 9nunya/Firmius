@@ -36,6 +36,7 @@ target_sources(firmius_core PRIVATE
     src/benchmarks/MBPPBenchmark.cpp
     src/benchmarks/AgentBench.cpp
     src/benchmarks/SWEBench.cpp
+    src/benchmarks/BenchmarkSession.cpp
 )
 
 target_sources(firmius_core PUBLIC
@@ -74,6 +75,7 @@ target_sources(firmius_core PUBLIC
     include/benchmarks/MBPPBenchmark.hpp
     include/benchmarks/AgentBench.hpp
     include/benchmarks/SWEBench.hpp
+    include/benchmarks/BenchmarkSession.hpp
 )
 
 target_include_directories(firmius_core PUBLIC

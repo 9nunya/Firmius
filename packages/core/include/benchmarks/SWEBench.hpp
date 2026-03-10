@@ -2,7 +2,7 @@
 #define FIRMIUS_CORE_SWE_BENCH_HPP
 
 #include "IBenchmark.hpp"
-#include "agents/Agent.hpp"
+#include "benchmarks/BenchmarkSession.hpp"
 #include <rapidjson/document.h>
 
 namespace firmius::core {
@@ -15,12 +15,7 @@ using namespace firmius::shared;
  */
 class SWEBench : public shared::IBenchmark {
 public:
-    /**
-     * @brief Constructs an SWEBench runner.
-     * @param agent The agent instance to evaluate.
-     * @param host The host environment to use for execution.
-     */
-    SWEBench(Agent& agent, shared::IHost& host);
+    explicit SWEBench(BenchmarkConfig config);
     
     std::vector<std::string> listTasks() override;
     bool prepareTask(const std::string& taskId) override;
@@ -37,8 +32,7 @@ private:
      */
     bool parseTestResults(const std::string& output, int& passed, int& failed, int& errors);
 
-    Agent& agent;
-    shared::IHost& host;
+    BenchmarkSession session;
     rapidjson::Document dataset;
     bool datasetLoaded = false;
 };

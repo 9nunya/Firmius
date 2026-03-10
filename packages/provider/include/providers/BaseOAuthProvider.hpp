@@ -1,7 +1,7 @@
 #pragma once
 
 #include "IProvider.hpp"
-#include "providers/oauth/OAuthWizard.hpp"
+#include "providers/OAuthWizard.hpp"
 #include <chrono>
 #include <map> // Added for std::map
 #include <memory>

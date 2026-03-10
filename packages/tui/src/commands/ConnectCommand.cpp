@@ -3,7 +3,7 @@
 #include "modals/ConfirmationModal.hpp"
 #include "modals/OAuthWizardModal.hpp"
 #include "providers/ProviderRegistry.hpp"
-#include "providers/oauth/BaseOAuthProvider.hpp"
+#include "providers/BaseOAuthProvider.hpp"
 #include <ftxui/component/component.hpp>
 #include <memory>
 

@@ -153,8 +153,8 @@ buildProviderSuggestions(ArgType argType, const std::string &filter) {
 ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
                           std::function<void(const std::string &)> on_submit) {
 
-  // Shared scroll offset — which line is at the top of the visible window.
   auto scroll_top = std::make_shared<int>(0);
+  auto suggestion_index = std::make_shared<int>(0);
 
   auto opt = ftxui::InputOption::Default();
   opt.multiline = true;
@@ -172,36 +172,80 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
   };
 
   auto input = ftxui::Input(opt);
-  auto with_keys = ftxui::CatchEvent(input, [model, on_submit, input,
-                                             scroll_top](ftxui::Event event) {
+  auto with_keys = ftxui::CatchEvent(input, [model, on_submit, input, scroll_top,
+                                             suggestion_index](ftxui::Event event) {
     if (!model || !model->buffer || !model->cursor)
       return false;
 
-    // Tab autocomplete
-    if (event == ftxui::Event::Tab) {
-      auto ac = CommandManager::instance().getAutocomplete(*model->buffer);
-      if (ac && ac->is_typing_command_name && !ac->command_matches.empty()) {
-        *model->buffer = "/" + ac->command_matches[0].name + " ";
-        *model->cursor = static_cast<int>(model->buffer->size());
+    auto ac = CommandManager::instance().getAutocomplete(*model->buffer);
+
+    if (ac && ((ac->is_typing_command_name && !ac->command_matches.empty()) ||
+               (!ac->is_typing_command_name && ac->current_arg &&
+                (ac->current_arg->type == ArgType::Provider ||
+                 ac->current_arg->type == ArgType::OAuthProvider)))) {
+
+      size_t match_count = 0;
+      if (ac->is_typing_command_name) {
+        match_count = std::min(ac->command_matches.size(), (size_t)5);
+      } else {
+        auto query = ac->has_current_arg_value ? ac->current_arg_value : "";
+        match_count = buildProviderSuggestions(ac->current_arg->type, query).size();
       }
-      return true;
+
+      if (match_count > 0) {
+        if (event == ftxui::Event::ArrowDown) {
+          *suggestion_index = (*suggestion_index + 1) % match_count;
+          return true;
+        }
+        if (event == ftxui::Event::ArrowUp) {
+          *suggestion_index = (*suggestion_index + match_count - 1) % match_count;
+          return true;
+        }
+      } else {
+        *suggestion_index = 0;
+      }
+    } else {
+      *suggestion_index = 0;
     }
 
-    // Submit on plain Enter
-    if (event == ftxui::Event::Return) {
-      auto ac = CommandManager::instance().getAutocomplete(*model->buffer);
-      if (ac && ac->is_typing_command_name && !ac->command_matches.empty() &&
-          !ac->command_matches[0].is_exact) {
-        // "when user presses enter + there is a match showing, autocomplete
-        // command as the best matching command and directly execute"
-        std::string cmd = "/" + ac->command_matches[0].name;
-        on_submit(cmd);
-        model->buffer->clear();
-        *model->cursor = 0;
-        *scroll_top = 0;
-        return true;
-      }
+    if (event == ftxui::Event::Tab || event == ftxui::Event::Return) {
+      if (ac) {
+        if (ac->is_typing_command_name && !ac->command_matches.empty()) {
+          size_t idx = static_cast<size_t>(*suggestion_index);
+          if (idx >= ac->command_matches.size()) idx = 0;
+          
+          if (event == ftxui::Event::Return && ac->command_matches[idx].is_exact) {
+          } else {
+            *model->buffer = "/" + ac->command_matches[idx].name + " ";
+            *model->cursor = static_cast<int>(model->buffer->size());
+            *suggestion_index = 0;
+            return true;
+          }
+        } else if (!ac->is_typing_command_name && ac->current_arg && 
+                   (ac->current_arg->type == ArgType::Provider || 
+                    ac->current_arg->type == ArgType::OAuthProvider)) {
+          auto query = ac->has_current_arg_value ? ac->current_arg_value : "";
+          auto suggestions = buildProviderSuggestions(ac->current_arg->type, query);
+          if (!suggestions.empty()) {
+            size_t idx = static_cast<size_t>(*suggestion_index);
+            if (idx >= suggestions.size()) idx = 0;
 
+            std::string text = *model->buffer;
+            size_t last_space = text.find_last_of(' ', *model->cursor - 1);
+            if (last_space == std::string::npos) last_space = 0;
+            else last_space++;
+
+            text.replace(last_space, *model->cursor - last_space, suggestions[idx].id + " ");
+            *model->buffer = text;
+            *model->cursor = static_cast<int>(last_space + suggestions[idx].id.size() + 1);
+            *suggestion_index = 0;
+            return true;
+          }
+        }
+      }
+    }
+
+    if (event == ftxui::Event::Return) {
       if (!model->buffer->empty()) {
         on_submit(*model->buffer);
         model->buffer->clear();
@@ -211,15 +255,8 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
       return true;
     }
 
-    // Newline insertion
     std::string raw = event.input();
-    bool is_shift_enter = false;
-    if (raw == "\x1b[13;2u")
-      is_shift_enter = true;
-    if (raw == "\x1b\r" || raw == "\x1b\n")
-      is_shift_enter = true;
-    if (raw == "\x1b[27;2;13~")
-      is_shift_enter = true;
+    bool is_shift_enter = (raw == "\x1b[13;2u" || raw == "\x1b\r" || raw == "\x1b\n" || raw == "\x1b[27;2;13~");
 
     if (is_shift_enter) {
       insertText(*model->buffer, *model->cursor, "\n");
@@ -230,7 +267,6 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
       return true;
     }
 
-    // ArrowUp/Down
     int lines = countLines(*model->buffer);
     if (lines > 1) {
       if (event == ftxui::Event::ArrowUp || event == ftxui::Event::ArrowDown) {
@@ -248,7 +284,7 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
     return false;
   });
 
-  return ftxui::Renderer(with_keys, [with_keys, model, scroll_top] {
+  return ftxui::Renderer(with_keys, [with_keys, model, scroll_top, suggestion_index] {
     auto prompt = ftxui::text("> ") | ftxui::bold |
                   ftxui::color(ftxui::Color::RGB(140, 120, 200));
 
@@ -257,7 +293,6 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
       total_lines = countLines(*model->buffer);
     }
 
-    // Autocomplete View MUST be built during Render()
     auto ac = CommandManager::instance().getAutocomplete(
         model->buffer ? *model->buffer : "");
     ftxui::Element autocomplete_layer = ftxui::text("");
@@ -269,40 +304,26 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
 
         auto match_text = ftxui::text("/" + match.name) | ftxui::bold |
                           ftxui::color(ftxui::Color::White);
-        if (i == 0)
+        if (i == static_cast<size_t>(*suggestion_index))
           match_text = match_text | ftxui::inverted;
 
         match_elements.push_back(
             ftxui::hbox({match_text, ftxui::text("  "),
                          ftxui::text(match.description) | ftxui::dim}));
       }
-      autocomplete_layer = ftxui::vbox(match_elements) | ftxui::borderEmpty |
+      autocomplete_layer = ftxui::vbox(match_elements) |
                            ftxui::bgcolor(ftxui::Color::RGB(40, 40, 60));
     } else if (ac && !ac->is_typing_command_name && ac->current_arg) {
       const auto &arg = *ac->current_arg;
       std::string type_str;
       switch (arg.type) {
-      case ArgType::String:
-        type_str = "String";
-        break;
-      case ArgType::Number:
-        type_str = "Number";
-        break;
-      case ArgType::AgentId:
-        type_str = "AgentId";
-        break;
-      case ArgType::ThreadId:
-        type_str = "ThreadId";
-        break;
-      case ArgType::Filepath:
-        type_str = "Filepath";
-        break;
-      case ArgType::Provider:
-        type_str = "Provider";
-        break;
-      case ArgType::OAuthProvider:
-        type_str = "OAuth provider";
-        break;
+      case ArgType::String: type_str = "String"; break;
+      case ArgType::Number: type_str = "Number"; break;
+      case ArgType::AgentId: type_str = "AgentId"; break;
+      case ArgType::ThreadId: type_str = "ThreadId"; break;
+      case ArgType::Filepath: type_str = "Filepath"; break;
+      case ArgType::Provider: type_str = "Provider"; break;
+      case ArgType::OAuthProvider: type_str = "OAuth provider"; break;
       }
 
       auto header = ftxui::hbox({
@@ -311,8 +332,7 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
                           ftxui::text(" [" + type_str +
                                       (arg.optional ? ", opt" : "") + "] ") |
                               ftxui::dim,
-                          ftxui::text(arg.description)}) |
-                    ftxui::borderEmpty;
+                          ftxui::text(arg.description)});
 
       const bool wants_provider_suggestions =
           arg.type == ArgType::Provider || arg.type == ArgType::OAuthProvider;
@@ -327,15 +347,13 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
           for (size_t i = 0; i < suggestions.size(); ++i) {
             const auto &match = suggestions[i];
             auto label = ftxui::text(" " + match.id) | ftxui::bold;
-            if (i == 0)
+            if (i == static_cast<size_t>(*suggestion_index))
               label = label | ftxui::inverted;
             auto meta = ftxui::text(" [" + match.type_label + "]") |
                         ftxui::dim;
-            rows.push_back(ftxui::hbox({label, ftxui::filler(), meta}) |
-                           ftxui::borderEmpty);
+            rows.push_back(ftxui::hbox({label, ftxui::filler(), meta}));
           }
           suggestion_body = ftxui::vbox(rows) | ftxui::yframe |
-                            ftxui::borderRounded |
                             ftxui::color(ftxui::Color::GrayLight);
         } else {
           std::string message = query.empty()
@@ -347,35 +365,28 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
         autocomplete_layer = ftxui::vbox(
                                      {header, ftxui::separatorLight(),
                                       suggestion_body}) |
-                             ftxui::borderEmpty |
                              ftxui::bgcolor(ftxui::Color::RGB(40, 40, 60));
       } else {
         autocomplete_layer = header |
-                             ftxui::borderEmpty |
                              ftxui::bgcolor(ftxui::Color::RGB(40, 40, 60));
       }
     }
 
-    // For short inputs, render normally and naturally let ftxui handle cursor
     if (total_lines <= MAX_VISIBLE_LINES) {
       *scroll_top = 0;
       return ftxui::vbox(
           {autocomplete_layer, ftxui::hbox({
                                    prompt,
                                    with_keys->Render() | ftxui::flex,
-                               })});
+                                })});
     }
 
     auto all_lines = splitLines(model->buffer ? *model->buffer : "");
-    int max_scroll =
-        std::max(0, static_cast<int>(all_lines.size()) - MAX_VISIBLE_LINES);
-    if (*scroll_top > max_scroll)
-      *scroll_top = max_scroll;
-    if (*scroll_top < 0)
-      *scroll_top = 0;
+    int max_scroll = std::max(0, static_cast<int>(all_lines.size()) - MAX_VISIBLE_LINES);
+    if (*scroll_top > max_scroll) *scroll_top = max_scroll;
+    if (*scroll_top < 0) *scroll_top = 0;
 
-    int cursor_line = cursorLine(model->buffer ? *model->buffer : "",
-                                 model->cursor ? *model->cursor : 0);
+    int cursor_line = cursorLine(model->buffer ? *model->buffer : "", model->cursor ? *model->cursor : 0);
     if (cursor_line < *scroll_top) {
       *scroll_top = cursor_line;
     } else if (cursor_line >= *scroll_top + MAX_VISIBLE_LINES) {
@@ -386,12 +397,10 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
     for (int k = 0; k < cursor_line; ++k) {
       cursor_col -= static_cast<int>(all_lines[k].size()) + 1;
     }
-    if (cursor_col < 0)
-      cursor_col = 0;
+    if (cursor_col < 0) cursor_col = 0;
 
     std::vector<ftxui::Element> visible_elements;
-    int end = std::min(*scroll_top + MAX_VISIBLE_LINES,
-                       static_cast<int>(all_lines.size()));
+    int end = std::min(*scroll_top + MAX_VISIBLE_LINES, static_cast<int>(all_lines.size()));
 
     for (int i = *scroll_top; i < end; ++i) {
       ftxui::Element line_el;
@@ -411,8 +420,6 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
 
         line_el = ftxui::hbox({
                       ftxui::text(pre),
-                      // The ftxui::focus decorator tells the screen engine to
-                      // put the hardware cursor here!
                       ftxui::text(cur_char) | ftxui::inverted | ftxui::focus,
                       ftxui::text(suf),
                   }) |
@@ -426,23 +433,15 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
 
     std::string indicator;
     if (*scroll_top > 0 && end < static_cast<int>(all_lines.size())) {
-      indicator = " [" + std::to_string(cursor_line + 1) + "/" +
-                  std::to_string(total_lines) +
-                  " \xe2\x86\x95]"; // Up-Down arrow
+      indicator = " [" + std::to_string(cursor_line + 1) + "/" + std::to_string(total_lines) + " \xe2\x86\x95]";
     } else if (*scroll_top > 0) {
-      indicator = " [" + std::to_string(cursor_line + 1) + "/" +
-                  std::to_string(total_lines) + " \xe2\x86\x91]"; // Up arrow
+      indicator = " [" + std::to_string(cursor_line + 1) + "/" + std::to_string(total_lines) + " \xe2\x86\x91]";
     } else if (end < static_cast<int>(all_lines.size())) {
-      indicator = " [" + std::to_string(cursor_line + 1) + "/" +
-                  std::to_string(total_lines) + " \xe2\x86\x93]"; // Down arrow
+      indicator = " [" + std::to_string(cursor_line + 1) + "/" + std::to_string(total_lines) + " \xe2\x86\x93]";
     }
 
-    auto line_hint = ftxui::text(indicator) | ftxui::dim |
-                     ftxui::color(ftxui::Color::RGB(100, 100, 140));
+    auto line_hint = ftxui::text(indicator) | ftxui::dim | ftxui::color(ftxui::Color::RGB(100, 100, 140));
 
-    // We no longer render the hidden true input to avoid it capturing focus.
-    // The CatchEvent wrapper still receives events because it wraps the
-    // returned hbox.
     return ftxui::vbox(
         {autocomplete_layer,
          ftxui::hbox({
@@ -452,5 +451,6 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
          })});
   });
 }
+
 
 } // namespace firmius::tui

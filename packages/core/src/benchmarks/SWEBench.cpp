@@ -72,7 +72,7 @@ void logError(Args&&... args) {
 }
 }
 
-SWEBench::SWEBench(Agent& a, shared::IHost& h) : agent(a), host(h) {}
+SWEBench::SWEBench(BenchmarkConfig config) : session(std::move(config)) {}
 
 std::vector<std::string> SWEBench::listTasks() {
     ensureDatasetLoaded();
@@ -146,26 +146,26 @@ bool SWEBench::prepareTask(const std::string& taskId) {
     }
 
     logDebug("[SWEBench][VERBOSE] Resetting /work and copying from host cache...");
-    host.exec("rm -rf /work/* /work/.* 2>/dev/null || true");
-    host.exec("mkdir -p /work");
+    session.getHost().exec("rm -rf /work/* /work/.* 2>/dev/null || true");
+    session.getHost().exec("mkdir -p /work");
 
-    if (host.getId() != "localhost") {
+    if (session.getHost().getId() != "localhost") {
         // Use docker cp for robust directory transfer
-        std::string transferCmd = "docker cp " + repoCacheDir + "/. " + host.getId() + ":/work/";
+        std::string transferCmd = "docker cp " + repoCacheDir + "/. " + session.getHost().getId() + ":/work/";
         int res = std::system(transferCmd.c_str());
         if (res != 0) throw std::runtime_error("Failed to transfer repository to container using docker cp");
         
-        auto gitCheck = host.exec("ls -d /work/.git");
+        auto gitCheck = session.getHost().exec("ls -d /work/.git");
         if (gitCheck.exitCode != 0) {
             logError("[SWEBench][ERROR] .git directory not found in /work after docker cp!");
         }
     } else {
-        host.exec("cp -a " + repoCacheDir + "/. /work/");
+        session.getHost().exec("cp -a " + repoCacheDir + "/. /work/");
     }
 
     logDebug("[SWEBench][VERBOSE] Checking out ", baseCommit, "...");
-    host.exec("git config --global --add safe.directory /work", "/work");
-    auto checkoutRes = host.exec("git checkout -f " + baseCommit, "/work");
+    session.getHost().exec("git config --global --add safe.directory /work", "/work");
+    auto checkoutRes = session.getHost().exec("git checkout -f " + baseCommit, "/work");
     if (checkoutRes.exitCode != 0) {
         logDebug("[SWEBench][DEBUG] Checkout failed. The commit might be missing from the cache.");
         // Do not try to fetch in the container if internet is disabled.
@@ -173,38 +173,38 @@ bool SWEBench::prepareTask(const std::string& taskId) {
         throw std::runtime_error("Git checkout failed in container: " + checkoutRes.stderrData);
     }
     
-    auto logRes = host.exec("git log -1 --format=%H", "/work");
+    auto logRes = session.getHost().exec("git log -1 --format=%H", "/work");
     logDebug("[SWEBench][DEBUG] Current Commit in Container: ", logRes.stdoutData);
     if (logRes.stdoutData.find(baseCommit) == std::string::npos && baseCommit.find(logRes.stdoutData.substr(0, 7)) == std::string::npos) {
         logError("[SWEBench][ERROR] Checkout failed to reach target commit!");
     }
 
     logDebug("[SWEBench][VERBOSE] Applying test patch...");
-    host.writeFile("/work/test.patch", std::vector<uint8_t>(testPatch.begin(), testPatch.end()));
-    auto applyRes = host.exec("git apply /work/test.patch", "/work");
+    session.getHost().writeFile("/work/test.patch", std::vector<uint8_t>(testPatch.begin(), testPatch.end()));
+    auto applyRes = session.getHost().exec("git apply /work/test.patch", "/work");
     if (applyRes.exitCode != 0) {
-        host.exec("patch -p1 < /work/test.patch", "/work");
+        session.getHost().exec("patch -p1 < /work/test.patch", "/work");
     }
 
     // Fix for Python 3.10+ compatibility: collections.Mapping -> collections.abc.Mapping
     // This affects astropy's vendored configobj
     logDebug("[SWEBench][VERBOSE] Applying Python 3.10+ compatibility patches...");
-    host.exec("find . -name '*.py' -exec sed -i 's/collections\\.Mapping/collections.abc.Mapping/g' {} \\; 2>/dev/null || true", "/work");
-    host.exec("find . -name '*.py' -exec sed -i 's/collections\\.Iterable/collections.abc.Iterable/g' {} \\; 2>/dev/null || true", "/work");
-    host.exec("find . -name '*.py' -exec sed -i 's/collections\\.Callable/collections.abc.Callable/g' {} \\; 2>/dev/null || true", "/work");
+    session.getHost().exec("find . -name '*.py' -exec sed -i 's/collections\\.Mapping/collections.abc.Mapping/g' {} \\; 2>/dev/null || true", "/work");
+    session.getHost().exec("find . -name '*.py' -exec sed -i 's/collections\\.Iterable/collections.abc.Iterable/g' {} \\; 2>/dev/null || true", "/work");
+    session.getHost().exec("find . -name '*.py' -exec sed -i 's/collections\\.Callable/collections.abc.Callable/g' {} \\; 2>/dev/null || true", "/work");
     // Additional patches for Python 3.10+ (removed in Python 3.11)
-    host.exec("find . -name '*.py' -exec sed -i 's/collections\\.MutableSequence/collections.abc.MutableSequence/g' {} \\; 2>/dev/null || true", "/work");
-    host.exec("find . -name '*.py' -exec sed -i 's/collections\\.MutableMapping/collections.abc.MutableMapping/g' {} \\; 2>/dev/null || true", "/work");
-    host.exec("find . -name '*.py' -exec sed -i 's/collections\\.Sequence/collections.abc.Sequence/g' {} \\; 2>/dev/null || true", "/work");
+    session.getHost().exec("find . -name '*.py' -exec sed -i 's/collections\\.MutableSequence/collections.abc.MutableSequence/g' {} \\; 2>/dev/null || true", "/work");
+    session.getHost().exec("find . -name '*.py' -exec sed -i 's/collections\\.MutableMapping/collections.abc.MutableMapping/g' {} \\; 2>/dev/null || true", "/work");
+    session.getHost().exec("find . -name '*.py' -exec sed -i 's/collections\\.Sequence/collections.abc.Sequence/g' {} \\; 2>/dev/null || true", "/work");
 
     logDebug("[SWEBench][VERBOSE] Installing environment dependencies with uv...");
     
     // Force clean to ensure no version conflicts
-    host.exec("uv pip uninstall --system --break-system-packages numpy setuptools wheel", "/work");
+    session.getHost().exec("uv pip uninstall --system --break-system-packages numpy setuptools wheel", "/work");
 
     // Detect if we need legacy setuptools (before removal of dep_util and package_index)
-    auto grepDepUtil = host.exec("grep -r \"setuptools.dep_util\" .", "/work");
-    auto grepPackageIndex = host.exec("grep -r \"setuptools.package_index\" .", "/work");
+    auto grepDepUtil = session.getHost().exec("grep -r \"setuptools.dep_util\" .", "/work");
+    auto grepPackageIndex = session.getHost().exec("grep -r \"setuptools.package_index\" .", "/work");
     bool needsLegacySetuptools = (grepDepUtil.exitCode == 0 || grepPackageIndex.exitCode == 0);
 
     std::string depCmd;
@@ -222,27 +222,27 @@ bool SWEBench::prepareTask(const std::string& taskId) {
     }
 
 
-    auto depRes = host.exec(depCmd, "/work");
+    auto depRes = session.getHost().exec(depCmd, "/work");
     if (depRes.exitCode != 0) {
         logError("[SWEBench][ERROR] Dependency Installation Failed:\n", depRes.stderrData);
         throw std::runtime_error("Environment dependency installation failed");
     }
 
     // Surgical fix for pyproject.toml
-    host.exec("sed -i 's/license = \"\\(.*\\)\"/license = {text = \"\\1\"}/g' pyproject.toml 2>/dev/null || true", "/work");
-    host.exec("sed -i '/license-files/d' pyproject.toml 2>/dev/null || true", "/work");
+    session.getHost().exec("sed -i 's/license = \"\\(.*\\)\"/license = {text = \"\\1\"}/g' pyproject.toml 2>/dev/null || true", "/work");
+    session.getHost().exec("sed -i '/license-files/d' pyproject.toml 2>/dev/null || true", "/work");
 
     logDebug("[SWEBench][VERBOSE] Building extension modules...");
-    auto buildRes = host.exec("python3 setup.py build_ext --inplace", "/work");
+    auto buildRes = session.getHost().exec("python3 setup.py build_ext --inplace", "/work");
     if (buildRes.exitCode != 0)
         logDebug("[SWEBench][DEBUG] Build Ext Warning (non-fatal):\n", buildRes.stderrData);
 
     logDebug("[SWEBench][VERBOSE] Installing repository in editable mode...");
     // Use --no-build-isolation to use our pinned versions
-    auto installRes = host.exec("uv pip install --system --no-build-isolation -e .", "/work");
+    auto installRes = session.getHost().exec("uv pip install --system --no-build-isolation -e .", "/work");
     if (installRes.exitCode != 0) {
         logDebug("[SWEBench][VERBOSE] Editable install not supported by this version, falling back to standard install...");
-        host.exec("uv pip install --system --no-build-isolation .", "/work");
+        session.getHost().exec("uv pip install --system --no-build-isolation .", "/work");
     }
 
     // VERIFY INSTALLATION
@@ -252,12 +252,12 @@ bool SWEBench::prepareTask(const std::string& taskId) {
     if (packageName.find("django") != std::string::npos) packageName = "django";
     if (packageName.find("astropy") != std::string::npos) packageName = "astropy";
 
-    auto verifyRes = host.exec("python3 -c \"import " + packageName + "; print('SUCCESS')\"", "/work");
+    auto verifyRes = session.getHost().exec("python3 -c \"import " + packageName + "; print('SUCCESS')\"", "/work");
     if (verifyRes.exitCode != 0 || verifyRes.stdoutData.find("SUCCESS") == std::string::npos) {
         logError("[SWEBench][ERROR] Environment Verification Failed. Package not importable:\n", verifyRes.stderrData);
         // Last ditch effort: install from source without editable
-        host.exec("python3 setup.py install --user", "/work");
-        verifyRes = host.exec("python3 -c \"import " + packageName + "; print('SUCCESS')\"", "/work");
+        session.getHost().exec("python3 setup.py install --user", "/work");
+        verifyRes = session.getHost().exec("python3 -c \"import " + packageName + "; print('SUCCESS')\"", "/work");
         if (verifyRes.exitCode != 0) throw std::runtime_error("Package verification failed after install");
     }
 
@@ -276,7 +276,7 @@ bool SWEBench::prepareTask(const std::string& taskId) {
         testCmdSS << " '" << normalizeTestName(repo, t) << "'";
     }
 
-    auto baselineRes = host.exec(testCmdSS.str(), "/work", testEnv);
+    auto baselineRes = session.getHost().exec(testCmdSS.str(), "/work", testEnv);
     logDebug("[SWEBench][DEBUG] Baseline Stdout:\n", baselineRes.stdoutData);
 
     int passed = 0, failed = 0, errors = 0;
@@ -314,6 +314,7 @@ BenchmarkResult SWEBench::runTask(const std::string& taskId) {
     for (const auto& t : failToPass) prompt << "- " << t << "\n";
     prompt << "\nFix the issue in the codebase. After finishing, provide a summary of your changes.";
 
+    auto& agent = session.getAgent();
     agent.reset();
     agent.run(prompt.str(), [](const StreamEvent&) {});
 
@@ -330,7 +331,7 @@ BenchmarkResult SWEBench::runTask(const std::string& taskId) {
         testCmdSS << " '" << normalizeTestName(repo, t) << "'";
     }
 
-    auto finalRes = host.exec(testCmdSS.str(), "/work", {{"PYTHONPATH", "/work"}});
+    auto finalRes = session.getHost().exec(testCmdSS.str(), "/work", {{"PYTHONPATH", "/work"}});
     int passed = 0, failed = 0, errors = 0;
     parseTestResults(finalRes.stdoutData, passed, failed, errors);
     if (passed == 0 && failed == 0 && errors == 0) parseTestResults(finalRes.stderrData, passed, failed, errors);

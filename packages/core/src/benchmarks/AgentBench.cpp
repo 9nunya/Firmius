@@ -23,7 +23,7 @@ size_t writeToFile(void* ptr, size_t size, size_t nmemb, void* userdata) {
 const std::string SCRIPT_BASE_URL = "https://raw.githubusercontent.com/THUDM/AgentBench/main/data/os_interaction/scripts/";
 }
 
-AgentBench::AgentBench(Agent& a, shared::IHost& h) : agent(a), host(h) {}
+AgentBench::AgentBench(BenchmarkConfig config) : session(std::move(config)) {}
 
 std::vector<std::string> AgentBench::listTasks() {
     ensureDatasetLoaded();
@@ -45,7 +45,7 @@ bool AgentBench::prepareTask(const std::string& taskId) {
 
     const auto& task = dataset[index];
 
-    host.exec("rm -rf /work/* /work/.* 2>/dev/null || true");
+    session.getHost().exec("rm -rf /work/* /work/.* 2>/dev/null || true");
     backgroundProcessPids.clear();
 
     currentScriptDir = "dev";
@@ -78,6 +78,7 @@ BenchmarkResult AgentBench::runTask(const std::string& taskId) {
 
     std::string fullPrompt = "Task: " + description + "\n\nProvide your final answer after you have found it. Do not call tools after you have found the answer.";
 
+    auto& agent = session.getAgent();
     agent.reset();
     agent.run(fullPrompt, [](const StreamEvent&) {});
 
@@ -296,7 +297,7 @@ void AgentBench::executeInitScripts(const rapidjson::Value& createConfig, const 
     std::regex suRegex(R"(su\s+-\s+([a-zA-Z0-9_-]+)\s*$)");
     std::smatch match;
     if (std::regex_search(lastInitCode, match, suRegex)) {
-        host.setUser(match[1]);
+        session.getHost().setUser(match[1]);
     }
 }
 
@@ -311,7 +312,7 @@ void AgentBench::executeStartCommand(const rapidjson::Value& startConfig, const 
     // Append echo $! to get the last background PID
     cmd += " echo $!";
 
-    auto result = host.exec(cmd);
+    auto result = session.getHost().exec(cmd);
     std::string output = result.stdoutData;
     
     // Extract PID from the last line
@@ -338,24 +339,24 @@ void AgentBench::detectAndSetUserContext() {
     // but in a way that might catch a user switch if it was persistent (unlikely)
     // or just rely on a more thorough check.
     
-    auto result = host.exec("whoami");
+    auto result = session.getHost().exec("whoami");
     std::string user = result.stdoutData;
     user.erase(std::remove_if(user.begin(), user.end(), ::isspace), user.end());
 
     if (!user.empty() && user != "root") {
-        host.setUser(user);
+        session.getHost().setUser(user);
     }
 }
 
 void AgentBench::terminateBackgroundProcesses() {
     for (const auto& pid : backgroundProcessPids) {
-        host.exec("kill " + pid + " 2>/dev/null || true");
+        session.getHost().exec("kill " + pid + " 2>/dev/null || true");
     }
     backgroundProcessPids.clear();
 }
 
 std::string AgentBench::extractAgentAnswer() {
-    const auto& turns = agent.getContext().history->turns;
+    const auto& turns = session.getAgent().getContext().history->turns;
     if (turns.empty()) {
         Logger::instance().logDebug("DEBUG: No turns in history");
         return "";
@@ -520,27 +521,27 @@ ProcessResult AgentBench::executeScript(const std::string& language, const std::
     std::string scriptPath = "/tmp/agentbench_script";
     if (language == "bash") {
         scriptPath += ".sh";
-        host.writeFile(scriptPath, std::vector<uint8_t>(code.begin(), code.end()));
+        session.getHost().writeFile(scriptPath, std::vector<uint8_t>(code.begin(), code.end()));
         std::string cmd = "bash " + scriptPath;
         for (const auto& param : params) {
             cmd += " \"" + param + "\"";
         }
-        return host.exec(cmd);
+        return session.getHost().exec(cmd);
     } else if (language == "python") {
         scriptPath += ".py";
-        host.writeFile(scriptPath, std::vector<uint8_t>(code.begin(), code.end()));
+        session.getHost().writeFile(scriptPath, std::vector<uint8_t>(code.begin(), code.end()));
         std::string cmd = "python3 " + scriptPath;
         for (const auto& param : params) {
             cmd += " \"" + param + "\"";
         }
-        return host.exec(cmd);
+        return session.getHost().exec(cmd);
     } else if (language == "c++" || language == "c") {
         std::string ext = (language == "c++") ? ".cpp" : ".c";
         scriptPath += ext;
-        host.writeFile(scriptPath, std::vector<uint8_t>(code.begin(), code.end()));
+        session.getHost().writeFile(scriptPath, std::vector<uint8_t>(code.begin(), code.end()));
 
         std::string compiler = (language == "c++") ? "g++" : "gcc";
-        auto compileResult = host.exec(compiler + " -o /tmp/a.out " + scriptPath + " 2>&1");
+        auto compileResult = session.getHost().exec(compiler + " -o /tmp/a.out " + scriptPath + " 2>&1");
 
         if (compileResult.exitCode != 0) {
             ProcessResult res;
@@ -555,7 +556,7 @@ ProcessResult AgentBench::executeScript(const std::string& language, const std::
         for (const auto& param : params) {
             cmd += " " + param;
         }
-        return host.exec(cmd);
+        return session.getHost().exec(cmd);
     } else {
         throw std::runtime_error("Unsupported script language: " + language);
     }

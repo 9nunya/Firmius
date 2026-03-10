@@ -19,8 +19,11 @@ struct AgentStripItem {
   int tool_call_count = 0;
 };
 
+inline constexpr size_t kAgentStripVisibleRows = 3;
+
 struct AgentStripModel {
   std::vector<AgentStripItem> items;
+  size_t view_offset = 0;
 };
 
 ftxui::Component AgentStrip(const std::shared_ptr<AgentStripModel> &model);

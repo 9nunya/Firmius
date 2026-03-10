@@ -1,5 +1,5 @@
-#include "providers/antigravity/AntigravityProvider.hpp"
-#include "providers/antigravity/AntigravityProtocol.hpp"
+#include "providers/AntigravityProvider.hpp"
+#include "providers/AntigravityProtocol.hpp"
 #include "utils/GCPHttpClient.hpp"
 #include "utils/TempOAuthServer.hpp"
 #include <atomic>

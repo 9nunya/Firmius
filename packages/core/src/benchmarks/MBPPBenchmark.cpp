@@ -1,5 +1,4 @@
 #include "benchmarks/MBPPBenchmark.hpp"
-#include "agents/PurposeLoader.hpp"
 #include <curl/curl.h>
 #include <fstream>
 #include <iostream>
@@ -20,7 +19,7 @@ size_t writeToFile(void* ptr, size_t size, size_t nmemb, void* userdata) {
 }
 }
 
-MBPPBenchmark::MBPPBenchmark(Agent& a, shared::IHost& h) : agent(a), host(h) {}
+MBPPBenchmark::MBPPBenchmark(BenchmarkConfig config) : session(std::move(config)) {}
 
 std::vector<std::string> MBPPBenchmark::listTasks() {
     ensureDatasetLoaded();
@@ -37,7 +36,7 @@ bool MBPPBenchmark::prepareTask(const std::string&) {
     ensureDatasetLoaded();
     
     // Clean /work before each task
-    host.exec("rm -rf /work/* /work/.* 2>/dev/null || true");
+    session.getHost().exec("rm -rf /work/* /work/.* 2>/dev/null || true");
     
     return true;
 }
@@ -76,8 +75,9 @@ BenchmarkResult MBPPBenchmark::runTask(const std::string& taskId) {
     BenchmarkResult result;
     result.taskId = taskId;
 
+    auto& agent = session.getAgent();
     agent.reset();
-    agent.run(fullPrompt.str(), [](const StreamEvent&) {}); 
+    agent.run(fullPrompt.str(), [](const StreamEvent&) {});
 
     // Evaluate
     std::stringstream ss;
@@ -107,8 +107,8 @@ BenchmarkResult MBPPBenchmark::runTask(const std::string& taskId) {
        << "print(json.dumps({'passed': passed, 'total': total, 'error': error_msg}))\n";
 
     std::string testScript = ss.str();
-    host.writeFile("/work/run_tests.py", std::vector<uint8_t>(testScript.begin(), testScript.end()));
-    auto execRes = host.exec("python3 /work/run_tests.py", "/work");
+    session.getHost().writeFile("/work/run_tests.py", std::vector<uint8_t>(testScript.begin(), testScript.end()));
+    auto execRes = session.getHost().exec("python3 /work/run_tests.py", "/work");
     
     rapidjson::Document resDoc;
     resDoc.Parse(execRes.stdoutData.c_str());

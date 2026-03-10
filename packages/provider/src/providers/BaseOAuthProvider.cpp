@@ -1,4 +1,4 @@
-#include "providers/oauth/BaseOAuthProvider.hpp"
+#include "providers/BaseOAuthProvider.hpp"
 
 #include <chrono>
 #include <filesystem>

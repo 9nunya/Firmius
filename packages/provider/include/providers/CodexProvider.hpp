@@ -1,6 +1,6 @@
 #pragma once
 
-#include "providers/oauth/BaseOAuthProvider.hpp"
+#include "providers/BaseOAuthProvider.hpp"
 #include <map>
 #include <memory>
 #include <string>
@@ -52,6 +52,7 @@ private:
                       std::function<void(const StreamEvent &)> &onEvent,
                       AgentMetrics &metrics, bool &metricsReceived,
                       bool &doneReceived, ToolCallTracker &tracker);
+  void fetchAndStoreQuotas(OAuthAccount &acc);
 };
 
-}
+} // namespace firmius::provider

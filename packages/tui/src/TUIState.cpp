@@ -17,6 +17,7 @@
 #include <ftxui/component/component.hpp>
 #include <ftxui/dom/elements.hpp>
 #include <unordered_map>
+#include <vector>
 
 namespace firmius::tui {
 
@@ -372,10 +373,13 @@ void TuiState::updateAgentStripModel() {
     }
   }
   auto all_ids = firmius::core::AgentRegistry::instance().listAll();
-  size_t added = 0;
+
+  std::vector<AgentStripItem> all_items;
+  all_items.reserve(all_ids.size());
+  size_t focused_index = 0;
+  bool focus_found = false;
+  size_t candidate_index = 0;
   for (const auto &id : all_ids) {
-    if (added >= 3)
-      break;
     auto child = firmius::core::AgentRegistry::instance().getAgent(id);
     if (!child)
       continue;
@@ -408,8 +412,38 @@ void TuiState::updateAgentStripModel() {
         (live_it != live_tool_call_counts.end()) ? live_it->second : 0;
     item.tool_call_count = history_tool_calls + live_tool_calls;
     item.is_focused = focused_agent_id_ == id;
-    agent_strip_model_->items.push_back(std::move(item));
-    ++added;
+    if (item.is_focused) {
+      focused_index = candidate_index;
+      focus_found = true;
+    }
+    all_items.push_back(std::move(item));
+    ++candidate_index;
+  }
+
+  const size_t total_items = all_items.size();
+  if (total_items == 0) {
+    agent_strip_model_->view_offset = 0;
+    return;
+  }
+
+  size_t visible_rows = std::min(kAgentStripVisibleRows, total_items);
+  size_t offset = agent_strip_model_->view_offset;
+  if (offset > total_items - visible_rows) {
+    offset = total_items - visible_rows;
+  }
+
+  if (focus_found) {
+    if (focused_index < offset) {
+      offset = focused_index;
+    } else if (focused_index >= offset + visible_rows) {
+      offset = focused_index - visible_rows + 1;
+    }
+  }
+
+  agent_strip_model_->view_offset = offset;
+  for (size_t i = 0; i < visible_rows; ++i) {
+    agent_strip_model_->items.push_back(
+        std::move(all_items[offset + i]));
   }
 }
 

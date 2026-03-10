@@ -2,7 +2,7 @@
 #define FIRMIUS_CORE_MBPP_BENCHMARK_HPP
 
 #include "IBenchmark.hpp"
-#include "agents/Agent.hpp"
+#include "benchmarks/BenchmarkSession.hpp"
 #include <rapidjson/document.h>
 
 namespace firmius::core {
@@ -14,12 +14,7 @@ using namespace firmius::shared;
  */
 class MBPPBenchmark : public shared::IBenchmark {
 public:
-    /**
-     * @brief Constructs an MBPPBenchmark runner.
-     * @param agent The agent instance to evaluate.
-     * @param host The host environment to use for execution.
-     */
-    MBPPBenchmark(Agent& agent, shared::IHost& host);
+    explicit MBPPBenchmark(BenchmarkConfig config);
     
     std::vector<std::string> listTasks() override;
     bool prepareTask(const std::string& taskId) override;
@@ -31,8 +26,7 @@ private:
      */
     void ensureDatasetLoaded();
     
-    Agent& agent;
-    shared::IHost& host;
+    BenchmarkSession session;
     rapidjson::Document dataset;
     bool datasetLoaded = false;
 };

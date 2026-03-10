@@ -11,6 +11,11 @@ target_sources(firmius_provider PRIVATE
     src/providers/OpenRouterProvider.cpp
     src/providers/ZaiProvider.cpp
     src/providers/ZenProvider.cpp
+    src/providers/BaseOpenAIProvider.cpp
+    src/providers/ProviderRegistry.cpp
+    src/providers/AntigravityProvider.cpp
+    src/providers/AntigravityProtocol.cpp
+    src/providers/BaseOAuthProvider.cpp
 )
 
 target_sources(firmius_provider PUBLIC 
@@ -24,6 +29,12 @@ target_sources(firmius_provider PUBLIC
     include/providers/OpenRouterProvider.hpp
     include/providers/ZaiProvider.hpp
     include/providers/ZenProvider.hpp
+    include/providers/BaseOpenAIProvider.hpp
+    include/providers/ProviderRegistry.hpp
+    include/providers/AntigravityProvider.hpp
+    include/providers/AntigravityProtocol.hpp
+    include/providers/BaseOAuthProvider.hpp
+    include/providers/OAuthWizard.hpp
 )
 
 target_include_directories(firmius_provider PUBLIC

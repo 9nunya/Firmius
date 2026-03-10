@@ -7,7 +7,7 @@
 #include "hosts/LocalHost.hpp"
 #include "persistence/ThreadManager.hpp"
 #include "providers/ProviderRegistry.hpp"
-#include "providers/oauth/BaseOAuthProvider.hpp"
+#include "providers/BaseOAuthProvider.hpp"
 #include "utils/StringUtil.hpp"
 #include <Context.hpp>
 #include <EnvLoader.hpp>

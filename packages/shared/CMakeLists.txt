@@ -14,11 +14,6 @@ target_sources(firmius_shared PRIVATE
     src/utils/ToolSummaries.cpp
     src/utils/TempOAuthServer.cpp
     src/utils/GCPHttpClient.cpp
-    src/providers/oauth/BaseOAuthProvider.cpp
-    src/providers/antigravity/AntigravityProvider.cpp
-    src/providers/antigravity/AntigravityProtocol.cpp
-    src/providers/BaseOpenAIProvider.cpp
-    src/providers/ProviderRegistry.cpp
     src/ConfigLoader.cpp
 )
 
@@ -33,6 +28,7 @@ target_sources(firmius_shared PUBLIC
     include/Context.hpp
     include/Serialization.hpp
     include/IProvider.hpp
+    include/IAudit.hpp
     include/EnvLoader.hpp
     include/HarnessEvents.hpp
     include/Panic.hpp
@@ -52,11 +48,6 @@ target_sources(firmius_shared PUBLIC
     include/utils/ToolView.hpp
     include/utils/TempOAuthServer.hpp
     include/utils/GCPHttpClient.hpp
-    include/providers/oauth/OAuthWizard.hpp
-    include/providers/oauth/BaseOAuthProvider.hpp
-    include/providers/antigravity/AntigravityProvider.hpp
-    include/providers/antigravity/AntigravityProtocol.hpp
-    include/providers/BaseOpenAIProvider.hpp
     include/ConfigLoader.hpp
 )
 

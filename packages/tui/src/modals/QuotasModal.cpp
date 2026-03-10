@@ -1,6 +1,7 @@
 #include "modals/QuotasModal.hpp"
 #include "TUIState.hpp"
 #include "harness/Harness.hpp"
+#include "components/ScrollableBox.hpp"
 #include <ftxui/component/component.hpp>
 #include <ftxui/dom/elements.hpp>
 #include <iomanip>
@@ -25,17 +26,13 @@ ftxui::Component QuotasModal::create(TuiState &state) {
     state.postEvent(ftxui::Event::Custom);
   }).detach();
 
-  auto component = ftxui::Renderer([allQuotas, isLoading,
-                                    providerId = providerId_]() {
+  auto content_renderer = ftxui::Renderer([allQuotas, isLoading,
+                                     providerId = providerId_]() {
     if (*isLoading) {
-      return ftxui::window(
-                 ftxui::text(" Quotas: " + providerId) | ftxui::bold |
-                     ftxui::color(ftxui::Color::Cyan),
-                 ftxui::vbox(
-                     {ftxui::text("Fetching quotas...") | ftxui::center,
-                      ftxui::text("") |
-                          ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, 5)})) |
-             ftxui::clear_under | ftxui::center;
+      return ftxui::vbox(
+                 {ftxui::text("Fetching quotas...") | ftxui::center,
+                  ftxui::text("") |
+                      ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, 5)});
     }
 
     ftxui::Elements accounts_elements;
@@ -49,8 +46,8 @@ ftxui::Component QuotasModal::create(TuiState &state) {
         bucket_elements.push_back(
             ftxui::hbox({ftxui::text(" Account: ") | ftxui::bold |
                              ftxui::color(ftxui::Color::Yellow),
-                         ftxui::text(account) | ftxui::bold |
-                             ftxui::color(ftxui::Color::YellowLight)}));
+                          ftxui::text(account) | ftxui::bold |
+                              ftxui::color(ftxui::Color::YellowLight)}));
         bucket_elements.push_back(ftxui::separatorLight());
 
         if (buckets.empty()) {
@@ -91,7 +88,12 @@ ftxui::Component QuotasModal::create(TuiState &state) {
         accounts_elements.push_back(ftxui::text("")); // Spacer
       }
     }
+    return ftxui::vbox(std::move(accounts_elements));
+  });
 
+  auto scrollable_content = ScrollableBox(content_renderer);
+
+  auto window_renderer = ftxui::Renderer(scrollable_content, [scrollable_content, isLoading, providerId = providerId_]() {
     auto window_title =
         ftxui::hbox({ftxui::text(" Provider Quotas: ") | ftxui::bold,
                      ftxui::text(providerId) | ftxui::bold |
@@ -100,8 +102,7 @@ ftxui::Component QuotasModal::create(TuiState &state) {
     return ftxui::window(
                window_title,
                ftxui::vbox({
-                   ftxui::vbox(std::move(accounts_elements)) |
-                       ftxui::vscroll_indicator | ftxui::yframe |
+                   scrollable_content->Render() |
                        ftxui::size(ftxui::HEIGHT, ftxui::LESS_THAN, 22),
                    ftxui::text(""),
                    ftxui::hbox({ftxui::text(" ESC/Enter ") | ftxui::bold |
@@ -112,13 +113,14 @@ ftxui::Component QuotasModal::create(TuiState &state) {
            ftxui::clear_under | ftxui::center;
   });
 
-  return ftxui::CatchEvent(component, [&state, isLoading](ftxui::Event event) {
+  return ftxui::CatchEvent(window_renderer, [&state, isLoading, scrollable_content](ftxui::Event event) {
     if (event == ftxui::Event::Escape || event == ftxui::Event::Return) {
       state.popModalImmediate();
       return true;
     }
-    return false;
+    return scrollable_content->OnEvent(event);
   });
 }
+
 
 } // namespace firmius::tui

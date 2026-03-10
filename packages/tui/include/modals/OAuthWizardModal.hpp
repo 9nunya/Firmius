@@ -1,7 +1,7 @@
 #pragma once
 
 #include "modals/IModal.hpp"
-#include "providers/oauth/OAuthWizard.hpp"
+#include "providers/OAuthWizard.hpp"
 #include <memory>
 #include <string>
 

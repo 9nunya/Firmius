@@ -1,80 +1,71 @@
+#include "audits/ProviderAudit.hpp"
+#include "Engine.hpp"
 #include "EnvLoader.hpp"
-#include "IProvider.hpp"
-#include "providers/NanoGPTProvider.hpp"
-#include "providers/OpenRouterProvider.hpp"
-#include "providers/ZaiProvider.hpp"
-#include "providers/ZenProvider.hpp"
-#include "providers/ChutesProvider.hpp"
-#include <iostream>
+#include "providers/ProviderRegistry.hpp"
 #include <chrono>
 #include <iomanip>
-#include <memory>
+#include <iostream>
 #include <sstream>
-#include <vector>
 
-using namespace firmius::shared;
+namespace firmius::audits {
+
 using namespace firmius::provider;
 using namespace firmius::shared;
 
+namespace {
 std::string getTimestamp() {
     auto now = std::chrono::system_clock::now();
     auto in_time_t = std::chrono::system_clock::to_time_t(now);
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
-
     std::stringstream ss;
     ss << std::put_time(std::localtime(&in_time_t), "%H:%M:%S") << "." << std::setfill('0') << std::setw(3) << ms.count();
     return ss.str();
 }
+}
 
-int main(int argc, char** argv) {
+std::string ProviderAudit::getId() const { return "provider_models"; }
+
+std::string ProviderAudit::getDescription() const { return "List models and stream a tool call"; }
+
+shared::AuditResult ProviderAudit::run(const std::vector<std::string>& args) {
+    AuditResult result;
+    result.auditId = getId();
     EnvLoader::load(".env.local");
-
-    std::string providerName = argc > 1 ? argv[1] : "nanogpt";
-    std::unique_ptr<firmius::provider::IProvider> provider;
-
-    if (providerName == "nanogpt") {
-        provider = std::make_unique<NanoGPTProvider>();
-    } else if (providerName == "openrouter") {
-        provider = std::make_unique<OpenRouterProvider>("");
-    } else if (providerName == "zai") {
-        provider = std::make_unique<ZaiProvider>("");
-    } else if (providerName == "zen") {
-        provider = std::make_unique<ZenProvider>("");
-    } else if (providerName == "chutes") {
-        provider = std::make_unique<ChutesProvider>("");
-    } else {
+    firmius::core::Engine::instance();
+    std::string providerName = args.empty() ? "nanogpt" : args[0];
+    auto provider = ProviderRegistry::instance().getProvider(providerName);
+    if (!provider) {
         std::cerr << "Unknown provider: " << providerName << std::endl;
-        return 1;
+        result.exitCode = 1;
+        result.passed = false;
+        return result;
     }
-
     std::cout << "--- Models List for " << providerName << " ---" << std::endl;
     auto models = provider->listModels();
     std::cout << std::left << std::setw(40) << "ID" << " | " << std::setw(10) << "Context" << " | " << "Modalities" << std::endl;
     std::cout << std::string(70, '-') << std::endl;
     for (const auto& m : models) {
         std::string mods;
-        for (const auto& mod : m.modalities) mods += mod + " ";
+        for (const auto& mod : m.modalities) {
+            mods += mod + " ";
+        }
         std::cout << std::left << std::setw(40) << m.id << " | " << std::setw(10) << m.contextWindow << " | " << mods << std::endl;
     }
-
     std::cout << "\n--- Streaming Audit (Tool Call Latency) ---" << std::endl;
-
     AgentHistory history;
     history.threadId = "audit-thread";
-
     AgentTurn turn;
     Message msg;
     msg.role = Role::User;
     msg.content.push_back(TextContent{"Use file_read to check package.json. DO NOT SAY ANYTHING ELSE."});
     turn.messages.push_back(msg);
     history.turns.push_back(turn);
-
     ProviderOptions opts;
     opts.tools = {
         {"file_read", "Read a file from the filesystem", R"({"type":"object","properties":{"path":{"type":"string"}}})"}
     };
-    if (argc > 2) {
-        opts.modelId = argv[2];
+    if (args.size() > 1) {
+        opts.modelId = args[1];
     } else {
         opts.modelId = models.empty() ? "gpt-4o" : models[0].id;
         if (providerName == "nanogpt") {
@@ -86,10 +77,8 @@ int main(int argc, char** argv) {
             }
         }
     }
-
     std::cout << "Using model: " << opts.modelId << std::endl;
-
-    provider->stream(history, opts, [](const StreamEvent& ev) {
+    provider->stream(history, opts, [&](const StreamEvent& ev) {
         std::string ts = getTimestamp();
         if (auto* txt = std::get_if<TextChunk>(&ev)) {
             std::cout << "[" << ts << "] TEXT: " << txt->delta << std::endl;
@@ -101,6 +90,9 @@ int main(int argc, char** argv) {
             std::cout << "[" << ts << "] METRICS: total_tokens=" << met->tokens.total << std::endl;
         }
     });
+    result.exitCode = 0;
+    result.passed = true;
+    return result;
+}
 
-    return 0;
 }
