@@ -16,6 +16,7 @@
 #include <filesystem>
 #include <ftxui/component/component.hpp>
 #include <ftxui/dom/elements.hpp>
+#include <unordered_map>
 
 namespace firmius::tui {
 
@@ -336,6 +337,40 @@ void TuiState::updateAgentStripModel() {
   agent_strip_model_->items.clear();
   if (focused_agent_id_.empty())
     return;
+
+  auto countHistoryToolCalls =
+      [](const firmius::shared::AgentHistory *history) {
+        if (!history)
+          return 0;
+        int count = 0;
+        for (const auto &turn : history->turns) {
+          for (const auto &msg : turn.messages) {
+            for (const auto &part : msg.content) {
+              if (std::holds_alternative<firmius::shared::ToolCallContent>(part))
+                ++count;
+            }
+          }
+        }
+        return count;
+      };
+
+  std::unordered_map<std::string, int> live_tool_call_counts;
+  const auto &tool_calls = stream_state_.getToolCalls();
+  for (const auto &[_, view] : tool_calls) {
+    if (!view || view->agentId.empty())
+      continue;
+    ++live_tool_call_counts[view->agentId];
+  }
+
+  std::string parent_focus = focused_agent_id_;
+  auto focused_agent =
+      firmius::core::AgentRegistry::instance().getAgent(focused_agent_id_);
+  if (focused_agent) {
+    const auto &ctx = focused_agent->getContext();
+    if (!ctx.identity.parentId.empty()) {
+      parent_focus = ctx.identity.parentId;
+    }
+  }
   auto all_ids = firmius::core::AgentRegistry::instance().listAll();
   size_t added = 0;
   for (const auto &id : all_ids) {
@@ -345,7 +380,7 @@ void TuiState::updateAgentStripModel() {
     if (!child)
       continue;
     const auto &ctx = child->getContext();
-    if (ctx.identity.parentId != focused_agent_id_)
+    if (ctx.identity.parentId != parent_focus)
       continue;
     AgentStripItem item;
     item.id = id;
@@ -366,6 +401,13 @@ void TuiState::updateAgentStripModel() {
             info.contextWindow;
       }
     }
+    int history_tool_calls =
+        countHistoryToolCalls(child->getContext().history.get());
+    auto live_it = live_tool_call_counts.find(id);
+    int live_tool_calls =
+        (live_it != live_tool_call_counts.end()) ? live_it->second : 0;
+    item.tool_call_count = history_tool_calls + live_tool_calls;
+    item.is_focused = focused_agent_id_ == id;
     agent_strip_model_->items.push_back(std::move(item));
     ++added;
   }
@@ -630,16 +672,20 @@ ftxui::Component TuiState::root() {
             focused_agent_id_);
         if (agent && !agent->getContext().identity.parentId.empty()) {
           std::string parentId = agent->getContext().identity.parentId;
-          if (harness_->setFocusedAgent(parentId)) {
-            focused_agent_id_ = parentId;
-            if (history_) {
-              *history_ = harness_->getAgentHistory(focused_agent_id_);
-            } else {
-              history_ = harness_->getAgentHistoryPtr(focused_agent_id_);
-            }
-            if (chat_component_)
-              chat_component_->OnEvent(ftxui::Event::Special("ThreadChanged"));
+        if (harness_->setFocusedAgent(parentId)) {
+          focused_agent_id_ = parentId;
+          if (history_) {
+            *history_ = harness_->getAgentHistory(focused_agent_id_);
+          } else {
+            history_ = harness_->getAgentHistoryPtr(focused_agent_id_);
           }
+          if (chat_component_)
+            chat_component_->OnEvent(ftxui::Event::Special("ThreadChanged"));
+          updateStatusModel();
+          updateAgentStripModel();
+          if (screen_)
+            screen_->PostEvent(ftxui::Event::Custom);
+        }
         }
       }
       return true;
@@ -662,17 +708,21 @@ ftxui::Component TuiState::root() {
                 it = agents.end();
               --it;
             }
-            if (harness_->setFocusedAgent(*it)) {
-              focused_agent_id_ = *it;
-              if (history_) {
-                *history_ = harness_->getAgentHistory(focused_agent_id_);
-              } else {
-                history_ = harness_->getAgentHistoryPtr(focused_agent_id_);
-              }
-              if (chat_component_)
-                chat_component_->OnEvent(
-                    ftxui::Event::Special("ThreadChanged"));
+          if (harness_->setFocusedAgent(*it)) {
+            focused_agent_id_ = *it;
+            if (history_) {
+              *history_ = harness_->getAgentHistory(focused_agent_id_);
+            } else {
+              history_ = harness_->getAgentHistoryPtr(focused_agent_id_);
             }
+            if (chat_component_)
+              chat_component_->OnEvent(
+                  ftxui::Event::Special("ThreadChanged"));
+            updateStatusModel();
+            updateAgentStripModel();
+            if (screen_)
+              screen_->PostEvent(ftxui::Event::Custom);
+          }
           }
         }
       }

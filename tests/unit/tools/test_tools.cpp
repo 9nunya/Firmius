@@ -1,16 +1,17 @@
 #include "Events.hpp"
 #include "IAgent.hpp"
 #include "ITool.hpp"
+#include "agents/AgentPermissionChecks.hpp"
 #include "hosts/LocalHost.hpp"
 #include "tools/FileReadTool.hpp"
 #include "tools/GlobTool.hpp"
 #include "tools/GrepTool.hpp"
 #include "tools/ListDirectoryTool.hpp"
 #include "tools/ProcessExecuteTool.hpp"
+#include <filesystem>
+#include <fstream>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
-#include <fstream>
-#include <filesystem>
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
@@ -61,6 +62,12 @@ public:
 
 class MockAgent : public IAgent {
 public:
+  firmius::shared::AgentContext defaultCtx;
+  std::unique_ptr<AgentPermissionChecks> pChecks;
+  MockAgent() { pChecks = std::make_unique<AgentPermissionChecks>(defaultCtx); }
+  AgentPermissionChecks &getPermissionChecks() const override {
+    return *pChecks;
+  }
   MOCK_METHOD(void, reset, (), (override));
   MOCK_METHOD(void, run,
               (const std::string &, (std::function<void(const StreamEvent &)>)),
@@ -141,18 +148,27 @@ protected:
   AgentContext agentContext;
 
   void SetUp() override {
-    agentContext.environment.cwd = "/tmp/work";
-    agentContext.permissions.allowOutsideCwd = false;
-    agentContext.permissions.allowedPaths = {"/tmp/work", "/tmp"};
+    mockAgent.defaultCtx.environment.cwd = "/tmp/work";
+    mockAgent.defaultCtx.permissions.allowOutsideCwd = false;
+    mockAgent.defaultCtx.permissions.allowedPaths = {"/tmp/work", "/tmp"};
 
-    ON_CALL(mockAgent, getContext()).WillByDefault(ReturnRef(agentContext));
+    ON_CALL(mockAgent, getContext())
+        .WillByDefault(ReturnRef(mockAgent.defaultCtx));
     ON_CALL(mockAgent, getMutableContext())
-        .WillByDefault(ReturnRef(agentContext));
+        .WillByDefault(ReturnRef(mockAgent.defaultCtx));
     ON_CALL(mockAgent, resolvePath(_))
         .WillByDefault(Invoke([](const std::string &path) {
           if (path.starts_with("/"))
             return path;
           return "/tmp/work/" + path;
+        }));
+    ON_CALL(mockHost, readFile(_))
+        .WillByDefault(Invoke([](const std::string &path) {
+          std::ifstream f(path, std::ios::binary);
+          if (!f)
+            throw std::runtime_error("Cannot read: " + path);
+          return std::vector<uint8_t>((std::istreambuf_iterator<char>(f)),
+                                      std::istreambuf_iterator<char>());
         }));
   }
 };
@@ -175,8 +191,8 @@ TEST_F(FileReadToolTest, allowedPaths_permitsInside) {
 }
 
 TEST_F(FileReadToolTest, allowedPaths_blocksOutside) {
-  agentContext.permissions.allowedPaths = {};
-  agentContext.permissions.allowOutsideCwd = false;
+  mockAgent.defaultCtx.permissions.allowedPaths = {};
+  mockAgent.defaultCtx.permissions.allowOutsideCwd = false;
 
   auto json = createJsonInput({{"path", "/etc/passwd"}});
   ToolContext ctx{mockHost, mockAgent, "test_call"};
@@ -217,6 +233,9 @@ protected:
   NiceMock<MockAgent> mockAgent;
 
   void SetUp() override {
+    mockAgent.defaultCtx.permissions.allowedPaths = {"/tmp", "/root"};
+    ON_CALL(mockAgent, getContext())
+        .WillByDefault(ReturnRef(mockAgent.defaultCtx));
     ON_CALL(mockAgent, resolvePath(_))
         .WillByDefault(Invoke([](const std::string &path) { return path; }));
   }
@@ -281,6 +300,9 @@ protected:
   NiceMock<MockAgent> mockAgent;
 
   void SetUp() override {
+    mockAgent.defaultCtx.permissions.allowedPaths = {"/tmp"};
+    ON_CALL(mockAgent, getContext())
+        .WillByDefault(ReturnRef(mockAgent.defaultCtx));
     ON_CALL(mockAgent, resolvePath(_))
         .WillByDefault(Invoke([](const std::string &path) { return path; }));
   }
@@ -344,15 +366,17 @@ protected:
   ProcessExecuteTool tool;
   NiceMock<MockHost> mockHost;
   NiceMock<MockAgent> mockAgent;
-  AgentContext agentContext;
 
   void SetUp() override {
-    agentContext.environment.cwd = "/tmp/work";
-    ON_CALL(mockAgent, getContext()).WillByDefault(ReturnRef(agentContext));
+    mockAgent.defaultCtx.environment.cwd = "/tmp/work";
+    mockAgent.defaultCtx.permissions.allowedPaths = {"/tmp/work"};
+    ON_CALL(mockAgent, getContext())
+        .WillByDefault(ReturnRef(mockAgent.defaultCtx));
     ON_CALL(mockAgent, getMutableContext())
-        .WillByDefault(ReturnRef(agentContext));
+        .WillByDefault(ReturnRef(mockAgent.defaultCtx));
     ON_CALL(mockAgent, isInterrupted()).WillByDefault(Return(false));
-    ON_CALL(mockAgent, resolvePath(_)).WillByDefault(Invoke([](const std::string& path) { return path; }));
+    ON_CALL(mockAgent, resolvePath(_))
+        .WillByDefault(Invoke([](const std::string &path) { return path; }));
   }
 };
 
@@ -400,16 +424,16 @@ protected:
   ListDirectoryTool tool;
   NiceMock<MockHost> mockHost;
   NiceMock<MockAgent> mockAgent;
-  AgentContext agentContext;
 
   void SetUp() override {
-    agentContext.environment.cwd = "/tmp/work";
-    agentContext.permissions.allowOutsideCwd = false;
-    agentContext.permissions.allowedPaths = {"/work"};
+    mockAgent.defaultCtx.environment.cwd = "/tmp/work";
+    mockAgent.defaultCtx.permissions.allowOutsideCwd = false;
+    mockAgent.defaultCtx.permissions.allowedPaths = {"/work"};
 
-    ON_CALL(mockAgent, getContext()).WillByDefault(ReturnRef(agentContext));
+    ON_CALL(mockAgent, getContext())
+        .WillByDefault(ReturnRef(mockAgent.defaultCtx));
     ON_CALL(mockAgent, getMutableContext())
-        .WillByDefault(ReturnRef(agentContext));
+        .WillByDefault(ReturnRef(mockAgent.defaultCtx));
     ON_CALL(mockAgent, resolvePath(_))
         .WillByDefault(Invoke([](const std::string &path) {
           if (path.starts_with("/"))
@@ -420,8 +444,8 @@ protected:
 };
 
 TEST_F(ListDirectoryToolTest, allowedPaths_enforced) {
-  agentContext.permissions.allowedPaths = {};
-  agentContext.permissions.allowOutsideCwd = false;
+  mockAgent.defaultCtx.permissions.allowedPaths = {};
+  mockAgent.defaultCtx.permissions.allowOutsideCwd = false;
 
   auto json = createJsonInput({{"path", "/etc"}});
   ToolContext ctx{mockHost, mockAgent, "test_call"};

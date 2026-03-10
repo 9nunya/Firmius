@@ -1,5 +1,6 @@
 #include "components/FileReadToolBlock.hpp"
 #include "components/LogWindow.hpp"
+#include <algorithm>
 #include <ftxui/dom/elements.hpp>
 #include <rapidjson/document.h>
 #include <sstream>
@@ -72,12 +73,23 @@ ftxui::Component FileReadToolBlock(const std::shared_ptr<ToolCallView> &view) {
 
     // ── Finished + success: code window ──
     std::string content = view->result;
-    {
-      rapidjson::Document res;
-      res.Parse(view->result.c_str());
-      if (!res.HasParseError() && res.IsObject() && res.HasMember("content") &&
-          res["content"].IsString()) {
+    rapidjson::Document res;
+    res.Parse(view->result.c_str());
+    int meta_line_start = start_line;
+    int meta_line_end = end_line;
+    bool read_full = false;
+    if (!res.HasParseError() && res.IsObject()) {
+      if (res.HasMember("content") && res["content"].IsString()) {
         content = res["content"].GetString();
+      }
+      if (res.HasMember("line_start") && res["line_start"].IsInt()) {
+        meta_line_start = res["line_start"].GetInt();
+      }
+      if (res.HasMember("line_end") && res["line_end"].IsInt()) {
+        meta_line_end = res["line_end"].GetInt();
+      }
+      if (res.HasMember("read_full") && res["read_full"].IsBool()) {
+        read_full = res["read_full"].GetBool();
       }
     }
 
@@ -102,8 +114,8 @@ ftxui::Component FileReadToolBlock(const std::shared_ptr<ToolCallView> &view) {
 
     int lines_to_show =
         view->show_result ? total_lines : std::min(preview_count, total_lines);
-    int line_num_start = (start_line != -1) ? start_line : 1;
-
+    int line_num_start = (meta_line_start != -1) ? meta_line_start : 1;
+    
     std::vector<ftxui::Element> code_lines;
     for (int i = 0; i < lines_to_show; i++) {
       int ln = line_num_start + i;
@@ -122,8 +134,19 @@ ftxui::Component FileReadToolBlock(const std::shared_ptr<ToolCallView> &view) {
           ftxui::dim);
     }
 
-    // Footer
-    std::string footer = "read " + path_arg;
+    std::string effective_path = path_arg.empty() ? "<path>" : path_arg;
+    int effective_end = meta_line_end;
+    if (effective_end < line_num_start) {
+      effective_end = line_num_start + total_lines - 1;
+    }
+    std::string footer;
+    if (read_full && !effective_path.empty()) {
+      footer = "Fully read " + effective_path;
+    } else {
+      footer = "Read " + effective_path + " (" +
+               std::to_string(line_num_start) + "-" +
+               std::to_string(std::max(line_num_start, effective_end)) + ")";
+    }
 
     std::vector<ftxui::Element> rows;
     rows.push_back(LogWindow(code_lines, footer, view->toggle_label));

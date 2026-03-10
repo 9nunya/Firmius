@@ -22,6 +22,20 @@ target_link_libraries(antigravity_provider_audit PRIVATE
     firmius::shared
 )
 
+add_executable(subagent_stress_audit subagent_stress_audit.cpp)
+target_link_libraries(subagent_stress_audit PRIVATE
+    firmius::core
+    firmius::provider
+    firmius::shared
+)
+
+add_executable(test_permissions test_permissions.cpp)
+target_link_libraries(test_permissions PRIVATE
+    firmius::core
+    firmius::provider
+    firmius::shared
+)
+
 add_executable(codex_provider_audit codex_provider_audit.cpp)
 target_link_libraries(codex_provider_audit PRIVATE
     firmius::core
@@ -88,6 +102,8 @@ target_link_libraries(codex_quota_audit PRIVATE
 target_include_directories(firmius_core_audit PRIVATE ${rapidjson_SOURCE_DIR}/include)
 target_include_directories(p15_audit PRIVATE ${rapidjson_SOURCE_DIR}/include)
 target_include_directories(antigravity_provider_audit PRIVATE ${rapidjson_SOURCE_DIR}/include)
+target_include_directories(subagent_stress_audit PRIVATE ${rapidjson_SOURCE_DIR}/include)
+target_include_directories(test_permissions PRIVATE ${rapidjson_SOURCE_DIR}/include)
 target_include_directories(antigravity_quota_audit PRIVATE ${rapidjson_SOURCE_DIR}/include)
 target_include_directories(codex_provider_audit PRIVATE ${rapidjson_SOURCE_DIR}/include)
 target_include_directories(codex_quota_audit PRIVATE ${rapidjson_SOURCE_DIR}/include)

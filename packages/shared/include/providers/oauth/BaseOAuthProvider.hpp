@@ -22,6 +22,7 @@ public:
   // IProvider interface overrides
   // ------------------------------------------------------------------------
   std::string getId() const override;
+  ProviderType getProviderType() const override;
   bool supportsStreamUsage() const;
 
   // Abstract definitions remaining from IProvider (subclasses must implement):

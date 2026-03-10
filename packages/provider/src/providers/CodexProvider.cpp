@@ -1,20 +1,20 @@
 #include "providers/CodexProvider.hpp"
 #include "utils/GCPHttpClient.hpp"
-#include "utils/TempOAuthServer.hpp"
 #include "utils/StringUtil.hpp"
-#include <rapidjson/document.h>
-#include <rapidjson/stringbuffer.h>
-#include <rapidjson/writer.h>
+#include "utils/TempOAuthServer.hpp"
 #include <algorithm>
-#include <atomic>
 #include <array>
-#include <chrono>
-#include <cstdint>
+#include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <iomanip>
 #include <optional>
 #include <random>
+#include <rapidjson/document.h>
+#include <rapidjson/stringbuffer.h>
+#include <rapidjson/writer.h>
 #include <sstream>
 #include <string_view>
 #include <thread>
@@ -44,7 +44,7 @@ constexpr char kDefaultInstructions[] =
 constexpr std::uint32_t kDefaultContextWindow = 272000;
 constexpr int kQuotaRefreshSeconds = 3600;
 constexpr int kAccountRetryLimit = 5;
-constexpr int kRateLimitBackoffSeconds = 3600;
+constexpr int kRateLimitBackoffSeconds = 60;
 
 struct RetrySettings {
   static constexpr int BASE_DELAY_MS = 1000;
@@ -104,8 +104,8 @@ std::string urlEncode(const std::string &value) {
     if (isUnreservedChar(static_cast<char>(c))) {
       escaped << c;
     } else {
-      escaped << '%' << std::uppercase << std::setw(2)
-              << static_cast<int>(c) << std::nouppercase;
+      escaped << '%' << std::uppercase << std::setw(2) << static_cast<int>(c)
+              << std::nouppercase;
     }
   }
   return escaped.str();
@@ -532,8 +532,7 @@ void appendMessageInput(rapidjson::Value &input,
       item.AddMember("type", rapidjson::Value(textType.c_str(), a), a);
       item.AddMember("text", rapidjson::Value(txt->text.c_str(), a), a);
       content.PushBack(item, a);
-    } else if (auto *img =
-                   std::get_if<firmius::shared::ImageContent>(&part)) {
+    } else if (auto *img = std::get_if<firmius::shared::ImageContent>(&part)) {
       rapidjson::Value item(rapidjson::kObjectType);
       item.AddMember("type", "input_image", a);
       rapidjson::Value urlObj(rapidjson::kObjectType);
@@ -559,8 +558,8 @@ void appendMessageInput(rapidjson::Value &input,
 void appendToolCallInput(rapidjson::Value &input,
                          const firmius::shared::ToolCallContent &call,
                          rapidjson::Document::AllocatorType &a) {
-  std::string callId = call.id.empty() ? firmius::shared::StringUtil::generateUuid()
-                                       : call.id;
+  std::string callId =
+      call.id.empty() ? firmius::shared::StringUtil::generateUuid() : call.id;
   rapidjson::Value item(rapidjson::kObjectType);
   item.AddMember("type", "function_call", a);
   item.AddMember("call_id", rapidjson::Value(callId.c_str(), a), a);
@@ -627,9 +626,9 @@ void addUsageToMetrics(const rapidjson::Value &usage,
   else
     metrics.tokens.prompt = contextSize;
   metrics.tokens.cumulativePrompt = metrics.tokens.prompt;
-  metrics.tokens.total = totalTokens ? totalTokens
-                                     : (metrics.tokens.prompt +
-                                        metrics.tokens.completion);
+  metrics.tokens.total =
+      totalTokens ? totalTokens
+                  : (metrics.tokens.prompt + metrics.tokens.completion);
 
   if (usage.HasMember("output_tokens_details") &&
       usage["output_tokens_details"].IsObject()) {
@@ -679,8 +678,7 @@ std::string buildRequestBody(const firmius::shared::AgentHistory &history,
       appendMessageInput(input, msg, a);
 
       for (const auto &part : msg.content) {
-        if (auto *call =
-                std::get_if<firmius::shared::ToolCallContent>(&part)) {
+        if (auto *call = std::get_if<firmius::shared::ToolCallContent>(&part)) {
           appendToolCallInput(input, *call, a);
         }
       }
@@ -727,8 +725,8 @@ std::string buildRequestBody(const firmius::shared::AgentHistory &history,
 
   if (!variant.verbosity.empty()) {
     rapidjson::Value text(rapidjson::kObjectType);
-    text.AddMember("verbosity",
-                   rapidjson::Value(variant.verbosity.c_str(), a), a);
+    text.AddMember("verbosity", rapidjson::Value(variant.verbosity.c_str(), a),
+                   a);
     d.AddMember("text", text, a);
   }
 
@@ -742,21 +740,21 @@ std::string buildRequestBody(const firmius::shared::AgentHistory &history,
   return buffer.GetString();
 }
 
-}
+} // namespace
 
 class CodexOAuthWizard : public OAuthWizard {
 public:
   explicit CodexOAuthWizard(CodexProvider *provider)
       : provider_(provider), verifier_(generateVerifier()),
         challenge_(generateCodeChallenge(verifier_)),
-        state_(StringUtil::generateUuid()),
-        server_(1455, "/auth/callback") {
+        state_(StringUtil::generateUuid()), server_(1455, "/auth/callback") {
     std::string url = buildAuthorizeUrl(state_, challenge_);
     prompt_ = "Please open this URL in your browser:\n\n" + url +
               "\n\nWaiting for authorization response...";
     server_.startAsync(
         "<html><body><h1>Firmius Temp Server</h1><p>Authentication complete! "
-        "You may now close this window and return to Firmius.</p></body></html>");
+        "You may now close this window and return to "
+        "Firmius.</p></body></html>");
   }
 
   std::optional<WizardPrompt> nextPrompt() override {
@@ -789,9 +787,8 @@ public:
 
     auto resp = client.post(kTokenUrl, body, 20);
     if (resp.code != 200) {
-      outErrorMessage =
-          "Token exchange failed: HTTP " + std::to_string(resp.code) + " " +
-          resp.body;
+      outErrorMessage = "Token exchange failed: HTTP " +
+                        std::to_string(resp.code) + " " + resp.body;
       return false;
     }
 
@@ -840,80 +837,93 @@ std::map<std::string, ModelInfo> CodexProvider::getStaticModels() {
   std::vector<ModelVariant> gpt52Variants = {
       {"none", R"({"effort":"none","summary":"auto","verbosity":"medium"})"},
       {"low", R"({"effort":"low","summary":"auto","verbosity":"medium"})"},
-      {"medium", R"({"effort":"medium","summary":"auto","verbosity":"medium"})"},
-      {"high", R"({"effort":"high","summary":"detailed","verbosity":"medium"})"},
-      {"xhigh", R"({"effort":"xhigh","summary":"detailed","verbosity":"medium"})"}};
+      {"medium",
+       R"({"effort":"medium","summary":"auto","verbosity":"medium"})"},
+      {"high",
+       R"({"effort":"high","summary":"detailed","verbosity":"medium"})"},
+      {"xhigh",
+       R"({"effort":"xhigh","summary":"detailed","verbosity":"medium"})"}};
 
   std::vector<ModelVariant> gpt52CodexVariants = {
       {"low", R"({"effort":"low","summary":"auto","verbosity":"medium"})"},
-      {"medium", R"({"effort":"medium","summary":"auto","verbosity":"medium"})"},
-      {"high", R"({"effort":"high","summary":"detailed","verbosity":"medium"})"},
-      {"xhigh", R"({"effort":"xhigh","summary":"detailed","verbosity":"medium"})"}};
+      {"medium",
+       R"({"effort":"medium","summary":"auto","verbosity":"medium"})"},
+      {"high",
+       R"({"effort":"high","summary":"detailed","verbosity":"medium"})"},
+      {"xhigh",
+       R"({"effort":"xhigh","summary":"detailed","verbosity":"medium"})"}};
 
   std::vector<ModelVariant> codexMaxVariants = {
       {"low", R"({"effort":"low","summary":"detailed","verbosity":"medium"})"},
-      {"medium", R"({"effort":"medium","summary":"detailed","verbosity":"medium"})"},
-      {"high", R"({"effort":"high","summary":"detailed","verbosity":"medium"})"},
-      {"xhigh", R"({"effort":"xhigh","summary":"detailed","verbosity":"medium"})"}};
+      {"medium",
+       R"({"effort":"medium","summary":"detailed","verbosity":"medium"})"},
+      {"high",
+       R"({"effort":"high","summary":"detailed","verbosity":"medium"})"},
+      {"xhigh",
+       R"({"effort":"xhigh","summary":"detailed","verbosity":"medium"})"}};
 
   std::vector<ModelVariant> codexVariants = {
       {"low", R"({"effort":"low","summary":"auto","verbosity":"medium"})"},
-      {"medium", R"({"effort":"medium","summary":"auto","verbosity":"medium"})"},
-      {"high", R"({"effort":"high","summary":"detailed","verbosity":"medium"})"}};
+      {"medium",
+       R"({"effort":"medium","summary":"auto","verbosity":"medium"})"},
+      {"high",
+       R"({"effort":"high","summary":"detailed","verbosity":"medium"})"}};
 
   std::vector<ModelVariant> codexMiniVariants = {
-      {"medium", R"({"effort":"medium","summary":"auto","verbosity":"medium"})"},
-      {"high", R"({"effort":"high","summary":"detailed","verbosity":"medium"})"}};
+      {"medium",
+       R"({"effort":"medium","summary":"auto","verbosity":"medium"})"},
+      {"high",
+       R"({"effort":"high","summary":"detailed","verbosity":"medium"})"}};
 
   std::vector<ModelVariant> gpt51Variants = {
       {"none", R"({"effort":"none","summary":"auto","verbosity":"medium"})"},
       {"low", R"({"effort":"low","summary":"auto","verbosity":"low"})"},
-      {"medium", R"({"effort":"medium","summary":"auto","verbosity":"medium"})"},
+      {"medium",
+       R"({"effort":"medium","summary":"auto","verbosity":"medium"})"},
       {"high", R"({"effort":"high","summary":"detailed","verbosity":"high"})"}};
 
-  return {
-      {"gpt-5.2",
-       {.id = "gpt-5.2",
-        .provider = kProviderId,
-        .contextWindow = kDefaultContextWindow,
-        .modalities = {"text", "image"},
-        .variants = gpt52Variants,
-        .supportsReasoning = true}},
-      {"gpt-5.2-codex",
-       {.id = "gpt-5.2-codex",
-        .provider = kProviderId,
-        .contextWindow = kDefaultContextWindow,
-        .modalities = {"text", "image"},
-        .variants = gpt52CodexVariants,
-        .supportsReasoning = true}},
-      {"gpt-5.1-codex-max",
-       {.id = "gpt-5.1-codex-max",
-        .provider = kProviderId,
-        .contextWindow = kDefaultContextWindow,
-        .modalities = {"text", "image"},
-        .variants = codexMaxVariants,
-        .supportsReasoning = true}},
-      {"gpt-5.1-codex",
-       {.id = "gpt-5.1-codex",
-        .provider = kProviderId,
-        .contextWindow = kDefaultContextWindow,
-        .modalities = {"text", "image"},
-        .variants = codexVariants,
-        .supportsReasoning = true}},
-      {"gpt-5.1-codex-mini",
-       {.id = "gpt-5.1-codex-mini",
-        .provider = kProviderId,
-        .contextWindow = kDefaultContextWindow,
-        .modalities = {"text", "image"},
-        .variants = codexMiniVariants,
-        .supportsReasoning = true}},
-      {"gpt-5.1",
-       {.id = "gpt-5.1",
-        .provider = kProviderId,
-        .contextWindow = kDefaultContextWindow,
-        .modalities = {"text", "image"},
-        .variants = gpt51Variants,
-        .supportsReasoning = true}}};
+  return {{"gpt-5.2",
+           {.id = "gpt-5.2",
+            .provider = kProviderId,
+            .contextWindow = kDefaultContextWindow,
+            .modalities = {"text", "image"},
+            .variants = gpt52Variants,
+            .supportsReasoning = true}},
+          {"gpt-5.2-codex",
+           {.id = "gpt-5.2-codex",
+            .provider = kProviderId,
+            .contextWindow = kDefaultContextWindow,
+            .modalities = {"text", "image"},
+            .variants = gpt52CodexVariants,
+            .supportsReasoning = true}},
+          {"gpt-5.1-codex-max",
+           {.id = "gpt-5.1-codex-max",
+            .provider = kProviderId,
+            .contextWindow = kDefaultContextWindow,
+            .modalities = {"text", "image"},
+            .variants = codexMaxVariants,
+            .supportsReasoning = true}},
+          {"gpt-5.1-codex",
+           {.id = "gpt-5.1-codex",
+            .provider = kProviderId,
+            .contextWindow = kDefaultContextWindow,
+            .modalities = {"text", "image"},
+            .variants = codexVariants,
+            .supportsReasoning = true}},
+          {"gpt-5.1-codex-mini",
+           {.id = "gpt-5.1-codex-mini",
+            .provider = kProviderId,
+            .contextWindow = kDefaultContextWindow,
+            .modalities = {"text", "image"},
+            .variants = codexMiniVariants,
+            .supportsReasoning = true}},
+          {"gpt-5.1",
+           {.id = "gpt-5.1",
+            .provider = kProviderId,
+            .contextWindow = kDefaultContextWindow,
+            .modalities = {"text", "image"},
+            .variants = gpt51Variants,
+            .supportsReasoning = true}}};
 }
 
 std::vector<ModelInfo> CodexProvider::listModels() {
@@ -1014,8 +1024,8 @@ CodexProvider::getAllQuotas() const {
   return result;
 }
 
-std::optional<OAuthAccount *> CodexProvider::getAvailableAccount(
-    const std::optional<std::string> &modelId) {
+std::optional<OAuthAccount *>
+CodexProvider::getAvailableAccount(const std::optional<std::string> &modelId) {
   std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
   if (accounts_.empty())
     return std::nullopt;
@@ -1025,7 +1035,10 @@ std::optional<OAuthAccount *> CodexProvider::getAvailableAccount(
     group = getQuotaKey(*modelId);
 
   int64_t now = nowSeconds();
-  int startIdx = (lastUsedIndex_ + 1) % static_cast<int>(accounts_.size());
+  int startIdx = (lastUsedIndex_ >= 0) ? lastUsedIndex_ : 0;
+  if (startIdx >= static_cast<int>(accounts_.size())) {
+    startIdx = 0;
+  }
   int currentIdx = startIdx;
 
   if (!group.empty()) {
@@ -1038,8 +1051,7 @@ std::optional<OAuthAccount *> CodexProvider::getAvailableAccount(
         auto it = acc.metadata.find("quota:" + group);
         if (it != acc.metadata.end()) {
           try {
-            float remaining =
-                normalizeQuotaFraction(std::stod(it->second));
+            float remaining = normalizeQuotaFraction(std::stod(it->second));
             hasQuota = remaining > 0.01f;
           } catch (...) {
             hasQuota = true;
@@ -1048,6 +1060,7 @@ std::optional<OAuthAccount *> CodexProvider::getAvailableAccount(
         if (hasQuota) {
           if (!isTokenExpired(acc) || refreshAccessToken(acc)) {
             lastUsedIndex_ = currentIdx;
+            saveAccounts();
             return &acc;
           }
         }
@@ -1098,7 +1111,7 @@ std::string CodexProvider::normalizeModelId(const std::string &modelId) {
 std::string CodexProvider::resolveEffort(const std::string &modelId) {
   std::string lower = StringUtil::toLower(modelId);
   const std::vector<std::string> efforts = {"xhigh", "high", "medium",
-                                            "low", "none", "minimal"};
+                                            "low",   "none", "minimal"};
   for (const auto &effort : efforts) {
     std::string token = "-" + effort;
     if (lower.find(token) != std::string::npos)
@@ -1145,8 +1158,7 @@ size_t CodexProvider::sseWriteCallback(char *ptr, size_t size, size_t nmemb,
     if (line.empty())
       continue;
 
-    auto *tracker =
-        static_cast<CodexProvider::ToolCallTracker *>(ctx->tracker);
+    auto *tracker = static_cast<CodexProvider::ToolCallTracker *>(ctx->tracker);
     ctx->provider->processSseLine(std::string(line), *(ctx->onEvent),
                                   *(ctx->metrics), *(ctx->metricsReceived),
                                   *(ctx->doneReceived), *tracker);
@@ -1244,8 +1256,7 @@ void CodexProvider::processSseLine(
       if (tracker.indexByItemId.count(itemId))
         outputIndex = tracker.indexByItemId[itemId];
     }
-    if (outputIndex >= 0 && doc.HasMember("delta") &&
-        doc["delta"].IsString()) {
+    if (outputIndex >= 0 && doc.HasMember("delta") && doc["delta"].IsString()) {
       auto it = tracker.byIndex.find(outputIndex);
       ToolCallChunk chunk;
       if (it != tracker.byIndex.end())
@@ -1272,14 +1283,45 @@ void CodexProvider::processSseLine(
   }
 }
 
-void CodexProvider::stream(
-    const AgentHistory &history, const ProviderOptions &opts,
-    std::function<void(const StreamEvent &)> onEvent) {
+void CodexProvider::stream(const AgentHistory &history,
+                           const ProviderOptions &opts,
+                           std::function<void(const StreamEvent &)> onEvent) {
   int accountRetries = 0;
   std::string lastAccountLocator;
   while (accountRetries < kAccountRetryLimit) {
     auto optAcc = getAvailableAccount(opts.modelId);
     if (!optAcc) {
+      // All accounts rate-limited: find the one closest to unlocking
+      int64_t now = nowSeconds();
+      int64_t earliestUnlock = 0;
+      for (const auto &a : accounts_) {
+        if (a.rateLimited) {
+          if (earliestUnlock == 0 || a.backoffUntil < earliestUnlock)
+            earliestUnlock = a.backoffUntil;
+        }
+      }
+      int64_t waitSec = (earliestUnlock > now) ? (earliestUnlock - now) : 0;
+      if (waitSec > 120)
+        waitSec = 120;
+      if (waitSec > 0) {
+        onEvent(StreamRetrying{accountRetries + 1, kAccountRetryLimit, 429,
+                               static_cast<int>(waitSec * 1000),
+                               "All accounts rate-limited, waiting",
+                               lastAccountLocator});
+        std::this_thread::sleep_for(std::chrono::seconds(waitSec));
+        int64_t nowAfter = nowSeconds();
+        for (auto &a : accounts_) {
+          if (a.rateLimited && nowAfter > a.backoffUntil) {
+            a.rateLimited = false;
+            for (auto &[k, v] : a.metadata) {
+              if (k.rfind("quota:", 0) == 0 && v == "0")
+                v = "1";
+            }
+          }
+        }
+        accountRetries++;
+        continue;
+      }
       onEvent(StreamError{"No accounts available.", -1, ""});
       return;
     }
@@ -1316,8 +1358,8 @@ void CodexProvider::stream(
     variant.effort = effort;
 
     if (variant.summary.empty()) {
-      variant.summary = (effort == "high" || effort == "xhigh") ? "detailed"
-                                                                  : "auto";
+      variant.summary =
+          (effort == "high" || effort == "xhigh") ? "detailed" : "auto";
     }
     if (variant.verbosity.empty())
       variant.verbosity = "medium";
@@ -1351,12 +1393,13 @@ void CodexProvider::stream(
       }
 
       if (accountId.empty()) {
-        onEvent(StreamError{"Missing ChatGPT account id.", 0,
-                            acc.getIdentifier()});
+        onEvent(
+            StreamError{"Missing ChatGPT account id.", 0, acc.getIdentifier()});
         return;
       }
 
-      std::string body = buildRequestBody(history, opts, effectiveModel, variant);
+      std::string body =
+          buildRequestBody(history, opts, effectiveModel, variant);
 
       GCPHttpClient client("firmius-codex/1.0");
       client.setBearerToken(acc.accessToken);
@@ -1394,12 +1437,18 @@ void CodexProvider::stream(
       };
 
       std::function<void(const StreamEvent &)> wrappedFn = wrappedOnEvent;
-      StreamContext ctx{this,          &wrappedFn,       "", 0,
-                        opts.abortSignal, &capturedMetrics, &metricsReceived,
-                        &doneReceived, static_cast<void *>(&tracker)};
+      StreamContext ctx{this,
+                        &wrappedFn,
+                        "",
+                        0,
+                        opts.abortSignal,
+                        &capturedMetrics,
+                        &metricsReceived,
+                        &doneReceived,
+                        static_cast<void *>(&tracker)};
 
-      auto resp = client.streamPost(std::string(kBaseUrl) + kResponsesPath, body,
-                                    sseWriteCallback, &ctx);
+      auto resp = client.streamPost(std::string(kBaseUrl) + kResponsesPath,
+                                    body, sseWriteCallback, &ctx);
 
       if (opts.abortSignal && opts.abortSignal->load()) {
         onEvent(StreamDone{StopReason::Cancelled});
@@ -1414,9 +1463,8 @@ void CodexProvider::stream(
         auto endMs = nowMs();
         if (metricsReceived) {
           capturedMetrics.timing.startMs = startMs;
-          capturedMetrics.timing.firstTokenMs = firstTokenEmitted
-                                                    ? firstTokenMs
-                                                    : static_cast<uint64_t>(0);
+          capturedMetrics.timing.firstTokenMs =
+              firstTokenEmitted ? firstTokenMs : static_cast<uint64_t>(0);
           capturedMetrics.timing.endMs = endMs;
           onEvent(capturedMetrics);
         }
@@ -1428,15 +1476,16 @@ void CodexProvider::stream(
         return;
       }
 
+      int backoff = std::min(60, 1 << accountRetries);
       if (code == 401 || code == 403) {
-        markAccountRateLimited(acc, kRateLimitBackoffSeconds);
+        markAccountRateLimited(acc, backoff);
         break;
       }
 
       if (code == 402 || code == 429) {
         acc.metadata["quota:" + getQuotaKey(effectiveModel)] = "0";
         saveAccounts();
-        markAccountRateLimited(acc, kRateLimitBackoffSeconds);
+        markAccountRateLimited(acc, backoff);
         break;
       }
 
@@ -1475,4 +1524,4 @@ void CodexProvider::generateSummary(
   stream(history, opts, onEvent);
 }
 
-}
+} // namespace firmius::provider

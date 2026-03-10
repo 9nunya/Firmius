@@ -13,8 +13,10 @@ struct AgentStripItem {
   std::string title;
   std::string purpose;
   std::string status_text;
-  float context_percent;
-  bool is_busy;
+  float context_percent = 0.0f;
+  bool is_busy = false;
+  bool is_focused = false;
+  int tool_call_count = 0;
 };
 
 struct AgentStripModel {

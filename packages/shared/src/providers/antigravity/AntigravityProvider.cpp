@@ -276,14 +276,24 @@ std::optional<OAuthAccount *> AntigravityProvider::getAvailableAccount(
   int64_t now = std::chrono::duration_cast<std::chrono::seconds>(
                     std::chrono::system_clock::now().time_since_epoch())
                     .count();
-  int startIdx = (lastUsedIndex_ + 1) % static_cast<int>(accounts_.size());
+  int startIdx = (lastUsedIndex_ >= 0) ? lastUsedIndex_ : 0;
+  if (startIdx >= static_cast<int>(accounts_.size())) {
+    startIdx = 0;
+  }
   int currentIdx = startIdx;
 
   if (group != "unknown") {
     do {
       auto &acc = accounts_[currentIdx];
-      if (acc.rateLimited && now > acc.backoffUntil)
+      if (acc.rateLimited && now > acc.backoffUntil) {
         acc.rateLimited = false;
+        // Reset stale quota metadata so the account is not skipped again
+        for (auto it = acc.metadata.begin(); it != acc.metadata.end(); ++it) {
+          if (it->first.rfind("quota:", 0) == 0 && it->second == "0") {
+            it->second = "1";
+          }
+        }
+      }
       if (!acc.rateLimited) {
         bool hasQuota = false;
         for (const auto &[key, val] : acc.metadata) {
@@ -319,6 +329,7 @@ std::optional<OAuthAccount *> AntigravityProvider::getAvailableAccount(
         if (hasQuota) {
           if (!isTokenExpired(acc) || refreshAccessToken(acc)) {
             lastUsedIndex_ = currentIdx;
+            saveAccounts();
             return &acc;
           }
         }
@@ -444,10 +455,48 @@ void AntigravityProvider::stream(
   int accountRetries = 0;
   std::string lastError;
   std::string lastAccountEmail;
-  int maxRetries = std::max(5, static_cast<int>(accounts_.size()) * 2);
+  int maxRetries = std::max(5, static_cast<int>(accounts_.size()) * 3);
   while (accountRetries < maxRetries) {
     auto optAcc = getAvailableAccount(opts.modelId);
     if (!optAcc) {
+      // All accounts rate-limited: find the one closest to unlocking
+      int64_t now = std::chrono::duration_cast<std::chrono::seconds>(
+                        std::chrono::system_clock::now().time_since_epoch())
+                        .count();
+      int64_t earliestUnlock = 0;
+      for (const auto &a : accounts_) {
+        if (a.rateLimited) {
+          if (earliestUnlock == 0 || a.backoffUntil < earliestUnlock)
+            earliestUnlock = a.backoffUntil;
+        }
+      }
+      int64_t waitSec = (earliestUnlock > now) ? (earliestUnlock - now) : 0;
+      if (waitSec > 120)
+        waitSec = 120; // cap at 2 minutes
+      if (waitSec > 0) {
+        onEvent(StreamRetrying{accountRetries + 1, maxRetries, 429,
+                               static_cast<int>(waitSec * 1000),
+                               "All accounts rate-limited, waiting",
+                               lastAccountEmail});
+        std::this_thread::sleep_for(std::chrono::seconds(waitSec));
+        // Clear expired backoffs after sleeping
+        int64_t nowAfter =
+            std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::system_clock::now().time_since_epoch())
+                .count();
+        for (auto &a : accounts_) {
+          if (a.rateLimited && nowAfter > a.backoffUntil) {
+            a.rateLimited = false;
+            for (auto &[k, v] : a.metadata) {
+              if (k.rfind("quota:", 0) == 0 && v == "0")
+                v = "1";
+            }
+          }
+        }
+        accountRetries++;
+        continue;
+      }
+      // Nothing to wait for
       if (!lastError.empty()) {
         onEvent(StreamError{lastError, -1, lastAccountEmail});
       } else {
@@ -572,7 +621,8 @@ void AntigravityProvider::stream(
         } else {
           lastError = "Rate limited (HTTP " + std::to_string(resp.code) + ")";
         }
-        markAccountRateLimited(acc, 3600);
+        int backoff = std::min(60, 1 << accountRetries);
+        markAccountRateLimited(acc, backoff);
         break;
       }
       if (resp.code < 500 && resp.code != 408 && resp.code != 0) {

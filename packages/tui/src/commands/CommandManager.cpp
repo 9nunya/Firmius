@@ -61,6 +61,8 @@ CommandManager::getAutocomplete(const std::string &input) {
   }
 
   AutocompleteState state;
+  state.current_arg_value.clear();
+  state.has_current_arg_value = false;
   std::string content = input.substr(1);
 
   size_t space_pos = content.find(' ');
@@ -96,6 +98,13 @@ CommandManager::getAutocomplete(const std::string &input) {
     const auto &schema_args = it->second->args();
     if (current_arg_index < schema_args.size()) {
       state.current_arg = schema_args[current_arg_index];
+      if (current_arg_index < tokens.size()) {
+        state.current_arg_value = tokens[current_arg_index];
+        state.has_current_arg_value = true;
+      } else {
+        state.current_arg_value.clear();
+        state.has_current_arg_value = false;
+      }
     }
   }
 

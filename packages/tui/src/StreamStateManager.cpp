@@ -222,6 +222,11 @@ void StreamStateManager::handleAgentSpawned(
     } else {
       pair.second->subagent_title = e.personaName;
     }
+    if (!e.friendlyName.empty()) {
+      pair.second->subagent_slug = e.friendlyName;
+    } else {
+      pair.second->subagent_slug = e.agentId;
+    }
     break;
   }
   (void)focused_agent_id;

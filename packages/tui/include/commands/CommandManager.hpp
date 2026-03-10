@@ -24,6 +24,8 @@ struct AutocompleteState {
   // Valid when typing arguments for a matched command
   std::string active_command_name;
   std::optional<CommandArg> current_arg;
+  std::string current_arg_value;
+  bool has_current_arg_value = false;
 };
 
 class CommandManager {

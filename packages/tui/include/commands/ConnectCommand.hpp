@@ -11,7 +11,7 @@ public:
     return "Connect to an OAuth provider (e.g. /connect antigravity)";
   }
   std::vector<CommandArg> args() const override {
-    return {{"provider", ArgType::String,
+    return {{"provider", ArgType::OAuthProvider,
              "The name of the provider to connect to", false}};
   }
   void execute(CommandCtx &ctx, const std::vector<ParsedArg> &args) override;

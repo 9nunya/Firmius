@@ -35,6 +35,7 @@ public:
     BaseOpenAIProvider(std::string id, const std::string& baseUrl, const std::string& apiKey);
     
     std::string getId() const override { return providerId; }
+    ProviderType getProviderType() const override;
 
     void stream(const AgentHistory& history, const ProviderOptions& opts, 
                 std::function<void(const StreamEvent&)> onEvent) override;

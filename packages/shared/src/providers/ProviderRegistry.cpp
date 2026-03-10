@@ -31,4 +31,14 @@ std::vector<std::string> ProviderRegistry::listProviderIds() const {
     return ids;
 }
 
+std::vector<std::shared_ptr<IProvider>> ProviderRegistry::listProviders() const {
+    std::lock_guard<std::mutex> lock(mutex);
+    std::vector<std::shared_ptr<IProvider>> list;
+    list.reserve(providers.size());
+    for (const auto& [_, provider] : providers) {
+        list.push_back(provider);
+    }
+    return list;
+}
+
 }

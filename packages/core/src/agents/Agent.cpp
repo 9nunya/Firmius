@@ -41,7 +41,10 @@ Agent::Agent(AgentContext ctx, std::unique_ptr<shared::IHost> h,
   if (!provider)
     throw std::runtime_error("Unknown provider: " + context.config.providerId);
 
-  debugPrettyPrint = (std::getenv("FIRMIUS_PRETTY_PRINT") != nullptr);
+  permissionChecks =
+      std::make_unique<firmius::core::AgentPermissionChecks>(context);
+
+  debugPrettyPrint = (std::getenv("FIRMIUS_NO_PRETTY_PRINT") == nullptr);
 
   if (debugPrettyPrint) {
     std::cout << "AGENT INITIATED! INFO:\n";
@@ -249,6 +252,9 @@ void Agent::run(const std::string &task,
   bool taskFinished = false;
   int maxTurns = context.config.maxTurns > 0 ? context.config.maxTurns : 200;
   int turnCount = 0;
+
+  int consecutiveProviderFailures = 0;
+  const int maxProviderRetries = 3;
 
   while (!taskFinished && turnCount < maxTurns && !interrupted.load()) {
     // --- CHECK FOR CONTEXT COMPACTION ---
@@ -493,11 +499,30 @@ void Agent::run(const std::string &task,
       if (debugPrettyPrint)
         std::cout << "\n";
 
-      // If there was a stream error and no content came back, treat as error
+      // If there was a stream error and no content came back, retry
       if (!streamError.empty() && fullResponse.empty() &&
           accumulatedToolChunks.empty()) {
-        throw std::runtime_error("Provider stream error: " + streamError);
+        consecutiveProviderFailures++;
+        if (consecutiveProviderFailures > maxProviderRetries) {
+          throw std::runtime_error("Provider stream error: " + streamError);
+        }
+        // Emit retry event and wait briefly before retrying
+        int retryDelaySec = 1 << (consecutiveProviderFailures - 1); // 1, 2, 4
+        if (debugPrettyPrint) {
+          std::cerr << "\033[1;33m[Provider error ("
+                    << consecutiveProviderFailures << "/" << maxProviderRetries
+                    << "): " << streamError << " — retrying in "
+                    << retryDelaySec << "s]\033[0m\n";
+        }
+        onEvent(StreamRetrying{consecutiveProviderFailures, maxProviderRetries,
+                               429, retryDelaySec * 1000,
+                               "Provider error, retrying", ""});
+        std::this_thread::sleep_for(std::chrono::seconds(retryDelaySec));
+        continue;
       }
+
+      // Reset consecutive failure counter on success
+      consecutiveProviderFailures = 0;
 
       // --- Build assistant turn ---
       AgentTurn assistantTurn;

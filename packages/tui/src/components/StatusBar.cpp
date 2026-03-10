@@ -3,10 +3,57 @@
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/component_base.hpp>
 #include <ftxui/dom/elements.hpp>
+#include <vector>
 
 namespace firmius::tui {
 
 namespace {
+
+struct StatusVisualConfig {
+  ftxui::Color badge_bg;
+  ftxui::Color badge_fg;
+  std::vector<ftxui::Color> gradient_colors;
+  bool use_gradient = true;
+};
+
+[[maybe_unused]] StatusVisualConfig BuildStatusVisualConfig(const std::string &mode) {
+  StatusVisualConfig config;
+  config.badge_bg = ftxui::Color::RGB(80, 80, 120);
+  config.badge_fg = ftxui::Color::RGB(220, 220, 255);
+  config.gradient_colors = {ftxui::Color::RGB(90, 100, 150),
+                             ftxui::Color::RGB(180, 190, 220)};
+  config.use_gradient = true;
+
+  if (mode == "streaming" || mode == "executing_tool") {
+    config.badge_bg = ftxui::Color::RGB(40, 140, 80);
+    config.badge_fg = ftxui::Color::RGB(220, 255, 220);
+    config.gradient_colors = {ftxui::Color::RGB(32, 110, 70),
+                               ftxui::Color::RGB(106, 220, 150)};
+  } else if (mode == "idle") {
+    config.badge_bg = ftxui::Color::RGB(60, 60, 100);
+    config.badge_fg = ftxui::Color::RGB(180, 180, 220);
+    config.gradient_colors = {ftxui::Color::RGB(60, 60, 100),
+                               ftxui::Color::RGB(100, 110, 160)};
+    config.use_gradient = false;
+  } else if (mode == "awaiting_input") {
+    config.badge_bg = ftxui::Color::RGB(60, 60, 100);
+    config.badge_fg = ftxui::Color::RGB(200, 200, 240);
+    config.gradient_colors = {ftxui::Color::RGB(70, 80, 130),
+                               ftxui::Color::RGB(160, 180, 230)};
+  } else if (mode == "error" || mode == "cancelled") {
+    config.badge_bg = ftxui::Color::RGB(160, 50, 50);
+    config.badge_fg = ftxui::Color::RGB(255, 200, 200);
+    config.gradient_colors.clear();
+    config.use_gradient = false;
+  } else if (mode == "provider_waiting" || mode == "compacting") {
+    config.badge_bg = ftxui::Color::RGB(140, 120, 40);
+    config.badge_fg = ftxui::Color::RGB(255, 240, 180);
+    config.gradient_colors = {ftxui::Color::RGB(120, 110, 50),
+                               ftxui::Color::RGB(245, 220, 110)};
+  }
+
+  return config;
+}
 
 class StatusBarComponentBase : public ftxui::ComponentBase {
 public:
@@ -96,42 +143,33 @@ private:
                          cfg);
 
     std::string mode = model_->status_text;
-    ftxui::Color badge_bg = ftxui::Color::RGB(80, 80, 120);
-    ftxui::Color badge_fg = ftxui::Color::RGB(220, 220, 255);
-    if (mode == "streaming" || mode == "executing_tool") {
-      badge_bg = ftxui::Color::RGB(40, 140, 80);
-      badge_fg = ftxui::Color::RGB(220, 255, 220);
-    } else if (mode == "idle" || mode == "awaiting_input") {
-      badge_bg = ftxui::Color::RGB(60, 60, 100);
-      badge_fg = ftxui::Color::RGB(180, 180, 220);
-    } else if (mode == "error" || mode == "cancelled") {
-      badge_bg = ftxui::Color::RGB(160, 50, 50);
-      badge_fg = ftxui::Color::RGB(255, 200, 200);
-    } else if (mode == "provider_waiting" || mode == "compacting") {
-      badge_bg = ftxui::Color::RGB(140, 120, 40);
-      badge_fg = ftxui::Color::RGB(255, 240, 180);
-    }
+    auto visual = BuildStatusVisualConfig(mode);
     std::string mode_upper;
     for (char c : mode)
       mode_upper += static_cast<char>(toupper(c));
 
-    if (mode_upper == "IDLE")
-      glint_badge_ = ftxui::Renderer([=] {
+    bool has_gradient = visual.use_gradient &&
+                        visual.gradient_colors.size() >= 2;
+    bool should_glint = has_gradient && mode_upper != "IDLE";
+    if (!should_glint) {
+      glint_badge_ = ftxui::Renderer([visual, mode_upper] {
         return ftxui::text(" " + mode_upper + " ") | ftxui::bold |
-               ftxui::color(badge_fg) | ftxui::bgcolor(badge_bg);
+               ftxui::color(visual.badge_fg) |
+               ftxui::bgcolor(visual.badge_bg);
       });
-    else {
+    } else {
       GlintConfig cfg_badge;
       cfg_badge.target = GlintConfig::Target::Background;
-      cfg_badge.gradientColors = {badge_bg, badge_fg};
+      cfg_badge.gradientColors = visual.gradient_colors;
       cfg_badge.glintSize = 14;
       cfg_badge.intervalSeconds = 3;
       cfg_badge.durationSeconds = 3;
       cfg_badge.easing = GlintEasing::EaseInOut;
-      glint_badge_ =
-          GlintEffect(ftxui::text(" " + mode_upper + " ") | ftxui::bold |
-                          ftxui::color(badge_fg) | ftxui::bgcolor(badge_bg),
-                      cfg_badge);
+      glint_badge_ = GlintEffect(
+          ftxui::text(" " + mode_upper + " ") | ftxui::bold |
+              ftxui::color(visual.badge_fg) |
+              ftxui::bgcolor(visual.badge_bg),
+          cfg_badge);
     }
   }
 

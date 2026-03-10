@@ -1,6 +1,9 @@
 #include "components/InputBar.hpp"
 #include "commands/CommandManager.hpp"
+#include "providers/ProviderRegistry.hpp"
 #include <algorithm>
+#include <cctype>
+#include <vector>
 #include <ftxui/component/component.hpp>
 #include <ftxui/dom/elements.hpp>
 
@@ -69,6 +72,82 @@ static std::string getUtf8Char(const std::string &str, size_t pos) {
   else if ((c & 0xF8) == 0xF0)
     len = 4;
   return str.substr(pos, std::min(len, str.size() - pos));
+}
+
+namespace {
+
+constexpr size_t MAX_PROVIDER_SUGGESTIONS = 6;
+
+std::string toLowerAscii(std::string value) {
+  std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+    return static_cast<char>(std::tolower(c));
+  });
+  return value;
+}
+
+bool fuzzyMatchIgnoreCase(const std::string &text, const std::string &query) {
+  if (query.empty())
+    return true;
+  auto comp = [](char lhs, char rhs) {
+    return std::tolower(static_cast<unsigned char>(lhs)) ==
+           std::tolower(static_cast<unsigned char>(rhs));
+  };
+  return std::search(text.begin(), text.end(), query.begin(), query.end(), comp) !=
+         text.end();
+}
+
+std::string providerTypeLabel(firmius::provider::ProviderType type) {
+  using Ptr = firmius::provider::ProviderType;
+  switch (type) {
+  case Ptr::OAuth:
+    return "OAuth";
+  case Ptr::APIKey:
+    return "API key";
+  }
+  return "Provider";
+}
+
+struct ProviderSuggestion {
+  std::string id;
+  std::string type_label;
+  bool is_prefix = false;
+};
+
+std::vector<ProviderSuggestion>
+buildProviderSuggestions(ArgType argType, const std::string &filter) {
+  std::vector<ProviderSuggestion> matches;
+  auto providers =
+      firmius::provider::ProviderRegistry::instance().listProviders();
+  std::string lower_filter = toLowerAscii(filter);
+  for (const auto &provider : providers) {
+    if (!provider)
+      continue;
+    auto type = provider->getProviderType();
+    if (argType == ArgType::OAuthProvider &&
+        type != firmius::provider::ProviderType::OAuth) {
+      continue;
+    }
+    const std::string id = provider->getId();
+    if (!filter.empty() && !fuzzyMatchIgnoreCase(id, filter)) {
+      continue;
+    }
+    std::string lower_id = toLowerAscii(id);
+    bool prefix = !lower_filter.empty() && lower_id.rfind(lower_filter, 0) == 0;
+    matches.push_back({id, providerTypeLabel(type), prefix});
+  }
+
+  std::sort(matches.begin(), matches.end(), [](const ProviderSuggestion &lhs,
+                                               const ProviderSuggestion &rhs) {
+    if (lhs.is_prefix != rhs.is_prefix)
+      return lhs.is_prefix;
+    return lhs.id < rhs.id;
+  });
+
+  if (matches.size() > MAX_PROVIDER_SUGGESTIONS)
+    matches.resize(MAX_PROVIDER_SUGGESTIONS);
+  return matches;
+}
+
 }
 
 ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
@@ -200,8 +279,9 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
       autocomplete_layer = ftxui::vbox(match_elements) | ftxui::borderEmpty |
                            ftxui::bgcolor(ftxui::Color::RGB(40, 40, 60));
     } else if (ac && !ac->is_typing_command_name && ac->current_arg) {
+      const auto &arg = *ac->current_arg;
       std::string type_str;
-      switch (ac->current_arg->type) {
+      switch (arg.type) {
       case ArgType::String:
         type_str = "String";
         break;
@@ -217,17 +297,63 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
       case ArgType::Filepath:
         type_str = "Filepath";
         break;
+      case ArgType::Provider:
+        type_str = "Provider";
+        break;
+      case ArgType::OAuthProvider:
+        type_str = "OAuth provider";
+        break;
       }
 
-      autocomplete_layer =
-          ftxui::hbox(
-              {ftxui::text(ac->current_arg->name) | ftxui::bold |
-                   ftxui::color(ftxui::Color::Cyan),
-               ftxui::text(" [" + type_str +
-                           (ac->current_arg->optional ? ", opt" : "") + "] ") |
-                   ftxui::dim,
-               ftxui::text(ac->current_arg->description)}) |
-          ftxui::borderEmpty | ftxui::bgcolor(ftxui::Color::RGB(40, 40, 60));
+      auto header = ftxui::hbox({
+                          ftxui::text(arg.name) | ftxui::bold |
+                              ftxui::color(ftxui::Color::Cyan),
+                          ftxui::text(" [" + type_str +
+                                      (arg.optional ? ", opt" : "") + "] ") |
+                              ftxui::dim,
+                          ftxui::text(arg.description)}) |
+                    ftxui::borderEmpty;
+
+      const bool wants_provider_suggestions =
+          arg.type == ArgType::Provider || arg.type == ArgType::OAuthProvider;
+      if (wants_provider_suggestions) {
+        std::string query = ac->has_current_arg_value ?
+                                ac->current_arg_value :
+                                std::string();
+        auto suggestions = buildProviderSuggestions(arg.type, query);
+        ftxui::Element suggestion_body;
+        if (!suggestions.empty()) {
+          ftxui::Elements rows;
+          for (size_t i = 0; i < suggestions.size(); ++i) {
+            const auto &match = suggestions[i];
+            auto label = ftxui::text(" " + match.id) | ftxui::bold;
+            if (i == 0)
+              label = label | ftxui::inverted;
+            auto meta = ftxui::text(" [" + match.type_label + "]") |
+                        ftxui::dim;
+            rows.push_back(ftxui::hbox({label, ftxui::filler(), meta}) |
+                           ftxui::borderEmpty);
+          }
+          suggestion_body = ftxui::vbox(rows) | ftxui::yframe |
+                            ftxui::borderRounded |
+                            ftxui::color(ftxui::Color::GrayLight);
+        } else {
+          std::string message = query.empty()
+                                    ? "No providers are registered yet."
+                                    : "No providers match '" + query + "'";
+          suggestion_body = ftxui::text(message) | ftxui::dim | ftxui::center;
+        }
+
+        autocomplete_layer = ftxui::vbox(
+                                     {header, ftxui::separatorLight(),
+                                      suggestion_body}) |
+                             ftxui::borderEmpty |
+                             ftxui::bgcolor(ftxui::Color::RGB(40, 40, 60));
+      } else {
+        autocomplete_layer = header |
+                             ftxui::borderEmpty |
+                             ftxui::bgcolor(ftxui::Color::RGB(40, 40, 60));
+      }
     }
 
     // For short inputs, render normally and naturally let ftxui handle cursor

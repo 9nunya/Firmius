@@ -61,8 +61,16 @@ public:
                           static_cast<int>(item.context_percent * 100)) +
                       "%") |
           ftxui::color(ctx_color);
-      rows.push_back(ftxui::hbox({bullet, title_el, purpose, ftxui::filler(),
-                                  state, ftxui::text(" "), ctx_pct}));
+      auto tool_badge = ftxui::text(" tools:" +
+                                  std::to_string(item.tool_call_count)) |
+                        ftxui::dim | ftxui::color(ftxui::Color::GrayLight);
+      ftxui::Color row_bg = ftxui::Color::RGB(20, 20, 40);
+      if (item.is_focused) {
+        row_bg = ftxui::Color::RGB(45, 75, 190);
+      }
+      auto row = ftxui::hbox({bullet, title_el, purpose, ftxui::filler(),
+                              state, ftxui::text(" "), tool_badge, ctx_pct});
+      rows.push_back(row | ftxui::bgcolor(row_bg));
     }
     return ftxui::vbox(std::move(rows)) |
            ftxui::bgcolor(ftxui::Color::RGB(20, 20, 40));

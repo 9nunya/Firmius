@@ -48,23 +48,36 @@ static ftxui::Component SubagentWaitBlock(const std::shared_ptr<ToolCallView> &v
   glint_cfg.durationSeconds = 1.2f;
   glint_cfg.easing = GlintEasing::EaseInOut;
 
-  std::string agent_id;
+  std::string parsed_agent_id;
+  std::string parsed_title;
   if (view && !view->args.empty()) {
     rapidjson::Document doc;
     doc.Parse(view->args.c_str());
-    if (!doc.HasParseError() && doc.IsObject() && doc.HasMember("agent_id") && doc["agent_id"].IsString()) {
-      agent_id = doc["agent_id"].GetString();
+    if (!doc.HasParseError() && doc.IsObject()) {
+      if (doc.HasMember("agent_id") && doc["agent_id"].IsString()) {
+        parsed_agent_id = doc["agent_id"].GetString();
+      }
+      if (doc.HasMember("title") && doc["title"].IsString()) {
+        parsed_title = doc["title"].GetString();
+      }
     }
   }
 
   auto glint = GlintEffect(
-    ftxui::text("Awaiting subagent " + agent_id),
+    ftxui::text("Awaiting subagent " +
+               (view->subagent_title.empty() ? parsed_title : view->subagent_title) +
+               " (" +
+               (!view->subagent_slug.empty() ? view->subagent_slug
+                                              : (parsed_agent_id.empty() ?
+                                                     view->agentId
+                                                     : parsed_agent_id)) +
+               ")"),
     glint_cfg
   );
 
   auto full_container = ftxui::Container::Vertical({container, glint});
 
-  return ftxui::Renderer(full_container, [view, toggle, glint, agent_id] {
+  return ftxui::Renderer(full_container, [view, toggle, glint] {
     if (!view) return ftxui::text("[subagent_wait] <null>") | ftxui::dim;
 
     if (view->phase == ToolPhase::Preparing || view->phase == ToolPhase::Called) {

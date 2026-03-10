@@ -1,19 +1,20 @@
 #include "EnvLoader.hpp"
+#include "utils/Logger.hpp"
+
 #include <fstream>
 #include <sstream>
 #include <cstdlib>
 #include <algorithm>
-#include <iostream>
 
 namespace firmius::shared {
 
 void EnvLoader::load(const std::string& filePath) {
     std::ifstream file(filePath);
     if (!file.is_open()) {
-        std::cerr << "[EnvLoader] Warning: Could not open " << filePath << std::endl;
+        Logger::instance().logWarning("[EnvLoader] Warning: Could not open " + filePath);
         return;
     }
-    std::cout << "[EnvLoader] Loading environment from " << filePath << std::endl;
+    Logger::instance().logInfo("[EnvLoader] Loading environment from " + filePath);
 
     std::string line;
     while (std::getline(file, line)) {

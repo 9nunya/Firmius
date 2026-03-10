@@ -6,6 +6,7 @@
 #include "Events.hpp"
 
 #include <atomic>
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <optional>
@@ -18,6 +19,8 @@
 namespace firmius::provider {
 
 using namespace firmius::shared;
+
+enum class ProviderType : std::uint8_t { OAuth, APIKey };
 
 /**
  * @brief Schema definition for an LLM-compatible tool.
@@ -48,9 +51,9 @@ struct ProviderOptions {
  * @brief Interface for a specific LLM backend (e.g., OpenAI, Anthropic,
  * OpenRouter).
  */
-class IProvider {
-public:
-  virtual ~IProvider() = default;
+  class IProvider {
+  public:
+    virtual ~IProvider() = default;
 
   /**
    * @brief Returns the unique identifier for this provider.
@@ -68,8 +71,8 @@ public:
 
   /**
    * @brief Discovers and lists available models from this provider.
-   * @return A list of supported models.
-   */
+    * @return A list of supported models.
+    */
   virtual std::vector<ModelInfo> listModels() = 0;
 
   /**
@@ -88,11 +91,16 @@ public:
 
   /**
    * @brief Returns the current quotas/limits for this provider.
-   * @return A map of quota names to values (e.g., "remainingFraction" as
-   * string).
-   */
-  virtual std::map<std::string, std::string> getQuotas() const { return {}; }
-};
+    * @return A map of quota names to values (e.g., "remainingFraction" as
+    * string).
+    */
+    virtual std::map<std::string, std::string> getQuotas() const { return {}; }
+
+    /**
+     * @brief Returns the type of authentication this provider uses.
+     */
+    virtual ProviderType getProviderType() const = 0;
+  };
 
 } // namespace firmius::provider
 

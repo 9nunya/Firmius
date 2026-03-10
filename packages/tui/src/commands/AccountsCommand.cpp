@@ -7,11 +7,11 @@ namespace firmius::tui {
 
 void AccountsCommand::execute(CommandCtx &ctx,
                               const std::vector<ParsedArg> &args) {
-  std::string providerId = "antigravity";
-  if (!args.empty() && !args[0].raw_value.empty()) {
-    providerId = args[0].asString();
+  if (args.empty() || args[0].raw_value.empty()) {
+    return;
   }
 
+  std::string providerId = args[0].asString();
   auto modalObj = std::make_shared<AccountsModal>(providerId);
   ctx.state->openModalDirect(modalObj->create(*ctx.state));
 }

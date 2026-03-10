@@ -59,27 +59,32 @@ public:
 
     float start_x = static_cast<float>(box_.x_min - 1);
     float end_x = static_cast<float>(box_.x_max + config_.glintSize);
-
     float exact_pos = start_x + (end_x - start_x) * progress_;
-    int leading_x = static_cast<int>(std::round(exact_pos));
+
+    float half_span = static_cast<float>(config_.glintSize) / 2.0f;
+    float min_center = exact_pos - half_span;
+    float max_center = exact_pos + half_span;
 
     for (int y = box_.y_min; y <= box_.y_max; ++y) {
-      for (int i = 0; i < config_.glintSize; ++i) {
-        int x = leading_x - i;
-        if (x >= box_.x_min && x <= box_.x_max) {
-          float color_t = 0.0f;
-          if (config_.glintSize > 1) {
-            color_t = static_cast<float>(i) / (config_.glintSize - 1);
-          }
+      int min_x = static_cast<int>(std::floor(min_center));
+      int max_x = static_cast<int>(std::ceil(max_center));
+      for (int x = min_x; x <= max_x; ++x) {
+        if (x < box_.x_min || x > box_.x_max) continue;
 
-          ftxui::Color c = InterpolateGradient(config_.gradientColors, color_t);
+        float distance = std::abs(exact_pos - static_cast<float>(x));
+        float color_t = 0.0f;
+        if (half_span > 0.0f) {
+          color_t = 1.0f - std::min(distance / half_span, 1.0f);
+        }
 
-          auto& pixel = screen.PixelAt(x, y);
-          if (config_.target == GlintConfig::Target::Text) {
-            pixel.foreground_color = c;
-          } else {
-            pixel.background_color = c;
-          }
+        if (color_t <= 0.0f) continue;
+        ftxui::Color c = InterpolateGradient(config_.gradientColors, color_t);
+
+        auto& pixel = screen.PixelAt(x, y);
+        if (config_.target == GlintConfig::Target::Text) {
+          pixel.foreground_color = c;
+        } else {
+          pixel.background_color = c;
         }
       }
     }

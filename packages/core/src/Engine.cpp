@@ -32,6 +32,7 @@
 #include "tools/SubagentWaitTool.hpp"
 #include "tools/WebFetchTool.hpp"
 #include "utils/StringUtil.hpp"
+#include "utils/HistoryMetrics.hpp"
 #include <Panic.hpp>
 #include <algorithm>
 #include <future>
@@ -310,6 +311,7 @@ std::string Engine::resumeAgent(const std::string &threadId,
   ctx.environment.identifier = metadata.hostIdentifier;
   ctx.environment.type = metadata.hostOptions.type;
   ctx.history = std::make_shared<AgentHistory>(std::move(history));
+  ctx.aggregateMetrics = aggregateHistoryMetrics(*ctx.history);
 
   std::unique_ptr<IHost> host;
   if (metadata.hostOptions.type == HostType::Docker) {

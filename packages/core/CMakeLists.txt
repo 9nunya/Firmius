@@ -25,6 +25,8 @@ target_sources(firmius_core PRIVATE
     src/tools/ProcessInputTool.cpp
     src/agents/PurposeLoader.cpp
     src/agents/Agent.cpp
+    src/agents/AgentPermissionChecks.cpp
+    src/agents/AgentPermissionChecks.cpp
     src/persistence/Journaler.cpp
     src/persistence/ThreadManager.cpp
     src/persistence/HistoryEditor.cpp
@@ -60,6 +62,8 @@ target_sources(firmius_core PUBLIC
     include/tools/ProcessInputTool.hpp
     include/agents/PurposeLoader.hpp
     include/agents/Agent.hpp
+    include/agents/AgentPermissionChecks.hpp
+    include/agents/AgentPermissionChecks.hpp
     include/persistence/Journaler.hpp
     include/persistence/ThreadManager.hpp
     include/persistence/HistoryEditor.hpp

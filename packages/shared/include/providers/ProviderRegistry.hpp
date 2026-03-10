@@ -6,6 +6,7 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <vector>
 
 namespace firmius::provider {
 
@@ -37,6 +38,7 @@ public:
      * @brief Lists all registered provider IDs.
      */
     std::vector<std::string> listProviderIds() const;
+    std::vector<std::shared_ptr<IProvider>> listProviders() const;
 
 private:
     ProviderRegistry() = default;

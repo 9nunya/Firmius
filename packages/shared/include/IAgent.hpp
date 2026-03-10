@@ -8,6 +8,12 @@
 #include <map>
 #include <string>
 
+namespace firmius {
+namespace core {
+class AgentPermissionChecks;
+}
+} // namespace firmius
+
 namespace firmius::shared {
 
 /**
@@ -42,6 +48,8 @@ public:
    * @return The agent context.
    */
   virtual AgentContext &getMutableContext() = 0;
+
+  virtual firmius::core::AgentPermissionChecks &getPermissionChecks() const = 0;
 
   /**
    * @brief Resolves a path relative to the agent's CWD.

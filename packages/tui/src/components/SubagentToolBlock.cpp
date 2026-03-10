@@ -147,6 +147,17 @@ ftxui::Component SubagentToolBlock(const std::shared_ptr<ToolCallView> &view) {
 
         rows.push_back(LogWindow(result_lines, footer));
       }
+
+      if (!view->subagent_tool_log.empty()) {
+        std::vector<ftxui::Element> log_lines;
+        for (const auto &entry : view->subagent_tool_log) {
+          log_lines.push_back(ftxui::text(entry) | ftxui::dim);
+        }
+        std::string log_footer = title + " log";
+        if (!persona.empty())
+          log_footer += " (" + persona + ")";
+        rows.push_back(LogWindow(log_lines, log_footer));
+      }
     } else {
       // Error state
       std::string error_msg = view->result;

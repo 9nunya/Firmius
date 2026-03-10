@@ -1,5 +1,6 @@
 #include "tools/ProcessExecuteTool.hpp"
 #include "IAgent.hpp"
+#include "agents/AgentPermissionChecks.hpp"
 #include "utils/FSUtil.hpp"
 #include <chrono>
 #include <optional>
@@ -38,17 +39,7 @@ shared::ToolResult ProcessExecuteTool::execute(const ProcessExecuteInput &input,
     // Normalize path first
     effectiveCwd = ctx.agent.resolvePath(effectiveCwd);
 
-    // Security check
-    bool allowed = false;
-    for (const auto& p : ctx.agent.getContext().permissions.allowedPaths) {
-        if (shared::FSUtil::isSubpath(effectiveCwd, p)) {
-            allowed = true;
-            break;
-        }
-    }
-    if (!allowed && !ctx.agent.getContext().permissions.allowOutsideCwd) {
-        return shared::ToolResult::fail("Access denied: cwd outside allowed directories: " + effectiveCwd);
-    }
+    ctx.agent.getPermissionChecks().validatePathAccess(effectiveCwd);
 
     processId = ctx.agent.spawnProcess(input.command, ctx.currentToolCallId,
                                        effectiveCwd, {});
@@ -87,7 +78,7 @@ shared::ToolResult ProcessExecuteTool::execute(const ProcessExecuteInput &input,
       auto now = std::chrono::steady_clock::now();
       auto elapsed =
           std::chrono::duration_cast<std::chrono::milliseconds>(now - start)
-               .count();
+              .count();
       if (elapsed > timeoutMs) {
         ctx.agent.removeBlockingProcessId(processId);
 
@@ -110,7 +101,7 @@ shared::ToolResult ProcessExecuteTool::execute(const ProcessExecuteInput &input,
 
       std::this_thread::sleep_for(sleepDuration);
       if (sleepDuration < maxSleep) {
-          sleepDuration = std::min(maxSleep, sleepDuration * 2);
+        sleepDuration = std::min(maxSleep, sleepDuration * 2);
       }
     }
 

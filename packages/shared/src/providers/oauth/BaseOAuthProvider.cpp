@@ -44,6 +44,10 @@ bool BaseOAuthProvider::supportsStreamUsage() const {
   return true; // Assume standard streaming by default
 }
 
+firmius::provider::ProviderType BaseOAuthProvider::getProviderType() const {
+  return firmius::provider::ProviderType::OAuth;
+}
+
 bool BaseOAuthProvider::isTokenExpired(const OAuthAccount &acc) const {
   // Treat as expired if we are within 5 minutes of expiration
   return getNowSeconds() >= (acc.tokenExpiration - 300);
@@ -62,7 +66,10 @@ std::optional<OAuthAccount *> BaseOAuthProvider::getAvailableAccount(
     return std::nullopt;
   }
 
-  int startIdx = (lastUsedIndex_ + 1) % static_cast<int>(accounts_.size());
+  int startIdx = (lastUsedIndex_ >= 0) ? lastUsedIndex_ : 0;
+  if (startIdx >= static_cast<int>(accounts_.size())) {
+    startIdx = 0;
+  }
   int currentIdx = startIdx;
   int64_t now = getNowSeconds();
 
@@ -72,12 +79,19 @@ std::optional<OAuthAccount *> BaseOAuthProvider::getAvailableAccount(
     // Reset rate limit if backoff expired
     if (acc.rateLimited && now > acc.backoffUntil) {
       acc.rateLimited = false;
+      // Reset stale quota metadata so the account is not skipped again
+      for (auto &[k, v] : acc.metadata) {
+        if (k.rfind("quota:", 0) == 0 && v == "0") {
+          v = "1";
+        }
+      }
     }
 
     if (!acc.rateLimited) {
       // Un-expired or we can refresh it successfully
       if (!isTokenExpired(acc) || refreshAccessToken(acc)) {
         lastUsedIndex_ = currentIdx;
+        saveAccounts();
         return &acc;
       }
     }
@@ -115,6 +129,10 @@ void BaseOAuthProvider::loadAccounts() {
 
   if (doc.HasParseError() || !doc.IsObject())
     return;
+
+  if (doc.HasMember("lastUsedIndex") && doc["lastUsedIndex"].IsInt()) {
+    lastUsedIndex_ = doc["lastUsedIndex"].GetInt();
+  }
 
   if (doc.HasMember(providerId_.c_str()) &&
       doc[providerId_.c_str()].IsArray()) {
@@ -207,6 +225,11 @@ void BaseOAuthProvider::saveAccounts() {
   }
   doc.AddMember(rapidjson::Value(providerId_.c_str(), doc.GetAllocator()), arr,
                 doc.GetAllocator());
+
+  if (doc.HasMember("lastUsedIndex")) {
+    doc.RemoveMember("lastUsedIndex");
+  }
+  doc.AddMember("lastUsedIndex", lastUsedIndex_, doc.GetAllocator());
 
   rapidjson::StringBuffer buffer;
   rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);

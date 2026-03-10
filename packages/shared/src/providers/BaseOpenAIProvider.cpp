@@ -77,6 +77,10 @@ BaseOpenAIProvider::BaseOpenAIProvider(std::string id,
                                        const std::string &apiKey)
     : providerId(std::move(id)), baseUrl(baseUrl), apiKey(apiKey) {}
 
+firmius::provider::ProviderType BaseOpenAIProvider::getProviderType() const {
+  return ProviderType::APIKey;
+}
+
 std::uint64_t BaseOpenAIProvider::nowMs() {
   return static_cast<std::uint64_t>(
       std::chrono::duration_cast<std::chrono::milliseconds>(

@@ -7,8 +7,10 @@ target_sources(firmius_shared PRIVATE
     src/Panic.cpp
     src/utils/JSONSchema.cpp
     src/utils/StringUtil.cpp
+    src/utils/HistoryMetrics.cpp
     src/utils/FSUtil.cpp
     src/utils/Hashline.cpp
+    src/utils/Logger.cpp
     src/utils/ToolSummaries.cpp
     src/utils/TempOAuthServer.cpp
     src/utils/GCPHttpClient.cpp
@@ -42,8 +44,10 @@ target_sources(firmius_shared PUBLIC
     include/HarnessEvents.hpp
     include/utils/JSONSchema.hpp
     include/utils/StringUtil.hpp
+    include/utils/HistoryMetrics.hpp
     include/utils/FSUtil.hpp
     include/utils/Hashline.hpp
+    include/utils/Logger.hpp
     include/utils/ToolSummaries.hpp
     include/utils/ToolView.hpp
     include/utils/TempOAuthServer.hpp

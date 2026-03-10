@@ -5,6 +5,7 @@
 #include "IAgent.hpp"
 #include "IHost.hpp"
 #include "IProvider.hpp"
+#include "agents/AgentPermissionChecks.hpp"
 #include "persistence/Journaler.hpp"
 #include "tools/ToolRegistry.hpp"
 
@@ -65,6 +66,9 @@ public:
   AgentContext &getMutableContext() override { return context; }
   std::string resolvePath(const std::string &inputPath) const override;
   std::shared_ptr<IHost> getHost() override { return host; }
+  firmius::core::AgentPermissionChecks &getPermissionChecks() const override {
+    return *permissionChecks;
+  }
 
 private:
   void compactContext(std::function<void(const shared::StreamEvent &)> onEvent);
@@ -85,6 +89,8 @@ private:
   std::function<void(const shared::StreamEvent &)> eventCallback;
   std::mutex callbackMutex;
   std::mutex blockingProcessMutex; // protects blockingProcessIds
+
+  std::unique_ptr<firmius::core::AgentPermissionChecks> permissionChecks;
 
   std::unordered_set<std::string> backgroundProcessIds;
 };

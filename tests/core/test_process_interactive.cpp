@@ -33,6 +33,7 @@ protected:
     ctx.environment.type = HostType::Local;
     ctx.environment.cwd = "/tmp";
     ctx.permissions.allowedScopes = {ToolScope::Process};
+    ctx.permissions.allowedPaths = {"/tmp"};
 
     // Registry and tools
     registry.registerTool(std::make_unique<ProcessSpawnTool>());

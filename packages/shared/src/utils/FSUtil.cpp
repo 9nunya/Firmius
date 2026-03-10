@@ -34,10 +34,13 @@ bool FSUtil::isSubpath(const std::string &path,
     normPath.pop_back();
   }
 
-  bool recursive = false;
   if (pattern.size() >= 3 && pattern.substr(pattern.size() - 3) == "/**") {
     pattern = pattern.substr(0, pattern.size() - 3);
-    recursive = true;
+  }
+
+  if (pattern.size() > 1 &&
+      pattern.back() == std::filesystem::path::preferred_separator) {
+    pattern.pop_back();
   }
 
   if (pattern.empty()) {
@@ -53,7 +56,7 @@ bool FSUtil::isSubpath(const std::string &path,
   if (normPath.size() > pattern.size() &&
       normPath.compare(0, pattern.size(), pattern) == 0 &&
       normPath[pattern.size()] == std::filesystem::path::preferred_separator) {
-    return recursive;
+    return true; // Any descendant is a valid subpath
   }
 
   return false;

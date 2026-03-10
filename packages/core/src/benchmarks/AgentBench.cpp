@@ -1,10 +1,11 @@
 #include "benchmarks/AgentBench.hpp"
+#include "utils/Logger.hpp"
 #include <curl/curl.h>
 #include <fstream>
-#include <iostream>
 #include <filesystem>
 #include <rapidjson/document.h>
 #include <regex>
+#include <sstream>
 #include <sys/stat.h>
 #include <unordered_set>
 #include <algorithm>
@@ -87,9 +88,9 @@ BenchmarkResult AgentBench::runTask(const std::string& taskId) {
 
     std::string answer = extractAgentAnswer();
     if (answer.empty()) {
-        std::cout << "DEBUG: Extracted answer is EMPTY" << std::endl;
+        Logger::instance().logDebug("DEBUG: Extracted answer is EMPTY");
     } else {
-        std::cout << "DEBUG: Extracted answer: '" << answer << "'" << std::endl;
+        Logger::instance().logDebug("DEBUG: Extracted answer: '" + answer + "'");
     }
 
     bool passed = false;
@@ -105,7 +106,8 @@ BenchmarkResult AgentBench::runTask(const std::string& taskId) {
 
     result.passed = passed;
     result.output = passed ? "Task passed" : "Task failed";
-    std::cout << "DEBUG: Evaluation result: " << (passed ? "PASSED" : "FAILED") << std::endl;
+    Logger::instance().logDebug("DEBUG: Evaluation result: " +
+                               std::string(passed ? "PASSED" : "FAILED"));
 
     return result;
 }
@@ -355,7 +357,7 @@ void AgentBench::terminateBackgroundProcesses() {
 std::string AgentBench::extractAgentAnswer() {
     const auto& turns = agent.getContext().history->turns;
     if (turns.empty()) {
-        std::cout << "DEBUG: No turns in history" << std::endl;
+        Logger::instance().logDebug("DEBUG: No turns in history");
         return "";
     }
 
