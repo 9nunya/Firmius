@@ -7,6 +7,8 @@
 #include "audits/HarnessChaosAudit.hpp"
 #include "audits/P15Audit.hpp"
 #include "audits/ProviderAudit.hpp"
+#include "audits/QwenProviderAudit.hpp"
+#include "audits/QwenQuotaAudit.hpp"
 #include "audits/SubagentStressAudit.hpp"
 
 namespace firmius::audits {
@@ -21,6 +23,8 @@ std::vector<std::unique_ptr<shared::IAudit>> createAudits() {
     audits.push_back(std::make_unique<AntigravityQuotaAudit>());
     audits.push_back(std::make_unique<CodexProviderAudit>());
     audits.push_back(std::make_unique<CodexQuotaAudit>());
+    audits.push_back(std::make_unique<QwenProviderAudit>());
+    audits.push_back(std::make_unique<QwenQuotaAudit>());
     audits.push_back(std::make_unique<HarnessChaosAudit>());
     return audits;
 }

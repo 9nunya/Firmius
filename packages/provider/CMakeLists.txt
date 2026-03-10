@@ -3,7 +3,7 @@ find_package(CURL REQUIRED)
 add_library(firmius_provider STATIC)
 add_library(firmius::provider ALIAS firmius_provider)
 
-target_sources(firmius_provider PRIVATE 
+target_sources(firmius_provider PRIVATE
     src/providers/CodexProvider.cpp
     src/providers/ChutesProvider.cpp
     src/providers/LMStudioProvider.cpp
@@ -16,9 +16,10 @@ target_sources(firmius_provider PRIVATE
     src/providers/AntigravityProvider.cpp
     src/providers/AntigravityProtocol.cpp
     src/providers/BaseOAuthProvider.cpp
+    src/providers/QwenProvider.cpp
 )
 
-target_sources(firmius_provider PUBLIC 
+target_sources(firmius_provider PUBLIC
   FILE_SET HEADERS
   BASE_DIRS include
   FILES
@@ -35,6 +36,7 @@ target_sources(firmius_provider PUBLIC
     include/providers/AntigravityProtocol.hpp
     include/providers/BaseOAuthProvider.hpp
     include/providers/OAuthWizard.hpp
+    include/providers/QwenProvider.hpp
 )
 
 target_include_directories(firmius_provider PUBLIC

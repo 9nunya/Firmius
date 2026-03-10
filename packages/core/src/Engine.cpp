@@ -13,6 +13,7 @@
 #include "providers/NanoGPTProvider.hpp"
 #include "providers/OpenRouterProvider.hpp"
 #include "providers/ProviderRegistry.hpp"
+#include "providers/QwenProvider.hpp"
 #include "providers/ZaiProvider.hpp"
 #include "providers/ZenProvider.hpp"
 #include "providers/AntigravityProvider.hpp"
@@ -88,6 +89,7 @@ void Engine::initProviders() {
   reg.registerProvider(std::make_shared<firmius::provider::CodexProvider>());
   reg.registerProvider(
       std::make_shared<firmius::provider::AntigravityProvider>());
+  reg.registerProvider(std::make_shared<firmius::provider::QwenProvider>());
 }
 
 void Engine::reap() { std::lock_guard<std::mutex> lock(listenerMutex); }
