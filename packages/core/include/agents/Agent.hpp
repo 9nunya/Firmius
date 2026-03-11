@@ -81,7 +81,6 @@ private:
   std::shared_ptr<shared::IHost> host;
   ToolRegistry &toolRegistry;
   std::shared_ptr<Journaler> journaler;
-  bool debugPrettyPrint = false;
   std::atomic<bool> interrupted{false};
   std::atomic<bool> running{false};
   std::atomic<bool> booting{false};

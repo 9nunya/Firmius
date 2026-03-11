@@ -11,6 +11,7 @@
 #include "audits/QwenProviderAudit.hpp"
 #include "audits/QwenQuotaAudit.hpp"
 #include "audits/SubagentStressAudit.hpp"
+#include "audits/WorkflowsAudit.hpp"
 
 namespace firmius::audits {
 
@@ -28,6 +29,7 @@ std::vector<std::unique_ptr<shared::IAudit>> createAudits() {
     audits.push_back(std::make_unique<QwenQuotaAudit>());
     audits.push_back(std::make_unique<HarnessChaosAudit>());
     audits.push_back(std::make_unique<OAuthWizardAudit>());
+    audits.push_back(std::make_unique<WorkflowsAudit>());
     return audits;
 }
 

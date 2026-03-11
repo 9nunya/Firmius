@@ -88,11 +88,6 @@ BenchmarkResult AgentBench::runTask(const std::string& taskId) {
     result.taskId = taskId;
 
     std::string answer = extractAgentAnswer();
-    if (answer.empty()) {
-        Logger::instance().logDebug("DEBUG: Extracted answer is EMPTY");
-    } else {
-        Logger::instance().logDebug("DEBUG: Extracted answer: '" + answer + "'");
-    }
 
     bool passed = false;
     if (task.HasMember("evaluation")) {

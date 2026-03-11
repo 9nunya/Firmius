@@ -170,7 +170,7 @@ private:
             auto e = ftxui::hbox(
                 {ftxui::text(prefix) | ftxui::bold | ftxui::color(prefixColor),
                  content | ftxui::flex});
-            return e | ftxui::size(ftxui::WIDTH, ftxui::LESS_THAN, 120);
+            return e | ftxui::flex;
           };
 
           for (const auto &part : msg.content) {

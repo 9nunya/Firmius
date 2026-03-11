@@ -9,13 +9,14 @@ ftxui::Component TitleBar(const std::shared_ptr<TitleBarModel>& model) {
         if (!model) {
             return ftxui::text("");
         }
-        return ftxui::vbox({
-            ftxui::hbox({
-                ftxui::text(" ") | ftxui::bgcolor(ftxui::Color::Cyan),
-                ftxui::text(" " + model->title + " ") | ftxui::bold | ftxui::color(ftxui::Color::Cyan),
-            }),
-            ftxui::separatorLight() | ftxui::color(ftxui::Color::Cyan) | ftxui::dim,
-        });
+        
+        // Compact title bar - single line with minimal decoration
+        auto title_el = ftxui::text(" " + model->title + " ") | 
+                        ftxui::bold | ftxui::color(ftxui::Color::Cyan);
+        
+        return ftxui::hbox({
+            title_el | ftxui::flex,
+        }) | ftxui::bgcolor(ftxui::Color::RGB(30, 30, 50));
     });
 }
 

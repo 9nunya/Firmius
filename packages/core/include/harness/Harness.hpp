@@ -88,6 +88,17 @@ public:
   void send(const std::string &text);
 
   /**
+   * Execute a workflow by ID with the provided arguments.
+   * Loads the workflow, replaces $1, $2, etc. placeholders with args,
+   * and sends the resulting prompt to the focused agent.
+   * @param workflowId The workflow ID (filename without extension).
+   * @param args Vector of argument values to substitute.
+   * @return true if the workflow was executed, false if workflow not found.
+   */
+  bool executeWorkflow(const std::string &workflowId,
+                       const std::vector<std::string> &args);
+
+  /**
    * Aborts the current agent's blocking process and interrupts the agent.
    * - Kills currentBlockingProcessId if set in OS
    * - Calls agent->interrupt()

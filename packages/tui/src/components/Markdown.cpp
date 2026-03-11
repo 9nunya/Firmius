@@ -8,6 +8,11 @@
 
 namespace firmius::tui {
 
+// Global width constraint for markdown rendering (set before rendering)
+static thread_local int g_markdown_width = 0;
+
+void SetMarkdownWidth(int width) { g_markdown_width = width; }
+
 static std::vector<std::string> splitLines(const std::string &text) {
   std::vector<std::string> lines;
   std::stringstream ss(text);
@@ -61,7 +66,75 @@ static std::vector<std::string> splitTableRow(const std::string &line) {
   return cells;
 }
 
-static std::vector<std::string> wrapTokens(const std::string &text) {
+// Wrap text into lines that fit within max_width
+static std::vector<std::string> wrapTextToWidth(const std::string &text, int max_width) {
+  std::vector<std::string> result;
+  if (max_width <= 0) max_width = 80;
+  
+  std::string current_line;
+  std::string current_word;
+  
+  auto flush_word = [&]() {
+    if (current_word.empty()) return;
+    if (current_line.empty()) {
+      current_line = current_word;
+    } else if (current_line.size() + 1 + current_word.size() <= static_cast<size_t>(max_width)) {
+      current_line += " " + current_word;
+    } else {
+      result.push_back(current_line);
+      current_line = current_word;
+    }
+    current_word.clear();
+  };
+  
+  auto is_break = [](char c) {
+    switch (c) {
+    case '/': case '\\': case '-': case '_': case '.':
+    case ':': case '?': case '&': case '=': case '#':
+    case '@': case '~': case '$': case '%': case '^':
+    case '*': case '+': case '|': case '<': case '>':
+      return true;
+    default:
+      return false;
+    }
+  };
+  
+  for (char c : text) {
+    if (c == '\n') {
+      flush_word();
+      if (!current_line.empty()) {
+        result.push_back(current_line);
+        current_line.clear();
+      }
+      continue;
+    }
+    if (std::isspace(static_cast<unsigned char>(c))) {
+      flush_word();
+      continue;
+    }
+    if (is_break(c)) {
+      flush_word();
+      result.push_back(current_line);
+      current_line.clear();
+      continue;
+    }
+    current_word += c;
+    // Force break on very long words
+    if (current_word.size() >= static_cast<size_t>(max_width)) {
+      result.push_back(current_word);
+      current_word.clear();
+    }
+  }
+  
+  flush_word();
+  if (!current_line.empty()) {
+    result.push_back(current_line);
+  }
+  
+  return result;
+}
+
+static std::vector<std::string> wrapTokens(const std::string &text, int max_width) {
   std::vector<std::string> out;
   std::string cur;
   auto flush = [&] {
@@ -93,7 +166,6 @@ static std::vector<std::string> wrapTokens(const std::string &text) {
 
   for (char c : text) {
     if (c == '\n') {
-      // Paragraphs are already handled outside; treat newlines as spaces.
       flush();
       if (out.empty() || out.back() != " ")
         out.push_back(" ");
@@ -114,8 +186,8 @@ static std::vector<std::string> wrapTokens(const std::string &text) {
   }
   flush();
 
-  // Soft-wrap long unbroken tokens into smaller chunks to avoid overflow.
-  const size_t kChunk = 16;
+  // Soft-wrap long unbroken tokens based on actual width
+  const size_t kChunk = static_cast<size_t>(std::max(8, max_width / 4));
   std::vector<std::string> wrapped;
   for (const auto &t : out) {
     if (t.size() <= kChunk || t == " ") {
@@ -129,13 +201,18 @@ static std::vector<std::string> wrapTokens(const std::string &text) {
   return wrapped;
 }
 
-static ftxui::Element renderInline(const std::string &text, bool dim) {
+static ftxui::Element renderInline(const std::string &text, bool dim, int max_width) {
   if (text.find('*') == std::string::npos &&
       text.find('`') == std::string::npos) {
-    auto e = ftxui::paragraph(text);
-    if (dim)
-      e = e | ftxui::dim;
-    return e;
+    // Use wrapped text instead of paragraph for better width handling
+    auto wrapped = wrapTextToWidth(text, max_width);
+    ftxui::Elements elems;
+    for (const auto& line : wrapped) {
+      auto e = ftxui::text(line);
+      if (dim) e = e | ftxui::dim;
+      elems.push_back(e);
+    }
+    return elems.empty() ? ftxui::text("") : ftxui::vbox(std::move(elems));
   }
 
   struct Span {
@@ -183,7 +260,7 @@ static ftxui::Element renderInline(const std::string &text, bool dim) {
 
   ftxui::Elements elems;
   for (const auto &sp : spans) {
-    auto tokens = wrapTokens(sp.text);
+    auto tokens = wrapTokens(sp.text, max_width);
     for (const auto &tok : tokens) {
       auto e = ftxui::text(tok);
       if (sp.bold)
@@ -203,6 +280,11 @@ static ftxui::Element renderInline(const std::string &text, bool dim) {
 }
 
 ftxui::Element RenderMarkdown(const std::string &text, bool dim) {
+  // Calculate effective width from global or use sensible default
+  int effective_width = g_markdown_width > 0 ? g_markdown_width : 80;
+  // Reserve space for borders, prefixes, and padding
+  int content_width = std::max(20, effective_width - 4);
+  
   std::vector<ftxui::Element> out;
   auto lines = splitLines(text);
   bool in_code = false;
@@ -212,7 +294,7 @@ ftxui::Element RenderMarkdown(const std::string &text, bool dim) {
   auto flush_para = [&] {
     if (para_buf.empty())
       return;
-    out.push_back(renderInline(para_buf, dim));
+    out.push_back(renderInline(para_buf, dim, content_width));
     para_buf.clear();
   };
 
@@ -220,8 +302,9 @@ ftxui::Element RenderMarkdown(const std::string &text, bool dim) {
     if (code_lines.empty())
       return;
     std::vector<ftxui::Element> code_elems;
+    // Use smaller wrap for code on narrow terminals
+    const size_t kCodeWrap = static_cast<size_t>(std::max(40, content_width));
     for (const auto &l : code_lines) {
-      const size_t kCodeWrap = 120;
       if (l.size() <= kCodeWrap) {
         auto e = ftxui::text(l);
         if (dim)
@@ -236,7 +319,7 @@ ftxui::Element RenderMarkdown(const std::string &text, bool dim) {
         code_elems.push_back(e);
       }
     }
-    out.push_back(ftxui::vbox(std::move(code_elems)) | ftxui::border);
+    out.push_back(ftxui::vbox(std::move(code_elems)) | ftxui::borderLight);
     code_lines.clear();
   };
 
@@ -278,7 +361,7 @@ ftxui::Element RenderMarkdown(const std::string &text, bool dim) {
       // Header row
       std::vector<ftxui::Element> header_elems;
       for (const auto& cell : header)
-        header_elems.push_back(renderInline(cell, dim) | ftxui::bold);
+        header_elems.push_back(renderInline(cell, dim, content_width / static_cast<int>(num_cols)) | ftxui::bold);
       header_elems.resize(num_cols, ftxui::text(""));
       table_data.push_back(std::move(header_elems));
 
@@ -287,7 +370,7 @@ ftxui::Element RenderMarkdown(const std::string &text, bool dim) {
         std::vector<ftxui::Element> row_elems;
         for (size_t c = 0; c < num_cols; ++c) {
           std::string cell = c < r.size() ? r[c] : "";
-          auto elem = renderInline(cell, dim);
+          auto elem = renderInline(cell, dim, content_width / static_cast<int>(num_cols));
           row_elems.push_back(std::move(elem));
         }
         table_data.push_back(std::move(row_elems));
@@ -322,7 +405,7 @@ ftxui::Element RenderMarkdown(const std::string &text, bool dim) {
         title.erase(title.begin());
       if (!title.empty() && title.front() == ' ')
         title.erase(title.begin());
-      auto elem = renderInline(title, dim) | ftxui::bold;
+      auto elem = renderInline(title, dim, content_width) | ftxui::bold;
       out.push_back(elem);
       continue;
     }
@@ -332,7 +415,7 @@ ftxui::Element RenderMarkdown(const std::string &text, bool dim) {
       auto content = line.substr(2);
       out.push_back(ftxui::hbox({
           ftxui::text("• "),
-          renderInline(content, dim) | ftxui::flex,
+          renderInline(content, dim, content_width - 2) | ftxui::flex,
       }));
       continue;
     }

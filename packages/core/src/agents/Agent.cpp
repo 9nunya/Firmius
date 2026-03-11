@@ -44,16 +44,6 @@ Agent::Agent(AgentContext ctx, std::unique_ptr<shared::IHost> h,
 
   permissionChecks =
       std::make_unique<firmius::core::AgentPermissionChecks>(context);
-
-  debugPrettyPrint = (std::getenv("FIRMIUS_NO_PRETTY_PRINT") == nullptr);
-
-  if (debugPrettyPrint) {
-    std::cout << "AGENT INITIATED! INFO:\n";
-    std::cout << "THREAD ID: " << context.history->threadId << "\n";
-    std::cout << "PURPOSE: " << context.identity.role << "\n";
-    std::cout << "PROVIDER: " << context.config.providerId << "\n";
-    std::cout << "MODEL: " << context.config.modelId << "\n\n";
-  }
 }
 
 Agent::~Agent() {
@@ -312,19 +302,6 @@ void Agent::run(const std::string &task,
       bool sawTool = false;
       bool mixedContentAndTools = false;
 
-      if (debugPrettyPrint) {
-        std::cout << "\n\033[1;36m--- " << context.identity.id.substr(0, 6)
-                  << (!context.identity.parentId.empty()
-                          ? " (sub of " +
-                                context.identity.parentId.substr(0, 6) + ")"
-                          : " LEAD")
-                  << " Turn " << turnCount << " (context: "
-                  << context.aggregateMetrics.tokens.contextSize
-                  << ", total billed: " << context.aggregateMetrics.tokens.total
-                  << ", cost: $" << context.aggregateMetrics.estimatedCostUsd
-                  << ") ---\033[0m\n";
-      }
-
       // Token repetition detection for hallucination loops
       bool tokenLoopDetected = false;
       char lastChar = '\0';
@@ -359,11 +336,6 @@ void Agent::run(const std::string &task,
               consecutiveRepeatCount++;
               if (consecutiveRepeatCount >= MAX_CONSECUTIVE_REPEAT) {
                 tokenLoopDetected = true;
-                if (debugPrettyPrint) {
-                  std::cerr << "\n\033[1;31m[TOKEN LOOP: repeated '" << c
-                            << "' " << consecutiveRepeatCount
-                            << " times - aborting stream]\033[0m\n";
-                }
               }
             } else {
               consecutiveRepeatCount = 1;
@@ -373,15 +345,11 @@ void Agent::run(const std::string &task,
 
           if (!tokenLoopDetected) {
             fullResponse += txt->delta;
-            if (debugPrettyPrint)
-              std::cout << txt->delta << std::flush;
           }
         } else if (auto *thk = std::get_if<ThinkingChunk>(&ev)) {
           onEvent(ev);
           sawThinking = true;
           fullThinking += thk->delta;
-          if (debugPrettyPrint)
-            std::cout << "\033[3;37m" << thk->delta << "\033[0m" << std::flush;
         } else if (auto *tcc = std::get_if<ToolCallChunk>(&ev)) {
           if (sawContent) {
             mixedContentAndTools = true;
@@ -390,12 +358,8 @@ void Agent::run(const std::string &task,
           // Emit immediately so TUI can show "Preparing" state
           onEvent(ev);
           bool found = false;
-          bool argsStarted = false;
           for (auto &existing : accumulatedToolChunks) {
             if (existing.index == tcc->index) {
-              if (existing.argsDelta.empty() && !tcc->argsDelta.empty()) {
-                argsStarted = true;
-              }
               existing.nameDelta += tcc->nameDelta;
               existing.argsDelta += tcc->argsDelta;
               if (!tcc->id.empty())
@@ -409,21 +373,7 @@ void Agent::run(const std::string &task,
             if (newChunk.id.empty())
               newChunk.id = "call_" + std::to_string(turnCount) + "_" +
                             std::to_string(tcc->index);
-            if (!newChunk.argsDelta.empty())
-              argsStarted = true;
             accumulatedToolChunks.push_back(newChunk);
-          }
-
-          if (debugPrettyPrint) {
-            if (!found) {
-              std::cout << "\n\033[1;33m[Tool Call: " << tcc->nameDelta
-                        << std::flush;
-            } else if (!tcc->nameDelta.empty()) {
-              std::cout << tcc->nameDelta << std::flush;
-            }
-            if (argsStarted) {
-              std::cout << " (preparing)]\033[0m" << std::flush;
-            }
           }
         } else if (auto *met = std::get_if<AgentMetrics>(&ev)) {
           onEvent(ev);
@@ -445,18 +395,10 @@ void Agent::run(const std::string &task,
       // If mixed content/tool output occurred, prefer tool calls and drop
       // visible text.
       if (mixedContentAndTools && !accumulatedToolChunks.empty()) {
-        if (debugPrettyPrint) {
-          std::cerr << "\033[1;33m[Mixed content and tool calls detected; "
-                       "discarding visible content]\033[0m\n";
-        }
         fullResponse.clear();
         sawContent = false;
         turnStopReason = StopReason::ToolUse;
       } else if (sawContent) {
-        if (mixedContentAndTools && debugPrettyPrint) {
-          std::cerr << "\033[1;33m[Mixed content and tool calls detected; "
-                       "discarding tool calls]\033[0m\n";
-        }
         accumulatedToolChunks.clear();
         if (turnStopReason == StopReason::ToolUse) {
           turnStopReason = StopReason::Stop;
@@ -466,11 +408,6 @@ void Agent::run(const std::string &task,
       // If token loop was detected, inject a nudge to refocus the agent
       if (tokenLoopDetected && fullResponse.empty() &&
           accumulatedToolChunks.empty()) {
-        if (debugPrettyPrint) {
-          std::cerr << "\033[1;33m[Injecting token loop nudge to refocus "
-                       "agent]\033[0m\n";
-        }
-
         AgentTurn loopNudgeTurn;
         loopNudgeTurn.turnId = "loop-nudge-" + std::to_string(turnCount);
         Message loopNudgeMsg;
@@ -494,9 +431,6 @@ void Agent::run(const std::string &task,
         continue;
       }
 
-      if (debugPrettyPrint)
-        std::cout << "\n";
-
       // If there was a stream error and no content came back, retry
       if (!streamError.empty() && fullResponse.empty() &&
           accumulatedToolChunks.empty()) {
@@ -506,12 +440,6 @@ void Agent::run(const std::string &task,
         }
         // Emit retry event and wait briefly before retrying
         int retryDelaySec = 1 << (consecutiveProviderFailures - 1); // 1, 2, 4
-        if (debugPrettyPrint) {
-          std::cerr << "\033[1;33m[Provider error ("
-                    << consecutiveProviderFailures << "/" << maxProviderRetries
-                    << "): " << streamError << " — retrying in "
-                    << retryDelaySec << "s]\033[0m\n";
-        }
         onEvent(StreamRetrying{consecutiveProviderFailures, maxProviderRetries,
                                429, retryDelaySec * 1000,
                                "Provider error, retrying", ""});
@@ -621,10 +549,6 @@ void Agent::run(const std::string &task,
       if (context.config.persistHistory && journaler)
         journaler->appendTurn(errorTurn);
 
-      if (debugPrettyPrint) {
-        std::cerr << "\033[1;31m[FATAL ERROR] " << e.what() << "\033[0m\n";
-      }
-
       // Emit error as a StreamError event
       onEvent(StreamError{e.what(), 0, ""});
       break;
@@ -639,39 +563,6 @@ void Agent::run(const std::string &task,
   }
 
   running = false;
-
-  if (debugPrettyPrint) {
-    std::cout << "\n\033[1;36m--- Agent " << context.identity.id.substr(0, 6)
-              << " Finished ---\033[0m\n";
-    std::cout << "Turns: " << turnCount << "\n";
-    std::cout << "Cumulative Tokens: "
-              << (context.aggregateMetrics.tokens.prompt +
-                  context.aggregateMetrics.tokens.completion)
-              << "\n";
-    std::cout << "  Prompt (billed): " << context.aggregateMetrics.tokens.prompt
-              << " (cached: " << context.aggregateMetrics.tokens.cacheRead
-              << ")\n";
-    std::cout << "  Completion: " << context.aggregateMetrics.tokens.completion
-              << " (reasoning: " << context.aggregateMetrics.tokens.reasoning
-              << ")\n";
-    std::cout << "Last Context Size: "
-              << context.aggregateMetrics.tokens.contextSize << "\n";
-    std::cout << "Total Cost: $" << context.aggregateMetrics.estimatedCostUsd
-              << "\n";
-    // TTFT: firstTokenMs and startMs are absolute steady_clock timestamps;
-    // subtract to get actual duration.
-    if (context.aggregateMetrics.timing.firstTokenMs > 0 &&
-        context.aggregateMetrics.timing.startMs > 0) {
-      std::cout << "TTFT (first turn): "
-                << (context.aggregateMetrics.timing.firstTokenMs -
-                    context.aggregateMetrics.timing.startMs)
-                << "ms\n";
-    } else {
-      std::cout << "TTFT (first turn): N/A\n";
-    }
-    std::cout << "Tool execution: "
-              << context.aggregateMetrics.timing.toolExecutionMs << "ms\n";
-  }
 }
 
 void Agent::executeTools(const std::vector<ToolCallChunk> &chunks,
@@ -694,13 +585,6 @@ void Agent::executeTools(const std::vector<ToolCallChunk> &chunks,
 
     if (repeatCount >= context.config.maxIdenticalToolCalls) {
       // Inject intervention nudge
-      if (debugPrettyPrint) {
-        std::cerr
-            << "\n\033[1;31m[INSANITY LOOP: " << chunk.nameDelta << " called "
-            << (repeatCount + 1)
-            << " times with identical args - aborting tool execution]\033[0m\n";
-      }
-
       AgentTurn interventionTurn;
       interventionTurn.turnId =
           "insanity-nudge-" + std::to_string(context.history->turns.size());
@@ -803,14 +687,7 @@ void Agent::executeTools(const std::vector<ToolCallChunk> &chunks,
       break;
       
     auto [resultStr, success, resultProcessId, resultSubagentId] = exec.future.get();
-    
-    if (debugPrettyPrint) {
-      std::cout << "\033[1;34m[Executing " << exec.name << " with "
-                << exec.args << "]\033[0m\n";
-      std::cout << "\033[1;32m[Result: " << resultStr.substr(0, 200)
-                << (resultStr.size() > 200 ? "..." : "") << "]\033[0m\n";
-    }
-    
+
     Message msg;
     msg.role = Role::ToolResult;
     msg.content.push_back(ToolResultContent{exec.toolCallId, resultStr, success,
@@ -867,13 +744,6 @@ void Agent::compactContext(
     std::function<void(const shared::StreamEvent &)> onEvent) {
   context.state.currentStatus = AgentStatus::Compacting;
   onEvent(AgentCompacting{context.identity.id, context.identity.parentId});
-
-  if (debugPrettyPrint) {
-    std::cout << "\n\033[1;35m--- CONTEXT COMPACTION TRIGGERED (Size: "
-              << context.aggregateMetrics.tokens.contextSize
-              << ") ---\033[0m\n";
-    std::cout << "\033[1;35mSummarizing session memory...\033[0m\n";
-  }
 
   // Build factual state preamble to preserve actual work state
   std::string factualState = "\n## FACTUAL STATE (GROUND TRUTH)\n\n";
@@ -938,14 +808,10 @@ void Agent::compactContext(
           return;
         if (auto *act = std::get_if<AgentCompactionText>(&ev)) {
           fullSummary += act->delta;
-          if (debugPrettyPrint)
-            std::cout << "\033[1;35m" << act->delta << "\033[0m" << std::flush;
           onEvent(AgentCompactionText{context.identity.id, act->delta,
                                       context.identity.parentId});
         } else if (auto *thk = std::get_if<AgentCompactionThinking>(&ev)) {
           fullThinking += thk->delta;
-          if (debugPrettyPrint)
-            std::cout << "\033[3;35m" << thk->delta << "\033[0m" << std::flush;
           onEvent(AgentCompactionThinking{context.identity.id, thk->delta,
                                           context.identity.parentId});
         } else {
@@ -954,27 +820,12 @@ void Agent::compactContext(
       },
       &interrupted);
 
-  if (debugPrettyPrint)
-    std::cout << "\n";
-
   // Validate summary before clearing history
   if (fullSummary.empty()) {
-    if (debugPrettyPrint) {
-      std::cout << "\033[1;31m--- COMPACTION FAILED: Empty summary generated "
-                   "---\033[0m\n";
-    }
     onEvent(StreamError{"Context compaction failed: Empty summary generated", 0,
                         ""});
     context.state.currentStatus = AgentStatus::Idle;
     return;
-  }
-
-  // Warn if summary seems suspiciously short
-  if (fullSummary.length() < 50) {
-    if (debugPrettyPrint) {
-      std::cout << "\033[1;33m--- COMPACTION WARNING: Summary is very short ("
-                << fullSummary.length() << " chars) ---\033[0m\n";
-    }
   }
 
   uint32_t oldTokens = context.aggregateMetrics.tokens.contextSize;
@@ -1018,11 +869,6 @@ void Agent::compactContext(
   uint32_t tokensSaved = (oldTokens > 1000) ? oldTokens - 1000 : 0;
   onEvent(ContextCompacted{context.identity.id, tokensSaved,
                            context.identity.parentId});
-
-  if (debugPrettyPrint) {
-    std::cout << "\033[1;35m--- CONTEXT COMPACTED. SYNTHETIC MEMORY INJECTED. "
-                 "---\033[0m\n";
-  }
 }
 
 } // namespace firmius::core

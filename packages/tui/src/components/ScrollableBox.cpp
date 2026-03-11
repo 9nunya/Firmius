@@ -19,11 +19,9 @@ ftxui::Element ScrollableBoxComponent::Render() {
     if (!child_) return ftxui::text("");
 
     auto background = child_->Render();
-    // if (viewport_width_ > 0) {
-    //     background = background | ftxui::size(ftxui::WIDTH, ftxui::EQUAL, viewport_width_);
-    // }
     background->ComputeRequirement();
-    size_ = background->requirement().flex_grow_y + background->requirement().min_y + background->requirement().flex_shrink_y + 300;
+    // Calculate proper content size
+    size_ = background->requirement().min_y + background->requirement().flex_grow_y;
     if (at_bottom_) {
         selected_ = size_;
     }
@@ -33,6 +31,7 @@ ftxui::Element ScrollableBoxComponent::Render() {
         | ftxui::vscroll_indicator
         | ftxui::yflex
         | ftxui::reflect(box_);
+    // Update viewport width for responsive layout
     if (box_.x_max >= box_.x_min) {
         viewport_width_ = box_.x_max - box_.x_min + 1;
     }

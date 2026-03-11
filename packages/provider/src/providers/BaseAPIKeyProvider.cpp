@@ -38,8 +38,6 @@ firmius::provider::ProviderType BaseAPIKeyProvider::getProviderType() const {
   return firmius::provider::ProviderType::APIKey;
 }
 
-bool BaseAPIKeyProvider::supportsStreamUsage() const { return true; }
-
 int64_t BaseAPIKeyProvider::getNowSeconds() {
   return std::chrono::duration_cast<std::chrono::seconds>(
              std::chrono::system_clock::now().time_since_epoch())

@@ -2,8 +2,10 @@
 #include "TUIState.hpp"
 #include "harness/Harness.hpp"
 #include "modals/OAuthWizardModal.hpp"
+#include "modals/APIKeyWizardModal.hpp"
 #include "providers/ProviderRegistry.hpp"
 #include "providers/BaseOAuthProvider.hpp"
+#include "providers/BaseAPIKeyProvider.hpp"
 #include <ftxui/component/component.hpp>
 #include <ftxui/dom/elements.hpp>
 #include <memory>
@@ -17,16 +19,34 @@ AccountsModal::AccountsModal(std::string providerId)
     : providerId_(std::move(providerId)) {}
 
 ftxui::Component AccountsModal::create(TuiState &state) {
-  auto accounts =
+  auto oauthAccounts =
       std::make_shared<std::vector<firmius::shared::OAuthAccount>>();
+  auto apiKeyAccounts =
+      std::make_shared<std::vector<firmius::provider::APIKeyAccount>>();
   auto selected = std::make_shared<int>(0);
   auto isLoading = std::make_shared<bool>(true);
   auto providerId = providerId_;
+  auto isAPIKeyProvider = std::make_shared<bool>(false);
 
-  auto refreshAccounts = [accounts, isLoading, providerId, &state]() {
+  auto refreshAccounts = [oauthAccounts, apiKeyAccounts, isLoading, providerId, 
+                          isAPIKeyProvider, &state]() {
     *isLoading = true;
-    std::thread([accounts, isLoading, providerId, &state]() {
-      *accounts = firmius::core::Harness::instance().getAccounts(providerId);
+    std::thread([oauthAccounts, apiKeyAccounts, isLoading, providerId, 
+                 isAPIKeyProvider, &state]() {
+      auto provider =
+          firmius::provider::ProviderRegistry::instance().getProvider(providerId);
+      
+      if (provider) {
+        auto apiKeyProvider =
+            std::dynamic_pointer_cast<firmius::provider::BaseAPIKeyProvider>(provider);
+        if (apiKeyProvider) {
+          *isAPIKeyProvider = true;
+          *apiKeyAccounts = apiKeyProvider->getAccounts();
+        } else {
+          *isAPIKeyProvider = false;
+          *oauthAccounts = firmius::core::Harness::instance().getAccounts(providerId);
+        }
+      }
       *isLoading = false;
       state.postEvent(ftxui::Event::Custom);
     }).detach();
@@ -34,10 +54,9 @@ ftxui::Component AccountsModal::create(TuiState &state) {
 
   refreshAccounts();
 
-  refreshAccounts();
-
   auto component =
-      ftxui::Renderer([accounts, selected, isLoading, providerId]() {
+      ftxui::Renderer([oauthAccounts, apiKeyAccounts, selected, isLoading, 
+                       providerId, isAPIKeyProvider]() {
         if (*isLoading) {
           return ftxui::window(
                      ftxui::text(" Accounts: " + providerId) | ftxui::bold |
@@ -50,15 +69,34 @@ ftxui::Component AccountsModal::create(TuiState &state) {
         }
 
         ftxui::Elements rows;
-        for (int i = 0; i < (int)accounts->size(); ++i) {
-          auto label = ftxui::text("  " + (*accounts)[i].identifier + "  ");
-          if (i == *selected) {
-            label = label | ftxui::inverted | ftxui::bold |
-                    ftxui::color(ftxui::Color::Yellow);
-          } else {
-            label = label | ftxui::color(ftxui::Color::GrayDark);
+        
+        if (*isAPIKeyProvider) {
+          // Display API key accounts with safe filtering
+          for (int i = 0; i < (int)apiKeyAccounts->size(); ++i) {
+            const auto &acc = (*apiKeyAccounts)[i];
+            // Safe display: shows "Key #N (prefix...)"
+            std::string display = acc.identifier + " (" + acc.keyPrefix + "...)";
+            auto label = ftxui::text("  " + display + "  ");
+            if (i == *selected) {
+              label = label | ftxui::inverted | ftxui::bold |
+                      ftxui::color(ftxui::Color::Yellow);
+            } else {
+              label = label | ftxui::color(ftxui::Color::GrayDark);
+            }
+            rows.push_back(label);
           }
-          rows.push_back(label);
+        } else {
+          // Display OAuth accounts
+          for (int i = 0; i < (int)oauthAccounts->size(); ++i) {
+            auto label = ftxui::text("  " + (*oauthAccounts)[i].identifier + "  ");
+            if (i == *selected) {
+              label = label | ftxui::inverted | ftxui::bold |
+                      ftxui::color(ftxui::Color::Yellow);
+            } else {
+              label = label | ftxui::color(ftxui::Color::GrayDark);
+            }
+            rows.push_back(label);
+          }
         }
 
         if (rows.empty()) {
@@ -102,7 +140,8 @@ ftxui::Component AccountsModal::create(TuiState &state) {
                ftxui::clear_under | ftxui::center;
       });
 
-  return ftxui::CatchEvent(component, [accounts, selected, providerId,
+  return ftxui::CatchEvent(component, [oauthAccounts, apiKeyAccounts, selected,
+                                       providerId, isAPIKeyProvider,
                                        refreshAccounts,
                                        &state](ftxui::Event event) {
     if (event == ftxui::Event::Escape) {
@@ -115,18 +154,21 @@ ftxui::Component AccountsModal::create(TuiState &state) {
       return true;
     }
     if (event == ftxui::Event::ArrowDown) {
-      if (*selected < (int)accounts->size() - 1)
+      if (*selected < (int)(*isAPIKeyProvider ? apiKeyAccounts->size() : oauthAccounts->size()) - 1)
         (*selected)++;
       return true;
     }
     if (event == ftxui::Event::Delete ||
         event == ftxui::Event::Character('d') ||
         event == ftxui::Event::Character('D')) {
-      if (!accounts->empty() && *selected < (int)accounts->size()) {
-        std::string identifier = (*accounts)[*selected].identifier;
+      if (!(*isAPIKeyProvider ? apiKeyAccounts->empty() : oauthAccounts->empty()) && 
+          *selected < (int)(*isAPIKeyProvider ? apiKeyAccounts->size() : oauthAccounts->size())) {
+        std::string identifier = *isAPIKeyProvider 
+            ? (*apiKeyAccounts)[*selected].identifier 
+            : (*oauthAccounts)[*selected].identifier;
         firmius::core::Harness::instance().deleteAccount(providerId, identifier);
         refreshAccounts();
-        if (*selected >= (int)accounts->size() && *selected > 0)
+        if (*selected >= (int)(*isAPIKeyProvider ? apiKeyAccounts->size() : oauthAccounts->size()) && *selected > 0)
           (*selected)--;
       }
       return true;
@@ -137,6 +179,22 @@ ftxui::Component AccountsModal::create(TuiState &state) {
           firmius::provider::ProviderRegistry::instance().getProvider(
               providerId);
       if (provider) {
+        // Try API key provider first
+        auto apiKeyProvider =
+            std::dynamic_pointer_cast<firmius::provider::BaseAPIKeyProvider>(
+                provider);
+        if (apiKeyProvider) {
+          auto wizard = apiKeyProvider->beginConnectionWizard();
+          if (wizard) {
+            state.popModalImmediate();
+            auto modalObj = std::make_shared<APIKeyWizardModal>(
+                std::move(wizard), providerId);
+            state.openModalDirect(modalObj->create(state));
+          }
+          return true;
+        }
+        
+        // Fall back to OAuth provider
         auto oauthProvider =
             std::dynamic_pointer_cast<firmius::provider::BaseOAuthProvider>(
                 provider);

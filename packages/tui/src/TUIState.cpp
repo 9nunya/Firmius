@@ -507,7 +507,7 @@ ftxui::Component TuiState::root() {
           return ftxui::hbox({ftxui::text("* ") | ftxui::bold |
                                   ftxui::color(ftxui::Color::Yellow),
                               content | ftxui::flex}) |
-                 ftxui::size(ftxui::WIDTH, ftxui::LESS_THAN, 120);
+                 ftxui::flex;
         };
 
         if (s) {
@@ -542,7 +542,7 @@ ftxui::Component TuiState::root() {
                      {ftxui::text(prefix) | ftxui::bold | ftxui::color(color),
                       ftxui::paragraph(msg) | ftxui::color(color) |
                           ftxui::flex}) |
-                 ftxui::size(ftxui::WIDTH, ftxui::LESS_THAN, 120);
+                 ftxui::flex;
         };
 
         const auto &swaps = stream_state_.getAccountSwaps();
@@ -565,7 +565,7 @@ ftxui::Component TuiState::root() {
           live_rows.push_back(ftxui::hbox({ftxui::text("> ") | ftxui::bold |
                                                ftxui::color(ftxui::Color::Cyan),
                                            ftxui::text(preview) | ftxui::dim}) |
-                              ftxui::size(ftxui::WIDTH, ftxui::LESS_THAN, 120));
+                              ftxui::flex);
         }
 
         return live_rows;
@@ -585,8 +585,7 @@ ftxui::Component TuiState::root() {
   auto welcome_screen = ftxui::Renderer([] {
     return ftxui::vbox({
                ftxui::text("Welcome to Firmius") | ftxui::bold | ftxui::center,
-               ftxui::text("Type a message to start a new thread, or use "
-                           "/threads to resume.") |
+               ftxui::text("Type a message to start") |
                    ftxui::dim | ftxui::center,
            }) |
            ftxui::flex | ftxui::center;
@@ -608,26 +607,20 @@ ftxui::Component TuiState::root() {
                              ? (chat->Render() | ftxui::flex)
                              : welcome_screen->Render();
 
+        // Ultra-compact bottom bar layout
         auto bottom_bar = ftxui::vbox({
             agent_strip->Render(),
-            ftxui::separatorLight(),
             input_bar->Render(),
-            ftxui::separatorLight(),
             status_bar->Render(),
         });
 
         if (view_mode_ == ViewMode::Welcome) {
-          // Hide title bar context in welcome
-          return ftxui::vbox({
-                     chat_area,
-                     bottom_bar,
-                 }) |
-                 ftxui::flex;
+          return ftxui::vbox({chat_area, bottom_bar}) | ftxui::flex;
         }
 
         return ftxui::vbox({
                    title_bar->Render(),
-                   chat_area,
+                   chat_area | ftxui::flex,
                    bottom_bar,
                }) |
                ftxui::flex;

@@ -26,3 +26,6 @@ install(TARGETS firmius DESTINATION bin)
 
 # Install prompts directory to ~/.firmius/prompts/
 install(DIRECTORY prompts/ DESTINATION $ENV{HOME}/.firmius/prompts)
+
+# Install workflows directory to ~/.firmius/workflows/
+install(DIRECTORY workflows/ DESTINATION $ENV{HOME}/.firmius/workflows)

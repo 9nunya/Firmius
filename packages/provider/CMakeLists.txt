@@ -17,6 +17,7 @@ target_sources(firmius_provider PRIVATE
     src/providers/AntigravityProtocol.cpp
     src/providers/BaseOAuthProvider.cpp
     src/providers/QwenProvider.cpp
+    src/providers/BaseAPIKeyProvider.cpp
 )
 
 target_sources(firmius_provider PUBLIC
@@ -37,6 +38,7 @@ target_sources(firmius_provider PUBLIC
     include/providers/BaseOAuthProvider.hpp
     include/providers/OAuthWizard.hpp
     include/providers/QwenProvider.hpp
+    include/providers/BaseAPIKeyProvider.hpp
 )
 
 target_include_directories(firmius_provider PUBLIC

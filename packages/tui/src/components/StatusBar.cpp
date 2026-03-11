@@ -60,7 +60,7 @@ public:
   explicit StatusBarComponentBase(std::shared_ptr<StatusBarModel> model)
       : model_(std::move(model)) {}
 
-  ftxui::Element Render() {
+  ftxui::Element Render() override {
     if (!model_) {
       return ftxui::text("");
     }
@@ -79,48 +79,37 @@ public:
     if (glint_badge_)
       mode_badge = glint_badge_->Render();
 
+    // Build model section (ultra-compact - just model name)
     auto model_section = ftxui::text("");
     if (!model_->model_name.empty()) {
-      auto name_el = ftxui::text(" " + model_->model_name + " ") |
+      model_section = ftxui::text(" " + model_->model_name + " ") |
                      ftxui::color(ftxui::Color::RGB(160, 160, 200));
-      if (!model_->model_variant.empty()) {
-        auto variant_el = ftxui::text(" " + model_->model_variant + " ") |
-                          ftxui::bold | ftxui::color(ftxui::Color::Orange1);
-        model_section = ftxui::hbox({name_el, variant_el});
-      } else {
-        model_section = name_el;
-      }
     }
-    auto purpose_section = ftxui::text("");
-    if (!model_->purpose.empty()) {
-      purpose_section = ftxui::text(" " + model_->purpose + " ") |
-                        ftxui::color(ftxui::Color::RGB(120, 120, 160));
-    }
+
+    // Build context section (ultra-compact - percentage only)
     ftxui::Element ctx_section = ftxui::text("");
     if (model_->context_max > 0) {
       float ratio =
           static_cast<float>(model_->context_used) / model_->context_max;
-      ftxui::Color bar_color = ftxui::Color::RGB(80, 200, 120);
+      ftxui::Color ctx_color = ftxui::Color::RGB(80, 200, 120);
       if (ratio > 0.85f)
-        bar_color = ftxui::Color::RGB(200, 60, 60);
+        ctx_color = ftxui::Color::RGB(200, 60, 60);
       else if (ratio > 0.60f)
-        bar_color = ftxui::Color::RGB(220, 180, 60);
-      std::string used_k = std::to_string(model_->context_used / 1000);
-      std::string max_k = std::to_string(model_->context_max / 1000) + "K";
+        ctx_color = ftxui::Color::RGB(220, 180, 60);
+
       std::string pct = std::to_string(static_cast<int>(ratio * 100)) + "%";
-      auto bar = ftxui::gauge(ratio) | ftxui::color(bar_color);
-      ctx_section =
-          ftxui::hbox({
-              ftxui::text(" "),
-              bar | ftxui::size(ftxui::WIDTH, ftxui::EQUAL, 10),
-              ftxui::text(" " + used_k + "/" + max_k + " (" + pct + ")"),
-          }) |
-          ftxui::color(ftxui::Color::RGB(160, 160, 180));
+      ctx_section = ftxui::text(" " + pct + " ") |
+                    ftxui::color(ctx_color);
     }
+
+    // Ultra-compact layout: mode | agent | model | filler | context%
     return ftxui::hbox(
-               {mode_badge, agent_name_el,
+               {mode_badge,
                 ftxui::text(" ") | ftxui::color(ftxui::Color::RGB(60, 60, 80)),
-                model_section, ftxui::filler(), purpose_section, ctx_section}) |
+                agent_name_el,
+                model_section,
+                ftxui::filler(),
+                ctx_section}) |
            ftxui::bgcolor(ftxui::Color::RGB(30, 30, 50));
   }
 

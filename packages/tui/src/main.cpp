@@ -1,6 +1,7 @@
 #include "Engine.hpp"
 #include "TUIState.hpp"
 #include "harness/Harness.hpp"
+#include "workflow/WorkflowLoader.hpp"
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/screen_interactive.hpp>
 #include <ftxui/dom/elements.hpp>
@@ -16,6 +17,7 @@
 #include "commands/QuotasCommand.hpp"
 #include "commands/ThreadsCommand.hpp"
 #include "commands/UndoCommand.hpp"
+#include "commands/WorkflowsCommand.hpp"
 #include "modals/ConfigDisplayModal.hpp"
 #include "modals/ModalRegistry.hpp"
 #include "modals/ModelPickerModal.hpp"
@@ -53,6 +55,8 @@ int main(int argc, char **argv) {
       std::make_shared<firmius::tui::QuotasCommand>());
   firmius::tui::CommandManager::instance().registerCommand(
       std::make_shared<firmius::tui::AccountsCommand>());
+  firmius::tui::CommandManager::instance().registerCommand(
+      std::make_shared<firmius::tui::WorkflowsCommand>());
 
   // Register Modals
   firmius::tui::ModalRegistry::instance().registerModal(
@@ -64,6 +68,9 @@ int main(int argc, char **argv) {
 
   auto &h = firmius::core::Harness::instance();
   h.init();
+
+  // Initialize workflow loader after harness (loads from ~/.firmius/workflows/)
+  firmius::core::WorkflowLoader::instance().init();
 
   auto &state = firmius::tui::TuiState::instance();
 

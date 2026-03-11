@@ -9,6 +9,7 @@
 #include "providers/ProviderRegistry.hpp"
 #include "providers/BaseOAuthProvider.hpp"
 #include "utils/StringUtil.hpp"
+#include "workflow/WorkflowLoader.hpp"
 #include <Context.hpp>
 #include <EnvLoader.hpp>
 #include <Events.hpp>
@@ -390,6 +391,22 @@ void Harness::send(const std::string &text) {
   }
 
   Engine::instance().executeTask(fid, text);
+}
+
+bool Harness::executeWorkflow(const std::string &workflowId,
+                              const std::vector<std::string> &args) {
+  auto &loader = WorkflowLoader::instance();
+  const Workflow *workflow = loader.getWorkflow(workflowId);
+
+  if (!workflow) {
+    emitEvent(firmius::shared::AgentError{
+        "", "Workflow not found: " + workflowId});
+    return false;
+  }
+
+  std::string builtPrompt = workflow->build(args);
+  send(builtPrompt);
+  return true;
 }
 
 void Harness::abort() {

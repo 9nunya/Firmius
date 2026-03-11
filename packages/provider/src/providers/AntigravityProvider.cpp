@@ -514,11 +514,13 @@ void AntigravityProvider::stream(
 
     for (int retryAttempt = 0; retryAttempt < 4; ++retryAttempt) {
       if (retryAttempt > 0) {
+        // Use unified backoff sequence from shared constants
+        int backoffSeconds = firmius::shared::BackoffConstants::getBackoffSeconds(retryAttempt - 1);
         onEvent(StreamRetrying{retryAttempt, 4, 0,
-                               (1 << (retryAttempt - 1)) * 1000,
+                               backoffSeconds * 1000,
                                "Connection error", acc.getIdentifier()});
         std::this_thread::sleep_for(
-            std::chrono::seconds(1 << (retryAttempt - 1)));
+            std::chrono::seconds(backoffSeconds));
       }
 
       std::string effectiveModel =

@@ -482,7 +482,9 @@ bool isUsageLimitError(const std::string &body) {
 }
 
 int calculateRetryDelay(int attempt) {
-  int exponentialDelay = RetrySettings::BASE_DELAY_MS * (1 << attempt);
+  // Use unified backoff sequence from shared constants
+  int backoffSeconds = firmius::shared::BackoffConstants::getBackoffSeconds(attempt);
+  int exponentialDelay = backoffSeconds * 1000;
   int capped = std::min(exponentialDelay, RetrySettings::MAX_DELAY_MS);
   std::random_device rd;
   std::mt19937 gen(rd());

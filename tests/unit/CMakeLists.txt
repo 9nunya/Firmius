@@ -144,3 +144,17 @@ target_include_directories(test_markdown PRIVATE
     ../../packages/tui/src
 )
 gtest_discover_tests(test_markdown)
+
+# Workflow tests
+add_executable(test_workflow
+    workflow/test_workflow.cpp
+)
+target_link_libraries(test_workflow PRIVATE
+    firmius::core
+    firmius::shared
+    GTest::gtest_main
+)
+target_include_directories(test_workflow PRIVATE
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_workflow)

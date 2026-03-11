@@ -15,17 +15,23 @@ public:
   explicit AgentStripComponentBase(std::shared_ptr<AgentStripModel> model)
       : model_(std::move(model)) {}
 
-  ftxui::Element Render() {
+  ftxui::Element Render() override {
     if (!model_ || model_->items.empty()) {
       return ftxui::text("");
     }
     syncGlints();
     std::vector<ftxui::Element> rows;
+
+    // Adaptive visible rows based on terminal height
     size_t count = std::min(model_->items.size(), kAgentStripVisibleRows);
+
     for (size_t i = 0; i < count; ++i) {
       const auto &item = model_->items[i];
-      auto bullet = ftxui::text(" ┄ ") | ftxui::dim |
+
+      // Compact bullet
+      auto bullet = ftxui::text(" ") | ftxui::dim |
                     ftxui::color(ftxui::Color::RGB(100, 100, 140));
+
       ftxui::Element title_el;
       if (item.is_busy) {
         auto it = glint_cache_.find(item.id);
@@ -39,15 +45,22 @@ public:
         title_el = ftxui::text(item.title) | ftxui::bold |
                    ftxui::color(ftxui::Color::RGB(180, 160, 220));
       }
-      auto purpose = ftxui::text(" " + item.purpose + " ") | ftxui::dim |
-                     ftxui::color(ftxui::Color::RGB(120, 120, 160));
+
+      // Ultra-compact purpose (hidden in very compact mode)
+      ftxui::Element purpose_el = ftxui::text("");
+
+      // Ultra-compact state badge (single char indicator)
       ftxui::Color state_fg = ftxui::Color::White;
       ftxui::Color state_bg = ftxui::Color::RGB(60, 60, 80);
       if (item.is_busy) {
         state_bg = ftxui::Color::RGB(40, 120, 60);
       }
-      auto state = ftxui::text(" " + item.status_text + " ") |
+      // Single character status indicator
+      char status_char = item.status_text.empty() ? ' ' : item.status_text[0];
+      auto state = ftxui::text(" " + std::string(1, status_char) + " ") |
                    ftxui::color(state_fg) | ftxui::bgcolor(state_bg);
+
+      // Ultra-compact context (%)
       ftxui::Color ctx_color = ftxui::Color::RGB(80, 200, 120);
       if (item.context_percent > 0.85f)
         ctx_color = ftxui::Color::RGB(200, 60, 60);
@@ -59,15 +72,21 @@ public:
                           static_cast<int>(item.context_percent * 100)) +
                       "%") |
           ftxui::color(ctx_color);
-      auto tool_badge = ftxui::text(" tools:" +
+
+      // Ultra-compact tool badge
+      auto tool_badge = ftxui::text(" t:" +
                                   std::to_string(item.tool_call_count)) |
                         ftxui::dim | ftxui::color(ftxui::Color::GrayLight);
+
       ftxui::Color row_bg = ftxui::Color::RGB(20, 20, 40);
       if (item.is_focused) {
         row_bg = ftxui::Color::RGB(45, 75, 190);
       }
-      auto row = ftxui::hbox({bullet, title_el, purpose, ftxui::filler(),
-                              state, ftxui::text(" "), tool_badge, ctx_pct});
+
+      // Ultra-compact row layout: bullet | title | filler | state | tools | ctx
+      auto row = ftxui::hbox({bullet, title_el, ftxui::filler(),
+                              state, ftxui::text(" "), tool_badge, ctx_pct,
+                              ftxui::text(" ")});
       rows.push_back(row | ftxui::bgcolor(row_bg));
     }
     return ftxui::vbox(std::move(rows)) |

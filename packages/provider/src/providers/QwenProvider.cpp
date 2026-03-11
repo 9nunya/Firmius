@@ -919,10 +919,6 @@ void QwenProvider::processSSELine(
     const auto &usage = d["usage"];
     AgentMetrics metrics;
 
-    if (!usage.IsNull()) {
-      Logger::instance().logDebug("OMG! USAGE NOT NULL!");
-    }
-
     if (usage.HasMember("prompt_tokens") && usage["prompt_tokens"].IsUint()) {
       metrics.tokens.prompt = usage["prompt_tokens"].GetUint();
       metrics.tokens.contextSize = metrics.tokens.prompt;

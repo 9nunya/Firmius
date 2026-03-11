@@ -40,6 +40,49 @@ public:
 };
 
 /**
+ * @brief Simple wizard for direct API key input.
+ */
+class SimpleAPIKeyWizard : public APIKeyWizard {
+public:
+  SimpleAPIKeyWizard() : prompt_("Enter your API key:") {}
+
+  std::optional<std::string> nextPrompt() override {
+    if (!promptShown_) {
+      promptShown_ = true;
+      return prompt_;
+    }
+    return std::nullopt;
+  }
+
+  void submitAnswer(const std::string &answer) override {
+    apiKey_ = answer;
+    isComplete_ = true;
+  }
+
+  bool isComplete() const override { return isComplete_; }
+
+  bool finalizeExchange(std::string &outApiKey,
+                        std::string &outErrorMessage) override {
+    if (apiKey_.empty()) {
+      outErrorMessage = "API key cannot be empty.";
+      return false;
+    }
+    outApiKey = apiKey_;
+    return true;
+  }
+
+  std::string getFinalMessage() const override {
+    return "API key successfully added!";
+  }
+
+private:
+  std::string prompt_;
+  bool promptShown_ = false;
+  std::string apiKey_;
+  bool isComplete_ = false;
+};
+
+/**
  * @brief Base class for providers that use API key authentication.
  * 
  * Supports multiple API keys with rotation and rate limit backoff.
@@ -53,7 +96,9 @@ public:
   // IProvider interface
   std::string getId() const override;
   ProviderType getProviderType() const override;
-  bool supportsStreamUsage() const override;
+  
+  // IProvider interface - stream, listModels, getModelInfo, generateSummary are implemented by subclasses
+  bool supportsStreamUsage() const { return true; }
 
   /**
    * @brief Get all configured API key accounts.

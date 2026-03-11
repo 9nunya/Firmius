@@ -15,6 +15,7 @@ target_sources(firmius_audits PRIVATE
     src/audits/QwenProviderAudit.cpp
     src/audits/QwenQuotaAudit.cpp
     src/audits/SubagentStressAudit.cpp
+    src/audits/WorkflowsAudit.cpp
 )
 
 target_sources(firmius_audits PUBLIC
@@ -34,6 +35,7 @@ target_sources(firmius_audits PUBLIC
     include/audits/QwenProviderAudit.hpp
     include/audits/QwenQuotaAudit.hpp
     include/audits/SubagentStressAudit.hpp
+    include/audits/WorkflowsAudit.hpp
 )
 
 target_include_directories(firmius_audits PUBLIC

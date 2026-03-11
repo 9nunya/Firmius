@@ -157,7 +157,7 @@ ftxui::Component ToolBlock(const std::shared_ptr<ToolCallView> &view) {
   auto container = ftxui::Container::Horizontal({toggle});
   return ftxui::Renderer(container, [view, toggle] {
     if (!view) {
-      return ftxui::text("[tool] <null>") | ftxui::dim;
+      return ftxui::text("[tool]") | ftxui::dim;
     }
 
     // Use SummarizeToolCall for a compact description
@@ -165,7 +165,7 @@ ftxui::Component ToolBlock(const std::shared_ptr<ToolCallView> &view) {
 
     if (view->phase == ToolPhase::Preparing ||
         view->phase == ToolPhase::Called) {
-      return ftxui::text("[~] " + summary + "...") | ftxui::dim;
+      return ftxui::text("[~] " + summary) | ftxui::dim;
     }
 
     // Finished
@@ -173,36 +173,34 @@ ftxui::Component ToolBlock(const std::shared_ptr<ToolCallView> &view) {
       view->toggle_label = view->show_result ? "hide" : "show";
       bool can_toggle = !view->result.empty();
 
-      std::vector<ftxui::Element> rows;
       if (can_toggle) {
+        std::vector<ftxui::Element> rows;
         rows.push_back(
             ftxui::hbox({ftxui::text("[+] " + summary) | ftxui::bold,
                          ftxui::text(" [") | ftxui::dim, toggle->Render(),
                          ftxui::text("]") | ftxui::dim}));
-      } else {
-        rows.push_back(ftxui::text("[+] " + summary) | ftxui::bold);
-      }
 
-      if (view->show_result && !view->result.empty()) {
-        // Show result in a small tool window (last 5 lines)
-        auto tail = TailLines(view->result, 5);
-        std::vector<ftxui::Element> out_lines;
-        for (const auto &line : tail) {
-          out_lines.push_back(ftxui::text(line) | ftxui::dim);
+        if (view->show_result && !view->result.empty()) {
+          // Show result in a small tool window (last 3 lines for compact mode)
+          auto tail = TailLines(view->result, 3);
+          std::vector<ftxui::Element> out_lines;
+          for (const auto &line : tail) {
+            out_lines.push_back(ftxui::text(line) | ftxui::dim);
+          }
+          rows.push_back(LogWindow(out_lines, view->name));
         }
-        rows.push_back(LogWindow(out_lines, view->name));
-      }
 
-      return ftxui::vbox(rows);
+        return ftxui::vbox(rows);
+      }
+      return ftxui::text("[+] " + summary) | ftxui::bold;
     }
 
-    // Error
+    // Error - truncate for compact display
     std::string err = view->result;
     if (err.empty())
       err = "unknown error";
-    // Truncate error to first 80 chars
-    if (err.size() > 80)
-      err = err.substr(0, 77) + "...";
+    if (err.size() > 60)
+      err = err.substr(0, 57) + "...";
     return ftxui::text("[x] " + summary + " failed: " + err) |
            ftxui::color(ftxui::Color::Red);
   });
