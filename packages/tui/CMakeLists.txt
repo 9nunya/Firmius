@@ -4,6 +4,7 @@ target_sources(firmius PRIVATE
     src/main.cpp
     src/TUIState.cpp
     src/StreamStateManager.cpp
+    src/NotificationManager.cpp
     src/commands/CommandManager.cpp
     src/commands/NewCommand.cpp
     src/commands/ThreadsCommand.cpp
@@ -39,6 +40,9 @@ target_sources(firmius PRIVATE
     src/components/AgentStrip.cpp
     src/components/InputBar.cpp
     src/components/GlintEffect.cpp
+    src/components/HelpOverlay.cpp
+    src/components/ANSIParser.cpp
+    src/components/SyntaxHighlighter.cpp
 )
 
 target_include_directories(firmius PRIVATE src include)

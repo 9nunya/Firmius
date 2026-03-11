@@ -145,6 +145,57 @@ target_include_directories(test_markdown PRIVATE
 )
 gtest_discover_tests(test_markdown)
 
+# TUI ANSI Parser tests
+add_executable(test_ansi_parser
+    tui/test_ansi_parser.cpp
+    ../../packages/tui/src/components/ANSIParser.cpp
+)
+target_link_libraries(test_ansi_parser PRIVATE
+    firmius::shared
+    GTest::gtest_main
+    ftxui::dom
+    ftxui::screen
+)
+target_include_directories(test_ansi_parser PRIVATE
+    ../../packages/tui/include
+    ../../packages/tui/src
+)
+gtest_discover_tests(test_ansi_parser)
+
+# TUI Syntax Highlighter tests
+add_executable(test_syntax_highlighter
+    tui/test_syntax_highlighter.cpp
+    ../../packages/tui/src/components/SyntaxHighlighter.cpp
+    ../../packages/tui/src/NotificationManager.cpp
+    ../../packages/tui/src/components/GlintEffect.cpp
+)
+target_link_libraries(test_syntax_highlighter PRIVATE
+    firmius::shared
+    GTest::gtest_main
+    ftxui::dom
+    ftxui::screen
+    ftxui::component
+)
+target_include_directories(test_syntax_highlighter PRIVATE
+    ../../packages/tui/include
+    ../../packages/tui/src
+)
+gtest_discover_tests(test_syntax_highlighter)
+
+# TUI Diff Rendering tests
+add_executable(test_diff_rendering
+    tui/test_diff_rendering.cpp
+)
+target_link_libraries(test_diff_rendering PRIVATE
+    firmius::shared
+    GTest::gtest_main
+)
+target_include_directories(test_diff_rendering PRIVATE
+    ../../packages/tui/include
+    ../../packages/tui/src
+)
+gtest_discover_tests(test_diff_rendering)
+
 # Workflow tests
 add_executable(test_workflow
     workflow/test_workflow.cpp

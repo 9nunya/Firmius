@@ -55,8 +55,7 @@ int main(int argc, char **argv) {
       std::make_shared<firmius::tui::QuotasCommand>());
   firmius::tui::CommandManager::instance().registerCommand(
       std::make_shared<firmius::tui::AccountsCommand>());
-  firmius::tui::CommandManager::instance().registerCommand(
-      std::make_shared<firmius::tui::WorkflowsCommand>());
+  // Note: /workflows command removed - workflows are now registered as individual commands below
 
   // Register Modals
   firmius::tui::ModalRegistry::instance().registerModal(
@@ -71,6 +70,9 @@ int main(int argc, char **argv) {
 
   // Initialize workflow loader after harness (loads from ~/.firmius/workflows/)
   firmius::core::WorkflowLoader::instance().init();
+
+  // Register each workflow as its own command (e.g., /parallel_exploration)
+  firmius::tui::registerWorkflowCommands();
 
   auto &state = firmius::tui::TuiState::instance();
 

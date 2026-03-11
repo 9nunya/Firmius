@@ -42,6 +42,23 @@ public:
   Harness(Harness &&) = delete;
   Harness &operator=(Harness &&) = delete;
 
+  // Debug logging flag for verbose turn/tool/thinking output
+  bool debugLogging = false;
+
+  // Internal state for debug logging tool call lifecycle
+  enum class DebugToolPhase { Preparing, Called, Finished };
+  struct DebugToolState {
+    std::string name;
+    std::string args;
+    std::string result;
+    DebugToolPhase phase = DebugToolPhase::Preparing;
+    bool success = false;
+    std::string agentId;
+  };
+  std::map<std::string, DebugToolState> debugToolStates_;  // toolCallId -> state
+  std::map<std::string, std::string> debugAgentToolMap_;   // agentId -> current toolCallId
+  uint64_t lastTurnCompletionTime_ = 0;  // Track last turn completion time to avoid duplicates
+
   /**
    * Initialize the Harness.
    * - Scans Docker for containers with com.firmius.owner_pid=<pid> labels
@@ -159,6 +176,15 @@ public:
    * @param modelId The new model ID.
    */
   void switchModel(const std::string &providerId, const std::string &modelId);
+
+  /**
+   * Switches the model for the focused agent with a specific variant (idle-only).
+   * @param providerId The new provider ID.
+   * @param modelId The new model ID.
+   * @param variantName The model variant name (e.g., "low", "medium", "max").
+   */
+  void switchModel(const std::string &providerId, const std::string &modelId,
+                   const std::string &variantName);
 
   /**
    * Interrupts the focused agent and switches its model.

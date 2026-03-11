@@ -25,16 +25,26 @@ ftxui::Element ScrollableBoxComponent::Render() {
     if (at_bottom_) {
         selected_ = size_;
     }
+    
+    // Update viewport width for responsive layout
+    int viewport_w = 0;
+    if (box_.x_max >= box_.x_min) {
+        viewport_w = box_.x_max - box_.x_min + 1;
+    }
+    viewport_width_ = viewport_w;
+    
+    // Constrain content width to viewport to prevent horizontal overflow
+    if (viewport_w > 0) {
+        background = background | ftxui::size(ftxui::WIDTH, ftxui::EQUAL, viewport_w);
+    }
+    
     auto frame = background
         | ftxui::focusPosition(0, selected_)
         | ftxui::frame
         | ftxui::vscroll_indicator
         | ftxui::yflex
         | ftxui::reflect(box_);
-    // Update viewport width for responsive layout
-    if (box_.x_max >= box_.x_min) {
-        viewport_width_ = box_.x_max - box_.x_min + 1;
-    }
+    
     return frame;
 }
 

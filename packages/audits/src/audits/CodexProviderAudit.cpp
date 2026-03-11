@@ -23,9 +23,14 @@ shared::AuditResult CodexProviderAudit::run(const std::vector<std::string>&) {
     std::cout << "Starting Codex Provider Audit..." << std::endl;
     Panic::init();
     EnvLoader::load(".env.local");
-    setenv("FIRMIUS_PRETTY_PRINT", "1", 1);
     auto& harness = Harness::instance();
     harness.init();
+    harness.debugLogging = true;  // Enable debug logging for thinking/tool calls
+    
+    // Clean up any existing container from previous runs
+    std::string cleanupCmd = "docker rm -f codex-audit-sandbox 2>/dev/null || true";
+    system(cleanupCmd.c_str());
+    
     HostCreationOptions opts;
     opts.type = HostType::Docker;
     opts.containerName = "codex-audit-sandbox";
@@ -50,30 +55,44 @@ shared::AuditResult CodexProviderAudit::run(const std::vector<std::string>&) {
                 std::visit([&](auto&& e) {
                     using T = std::decay_t<decltype(e)>;
                     if constexpr (std::is_same_v<T, AgentError>) {
-                        std::cout << "[Event] AgentError: " << e.message << std::endl;
+                        if (!harness.debugLogging) {
+                            std::cout << "[Event] AgentError: " << e.message << std::endl;
+                        }
                         done = true;
                         cv.notify_one();
                     } else if constexpr (std::is_same_v<T, AgentTurnCompleted>) {
-                        std::cout << "[Event] AgentTurnCompleted" << std::endl;
+                        if (!harness.debugLogging) {
+                            std::cout << "[Event] AgentTurnCompleted" << std::endl;
+                        }
                         done = true;
                         cv.notify_one();
                     } else if constexpr (std::is_same_v<T, AgentText>) {
-                        std::cout << e.delta << std::flush;
+                        if (!harness.debugLogging) {
+                            std::cout << e.delta << std::flush;
+                        }
                         agentResponse += e.delta;
                         hadOutput = true;
                     } else if constexpr (std::is_same_v<T, AgentThinking>) {
-                        std::cout << "\x1B[3m" << e.delta << "\x1B[0m" << std::flush;
+                        if (!harness.debugLogging) {
+                            std::cout << "\x1B[3m" << e.delta << "\x1B[0m" << std::flush;
+                        }
                         hadOutput = true;
                     } else if constexpr (std::is_same_v<T, AgentToolCall>) {
-                        std::cout << "\n[Tool Call] " << e.toolName << "(" << e.toolArgs << ")" << std::endl;
+                        if (!harness.debugLogging) {
+                            std::cout << "\n[Tool Call] " << e.toolName << "(" << e.toolArgs << ")" << std::endl;
+                        }
                         std::ofstream out("/tmp/codex_request.json", std::ios::app);
                         out << "\n--- TOOL CALL ---\n" << e.toolName << "(" << e.toolArgs << ")\n";
                     } else if constexpr (std::is_same_v<T, AgentProcessSpawned>) {
-                        std::cout << "[Process Spawned] " << e.command << std::endl;
+                        if (!harness.debugLogging) {
+                            std::cout << "[Process Spawned] " << e.command << std::endl;
+                        }
                         std::ofstream out("/tmp/codex_request.json", std::ios::app);
                         out << "\n--- PROCESS SPAWNED ---\n" << e.command << "\n";
                     } else if constexpr (std::is_same_v<T, AgentProcessOutput>) {
-                        std::cout << e.output << std::flush;
+                        if (!harness.debugLogging) {
+                            std::cout << e.output << std::flush;
+                        }
                         std::ofstream out("/tmp/codex_request.json", std::ios::app);
                         out << "\n--- PROCESS OUTPUT ---\n" << e.output << "\n";
                     }

@@ -33,6 +33,12 @@ static std::string trim(const std::string &s) {
   return s.substr(start, end - start);
 }
 
+// These functions are used by table rendering which is conditionally compiled
+#ifdef __GNUC__
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
+#endif
+
 static bool isTableSeparator(const std::string &line) {
   if (line.find('|') == std::string::npos)
     return false;
@@ -202,17 +208,14 @@ static std::vector<std::string> wrapTokens(const std::string &text, int max_widt
 }
 
 static ftxui::Element renderInline(const std::string &text, bool dim, int max_width) {
+  (void)max_width; // Let hflow handle wrapping naturally based on container
+  
   if (text.find('*') == std::string::npos &&
       text.find('`') == std::string::npos) {
-    // Use wrapped text instead of paragraph for better width handling
-    auto wrapped = wrapTextToWidth(text, max_width);
-    ftxui::Elements elems;
-    for (const auto& line : wrapped) {
-      auto e = ftxui::text(line);
-      if (dim) e = e | ftxui::dim;
-      elems.push_back(e);
-    }
-    return elems.empty() ? ftxui::text("") : ftxui::vbox(std::move(elems));
+    // Simple text - let parent container handle wrapping via hflow
+    auto e = ftxui::text(text);
+    if (dim) e = e | ftxui::dim;
+    return e;
   }
 
   struct Span {
@@ -260,19 +263,16 @@ static ftxui::Element renderInline(const std::string &text, bool dim, int max_wi
 
   ftxui::Elements elems;
   for (const auto &sp : spans) {
-    auto tokens = wrapTokens(sp.text, max_width);
-    for (const auto &tok : tokens) {
-      auto e = ftxui::text(tok);
-      if (sp.bold)
-        e = e | ftxui::bold;
-      if (sp.italic)
-        e = e | ftxui::dim;
-      if (sp.code)
-        e = e | ftxui::inverted;
-      if (dim)
-        e = e | ftxui::dim;
-      elems.push_back(e);
-    }
+    auto e = ftxui::text(sp.text);
+    if (sp.bold)
+      e = e | ftxui::bold;
+    if (sp.italic)
+      e = e | ftxui::dim;
+    if (sp.code)
+      e = e | ftxui::dim | ftxui::color(ftxui::Color::RGB(100, 180, 160));
+    if (dim)
+      e = e | ftxui::dim;
+    elems.push_back(e);
   }
   if (elems.empty())
     return ftxui::text("");
@@ -436,5 +436,9 @@ ftxui::Element RenderMarkdown(const std::string &text, bool dim) {
   }
   return ftxui::vbox(std::move(out));
 }
+
+#ifdef __GNUC__
+#pragma GCC diagnostic pop
+#endif
 
 } // namespace firmius::tui

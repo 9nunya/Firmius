@@ -534,6 +534,25 @@ void Engine::switchAgentModel(const std::string &agentId,
                           modelId, agent->getContext().identity.parentId});
 }
 
+void Engine::switchAgentModel(const std::string &agentId,
+                              const std::string &providerId,
+                              const std::string &modelId,
+                              const std::string &variantName) {
+  auto agent = AgentRegistry::instance().getAgent(agentId);
+  if (!agent) {
+    throw std::runtime_error("Agent not found: " + agentId);
+  }
+
+  std::string oldProviderId = agent->getContext().config.providerId;
+  std::string oldModelId = agent->getContext().config.modelId;
+  std::string oldVariantName = agent->getContext().config.modelVariant;
+
+  agent->setModel(providerId, modelId, variantName);
+
+  broadcast(ModelSwitched{agentId, oldProviderId, oldModelId, providerId,
+                          modelId, agent->getContext().identity.parentId});
+}
+
 void Engine::executeTask(const std::string &agentId, const std::string &task) {
   auto agent = AgentRegistry::instance().getAgent(agentId);
   if (!agent) {

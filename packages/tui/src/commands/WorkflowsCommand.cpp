@@ -1,4 +1,5 @@
 #include "commands/WorkflowsCommand.hpp"
+#include "commands/CommandManager.hpp"
 #include "TUIState.hpp"
 #include "harness/Harness.hpp"
 #include "workflow/WorkflowLoader.hpp"
@@ -7,76 +8,73 @@
 
 namespace firmius::tui {
 
-std::vector<CommandArg> WorkflowsCommand::args() const {
+WorkflowCommand::WorkflowCommand(const firmius::core::Workflow &workflow)
+    : workflow_(workflow) {}
+
+std::vector<CommandArg> WorkflowCommand::args() const {
   std::vector<CommandArg> args;
 
-  // First arg: workflow ID (required)
-  CommandArg workflowArg;
-  workflowArg.name = "workflow_id";
-  workflowArg.type = ArgType::String;
-  workflowArg.description = "Workflow ID to execute";
-  workflowArg.optional = true; // Optional to allow listing
-  args.push_back(workflowArg);
-
-  // Additional args are dynamic based on workflow, but we'll accept strings
-  for (int i = 0; i < 10; ++i) {
+  for (const auto &wfArg : workflow_.args) {
     CommandArg arg;
-    arg.name = "arg" + std::to_string(i + 1);
-    arg.type = ArgType::String;
-    arg.description = "Argument " + std::to_string(i + 1);
-    arg.optional = true;
+    arg.name = wfArg.name;
+    arg.description = wfArg.description;
+    arg.optional = wfArg.optional;
+
+    // Map WorkflowArgType to CommandArg ArgType
+    switch (wfArg.type) {
+      case firmius::core::WorkflowArgType::String:
+        arg.type = ArgType::String;
+        break;
+      case firmius::core::WorkflowArgType::Number:
+        arg.type = ArgType::Number;
+        break;
+      case firmius::core::WorkflowArgType::Filepath:
+        arg.type = ArgType::Filepath;
+        break;
+      case firmius::core::WorkflowArgType::AgentId:
+        arg.type = ArgType::AgentId;
+        break;
+      case firmius::core::WorkflowArgType::ThreadId:
+        arg.type = ArgType::ThreadId;
+        break;
+    }
+
     args.push_back(arg);
   }
 
   return args;
 }
 
-void WorkflowsCommand::execute(CommandCtx &ctx,
-                               const std::vector<ParsedArg> &parsedArgs) {
+void WorkflowCommand::execute(CommandCtx &ctx,
+                              const std::vector<ParsedArg> &parsedArgs) {
   (void)ctx; // Mark as unused for now
-  auto &loader = firmius::core::WorkflowLoader::instance();
-  auto &harness = firmius::core::Harness::instance();
 
-  // If no workflow ID provided, list all workflows
-  if (parsedArgs.empty() || parsedArgs[0].raw_value.empty()) {
-    auto workflows = loader.getAllWorkflows();
-
-    std::stringstream ss;
-    ss << "## Available Workflows\n\n";
-    ss << "Use `/workflows <id> [arg1] [arg2] ...` to execute a workflow.\n\n";
-
-    for (const auto &wf : workflows) {
-      ss << "### " << wf.name << " (`" << wf.id << "`)\n\n";
-      ss << wf.description << "\n\n";
-      if (wf.argCount > 0) {
-        ss << "**Arguments:** " << wf.argCount << "\n\n";
-      }
-    }
-
-    // Display in TUI log/output
-    std::cout << ss.str() << std::endl;
-    return;
-  }
-
-  // Execute the specified workflow
-  std::string workflowId = parsedArgs[0].raw_value;
   std::vector<std::string> args;
+  args.reserve(parsedArgs.size());
 
-  // Collect arguments (skip the first one which is the workflow ID)
-  for (size_t i = 1; i < parsedArgs.size(); ++i) {
-    if (!parsedArgs[i].raw_value.empty()) {
-      args.push_back(parsedArgs[i].raw_value);
-    }
+  for (const auto &arg : parsedArgs) {
+    args.push_back(arg.raw_value);
   }
 
-  bool success = harness.executeWorkflow(workflowId, args);
+  auto &harness = firmius::core::Harness::instance();
+  bool success = harness.executeWorkflow(workflow_.id, args);
 
   if (!success) {
     std::stringstream ss;
     ss << "## Workflow Error\n\n";
-    ss << "Workflow '" << workflowId << "' not found.\n\n";
-    ss << "Use `/workflows` to list available workflows.\n";
+    ss << "Failed to execute workflow '" << workflow_.id << "'.\n";
     std::cout << ss.str() << std::endl;
+  }
+}
+
+void registerWorkflowCommands() {
+  auto &loader = firmius::core::WorkflowLoader::instance();
+  auto &commandManager = CommandManager::instance();
+
+  auto workflows = loader.getAllWorkflows();
+  for (const auto &workflow : workflows) {
+    commandManager.registerCommand(
+        std::make_shared<WorkflowCommand>(workflow));
   }
 }
 

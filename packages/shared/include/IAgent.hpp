@@ -78,6 +78,15 @@ public:
                         const std::string &modelId) = 0;
 
   /**
+   * @brief Sets the provider, model, and variant for this agent.
+   * @param providerId The provider ID.
+   * @param modelId The model ID.
+   * @param variantName The model variant name (e.g., "low", "medium", "max").
+   */
+  virtual void setModel(const std::string &providerId, const std::string &modelId,
+                        const std::string &variantName) = 0;
+
+  /**
    * @brief Checks if the agent is currently running.
    * @return True if the agent is executing a task.
    */

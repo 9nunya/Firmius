@@ -1,10 +1,25 @@
 #include "workflow/Workflow.hpp"
 #include <algorithm>
 #include <regex>
+#include <stdexcept>
 
 namespace firmius::core {
 
 std::string Workflow::build(const std::vector<std::string> &args) const {
+  // Validate required arguments
+  for (size_t i = 0; i < args.size() && i < this->args.size(); ++i) {
+    if (!this->args[i].optional && args[i].empty()) {
+      throw std::runtime_error("Missing required argument: " + this->args[i].name);
+    }
+  }
+
+  // Check that all required args are provided
+  for (size_t i = args.size(); i < this->args.size(); ++i) {
+    if (!this->args[i].optional) {
+      throw std::runtime_error("Missing required argument: " + this->args[i].name);
+    }
+  }
+
   std::string result = body;
 
   for (size_t i = 0; i < args.size(); ++i) {

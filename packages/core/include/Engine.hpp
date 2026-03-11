@@ -94,6 +94,16 @@ public:
     void switchAgentModel(const std::string& agentId, const std::string& providerId, const std::string& modelId);
 
     /**
+     * @brief Switches the provider/model/variant for an agent.
+     * @param agentId The agent ID.
+     * @param providerId The new provider ID.
+     * @param modelId The new model ID.
+     * @param variantName The model variant name (e.g., "low", "medium", "max").
+     */
+    void switchAgentModel(const std::string& agentId, const std::string& providerId, const std::string& modelId,
+                          const std::string& variantName);
+
+    /**
      * @brief Undoes the last N turns for an agent.
      * @param agentId The agent ID.
      * @param count Number of turns to undo.

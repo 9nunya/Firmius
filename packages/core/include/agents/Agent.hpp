@@ -40,6 +40,8 @@ public:
   bool isInterrupted() const override { return interrupted.load(); }
   void setModel(const std::string &providerId,
                 const std::string &modelId) override;
+  void setModel(const std::string &providerId, const std::string &modelId,
+                const std::string &variantName);
   bool isRunning() const override { return running.load(); }
   bool isBooting() const override { return booting.load(); }
   void setBooting(bool b) override { booting = b; }

@@ -1,5 +1,7 @@
 #include "components/FileReadToolBlock.hpp"
+#include "components/SyntaxHighlighter.hpp"
 #include "components/LogWindow.hpp"
+#include "UIState.hpp"
 #include <algorithm>
 #include <ftxui/dom/elements.hpp>
 #include <rapidjson/document.h>
@@ -31,7 +33,7 @@ ftxui::Component FileReadToolBlock(const std::shared_ptr<ToolCallView> &view) {
 
   return ftxui::Renderer(container, [view, toggle] {
     if (!view)
-      return ftxui::text("[file_read] <null>") | ftxui::dim;
+      return ftxui::text("File read call") | ftxui::dim;
 
     // Parse args
     std::string path_arg;
@@ -50,7 +52,13 @@ ftxui::Component FileReadToolBlock(const std::shared_ptr<ToolCallView> &view) {
       }
     }
 
-    std::string loc_str = path_arg;
+    // Get filename from path
+    std::string filename = path_arg;
+    auto pos = path_arg.find_last_of('/');
+    if (pos != std::string::npos && pos + 1 < path_arg.size())
+      filename = path_arg.substr(pos + 1);
+
+    std::string loc_str = filename;
     if (start_line != -1 && end_line != -1) {
       loc_str += " (" + std::to_string(start_line) + "-" +
                  std::to_string(end_line) + ")";
@@ -59,7 +67,11 @@ ftxui::Component FileReadToolBlock(const std::shared_ptr<ToolCallView> &view) {
     // ── Preparing / Called ──
     if (view->phase == ToolPhase::Preparing ||
         view->phase == ToolPhase::Called) {
-      return ftxui::text("[~] Reading " + loc_str + "...") | ftxui::dim;
+      return ftxui::hbox({
+        ftxui::text("⟳ ") | ftxui::color(ftxui::Color::Cyan),
+        ftxui::text("Reading ") | ftxui::dim,
+        ftxui::text(loc_str) | ftxui::color(ftxui::Color::RGB(160, 180, 200))
+      });
     }
 
     // ── Finished + error ──
@@ -67,8 +79,13 @@ ftxui::Component FileReadToolBlock(const std::shared_ptr<ToolCallView> &view) {
       std::string err_msg = view->result;
       if (err_msg.empty())
         err_msg = "unknown error";
-      return ftxui::text("[x] Read " + loc_str + " failed: " + err_msg) |
-             ftxui::color(ftxui::Color::Red);
+      if (err_msg.size() > 60)
+        err_msg = err_msg.substr(0, 57) + "…";
+
+      return ftxui::hbox({
+        ftxui::text("▸ ") | ftxui::color(ftxui::Color::Red),
+        ftxui::text("Read failed: " + err_msg) | ftxui::color(ftxui::Color::RedLight)
+      }) | ftxui::borderRounded | ftxui::color(ftxui::Color::RGB(200, 100, 100));
     }
 
     // ── Finished + success: code window ──
@@ -104,7 +121,7 @@ ftxui::Component FileReadToolBlock(const std::shared_ptr<ToolCallView> &view) {
     }
 
     int total_lines = static_cast<int>(all_lines.size());
-    int preview_count = 5;
+    int preview_count = 8;
     bool has_more = total_lines > preview_count;
     int remaining = has_more ? total_lines - preview_count : 0;
 
@@ -115,48 +132,119 @@ ftxui::Component FileReadToolBlock(const std::shared_ptr<ToolCallView> &view) {
     int lines_to_show =
         view->show_result ? total_lines : std::min(preview_count, total_lines);
     int line_num_start = (meta_line_start != -1) ? meta_line_start : 1;
-    
-    std::vector<ftxui::Element> code_lines;
-    for (int i = 0; i < lines_to_show; i++) {
-      int ln = line_num_start + i;
-      std::string gutter = std::to_string(ln);
-      // Pad gutter to consistent width
-      while (gutter.size() < 3)
-        gutter = " " + gutter;
 
-      code_lines.push_back(ftxui::hbox({ftxui::text(gutter + "| ") | ftxui::dim,
-                                        ftxui::text(all_lines[i])}));
+    // Use syntax highlighting if enabled
+    bool use_syntax_highlight = UIState::instance().syntaxHighlightingEnabled;
+    std::string detected_lang = SyntaxHighlighter::instance().detectLanguage(filename);
+    
+    ftxui::Elements code_lines;
+    int gutter_width = std::to_string(line_num_start + lines_to_show).size();
+
+    if (use_syntax_highlight && SyntaxHighlighter::instance().hasGrammar(detected_lang)) {
+      // Highlight content and split into lines
+      auto tokens = SyntaxHighlighter::instance().highlight(content, detected_lang);
+      
+      // Convert tokens to lines
+      std::vector<std::pair<std::string, ftxui::Color>> line_segments;
+      std::string current_text;
+      ftxui::Color current_color = ftxui::Color::RGB(180, 180, 200);
+      
+      for (const auto& token : tokens) {
+        // Map TokenType to Color
+        ftxui::Color token_color;
+        switch (token.type) {
+          case TokenType::Keyword: token_color = ftxui::Color::RGB(200, 120, 255); break;
+          case TokenType::Type: token_color = ftxui::Color::RGB(80, 180, 220); break;
+          case TokenType::Function: token_color = ftxui::Color::RGB(100, 200, 150); break;
+          case TokenType::String: token_color = ftxui::Color::RGB(230, 150, 120); break;
+          case TokenType::Comment: token_color = ftxui::Color::RGB(100, 120, 140); break;
+          case TokenType::Number: token_color = ftxui::Color::RGB(255, 180, 100); break;
+          case TokenType::Constant: token_color = ftxui::Color::RGB(100, 200, 200); break;
+          default: token_color = ftxui::Color::RGB(180, 180, 200); break;
+        }
+        
+        // Split token by newlines
+        size_t pos = 0;
+        while (pos < token.text.size()) {
+          size_t nl = token.text.find('\n', pos);
+          if (nl == std::string::npos) {
+            // Rest of token
+            current_text += token.text.substr(pos);
+            current_color = token_color;
+            break;
+          } else {
+            // Complete current line
+            current_text += token.text.substr(pos, nl - pos);
+            line_segments.push_back({current_text, current_color});
+            current_text.clear();
+            pos = nl + 1;
+          }
+        }
+      }
+      if (!current_text.empty()) {
+        line_segments.push_back({current_text, current_color});
+      }
+      
+      // Render lines with line numbers
+      for (int i = 0; i < lines_to_show && i < static_cast<int>(line_segments.size()); i++) {
+        int ln = line_num_start + i;
+        std::string gutter = std::to_string(ln);
+        while (static_cast<int>(gutter.size()) < gutter_width)
+          gutter = " " + gutter;
+
+        code_lines.push_back(ftxui::hbox({
+          ftxui::text(gutter + " │ ") | ftxui::dim | ftxui::color(ftxui::Color::RGB(100, 100, 130)),
+          ftxui::text(line_segments[i].first) | ftxui::color(line_segments[i].second)
+        }));
+      }
+    } else {
+      // No syntax highlighting - use plain text
+      for (int i = 0; i < lines_to_show; i++) {
+        int ln = line_num_start + i;
+        std::string gutter = std::to_string(ln);
+        while (static_cast<int>(gutter.size()) < gutter_width)
+          gutter = " " + gutter;
+
+        code_lines.push_back(ftxui::hbox({
+          ftxui::text(gutter + " │ ") | ftxui::dim | ftxui::color(ftxui::Color::RGB(100, 100, 130)),
+          ftxui::text(all_lines[i]) | ftxui::color(ftxui::Color::RGB(180, 180, 200))
+        }));
+      }
     }
 
     if (has_more && !view->show_result) {
       code_lines.push_back(
-          ftxui::text("   .. " + std::to_string(remaining) + " more lines..") |
-          ftxui::dim);
+          ftxui::text("   … " + std::to_string(remaining) + " more lines") |
+          ftxui::dim | ftxui::color(ftxui::Color::RGB(120, 120, 150)));
     }
 
-    std::string effective_path = path_arg.empty() ? "<path>" : path_arg;
-    int effective_end = meta_line_end;
-    if (effective_end < line_num_start) {
-      effective_end = line_num_start + total_lines - 1;
-    }
     std::string footer;
-    if (read_full && !effective_path.empty()) {
-      footer = "Fully read " + effective_path;
+    if (read_full) {
+      footer = "Fully read " + filename;
     } else {
-      footer = "Read " + effective_path + " (" +
-               std::to_string(line_num_start) + "-" +
-               std::to_string(std::max(line_num_start, effective_end)) + ")";
+      int effective_end = meta_line_end > 0 ? meta_line_end : line_num_start + total_lines - 1;
+      footer = filename + " (" + std::to_string(line_num_start) + "–" +
+               std::to_string(effective_end) + ")";
     }
 
-    std::vector<ftxui::Element> rows;
-    rows.push_back(LogWindow(code_lines, footer, view->toggle_label));
+    ftxui::Elements rows;
+    rows.push_back(ftxui::hbox({
+      ftxui::text("▸ ") | ftxui::color(ftxui::Color::RGB(100, 180, 220)),
+      ftxui::text(filename + " ") | ftxui::bold | ftxui::color(ftxui::Color::RGB(140, 200, 240)),
+      ftxui::filler(),
+      ftxui::text(std::to_string(total_lines) + " lines") | ftxui::dim
+    }));
+
+    rows.push_back(ftxui::separatorLight());
+    rows.push_back(ftxui::vbox(code_lines) | ftxui::frame);
+
     if (has_more || view->show_result) {
       rows.push_back(
-          ftxui::hbox({ftxui::text("[") | ftxui::dim, toggle->Render(),
+          ftxui::hbox({ftxui::text("  [") | ftxui::dim, toggle->Render(),
                        ftxui::text("]") | ftxui::dim}));
     }
 
-    return ftxui::vbox(rows);
+    return ftxui::vbox(rows) | ftxui::borderRounded | ftxui::color(ftxui::Color::RGB(130, 160, 180));
   });
 }
 

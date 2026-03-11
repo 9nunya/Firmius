@@ -96,6 +96,24 @@ void Agent::setModel(const std::string &providerId,
   provider = newProvider;
 }
 
+void Agent::setModel(const std::string &providerId, const std::string &modelId,
+                     const std::string &variantName) {
+  if (running.load()) {
+    throw std::runtime_error("Cannot switch model while agent is running");
+  }
+
+  auto newProvider =
+      firmius::provider::ProviderRegistry::instance().getProvider(providerId);
+  if (!newProvider) {
+    throw std::runtime_error("Unknown provider: " + providerId);
+  }
+
+  context.config.providerId = providerId;
+  context.config.modelId = modelId;
+  context.config.modelVariant = variantName;
+  provider = newProvider;
+}
+
 std::string Agent::spawnProcess(const std::string &command,
                                 const std::string &toolCallId,
                                 const std::string &cwd,

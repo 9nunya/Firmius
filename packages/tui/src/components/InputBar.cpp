@@ -477,11 +477,12 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
       std::vector<ftxui::Element> match_elements;
       for (size_t i = 0; i < ac->command_matches.size() && i < 5; ++i) {
         const auto &match = ac->command_matches[i];
+        bool is_selected = (i == static_cast<size_t>(*suggestion_index));
 
         auto match_text = ftxui::text("/" + match.name) | ftxui::bold |
-                          ftxui::color(ftxui::Color::White);
-        if (i == static_cast<size_t>(*suggestion_index))
-          match_text = match_text | ftxui::inverted;
+                          ftxui::color(is_selected ? ftxui::Color::Black : ftxui::Color::White);
+        if (is_selected)
+          match_text = match_text | ftxui::bgcolor(ftxui::Color::Cyan);
 
         match_elements.push_back(
             ftxui::hbox({match_text, ftxui::text("  "),
@@ -522,9 +523,11 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
           ftxui::Elements rows;
           for (size_t i = 0; i < suggestions.size(); ++i) {
             const auto &match = suggestions[i];
-            auto label = ftxui::text(" " + match.id) | ftxui::bold;
-            if (i == static_cast<size_t>(*suggestion_index))
-              label = label | ftxui::inverted;
+            bool is_selected = (i == static_cast<size_t>(*suggestion_index));
+            auto label = ftxui::text(" " + match.id) | ftxui::bold |
+                         ftxui::color(is_selected ? ftxui::Color::Black : ftxui::Color::GrayLight);
+            if (is_selected)
+              label = label | ftxui::bgcolor(ftxui::Color::Cyan);
             auto meta = ftxui::text(" [" + match.type_label + "]") |
                         ftxui::dim;
             rows.push_back(ftxui::hbox({label, ftxui::filler(), meta}));
@@ -554,7 +557,62 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
     // Helper to render buffer with pasted blocks highlighted
     auto renderBufferWithBlocks = [&]() -> ftxui::Element {
       if (model->pasted_blocks.empty()) {
-        return with_keys->Render() | ftxui::flex;
+        // Simple case: no pasted blocks, manually wrap long lines
+        const std::string& content = *model->buffer;
+        int cursor = *model->cursor;
+        
+        // Split into lines and wrap long ones
+        std::vector<std::string> raw_lines = splitLines(content);
+        ftxui::Elements line_elements;
+        
+        int char_pos = 0;
+        for (const auto& raw_line : raw_lines) {
+          // Wrap long lines to ~80 characters
+          const size_t WRAP_WIDTH = 80;
+          size_t line_start = 0;
+          
+          while (line_start < raw_line.size()) {
+            size_t line_len = std::min(WRAP_WIDTH, raw_line.size() - line_start);
+            std::string segment = raw_line.substr(line_start, line_len);
+            
+            // Calculate cursor position for this segment
+            int seg_start = char_pos;
+            int seg_end = char_pos + segment.size();
+            bool cursor_here = (cursor >= seg_start && cursor <= seg_end);
+            
+            ftxui::Element seg_elem;
+            if (cursor_here) {
+              int local_cursor = cursor - seg_start;
+              if (local_cursor < static_cast<int>(segment.size())) {
+                seg_elem = ftxui::hbox({
+                  ftxui::text(segment.substr(0, local_cursor)),
+                  ftxui::text(segment.substr(local_cursor, 1)) | ftxui::inverted | ftxui::focus,
+                  ftxui::text(segment.substr(local_cursor + 1))
+                });
+              } else {
+                seg_elem = ftxui::hbox({
+                  ftxui::text(segment),
+                  ftxui::text(" ") | ftxui::inverted | ftxui::focus
+                });
+              }
+            } else {
+              seg_elem = ftxui::text(segment);
+            }
+            
+            line_elements.push_back(seg_elem);
+            char_pos += line_len;
+            line_start += line_len;
+          }
+          
+          // Handle newline
+          if (char_pos < cursor) cursor++; // Account for newline in cursor position
+          char_pos++;
+          if (line_start >= raw_line.size()) {
+            line_elements.push_back(ftxui::text(""));
+          }
+        }
+        
+        return ftxui::vbox(std::move(line_elements)) | ftxui::flex;
       }
       
       // Custom rendering to show pasted blocks with special styling
@@ -613,18 +671,23 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
         
         // Render rest of line if no block or after block
         if (!has_block) {
-          bool cursor_here = (cursor >= static_cast<int>(line_start) && 
+          bool cursor_here = (cursor >= static_cast<int>(line_start) &&
                               cursor <= static_cast<int>(line_end));
           if (cursor_here) {
             int local_cursor = cursor - line_start;
-            if (local_cursor < static_cast<int>(line.size())) {
+            // Fix: cursor position should be correct, not ahead
+            if (local_cursor <= static_cast<int>(line.size())) {
               line_parts.push_back(ftxui::text(line.substr(0, local_cursor)));
-              line_parts.push_back(ftxui::text(line.substr(local_cursor, 1)) | 
-                                  ftxui::inverted | ftxui::focus);
-              line_parts.push_back(ftxui::text(line.substr(local_cursor + 1)));
+              if (local_cursor < static_cast<int>(line.size())) {
+                line_parts.push_back(ftxui::text(line.substr(local_cursor, 1)) |
+                                    ftxui::inverted | ftxui::focus);
+                line_parts.push_back(ftxui::text(line.substr(local_cursor + 1)));
+              } else {
+                // Cursor at end of line
+                line_parts.push_back(ftxui::text(" ") | ftxui::inverted | ftxui::focus);
+              }
             } else {
               line_parts.push_back(ftxui::text(line));
-              line_parts.push_back(ftxui::text(" ") | ftxui::inverted | ftxui::focus);
             }
           } else {
             line_parts.push_back(ftxui::text(line));
@@ -647,7 +710,7 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
           line_elements.push_back(ftxui::text(" ") | ftxui::inverted | ftxui::focus);
         }
       }
-      
+
       return ftxui::vbox(std::move(line_elements)) | ftxui::flex;
     };
 
@@ -687,12 +750,22 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
           std::string suf = "";
           int len = static_cast<int>(all_lines[i].size());
 
-          if (cursor_col <= len) {
+          // Fix: cursor should be at the correct position, not ahead by one
+          if (cursor_col < len) {
+            // Cursor is on a character
             pre = all_lines[i].substr(0, cursor_col);
-            if (cursor_col < len) {
-              cur_char = all_lines[i][cursor_col];
-              suf = all_lines[i].substr(cursor_col + 1);
-            }
+            cur_char = all_lines[i][cursor_col];
+            suf = all_lines[i].substr(cursor_col + 1);
+          } else if (cursor_col == len) {
+            // Cursor is at end of line - show space cursor
+            pre = all_lines[i];
+            cur_char = " ";
+            suf = "";
+          } else {
+            // Cursor is beyond line - shouldn't happen but handle gracefully
+            pre = all_lines[i];
+            cur_char = " ";
+            suf = "";
           }
 
           line_el = ftxui::hbox({
@@ -720,13 +793,14 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
                     std::to_string(total_lines) + " \xe2\x86\x93]";
       }
 
-      auto line_hint = ftxui::text(indicator) | ftxui::dim | 
+      auto line_hint = ftxui::text(indicator) | ftxui::dim |
                        ftxui::color(ftxui::Color::RGB(100, 100, 140));
 
-      input_display = ftxui::hbox({
-          ftxui::vbox(std::move(visible_elements)) | ftxui::flex,
-          line_hint,
-      });
+      auto wrapped_content = ftxui::vbox(std::move(visible_elements)) | ftxui::flex;
+      ftxui::Elements input_parts;
+      input_parts.push_back(wrapped_content);
+      input_parts.push_back(line_hint);
+      input_display = ftxui::hbox(std::move(input_parts));
     }
 
     auto input_area = ftxui::hbox({prompt, input_display});

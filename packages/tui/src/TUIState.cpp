@@ -1,5 +1,7 @@
 #include "TUIState.hpp"
 #include "AgentRegistry.hpp"
+#include "NotificationManager.hpp"
+#include "UIState.hpp"
 #include "commands/CommandManager.hpp"
 #include "components/AgentStrip.hpp"
 #include "components/ChatWindow.hpp"
@@ -8,6 +10,7 @@
 #include "components/StatusBar.hpp"
 #include "components/TitleBar.hpp"
 #include "components/ToolBlock.hpp"
+#include "components/HelpOverlay.hpp"
 #include "harness/Harness.hpp"
 #include "modals/ModalRegistry.hpp"
 #include "modals/ThreadLockedModal.hpp"
@@ -603,9 +606,15 @@ ftxui::Component TuiState::root() {
           }
         }
 
-        auto chat_area = (view_mode_ == ViewMode::Chat)
-                             ? (chat->Render() | ftxui::flex)
-                             : welcome_screen->Render();
+        ftxui::Element chat_area;
+        if (view_mode_ == ViewMode::Chat) {
+          chat_area = chat->Render() | ftxui::flex;
+        } else if (view_mode_ == ViewMode::ProcessFocus) {
+          // Process focus mode - show process output prominently
+          chat_area = chat->Render() | ftxui::flex;
+        } else {
+          chat_area = welcome_screen->Render();
+        }
 
         // Ultra-compact bottom bar layout
         auto bottom_bar = ftxui::vbox({
@@ -614,16 +623,28 @@ ftxui::Component TuiState::root() {
             status_bar->Render(),
         });
 
+        ftxui::Element main_view;
         if (view_mode_ == ViewMode::Welcome) {
-          return ftxui::vbox({chat_area, bottom_bar}) | ftxui::flex;
+          main_view = ftxui::vbox({chat_area, bottom_bar}) | ftxui::flex;
+        } else {
+          main_view = ftxui::vbox({
+                     title_bar->Render(),
+                     chat_area | ftxui::flex,
+                     bottom_bar,
+                 }) | ftxui::flex;
         }
 
-        return ftxui::vbox({
-                   title_bar->Render(),
-                   chat_area | ftxui::flex,
-                   bottom_bar,
-               }) |
-               ftxui::flex;
+        // Layer help overlay
+        if (show_help_) {
+          auto help = HelpOverlay();
+          main_view = ftxui::dbox({main_view, help->Render()});
+        }
+
+        // Layer notifications
+        auto notifications = NotificationManager::instance().render();
+        main_view = ftxui::dbox({main_view, notifications});
+
+        return main_view;
       });
 
   // Layer modals using dbox
@@ -793,6 +814,80 @@ ftxui::Component TuiState::root() {
           }
         }
       }
+      return true;
+    }
+
+    // Ctrl+H - Toggle notifications
+    if (event == ftxui::Event::Special("\x08")) {
+      NotificationManager::instance().toggleVisibility();
+      return true;
+    }
+
+    // Ctrl+G - Toggle diff expansion
+    if (event == ftxui::Event::Special("\x07")) {
+      diffs_expanded_ = !diffs_expanded_;
+      UIState::instance().diffsExpanded = diffs_expanded_;
+      
+      if (diffs_expanded_) {
+        NotificationManager::instance().notifyInfo(
+          "Diffs Expanded",
+          "Showing full diff content",
+          std::chrono::milliseconds(2000)
+        );
+      } else {
+        NotificationManager::instance().notifyInfo(
+          "Diffs Collapsed",
+          "Showing top 3 relevant hunks (10 lines max)",
+          std::chrono::milliseconds(2000)
+        );
+      }
+      return true;
+    }
+
+    // ? - Toggle help overlay (only when input is empty)
+    if (event == ftxui::Event::Character("?")) {
+      if (input_.empty() && cursor_ == 0) {
+        show_help_ = !show_help_;
+        return true;
+      }
+    }
+
+    // Ctrl+F - Focus on process (interactive mode)
+    if (event == ftxui::Event::Special("\x06")) {
+      if (!focused_agent_id_.empty()) {
+        auto agent = firmius::core::AgentRegistry::instance().getAgent(
+            focused_agent_id_);
+        if (agent) {
+          const auto& ctx = agent->getContext();
+          if (!ctx.state.ownedProcesses.empty()) {
+            focused_process_id_ = ctx.state.ownedProcesses.front();
+            view_mode_ = ViewMode::ProcessFocus;
+            NotificationManager::instance().notifyInfo(
+              "Process Focus",
+              "Interactive mode enabled. Type to send input to process.",
+              std::chrono::milliseconds(3000)
+            );
+            return true;
+          }
+        }
+      }
+      NotificationManager::instance().notifyWarning(
+        "No Process",
+        "No active background process to focus on.",
+        std::chrono::milliseconds(2000)
+      );
+      return true;
+    }
+
+    // Exit process focus mode with Escape
+    if (event == ftxui::Event::Escape && view_mode_ == ViewMode::ProcessFocus) {
+      view_mode_ = ViewMode::Chat;
+      focused_process_id_.clear();
+      NotificationManager::instance().notifyInfo(
+        "Process Focus",
+        "Exited process focus mode.",
+        std::chrono::milliseconds(2000)
+      );
       return true;
     }
 

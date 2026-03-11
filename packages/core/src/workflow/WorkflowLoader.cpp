@@ -8,8 +8,98 @@
 #include <optional>
 #include <regex>
 #include <sstream>
+#include <cctype>
 
 namespace firmius::core {
+
+/**
+ * Parse a YAML args array from frontmatter lines.
+ * Expects format:
+ * args:
+ *   - name: arg_name
+ *     type: string|number|filepath|agent_id|thread_id
+ *     description: Some description
+ *     optional: true|false
+ */
+static std::vector<WorkflowArg> parseYamlArgs(const std::vector<std::string> &frontmatterLines) {
+  std::vector<WorkflowArg> args;
+  bool inArgsArray = false;
+  WorkflowArg currentArg;
+  bool hasCurrentArg = false;
+
+  for (const auto &line : frontmatterLines) {
+    // Skip empty lines
+    if (line.empty()) continue;
+
+    // Check for args: key
+    if (line.substr(0, 5) == "args:") {
+      inArgsArray = true;
+      continue;
+    }
+
+    if (!inArgsArray) continue;
+
+    // Check if we've left the args section (new top-level key)
+    if (line[0] != ' ' && line[0] != '\t' && line.find(':') != std::string::npos) {
+      // Save current arg if any
+      if (hasCurrentArg) {
+        args.push_back(currentArg);
+        hasCurrentArg = false;
+      }
+      inArgsArray = false;
+      continue;
+    }
+
+    // Parse array item start
+    if (line.substr(0, 2) == "- ") {
+      // Save previous arg if any
+      if (hasCurrentArg) {
+        args.push_back(currentArg);
+      }
+      hasCurrentArg = true;
+      currentArg = WorkflowArg{};
+      currentArg.optional = false;
+
+      // Check if there's inline content after "- "
+      std::string inlineContent = firmius::shared::StringUtil::trim(line.substr(2));
+      if (inlineContent.substr(0, 5) == "name:") {
+        currentArg.name = firmius::shared::StringUtil::trim(inlineContent.substr(5));
+      }
+      continue;
+    }
+
+    // Parse arg properties
+    if (hasCurrentArg) {
+      auto colon = line.find(':');
+      if (colon == std::string::npos) continue;
+
+      std::string key = firmius::shared::StringUtil::trim(line.substr(0, colon));
+      std::string value = firmius::shared::StringUtil::trim(line.substr(colon + 1));
+
+      if (key == "name") {
+        currentArg.name = value;
+      } else if (key == "type") {
+        if (value == "string") currentArg.type = WorkflowArgType::String;
+        else if (value == "number") currentArg.type = WorkflowArgType::Number;
+        else if (value == "filepath") currentArg.type = WorkflowArgType::Filepath;
+        else if (value == "agent_id") currentArg.type = WorkflowArgType::AgentId;
+        else if (value == "thread_id") currentArg.type = WorkflowArgType::ThreadId;
+        else currentArg.type = WorkflowArgType::String; // default
+      } else if (key == "description") {
+        currentArg.description = value;
+      } else if (key == "optional") {
+        currentArg.optional = (value == "true" || value == "yes" || value == "1");
+      }
+    }
+  }
+
+  // Don't forget the last arg
+  if (hasCurrentArg) {
+    args.push_back(currentArg);
+  }
+
+  return args;
+}
 
 WorkflowLoader &WorkflowLoader::instance() {
   static WorkflowLoader inst;
@@ -91,7 +181,7 @@ std::optional<Workflow> WorkflowLoader::loadWorkflow(const std::string &path) {
   }
 
   std::string line;
-  std::string frontmatter;
+  std::vector<std::string> frontmatterLines;
   std::string body;
   bool inFrontmatter = false;
   int dashCount = 0;
@@ -107,7 +197,7 @@ std::optional<Workflow> WorkflowLoader::loadWorkflow(const std::string &path) {
     }
 
     if (inFrontmatter)
-      frontmatter += line + "\n";
+      frontmatterLines.push_back(line);
     else
       body += line + "\n";
   }
@@ -119,21 +209,23 @@ std::optional<Workflow> WorkflowLoader::loadWorkflow(const std::string &path) {
   workflow.id = fsPath.stem().string();
 
   // Parse frontmatter
-  std::stringstream ss_fm(frontmatter);
-  while (std::getline(ss_fm, line)) {
-    auto colon = line.find(':');
+  for (const auto &fmLine : frontmatterLines) {
+    auto colon = fmLine.find(':');
     if (colon == std::string::npos)
       continue;
 
-    std::string key = firmius::shared::StringUtil::trim(line.substr(0, colon));
+    std::string key = firmius::shared::StringUtil::trim(fmLine.substr(0, colon));
     std::string value =
-        firmius::shared::StringUtil::trim(line.substr(colon + 1));
+        firmius::shared::StringUtil::trim(fmLine.substr(colon + 1));
 
     if (key == "name")
       workflow.name = value;
     else if (key == "description")
       workflow.description = value;
   }
+
+  // Parse YAML args array if present
+  workflow.args = parseYamlArgs(frontmatterLines);
 
   // Set defaults if not provided
   if (workflow.name.empty()) {
@@ -167,7 +259,7 @@ std::optional<Workflow> WorkflowLoader::loadWorkflow(const std::string &path) {
 
   workflow.body = firmius::shared::StringUtil::trim(body);
 
-  // Count argument placeholders ($1, $2, etc.)
+  // Count argument placeholders ($1, $2, etc.) for legacy support
   std::regex argPattern(R"(\$([0-9]+))");
   auto begin = std::sregex_iterator(workflow.body.begin(), workflow.body.end(),
                                     argPattern);
@@ -180,6 +272,20 @@ std::optional<Workflow> WorkflowLoader::loadWorkflow(const std::string &path) {
     maxArg = std::max(maxArg, argNum);
   }
   workflow.argCount = maxArg;
+
+  // If no YAML args defined, fall back to legacy mode (argCount from $N placeholders)
+  // If YAML args defined, use those and ignore argCount
+  if (workflow.args.empty() && workflow.argCount > 0) {
+    // Legacy mode: create generic string args based on $N placeholders
+    for (size_t i = 0; i < workflow.argCount; ++i) {
+      WorkflowArg arg;
+      arg.name = "arg" + std::to_string(i + 1);
+      arg.type = WorkflowArgType::String;
+      arg.description = "Argument " + std::to_string(i + 1);
+      arg.optional = false;
+      workflow.args.push_back(arg);
+    }
+  }
 
   return workflow;
 }

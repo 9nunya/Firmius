@@ -5,6 +5,7 @@
 #include "EventQueue.hpp"
 #include "Events.hpp"
 #include "StreamStateManager.hpp"
+#include "NotificationManager.hpp"
 #include <ftxui/component/component_base.hpp>
 #include <ftxui/component/screen_interactive.hpp>
 #include <memory>
@@ -43,7 +44,7 @@ public:
 
   ftxui::Component root();
 
-  enum class ViewMode { Welcome, Chat };
+  enum class ViewMode { Welcome, Chat, ProcessFocus };
   void setViewMode(ViewMode mode);
   ViewMode getViewMode() const;
 
@@ -89,10 +90,16 @@ private:
   std::vector<ftxui::Component> modals_; // Used as a stack
   bool pending_modal_clear_ =
       false; // Deferred clear to avoid UB in modal handlers
+  bool show_help_ = false;
+  bool diffs_expanded_ = true; // Ctrl+G toggle for diff expansion
 
   ftxui::Component root_component_;
   ftxui::Component chat_component_;
   ftxui::Component input_component_;
+  
+  // Process focus mode
+  std::string focused_process_id_;
+  bool process_focus_expanded_ = false;
 };
 
 } // namespace firmius::tui
