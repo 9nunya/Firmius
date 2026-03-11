@@ -1,4 +1,5 @@
 #include "providers/CodexProvider.hpp"
+#include "providers/BackoffConstants.hpp"
 #include "utils/GCPHttpClient.hpp"
 #include "utils/StringUtil.hpp"
 #include "utils/TempOAuthServer.hpp"
@@ -44,7 +45,6 @@ constexpr char kDefaultInstructions[] =
 constexpr std::uint32_t kDefaultContextWindow = 272000;
 constexpr int kQuotaRefreshSeconds = 3600;
 constexpr int kAccountRetryLimit = 5;
-constexpr int kRateLimitBackoffSeconds = 60;
 
 struct RetrySettings {
   static constexpr int BASE_DELAY_MS = 1000;
@@ -1376,7 +1376,8 @@ void CodexProvider::stream(const AgentHistory &history,
       }
 
       if (isTokenExpired(acc) && !refreshAccessToken(acc)) {
-        markAccountRateLimited(acc, kRateLimitBackoffSeconds);
+        // Use unified backoff constant from shared
+        markAccountRateLimited(acc, firmius::shared::BackoffConstants::MAX_BACKOFF);
         break;
       }
 
@@ -1476,7 +1477,8 @@ void CodexProvider::stream(const AgentHistory &history,
         return;
       }
 
-      int backoff = std::min(60, 1 << accountRetries);
+      // Use unified backoff sequence from shared constants
+      int backoff = firmius::shared::BackoffConstants::getBackoffSeconds(accountRetries);
       if (code == 401 || code == 403) {
         markAccountRateLimited(acc, backoff);
         break;

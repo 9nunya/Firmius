@@ -1,5 +1,6 @@
 #include "providers/AntigravityProvider.hpp"
 #include "providers/AntigravityProtocol.hpp"
+#include "providers/BackoffConstants.hpp"
 #include "utils/GCPHttpClient.hpp"
 #include "utils/TempOAuthServer.hpp"
 #include <atomic>
@@ -621,7 +622,8 @@ void AntigravityProvider::stream(
         } else {
           lastError = "Rate limited (HTTP " + std::to_string(resp.code) + ")";
         }
-        int backoff = std::min(60, 1 << accountRetries);
+        // Use unified backoff sequence from shared constants
+        int backoff = firmius::shared::BackoffConstants::getBackoffSeconds(accountRetries);
         markAccountRateLimited(acc, backoff);
         break;
       }

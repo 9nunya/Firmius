@@ -20,3 +20,9 @@ add_subdirectory(packages/audits)
 add_subdirectory(tests/shared)
 add_subdirectory(tests/core)
 add_subdirectory(tests/unit)
+
+# Install the firmius binary to user's bin location
+install(TARGETS firmius DESTINATION bin)
+
+# Install prompts directory to ~/.firmius/prompts/
+install(DIRECTORY prompts/ DESTINATION $ENV{HOME}/.firmius/prompts)

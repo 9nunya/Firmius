@@ -1,4 +1,5 @@
 #include "providers/BaseOpenAIProvider.hpp"
+#include "providers/BackoffConstants.hpp"
 #include <cctype>
 #include <chrono>
 #include <curl/curl.h>
@@ -149,7 +150,9 @@ bool BaseOpenAIProvider::isNonRetriableStatus(int httpStatus) const {
 
 int BaseOpenAIProvider::calculateRetryDelay(int attempt,
                                             int headerDelayMs) const {
-  int exponentialDelay = RetryConstants::BASE_DELAY_MS * (1 << attempt);
+  // Use unified backoff sequence from shared constants
+  int backoffSeconds = firmius::shared::BackoffConstants::getBackoffSeconds(attempt);
+  int exponentialDelay = backoffSeconds * 1000;
   int computedDelay = std::min(exponentialDelay, RetryConstants::MAX_DELAY_MS);
   int baseDelay = std::max(computedDelay, headerDelayMs);
 

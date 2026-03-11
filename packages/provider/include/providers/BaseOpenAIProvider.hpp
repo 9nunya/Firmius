@@ -2,6 +2,7 @@
 #define FIRMIUS_PROVIDER_BASE_OPENAI_PROVIDER_HPP
 
 #include "IProvider.hpp"
+#include "providers/BackoffConstants.hpp"
 #include <string>
 #include <map>
 #include <vector>
@@ -12,6 +13,7 @@ namespace firmius::provider {
 
 /**
  * @brief Constants for retry logic with exponential backoff.
+ * @deprecated Use firmius::shared::BackoffConstants instead.
  */
 struct RetryConstants {
     static constexpr int BASE_DELAY_MS = 1000;      ///< Base delay for exponential backoff (1 second).

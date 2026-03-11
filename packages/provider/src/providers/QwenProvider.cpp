@@ -1,4 +1,5 @@
 #include "providers/QwenProvider.hpp"
+#include "providers/BackoffConstants.hpp"
 #include "utils/GCPHttpClient.hpp"
 #include "utils/Logger.hpp"
 #include "utils/StringUtil.hpp"
@@ -1248,7 +1249,7 @@ bool QwenProvider::executeStreamRequest(
   if (resp.code == 401 || resp.code == 403) {
     // Token expired or invalid - mark for refresh
     acc.rateLimited = true;
-    acc.backoffUntil = nowSeconds() + 60;
+    acc.backoffUntil = nowSeconds() + firmius::shared::BackoffConstants::MAX_BACKOFF;
     onEvent(StreamError{"Authentication failed. Token may be expired.",
                         static_cast<int>(resp.code), acc.getIdentifier()});
   } else if (resp.code == 429 || (resp.code == 400 && errMsg.find("insufficient_quota") != std::string::npos)) {
