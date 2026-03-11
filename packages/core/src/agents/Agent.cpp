@@ -13,6 +13,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <future>
 #include <iostream>
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
@@ -310,7 +311,6 @@ void Agent::run(const std::string &task,
       bool sawThinking = false;
       bool sawTool = false;
       bool mixedContentAndTools = false;
-      std::vector<ToolCallChunk> bufferedToolEvents;
 
       if (debugPrettyPrint) {
         std::cout << "\n\033[1;36m--- " << context.identity.id.substr(0, 6)
@@ -387,7 +387,8 @@ void Agent::run(const std::string &task,
             mixedContentAndTools = true;
           }
           sawTool = true;
-          bufferedToolEvents.push_back(*tcc);
+          // Emit immediately so TUI can show "Preparing" state
+          onEvent(ev);
           bool found = false;
           bool argsStarted = false;
           for (auto &existing : accumulatedToolChunks) {
@@ -438,11 +439,8 @@ void Agent::run(const std::string &task,
         }
       });
 
-      if (!sawContent) {
-        for (const auto &tcc : bufferedToolEvents) {
-          onEvent(tcc);
-        }
-      }
+      // ToolCallChunk events are now emitted immediately above
+      // No need to re-emit buffered events
 
       // If mixed content/tool output occurred, prefer tool calls and drop
       // visible text.
@@ -740,49 +738,82 @@ void Agent::executeTools(const std::vector<ToolCallChunk> &chunks,
   toolResultTurn.turnId =
       "tools-" + std::to_string(context.history->turns.size());
 
+  // Execute ALL tools in parallel using futures
+  struct ToolExecution {
+    std::string toolCallId;
+    std::string name;
+    std::string args;
+    std::future<std::tuple<std::string, bool, std::string, std::string>> future;
+  };
+  
+  std::vector<ToolExecution> executions;
+  
+  // First pass: start all tool executions in parallel
   for (const auto &chunk : chunks) {
     if (interrupted.load())
-      return;
+      break;
+      
     rapidjson::Document input;
     input.Parse(chunk.argsDelta.c_str());
-
-    std::string resultStr;
-    bool success = false;
-
-    std::string resultProcessId;
-    std::string resultSubagentId;
-
+    
     if (input.HasParseError()) {
-      resultStr = "Invalid JSON arguments: " + chunk.argsDelta;
-      success = false;
-    } else {
-      if (debugPrettyPrint) {
-        std::cout << "\033[1;34m[Executing " << chunk.nameDelta << " with "
-                  << chunk.argsDelta << "]\033[0m\n";
-      }
-
-      ToolContext toolCtx{*host, *this, chunk.id};
-      auto result = toolRegistry.execute(chunk.nameDelta, input, toolCtx);
-      resultProcessId = result.processId;
-      resultSubagentId = result.subagentId;
-
-      if (result.success) {
-        resultStr = result.data;
-        success = true;
-      } else {
-        resultStr = "Error: " + result.error;
-        success = false;
-      }
+      // Invalid JSON - create error result immediately
+      Message msg;
+      msg.role = Role::ToolResult;
+      msg.content.push_back(ToolResultContent{chunk.id, 
+        "Invalid JSON arguments: " + chunk.argsDelta, false, "", ""});
+      auto now = std::chrono::system_clock::now();
+      msg.timestamp = static_cast<uint64_t>(
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+              now.time_since_epoch()).count());
+      toolResultTurn.messages.push_back(msg);
+      continue;
     }
-
+    
+    // Capture chunk data for async execution
+    std::string toolName = chunk.nameDelta;
+    std::string toolArgs = chunk.argsDelta;
+    std::string toolId = chunk.id;
+    
+    // Launch tool execution in async thread
+    auto future = std::async(std::launch::async, 
+      [this, toolName, toolArgs, toolId]() -> std::tuple<std::string, bool, std::string, std::string> {
+        rapidjson::Document input;
+        input.Parse(toolArgs.c_str());
+        
+        ToolContext toolCtx{*host, *this, toolId};
+        auto result = toolRegistry.execute(toolName, input, toolCtx);
+        
+        std::string resultStr;
+        if (result.success) {
+          resultStr = result.data;
+        } else {
+          resultStr = "Error: " + result.error;
+        }
+        
+        return {resultStr, result.success, result.processId, result.subagentId};
+      });
+    
+    executions.push_back({toolId, toolName, toolArgs, std::move(future)});
+  }
+  
+  // Second pass: collect all results (already running in parallel)
+  for (auto &exec : executions) {
+    if (interrupted.load())
+      break;
+      
+    auto [resultStr, success, resultProcessId, resultSubagentId] = exec.future.get();
+    
     if (debugPrettyPrint) {
+      std::cout << "\033[1;34m[Executing " << exec.name << " with "
+                << exec.args << "]\033[0m\n";
       std::cout << "\033[1;32m[Result: " << resultStr.substr(0, 200)
                 << (resultStr.size() > 200 ? "..." : "") << "]\033[0m\n";
     }
-
+    
     Message msg;
     msg.role = Role::ToolResult;
-    msg.content.push_back(ToolResultContent{chunk.id, resultStr, success,
+    msg.content.push_back(ToolResultContent{exec.toolCallId, resultStr, success,
                                             resultProcessId, resultSubagentId});
     auto now = std::chrono::system_clock::now();
     msg.timestamp = static_cast<uint64_t>(
@@ -790,29 +821,27 @@ void Agent::executeTools(const std::vector<ToolCallChunk> &chunks,
             now.time_since_epoch())
             .count());
     toolResultTurn.messages.push_back(msg);
-
+    
     // Track edited files for file_edit and file_write tools
     if (success) {
-      if (chunk.nameDelta == "file_edit" || chunk.nameDelta == "file_write") {
-        if (!input.HasParseError()) {
-          if (input.HasMember("path")) {
-            std::string filePath = input["path"].GetString();
-            // Normalize path and add to editedFiles if not already tracked
-            if (std::find(context.state.editedFiles.begin(),
-                          context.state.editedFiles.end(),
-                          filePath) == context.state.editedFiles.end()) {
-              context.state.editedFiles.push_back(filePath);
-            }
-            // Add a completed action entry
-            std::string actionDesc = "Edited file: " + filePath;
-            context.state.completedActions.push_back(actionDesc);
+      if (exec.name == "file_edit" || exec.name == "file_write") {
+        rapidjson::Document input;
+        input.Parse(exec.args.c_str());
+        if (!input.HasParseError() && input.HasMember("path")) {
+          std::string filePath = input["path"].GetString();
+          if (std::find(context.state.editedFiles.begin(),
+                        context.state.editedFiles.end(),
+                        filePath) == context.state.editedFiles.end()) {
+            context.state.editedFiles.push_back(filePath);
           }
+          std::string actionDesc = "Edited file: " + filePath;
+          context.state.completedActions.push_back(actionDesc);
         }
       }
     }
-
+    
     // Track this tool call signature after successful execution
-    std::string signature = chunk.nameDelta + ":" + chunk.argsDelta;
+    std::string signature = exec.name + ":" + exec.args;
     context.state.recentToolCallSignatures.push_back(signature);
   }
 

@@ -5,6 +5,7 @@
 #include "audits/CodexProviderAudit.hpp"
 #include "audits/CodexQuotaAudit.hpp"
 #include "audits/HarnessChaosAudit.hpp"
+#include "audits/OAuthWizardAudit.hpp"
 #include "audits/P15Audit.hpp"
 #include "audits/ProviderAudit.hpp"
 #include "audits/QwenProviderAudit.hpp"
@@ -26,6 +27,7 @@ std::vector<std::unique_ptr<shared::IAudit>> createAudits() {
     audits.push_back(std::make_unique<QwenProviderAudit>());
     audits.push_back(std::make_unique<QwenQuotaAudit>());
     audits.push_back(std::make_unique<HarnessChaosAudit>());
+    audits.push_back(std::make_unique<OAuthWizardAudit>());
     return audits;
 }
 

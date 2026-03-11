@@ -23,7 +23,7 @@ shared::AuditResult QwenProviderAudit::run(const std::vector<std::string>&) {
     std::cout << "Starting Qwen Provider Audit..." << std::endl;
     Panic::init();
     EnvLoader::load(".env.local");
-    setenv("FIRMIUS_PRETTY_PRINT", "1", 1);
+    // Note: FIRMIUS_PRETTY_PRINT removed - it persists in environment and breaks TUI
     auto& harness = Harness::instance();
     harness.init();
     HostCreationOptions opts;
@@ -39,7 +39,7 @@ shared::AuditResult QwenProviderAudit::run(const std::vector<std::string>&) {
             break;
         }
         std::cout << "Docker thread created: " << threadId << std::endl;
-        harness.switchModel("qwen", "qwen3.5-plus");
+        harness.switchModel("qwen", "coder-model");
         auto runTurn = [&](const std::string& prompt) -> bool {
             std::mutex mtx;
             std::condition_variable cv;

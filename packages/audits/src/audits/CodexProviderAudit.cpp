@@ -39,7 +39,7 @@ shared::AuditResult CodexProviderAudit::run(const std::vector<std::string>&) {
             break;
         }
         std::cout << "Docker thread created: " << threadId << std::endl;
-        harness.switchModel("codex", "gpt-5.2-codex");
+        harness.switchModel("codex", "gpt-5.1-codex-mini");
         auto runTurn = [&](const std::string& prompt) -> bool {
             std::mutex mtx;
             std::condition_variable cv;

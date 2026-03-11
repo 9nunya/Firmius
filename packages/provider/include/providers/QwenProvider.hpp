@@ -78,7 +78,7 @@ private:
   static std::map<std::string, ModelInfo> getStaticModels();
 
   // Sends the OpenAI-compatible chat completions request
-  void executeStreamRequest(OAuthAccount &acc, const AgentHistory &history,
+  bool executeStreamRequest(OAuthAccount &acc, const AgentHistory &history,
                             const ProviderOptions &opts,
                             std::function<void(const StreamEvent &)> &onEvent);
 

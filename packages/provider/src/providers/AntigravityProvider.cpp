@@ -170,7 +170,7 @@ public:
       uDoc.Parse(uResp.body.c_str());
       if (!uDoc.HasParseError() && uDoc.IsObject() && uDoc.HasMember("email") &&
           uDoc["email"].IsString()) {
-        acc.email = uDoc["email"].GetString();
+        acc.identifier = uDoc["email"].GetString();
       }
     }
 
@@ -505,17 +505,17 @@ void AntigravityProvider::stream(
       return;
     }
     OAuthAccount &acc = *optAcc.value();
-    lastAccountEmail = acc.email;
+    lastAccountEmail = acc.getIdentifier();
 
     if (accountRetries > 0) {
-      onEvent(StreamAccountSwitched{acc.email});
+      onEvent(StreamAccountSwitched{acc.getIdentifier()});
     }
 
     for (int retryAttempt = 0; retryAttempt < 4; ++retryAttempt) {
       if (retryAttempt > 0) {
         onEvent(StreamRetrying{retryAttempt, 4, 0,
                                (1 << (retryAttempt - 1)) * 1000,
-                               "Connection error", acc.email});
+                               "Connection error", acc.getIdentifier()});
         std::this_thread::sleep_for(
             std::chrono::seconds(1 << (retryAttempt - 1)));
       }
@@ -629,7 +629,7 @@ void AntigravityProvider::stream(
         std::string errMsg = "API error: " + std::to_string(resp.code);
         if (!ctx.buffer.empty())
           errMsg += "\n" + ctx.buffer;
-        onEvent(StreamError{errMsg, (int)resp.code, acc.email});
+        onEvent(StreamError{errMsg, (int)resp.code, acc.getIdentifier()});
         return;
       }
     }

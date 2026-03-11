@@ -87,19 +87,32 @@ std::optional<OAuthAccount *> BaseOAuthProvider::getAvailableAccount(
       }
     }
 
-    if (!acc.rateLimited) {
-      // Un-expired or we can refresh it successfully
-      if (!isTokenExpired(acc) || refreshAccessToken(acc)) {
-        lastUsedIndex_ = currentIdx;
-        saveAccounts();
-        return &acc;
+    // Check if account is quota-exhausted (Qwen-specific)
+    // Check if ANY model has quota "0" - means account is exhausted
+    bool isQuotaExhausted = false;
+    for (const auto &[key, val] : acc.metadata) {
+      if (key.rfind("quota:", 0) == 0 && val == "0") {
+        isQuotaExhausted = true;
+        break;
       }
+    }
+
+    if (!acc.rateLimited && !isQuotaExhausted) {
+      // Check token expiration but DON'T update lastUsedIndex_ yet
+      // (only update on successful request to avoid sticking to failed accounts)
+      if (isTokenExpired(acc) && !refreshAccessToken(acc)) {
+        // Token expired and refresh failed, skip this account
+        currentIdx = (currentIdx + 1) % static_cast<int>(accounts_.size());
+        continue;
+      }
+      // Return account without updating lastUsedIndex_
+      return &acc;
     }
 
     currentIdx = (currentIdx + 1) % static_cast<int>(accounts_.size());
   } while (currentIdx != startIdx);
 
-  // If all are rate limited, return the one closest to unlocking (or just the
+  // If all are rate limited or quota exhausted, return the one closest to unlocking (or just the
   // next one as fallback)
   return std::nullopt;
 }
@@ -140,8 +153,20 @@ void BaseOAuthProvider::loadAccounts() {
     for (rapidjson::SizeType i = 0; i < arr.Size(); i++) {
       const auto &item = arr[i];
       OAuthAccount acc;
-      if (item.HasMember("email") && item["email"].IsString())
-        acc.email = item["email"].GetString();
+      // Migration: load from "identifier" (new) or "email" (legacy)
+      if (item.HasMember("identifier") && item["identifier"].IsString()) {
+        acc.identifier = item["identifier"].GetString();
+      } else if (item.HasMember("email") && item["email"].IsString()) {
+        acc.identifier = item["email"].GetString();
+      }
+      // If identifier is empty, generate from access token hash
+      if (acc.identifier.empty() && item.HasMember("accessToken") && item["accessToken"].IsString()) {
+        std::string token = item["accessToken"].GetString();
+        if (!token.empty()) {
+          // Use first 12 chars of token as temporary identifier
+          acc.identifier = token.substr(0, std::min(size_t(12), token.size()));
+        }
+      }
       if (item.HasMember("refreshToken") && item["refreshToken"].IsString())
         acc.refreshToken = item["refreshToken"].GetString();
       if (item.HasMember("accessToken") && item["accessToken"].IsString())
@@ -194,8 +219,8 @@ void BaseOAuthProvider::saveAccounts() {
   rapidjson::Value arr(rapidjson::kArrayType);
   for (const auto &acc : accounts_) {
     rapidjson::Value obj(rapidjson::kObjectType);
-    obj.AddMember("email",
-                  rapidjson::Value(acc.email.c_str(), doc.GetAllocator()),
+    obj.AddMember("identifier",
+                  rapidjson::Value(acc.identifier.c_str(), doc.GetAllocator()),
                   doc.GetAllocator());
     obj.AddMember(
         "refreshToken",

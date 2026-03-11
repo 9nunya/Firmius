@@ -51,7 +51,7 @@ ftxui::Component AccountsModal::create(TuiState &state) {
 
         ftxui::Elements rows;
         for (int i = 0; i < (int)accounts->size(); ++i) {
-          auto label = ftxui::text("  " + (*accounts)[i].email + "  ");
+          auto label = ftxui::text("  " + (*accounts)[i].identifier + "  ");
           if (i == *selected) {
             label = label | ftxui::inverted | ftxui::bold |
                     ftxui::color(ftxui::Color::Yellow);
@@ -123,8 +123,8 @@ ftxui::Component AccountsModal::create(TuiState &state) {
         event == ftxui::Event::Character('d') ||
         event == ftxui::Event::Character('D')) {
       if (!accounts->empty() && *selected < (int)accounts->size()) {
-        std::string email = (*accounts)[*selected].email;
-        firmius::core::Harness::instance().deleteAccount(providerId, email);
+        std::string identifier = (*accounts)[*selected].identifier;
+        firmius::core::Harness::instance().deleteAccount(providerId, identifier);
         refreshAccounts();
         if (*selected >= (int)accounts->size() && *selected > 0)
           (*selected)--;

@@ -9,6 +9,7 @@ target_sources(firmius_audits PRIVATE
     src/audits/CodexProviderAudit.cpp
     src/audits/CodexQuotaAudit.cpp
     src/audits/HarnessChaosAudit.cpp
+    src/audits/OAuthWizardAudit.cpp
     src/audits/P15Audit.cpp
     src/audits/ProviderAudit.cpp
     src/audits/QwenProviderAudit.cpp
@@ -27,6 +28,7 @@ target_sources(firmius_audits PUBLIC
     include/audits/CodexProviderAudit.hpp
     include/audits/CodexQuotaAudit.hpp
     include/audits/HarnessChaosAudit.hpp
+    include/audits/OAuthWizardAudit.hpp
     include/audits/P15Audit.hpp
     include/audits/ProviderAudit.hpp
     include/audits/QwenProviderAudit.hpp

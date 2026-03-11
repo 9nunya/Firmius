@@ -810,7 +810,7 @@ public:
     acc.tokenExpiration = nowSeconds() + token.expiresIn;
     acc.metadata["chatgpt_account_id"] = accountId.value();
     auto email = extractEmailFromJwt(token.access);
-    acc.email = email.value_or(accountId.value());
+    acc.identifier = email.value_or(accountId.value());
 
     provider_->addAccount(acc);
     return true;
@@ -974,12 +974,12 @@ bool CodexProvider::refreshAccessToken(OAuthAccount &acc) {
   if (accountId.has_value() && !accountId->empty()) {
     acc.metadata["chatgpt_account_id"] = accountId.value();
   }
-  if (acc.email.empty()) {
+  if (acc.identifier.empty()) {
     auto email = extractEmailFromJwt(token.access);
     if (email.has_value())
-      acc.email = email.value();
+      acc.identifier = email.value();
     else if (accountId.has_value())
-      acc.email = accountId.value();
+      acc.identifier = accountId.value();
   }
 
   saveAccounts();

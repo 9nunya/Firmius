@@ -1,11 +1,13 @@
 #include "providers/QwenProvider.hpp"
 #include "utils/GCPHttpClient.hpp"
+#include "utils/Logger.hpp"
 #include "utils/StringUtil.hpp"
 #include "utils/TempOAuthServer.hpp"
-#include "utils/Logger.hpp"
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <ctime>
+#include <iostream>
 #include <random>
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
@@ -16,14 +18,21 @@
 namespace firmius::provider {
 
 // Initialize static constants
-const std::string QwenProvider::QWEN_OAUTH_CLIENT_ID = "f0304373b74a44d2b584a3fb70ca9e56";
-const std::string QwenProvider::QWEN_OAUTH_SCOPE = "openid profile email model.completion";
-const std::string QwenProvider::QWEN_OAUTH_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code";
-const std::string QwenProvider::QWEN_OAUTH_DEVICE_CODE_ENDPOINT = "https://chat.qwen.ai/api/v1/oauth2/device/code";
-const std::string QwenProvider::QWEN_OAUTH_TOKEN_ENDPOINT = "https://chat.qwen.ai/api/v1/oauth2/token";
+const std::string QwenProvider::QWEN_OAUTH_CLIENT_ID =
+    "f0304373b74a44d2b584a3fb70ca9e56";
+const std::string QwenProvider::QWEN_OAUTH_SCOPE =
+    "openid profile email model.completion";
+const std::string QwenProvider::QWEN_OAUTH_GRANT_TYPE =
+    "urn:ietf:params:oauth:grant-type:device_code";
+const std::string QwenProvider::QWEN_OAUTH_DEVICE_CODE_ENDPOINT =
+    "https://chat.qwen.ai/api/v1/oauth2/device/code";
+const std::string QwenProvider::QWEN_OAUTH_TOKEN_ENDPOINT =
+    "https://chat.qwen.ai/api/v1/oauth2/token";
 const std::string QwenProvider::QWEN_API_BASE_URL = "https://portal.qwen.ai/v1";
-const std::string QwenProvider::QWEN_CHAT_ENDPOINT = "https://portal.qwen.ai/v1/chat/completions";
-const std::string QwenProvider::QWEN_MODELS_ENDPOINT = "https://portal.qwen.ai/v1/models";
+const std::string QwenProvider::QWEN_CHAT_ENDPOINT =
+    "https://portal.qwen.ai/v1/chat/completions";
+const std::string QwenProvider::QWEN_MODELS_ENDPOINT =
+    "https://portal.qwen.ai/v1/models";
 
 namespace {
 
@@ -46,6 +55,8 @@ struct StreamContext {
 };
 
 // Generate PKCE code verifier (32 bytes, base64url encoded)
+// Following RFC 7636: verifier is base64url(random bytes), no padding
+// 32 bytes = 43 base64url characters
 std::string generateVerifier() {
   std::vector<uint8_t> bytes(32);
   std::random_device rd;
@@ -53,34 +64,29 @@ std::string generateVerifier() {
   for (auto &b : bytes)
     b = static_cast<uint8_t>(dist(rd));
 
-  // Base64url encode
-  static const char *chars =
-      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  std::string out;
-  int val = 0;
-  int valb = -6;
-  for (uint8_t c : bytes) {
-    val = (val << 8) + c;
-    valb += 8;
-    while (valb >= 0) {
-      out.push_back(chars[(val >> valb) & 0x3F]);
-      valb -= 6;
-    }
-  }
-  while (out.size() % 4)
-    out.push_back('=');
+  // Use standard base64url encoding (RFC 4648 Section 5)
+  static const char *table =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
-  // Convert to base64url
-  for (char &c : out) {
-    if (c == '+')
-      c = '-';
-    else if (c == '/')
-      c = '_';
-  }
-  while (!out.empty() && out.back() == '=')
-    out.pop_back();
+  std::string result;
+  result.reserve(43);
 
-  return out;
+  for (size_t i = 0; i < bytes.size(); i += 3) {
+    uint32_t n = static_cast<uint32_t>(bytes[i]) << 16;
+    if (i + 1 < bytes.size())
+      n |= static_cast<uint32_t>(bytes[i + 1]) << 8;
+    if (i + 2 < bytes.size())
+      n |= static_cast<uint32_t>(bytes[i + 2]);
+
+    result.push_back(table[(n >> 18) & 0x3F]);
+    result.push_back(table[(n >> 12) & 0x3F]);
+    if (i + 1 < bytes.size())
+      result.push_back(table[(n >> 6) & 0x3F]);
+    if (i + 2 < bytes.size())
+      result.push_back(table[n & 0x3F]);
+  }
+
+  return result;
 }
 
 // SHA256 for PKCE code challenge
@@ -221,37 +227,34 @@ std::vector<uint8_t> sha256(const std::string &input) {
 }
 
 // Generate code challenge from verifier
+// Following RFC 7636: challenge is base64url(SHA256(verifier)), no padding
+// SHA256 = 32 bytes = 43 base64url characters
 std::string generateCodeChallenge(const std::string &verifier) {
   auto hash = sha256(verifier);
 
-  // Base64url encode
-  static const char *chars =
-      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  std::string out;
-  int val = 0;
-  int valb = -6;
-  for (uint8_t c : hash) {
-    val = (val << 8) + c;
-    valb += 8;
-    while (valb >= 0) {
-      out.push_back(chars[(val >> valb) & 0x3F]);
-      valb -= 6;
-    }
-  }
-  while (out.size() % 4)
-    out.push_back('=');
+  // Use standard base64url encoding (RFC 4648 Section 5)
+  static const char *table =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
-  // Convert to base64url
-  for (char &c : out) {
-    if (c == '+')
-      c = '-';
-    else if (c == '/')
-      c = '_';
-  }
-  while (!out.empty() && out.back() == '=')
-    out.pop_back();
+  std::string result;
+  result.reserve(43);
 
-  return out;
+  for (size_t i = 0; i < hash.size(); i += 3) {
+    uint32_t n = static_cast<uint32_t>(hash[i]) << 16;
+    if (i + 1 < hash.size())
+      n |= static_cast<uint32_t>(hash[i + 1]) << 8;
+    if (i + 2 < hash.size())
+      n |= static_cast<uint32_t>(hash[i + 2]);
+
+    result.push_back(table[(n >> 18) & 0x3F]);
+    result.push_back(table[(n >> 12) & 0x3F]);
+    if (i + 1 < hash.size())
+      result.push_back(table[(n >> 6) & 0x3F]);
+    if (i + 2 < hash.size())
+      result.push_back(table[n & 0x3F]);
+  }
+
+  return result;
 }
 
 // URL encode for form data
@@ -264,8 +267,8 @@ std::string urlEncode(const std::string &value) {
         c == '_' || c == '~') {
       escaped << c;
     } else {
-      escaped << '%' << std::uppercase << std::setw(2)
-              << static_cast<int>(c) << std::nouppercase;
+      escaped << '%' << std::uppercase << std::setw(2) << static_cast<int>(c)
+              << std::nouppercase;
     }
   }
   return escaped.str();
@@ -339,9 +342,8 @@ public:
     firmius::utils::GCPHttpClient client;
     client.setContentType("application/x-www-form-urlencoded");
 
-    auto resp = client.post(
-        QwenProvider::QWEN_OAUTH_DEVICE_CODE_ENDPOINT,
-        objectToUrlEncoded(bodyData));
+    auto resp = client.post(QwenProvider::QWEN_OAUTH_DEVICE_CODE_ENDPOINT,
+                            objectToUrlEncoded(bodyData));
 
     if (resp.code != 200) {
       prompt_ = "Failed to initiate OAuth: HTTP " + std::to_string(resp.code);
@@ -380,16 +382,16 @@ public:
 
     prompt_ = "Qwen OAuth Authorization\n\n"
               "1. Open this URL in your browser:\n"
-              "   " + verificationUriComplete_ +
+              "   " +
+              verificationUriComplete_ +
               "\n\n"
-              "2. Enter the code: " + userCode_ +
+              "2. Enter the code: " +
+              userCode_ +
               "\n\n"
               "3. Press Enter after completing authorization...";
 
     // Start polling in background thread
-    pollingThread_ = std::thread([this]() {
-      pollForToken();
-    });
+    pollingThread_ = std::thread([this]() { pollForToken(); });
   }
 
   ~QwenOAuthWizard() override {
@@ -413,12 +415,12 @@ public:
     }
   }
 
-  bool isComplete() const override { 
-    return isComplete_ || tokenReceived_; 
+  bool isComplete() const override {
+    return isComplete_.load() || tokenReceived_.load();
   }
 
   bool finalizeExchange(std::string &outErrorMessage) override {
-    if (!tokenReceived_) {
+    if (!tokenReceived_.load()) {
       outErrorMessage = "OAuth authorization not completed: " + prompt_;
       return false;
     }
@@ -428,7 +430,7 @@ public:
     acc.accessToken = accessToken_;
     acc.refreshToken = refreshToken_;
     acc.tokenExpiration = tokenExpiration_;
-    acc.email = email_;
+    acc.identifier = email_;
 
     provider_->addAccount(acc);
     return true;
@@ -452,7 +454,8 @@ private:
 
     std::uint64_t startTime = nowMs();
     int interval = 5000; // 5 seconds initial interval
-    const std::uint64_t timeoutMs = static_cast<std::uint64_t>(expiresIn_) * 1000 - 3000;
+    const std::uint64_t timeoutMs =
+        static_cast<std::uint64_t>(expiresIn_) * 1000 - 3000;
 
     while ((nowMs() - startTime) < timeoutMs) {
       auto resp = client.post(QwenProvider::QWEN_OAUTH_TOKEN_ENDPOINT,
@@ -462,8 +465,7 @@ private:
         rapidjson::Document doc;
         doc.Parse(resp.body.c_str());
         if (!doc.HasParseError() && doc.IsObject()) {
-          if (doc.HasMember("access_token") &&
-              doc["access_token"].IsString()) {
+          if (doc.HasMember("access_token") && doc["access_token"].IsString()) {
             accessToken_ = doc["access_token"].GetString();
           }
           if (doc.HasMember("refresh_token") &&
@@ -480,8 +482,8 @@ private:
           if (!accessToken_.empty()) {
             // Fetch user email from token
             fetchUserEmail();
-            tokenReceived_ = true;
-            isComplete_ = true;
+            tokenReceived_.store(true);
+            isComplete_.store(true);
             return;
           }
         }
@@ -489,8 +491,8 @@ private:
         // Check for specific OAuth errors
         rapidjson::Document doc;
         doc.Parse(resp.body.c_str());
-        if (!doc.HasParseError() && doc.IsObject() &&
-            doc.HasMember("error") && doc["error"].IsString()) {
+        if (!doc.HasParseError() && doc.IsObject() && doc.HasMember("error") &&
+            doc["error"].IsString()) {
           std::string error = doc["error"].GetString();
 
           if (error == "authorization_pending") {
@@ -545,8 +547,8 @@ private:
                   : (c >= 'a' && c <= 'z') ? c - 'a' + 26
                   : (c >= '0' && c <= '9') ? c - '0' + 52
                   : (c == '+')             ? 62
-                                           : (c == '/') ? 63
-                                                        : -1;
+                  : (c == '/')             ? 63
+                                           : -1;
           if (d == -1)
             continue;
           val = (val << 6) + d;
@@ -575,13 +577,12 @@ private:
     if (email_.empty()) {
       firmius::utils::GCPHttpClient client;
       client.setBearerToken(accessToken_);
-      auto resp =
-          client.get("https://chat.qwen.ai/api/v1/oauth2/userinfo", 10);
+      auto resp = client.get("https://chat.qwen.ai/api/v1/oauth2/userinfo", 10);
       if (resp.code == 200) {
         rapidjson::Document doc;
         doc.Parse(resp.body.c_str());
-        if (!doc.HasParseError() && doc.IsObject() &&
-            doc.HasMember("email") && doc["email"].IsString()) {
+        if (!doc.HasParseError() && doc.IsObject() && doc.HasMember("email") &&
+            doc["email"].IsString()) {
           email_ = doc["email"].GetString();
         }
       }
@@ -591,8 +592,8 @@ private:
   QwenProvider *provider_;
   std::string prompt_;
   bool promptShown_ = false;
-  bool isComplete_ = false;
-  bool tokenReceived_ = false;
+  std::atomic<bool> isComplete_ = false;
+  std::atomic<bool> tokenReceived_ = false;
 
   std::string verifier_;
   std::string challenge_;
@@ -756,13 +757,58 @@ bool QwenProvider::refreshAccessToken(OAuthAccount &acc) {
 }
 
 void QwenProvider::refreshQuotas() {
-  // Qwen OAuth is free tier, no quota tracking needed
-  // But we can still update token expiration
+  // Qwen OAuth free tier (2k requests/day) has no quota API endpoint
+  // We track quota status based on API responses:
+  // - "insufficient_quota" error -> mark quota as 0 until midnight UTC
+  // - Successful request -> quota available (100%)
+  // - Network errors/timeouts -> don't mark as exhausted, just retry
+  
   int64_t now = nowSeconds();
+  
+  // Calculate next midnight UTC
+  std::time_t now_t = static_cast<std::time_t>(now);
+  std::tm *tm = std::gmtime(&now_t);
+  tm->tm_mday += 1;
+  tm->tm_hour = 0;
+  tm->tm_min = 0;
+  tm->tm_sec = 0;
+  int64_t midnight = static_cast<int64_t>(std::mktime(tm));
+  
+  char resetBuf[64];
+  std::strftime(resetBuf, sizeof(resetBuf), "%Y-%m-%dT%H:%M:%SZ", std::gmtime(reinterpret_cast<std::time_t*>(&midnight)));
+  
   for (auto &acc : accounts_) {
+    // Refresh token if expired
     if (isTokenExpired(acc)) {
       refreshAccessToken(acc);
     }
+    
+    // Check if this account has any quota set to "0" (exhausted)
+    bool wasExhausted = false;
+    for (const auto &[key, val] : acc.metadata) {
+      if (key.rfind("quota:", 0) == 0 && val == "0") {
+        wasExhausted = true;
+        break;
+      }
+    }
+    
+    if (wasExhausted) {
+      // Still exhausted - keep quota as 0, set reset time
+      acc.metadata["quota_reset:coder-model"] = resetBuf;
+    } else {
+      // Not exhausted - assume quota available (we'll discover otherwise on first request)
+      acc.metadata["quota:coder-model"] = "1";
+      acc.metadata["quota:qwen3-coder-plus"] = "1";
+      acc.metadata["quota:qwen3-coder-flash"] = "1";
+      acc.metadata["quota:qwen3.5-plus"] = "1";
+      acc.metadata["quota:vision-model"] = "1";
+      acc.metadata["quota_reset:coder-model"] = resetBuf;
+      
+      // Clear any stale rate-limiting from network errors
+      acc.rateLimited = false;
+      acc.backoffUntil = 0;
+    }
+    
     acc.lastQuotaRefresh = now;
   }
   saveAccounts();
@@ -770,8 +816,42 @@ void QwenProvider::refreshQuotas() {
 
 std::map<std::string, std::vector<QuotaBucket>>
 QwenProvider::getAllQuotas() const {
-  // Qwen OAuth is free tier, return empty quotas
-  return {};
+  std::map<std::string, std::vector<QuotaBucket>> result;
+  
+  for (const auto &acc : accounts_) {
+    std::vector<QuotaBucket> buckets;
+    
+    // Check each model's quota
+    std::vector<std::string> models = {
+      "coder-model", "qwen3-coder-plus", "qwen3-coder-flash", 
+      "qwen3.5-plus", "vision-model"
+    };
+    
+    for (const auto &model : models) {
+      std::string quotaKey = "quota:" + model;
+      std::string resetKey = "quota_reset:" + model;
+      
+      float remaining = 1.0f; // Default to available
+      if (acc.metadata.count(quotaKey)) {
+        try {
+          remaining = std::stof(acc.metadata.at(quotaKey));
+        } catch (...) {
+          remaining = 1.0f;
+        }
+      }
+      
+      std::string resetTime;
+      if (acc.metadata.count(resetKey)) {
+        resetTime = acc.metadata.at(resetKey);
+      }
+      
+      buckets.push_back(QuotaBucket{model, remaining, resetTime});
+    }
+    
+    result[acc.getIdentifier()] = buckets;
+  }
+  
+  return result;
 }
 
 size_t QwenProvider::sseWriteCallback(char *ptr, size_t size, size_t nmemb,
@@ -787,7 +867,8 @@ size_t QwenProvider::sseWriteCallback(char *ptr, size_t size, size_t nmemb,
   size_t newlinePos;
   while ((newlinePos = ctx->buffer.find('\n', ctx->readOffset)) !=
          std::string::npos) {
-    std::string line = ctx->buffer.substr(ctx->readOffset, newlinePos - ctx->readOffset);
+    std::string line =
+        ctx->buffer.substr(ctx->readOffset, newlinePos - ctx->readOffset);
     ctx->readOffset = newlinePos + 1;
 
     // Remove trailing \r if present
@@ -831,10 +912,15 @@ void QwenProvider::processSSELine(
     return;
   }
 
-  // Parse usage metadata
-  if (d.HasMember("usage")) {
+  // Parse usage metadata - Qwen may send usage only in final chunk or not at
+  // all for free tier
+  if (d.HasMember("usage") && !d["usage"].IsNull()) {
     const auto &usage = d["usage"];
     AgentMetrics metrics;
+
+    if (!usage.IsNull()) {
+      Logger::instance().logDebug("OMG! USAGE NOT NULL!");
+    }
 
     if (usage.HasMember("prompt_tokens") && usage["prompt_tokens"].IsUint()) {
       metrics.tokens.prompt = usage["prompt_tokens"].GetUint();
@@ -847,8 +933,28 @@ void QwenProvider::processSSELine(
     if (usage.HasMember("total_tokens") && usage["total_tokens"].IsUint()) {
       metrics.tokens.total = usage["total_tokens"].GetUint();
     }
+    // Qwen may send reasoning_tokens separately
+    if (usage.HasMember("prompt_tokens_details") &&
+        usage["prompt_tokens_details"].IsObject()) {
+      const auto &details = usage["prompt_tokens_details"];
+      if (details.HasMember("cached_tokens") &&
+          details["cached_tokens"].IsUint()) {
+        metrics.tokens.cacheRead = details["cached_tokens"].GetUint();
+      }
+    }
+    if (usage.HasMember("completion_tokens_details") &&
+        usage["completion_tokens_details"].IsObject()) {
+      const auto &details = usage["completion_tokens_details"];
+      if (details.HasMember("reasoning_tokens") &&
+          details["reasoning_tokens"].IsUint()) {
+        metrics.tokens.reasoning = details["reasoning_tokens"].GetUint();
+      }
+    }
 
-    onEvent(metrics);
+    // Only emit if we have actual token data
+    if (metrics.tokens.prompt > 0 || metrics.tokens.completion > 0) {
+      onEvent(metrics);
+    }
   }
 
   // Parse choices
@@ -859,7 +965,8 @@ void QwenProvider::processSSELine(
       }
 
       // Check for finish reason
-      if (choice.HasMember("finish_reason") && choice["finish_reason"].IsString()) {
+      if (choice.HasMember("finish_reason") &&
+          choice["finish_reason"].IsString()) {
         std::string reason = choice["finish_reason"].GetString();
         if (reason == "stop") {
           onEvent(StreamDone{StopReason::Stop});
@@ -914,8 +1021,7 @@ void QwenProvider::processSSELine(
               if (func.HasMember("name") && func["name"].IsString()) {
                 chunk.nameDelta = func["name"].GetString();
               }
-              if (func.HasMember("arguments") &&
-                  func["arguments"].IsString()) {
+              if (func.HasMember("arguments") && func["arguments"].IsString()) {
                 chunk.argsDelta = func["arguments"].GetString();
               }
             }
@@ -928,9 +1034,8 @@ void QwenProvider::processSSELine(
   }
 }
 
-void QwenProvider::executeStreamRequest(
-    OAuthAccount &acc, const AgentHistory &history,
-    const ProviderOptions &opts,
+bool QwenProvider::executeStreamRequest(
+    OAuthAccount &acc, const AgentHistory &history, const ProviderOptions &opts,
     std::function<void(const StreamEvent &)> &onEvent) {
   // Build request body (OpenAI-compatible format)
   rapidjson::Document d;
@@ -938,7 +1043,7 @@ void QwenProvider::executeStreamRequest(
   auto &a = d.GetAllocator();
 
   // Model
-  std::string modelId = opts.modelId.empty() ? "qwen3.5-plus" : opts.modelId;
+  std::string modelId = opts.modelId.empty() ? "coder-model" : opts.modelId;
   d.AddMember("model", rapidjson::Value(modelId.c_str(), a), a);
 
   // Stream
@@ -956,14 +1061,13 @@ void QwenProvider::executeStreamRequest(
       message.AddMember("role",
                         rapidjson::Value(roleToString(msg.role).c_str(), a), a);
 
-      // Build content array
+      // Build content array for text/images
       rapidjson::Value content(rapidjson::kArrayType);
       for (const auto &part : msg.content) {
         if (auto *txt = std::get_if<firmius::shared::TextContent>(&part)) {
           rapidjson::Value item(rapidjson::kObjectType);
           item.AddMember("type", "text", a);
-          item.AddMember("text",
-                         rapidjson::Value(txt->text.c_str(), a), a);
+          item.AddMember("text", rapidjson::Value(txt->text.c_str(), a), a);
           content.PushBack(item, a);
         } else if (auto *img =
                        std::get_if<firmius::shared::ImageContent>(&part)) {
@@ -974,12 +1078,56 @@ void QwenProvider::executeStreamRequest(
           item.AddMember("image_url", imageUrl, a);
           content.PushBack(item, a);
         }
-        // Tool calls and results handled separately in OpenAI format
       }
 
-      // Add content to message
+      // Add content to message if not empty
       if (content.Size() > 0) {
         message.AddMember("content", content, a);
+      }
+
+      // Handle tool calls (assistant message with tool_calls)
+      for (const auto &part : msg.content) {
+        if (auto *call = std::get_if<firmius::shared::ToolCallContent>(&part)) {
+          // Add tool_calls array to the message
+          if (!message.HasMember("tool_calls")) {
+            rapidjson::Value toolCalls(rapidjson::kArrayType);
+            message.AddMember("tool_calls", toolCalls, a);
+          }
+          
+          rapidjson::Value toolCall(rapidjson::kObjectType);
+          toolCall.AddMember("id", rapidjson::Value(call->id.c_str(), a), a);
+          toolCall.AddMember("type", "function", a);
+          
+          rapidjson::Value function(rapidjson::kObjectType);
+          function.AddMember("name", rapidjson::Value(call->name.c_str(), a), a);
+          function.AddMember("arguments", rapidjson::Value(call->args.c_str(), a), a);
+          toolCall.AddMember("function", function, a);
+          
+          message["tool_calls"].PushBack(toolCall, a);
+        }
+      }
+
+      // Handle tool results (tool role message)
+      for (const auto &part : msg.content) {
+        if (auto *result = std::get_if<firmius::shared::ToolResultContent>(&part)) {
+          // Tool results are sent as separate messages with role="tool"
+          // But since we're iterating by message, we need to handle this differently
+          // For now, add result as content if this is a tool result message
+          if (msg.role == firmius::shared::Role::ToolResult) {
+            if (!message.HasMember("content") || message["content"].Size() == 0) {
+              rapidjson::Value resultContent(rapidjson::kArrayType);
+              rapidjson::Value item(rapidjson::kObjectType);
+              item.AddMember("type", "text", a);
+              item.AddMember("text", rapidjson::Value(result->result.c_str(), a), a);
+              resultContent.PushBack(item, a);
+              message.AddMember("content", resultContent, a);
+            }
+          }
+          // Add tool_call_id for tool result messages
+          if (!result->toolCallId.empty()) {
+            message.AddMember("tool_call_id", rapidjson::Value(result->toolCallId.c_str(), a), a);
+          }
+        }
       }
 
       messages.PushBack(message, a);
@@ -995,8 +1143,7 @@ void QwenProvider::executeStreamRequest(
       toolObj.AddMember("type", "function", a);
 
       rapidjson::Value function(rapidjson::kObjectType);
-      function.AddMember("name",
-                         rapidjson::Value(tool.name.c_str(), a), a);
+      function.AddMember("name", rapidjson::Value(tool.name.c_str(), a), a);
       function.AddMember("description",
                          rapidjson::Value(tool.description.c_str(), a), a);
 
@@ -1022,8 +1169,7 @@ void QwenProvider::executeStreamRequest(
 
   // Max tokens
   if (opts.maxTokens.has_value()) {
-    d.AddMember("max_tokens",
-                rapidjson::Value(opts.maxTokens.value()), a);
+    d.AddMember("max_tokens", rapidjson::Value(opts.maxTokens.value()), a);
   }
 
   // Stop sequences
@@ -1076,19 +1222,21 @@ void QwenProvider::executeStreamRequest(
   std::function<void(const StreamEvent &)> wrappedFn = wrappedOnEvent;
   StreamContext ctx{this, &wrappedFn, "", 0, opts.abortSignal};
 
-  auto resp = client.streamPost(QWEN_CHAT_ENDPOINT, body, sseWriteCallback,
-                                &ctx);
+  // 30 second timeout for Qwen API
+  auto resp =
+      client.streamPost(QWEN_CHAT_ENDPOINT, body, sseWriteCallback, &ctx, 30);
 
   // Handle response
   if (resp.code == 200) {
     auto endMs = nowMs();
     if (metricsReceived) {
       capturedMetrics.timing.startMs = startMs;
-      capturedMetrics.timing.firstTokenMs = firstTokenEmitted ? firstTokenMs : 0;
+      capturedMetrics.timing.firstTokenMs =
+          firstTokenEmitted ? firstTokenMs : 0;
       capturedMetrics.timing.endMs = endMs;
       onEvent(capturedMetrics);
     }
-    return;
+    return true; // Success
   }
 
   // Error handling
@@ -1101,37 +1249,51 @@ void QwenProvider::executeStreamRequest(
     // Token expired or invalid - mark for refresh
     acc.rateLimited = true;
     acc.backoffUntil = nowSeconds() + 60;
-    onEvent(StreamError{
-        "Authentication failed. Token may be expired.",
-        static_cast<int>(resp.code), acc.email});
-  } else if (resp.code == 429) {
-    // Rate limited
-    int backoff = 60;
-    markAccountRateLimited(acc, backoff);
-    onEvent(StreamRetrying{1, 5, 429, backoff * 1000,
-                           "Rate limited", acc.email});
-  } else if (resp.code >= 500) {
-    // Server error
-    onEvent(StreamError{"Server error: " + std::to_string(resp.code),
-                        static_cast<int>(resp.code), acc.email});
+    onEvent(StreamError{"Authentication failed. Token may be expired.",
+                        static_cast<int>(resp.code), acc.getIdentifier()});
+  } else if (resp.code == 429 || (resp.code == 400 && errMsg.find("insufficient_quota") != std::string::npos)) {
+    // Rate limited or quota exhausted - IMMEDIATE account switch
+    // Set quota to 0 for all models (this marks account as exhausted)
+    acc.metadata["quota:coder-model"] = "0";
+    acc.metadata["quota:qwen3-coder-plus"] = "0";
+    acc.metadata["quota:qwen3-coder-flash"] = "0";
+    acc.metadata["quota:qwen3.5-plus"] = "0";
+    acc.metadata["quota:vision-model"] = "0";
+    
+    // Persist the quota exhaustion immediately
+    saveAccounts();
+    
+    std::string quotaError = "Quota exhausted (2k/day free limit). Switching to next account...";
+    onEvent(StreamError{quotaError, static_cast<int>(resp.code), acc.getIdentifier()});
+  } else if (resp.code >= 500 || resp.code == 0) {
+    // Server error or timeout - DON'T mark as exhausted, just fail this attempt
+    // The retry logic will try other accounts
+    onEvent(StreamError{resp.code == 0 ? "Request timeout" : "Server error: " + std::to_string(resp.code),
+                        static_cast<int>(resp.code), acc.getIdentifier()});
   } else {
-    // Other errors
-    onEvent(StreamError{errMsg, static_cast<int>(resp.code), acc.email});
+    // Other errors (4xx) - don't mark as rate-limited, but fail this attempt
+    onEvent(StreamError{errMsg, static_cast<int>(resp.code), acc.getIdentifier()});
   }
+  return false; // Failed
 }
 
 void QwenProvider::stream(const AgentHistory &history,
                           const ProviderOptions &opts,
                           std::function<void(const StreamEvent &)> onEvent) {
-  int accountRetries = 0;
+  // Retry schedule: 1s -> 2s -> 3s -> 4s -> 5s (fail fast, switch accounts)
+  static const int retryDelays[] = {1, 2, 3, 4, 5};
+  static const int numRetries = sizeof(retryDelays) / sizeof(retryDelays[0]);
+  
+  int accountSwitchCount = 0;
   std::string lastError;
   std::string lastAccountEmail;
-  int maxRetries = std::max(5, static_cast<int>(accounts_.size()) * 3);
+  int maxAccountSwitches = std::max(3, static_cast<int>(accounts_.size()));
 
-  while (accountRetries < maxRetries) {
+  // Try each account with retries
+  while (accountSwitchCount < maxAccountSwitches) {
     auto optAcc = getAvailableAccount(opts.modelId);
     if (!optAcc) {
-      // All accounts rate-limited
+      // All accounts rate-limited - wait for earliest to unlock
       int64_t now = nowSeconds();
       int64_t earliestUnlock = 0;
       for (const auto &a : accounts_) {
@@ -1143,14 +1305,10 @@ void QwenProvider::stream(const AgentHistory &history,
       }
 
       int64_t waitSec = (earliestUnlock > now) ? (earliestUnlock - now) : 0;
-      if (waitSec > 120) {
-        waitSec = 120;
-      }
-
-      if (waitSec > 0) {
-        onEvent(StreamRetrying{accountRetries + 1, maxRetries, 429,
+      if (waitSec > 0 && waitSec <= 120) {
+        onEvent(StreamRetrying{1, numRetries, 429,
                                static_cast<int>(waitSec * 1000),
-                               "All accounts rate-limited", lastAccountEmail});
+                               "All accounts rate-limited, waiting", lastAccountEmail});
         std::this_thread::sleep_for(std::chrono::seconds(waitSec));
 
         // Clear expired backoffs
@@ -1160,10 +1318,10 @@ void QwenProvider::stream(const AgentHistory &history,
             a.rateLimited = false;
           }
         }
-        accountRetries++;
         continue;
       }
 
+      // No accounts available
       if (!lastError.empty()) {
         onEvent(StreamError{lastError, -1, lastAccountEmail});
       } else {
@@ -1173,33 +1331,82 @@ void QwenProvider::stream(const AgentHistory &history,
     }
 
     OAuthAccount &acc = *optAcc.value();
-    lastAccountEmail = acc.email;
 
-    if (accountRetries > 0) {
-      onEvent(StreamAccountSwitched{acc.email});
+    if (accountSwitchCount > 0) {
+      onEvent(StreamAccountSwitched{acc.getIdentifier()});
     }
+    lastAccountEmail = acc.getIdentifier();
 
-    // Retry loop for this account
-    for (int retryAttempt = 0; retryAttempt < 4; ++retryAttempt) {
-      if (retryAttempt > 0) {
-        int delay = (1 << (retryAttempt - 1)) * 1000;
-        onEvent(StreamRetrying{retryAttempt, 4, 0, delay,
-                               "Connection error", acc.email});
-        std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+    // Retry loop for this account (retries happen within same turn)
+    bool accountFailed = false;
+    bool wasQuotaError = false;
+    
+    for (int retryIdx = 0; retryIdx < numRetries; ++retryIdx) {
+      if (retryIdx > 0) {
+        int delaySec = retryDelays[retryIdx - 1];
+        onEvent(StreamRetrying{retryIdx, numRetries, 0, delaySec * 1000,
+                               "Retrying request", acc.getIdentifier()});
+        std::this_thread::sleep_for(std::chrono::seconds(delaySec));
       }
 
-      executeStreamRequest(acc, history, opts, onEvent);
-      return; // Success or terminal error
+      // Try the request
+      if (executeStreamRequest(acc, history, opts, onEvent)) {
+        // Success! Update lastUsedIndex_ so next request starts from this account
+        {
+          std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
+          for (size_t i = 0; i < accounts_.size(); i++) {
+            if (&accounts_[i] == &acc) {
+              lastUsedIndex_ = static_cast<int>(i);
+              saveAccounts();
+              break;
+            }
+          }
+        }
+        return; // Success!
+      }
+
+      // Check if this was a quota exhaustion error (any model has quota "0")
+      bool isQuotaExhausted = false;
+      for (const auto &[key, val] : acc.metadata) {
+        if (key.rfind("quota:", 0) == 0 && val == "0") {
+          isQuotaExhausted = true;
+          break;
+        }
+      }
+      if (isQuotaExhausted) {
+        // Quota exhausted - switch accounts immediately, no more retries
+        wasQuotaError = true;
+        accountFailed = true;
+        accountSwitchCount++;
+        break;
+      }
+
+      // For other errors (timeout, server error), retry a few times then switch
+      // After 2 retries, switch to next account
+      if (retryIdx >= 2) {
+        accountFailed = true;
+        accountSwitchCount++;
+        break;
+      }
     }
 
-    accountRetries++;
+    // All retries exhausted for this account
+    if (accountFailed) {
+      if (wasQuotaError) {
+        continue; // Try next account
+      }
+      // For non-quota errors, we already switched accounts in the loop
+      continue;
+    }
+
+    // Non-rate-limit failure after all retries
+    lastError = "Exhausted all retries";
+    onEvent(StreamError{lastError, -1, lastAccountEmail});
+    return;
   }
 
-  if (!lastError.empty()) {
-    onEvent(StreamError{lastError, -1, lastAccountEmail});
-  } else {
-    onEvent(StreamError{"Exhausted retries.", -1, lastAccountEmail});
-  }
+  // All accounts exhausted
+  onEvent(StreamError{"All accounts rate-limited or exhausted", -1, lastAccountEmail});
 }
 
 void QwenProvider::generateSummary(
@@ -1207,7 +1414,7 @@ void QwenProvider::generateSummary(
     const std::string &, std::function<void(const StreamEvent &)> onEvent,
     std::atomic<bool> *abortSignal) {
   ProviderOptions opts;
-  opts.modelId = modelId.empty() ? "qwen3.5-plus" : modelId;
+  opts.modelId = modelId.empty() ? "coder-model" : modelId;
   opts.temperature = 0.7f;
   opts.maxTokens = 16384;
   opts.abortSignal = abortSignal;

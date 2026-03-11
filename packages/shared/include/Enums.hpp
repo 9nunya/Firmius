@@ -129,7 +129,7 @@ struct ModelInfo {
  * @brief Represents an OAuth account stored by a provider.
  */
 struct OAuthAccount {
-  std::string email;
+  std::string identifier;  // User identifier (email for most providers, UUID for Codex)
   std::string refreshToken;
   std::string accessToken;
   int64_t tokenExpiration = 0;  // Epoch seconds
@@ -143,7 +143,7 @@ struct OAuthAccount {
   // projectId, quota tracking)
   std::map<std::string, std::string> metadata;
 
-  std::string getIdentifier() const { return email; }
+  std::string getIdentifier() const { return identifier; }
 };
 
 /**
