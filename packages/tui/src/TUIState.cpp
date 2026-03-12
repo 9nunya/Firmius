@@ -589,7 +589,8 @@ ftxui::Component TuiState::root() {
             preview += "...";
           live_rows.push_back(ftxui::hbox({ftxui::text("> ") | ftxui::bold |
                                                ftxui::color(ftxui::Color::Cyan),
-                                           ftxui::text(preview) | ftxui::dim}) |
+                                           ftxui::paragraph(preview) |
+                                               ftxui::dim | ftxui::flex}) |
                               ftxui::flex);
         }
 

@@ -8,6 +8,7 @@
 #include "providers/ProviderRegistry.hpp"
 #include "utils/FSUtil.hpp"
 #include "utils/StringUtil.hpp"
+#include "utils/InterruptibleSleep.hpp"
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -465,7 +466,12 @@ void Agent::run(const std::string &task,
         onEvent(StreamRetrying{consecutiveProviderFailures, maxProviderRetries,
                                429, retryDelaySec * 1000,
                                "Provider error, retrying", ""});
-        std::this_thread::sleep_for(std::chrono::seconds(retryDelaySec));
+        // Use interruptible sleep to allow immediate cancellation
+        if (!interruptibleSleep(std::chrono::seconds(retryDelaySec),
+                                &interrupted)) {
+          // Interrupted during retry delay
+          return;
+        }
         continue;
       }
 

@@ -1,6 +1,7 @@
 #include "providers/QwenProvider.hpp"
 #include "providers/BackoffConstants.hpp"
 #include "utils/GCPHttpClient.hpp"
+#include "utils/InterruptibleSleep.hpp"
 #include <atomic>
 #include <chrono>
 #include <ctime>
@@ -418,7 +419,14 @@ public:
     acc.accessToken = accessToken_;
     acc.refreshToken = refreshToken_;
     acc.tokenExpiration = tokenExpiration_;
-    acc.identifier = email_;
+    
+    // Use email as identifier, or generate from token if email extraction failed
+    if (email_.empty()) {
+      // Generate identifier from access token prefix
+      acc.identifier = accessToken_.substr(0, std::min(size_t(12), accessToken_.size()));
+    } else {
+      acc.identifier = email_;
+    }
 
     provider_->addAccount(acc);
     return true;
@@ -745,46 +753,38 @@ bool QwenProvider::refreshAccessToken(OAuthAccount &acc) {
 }
 
 void QwenProvider::refreshQuotas() {
-  // Qwen OAuth free tier (2k requests/day) has no quota API endpoint.
-  // Since we cannot dynamically fetch quota, always assume 100% available.
-  // Quota exhaustion is only detected via API errors (429/insufficient_quota).
+  // Qwen OAuth free tier has no quota API endpoint.
+  // We don't track quotas - let the API tell us when we're rate limited.
+  
+  // If no accounts loaded, can't refresh
+  if (accounts_.empty()) {
+    return;
+  }
 
   int64_t now = nowSeconds();
-
-  // Calculate next midnight UTC
-  std::time_t now_t = static_cast<std::time_t>(now);
-  std::tm *tm = std::gmtime(&now_t);
-  tm->tm_mday += 1;
-  tm->tm_hour = 0;
-  tm->tm_min = 0;
-  tm->tm_sec = 0;
-  int64_t midnight = static_cast<int64_t>(std::mktime(tm));
-
-  char resetBuf[64];
-  std::strftime(resetBuf, sizeof(resetBuf), "%Y-%m-%dT%H:%M:%SZ",
-                std::gmtime(reinterpret_cast<std::time_t *>(&midnight)));
-
+  bool needsSave = false;
+  
   for (auto &acc : accounts_) {
     // Refresh token if expired
     if (isTokenExpired(acc)) {
-      refreshAccessToken(acc);
+      if (refreshAccessToken(acc)) {
+        needsSave = true;
+      }
     }
-
-    // Always assume quota is 100% available for all models
-    // We cannot check dynamically, so we assume available until API says otherwise
-    acc.metadata["quota:coder-model"] = "1";
-    acc.metadata["quota:qwen3-coder-plus"] = "1";
-    acc.metadata["quota:qwen3-coder-flash"] = "1";
-    acc.metadata["quota:qwen3.5-plus"] = "1";
-    acc.metadata["quota:vision-model"] = "1";
-    acc.metadata["quota_reset:coder-model"] = resetBuf;
-
-    // Clear any stale rate-limiting
-    acc.rateLimited = false;
+    
+    // Clear any stale rate-limiting from previous sessions
+    if (acc.rateLimited && now > acc.backoffUntil) {
+      acc.rateLimited = false;
+      needsSave = true;
+    }
     acc.backoffUntil = 0;
     acc.lastQuotaRefresh = now;
   }
-  saveAccounts();
+  
+  // Only save if something actually changed (token refreshed or rate limit cleared)
+  if (needsSave) {
+    saveAccounts();
+  }
 }
 
 std::map<std::string, std::vector<QuotaBucket>>
@@ -1237,16 +1237,9 @@ bool QwenProvider::executeStreamRequest(
              (resp.code == 400 &&
               errMsg.find("insufficient_quota") != std::string::npos)) {
     // Rate limited or quota exhausted - IMMEDIATE account switch
-    // Set quota to 0 for all models (this marks account as exhausted)
-    acc.metadata["quota:coder-model"] = "0";
-    acc.metadata["quota:qwen3-coder-plus"] = "0";
-    acc.metadata["quota:qwen3-coder-flash"] = "0";
-    acc.metadata["quota:qwen3.5-plus"] = "0";
-    acc.metadata["quota:vision-model"] = "0";
-
-    // Persist the quota exhaustion immediately
-    saveAccounts();
-
+    // Qwen has no real quota API, so we don't mark quotas as 0
+    // Just rely on retry/account switching logic
+    
     std::string quotaError =
         "Quota exhausted (2k/day free limit). Switching to next account...";
     onEvent(StreamError{quotaError, static_cast<int>(resp.code),
@@ -1339,7 +1332,12 @@ void QwenProvider::stream(const AgentHistory &history,
         int delaySec = retryDelays[retryIdx - 1];
         onEvent(StreamRetrying{retryIdx, numRetries, 0, delaySec * 1000,
                                "Retrying request", acc.getIdentifier()});
-        std::this_thread::sleep_for(std::chrono::seconds(delaySec));
+        // Use interruptible sleep to allow immediate cancellation
+        if (!interruptibleSleep(std::chrono::seconds(delaySec),
+                                opts.abortSignal)) {
+          // Interrupted during retry delay
+          return;
+        }
       }
 
       // Try the request
@@ -1359,18 +1357,9 @@ void QwenProvider::stream(const AgentHistory &history,
         return; // Success!
       }
 
-      // Check if this was a quota exhaustion error (any model has quota "0")
-      bool isQuotaExhausted = false;
-      for (const auto &[key, val] : acc.metadata) {
-        if (key.rfind("quota:", 0) == 0 && val == "0") {
-          isQuotaExhausted = true;
-          break;
-        }
-      }
-      if (isQuotaExhausted) {
+      // Check if this was a quota exhaustion error (429 or insufficient_quota)
+      if (wasQuotaError) {
         // Quota exhausted - switch accounts immediately, no more retries
-        wasQuotaError = true;
-        accountFailed = true;
         accountSwitchCount++;
         break;
       }

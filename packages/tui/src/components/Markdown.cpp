@@ -229,23 +229,21 @@ static std::vector<std::string> wrapTokens(const std::string &text,
   return wrapped;
 }
 
-static ftxui::Element renderInline(const std::string &text, bool dim,
-                                   int max_width) {
-  (void)max_width; // Let hflow handle wrapping naturally based on container
-
+static ftxui::Element renderInline(const std::string &text, bool dim) {
   if (text.empty()) {
     return ftxui::text("");
   }
 
+  // For simple text without formatting, use paragraph for proper wrapping
   if (text.find('*') == std::string::npos &&
       text.find('`') == std::string::npos) {
-    // Simple text - let parent container handle wrapping via hflow
-    auto e = ftxui::text(text);
+    auto e = ftxui::paragraph(text);
     if (dim)
       e = e | ftxui::dim;
     return e;
   }
 
+  // Parse inline styles (bold, italic, code)
   struct Span {
     std::string text;
     bool bold = false;
@@ -289,9 +287,10 @@ static ftxui::Element renderInline(const std::string &text, bool dim,
   }
   flush();
 
+  // Build styled elements - use paragraph for each span to enable wrapping
   ftxui::Elements elems;
   for (const auto &sp : spans) {
-    auto e = ftxui::text(sp.text);
+    auto e = ftxui::paragraph(sp.text);
     if (sp.bold)
       e = e | ftxui::bold;
     if (sp.italic)
@@ -304,6 +303,8 @@ static ftxui::Element renderInline(const std::string &text, bool dim,
   }
   if (elems.empty())
     return ftxui::text("");
+  
+  // Use hbox to flow elements horizontally with wrapping
   return ftxui::hflow(std::move(elems));
 }
 
@@ -325,7 +326,7 @@ ftxui::Element RenderMarkdown(const std::string &text, bool dim) {
   auto flush_para = [&] {
     if (para_buf.empty())
       return;
-    out.push_back(renderInline(para_buf, dim, content_width));
+    out.push_back(renderInline(para_buf, dim));
     para_buf.clear();
   };
 
@@ -399,7 +400,7 @@ ftxui::Element RenderMarkdown(const std::string &text, bool dim) {
       std::vector<ftxui::Element> header_elems;
       for (const auto &cell : header) {
         header_elems.push_back(
-            renderInline(cell, dim, col_width) | ftxui::bold |
+            renderInline(cell, dim) | ftxui::bold |
             ftxui::size(ftxui::WIDTH, ftxui::LESS_THAN, col_width));
       }
       header_elems.resize(num_cols, ftxui::text(""));
@@ -410,7 +411,7 @@ ftxui::Element RenderMarkdown(const std::string &text, bool dim) {
         std::vector<ftxui::Element> row_elems;
         for (size_t c = 0; c < num_cols; ++c) {
           std::string cell = c < r.size() ? r[c] : "";
-          auto elem = renderInline(cell, dim, col_width) |
+          auto elem = renderInline(cell, dim) |
                       ftxui::size(ftxui::WIDTH, ftxui::LESS_THAN, col_width);
           row_elems.push_back(std::move(elem));
         }
@@ -448,7 +449,7 @@ ftxui::Element RenderMarkdown(const std::string &text, bool dim) {
         title.erase(title.begin());
       if (!title.empty() && title.front() == ' ')
         title.erase(title.begin());
-      auto elem = renderInline(title, dim, content_width) | ftxui::bold;
+      auto elem = renderInline(title, dim) | ftxui::bold;
       out.push_back(elem);
       continue;
     }
@@ -458,7 +459,7 @@ ftxui::Element RenderMarkdown(const std::string &text, bool dim) {
       auto content = line.substr(2);
       out.push_back(ftxui::hbox({
           ftxui::text("• "),
-          renderInline(content, dim, content_width - 2) | ftxui::flex,
+          renderInline(content, dim) | ftxui::flex,
       }));
       continue;
     }
@@ -466,7 +467,7 @@ ftxui::Element RenderMarkdown(const std::string &text, bool dim) {
     // For regular text lines, render each line separately to preserve newlines
     // This is different from standard markdown paragraph merging
     flush_para();
-    out.push_back(renderInline(line, dim, content_width));
+    out.push_back(renderInline(line, dim));
   }
 
   if (in_code) {

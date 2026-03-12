@@ -121,20 +121,20 @@
         },
         "error": {
             "normal": {
-                "bg": "#ff0000",
-                "fg": "#ffffff"
+                "bg": "#111111",
+                "fg": "#ff0000"
             },
             "focused": {
-                "bg": "#ff5555",
-                "fg": "#ffffff"
+                "bg": "#222222",
+                "fg": "#ff5555"
             },
             "busy": {
-                "bg": "#ff0000",
-                "fg": "#ffffff"
+                "bg": "#111111",
+                "fg": "#ff0000"
             },
             "error": {
-                "bg": "#ff0000",
-                "fg": "#ffffff"
+                "bg": "#111111",
+                "fg": "#ff0000"
             },
             "glint": [
                 "#ff0000",

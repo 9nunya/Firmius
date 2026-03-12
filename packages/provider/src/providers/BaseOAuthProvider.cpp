@@ -79,25 +79,9 @@ std::optional<OAuthAccount *> BaseOAuthProvider::getAvailableAccount(
     // Reset rate limit if backoff expired
     if (acc.rateLimited && now > acc.backoffUntil) {
       acc.rateLimited = false;
-      // Reset stale quota metadata so the account is not skipped again
-      for (auto &[k, v] : acc.metadata) {
-        if (k.rfind("quota:", 0) == 0 && v == "0") {
-          v = "1";
-        }
-      }
     }
 
-    // Check if account is quota-exhausted (Qwen-specific)
-    // Check if ANY model has quota "0" - means account is exhausted
-    bool isQuotaExhausted = false;
-    for (const auto &[key, val] : acc.metadata) {
-      if (key.rfind("quota:", 0) == 0 && val == "0") {
-        isQuotaExhausted = true;
-        break;
-      }
-    }
-
-    if (!acc.rateLimited && !isQuotaExhausted) {
+    if (!acc.rateLimited) {
       // Check token expiration but DON'T update lastUsedIndex_ yet
       // (only update on successful request to avoid sticking to failed accounts)
       if (isTokenExpired(acc) && !refreshAccessToken(acc)) {
@@ -112,7 +96,7 @@ std::optional<OAuthAccount *> BaseOAuthProvider::getAvailableAccount(
     currentIdx = (currentIdx + 1) % static_cast<int>(accounts_.size());
   } while (currentIdx != startIdx);
 
-  // If all are rate limited or quota exhausted, return the one closest to unlocking (or just the
+  // If all are rate limited, return the one closest to unlocking (or just the
   // next one as fallback)
   return std::nullopt;
 }

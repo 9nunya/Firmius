@@ -2,6 +2,7 @@
 #include "providers/AntigravityProtocol.hpp"
 #include "providers/BackoffConstants.hpp"
 #include "utils/GCPHttpClient.hpp"
+#include "utils/InterruptibleSleep.hpp"
 #include "utils/TempOAuthServer.hpp"
 #include <atomic>
 #include <chrono>
@@ -527,7 +528,12 @@ void AntigravityProvider::stream(
                                                                  1);
         onEvent(StreamRetrying{retryAttempt, 4, 0, backoffSeconds * 1000,
                                "Connection error", acc.getIdentifier()});
-        std::this_thread::sleep_for(std::chrono::seconds(backoffSeconds));
+        // Use interruptible sleep to allow immediate cancellation
+        if (!interruptibleSleep(std::chrono::seconds(backoffSeconds),
+                                opts.abortSignal)) {
+          // Interrupted during retry delay
+          return;
+        }
       }
 
       std::string effectiveModel =
@@ -680,6 +686,11 @@ void AntigravityProvider::generateSummary(
 }
 
 void AntigravityProvider::refreshQuotas() {
+  // Don't update accounts if none are loaded - prevents data loss
+  if (accounts_.empty()) {
+    return;
+  }
+  
   int64_t now = std::chrono::duration_cast<std::chrono::seconds>(
                     std::chrono::system_clock::now().time_since_epoch())
                     .count();

@@ -1,5 +1,6 @@
 #include "providers/BaseOpenAIProvider.hpp"
 #include "providers/BackoffConstants.hpp"
+#include "utils/InterruptibleSleep.hpp"
 #include <cctype>
 #include <chrono>
 #include <curl/curl.h>
@@ -292,7 +293,12 @@ void BaseOpenAIProvider::stream(
                              static_cast<int>(responseCode), delayMs, reason,
                              ""});
 
-      std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
+      // Use interruptible sleep to allow immediate cancellation
+      if (!interruptibleSleep(std::chrono::milliseconds(delayMs),
+                              opts.abortSignal)) {
+        // Interrupted during retry delay
+        return;
+      }
       attempt++;
     } else {
       std::string errMsg =

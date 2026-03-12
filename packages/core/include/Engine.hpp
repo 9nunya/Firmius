@@ -149,11 +149,9 @@ private:
     
     std::vector<std::jthread> taskThreads_;
     std::mutex taskThreadsMutex_;
-    
+
     std::map<std::string, std::shared_future<std::string>> agentFutures;
     std::mutex futuresMutex;
-
-    size_t maxConcurrentAgents = 10;
 };
 
 }

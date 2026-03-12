@@ -233,6 +233,13 @@ std::string Harness::newThread(HostCreationOptions hostOptions,
       if (!currentThreadId_.empty() && !focusedAgentId_.empty()) {
         threadAgentMap_[currentThreadId_] = focusedAgentId_;
       }
+      
+      // Clear agent registry when creating new thread to prevent stale agents
+      auto allAgents = AgentRegistry::instance().listAll();
+      for (const auto &agentId : allAgents) {
+        Engine::instance().terminateAgent(agentId);
+      }
+      
       currentThreadId_ = threadId;
       focusedAgentId_.clear();
       clearQueue();
@@ -275,6 +282,13 @@ bool Harness::switchThread(const std::string &threadId) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!currentThreadId_.empty() && !focusedAgentId_.empty()) {
       threadAgentMap_[currentThreadId_] = focusedAgentId_;
+    }
+
+    // Clear agent registry when switching threads to prevent stale agents
+    // and avoid hitting concurrent subagent limits
+    auto allAgents = AgentRegistry::instance().listAll();
+    for (const auto &agentId : allAgents) {
+      Engine::instance().terminateAgent(agentId);
     }
 
     currentThreadId_ = threadId;
@@ -441,6 +455,10 @@ void Harness::abort() {
   }
 
   agent->interrupt();
+  
+  // If focused agent is a subagent (has parentId), only interrupt it
+  // If focused agent is a lead agent (no parentId), do NOT cancel async=true subagents
+  // The subagent tool already handles cancellation of async=false subagents when parent is interrupted
 }
 
 int Harness::subscribe(

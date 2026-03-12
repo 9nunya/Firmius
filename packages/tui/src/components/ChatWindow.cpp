@@ -175,9 +175,10 @@ private:
 
           auto decorateMsg = [prefixColor,
                               prefix](const ftxui::Element &content) {
-            auto e = ftxui::hbox(
-                {ftxui::text(prefix) | ftxui::bold | ftxui::color(prefixColor),
-                 content | ftxui::flex});
+            auto e = ftxui::hbox({
+                ftxui::text(prefix) | ftxui::bold | ftxui::color(prefixColor),
+                content | ftxui::flex,
+            });
             return e | ftxui::flex;
           };
 

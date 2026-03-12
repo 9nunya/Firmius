@@ -112,9 +112,7 @@ std::string Engine::summonAgent(const std::string &threadId,
   (void)modelId;
   (void)variantName;
 
-  if (AgentRegistry::instance().listAll().size() >= maxConcurrentAgents) {
-    throw std::runtime_error("Maximum concurrent agents reached");
-  }
+  // No limit on concurrent agents - removed to allow unlimited parallel exploration
 
   std::string agentId = requestedAgentId.empty()
                             ? shared::StringUtil::generateUuid()

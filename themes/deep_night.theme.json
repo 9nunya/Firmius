@@ -121,20 +121,20 @@
         },
         "error": {
             "normal": {
-                "bg": "#f38ba8",
-                "fg": "#1e1e2e"
+                "bg": "#313244",
+                "fg": "#f38ba8"
             },
             "focused": {
-                "bg": "#eba0ac",
-                "fg": "#1e1e2e"
+                "bg": "#45475a",
+                "fg": "#eba0ac"
             },
             "busy": {
-                "bg": "#f38ba8",
-                "fg": "#1e1e2e"
+                "bg": "#313244",
+                "fg": "#f38ba8"
             },
             "error": {
-                "bg": "#f38ba8",
-                "fg": "#1e1e2e"
+                "bg": "#313244",
+                "fg": "#f38ba8"
             },
             "glint": [
                 "#f38ba8",

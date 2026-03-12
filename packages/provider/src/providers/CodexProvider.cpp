@@ -1,6 +1,7 @@
 #include "providers/CodexProvider.hpp"
 #include "providers/BackoffConstants.hpp"
 #include "utils/GCPHttpClient.hpp"
+#include "utils/InterruptibleSleep.hpp"
 #include "utils/StringUtil.hpp"
 #include "utils/TempOAuthServer.hpp"
 #include <algorithm>
@@ -991,6 +992,12 @@ bool CodexProvider::refreshAccessToken(OAuthAccount &acc) {
 
 void CodexProvider::refreshQuotas() {
   std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
+  
+  // Don't save if no accounts loaded - prevents overwriting with empty array
+  if (accounts_.empty()) {
+    return;
+  }
+  
   int64_t now = nowSeconds();
   for (auto &acc : accounts_) {
     if (now - acc.lastQuotaRefresh >= kQuotaRefreshSeconds) {
@@ -1375,7 +1382,12 @@ void CodexProvider::stream(const AgentHistory &history,
         onEvent(StreamRetrying{attempt, RetrySettings::MAX_RETRIES,
                                lastRetryStatus, delayMs, lastRetryReason,
                                acc.getIdentifier()});
-        std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
+        // Use interruptible sleep to allow immediate cancellation
+        if (!interruptibleSleep(std::chrono::milliseconds(delayMs),
+                                opts.abortSignal)) {
+          // Interrupted during retry delay
+          return;
+        }
       }
 
       if (isTokenExpired(acc) && !refreshAccessToken(acc)) {

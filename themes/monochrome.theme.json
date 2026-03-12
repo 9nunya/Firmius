@@ -123,24 +123,25 @@
         },
         "error": {
             "normal": {
-                "bg": "#ffffff",
-                "fg": "#000000"
+                "bg": "#666666",
+                "fg": "#ffffff"
             },
             "focused": {
-                "bg": "#cccccc",
-                "fg": "#000000"
+                "bg": "#888888",
+                "fg": "#ffffff"
             },
             "busy": {
-                "bg": "#ffffff",
-                "fg": "#000000"
+                "bg": "#666666",
+                "fg": "#ffffff"
             },
             "error": {
-                "bg": "#ffffff",
-                "fg": "#000000"
+                "bg": "#666666",
+                "fg": "#ffffff"
             },
             "glint": [
+                "#888888",
                 "#ffffff",
-                "#000000"
+                "#888888"
             ]
         },
         "agent_bg": "#222222",
