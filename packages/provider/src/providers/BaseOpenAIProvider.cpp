@@ -372,12 +372,12 @@ void BaseOpenAIProvider::processSSELine(
       std::string reasoningField = getReasoningFieldName();
       if (delta.HasMember(reasoningField.c_str()) &&
           delta[reasoningField.c_str()].IsString()) {
-        onEvent(ThinkingChunk{delta[reasoningField.c_str()].GetString()});
+        onEvent(ThinkingChunk{delta[reasoningField.c_str()].GetString(), ""});
       } else if (reasoningField != "reasoning" &&
                  delta.HasMember("reasoning") &&
                  delta["reasoning"].IsString()) {
         // Fallback: try "reasoning" if the provider-specific field wasn't found
-        onEvent(ThinkingChunk{delta["reasoning"].GetString()});
+        onEvent(ThinkingChunk{delta["reasoning"].GetString(), ""});
       }
 
       if (delta.HasMember("tool_calls") && delta["tool_calls"].IsArray()) {

@@ -315,7 +315,7 @@ MessagePart messagePartFromJson(const rapidjson::Value &v) {
   if (type == "text")
     return TextContent{v["text"].GetString()};
   if (type == "thinking")
-    return ThinkingContent{v["thinking"].GetString()};
+    return ThinkingContent{v["thinking"].GetString(), ""};
   if (type == "toolCall")
     return ToolCallContent{v["id"].GetString(), v["name"].GetString(),
                            v["args"].GetString()};
@@ -710,7 +710,7 @@ StreamEvent streamEventFromJsonValue(const rapidjson::Value &v) {
   if (type == "text")
     return TextChunk{v["delta"].GetString()};
   if (type == "thinking")
-    return ThinkingChunk{v["delta"].GetString()};
+    return ThinkingChunk{v["delta"].GetString(), ""};
   if (type == "toolCall")
     return ToolCallChunk{v["id"].GetString(), v["index"].GetUint(),
                          v["nameDelta"].GetString(),

@@ -26,6 +26,7 @@ struct TextContent {
  */
 struct ThinkingContent {
   std::string thinking;
+  std::string signature;
   bool operator==(const ThinkingContent &other) const = default;
 };
 

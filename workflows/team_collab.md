@@ -10,14 +10,6 @@ args:
     type: string
     description: The main task or problem for the team to solve
     optional: false
-  - name: working_dir
-    type: filepath
-    description: Directory to work in (defaults to current directory)
-    optional: true
-  - name: coordinator_role
-    type: string
-    description: Special role for the coordinator subagent (e.g., "architect", "tech lead")
-    optional: true
 ---
 
 # Team Collaboration Session
@@ -25,8 +17,6 @@ args:
 **Task:** $2
 
 **Team Size:** $1 subagents
-
-$4
 
 ## Instructions
 
@@ -48,7 +38,7 @@ Based on the task, consider spawning subagents with these specializations:
 
 ## Workflow
 
-1. First, explore `$3` (or current directory if not specified) to understand the context
+1. First, explore the current directory to understand the context
 2. Create a brief plan outlining which subagents you'll spawn and their responsibilities
 3. Spawn each subagent using `summon_subagent` with a clear persona description
 4. Wait for all subagents to complete their work

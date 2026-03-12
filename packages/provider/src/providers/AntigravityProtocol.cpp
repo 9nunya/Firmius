@@ -257,8 +257,13 @@ std::string AntigravityProtocol::prepareRequestBody(const AgentHistory &history,
         } else if (auto *thk = std::get_if<ThinkingContent>(&part)) {
           rapidjson::Value p(rapidjson::kObjectType);
           p.AddMember("text", rapidjson::Value(thk->thinking.c_str(), a), a);
-          // If the model supports reasoning deltas, we might want to flag this
-          // for the proxy.
+          // Claude thinking blocks require a signature.
+          // Fallback to sentinel skip_thought_signature_validator if missing.
+          std::string sig = thk->signature;
+          if (sig.length() < 50) {
+            sig = "skip_thought_signature_validator";
+          }
+          p.AddMember("signature", rapidjson::Value(sig.c_str(), a), a);
           p.AddMember("thought", true, a);
           parts.PushBack(p, a);
         } else if (auto *call = std::get_if<ToolCallContent>(&part)) {

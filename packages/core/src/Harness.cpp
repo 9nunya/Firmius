@@ -381,6 +381,8 @@ void Harness::send(const std::string &text) {
   emitEvent(firmius::shared::UserMessageSent{messageId, text, tid});
 
   if (needsSummon) {
+    // Note: summonAgent will use the default model from ConfigLoader
+    // which is what we want for a brand new lead agent in a thread.
     Engine::instance().summonAgent(tid, metadata.leadPersona, text, true, "",
                                    "lead", "", requestedId);
     return;

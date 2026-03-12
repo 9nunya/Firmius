@@ -28,9 +28,10 @@ struct TextChunk {
  */
 struct ThinkingChunk {
   std::string delta;
+  std::string signature;
 
   bool operator==(const ThinkingChunk &other) const {
-    return delta == other.delta;
+    return delta == other.delta && signature == other.signature;
   }
 };
 

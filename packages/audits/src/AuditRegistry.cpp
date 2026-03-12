@@ -8,6 +8,7 @@
 #include "audits/OAuthWizardAudit.hpp"
 #include "audits/P15Audit.hpp"
 #include "audits/ProviderAudit.hpp"
+#include "audits/ProviderStreamDebugAudit.hpp"
 #include "audits/QwenProviderAudit.hpp"
 #include "audits/QwenQuotaAudit.hpp"
 #include "audits/SubagentStressAudit.hpp"
@@ -30,6 +31,7 @@ std::vector<std::unique_ptr<shared::IAudit>> createAudits() {
     audits.push_back(std::make_unique<HarnessChaosAudit>());
     audits.push_back(std::make_unique<OAuthWizardAudit>());
     audits.push_back(std::make_unique<WorkflowsAudit>());
+    audits.push_back(std::make_unique<ProviderStreamDebugAudit>());
     return audits;
 }
 

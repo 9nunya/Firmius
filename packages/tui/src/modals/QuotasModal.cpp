@@ -5,6 +5,7 @@
 #include "harness/Harness.hpp"
 #include <ftxui/component/component.hpp>
 #include <ftxui/dom/elements.hpp>
+#include <chrono>
 #include <iomanip>
 #include <sstream>
 #include <string>
@@ -12,6 +13,77 @@
 #include <vector>
 
 namespace firmius::tui {
+
+namespace {
+
+/**
+ * @brief Parse ISO 8601 timestamp to time_t
+ */
+std::time_t parseIso8601(const std::string &isoTime) {
+  std::tm tm = {};
+  std::istringstream ss(isoTime);
+  ss >> std::get_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
+  if (ss.fail()) {
+    return 0;
+  }
+  return std::mktime(&tm);
+}
+
+/**
+ * @brief Convert a timestamp to a human-readable relative time string
+ */
+std::string humanizeResetTime(const std::string &isoTime) {
+  if (isoTime.empty()) {
+    return "";
+  }
+
+  std::time_t resetTime = parseIso8601(isoTime);
+  if (resetTime == 0) {
+    return isoTime; // Return as-is if parsing fails
+  }
+
+  auto now = std::chrono::system_clock::now();
+  std::time_t nowTime = std::chrono::system_clock::to_time_t(now);
+
+  int64_t diff = static_cast<int64_t>(resetTime) - static_cast<int64_t>(nowTime);
+
+  if (diff <= 0) {
+    return "resetting now";
+  }
+
+  int64_t days = diff / 86400;
+  int64_t hours = (diff % 86400) / 3600;
+  int64_t minutes = (diff % 3600) / 60;
+
+  std::ostringstream result;
+
+  if (days > 0) {
+    result << "in " << days << " day";
+    if (days > 1)
+      result << "s";
+    if (hours > 0) {
+      result << ", " << hours << " hour";
+      if (hours > 1)
+        result << "s";
+    }
+    if (minutes > 0 && days == 0) {
+      result << ", " << minutes << " min";
+    }
+  } else if (hours > 0) {
+    result << "in " << hours << " hour";
+    if (hours > 1)
+      result << "s";
+    if (minutes > 0) {
+      result << ", " << minutes << " min";
+    }
+  } else {
+    result << "in " << minutes << " min";
+  }
+
+  return result.str();
+}
+
+} // namespace
 
 QuotasModal::QuotasModal(std::string providerId)
     : providerId_(std::move(providerId)) {}
@@ -59,8 +131,9 @@ ftxui::Component QuotasModal::create(TuiState &state) {
         } else {
           for (const auto &bucket : buckets) {
             std::stringstream ss;
-            ss << std::fixed << std::setprecision(1)
-               << (bucket.remainingFraction * 100.0f) << "%";
+            ss << std::fixed << std::setprecision(0)
+               << (bucket.remainingFraction * 100.0f);
+            std::string percentStr = ss.str() + "%";
 
             ftxui::Color color = theme.modals.highlight_fg;
             if (bucket.remainingFraction < 0.2f)
@@ -68,21 +141,23 @@ ftxui::Component QuotasModal::create(TuiState &state) {
             else if (bucket.remainingFraction < 0.5f)
               color = theme.modals.title;
 
+            // Compact mode: combine name + percentage
+            std::string compactLabel = bucket.name + " " + percentStr;
+
             ftxui::Element resetInfo = ftxui::filler();
             if (!bucket.resetTime.empty()) {
-              resetInfo = ftxui::text(" (Resets: " + bucket.resetTime + ")") |
+              std::string humanized = humanizeResetTime(bucket.resetTime);
+              resetInfo = ftxui::text(" | " + humanized) |
                           ftxui::color(theme.base.dim);
             }
 
+            // Compact mode: name + % on left, gauge, then reset time
             bucket_elements.push_back(ftxui::hbox(
-                {ftxui::text("  " + bucket.name) |
-                     ftxui::color(theme.modals.fg) |
-                     ftxui::size(ftxui::WIDTH, ftxui::EQUAL, 17),
+                {ftxui::text("  " + compactLabel) |
+                     ftxui::color(color) | ftxui::bold,
                  ftxui::gauge(bucket.remainingFraction) | ftxui::color(color) |
-                     ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, 1) | ftxui::flex,
-                 ftxui::text(" " + ss.str()) |
-                     ftxui::size(ftxui::WIDTH, ftxui::EQUAL, 7) | ftxui::bold |
-                     ftxui::color(color),
+                     ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, 1) |
+                     ftxui::size(ftxui::WIDTH, ftxui::EQUAL, 20) | ftxui::flex,
                  resetInfo}));
           }
         }
@@ -111,7 +186,8 @@ ftxui::Component QuotasModal::create(TuiState &state) {
                    window_title,
                    ftxui::vbox({
                        scrollable_content->Render() |
-                           ftxui::size(ftxui::HEIGHT, ftxui::LESS_THAN, 22),
+                           ftxui::size(ftxui::HEIGHT, ftxui::LESS_THAN, 22) |
+                           ftxui::size(ftxui::WIDTH, ftxui::LESS_THAN, 60),
                        ftxui::text(""),
                        ftxui::hbox({ftxui::text(" ESC/Enter ") | ftxui::bold |
                                         ftxui::color(theme.base.dim),
@@ -121,7 +197,8 @@ ftxui::Component QuotasModal::create(TuiState &state) {
                    })) |
                ftxui::clear_under | ftxui::center |
                ftxui::bgcolor(theme.modals.bg) |
-               ftxui::color(theme.modals.border);
+               ftxui::color(theme.modals.border) |
+               ftxui::size(ftxui::WIDTH, ftxui::LESS_THAN, 65);
       });
 
   return ftxui::CatchEvent(

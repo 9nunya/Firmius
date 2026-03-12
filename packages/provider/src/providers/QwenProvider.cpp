@@ -745,11 +745,9 @@ bool QwenProvider::refreshAccessToken(OAuthAccount &acc) {
 }
 
 void QwenProvider::refreshQuotas() {
-  // Qwen OAuth free tier (2k requests/day) has no quota API endpoint
-  // We track quota status based on API responses:
-  // - "insufficient_quota" error -> mark quota as 0 until midnight UTC
-  // - Successful request -> quota available (100%)
-  // - Network errors/timeouts -> don't mark as exhausted, just retry
+  // Qwen OAuth free tier (2k requests/day) has no quota API endpoint.
+  // Since we cannot dynamically fetch quota, always assume 100% available.
+  // Quota exhaustion is only detected via API errors (429/insufficient_quota).
 
   int64_t now = nowSeconds();
 
@@ -772,33 +770,18 @@ void QwenProvider::refreshQuotas() {
       refreshAccessToken(acc);
     }
 
-    // Check if this account has any quota set to "0" (exhausted)
-    bool wasExhausted = false;
-    for (const auto &[key, val] : acc.metadata) {
-      if (key.rfind("quota:", 0) == 0 && val == "0") {
-        wasExhausted = true;
-        break;
-      }
-    }
+    // Always assume quota is 100% available for all models
+    // We cannot check dynamically, so we assume available until API says otherwise
+    acc.metadata["quota:coder-model"] = "1";
+    acc.metadata["quota:qwen3-coder-plus"] = "1";
+    acc.metadata["quota:qwen3-coder-flash"] = "1";
+    acc.metadata["quota:qwen3.5-plus"] = "1";
+    acc.metadata["quota:vision-model"] = "1";
+    acc.metadata["quota_reset:coder-model"] = resetBuf;
 
-    if (wasExhausted) {
-      // Still exhausted - keep quota as 0, set reset time
-      acc.metadata["quota_reset:coder-model"] = resetBuf;
-    } else {
-      // Not exhausted - assume quota available (we'll discover otherwise on
-      // first request)
-      acc.metadata["quota:coder-model"] = "1";
-      acc.metadata["quota:qwen3-coder-plus"] = "1";
-      acc.metadata["quota:qwen3-coder-flash"] = "1";
-      acc.metadata["quota:qwen3.5-plus"] = "1";
-      acc.metadata["quota:vision-model"] = "1";
-      acc.metadata["quota_reset:coder-model"] = resetBuf;
-
-      // Clear any stale rate-limiting from network errors
-      acc.rateLimited = false;
-      acc.backoffUntil = 0;
-    }
-
+    // Clear any stale rate-limiting
+    acc.rateLimited = false;
+    acc.backoffUntil = 0;
     acc.lastQuotaRefresh = now;
   }
   saveAccounts();
@@ -981,7 +964,7 @@ void QwenProvider::processSSELine(
             delta["reasoning_content"].IsString()) {
           std::string reasoning = delta["reasoning_content"].GetString();
           if (!reasoning.empty()) {
-            onEvent(ThinkingChunk{reasoning});
+            onEvent(ThinkingChunk{reasoning, ""});
           }
         }
 
@@ -1174,6 +1157,11 @@ bool QwenProvider::executeStreamRequest(
     d.AddMember("stop", stop, a);
   }
 
+  // Request usage metadata in streaming response (OpenAI-compatible)
+  rapidjson::Value streamOptions(rapidjson::kObjectType);
+  streamOptions.AddMember("include_usage", true, a);
+  d.AddMember("stream_options", streamOptions, a);
+
   // Serialize to JSON string
   rapidjson::StringBuffer buffer;
   rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
@@ -1281,6 +1269,10 @@ bool QwenProvider::executeStreamRequest(
 void QwenProvider::stream(const AgentHistory &history,
                           const ProviderOptions &opts,
                           std::function<void(const StreamEvent &)> onEvent) {
+  // Refresh quotas first to reset any stale quota="0" markers
+  // Since Qwen has no dynamic quota API, we assume 100% available
+  refreshQuotas();
+
   // Retry schedule: 1s -> 2s -> 3s -> 4s -> 5s (fail fast, switch accounts)
   static const int retryDelays[] = {1, 2, 3, 4, 5};
   static const int numRetries = sizeof(retryDelays) / sizeof(retryDelays[0]);

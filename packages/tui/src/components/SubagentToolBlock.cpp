@@ -61,8 +61,15 @@ ftxui::Component SubagentToolBlock(const std::shared_ptr<ToolCallView> &view,
     const auto &theme = ThemeManager::instance().getCurrentTheme();
 
     // ── Generate Synthesized Log ──
+    // Use the real subagent_tool_log from the view (maintained by StreamStateManager)
+    // If not available, synthesize from subagent history as fallback
     std::vector<shared::SubagentToolLogEntry> synthesized_log;
-    if (sub_history_getter && !view->subagent_id.empty()) {
+
+    if (!view->subagent_tool_log.empty()) {
+      // Use the real log maintained by StreamStateManager
+      synthesized_log = view->subagent_tool_log;
+    } else if (sub_history_getter && !view->subagent_id.empty()) {
+      // Fallback: synthesize from subagent history if real log is not available
       const auto *hist = sub_history_getter(view->subagent_id);
       if (hist) {
         for (const auto &turn : hist->turns) {
@@ -74,6 +81,8 @@ ftxui::Component SubagentToolBlock(const std::shared_ptr<ToolCallView> &view,
                     tc->name, tc->args, shared::ToolPhase::Finished);
                 entry.phase = shared::ToolPhase::Finished;
                 entry.toolCallId = tc->id;
+                entry.name = tc->name;
+                entry.args = tc->args;
                 synthesized_log.push_back(std::move(entry));
               } else if (auto *th =
                              std::get_if<shared::ThinkingContent>(&part)) {
@@ -81,6 +90,7 @@ ftxui::Component SubagentToolBlock(const std::shared_ptr<ToolCallView> &view,
                   shared::SubagentToolLogEntry entry;
                   entry.summary = "Thought";
                   entry.phase = shared::ToolPhase::Finished;
+                  entry.toolCallId = "";
                   synthesized_log.push_back(std::move(entry));
                 }
               }
@@ -88,31 +98,11 @@ ftxui::Component SubagentToolBlock(const std::shared_ptr<ToolCallView> &view,
           }
         }
       }
+      // Don't add stream-based entries when using history fallback
+      // to avoid duplicates - history already has the complete picture
     }
-
-    if (sub_stream_getter && !view->subagent_id.empty()) {
-      const auto *s = sub_stream_getter(view->subagent_id);
-      if (s) {
-        if (s->is_thinking) {
-          shared::SubagentToolLogEntry entry;
-          entry.summary = "Thinking...";
-          entry.phase = shared::ToolPhase::Preparing;
-          synthesized_log.push_back(std::move(entry));
-        } else if (!s->text.empty()) {
-          shared::SubagentToolLogEntry entry;
-          std::string preview = s->text;
-          if (preview.size() > 40)
-            preview = preview.substr(0, 37) + "...";
-          entry.summary = "Responding: " + preview;
-          entry.phase = shared::ToolPhase::Preparing;
-          synthesized_log.push_back(std::move(entry));
-        }
-      }
-    }
-
-    if (synthesized_log.empty() && !view->subagent_tool_log.empty()) {
-      synthesized_log = view->subagent_tool_log;
-    }
+    // When using real subagent_tool_log, StreamStateManager handles updates
+    // so we don't add duplicate stream-based entries here
 
     auto renderLogSection = [&](size_t limit) {
       if (synthesized_log.empty()) {

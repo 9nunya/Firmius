@@ -428,9 +428,14 @@ void AntigravityProvider::processSSELine(
           else if (part.HasMember("type"))
             isThinking = (std::string(part["type"].GetString()) == "thinking");
 
-          if (isThinking)
-            onEvent(ThinkingChunk{text});
-          else
+          if (isThinking) {
+            std::string signature;
+            if (part.HasMember("thought_signature"))
+              signature = part["thought_signature"].GetString();
+            else if (part.HasMember("signature"))
+              signature = part["signature"].GetString();
+            onEvent(ThinkingChunk{text, signature});
+          } else
             onEvent(TextChunk{text});
         } else if (part.HasMember("functionCall")) {
           const auto &fc = part["functionCall"];

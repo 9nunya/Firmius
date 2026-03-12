@@ -63,7 +63,7 @@ AgentContext createTestContext() {
   msg2.id = "msg-002";
   msg2.role = Role::Assistant;
   msg2.content.push_back(TextContent{"Sure, I'd be happy to help!"});
-  msg2.content.push_back(ThinkingContent{"Let me think about how to respond."});
+  msg2.content.push_back(ThinkingContent{"Let me think about how to respond.", ""});
   msg2.timestamp = 1500;
   msg2.parentId = "msg-001";
 
@@ -158,7 +158,7 @@ TEST(Serialization, MessageRoundtrip) {
   msg.id = "msg-test";
   msg.role = Role::Assistant;
   msg.content.push_back(TextContent{"Hello world"});
-  msg.content.push_back(ThinkingContent{"Let me think"});
+  msg.content.push_back(ThinkingContent{"Let me think", ""});
   msg.content.push_back(
       ToolCallContent{"call-1", "test_tool", R"({"key":"value"})"});
   msg.content.push_back(

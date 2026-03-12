@@ -54,6 +54,11 @@ shared::ToolResult SubagentTool::execute(const SubagentInput &input,
     }
   }
 
+  // Inherit model from parent agent
+  std::string providerId = ctx.agent.getContext().config.providerId;
+  std::string modelId = ctx.agent.getContext().config.modelId;
+  std::string variantName = ctx.agent.getContext().config.modelVariant;
+
   // Check if re-tasking an existing agent
   if (input.agent_id.has_value() && !input.agent_id.value().empty()) {
     auto agent = AgentRegistry::instance().getAgent(input.agent_id.value());
@@ -115,7 +120,8 @@ shared::ToolResult SubagentTool::execute(const SubagentInput &input,
   if (input.async) {
     std::string subagentId = Engine::instance().summonAgent(
         threadId, input.persona, input.task, true,
-        ctx.agent.getContext().identity.id, input.name, input.title);
+        ctx.agent.getContext().identity.id, input.name, input.title, "",
+        providerId, modelId, variantName);
     rapidjson::Document d;
     d.SetObject();
     auto &a = d.GetAllocator();
@@ -125,7 +131,8 @@ shared::ToolResult SubagentTool::execute(const SubagentInput &input,
   } else {
     std::string subagentId = Engine::instance().summonAgent(
         threadId, input.persona, input.task, true,
-        ctx.agent.getContext().identity.id, input.name, input.title);
+        ctx.agent.getContext().identity.id, input.name, input.title, "",
+        providerId, modelId, variantName);
 
     // Polling wait to support heartbeats and interrupts
     std::string resultSummary;

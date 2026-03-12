@@ -24,6 +24,7 @@
 namespace firmius::provider {
 
 using firmius::shared::StringUtil;
+using namespace firmius::shared;
 using namespace firmius::utils;
 
 namespace {
@@ -1207,7 +1208,7 @@ void CodexProvider::processSseLine(
 
   if (type == "response.reasoning_text.delta") {
     if (doc.HasMember("delta") && doc["delta"].IsString())
-      onEvent(ThinkingChunk{doc["delta"].GetString()});
+      onEvent(ThinkingChunk{doc["delta"].GetString(), ""});
     return;
   }
 

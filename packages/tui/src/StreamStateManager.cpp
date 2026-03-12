@@ -50,6 +50,31 @@ void StreamStateManager::handleAgentTurnCompleted(
   s.provider_waiting = false;
   s.is_thinking = false;
   pushTokenUsage(e.agentId, e.aggregateMetrics);
+
+  // Mark all pending tool calls for this agent as finished
+  for (auto &[toolId, view] : tool_calls_) {
+    if (view && view->agentId == e.agentId &&
+        view->name != "summon_subagent" &&
+        view->phase != ToolPhase::Finished) {
+      view->phase = ToolPhase::Finished;
+      view->success = true;
+    }
+  }
+
+  // Mark all pending subagent tool log entries as finished and update summaries
+  for (auto &[toolId, view] : tool_calls_) {
+    if (view && view->name == "summon_subagent") {
+      for (auto &entry : view->subagent_tool_log) {
+        if (entry.phase != ToolPhase::Finished && !entry.name.empty()) {
+          // Regenerate summary with stored name/args
+          entry.summary = shared::SummarizeToolCall(
+              entry.name, entry.args, ToolPhase::Finished);
+          entry.phase = ToolPhase::Finished;
+        }
+      }
+    }
+  }
+
   for (auto it = tool_calls_.begin(); it != tool_calls_.end();) {
     if (it->second && it->second->agentId == e.agentId &&
         it->second->name != "summon_subagent") {
@@ -109,17 +134,27 @@ void StreamStateManager::handleAgentToolCallChunk(
           firmius::shared::SummarizeToolCall(view->name, view->args, phase);
       auto &log = it_parent->second->subagent_tool_log;
       if (!summary.empty()) {
-        if (it_parent->second->last_subagent_tool_id == e.toolCallId &&
-            !log.empty()) {
-          log.back().summary = summary;
-          log.back().phase = phase;
+        // Search for existing entry with this toolCallId (for parallel subagents)
+        auto it_entry = std::find_if(log.begin(), log.end(),
+            [&e](const shared::SubagentToolLogEntry &entry) {
+              return entry.toolCallId == e.toolCallId;
+            });
+
+        if (it_entry != log.end()) {
+          // Update existing entry
+          it_entry->summary = summary;
+          it_entry->phase = phase;
+          it_entry->name = view->name;
+          it_entry->args = view->args;
         } else {
+          // Create new entry
           shared::SubagentToolLogEntry entry;
           entry.summary = summary;
           entry.phase = phase;
           entry.toolCallId = e.toolCallId;
+          entry.name = view->name;
+          entry.args = view->args;
           log.push_back(entry);
-          it_parent->second->last_subagent_tool_id = e.toolCallId;
           while (log.size() > 8)
             log.erase(log.begin());
         }
@@ -151,17 +186,27 @@ void StreamStateManager::handleAgentToolCall(const shared::AgentToolCall &e) {
           view->name, view->args, view->phase);
       auto &log = it_parent->second->subagent_tool_log;
       if (!summary.empty()) {
-        if (it_parent->second->last_subagent_tool_id == e.toolCallId &&
-            !log.empty()) {
-          log.back().summary = summary;
-          log.back().phase = view->phase;
+        // Search for existing entry with this toolCallId (for parallel subagents)
+        auto it_entry = std::find_if(log.begin(), log.end(),
+            [&e](const shared::SubagentToolLogEntry &entry) {
+              return entry.toolCallId == e.toolCallId;
+            });
+
+        if (it_entry != log.end()) {
+          // Update existing entry
+          it_entry->summary = summary;
+          it_entry->phase = view->phase;
+          it_entry->name = view->name;
+          it_entry->args = view->args;
         } else {
+          // Create new entry
           shared::SubagentToolLogEntry entry;
           entry.summary = summary;
           entry.phase = view->phase;
           entry.toolCallId = e.toolCallId;
+          entry.name = view->name;
+          entry.args = view->args;
           log.push_back(entry);
-          it_parent->second->last_subagent_tool_id = e.toolCallId;
           while (log.size() > 8)
             log.erase(log.begin());
         }

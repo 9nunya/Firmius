@@ -12,6 +12,7 @@ target_sources(firmius_audits PRIVATE
     src/audits/OAuthWizardAudit.cpp
     src/audits/P15Audit.cpp
     src/audits/ProviderAudit.cpp
+    src/audits/ProviderStreamDebugAudit.cpp
     src/audits/QwenProviderAudit.cpp
     src/audits/QwenQuotaAudit.cpp
     src/audits/SubagentStressAudit.cpp
@@ -32,6 +33,7 @@ target_sources(firmius_audits PUBLIC
     include/audits/OAuthWizardAudit.hpp
     include/audits/P15Audit.hpp
     include/audits/ProviderAudit.hpp
+    include/audits/ProviderStreamDebugAudit.hpp
     include/audits/QwenProviderAudit.hpp
     include/audits/QwenQuotaAudit.hpp
     include/audits/SubagentStressAudit.hpp

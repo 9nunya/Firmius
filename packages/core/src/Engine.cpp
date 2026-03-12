@@ -1,4 +1,5 @@
 #include "Engine.hpp"
+#include <string>
 #include "AgentRegistry.hpp"
 #include "ConfigLoader.hpp"
 #include "agents/Agent.hpp"
@@ -100,8 +101,16 @@ std::string Engine::summonAgent(const std::string &threadId,
                                 const std::string &parentId,
                                 const std::string &friendlyName,
                                 const std::string &title,
-                                const std::string &requestedAgentId) {
+                                const std::string &requestedAgentId,
+                                const std::string &providerId,
+                                const std::string &modelId,
+                                const std::string &variantName) {
   reap();
+
+  // Suppress unused parameter warnings
+  (void)providerId;
+  (void)modelId;
+  (void)variantName;
 
   if (AgentRegistry::instance().listAll().size() >= maxConcurrentAgents) {
     throw std::runtime_error("Maximum concurrent agents reached");

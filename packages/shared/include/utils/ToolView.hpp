@@ -19,6 +19,8 @@ struct SubagentToolLogEntry {
   std::string summary;
   ToolPhase phase = ToolPhase::Preparing;
   std::string toolCallId;
+  std::string name;  // Store tool name for summary regeneration
+  std::string args;  // Store tool args for summary regeneration
 };
 
 struct ToolCallView {
@@ -35,7 +37,6 @@ struct ToolCallView {
   std::vector<SubagentToolLogEntry> subagent_tool_log;
   std::string subagent_title;
   bool subagent_running = false;
-  std::string last_subagent_tool_id;
   std::string subagent_slug;
   std::string subagent_id;
 };
