@@ -1,4 +1,5 @@
 #include "components/FileEditToolBlock.hpp"
+#include "ThemeManager.hpp"
 #include "UIState.hpp"
 #include "components/LogWindow.hpp"
 #include "utils/Icons.hpp"
@@ -135,6 +136,7 @@ static std::vector<DiffHunk> parseDiff(const std::string & /*path*/,
 static ftxui::Element renderDiffHunk(const DiffHunk &hunk,
                                      bool compact = false) {
   ftxui::Elements elements;
+  const auto &theme = ThemeManager::instance().getCurrentTheme();
 
   int line_num = hunk.old_start;
   int max_lines = compact ? 15 : INT32_MAX;
@@ -142,7 +144,7 @@ static ftxui::Element renderDiffHunk(const DiffHunk &hunk,
 
   for (const auto &[type, content] : hunk.lines) {
     if (compact && shown >= max_lines) {
-      elements.push_back(ftxui::text("  …") | ftxui::dim);
+      elements.push_back(ftxui::text("  …") | ftxui::color(theme.base.dim));
       break;
     }
 
@@ -154,28 +156,24 @@ static ftxui::Element renderDiffHunk(const DiffHunk &hunk,
     switch (type) {
     case '-':
       line_el = ftxui::hbox(
-          {ftxui::text(line_num_str + " ") | ftxui::dim |
-               ftxui::color(ftxui::Color::RGB(150, 150, 150)),
-           ftxui::text("− ") | ftxui::color(ftxui::Color::RGB(200, 80, 80)),
+          {ftxui::text(line_num_str + " ") | ftxui::color(theme.base.dim),
+           ftxui::text("− ") | ftxui::color(theme.status_bar.error.normal.bg),
            ftxui::text(content) |
-               ftxui::color(ftxui::Color::RGB(220, 100, 100))});
+               ftxui::color(theme.status_bar.error.normal.bg)});
       line_num++;
       break;
     case '+':
       line_el = ftxui::hbox(
-          {ftxui::text(line_num_str + " ") | ftxui::dim |
-               ftxui::color(ftxui::Color::RGB(150, 150, 150)),
-           ftxui::text("+ ") | ftxui::color(ftxui::Color::RGB(80, 180, 80)),
-           ftxui::text(content) |
-               ftxui::color(ftxui::Color::RGB(100, 220, 100))});
+          {ftxui::text(line_num_str + " ") | ftxui::color(theme.base.dim),
+           ftxui::text("+ ") | ftxui::color(theme.syntax.string),
+           ftxui::text(content) | ftxui::color(theme.syntax.string)});
       break;
     case ' ':
-      line_el =
-          ftxui::hbox({ftxui::text(line_num_str + " ") | ftxui::dim |
-                           ftxui::color(ftxui::Color::RGB(100, 100, 120)),
-                       ftxui::text("  ") | ftxui::dim,
-                       ftxui::text(content) |
-                           ftxui::color(ftxui::Color::RGB(180, 180, 200))});
+      line_el = ftxui::hbox(
+          {ftxui::text(line_num_str + " ") | ftxui::color(theme.base.dim),
+           ftxui::text("  ") | ftxui::color(theme.base.dim),
+           ftxui::text(content) |
+               ftxui::color(theme.tool_blocks.specific.file_edit.fg)});
       line_num++;
       break;
     }
@@ -210,8 +208,9 @@ ftxui::Component FileEditToolBlock(const std::shared_ptr<ToolCallView> &view) {
   auto container = ftxui::Container::Horizontal({toggle});
 
   return ftxui::Renderer(container, [view, toggle] {
+    const auto &theme = ThemeManager::instance().getCurrentTheme();
     if (!view)
-      return ftxui::text("File edit call") | ftxui::dim;
+      return ftxui::text("File edit call") | ftxui::color(theme.base.dim);
 
     // Parse args
     std::string path_arg;
@@ -251,13 +250,13 @@ ftxui::Component FileEditToolBlock(const std::shared_ptr<ToolCallView> &view) {
       std::string action = is_overwrite ? "Writing" : "Editing";
 
       using namespace firmius::shared;
-      auto header =
-          ftxui::hbox({ftxui::text(" " + ICON_GEAR + " ") |
-                           ftxui::color(ftxui::Color::Yellow),
-                       ftxui::text(action + " ") | ftxui::bold |
-                           ftxui::color(ftxui::Color::RGB(200, 180, 100)),
-                       ftxui::text(filename) |
-                           ftxui::color(ftxui::Color::RGB(180, 160, 140))});
+      auto header = ftxui::hbox(
+          {ftxui::text(" " + ICON_GEAR + " ") |
+               ftxui::color(theme.tool_blocks.generic_icon),
+           ftxui::text(action + " ") | ftxui::bold |
+               ftxui::color(theme.tool_blocks.generic_title),
+           ftxui::text(filename) |
+               ftxui::color(theme.tool_blocks.specific.file_edit.fg)});
 
       // Show diff preview during Called if we have content
       if (view->phase == ToolPhase::Called &&
@@ -284,11 +283,11 @@ ftxui::Component FileEditToolBlock(const std::shared_ptr<ToolCallView> &view) {
             while (ln.size() < 4)
               ln = " " + ln;
             diff_elements.push_back(ftxui::hbox(
-                {ftxui::text(ln + " ") | ftxui::dim,
+                {ftxui::text(ln + " ") | ftxui::color(theme.base.dim),
                  ftxui::text("│ ") |
-                     ftxui::color(ftxui::Color::RGB(100, 100, 150)),
+                     ftxui::color(theme.tool_blocks.generic_border),
                  ftxui::text(line) |
-                     ftxui::color(ftxui::Color::RGB(180, 180, 200))}));
+                     ftxui::color(theme.tool_blocks.specific.file_edit.fg)}));
             line_num++;
             shown++;
           }
@@ -301,22 +300,26 @@ ftxui::Component FileEditToolBlock(const std::shared_ptr<ToolCallView> &view) {
           if (total_added > 0)
             stats_parts.push_back(
                 ftxui::text("+" + std::to_string(total_added)) |
-                ftxui::color(ftxui::Color::Green));
+                ftxui::color(theme.syntax.string));
           if (total_removed > 0)
             stats_parts.push_back(
                 ftxui::text("−" + std::to_string(total_removed)) |
-                ftxui::color(ftxui::Color::Red));
-          stats = ftxui::hbox(stats_parts) | ftxui::dim;
+                ftxui::color(theme.status_bar.error.normal.bg));
+          stats = ftxui::hbox(stats_parts) | ftxui::color(theme.base.dim);
         }
 
         return ftxui::vbox(
-                   {header, ftxui::separatorLight(),
+                   {header,
+                    ftxui::separatorLight() |
+                        ftxui::color(theme.tool_blocks.generic_border),
                     ftxui::vbox(diff_elements) | ftxui::frame |
                         ftxui::size(ftxui::HEIGHT, ftxui::LESS_THAN, 12),
                     ftxui::hbox({stats, ftxui::filler(),
-                                 ftxui::text(filename) | ftxui::dim})}) |
+                                 ftxui::text(filename) |
+                                     ftxui::color(theme.base.dim)})}) |
                ftxui::borderRounded |
-               ftxui::color(ftxui::Color::RGB(160, 150, 130));
+               ftxui::color(theme.tool_blocks.generic_border) |
+               ftxui::bgcolor(theme.tool_blocks.generic_bg);
       }
 
       return header;
@@ -332,11 +335,12 @@ ftxui::Component FileEditToolBlock(const std::shared_ptr<ToolCallView> &view) {
 
       using namespace firmius::shared;
       return ftxui::hbox({ftxui::text(" " + ICON_ERROR + " ") |
-                              ftxui::color(ftxui::Color::Red),
+                              ftxui::color(theme.status_bar.error.normal.bg),
                           ftxui::text("Edit failed: " + err_msg) |
-                              ftxui::color(ftxui::Color::RedLight)}) |
+                              ftxui::color(theme.status_bar.error.normal.bg)}) |
              ftxui::borderRounded |
-             ftxui::color(ftxui::Color::RGB(200, 100, 100));
+             ftxui::color(theme.status_bar.error.normal.bg) |
+             ftxui::bgcolor(theme.tool_blocks.generic_bg);
     }
 
     // ── Finished + success ──
@@ -363,18 +367,18 @@ ftxui::Component FileEditToolBlock(const std::shared_ptr<ToolCallView> &view) {
     // Header with stats
     rows.push_back(ftxui::hbox({
         ftxui::text(" " + ICON_FILE_EDIT + " ") |
-            ftxui::color(ftxui::Color::RGB(100, 200, 150)),
+            ftxui::color(theme.tool_blocks.generic_icon),
         ftxui::text(filename + " ") | ftxui::bold |
-            ftxui::color(ftxui::Color::RGB(150, 230, 180)),
-        ftxui::text(" [") | ftxui::dim,
+            ftxui::color(theme.tool_blocks.generic_title),
+        ftxui::text(" [") | ftxui::color(theme.base.dim),
         toggle->Render(),
-        ftxui::text("]") | ftxui::dim,
+        ftxui::text("]") | ftxui::color(theme.base.dim),
         ftxui::filler(),
         removed > 0 ? (ftxui::text("−" + std::to_string(removed)) |
-                       ftxui::color(ftxui::Color::Red))
+                       ftxui::color(theme.status_bar.error.normal.bg))
                     : ftxui::text(""),
         added > 0 ? (ftxui::text(" +" + std::to_string(added)) |
-                     ftxui::color(ftxui::Color::Green))
+                     ftxui::color(theme.syntax.string))
                   : ftxui::text(""),
     }));
 
@@ -419,7 +423,7 @@ ftxui::Component FileEditToolBlock(const std::shared_ptr<ToolCallView> &view) {
               diff_elements.begin(),
               ftxui::text("  … " + std::to_string(hiddenCount) +
                           " hunks hidden (press Ctrl+G to expand)") |
-                  ftxui::dim | ftxui::color(ftxui::Color::RGB(120, 120, 150)));
+                  ftxui::color(theme.base.dim));
         }
       } else {
         // Show all hunks
@@ -444,11 +448,11 @@ ftxui::Component FileEditToolBlock(const std::shared_ptr<ToolCallView> &view) {
           while (ln.size() < 4)
             ln = " " + ln;
           diff_elements.push_back(ftxui::hbox(
-              {ftxui::text(ln + " ") | ftxui::dim,
+              {ftxui::text(ln + " ") | ftxui::color(theme.base.dim),
                ftxui::text("│ ") |
-                   ftxui::color(ftxui::Color::RGB(100, 100, 150)),
+                   ftxui::color(theme.tool_blocks.generic_border),
                ftxui::text(line) |
-                   ftxui::color(ftxui::Color::RGB(180, 180, 200))}));
+                   ftxui::color(theme.tool_blocks.specific.file_edit.fg)}));
           line_num++;
           shown++;
         }
@@ -459,16 +463,18 @@ ftxui::Component FileEditToolBlock(const std::shared_ptr<ToolCallView> &view) {
                             1) {
           diff_elements.push_back(
               ftxui::text("  … Content truncated (press Ctrl+G to expand)") |
-              ftxui::dim | ftxui::color(ftxui::Color::RGB(120, 120, 150)));
+              ftxui::color(theme.base.dim));
         }
       }
 
-      rows.push_back(ftxui::separatorLight());
+      rows.push_back(ftxui::separatorLight() |
+                     ftxui::color(theme.tool_blocks.generic_border));
       rows.push_back(ftxui::vbox(diff_elements) | ftxui::frame);
     }
 
     return ftxui::vbox(rows) | ftxui::borderRounded |
-           ftxui::color(ftxui::Color::RGB(140, 180, 160));
+           ftxui::color(theme.tool_blocks.generic_border) |
+           ftxui::bgcolor(theme.tool_blocks.generic_bg);
   });
 }
 

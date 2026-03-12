@@ -1,12 +1,8 @@
 #include "providers/QwenProvider.hpp"
 #include "providers/BackoffConstants.hpp"
 #include "utils/GCPHttpClient.hpp"
-#include "utils/Logger.hpp"
-#include "utils/StringUtil.hpp"
-#include "utils/TempOAuthServer.hpp"
 #include <atomic>
 #include <chrono>
-#include <cmath>
 #include <ctime>
 #include <iostream>
 #include <random>
@@ -36,15 +32,6 @@ const std::string QwenProvider::QWEN_MODELS_ENDPOINT =
     "https://portal.qwen.ai/v1/models";
 
 namespace {
-
-// Retry configuration
-struct RetrySettings {
-  static constexpr int BASE_DELAY_MS = 1000;
-  static constexpr int MAX_DELAY_MS = 30000;
-  static constexpr int MAX_RETRIES = 5;
-  static constexpr double JITTER_MIN = 0.5;
-  static constexpr double JITTER_MAX = 1.0;
-};
 
 // Stream context for CURL callback
 struct StreamContext {
@@ -763,9 +750,9 @@ void QwenProvider::refreshQuotas() {
   // - "insufficient_quota" error -> mark quota as 0 until midnight UTC
   // - Successful request -> quota available (100%)
   // - Network errors/timeouts -> don't mark as exhausted, just retry
-  
+
   int64_t now = nowSeconds();
-  
+
   // Calculate next midnight UTC
   std::time_t now_t = static_cast<std::time_t>(now);
   std::tm *tm = std::gmtime(&now_t);
@@ -774,16 +761,17 @@ void QwenProvider::refreshQuotas() {
   tm->tm_min = 0;
   tm->tm_sec = 0;
   int64_t midnight = static_cast<int64_t>(std::mktime(tm));
-  
+
   char resetBuf[64];
-  std::strftime(resetBuf, sizeof(resetBuf), "%Y-%m-%dT%H:%M:%SZ", std::gmtime(reinterpret_cast<std::time_t*>(&midnight)));
-  
+  std::strftime(resetBuf, sizeof(resetBuf), "%Y-%m-%dT%H:%M:%SZ",
+                std::gmtime(reinterpret_cast<std::time_t *>(&midnight)));
+
   for (auto &acc : accounts_) {
     // Refresh token if expired
     if (isTokenExpired(acc)) {
       refreshAccessToken(acc);
     }
-    
+
     // Check if this account has any quota set to "0" (exhausted)
     bool wasExhausted = false;
     for (const auto &[key, val] : acc.metadata) {
@@ -792,24 +780,25 @@ void QwenProvider::refreshQuotas() {
         break;
       }
     }
-    
+
     if (wasExhausted) {
       // Still exhausted - keep quota as 0, set reset time
       acc.metadata["quota_reset:coder-model"] = resetBuf;
     } else {
-      // Not exhausted - assume quota available (we'll discover otherwise on first request)
+      // Not exhausted - assume quota available (we'll discover otherwise on
+      // first request)
       acc.metadata["quota:coder-model"] = "1";
       acc.metadata["quota:qwen3-coder-plus"] = "1";
       acc.metadata["quota:qwen3-coder-flash"] = "1";
       acc.metadata["quota:qwen3.5-plus"] = "1";
       acc.metadata["quota:vision-model"] = "1";
       acc.metadata["quota_reset:coder-model"] = resetBuf;
-      
+
       // Clear any stale rate-limiting from network errors
       acc.rateLimited = false;
       acc.backoffUntil = 0;
     }
-    
+
     acc.lastQuotaRefresh = now;
   }
   saveAccounts();
@@ -818,20 +807,19 @@ void QwenProvider::refreshQuotas() {
 std::map<std::string, std::vector<QuotaBucket>>
 QwenProvider::getAllQuotas() const {
   std::map<std::string, std::vector<QuotaBucket>> result;
-  
+
   for (const auto &acc : accounts_) {
     std::vector<QuotaBucket> buckets;
-    
+
     // Check each model's quota
-    std::vector<std::string> models = {
-      "coder-model", "qwen3-coder-plus", "qwen3-coder-flash", 
-      "qwen3.5-plus", "vision-model"
-    };
-    
+    std::vector<std::string> models = {"coder-model", "qwen3-coder-plus",
+                                       "qwen3-coder-flash", "qwen3.5-plus",
+                                       "vision-model"};
+
     for (const auto &model : models) {
       std::string quotaKey = "quota:" + model;
       std::string resetKey = "quota_reset:" + model;
-      
+
       float remaining = 1.0f; // Default to available
       if (acc.metadata.count(quotaKey)) {
         try {
@@ -840,18 +828,18 @@ QwenProvider::getAllQuotas() const {
           remaining = 1.0f;
         }
       }
-      
+
       std::string resetTime;
       if (acc.metadata.count(resetKey)) {
         resetTime = acc.metadata.at(resetKey);
       }
-      
+
       buckets.push_back(QuotaBucket{model, remaining, resetTime});
     }
-    
+
     result[acc.getIdentifier()] = buckets;
   }
-  
+
   return result;
 }
 
@@ -1090,39 +1078,47 @@ bool QwenProvider::executeStreamRequest(
             rapidjson::Value toolCalls(rapidjson::kArrayType);
             message.AddMember("tool_calls", toolCalls, a);
           }
-          
+
           rapidjson::Value toolCall(rapidjson::kObjectType);
           toolCall.AddMember("id", rapidjson::Value(call->id.c_str(), a), a);
           toolCall.AddMember("type", "function", a);
-          
+
           rapidjson::Value function(rapidjson::kObjectType);
-          function.AddMember("name", rapidjson::Value(call->name.c_str(), a), a);
-          function.AddMember("arguments", rapidjson::Value(call->args.c_str(), a), a);
+          function.AddMember("name", rapidjson::Value(call->name.c_str(), a),
+                             a);
+          function.AddMember("arguments",
+                             rapidjson::Value(call->args.c_str(), a), a);
           toolCall.AddMember("function", function, a);
-          
+
           message["tool_calls"].PushBack(toolCall, a);
         }
       }
 
       // Handle tool results (tool role message)
       for (const auto &part : msg.content) {
-        if (auto *result = std::get_if<firmius::shared::ToolResultContent>(&part)) {
+        if (auto *result =
+                std::get_if<firmius::shared::ToolResultContent>(&part)) {
           // Tool results are sent as separate messages with role="tool"
-          // But since we're iterating by message, we need to handle this differently
-          // For now, add result as content if this is a tool result message
+          // But since we're iterating by message, we need to handle this
+          // differently For now, add result as content if this is a tool result
+          // message
           if (msg.role == firmius::shared::Role::ToolResult) {
-            if (!message.HasMember("content") || message["content"].Size() == 0) {
+            if (!message.HasMember("content") ||
+                message["content"].Size() == 0) {
               rapidjson::Value resultContent(rapidjson::kArrayType);
               rapidjson::Value item(rapidjson::kObjectType);
               item.AddMember("type", "text", a);
-              item.AddMember("text", rapidjson::Value(result->result.c_str(), a), a);
+              item.AddMember("text",
+                             rapidjson::Value(result->result.c_str(), a), a);
               resultContent.PushBack(item, a);
               message.AddMember("content", resultContent, a);
             }
           }
           // Add tool_call_id for tool result messages
           if (!result->toolCallId.empty()) {
-            message.AddMember("tool_call_id", rapidjson::Value(result->toolCallId.c_str(), a), a);
+            message.AddMember("tool_call_id",
+                              rapidjson::Value(result->toolCallId.c_str(), a),
+                              a);
           }
         }
       }
@@ -1245,10 +1241,13 @@ bool QwenProvider::executeStreamRequest(
   if (resp.code == 401 || resp.code == 403) {
     // Token expired or invalid - mark for refresh
     acc.rateLimited = true;
-    acc.backoffUntil = nowSeconds() + firmius::shared::BackoffConstants::MAX_BACKOFF;
+    acc.backoffUntil =
+        nowSeconds() + firmius::shared::BackoffConstants::MAX_BACKOFF;
     onEvent(StreamError{"Authentication failed. Token may be expired.",
                         static_cast<int>(resp.code), acc.getIdentifier()});
-  } else if (resp.code == 429 || (resp.code == 400 && errMsg.find("insufficient_quota") != std::string::npos)) {
+  } else if (resp.code == 429 ||
+             (resp.code == 400 &&
+              errMsg.find("insufficient_quota") != std::string::npos)) {
     // Rate limited or quota exhausted - IMMEDIATE account switch
     // Set quota to 0 for all models (this marks account as exhausted)
     acc.metadata["quota:coder-model"] = "0";
@@ -1256,20 +1255,25 @@ bool QwenProvider::executeStreamRequest(
     acc.metadata["quota:qwen3-coder-flash"] = "0";
     acc.metadata["quota:qwen3.5-plus"] = "0";
     acc.metadata["quota:vision-model"] = "0";
-    
+
     // Persist the quota exhaustion immediately
     saveAccounts();
-    
-    std::string quotaError = "Quota exhausted (2k/day free limit). Switching to next account...";
-    onEvent(StreamError{quotaError, static_cast<int>(resp.code), acc.getIdentifier()});
+
+    std::string quotaError =
+        "Quota exhausted (2k/day free limit). Switching to next account...";
+    onEvent(StreamError{quotaError, static_cast<int>(resp.code),
+                        acc.getIdentifier()});
   } else if (resp.code >= 500 || resp.code == 0) {
     // Server error or timeout - DON'T mark as exhausted, just fail this attempt
     // The retry logic will try other accounts
-    onEvent(StreamError{resp.code == 0 ? "Request timeout" : "Server error: " + std::to_string(resp.code),
+    onEvent(StreamError{resp.code == 0
+                            ? "Request timeout"
+                            : "Server error: " + std::to_string(resp.code),
                         static_cast<int>(resp.code), acc.getIdentifier()});
   } else {
     // Other errors (4xx) - don't mark as rate-limited, but fail this attempt
-    onEvent(StreamError{errMsg, static_cast<int>(resp.code), acc.getIdentifier()});
+    onEvent(
+        StreamError{errMsg, static_cast<int>(resp.code), acc.getIdentifier()});
   }
   return false; // Failed
 }
@@ -1280,7 +1284,7 @@ void QwenProvider::stream(const AgentHistory &history,
   // Retry schedule: 1s -> 2s -> 3s -> 4s -> 5s (fail fast, switch accounts)
   static const int retryDelays[] = {1, 2, 3, 4, 5};
   static const int numRetries = sizeof(retryDelays) / sizeof(retryDelays[0]);
-  
+
   int accountSwitchCount = 0;
   std::string lastError;
   std::string lastAccountEmail;
@@ -1303,9 +1307,9 @@ void QwenProvider::stream(const AgentHistory &history,
 
       int64_t waitSec = (earliestUnlock > now) ? (earliestUnlock - now) : 0;
       if (waitSec > 0 && waitSec <= 120) {
-        onEvent(StreamRetrying{1, numRetries, 429,
-                               static_cast<int>(waitSec * 1000),
-                               "All accounts rate-limited, waiting", lastAccountEmail});
+        onEvent(StreamRetrying{
+            1, numRetries, 429, static_cast<int>(waitSec * 1000),
+            "All accounts rate-limited, waiting", lastAccountEmail});
         std::this_thread::sleep_for(std::chrono::seconds(waitSec));
 
         // Clear expired backoffs
@@ -1337,7 +1341,7 @@ void QwenProvider::stream(const AgentHistory &history,
     // Retry loop for this account (retries happen within same turn)
     bool accountFailed = false;
     bool wasQuotaError = false;
-    
+
     for (int retryIdx = 0; retryIdx < numRetries; ++retryIdx) {
       if (retryIdx > 0) {
         int delaySec = retryDelays[retryIdx - 1];
@@ -1348,7 +1352,8 @@ void QwenProvider::stream(const AgentHistory &history,
 
       // Try the request
       if (executeStreamRequest(acc, history, opts, onEvent)) {
-        // Success! Update lastUsedIndex_ so next request starts from this account
+        // Success! Update lastUsedIndex_ so next request starts from this
+        // account
         {
           std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
           for (size_t i = 0; i < accounts_.size(); i++) {
@@ -1403,7 +1408,8 @@ void QwenProvider::stream(const AgentHistory &history,
   }
 
   // All accounts exhausted
-  onEvent(StreamError{"All accounts rate-limited or exhausted", -1, lastAccountEmail});
+  onEvent(StreamError{"All accounts rate-limited or exhausted", -1,
+                      lastAccountEmail});
 }
 
 void QwenProvider::generateSummary(

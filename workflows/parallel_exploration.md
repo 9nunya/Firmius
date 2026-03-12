@@ -22,4 +22,4 @@ I need you to explore the current working directory and create a comprehensive a
    - Key files and their purposes
    - Any potential issues or recommendations
 
-Use `summon_subagent` to create each subagent with a clear persona and task. Wait for all to complete before synthesizing.
+Use `summon_subagent` with `async=true` to create each subagent with a clear persona and task. Wait for all to complete before synthesizing.

@@ -1,11 +1,12 @@
 #include "modals/AccountsModal.hpp"
 #include "TUIState.hpp"
+#include "ThemeManager.hpp"
 #include "harness/Harness.hpp"
-#include "modals/OAuthWizardModal.hpp"
 #include "modals/APIKeyWizardModal.hpp"
-#include "providers/ProviderRegistry.hpp"
-#include "providers/BaseOAuthProvider.hpp"
+#include "modals/OAuthWizardModal.hpp"
 #include "providers/BaseAPIKeyProvider.hpp"
+#include "providers/BaseOAuthProvider.hpp"
+#include "providers/ProviderRegistry.hpp"
 #include <ftxui/component/component.hpp>
 #include <ftxui/dom/elements.hpp>
 #include <memory>
@@ -28,23 +29,26 @@ ftxui::Component AccountsModal::create(TuiState &state) {
   auto providerId = providerId_;
   auto isAPIKeyProvider = std::make_shared<bool>(false);
 
-  auto refreshAccounts = [oauthAccounts, apiKeyAccounts, isLoading, providerId, 
+  auto refreshAccounts = [oauthAccounts, apiKeyAccounts, isLoading, providerId,
                           isAPIKeyProvider, &state]() {
     *isLoading = true;
-    std::thread([oauthAccounts, apiKeyAccounts, isLoading, providerId, 
+    std::thread([oauthAccounts, apiKeyAccounts, isLoading, providerId,
                  isAPIKeyProvider, &state]() {
       auto provider =
-          firmius::provider::ProviderRegistry::instance().getProvider(providerId);
-      
+          firmius::provider::ProviderRegistry::instance().getProvider(
+              providerId);
+
       if (provider) {
         auto apiKeyProvider =
-            std::dynamic_pointer_cast<firmius::provider::BaseAPIKeyProvider>(provider);
+            std::dynamic_pointer_cast<firmius::provider::BaseAPIKeyProvider>(
+                provider);
         if (apiKeyProvider) {
           *isAPIKeyProvider = true;
           *apiKeyAccounts = apiKeyProvider->getAccounts();
         } else {
           *isAPIKeyProvider = false;
-          *oauthAccounts = firmius::core::Harness::instance().getAccounts(providerId);
+          *oauthAccounts =
+              firmius::core::Harness::instance().getAccounts(providerId);
         }
       }
       *isLoading = false;
@@ -54,91 +58,103 @@ ftxui::Component AccountsModal::create(TuiState &state) {
 
   refreshAccounts();
 
-  auto component =
-      ftxui::Renderer([oauthAccounts, apiKeyAccounts, selected, isLoading, 
-                       providerId, isAPIKeyProvider]() {
-        if (*isLoading) {
-          return ftxui::window(
-                     ftxui::text(" Accounts: " + providerId) | ftxui::bold |
-                         ftxui::color(ftxui::Color::Cyan),
-                     ftxui::vbox(
-                         {ftxui::text("Loading accounts...") | ftxui::center,
-                          ftxui::text("") |
-                              ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, 5)})) |
-                 ftxui::clear_under | ftxui::center;
-        }
+  auto component = ftxui::Renderer([oauthAccounts, apiKeyAccounts, selected,
+                                    isLoading, providerId, isAPIKeyProvider]() {
+    const auto &theme = ThemeManager::instance().getCurrentTheme();
 
-        ftxui::Elements rows;
-        
-        if (*isAPIKeyProvider) {
-          // Display API key accounts with safe filtering
-          for (int i = 0; i < (int)apiKeyAccounts->size(); ++i) {
-            const auto &acc = (*apiKeyAccounts)[i];
-            // Safe display: shows "Key #N (prefix...)"
-            std::string display = acc.identifier + " (" + acc.keyPrefix + "...)";
-            auto label = ftxui::text("  " + display + "  ");
-            if (i == *selected) {
-              label = label | ftxui::inverted | ftxui::bold |
-                      ftxui::color(ftxui::Color::Yellow);
-            } else {
-              label = label | ftxui::color(ftxui::Color::GrayDark);
-            }
-            rows.push_back(label);
-          }
+    if (*isLoading) {
+      return ftxui::window(
+                 ftxui::text(" Accounts: " + providerId) | ftxui::bold |
+                     ftxui::color(theme.modals.title),
+                 ftxui::vbox(
+                     {ftxui::text("Loading accounts...") | ftxui::center |
+                          ftxui::color(theme.modals.fg),
+                      ftxui::text("") |
+                          ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, 5)})) |
+             ftxui::clear_under | ftxui::center |
+             ftxui::bgcolor(theme.modals.bg) |
+             ftxui::color(theme.modals.border);
+    }
+
+    ftxui::Elements rows;
+
+    if (*isAPIKeyProvider) {
+      // Display API key accounts with safe filtering
+      for (int i = 0; i < (int)apiKeyAccounts->size(); ++i) {
+        const auto &acc = (*apiKeyAccounts)[i];
+        // Safe display: shows "Key #N (prefix...)"
+        std::string display = acc.identifier + " (" + acc.keyPrefix + "...)";
+        auto label = ftxui::text("  " + display + "  ");
+        if (i == *selected) {
+          label = label | ftxui::inverted | ftxui::bold |
+                  ftxui::color(theme.modals.highlight_fg) |
+                  ftxui::bgcolor(theme.modals.highlight_bg);
         } else {
-          // Display OAuth accounts
-          for (int i = 0; i < (int)oauthAccounts->size(); ++i) {
-            auto label = ftxui::text("  " + (*oauthAccounts)[i].identifier + "  ");
-            if (i == *selected) {
-              label = label | ftxui::inverted | ftxui::bold |
-                      ftxui::color(ftxui::Color::Yellow);
-            } else {
-              label = label | ftxui::color(ftxui::Color::GrayDark);
-            }
-            rows.push_back(label);
-          }
+          label = label | ftxui::color(theme.modals.fg);
         }
-
-        if (rows.empty()) {
-          rows.push_back(ftxui::text("No accounts connected.") | ftxui::dim |
-                         ftxui::center);
+        rows.push_back(label);
+      }
+    } else {
+      // Display OAuth accounts
+      for (int i = 0; i < (int)oauthAccounts->size(); ++i) {
+        auto label = ftxui::text("  " + (*oauthAccounts)[i].identifier + "  ");
+        if (i == *selected) {
+          label = label | ftxui::inverted | ftxui::bold |
+                  ftxui::color(theme.modals.highlight_fg) |
+                  ftxui::bgcolor(theme.modals.highlight_bg);
+        } else {
+          label = label | ftxui::color(theme.modals.fg);
         }
+        rows.push_back(label);
+      }
+    }
 
-        auto window_title =
-            ftxui::hbox({ftxui::text(" Manage Accounts: ") | ftxui::bold,
-                         ftxui::text(providerId) | ftxui::bold |
-                             ftxui::color(ftxui::Color::Cyan)});
+    if (rows.empty()) {
+      rows.push_back(ftxui::text("No accounts connected.") |
+                     ftxui::color(theme.base.dim) | ftxui::center);
+    }
 
-        return ftxui::window(
-                   window_title,
-                   ftxui::vbox({
-                       ftxui::text("Select an account to manage:") | ftxui::dim,
-                       ftxui::text(""),
-                       ftxui::vbox(rows) | ftxui::vscroll_indicator |
-                           ftxui::yframe |
-                           ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, 8) |
-                           ftxui::borderRounded |
-                           ftxui::color(ftxui::Color::GrayLight),
-                       ftxui::text(""),
-                       ftxui::hbox({ftxui::text(" [A] ") | ftxui::bold |
-                                        ftxui::color(ftxui::Color::Blue),
-                                    ftxui::text(" Add Account   "),
-                                    ftxui::text(" [D] ") | ftxui::bold |
-                                        ftxui::color(ftxui::Color::Red),
-                                    ftxui::text(" Delete Selected "),
-                                    ftxui::filler(),
-                                    ftxui::text(" [ESC] ") | ftxui::bold |
-                                        ftxui::color(ftxui::Color::GrayLight),
-                                    ftxui::text(" Close ")}) |
-                           ftxui::center,
-                       ftxui::separatorLight(),
-                       ftxui::hbox({ftxui::text(" ↑↓ ") | ftxui::bold |
-                                        ftxui::color(ftxui::Color::Cyan),
-                                    ftxui::text("navigate elements")}) |
-                           ftxui::center | ftxui::dim,
-                   })) |
-               ftxui::clear_under | ftxui::center;
-      });
+    auto window_title =
+        ftxui::hbox({ftxui::text(" Manage Accounts: ") | ftxui::bold |
+                         ftxui::color(theme.modals.title),
+                     ftxui::text(providerId) | ftxui::bold |
+                         ftxui::color(theme.modals.highlight_fg)});
+
+    return ftxui::window(
+               window_title,
+               ftxui::vbox({
+                   ftxui::text("Select an account to manage:") |
+                       ftxui::color(theme.base.dim),
+                   ftxui::text(""),
+                   ftxui::vbox(rows) | ftxui::vscroll_indicator |
+                       ftxui::yframe |
+                       ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, 8) |
+                       ftxui::borderRounded | ftxui::color(theme.modals.border),
+                   ftxui::text(""),
+                   ftxui::hbox(
+                       {ftxui::text(" [A] ") | ftxui::bold |
+                            ftxui::color(theme.modals.highlight_fg),
+                        ftxui::text(" Add Account   ") |
+                            ftxui::color(theme.modals.fg),
+                        ftxui::text(" [D] ") | ftxui::bold |
+                            ftxui::color(theme.status_bar.error.normal.fg),
+                        ftxui::text(" Delete Selected ") |
+                            ftxui::color(theme.modals.fg),
+                        ftxui::filler(),
+                        ftxui::text(" [ESC] ") | ftxui::bold |
+                            ftxui::color(theme.base.dim),
+                        ftxui::text(" Close ") |
+                            ftxui::color(theme.modals.fg)}) |
+                       ftxui::center,
+                   ftxui::separatorLight() | ftxui::color(theme.modals.border),
+                   ftxui::hbox({ftxui::text(" ↑↓ ") | ftxui::bold |
+                                    ftxui::color(theme.modals.title),
+                                ftxui::text("navigate elements")}) |
+                       ftxui::center | ftxui::color(theme.base.dim),
+               })) |
+           ftxui::clear_under | ftxui::center |
+           ftxui::bgcolor(theme.modals.bg) | ftxui::color(theme.modals.border);
+  });
 
   return ftxui::CatchEvent(component, [oauthAccounts, apiKeyAccounts, selected,
                                        providerId, isAPIKeyProvider,
@@ -154,21 +170,28 @@ ftxui::Component AccountsModal::create(TuiState &state) {
       return true;
     }
     if (event == ftxui::Event::ArrowDown) {
-      if (*selected < (int)(*isAPIKeyProvider ? apiKeyAccounts->size() : oauthAccounts->size()) - 1)
+      if (*selected < (int)(*isAPIKeyProvider ? apiKeyAccounts->size()
+                                              : oauthAccounts->size()) -
+                          1)
         (*selected)++;
       return true;
     }
     if (event == ftxui::Event::Delete ||
         event == ftxui::Event::Character('d') ||
         event == ftxui::Event::Character('D')) {
-      if (!(*isAPIKeyProvider ? apiKeyAccounts->empty() : oauthAccounts->empty()) && 
-          *selected < (int)(*isAPIKeyProvider ? apiKeyAccounts->size() : oauthAccounts->size())) {
-        std::string identifier = *isAPIKeyProvider 
-            ? (*apiKeyAccounts)[*selected].identifier 
-            : (*oauthAccounts)[*selected].identifier;
-        firmius::core::Harness::instance().deleteAccount(providerId, identifier);
+      if (!(*isAPIKeyProvider ? apiKeyAccounts->empty()
+                              : oauthAccounts->empty()) &&
+          *selected < (int)(*isAPIKeyProvider ? apiKeyAccounts->size()
+                                              : oauthAccounts->size())) {
+        std::string identifier = *isAPIKeyProvider
+                                     ? (*apiKeyAccounts)[*selected].identifier
+                                     : (*oauthAccounts)[*selected].identifier;
+        firmius::core::Harness::instance().deleteAccount(providerId,
+                                                         identifier);
         refreshAccounts();
-        if (*selected >= (int)(*isAPIKeyProvider ? apiKeyAccounts->size() : oauthAccounts->size()) && *selected > 0)
+        if (*selected >= (int)(*isAPIKeyProvider ? apiKeyAccounts->size()
+                                                 : oauthAccounts->size()) &&
+            *selected > 0)
           (*selected)--;
       }
       return true;
@@ -193,7 +216,7 @@ ftxui::Component AccountsModal::create(TuiState &state) {
           }
           return true;
         }
-        
+
         // Fall back to OAuth provider
         auto oauthProvider =
             std::dynamic_pointer_cast<firmius::provider::BaseOAuthProvider>(

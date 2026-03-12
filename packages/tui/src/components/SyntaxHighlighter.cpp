@@ -1,4 +1,5 @@
 #include "components/SyntaxHighlighter.hpp"
+#include "ThemeManager.hpp"
 #include <algorithm>
 #include <cstring>
 #include <sstream>
@@ -378,34 +379,35 @@ SyntaxHighlighter::classifyNode(TSNode node,
 }
 
 ftxui::Color SyntaxHighlighter::colorFor(HighlightKind kind) const {
+  const auto &theme = ThemeManager::instance().getCurrentTheme();
   switch (kind) {
   case HighlightKind::Keyword:
-    return colorScheme_.keyword;
+    return theme.syntax.keyword;
   case HighlightKind::Type:
-    return colorScheme_.type;
+    return theme.syntax.type;
   case HighlightKind::Function:
-    return colorScheme_.function;
+    return theme.syntax.function;
   case HighlightKind::Variable:
-    return colorScheme_.variable;
+    return theme.syntax.variable;
   case HighlightKind::String:
-    return colorScheme_.string;
+    return theme.syntax.string;
   case HighlightKind::Comment:
-    return colorScheme_.comment;
+    return theme.syntax.comment;
   case HighlightKind::Number:
-    return colorScheme_.number;
+    return theme.syntax.number;
   case HighlightKind::Operator:
-    return colorScheme_.operator_color;
+    return theme.syntax.op;
   case HighlightKind::Punctuation:
-    return colorScheme_.punctuation;
+    return theme.base.fg;
   case HighlightKind::Constant:
-    return colorScheme_.constant;
+    return theme.syntax.constant;
   case HighlightKind::Tag:
-    return colorScheme_.tag;
+    return theme.syntax.tag;
   case HighlightKind::Attribute:
-    return colorScheme_.attribute;
+    return theme.syntax.attr;
   case HighlightKind::Plain:
   default:
-    return colorScheme_.plain;
+    return theme.base.fg;
   }
 }
 
@@ -526,7 +528,9 @@ SyntaxHighlighter::highlightRenderLines(const std::string &code,
       // Gap between cursor and this span = plain text
       if (sStart > cursor) {
         std::string gap = code.substr(cursor, sStart - cursor);
-        parts.push_back(ftxui::text(gap) | ftxui::color(colorScheme_.plain));
+        parts.push_back(
+            ftxui::text(gap) |
+            ftxui::color(ThemeManager::instance().getCurrentTheme().base.fg));
       }
 
       // The highlighted span text
@@ -540,7 +544,9 @@ SyntaxHighlighter::highlightRenderLines(const std::string &code,
     // Remaining text after last span on this line
     if (cursor < lineEndByte) {
       std::string tail = code.substr(cursor, lineEndByte - cursor);
-      parts.push_back(ftxui::text(tail) | ftxui::color(colorScheme_.plain));
+      parts.push_back(
+          ftxui::text(tail) |
+          ftxui::color(ThemeManager::instance().getCurrentTheme().base.fg));
     }
 
     // If the line was completely empty, ensure we push an empty text element
@@ -571,11 +577,12 @@ ftxui::Element SyntaxHighlighter::highlightRender(const std::string &code,
   linesWithNumbers.reserve(lines.size());
 
   int lineNum = 1;
+  const auto &theme = ThemeManager::instance().getCurrentTheme();
   for (auto &line : lines) {
     std::string gutter = std::to_string(lineNum);
     linesWithNumbers.push_back(
         ftxui::hbox({ftxui::text(gutter + " │ ") | ftxui::dim |
-                         ftxui::color(ftxui::Color::RGB(100, 100, 130)),
+                         ftxui::color(theme.base.dim),
                      line}));
     lineNum++;
   }

@@ -1,6 +1,7 @@
 #include "TUIState.hpp"
 #include "AgentRegistry.hpp"
 #include "NotificationManager.hpp"
+#include "ThemeManager.hpp"
 #include "UIState.hpp"
 #include "commands/CommandManager.hpp"
 #include "components/AgentStrip.hpp"
@@ -650,12 +651,14 @@ ftxui::Component TuiState::root() {
           chat_area = welcome_screen->Render();
         }
 
+        const auto &theme = ThemeManager::instance().getCurrentTheme();
+
         // Ultra-compact bottom bar layout
         auto bottom_bar = ftxui::vbox({
             agent_strip->Render(),
-            ftxui::separator(),
+            ftxui::separator() | ftxui::color(theme.base.border),
             input_bar->Render(),
-            ftxui::separator(),
+            ftxui::separator() | ftxui::color(theme.base.border),
             status_bar->Render(),
         });
 
@@ -681,7 +684,7 @@ ftxui::Component TuiState::root() {
         auto notifications = NotificationManager::instance().render();
         main_view = ftxui::dbox({main_view, notifications});
 
-        return main_view;
+        return main_view | ftxui::bgcolor(theme.base.bg);
       });
 
   // Layer modals using dbox
@@ -834,8 +837,19 @@ ftxui::Component TuiState::root() {
       return true;
     }
 
+    if (event == ftxui::Event::Special("\x14")) { // Ctrl+T (Cycle Theme)
+      ThemeManager::instance().cycleTheme();
+      if (chat_component_) {
+        chat_component_->OnEvent(ftxui::Event::Special("ThemeChanged"));
+      }
+      NotificationManager::instance().notifyInfo(
+          "Theme Changed", ThemeManager::instance().getCurrentTheme().name,
+          std::chrono::milliseconds(1500));
+      return true;
+    }
+
     if (event ==
-        ftxui::Event::Special("\x14")) { // Ctrl+T (Cycle model variant)
+        ftxui::Event::Special("\x19")) { // Ctrl+Y (Cycle model variant)
       if (harness_ && !focused_agent_id_.empty()) {
         auto agent = firmius::core::AgentRegistry::instance().getAgent(
             focused_agent_id_);

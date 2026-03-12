@@ -180,6 +180,7 @@ add_executable(test_syntax_highlighter
     tui/test_syntax_highlighter.cpp
     ../../packages/tui/src/components/SyntaxHighlighter.cpp
     ../../packages/tui/src/NotificationManager.cpp
+    ../../packages/tui/src/ThemeManager.cpp
     ../../packages/tui/src/components/GlintEffect.cpp
 )
 target_link_libraries(test_syntax_highlighter PRIVATE

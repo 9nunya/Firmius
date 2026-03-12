@@ -1,4 +1,5 @@
 #include "components/StatusBar.hpp"
+#include "ThemeManager.hpp"
 #include "components/GlintEffect.hpp"
 #include "utils/Icons.hpp"
 #include "utils/ModelUtil.hpp"
@@ -11,50 +12,19 @@ namespace firmius::tui {
 
 namespace {
 
-struct StatusVisualConfig {
-  ftxui::Color badge_bg;
-  ftxui::Color badge_fg;
-  std::vector<ftxui::Color> gradient_colors;
-  bool use_gradient = true;
-};
-
-StatusVisualConfig BuildStatusVisualConfig(const std::string &mode) {
-  StatusVisualConfig config;
-  config.badge_bg = ftxui::Color::RGB(80, 80, 120);
-  config.badge_fg = ftxui::Color::RGB(220, 220, 255);
-  config.gradient_colors = {ftxui::Color::RGB(90, 100, 150),
-                            ftxui::Color::RGB(180, 190, 220)};
-  config.use_gradient = true;
-
-  if (mode == "streaming" || mode == "executing_tool") {
-    config.badge_bg = ftxui::Color::RGB(40, 140, 80);
-    config.badge_fg = ftxui::Color::RGB(220, 255, 220);
-    config.gradient_colors = {ftxui::Color::RGB(32, 110, 70),
-                              ftxui::Color::RGB(106, 220, 150)};
-  } else if (mode == "idle") {
-    config.badge_bg = ftxui::Color::RGB(60, 60, 100);
-    config.badge_fg = ftxui::Color::RGB(180, 180, 220);
-    config.gradient_colors = {ftxui::Color::RGB(60, 60, 100),
-                              ftxui::Color::RGB(100, 110, 160)};
-    config.use_gradient = false;
-  } else if (mode == "awaiting_input") {
-    config.badge_bg = ftxui::Color::RGB(60, 60, 100);
-    config.badge_fg = ftxui::Color::RGB(200, 200, 240);
-    config.gradient_colors = {ftxui::Color::RGB(70, 80, 130),
-                              ftxui::Color::RGB(160, 180, 230)};
-  } else if (mode == "error" || mode == "cancelled") {
-    config.badge_bg = ftxui::Color::RGB(160, 50, 50);
-    config.badge_fg = ftxui::Color::RGB(255, 200, 200);
-    config.gradient_colors.clear();
-    config.use_gradient = false;
-  } else if (mode == "provider_waiting" || mode == "compacting") {
-    config.badge_bg = ftxui::Color::RGB(140, 120, 40);
-    config.badge_fg = ftxui::Color::RGB(255, 240, 180);
-    config.gradient_colors = {ftxui::Color::RGB(120, 110, 50),
-                              ftxui::Color::RGB(245, 220, 110)};
-  }
-
-  return config;
+const StateColors &GetStateColorsForMode(const std::string &mode,
+                                         const Theme &theme) {
+  if (mode == "streaming")
+    return theme.status_bar.streaming;
+  if (mode == "executing_tool")
+    return theme.status_bar.executing_tool;
+  if (mode == "provider_waiting")
+    return theme.status_bar.provider_waiting;
+  if (mode == "compacting")
+    return theme.status_bar.compacting;
+  if (mode == "error" || mode == "cancelled")
+    return theme.status_bar.error;
+  return theme.status_bar.idle;
 }
 
 class StatusBarComponentBase : public ftxui::ComponentBase {
@@ -69,40 +39,37 @@ public:
 
     syncGlint();
 
-    using namespace firmius::shared;
-
+    const auto &theme = ThemeManager::instance().getCurrentTheme();
     std::string mode = model_->status_text;
-    auto visual = BuildStatusVisualConfig(mode);
+    const auto &state = GetStateColorsForMode(mode, theme);
 
     // 1. Status Segment (Icon)
-    std::string status_icon = ICON_WAIT;
+    std::string status_icon = firmius::shared::ICON_WAIT;
     if (mode == "streaming" || mode == "executing_tool")
-      status_icon = ICON_GEAR;
+      status_icon = firmius::shared::ICON_GEAR;
     else if (mode == "error" || mode == "cancelled")
-      status_icon = ICON_ERROR;
-    else if (mode == "provider_waiting" || mode == "compacting")
-      status_icon = ICON_WAIT;
+      status_icon = firmius::shared::ICON_ERROR;
 
-    ftxui::Color status_bg = visual.badge_bg;
-    ftxui::Color status_fg = visual.badge_fg;
+    ftxui::Color status_bg = state.normal.bg;
+    ftxui::Color status_fg = state.normal.fg;
 
     auto status_seg = ftxui::text(" " + status_icon + " ") | ftxui::bold |
                       ftxui::color(status_fg) | ftxui::bgcolor(status_bg);
 
     // Colors for subsequent segments
-    ftxui::Color agent_bg = ftxui::Color::RGB(50, 50, 80);
-    ftxui::Color agent_fg = ftxui::Color::RGB(200, 180, 255);
-    ftxui::Color pill_bg = ftxui::Color::RGB(40, 40, 60);
-    ftxui::Color pill_fg = ftxui::Color::RGB(160, 160, 200);
-    ftxui::Color filler_bg = ftxui::Color::RGB(30, 30, 50);
+    ftxui::Color agent_bg = theme.status_bar.agent_bg;
+    ftxui::Color agent_fg = theme.status_bar.agent_fg;
+    ftxui::Color pill_bg = theme.status_bar.pill_bg;
+    ftxui::Color pill_fg = theme.status_bar.pill_fg;
+    ftxui::Color filler_bg = theme.status_bar.filler_bg;
 
     // Separators
-    auto sep1 = ftxui::text(PL_LEFT_SEP) | ftxui::color(status_bg) |
-                ftxui::bgcolor(agent_bg);
-    auto sep2 = ftxui::text(PL_LEFT_SEP) | ftxui::color(agent_bg) |
-                ftxui::bgcolor(pill_bg);
-    auto sep3 = ftxui::text(PL_LEFT_SEP) | ftxui::color(pill_bg) |
-                ftxui::bgcolor(filler_bg);
+    auto sep1 = ftxui::text(firmius::shared::PL_LEFT_SEP) |
+                ftxui::color(status_bg) | ftxui::bgcolor(agent_bg);
+    auto sep2 = ftxui::text(firmius::shared::PL_LEFT_SEP) |
+                ftxui::color(agent_bg) | ftxui::bgcolor(pill_bg);
+    auto sep3 = ftxui::text(firmius::shared::PL_LEFT_SEP) |
+                ftxui::color(pill_bg) | ftxui::bgcolor(filler_bg);
 
     // 2. Agent Segment
     ftxui::Element agent_name_el;
@@ -131,15 +98,15 @@ public:
 
     // 4. Context Segment (Right Aligned)
     ftxui::Element ctx_seg = ftxui::text("");
-    ftxui::Color ctx_bg = ftxui::Color::RGB(40, 50, 70);
+    ftxui::Color ctx_bg = theme.status_bar.context.bg;
     if (model_->context_max > 0) {
       float ratio =
           static_cast<float>(model_->context_used) / model_->context_max;
-      ftxui::Color ctx_color = ftxui::Color::RGB(100, 255, 150);
+      ftxui::Color ctx_color = theme.status_bar.context.low;
       if (ratio > 0.85f)
-        ctx_color = ftxui::Color::RGB(255, 100, 100);
+        ctx_color = theme.status_bar.context.high;
       else if (ratio > 0.60f)
-        ctx_color = ftxui::Color::RGB(255, 220, 100);
+        ctx_color = theme.status_bar.context.medium;
 
       char buf[32];
       snprintf(buf, sizeof(buf), "%.1f%%", ratio * 100.0f);
@@ -172,12 +139,14 @@ public:
                                  format_val(model_->context_max);
 
       ctx_seg = ftxui::hbox({
-          ftxui::text(PL_RIGHT_SEP) | ftxui::color(ctx_bg) |
+          ftxui::text(firmius::shared::PL_RIGHT_SEP) | ftxui::color(ctx_bg) |
               ftxui::bgcolor(filler_bg),
-          ftxui::text(" " + ICON_CONTEXT + " " + combined_ctx + " ") |
-              ftxui::color(ftxui::Color::GrayLight) | ftxui::bgcolor(ctx_bg),
-          ftxui::text(PL_RIGHT_SOFT_SEP) |
-              ftxui::color(ftxui::Color::GrayDark) | ftxui::bgcolor(ctx_bg),
+          ftxui::text(" " + firmius::shared::ICON_CONTEXT + " " + combined_ctx +
+                      " ") |
+              ftxui::color(theme.status_bar.context.icon) |
+              ftxui::bgcolor(ctx_bg),
+          ftxui::text(firmius::shared::PL_RIGHT_SOFT_SEP) |
+              ftxui::color(theme.base.dim) | ftxui::bgcolor(ctx_bg),
           ftxui::text(" " + pct_str + " ") | ftxui::bold |
               ftxui::color(ctx_color) | ftxui::bgcolor(ctx_bg),
       });
@@ -204,23 +173,30 @@ private:
       model_text = model_->purpose + " | " + model_text;
     }
 
+    const auto &theme = ThemeManager::instance().getCurrentTheme();
     if (model_text == cached_name_ && model_->status_text == cached_status_ &&
-        glint_)
+        theme.name == cached_theme_name_ && glint_)
       return;
 
     cached_name_ = model_text;
     cached_status_ = model_->status_text;
+    cached_theme_name_ = theme.name;
+
+    const auto &state = GetStateColorsForMode(model_->status_text, theme);
 
     GlintConfig cfg;
     cfg.target = GlintConfig::Target::Text;
-    cfg.gradientColors = {ftxui::Color::Blue, ftxui::Color::White};
+    cfg.gradientColors =
+        state.glint.empty()
+            ? std::vector<ftxui::Color>{ftxui::Color::Blue, ftxui::Color::White}
+            : state.glint;
     cfg.glintSize = 14;
     cfg.intervalSeconds = 3;
     cfg.durationSeconds = 1.2f;
     cfg.easing = GlintEasing::EaseInOut;
 
     glint_ = GlintEffect(ftxui::text(" " + model_text + " ") |
-                             ftxui::color(ftxui::Color::RGB(160, 160, 200)),
+                             ftxui::color(theme.status_bar.pill_fg),
                          cfg);
   }
 
@@ -228,6 +204,7 @@ private:
   ftxui::Component glint_;
   std::string cached_name_;
   std::string cached_status_;
+  std::string cached_theme_name_;
 };
 
 } // namespace

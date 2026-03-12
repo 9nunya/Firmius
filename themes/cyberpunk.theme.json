@@ -1,0 +1,279 @@
+{
+    "name": "Cyberpunk",
+    "base": {
+        "bg": "#000000",
+        "fg": "#00ff00",
+        "border": "#ff00ff",
+        "separator": "#00ffff",
+        "highlight": "#ffff00",
+        "dim": "#333333"
+    },
+    "status_bar": {
+        "idle": {
+            "normal": {
+                "bg": "#111111",
+                "fg": "#00ff00"
+            },
+            "focused": {
+                "bg": "#222222",
+                "fg": "#00ffff"
+            },
+            "busy": {
+                "bg": "#ffff00",
+                "fg": "#000000"
+            },
+            "error": {
+                "bg": "#ff0000",
+                "fg": "#ffffff"
+            },
+            "glint": [
+                "#00ff00",
+                "#000000"
+            ]
+        },
+        "streaming": {
+            "normal": {
+                "bg": "#00ffff",
+                "fg": "#000000"
+            },
+            "focused": {
+                "bg": "#00ff00",
+                "fg": "#000000"
+            },
+            "busy": {
+                "bg": "#ffff00",
+                "fg": "#000000"
+            },
+            "error": {
+                "bg": "#ff0000",
+                "fg": "#ffffff"
+            },
+            "glint": [
+                "#00ffff",
+                "#ff00ff"
+            ]
+        },
+        "executing_tool": {
+            "normal": {
+                "bg": "#ff00ff",
+                "fg": "#ffffff"
+            },
+            "focused": {
+                "bg": "#ffff00",
+                "fg": "#000000"
+            },
+            "busy": {
+                "bg": "#ff0000",
+                "fg": "#ffffff"
+            },
+            "error": {
+                "bg": "#ff0000",
+                "fg": "#ffffff"
+            },
+            "glint": [
+                "#ff00ff",
+                "#00ffff"
+            ]
+        },
+        "provider_waiting": {
+            "normal": {
+                "bg": "#ffff00",
+                "fg": "#000000"
+            },
+            "focused": {
+                "bg": "#00ff00",
+                "fg": "#000000"
+            },
+            "busy": {
+                "bg": "#ff00ff",
+                "fg": "#ffffff"
+            },
+            "error": {
+                "bg": "#ff0000",
+                "fg": "#ffffff"
+            },
+            "glint": [
+                "#ffff00",
+                "#ff00ff"
+            ]
+        },
+        "compacting": {
+            "normal": {
+                "bg": "#0000ff",
+                "fg": "#ffffff"
+            },
+            "focused": {
+                "bg": "#00ffff",
+                "fg": "#000000"
+            },
+            "busy": {
+                "bg": "#ff00ff",
+                "fg": "#ffffff"
+            },
+            "error": {
+                "bg": "#ff0000",
+                "fg": "#ffffff"
+            },
+            "glint": [
+                "#0000ff",
+                "#ff00ff"
+            ]
+        },
+        "error": {
+            "normal": {
+                "bg": "#ff0000",
+                "fg": "#ffffff"
+            },
+            "focused": {
+                "bg": "#ff5555",
+                "fg": "#ffffff"
+            },
+            "busy": {
+                "bg": "#ff0000",
+                "fg": "#ffffff"
+            },
+            "error": {
+                "bg": "#ff0000",
+                "fg": "#ffffff"
+            },
+            "glint": [
+                "#ff0000",
+                "#ff00ff"
+            ]
+        },
+        "agent_bg": "#111111",
+        "agent_fg": "#ff00ff",
+        "pill_bg": "#000000",
+        "pill_fg": "#00ff00",
+        "filler_bg": "#000000",
+        "context": {
+            "bg": "#111111",
+            "icon": "#00ffff",
+            "low": "#00ff00",
+            "medium": "#ffff00",
+            "high": "#ff0000"
+        }
+    },
+    "agent_strip": {
+        "bg": "#000000",
+        "item": {
+            "normal": {
+                "bg": "#000000",
+                "fg": "#00ff00"
+            },
+            "focused": {
+                "bg": "#111111",
+                "fg": "#00ffff"
+            },
+            "busy": {
+                "bg": "#000000",
+                "fg": "#ffff00"
+            },
+            "error": {
+                "bg": "#000000",
+                "fg": "#ff0000"
+            },
+            "glint": [
+                "#00ff00",
+                "#00ffff",
+                "#ff00ff"
+            ]
+        },
+        "pills": {
+            "slug_bg": "#111111",
+            "slug_fg": "#ff00ff",
+            "purpose_bg": "#000000",
+            "purpose_fg": "#00ffff",
+            "model_bg": "#000000",
+            "model_fg": "#00ff00",
+            "state_bg": "#111111",
+            "state_fg": "#ffff00",
+            "tool_bg": "#000000",
+            "tool_fg": "#00ff00",
+            "context_bg": "#111111"
+        }
+    },
+    "chat": {
+        "bg": "#000000",
+        "user_prefix": "#00ffff",
+        "agent_prefix": "#ff00ff",
+        "timestamp": "#333333",
+        "markdown": {
+            "text": "#00ff00",
+            "header": "#00ffff",
+            "code_bg": "#111111",
+            "code_fg": "#00ff00",
+            "link": "#ffff00",
+            "quote_bar": "#333333",
+            "quote_text": "#00ff00"
+        }
+    },
+    "syntax": {
+        "keyword": "#ff00ff",
+        "string": "#ffff00",
+        "comment": "#333333",
+        "number": "#ff0000",
+        "function": "#00ffff",
+        "type": "#00ff00",
+        "op": "#00ffff",
+        "attr": "#ff00ff",
+        "constant": "#ffff00",
+        "variable": "#00ff00",
+        "tag": "#ff00ff"
+    },
+    "tool_blocks": {
+        "generic_bg": "#000000",
+        "generic_border": "#ff00ff",
+        "generic_header_bg": "#111111",
+        "generic_title": "#00ff00",
+        "generic_icon": "#00ffff",
+        "specific": {
+            "file_read": {
+                "bg": "#000000",
+                "fg": "#00ff00"
+            },
+            "file_edit": {
+                "bg": "#000000",
+                "fg": "#ffff00"
+            },
+            "terminal": {
+                "bg": "#000000",
+                "fg": "#00ffff"
+            },
+            "subagent": {
+                "bg": "#000000",
+                "fg": "#ff00ff"
+            },
+            "ls": {
+                "bg": "#000000",
+                "fg": "#00ff00"
+            },
+            "wait": {
+                "bg": "#000000",
+                "fg": "#ffff00"
+            }
+        },
+        "glint": [
+            "#00ff00",
+            "#ff00ff"
+        ]
+    },
+    "input": {
+        "bg": "#000000",
+        "fg": "#00ff00",
+        "prompt": "#00ffff",
+        "cursor": "#ffffff",
+        "placeholder": "#333333"
+    },
+    "modals": {
+        "overlay": "#000000cc",
+        "bg": "#111111",
+        "fg": "#00ff00",
+        "border": "#ff00ff",
+        "title": "#ff00ff",
+        "highlight_bg": "#222222",
+        "highlight_fg": "#00ffff",
+        "button_bg": "#333333",
+        "button_fg": "#00ff00"
+    }
+}

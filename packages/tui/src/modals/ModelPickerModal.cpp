@@ -1,5 +1,6 @@
 #include "modals/ModelPickerModal.hpp"
 #include "TUIState.hpp"
+#include "ThemeManager.hpp"
 #include "harness/Harness.hpp"
 #include <algorithm>
 #include <ftxui/component/component.hpp>
@@ -94,6 +95,7 @@ ftxui::Component ModelPickerModal::create(TuiState &state) {
                                           rebuild_filtered, isLoading,
                                           display_entries, menu, needs_refresh,
                                           refresh]() {
+    const auto &theme = ThemeManager::instance().getCurrentTheme();
     if (*needs_refresh) {
       *needs_refresh = false;
       refresh();
@@ -101,12 +103,15 @@ ftxui::Component ModelPickerModal::create(TuiState &state) {
     if (*isLoading) {
       return ftxui::window(
                  ftxui::text(" Select Model ") | ftxui::bold |
-                     ftxui::color(ftxui::Color::Cyan),
+                     ftxui::color(theme.modals.title),
                  ftxui::vbox(
-                     {ftxui::text("Loading models...") | ftxui::center,
+                     {ftxui::text("Loading models...") | ftxui::center |
+                          ftxui::color(theme.modals.fg),
                       ftxui::text("") |
                           ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, 5)})) |
-             ftxui::clear_under | ftxui::center;
+             ftxui::clear_under | ftxui::center |
+             ftxui::bgcolor(theme.modals.bg) |
+             ftxui::color(theme.modals.border);
     }
 
     rebuild_filtered();
@@ -114,35 +119,44 @@ ftxui::Component ModelPickerModal::create(TuiState &state) {
     if (display_entries->empty()) {
       return ftxui::window(
                  ftxui::text(" Select Model ") | ftxui::bold |
-                     ftxui::color(ftxui::Color::Cyan),
-                 ftxui::vbox({ftxui::hbox({ftxui::text("Filter: "),
+                     ftxui::color(theme.modals.title),
+                 ftxui::vbox({ftxui::hbox({ftxui::text("Filter: ") |
+                                               ftxui::color(theme.modals.fg),
                                            ftxui::text(*filter_text) |
-                                               ftxui::underlined}),
-                              ftxui::separator(),
-                              ftxui::text("No matching models") | ftxui::dim |
-                                  ftxui::center,
+                                               ftxui::underlined |
+                                               ftxui::color(theme.modals.fg)}),
+                              ftxui::separatorLight() |
+                                  ftxui::color(theme.modals.border),
+                              ftxui::text("No matching models") |
+                                  ftxui::color(theme.base.dim) | ftxui::center,
                               ftxui::text(""),
                               ftxui::text(" ESC cancel, type to filter ") |
-                                  ftxui::dim | ftxui::center})) |
-             ftxui::clear_under | ftxui::center;
+                                  ftxui::color(theme.base.dim) |
+                                  ftxui::center})) |
+             ftxui::clear_under | ftxui::center |
+             ftxui::bgcolor(theme.modals.bg) |
+             ftxui::color(theme.modals.border);
     }
 
     return ftxui::window(
                ftxui::text(" Select Model ") | ftxui::bold |
-                   ftxui::color(ftxui::Color::Cyan),
+                   ftxui::color(theme.modals.title),
                ftxui::vbox({
-                   ftxui::hbox({ftxui::text("Filter: "),
-                                ftxui::text(*filter_text) | ftxui::underlined}),
-                   ftxui::separator(),
+                   ftxui::hbox(
+                       {ftxui::text("Filter: ") | ftxui::color(theme.modals.fg),
+                        ftxui::text(*filter_text) | ftxui::underlined |
+                            ftxui::color(theme.modals.fg)}),
+                   ftxui::separatorLight() | ftxui::color(theme.modals.border),
                    menu->Render() | ftxui::vscroll_indicator | ftxui::frame |
                        ftxui::size(ftxui::HEIGHT, ftxui::LESS_THAN, 15),
                    ftxui::text(""),
                    ftxui::text("↑↓ navigate, Enter select, ESC cancel, "
                                "type/mouse click to "
                                "filter/select") |
-                       ftxui::dim | ftxui::center,
+                       ftxui::color(theme.base.dim) | ftxui::center,
                })) |
-           ftxui::clear_under | ftxui::center;
+           ftxui::clear_under | ftxui::center |
+           ftxui::bgcolor(theme.modals.bg) | ftxui::color(theme.modals.border);
   });
 
   return ftxui::CatchEvent(component, [models, entries, filtered_indices,

@@ -1,5 +1,6 @@
 #include "modals/OAuthWizardModal.hpp"
 #include "TUIState.hpp"
+#include "ThemeManager.hpp"
 #include <chrono>
 #include <ftxui/component/component.hpp>
 #include <ftxui/dom/elements.hpp>
@@ -67,18 +68,20 @@ ftxui::Component OAuthWizardModal::create(TuiState &state) {
   auto renderer = ftxui::Renderer([message, url, isPolling, isDone, isError,
                                    resultMessage, tab_index, providerName]() {
     *tab_index = *isDone ? 1 : 0;
+    const auto &theme = ThemeManager::instance().getCurrentTheme();
 
     ftxui::Elements content;
 
-    auto title_color = ftxui::Color::Cyan;
+    auto title_color = theme.modals.title;
     if (*isDone) {
       if (*isError)
-        title_color = ftxui::Color::Red;
+        title_color = theme.status_bar.error.normal.fg;
       else
-        title_color = ftxui::Color::Green;
+        title_color = theme.modals.highlight_fg;
     }
 
-    content.push_back(ftxui::text(*message) | ftxui::automerge | ftxui::bold);
+    content.push_back(ftxui::text(*message) | ftxui::automerge | ftxui::bold |
+                      ftxui::color(theme.modals.fg));
     content.push_back(ftxui::text(""));
 
     if (*isDone) {
@@ -86,57 +89,63 @@ ftxui::Component OAuthWizardModal::create(TuiState &state) {
         content.push_back(
             ftxui::vbox({
                 ftxui::text(" Connection Failed ") | ftxui::bold |
-                    ftxui::color(ftxui::Color::Red) | ftxui::center,
+                    ftxui::color(theme.status_bar.error.normal.fg) |
+                    ftxui::center,
                 ftxui::text(""),
-                ftxui::text(*resultMessage) | ftxui::center | ftxui::automerge,
+                ftxui::text(*resultMessage) | ftxui::center | ftxui::automerge |
+                    ftxui::color(theme.modals.fg),
             }) |
-            ftxui::borderRounded | ftxui::color(ftxui::Color::Red));
+            ftxui::borderRounded |
+            ftxui::color(theme.status_bar.error.normal.fg));
         content.push_back(ftxui::text(""));
         content.push_back(ftxui::text(" (Press Enter/Esc to close) ") |
-                          ftxui::dim | ftxui::center);
+                          ftxui::color(theme.base.dim) | ftxui::center);
       } else {
         content.push_back(
             ftxui::vbox({
                 ftxui::text(" Connection Successful! ") | ftxui::bold |
-                    ftxui::color(ftxui::Color::Green) | ftxui::center,
+                    ftxui::color(theme.modals.highlight_fg) | ftxui::center,
                 ftxui::text(""),
-                ftxui::text(*resultMessage) | ftxui::center,
+                ftxui::text(*resultMessage) | ftxui::center |
+                    ftxui::color(theme.modals.fg),
             }) |
-            ftxui::borderRounded | ftxui::color(ftxui::Color::Green));
+            ftxui::borderRounded | ftxui::color(theme.modals.highlight_fg));
         content.push_back(ftxui::text(""));
         content.push_back(ftxui::text(" (Press Enter/Esc to close) ") |
-                          ftxui::dim | ftxui::center);
+                          ftxui::color(theme.base.dim) | ftxui::center);
       }
     } else {
       content.push_back(
           ftxui::vbox({
               ftxui::text(" Authentication in Progress ") | ftxui::bold |
-                  ftxui::color(ftxui::Color::Yellow) | ftxui::center,
+                  ftxui::color(theme.modals.title) | ftxui::center,
               ftxui::text(""),
               ftxui::text(
                   " Please check your browser to complete the login. ") |
-                  ftxui::center,
-              ftxui::text(" Waiting for callback... ") | ftxui::dim |
-                  ftxui::blink | ftxui::center,
+                  ftxui::center | ftxui::color(theme.modals.fg),
+              ftxui::text(" Waiting for callback... ") |
+                  ftxui::color(theme.base.dim) | ftxui::blink | ftxui::center,
           }) |
-          ftxui::borderRounded | ftxui::color(ftxui::Color::Yellow));
+          ftxui::borderRounded | ftxui::color(theme.modals.border));
       content.push_back(ftxui::text(""));
       content.push_back(ftxui::hbox({
                             ftxui::text(" [O]pen Browser ") | ftxui::bold |
-                                ftxui::color(ftxui::Color::Blue),
+                                ftxui::color(theme.modals.highlight_fg),
                             ftxui::text("   "),
                             ftxui::text(" [E]scape to Cancel ") | ftxui::bold |
-                                ftxui::color(ftxui::Color::Red),
+                                ftxui::color(theme.status_bar.error.normal.fg),
                         }) |
                         ftxui::center);
     }
 
     auto window_title = ftxui::hbox(
-        {ftxui::text(" OAuth Connection: ") | ftxui::bold,
+        {ftxui::text(" OAuth Connection: ") | ftxui::bold |
+             ftxui::color(theme.modals.title),
          ftxui::text(providerName) | ftxui::bold | ftxui::color(title_color)});
 
     return ftxui::window(window_title, ftxui::vbox(content)) |
-           ftxui::clear_under | ftxui::center;
+           ftxui::clear_under | ftxui::center |
+           ftxui::bgcolor(theme.modals.bg) | ftxui::color(theme.modals.border);
   });
 
   return ftxui::CatchEvent(renderer, [url, isDone, &state](ftxui::Event event) {

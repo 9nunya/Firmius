@@ -19,7 +19,7 @@ TEST(ModelUtilTest, PrettifyNames) {
 
   // Complex versions and thinking models
   EXPECT_EQ(PrettifyModelName("claude-opus-4-6-thinking"),
-            "Claude Opus 4 6 Thinking"); // Based on prompt request
+            "Claude Opus 4.6 Thinking"); // Based on prompt request
   EXPECT_EQ(PrettifyModelName("gemini-3.1-pro"), "Gemini 3.1 Pro");
   EXPECT_EQ(PrettifyModelName("gpt-5.1-codex-mini"), "GPT 5.1 Codex Mini");
 
@@ -27,7 +27,7 @@ TEST(ModelUtilTest, PrettifyNames) {
   EXPECT_EQ(PrettifyModelName("qwen-max"), "Qwen Max");
   EXPECT_EQ(PrettifyModelName("deepseek-chat"), "Deepseek Chat");
   EXPECT_EQ(PrettifyModelName("mistral-large-latest"), "Mistral Large Latest");
-  EXPECT_EQ(PrettifyModelName("llama-3-70b-instruct"), "Llama 3 70b Instruct");
+  EXPECT_EQ(PrettifyModelName("llama-3-70b-instruct"), "Llama 3.70b Instruct");
   EXPECT_EQ(PrettifyModelName("mixtral-8x7b-v0.1"), "Mixtral 8x7b V0.1");
   EXPECT_EQ(PrettifyModelName("command-r-plus"), "Command R Plus");
   EXPECT_EQ(PrettifyModelName("stable-diffusion-xl-1.0"),
@@ -38,7 +38,7 @@ TEST(ModelUtilTest, PrettifyNames) {
   EXPECT_EQ(PrettifyModelName("gemma-7b-it"), "Gemma 7b It");
   EXPECT_EQ(PrettifyModelName("falcon-180b-chat"), "Falcon 180b Chat");
   EXPECT_EQ(PrettifyModelName("yi-34b-chat"), "Yi 34b Chat");
-  EXPECT_EQ(PrettifyModelName("baichuan-2-13b-chat"), "Baichuan 2 13b Chat");
+  EXPECT_EQ(PrettifyModelName("baichuan-2-13b-chat"), "Baichuan 2.13b Chat");
   EXPECT_EQ(PrettifyModelName("glm-4"), "Glm 4");
   EXPECT_EQ(PrettifyModelName("solar-10.7b-instruct"), "Solar 10.7b Instruct");
   EXPECT_EQ(PrettifyModelName("starCoder-2"), "StarCoder 2");
@@ -47,7 +47,7 @@ TEST(ModelUtilTest, PrettifyNames) {
   EXPECT_EQ(PrettifyModelName("dolphin-2.6-mixtral-8x7b"),
             "Dolphin 2.6 Mixtral 8x7b");
   EXPECT_EQ(PrettifyModelName("nous-hermes-llama-2-7b"),
-            "Nous Hermes Llama 2 7b");
+            "Nous Hermes Llama 2.7b");
   EXPECT_EQ(PrettifyModelName("zephyr-7b-beta"), "Zephyr 7b Beta");
   EXPECT_EQ(PrettifyModelName("neural-chat-7b-v3.3"), "Neural Chat 7b V3.3");
   EXPECT_EQ(PrettifyModelName("open-adams-1.0"), "Open Adams 1.0");

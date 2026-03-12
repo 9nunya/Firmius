@@ -2,6 +2,7 @@
 #include "Context.hpp"
 #include "Enums.hpp"
 #include "Message.hpp"
+#include "ThemeManager.hpp"
 #include "components/Markdown.hpp"
 #include "components/ScrollableBox.hpp"
 #include "components/ToolBlock.hpp"
@@ -121,7 +122,8 @@ public:
   bool Focusable() const override { return false; }
 
   bool OnEvent(ftxui::Event event) override {
-    if (event == ftxui::Event::Special("ThreadChanged")) {
+    if (event == ftxui::Event::Special("ThreadChanged") ||
+        event == ftxui::Event::Special("ThemeChanged")) {
       last_turns_size_ = static_cast<size_t>(-1);
       RebuildIfNeeded();
       user_scrolled_up_ = false;
@@ -164,10 +166,12 @@ private:
           continue;
 
         for (const auto &msg : t.messages) {
+          const auto &theme =
+              firmius::tui::ThemeManager::instance().getCurrentTheme();
           const std::string prefix = rolePrefix(msg.role);
           bool isUser = (msg.role == firmius::shared::Role::User);
           ftxui::Color prefixColor =
-              isUser ? ftxui::Color::Cyan : ftxui::Color::Yellow;
+              isUser ? theme.chat.user_prefix : theme.chat.agent_prefix;
 
           auto decorateMsg = [prefixColor,
                               prefix](const ftxui::Element &content) {
@@ -242,7 +246,7 @@ private:
                   "[!] " + err->errorName + ": " + err->description;
               std::string details = err->details;
 
-              auto details_cmp = ftxui::Renderer([details] {
+              auto details_cmp = ftxui::Renderer([details, theme] {
                 std::stringstream ss(details);
                 std::string line;
                 ftxui::Elements lines;
@@ -250,14 +254,15 @@ private:
                   lines.push_back(ftxui::text(line));
                 }
                 return ftxui::vbox(std::move(lines)) |
-                       ftxui::color(ftxui::Color::RedLight);
+                       ftxui::color(theme.status_bar.error.normal.fg);
               });
 
               auto coll_cmp = ftxui::Collapsible(title, details_cmp);
-              auto row =
-                  ftxui::Make<RowComponent>(coll_cmp, [decorateMsg, coll_cmp] {
-                    return decorateMsg(coll_cmp->Render() |
-                                       ftxui::color(ftxui::Color::Red));
+              auto row = ftxui::Make<RowComponent>(
+                  coll_cmp, [decorateMsg, coll_cmp, theme] {
+                    return decorateMsg(
+                        coll_cmp->Render() |
+                        ftxui::color(theme.status_bar.error.normal.fg));
                   });
               rows_.push_back(row);
             }

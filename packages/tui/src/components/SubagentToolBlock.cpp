@@ -1,5 +1,6 @@
 #include "components/SubagentToolBlock.hpp"
 #include "StreamStateManager.hpp"
+#include "ThemeManager.hpp"
 #include "components/GlintEffect.hpp"
 #include "utils/ErrorCleaner.hpp"
 #include "utils/Icons.hpp"
@@ -56,6 +57,8 @@ ftxui::Component SubagentToolBlock(const std::shared_ptr<ToolCallView> &view,
     }
     if (title.empty())
       title = "subagent";
+
+    const auto &theme = ThemeManager::instance().getCurrentTheme();
 
     // ── Generate Synthesized Log ──
     std::vector<shared::SubagentToolLogEntry> synthesized_log;
@@ -131,11 +134,14 @@ ftxui::Component SubagentToolBlock(const std::shared_ptr<ToolCallView> &view,
         if (entry.phase == shared::ToolPhase::Preparing) {
           GlintConfig cfg_log;
           cfg_log.target = GlintConfig::Target::Text;
-          cfg_log.gradientColors = {
-              ftxui::Color::RGB(150, 50, 255),  // Deep purple
-              ftxui::Color::RGB(220, 100, 255), // Magenta
-              ftxui::Color::White, ftxui::Color::RGB(220, 100, 255),
-              ftxui::Color::RGB(150, 50, 255)};
+          cfg_log.gradientColors =
+              theme.tool_blocks.glint.empty()
+                  ? std::vector<ftxui::Color>{ftxui::Color::RGB(150, 50, 255),
+                                              ftxui::Color::RGB(220, 100, 255),
+                                              ftxui::Color::White,
+                                              ftxui::Color::RGB(220, 100, 255),
+                                              ftxui::Color::RGB(150, 50, 255)}
+                  : theme.tool_blocks.glint;
           cfg_log.glintSize = 10;
           cfg_log.intervalSeconds = 1.0f;
           cfg_log.durationSeconds = 1.2f;
@@ -146,7 +152,7 @@ ftxui::Component SubagentToolBlock(const std::shared_ptr<ToolCallView> &view,
                               ftxui::flex_shrink);
         } else {
           log_lines.push_back(ftxui::text("  " + entry.summary) |
-                              ftxui::color(ftxui::Color::RGB(160, 140, 180)) |
+                              ftxui::color(theme.base.dim) |
                               ftxui::flex_shrink);
         }
       }
@@ -157,11 +163,7 @@ ftxui::Component SubagentToolBlock(const std::shared_ptr<ToolCallView> &view,
     if (view->phase == ToolPhase::Preparing) {
       GlintConfig cfg;
       cfg.target = GlintConfig::Target::Text;
-      cfg.gradientColors = {ftxui::Color::RGB(150, 50, 255),  // Deep purple
-                            ftxui::Color::RGB(220, 100, 255), // Vibrant magenta
-                            ftxui::Color::White,
-                            ftxui::Color::RGB(220, 100, 255),
-                            ftxui::Color::RGB(150, 50, 255)};
+      cfg.gradientColors = theme.tool_blocks.glint;
       cfg.glintSize = 14;
       cfg.intervalSeconds = 1.5f;
       cfg.durationSeconds = 1.2f;
@@ -171,7 +173,8 @@ ftxui::Component SubagentToolBlock(const std::shared_ptr<ToolCallView> &view,
           ftxui::text(ICON_GEAR + " Spawning \"" + title + "\"...") |
           ftxui::bold;
       return ftxui::hbox(
-          {ftxui::text("▸ ") | ftxui::color(ftxui::Color::RGB(180, 120, 255)),
+          {ftxui::text("▸ ") |
+               ftxui::color(theme.tool_blocks.specific.subagent.fg),
            GlintEffect(spawning_text, cfg)->Render() | ftxui::flex_shrink});
     }
 
@@ -186,11 +189,7 @@ ftxui::Component SubagentToolBlock(const std::shared_ptr<ToolCallView> &view,
       std::vector<ftxui::Element> rows;
       GlintConfig cfg;
       cfg.target = GlintConfig::Target::Text;
-      cfg.gradientColors = {ftxui::Color::RGB(150, 50, 255),  // Deep purple
-                            ftxui::Color::RGB(220, 100, 255), // Radiant magenta
-                            ftxui::Color::White,
-                            ftxui::Color::RGB(220, 100, 255),
-                            ftxui::Color::RGB(150, 50, 255)};
+      cfg.gradientColors = theme.tool_blocks.glint;
       cfg.glintSize = 14;
       cfg.intervalSeconds = 2.0f;
       cfg.durationSeconds = 1.5f;
@@ -199,30 +198,32 @@ ftxui::Component SubagentToolBlock(const std::shared_ptr<ToolCallView> &view,
       using namespace firmius::shared;
       rows.push_back(
           GlintEffect(ftxui::text(ICON_AGENT + " " + title) | ftxui::bold |
-                          ftxui::color(ftxui::Color::RGB(200, 150, 255)),
+                          ftxui::color(theme.tool_blocks.specific.subagent.fg),
                       cfg)
               ->Render() |
           ftxui::flex_shrink);
 
       if (!task.empty()) {
-        rows.push_back(ftxui::paragraph("  " + task) | ftxui::dim |
-                       ftxui::color(ftxui::Color::RGB(180, 160, 200)) |
-                       ftxui::flex_shrink |
+        rows.push_back(ftxui::paragraph("  " + task) |
+                       ftxui::color(theme.base.dim) | ftxui::flex_shrink |
                        ftxui::size(ftxui::WIDTH, ftxui::LESS_THAN,
                                    ftxui::Terminal::Size().dimx - 10));
       }
-      rows.push_back(ftxui::separatorLight());
+      rows.push_back(ftxui::separatorLight() | ftxui::color(theme.base.border));
 
       view->toggle_label = view->show_result ? "collapse" : "expand";
       rows.push_back(
           ftxui::vbox(
               {renderLogSection(view->show_result ? 10 : 3),
-               ftxui::hbox({ftxui::text("  [") | ftxui::dim, toggle->Render(),
-                            ftxui::text("]") | ftxui::dim})}) |
+               ftxui::hbox(
+                   {ftxui::text("  [") | ftxui::color(theme.base.dim),
+                    toggle->Render(),
+                    ftxui::text("]") | ftxui::color(theme.base.dim)})}) |
           ftxui::frame);
 
       return ftxui::vbox(rows) | ftxui::borderRounded |
-             ftxui::color(ftxui::Color::RGB(180, 150, 200));
+             ftxui::color(theme.tool_blocks.generic_border) |
+             ftxui::bgcolor(theme.tool_blocks.generic_bg);
     }
 
     // ── Finished ──
@@ -230,14 +231,14 @@ ftxui::Component SubagentToolBlock(const std::shared_ptr<ToolCallView> &view,
     if (view->success) {
       view->toggle_label = view->show_result ? "hide" : "show";
       using namespace firmius::shared;
-      rows.push_back(
-          ftxui::hbox({ftxui::text(" " + ICON_CHECK + " ") |
-                           ftxui::color(ftxui::Color::RGB(100, 220, 150)),
-                       ftxui::text(title + " completed") | ftxui::bold |
-                           ftxui::color(ftxui::Color::RGB(150, 255, 200)) |
-                           ftxui::flex_shrink,
-                       ftxui::text("  [") | ftxui::dim, toggle->Render(),
-                       ftxui::text("]") | ftxui::dim}));
+      rows.push_back(ftxui::hbox(
+          {ftxui::text(" " + ICON_CHECK + " ") |
+               ftxui::color(theme.tool_blocks.specific.subagent.fg),
+           ftxui::text(title + " completed") | ftxui::bold |
+               ftxui::color(theme.tool_blocks.specific.subagent.fg) |
+               ftxui::flex_shrink,
+           ftxui::text("  [") | ftxui::color(theme.base.dim), toggle->Render(),
+           ftxui::text("]") | ftxui::color(theme.base.dim)}));
 
       if (view->show_result && !view->result.empty()) {
         std::string display_result = view->result;
@@ -249,19 +250,20 @@ ftxui::Component SubagentToolBlock(const std::shared_ptr<ToolCallView> &view,
         }
         if (display_result.size() > 300)
           display_result = display_result.substr(0, 297) + "…";
-        rows.push_back(ftxui::separatorLight());
+        rows.push_back(ftxui::separatorLight() |
+                       ftxui::color(theme.base.border));
         rows.push_back(ftxui::paragraph(display_result) |
-                       ftxui::color(ftxui::Color::RGB(180, 200, 190)) |
-                       ftxui::frame |
+                       ftxui::color(theme.base.fg) | ftxui::frame |
                        ftxui::size(ftxui::HEIGHT, ftxui::LESS_THAN, 10));
       }
 
-      rows.push_back(ftxui::separatorLight());
+      rows.push_back(ftxui::separatorLight() | ftxui::color(theme.base.border));
       rows.push_back(renderLogSection(view->show_result ? 10 : 5) |
                      ftxui::frame);
 
       return ftxui::vbox(rows) | ftxui::borderRounded |
-             ftxui::color(ftxui::Color::RGB(150, 200, 180));
+             ftxui::color(theme.tool_blocks.generic_border) |
+             ftxui::bgcolor(theme.tool_blocks.generic_bg);
     } else {
       std::string error_msg =
           firmius::shared::ErrorCleaner::clean(view->result);
@@ -269,15 +271,16 @@ ftxui::Component SubagentToolBlock(const std::shared_ptr<ToolCallView> &view,
         error_msg = error_msg.substr(0, 397) + "…";
 
       return ftxui::vbox(
-                 {ftxui::hbox({ftxui::text(" " + shared::ICON_ERROR + " ") |
-                                   ftxui::color(ftxui::Color::Red),
-                               ftxui::text(title + " failed") | ftxui::bold |
-                                   ftxui::color(ftxui::Color::RedLight)}),
+                 {ftxui::hbox(
+                      {ftxui::text(" " + shared::ICON_ERROR + " ") |
+                           ftxui::color(theme.status_bar.error.normal.fg),
+                       ftxui::text(title + " failed") | ftxui::bold |
+                           ftxui::color(theme.status_bar.error.normal.fg)}),
                   ftxui::paragraph("  " + error_msg) |
-                      ftxui::color(ftxui::Color::RedLight) |
+                      ftxui::color(theme.status_bar.error.normal.fg) |
                       ftxui::flex_shrink}) |
              ftxui::borderRounded |
-             ftxui::color(ftxui::Color::RGB(200, 100, 100)) |
+             ftxui::color(theme.status_bar.error.normal.fg) |
              ftxui::flex_shrink;
     }
   });

@@ -1,4 +1,5 @@
 #include "components/ToolBlock.hpp"
+#include "ThemeManager.hpp"
 #include "components/FileEditToolBlock.hpp"
 #include "components/FileReadToolBlock.hpp"
 #include "components/GlintEffect.hpp"
@@ -69,17 +70,20 @@ ftxui::Component ToolBlock(const std::shared_ptr<ToolCallView> &view,
     std::string summary =
         SummarizeToolCall(view->name, view->args, view->phase);
 
+    const auto &theme = ThemeManager::instance().getCurrentTheme();
+
     // Preparing state with animated glint
     if (view->phase == ToolPhase::Preparing ||
         view->phase == ToolPhase::Called) {
 
       GlintConfig cfg;
       cfg.target = GlintConfig::Target::Text;
-      cfg.gradientColors = {ftxui::Color::RGB(50, 100, 255),  // Deep blue
-                            ftxui::Color::RGB(100, 180, 255), // Sky blue
-                            ftxui::Color::White,
-                            ftxui::Color::RGB(100, 180, 255),
-                            ftxui::Color::RGB(50, 100, 255)};
+      if (!theme.tool_blocks.glint.empty()) {
+        cfg.gradientColors = theme.tool_blocks.glint;
+      } else {
+        cfg.gradientColors = {theme.tool_blocks.generic_title, theme.base.fg,
+                              theme.tool_blocks.generic_title};
+      }
       cfg.glintSize = 14;
       cfg.intervalSeconds = 1.5f;
       cfg.durationSeconds = 1.2f;
@@ -90,9 +94,9 @@ ftxui::Component ToolBlock(const std::shared_ptr<ToolCallView> &view,
       auto loading = GlintEffect(loading_text, cfg);
 
       return ftxui::hbox({ftxui::text("▸ ") |
-                              ftxui::color(ftxui::Color::RGB(100, 150, 255)),
+                              ftxui::color(theme.tool_blocks.generic_icon),
                           loading->Render() |
-                              ftxui::color(ftxui::Color::RGB(150, 200, 255))}) |
+                              ftxui::color(theme.tool_blocks.generic_title)}) |
              ftxui::dim;
     }
 
@@ -107,9 +111,9 @@ ftxui::Component ToolBlock(const std::shared_ptr<ToolCallView> &view,
       // Header row with icon and toggle
       ftxui::Elements header;
       header.push_back(ftxui::text(" " + ICON_CHECK + " ") |
-                       ftxui::color(ftxui::Color::RGB(100, 220, 150)));
+                       ftxui::color(theme.tool_blocks.generic_icon));
       header.push_back(ftxui::text(summary + " ") | ftxui::bold |
-                       ftxui::color(ftxui::Color::RGB(150, 255, 200)));
+                       ftxui::color(theme.tool_blocks.generic_title));
 
       if (can_toggle) {
         header.push_back(ftxui::text("[") | ftxui::dim);
@@ -125,7 +129,7 @@ ftxui::Component ToolBlock(const std::shared_ptr<ToolCallView> &view,
         ftxui::Elements result_lines;
         for (const auto &line : tail) {
           result_lines.push_back(ftxui::text(line) |
-                                 ftxui::color(ftxui::Color::GrayLight));
+                                 ftxui::color(theme.base.dim));
         }
         rows.push_back(ftxui::separatorLight());
         rows.push_back(ftxui::vbox(result_lines) | ftxui::frame |
@@ -142,12 +146,14 @@ ftxui::Component ToolBlock(const std::shared_ptr<ToolCallView> &view,
 
     using namespace firmius::shared;
     return ftxui::vbox({
-               ftxui::hbox({ftxui::text(" " + ICON_ERROR + " ") |
-                                ftxui::color(ftxui::Color::Red),
-                            ftxui::text(summary + " failed") | ftxui::bold |
-                                ftxui::color(ftxui::Color::RedLight)}),
+               ftxui::hbox(
+                   {ftxui::text(" " + ICON_ERROR + " ") |
+                        ftxui::color(theme.status_bar.error.normal.fg),
+                    ftxui::text(summary + " failed") | ftxui::bold |
+                        ftxui::color(theme.status_bar.error.normal.fg)}),
                ftxui::paragraph("  " + err) |
-                   ftxui::color(ftxui::Color::RedLight) | ftxui::flex_shrink,
+                   ftxui::color(theme.status_bar.error.normal.fg) |
+                   ftxui::flex_shrink,
            }) |
            ftxui::flex_shrink;
   });

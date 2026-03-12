@@ -1,4 +1,5 @@
 #include "components/FileReadToolBlock.hpp"
+#include "ThemeManager.hpp"
 #include "UIState.hpp"
 #include "components/SyntaxHighlighter.hpp"
 #include "utils/Hashline.hpp"
@@ -69,14 +70,17 @@ ftxui::Component FileReadToolBlock(const std::shared_ptr<ToolCallView> &view) {
     }
 
     using namespace firmius::shared;
+    const auto &theme = ThemeManager::instance().getCurrentTheme();
+
     // ── Preparing / Called ──
     if (view->phase == ToolPhase::Preparing ||
         view->phase == ToolPhase::Called) {
-      return ftxui::hbox({ftxui::text(" " + ICON_GEAR + " ") |
-                              ftxui::color(ftxui::Color::Cyan),
-                          ftxui::text("Reading ") | ftxui::dim,
-                          ftxui::text(loc_str) |
-                              ftxui::color(ftxui::Color::RGB(160, 180, 200))});
+      return ftxui::hbox(
+          {ftxui::text(" " + ICON_GEAR + " ") |
+               ftxui::color(theme.tool_blocks.specific.file_read.fg),
+           ftxui::text("Reading ") | ftxui::color(theme.base.dim),
+           ftxui::text(loc_str) |
+               ftxui::color(theme.tool_blocks.specific.file_read.fg)});
     }
 
     // ── Finished + error ──
@@ -89,11 +93,11 @@ ftxui::Component FileReadToolBlock(const std::shared_ptr<ToolCallView> &view) {
 
       using namespace firmius::shared;
       return ftxui::hbox({ftxui::text(" " + ICON_ERROR + " ") |
-                              ftxui::color(ftxui::Color::Red),
+                              ftxui::color(theme.status_bar.error.normal.fg),
                           ftxui::text("Read failed: " + err_msg) |
-                              ftxui::color(ftxui::Color::RedLight)}) |
+                              ftxui::color(theme.status_bar.error.normal.fg)}) |
              ftxui::borderRounded |
-             ftxui::color(ftxui::Color::RGB(200, 100, 100));
+             ftxui::color(theme.status_bar.error.normal.fg);
     }
 
     // ── Finished + success: code window ──
@@ -178,7 +182,7 @@ ftxui::Component FileReadToolBlock(const std::shared_ptr<ToolCallView> &view) {
 
         code_lines.push_back(
             ftxui::hbox({ftxui::text(gutter + " │ ") | ftxui::dim |
-                             ftxui::color(ftxui::Color::RGB(100, 100, 130)),
+                             ftxui::color(theme.base.dim),
                          lineElem | ftxui::flex_shrink}) |
             ftxui::flex_shrink);
       }
@@ -190,18 +194,17 @@ ftxui::Component FileReadToolBlock(const std::shared_ptr<ToolCallView> &view) {
         while (static_cast<int>(gutter.size()) < gutter_width)
           gutter = " " + gutter;
 
-        code_lines.push_back(
-            ftxui::hbox({ftxui::text(gutter + " │ ") | ftxui::dim |
-                             ftxui::color(ftxui::Color::RGB(100, 100, 130)),
-                         ftxui::text(all_lines[i]) |
-                             ftxui::color(ftxui::Color::RGB(180, 180, 200))}));
+        code_lines.push_back(ftxui::hbox(
+            {ftxui::text(gutter + " │ ") | ftxui::dim |
+                 ftxui::color(theme.base.dim),
+             ftxui::text(all_lines[i]) | ftxui::color(theme.base.fg)}));
       }
     }
 
     if (has_more && !view->show_result) {
       code_lines.push_back(
           ftxui::text("   … " + std::to_string(remaining) + " more lines") |
-          ftxui::dim | ftxui::color(ftxui::Color::RGB(120, 120, 150)));
+          ftxui::dim | ftxui::color(theme.base.dim));
     }
 
     std::string footer;
@@ -214,27 +217,29 @@ ftxui::Component FileReadToolBlock(const std::shared_ptr<ToolCallView> &view) {
                std::to_string(effective_end) + ")";
     }
 
-    using namespace firmius::shared;
     ftxui::Elements rows;
-    rows.push_back(ftxui::hbox(
-        {ftxui::text(" " + ICON_FILE + " ") |
-             ftxui::color(ftxui::Color::RGB(100, 180, 220)),
-         ftxui::text(filename + " ") | ftxui::bold |
-             ftxui::color(ftxui::Color::RGB(140, 200, 240)),
-         ftxui::filler(),
-         ftxui::text(std::to_string(total_lines) + " lines") | ftxui::dim}));
+    rows.push_back(
+        ftxui::hbox({ftxui::text(" " + ICON_FILE + " ") |
+                         ftxui::color(theme.tool_blocks.specific.file_read.fg),
+                     ftxui::text(filename + " ") | ftxui::bold |
+                         ftxui::color(theme.tool_blocks.specific.file_read.fg),
+                     ftxui::filler(),
+                     ftxui::text(std::to_string(total_lines) + " lines") |
+                         ftxui::dim | ftxui::color(theme.base.dim)}));
 
-    rows.push_back(ftxui::separatorLight());
+    rows.push_back(ftxui::separatorLight() | ftxui::color(theme.base.border));
     rows.push_back(ftxui::vbox(code_lines) | ftxui::frame | ftxui::flex_shrink);
 
     if (has_more || view->show_result) {
-      rows.push_back(
-          ftxui::hbox({ftxui::text("  [") | ftxui::dim, toggle->Render(),
-                       ftxui::text("]") | ftxui::dim}));
+      rows.push_back(ftxui::hbox(
+          {ftxui::text("  [") | ftxui::dim | ftxui::color(theme.base.dim),
+           toggle->Render(),
+           ftxui::text("]") | ftxui::dim | ftxui::color(theme.base.dim)}));
     }
 
     return ftxui::vbox(rows) | ftxui::borderRounded |
-           ftxui::color(ftxui::Color::RGB(130, 160, 180)) | ftxui::flex_shrink;
+           ftxui::color(theme.tool_blocks.specific.file_read.fg) |
+           ftxui::flex_shrink;
   });
 }
 

@@ -1,7 +1,7 @@
 #include "components/ListDirectoryToolBlock.hpp"
+#include "ThemeManager.hpp"
 #include "utils/ErrorCleaner.hpp"
 #include "utils/Icons.hpp"
-#include "utils/ToolView.hpp"
 #include <ftxui/component/component.hpp>
 #include <ftxui/dom/elements.hpp>
 #include <rapidjson/document.h>
@@ -46,12 +46,14 @@ ListDirectoryToolBlock(const std::shared_ptr<ToolCallView> &view) {
       }
     }
 
+    const auto &theme = ThemeManager::instance().getCurrentTheme();
+
     using namespace firmius::shared;
     // ── Preparing / Called: one-liner ──
     if (view->phase == ToolPhase::Preparing ||
         view->phase == ToolPhase::Called) {
       return ftxui::text(ICON_GEAR + " Listing " + path_arg + "...") |
-             ftxui::dim;
+             ftxui::color(theme.base.dim);
     }
 
     // ── Finished ──
@@ -75,13 +77,13 @@ ListDirectoryToolBlock(const std::shared_ptr<ToolCallView> &view) {
       std::vector<ftxui::Element> rows;
       rows.push_back(ftxui::hbox(
           {ftxui::text(" " + ICON_FOLDER + " ") |
-               ftxui::color(ftxui::Color::RGB(100, 180, 220)),
+               ftxui::color(theme.tool_blocks.specific.ls.fg),
            ftxui::text("Listed " + path_display + " (" +
                        std::to_string(num_items) + " items)") |
-               ftxui::bold | ftxui::color(ftxui::Color::RGB(100, 180, 220)) |
+               ftxui::bold | ftxui::color(theme.tool_blocks.specific.ls.fg) |
                ftxui::flex_shrink,
-           ftxui::text("  [") | ftxui::dim, toggle->Render(),
-           ftxui::text("]") | ftxui::dim}));
+           ftxui::text("  [") | ftxui::color(theme.base.dim), toggle->Render(),
+           ftxui::text("]") | ftxui::color(theme.base.dim)}));
 
       if (view->show_result) {
         if (!res.HasParseError() && res.IsArray()) {
@@ -98,8 +100,8 @@ ListDirectoryToolBlock(const std::shared_ptr<ToolCallView> &view) {
               if (name.size() > 60) {
                 name = name.substr(0, 58) + "…";
               }
-              rows.push_back(ftxui::text(prefix + name) | ftxui::dim |
-                             ftxui::flex_shrink);
+              rows.push_back(ftxui::text(prefix + name) |
+                             ftxui::color(theme.base.dim) | ftxui::flex_shrink);
             }
           }
         }
@@ -112,12 +114,14 @@ ListDirectoryToolBlock(const std::shared_ptr<ToolCallView> &view) {
     // Error state
     std::string err_msg = firmius::shared::ErrorCleaner::clean(view->result);
     return ftxui::vbox({
-               ftxui::hbox({ftxui::text(" " + ICON_ERROR + " ") |
-                                ftxui::color(ftxui::Color::Red),
-                            ftxui::text(path_arg + " failed") | ftxui::bold |
-                                ftxui::color(ftxui::Color::RedLight)}),
+               ftxui::hbox(
+                   {ftxui::text(" " + ICON_ERROR + " ") |
+                        ftxui::color(theme.status_bar.error.normal.fg),
+                    ftxui::text(path_arg + " failed") | ftxui::bold |
+                        ftxui::color(theme.status_bar.error.normal.fg)}),
                ftxui::paragraph("  " + err_msg) |
-                   ftxui::color(ftxui::Color::RedLight) | ftxui::flex_shrink,
+                   ftxui::color(theme.status_bar.error.normal.fg) |
+                   ftxui::flex_shrink,
            }) |
            ftxui::flex_shrink;
   });

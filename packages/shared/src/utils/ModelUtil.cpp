@@ -52,7 +52,24 @@ std::string PrettifyModelName(const std::string &model_slug) {
     name = name.substr(slash_pos + 1);
   }
 
-  // 2. Split by hyphens
+  // 2. Handle Variant suffix before splitting by hyphens
+  std::string variant;
+  size_t colon_pos = name.find(':');
+  if (colon_pos != std::string::npos) {
+    variant = name.substr(colon_pos + 1);
+    name = name.substr(0, colon_pos);
+  }
+
+  // 3. Replace hyphens between digits with dots (e.g. 4-6 -> 4.6)
+  for (size_t i = 1; i + 1 < name.size(); ++i) {
+    if (name[i] == '-' &&
+        std::isdigit(static_cast<unsigned char>(name[i - 1])) &&
+        std::isdigit(static_cast<unsigned char>(name[i + 1]))) {
+      name[i] = '.';
+    }
+  }
+
+  // 4. Split core name by hyphens
   std::vector<std::string> parts;
   std::stringstream ss(name);
   std::string item;
@@ -62,12 +79,17 @@ std::string PrettifyModelName(const std::string &model_slug) {
     }
   }
 
-  // 3. Process and Join
+  // 5. Process and Join
   std::string pretty;
   for (size_t i = 0; i < parts.size(); ++i) {
     if (i > 0)
       pretty += " ";
     pretty += capitalize(parts[i]);
+  }
+
+  // 6. Append Variant if present
+  if (!variant.empty() && variant != "default") {
+    pretty += " (" + capitalize(variant) + ")";
   }
 
   return pretty;

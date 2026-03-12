@@ -5,6 +5,7 @@ target_sources(firmius PRIVATE
     src/TUIState.cpp
     src/StreamStateManager.cpp
     src/NotificationManager.cpp
+    src/ThemeManager.cpp
     src/commands/CommandManager.cpp
     src/commands/NewCommand.cpp
     src/commands/ThreadsCommand.cpp

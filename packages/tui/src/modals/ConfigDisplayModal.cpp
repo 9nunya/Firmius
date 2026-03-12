@@ -1,6 +1,7 @@
 #include "modals/ConfigDisplayModal.hpp"
 #include "AgentRegistry.hpp"
 #include "TUIState.hpp"
+#include "ThemeManager.hpp"
 #include "harness/Harness.hpp"
 #include <ftxui/component/component.hpp>
 #include <ftxui/dom/elements.hpp>
@@ -45,52 +46,68 @@ ftxui::Component ConfigDisplayModal::create(TuiState &state) {
   }
 
   auto component = ftxui::Renderer([=]() {
+    const auto &theme = ThemeManager::instance().getCurrentTheme();
     ftxui::Elements rows;
     rows.push_back(ftxui::hbox(
-        {ftxui::text("Provider:    ") | ftxui::bold, ftxui::text(providerId)}));
+        {ftxui::text("Provider:    ") | ftxui::bold |
+             ftxui::color(theme.modals.fg),
+         ftxui::text(providerId) | ftxui::color(theme.modals.highlight_fg)}));
     rows.push_back(ftxui::hbox(
-        {ftxui::text("Model:       ") | ftxui::bold, ftxui::text(modelId)}));
+        {ftxui::text("Model:       ") | ftxui::bold |
+             ftxui::color(theme.modals.fg),
+         ftxui::text(modelId) | ftxui::color(theme.modals.highlight_fg)}));
     rows.push_back(ftxui::hbox(
-        {ftxui::text("Unrestricted Paths: ") | ftxui::bold,
-         ftxui::text(config.dangerouslySkipPermissions ? "[ENABLED]" : "[DISABLED]") |
-             ftxui::color(config.dangerouslySkipPermissions ? ftxui::Color::Red
-                                                            : ftxui::Color::Green)}));
+        {ftxui::text("Unrestricted Paths: ") | ftxui::bold |
+             ftxui::color(theme.modals.fg),
+         ftxui::text(config.dangerouslySkipPermissions ? "[ENABLED]"
+                                                       : "[DISABLED]") |
+             ftxui::color(config.dangerouslySkipPermissions
+                              ? theme.status_bar.error.normal.fg
+                              : theme.modals.highlight_fg)}));
 
     if (!apiKeyNames.empty()) {
-      rows.push_back(ftxui::separator());
-      rows.push_back(ftxui::text("API Keys:") | ftxui::bold);
+      rows.push_back(ftxui::separatorLight() |
+                     ftxui::color(theme.modals.border));
+      rows.push_back(ftxui::text("API Keys:") | ftxui::bold |
+                     ftxui::color(theme.modals.title));
       for (const auto &k : apiKeyNames) {
-        rows.push_back(ftxui::text("  " + k) | ftxui::dim);
+        rows.push_back(ftxui::text("  " + k) | ftxui::color(theme.base.dim));
       }
     }
 
     if (!provOptLines.empty()) {
-      rows.push_back(ftxui::separator());
-      rows.push_back(ftxui::text("Provider Options:") | ftxui::bold);
+      rows.push_back(ftxui::separatorLight() |
+                     ftxui::color(theme.modals.border));
+      rows.push_back(ftxui::text("Provider Options:") | ftxui::bold |
+                     ftxui::color(theme.modals.title));
       for (const auto &o : provOptLines) {
-        rows.push_back(ftxui::text("  " + o) | ftxui::dim);
+        rows.push_back(ftxui::text("  " + o) | ftxui::color(theme.base.dim));
       }
     }
 
     rows.push_back(ftxui::text(""));
-    rows.push_back(ftxui::hbox({ftxui::text(" [C] ") | ftxui::bold |
-                                    ftxui::color(ftxui::Color::Blue),
-                                ftxui::text("Change Model   "),
-                                ftxui::text(" [P] ") | ftxui::bold |
-                                    ftxui::color(ftxui::Color::Yellow),
-                                ftxui::text("Toggle Permissions   "),
-                                ftxui::text(" [ESC] ") | ftxui::bold |
-                                    ftxui::color(ftxui::Color::GrayDark),
-                                ftxui::text("Close")}) |
-                   ftxui::center);
+    rows.push_back(
+        ftxui::hbox(
+            {ftxui::text(" [C] ") | ftxui::bold |
+                 ftxui::color(theme.modals.highlight_fg),
+             ftxui::text("Change Model   ") | ftxui::color(theme.modals.fg),
+             ftxui::text(" [P] ") | ftxui::bold |
+                 ftxui::color(theme.modals.title),
+             ftxui::text("Toggle Permissions   ") |
+                 ftxui::color(theme.modals.fg),
+             ftxui::text(" [ESC] ") | ftxui::bold |
+                 ftxui::color(theme.base.dim),
+             ftxui::text("Close") | ftxui::color(theme.modals.fg)}) |
+        ftxui::center);
 
     return ftxui::window(ftxui::text(" Configuration ") | ftxui::bold |
-                             ftxui::color(ftxui::Color::Cyan),
+                             ftxui::color(theme.modals.title),
                          ftxui::vbox(rows) | ftxui::yframe |
                              ftxui::vscroll_indicator | ftxui::yflex |
                              ftxui::size(ftxui::WIDTH, ftxui::LESS_THAN, 60) |
                              ftxui::size(ftxui::HEIGHT, ftxui::LESS_THAN, 20)) |
-           ftxui::clear_under | ftxui::center;
+           ftxui::clear_under | ftxui::center |
+           ftxui::bgcolor(theme.modals.bg) | ftxui::color(theme.modals.border);
   });
 
   return ftxui::CatchEvent(component, [&state](ftxui::Event event) {

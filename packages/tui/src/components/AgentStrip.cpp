@@ -1,4 +1,5 @@
 #include "components/AgentStrip.hpp"
+#include "ThemeManager.hpp"
 #include "components/GlintEffect.hpp"
 #include "utils/Icons.hpp"
 #include "utils/ModelUtil.hpp"
@@ -29,45 +30,50 @@ public:
     auto term_size = ftxui::Terminal::Size();
     bool wide_mode = term_size.dimx > 110;
 
+    const auto &theme = ThemeManager::instance().getCurrentTheme();
     for (size_t i = 0; i < count; ++i) {
       const auto &item = model_->items[i];
 
-      using namespace firmius::shared;
+      const auto &state =
+          item.is_busy
+              ? theme.agent_strip.item.busy
+              : (item.status_text == "error"
+                     ? theme.agent_strip.item.error
+                     : (item.is_focused ? theme.agent_strip.item.focused
+                                        : theme.agent_strip.item.normal));
 
       // Colors for pills and rows
-      ftxui::Color row_bg = ftxui::Color::RGB(25, 25, 45); // Main background
-      if (item.is_focused) {
-        row_bg = ftxui::Color::RGB(40, 50, 120);
-      }
+      ftxui::Color row_bg = state.bg;
 
       // --- 1. Agent Name Area / Wide Pill ---
       ftxui::Element name_area;
-      auto icon_el = ftxui::text(ICON_AGENT + " ") |
-                     ftxui::color(ftxui::Color::RGB(150, 150, 255));
+      auto icon_el =
+          ftxui::text(firmius::shared::ICON_AGENT + " ") |
+          ftxui::color(theme.agent_strip.pills.slug_fg); // use slug_fg for icon
 
       if (wide_mode) {
         // [Slug] > [Purpose] > [Model]
-        ftxui::Color slug_bg = ftxui::Color::RGB(50, 50, 90);
-        ftxui::Color slug_fg = ftxui::Color::RGB(200, 200, 255);
-        ftxui::Color purp_bg = ftxui::Color::RGB(40, 40, 70);
-        ftxui::Color purp_fg = ftxui::Color::RGB(180, 180, 220);
-        ftxui::Color mod_bg = ftxui::Color::RGB(30, 30, 50);
-        ftxui::Color mod_fg = ftxui::Color::RGB(150, 150, 190);
+        ftxui::Color slug_bg = theme.agent_strip.pills.slug_bg;
+        ftxui::Color slug_fg = theme.agent_strip.pills.slug_fg;
+        ftxui::Color purp_bg = theme.agent_strip.pills.purpose_bg;
+        ftxui::Color purp_fg = theme.agent_strip.pills.purpose_fg;
+        ftxui::Color mod_bg = theme.agent_strip.pills.model_bg;
+        ftxui::Color mod_fg = theme.agent_strip.pills.model_fg;
 
         auto slug_el =
             ftxui::text(" " + firmius::shared::PrettifyModelName(item.title) +
                         " ") |
             ftxui::bold | ftxui::color(slug_fg) | ftxui::bgcolor(slug_bg);
-        auto sep1 = ftxui::text(PL_LEFT_SEP) | ftxui::color(slug_bg) |
-                    ftxui::bgcolor(purp_bg);
+        auto sep1 = ftxui::text(firmius::shared::PL_LEFT_SEP) |
+                    ftxui::color(slug_bg) | ftxui::bgcolor(purp_bg);
         auto purp_el = ftxui::text(" " + item.purpose + " ") |
                        ftxui::color(purp_fg) | ftxui::bgcolor(purp_bg);
-        auto sep2 = ftxui::text(PL_LEFT_SEP) | ftxui::color(purp_bg) |
-                    ftxui::bgcolor(mod_bg);
+        auto sep2 = ftxui::text(firmius::shared::PL_LEFT_SEP) |
+                    ftxui::color(purp_bg) | ftxui::bgcolor(mod_bg);
         auto mod_el = ftxui::text(" " + item.model_name + " ") |
                       ftxui::color(mod_fg) | ftxui::bgcolor(mod_bg);
-        auto sep3 = ftxui::text(PL_LEFT_SEP) | ftxui::color(mod_bg) |
-                    ftxui::bgcolor(row_bg);
+        auto sep3 = ftxui::text(firmius::shared::PL_LEFT_SEP) |
+                    ftxui::color(mod_bg) | ftxui::bgcolor(row_bg);
 
         ftxui::Element wide_content =
             ftxui::hbox({icon_el | ftxui::bgcolor(slug_bg), slug_el, sep1,
@@ -88,31 +94,27 @@ public:
             title_el = it->second->Render();
           } else {
             title_el = ftxui::text(item.title) | ftxui::bold |
-                       ftxui::color(ftxui::Color::RGB(180, 160, 220));
+                       ftxui::color(theme.agent_strip.pills.slug_fg);
           }
         } else {
           title_el =
               ftxui::text(firmius::shared::PrettifyModelName(item.title)) |
-              ftxui::bold | ftxui::color(ftxui::Color::RGB(180, 160, 220));
+              ftxui::bold | ftxui::color(theme.agent_strip.pills.slug_fg);
         }
         name_area = ftxui::hbox({icon_el, title_el});
       }
 
       // --- 2. State Pill ---
-      ftxui::Color state_bg = ftxui::Color::RGB(45, 45, 75);
-      ftxui::Color state_fg = ftxui::Color::RGB(180, 180, 220);
-      std::string status_icon = ICON_CHECK;
+      ftxui::Color state_bg = theme.agent_strip.pills.state_bg;
+      ftxui::Color state_fg = theme.agent_strip.pills.state_fg;
+      std::string status_icon = firmius::shared::ICON_CHECK;
       std::string status_label = ""; // Empty for idle
 
       if (item.is_busy) {
-        state_bg = ftxui::Color::RGB(40, 110, 70);
-        state_fg = ftxui::Color::White;
-        status_icon = ICON_GEAR;
+        status_icon = firmius::shared::ICON_GEAR;
         status_label = "BUSY";
       } else if (item.status_text == "error") {
-        state_bg = ftxui::Color::RGB(160, 45, 45);
-        state_fg = ftxui::Color::White;
-        status_icon = ICON_ERROR;
+        status_icon = firmius::shared::ICON_ERROR;
         status_label = "ERR";
       }
 
@@ -122,29 +124,30 @@ public:
           ftxui::bold | ftxui::color(state_fg) | ftxui::bgcolor(state_bg);
 
       // --- 3. Tool Pill ---
-      ftxui::Color tool_bg = ftxui::Color::RGB(35, 40, 65);
+      ftxui::Color tool_bg = theme.agent_strip.pills.tool_bg;
       auto tool_pill =
           ftxui::hbox({
-              ftxui::text(" " + ICON_TOOL + " ") |
-                  ftxui::color(ftxui::Color::Cyan),
+              ftxui::text(" " + firmius::shared::ICON_TOOL + " ") |
+                  ftxui::color(theme.agent_strip.pills.tool_fg),
               ftxui::text(std::to_string(item.tool_call_count) + " ") |
-                  ftxui::color(ftxui::Color::GrayLight),
+                  ftxui::color(theme.agent_strip.pills.tool_fg),
           }) |
           ftxui::bgcolor(tool_bg);
 
       // --- 4. Context Pill ---
-      ftxui::Color ctx_bg = ftxui::Color::RGB(40, 35, 65);
-      ftxui::Color ctx_color = ftxui::Color::RGB(100, 255, 150);
+      ftxui::Color ctx_bg = theme.agent_strip.pills.context_bg;
+      ftxui::Color ctx_color = theme.status_bar.context.low;
       if (item.context_percent > 0.85f)
-        ctx_color = ftxui::Color::RGB(255, 100, 100);
+        ctx_color = theme.status_bar.context.high;
       else if (item.context_percent > 0.60f)
-        ctx_color = ftxui::Color::RGB(255, 220, 100);
+        ctx_color = theme.status_bar.context.medium;
 
       char buf[32];
       snprintf(buf, sizeof(buf), "%.1f%%", item.context_percent * 100.0f);
       auto ctx_pill =
           ftxui::hbox({
-              ftxui::text(" " + ICON_CONTEXT + " ") | ftxui::color(ctx_color),
+              ftxui::text(" " + firmius::shared::ICON_CONTEXT + " ") |
+                  ftxui::color(ctx_color),
               ftxui::text(std::string(buf) + " ") | ftxui::color(ctx_color),
           }) |
           ftxui::bgcolor(ctx_bg);
@@ -152,19 +155,18 @@ public:
       // --- 5. Focus Indicator (Right Arrow) ---
       ftxui::Element focus_arrow = ftxui::text("  ");
       if (item.is_focused) {
-        focus_arrow = ftxui::text(" " + PL_LEFT_SEP) | ftxui::color(row_bg) |
-                      ftxui::bgcolor(ftxui::Color::RGB(20, 20, 35));
+        focus_arrow = ftxui::text(" " + firmius::shared::PL_LEFT_SEP) |
+                      ftxui::color(row_bg) | ftxui::bgcolor(theme.base.bg);
       }
 
-      // Cluster on the right: Use PL_RIGHT_SEP () pointing LEFT
       // Sequence: filler |  state |  tool |  ctx |  pct
       // Wait, let's keep it simple: [filler]  [state]  [tool]  [ctx]
-      auto rsep1 = ftxui::text(PL_RIGHT_SEP) | ftxui::color(state_bg) |
-                   ftxui::bgcolor(row_bg);
-      auto rsep2 = ftxui::text(PL_RIGHT_SEP) | ftxui::color(tool_bg) |
-                   ftxui::bgcolor(state_bg);
-      auto rsep3 = ftxui::text(PL_RIGHT_SEP) | ftxui::color(ctx_bg) |
-                   ftxui::bgcolor(tool_bg);
+      auto rsep1 = ftxui::text(firmius::shared::PL_RIGHT_SEP) |
+                   ftxui::color(state_bg) | ftxui::bgcolor(row_bg);
+      auto rsep2 = ftxui::text(firmius::shared::PL_RIGHT_SEP) |
+                   ftxui::color(tool_bg) | ftxui::bgcolor(state_bg);
+      auto rsep3 = ftxui::text(firmius::shared::PL_RIGHT_SEP) |
+                   ftxui::color(ctx_bg) | ftxui::bgcolor(tool_bg);
 
       auto row = ftxui::hbox({ftxui::text(" "), name_area, ftxui::filler(),
                               rsep1, state_pill, rsep2, tool_pill, rsep3,
@@ -172,8 +174,7 @@ public:
 
       rows.push_back(row | ftxui::bgcolor(row_bg));
     }
-    return ftxui::vbox(std::move(rows)) |
-           ftxui::bgcolor(ftxui::Color::RGB(20, 20, 35));
+    return ftxui::vbox(std::move(rows)) | ftxui::bgcolor(theme.agent_strip.bg);
   }
 
 private:
@@ -194,71 +195,84 @@ private:
       if (wide_mode)
         current_ids.insert(item.id + "_wide");
 
-      // Compact glint
+      const auto &theme = ThemeManager::instance().getCurrentTheme();
       if (!wide_mode) {
-        if (glint_cache_.count(item.id) && title_cache_[item.id] == item.title)
+        if (glint_cache_.count(item.id) &&
+            title_cache_[item.id] == item.title &&
+            cached_theme_name_ == theme.name)
           continue;
+        const auto &state = theme.agent_strip.item;
         GlintConfig cfg;
         cfg.target = GlintConfig::Target::Text;
-        cfg.gradientColors = {ftxui::Color::RGB(0, 80, 255),
-                              ftxui::Color::White,
-                              ftxui::Color::RGB(0, 80, 255)};
+        cfg.gradientColors =
+            state.glint.empty()
+                ? std::vector<ftxui::Color>{ftxui::Color::RGB(0, 80, 255),
+                                            ftxui::Color::White,
+                                            ftxui::Color::RGB(0, 80, 255)}
+                : state.glint;
         cfg.glintSize = 20;
         cfg.intervalSeconds = 2.0f;
         cfg.durationSeconds = 1.5f;
         cfg.easing = GlintEasing::EaseInOut;
         glint_cache_[item.id] = GlintEffect(
             ftxui::text(firmius::shared::PrettifyModelName(item.title)) |
-                ftxui::bold | ftxui::color(ftxui::Color::RGB(180, 160, 220)),
+                ftxui::bold | ftxui::color(theme.agent_strip.pills.slug_fg),
             cfg);
         title_cache_[item.id] = item.title;
       } else {
         // Wide glint
         if (glint_cache_.count(item.id + "_wide") &&
             title_cache_[item.id + "_wide"] ==
-                item.title + item.purpose + item.model_name)
+                item.title + item.purpose + item.model_name &&
+            cached_theme_name_ == theme.name)
           continue;
+        const auto &state = theme.agent_strip.item;
         GlintConfig cfg;
         cfg.target = GlintConfig::Target::Text;
-        cfg.gradientColors = {ftxui::Color::RGB(100, 100, 255),
-                              ftxui::Color::White,
-                              ftxui::Color::RGB(100, 100, 255)};
+        cfg.gradientColors =
+            state.glint.empty()
+                ? std::vector<ftxui::Color>{ftxui::Color::RGB(100, 100, 255),
+                                            ftxui::Color::White,
+                                            ftxui::Color::RGB(100, 100, 255)}
+                : state.glint;
         cfg.glintSize = 30;
         cfg.intervalSeconds = 3.0f;
         cfg.durationSeconds = 2.0f;
         cfg.easing = GlintEasing::EaseInOut;
 
         // Colors for wide pill glint
-        ftxui::Color slug_bg = ftxui::Color::RGB(50, 50, 90);
-        ftxui::Color purp_bg = ftxui::Color::RGB(40, 40, 70);
-        ftxui::Color mod_bg = ftxui::Color::RGB(30, 30, 50);
+        ftxui::Color slug_bg = theme.agent_strip.pills.slug_bg;
+        ftxui::Color purp_bg = theme.agent_strip.pills.purpose_bg;
+        ftxui::Color mod_bg = theme.agent_strip.pills.model_bg;
 
         auto slug_el =
             ftxui::text(" " + firmius::shared::PrettifyModelName(item.title) +
                         " ") |
             ftxui::bold | ftxui::bgcolor(slug_bg);
-        auto sep1 = ftxui::text(PL_LEFT_SEP) | ftxui::color(slug_bg) |
-                    ftxui::bgcolor(purp_bg);
+        auto sep1 = ftxui::text(firmius::shared::PL_LEFT_SEP) |
+                    ftxui::color(slug_bg) | ftxui::bgcolor(purp_bg);
         auto purp_el =
             ftxui::text(" " + item.purpose + " ") | ftxui::bgcolor(purp_bg);
-        auto sep2 = ftxui::text(PL_LEFT_SEP) | ftxui::color(purp_bg) |
-                    ftxui::bgcolor(mod_bg);
+        auto sep2 = ftxui::text(firmius::shared::PL_LEFT_SEP) |
+                    ftxui::color(purp_bg) | ftxui::bgcolor(mod_bg);
         auto mod_el =
             ftxui::text(" " +
                         firmius::shared::PrettifyModelName(item.model_name) +
                         " ") |
             ftxui::bgcolor(mod_bg);
 
-        auto icon_el = ftxui::text(ICON_AGENT + " ") | ftxui::bgcolor(slug_bg);
+        auto icon_el = ftxui::text(firmius::shared::ICON_AGENT + " ") |
+                       ftxui::bgcolor(slug_bg);
 
         glint_cache_[item.id + "_wide"] = GlintEffect(
             ftxui::hbox({icon_el, slug_el, sep1, purp_el, sep2, mod_el}) |
-                ftxui::color(ftxui::Color::RGB(180, 180, 220)),
+                ftxui::color(theme.agent_strip.pills.slug_fg),
             cfg);
         title_cache_[item.id + "_wide"] =
             item.title + item.purpose + item.model_name;
       }
     }
+    cached_theme_name_ = ThemeManager::instance().getCurrentTheme().name;
     for (auto it = glint_cache_.begin(); it != glint_cache_.end();) {
       if (current_ids.find(it->first) == current_ids.end()) {
         title_cache_.erase(it->first);
@@ -272,6 +286,7 @@ private:
   std::shared_ptr<AgentStripModel> model_;
   std::map<std::string, ftxui::Component> glint_cache_;
   std::map<std::string, std::string> title_cache_;
+  std::string cached_theme_name_;
 };
 
 } // namespace

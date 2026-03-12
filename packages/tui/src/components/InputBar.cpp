@@ -1,4 +1,5 @@
 #include "components/InputBar.hpp"
+#include "ThemeManager.hpp"
 #include "commands/CommandManager.hpp"
 #include "providers/ProviderRegistry.hpp"
 #include <algorithm>
@@ -486,8 +487,9 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
   });
 
   return ftxui::Renderer(with_keys, [model, scroll_top, suggestion_index] {
-    auto prompt = ftxui::text("> ") | ftxui::bold |
-                  ftxui::color(ftxui::Color::RGB(140, 120, 200));
+    const auto &theme = ThemeManager::instance().getCurrentTheme();
+    auto prompt =
+        ftxui::text("> ") | ftxui::bold | ftxui::color(theme.input.prompt);
 
     // Render image tags above input
     std::optional<ftxui::Element> image_tags_el;
@@ -495,8 +497,8 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
       ftxui::Elements tag_elements;
       for (size_t i = 0; i < model->image_tags.size(); ++i) {
         auto tag = ftxui::text(" [Image " + std::to_string(i + 1) + "] ") |
-                   ftxui::color(ftxui::Color::Cyan) |
-                   ftxui::bgcolor(ftxui::Color::RGB(40, 40, 60));
+                   ftxui::color(theme.agent_strip.pills.tool_fg) |
+                   ftxui::bgcolor(theme.agent_strip.pills.tool_bg);
         tag_elements.push_back(tag);
       }
       image_tags_el = ftxui::hbox(tag_elements);
@@ -521,14 +523,15 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
                           ftxui::color(is_selected ? ftxui::Color::Black
                                                    : ftxui::Color::White);
         if (is_selected)
-          match_text = match_text | ftxui::bgcolor(ftxui::Color::Cyan);
+          match_text = match_text | ftxui::bgcolor(theme.modals.highlight_bg) |
+                       ftxui::color(theme.modals.highlight_fg);
 
         match_elements.push_back(
             ftxui::hbox({match_text, ftxui::text("  "),
                          ftxui::text(match.description) | ftxui::dim}));
       }
-      autocomplete_layer = ftxui::vbox(match_elements) |
-                           ftxui::bgcolor(ftxui::Color::RGB(40, 40, 60));
+      autocomplete_layer =
+          ftxui::vbox(match_elements) | ftxui::bgcolor(theme.modals.bg);
     } else if (ac && !ac->is_typing_command_name && ac->current_arg) {
       const auto &arg = *ac->current_arg;
       std::string type_str;
@@ -579,16 +582,16 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
           for (size_t i = 0; i < suggestions.size(); ++i) {
             const auto &match = suggestions[i];
             bool is_selected = (i == static_cast<size_t>(*suggestion_index));
-            auto label = ftxui::text(" " + match.id) | ftxui::bold |
-                         ftxui::color(is_selected ? ftxui::Color::Black
-                                                  : ftxui::Color::GrayLight);
+            auto label =
+                ftxui::text(" " + match.id) | ftxui::bold |
+                ftxui::color(is_selected ? theme.base.bg : theme.base.fg);
             if (is_selected)
-              label = label | ftxui::bgcolor(ftxui::Color::Cyan);
+              label = label | ftxui::bgcolor(theme.modals.highlight_bg);
             auto meta = ftxui::text(" [" + match.type_label + "]") | ftxui::dim;
             rows.push_back(ftxui::hbox({label, ftxui::filler(), meta}));
           }
-          suggestion_body = ftxui::vbox(rows) | ftxui::yframe |
-                            ftxui::color(ftxui::Color::GrayLight);
+          suggestion_body =
+              ftxui::vbox(rows) | ftxui::yframe | ftxui::color(theme.base.fg);
         } else {
           std::string message = query.empty()
                                     ? "No providers are registered yet."
@@ -598,10 +601,9 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
 
         autocomplete_layer =
             ftxui::vbox({header, ftxui::separatorLight(), suggestion_body}) |
-            ftxui::bgcolor(ftxui::Color::RGB(40, 40, 60));
+            ftxui::bgcolor(theme.modals.bg);
       } else {
-        autocomplete_layer =
-            header | ftxui::bgcolor(ftxui::Color::RGB(40, 40, 60));
+        autocomplete_layer = header | ftxui::bgcolor(theme.modals.bg);
       }
     }
 
@@ -610,7 +612,8 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
 
     auto with_cursor = [&](ftxui::Element e) {
       if (model && model->is_focused) {
-        return e | ftxui::inverted | ftxui::focus;
+        return e | ftxui::bgcolor(theme.input.fg) |
+               ftxui::color(theme.input.bg) | ftxui::focus;
       }
       return e | ftxui::focus;
     };
@@ -736,8 +739,8 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
                 (cursor >= static_cast<int>(block.start_pos) &&
                  cursor <= static_cast<int>(block.end_pos));
             auto block_el = ftxui::text(" " + placeholder + " ") |
-                            ftxui::bgcolor(ftxui::Color::RGB(60, 50, 80)) |
-                            ftxui::color(ftxui::Color::Cyan);
+                            ftxui::bgcolor(theme.agent_strip.pills.purpose_bg) |
+                            ftxui::color(theme.agent_strip.pills.purpose_fg);
             if (cursor_in_block) {
               block_el = block_el | ftxui::underlined;
             }
