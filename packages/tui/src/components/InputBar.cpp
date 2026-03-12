@@ -219,7 +219,8 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
   auto with_keys = ftxui::CatchEvent(input, [model, on_submit, input,
                                              scroll_top, suggestion_index,
                                              in_paste, paste_buffer,
-                                             just_submitted](ftxui::Event event) {
+                                             just_submitted](
+                                                ftxui::Event event) {
     if (!model || !model->buffer || !model->cursor)
       return false;
 
@@ -607,6 +608,13 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
     // Build the input display with proper wrapping and pasted block rendering
     ftxui::Element input_display;
 
+    auto with_cursor = [&](ftxui::Element e) {
+      if (model && model->is_focused) {
+        return e | ftxui::inverted | ftxui::focus;
+      }
+      return e | ftxui::focus;
+    };
+
     // Helper to render buffer with pasted blocks highlighted
     auto renderBufferWithBlocks = [&]() -> ftxui::Element {
       if (model->pasted_blocks.empty()) {
@@ -617,9 +625,9 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
           std::string ph = model->placeholder;
           if (ph.empty())
             ph = " ";
-          return ftxui::hbox({ftxui::text(ph.substr(0, 1)) | ftxui::inverted |
-                                  ftxui::focus | ftxui::dim,
-                              ftxui::text(ph.substr(1)) | ftxui::dim});
+          return ftxui::hbox(
+              {with_cursor(ftxui::text(ph.substr(0, 1))) | ftxui::dim,
+               ftxui::text(ph.substr(1)) | ftxui::dim});
         }
 
         std::vector<std::string> raw_lines = splitLines(content);
@@ -633,8 +641,8 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
 
           if (raw_line.empty()) {
             if (cursor == char_pos) {
-              line_elements.push_back(ftxui::hbox(
-                  {ftxui::text(" ") | ftxui::inverted | ftxui::focus}));
+              line_elements.push_back(
+                  ftxui::hbox({with_cursor(ftxui::text(" "))}));
             } else {
               line_elements.push_back(ftxui::text(""));
             }
@@ -663,13 +671,12 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
                 if (local_cursor < static_cast<int>(segment.size())) {
                   seg_elem = ftxui::hbox(
                       {ftxui::text(segment.substr(0, local_cursor)),
-                       ftxui::text(segment.substr(local_cursor, 1)) |
-                           ftxui::inverted | ftxui::focus,
+                       with_cursor(
+                           ftxui::text(segment.substr(local_cursor, 1))),
                        ftxui::text(segment.substr(local_cursor + 1))});
                 } else {
                   seg_elem = ftxui::hbox(
-                      {ftxui::text(segment),
-                       ftxui::text(" ") | ftxui::inverted | ftxui::focus});
+                      {ftxui::text(segment), with_cursor(ftxui::text(" "))});
                 }
               } else {
                 seg_elem = ftxui::text(segment);
@@ -714,8 +721,8 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
               if (cursor_here) {
                 int local_cursor = cursor - line_start;
                 line_parts.push_back(ftxui::text(pre.substr(0, local_cursor)));
-                line_parts.push_back(ftxui::text(pre.substr(local_cursor, 1)) |
-                                     ftxui::inverted | ftxui::focus);
+                line_parts.push_back(
+                    with_cursor(ftxui::text(pre.substr(local_cursor, 1))));
                 line_parts.push_back(ftxui::text(pre.substr(local_cursor + 1)));
               } else {
                 line_parts.push_back(ftxui::text(pre));
@@ -752,14 +759,13 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
             if (local_cursor <= static_cast<int>(line.size())) {
               line_parts.push_back(ftxui::text(line.substr(0, local_cursor)));
               if (local_cursor < static_cast<int>(line.size())) {
-                line_parts.push_back(ftxui::text(line.substr(local_cursor, 1)) |
-                                     ftxui::inverted | ftxui::focus);
+                line_parts.push_back(
+                    with_cursor(ftxui::text(line.substr(local_cursor, 1))));
                 line_parts.push_back(
                     ftxui::text(line.substr(local_cursor + 1)));
               } else {
                 // Cursor at end of line
-                line_parts.push_back(ftxui::text(" ") | ftxui::inverted |
-                                     ftxui::focus);
+                line_parts.push_back(with_cursor(ftxui::text(" ")));
               }
             } else {
               line_parts.push_back(ftxui::text(line));
@@ -782,8 +788,7 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
       // Handle empty last line with cursor
       if (lines.empty() || (buf.size() > 0 && buf.back() == '\n')) {
         if (cursor == static_cast<int>(buf.size())) {
-          line_elements.push_back(
-              ftxui::hbox({ftxui::text(" ") | ftxui::inverted | ftxui::focus}));
+          line_elements.push_back(ftxui::hbox({with_cursor(ftxui::text(" "))}));
         }
       }
 
@@ -850,7 +855,7 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
 
           line_el = ftxui::hbox({
                         ftxui::text(pre),
-                        ftxui::text(cur_char) | ftxui::inverted | ftxui::focus,
+                        with_cursor(ftxui::text(cur_char)),
                         ftxui::text(suf),
                     }) |
                     ftxui::color(ftxui::Color::RGB(220, 220, 240));

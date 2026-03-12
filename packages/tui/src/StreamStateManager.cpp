@@ -228,6 +228,10 @@ void StreamStateManager::handleAgentSpawned(
   if (!e.providerId.empty() || !e.modelId.empty()) {
     agent_provider_model_[e.agentId] = e.providerId + "/" + e.modelId;
   }
+  if (!e.title.empty()) {
+    agent_titles_[e.agentId] = e.title;
+  }
+
   // Link spawned agent to parent tool call
   for (auto &pair : tool_calls_) {
     if (!pair.second || pair.second->agentId != e.parentId)
@@ -250,7 +254,6 @@ void StreamStateManager::handleAgentSpawned(
       pair.second->subagent_id = e.agentId;
       if (!e.title.empty()) {
         pair.second->subagent_title = e.title;
-        agent_titles_[e.agentId] = e.title;
       }
       if (!e.friendlyName.empty())
         pair.second->subagent_slug = e.friendlyName;

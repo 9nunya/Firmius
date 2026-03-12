@@ -1,6 +1,7 @@
 #include "components/ProcessExecuteToolBlock.hpp"
-#include "components/LogWindow.hpp"
 #include "components/ANSIParser.hpp"
+#include "components/LogWindow.hpp"
+#include "utils/Icons.hpp"
 #include "utils/ToolSummaries.hpp"
 #include <ftxui/dom/elements.hpp>
 #include <rapidjson/document.h>
@@ -50,12 +51,12 @@ ProcessExecuteToolBlock(const std::shared_ptr<ToolCallView> &view) {
 
     std::string cmd_display = "$ " + command_arg;
 
+    using namespace firmius::shared;
     // ── Preparing ──
     if (view->phase == ToolPhase::Preparing) {
-      return ftxui::hbox({
-        ftxui::text("⟳ ") | ftxui::color(ftxui::Color::Cyan),
-        ftxui::text("Running " + cmd_display) | ftxui::dim
-      });
+      return ftxui::hbox({ftxui::text(" " + ICON_GEAR + " ") |
+                              ftxui::color(ftxui::Color::Cyan),
+                          ftxui::text("Running " + cmd_display) | ftxui::dim});
     }
 
     // ── Called: show rolling last 5 lines of live output with ANSI colors ──
@@ -70,15 +71,15 @@ ProcessExecuteToolBlock(const std::shared_ptr<ToolCallView> &view) {
       std::vector<ftxui::Element> out_lines;
       for (const auto &line : tail) {
         // Parse ANSI colors from process output
-        out_lines.push_back(ftxui::hbox({
-          ftxui::text("│ ") | ftxui::color(ftxui::Color::RGB(100, 100, 150)),
-          ParseANSI(line)
-        }));
+        out_lines.push_back(ftxui::hbox(
+            {ftxui::text("│ ") | ftxui::color(ftxui::Color::RGB(100, 100, 150)),
+             ParseANSI(line)}));
       }
 
       std::string footer = cmd_display;
       rows.push_back(LogWindow(out_lines, footer));
-      return ftxui::vbox(rows) | ftxui::borderRounded | ftxui::color(ftxui::Color::RGB(150, 150, 180));
+      return ftxui::vbox(rows) | ftxui::borderRounded |
+             ftxui::color(ftxui::Color::RGB(150, 150, 180));
     }
 
     // ── Finished + error ──
@@ -88,11 +89,14 @@ ProcessExecuteToolBlock(const std::shared_ptr<ToolCallView> &view) {
         err_msg = "unknown error";
       if (err_msg.size() > 70)
         err_msg = err_msg.substr(0, 67) + "…";
-      
-      return ftxui::hbox({
-        ftxui::text("▸ ") | ftxui::color(ftxui::Color::Red),
-        ftxui::text(cmd_display + " failed: " + err_msg) | ftxui::color(ftxui::Color::RedLight)
-      }) | ftxui::borderRounded | ftxui::color(ftxui::Color::RGB(200, 100, 100));
+
+      using namespace firmius::shared;
+      return ftxui::hbox({ftxui::text(" " + ICON_ERROR + " ") |
+                              ftxui::color(ftxui::Color::Red),
+                          ftxui::text(cmd_display + " failed: " + err_msg) |
+                              ftxui::color(ftxui::Color::RedLight)}) |
+             ftxui::borderRounded |
+             ftxui::color(ftxui::Color::RGB(200, 100, 100));
     }
 
     // ── Finished + success: parse result ──
@@ -131,6 +135,27 @@ ProcessExecuteToolBlock(const std::shared_ptr<ToolCallView> &view) {
 
     view->toggle_label = view->show_result ? "collapse" : "expand";
 
+    // Trim output_str to check for meaningful content
+    std::string trimmed_output = output_str;
+    trimmed_output.erase(
+        trimmed_output.begin(),
+        std::find_if(trimmed_output.begin(), trimmed_output.end(),
+                     [](unsigned char ch) { return !std::isspace(ch); }));
+    trimmed_output.erase(
+        std::find_if(trimmed_output.rbegin(), trimmed_output.rend(),
+                     [](unsigned char ch) { return !std::isspace(ch); })
+            .base(),
+        trimmed_output.end());
+
+    if (trimmed_output.empty() && view->success) {
+      using namespace firmius::shared;
+      return ftxui::hbox(
+          {ftxui::text(" " + ICON_CHECK + " ") |
+               ftxui::color(ftxui::Color::Green),
+           ftxui::text(cmd_display) | ftxui::dim,
+           ftxui::text(" [exit " + exit_code_str + "]") | ftxui::dim});
+    }
+
     // Count total lines
     int total_lines = 0;
     {
@@ -147,19 +172,17 @@ ProcessExecuteToolBlock(const std::shared_ptr<ToolCallView> &view) {
       std::istringstream ss(output_str);
       std::string line;
       while (std::getline(ss, line)) {
-        out_lines.push_back(ftxui::hbox({
-          ftxui::text("│ ") | ftxui::color(ftxui::Color::RGB(100, 100, 150)),
-          ParseANSI(line)
-        }));
+        out_lines.push_back(ftxui::hbox(
+            {ftxui::text("│ ") | ftxui::color(ftxui::Color::RGB(100, 100, 150)),
+             ParseANSI(line)}));
       }
     } else {
       // Show last 5 lines
       auto all_tail = TailLines(output_str, 5);
       for (const auto &line : all_tail) {
-        out_lines.push_back(ftxui::hbox({
-          ftxui::text("│ ") | ftxui::color(ftxui::Color::RGB(100, 100, 150)),
-          ParseANSI(line)
-        }));
+        out_lines.push_back(ftxui::hbox(
+            {ftxui::text("│ ") | ftxui::color(ftxui::Color::RGB(100, 100, 150)),
+             ParseANSI(line)}));
       }
     }
 
@@ -175,16 +198,18 @@ ProcessExecuteToolBlock(const std::shared_ptr<ToolCallView> &view) {
       footer += " (" + finish_reason + ")";
     }
 
+    using namespace firmius::shared;
     std::vector<ftxui::Element> rows;
-    rows.push_back(
-        LogWindow(out_lines, footer, has_more ? view->toggle_label : ""));
+    rows.push_back(LogWindow(out_lines, ICON_TERMINAL + " " + footer,
+                             has_more ? view->toggle_label : ""));
     if (has_more) {
       rows.push_back(
           ftxui::hbox({ftxui::text("  [") | ftxui::dim, toggle->Render(),
                        ftxui::text("]") | ftxui::dim}));
     }
 
-    return ftxui::vbox(rows) | ftxui::borderRounded | ftxui::color(ftxui::Color::RGB(150, 180, 160));
+    return ftxui::vbox(rows) | ftxui::borderRounded |
+           ftxui::color(ftxui::Color::RGB(150, 180, 160));
   });
 }
 

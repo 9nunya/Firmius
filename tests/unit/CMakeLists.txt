@@ -128,6 +128,19 @@ target_include_directories(test_fsutil PRIVATE
 )
 gtest_discover_tests(test_fsutil)
 
+# ModelUtil tests
+add_executable(test_model_util
+    shared/test_model_util.cpp
+)
+target_link_libraries(test_model_util PRIVATE
+    firmius::shared
+    GTest::gtest_main
+)
+target_include_directories(test_model_util PRIVATE
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_model_util)
+
 # TUI Markdown tests
 add_executable(test_markdown
     tui/test_markdown.cpp

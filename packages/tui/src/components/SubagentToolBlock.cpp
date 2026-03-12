@@ -2,6 +2,7 @@
 #include "StreamStateManager.hpp"
 #include "components/GlintEffect.hpp"
 #include "utils/ErrorCleaner.hpp"
+#include "utils/Icons.hpp"
 #include "utils/ToolSummaries.hpp"
 #include "utils/ToolView.hpp"
 #include <ftxui/dom/elements.hpp>
@@ -165,8 +166,10 @@ ftxui::Component SubagentToolBlock(const std::shared_ptr<ToolCallView> &view,
       cfg.intervalSeconds = 1.5f;
       cfg.durationSeconds = 1.2f;
       cfg.easing = GlintEasing::EaseInOut;
+      using namespace firmius::shared;
       auto spawning_text =
-          ftxui::text("⟳ Spawning \"" + title + "\"...") | ftxui::bold;
+          ftxui::text(ICON_GEAR + " Spawning \"" + title + "\"...") |
+          ftxui::bold;
       return ftxui::hbox(
           {ftxui::text("▸ ") | ftxui::color(ftxui::Color::RGB(180, 120, 255)),
            GlintEffect(spawning_text, cfg)->Render() | ftxui::flex_shrink});
@@ -193,8 +196,9 @@ ftxui::Component SubagentToolBlock(const std::shared_ptr<ToolCallView> &view,
       cfg.durationSeconds = 1.5f;
       cfg.easing = GlintEasing::EaseInOut;
 
+      using namespace firmius::shared;
       rows.push_back(
-          GlintEffect(ftxui::text("▸ " + title) | ftxui::bold |
+          GlintEffect(ftxui::text(ICON_AGENT + " " + title) | ftxui::bold |
                           ftxui::color(ftxui::Color::RGB(200, 150, 255)),
                       cfg)
               ->Render() |
@@ -225,13 +229,15 @@ ftxui::Component SubagentToolBlock(const std::shared_ptr<ToolCallView> &view,
     std::vector<ftxui::Element> rows;
     if (view->success) {
       view->toggle_label = view->show_result ? "hide" : "show";
-      rows.push_back(ftxui::hbox(
-          {ftxui::text("▸ ") | ftxui::color(ftxui::Color::RGB(100, 220, 150)),
-           ftxui::text(title + " completed") | ftxui::bold |
-               ftxui::color(ftxui::Color::RGB(150, 255, 200)) |
-               ftxui::flex_shrink,
-           ftxui::text("  [") | ftxui::dim, toggle->Render(),
-           ftxui::text("]") | ftxui::dim}));
+      using namespace firmius::shared;
+      rows.push_back(
+          ftxui::hbox({ftxui::text(" " + ICON_CHECK + " ") |
+                           ftxui::color(ftxui::Color::RGB(100, 220, 150)),
+                       ftxui::text(title + " completed") | ftxui::bold |
+                           ftxui::color(ftxui::Color::RGB(150, 255, 200)) |
+                           ftxui::flex_shrink,
+                       ftxui::text("  [") | ftxui::dim, toggle->Render(),
+                       ftxui::text("]") | ftxui::dim}));
 
       if (view->show_result && !view->result.empty()) {
         std::string display_result = view->result;
@@ -259,11 +265,14 @@ ftxui::Component SubagentToolBlock(const std::shared_ptr<ToolCallView> &view,
     } else {
       std::string error_msg =
           firmius::shared::ErrorCleaner::clean(view->result);
+      if (error_msg.size() > 400)
+        error_msg = error_msg.substr(0, 397) + "…";
+
       return ftxui::vbox(
-                 {ftxui::hbox(
-                      {ftxui::text("▸ ") | ftxui::color(ftxui::Color::Red),
-                       ftxui::text(title + " failed") | ftxui::bold |
-                           ftxui::color(ftxui::Color::RedLight)}),
+                 {ftxui::hbox({ftxui::text(" " + shared::ICON_ERROR + " ") |
+                                   ftxui::color(ftxui::Color::Red),
+                               ftxui::text(title + " failed") | ftxui::bold |
+                                   ftxui::color(ftxui::Color::RedLight)}),
                   ftxui::paragraph("  " + error_msg) |
                       ftxui::color(ftxui::Color::RedLight) |
                       ftxui::flex_shrink}) |

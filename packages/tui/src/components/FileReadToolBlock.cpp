@@ -2,6 +2,7 @@
 #include "UIState.hpp"
 #include "components/SyntaxHighlighter.hpp"
 #include "utils/Hashline.hpp"
+#include "utils/Icons.hpp"
 #include <algorithm>
 #include <ftxui/dom/elements.hpp>
 #include <rapidjson/document.h>
@@ -67,10 +68,12 @@ ftxui::Component FileReadToolBlock(const std::shared_ptr<ToolCallView> &view) {
                  std::to_string(end_line) + ")";
     }
 
+    using namespace firmius::shared;
     // ── Preparing / Called ──
     if (view->phase == ToolPhase::Preparing ||
         view->phase == ToolPhase::Called) {
-      return ftxui::hbox({ftxui::text("⟳ ") | ftxui::color(ftxui::Color::Cyan),
+      return ftxui::hbox({ftxui::text(" " + ICON_GEAR + " ") |
+                              ftxui::color(ftxui::Color::Cyan),
                           ftxui::text("Reading ") | ftxui::dim,
                           ftxui::text(loc_str) |
                               ftxui::color(ftxui::Color::RGB(160, 180, 200))});
@@ -84,7 +87,9 @@ ftxui::Component FileReadToolBlock(const std::shared_ptr<ToolCallView> &view) {
       if (err_msg.size() > 60)
         err_msg = err_msg.substr(0, 57) + "…";
 
-      return ftxui::hbox({ftxui::text("▸ ") | ftxui::color(ftxui::Color::Red),
+      using namespace firmius::shared;
+      return ftxui::hbox({ftxui::text(" " + ICON_ERROR + " ") |
+                              ftxui::color(ftxui::Color::Red),
                           ftxui::text("Read failed: " + err_msg) |
                               ftxui::color(ftxui::Color::RedLight)}) |
              ftxui::borderRounded |
@@ -209,9 +214,11 @@ ftxui::Component FileReadToolBlock(const std::shared_ptr<ToolCallView> &view) {
                std::to_string(effective_end) + ")";
     }
 
+    using namespace firmius::shared;
     ftxui::Elements rows;
     rows.push_back(ftxui::hbox(
-        {ftxui::text("▸ ") | ftxui::color(ftxui::Color::RGB(100, 180, 220)),
+        {ftxui::text(" " + ICON_FILE + " ") |
+             ftxui::color(ftxui::Color::RGB(100, 180, 220)),
          ftxui::text(filename + " ") | ftxui::bold |
              ftxui::color(ftxui::Color::RGB(140, 200, 240)),
          ftxui::filler(),

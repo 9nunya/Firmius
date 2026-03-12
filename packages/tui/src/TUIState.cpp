@@ -398,6 +398,7 @@ void TuiState::updateAgentStripModel() {
     item.title = ctx.identity.friendlyName.empty() ? ctx.identity.name
                                                    : ctx.identity.friendlyName;
     item.purpose = ctx.identity.role;
+    item.model_name = ctx.config.providerId + "/" + ctx.config.modelId;
     item.status_text = statusToString(ctx.state.currentStatus);
     item.is_busy = ctx.state.currentStatus == AgentStatus::Streaming ||
                    ctx.state.currentStatus == AgentStatus::ExecutingTool ||
@@ -632,9 +633,11 @@ ftxui::Component TuiState::root() {
         if (pending_modal_clear_) {
           modals_.clear();
           pending_modal_clear_ = false;
-          if (input_component_) {
-            input_component_->TakeFocus();
-          }
+        }
+
+        // AGGRESSIVELY take focus if no modals are open
+        if (modals_.empty() && input_component_) {
+          input_component_->TakeFocus();
         }
 
         ftxui::Element chat_area;
@@ -716,10 +719,19 @@ ftxui::Component TuiState::root() {
 
     // Handle terminal focus gained event (escape sequence \x1b[I)
     if (event.input() == "\x1b[I") {
+      if (input_model_)
+        input_model_->is_focused = true;
       // Terminal regained focus - restore focus to input
       if (input_component_) {
         input_component_->TakeFocus();
       }
+      return true;
+    }
+
+    // Handle terminal focus lost event (escape sequence \x1b[O)
+    if (event.input() == "\x1b[O") {
+      if (input_model_)
+        input_model_->is_focused = false;
       return true;
     }
 

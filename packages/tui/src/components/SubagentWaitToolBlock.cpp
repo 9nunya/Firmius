@@ -1,6 +1,7 @@
 #include "components/SubagentWaitToolBlock.hpp"
+#include "AgentRegistry.hpp"
 #include "components/GlintEffect.hpp"
-#include "utils/ToolSummaries.hpp"
+#include "utils/Icons.hpp"
 #include <ftxui/dom/elements.hpp>
 #include <rapidjson/document.h>
 
@@ -16,6 +17,13 @@ SubagentWaitToolBlock(const std::shared_ptr<ToolCallView> &view) {
     std::string title = "subagent";
     if (!view->subagent_title.empty()) {
       title = view->subagent_title;
+    } else if (!view->subagent_id.empty()) {
+      auto agent =
+          firmius::core::AgentRegistry::instance().getAgent(view->subagent_id);
+      if (agent) {
+        const auto &ident = agent->getContext().identity;
+        title = ident.friendlyName.empty() ? ident.name : ident.friendlyName;
+      }
     } else if (!view->args.empty()) {
       rapidjson::Document doc;
       doc.Parse(view->args.c_str());
@@ -41,16 +49,20 @@ SubagentWaitToolBlock(const std::shared_ptr<ToolCallView> &view) {
       cfg.durationSeconds = 2.0f;
       cfg.easing = GlintEasing::EaseInOut;
 
-      auto text = ftxui::text("▸ Waiting on " + title + "...") | ftxui::bold |
-                  ftxui::color(ftxui::Color::RGB(150, 200, 255));
+      using namespace firmius::shared;
+      auto text =
+          ftxui::text(" " + ICON_WAIT + " Waiting on " + title + "...") |
+          ftxui::bold | ftxui::color(ftxui::Color::RGB(150, 200, 255));
       return GlintEffect(text, cfg)->Render();
     }
 
+    using namespace firmius::shared;
     // Finished state
-    return ftxui::hbox(
-        {ftxui::text("▸ ") | ftxui::color(ftxui::Color::RGB(100, 220, 150)),
-         ftxui::text(title + " ready") |
-             ftxui::color(ftxui::Color::RGB(150, 255, 200)) | ftxui::dim});
+    return ftxui::hbox({ftxui::text(" " + ICON_CHECK + " ") |
+                            ftxui::color(ftxui::Color::RGB(100, 220, 150)),
+                        ftxui::text(title + " ready") |
+                            ftxui::color(ftxui::Color::RGB(150, 255, 200)) |
+                            ftxui::dim});
   });
 }
 

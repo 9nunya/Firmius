@@ -7,6 +7,7 @@
 #include "components/SubagentToolBlock.hpp"
 #include "components/SubagentWaitToolBlock.hpp"
 #include "utils/ErrorCleaner.hpp"
+#include "utils/Icons.hpp"
 #include "utils/ToolSummaries.hpp"
 #include <ftxui/component/component.hpp>
 #include <ftxui/dom/elements.hpp>
@@ -84,7 +85,8 @@ ftxui::Component ToolBlock(const std::shared_ptr<ToolCallView> &view,
       cfg.durationSeconds = 1.2f;
       cfg.easing = GlintEasing::EaseInOut;
 
-      auto loading_text = ftxui::text("⟳ " + summary) | ftxui::bold;
+      using namespace firmius::shared;
+      auto loading_text = ftxui::text(ICON_GEAR + " " + summary) | ftxui::bold;
       auto loading = GlintEffect(loading_text, cfg);
 
       return ftxui::hbox({ftxui::text("▸ ") |
@@ -101,9 +103,10 @@ ftxui::Component ToolBlock(const std::shared_ptr<ToolCallView> &view,
 
       ftxui::Elements rows;
 
+      using namespace firmius::shared;
       // Header row with icon and toggle
       ftxui::Elements header;
-      header.push_back(ftxui::text("▸ ") |
+      header.push_back(ftxui::text(" " + ICON_CHECK + " ") |
                        ftxui::color(ftxui::Color::RGB(100, 220, 150)));
       header.push_back(ftxui::text(summary + " ") | ftxui::bold |
                        ftxui::color(ftxui::Color::RGB(150, 255, 200)));
@@ -134,12 +137,14 @@ ftxui::Component ToolBlock(const std::shared_ptr<ToolCallView> &view,
 
     // Error state
     std::string err = firmius::shared::ErrorCleaner::clean(view->result);
-    if (err.size() > 200)
-      err = err.substr(0, 197) + "…";
+    if (err.size() > 400)
+      err = err.substr(0, 397) + "…";
 
+    using namespace firmius::shared;
     return ftxui::vbox({
-               ftxui::hbox({ftxui::text("▸ ") | ftxui::color(ftxui::Color::Red),
-                            ftxui::text(summary) | ftxui::bold |
+               ftxui::hbox({ftxui::text(" " + ICON_ERROR + " ") |
+                                ftxui::color(ftxui::Color::Red),
+                            ftxui::text(summary + " failed") | ftxui::bold |
                                 ftxui::color(ftxui::Color::RedLight)}),
                ftxui::paragraph("  " + err) |
                    ftxui::color(ftxui::Color::RedLight) | ftxui::flex_shrink,

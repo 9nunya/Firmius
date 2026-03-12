@@ -1,6 +1,7 @@
 #include "components/FileEditToolBlock.hpp"
 #include "UIState.hpp"
 #include "components/LogWindow.hpp"
+#include "utils/Icons.hpp"
 #include <algorithm>
 #include <ftxui/dom/elements.hpp>
 #include <rapidjson/document.h>
@@ -249,8 +250,10 @@ ftxui::Component FileEditToolBlock(const std::shared_ptr<ToolCallView> &view) {
         view->phase == ToolPhase::Called) {
       std::string action = is_overwrite ? "Writing" : "Editing";
 
+      using namespace firmius::shared;
       auto header =
-          ftxui::hbox({ftxui::text("⟳ ") | ftxui::color(ftxui::Color::Yellow),
+          ftxui::hbox({ftxui::text(" " + ICON_GEAR + " ") |
+                           ftxui::color(ftxui::Color::Yellow),
                        ftxui::text(action + " ") | ftxui::bold |
                            ftxui::color(ftxui::Color::RGB(200, 180, 100)),
                        ftxui::text(filename) |
@@ -327,7 +330,9 @@ ftxui::Component FileEditToolBlock(const std::shared_ptr<ToolCallView> &view) {
       if (err_msg.size() > 60)
         err_msg = err_msg.substr(0, 57) + "…";
 
-      return ftxui::hbox({ftxui::text("▸ ") | ftxui::color(ftxui::Color::Red),
+      using namespace firmius::shared;
+      return ftxui::hbox({ftxui::text(" " + ICON_ERROR + " ") |
+                              ftxui::color(ftxui::Color::Red),
                           ftxui::text("Edit failed: " + err_msg) |
                               ftxui::color(ftxui::Color::RedLight)}) |
              ftxui::borderRounded |
@@ -354,9 +359,11 @@ ftxui::Component FileEditToolBlock(const std::shared_ptr<ToolCallView> &view) {
 
     ftxui::Elements rows;
 
+    using namespace firmius::shared;
     // Header with stats
     rows.push_back(ftxui::hbox({
-        ftxui::text("▸ ") | ftxui::color(ftxui::Color::RGB(100, 200, 150)),
+        ftxui::text(" " + ICON_FILE_EDIT + " ") |
+            ftxui::color(ftxui::Color::RGB(100, 200, 150)),
         ftxui::text(filename + " ") | ftxui::bold |
             ftxui::color(ftxui::Color::RGB(150, 230, 180)),
         ftxui::text(" [") | ftxui::dim,

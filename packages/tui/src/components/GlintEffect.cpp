@@ -111,6 +111,8 @@ private:
   }
 };
 
+static auto global_start_time = std::chrono::steady_clock::now();
+
 class GlintComponentBase : public ftxui::ComponentBase {
 public:
   GlintComponentBase(ftxui::Element child, GlintConfig config)
@@ -118,9 +120,10 @@ public:
     start_time_ = std::chrono::steady_clock::now();
   }
 
-  ftxui::Element Render() {
+  ftxui::Element Render() override {
     auto now = std::chrono::steady_clock::now();
-    float elapsed = std::chrono::duration<float>(now - start_time_).count();
+    float elapsed =
+        std::chrono::duration<float>(now - global_start_time).count();
     float cycle_duration = config_.durationSeconds + config_.intervalSeconds;
 
     if (cycle_duration <= 0.0f || config_.durationSeconds <= 0.0f) {

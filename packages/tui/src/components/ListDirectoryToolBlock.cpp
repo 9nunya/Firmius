@@ -1,5 +1,6 @@
 #include "components/ListDirectoryToolBlock.hpp"
 #include "utils/ErrorCleaner.hpp"
+#include "utils/Icons.hpp"
 #include "utils/ToolView.hpp"
 #include <ftxui/component/component.hpp>
 #include <ftxui/dom/elements.hpp>
@@ -45,10 +46,12 @@ ListDirectoryToolBlock(const std::shared_ptr<ToolCallView> &view) {
       }
     }
 
+    using namespace firmius::shared;
     // ── Preparing / Called: one-liner ──
     if (view->phase == ToolPhase::Preparing ||
         view->phase == ToolPhase::Called) {
-      return ftxui::text("[~] Listing " + path_arg + "...") | ftxui::dim;
+      return ftxui::text(ICON_GEAR + " Listing " + path_arg + "...") |
+             ftxui::dim;
     }
 
     // ── Finished ──
@@ -68,9 +71,12 @@ ListDirectoryToolBlock(const std::shared_ptr<ToolCallView> &view) {
         path_display = "…" + path_display.substr(path_display.size() - 48);
       }
 
+      using namespace firmius::shared;
       std::vector<ftxui::Element> rows;
       rows.push_back(ftxui::hbox(
-          {ftxui::text("▸ Listed " + path_display + " (" +
+          {ftxui::text(" " + ICON_FOLDER + " ") |
+               ftxui::color(ftxui::Color::RGB(100, 180, 220)),
+           ftxui::text("Listed " + path_display + " (" +
                        std::to_string(num_items) + " items)") |
                ftxui::bold | ftxui::color(ftxui::Color::RGB(100, 180, 220)) |
                ftxui::flex_shrink,
@@ -81,10 +87,11 @@ ListDirectoryToolBlock(const std::shared_ptr<ToolCallView> &view) {
         if (!res.HasParseError() && res.IsArray()) {
           for (rapidjson::SizeType i = 0; i < res.Size(); i++) {
             const auto &item = res[i];
-            std::string prefix = "  ";
+            using namespace firmius::shared;
+            std::string prefix = ICON_FILE + " ";
             if (item.HasMember("is_directory") &&
                 item["is_directory"].GetBool()) {
-              prefix = "d ";
+              prefix = ICON_FOLDER + " ";
             }
             if (item.HasMember("name") && item["name"].IsString()) {
               std::string name = item["name"].GetString();
@@ -101,13 +108,14 @@ ListDirectoryToolBlock(const std::shared_ptr<ToolCallView> &view) {
       return ftxui::vbox(rows);
     }
 
+    using namespace firmius::shared;
     // Error state
     std::string err_msg = firmius::shared::ErrorCleaner::clean(view->result);
     return ftxui::vbox({
-               ftxui::hbox(
-                   {ftxui::text("[x] List ") | ftxui::color(ftxui::Color::Red),
-                    ftxui::text(path_arg + " failed") | ftxui::bold |
-                        ftxui::color(ftxui::Color::RedLight)}),
+               ftxui::hbox({ftxui::text(" " + ICON_ERROR + " ") |
+                                ftxui::color(ftxui::Color::Red),
+                            ftxui::text(path_arg + " failed") | ftxui::bold |
+                                ftxui::color(ftxui::Color::RedLight)}),
                ftxui::paragraph("  " + err_msg) |
                    ftxui::color(ftxui::Color::RedLight) | ftxui::flex_shrink,
            }) |

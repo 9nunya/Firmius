@@ -15,6 +15,7 @@ target_sources(firmius_shared PRIVATE
     src/utils/ToolSummaries.cpp
     src/utils/TempOAuthServer.cpp
     src/utils/GCPHttpClient.cpp
+    src/utils/ModelUtil.cpp
     src/ConfigLoader.cpp
 )
 
@@ -50,6 +51,7 @@ target_sources(firmius_shared PUBLIC
     include/utils/ToolView.hpp
     include/utils/TempOAuthServer.hpp
     include/utils/GCPHttpClient.hpp
+    include/utils/ModelUtil.hpp
     include/ConfigLoader.hpp
 )
 
