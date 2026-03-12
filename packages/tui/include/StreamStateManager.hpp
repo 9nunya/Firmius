@@ -82,6 +82,7 @@ private:
   std::unordered_map<std::string, std::string> current_process_for_agent_;
   std::unordered_map<std::string, std::string> current_subagent_for_agent_;
   std::unordered_map<std::string, std::string> subagent_to_parent_tool_;
+  std::unordered_map<std::string, std::string> agent_titles_;
   std::unordered_map<std::string, std::string> agent_provider_model_;
 
   std::string retry_status_;

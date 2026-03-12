@@ -68,4 +68,47 @@ std::string HashlineReadEnhancer::enhance(std::string_view content) {
     return result;
 }
 
+std::string HashlineTrimmer::trimLine(std::string_view line) {
+    // Find the '|' separator that marks the end of the hashline prefix
+    size_t separatorPos = line.find('|');
+    if (separatorPos == std::string_view::npos) {
+        // Not a hashline-formatted line, return as-is
+        return std::string(line);
+    }
+    
+    // Verify it looks like a hashline prefix (has # before |)
+    size_t hashPos = line.find('#');
+    if (hashPos == std::string_view::npos || hashPos > separatorPos) {
+        // Doesn't look like a hashline, return as-is
+        return std::string(line);
+    }
+    
+    // Return everything after the '|'
+    return std::string(line.substr(separatorPos + 1));
+}
+
+std::string HashlineTrimmer::trimAll(std::string_view content) {
+    std::string result;
+    result.reserve(content.size()); // Reserve at least the same size
+    
+    size_t start = 0;
+    size_t end = content.find('\n');
+    
+    while (end != std::string_view::npos) {
+        std::string_view line = content.substr(start, end - start);
+        result += trimLine(line);
+        result += '\n';
+        start = end + 1;
+        end = content.find('\n', start);
+    }
+    
+    // Handle last line if it doesn't end with \n
+    if (start < content.size()) {
+        std::string_view line = content.substr(start);
+        result += trimLine(line);
+    }
+    
+    return result;
+}
+
 } // namespace firmius::shared::utils

@@ -3,6 +3,7 @@
 
 #include "IProvider.hpp"
 #include "providers/BackoffConstants.hpp"
+#include "providers/BaseAPIKeyProvider.hpp"
 #include <string>
 #include <map>
 #include <vector>
@@ -32,16 +33,15 @@ struct HeaderCaptureContext {
     bool headersParsed = false;                     ///< Whether headers have been parsed.
 };
 
-class BaseOpenAIProvider : public IProvider {
+class BaseOpenAIProvider : public BaseAPIKeyProvider {
 public:
     BaseOpenAIProvider(std::string id, const std::string& baseUrl, const std::string& apiKey);
-    
-    std::string getId() const override { return providerId; }
-    ProviderType getProviderType() const override;
 
-    void stream(const AgentHistory& history, const ProviderOptions& opts, 
+    // getId() and getProviderType() inherited from BaseAPIKeyProvider
+
+    void stream(const AgentHistory& history, const ProviderOptions& opts,
                 std::function<void(const StreamEvent&)> onEvent) override;
-    
+
     std::vector<ModelInfo> listModels() override;
 
     void processSSELine(const std::string& line, std::function<void(const StreamEvent&)>& onEvent);
@@ -51,10 +51,14 @@ public:
                          std::function<void(const StreamEvent &)> onEvent,
                          std::atomic<bool> *abortSignal = nullptr) override;
 
+    /**
+     * @brief Begin the API key connection wizard.
+     * @return Wizard instance for API key input.
+     */
+    std::unique_ptr<APIKeyWizard> beginConnectionWizard() override;
+
 protected:
-    std::string providerId;
     std::string baseUrl;
-    std::string apiKey;
 
     virtual std::map<std::string, std::string> getHeaders();
     virtual std::string prepareRequestBody(const AgentHistory& history, const ProviderOptions& opts);

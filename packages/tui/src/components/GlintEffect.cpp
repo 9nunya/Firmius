@@ -1,7 +1,7 @@
 #include "components/GlintEffect.hpp"
 
-#include <cmath>
 #include <algorithm>
+#include <cmath>
 
 #include <ftxui/component/animation.hpp>
 #include <ftxui/dom/node.hpp>
@@ -10,25 +10,22 @@
 namespace firmius::tui {
 
 namespace GlintEasing {
-  float Linear(float t) { return t; }
+float Linear(float t) { return t; }
 
-  float EaseInOut(float t) {
-    return t < 0.5f ? 4.0f * t * t * t : 1.0f - std::pow(-2.0f * t + 2.0f, 3.0f) / 2.0f;
-  }
-
-  float EaseIn(float t) {
-    return t * t * t;
-  }
-
-  float EaseOut(float t) {
-    return 1.0f - std::pow(1.0f - t, 3.0f);
-  }
+float EaseInOut(float t) {
+  return t < 0.5f ? 4.0f * t * t * t
+                  : 1.0f - std::pow(-2.0f * t + 2.0f, 3.0f) / 2.0f;
 }
+
+float EaseIn(float t) { return t * t * t; }
+
+float EaseOut(float t) { return 1.0f - std::pow(1.0f - t, 3.0f); }
+} // namespace GlintEasing
 
 namespace {
 
 class NodeDecorator : public ftxui::Node {
- public:
+public:
   NodeDecorator(ftxui::Element child) : ftxui::Node({std::move(child)}) {}
 
   void ComputeRequirement() override {
@@ -41,27 +38,27 @@ class NodeDecorator : public ftxui::Node {
     children_[0]->SetBox(box);
   }
 
-  void Render(ftxui::Screen& screen) override {
-    ftxui::Node::Render(screen);
-  }
+  void Render(ftxui::Screen &screen) override { ftxui::Node::Render(screen); }
 };
 
 class GlintNode : public NodeDecorator {
 public:
-  GlintNode(ftxui::Element child, const GlintConfig& config, float progress)
+  GlintNode(ftxui::Element child, const GlintConfig &config, float progress)
       : NodeDecorator(std::move(child)), config_(config), progress_(progress) {}
 
-  void Render(ftxui::Screen& screen) override {
+  void Render(ftxui::Screen &screen) override {
     NodeDecorator::Render(screen);
 
     int width = box_.x_max - box_.x_min + 1;
-    if (width <= 0 || config_.glintSize <= 0) return;
+    if (width <= 0 || config_.glintSize <= 0)
+      return;
 
-    float start_x = static_cast<float>(box_.x_min - 1);
-    float end_x = static_cast<float>(box_.x_max + config_.glintSize);
+    float glint_size = static_cast<float>(config_.glintSize);
+    float start_x = static_cast<float>(box_.x_min) - glint_size;
+    float end_x = static_cast<float>(box_.x_max) + glint_size;
     float exact_pos = start_x + (end_x - start_x) * progress_;
 
-    float half_span = static_cast<float>(config_.glintSize) / 2.0f;
+    float half_span = glint_size / 2.0f;
     float min_center = exact_pos - half_span;
     float max_center = exact_pos + half_span;
 
@@ -69,7 +66,8 @@ public:
       int min_x = static_cast<int>(std::floor(min_center));
       int max_x = static_cast<int>(std::ceil(max_center));
       for (int x = min_x; x <= max_x; ++x) {
-        if (x < box_.x_min || x > box_.x_max) continue;
+        if (x < box_.x_min || x > box_.x_max)
+          continue;
 
         float distance = std::abs(exact_pos - static_cast<float>(x));
         float color_t = 0.0f;
@@ -77,10 +75,11 @@ public:
           color_t = 1.0f - std::min(distance / half_span, 1.0f);
         }
 
-        if (color_t <= 0.0f) continue;
+        if (color_t <= 0.0f)
+          continue;
         ftxui::Color c = InterpolateGradient(config_.gradientColors, color_t);
 
-        auto& pixel = screen.PixelAt(x, y);
+        auto &pixel = screen.PixelAt(x, y);
         if (config_.target == GlintConfig::Target::Text) {
           pixel.foreground_color = c;
         } else {
@@ -94,14 +93,18 @@ private:
   GlintConfig config_;
   float progress_;
 
-  ftxui::Color InterpolateGradient(const std::vector<ftxui::Color>& colors, float t) {
-    if (colors.empty()) return ftxui::Color::Default;
-    if (colors.size() == 1) return colors[0];
+  ftxui::Color InterpolateGradient(const std::vector<ftxui::Color> &colors,
+                                   float t) {
+    if (colors.empty())
+      return ftxui::Color::Default;
+    if (colors.size() == 1)
+      return colors[0];
 
     t = std::max(0.0f, std::min(1.0f, t));
     float scaled_t = t * (colors.size() - 1);
     int idx = static_cast<int>(scaled_t);
-    if (idx >= static_cast<int>(colors.size()) - 1) return colors.back();
+    if (idx >= static_cast<int>(colors.size()) - 1)
+      return colors.back();
 
     float frac = scaled_t - idx;
     return ftxui::Color::Interpolate(frac, colors[idx], colors[idx + 1]);
@@ -147,7 +150,7 @@ private:
 
 } // namespace
 
-ftxui::Component GlintEffect(ftxui::Element child, const GlintConfig& config) {
+ftxui::Component GlintEffect(ftxui::Element child, const GlintConfig &config) {
   return std::make_shared<GlintComponentBase>(std::move(child), config);
 }
 

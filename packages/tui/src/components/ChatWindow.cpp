@@ -29,7 +29,7 @@ static std::string rolePrefix(firmius::shared::Role role) {
   case Role::User:
     return "> ";
   case Role::Assistant:
-    return "* ";
+    return "";
   case Role::System:
     return "# ";
   case Role::ToolResult:
@@ -68,10 +68,14 @@ public:
   explicit ChatWindowComponent(
       std::function<const firmius::shared::AgentHistory *()> history_getter,
       std::function<std::vector<ftxui::Element>()> live_rows_provider,
-      firmius::tui::ToolViewProvider tool_view_provider)
+      firmius::tui::ToolViewProvider tool_view_provider,
+      firmius::tui::HistoryGetter sub_history_getter,
+      firmius::tui::StreamGetter sub_stream_getter)
       : history_getter_(std::move(history_getter)),
         live_rows_provider_(std::move(live_rows_provider)),
-        tool_view_provider_(std::move(tool_view_provider)) {
+        tool_view_provider_(std::move(tool_view_provider)),
+        sub_history_getter_(std::move(sub_history_getter)),
+        sub_stream_getter_(std::move(sub_stream_getter)) {
 
     history_inner_ = ftxui::Container::Vertical({});
     history_container_ = ftxui::Renderer(history_inner_, [this] {
@@ -278,6 +282,8 @@ private:
   std::function<const firmius::shared::AgentHistory *()> history_getter_;
   std::function<std::vector<ftxui::Element>()> live_rows_provider_;
   firmius::tui::ToolViewProvider tool_view_provider_;
+  firmius::tui::HistoryGetter sub_history_getter_;
+  firmius::tui::StreamGetter sub_stream_getter_;
   size_t last_turns_size_ = static_cast<size_t>(-1);
   std::vector<ftxui::Component> rows_;
   ftxui::Component history_inner_;
@@ -294,8 +300,11 @@ private:
 ftxui::Component firmius::tui::ChatWindow(
     std::function<const shared::AgentHistory *()> history_getter,
     std::function<std::vector<ftxui::Element>()> live_rows_provider,
-    ToolViewProvider tool_view_provider) {
-  return ftxui::Make<ChatWindowComponent>(std::move(history_getter),
-                                          std::move(live_rows_provider),
-                                          std::move(tool_view_provider));
+    ToolViewProvider tool_view_provider,
+    firmius::tui::HistoryGetter sub_history_getter,
+    firmius::tui::StreamGetter sub_stream_getter) {
+  return ftxui::Make<ChatWindowComponent>(
+      std::move(history_getter), std::move(live_rows_provider),
+      std::move(tool_view_provider), std::move(sub_history_getter),
+      std::move(sub_stream_getter));
 }

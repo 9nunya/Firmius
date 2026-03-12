@@ -175,6 +175,7 @@ target_link_libraries(test_syntax_highlighter PRIVATE
     ftxui::dom
     ftxui::screen
     ftxui::component
+    tree_sitter_all
 )
 target_include_directories(test_syntax_highlighter PRIVATE
     ../../packages/tui/include

@@ -16,8 +16,16 @@ size_t writeCallback(char* ptr, size_t size, size_t nmemb, void* userdata) {
 
 ChutesProvider::ChutesProvider(const std::string& apiKey)
     : BaseOpenAIProvider("chutes", "https://llm.chutes.ai/v1", apiKey) {
-    if (this->apiKey.empty()) {
-        this->apiKey = shared::EnvLoader::get("CHUTES_API_KEY");
+    // If no API key was provided and no accounts exist, try environment variable
+    if (getAccountCount() == 0) {
+        std::string key = shared::EnvLoader::get("CHUTES_API_KEY");
+        if (!key.empty()) {
+            APIKeyAccount acc;
+            acc.apiKey = key;
+            acc.keyPrefix = extractKeyPrefix(key);
+            acc.identifier = generateIdentifier();
+            addAccount(acc);
+        }
     }
 }
 
@@ -36,8 +44,9 @@ std::vector<firmius::shared::ModelInfo> ChutesProvider::listModels() {
     struct curl_slist* headers = nullptr;
     headers = curl_slist_append(headers, "Content-Type: application/json");
     // Auth is optional for model listing but include if available
-    if (!apiKey.empty()) {
-        headers = curl_slist_append(headers, ("Authorization: Bearer " + apiKey).c_str());
+    auto account = getAvailableAccount();
+    if (account && !(*account)->apiKey.empty()) {
+        headers = curl_slist_append(headers, ("Authorization: Bearer " + (*account)->apiKey).c_str());
     }
 
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());

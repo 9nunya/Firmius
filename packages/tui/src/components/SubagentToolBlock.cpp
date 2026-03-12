@@ -1,12 +1,17 @@
 #include "components/SubagentToolBlock.hpp"
-#include "components/LogWindow.hpp"
+#include "StreamStateManager.hpp"
 #include "components/GlintEffect.hpp"
+#include "utils/ErrorCleaner.hpp"
+#include "utils/ToolSummaries.hpp"
+#include "utils/ToolView.hpp"
 #include <ftxui/dom/elements.hpp>
 #include <rapidjson/document.h>
 
 namespace firmius::tui {
 
-ftxui::Component SubagentToolBlock(const std::shared_ptr<ToolCallView> &view) {
+ftxui::Component SubagentToolBlock(const std::shared_ptr<ToolCallView> &view,
+                                   HistoryGetter sub_history_getter,
+                                   StreamGetter sub_stream_getter) {
   auto opt = ftxui::ButtonOption::Simple();
   opt.transform = [](const ftxui::EntryState &s) {
     auto e = ftxui::text(s.label) | ftxui::dim;
@@ -28,15 +33,14 @@ ftxui::Component SubagentToolBlock(const std::shared_ptr<ToolCallView> &view) {
   auto toggle = ftxui::Button(opt);
   auto container = ftxui::Container::Horizontal({toggle});
 
-  return ftxui::Renderer(container, [view, toggle] {
+  return ftxui::Renderer(container, [view, toggle, sub_history_getter,
+                                     sub_stream_getter] {
     if (!view)
       return ftxui::text("Subagent call") | ftxui::dim;
 
     // Extract args
     std::string title = view->subagent_title;
     std::string task;
-    std::string persona;
-    bool is_async = false;
     if (!view->args.empty()) {
       rapidjson::Document doc;
       doc.Parse(view->args.c_str());
@@ -45,129 +49,189 @@ ftxui::Component SubagentToolBlock(const std::shared_ptr<ToolCallView> &view) {
           title = doc["title"].GetString();
         if (doc.HasMember("task") && doc["task"].IsString())
           task = doc["task"].GetString();
-        if (doc.HasMember("persona") && doc["persona"].IsString())
-          persona = doc["persona"].GetString();
         if (title.empty() && doc.HasMember("name") && doc["name"].IsString())
           title = doc["name"].GetString();
-        if (doc.HasMember("async") && doc["async"].IsBool())
-          is_async = doc["async"].GetBool();
       }
     }
-
     if (title.empty())
       title = "subagent";
 
-    // Build footer label
-    std::string footer_label = title;
-    if (!persona.empty()) footer_label += " [" + persona;
-    if (is_async) footer_label += (persona.empty() ? "async]" : ", async]");
-    else if (!persona.empty()) footer_label += "]";
+    // ── Generate Synthesized Log ──
+    std::vector<shared::SubagentToolLogEntry> synthesized_log;
+    if (sub_history_getter && !view->subagent_id.empty()) {
+      const auto *hist = sub_history_getter(view->subagent_id);
+      if (hist) {
+        for (const auto &turn : hist->turns) {
+          for (const auto &msg : turn.messages) {
+            for (const auto &part : msg.content) {
+              if (auto *tc = std::get_if<shared::ToolCallContent>(&part)) {
+                shared::SubagentToolLogEntry entry;
+                entry.summary = shared::SummarizeToolCall(
+                    tc->name, tc->args, shared::ToolPhase::Finished);
+                entry.phase = shared::ToolPhase::Finished;
+                entry.toolCallId = tc->id;
+                synthesized_log.push_back(std::move(entry));
+              } else if (auto *th =
+                             std::get_if<shared::ThinkingContent>(&part)) {
+                if (!th->thinking.empty()) {
+                  shared::SubagentToolLogEntry entry;
+                  entry.summary = "Thought";
+                  entry.phase = shared::ToolPhase::Finished;
+                  synthesized_log.push_back(std::move(entry));
+                }
+              }
+            }
+          }
+        }
+      }
+    }
 
-    // ── Preparing state with glint effect ──
+    if (sub_stream_getter && !view->subagent_id.empty()) {
+      const auto *s = sub_stream_getter(view->subagent_id);
+      if (s) {
+        if (s->is_thinking) {
+          shared::SubagentToolLogEntry entry;
+          entry.summary = "Thinking...";
+          entry.phase = shared::ToolPhase::Preparing;
+          synthesized_log.push_back(std::move(entry));
+        } else if (!s->text.empty()) {
+          shared::SubagentToolLogEntry entry;
+          std::string preview = s->text;
+          if (preview.size() > 40)
+            preview = preview.substr(0, 37) + "...";
+          entry.summary = "Responding: " + preview;
+          entry.phase = shared::ToolPhase::Preparing;
+          synthesized_log.push_back(std::move(entry));
+        }
+      }
+    }
+
+    if (synthesized_log.empty() && !view->subagent_tool_log.empty()) {
+      synthesized_log = view->subagent_tool_log;
+    }
+
+    auto renderLogSection = [&](size_t limit) {
+      if (synthesized_log.empty()) {
+        if (view->phase == ToolPhase::Finished)
+          return ftxui::text("  (no activity log)") | ftxui::dim;
+        return ftxui::text("  running…") | ftxui::dim |
+               ftxui::color(ftxui::Color::RGB(150, 150, 180));
+      }
+
+      std::vector<ftxui::Element> log_lines;
+      size_t start_idx =
+          view->show_result
+              ? 0
+              : (synthesized_log.size() > limit ? synthesized_log.size() - limit
+                                                : 0);
+
+      for (size_t i = start_idx; i < synthesized_log.size(); ++i) {
+        const auto &entry = synthesized_log[i];
+        if (entry.phase == shared::ToolPhase::Preparing) {
+          GlintConfig cfg_log;
+          cfg_log.target = GlintConfig::Target::Text;
+          cfg_log.gradientColors = {
+              ftxui::Color::RGB(150, 50, 255),  // Deep purple
+              ftxui::Color::RGB(220, 100, 255), // Magenta
+              ftxui::Color::White, ftxui::Color::RGB(220, 100, 255),
+              ftxui::Color::RGB(150, 50, 255)};
+          cfg_log.glintSize = 10;
+          cfg_log.intervalSeconds = 1.0f;
+          cfg_log.durationSeconds = 1.2f;
+          cfg_log.easing = GlintEasing::EaseInOut;
+
+          auto preparing_text = ftxui::text("  " + entry.summary) | ftxui::bold;
+          log_lines.push_back(GlintEffect(preparing_text, cfg_log)->Render() |
+                              ftxui::flex_shrink);
+        } else {
+          log_lines.push_back(ftxui::text("  " + entry.summary) |
+                              ftxui::color(ftxui::Color::RGB(160, 140, 180)) |
+                              ftxui::flex_shrink);
+        }
+      }
+      return ftxui::vbox(log_lines);
+    };
+
+    // ── Preparing ──
     if (view->phase == ToolPhase::Preparing) {
       GlintConfig cfg;
       cfg.target = GlintConfig::Target::Text;
-      cfg.gradientColors = {ftxui::Color::RGB(180, 120, 255), ftxui::Color::White};
-      cfg.glintSize = 12;
-      cfg.intervalSeconds = 2;
-      cfg.durationSeconds = 1.5f;
+      cfg.gradientColors = {ftxui::Color::RGB(150, 50, 255),  // Deep purple
+                            ftxui::Color::RGB(220, 100, 255), // Vibrant magenta
+                            ftxui::Color::White,
+                            ftxui::Color::RGB(220, 100, 255),
+                            ftxui::Color::RGB(150, 50, 255)};
+      cfg.glintSize = 14;
+      cfg.intervalSeconds = 1.5f;
+      cfg.durationSeconds = 1.2f;
       cfg.easing = GlintEasing::EaseInOut;
-      
-      auto spawning_text = ftxui::text("⟳ Spawning \"" + title + "\"...") | ftxui::bold;
-      auto spawning = GlintEffect(spawning_text, cfg);
-      
-      return ftxui::hbox({
-        ftxui::text("▸ ") | ftxui::color(ftxui::Color::RGB(180, 120, 255)),
-        spawning->Render()
-      });
+      auto spawning_text =
+          ftxui::text("⟳ Spawning \"" + title + "\"...") | ftxui::bold;
+      return ftxui::hbox(
+          {ftxui::text("▸ ") | ftxui::color(ftxui::Color::RGB(180, 120, 255)),
+           GlintEffect(spawning_text, cfg)->Render() | ftxui::flex_shrink});
     }
 
-    bool status_spawned = false;
-    if (view->phase == ToolPhase::Finished && view->success && !view->result.empty()) {
-      rapidjson::Document res;
-      res.Parse(view->result.c_str());
-      if (!res.HasParseError() && res.IsObject() && res.HasMember("status") && res["status"].IsString()) {
-        std::string status = res["status"].GetString();
-        if (status == "spawned" || status == "re-tasked") {
-          status_spawned = true;
-        }
-      }
-    }
+    bool status_spawned =
+        (view->phase == ToolPhase::Finished && view->success &&
+         (view->result.find("\"status\":\"spawned\"") != std::string::npos ||
+          view->result.find("\"status\":\"re-tasked\"") != std::string::npos));
 
-    // ── Running state: show title + task + rolling tool log (expandable) ──
-    if (view->phase == ToolPhase::Called || view->subagent_running || status_spawned) {
+    // ── Running / Spawned ──
+    if (view->phase == ToolPhase::Called || view->subagent_running ||
+        status_spawned) {
       std::vector<ftxui::Element> rows;
-
-      // Header with glint effect
       GlintConfig cfg;
       cfg.target = GlintConfig::Target::Text;
-      cfg.gradientColors = {ftxui::Color::RGB(180, 120, 255), ftxui::Color::RGB(220, 180, 255)};
-      cfg.glintSize = 10;
-      cfg.intervalSeconds = 3;
-      cfg.durationSeconds = 2.0f;
+      cfg.gradientColors = {ftxui::Color::RGB(150, 50, 255),  // Deep purple
+                            ftxui::Color::RGB(220, 100, 255), // Radiant magenta
+                            ftxui::Color::White,
+                            ftxui::Color::RGB(220, 100, 255),
+                            ftxui::Color::RGB(150, 50, 255)};
+      cfg.glintSize = 14;
+      cfg.intervalSeconds = 2.0f;
+      cfg.durationSeconds = 1.5f;
       cfg.easing = GlintEasing::EaseInOut;
-      
-      auto header_text = ftxui::text("▸ " + title) | ftxui::bold | ftxui::color(ftxui::Color::RGB(200, 150, 255));
-      auto header_glint = GlintEffect(header_text, cfg);
-      
-      rows.push_back(header_glint->Render());
-      
-      // Task description
+
+      rows.push_back(
+          GlintEffect(ftxui::text("▸ " + title) | ftxui::bold |
+                          ftxui::color(ftxui::Color::RGB(200, 150, 255)),
+                      cfg)
+              ->Render() |
+          ftxui::flex_shrink);
+
       if (!task.empty()) {
-        std::string task_display = task;
-        if (task_display.size() > 80) {
-          task_display = task_display.substr(0, 77) + "…";
-        }
-        rows.push_back(ftxui::text("  " + task_display) | ftxui::dim | ftxui::color(ftxui::Color::RGB(180, 160, 200)));
+        rows.push_back(ftxui::paragraph("  " + task) | ftxui::dim |
+                       ftxui::color(ftxui::Color::RGB(180, 160, 200)) |
+                       ftxui::flex_shrink |
+                       ftxui::size(ftxui::WIDTH, ftxui::LESS_THAN,
+                                   ftxui::Terminal::Size().dimx - 10));
       }
-      
       rows.push_back(ftxui::separatorLight());
 
-      // Tool log - expandable up to 10 lines
-      std::vector<ftxui::Element> log_lines;
-      size_t log_limit = view->show_result ? 10 : 3;
-      
-      if (!view->subagent_tool_log.empty()) {
-        size_t start_idx = view->show_result ? 0 : 
-                          (view->subagent_tool_log.size() > log_limit ? 
-                           view->subagent_tool_log.size() - log_limit : 0);
-        
-        for (size_t i = start_idx; i < view->subagent_tool_log.size(); ++i) {
-          log_lines.push_back(ftxui::text("  " + view->subagent_tool_log[i]) | 
-                             ftxui::color(ftxui::Color::RGB(160, 140, 180)));
-        }
-      } else {
-        log_lines.push_back(ftxui::text("  running…") | ftxui::dim | ftxui::color(ftxui::Color::RGB(150, 150, 180)));
-      }
-      
-      // Toggle button for expand/collapse
       view->toggle_label = view->show_result ? "collapse" : "expand";
-      auto toggle_row = ftxui::hbox({
-        ftxui::text("  [") | ftxui::dim,
-        toggle->Render(),
-        ftxui::text("]") | ftxui::dim
-      });
-      log_lines.push_back(toggle_row);
-      
-      rows.push_back(ftxui::vbox(log_lines) | ftxui::frame);
-      
-      return ftxui::vbox(rows) | ftxui::borderRounded | ftxui::color(ftxui::Color::RGB(180, 150, 200));
+      rows.push_back(
+          ftxui::vbox(
+              {renderLogSection(view->show_result ? 10 : 3),
+               ftxui::hbox({ftxui::text("  [") | ftxui::dim, toggle->Render(),
+                            ftxui::text("]") | ftxui::dim})}) |
+          ftxui::frame);
+
+      return ftxui::vbox(rows) | ftxui::borderRounded |
+             ftxui::color(ftxui::Color::RGB(180, 150, 200));
     }
 
-    // ── Finished state ──
+    // ── Finished ──
     std::vector<ftxui::Element> rows;
-
     if (view->success) {
       view->toggle_label = view->show_result ? "hide" : "show";
-
-      // Success header
-      rows.push_back(ftxui::hbox({
-        ftxui::text("▸ ") | ftxui::color(ftxui::Color::RGB(100, 220, 150)),
-        ftxui::text(title + " completed") | ftxui::bold | ftxui::color(ftxui::Color::RGB(150, 255, 200)),
-        ftxui::text("  [") | ftxui::dim,
-        toggle->Render(),
-        ftxui::text("]") | ftxui::dim
-      }));
+      rows.push_back(ftxui::hbox(
+          {ftxui::text("▸ ") | ftxui::color(ftxui::Color::RGB(100, 220, 150)),
+           ftxui::text(title + " completed") | ftxui::bold |
+               ftxui::color(ftxui::Color::RGB(150, 255, 200)) |
+               ftxui::flex_shrink,
+           ftxui::text("  [") | ftxui::dim, toggle->Render(),
+           ftxui::text("]") | ftxui::dim}));
 
       if (view->show_result && !view->result.empty()) {
         std::string display_result = view->result;
@@ -177,49 +241,35 @@ ftxui::Component SubagentToolBlock(const std::shared_ptr<ToolCallView> &view) {
             res["result"].IsString()) {
           display_result = res["result"].GetString();
         }
-
-        if (display_result.size() > 300) {
+        if (display_result.size() > 300)
           display_result = display_result.substr(0, 297) + "…";
-        }
-
-        std::vector<ftxui::Element> result_lines;
-        for (const auto& line : display_result) {
-          (void)line; // suppress warning
-        }
-        result_lines.push_back(ftxui::text(display_result) | 
-                              ftxui::color(ftxui::Color::RGB(180, 200, 190)));
-
         rows.push_back(ftxui::separatorLight());
-        rows.push_back(ftxui::vbox(result_lines) | ftxui::frame | ftxui::size(ftxui::HEIGHT, ftxui::LESS_THAN, 10));
+        rows.push_back(ftxui::paragraph(display_result) |
+                       ftxui::color(ftxui::Color::RGB(180, 200, 190)) |
+                       ftxui::frame |
+                       ftxui::size(ftxui::HEIGHT, ftxui::LESS_THAN, 10));
       }
 
-      // Tool log from subagent
-      if (!view->subagent_tool_log.empty()) {
-        rows.push_back(ftxui::separatorLight());
-        std::vector<ftxui::Element> log_lines;
-        size_t start = view->show_result ? 0 : 
-                      (view->subagent_tool_log.size() > 5 ? 
-                       view->subagent_tool_log.size() - 5 : 0);
-        for (size_t i = start; i < view->subagent_tool_log.size(); ++i) {
-          log_lines.push_back(ftxui::text("  " + view->subagent_tool_log[i]) | 
-                             ftxui::color(ftxui::Color::RGB(160, 140, 180)));
-        }
-        rows.push_back(ftxui::vbox(log_lines) | ftxui::frame);
-      }
-      
-      return ftxui::vbox(rows) | ftxui::borderRounded | ftxui::color(ftxui::Color::RGB(150, 200, 180));
+      rows.push_back(ftxui::separatorLight());
+      rows.push_back(renderLogSection(view->show_result ? 10 : 5) |
+                     ftxui::frame);
+
+      return ftxui::vbox(rows) | ftxui::borderRounded |
+             ftxui::color(ftxui::Color::RGB(150, 200, 180));
     } else {
-      // Error state
-      std::string error_msg = view->result;
-      if (error_msg.empty())
-        error_msg = "unknown error";
-      if (error_msg.size() > 80)
-        error_msg = error_msg.substr(0, 77) + "…";
-
-      return ftxui::hbox({
-        ftxui::text("▸ ") | ftxui::color(ftxui::Color::Red),
-        ftxui::text(title + " failed: " + error_msg) | ftxui::color(ftxui::Color::RedLight)
-      }) | ftxui::borderRounded | ftxui::color(ftxui::Color::RGB(200, 100, 100));
+      std::string error_msg =
+          firmius::shared::ErrorCleaner::clean(view->result);
+      return ftxui::vbox(
+                 {ftxui::hbox(
+                      {ftxui::text("▸ ") | ftxui::color(ftxui::Color::Red),
+                       ftxui::text(title + " failed") | ftxui::bold |
+                           ftxui::color(ftxui::Color::RedLight)}),
+                  ftxui::paragraph("  " + error_msg) |
+                      ftxui::color(ftxui::Color::RedLight) |
+                      ftxui::flex_shrink}) |
+             ftxui::borderRounded |
+             ftxui::color(ftxui::Color::RGB(200, 100, 100)) |
+             ftxui::flex_shrink;
     }
   });
 }

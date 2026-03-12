@@ -437,6 +437,8 @@ void AntigravityProvider::processSSELine(
           ToolCallChunk chunk;
           if (fc.HasMember("name"))
             chunk.nameDelta = fc["name"].GetString();
+          if (fc.HasMember("id"))
+            chunk.id = fc["id"].GetString();
           if (fc.HasMember("args")) {
             rapidjson::StringBuffer sb;
             rapidjson::Writer<rapidjson::StringBuffer> writer(sb);
@@ -515,12 +517,12 @@ void AntigravityProvider::stream(
     for (int retryAttempt = 0; retryAttempt < 4; ++retryAttempt) {
       if (retryAttempt > 0) {
         // Use unified backoff sequence from shared constants
-        int backoffSeconds = firmius::shared::BackoffConstants::getBackoffSeconds(retryAttempt - 1);
-        onEvent(StreamRetrying{retryAttempt, 4, 0,
-                               backoffSeconds * 1000,
+        int backoffSeconds =
+            firmius::shared::BackoffConstants::getBackoffSeconds(retryAttempt -
+                                                                 1);
+        onEvent(StreamRetrying{retryAttempt, 4, 0, backoffSeconds * 1000,
                                "Connection error", acc.getIdentifier()});
-        std::this_thread::sleep_for(
-            std::chrono::seconds(backoffSeconds));
+        std::this_thread::sleep_for(std::chrono::seconds(backoffSeconds));
       }
 
       std::string effectiveModel =
@@ -541,6 +543,18 @@ void AntigravityProvider::stream(
 
       GCPHttpClient client;
       client.setBearerToken(acc.accessToken);
+      // Set required Antigravity headers
+      client.addHeader(
+          "User-Agent",
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+          "(KHTML, like Gecko) Antigravity/1.18.3 Chrome/138.0.7204.235 "
+          "Electron/37.3.1 Safari/537.36");
+      client.addHeader("X-Goog-Api-Client",
+                       "google-cloud-sdk vscode_cloudshelleditor/0.1");
+      client.addHeader(
+          "Client-Metadata",
+          R"({"ideType":"ANTIGRAVITY","platform":"LINUX","pluginType":"GEMINI"})");
+      client.setContentType("application/json");
 
       std::uint64_t startMs =
           std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -625,7 +639,8 @@ void AntigravityProvider::stream(
           lastError = "Rate limited (HTTP " + std::to_string(resp.code) + ")";
         }
         // Use unified backoff sequence from shared constants
-        int backoff = firmius::shared::BackoffConstants::getBackoffSeconds(accountRetries);
+        int backoff = firmius::shared::BackoffConstants::getBackoffSeconds(
+            accountRetries);
         markAccountRateLimited(acc, backoff);
         break;
       }

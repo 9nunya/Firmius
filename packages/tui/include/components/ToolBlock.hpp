@@ -8,12 +8,21 @@
 
 #include "utils/ToolView.hpp"
 
+#include "StreamStateManager.hpp"
+
 namespace firmius::tui {
 
 using firmius::shared::ToolCallView;
 using firmius::shared::ToolPhase;
 
-ftxui::Component ToolBlock(const std::shared_ptr<ToolCallView> &view);
+using HistoryGetter =
+    std::function<const firmius::shared::AgentHistory *(const std::string &)>;
+using StreamGetter =
+    std::function<const firmius::tui::StreamState *(const std::string &)>;
+
+ftxui::Component ToolBlock(const std::shared_ptr<ToolCallView> &view,
+                           HistoryGetter sub_history_getter = nullptr,
+                           StreamGetter sub_stream_getter = nullptr);
 
 } // namespace firmius::tui
 

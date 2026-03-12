@@ -1,449 +1,586 @@
 #include "components/SyntaxHighlighter.hpp"
-#include "NotificationManager.hpp"
 #include <algorithm>
-#include <regex>
-#include <fstream>
-#include <thread>
+#include <cstring>
 #include <sstream>
 
 namespace firmius::tui {
 
-SyntaxHighlighter& SyntaxHighlighter::instance() {
+SyntaxHighlighter &SyntaxHighlighter::instance() {
   static SyntaxHighlighter inst;
   return inst;
 }
 
-void SyntaxHighlighter::initialize(const std::filesystem::path& cacheDir) {
-  if (initialized_) return;
-  
-  cacheDir_ = cacheDir;
-  std::filesystem::create_directories(cacheDir_);
-  
-  // Register built-in language definitions
+void SyntaxHighlighter::initialize() {
+  if (initialized_)
+    return;
+
+  // Register all compiled-in grammars with their TSLanguage constructors
+  grammars_["c"] = GrammarInfo{
+      .name = "C",
+      .fileExtensions = {".c", ".h"},
+      .languageFn = tree_sitter_c,
+  };
+
   grammars_["cpp"] = GrammarInfo{
-    .name = "C++",
-    .version = "1.0",
-    .fileExtensions = {".cpp", ".hpp", ".cc", ".cxx", ".h", ".hxx"},
-    .downloadUrl = "",
-    .downloaded = true // Built-in pattern highlighter
+      .name = "C++",
+      .fileExtensions = {".cpp", ".hpp", ".cc", ".cxx", ".hxx"},
+      .languageFn = tree_sitter_cpp,
   };
-  
+
+  grammars_["java"] = GrammarInfo{
+      .name = "Java",
+      .fileExtensions = {".java"},
+      .languageFn = tree_sitter_java,
+  };
+
   grammars_["rust"] = GrammarInfo{
-    .name = "Rust",
-    .version = "1.0",
-    .fileExtensions = {".rs"},
-    .downloadUrl = "",
-    .downloaded = true
+      .name = "Rust",
+      .fileExtensions = {".rs"},
+      .languageFn = tree_sitter_rust,
   };
-  
+
   grammars_["python"] = GrammarInfo{
-    .name = "Python",
-    .version = "1.0",
-    .fileExtensions = {".py", ".pyw"},
-    .downloadUrl = "",
-    .downloaded = true
+      .name = "Python",
+      .fileExtensions = {".py", ".pyw"},
+      .languageFn = tree_sitter_python,
   };
-  
+
   grammars_["javascript"] = GrammarInfo{
-    .name = "JavaScript",
-    .version = "1.0",
-    .fileExtensions = {".js", ".jsx", ".mjs"},
-    .downloadUrl = "",
-    .downloaded = true
+      .name = "JavaScript",
+      .fileExtensions = {".js", ".jsx", ".mjs"},
+      .languageFn = tree_sitter_javascript,
   };
-  
+
   grammars_["typescript"] = GrammarInfo{
-    .name = "TypeScript",
-    .version = "1.0",
-    .fileExtensions = {".ts", ".tsx"},
-    .downloadUrl = "",
-    .downloaded = true
+      .name = "TypeScript",
+      .fileExtensions = {".ts", ".tsx"},
+      .languageFn = tree_sitter_typescript,
   };
-  
+
   grammars_["json"] = GrammarInfo{
-    .name = "JSON",
-    .version = "1.0",
-    .fileExtensions = {".json"},
-    .downloadUrl = "",
-    .downloaded = true
+      .name = "JSON",
+      .fileExtensions = {".json"},
+      .languageFn = tree_sitter_json,
   };
-  
+
   grammars_["yaml"] = GrammarInfo{
-    .name = "YAML",
-    .version = "1.0",
-    .fileExtensions = {".yaml", ".yml"},
-    .downloadUrl = "",
-    .downloaded = true
+      .name = "YAML",
+      .fileExtensions = {".yaml", ".yml"},
+      .languageFn = tree_sitter_yaml,
   };
-  
-  grammars_["markdown"] = GrammarInfo{
-    .name = "Markdown",
-    .version = "1.0",
-    .fileExtensions = {".md", ".markdown"},
-    .downloadUrl = "",
-    .downloaded = true
-  };
-  
-  grammars_["shell"] = GrammarInfo{
-    .name = "Shell",
-    .version = "1.0",
-    .fileExtensions = {".sh", ".bash", ".zsh"},
-    .downloadUrl = "",
-    .downloaded = true
-  };
-  
+
   grammars_["toml"] = GrammarInfo{
-    .name = "TOML",
-    .version = "1.0",
-    .fileExtensions = {".toml"},
-    .downloadUrl = "",
-    .downloaded = true
+      .name = "TOML",
+      .fileExtensions = {".toml"},
+      .languageFn = tree_sitter_toml,
   };
-  
-  // Check for downloaded grammars
-  for (auto& [lang, info] : grammars_) {
-    std::filesystem::path grammarFile = cacheDir_ / (lang + ".json");
-    if (std::filesystem::exists(grammarFile)) {
-      info.downloaded = true;
-    }
-  }
-  
+
+  grammars_["cmake"] = GrammarInfo{
+      .name = "CMake",
+      .fileExtensions = {".cmake", "CMakeLists.txt"},
+      .languageFn = tree_sitter_cmake,
+  };
+
+  grammars_["lua"] = GrammarInfo{
+      .name = "Lua",
+      .fileExtensions = {".lua"},
+      .languageFn = tree_sitter_lua,
+  };
+
+  grammars_["luau"] = GrammarInfo{
+      .name = "Luau",
+      .fileExtensions = {".luau"},
+      .languageFn = tree_sitter_luau,
+  };
+
+  grammars_["markdown"] = GrammarInfo{
+      .name = "Markdown",
+      .fileExtensions = {".md", ".markdown"},
+      .languageFn = tree_sitter_markdown,
+  };
+
   initialized_ = true;
 }
 
-void SyntaxHighlighter::downloadGrammar(const std::string& language) {
-  auto it = grammars_.find(language);
-  if (it == grammars_.end() || it->second.downloaded) return;
-  
-  it->second.downloading = true;
-  
-  // Download in background thread
-  std::thread([this, language]() {
-    auto& info = grammars_[language];
-    
-    // Simulate download (in real implementation, would fetch from GitHub)
-    // For now, just mark as downloaded since we use pattern-based highlighting
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
-    
-    info.downloaded = true;
-    info.downloading = false;
-    
-    // Save marker file
-    std::ofstream marker(cacheDir_ / (language + ".json"));
-    if (marker) {
-      marker << "{\"language\": \"" << language << "\", \"version\": \"1.0\"}";
-    }
-    
-    // Show notification
-    NotificationManager::instance().notifySuccess(
-      "Grammar Downloaded",
-      language + " syntax highlighting is now available",
-      std::chrono::milliseconds(3000)
-    );
-  }).detach();
-  
-  NotificationManager::instance().notifyInfo(
-    "Downloading Grammar",
-    "Fetching " + language + " syntax definitions...",
-    std::chrono::milliseconds(2000)
-  );
+bool SyntaxHighlighter::hasGrammar(const std::string &language) const {
+  if (!initialized_) {
+    const_cast<SyntaxHighlighter *>(this)->initialize();
+  }
+  return grammars_.find(language) != grammars_.end();
 }
 
-bool SyntaxHighlighter::hasGrammar(const std::string& language) const {
-  auto it = grammars_.find(language);
-  return it != grammars_.end() && it->second.downloaded;
-}
-
-const GrammarInfo* SyntaxHighlighter::getGrammarInfo(const std::string& language) const {
+const GrammarInfo *
+SyntaxHighlighter::getGrammarInfo(const std::string &language) const {
   auto it = grammars_.find(language);
   return it != grammars_.end() ? &it->second : nullptr;
 }
 
 std::vector<std::string> SyntaxHighlighter::getAvailableLanguages() const {
   std::vector<std::string> langs;
-  for (const auto& [lang, info] : grammars_) {
-    if (info.downloaded) {
-      langs.push_back(lang);
-    }
+  for (const auto &[lang, _] : grammars_) {
+    langs.push_back(lang);
   }
+  std::sort(langs.begin(), langs.end());
   return langs;
 }
 
-std::string SyntaxHighlighter::detectLanguage(const std::string& filename) const {
+std::string
+SyntaxHighlighter::detectLanguage(const std::string &filename) const {
+  if (!initialized_) {
+    const_cast<SyntaxHighlighter *>(this)->initialize();
+  }
+
   std::string ext;
   auto pos = filename.find_last_of('.');
   if (pos != std::string::npos) {
     ext = filename.substr(pos);
   }
-  
-  for (const auto& [lang, info] : grammars_) {
-    for (const auto& knownExt : info.fileExtensions) {
-      if (ext == knownExt) {
+
+  for (const auto &[lang, info] : grammars_) {
+    for (const auto &knownExt : info.fileExtensions) {
+      if (filename == knownExt || (!ext.empty() && ext == knownExt)) {
         return lang;
       }
     }
   }
-  
-  // Check for shebang
-  if (filename.empty() || filename[0] == '#') {
-    if (filename.find("python") != std::string::npos) return "python";
-    if (filename.find("node") != std::string::npos) return "javascript";
-    if (filename.find("bash") != std::string::npos || 
-        filename.find("sh") != std::string::npos) return "shell";
-  }
-  
+
   return "";
 }
 
-std::vector<HighlightedToken> SyntaxHighlighter::highlight(
-    const std::string& code, const std::string& language) const {
-  if (!initialized_) {
-    const_cast<SyntaxHighlighter*>(this)->initialize();
-  }
-  
-  auto it = grammars_.find(language);
-  if (it == grammars_.end() || !it->second.downloaded) {
-    // Fallback to plain text
-    return {HighlightedToken{code, TokenType::Plain}};
-  }
-  
-  return highlightWithPatterns(code, language);
+std::string SyntaxHighlighter::highlight(const std::string &code,
+                                         const std::string &language) const {
+  // Plain text passthrough — use highlightRender() for actual highlighting
+  (void)language;
+  return code;
 }
 
-ftxui::Element SyntaxHighlighter::highlightRender(
-    const std::string& code, const std::string& language,
-    bool showLineNumbers) const {
-  
-  auto tokens = highlight(code, language);
-  auto rendered = RenderHighlightedTokens(tokens, colorScheme_);
-  
-  if (!showLineNumbers) {
-    return rendered;
+// ─── Node classification ────────────────────────────────────────────────────
+
+// Helper: check if a C string starts with a prefix
+static bool startsWith(const char *str, const char *prefix) {
+  return strncmp(str, prefix, strlen(prefix)) == 0;
+}
+
+// Helper: check if an anonymous (literal) leaf node is a keyword
+static bool isKeywordText(const char *text) {
+  static const char *keywords[] = {
+      // C / C++
+      "if", "else", "for", "while", "do", "switch", "case", "break", "continue",
+      "return", "goto", "typedef", "struct", "union", "enum", "sizeof",
+      "static", "extern", "inline", "const", "volatile", "register", "void",
+      "auto", "default", "signed", "unsigned",
+      // C++ extras
+      "class", "namespace", "template", "typename", "public", "private",
+      "protected", "virtual", "override", "final", "new", "delete", "try",
+      "catch", "throw", "using", "constexpr", "noexcept", "explicit", "friend",
+      "operator", "this", "nullptr", "static_cast", "dynamic_cast",
+      "const_cast", "reinterpret_cast", "co_await", "co_yield", "co_return",
+      "concept", "requires",
+      // Java
+      "abstract", "implements", "extends", "interface", "package", "import",
+      "instanceof", "synchronized", "throws", "transient", "native", "strictfp",
+      "assert", "super",
+      // Rust
+      "fn", "let", "mut", "impl", "trait", "pub", "mod", "use", "crate", "self",
+      "Self", "where", "as", "in", "ref", "move", "unsafe", "async", "await",
+      "dyn", "type", "loop", "match",
+      // Python
+      "def", "lambda", "import", "from", "pass", "raise", "with", "yield",
+      "global", "nonlocal", "del", "and", "or", "not", "is", "in", "elif",
+      "except", "finally",
+      // JavaScript / TypeScript
+      "void", "delete", "in", "instanceof", "export", "import", "from",
+      // Lua / Luau
+      "and", "break", "do", "else", "elseif", "end", "false", "for", "function",
+      "goto", "if", "in", "local", "nil", "not", "or", "repeat", "return",
+      "then", "true", "until", "while",
+      // CMake
+      "if", "else", "elseif", "endif", "foreach", "endforeach", "while",
+      "endwhile", "macro", "endmacro", "function", "endfunction", "return",
+      // YAML / TOML (few keywords)
+      "true", "false", "null", "yes", "no", "on", "off",
+      // Common
+      "True", "False", "None", nullptr};
+  for (int i = 0; keywords[i]; ++i) {
+    if (strcmp(text, keywords[i]) == 0)
+      return true;
   }
-  
-  // Add line numbers
-  std::vector<ftxui::Element> lines;
-  std::istringstream ss(code);
-  std::string line;
-  int lineNum = 1;
-  int maxLineNum = 1;
-  while (std::getline(ss, line)) maxLineNum++;
-  
-  int gutterWidth = std::to_string(maxLineNum).size();
-  
-  ss.clear();
-  ss.seekg(0);
-  
-  while (std::getline(ss, line)) {
-    std::string gutter = std::to_string(lineNum);
-    while (static_cast<int>(gutter.size()) < gutterWidth) {
-      gutter = " " + gutter;
+  return false;
+}
+
+HighlightKind
+SyntaxHighlighter::classifyNode(TSNode node,
+                                const std::string & /*language*/) const {
+  const char *type = ts_node_type(node);
+  bool named = ts_node_is_named(node);
+
+  // ── Comments ──
+  if (strcmp(type, "comment") == 0 || strcmp(type, "line_comment") == 0 ||
+      strcmp(type, "block_comment") == 0) {
+    return HighlightKind::Comment;
+  }
+
+  // ── Strings ──
+  if (strcmp(type, "string") == 0 || strcmp(type, "string_literal") == 0 ||
+      strcmp(type, "string_content") == 0 ||
+      strcmp(type, "raw_string_literal") == 0 ||
+      strcmp(type, "template_string") == 0 ||
+      strcmp(type, "string_fragment") == 0 ||
+      strcmp(type, "char_literal") == 0 || strcmp(type, "heredoc_body") == 0 ||
+      strcmp(type, "concatenated_string") == 0 ||
+      startsWith(type, "\"") || // anonymous string delimiters
+      startsWith(type, "'")) {
+    return HighlightKind::String;
+  }
+
+  // ── Numbers ──
+  if (strcmp(type, "number") == 0 || strcmp(type, "number_literal") == 0 ||
+      strcmp(type, "integer") == 0 || strcmp(type, "integer_literal") == 0 ||
+      strcmp(type, "float") == 0 || strcmp(type, "float_literal") == 0) {
+    return HighlightKind::Number;
+  }
+
+  // ── Boolean / null constants ──
+  if (strcmp(type, "true") == 0 || strcmp(type, "false") == 0 ||
+      strcmp(type, "null") == 0 || strcmp(type, "none") == 0 ||
+      strcmp(type, "True") == 0 || strcmp(type, "False") == 0 ||
+      strcmp(type, "None") == 0 || strcmp(type, "nullptr") == 0 ||
+      strcmp(type, "boolean") == 0 || strcmp(type, "null_literal") == 0) {
+    return HighlightKind::Constant;
+  }
+
+  // ── Types (named type identifiers) ──
+  if (strcmp(type, "type_identifier") == 0 ||
+      strcmp(type, "primitive_type") == 0 ||
+      strcmp(type, "builtin_type") == 0 ||
+      strcmp(type, "sized_type_specifier") == 0 ||
+      strcmp(type, "type_builtin") == 0 || strcmp(type, "generic_type") == 0 ||
+      strcmp(type, "scoped_type_identifier") == 0 ||
+      strcmp(type, "class_name") == 0 || strcmp(type, "interface_type") == 0) {
+    return HighlightKind::Type;
+  }
+
+  // ── Function names (identifiers inside call/definition nodes) ──
+  if (named && strcmp(type, "identifier") == 0) {
+    TSNode parent = ts_node_parent(node);
+    if (!ts_node_is_null(parent)) {
+      const char *parentType = ts_node_type(parent);
+      if (strcmp(parentType, "call_expression") == 0 ||
+          strcmp(parentType, "function_declarator") == 0 ||
+          strcmp(parentType, "function_definition") == 0 ||
+          strcmp(parentType, "method_declaration") == 0 ||
+          strcmp(parentType, "function_item") == 0 ||
+          strcmp(parentType, "decorated_definition") == 0 ||
+          strcmp(parentType, "attribute") == 0 ||
+          // CMake
+          strcmp(parentType, "normal_command") == 0 ||
+          strcmp(parentType, "function_command") == 0 ||
+          strcmp(parentType, "macro_command") == 0) {
+        // Only the first child (function name) — not arguments
+        TSNode firstChild = ts_node_child(parent, 0);
+        if (ts_node_eq(firstChild, node)) {
+          return HighlightKind::Function;
+        }
+      }
     }
-    
-    lines.push_back(ftxui::hbox({
-      ftxui::text(gutter + " │ ") | ftxui::dim | ftxui::color(ftxui::Color::RGB(100, 100, 130)),
-      ftxui::text(line) // Will be replaced by actual highlighted content
-    }));
+
+    // CMake variables
+    if (startsWith(type, "variable")) {
+      return HighlightKind::Variable;
+    }
+
+    return HighlightKind::Variable;
+  }
+
+  // ── CMake specific ──
+  if (strcmp(type, "normal_command") == 0 ||
+      strcmp(type, "function_command") == 0 ||
+      strcmp(type, "macro_command") == 0) {
+    return HighlightKind::Plain; // Children handle it
+  }
+  if (strcmp(type, "argument") == 0 || strcmp(type, "unquoted_argument") == 0) {
+    return HighlightKind::Plain;
+  }
+  if (strcmp(type, "quoted_argument") == 0 ||
+      strcmp(type, "bracket_argument") == 0) {
+    return HighlightKind::String;
+  }
+  if (strcmp(type, "variable_reference") == 0) {
+    return HighlightKind::Variable;
+  }
+
+  // ── Field / property identifiers ──
+  if (strcmp(type, "field_identifier") == 0 ||
+      strcmp(type, "property_identifier") == 0 ||
+      strcmp(type, "shorthand_property_identifier") == 0) {
+    return HighlightKind::Variable;
+  }
+
+  // ── Operators ──
+  if (!named) {
+    // Anonymous nodes that are operator symbols
+    if (strlen(type) <= 3 && type[0] != '(' && type[0] != ')' &&
+        type[0] != '{' && type[0] != '}' && type[0] != '[' && type[0] != ']' &&
+        type[0] != ';' && type[0] != ',' && type[0] != '.' && type[0] != '"' &&
+        type[0] != '\'') {
+      // Likely an operator: +, -, *, /, =, ==, !=, <, >, etc.
+      bool allOp = true;
+      for (const char *c = type; *c; ++c) {
+        if (!((*c >= '!' && *c <= '/') || (*c >= ':' && *c <= '@') ||
+              *c == '^' || *c == '~' || *c == '|' || *c == '&')) {
+          allOp = false;
+          break;
+        }
+      }
+      if (allOp && strlen(type) > 0) {
+        return HighlightKind::Operator;
+      }
+    }
+
+    // Punctuation: brackets, parens, braces, semicolons, commas, dots
+    if (type[0] == '(' || type[0] == ')' || type[0] == '{' || type[0] == '}' ||
+        type[0] == '[' || type[0] == ']' || type[0] == ';' || type[0] == ',' ||
+        type[0] == '.' || type[0] == ':') {
+      return HighlightKind::Punctuation;
+    }
+
+    // Anonymous keyword-like text nodes (e.g., "if", "for", "class")
+    if (isKeywordText(type)) {
+      return HighlightKind::Keyword;
+    }
+  }
+
+  // ── YAML / JSON specific tags ──
+  if (strcmp(type, "tag") == 0 || strcmp(type, "anchor") == 0 ||
+      strcmp(type, "alias") == 0) {
+    return HighlightKind::Tag;
+  }
+
+  // ── Keys in key-value pairs ──
+  if (strcmp(type, "pair") == 0) {
+    // Don't color the pair node itself — children handle it
+    return HighlightKind::Plain;
+  }
+
+  // ── Preproc / include ──
+  if (startsWith(type, "preproc") || strcmp(type, "include") == 0 ||
+      strcmp(type, "system_lib_string") == 0 ||
+      strcmp(type, "header_name") == 0) {
+    return HighlightKind::Tag;
+  }
+
+  // ── Attribute-like nodes ──
+  if (strcmp(type, "attribute") == 0 || strcmp(type, "decorator") == 0) {
+    return HighlightKind::Attribute;
+  }
+
+  return HighlightKind::Plain;
+}
+
+ftxui::Color SyntaxHighlighter::colorFor(HighlightKind kind) const {
+  switch (kind) {
+  case HighlightKind::Keyword:
+    return colorScheme_.keyword;
+  case HighlightKind::Type:
+    return colorScheme_.type;
+  case HighlightKind::Function:
+    return colorScheme_.function;
+  case HighlightKind::Variable:
+    return colorScheme_.variable;
+  case HighlightKind::String:
+    return colorScheme_.string;
+  case HighlightKind::Comment:
+    return colorScheme_.comment;
+  case HighlightKind::Number:
+    return colorScheme_.number;
+  case HighlightKind::Operator:
+    return colorScheme_.operator_color;
+  case HighlightKind::Punctuation:
+    return colorScheme_.punctuation;
+  case HighlightKind::Constant:
+    return colorScheme_.constant;
+  case HighlightKind::Tag:
+    return colorScheme_.tag;
+  case HighlightKind::Attribute:
+    return colorScheme_.attribute;
+  case HighlightKind::Plain:
+  default:
+    return colorScheme_.plain;
+  }
+}
+
+// ─── AST span collection ────────────────────────────────────────────────────
+
+void SyntaxHighlighter::collectSpans(TSNode node, const std::string &language,
+                                     std::vector<HighlightSpan> &spans) const {
+  uint32_t childCount = ts_node_child_count(node);
+
+  if (childCount == 0) {
+    // Leaf node — emit a span
+    HighlightKind kind = classifyNode(node, language);
+    uint32_t start = ts_node_start_byte(node);
+    uint32_t end = ts_node_end_byte(node);
+    if (start < end) {
+      spans.push_back({start, end, kind});
+    }
+    return;
+  }
+
+  // For comments and strings, treat the whole subtree as one span
+  HighlightKind nodeKind = classifyNode(node, language);
+  if (nodeKind == HighlightKind::Comment || nodeKind == HighlightKind::String) {
+    uint32_t start = ts_node_start_byte(node);
+    uint32_t end = ts_node_end_byte(node);
+    if (start < end) {
+      spans.push_back({start, end, nodeKind});
+    }
+    return;
+  }
+
+  // Recurse into children (including anonymous children)
+  for (uint32_t i = 0; i < childCount; ++i) {
+    TSNode child = ts_node_child(node, i);
+    collectSpans(child, language, spans);
+  }
+}
+
+// ─── Public rendering ───────────────────────────────────────────────────────
+
+std::vector<ftxui::Element>
+SyntaxHighlighter::highlightRenderLines(const std::string &code,
+                                        const std::string &language) const {
+
+  if (!initialized_) {
+    const_cast<SyntaxHighlighter *>(this)->initialize();
+  }
+
+  auto it = grammars_.find(language);
+  if (it == grammars_.end()) {
+    // Unknown language — plain text fallback
+    std::vector<ftxui::Element> lines;
+    std::istringstream ss(code);
+    std::string lineStr;
+    while (std::getline(ss, lineStr)) {
+      lines.push_back(ftxui::text(lineStr));
+    }
+    return lines;
+  }
+
+  // ── Parse with tree-sitter ──
+  const TSLanguage *tsLang = it->second.languageFn();
+  TSParser *parser = ts_parser_new();
+  ts_parser_set_language(parser, tsLang);
+
+  TSTree *tree = ts_parser_parse_string(parser, nullptr, code.c_str(),
+                                        static_cast<uint32_t>(code.size()));
+
+  if (!tree) {
+    // Parse failure — plain text fallback
+    ts_parser_delete(parser);
+    std::vector<ftxui::Element> lines;
+    std::istringstream ss(code);
+    std::string lineStr;
+    while (std::getline(ss, lineStr)) {
+      lines.push_back(ftxui::text(lineStr));
+    }
+    return lines;
+  }
+
+  TSNode root = ts_tree_root_node(tree);
+
+  // Collect highlight spans from the AST
+  std::vector<HighlightSpan> spans;
+  spans.reserve(256);
+  collectSpans(root, language, spans);
+
+  // Sort spans by start byte (should already be mostly sorted from DFS)
+  std::sort(spans.begin(), spans.end(),
+            [](const HighlightSpan &a, const HighlightSpan &b) {
+              return a.startByte < b.startByte;
+            });
+
+  // ── Build line-by-line FTXUI elements from highlight spans ──
+  std::vector<ftxui::Element> renderedLines;
+  std::istringstream ss(code);
+  std::string lineStr;
+  uint32_t lineStartByte = 0;
+
+  while (std::getline(ss, lineStr)) {
+    uint32_t lineEndByte =
+        lineStartByte + static_cast<uint32_t>(lineStr.size());
+
+    std::vector<ftxui::Element> parts;
+
+    // Walk spans that intersect this line
+    uint32_t cursor = lineStartByte;
+    for (const auto &span : spans) {
+      if (span.endByte <= lineStartByte)
+        continue; // span is before this line
+      if (span.startByte >= lineEndByte)
+        break; // past this line
+
+      // Clip span to this line
+      uint32_t sStart = std::max(span.startByte, lineStartByte);
+      uint32_t sEnd = std::min(span.endByte, lineEndByte);
+
+      // Gap between cursor and this span = plain text
+      if (sStart > cursor) {
+        std::string gap = code.substr(cursor, sStart - cursor);
+        parts.push_back(ftxui::text(gap) | ftxui::color(colorScheme_.plain));
+      }
+
+      // The highlighted span text
+      std::string spanText = code.substr(sStart, sEnd - sStart);
+      parts.push_back(ftxui::text(spanText) |
+                      ftxui::color(colorFor(span.kind)));
+
+      cursor = sEnd;
+    }
+
+    // Remaining text after last span on this line
+    if (cursor < lineEndByte) {
+      std::string tail = code.substr(cursor, lineEndByte - cursor);
+      parts.push_back(ftxui::text(tail) | ftxui::color(colorScheme_.plain));
+    }
+
+    // If the line was completely empty, ensure we push an empty text element
+    if (parts.empty()) {
+      parts.push_back(ftxui::text(""));
+    }
+
+    renderedLines.push_back(ftxui::hbox(parts));
+    lineStartByte = lineEndByte + 1; // +1 for the newline character
+  }
+
+  ts_tree_delete(tree);
+  ts_parser_delete(parser);
+
+  return renderedLines;
+}
+
+ftxui::Element SyntaxHighlighter::highlightRender(const std::string &code,
+                                                  const std::string &language,
+                                                  bool showLineNumbers) const {
+  auto lines = highlightRenderLines(code, language);
+
+  if (!showLineNumbers) {
+    return ftxui::vbox(lines) | ftxui::frame;
+  }
+
+  std::vector<ftxui::Element> linesWithNumbers;
+  linesWithNumbers.reserve(lines.size());
+
+  int lineNum = 1;
+  for (auto &line : lines) {
+    std::string gutter = std::to_string(lineNum);
+    linesWithNumbers.push_back(
+        ftxui::hbox({ftxui::text(gutter + " │ ") | ftxui::dim |
+                         ftxui::color(ftxui::Color::RGB(100, 100, 130)),
+                     line}));
     lineNum++;
   }
-  
-  return ftxui::vbox(lines) | ftxui::frame;
-}
 
-// Pattern-based highlighter (simulates tree-sitter behavior)
-std::vector<HighlightedToken> SyntaxHighlighter::highlightWithPatterns(
-    const std::string& code, const std::string& language) const {
-  
-  std::vector<HighlightedToken> tokens;
-  
-  // Language-specific keywords
-  static const std::unordered_map<std::string, std::vector<std::string>> keywords = {
-    {"cpp", {"auto", "break", "case", "catch", "class", "const", "constexpr",
-             "continue", "default", "delete", "do", "else", "enum", "explicit",
-             "extern", "for", "friend", "goto", "if", "inline", "namespace",
-             "new", "noexcept", "nullptr", "operator", "private", "protected",
-             "public", "register", "return", "sizeof", "static", "struct",
-             "switch", "template", "this", "throw", "try", "typedef", "typeid",
-             "typename", "union", "using", "virtual", "volatile", "while"}},
-    {"rust", {"as", "async", "await", "break", "const", "continue", "crate",
-              "dyn", "else", "enum", "extern", "false", "fn", "for", "if",
-              "impl", "in", "let", "loop", "match", "mod", "move", "mut",
-              "pub", "ref", "return", "Self", "self", "static", "struct",
-              "super", "trait", "true", "type", "unsafe", "use", "where", "while"}},
-    {"python", {"and", "as", "assert", "async", "await", "break", "class",
-                "continue", "def", "del", "elif", "else", "except", "finally",
-                "for", "from", "global", "if", "import", "in", "is", "lambda",
-                "nonlocal", "not", "or", "pass", "raise", "return", "try",
-                "while", "with", "yield", "True", "False", "None"}},
-    {"javascript", {"async", "await", "break", "case", "catch", "class", "const",
-                    "continue", "debugger", "default", "delete", "do", "else",
-                    "export", "extends", "false", "finally", "for", "function",
-                    "if", "import", "in", "instanceof", "let", "new", "null",
-                    "return", "static", "super", "switch", "this", "throw",
-                    "true", "try", "typeof", "var", "void", "while", "with", "yield"}},
-  };
-  
-  // Language-specific types
-  static const std::unordered_map<std::string, std::vector<std::string>> types = {
-    {"cpp", {"bool", "char", "double", "float", "int", "long", "short", "signed",
-             "unsigned", "void", "wchar_t", "string", "vector", "map", "set",
-             "unique_ptr", "shared_ptr", "optional", "variant", "any"}},
-    {"rust", {"i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32",
-              "u64", "u128", "usize", "f32", "f64", "bool", "char", "str",
-              "String", "Vec", "HashMap", "Option", "Result", "Box", "Rc", "Arc"}},
-    {"python", {"int", "float", "str", "bool", "list", "dict", "set", "tuple",
-                "bytes", "bytearray", "range", "slice", "object", "type"}},
-  };
-  
-  auto kwIt = keywords.find(language);
-  auto typeIt = types.find(language);
-  
-  std::vector<std::string> kwList = kwIt != keywords.end() ? kwIt->second : std::vector<std::string>{};
-  std::vector<std::string> typeList = typeIt != types.end() ? typeIt->second : std::vector<std::string>{};
-  
-  // Simple tokenizer
-  size_t i = 0;
-  while (i < code.size()) {
-    // Skip whitespace
-    if (std::isspace(static_cast<unsigned char>(code[i]))) {
-      size_t start = i;
-      while (i < code.size() && std::isspace(static_cast<unsigned char>(code[i]))) i++;
-      tokens.push_back({code.substr(start, i - start), TokenType::Plain});
-      continue;
-    }
-    
-    // Comments
-    if (i + 1 < code.size()) {
-      if ((language == "cpp" || language == "rust" || language == "javascript") &&
-          code[i] == '/' && code[i + 1] == '/') {
-        size_t start = i;
-        while (i < code.size() && code[i] != '\n') i++;
-        tokens.push_back({code.substr(start, i - start), TokenType::Comment});
-        continue;
-      }
-      if ((language == "cpp" || language == "rust" || language == "javascript") &&
-          code[i] == '/' && code[i + 1] == '*') {
-        size_t start = i;
-        i += 2;
-        while (i + 1 < code.size() && !(code[i] == '*' && code[i + 1] == '/')) i++;
-        i += 2;
-        tokens.push_back({code.substr(start, i - start), TokenType::Comment});
-        continue;
-      }
-      if (language == "python" && code[i] == '#') {
-        size_t start = i;
-        while (i < code.size() && code[i] != '\n') i++;
-        tokens.push_back({code.substr(start, i - start), TokenType::Comment});
-        continue;
-      }
-    }
-    
-    // Strings
-    if (code[i] == '"' || code[i] == '\'' || code[i] == '`') {
-      char quote = code[i];
-      size_t start = i;
-      i++;
-      while (i < code.size() && code[i] != quote) {
-        if (code[i] == '\\' && i + 1 < code.size()) i++;
-        i++;
-      }
-      i++;
-      tokens.push_back({code.substr(start, i - start), TokenType::String});
-      continue;
-    }
-    
-    // Numbers
-    if (std::isdigit(static_cast<unsigned char>(code[i]))) {
-      size_t start = i;
-      while (i < code.size() && (std::isdigit(static_cast<unsigned char>(code[i])) ||
-                                  code[i] == '.' || code[i] == 'x' ||
-                                  code[i] == 'e' || code[i] == 'E' ||
-                                  code[i] == '+' || code[i] == '-')) i++;
-      tokens.push_back({code.substr(start, i - start), TokenType::Number});
-      continue;
-    }
-    
-    // Identifiers and keywords
-    if (std::isalpha(static_cast<unsigned char>(code[i])) || code[i] == '_') {
-      size_t start = i;
-      while (i < code.size() && (std::isalnum(static_cast<unsigned char>(code[i])) ||
-                                  code[i] == '_')) i++;
-      
-      std::string word = code.substr(start, i - start);
-      
-      // Check if keyword
-      if (std::find(kwList.begin(), kwList.end(), word) != kwList.end()) {
-        tokens.push_back({word, TokenType::Keyword});
-      }
-      // Check if type
-      else if (std::find(typeList.begin(), typeList.end(), word) != typeList.end()) {
-        tokens.push_back({word, TokenType::Type});
-      }
-      // Check if constant (ALL_CAPS)
-      else if (std::all_of(word.begin(), word.end(),
-               [](char c) { return !std::isalpha(static_cast<unsigned char>(c)) ||
-                                     std::isupper(static_cast<unsigned char>(c)); })) {
-        tokens.push_back({word, TokenType::Constant});
-      }
-      // Otherwise variable/function
-      else {
-        tokens.push_back({word, TokenType::Variable});
-      }
-      continue;
-    }
-    
-    // Operators and punctuation
-    if (std::string("+-*/%=<>!&|^~?:").find(code[i]) != std::string::npos) {
-      size_t start = i;
-      while (i < code.size() && std::string("+-*/%=<>!&|^~?:").find(code[i]) != std::string::npos) i++;
-      tokens.push_back({code.substr(start, i - start), TokenType::Operator});
-      continue;
-    }
-    
-    // Punctuation
-    if (std::string("()[]{}.,;").find(code[i]) != std::string::npos) {
-      tokens.push_back({std::string(1, code[i]), TokenType::Punctuation});
-      i++;
-      continue;
-    }
-    
-    // Unknown character
-    tokens.push_back({std::string(1, code[i]), TokenType::Plain});
-    i++;
-  }
-  
-  return tokens;
-}
-
-ftxui::Element RenderHighlightedTokens(const std::vector<HighlightedToken>& tokens,
-                                        const SyntaxColorScheme& colors) {
-  ftxui::Elements elements;
-  
-  for (const auto& token : tokens) {
-    ftxui::Color color;
-    ftxui::Element e = ftxui::text(token.text);
-    
-    switch (token.type) {
-      case TokenType::Keyword: color = colors.keyword; break;
-      case TokenType::Type: color = colors.type; break;
-      case TokenType::Function: color = colors.function; break;
-      case TokenType::Variable: color = colors.variable; break;
-      case TokenType::String: color = colors.string; break;
-      case TokenType::Comment: color = colors.comment; break;
-      case TokenType::Number: color = colors.number; break;
-      case TokenType::Operator: color = colors.operator_color; break;
-      case TokenType::Punctuation: color = colors.punctuation; break;
-      case TokenType::Constant: color = colors.constant; break;
-      case TokenType::Tag: color = colors.tag; break;
-      case TokenType::Attribute: color = colors.attribute; break;
-      case TokenType::Plain: default: color = colors.plain; break;
-    }
-    
-    e = e | ftxui::color(color);
-    elements.push_back(e);
-  }
-  
-  return ftxui::hflow(std::move(elements));
+  return ftxui::vbox(linesWithNumbers) | ftxui::frame;
 }
 
 } // namespace firmius::tui

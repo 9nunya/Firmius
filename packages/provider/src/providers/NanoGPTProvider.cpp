@@ -16,25 +16,53 @@ size_t writeCallback(char* ptr, size_t size, size_t nmemb, void* userdata) {
 }
 
 NanoGPTProvider::NanoGPTProvider(const std::vector<std::string>& initialKeys)
-    : BaseOpenAIProvider("nanogpt", "https://nano-gpt.com/api/v1", ""), apiKeys(initialKeys) {
-    
-    if (apiKeys.empty()) {
+    : BaseOpenAIProvider("nanogpt", "https://nano-gpt.com/api/v1", "") {
+
+    // Add initial keys if provided
+    for (const auto& key : initialKeys) {
+        if (!key.empty()) {
+            APIKeyAccount acc;
+            acc.apiKey = key;
+            acc.keyPrefix = extractKeyPrefix(key);
+            acc.identifier = generateIdentifier();
+            addAccount(acc);
+        }
+    }
+
+    // Load from environment if no keys provided
+    if (getAccountCount() == 0) {
         for (int i = 1; i <= 10; ++i) {
             std::string key = shared::EnvLoader::get("NANOGPT_API_KEY_" + std::to_string(i));
-            if (!key.empty()) apiKeys.push_back(key);
+            if (!key.empty()) {
+                APIKeyAccount acc;
+                acc.apiKey = key;
+                acc.keyPrefix = extractKeyPrefix(key);
+                acc.identifier = generateIdentifier();
+                addAccount(acc);
+            }
         }
-        
-        if (apiKeys.empty()) {
+
+        if (getAccountCount() == 0) {
             std::string primary = shared::EnvLoader::get("NANOGPT_API_KEY");
             if (!primary.empty()) {
                 if (primary.find(',') != std::string::npos) {
                     std::stringstream ss(primary);
                     std::string item;
                     while (std::getline(ss, item, ',')) {
-                        if (!item.empty()) apiKeys.push_back(item);
+                        if (!item.empty()) {
+                            APIKeyAccount acc;
+                            acc.apiKey = item;
+                            acc.keyPrefix = extractKeyPrefix(item);
+                            acc.identifier = generateIdentifier();
+                            addAccount(acc);
+                        }
                     }
                 } else {
-                    apiKeys.push_back(primary);
+                    APIKeyAccount acc;
+                    acc.apiKey = primary;
+                    acc.keyPrefix = extractKeyPrefix(primary);
+                    acc.identifier = generateIdentifier();
+                    addAccount(acc);
                 }
             }
         }
@@ -42,13 +70,7 @@ NanoGPTProvider::NanoGPTProvider(const std::vector<std::string>& initialKeys)
 }
 
 std::map<std::string, std::string> NanoGPTProvider::getHeaders() {
-    std::string key = apiKeys.empty() ? "" : apiKeys[currentKeyIndex];
-    currentKeyIndex = (currentKeyIndex + 1) % (apiKeys.empty() ? 1 : apiKeys.size());
-    
-    return {
-        {"Authorization", "Bearer " + key},
-        {"Content-Type", "application/json"}
-    };
+    return BaseOpenAIProvider::getHeaders();
 }
 
 std::string NanoGPTProvider::getReasoningFieldName() const {

@@ -27,7 +27,7 @@ public:
 
 protected:
     /**
-     * @brief Returns headers with a rotated API key.
+     * @brief Returns headers with authorization.
      */
     std::map<std::string, std::string> getHeaders() override;
 
@@ -35,10 +35,6 @@ protected:
      * @brief Returns "reasoning_content" as used by StepFun models.
      */
     std::string getReasoningFieldName() const override;
-
-private:
-    std::vector<std::string> apiKeys;
-    size_t currentKeyIndex = 0;
 };
 
 }

@@ -76,10 +76,19 @@ std::string roleToString(Role r) {
 BaseOpenAIProvider::BaseOpenAIProvider(std::string id,
                                        const std::string &baseUrl,
                                        const std::string &apiKey)
-    : providerId(std::move(id)), baseUrl(baseUrl), apiKey(apiKey) {}
+    : BaseAPIKeyProvider(std::move(id)), baseUrl(baseUrl) {
+  // If apiKey is provided and non-empty, add it as the initial account
+  if (!apiKey.empty()) {
+    APIKeyAccount acc;
+    acc.apiKey = apiKey;
+    acc.keyPrefix = extractKeyPrefix(apiKey);
+    acc.identifier = generateIdentifier();
+    addAccount(acc);
+  }
+}
 
-firmius::provider::ProviderType BaseOpenAIProvider::getProviderType() const {
-  return ProviderType::APIKey;
+std::unique_ptr<APIKeyWizard> BaseOpenAIProvider::beginConnectionWizard() {
+  return std::make_unique<SimpleAPIKeyWizard>();
 }
 
 std::uint64_t BaseOpenAIProvider::nowMs() {
@@ -489,7 +498,10 @@ std::vector<ModelInfo> BaseOpenAIProvider::listModels() {
 }
 
 std::map<std::string, std::string> BaseOpenAIProvider::getHeaders() {
-  return {{"Authorization", "Bearer " + apiKey},
+  // Get an available account to retrieve the API key
+  auto account = getAvailableAccount();
+  std::string apiKeyValue = account ? (*account)->apiKey : "";
+  return {{"Authorization", "Bearer " + apiKeyValue},
           {"Content-Type", "application/json"}};
 }
 

@@ -5,12 +5,12 @@
 #include "commands/CommandManager.hpp"
 #include "components/AgentStrip.hpp"
 #include "components/ChatWindow.hpp"
+#include "components/HelpOverlay.hpp"
 #include "components/InputBar.hpp"
 #include "components/Markdown.hpp"
 #include "components/StatusBar.hpp"
 #include "components/TitleBar.hpp"
 #include "components/ToolBlock.hpp"
-#include "components/HelpOverlay.hpp"
 #include "harness/Harness.hpp"
 #include "modals/ModalRegistry.hpp"
 #include "modals/ThreadLockedModal.hpp"
@@ -81,6 +81,9 @@ void TuiState::popModalImmediate() {
     if (input_component_) {
       input_component_->TakeFocus();
     }
+    // Also explicitly post an event to ensure the screen re-renders and focus
+    // is acknowledged
+    postEvent(ftxui::Event::Custom);
   } else {
     modals_.back()->TakeFocus();
   }
@@ -350,7 +353,8 @@ void TuiState::updateAgentStripModel() {
         for (const auto &turn : history->turns) {
           for (const auto &msg : turn.messages) {
             for (const auto &part : msg.content) {
-              if (std::holds_alternative<firmius::shared::ToolCallContent>(part))
+              if (std::holds_alternative<firmius::shared::ToolCallContent>(
+                      part))
                 ++count;
             }
           }
@@ -445,8 +449,7 @@ void TuiState::updateAgentStripModel() {
 
   agent_strip_model_->view_offset = offset;
   for (size_t i = 0; i < visible_rows; ++i) {
-    agent_strip_model_->items.push_back(
-        std::move(all_items[offset + i]));
+    agent_strip_model_->items.push_back(std::move(all_items[offset + i]));
   }
 }
 
@@ -491,6 +494,7 @@ ftxui::Component TuiState::root() {
         harness_->send(text);
       }
     }
+    input_component_->TakeFocus();
   });
   auto chat = ChatWindow(
       [this]() -> const firmius::shared::AgentHistory * {
@@ -533,8 +537,24 @@ ftxui::Component TuiState::root() {
             auto it_tool = tool_calls.find(entry.id);
             if (it_tool == tool_calls.end() || !it_tool->second)
               continue;
+
+            auto sub_history_getter = [this](const std::string &agentId)
+                -> const firmius::shared::AgentHistory * {
+              if (agentId.empty())
+                return nullptr;
+              return harness_->getAgentHistoryPtr(agentId).get();
+            };
+            auto sub_stream_getter = [this](const std::string &agentId)
+                -> const firmius::tui::StreamState * {
+              if (agentId.empty())
+                return nullptr;
+              return stream_state_.getStream(agentId);
+            };
+
             live_rows.push_back(
-                decorateMsg(ToolBlock(it_tool->second)->Render()));
+                decorateMsg(ToolBlock(it_tool->second, sub_history_getter,
+                                      sub_stream_getter)
+                                ->Render()));
           }
         }
 
@@ -575,6 +595,17 @@ ftxui::Component TuiState::root() {
       },
       [this](const std::string &toolCallId) {
         return stream_state_.getToolView(toolCallId);
+      },
+      [this](
+          const std::string &agentId) -> const firmius::shared::AgentHistory * {
+        if (agentId.empty())
+          return nullptr;
+        return harness_->getAgentHistoryPtr(agentId).get();
+      },
+      [this](const std::string &agentId) -> const firmius::tui::StreamState * {
+        if (agentId.empty())
+          return nullptr;
+        return stream_state_.getStream(agentId);
       });
   chat_component_ = chat;
   input_component_ = input_bar;
@@ -588,8 +619,8 @@ ftxui::Component TuiState::root() {
   auto welcome_screen = ftxui::Renderer([] {
     return ftxui::vbox({
                ftxui::text("Welcome to Firmius") | ftxui::bold | ftxui::center,
-               ftxui::text("Type a message to start") |
-                   ftxui::dim | ftxui::center,
+               ftxui::text("Type a message to start") | ftxui::dim |
+                   ftxui::center,
            }) |
            ftxui::flex | ftxui::center;
   });
@@ -619,7 +650,9 @@ ftxui::Component TuiState::root() {
         // Ultra-compact bottom bar layout
         auto bottom_bar = ftxui::vbox({
             agent_strip->Render(),
+            ftxui::separator(),
             input_bar->Render(),
+            ftxui::separator(),
             status_bar->Render(),
         });
 
@@ -628,10 +661,11 @@ ftxui::Component TuiState::root() {
           main_view = ftxui::vbox({chat_area, bottom_bar}) | ftxui::flex;
         } else {
           main_view = ftxui::vbox({
-                     title_bar->Render(),
-                     chat_area | ftxui::flex,
-                     bottom_bar,
-                 }) | ftxui::flex;
+                          title_bar->Render(),
+                          chat_area | ftxui::flex,
+                          bottom_bar,
+                      }) |
+                      ftxui::flex;
         }
 
         // Layer help overlay
@@ -672,8 +706,19 @@ ftxui::Component TuiState::root() {
         if (input_component_) {
           input_component_->TakeFocus();
         }
+        // Force re-render to ensure focus state is propagated
+        postEvent(ftxui::Event::Custom);
       } else {
         modals_.back()->TakeFocus();
+      }
+      return true;
+    }
+
+    // Handle terminal focus gained event (escape sequence \x1b[I)
+    if (event.input() == "\x1b[I") {
+      // Terminal regained focus - restore focus to input
+      if (input_component_) {
+        input_component_->TakeFocus();
       }
       return true;
     }
@@ -720,20 +765,20 @@ ftxui::Component TuiState::root() {
             focused_agent_id_);
         if (agent && !agent->getContext().identity.parentId.empty()) {
           std::string parentId = agent->getContext().identity.parentId;
-        if (harness_->setFocusedAgent(parentId)) {
-          focused_agent_id_ = parentId;
-          if (history_) {
-            *history_ = harness_->getAgentHistory(focused_agent_id_);
-          } else {
-            history_ = harness_->getAgentHistoryPtr(focused_agent_id_);
+          if (harness_->setFocusedAgent(parentId)) {
+            focused_agent_id_ = parentId;
+            if (history_) {
+              *history_ = harness_->getAgentHistory(focused_agent_id_);
+            } else {
+              history_ = harness_->getAgentHistoryPtr(focused_agent_id_);
+            }
+            if (chat_component_)
+              chat_component_->OnEvent(ftxui::Event::Special("ThreadChanged"));
+            updateStatusModel();
+            updateAgentStripModel();
+            if (screen_)
+              screen_->PostEvent(ftxui::Event::Custom);
           }
-          if (chat_component_)
-            chat_component_->OnEvent(ftxui::Event::Special("ThreadChanged"));
-          updateStatusModel();
-          updateAgentStripModel();
-          if (screen_)
-            screen_->PostEvent(ftxui::Event::Custom);
-        }
         }
       }
       return true;
@@ -756,21 +801,21 @@ ftxui::Component TuiState::root() {
                 it = agents.end();
               --it;
             }
-          if (harness_->setFocusedAgent(*it)) {
-            focused_agent_id_ = *it;
-            if (history_) {
-              *history_ = harness_->getAgentHistory(focused_agent_id_);
-            } else {
-              history_ = harness_->getAgentHistoryPtr(focused_agent_id_);
+            if (harness_->setFocusedAgent(*it)) {
+              focused_agent_id_ = *it;
+              if (history_) {
+                *history_ = harness_->getAgentHistory(focused_agent_id_);
+              } else {
+                history_ = harness_->getAgentHistoryPtr(focused_agent_id_);
+              }
+              if (chat_component_)
+                chat_component_->OnEvent(
+                    ftxui::Event::Special("ThreadChanged"));
+              updateStatusModel();
+              updateAgentStripModel();
+              if (screen_)
+                screen_->PostEvent(ftxui::Event::Custom);
             }
-            if (chat_component_)
-              chat_component_->OnEvent(
-                  ftxui::Event::Special("ThreadChanged"));
-            updateStatusModel();
-            updateAgentStripModel();
-            if (screen_)
-              screen_->PostEvent(ftxui::Event::Custom);
-          }
           }
         }
       }
@@ -827,19 +872,15 @@ ftxui::Component TuiState::root() {
     if (event == ftxui::Event::Special("\x07")) {
       diffs_expanded_ = !diffs_expanded_;
       UIState::instance().diffsExpanded = diffs_expanded_;
-      
+
       if (diffs_expanded_) {
         NotificationManager::instance().notifyInfo(
-          "Diffs Expanded",
-          "Showing full diff content",
-          std::chrono::milliseconds(2000)
-        );
+            "Diffs Expanded", "Showing full diff content",
+            std::chrono::milliseconds(2000));
       } else {
         NotificationManager::instance().notifyInfo(
-          "Diffs Collapsed",
-          "Showing top 3 relevant hunks (10 lines max)",
-          std::chrono::milliseconds(2000)
-        );
+            "Diffs Collapsed", "Showing top 3 relevant hunks (10 lines max)",
+            std::chrono::milliseconds(2000));
       }
       return true;
     }
@@ -858,24 +899,21 @@ ftxui::Component TuiState::root() {
         auto agent = firmius::core::AgentRegistry::instance().getAgent(
             focused_agent_id_);
         if (agent) {
-          const auto& ctx = agent->getContext();
+          const auto &ctx = agent->getContext();
           if (!ctx.state.ownedProcesses.empty()) {
             focused_process_id_ = ctx.state.ownedProcesses.front();
             view_mode_ = ViewMode::ProcessFocus;
             NotificationManager::instance().notifyInfo(
-              "Process Focus",
-              "Interactive mode enabled. Type to send input to process.",
-              std::chrono::milliseconds(3000)
-            );
+                "Process Focus",
+                "Interactive mode enabled. Type to send input to process.",
+                std::chrono::milliseconds(3000));
             return true;
           }
         }
       }
       NotificationManager::instance().notifyWarning(
-        "No Process",
-        "No active background process to focus on.",
-        std::chrono::milliseconds(2000)
-      );
+          "No Process", "No active background process to focus on.",
+          std::chrono::milliseconds(2000));
       return true;
     }
 
@@ -884,10 +922,8 @@ ftxui::Component TuiState::root() {
       view_mode_ = ViewMode::Chat;
       focused_process_id_.clear();
       NotificationManager::instance().notifyInfo(
-        "Process Focus",
-        "Exited process focus mode.",
-        std::chrono::milliseconds(2000)
-      );
+          "Process Focus", "Exited process focus mode.",
+          std::chrono::milliseconds(2000));
       return true;
     }
 

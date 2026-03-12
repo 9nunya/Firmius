@@ -104,15 +104,21 @@ void StreamStateManager::handleAgentToolCallChunk(
   if (it_sub != subagent_to_parent_tool_.end()) {
     auto it_parent = tool_calls_.find(it_sub->second);
     if (it_parent != tool_calls_.end() && it_parent->second) {
-      std::string summary = firmius::shared::SummarizeToolCall(
-          view->name, view->args, firmius::shared::ToolPhase::Called);
+      auto phase = view->phase;
+      std::string summary =
+          firmius::shared::SummarizeToolCall(view->name, view->args, phase);
       auto &log = it_parent->second->subagent_tool_log;
       if (!summary.empty()) {
         if (it_parent->second->last_subagent_tool_id == e.toolCallId &&
             !log.empty()) {
-          log.back() = summary;
+          log.back().summary = summary;
+          log.back().phase = phase;
         } else {
-          log.push_back(summary);
+          shared::SubagentToolLogEntry entry;
+          entry.summary = summary;
+          entry.phase = phase;
+          entry.toolCallId = e.toolCallId;
+          log.push_back(entry);
           it_parent->second->last_subagent_tool_id = e.toolCallId;
           while (log.size() > 8)
             log.erase(log.begin());
@@ -147,12 +153,33 @@ void StreamStateManager::handleAgentToolCall(const shared::AgentToolCall &e) {
       if (!summary.empty()) {
         if (it_parent->second->last_subagent_tool_id == e.toolCallId &&
             !log.empty()) {
-          log.back() = summary;
+          log.back().summary = summary;
+          log.back().phase = view->phase;
         } else {
-          log.push_back(summary);
+          shared::SubagentToolLogEntry entry;
+          entry.summary = summary;
+          entry.phase = view->phase;
+          entry.toolCallId = e.toolCallId;
+          log.push_back(entry);
           it_parent->second->last_subagent_tool_id = e.toolCallId;
           while (log.size() > 8)
             log.erase(log.begin());
+        }
+      }
+    }
+  }
+
+  // Handle subagent_wait linking
+  if (view->name == "subagent_wait" && !view->args.empty()) {
+    rapidjson::Document doc;
+    doc.Parse(view->args.c_str());
+    if (!doc.HasParseError() && doc.IsObject()) {
+      if (doc.HasMember("agent_id") && doc["agent_id"].IsString()) {
+        std::string subId = doc["agent_id"].GetString();
+        view->subagent_id = subId;
+        auto it_title = agent_titles_.find(subId);
+        if (it_title != agent_titles_.end()) {
+          view->subagent_title = it_title->second;
         }
       }
     }
@@ -201,33 +228,34 @@ void StreamStateManager::handleAgentSpawned(
   if (!e.providerId.empty() || !e.modelId.empty()) {
     agent_provider_model_[e.agentId] = e.providerId + "/" + e.modelId;
   }
+  // Link spawned agent to parent tool call
   for (auto &pair : tool_calls_) {
     if (!pair.second || pair.second->agentId != e.parentId)
       continue;
     if (pair.second->name != "summon_subagent")
       continue;
-    bool already_linked = false;
-    for (const auto &sub : subagent_to_parent_tool_) {
-      if (sub.second == pair.first && sub.first != e.agentId) {
-        already_linked = true;
-        break;
+
+    // Check if this tool call is likely the one that spawned this agent
+    // We can use the agentId if the tool call reported it (async mode)
+    // or check name/slug matches.
+    bool id_match = (!pair.second->subagent_id.empty() &&
+                     pair.second->subagent_id == e.agentId);
+    bool name_match = (!pair.second->subagent_slug.empty() &&
+                       pair.second->subagent_slug == e.friendlyName);
+
+    // If we haven't linked a subagent_id yet, and it's a name match, take it.
+    if (pair.second->subagent_id.empty() || id_match || name_match) {
+      subagent_to_parent_tool_[e.agentId] = pair.first;
+      pair.second->subagent_running = true;
+      pair.second->subagent_id = e.agentId;
+      if (!e.title.empty()) {
+        pair.second->subagent_title = e.title;
+        agent_titles_[e.agentId] = e.title;
       }
+      if (!e.friendlyName.empty())
+        pair.second->subagent_slug = e.friendlyName;
+      break;
     }
-    if (already_linked)
-      continue;
-    subagent_to_parent_tool_[e.agentId] = pair.first;
-    pair.second->subagent_running = true;
-    if (!e.title.empty()) {
-      pair.second->subagent_title = e.title;
-    } else {
-      pair.second->subagent_title = e.personaName;
-    }
-    if (!e.friendlyName.empty()) {
-      pair.second->subagent_slug = e.friendlyName;
-    } else {
-      pair.second->subagent_slug = e.agentId;
-    }
-    break;
   }
   (void)focused_agent_id;
 }
@@ -243,7 +271,11 @@ void StreamStateManager::pushThinkingDuration(const std::string &agentId,
 
   std::string label = "Thought for " + formatDuration(seconds);
   auto &log = it_parent->second->subagent_tool_log;
-  log.push_back(label);
+  shared::SubagentToolLogEntry entry;
+  entry.summary = label;
+  entry.phase = shared::ToolPhase::Finished;
+  entry.toolCallId = "";
+  log.push_back(entry);
   while (log.size() > 8)
     log.erase(log.begin());
 }
@@ -256,7 +288,11 @@ void StreamStateManager::handleAgentCompleted(const shared::AgentCompleted &e) {
   if (it_sub != subagent_to_parent_tool_.end()) {
     auto it_parent = tool_calls_.find(it_sub->second);
     if (it_parent != tool_calls_.end() && it_parent->second) {
-      it_parent->second->subagent_tool_log.push_back("Done");
+      shared::SubagentToolLogEntry entry;
+      entry.summary = "Done";
+      entry.phase = shared::ToolPhase::Finished;
+      entry.toolCallId = "";
+      it_parent->second->subagent_tool_log.push_back(entry);
       it_parent->second->subagent_running = false;
     }
   }

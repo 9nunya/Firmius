@@ -23,7 +23,8 @@ LMStudioProvider::LMStudioProvider(const std::string& baseUrl)
                 ? "http://localhost:1234"
                 : shared::EnvLoader::get("LMSTUDIO_BASE_URL"))
             : baseUrl,
-        "lm-studio") {
+        "") {
+    // LM Studio doesn't require API keys, so we don't add any accounts
 }
 
 std::map<std::string, std::string> LMStudioProvider::getHeaders() {

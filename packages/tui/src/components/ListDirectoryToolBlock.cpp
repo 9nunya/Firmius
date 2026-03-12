@@ -1,4 +1,7 @@
 #include "components/ListDirectoryToolBlock.hpp"
+#include "utils/ErrorCleaner.hpp"
+#include "utils/ToolView.hpp"
+#include <ftxui/component/component.hpp>
 #include <ftxui/dom/elements.hpp>
 #include <rapidjson/document.h>
 
@@ -60,13 +63,19 @@ ListDirectoryToolBlock(const std::shared_ptr<ToolCallView> &view) {
 
       view->toggle_label = view->show_result ? "hide" : "show";
 
+      std::string path_display = path_arg;
+      if (path_display.size() > 50) {
+        path_display = "…" + path_display.substr(path_display.size() - 48);
+      }
+
       std::vector<ftxui::Element> rows;
-      rows.push_back(
-          ftxui::hbox({ftxui::text("[+] Listed " + path_arg + " (" +
-                                   std::to_string(num_items) + " items)") |
-                           ftxui::bold,
-                       ftxui::text(" [") | ftxui::dim, toggle->Render(),
-                       ftxui::text("]") | ftxui::dim}));
+      rows.push_back(ftxui::hbox(
+          {ftxui::text("▸ Listed " + path_display + " (" +
+                       std::to_string(num_items) + " items)") |
+               ftxui::bold | ftxui::color(ftxui::Color::RGB(100, 180, 220)) |
+               ftxui::flex_shrink,
+           ftxui::text("  [") | ftxui::dim, toggle->Render(),
+           ftxui::text("]") | ftxui::dim}));
 
       if (view->show_result) {
         if (!res.HasParseError() && res.IsArray()) {
@@ -78,8 +87,12 @@ ListDirectoryToolBlock(const std::shared_ptr<ToolCallView> &view) {
               prefix = "d ";
             }
             if (item.HasMember("name") && item["name"].IsString()) {
-              rows.push_back(ftxui::text(prefix + item["name"].GetString()) |
-                             ftxui::dim);
+              std::string name = item["name"].GetString();
+              if (name.size() > 60) {
+                name = name.substr(0, 58) + "…";
+              }
+              rows.push_back(ftxui::text(prefix + name) | ftxui::dim |
+                             ftxui::flex_shrink);
             }
           }
         }
@@ -89,11 +102,16 @@ ListDirectoryToolBlock(const std::shared_ptr<ToolCallView> &view) {
     }
 
     // Error state
-    std::string err_msg = view->result;
-    if (err_msg.empty())
-      err_msg = "unknown error";
-    return ftxui::text("[x] List " + path_arg + " failed: " + err_msg) |
-           ftxui::color(ftxui::Color::Red);
+    std::string err_msg = firmius::shared::ErrorCleaner::clean(view->result);
+    return ftxui::vbox({
+               ftxui::hbox(
+                   {ftxui::text("[x] List ") | ftxui::color(ftxui::Color::Red),
+                    ftxui::text(path_arg + " failed") | ftxui::bold |
+                        ftxui::color(ftxui::Color::RedLight)}),
+               ftxui::paragraph("  " + err_msg) |
+                   ftxui::color(ftxui::Color::RedLight) | ftxui::flex_shrink,
+           }) |
+           ftxui::flex_shrink;
   });
 }
 

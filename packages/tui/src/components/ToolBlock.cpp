@@ -1,11 +1,12 @@
 #include "components/ToolBlock.hpp"
 #include "components/FileEditToolBlock.hpp"
 #include "components/FileReadToolBlock.hpp"
+#include "components/GlintEffect.hpp"
 #include "components/ListDirectoryToolBlock.hpp"
 #include "components/ProcessExecuteToolBlock.hpp"
 #include "components/SubagentToolBlock.hpp"
-#include "components/LogWindow.hpp"
-#include "components/GlintEffect.hpp"
+#include "components/SubagentWaitToolBlock.hpp"
+#include "utils/ErrorCleaner.hpp"
 #include "utils/ToolSummaries.hpp"
 #include <ftxui/component/component.hpp>
 #include <ftxui/dom/elements.hpp>
@@ -17,7 +18,9 @@ namespace firmius::tui {
 using firmius::shared::SummarizeToolCall;
 using firmius::shared::TailLines;
 
-ftxui::Component ToolBlock(const std::shared_ptr<ToolCallView> &view) {
+ftxui::Component ToolBlock(const std::shared_ptr<ToolCallView> &view,
+                           HistoryGetter sub_history_getter,
+                           StreamGetter sub_stream_getter) {
   if (view) {
     if (view->name == "list_directory") {
       return ListDirectoryToolBlock(view);
@@ -29,9 +32,9 @@ ftxui::Component ToolBlock(const std::shared_ptr<ToolCallView> &view) {
                view->name == "process_spawn") {
       return ProcessExecuteToolBlock(view);
     } else if (view->name == "summon_subagent") {
-      return SubagentToolBlock(view);
+      return SubagentToolBlock(view, sub_history_getter, sub_stream_getter);
     } else if (view->name == "subagent_wait") {
-      return SubagentToolBlock(view);
+      return SubagentWaitToolBlock(view);
     }
   }
 
@@ -56,33 +59,39 @@ ftxui::Component ToolBlock(const std::shared_ptr<ToolCallView> &view) {
 
   auto toggle = ftxui::Button(opt);
   auto container = ftxui::Container::Horizontal({toggle});
-  
+
   return ftxui::Renderer(container, [view, toggle] {
     if (!view) {
       return ftxui::text("Tool call") | ftxui::dim;
     }
 
-    std::string summary = SummarizeToolCall(view->name, view->args, view->phase);
+    std::string summary =
+        SummarizeToolCall(view->name, view->args, view->phase);
 
     // Preparing state with animated glint
     if (view->phase == ToolPhase::Preparing ||
         view->phase == ToolPhase::Called) {
-      
+
       GlintConfig cfg;
       cfg.target = GlintConfig::Target::Text;
-      cfg.gradientColors = {ftxui::Color::RGB(100, 150, 255), ftxui::Color::White};
-      cfg.glintSize = 12;
-      cfg.intervalSeconds = 2;
-      cfg.durationSeconds = 1.5f;
+      cfg.gradientColors = {ftxui::Color::RGB(50, 100, 255),  // Deep blue
+                            ftxui::Color::RGB(100, 180, 255), // Sky blue
+                            ftxui::Color::White,
+                            ftxui::Color::RGB(100, 180, 255),
+                            ftxui::Color::RGB(50, 100, 255)};
+      cfg.glintSize = 14;
+      cfg.intervalSeconds = 1.5f;
+      cfg.durationSeconds = 1.2f;
       cfg.easing = GlintEasing::EaseInOut;
-      
+
       auto loading_text = ftxui::text("⟳ " + summary) | ftxui::bold;
       auto loading = GlintEffect(loading_text, cfg);
-      
-      return ftxui::hbox({
-        ftxui::text("▸ ") | ftxui::color(ftxui::Color::RGB(100, 150, 255)),
-        loading->Render() | ftxui::color(ftxui::Color::RGB(150, 200, 255))
-      }) | ftxui::dim;
+
+      return ftxui::hbox({ftxui::text("▸ ") |
+                              ftxui::color(ftxui::Color::RGB(100, 150, 255)),
+                          loading->Render() |
+                              ftxui::color(ftxui::Color::RGB(150, 200, 255))}) |
+             ftxui::dim;
     }
 
     // Success state
@@ -91,18 +100,20 @@ ftxui::Component ToolBlock(const std::shared_ptr<ToolCallView> &view) {
       bool can_toggle = !view->result.empty();
 
       ftxui::Elements rows;
-      
+
       // Header row with icon and toggle
       ftxui::Elements header;
-      header.push_back(ftxui::text("▸ ") | ftxui::color(ftxui::Color::RGB(100, 220, 150)));
-      header.push_back(ftxui::text(summary + " ") | ftxui::bold | ftxui::color(ftxui::Color::RGB(150, 255, 200)));
-      
+      header.push_back(ftxui::text("▸ ") |
+                       ftxui::color(ftxui::Color::RGB(100, 220, 150)));
+      header.push_back(ftxui::text(summary + " ") | ftxui::bold |
+                       ftxui::color(ftxui::Color::RGB(150, 255, 200)));
+
       if (can_toggle) {
-        header.push_back(ftxui::text("[" ) | ftxui::dim);
+        header.push_back(ftxui::text("[") | ftxui::dim);
         header.push_back(toggle->Render());
         header.push_back(ftxui::text("]") | ftxui::dim);
       }
-      
+
       rows.push_back(ftxui::hbox(header));
 
       // Expandable result
@@ -110,26 +121,30 @@ ftxui::Component ToolBlock(const std::shared_ptr<ToolCallView> &view) {
         auto tail = TailLines(view->result, 5);
         ftxui::Elements result_lines;
         for (const auto &line : tail) {
-          result_lines.push_back(ftxui::text(line) | ftxui::color(ftxui::Color::GrayLight));
+          result_lines.push_back(ftxui::text(line) |
+                                 ftxui::color(ftxui::Color::GrayLight));
         }
         rows.push_back(ftxui::separatorLight());
-        rows.push_back(ftxui::vbox(result_lines) | ftxui::frame | ftxui::size(ftxui::HEIGHT, ftxui::LESS_THAN, 8));
+        rows.push_back(ftxui::vbox(result_lines) | ftxui::frame |
+                       ftxui::size(ftxui::HEIGHT, ftxui::LESS_THAN, 8));
       }
 
       return ftxui::vbox(rows);
     }
 
     // Error state
-    std::string err = view->result;
-    if (err.empty())
-      err = "unknown error";
-    if (err.size() > 70)
-      err = err.substr(0, 67) + "…";
-    
-    return ftxui::hbox({
-      ftxui::text("▸ ") | ftxui::color(ftxui::Color::Red),
-      ftxui::text(summary + ": " + err) | ftxui::color(ftxui::Color::RedLight)
-    });
+    std::string err = firmius::shared::ErrorCleaner::clean(view->result);
+    if (err.size() > 200)
+      err = err.substr(0, 197) + "…";
+
+    return ftxui::vbox({
+               ftxui::hbox({ftxui::text("▸ ") | ftxui::color(ftxui::Color::Red),
+                            ftxui::text(summary) | ftxui::bold |
+                                ftxui::color(ftxui::Color::RedLight)}),
+               ftxui::paragraph("  " + err) |
+                   ftxui::color(ftxui::Color::RedLight) | ftxui::flex_shrink,
+           }) |
+           ftxui::flex_shrink;
   });
 }
 

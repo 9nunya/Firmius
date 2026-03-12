@@ -3,9 +3,9 @@
 #include "providers/ProviderRegistry.hpp"
 #include <algorithm>
 #include <cctype>
-#include <vector>
 #include <ftxui/component/component.hpp>
 #include <ftxui/dom/elements.hpp>
+#include <vector>
 
 namespace firmius::tui {
 
@@ -57,9 +57,12 @@ static int cursorLine(const std::string &text, int cursor) {
 }
 
 // Insert text at cursor position
-static void insertText(std::string &text, int &cursor, const std::string &insert) {
-  if (cursor < 0) cursor = 0;
-  if (cursor > static_cast<int>(text.size())) cursor = static_cast<int>(text.size());
+static void insertText(std::string &text, int &cursor,
+                       const std::string &insert) {
+  if (cursor < 0)
+    cursor = 0;
+  if (cursor > static_cast<int>(text.size()))
+    cursor = static_cast<int>(text.size());
   text.insert(text.begin() + cursor, insert.begin(), insert.end());
   cursor += static_cast<int>(insert.size());
 }
@@ -75,22 +78,24 @@ static int findBlockAtPos(const std::vector<PastedBlock> &blocks, size_t pos) {
 }
 
 // Remove block and clean up buffer
-static void removeBlock(std::string &buffer, int &cursor, 
+static void removeBlock(std::string &buffer, int &cursor,
                         std::vector<PastedBlock> &blocks, int block_idx) {
-  if (block_idx < 0 || block_idx >= static_cast<int>(blocks.size())) return;
-  
+  if (block_idx < 0 || block_idx >= static_cast<int>(blocks.size()))
+    return;
+
   auto &block = blocks[block_idx];
   size_t len = block.end_pos - block.start_pos;
-  
+
   // Remove from buffer
   buffer.erase(block.start_pos, len);
-  
+
   // Adjust cursor
   if (static_cast<size_t>(cursor) > block.start_pos) {
     cursor -= static_cast<int>(len);
-    if (cursor < 0) cursor = 0;
+    if (cursor < 0)
+      cursor = 0;
   }
-  
+
   // Adjust other blocks' positions
   for (auto &b : blocks) {
     if (b.start_pos > block.start_pos) {
@@ -98,7 +103,7 @@ static void removeBlock(std::string &buffer, int &cursor,
       b.end_pos -= len;
     }
   }
-  
+
   // Remove block from list
   blocks.erase(blocks.begin() + block_idx);
 }
@@ -113,9 +118,9 @@ namespace {
 constexpr size_t MAX_PROVIDER_SUGGESTIONS = 6;
 
 std::string toLowerAscii(std::string value) {
-  std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
-    return static_cast<char>(std::tolower(c));
-  });
+  std::transform(
+      value.begin(), value.end(), value.begin(),
+      [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
   return value;
 }
 
@@ -126,8 +131,8 @@ bool fuzzyMatchIgnoreCase(const std::string &text, const std::string &query) {
     return std::tolower(static_cast<unsigned char>(lhs)) ==
            std::tolower(static_cast<unsigned char>(rhs));
   };
-  return std::search(text.begin(), text.end(), query.begin(), query.end(), comp) !=
-         text.end();
+  return std::search(text.begin(), text.end(), query.begin(), query.end(),
+                     comp) != text.end();
 }
 
 std::string providerTypeLabel(firmius::provider::ProviderType type) {
@@ -161,6 +166,7 @@ buildProviderSuggestions(ArgType argType, const std::string &filter) {
         type != firmius::provider::ProviderType::OAuth) {
       continue;
     }
+    // ProviderId shows all providers (both OAuth and APIKey)
     const std::string id = provider->getId();
     if (!filter.empty() && !fuzzyMatchIgnoreCase(id, filter)) {
       continue;
@@ -170,12 +176,12 @@ buildProviderSuggestions(ArgType argType, const std::string &filter) {
     matches.push_back({id, providerTypeLabel(type), prefix});
   }
 
-  std::sort(matches.begin(), matches.end(), [](const ProviderSuggestion &lhs,
-                                               const ProviderSuggestion &rhs) {
-    if (lhs.is_prefix != rhs.is_prefix)
-      return lhs.is_prefix;
-    return lhs.id < rhs.id;
-  });
+  std::sort(matches.begin(), matches.end(),
+            [](const ProviderSuggestion &lhs, const ProviderSuggestion &rhs) {
+              if (lhs.is_prefix != rhs.is_prefix)
+                return lhs.is_prefix;
+              return lhs.id < rhs.id;
+            });
 
   if (matches.size() > MAX_PROVIDER_SUGGESTIONS)
     matches.resize(MAX_PROVIDER_SUGGESTIONS);
@@ -205,41 +211,51 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
     return state.element;
   };
 
+  auto in_paste = std::make_shared<bool>(false);
+  auto paste_buffer = std::make_shared<std::string>();
+  auto just_submitted = std::make_shared<bool>(false);
+
   auto input = ftxui::Input(opt);
-  auto with_keys = ftxui::CatchEvent(input, [model, on_submit, input, scroll_top,
-                                             suggestion_index](ftxui::Event event) {
+  auto with_keys = ftxui::CatchEvent(input, [model, on_submit, input,
+                                             scroll_top, suggestion_index,
+                                             in_paste, paste_buffer,
+                                             just_submitted](ftxui::Event event) {
     if (!model || !model->buffer || !model->cursor)
       return false;
 
+    // Skip processing if we just submitted (let input component catch up)
+    if (*just_submitted) {
+      *just_submitted = false;
+      return false;
+    }
+
     // Get raw input once for all handlers
     std::string raw = event.input();
-    
+
     // Handle bracketed paste (Ctrl+V or terminal paste)
     // Bracketed paste starts with \x1b[200~ and ends with \x1b[201~
-    static thread_local std::string paste_buffer;
-    static thread_local bool in_paste = false;
-    
     if (raw == "\x1b[200~") {
       // Start of bracketed paste
-      in_paste = true;
-      paste_buffer.clear();
+      *in_paste = true;
+      paste_buffer->clear();
       return true; // Consume the event
     }
-    
+
     if (raw == "\x1b[201~") {
       // End of bracketed paste - process the content
-      if (in_paste && !paste_buffer.empty()) {
+      if (*in_paste && !paste_buffer->empty()) {
         // Remove trailing newline if present
-        if (!paste_buffer.empty() && paste_buffer.back() == '\n') {
-          paste_buffer.pop_back();
+        if (!paste_buffer->empty() && paste_buffer->back() == '\n') {
+          paste_buffer->pop_back();
         }
-        
+
         // Count lines
-        int line_count = countLines(paste_buffer);
-        
-        // Check if it looks like image data (very long single line, base64-like)
-        bool is_likely_image = (line_count == 1 && paste_buffer.size() > 1000);
-        
+        int line_count = countLines(*paste_buffer);
+
+        // Check if it looks like image data (very long single line,
+        // base64-like)
+        bool is_likely_image = (line_count == 1 && paste_buffer->size() > 1000);
+
         if (is_likely_image) {
           // Add as image tag above input
           PastedBlock img_block;
@@ -249,37 +265,38 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
         } else if (line_count >= 2) {
           // Multi-line text - create pasted block placeholder
           std::string placeholder = createTextBlockPlaceholder(line_count);
-          
+
           // Insert placeholder at cursor
           insertText(*model->buffer, *model->cursor, placeholder);
-          
+
           // Register the block
           PastedBlock text_block;
           text_block.type = "text";
           text_block.id = generateBlockId();
           text_block.line_count = line_count;
-          text_block.content = paste_buffer;
+          text_block.content = *paste_buffer;
           text_block.start_pos = *model->cursor - placeholder.size();
           text_block.end_pos = *model->cursor;
           model->pasted_blocks.push_back(text_block);
         } else {
           // Single line - insert normally
-          insertText(*model->buffer, *model->cursor, paste_buffer);
+          insertText(*model->buffer, *model->cursor, *paste_buffer);
         }
-        
-        paste_buffer.clear();
-        in_paste = false;
+
+        paste_buffer->clear();
+        *in_paste = false;
       }
       return true; // Consume the event
     }
-    
-    if (in_paste) {
+
+    if (*in_paste) {
       // Accumulate paste content
-      paste_buffer += raw;
+      *paste_buffer += raw;
       return true; // Consume the event
     }
 
-    // Handle Ctrl+V as alternative paste trigger (for terminals without bracketed paste)
+    // Handle Ctrl+V as alternative paste trigger (for terminals without
+    // bracketed paste)
     if (event == ftxui::Event::Character("\x16")) {
       // This would need clipboard access - for now just pass through
       // In a real implementation, you'd access system clipboard here
@@ -287,7 +304,7 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
     }
 
     // Handle Ctrl+Shift+V (explicit text paste) - various encodings
-    if (raw == "\x1b[24;5~" || raw == "\x1b[24~" || 
+    if (raw == "\x1b[24;5~" || raw == "\x1b[24~" ||
         (raw.size() >= 2 && raw[0] == '\x1b' && raw[1] == 'V')) {
       return false; // Let terminal handle
     }
@@ -296,42 +313,45 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
     if (event == ftxui::Event::Delete || event == ftxui::Event::Backspace) {
       // Check if cursor is inside or at edge of a pasted block
       int block_idx = -1;
-      
+
       // For Delete key (forward delete)
       if (event == ftxui::Event::Delete) {
         block_idx = findBlockAtPos(model->pasted_blocks, *model->cursor);
         // Also check if we're right before a block
         if (block_idx < 0) {
           for (size_t i = 0; i < model->pasted_blocks.size(); ++i) {
-            if (static_cast<int>(model->pasted_blocks[i].start_pos) == *model->cursor) {
+            if (static_cast<int>(model->pasted_blocks[i].start_pos) ==
+                *model->cursor) {
               block_idx = static_cast<int>(i);
               break;
             }
           }
         }
-      } 
+      }
       // For Backspace key
       else {
         // Check if cursor is at end of a block
         for (size_t i = 0; i < model->pasted_blocks.size(); ++i) {
-          if (static_cast<int>(model->pasted_blocks[i].end_pos) == *model->cursor) {
+          if (static_cast<int>(model->pasted_blocks[i].end_pos) ==
+              *model->cursor) {
             block_idx = static_cast<int>(i);
             break;
           }
         }
         // Also check if inside a block
         if (block_idx < 0) {
-          block_idx = findBlockAtPos(model->pasted_blocks, 
+          block_idx = findBlockAtPos(model->pasted_blocks,
                                      std::max(0, *model->cursor - 1));
         }
       }
-      
+
       if (block_idx >= 0) {
         // Delete entire block
-        removeBlock(*model->buffer, *model->cursor, model->pasted_blocks, block_idx);
+        removeBlock(*model->buffer, *model->cursor, model->pasted_blocks,
+                    block_idx);
         return true;
       }
-      
+
       return false;
     }
 
@@ -341,14 +361,16 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
     if (ac && ((ac->is_typing_command_name && !ac->command_matches.empty()) ||
                (!ac->is_typing_command_name && ac->current_arg &&
                 (ac->current_arg->type == ArgType::Provider ||
-                 ac->current_arg->type == ArgType::OAuthProvider)))) {
+                 ac->current_arg->type == ArgType::OAuthProvider ||
+                 ac->current_arg->type == ArgType::ProviderId)))) {
 
       size_t match_count = 0;
       if (ac->is_typing_command_name) {
         match_count = std::min(ac->command_matches.size(), (size_t)5);
       } else {
         auto query = ac->has_current_arg_value ? ac->current_arg_value : "";
-        match_count = buildProviderSuggestions(ac->current_arg->type, query).size();
+        match_count =
+            buildProviderSuggestions(ac->current_arg->type, query).size();
       }
 
       if (match_count > 0) {
@@ -357,7 +379,8 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
           return true;
         }
         if (event == ftxui::Event::ArrowUp) {
-          *suggestion_index = (*suggestion_index + match_count - 1) % match_count;
+          *suggestion_index =
+              (*suggestion_index + match_count - 1) % match_count;
           return true;
         }
       } else {
@@ -371,9 +394,11 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
       if (ac) {
         if (ac->is_typing_command_name && !ac->command_matches.empty()) {
           size_t idx = static_cast<size_t>(*suggestion_index);
-          if (idx >= ac->command_matches.size()) idx = 0;
+          if (idx >= ac->command_matches.size())
+            idx = 0;
 
-          if (event == ftxui::Event::Return && ac->command_matches[idx].is_exact) {
+          if (event == ftxui::Event::Return &&
+              ac->command_matches[idx].is_exact) {
           } else {
             *model->buffer = "/" + ac->command_matches[idx].name + " ";
             *model->cursor = static_cast<int>(model->buffer->size());
@@ -382,21 +407,28 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
           }
         } else if (!ac->is_typing_command_name && ac->current_arg &&
                    (ac->current_arg->type == ArgType::Provider ||
-                    ac->current_arg->type == ArgType::OAuthProvider)) {
+                    ac->current_arg->type == ArgType::OAuthProvider ||
+                    ac->current_arg->type == ArgType::ProviderId)) {
           auto query = ac->has_current_arg_value ? ac->current_arg_value : "";
-          auto suggestions = buildProviderSuggestions(ac->current_arg->type, query);
+          auto suggestions =
+              buildProviderSuggestions(ac->current_arg->type, query);
           if (!suggestions.empty()) {
             size_t idx = static_cast<size_t>(*suggestion_index);
-            if (idx >= suggestions.size()) idx = 0;
+            if (idx >= suggestions.size())
+              idx = 0;
 
             std::string text = *model->buffer;
             size_t last_space = text.find_last_of(' ', *model->cursor - 1);
-            if (last_space == std::string::npos) last_space = 0;
-            else last_space++;
+            if (last_space == std::string::npos)
+              last_space = 0;
+            else
+              last_space++;
 
-            text.replace(last_space, *model->cursor - last_space, suggestions[idx].id + " ");
+            text.replace(last_space, *model->cursor - last_space,
+                         suggestions[idx].id + " ");
             *model->buffer = text;
-            *model->cursor = static_cast<int>(last_space + suggestions[idx].id.size() + 1);
+            *model->cursor =
+                static_cast<int>(last_space + suggestions[idx].id.size() + 1);
             *suggestion_index = 0;
             return true;
           }
@@ -413,6 +445,10 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
         model->image_tags.clear();
         *model->cursor = 0;
         *scroll_top = 0;
+        // Mark as just submitted to skip next input processing
+        *just_submitted = true;
+        // Consume the event - don't let input component insert newline
+        return true;
       }
       return true;
     }
@@ -448,17 +484,18 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
     return false;
   });
 
-  return ftxui::Renderer(with_keys, [with_keys, model, scroll_top, suggestion_index] {
+  return ftxui::Renderer(with_keys, [model, scroll_top, suggestion_index] {
     auto prompt = ftxui::text("> ") | ftxui::bold |
                   ftxui::color(ftxui::Color::RGB(140, 120, 200));
 
     // Render image tags above input
-    ftxui::Element image_tags_el = ftxui::text("");
+    std::optional<ftxui::Element> image_tags_el;
     if (model && !model->image_tags.empty()) {
       ftxui::Elements tag_elements;
       for (size_t i = 0; i < model->image_tags.size(); ++i) {
         auto tag = ftxui::text(" [Image " + std::to_string(i + 1) + "] ") |
-                   ftxui::color(ftxui::Color::Cyan) | ftxui::bgcolor(ftxui::Color::RGB(40, 40, 60));
+                   ftxui::color(ftxui::Color::Cyan) |
+                   ftxui::bgcolor(ftxui::Color::RGB(40, 40, 60));
         tag_elements.push_back(tag);
       }
       image_tags_el = ftxui::hbox(tag_elements);
@@ -471,7 +508,7 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
 
     auto ac = CommandManager::instance().getAutocomplete(
         model->buffer ? *model->buffer : "");
-    ftxui::Element autocomplete_layer = ftxui::text("");
+    std::optional<ftxui::Element> autocomplete_layer;
 
     if (ac && ac->is_typing_command_name && !ac->command_matches.empty()) {
       std::vector<ftxui::Element> match_elements;
@@ -480,7 +517,8 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
         bool is_selected = (i == static_cast<size_t>(*suggestion_index));
 
         auto match_text = ftxui::text("/" + match.name) | ftxui::bold |
-                          ftxui::color(is_selected ? ftxui::Color::Black : ftxui::Color::White);
+                          ftxui::color(is_selected ? ftxui::Color::Black
+                                                   : ftxui::Color::White);
         if (is_selected)
           match_text = match_text | ftxui::bgcolor(ftxui::Color::Cyan);
 
@@ -494,29 +532,45 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
       const auto &arg = *ac->current_arg;
       std::string type_str;
       switch (arg.type) {
-      case ArgType::String: type_str = "String"; break;
-      case ArgType::Number: type_str = "Number"; break;
-      case ArgType::AgentId: type_str = "AgentId"; break;
-      case ArgType::ThreadId: type_str = "ThreadId"; break;
-      case ArgType::Filepath: type_str = "Filepath"; break;
-      case ArgType::Provider: type_str = "Provider"; break;
-      case ArgType::OAuthProvider: type_str = "OAuth provider"; break;
+      case ArgType::String:
+        type_str = "String";
+        break;
+      case ArgType::Number:
+        type_str = "Number";
+        break;
+      case ArgType::AgentId:
+        type_str = "AgentId";
+        break;
+      case ArgType::ThreadId:
+        type_str = "ThreadId";
+        break;
+      case ArgType::Filepath:
+        type_str = "Filepath";
+        break;
+      case ArgType::Provider:
+        type_str = "Provider";
+        break;
+      case ArgType::OAuthProvider:
+        type_str = "OAuth provider";
+        break;
+      case ArgType::ProviderId:
+        type_str = "Provider ID";
+        break;
       }
 
-      auto header = ftxui::hbox({
-                          ftxui::text(arg.name) | ftxui::bold |
-                              ftxui::color(ftxui::Color::Cyan),
-                          ftxui::text(" [" + type_str +
-                                      (arg.optional ? ", opt" : "") + "] ") |
-                              ftxui::dim,
-                          ftxui::text(arg.description)});
+      auto header = ftxui::hbox(
+          {ftxui::text(arg.name) | ftxui::bold |
+               ftxui::color(ftxui::Color::Cyan),
+           ftxui::text(" [" + type_str + (arg.optional ? ", opt" : "") + "] ") |
+               ftxui::dim,
+           ftxui::text(arg.description)});
 
       const bool wants_provider_suggestions =
-          arg.type == ArgType::Provider || arg.type == ArgType::OAuthProvider;
+          arg.type == ArgType::Provider || arg.type == ArgType::OAuthProvider ||
+          arg.type == ArgType::ProviderId;
       if (wants_provider_suggestions) {
-        std::string query = ac->has_current_arg_value ?
-                                ac->current_arg_value :
-                                std::string();
+        std::string query =
+            ac->has_current_arg_value ? ac->current_arg_value : std::string();
         auto suggestions = buildProviderSuggestions(arg.type, query);
         ftxui::Element suggestion_body;
         if (!suggestions.empty()) {
@@ -525,11 +579,11 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
             const auto &match = suggestions[i];
             bool is_selected = (i == static_cast<size_t>(*suggestion_index));
             auto label = ftxui::text(" " + match.id) | ftxui::bold |
-                         ftxui::color(is_selected ? ftxui::Color::Black : ftxui::Color::GrayLight);
+                         ftxui::color(is_selected ? ftxui::Color::Black
+                                                  : ftxui::Color::GrayLight);
             if (is_selected)
               label = label | ftxui::bgcolor(ftxui::Color::Cyan);
-            auto meta = ftxui::text(" [" + match.type_label + "]") |
-                        ftxui::dim;
+            auto meta = ftxui::text(" [" + match.type_label + "]") | ftxui::dim;
             rows.push_back(ftxui::hbox({label, ftxui::filler(), meta}));
           }
           suggestion_body = ftxui::vbox(rows) | ftxui::yframe |
@@ -541,13 +595,12 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
           suggestion_body = ftxui::text(message) | ftxui::dim | ftxui::center;
         }
 
-        autocomplete_layer = ftxui::vbox(
-                                     {header, ftxui::separatorLight(),
-                                      suggestion_body}) |
-                             ftxui::bgcolor(ftxui::Color::RGB(40, 40, 60));
+        autocomplete_layer =
+            ftxui::vbox({header, ftxui::separatorLight(), suggestion_body}) |
+            ftxui::bgcolor(ftxui::Color::RGB(40, 40, 60));
       } else {
-        autocomplete_layer = header |
-                             ftxui::bgcolor(ftxui::Color::RGB(40, 40, 60));
+        autocomplete_layer =
+            header | ftxui::bgcolor(ftxui::Color::RGB(40, 40, 60));
       }
     }
 
@@ -557,118 +610,138 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
     // Helper to render buffer with pasted blocks highlighted
     auto renderBufferWithBlocks = [&]() -> ftxui::Element {
       if (model->pasted_blocks.empty()) {
-        // Simple case: no pasted blocks, manually wrap long lines
-        const std::string& content = *model->buffer;
+        const std::string &content = *model->buffer;
         int cursor = *model->cursor;
-        
-        // Split into lines and wrap long ones
+
+        if (content.empty()) {
+          std::string ph = model->placeholder;
+          if (ph.empty())
+            ph = " ";
+          return ftxui::hbox({ftxui::text(ph.substr(0, 1)) | ftxui::inverted |
+                                  ftxui::focus | ftxui::dim,
+                              ftxui::text(ph.substr(1)) | ftxui::dim});
+        }
+
         std::vector<std::string> raw_lines = splitLines(content);
         ftxui::Elements line_elements;
-        
+
         int char_pos = 0;
-        for (const auto& raw_line : raw_lines) {
-          // Wrap long lines to ~80 characters
-          const size_t WRAP_WIDTH = 80;
+        for (const auto &raw_line : raw_lines) {
+          const size_t WRAP_WIDTH =
+              std::max(20, ftxui::Terminal::Size().dimx - 10);
           size_t line_start = 0;
-          
-          while (line_start < raw_line.size()) {
-            size_t line_len = std::min(WRAP_WIDTH, raw_line.size() - line_start);
-            std::string segment = raw_line.substr(line_start, line_len);
-            
-            // Calculate cursor position for this segment
-            int seg_start = char_pos;
-            int seg_end = char_pos + segment.size();
-            bool cursor_here = (cursor >= seg_start && cursor <= seg_end);
-            
-            ftxui::Element seg_elem;
-            if (cursor_here) {
-              int local_cursor = cursor - seg_start;
-              if (local_cursor < static_cast<int>(segment.size())) {
-                seg_elem = ftxui::hbox({
-                  ftxui::text(segment.substr(0, local_cursor)),
-                  ftxui::text(segment.substr(local_cursor, 1)) | ftxui::inverted | ftxui::focus,
-                  ftxui::text(segment.substr(local_cursor + 1))
-                });
-              } else {
-                seg_elem = ftxui::hbox({
-                  ftxui::text(segment),
-                  ftxui::text(" ") | ftxui::inverted | ftxui::focus
-                });
-              }
+
+          if (raw_line.empty()) {
+            if (cursor == char_pos) {
+              line_elements.push_back(ftxui::hbox(
+                  {ftxui::text(" ") | ftxui::inverted | ftxui::focus}));
             } else {
-              seg_elem = ftxui::text(segment);
+              line_elements.push_back(ftxui::text(""));
             }
-            
-            line_elements.push_back(seg_elem);
-            char_pos += line_len;
-            line_start += line_len;
+          } else {
+            while (line_start < raw_line.size()) {
+              size_t line_len =
+                  std::min(WRAP_WIDTH, raw_line.size() - line_start);
+              std::string segment = raw_line.substr(line_start, line_len);
+
+              int seg_start = char_pos;
+              int seg_end = char_pos + segment.size();
+
+              line_start += line_len;
+              bool is_end_of_line = (line_start >= raw_line.size());
+
+              bool cursor_here = false;
+              if (is_end_of_line) {
+                cursor_here = (cursor >= seg_start && cursor <= seg_end);
+              } else {
+                cursor_here = (cursor >= seg_start && cursor < seg_end);
+              }
+
+              ftxui::Element seg_elem;
+              if (cursor_here) {
+                int local_cursor = cursor - seg_start;
+                if (local_cursor < static_cast<int>(segment.size())) {
+                  seg_elem = ftxui::hbox(
+                      {ftxui::text(segment.substr(0, local_cursor)),
+                       ftxui::text(segment.substr(local_cursor, 1)) |
+                           ftxui::inverted | ftxui::focus,
+                       ftxui::text(segment.substr(local_cursor + 1))});
+                } else {
+                  seg_elem = ftxui::hbox(
+                      {ftxui::text(segment),
+                       ftxui::text(" ") | ftxui::inverted | ftxui::focus});
+                }
+              } else {
+                seg_elem = ftxui::text(segment);
+              }
+
+              line_elements.push_back(seg_elem);
+              char_pos += line_len;
+            }
           }
-          
-          // Handle newline
-          if (char_pos < cursor) cursor++; // Account for newline in cursor position
-          char_pos++;
-          if (line_start >= raw_line.size()) {
-            line_elements.push_back(ftxui::text(""));
-          }
+          char_pos++; // Account for newline char
         }
-        
-        return ftxui::vbox(std::move(line_elements)) | ftxui::flex;
+
+        return ftxui::vbox(std::move(line_elements));
       }
-      
+
       // Custom rendering to show pasted blocks with special styling
       const std::string &buf = *model->buffer;
       int cursor = *model->cursor;
-      
+
       ftxui::Elements line_elements;
       std::vector<std::string> lines = splitLines(buf);
-      
+
       size_t buf_pos = 0;
       for (size_t line_idx = 0; line_idx < lines.size(); ++line_idx) {
         const std::string &line = lines[line_idx];
         ftxui::Elements line_parts;
-        
+
         size_t line_start = buf_pos;
         size_t line_end = buf_pos + line.size();
-        
+
         // Check for pasted blocks on this line
         bool has_block = false;
         for (const auto &block : model->pasted_blocks) {
-          if (block.type == "text" && 
-              block.start_pos >= line_start && block.start_pos <= line_end) {
+          if (block.type == "text" && block.start_pos >= line_start &&
+              block.start_pos <= line_end) {
             // Render text before block
             if (block.start_pos > line_start) {
-              std::string pre = buf.substr(line_start, block.start_pos - line_start);
-              bool cursor_here = (cursor >= static_cast<int>(line_start) && 
+              std::string pre =
+                  buf.substr(line_start, block.start_pos - line_start);
+              bool cursor_here = (cursor >= static_cast<int>(line_start) &&
                                   cursor < static_cast<int>(block.start_pos));
               if (cursor_here) {
                 int local_cursor = cursor - line_start;
                 line_parts.push_back(ftxui::text(pre.substr(0, local_cursor)));
-                line_parts.push_back(ftxui::text(pre.substr(local_cursor, 1)) | 
-                                    ftxui::inverted | ftxui::focus);
+                line_parts.push_back(ftxui::text(pre.substr(local_cursor, 1)) |
+                                     ftxui::inverted | ftxui::focus);
                 line_parts.push_back(ftxui::text(pre.substr(local_cursor + 1)));
               } else {
                 line_parts.push_back(ftxui::text(pre));
               }
             }
-            
+
             // Render block placeholder with special styling
-            std::string placeholder = createTextBlockPlaceholder(block.line_count);
-            bool cursor_in_block = (cursor >= static_cast<int>(block.start_pos) &&
-                                    cursor <= static_cast<int>(block.end_pos));
+            std::string placeholder =
+                createTextBlockPlaceholder(block.line_count);
+            bool cursor_in_block =
+                (cursor >= static_cast<int>(block.start_pos) &&
+                 cursor <= static_cast<int>(block.end_pos));
             auto block_el = ftxui::text(" " + placeholder + " ") |
-                           ftxui::bgcolor(ftxui::Color::RGB(60, 50, 80)) |
-                           ftxui::color(ftxui::Color::Cyan);
+                            ftxui::bgcolor(ftxui::Color::RGB(60, 50, 80)) |
+                            ftxui::color(ftxui::Color::Cyan);
             if (cursor_in_block) {
               block_el = block_el | ftxui::underlined;
             }
             line_parts.push_back(block_el);
-            
+
             has_block = true;
             buf_pos = block.end_pos;
             break;
           }
         }
-        
+
         // Render rest of line if no block or after block
         if (!has_block) {
           bool cursor_here = (cursor >= static_cast<int>(line_start) &&
@@ -680,11 +753,13 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
               line_parts.push_back(ftxui::text(line.substr(0, local_cursor)));
               if (local_cursor < static_cast<int>(line.size())) {
                 line_parts.push_back(ftxui::text(line.substr(local_cursor, 1)) |
-                                    ftxui::inverted | ftxui::focus);
-                line_parts.push_back(ftxui::text(line.substr(local_cursor + 1)));
+                                     ftxui::inverted | ftxui::focus);
+                line_parts.push_back(
+                    ftxui::text(line.substr(local_cursor + 1)));
               } else {
                 // Cursor at end of line
-                line_parts.push_back(ftxui::text(" ") | ftxui::inverted | ftxui::focus);
+                line_parts.push_back(ftxui::text(" ") | ftxui::inverted |
+                                     ftxui::focus);
               }
             } else {
               line_parts.push_back(ftxui::text(line));
@@ -699,19 +774,20 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
             line_parts.push_back(ftxui::text(post));
           }
         }
-        
+
         line_elements.push_back(ftxui::hbox(line_parts));
         buf_pos = line_end + 1; // +1 for newline
       }
-      
+
       // Handle empty last line with cursor
       if (lines.empty() || (buf.size() > 0 && buf.back() == '\n')) {
         if (cursor == static_cast<int>(buf.size())) {
-          line_elements.push_back(ftxui::text(" ") | ftxui::inverted | ftxui::focus);
+          line_elements.push_back(
+              ftxui::hbox({ftxui::text(" ") | ftxui::inverted | ftxui::focus}));
         }
       }
 
-      return ftxui::vbox(std::move(line_elements)) | ftxui::flex;
+      return ftxui::vbox(std::move(line_elements));
     };
 
     if (total_lines <= MAX_VISIBLE_LINES) {
@@ -720,11 +796,14 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
     } else {
       // Multi-line scrolling view
       auto all_lines = splitLines(model->buffer ? *model->buffer : "");
-      int max_scroll = std::max(0, static_cast<int>(all_lines.size()) - MAX_VISIBLE_LINES);
-      if (*scroll_top > max_scroll) *scroll_top = max_scroll;
-      if (*scroll_top < 0) *scroll_top = 0;
+      int max_scroll =
+          std::max(0, static_cast<int>(all_lines.size()) - MAX_VISIBLE_LINES);
+      if (*scroll_top > max_scroll)
+        *scroll_top = max_scroll;
+      if (*scroll_top < 0)
+        *scroll_top = 0;
 
-      int cursor_line = cursorLine(model->buffer ? *model->buffer : "", 
+      int cursor_line = cursorLine(model->buffer ? *model->buffer : "",
                                    model->cursor ? *model->cursor : 0);
       if (cursor_line < *scroll_top) {
         *scroll_top = cursor_line;
@@ -736,10 +815,11 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
       for (int k = 0; k < cursor_line; ++k) {
         cursor_col -= static_cast<int>(all_lines[k].size()) + 1;
       }
-      if (cursor_col < 0) cursor_col = 0;
+      if (cursor_col < 0)
+        cursor_col = 0;
 
       std::vector<ftxui::Element> visible_elements;
-      int end = std::min(*scroll_top + MAX_VISIBLE_LINES, 
+      int end = std::min(*scroll_top + MAX_VISIBLE_LINES,
                          static_cast<int>(all_lines.size()));
 
       for (int i = *scroll_top; i < end; ++i) {
@@ -769,11 +849,11 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
           }
 
           line_el = ftxui::hbox({
-                      ftxui::text(pre),
-                      ftxui::text(cur_char) | ftxui::inverted | ftxui::focus,
-                      ftxui::text(suf),
-                  }) |
-                  ftxui::color(ftxui::Color::RGB(220, 220, 240));
+                        ftxui::text(pre),
+                        ftxui::text(cur_char) | ftxui::inverted | ftxui::focus,
+                        ftxui::text(suf),
+                    }) |
+                    ftxui::color(ftxui::Color::RGB(220, 220, 240));
         } else {
           line_el = ftxui::text(all_lines[i]) |
                     ftxui::color(ftxui::Color::RGB(180, 180, 200));
@@ -783,20 +863,20 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
 
       std::string indicator;
       if (*scroll_top > 0 && end < static_cast<int>(all_lines.size())) {
-        indicator = " [" + std::to_string(cursor_line + 1) + "/" + 
+        indicator = " [" + std::to_string(cursor_line + 1) + "/" +
                     std::to_string(total_lines) + " \xe2\x86\x95]";
       } else if (*scroll_top > 0) {
-        indicator = " [" + std::to_string(cursor_line + 1) + "/" + 
+        indicator = " [" + std::to_string(cursor_line + 1) + "/" +
                     std::to_string(total_lines) + " \xe2\x86\x91]";
       } else if (end < static_cast<int>(all_lines.size())) {
-        indicator = " [" + std::to_string(cursor_line + 1) + "/" + 
+        indicator = " [" + std::to_string(cursor_line + 1) + "/" +
                     std::to_string(total_lines) + " \xe2\x86\x93]";
       }
 
       auto line_hint = ftxui::text(indicator) | ftxui::dim |
                        ftxui::color(ftxui::Color::RGB(100, 100, 140));
 
-      auto wrapped_content = ftxui::vbox(std::move(visible_elements)) | ftxui::flex;
+      auto wrapped_content = ftxui::vbox(std::move(visible_elements));
       ftxui::Elements input_parts;
       input_parts.push_back(wrapped_content);
       input_parts.push_back(line_hint);
@@ -805,11 +885,16 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
 
     auto input_area = ftxui::hbox({prompt, input_display});
 
-    return ftxui::vbox({
-        autocomplete_layer,
-        image_tags_el,
-        input_area,
-    });
+    ftxui::Elements root_elements;
+    if (autocomplete_layer) {
+      root_elements.push_back(*autocomplete_layer);
+    }
+    if (image_tags_el) {
+      root_elements.push_back(*image_tags_el);
+    }
+    root_elements.push_back(input_area);
+
+    return ftxui::vbox(std::move(root_elements));
   });
 }
 

@@ -23,13 +23,17 @@ ftxui::Component APIKeyWizardModal::create(TuiState &state) {
 
   auto providerName = providerName_;
 
+  // Bracketed paste handling
+  auto paste_buffer = std::make_shared<std::string>("");
+  auto in_paste = std::make_shared<bool>(false);
+
   auto opt = ftxui::InputOption::Default();
   opt.content = input_content.get();
   opt.placeholder = "sk-...";
-  
+
   auto input = ftxui::Input(opt);
 
-  auto renderer = ftxui::Renderer(input, [input_content, errorMessage, isDone, isError,
+  auto renderer = ftxui::Renderer([input_content, errorMessage, isDone, isError,
                                    resultMessage, providerName, input]() {
     ftxui::Elements content;
 
@@ -103,14 +107,17 @@ ftxui::Component APIKeyWizardModal::create(TuiState &state) {
            ftxui::clear_under | ftxui::center;
   });
 
+  // Single event handler that handles paste, global keys, and delegates to input
   return ftxui::CatchEvent(renderer, [input_content, isDone, isError, errorMessage,
-                                      resultMessage, wizard,
-                                      &state](ftxui::Event event) {
+                                      resultMessage, wizard, &state,
+                                      paste_buffer, in_paste, input](ftxui::Event event) {
+    // Handle Escape globally
     if (event == ftxui::Event::Escape) {
       state.popModalImmediate();
       return true;
     }
 
+    // Handle completion state
     if (*isDone) {
       if (event == ftxui::Event::Return) {
         state.popModalImmediate();
@@ -119,6 +126,31 @@ ftxui::Component APIKeyWizardModal::create(TuiState &state) {
       return false;
     }
 
+    // Handle bracketed paste
+    std::string raw = event.input();
+    if (raw == "\x1b[200~") {
+      *in_paste = true;
+      *paste_buffer = "";
+      return true;
+    }
+    if (raw == "\x1b[201~") {
+      if (*in_paste && !paste_buffer->empty()) {
+        if (!paste_buffer->empty() && paste_buffer->back() == '\n') {
+          paste_buffer->pop_back();
+        }
+        *input_content = *paste_buffer;
+        state.postEvent(ftxui::Event::Custom);
+      }
+      *in_paste = false;
+      paste_buffer->clear();
+      return true;
+    }
+    if (*in_paste) {
+      *paste_buffer += raw;
+      return true;
+    }
+
+    // Handle Enter for submission
     if (event == ftxui::Event::Return) {
       if (input_content->empty()) {
         *isError = true;
@@ -143,7 +175,8 @@ ftxui::Component APIKeyWizardModal::create(TuiState &state) {
       return true;
     }
 
-    return false;
+    // Let input handle everything else (character input, navigation, etc.)
+    return input->OnEvent(event);
   });
 }
 

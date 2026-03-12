@@ -3,29 +3,33 @@
 
 #include <ftxui/dom/elements.hpp>
 #include <string>
-#include <vector>
 #include <unordered_map>
-#include <memory>
-#include <filesystem>
+#include <vector>
+
+// tree-sitter C API
+extern "C" {
+#include <tree_sitter/api.h>
+}
+
+// Forward-declare each parser's language function (defined in their parser.c)
+extern "C" {
+const TSLanguage *tree_sitter_c(void);
+const TSLanguage *tree_sitter_cpp(void);
+const TSLanguage *tree_sitter_java(void);
+const TSLanguage *tree_sitter_rust(void);
+const TSLanguage *tree_sitter_python(void);
+const TSLanguage *tree_sitter_javascript(void);
+const TSLanguage *tree_sitter_typescript(void);
+const TSLanguage *tree_sitter_json(void);
+const TSLanguage *tree_sitter_yaml(void);
+const TSLanguage *tree_sitter_toml(void);
+const TSLanguage *tree_sitter_cmake(void);
+const TSLanguage *tree_sitter_lua(void);
+const TSLanguage *tree_sitter_luau(void);
+const TSLanguage *tree_sitter_markdown(void);
+}
 
 namespace firmius::tui {
-
-// Token types for syntax highlighting
-enum class TokenType {
-  Keyword,
-  Type,
-  Function,
-  Variable,
-  String,
-  Comment,
-  Number,
-  Operator,
-  Punctuation,
-  Constant,
-  Tag,
-  Attribute,
-  Plain
-};
 
 // Color scheme for syntax highlighting
 struct SyntaxColorScheme {
@@ -44,76 +48,91 @@ struct SyntaxColorScheme {
   ftxui::Color plain = ftxui::Color::RGB(200, 200, 220);
 };
 
-// A highlighted token
-struct HighlightedToken {
-  std::string text;
-  TokenType type = TokenType::Plain;
-};
-
-// Grammar metadata
+// Grammar metadata (all grammars are compiled in, no downloads needed)
 struct GrammarInfo {
   std::string name;
-  std::string version;
   std::vector<std::string> fileExtensions;
-  std::string downloadUrl;
-  bool downloaded = false;
-  bool downloading = false;
+  const TSLanguage *(*languageFn)(); // Function pointer to get TSLanguage
+};
+
+// Highlight category for a node
+enum class HighlightKind {
+  Plain,
+  Keyword,
+  Type,
+  Function,
+  Variable,
+  String,
+  Comment,
+  Number,
+  Operator,
+  Punctuation,
+  Constant,
+  Tag,
+  Attribute,
 };
 
 class SyntaxHighlighter {
 public:
-  static SyntaxHighlighter& instance();
-  
-  // Initialize - loads cached grammars
-  void initialize(const std::filesystem::path& cacheDir = 
-    std::filesystem::path(std::getenv("HOME") ? std::getenv("HOME") : "/tmp") / ".firmius" / "grammars");
-  
-  // Download grammar in background
-  void downloadGrammar(const std::string& language);
-  
-  // Check if grammar is available
-  bool hasGrammar(const std::string& language) const;
-  
+  static SyntaxHighlighter &instance();
+
+  // Initialize — registers all compiled-in grammars
+  void initialize();
+
+  // All grammars are always available (compiled in)
+  bool hasGrammar(const std::string &language) const;
+
   // Get grammar info
-  const GrammarInfo* getGrammarInfo(const std::string& language) const;
-  
-  // Get all available grammars
+  const GrammarInfo *getGrammarInfo(const std::string &language) const;
+
+  // Get all available language names
   std::vector<std::string> getAvailableLanguages() const;
-  
-  // Detect language from filename
-  std::string detectLanguage(const std::string& filename) const;
-  
-  // Highlight code
-  std::vector<HighlightedToken> highlight(const std::string& code, 
-                                           const std::string& language) const;
-  
-  // Highlight and render to FTXUI element
-  ftxui::Element highlightRender(const std::string& code,
-                                  const std::string& language,
-                                  bool showLineNumbers = true) const;
-  
-  // Get color scheme
-  const SyntaxColorScheme& getColorScheme() const { return colorScheme_; }
-  
-  // Set color scheme
-  void setColorScheme(const SyntaxColorScheme& scheme) { colorScheme_ = scheme; }
+
+  // Detect language from filename extension
+  std::string detectLanguage(const std::string &filename) const;
+
+  // Highlight code — returns the source as-is (use highlightRender for UI)
+  std::string highlight(const std::string &code,
+                        const std::string &language) const;
+
+  // Highlight and render to a vector of FTXUI elements (one per line)
+  std::vector<ftxui::Element>
+  highlightRenderLines(const std::string &code,
+                       const std::string &language) const;
+
+  // Highlight and render to a single FTXUI element (framed vbox)
+  ftxui::Element highlightRender(const std::string &code,
+                                 const std::string &language,
+                                 bool showLineNumbers = true) const;
+
+  // Color scheme accessors
+  const SyntaxColorScheme &getColorScheme() const { return colorScheme_; }
+  void setColorScheme(const SyntaxColorScheme &scheme) {
+    colorScheme_ = scheme;
+  }
 
 private:
   SyntaxHighlighter() = default;
-  
-  // Simple pattern-based highlighter (fallback when tree-sitter not available)
-  std::vector<HighlightedToken> highlightWithPatterns(const std::string& code,
-                                                       const std::string& language) const;
-  
-  std::filesystem::path cacheDir_;
+
+  // Classify a tree-sitter node into a highlight category
+  HighlightKind classifyNode(TSNode node, const std::string &language) const;
+
+  // Get FTXUI color for a highlight kind
+  ftxui::Color colorFor(HighlightKind kind) const;
+
+  // Collect leaf-node highlight spans from the AST
+  struct HighlightSpan {
+    uint32_t startByte;
+    uint32_t endByte;
+    HighlightKind kind;
+  };
+  void collectSpans(TSNode node, const std::string &language,
+                    std::vector<HighlightSpan> &spans) const;
+
   std::unordered_map<std::string, GrammarInfo> grammars_;
   SyntaxColorScheme colorScheme_;
   mutable bool initialized_ = false;
 };
-
-// Helper to render highlighted tokens
-ftxui::Element RenderHighlightedTokens(const std::vector<HighlightedToken>& tokens,
-                                        const SyntaxColorScheme& colors);
 
 } // namespace firmius::tui
 

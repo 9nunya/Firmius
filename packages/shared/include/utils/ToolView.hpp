@@ -12,6 +12,15 @@ enum class ToolPhase {
   Finished,
 };
 
+/**
+ * @brief Represents a single tool call entry in a subagent's tool log.
+ */
+struct SubagentToolLogEntry {
+  std::string summary;
+  ToolPhase phase = ToolPhase::Preparing;
+  std::string toolCallId;
+};
+
 struct ToolCallView {
   std::string agentId;
   std::string toolCallId;
@@ -23,11 +32,12 @@ struct ToolCallView {
   bool show_result = false;
   std::string toggle_label = "show";
   std::string live_process_output;
-  std::vector<std::string> subagent_tool_log;
+  std::vector<SubagentToolLogEntry> subagent_tool_log;
   std::string subagent_title;
   bool subagent_running = false;
   std::string last_subagent_tool_id;
   std::string subagent_slug;
+  std::string subagent_id;
 };
 
 } // namespace firmius::shared

@@ -254,6 +254,13 @@ std::string AntigravityProtocol::prepareRequestBody(const AgentHistory &history,
           rapidjson::Value p(rapidjson::kObjectType);
           p.AddMember("text", rapidjson::Value(text->text.c_str(), a), a);
           parts.PushBack(p, a);
+        } else if (auto *thk = std::get_if<ThinkingContent>(&part)) {
+          rapidjson::Value p(rapidjson::kObjectType);
+          p.AddMember("text", rapidjson::Value(thk->thinking.c_str(), a), a);
+          // If the model supports reasoning deltas, we might want to flag this
+          // for the proxy.
+          p.AddMember("thought", true, a);
+          parts.PushBack(p, a);
         } else if (auto *call = std::get_if<ToolCallContent>(&part)) {
           rapidjson::Value p(rapidjson::kObjectType);
           rapidjson::Value fn(rapidjson::kObjectType);
@@ -327,6 +334,13 @@ std::string AntigravityProtocol::prepareRequestBody(const AgentHistory &history,
           parts.PushBack(p, a);
         }
       }
+
+      if (parts.Empty()) {
+        rapidjson::Value p(rapidjson::kObjectType);
+        p.AddMember("text", rapidjson::Value("...", a), a);
+        parts.PushBack(p, a);
+      }
+
       turnObj.AddMember("parts", parts, a);
       contents.PushBack(turnObj, a);
 
@@ -380,7 +394,6 @@ std::string AntigravityProtocol::prepareRequestBody(const AgentHistory &history,
                     a);
   sysParts.PushBack(sysPart, a);
   sysInst.AddMember("parts", sysParts, a);
-  sysInst.AddMember("role", rapidjson::Value("user", a), a);
 
   req.AddMember("systemInstruction", sysInst, a);
   req.AddMember("contents", contents, a);

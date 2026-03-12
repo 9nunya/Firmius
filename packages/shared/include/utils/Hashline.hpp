@@ -51,4 +51,26 @@ public:
     static std::string enhance(std::string_view content);
 };
 
+/**
+ * @brief Removes hashline prefixes from text.
+ * @details Strips the "lineNum#hash|" prefix from each line, returning clean content.
+ *          Useful for displaying hashline-formatted text without the metadata.
+ */
+class HashlineTrimmer {
+public:
+    /**
+     * @brief Trims hashline prefix from a single line.
+     * @param line The hashline-formatted line (e.g., "1#f828|cmake_minimum_required...").
+     * @return The clean content without the hashline prefix.
+     */
+    static std::string trimLine(std::string_view line);
+
+    /**
+     * @brief Trims hashline prefixes from all lines in text.
+     * @param content Text with hashline-formatted lines.
+     * @return The clean text with all hashline prefixes removed.
+     */
+    static std::string trimAll(std::string_view content);
+};
+
 } // namespace firmius::shared::utils

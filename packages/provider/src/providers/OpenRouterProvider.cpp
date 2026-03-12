@@ -17,8 +17,16 @@ size_t writeCallback(char* ptr, size_t size, size_t nmemb, void* userdata) {
 
 OpenRouterProvider::OpenRouterProvider(const std::string& apiKey)
     : BaseOpenAIProvider("openrouter", "https://openrouter.ai/api/v1", apiKey) {
-    if (this->apiKey.empty()) {
-        this->apiKey = shared::EnvLoader::get("OPENROUTER_API_KEY");
+    // If no API key was provided and no accounts exist, try environment variable
+    if (getAccountCount() == 0) {
+        std::string envKey = shared::EnvLoader::get("OPENROUTER_API_KEY");
+        if (!envKey.empty()) {
+            APIKeyAccount acc;
+            acc.apiKey = envKey;
+            acc.keyPrefix = extractKeyPrefix(envKey);
+            acc.identifier = generateIdentifier();
+            addAccount(acc);
+        }
     }
 }
 

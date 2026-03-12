@@ -67,16 +67,16 @@ public:
       else if (item.context_percent > 0.60f)
         ctx_color = ftxui::Color::RGB(220, 180, 60);
       auto ctx_pct =
-          ftxui::text(" " +
-                      std::to_string(
-                          static_cast<int>(item.context_percent * 100)) +
-                      "%") |
+          ftxui::text(
+              " " +
+              std::to_string(static_cast<int>(item.context_percent * 100)) +
+              "%") |
           ftxui::color(ctx_color);
 
       // Ultra-compact tool badge
-      auto tool_badge = ftxui::text(" t:" +
-                                  std::to_string(item.tool_call_count)) |
-                        ftxui::dim | ftxui::color(ftxui::Color::GrayLight);
+      auto tool_badge =
+          ftxui::text(" t:" + std::to_string(item.tool_call_count)) |
+          ftxui::dim | ftxui::color(ftxui::Color::GrayLight);
 
       ftxui::Color row_bg = ftxui::Color::RGB(20, 20, 40);
       if (item.is_focused) {
@@ -84,8 +84,8 @@ public:
       }
 
       // Ultra-compact row layout: bullet | title | filler | state | tools | ctx
-      auto row = ftxui::hbox({bullet, title_el, ftxui::filler(),
-                              state, ftxui::text(" "), tool_badge, ctx_pct,
+      auto row = ftxui::hbox({bullet, title_el, ftxui::filler(), state,
+                              ftxui::text(" "), tool_badge, ctx_pct,
                               ftxui::text(" ")});
       rows.push_back(row | ftxui::bgcolor(row_bg));
     }
@@ -109,15 +109,19 @@ private:
       }
       GlintConfig cfg;
       cfg.target = GlintConfig::Target::Text;
-      cfg.gradientColors = {ftxui::Color::Blue, ftxui::Color::White};
-      cfg.glintSize = 14;
-      cfg.intervalSeconds = 3;
-      cfg.durationSeconds = 1.2f;
+      cfg.gradientColors = {ftxui::Color::RGB(0, 80, 255),    // Royal Blue
+                            ftxui::Color::RGB(100, 200, 255), // Electric Blue
+                            ftxui::Color::White,
+                            ftxui::Color::RGB(100, 200, 255),
+                            ftxui::Color::RGB(0, 80, 255)};
+      cfg.glintSize = 20;
+      cfg.intervalSeconds = 2.0f;
+      cfg.durationSeconds = 1.5f;
       cfg.easing = GlintEasing::EaseInOut;
-      glint_cache_[item.id] = GlintEffect(
-          ftxui::text(item.title) | ftxui::bold |
-              ftxui::color(ftxui::Color::RGB(180, 160, 220)),
-          cfg);
+      glint_cache_[item.id] =
+          GlintEffect(ftxui::text(item.title) | ftxui::bold |
+                          ftxui::color(ftxui::Color::RGB(180, 160, 220)),
+                      cfg);
       title_cache_[item.id] = item.title;
     }
     for (auto it = glint_cache_.begin(); it != glint_cache_.end();) {

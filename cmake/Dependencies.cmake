@@ -28,3 +28,6 @@ FetchContent_Declare(
 )
 
 FetchContent_MakeAvailable(rapidjson googletest ftxui)
+
+# Tree-sitter core + language parsers (compiled in at build time)
+include(cmake/TreeSitter.cmake)

@@ -32,6 +32,7 @@ target_sources(firmius PRIVATE
     src/components/ListDirectoryToolBlock.cpp
     src/components/ProcessExecuteToolBlock.cpp
     src/components/SubagentToolBlock.cpp
+    src/components/SubagentWaitToolBlock.cpp
     src/components/LogWindow.cpp
     src/components/Markdown.cpp
     src/components/ScrollableBox.cpp
@@ -52,6 +53,7 @@ target_link_libraries(firmius PRIVATE
     ftxui::screen
     ftxui::dom
     ftxui::component
+    tree_sitter_all
 )
 
 # Include rapidjson headers

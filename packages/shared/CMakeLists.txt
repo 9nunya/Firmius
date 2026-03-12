@@ -11,6 +11,7 @@ target_sources(firmius_shared PRIVATE
     src/utils/FSUtil.cpp
     src/utils/Hashline.cpp
     src/utils/Logger.cpp
+    src/utils/ErrorCleaner.cpp
     src/utils/ToolSummaries.cpp
     src/utils/TempOAuthServer.cpp
     src/utils/GCPHttpClient.cpp
@@ -44,6 +45,7 @@ target_sources(firmius_shared PUBLIC
     include/utils/FSUtil.hpp
     include/utils/Hashline.hpp
     include/utils/Logger.hpp
+    include/utils/ErrorCleaner.hpp
     include/utils/ToolSummaries.hpp
     include/utils/ToolView.hpp
     include/utils/TempOAuthServer.hpp
