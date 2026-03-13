@@ -62,7 +62,7 @@ std::string SummarizeToolCall(const std::string &name, const std::string &args, 
     std::string path = "";
     if (valid && doc.HasMember("path") && doc["path"].IsString())
       path = doc["path"].GetString();
-    return "List " + (path.empty() ? "." : baseName(path));
+    return "List " + (path.empty() ? "." : path);
   }
   if (name == "file_read") {
     std::string path = "";
@@ -75,7 +75,7 @@ std::string SummarizeToolCall(const std::string &name, const std::string &args, 
       if (doc.HasMember("end_line") && doc["end_line"].IsInt())
         end = doc["end_line"].GetInt();
     }
-    std::string s = "Read " + baseName(path);
+    std::string s = "Read " + path;
     if (start >= 0 && end >= 0)
       s += "[" + std::to_string(start) + ":" + std::to_string(end) + "]";
     return s;
@@ -84,7 +84,7 @@ std::string SummarizeToolCall(const std::string &name, const std::string &args, 
     std::string path = "";
     if (valid && doc.HasMember("path") && doc["path"].IsString())
       path = doc["path"].GetString();
-    return "Edit " + baseName(path);
+    return "Edit " + path;
   }
   if (name == "process_execute" || name == "process_spawn") {
     std::string cmd = "";

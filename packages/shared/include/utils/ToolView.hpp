@@ -10,6 +10,7 @@ enum class ToolPhase {
   Preparing,
   Called,
   Finished,
+  Error,
 };
 
 /**

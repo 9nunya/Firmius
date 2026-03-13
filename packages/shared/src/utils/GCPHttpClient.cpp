@@ -3,6 +3,7 @@
 #include <atomic>
 #include <thread>
 #include <future>
+#include <cstdio>
 
 namespace firmius::utils {
 
@@ -57,16 +58,6 @@ size_t GCPHttpClient::stringWriteCallback(char* ptr, size_t size, size_t nmemb, 
     auto* body = static_cast<std::string*>(userdata);
     body->append(ptr, size * nmemb);
     return size * nmemb;
-}
-
-/**
- * @brief Abort callback for CURL - called periodically during transfers.
- * @param clientp Pointer to std::atomic<bool>* abort signal
- * @return 1 to abort, 0 to continue
- */
-static int abortCallback(void* clientp, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
-    auto* abortSignal = static_cast<std::atomic<bool>*>(clientp);
-    return (abortSignal && abortSignal->load()) ? 1 : 0;
 }
 
 GCPHttpClient::Response GCPHttpClient::post(const std::string& url, const std::string& body, int timeoutSeconds) {
@@ -162,11 +153,12 @@ GCPHttpClient::Response GCPHttpClient::streamPost(const std::string& url,
         std::promise<Response> promise;
         std::atomic<bool>* abortSignal;
         int timeoutSeconds;
+        FILE* stderrFile = nullptr;
     };
 
     auto threadFunc = [](ThreadData* data) {
         Response resp;
-        
+
         // Check if already aborted before starting
         if (data->abortSignal && data->abortSignal->load()) {
             resp.error = "Request aborted before start";
@@ -174,6 +166,7 @@ GCPHttpClient::Response GCPHttpClient::streamPost(const std::string& url,
             data->promise.set_value(resp);
             if (data->headers) curl_slist_free_all(data->headers);
             if (data->curl) curl_easy_cleanup(data->curl);
+            if (data->stderrFile) fclose(data->stderrFile);
             delete data;
             return;
         }
@@ -188,6 +181,14 @@ GCPHttpClient::Response GCPHttpClient::streamPost(const std::string& url,
         curl_easy_setopt(data->curl, CURLOPT_XFERINFOFUNCTION, checkAbortCallback);
         curl_easy_setopt(data->curl, CURLOPT_XFERINFODATA, &localAbort);
         curl_easy_setopt(data->curl, CURLOPT_NOPROGRESS, 0L);
+        curl_easy_setopt(data->curl, CURLOPT_VERBOSE, 0L); // Disable verbose output
+        
+        // Suppress progress meter output to stderr
+        FILE* devnull = fopen("/dev/null", "w");
+        if (devnull) {
+            curl_easy_setopt(data->curl, CURLOPT_STDERR, devnull);
+            data->stderrFile = devnull;
+        }
 
         // Monitor abort signal in a separate thread
         std::thread monitorThread([data, &localAbort]() {
@@ -218,6 +219,7 @@ GCPHttpClient::Response GCPHttpClient::streamPost(const std::string& url,
         data->promise.set_value(resp);
         if (data->headers) curl_slist_free_all(data->headers);
         if (data->curl) curl_easy_cleanup(data->curl);
+        if (data->stderrFile) fclose(data->stderrFile);
         delete data;
     };
 

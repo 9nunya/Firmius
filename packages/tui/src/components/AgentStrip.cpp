@@ -70,8 +70,11 @@ public:
                        ftxui::color(purp_fg) | ftxui::bgcolor(purp_bg);
         auto sep2 = ftxui::text(firmius::shared::PL_LEFT_SEP) |
                     ftxui::color(purp_bg) | ftxui::bgcolor(mod_bg);
-        auto mod_el = ftxui::text(" " + item.model_name + " ") |
-                      ftxui::color(mod_fg) | ftxui::bgcolor(mod_bg);
+        auto mod_el =
+            ftxui::text(" " +
+                        firmius::shared::PrettifyModelName(item.model_name) +
+                        " ") |
+            ftxui::color(mod_fg) | ftxui::bgcolor(mod_bg);
         auto sep3 = ftxui::text(firmius::shared::PL_LEFT_SEP) |
                     ftxui::color(mod_bg) | ftxui::bgcolor(row_bg);
 
@@ -97,8 +100,9 @@ public:
                        ftxui::color(theme.agent_strip.pills.slug_fg);
           }
         } else {
+          // Not busy - show model name instead of title
           title_el =
-              ftxui::text(firmius::shared::PrettifyModelName(item.title)) |
+              ftxui::text(firmius::shared::PrettifyModelName(item.model_name)) |
               ftxui::bold | ftxui::color(theme.agent_strip.pills.slug_fg);
         }
         name_area = ftxui::hbox({icon_el, title_el});
@@ -153,10 +157,10 @@ public:
           ftxui::bgcolor(ctx_bg);
 
       // --- 5. Focus Indicator (Right Arrow) ---
-      ftxui::Element focus_arrow = ftxui::text("  ");
+      ftxui::Element focus_arrow = ftxui::text("");
       if (item.is_focused) {
-        focus_arrow = ftxui::text(" " + firmius::shared::PL_LEFT_SEP) |
-                      ftxui::color(row_bg) | ftxui::bgcolor(theme.base.bg);
+        focus_arrow = ftxui::text(firmius::shared::PL_LEFT_SEP + " ") |
+                      ftxui::color(row_bg) | ftxui::bgcolor(ctx_bg);
       }
 
       // Sequence: filler |  state |  tool |  ctx |  pct
@@ -168,7 +172,7 @@ public:
       auto rsep3 = ftxui::text(firmius::shared::PL_RIGHT_SEP) |
                    ftxui::color(ctx_bg) | ftxui::bgcolor(tool_bg);
 
-      auto row = ftxui::hbox({ftxui::text(" "), name_area, ftxui::filler(),
+      auto row = ftxui::hbox({name_area, ftxui::filler(),
                               rsep1, state_pill, rsep2, tool_pill, rsep3,
                               ctx_pill, focus_arrow});
 
@@ -198,7 +202,7 @@ private:
       const auto &theme = ThemeManager::instance().getCurrentTheme();
       if (!wide_mode) {
         if (glint_cache_.count(item.id) &&
-            title_cache_[item.id] == item.title &&
+            title_cache_[item.id] == item.model_name &&
             cached_theme_name_ == theme.name)
           continue;
         const auto &state = theme.agent_strip.item;
@@ -215,10 +219,10 @@ private:
         cfg.durationSeconds = 1.5f;
         cfg.easing = GlintEasing::EaseInOut;
         glint_cache_[item.id] = GlintEffect(
-            ftxui::text(firmius::shared::PrettifyModelName(item.title)) |
+            ftxui::text(firmius::shared::PrettifyModelName(item.model_name)) |
                 ftxui::bold | ftxui::color(theme.agent_strip.pills.slug_fg),
             cfg);
-        title_cache_[item.id] = item.title;
+        title_cache_[item.id] = item.model_name;
       } else {
         // Wide glint
         if (glint_cache_.count(item.id + "_wide") &&
@@ -246,8 +250,7 @@ private:
         ftxui::Color mod_bg = theme.agent_strip.pills.model_bg;
 
         auto slug_el =
-            ftxui::text(" " + firmius::shared::PrettifyModelName(item.title) +
-                        " ") |
+            ftxui::text(" " + item.title + " ") |
             ftxui::bold | ftxui::bgcolor(slug_bg);
         auto sep1 = ftxui::text(firmius::shared::PL_LEFT_SEP) |
                     ftxui::color(slug_bg) | ftxui::bgcolor(purp_bg);

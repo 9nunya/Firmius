@@ -380,8 +380,11 @@ void Harness::send(const std::string &text) {
       } else {
         auto agent = AgentRegistry::instance().getAgent(fid);
         if (agent && (agent->isRunning() || agent->isBooting())) {
-          agentRunning = true;
-          messageQueue_.push({messageId, text});
+          // Don't queue if agent is cancelled/interrupted - let the message go through
+          if (agent->getContext().state.currentStatus != AgentStatus::Cancelled) {
+            agentRunning = true;
+            messageQueue_.push({messageId, text});
+          }
         }
       }
     }
@@ -456,6 +459,9 @@ void Harness::abort() {
 
   agent->interrupt();
   
+  // Clear the message queue since we're aborting the current operation
+  clearQueue();
+
   // If focused agent is a subagent (has parentId), only interrupt it
   // If focused agent is a lead agent (no parentId), do NOT cancel async=true subagents
   // The subagent tool already handles cancellation of async=false subagents when parent is interrupted

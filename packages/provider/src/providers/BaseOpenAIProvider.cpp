@@ -12,6 +12,7 @@
 #include <thread>
 #include <future>
 #include <atomic>
+#include <cstdio>
 
 namespace firmius::provider {
 
@@ -57,16 +58,6 @@ size_t sseWriteCallback(char *ptr, size_t size, size_t nmemb, void *userdata) {
   }
 
   return size * nmemb;
-}
-
-/**
- * @brief Abort callback for CURL - called periodically during transfers.
- * @param clientp Pointer to std::atomic<bool> abort signal
- * @return 1 to abort, 0 to continue
- */
-static int abortCallback(void* clientp, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
-  auto* abortSignal = static_cast<std::atomic<bool>*>(clientp);
-  return (abortSignal && abortSignal->load()) ? 1 : 0;
 }
 
 std::string roleToString(Role r) {
@@ -258,14 +249,18 @@ void BaseOpenAIProvider::stream(
 
     // Use threaded CURL execution for immediate interrupt support
     struct CURLTask {
-      CURL* curl;
-      StreamContext* ctx;
-      HeaderCaptureContext* headerCtx;
-      std::atomic<bool>* abortSignal;
+      CURL* curl = nullptr;
+      StreamContext* ctx = nullptr;
+      HeaderCaptureContext* headerCtx = nullptr;
+      std::atomic<bool>* abortSignal = nullptr;
       std::promise<std::pair<CURLcode, long>> promise;
     };
 
-    CURLTask* task = new CURLTask{curl, &ctx, &currentHeaderCtx, opts.abortSignal};
+    CURLTask* task = new CURLTask();
+    task->curl = curl;
+    task->ctx = &ctx;
+    task->headerCtx = &currentHeaderCtx;
+    task->abortSignal = opts.abortSignal;
     
     auto curlThreadFunc = [](CURLTask* t) {
       // Check abort before starting
@@ -284,9 +279,16 @@ void BaseOpenAIProvider::stream(
       curl_easy_setopt(t->curl, CURLOPT_XFERINFOFUNCTION, progressCallback);
       curl_easy_setopt(t->curl, CURLOPT_XFERINFODATA, &shouldAbort);
       curl_easy_setopt(t->curl, CURLOPT_NOPROGRESS, 0L);
+      curl_easy_setopt(t->curl, CURLOPT_VERBOSE, 0L); // Disable verbose output
+      
+      // Suppress progress meter output to stderr
+      FILE* devnull = fopen("/dev/null", "w");
+      if (devnull) {
+        curl_easy_setopt(t->curl, CURLOPT_STDERR, devnull);
+      }
 
       // Monitor thread that watches abort signal
-      std::thread monitor([t, &shouldAbort]() {
+      std::thread monitor([t, &shouldAbort, devnull]() {
         while (!shouldAbort.load()) {
           if (t->abortSignal && t->abortSignal->load()) {
             shouldAbort.store(true);
@@ -296,6 +298,7 @@ void BaseOpenAIProvider::stream(
           }
           std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
+        if (devnull) fclose(devnull);
       });
 
       CURLcode code = curl_easy_perform(t->curl);
@@ -863,17 +866,74 @@ void BaseOpenAIProvider::generateSummary(
     curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, headerCallback);
     curl_easy_setopt(curl, CURLOPT_HEADERDATA, &currentHeaderCtx);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 60L);
-    
-    // Enable abort callback if abort signal is provided
-    if (abortSignal) {
-      curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, abortCallback);
-      curl_easy_setopt(curl, CURLOPT_XFERINFODATA, abortSignal);
-      curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
-    }
 
-    CURLcode res = curl_easy_perform(curl);
-    long responseCode = 0;
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &responseCode);
+    // Use threaded CURL execution for immediate interrupt support
+    struct CURLTask {
+      CURL* curl = nullptr;
+      StreamContext* ctx = nullptr;
+      HeaderCaptureContext* headerCtx = nullptr;
+      std::atomic<bool>* abortSignal = nullptr;
+      std::promise<std::pair<CURLcode, long>> promise;
+    };
+
+    CURLTask* task = new CURLTask();
+    task->curl = curl;
+    task->ctx = &ctx;
+    task->headerCtx = &currentHeaderCtx;
+    task->abortSignal = abortSignal;
+    
+    auto curlThreadFunc = [](CURLTask* t) {
+      if (t->abortSignal && t->abortSignal->load()) {
+        t->promise.set_value({CURLE_ABORTED_BY_CALLBACK, 0});
+        delete t;
+        return;
+      }
+
+      std::atomic<bool> shouldAbort{false};
+      auto progressCallback = [](void* clientp, curl_off_t, curl_off_t, curl_off_t, curl_off_t) -> int {
+        auto* flag = static_cast<std::atomic<bool>*>(clientp);
+        return (flag && flag->load()) ? 1 : 0;
+      };
+      curl_easy_setopt(t->curl, CURLOPT_XFERINFOFUNCTION, progressCallback);
+      curl_easy_setopt(t->curl, CURLOPT_XFERINFODATA, &shouldAbort);
+      curl_easy_setopt(t->curl, CURLOPT_NOPROGRESS, 0L);
+      curl_easy_setopt(t->curl, CURLOPT_VERBOSE, 0L); // Disable verbose output
+      
+      // Suppress progress meter output to stderr
+      FILE* devnull = fopen("/dev/null", "w");
+      if (devnull) {
+        curl_easy_setopt(t->curl, CURLOPT_STDERR, devnull);
+      }
+
+      std::thread monitor([t, &shouldAbort, devnull]() {
+        while (!shouldAbort.load()) {
+          if (t->abortSignal && t->abortSignal->load()) {
+            shouldAbort.store(true);
+            curl_easy_pause(t->curl, CURLPAUSE_ALL);
+            break;
+          }
+          std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        if (devnull) fclose(devnull);
+      });
+
+      CURLcode code = curl_easy_perform(t->curl);
+      shouldAbort.store(true);
+      monitor.join();
+
+      long responseCode = 0;
+      curl_easy_getinfo(t->curl, CURLINFO_RESPONSE_CODE, &responseCode);
+      t->promise.set_value({code, responseCode});
+      delete t;
+    };
+
+    std::thread curlThread(curlThreadFunc, task);
+    curlThread.detach();
+
+    auto future = task->promise.get_future();
+    future.wait();
+    auto [resCode, responseCode] = future.get();
+    CURLcode res = resCode;
 
     if (res == CURLE_OK && responseCode < 400) {
       break;

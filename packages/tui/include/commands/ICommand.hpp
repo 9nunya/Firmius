@@ -41,6 +41,10 @@ public:
   // Ordered list of parsed arguments mapped 1:1 with args()
   virtual void execute(CommandCtx &ctx,
                        const std::vector<ParsedArg> &parsed_args) = 0;
+
+  // Returns true if this command creates/uses an agent thread (e.g., workflows)
+  // Returns false for utility commands (e.g., /threads, /help, /config)
+  virtual bool isWorkflow() const { return false; }
 };
 
 } // namespace firmius::tui

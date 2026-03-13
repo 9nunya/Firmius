@@ -342,6 +342,7 @@ void StreamStateManager::handleAgentCompleted(const shared::AgentCompleted &e) {
       entry.toolCallId = "";
       it_parent->second->subagent_tool_log.push_back(entry);
       it_parent->second->subagent_running = false;
+      it_parent->second->phase = ToolPhase::Finished; // Mark tool as finished when subagent completes
     }
   }
 }

@@ -169,7 +169,7 @@ ftxui::Component SubagentToolBlock(const std::shared_ptr<ToolCallView> &view,
     }
 
     bool status_spawned =
-        (view->phase == ToolPhase::Finished && view->success &&
+        (view->phase == ToolPhase::Called && view->success &&
          (view->result.find("\"status\":\"spawned\"") != std::string::npos ||
           view->result.find("\"status\":\"re-tasked\"") != std::string::npos));
 

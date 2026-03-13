@@ -154,4 +154,12 @@ bool CommandManager::executeCommand(CommandCtx &ctx, const std::string &input) {
   return true;
 }
 
+std::shared_ptr<ICommand> CommandManager::getCommand(const std::string &name) const {
+  auto it = commands_.find(name);
+  if (it != commands_.end()) {
+    return it->second;
+  }
+  return nullptr;
+}
+
 } // namespace firmius::tui

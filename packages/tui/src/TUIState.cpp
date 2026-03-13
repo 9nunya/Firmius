@@ -399,7 +399,7 @@ void TuiState::updateAgentStripModel() {
     item.title = ctx.identity.friendlyName.empty() ? ctx.identity.name
                                                    : ctx.identity.friendlyName;
     item.purpose = ctx.identity.role;
-    item.model_name = ctx.config.providerId + "/" + ctx.config.modelId;
+    item.model_name = ctx.config.modelId; // Use modelId directly, PrettifyModelName handles prefixes
     item.status_text = statusToString(ctx.state.currentStatus);
     item.is_busy = ctx.state.currentStatus == AgentStatus::Streaming ||
                    ctx.state.currentStatus == AgentStatus::ExecutingTool ||
@@ -466,8 +466,38 @@ ftxui::Component TuiState::root() {
   auto input_bar = InputBar(input_model_, [this](const std::string &text) {
     if (!text.empty() && text[0] == '/') {
       CommandCtx ctx{this};
-      if (firmius::tui::CommandManager::instance().executeCommand(ctx, text)) {
-        return; // Command handled successfully
+      auto &cmdManager = firmius::tui::CommandManager::instance();
+      
+      // Check if this is a workflow command before executing
+      bool is_workflow_command = false;
+      std::string content = text.substr(1);
+      size_t space_pos = content.find(' ');
+      std::string cmd_name = (space_pos == std::string::npos) ? content : content.substr(0, space_pos);
+      
+      auto it = cmdManager.getCommand(cmd_name);
+      if (it && it->isWorkflow()) {
+        is_workflow_command = true;
+      }
+      
+      if (cmdManager.executeCommand(ctx, text)) {
+        // Command handled successfully
+        // If on welcome screen and this is a workflow command, create thread and switch to chat mode
+        if (view_mode_ == ViewMode::Welcome && harness_ && is_workflow_command) {
+          std::string cwd = std::filesystem::current_path().string();
+          std::string newThreadId = harness_->newThread({}, cwd, "firmius");
+          
+          // Sync UI with the newly created lead agent
+          auto agents = harness_->listAgents(newThreadId);
+          if (!agents.empty()) {
+            focused_agent_id_ = agents.front();
+            history_ = harness_->getAgentHistoryPtr(focused_agent_id_);
+            if (chat_component_) {
+              chat_component_->OnEvent(ftxui::Event::Special("ThreadChanged"));
+            }
+          }
+          setViewMode(ViewMode::Chat);
+        }
+        return;
       }
     }
 
@@ -520,6 +550,12 @@ ftxui::Component TuiState::root() {
         };
 
         if (s) {
+          // Show thinking content immediately (for reasoning models)
+          if (!s->thinking.empty()) {
+            live_rows.push_back(
+                decorateMsg(firmius::tui::RenderMarkdown(s->thinking, true)));
+          }
+          // Show text content
           if (!s->text.empty()) {
             live_rows.push_back(
                 decorateMsg(firmius::tui::RenderMarkdown(s->text)));

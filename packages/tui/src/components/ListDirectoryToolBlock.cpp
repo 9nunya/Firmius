@@ -110,14 +110,20 @@ ListDirectoryToolBlock(const std::shared_ptr<ToolCallView> &view) {
       return ftxui::vbox(rows);
     }
 
+    // ── Error ──
+    view->phase = ToolPhase::Error;
     using namespace firmius::shared;
-    // Error state
     std::string err_msg = firmius::shared::ErrorCleaner::clean(view->result);
+    std::string path_display = path_arg.empty() ? "." : path_arg;
+    if (path_display.size() > 50) {
+      path_display = "…" + path_display.substr(path_display.size() - 48);
+    }
     return ftxui::vbox({
                ftxui::hbox(
                    {ftxui::text(" " + ICON_ERROR + " ") |
                         ftxui::color(theme.status_bar.error.normal.fg),
-                    ftxui::text(path_arg + " failed") | ftxui::bold |
+                    ftxui::text("list_directory \"" + path_display + "\" failed") |
+                        ftxui::bold |
                         ftxui::color(theme.status_bar.error.normal.fg)}),
                ftxui::paragraph("  " + err_msg) |
                    ftxui::color(theme.status_bar.error.normal.fg) |

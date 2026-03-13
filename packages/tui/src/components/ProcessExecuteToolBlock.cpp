@@ -84,7 +84,7 @@ ProcessExecuteToolBlock(const std::shared_ptr<ToolCallView> &view) {
       std::string footer = cmd_display;
       rows.push_back(LogWindow(out_lines, footer));
       return ftxui::vbox(rows) | ftxui::borderRounded |
-             ftxui::color(theme.tool_blocks.specific.terminal.bg);
+             ftxui::color(theme.tool_blocks.specific.terminal.fg);
     }
 
     // ── Finished + error ──

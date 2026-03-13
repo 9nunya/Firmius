@@ -19,6 +19,7 @@ public:
   std::vector<CommandArg> args() const override;
   void execute(CommandCtx &ctx,
                const std::vector<ParsedArg> &args) override;
+  bool isWorkflow() const override { return true; }
 
 private:
   firmius::core::Workflow workflow_;

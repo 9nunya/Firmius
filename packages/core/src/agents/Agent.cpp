@@ -78,7 +78,10 @@ std::string Agent::resolvePath(const std::string &inputPath) const {
   return shared::FSUtil::resolvePath(inputPath, context.environment.cwd);
 }
 
-void Agent::interrupt() { interrupted = true; }
+void Agent::interrupt() {
+  interrupted = true;
+  running = false; // Allow immediate re-tasking after interrupt
+}
 
 void Agent::setModel(const std::string &providerId,
                      const std::string &modelId) {
@@ -419,6 +422,13 @@ void Agent::run(const std::string &task,
           turnStopReason = done->reason;
         } else if (auto *err = std::get_if<StreamError>(&ev)) {
           onEvent(ev);
+          // Don't treat abort/interrupt errors as stream errors
+          if (err->message.find("interrupted") != std::string::npos ||
+              err->message.find("aborted") != std::string::npos ||
+              err->message.find("Cancelled") != std::string::npos) {
+            context.state.currentStatus = AgentStatus::Cancelled;
+            return;
+          }
           streamError = err->message;
         } else {
           onEvent(ev);
@@ -470,6 +480,11 @@ void Agent::run(const std::string &task,
       // If there was a stream error and no content came back, retry
       if (!streamError.empty() && fullResponse.empty() &&
           accumulatedToolChunks.empty()) {
+        // Don't retry if user interrupted
+        if (interrupted.load()) {
+          context.state.currentStatus = AgentStatus::Cancelled;
+          return;
+        }
         consecutiveProviderFailures++;
         if (consecutiveProviderFailures > maxProviderRetries) {
           throw std::runtime_error("Provider stream error: " + streamError);
@@ -483,6 +498,7 @@ void Agent::run(const std::string &task,
         if (!interruptibleSleep(std::chrono::seconds(retryDelaySec),
                                 &interrupted)) {
           // Interrupted during retry delay
+          context.state.currentStatus = AgentStatus::Cancelled;
           return;
         }
         continue;
@@ -535,6 +551,11 @@ void Agent::run(const std::string &task,
       // --- Check for termination ---
       if (accumulatedToolChunks.empty()) {
         if (fullResponse.empty() && fullThinking.empty()) {
+          // Don't error if user interrupted
+          if (interrupted.load()) {
+            context.state.currentStatus = AgentStatus::Cancelled;
+            return;
+          }
           throw std::runtime_error(
               "Provider returned empty response (timeout or model failure)");
         }
@@ -846,14 +867,18 @@ void Agent::compactContext(
   std::string fullSummary;
   std::string fullThinking;
 
-  if (interrupted.load())
+  if (interrupted.load()) {
+    context.state.currentStatus = AgentStatus::Cancelled;
     return;
+  }
 
   provider->generateSummary(
       context.config.modelId, *context.history, fullCompactionPrompt,
       [&](const StreamEvent &ev) {
-        if (interrupted.load())
+        if (interrupted.load()) {
+          context.state.currentStatus = AgentStatus::Cancelled;
           return;
+        }
         if (auto *act = std::get_if<AgentCompactionText>(&ev)) {
           fullSummary += act->delta;
           onEvent(AgentCompactionText{context.identity.id, act->delta,

@@ -41,6 +41,9 @@ public:
   // Returns true if a command was executed, false otherwise
   bool executeCommand(CommandCtx &ctx, const std::string &input);
 
+  // Get a command by name (for checking command type before execution)
+  std::shared_ptr<ICommand> getCommand(const std::string &name) const;
+
 private:
   CommandManager() = default;
   ~CommandManager() = default;
