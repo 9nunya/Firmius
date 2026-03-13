@@ -34,6 +34,28 @@ static std::string trim(const std::string &s) {
   return s.substr(start, end - start);
 }
 
+static std::string collapseWhitespace(const std::string &s) {
+  std::string out;
+  out.reserve(s.size());
+  bool in_ws = false;
+  for (char c : s) {
+    if (std::isspace(static_cast<unsigned char>(c))) {
+      if (!in_ws) {
+        out.push_back(' ');
+        in_ws = true;
+      }
+      continue;
+    }
+    in_ws = false;
+    out.push_back(c);
+  }
+  if (!out.empty() && out.front() == ' ')
+    out.erase(out.begin());
+  if (!out.empty() && out.back() == ' ')
+    out.pop_back();
+  return out;
+}
+
 // These functions are used by table rendering which is conditionally compiled
 #ifdef __GNUC__
 #pragma GCC diagnostic push
@@ -230,72 +252,89 @@ static std::vector<std::string> wrapTokens(const std::string &text,
 }
 
 static ftxui::Element renderInline(const std::string &text, bool dim) {
-  if (text.empty()) {
+  std::string cleaned = collapseWhitespace(text);
+  if (cleaned.empty()) {
     return ftxui::text("");
   }
 
   // For simple text without formatting, use paragraph for proper wrapping
-  if (text.find('*') == std::string::npos &&
-      text.find('`') == std::string::npos) {
-    auto e = ftxui::paragraph(text);
+  if (cleaned.find('*') == std::string::npos &&
+      cleaned.find('`') == std::string::npos) {
+    auto e = ftxui::paragraph(cleaned);
     if (dim)
       e = e | ftxui::dim;
     return e;
   }
 
-  // Parse inline styles (bold, italic, code)
-  struct Span {
+  // Parse inline styles (bold, italic, code) into tokens.
+  struct Token {
     std::string text;
     bool bold = false;
     bool italic = false;
     bool code = false;
+    bool is_space = false;
   };
-  std::vector<Span> spans;
-  Span cur;
+  std::vector<Token> tokens;
+  Token cur;
   bool bold = false;
   bool italic = false;
   bool code = false;
 
-  auto flush = [&] {
+  auto flush_word = [&] {
     if (!cur.text.empty()) {
       cur.bold = bold;
       cur.italic = italic;
       cur.code = code;
-      spans.push_back(cur);
+      cur.is_space = false;
+      tokens.push_back(cur);
       cur.text.clear();
     }
   };
 
-  for (size_t i = 0; i < text.size(); ++i) {
-    if (!code && i + 1 < text.size() && text[i] == '*' && text[i + 1] == '*') {
-      flush();
+  for (size_t i = 0; i < cleaned.size(); ++i) {
+    if (!code && i + 1 < cleaned.size() && cleaned[i] == '*' &&
+        cleaned[i + 1] == '*') {
+      flush_word();
       bold = !bold;
       ++i;
       continue;
     }
-    if (!code && text[i] == '*') {
-      flush();
+    if (!code && cleaned[i] == '*') {
+      flush_word();
       italic = !italic;
       continue;
     }
-    if (text[i] == '`') {
-      flush();
+    if (cleaned[i] == '`') {
+      flush_word();
       code = !code;
       continue;
     }
-    cur.text.push_back(text[i]);
+    if (cleaned[i] == ' ') {
+      flush_word();
+      if (!tokens.empty() && tokens.back().is_space)
+        continue;
+      Token space;
+      space.text = " ";
+      space.bold = bold;
+      space.italic = italic;
+      space.code = code;
+      space.is_space = true;
+      tokens.push_back(space);
+      continue;
+    }
+    cur.text.push_back(cleaned[i]);
   }
-  flush();
+  flush_word();
 
-  // Build styled elements - use paragraph for each span to enable wrapping
+  // Build styled elements from tokens.
   ftxui::Elements elems;
-  for (const auto &sp : spans) {
-    auto e = ftxui::paragraph(sp.text);
-    if (sp.bold)
+  for (const auto &tok : tokens) {
+    auto e = ftxui::text(tok.text);
+    if (tok.bold)
       e = e | ftxui::bold;
-    if (sp.italic)
+    if (tok.italic)
       e = e | ftxui::dim;
-    if (sp.code)
+    if (tok.code)
       e = e | ftxui::dim | ftxui::color(ftxui::Color::RGB(100, 180, 160));
     if (dim)
       e = e | ftxui::dim;
@@ -315,7 +354,7 @@ ftxui::Element RenderMarkdown(const std::string &text, bool dim) {
                             ? g_markdown_width
                             : (term_width > 0 ? term_width : 80);
   // Reserve space for borders, prefixes, and padding
-  int content_width = std::max(20, effective_width - 4);
+  int content_width = std::max(10, effective_width - 4);
 
   std::vector<ftxui::Element> out;
   auto lines = splitLines(text);
@@ -335,7 +374,7 @@ ftxui::Element RenderMarkdown(const std::string &text, bool dim) {
       return;
     std::vector<ftxui::Element> code_elems;
     // Use smaller wrap for code on narrow terminals
-    const size_t kCodeWrap = static_cast<size_t>(std::max(40, content_width));
+    const size_t kCodeWrap = static_cast<size_t>(std::max(10, content_width));
     for (const auto &l : code_lines) {
       if (l.size() <= kCodeWrap) {
         auto e = ftxui::text(l);

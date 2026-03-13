@@ -3,6 +3,17 @@
 
 include(FetchContent)
 
+# Keep Tree-sitter downloads in the same FetchContent cache base.
+set(FETCHCONTENT_UPDATES_DISCONNECTED ON CACHE BOOL
+    "Do not update FetchContent deps automatically" FORCE)
+
+option(FIRMIUS_FETCHCONTENT_VERBOSE "Verbose FetchContent download logging" OFF)
+if(FIRMIUS_FETCHCONTENT_VERBOSE)
+  set(_firmius_git_progress TRUE)
+else()
+  set(_firmius_git_progress FALSE)
+endif()
+
 # ─── Tree-sitter core ────────────────────────────────────────────────────────
 # SOURCE_SUBDIR trick: point to a nonexistent dir so FetchContent only
 # downloads the source but does NOT run add_subdirectory (we build our own
@@ -12,6 +23,7 @@ FetchContent_Declare(
   GIT_REPOSITORY https://github.com/tree-sitter/tree-sitter.git
   GIT_TAG        v0.24.6
   GIT_SHALLOW    TRUE
+  GIT_PROGRESS   ${_firmius_git_progress}
   SOURCE_SUBDIR  _none
 )
 
@@ -21,6 +33,7 @@ FetchContent_Declare(
   GIT_REPOSITORY https://github.com/tree-sitter/tree-sitter-c.git
   GIT_TAG        v0.23.5
   GIT_SHALLOW    TRUE
+  GIT_PROGRESS   ${_firmius_git_progress}
   SOURCE_SUBDIR  _none
 )
 
@@ -29,6 +42,7 @@ FetchContent_Declare(
   GIT_REPOSITORY https://github.com/tree-sitter/tree-sitter-cpp.git
   GIT_TAG        v0.23.4
   GIT_SHALLOW    TRUE
+  GIT_PROGRESS   ${_firmius_git_progress}
   SOURCE_SUBDIR  _none
 )
 
@@ -37,6 +51,7 @@ FetchContent_Declare(
   GIT_REPOSITORY https://github.com/tree-sitter/tree-sitter-java.git
   GIT_TAG        v0.23.5
   GIT_SHALLOW    TRUE
+  GIT_PROGRESS   ${_firmius_git_progress}
   SOURCE_SUBDIR  _none
 )
 
@@ -45,6 +60,7 @@ FetchContent_Declare(
   GIT_REPOSITORY https://github.com/tree-sitter/tree-sitter-rust.git
   GIT_TAG        v0.23.2
   GIT_SHALLOW    TRUE
+  GIT_PROGRESS   ${_firmius_git_progress}
   SOURCE_SUBDIR  _none
 )
 
@@ -53,6 +69,7 @@ FetchContent_Declare(
   GIT_REPOSITORY https://github.com/tree-sitter/tree-sitter-python.git
   GIT_TAG        v0.23.6
   GIT_SHALLOW    TRUE
+  GIT_PROGRESS   ${_firmius_git_progress}
   SOURCE_SUBDIR  _none
 )
 
@@ -61,6 +78,7 @@ FetchContent_Declare(
   GIT_REPOSITORY https://github.com/tree-sitter/tree-sitter-javascript.git
   GIT_TAG        v0.23.1
   GIT_SHALLOW    TRUE
+  GIT_PROGRESS   ${_firmius_git_progress}
   SOURCE_SUBDIR  _none
 )
 
@@ -69,6 +87,7 @@ FetchContent_Declare(
   GIT_REPOSITORY https://github.com/tree-sitter/tree-sitter-typescript.git
   GIT_TAG        v0.23.2
   GIT_SHALLOW    TRUE
+  GIT_PROGRESS   ${_firmius_git_progress}
   SOURCE_SUBDIR  _none
 )
 
@@ -77,6 +96,7 @@ FetchContent_Declare(
   GIT_REPOSITORY https://github.com/tree-sitter/tree-sitter-json.git
   GIT_TAG        v0.24.8
   GIT_SHALLOW    TRUE
+  GIT_PROGRESS   ${_firmius_git_progress}
   SOURCE_SUBDIR  _none
 )
 
@@ -85,6 +105,7 @@ FetchContent_Declare(
   GIT_REPOSITORY https://github.com/tree-sitter-grammars/tree-sitter-yaml.git
   GIT_TAG        v0.7.0
   GIT_SHALLOW    TRUE
+  GIT_PROGRESS   ${_firmius_git_progress}
   SOURCE_SUBDIR  _none
 )
 
@@ -93,6 +114,7 @@ FetchContent_Declare(
   GIT_REPOSITORY https://github.com/tree-sitter-grammars/tree-sitter-toml.git
   GIT_TAG        v0.7.0
   GIT_SHALLOW    TRUE
+  GIT_PROGRESS   ${_firmius_git_progress}
   SOURCE_SUBDIR  _none
 )
 
@@ -101,6 +123,7 @@ FetchContent_Declare(
   GIT_REPOSITORY https://github.com/uyha/tree-sitter-cmake.git
   GIT_TAG        v0.7.2
   GIT_SHALLOW    TRUE
+  GIT_PROGRESS   ${_firmius_git_progress}
   SOURCE_SUBDIR  _none
 )
 
@@ -109,6 +132,7 @@ FetchContent_Declare(
   GIT_REPOSITORY https://github.com/tree-sitter-grammars/tree-sitter-lua.git
   GIT_TAG        v0.5.0
   GIT_SHALLOW    TRUE
+  GIT_PROGRESS   ${_firmius_git_progress}
   SOURCE_SUBDIR  _none
 )
 
@@ -117,6 +141,7 @@ FetchContent_Declare(
   GIT_REPOSITORY https://github.com/tree-sitter-grammars/tree-sitter-luau.git
   GIT_TAG        v1.2.0
   GIT_SHALLOW    TRUE
+  GIT_PROGRESS   ${_firmius_git_progress}
   SOURCE_SUBDIR  _none
 )
 
@@ -125,6 +150,7 @@ FetchContent_Declare(
   GIT_REPOSITORY https://github.com/tree-sitter-grammars/tree-sitter-markdown.git
   GIT_TAG        v0.5.3
   GIT_SHALLOW    TRUE
+  GIT_PROGRESS   ${_firmius_git_progress}
   SOURCE_SUBDIR  _none
 )
 

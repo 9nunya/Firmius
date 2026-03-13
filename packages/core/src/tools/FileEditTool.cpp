@@ -43,7 +43,7 @@ shared::ToolResult FileEditTool::execute(const FileEditInput &input,
   std::string absolutePath = ctx.agent.resolvePath(input.path);
 
   // Only require reading if file already exists (skip for new files)
-  if (ctx.host.exists(absolutePath) && !ctx.agent.hasReadFile(absolutePath)) {
+  if (ctx.host.exists(absolutePath) && !ctx.agent.hasFullyReadFile(absolutePath)) {
     return shared::ToolResult::fail(
         "You MUST READ the ENTIRE file before making any edits to ensure "
         "complete context and avoid breaking dependencies or logic. Use "

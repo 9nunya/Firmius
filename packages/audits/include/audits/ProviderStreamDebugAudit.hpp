@@ -1,6 +1,9 @@
 #pragma once
 
 #include "IAudit.hpp"
+#include "Context.hpp"
+#include <string>
+#include <vector>
 
 namespace firmius::audits {
 
@@ -9,13 +12,27 @@ using namespace firmius::shared;
 /**
  * @brief Debug audit that logs EVERY chunk from a provider stream to STDOUT.
  *
- * Usage: firmius_audit --audit provider_stream_debug <provider_id> [model_id]
+ * Usage: firmius_audit --audit provider_stream_debug <provider_id> [model_id] [--history-variant=<variant>]
+ *        firmius_audit --audit provider_stream_debug <provider_id> [model_id] --thread-id=<threadId> [--thread-agent=<agentId>]
+ * 
+ * History variants for testing edge cases:
+ * - normal_agentic: Standard conversation with user/assistant messages
+ * - agentic_tool_errors: Conversation with tool errors in chat
+ * - multiple_tool_results: Multiple tool results in sequence
+ * - tool_then_error: Tool result followed by error message
+ * - error_then_tool: Error message followed by tool result
  */
 class ProviderStreamDebugAudit : public IAudit {
 public:
     std::string getId() const override;
     std::string getDescription() const override;
     AuditResult run(const std::vector<std::string>& args) override;
+    
+private:
+    /**
+     * @brief Build different history variants for testing edge cases.
+     */
+    AgentHistory buildHistoryVariant(const std::string& variant);
 };
 
 } // namespace firmius::audits

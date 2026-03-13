@@ -68,6 +68,7 @@ struct AgentState {
   std::vector<std::string>
       ownedProcesses;                 ///< IDs of spawned background processes.
   std::vector<std::string> readFiles; ///< Paths of files read in this session.
+  std::vector<std::string> fullyReadFiles; ///< Set of paths that were read entirely
   std::vector<std::string>
       editedFiles; ///< Paths of files successfully edited or written.
   std::vector<std::string>

@@ -50,6 +50,8 @@ public:
 private:
   // Fetches the managed project ID from Antigravity
   std::string fetchManagedProject(OAuthAccount &acc);
+  // Resolves a usable project ID for streaming requests.
+  std::string resolveProjectIdForAccount(OAuthAccount &acc, bool forceRefresh);
 
   static std::map<std::string, ModelInfo> getStaticModels();
 

@@ -15,6 +15,7 @@
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
+#include <set>
 
 using namespace firmius::core;
 using namespace firmius::shared;
@@ -64,7 +65,32 @@ class MockAgent : public IAgent {
 public:
   firmius::shared::AgentContext defaultCtx;
   std::unique_ptr<AgentPermissionChecks> pChecks;
-  MockAgent() { pChecks = std::make_unique<AgentPermissionChecks>(defaultCtx); }
+  MockAgent() {
+    pChecks = std::make_unique<AgentPermissionChecks>(defaultCtx);
+    ON_CALL(*this, hasReadFile(_))
+        .WillByDefault(Invoke([this](const std::string &path) {
+          return readFiles_.find(path) != readFiles_.end();
+        }));
+    ON_CALL(*this, hasFullyReadFile(_))
+        .WillByDefault(Invoke([this](const std::string &path) {
+          return fullyReadFiles_.find(path) != fullyReadFiles_.end();
+        }));
+    ON_CALL(*this, markFileAsRead(_))
+        .WillByDefault(Invoke([this](const std::string &path) {
+          if (readFiles_.insert(path).second) {
+            defaultCtx.state.readFiles.push_back(path);
+          }
+        }));
+    ON_CALL(*this, markFileAsFullyRead(_))
+        .WillByDefault(Invoke([this](const std::string &path) {
+          if (readFiles_.insert(path).second) {
+            defaultCtx.state.readFiles.push_back(path);
+          }
+          if (fullyReadFiles_.insert(path).second) {
+            defaultCtx.state.fullyReadFiles.push_back(path);
+          }
+        }));
+  }
   AgentPermissionChecks &getPermissionChecks() const override {
     return *pChecks;
   }
@@ -104,7 +130,13 @@ public:
               (override));
   MOCK_METHOD(bool, hasReadFile, (const std::string &), (const, override));
   MOCK_METHOD(void, markFileAsRead, (const std::string &), (override));
+  MOCK_METHOD(bool, hasFullyReadFile, (const std::string &), (const, override));
+  MOCK_METHOD(void, markFileAsFullyRead, (const std::string &), (override));
   MOCK_METHOD((std::shared_ptr<IHost>), getHost, (), (override));
+
+private:
+  std::set<std::string> readFiles_;
+  std::set<std::string> fullyReadFiles_;
 };
 
 class MockHostProcess : public IHostProcess {

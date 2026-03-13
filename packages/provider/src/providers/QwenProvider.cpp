@@ -369,15 +369,8 @@ public:
       return;
     }
 
-    prompt_ = "Qwen OAuth Authorization\n\n"
-              "1. Open this URL in your browser:\n"
-              "   " +
-              verificationUriComplete_ +
-              "\n\n"
-              "2. Enter the code: " +
-              userCode_ +
-              "\n\n"
-              "3. Press Enter after completing authorization...";
+    prompt_ = verificationUriComplete_ +
+              "\nWaiting for authorization...";
 
     // Start polling in background thread
     pollingThread_ = std::thread([this]() { pollForToken(); });
@@ -419,7 +412,7 @@ public:
     acc.accessToken = accessToken_;
     acc.refreshToken = refreshToken_;
     acc.tokenExpiration = tokenExpiration_;
-    
+
     // Use email as identifier, or generate from token if email extraction failed
     if (email_.empty()) {
       // Generate identifier from access token prefix
@@ -755,7 +748,7 @@ bool QwenProvider::refreshAccessToken(OAuthAccount &acc) {
 void QwenProvider::refreshQuotas() {
   // Qwen OAuth free tier has no quota API endpoint.
   // We don't track quotas - let the API tell us when we're rate limited.
-  
+
   // If no accounts loaded, can't refresh
   if (accounts_.empty()) {
     return;
@@ -763,7 +756,7 @@ void QwenProvider::refreshQuotas() {
 
   int64_t now = nowSeconds();
   bool needsSave = false;
-  
+
   for (auto &acc : accounts_) {
     // Refresh token if expired
     if (isTokenExpired(acc)) {
@@ -771,7 +764,7 @@ void QwenProvider::refreshQuotas() {
         needsSave = true;
       }
     }
-    
+
     // Clear any stale rate-limiting from previous sessions
     if (acc.rateLimited && now > acc.backoffUntil) {
       acc.rateLimited = false;
@@ -780,7 +773,7 @@ void QwenProvider::refreshQuotas() {
     acc.backoffUntil = 0;
     acc.lastQuotaRefresh = now;
   }
-  
+
   // Only save if something actually changed (token refreshed or rate limit cleared)
   if (needsSave) {
     saveAccounts();
@@ -1205,7 +1198,8 @@ bool QwenProvider::executeStreamRequest(
 
   // 30 second timeout for Qwen API
   auto resp =
-      client.streamPost(QWEN_CHAT_ENDPOINT, body, sseWriteCallback, &ctx, 30);
+      client.streamPost(QWEN_CHAT_ENDPOINT, body, sseWriteCallback, &ctx, 30,
+                        opts.abortSignal);
 
   // Handle response
   if (resp.code == 200) {
@@ -1239,7 +1233,7 @@ bool QwenProvider::executeStreamRequest(
     // Rate limited or quota exhausted - IMMEDIATE account switch
     // Qwen has no real quota API, so we don't mark quotas as 0
     // Just rely on retry/account switching logic
-    
+
     std::string quotaError =
         "Quota exhausted (2k/day free limit). Switching to next account...";
     onEvent(StreamError{quotaError, static_cast<int>(resp.code),

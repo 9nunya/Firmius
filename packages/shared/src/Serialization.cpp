@@ -459,6 +459,11 @@ rapidjson::Document toJson(const AgentContext &ctx) {
   for (const auto &f : ctx.state.readFiles)
     readFiles.PushBack(rapidjson::Value(f.c_str(), a), a);
   state.AddMember("readFiles", readFiles, a);
+  
+  rapidjson::Value fullyReadFiles(rapidjson::kArrayType);
+  for (const auto &f : ctx.state.fullyReadFiles)
+    fullyReadFiles.PushBack(rapidjson::Value(f.c_str(), a), a);
+  state.AddMember("fullyReadFiles", fullyReadFiles, a);
   rapidjson::Value editedFilesArray(rapidjson::kArrayType);
   for (const auto &f : ctx.state.editedFiles)
     editedFilesArray.PushBack(rapidjson::Value(f.c_str(), a), a);
@@ -554,6 +559,10 @@ AgentContext fromJson(const rapidjson::Value &v) {
   if (v["state"].HasMember("readFiles") && v["state"]["readFiles"].IsArray()) {
     for (const auto &f : v["state"]["readFiles"].GetArray())
       ctx.state.readFiles.push_back(f.GetString());
+  }
+  if (v["state"].HasMember("fullyReadFiles") && v["state"]["fullyReadFiles"].IsArray()) {
+    for (const auto &f : v["state"]["fullyReadFiles"].GetArray())
+      ctx.state.fullyReadFiles.push_back(f.GetString());
   }
   if (v["state"].HasMember("editedFiles") &&
       v["state"]["editedFiles"].IsArray()) {

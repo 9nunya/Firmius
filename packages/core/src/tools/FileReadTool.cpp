@@ -64,11 +64,7 @@ shared::ToolResult FileReadTool::execute(const FileReadInput &input,
     if (ss.eof())
       reachedEnd = true;
 
-    // Mark file as read if the entire file was read (start_line == 1 and we
-    // reached EOF)
-    if (input.start_line == 1 && reachedEnd) {
-      ctx.agent.markFileAsRead(absolutePath);
-    }
+    // Old fully read check logic removed
 
     std::string enhancedContent =
         shared::utils::HashlineReadEnhancer::enhance(sliced);
@@ -83,8 +79,14 @@ shared::ToolResult FileReadTool::execute(const FileReadInput &input,
     int normalized_end = normalized_start + lines_taken - 1;
     if (lines_taken == 0)
       normalized_end = normalized_start - 1;
-    bool read_full = reachedEnd && input.start_line <= 1 &&
-                     (input.end_line == -1 || normalized_end <= input.end_line);
+    bool read_full = reachedEnd && input.start_line <= 1;
+
+    if (read_full) {
+      ctx.agent.markFileAsFullyRead(absolutePath);
+    } else {
+      ctx.agent.markFileAsRead(absolutePath);
+    }
+
     res.AddMember("line_start", normalized_start, res.GetAllocator());
     res.AddMember("line_end", normalized_end, res.GetAllocator());
     res.AddMember("lines_read", lines_taken, res.GetAllocator());

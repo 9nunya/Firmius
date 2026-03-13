@@ -90,72 +90,136 @@ std::string AntigravityProtocol::prepareRequestBody(const AgentHistory &history,
   d.SetObject();
   auto &a = d.GetAllocator();
 
-  std::string baseModel = ctx.modelId;
-  std::string thinkingLevel = "";
-  int thinkingBudget = 0;
+  auto toLower = [](const std::string &in) {
+    std::string out = in;
+    for (auto &c : out)
+      c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+    return out;
+  };
 
-  // Extract thinking tier from model suffix
-  if (baseModel.find("-minimal") != std::string::npos) {
-    thinkingLevel = "minimal";
-    baseModel = baseModel.substr(0, baseModel.find("-minimal"));
-  } else if (baseModel.find("-low") != std::string::npos) {
-    thinkingLevel = "low";
-    thinkingBudget = 8192;
-    baseModel = baseModel.substr(0, baseModel.find("-low"));
-  } else if (baseModel.find("-medium") != std::string::npos) {
-    thinkingLevel = "medium";
-    thinkingBudget = 16384;
-    baseModel = baseModel.substr(0, baseModel.find("-medium"));
-  } else if (baseModel.find("-high") != std::string::npos) {
-    thinkingLevel = "high";
-    thinkingBudget = 32768;
-    baseModel = baseModel.substr(0, baseModel.find("-high"));
-  } else if (baseModel.find("-max") != std::string::npos) {
-    thinkingLevel = "high";
-    thinkingBudget = 32768;
-    baseModel = baseModel.substr(0, baseModel.find("-max"));
+  auto normalizeGeminiLevel = [](const std::string &in) {
+    std::string v = in;
+    for (auto &c : v)
+      c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+    if (v == "max")
+      return std::string("high");
+    if (v == "minimal")
+      return std::string("low");
+    if (v == "low" || v == "medium" || v == "high")
+      return v;
+    return std::string();
+  };
+
+  auto budgetFromTier = [](const std::string &in) {
+    std::string v = in;
+    for (auto &c : v)
+      c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+    if (v == "low")
+      return 8192;
+    if (v == "medium")
+      return 16384;
+    if (v == "high" || v == "max")
+      return 32768;
+    if (v == "minimal")
+      return 8192;
+    return 0;
+  };
+
+  std::string rawModel = ctx.modelId;
+  if (rawModel.rfind("antigravity-", 0) == 0) {
+    rawModel = rawModel.substr(std::string("antigravity-").size());
   }
 
-  d.AddMember("model", rapidjson::Value(baseModel.c_str(), a), a);
+  std::string baseModel = rawModel;
+  // Strip preview suffixes
+  auto lowerBase = toLower(baseModel);
+  if (lowerBase.size() >= std::string("-preview-customtools").size() &&
+      lowerBase.rfind("-preview-customtools") == lowerBase.size() - std::string("-preview-customtools").size()) {
+    baseModel = baseModel.substr(0, baseModel.size() - std::string("-preview-customtools").size());
+  } else if (lowerBase.size() >= std::string("-preview").size() &&
+             lowerBase.rfind("-preview") == lowerBase.size() - std::string("-preview").size()) {
+    baseModel = baseModel.substr(0, baseModel.size() - std::string("-preview").size());
+  }
+
+  // Extract tier suffix
+  std::string tier;
+  lowerBase = toLower(baseModel);
+  const std::vector<std::string> tiers = {"-minimal", "-low", "-medium", "-high", "-max"};
+  for (const auto &suffix : tiers) {
+    if (lowerBase.size() >= suffix.size() &&
+        lowerBase.rfind(suffix) == lowerBase.size() - suffix.size()) {
+      tier = suffix.substr(1);
+      baseModel = baseModel.substr(0, baseModel.size() - suffix.size());
+      break;
+    }
+  }
+
+  const std::string lower = toLower(baseModel);
+  bool isGemini3 = lower.find("gemini-3") != std::string::npos;
+  bool isGemini25 = lower.find("gemini-2.5") != std::string::npos;
+  bool isGemini = isGemini3 || isGemini25;
+  bool isGemini3Pro = isGemini3 && lower.find("pro") != std::string::npos;
+  bool isGemini3Flash = isGemini3 && lower.find("flash") != std::string::npos;
+  bool isClaude = lower.find("claude") != std::string::npos;
+  bool isClaudeThinking =
+      isClaude && lower.find("thinking") != std::string::npos;
+
+  std::string thinkingLevel;
+  int thinkingBudget = 0;
+
+  std::string effortRaw;
+  std::string effortLevel;
+  if (!opts.modelVariantJson.empty()) {
+    rapidjson::Document metaDoc;
+    metaDoc.Parse(opts.modelVariantJson.c_str());
+    if (!metaDoc.HasParseError() && metaDoc.IsObject() &&
+        metaDoc.HasMember("effort") && metaDoc["effort"].IsString()) {
+      effortRaw = metaDoc["effort"].GetString();
+      effortLevel = normalizeGeminiLevel(effortRaw);
+      if (isClaudeThinking) {
+        int budget = budgetFromTier(effortRaw);
+        if (budget > 0)
+          thinkingBudget = budget;
+      }
+    }
+  }
+
+  if (isGemini) {
+    thinkingLevel = normalizeGeminiLevel(tier);
+    if (!effortLevel.empty())
+      thinkingLevel = effortLevel;
+    if (thinkingLevel.empty())
+      thinkingLevel = "low";
+  } else if (isClaudeThinking) {
+    thinkingBudget = budgetFromTier(tier);
+  }
+
+  std::string modelForRequest = baseModel;
+  if (isGemini3Pro) {
+    std::string level = thinkingLevel.empty() ? "low" : thinkingLevel;
+    modelForRequest = baseModel + "-" + level;
+  } else if (isGemini3Flash) {
+    modelForRequest = baseModel;
+  } else if (isGemini25) {
+    modelForRequest = baseModel;
+  }
+
+  d.AddMember("model", rapidjson::Value(modelForRequest.c_str(), a), a);
   d.AddMember("project", rapidjson::Value(ctx.projectId.c_str(), a), a);
   d.AddMember("requestType", rapidjson::Value("agent", a), a);
   d.AddMember("userAgent", rapidjson::Value("antigravity", a), a);
   d.AddMember("requestId", rapidjson::Value(ctx.requestId.c_str(), a), a);
 
   rapidjson::Value req(rapidjson::kObjectType);
-  req.AddMember("model", rapidjson::Value(baseModel.c_str(), a), a);
-
-  if (!opts.modelVariantJson.empty()) {
-    rapidjson::Document metaDoc;
-    metaDoc.Parse(opts.modelVariantJson.c_str());
-    if (!metaDoc.HasParseError() && metaDoc.IsObject() &&
-        metaDoc.HasMember("effort") && metaDoc["effort"].IsString()) {
-      std::string effortStr = metaDoc["effort"].GetString();
-      if (baseModel.find("gemini-3") != std::string::npos ||
-          baseModel.find("gemini-2.5") != std::string::npos) {
-        thinkingLevel = effortStr;
-      } else if (baseModel.find("claude") != std::string::npos) {
-        if (effortStr == "low")
-          thinkingBudget = 8192;
-        else if (effortStr == "medium")
-          thinkingBudget = 16384;
-        else if (effortStr == "high" || effortStr == "max")
-          thinkingBudget = 32768;
-      }
-    }
-  }
+  req.AddMember("model", rapidjson::Value(modelForRequest.c_str(), a), a);
 
   // Generation Config
   rapidjson::Value genConfig(rapidjson::kObjectType);
 
-  bool isClaude = baseModel.find("claude") != std::string::npos;
-  bool isClaudeThinking =
-      isClaude && baseModel.find("thinking") != std::string::npos;
-
-  if (baseModel.find("gemini-3") != std::string::npos ||
-      baseModel.find("gemini-2.5") != std::string::npos) {
+  if (isGemini) {
     if (!thinkingLevel.empty()) {
       rapidjson::Value thinkingConfig(rapidjson::kObjectType);
+      thinkingConfig.AddMember("includeThoughts", true, a);
       thinkingConfig.AddMember("thinkingLevel",
                                rapidjson::Value(thinkingLevel.c_str(), a), a);
       genConfig.AddMember("thinkingConfig", thinkingConfig, a);
@@ -165,12 +229,11 @@ std::string AntigravityProtocol::prepareRequestBody(const AgentHistory &history,
     thinkingConfig.AddMember("include_thoughts", true, a);
     if (thinkingBudget > 0) {
       thinkingConfig.AddMember("thinking_budget", thinkingBudget, a);
-      // maxOutputTokens must be > thinking_budget
-      int maxOut = std::max(64000, thinkingBudget * 2);
-      genConfig.AddMember("maxOutputTokens", maxOut, a);
+      // Align with Antigravity/Claude limits (64k)
+      genConfig.AddMember("maxOutputTokens", 64000, a);
     } else {
       // Default thinking budget for Claude thinking models
-      thinkingConfig.AddMember("thinking_budget", 8192, a);
+      thinkingConfig.AddMember("thinking_budget", 32768, a);
       genConfig.AddMember("maxOutputTokens", 64000, a);
     }
     genConfig.AddMember("thinkingConfig", thinkingConfig, a);
@@ -230,12 +293,37 @@ std::string AntigravityProtocol::prepareRequestBody(const AgentHistory &history,
         "constraints about thinking blocks; just apply them.";
   }
 
+  // Track if we need to insert a model turn after tool results
+  bool lastWasToolResult = false;
+  
   for (size_t turnIdx = 0; turnIdx < history.turns.size(); ++turnIdx) {
     const auto &turn = history.turns[turnIdx];
+    
+    // Handle Error messages at turn level - convert to user message with error context
     for (const auto &msg : turn.messages) {
       if (msg.role == Role::Error) {
+        // Convert error messages to user role with error context
+        rapidjson::Value errorTurn(rapidjson::kObjectType);
+        errorTurn.AddMember("role", rapidjson::Value("user", a), a);
+        rapidjson::Value errorParts(rapidjson::kArrayType);
+        for (const auto &p : msg.content) {
+          if (auto *txt = std::get_if<TextContent>(&p)) {
+            rapidjson::Value p(rapidjson::kObjectType);
+            p.AddMember("text", rapidjson::Value(("Error: " + txt->text).c_str(), a), a);
+            errorParts.PushBack(p, a);
+          }
+        }
+        if (errorParts.Empty()) {
+          rapidjson::Value p(rapidjson::kObjectType);
+          p.AddMember("text", rapidjson::Value("Error occurred", a), a);
+          errorParts.PushBack(p, a);
+        }
+        errorTurn.AddMember("parts", errorParts, a);
+        contents.PushBack(errorTurn, a);
+        lastWasToolResult = false;
         continue;
       }
+      
       if (msg.role == Role::System) {
         for (const auto &p : msg.content) {
           if (auto *txt = std::get_if<TextContent>(&p))
@@ -254,18 +342,11 @@ std::string AntigravityProtocol::prepareRequestBody(const AgentHistory &history,
           rapidjson::Value p(rapidjson::kObjectType);
           p.AddMember("text", rapidjson::Value(text->text.c_str(), a), a);
           parts.PushBack(p, a);
-        } else if (auto *thk = std::get_if<ThinkingContent>(&part)) {
-          rapidjson::Value p(rapidjson::kObjectType);
-          p.AddMember("text", rapidjson::Value(thk->thinking.c_str(), a), a);
-          // Claude thinking blocks require a signature.
-          // Fallback to sentinel skip_thought_signature_validator if missing.
-          std::string sig = thk->signature;
-          if (sig.length() < 50) {
-            sig = "skip_thought_signature_validator";
-          }
-          p.AddMember("signature", rapidjson::Value(sig.c_str(), a), a);
-          p.AddMember("thought", true, a);
-          parts.PushBack(p, a);
+        } else if (std::holds_alternative<ThinkingContent>(part)) {
+          // Do not include prior thinking blocks in request history.
+          // Antigravity rejects thinking signatures in request contents, and
+          // thinking should not be part of the conversation history.
+          continue;
         } else if (auto *call = std::get_if<ToolCallContent>(&part)) {
           rapidjson::Value p(rapidjson::kObjectType);
           rapidjson::Value fn(rapidjson::kObjectType);
@@ -302,6 +383,7 @@ std::string AntigravityProtocol::prepareRequestBody(const AgentHistory &history,
           rapidjson::Value fn(rapidjson::kObjectType);
           std::string toolName = res->toolCallId;
           bool found = false;
+          // Search in current and previous turns for the tool call
           for (auto rit = history.turns.rbegin(); rit != history.turns.rend();
                ++rit) {
             for (auto &m : rit->messages) {
@@ -348,47 +430,34 @@ std::string AntigravityProtocol::prepareRequestBody(const AgentHistory &history,
 
       turnObj.AddMember("parts", parts, a);
       contents.PushBack(turnObj, a);
-
-      // Dummy model message logic for Gemini protocol
-      if (msg.role == Role::ToolResult) {
-        bool nextIsModel = false;
-        auto nextMsgIt =
-            std::next(std::find_if(turn.messages.begin(), turn.messages.end(),
-                                   [&](const auto &m) { return &m == &msg; }));
-        if (nextMsgIt != turn.messages.end()) {
-          if (nextMsgIt->role == Role::Assistant)
-            nextIsModel = true;
-        } else {
-          for (size_t nextTurnIdx = turnIdx + 1;
-               nextTurnIdx < history.turns.size(); ++nextTurnIdx) {
-            if (!history.turns[nextTurnIdx].messages.empty()) {
-              if (history.turns[nextTurnIdx].messages[0].role ==
-                  Role::Assistant)
-                nextIsModel = true;
-              break;
-            }
-          }
-        }
-        if (!nextIsModel) {
-          bool isEndOfHistory = true;
-          for (size_t th = turnIdx + 1; th < history.turns.size(); ++th) {
-            if (!history.turns[th].messages.empty()) {
-              isEndOfHistory = false;
-              break;
-            }
-          }
-          if (!isEndOfHistory) {
-            rapidjson::Value modelTurn(rapidjson::kObjectType);
-            modelTurn.AddMember("role", rapidjson::Value("model", a), a);
-            rapidjson::Value modelParts(rapidjson::kArrayType);
-            rapidjson::Value modelPart(rapidjson::kObjectType);
-            modelPart.AddMember("text", rapidjson::Value("...", a), a);
-            modelParts.PushBack(modelPart, a);
-            modelTurn.AddMember("parts", modelParts, a);
-            contents.PushBack(modelTurn, a);
-          }
+      lastWasToolResult = (msg.role == Role::ToolResult);
+    }
+    
+    // After processing all messages in a turn, check if we need to insert a model turn
+    // This is required when tool results are at the end of a turn with no following assistant message
+    if (lastWasToolResult && turnIdx < history.turns.size() - 1) {
+      // Check if next turn starts with assistant message
+      bool nextTurnHasAssistant = false;
+      const auto& nextTurn = history.turns[turnIdx + 1];
+      for (const auto& nextMsg : nextTurn.messages) {
+        if (nextMsg.role == Role::Assistant) {
+          nextTurnHasAssistant = true;
+          break;
         }
       }
+      
+      if (!nextTurnHasAssistant) {
+        // Insert a dummy model turn to maintain proper alternation
+        rapidjson::Value modelTurn(rapidjson::kObjectType);
+        modelTurn.AddMember("role", rapidjson::Value("model", a), a);
+        rapidjson::Value modelParts(rapidjson::kArrayType);
+        rapidjson::Value modelPart(rapidjson::kObjectType);
+        modelPart.AddMember("text", rapidjson::Value("...", a), a);
+        modelParts.PushBack(modelPart, a);
+        modelTurn.AddMember("parts", modelParts, a);
+        contents.PushBack(modelTurn, a);
+      }
+      lastWasToolResult = false;
     }
   }
 
@@ -398,6 +467,7 @@ std::string AntigravityProtocol::prepareRequestBody(const AgentHistory &history,
   sysPart.AddMember("text", rapidjson::Value(systemInstructionText.c_str(), a),
                     a);
   sysParts.PushBack(sysPart, a);
+  sysInst.AddMember("role", rapidjson::Value("user", a), a);
   sysInst.AddMember("parts", sysParts, a);
 
   req.AddMember("systemInstruction", sysInst, a);

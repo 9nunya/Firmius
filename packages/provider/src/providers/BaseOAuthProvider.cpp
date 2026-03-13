@@ -153,6 +153,30 @@ void BaseOAuthProvider::loadAccounts() {
       }
       if (item.HasMember("refreshToken") && item["refreshToken"].IsString())
         acc.refreshToken = item["refreshToken"].GetString();
+      
+      // Parse project IDs from refresh token if stored in TypeScript format (refreshToken|projectId|managedProjectId)
+      size_t firstPipe = acc.refreshToken.find('|');
+      if (firstPipe != std::string::npos) {
+        std::string actualRefreshToken = acc.refreshToken.substr(0, firstPipe);
+        std::string remaining = acc.refreshToken.substr(firstPipe + 1);
+        acc.refreshToken = actualRefreshToken;
+        
+        size_t secondPipe = remaining.find('|');
+        std::string projectId, managedProjectId;
+        if (secondPipe != std::string::npos) {
+          projectId = remaining.substr(0, secondPipe);
+          managedProjectId = remaining.substr(secondPipe + 1);
+        } else {
+          projectId = remaining;
+        }
+        
+        // Store in metadata for use by provider
+        if (!projectId.empty() && !acc.metadata.count("projectId"))
+          acc.metadata["projectId"] = projectId;
+        if (!managedProjectId.empty() && !acc.metadata.count("managedProjectId"))
+          acc.metadata["managedProjectId"] = managedProjectId;
+      }
+      
       if (item.HasMember("accessToken") && item["accessToken"].IsString())
         acc.accessToken = item["accessToken"].GetString();
       if (item.HasMember("tokenExpiration") &&

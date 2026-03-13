@@ -269,13 +269,37 @@ public:
     }
 
     /**
+     * @brief Checks if a file has been fully read in the current session.
+     * @param path The absolute path to the file.
+     * @return True if the file has been fully read.
+     */
+    bool hasFullyReadFile(const std::string& path) const override {
+        return fullyReadFiles_.find(path) != fullyReadFiles_.end();
+    }
+
+    /**
      * @brief Marks a file as having been read in the current session.
      * @param path The absolute path to the file.
      */
     void markFileAsRead(const std::string& path) override {
         recordCall("markFileAsRead", {{"path", path}});
-        readFiles_.insert(path);
-        context_.state.readFiles.push_back(path);
+        if (readFiles_.insert(path).second) {
+            context_.state.readFiles.push_back(path);
+        }
+    }
+
+    /**
+     * @brief Marks a file as having been fully read in the current session.
+     * @param path The absolute path to the file.
+     */
+    void markFileAsFullyRead(const std::string& path) override {
+        recordCall("markFileAsFullyRead", {{"path", path}});
+        if (readFiles_.insert(path).second) {
+            context_.state.readFiles.push_back(path);
+        }
+        if (fullyReadFiles_.insert(path).second) {
+            context_.state.fullyReadFiles.push_back(path);
+        }
     }
 
     /**
@@ -440,6 +464,7 @@ private:
     std::map<std::string, ProcessResult> processResults_;
     std::map<std::string, std::vector<std::string>> processInputs_;
     std::set<std::string> readFiles_;
+    std::set<std::string> fullyReadFiles_;
     std::set<std::string> registeredProcessIds_;
     std::vector<std::string> blockingProcessIds_;
 

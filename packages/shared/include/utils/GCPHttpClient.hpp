@@ -5,6 +5,7 @@
 #include <vector>
 #include <functional>
 #include <optional>
+#include <atomic>
 #include <curl/curl.h>
 
 namespace firmius::utils {
@@ -36,15 +37,20 @@ public:
     Response get(const std::string& url, int timeoutSeconds = 30);
 
     /**
-     * @brief Performs a streaming POST request.
+     * @brief Performs a streaming POST request with interrupt support.
      * @param writeCallback Standard CURL write callback
      * @param userdata Data passed to the callback
+     * @param abortSignal Optional atomic bool to abort the request immediately
+     * 
+     * This method runs CURL in a separate thread to support immediate interruption.
+     * When abortSignal is set, the CURL handle is cancelled immediately.
      */
-    Response streamPost(const std::string& url, 
-                       const std::string& body, 
-                       size_t (*writeCallback)(char*, size_t, size_t, void*), 
+    Response streamPost(const std::string& url,
+                       const std::string& body,
+                       size_t (*writeCallback)(char*, size_t, size_t, void*),
                        void* userdata,
-                       int timeoutSeconds = 300);
+                       int timeoutSeconds = 300,
+                       std::atomic<bool>* abortSignal = nullptr);
 
 private:
     std::string userAgent_;

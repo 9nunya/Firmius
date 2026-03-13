@@ -4,17 +4,47 @@
 #include "components/ScrollableBox.hpp"
 #include "harness/Harness.hpp"
 #include <ftxui/component/component.hpp>
+#include <ftxui/component/mouse.hpp>
 #include <ftxui/dom/elements.hpp>
+#include <ftxui/screen/terminal.hpp>
 #include <chrono>
 #include <iomanip>
 #include <sstream>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace firmius::tui {
 
 namespace {
+
+struct HeaderHit {
+  std::string account;
+  ftxui::Box box;
+};
+
+struct QuotaModalWidths {
+  int window_w;
+  int content_w;
+  int inner_w;
+};
+
+QuotaModalWidths computeQuotaModalWidths() {
+  auto terminal = ftxui::Terminal::Size();
+  int terminal_w = std::max(0, terminal.dimx);
+  int preferred_w = 80;
+  int padded_w = std::max(0, terminal_w - 4);
+  int window_w = std::min(preferred_w, padded_w);
+  window_w = std::max(10, window_w);
+  if (terminal_w > 0) {
+    window_w = std::min(window_w, terminal_w);
+  }
+  // Leave a column for the scroll indicator so borders don't clip.
+  int content_w = std::max(8, window_w - 3);
+  int inner_w = std::max(6, content_w - 2);
+  return {window_w, content_w, inner_w};
+}
 
 /**
  * @brief Parse ISO 8601 timestamp to time_t
@@ -92,6 +122,9 @@ ftxui::Component QuotasModal::create(TuiState &state) {
   auto allQuotas = std::make_shared<
       std::map<std::string, std::vector<firmius::shared::QuotaBucket>>>();
   auto isLoading = std::make_shared<bool>(true);
+  auto collapsed =
+      std::make_shared<std::unordered_map<std::string, bool>>();
+  auto header_hits = std::make_shared<std::vector<HeaderHit>>();
 
   std::thread([allQuotas, isLoading, providerId = providerId_, &state]() {
     *allQuotas = firmius::core::Harness::instance().getAllQuotas(providerId);
@@ -99,9 +132,11 @@ ftxui::Component QuotasModal::create(TuiState &state) {
     state.postEvent(ftxui::Event::Custom);
   }).detach();
 
-  auto content_renderer = ftxui::Renderer([allQuotas, isLoading,
+  auto content_renderer = ftxui::Renderer([allQuotas, isLoading, collapsed,
+                                           header_hits,
                                            providerId = providerId_]() {
     const auto &theme = ThemeManager::instance().getCurrentTheme();
+    const auto widths = computeQuotaModalWidths();
     if (*isLoading) {
       return ftxui::vbox(
           {ftxui::text("Fetching quotas...") | ftxui::center |
@@ -110,6 +145,23 @@ ftxui::Component QuotasModal::create(TuiState &state) {
     }
 
     ftxui::Elements accounts_elements;
+    header_hits->clear();
+    header_hits->reserve(allQuotas->size());
+    int max_reset_len = 0;
+    for (const auto &[account, buckets] : *allQuotas) {
+      (void)account;
+      for (const auto &bucket : buckets) {
+        if (!bucket.resetTime.empty()) {
+          std::string humanized = humanizeResetTime(bucket.resetTime);
+          int len = static_cast<int>(humanized.size());
+          if (len > max_reset_len) {
+            max_reset_len = len;
+          }
+        }
+      }
+    }
+    int reset_reserve = std::clamp(max_reset_len + 1, 12, 28);
+
     if (allQuotas->empty()) {
       accounts_elements.push_back(
           ftxui::text("No accounts or quotas found for " + providerId) |
@@ -117,15 +169,37 @@ ftxui::Component QuotasModal::create(TuiState &state) {
     } else {
       for (const auto &[account, buckets] : *allQuotas) {
         ftxui::Elements bucket_elements;
-        bucket_elements.push_back(
-            ftxui::hbox({ftxui::text(" Account: ") | ftxui::bold |
-                             ftxui::color(theme.modals.title),
-                         ftxui::text(account) | ftxui::bold |
-                             ftxui::color(theme.modals.highlight_fg)}));
+        bool isCollapsed = false;
+        auto it = collapsed->find(account);
+        if (it != collapsed->end()) {
+          isCollapsed = it->second;
+        } else {
+          collapsed->emplace(account, false);
+        }
+
+        HeaderHit hit;
+        hit.account = account;
+        header_hits->push_back(hit);
+        auto &hit_box = header_hits->back().box;
+        std::string arrow = isCollapsed ? ">" : "v";
+        auto header_line =
+            ftxui::hbox(
+                {ftxui::text(" " + arrow + " ") | ftxui::bold |
+                     ftxui::color(theme.modals.highlight_fg),
+                 ftxui::text("Account: ") | ftxui::bold |
+                     ftxui::color(theme.modals.title),
+                 ftxui::text(account) | ftxui::bold |
+                     ftxui::color(theme.modals.highlight_fg) | ftxui::flex}) |
+            ftxui::size(ftxui::WIDTH, ftxui::EQUAL, widths.inner_w) |
+            ftxui::bgcolor(theme.modals.highlight_bg) |
+            ftxui::reflect(hit_box);
+        bucket_elements.push_back(header_line);
         bucket_elements.push_back(ftxui::separatorLight() |
                                   ftxui::color(theme.modals.border));
 
-        if (buckets.empty()) {
+        if (isCollapsed) {
+          // Skip rendering buckets when collapsed.
+        } else if (buckets.empty()) {
           bucket_elements.push_back(ftxui::text("  (No quota data available)") |
                                     ftxui::color(theme.base.dim));
         } else {
@@ -144,26 +218,35 @@ ftxui::Component QuotasModal::create(TuiState &state) {
             // Compact mode: combine name + percentage
             std::string compactLabel = bucket.name + " " + percentStr;
 
-            ftxui::Element resetInfo = ftxui::filler();
+            ftxui::Element resetInfo = ftxui::text("");
             if (!bucket.resetTime.empty()) {
               std::string humanized = humanizeResetTime(bucket.resetTime);
-              resetInfo = ftxui::text(" | " + humanized) |
-                          ftxui::color(theme.base.dim);
+              resetInfo = ftxui::text(" " + humanized) |
+                          ftxui::color(theme.base.dim) |
+                          ftxui::size(ftxui::WIDTH, ftxui::EQUAL,
+                                      reset_reserve) |
+                          ftxui::align_right;
             }
 
-            // Compact mode: name + % on left, gauge, then reset time
-            bucket_elements.push_back(ftxui::hbox(
-                {ftxui::text("  " + compactLabel) |
-                     ftxui::color(color) | ftxui::bold,
-                 ftxui::gauge(bucket.remainingFraction) | ftxui::color(color) |
-                     ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, 1) |
-                     ftxui::size(ftxui::WIDTH, ftxui::EQUAL, 20) | ftxui::flex,
-                 resetInfo}));
+            int gaugeWidth = std::max(10, widths.inner_w - reset_reserve);
+            auto gauge = ftxui::gauge(bucket.remainingFraction) |
+                         ftxui::color(color) |
+                         ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, 1) |
+                         ftxui::size(ftxui::WIDTH, ftxui::EQUAL, gaugeWidth);
+            auto label =
+                ftxui::text(" " + compactLabel) | ftxui::bold |
+                ftxui::color(theme.modals.fg) | ftxui::bgcolor(color);
+            ftxui::Element gauge_with_label =
+                ftxui::dbox({gauge, label}) | ftxui::flex;
+
+            // Compact mode: label on gauge, then reset time
+            bucket_elements.push_back(
+                ftxui::hbox({gauge_with_label, resetInfo}));
           }
         }
         accounts_elements.push_back(ftxui::vbox(std::move(bucket_elements)) |
-                                    ftxui::borderRounded |
-                                    ftxui::color(theme.modals.border));
+                                    ftxui::size(ftxui::WIDTH, ftxui::EQUAL,
+                                                widths.inner_w));
         accounts_elements.push_back(ftxui::text("")); // Spacer
       }
     }
@@ -176,6 +259,7 @@ ftxui::Component QuotasModal::create(TuiState &state) {
       ftxui::Renderer(scrollable_content, [scrollable_content, isLoading,
                                            providerId = providerId_]() {
         const auto &theme = ThemeManager::instance().getCurrentTheme();
+        const auto widths = computeQuotaModalWidths();
         auto window_title =
             ftxui::hbox({ftxui::text(" Provider Quotas: ") | ftxui::bold |
                              ftxui::color(theme.modals.title),
@@ -187,7 +271,8 @@ ftxui::Component QuotasModal::create(TuiState &state) {
                    ftxui::vbox({
                        scrollable_content->Render() |
                            ftxui::size(ftxui::HEIGHT, ftxui::LESS_THAN, 22) |
-                           ftxui::size(ftxui::WIDTH, ftxui::LESS_THAN, 60),
+                           ftxui::size(ftxui::WIDTH, ftxui::EQUAL,
+                                       widths.content_w),
                        ftxui::text(""),
                        ftxui::hbox({ftxui::text(" ESC/Enter ") | ftxui::bold |
                                         ftxui::color(theme.base.dim),
@@ -198,15 +283,26 @@ ftxui::Component QuotasModal::create(TuiState &state) {
                ftxui::clear_under | ftxui::center |
                ftxui::bgcolor(theme.modals.bg) |
                ftxui::color(theme.modals.border) |
-               ftxui::size(ftxui::WIDTH, ftxui::LESS_THAN, 65);
+               ftxui::size(ftxui::WIDTH, ftxui::EQUAL, widths.window_w);
       });
 
   return ftxui::CatchEvent(
       window_renderer,
-      [&state, isLoading, scrollable_content](ftxui::Event event) {
+      [&state, isLoading, scrollable_content, collapsed,
+       header_hits](ftxui::Event event) {
         if (event == ftxui::Event::Escape || event == ftxui::Event::Return) {
           state.popModalImmediate();
           return true;
+        }
+        if (event.is_mouse() &&
+            event.mouse().button == ftxui::Mouse::Left) {
+          for (const auto &hit : *header_hits) {
+            if (hit.box.Contain(event.mouse().x, event.mouse().y)) {
+              bool &isCollapsed = (*collapsed)[hit.account];
+              isCollapsed = !isCollapsed;
+              return true;
+            }
+          }
         }
         return scrollable_content->OnEvent(event);
       });

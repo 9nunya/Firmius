@@ -1219,6 +1219,13 @@ void CodexProvider::processSseLine(
     return;
   }
 
+  // Handle reasoning summary text delta (used by Codex API for streaming thinking)
+  if (type == "response.reasoning_summary_text.delta") {
+    if (doc.HasMember("delta") && doc["delta"].IsString())
+      onEvent(ThinkingChunk{doc["delta"].GetString(), ""});
+    return;
+  }
+
   if (type == "response.output_item.added") {
     if (doc.HasMember("item") && doc["item"].IsObject()) {
       const auto &item = doc["item"];
@@ -1464,7 +1471,8 @@ void CodexProvider::stream(const AgentHistory &history,
                         static_cast<void *>(&tracker)};
 
       auto resp = client.streamPost(std::string(kBaseUrl) + kResponsesPath,
-                                    body, sseWriteCallback, &ctx);
+                                    body, sseWriteCallback, &ctx, 300,
+                                    opts.abortSignal);
 
       if (opts.abortSignal && opts.abortSignal->load()) {
         onEvent(StreamDone{StopReason::Cancelled});

@@ -142,6 +142,19 @@ public:
   virtual void markFileAsRead(const std::string &path) = 0;
 
   /**
+   * @brief Checks if a file has been FULLY read in the current session.
+   * @param path The absolute path to the file.
+   * @return True if the file has been fully read.
+   */
+  virtual bool hasFullyReadFile(const std::string &path) const = 0;
+
+  /**
+   * @brief Marks a file as having been FULLY read in the current session.
+   * @param path The absolute path to the file.
+   */
+  virtual void markFileAsFullyRead(const std::string &path) = 0;
+
+  /**
    * @brief Returns the agent's host.
    */
   virtual std::shared_ptr<IHost> getHost() = 0;

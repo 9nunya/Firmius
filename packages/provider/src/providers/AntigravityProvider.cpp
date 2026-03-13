@@ -4,9 +4,14 @@
 #include "utils/GCPHttpClient.hpp"
 #include "utils/InterruptibleSleep.hpp"
 #include "utils/TempOAuthServer.hpp"
+#include "utils/StringUtil.hpp"
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <iostream>
+#include <mutex>
+#include <random>
+#include <set>
 
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
@@ -18,6 +23,293 @@ namespace firmius::provider {
 using namespace firmius::utils;
 
 namespace {
+
+std::string getAntigravityVersion();
+
+std::string getAntigravityUserAgent() {
+  static std::string cached;
+  if (!cached.empty())
+    return cached;
+
+  static const std::vector<std::string> platforms = {
+      "windows/amd64",
+      "darwin/arm64",
+      "darwin/amd64",
+  };
+  static thread_local std::mt19937 rng(std::random_device{}());
+  std::uniform_int_distribution<size_t> dist(0, platforms.size() - 1);
+  cached = "antigravity/" + getAntigravityVersion() + " " + platforms[dist(rng)];
+  return cached;
+}
+
+std::string getAntigravityBrowserUserAgent() {
+  return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+         "(KHTML, like Gecko) Antigravity/" + getAntigravityVersion() + " Chrome/138.0.7204.235 "
+         "Electron/37.3.1 Safari/537.36";
+}
+
+std::string toLowerCopy(const std::string &input) {
+  std::string out = input;
+  for (auto &c : out)
+    c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+  return out;
+}
+
+std::string parseAntigravityVersion(const std::string &text) {
+  int dots = 0;
+  std::string current;
+  for (char ch : text) {
+    if ((ch >= '0' && ch <= '9') || ch == '.') {
+      current.push_back(ch);
+      if (ch == '.')
+        dots++;
+      if (dots >= 2) {
+        // If we have at least x.y.z, stop when non-numeric follows
+        continue;
+      }
+    } else if (!current.empty()) {
+      if (dots >= 2) {
+        // Trim trailing dots
+        while (!current.empty() && current.back() == '.')
+          current.pop_back();
+        return current;
+      }
+      current.clear();
+      dots = 0;
+    }
+  }
+  if (!current.empty() && dots >= 2) {
+    while (!current.empty() && current.back() == '.')
+      current.pop_back();
+    return current;
+  }
+  return "";
+}
+
+std::string fetchAntigravityVersionOnce() {
+  static std::once_flag once;
+  static std::string version = "1.18.3";
+  std::call_once(once, [&]() {
+    const std::string versionUrl =
+        "https://antigravity-auto-updater-974169037036.us-central1.run.app";
+    const std::string changelogUrl = "https://antigravity.google/changelog";
+
+    GCPHttpClient client("google-api-nodejs-client/9.15.1");
+    auto resp = client.get(versionUrl, 5);
+    if (resp.code == 200) {
+      std::string parsed = parseAntigravityVersion(resp.body);
+      if (!parsed.empty()) {
+        version = parsed;
+        return;
+      }
+    }
+
+    auto resp2 = client.get(changelogUrl, 5);
+    if (resp2.code == 200) {
+      std::string body = resp2.body;
+      if (body.size() > 5000)
+        body.resize(5000);
+      std::string parsed = parseAntigravityVersion(body);
+      if (!parsed.empty()) {
+        version = parsed;
+        return;
+      }
+    }
+  });
+  return version;
+}
+
+std::string getAntigravityVersion() { return fetchAntigravityVersionOnce(); }
+
+bool endsWithInsensitive(const std::string &value, const std::string &suffix) {
+  if (value.size() < suffix.size())
+    return false;
+  std::string tail = value.substr(value.size() - suffix.size());
+  return toLowerCopy(tail) == toLowerCopy(suffix);
+}
+
+std::optional<std::string> parseEffortFromVariantJson(const std::string &json) {
+  if (json.empty())
+    return std::nullopt;
+  rapidjson::Document doc;
+  doc.Parse(json.c_str());
+  if (doc.HasParseError() || !doc.IsObject())
+    return std::nullopt;
+  if (doc.HasMember("effort") && doc["effort"].IsString())
+    return std::string(doc["effort"].GetString());
+  return std::nullopt;
+}
+
+std::string normalizeAntigravityModelId(const std::string &modelId,
+                                        const std::string &variantJson) {
+  if (modelId.empty())
+    return modelId;
+
+  std::string base = modelId;
+  std::string lower = toLowerCopy(base);
+
+  if (lower.rfind("antigravity-", 0) == 0) {
+    base = base.substr(std::string("antigravity-").size());
+    lower = lower.substr(std::string("antigravity-").size());
+  }
+
+  if (endsWithInsensitive(base, "-preview-customtools")) {
+    base = base.substr(0, base.size() - std::string("-preview-customtools").size());
+    lower = toLowerCopy(base);
+  } else if (endsWithInsensitive(base, "-preview")) {
+    base = base.substr(0, base.size() - std::string("-preview").size());
+    lower = toLowerCopy(base);
+  }
+
+  bool isGemini3 = lower.find("gemini-3") != std::string::npos;
+  if (!isGemini3)
+    return modelId;
+
+  bool isFlash = lower.find("flash") != std::string::npos;
+  bool hasTierSuffix =
+      endsWithInsensitive(base, "-low") || endsWithInsensitive(base, "-medium") ||
+      endsWithInsensitive(base, "-high");
+
+  if (!isFlash && !hasTierSuffix) {
+    std::string effort = "low";
+    if (auto parsed = parseEffortFromVariantJson(variantJson)) {
+      effort = toLowerCopy(*parsed);
+    }
+    if (effort == "max")
+      effort = "high";
+    if (effort != "low" && effort != "medium" && effort != "high")
+      effort = "low";
+    base += "-" + effort;
+  }
+
+  return "antigravity-" + base;
+}
+
+struct RefreshTokenParts {
+  std::string refreshToken;
+  std::string projectId;
+  std::string managedProjectId;
+};
+
+RefreshTokenParts parseRefreshTokenParts(const std::string &token) {
+  RefreshTokenParts parts;
+  size_t first = token.find('|');
+  if (first == std::string::npos) {
+    parts.refreshToken = token;
+    return parts;
+  }
+  size_t second = token.find('|', first + 1);
+  parts.refreshToken = token.substr(0, first);
+  if (second == std::string::npos) {
+    parts.projectId = token.substr(first + 1);
+    return parts;
+  }
+  parts.projectId = token.substr(first + 1, second - first - 1);
+  parts.managedProjectId = token.substr(second + 1);
+  return parts;
+}
+
+
+/**
+ * @brief Maps a model ID to its quota bucket name.
+ * 
+ * Quota buckets:
+ * - "claude" for all Claude models
+ * - "gemini-flash" for Gemini Flash models
+ * - "gemini-pro" for Gemini Pro models
+ * 
+ * Also checks if a specific model variant has quota.
+ */
+std::string modelToQuotaBucket(const std::string& modelId) {
+  std::string lowerModel = modelId;
+  for (auto &c : lowerModel)
+    c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+
+  if (lowerModel.find("claude") != std::string::npos)
+    return "claude";
+  
+  if (lowerModel.find("gemini-3") != std::string::npos ||
+      lowerModel.find("gemini 3") != std::string::npos ||
+      lowerModel.find("gemini-2.5") != std::string::npos) {
+    if (lowerModel.find("flash") != std::string::npos)
+      return "gemini-flash";
+    else
+      return "gemini-pro";
+  }
+  
+  // Default to gemini-pro for unknown models
+  return "gemini-pro";
+}
+
+/**
+ * @brief Check if an account has quota for a given model, checking both exact match and bucket match.
+ */
+bool accountHasQuota(const OAuthAccount& acc, const std::string& modelId) {
+  std::string lowerModel = toLowerCopy(modelId);
+  std::string lowerModelNoPrefix = lowerModel;
+  if (lowerModelNoPrefix.rfind("antigravity-", 0) == 0) {
+    lowerModelNoPrefix = lowerModelNoPrefix.substr(std::string("antigravity-").size());
+  }
+  
+  // First check for exact model match (including variants like gemini-3.1-pro-high-a)
+  std::string exactQuotaKey = "quota:" + lowerModel;
+  auto it = acc.metadata.find(exactQuotaKey);
+  if (it != acc.metadata.end()) {
+    try {
+      if (std::stof(it->second) > 0.01f)
+        return true;
+    } catch (...) {}
+  }
+  
+  // Check for variant matches (e.g., gemini-3.1-pro matches gemini-3.1-pro-high, gemini-3.1-pro-low, etc.)
+  for (const auto &[key, val] : acc.metadata) {
+    if (key.rfind("quota:", 0) == 0) {
+      std::string quotaModel = key.substr(6);
+      std::string quotaModelLower = toLowerCopy(quotaModel);
+      std::string quotaModelNoPrefix = quotaModelLower;
+      if (quotaModelNoPrefix.rfind("antigravity-", 0) == 0) {
+        quotaModelNoPrefix = quotaModelNoPrefix.substr(std::string("antigravity-").size());
+      }
+      // Check if the quota model starts with our model (variant match)
+      if (quotaModelLower.find(lowerModel) == 0 ||
+          quotaModelLower.find(lowerModelNoPrefix) == 0 ||
+          quotaModelNoPrefix.find(lowerModel) == 0 ||
+          quotaModelNoPrefix.find(lowerModelNoPrefix) == 0) {
+        try {
+          if (std::stof(val) > 0.01f)
+            return true;
+        } catch (...) {}
+      }
+      // Also check if our model contains the quota model (reverse match)
+      if (lowerModel.find(quotaModelLower) == 0 ||
+          lowerModel.find(quotaModelNoPrefix) == 0 ||
+          lowerModelNoPrefix.find(quotaModelLower) == 0 ||
+          lowerModelNoPrefix.find(quotaModelNoPrefix) == 0) {
+        try {
+          if (std::stof(val) > 0.01f)
+            return true;
+        } catch (...) {}
+      }
+    }
+  }
+  
+  // Fallback to bucket matching
+  std::string bucket = modelToQuotaBucket(modelId);
+  for (const auto &[key, val] : acc.metadata) {
+    if (key.rfind("quota:", 0) == 0) {
+      std::string quotaModel = key.substr(6);
+      std::string quotaBucket = modelToQuotaBucket(quotaModel);
+      if (quotaBucket == bucket) {
+        try {
+          if (std::stof(val) > 0.01f)
+            return true;
+        } catch (...) {}
+      }
+    }
+  }
+  
+  return false;
+}
 
 float normalizeQuotaFraction(double value) {
   if (!std::isfinite(value))
@@ -88,8 +380,8 @@ public:
         "https://www.googleapis.com/auth/experimentsandconfigs"
         "&access_type=offline"
         "&prompt=consent";
-    prompt_ = "Please open this URL in your browser:\n\n" + url +
-              "\n\nWaiting for authorization response...";
+    prompt_ = url +
+              "\nWaiting for authorization response...";
 
     server_.startAsync(
         "<html><body><h1>Firmius Temp Server</h1><p>Authentication complete! "
@@ -175,6 +467,85 @@ public:
         acc.identifier = uDoc["email"].GetString();
       }
     }
+    
+    // Fetch managed project ID and store in metadata
+    client.clearHeaders();
+    client.setBearerToken(acc.accessToken);
+    client.setContentType("application/json");
+    client.addHeader("User-Agent", "google-api-nodejs-client/9.15.1");
+    
+    rapidjson::Document metaDoc;
+    metaDoc.SetObject();
+    auto &metaAlloc = metaDoc.GetAllocator();
+    rapidjson::Value metadata(rapidjson::kObjectType);
+    metadata.AddMember("ideType", "ANTIGRAVITY", metaAlloc);
+    metadata.AddMember("platform", "MACOS", metaAlloc);
+    metadata.AddMember("pluginType", "GEMINI", metaAlloc);
+    rapidjson::Value metaBody(rapidjson::kObjectType);
+    metaBody.AddMember("metadata", metadata, metaAlloc);
+    
+    rapidjson::StringBuffer metaBuffer;
+    rapidjson::Writer<rapidjson::StringBuffer> metaWriter(metaBuffer);
+    metaBody.Accept(metaWriter);
+    
+    // Try loadCodeAssist on prod endpoint
+    auto projResp = client.post(
+        "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist",
+        metaBuffer.GetString());
+    
+    if (projResp.code == 200) {
+      rapidjson::Document projDoc;
+      projDoc.Parse(projResp.body.c_str());
+      if (!projDoc.HasParseError() && projDoc.IsObject() &&
+          projDoc.HasMember("cloudaicompanionProject")) {
+        const auto &proj = projDoc["cloudaicompanionProject"];
+        if (proj.IsString()) {
+          acc.metadata["projectId"] = proj.GetString();
+          acc.metadata["managedProjectId"] = proj.GetString();
+        } else if (proj.IsObject() && proj.HasMember("id")) {
+          acc.metadata["projectId"] = proj["id"].GetString();
+          acc.metadata["managedProjectId"] = proj["id"].GetString();
+        }
+      }
+    }
+    
+    // If loadCodeAssist failed, try onboardUser to enable the API
+    if (acc.metadata.find("projectId") == acc.metadata.end()) {
+      rapidjson::Document onboardDoc;
+      onboardDoc.SetObject();
+      auto &onboardAlloc = onboardDoc.GetAllocator();
+      onboardDoc.AddMember("tierId", rapidjson::Value("standard", onboardAlloc), onboardAlloc);
+      onboardDoc.AddMember("metadata", metadata, onboardAlloc);
+      
+      rapidjson::StringBuffer onboardBuffer;
+      rapidjson::Writer<rapidjson::StringBuffer> onboardWriter(onboardBuffer);
+      onboardDoc.Accept(onboardWriter);
+      
+      client.clearHeaders();
+      client.setBearerToken(acc.accessToken);
+      client.setContentType("application/json");
+      client.addHeader("User-Agent", "google-api-nodejs-client/9.15.1");
+      
+      auto onboardResp = client.post(
+          "https://cloudcode-pa.googleapis.com/v1internal:onboardUser",
+          onboardBuffer.GetString());
+      
+      if (onboardResp.code == 200) {
+        rapidjson::Document onboardRespDoc;
+        onboardRespDoc.Parse(onboardResp.body.c_str());
+        if (!onboardRespDoc.HasParseError() && onboardRespDoc.IsObject() &&
+            onboardRespDoc.HasMember("response") && onboardRespDoc["response"].IsObject()) {
+          const auto &response = onboardRespDoc["response"];
+          if (response.HasMember("cloudaicompanionProject") && response["cloudaicompanionProject"].IsObject()) {
+            const auto &proj = response["cloudaicompanionProject"];
+            if (proj.HasMember("id") && proj["id"].IsString()) {
+              acc.metadata["projectId"] = proj["id"].GetString();
+              acc.metadata["managedProjectId"] = proj["id"].GetString();
+            }
+          }
+        }
+      }
+    }
 
     provider_->addAccount(acc);
     return true;
@@ -257,95 +628,76 @@ std::optional<OAuthAccount *> AntigravityProvider::getAvailableAccount(
   if (accounts_.empty())
     return std::nullopt;
 
-  std::string group = "unknown";
+  std::string normalizedModel;
   if (modelId) {
-    std::string lowerModel = *modelId;
-    for (auto &c : lowerModel)
-      c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
-
-    if (lowerModel.find("claude") != std::string::npos)
-      group = "claude";
-    else if (lowerModel.find("gemini-3") != std::string::npos ||
-             lowerModel.find("gemini 3") != std::string::npos ||
-             lowerModel.find("gemini-2.5") != std::string::npos) {
-      if (lowerModel.find("flash") != std::string::npos)
-        group = "gemini-flash";
-      else
-        group = "gemini-pro";
-    }
+    normalizedModel = normalizeAntigravityModelId(*modelId, "");
   }
 
   int64_t now = std::chrono::duration_cast<std::chrono::seconds>(
                     std::chrono::system_clock::now().time_since_epoch())
                     .count();
-  int startIdx = (lastUsedIndex_ >= 0) ? lastUsedIndex_ : 0;
-  if (startIdx >= static_cast<int>(accounts_.size())) {
-    startIdx = 0;
+                    
+  // Collect all accounts with quota > 0 for this model
+  std::vector<int> qualifiedIndices;
+  
+  for (int i = 0; i < static_cast<int>(accounts_.size()); ++i) {
+    auto &acc = accounts_[i];
+    
+    // Clear stale rate limits
+    if (acc.rateLimited && now > acc.backoffUntil) {
+      acc.rateLimited = false;
+    }
+    
+    if (acc.rateLimited) {
+      continue;
+    }
+    
+    // Check if this account has quota for the requested model
+    bool hasQuota = modelId ? accountHasQuota(acc, normalizedModel) : false;
+    
+    if (hasQuota && (!isTokenExpired(acc) || refreshAccessToken(acc))) {
+      qualifiedIndices.push_back(i);
+    }
   }
-  int currentIdx = startIdx;
-
-  if (group != "unknown") {
-    do {
-      auto &acc = accounts_[currentIdx];
-      if (acc.rateLimited && now > acc.backoffUntil) {
-        acc.rateLimited = false;
-        // Reset stale quota metadata so the account is not skipped again
-        for (auto it = acc.metadata.begin(); it != acc.metadata.end(); ++it) {
-          if (it->first.rfind("quota:", 0) == 0 && it->second == "0") {
-            it->second = "1";
-          }
-        }
+  
+  // If we have qualified accounts, use round-robin among them
+  if (!qualifiedIndices.empty()) {
+    // Find the next account in round-robin order
+    int nextIdx = -1;
+    for (size_t i = 0; i < qualifiedIndices.size(); ++i) {
+      if (qualifiedIndices[i] > lastUsedIndex_) {
+        nextIdx = qualifiedIndices[i];
+        break;
       }
-      if (!acc.rateLimited) {
-        bool hasQuota = false;
-        for (const auto &[key, val] : acc.metadata) {
-          if (key.rfind("quota:", 0) == 0) {
-            std::string modelGroup = "unknown";
-            std::string lowerModel = key.substr(6);
-            for (auto &c : lowerModel)
-              c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
-
-            if (lowerModel.find("claude") != std::string::npos)
-              modelGroup = "claude";
-            else if (lowerModel.find("gemini-3") != std::string::npos ||
-                     lowerModel.find("gemini 3") != std::string::npos ||
-                     lowerModel.find("gemini-2.5") != std::string::npos) {
-              if (lowerModel.find("flash") != std::string::npos)
-                modelGroup = "gemini-flash";
-              else
-                modelGroup = "gemini-pro";
-            }
-
-            if (modelGroup == group) {
-              try {
-                if (std::stof(val) > 0.01f) {
-                  hasQuota = true;
-                  break;
-                }
-              } catch (...) {
-              }
-            }
-          }
-        }
-
-        if (hasQuota) {
-          if (!isTokenExpired(acc) || refreshAccessToken(acc)) {
-            lastUsedIndex_ = currentIdx;
-            saveAccounts();
-            return &acc;
-          }
-        }
-      }
-      currentIdx = (currentIdx + 1) % static_cast<int>(accounts_.size());
-    } while (currentIdx != startIdx);
+    }
+    if (nextIdx == -1) {
+      // Wrap around to the first qualified account
+      nextIdx = qualifiedIndices[0];
+    }
+    
+    lastUsedIndex_ = nextIdx;
+    saveAccounts();
+    return &accounts_[nextIdx];
   }
-
+  
+  // Fallback: if no accounts have quota metadata, use base class logic
   return BaseOAuthProvider::getAvailableAccount(modelId);
 }
 
 bool AntigravityProvider::refreshAccessToken(OAuthAccount &acc) {
   GCPHttpClient client;
   client.setContentType("application/x-www-form-urlencoded");
+  RefreshTokenParts tokenParts = parseRefreshTokenParts(acc.refreshToken);
+  if (!tokenParts.managedProjectId.empty()) {
+    acc.metadata["managedProjectId"] = tokenParts.managedProjectId;
+  }
+  if (!tokenParts.projectId.empty()) {
+    acc.metadata["projectId"] = tokenParts.projectId;
+  }
+  if (!tokenParts.refreshToken.empty() &&
+      tokenParts.refreshToken != acc.refreshToken) {
+    acc.refreshToken = tokenParts.refreshToken;
+  }
   std::string body =
       "grant_type=refresh_token"
       "&client_id=1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps."
@@ -421,23 +773,28 @@ void AntigravityProvider::processSSELine(
     const auto &cand = resp["candidates"][0];
     if (cand.HasMember("content") && cand["content"].HasMember("parts")) {
       for (const auto &part : cand["content"]["parts"].GetArray()) {
-        if (part.HasMember("text")) {
-          std::string text = part["text"].GetString();
-          bool isThinking = false;
-          if (part.HasMember("thought"))
-            isThinking = part["thought"].GetBool();
-          else if (part.HasMember("type"))
-            isThinking = (std::string(part["type"].GetString()) == "thinking");
+        bool hasText = part.HasMember("text") && part["text"].IsString();
+        bool hasThinking = part.HasMember("thinking") && part["thinking"].IsString();
+        bool isThinking = false;
+        if (part.HasMember("thought") && part["thought"].IsBool())
+          isThinking = part["thought"].GetBool();
+        else if (part.HasMember("type") && part["type"].IsString())
+          isThinking = (std::string(part["type"].GetString()) == "thinking");
 
+        if (hasText || hasThinking) {
+          std::string text = hasText ? part["text"].GetString()
+                                     : part["thinking"].GetString();
           if (isThinking) {
             std::string signature;
-            if (part.HasMember("thought_signature"))
+            if (part.HasMember("thought_signature") &&
+                part["thought_signature"].IsString())
               signature = part["thought_signature"].GetString();
-            else if (part.HasMember("signature"))
+            else if (part.HasMember("signature") && part["signature"].IsString())
               signature = part["signature"].GetString();
             onEvent(ThinkingChunk{text, signature});
-          } else
+          } else {
             onEvent(TextChunk{text});
+          }
         } else if (part.HasMember("functionCall")) {
           const auto &fc = part["functionCall"];
           ToolCallChunk chunk;
@@ -461,65 +818,65 @@ void AntigravityProvider::processSSELine(
 void AntigravityProvider::stream(
     const AgentHistory &history, const ProviderOptions &opts,
     std::function<void(const StreamEvent &)> onEvent) {
+  // Refresh quotas to ensure we have up-to-date information for account selection
+  refreshQuotas();
+  
+  std::string requestedModel =
+      opts.modelId.empty() ? "gemini-3-flash" : opts.modelId;
+  std::string resolvedModel =
+      normalizeAntigravityModelId(requestedModel, opts.modelVariantJson);
+
+  // Find all accounts with quota for this model
+  std::vector<std::string> qualifiedAccounts;
+  for (const auto &acc : accounts_) {
+    if (accountHasQuota(acc, resolvedModel)) {
+      qualifiedAccounts.push_back(acc.getIdentifier());
+    }
+  }
+  
+  // Track which accounts we've already tried in this session
+  std::set<std::string> triedAccounts;
+  
   int accountRetries = 0;
   std::string lastError;
   std::string lastAccountEmail;
-  int maxRetries = std::max(5, static_cast<int>(accounts_.size()) * 3);
-  while (accountRetries < maxRetries) {
-    auto optAcc = getAvailableAccount(opts.modelId);
+  // Only allow trying each qualified account once with internal retries
+  int maxAccountAttempts = std::max(1, static_cast<int>(qualifiedAccounts.size()));
+  
+  while (accountRetries < maxAccountAttempts) {
+    auto optAcc = getAvailableAccount(resolvedModel);
     if (!optAcc) {
-      // All accounts rate-limited: find the one closest to unlocking
-      int64_t now = std::chrono::duration_cast<std::chrono::seconds>(
-                        std::chrono::system_clock::now().time_since_epoch())
-                        .count();
-      int64_t earliestUnlock = 0;
-      for (const auto &a : accounts_) {
-        if (a.rateLimited) {
-          if (earliestUnlock == 0 || a.backoffUntil < earliestUnlock)
-            earliestUnlock = a.backoffUntil;
-        }
-      }
-      int64_t waitSec = (earliestUnlock > now) ? (earliestUnlock - now) : 0;
-      if (waitSec > 120)
-        waitSec = 120; // cap at 2 minutes
-      if (waitSec > 0) {
-        onEvent(StreamRetrying{accountRetries + 1, maxRetries, 429,
-                               static_cast<int>(waitSec * 1000),
-                               "All accounts rate-limited, waiting",
-                               lastAccountEmail});
-        std::this_thread::sleep_for(std::chrono::seconds(waitSec));
-        // Clear expired backoffs after sleeping
-        int64_t nowAfter =
-            std::chrono::duration_cast<std::chrono::seconds>(
-                std::chrono::system_clock::now().time_since_epoch())
-                .count();
-        for (auto &a : accounts_) {
-          if (a.rateLimited && nowAfter > a.backoffUntil) {
-            a.rateLimited = false;
-            for (auto &[k, v] : a.metadata) {
-              if (k.rfind("quota:", 0) == 0 && v == "0")
-                v = "1";
-            }
-          }
-        }
-        accountRetries++;
-        continue;
-      }
-      // Nothing to wait for
+      // All accounts exhausted - exit immediately
       if (!lastError.empty()) {
         onEvent(StreamError{lastError, -1, lastAccountEmail});
       } else {
-        onEvent(StreamError{"No accounts available.", -1, lastAccountEmail});
+        onEvent(StreamError{"All qualified accounts exhausted.", -1, lastAccountEmail});
       }
       return;
     }
     OAuthAccount &acc = *optAcc.value();
     lastAccountEmail = acc.getIdentifier();
+    
+    // Check if we've already tried this account
+    if (triedAccounts.count(lastAccountEmail)) {
+      if (!lastError.empty()) {
+        onEvent(StreamError{lastError, -1, lastAccountEmail});
+      } else {
+        onEvent(StreamError{"All qualified accounts exhausted.", -1, lastAccountEmail});
+      }
+      return;
+    }
+    triedAccounts.insert(lastAccountEmail);
 
     if (accountRetries > 0) {
       onEvent(StreamAccountSwitched{acc.getIdentifier()});
     }
 
+    std::string effectiveProjectId = resolveProjectIdForAccount(acc, true);
+    bool projectRefreshed = false;
+
+    bool shouldTryNextAccount = false;
+    std::string retryReason = "Connection error";
     for (int retryAttempt = 0; retryAttempt < 4; ++retryAttempt) {
       if (retryAttempt > 0) {
         // Use unified backoff sequence from shared constants
@@ -527,7 +884,7 @@ void AntigravityProvider::stream(
             firmius::shared::BackoffConstants::getBackoffSeconds(retryAttempt -
                                                                  1);
         onEvent(StreamRetrying{retryAttempt, 4, 0, backoffSeconds * 1000,
-                               "Connection error", acc.getIdentifier()});
+                               retryReason, acc.getIdentifier()});
         // Use interruptible sleep to allow immediate cancellation
         if (!interruptibleSleep(std::chrono::seconds(backoffSeconds),
                                 opts.abortSignal)) {
@@ -537,34 +894,32 @@ void AntigravityProvider::stream(
       }
 
       std::string effectiveModel =
-          opts.modelId.empty() ? "gemini-3-flash" : opts.modelId;
+          resolvedModel.empty() ? "gemini-3-flash" : resolvedModel;
 
-      std::string effectiveProjectId = acc.metadata.count("projectId")
-                                           ? acc.metadata["projectId"]
-                                           : "rising-fact-p41fc";
+      // If we refreshed project context due to a prior error, recompute now.
+      if (projectRefreshed) {
+        effectiveProjectId = resolveProjectIdForAccount(acc, false);
+      }
 
       AntigravityProtocol::RequestContext reqCtx;
       reqCtx.modelId = effectiveModel;
       reqCtx.projectId = effectiveProjectId;
-      reqCtx.sessionId = std::to_string(rand());
-      reqCtx.requestId = "agent-" + std::to_string(rand());
+      reqCtx.sessionId = firmius::shared::StringUtil::generateUuid();
+      reqCtx.requestId =
+          "agent-" + firmius::shared::StringUtil::generateUuid();
 
       std::string body =
           AntigravityProtocol::prepareRequestBody(history, opts, reqCtx);
 
-      GCPHttpClient client;
+      GCPHttpClient client(getAntigravityUserAgent());
       client.setBearerToken(acc.accessToken);
-      // Set required Antigravity headers
-      client.addHeader(
-          "User-Agent",
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-          "(KHTML, like Gecko) Antigravity/1.18.3 Chrome/138.0.7204.235 "
-          "Electron/37.3.1 Safari/537.36");
-      client.addHeader("X-Goog-Api-Client",
-                       "google-cloud-sdk vscode_cloudshelleditor/0.1");
-      client.addHeader(
-          "Client-Metadata",
-          R"({"ideType":"ANTIGRAVITY","platform":"LINUX","pluginType":"GEMINI"})");
+      // Antigravity mode: Only send User-Agent header (matches TypeScript behavior)
+      // Do NOT send X-Goog-Api-Client or Client-Metadata headers
+      client.addHeader("Accept", "text/event-stream");
+      if (effectiveModel.find("claude") != std::string::npos &&
+          effectiveModel.find("thinking") != std::string::npos) {
+        client.addHeader("anthropic-beta", "interleaved-thinking-2025-05-14");
+      }
       client.setContentType("application/json");
 
       std::uint64_t startMs =
@@ -605,62 +960,141 @@ void AntigravityProvider::stream(
 
       std::function<void(const StreamEvent &)> wrappedFn = wrappedOnEvent;
       StreamContext ctx{this, &wrappedFn, "", 0, opts.abortSignal};
-      auto resp =
-          client.streamPost("https://daily-cloudcode-pa.sandbox.googleapis.com/"
-                            "v1internal:streamGenerateContent?alt=sse",
-                            body, sseWriteCallback, &ctx);
+      bool isClaudeModel =
+          effectiveModel.find("claude") != std::string::npos ||
+          effectiveModel.find("Claude") != std::string::npos;
+      // Try endpoint order:
+      // - Claude: prod first (sandbox often disabled)
+      // - Gemini: daily first (CLIProxy behavior), then autopush, then prod
+      const std::vector<std::string> endpoints = isClaudeModel
+          ? std::vector<std::string>{
+                "https://cloudcode-pa.googleapis.com"}
+          : std::vector<std::string>{
+                "https://daily-cloudcode-pa.sandbox.googleapis.com",
+                "https://autopush-cloudcode-pa.sandbox.googleapis.com",
+                "https://cloudcode-pa.googleapis.com"};
+      
+      bool success = false;
+      bool retryableFailure = false;
+      for (const auto& endpoint : endpoints) {
+        auto resp =
+            client.streamPost(endpoint + "/v1internal:streamGenerateContent?alt=sse",
+                              body, sseWriteCallback, &ctx, 300,
+                              opts.abortSignal);
+        
+        if (resp.code == 200) {
+          auto endMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                           std::chrono::system_clock::now().time_since_epoch())
+                           .count();
+          if (metricsReceived) {
+            capturedMetrics.timing.startMs = startMs;
+            capturedMetrics.timing.firstTokenMs =
+                firstTokenEmitted ? firstTokenMs : 0;
+            capturedMetrics.timing.endMs = endMs;
 
-      if (resp.code == 200) {
-        auto endMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                         std::chrono::system_clock::now().time_since_epoch())
-                         .count();
-        if (metricsReceived) {
-          capturedMetrics.timing.startMs = startMs;
-          capturedMetrics.timing.firstTokenMs =
-              firstTokenEmitted ? firstTokenMs : 0;
-          capturedMetrics.timing.endMs = endMs;
+            try {
+              auto modelInfo = getModelInfo(opts.modelId);
+              double promptUsd =
+                  (static_cast<double>(capturedMetrics.tokens.prompt) *
+                   modelInfo.pricePer1MInput) /
+                  1000000.0;
+              double completionUsd =
+                  (static_cast<double>(capturedMetrics.tokens.completion) *
+                   modelInfo.pricePer1MOutput) /
+                  1000000.0;
+              double cacheReadUsd =
+                  (static_cast<double>(capturedMetrics.tokens.cacheRead) *
+                   modelInfo.pricePer1MCacheRead) /
+                  1000000.0;
+              capturedMetrics.estimatedCostUsd =
+                  promptUsd + completionUsd + cacheReadUsd;
+            } catch (...) {
+            }
 
-          try {
-            auto modelInfo = getModelInfo(opts.modelId);
-            double promptUsd =
-                (static_cast<double>(capturedMetrics.tokens.prompt) *
-                 modelInfo.pricePer1MInput) /
-                1000000.0;
-            double completionUsd =
-                (static_cast<double>(capturedMetrics.tokens.completion) *
-                 modelInfo.pricePer1MOutput) /
-                1000000.0;
-            double cacheReadUsd =
-                (static_cast<double>(capturedMetrics.tokens.cacheRead) *
-                 modelInfo.pricePer1MCacheRead) /
-                1000000.0;
-            capturedMetrics.estimatedCostUsd =
-                promptUsd + completionUsd + cacheReadUsd;
-          } catch (...) {
+            onEvent(capturedMetrics);
+          }
+          success = true;
+          break;
+        }
+        // Classify failure types
+        if (resp.code == 0 || resp.code == 408 || resp.code >= 500) {
+          retryableFailure = true;
+          if (!resp.error.empty())
+            retryReason = "Connection error: " + resp.error;
+          continue;
+        }
+
+        std::string lowerBody = ctx.buffer;
+        for (auto &c : lowerBody)
+          c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+
+        if (resp.code == 403) {
+          bool consumerInvalid =
+              lowerBody.find("consumer_invalid") != std::string::npos ||
+              lowerBody.find("permission denied on resource project") != std::string::npos;
+          bool serviceDisabled =
+              lowerBody.find("service_disabled") != std::string::npos ||
+              lowerBody.find("staging-cloudaicompanion.sandbox.googleapis.com") != std::string::npos ||
+              lowerBody.find("sandbox") != std::string::npos;
+
+          if (consumerInvalid && !projectRefreshed) {
+            // Attempt to refresh project context once, then retry immediately.
+            effectiveProjectId = resolveProjectIdForAccount(acc, true);
+            projectRefreshed = true;
+            reqCtx.projectId = effectiveProjectId;
+            body = AntigravityProtocol::prepareRequestBody(history, opts, reqCtx);
+            continue;
           }
 
-          onEvent(capturedMetrics);
+          if (serviceDisabled) {
+            // Skip sandbox endpoint and try next endpoint (prod may work).
+            lastError = "API error 403 (service disabled on endpoint)";
+            continue;
+          }
+
+          lastError = "API error 403: " + ctx.buffer;
+          shouldTryNextAccount = true;
+          break;
         }
+
+        if (resp.code == 402 || resp.code == 429) {
+          lastError = "Rate limited (HTTP " + std::to_string(resp.code) + ")";
+          int backoff = firmius::shared::BackoffConstants::getBackoffSeconds(
+              accountRetries);
+          markAccountRateLimited(acc, backoff);
+          shouldTryNextAccount = true;
+          break;
+        }
+
+        if (resp.code == 400) {
+          std::string errMsg = "API error 400";
+          if (!ctx.buffer.empty())
+            errMsg += ": " + ctx.buffer;
+          onEvent(StreamError{errMsg, 400, acc.getIdentifier()});
+          return;
+        }
+        if (resp.code < 500 && resp.code != 404) {
+          std::string errMsg = "API error: " + std::to_string(resp.code);
+          if (!ctx.buffer.empty())
+            errMsg += "\n" + ctx.buffer;
+          onEvent(StreamError{errMsg, (int)resp.code, acc.getIdentifier()});
+          return;
+        }
+
+        // 400/404 are non-retryable for this endpoint; try next endpoint.
+        lastError = "API error " + std::to_string(resp.code);
+      }
+      
+      if (success) {
         return;
       }
-      if (resp.code == 402 || resp.code == 429 || resp.code == 403) {
-        if (resp.code == 403) {
-          lastError = "API error 403: " + ctx.buffer;
-        } else {
-          lastError = "Rate limited (HTTP " + std::to_string(resp.code) + ")";
-        }
-        // Use unified backoff sequence from shared constants
-        int backoff = firmius::shared::BackoffConstants::getBackoffSeconds(
-            accountRetries);
-        markAccountRateLimited(acc, backoff);
+
+      if (shouldTryNextAccount) {
         break;
       }
-      if (resp.code < 500 && resp.code != 408 && resp.code != 0) {
-        std::string errMsg = "API error: " + std::to_string(resp.code);
-        if (!ctx.buffer.empty())
-          errMsg += "\n" + ctx.buffer;
-        onEvent(StreamError{errMsg, (int)resp.code, acc.getIdentifier()});
-        return;
+
+      if (!retryableFailure) {
+        break;
       }
     }
     accountRetries++;
@@ -690,7 +1124,7 @@ void AntigravityProvider::refreshQuotas() {
   if (accounts_.empty()) {
     return;
   }
-  
+
   int64_t now = std::chrono::duration_cast<std::chrono::seconds>(
                     std::chrono::system_clock::now().time_since_epoch())
                     .count();
@@ -704,42 +1138,184 @@ void AntigravityProvider::refreshQuotas() {
 }
 
 std::string AntigravityProvider::fetchManagedProject(OAuthAccount &acc) {
+  // The loadCodeAssist API expects metadata directly in the body, not wrapped
+  // Format: { "metadata": { "ideType": "ANTIGRAVITY", "platform": "MACOS", "pluginType": "GEMINI" } }
   rapidjson::Document doc;
   doc.SetObject();
   auto &a = doc.GetAllocator();
+  
   rapidjson::Value metadata(rapidjson::kObjectType);
   metadata.AddMember("ideType", "ANTIGRAVITY", a);
-  metadata.AddMember("platform", "LINUX", a);
+  metadata.AddMember("platform", "MACOS", a);
   metadata.AddMember("pluginType", "GEMINI", a);
-  rapidjson::Value bodyObj(rapidjson::kObjectType);
-  bodyObj.AddMember("metadata", metadata, a);
+  if (acc.metadata.count("projectId") && !acc.metadata["projectId"].empty()) {
+    metadata.AddMember("duetProject",
+                       rapidjson::Value(acc.metadata["projectId"].c_str(), a),
+                       a);
+  }
+  
+  doc.AddMember("metadata", metadata, a);
 
   rapidjson::StringBuffer buffer;
   rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
-  bodyObj.Accept(writer);
+  doc.Accept(writer);
 
-  GCPHttpClient client;
+  GCPHttpClient client("google-api-nodejs-client/9.15.1");
   client.setBearerToken(acc.accessToken);
-  client.addHeader("User-Agent", "google-api-nodejs-client/9.15.1");
-  client.addHeader("X-Goog-Api-Client",
-                   "google-cloud-sdk vscode_cloudshelleditor/0.1");
+  client.setContentType("application/json");
+  // loadCodeAssist requires these headers
+  client.addHeader("X-Goog-Api-Client", "google-cloud-sdk vscode_cloudshelleditor/0.1");
+  client.addHeader(
+      "Client-Metadata",
+      R"({"ideType":"ANTIGRAVITY","platform":"MACOS","pluginType":"GEMINI"})");
 
-  auto resp = client.post(
-      "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist",
-      buffer.GetString());
-  if (resp.code == 200) {
-    rapidjson::Document respDoc;
-    respDoc.Parse(resp.body.c_str());
-    if (!respDoc.HasParseError() && respDoc.IsObject() &&
-        respDoc.HasMember("cloudaicompanionProject")) {
-      const auto &proj = respDoc["cloudaicompanionProject"];
-      if (proj.IsString())
-        return proj.GetString();
-      if (proj.IsObject() && proj.HasMember("id"))
-        return proj["id"].GetString();
+  // Try multiple endpoints in order (prod first, then sandbox)
+  const std::vector<std::string> endpoints = {
+      "https://cloudcode-pa.googleapis.com",
+      "https://daily-cloudcode-pa.sandbox.googleapis.com",
+      "https://autopush-cloudcode-pa.sandbox.googleapis.com"
+  };
+
+  // First try loadCodeAssist
+  std::string tierId = "FREE";
+  for (const auto& endpoint : endpoints) {
+    auto resp = client.post(
+        endpoint + "/v1internal:loadCodeAssist",
+        buffer.GetString());
+
+    
+    if (resp.code == 200) {
+      rapidjson::Document respDoc;
+      respDoc.Parse(resp.body.c_str());
+      if (!respDoc.HasParseError() && respDoc.IsObject() &&
+          respDoc.HasMember("cloudaicompanionProject")) {
+        const auto &proj = respDoc["cloudaicompanionProject"];
+        std::string projectId;
+        if (proj.IsString())
+          projectId = proj.GetString();
+        else if (proj.IsObject() && proj.HasMember("id"))
+          projectId = proj["id"].GetString();
+        
+        if (!projectId.empty()) {
+          return projectId;
+        }
+      }
+
+      if (respDoc.IsObject() && respDoc.HasMember("allowedTiers") &&
+          respDoc["allowedTiers"].IsArray()) {
+        const auto &tiers = respDoc["allowedTiers"];
+        std::string fallbackTier;
+        for (const auto &tier : tiers.GetArray()) {
+          if (tier.IsObject() && tier.HasMember("id") && tier["id"].IsString()) {
+            if (fallbackTier.empty())
+              fallbackTier = tier["id"].GetString();
+            if (tier.HasMember("isDefault") && tier["isDefault"].IsBool() &&
+                tier["isDefault"].GetBool()) {
+              tierId = tier["id"].GetString();
+              break;
+            }
+          }
+        }
+        if (tierId == "FREE" && !fallbackTier.empty())
+          tierId = fallbackTier;
+      }
     }
   }
+  
+  // loadCodeAssist failed - try to onboard the user to enable the API
+  
+  rapidjson::Document onboardDoc;
+  onboardDoc.SetObject();
+  auto &onboardAlloc = onboardDoc.GetAllocator();
+  onboardDoc.AddMember("tierId", rapidjson::Value(tierId.c_str(), onboardAlloc), onboardAlloc);
+  onboardDoc.AddMember("metadata", metadata, onboardAlloc);
+  
+  rapidjson::StringBuffer onboardBuffer;
+  rapidjson::Writer<rapidjson::StringBuffer> onboardWriter(onboardBuffer);
+  onboardDoc.Accept(onboardWriter);
+  
+  GCPHttpClient onboardClient(getAntigravityBrowserUserAgent());
+  onboardClient.setBearerToken(acc.accessToken);
+  onboardClient.setContentType("application/json");
+  // onboardUser requires these headers
+  onboardClient.addHeader("X-Goog-Api-Client", "google-cloud-sdk vscode_cloudshelleditor/0.1");
+  onboardClient.addHeader(
+      "Client-Metadata",
+      R"({"ideType":"ANTIGRAVITY","platform":"MACOS","pluginType":"GEMINI"})");
+  
+  // Try onboardUser on fallback endpoints
+  const std::vector<std::string> onboardEndpoints = {
+      "https://daily-cloudcode-pa.sandbox.googleapis.com",
+      "https://autopush-cloudcode-pa.sandbox.googleapis.com",
+      "https://cloudcode-pa.googleapis.com"};
+
+  for (const auto &endpoint : onboardEndpoints) {
+    auto onboardResp = onboardClient.post(
+        endpoint + "/v1internal:onboardUser",
+        onboardBuffer.GetString());
+
+    if (onboardResp.code == 200) {
+      rapidjson::Document onboardRespDoc;
+      onboardRespDoc.Parse(onboardResp.body.c_str());
+      if (!onboardRespDoc.HasParseError() && onboardRespDoc.IsObject()) {
+        if (onboardRespDoc.HasMember("response") &&
+            onboardRespDoc["response"].IsObject()) {
+          const auto &response = onboardRespDoc["response"];
+          if (response.HasMember("cloudaicompanionProject") &&
+              response["cloudaicompanionProject"].IsObject()) {
+            const auto &proj = response["cloudaicompanionProject"];
+            if (proj.HasMember("id") && proj["id"].IsString()) {
+              std::string projectId = proj["id"].GetString();
+              return projectId;
+            }
+          }
+        }
+      }
+    }
+  }
+  
   return "";
+}
+
+std::string AntigravityProvider::resolveProjectIdForAccount(
+    OAuthAccount &acc, bool forceRefresh) {
+  static const std::string kDefaultProjectId = "rising-fact-p41fc";
+
+  RefreshTokenParts tokenParts = parseRefreshTokenParts(acc.refreshToken);
+  if (!tokenParts.managedProjectId.empty()) {
+    acc.metadata["managedProjectId"] = tokenParts.managedProjectId;
+  }
+  if (!tokenParts.projectId.empty()) {
+    acc.metadata["projectId"] = tokenParts.projectId;
+  }
+  if (!tokenParts.refreshToken.empty() &&
+      tokenParts.refreshToken != acc.refreshToken) {
+    acc.refreshToken = tokenParts.refreshToken;
+  }
+
+  if (!forceRefresh) {
+    auto itManaged = acc.metadata.find("managedProjectId");
+    if (itManaged != acc.metadata.end() && !itManaged->second.empty())
+      return itManaged->second;
+    auto itProject = acc.metadata.find("projectId");
+    if (itProject != acc.metadata.end() && !itProject->second.empty())
+      return itProject->second;
+  }
+
+  std::string managed = fetchManagedProject(acc);
+  if (!managed.empty()) {
+    acc.metadata["managedProjectId"] = managed;
+    if (!acc.metadata.count("projectId") || acc.metadata["projectId"].empty())
+      acc.metadata["projectId"] = managed;
+    saveAccounts();
+    return managed;
+  }
+
+  auto itProject = acc.metadata.find("projectId");
+  if (itProject != acc.metadata.end() && !itProject->second.empty())
+    return itProject->second;
+
+  return kDefaultProjectId;
 }
 
 void AntigravityProvider::fetchAndStoreQuotas(OAuthAccount &acc) {
@@ -757,7 +1333,7 @@ void AntigravityProvider::fetchAndStoreQuotas(OAuthAccount &acc) {
   if (projId.empty())
     projId = "rising-fact-p41fc";
 
-  GCPHttpClient client("antigravity/1.18.3 windows/amd64");
+  GCPHttpClient client(getAntigravityUserAgent());
   client.setBearerToken(acc.accessToken);
 
   auto resp = client.post(

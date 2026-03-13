@@ -63,6 +63,8 @@ public:
 
   bool hasReadFile(const std::string &path) const override;
   void markFileAsRead(const std::string &path) override;
+  bool hasFullyReadFile(const std::string &path) const override;
+  void markFileAsFullyRead(const std::string &path) override;
 
   const AgentContext &getContext() const override { return context; }
   AgentContext &getMutableContext() override { return context; }

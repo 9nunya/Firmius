@@ -10,6 +10,8 @@
 #include <rapidjson/writer.h>
 #include <string_view>
 #include <thread>
+#include <future>
+#include <atomic>
 
 namespace firmius::provider {
 
@@ -55,6 +57,16 @@ size_t sseWriteCallback(char *ptr, size_t size, size_t nmemb, void *userdata) {
   }
 
   return size * nmemb;
+}
+
+/**
+ * @brief Abort callback for CURL - called periodically during transfers.
+ * @param clientp Pointer to std::atomic<bool> abort signal
+ * @return 1 to abort, 0 to continue
+ */
+static int abortCallback(void* clientp, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
+  auto* abortSignal = static_cast<std::atomic<bool>*>(clientp);
+  return (abortSignal && abortSignal->load()) ? 1 : 0;
 }
 
 std::string roleToString(Role r) {
@@ -244,13 +256,70 @@ void BaseOpenAIProvider::stream(
     curl_easy_setopt(curl, CURLOPT_HEADERDATA, &currentHeaderCtx);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 300L);
 
-    res = curl_easy_perform(curl);
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &responseCode);
+    // Use threaded CURL execution for immediate interrupt support
+    struct CURLTask {
+      CURL* curl;
+      StreamContext* ctx;
+      HeaderCaptureContext* headerCtx;
+      std::atomic<bool>* abortSignal;
+      std::promise<std::pair<CURLcode, long>> promise;
+    };
+
+    CURLTask* task = new CURLTask{curl, &ctx, &currentHeaderCtx, opts.abortSignal};
+    
+    auto curlThreadFunc = [](CURLTask* t) {
+      // Check abort before starting
+      if (t->abortSignal && t->abortSignal->load()) {
+        t->promise.set_value({CURLE_ABORTED_BY_CALLBACK, 0});
+        delete t;
+        return;
+      }
+
+      // Monitor abort signal and cancel CURL immediately
+      std::atomic<bool> shouldAbort{false};
+      auto progressCallback = [](void* clientp, curl_off_t, curl_off_t, curl_off_t, curl_off_t) -> int {
+        auto* flag = static_cast<std::atomic<bool>*>(clientp);
+        return (flag && flag->load()) ? 1 : 0;
+      };
+      curl_easy_setopt(t->curl, CURLOPT_XFERINFOFUNCTION, progressCallback);
+      curl_easy_setopt(t->curl, CURLOPT_XFERINFODATA, &shouldAbort);
+      curl_easy_setopt(t->curl, CURLOPT_NOPROGRESS, 0L);
+
+      // Monitor thread that watches abort signal
+      std::thread monitor([t, &shouldAbort]() {
+        while (!shouldAbort.load()) {
+          if (t->abortSignal && t->abortSignal->load()) {
+            shouldAbort.store(true);
+            // Cancel the CURL handle immediately
+            curl_easy_pause(t->curl, CURLPAUSE_ALL);
+            break;
+          }
+          std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+      });
+
+      CURLcode code = curl_easy_perform(t->curl);
+      shouldAbort.store(true);
+      monitor.join();
+
+      long responseCode = 0;
+      curl_easy_getinfo(t->curl, CURLINFO_RESPONSE_CODE, &responseCode);
+      t->promise.set_value({code, responseCode});
+      delete t;
+    };
+
+    std::thread curlThread(curlThreadFunc, task);
+    curlThread.detach();
+
+    // Wait for result
+    auto future = task->promise.get_future();
+    future.wait();
+    auto [code, responseCode] = future.get();
+    res = code;
 
     if (res != CURLE_OK) {
-      if (res == CURLE_WRITE_ERROR && opts.abortSignal &&
-          opts.abortSignal->load()) {
-        break;
+      if (opts.abortSignal && opts.abortSignal->load()) {
+        break; // Interrupted by user
       }
       onEvent(StreamError{std::string("CURL error: ") + curl_easy_strerror(res),
                           0, ""});
@@ -794,6 +863,13 @@ void BaseOpenAIProvider::generateSummary(
     curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, headerCallback);
     curl_easy_setopt(curl, CURLOPT_HEADERDATA, &currentHeaderCtx);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 60L);
+    
+    // Enable abort callback if abort signal is provided
+    if (abortSignal) {
+      curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, abortCallback);
+      curl_easy_setopt(curl, CURLOPT_XFERINFODATA, abortSignal);
+      curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+    }
 
     CURLcode res = curl_easy_perform(curl);
     long responseCode = 0;

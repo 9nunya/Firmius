@@ -184,6 +184,19 @@ void Agent::markFileAsRead(const std::string &path) {
   }
 }
 
+bool Agent::hasFullyReadFile(const std::string &path) const {
+  return std::find(context.state.fullyReadFiles.begin(),
+                   context.state.fullyReadFiles.end(),
+                   path) != context.state.fullyReadFiles.end();
+}
+
+void Agent::markFileAsFullyRead(const std::string &path) {
+  markFileAsRead(path);
+  if (!hasFullyReadFile(path)) {
+    context.state.fullyReadFiles.push_back(path);
+  }
+}
+
 void Agent::run(const std::string &task,
                 std::function<void(const shared::StreamEvent &)> onEvent) {
   {

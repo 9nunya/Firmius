@@ -90,6 +90,7 @@ TEST(MockAgentExample, FileTracking) {
     
     // Initially not read
     EXPECT_FALSE(agent.hasReadFile("/work/config.json"));
+    EXPECT_FALSE(agent.hasFullyReadFile("/work/config.json"));
     
     // Mark as read
     agent.markFileAsRead("/work/config.json");
@@ -97,6 +98,12 @@ TEST(MockAgentExample, FileTracking) {
     // Now it should be tracked
     EXPECT_TRUE(agent.hasReadFile("/work/config.json"));
     EXPECT_TRUE(agent.wasCalledWith("markFileAsRead", {{"path", "/work/config.json"}}));
+
+    // Mark as fully read should also register as read
+    agent.markFileAsFullyRead("/work/another.json");
+    EXPECT_TRUE(agent.hasReadFile("/work/another.json"));
+    EXPECT_TRUE(agent.hasFullyReadFile("/work/another.json"));
+    EXPECT_TRUE(agent.wasCalledWith("markFileAsFullyRead", {{"path", "/work/another.json"}}));
 }
 
 TEST(MockAgentExample, ProcessSpawning) {
