@@ -55,7 +55,8 @@ int main(int argc, char **argv) {
       std::make_shared<firmius::tui::QuotasCommand>());
   firmius::tui::CommandManager::instance().registerCommand(
       std::make_shared<firmius::tui::AccountsCommand>());
-  // Note: /workflows command removed - workflows are now registered as individual commands below
+  // Note: /workflows command removed - workflows are now registered as
+  // individual commands below
 
   // Register Modals
   firmius::tui::ModalRegistry::instance().registerModal(
@@ -85,7 +86,7 @@ int main(int argc, char **argv) {
     opts.deleteOnExit = false;
 
     std::string cwd = "/work";
-    if (!h.newThread(opts, cwd, "firmius").empty()) {
+    if (!h.newThread(opts, cwd, "brainstormer").empty()) {
       thread_loaded = true;
     }
   } else if (continue_last) {

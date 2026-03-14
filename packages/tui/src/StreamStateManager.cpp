@@ -1,7 +1,10 @@
 #include "StreamStateManager.hpp"
 #include "components/ToolBlock.hpp"
 #include "utils/ToolSummaries.hpp"
+#include "harness/Harness.hpp"
 #include <chrono>
+#include <unordered_map>
+#include <unordered_set>
 #include <rapidjson/document.h>
 
 namespace firmius::tui {
@@ -51,13 +54,32 @@ void StreamStateManager::handleAgentTurnCompleted(
   s.is_thinking = false;
   pushTokenUsage(e.agentId, e.aggregateMetrics);
 
-  // Mark all pending tool calls for this agent as finished
+  // Process tool results from the turn to determine success/failure
+  std::unordered_map<std::string, bool> toolSuccessMap;
+  for (const auto &msg : e.turn.messages) {
+    if (msg.role == shared::Role::ToolResult) {
+      for (const auto &content : msg.content) {
+        if (auto *trc = std::get_if<shared::ToolResultContent>(&content)) {
+          toolSuccessMap[trc->toolCallId] = trc->success;
+        }
+      }
+    }
+  }
+
+  // Mark all pending tool calls for this agent as finished with proper success state
   for (auto &[toolId, view] : tool_calls_) {
     if (view && view->agentId == e.agentId &&
         view->name != "summon_subagent" &&
         view->phase != ToolPhase::Finished) {
-      view->phase = ToolPhase::Finished;
-      view->success = true;
+      auto it = toolSuccessMap.find(toolId);
+      if (it != toolSuccessMap.end()) {
+        view->success = it->second;
+        view->phase = it->second ? ToolPhase::Finished : ToolPhase::Error;
+      } else {
+        // No result found, assume success
+        view->phase = ToolPhase::Finished;
+        view->success = true;
+      }
     }
   }
 
@@ -418,7 +440,230 @@ void StreamStateManager::handleMessageDequeued(
                          queued_messages_.end());
 }
 
-void StreamStateManager::handleThreadChanged() { queued_messages_.clear(); }
+void StreamStateManager::handleThreadChanged() {
+  queued_messages_.clear();
+  // Clear live tool calls - they will be rebuilt from history
+  tool_calls_.clear();
+  timeline_.clear();
+  subagent_to_parent_tool_.clear();
+}
+
+void StreamStateManager::rebuildToolCallsFromHistory(
+    const std::string &agentId, const shared::AgentHistory *history,
+    const std::string &threadId, bool populate_subagent_log) {
+  if (!history)
+    return;
+
+  // First pass: collect all tool results to know success/failure
+  std::unordered_map<std::string, std::pair<bool, std::string>> toolResults;
+  for (const auto &turn : history->turns) {
+    for (const auto &msg : turn.messages) {
+      if (msg.role == shared::Role::ToolResult) {
+        for (const auto &content : msg.content) {
+          if (auto *tr = std::get_if<shared::ToolResultContent>(&content)) {
+            toolResults[tr->toolCallId] = {tr->success, tr->result};
+          }
+        }
+      }
+    }
+  }
+
+  // Second pass: extract tool calls and set state based on results
+  // For historical data, assume success unless we have explicit error
+  for (const auto &turn : history->turns) {
+    for (const auto &msg : turn.messages) {
+      if (msg.role == shared::Role::Assistant) {
+        for (const auto &content : msg.content) {
+          if (auto *tc = std::get_if<shared::ToolCallContent>(&content)) {
+            auto &view = tool_calls_[tc->id];
+            if (!view) {
+              view = std::make_shared<ToolCallView>();
+              view->toolCallId = tc->id;
+              view->agentId = agentId;
+              view->name = tc->name;
+              view->args = tc->args;
+              view->subagent_running = false;
+
+              // Check if we have a result for this tool call
+              auto it = toolResults.find(tc->id);
+              if (it != toolResults.end()) {
+                // We have explicit result
+                view->success = it->second.first;
+                view->result = it->second.second;
+                view->phase = it->second.first ? ToolPhase::Finished
+                                               : ToolPhase::Error;
+              } else {
+                // No explicit result - for historical data, assume success
+                // This handles summon_subagent and other tools that may not have
+                // explicit ToolResultContent but completed successfully
+                view->success = true;
+                view->phase = ToolPhase::Finished;
+              }
+
+              timeline_.push_back(
+                  {TimelineEntry::Kind::ToolCall, tc->id, "", agentId});
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Third pass: populate subagent_tool_log for summon_subagent tool calls
+  // by analyzing the history of spawned subagents (only if requested)
+  if (!populate_subagent_log)
+    return;
+    
+  for (auto &[toolCallId, view] : tool_calls_) {
+    if (!view || view->name != "summon_subagent" || view->args.empty())
+      continue;
+
+    // Parse args to extract agent_id or agent name
+    rapidjson::Document doc;
+    doc.Parse(view->args.c_str());
+    if (doc.HasParseError() || !doc.IsObject())
+      continue;
+
+    std::string subagentId;
+    std::string subagentTitle;
+    std::string subagentTask;
+
+    if (doc.HasMember("title") && doc["title"].IsString()) {
+      subagentTitle = doc["title"].GetString();
+    }
+    if (doc.HasMember("task") && doc["task"].IsString()) {
+      subagentTask = doc["task"].GetString();
+    }
+    if (doc.HasMember("name") && doc["name"].IsString()) {
+      if (subagentTitle.empty())
+        subagentTitle = doc["name"].GetString();
+    }
+
+    // Also check the tool result for agentId
+    auto it_result = toolResults.find(toolCallId);
+    if (it_result != toolResults.end() && !it_result->second.second.empty()) {
+      rapidjson::Document resDoc;
+      resDoc.Parse(it_result->second.second.c_str());
+      if (!resDoc.HasParseError() && resDoc.IsObject() &&
+          resDoc.HasMember("agentId") && resDoc["agentId"].IsString()) {
+        subagentId = resDoc["agentId"].GetString();
+      }
+    }
+
+    // Store title and subagent ID in view
+    if (!subagentTitle.empty()) {
+      view->subagent_title = subagentTitle;
+    }
+    if (!subagentId.empty()) {
+      view->subagent_id = subagentId;
+    }
+
+    // If we have a subagent ID, try to get its history and synthesize the log
+    if (!subagentId.empty()) {
+      // Register the mapping from subagent to parent tool call
+      subagent_to_parent_tool_[subagentId] = toolCallId;
+
+      // Try to get the subagent's history from the harness
+      auto &harness = firmius::core::Harness::instance();
+      auto subHistoryPtr = harness.getAgentHistoryPtr(subagentId);
+      const shared::AgentHistory* subHistory = subHistoryPtr.get();
+
+      // If not available via harness, try loading from disk
+      if (!subHistory && !threadId.empty()) {
+        auto fallback_hist =
+            firmius::core::ThreadManager(
+                std::string(std::getenv("HOME") ? std::getenv("HOME") : "/tmp") +
+                "/.firmius/threads")
+                .loadAgentHistory(threadId, subagentId);
+        if (!fallback_hist.turns.empty()) {
+          subHistory = new shared::AgentHistory{std::move(fallback_hist)};
+        }
+      }
+
+      if (subHistory && !subHistory->turns.empty()) {
+        // Synthesize subagent_tool_log from subagent's history
+        std::vector<shared::SubagentToolLogEntry> logEntries;
+
+        // Add task description as first entry if available
+        if (!subagentTask.empty()) {
+          shared::SubagentToolLogEntry entry;
+          entry.summary = "Task: " + subagentTask;
+          entry.phase = shared::ToolPhase::Finished;
+          entry.toolCallId = "";
+          logEntries.push_back(std::move(entry));
+        }
+
+        // Extract tool calls from subagent's history
+        for (const auto &turn : subHistory->turns) {
+          for (const auto &msg : turn.messages) {
+            if (msg.role == shared::Role::Assistant) {
+              for (const auto &content : msg.content) {
+                if (auto *tc = std::get_if<shared::ToolCallContent>(&content)) {
+                  shared::SubagentToolLogEntry entry;
+                  entry.name = tc->name;
+                  entry.args = tc->args;
+                  entry.toolCallId = tc->id;
+                  entry.phase = shared::ToolPhase::Finished; // Historical data = completed
+                  entry.summary = shared::SummarizeToolCall(tc->name, tc->args, shared::ToolPhase::Finished);
+                  logEntries.push_back(std::move(entry));
+                } else if (auto *th = std::get_if<shared::ThinkingContent>(&content)) {
+                  if (!th->thinking.empty()) {
+                    shared::SubagentToolLogEntry entry;
+                    entry.summary = "Thought";
+                    entry.phase = shared::ToolPhase::Finished;
+                    entry.toolCallId = "";
+                    logEntries.push_back(std::move(entry));
+                  }
+                }
+              }
+            }
+          }
+        }
+
+        // Add "Done" entry only if the agent actually completed
+        if (view->success && view->phase == ToolPhase::Finished) {
+          shared::SubagentToolLogEntry doneEntry;
+          doneEntry.summary = "Done";
+          doneEntry.phase = shared::ToolPhase::Finished;
+          doneEntry.toolCallId = "";
+          logEntries.push_back(std::move(doneEntry));
+        }
+
+        // Limit log size but ensure we keep recent entries
+        while (logEntries.size() > 8) {
+          logEntries.erase(logEntries.begin());
+        }
+
+        view->subagent_tool_log = std::move(logEntries);
+        view->subagent_running = false;
+      } else {
+        // No subagent history available - create minimal log
+        // Only add "Done" if the tool call indicates completion
+        std::vector<shared::SubagentToolLogEntry> logEntries;
+        
+        if (!subagentTask.empty()) {
+          shared::SubagentToolLogEntry entry;
+          entry.summary = "Task: " + subagentTask;
+          entry.phase = shared::ToolPhase::Finished;
+          entry.toolCallId = "";
+          logEntries.push_back(std::move(entry));
+        }
+        
+        // Add "Done" entry only if the tool call indicates completion
+        if (view->success && view->phase == ToolPhase::Finished) {
+          shared::SubagentToolLogEntry doneEntry;
+          doneEntry.summary = "Done";
+          doneEntry.phase = shared::ToolPhase::Finished;
+          doneEntry.toolCallId = "";
+          logEntries.push_back(std::move(doneEntry));
+        }
+        
+        view->subagent_tool_log = std::move(logEntries);
+        view->subagent_running = false;
+      }
+    }
+  }
+}
 
 const std::vector<std::pair<std::string, std::string>> &
 StreamStateManager::getQueuedMessages() const {

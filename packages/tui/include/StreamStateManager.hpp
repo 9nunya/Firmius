@@ -55,6 +55,12 @@ public:
   void handleMessageDequeued(const shared::MessageDequeued &e);
   void handleThreadChanged();
 
+  // Rebuild tool calls from history when loading a thread
+  void rebuildToolCallsFromHistory(const std::string &agentId,
+                                   const shared::AgentHistory *history,
+                                   const std::string &threadId,
+                                   bool populate_subagent_log = true);
+
   const StreamState *getStream(const std::string &agentId) const;
   const std::vector<TimelineEntry> &getTimeline() const;
   const std::unordered_map<std::string, std::shared_ptr<ToolCallView>> &

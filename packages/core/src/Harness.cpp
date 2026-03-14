@@ -6,8 +6,8 @@
 #include "hosts/DockerHost.hpp"
 #include "hosts/LocalHost.hpp"
 #include "persistence/ThreadManager.hpp"
-#include "providers/ProviderRegistry.hpp"
 #include "providers/BaseOAuthProvider.hpp"
+#include "providers/ProviderRegistry.hpp"
 #include "utils/StringUtil.hpp"
 #include "utils/ToolSummaries.hpp"
 #include "workflow/WorkflowLoader.hpp"
@@ -233,13 +233,13 @@ std::string Harness::newThread(HostCreationOptions hostOptions,
       if (!currentThreadId_.empty() && !focusedAgentId_.empty()) {
         threadAgentMap_[currentThreadId_] = focusedAgentId_;
       }
-      
+
       // Clear agent registry when creating new thread to prevent stale agents
       auto allAgents = AgentRegistry::instance().listAll();
       for (const auto &agentId : allAgents) {
         Engine::instance().terminateAgent(agentId);
       }
-      
+
       currentThreadId_ = threadId;
       focusedAgentId_.clear();
       clearQueue();
@@ -380,8 +380,10 @@ void Harness::send(const std::string &text) {
       } else {
         auto agent = AgentRegistry::instance().getAgent(fid);
         if (agent && (agent->isRunning() || agent->isBooting())) {
-          // Don't queue if agent is cancelled/interrupted - let the message go through
-          if (agent->getContext().state.currentStatus != AgentStatus::Cancelled) {
+          // Don't queue if agent is cancelled/interrupted - let the message go
+          // through
+          if (agent->getContext().state.currentStatus !=
+              AgentStatus::Cancelled) {
             agentRunning = true;
             messageQueue_.push({messageId, text});
           }
@@ -419,8 +421,8 @@ bool Harness::executeWorkflow(const std::string &workflowId,
   const Workflow *workflow = loader.getWorkflow(workflowId);
 
   if (!workflow) {
-    emitEvent(firmius::shared::AgentError{
-        "", "Workflow not found: " + workflowId});
+    emitEvent(
+        firmius::shared::AgentError{"", "Workflow not found: " + workflowId});
     return false;
   }
 
@@ -428,8 +430,8 @@ bool Harness::executeWorkflow(const std::string &workflowId,
   try {
     builtPrompt = workflow->build(args);
   } catch (const std::exception &e) {
-    emitEvent(firmius::shared::AgentError{
-        "", "Workflow argument error: " + std::string(e.what())});
+    emitEvent(firmius::shared::AgentError{"", "Workflow argument error: " +
+                                                  std::string(e.what())});
     return false;
   }
 
@@ -458,13 +460,14 @@ void Harness::abort() {
   }
 
   agent->interrupt();
-  
+
   // Clear the message queue since we're aborting the current operation
   clearQueue();
 
   // If focused agent is a subagent (has parentId), only interrupt it
-  // If focused agent is a lead agent (no parentId), do NOT cancel async=true subagents
-  // The subagent tool already handles cancellation of async=false subagents when parent is interrupted
+  // If focused agent is a lead agent (no parentId), do NOT cancel async=true
+  // subagents The subagent tool already handles cancellation of async=false
+  // subagents when parent is interrupted
 }
 
 int Harness::subscribe(
@@ -508,151 +511,174 @@ bool Harness::isDescendant(const std::string &agentId,
 void Harness::emitEvent(const firmius::shared::AppEvent &event) {
   // Debug logging for thinking, tool calls, and turn information
   if (debugLogging) {
-    std::visit([&](auto &&ev) {
-      using T = std::decay_t<decltype(ev)>;
+    std::visit(
+        [&](auto &&ev) {
+          using T = std::decay_t<decltype(ev)>;
 
-      if constexpr (std::is_same_v<T, AgentThinking>) {
-        // Emit thinking chunks in italic
-        std::cout << "\x1B[3m" << ev.delta << "\x1B[0m" << std::flush;
-      } else if constexpr (std::is_same_v<T, AgentToolCallChunk>) {
-        // Track tool call chunks (streaming args)
-        auto &state = debugToolStates_[ev.toolCallId];
-        state.agentId = ev.agentId;
-        // Detect new tool call - Preparing phase
-        if (state.name.empty() && state.args.empty()) {
-          state.phase = DebugToolPhase::Preparing;
-          // Show "Preparing" message when we first detect this tool
-          if (!ev.nameDelta.empty()) {
-            std::string preparingSummary = SummarizeToolCall(ev.nameDelta, "", firmius::shared::ToolPhase::Preparing);
-            std::cout << "\n-> " << preparingSummary << std::endl;
-          }
-        }
-        state.name += ev.nameDelta;
-        state.args += ev.argsDelta;
-        if (state.phase == DebugToolPhase::Preparing && !state.args.empty()) {
-          // Transition to Called phase when we have args
-          state.phase = DebugToolPhase::Called;
-          std::string summary = SummarizeToolCall(state.name, state.args, firmius::shared::ToolPhase::Called);
-          std::cout << "\n--> Called: " << summary << std::endl;
-        }
-      } else if constexpr (std::is_same_v<T, AgentToolCall>) {
-        // Track complete tool call
-        auto &state = debugToolStates_[ev.toolCallId];
-        state.agentId = ev.agentId;
-        // Detect new tool call - Preparing phase
-        bool isNewCall = state.name.empty() && state.args.empty();
-        if (isNewCall) {
-          state.phase = DebugToolPhase::Preparing;
-          // Show "Preparing" message first
-          std::string preparingSummary = SummarizeToolCall(ev.toolName, ev.toolArgs, firmius::shared::ToolPhase::Preparing);
-          std::cout << "\n-> " << preparingSummary << std::endl;
-        }
-        if (!ev.toolName.empty()) state.name = ev.toolName;
-        if (!ev.toolArgs.empty()) state.args = ev.toolArgs;
-        debugAgentToolMap_[ev.agentId] = ev.toolCallId;
-        if (isNewCall && !ev.toolArgs.empty()) {
-          // If args came with the call, also show Called
-          state.phase = DebugToolPhase::Called;
-          std::string summary = SummarizeToolCall(state.name, state.args, firmius::shared::ToolPhase::Called);
-          std::cout << "\n--> Called: " << summary << std::endl;
-        }
-      } else if constexpr (std::is_same_v<T, AgentTurnCompleted>) {
-        // Get context size from aggregate metrics
-        uint32_t contextSize = ev.aggregateMetrics.tokens.contextSize;
-        std::string agentId = ev.agentId;
-        
-        // Get current time in ms for deduplication
-        auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count();
-        
-        // Skip if we printed a turn header for this agent with same context size recently (<100ms)
-        std::string dedupKey = agentId + ":" + std::to_string(contextSize);
-        bool shouldPrint = true;
-        if (lastTurnCompletionTime_ > 0 && now - lastTurnCompletionTime_ < 100) {
-          // Too soon - likely duplicate event
-          shouldPrint = false;
-        }
-        
-        if (shouldPrint) {
-          lastTurnCompletionTime_ = now;
-
-          // Get agent info for display
-          auto agent = AgentRegistry::instance().getAgent(agentId);
-          std::string displayName = agentId;
-          std::string modelInfo;
-          if (agent) {
-            const auto &ctx = agent->getContext();
-            if (!ctx.identity.friendlyName.empty()) {
-              displayName = ctx.identity.friendlyName;
-            }
-            modelInfo = ctx.config.modelId;
-          }
-
-          // Format: -- jf8s LEAD T1 (CTX: 3824) --
-          std::string shortId = agentId.substr(0, 4);
-          // Count actual user/assistant messages, not tool results
-          int userMsgCount = 0;
-          for (const auto &msg : ev.turn.messages) {
-            if (msg.role == firmius::shared::Role::User || 
-                msg.role == firmius::shared::Role::Assistant) {
-              userMsgCount++;
-            }
-          }
-          std::string turnNum = std::to_string(userMsgCount);
-          std::cout << "\n-- " << shortId << " " << displayName << " T" << turnNum
-                    << " (CTX: " << contextSize << ") [" << modelInfo << "] --" << std::endl;
-        }
-
-        // Show tool results from this turn (Finished phase)
-        for (const auto &msg : ev.turn.messages) {
-          if (msg.role == firmius::shared::Role::ToolResult) {
-            for (const auto &content : msg.content) {
-              if (auto *res = std::get_if<firmius::shared::ToolResultContent>(&content)) {
-                // Truncate result for display (max 60 chars)
-                std::string resultPreview = res->result;
-                // Remove newlines and extra whitespace for compact display
-                for (auto &c : resultPreview) {
-                  if (c == '\n' || c == '\r' || c == '\t') c = ' ';
-                }
-                // Trim leading/trailing whitespace
-                size_t start = resultPreview.find_first_not_of(" ");
-                size_t end = resultPreview.find_last_not_of(" ");
-                if (start != std::string::npos && end != std::string::npos) {
-                  resultPreview = resultPreview.substr(start, end - start + 1);
-                }
-                if (resultPreview.size() > 60) {
-                  resultPreview = resultPreview.substr(0, 57) + "...";
-                }
-                std::cout << "--> Result [" << res->toolCallId << "] {" << resultPreview << "}" << std::endl;
+          if constexpr (std::is_same_v<T, AgentThinking>) {
+            // Emit thinking chunks in italic
+            std::cout << "\x1B[3m" << ev.delta << "\x1B[0m" << std::flush;
+          } else if constexpr (std::is_same_v<T, AgentToolCallChunk>) {
+            // Track tool call chunks (streaming args)
+            auto &state = debugToolStates_[ev.toolCallId];
+            state.agentId = ev.agentId;
+            // Detect new tool call - Preparing phase
+            if (state.name.empty() && state.args.empty()) {
+              state.phase = DebugToolPhase::Preparing;
+              // Show "Preparing" message when we first detect this tool
+              if (!ev.nameDelta.empty()) {
+                std::string preparingSummary = SummarizeToolCall(
+                    ev.nameDelta, "", firmius::shared::ToolPhase::Preparing);
+                std::cout << "\n-> " << preparingSummary << std::endl;
               }
             }
-          }
-        }
+            state.name += ev.nameDelta;
+            state.args += ev.argsDelta;
+            if (state.phase == DebugToolPhase::Preparing &&
+                !state.args.empty()) {
+              // Transition to Called phase when we have args
+              state.phase = DebugToolPhase::Called;
+              std::string summary = SummarizeToolCall(
+                  state.name, state.args, firmius::shared::ToolPhase::Called);
+              std::cout << "\n--> Called: " << summary << std::endl;
+            }
+          } else if constexpr (std::is_same_v<T, AgentToolCall>) {
+            // Track complete tool call
+            auto &state = debugToolStates_[ev.toolCallId];
+            state.agentId = ev.agentId;
+            // Detect new tool call - Preparing phase
+            bool isNewCall = state.name.empty() && state.args.empty();
+            if (isNewCall) {
+              state.phase = DebugToolPhase::Preparing;
+              // Show "Preparing" message first
+              std::string preparingSummary =
+                  SummarizeToolCall(ev.toolName, ev.toolArgs,
+                                    firmius::shared::ToolPhase::Preparing);
+              std::cout << "\n-> " << preparingSummary << std::endl;
+            }
+            if (!ev.toolName.empty())
+              state.name = ev.toolName;
+            if (!ev.toolArgs.empty())
+              state.args = ev.toolArgs;
+            debugAgentToolMap_[ev.agentId] = ev.toolCallId;
+            if (isNewCall && !ev.toolArgs.empty()) {
+              // If args came with the call, also show Called
+              state.phase = DebugToolPhase::Called;
+              std::string summary = SummarizeToolCall(
+                  state.name, state.args, firmius::shared::ToolPhase::Called);
+              std::cout << "\n--> Called: " << summary << std::endl;
+            }
+          } else if constexpr (std::is_same_v<T, AgentTurnCompleted>) {
+            // Get context size from aggregate metrics
+            uint32_t contextSize = ev.aggregateMetrics.tokens.contextSize;
+            std::string agentId = ev.agentId;
 
-        // Clear finished tool calls for this agent
-        for (auto it = debugToolStates_.begin(); it != debugToolStates_.end();) {
-          if (it->second.phase == DebugToolPhase::Finished || it->second.agentId == agentId) {
-            it = debugToolStates_.erase(it);
-          } else {
-            ++it;
+            // Get current time in ms for deduplication
+            auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                           std::chrono::system_clock::now().time_since_epoch())
+                           .count();
+
+            // Skip if we printed a turn header for this agent with same context
+            // size recently (<100ms)
+            std::string dedupKey = agentId + ":" + std::to_string(contextSize);
+            bool shouldPrint = true;
+            if (lastTurnCompletionTime_ > 0 &&
+                now - lastTurnCompletionTime_ < 100) {
+              // Too soon - likely duplicate event
+              shouldPrint = false;
+            }
+
+            if (shouldPrint) {
+              lastTurnCompletionTime_ = now;
+
+              // Get agent info for display
+              auto agent = AgentRegistry::instance().getAgent(agentId);
+              std::string displayName = agentId;
+              std::string modelInfo;
+              if (agent) {
+                const auto &ctx = agent->getContext();
+                if (!ctx.identity.friendlyName.empty()) {
+                  displayName = ctx.identity.friendlyName;
+                }
+                modelInfo = ctx.config.modelId;
+              }
+
+              // Format: -- jf8s LEAD T1 (CTX: 3824) --
+              std::string shortId = agentId.substr(0, 4);
+              // Count actual user/assistant messages, not tool results
+              int userMsgCount = 0;
+              for (const auto &msg : ev.turn.messages) {
+                if (msg.role == firmius::shared::Role::User ||
+                    msg.role == firmius::shared::Role::Assistant) {
+                  userMsgCount++;
+                }
+              }
+              std::string turnNum = std::to_string(userMsgCount);
+              std::cout << "\n-- " << shortId << " " << displayName << " T"
+                        << turnNum << " (CTX: " << contextSize << ") ["
+                        << modelInfo << "] --" << std::endl;
+            }
+
+            // Show tool results from this turn (Finished phase)
+            for (const auto &msg : ev.turn.messages) {
+              if (msg.role == firmius::shared::Role::ToolResult) {
+                for (const auto &content : msg.content) {
+                  if (auto *res =
+                          std::get_if<firmius::shared::ToolResultContent>(
+                              &content)) {
+                    // Truncate result for display (max 60 chars)
+                    std::string resultPreview = res->result;
+                    // Remove newlines and extra whitespace for compact display
+                    for (auto &c : resultPreview) {
+                      if (c == '\n' || c == '\r' || c == '\t')
+                        c = ' ';
+                    }
+                    // Trim leading/trailing whitespace
+                    size_t start = resultPreview.find_first_not_of(" ");
+                    size_t end = resultPreview.find_last_not_of(" ");
+                    if (start != std::string::npos &&
+                        end != std::string::npos) {
+                      resultPreview =
+                          resultPreview.substr(start, end - start + 1);
+                    }
+                    if (resultPreview.size() > 60) {
+                      resultPreview = resultPreview.substr(0, 57) + "...";
+                    }
+                    std::cout << "--> Result [" << res->toolCallId << "] {"
+                              << resultPreview << "}" << std::endl;
+                  }
+                }
+              }
+            }
+
+            // Clear finished tool calls for this agent
+            for (auto it = debugToolStates_.begin();
+                 it != debugToolStates_.end();) {
+              if (it->second.phase == DebugToolPhase::Finished ||
+                  it->second.agentId == agentId) {
+                it = debugToolStates_.erase(it);
+              } else {
+                ++it;
+              }
+            }
+          } else if constexpr (std::is_same_v<T, AgentText>) {
+            // Don't print text in debug mode - it will be shown in turn summary
+            // Only print if we're NOT in debug logging mode
+            // (subscribers still get the event)
+          } else if constexpr (std::is_same_v<T, AgentProcessSpawned>) {
+            std::cout << "[Process Spawned] " << ev.command << std::endl;
+          } else if constexpr (std::is_same_v<T, AgentProcessOutput>) {
+            std::cout << ev.output << std::flush;
+          } else if constexpr (std::is_same_v<T, AgentError>) {
+            std::cout << "[Error] " << ev.message << std::endl;
+          } else if constexpr (std::is_same_v<T, AgentSpawned>) {
+            std::string shortId = ev.agentId.substr(0, 4);
+            std::cout << "\n-- " << shortId << " " << ev.friendlyName
+                      << " (subagent of " << ev.parentId.substr(0, 4) << ") --"
+                      << std::endl;
           }
-        }
-      } else if constexpr (std::is_same_v<T, AgentText>) {
-        // Don't print text in debug mode - it will be shown in turn summary
-        // Only print if we're NOT in debug logging mode
-        // (subscribers still get the event)
-      } else if constexpr (std::is_same_v<T, AgentProcessSpawned>) {
-        std::cout << "[Process Spawned] " << ev.command << std::endl;
-      } else if constexpr (std::is_same_v<T, AgentProcessOutput>) {
-        std::cout << ev.output << std::flush;
-      } else if constexpr (std::is_same_v<T, AgentError>) {
-        std::cout << "[Error] " << ev.message << std::endl;
-      } else if constexpr (std::is_same_v<T, AgentSpawned>) {
-        std::string shortId = ev.agentId.substr(0, 4);
-        std::cout << "\n-- " << shortId << " " << ev.friendlyName << " (subagent of " 
-                  << ev.parentId.substr(0, 4) << ") --" << std::endl;
-      }
-    }, event);
+        },
+        event);
   }
 
   std::vector<std::function<void(const firmius::shared::AppEvent &)>> cbs;

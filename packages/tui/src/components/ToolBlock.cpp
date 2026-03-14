@@ -108,11 +108,48 @@ ftxui::Component ToolBlock(const std::shared_ptr<ToolCallView> &view,
       ftxui::Elements rows;
 
       using namespace firmius::shared;
+      
+      // Build a better success summary with result info for grep/glob
+      std::string success_summary;
+      std::string result_info;
+      
+      if (view->name == "grep" || view->name == "glob") {
+        rapidjson::Document doc;
+        doc.Parse(view->result.c_str());
+        size_t match_count = 0;
+        if (!doc.HasParseError() && doc.IsArray()) {
+          match_count = doc.Size();
+        }
+        result_info = " (" + std::to_string(match_count) + " matches)";
+        
+        if (view->name == "grep") {
+          rapidjson::Document argsDoc;
+          argsDoc.Parse(view->args.c_str());
+          std::string pattern = "";
+          if (!argsDoc.HasParseError() && argsDoc.IsObject() && 
+              argsDoc.HasMember("pattern") && argsDoc["pattern"].IsString()) {
+            pattern = argsDoc["pattern"].GetString();
+          }
+          success_summary = "grep \"" + firstWords(pattern, 2) + "\"";
+        } else {
+          rapidjson::Document argsDoc;
+          argsDoc.Parse(view->args.c_str());
+          std::string pattern = "";
+          if (!argsDoc.HasParseError() && argsDoc.IsObject() && 
+              argsDoc.HasMember("pattern") && argsDoc["pattern"].IsString()) {
+            pattern = argsDoc["pattern"].GetString();
+          }
+          success_summary = "glob \"" + pattern + "\"";
+        }
+      } else {
+        success_summary = summary;
+      }
+      
       // Header row with icon and toggle
       ftxui::Elements header;
       header.push_back(ftxui::text(" " + ICON_CHECK + " ") |
                        ftxui::color(theme.tool_blocks.generic_icon));
-      header.push_back(ftxui::text(summary + " ") | ftxui::bold |
+      header.push_back(ftxui::text(success_summary + result_info + " ") | ftxui::bold |
                        ftxui::color(theme.tool_blocks.generic_title));
 
       if (can_toggle) {
@@ -123,33 +160,94 @@ ftxui::Component ToolBlock(const std::shared_ptr<ToolCallView> &view,
 
       rows.push_back(ftxui::hbox(header));
 
-      // Expandable result
+      // Expandable result with pretty formatting for grep/glob
       if (view->show_result && !view->result.empty()) {
-        auto tail = TailLines(view->result, 5);
-        ftxui::Elements result_lines;
-        for (const auto &line : tail) {
-          result_lines.push_back(ftxui::text(line) |
-                                 ftxui::color(theme.base.dim));
+        if (view->name == "grep" || view->name == "glob") {
+          // Pretty print grep/glob results
+          rapidjson::Document doc;
+          doc.Parse(view->result.c_str());
+          if (!doc.HasParseError() && doc.IsArray()) {
+            ftxui::Elements result_lines;
+            for (rapidjson::SizeType i = 0; i < doc.Size() && i < 20; i++) {
+              const auto &item = doc[i];
+              std::string line;
+              if (item.IsString()) {
+                line = item.GetString();
+              } else if (item.IsObject() && item.HasMember("path") && item["path"].IsString()) {
+                line = item["path"].GetString();
+                if (item.HasMember("type") && item["type"].IsString()) {
+                  std::string type = item["type"].GetString();
+                  std::string prefix = (type == "directory") ? ICON_FOLDER : ICON_FILE;
+                  line = prefix + " " + line;
+                }
+              }
+              if (line.size() > 80) {
+                line = line.substr(0, 77) + "…";
+              }
+              result_lines.push_back(ftxui::text(line) |
+                                     ftxui::color(theme.base.dim));
+            }
+            if (doc.Size() > 20) {
+              result_lines.push_back(ftxui::text("… and " + std::to_string(doc.Size() - 20) + " more") |
+                                     ftxui::dim);
+            }
+            rows.push_back(ftxui::separatorLight());
+            rows.push_back(ftxui::vbox(result_lines) | ftxui::frame |
+                           ftxui::size(ftxui::HEIGHT, ftxui::LESS_THAN, 15));
+          }
+        } else {
+          // Generic result display
+          auto tail = TailLines(view->result, 5);
+          ftxui::Elements result_lines;
+          for (const auto &line : tail) {
+            result_lines.push_back(ftxui::text(line) |
+                                   ftxui::color(theme.base.dim));
+          }
+          rows.push_back(ftxui::separatorLight());
+          rows.push_back(ftxui::vbox(result_lines) | ftxui::frame |
+                         ftxui::size(ftxui::HEIGHT, ftxui::LESS_THAN, 8));
         }
-        rows.push_back(ftxui::separatorLight());
-        rows.push_back(ftxui::vbox(result_lines) | ftxui::frame |
-                       ftxui::size(ftxui::HEIGHT, ftxui::LESS_THAN, 8));
       }
 
       return ftxui::vbox(rows);
     }
 
     // Error state
+    view->phase = ToolPhase::Error;
     std::string err = firmius::shared::ErrorCleaner::clean(view->result);
     if (err.size() > 400)
       err = err.substr(0, 397) + "…";
 
     using namespace firmius::shared;
+    // Build a better error summary that includes tool name and key args
+    std::string error_summary;
+    if (view->name == "grep") {
+      rapidjson::Document doc;
+      doc.Parse(view->args.c_str());
+      std::string pattern = "";
+      if (!doc.HasParseError() && doc.IsObject() && doc.HasMember("pattern") &&
+          doc["pattern"].IsString()) {
+        pattern = doc["pattern"].GetString();
+      }
+      error_summary = "grep \"" + firstWords(pattern, 2) + "\"";
+    } else if (view->name == "glob") {
+      rapidjson::Document doc;
+      doc.Parse(view->args.c_str());
+      std::string pattern = "";
+      if (!doc.HasParseError() && doc.IsObject() && doc.HasMember("pattern") &&
+          doc["pattern"].IsString()) {
+        pattern = doc["pattern"].GetString();
+      }
+      error_summary = "glob \"" + pattern + "\"";
+    } else {
+      error_summary = SummarizeToolCall(view->name, view->args, ToolPhase::Called);
+    }
+
     return ftxui::vbox({
                ftxui::hbox(
                    {ftxui::text(" " + ICON_ERROR + " ") |
                         ftxui::color(theme.status_bar.error.normal.fg),
-                    ftxui::text(summary + " failed") | ftxui::bold |
+                    ftxui::text(error_summary + " failed") | ftxui::bold |
                         ftxui::color(theme.status_bar.error.normal.fg)}),
                ftxui::paragraph("  " + err) |
                    ftxui::color(theme.status_bar.error.normal.fg) |

@@ -219,6 +219,63 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
           pending_modal_clear_ = true;
           stream_state_.handleThreadChanged();
 
+          // Rebuild tool calls from history for ALL agents in the thread
+          // This ensures parent agents' summon_subagent tool calls get their
+          // subagent_tool_log populated from subagent histories
+          // Process agents in order (lead agent first, then subagents)
+          auto all_agents = harness_->listAgents(thread_.threadId);
+
+          // First pass: create all tool calls for all agents
+          for (const auto &agent_id : all_agents) {
+            auto agent_hist = harness_->getAgentHistoryPtr(agent_id);
+            std::shared_ptr<firmius::shared::AgentHistory> owned_hist;
+            if (!agent_hist) {
+              // Try loading from disk
+              auto fallback_hist =
+                  firmius::core::ThreadManager(
+                      std::string(std::getenv("HOME") ? std::getenv("HOME")
+                                                      : "/tmp") +
+                      "/.firmius/threads")
+                      .loadAgentHistory(thread_.threadId, agent_id);
+              if (!fallback_hist.turns.empty()) {
+                owned_hist = std::make_shared<firmius::shared::AgentHistory>(
+                    std::move(fallback_hist));
+                agent_hist = owned_hist;
+              }
+            }
+            if (agent_hist) {
+              // Pass false for populate_subagent_log - just create tool calls
+              stream_state_.rebuildToolCallsFromHistory(
+                  agent_id, agent_hist.get(), thread_.threadId, false);
+            }
+          }
+
+          // Second pass: populate subagent_tool_log for all summon_subagent
+          // calls
+          for (const auto &agent_id : all_agents) {
+            auto agent_hist = harness_->getAgentHistoryPtr(agent_id);
+            std::shared_ptr<firmius::shared::AgentHistory> owned_hist;
+            if (!agent_hist) {
+              auto fallback_hist =
+                  firmius::core::ThreadManager(
+                      std::string(std::getenv("HOME") ? std::getenv("HOME")
+                                                      : "/tmp") +
+                      "/.firmius/threads")
+                      .loadAgentHistory(thread_.threadId, agent_id);
+              if (!fallback_hist.turns.empty()) {
+                owned_hist = std::make_shared<firmius::shared::AgentHistory>(
+                    std::move(fallback_hist));
+                agent_hist = owned_hist;
+              }
+            }
+            if (agent_hist) {
+              // Pass true for populate_subagent_log - populate
+              // subagent_tool_log
+              stream_state_.rebuildToolCallsFromHistory(
+                  agent_id, agent_hist.get(), thread_.threadId, true);
+            }
+          }
+
           if (title_model_) {
             title_model_->title = thread_.title;
             title_model_->thread_id = thread_.threadId;
@@ -399,7 +456,8 @@ void TuiState::updateAgentStripModel() {
     item.title = ctx.identity.friendlyName.empty() ? ctx.identity.name
                                                    : ctx.identity.friendlyName;
     item.purpose = ctx.identity.role;
-    item.model_name = ctx.config.modelId; // Use modelId directly, PrettifyModelName handles prefixes
+    item.model_name = ctx.config.modelId; // Use modelId directly,
+                                          // PrettifyModelName handles prefixes
     item.status_text = statusToString(ctx.state.currentStatus);
     item.is_busy = ctx.state.currentStatus == AgentStatus::Streaming ||
                    ctx.state.currentStatus == AgentStatus::ExecutingTool ||
@@ -467,25 +525,30 @@ ftxui::Component TuiState::root() {
     if (!text.empty() && text[0] == '/') {
       CommandCtx ctx{this};
       auto &cmdManager = firmius::tui::CommandManager::instance();
-      
+
       // Check if this is a workflow command before executing
       bool is_workflow_command = false;
       std::string content = text.substr(1);
       size_t space_pos = content.find(' ');
-      std::string cmd_name = (space_pos == std::string::npos) ? content : content.substr(0, space_pos);
-      
+      std::string cmd_name = (space_pos == std::string::npos)
+                                 ? content
+                                 : content.substr(0, space_pos);
+
       auto it = cmdManager.getCommand(cmd_name);
       if (it && it->isWorkflow()) {
         is_workflow_command = true;
       }
-      
+
       if (cmdManager.executeCommand(ctx, text)) {
         // Command handled successfully
-        // If on welcome screen and this is a workflow command, create thread and switch to chat mode
-        if (view_mode_ == ViewMode::Welcome && harness_ && is_workflow_command) {
+        // If on welcome screen and this is a workflow command, create thread
+        // and switch to chat mode
+        if (view_mode_ == ViewMode::Welcome && harness_ &&
+            is_workflow_command) {
           std::string cwd = std::filesystem::current_path().string();
-          std::string newThreadId = harness_->newThread({}, cwd, "firmius");
-          
+          std::string newThreadId =
+              harness_->newThread({}, cwd, "brainstormer");
+
           // Sync UI with the newly created lead agent
           auto agents = harness_->listAgents(newThreadId);
           if (!agents.empty()) {
@@ -507,7 +570,7 @@ ftxui::Component TuiState::root() {
       if (harness_) {
         // Auto-create thread in current directory with default lead persona
         std::string cwd = std::filesystem::current_path().string();
-        std::string newThreadId = harness_->newThread({}, cwd, "firmius");
+        std::string newThreadId = harness_->newThread({}, cwd, "brainstormer");
         harness_->send(text);
 
         // Immediately sync UI with the newly created lead agent
@@ -568,9 +631,26 @@ ftxui::Component TuiState::root() {
 
         const auto &timeline = stream_state_.getTimeline();
         const auto &tool_calls = stream_state_.getToolCalls();
+
+        // Find parent tool calls that spawned this focused subagent
+        std::unordered_set<std::string> parent_tool_calls_for_subagent;
+        for (const auto &[toolCallId, view] : tool_calls) {
+          if (view && view->name == "summon_subagent" &&
+              view->subagent_id == focused_agent_id_) {
+            parent_tool_calls_for_subagent.insert(toolCallId);
+          }
+        }
+
         for (const auto &entry : timeline) {
-          if (entry.agentId != focused_agent_id_)
+          // Show tool calls from focused agent OR tool calls that spawned this
+          // subagent
+          bool is_focused_agent_tool = (entry.agentId == focused_agent_id_);
+          bool is_parent_tool_for_subagent =
+              (parent_tool_calls_for_subagent.count(entry.id) > 0);
+
+          if (!is_focused_agent_tool && !is_parent_tool_for_subagent)
             continue;
+
           if (entry.kind == TimelineEntry::Kind::ToolCall) {
             auto it_tool = tool_calls.find(entry.id);
             if (it_tool == tool_calls.end() || !it_tool->second)

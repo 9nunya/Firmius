@@ -1,8 +1,8 @@
 #include "audits/WorkflowsAudit.hpp"
 #include "AgentRegistry.hpp"
 #include "EnvLoader.hpp"
-#include "harness/Harness.hpp"
 #include "Panic.hpp"
+#include "harness/Harness.hpp"
 #include "workflow/Workflow.hpp"
 #include "workflow/WorkflowLoader.hpp"
 #include <chrono>
@@ -40,8 +40,8 @@ bool checkDockerAvailable() {
 }
 
 bool checkSandboxImage() {
-  int result =
-      std::system("docker image inspect firmius-sandbox:latest > /dev/null 2>&1");
+  int result = std::system(
+      "docker image inspect firmius-sandbox:latest > /dev/null 2>&1");
   return result == 0;
 }
 } // namespace
@@ -263,7 +263,7 @@ shared::AuditResult WorkflowsAudit::run(const std::vector<std::string> &args) {
   std::filesystem::create_directories(testDir);
 
   std::string threadId =
-      harness.newThread({HostType::Docker}, testDir, "firmius");
+      harness.newThread({HostType::Docker}, testDir, "general");
   if (threadId.empty()) {
     std::cerr << "FAILED: Could not create test thread" << std::endl;
     result.exitCode = AUDIT_EXIT_EXEC_FAILED;
@@ -277,15 +277,17 @@ shared::AuditResult WorkflowsAudit::run(const std::vector<std::string> &args) {
   // Subscribe to events to verify message was sent
   TestState state;
   int subId = harness.subscribe([&state](const AppEvent &ev) {
-    std::visit([&state](auto &&e) {
-      using T = std::decay_t<decltype(e)>;
-      if constexpr (std::is_same_v<T, UserMessageSent>) {
-        std::lock_guard<std::mutex> lk(state.mtx);
-        state.gotMessage = true;
-        state.capturedMessage = e.text;
-        state.cv.notify_one();
-      }
-    }, ev);
+    std::visit(
+        [&state](auto &&e) {
+          using T = std::decay_t<decltype(e)>;
+          if constexpr (std::is_same_v<T, UserMessageSent>) {
+            std::lock_guard<std::mutex> lk(state.mtx);
+            state.gotMessage = true;
+            state.capturedMessage = e.text;
+            state.cv.notify_one();
+          }
+        },
+        ev);
   });
 
   // Execute workflow
@@ -305,9 +307,8 @@ shared::AuditResult WorkflowsAudit::run(const std::vector<std::string> &args) {
   // Wait for message event
   {
     std::unique_lock<std::mutex> lk(state.mtx);
-    bool gotEvent = state.cv.wait_for(lk, 10s, [&state] {
-      return state.gotMessage.load();
-    });
+    bool gotEvent = state.cv.wait_for(
+        lk, 10s, [&state] { return state.gotMessage.load(); });
     if (!gotEvent) {
       std::cerr << "FAILED: UserMessageSent event not received" << std::endl;
       result.exitCode = AUDIT_EXIT_EXEC_FAILED;

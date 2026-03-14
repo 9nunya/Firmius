@@ -55,9 +55,11 @@ public:
     bool success = false;
     std::string agentId;
   };
-  std::map<std::string, DebugToolState> debugToolStates_;  // toolCallId -> state
-  std::map<std::string, std::string> debugAgentToolMap_;   // agentId -> current toolCallId
-  uint64_t lastTurnCompletionTime_ = 0;  // Track last turn completion time to avoid duplicates
+  std::map<std::string, DebugToolState> debugToolStates_; // toolCallId -> state
+  std::map<std::string, std::string>
+      debugAgentToolMap_; // agentId -> current toolCallId
+  uint64_t lastTurnCompletionTime_ =
+      0; // Track last turn completion time to avoid duplicates
 
   /**
    * Initialize the Harness.
@@ -83,7 +85,7 @@ public:
    */
   std::string newThread(shared::HostCreationOptions hostOptions,
                         const std::string &cwd,
-                        const std::string &leadPersona = "firmius");
+                        const std::string &leadPersona = "brainstormer");
 
   /**
    * Switch focus to a different thread.
@@ -178,7 +180,8 @@ public:
   void switchModel(const std::string &providerId, const std::string &modelId);
 
   /**
-   * Switches the model for the focused agent with a specific variant (idle-only).
+   * Switches the model for the focused agent with a specific variant
+   * (idle-only).
    * @param providerId The new provider ID.
    * @param modelId The new model ID.
    * @param variantName The model variant name (e.g., "low", "medium", "max").

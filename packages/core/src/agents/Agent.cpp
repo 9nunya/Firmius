@@ -7,8 +7,8 @@
 #include "persistence/Journaler.hpp"
 #include "providers/ProviderRegistry.hpp"
 #include "utils/FSUtil.hpp"
-#include "utils/StringUtil.hpp"
 #include "utils/InterruptibleSleep.hpp"
+#include "utils/StringUtil.hpp"
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -223,7 +223,7 @@ void Agent::run(const std::string &task,
     auto toolDefs =
         toolRegistry.getAvailableToolDefinitions(context.permissions);
     std::string personaName = context.config.personaName.empty()
-                                  ? "coder"
+                                  ? "builder"
                                   : context.config.personaName;
     Persona persona = PurposeLoader::load(personaName);
     std::string toolBlock = PurposeLoader::buildToolsBlock(toolDefs);

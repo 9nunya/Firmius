@@ -68,7 +68,8 @@ struct AgentState {
   std::vector<std::string>
       ownedProcesses;                 ///< IDs of spawned background processes.
   std::vector<std::string> readFiles; ///< Paths of files read in this session.
-  std::vector<std::string> fullyReadFiles; ///< Set of paths that were read entirely
+  std::vector<std::string>
+      fullyReadFiles; ///< Set of paths that were read entirely
   std::vector<std::string>
       editedFiles; ///< Paths of files successfully edited or written.
   std::vector<std::string>
@@ -93,7 +94,7 @@ struct AgentConfig {
   std::string providerId = "nanogpt"; ///< LLM provider identifier.
   std::string modelId;                ///< LLM model identifier.
   std::string modelVariant; ///< Selected model variant (if applicable).
-  std::string personaName = "coder"; ///< Persona to load from prompts/.
+  std::string personaName = "builder"; ///< Persona to load from prompts/.
   int maxTurns = 200;       ///< Maximum autonomous turns before stopping.
   float temperature = 0.7f; ///< LLM generation temperature.
   std::optional<std::uint32_t> maxTokens; ///< Optional max output tokens.
