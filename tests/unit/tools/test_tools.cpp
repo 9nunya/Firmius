@@ -104,6 +104,9 @@ public:
               (const, override));
   MOCK_METHOD(void, interrupt, (), (override));
   MOCK_METHOD(bool, isInterrupted, (), (const, override));
+  MOCK_METHOD(void, clearInterrupt, (), (override));
+  MOCK_METHOD(void, compactNow,
+              (std::function<void(const StreamEvent &)>), (override));
   MOCK_METHOD(void, setModel, (const std::string &, const std::string &),
               (override));
   MOCK_METHOD(void, setModel,

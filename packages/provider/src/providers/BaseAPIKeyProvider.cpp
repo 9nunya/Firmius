@@ -114,6 +114,16 @@ void BaseAPIKeyProvider::addAccount(const APIKeyAccount &acc) {
   saveAccounts();
 }
 
+void BaseAPIKeyProvider::addApiKey(const std::string &apiKey) {
+  if (apiKey.empty())
+    return;
+  APIKeyAccount acc;
+  acc.apiKey = apiKey;
+  acc.keyPrefix = extractKeyPrefix(apiKey);
+  acc.identifier = generateIdentifier();
+  addAccount(acc);
+}
+
 void BaseAPIKeyProvider::deleteAccount(const std::string &identifier) {
   std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
   auto it = std::remove_if(accounts_.begin(), accounts_.end(),

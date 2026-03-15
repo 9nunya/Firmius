@@ -114,6 +114,7 @@ public:
    * @brief Add a new API key account.
    */
   void addAccount(const APIKeyAccount &acc);
+  void addApiKey(const std::string &apiKey);
 
   /**
    * @brief Delete an API key account by identifier.

@@ -179,12 +179,7 @@ ftxui::Component APIKeyWizardModal::create(TuiState &state) {
             std::dynamic_pointer_cast<firmius::provider::BaseAPIKeyProvider>(
                 provider);
         if (apiKeyProvider && !apiKey.empty()) {
-          firmius::provider::APIKeyAccount acc;
-          acc.apiKey = apiKey;
-          acc.keyPrefix =
-              firmius::provider::BaseAPIKeyProvider::extractKeyPrefix(apiKey);
-          acc.identifier = apiKeyProvider->generateIdentifier();
-          apiKeyProvider->addAccount(acc);
+          apiKeyProvider->addApiKey(apiKey);
         }
 
         *resultMessage = wizard->getFinalMessage();

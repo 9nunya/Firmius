@@ -686,10 +686,24 @@ ftxui::Component TuiState::root() {
                  ftxui::flex;
         };
 
+        auto full_width_separator = [](const std::string &label) {
+          int width = ftxui::Terminal::Size().dimx;
+          std::string label_text = " " + label + " ";
+          if (width <= static_cast<int>(label_text.size())) {
+            return ftxui::text(label_text) | ftxui::dim | ftxui::center |
+                   ftxui::flex;
+          }
+          int left = (width - static_cast<int>(label_text.size())) / 2;
+          int right = width - static_cast<int>(label_text.size()) - left;
+          std::string line =
+              std::string(left, '-') + label_text + std::string(right, '-');
+          return ftxui::text(line) | ftxui::dim | ftxui::flex;
+        };
+
         if (s) {
-          auto compaction_separator = []() {
-            return ftxui::text("------- Compaction --------") | ftxui::dim |
-                   ftxui::center | ftxui::flex;
+
+          auto compaction_separator = [&full_width_separator]() {
+            return full_width_separator("Compaction");
           };
           bool has_compaction_output =
               s->compaction_active || !s->compaction_thinking.empty() ||
@@ -795,15 +809,19 @@ ftxui::Component TuiState::root() {
         }
 
         const auto &queued = stream_state_.getQueuedMessages();
-        for (const auto &[id, text] : queued) {
-          std::string preview = text.substr(0, 80);
-          if (text.size() > 80)
-            preview += "...";
-          live_rows.push_back(ftxui::hbox({ftxui::text("> ") | ftxui::bold |
-                                               ftxui::color(ftxui::Color::Cyan),
-                                           ftxui::paragraph(preview) |
-                                               ftxui::dim | ftxui::flex}) |
-                              ftxui::flex);
+        if (!queued.empty()) {
+          auto queued_separator = [&full_width_separator]() {
+            return full_width_separator("Queued Messages");
+          };
+          live_rows.push_back(queued_separator());
+          for (const auto &[id, text] : queued) {
+            live_rows.push_back(
+                ftxui::hbox({ftxui::text("> ") | ftxui::bold |
+                                 ftxui::color(ftxui::Color::Cyan),
+                             firmius::tui::RenderMarkdown(text) |
+                                 ftxui::dim | ftxui::flex}) |
+                ftxui::flex);
+          }
         }
 
         return live_rows;
