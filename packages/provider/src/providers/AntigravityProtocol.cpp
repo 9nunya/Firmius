@@ -378,6 +378,21 @@ std::string AntigravityProtocol::prepareRequestBody(const AgentHistory &history,
                         a);
           p.AddMember("functionCall", fn, a);
           parts.PushBack(p, a);
+        } else if (auto *img = std::get_if<ImageContent>(&part)) {
+          rapidjson::Value p(rapidjson::kObjectType);
+          rapidjson::Value inlineData(rapidjson::kObjectType);
+          inlineData.AddMember("mimeType", rapidjson::Value(img->mediaType.c_str(), a), a);
+          // Remove data URI prefix if present (e.g., "data:image/png;base64,")
+          std::string base64Data = img->url;
+          if (base64Data.rfind("data:image/", 0) == 0) {
+            size_t commaPos = base64Data.find(',');
+            if (commaPos != std::string::npos) {
+              base64Data = base64Data.substr(commaPos + 1);
+            }
+          }
+          inlineData.AddMember("data", rapidjson::Value(base64Data.c_str(), a), a);
+          p.AddMember("inlineData", inlineData, a);
+          parts.PushBack(p, a);
         } else if (auto *res = std::get_if<ToolResultContent>(&part)) {
           rapidjson::Value p(rapidjson::kObjectType);
           rapidjson::Value fn(rapidjson::kObjectType);

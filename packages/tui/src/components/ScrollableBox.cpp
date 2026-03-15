@@ -19,7 +19,6 @@ void ScrollableBoxComponent::RequestScrollToBottom() {
 ftxui::Element ScrollableBoxComponent::OnRender() {
     if (!child_) return ftxui::text("");
 
-    // Update viewport width for responsive layout
     int viewport_w = 0;
     if (box_.x_max >= box_.x_min) {
         viewport_w = box_.x_max - box_.x_min + 1;
@@ -32,15 +31,19 @@ ftxui::Element ScrollableBoxComponent::OnRender() {
 
     auto background = child_->Render();
 
-    // Constrain content width to viewport to prevent horizontal overflow
     if (viewport_w > 0)
         background = background | ftxui::size(ftxui::WIDTH, ftxui::EQUAL, viewport_w - 2);
 
-    // Spacer line to allow the final row to scroll fully into view.
-    background = ftxui::vbox({background, ftxui::text("")});
-
-    background->ComputeRequirement();
-    size_ = background->requirement().min_y;
+    // Use the ACTUAL laid-out height from previous frame.
+    // ComputeRequirement() calculates height BEFORE text wrapping (assuming infinite width),
+    // which gives an underestimated size_. Using last_background_ gives us the true
+    // height after FTXUI has performed layout with proper width constraints.
+    if (last_background_) {
+        size_ = last_background_->requirement().min_y;
+    } else {
+        background->ComputeRequirement();
+        size_ = background->requirement().min_y;
+    }
 
     int viewport_h = 0;
     if (box_.y_max >= box_.y_min) {
@@ -54,9 +57,6 @@ ftxui::Element ScrollableBoxComponent::OnRender() {
     }
     selected_ = std::clamp(selected_, 0, max_scroll);
 
-    // FTXUI's frame centers the viewport around focusPosition.
-    // To make selected_ the TOP line of the viewport, we must shift
-    // the focus down by half the viewport height.
     int external_dimy = std::max(0, viewport_h - 1);
     int focus_y = selected_ + external_dimy / 2;
 
@@ -66,6 +66,9 @@ ftxui::Element ScrollableBoxComponent::OnRender() {
         | ftxui::vscroll_indicator
         | ftxui::yflex
         | ftxui::reflect(box_);
+
+    // Save background for next frame's size calculation
+    last_background_ = background;
 
     return frame;
 }
@@ -92,11 +95,14 @@ bool ScrollableBoxComponent::OnEvent(ftxui::Event event) {
     if (event == ftxui::Event::Home) {
         selected_ = 0;
     }
+
     int viewport_h = 0;
     if (box_.y_max >= box_.y_min) {
         viewport_h = box_.y_max - box_.y_min + 1;
     }
-    int max_scroll = std::max(0, size_ - viewport_h + 1);
+
+    // Use same max_scroll formula as OnRender
+    int max_scroll = std::max(0, size_ - viewport_h);
 
     if (event == ftxui::Event::End) {
         selected_ = max_scroll;
@@ -107,8 +113,8 @@ bool ScrollableBoxComponent::OnEvent(ftxui::Event event) {
     if (previous != selected_ && event != ftxui::Event::End) {
         at_bottom_ = (selected_ >= max_scroll);
     }
-    bool child_handled = ComponentBase::OnEvent(event);
 
+    bool child_handled = ComponentBase::OnEvent(event);
     return previous != selected_ || child_handled || (previous != selected_);
 }
 

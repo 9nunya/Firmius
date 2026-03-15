@@ -6,6 +6,7 @@
 #include <ftxui/component/screen_interactive.hpp>
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/screen.hpp>
+#include <iostream>
 #include <string>
 
 #include "commands/AccountsCommand.hpp"
@@ -121,6 +122,10 @@ int main(int argc, char **argv) {
   auto screen = ftxui::ScreenInteractive::Fullscreen();
   screen.TrackMouse(true);
   state.attachScreen(&screen);
+
+  // Enable bracketed paste mode so terminal sends \x1b[200~ and \x1b[201~
+  // sequences around pasted content, allowing us to detect multi-line pastes
+  std::cout << "\x1b[?2004h" << std::flush;
 
   auto renderer = state.root();
   renderer = CatchEvent(renderer, [&](Event event) {

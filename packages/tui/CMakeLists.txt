@@ -46,6 +46,7 @@ target_sources(firmius PRIVATE
     src/components/HelpOverlay.cpp
     src/components/ANSIParser.cpp
     src/components/SyntaxHighlighter.cpp
+    src/utils/Clipboard.cpp
 )
 
 target_include_directories(firmius PRIVATE src include)

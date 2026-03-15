@@ -29,6 +29,7 @@ private:
     ftxui::Component child_;
     bool at_bottom_ = true;
     int viewport_width_ = 0;
+    ftxui::Element last_background_;
 };
 
 std::shared_ptr<ScrollableBoxComponent> ScrollableBox(ftxui::Component child);

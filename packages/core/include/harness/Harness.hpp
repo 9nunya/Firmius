@@ -103,8 +103,10 @@ public:
   /**
    * Send a message to the current lead agent.
    * @param text The message text to send
+   * @param images Optional vector of image content to include with the message
    */
-  void send(const std::string &text);
+  void send(const std::string &text,
+            const std::vector<firmius::shared::ImageContent> &images = {});
 
   /**
    * Execute a workflow by ID with the provided arguments.

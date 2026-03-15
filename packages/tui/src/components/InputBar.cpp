@@ -2,6 +2,8 @@
 #include "ThemeManager.hpp"
 #include "commands/CommandManager.hpp"
 #include "providers/ProviderRegistry.hpp"
+#include "NotificationManager.hpp"
+#include "utils/Clipboard.hpp"
 #include <algorithm>
 #include <cctype>
 #include <ftxui/component/component.hpp>
@@ -112,6 +114,47 @@ static void removeBlock(std::string &buffer, int &cursor,
 // Create pasted text block placeholder
 static std::string createTextBlockPlaceholder(size_t line_count) {
   return "[Pasted: " + std::to_string(line_count) + " lines]";
+}
+
+// Expand buffer content by replacing placeholders with actual pasted content
+static std::string expandPastedContent(
+    const std::string &buffer,
+    const std::vector<PastedBlock> &pasted_blocks) {
+  if (pasted_blocks.empty()) {
+    return buffer;
+  }
+
+  std::string result;
+  size_t pos = 0;
+
+  // Sort blocks by start position to process in order
+  std::vector<PastedBlock> sorted_blocks = pasted_blocks;
+  std::sort(sorted_blocks.begin(), sorted_blocks.end(),
+            [](const PastedBlock &a, const PastedBlock &b) {
+              return a.start_pos < b.start_pos;
+            });
+
+  for (const auto &block : sorted_blocks) {
+    if (block.type != "text")
+      continue;
+
+    // Add text before this block
+    if (block.start_pos > pos && block.start_pos <= buffer.size()) {
+      result += buffer.substr(pos, block.start_pos - pos);
+    }
+
+    // Add the actual content instead of placeholder
+    result += block.content;
+
+    pos = block.end_pos;
+  }
+
+  // Add remaining text after last block
+  if (pos < buffer.size()) {
+    result += buffer.substr(pos);
+  }
+
+  return result;
 }
 
 namespace {
@@ -441,7 +484,9 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
     // Handle Enter (submit)
     if (event == ftxui::Event::Return) {
       if (!model->buffer->empty()) {
-        on_submit(*model->buffer);
+        // Expand pasted block placeholders to actual content before submitting
+        std::string expanded = expandPastedContent(*model->buffer, model->pasted_blocks);
+        on_submit(expanded);
         model->buffer->clear();
         model->pasted_blocks.clear();
         model->image_tags.clear();
