@@ -32,7 +32,7 @@ public:
   explicit StatusBarComponentBase(std::shared_ptr<StatusBarModel> model)
       : model_(std::move(model)) {}
 
-  ftxui::Element Render() override {
+  ftxui::Element OnRender() override {
     if (!model_) {
       return ftxui::text("");
     }

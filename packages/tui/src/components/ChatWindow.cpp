@@ -51,7 +51,7 @@ public:
       Add(child_);
   }
 
-  ftxui::Element Render() override { return render_(); }
+  ftxui::Element OnRender() override { return render_(); }
   bool Focusable() const override { return false; }
   bool OnEvent(ftxui::Event event) override {
     if (child_)
@@ -114,7 +114,7 @@ public:
     Add(scrollable_);
   }
 
-  ftxui::Element Render() override {
+  ftxui::Element OnRender() override {
     RebuildIfNeeded();
     return scrollable_ ? scrollable_->Render() : ftxui::text("");
   }

@@ -74,7 +74,7 @@ set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(
   ftxui
   GIT_REPOSITORY https://github.com/ArthurSonzogni/FTXUI.git
-  GIT_TAG v5.0.0
+  GIT_TAG v6.1.9
   GIT_SHALLOW TRUE
   GIT_PROGRESS ${_firmius_git_progress}
 )

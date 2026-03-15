@@ -18,7 +18,7 @@ public:
 
     void RequestScrollToBottom();
 
-    ftxui::Element Render();
+    ftxui::Element OnRender() override;
     bool OnEvent(ftxui::Event event) override;
     bool Focusable() const override;
 

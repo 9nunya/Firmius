@@ -120,7 +120,7 @@ public:
     start_time_ = std::chrono::steady_clock::now();
   }
 
-  ftxui::Element Render() override {
+  ftxui::Element OnRender() override {
     auto now = std::chrono::steady_clock::now();
     float elapsed =
         std::chrono::duration<float>(now - global_start_time).count();

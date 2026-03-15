@@ -16,7 +16,7 @@ void ScrollableBoxComponent::RequestScrollToBottom() {
     at_bottom_ = true;
 }
 
-ftxui::Element ScrollableBoxComponent::Render() {
+ftxui::Element ScrollableBoxComponent::OnRender() {
     if (!child_) return ftxui::text("");
 
     // Update viewport width for responsive layout
@@ -42,13 +42,26 @@ ftxui::Element ScrollableBoxComponent::Render() {
     background->ComputeRequirement();
     size_ = background->requirement().min_y;
 
-    int max_scroll = std::max(0, size_ + 30);
+    int viewport_h = 0;
+    if (box_.y_max >= box_.y_min) {
+        viewport_h = box_.y_max - box_.y_min + 1;
+    }
 
-    if (at_bottom_) selected_ = max_scroll;
+    int max_scroll = std::max(0, size_ - viewport_h);
+
+    if (at_bottom_) {
+        selected_ = max_scroll;
+    }
     selected_ = std::clamp(selected_, 0, max_scroll);
 
+    // FTXUI's frame centers the viewport around focusPosition.
+    // To make selected_ the TOP line of the viewport, we must shift
+    // the focus down by half the viewport height.
+    int external_dimy = std::max(0, viewport_h - 1);
+    int focus_y = selected_ + external_dimy / 2;
+
     auto frame = background
-        | ftxui::focusPosition(0, selected_)
+        | ftxui::focusPosition(0, focus_y)
         | ftxui::frame
         | ftxui::vscroll_indicator
         | ftxui::yflex
@@ -79,19 +92,17 @@ bool ScrollableBoxComponent::OnEvent(ftxui::Event event) {
     if (event == ftxui::Event::Home) {
         selected_ = 0;
     }
-    if (event == ftxui::Event::End) {
-        selected_ = size_;
-        at_bottom_ = true;
-    }
-
     int viewport_h = 0;
     if (box_.y_max >= box_.y_min) {
         viewport_h = box_.y_max - box_.y_min + 1;
     }
-    int max_scroll = 0;
-    if (viewport_h > 0) {
-        max_scroll = std::max(0, size_ + 30);
+    int max_scroll = std::max(0, size_ - viewport_h + 1);
+
+    if (event == ftxui::Event::End) {
+        selected_ = max_scroll;
+        at_bottom_ = true;
     }
+
     selected_ = std::clamp(selected_, 0, max_scroll);
     if (previous != selected_ && event != ftxui::Event::End) {
         at_bottom_ = (selected_ >= max_scroll);
