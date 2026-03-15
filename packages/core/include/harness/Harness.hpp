@@ -299,8 +299,8 @@ private:
                           const std::string &firstMessage);
 
   /**
-   * Drains one message from the queue and sends it to the focused agent.
-   * Called when agent turn completes.
+   * Drains all queued messages and sends them to the focused agent.
+   * Called when the focused agent is available to accept new input.
    */
   void drainQueue();
 

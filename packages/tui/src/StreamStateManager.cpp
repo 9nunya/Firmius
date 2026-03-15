@@ -261,6 +261,8 @@ void StreamStateManager::handleAgentCompacting(
   auto &s = streams_[e.agentId];
   s.compaction_active = true;
   s.compaction_finished = false;
+  s.compaction_thinking.clear();
+  s.compaction_text.clear();
   (void)e;
 }
 
@@ -285,8 +287,6 @@ void StreamStateManager::handleContextCompacted(
   auto &s = streams_[e.agentId];
   s.compaction_active = false;
   s.compaction_finished = true;
-  s.compaction_thinking.clear();
-  s.compaction_text.clear();
 }
 
 void StreamStateManager::handleAgentProcessSpawned(

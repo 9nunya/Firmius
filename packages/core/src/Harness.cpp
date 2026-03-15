@@ -1195,12 +1195,59 @@ void Harness::drainQueue() {
     return;
   }
 
-  auto [id, text] = messageQueue_.front();
   std::string agentId = focusedAgentId_;
-  messageQueue_.pop();
+  auto agent = AgentRegistry::instance().getAgent(agentId);
+  if (!agent) {
+    return;
+  }
+  if (agent->isRunning() || agent->isBooting()) {
+    return;
+  }
 
-  emitEvent(firmius::shared::MessageDequeued{id});
-  Engine::instance().executeTask(agentId, text);
+  std::vector<std::pair<std::string, std::string>> batch;
+  while (!messageQueue_.empty()) {
+    batch.push_back(messageQueue_.front());
+    messageQueue_.pop();
+  }
+
+  for (const auto &item : batch) {
+    emitEvent(firmius::shared::MessageDequeued{item.first});
+  }
+
+  if (batch.empty()) {
+    return;
+  }
+
+  if (batch.size() > 1) {
+    auto &ctx = agent->getMutableContext();
+    if (ctx.history) {
+      std::unique_ptr<Journaler> journaler;
+      if (ctx.config.persistHistory) {
+        journaler = std::make_unique<Journaler>(ctx.history->threadId, agentId);
+      }
+
+      for (size_t i = 0; i + 1 < batch.size(); ++i) {
+        AgentTurn taskTurn;
+        taskTurn.turnId =
+            "user-task-" + std::to_string(ctx.history->turns.size());
+        Message taskMsg;
+        taskMsg.role = Role::User;
+        taskMsg.content.push_back(TextContent{batch[i].second});
+        auto now = std::chrono::system_clock::now();
+        taskMsg.timestamp = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                now.time_since_epoch())
+                .count());
+        taskTurn.messages.push_back(taskMsg);
+        ctx.history->turns.push_back(taskTurn);
+        if (ctx.config.persistHistory && journaler) {
+          journaler->appendTurn(taskTurn);
+        }
+      }
+    }
+  }
+
+  Engine::instance().executeTask(agentId, batch.back().second);
 }
 
 void Harness::clearQueue() {
