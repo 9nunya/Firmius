@@ -234,8 +234,10 @@ buildProviderSuggestions(ArgType argType, const std::string &filter) {
 
 } // namespace
 
-ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
-                          std::function<void(const std::string &)> on_submit) {
+ftxui::Component InputBar(
+    const std::shared_ptr<InputBarModel> &model,
+    std::function<void(const std::string &, const std::vector<PastedBlock> &)>
+        on_submit) {
 
   auto scroll_top = std::make_shared<int>(0);
   auto suggestion_index = std::make_shared<int>(0);
@@ -340,11 +342,95 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
       return true; // Consume the event
     }
 
-    // Handle Ctrl+V as alternative paste trigger (for terminals without
-    // bracketed paste)
+    // Handle Alt+Backspace (delete previous word)
+    if (raw == "\x1b\x7f" || raw == "\x1b\b") {
+      if (*model->cursor > 0) {
+        int end = *model->cursor;
+        int start = end;
+        // Skip whitespace
+        while (start > 0 && std::isspace((*model->buffer)[start - 1]))
+          start--;
+        // Skip word characters
+        while (start > 0 && !std::isspace((*model->buffer)[start - 1]))
+          start--;
+        model->buffer->erase(start, end - start);
+        *model->cursor = start;
+      }
+      return true;
+    }
+
+    // Handle Ctrl+Left Arrow (move to previous word)
+    if (raw == "\x1b[1;5D" || raw == "\x1b\x1b[D" || raw == std::string("\x1b") + "b") {
+      if (*model->cursor > 0) {
+        // Skip whitespace
+        while (*model->cursor > 0 &&
+               std::isspace((*model->buffer)[*model->cursor - 1]))
+          (*model->cursor)--;
+        // Skip word characters
+        while (*model->cursor > 0 &&
+               !std::isspace((*model->buffer)[*model->cursor - 1]))
+          (*model->cursor)--;
+      }
+      return true;
+    }
+
+    // Handle Ctrl+Right Arrow (move to next word)
+    if (raw == "\x1b[1;5C" || raw == "\x1b\x1b[C" || raw == std::string("\x1b") + "f") {
+      int len = static_cast<int>(model->buffer->size());
+      if (*model->cursor < len) {
+        // Skip current word
+        while (*model->cursor < len &&
+               !std::isspace((*model->buffer)[*model->cursor]))
+          (*model->cursor)++;
+        // Skip whitespace
+        while (*model->cursor < len &&
+               std::isspace((*model->buffer)[*model->cursor]))
+          (*model->cursor)++;
+      }
+      return true;
+    }
+
+    // Handle Ctrl+V for image paste from clipboard
     if (event == ftxui::Event::Character("\x16")) {
-      // This would need clipboard access - for now just pass through
-      // In a real implementation, you'd access system clipboard here
+      // Check if clipboard has image
+      if (!Clipboard::hasImage()) {
+        return false; // No image in clipboard, let terminal handle
+      }
+
+      // Check if model supports vision
+      if (model->check_vision_capable && !model->check_vision_capable()) {
+        if (model->show_notification) {
+          model->show_notification("Image Paste Failed",
+                                   "Model not visually capable");
+        }
+        return true; // Consume the event
+      }
+
+      // Get image from clipboard
+      std::string mimeType;
+      auto imageData = Clipboard::getImage(mimeType);
+      if (imageData) {
+        // Generate placeholder text
+        int img_num = static_cast<int>(model->image_tags.size()) + 1;
+        std::string placeholder = "[Image " + std::to_string(img_num) + "]";
+        
+        // Insert placeholder at cursor position
+        insertText(*model->buffer, *model->cursor, placeholder);
+        
+        // Track in pasted_blocks with position
+        PastedBlock img_block;
+        img_block.type = "image";
+        img_block.id = generateBlockId();
+        img_block.content = *imageData;
+        img_block.mime_type = mimeType;
+        img_block.start_pos = static_cast<size_t>(*model->cursor) - placeholder.size();
+        img_block.end_pos = static_cast<size_t>(*model->cursor);
+        model->pasted_blocks.push_back(img_block);
+        
+        // Also track in image_tags
+        model->image_tags.push_back(img_block);
+        return true;
+      }
       return false;
     }
 
@@ -486,7 +572,7 @@ ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
       if (!model->buffer->empty()) {
         // Expand pasted block placeholders to actual content before submitting
         std::string expanded = expandPastedContent(*model->buffer, model->pasted_blocks);
-        on_submit(expanded);
+        on_submit(expanded, model->image_tags);
         model->buffer->clear();
         model->pasted_blocks.clear();
         model->image_tags.clear();

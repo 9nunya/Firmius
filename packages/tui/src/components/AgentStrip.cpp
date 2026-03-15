@@ -7,8 +7,11 @@
 #include <chrono>
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/animation.hpp>
+#include <ftxui/component/event.hpp>
+#include <ftxui/component/mouse.hpp>
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/terminal.hpp>
+#include <ftxui/screen/box.hpp>
 #include <map>
 #include <set>
 
@@ -47,6 +50,25 @@ public:
   explicit AgentStripComponentBase(std::shared_ptr<AgentStripModel> model)
       : model_(std::move(model)) {}
 
+  bool OnEvent(ftxui::Event event) override {
+    if (event.is_mouse()) {
+      bool handled = false;
+      for (size_t i = 0; i < row_boxes_.size(); ++i) {
+        if (row_boxes_[i].Contain(event.mouse().x, event.mouse().y)) {
+          if (event.mouse().button == ftxui::Mouse::Left &&
+              event.mouse().motion == ftxui::Mouse::Pressed) {
+            if (model_ && model_->on_item_click && i < model_->items.size()) {
+              model_->on_item_click(model_->items[i].id);
+              handled = true;
+            }
+          }
+        }
+      }
+      if (handled) return true;
+    }
+    return ComponentBase::OnEvent(event);
+  }
+
   ftxui::Element OnRender() override {
     if (!model_ || model_->items.empty()) {
       return ftxui::text("");
@@ -55,6 +77,7 @@ public:
     std::vector<ftxui::Element> rows;
 
     size_t count = std::min(model_->items.size(), kAgentStripVisibleRows);
+    row_boxes_.resize(count);
     auto term_size = ftxui::Terminal::Size();
     bool wide_mode = term_size.dimx > 110;
     uint64_t now_ms =
@@ -91,7 +114,14 @@ public:
       }
       auto icon_el =
           ftxui::text(primary_icon + " ") |
-          ftxui::color(theme.agent_strip.pills.slug_fg); // use slug_fg for icon
+          ftxui::color(theme.agent_strip.pills.slug_fg);
+
+      // Build hierarchy prefix with simple indentation indicators
+      std::string tree_prefix;
+      for (int d = 0; d < item.hierarchy_depth; ++d) {
+        tree_prefix += "› ";
+      }
+      auto tree_el = ftxui::text(tree_prefix) | ftxui::color(theme.base.dim);
 
       if (wide_mode) {
         // [Slug] > [Purpose] > [Model]
@@ -120,14 +150,14 @@ public:
                     ftxui::color(mod_bg) | ftxui::bgcolor(row_bg);
 
         ftxui::Element wide_content =
-            ftxui::hbox({icon_el | ftxui::bgcolor(slug_bg), slug_el, sep1,
+            ftxui::hbox({tree_el, icon_el | ftxui::bgcolor(slug_bg), slug_el, sep1,
                          purp_el, sep2, mod_el, sep3});
 
         if (item.is_busy) {
           auto it = glint_cache_.find(item.id + "_wide");
           if (it != glint_cache_.end()) {
             wide_content =
-                ftxui::hbox({icon_el | ftxui::bgcolor(slug_bg),
+                ftxui::hbox({tree_el, icon_el | ftxui::bgcolor(slug_bg),
                              it->second->Render(), sep3});
           }
         }
@@ -146,7 +176,7 @@ public:
           title_el = ftxui::text(item.title) | ftxui::bold |
                      ftxui::color(theme.agent_strip.pills.slug_fg);
         }
-        name_area = ftxui::hbox({icon_el, title_el});
+        name_area = ftxui::hbox({tree_el, icon_el, title_el});
       }
 
       // --- 2. State Pill ---
@@ -224,12 +254,15 @@ public:
                               rsep1, state_pill, rsep2, tool_pill, rsep3,
                               ctx_pill, focus_arrow});
 
-      rows.push_back(row | ftxui::bgcolor(row_bg));
+      rows.push_back(row | ftxui::bgcolor(row_bg) | ftxui::reflect(row_boxes_[i]));
     }
-    return ftxui::vbox(std::move(rows)) | ftxui::bgcolor(theme.agent_strip.bg);
+    return ftxui::vbox(std::move(rows)) | ftxui::bgcolor(theme.agent_strip.bg) |
+           ftxui::reflect(box_);
   }
 
 private:
+  ftxui::Box box_;
+
   void syncGlints() {
     std::set<std::string> current_ids;
     size_t count = std::min(model_->items.size(), kAgentStripVisibleRows);
@@ -330,6 +363,7 @@ private:
     }
   }
 
+  std::vector<ftxui::Box> row_boxes_;
   std::shared_ptr<AgentStripModel> model_;
   std::map<std::string, ftxui::Component> glint_cache_;
   std::map<std::string, std::string> title_cache_;

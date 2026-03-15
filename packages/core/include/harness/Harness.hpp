@@ -309,7 +309,13 @@ private:
   void clearQueue();
 
   // Message queue for sending while agent is running
-  std::queue<std::pair<std::string, std::string>> messageQueue_; // id, text
+  // Message queue entry: messageId, text, images
+  struct QueuedMessage {
+    std::string id;
+    std::string text;
+    std::vector<firmius::shared::ImageContent> images;
+  };
+  std::queue<QueuedMessage> messageQueue_;
 
   // Background model caching
   std::vector<shared::ModelInfo> cachedModels_;

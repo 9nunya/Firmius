@@ -33,9 +33,11 @@ public:
    * @brief Runs the agent on a specific task.
    * @param task The task description.
    * @param onEvent Callback for real-time stream events.
+   * @param images Optional images to include with the task.
    */
   virtual void run(const std::string &task,
-                   std::function<void(const StreamEvent &)> onEvent) = 0;
+                   std::function<void(const StreamEvent &)> onEvent,
+                   const std::vector<ImageContent> &images = {}) = 0;
 
   /**
    * @brief Gets the current agent context (read-only).

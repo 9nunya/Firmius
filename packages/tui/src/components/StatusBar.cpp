@@ -43,6 +43,11 @@ public:
     std::string mode = model_->status_text;
     const auto &state = GetStateColorsForMode(mode, theme);
 
+    // Get terminal dimensions for responsive layout
+    int term_width = ftxui::Terminal::Size().dimx;
+    bool compact_mode = term_width <= 110;
+    bool ultra_compact = term_width < 70;
+
     // 1. Status Segment (Icon)
     std::string status_icon = firmius::shared::ICON_WAIT;
     if (mode == "streaming" || mode == "executing_tool")
@@ -71,18 +76,43 @@ public:
     auto sep3 = ftxui::text(firmius::shared::PL_LEFT_SEP) |
                 ftxui::color(pill_bg) | ftxui::bgcolor(filler_bg);
 
-    // 2. Agent Segment
+    // 2. Agent Segment (abbreviated in compact mode)
+    std::string agent_name = firmius::shared::PrettifyModelName(model_->agent_name);
+    if (compact_mode) {
+      // Shorten agent name: "Firmius Orchestrator" -> "Firmius"
+      size_t space_pos = agent_name.find(' ');
+      if (space_pos != std::string::npos) {
+        agent_name = agent_name.substr(0, space_pos);
+      }
+      // If ultra compact, just first 4 chars
+      if (ultra_compact && agent_name.length() > 4) {
+        agent_name = agent_name.substr(0, 4);
+      }
+    }
+
     ftxui::Element agent_name_el;
-    agent_name_el =
-        ftxui::text(" " +
-                    firmius::shared::PrettifyModelName(model_->agent_name) +
-                    " ") |
+    agent_name_el = ftxui::text(" " + agent_name + " ") |
         ftxui::bold | ftxui::color(agent_fg) | ftxui::bgcolor(agent_bg);
 
     // 3. Model/Purpose Pill Segment
     std::string model_text =
         firmius::shared::PrettifyModelName(model_->model_name);
-    if (!model_->purpose.empty()) {
+    
+    // In compact mode, simplify model name
+    if (compact_mode) {
+      // "GPT 5.1 Codex Mini" -> "GPT 5.1"
+      size_t last_space = model_text.rfind(' ');
+      if (last_space != std::string::npos) {
+        // Check if last word is likely a qualifier (Mini, Pro, etc.)
+        std::string last_word = model_text.substr(last_space + 1);
+        if (last_word == "Mini" || last_word == "Pro" || last_word == "Max" ||
+            last_word == "Ultra" || last_word == "Nano") {
+          model_text = model_text.substr(0, last_space);
+        }
+      }
+    }
+    
+    if (!model_->purpose.empty() && !compact_mode) {
       model_text = model_->purpose + " | " + model_text;
     }
 
@@ -99,7 +129,7 @@ public:
     // 4. Context Segment (Right Aligned)
     ftxui::Element ctx_seg = ftxui::text("");
     ftxui::Color ctx_bg = theme.status_bar.context.bg;
-    if (model_->context_max > 0) {
+    if (model_->context_max > 0 && !ultra_compact) {
       float ratio =
           static_cast<float>(model_->context_used) / model_->context_max;
       ftxui::Color ctx_color = theme.status_bar.context.low;
@@ -109,47 +139,56 @@ public:
         ctx_color = theme.status_bar.context.medium;
 
       char buf[32];
-      snprintf(buf, sizeof(buf), "%.1f%%", ratio * 100.0f);
+      snprintf(buf, sizeof(buf), "%.0f%%", ratio * 100.0f);
       std::string pct_str = buf;
 
-      // Formatting helper for context numbers
-      auto format_val = [](uint32_t val) -> std::string {
-        if (val >= 1000000) {
-          char val_buf[32];
-          snprintf(val_buf, sizeof(val_buf), "%.1fM", val / 1000000.0f);
-          // If ends in .0M, simplify to M
-          std::string s = val_buf;
-          if (s.size() > 3 && s.substr(s.size() - 3) == ".0M") {
-            return s.substr(0, s.size() - 3) + "M";
+      if (compact_mode) {
+        // Just show percentage in compact mode
+        ctx_seg = ftxui::hbox({
+            ftxui::text(firmius::shared::PL_RIGHT_SEP) | ftxui::color(ctx_bg) |
+                ftxui::bgcolor(filler_bg),
+            ftxui::text(" " + pct_str + " ") | ftxui::bold |
+                ftxui::color(ctx_color) | ftxui::bgcolor(ctx_bg),
+        });
+      } else {
+        // Formatting helper for context numbers
+        auto format_val = [](uint32_t val) -> std::string {
+          if (val >= 1000000) {
+            char val_buf[32];
+            snprintf(val_buf, sizeof(val_buf), "%.1fM", val / 1000000.0f);
+            std::string s = val_buf;
+            if (s.size() > 3 && s.substr(s.size() - 3) == ".0M") {
+              return s.substr(0, s.size() - 3) + "M";
+            }
+            return s;
+          } else if (val >= 1000) {
+            char val_buf[32];
+            snprintf(val_buf, sizeof(val_buf), "%.1fk", val / 1000.0f);
+            std::string s = val_buf;
+            if (s.size() > 3 && s.substr(s.size() - 3) == ".0k") {
+              return s.substr(0, s.size() - 3) + "k";
+            }
+            return s;
           }
-          return s;
-        } else if (val >= 1000) {
-          char val_buf[32];
-          snprintf(val_buf, sizeof(val_buf), "%.1fk", val / 1000.0f);
-          std::string s = val_buf;
-          if (s.size() > 3 && s.substr(s.size() - 3) == ".0k") {
-            return s.substr(0, s.size() - 3) + "k";
-          }
-          return s;
-        }
-        return std::to_string(val);
-      };
+          return std::to_string(val);
+        };
 
-      std::string combined_ctx = format_val(model_->context_used) + " / " +
-                                 format_val(model_->context_max);
+        std::string combined_ctx = format_val(model_->context_used) + " / " +
+                                   format_val(model_->context_max);
 
-      ctx_seg = ftxui::hbox({
-          ftxui::text(firmius::shared::PL_RIGHT_SEP) | ftxui::color(ctx_bg) |
-              ftxui::bgcolor(filler_bg),
-          ftxui::text(" " + firmius::shared::ICON_CONTEXT + " " + combined_ctx +
-                      " ") |
-              ftxui::color(theme.status_bar.context.icon) |
-              ftxui::bgcolor(ctx_bg),
-          ftxui::text(firmius::shared::PL_RIGHT_SOFT_SEP) |
-              ftxui::color(theme.base.dim) | ftxui::bgcolor(ctx_bg),
-          ftxui::text(" " + pct_str + " ") | ftxui::bold |
-              ftxui::color(ctx_color) | ftxui::bgcolor(ctx_bg),
-      });
+        ctx_seg = ftxui::hbox({
+            ftxui::text(firmius::shared::PL_RIGHT_SEP) | ftxui::color(ctx_bg) |
+                ftxui::bgcolor(filler_bg),
+            ftxui::text(" " + firmius::shared::ICON_CONTEXT + " " + combined_ctx +
+                        " ") |
+                ftxui::color(theme.status_bar.context.icon) |
+                ftxui::bgcolor(ctx_bg),
+            ftxui::text(firmius::shared::PL_RIGHT_SOFT_SEP) |
+                ftxui::color(theme.base.dim) | ftxui::bgcolor(ctx_bg),
+            ftxui::text(" " + pct_str + " ") | ftxui::bold |
+                ftxui::color(ctx_color) | ftxui::bgcolor(ctx_bg),
+        });
+      }
     }
 
     return ftxui::hbox({

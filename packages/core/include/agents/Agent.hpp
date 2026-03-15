@@ -34,7 +34,8 @@ public:
 
   void reset() override;
   void run(const std::string &task,
-           std::function<void(const StreamEvent &)> onEvent) override;
+           std::function<void(const StreamEvent &)> onEvent,
+           const std::vector<ImageContent> &images = {}) override;
 
   void interrupt() override;
   bool isInterrupted() const override { return interrupted.load(); }

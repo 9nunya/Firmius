@@ -35,8 +35,11 @@ struct InputBarModel {
   std::function<void(const std::string& title, const std::string& message)> show_notification = nullptr;
 };
 
-ftxui::Component InputBar(const std::shared_ptr<InputBarModel> &model,
-                          std::function<void(const std::string &)> on_submit);
+ftxui::Component InputBar(
+    const std::shared_ptr<InputBarModel> &model,
+    std::function<void(const std::string &,
+                       const std::vector<PastedBlock> &images)>
+        on_submit);
 
 } // namespace firmius::tui
 

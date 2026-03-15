@@ -264,6 +264,14 @@ private:
                     return decorateMsg(
                         coll_cmp->Render() |
                         ftxui::color(theme.status_bar.error.normal.fg));
+                           });
+              rows_.push_back(row);
+            } else if (std::holds_alternative<firmius::shared::ImageContent>(
+                           part)) {
+              std::string indicator = "[Image]";
+              auto row = ftxui::Make<RowComponent>(
+                  nullptr, [decorateMsg, indicator] {
+                    return decorateMsg(ftxui::text(indicator));
                   });
               rows_.push_back(row);
             }

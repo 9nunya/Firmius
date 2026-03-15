@@ -84,8 +84,12 @@ public:
 
     /**
      * @brief Executes a task on an existing agent (re-tasking).
+     * @param agentId The agent ID.
+     * @param task The task text.
+     * @param images Optional images to include with the task.
      */
-    void executeTask(const std::string& agentId, const std::string& task);
+    void executeTask(const std::string& agentId, const std::string& task,
+                     const std::vector<firmius::shared::ImageContent>& images = {});
 
     /**
      * @brief Compacts an agent's context without resuming execution.

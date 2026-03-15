@@ -20,6 +20,9 @@ struct AgentStripItem {
   bool is_focused = false;
   int tool_call_count = 0;
   std::optional<uint64_t> working_since_ms;
+  int hierarchy_depth = 0;  // 0 = lead, 1 = subagent, 2 = sub-subagent, etc.
+  std::string parent_id;    // Empty if lead agent
+  bool has_children = false; // True if this agent has subagents
 };
 
 inline constexpr size_t kAgentStripVisibleRows = 3;
@@ -27,6 +30,7 @@ inline constexpr size_t kAgentStripVisibleRows = 3;
 struct AgentStripModel {
   std::vector<AgentStripItem> items;
   size_t view_offset = 0;
+  std::function<void(const std::string&)> on_item_click;
 };
 
 ftxui::Component AgentStrip(const std::shared_ptr<AgentStripModel> &model);

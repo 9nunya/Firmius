@@ -90,7 +90,8 @@ public:
   }
   MOCK_METHOD(void, reset, (), (override));
   MOCK_METHOD(void, run,
-              (const std::string &, (std::function<void(const StreamEvent &)>)),
+              (const std::string &, (std::function<void(const StreamEvent &)>),
+               const std::vector<ImageContent> &),
               (override));
   MOCK_METHOD((const AgentContext &), getContext, (), (const, override));
   MOCK_METHOD(AgentContext &, getMutableContext, (), (override));

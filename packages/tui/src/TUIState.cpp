@@ -172,7 +172,44 @@ void TuiState::init(firmius::core::Harness &harness,
   input_model_->cursor = &cursor_;
   input_model_->placeholder = "Type a message...";
 
+  // Set up vision capability check
+  input_model_->check_vision_capable = [this]() -> bool {
+    if (!harness_ || focused_agent_id_.empty())
+      return false;
+    auto agent = firmius::core::AgentRegistry::instance().getAgent(
+        focused_agent_id_);
+    if (!agent)
+      return false;
+    auto &ctx =
+        const_cast<firmius::shared::AgentContext &>(agent->getContext());
+    auto provider =
+        firmius::provider::ProviderRegistry::instance().getProvider(
+            ctx.config.providerId);
+    if (!provider)
+      return false;
+    auto info = provider->getModelInfo(ctx.config.modelId);
+    return std::find(info.modalities.begin(), info.modalities.end(),
+                     "image") != info.modalities.end();
+  };
+
+  // Set up notification function
+  input_model_->show_notification = [](const std::string &title,
+                                       const std::string &message) {
+    NotificationManager::instance().notifyError(title, message, false);
+  };
+
   agent_strip_model_ = std::make_shared<AgentStripModel>();
+  agent_strip_model_->on_item_click = [this](const std::string& agent_id) {
+    if (harness_ && harness_->setFocusedAgent(agent_id)) {
+      focused_agent_id_ = agent_id;
+      history_ = harness_->getAgentHistoryPtr(agent_id);
+      if (chat_component_) {
+        chat_component_->OnEvent(ftxui::Event::Special("AgentFocused"));
+      }
+      updateAgentStripModel();
+      updateStatusModel();
+    }
+  };
 
   subscription_id_ =
       harness_->subscribe([this](const firmius::shared::AppEvent &ev) {
@@ -552,6 +589,32 @@ void TuiState::updateAgentStripModel() {
         (live_it != live_tool_call_counts.end()) ? live_it->second : 0;
     item.tool_call_count = history_tool_calls + live_tool_calls;
     item.is_focused = focused_agent_id_ == id;
+    
+    // Calculate hierarchy depth
+    item.parent_id = ctx.identity.parentId;
+    item.hierarchy_depth = 0;
+    std::string current_parent = ctx.identity.parentId;
+    while (!current_parent.empty()) {
+      item.hierarchy_depth++;
+      auto parent = firmius::core::AgentRegistry::instance().getAgent(current_parent);
+      if (parent) {
+        current_parent = parent->getContext().identity.parentId;
+      } else {
+        break;
+      }
+    }
+    
+    // Check if this agent has children
+    item.has_children = false;
+    for (const auto &other_id : all_ids) {
+      if (other_id == id) continue;
+      auto other = firmius::core::AgentRegistry::instance().getAgent(other_id);
+      if (other && other->getContext().identity.parentId == id) {
+        item.has_children = true;
+        break;
+      }
+    }
+    
     if (item.is_focused) {
       focused_index = candidate_index;
       focus_found = true;
@@ -594,77 +657,94 @@ ftxui::Component TuiState::root() {
   auto status_bar = StatusBar(status_model_);
   auto agent_strip = AgentStrip(agent_strip_model_);
 
-  auto input_bar = InputBar(input_model_, [this](const std::string &text) {
-    if (!text.empty() && text[0] == '/') {
-      CommandCtx ctx{this};
-      auto &cmdManager = firmius::tui::CommandManager::instance();
+  auto input_bar = InputBar(
+      input_model_,
+      [this](const std::string &text,
+             const std::vector<firmius::tui::PastedBlock> &images) {
+        // Convert pasted image blocks to ImageContent
+        std::vector<firmius::shared::ImageContent> image_contents;
+        for (const auto &img : images) {
+          if (img.type == "image") {
+            firmius::shared::ImageContent content;
+            content.url = "data:" + img.mime_type + ";base64," + img.content;
+            content.mediaType = img.mime_type;
+            content.detail = "auto";
+            image_contents.push_back(content);
+          }
+        }
 
-      // Check if this is a workflow command before executing
-      bool is_workflow_command = false;
-      std::string content = text.substr(1);
-      size_t space_pos = content.find(' ');
-      std::string cmd_name = (space_pos == std::string::npos)
-                                 ? content
-                                 : content.substr(0, space_pos);
+        if (!text.empty() && text[0] == '/') {
+          CommandCtx ctx{this};
+          auto &cmdManager = firmius::tui::CommandManager::instance();
 
-      auto it = cmdManager.getCommand(cmd_name);
-      if (it && it->isWorkflow()) {
-        is_workflow_command = true;
-      }
+          // Check if this is a workflow command before executing
+          bool is_workflow_command = false;
+          std::string content = text.substr(1);
+          size_t space_pos = content.find(' ');
+          std::string cmd_name = (space_pos == std::string::npos)
+                                     ? content
+                                     : content.substr(0, space_pos);
 
-      if (cmdManager.executeCommand(ctx, text)) {
-        // Command handled successfully
-        // If on welcome screen and this is a workflow command, create thread
-        // and switch to chat mode
-        if (view_mode_ == ViewMode::Welcome && harness_ &&
-            is_workflow_command) {
-          std::string cwd = std::filesystem::current_path().string();
-          std::string newThreadId = harness_->newThread(
-              {}, cwd, resolveDefaultLeadPersona(harness_));
+          auto it = cmdManager.getCommand(cmd_name);
+          if (it && it->isWorkflow()) {
+            is_workflow_command = true;
+          }
 
-          // Sync UI with the newly created lead agent
-          auto agents = harness_->listAgents(newThreadId);
-          if (!agents.empty()) {
-            focused_agent_id_ = agents.front();
-            history_ = harness_->getAgentHistoryPtr(focused_agent_id_);
-            if (chat_component_) {
-              chat_component_->OnEvent(ftxui::Event::Special("ThreadChanged"));
+          if (cmdManager.executeCommand(ctx, text)) {
+            // Command handled successfully
+            // If on welcome screen and this is a workflow command, create thread
+            // and switch to chat mode
+            if (view_mode_ == ViewMode::Welcome && harness_ &&
+                is_workflow_command) {
+              std::string cwd = std::filesystem::current_path().string();
+              std::string newThreadId = harness_->newThread(
+                  {}, cwd, resolveDefaultLeadPersona(harness_));
+
+              // Sync UI with the newly created lead agent
+              auto agents = harness_->listAgents(newThreadId);
+              if (!agents.empty()) {
+                focused_agent_id_ = agents.front();
+                history_ = harness_->getAgentHistoryPtr(focused_agent_id_);
+                if (chat_component_) {
+                  chat_component_->OnEvent(
+                      ftxui::Event::Special("ThreadChanged"));
+                }
+              }
+              setViewMode(ViewMode::Chat);
+            }
+            return;
+          }
+        }
+
+        if (view_mode_ == ViewMode::Welcome) {
+          // If we are on the welcome screen, typing a message automatically
+          // starts a thread
+          if (harness_) {
+            // Auto-create thread in current directory with default lead persona
+            std::string cwd = std::filesystem::current_path().string();
+            std::string newThreadId = harness_->newThread(
+                {}, cwd, resolveDefaultLeadPersona(harness_));
+            harness_->send(text, image_contents);
+
+            // Immediately sync UI with the newly created lead agent
+            auto agents = harness_->listAgents(newThreadId);
+            if (!agents.empty()) {
+              focused_agent_id_ = agents.front();
+              history_ = harness_->getAgentHistoryPtr(focused_agent_id_);
+              if (chat_component_) {
+                chat_component_->OnEvent(
+                    ftxui::Event::Special("ThreadChanged"));
+              }
             }
           }
           setViewMode(ViewMode::Chat);
-        }
-        return;
-      }
-    }
-
-    if (view_mode_ == ViewMode::Welcome) {
-      // If we are on the welcome screen, typing a message automatically starts
-      // a thread
-      if (harness_) {
-        // Auto-create thread in current directory with default lead persona
-        std::string cwd = std::filesystem::current_path().string();
-        std::string newThreadId = harness_->newThread(
-            {}, cwd, resolveDefaultLeadPersona(harness_));
-        harness_->send(text);
-
-        // Immediately sync UI with the newly created lead agent
-        auto agents = harness_->listAgents(newThreadId);
-        if (!agents.empty()) {
-          focused_agent_id_ = agents.front();
-          history_ = harness_->getAgentHistoryPtr(focused_agent_id_);
-          if (chat_component_) {
-            chat_component_->OnEvent(ftxui::Event::Special("ThreadChanged"));
+        } else {
+          if (harness_) {
+            harness_->send(text, image_contents);
           }
         }
-      }
-      setViewMode(ViewMode::Chat);
-    } else {
-      if (harness_) {
-        harness_->send(text);
-      }
-    }
-    input_component_->TakeFocus();
-  });
+        input_component_->TakeFocus();
+      });
   auto chat = ChatWindow(
       [this]() -> const firmius::shared::AgentHistory * {
         if (focused_agent_id_.empty())

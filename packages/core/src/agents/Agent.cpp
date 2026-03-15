@@ -208,7 +208,8 @@ void Agent::markFileAsFullyRead(const std::string &path) {
 }
 
 void Agent::run(const std::string &task,
-                std::function<void(const shared::StreamEvent &)> onEvent) {
+                std::function<void(const shared::StreamEvent &)> onEvent,
+                const std::vector<ImageContent> &images) {
   {
     std::lock_guard<std::mutex> lock(callbackMutex);
     eventCallback = onEvent;
@@ -271,6 +272,11 @@ void Agent::run(const std::string &task,
   Message taskMsg;
   taskMsg.role = Role::User;
   taskMsg.content.push_back(TextContent{task});
+
+  // Add any images to the message content
+  for (const auto& img : images) {
+    taskMsg.content.push_back(img);
+  }
   auto now = std::chrono::system_clock::now();
   taskMsg.timestamp = static_cast<uint64_t>(
       std::chrono::duration_cast<std::chrono::milliseconds>(

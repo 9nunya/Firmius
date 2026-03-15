@@ -351,7 +351,9 @@ bool Harness::resumeLast() {
   return switchThread(threadId);
 }
 
-void Harness::send(const std::string &text) {
+void Harness::send(
+    const std::string &text,
+    const std::vector<firmius::shared::ImageContent> &images) {
   std::string tid;
   ThreadMetadata metadata;
   std::string fid;
@@ -392,7 +394,7 @@ void Harness::send(const std::string &text) {
           if (agent->getContext().state.currentStatus !=
               AgentStatus::Cancelled) {
             agentRunning = true;
-            messageQueue_.push({messageId, text});
+            messageQueue_.push({messageId, text, images});
           }
         }
       }
@@ -409,6 +411,7 @@ void Harness::send(const std::string &text) {
   if (needsSummon) {
     // Note: summonAgent will use the default model from ConfigLoader
     // which is what we want for a brand new lead agent in a thread.
+    // Images are not supported when summoning a new agent.
     Engine::instance().summonAgent(tid, metadata.leadPersona, text, true, "",
                                    "lead", "", requestedId);
     return;
@@ -419,7 +422,7 @@ void Harness::send(const std::string &text) {
     return;
   }
 
-  Engine::instance().executeTask(fid, text);
+  Engine::instance().executeTask(fid, text, images);
 }
 
 bool Harness::executeWorkflow(const std::string &workflowId,
@@ -1204,14 +1207,14 @@ void Harness::drainQueue() {
     return;
   }
 
-  std::vector<std::pair<std::string, std::string>> batch;
+  std::vector<QueuedMessage> batch;
   while (!messageQueue_.empty()) {
     batch.push_back(messageQueue_.front());
     messageQueue_.pop();
   }
 
   for (const auto &item : batch) {
-    emitEvent(firmius::shared::MessageDequeued{item.first});
+    emitEvent(firmius::shared::MessageDequeued{item.id});
   }
 
   if (batch.empty()) {
@@ -1232,7 +1235,13 @@ void Harness::drainQueue() {
             "user-task-" + std::to_string(ctx.history->turns.size());
         Message taskMsg;
         taskMsg.role = Role::User;
-        taskMsg.content.push_back(TextContent{batch[i].second});
+        taskMsg.content.push_back(TextContent{batch[i].text});
+
+        // Add images for this message
+        for (const auto &img : batch[i].images) {
+          taskMsg.content.push_back(img);
+        }
+
         auto now = std::chrono::system_clock::now();
         taskMsg.timestamp = static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1247,7 +1256,7 @@ void Harness::drainQueue() {
     }
   }
 
-  Engine::instance().executeTask(agentId, batch.back().second);
+  Engine::instance().executeTask(agentId, batch.back().text, batch.back().images);
 }
 
 void Harness::clearQueue() {

@@ -539,12 +539,7 @@ void appendMessageInput(rapidjson::Value &input,
     } else if (auto *img = std::get_if<firmius::shared::ImageContent>(&part)) {
       rapidjson::Value item(rapidjson::kObjectType);
       item.AddMember("type", "input_image", a);
-      rapidjson::Value urlObj(rapidjson::kObjectType);
-      urlObj.AddMember("url", rapidjson::Value(img->url.c_str(), a), a);
-      if (!img->detail.empty()) {
-        urlObj.AddMember("detail", rapidjson::Value(img->detail.c_str(), a), a);
-      }
-      item.AddMember("image_url", urlObj, a);
+      item.AddMember("image_url", rapidjson::Value(img->url.c_str(), a), a);
       content.PushBack(item, a);
     }
   }

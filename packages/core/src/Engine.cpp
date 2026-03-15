@@ -560,7 +560,9 @@ void Engine::switchAgentModel(const std::string &agentId,
                           modelId, agent->getContext().identity.parentId});
 }
 
-void Engine::executeTask(const std::string &agentId, const std::string &task) {
+void Engine::executeTask(
+    const std::string &agentId, const std::string &task,
+    const std::vector<firmius::shared::ImageContent> &images) {
   auto agent = AgentRegistry::instance().getAgent(agentId);
   if (!agent) {
     throw std::runtime_error("Agent not found: " + agentId);
@@ -574,7 +576,7 @@ void Engine::executeTask(const std::string &agentId, const std::string &task) {
 
   {
     std::lock_guard<std::mutex> lock(taskThreadsMutex_);
-    taskThreads_.emplace_back([this, agentId, task, agent, prom]() mutable {
+    taskThreads_.emplace_back([this, agentId, task, images, agent, prom]() mutable {
       std::string parentId = "";
       // Track if we already broadcast an error from the stream
       bool errorBroadcast = false;
@@ -588,7 +590,7 @@ void Engine::executeTask(const std::string &agentId, const std::string &task) {
         agent->run(task, [this, agentId, parentId,
                           &errorBroadcast](const StreamEvent &ev) {
           handleStreamEvent(agentId, parentId, ev, errorBroadcast);
-        });
+        }, images);
 
         const auto &turns = agent->getContext().history->turns;
         if (!turns.empty() && !turns.back().messages.empty()) {
