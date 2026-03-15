@@ -4,7 +4,9 @@
 #include "utils/Icons.hpp"
 #include "utils/ModelUtil.hpp"
 #include <algorithm>
+#include <chrono>
 #include <ftxui/component/component.hpp>
+#include <ftxui/component/animation.hpp>
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/terminal.hpp>
 #include <map>
@@ -13,6 +15,32 @@
 namespace firmius::tui {
 
 namespace {
+
+std::string spinnerFrame() {
+  static const std::vector<std::string> frames = {
+      "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"};
+  auto now = std::chrono::steady_clock::now();
+  auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                now.time_since_epoch())
+                .count();
+  size_t idx = static_cast<size_t>((ms / 80) % frames.size());
+  ftxui::animation::RequestAnimationFrame();
+  return frames[idx];
+}
+
+std::string formatWorkingDuration(uint64_t elapsed_ms) {
+  uint64_t total_seconds = elapsed_ms / 1000;
+  uint64_t hours = total_seconds / 3600;
+  uint64_t minutes = (total_seconds / 60) % 60;
+  uint64_t seconds = total_seconds % 60;
+  if (hours > 0) {
+    return std::to_string(hours) + "h, " + std::to_string(minutes) + "m";
+  }
+  if (minutes > 0) {
+    return std::to_string(minutes) + "m, " + std::to_string(seconds) + "s";
+  }
+  return std::to_string(seconds) + "s";
+}
 
 class AgentStripComponentBase : public ftxui::ComponentBase {
 public:
@@ -29,6 +57,10 @@ public:
     size_t count = std::min(model_->items.size(), kAgentStripVisibleRows);
     auto term_size = ftxui::Terminal::Size();
     bool wide_mode = term_size.dimx > 110;
+    uint64_t now_ms =
+        static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                  std::chrono::steady_clock::now().time_since_epoch())
+                                  .count());
 
     const auto &theme = ThemeManager::instance().getCurrentTheme();
     for (size_t i = 0; i < count; ++i) {
@@ -47,8 +79,18 @@ public:
 
       // --- 1. Agent Name Area / Wide Pill ---
       ftxui::Element name_area;
+      std::string busy_spinner;
+      if (item.is_busy) {
+        busy_spinner = spinnerFrame();
+      }
+      std::string primary_icon = firmius::shared::ICON_CHECK;
+      if (item.is_busy) {
+        primary_icon = busy_spinner;
+      } else if (item.status_text == "error") {
+        primary_icon = firmius::shared::ICON_ERROR;
+      }
       auto icon_el =
-          ftxui::text(firmius::shared::ICON_AGENT + " ") |
+          ftxui::text(primary_icon + " ") |
           ftxui::color(theme.agent_strip.pills.slug_fg); // use slug_fg for icon
 
       if (wide_mode) {
@@ -61,8 +103,7 @@ public:
         ftxui::Color mod_fg = theme.agent_strip.pills.model_fg;
 
         auto slug_el =
-            ftxui::text(" " + firmius::shared::PrettifyModelName(item.title) +
-                        " ") |
+            ftxui::text(" " + item.title + " ") |
             ftxui::bold | ftxui::color(slug_fg) | ftxui::bgcolor(slug_bg);
         auto sep1 = ftxui::text(firmius::shared::PL_LEFT_SEP) |
                     ftxui::color(slug_bg) | ftxui::bgcolor(purp_bg);
@@ -85,7 +126,9 @@ public:
         if (item.is_busy) {
           auto it = glint_cache_.find(item.id + "_wide");
           if (it != glint_cache_.end()) {
-            wide_content = ftxui::hbox({it->second->Render(), sep3});
+            wide_content =
+                ftxui::hbox({icon_el | ftxui::bgcolor(slug_bg),
+                             it->second->Render(), sep3});
           }
         }
         name_area = wide_content;
@@ -100,10 +143,8 @@ public:
                        ftxui::color(theme.agent_strip.pills.slug_fg);
           }
         } else {
-          // Not busy - show model name instead of title
-          title_el =
-              ftxui::text(firmius::shared::PrettifyModelName(item.model_name)) |
-              ftxui::bold | ftxui::color(theme.agent_strip.pills.slug_fg);
+          title_el = ftxui::text(item.title) | ftxui::bold |
+                     ftxui::color(theme.agent_strip.pills.slug_fg);
         }
         name_area = ftxui::hbox({icon_el, title_el});
       }
@@ -115,8 +156,15 @@ public:
       std::string status_label = ""; // Empty for idle
 
       if (item.is_busy) {
-        status_icon = firmius::shared::ICON_GEAR;
-        status_label = "BUSY";
+        status_icon = busy_spinner;
+        status_label = "WORKING";
+        if (item.working_since_ms.has_value()) {
+          uint64_t elapsed = 0;
+          if (now_ms >= item.working_since_ms.value()) {
+            elapsed = now_ms - item.working_since_ms.value();
+          }
+          status_label += " (" + formatWorkingDuration(elapsed) + ")";
+        }
       } else if (item.status_text == "error") {
         status_icon = firmius::shared::ICON_ERROR;
         status_label = "ERR";
@@ -202,7 +250,7 @@ private:
       const auto &theme = ThemeManager::instance().getCurrentTheme();
       if (!wide_mode) {
         if (glint_cache_.count(item.id) &&
-            title_cache_[item.id] == item.model_name &&
+            title_cache_[item.id] == item.title &&
             cached_theme_name_ == theme.name)
           continue;
         const auto &state = theme.agent_strip.item;
@@ -219,10 +267,10 @@ private:
         cfg.durationSeconds = 1.5f;
         cfg.easing = GlintEasing::EaseInOut;
         glint_cache_[item.id] = GlintEffect(
-            ftxui::text(firmius::shared::PrettifyModelName(item.model_name)) |
-                ftxui::bold | ftxui::color(theme.agent_strip.pills.slug_fg),
+            ftxui::text(item.title) | ftxui::bold |
+                ftxui::color(theme.agent_strip.pills.slug_fg),
             cfg);
-        title_cache_[item.id] = item.model_name;
+        title_cache_[item.id] = item.title;
       } else {
         // Wide glint
         if (glint_cache_.count(item.id + "_wide") &&
@@ -263,12 +311,8 @@ private:
                         firmius::shared::PrettifyModelName(item.model_name) +
                         " ") |
             ftxui::bgcolor(mod_bg);
-
-        auto icon_el = ftxui::text(firmius::shared::ICON_AGENT + " ") |
-                       ftxui::bgcolor(slug_bg);
-
         glint_cache_[item.id + "_wide"] = GlintEffect(
-            ftxui::hbox({icon_el, slug_el, sep1, purp_el, sep2, mod_el}) |
+            ftxui::hbox({slug_el, sep1, purp_el, sep2, mod_el}) |
                 ftxui::color(theme.agent_strip.pills.slug_fg),
             cfg);
         title_cache_[item.id + "_wide"] =

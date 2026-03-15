@@ -5,6 +5,7 @@
 #include "agents/PurposeLoader.hpp"
 #include "hosts/DockerHost.hpp"
 #include "hosts/LocalHost.hpp"
+#include "persistence/Journaler.hpp"
 #include "persistence/ThreadManager.hpp"
 #include "providers/BaseOAuthProvider.hpp"
 #include "providers/ProviderRegistry.hpp"
@@ -221,7 +222,13 @@ std::string Harness::newThread(HostCreationOptions hostOptions,
       finalCwd = "/work";
     }
     newMeta.cwd = finalCwd;
-    newMeta.leadPersona = leadPersona;
+    std::string effectiveLead = leadPersona;
+    if (effectiveLead.empty()) {
+      const auto &cfg = shared::ConfigLoader::instance().getConfig();
+      effectiveLead =
+          cfg.defaultLeadPersona.empty() ? "firmius" : cfg.defaultLeadPersona;
+    }
+    newMeta.leadPersona = effectiveLead;
 
     threadId = threadManager_.createThread(newMeta);
 
@@ -868,6 +875,78 @@ bool Harness::setFocusedAgent(const std::string &agentId) {
   return true;
 }
 
+bool Harness::switchLeadPersona(const std::string &personaName) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  if (currentThreadId_.empty())
+    return false;
+  if (!PurposeLoader::isValid(personaName))
+    return false;
+
+  auto agent = focusedAgentId_.empty()
+                   ? nullptr
+                   : AgentRegistry::instance().getAgent(focusedAgentId_);
+  if (agent) {
+    if (!agent->getContext().identity.parentId.empty()) {
+      return false;
+    }
+    if (agent->isRunning() || agent->isBooting()) {
+      return false;
+    }
+  }
+
+  ThreadMetadata metadata = threadManager_.getMetadata(currentThreadId_);
+  metadata.leadPersona = personaName;
+  threadManager_.updateMetadata(currentThreadId_, metadata);
+
+  if (!agent) {
+    return true;
+  }
+
+  Persona persona = PurposeLoader::load(personaName);
+  auto &ctx = agent->getMutableContext();
+  ctx.identity.name = persona.name;
+  ctx.identity.role = persona.title;
+  ctx.config.personaName = personaName;
+  ctx.permissions.allowedScopes = persona.allowedScopes;
+
+  AgentTurn nudgeTurn;
+  nudgeTurn.turnId = "system-persona-switch-" +
+                     std::to_string(std::chrono::duration_cast<
+                                        std::chrono::milliseconds>(
+                                        std::chrono::system_clock::now()
+                                            .time_since_epoch())
+                                        .count());
+  Message nudgeMsg;
+  nudgeMsg.role = Role::System;
+  nudgeMsg.content.push_back(TextContent{
+      "Lead persona switched to '" + persona.title +
+      "'. Follow the new persona instructions for all future turns."});
+  nudgeMsg.timestamp = static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::system_clock::now().time_since_epoch())
+          .count());
+  nudgeTurn.messages.push_back(nudgeMsg);
+  ctx.history->turns.push_back(nudgeTurn);
+
+  if (ctx.config.persistHistory) {
+    Journaler jnl(ctx.history->threadId, ctx.identity.id);
+    jnl.appendTurn(nudgeTurn);
+  }
+
+  try {
+    auto manifest = threadManager_.readAgentManifest(currentThreadId_);
+    auto it = manifest.find(ctx.identity.id);
+    if (it != manifest.end()) {
+      it->second.persona = personaName;
+      it->second.title = persona.title;
+      threadManager_.writeAgentManifest(currentThreadId_, manifest);
+    }
+  } catch (...) {
+  }
+
+  return true;
+}
+
 std::vector<ModelInfo> Harness::listAllModels() {
   std::lock_guard<std::mutex> lock(modelsMutex_);
 
@@ -908,7 +987,7 @@ std::vector<ModelInfo> Harness::listAllModels() {
   return {};
 }
 
-const UserConfig &Harness::getConfig() {
+const UserConfig &Harness::getConfig() const {
   return shared::ConfigLoader::instance().getConfig();
 }
 
@@ -1015,6 +1094,25 @@ UndoResult Harness::undoAfterTimestamp(uint64_t timestamp) {
   auto result =
       Engine::instance().undoAgentAfterTimestamp(focusedAgentId_, timestamp);
   return result;
+}
+
+void Harness::compactFocusedAgent() {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  if (focusedAgentId_.empty()) {
+    emitEvent(firmius::shared::AgentError{"", "No focused agent to compact"});
+    return;
+  }
+  auto agent = AgentRegistry::instance().getAgent(focusedAgentId_);
+  if (!agent) {
+    emitEvent(firmius::shared::AgentError{"", "Focused agent not found"});
+    return;
+  }
+  if (agent->isRunning()) {
+    emitEvent(
+        firmius::shared::AgentError{"", "Cannot compact while agent is running"});
+    return;
+  }
+  Engine::instance().compactAgent(focusedAgentId_);
 }
 
 void Harness::maybeGenerateTitle(const std::string &threadId,

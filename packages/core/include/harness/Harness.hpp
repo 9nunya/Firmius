@@ -85,7 +85,7 @@ public:
    */
   std::string newThread(shared::HostCreationOptions hostOptions,
                         const std::string &cwd,
-                        const std::string &leadPersona = "brainstormer");
+                        const std::string &leadPersona = "");
 
   /**
    * Switch focus to a different thread.
@@ -155,6 +155,14 @@ public:
    */
   bool setFocusedAgent(const std::string &agentId);
 
+  /**
+   * Switches the lead persona for the current thread and focuses a new lead
+   * agent if possible.
+   * @param personaName The new lead persona name.
+   * @return true if the switch succeeded, false otherwise.
+   */
+  bool switchLeadPersona(const std::string &personaName);
+
   void deleteThread(const std::string &threadId);
 
   std::vector<ThreadMetadata> listThreads();
@@ -162,7 +170,7 @@ public:
   std::vector<shared::ModelInfo> listAllModels();
   bool isModelsLoaded() const { return modelsLoaded_; }
 
-  const UserConfig &getConfig();
+  const UserConfig &getConfig() const;
   void updateConfig(const UserConfig &config);
   void saveConfig();
 
@@ -217,6 +225,11 @@ public:
    * @return Result of the undo operation.
    */
   UndoResult undoAfterTimestamp(uint64_t timestamp);
+
+  /**
+   * Compact the focused agent's context without resuming execution.
+   */
+  void compactFocusedAgent();
 
   /**
    * @brief Writes an interruption record to the current thread's journal

@@ -9,7 +9,10 @@ void NewCommand::execute(CommandCtx &ctx, const std::vector<ParsedArg> &args) {
   (void)args;
   auto &h = firmius::core::Harness::instance();
   std::string cwd = std::filesystem::current_path().string();
-  h.newThread({}, cwd, "brainstormer");
+  auto cfg = h.getConfig();
+  std::string lead =
+      cfg.defaultLeadPersona.empty() ? "firmius" : cfg.defaultLeadPersona;
+  h.newThread({}, cwd, lead);
 }
 
 } // namespace firmius::tui

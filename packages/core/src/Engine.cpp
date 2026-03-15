@@ -151,9 +151,9 @@ std::string Engine::summonAgent(const std::string &threadId,
           ctx.config.maxTokens = userCfg.defaultMaxTokens.value();
         }
         ctx.config.persistHistory = persistHistory;
+        ctx.config.personaName = personaName;
         ctx.identity.name = persona.name;
         ctx.identity.role = persona.title;
-        ctx.config.stop = persona.stopSequences;
         ctx.permissions.allowedScopes = persona.allowedScopes;
 
         std::string home = getenv("HOME") ? getenv("HOME") : "/root";
@@ -298,7 +298,6 @@ std::string Engine::resumeAgent(const std::string &threadId,
   ctx.identity.friendlyName = parentId.empty() ? "lead" : friendlyName;
   ctx.identity.name = persona.name;
   ctx.identity.role = title.empty() ? persona.title : title;
-  ctx.config.stop = persona.stopSequences;
   const auto &userCfg = shared::ConfigLoader::instance().getConfig();
   ctx.config.providerId = userCfg.defaultProviderId;
   ctx.config.modelId = userCfg.defaultModelId;
@@ -307,6 +306,7 @@ std::string Engine::resumeAgent(const std::string &threadId,
     ctx.config.maxTokens = userCfg.defaultMaxTokens.value();
   }
   ctx.config.persistHistory = persistHistory;
+  ctx.config.personaName = personaName;
   ctx.permissions.allowedScopes = persona.allowedScopes;
 
   std::string home = getenv("HOME") ? getenv("HOME") : "/root";
@@ -633,6 +633,39 @@ void Engine::executeTask(const std::string &agentId, const std::string &task) {
           broadcast(AgentError{agentId, e.what(), parentId});
         }
         prom->set_exception(std::make_exception_ptr(e));
+      }
+    });
+  }
+}
+
+void Engine::compactAgent(const std::string &agentId) {
+  auto agent = AgentRegistry::instance().getAgent(agentId);
+  if (!agent) {
+    throw std::runtime_error("Agent not found: " + agentId);
+  }
+  if (agent->isRunning()) {
+    throw std::runtime_error("Cannot compact while agent is running");
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(taskThreadsMutex_);
+    taskThreads_.emplace_back([this, agentId, agent]() mutable {
+      std::string parentId = "";
+      bool errorBroadcast = false;
+      try {
+        if (agent) {
+          parentId = agent->getContext().identity.parentId;
+        }
+        agent->clearInterrupt();
+        agent->compactNow([this, agentId, parentId,
+                           &errorBroadcast](const StreamEvent &ev) {
+          handleStreamEvent(agentId, parentId, ev, errorBroadcast);
+        });
+        agent->getMutableContext().state.currentStatus = AgentStatus::Idle;
+      } catch (const std::exception &e) {
+        if (!errorBroadcast) {
+          broadcast(AgentError{agentId, e.what(), parentId});
+        }
       }
     });
   }

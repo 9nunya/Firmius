@@ -21,7 +21,7 @@ protected:
 
         // Create a dummy persona
         std::ofstream coderFile(testPromptsDir / "test_coder.md");
-        coderFile << "---\nname: test_coder\ntitle: Test Coder\ndescription: A test persona\nscopes: [\"fs:read\"]\nstop: [\"<done />\"]\ncanSpawn: true\n---\nYou are a test coder.";
+        coderFile << "---\nname: test_coder\ntitle: Test Coder\ndescription: A test persona\nscopes: [\"fs:read\"]\nswitchable: true\ncanSpawn: true\n---\nYou are a test coder.";
         coderFile.close();
     }
 
@@ -38,11 +38,10 @@ TEST_F(PurposeLoaderTest, isValid_check) {
     EXPECT_FALSE(PurposeLoader::isValid("non_existent"));
 }
 
-TEST_F(PurposeLoaderTest, load_persona_stop) {
+TEST_F(PurposeLoaderTest, load_persona_switchable) {
     Persona persona = PurposeLoader::load("test_coder");
     EXPECT_EQ(persona.name, "test_coder");
-    ASSERT_EQ(persona.stopSequences.size(), 1);
-    EXPECT_EQ(persona.stopSequences[0], "<done />");
+    EXPECT_TRUE(persona.switchable);
 }
 
 TEST_F(PurposeLoaderTest, composeSystemPrompt_placeholders) {

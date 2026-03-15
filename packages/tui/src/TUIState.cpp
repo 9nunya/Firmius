@@ -3,6 +3,7 @@
 #include "NotificationManager.hpp"
 #include "ThemeManager.hpp"
 #include "UIState.hpp"
+#include "agents/PurposeLoader.hpp"
 #include "commands/CommandManager.hpp"
 #include "components/AgentStrip.hpp"
 #include "components/ChatWindow.hpp"
@@ -17,6 +18,7 @@
 #include "modals/ThreadLockedModal.hpp"
 #include "providers/ProviderRegistry.hpp"
 #include <algorithm>
+#include <chrono>
 #include <filesystem>
 #include <ftxui/component/component.hpp>
 #include <ftxui/dom/elements.hpp>
@@ -48,6 +50,33 @@ static std::string statusToString(shared::AgentStatus status) {
     return "cancelled";
   }
   return "unknown";
+}
+
+static std::string resolveDefaultLeadPersona(
+    const firmius::core::Harness *harness) {
+  std::string fallback = "firmius";
+  if (!harness)
+    return fallback;
+  const auto &cfg = harness->getConfig();
+  if (!cfg.defaultLeadPersona.empty())
+    return cfg.defaultLeadPersona;
+  return fallback;
+}
+
+static std::string resolvePersonaTitle(const std::string &personaName) {
+  try {
+    return firmius::core::PurposeLoader::load(personaName).title;
+  } catch (...) {
+    return personaName;
+  }
+}
+
+static std::vector<std::string> getSwitchableLeadPersonas() {
+  auto purposes = firmius::core::PurposeLoader::listSwitchablePurposes();
+  if (purposes.empty()) {
+    purposes.push_back("firmius");
+  }
+  return purposes;
 }
 
 TuiState &TuiState::instance() {
@@ -152,6 +181,9 @@ void TuiState::init(firmius::core::Harness &harness,
           screen_->PostEvent(ftxui::Event::Custom);
         }
       });
+
+  updateStatusModel();
+  updateAgentStripModel();
 }
 
 void TuiState::attachScreen(ftxui::ScreenInteractive *screen) {
@@ -292,6 +324,8 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
           auto locked_modal =
               ThreadLockedModal::create(*this, e.threadId, e.ownerPid);
           openModalDirect(locked_modal);
+        } else if constexpr (std::is_same_v<T, AgentCompacting>) {
+          stream_state_.handleAgentCompacting(e);
         } else if constexpr (std::is_same_v<T, AgentCompactionThinking>) {
           stream_state_.handleAgentCompactionThinking(e);
         } else if constexpr (std::is_same_v<T, AgentCompactionText>) {
@@ -388,9 +422,18 @@ void TuiState::updateStatusModel() {
     }
   }
   status_model_->status_text = "idle";
-  status_model_->model_name = "";
-  status_model_->purpose = "";
-  status_model_->agent_name = "";
+  std::string personaName = resolveDefaultLeadPersona(harness_);
+  std::string personaTitle = resolvePersonaTitle(personaName);
+  if (harness_) {
+    const auto &cfg = harness_->getConfig();
+    status_model_->model_name = cfg.defaultProviderId + "/" + cfg.defaultModelId;
+    status_model_->model_variant = cfg.defaultModelVariant;
+  } else {
+    status_model_->model_name = "";
+    status_model_->model_variant.clear();
+  }
+  status_model_->purpose = personaTitle;
+  status_model_->agent_name = personaTitle;
   status_model_->context_used = 0;
   status_model_->context_max = 0;
   status_model_->is_active = false;
@@ -428,22 +471,37 @@ void TuiState::updateAgentStripModel() {
     ++live_tool_call_counts[view->agentId];
   }
 
+  auto all_ids = firmius::core::AgentRegistry::instance().listAll();
   std::string parent_focus = focused_agent_id_;
+  std::string focused_parent;
   auto focused_agent =
       firmius::core::AgentRegistry::instance().getAgent(focused_agent_id_);
   if (focused_agent) {
-    const auto &ctx = focused_agent->getContext();
-    if (!ctx.identity.parentId.empty()) {
-      parent_focus = ctx.identity.parentId;
+    focused_parent = focused_agent->getContext().identity.parentId;
+  }
+  bool has_children = false;
+  for (const auto &id : all_ids) {
+    auto child = firmius::core::AgentRegistry::instance().getAgent(id);
+    if (!child)
+      continue;
+    if (child->getContext().identity.parentId == focused_agent_id_) {
+      has_children = true;
+      break;
     }
   }
-  auto all_ids = firmius::core::AgentRegistry::instance().listAll();
+  if (!has_children && !focused_parent.empty()) {
+    parent_focus = focused_parent;
+  }
 
   std::vector<AgentStripItem> all_items;
   all_items.reserve(all_ids.size());
   size_t focused_index = 0;
   bool focus_found = false;
   size_t candidate_index = 0;
+  uint64_t now_ms =
+      static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now().time_since_epoch())
+                                .count());
   for (const auto &id : all_ids) {
     auto child = firmius::core::AgentRegistry::instance().getAgent(id);
     if (!child)
@@ -453,8 +511,13 @@ void TuiState::updateAgentStripModel() {
       continue;
     AgentStripItem item;
     item.id = id;
-    item.title = ctx.identity.friendlyName.empty() ? ctx.identity.name
-                                                   : ctx.identity.friendlyName;
+    std::string display_title = ctx.identity.role;
+    if (display_title.empty())
+      display_title = ctx.identity.name;
+    std::string stream_title = stream_state_.getAgentTitle(id);
+    if (!stream_title.empty())
+      display_title = stream_title;
+    item.title = display_title;
     item.purpose = ctx.identity.role;
     item.model_name = ctx.config.modelId; // Use modelId directly,
                                           // PrettifyModelName handles prefixes
@@ -462,6 +525,16 @@ void TuiState::updateAgentStripModel() {
     item.is_busy = ctx.state.currentStatus == AgentStatus::Streaming ||
                    ctx.state.currentStatus == AgentStatus::ExecutingTool ||
                    ctx.state.currentStatus == AgentStatus::ProviderWaiting;
+    if (item.is_busy) {
+      auto it = agent_work_start_ms_.find(id);
+      if (it == agent_work_start_ms_.end()) {
+        auto inserted = agent_work_start_ms_.emplace(id, now_ms);
+        it = inserted.first;
+      }
+      item.working_since_ms = it->second;
+    } else {
+      agent_work_start_ms_.erase(id);
+    }
     auto provider = firmius::provider::ProviderRegistry::instance().getProvider(
         ctx.config.providerId);
     if (provider) {
@@ -546,8 +619,8 @@ ftxui::Component TuiState::root() {
         if (view_mode_ == ViewMode::Welcome && harness_ &&
             is_workflow_command) {
           std::string cwd = std::filesystem::current_path().string();
-          std::string newThreadId =
-              harness_->newThread({}, cwd, "brainstormer");
+          std::string newThreadId = harness_->newThread(
+              {}, cwd, resolveDefaultLeadPersona(harness_));
 
           // Sync UI with the newly created lead agent
           auto agents = harness_->listAgents(newThreadId);
@@ -570,7 +643,8 @@ ftxui::Component TuiState::root() {
       if (harness_) {
         // Auto-create thread in current directory with default lead persona
         std::string cwd = std::filesystem::current_path().string();
-        std::string newThreadId = harness_->newThread({}, cwd, "brainstormer");
+        std::string newThreadId = harness_->newThread(
+            {}, cwd, resolveDefaultLeadPersona(harness_));
         harness_->send(text);
 
         // Immediately sync UI with the newly created lead agent
@@ -613,6 +687,28 @@ ftxui::Component TuiState::root() {
         };
 
         if (s) {
+          auto compaction_separator = []() {
+            return ftxui::text("------- Compaction --------") | ftxui::dim |
+                   ftxui::center | ftxui::flex;
+          };
+          bool has_compaction_output =
+              s->compaction_active || !s->compaction_thinking.empty() ||
+              !s->compaction_text.empty();
+          if (has_compaction_output) {
+            live_rows.push_back(compaction_separator());
+            if (!s->compaction_thinking.empty()) {
+              live_rows.push_back(decorateMsg(
+                  firmius::tui::RenderMarkdown(s->compaction_thinking, true)));
+            }
+            if (!s->compaction_text.empty()) {
+              live_rows.push_back(decorateMsg(
+                  firmius::tui::RenderMarkdown(s->compaction_text)));
+            }
+          }
+          if (s->compaction_finished) {
+            live_rows.push_back(compaction_separator());
+          }
+
           // Show thinking content immediately (for reasoning models)
           if (!s->thinking.empty()) {
             live_rows.push_back(
@@ -889,6 +985,88 @@ ftxui::Component TuiState::root() {
       }
       if (harness_)
         harness_->abort();
+      return true;
+    }
+    if (event.input() == "\x1b[Z") { // Shift+Tab (cycle lead mode)
+      if (!harness_)
+        return true;
+
+      if (!focused_agent_id_.empty()) {
+        auto agent = firmius::core::AgentRegistry::instance().getAgent(
+            focused_agent_id_);
+        if (agent) {
+          const auto &ctx = agent->getContext();
+          if (!ctx.identity.parentId.empty()) {
+            NotificationManager::instance().notifyWarning(
+                "Lead Mode",
+                "Cannot switch mode while focused on a subagent.",
+                std::chrono::milliseconds(1500));
+            return true;
+          }
+          if (agent->isRunning() || agent->isBooting()) {
+            NotificationManager::instance().notifyWarning(
+                "Lead Mode",
+                "Lead agent is busy. Cancel or wait before switching.",
+                std::chrono::milliseconds(1500));
+            return true;
+          }
+        }
+      }
+
+      auto modes = getSwitchableLeadPersonas();
+      std::string current;
+      if (!focused_agent_id_.empty()) {
+        auto agent = firmius::core::AgentRegistry::instance().getAgent(
+            focused_agent_id_);
+        if (agent) {
+          current = agent->getContext().identity.name;
+        }
+      }
+      if (current.empty() && !thread_.leadPersona.empty()) {
+        current = thread_.leadPersona;
+      }
+      if (current.empty()) {
+        current = resolveDefaultLeadPersona(harness_);
+      }
+
+      size_t next_index = 0;
+      auto it = std::find(modes.begin(), modes.end(), current);
+      if (it != modes.end()) {
+        next_index =
+            (static_cast<size_t>(it - modes.begin()) + 1) % modes.size();
+      }
+      std::string next = modes[next_index];
+
+      auto cfg = harness_->getConfig();
+      cfg.defaultLeadPersona = next;
+      harness_->updateConfig(cfg);
+      harness_->saveConfig();
+
+      bool switched = false;
+      if (!thread_.threadId.empty() &&
+          harness_->currentThreadId() == thread_.threadId) {
+        switched = harness_->switchLeadPersona(next);
+        if (switched) {
+          focused_agent_id_ = harness_->focusedAgentId();
+          history_ = focused_agent_id_.empty()
+                         ? nullptr
+                         : harness_->getAgentHistoryPtr(focused_agent_id_);
+        }
+      }
+      thread_.leadPersona = next;
+
+      updateStatusModel();
+      updateAgentStripModel();
+      if (chat_component_) {
+        chat_component_->OnEvent(ftxui::Event::Special("ThreadChanged"));
+      }
+      if (screen_) {
+        screen_->PostEvent(ftxui::Event::Custom);
+      }
+
+      NotificationManager::instance().notifyInfo(
+          "Lead Mode", "Lead persona: " + resolvePersonaTitle(next),
+          std::chrono::milliseconds(1500));
       return true;
     }
     if (event == ftxui::Event::Special("\x10")) { // Ctrl+P (Parent)

@@ -83,6 +83,8 @@ void Agent::interrupt() {
   running = false; // Allow immediate re-tasking after interrupt
 }
 
+void Agent::clearInterrupt() { interrupted = false; }
+
 void Agent::setModel(const std::string &providerId,
                      const std::string &modelId) {
   if (running.load()) {
@@ -98,6 +100,11 @@ void Agent::setModel(const std::string &providerId,
   context.config.providerId = providerId;
   context.config.modelId = modelId;
   provider = newProvider;
+}
+
+void Agent::compactNow(
+    std::function<void(const shared::StreamEvent &)> onEvent) {
+  compactContext(std::move(onEvent));
 }
 
 void Agent::setModel(const std::string &providerId, const std::string &modelId,

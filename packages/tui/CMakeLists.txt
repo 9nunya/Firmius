@@ -11,6 +11,7 @@ target_sources(firmius PRIVATE
     src/commands/ThreadsCommand.cpp
     src/commands/ModelCommand.cpp
     src/commands/UndoCommand.cpp
+    src/commands/CompactCommand.cpp
     src/commands/ConfigCommand.cpp
     src/commands/ConnectCommand.cpp
     src/commands/QuotasCommand.cpp

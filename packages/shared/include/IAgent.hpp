@@ -68,6 +68,13 @@ public:
    * @return True if interrupt() has been called.
    */
   virtual bool isInterrupted() const = 0;
+  virtual void clearInterrupt() = 0;
+
+  /**
+   * @brief Compacts the agent context without resuming execution.
+   */
+  virtual void compactNow(
+      std::function<void(const StreamEvent &)> onEvent) = 0;
 
   /**
    * @brief Sets the provider and model for this agent.

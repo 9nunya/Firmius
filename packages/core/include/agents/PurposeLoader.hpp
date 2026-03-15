@@ -21,8 +21,8 @@ struct Persona {
   std::string description; ///< High-level description.
   std::vector<ToolScope>
       allowedScopes; ///< Tools the persona is allowed to use.
-  std::vector<std::string> stopSequences; ///< Optional stop sequences.
   bool canSpawn = false;      ///< Whether this persona can spawn sub-agents.
+  bool switchable = false;    ///< Whether this persona is selectable as lead.
   std::string identityPrompt; ///< The core instructions for the persona.
 };
 
@@ -67,6 +67,11 @@ public:
    * @return The path to the prompts directory with trailing slash.
    */
   static std::string resolvePromptsDir();
+
+  /**
+   * @brief Lists persona names that are marked as switchable.
+   */
+  static std::vector<std::string> listSwitchablePurposes();
 
   /**
    * @brief Registers a custom placeholder for system prompt composition.

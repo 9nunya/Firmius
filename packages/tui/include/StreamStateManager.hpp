@@ -27,6 +27,8 @@ struct StreamState {
   std::string text;
   std::string compaction_thinking;
   std::string compaction_text;
+  bool compaction_active = false;
+  bool compaction_finished = false;
   bool provider_waiting = false;
   std::chrono::steady_clock::time_point thinking_start{};
   bool is_thinking = false;
@@ -37,6 +39,7 @@ public:
   void handleAgentThinking(const shared::AgentThinking &e);
   void handleAgentText(const shared::AgentText &e);
   void handleAgentTurnCompleted(const shared::AgentTurnCompleted &e);
+  void handleAgentCompacting(const shared::AgentCompacting &e);
   void handleAgentProviderWaiting(const shared::AgentProviderWaiting &e);
   void handleAgentToolCallChunk(const shared::AgentToolCallChunk &e);
   void handleAgentToolCall(const shared::AgentToolCall &e);
@@ -67,6 +70,7 @@ public:
   getToolCalls() const;
   std::shared_ptr<ToolCallView>
   getToolView(const std::string &toolCallId) const;
+  std::string getAgentTitle(const std::string &agentId) const;
   const std::string &getRetryStatus() const;
   const std::vector<std::string> &getAccountSwaps() const;
   const std::vector<std::pair<std::string, std::string>> &

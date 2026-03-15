@@ -10,6 +10,7 @@
 
 #include "commands/AccountsCommand.hpp"
 #include "commands/CommandManager.hpp"
+#include "commands/CompactCommand.hpp"
 #include "commands/ConfigCommand.hpp"
 #include "commands/ConnectCommand.hpp"
 #include "commands/ModelCommand.hpp"
@@ -50,6 +51,8 @@ int main(int argc, char **argv) {
   firmius::tui::CommandManager::instance().registerCommand(
       std::make_shared<firmius::tui::ConfigCommand>());
   firmius::tui::CommandManager::instance().registerCommand(
+      std::make_shared<firmius::tui::CompactCommand>());
+  firmius::tui::CommandManager::instance().registerCommand(
       std::make_shared<firmius::tui::ConnectCommand>());
   firmius::tui::CommandManager::instance().registerCommand(
       std::make_shared<firmius::tui::QuotasCommand>());
@@ -86,7 +89,10 @@ int main(int argc, char **argv) {
     opts.deleteOnExit = false;
 
     std::string cwd = "/work";
-    if (!h.newThread(opts, cwd, "brainstormer").empty()) {
+    auto cfg = h.getConfig();
+    std::string lead =
+        cfg.defaultLeadPersona.empty() ? "firmius" : cfg.defaultLeadPersona;
+    if (!h.newThread(opts, cwd, lead).empty()) {
       thread_loaded = true;
     }
   } else if (continue_last) {

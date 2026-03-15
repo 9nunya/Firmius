@@ -10,6 +10,7 @@
 #include <ftxui/component/screen_interactive.hpp>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace firmius::core {
@@ -96,6 +97,7 @@ private:
   ftxui::Component root_component_;
   ftxui::Component chat_component_;
   ftxui::Component input_component_;
+  std::unordered_map<std::string, uint64_t> agent_work_start_ms_;
   
   // Process focus mode
   std::string focused_process_id_;

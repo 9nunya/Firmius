@@ -88,6 +88,11 @@ public:
     void executeTask(const std::string& agentId, const std::string& task);
 
     /**
+     * @brief Compacts an agent's context without resuming execution.
+     */
+    void compactAgent(const std::string& agentId);
+
+    /**
      * @brief Switches the provider/model for an agent.
      * @param agentId The agent ID.
      * @param providerId The new provider ID.

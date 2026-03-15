@@ -51,6 +51,9 @@ void ConfigLoader::loadImpl() {
     if (doc.HasMember("defaultModelVariant") && doc["defaultModelVariant"].IsString()) {
         config_.defaultModelVariant = doc["defaultModelVariant"].GetString();
     }
+    if (doc.HasMember("defaultLeadPersona") && doc["defaultLeadPersona"].IsString()) {
+        config_.defaultLeadPersona = doc["defaultLeadPersona"].GetString();
+    }
     if (doc.HasMember("defaultTemperature") && doc["defaultTemperature"].IsFloat()) {
         config_.defaultTemperature = doc["defaultTemperature"].GetFloat();
     }
@@ -105,6 +108,7 @@ void ConfigLoader::save() const {
     doc.AddMember("defaultProviderId", rapidjson::Value(config_.defaultProviderId.c_str(), allocator), allocator);
     doc.AddMember("defaultModelId", rapidjson::Value(config_.defaultModelId.c_str(), allocator), allocator);
     doc.AddMember("defaultModelVariant", rapidjson::Value(config_.defaultModelVariant.c_str(), allocator), allocator);
+    doc.AddMember("defaultLeadPersona", rapidjson::Value(config_.defaultLeadPersona.c_str(), allocator), allocator);
     doc.AddMember("defaultTemperature", config_.defaultTemperature, allocator);
     doc.AddMember("dangerouslySkipPermissions", config_.dangerouslySkipPermissions, allocator);
 

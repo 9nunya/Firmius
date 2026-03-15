@@ -38,6 +38,7 @@ public:
 
   void interrupt() override;
   bool isInterrupted() const override { return interrupted.load(); }
+  void clearInterrupt() override;
   void setModel(const std::string &providerId,
                 const std::string &modelId) override;
   void setModel(const std::string &providerId, const std::string &modelId,
@@ -73,6 +74,8 @@ public:
   firmius::core::AgentPermissionChecks &getPermissionChecks() const override {
     return *permissionChecks;
   }
+  void compactNow(
+      std::function<void(const StreamEvent &)> onEvent) override;
 
 private:
   void compactContext(std::function<void(const shared::StreamEvent &)> onEvent);

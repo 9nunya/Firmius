@@ -3,10 +3,29 @@
 #include "ThemeManager.hpp"
 #include "components/GlintEffect.hpp"
 #include "utils/Icons.hpp"
+#include <chrono>
+#include <ftxui/component/animation.hpp>
 #include <ftxui/dom/elements.hpp>
 #include <rapidjson/document.h>
+#include <vector>
 
 namespace firmius::tui {
+
+namespace {
+
+std::string spinnerFrame() {
+  static const std::vector<std::string> frames = {
+      "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"};
+  auto now = std::chrono::steady_clock::now();
+  auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                now.time_since_epoch())
+                .count();
+  size_t idx = static_cast<size_t>((ms / 80) % frames.size());
+  ftxui::animation::RequestAnimationFrame();
+  return frames[idx];
+}
+
+} // namespace
 
 ftxui::Component
 SubagentWaitToolBlock(const std::shared_ptr<ToolCallView> &view) {
@@ -51,8 +70,9 @@ SubagentWaitToolBlock(const std::shared_ptr<ToolCallView> &view) {
       cfg.easing = GlintEasing::EaseInOut;
 
       using namespace firmius::shared;
+      auto spinner = spinnerFrame();
       auto text =
-          ftxui::text(" " + ICON_WAIT + " Waiting on " + title + "...") |
+          ftxui::text(" " + spinner + " Waiting on " + title + "...") |
           ftxui::bold | ftxui::color(theme.tool_blocks.specific.wait.fg);
       return GlintEffect(text, cfg)->Render();
     }

@@ -1,6 +1,7 @@
 #include "modals/APIKeyWizardModal.hpp"
 #include "TUIState.hpp"
 #include "ThemeManager.hpp"
+#include "providers/ProviderRegistry.hpp"
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/component_options.hpp>
 #include <ftxui/dom/elements.hpp>
@@ -120,8 +121,8 @@ ftxui::Component APIKeyWizardModal::create(TuiState &state) {
   // input
   return ftxui::CatchEvent(renderer, [input_content, isDone, isError,
                                       errorMessage, resultMessage, wizard,
-                                      &state, paste_buffer, in_paste,
-                                      input](ftxui::Event event) {
+                                      providerName, &state, paste_buffer,
+                                      in_paste, input](ftxui::Event event) {
     // Handle Escape globally
     if (event == ftxui::Event::Escape) {
       state.popModalImmediate();
@@ -164,16 +165,28 @@ ftxui::Component APIKeyWizardModal::create(TuiState &state) {
     // Handle Enter for submission
     if (event == ftxui::Event::Return) {
       if (input_content->empty()) {
-        *isError = true;
-        *errorMessage = "API key cannot be empty.";
-        *isDone = true;
-        state.postEvent(ftxui::Event::Custom);
         return true;
       }
 
-      std::string apiKey = *input_content;
+      wizard->submitAnswer(*input_content);
+      std::string apiKey;
       std::string err;
       if (wizard->finalizeExchange(apiKey, err)) {
+        auto provider =
+            firmius::provider::ProviderRegistry::instance().getProvider(
+                providerName);
+        auto apiKeyProvider =
+            std::dynamic_pointer_cast<firmius::provider::BaseAPIKeyProvider>(
+                provider);
+        if (apiKeyProvider && !apiKey.empty()) {
+          firmius::provider::APIKeyAccount acc;
+          acc.apiKey = apiKey;
+          acc.keyPrefix =
+              firmius::provider::BaseAPIKeyProvider::extractKeyPrefix(apiKey);
+          acc.identifier = apiKeyProvider->generateIdentifier();
+          apiKeyProvider->addAccount(acc);
+        }
+
         *resultMessage = wizard->getFinalMessage();
         *isDone = true;
         *isError = false;

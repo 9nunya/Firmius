@@ -27,6 +27,7 @@ void StreamStateManager::handleAgentThinking(const shared::AgentThinking &e) {
     s.thinking_start = std::chrono::steady_clock::now();
     s.is_thinking = true;
   }
+  s.compaction_finished = false;
   s.thinking += e.delta;
   s.provider_waiting = false;
   clearRetryStatus();
@@ -40,6 +41,7 @@ void StreamStateManager::handleAgentText(const shared::AgentText &e) {
     s.is_thinking = false;
     pushThinkingDuration(e.agentId, secs);
   }
+  s.compaction_finished = false;
   s.text += e.delta;
   s.provider_waiting = false;
   clearRetryStatus();
@@ -50,6 +52,7 @@ void StreamStateManager::handleAgentTurnCompleted(
   auto &s = streams_[e.agentId];
   s.thinking.clear();
   s.text.clear();
+  s.compaction_finished = false;
   s.provider_waiting = false;
   s.is_thinking = false;
   pushTokenUsage(e.agentId, e.aggregateMetrics);
@@ -253,19 +256,35 @@ void StreamStateManager::handleAgentToolCall(const shared::AgentToolCall &e) {
   }
 }
 
+void StreamStateManager::handleAgentCompacting(
+    const shared::AgentCompacting &e) {
+  auto &s = streams_[e.agentId];
+  s.compaction_active = true;
+  s.compaction_finished = false;
+  (void)e;
+}
+
 void StreamStateManager::handleAgentCompactionThinking(
     const shared::AgentCompactionThinking &e) {
-  streams_[e.agentId].compaction_thinking += e.delta;
+  auto &s = streams_[e.agentId];
+  s.compaction_active = true;
+  s.compaction_finished = false;
+  s.compaction_thinking += e.delta;
 }
 
 void StreamStateManager::handleAgentCompactionText(
     const shared::AgentCompactionText &e) {
-  streams_[e.agentId].compaction_text += e.delta;
+  auto &s = streams_[e.agentId];
+  s.compaction_active = true;
+  s.compaction_finished = false;
+  s.compaction_text += e.delta;
 }
 
 void StreamStateManager::handleContextCompacted(
     const shared::ContextCompacted &e) {
   auto &s = streams_[e.agentId];
+  s.compaction_active = false;
+  s.compaction_finished = true;
   s.compaction_thinking.clear();
   s.compaction_text.clear();
 }
@@ -394,6 +413,14 @@ StreamStateManager::getToolView(const std::string &toolCallId) const {
   return nullptr;
 }
 
+std::string StreamStateManager::getAgentTitle(
+    const std::string &agentId) const {
+  auto it = agent_titles_.find(agentId);
+  if (it != agent_titles_.end())
+    return it->second;
+  return "";
+}
+
 // Transient error rendering is disabled; errors are now rendered
 // persistently via ChatWindow using AgentHistory ErrorContent.
 
@@ -446,6 +473,7 @@ void StreamStateManager::handleThreadChanged() {
   tool_calls_.clear();
   timeline_.clear();
   subagent_to_parent_tool_.clear();
+  streams_.clear();
 }
 
 void StreamStateManager::rebuildToolCallsFromHistory(
@@ -499,9 +527,6 @@ void StreamStateManager::rebuildToolCallsFromHistory(
                 view->success = true;
                 view->phase = ToolPhase::Finished;
               }
-
-              timeline_.push_back(
-                  {TimelineEntry::Kind::ToolCall, tc->id, "", agentId});
             }
           }
         }

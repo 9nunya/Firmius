@@ -138,17 +138,10 @@ Persona PurposeLoader::load(const std::string &purpose) {
           persona.allowedScopes.push_back(stringToScope(cleaned));
         }
       }
-    } else if (key == "stop") {
-      if (value.front() == '[' && value.back() == ']') {
-        std::string list = value.substr(1, value.size() - 2);
-        auto parts = StringUtil::split(list, ',');
-        for (auto &p : parts) {
-          std::string cleaned = p;
-          if (cleaned.front() == '"' && cleaned.back() == '"')
-            cleaned = cleaned.substr(1, cleaned.size() - 2);
-          persona.stopSequences.push_back(cleaned);
-        }
-      }
+    } else if (key == "switchable") {
+      auto lowered = StringUtil::toLower(value);
+      persona.switchable = (lowered == "true" || lowered == "yes" ||
+                            lowered == "1");
     }
   }
 
@@ -259,15 +252,39 @@ std::string PurposeLoader::resolvePromptsDir() {
   return "prompts/";
 }
 
+std::vector<std::string> PurposeLoader::listSwitchablePurposes() {
+  std::vector<std::string> purposes;
+  std::string promptsDir = resolvePromptsDir();
+  if (!std::filesystem::exists(promptsDir)) {
+    return purposes;
+  }
+
+  for (const auto &entry : std::filesystem::directory_iterator(promptsDir)) {
+    if (entry.path().extension() != ".md")
+      continue;
+    auto stem = entry.path().stem().string();
+    if (stem == "base" || stem == "COMPACTION_PROMPT")
+      continue;
+    try {
+      auto persona = load(stem);
+      if (persona.switchable) {
+        purposes.push_back(stem);
+      }
+    } catch (...) {
+    }
+  }
+
+  std::sort(purposes.begin(), purposes.end());
+  purposes.erase(std::unique(purposes.begin(), purposes.end()), purposes.end());
+  return purposes;
+}
+
 void PurposeLoader::bootstrapDefaults(const std::string &builtinPromptsDir) {
   const char *home = std::getenv("HOME");
   if (!home)
     return;
 
   std::string userDir = std::string(home) + "/.firmius/prompts";
-  if (std::filesystem::exists(userDir))
-    return;
-
   if (!std::filesystem::exists(builtinPromptsDir))
     return;
 
@@ -275,10 +292,13 @@ void PurposeLoader::bootstrapDefaults(const std::string &builtinPromptsDir) {
   for (const auto &entry :
        std::filesystem::directory_iterator(builtinPromptsDir)) {
     if (entry.is_regular_file()) {
-      std::filesystem::copy_file(
-          entry.path(),
-          std::string(userDir) + "/" + entry.path().filename().string(),
-          std::filesystem::copy_options::overwrite_existing);
+      std::filesystem::path target =
+          std::filesystem::path(userDir) / entry.path().filename();
+      if (!std::filesystem::exists(target)) {
+        std::filesystem::copy_file(
+            entry.path(), target,
+            std::filesystem::copy_options::overwrite_existing);
+      }
     }
   }
 }

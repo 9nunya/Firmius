@@ -3,7 +3,6 @@ name: titler
 title: Thread Title Generator
 description: Generates concise titles for conversation threads.
 scopes: []
-stop: ["<done />"]
 canSpawn: false
 ---
 You generate short, descriptive titles for conversation threads based on the user's first message.

@@ -3,6 +3,7 @@
 
 #include <ftxui/component/component_base.hpp>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -18,6 +19,7 @@ struct AgentStripItem {
   bool is_busy = false;
   bool is_focused = false;
   int tool_call_count = 0;
+  std::optional<uint64_t> working_since_ms;
 };
 
 inline constexpr size_t kAgentStripVisibleRows = 3;

@@ -6,10 +6,29 @@
 #include "utils/Icons.hpp"
 #include "utils/ToolSummaries.hpp"
 #include "utils/ToolView.hpp"
+#include <chrono>
+#include <ftxui/component/animation.hpp>
 #include <ftxui/dom/elements.hpp>
 #include <rapidjson/document.h>
+#include <vector>
 
 namespace firmius::tui {
+
+namespace {
+
+std::string spinnerFrame() {
+  static const std::vector<std::string> frames = {
+      "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"};
+  auto now = std::chrono::steady_clock::now();
+  auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                now.time_since_epoch())
+                .count();
+  size_t idx = static_cast<size_t>((ms / 80) % frames.size());
+  ftxui::animation::RequestAnimationFrame();
+  return frames[idx];
+}
+
+} // namespace
 
 ftxui::Component SubagentToolBlock(const std::shared_ptr<ToolCallView> &view,
                                    HistoryGetter sub_history_getter,
@@ -159,8 +178,9 @@ ftxui::Component SubagentToolBlock(const std::shared_ptr<ToolCallView> &view,
       cfg.durationSeconds = 1.2f;
       cfg.easing = GlintEasing::EaseInOut;
       using namespace firmius::shared;
+      auto spinner = spinnerFrame();
       auto spawning_text =
-          ftxui::text(ICON_GEAR + " Spawning \"" + title + "\"...") |
+          ftxui::text(spinner + " Spawning \"" + title + "\"...") |
           ftxui::bold;
       return ftxui::hbox(
           {ftxui::text("▸ ") |
@@ -186,8 +206,9 @@ ftxui::Component SubagentToolBlock(const std::shared_ptr<ToolCallView> &view,
       cfg.easing = GlintEasing::EaseInOut;
 
       using namespace firmius::shared;
+      auto spinner = spinnerFrame();
       rows.push_back(
-          GlintEffect(ftxui::text(ICON_AGENT + " " + title) | ftxui::bold |
+          GlintEffect(ftxui::text(spinner + " " + title) | ftxui::bold |
                           ftxui::color(theme.tool_blocks.specific.subagent.fg),
                       cfg)
               ->Render() |

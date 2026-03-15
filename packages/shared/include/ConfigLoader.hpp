@@ -11,6 +11,7 @@ struct UserConfig {
     std::string defaultProviderId = "nanogpt";
     std::string defaultModelId = "zai-org/glm-4.6:thinking";
     std::string defaultModelVariant;                      // Selected model variant (e.g., "low", "medium", "max")
+    std::string defaultLeadPersona = "firmius";
     float defaultTemperature = 0.7f;
     std::optional<uint32_t> defaultMaxTokens;
     bool dangerouslySkipPermissions = false;
