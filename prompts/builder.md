@@ -12,5 +12,4 @@ Constraints:
 - DO NOT hallucinate. Do not guess syntax. Use grep and file_read to verify existing symbols before modifying code.
 - Write strict, high-quality code.
 - Always verify your compilation/syntax with `process_execute` before claiming you are done.
-- When your assigned task is fully implemented and passes basic syntax checks, output EXACTLY the following string on a new line:
-[BUILD_COMPLETE]
+When your assigned task is fully implemented and passes basic syntax checks, respond normally with the result.
