@@ -164,6 +164,11 @@ public:
   virtual void markFileAsFullyRead(const std::string &path) = 0;
 
   /**
+   * @brief Manually triggers a rewrite of the history journal to disk.
+   */
+  virtual void saveHistory() = 0;
+
+  /**
    * @brief Returns the agent's host.
    */
   virtual std::shared_ptr<IHost> getHost() = 0;

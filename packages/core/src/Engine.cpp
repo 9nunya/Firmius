@@ -683,6 +683,8 @@ UndoResult Engine::undoAgentTurns(const std::string &agentId, int count) {
   auto &ctx = agent->getMutableContext();
   auto result = HistoryEditor::undoTurns(ctx.history->turns, count);
 
+  agent->saveHistory();
+
   broadcast(HistoryUndone{agentId, ctx.history->threadId, result.turnsRemoved,
                           result.compactionReversed, ctx.identity.parentId});
   return result;
@@ -697,6 +699,8 @@ UndoResult Engine::undoAgentMessages(const std::string &agentId, int count) {
 
   auto &ctx = agent->getMutableContext();
   auto result = HistoryEditor::undoMessages(ctx.history->turns, count);
+
+  agent->saveHistory();
 
   broadcast(HistoryUndone{agentId, ctx.history->threadId, result.turnsRemoved,
                           result.compactionReversed, ctx.identity.parentId});
@@ -714,6 +718,8 @@ UndoResult Engine::undoAgentAfterTimestamp(const std::string &agentId,
   auto &ctx = agent->getMutableContext();
   auto result =
       HistoryEditor::undoAfterTimestamp(ctx.history->turns, timestamp);
+
+  agent->saveHistory();
 
   broadcast(HistoryUndone{agentId, ctx.history->threadId, result.turnsRemoved,
                           result.compactionReversed, ctx.identity.parentId});

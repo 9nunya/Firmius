@@ -4,6 +4,8 @@
 #include <thread>
 #include <future>
 #include <cstdio>
+#include <map>
+#include <algorithm>
 
 namespace firmius::utils {
 
@@ -60,9 +62,29 @@ size_t GCPHttpClient::stringWriteCallback(char* ptr, size_t size, size_t nmemb, 
     return size * nmemb;
 }
 
+static size_t headerCallback(char* buffer, size_t size, size_t nitems, void* userdata) {
+    auto* headers = static_cast<std::map<std::string, std::string>*>(userdata);
+    std::string line(buffer, size * nitems);
+    size_t colon = line.find(':');
+    if (colon != std::string::npos) {
+        std::string name = line.substr(0, colon);
+        std::string value = line.substr(colon + 1);
+        
+        name.erase(0, name.find_first_not_of(" \t\r\n"));
+        name.erase(name.find_last_not_of(" \t\r\n") + 1);
+        value.erase(0, value.find_first_not_of(" \t\r\n"));
+        value.erase(value.find_last_not_of(" \t\r\n") + 1);
+        
+        for (auto& c : name) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+        
+        (*headers)[name] = value;
+    }
+    return size * nitems;
+}
+
 GCPHttpClient::Response GCPHttpClient::post(const std::string& url, const std::string& body, int timeoutSeconds) {
     CURL* curl = curl_easy_init();
-    if (!curl) return {0, "", "Failed to initialize CURL"};
+    if (!curl) return {0, "", "Failed to initialize CURL", {}};
 
     Response resp;
     struct curl_slist* headers = prepareHeaders();
@@ -72,6 +94,8 @@ GCPHttpClient::Response GCPHttpClient::post(const std::string& url, const std::s
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, stringWriteCallback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp.body);
+    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, headerCallback);
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA, &resp.headers);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, static_cast<long>(timeoutSeconds));
 
     CURLcode res = curl_easy_perform(curl);
@@ -88,7 +112,7 @@ GCPHttpClient::Response GCPHttpClient::post(const std::string& url, const std::s
 
 GCPHttpClient::Response GCPHttpClient::get(const std::string& url, int timeoutSeconds) {
     CURL* curl = curl_easy_init();
-    if (!curl) return {0, "", "Failed to initialize CURL"};
+    if (!curl) return {0, "", "Failed to initialize CURL", {}};
 
     Response resp;
     struct curl_slist* headers = prepareHeaders();
@@ -97,6 +121,8 @@ GCPHttpClient::Response GCPHttpClient::get(const std::string& url, int timeoutSe
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, stringWriteCallback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp.body);
+    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, headerCallback);
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA, &resp.headers);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, static_cast<long>(timeoutSeconds));
 
     CURLcode res = curl_easy_perform(curl);
@@ -120,7 +146,7 @@ GCPHttpClient::Response GCPHttpClient::streamPost(const std::string& url,
     // If no abort signal, use simple synchronous call
     if (!abortSignal) {
         CURL* curl = curl_easy_init();
-        if (!curl) return {0, "", "Failed to initialize CURL"};
+        if (!curl) return {0, "", "Failed to initialize CURL", {}};
 
         Response resp;
         struct curl_slist* headers = prepareHeaders();
@@ -130,6 +156,8 @@ GCPHttpClient::Response GCPHttpClient::streamPost(const std::string& url,
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeCallback);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, userdata);
+        curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, headerCallback);
+        curl_easy_setopt(curl, CURLOPT_HEADERDATA, &resp.headers);
         curl_easy_setopt(curl, CURLOPT_TIMEOUT, static_cast<long>(timeoutSeconds));
         curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
         curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
@@ -154,6 +182,7 @@ GCPHttpClient::Response GCPHttpClient::streamPost(const std::string& url,
         std::atomic<bool>* abortSignal;
         int timeoutSeconds;
         FILE* stderrFile = nullptr;
+        std::map<std::string, std::string> responseHeaders;
     };
 
     auto threadFunc = [](ThreadData* data) {
@@ -215,6 +244,7 @@ GCPHttpClient::Response GCPHttpClient::streamPost(const std::string& url,
         } else {
             curl_easy_getinfo(data->curl, CURLINFO_RESPONSE_CODE, &resp.code);
         }
+        resp.headers = std::move(data->responseHeaders);
 
         data->promise.set_value(resp);
         if (data->headers) curl_slist_free_all(data->headers);
@@ -226,7 +256,7 @@ GCPHttpClient::Response GCPHttpClient::streamPost(const std::string& url,
     ThreadData* data = new ThreadData();
     data->curl = curl_easy_init();
     if (!data->curl) {
-        Response resp{0, "", "Failed to initialize CURL"};
+        Response resp{0, "", "Failed to initialize CURL", {}};
         delete data;
         return resp;
     }
@@ -240,6 +270,8 @@ GCPHttpClient::Response GCPHttpClient::streamPost(const std::string& url,
     curl_easy_setopt(data->curl, CURLOPT_HTTPHEADER, data->headers);
     curl_easy_setopt(data->curl, CURLOPT_WRITEFUNCTION, writeCallback);
     curl_easy_setopt(data->curl, CURLOPT_WRITEDATA, userdata);
+    curl_easy_setopt(data->curl, CURLOPT_HEADERFUNCTION, headerCallback);
+    curl_easy_setopt(data->curl, CURLOPT_HEADERDATA, &data->responseHeaders);
     curl_easy_setopt(data->curl, CURLOPT_TIMEOUT, static_cast<long>(timeoutSeconds));
     curl_easy_setopt(data->curl, CURLOPT_CONNECTTIMEOUT, 10L);
     curl_easy_setopt(data->curl, CURLOPT_TCP_KEEPALIVE, 1L);

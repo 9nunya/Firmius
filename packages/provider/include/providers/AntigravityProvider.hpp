@@ -55,6 +55,8 @@ private:
 
   static std::map<std::string, ModelInfo> getStaticModels();
 
+  uint32_t toolCallCounter_ = 0;
+
   // Sends the internal Antigravity proxy request (v1internal:streamGenerateContent)
   void executeStreamRequest(OAuthAccount &acc, const AgentHistory &history,
                             const ProviderOptions &opts,

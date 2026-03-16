@@ -77,8 +77,17 @@ SubagentWaitToolBlock(const std::shared_ptr<ToolCallView> &view) {
       return GlintEffect(text, cfg)->Render();
     }
 
+    if (view->phase == ToolPhase::Error ||
+        (view->phase == ToolPhase::Finished && !view->success)) {
+      using namespace firmius::shared;
+      return ftxui::hbox({ftxui::text(" " + ICON_ERROR + " ") |
+                              ftxui::color(theme.status_bar.error.normal.fg),
+                          ftxui::text("Waiting on " + title + " failed") |
+                              ftxui::bold |
+                              ftxui::color(theme.status_bar.error.normal.fg)});
+    }
+
     using namespace firmius::shared;
-    // Finished state
     return ftxui::hbox({ftxui::text(" " + ICON_CHECK + " ") |
                             ftxui::color(theme.tool_blocks.specific.wait.fg),
                         ftxui::text(title + " ready") |

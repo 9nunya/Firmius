@@ -42,15 +42,20 @@ std::string firstWords(const std::string &s, int n) {
   return result;
 }
 
+static bool isMatch(const std::string &actual, const std::string &expected) {
+  if (actual.empty() || expected.empty()) return false;
+  return actual.find(expected) != std::string::npos;
+}
+
 std::string SummarizeToolCall(const std::string &name, const std::string &args, ToolPhase phase) {
   if (phase == ToolPhase::Preparing) {
-    if (name == "file_edit") return "Preparing edit...";
-    if (name == "file_read") return "Preparing read...";
-    if (name == "process_execute" || name == "process_spawn") return "Writing command...";
-    if (name == "summon_subagent") return "Summoning subagent...";
-    if (name == "subagent_wait") return "Awaiting subagent...";
-    if (name == "grep") return "Preparing grep...";
-    if (name == "glob") return "Preparing glob...";
+    if (isMatch(name, "file_edit")) return "Preparing edit...";
+    if (isMatch(name, "file_read")) return "Preparing read...";
+    if (isMatch(name, "process_execute") || isMatch(name, "process_spawn")) return "Writing command...";
+    if (isMatch(name, "summon_subagent")) return "Summoning subagent...";
+    if (isMatch(name, "subagent_wait")) return "Awaiting subagent...";
+    if (isMatch(name, "grep")) return "Preparing grep...";
+    if (isMatch(name, "glob")) return "Preparing glob...";
     return "Preparing " + name + "...";
   }
 
@@ -58,13 +63,13 @@ std::string SummarizeToolCall(const std::string &name, const std::string &args, 
   doc.Parse(args.c_str());
   bool valid = !doc.HasParseError() && doc.IsObject();
 
-  if (name == "list_directory") {
+  if (isMatch(name, "list_directory")) {
     std::string path = "";
     if (valid && doc.HasMember("path") && doc["path"].IsString())
       path = doc["path"].GetString();
     return "List " + (path.empty() ? "." : path);
   }
-  if (name == "file_read") {
+  if (isMatch(name, "file_read")) {
     std::string path = "";
     int start = -1, end = -1;
     if (valid) {
@@ -80,34 +85,34 @@ std::string SummarizeToolCall(const std::string &name, const std::string &args, 
       s += "[" + std::to_string(start) + ":" + std::to_string(end) + "]";
     return s;
   }
-  if (name == "file_edit") {
+  if (isMatch(name, "file_edit")) {
     std::string path = "";
     if (valid && doc.HasMember("path") && doc["path"].IsString())
       path = doc["path"].GetString();
     return "Edit " + path;
   }
-  if (name == "process_execute" || name == "process_spawn") {
+  if (isMatch(name, "process_execute") || isMatch(name, "process_spawn")) {
     std::string cmd = "";
     if (valid && doc.HasMember("command") && doc["command"].IsString())
       cmd = doc["command"].GetString();
     return "$ " + firstWords(cmd, 3);
   }
-  if (name == "grep") {
+  if (isMatch(name, "grep")) {
     std::string pattern = "";
     if (valid && doc.HasMember("pattern") && doc["pattern"].IsString())
       pattern = doc["pattern"].GetString();
     return "Grep \"" + firstWords(pattern, 2) + "\"";
   }
-  if (name == "glob") {
+  if (isMatch(name, "glob")) {
     std::string pattern = "";
     if (valid && doc.HasMember("pattern") && doc["pattern"].IsString())
       pattern = doc["pattern"].GetString();
     return "Glob \"" + pattern + "\"";
   }
-  if (name == "python_execute") {
+  if (isMatch(name, "python_execute")) {
     return "Python exec";
   }
-  if (name == "web_fetch") {
+  if (isMatch(name, "web_fetch")) {
     std::string url = "";
     if (valid && doc.HasMember("url") && doc["url"].IsString())
       url = doc["url"].GetString();
@@ -121,7 +126,7 @@ std::string SummarizeToolCall(const std::string &name, const std::string &args, 
     }
     return "Fetch " + url;
   }
-  if (name == "summon_subagent") {
+  if (isMatch(name, "summon_subagent")) {
     std::string title = "";
     if (valid && doc.HasMember("title") && doc["title"].IsString())
       title = doc["title"].GetString();
@@ -130,19 +135,26 @@ std::string SummarizeToolCall(const std::string &name, const std::string &args, 
       title = doc["name"].GetString();
     return "Subagent \"" + firstWords(title, 3) + "\"";
   }
-  if (name == "subagent_wait") {
+  if (isMatch(name, "subagent_wait")) {
+    std::string title = "";
+    if (valid && doc.HasMember("title") && doc["title"].IsString())
+      title = doc["title"].GetString();
+    if (title.empty() && valid && doc.HasMember("name") && doc["name"].IsString())
+      title = doc["name"].GetString();
+    
+    if (!title.empty()) return "Wait for " + title;
     return "Await subagent";
   }
-  if (name == "subagent_terminate") {
+  if (isMatch(name, "subagent_terminate")) {
     return "Kill subagent";
   }
-  if (name == "process_status") {
+  if (isMatch(name, "process_status")) {
     return "Process status";
   }
-  if (name == "process_input") {
+  if (isMatch(name, "process_input")) {
     return "Process input";
   }
-  if (name == "process_wait") {
+  if (isMatch(name, "process_wait")) {
     return "Process wait";
   }
 

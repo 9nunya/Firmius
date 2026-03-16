@@ -144,7 +144,9 @@ void StreamStateManager::handleAgentToolCallChunk(
         {TimelineEntry::Kind::ToolCall, e.toolCallId, "", e.agentId});
   }
   view->phase = ToolPhase::Preparing;
-  view->name += e.nameDelta;
+  if (!e.nameDelta.empty()) {
+    view->name += e.nameDelta;
+  }
   view->args += e.argsDelta;
   if (!view->args.empty()) {
     view->phase = ToolPhase::Called;
@@ -287,6 +289,8 @@ void StreamStateManager::handleContextCompacted(
   auto &s = streams_[e.agentId];
   s.compaction_active = false;
   s.compaction_finished = true;
+  s.compaction_thinking.clear();
+  s.compaction_text.clear();
 }
 
 void StreamStateManager::handleAgentProcessSpawned(

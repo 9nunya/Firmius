@@ -798,10 +798,13 @@ void AntigravityProvider::processSSELine(
         } else if (part.HasMember("functionCall")) {
           const auto &fc = part["functionCall"];
           ToolCallChunk chunk;
+          chunk.index = toolCallCounter_++;
           if (fc.HasMember("name"))
             chunk.nameDelta = fc["name"].GetString();
           if (fc.HasMember("id"))
             chunk.id = fc["id"].GetString();
+          else
+            chunk.id = "gemini_call_" + std::to_string(chunk.index);
           if (fc.HasMember("args")) {
             rapidjson::StringBuffer sb;
             rapidjson::Writer<rapidjson::StringBuffer> writer(sb);
@@ -818,13 +821,38 @@ void AntigravityProvider::processSSELine(
 void AntigravityProvider::stream(
     const AgentHistory &history, const ProviderOptions &opts,
     std::function<void(const StreamEvent &)> onEvent) {
-  // Refresh quotas to ensure we have up-to-date information for account selection
-  refreshQuotas();
-  
+  toolCallCounter_ = 0;
   std::string requestedModel =
       opts.modelId.empty() ? "gemini-3-flash" : opts.modelId;
   std::string resolvedModel =
       normalizeAntigravityModelId(requestedModel, opts.modelVariantJson);
+
+  // Check if ALL accounts have quota metadata and ALL are exhausted for this
+  // model
+  {
+    bool hasAnyQuotaData = false;
+    bool hasAnyQuotaRemaining = false;
+    for (const auto &acc : accounts_) {
+      for (const auto &[key, val] : acc.metadata) {
+        if (key.rfind("quota:", 0) == 0) {
+          hasAnyQuotaData = true;
+          break;
+        }
+      }
+      if (accountHasQuota(acc, resolvedModel)) {
+        hasAnyQuotaRemaining = true;
+        break;
+      }
+    }
+
+    if (hasAnyQuotaData && !hasAnyQuotaRemaining) {
+      onEvent(StreamError{
+          "Quota exhausted for model '" + requestedModel +
+              "' across all accounts. Please wait for quota reset.",
+          429, ""});
+      return;
+    }
+  }
 
   // Find all accounts with quota for this model
   std::vector<std::string> qualifiedAccounts;

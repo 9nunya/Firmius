@@ -59,6 +59,7 @@ class MockAgent : public IAgent {
 public:
   firmius::shared::AgentContext defaultCtx;
   std::unique_ptr<AgentPermissionChecks> pChecks;
+  MOCK_METHOD(void, saveHistory, (), (override));
   MockAgent() {
     pChecks = std::make_unique<AgentPermissionChecks>(defaultCtx);
     ON_CALL(*this, hasReadFile(_))

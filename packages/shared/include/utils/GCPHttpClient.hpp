@@ -19,6 +19,7 @@ public:
         long code = 0;
         std::string body;
         std::string error;
+        std::map<std::string, std::string> headers;
     };
 
     explicit GCPHttpClient(std::string userAgent = "antigravity/1.18.3 linux/x86_64");

@@ -20,24 +20,29 @@ namespace firmius::tui {
 using firmius::shared::SummarizeToolCall;
 using firmius::shared::TailLines;
 
+static bool isMatch(const std::string &actual, const std::string &expected) {
+  if (actual.empty() || expected.empty()) return false;
+  return actual.find(expected) != std::string::npos;
+}
+
 ftxui::Component ToolBlock(const std::shared_ptr<ToolCallView> &view,
-                           HistoryGetter sub_history_getter,
-                           StreamGetter sub_stream_getter) {
-  if (view) {
-    if (view->name == "list_directory") {
-      return ListDirectoryToolBlock(view);
-    } else if (view->name == "file_read") {
-      return FileReadToolBlock(view);
-    } else if (view->name == "file_edit") {
-      return FileEditToolBlock(view);
-    } else if (view->name == "process_execute" ||
-               view->name == "process_spawn") {
-      return ProcessExecuteToolBlock(view);
-    } else if (view->name == "summon_subagent") {
-      return SubagentToolBlock(view, sub_history_getter, sub_stream_getter);
-    } else if (view->name == "subagent_wait") {
-      return SubagentWaitToolBlock(view);
-    }
+                           HistoryGetter history_getter,
+                           StreamGetter stream_getter) {
+  if (!view)
+    return ftxui::Renderer([] { return ftxui::text("Missing tool view"); });
+
+  if (isMatch(view->name, "list_directory")) {
+    return ListDirectoryToolBlock(view);
+  } else if (isMatch(view->name, "file_read")) {
+    return FileReadToolBlock(view);
+  } else if (isMatch(view->name, "file_edit")) {
+    return FileEditToolBlock(view);
+  } else if (isMatch(view->name, "process_execute") || isMatch(view->name, "process_spawn")) {
+    return ProcessExecuteToolBlock(view);
+  } else if (isMatch(view->name, "summon_subagent")) {
+    return SubagentToolBlock(view, history_getter, stream_getter);
+  } else if (isMatch(view->name, "subagent_wait")) {
+    return SubagentWaitToolBlock(view);
   }
 
   // Generic fallback for unhandled tools
@@ -113,7 +118,7 @@ ftxui::Component ToolBlock(const std::shared_ptr<ToolCallView> &view,
       std::string success_summary;
       std::string result_info;
       
-      if (view->name == "grep" || view->name == "glob") {
+      if (isMatch(view->name, "grep") || isMatch(view->name, "glob")) {
         rapidjson::Document doc;
         doc.Parse(view->result.c_str());
         size_t match_count = 0;
@@ -122,7 +127,7 @@ ftxui::Component ToolBlock(const std::shared_ptr<ToolCallView> &view,
         }
         result_info = " (" + std::to_string(match_count) + " matches)";
         
-        if (view->name == "grep") {
+        if (isMatch(view->name, "grep")) {
           rapidjson::Document argsDoc;
           argsDoc.Parse(view->args.c_str());
           std::string pattern = "";
@@ -162,7 +167,7 @@ ftxui::Component ToolBlock(const std::shared_ptr<ToolCallView> &view,
 
       // Expandable result with pretty formatting for grep/glob
       if (view->show_result && !view->result.empty()) {
-        if (view->name == "grep" || view->name == "glob") {
+        if (isMatch(view->name, "grep") || isMatch(view->name, "glob")) {
           // Pretty print grep/glob results
           rapidjson::Document doc;
           doc.Parse(view->result.c_str());
@@ -221,7 +226,7 @@ ftxui::Component ToolBlock(const std::shared_ptr<ToolCallView> &view,
     using namespace firmius::shared;
     // Build a better error summary that includes tool name and key args
     std::string error_summary;
-    if (view->name == "grep") {
+    if (isMatch(view->name, "grep")) {
       rapidjson::Document doc;
       doc.Parse(view->args.c_str());
       std::string pattern = "";
@@ -230,7 +235,7 @@ ftxui::Component ToolBlock(const std::shared_ptr<ToolCallView> &view,
         pattern = doc["pattern"].GetString();
       }
       error_summary = "grep \"" + firstWords(pattern, 2) + "\"";
-    } else if (view->name == "glob") {
+    } else if (isMatch(view->name, "glob")) {
       rapidjson::Document doc;
       doc.Parse(view->args.c_str());
       std::string pattern = "";

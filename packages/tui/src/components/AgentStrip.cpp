@@ -118,15 +118,19 @@ public:
 
       // Build hierarchy prefix with simple indentation indicators
       std::string tree_prefix;
-      for (int d = 0; d < item.hierarchy_depth; ++d) {
-        tree_prefix += "› ";
+      if (item.hierarchy_depth > 0) {
+        for (int d = 0; d < item.hierarchy_depth; ++d) {
+          tree_prefix += "› ";
+        }
       }
-      auto tree_el = ftxui::text(tree_prefix) | ftxui::color(theme.base.dim);
+      
+      ftxui::Color slug_bg = theme.agent_strip.pills.slug_bg;
+      ftxui::Color slug_fg = theme.agent_strip.pills.slug_fg;
+
+      auto tree_el = ftxui::text(tree_prefix) | ftxui::color(theme.base.dim) | ftxui::bgcolor(slug_bg);
 
       if (wide_mode) {
         // [Slug] > [Purpose] > [Model]
-        ftxui::Color slug_bg = theme.agent_strip.pills.slug_bg;
-        ftxui::Color slug_fg = theme.agent_strip.pills.slug_fg;
         ftxui::Color purp_bg = theme.agent_strip.pills.purpose_bg;
         ftxui::Color purp_fg = theme.agent_strip.pills.purpose_fg;
         ftxui::Color mod_bg = theme.agent_strip.pills.model_bg;
@@ -135,12 +139,29 @@ public:
         auto slug_el =
             ftxui::text(" " + item.title + " ") |
             ftxui::bold | ftxui::color(slug_fg) | ftxui::bgcolor(slug_bg);
-        auto sep1 = ftxui::text(firmius::shared::PL_LEFT_SEP) |
-                    ftxui::color(slug_bg) | ftxui::bgcolor(purp_bg);
-        auto purp_el = ftxui::text(" " + item.purpose + " ") |
-                       ftxui::color(purp_fg) | ftxui::bgcolor(purp_bg);
-        auto sep2 = ftxui::text(firmius::shared::PL_LEFT_SEP) |
-                    ftxui::color(purp_bg) | ftxui::bgcolor(mod_bg);
+        
+        ftxui::Elements wide_elements;
+        wide_elements.push_back(tree_el);
+        wide_elements.push_back(icon_el | ftxui::bgcolor(slug_bg));
+        wide_elements.push_back(slug_el);
+
+        if (!item.purpose.empty()) {
+          auto sep1 = ftxui::text(firmius::shared::PL_LEFT_SEP) |
+                      ftxui::color(slug_bg) | ftxui::bgcolor(purp_bg);
+          auto purp_el = ftxui::text(" " + item.purpose + " ") |
+                         ftxui::color(purp_fg) | ftxui::bgcolor(purp_bg);
+          auto sep2 = ftxui::text(firmius::shared::PL_LEFT_SEP) |
+                      ftxui::color(purp_bg) | ftxui::bgcolor(mod_bg);
+
+          wide_elements.push_back(sep1);
+          wide_elements.push_back(purp_el);
+          wide_elements.push_back(sep2);
+        } else {
+          auto sep_skip = ftxui::text(firmius::shared::PL_LEFT_SEP) |
+                          ftxui::color(slug_bg) | ftxui::bgcolor(mod_bg);
+          wide_elements.push_back(sep_skip);
+        }
+
         auto mod_el =
             ftxui::text(" " +
                         firmius::shared::PrettifyModelName(item.model_name) +
@@ -149,9 +170,10 @@ public:
         auto sep3 = ftxui::text(firmius::shared::PL_LEFT_SEP) |
                     ftxui::color(mod_bg) | ftxui::bgcolor(row_bg);
 
-        ftxui::Element wide_content =
-            ftxui::hbox({tree_el, icon_el | ftxui::bgcolor(slug_bg), slug_el, sep1,
-                         purp_el, sep2, mod_el, sep3});
+        wide_elements.push_back(mod_el);
+        wide_elements.push_back(sep3);
+
+        ftxui::Element wide_content = ftxui::hbox(std::move(wide_elements));
 
         if (item.is_busy) {
           auto it = glint_cache_.find(item.id + "_wide");
@@ -176,7 +198,9 @@ public:
           title_el = ftxui::text(item.title) | ftxui::bold |
                      ftxui::color(theme.agent_strip.pills.slug_fg);
         }
-        name_area = ftxui::hbox({tree_el, icon_el, title_el});
+        name_area = ftxui::hbox({tree_el | ftxui::bgcolor(row_bg),
+                                 icon_el | ftxui::bgcolor(row_bg),
+                                 title_el | ftxui::bgcolor(row_bg)});
       }
 
       // --- 2. State Pill ---

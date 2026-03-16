@@ -6,6 +6,7 @@
 #include "components/Markdown.hpp"
 #include "components/ScrollableBox.hpp"
 #include "components/ToolBlock.hpp"
+#include "utils/ToolSummaries.hpp"
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/component_base.hpp>
 #include <ftxui/dom/elements.hpp>
@@ -165,6 +166,62 @@ private:
         if (t.messages.empty() || isSystemTurn(t))
           continue;
 
+        bool isCompactionSummary = (t.turnId.rfind("compaction-summary-", 0) == 0);
+        if (isCompactionSummary) {
+          auto full_width_separator = [](const std::string &label) {
+            int width = ftxui::Terminal::Size().dimx;
+            std::string label_text = " " + label + " ";
+            if (width <= static_cast<int>(label_text.size())) {
+              return ftxui::text(label_text) | ftxui::dim | ftxui::center |
+                     ftxui::flex;
+            }
+            int left = (width - static_cast<int>(label_text.size())) / 2;
+            int right = width - static_cast<int>(label_text.size()) - left;
+            std::string line =
+                std::string(left, '-') + label_text + std::string(right, '-');
+            return ftxui::text(line) | ftxui::dim | ftxui::flex;
+          };
+          auto compaction_separator = [full_width_separator]() {
+            return full_width_separator("Compaction");
+          };
+          auto compaction_separator_bottom = [full_width_separator]() {
+            return full_width_separator("Compaction Complete");
+          };
+          auto decorateCompactionMsg = [](const ftxui::Element &content) {
+            return ftxui::hbox({ftxui::text("* ") | ftxui::bold |
+                                    ftxui::color(ftxui::Color::Yellow),
+                                content | ftxui::flex}) |
+                   ftxui::flex;
+          };
+
+          rows_.push_back(ftxui::Make<RowComponent>(nullptr, [compaction_separator]() {
+            return compaction_separator();
+          }));
+
+          for (const auto &msg : t.messages) {
+            for (const auto &part : msg.content) {
+              if (auto *txt = std::get_if<firmius::shared::TextContent>(&part)) {
+                std::string text = txt->text;
+                rows_.push_back(ftxui::Make<RowComponent>(
+                    nullptr, [decorateCompactionMsg, text = std::move(text)] {
+                      return decorateCompactionMsg(firmius::tui::RenderMarkdown(text));
+                    }));
+              } else if (auto *thk = std::get_if<firmius::shared::ThinkingContent>(&part)) {
+                std::string thinking = thk->thinking;
+                rows_.push_back(ftxui::Make<RowComponent>(
+                    nullptr, [decorateCompactionMsg, thinking = std::move(thinking)] {
+                      return decorateCompactionMsg(firmius::tui::RenderMarkdown(thinking, true));
+                    }));
+              }
+            }
+          }
+
+          rows_.push_back(ftxui::Make<RowComponent>(nullptr, [compaction_separator_bottom]() {
+            return compaction_separator_bottom();
+          }));
+          continue;
+        }
+
         for (const auto &msg : t.messages) {
           const auto &theme =
               firmius::tui::ThemeManager::instance().getCurrentTheme();
@@ -210,7 +267,8 @@ private:
               view->toolCallId = tc->id;
               view->name = tc->name;
               view->args = tc->args;
-              if (view->phase != firmius::tui::ToolPhase::Finished)
+              if (view->phase != firmius::tui::ToolPhase::Finished &&
+                  view->phase != firmius::tui::ToolPhase::Error)
                 view->phase = firmius::tui::ToolPhase::Called;
               seen_tool_call[tc->id] = true;
 
@@ -230,7 +288,8 @@ private:
               view->toolCallId = tr->toolCallId;
               view->result = tr->result;
               view->success = tr->success;
-              view->phase = firmius::tui::ToolPhase::Finished;
+              view->phase = tr->success ? firmius::tui::ToolPhase::Finished
+                                        : firmius::tui::ToolPhase::Error;
 
               if (!seen_tool_call[tr->toolCallId]) {
                 auto block = firmius::tui::ToolBlock(view);

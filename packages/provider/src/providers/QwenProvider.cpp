@@ -768,6 +768,11 @@ void QwenProvider::refreshQuotas() {
     // Clear any stale rate-limiting from previous sessions
     if (acc.rateLimited && now > acc.backoffUntil) {
       acc.rateLimited = false;
+      for (auto &[k, v] : acc.metadata) {
+        if (k.rfind("quota:", 0) == 0 && v == "0") {
+          v = "1";
+        }
+      }
       needsSave = true;
     }
     acc.backoffUntil = 0;
@@ -1162,9 +1167,11 @@ bool QwenProvider::executeStreamRequest(
   std::string body = buffer.GetString();
 
   // Make HTTP request
-  firmius::utils::GCPHttpClient client;
+  firmius::utils::GCPHttpClient client("QwenCode/0.12.0 (linux; x64)");
   client.setBearerToken(acc.accessToken);
   client.setContentType("application/json");
+  client.addHeader("X-DashScope-AuthType", "qwen-oauth");
+  client.addHeader("X-DashScope-CacheControl", "enable");
 
   std::uint64_t startMs = nowMs();
   std::uint64_t firstTokenMs = 0;
@@ -1227,15 +1234,27 @@ bool QwenProvider::executeStreamRequest(
         nowSeconds() + firmius::shared::BackoffConstants::MAX_BACKOFF;
     onEvent(StreamError{"Authentication failed. Token may be expired.",
                         static_cast<int>(resp.code), acc.getIdentifier()});
-  } else if (resp.code == 429 ||
+  } else if (resp.code == 429 || resp.code == 1302 || resp.code == 1305 ||
              (resp.code == 400 &&
-              errMsg.find("insufficient_quota") != std::string::npos)) {
+              (errMsg.find("insufficient_quota") != std::string::npos ||
+               errMsg.find("free allocated quota exceeded") != std::string::npos ||
+               errMsg.find("quota exceeded") != std::string::npos))) {
     // Rate limited or quota exhausted - IMMEDIATE account switch
-    // Qwen has no real quota API, so we don't mark quotas as 0
-    // Just rely on retry/account switching logic
+    acc.metadata["quota:" + modelId] = "0";
+    
+    int backoff = firmius::shared::BackoffConstants::getBackoffSeconds(0);
+    if (resp.headers.count("retry-after")) {
+      try {
+        backoff = std::stoi(resp.headers.at("retry-after"));
+      } catch (...) {}
+    }
+    
+    acc.rateLimited = true;
+    acc.backoffUntil = nowSeconds() + backoff;
+    saveAccounts();
 
     std::string quotaError =
-        "Quota exhausted (2k/day free limit). Switching to next account...";
+        "Quota exhausted or rate limited. Switching to next account...";
     onEvent(StreamError{quotaError, static_cast<int>(resp.code),
                         acc.getIdentifier()});
   } else if (resp.code >= 500 || resp.code == 0) {
@@ -1256,10 +1275,6 @@ bool QwenProvider::executeStreamRequest(
 void QwenProvider::stream(const AgentHistory &history,
                           const ProviderOptions &opts,
                           std::function<void(const StreamEvent &)> onEvent) {
-  // Refresh quotas first to reset any stale quota="0" markers
-  // Since Qwen has no dynamic quota API, we assume 100% available
-  refreshQuotas();
-
   // Retry schedule: 1s -> 2s -> 3s -> 4s -> 5s (fail fast, switch accounts)
   static const int retryDelays[] = {1, 2, 3, 4, 5};
   static const int numRetries = sizeof(retryDelays) / sizeof(retryDelays[0]);

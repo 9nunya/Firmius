@@ -202,9 +202,13 @@ void TuiState::init(firmius::core::Harness &harness,
   agent_strip_model_->on_item_click = [this](const std::string& agent_id) {
     if (harness_ && harness_->setFocusedAgent(agent_id)) {
       focused_agent_id_ = agent_id;
-      history_ = harness_->getAgentHistoryPtr(agent_id);
+      if (history_) {
+        *history_ = harness_->getAgentHistory(agent_id);
+      } else {
+        history_ = harness_->getAgentHistoryPtr(agent_id);
+      }
       if (chat_component_) {
-        chat_component_->OnEvent(ftxui::Event::Special("AgentFocused"));
+        chat_component_->OnEvent(ftxui::Event::Special("ThreadChanged"));
       }
       updateAgentStripModel();
       updateStatusModel();
@@ -396,12 +400,28 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
           }
         } else if constexpr (std::is_same_v<T, AgentAccountSwitched>) {
           stream_state_.handleAgentAccountSwitched(e);
+          NotificationManager::instance().notifyInfo(
+              "Account Switch", "Switched to " + e.accountLocator,
+              std::chrono::milliseconds(4000));
         } else if constexpr (std::is_same_v<T, AgentError>) {
           // Errors are handled persistently via ChatWindow history rendering
         } else if constexpr (std::is_same_v<T, AgentRetrying>) {
           stream_state_.handleAgentRetrying(e);
+          std::string retryMsg = "Attempt " + std::to_string(e.attempt) + "/" +
+                                 std::to_string(e.maxAttempts);
+          if (!e.reason.empty())
+            retryMsg += " - " + e.reason;
+          if (e.delayMs > 0)
+            retryMsg += " (~" + std::to_string(e.delayMs / 1000) + "s)";
+          NotificationManager::instance().notifyWarning(
+              "Retrying", retryMsg,
+              std::chrono::milliseconds(std::max(e.delayMs, 3000)));
         } else if constexpr (std::is_same_v<T, AgentRetryFailed>) {
           stream_state_.handleAgentRetryFailed(e);
+          NotificationManager::instance().notifyError(
+              "Retry Failed",
+              e.reason.empty() ? "All retry attempts exhausted" : e.reason,
+              false);
         } else if constexpr (std::is_same_v<T, AgentCompleted>) {
           stream_state_.handleAgentCompleted(e);
         } else if constexpr (std::is_same_v<T, ThreadTitleUpdated>) {
@@ -555,7 +575,7 @@ void TuiState::updateAgentStripModel() {
     if (!stream_title.empty())
       display_title = stream_title;
     item.title = display_title;
-    item.purpose = ctx.identity.role;
+    item.purpose = resolvePersonaTitle(ctx.config.personaName);
     item.model_name = ctx.config.modelId; // Use modelId directly,
                                           // PrettifyModelName handles prefixes
     item.status_text = statusToString(ctx.state.currentStatus);
@@ -799,9 +819,6 @@ ftxui::Component TuiState::root() {
                   firmius::tui::RenderMarkdown(s->compaction_text)));
             }
           }
-          if (s->compaction_finished) {
-            live_rows.push_back(compaction_separator());
-          }
 
           // Show thinking content immediately (for reasoning models)
           if (!s->thinking.empty()) {
@@ -866,27 +883,6 @@ ftxui::Component TuiState::root() {
           }
         }
 
-        auto renderTransientError = [](const std::string &prefix,
-                                       const std::string &msg,
-                                       ftxui::Color color) {
-          return ftxui::hbox(
-                     {ftxui::text(prefix) | ftxui::bold | ftxui::color(color),
-                      ftxui::paragraph(msg) | ftxui::color(color) |
-                          ftxui::flex}) |
-                 ftxui::flex;
-        };
-
-        const auto &swaps = stream_state_.getAccountSwaps();
-        for (const auto &swap : swaps) {
-          live_rows.push_back(
-              renderTransientError("! ", swap, ftxui::Color::YellowLight));
-        }
-
-        const auto &retry = stream_state_.getRetryStatus();
-        if (!retry.empty()) {
-          live_rows.push_back(
-              renderTransientError("! ", retry, ftxui::Color::RedLight));
-        }
 
         const auto &queued = stream_state_.getQueuedMessages();
         if (!queued.empty()) {

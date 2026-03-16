@@ -8,6 +8,9 @@
 #include <string>
 #include <mutex>
 #include <vector>
+#include <thread>
+#include <atomic>
+#include <condition_variable>
 
 namespace firmius::provider {
 
@@ -16,7 +19,7 @@ using namespace firmius::shared;
 class BaseOAuthProvider : public IProvider {
 public:
   explicit BaseOAuthProvider(std::string providerId);
-  virtual ~BaseOAuthProvider() = default;
+  virtual ~BaseOAuthProvider();
 
   // ------------------------------------------------------------------------
   // IProvider interface overrides
@@ -75,6 +78,14 @@ protected:
   std::vector<OAuthAccount> accounts_;
   mutable std::recursive_mutex accountsMutex_;
   int lastUsedIndex_ = -1;
+
+  std::thread quotaRefreshThread_;
+  std::atomic<bool> stopQuotaRefresh_{false};
+  std::mutex quotaRefreshMutex_;
+  std::condition_variable quotaRefreshCv_;
+
+  void startBackgroundQuotaRefresh();
+  void stopBackgroundQuotaRefresh();
 
   bool isTokenExpired(const OAuthAccount &acc) const;
   void markAccountRateLimited(OAuthAccount &acc, int backoffSeconds);

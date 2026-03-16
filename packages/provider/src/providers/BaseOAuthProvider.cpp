@@ -36,6 +36,41 @@ int64_t getNowSeconds() {
 BaseOAuthProvider::BaseOAuthProvider(std::string providerId)
     : providerId_(std::move(providerId)) {
   loadAccounts();
+  startBackgroundQuotaRefresh();
+}
+
+BaseOAuthProvider::~BaseOAuthProvider() { stopBackgroundQuotaRefresh(); }
+
+void BaseOAuthProvider::startBackgroundQuotaRefresh() {
+  stopQuotaRefresh_ = false;
+  quotaRefreshThread_ = std::thread([this]() {
+    try {
+      refreshQuotas();
+    } catch (...) {
+    }
+
+    while (!stopQuotaRefresh_) {
+      std::unique_lock<std::mutex> lock(quotaRefreshMutex_);
+      if (quotaRefreshCv_.wait_for(lock, std::chrono::minutes(30), [this] {
+            return stopQuotaRefresh_.load();
+          })) {
+        break;
+      }
+
+      try {
+        refreshQuotas();
+      } catch (...) {
+      }
+    }
+  });
+}
+
+void BaseOAuthProvider::stopBackgroundQuotaRefresh() {
+  stopQuotaRefresh_ = true;
+  quotaRefreshCv_.notify_all();
+  if (quotaRefreshThread_.joinable()) {
+    quotaRefreshThread_.join();
+  }
 }
 
 std::string BaseOAuthProvider::getId() const { return providerId_; }
@@ -127,7 +162,11 @@ void BaseOAuthProvider::loadAccounts() {
   if (doc.HasParseError() || !doc.IsObject())
     return;
 
-  if (doc.HasMember("lastUsedIndex") && doc["lastUsedIndex"].IsInt()) {
+  std::string luiKey = "lastUsedIndex_" + providerId_;
+  if (doc.HasMember(luiKey.c_str()) && doc[luiKey.c_str()].IsInt()) {
+    lastUsedIndex_ = doc[luiKey.c_str()].GetInt();
+  } else if (doc.HasMember("lastUsedIndex") && doc["lastUsedIndex"].IsInt()) {
+    // Migration: read old global key as fallback
     lastUsedIndex_ = doc["lastUsedIndex"].GetInt();
   }
 
@@ -259,10 +298,18 @@ void BaseOAuthProvider::saveAccounts() {
   doc.AddMember(rapidjson::Value(providerId_.c_str(), doc.GetAllocator()), arr,
                 doc.GetAllocator());
 
+  std::string luiKey = "lastUsedIndex_" + providerId_;
+  if (doc.HasMember(luiKey.c_str())) {
+    doc.RemoveMember(luiKey.c_str());
+  }
+  {
+    rapidjson::Value name(luiKey.c_str(), doc.GetAllocator());
+    doc.AddMember(name, lastUsedIndex_, doc.GetAllocator());
+  }
+  // Also clean up old global key if present
   if (doc.HasMember("lastUsedIndex")) {
     doc.RemoveMember("lastUsedIndex");
   }
-  doc.AddMember("lastUsedIndex", lastUsedIndex_, doc.GetAllocator());
 
   rapidjson::StringBuffer buffer;
   rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);

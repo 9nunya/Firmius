@@ -458,6 +458,7 @@ bool containsUsageLimit(const std::string &text) {
   return lower.find("usage_limit") != std::string::npos ||
          lower.find("usage limit") != std::string::npos ||
          lower.find("rate_limit_exceeded") != std::string::npos ||
+         lower.find("insufficient_quota") != std::string::npos ||
          lower.find("usage_not_included") != std::string::npos;
 }
 
@@ -988,7 +989,6 @@ bool CodexProvider::refreshAccessToken(OAuthAccount &acc) {
 void CodexProvider::refreshQuotas() {
   std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
   
-  // Don't save if no accounts loaded - prevents overwriting with empty array
   if (accounts_.empty()) {
     return;
   }
@@ -998,10 +998,9 @@ void CodexProvider::refreshQuotas() {
     if (now - acc.lastQuotaRefresh >= kQuotaRefreshSeconds) {
       if (isTokenExpired(acc))
         refreshAccessToken(acc);
-      acc.lastQuotaRefresh = now;
+      fetchAndStoreQuotas(acc);
     }
   }
-  saveAccounts();
 }
 
 std::map<std::string, std::vector<QuotaBucket>>
@@ -1295,6 +1294,72 @@ void CodexProvider::processSseLine(
   }
 }
 
+void CodexProvider::fetchAndStoreQuotas(OAuthAccount &acc) {
+  std::string accountId;
+  if (acc.metadata.count("chatgpt_account_id"))
+    accountId = acc.metadata["chatgpt_account_id"];
+  if (accountId.empty()) {
+    auto extracted = extractAccountIdFromJwt(acc.accessToken);
+    if (extracted.has_value()) {
+      accountId = extracted.value();
+      acc.metadata["chatgpt_account_id"] = accountId;
+    }
+  }
+  if (accountId.empty())
+    return;
+
+  GCPHttpClient client("firmius-codex/1.0");
+  client.setBearerToken(acc.accessToken);
+  client.addHeader("OpenAI-Beta", kBetaHeaderValue);
+  client.addHeader("originator", kOriginator);
+  client.addHeader("chatgpt-account-id", accountId);
+
+  auto resp = client.get(std::string(kBaseUrl) + "/wham/usage", 10);
+  if (resp.code == 200) {
+    rapidjson::Document doc;
+    doc.Parse(resp.body.c_str());
+    if (!doc.HasParseError() && doc.IsObject()) {
+      if (doc.HasMember("rate_limit") && doc["rate_limit"].IsObject()) {
+        const auto &rl = doc["rate_limit"];
+        if (rl.HasMember("primary_window") && rl["primary_window"].IsObject()) {
+          const auto &pw = rl["primary_window"];
+          if (pw.HasMember("used_percent") && pw["used_percent"].IsNumber()) {
+            float used = static_cast<float>(pw["used_percent"].GetDouble());
+            acc.metadata["quota:codex"] = std::to_string(1.0f - (used / 100.0f));
+          }
+          if (pw.HasMember("reset_at") && pw["reset_at"].IsInt64()) {
+            acc.metadata["quota_reset:codex"] = std::to_string(pw["reset_at"].GetInt64());
+          }
+        }
+      }
+      
+      if (doc.HasMember("additional_rate_limits") && doc["additional_rate_limits"].IsArray()) {
+        const auto &arls = doc["additional_rate_limits"];
+        for (rapidjson::SizeType i = 0; i < arls.Size(); ++i) {
+          const auto &arl = arls[i];
+          if (arl.HasMember("limit_name") && arl["limit_name"].IsString() &&
+              arl.HasMember("rate_limit") && arl["rate_limit"].IsObject()) {
+            std::string name = arl["limit_name"].GetString();
+            const auto &rl = arl["rate_limit"];
+            if (rl.HasMember("primary_window") && rl["primary_window"].IsObject()) {
+              const auto &pw = rl["primary_window"];
+              if (pw.HasMember("used_percent") && pw["used_percent"].IsNumber()) {
+                float used = static_cast<float>(pw["used_percent"].GetDouble());
+                acc.metadata["quota:" + name] = std::to_string(1.0f - (used / 100.0f));
+              }
+              if (pw.HasMember("reset_at") && pw["reset_at"].IsInt64()) {
+                acc.metadata["quota_reset:" + name] = std::to_string(pw["reset_at"].GetInt64());
+              }
+            }
+          }
+        }
+      }
+      acc.lastQuotaRefresh = nowSeconds();
+      saveAccounts();
+    }
+  }
+}
+
 void CodexProvider::stream(const AgentHistory &history,
                            const ProviderOptions &opts,
                            std::function<void(const StreamEvent &)> onEvent) {
@@ -1490,7 +1555,32 @@ void CodexProvider::stream(const AgentHistory &history,
         if (!doneReceived) {
           onEvent(StreamDone{StopReason::Stop});
         }
-        acc.metadata["quota:" + getQuotaKey(effectiveModel)] = "1";
+        
+        if (resp.headers.count("x-codex-primary-used-percent")) {
+          try {
+            float used = std::stof(resp.headers.at("x-codex-primary-used-percent"));
+            acc.metadata["quota:codex"] = std::to_string(1.0f - (used / 100.0f));
+          } catch (...) {}
+        }
+        if (resp.headers.count("x-codex-primary-reset-at")) {
+          acc.metadata["quota_reset:codex"] = resp.headers.at("x-codex-primary-reset-at");
+        }
+        
+        std::string quotaKey = getQuotaKey(effectiveModel);
+        if (resp.headers.count("x-" + quotaKey + "-primary-used-percent")) {
+          try {
+            float used = std::stof(resp.headers.at("x-" + quotaKey + "-primary-used-percent"));
+            acc.metadata["quota:" + quotaKey] = std::to_string(1.0f - (used / 100.0f));
+          } catch (...) {}
+        }
+        if (resp.headers.count("x-" + quotaKey + "-primary-reset-at")) {
+          acc.metadata["quota_reset:" + quotaKey] = resp.headers.at("x-" + quotaKey + "-primary-reset-at");
+        }
+
+        if (acc.metadata.find("quota:" + quotaKey) == acc.metadata.end()) {
+          acc.metadata["quota:" + quotaKey] = "1";
+        }
+        
         saveAccounts();
         return;
       }
@@ -1504,6 +1594,11 @@ void CodexProvider::stream(const AgentHistory &history,
 
       if (code == 402 || code == 429) {
         acc.metadata["quota:" + getQuotaKey(effectiveModel)] = "0";
+        if (resp.headers.count("retry-after")) {
+          try {
+            backoff = std::stoi(resp.headers.at("retry-after"));
+          } catch (...) {}
+        }
         saveAccounts();
         markAccountRateLimited(acc, backoff);
         break;

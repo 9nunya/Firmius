@@ -752,7 +752,7 @@ void Agent::executeTools(const std::vector<ToolCallChunk> &chunks,
           if (result.success) {
             resultStr = result.data;
           } else {
-            resultStr = "Error: " + result.error;
+            resultStr = result.error;
           }
 
           return {resultStr, result.success, result.processId,
@@ -822,6 +822,12 @@ void Agent::executeTools(const std::vector<ToolCallChunk> &chunks,
                              context.identity.parentId});
 }
 
+void Agent::saveHistory() {
+  if (context.config.persistHistory && journaler) {
+    journaler->rewriteJournal(context.history->turns);
+  }
+}
+
 void Agent::compactContext(
     std::function<void(const shared::StreamEvent &)> onEvent) {
   context.state.currentStatus = AgentStatus::Compacting;
@@ -885,8 +891,38 @@ void Agent::compactContext(
     return;
   }
 
+  AgentHistory historyToSummarize;
+  historyToSummarize.threadId = context.history->threadId;
+  
+  std::vector<AgentTurn> preservedTurns;
+  if (!context.history->turns.empty()) {
+    preservedTurns.push_back(context.history->turns.front());
+  }
+
+  AgentTurn preservedLastTurn;
+  bool hasPreservedLastTurn = false;
+  if (context.history->turns.size() > 1) {
+    auto& last = context.history->turns.back();
+    if (last.messages.size() == 1 && last.messages[0].role == Role::User && last.turnId.find("user-task-") == 0) {
+      preservedLastTurn = last;
+      hasPreservedLastTurn = true;
+    }
+  }
+
+  for (size_t i = 1; i < context.history->turns.size(); ++i) {
+    if (hasPreservedLastTurn && i == context.history->turns.size() - 1) {
+      break;
+    }
+    historyToSummarize.turns.push_back(context.history->turns[i]);
+  }
+
+  if (historyToSummarize.turns.empty()) {
+    context.state.currentStatus = AgentStatus::Idle;
+    return;
+  }
+
   provider->generateSummary(
-      context.config.modelId, *context.history, fullCompactionPrompt,
+      context.config.modelId, historyToSummarize, fullCompactionPrompt,
       [&](const StreamEvent &ev) {
         if (interrupted.load()) {
           context.state.currentStatus = AgentStatus::Cancelled;
@@ -916,18 +952,11 @@ void Agent::compactContext(
 
   uint32_t oldTokens = context.aggregateMetrics.tokens.contextSize;
 
-  // Preserve Pinned Turns (0 and 1)
-  std::vector<AgentTurn> pinned;
-  if (context.history->turns.size() >= 2) {
-    pinned.push_back(context.history->turns[0]);
-    pinned.push_back(context.history->turns[1]);
-  } else {
-    pinned = context.history->turns;
+  // Rebuild history array
+  std::vector<AgentTurn> newTurns;
+  if (!preservedTurns.empty()) {
+    newTurns.push_back(preservedTurns[0]);
   }
-
-  context.history->turns.clear();
-  for (auto &t : pinned)
-    context.history->turns.push_back(t);
 
   // Create Synthetic Memory Turn
   AgentTurn summaryTurn;
@@ -942,10 +971,16 @@ void Agent::compactContext(
   summaryMsg.timestamp = nowMs();
 
   summaryTurn.messages.push_back(summaryMsg);
-  context.history->turns.push_back(summaryTurn);
+  newTurns.push_back(summaryTurn);
+
+  if (hasPreservedLastTurn) {
+    newTurns.push_back(preservedLastTurn);
+  }
+
+  context.history->turns = std::move(newTurns);
 
   if (context.config.persistHistory && journaler) {
-    journaler->appendTurn(summaryTurn);
+    journaler->rewriteJournal(context.history->turns);
   }
 
   // Reset context size to conservative estimate (system + task + summary ~1000

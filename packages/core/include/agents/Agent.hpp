@@ -77,6 +77,7 @@ public:
   }
   void compactNow(
       std::function<void(const StreamEvent &)> onEvent) override;
+  void saveHistory() override;
 
 private:
   void compactContext(std::function<void(const shared::StreamEvent &)> onEvent);
