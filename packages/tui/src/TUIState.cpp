@@ -237,6 +237,14 @@ void TuiState::replaceModalDirect(ftxui::Component modal) {
 
 void TuiState::clearModals() { modals_.clear(); }
 
+void TuiState::deferUiMutation(std::function<void()> action) {
+  if (!action) {
+    return;
+  }
+  deferred_ui_mutations_.push_back(std::move(action));
+  postEvent(ftxui::Event::Custom);
+}
+
 void TuiState::postEvent(ftxui::Event event) {
   if (screen_) {
     screen_->PostEvent(event);
@@ -1164,6 +1172,13 @@ ftxui::Component TuiState::root() {
   root_component_ = ftxui::CatchEvent(modal_renderer, [this, chat](
                                                           ftxui::Event event) {
     if (event == ftxui::Event::Custom) {
+      if (!deferred_ui_mutations_.empty()) {
+        auto deferred = std::move(deferred_ui_mutations_);
+        deferred_ui_mutations_.clear();
+        for (auto &mutation : deferred) {
+          mutation();
+        }
+      }
       drainEvents();
       return true;
     }

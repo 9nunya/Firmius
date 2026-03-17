@@ -1,7 +1,6 @@
 #include "Panic.hpp"
 #include "agents/Agent.hpp"
 #include "environment/Environment.hpp"
-#include "environment/Permissions.hpp"
 #include "hosts/LocalHost.hpp"
 #include "providers/NanoGPTProvider.hpp"
 #include "providers/ProviderRegistry.hpp"
@@ -10,6 +9,7 @@
 #include "tools/ProcessStatusTool.hpp"
 #include "tools/ProcessWaitTool.hpp"
 #include "tools/ToolRegistry.hpp"
+#include "../unit/mocks/MockPermissions.hpp"
 #include <gtest/gtest.h>
 #include <rapidjson/document.h>
 
@@ -48,7 +48,9 @@ protected:
     auto environment = std::make_shared<Environment>(
         localHost, ctx.environment.cwd,
         [](const StreamEvent & /*ev*/) {});
-    auto permissions = std::make_shared<Permissions>();
+    auto permissions = std::make_shared<firmius::test::MockPermissions>();
+    permissions->cwd_ = ctx.environment.cwd;
+    permissions->allowedPaths_ = ctx.permissions.allowedPaths;
     agent = std::make_unique<Agent>(ctx, environment, permissions, registry, nullptr);
   }
 
@@ -69,20 +71,22 @@ protected:
 };
 
 TEST_F(ProcessInteractiveTest, PythonInteraction) {
-  // 1. Spawn interactive python
-  std::string spawnData =
-      callTool("process_spawn", R"({"command": "python3 -i"})");
+  // Use a stdin-driven Python loop instead of REPL mode to avoid TTY-specific
+  // behavior while still verifying interactive process IO.
+  std::string spawnData = callTool(
+      "process_spawn",
+      R"({"command": "python3 -u -c 'import sys; exec(\"for line in sys.stdin:\\n    if line.strip() == \\\"__EXIT__\\\":\\n        break\\n    sys.stdout.write(line)\\n    sys.stdout.flush()\")'"})");
   rapidjson::Document spawnDoc;
   spawnDoc.Parse(spawnData.c_str());
   std::string pid = spawnDoc["process_id"].GetString();
   EXPECT_FALSE(pid.empty());
 
-  // 2. Send input
+  // 2. Send input.
   callTool("process_input",
            R"({"process_id": ")" + pid +
-               R"(", "input": "print('firmius_interactive_test')\n"})");
+               R"(", "input": "firmius_interactive_test\n"})");
 
-  // 3. Wait for output pattern
+  // 3. Wait for the output pattern to appear.
   std::string waitData = callTool(
       "process_wait",
       R"({"process_id": ")" + pid +
@@ -92,28 +96,18 @@ TEST_F(ProcessInteractiveTest, PythonInteraction) {
   EXPECT_TRUE(waitDoc["patternFound"].GetBool());
   EXPECT_TRUE(waitDoc["isRunning"].GetBool());
 
-  // 4. Send exit
+  // 4. Ask the script to exit.
   callTool("process_input",
-           R"({"process_id": ")" + pid + R"(", "input": "exit()\n"})");
+           R"({"process_id": ")" + pid +
+               R"(", "input": "__EXIT__\n"})");
 
-  // 5. Verify process exits
-  // Poll status a bit
-  bool exited = false;
-  for (int i = 0; i < 20; ++i) {
-    std::string statusData =
-        callTool("process_status", R"({"process_id": ")" + pid + R"("})");
-    rapidjson::Document statusDoc;
-    statusDoc.Parse(statusData.c_str());
-    std::cout << "[Poll " << i << "] Running: "
-              << (statusDoc["isRunning"].GetBool() ? "Yes" : "No")
-              << ", Stdout: " << statusDoc["stdout"].GetString() << std::endl;
-    if (!statusDoc["isRunning"].GetBool()) {
-      exited = true;
-      break;
-    }
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
-  }
-  EXPECT_TRUE(exited);
+  // 5. Verify the process exits within a bounded timeout.
+  std::string exitWaitData =
+      callTool("process_wait",
+               R"({"process_id": ")" + pid + R"(", "timeout_ms": 5000})");
+  rapidjson::Document exitWaitDoc;
+  exitWaitDoc.Parse(exitWaitData.c_str());
+  EXPECT_FALSE(exitWaitDoc["isRunning"].GetBool());
 }
 
 TEST_F(ProcessInteractiveTest, PatternWaitTimeout) {

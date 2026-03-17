@@ -48,7 +48,7 @@ ftxui::Component ConfirmationModal::create(TuiState &state) {
                              if (event == ftxui::Event::Character('y') ||
                                  event == ftxui::Event::Character('Y') ||
                                  event == ftxui::Event::Return) {
-                               state.popModalImmediate();
+                               state.popModal();
                                if (onConfirm)
                                  onConfirm();
                                return true;
@@ -56,7 +56,7 @@ ftxui::Component ConfirmationModal::create(TuiState &state) {
                              if (event == ftxui::Event::Character('n') ||
                                  event == ftxui::Event::Character('N') ||
                                  event == ftxui::Event::Escape) {
-                               state.popModalImmediate();
+                               state.popModal();
                                if (onCancel)
                                  onCancel();
                                return true;

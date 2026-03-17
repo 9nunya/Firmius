@@ -212,6 +212,7 @@ TEST(Serialization, ThreadMetadataPermissionModeRoundtrip) {
   metadata.hostIdentifier = "localhost";
   metadata.cwd = "/tmp";
   metadata.leadPersona = "firmius";
+  metadata.activePlanId = "plan-123";
   metadata.permissionMode = ThreadPermissionMode::DenyAll;
   metadata.createdAt = 123;
   metadata.lastActiveAt = 456;
@@ -239,6 +240,110 @@ TEST(Serialization, ThreadMetadataPermissionModeDefaultsToRequest) {
 
   auto metadata = threadMetadataFromJson(doc);
   EXPECT_EQ(metadata.permissionMode, ThreadPermissionMode::Request);
+  EXPECT_TRUE(metadata.activePlanId.empty());
+}
+
+TEST(Serialization, ThreadMetadataActivePlanIdBackwardCompatibleDefault) {
+  rapidjson::Document doc;
+  doc.SetObject();
+  auto &a = doc.GetAllocator();
+  doc.AddMember("threadId", "thread-legacy", a);
+  doc.AddMember("title", "Legacy", a);
+  doc.AddMember("cwd", "/tmp", a);
+  doc.AddMember("leadPersona", "firmius", a);
+  doc.AddMember("permissionMode", "Request", a);
+
+  auto metadata = threadMetadataFromJson(doc);
+  EXPECT_EQ(metadata.threadId, "thread-legacy");
+  EXPECT_TRUE(metadata.activePlanId.empty());
+}
+
+TEST(Serialization, WorkChunkRoundtrip) {
+  WorkChunk original;
+  original.id = "chunk-1";
+  original.title = "Add models";
+  original.goal = "Create persisted work chunk model";
+  original.context = "Chunk 1";
+  original.constraints = "No chunk files";
+  original.completion = "Model compiles and round-trips";
+  original.status = WorkChunkStatus::Verifying;
+  original.priority = 7;
+  original.dependsOn = {"chunk-0", "chunk-bootstrap"};
+  original.assignedAgentId = "agent-lead";
+  original.assignedRole = "implementer";
+  original.attemptCount = 2;
+  original.resultSummary = "Implemented model";
+  original.reviewSummary = "Pending review";
+  original.createdAt = 100;
+  original.updatedAt = 200;
+
+  auto doc = toJson(original);
+  auto restored = workChunkFromJson(doc);
+
+  EXPECT_EQ(original, restored);
+}
+
+TEST(Serialization, WorkChunkDefaultsForMissingFields) {
+  rapidjson::Document doc;
+  doc.SetObject();
+  auto &a = doc.GetAllocator();
+  doc.AddMember("id", "chunk-legacy", a);
+  doc.AddMember("title", "Legacy chunk", a);
+
+  auto chunk = workChunkFromJson(doc);
+  EXPECT_EQ(chunk.id, "chunk-legacy");
+  EXPECT_EQ(chunk.title, "Legacy chunk");
+  EXPECT_EQ(chunk.status, WorkChunkStatus::Draft);
+  EXPECT_EQ(chunk.priority, 0);
+  EXPECT_EQ(chunk.attemptCount, 0);
+  EXPECT_TRUE(chunk.dependsOn.empty());
+  EXPECT_TRUE(chunk.assignedAgentId.empty());
+}
+
+TEST(Serialization, PlanRoundtrip) {
+  Plan original;
+  original.id = "plan-1";
+  original.threadId = "thread-1";
+  original.title = "Work Language Migration";
+  original.objective = "Add plan persistence";
+  original.context = "Chunk 1 only";
+  original.strategy = "Models plus persistence";
+  original.status = PlanStatus::Active;
+  original.notes = "No tool APIs yet";
+  original.createdAt = 123;
+  original.updatedAt = 456;
+
+  WorkChunk chunk;
+  chunk.id = "chunk-1";
+  chunk.title = "Add core models";
+  chunk.goal = "Define Plan and WorkChunk";
+  chunk.status = WorkChunkStatus::Ready;
+  chunk.priority = 1;
+  chunk.createdAt = 124;
+  chunk.updatedAt = 125;
+  original.chunks.push_back(chunk);
+
+  auto doc = toJson(original);
+  auto restored = planFromJson(doc);
+
+  EXPECT_EQ(original, restored);
+}
+
+TEST(Serialization, PlanDefaultsForMissingFields) {
+  rapidjson::Document doc;
+  doc.SetObject();
+  auto &a = doc.GetAllocator();
+  doc.AddMember("id", "plan-legacy", a);
+  doc.AddMember("thread_id", "thread-legacy", a);
+  doc.AddMember("title", "Legacy plan", a);
+
+  auto plan = planFromJson(doc);
+  EXPECT_EQ(plan.id, "plan-legacy");
+  EXPECT_EQ(plan.threadId, "thread-legacy");
+  EXPECT_EQ(plan.title, "Legacy plan");
+  EXPECT_EQ(plan.status, PlanStatus::Draft);
+  EXPECT_EQ(plan.createdAt, 0u);
+  EXPECT_TRUE(plan.chunks.empty());
 }
 
 TEST(Serialization, StreamEventRoundtrip) {

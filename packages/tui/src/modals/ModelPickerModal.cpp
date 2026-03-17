@@ -162,7 +162,7 @@ ftxui::Component ModelPickerModal::create(TuiState &state) {
     if (*isLoading) {
       if (event == ftxui::Event::Escape) {
         firmius::core::Harness::instance().unsubscribe(subId);
-        state.popModalImmediate();
+        state.popModal();
         return true;
       }
       return false;
@@ -170,7 +170,7 @@ ftxui::Component ModelPickerModal::create(TuiState &state) {
 
     if (event == ftxui::Event::Escape) {
       firmius::core::Harness::instance().unsubscribe(subId);
-      state.popModalImmediate();
+      state.popModal();
       return true;
     }
 
@@ -183,7 +183,7 @@ ftxui::Component ModelPickerModal::create(TuiState &state) {
         firmius::core::Harness::instance().switchModel(m.provider, m.id);
       }
       firmius::core::Harness::instance().unsubscribe(subId);
-      state.popModalImmediate();
+      state.popModal();
       return true;
     }
 

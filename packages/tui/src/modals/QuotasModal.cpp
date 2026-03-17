@@ -286,7 +286,7 @@ ftxui::Component QuotasModal::create(TuiState &state) {
       [&state, isLoading, scrollable_content, collapsed,
        header_hits](ftxui::Event event) {
         if (event == ftxui::Event::Escape || event == ftxui::Event::Return) {
-          state.popModalImmediate();
+          state.popModal();
           return true;
         }
         if (event.is_mouse() &&

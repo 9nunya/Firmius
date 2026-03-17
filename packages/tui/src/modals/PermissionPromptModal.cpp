@@ -21,7 +21,7 @@ std::vector<std::string> PermissionPromptModal::getEditOptions() const {
         "No, don't allow"
     };
     if (request_.allowAlways) {
-        options.insert(options.begin() + 1, "Yes, allow always");
+        options.insert(options.begin() + 1, "Yes, always allow writes in this location");
     }
     return options;
 }
@@ -32,8 +32,7 @@ std::vector<std::string> PermissionPromptModal::getCommandOptions() const {
         "No, don't run it"
     };
     if (request_.allowAlways) {
-        options.insert(options.begin() + 1,
-                       "Yes, allow always (" + severityToString(request_.severity) + ")");
+        options.insert(options.begin() + 1, "Yes, always allow this command");
     }
     return options;
 }
@@ -105,10 +104,11 @@ ftxui::Component PermissionPromptModal::create(TuiState &state) {
     auto request = request_;
     auto onResult = onResult_;
     auto severityColor = severityToColor(request.severity);
+    auto severityLabel = severityToString(request.severity);
 
     auto radiobox = ftxui::Radiobox(options.get(), selectedOption.get());
 
-    auto component = ftxui::Renderer(radiobox, [radiobox, options, request, severityColor]() {
+    auto component = ftxui::Renderer(radiobox, [radiobox, options, request, severityColor, severityLabel]() {
         const auto &theme = ThemeManager::instance().getCurrentTheme();
 
         ftxui::Element severityIndicator;
@@ -123,29 +123,38 @@ ftxui::Component PermissionPromptModal::create(TuiState &state) {
         }
 
         std::string detail = request.command.empty() ? request.targetPath : request.command;
+        ftxui::Element severityText = ftxui::text("");
+        if (request.requestType == firmius::shared::PermissionRequestType::Command) {
+            severityText = ftxui::text("Severity: " + severityLabel)
+                | ftxui::color(severityColor) | ftxui::center;
+        }
+
+        ftxui::Elements content = {
+            severityIndicator,
+            ftxui::text(request.message) | ftxui::center | ftxui::color(theme.modals.fg),
+            ftxui::text(""),
+            severityText,
+            ftxui::text(""),
+            ftxui::paragraph(detail) | ftxui::color(theme.base.fg),
+            ftxui::text(""),
+            radiobox->Render() | ftxui::center,
+            ftxui::text(""),
+            ftxui::text("(Press Enter to confirm, Esc to cancel)")
+                | ftxui::color(theme.base.dim) | ftxui::center
+        };
 
         return FlatModalPanel(
             theme, request.title,
             ModalSection(
                 theme,
-                ftxui::vbox({
-                    severityIndicator,
-                    ftxui::text(request.message) | ftxui::center | ftxui::color(theme.modals.fg),
-                    ftxui::text(""),
-                    ftxui::paragraph(detail) | ftxui::color(theme.base.fg),
-                    ftxui::text(""),
-                    radiobox->Render() | ftxui::center,
-                    ftxui::text(""),
-                    ftxui::text("(Press Enter to confirm, Esc to cancel)")
-                        | ftxui::color(theme.base.dim) | ftxui::center
-                }),
+                ftxui::vbox(std::move(content)),
                 theme.modals.bg),
             72, 22, severityColor);
     });
 
     return ftxui::CatchEvent(component, [selectedOption, responses, onResult, &state](ftxui::Event event) {
         if (event == ftxui::Event::Return) {
-            state.popModalImmediate();
+            state.popModal();
             if (onResult) {
                 auto result = firmius::shared::PermissionResponse::Deny;
                 if (*selectedOption >= 0 &&
@@ -157,7 +166,7 @@ ftxui::Component PermissionPromptModal::create(TuiState &state) {
             return true;
         }
         if (event == ftxui::Event::Escape) {
-            state.popModalImmediate();
+            state.popModal();
             if (onResult) {
                 onResult(firmius::shared::PermissionResponse::Deny);
             }

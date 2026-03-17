@@ -10,6 +10,7 @@
 #include <fstream>
 #include <cstdlib>
 #include <cstdio>
+#include <algorithm>
 
 using namespace firmius::core;
 using namespace firmius::shared;
@@ -73,6 +74,38 @@ protected:
         turn.metrics.estimatedCostUsd = 0.001;
 
         return turn;
+    }
+
+    Plan createTestPlan(const std::string& threadId,
+                        const std::string& planId = "") {
+        Plan plan;
+        plan.id = planId;
+        plan.threadId = threadId;
+        plan.title = "Work Language Migration";
+        plan.objective = "Persist plans";
+        plan.context = "Chunk 1";
+        plan.strategy = "Shared models and thread storage";
+        plan.status = PlanStatus::Draft;
+        plan.notes = "No live events";
+
+        WorkChunk chunk;
+        chunk.id = "chunk-1";
+        chunk.title = "Add models";
+        chunk.goal = "Create plan types";
+        chunk.context = "Shared contracts";
+        chunk.constraints = "Chunk 1 only";
+        chunk.completion = "Compile and persist";
+        chunk.status = WorkChunkStatus::Ready;
+        chunk.priority = 10;
+        chunk.dependsOn = {"bootstrap"};
+        chunk.assignedAgentId = "lead";
+        chunk.assignedRole = "implementer";
+        chunk.attemptCount = 1;
+        chunk.resultSummary = "In progress";
+        chunk.reviewSummary = "";
+        plan.chunks.push_back(chunk);
+
+        return plan;
     }
 };
 
@@ -185,6 +218,114 @@ TEST_F(ThreadManagerTest, updateMetadata_persistsPermissionMode) {
 
     auto updated = tm->getMetadata(threadId);
     EXPECT_EQ(updated.permissionMode, ThreadPermissionMode::AlwaysAllow);
+}
+
+TEST_F(ThreadManagerTest, updateMetadata_persistsActivePlanId) {
+    ThreadMetadata metadata = createTestMetadata();
+    std::string threadId = tm->createThread(metadata);
+
+    auto loaded = tm->getMetadata(threadId);
+    EXPECT_TRUE(loaded.activePlanId.empty());
+
+    loaded.activePlanId = "plan-active";
+    tm->updateMetadata(threadId, loaded);
+
+    auto updated = tm->getMetadata(threadId);
+    EXPECT_EQ(updated.activePlanId, "plan-active");
+}
+
+TEST_F(ThreadManagerTest, createAndGetPlan_roundtrip) {
+    ThreadMetadata metadata = createTestMetadata();
+    std::string threadId = tm->createThread(metadata);
+
+    Plan plan = createTestPlan(threadId);
+    std::string planId = tm->createPlan(plan);
+
+    EXPECT_FALSE(planId.empty());
+
+    Plan loaded = tm->getPlan(threadId, planId);
+    EXPECT_EQ(loaded.id, planId);
+    EXPECT_EQ(loaded.threadId, threadId);
+    EXPECT_EQ(loaded.title, "Work Language Migration");
+    ASSERT_EQ(loaded.chunks.size(), 1u);
+    EXPECT_EQ(loaded.chunks[0].id, "chunk-1");
+
+    std::filesystem::path planPath =
+        std::filesystem::path(tempDir) / ".firmius" / "threads" / threadId /
+        "plans" / (planId + ".json");
+    EXPECT_TRUE(std::filesystem::exists(planPath));
+}
+
+TEST_F(ThreadManagerTest, writePlan_createsPlansDirectory) {
+    ThreadMetadata metadata = createTestMetadata();
+    std::string threadId = tm->createThread(metadata);
+
+    Plan plan = createTestPlan(threadId, "plan-manual");
+    tm->writePlan(threadId, plan);
+
+    std::filesystem::path plansDir =
+        std::filesystem::path(tempDir) / ".firmius" / "threads" / threadId /
+        "plans";
+    EXPECT_TRUE(std::filesystem::exists(plansDir));
+
+    Plan loaded = tm->getPlan(threadId, "plan-manual");
+    EXPECT_EQ(loaded.id, "plan-manual");
+    EXPECT_EQ(loaded.threadId, threadId);
+}
+
+TEST_F(ThreadManagerTest, listPlans_returnsPersistedPlans) {
+    ThreadMetadata metadata = createTestMetadata();
+    std::string threadId = tm->createThread(metadata);
+
+    tm->writePlan(threadId, createTestPlan(threadId, "plan-b"));
+    tm->writePlan(threadId, createTestPlan(threadId, "plan-a"));
+
+    auto plans = tm->listPlans(threadId);
+    ASSERT_EQ(plans.size(), 2u);
+    EXPECT_EQ(plans[0].id, "plan-a");
+    EXPECT_EQ(plans[1].id, "plan-b");
+}
+
+TEST_F(ThreadManagerTest, updatePlan_preservesCreatedAtAndRefreshesUpdatedAt) {
+    ThreadMetadata metadata = createTestMetadata();
+    std::string threadId = tm->createThread(metadata);
+
+    std::string planId = tm->createPlan(createTestPlan(threadId));
+    Plan existing = tm->getPlan(threadId, planId);
+
+    existing.status = PlanStatus::Paused;
+    existing.notes = "Updated";
+    uint64_t originalCreatedAt = existing.createdAt;
+    uint64_t originalUpdatedAt = existing.updatedAt;
+
+    tm->updatePlan(threadId, existing);
+
+    Plan updated = tm->getPlan(threadId, planId);
+    EXPECT_EQ(updated.createdAt, originalCreatedAt);
+    EXPECT_GE(updated.updatedAt, originalUpdatedAt);
+    EXPECT_EQ(updated.status, PlanStatus::Paused);
+    EXPECT_EQ(updated.notes, "Updated");
+}
+
+TEST_F(ThreadManagerTest, getPlan_appliesBackwardCompatibleDefaults) {
+    ThreadMetadata metadata = createTestMetadata();
+    std::string threadId = tm->createThread(metadata);
+
+    std::filesystem::path planPath =
+        std::filesystem::path(tempDir) / ".firmius" / "threads" / threadId /
+        "plans" / "legacy-plan.json";
+    std::filesystem::create_directories(planPath.parent_path());
+
+    std::ofstream file(planPath);
+    file << R"({"id":"legacy-plan","title":"Legacy plan"})";
+    file.close();
+
+    Plan loaded = tm->getPlan(threadId, "legacy-plan");
+    EXPECT_EQ(loaded.id, "legacy-plan");
+    EXPECT_EQ(loaded.threadId, threadId);
+    EXPECT_EQ(loaded.title, "Legacy plan");
+    EXPECT_EQ(loaded.status, PlanStatus::Draft);
+    EXPECT_TRUE(loaded.chunks.empty());
 }
 
 TEST_F(ThreadManagerTest, permissionRules_roundtrip) {

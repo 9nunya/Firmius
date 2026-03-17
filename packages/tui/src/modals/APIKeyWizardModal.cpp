@@ -122,14 +122,14 @@ ftxui::Component APIKeyWizardModal::create(TuiState &state) {
                                       in_paste, input](ftxui::Event event) {
     // Handle Escape globally
     if (event == ftxui::Event::Escape) {
-      state.popModalImmediate();
+      state.popModal();
       return true;
     }
 
     // Handle completion state
     if (*isDone) {
       if (event == ftxui::Event::Return) {
-        state.popModalImmediate();
+        state.popModal();
         return true;
       }
       return false;

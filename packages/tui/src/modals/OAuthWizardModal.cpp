@@ -154,12 +154,12 @@ ftxui::Component OAuthWizardModal::create(TuiState &state) {
 
   return ftxui::CatchEvent(renderer, [url, isDone, &state](ftxui::Event event) {
     if (event == ftxui::Event::Escape) {
-      state.popModalImmediate();
+      state.popModal();
       return true;
     }
     if (*isDone) {
       if (event == ftxui::Event::Return) {
-        state.popModalImmediate();
+        state.popModal();
         return true;
       }
     } else {

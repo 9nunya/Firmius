@@ -140,20 +140,24 @@ ftxui::Component ConfigDisplayModal::create(TuiState &state) {
 
   return ftxui::CatchEvent(component, [&state](ftxui::Event event) {
     if (event == ftxui::Event::Escape) {
-      state.popModalImmediate();
+      state.popModal();
       return true;
     }
     if (event == ftxui::Event::Character('c') ||
         event == ftxui::Event::Character('C')) {
-      state.popModalImmediate();
-      state.openModal("model_picker");
+      state.deferUiMutation([&state]() {
+        state.popModalImmediate();
+        state.openModal("model_picker");
+      });
       return true;
     }
     if (event == ftxui::Event::Character('p') ||
         event == ftxui::Event::Character('P')) {
       state.cycleThreadPermissionMode();
-      state.popModalImmediate();
-      state.openModal("config_display");
+      state.deferUiMutation([&state]() {
+        state.popModalImmediate();
+        state.openModal("config_display");
+      });
       return true;
     }
     return false;

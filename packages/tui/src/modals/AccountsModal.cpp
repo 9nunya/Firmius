@@ -159,7 +159,7 @@ ftxui::Component AccountsModal::create(TuiState &state) {
                                        refreshAccounts,
                                        &state](ftxui::Event event) {
     if (event == ftxui::Event::Escape) {
-      state.popModalImmediate();
+      state.popModal();
       return true;
     }
     if (event == ftxui::Event::ArrowUp) {
@@ -207,10 +207,12 @@ ftxui::Component AccountsModal::create(TuiState &state) {
         if (apiKeyProvider) {
           auto wizard = apiKeyProvider->beginConnectionWizard();
           if (wizard) {
-            state.popModalImmediate();
             auto modalObj = std::make_shared<APIKeyWizardModal>(
                 std::move(wizard), providerId);
-            state.openModalDirect(modalObj->create(state));
+            state.deferUiMutation([&state, modalObj]() {
+              state.popModalImmediate();
+              state.openModalDirect(modalObj->create(state));
+            });
           }
           return true;
         }
@@ -222,10 +224,12 @@ ftxui::Component AccountsModal::create(TuiState &state) {
         if (oauthProvider) {
           auto wizard = oauthProvider->beginConnectionWizard();
           if (wizard) {
-            state.popModalImmediate();
             auto modalObj = std::make_shared<OAuthWizardModal>(
                 std::move(wizard), providerId);
-            state.openModalDirect(modalObj->create(state));
+            state.deferUiMutation([&state, modalObj]() {
+              state.popModalImmediate();
+              state.openModalDirect(modalObj->create(state));
+            });
           }
         }
       }

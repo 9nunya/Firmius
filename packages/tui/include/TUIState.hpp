@@ -8,6 +8,7 @@
 #include "NotificationManager.hpp"
 #include <ftxui/component/component_base.hpp>
 #include <ftxui/component/screen_interactive.hpp>
+#include <functional>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -55,6 +56,7 @@ public:
   void popModalImmediate();
   void replaceModalDirect(ftxui::Component modal);
   void clearModals();
+  void deferUiMutation(std::function<void()> action);
 
   void postEvent(ftxui::Event event);
   bool cycleThreadPermissionMode();
@@ -93,6 +95,7 @@ private:
 
   ViewMode view_mode_ = ViewMode::Chat;
   std::vector<ftxui::Component> modals_; // Used as a stack
+  std::vector<std::function<void()>> deferred_ui_mutations_;
   bool pending_modal_clear_ =
       false; // Deferred clear to avoid UB in modal handlers
   bool show_help_ = false;
