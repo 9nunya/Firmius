@@ -9,6 +9,7 @@
 #include "persistence/ThreadManager.hpp"
 #include "providers/BaseOAuthProvider.hpp"
 #include "providers/ProviderRegistry.hpp"
+#include "utils/FSUtil.hpp"
 #include "utils/StringUtil.hpp"
 #include "utils/ToolSummaries.hpp"
 #include "workflow/WorkflowLoader.hpp"
@@ -25,6 +26,8 @@
 #include <unistd.h>
 
 #include <chrono>
+#include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <cstring>
 #include <curl/curl.h>
@@ -51,6 +54,18 @@ const std::string FIRMIUS_DIR = ".firmius";
 const std::string SESSION_FILE = "last_session.json";
 const std::string OWNER_PID_LABEL = "com.firmius.owner_pid";
 
+ThreadPermissionMode nextThreadPermissionMode(ThreadPermissionMode mode) {
+  switch (mode) {
+  case ThreadPermissionMode::Request:
+    return ThreadPermissionMode::AlwaysAllow;
+  case ThreadPermissionMode::AlwaysAllow:
+    return ThreadPermissionMode::DenyAll;
+  case ThreadPermissionMode::DenyAll:
+    return ThreadPermissionMode::Request;
+  }
+  return ThreadPermissionMode::Request;
+}
+
 std::string getFirmiusHome() {
   const char *home = std::getenv("HOME");
   if (!home) {
@@ -62,6 +77,23 @@ std::string getFirmiusHome() {
 std::string getSessionPath() { return getFirmiusHome() + "/" + SESSION_FILE; }
 
 bool isPidAlive(pid_t pid) { return kill(pid, 0) == 0 || errno == EPERM; }
+
+std::string normalizeCommandForRuleMatch(const std::string &command) {
+  std::stringstream normalized;
+  bool previousWasSpace = false;
+  for (char ch : command) {
+    if (std::isspace(static_cast<unsigned char>(ch))) {
+      if (!previousWasSpace) {
+        normalized << ' ';
+        previousWasSpace = true;
+      }
+    } else {
+      normalized << ch;
+      previousWasSpace = false;
+    }
+  }
+  return shared::StringUtil::trim(normalized.str());
+}
 
 size_t curlWriteCallback(char *ptr, size_t size, size_t nmemb, void *userdata) {
   auto *s = static_cast<std::string *>(userdata);
@@ -165,9 +197,14 @@ void Harness::init() {
 void Harness::shutdown() {
   Engine::instance().shutdown();
   std::vector<std::jthread> toJoin;
+  std::vector<std::shared_ptr<PendingPermissionRequest>> pendingRequests;
   {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     toJoin = std::move(backgroundThreads_);
+    for (auto &[_, pending] : pendingPermissionRequests_) {
+      pendingRequests.push_back(pending);
+    }
+    pendingPermissionRequests_.clear();
 
     shared::Panic::removeExtraInfo(PANIC_INFO_HARNESS_STATE);
 
@@ -195,6 +232,14 @@ void Harness::shutdown() {
       sessionFile << buffer.GetString();
       sessionFile.close();
     }
+  }
+  for (const auto &pending : pendingRequests) {
+    {
+      std::lock_guard<std::mutex> pendingLock(pending->mutex);
+      pending->resolved = true;
+      pending->response = PermissionResponse::Deny;
+    }
+    pending->cv.notify_all();
   }
   toJoin.clear();
 }
@@ -458,7 +503,7 @@ void Harness::abort() {
   if (!agent)
     return;
 
-  auto procIds = agent->getBlockingProcessIds();
+  auto procIds = agent->getEnvironment()->getProcessManager().getBlockingProcessIds();
   for (const auto &procId : procIds) {
     try {
       if (std::all_of(procId.begin(), procId.end(), ::isdigit)) {
@@ -950,6 +995,182 @@ bool Harness::switchLeadPersona(const std::string &personaName) {
   return true;
 }
 
+ThreadPermissionMode Harness::currentThreadPermissionMode() {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  if (currentThreadId_.empty()) {
+    return ThreadPermissionMode::Request;
+  }
+
+  return threadManager_.getMetadata(currentThreadId_).permissionMode;
+}
+
+ThreadPermissionMode Harness::threadPermissionMode(const std::string &threadId) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  if (threadId.empty()) {
+    return ThreadPermissionMode::Request;
+  }
+  try {
+    return threadManager_.getMetadata(threadId).permissionMode;
+  } catch (...) {
+    return ThreadPermissionMode::Request;
+  }
+}
+
+ThreadPermissionRules Harness::threadPermissionRules(const std::string &threadId) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  if (threadId.empty()) {
+    return {};
+  }
+  try {
+    return threadManager_.readPermissionRules(threadId);
+  } catch (...) {
+    return {};
+  }
+}
+
+bool Harness::commandMatchesPersistedAllowRule(const std::string &threadId,
+                                               const std::string &command) {
+  if (threadId.empty()) {
+    return false;
+  }
+
+  auto rules = threadPermissionRules(threadId);
+  std::string normalized = normalizeCommandForRuleMatch(command);
+  return std::any_of(
+      rules.commandAllowRules.begin(), rules.commandAllowRules.end(),
+      [&command, &normalized](const CommandAllowRule &rule) {
+        return rule.exactCommand == command ||
+               (!rule.normalizedCommand.empty() &&
+                rule.normalizedCommand == normalized);
+      });
+}
+
+bool Harness::pathMatchesPersistedWriteAllowRule(
+    const std::string &threadId, const std::string &absolutePath) {
+  if (threadId.empty()) {
+    return false;
+  }
+
+  auto rules = threadPermissionRules(threadId);
+  return std::any_of(
+      rules.writeAllowPaths.begin(), rules.writeAllowPaths.end(),
+      [&absolutePath](const std::string &pathPrefix) {
+        return shared::FSUtil::isSubpath(absolutePath, pathPrefix);
+      });
+}
+
+void Harness::persistCommandAllowRule(const std::string &threadId,
+                                      const CommandAllowRule &rule) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  if (threadId.empty()) {
+    return;
+  }
+  threadManager_.addCommandAllowRule(threadId, rule);
+}
+
+void Harness::persistWriteAllowPath(const std::string &threadId,
+                                    const std::string &pathPrefix) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  if (threadId.empty() || pathPrefix.empty()) {
+    return;
+  }
+  threadManager_.addWriteAllowPath(threadId, pathPrefix);
+}
+
+bool Harness::setCurrentThreadPermissionMode(ThreadPermissionMode mode) {
+  ThreadMetadata metadata;
+  {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (currentThreadId_.empty()) {
+      return false;
+    }
+
+    metadata = threadManager_.getMetadata(currentThreadId_);
+    if (metadata.permissionMode == mode) {
+      return true;
+    }
+
+    metadata.permissionMode = mode;
+    threadManager_.updateMetadata(currentThreadId_, metadata);
+  }
+
+  emitEvent(firmius::shared::ThreadMetadataUpdated{metadata.threadId, metadata});
+  return true;
+}
+
+std::optional<ThreadPermissionMode> Harness::cycleCurrentThreadPermissionMode() {
+  ThreadMetadata metadata;
+  {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (currentThreadId_.empty()) {
+      return std::nullopt;
+    }
+
+    metadata = threadManager_.getMetadata(currentThreadId_);
+    metadata.permissionMode = nextThreadPermissionMode(metadata.permissionMode);
+    threadManager_.updateMetadata(currentThreadId_, metadata);
+  }
+
+  emitEvent(firmius::shared::ThreadMetadataUpdated{metadata.threadId, metadata});
+  return metadata.permissionMode;
+}
+
+PermissionResponse
+Harness::requestPermissionEscalation(PermissionEscalationRequest request) {
+  auto pending = std::make_shared<PendingPermissionRequest>();
+  {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (request.requestId.empty()) {
+      request.requestId =
+          "perm-" + std::to_string(++nextPermissionRequestId_);
+    }
+    pending->request = request;
+    pendingPermissionRequests_[request.requestId] = pending;
+  }
+
+  emitEvent(request);
+
+  std::unique_lock<std::mutex> pendingLock(pending->mutex);
+  pending->cv.wait(pendingLock, [&pending] { return pending->resolved; });
+  PermissionResponse response = pending->response;
+  pendingLock.unlock();
+
+  {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    pendingPermissionRequests_.erase(request.requestId);
+  }
+
+  return response;
+}
+
+bool Harness::resolvePermissionEscalation(const std::string &requestId,
+                                          PermissionResponse response) {
+  std::shared_ptr<PendingPermissionRequest> pending;
+  {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    auto it = pendingPermissionRequests_.find(requestId);
+    if (it == pendingPermissionRequests_.end()) {
+      return false;
+    }
+    pending = it->second;
+  }
+
+  {
+    std::lock_guard<std::mutex> pendingLock(pending->mutex);
+    if (pending->resolved) {
+      return false;
+    }
+    pending->resolved = true;
+    pending->response = response;
+  }
+
+  pending->cv.notify_all();
+  emitEvent(firmius::shared::PermissionEscalationResolved{
+      pending->request.requestId, pending->request.threadId,
+      pending->request.agentId, response});
+  return true;
+}
+
 std::vector<ModelInfo> Harness::listAllModels() {
   std::lock_guard<std::mutex> lock(modelsMutex_);
 
@@ -1052,7 +1273,7 @@ void Harness::interruptAndSwitchModel(const std::string &providerId,
 
   auto agent = AgentRegistry::instance().getAgent(focusedAgentId_);
   if (agent) {
-    auto procIds = agent->getBlockingProcessIds();
+  auto procIds = agent->getEnvironment()->getProcessManager().getBlockingProcessIds();
     for (const auto &procId : procIds) {
       try {
         if (std::all_of(procId.begin(), procId.end(), ::isdigit)) {

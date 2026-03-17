@@ -22,6 +22,7 @@ target_sources(firmius PRIVATE
     src/modals/ThreadLockedModal.cpp
     src/modals/ModelPickerModal.cpp
     src/modals/ConfigDisplayModal.cpp
+    src/modals/PermissionPromptModal.cpp
     src/modals/OAuthWizardModal.cpp
     src/modals/APIKeyWizardModal.cpp
     src/modals/ConfirmationModal.cpp

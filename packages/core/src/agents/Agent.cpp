@@ -31,31 +31,30 @@ std::uint64_t Agent::nowMs() {
           .count());
 }
 
-Agent::Agent(AgentContext ctx, std::unique_ptr<shared::IHost> h,
-             ToolRegistry &reg, std::shared_ptr<Journaler> jnl)
-    : context(std::move(ctx)), host(std::move(h)), toolRegistry(reg),
-      journaler(jnl) {
+Agent::Agent(AgentContext ctx, std::shared_ptr<shared::IEnvironment> env,
+             std::shared_ptr<shared::IPermissions> perms, ToolRegistry &reg,
+             std::shared_ptr<Journaler> jnl)
+    : context(std::move(ctx)), environment_(std::move(env)),
+      permissions_(std::move(perms)), toolRegistry(reg), journaler(jnl) {
   if (!context.history) {
     context.history = std::make_shared<AgentHistory>();
   }
+
   provider = firmius::provider::ProviderRegistry::instance().getProvider(
       context.config.providerId);
   if (!provider)
     throw std::runtime_error("Unknown provider: " + context.config.providerId);
-
-  permissionChecks =
-      std::make_unique<firmius::core::AgentPermissionChecks>(context);
 }
 
 Agent::~Agent() {
   for (const auto &id : backgroundProcessIds) {
     try {
-      host->killBackgroundProcess(id);
+      environment_->getHost()->killBackgroundProcess(id);
     } catch (...) {
     }
   }
-  if (host)
-    host->destroy();
+  if (environment_->getHost())
+    environment_->getHost()->destroy();
 }
 
 void Agent::reset() {
@@ -67,7 +66,7 @@ void Agent::reset() {
 
   for (const auto &id : backgroundProcessIds) {
     try {
-      host->killBackgroundProcess(id);
+      environment_->getHost()->killBackgroundProcess(id);
     } catch (...) {
     }
   }
@@ -75,8 +74,10 @@ void Agent::reset() {
 }
 
 std::string Agent::resolvePath(const std::string &inputPath) const {
-  return shared::FSUtil::resolvePath(inputPath, context.environment.cwd);
+  return environment_->getWorkspace().resolvePath(inputPath);
 }
+
+std::shared_ptr<IHost> Agent::getHost() { return environment_->getHost(); }
 
 void Agent::interrupt() {
   interrupted = true;
@@ -129,82 +130,55 @@ std::string Agent::spawnProcess(const std::string &command,
                                 const std::string &toolCallId,
                                 const std::string &cwd,
                                 const std::map<std::string, std::string> &env) {
-  std::string id = StringUtil::generateUuid();
-  auto proc = host->spawn(command, cwd, env);
-  proc->onOutput([this, id](const std::string &output, bool isError) {
-    std::lock_guard<std::mutex> lock(callbackMutex);
-    if (eventCallback) {
-      eventCallback(ProcessOutputDelta{id, output, isError, false});
-    }
-  });
-  host->registerBackgroundProcess(id, std::move(proc));
-  backgroundProcessIds.insert(id);
-  emitProcessSpawned(id, toolCallId, command);
-  return id;
+  return environment_->getProcessManager().spawnProcess(command, toolCallId, cwd,
+                                                        env);
 }
 
 shared::ProcessSnapshot Agent::inspectProcess(const std::string &id) {
-  return host->inspectBackgroundProcess(id);
+  return environment_->getProcessManager().inspectProcess(id);
 }
 
 void Agent::writeToProcess(const std::string &id, const std::string &data) {
-  host->writeToBackgroundProcess(id, data);
+  environment_->getProcessManager().writeToProcess(id, data);
 }
 
 void Agent::registerProcessId(const std::string &id) {
-  backgroundProcessIds.insert(id);
+  environment_->getProcessManager().registerProcessId(id);
 }
 
 void Agent::emitProcessSpawned(const std::string &processId,
                                const std::string &toolCallId,
                                const std::string &command) {
-  std::lock_guard<std::mutex> lock(callbackMutex);
-  if (eventCallback) {
-    eventCallback(shared::StreamEvent(
-        AgentProcessSpawned{context.identity.id, processId, toolCallId, command,
-                            context.identity.parentId}));
-  }
+  environment_->getProcessManager().emitProcessSpawned(processId, toolCallId,
+                                                       command);
 }
 
 void Agent::addBlockingProcessId(const std::string &id) {
-  std::lock_guard<std::mutex> lock(blockingProcessMutex);
-  context.state.blockingProcessIds.push_back(id);
+  environment_->getProcessManager().addBlockingProcessId(id);
 }
 
 void Agent::removeBlockingProcessId(const std::string &id) {
-  std::lock_guard<std::mutex> lock(blockingProcessMutex);
-  auto &vec = context.state.blockingProcessIds;
-  vec.erase(std::remove(vec.begin(), vec.end(), id), vec.end());
+  environment_->getProcessManager().removeBlockingProcessId(id);
 }
 
 std::vector<std::string> Agent::getBlockingProcessIds() {
-  std::lock_guard<std::mutex> lock(blockingProcessMutex);
-  return context.state.blockingProcessIds; // return copy
+  return environment_->getProcessManager().getBlockingProcessIds();
 }
 
 bool Agent::hasReadFile(const std::string &path) const {
-  return std::find(context.state.readFiles.begin(),
-                   context.state.readFiles.end(),
-                   path) != context.state.readFiles.end();
+  return environment_->getWorkspace().hasReadFile(path);
 }
 
 void Agent::markFileAsRead(const std::string &path) {
-  if (!hasReadFile(path)) {
-    context.state.readFiles.push_back(path);
-  }
+  environment_->getWorkspace().markFileAsRead(path);
 }
 
 bool Agent::hasFullyReadFile(const std::string &path) const {
-  return std::find(context.state.fullyReadFiles.begin(),
-                   context.state.fullyReadFiles.end(),
-                   path) != context.state.fullyReadFiles.end();
+  return environment_->getWorkspace().hasFullyReadFile(path);
 }
 
 void Agent::markFileAsFullyRead(const std::string &path) {
-  markFileAsRead(path);
-  if (!hasFullyReadFile(path)) {
-    context.state.fullyReadFiles.push_back(path);
-  }
+  environment_->getWorkspace().markFileAsFullyRead(path);
 }
 
 void Agent::run(const std::string &task,
@@ -745,7 +719,7 @@ void Agent::executeTools(const std::vector<ToolCallChunk> &chunks,
           rapidjson::Document input;
           input.Parse(toolArgs.c_str());
 
-          ToolContext toolCtx{*host, *this, toolId};
+          ToolContext toolCtx{*environment_->getHost(), *this, toolId};
           auto result = toolRegistry.execute(toolName, input, toolCtx);
 
           std::string resultStr;

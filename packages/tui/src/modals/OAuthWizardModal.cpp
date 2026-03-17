@@ -1,6 +1,7 @@
 #include "modals/OAuthWizardModal.hpp"
 #include "TUIState.hpp"
 #include "ThemeManager.hpp"
+#include "modals/ModalLayout.hpp"
 #include <chrono>
 #include <ftxui/component/component.hpp>
 #include <ftxui/dom/elements.hpp>
@@ -87,46 +88,53 @@ ftxui::Component OAuthWizardModal::create(TuiState &state) {
     if (*isDone) {
       if (*isError) {
         content.push_back(
-            ftxui::vbox({
-                ftxui::text(" Connection Failed ") | ftxui::bold |
-                    ftxui::color(theme.status_bar.error.normal.fg) |
-                    ftxui::center,
-                ftxui::text(""),
-                ftxui::text(*resultMessage) | ftxui::center | ftxui::automerge |
-                    ftxui::color(theme.modals.fg),
-            }) |
-            ftxui::borderRounded |
-            ftxui::color(theme.status_bar.error.normal.fg));
+            ModalSection(
+                theme,
+                ftxui::vbox({
+                    ftxui::text(" Connection Failed ") | ftxui::bold |
+                        ftxui::color(theme.status_bar.error.normal.fg) |
+                        ftxui::center,
+                    ftxui::text(""),
+                    ftxui::text(*resultMessage) | ftxui::center |
+                        ftxui::automerge | ftxui::color(theme.modals.fg),
+                }),
+                theme.base.bg));
         content.push_back(ftxui::text(""));
         content.push_back(ftxui::text(" (Press Enter/Esc to close) ") |
                           ftxui::color(theme.base.dim) | ftxui::center);
       } else {
         content.push_back(
-            ftxui::vbox({
-                ftxui::text(" Connection Successful! ") | ftxui::bold |
-                    ftxui::color(theme.modals.highlight_fg) | ftxui::center,
-                ftxui::text(""),
-                ftxui::text(*resultMessage) | ftxui::center |
-                    ftxui::color(theme.modals.fg),
-            }) |
-            ftxui::borderRounded | ftxui::color(theme.modals.highlight_fg));
+            ModalSection(
+                theme,
+                ftxui::vbox({
+                    ftxui::text(" Connection Successful! ") | ftxui::bold |
+                        ftxui::color(theme.modals.highlight_fg) |
+                        ftxui::center,
+                    ftxui::text(""),
+                    ftxui::text(*resultMessage) | ftxui::center |
+                        ftxui::color(theme.modals.fg),
+                }),
+                theme.base.bg));
         content.push_back(ftxui::text(""));
         content.push_back(ftxui::text(" (Press Enter/Esc to close) ") |
                           ftxui::color(theme.base.dim) | ftxui::center);
       }
     } else {
       content.push_back(
-          ftxui::vbox({
-              ftxui::text(" Authentication in Progress ") | ftxui::bold |
-                  ftxui::color(theme.modals.title) | ftxui::center,
-              ftxui::text(""),
-              ftxui::text(
-                  " Please check your browser to complete the login. ") |
-                  ftxui::center | ftxui::color(theme.modals.fg),
-              ftxui::text(" Waiting for callback... ") |
-                  ftxui::color(theme.base.dim) | ftxui::blink | ftxui::center,
-          }) |
-          ftxui::borderRounded | ftxui::color(theme.modals.border));
+          ModalSection(
+              theme,
+              ftxui::vbox({
+                  ftxui::text(" Authentication in Progress ") | ftxui::bold |
+                      ftxui::color(theme.modals.title) | ftxui::center,
+                  ftxui::text(""),
+                  ftxui::text(
+                      " Please check your browser to complete the login. ") |
+                      ftxui::center | ftxui::color(theme.modals.fg),
+                  ftxui::text(" Waiting for callback... ") |
+                      ftxui::color(theme.base.dim) | ftxui::blink |
+                      ftxui::center,
+              }),
+              theme.base.bg));
       content.push_back(ftxui::text(""));
       content.push_back(ftxui::hbox({
                             ftxui::text(" [O]pen Browser ") | ftxui::bold |
@@ -138,14 +146,10 @@ ftxui::Component OAuthWizardModal::create(TuiState &state) {
                         ftxui::center);
     }
 
-    auto window_title = ftxui::hbox(
-        {ftxui::text(" OAuth Connection: ") | ftxui::bold |
-             ftxui::color(theme.modals.title),
-         ftxui::text(providerName) | ftxui::bold | ftxui::color(title_color)});
-
-    return ftxui::window(window_title, ftxui::vbox(content)) |
-           ftxui::clear_under | ftxui::center |
-           ftxui::bgcolor(theme.modals.bg) | ftxui::color(theme.modals.border);
+    return FlatModalPanel(theme, "OAuth Connection: " + providerName,
+                          ModalSection(theme, ftxui::vbox(content),
+                                       theme.modals.bg),
+                          72, 24, title_color);
   });
 
   return ftxui::CatchEvent(renderer, [url, isDone, &state](ftxui::Event event) {

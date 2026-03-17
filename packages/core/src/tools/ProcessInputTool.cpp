@@ -15,7 +15,7 @@ shared::ToolResult ProcessInputTool::execute(const ProcessInputInput& input, sha
         size_t next = 0;
         while ((next = translated.find('\n', last)) != std::string::npos) {
             std::string part = translated.substr(last, next - last + 1);
-            ctx.agent.writeToProcess(input.process_id, part);
+            ctx.agent.getEnvironment()->getProcessManager().writeToProcess(input.process_id, part);
             
             // Wait for 1000ms but stay interruptible
             auto start = std::chrono::steady_clock::now();
@@ -30,7 +30,7 @@ shared::ToolResult ProcessInputTool::execute(const ProcessInputInput& input, sha
         
         // Send remaining part
         if (last < translated.size()) {
-            ctx.agent.writeToProcess(input.process_id, translated.substr(last));
+            ctx.agent.getEnvironment()->getProcessManager().writeToProcess(input.process_id, translated.substr(last));
         }
 
         return shared::ToolResult::ok();

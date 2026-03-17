@@ -98,6 +98,26 @@ rapidjson::Document toJson(const ThreadMetadata& metadata);
 ThreadMetadata threadMetadataFromJson(const rapidjson::Value& value);
 
 /**
+ * @brief Serializes a WorkChunk to a RapidJSON document.
+ */
+rapidjson::Document toJson(const WorkChunk& chunk);
+
+/**
+ * @brief Deserializes a WorkChunk from a RapidJSON value.
+ */
+WorkChunk workChunkFromJson(const rapidjson::Value& value);
+
+/**
+ * @brief Serializes a Plan to a RapidJSON document.
+ */
+rapidjson::Document toJson(const Plan& plan);
+
+/**
+ * @brief Deserializes a Plan from a RapidJSON value.
+ */
+Plan planFromJson(const rapidjson::Value& value);
+
+/**
  * @brief Serializes an EngineEvent to a RapidJSON document.
  */
 rapidjson::Document toJson(const EngineEvent& event);

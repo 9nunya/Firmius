@@ -37,13 +37,21 @@ shared::ToolResult ProcessExecuteTool::execute(const ProcessExecuteInput &input,
     std::string effectiveCwd =
         input.cwd.empty() ? ctx.agent.getContext().environment.cwd : input.cwd;
     // Normalize path first
-    effectiveCwd = ctx.agent.resolvePath(effectiveCwd);
+    effectiveCwd = ctx.agent.getEnvironment()->getWorkspace().resolvePath(effectiveCwd);
 
-    ctx.agent.getPermissionChecks().validatePathAccess(effectiveCwd);
+    ctx.agent.getPermissions()->validatePathAccess(effectiveCwd, firmius::shared::AccessMode::READ);
+    auto intent = ctx.agent.getPermissions()->getIntentAnalyzer().analyze(
+        input.command, effectiveCwd);
+    auto approval =
+        ctx.agent.getPermissions()->requestCommandApproval(input.command, intent);
+    if (approval == PermissionResponse::Deny) {
+      return shared::ToolResult::fail("Command execution denied: " +
+                                      input.command);
+    }
 
-    processId = ctx.agent.spawnProcess(input.command, ctx.currentToolCallId,
+    processId = ctx.agent.getEnvironment()->getProcessManager().spawnProcess(input.command, ctx.currentToolCallId,
                                        effectiveCwd, {});
-    ctx.agent.addBlockingProcessId(processId);
+    ctx.agent.getEnvironment()->getProcessManager().addBlockingProcessId(processId);
 
     auto timeoutMs = (input.timeout_ms > 0) ? input.timeout_ms : 15000;
     auto start = std::chrono::steady_clock::now();
@@ -54,7 +62,7 @@ shared::ToolResult ProcessExecuteTool::execute(const ProcessExecuteInput &input,
     while (true) {
       // Check for interrupt at the top of each iteration
       if (ctx.agent.isInterrupted()) {
-        ctx.agent.removeBlockingProcessId(processId);
+        ctx.agent.getEnvironment()->getProcessManager().removeBlockingProcessId(processId);
 
         rapidjson::Document doc;
         doc.SetObject();
@@ -71,7 +79,7 @@ shared::ToolResult ProcessExecuteTool::execute(const ProcessExecuteInput &input,
         return shared::ToolResult::ok(doc, processId);
       }
 
-      snap = ctx.agent.inspectProcess(processId);
+      snap = ctx.agent.getEnvironment()->getProcessManager().inspectProcess(processId);
       if (!snap.running)
         break;
 
@@ -80,7 +88,7 @@ shared::ToolResult ProcessExecuteTool::execute(const ProcessExecuteInput &input,
           std::chrono::duration_cast<std::chrono::milliseconds>(now - start)
               .count();
       if (elapsed > timeoutMs) {
-        ctx.agent.removeBlockingProcessId(processId);
+        ctx.agent.getEnvironment()->getProcessManager().removeBlockingProcessId(processId);
 
         rapidjson::Document doc;
         doc.SetObject();
@@ -105,7 +113,7 @@ shared::ToolResult ProcessExecuteTool::execute(const ProcessExecuteInput &input,
       }
     }
 
-    ctx.agent.removeBlockingProcessId(processId);
+    ctx.agent.getEnvironment()->getProcessManager().removeBlockingProcessId(processId);
 
     rapidjson::Document doc;
     doc.SetObject();
@@ -121,7 +129,7 @@ shared::ToolResult ProcessExecuteTool::execute(const ProcessExecuteInput &input,
     return shared::ToolResult::ok(doc, processId);
   } catch (const std::exception &e) {
     if (!processId.empty())
-      ctx.agent.removeBlockingProcessId(processId);
+      ctx.agent.getEnvironment()->getProcessManager().removeBlockingProcessId(processId);
     return shared::ToolResult::fail(e.what());
   }
 }

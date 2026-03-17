@@ -48,6 +48,8 @@ ftxui::Component HelpOverlay() {
       
       section("Agent Control", {
         {"Ctrl+P", "Focus parent agent"},
+        {"Ctrl+Shift+P", "Cycle thread permissions"},
+        {"/config then P", "Fallback permission mode cycle"},
         {"Ctrl+N", "Next sibling agent"},
         {"Ctrl+B", "Previous sibling agent"},
         {"Ctrl+F", "Focus on process (interactive)"},

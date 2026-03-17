@@ -4,10 +4,13 @@
 #include "agents/AgentPermissionChecks.hpp"
 #include "hosts/LocalHost.hpp"
 #include "tools/FileReadTool.hpp"
+#include "tools/FileEditTool.hpp"
 #include "tools/GlobTool.hpp"
 #include "tools/GrepTool.hpp"
 #include "tools/ListDirectoryTool.hpp"
 #include "tools/ProcessExecuteTool.hpp"
+#include "tools/ProcessSpawnTool.hpp"
+#include "tools/PythonExecuteTool.hpp"
 #include <filesystem>
 #include <fstream>
 #include <gmock/gmock.h>
@@ -61,40 +64,26 @@ public:
   MOCK_METHOD(void, killBackgroundProcess, (const std::string &), (override));
 };
 
+#include "../mocks/MockEnvironment.hpp"
+
+// Local MockAgent that uses MOCK_METHOD for all interface methods
 class MockAgent : public IAgent {
 public:
   firmius::shared::AgentContext defaultCtx;
-  std::unique_ptr<AgentPermissionChecks> pChecks;
-  MOCK_METHOD(void, saveHistory, (), (override));
-  MockAgent() {
-    pChecks = std::make_unique<AgentPermissionChecks>(defaultCtx);
-    ON_CALL(*this, hasReadFile(_))
-        .WillByDefault(Invoke([this](const std::string &path) {
-          return readFiles_.find(path) != readFiles_.end();
-        }));
-    ON_CALL(*this, hasFullyReadFile(_))
-        .WillByDefault(Invoke([this](const std::string &path) {
-          return fullyReadFiles_.find(path) != fullyReadFiles_.end();
-        }));
-    ON_CALL(*this, markFileAsRead(_))
-        .WillByDefault(Invoke([this](const std::string &path) {
-          if (readFiles_.insert(path).second) {
-            defaultCtx.state.readFiles.push_back(path);
-          }
-        }));
-    ON_CALL(*this, markFileAsFullyRead(_))
-        .WillByDefault(Invoke([this](const std::string &path) {
-          if (readFiles_.insert(path).second) {
-            defaultCtx.state.readFiles.push_back(path);
-          }
-          if (fullyReadFiles_.insert(path).second) {
-            defaultCtx.state.fullyReadFiles.push_back(path);
-          }
-        }));
+  std::shared_ptr<firmius::test::MockEnvironment> mockEnv_;
+  std::shared_ptr<firmius::test::MockPermissions> mockPerms_;
+
+  MockAgent() 
+    : mockEnv_(std::make_shared<firmius::test::MockEnvironment>())
+    , mockPerms_(std::make_shared<firmius::test::MockPermissions>()) {
+    if (!defaultCtx.history) {
+      defaultCtx.history = std::make_shared<AgentHistory>();
+    }
   }
-  AgentPermissionChecks &getPermissionChecks() const override {
-    return *pChecks;
-  }
+
+  std::shared_ptr<IEnvironment> getEnvironment() const override { return mockEnv_; }
+  std::shared_ptr<IPermissions> getPermissions() const override { return mockPerms_; }
+
   MOCK_METHOD(void, reset, (), (override));
   MOCK_METHOD(void, run,
               (const std::string &, (std::function<void(const StreamEvent &)>),
@@ -102,13 +91,12 @@ public:
               (override));
   MOCK_METHOD((const AgentContext &), getContext, (), (const, override));
   MOCK_METHOD(AgentContext &, getMutableContext, (), (override));
-  MOCK_METHOD(std::string, resolvePath, (const std::string &),
-              (const, override));
   MOCK_METHOD(void, interrupt, (), (override));
   MOCK_METHOD(bool, isInterrupted, (), (const, override));
   MOCK_METHOD(void, clearInterrupt, (), (override));
   MOCK_METHOD(void, compactNow,
               (std::function<void(const StreamEvent &)>), (override));
+  MOCK_METHOD(void, saveHistory, (), (override));
   MOCK_METHOD(void, setModel, (const std::string &, const std::string &),
               (override));
   MOCK_METHOD(void, setModel,
@@ -117,31 +105,7 @@ public:
   MOCK_METHOD(bool, isRunning, (), (const, override));
   MOCK_METHOD(bool, isBooting, (), (const, override));
   MOCK_METHOD(void, setBooting, (bool), (override));
-  MOCK_METHOD(void, emitProcessSpawned,
-              (const std::string &, const std::string &, const std::string &),
-              (override));
-  MOCK_METHOD(std::string, spawnProcess,
-              (const std::string &, const std::string &, const std::string &,
-               (const std::map<std::string, std::string> &)),
-              (override));
-  MOCK_METHOD(ProcessSnapshot, inspectProcess, (const std::string &),
-              (override));
-  MOCK_METHOD(void, writeToProcess, (const std::string &, const std::string &),
-              (override));
-  MOCK_METHOD(void, registerProcessId, (const std::string &), (override));
-  MOCK_METHOD(void, addBlockingProcessId, (const std::string &), (override));
-  MOCK_METHOD(void, removeBlockingProcessId, (const std::string &), (override));
-  MOCK_METHOD((std::vector<std::string>), getBlockingProcessIds, (),
-              (override));
-  MOCK_METHOD(bool, hasReadFile, (const std::string &), (const, override));
-  MOCK_METHOD(void, markFileAsRead, (const std::string &), (override));
-  MOCK_METHOD(bool, hasFullyReadFile, (const std::string &), (const, override));
-  MOCK_METHOD(void, markFileAsFullyRead, (const std::string &), (override));
   MOCK_METHOD((std::shared_ptr<IHost>), getHost, (), (override));
-
-private:
-  std::set<std::string> readFiles_;
-  std::set<std::string> fullyReadFiles_;
 };
 
 class MockHostProcess : public IHostProcess {
@@ -192,11 +156,15 @@ protected:
     mockAgent.defaultCtx.permissions.allowOutsideCwd = false;
     mockAgent.defaultCtx.permissions.allowedPaths = {"/tmp/work", "/tmp"};
 
+    mockAgent.mockPerms_->allowOutsideCwd_ = false;
+    mockAgent.mockPerms_->allowedPaths_ = {"/tmp/work", "/tmp"};
+    mockAgent.mockPerms_->cwd_ = "/tmp/work";
+
     ON_CALL(mockAgent, getContext())
         .WillByDefault(ReturnRef(mockAgent.defaultCtx));
     ON_CALL(mockAgent, getMutableContext())
         .WillByDefault(ReturnRef(mockAgent.defaultCtx));
-    ON_CALL(mockAgent, resolvePath(_))
+    ON_CALL(mockAgent.mockEnv_->mockWorkspace(), resolvePath(_))
         .WillByDefault(Invoke([](const std::string &path) {
           if (path.starts_with("/"))
             return path;
@@ -276,7 +244,7 @@ protected:
     mockAgent.defaultCtx.permissions.allowedPaths = {"/tmp", "/root"};
     ON_CALL(mockAgent, getContext())
         .WillByDefault(ReturnRef(mockAgent.defaultCtx));
-    ON_CALL(mockAgent, resolvePath(_))
+    ON_CALL(mockAgent.mockEnv_->mockWorkspace(), resolvePath(_))
         .WillByDefault(Invoke([](const std::string &path) { return path; }));
   }
 };
@@ -343,7 +311,7 @@ protected:
     mockAgent.defaultCtx.permissions.allowedPaths = {"/tmp"};
     ON_CALL(mockAgent, getContext())
         .WillByDefault(ReturnRef(mockAgent.defaultCtx));
-    ON_CALL(mockAgent, resolvePath(_))
+    ON_CALL(mockAgent.mockEnv_->mockWorkspace(), resolvePath(_))
         .WillByDefault(Invoke([](const std::string &path) { return path; }));
   }
 };
@@ -382,6 +350,121 @@ TEST_F(GrepToolTest, exitCode1_noMatches) {
   EXPECT_NE(toolResult.data.find("[]"), std::string::npos);
 }
 
+class CommandPermissionToolTest : public ::testing::Test {
+protected:
+  NiceMock<MockHost> mockHost;
+  NiceMock<MockAgent> mockAgent;
+
+  void SetUp() override {
+    mockAgent.defaultCtx.environment.cwd = "/tmp/work";
+    mockAgent.defaultCtx.permissions.allowOutsideCwd = false;
+    mockAgent.defaultCtx.permissions.allowedPaths = {"/tmp/work", "/tmp"};
+    mockAgent.mockPerms_->allowOutsideCwd_ = false;
+    mockAgent.mockPerms_->allowedPaths_ = {"/tmp/work", "/tmp"};
+    mockAgent.mockPerms_->cwd_ = "/tmp/work";
+
+    ON_CALL(mockAgent, getContext())
+        .WillByDefault(ReturnRef(mockAgent.defaultCtx));
+    ON_CALL(mockAgent, getMutableContext())
+        .WillByDefault(ReturnRef(mockAgent.defaultCtx));
+    ON_CALL(mockAgent.mockEnv_->mockWorkspace(), resolvePath(_))
+        .WillByDefault(Invoke([](const std::string &path) {
+          if (path.starts_with("/")) {
+            return path;
+          }
+          return "/tmp/work/" + path;
+        }));
+    ON_CALL(mockAgent.mockEnv_->mockProcessManager(), removeBlockingProcessId(_))
+        .WillByDefault(Return());
+    ON_CALL(mockAgent, isInterrupted()).WillByDefault(Return(false));
+  }
+};
+
+TEST_F(CommandPermissionToolTest,
+       processExecute_deniedCommandDoesNotSpawnProcess) {
+  ProcessExecuteTool tool;
+  mockAgent.mockPerms_->commandApprovalResponse_ = PermissionResponse::Deny;
+
+  auto json =
+      createJsonInput({{"command", "touch denied.txt"}, {"cwd", "/tmp/work"}});
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+
+  EXPECT_CALL(mockAgent.mockEnv_->mockProcessManager(), spawnProcess(_, _, _, _))
+      .Times(0);
+
+  ITool *itool = &tool;
+  auto result = itool->execute(json, ctx);
+
+  EXPECT_FALSE(result.success);
+  ASSERT_EQ(mockAgent.mockPerms_->requestedCommands_.size(), 1u);
+  EXPECT_EQ(mockAgent.mockPerms_->requestedCommands_[0], "touch denied.txt");
+}
+
+TEST_F(CommandPermissionToolTest,
+       processSpawn_deniedCommandDoesNotSpawnProcess) {
+  ProcessSpawnTool tool;
+  mockAgent.mockPerms_->commandApprovalResponse_ = PermissionResponse::Deny;
+
+  rapidjson::Document doc;
+  doc.SetObject();
+  auto &alloc = doc.GetAllocator();
+  doc.AddMember("command", makeJsonString("sleep 10", alloc), alloc);
+
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+
+  EXPECT_CALL(mockAgent.mockEnv_->mockProcessManager(), spawnProcess(_, _, _, _))
+      .Times(0);
+
+  ITool *itool = &tool;
+  auto result = itool->execute(doc, ctx);
+
+  EXPECT_FALSE(result.success);
+  ASSERT_EQ(mockAgent.mockPerms_->requestedCommands_.size(), 1u);
+  EXPECT_EQ(mockAgent.mockPerms_->requestedCommands_[0], "sleep 10");
+}
+
+TEST_F(CommandPermissionToolTest,
+       pythonExecute_deniedCommandDoesNotWriteTempFile) {
+  PythonExecuteTool tool;
+  mockAgent.mockPerms_->commandApprovalResponse_ = PermissionResponse::Deny;
+
+  auto json = createJsonInput({{"code", "print('hi')"}});
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+
+  EXPECT_CALL(mockHost, writeFile(_, _)).Times(0);
+  EXPECT_CALL(mockAgent.mockEnv_->mockProcessManager(), spawnProcess(_, _, _, _))
+      .Times(0);
+
+  ITool *itool = &tool;
+  auto result = itool->execute(json, ctx);
+
+  EXPECT_FALSE(result.success);
+  ASSERT_EQ(mockAgent.mockPerms_->requestedCommands_.size(), 1u);
+  EXPECT_THAT(mockAgent.mockPerms_->requestedCommands_[0],
+              HasSubstr("python3 /tmp/firmius_script_"));
+}
+
+TEST_F(CommandPermissionToolTest,
+       fileEdit_deniedWriteApprovalDoesNotWriteFile) {
+  FileEditTool tool;
+  mockAgent.mockPerms_->editApprovalResponse_ = PermissionResponse::Deny;
+
+  auto json =
+      createJsonInput({{"path", "blocked.txt"}, {"content", "new content"}});
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+
+  EXPECT_CALL(mockHost, exists("/tmp/work/blocked.txt")).WillOnce(Return(false));
+  EXPECT_CALL(mockHost, writeFile(_, _)).Times(0);
+
+  ITool *itool = &tool;
+  auto result = itool->execute(json, ctx);
+
+  EXPECT_FALSE(result.success);
+  ASSERT_EQ(mockAgent.mockPerms_->requestedEditPaths_.size(), 1u);
+  EXPECT_EQ(mockAgent.mockPerms_->requestedEditPaths_[0],
+            "/tmp/work/blocked.txt");
+}
+
 TEST_F(GrepToolTest, contextLines) {
   ProcessResult result;
   result.exitCode = 0;
@@ -415,7 +498,7 @@ protected:
     ON_CALL(mockAgent, getMutableContext())
         .WillByDefault(ReturnRef(mockAgent.defaultCtx));
     ON_CALL(mockAgent, isInterrupted()).WillByDefault(Return(false));
-    ON_CALL(mockAgent, resolvePath(_))
+    ON_CALL(mockAgent.mockEnv_->mockWorkspace(), resolvePath(_))
         .WillByDefault(Invoke([](const std::string &path) { return path; }));
   }
 };
@@ -423,14 +506,14 @@ protected:
 TEST_F(ProcessExecuteToolTest, cwdDefaultsToAgentCwd) {
   std::string capturedCwd;
 
-  EXPECT_CALL(mockAgent, spawnProcess(_, _, _, _))
+  EXPECT_CALL(mockAgent.mockEnv_->mockProcessManager(), spawnProcess(_, _, _, _))
       .WillOnce(Invoke([&capturedCwd](const std::string &, const std::string &,
                                       const std::string &cwd, const auto &) {
         capturedCwd = cwd;
         return "proc_123";
       }));
 
-  EXPECT_CALL(mockAgent, inspectProcess(_))
+  EXPECT_CALL(mockAgent.mockEnv_->mockProcessManager(), inspectProcess(_))
       .WillRepeatedly(Return(ProcessSnapshot{false, 0, "output", "", 100.0}));
 
   auto json = createJsonInput({{"command", "echo test"}});
@@ -443,10 +526,10 @@ TEST_F(ProcessExecuteToolTest, cwdDefaultsToAgentCwd) {
 }
 
 TEST_F(ProcessExecuteToolTest, timeoutHandling) {
-  EXPECT_CALL(mockAgent, spawnProcess(_, _, _, _)).WillOnce(Return("proc_123"));
+  EXPECT_CALL(mockAgent.mockEnv_->mockProcessManager(), spawnProcess(_, _, _, _)).WillOnce(Return("proc_123"));
 
   ProcessSnapshot runningSnapshot{true, -1, "partial output", "", 100.0};
-  EXPECT_CALL(mockAgent, inspectProcess(_))
+  EXPECT_CALL(mockAgent.mockEnv_->mockProcessManager(), inspectProcess(_))
       .WillRepeatedly(Return(runningSnapshot));
 
   auto json = createJsonInput({{"command", "sleep 100"}}, {{"timeout_ms", 50}});
@@ -470,11 +553,15 @@ protected:
     mockAgent.defaultCtx.permissions.allowOutsideCwd = false;
     mockAgent.defaultCtx.permissions.allowedPaths = {"/work"};
 
+    mockAgent.mockPerms_->allowOutsideCwd_ = false;
+    mockAgent.mockPerms_->allowedPaths_ = {"/work"};
+    mockAgent.mockPerms_->cwd_ = "/tmp/work";
+
     ON_CALL(mockAgent, getContext())
         .WillByDefault(ReturnRef(mockAgent.defaultCtx));
     ON_CALL(mockAgent, getMutableContext())
         .WillByDefault(ReturnRef(mockAgent.defaultCtx));
-    ON_CALL(mockAgent, resolvePath(_))
+    ON_CALL(mockAgent.mockEnv_->mockWorkspace(), resolvePath(_))
         .WillByDefault(Invoke([](const std::string &path) {
           if (path.starts_with("/"))
             return path;
@@ -486,6 +573,9 @@ protected:
 TEST_F(ListDirectoryToolTest, allowedPaths_enforced) {
   mockAgent.defaultCtx.permissions.allowedPaths = {};
   mockAgent.defaultCtx.permissions.allowOutsideCwd = false;
+
+  mockAgent.mockPerms_->allowOutsideCwd_ = false;
+  mockAgent.mockPerms_->allowedPaths_ = {};
 
   auto json = createJsonInput({{"path", "/etc"}});
   ToolContext ctx{mockHost, mockAgent, "test_call"};

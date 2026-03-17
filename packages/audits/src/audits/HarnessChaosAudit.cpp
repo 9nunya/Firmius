@@ -314,7 +314,7 @@ int phase3_abort_mid_process(Harness &harnessInst, TestState &state) {
     std::cerr << "Phase 3 FAILED: Agent not in registry" << std::endl;
     return EXIT_PHASE3_FAILED;
   }
-  auto blockingPids = agent->getBlockingProcessIds();
+  auto blockingPids = agent->getEnvironment()->getProcessManager().getBlockingProcessIds();
   if (blockingPids.empty()) {
     std::cout << "[Phase 3] WARNING: No blocking process found (may have "
                  "finished quickly)"

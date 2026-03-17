@@ -100,6 +100,28 @@ ToolScope stringToToolScope(const std::string &str) {
   throw std::runtime_error("Unknown ToolScope: " + str);
 }
 
+std::string threadPermissionModeToString(ThreadPermissionMode value) {
+  switch (value) {
+  case ThreadPermissionMode::Request:
+    return "Request";
+  case ThreadPermissionMode::AlwaysAllow:
+    return "AlwaysAllow";
+  case ThreadPermissionMode::DenyAll:
+    return "DenyAll";
+  }
+  return "Unknown";
+}
+
+ThreadPermissionMode stringToThreadPermissionMode(const std::string &str) {
+  if (str == "Request")
+    return ThreadPermissionMode::Request;
+  if (str == "AlwaysAllow")
+    return ThreadPermissionMode::AlwaysAllow;
+  if (str == "DenyAll")
+    return ThreadPermissionMode::DenyAll;
+  throw std::runtime_error("Unknown ThreadPermissionMode: " + str);
+}
+
 std::string agentStatusToString(AgentStatus value) {
   switch (value) {
   case AgentStatus::Idle:
@@ -138,6 +160,82 @@ AgentStatus stringToAgentStatus(const std::string &str) {
   if (str == "Cancelled")
     return AgentStatus::Cancelled;
   throw std::runtime_error("Unknown AgentStatus: " + str);
+}
+
+std::string planStatusToString(PlanStatus value) {
+  switch (value) {
+  case PlanStatus::Draft:
+    return "Draft";
+  case PlanStatus::Active:
+    return "Active";
+  case PlanStatus::Paused:
+    return "Paused";
+  case PlanStatus::Done:
+    return "Done";
+  case PlanStatus::Abandoned:
+    return "Abandoned";
+  }
+  return "Draft";
+}
+
+PlanStatus stringToPlanStatus(const std::string &str) {
+  if (str == "Draft")
+    return PlanStatus::Draft;
+  if (str == "Active")
+    return PlanStatus::Active;
+  if (str == "Paused")
+    return PlanStatus::Paused;
+  if (str == "Done")
+    return PlanStatus::Done;
+  if (str == "Abandoned")
+    return PlanStatus::Abandoned;
+  throw std::runtime_error("Unknown PlanStatus: " + str);
+}
+
+std::string workChunkStatusToString(WorkChunkStatus value) {
+  switch (value) {
+  case WorkChunkStatus::Draft:
+    return "Draft";
+  case WorkChunkStatus::Ready:
+    return "Ready";
+  case WorkChunkStatus::InProgress:
+    return "InProgress";
+  case WorkChunkStatus::Implemented:
+    return "Implemented";
+  case WorkChunkStatus::Verifying:
+    return "Verifying";
+  case WorkChunkStatus::Done:
+    return "Done";
+  case WorkChunkStatus::Blocked:
+    return "Blocked";
+  case WorkChunkStatus::Failed:
+    return "Failed";
+  case WorkChunkStatus::Cancelled:
+    return "Cancelled";
+  }
+  return "Draft";
+}
+
+WorkChunkStatus stringToWorkChunkStatus(const std::string &str) {
+  if (str == "Draft")
+    return WorkChunkStatus::Draft;
+  if (str == "Ready")
+    return WorkChunkStatus::Ready;
+  if (str == "InProgress")
+    return WorkChunkStatus::InProgress;
+  if (str == "Implemented")
+    return WorkChunkStatus::Implemented;
+  if (str == "Verifying")
+    return WorkChunkStatus::Verifying;
+  if (str == "Done")
+    return WorkChunkStatus::Done;
+  if (str == "Blocked")
+    return WorkChunkStatus::Blocked;
+  if (str == "Failed")
+    return WorkChunkStatus::Failed;
+  if (str == "Cancelled")
+    return WorkChunkStatus::Cancelled;
+  throw std::runtime_error("Unknown WorkChunkStatus: " + str);
 }
 
 std::string stopReasonToString(StopReason value) {
@@ -272,6 +370,187 @@ HostCreationOptions hostCreationOptionsFromJson(const rapidjson::Value &v) {
     o.deleteOnExit = v["deleteOnExit"].GetBool();
   }
   return o;
+}
+
+rapidjson::Value workChunkToJson(const WorkChunk &chunk,
+                                 rapidjson::Document::AllocatorType &a) {
+  rapidjson::Value v(rapidjson::kObjectType);
+  v.AddMember("id", rapidjson::Value(chunk.id.c_str(), a), a);
+  v.AddMember("title", rapidjson::Value(chunk.title.c_str(), a), a);
+  v.AddMember("goal", rapidjson::Value(chunk.goal.c_str(), a), a);
+  v.AddMember("context", rapidjson::Value(chunk.context.c_str(), a), a);
+  v.AddMember("constraints", rapidjson::Value(chunk.constraints.c_str(), a), a);
+  v.AddMember("completion", rapidjson::Value(chunk.completion.c_str(), a), a);
+  v.AddMember("status",
+              rapidjson::Value(workChunkStatusToString(chunk.status).c_str(), a),
+              a);
+  v.AddMember("priority", chunk.priority, a);
+  rapidjson::Value dependsOn(rapidjson::kArrayType);
+  for (const auto &dependency : chunk.dependsOn) {
+    dependsOn.PushBack(rapidjson::Value(dependency.c_str(), a), a);
+  }
+  v.AddMember("depends_on", dependsOn, a);
+  v.AddMember("assigned_agent_id",
+              rapidjson::Value(chunk.assignedAgentId.c_str(), a), a);
+  v.AddMember("assigned_role",
+              rapidjson::Value(chunk.assignedRole.c_str(), a), a);
+  v.AddMember("attempt_count", chunk.attemptCount, a);
+  v.AddMember("result_summary",
+              rapidjson::Value(chunk.resultSummary.c_str(), a), a);
+  v.AddMember("review_summary",
+              rapidjson::Value(chunk.reviewSummary.c_str(), a), a);
+  v.AddMember("created_at", chunk.createdAt, a);
+  v.AddMember("updated_at", chunk.updatedAt, a);
+  return v;
+}
+
+WorkChunk workChunkFromJsonValue(const rapidjson::Value &v) {
+  WorkChunk chunk;
+  chunk.id =
+      v.HasMember("id") && v["id"].IsString() ? v["id"].GetString() : "";
+  chunk.title =
+      v.HasMember("title") && v["title"].IsString() ? v["title"].GetString() : "";
+  chunk.goal =
+      v.HasMember("goal") && v["goal"].IsString() ? v["goal"].GetString() : "";
+  chunk.context = v.HasMember("context") && v["context"].IsString()
+                      ? v["context"].GetString()
+                      : "";
+  chunk.constraints =
+      v.HasMember("constraints") && v["constraints"].IsString()
+          ? v["constraints"].GetString()
+          : "";
+  chunk.completion =
+      v.HasMember("completion") && v["completion"].IsString()
+          ? v["completion"].GetString()
+          : "";
+  chunk.status = v.HasMember("status") && v["status"].IsString()
+                     ? stringToWorkChunkStatus(v["status"].GetString())
+                     : WorkChunkStatus::Draft;
+  chunk.priority =
+      v.HasMember("priority") && v["priority"].IsInt() ? v["priority"].GetInt() : 0;
+  if (v.HasMember("depends_on") && v["depends_on"].IsArray()) {
+    for (const auto &dependency : v["depends_on"].GetArray()) {
+      if (dependency.IsString()) {
+        chunk.dependsOn.push_back(dependency.GetString());
+      }
+    }
+  } else if (v.HasMember("dependsOn") && v["dependsOn"].IsArray()) {
+    for (const auto &dependency : v["dependsOn"].GetArray()) {
+      if (dependency.IsString()) {
+        chunk.dependsOn.push_back(dependency.GetString());
+      }
+    }
+  }
+  chunk.assignedAgentId =
+      v.HasMember("assigned_agent_id") && v["assigned_agent_id"].IsString()
+          ? v["assigned_agent_id"].GetString()
+          : (v.HasMember("assignedAgentId") && v["assignedAgentId"].IsString()
+                 ? v["assignedAgentId"].GetString()
+                 : "");
+  chunk.assignedRole =
+      v.HasMember("assigned_role") && v["assigned_role"].IsString()
+          ? v["assigned_role"].GetString()
+          : (v.HasMember("assignedRole") && v["assignedRole"].IsString()
+                 ? v["assignedRole"].GetString()
+                 : "");
+  chunk.attemptCount = v.HasMember("attempt_count") && v["attempt_count"].IsInt()
+                           ? v["attempt_count"].GetInt()
+                           : (v.HasMember("attemptCount") &&
+                                      v["attemptCount"].IsInt()
+                                  ? v["attemptCount"].GetInt()
+                                  : 0);
+  chunk.resultSummary =
+      v.HasMember("result_summary") && v["result_summary"].IsString()
+          ? v["result_summary"].GetString()
+          : (v.HasMember("resultSummary") && v["resultSummary"].IsString()
+                 ? v["resultSummary"].GetString()
+                 : "");
+  chunk.reviewSummary =
+      v.HasMember("review_summary") && v["review_summary"].IsString()
+          ? v["review_summary"].GetString()
+          : (v.HasMember("reviewSummary") && v["reviewSummary"].IsString()
+                 ? v["reviewSummary"].GetString()
+                 : "");
+  chunk.createdAt = v.HasMember("created_at") && v["created_at"].IsUint64()
+                        ? v["created_at"].GetUint64()
+                        : (v.HasMember("createdAt") && v["createdAt"].IsUint64()
+                               ? v["createdAt"].GetUint64()
+                               : 0);
+  chunk.updatedAt = v.HasMember("updated_at") && v["updated_at"].IsUint64()
+                        ? v["updated_at"].GetUint64()
+                        : (v.HasMember("updatedAt") && v["updatedAt"].IsUint64()
+                               ? v["updatedAt"].GetUint64()
+                               : 0);
+  return chunk;
+}
+
+rapidjson::Value planToJson(const Plan &plan,
+                            rapidjson::Document::AllocatorType &a) {
+  rapidjson::Value v(rapidjson::kObjectType);
+  v.AddMember("id", rapidjson::Value(plan.id.c_str(), a), a);
+  v.AddMember("thread_id", rapidjson::Value(plan.threadId.c_str(), a), a);
+  v.AddMember("title", rapidjson::Value(plan.title.c_str(), a), a);
+  v.AddMember("objective", rapidjson::Value(plan.objective.c_str(), a), a);
+  v.AddMember("context", rapidjson::Value(plan.context.c_str(), a), a);
+  v.AddMember("strategy", rapidjson::Value(plan.strategy.c_str(), a), a);
+  v.AddMember("status",
+              rapidjson::Value(planStatusToString(plan.status).c_str(), a), a);
+  v.AddMember("notes", rapidjson::Value(plan.notes.c_str(), a), a);
+  v.AddMember("created_at", plan.createdAt, a);
+  v.AddMember("updated_at", plan.updatedAt, a);
+  rapidjson::Value chunks(rapidjson::kArrayType);
+  for (const auto &chunk : plan.chunks) {
+    chunks.PushBack(workChunkToJson(chunk, a), a);
+  }
+  v.AddMember("chunks", chunks, a);
+  return v;
+}
+
+Plan planFromJsonValue(const rapidjson::Value &v) {
+  Plan plan;
+  plan.id =
+      v.HasMember("id") && v["id"].IsString() ? v["id"].GetString() : "";
+  plan.threadId = v.HasMember("thread_id") && v["thread_id"].IsString()
+                      ? v["thread_id"].GetString()
+                      : (v.HasMember("threadId") && v["threadId"].IsString()
+                             ? v["threadId"].GetString()
+                             : "");
+  plan.title =
+      v.HasMember("title") && v["title"].IsString() ? v["title"].GetString() : "";
+  plan.objective =
+      v.HasMember("objective") && v["objective"].IsString()
+          ? v["objective"].GetString()
+          : "";
+  plan.context = v.HasMember("context") && v["context"].IsString()
+                     ? v["context"].GetString()
+                     : "";
+  plan.strategy =
+      v.HasMember("strategy") && v["strategy"].IsString()
+          ? v["strategy"].GetString()
+          : "";
+  plan.status = v.HasMember("status") && v["status"].IsString()
+                    ? stringToPlanStatus(v["status"].GetString())
+                    : PlanStatus::Draft;
+  plan.notes =
+      v.HasMember("notes") && v["notes"].IsString() ? v["notes"].GetString() : "";
+  plan.createdAt = v.HasMember("created_at") && v["created_at"].IsUint64()
+                       ? v["created_at"].GetUint64()
+                       : (v.HasMember("createdAt") && v["createdAt"].IsUint64()
+                              ? v["createdAt"].GetUint64()
+                              : 0);
+  plan.updatedAt = v.HasMember("updated_at") && v["updated_at"].IsUint64()
+                       ? v["updated_at"].GetUint64()
+                       : (v.HasMember("updatedAt") && v["updatedAt"].IsUint64()
+                              ? v["updatedAt"].GetUint64()
+                              : 0);
+  if (v.HasMember("chunks") && v["chunks"].IsArray()) {
+    for (const auto &chunkValue : v["chunks"].GetArray()) {
+      if (chunkValue.IsObject()) {
+        plan.chunks.push_back(workChunkFromJsonValue(chunkValue));
+      }
+    }
+  }
+  return plan;
 }
 
 rapidjson::Value messagePartToJson(const MessagePart &p,
@@ -793,6 +1072,11 @@ rapidjson::Document toJson(const ThreadMetadata &m) {
               a);
   d.AddMember("cwd", rapidjson::Value(m.cwd.c_str(), a), a);
   d.AddMember("leadPersona", rapidjson::Value(m.leadPersona.c_str(), a), a);
+  d.AddMember("active_plan_id", rapidjson::Value(m.activePlanId.c_str(), a), a);
+  d.AddMember(
+      "permissionMode",
+      rapidjson::Value(threadPermissionModeToString(m.permissionMode).c_str(), a),
+      a);
   d.AddMember("createdAt", m.createdAt, a);
   d.AddMember("lastActiveAt", m.lastActiveAt, a);
   return d;
@@ -819,6 +1103,16 @@ ThreadMetadata threadMetadataFromJson(const rapidjson::Value &v) {
   m.leadPersona = v.HasMember("leadPersona") && v["leadPersona"].IsString()
                       ? v["leadPersona"].GetString()
                       : "";
+  m.activePlanId =
+      v.HasMember("active_plan_id") && v["active_plan_id"].IsString()
+          ? v["active_plan_id"].GetString()
+          : (v.HasMember("activePlanId") && v["activePlanId"].IsString()
+                 ? v["activePlanId"].GetString()
+                 : "");
+  m.permissionMode =
+      v.HasMember("permissionMode") && v["permissionMode"].IsString()
+          ? stringToThreadPermissionMode(v["permissionMode"].GetString())
+          : ThreadPermissionMode::Request;
   m.createdAt = v.HasMember("createdAt") && v["createdAt"].IsUint64()
                     ? v["createdAt"].GetUint64()
                     : 0;
@@ -826,6 +1120,30 @@ ThreadMetadata threadMetadataFromJson(const rapidjson::Value &v) {
                        ? v["lastActiveAt"].GetUint64()
                        : 0;
   return m;
+}
+
+rapidjson::Document toJson(const WorkChunk &chunk) {
+  rapidjson::Document d;
+  d.SetObject();
+  auto &a = d.GetAllocator();
+  d.CopyFrom(workChunkToJson(chunk, a), a);
+  return d;
+}
+
+WorkChunk workChunkFromJson(const rapidjson::Value &value) {
+  return workChunkFromJsonValue(value);
+}
+
+rapidjson::Document toJson(const Plan &plan) {
+  rapidjson::Document d;
+  d.SetObject();
+  auto &a = d.GetAllocator();
+  d.CopyFrom(planToJson(plan, a), a);
+  return d;
+}
+
+Plan planFromJson(const rapidjson::Value &value) {
+  return planFromJsonValue(value);
 }
 
 rapidjson::Document toJson(const EngineEvent &ev) {

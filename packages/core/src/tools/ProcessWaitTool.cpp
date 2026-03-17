@@ -12,7 +12,7 @@ shared::ToolResult ProcessWaitTool::execute(const ProcessWaitInput& input, share
         int timeout = input.timeout_ms > 0 ? input.timeout_ms : 30000;
 
         while (true) {
-            auto snapshot = ctx.agent.inspectProcess(input.process_id);
+            auto snapshot = ctx.agent.getEnvironment()->getProcessManager().inspectProcess(input.process_id);
 
             bool patternFound = false;
             if (!input.pattern.empty()) {

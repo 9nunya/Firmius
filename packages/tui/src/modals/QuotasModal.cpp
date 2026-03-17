@@ -3,6 +3,7 @@
 #include "ThemeManager.hpp"
 #include "components/ScrollableBox.hpp"
 #include "harness/Harness.hpp"
+#include "modals/ModalLayout.hpp"
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/mouse.hpp>
 #include <ftxui/dom/elements.hpp>
@@ -260,30 +261,24 @@ ftxui::Component QuotasModal::create(TuiState &state) {
                                            providerId = providerId_]() {
         const auto &theme = ThemeManager::instance().getCurrentTheme();
         const auto widths = computeQuotaModalWidths();
-        auto window_title =
-            ftxui::hbox({ftxui::text(" Provider Quotas: ") | ftxui::bold |
-                             ftxui::color(theme.modals.title),
-                         ftxui::text(providerId) | ftxui::bold |
-                             ftxui::color(theme.modals.highlight_fg)});
-
-        return ftxui::window(
-                   window_title,
-                   ftxui::vbox({
-                       scrollable_content->Render() |
-                           ftxui::size(ftxui::HEIGHT, ftxui::LESS_THAN, 22) |
-                           ftxui::size(ftxui::WIDTH, ftxui::EQUAL,
-                                       widths.content_w),
-                       ftxui::text(""),
-                       ftxui::hbox({ftxui::text(" ESC/Enter ") | ftxui::bold |
-                                        ftxui::color(theme.base.dim),
-                                    ftxui::text("close") |
-                                        ftxui::color(theme.modals.fg)}) |
-                           ftxui::center,
-                   })) |
-               ftxui::clear_under | ftxui::center |
-               ftxui::bgcolor(theme.modals.bg) |
-               ftxui::color(theme.modals.border) |
-               ftxui::size(ftxui::WIDTH, ftxui::EQUAL, widths.window_w);
+        return FlatModalPanel(
+            theme, "Provider Quotas: " + providerId,
+            ModalSection(
+                theme,
+                ftxui::vbox({
+                    scrollable_content->Render() |
+                        ftxui::size(ftxui::HEIGHT, ftxui::LESS_THAN, 22) |
+                        ftxui::size(ftxui::WIDTH, ftxui::EQUAL,
+                                    widths.content_w),
+                    ftxui::text(""),
+                    ftxui::hbox({ftxui::text(" ESC/Enter ") | ftxui::bold |
+                                     ftxui::color(theme.base.dim),
+                                 ftxui::text("close") |
+                                     ftxui::color(theme.modals.fg)}) |
+                        ftxui::center,
+                }),
+                theme.modals.bg),
+            widths.window_w + 2, 28);
       });
 
   return ftxui::CatchEvent(

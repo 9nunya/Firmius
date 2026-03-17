@@ -224,10 +224,10 @@ public:
      * @param timeout Optional timeout for the execution.
      * @return Result of the execution.
      */
-    ProcessResult exec(const std::string& command, 
+    ProcessResult exec(const std::string& command,
                        const std::string& cwd = "",
-                       const std::map<std::string, std::string>& env = {},
-                       std::optional<std::chrono::milliseconds> timeout = std::nullopt) override {
+                       const std::map<std::string, std::string>& /*env*/ = {},
+                       std::optional<std::chrono::milliseconds> /*timeout*/ = std::nullopt) override {
         recordCall("exec", {
             {"command", command},
             {"cwd", cwd}
@@ -266,7 +266,7 @@ public:
      */
     std::unique_ptr<IHostProcess> spawn(const std::string& command,
                                           const std::string& cwd = "",
-                                          const std::map<std::string, std::string>& env = {}) override {
+                                          const std::map<std::string, std::string>& /*env*/ = {}) override {
         recordCall("spawn", {
             {"command", command},
             {"cwd", cwd}

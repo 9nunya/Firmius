@@ -25,20 +25,31 @@ shared::ToolResult PythonExecuteTool::execute(const PythonExecuteInput &input,
                                               shared::ToolContext &ctx) {
   std::string tempFile =
       "/tmp/firmius_script_" + shared::StringUtil::generateUuid() + ".py";
+  std::string command = "python3 " + tempFile;
   std::string processId;
 
   try {
     std::string effectiveCwd = ctx.agent.getContext().environment.cwd;
-    effectiveCwd = ctx.agent.resolvePath(effectiveCwd);
+    effectiveCwd = ctx.agent.getEnvironment()->getWorkspace().resolvePath(effectiveCwd);
 
-    ctx.agent.getPermissionChecks().validatePathAccess(effectiveCwd);
+    ctx.agent.getPermissions()->validatePathAccess(
+        effectiveCwd, firmius::shared::AccessMode::READ);
+    auto intent =
+        ctx.agent.getPermissions()->getIntentAnalyzer().analyze(command, effectiveCwd);
+    auto approval =
+        ctx.agent.getPermissions()->requestCommandApproval(command, intent);
+    if (approval == PermissionResponse::Deny) {
+      return shared::ToolResult::fail("Command execution denied: " + command);
+    }
+    ctx.agent.getPermissions()->validatePathAccess(
+        tempFile, firmius::shared::AccessMode::WRITE);
 
     ctx.host.writeFile(
         tempFile, std::vector<uint8_t>(input.code.begin(), input.code.end()));
 
-    processId = ctx.agent.spawnProcess("python3 " + tempFile,
+    processId = ctx.agent.getEnvironment()->getProcessManager().spawnProcess(command,
                                        ctx.currentToolCallId, effectiveCwd);
-    ctx.agent.addBlockingProcessId(processId);
+    ctx.agent.getEnvironment()->getProcessManager().addBlockingProcessId(processId);
 
     shared::ProcessSnapshot snap;
     auto sleepDuration = std::chrono::milliseconds(1);
@@ -47,7 +58,7 @@ shared::ToolResult PythonExecuteTool::execute(const PythonExecuteInput &input,
     while (true) {
       // Check for interrupt
       if (ctx.agent.isInterrupted()) {
-        ctx.agent.removeBlockingProcessId(processId);
+        ctx.agent.getEnvironment()->getProcessManager().removeBlockingProcessId(processId);
         rapidjson::Document doc;
         doc.SetObject();
         auto &a = doc.GetAllocator();
@@ -61,7 +72,7 @@ shared::ToolResult PythonExecuteTool::execute(const PythonExecuteInput &input,
         return shared::ToolResult::ok(doc);
       }
 
-      snap = ctx.agent.inspectProcess(processId);
+      snap = ctx.agent.getEnvironment()->getProcessManager().inspectProcess(processId);
       if (!snap.running)
         break;
 
@@ -71,7 +82,7 @@ shared::ToolResult PythonExecuteTool::execute(const PythonExecuteInput &input,
       }
     }
 
-    ctx.agent.removeBlockingProcessId(processId);
+    ctx.agent.getEnvironment()->getProcessManager().removeBlockingProcessId(processId);
 
     // Cleanup
     ctx.host.exec("rm " + tempFile);
@@ -89,7 +100,7 @@ shared::ToolResult PythonExecuteTool::execute(const PythonExecuteInput &input,
     return shared::ToolResult::ok(doc);
   } catch (const std::exception &e) {
     if (!processId.empty())
-      ctx.agent.removeBlockingProcessId(processId);
+      ctx.agent.getEnvironment()->getProcessManager().removeBlockingProcessId(processId);
     return shared::ToolResult::fail(e.what());
   }
 }

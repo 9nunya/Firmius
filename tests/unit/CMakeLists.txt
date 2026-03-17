@@ -224,3 +224,18 @@ target_include_directories(test_workflow PRIVATE
     ${rapidjson_SOURCE_DIR}/include
 )
 gtest_discover_tests(test_workflow)
+
+# CommandIntentAnalyzer tests
+add_executable(test_command_intent_analyzer
+    core/test_command_intent_analyzer.cpp
+)
+target_link_libraries(test_command_intent_analyzer PRIVATE
+    firmius::core
+    firmius::shared
+    GTest::gtest_main
+    GTest::gmock
+)
+target_include_directories(test_command_intent_analyzer PRIVATE
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_command_intent_analyzer)

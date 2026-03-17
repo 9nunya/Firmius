@@ -2,6 +2,7 @@
 #include "TUIState.hpp"
 #include "ThemeManager.hpp"
 #include "harness/Harness.hpp"
+#include "modals/ModalLayout.hpp"
 #include <Serialization.hpp>
 #include <ftxui/component/component.hpp>
 #include <ftxui/dom/elements.hpp>
@@ -378,35 +379,33 @@ ftxui::Component ThreadPickerModal::create(TuiState &state) {
         *list_width = content_width;
 
         if (entries->empty()) {
-          return ftxui::window(
-                     ftxui::text(" Select Thread ") | ftxui::bold |
-                         ftxui::color(theme.modals.title),
-                     ftxui::vbox(
-                         {ftxui::text("No threads in this directory.") |
-                              ftxui::color(theme.base.dim) | ftxui::center,
-                          ftxui::text(""),
-                          ftxui::text("Press ESC to cancel.") |
-                              ftxui::color(theme.base.dim) | ftxui::center})) |
-                 ftxui::clear_under | ftxui::center |
-                 ftxui::bgcolor(theme.modals.bg) |
-                 ftxui::color(theme.modals.border) |
-                 ftxui::size(ftxui::WIDTH, ftxui::EQUAL, modal_width);
+          return FlatModalPanel(
+              theme, "Select Thread",
+              ModalSection(
+                  theme,
+                  ftxui::vbox(
+                      {ftxui::text("No threads in this directory.") |
+                           ftxui::color(theme.base.dim) | ftxui::center,
+                       ftxui::text(""),
+                       ftxui::text("Press ESC to cancel.") |
+                           ftxui::color(theme.base.dim) | ftxui::center}),
+                  theme.modals.bg),
+              modal_width, 16);
         }
 
-        return ftxui::window(
-                   ftxui::text(" Select Thread ") | ftxui::bold |
-                       ftxui::color(theme.modals.title),
-                   ftxui::vbox(
-                       {menu->Render() | ftxui::vscroll_indicator |
-                            ftxui::yframe |
-                            ftxui::size(ftxui::HEIGHT, ftxui::LESS_THAN, 18),
-                        ftxui::text(""),
-                        ftxui::text("Press Enter to switch, ESC to cancel.") |
-                            ftxui::color(theme.base.dim)})) |
-               ftxui::clear_under | ftxui::center |
-               ftxui::bgcolor(theme.modals.bg) |
-               ftxui::color(theme.modals.border) |
-               ftxui::size(ftxui::WIDTH, ftxui::EQUAL, modal_width);
+        return FlatModalPanel(
+            theme, "Select Thread",
+            ModalSection(
+                theme,
+                ftxui::vbox(
+                    {menu->Render() | ftxui::vscroll_indicator |
+                         ftxui::yframe |
+                         ftxui::size(ftxui::HEIGHT, ftxui::LESS_THAN, 18),
+                     ftxui::text(""),
+                     ftxui::text("Press Enter to switch, ESC to cancel.") |
+                         ftxui::color(theme.base.dim)}),
+                theme.modals.bg),
+            modal_width, 24);
       });
 
   return ftxui::CatchEvent(

@@ -1,0 +1,123 @@
+#include "environment/ProcessManager.hpp"
+#include "utils/StringUtil.hpp"
+#include <chrono>
+#include <algorithm>
+
+namespace firmius::core {
+
+ProcessManager::ProcessManager(std::shared_ptr<IHost> host,
+                               std::function<void(const StreamEvent&)> eventCallback)
+    : host_(std::move(host))
+    , eventCallback_(std::move(eventCallback))
+{
+}
+
+ProcessManager::~ProcessManager() {
+    cleanup();
+}
+
+std::string ProcessManager::spawnProcess(const std::string& command,
+                                        const std::string& toolCallId,
+                                        const std::string& cwd,
+                                        const std::map<std::string, std::string>& env) {
+    if (!active_.load()) {
+        throw std::runtime_error("ProcessManager is not active");
+    }
+    
+    std::string id = StringUtil::generateUuid();
+    auto proc = host_->spawn(command, cwd, env);
+    
+    proc->onOutput([this, id](const std::string& output, bool isError) {
+        std::lock_guard<std::mutex> lock(callbackMutex_);
+        if (eventCallback_) {
+            eventCallback_(ProcessOutputDelta{id, output, isError, false});
+        }
+    });
+    
+    host_->registerBackgroundProcess(id, std::move(proc));
+    
+    std::lock_guard<std::mutex> lock(processMutex_);
+    processIds_.insert(id);
+    
+    emitProcessSpawned(id, toolCallId, command);
+    return id;
+}
+
+ProcessSnapshot ProcessManager::inspectProcess(const std::string& id) {
+    return host_->inspectBackgroundProcess(id);
+}
+
+void ProcessManager::writeToProcess(const std::string& id, const std::string& data) {
+    host_->writeToBackgroundProcess(id, data);
+}
+
+void ProcessManager::registerProcessId(const std::string& id) {
+    std::lock_guard<std::mutex> lock(processMutex_);
+    processIds_.insert(id);
+}
+
+void ProcessManager::emitProcessSpawned(const std::string& processId,
+                                       const std::string& toolCallId,
+                                       const std::string& command) {
+    std::lock_guard<std::mutex> lock(callbackMutex_);
+    if (eventCallback_) {
+        AgentProcessSpawned event;
+        event.processId = processId;
+        event.toolCallId = toolCallId;
+        event.command = command;
+        eventCallback_(event);
+    }
+}
+
+void ProcessManager::addBlockingProcessId(const std::string& id) {
+    std::lock_guard<std::mutex> lock(processMutex_);
+    blockingProcessIds_.push_back(id);
+}
+
+void ProcessManager::removeBlockingProcessId(const std::string& id) {
+    std::lock_guard<std::mutex> lock(processMutex_);
+    auto it = std::find(blockingProcessIds_.begin(), blockingProcessIds_.end(), id);
+    if (it != blockingProcessIds_.end()) {
+        blockingProcessIds_.erase(it);
+    }
+}
+
+std::vector<std::string> ProcessManager::getBlockingProcessIds() {
+    std::lock_guard<std::mutex> lock(processMutex_);
+    return blockingProcessIds_;
+}
+
+void ProcessManager::killProcess(const std::string& id) {
+    try {
+        host_->killBackgroundProcess(id);
+    } catch (...) {
+        // Ignore errors during kill
+    }
+    
+    std::lock_guard<std::mutex> lock(processMutex_);
+    processIds_.erase(id);
+}
+
+void ProcessManager::cleanup() {
+    if (!active_.exchange(false)) {
+        return; // Already cleaned up
+    }
+    
+    std::lock_guard<std::mutex> lock(processMutex_);
+    for (const auto& id : processIds_) {
+        try {
+            host_->killBackgroundProcess(id);
+        } catch (...) {
+            // Ignore errors during cleanup
+        }
+    }
+    processIds_.clear();
+    blockingProcessIds_.clear();
+}
+
+size_t ProcessManager::getProcessCount() const {
+    std::lock_guard<std::mutex> lock(processMutex_);
+    return processIds_.size();
+}
+
+} // namespace firmius::core

@@ -9,8 +9,8 @@ class TuiState; // Forward declaration
 
 /// Base interface for all TUI modals.
 /// Each modal lives in its own file and is registered by name.
-/// TuiState provides the chrome (border, dimmed bg, centering) — modals
-/// only return their inner content component.
+/// TuiState provides modal stacking/centering. Modals return their own flat
+/// panel content and handle their own events.
 class IModal {
 public:
   virtual ~IModal() = default;

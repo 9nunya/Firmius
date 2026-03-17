@@ -1,6 +1,8 @@
 #include "Engine.hpp"
 #include <string>
 #include "AgentRegistry.hpp"
+#include "environment/Environment.hpp"
+#include "environment/Permissions.hpp"
 #include "ConfigLoader.hpp"
 #include "agents/Agent.hpp"
 #include "agents/PurposeLoader.hpp"
@@ -187,8 +189,16 @@ std::string Engine::summonAgent(const std::string &threadId,
           jnl = std::make_shared<Journaler>(threadId, agentId);
         }
 
+        // Create Environment and Permissions
+        std::shared_ptr<IHost> hostPtr = std::move(host);
+        auto environment = std::make_shared<Environment>(
+            hostPtr, ctx.environment.cwd,
+            [this](const StreamEvent &/*ev*/) { });
+        auto permissions = std::make_shared<Permissions>(threadId, agentId);
+
         auto agent =
-            std::make_shared<Agent>(ctx, std::move(host), toolRegistry, jnl);
+            std::make_shared<Agent>(ctx, environment, permissions, toolRegistry, jnl);
+        permissions->bindContext(agent->getContext());
         agent->setBooting(true);
         AgentRegistry::instance().registerAgent(agentId, agent);
 
@@ -334,7 +344,15 @@ std::string Engine::resumeAgent(const std::string &threadId,
     jnl = std::make_shared<Journaler>(threadId, agentId);
   }
 
-  auto agent = std::make_shared<Agent>(ctx, std::move(host), toolRegistry, jnl);
+  // Create Environment and Permissions
+  std::shared_ptr<IHost> hostPtr = std::move(host);
+  auto environment = std::make_shared<Environment>(
+      hostPtr, ctx.environment.cwd,
+      [this](const StreamEvent &/*ev*/) { });
+  auto permissions = std::make_shared<Permissions>(threadId, agentId);
+
+  auto agent = std::make_shared<Agent>(ctx, environment, permissions, toolRegistry, jnl);
+  permissions->bindContext(agent->getContext());
   agent->setBooting(true);
   AgentRegistry::instance().registerAgent(agentId, agent);
 

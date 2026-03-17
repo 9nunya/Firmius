@@ -3,6 +3,7 @@
 #include "ThemeManager.hpp"
 #include "harness/Harness.hpp"
 #include "modals/APIKeyWizardModal.hpp"
+#include "modals/ModalLayout.hpp"
 #include "modals/OAuthWizardModal.hpp"
 #include "providers/BaseAPIKeyProvider.hpp"
 #include "providers/BaseOAuthProvider.hpp"
@@ -63,17 +64,16 @@ ftxui::Component AccountsModal::create(TuiState &state) {
     const auto &theme = ThemeManager::instance().getCurrentTheme();
 
     if (*isLoading) {
-      return ftxui::window(
-                 ftxui::text(" Accounts: " + providerId) | ftxui::bold |
-                     ftxui::color(theme.modals.title),
-                 ftxui::vbox(
-                     {ftxui::text("Loading accounts...") | ftxui::center |
-                          ftxui::color(theme.modals.fg),
-                      ftxui::text("") |
-                          ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, 5)})) |
-             ftxui::clear_under | ftxui::center |
-             ftxui::bgcolor(theme.modals.bg) |
-             ftxui::color(theme.modals.border);
+      return FlatModalPanel(
+          theme, "Accounts: " + providerId,
+          ModalSection(
+              theme,
+              ftxui::vbox({ftxui::text("Loading accounts...") | ftxui::center |
+                               ftxui::color(theme.modals.fg),
+                           ftxui::text("") |
+                               ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, 5)}),
+              theme.modals.bg),
+          70, 18);
     }
 
     ftxui::Elements rows;
@@ -114,46 +114,44 @@ ftxui::Component AccountsModal::create(TuiState &state) {
                      ftxui::color(theme.base.dim) | ftxui::center);
     }
 
-    auto window_title =
-        ftxui::hbox({ftxui::text(" Manage Accounts: ") | ftxui::bold |
-                         ftxui::color(theme.modals.title),
-                     ftxui::text(providerId) | ftxui::bold |
-                         ftxui::color(theme.modals.highlight_fg)});
-
-    return ftxui::window(
-               window_title,
-               ftxui::vbox({
-                   ftxui::text("Select an account to manage:") |
-                       ftxui::color(theme.base.dim),
-                   ftxui::text(""),
-                   ftxui::vbox(rows) | ftxui::vscroll_indicator |
-                       ftxui::yframe |
-                       ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, 8) |
-                       ftxui::borderRounded | ftxui::color(theme.modals.border),
-                   ftxui::text(""),
-                   ftxui::hbox(
-                       {ftxui::text(" [A] ") | ftxui::bold |
-                            ftxui::color(theme.modals.highlight_fg),
-                        ftxui::text(" Add Account   ") |
-                            ftxui::color(theme.modals.fg),
-                        ftxui::text(" [D] ") | ftxui::bold |
-                            ftxui::color(theme.status_bar.error.normal.fg),
-                        ftxui::text(" Delete Selected ") |
-                            ftxui::color(theme.modals.fg),
-                        ftxui::filler(),
-                        ftxui::text(" [ESC] ") | ftxui::bold |
-                            ftxui::color(theme.base.dim),
-                        ftxui::text(" Close ") |
-                            ftxui::color(theme.modals.fg)}) |
-                       ftxui::center,
-                   ftxui::separatorLight() | ftxui::color(theme.modals.border),
-                   ftxui::hbox({ftxui::text(" ↑↓ ") | ftxui::bold |
-                                    ftxui::color(theme.modals.title),
-                                ftxui::text("navigate elements")}) |
-                       ftxui::center | ftxui::color(theme.base.dim),
-               })) |
-           ftxui::clear_under | ftxui::center |
-           ftxui::bgcolor(theme.modals.bg) | ftxui::color(theme.modals.border);
+    return FlatModalPanel(
+        theme, "Manage Accounts: " + providerId,
+        ModalSection(
+            theme,
+            ftxui::vbox({
+                ftxui::text("Select an account to manage:") |
+                    ftxui::color(theme.base.dim),
+                ftxui::text(""),
+                ModalSection(
+                    theme,
+                    ftxui::vbox(rows) | ftxui::vscroll_indicator |
+                        ftxui::yframe |
+                        ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, 8),
+                    theme.base.bg),
+                ftxui::text(""),
+                ftxui::hbox(
+                    {ftxui::text(" [A] ") | ftxui::bold |
+                         ftxui::color(theme.modals.highlight_fg),
+                     ftxui::text(" Add Account   ") |
+                         ftxui::color(theme.modals.fg),
+                     ftxui::text(" [D] ") | ftxui::bold |
+                         ftxui::color(theme.status_bar.error.normal.fg),
+                     ftxui::text(" Delete Selected ") |
+                         ftxui::color(theme.modals.fg),
+                     ftxui::filler(),
+                     ftxui::text(" [ESC] ") | ftxui::bold |
+                         ftxui::color(theme.base.dim),
+                     ftxui::text(" Close ") |
+                         ftxui::color(theme.modals.fg)}) |
+                    ftxui::center,
+                ftxui::separatorLight() | ftxui::color(theme.modals.border),
+                ftxui::hbox({ftxui::text(" ↑↓ ") | ftxui::bold |
+                                 ftxui::color(theme.modals.title),
+                             ftxui::text("navigate elements")}) |
+                    ftxui::center | ftxui::color(theme.base.dim),
+            }),
+            theme.modals.bg),
+        78, 24);
   });
 
   return ftxui::CatchEvent(component, [oauthAccounts, apiKeyAccounts, selected,

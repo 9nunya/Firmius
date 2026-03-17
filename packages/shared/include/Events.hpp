@@ -3,6 +3,7 @@
 
 #include "Context.hpp"
 #include "Enums.hpp"
+#include "ICommandIntent.hpp"
 #include "Metrics.hpp"
 
 #include <cstdint>
@@ -301,6 +302,43 @@ struct ThreadChanged {
 };
 
 /**
+ * @brief Emitted when thread metadata changes without changing focus.
+ */
+struct ThreadMetadataUpdated {
+  std::string threadId;
+  ThreadMetadata metadata;
+  bool operator==(const ThreadMetadataUpdated &) const = default;
+};
+
+/**
+ * @brief Emitted when core needs the UI to resolve a permission escalation.
+ */
+struct PermissionEscalationRequest {
+  std::string requestId;
+  std::string threadId;
+  std::string agentId;
+  PermissionRequestType requestType = PermissionRequestType::Command;
+  std::string title;
+  std::string message;
+  std::string command;
+  CommandSeverity severity = CommandSeverity::MEDIUM;
+  std::string targetPath;
+  bool allowAlways = true;
+  bool operator==(const PermissionEscalationRequest &) const = default;
+};
+
+/**
+ * @brief Emitted when a pending permission escalation is answered.
+ */
+struct PermissionEscalationResolved {
+  std::string requestId;
+  std::string threadId;
+  std::string agentId;
+  PermissionResponse response = PermissionResponse::Deny;
+  bool operator==(const PermissionEscalationResolved &) const = default;
+};
+
+/**
  * @brief Emitted when a thread cannot be locked (already in use by another
  * process).
  */
@@ -405,9 +443,10 @@ using AppEvent = std::variant<
     AgentTurnCompleted, AgentCompleted, AgentError, AgentCompacting,
     AgentCompactionThinking, AgentCompactionText, ContextCompacted,
     AgentProcessOutput, AgentProcessSpawned, ModelSwitched, HistoryUndone,
-    AgentAccountSwitched, ThreadChanged, ThreadLocked, ThreadDeleted,
-    ConfigUpdated, ModelsRefreshed, ThreadTitleUpdated, MessageQueued,
-    MessageDequeued, UserMessageSent, AgentFinished>;
+    AgentAccountSwitched, ThreadChanged, ThreadMetadataUpdated,
+    PermissionEscalationRequest, PermissionEscalationResolved, ThreadLocked,
+    ThreadDeleted, ConfigUpdated, ModelsRefreshed, ThreadTitleUpdated,
+    MessageQueued, MessageDequeued, UserMessageSent, AgentFinished>;
 } // namespace firmius::shared
 
 #endif

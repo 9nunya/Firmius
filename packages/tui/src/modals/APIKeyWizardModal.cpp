@@ -1,6 +1,7 @@
 #include "modals/APIKeyWizardModal.hpp"
 #include "TUIState.hpp"
 #include "ThemeManager.hpp"
+#include "modals/ModalLayout.hpp"
 #include "providers/ProviderRegistry.hpp"
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/component_options.hpp>
@@ -58,8 +59,8 @@ ftxui::Component APIKeyWizardModal::create(TuiState &state) {
         errorContent.push_back(ftxui::text(*errorMessage) | ftxui::center |
                                ftxui::automerge |
                                ftxui::color(theme.modals.fg));
-        content.push_back(ftxui::vbox(errorContent) | ftxui::borderRounded |
-                          ftxui::color(theme.status_bar.error.normal.fg));
+        content.push_back(ModalSection(theme, ftxui::vbox(errorContent),
+                                       theme.base.bg));
         content.push_back(ftxui::text(""));
         content.push_back(ftxui::text(" (Press Enter/Esc to close) ") |
                           ftxui::color(theme.base.dim) | ftxui::center);
@@ -71,8 +72,8 @@ ftxui::Component APIKeyWizardModal::create(TuiState &state) {
         successContent.push_back(ftxui::text(""));
         successContent.push_back(ftxui::text(*resultMessage) | ftxui::center |
                                  ftxui::color(theme.modals.fg));
-        content.push_back(ftxui::vbox(successContent) | ftxui::borderRounded |
-                          ftxui::color(theme.modals.border));
+        content.push_back(ModalSection(theme, ftxui::vbox(successContent),
+                                       theme.base.bg));
         content.push_back(ftxui::text(""));
         content.push_back(ftxui::text(" (Press Enter/Esc to close) ") |
                           ftxui::color(theme.base.dim) | ftxui::center);
@@ -92,8 +93,8 @@ ftxui::Component APIKeyWizardModal::create(TuiState &state) {
           ftxui::text(
               " The key will be stored securely in ~/.firmius/keys.json ") |
           ftxui::color(theme.base.dim) | ftxui::center);
-      content.push_back(ftxui::vbox(inputContent) | ftxui::borderRounded |
-                        ftxui::color(theme.modals.border));
+      content.push_back(
+          ModalSection(theme, ftxui::vbox(inputContent), theme.base.bg));
       content.push_back(ftxui::text(""));
       ftxui::Elements buttonContent;
       buttonContent.push_back(ftxui::text(" [Enter] ") | ftxui::bold |
@@ -107,14 +108,10 @@ ftxui::Component APIKeyWizardModal::create(TuiState &state) {
       content.push_back(ftxui::hbox(buttonContent) | ftxui::center);
     }
 
-    auto window_title = ftxui::hbox(
-        {ftxui::text(" API Key Setup: ") | ftxui::bold |
-             ftxui::color(theme.modals.title),
-         ftxui::text(providerName) | ftxui::bold | ftxui::color(title_color)});
-
-    return ftxui::window(window_title, ftxui::vbox(content)) |
-           ftxui::clear_under | ftxui::center |
-           ftxui::bgcolor(theme.modals.bg) | ftxui::color(theme.modals.border);
+    return FlatModalPanel(theme, "API Key Setup: " + providerName,
+                          ModalSection(theme, ftxui::vbox(content),
+                                       theme.modals.bg),
+                          72, 24, title_color);
   });
 
   // Single event handler that handles paste, global keys, and delegates to

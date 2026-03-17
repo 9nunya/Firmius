@@ -55,40 +55,28 @@ public:
   MOCK_METHOD(void, killBackgroundProcess, (const std::string &), (override));
 };
 
+#include "../mocks/MockEnvironment.hpp"
+
+// Local MockAgent with MOCK_METHOD for testing
 class MockAgent : public IAgent {
 public:
   firmius::shared::AgentContext defaultCtx;
-  std::unique_ptr<AgentPermissionChecks> pChecks;
-  MOCK_METHOD(void, saveHistory, (), (override));
-  MockAgent() {
-    pChecks = std::make_unique<AgentPermissionChecks>(defaultCtx);
-    ON_CALL(*this, hasReadFile(_))
-        .WillByDefault(Invoke([this](const std::string &path) {
-          return readFiles_.find(path) != readFiles_.end();
-        }));
-    ON_CALL(*this, hasFullyReadFile(_))
-        .WillByDefault(Invoke([this](const std::string &path) {
-          return fullyReadFiles_.find(path) != fullyReadFiles_.end();
-        }));
-    ON_CALL(*this, markFileAsRead(_))
-        .WillByDefault(Invoke([this](const std::string &path) {
-          if (readFiles_.insert(path).second) {
-            defaultCtx.state.readFiles.push_back(path);
-          }
-        }));
-    ON_CALL(*this, markFileAsFullyRead(_))
-        .WillByDefault(Invoke([this](const std::string &path) {
-          if (readFiles_.insert(path).second) {
-            defaultCtx.state.readFiles.push_back(path);
-          }
-          if (fullyReadFiles_.insert(path).second) {
-            defaultCtx.state.fullyReadFiles.push_back(path);
-          }
-        }));
+  std::shared_ptr<firmius::test::MockEnvironment> mockEnv_;
+  std::shared_ptr<firmius::test::MockPermissions> mockPerms_;
+
+  MockAgent()
+    : mockEnv_(std::make_shared<firmius::test::MockEnvironment>())
+    , mockPerms_(std::make_shared<firmius::test::MockPermissions>()) {
+    if (!defaultCtx.history) {
+      defaultCtx.history = std::make_shared<AgentHistory>();
+    }
   }
-  AgentPermissionChecks &getPermissionChecks() const override {
-    return *pChecks;
-  }
+
+  ~MockAgent() override = default;
+
+  std::shared_ptr<IEnvironment> getEnvironment() const override { return mockEnv_; }
+  std::shared_ptr<IPermissions> getPermissions() const override { return mockPerms_; }
+
   MOCK_METHOD(void, reset, (), (override));
   MOCK_METHOD(void, run,
               (const std::string &, (std::function<void(const StreamEvent &)>),
@@ -96,13 +84,12 @@ public:
               (override));
   MOCK_METHOD((const AgentContext &), getContext, (), (const, override));
   MOCK_METHOD(AgentContext &, getMutableContext, (), (override));
-  MOCK_METHOD(std::string, resolvePath, (const std::string &),
-              (const, override));
   MOCK_METHOD(void, interrupt, (), (override));
   MOCK_METHOD(bool, isInterrupted, (), (const, override));
   MOCK_METHOD(void, clearInterrupt, (), (override));
   MOCK_METHOD(void, compactNow,
               (std::function<void(const StreamEvent &)>), (override));
+  MOCK_METHOD(void, saveHistory, (), (override));
   MOCK_METHOD(void, setModel, (const std::string &, const std::string &),
               (override));
   MOCK_METHOD(void, setModel,
@@ -111,31 +98,7 @@ public:
   MOCK_METHOD(bool, isRunning, (), (const, override));
   MOCK_METHOD(bool, isBooting, (), (const, override));
   MOCK_METHOD(void, setBooting, (bool), (override));
-  MOCK_METHOD(void, emitProcessSpawned,
-              (const std::string &, const std::string &, const std::string &),
-              (override));
-  MOCK_METHOD(std::string, spawnProcess,
-              (const std::string &, const std::string &, const std::string &,
-               (const std::map<std::string, std::string> &)),
-              (override));
-  MOCK_METHOD(ProcessSnapshot, inspectProcess, (const std::string &),
-              (override));
-  MOCK_METHOD(void, writeToProcess, (const std::string &, const std::string &),
-              (override));
-  MOCK_METHOD(void, registerProcessId, (const std::string &), (override));
-  MOCK_METHOD(void, addBlockingProcessId, (const std::string &), (override));
-  MOCK_METHOD(void, removeBlockingProcessId, (const std::string &), (override));
-  MOCK_METHOD((std::vector<std::string>), getBlockingProcessIds, (),
-              (override));
-  MOCK_METHOD(bool, hasReadFile, (const std::string &), (const, override));
-  MOCK_METHOD(void, markFileAsRead, (const std::string &), (override));
-  MOCK_METHOD(bool, hasFullyReadFile, (const std::string &), (const, override));
-  MOCK_METHOD(void, markFileAsFullyRead, (const std::string &), (override));
   MOCK_METHOD((std::shared_ptr<IHost>), getHost, (), (override));
-
-private:
-  std::set<std::string> readFiles_;
-  std::set<std::string> fullyReadFiles_;
 };
 
 class SubagentToolTest : public ::testing::Test {
@@ -204,14 +167,13 @@ TEST_F(SubagentToolTest, validation_passes_for_valid_persona) {
   NiceMock<MockHost> host;
   ToolContext toolCtx{host, agent, "test-call-id"};
 
-  // We expect validation to pass, but the engine call to fail because the
-  // environment isn't set up. However, we want to ensure it doesn't fail with
-  // the "Invalid persona" error.
   ToolResult result = tool.execute(input, toolCtx);
   if (!result.success) {
     EXPECT_THAT(result.error,
                 ::testing::Not(::testing::HasSubstr("Invalid persona")));
   }
+
+  ::testing::Mock::VerifyAndClearExpectations(&agent);
 }
 
 TEST_F(SubagentToolTest, concurrent_validation_requests) {

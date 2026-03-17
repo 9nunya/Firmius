@@ -27,6 +27,32 @@ const StateColors &GetStateColorsForMode(const std::string &mode,
   return theme.status_bar.idle;
 }
 
+std::string permissionModeToCompactLabel(
+    firmius::shared::ThreadPermissionMode mode) {
+  switch (mode) {
+  case firmius::shared::ThreadPermissionMode::Request:
+    return "ASK";
+  case firmius::shared::ThreadPermissionMode::AlwaysAllow:
+    return "AUTO";
+  case firmius::shared::ThreadPermissionMode::DenyAll:
+    return "DENY";
+  }
+  return "ASK";
+}
+
+ftxui::Color permissionModeColor(firmius::shared::ThreadPermissionMode mode,
+                                 const Theme &theme) {
+  switch (mode) {
+  case firmius::shared::ThreadPermissionMode::Request:
+    return theme.status_bar.context.icon;
+  case firmius::shared::ThreadPermissionMode::AlwaysAllow:
+    return theme.modals.highlight_fg;
+  case firmius::shared::ThreadPermissionMode::DenyAll:
+    return theme.status_bar.error.normal.fg;
+  }
+  return theme.status_bar.context.icon;
+}
+
 class StatusBarComponentBase : public ftxui::ComponentBase {
 public:
   explicit StatusBarComponentBase(std::shared_ptr<StatusBarModel> model)
@@ -127,8 +153,23 @@ public:
     }
 
     // 4. Context Segment (Right Aligned)
-    ftxui::Element ctx_seg = ftxui::text("");
     ftxui::Color ctx_bg = theme.status_bar.context.bg;
+    std::string perms_label = permissionModeToCompactLabel(model_->permission_mode);
+    ftxui::Color perms_color = permissionModeColor(model_->permission_mode, theme);
+    ftxui::Elements ctx_items;
+
+    if (ultra_compact) {
+      ctx_items.push_back(ftxui::text(" " + perms_label + " ") | ftxui::bold |
+                          ftxui::color(perms_color) |
+                          ftxui::bgcolor(ctx_bg));
+    } else {
+      ctx_items.push_back(ftxui::text(" perm ") | ftxui::color(theme.base.dim) |
+                          ftxui::bgcolor(ctx_bg));
+      ctx_items.push_back(ftxui::text(" " + perms_label + " ") | ftxui::bold |
+                          ftxui::color(perms_color) |
+                          ftxui::bgcolor(ctx_bg));
+    }
+
     if (model_->context_max > 0 && !ultra_compact) {
       float ratio =
           static_cast<float>(model_->context_used) / model_->context_max;
@@ -143,13 +184,12 @@ public:
       std::string pct_str = buf;
 
       if (compact_mode) {
-        // Just show percentage in compact mode
-        ctx_seg = ftxui::hbox({
-            ftxui::text(firmius::shared::PL_RIGHT_SEP) | ftxui::color(ctx_bg) |
-                ftxui::bgcolor(filler_bg),
-            ftxui::text(" " + pct_str + " ") | ftxui::bold |
-                ftxui::color(ctx_color) | ftxui::bgcolor(ctx_bg),
-        });
+        ctx_items.push_back(ftxui::text(firmius::shared::PL_RIGHT_SOFT_SEP) |
+                            ftxui::color(theme.base.dim) |
+                            ftxui::bgcolor(ctx_bg));
+        ctx_items.push_back(ftxui::text(" " + pct_str + " ") | ftxui::bold |
+                            ftxui::color(ctx_color) |
+                            ftxui::bgcolor(ctx_bg));
       } else {
         // Formatting helper for context numbers
         auto format_val = [](uint32_t val) -> std::string {
@@ -176,20 +216,27 @@ public:
         std::string combined_ctx = format_val(model_->context_used) + " / " +
                                    format_val(model_->context_max);
 
-        ctx_seg = ftxui::hbox({
-            ftxui::text(firmius::shared::PL_RIGHT_SEP) | ftxui::color(ctx_bg) |
-                ftxui::bgcolor(filler_bg),
-            ftxui::text(" " + firmius::shared::ICON_CONTEXT + " " + combined_ctx +
-                        " ") |
-                ftxui::color(theme.status_bar.context.icon) |
-                ftxui::bgcolor(ctx_bg),
-            ftxui::text(firmius::shared::PL_RIGHT_SOFT_SEP) |
-                ftxui::color(theme.base.dim) | ftxui::bgcolor(ctx_bg),
-            ftxui::text(" " + pct_str + " ") | ftxui::bold |
-                ftxui::color(ctx_color) | ftxui::bgcolor(ctx_bg),
-        });
+        ctx_items.push_back(ftxui::text(firmius::shared::PL_RIGHT_SOFT_SEP) |
+                            ftxui::color(theme.base.dim) |
+                            ftxui::bgcolor(ctx_bg));
+        ctx_items.push_back(ftxui::text(" " + firmius::shared::ICON_CONTEXT +
+                                        " " + combined_ctx + " ") |
+                            ftxui::color(theme.status_bar.context.icon) |
+                            ftxui::bgcolor(ctx_bg));
+        ctx_items.push_back(ftxui::text(firmius::shared::PL_RIGHT_SOFT_SEP) |
+                            ftxui::color(theme.base.dim) |
+                            ftxui::bgcolor(ctx_bg));
+        ctx_items.push_back(ftxui::text(" " + pct_str + " ") | ftxui::bold |
+                            ftxui::color(ctx_color) |
+                            ftxui::bgcolor(ctx_bg));
       }
     }
+
+    ftxui::Element ctx_seg = ftxui::hbox({
+        ftxui::text(firmius::shared::PL_RIGHT_SEP) | ftxui::color(ctx_bg) |
+            ftxui::bgcolor(filler_bg),
+        ftxui::hbox(std::move(ctx_items)) | ftxui::bgcolor(ctx_bg),
+    });
 
     return ftxui::hbox({
                status_seg,

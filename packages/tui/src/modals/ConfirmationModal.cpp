@@ -1,6 +1,7 @@
 #include "modals/ConfirmationModal.hpp"
 #include "TUIState.hpp"
 #include "ThemeManager.hpp"
+#include "modals/ModalLayout.hpp"
 #include <ftxui/component/component.hpp>
 #include <ftxui/dom/elements.hpp>
 
@@ -20,25 +21,26 @@ ftxui::Component ConfirmationModal::create(TuiState &state) {
 
   auto component = ftxui::Renderer([title, message]() {
     const auto &theme = ThemeManager::instance().getCurrentTheme();
-    return ftxui::window(
-               ftxui::text(" " + title + " ") | ftxui::bold |
-                   ftxui::color(theme.modals.title),
-               ftxui::vbox(
-                   {ftxui::text(message) | ftxui::center |
-                        ftxui::color(theme.modals.fg),
-                    ftxui::text(""),
-                    ftxui::hbox({
-                        ftxui::text(" [Y]es ") | ftxui::bold |
-                            ftxui::color(theme.modals.highlight_fg),
-                        ftxui::text("   "),
-                        ftxui::text(" [N]o ") | ftxui::bold |
-                            ftxui::color(theme.status_bar.error.normal.fg),
-                    }) | ftxui::center,
-                    ftxui::text(""),
-                    ftxui::text(" (Press Y/Enter for Yes, N/Esc for No) ") |
-                        ftxui::color(theme.base.dim) | ftxui::center})) |
-           ftxui::clear_under | ftxui::center |
-           ftxui::bgcolor(theme.modals.bg) | ftxui::color(theme.modals.border);
+    return FlatModalPanel(
+        theme, title,
+        ModalSection(
+            theme,
+            ftxui::vbox(
+                {ftxui::text(message) | ftxui::center |
+                     ftxui::color(theme.modals.fg),
+                 ftxui::text(""),
+                 ftxui::hbox({
+                     ftxui::text(" [Y]es ") | ftxui::bold |
+                         ftxui::color(theme.modals.highlight_fg),
+                     ftxui::text("   "),
+                     ftxui::text(" [N]o ") | ftxui::bold |
+                         ftxui::color(theme.status_bar.error.normal.fg),
+                 }) | ftxui::center,
+                 ftxui::text(""),
+                 ftxui::text(" (Press Y/Enter for Yes, N/Esc for No) ") |
+                     ftxui::color(theme.base.dim) | ftxui::center}),
+            theme.modals.bg),
+        56, 16);
   });
 
   return ftxui::CatchEvent(component,

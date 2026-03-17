@@ -1,5 +1,7 @@
 #include "Panic.hpp"
 #include "agents/Agent.hpp"
+#include "environment/Environment.hpp"
+#include "environment/Permissions.hpp"
 #include "hosts/LocalHost.hpp"
 #include "providers/NanoGPTProvider.hpp"
 #include "providers/ProviderRegistry.hpp"
@@ -41,14 +43,16 @@ protected:
     registry.registerTool(std::make_unique<ProcessStatusTool>());
     registry.registerTool(std::make_unique<ProcessWaitTool>());
 
-    host = std::make_unique<LocalHost>();
-    firmius::shared::IHost *hostPtr = host.get();
-    agent = std::make_unique<Agent>(ctx, std::move(host), registry);
-    hostRaw = hostPtr;
+    auto localHost = std::make_shared<LocalHost>();
+    hostRaw = localHost.get();
+    auto environment = std::make_shared<Environment>(
+        localHost, ctx.environment.cwd,
+        [](const StreamEvent & /*ev*/) {});
+    auto permissions = std::make_shared<Permissions>();
+    agent = std::make_unique<Agent>(ctx, environment, permissions, registry, nullptr);
   }
 
   ToolRegistry registry;
-  std::unique_ptr<LocalHost> host;
   firmius::shared::IHost *hostRaw = nullptr;
   std::unique_ptr<Agent> agent;
 

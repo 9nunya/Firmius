@@ -40,10 +40,10 @@ std::shared_ptr<shared::JSONSchema> FileEditTool::getSchema() const {
 
 shared::ToolResult FileEditTool::execute(const FileEditInput &input,
                                          shared::ToolContext &ctx) {
-  std::string absolutePath = ctx.agent.resolvePath(input.path);
+  std::string absolutePath = ctx.agent.getEnvironment()->getWorkspace().resolvePath(input.path);
 
   // Only require reading if file already exists (skip for new files)
-  if (ctx.host.exists(absolutePath) && !ctx.agent.hasFullyReadFile(absolutePath)) {
+  if (ctx.host.exists(absolutePath) && !ctx.agent.getEnvironment()->getWorkspace().hasFullyReadFile(absolutePath)) {
     return shared::ToolResult::fail(
         "You MUST READ the ENTIRE file before making any edits to ensure "
         "complete context and avoid breaking dependencies or logic. Use "
@@ -53,9 +53,10 @@ shared::ToolResult FileEditTool::execute(const FileEditInput &input,
         "entire file.");
   }
 
-  ctx.agent.getPermissionChecks().validatePathAccess(absolutePath);
-
   try {
+    ctx.agent.getPermissions()->validatePathAccess(
+        absolutePath, firmius::shared::AccessMode::WRITE);
+
     if (!input.old_string.empty() && !input.new_string.empty()) {
       // Replace mode
       auto data = ctx.host.readFile(absolutePath);

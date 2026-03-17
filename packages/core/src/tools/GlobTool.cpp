@@ -13,10 +13,10 @@ using namespace firmius::shared;
 shared::ToolResult GlobTool::execute(const GlobInput &input,
                                      shared::ToolContext &ctx) {
   try {
-    std::string absPath = ctx.agent.resolvePath(input.path);
+    std::string absPath = ctx.agent.getEnvironment()->getWorkspace().resolvePath(input.path);
 
     // Security check
-    ctx.agent.getPermissionChecks().validatePathAccess(absPath);
+    ctx.agent.getPermissions()->validatePathAccess(absPath, firmius::shared::AccessMode::READ);
 
     std::string command = "find " + shared::StringUtil::shellEscape(absPath) +
                           " -name " +

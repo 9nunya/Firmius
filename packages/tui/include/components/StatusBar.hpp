@@ -1,6 +1,7 @@
 #ifndef FIRMIUS_COMPONENTS_STATUS_BAR_HPP
 #define FIRMIUS_COMPONENTS_STATUS_BAR_HPP
 
+#include "Enums.hpp"
 #include <ftxui/component/component_base.hpp>
 #include <memory>
 #include <string>
@@ -13,6 +14,8 @@ struct StatusBarModel {
   std::string purpose;     // e.g. "orchestrator"
   std::string agent_name;
   std::string model_variant;
+  firmius::shared::ThreadPermissionMode permission_mode =
+      firmius::shared::ThreadPermissionMode::Request;
   uint32_t context_used = 0;
   uint32_t context_max = 0;
   bool is_active = false;

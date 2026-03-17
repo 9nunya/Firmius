@@ -6,7 +6,7 @@ namespace firmius::core {
 
 shared::ToolResult ProcessStatusTool::execute(const ProcessStatusInput& input, shared::ToolContext& ctx) {
     try {
-        auto snapshot = ctx.agent.inspectProcess(input.process_id);
+        auto snapshot = ctx.agent.getEnvironment()->getProcessManager().inspectProcess(input.process_id);
         
         rapidjson::Document doc;
         doc.SetObject();

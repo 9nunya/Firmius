@@ -14,9 +14,9 @@ using namespace firmius::shared;
 shared::ToolResult GrepTool::execute(const GrepInput &input,
                                      shared::ToolContext &ctx) {
   try {
-    std::string absPath = ctx.agent.resolvePath(input.path);
+    std::string absPath = ctx.agent.getEnvironment()->getWorkspace().resolvePath(input.path);
 
-    ctx.agent.getPermissionChecks().validatePathAccess(absPath);
+    ctx.agent.getPermissions()->validatePathAccess(absPath, firmius::shared::AccessMode::READ);
 
     std::string command = "grep -rnHE --binary-files=without-match " +
                           shared::StringUtil::shellEscape(input.pattern);

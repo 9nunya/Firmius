@@ -13,11 +13,19 @@ shared::ToolResult ProcessSpawnTool::execute(const ProcessSpawnInput &input,
   try {
     std::string effectiveCwd =
         input.cwd.empty() ? ctx.agent.getContext().environment.cwd : input.cwd;
-    effectiveCwd = ctx.agent.resolvePath(effectiveCwd);
+    effectiveCwd = ctx.agent.getEnvironment()->getWorkspace().resolvePath(effectiveCwd);
 
-    ctx.agent.getPermissionChecks().validatePathAccess(effectiveCwd);
+    ctx.agent.getPermissions()->validatePathAccess(effectiveCwd, firmius::shared::AccessMode::READ);
+    auto intent = ctx.agent.getPermissions()->getIntentAnalyzer().analyze(
+        input.command, effectiveCwd);
+    auto approval =
+        ctx.agent.getPermissions()->requestCommandApproval(input.command, intent);
+    if (approval == PermissionResponse::Deny) {
+      return shared::ToolResult::fail("Command execution denied: " +
+                                      input.command);
+    }
 
-    std::string processId = ctx.agent.spawnProcess(
+    std::string processId = ctx.agent.getEnvironment()->getProcessManager().spawnProcess(
         input.command, ctx.currentToolCallId, effectiveCwd, input.env);
 
     rapidjson::Document doc;

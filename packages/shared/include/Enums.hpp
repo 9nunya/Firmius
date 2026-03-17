@@ -54,6 +54,32 @@ enum class ToolScope : std::uint8_t {
 };
 
 /**
+ * @brief Thread-level permission handling mode.
+ */
+enum class ThreadPermissionMode : std::uint8_t {
+  Request,     ///< Ask before permissioned actions.
+  AlwaysAllow, ///< Allow permissioned actions without prompting.
+  DenyAll      ///< Deny all permissioned actions.
+};
+
+/**
+ * @brief Types of permission escalation requests.
+ */
+enum class PermissionRequestType : std::uint8_t {
+  Command,
+  Edit
+};
+
+/**
+ * @brief User response to a permission escalation request.
+ */
+enum class PermissionResponse : std::uint8_t {
+  AllowOnce,
+  AllowAlways,
+  Deny
+};
+
+/**
  * @brief Current operational status of an agent.
  */
 enum class AgentStatus : std::uint8_t {
@@ -65,6 +91,32 @@ enum class AgentStatus : std::uint8_t {
   ProviderWaiting, ///< Waiting for initial response from LLM provider.
   Error,           ///< Agent encountered a fatal runtime error.
   Cancelled        ///< Agent was interrupted/aborted by user or engine.
+};
+
+/**
+ * @brief Lifecycle status for a persisted plan.
+ */
+enum class PlanStatus : std::uint8_t {
+  Draft,
+  Active,
+  Paused,
+  Done,
+  Abandoned
+};
+
+/**
+ * @brief Lifecycle status for a work chunk embedded in a plan.
+ */
+enum class WorkChunkStatus : std::uint8_t {
+  Draft,
+  Ready,
+  InProgress,
+  Implemented,
+  Verifying,
+  Done,
+  Blocked,
+  Failed,
+  Cancelled
 };
 
 /**

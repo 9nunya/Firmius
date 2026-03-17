@@ -33,10 +33,10 @@ std::shared_ptr<shared::JSONSchema> FileReadTool::getSchema() const {
 
 shared::ToolResult FileReadTool::execute(const FileReadInput &input,
                                          shared::ToolContext &ctx) {
-  std::string absolutePath = ctx.agent.resolvePath(input.path);
+  std::string absolutePath = ctx.agent.getEnvironment()->getWorkspace().resolvePath(input.path);
 
   try {
-    ctx.agent.getPermissionChecks().validatePathAccess(absolutePath);
+    ctx.agent.getPermissions()->validatePathAccess(absolutePath, firmius::shared::AccessMode::READ);
     auto data = ctx.host.readFile(absolutePath);
     std::string content(data.begin(), data.end());
     std::stringstream ss(content);
@@ -82,9 +82,9 @@ shared::ToolResult FileReadTool::execute(const FileReadInput &input,
     bool read_full = reachedEnd && input.start_line <= 1;
 
     if (read_full) {
-      ctx.agent.markFileAsFullyRead(absolutePath);
+      ctx.agent.getEnvironment()->getWorkspace().markFileAsFullyRead(absolutePath);
     } else {
-      ctx.agent.markFileAsRead(absolutePath);
+      ctx.agent.getEnvironment()->getWorkspace().markFileAsRead(absolutePath);
     }
 
     res.AddMember("line_start", normalized_start, res.GetAllocator());

@@ -2,6 +2,7 @@
 
 #include "Enums.hpp"
 #include <functional>
+#include <condition_variable>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -164,6 +165,23 @@ public:
    * @return true if the switch succeeded, false otherwise.
    */
   bool switchLeadPersona(const std::string &personaName);
+  ThreadPermissionMode threadPermissionMode(const std::string &threadId);
+  ThreadPermissionRules threadPermissionRules(const std::string &threadId);
+  bool commandMatchesPersistedAllowRule(const std::string &threadId,
+                                        const std::string &command);
+  bool pathMatchesPersistedWriteAllowRule(const std::string &threadId,
+                                          const std::string &absolutePath);
+  void persistCommandAllowRule(const std::string &threadId,
+                               const CommandAllowRule &rule);
+  void persistWriteAllowPath(const std::string &threadId,
+                             const std::string &pathPrefix);
+  ThreadPermissionMode currentThreadPermissionMode();
+  bool setCurrentThreadPermissionMode(ThreadPermissionMode mode);
+  std::optional<ThreadPermissionMode> cycleCurrentThreadPermissionMode();
+  PermissionResponse
+  requestPermissionEscalation(PermissionEscalationRequest request);
+  bool resolvePermissionEscalation(const std::string &requestId,
+                                   PermissionResponse response);
 
   void deleteThread(const std::string &threadId);
 
@@ -296,6 +314,17 @@ private:
 
   // Track which threads have had titles generated
   std::unordered_set<std::string> titleGeneratedThreads_;
+
+  struct PendingPermissionRequest {
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool resolved = false;
+    PermissionResponse response = PermissionResponse::Deny;
+    PermissionEscalationRequest request;
+  };
+  std::map<std::string, std::shared_ptr<PendingPermissionRequest>>
+      pendingPermissionRequests_;
+  uint64_t nextPermissionRequestId_ = 0;
 
   void maybeGenerateTitle(const std::string &threadId,
                           const std::string &firstMessage);

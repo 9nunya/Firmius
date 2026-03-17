@@ -3,23 +3,21 @@
 
 #include "Context.hpp"
 #include "Events.hpp"
-#include "IHost.hpp"
+#include "IEnvironment.hpp"
+#include "IPermissions.hpp"
 #include <functional>
-#include <map>
+#include <memory>
 #include <string>
-
-namespace firmius {
-namespace core {
-class AgentPermissionChecks;
-}
-} // namespace firmius
+#include <vector>
 
 namespace firmius::shared {
 
 /**
  * @brief Interface for the Agent Engine.
+ * 
+ * Refactored to use composition: IAgent delegates environment operations
+ * to IEnvironment and permission checks to IPermissions.
  */
-
 class IAgent {
 public:
   virtual ~IAgent() = default;
@@ -40,27 +38,6 @@ public:
                    const std::vector<ImageContent> &images = {}) = 0;
 
   /**
-   * @brief Gets the current agent context (read-only).
-   * @return The agent context.
-   */
-  virtual const AgentContext &getContext() const = 0;
-
-  /**
-   * @brief Gets the current agent context (mutable).
-   * @return The agent context.
-   */
-  virtual AgentContext &getMutableContext() = 0;
-
-  virtual firmius::core::AgentPermissionChecks &getPermissionChecks() const = 0;
-
-  /**
-   * @brief Resolves a path relative to the agent's CWD.
-   * @param path The path to resolve.
-   * @return An absolute, normalized path within the sandbox.
-   */
-  virtual std::string resolvePath(const std::string &path) const = 0;
-
-  /**
    * @brief Interrupts the current agent execution.
    */
   virtual void interrupt() = 0;
@@ -70,6 +47,10 @@ public:
    * @return True if interrupt() has been called.
    */
   virtual bool isInterrupted() const = 0;
+
+  /**
+   * @brief Clears the interrupt flag.
+   */
   virtual void clearInterrupt() = 0;
 
   /**
@@ -92,7 +73,8 @@ public:
    * @param modelId The model ID.
    * @param variantName The model variant name (e.g., "low", "medium", "max").
    */
-  virtual void setModel(const std::string &providerId, const std::string &modelId,
+  virtual void setModel(const std::string &providerId, 
+                        const std::string &modelId,
                         const std::string &variantName) = 0;
 
   /**
@@ -100,68 +82,30 @@ public:
    * @return True if the agent is executing a task.
    */
   virtual bool isRunning() const = 0;
+
+  /**
+   * @brief Checks if the agent is booting.
+   * @return True if booting.
+   */
   virtual bool isBooting() const = 0;
+
+  /**
+   * @brief Sets the booting state.
+   * @param b The booting state.
+   */
   virtual void setBooting(bool b) = 0;
 
   /**
-   * @brief Spawns a background process.
-   * @return A unique process ID.
+   * @brief Gets the current agent context (read-only).
+   * @return The agent context.
    */
-  virtual std::string
-  spawnProcess(const std::string &command, const std::string &toolCallId = "",
-               const std::string &cwd = "",
-               const std::map<std::string, std::string> &env = {}) = 0;
+  virtual const AgentContext &getContext() const = 0;
 
   /**
-   * @brief Inspects a background process.
-   * @param id The process ID.
-   * @return A snapshot of the process state.
+   * @brief Gets the current agent context (mutable).
+   * @return The agent context.
    */
-  virtual ProcessSnapshot inspectProcess(const std::string &id) = 0;
-
-  /**
-   * @brief Writes data to a background process's stdin.
-   * @param id The process ID.
-   * @param data The data to write.
-   */
-  virtual void writeToProcess(const std::string &id,
-                              const std::string &data) = 0;
-  virtual void registerProcessId(const std::string &id) = 0;
-
-  virtual void emitProcessSpawned(const std::string &processId,
-                                  const std::string &toolCallId,
-                                  const std::string &command) = 0;
-
-  virtual void addBlockingProcessId(const std::string &id) = 0;
-  virtual void removeBlockingProcessId(const std::string &id) = 0;
-  virtual std::vector<std::string> getBlockingProcessIds() = 0;
-
-  /**
-   * @brief Checks if a file has been read in the current session.
-
-   * @param path The absolute path to the file.
-   * @return True if the file has been read.
-   */
-  virtual bool hasReadFile(const std::string &path) const = 0;
-
-  /**
-   * @brief Marks a file as having been read in the current session.
-   * @param path The absolute path to the file.
-   */
-  virtual void markFileAsRead(const std::string &path) = 0;
-
-  /**
-   * @brief Checks if a file has been FULLY read in the current session.
-   * @param path The absolute path to the file.
-   * @return True if the file has been fully read.
-   */
-  virtual bool hasFullyReadFile(const std::string &path) const = 0;
-
-  /**
-   * @brief Marks a file as having been FULLY read in the current session.
-   * @param path The absolute path to the file.
-   */
-  virtual void markFileAsFullyRead(const std::string &path) = 0;
+  virtual AgentContext &getMutableContext() = 0;
 
   /**
    * @brief Manually triggers a rewrite of the history journal to disk.
@@ -169,11 +113,24 @@ public:
   virtual void saveHistory() = 0;
 
   /**
-   * @brief Returns the agent's host.
+   * @brief Returns the execution environment for this agent.
+   * @return Shared pointer to the environment.
+   */
+  virtual std::shared_ptr<IEnvironment> getEnvironment() const = 0;
+
+  /**
+   * @brief Returns the permissions manager for this agent.
+   * @return Shared pointer to the permissions.
+   */
+  virtual std::shared_ptr<IPermissions> getPermissions() const = 0;
+
+  /**
+   * @brief Returns the agent's host (convenience accessor).
+   * @return Shared pointer to the host.
    */
   virtual std::shared_ptr<IHost> getHost() = 0;
 };
 
 } // namespace firmius::shared
 
-#endif
+#endif // FIRMIUS_SHARED_IAGENT_HPP

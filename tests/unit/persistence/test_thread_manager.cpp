@@ -173,4 +173,55 @@ TEST_F(ThreadManagerTest, loadAgentHistory_withTurns) {
     EXPECT_EQ(history.turns[1].turnId, "turn-002");
 }
 
+TEST_F(ThreadManagerTest, updateMetadata_persistsPermissionMode) {
+    ThreadMetadata metadata = createTestMetadata();
+    std::string threadId = tm->createThread(metadata);
+
+    auto loaded = tm->getMetadata(threadId);
+    EXPECT_EQ(loaded.permissionMode, ThreadPermissionMode::Request);
+
+    loaded.permissionMode = ThreadPermissionMode::AlwaysAllow;
+    tm->updateMetadata(threadId, loaded);
+
+    auto updated = tm->getMetadata(threadId);
+    EXPECT_EQ(updated.permissionMode, ThreadPermissionMode::AlwaysAllow);
+}
+
+TEST_F(ThreadManagerTest, permissionRules_roundtrip) {
+    ThreadMetadata metadata = createTestMetadata();
+    std::string threadId = tm->createThread(metadata);
+
+    ThreadPermissionRules rules;
+    rules.commandAllowRules.push_back(
+        {"git status", "git status", "git", CommandSeverity::LOW});
+    rules.writeAllowPaths.push_back("/tmp/work/src/**");
+
+    tm->writePermissionRules(threadId, rules);
+
+    auto loaded = tm->readPermissionRules(threadId);
+    ASSERT_EQ(loaded.commandAllowRules.size(), 1u);
+    EXPECT_EQ(loaded.commandAllowRules[0].exactCommand, "git status");
+    EXPECT_EQ(loaded.commandAllowRules[0].normalizedCommand, "git status");
+    EXPECT_EQ(loaded.commandAllowRules[0].primaryCommand, "git");
+    EXPECT_EQ(loaded.commandAllowRules[0].severity, CommandSeverity::LOW);
+    ASSERT_EQ(loaded.writeAllowPaths.size(), 1u);
+    EXPECT_EQ(loaded.writeAllowPaths[0], "/tmp/work/src/**");
+}
+
+TEST_F(ThreadManagerTest, addPermissionRules_deduplicatesEntries) {
+    ThreadMetadata metadata = createTestMetadata();
+    std::string threadId = tm->createThread(metadata);
+
+    CommandAllowRule commandRule{"git status", "git status", "git",
+                                 CommandSeverity::LOW};
+    tm->addCommandAllowRule(threadId, commandRule);
+    tm->addCommandAllowRule(threadId, commandRule);
+    tm->addWriteAllowPath(threadId, "/tmp/work/src/**");
+    tm->addWriteAllowPath(threadId, "/tmp/work/src/**");
+
+    auto loaded = tm->readPermissionRules(threadId);
+    EXPECT_EQ(loaded.commandAllowRules.size(), 1u);
+    EXPECT_EQ(loaded.writeAllowPaths.size(), 1u);
+}
+
 }

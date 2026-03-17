@@ -204,6 +204,43 @@ TEST(Serialization, AgentMetricsRoundtrip) {
   EXPECT_EQ(metrics, roundtripped);
 }
 
+TEST(Serialization, ThreadMetadataPermissionModeRoundtrip) {
+  ThreadMetadata metadata;
+  metadata.threadId = "thread-123";
+  metadata.title = "Permissions";
+  metadata.hostOptions.type = HostType::Local;
+  metadata.hostIdentifier = "localhost";
+  metadata.cwd = "/tmp";
+  metadata.leadPersona = "firmius";
+  metadata.permissionMode = ThreadPermissionMode::DenyAll;
+  metadata.createdAt = 123;
+  metadata.lastActiveAt = 456;
+
+  auto doc = toJson(metadata);
+  rapidjson::StringBuffer buffer;
+  rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+  doc.Accept(writer);
+
+  rapidjson::Document parsed;
+  parsed.Parse(buffer.GetString());
+  auto roundtripped = threadMetadataFromJson(parsed);
+
+  EXPECT_EQ(metadata, roundtripped);
+}
+
+TEST(Serialization, ThreadMetadataPermissionModeDefaultsToRequest) {
+  rapidjson::Document doc;
+  doc.SetObject();
+  auto &a = doc.GetAllocator();
+  doc.AddMember("threadId", "thread-legacy", a);
+  doc.AddMember("title", "Legacy", a);
+  doc.AddMember("cwd", "/tmp", a);
+  doc.AddMember("leadPersona", "firmius", a);
+
+  auto metadata = threadMetadataFromJson(doc);
+  EXPECT_EQ(metadata.permissionMode, ThreadPermissionMode::Request);
+}
+
 TEST(Serialization, StreamEventRoundtrip) {
   StreamEvent textEvent = TextChunk{"Hello"};
   auto doc = toJson(textEvent);

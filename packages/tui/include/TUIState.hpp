@@ -57,6 +57,10 @@ public:
   void clearModals();
 
   void postEvent(ftxui::Event event);
+  bool cycleThreadPermissionMode();
+  bool hasActiveThread() const;
+  std::string currentThreadId() const;
+  shared::ThreadPermissionMode currentThreadPermissionMode() const;
 
 private:
   TuiState();

@@ -5,7 +5,8 @@
 #include "IAgent.hpp"
 #include "IHost.hpp"
 #include "IProvider.hpp"
-#include "agents/AgentPermissionChecks.hpp"
+#include "IEnvironment.hpp"
+#include "IPermissions.hpp"
 #include "persistence/Journaler.hpp"
 #include "tools/ToolRegistry.hpp"
 
@@ -27,7 +28,8 @@ using namespace firmius::shared;
  */
 class Agent : public IAgent {
 public:
-  Agent(AgentContext context, std::unique_ptr<shared::IHost> host,
+  Agent(AgentContext context, std::shared_ptr<shared::IEnvironment> environment,
+        std::shared_ptr<shared::IPermissions> permissions,
         ToolRegistry &toolRegistry,
         std::shared_ptr<Journaler> journaler = nullptr);
   ~Agent() override;
@@ -43,41 +45,43 @@ public:
   void setModel(const std::string &providerId,
                 const std::string &modelId) override;
   void setModel(const std::string &providerId, const std::string &modelId,
-                const std::string &variantName);
+                const std::string &variantName) override;
   bool isRunning() const override { return running.load(); }
   bool isBooting() const override { return booting.load(); }
   void setBooting(bool b) override { booting = b; }
 
-  std::string
-  spawnProcess(const std::string &command, const std::string &toolCallId = "",
-               const std::string &cwd = "",
-               const std::map<std::string, std::string> &env = {}) override;
-  ProcessSnapshot inspectProcess(const std::string &id) override;
-  void writeToProcess(const std::string &id, const std::string &data) override;
-  void registerProcessId(const std::string &id) override;
-  void emitProcessSpawned(const std::string &processId,
-                          const std::string &toolCallId,
-                          const std::string &command) override;
-
-  void addBlockingProcessId(const std::string &id) override;
-  void removeBlockingProcessId(const std::string &id) override;
-  std::vector<std::string> getBlockingProcessIds() override;
-
-  bool hasReadFile(const std::string &path) const override;
-  void markFileAsRead(const std::string &path) override;
-  bool hasFullyReadFile(const std::string &path) const override;
-  void markFileAsFullyRead(const std::string &path) override;
-
   const AgentContext &getContext() const override { return context; }
   AgentContext &getMutableContext() override { return context; }
-  std::string resolvePath(const std::string &inputPath) const override;
-  std::shared_ptr<IHost> getHost() override { return host; }
-  firmius::core::AgentPermissionChecks &getPermissionChecks() const override {
-    return *permissionChecks;
-  }
+  std::shared_ptr<IHost> getHost() override;
+  
+  std::shared_ptr<IEnvironment> getEnvironment() const override { return environment_; }
+  std::shared_ptr<IPermissions> getPermissions() const override { return permissions_; }
+
   void compactNow(
       std::function<void(const StreamEvent &)> onEvent) override;
   void saveHistory() override;
+
+  // Backward compatibility during transition
+  std::string
+  spawnProcess(const std::string &command, const std::string &toolCallId = "",
+               const std::string &cwd = "",
+               const std::map<std::string, std::string> &env = {});
+  ProcessSnapshot inspectProcess(const std::string &id);
+  void writeToProcess(const std::string &id, const std::string &data);
+  void registerProcessId(const std::string &id);
+  void emitProcessSpawned(const std::string &processId,
+                          const std::string &toolCallId,
+                          const std::string &command);
+
+  void addBlockingProcessId(const std::string &id);
+  void removeBlockingProcessId(const std::string &id);
+  std::vector<std::string> getBlockingProcessIds();
+
+  bool hasReadFile(const std::string &path) const;
+  void markFileAsRead(const std::string &path);
+  bool hasFullyReadFile(const std::string &path) const;
+  void markFileAsFullyRead(const std::string &path);
+  std::string resolvePath(const std::string &inputPath) const;
 
 private:
   void compactContext(std::function<void(const shared::StreamEvent &)> onEvent);
@@ -87,7 +91,8 @@ private:
 
   AgentContext context;
   std::shared_ptr<firmius::provider::IProvider> provider;
-  std::shared_ptr<shared::IHost> host;
+  std::shared_ptr<firmius::shared::IEnvironment> environment_;
+  std::shared_ptr<firmius::shared::IPermissions> permissions_;
   ToolRegistry &toolRegistry;
   std::shared_ptr<Journaler> journaler;
   std::atomic<bool> interrupted{false};
@@ -96,9 +101,7 @@ private:
   std::mutex runMutex;
   std::function<void(const shared::StreamEvent &)> eventCallback;
   std::mutex callbackMutex;
-  std::mutex blockingProcessMutex; // protects blockingProcessIds
-
-  std::unique_ptr<firmius::core::AgentPermissionChecks> permissionChecks;
+  std::mutex blockingProcessMutex;
 
   std::unordered_set<std::string> backgroundProcessIds;
 };

@@ -7,6 +7,11 @@ add_library(firmius::core ALIAS firmius_core)
 target_sources(firmius_core PRIVATE
     src/hosts/LocalHost.cpp
     src/hosts/DockerHost.cpp
+    src/environment/CommandIntentAnalyzer.cpp
+    src/environment/ProcessManager.cpp
+    src/environment/Workspace.cpp
+    src/environment/Environment.cpp
+    src/environment/Permissions.cpp
     src/tools/FileReadTool.cpp
     src/tools/FileEditTool.cpp
     src/tools/ProcessExecuteTool.cpp
@@ -47,6 +52,11 @@ target_sources(firmius_core PUBLIC
   FILES
     include/hosts/LocalHost.hpp
     include/hosts/DockerHost.hpp
+    include/environment/CommandIntentAnalyzer.hpp
+    include/environment/ProcessManager.hpp
+    include/environment/Workspace.hpp
+    include/environment/Environment.hpp
+    include/environment/Permissions.hpp
     include/tools/FileReadTool.hpp
     include/tools/FileEditTool.hpp
     include/tools/ProcessExecuteTool.hpp

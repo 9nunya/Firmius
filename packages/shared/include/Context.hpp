@@ -167,10 +167,55 @@ struct ThreadMetadata {
   std::string hostIdentifier;
   std::string cwd;
   std::string leadPersona;
+  std::string activePlanId;
+  ThreadPermissionMode permissionMode = ThreadPermissionMode::Request;
   uint64_t createdAt = 0;
   uint64_t lastActiveAt = 0;
 
   bool operator==(const ThreadMetadata &other) const = default;
+};
+
+/**
+ * @brief Smallest persisted unit of plan execution in V1.
+ */
+struct WorkChunk {
+  std::string id;
+  std::string title;
+  std::string goal;
+  std::string context;
+  std::string constraints;
+  std::string completion;
+  WorkChunkStatus status = WorkChunkStatus::Draft;
+  int priority = 0;
+  std::vector<std::string> dependsOn;
+  std::string assignedAgentId;
+  std::string assignedRole;
+  int attemptCount = 0;
+  std::string resultSummary;
+  std::string reviewSummary;
+  uint64_t createdAt = 0;
+  uint64_t updatedAt = 0;
+
+  bool operator==(const WorkChunk &other) const = default;
+};
+
+/**
+ * @brief Persisted thread-owned plan with embedded chunks.
+ */
+struct Plan {
+  std::string id;
+  std::string threadId;
+  std::string title;
+  std::string objective;
+  std::string context;
+  std::string strategy;
+  PlanStatus status = PlanStatus::Draft;
+  std::string notes;
+  uint64_t createdAt = 0;
+  uint64_t updatedAt = 0;
+  std::vector<WorkChunk> chunks;
+
+  bool operator==(const Plan &other) const = default;
 };
 
 } // namespace firmius::shared

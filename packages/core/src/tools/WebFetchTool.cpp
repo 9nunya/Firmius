@@ -67,6 +67,8 @@ shared::ToolResult WebFetchTool::execute(const WebFetchInput& input, shared::Too
     if (size > 100000) {
         std::string fileName = "/tmp/firmius_fetch_" + shared::StringUtil::generateUuid() + ".md";
         std::vector<uint8_t> data(markdown.begin(), markdown.end());
+        ctx.agent.getPermissions()->validatePathAccess(
+            fileName, shared::AccessMode::WRITE);
         ctx.host.writeFile(fileName, data);
         doc.AddMember("redirected_to", rapidjson::Value(fileName.c_str(), a).Move(), a);
         doc.AddMember("content", "Content too large, saved to file.", a);

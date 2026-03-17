@@ -2,6 +2,7 @@
 #include "harness/Harness.hpp"
 #include "Engine.hpp"
 #include "AgentRegistry.hpp"
+#include "environment/Permissions.hpp"
 #include "persistence/ThreadManager.hpp"
 #include "utils/StringUtil.hpp"
 #include "Events.hpp"
@@ -10,6 +11,8 @@
 #include <fstream>
 #include <thread>
 #include <chrono>
+#include <atomic>
+#include <future>
 
 using namespace firmius::core;
 using namespace firmius::shared;
@@ -189,6 +192,214 @@ TEST_F(HarnessTest, resumeLast_restoresSession) {
     bool result = Harness::instance().resumeLast();
     EXPECT_TRUE(result);
     EXPECT_EQ(Harness::instance().currentThreadId(), threadId);
+}
+
+TEST_F(HarnessTest, currentThreadPermissionMode_defaultsToRequest) {
+    std::string threadId = Harness::instance().newThread({}, "/tmp", "test");
+    ASSERT_FALSE(threadId.empty());
+
+    EXPECT_EQ(Harness::instance().currentThreadPermissionMode(),
+              ThreadPermissionMode::Request);
+}
+
+TEST_F(HarnessTest, setCurrentThreadPermissionMode_persistsAcrossThreadSwitch) {
+    std::string threadA = Harness::instance().newThread({}, "/tmp", "test");
+    ASSERT_FALSE(threadA.empty());
+    ASSERT_TRUE(Harness::instance().setCurrentThreadPermissionMode(
+        ThreadPermissionMode::AlwaysAllow));
+
+    std::string threadB = Harness::instance().newThread({}, "/tmp", "test");
+    ASSERT_FALSE(threadB.empty());
+    ASSERT_TRUE(Harness::instance().switchThread(threadA));
+
+    EXPECT_EQ(Harness::instance().currentThreadPermissionMode(),
+              ThreadPermissionMode::AlwaysAllow);
+}
+
+TEST_F(HarnessTest, cycleCurrentThreadPermissionMode_cyclesAndPersists) {
+    std::string threadId = Harness::instance().newThread({}, "/tmp", "test");
+    ASSERT_FALSE(threadId.empty());
+
+    auto next = Harness::instance().cycleCurrentThreadPermissionMode();
+    ASSERT_TRUE(next.has_value());
+    EXPECT_EQ(*next, ThreadPermissionMode::AlwaysAllow);
+    EXPECT_EQ(Harness::instance().currentThreadPermissionMode(),
+              ThreadPermissionMode::AlwaysAllow);
+
+    next = Harness::instance().cycleCurrentThreadPermissionMode();
+    ASSERT_TRUE(next.has_value());
+    EXPECT_EQ(*next, ThreadPermissionMode::DenyAll);
+
+    next = Harness::instance().cycleCurrentThreadPermissionMode();
+    ASSERT_TRUE(next.has_value());
+    EXPECT_EQ(*next, ThreadPermissionMode::Request);
+}
+
+TEST_F(HarnessTest, requestPermissionEscalation_blocksUntilResolved) {
+    std::string threadId = Harness::instance().newThread({}, "/tmp", "test");
+    ASSERT_FALSE(threadId.empty());
+
+    std::promise<PermissionEscalationRequest> requestPromise;
+    auto requestFuture = requestPromise.get_future();
+    int subId = Harness::instance().subscribe([&](const AppEvent& event) {
+        if (auto request = std::get_if<PermissionEscalationRequest>(&event)) {
+            requestPromise.set_value(*request);
+        }
+    });
+
+    std::promise<PermissionResponse> responsePromise;
+    auto responseFuture = responsePromise.get_future();
+    std::thread worker([&]() {
+        PermissionEscalationRequest request;
+        request.threadId = threadId;
+        request.agentId = "agent-1";
+        request.requestType = PermissionRequestType::Command;
+        request.title = "Need approval";
+        request.message = "Run command?";
+        request.command = "rm -rf /tmp/nope";
+        request.severity = CommandSeverity::HIGH;
+        responsePromise.set_value(
+            Harness::instance().requestPermissionEscalation(request));
+    });
+
+    auto emittedRequest = requestFuture.get();
+    EXPECT_FALSE(emittedRequest.requestId.empty());
+    EXPECT_EQ(emittedRequest.threadId, threadId);
+    EXPECT_EQ(emittedRequest.command, "rm -rf /tmp/nope");
+
+    EXPECT_TRUE(Harness::instance().resolvePermissionEscalation(
+        emittedRequest.requestId, PermissionResponse::AllowOnce));
+
+    EXPECT_EQ(responseFuture.get(), PermissionResponse::AllowOnce);
+
+    worker.join();
+    Harness::instance().unsubscribe(subId);
+}
+
+TEST_F(HarnessTest, setCurrentThreadPermissionMode_emitsThreadMetadataUpdated) {
+    std::string threadId = Harness::instance().newThread({}, "/tmp", "test");
+    ASSERT_FALSE(threadId.empty());
+
+    std::promise<ThreadMetadataUpdated> eventPromise;
+    auto eventFuture = eventPromise.get_future();
+    int subId = Harness::instance().subscribe([&](const AppEvent& event) {
+        if (auto metadata = std::get_if<ThreadMetadataUpdated>(&event)) {
+            eventPromise.set_value(*metadata);
+        }
+    });
+
+    ASSERT_TRUE(Harness::instance().setCurrentThreadPermissionMode(
+        ThreadPermissionMode::AlwaysAllow));
+
+    auto updated = eventFuture.get();
+    EXPECT_EQ(updated.threadId, threadId);
+    EXPECT_EQ(updated.metadata.permissionMode, ThreadPermissionMode::AlwaysAllow);
+    EXPECT_EQ(Harness::instance().currentThreadPermissionMode(),
+              ThreadPermissionMode::AlwaysAllow);
+
+    Harness::instance().unsubscribe(subId);
+}
+
+TEST_F(HarnessTest, commandAllowAlways_persistsRuleAndSkipsSecondPrompt) {
+    std::string threadId = Harness::instance().newThread({}, "/tmp", "test");
+    ASSERT_FALSE(threadId.empty());
+
+    Permissions permissions(threadId, "agent-1");
+    auto intent =
+        permissions.getIntentAnalyzer().analyze("git status", "/tmp");
+
+    std::atomic<int> requestCount{0};
+    std::promise<PermissionEscalationRequest> requestPromise;
+    auto requestFuture = requestPromise.get_future();
+    int subId = Harness::instance().subscribe(
+        [&](const AppEvent& event) {
+            if (auto request = std::get_if<PermissionEscalationRequest>(&event)) {
+                requestCount.fetch_add(1);
+                requestPromise.set_value(*request);
+            }
+        });
+
+    std::promise<PermissionResponse> responsePromise;
+    auto responseFuture = responsePromise.get_future();
+    std::thread worker([&]() {
+        responsePromise.set_value(
+            permissions.requestCommandApproval("git status", intent));
+    });
+
+    auto request = requestFuture.get();
+    EXPECT_TRUE(Harness::instance().resolvePermissionEscalation(
+        request.requestId, PermissionResponse::AllowAlways));
+    EXPECT_EQ(responseFuture.get(), PermissionResponse::AllowAlways);
+    worker.join();
+
+    EXPECT_EQ(permissions.requestCommandApproval("git status", intent),
+              PermissionResponse::AllowAlways);
+    EXPECT_EQ(requestCount.load(), 1);
+
+    auto rules = Harness::instance().threadPermissionRules(threadId);
+    ASSERT_EQ(rules.commandAllowRules.size(), 1u);
+    EXPECT_EQ(rules.commandAllowRules[0].exactCommand, "git status");
+
+    Harness::instance().unsubscribe(subId);
+}
+
+TEST_F(HarnessTest, writeAllowAlways_persistsPrefixAndSkipsSecondPrompt) {
+    std::string threadId = Harness::instance().newThread({}, "/tmp", "test");
+    ASSERT_FALSE(threadId.empty());
+
+    Permissions permissions(threadId, "agent-1");
+    AgentContext context;
+    context.permissions.allowedPaths = {"/tmp/**"};
+    context.permissions.allowOutsideCwd = false;
+    permissions.bindContext(context);
+
+    std::string filePath = "/tmp/project/src/file.txt";
+
+    std::atomic<int> requestCount{0};
+    std::promise<PermissionEscalationRequest> requestPromise;
+    auto requestFuture = requestPromise.get_future();
+    int subId = Harness::instance().subscribe(
+        [&](const AppEvent& event) {
+            if (auto request = std::get_if<PermissionEscalationRequest>(&event)) {
+                requestCount.fetch_add(1);
+                requestPromise.set_value(*request);
+            }
+        });
+
+    std::promise<PermissionResponse> responsePromise;
+    auto responseFuture = responsePromise.get_future();
+    std::thread worker([&]() {
+        responsePromise.set_value(permissions.requestEditApproval(filePath));
+    });
+
+    auto request = requestFuture.get();
+    EXPECT_TRUE(Harness::instance().resolvePermissionEscalation(
+        request.requestId, PermissionResponse::AllowAlways));
+    EXPECT_EQ(responseFuture.get(), PermissionResponse::AllowAlways);
+    worker.join();
+
+    EXPECT_EQ(permissions.requestEditApproval(filePath),
+              PermissionResponse::AllowAlways);
+    EXPECT_EQ(requestCount.load(), 1);
+
+    auto rules = Harness::instance().threadPermissionRules(threadId);
+    ASSERT_EQ(rules.writeAllowPaths.size(), 1u);
+    EXPECT_EQ(rules.writeAllowPaths[0], "/tmp/project/src/**");
+
+    Harness::instance().unsubscribe(subId);
+}
+
+TEST_F(HarnessTest, vulnerableCommandsRemainDeniedInAlwaysAllowMode) {
+    std::string threadId = Harness::instance().newThread({}, "/tmp", "test");
+    ASSERT_FALSE(threadId.empty());
+    ASSERT_TRUE(Harness::instance().setCurrentThreadPermissionMode(
+        ThreadPermissionMode::AlwaysAllow));
+
+    Permissions permissions(threadId, "agent-1");
+    auto intent = permissions.getIntentAnalyzer().analyze("rm -rf /", "/tmp");
+    EXPECT_EQ(intent.severity, CommandSeverity::VULNERABLE);
+    EXPECT_EQ(permissions.requestCommandApproval("rm -rf /", intent),
+              PermissionResponse::Deny);
 }
 
 } // namespace

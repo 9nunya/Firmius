@@ -10,9 +10,9 @@ namespace firmius::core {
 shared::ToolResult ListDirectoryTool::execute(const ListDirectoryInput &input,
                                               shared::ToolContext &ctx) {
   try {
-    std::string absPath = ctx.agent.resolvePath(input.path);
+    std::string absPath = ctx.agent.getEnvironment()->getWorkspace().resolvePath(input.path);
 
-    ctx.agent.getPermissionChecks().validatePathAccess(absPath);
+    ctx.agent.getPermissions()->validatePathAccess(absPath, firmius::shared::AccessMode::READ);
 
     auto entries = ctx.host.listDir(absPath);
 

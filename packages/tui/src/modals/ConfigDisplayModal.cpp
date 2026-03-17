@@ -3,6 +3,7 @@
 #include "TUIState.hpp"
 #include "ThemeManager.hpp"
 #include "harness/Harness.hpp"
+#include "modals/ModalLayout.hpp"
 #include <ftxui/component/component.hpp>
 #include <ftxui/dom/elements.hpp>
 #include <memory>
@@ -10,9 +11,24 @@
 
 namespace firmius::tui {
 
+namespace {
+
+std::string permissionModeLabel(firmius::shared::ThreadPermissionMode mode) {
+  switch (mode) {
+  case firmius::shared::ThreadPermissionMode::Request:
+    return "Request";
+  case firmius::shared::ThreadPermissionMode::AlwaysAllow:
+    return "Always Allow";
+  case firmius::shared::ThreadPermissionMode::DenyAll:
+    return "Deny All";
+  }
+  return "Request";
+}
+
+} // namespace
+
 ftxui::Component ConfigDisplayModal::create(TuiState &state) {
   auto &h = firmius::core::Harness::instance();
-  auto offset = std::make_shared<int>(0);
 
   // We capture everything by value to avoid referencing locals in the renderer
   // and we perform the data gathering once here to avoid calling
@@ -45,8 +61,9 @@ ftxui::Component ConfigDisplayModal::create(TuiState &state) {
     provOptLines.push_back(key + " = " + val);
   }
 
-  auto component = ftxui::Renderer([=]() {
+  auto component = ftxui::Renderer([=, &state]() {
     const auto &theme = ThemeManager::instance().getCurrentTheme();
+    const bool hasActiveThread = state.hasActiveThread();
     ftxui::Elements rows;
     rows.push_back(ftxui::hbox(
         {ftxui::text("Provider:    ") | ftxui::bold |
@@ -57,13 +74,22 @@ ftxui::Component ConfigDisplayModal::create(TuiState &state) {
              ftxui::color(theme.modals.fg),
          ftxui::text(modelId) | ftxui::color(theme.modals.highlight_fg)}));
     rows.push_back(ftxui::hbox(
-        {ftxui::text("Unrestricted Paths: ") | ftxui::bold |
+        {ftxui::text("Permissions: ") | ftxui::bold |
              ftxui::color(theme.modals.fg),
-         ftxui::text(config.dangerouslySkipPermissions ? "[ENABLED]"
-                                                       : "[DISABLED]") |
-             ftxui::color(config.dangerouslySkipPermissions
-                              ? theme.status_bar.error.normal.fg
-                              : theme.modals.highlight_fg)}));
+         ftxui::text(hasActiveThread
+                         ? ("Thread " + state.currentThreadId())
+                         : "No active thread") |
+             ftxui::color(hasActiveThread ? theme.modals.highlight_fg
+                                          : theme.base.dim)}));
+    rows.push_back(ftxui::hbox(
+        {ftxui::text("Mode:        ") | ftxui::bold |
+             ftxui::color(theme.modals.fg),
+         ftxui::text(
+             hasActiveThread
+                 ? permissionModeLabel(state.currentThreadPermissionMode())
+                 : "Unavailable") |
+             ftxui::color(hasActiveThread ? theme.modals.highlight_fg
+                                          : theme.base.dim)}));
 
     if (!apiKeyNames.empty()) {
       rows.push_back(ftxui::separatorLight() |
@@ -93,21 +119,23 @@ ftxui::Component ConfigDisplayModal::create(TuiState &state) {
              ftxui::text("Change Model   ") | ftxui::color(theme.modals.fg),
              ftxui::text(" [P] ") | ftxui::bold |
                  ftxui::color(theme.modals.title),
-             ftxui::text("Toggle Permissions   ") |
-                 ftxui::color(theme.modals.fg),
+             ftxui::text(hasActiveThread ? "Cycle Thread Mode   "
+                                         : "No Active Thread   ") |
+                 ftxui::color(hasActiveThread ? theme.modals.fg
+                                              : theme.base.dim),
              ftxui::text(" [ESC] ") | ftxui::bold |
                  ftxui::color(theme.base.dim),
              ftxui::text("Close") | ftxui::color(theme.modals.fg)}) |
         ftxui::center);
 
-    return ftxui::window(ftxui::text(" Configuration ") | ftxui::bold |
-                             ftxui::color(theme.modals.title),
-                         ftxui::vbox(rows) | ftxui::yframe |
-                             ftxui::vscroll_indicator | ftxui::yflex |
-                             ftxui::size(ftxui::WIDTH, ftxui::LESS_THAN, 60) |
-                             ftxui::size(ftxui::HEIGHT, ftxui::LESS_THAN, 20)) |
-           ftxui::clear_under | ftxui::center |
-           ftxui::bgcolor(theme.modals.bg) | ftxui::color(theme.modals.border);
+    return FlatModalPanel(
+        theme, "Configuration",
+        ModalSection(
+            theme,
+            ftxui::vbox(rows) | ftxui::yframe | ftxui::vscroll_indicator |
+                ftxui::yflex,
+            theme.modals.bg),
+        60, 20);
   });
 
   return ftxui::CatchEvent(component, [&state](ftxui::Event event) {
@@ -123,12 +151,7 @@ ftxui::Component ConfigDisplayModal::create(TuiState &state) {
     }
     if (event == ftxui::Event::Character('p') ||
         event == ftxui::Event::Character('P')) {
-      auto &h = firmius::core::Harness::instance();
-      auto cfg = h.getConfig();
-      cfg.dangerouslySkipPermissions = !cfg.dangerouslySkipPermissions;
-      h.updateConfig(cfg);
-      h.saveConfig();
-      // Re-trigger modal to refresh view
+      state.cycleThreadPermissionMode();
       state.popModalImmediate();
       state.openModal("config_display");
       return true;

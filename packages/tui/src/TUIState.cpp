@@ -15,13 +15,16 @@
 #include "components/ToolBlock.hpp"
 #include "harness/Harness.hpp"
 #include "modals/ModalRegistry.hpp"
+#include "modals/PermissionPromptModal.hpp"
 #include "modals/ThreadLockedModal.hpp"
 #include "providers/ProviderRegistry.hpp"
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <ftxui/component/component.hpp>
+#include <ftxui/dom/node.hpp>
 #include <ftxui/dom/elements.hpp>
+#include <ftxui/screen/screen.hpp>
 #include <unordered_map>
 #include <vector>
 
@@ -77,6 +80,109 @@ static std::vector<std::string> getSwitchableLeadPersonas() {
     purposes.push_back("firmius");
   }
   return purposes;
+}
+
+static std::string permissionModeToDisplayName(
+    shared::ThreadPermissionMode mode) {
+  switch (mode) {
+  case shared::ThreadPermissionMode::Request:
+    return "Request";
+  case shared::ThreadPermissionMode::AlwaysAllow:
+    return "Always Allow";
+  case shared::ThreadPermissionMode::DenyAll:
+    return "Deny All";
+  }
+  return "Request";
+}
+
+static std::string permissionResponseToDisplayName(
+    shared::PermissionResponse response) {
+  switch (response) {
+  case shared::PermissionResponse::AllowOnce:
+    return "Allow Once";
+  case shared::PermissionResponse::AllowAlways:
+    return "Allow Always";
+  case shared::PermissionResponse::Deny:
+    return "Deny";
+  }
+  return "Deny";
+}
+
+static bool isPermissionCycleEvent(const ftxui::Event &event) {
+  const std::string raw = event.input();
+  if (raw == "\x1b[1;6P" || raw == "\x1b[80;6u" ||
+      raw == "\x1b[27;6;80~" || raw == "\x1b[27;6;112~") {
+    return true;
+  }
+
+  // Some terminals report modified letters through CSI-u and differ on
+  // whether shift is encoded via the codepoint or the modifier bits.
+  if (raw.size() > 5 && raw.rfind("\x1b[", 0) == 0 && raw.back() == 'u') {
+    auto semi = raw.find(';', 2);
+    if (semi != std::string::npos) {
+      try {
+        int codepoint = std::stoi(raw.substr(2, semi - 2));
+        int modifier = std::stoi(raw.substr(semi + 1, raw.size() - semi - 2));
+        bool is_p = codepoint == 'P' || codepoint == 'p';
+        bool has_ctrl = (modifier & 4) != 0;
+        bool has_shift = (modifier & 1) != 0 || codepoint == 'P';
+        if (is_p && has_ctrl && has_shift) {
+          return true;
+        }
+      } catch (...) {
+      }
+    }
+  }
+
+  return false;
+}
+
+class ScreenShaderNode : public ftxui::Node {
+public:
+  explicit ScreenShaderNode(ftxui::Element child)
+      : ftxui::Node({std::move(child)}) {}
+
+  void ComputeRequirement() override {
+    requirement_ = children_[0]->requirement();
+  }
+
+  void SetBox(ftxui::Box box) override {
+    box_ = box;
+    children_[0]->SetBox(box);
+  }
+
+  void Render(ftxui::Screen &screen) override { children_[0]->Render(screen); }
+};
+
+class DarkenNode : public ScreenShaderNode {
+public:
+  DarkenNode(ftxui::Element child, uint8_t alpha)
+      : ScreenShaderNode(std::move(child)),
+        overlay_(ftxui::Color::RGBA(0, 0, 0, alpha)) {}
+
+  void Render(ftxui::Screen &screen) override {
+    ScreenShaderNode::Render(screen);
+    for (int y = box_.y_min; y <= box_.y_max; ++y) {
+      for (int x = box_.x_min; x <= box_.x_max; ++x) {
+        auto &pixel = screen.PixelAt(x, y);
+        if (pixel.foreground_color != ftxui::Color::Default) {
+          pixel.foreground_color =
+              ftxui::Color::Blend(pixel.foreground_color, overlay_);
+        }
+        if (pixel.background_color != ftxui::Color::Default) {
+          pixel.background_color =
+              ftxui::Color::Blend(pixel.background_color, overlay_);
+        }
+      }
+    }
+  }
+
+private:
+  ftxui::Color overlay_;
+};
+
+static ftxui::Element DarkenElement(ftxui::Element child, uint8_t alpha = 96) {
+  return std::make_shared<DarkenNode>(std::move(child), alpha);
 }
 
 TuiState &TuiState::instance() {
@@ -135,6 +241,26 @@ void TuiState::postEvent(ftxui::Event event) {
   if (screen_) {
     screen_->PostEvent(event);
   }
+}
+
+bool TuiState::cycleThreadPermissionMode() {
+  if (!harness_ || thread_.threadId.empty()) {
+    NotificationManager::instance().notifyWarning(
+        "Permissions", "No active thread to update.",
+        std::chrono::milliseconds(1600));
+    return false;
+  }
+
+  harness_->cycleCurrentThreadPermissionMode();
+  return true;
+}
+
+bool TuiState::hasActiveThread() const { return !thread_.threadId.empty(); }
+
+std::string TuiState::currentThreadId() const { return thread_.threadId; }
+
+shared::ThreadPermissionMode TuiState::currentThreadPermissionMode() const {
+  return thread_.permissionMode;
 }
 
 void TuiState::init(firmius::core::Harness &harness,
@@ -361,6 +487,35 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
           if (chat_component_) {
             chat_component_->OnEvent(ftxui::Event::Special("ThreadChanged"));
           }
+        } else if constexpr (std::is_same_v<T, ThreadMetadataUpdated>) {
+          if (e.threadId == thread_.threadId) {
+            auto previousMode = thread_.permissionMode;
+            thread_ = e.metadata;
+            if (title_model_) {
+              title_model_->title = thread_.title;
+              title_model_->thread_id = thread_.threadId;
+            }
+            if (previousMode != thread_.permissionMode) {
+              NotificationManager::instance().notifyInfo(
+                  "Permissions",
+                  "Thread mode: " +
+                      permissionModeToDisplayName(thread_.permissionMode),
+                  std::chrono::milliseconds(1500));
+            }
+          }
+        } else if constexpr (std::is_same_v<T, PermissionEscalationRequest>) {
+          auto modal = std::make_shared<PermissionPromptModal>(
+              e, [this, requestId = e.requestId](PermissionResponse response) {
+                if (harness_) {
+                  harness_->resolvePermissionEscalation(requestId, response);
+                }
+              });
+          openModalDirect(modal->create(*this));
+        } else if constexpr (std::is_same_v<T, PermissionEscalationResolved>) {
+          NotificationManager::instance().notifyInfo(
+              "Permission",
+              permissionResponseToDisplayName(e.response),
+              std::chrono::milliseconds(1200));
         } else if constexpr (std::is_same_v<T, ThreadLocked>) {
           auto locked_modal =
               ThreadLockedModal::create(*this, e.threadId, e.ownerPid);
@@ -450,6 +605,7 @@ std::string TuiState::statusText() const { return "unknown"; }
 void TuiState::updateStatusModel() {
   if (!status_model_)
     return;
+  status_model_->permission_mode = thread_.permissionMode;
   if (!focused_agent_id_.empty()) {
     auto agent =
         firmius::core::AgentRegistry::instance().getAgent(focused_agent_id_);
@@ -999,7 +1155,8 @@ ftxui::Component TuiState::root() {
     ftxui::Element current = base_view->Render();
     for (const auto &modal : modals_) {
       current = ftxui::dbox(
-          {current, modal->Render() | ftxui::clear_under | ftxui::center});
+          {DarkenElement(current),
+           modal->Render() | ftxui::clear_under | ftxui::center});
     }
     return current;
   });
@@ -1079,6 +1236,10 @@ ftxui::Component TuiState::root() {
       }
       if (harness_)
         harness_->abort();
+      return true;
+    }
+    if (isPermissionCycleEvent(event)) { // Ctrl+Shift+P (Permission Mode)
+      cycleThreadPermissionMode();
       return true;
     }
     if (event.input() == "\x1b[Z") { // Shift+Tab (cycle lead mode)
