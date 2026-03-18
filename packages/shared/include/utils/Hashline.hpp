@@ -2,9 +2,15 @@
 
 #include <string>
 #include <string_view>
+#include <optional>
 #include <vector>
 
 namespace firmius::shared::utils {
+
+struct HashlineAnchor {
+    int lineNumber = 0;
+    std::string hash;
+};
 
 /**
  * @brief Utility for Hash-Anchored Edits (Hashline pattern).
@@ -22,12 +28,27 @@ public:
     static std::string computeHash(std::string_view content) noexcept;
 
     /**
+     * @brief Formats an anchor without line content: "lineNum#hash".
+     * @param lineNum The 1-indexed line number.
+     * @param content The line content used to derive the hash.
+     * @return The formatted anchor string.
+     */
+    static std::string formatAnchor(int lineNum, std::string_view content);
+
+    /**
      * @brief Formats a line into the hashline pattern: "lineNum#hash|content".
      * @param lineNum The 1-indexed line number.
      * @param content The line content.
      * @return The formatted hashline string.
      */
     static std::string formatLine(int lineNum, std::string_view content);
+
+    /**
+     * @brief Parses an anchor in the form "lineNum#hash".
+     * @param anchor The anchor text.
+     * @return Parsed anchor if valid.
+     */
+    static std::optional<HashlineAnchor> parseAnchor(std::string_view anchor) noexcept;
 
     /**
      * @brief Verifies if the actual content matches the expected hash.

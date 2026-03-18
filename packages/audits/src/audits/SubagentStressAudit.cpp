@@ -41,7 +41,7 @@ SubagentStressAudit::run(const std::vector<std::string> &args) {
   opts.containerName = "";
   opts.deleteOnExit = false;
   std::string threadId =
-      harness.newThread(opts, "/home/nunya/Projects/Firmius", "general");
+      harness.newThread(opts, "/home/nunya/Projects/Firmius", "lead");
   if (threadId.empty()) {
     std::cerr << "Failed to create Local thread." << std::endl;
     result.exitCode = 1;

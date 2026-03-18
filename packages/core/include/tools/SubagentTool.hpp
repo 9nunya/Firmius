@@ -12,6 +12,8 @@ struct SubagentInput {
     std::string task;
     bool async = false;
     std::optional<std::string> agent_id;
+    std::optional<std::string> plan_id;
+    std::optional<std::string> chunk_id;
     std::string name;   ///< Machine-friendly slug (e.g., "auth-finder")
     std::string title;  ///< Human-readable display name (e.g., "Find auth patterns")
 };
@@ -27,6 +29,12 @@ public:
         MAP_BOOL(async, "async")
         if (json.HasMember("agent_id") && json["agent_id"].IsString()) {
             input.agent_id = json["agent_id"].GetString();
+        }
+        if (json.HasMember("plan_id") && json["plan_id"].IsString()) {
+            input.plan_id = json["plan_id"].GetString();
+        }
+        if (json.HasMember("chunk_id") && json["chunk_id"].IsString()) {
+            input.chunk_id = json["chunk_id"].GetString();
         }
         MAP_STRING(name, "name")
         MAP_STRING(title, "title")

@@ -1,188 +1,99 @@
 #include "components/FileEditToolBlock.hpp"
+#include "components/SyntaxHighlighter.hpp"
 #include "ThemeManager.hpp"
 #include "UIState.hpp"
-#include "components/LogWindow.hpp"
 #include "utils/Icons.hpp"
-#include <algorithm>
 #include <ftxui/dom/elements.hpp>
 #include <rapidjson/document.h>
-#include <sstream>
 
 namespace firmius::tui {
 
-// Simple diff hunk structure
-struct DiffHunk {
-  int old_start = 0;
-  int old_count = 0;
-  int new_start = 0;
-  int new_count = 0;
-  std::vector<std::pair<char, std::string>> lines; // +, -, or ' ' (context)
+namespace {
+
+struct EditPreview {
+  std::string op;
+  std::string label;
+  std::vector<std::string> newLines;
 };
 
-// Smart hunk ranking - prioritize hunks with more changes and context
-static std::vector<size_t>
-rankHunksByRelevance(const std::vector<DiffHunk> &hunks) {
-  std::vector<std::pair<size_t, int>> scored;
-
-  for (size_t i = 0; i < hunks.size(); i++) {
-    const auto &hunk = hunks[i];
-    int score = 0;
-
-    // More changes = more relevant
-    score += (hunk.old_count + hunk.new_count) * 2;
-
-    // Hunks at the beginning or end of file are often less relevant
-    if (hunk.old_start > 1 && i < hunks.size() - 1) {
-      score += 5; // Middle hunks are more relevant
+ftxui::Element renderHighlightedContent(const std::string &content,
+                                        const std::string &language,
+                                        ftxui::Color fallback) {
+  if (!language.empty() &&
+      SyntaxHighlighter::instance().hasGrammar(language)) {
+    auto highlighted =
+        SyntaxHighlighter::instance().highlightRenderLines(content, language);
+    if (!highlighted.empty()) {
+      return highlighted.front();
     }
+  }
+  return ftxui::text(content) | ftxui::color(fallback);
+} // namespace
 
-    // Hunks with both additions and deletions are more significant
-    if (hunk.old_count > 0 && hunk.new_count > 0) {
-      score += 10;
-    }
-
-    scored.push_back({i, score});
+std::vector<EditPreview> parseEditPreviews(const rapidjson::Document &doc) {
+  std::vector<EditPreview> previews;
+  if (!doc.HasMember("edits") || !doc["edits"].IsArray()) {
+    return previews;
   }
 
-  // Sort by score descending
-  std::sort(scored.begin(), scored.end(),
-            [](const auto &a, const auto &b) { return a.second > b.second; });
+  for (const auto &edit : doc["edits"].GetArray()) {
+    if (!edit.IsObject()) {
+      continue;
+    }
 
-  std::vector<size_t> result;
-  for (const auto &[idx, score] : scored) {
-    (void)score;
-    result.push_back(idx);
+    EditPreview preview;
+    if (edit.HasMember("op") && edit["op"].IsString()) {
+      preview.op = edit["op"].GetString();
+    }
+
+    if ((preview.op == "replace_range" || preview.op == "delete_range") &&
+        edit.HasMember("start_anchor") && edit["start_anchor"].IsString() &&
+        edit.HasMember("end_anchor") && edit["end_anchor"].IsString()) {
+      preview.label = std::string(edit["start_anchor"].GetString()) + " -> " +
+                      edit["end_anchor"].GetString();
+    } else if ((preview.op == "insert_after" || preview.op == "insert_before") &&
+               edit.HasMember("anchor") && edit["anchor"].IsString()) {
+      preview.label = edit["anchor"].GetString();
+    }
+
+    if (edit.HasMember("new_lines") && edit["new_lines"].IsArray()) {
+      for (const auto &line : edit["new_lines"].GetArray()) {
+        if (line.IsString()) {
+          preview.newLines.emplace_back(line.GetString());
+        }
+      }
+    }
+
+    previews.push_back(std::move(preview));
   }
 
-  return result;
+  return previews;
 }
 
-// Parse unified diff format or generate from old/new strings
-static std::vector<DiffHunk> parseDiff(const std::string & /*path*/,
-                                       const std::string &old_str,
-                                       const std::string &new_str) {
-  std::vector<DiffHunk> hunks;
-
-  if (old_str.empty() && new_str.empty())
-    return hunks;
-
-  // Simple line-by-line diff
-  std::vector<std::string> old_lines, new_lines;
-  {
-    std::istringstream ss(old_str);
-    std::string line;
-    while (std::getline(ss, line))
-      old_lines.push_back(line);
-  }
-  {
-    std::istringstream ss(new_str);
-    std::string line;
-    while (std::getline(ss, line))
-      new_lines.push_back(line);
-  }
-
-  // Simple LCS-based diff
-  size_t old_idx = 0, new_idx = 0;
-  DiffHunk current_hunk;
-  bool in_hunk = false;
-
-  while (old_idx < old_lines.size() || new_idx < new_lines.size()) {
-    if (old_idx < old_lines.size() && new_idx < new_lines.size() &&
-        old_lines[old_idx] == new_lines[new_idx]) {
-      // Context line
-      if (in_hunk) {
-        current_hunk.lines.push_back({' ', old_lines[old_idx]});
-        current_hunk.old_count++;
-        current_hunk.new_count++;
-      }
-      old_idx++;
-      new_idx++;
-    } else {
-      // Change detected
-      if (!in_hunk) {
-        current_hunk = DiffHunk();
-        current_hunk.old_start = old_idx + 1;
-        current_hunk.new_start = new_idx + 1;
-        in_hunk = true;
-      }
-
-      // Remove lines from old
-      while (old_idx < old_lines.size() &&
-             (new_idx >= new_lines.size() ||
-              old_lines[old_idx] != new_lines[new_idx])) {
-        current_hunk.lines.push_back({'-', old_lines[old_idx]});
-        current_hunk.old_count++;
-        old_idx++;
-      }
-
-      // Add lines from new
-      while (new_idx < new_lines.size() &&
-             (old_idx >= old_lines.size() ||
-              old_lines[old_idx] != new_lines[new_idx])) {
-        current_hunk.lines.push_back({'+', new_lines[new_idx]});
-        current_hunk.new_count++;
-        new_idx++;
-      }
-
-      hunks.push_back(current_hunk);
-      in_hunk = false;
+ftxui::Element renderPreviewLines(const std::vector<std::string> &lines,
+                                  const std::string &language,
+                                  size_t maxLines,
+                                  ftxui::Color fallback,
+                                  ftxui::Color dim) {
+  ftxui::Elements rendered;
+  size_t shown = 0;
+  for (const auto &line : lines) {
+    if (shown >= maxLines) {
+      rendered.push_back(ftxui::text("  …") | ftxui::color(dim));
+      break;
     }
+    rendered.push_back(ftxui::hbox({
+        ftxui::text("+ ") | ftxui::color(ftxui::Color::Green),
+        renderHighlightedContent(line, language, fallback) | ftxui::flex_shrink,
+    }));
+    ++shown;
   }
-
-  return hunks;
+  if (rendered.empty()) {
+    rendered.push_back(ftxui::text("(no new lines)") | ftxui::color(dim));
+  }
+  return ftxui::vbox(rendered);
 }
 
-// Render a single diff hunk
-static ftxui::Element renderDiffHunk(const DiffHunk &hunk,
-                                     bool compact = false) {
-  ftxui::Elements elements;
-  const auto &theme = ThemeManager::instance().getCurrentTheme();
-
-  int line_num = hunk.old_start;
-  int max_lines = compact ? 15 : INT32_MAX;
-  int shown = 0;
-
-  for (const auto &[type, content] : hunk.lines) {
-    if (compact && shown >= max_lines) {
-      elements.push_back(ftxui::text("  …") | ftxui::color(theme.base.dim));
-      break;
-    }
-
-    ftxui::Element line_el;
-    std::string line_num_str = std::to_string(line_num);
-    while (line_num_str.size() < 4)
-      line_num_str = " " + line_num_str;
-
-    switch (type) {
-    case '-':
-      line_el = ftxui::hbox(
-          {ftxui::text(line_num_str + " ") | ftxui::color(theme.base.dim),
-           ftxui::text("− ") | ftxui::color(theme.status_bar.error.normal.bg),
-           ftxui::text(content) |
-               ftxui::color(theme.status_bar.error.normal.bg)});
-      line_num++;
-      break;
-    case '+':
-      line_el = ftxui::hbox(
-          {ftxui::text(line_num_str + " ") | ftxui::color(theme.base.dim),
-           ftxui::text("+ ") | ftxui::color(theme.syntax.string),
-           ftxui::text(content) | ftxui::color(theme.syntax.string)});
-      break;
-    case ' ':
-      line_el = ftxui::hbox(
-          {ftxui::text(line_num_str + " ") | ftxui::color(theme.base.dim),
-           ftxui::text("  ") | ftxui::color(theme.base.dim),
-           ftxui::text(content) |
-               ftxui::color(theme.tool_blocks.specific.file_edit.fg)});
-      line_num++;
-      break;
-    }
-
-    elements.push_back(line_el);
-    shown++;
-  }
-
-  return ftxui::vbox(elements);
 }
 
 ftxui::Component FileEditToolBlock(const std::shared_ptr<ToolCallView> &view) {
@@ -214,8 +125,7 @@ ftxui::Component FileEditToolBlock(const std::shared_ptr<ToolCallView> &view) {
 
     // Parse args
     std::string path_arg;
-    std::string old_string;
-    std::string new_string;
+    std::vector<EditPreview> previews;
     bool is_overwrite = false;
     if (!view->args.empty()) {
       rapidjson::Document doc;
@@ -223,14 +133,10 @@ ftxui::Component FileEditToolBlock(const std::shared_ptr<ToolCallView> &view) {
       if (!doc.HasParseError() && doc.IsObject()) {
         if (doc.HasMember("path") && doc["path"].IsString())
           path_arg = doc["path"].GetString();
-        if (doc.HasMember("old_string") && doc["old_string"].IsString())
-          old_string = doc["old_string"].GetString();
-        if (doc.HasMember("new_string") && doc["new_string"].IsString())
-          new_string = doc["new_string"].GetString();
         if (doc.HasMember("content") && doc["content"].IsString()) {
           is_overwrite = true;
-          new_string = doc["content"].GetString();
         }
+        previews = parseEditPreviews(doc);
       }
     }
 
@@ -258,54 +164,29 @@ ftxui::Component FileEditToolBlock(const std::shared_ptr<ToolCallView> &view) {
            ftxui::text(filename) |
                ftxui::color(theme.tool_blocks.specific.file_edit.fg)});
 
-      // Show diff preview during Called if we have content
       if (view->phase == ToolPhase::Called &&
-          (!old_string.empty() || !new_string.empty())) {
-        auto hunks = parseDiff(path_arg, old_string, new_string);
-
+          (is_overwrite || !previews.empty())) {
         ftxui::Elements diff_elements;
-        int total_added = 0, total_removed = 0;
+        std::string language =
+            SyntaxHighlighter::instance().detectLanguage(filename);
 
-        for (const auto &hunk : hunks) {
-          diff_elements.push_back(renderDiffHunk(hunk, true));
-          total_added += hunk.new_count;
-          total_removed += hunk.old_count;
-        }
-
-        if (diff_elements.empty() && is_overwrite) {
-          // For overwrite, show new content preview
-          std::istringstream ss(new_string);
-          std::string line;
-          int line_num = 1;
-          int shown = 0;
-          while (std::getline(ss, line) && shown < 10) {
-            std::string ln = std::to_string(line_num);
-            while (ln.size() < 4)
-              ln = " " + ln;
-            diff_elements.push_back(ftxui::hbox(
-                {ftxui::text(ln + " ") | ftxui::color(theme.base.dim),
-                 ftxui::text("│ ") |
-                     ftxui::color(theme.tool_blocks.generic_border),
-                 ftxui::text(line) |
-                     ftxui::color(theme.tool_blocks.specific.file_edit.fg)}));
-            line_num++;
-            shown++;
+        if (!previews.empty()) {
+          size_t shown = 0;
+          for (const auto &preview : previews) {
+            if (shown >= 3) {
+              diff_elements.push_back(ftxui::text("  …") |
+                                      ftxui::color(theme.base.dim));
+              break;
+            }
+            diff_elements.push_back(ftxui::vbox({
+                ftxui::text(preview.op + " " + preview.label) | ftxui::bold |
+                    ftxui::color(theme.tool_blocks.specific.file_edit.fg),
+                renderPreviewLines(preview.newLines, language, 4,
+                                   theme.tool_blocks.specific.file_edit.fg,
+                                   theme.base.dim),
+            }));
+            ++shown;
           }
-          total_added = line_num - 1;
-        }
-
-        auto stats = ftxui::text(" ");
-        if (total_added > 0 || total_removed > 0) {
-          ftxui::Elements stats_parts;
-          if (total_added > 0)
-            stats_parts.push_back(
-                ftxui::text("+" + std::to_string(total_added)) |
-                ftxui::color(theme.syntax.string));
-          if (total_removed > 0)
-            stats_parts.push_back(
-                ftxui::text("−" + std::to_string(total_removed)) |
-                ftxui::color(theme.status_bar.error.normal.bg));
-          stats = ftxui::hbox(stats_parts) | ftxui::color(theme.base.dim);
         }
 
         return ftxui::vbox(
@@ -314,7 +195,10 @@ ftxui::Component FileEditToolBlock(const std::shared_ptr<ToolCallView> &view) {
                         ftxui::color(theme.tool_blocks.generic_border),
                     ftxui::vbox(diff_elements) | ftxui::frame |
                         ftxui::size(ftxui::HEIGHT, ftxui::LESS_THAN, 12),
-                    ftxui::hbox({stats, ftxui::filler(),
+                    ftxui::hbox({ftxui::text(std::to_string(previews.size()) +
+                                             " ops") |
+                                     ftxui::color(theme.base.dim),
+                                 ftxui::filler(),
                                  ftxui::text(filename) |
                                      ftxui::color(theme.base.dim)})}) |
                ftxui::borderRounded |
@@ -346,19 +230,14 @@ ftxui::Component FileEditToolBlock(const std::shared_ptr<ToolCallView> &view) {
     // ── Finished + success ──
     view->toggle_label = view->show_result ? "hide" : "show diff";
 
-    // Count lines for stats
-    int removed = 0, added = 0;
-    {
-      std::istringstream ss(old_string);
-      std::string line;
-      while (std::getline(ss, line))
-        removed++;
-    }
-    {
-      std::istringstream ss(new_string);
-      std::string line;
-      while (std::getline(ss, line))
-        added++;
+    int added = 0;
+    int removed = 0;
+    std::string language =
+        SyntaxHighlighter::instance().detectLanguage(filename);
+    for (const auto &preview : previews) {
+      added += static_cast<int>(preview.newLines.size());
+      if (preview.op == "replace_range" || preview.op == "delete_range")
+        removed += 1;
     }
 
     ftxui::Elements rows;
@@ -382,89 +261,29 @@ ftxui::Component FileEditToolBlock(const std::shared_ptr<ToolCallView> &view) {
                   : ftxui::text(""),
     }));
 
-    if (view->show_result && (!old_string.empty() || !new_string.empty())) {
-      auto hunks = parseDiff(path_arg, old_string, new_string);
-
-      // Smart hunk optimization: show most relevant hunks when collapsed
+    if (view->show_result && (is_overwrite || !previews.empty())) {
       bool expanded = UIState::instance().diffsExpanded;
-      size_t maxHunks =
-          expanded ? hunks.size() : 3; // Show top 3 hunks when collapsed
-      size_t maxLines =
-          expanded ? SIZE_MAX
-                   : static_cast<size_t>(UIState::instance().maxCollapsedLines);
-
+      size_t maxOps = expanded ? previews.size() : 3;
       ftxui::Elements diff_elements;
-
-      if (hunks.size() > maxHunks && !expanded) {
-        // Show only most relevant hunks
-        auto ranked = rankHunksByRelevance(hunks);
-        size_t shownHunks = 0;
-        size_t totalLines = 0;
-
-        for (size_t ri = 0; ri < ranked.size() && shownHunks < maxHunks; ri++) {
-          size_t hunkIdx = ranked[ri];
-          const auto &hunk = hunks[hunkIdx];
-
-          // Check if adding this hunk would exceed line limit
-          size_t hunkLines = hunk.lines.size();
-          if (totalLines + hunkLines > maxLines && shownHunks > 0) {
-            break; // Don't show partial hunks
-          }
-
-          diff_elements.push_back(renderDiffHunk(hunk, !expanded));
-          totalLines += hunkLines;
-          shownHunks++;
-        }
-
-        // Add indicator for hidden hunks
-        if (hunks.size() > shownHunks) {
-          size_t hiddenCount = hunks.size() - shownHunks;
-          diff_elements.insert(
-              diff_elements.begin(),
-              ftxui::text("  … " + std::to_string(hiddenCount) +
-                          " hunks hidden (press Ctrl+G to expand)") |
-                  ftxui::color(theme.base.dim));
-        }
-      } else {
-        // Show all hunks
-        for (const auto &hunk : hunks) {
-          diff_elements.push_back(renderDiffHunk(hunk, !expanded));
-        }
+      for (size_t i = 0; i < previews.size() && i < maxOps; ++i) {
+        const auto &preview = previews[i];
+        diff_elements.push_back(ftxui::vbox({
+            ftxui::text(preview.op + " " + preview.label) | ftxui::bold |
+                ftxui::color(theme.tool_blocks.specific.file_edit.fg),
+            renderPreviewLines(
+                preview.newLines, language,
+                expanded ? SIZE_MAX
+                         : static_cast<size_t>(
+                               UIState::instance().maxCollapsedLines),
+                theme.tool_blocks.specific.file_edit.fg, theme.base.dim),
+        }));
       }
-
-      // For overwrite mode with no old content
-      if (diff_elements.empty() && is_overwrite) {
-        std::istringstream ss(new_string);
-        std::string line;
-        int line_num = 1;
-        size_t shown = 0;
-        size_t lineLimit =
-            expanded
-                ? SIZE_MAX
-                : static_cast<size_t>(UIState::instance().maxCollapsedLines);
-
-        while (std::getline(ss, line) && shown < lineLimit) {
-          std::string ln = std::to_string(line_num);
-          while (ln.size() < 4)
-            ln = " " + ln;
-          diff_elements.push_back(ftxui::hbox(
-              {ftxui::text(ln + " ") | ftxui::color(theme.base.dim),
-               ftxui::text("│ ") |
-                   ftxui::color(theme.tool_blocks.generic_border),
-               ftxui::text(line) |
-                   ftxui::color(theme.tool_blocks.specific.file_edit.fg)}));
-          line_num++;
-          shown++;
-        }
-
-        if (!expanded &&
-            line_num <= static_cast<int>(std::count(new_string.begin(),
-                                                    new_string.end(), '\n')) +
-                            1) {
-          diff_elements.push_back(
-              ftxui::text("  … Content truncated (press Ctrl+G to expand)") |
-              ftxui::color(theme.base.dim));
-        }
+      if (!expanded && previews.size() > maxOps) {
+        diff_elements.insert(
+            diff_elements.begin(),
+            ftxui::text("  … " + std::to_string(previews.size() - maxOps) +
+                        " ops hidden (press Ctrl+G to expand)") |
+                ftxui::color(theme.base.dim));
       }
 
       rows.push_back(ftxui::separatorLight() |

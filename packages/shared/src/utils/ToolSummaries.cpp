@@ -47,6 +47,43 @@ static bool isMatch(const std::string &actual, const std::string &expected) {
   return actual.find(expected) != std::string::npos;
 }
 
+static std::string stringArg(const rapidjson::Document &doc, const char *key) {
+  if (doc.IsObject() && doc.HasMember(key) && doc[key].IsString()) {
+    return doc[key].GetString();
+  }
+  return "";
+}
+
+static std::string quotedLabel(const std::string &value, int words = 4) {
+  if (value.empty()) {
+    return "";
+  }
+  return " \"" + firstWords(value, words) + "\"";
+}
+
+static int countNonEmptyLines(const std::string &text) {
+  std::istringstream ss(text);
+  std::string line;
+  int count = 0;
+  while (std::getline(ss, line)) {
+    if (!line.empty()) {
+      count++;
+    }
+  }
+  return count;
+}
+
+static std::string firstNonEmptyLine(const std::string &text) {
+  std::istringstream ss(text);
+  std::string line;
+  while (std::getline(ss, line)) {
+    if (!line.empty()) {
+      return line;
+    }
+  }
+  return "";
+}
+
 std::string SummarizeToolCall(const std::string &name, const std::string &args, ToolPhase phase) {
   if (phase == ToolPhase::Preparing) {
     if (isMatch(name, "file_edit")) return "Preparing edit...";
@@ -56,12 +93,48 @@ std::string SummarizeToolCall(const std::string &name, const std::string &args, 
     if (isMatch(name, "subagent_wait")) return "Awaiting subagent...";
     if (isMatch(name, "grep")) return "Preparing grep...";
     if (isMatch(name, "glob")) return "Preparing glob...";
+    if (isMatch(name, "plan_")) return "Preparing plan update...";
+    if (isMatch(name, "chunk_")) return "Preparing chunk update...";
     return "Preparing " + name + "...";
   }
 
   rapidjson::Document doc;
   doc.Parse(args.c_str());
   bool valid = !doc.HasParseError() && doc.IsObject();
+
+  if (isMatch(name, "plan_create")) {
+    return "Create plan" + quotedLabel(valid ? stringArg(doc, "title") : "");
+  }
+  if (isMatch(name, "plan_update")) {
+    std::string title = valid ? stringArg(doc, "title") : "";
+    return "Update plan" + quotedLabel(title);
+  }
+  if (isMatch(name, "plan_get")) {
+    return "Load plan";
+  }
+  if (isMatch(name, "plan_list")) {
+    return "List plans";
+  }
+  if (isMatch(name, "plan_set_active")) {
+    return "Set active plan";
+  }
+  if (isMatch(name, "chunk_add")) {
+    return "Add chunk" + quotedLabel(valid ? stringArg(doc, "title") : "");
+  }
+  if (isMatch(name, "chunk_get")) {
+    std::string title = valid ? stringArg(doc, "title") : "";
+    return "Load chunk" + quotedLabel(title);
+  }
+  if (isMatch(name, "chunk_list")) {
+    return "List chunks";
+  }
+  if (isMatch(name, "chunk_update")) {
+    std::string title = valid ? stringArg(doc, "title") : "";
+    return "Update chunk" + quotedLabel(title);
+  }
+  if (isMatch(name, "chunk_ready_for_execution")) {
+    return "Find executable chunks";
+  }
 
   if (isMatch(name, "list_directory")) {
     std::string path = "";
@@ -87,8 +160,18 @@ std::string SummarizeToolCall(const std::string &name, const std::string &args, 
   }
   if (isMatch(name, "file_edit")) {
     std::string path = "";
+    size_t editCount = 0;
+    bool overwrite = false;
     if (valid && doc.HasMember("path") && doc["path"].IsString())
       path = doc["path"].GetString();
+    if (valid && doc.HasMember("edits") && doc["edits"].IsArray())
+      editCount = doc["edits"].Size();
+    if (valid && doc.HasMember("content") && doc["content"].IsString())
+      overwrite = true;
+    if (overwrite)
+      return "Overwrite " + path;
+    if (editCount > 0)
+      return "Edit " + path + " (" + std::to_string(editCount) + " ops)";
     return "Edit " + path;
   }
   if (isMatch(name, "process_execute") || isMatch(name, "process_spawn")) {
@@ -110,6 +193,15 @@ std::string SummarizeToolCall(const std::string &name, const std::string &args, 
     return "Glob \"" + pattern + "\"";
   }
   if (isMatch(name, "python_execute")) {
+    std::string code = valid ? stringArg(doc, "code") : "";
+    std::string firstLine = firstNonEmptyLine(code);
+    if (!firstLine.empty()) {
+      return "Python" + quotedLabel(firstLine, 5);
+    }
+    int lineCount = countNonEmptyLines(code);
+    if (lineCount > 0) {
+      return "Python " + std::to_string(lineCount) + " lines";
+    }
     return "Python exec";
   }
   if (isMatch(name, "web_fetch")) {

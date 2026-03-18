@@ -96,10 +96,8 @@ protected:
         chunk.constraints = "Chunk 1 only";
         chunk.completion = "Compile and persist";
         chunk.status = WorkChunkStatus::Ready;
-        chunk.priority = 10;
         chunk.dependsOn = {"bootstrap"};
         chunk.assignedAgentId = "lead";
-        chunk.assignedRole = "implementer";
         chunk.attemptCount = 1;
         chunk.resultSummary = "In progress";
         chunk.reviewSummary = "";

@@ -3,6 +3,8 @@ add_executable(firmius)
 target_sources(firmius PRIVATE
     src/main.cpp
     src/TUIState.cpp
+    src/TUIHotkeys.cpp
+    src/ActivePlanState.cpp
     src/StreamStateManager.cpp
     src/NotificationManager.cpp
     src/ThemeManager.cpp
@@ -31,6 +33,7 @@ target_sources(firmius PRIVATE
     src/components/ChatWindow.cpp
     src/components/ToolBlock.cpp
     src/components/FileEditToolBlock.cpp
+    src/components/FileEditDiff.cpp
     src/components/FileReadToolBlock.cpp
     src/components/ListDirectoryToolBlock.cpp
     src/components/ProcessExecuteToolBlock.cpp
@@ -42,6 +45,7 @@ target_sources(firmius PRIVATE
     src/components/TitleBar.cpp
     src/components/StatusBar.cpp
     src/components/AgentStrip.cpp
+    src/components/PlanLane.cpp
     src/components/InputBar.cpp
     src/components/GlintEffect.cpp
     src/components/HelpOverlay.cpp

@@ -1,25 +1,13 @@
 #include "components/HelpOverlay.hpp"
 #include "components/GlintEffect.hpp"
+#include "TUIHotkeys.hpp"
 #include <ftxui/component/component.hpp>
 #include <ftxui/dom/elements.hpp>
 
 namespace firmius::tui {
 
 ftxui::Component HelpOverlay() {
-  struct State {
-    bool show_help = false;
-  };
-  auto state = std::make_shared<State>();
-  
-  auto toggle_help = [state]() {
-    state->show_help = !state->show_help;
-  };
-  
-  auto render_help = [state]() -> ftxui::Element {
-    if (!state->show_help) {
-      return ftxui::text("");
-    }
-    
+  auto render_help = []() -> ftxui::Element {
     auto section = [](const std::string& title, const std::vector<std::pair<std::string, std::string>>& items) {
       ftxui::Elements rows;
       rows.push_back(ftxui::text(title) | ftxui::bold | ftxui::color(ftxui::Color::Cyan) | ftxui::underlined);
@@ -48,7 +36,7 @@ ftxui::Component HelpOverlay() {
       
       section("Agent Control", {
         {"Ctrl+P", "Focus parent agent"},
-        {"Ctrl+Shift+P", "Cycle thread permissions"},
+        {kPermissionCycleHotkeyLabel, "Cycle thread permissions"},
         {"/config then P", "Fallback permission mode cycle"},
         {"Ctrl+N", "Next sibling agent"},
         {"Ctrl+B", "Previous sibling agent"},
@@ -72,6 +60,7 @@ ftxui::Component HelpOverlay() {
       section("UI", {
         {"?", "Toggle this help"},
         {"Ctrl+H", "Toggle notifications"},
+        {"Ctrl+O", "Expand/collapse plan lane"},
         {"Enter", "Send message"},
         {"Shift+Enter", "New line"},
       }),
@@ -85,8 +74,8 @@ ftxui::Component HelpOverlay() {
       help_content | ftxui::center | ftxui::clear_under
     }) | ftxui::clear_under;
   };
-  
-  return ftxui::Renderer([state, render_help] {
+
+  return ftxui::Renderer([render_help] {
     return render_help();
   });
 }

@@ -211,7 +211,7 @@ TEST(Serialization, ThreadMetadataPermissionModeRoundtrip) {
   metadata.hostOptions.type = HostType::Local;
   metadata.hostIdentifier = "localhost";
   metadata.cwd = "/tmp";
-  metadata.leadPersona = "firmius";
+  metadata.leadPersona = "lead";
   metadata.activePlanId = "plan-123";
   metadata.permissionMode = ThreadPermissionMode::DenyAll;
   metadata.createdAt = 123;
@@ -236,7 +236,7 @@ TEST(Serialization, ThreadMetadataPermissionModeDefaultsToRequest) {
   doc.AddMember("threadId", "thread-legacy", a);
   doc.AddMember("title", "Legacy", a);
   doc.AddMember("cwd", "/tmp", a);
-  doc.AddMember("leadPersona", "firmius", a);
+  doc.AddMember("leadPersona", "lead", a);
 
   auto metadata = threadMetadataFromJson(doc);
   EXPECT_EQ(metadata.permissionMode, ThreadPermissionMode::Request);
@@ -250,12 +250,29 @@ TEST(Serialization, ThreadMetadataActivePlanIdBackwardCompatibleDefault) {
   doc.AddMember("threadId", "thread-legacy", a);
   doc.AddMember("title", "Legacy", a);
   doc.AddMember("cwd", "/tmp", a);
-  doc.AddMember("leadPersona", "firmius", a);
+  doc.AddMember("leadPersona", "lead", a);
   doc.AddMember("permissionMode", "Request", a);
 
   auto metadata = threadMetadataFromJson(doc);
   EXPECT_EQ(metadata.threadId, "thread-legacy");
   EXPECT_TRUE(metadata.activePlanId.empty());
+}
+
+TEST(Serialization, WorkLanguageToolScopesRoundtrip) {
+  AgentContext original;
+  original.permissions.allowedScopes = {
+      ToolScope::PlanRead, ToolScope::PlanWrite, ToolScope::ChunkRead,
+      ToolScope::ChunkWrite, ToolScope::ChunkAssign, ToolScope::ChunkReview};
+  original.environment.type = HostType::Local;
+  original.environment.identifier = "local";
+  original.environment.cwd = "/work";
+  original.history->threadId = "thread-work-scopes";
+
+  std::string json = serializeToString(original);
+  auto restored = deserializeFromString(json);
+
+  EXPECT_EQ(restored.permissions.allowedScopes,
+            original.permissions.allowedScopes);
 }
 
 TEST(Serialization, WorkChunkRoundtrip) {
@@ -267,10 +284,8 @@ TEST(Serialization, WorkChunkRoundtrip) {
   original.constraints = "No chunk files";
   original.completion = "Model compiles and round-trips";
   original.status = WorkChunkStatus::Verifying;
-  original.priority = 7;
   original.dependsOn = {"chunk-0", "chunk-bootstrap"};
   original.assignedAgentId = "agent-lead";
-  original.assignedRole = "implementer";
   original.attemptCount = 2;
   original.resultSummary = "Implemented model";
   original.reviewSummary = "Pending review";
@@ -294,9 +309,24 @@ TEST(Serialization, WorkChunkDefaultsForMissingFields) {
   EXPECT_EQ(chunk.id, "chunk-legacy");
   EXPECT_EQ(chunk.title, "Legacy chunk");
   EXPECT_EQ(chunk.status, WorkChunkStatus::Draft);
-  EXPECT_EQ(chunk.priority, 0);
   EXPECT_EQ(chunk.attemptCount, 0);
   EXPECT_TRUE(chunk.dependsOn.empty());
+  EXPECT_TRUE(chunk.assignedAgentId.empty());
+}
+
+TEST(Serialization, WorkChunkIgnoresLegacyAssignedRoleAndPriorityFields) {
+  rapidjson::Document doc;
+  doc.SetObject();
+  auto &a = doc.GetAllocator();
+  doc.AddMember("id", "chunk-legacy", a);
+  doc.AddMember("title", "Legacy chunk", a);
+  doc.AddMember("priority", 9, a);
+  doc.AddMember("assigned_role", "executor", a);
+  doc.AddMember("assignedRole", "executor", a);
+
+  auto chunk = workChunkFromJson(doc);
+  EXPECT_EQ(chunk.id, "chunk-legacy");
+  EXPECT_EQ(chunk.title, "Legacy chunk");
   EXPECT_TRUE(chunk.assignedAgentId.empty());
 }
 
@@ -318,7 +348,6 @@ TEST(Serialization, PlanRoundtrip) {
   chunk.title = "Add core models";
   chunk.goal = "Define Plan and WorkChunk";
   chunk.status = WorkChunkStatus::Ready;
-  chunk.priority = 1;
   chunk.createdAt = 124;
   chunk.updatedAt = 125;
   original.chunks.push_back(chunk);

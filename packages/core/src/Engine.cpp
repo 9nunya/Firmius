@@ -25,12 +25,22 @@
 #include "tools/GlobTool.hpp"
 #include "tools/GrepTool.hpp"
 #include "tools/ListDirectoryTool.hpp"
+#include "tools/PlanCreateTool.hpp"
+#include "tools/PlanGetTool.hpp"
+#include "tools/PlanListTool.hpp"
+#include "tools/PlanSetActiveTool.hpp"
+#include "tools/PlanUpdateTool.hpp"
 #include "tools/ProcessExecuteTool.hpp"
 #include "tools/ProcessInputTool.hpp"
 #include "tools/ProcessSpawnTool.hpp"
 #include "tools/ProcessStatusTool.hpp"
 #include "tools/ProcessWaitTool.hpp"
 #include "tools/PythonExecuteTool.hpp"
+#include "tools/ChunkAddTool.hpp"
+#include "tools/ChunkGetTool.hpp"
+#include "tools/ChunkListTool.hpp"
+#include "tools/ChunkReadyForExecutionTool.hpp"
+#include "tools/ChunkUpdateTool.hpp"
 #include "tools/SubagentTerminateTool.hpp"
 #include "tools/SubagentTool.hpp"
 #include "tools/SubagentWaitTool.hpp"
@@ -79,6 +89,16 @@ Engine::Engine() {
   toolRegistry.registerTool(std::make_unique<ProcessStatusTool>());
   toolRegistry.registerTool(std::make_unique<ProcessWaitTool>());
   toolRegistry.registerTool(std::make_unique<ProcessInputTool>());
+  toolRegistry.registerTool(std::make_unique<PlanCreateTool>());
+  toolRegistry.registerTool(std::make_unique<PlanListTool>());
+  toolRegistry.registerTool(std::make_unique<PlanGetTool>());
+  toolRegistry.registerTool(std::make_unique<PlanUpdateTool>());
+  toolRegistry.registerTool(std::make_unique<PlanSetActiveTool>());
+  toolRegistry.registerTool(std::make_unique<ChunkAddTool>());
+  toolRegistry.registerTool(std::make_unique<ChunkListTool>());
+  toolRegistry.registerTool(std::make_unique<ChunkGetTool>());
+  toolRegistry.registerTool(std::make_unique<ChunkUpdateTool>());
+  toolRegistry.registerTool(std::make_unique<ChunkReadyForExecutionTool>());
 }
 
 void Engine::initProviders() {

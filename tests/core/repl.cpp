@@ -54,7 +54,7 @@ int main() {
     meta.hostType = HostType::Local;
     meta.hostIdentifier = "local";
     meta.cwd = std::filesystem::current_path().string();
-    meta.leadPersona = "general";
+    meta.leadPersona = "lead";
     
     currentThreadId = ThreadManager::createThread(meta);
 

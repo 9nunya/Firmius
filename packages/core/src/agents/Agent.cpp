@@ -205,7 +205,7 @@ void Agent::run(const std::string &task,
     auto toolDefs =
         toolRegistry.getAvailableToolDefinitions(context.permissions);
     std::string personaName = context.config.personaName.empty()
-                                  ? "builder"
+                                  ? "lead"
                                   : context.config.personaName;
     Persona persona = PurposeLoader::load(personaName);
     std::string toolBlock = PurposeLoader::buildToolsBlock(toolDefs);

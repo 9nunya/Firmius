@@ -37,6 +37,10 @@ public:
     MOCK_METHOD(std::string, resolvePath, (const std::string& path), (const, override));
     MOCK_METHOD(bool, hasReadFile, (const std::string& path), (const, override));
     MOCK_METHOD(void, markFileAsRead, (const std::string& path), (override));
+    MOCK_METHOD(void, recordFileRead,
+                (const std::string& path, int startLine, int endLine,
+                 bool reachedEnd),
+                (override));
     MOCK_METHOD(bool, hasFullyReadFile, (const std::string& path), (const, override));
     MOCK_METHOD(void, markFileAsFullyRead, (const std::string& path), (override));
     MOCK_METHOD(std::string, getCurrentWorkingDirectory, (), (const, override));

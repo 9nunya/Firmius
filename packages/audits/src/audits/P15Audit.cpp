@@ -96,7 +96,7 @@ shared::AuditResult P15Audit::run(const std::vector<std::string> &) {
     std::cout << "[TEST 5] Testing SubagentTool with agent_id for re-tasking..."
               << std::endl;
     std::string agentId2 = Engine::instance().summonAgent(
-        threadId, "general", "Return 'initial task done'", false);
+        threadId, "lead", "Return 'initial task done'", false);
     std::cout << "  -> Created second agent: " << agentId2 << std::endl;
     Engine::instance().waitForAgent(agentId2);
     std::cout << "  -> First task completed" << std::endl;

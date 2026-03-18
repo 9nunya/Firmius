@@ -94,7 +94,7 @@ struct AgentConfig {
   std::string providerId = "nanogpt"; ///< LLM provider identifier.
   std::string modelId;                ///< LLM model identifier.
   std::string modelVariant; ///< Selected model variant (if applicable).
-  std::string personaName = "builder"; ///< Persona to load from prompts/.
+  std::string personaName = "lead"; ///< Persona to load from prompts/.
   int maxTurns = 200;       ///< Maximum autonomous turns before stopping.
   float temperature = 0.7f; ///< LLM generation temperature.
   std::optional<std::uint32_t> maxTokens; ///< Optional max output tokens.
@@ -186,10 +186,8 @@ struct WorkChunk {
   std::string constraints;
   std::string completion;
   WorkChunkStatus status = WorkChunkStatus::Draft;
-  int priority = 0;
   std::vector<std::string> dependsOn;
   std::string assignedAgentId;
-  std::string assignedRole;
   int attemptCount = 0;
   std::string resultSummary;
   std::string reviewSummary;

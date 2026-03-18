@@ -70,6 +70,21 @@ target_include_directories(test_tools PRIVATE
 )
 gtest_discover_tests(test_tools)
 
+add_executable(test_work_tools
+    tools/test_work_tools.cpp
+)
+target_link_libraries(test_work_tools PRIVATE
+    firmius::core
+    firmius::shared
+    GTest::gtest_main
+    GTest::gmock
+    CURL::libcurl
+)
+target_include_directories(test_work_tools PRIVATE
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_work_tools)
+
 # Harness tests
 add_executable(test_harness
     harness/test_harness.cpp
@@ -200,6 +215,7 @@ gtest_discover_tests(test_syntax_highlighter)
 # TUI Diff Rendering tests
 add_executable(test_diff_rendering
     tui/test_diff_rendering.cpp
+    ../../packages/tui/src/components/FileEditDiff.cpp
 )
 target_link_libraries(test_diff_rendering PRIVATE
     firmius::shared
@@ -210,6 +226,35 @@ target_include_directories(test_diff_rendering PRIVATE
     ../../packages/tui/src
 )
 gtest_discover_tests(test_diff_rendering)
+
+add_executable(test_tui_hotkeys
+    tui/test_tui_hotkeys.cpp
+    ../../packages/tui/src/TUIHotkeys.cpp
+)
+target_link_libraries(test_tui_hotkeys PRIVATE
+    firmius::shared
+    GTest::gtest_main
+    ftxui::component
+)
+target_include_directories(test_tui_hotkeys PRIVATE
+    ../../packages/tui/include
+    ../../packages/tui/src
+)
+gtest_discover_tests(test_tui_hotkeys)
+
+add_executable(test_active_plan_state
+    tui/test_active_plan_state.cpp
+    ../../packages/tui/src/ActivePlanState.cpp
+)
+target_link_libraries(test_active_plan_state PRIVATE
+    firmius::shared
+    GTest::gtest_main
+)
+target_include_directories(test_active_plan_state PRIVATE
+    ../../packages/tui/include
+    ../../packages/tui/src
+)
+gtest_discover_tests(test_active_plan_state)
 
 # Workflow tests
 add_executable(test_workflow
@@ -239,3 +284,16 @@ target_include_directories(test_command_intent_analyzer PRIVATE
     ${rapidjson_SOURCE_DIR}/include
 )
 gtest_discover_tests(test_command_intent_analyzer)
+
+add_executable(test_workspace
+    core/test_workspace.cpp
+)
+target_link_libraries(test_workspace PRIVATE
+    firmius::core
+    firmius::shared
+    GTest::gtest_main
+)
+target_include_directories(test_workspace PRIVATE
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_workspace)

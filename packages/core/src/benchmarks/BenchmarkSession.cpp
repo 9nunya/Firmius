@@ -45,7 +45,7 @@ void BenchmarkSession::ensureReady() {
     config_.cwd = "/work";
   }
   if (config_.personaName.empty()) {
-    config_.personaName = "builder";
+    config_.personaName = "lead";
   }
   threadId_ =
       harness.newThread(config_.hostOptions, config_.cwd, config_.personaName);

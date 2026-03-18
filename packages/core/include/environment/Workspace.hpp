@@ -2,9 +2,12 @@
 #define FIRMIUS_CORE_WORKSPACE_HPP
 
 #include "IEnvironment.hpp"
-#include <set>
+#include <map>
 #include <mutex>
+#include <optional>
+#include <set>
 #include <string>
+#include <vector>
 
 namespace firmius::core {
 
@@ -25,6 +28,8 @@ public:
     std::string resolvePath(const std::string& path) const override;
     bool hasReadFile(const std::string& path) const override;
     void markFileAsRead(const std::string& path) override;
+    void recordFileRead(const std::string& path, int startLine, int endLine,
+                        bool reachedEnd) override;
     bool hasFullyReadFile(const std::string& path) const override;
     void markFileAsFullyRead(const std::string& path) override;
     std::string getCurrentWorkingDirectory() const override;
@@ -36,10 +41,20 @@ public:
     void setCurrentWorkingDirectory(const std::string& cwd);
 
 private:
+    struct ReadCoverage {
+        std::vector<std::pair<int, int>> ranges;
+        std::optional<int> terminalLine;
+    };
+
+    static void mergeRange(std::vector<std::pair<int, int>>& ranges,
+                           int startLine, int endLine);
+    static bool isFullyCovered(const ReadCoverage& coverage);
+
     std::string cwd_;
     mutable std::mutex fileMutex_;
     std::set<std::string> readFiles_;
     std::set<std::string> fullyReadFiles_;
+    std::map<std::string, ReadCoverage> readCoverage_;
 };
 
 } // namespace firmius::core

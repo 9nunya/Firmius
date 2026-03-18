@@ -11,6 +11,7 @@
 #include "tools/ProcessExecuteTool.hpp"
 #include "tools/ProcessSpawnTool.hpp"
 #include "tools/PythonExecuteTool.hpp"
+#include "utils/Hashline.hpp"
 #include <filesystem>
 #include <fstream>
 #include <gmock/gmock.h>
@@ -18,6 +19,7 @@
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
+#include <sstream>
 #include <set>
 
 using namespace firmius::core;
@@ -141,6 +143,42 @@ createJsonInput(const std::map<std::string, std::string> &stringFields,
     doc.AddMember(makeJsonString(key, alloc), rapidjson::Value(value), alloc);
   }
 
+  return doc;
+}
+
+rapidjson::Document createFileEditJson(
+    const std::string &path,
+    const std::vector<std::map<std::string, std::string>> &edits) {
+  rapidjson::Document doc;
+  doc.SetObject();
+  auto &alloc = doc.GetAllocator();
+  doc.AddMember("path", makeJsonString(path, alloc), alloc);
+
+  rapidjson::Value editArray(rapidjson::kArrayType);
+  for (const auto &editFields : edits) {
+    rapidjson::Value editObj(rapidjson::kObjectType);
+    rapidjson::Value newLines(rapidjson::kArrayType);
+
+    for (const auto &[key, value] : editFields) {
+      if (key == "new_lines") {
+        std::stringstream ss(value);
+        std::string line;
+        while (std::getline(ss, line, '\n')) {
+          newLines.PushBack(makeJsonString(line, alloc), alloc);
+        }
+        continue;
+      }
+      editObj.AddMember(makeJsonString(key, alloc), makeJsonString(value, alloc),
+                        alloc);
+    }
+
+    if (!newLines.Empty()) {
+      editObj.AddMember("new_lines", newLines, alloc);
+    }
+    editArray.PushBack(editObj, alloc);
+  }
+
+  doc.AddMember("edits", editArray, alloc);
   return doc;
 }
 
@@ -380,6 +418,50 @@ protected:
   }
 };
 
+class FileEditAnchorToolTest : public ::testing::Test {
+protected:
+  FileEditTool tool;
+  NiceMock<MockHost> mockHost;
+  NiceMock<MockAgent> mockAgent;
+  std::string capturedWrite;
+
+  void SetUp() override {
+    mockAgent.defaultCtx.environment.cwd = "/tmp/work";
+    mockAgent.defaultCtx.permissions.allowOutsideCwd = false;
+    mockAgent.defaultCtx.permissions.allowedPaths = {"/tmp/work", "/tmp"};
+    mockAgent.mockPerms_->allowOutsideCwd_ = false;
+    mockAgent.mockPerms_->allowedPaths_ = {"/tmp/work", "/tmp"};
+    mockAgent.mockPerms_->cwd_ = "/tmp/work";
+
+    ON_CALL(mockAgent, getContext())
+        .WillByDefault(ReturnRef(mockAgent.defaultCtx));
+    ON_CALL(mockAgent, getMutableContext())
+        .WillByDefault(ReturnRef(mockAgent.defaultCtx));
+    ON_CALL(mockAgent.mockEnv_->mockWorkspace(), resolvePath(_))
+        .WillByDefault(Invoke([](const std::string &path) {
+          if (path.starts_with("/")) {
+            return path;
+          }
+          return "/tmp/work/" + path;
+        }));
+    ON_CALL(mockAgent.mockEnv_->mockWorkspace(), hasFullyReadFile(_))
+        .WillByDefault(Return(true));
+    ON_CALL(mockHost, writeFile(_, _))
+        .WillByDefault(Invoke([this](const std::string &,
+                                     const std::vector<uint8_t> &data) {
+          capturedWrite.assign(data.begin(), data.end());
+        }));
+  }
+
+  static std::vector<uint8_t> bytes(const std::string &text) {
+    return std::vector<uint8_t>(text.begin(), text.end());
+  }
+
+  static std::string anchor(int line, const std::string &content) {
+    return firmius::shared::utils::Hashline::formatAnchor(line, content);
+  }
+};
+
 TEST_F(CommandPermissionToolTest,
        processExecute_deniedCommandDoesNotSpawnProcess) {
   ProcessExecuteTool tool;
@@ -440,8 +522,39 @@ TEST_F(CommandPermissionToolTest,
 
   EXPECT_FALSE(result.success);
   ASSERT_EQ(mockAgent.mockPerms_->requestedCommands_.size(), 1u);
-  EXPECT_THAT(mockAgent.mockPerms_->requestedCommands_[0],
-              HasSubstr("python3 /tmp/firmius_script_"));
+  EXPECT_EQ(mockAgent.mockPerms_->requestedCommands_[0],
+            "python3 -c \"import os; exec(compile(os.environ['FIRMIUS_PYTHON_EXECUTE_CODE'], '<python_execute>', 'exec'))\"");
+}
+
+TEST_F(CommandPermissionToolTest,
+       pythonExecuteUsesSingleApprovedCommandWithEnvPayload) {
+  PythonExecuteTool tool;
+  std::map<std::string, std::string> capturedEnv;
+
+  EXPECT_CALL(mockHost, writeFile(_, _)).Times(0);
+  EXPECT_CALL(mockAgent.mockEnv_->mockProcessManager(), spawnProcess(_, _, _, _))
+      .WillOnce(Invoke([&capturedEnv](const std::string &command,
+                                      const std::string &, const std::string &,
+                                      const auto &env) {
+        EXPECT_EQ(command,
+                  "python3 -c \"import os; exec(compile(os.environ['FIRMIUS_PYTHON_EXECUTE_CODE'], '<python_execute>', 'exec'))\"");
+        capturedEnv = env;
+        return "proc_python";
+      }));
+  EXPECT_CALL(mockAgent.mockEnv_->mockProcessManager(), inspectProcess(_))
+      .WillRepeatedly(Return(ProcessSnapshot{false, 0, "ok", "", 5.0}));
+
+  auto json = createJsonInput({{"code", "print('hi')"}});
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+
+  ITool *itool = &tool;
+  auto result = itool->execute(json, ctx);
+
+  EXPECT_TRUE(result.success);
+  ASSERT_EQ(mockAgent.mockPerms_->requestedCommands_.size(), 1u);
+  EXPECT_EQ(mockAgent.mockPerms_->requestedCommands_[0],
+            "python3 -c \"import os; exec(compile(os.environ['FIRMIUS_PYTHON_EXECUTE_CODE'], '<python_execute>', 'exec'))\"");
+  ASSERT_EQ(capturedEnv["FIRMIUS_PYTHON_EXECUTE_CODE"], "print('hi')");
 }
 
 TEST_F(CommandPermissionToolTest,
@@ -463,6 +576,162 @@ TEST_F(CommandPermissionToolTest,
   ASSERT_EQ(mockAgent.mockPerms_->requestedEditPaths_.size(), 1u);
   EXPECT_EQ(mockAgent.mockPerms_->requestedEditPaths_[0],
             "/tmp/work/blocked.txt");
+}
+
+TEST_F(FileEditAnchorToolTest, replaceRangeByAnchor) {
+  const std::string path = "/tmp/work/file.txt";
+  const std::string original = "alpha\nbeta\ngamma\n";
+
+  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
+  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
+
+  auto json = createFileEditJson(
+      "file.txt",
+      {{{"op", "replace_range"},
+        {"start_anchor", anchor(2, "beta")},
+        {"end_anchor", anchor(3, "gamma")},
+        {"new_lines", "beta2\ngamma2"}}});
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+
+  ITool *itool = &tool;
+  auto result = itool->execute(json, ctx);
+
+  EXPECT_TRUE(result.success);
+  EXPECT_EQ(capturedWrite, "alpha\nbeta2\ngamma2\n");
+  EXPECT_NE(result.data.find("\"applied_edits\":1"), std::string::npos);
+}
+
+TEST_F(FileEditAnchorToolTest, insertAfterByAnchor) {
+  const std::string path = "/tmp/work/file.txt";
+  const std::string original = "alpha\nbeta\n";
+
+  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
+  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
+
+  auto json = createFileEditJson(
+      "file.txt",
+      {{{"op", "insert_after"},
+        {"anchor", anchor(1, "alpha")},
+        {"new_lines", "inserted"}}});
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+
+  ITool *itool = &tool;
+  auto result = itool->execute(json, ctx);
+
+  EXPECT_TRUE(result.success);
+  EXPECT_EQ(capturedWrite, "alpha\ninserted\nbeta\n");
+}
+
+TEST_F(FileEditAnchorToolTest, insertBeforeByAnchor) {
+  const std::string path = "/tmp/work/file.txt";
+  const std::string original = "alpha\nbeta\n";
+
+  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
+  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
+
+  auto json = createFileEditJson(
+      "file.txt",
+      {{{"op", "insert_before"},
+        {"anchor", anchor(2, "beta")},
+        {"new_lines", "inserted"}}});
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+
+  ITool *itool = &tool;
+  auto result = itool->execute(json, ctx);
+
+  EXPECT_TRUE(result.success);
+  EXPECT_EQ(capturedWrite, "alpha\ninserted\nbeta\n");
+}
+
+TEST_F(FileEditAnchorToolTest, deleteRangeByAnchor) {
+  const std::string path = "/tmp/work/file.txt";
+  const std::string original = "alpha\nbeta\ngamma\ndelta\n";
+
+  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
+  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
+
+  auto json = createFileEditJson(
+      "file.txt",
+      {{{"op", "delete_range"},
+        {"start_anchor", anchor(2, "beta")},
+        {"end_anchor", anchor(3, "gamma")}}});
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+
+  ITool *itool = &tool;
+  auto result = itool->execute(json, ctx);
+
+  EXPECT_TRUE(result.success);
+  EXPECT_EQ(capturedWrite, "alpha\ndelta\n");
+}
+
+TEST_F(FileEditAnchorToolTest, staleAnchorFailsClearly) {
+  const std::string path = "/tmp/work/file.txt";
+  const std::string original = "alpha\nbeta\n";
+
+  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
+  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
+  EXPECT_CALL(mockHost, writeFile(_, _)).Times(0);
+
+  auto json = createFileEditJson(
+      "file.txt",
+      {{{"op", "insert_after"},
+        {"anchor", "2#dead"},
+        {"new_lines", "inserted"}}});
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+
+  ITool *itool = &tool;
+  auto result = itool->execute(json, ctx);
+
+  EXPECT_FALSE(result.success);
+  EXPECT_NE(result.error.find("Reread the file"), std::string::npos);
+}
+
+TEST_F(FileEditAnchorToolTest, nearbyAnchorRelocationSucceeds) {
+  const std::string path = "/tmp/work/file.txt";
+  const std::string original = "prefix\nalpha\nbeta\n";
+
+  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
+  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
+
+  auto json = createFileEditJson(
+      "file.txt",
+      {{{"op", "insert_after"},
+        {"anchor", anchor(2, "beta")},
+        {"new_lines", "inserted"}}});
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+
+  ITool *itool = &tool;
+  auto result = itool->execute(json, ctx);
+
+  EXPECT_TRUE(result.success);
+  EXPECT_EQ(capturedWrite, "prefix\nalpha\nbeta\ninserted\n");
+  EXPECT_NE(result.data.find("\"relocated_anchors\":1"), std::string::npos);
+}
+
+TEST_F(FileEditAnchorToolTest, overlappingEditsAreRejected) {
+  const std::string path = "/tmp/work/file.txt";
+  const std::string original = "alpha\nbeta\ngamma\n";
+
+  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
+  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
+  EXPECT_CALL(mockHost, writeFile(_, _)).Times(0);
+
+  auto json = createFileEditJson(
+      "file.txt",
+      {{{"op", "replace_range"},
+        {"start_anchor", anchor(2, "beta")},
+        {"end_anchor", anchor(3, "gamma")},
+        {"new_lines", "beta2"}},
+       {{"op", "insert_before"},
+        {"anchor", anchor(3, "gamma")},
+        {"new_lines", "inserted"}}});
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+
+  ITool *itool = &tool;
+  auto result = itool->execute(json, ctx);
+
+  EXPECT_FALSE(result.success);
+  EXPECT_NE(result.error.find("Overlapping edits"), std::string::npos);
 }
 
 TEST_F(GrepToolTest, contextLines) {

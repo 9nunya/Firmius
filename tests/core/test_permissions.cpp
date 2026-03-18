@@ -30,7 +30,7 @@ int main() {
   opts.containerName = "antigravity-permissions-sandbox";
   opts.deleteOnExit = true;
 
-  std::string threadId = harness.newThread(opts, "/work", "firmius");
+  std::string threadId = harness.newThread(opts, "/work", "lead");
   if (threadId.size() == 0) {
     std::cerr << "Failed to create Docker thread." << std::endl;
     return 1;

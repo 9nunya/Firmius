@@ -36,7 +36,7 @@ int main(int argc, char** argv) {
     config.hostOptions.containerName = containerId;
     config.hostOptions.connectToExisting = true;
     config.cwd = "/work";
-    config.personaName = "firmius";
+    config.personaName = "lead";
     config.providerId = "nanogpt";
     config.modelId = "gpt-4";
 

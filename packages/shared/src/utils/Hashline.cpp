@@ -1,4 +1,6 @@
 #include "utils/Hashline.hpp"
+#include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <iomanip>
 #include <sstream>
@@ -27,16 +29,59 @@ std::string Hashline::computeHash(std::string_view content) noexcept {
     return ss.str();
 }
 
-std::string Hashline::formatLine(int lineNum, std::string_view content) {
-    const std::string hash = computeHash(content);
+std::string Hashline::formatAnchor(int lineNum, std::string_view content) {
     std::string result;
-    result.reserve(hash.size() + content.size() + 16);
+    const std::string hash = computeHash(content);
+    result.reserve(hash.size() + 16);
     result += std::to_string(lineNum);
     result += '#';
     result += hash;
+    return result;
+}
+
+std::string Hashline::formatLine(int lineNum, std::string_view content) {
+    std::string result;
+    const std::string anchor = formatAnchor(lineNum, content);
+    result.reserve(anchor.size() + content.size() + 1);
+    result += anchor;
     result += '|';
     result += content;
     return result;
+}
+
+std::optional<HashlineAnchor> Hashline::parseAnchor(std::string_view anchor) noexcept {
+    const size_t hashPos = anchor.find('#');
+    if (hashPos == std::string_view::npos || hashPos == 0 ||
+        hashPos + 1 >= anchor.size()) {
+        return std::nullopt;
+    }
+
+    int lineNumber = 0;
+    for (size_t i = 0; i < hashPos; ++i) {
+        const unsigned char ch = static_cast<unsigned char>(anchor[i]);
+        if (!std::isdigit(ch)) {
+            return std::nullopt;
+        }
+        lineNumber = (lineNumber * 10) + (anchor[i] - '0');
+    }
+    if (lineNumber <= 0) {
+        return std::nullopt;
+    }
+
+    HashlineAnchor parsed;
+    parsed.lineNumber = lineNumber;
+    parsed.hash = std::string(anchor.substr(hashPos + 1));
+    if (parsed.hash.empty()) {
+        return std::nullopt;
+    }
+    if (!std::all_of(parsed.hash.begin(), parsed.hash.end(), [](unsigned char ch) {
+            return std::isxdigit(ch) != 0;
+        })) {
+        return std::nullopt;
+    }
+    std::transform(parsed.hash.begin(), parsed.hash.end(), parsed.hash.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    return parsed;
 }
 
 bool Hashline::verifyAnchor(std::string_view expectedHash, std::string_view actualContent) noexcept {

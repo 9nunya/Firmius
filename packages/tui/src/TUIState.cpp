@@ -1,7 +1,9 @@
+#include "ActivePlanState.hpp"
 #include "TUIState.hpp"
 #include "AgentRegistry.hpp"
 #include "NotificationManager.hpp"
 #include "ThemeManager.hpp"
+#include "TUIHotkeys.hpp"
 #include "UIState.hpp"
 #include "agents/PurposeLoader.hpp"
 #include "commands/CommandManager.hpp"
@@ -10,6 +12,7 @@
 #include "components/HelpOverlay.hpp"
 #include "components/InputBar.hpp"
 #include "components/Markdown.hpp"
+#include "components/PlanLane.hpp"
 #include "components/StatusBar.hpp"
 #include "components/TitleBar.hpp"
 #include "components/ToolBlock.hpp"
@@ -17,9 +20,11 @@
 #include "modals/ModalRegistry.hpp"
 #include "modals/PermissionPromptModal.hpp"
 #include "modals/ThreadLockedModal.hpp"
+#include "persistence/ThreadManager.hpp"
 #include "providers/ProviderRegistry.hpp"
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <ftxui/component/component.hpp>
 #include <ftxui/dom/node.hpp>
@@ -57,7 +62,7 @@ static std::string statusToString(shared::AgentStatus status) {
 
 static std::string resolveDefaultLeadPersona(
     const firmius::core::Harness *harness) {
-  std::string fallback = "firmius";
+  std::string fallback = "lead";
   if (!harness)
     return fallback;
   const auto &cfg = harness->getConfig();
@@ -74,10 +79,15 @@ static std::string resolvePersonaTitle(const std::string &personaName) {
   }
 }
 
+static std::string firmiusThreadsPath() {
+  return std::string(std::getenv("HOME") ? std::getenv("HOME") : "/tmp") +
+         "/.firmius/threads";
+}
+
 static std::vector<std::string> getSwitchableLeadPersonas() {
   auto purposes = firmius::core::PurposeLoader::listSwitchablePurposes();
   if (purposes.empty()) {
-    purposes.push_back("firmius");
+    purposes.push_back("lead");
   }
   return purposes;
 }
@@ -106,35 +116,6 @@ static std::string permissionResponseToDisplayName(
     return "Deny";
   }
   return "Deny";
-}
-
-static bool isPermissionCycleEvent(const ftxui::Event &event) {
-  const std::string raw = event.input();
-  if (raw == "\x1b[1;6P" || raw == "\x1b[80;6u" ||
-      raw == "\x1b[27;6;80~" || raw == "\x1b[27;6;112~") {
-    return true;
-  }
-
-  // Some terminals report modified letters through CSI-u and differ on
-  // whether shift is encoded via the codepoint or the modifier bits.
-  if (raw.size() > 5 && raw.rfind("\x1b[", 0) == 0 && raw.back() == 'u') {
-    auto semi = raw.find(';', 2);
-    if (semi != std::string::npos) {
-      try {
-        int codepoint = std::stoi(raw.substr(2, semi - 2));
-        int modifier = std::stoi(raw.substr(semi + 1, raw.size() - semi - 2));
-        bool is_p = codepoint == 'P' || codepoint == 'p';
-        bool has_ctrl = (modifier & 4) != 0;
-        bool has_shift = (modifier & 1) != 0 || codepoint == 'P';
-        if (is_p && has_ctrl && has_shift) {
-          return true;
-        }
-      } catch (...) {
-      }
-    }
-  }
-
-  return false;
 }
 
 class ScreenShaderNode : public ftxui::Node {
@@ -349,6 +330,11 @@ void TuiState::init(firmius::core::Harness &harness,
     }
   };
 
+  plan_lane_model_ = std::make_shared<PlanLaneModel>();
+  active_plan_state_.setExpanded(plan_lane_expanded_);
+  active_plan_state_.hydrateForThread(thread_, loadActivePlanForThread(thread_));
+  updatePlanLaneModel();
+
   subscription_id_ =
       harness_->subscribe([this](const firmius::shared::AppEvent &ev) {
         event_queue_.push(ev);
@@ -359,6 +345,7 @@ void TuiState::init(firmius::core::Harness &harness,
 
   updateStatusModel();
   updateAgentStripModel();
+  updatePlanLaneModel();
 }
 
 void TuiState::attachScreen(ftxui::ScreenInteractive *screen) {
@@ -487,6 +474,10 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
             title_model_->title = thread_.title;
             title_model_->thread_id = thread_.threadId;
           }
+          active_plan_state_.setExpanded(plan_lane_expanded_);
+          active_plan_state_.hydrateForThread(thread_,
+                                              loadActivePlanForThread(thread_));
+          updatePlanLaneModel();
           setViewMode(ViewMode::Chat);
 
           updateStatusModel();
@@ -497,11 +488,18 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
           }
         } else if constexpr (std::is_same_v<T, ThreadMetadataUpdated>) {
           if (e.threadId == thread_.threadId) {
+            const std::string previous_active_plan_id = thread_.activePlanId;
             auto previousMode = thread_.permissionMode;
             thread_ = e.metadata;
             if (title_model_) {
               title_model_->title = thread_.title;
               title_model_->thread_id = thread_.threadId;
+            }
+            if (previous_active_plan_id != thread_.activePlanId) {
+              active_plan_state_.setExpanded(plan_lane_expanded_);
+              active_plan_state_.hydrateForThread(
+                  thread_, loadActivePlanForThread(thread_));
+              updatePlanLaneModel();
             }
             if (previousMode != thread_.permissionMode) {
               NotificationManager::instance().notifyInfo(
@@ -599,6 +597,13 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
         }
       },
       ev);
+
+  if (active_plan_state_.handleEvent(ev, thread_.threadId)) {
+    if (const auto &plan = active_plan_state_.activePlan(); plan.has_value()) {
+      thread_.activePlanId = plan->id;
+    }
+    updatePlanLaneModel();
+  }
 
   updateStatusModel();
   updateAgentStripModel();
@@ -833,6 +838,27 @@ void TuiState::updateAgentStripModel() {
   }
 }
 
+void TuiState::updatePlanLaneModel() {
+  if (!plan_lane_model_) {
+    return;
+  }
+  *plan_lane_model_ = active_plan_state_.model();
+}
+
+std::optional<shared::Plan>
+TuiState::loadActivePlanForThread(const shared::ThreadMetadata &thread) const {
+  if (thread.threadId.empty() || thread.activePlanId.empty()) {
+    return std::nullopt;
+  }
+
+  try {
+    firmius::core::ThreadManager tm(firmiusThreadsPath());
+    return tm.getPlan(thread.threadId, thread.activePlanId);
+  } catch (...) {
+    return std::nullopt;
+  }
+}
+
 ftxui::Component TuiState::root() {
   if (root_component_)
     return root_component_;
@@ -840,6 +866,7 @@ ftxui::Component TuiState::root() {
   auto title_bar = TitleBar(title_model_);
   auto status_bar = StatusBar(status_model_);
   auto agent_strip = AgentStrip(agent_strip_model_);
+  auto plan_lane = PlanLane(plan_lane_model_);
 
   auto input_bar = InputBar(
       input_model_,
@@ -1086,6 +1113,7 @@ ftxui::Component TuiState::root() {
   auto container = ftxui::Container::Vertical({
       input_bar,
       chat,
+      plan_lane,
       agent_strip,
   });
 
@@ -1099,8 +1127,9 @@ ftxui::Component TuiState::root() {
   });
 
   auto base_view =
-      ftxui::Renderer(container, [this, title_bar, status_bar, agent_strip,
-                                  input_bar, chat, welcome_screen] {
+      ftxui::Renderer(container, [this, title_bar, status_bar, plan_lane,
+                                  agent_strip, input_bar, chat,
+                                  welcome_screen] {
         // Deferred modal clearing: drain here where it's safe
         if (pending_modal_clear_) {
           modals_.clear();
@@ -1125,13 +1154,21 @@ ftxui::Component TuiState::root() {
         const auto &theme = ThemeManager::instance().getCurrentTheme();
 
         // Ultra-compact bottom bar layout
-        auto bottom_bar = ftxui::vbox({
-            agent_strip->Render(),
-            ftxui::separator() | ftxui::color(theme.base.border),
-            input_bar->Render(),
-            ftxui::separator() | ftxui::color(theme.base.border),
-            status_bar->Render(),
-        });
+        ftxui::Elements bottom_bar_children;
+        if (plan_lane_model_ && plan_lane_model_->visible) {
+          bottom_bar_children.push_back(plan_lane->Render());
+          bottom_bar_children.push_back(ftxui::separator() |
+                                        ftxui::color(theme.base.border));
+        }
+        bottom_bar_children.push_back(agent_strip->Render());
+        bottom_bar_children.push_back(ftxui::separator() |
+                                      ftxui::color(theme.base.border));
+        bottom_bar_children.push_back(input_bar->Render());
+        bottom_bar_children.push_back(ftxui::separator() |
+                                      ftxui::color(theme.base.border));
+        bottom_bar_children.push_back(status_bar->Render());
+
+        auto bottom_bar = ftxui::vbox(std::move(bottom_bar_children));
 
         ftxui::Element main_view;
         if (view_mode_ == ViewMode::Welcome) {
@@ -1253,7 +1290,7 @@ ftxui::Component TuiState::root() {
         harness_->abort();
       return true;
     }
-    if (isPermissionCycleEvent(event)) { // Ctrl+Shift+P (Permission Mode)
+    if (IsPermissionCycleEvent(event)) { // Ctrl+Y (Permission Mode)
       cycleThreadPermissionMode();
       return true;
     }
@@ -1456,6 +1493,17 @@ ftxui::Component TuiState::root() {
     // Ctrl+H - Toggle notifications
     if (event == ftxui::Event::Special("\x08")) {
       NotificationManager::instance().toggleVisibility();
+      return true;
+    }
+
+    // Ctrl+O - Toggle plan lane expansion
+    if (event == ftxui::Event::Special("\x0F")) {
+      plan_lane_expanded_ = !plan_lane_expanded_;
+      active_plan_state_.setExpanded(plan_lane_expanded_);
+      updatePlanLaneModel();
+      if (screen_) {
+        screen_->PostEvent(ftxui::Event::Custom);
+      }
       return true;
     }
 

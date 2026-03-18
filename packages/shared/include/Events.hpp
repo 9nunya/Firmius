@@ -310,6 +310,58 @@ struct ThreadMetadataUpdated {
   bool operator==(const ThreadMetadataUpdated &) const = default;
 };
 
+struct PlanCreated {
+  std::string threadId;
+  Plan plan;
+  bool operator==(const PlanCreated &) const = default;
+};
+
+struct PlanUpdated {
+  std::string threadId;
+  Plan plan;
+  bool operator==(const PlanUpdated &) const = default;
+};
+
+struct PlanActivated {
+  std::string threadId;
+  std::string planId;
+  Plan plan;
+  bool operator==(const PlanActivated &) const = default;
+};
+
+struct ChunkAdded {
+  std::string threadId;
+  std::string planId;
+  WorkChunk chunk;
+  bool operator==(const ChunkAdded &) const = default;
+};
+
+struct ChunkUpdated {
+  std::string threadId;
+  std::string planId;
+  WorkChunk chunk;
+  bool operator==(const ChunkUpdated &) const = default;
+};
+
+struct ChunkAssigned {
+  std::string threadId;
+  std::string planId;
+  std::string chunkId;
+  std::string assignedAgentId;
+  WorkChunk chunk;
+  bool operator==(const ChunkAssigned &) const = default;
+};
+
+struct ChunkStatusChanged {
+  std::string threadId;
+  std::string planId;
+  std::string chunkId;
+  WorkChunkStatus oldStatus = WorkChunkStatus::Draft;
+  WorkChunkStatus newStatus = WorkChunkStatus::Draft;
+  WorkChunk chunk;
+  bool operator==(const ChunkStatusChanged &) const = default;
+};
+
 /**
  * @brief Emitted when core needs the UI to resolve a permission escalation.
  */
@@ -443,7 +495,9 @@ using AppEvent = std::variant<
     AgentTurnCompleted, AgentCompleted, AgentError, AgentCompacting,
     AgentCompactionThinking, AgentCompactionText, ContextCompacted,
     AgentProcessOutput, AgentProcessSpawned, ModelSwitched, HistoryUndone,
-    AgentAccountSwitched, ThreadChanged, ThreadMetadataUpdated,
+    AgentAccountSwitched, ThreadChanged, ThreadMetadataUpdated, PlanCreated,
+    PlanUpdated, PlanActivated, ChunkAdded, ChunkUpdated, ChunkAssigned,
+    ChunkStatusChanged,
     PermissionEscalationRequest, PermissionEscalationResolved, ThreadLocked,
     ThreadDeleted, ConfigUpdated, ModelsRefreshed, ThreadTitleUpdated,
     MessageQueued, MessageDequeued, UserMessageSent, AgentFinished>;

@@ -271,7 +271,7 @@ std::string Harness::newThread(HostCreationOptions hostOptions,
     if (effectiveLead.empty()) {
       const auto &cfg = shared::ConfigLoader::instance().getConfig();
       effectiveLead =
-          cfg.defaultLeadPersona.empty() ? "firmius" : cfg.defaultLeadPersona;
+          cfg.defaultLeadPersona.empty() ? "lead" : cfg.defaultLeadPersona;
     }
     newMeta.leadPersona = effectiveLead;
 
@@ -536,6 +536,10 @@ int Harness::subscribe(
 void Harness::unsubscribe(const int &subscriptionId) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   subscribers_.erase(subscriptionId);
+}
+
+void Harness::publishEvent(const firmius::shared::AppEvent &event) {
+  emitEvent(event);
 }
 
 std::string Harness::currentThreadId() {
@@ -1172,18 +1176,22 @@ bool Harness::resolvePermissionEscalation(const std::string &requestId,
 }
 
 std::vector<ModelInfo> Harness::listAllModels() {
-  std::lock_guard<std::mutex> lock(modelsMutex_);
+  {
+    std::lock_guard<std::mutex> lock(modelsMutex_);
 
-  if (modelsLoaded_) {
-    return cachedModels_;
+    if (modelsLoaded_) {
+      return cachedModels_;
+    }
+
+    if (isRefreshingModels_) {
+      return {}; // Still loading...
+    }
+
+    isRefreshingModels_ = true;
   }
 
-  if (isRefreshingModels_) {
-    return {}; // Still loading...
-  }
-
-  isRefreshingModels_ = true;
-  std::thread([this]() {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  backgroundThreads_.emplace_back([this]() {
     std::vector<ModelInfo> all;
     auto providerIds = provider::ProviderRegistry::instance().listProviderIds();
     for (const auto &pid : providerIds) {
@@ -1204,9 +1212,9 @@ std::vector<ModelInfo> Harness::listAllModels() {
       modelsLoaded_ = true;
     }
 
-    // Emit event so TUI knows models are ready
+    // Emit event so TUI knows models are ready.
     emitEvent(firmius::shared::AppEvent(firmius::shared::ModelsRefreshed{}));
-  }).detach();
+  });
 
   return {};
 }

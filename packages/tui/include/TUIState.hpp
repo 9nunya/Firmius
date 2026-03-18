@@ -4,6 +4,7 @@
 #include "Context.hpp"
 #include "EventQueue.hpp"
 #include "Events.hpp"
+#include "ActivePlanState.hpp"
 #include "StreamStateManager.hpp"
 #include "NotificationManager.hpp"
 #include <ftxui/component/component_base.hpp>
@@ -24,6 +25,7 @@ struct TitleBarModel;
 struct StatusBarModel;
 struct InputBarModel;
 struct AgentStripModel;
+struct PlanLaneModel;
 
 class TuiState {
 public:
@@ -72,6 +74,9 @@ private:
   std::string statusText() const;
   void updateStatusModel();
   void updateAgentStripModel();
+  void updatePlanLaneModel();
+  std::optional<shared::Plan> loadActivePlanForThread(
+      const shared::ThreadMetadata &thread) const;
 
   firmius::core::Harness *harness_ = nullptr;
   shared::ThreadMetadata thread_;
@@ -92,6 +97,8 @@ private:
   std::shared_ptr<StatusBarModel> status_model_;
   std::shared_ptr<InputBarModel> input_model_;
   std::shared_ptr<AgentStripModel> agent_strip_model_;
+  std::shared_ptr<PlanLaneModel> plan_lane_model_;
+  ActivePlanState active_plan_state_;
 
   ViewMode view_mode_ = ViewMode::Chat;
   std::vector<ftxui::Component> modals_; // Used as a stack
@@ -100,6 +107,7 @@ private:
       false; // Deferred clear to avoid UB in modal handlers
   bool show_help_ = false;
   bool diffs_expanded_ = true; // Ctrl+G toggle for diff expansion
+  bool plan_lane_expanded_ = false;
 
   ftxui::Component root_component_;
   ftxui::Component chat_component_;

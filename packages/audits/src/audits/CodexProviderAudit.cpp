@@ -40,7 +40,7 @@ shared::AuditResult CodexProviderAudit::run(const std::vector<std::string> &) {
   opts.deleteOnExit = true;
   int exitCode = 0;
   do {
-    std::string threadId = harness.newThread(opts, "/work", "general");
+    std::string threadId = harness.newThread(opts, "/work", "lead");
     if (threadId.empty()) {
       std::cerr << "Failed to create Docker thread." << std::endl;
       exitCode = 1;

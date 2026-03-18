@@ -23,6 +23,55 @@ void Workspace::markFileAsRead(const std::string& path) {
     readFiles_.insert(path);
 }
 
+void Workspace::mergeRange(std::vector<std::pair<int, int>>& ranges,
+                           int startLine, int endLine) {
+    if (startLine <= 0 || endLine < startLine) {
+        return;
+    }
+
+    ranges.push_back({startLine, endLine});
+    std::sort(ranges.begin(), ranges.end());
+
+    std::vector<std::pair<int, int>> merged;
+    for (const auto& range : ranges) {
+        if (merged.empty() || range.first > merged.back().second + 1) {
+            merged.push_back(range);
+            continue;
+        }
+        merged.back().second = std::max(merged.back().second, range.second);
+    }
+    ranges = std::move(merged);
+}
+
+bool Workspace::isFullyCovered(const ReadCoverage& coverage) {
+    if (!coverage.terminalLine.has_value() || coverage.ranges.empty()) {
+        return false;
+    }
+
+    return coverage.ranges.size() == 1 && coverage.ranges.front().first <= 1 &&
+           coverage.ranges.front().second >= *coverage.terminalLine;
+}
+
+void Workspace::recordFileRead(const std::string& path, int startLine,
+                               int endLine, bool reachedEnd) {
+    std::lock_guard<std::mutex> lock(fileMutex_);
+    readFiles_.insert(path);
+
+    if (fullyReadFiles_.count(path) > 0) {
+        return;
+    }
+
+    auto& coverage = readCoverage_[path];
+    mergeRange(coverage.ranges, startLine, endLine);
+    if (reachedEnd && endLine >= startLine) {
+        coverage.terminalLine = endLine;
+    }
+
+    if (isFullyCovered(coverage)) {
+        fullyReadFiles_.insert(path);
+    }
+}
+
 bool Workspace::hasFullyReadFile(const std::string& path) const {
     std::lock_guard<std::mutex> lock(fileMutex_);
     return fullyReadFiles_.count(path) > 0;
@@ -32,6 +81,7 @@ void Workspace::markFileAsFullyRead(const std::string& path) {
     std::lock_guard<std::mutex> lock(fileMutex_);
     readFiles_.insert(path);
     fullyReadFiles_.insert(path);
+    readCoverage_.erase(path);
 }
 
 std::string Workspace::getCurrentWorkingDirectory() const {

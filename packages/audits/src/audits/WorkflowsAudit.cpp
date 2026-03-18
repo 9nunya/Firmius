@@ -263,7 +263,7 @@ shared::AuditResult WorkflowsAudit::run(const std::vector<std::string> &args) {
   std::filesystem::create_directories(testDir);
 
   std::string threadId =
-      harness.newThread({HostType::Docker}, testDir, "general");
+      harness.newThread({HostType::Docker}, testDir, "lead");
   if (threadId.empty()) {
     std::cerr << "FAILED: Could not create test thread" << std::endl;
     result.exitCode = AUDIT_EXIT_EXEC_FAILED;

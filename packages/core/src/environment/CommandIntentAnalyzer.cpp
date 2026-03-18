@@ -9,6 +9,41 @@ namespace firmius::core {
 
 using namespace firmius::shared;
 
+namespace {
+
+std::string stripMatchingQuotes(const std::string& token) {
+    if (token.size() >= 2 &&
+        ((token.front() == '"' && token.back() == '"') ||
+         (token.front() == '\'' && token.back() == '\''))) {
+        return token.substr(1, token.size() - 2);
+    }
+    return token;
+}
+
+std::string resolveWorkingDirectory(const std::string& path, const std::string& cwd) {
+    std::string resolved = path;
+
+    if (!resolved.empty() && resolved[0] == '~') {
+        const char* home = std::getenv("HOME");
+        if (home) {
+            resolved = std::string(home) + resolved.substr(1);
+        }
+    }
+
+    if (!resolved.empty() && resolved[0] != '/' && !cwd.empty()) {
+        resolved = cwd + "/" + resolved;
+    }
+
+    try {
+        resolved = std::filesystem::weakly_canonical(resolved).string();
+    } catch (...) {
+    }
+
+    return resolved;
+}
+
+}
+
 CommandIntentAnalyzer::CommandIntentAnalyzer()
     : subshellRegex_(R"(\$\(|\`|\$\{)")
     , pipeRegex_(R"(\|\s*)")
@@ -90,10 +125,25 @@ CommandIntent CommandIntentAnalyzer::analyze(const std::string& command, const s
 
     extractEnvironmentVariables(command, intent);
 
-    // Extract paths from all sub-commands
+    // Extract paths from all sub-commands, carrying forward cwd changes.
+    std::string effectiveCwd = cwd;
     for (const auto& cmd : intent.parsedCommands) {
         auto tokens = tokenize(cmd);
-        extractPathsFromCommand(tokens, cwd, intent);
+        extractPathsFromCommand(tokens, effectiveCwd, intent);
+
+        if (tokens.empty()) {
+            continue;
+        }
+
+        size_t idx = 0;
+        if (elevatedPrefixes_.count(tokens[0]) > 0 && tokens.size() > 1) {
+            idx = 1;
+        }
+
+        if (idx < tokens.size() && tokens[idx] == "cd" && idx + 1 < tokens.size()) {
+            effectiveCwd = resolveWorkingDirectory(stripMatchingQuotes(tokens[idx + 1]),
+                                                   effectiveCwd);
+        }
     }
 
     // Assess severity
@@ -305,10 +355,15 @@ void CommandIntentAnalyzer::extractPathsFromCommand(const std::vector<std::strin
         isWriteOp = true;
     }
 
+    if (cmd == "cd") {
+        return;
+    }
+
     std::vector<std::string> sourceFiles;
     bool isCopyMove = (cmd == "cp" || cmd == "mv");
     bool takesFileArgs = readCommands_.count(cmd) > 0 || writeCommands_.count(cmd) > 0 ||
                          cmd == "tee" || cmd == "cat";
+    bool skippedPrimaryOperand = false;
 
     for (size_t i = 1; i < tokens.size(); ++i) {
         const std::string& token = tokens[i];
@@ -319,15 +374,17 @@ void CommandIntentAnalyzer::extractPathsFromCommand(const std::vector<std::strin
             continue;
         }
 
-        std::string unquoted = token;
-        if ((token.front() == '"' && token.back() == '"') ||
-            (token.front() == '\'' && token.back() == '\'')) {
-            unquoted = token.substr(1, token.length() - 2);
-        }
+        std::string unquoted = stripMatchingQuotes(token);
 
         bool looksLikePath = !unquoted.empty() &&
             (unquoted[0] == '/' || unquoted[0] == '.' || unquoted[0] == '~' ||
              unquoted.find('/') != std::string::npos);
+
+        if ((cmd == "grep" || cmd == "sed" || cmd == "awk") &&
+            !skippedPrimaryOperand && !looksLikePath) {
+            skippedPrimaryOperand = true;
+            continue;
+        }
 
         if (looksLikePath || isCopyMove || takesFileArgs) {
             if (isCopyMove) {
@@ -357,27 +414,7 @@ void CommandIntentAnalyzer::resolveAndCategorizePath(const std::string& path,
                                                       const std::string& cwd,
                                                       bool isWrite,
                                                       CommandIntent& intent) const {
-    std::string resolved = path;
-
-    // Expand ~ to home FIRST (before making it absolute)
-    if (!resolved.empty() && resolved[0] == '~') {
-        const char* home = std::getenv("HOME");
-        if (home) {
-            resolved = std::string(home) + resolved.substr(1);
-        }
-    }
-
-    // Resolve relative paths (those not starting with / after tilde expansion)
-    if (!resolved.empty() && resolved[0] != '/' && !cwd.empty()) {
-        resolved = cwd + "/" + resolved;
-    }
-
-    // Normalize
-    try {
-        resolved = std::filesystem::weakly_canonical(resolved).string();
-    } catch (...) {
-        // Keep original if normalization fails
-    }
+    std::string resolved = resolveWorkingDirectory(path, cwd);
 
     if (isWrite) {
         intent.filesWritten.push_back(resolved);

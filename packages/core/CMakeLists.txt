@@ -28,6 +28,17 @@ target_sources(firmius_core PRIVATE
     src/tools/ProcessStatusTool.cpp
     src/tools/ProcessWaitTool.cpp
     src/tools/ProcessInputTool.cpp
+    src/tools/WorkToolCommon.cpp
+    src/tools/PlanCreateTool.cpp
+    src/tools/PlanListTool.cpp
+    src/tools/PlanGetTool.cpp
+    src/tools/PlanUpdateTool.cpp
+    src/tools/PlanSetActiveTool.cpp
+    src/tools/ChunkAddTool.cpp
+    src/tools/ChunkListTool.cpp
+    src/tools/ChunkGetTool.cpp
+    src/tools/ChunkUpdateTool.cpp
+    src/tools/ChunkReadyForExecutionTool.cpp
     src/agents/PurposeLoader.cpp
     src/agents/Agent.cpp
     src/agents/AgentPermissionChecks.cpp
@@ -73,6 +84,17 @@ target_sources(firmius_core PUBLIC
     include/tools/ProcessStatusTool.hpp
     include/tools/ProcessWaitTool.hpp
     include/tools/ProcessInputTool.hpp
+    include/tools/WorkToolCommon.hpp
+    include/tools/PlanCreateTool.hpp
+    include/tools/PlanListTool.hpp
+    include/tools/PlanGetTool.hpp
+    include/tools/PlanUpdateTool.hpp
+    include/tools/PlanSetActiveTool.hpp
+    include/tools/ChunkAddTool.hpp
+    include/tools/ChunkListTool.hpp
+    include/tools/ChunkGetTool.hpp
+    include/tools/ChunkUpdateTool.hpp
+    include/tools/ChunkReadyForExecutionTool.hpp
     include/agents/PurposeLoader.hpp
     include/agents/Agent.hpp
     include/agents/AgentPermissionChecks.hpp

@@ -122,6 +122,21 @@ public:
     virtual void markFileAsRead(const std::string& path) = 0;
 
     /**
+     * @brief Records a line-oriented read segment for a file.
+     * @param path The absolute path.
+     * @param startLine The first 1-indexed line included in the read.
+     * @param endLine The last 1-indexed line included in the read.
+     * @param reachedEnd Whether this read segment reached EOF.
+     */
+    virtual void recordFileRead(const std::string& path, int startLine,
+                                int endLine, bool reachedEnd) {
+        (void)startLine;
+        (void)endLine;
+        (void)reachedEnd;
+        markFileAsRead(path);
+    }
+
+    /**
      * @brief Checks if a file has been fully read.
      * @param path The absolute path.
      * @return True if fully read.

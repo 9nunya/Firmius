@@ -3,11 +3,175 @@
 #include "AgentRegistry.hpp"
 #include "Engine.hpp"
 #include "Events.hpp"
-#include <condition_variable>
-#include <future>
-#include <mutex>
+#include "persistence/ThreadManager.hpp"
+#include "tools/WorkToolCommon.hpp"
+#include "utils/StringUtil.hpp"
+#include <sstream>
 
 namespace firmius::core {
+
+namespace {
+
+bool isExecutorPersona(const std::string &persona) { return persona == "executor"; }
+
+bool isWorkerPersona(const std::string &persona) {
+  return persona == "worker" || persona == "scout";
+}
+
+const shared::WorkChunk &
+findChunk(const shared::Plan &plan, const std::string &chunkId) {
+  return worktools::requireChunk(plan, chunkId);
+}
+
+shared::Plan loadPlan(const std::string &threadId, const std::string &planId) {
+  ThreadManager tm(std::string(getenv("HOME") ? getenv("HOME") : "/tmp") +
+                   "/.firmius/threads");
+  return tm.getPlan(threadId, planId);
+}
+
+std::string buildExecutorTask(const shared::Plan &plan,
+                              const shared::WorkChunk &chunk,
+                              const std::string &task) {
+  std::ostringstream prompt;
+  prompt << "You are the executor responsible for exactly one assigned work "
+            "chunk.\n\n";
+  prompt << "Chunk Ownership Contract\n";
+  prompt << "- You own exactly this chunk: " << chunk.id << "\n";
+  prompt << "- You do not own the whole plan.\n";
+  prompt << "- Do not take ownership of any other chunk.\n";
+  prompt << "- You may delegate only bounded subtasks to worker/scout helpers "
+            "one level deep.\n\n";
+  prompt << "Plan Context\n";
+  prompt << "Plan Title: " << plan.title << "\n";
+  prompt << "Plan Objective: " << plan.objective << "\n";
+  prompt << "Plan Strategy Summary: " << plan.strategy << "\n\n";
+  prompt << "Assigned Chunk\n";
+  prompt << "Chunk ID: " << chunk.id << "\n";
+  prompt << "Chunk Title: " << chunk.title << "\n";
+  prompt << "Chunk Goal: " << chunk.goal << "\n";
+  prompt << "Chunk Context: " << chunk.context << "\n";
+  prompt << "Chunk Constraints: " << chunk.constraints << "\n";
+  prompt << "Chunk Completion: " << chunk.completion << "\n";
+  prompt << "\nExecution State Reporting\n";
+  prompt << "- If you report chunk progress with chunk_update, use plan_id=\""
+         << plan.id << "\" and chunk_id=\"" << chunk.id << "\".\n";
+  prompt << "- The only chunk fields you may write are: status, attempt_count, result_summary.\n";
+  prompt << "- Valid chunk_update payload pattern: {\"plan_id\":\"" << plan.id
+         << "\",\"chunk_id\":\"" << chunk.id
+         << "\",\"status\":\"Implemented\",\"attempt_count\":1,\"result_summary\":\"implemented and verified\"}.\n";
+  prompt << "- Do not send title, goal, context, constraints, completion, depends_on, assigned_agent_id, or review_summary through chunk_update.\n";
+  prompt << "- Any design, review, dependency, or assignment fields in chunk_update will be rejected by runtime authority checks.\n";
+  prompt << "- Treat execution dispatch as already started for this chunk; update status/result only when you have real progress to report.\n";
+  if (!task.empty()) {
+    prompt << "\nLead Notes\n" << task << "\n";
+  }
+  return prompt.str();
+}
+
+std::string buildWorkerTask(const std::string &task) {
+  std::ostringstream prompt;
+  prompt << "You are a worker helper supporting your parent executor on a "
+            "bounded subtask.\n\n";
+  prompt << "Boundaries\n";
+  prompt << "- You do not own a plan chunk.\n";
+  prompt << "- You are not responsible for the whole plan.\n";
+  prompt << "- Complete only the bounded subtask below and return useful "
+            "results to the executor.\n\n";
+  prompt << "Subtask\n" << task << "\n";
+  return prompt.str();
+}
+
+void ensureExecutorAssignmentAvailable(const std::string &threadId,
+                                       const std::string &planId,
+                                       const std::string &chunkId,
+                                       const std::optional<std::string> &agentId) {
+  ThreadManager tm(std::string(getenv("HOME") ? getenv("HOME") : "/tmp") +
+                   "/.firmius/threads");
+  const shared::Plan plan = tm.getPlan(threadId, planId);
+  const shared::WorkChunk &chunk = findChunk(plan, chunkId);
+
+  if (!chunk.assignedAgentId.empty() &&
+      (!agentId.has_value() || chunk.assignedAgentId != *agentId)) {
+    throw std::runtime_error("Chunk '" + chunkId +
+                             "' is already owned by executor agent '" +
+                             chunk.assignedAgentId + "'");
+  }
+
+  if (!agentId.has_value() || agentId->empty()) {
+    return;
+  }
+
+  for (const auto &candidatePlan : tm.listPlans(threadId)) {
+    for (const auto &candidateChunk : candidatePlan.chunks) {
+      if (candidateChunk.assignedAgentId != *agentId) {
+        continue;
+      }
+      if (candidatePlan.id == planId && candidateChunk.id == chunkId) {
+        continue;
+      }
+      throw std::runtime_error("Executor agent '" + *agentId +
+                               "' already owns chunk '" + candidateChunk.id +
+                               "'");
+    }
+  }
+}
+
+void ensureExecutorChunkReadyForDispatch(const std::string &threadId,
+                                         const std::string &planId,
+                                         const std::string &chunkId) {
+  ThreadManager tm(std::string(getenv("HOME") ? getenv("HOME") : "/tmp") +
+                   "/.firmius/threads");
+  const shared::Plan plan = tm.getPlan(threadId, planId);
+  const shared::WorkChunk &chunk = findChunk(plan, chunkId);
+  worktools::requireChunkReadyForExecution(plan, chunk, "dispatch");
+}
+
+void persistExecutorDispatch(const std::string &threadId,
+                             const std::string &planId,
+                             const std::string &chunkId,
+                             const std::string &agentId) {
+  ThreadManager tm(std::string(getenv("HOME") ? getenv("HOME") : "/tmp") +
+                   "/.firmius/threads");
+  shared::Plan plan = tm.getPlan(threadId, planId);
+  auto &chunk = worktools::requireChunk(plan, chunkId);
+  const shared::WorkChunk originalChunk = chunk;
+  worktools::validateExecutorAssignmentInvariant(tm, threadId, plan.id, chunk.id,
+                                                 agentId);
+  chunk.assignedAgentId = agentId;
+  if (chunk.status == shared::WorkChunkStatus::Ready) {
+    chunk.status = shared::WorkChunkStatus::InProgress;
+  }
+  chunk.updatedAt = worktools::nowEpochMs();
+  tm.updatePlan(threadId, plan);
+  worktools::emitWorkEvent(shared::ChunkUpdated{threadId, plan.id, chunk});
+  if (originalChunk.assignedAgentId != chunk.assignedAgentId) {
+    worktools::emitWorkEvent(shared::ChunkAssigned{
+        threadId, plan.id, chunk.id, chunk.assignedAgentId, chunk});
+  }
+  if (originalChunk.status != chunk.status) {
+    worktools::emitWorkEvent(shared::ChunkStatusChanged{
+        threadId, plan.id, chunk.id, originalChunk.status, chunk.status,
+        chunk});
+  }
+}
+
+std::string buildDelegationTask(const SubagentInput &input,
+                                const std::string &threadId) {
+  if (isExecutorPersona(input.persona) && input.plan_id.has_value() &&
+      input.chunk_id.has_value()) {
+    const shared::Plan plan = loadPlan(threadId, *input.plan_id);
+    const shared::WorkChunk &chunk = findChunk(plan, *input.chunk_id);
+    return buildExecutorTask(plan, chunk, input.task);
+  }
+
+  if (isWorkerPersona(input.persona)) {
+    return buildWorkerTask(input.task);
+  }
+
+  return input.task;
+}
+
+}
 
 shared::ToolMetadata SubagentTool::getMetadata() const {
   return {"summon_subagent", "Summon a child agent to perform a sub-task.",
@@ -17,7 +181,7 @@ shared::ToolMetadata SubagentTool::getMetadata() const {
 std::shared_ptr<shared::JSONSchema> SubagentTool::getSchema() const {
   return shared::zObject(
              {{"persona", shared::zString()->describe(
-                              "Persona name (e.g., 'researcher')")},
+                              "Persona name (e.g., 'executor', 'worker', 'scout')")},
               {"task", shared::zString()->describe("Description of the task")},
               {"async",
                shared::zBoolean()
@@ -27,6 +191,14 @@ std::shared_ptr<shared::JSONSchema> SubagentTool::getSchema() const {
                shared::zString()
                    ->describe(
                        "ID of existing agent to re-task (omit to create new)")
+                   ->setOptional()},
+              {"plan_id",
+               shared::zString()
+                   ->describe("Optional plan to bind delegation context to")
+                   ->setOptional()},
+              {"chunk_id",
+               shared::zString()
+                   ->describe("Optional assigned chunk for executor delegation")
                    ->setOptional()},
               {"name", shared::zString()->describe(
                            "Machine-friendly slug (e.g., 'auth-finder')")},
@@ -38,17 +210,59 @@ std::shared_ptr<shared::JSONSchema> SubagentTool::getSchema() const {
 
 shared::ToolResult SubagentTool::execute(const SubagentInput &input,
                                          shared::ToolContext &ctx) {
-  if (!PurposeLoader::isValid(input.persona)) {
+  std::string persona;
+  try {
+    const std::string loweredPersona =
+        shared::StringUtil::toLower(shared::StringUtil::trim(input.persona));
+    if (loweredPersona == "implementer" || loweredPersona == "researcher") {
+      persona = worktools::normalizePersonaRole(input.persona, "persona");
+    } else if (input.plan_id.has_value() || input.chunk_id.has_value()) {
+      persona = worktools::normalizePersonaRole(input.persona, "persona");
+    } else {
+      persona = loweredPersona;
+    }
+  } catch (const std::exception &e) {
+    return shared::ToolResult::fail(e.what());
+  }
+
+  if (!PurposeLoader::isValid(persona)) {
     return shared::ToolResult::fail("Invalid persona: '" + input.persona +
                                     "'. Check available personas in base.md or prompts/ directory.");
   }
 
   std::string threadId = ctx.agent.getContext().history->threadId;
+  if (input.plan_id.has_value() != input.chunk_id.has_value()) {
+    return shared::ToolResult::fail(
+        "plan_id and chunk_id must either both be provided or both be omitted");
+  }
+
+  if (isExecutorPersona(persona) && input.plan_id.has_value() &&
+      input.chunk_id.has_value()) {
+    try {
+      ensureExecutorChunkReadyForDispatch(threadId, *input.plan_id,
+                                          *input.chunk_id);
+      ensureExecutorAssignmentAvailable(threadId, *input.plan_id, *input.chunk_id,
+                                        input.agent_id);
+    } catch (const std::exception &e) {
+      return shared::ToolResult::fail(e.what());
+    }
+  }
+
+  const std::string delegatedTask = [&]() -> std::string {
+    try {
+      SubagentInput normalizedInput = input;
+      normalizedInput.persona = persona;
+      return buildDelegationTask(normalizedInput, threadId);
+    } catch (const std::exception &e) {
+      throw;
+    }
+  }();
 
   auto existingAgents = AgentRegistry::instance().listAll();
   for (const auto &agentId : existingAgents) {
     auto agent = AgentRegistry::instance().getAgent(agentId);
-    if (agent && agent->getContext().identity.friendlyName == input.name) {
+    if (agent && agent->getContext().identity.friendlyName == input.name &&
+        (!input.agent_id.has_value() || agentId != *input.agent_id)) {
       return shared::ToolResult::fail("Agent name '" + input.name +
                                       "' already exists in this thread");
     }
@@ -73,7 +287,12 @@ shared::ToolResult SubagentTool::execute(const SubagentInput &input,
     }
 
     // Re-task existing agent
-    Engine::instance().executeTask(input.agent_id.value(), input.task);
+    if (isExecutorPersona(persona) && input.plan_id.has_value() &&
+        input.chunk_id.has_value()) {
+      persistExecutorDispatch(threadId, *input.plan_id, *input.chunk_id,
+                              input.agent_id.value());
+    }
+    Engine::instance().executeTask(input.agent_id.value(), delegatedTask);
 
     if (input.async) {
       rapidjson::Document d;
@@ -119,9 +338,14 @@ shared::ToolResult SubagentTool::execute(const SubagentInput &input,
   // Original behavior: summon new agent
   if (input.async) {
     std::string subagentId = Engine::instance().summonAgent(
-        threadId, input.persona, input.task, true,
+        threadId, persona, delegatedTask, true,
         ctx.agent.getContext().identity.id, input.name, input.title, "",
         providerId, modelId, variantName);
+    if (isExecutorPersona(persona) && input.plan_id.has_value() &&
+        input.chunk_id.has_value()) {
+      persistExecutorDispatch(threadId, *input.plan_id, *input.chunk_id,
+                              subagentId);
+    }
     rapidjson::Document d;
     d.SetObject();
     auto &a = d.GetAllocator();
@@ -130,9 +354,14 @@ shared::ToolResult SubagentTool::execute(const SubagentInput &input,
     return shared::ToolResult::ok(d);
   } else {
     std::string subagentId = Engine::instance().summonAgent(
-        threadId, input.persona, input.task, true,
+        threadId, persona, delegatedTask, true,
         ctx.agent.getContext().identity.id, input.name, input.title, "",
         providerId, modelId, variantName);
+    if (isExecutorPersona(persona) && input.plan_id.has_value() &&
+        input.chunk_id.has_value()) {
+      persistExecutorDispatch(threadId, *input.plan_id, *input.chunk_id,
+                              subagentId);
+    }
 
     // Polling wait to support heartbeats and interrupts
     std::string resultSummary;

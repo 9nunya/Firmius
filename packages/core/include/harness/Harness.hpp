@@ -144,6 +144,11 @@ public:
   void unsubscribe(const int &subscriptionId);
 
   /**
+   * Publish an app event to Harness subscribers.
+   */
+  void publishEvent(const firmius::shared::AppEvent &event);
+
+  /**
    * Get the current thread ID.
    */
   std::string currentThreadId();

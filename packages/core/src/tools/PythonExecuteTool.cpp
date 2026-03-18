@@ -4,6 +4,7 @@
 #include "utils/FSUtil.hpp"
 #include "utils/StringUtil.hpp"
 #include <filesystem>
+#include <map>
 #include <rapidjson/document.h>
 #include <thread>
 
@@ -23,9 +24,10 @@ std::shared_ptr<shared::JSONSchema> PythonExecuteTool::getSchema() const {
 
 shared::ToolResult PythonExecuteTool::execute(const PythonExecuteInput &input,
                                               shared::ToolContext &ctx) {
-  std::string tempFile =
-      "/tmp/firmius_script_" + shared::StringUtil::generateUuid() + ".py";
-  std::string command = "python3 " + tempFile;
+  static const char *kCodeEnvVar = "FIRMIUS_PYTHON_EXECUTE_CODE";
+  std::string command =
+      "python3 -c \"import os; exec(compile(os.environ['" +
+      std::string(kCodeEnvVar) + "'], '<python_execute>', 'exec'))\"";
   std::string processId;
 
   try {
@@ -41,14 +43,15 @@ shared::ToolResult PythonExecuteTool::execute(const PythonExecuteInput &input,
     if (approval == PermissionResponse::Deny) {
       return shared::ToolResult::fail("Command execution denied: " + command);
     }
-    ctx.agent.getPermissions()->validatePathAccess(
-        tempFile, firmius::shared::AccessMode::WRITE);
 
-    ctx.host.writeFile(
-        tempFile, std::vector<uint8_t>(input.code.begin(), input.code.end()));
+    std::map<std::string, std::string> env = {
+        {kCodeEnvVar, input.code},
+        {"FIRMIUS_PYTHON_EXECUTE_LINES",
+         std::to_string(std::count(input.code.begin(), input.code.end(), '\n') +
+                        (!input.code.empty() ? 1 : 0))}};
 
-    processId = ctx.agent.getEnvironment()->getProcessManager().spawnProcess(command,
-                                       ctx.currentToolCallId, effectiveCwd);
+    processId = ctx.agent.getEnvironment()->getProcessManager().spawnProcess(
+        command, ctx.currentToolCallId, effectiveCwd, env);
     ctx.agent.getEnvironment()->getProcessManager().addBlockingProcessId(processId);
 
     shared::ProcessSnapshot snap;
@@ -63,13 +66,17 @@ shared::ToolResult PythonExecuteTool::execute(const PythonExecuteInput &input,
         doc.SetObject();
         auto &a = doc.GetAllocator();
         doc.AddMember("exit_code", -2, a);
-        doc.AddMember("output",
+        doc.AddMember("stdout",
                       rapidjson::Value(snap.stdoutData.c_str(), a).Move(), a);
+        doc.AddMember("stderr",
+                      rapidjson::Value(snap.stderrData.c_str(), a).Move(), a);
         doc.AddMember("duration_ms", snap.elapsedMs, a);
         doc.AddMember("finish_reason", "Interrupted", a);
         doc.AddMember("process_id",
                       rapidjson::Value(processId.c_str(), a).Move(), a);
-        return shared::ToolResult::ok(doc);
+        doc.AddMember("command",
+                      rapidjson::Value(command.c_str(), a).Move(), a);
+        return shared::ToolResult::ok(doc, processId);
       }
 
       snap = ctx.agent.getEnvironment()->getProcessManager().inspectProcess(processId);
@@ -84,9 +91,6 @@ shared::ToolResult PythonExecuteTool::execute(const PythonExecuteInput &input,
 
     ctx.agent.getEnvironment()->getProcessManager().removeBlockingProcessId(processId);
 
-    // Cleanup
-    ctx.host.exec("rm " + tempFile);
-
     rapidjson::Document doc;
     doc.SetObject();
     auto &a = doc.GetAllocator();
@@ -96,8 +100,13 @@ shared::ToolResult PythonExecuteTool::execute(const PythonExecuteInput &input,
     doc.AddMember("stderr", rapidjson::Value(snap.stderrData.c_str(), a).Move(),
                   a);
     doc.AddMember("duration_ms", snap.elapsedMs, a);
+    doc.AddMember("finish_reason", "Natural", a);
+    doc.AddMember("process_id",
+                  rapidjson::Value(processId.c_str(), a).Move(), a);
+    doc.AddMember("command",
+                  rapidjson::Value(command.c_str(), a).Move(), a);
 
-    return shared::ToolResult::ok(doc);
+    return shared::ToolResult::ok(doc, processId);
   } catch (const std::exception &e) {
     if (!processId.empty())
       ctx.agent.getEnvironment()->getProcessManager().removeBlockingProcessId(processId);

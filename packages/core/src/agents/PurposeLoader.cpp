@@ -1,6 +1,7 @@
 #include "agents/PurposeLoader.hpp"
 #include "utils/StringUtil.hpp"
 #include <algorithm>
+#include <array>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -17,25 +18,40 @@ using namespace firmius::shared;
  */
 
 namespace {
+const std::array<const char *, 7> kLegacyPromptFiles = {
+    "brainstormer.md", "builder.md",    "coordinator.md", "firmius.md",
+    "general.md",      "planner.md",    "reviewer.md"};
 /**
  * @brief Maps a string scope identifier to the ToolScope enum.
  */
 firmius::shared::ToolScope stringToScope(const std::string &s) {
   using firmius::shared::ToolScope;
-  if (s == "fs:read")
+  if (s == "fs:read" || s == "FilesystemRead")
     return ToolScope::FilesystemRead;
-  if (s == "fs:write")
+  if (s == "fs:write" || s == "FilesystemWrite")
     return ToolScope::FilesystemWrite;
-  if (s == "process:exec")
+  if (s == "process:exec" || s == "Process")
     return ToolScope::Process;
-  if (s == "semantic")
+  if (s == "semantic" || s == "Semantic")
     return ToolScope::Semantic;
-  if (s == "delegation")
+  if (s == "delegation" || s == "Delegation")
     return ToolScope::Delegation;
-  if (s == "web")
+  if (s == "web" || s == "Web")
     return ToolScope::Web;
-  if (s == "git")
+  if (s == "git" || s == "Git")
     return ToolScope::Git;
+  if (s == "plan:read" || s == "PlanRead")
+    return ToolScope::PlanRead;
+  if (s == "plan:write" || s == "PlanWrite")
+    return ToolScope::PlanWrite;
+  if (s == "chunk:read" || s == "ChunkRead")
+    return ToolScope::ChunkRead;
+  if (s == "chunk:write" || s == "ChunkWrite")
+    return ToolScope::ChunkWrite;
+  if (s == "chunk:assign" || s == "ChunkAssign")
+    return ToolScope::ChunkAssign;
+  if (s == "chunk:review" || s == "ChunkReview")
+    return ToolScope::ChunkReview;
   throw std::runtime_error("Unknown scope: " + s);
 }
 } // namespace
@@ -289,16 +305,16 @@ void PurposeLoader::bootstrapDefaults(const std::string &builtinPromptsDir) {
     return;
 
   std::filesystem::create_directories(userDir);
+  for (const auto *legacyFile : kLegacyPromptFiles) {
+    std::filesystem::remove(std::filesystem::path(userDir) / legacyFile);
+  }
   for (const auto &entry :
        std::filesystem::directory_iterator(builtinPromptsDir)) {
     if (entry.is_regular_file()) {
       std::filesystem::path target =
           std::filesystem::path(userDir) / entry.path().filename();
-      if (!std::filesystem::exists(target)) {
-        std::filesystem::copy_file(
-            entry.path(), target,
-            std::filesystem::copy_options::overwrite_existing);
-      }
+      std::filesystem::copy_file(entry.path(), target,
+                                 std::filesystem::copy_options::overwrite_existing);
     }
   }
 }

@@ -84,7 +84,8 @@ shared::ToolResult FileReadTool::execute(const FileReadInput &input,
     if (read_full) {
       ctx.agent.getEnvironment()->getWorkspace().markFileAsFullyRead(absolutePath);
     } else {
-      ctx.agent.getEnvironment()->getWorkspace().markFileAsRead(absolutePath);
+      ctx.agent.getEnvironment()->getWorkspace().recordFileRead(
+          absolutePath, normalized_start, normalized_end, reachedEnd);
     }
 
     res.AddMember("line_start", normalized_start, res.GetAllocator());

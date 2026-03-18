@@ -92,7 +92,7 @@ int main(int argc, char **argv) {
     std::string cwd = "/work";
     auto cfg = h.getConfig();
     std::string lead =
-        cfg.defaultLeadPersona.empty() ? "firmius" : cfg.defaultLeadPersona;
+        cfg.defaultLeadPersona.empty() ? "lead" : cfg.defaultLeadPersona;
     if (!h.newThread(opts, cwd, lead).empty()) {
       thread_loaded = true;
     }

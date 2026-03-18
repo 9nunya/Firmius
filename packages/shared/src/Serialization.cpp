@@ -8,7 +8,6 @@
 namespace firmius::shared {
 
 namespace {
-
 // Enum conversion helpers
 std::string roleToString(Role value) {
   switch (value) {
@@ -78,6 +77,18 @@ std::string toolScopeToString(ToolScope value) {
     return "Web";
   case ToolScope::Git:
     return "Git";
+  case ToolScope::PlanRead:
+    return "PlanRead";
+  case ToolScope::PlanWrite:
+    return "PlanWrite";
+  case ToolScope::ChunkRead:
+    return "ChunkRead";
+  case ToolScope::ChunkWrite:
+    return "ChunkWrite";
+  case ToolScope::ChunkAssign:
+    return "ChunkAssign";
+  case ToolScope::ChunkReview:
+    return "ChunkReview";
   }
   return "Unknown";
 }
@@ -97,6 +108,18 @@ ToolScope stringToToolScope(const std::string &str) {
     return ToolScope::Web;
   if (str == "Git")
     return ToolScope::Git;
+  if (str == "PlanRead")
+    return ToolScope::PlanRead;
+  if (str == "PlanWrite")
+    return ToolScope::PlanWrite;
+  if (str == "ChunkRead")
+    return ToolScope::ChunkRead;
+  if (str == "ChunkWrite")
+    return ToolScope::ChunkWrite;
+  if (str == "ChunkAssign")
+    return ToolScope::ChunkAssign;
+  if (str == "ChunkReview")
+    return ToolScope::ChunkReview;
   throw std::runtime_error("Unknown ToolScope: " + str);
 }
 
@@ -384,7 +407,6 @@ rapidjson::Value workChunkToJson(const WorkChunk &chunk,
   v.AddMember("status",
               rapidjson::Value(workChunkStatusToString(chunk.status).c_str(), a),
               a);
-  v.AddMember("priority", chunk.priority, a);
   rapidjson::Value dependsOn(rapidjson::kArrayType);
   for (const auto &dependency : chunk.dependsOn) {
     dependsOn.PushBack(rapidjson::Value(dependency.c_str(), a), a);
@@ -392,8 +414,6 @@ rapidjson::Value workChunkToJson(const WorkChunk &chunk,
   v.AddMember("depends_on", dependsOn, a);
   v.AddMember("assigned_agent_id",
               rapidjson::Value(chunk.assignedAgentId.c_str(), a), a);
-  v.AddMember("assigned_role",
-              rapidjson::Value(chunk.assignedRole.c_str(), a), a);
   v.AddMember("attempt_count", chunk.attemptCount, a);
   v.AddMember("result_summary",
               rapidjson::Value(chunk.resultSummary.c_str(), a), a);
@@ -426,8 +446,6 @@ WorkChunk workChunkFromJsonValue(const rapidjson::Value &v) {
   chunk.status = v.HasMember("status") && v["status"].IsString()
                      ? stringToWorkChunkStatus(v["status"].GetString())
                      : WorkChunkStatus::Draft;
-  chunk.priority =
-      v.HasMember("priority") && v["priority"].IsInt() ? v["priority"].GetInt() : 0;
   if (v.HasMember("depends_on") && v["depends_on"].IsArray()) {
     for (const auto &dependency : v["depends_on"].GetArray()) {
       if (dependency.IsString()) {
@@ -446,12 +464,6 @@ WorkChunk workChunkFromJsonValue(const rapidjson::Value &v) {
           ? v["assigned_agent_id"].GetString()
           : (v.HasMember("assignedAgentId") && v["assignedAgentId"].IsString()
                  ? v["assignedAgentId"].GetString()
-                 : "");
-  chunk.assignedRole =
-      v.HasMember("assigned_role") && v["assigned_role"].IsString()
-          ? v["assigned_role"].GetString()
-          : (v.HasMember("assignedRole") && v["assignedRole"].IsString()
-                 ? v["assignedRole"].GetString()
                  : "");
   chunk.attemptCount = v.HasMember("attempt_count") && v["attempt_count"].IsInt()
                            ? v["attempt_count"].GetInt()

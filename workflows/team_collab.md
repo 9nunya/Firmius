@@ -20,7 +20,7 @@ args:
 
 ## Instructions
 
-You are the coordinator of a multi-agent collaboration session. Your job is to:
+You are the `lead` for a multi-agent collaboration session. Your job is to:
 
 1. **Analyze the task** and break it down into subtasks that can be parallelized
 2. **Spawn $1 specialized subagents** with clear personas and responsibilities
@@ -30,17 +30,16 @@ You are the coordinator of a multi-agent collaboration session. Your job is to:
 ## Suggested Subagent Roles
 
 Based on the task, consider spawning subagents with these specializations:
-- **Researcher**: Gathers information, reads documentation, explores codebases
-- **Implementer**: Writes code, creates files, makes edits
-- **Reviewer**: Reviews code quality, checks for bugs, validates solutions
-- **Tester**: Creates tests, runs validation, ensures correctness
-- **Documenter**: Writes documentation, adds comments, creates summaries
+- **Scout**: Gathers information, reads documentation, explores codebases
+- **Executor**: Owns one chunk and performs implementation
+- **Auditor**: Reviews risks, regressions, and missing verification
+- **Worker**: Handles a tightly bounded executor-delegated subtask
 
 ## Workflow
 
 1. First, explore the current directory to understand the context
 2. Create a brief plan outlining which subagents you'll spawn and their responsibilities
-3. Spawn each subagent using `summon_subagent` with a clear persona description
+3. Spawn each subagent using `summon_subagent` with one of the shipped personas and a bounded task
 4. Wait for all subagents to complete their work
 5. Review each subagent's output and provide feedback if needed
 6. Synthesize all contributions into a final deliverable
@@ -48,7 +47,7 @@ Based on the task, consider spawning subagents with these specializations:
 
 ## Communication Guidelines
 
-- Give each subagent a **specific, focused task** - avoid vague instructions
+- Give each subagent a **specific, focused task** with boundaries and expected evidence
 - Set **clear expectations** for deliverables and format
 - Check in periodically on long-running subtasks
 - Resolve conflicts if subagents produce contradictory work

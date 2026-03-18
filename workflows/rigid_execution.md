@@ -1,16 +1,17 @@
 ---
-description: The Firmius Rigid Execution Loop
+name: Rigid Execution
+description: Execute an existing plan through bounded chunks, implementation, and review.
 ---
 # Rigid Execution Workflow
 
-This workflow executes a predefined `ROADMAP.md` with zero Hallucinations and strict Quality Gates.
+This workflow executes an existing plan through explicit chunk ownership and review.
 
-1. **Initialization**: The `coordinator` agent reads the `ROADMAP.md` and identifies the first `<plan status="pending">`.
-2. **State Transition**: The `coordinator` marks the plan as `status="in_progress"` in the XML.
-3. **Task Dispersal (`coordinator` -> `builder`)**: For each `<task status="pending">` whose dependencies are met, the `coordinator` spawns a `builder` agent, providing it ONLY the `<files_to_edit>` and `<constraints>`.
-4. **Implementation (`builder`)**: The `builder` implements the code, validates syntax compilation, and returns `[BUILD_COMPLETE]`.
-5. **Validation (`coordinator` -> `reviewer`)**: The `coordinator` spawns a `reviewer` agent, passing the `builder`'s diff and the physical `<quality_gate>` required by the task.
-6. **Pass/Fail Routing**: 
-   - If `reviewer` returns `[REVIEW_RESULT] Passed`, the task is marked `status="done"` in the `ROADMAP.md`.
-   - If `reviewer` returns `[REVIEW_RESULT] Failed: <reason>`, the `coordinator` respawns the `builder` with the explicit fail instructions.
-7. **Completion**: Loop continues until all `<phase>` elements are `done`. The `coordinator` emits `[COORDINATION_COMPLETE]`.
+1. **Initialization (`lead`)**: The `lead` reads the active plan and selects ready chunks whose dependencies and priorities make them executable now.
+2. **State Transition (`lead`)**: The `lead` keeps plan and chunk state current before dispatching work.
+3. **Task Dispersal (`lead` -> `executor`)**: For each ready chunk, the `lead` assigns an `executor` with bounded instructions, scope limits, and explicit verification expectations.
+4. **Implementation (`executor`)**: The `executor` implements one chunk only, verifies its changes, and reports implementation status, verification, blockers, and residual risk.
+5. **Validation (`lead` -> `auditor`)**: The `lead` routes the returned chunk to `auditor` for evidence-first review against chunk intent and regression risk.
+6. **Pass/Fail Routing**:
+   - If the `auditor` finds the chunk acceptable, the `lead` advances the chunk state.
+   - If the `auditor` finds issues, the `lead` refines the chunk, retries it, or reassigns it with explicit correction instructions.
+7. **Completion**: The loop continues until the active plan is complete or a blocking decision is reached.
