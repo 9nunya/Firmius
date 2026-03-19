@@ -36,7 +36,8 @@ public:
         const std::string& command,
         const std::string& toolCallId = "",
         const std::string& cwd = "",
-        const std::map<std::string, std::string>& env = {}) = 0;
+        const std::map<std::string, std::string>& env = {},
+        bool monitorCompletion = false) = 0;
 
     /**
      * @brief Inspects a background process.

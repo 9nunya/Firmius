@@ -61,35 +61,42 @@ void LocalHostProcess::onOutput(
 }
 
 shared::ProcessResult LocalHostProcess::wait() {
+  reapIfNeeded(true);
   if (captureThread.joinable()) {
     captureThread.join();
   }
-
-  int status;
-  waitpid(pid, &status, 0);
-  exitCode = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
-  finished = true;
 
   auto end = std::chrono::steady_clock::now();
   double duration =
       std::chrono::duration<double, std::milli>(end - startTime).count();
 
   shared::ProcessResult res;
-  res.exitCode = exitCode;
-  res.stdoutData = stdoutBuffer;
-  res.stderrData = stderrBuffer;
+  res.exitCode = exitCode.load();
+  {
+    std::lock_guard<std::mutex> lock(callbackMutex);
+    res.stdoutData = stdoutBuffer;
+    res.stderrData = stderrBuffer;
+  }
   res.durationMs = duration;
   res.finishReason = shared::ProcessFinishReason::Natural;
   return res;
 }
 
 shared::ProcessSnapshot LocalHostProcess::inspect() const {
-  std::lock_guard<std::mutex> lock(callbackMutex);
+  const_cast<LocalHostProcess *>(this)->reapIfNeeded(false);
+
+  std::string stdoutData;
+  std::string stderrData;
+  {
+    std::lock_guard<std::mutex> lock(callbackMutex);
+    stdoutData = stdoutBuffer;
+    stderrData = stderrBuffer;
+  }
   auto now = std::chrono::steady_clock::now();
   double elapsed =
       std::chrono::duration<double, std::milli>(now - startTime).count();
 
-  return {!finished.load(), exitCode, stdoutBuffer, stderrBuffer, elapsed};
+  return {!finished.load(), exitCode.load(), stdoutData, stderrData, elapsed};
 }
 
 void LocalHostProcess::kill() { ::kill(pid, SIGKILL); }
@@ -115,18 +122,8 @@ void LocalHostProcess::write(const std::string &data) {
 }
 
 bool LocalHostProcess::isRunning() {
-  if (finished)
-    return false;
-  int status;
-  pid_t res = waitpid(pid, &status, WNOHANG);
-  if (res == 0)
-    return true;
-  if (res == pid) {
-    exitCode = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
-    finished = true;
-    return false;
-  }
-  return false;
+  reapIfNeeded(false);
+  return !finished.load();
 }
 
 std::string LocalHostProcess::getSystemId() const {
@@ -180,7 +177,46 @@ void LocalHostProcess::captureLoop() {
       }
     }
   }
-  finished = true;
+  reapIfNeeded(false);
+}
+
+bool LocalHostProcess::reapIfNeeded(bool block) {
+  if (finished.load()) {
+    return true;
+  }
+
+  std::lock_guard<std::mutex> lock(stateMutex);
+  if (reaped) {
+    return true;
+  }
+
+  int status = 0;
+  pid_t res = waitpid(pid, &status, block ? 0 : WNOHANG);
+  if (res == 0) {
+    return false;
+  }
+  if (res == pid) {
+    exitCode.store(decodeExitStatus(status));
+    reaped = true;
+    finished = true;
+    return true;
+  }
+  if (res < 0 && errno == ECHILD) {
+    reaped = true;
+    finished = true;
+    return true;
+  }
+  return false;
+}
+
+int LocalHostProcess::decodeExitStatus(int status) {
+  if (WIFEXITED(status)) {
+    return WEXITSTATUS(status);
+  }
+  if (WIFSIGNALED(status)) {
+    return 128 + WTERMSIG(status);
+  }
+  return -1;
 }
 
 std::string LocalHost::init() { return "localhost"; }
@@ -404,11 +440,7 @@ LocalHost::inspectBackgroundProcess(const std::string &id) {
   if (it == backgroundProcesses.end()) {
     throw std::runtime_error("Background process not found: " + id);
   }
-  auto snapshot = it->second->inspect();
-  if (!snapshot.running) {
-    backgroundProcesses.erase(it);
-  }
-  return snapshot;
+  return it->second->inspect();
 }
 
 void LocalHost::writeToBackgroundProcess(const std::string &id,

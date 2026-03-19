@@ -108,6 +108,7 @@ public:
    */
   void send(const std::string &text,
             const std::vector<firmius::shared::ImageContent> &images = {});
+  bool retryLastRequest(std::string &statusMessage);
 
   /**
    * Execute a workflow by ID with the provided arguments.
@@ -333,6 +334,21 @@ private:
 
   void maybeGenerateTitle(const std::string &threadId,
                           const std::string &firstMessage);
+  bool dispatchRequestToAgent(
+      const std::string &threadId, const std::string &preferredAgentId,
+      const std::string &text,
+      const std::vector<firmius::shared::ImageContent> &images,
+      std::string &statusMessage);
+  std::optional<shared::ThreadMetadata::RetryableRequest>
+  snapshotResumableTurnForAgent(const std::string &threadId,
+                                const std::string &agentId);
+  std::optional<shared::ThreadMetadata::RetryableRequest>
+  recoverLastResumableTurnForThread(
+      const std::string &threadId,
+      const std::string &preferredAgentId = "");
+  std::optional<std::string> resolveRetryTargetAgentId(
+      const std::string &threadId,
+      const std::string &preferredAgentId = "");
 
   /**
    * Drains all queued messages and sends them to the focused agent.

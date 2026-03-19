@@ -106,8 +106,47 @@ TEST_F(LocalHostTest, inspectBackgroundProcess_finished) {
     
     auto snapshot = host.inspectBackgroundProcess(processId);
     EXPECT_FALSE(snapshot.running);
-    
-    EXPECT_THROW(host.inspectBackgroundProcess(processId), std::runtime_error);
+    EXPECT_EQ(snapshot.exitCode, 0);
+
+    auto secondSnapshot = host.inspectBackgroundProcess(processId);
+    EXPECT_FALSE(secondSnapshot.running);
+    EXPECT_EQ(secondSnapshot.exitCode, 0);
+}
+
+TEST_F(LocalHostTest, spawn_fastProcessReportsRealExitCodeBeforeFinished) {
+    auto proc = host.spawn("true");
+
+    for (int i = 0; i < 100; ++i) {
+        auto snapshot = proc->inspect();
+        if (!snapshot.running) {
+            EXPECT_EQ(snapshot.exitCode, 0);
+            return;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    FAIL() << "process did not finish in time";
+}
+
+TEST_F(LocalHostTest, inspectBackgroundProcess_immediateExitKeepsFinishedSnapshot) {
+    auto proc = host.spawn("true");
+    std::string processId = "immediate_exit_" + std::to_string(getpid());
+    host.registerBackgroundProcess(processId, std::move(proc));
+
+    for (int i = 0; i < 100; ++i) {
+        auto snapshot = host.inspectBackgroundProcess(processId);
+        if (!snapshot.running) {
+            EXPECT_EQ(snapshot.exitCode, 0);
+
+            auto repeatedSnapshot = host.inspectBackgroundProcess(processId);
+            EXPECT_FALSE(repeatedSnapshot.running);
+            EXPECT_EQ(repeatedSnapshot.exitCode, 0);
+            return;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    FAIL() << "background process did not finish in time";
 }
 
 TEST_F(LocalHostTest, listDir_basic) {

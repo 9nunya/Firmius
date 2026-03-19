@@ -49,8 +49,8 @@ shared::ToolResult ProcessExecuteTool::execute(const ProcessExecuteInput &input,
                                       input.command);
     }
 
-    processId = ctx.agent.getEnvironment()->getProcessManager().spawnProcess(input.command, ctx.currentToolCallId,
-                                       effectiveCwd, {});
+    processId = ctx.agent.getEnvironment()->getProcessManager().spawnProcess(
+        input.command, ctx.currentToolCallId, effectiveCwd, {}, true);
     ctx.agent.getEnvironment()->getProcessManager().addBlockingProcessId(processId);
 
     auto timeoutMs = (input.timeout_ms > 0) ? input.timeout_ms : 15000;
@@ -98,13 +98,14 @@ shared::ToolResult ProcessExecuteTool::execute(const ProcessExecuteInput &input,
                       rapidjson::Value(snap.stdoutData.c_str(), a).Move(), a);
         doc.AddMember("stderr",
                       rapidjson::Value(snap.stderrData.c_str(), a).Move(), a);
-        doc.AddMember("duration_ms", (double)elapsed, a);
+        doc.AddMember("duration_ms", snap.elapsedMs, a);
         doc.AddMember("finish_reason", "Timeout", a);
         doc.AddMember("process_id",
                       rapidjson::Value(processId.c_str(), a).Move(), a);
-        doc.AddMember("message",
-                      "Process timed out but continues in background.", a);
-        return shared::ToolResult::ok(doc, processId);
+
+        auto result = shared::ToolResult::ok(doc, processId);
+        result.is_background = true;
+        return result;
       }
 
       std::this_thread::sleep_for(sleepDuration);
@@ -125,6 +126,8 @@ shared::ToolResult ProcessExecuteTool::execute(const ProcessExecuteInput &input,
                   a);
     doc.AddMember("duration_ms", snap.elapsedMs, a);
     doc.AddMember("finish_reason", "Natural", a);
+    doc.AddMember("process_id",
+                  rapidjson::Value(processId.c_str(), a).Move(), a);
 
     return shared::ToolResult::ok(doc, processId);
   } catch (const std::exception &e) {

@@ -1,5 +1,6 @@
 #include "tools/ChunkUpdateTool.hpp"
 #include "tools/WorkToolCommon.hpp"
+#include "utils/StringUtil.hpp"
 
 namespace firmius::core {
 
@@ -17,8 +18,9 @@ std::shared_ptr<shared::JSONSchema> ChunkUpdateTool::getSchema() const {
              {"context", zString()->setOptional()},
              {"constraints", zString()->setOptional()},
              {"completion", zString()->setOptional()},
+             {"planning_gate", zBoolean()->setOptional()},
              {"status",
-              zEnum({"Draft", "Ready", "InProgress", "Implemented",
+              zEnum({"Ready", "InProgress", "Implemented",
                      "Verifying", "Done", "Blocked", "Failed", "Cancelled"})
                   ->setOptional()},
              {"depends_on", zArray(zString())->setOptional()},
@@ -34,58 +36,94 @@ shared::ToolResult ChunkUpdateTool::execute(const rapidjson::Value &input,
   try {
     const std::string threadId = worktools::requireCurrentThreadId(ctx);
     auto tm = worktools::makeThreadManager();
-    shared::Plan plan =
-        worktools::loadPlan(tm, threadId, input["plan_id"].GetString());
-    auto &chunk = worktools::requireChunk(plan, input["chunk_id"].GetString());
-    worktools::requireChunkUpdateAccess(input, ctx, threadId, plan, chunk);
-    const shared::WorkChunk originalChunk = chunk;
+    shared::WorkChunk originalChunk;
+    shared::WorkChunk updatedChunk;
+    const bool statusWasProvided = input.HasMember("status");
 
-    if (input.HasMember("title")) {
-      chunk.title = input["title"].GetString();
-    }
-    if (input.HasMember("goal")) {
-      chunk.goal = input["goal"].GetString();
-    }
-    if (input.HasMember("context")) {
-      chunk.context = input["context"].GetString();
-    }
-    if (input.HasMember("constraints")) {
-      chunk.constraints = input["constraints"].GetString();
-    }
-    if (input.HasMember("completion")) {
-      chunk.completion = input["completion"].GetString();
-    }
-    if (input.HasMember("status")) {
-      chunk.status = worktools::parseChunkStatus(input["status"].GetString());
-    }
-    if (input.HasMember("depends_on")) {
-      chunk.dependsOn = worktools::parseStringArray(input, "depends_on");
-    }
-    if (input.HasMember("attempt_count")) {
-      chunk.attemptCount = input["attempt_count"].GetInt();
-    }
-    if (input.HasMember("result_summary")) {
-      chunk.resultSummary = input["result_summary"].GetString();
-    }
-    if (input.HasMember("review_summary")) {
-      chunk.reviewSummary = input["review_summary"].GetString();
-    }
-    chunk.updatedAt = worktools::nowEpochMs();
+    auto updatedPlan = tm.mutatePlan(
+        threadId, input["plan_id"].GetString(), [&](shared::Plan &plan) {
+          auto &chunk =
+              worktools::requireChunk(plan, input["chunk_id"].GetString());
+          worktools::requireChunkUpdateAccess(input, ctx, threadId, plan,
+                                              chunk);
+          originalChunk = chunk;
+          const bool dependsOnWasProvided = input.HasMember("depends_on");
 
-    tm.updatePlan(threadId, plan);
-    const shared::WorkChunk updatedChunk = chunk;
+          if (input.HasMember("title")) {
+            chunk.title = input["title"].GetString();
+          }
+          if (input.HasMember("goal")) {
+            chunk.goal = input["goal"].GetString();
+          }
+          if (input.HasMember("context")) {
+            chunk.context = input["context"].GetString();
+          }
+          if (input.HasMember("constraints")) {
+            chunk.constraints = input["constraints"].GetString();
+          }
+          if (input.HasMember("completion")) {
+            chunk.completion = input["completion"].GetString();
+          }
+          if (input.HasMember("planning_gate")) {
+            chunk.planningGate = input["planning_gate"].GetBool();
+          }
+          if (input.HasMember("status")) {
+            chunk.status =
+                worktools::parseChunkStatus(input["status"].GetString());
+          }
+          if (input.HasMember("depends_on")) {
+            chunk.dependsOn = worktools::parseStringArray(input, "depends_on");
+          }
+          if (input.HasMember("attempt_count")) {
+            chunk.attemptCount = input["attempt_count"].GetInt();
+          }
+          if (input.HasMember("result_summary")) {
+            chunk.resultSummary = input["result_summary"].GetString();
+          }
+          if (input.HasMember("review_summary")) {
+            chunk.reviewSummary = input["review_summary"].GetString();
+          }
+
+          if (statusWasProvided &&
+              chunk.status == shared::WorkChunkStatus::Done) {
+            if (worktools::roleForContext(ctx) !=
+                worktools::WorkAgentRole::Lead) {
+              throw std::runtime_error(
+                  "Only the lead may mark a chunk Done after review");
+            }
+            if (!worktools::chunkDependenciesDone(plan, chunk)) {
+              throw std::runtime_error("Chunk '" + chunk.id +
+                                       "' cannot be marked Done until "
+                                       "dependencies are Done");
+            }
+            if (shared::StringUtil::trim(chunk.reviewSummary).empty()) {
+              throw std::runtime_error("Chunk '" + chunk.id +
+                                       "' cannot be marked Done without "
+                                       "review_summary acceptance evidence");
+            }
+          }
+
+          if (statusWasProvided || dependsOnWasProvided) {
+            worktools::blockChunkIfDependenciesIncomplete(plan, chunk);
+          }
+
+          chunk.updatedAt = worktools::nowEpochMs();
+          updatedChunk = chunk;
+        });
+
     worktools::emitWorkEvent(
-        shared::ChunkUpdated{threadId, plan.id, updatedChunk});
+        shared::ChunkUpdated{threadId, updatedPlan.id, updatedChunk});
     if (originalChunk.status != updatedChunk.status) {
       worktools::emitWorkEvent(shared::ChunkStatusChanged{
-          threadId, plan.id, updatedChunk.id, originalChunk.status,
+          threadId, updatedPlan.id, updatedChunk.id, originalChunk.status,
           updatedChunk.status, updatedChunk});
     }
     rapidjson::Document doc;
     doc.SetObject();
     auto &alloc = doc.GetAllocator();
-    doc.AddMember("chunk_id", rapidjson::Value(chunk.id.c_str(), alloc), alloc);
-    std::string status = worktools::chunkStatusToString(chunk.status);
+    doc.AddMember("chunk_id",
+                  rapidjson::Value(updatedChunk.id.c_str(), alloc), alloc);
+    std::string status = worktools::chunkStatusToString(updatedChunk.status);
     doc.AddMember("status", rapidjson::Value(status.c_str(), alloc), alloc);
     return shared::ToolResult::ok(doc);
   } catch (const std::exception &e) {

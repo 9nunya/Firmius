@@ -105,7 +105,6 @@ private:
   std::vector<std::function<void()>> deferred_ui_mutations_;
   bool pending_modal_clear_ =
       false; // Deferred clear to avoid UB in modal handlers
-  bool show_help_ = false;
   bool diffs_expanded_ = true; // Ctrl+G toggle for diff expansion
   bool plan_lane_expanded_ = false;
 

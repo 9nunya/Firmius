@@ -87,6 +87,8 @@ public:
               (const std::string &, (std::function<void(const StreamEvent &)>),
                const std::vector<ImageContent> &),
               (override));
+  MOCK_METHOD(void, resume, ((std::function<void(const StreamEvent &)>)),
+              (override));
   MOCK_METHOD((const AgentContext &), getContext, (), (const, override));
   MOCK_METHOD(AgentContext &, getMutableContext, (), (override));
   MOCK_METHOD(void, interrupt, (), (override));
@@ -448,13 +450,34 @@ TEST_F(SubagentToolTest, executorRetaskUsesChunkAwareDelegationContext) {
       delegatedTask,
       ::testing::HasSubstr("Valid chunk_update payload pattern: {\"plan_id\":\"" +
                            planId +
-                           "\",\"chunk_id\":\"chunk-1\",\"status\":\"Implemented\",\"attempt_count\":1,\"result_summary\":\"implemented and verified\"}."));
+                           "\",\"chunk_id\":\"chunk-1\",\"status\":\"Implemented\",\"attempt_count\":1,\"result_summary\":\"implemented scoped changes; verified with focused evidence\"}."));
   EXPECT_THAT(
       delegatedTask,
       ::testing::HasSubstr("Do not send title, goal, context, constraints, completion, depends_on, assigned_agent_id, or review_summary through chunk_update."));
   EXPECT_THAT(
       delegatedTask,
       ::testing::HasSubstr("Any design, review, dependency, or assignment fields in chunk_update will be rejected by runtime authority checks."));
+  EXPECT_THAT(
+      delegatedTask,
+      ::testing::HasSubstr("Only the lead accepts work and marks a chunk Done after review; your terminal success state is normally Implemented."));
+  EXPECT_THAT(
+      delegatedTask,
+      ::testing::HasSubstr("Your report must name the verification commands or tests you ran and the outcome."));
+  EXPECT_THAT(
+      delegatedTask,
+      ::testing::HasSubstr("If an anchor or local context is stale, reread and repair it before editing; do not guess."));
+  EXPECT_THAT(
+      delegatedTask,
+      ::testing::HasSubstr("Do not claim completion, verification, or review without evidence."));
+  EXPECT_THAT(
+      delegatedTask,
+      ::testing::HasSubstr("Changed: <files/behavior>"));
+  EXPECT_THAT(
+      delegatedTask,
+      ::testing::HasSubstr("Verified: <command/test and result>"));
+  EXPECT_THAT(
+      delegatedTask,
+      ::testing::HasSubstr("Blockers/Risks: <none or concrete issue>"));
   EXPECT_THAT(delegatedTask,
               ::testing::HasSubstr("plan_id=\"" + planId + "\" and chunk_id=\"chunk-1\""));
   EXPECT_THAT(delegatedTask,
@@ -612,13 +635,13 @@ TEST_F(SubagentToolTest, executorDispatchFailsWhenDependencyIsNotDone) {
 
   EXPECT_FALSE(result.success);
   EXPECT_THAT(result.error,
-              ::testing::HasSubstr("dependency 'dep-1' is Verifying"));
+              ::testing::HasSubstr("status is Blocked"));
   EXPECT_THAT(result.error,
               ::testing::HasSubstr("dependencies must be Done"));
 
   const Plan updatedPlan = threadManager_->getPlan(threadId, planId);
   EXPECT_TRUE(updatedPlan.chunks[1].assignedAgentId.empty());
-  EXPECT_EQ(updatedPlan.chunks[1].status, WorkChunkStatus::Ready);
+  EXPECT_EQ(updatedPlan.chunks[1].status, WorkChunkStatus::Blocked);
 }
 
 TEST_F(SubagentToolTest, executorDispatchSucceedsWhenDependenciesAreDone) {

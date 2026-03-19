@@ -42,6 +42,8 @@ private:
      * @brief Background loop to read from pipes.
      */
     void captureLoop();
+    bool reapIfNeeded(bool block);
+    static int decodeExitStatus(int status);
 
     pid_t pid;
     int stdoutFd;
@@ -53,7 +55,9 @@ private:
     mutable std::string stderrBuffer;
     std::thread captureThread;
     std::atomic<bool> finished{false};
-    int exitCode = -1;
+    std::mutex stateMutex;
+    bool reaped = false;
+    std::atomic<int> exitCode{-1};
     std::chrono::steady_clock::time_point startTime;
 };
 

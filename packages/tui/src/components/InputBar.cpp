@@ -521,7 +521,10 @@ ftxui::Component InputBar(
       *suggestion_index = 0;
     }
 
-    if (event == ftxui::Event::Tab || event == ftxui::Event::Return) {
+    const bool is_shift_enter = IsShiftEnterInput(raw);
+
+    if (event == ftxui::Event::Tab || (event == ftxui::Event::Return &&
+                                       !is_shift_enter)) {
       if (ac) {
         if (ac->is_typing_command_name && !ac->command_matches.empty()) {
           size_t idx = static_cast<size_t>(*suggestion_index);
@@ -567,6 +570,16 @@ ftxui::Component InputBar(
       }
     }
 
+    // Handle Shift+Enter (newline)
+    if (is_shift_enter) {
+      insertText(*model->buffer, *model->cursor, "\n");
+      int cline = cursorLine(*model->buffer, *model->cursor);
+      if (cline >= *scroll_top + MAX_VISIBLE_LINES) {
+        *scroll_top = cline - MAX_VISIBLE_LINES + 1;
+      }
+      return true;
+    }
+
     // Handle Enter (submit)
     if (event == ftxui::Event::Return) {
       if (!model->buffer->empty()) {
@@ -582,19 +595,6 @@ ftxui::Component InputBar(
         *just_submitted = true;
         // Consume the event - don't let input component insert newline
         return true;
-      }
-      return true;
-    }
-
-    // Handle Shift+Enter (newline)
-    bool is_shift_enter = (raw == "\x1b[13;2u" || raw == "\x1b\r" ||
-                           raw == "\x1b\n" || raw == "\x1b[27;2;13~");
-
-    if (is_shift_enter) {
-      insertText(*model->buffer, *model->cursor, "\n");
-      int cline = cursorLine(*model->buffer, *model->cursor);
-      if (cline >= *scroll_top + MAX_VISIBLE_LINES) {
-        *scroll_top = cline - MAX_VISIBLE_LINES + 1;
       }
       return true;
     }

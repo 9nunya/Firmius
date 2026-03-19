@@ -217,8 +217,6 @@ PlanStatus stringToPlanStatus(const std::string &str) {
 
 std::string workChunkStatusToString(WorkChunkStatus value) {
   switch (value) {
-  case WorkChunkStatus::Draft:
-    return "Draft";
   case WorkChunkStatus::Ready:
     return "Ready";
   case WorkChunkStatus::InProgress:
@@ -236,12 +234,12 @@ std::string workChunkStatusToString(WorkChunkStatus value) {
   case WorkChunkStatus::Cancelled:
     return "Cancelled";
   }
-  return "Draft";
+  return "Ready";
 }
 
 WorkChunkStatus stringToWorkChunkStatus(const std::string &str) {
   if (str == "Draft")
-    return WorkChunkStatus::Draft;
+    return WorkChunkStatus::Ready;
   if (str == "Ready")
     return WorkChunkStatus::Ready;
   if (str == "InProgress")
@@ -404,6 +402,7 @@ rapidjson::Value workChunkToJson(const WorkChunk &chunk,
   v.AddMember("context", rapidjson::Value(chunk.context.c_str(), a), a);
   v.AddMember("constraints", rapidjson::Value(chunk.constraints.c_str(), a), a);
   v.AddMember("completion", rapidjson::Value(chunk.completion.c_str(), a), a);
+  v.AddMember("planning_gate", chunk.planningGate, a);
   v.AddMember("status",
               rapidjson::Value(workChunkStatusToString(chunk.status).c_str(), a),
               a);
@@ -443,9 +442,15 @@ WorkChunk workChunkFromJsonValue(const rapidjson::Value &v) {
       v.HasMember("completion") && v["completion"].IsString()
           ? v["completion"].GetString()
           : "";
+  chunk.planningGate =
+      v.HasMember("planning_gate") && v["planning_gate"].IsBool()
+          ? v["planning_gate"].GetBool()
+          : (v.HasMember("planningGate") && v["planningGate"].IsBool()
+                 ? v["planningGate"].GetBool()
+                 : false);
   chunk.status = v.HasMember("status") && v["status"].IsString()
                      ? stringToWorkChunkStatus(v["status"].GetString())
-                     : WorkChunkStatus::Draft;
+                     : WorkChunkStatus::Ready;
   if (v.HasMember("depends_on") && v["depends_on"].IsArray()) {
     for (const auto &dependency : v["depends_on"].GetArray()) {
       if (dependency.IsString()) {
@@ -1001,6 +1006,8 @@ rapidjson::Document toJson(const StreamEvent &ev) {
     d.AddMember("output", rapidjson::Value(pod->output.c_str(), a), a);
     d.AddMember("isStderr", pod->isStderr, a);
     d.AddMember("finished", pod->finished, a);
+    d.AddMember("exitCode", pod->exitCode, a);
+    d.AddMember("durationMs", pod->durationMs, a);
   }
   return d;
 }
@@ -1047,7 +1054,12 @@ StreamEvent streamEventFromJsonValue(const rapidjson::Value &v) {
   if (type == "processOutput")
     return ProcessOutputDelta{v["processId"].GetString(),
                               v["output"].GetString(), v["isStderr"].GetBool(),
-                              v["finished"].GetBool()};
+                              v["finished"].GetBool(),
+                              v.HasMember("exitCode") ? v["exitCode"].GetInt()
+                                                       : -1,
+                              v.HasMember("durationMs")
+                                  ? v["durationMs"].GetDouble()
+                                  : 0.0};
   throw std::runtime_error("Unknown StreamEvent type: " + type);
 }
 
@@ -1085,6 +1097,29 @@ rapidjson::Document toJson(const ThreadMetadata &m) {
   d.AddMember("cwd", rapidjson::Value(m.cwd.c_str(), a), a);
   d.AddMember("leadPersona", rapidjson::Value(m.leadPersona.c_str(), a), a);
   d.AddMember("active_plan_id", rapidjson::Value(m.activePlanId.c_str(), a), a);
+  if (m.lastRetryableRequest.has_value()) {
+    rapidjson::Value retry(rapidjson::kObjectType);
+    retry.AddMember(
+        "targetAgentId",
+        rapidjson::Value(m.lastRetryableRequest->targetAgentId.c_str(), a), a);
+    retry.AddMember("turnId",
+                    rapidjson::Value(m.lastRetryableRequest->turnId.c_str(), a),
+                    a);
+    retry.AddMember("text",
+                    rapidjson::Value(m.lastRetryableRequest->text.c_str(), a),
+                    a);
+    rapidjson::Value images(rapidjson::kArrayType);
+    for (const auto &image : m.lastRetryableRequest->images) {
+      images.PushBack(messagePartToJson(image, a), a);
+    }
+    retry.AddMember("images", images, a);
+    retry.AddMember("recordedAt", m.lastRetryableRequest->recordedAt, a);
+    retry.AddMember("eligible", m.lastRetryableRequest->eligible, a);
+    d.AddMember("lastRetryableRequest", retry, a);
+  } else {
+    d.AddMember("lastRetryableRequest", rapidjson::Value(rapidjson::kNullType),
+                a);
+  }
   d.AddMember(
       "permissionMode",
       rapidjson::Value(threadPermissionModeToString(m.permissionMode).c_str(), a),
@@ -1121,6 +1156,48 @@ ThreadMetadata threadMetadataFromJson(const rapidjson::Value &v) {
           : (v.HasMember("activePlanId") && v["activePlanId"].IsString()
                  ? v["activePlanId"].GetString()
                  : "");
+  if (v.HasMember("lastRetryableRequest") &&
+      v["lastRetryableRequest"].IsObject()) {
+    ThreadMetadata::RetryableRequest retry;
+    const auto &retryValue = v["lastRetryableRequest"];
+    retry.targetAgentId =
+        retryValue.HasMember("targetAgentId") &&
+                retryValue["targetAgentId"].IsString()
+            ? retryValue["targetAgentId"].GetString()
+            : "";
+    retry.turnId = retryValue.HasMember("turnId") && retryValue["turnId"].IsString()
+                       ? retryValue["turnId"].GetString()
+                       : "";
+    retry.text = retryValue.HasMember("text") && retryValue["text"].IsString()
+                     ? retryValue["text"].GetString()
+                     : "";
+    retry.recordedAt =
+        retryValue.HasMember("recordedAt") && retryValue["recordedAt"].IsUint64()
+            ? retryValue["recordedAt"].GetUint64()
+            : 0;
+    retry.eligible =
+        retryValue.HasMember("eligible") && retryValue["eligible"].IsBool()
+            ? retryValue["eligible"].GetBool()
+            : false;
+    if (retryValue.HasMember("images") && retryValue["images"].IsArray()) {
+      for (const auto &imageValue : retryValue["images"].GetArray()) {
+        if (!imageValue.IsObject() || !imageValue.HasMember("type") ||
+            !imageValue["type"].IsString()) {
+          continue;
+        }
+        try {
+          auto part = messagePartFromJson(imageValue);
+          if (auto *image = std::get_if<ImageContent>(&part)) {
+            retry.images.push_back(*image);
+          }
+        } catch (...) {
+        }
+      }
+    }
+    if (!retry.text.empty() || !retry.images.empty()) {
+      m.lastRetryableRequest = std::move(retry);
+    }
+  }
   m.permissionMode =
       v.HasMember("permissionMode") && v["permissionMode"].IsString()
           ? stringToThreadPermissionMode(v["permissionMode"].GetString())
@@ -1227,6 +1304,8 @@ rapidjson::Document toJson(const EngineEvent &ev) {
     d.AddMember("output", rapidjson::Value(apo->output.c_str(), a), a);
     d.AddMember("isStderr", apo->isStderr, a);
     d.AddMember("finished", apo->finished, a);
+    d.AddMember("exitCode", apo->exitCode, a);
+    d.AddMember("durationMs", apo->durationMs, a);
     d.AddMember("parentId", rapidjson::Value(apo->parentId.c_str(), a), a);
   }
 
@@ -1291,6 +1370,8 @@ EngineEvent engineEventFromJson(const rapidjson::Value &v) {
         v["output"].GetString(),
         v["isStderr"].GetBool(),
         v["finished"].GetBool(),
+        v.HasMember("exitCode") ? v["exitCode"].GetInt() : -1,
+        v.HasMember("durationMs") ? v["durationMs"].GetDouble() : 0.0,
         v.HasMember("parentId") ? v["parentId"].GetString() : ""};
   throw std::runtime_error("Unknown EngineEvent type: " + type);
 }

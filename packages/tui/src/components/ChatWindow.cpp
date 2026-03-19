@@ -3,9 +3,12 @@
 #include "Enums.hpp"
 #include "Message.hpp"
 #include "ThemeManager.hpp"
+#include "components/ErrorDisplay.hpp"
 #include "components/Markdown.hpp"
 #include "components/ScrollableBox.hpp"
+#include "components/TranscriptGrouping.hpp"
 #include "components/ToolBlock.hpp"
+#include "components/GlintEffect.hpp"
 #include "utils/ToolSummaries.hpp"
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/component_base.hpp>
@@ -65,6 +68,258 @@ private:
   std::function<ftxui::Element()> render_;
 };
 
+struct QuickToolCluster {
+  std::vector<std::string> order;
+  std::unordered_map<std::string, std::shared_ptr<firmius::shared::ToolCallView>>
+      views;
+  std::unordered_map<std::string, bool> failed_tools;
+  std::unordered_map<std::string, bool> successful_tools;
+
+  bool empty() const { return order.empty(); }
+
+  void add(const std::shared_ptr<firmius::shared::ToolCallView> &view,
+           bool is_success = true) {
+    if (!view) {
+      return;
+    }
+    if (!views.count(view->toolCallId)) {
+      order.push_back(view->toolCallId);
+    }
+    views[view->toolCallId] = view;
+    if (is_success) {
+      successful_tools[view->toolCallId] = true;
+    } else {
+      failed_tools[view->toolCallId] = true;
+    }
+  }
+
+  void clear() {
+    order.clear();
+    views.clear();
+    failed_tools.clear();
+    successful_tools.clear();
+  }
+};
+
+ftxui::Element RenderQuickToolRow(const firmius::tui::QuickToolGroupSummary &summary,
+                                  const firmius::tui::Theme &theme) {
+  const bool live = summary.has_preparing || summary.has_live;
+  std::string keyword;
+  switch (summary.category) {
+  case firmius::tui::QuickToolCategory::Read:
+    keyword = summary.has_error ? "Failed Reading" : (live ? "Reading..." : "Read");
+    break;
+  case firmius::tui::QuickToolCategory::List:
+    keyword = summary.has_error ? "Failed Listing" : (live ? "Listing..." : "Listed");
+    break;
+  case firmius::tui::QuickToolCategory::Search:
+    keyword = summary.has_error ? "Failed Search" : (live ? "Searching..." : "Search");
+    break;
+  case firmius::tui::QuickToolCategory::None:
+    return ftxui::text("");
+  }
+  const int live_count = summary.preparing_count + summary.live_count;
+  if (live && live_count > 1) {
+    keyword += " (x" + std::to_string(live_count) + ")";
+  }
+
+  std::vector<std::string> deduped_targets;
+  std::unordered_map<std::string, bool> seen_targets;
+  for (const auto &target : summary.targets) {
+    if (target.empty() || seen_targets[target]) {
+      continue;
+    }
+    seen_targets[target] = true;
+    deduped_targets.push_back(target);
+  }
+
+  std::string joined_targets;
+  for (size_t i = 0; i < deduped_targets.size(); ++i) {
+    if (i > 0) {
+      joined_targets += ", ";
+    }
+    joined_targets += deduped_targets[i];
+  }
+
+  auto accent = theme.status_bar.executing_tool.normal.fg;
+  auto bullet_color = theme.base.dim;
+  auto target_color = theme.base.fg;
+
+  if (summary.category == firmius::tui::QuickToolCategory::Search) {
+    accent = theme.tool_blocks.specific.file_read.fg;
+  } else if (summary.category == firmius::tui::QuickToolCategory::List) {
+    accent = theme.tool_blocks.specific.ls.fg;
+  } else if (summary.category == firmius::tui::QuickToolCategory::Read) {
+    accent = theme.tool_blocks.specific.file_read.fg;
+  }
+
+  if (summary.has_error) {
+    accent = theme.status_bar.error.normal.fg;
+    bullet_color = theme.status_bar.error.normal.fg;
+    target_color = theme.status_bar.error.normal.fg;
+  } else if (summary.has_live) {
+    accent = theme.status_bar.streaming.normal.fg;
+    target_color = theme.base.fg;
+  } else if (summary.has_preparing) {
+    accent = theme.status_bar.executing_tool.normal.fg;
+    target_color = theme.base.fg;
+  }
+
+  auto keyword_el = ftxui::text(keyword) | ftxui::bold | ftxui::color(accent);
+  auto targets_el =
+      ftxui::paragraph(joined_targets.empty() ? "." : joined_targets) |
+      ftxui::color(target_color) | ftxui::flex;
+  if (summary.has_live) {
+    targets_el = targets_el | ftxui::bold;
+  }
+
+  auto row_base = ftxui::hbox({
+                      ftxui::text("· ") | ftxui::color(bullet_color),
+                      keyword_el,
+                      ftxui::text(" ") | ftxui::color(bullet_color),
+                      targets_el,
+                  }) |
+                  ftxui::bgcolor(theme.tool_blocks.generic_bg) | ftxui::xflex;
+
+  if (!summary.has_preparing && !summary.has_live) {
+    return row_base;
+  }
+
+  firmius::tui::GlintConfig cfg;
+  cfg.target = firmius::tui::GlintConfig::Target::Text;
+  cfg.gradientColors = theme.tool_blocks.glint.empty()
+                           ? std::vector<ftxui::Color>{accent, theme.base.fg,
+                                                       accent}
+                           : theme.tool_blocks.glint;
+  cfg.glintSize = 10;
+  cfg.intervalSeconds = summary.has_live ? 1.1f : 1.8f;
+  cfg.durationSeconds = summary.has_live ? 0.9f : 1.1f;
+  cfg.easing = firmius::tui::GlintEasing::EaseInOut;
+  auto glint = firmius::tui::GlintEffect(row_base, cfg);
+  return glint->Render();
+}
+
+std::vector<ftxui::Component> BuildQuickToolClusterRows(
+    const QuickToolCluster &cluster,
+    const firmius::tui::LiveQuickSummaryCluster *live_cluster = nullptr) {
+  std::vector<ftxui::Component> rows;
+  if (cluster.empty() && (!live_cluster || live_cluster->summaries.empty())) {
+    return rows;
+  }
+
+  std::vector<firmius::tui::QuickToolCategory> category_order;
+  std::unordered_map<int, firmius::tui::QuickToolGroupSummary> summaries;
+  std::vector<std::string> individual_failed_tool_call_ids;
+
+  for (const auto &tool_call_id : cluster.order) {
+    auto it = cluster.views.find(tool_call_id);
+    if (it == cluster.views.end() || !it->second) {
+      continue;
+    }
+
+    const auto descriptor = firmius::tui::DescribeQuickToolCall(*it->second);
+    if (!firmius::tui::IsQuickToolCategory(descriptor.category)) {
+      continue;
+    }
+
+    if (cluster.failed_tools.count(tool_call_id)) {
+      individual_failed_tool_call_ids.push_back(tool_call_id);
+      continue;
+    }
+
+    auto key = static_cast<int>(descriptor.category);
+    auto &summary = summaries[key];
+    if (summary.targets.empty()) {
+      summary.category = descriptor.category;
+      category_order.push_back(descriptor.category);
+    }
+    if (!descriptor.target.empty()) {
+      summary.targets.push_back(descriptor.target);
+    }
+    summary.has_preparing =
+        summary.has_preparing ||
+        it->second->phase == firmius::shared::ToolPhase::Preparing;
+    summary.has_live =
+        summary.has_live || it->second->phase == firmius::shared::ToolPhase::Called;
+    summary.has_error = false; // Grouped rows in this logic are only for success/live
+  }
+
+  if (live_cluster) {
+    for (auto category : live_cluster->category_order) {
+      auto key = static_cast<int>(category);
+      if (summaries.count(key) == 0) {
+        category_order.push_back(category);
+      }
+      auto &summary = summaries[key];
+      if (summary.category == firmius::tui::QuickToolCategory::None) {
+        summary.category = category;
+      }
+      auto it_live = live_cluster->summaries.find(key);
+      if (it_live != live_cluster->summaries.end()) {
+        const auto &live = it_live->second;
+        summary.targets.insert(summary.targets.end(), live.targets.begin(),
+                               live.targets.end());
+        summary.has_preparing = summary.has_preparing || live.has_preparing;
+        summary.has_live = summary.has_live || live.has_live;
+        summary.has_error = summary.has_error || live.has_error;
+        summary.preparing_count += live.preparing_count;
+        summary.live_count += live.live_count;
+      }
+    }
+    for (const auto &[key, live] : live_cluster->summaries) {
+      if (summaries.count(key) > 0) {
+        continue;
+      }
+      auto category = static_cast<firmius::tui::QuickToolCategory>(key);
+      category_order.push_back(category);
+      summaries[key] = live;
+    }
+  }
+
+  if (category_order.empty() && !summaries.empty()) {
+    std::vector<firmius::tui::QuickToolCategory> fallback = {
+        firmius::tui::QuickToolCategory::Read,
+        firmius::tui::QuickToolCategory::List,
+        firmius::tui::QuickToolCategory::Search};
+    for (auto category : fallback) {
+      if (summaries.count(static_cast<int>(category)) > 0) {
+        category_order.push_back(category);
+      }
+    }
+  }
+
+  for (auto category : category_order) {
+    auto summary = summaries[static_cast<int>(category)];
+    if (summary.category == firmius::tui::QuickToolCategory::None) {
+      summary.category = category;
+    }
+    rows.push_back(ftxui::Make<RowComponent>(
+        nullptr, [summary = std::move(summary)] {
+          const auto &theme =
+              firmius::tui::ThemeManager::instance().getCurrentTheme();
+          return RenderQuickToolRow(summary, theme);
+        }));
+  }
+
+  for (const auto &tool_call_id : individual_failed_tool_call_ids) {
+    auto it = cluster.views.find(tool_call_id);
+    if (it == cluster.views.end()) continue;
+    firmius::tui::QuickToolGroupSummary failure_summary;
+    const auto descriptor = firmius::tui::DescribeQuickToolCall(*it->second);
+    failure_summary.category = descriptor.category;
+    failure_summary.targets = {descriptor.target};
+    failure_summary.has_error = true;
+    rows.push_back(ftxui::Make<RowComponent>(
+        nullptr, [summary = std::move(failure_summary)] {
+          const auto &theme =
+              firmius::tui::ThemeManager::instance().getCurrentTheme();
+          return RenderQuickToolRow(summary, theme);
+        }));
+  }
+
+  return rows;
+}
+
 class ChatWindowComponent : public ftxui::ComponentBase {
 public:
   explicit ChatWindowComponent(
@@ -72,12 +327,14 @@ public:
       std::function<std::vector<ftxui::Element>()> live_rows_provider,
       firmius::tui::ToolViewProvider tool_view_provider,
       firmius::tui::HistoryGetter sub_history_getter,
-      firmius::tui::StreamGetter sub_stream_getter)
+      firmius::tui::StreamGetter sub_stream_getter,
+      firmius::tui::LiveQuickSummaryProvider live_quick_summary_provider)
       : history_getter_(std::move(history_getter)),
         live_rows_provider_(std::move(live_rows_provider)),
         tool_view_provider_(std::move(tool_view_provider)),
         sub_history_getter_(std::move(sub_history_getter)),
-        sub_stream_getter_(std::move(sub_stream_getter)) {
+        sub_stream_getter_(std::move(sub_stream_getter)),
+        live_quick_summary_provider_(std::move(live_quick_summary_provider)) {
 
     history_inner_ = ftxui::Container::Vertical({});
     history_container_ = ftxui::Renderer(history_inner_, [this] {
@@ -162,12 +419,46 @@ private:
 
     if (history) {
       std::unordered_map<std::string, bool> seen_tool_call;
-      for (const auto &t : history->turns) {
+      QuickToolCluster quick_cluster;
+      auto flush_quick_cluster = [&](bool merge_live = false) {
+        std::vector<firmius::tui::LiveQuickSummaryCluster> live_clusters;
+        if (merge_live && live_quick_summary_provider_) {
+          live_clusters = live_quick_summary_provider_();
+        }
+
+        const firmius::tui::LiveQuickSummaryCluster *merge_cluster = nullptr;
+        size_t start_index = 0;
+        if (!live_clusters.empty() && live_clusters.front().merge_with_history) {
+          merge_cluster = &live_clusters.front();
+          start_index = 1;
+        }
+
+        auto grouped_rows =
+            BuildQuickToolClusterRows(quick_cluster, merge_cluster);
+        for (auto &row : grouped_rows) {
+          rows_.push_back(row);
+        }
+        quick_cluster.clear();
+
+        QuickToolCluster empty_cluster;
+        for (size_t i = start_index; i < live_clusters.size(); ++i) {
+          auto live_rows =
+              BuildQuickToolClusterRows(empty_cluster, &live_clusters[i]);
+          for (auto &row : live_rows) {
+            rows_.push_back(row);
+          }
+        }
+      };
+
+      for (size_t turn_index = 0; turn_index < history->turns.size();
+           ++turn_index) {
+        const auto &t = history->turns[turn_index];
         if (t.messages.empty() || isSystemTurn(t))
           continue;
 
         bool isCompactionSummary = (t.turnId.rfind("compaction-summary-", 0) == 0);
         if (isCompactionSummary) {
+          flush_quick_cluster();
           auto full_width_separator = [](const std::string &label) {
             int width = ftxui::Terminal::Size().dimx;
             std::string label_text = " " + label + " ";
@@ -241,6 +532,7 @@ private:
 
           for (const auto &part : msg.content) {
             if (auto *txt = std::get_if<firmius::shared::TextContent>(&part)) {
+              flush_quick_cluster();
               std::string text = txt->text;
               auto row = ftxui::Make<RowComponent>(
                   nullptr, [decorateMsg, text = std::move(text)] {
@@ -250,6 +542,7 @@ private:
             } else if (auto *thk =
                            std::get_if<firmius::shared::ThinkingContent>(
                                &part)) {
+              flush_quick_cluster();
               std::string thinking = thk->thinking;
               auto row = ftxui::Make<RowComponent>(
                   nullptr, [decorateMsg, thinking = std::move(thinking)] {
@@ -262,16 +555,30 @@ private:
               auto &view = tool_views_[tc->id];
               if (!view && tool_view_provider_)
                 view = tool_view_provider_(tc->id);
-              if (!view)
+              if (!view) {
                 view = std::make_shared<firmius::tui::ToolCallView>();
+                view->phase = firmius::tui::ToolPhase::Finished;
+                view->success = true;
+              }
               view->toolCallId = tc->id;
               view->name = tc->name;
               view->args = tc->args;
+              if (!firmius::tui::ShouldRenderToolCallView(*view)) {
+                continue;
+              }
               if (view->phase != firmius::tui::ToolPhase::Finished &&
-                  view->phase != firmius::tui::ToolPhase::Error)
+                  view->phase != firmius::tui::ToolPhase::Error &&
+                  view->phase != firmius::tui::ToolPhase::BackgroundRunning)
                 view->phase = firmius::tui::ToolPhase::Called;
               seen_tool_call[tc->id] = true;
 
+              if (firmius::tui::IsQuickInspectionTool(view->name)) {
+                bool is_success = (view->phase != firmius::tui::ToolPhase::Error);
+                quick_cluster.add(view, is_success);
+                continue;
+              }
+
+              flush_quick_cluster();
               auto block = firmius::tui::ToolBlock(view);
               auto row = ftxui::Make<RowComponent>(block, [decorateMsg, block] {
                 return decorateMsg(block->Render());
@@ -283,15 +590,30 @@ private:
               auto &view = tool_views_[tr->toolCallId];
               if (!view && tool_view_provider_)
                 view = tool_view_provider_(tr->toolCallId);
-              if (!view)
+              if (!view) {
                 view = std::make_shared<firmius::tui::ToolCallView>();
+                view->phase = firmius::tui::ToolPhase::Finished;
+              }
               view->toolCallId = tr->toolCallId;
               view->result = tr->result;
               view->success = tr->success;
-              view->phase = tr->success ? firmius::tui::ToolPhase::Finished
-                                        : firmius::tui::ToolPhase::Error;
+              if (!tr->success) {
+                view->phase = firmius::tui::ToolPhase::Error;
+              } else if (view->phase !=
+                         firmius::tui::ToolPhase::BackgroundRunning) {
+                view->phase = firmius::tui::ToolPhase::Finished;
+              }
+
+              if (firmius::tui::IsQuickInspectionTool(view->name)) {
+                if (!seen_tool_call[tr->toolCallId]) {
+                  bool is_success = (view->phase != firmius::tui::ToolPhase::Error);
+                  quick_cluster.add(view, is_success);
+                }
+                continue;
+              }
 
               if (!seen_tool_call[tr->toolCallId]) {
+                flush_quick_cluster();
                 auto block = firmius::tui::ToolBlock(view);
                 auto row =
                     ftxui::Make<RowComponent>(block, [decorateMsg, block] {
@@ -302,31 +624,16 @@ private:
               }
             } else if (auto *err =
                            std::get_if<firmius::shared::ErrorContent>(&part)) {
-              std::string title =
-                  "[!] " + err->errorName + ": " + err->description;
-              std::string details = err->details;
-
-              auto details_cmp = ftxui::Renderer([details, theme] {
-                std::stringstream ss(details);
-                std::string line;
-                ftxui::Elements lines;
-                while (std::getline(ss, line)) {
-                  lines.push_back(ftxui::text(line));
-                }
-                return ftxui::vbox(std::move(lines)) |
-                       ftxui::color(theme.status_bar.error.normal.fg);
+              flush_quick_cluster();
+              auto error = *err;
+              auto row = ftxui::Make<RowComponent>(nullptr, [decorateMsg, error,
+                                                            theme] {
+                return decorateMsg(RenderErrorDisplay(theme, error));
               });
-
-              auto coll_cmp = ftxui::Collapsible(title, details_cmp);
-              auto row = ftxui::Make<RowComponent>(
-                  coll_cmp, [decorateMsg, coll_cmp, theme] {
-                    return decorateMsg(
-                        coll_cmp->Render() |
-                        ftxui::color(theme.status_bar.error.normal.fg));
-                           });
               rows_.push_back(row);
             } else if (std::holds_alternative<firmius::shared::ImageContent>(
                            part)) {
+              flush_quick_cluster();
               std::string indicator = "[Image]";
               auto row = ftxui::Make<RowComponent>(
                   nullptr, [decorateMsg, indicator] {
@@ -337,6 +644,7 @@ private:
           }
         }
       }
+      flush_quick_cluster(true);
     }
 
     for (auto &row : rows_)
@@ -357,6 +665,7 @@ private:
   firmius::tui::ToolViewProvider tool_view_provider_;
   firmius::tui::HistoryGetter sub_history_getter_;
   firmius::tui::StreamGetter sub_stream_getter_;
+  firmius::tui::LiveQuickSummaryProvider live_quick_summary_provider_;
   size_t last_turns_size_ = static_cast<size_t>(-1);
   std::vector<ftxui::Component> rows_;
   ftxui::Component history_inner_;
@@ -375,9 +684,10 @@ ftxui::Component firmius::tui::ChatWindow(
     std::function<std::vector<ftxui::Element>()> live_rows_provider,
     ToolViewProvider tool_view_provider,
     firmius::tui::HistoryGetter sub_history_getter,
-    firmius::tui::StreamGetter sub_stream_getter) {
+    firmius::tui::StreamGetter sub_stream_getter,
+    firmius::tui::LiveQuickSummaryProvider live_quick_summary_provider) {
   return ftxui::Make<ChatWindowComponent>(
       std::move(history_getter), std::move(live_rows_provider),
       std::move(tool_view_provider), std::move(sub_history_getter),
-      std::move(sub_stream_getter));
+      std::move(sub_stream_getter), std::move(live_quick_summary_provider));
 }

@@ -11,6 +11,11 @@
 #include <cstdlib>
 #include <cstdio>
 #include <algorithm>
+#include <atomic>
+#include <future>
+#include <thread>
+
+#include <rapidjson/document.h>
 
 using namespace firmius::core;
 using namespace firmius::shared;
@@ -172,6 +177,25 @@ TEST_F(ThreadManagerTest, listThreads_multiple) {
     EXPECT_TRUE(std::find(threads.begin(), threads.end(), id3) != threads.end());
 }
 
+TEST_F(ThreadManagerTest, listThreadsWithMetadata_skipsBrokenThreadDirectories) {
+    ThreadMetadata good = createTestMetadata();
+    good.title = "Healthy Thread";
+    std::string goodId = tm->createThread(good);
+
+    const std::string brokenId = "broken-thread";
+    const auto brokenDir = std::filesystem::path(tempDir) / ".firmius" / "threads" / brokenId;
+    std::filesystem::create_directories(brokenDir);
+    {
+        std::ofstream lockFile(brokenDir / ".lock");
+        lockFile << "locked";
+    }
+
+    auto threads = tm->listThreadsWithMetadata();
+    ASSERT_EQ(threads.size(), 1u);
+    EXPECT_EQ(threads.front().threadId, goodId);
+    EXPECT_EQ(threads.front().title, "Healthy Thread");
+}
+
 TEST_F(ThreadManagerTest, loadAgentHistory_empty) {
     ThreadMetadata metadata = createTestMetadata();
     std::string threadId = tm->createThread(metadata);
@@ -228,8 +252,33 @@ TEST_F(ThreadManagerTest, updateMetadata_persistsActivePlanId) {
     loaded.activePlanId = "plan-active";
     tm->updateMetadata(threadId, loaded);
 
+  auto updated = tm->getMetadata(threadId);
+  EXPECT_EQ(updated.activePlanId, "plan-active");
+}
+
+TEST_F(ThreadManagerTest, updateMetadata_persistsRetryableRequest) {
+    ThreadMetadata metadata = createTestMetadata();
+    std::string threadId = tm->createThread(metadata);
+
+    auto loaded = tm->getMetadata(threadId);
+    loaded.lastRetryableRequest = ThreadMetadata::RetryableRequest{
+        "agent-7",
+        "user-task-7",
+        "retry me",
+        {ImageContent{"data:image/png;base64,abc", "image/png", "auto"}},
+        1234,
+        true,
+    };
+
+    tm->updateMetadata(threadId, loaded);
+
     auto updated = tm->getMetadata(threadId);
-    EXPECT_EQ(updated.activePlanId, "plan-active");
+    ASSERT_TRUE(updated.lastRetryableRequest.has_value());
+    EXPECT_EQ(updated.lastRetryableRequest->targetAgentId, "agent-7");
+    EXPECT_EQ(updated.lastRetryableRequest->turnId, "user-task-7");
+    EXPECT_EQ(updated.lastRetryableRequest->text, "retry me");
+    ASSERT_EQ(updated.lastRetryableRequest->images.size(), 1u);
+    EXPECT_TRUE(updated.lastRetryableRequest->eligible);
 }
 
 TEST_F(ThreadManagerTest, createAndGetPlan_roundtrip) {
@@ -303,6 +352,127 @@ TEST_F(ThreadManagerTest, updatePlan_preservesCreatedAtAndRefreshesUpdatedAt) {
     EXPECT_GE(updated.updatedAt, originalUpdatedAt);
     EXPECT_EQ(updated.status, PlanStatus::Paused);
     EXPECT_EQ(updated.notes, "Updated");
+}
+
+TEST_F(ThreadManagerTest, mutatePlan_serializesConcurrentChunkAddsAcrossInstances) {
+    ThreadMetadata metadata = createTestMetadata();
+    std::string threadId = tm->createThread(metadata);
+    std::string planId = tm->createPlan(createTestPlan(threadId));
+    const int addCount = 24;
+
+    std::vector<std::future<void>> writers;
+    for (int i = 0; i < addCount; ++i) {
+        writers.push_back(std::async(std::launch::async, [&, i]() {
+            ThreadManager localTm(tempDir + "/.firmius/threads");
+            localTm.mutatePlan(threadId, planId, [&](Plan& plan) {
+                WorkChunk chunk;
+                chunk.id = "chunk-" + std::to_string(i + 2);
+                chunk.title = "Chunk " + std::to_string(i);
+                chunk.goal = "Goal";
+                chunk.context = "Context";
+                chunk.constraints = "Constraints";
+                chunk.completion = "Completion";
+                chunk.createdAt = static_cast<uint64_t>(i + 1);
+                chunk.updatedAt = chunk.createdAt;
+                plan.chunks.push_back(chunk);
+            });
+        }));
+    }
+    for (auto& writer : writers) {
+        writer.get();
+    }
+
+    Plan loaded = tm->getPlan(threadId, planId);
+    ASSERT_EQ(loaded.chunks.size(), static_cast<size_t>(addCount + 1));
+
+    std::filesystem::path planPath =
+        std::filesystem::path(tempDir) / ".firmius" / "threads" / threadId /
+        "plans" / (planId + ".json");
+    std::ifstream file(planPath);
+    ASSERT_TRUE(file.is_open());
+    std::string raw((std::istreambuf_iterator<char>(file)),
+                    std::istreambuf_iterator<char>());
+    rapidjson::Document doc;
+    doc.Parse(raw.c_str());
+    EXPECT_FALSE(doc.HasParseError());
+    ASSERT_TRUE(doc.HasMember("chunks"));
+    EXPECT_EQ(doc["chunks"].Size(), loaded.chunks.size());
+}
+
+TEST_F(ThreadManagerTest, mutatePlan_preventsLostUpdatesAndTornReadsDuringConcurrentAddAndUpdate) {
+    ThreadMetadata metadata = createTestMetadata();
+    std::string threadId = tm->createThread(metadata);
+    std::string planId = tm->createPlan(createTestPlan(threadId));
+    std::filesystem::path planPath =
+        std::filesystem::path(tempDir) / ".firmius" / "threads" / threadId /
+        "plans" / (planId + ".json");
+
+    constexpr int iterations = 40;
+    std::atomic<bool> stopReader{false};
+    std::atomic<int> parseFailures{0};
+
+    std::thread reader([&]() {
+        while (!stopReader.load()) {
+            std::ifstream file(planPath);
+            if (!file.is_open()) {
+                continue;
+            }
+            std::string raw((std::istreambuf_iterator<char>(file)),
+                            std::istreambuf_iterator<char>());
+            if (raw.empty()) {
+                ++parseFailures;
+                continue;
+            }
+            rapidjson::Document doc;
+            doc.Parse(raw.c_str());
+            if (doc.HasParseError() || !doc.IsObject()) {
+                ++parseFailures;
+            }
+        }
+    });
+
+    auto addFuture = std::async(std::launch::async, [&]() {
+        ThreadManager localTm(tempDir + "/.firmius/threads");
+        for (int i = 0; i < iterations; ++i) {
+            localTm.mutatePlan(threadId, planId, [&](Plan& plan) {
+                WorkChunk chunk;
+                chunk.id = "parallel-" + std::to_string(i);
+                chunk.title = "Parallel " + std::to_string(i);
+                chunk.goal = "Goal";
+                chunk.context = "Context";
+                chunk.constraints = "Constraints";
+                chunk.completion = "Completion";
+                chunk.createdAt = static_cast<uint64_t>(100 + i);
+                chunk.updatedAt = chunk.createdAt;
+                plan.chunks.push_back(chunk);
+            });
+        }
+    });
+
+    auto updateFuture = std::async(std::launch::async, [&]() {
+        ThreadManager localTm(tempDir + "/.firmius/threads");
+        for (int i = 0; i < iterations; ++i) {
+            localTm.mutatePlan(threadId, planId, [&](Plan& plan) {
+                auto& chunk = plan.chunks.front();
+                chunk.attemptCount += 1;
+                chunk.resultSummary = "attempt-" + std::to_string(chunk.attemptCount);
+                chunk.updatedAt = static_cast<uint64_t>(200 + i);
+            });
+        }
+    });
+
+    addFuture.get();
+    updateFuture.get();
+    stopReader = true;
+    reader.join();
+
+    EXPECT_EQ(parseFailures.load(), 0);
+
+    Plan loaded = tm->getPlan(threadId, planId);
+    ASSERT_EQ(loaded.chunks.size(), static_cast<size_t>(iterations + 1));
+    EXPECT_EQ(loaded.chunks.front().attemptCount, 1 + iterations);
+    EXPECT_EQ(loaded.chunks.front().resultSummary,
+              "attempt-" + std::to_string(1 + iterations));
 }
 
 TEST_F(ThreadManagerTest, getPlan_appliesBackwardCompatibleDefaults) {

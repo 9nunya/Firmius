@@ -57,6 +57,16 @@ std::string ProviderStreamDebugAudit::getDescription() const {
     return "Debug: Log EVERY chunk from provider stream to STDOUT";
 }
 
+std::string ProviderStreamDebugAudit::resolveModelIdArg(
+    const std::vector<std::string>& args) {
+    for (size_t i = 1; i < args.size(); ++i) {
+        if (!args[i].empty() && args[i].rfind("--", 0) != 0) {
+            return args[i];
+        }
+    }
+    return "";
+}
+
 AgentHistory ProviderStreamDebugAudit::buildHistoryVariant(const std::string& variant) {
     AgentHistory history;
     history.threadId = "debug-audit-" + variant;
@@ -347,15 +357,7 @@ shared::AuditResult ProviderStreamDebugAudit::run(const std::vector<std::string>
     std::cout << "Provider: " << providerName << std::endl;
 
     auto models = provider->listModels();
-    std::string modelId;
-    if (args.size() > 1) {
-        // Check if second arg is a flag or model ID
-        if (args[1].find("--history-variant=") == 0) {
-            modelId = "";
-        } else {
-            modelId = args[1];
-        }
-    }
+    std::string modelId = resolveModelIdArg(args);
     
     // Parse history variant and thread flags
     std::string historyVariant = "default";

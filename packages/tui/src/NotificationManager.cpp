@@ -196,43 +196,54 @@ NotificationManager::renderNotification(const Notification &notif) {
     break;
   }
 
-  ftxui::Elements parts;
+  ftxui::Elements header;
+  header.push_back(ftxui::text(icon + " ") | ftxui::bold | ftxui::color(color));
+  header.push_back(ftxui::text(notif.title) | ftxui::bold | ftxui::color(color));
 
-  // Icon with glint effect for active notifications
-  auto icon_el = ftxui::text(icon + " ") | ftxui::bold | ftxui::color(color);
-  parts.push_back(icon_el);
-
-  // Title
-  parts.push_back(ftxui::text(notif.title + " ") | ftxui::bold |
-                  ftxui::color(color));
-
-  // Message (truncated if too long)
   std::string msg = notif.message;
   if (msg.size() > 60)
     msg = msg.substr(0, 57) + "…";
-  parts.push_back(ftxui::text(msg) | ftxui::dim);
+  ftxui::Elements body_rows;
+  body_rows.push_back(ftxui::hbox(std::move(header)));
+  body_rows.push_back(ftxui::text(" " + msg) | ftxui::color(ftxui::Color::RGB(200, 200, 220)));
 
   // Progress bar for progress notifications
   if (notif.type == NotificationType::Progress) {
     auto bar = ftxui::gauge(notif.progress) | ftxui::color(color) |
                ftxui::size(ftxui::WIDTH, ftxui::EQUAL, 10);
-    parts.push_back(ftxui::text(" "));
-    parts.push_back(bar);
+    body_rows.push_back(ftxui::text(""));
+    body_rows.push_back(ftxui::hbox({ftxui::text(" "), bar}));
     if (!notif.progressLabel.empty()) {
-      parts.push_back(ftxui::text(" " + notif.progressLabel) | ftxui::dim);
+      body_rows.push_back(ftxui::text(" " + notif.progressLabel) | ftxui::dim);
     }
   }
 
   // Action button if available
   if (!notif.actionLabel.empty()) {
-    parts.push_back(ftxui::text(" ["));
-    parts.push_back(ftxui::text(notif.actionLabel) | ftxui::color(color) |
-                    ftxui::bold);
-    parts.push_back(ftxui::text("]"));
+    body_rows.push_back(ftxui::text(""));
+    body_rows.push_back(ftxui::hbox({
+        ftxui::text(" "),
+        ftxui::text(" " + notif.actionLabel + " ") | ftxui::color(color) |
+            ftxui::bold,
+    }));
   }
 
-  return ftxui::hbox(parts) | ftxui::bgcolor(ftxui::Color::RGB(30, 30, 50)) |
-         ftxui::borderRounded | ftxui::color(ftxui::Color::RGB(200, 200, 220));
+  auto body = ftxui::vbox({
+                  ftxui::text(""),
+                  ftxui::hbox({
+                      ftxui::text("  "),
+                      ftxui::vbox(std::move(body_rows)) | ftxui::xflex,
+                      ftxui::text("  "),
+                  }),
+                  ftxui::text(""),
+              }) |
+              ftxui::bgcolor(ftxui::Color::RGB(30, 30, 50)) |
+              ftxui::color(ftxui::Color::RGB(200, 200, 220)) | ftxui::xflex;
+
+  return ftxui::hbox({
+      ftxui::text(" ") | ftxui::bgcolor(color),
+      body,
+  });
 }
 
 ftxui::Element NotificationManager::render() {
@@ -247,6 +258,9 @@ ftxui::Element NotificationManager::render() {
 
   ftxui::Elements notif_elements;
   for (size_t i = 0; i < count; ++i) {
+    if (i > 0) {
+      notif_elements.push_back(ftxui::text(""));
+    }
     notif_elements.push_back(renderNotification(notifications_[i]));
   }
 

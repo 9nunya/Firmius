@@ -16,11 +16,56 @@
 #include <filesystem>
 #include <future>
 #include <iostream>
+#include <sstream>
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
 
 namespace firmius::core {
+
+namespace {
+bool shouldRetryProviderFailureAtAgentLayer(int httpStatus) {
+  if (httpStatus < 0) {
+    return false;
+  }
+  if (httpStatus == 0 || httpStatus >= 500) {
+    return true;
+  }
+  return httpStatus == 408 || httpStatus == 409 || httpStatus == 425;
+}
+
+struct ToolCallValidationFailure {
+  std::string toolCallId;
+  std::string message;
+};
+
+std::vector<ToolCallValidationFailure>
+validateStreamedToolCalls(const std::vector<ToolCallChunk> &chunks) {
+  std::vector<ToolCallValidationFailure> failures;
+  for (const auto &chunk : chunks) {
+    if (shared::StringUtil::trim(chunk.nameDelta).empty()) {
+      failures.push_back({chunk.id, "missing tool name"});
+      continue;
+    }
+
+    rapidjson::Document args;
+    args.Parse(chunk.argsDelta.c_str());
+    if (args.HasParseError()) {
+      failures.push_back(
+          {chunk.id, "invalid or truncated JSON arguments for tool '" +
+                         chunk.nameDelta + "'"});
+      continue;
+    }
+
+    if (!args.IsObject()) {
+      failures.push_back(
+          {chunk.id, "tool arguments for '" + chunk.nameDelta +
+                         "' must be a JSON object"});
+    }
+  }
+  return failures;
+}
+} // namespace
 
 using namespace firmius::shared;
 
@@ -129,9 +174,10 @@ void Agent::setModel(const std::string &providerId, const std::string &modelId,
 std::string Agent::spawnProcess(const std::string &command,
                                 const std::string &toolCallId,
                                 const std::string &cwd,
-                                const std::map<std::string, std::string> &env) {
+                                const std::map<std::string, std::string> &env,
+                                bool monitorCompletion) {
   return environment_->getProcessManager().spawnProcess(command, toolCallId, cwd,
-                                                        env);
+                                                        env, monitorCompletion);
 }
 
 shared::ProcessSnapshot Agent::inspectProcess(const std::string &id) {
@@ -184,6 +230,16 @@ void Agent::markFileAsFullyRead(const std::string &path) {
 void Agent::run(const std::string &task,
                 std::function<void(const shared::StreamEvent &)> onEvent,
                 const std::vector<ImageContent> &images) {
+  runImpl(task, std::move(onEvent), images);
+}
+
+void Agent::resume(std::function<void(const shared::StreamEvent &)> onEvent) {
+  runImpl(std::nullopt, std::move(onEvent), {});
+}
+
+void Agent::runImpl(const std::optional<std::string> &task,
+                    std::function<void(const shared::StreamEvent &)> onEvent,
+                    const std::vector<ImageContent> &images) {
   {
     std::lock_guard<std::mutex> lock(callbackMutex);
     eventCallback = onEvent;
@@ -238,28 +294,29 @@ void Agent::run(const std::string &task,
       journaler->appendTurn(turn);
   }
 
-  // 2. Add Task as User Message
-  // Always append the new task as a User message turn (for re-tasking support)
-  AgentTurn taskTurn;
-  taskTurn.turnId =
-      "user-task-" + std::to_string(context.history->turns.size());
-  Message taskMsg;
-  taskMsg.role = Role::User;
-  taskMsg.content.push_back(TextContent{task});
+  // 2. Add Task as User Message when explicitly re-tasking.
+  if (task.has_value()) {
+    AgentTurn taskTurn;
+    taskTurn.turnId =
+        "user-task-" + std::to_string(context.history->turns.size());
+    Message taskMsg;
+    taskMsg.role = Role::User;
+    taskMsg.content.push_back(TextContent{*task});
 
-  // Add any images to the message content
-  for (const auto& img : images) {
-    taskMsg.content.push_back(img);
+    for (const auto &img : images) {
+      taskMsg.content.push_back(img);
+    }
+    auto now = std::chrono::system_clock::now();
+    taskMsg.timestamp = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            now.time_since_epoch())
+            .count());
+    taskTurn.messages.push_back(taskMsg);
+    context.history->turns.push_back(taskTurn);
+    if (context.config.persistHistory && journaler) {
+      journaler->appendTurn(taskTurn);
+    }
   }
-  auto now = std::chrono::system_clock::now();
-  taskMsg.timestamp = static_cast<uint64_t>(
-      std::chrono::duration_cast<std::chrono::milliseconds>(
-          now.time_since_epoch())
-          .count());
-  taskTurn.messages.push_back(taskMsg);
-  context.history->turns.push_back(taskTurn);
-  if (context.config.persistHistory && journaler)
-    journaler->appendTurn(taskTurn);
 
   // 3. Autonomous Loop
   bool taskFinished = false;
@@ -320,6 +377,7 @@ void Agent::run(const std::string &task,
       AgentMetrics turnMetrics;
       StopReason turnStopReason = StopReason::Stop;
       std::string streamError;
+      int streamErrorStatus = 0;
       bool sawContent = false;
       bool sawThinking = false;
       bool sawTool = false;
@@ -409,6 +467,7 @@ void Agent::run(const std::string &task,
           turnStopReason = done->reason;
         } else if (auto *err = std::get_if<StreamError>(&ev)) {
           onEvent(ev);
+          streamErrorStatus = err->httpStatus;
           // Don't treat abort/interrupt errors as stream errors
           if (err->message.find("interrupted") != std::string::npos ||
               err->message.find("aborted") != std::string::npos ||
@@ -472,6 +531,9 @@ void Agent::run(const std::string &task,
           context.state.currentStatus = AgentStatus::Cancelled;
           return;
         }
+        if (!shouldRetryProviderFailureAtAgentLayer(streamErrorStatus)) {
+          throw std::runtime_error("Provider stream error: " + streamError);
+        }
         consecutiveProviderFailures++;
         if (consecutiveProviderFailures > maxProviderRetries) {
           throw std::runtime_error("Provider stream error: " + streamError);
@@ -489,6 +551,37 @@ void Agent::run(const std::string &task,
           return;
         }
         continue;
+      }
+
+      const bool providerDeclaredToolStreamTruncation =
+          streamError.find(
+              "Provider stream truncated during tool-call generation") !=
+              std::string::npos ||
+          streamError.find("incomplete tool-call arguments for tool") !=
+              std::string::npos;
+      if (!streamError.empty() && providerDeclaredToolStreamTruncation) {
+        throw std::runtime_error("Provider stream error: " + streamError);
+      }
+
+      const auto malformedToolCalls =
+          validateStreamedToolCalls(accumulatedToolChunks);
+      if (!malformedToolCalls.empty()) {
+        std::ostringstream error;
+        error << "Provider emitted malformed streamed tool call payload";
+        if (malformedToolCalls.size() > 1) {
+          error << "s";
+        }
+        error << ": ";
+        for (std::size_t i = 0; i < malformedToolCalls.size(); ++i) {
+          if (i > 0) {
+            error << "; ";
+          }
+          const auto &failure = malformedToolCalls[i];
+          error << "[" << (failure.toolCallId.empty() ? "unknown"
+                                                      : failure.toolCallId)
+                << "] " << failure.message;
+        }
+        throw std::runtime_error(error.str());
       }
 
       // Reset consecutive failure counter on success
@@ -608,6 +701,28 @@ void Agent::run(const std::string &task,
   // --- Final state ---
   if (interrupted.load()) {
     context.state.currentStatus = AgentStatus::Cancelled;
+    if (!context.history->turns.empty()) {
+      const auto &lastTurn = context.history->turns.back();
+      const bool alreadyCancelledTurn =
+          lastTurn.turnId.rfind("cancelled-", 0) == 0;
+      if (!alreadyCancelledTurn) {
+        AgentTurn cancelledTurn;
+        cancelledTurn.turnId =
+            "cancelled-" + std::to_string(context.history->turns.size());
+        Message cancelledMsg;
+        cancelledMsg.role = Role::Error;
+        cancelledMsg.content.push_back(ErrorContent{
+            "Agent Cancelled",
+            "The agent execution was interrupted.",
+            "Execution stopped before completion and can be resumed."});
+        cancelledMsg.timestamp = nowMs();
+        cancelledTurn.messages.push_back(cancelledMsg);
+        context.history->turns.push_back(cancelledTurn);
+        if (context.config.persistHistory && journaler) {
+          journaler->appendTurn(cancelledTurn);
+        }
+      }
+    }
   } else if (context.state.currentStatus != AgentStatus::Error) {
     context.state.currentStatus = AgentStatus::Idle;
   }
@@ -677,7 +792,7 @@ void Agent::executeTools(const std::vector<ToolCallChunk> &chunks,
     std::string toolCallId;
     std::string name;
     std::string args;
-    std::future<std::tuple<std::string, bool, std::string, std::string>> future;
+    std::future<std::tuple<std::string, bool, std::string, std::string, bool>> future;
   };
 
   std::vector<ToolExecution> executions;
@@ -715,7 +830,7 @@ void Agent::executeTools(const std::vector<ToolCallChunk> &chunks,
     auto future = std::async(
         std::launch::async,
         [this, toolName, toolArgs,
-         toolId]() -> std::tuple<std::string, bool, std::string, std::string> {
+         toolId]() -> std::tuple<std::string, bool, std::string, std::string, bool> {
           rapidjson::Document input;
           input.Parse(toolArgs.c_str());
 
@@ -730,7 +845,7 @@ void Agent::executeTools(const std::vector<ToolCallChunk> &chunks,
           }
 
           return {resultStr, result.success, result.processId,
-                  result.subagentId};
+                  result.subagentId, result.is_background};
         });
 
     executions.push_back({toolId, toolName, toolArgs, std::move(future)});
@@ -741,7 +856,7 @@ void Agent::executeTools(const std::vector<ToolCallChunk> &chunks,
     if (interrupted.load())
       break;
 
-    auto [resultStr, success, resultProcessId, resultSubagentId] =
+    auto [resultStr, success, resultProcessId, resultSubagentId, isBackground] =
         exec.future.get();
 
     Message msg;
@@ -757,6 +872,16 @@ void Agent::executeTools(const std::vector<ToolCallChunk> &chunks,
 
     // Track edited files for file_edit and file_write tools
     if (success) {
+      const bool owns_background_process =
+          !resultProcessId.empty() &&
+          (isBackground || exec.name == "process_spawn");
+      if (owns_background_process &&
+          std::find(context.state.ownedProcesses.begin(),
+                    context.state.ownedProcesses.end(),
+                    resultProcessId) == context.state.ownedProcesses.end()) {
+        context.state.ownedProcesses.push_back(resultProcessId);
+      }
+
       if (exec.name == "file_edit" || exec.name == "file_write") {
         rapidjson::Document input;
         input.Parse(exec.args.c_str());

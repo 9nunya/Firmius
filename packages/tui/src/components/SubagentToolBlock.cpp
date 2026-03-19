@@ -28,6 +28,26 @@ std::string spinnerFrame() {
   return frames[idx];
 }
 
+ftxui::Element subagentPanel(const ftxui::Element &content, const Theme &theme,
+                             ftxui::Color rail_color) {
+  const auto panel_bg = theme.tool_blocks.generic_header_bg;
+  auto padded = ftxui::vbox({
+                    ftxui::text("") | ftxui::bgcolor(panel_bg),
+                    ftxui::hbox({
+                        ftxui::text("  ") | ftxui::bgcolor(panel_bg),
+                        content | ftxui::bgcolor(panel_bg) | ftxui::flex,
+                        ftxui::text("  ") | ftxui::bgcolor(panel_bg),
+                    }) | ftxui::bgcolor(panel_bg),
+                    ftxui::text("") | ftxui::bgcolor(panel_bg),
+                }) |
+                ftxui::bgcolor(panel_bg) | ftxui::xflex;
+  return ftxui::hbox({
+             ftxui::text(" ") | ftxui::bgcolor(rail_color),
+             padded | ftxui::flex,
+         }) |
+         ftxui::xflex;
+}
+
 } // namespace
 
 ftxui::Component SubagentToolBlock(const std::shared_ptr<ToolCallView> &view,
@@ -182,10 +202,12 @@ ftxui::Component SubagentToolBlock(const std::shared_ptr<ToolCallView> &view,
       auto spawning_text =
           ftxui::text(spinner + " Spawning \"" + title + "\"...") |
           ftxui::bold;
-      return ftxui::hbox(
-          {ftxui::text("▸ ") |
-               ftxui::color(theme.tool_blocks.specific.subagent.fg),
-           GlintEffect(spawning_text, cfg)->Render() | ftxui::flex_shrink});
+      return subagentPanel(
+          ftxui::hbox(
+              {ftxui::text("▸ ") |
+                   ftxui::color(theme.tool_blocks.specific.subagent.fg),
+               GlintEffect(spawning_text, cfg)->Render() | ftxui::flex_shrink}),
+          theme, theme.tool_blocks.specific.subagent.fg);
     }
 
     bool status_spawned =
@@ -232,9 +254,8 @@ ftxui::Component SubagentToolBlock(const std::shared_ptr<ToolCallView> &view,
                     ftxui::text("]") | ftxui::color(theme.base.dim)})}) |
           ftxui::frame);
 
-      return ftxui::vbox(rows) | ftxui::borderRounded |
-             ftxui::color(theme.tool_blocks.generic_border) |
-             ftxui::bgcolor(theme.tool_blocks.generic_bg);
+      return subagentPanel(ftxui::vbox(rows), theme,
+                           theme.tool_blocks.specific.subagent.fg);
     }
 
     // ── Finished ──
@@ -272,27 +293,25 @@ ftxui::Component SubagentToolBlock(const std::shared_ptr<ToolCallView> &view,
       rows.push_back(renderLogSection(view->show_result ? 10 : 5) |
                      ftxui::frame);
 
-      return ftxui::vbox(rows) | ftxui::borderRounded |
-             ftxui::color(theme.tool_blocks.generic_border) |
-             ftxui::bgcolor(theme.tool_blocks.generic_bg);
+      return subagentPanel(ftxui::vbox(rows), theme,
+                           theme.tool_blocks.specific.subagent.fg);
     } else {
       std::string error_msg =
           firmius::shared::ErrorCleaner::clean(view->result);
       if (error_msg.size() > 400)
         error_msg = error_msg.substr(0, 397) + "…";
 
-      return ftxui::vbox(
-                 {ftxui::hbox(
-                      {ftxui::text(" " + shared::ICON_ERROR + " ") |
-                           ftxui::color(theme.status_bar.error.normal.fg),
-                       ftxui::text(title + " failed") | ftxui::bold |
-                           ftxui::color(theme.status_bar.error.normal.fg)}),
-                  ftxui::paragraph("  " + error_msg) |
-                      ftxui::color(theme.status_bar.error.normal.fg) |
-                      ftxui::flex_shrink}) |
-             ftxui::borderRounded |
-             ftxui::color(theme.status_bar.error.normal.fg) |
-             ftxui::flex_shrink;
+      return subagentPanel(
+          ftxui::vbox(
+              {ftxui::hbox(
+                   {ftxui::text(" " + shared::ICON_ERROR + " ") |
+                        ftxui::color(theme.status_bar.error.normal.fg),
+                    ftxui::text(title + " failed") | ftxui::bold |
+                        ftxui::color(theme.status_bar.error.normal.fg)}),
+               ftxui::paragraph("  " + error_msg) |
+                   ftxui::color(theme.status_bar.error.normal.fg) |
+                   ftxui::flex_shrink}),
+          theme, theme.status_bar.error.normal.fg);
     }
   });
 }

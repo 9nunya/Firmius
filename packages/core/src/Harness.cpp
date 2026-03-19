@@ -54,6 +54,49 @@ const std::string FIRMIUS_DIR = ".firmius";
 const std::string SESSION_FILE = "last_session.json";
 const std::string OWNER_PID_LABEL = "com.firmius.owner_pid";
 
+bool ensureWritableDirectory(const std::filesystem::path &dir) {
+  std::error_code ec;
+  std::filesystem::create_directories(dir, ec);
+  if (ec || !std::filesystem::exists(dir) || !std::filesystem::is_directory(dir)) {
+    return false;
+  }
+
+  const auto probe = dir / (".write_probe_" + shared::StringUtil::generateUuid());
+  std::ofstream out(probe);
+  if (!out.is_open()) {
+    return false;
+  }
+  out << "ok";
+  out.close();
+  std::filesystem::remove(probe, ec);
+  return true;
+}
+
+std::string resolveWritableFirmiusHome() {
+  if (const char *home = std::getenv("HOME")) {
+    const std::filesystem::path userHome =
+        std::filesystem::path(home) / FIRMIUS_DIR;
+    if (ensureWritableDirectory(userHome)) {
+      return userHome.string();
+    }
+  }
+
+  const std::filesystem::path localHome =
+      std::filesystem::current_path() / FIRMIUS_DIR;
+  if (ensureWritableDirectory(localHome)) {
+    return localHome.string();
+  }
+
+  const std::filesystem::path tempHome =
+      std::filesystem::temp_directory_path() /
+      ("firmius-" + std::to_string(static_cast<long long>(getuid())));
+  if (ensureWritableDirectory(tempHome)) {
+    return tempHome.string();
+  }
+
+  return (std::filesystem::temp_directory_path() / "firmius").string();
+}
+
 ThreadPermissionMode nextThreadPermissionMode(ThreadPermissionMode mode) {
   switch (mode) {
   case ThreadPermissionMode::Request:
@@ -67,16 +110,61 @@ ThreadPermissionMode nextThreadPermissionMode(ThreadPermissionMode mode) {
 }
 
 std::string getFirmiusHome() {
-  const char *home = std::getenv("HOME");
-  if (!home) {
-    home = "/tmp";
-  }
-  return std::string(home) + "/" + FIRMIUS_DIR;
+  static const std::string resolvedHome = resolveWritableFirmiusHome();
+  return resolvedHome;
 }
 
 std::string getSessionPath() { return getFirmiusHome() + "/" + SESSION_FILE; }
 
+void persistSessionState(const std::string &threadId,
+                         const std::string &focusedAgentId) {
+  rapidjson::Document doc;
+  doc.SetObject();
+  auto &a = doc.GetAllocator();
+
+  if (!threadId.empty()) {
+    doc.AddMember("threadId", rapidjson::Value(threadId.c_str(), a), a);
+  }
+  if (!focusedAgentId.empty()) {
+    doc.AddMember("focusedAgentId", rapidjson::Value(focusedAgentId.c_str(), a),
+                  a);
+  }
+
+  rapidjson::StringBuffer buffer;
+  rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+  doc.Accept(writer);
+
+  std::ofstream sessionFile(getSessionPath());
+  if (sessionFile.is_open()) {
+    sessionFile << buffer.GetString();
+    sessionFile.close();
+  }
+}
+
 bool isPidAlive(pid_t pid) { return kill(pid, 0) == 0 || errno == EPERM; }
+
+void appendUniqueAgentId(std::vector<std::string> &agentIds,
+                         const std::string &agentId) {
+  if (agentId.empty()) {
+    return;
+  }
+  if (std::find(agentIds.begin(), agentIds.end(), agentId) == agentIds.end()) {
+    agentIds.push_back(agentId);
+  }
+}
+
+template <typename Fn>
+bool waitFor(Fn &&fn, std::chrono::milliseconds timeout,
+             std::chrono::milliseconds step = std::chrono::milliseconds(20)) {
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (fn()) {
+      return true;
+    }
+    std::this_thread::sleep_for(step);
+  }
+  return fn();
+}
 
 std::string normalizeCommandForRuleMatch(const std::string &command) {
   std::stringstream normalized;
@@ -210,28 +298,7 @@ void Harness::shutdown() {
 
     lockManager_.releaseAll();
 
-    rapidjson::Document doc;
-    doc.SetObject();
-    auto &a = doc.GetAllocator();
-
-    if (!currentThreadId_.empty()) {
-      doc.AddMember("threadId", rapidjson::Value(currentThreadId_.c_str(), a),
-                    a);
-    }
-    if (!focusedAgentId_.empty()) {
-      doc.AddMember("focusedAgentId",
-                    rapidjson::Value(focusedAgentId_.c_str(), a), a);
-    }
-
-    rapidjson::StringBuffer buffer;
-    rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
-    doc.Accept(writer);
-
-    std::ofstream sessionFile(getSessionPath());
-    if (sessionFile.is_open()) {
-      sessionFile << buffer.GetString();
-      sessionFile.close();
-    }
+    persistSessionState(currentThreadId_, focusedAgentId_);
   }
   for (const auto &pending : pendingRequests) {
     {
@@ -310,8 +377,12 @@ std::string Harness::newThread(HostCreationOptions hostOptions,
 
 bool Harness::switchThread(const std::string &threadId) {
   ThreadMetadata threadMeta;
+  std::map<std::string, AgentManifestEntry> manifest;
   bool alreadyLocked = false;
   int ownerPid = -1;
+  bool manifestRecovered = false;
+  std::string manifestError;
+  std::string metadataError;
 
   {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -330,6 +401,21 @@ bool Harness::switchThread(const std::string &threadId) {
     }
   }
 
+  if (!threadManager_.tryGetMetadata(threadId, threadMeta, &metadataError)) {
+    if (!alreadyLocked) {
+      lockManager_.release(threadId);
+    }
+    emitEvent(firmius::shared::AgentError{
+        "", "Thread '" + threadId +
+                "' is incomplete or corrupt and could not be opened: " +
+                metadataError});
+    return false;
+  }
+
+  if (!threadManager_.tryReadAgentManifest(threadId, manifest, &manifestError)) {
+    manifestRecovered = true;
+  }
+
   {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!currentThreadId_.empty() && !focusedAgentId_.empty()) {
@@ -345,7 +431,6 @@ bool Harness::switchThread(const std::string &threadId) {
 
     currentThreadId_ = threadId;
 
-    auto manifest = threadManager_.readAgentManifest(threadId);
     for (const auto &[agentId, entry] : manifest) {
       Engine::instance().resumeAgent(threadId, agentId, entry.persona,
                                      entry.parentId, entry.friendlyName,
@@ -362,9 +447,15 @@ bool Harness::switchThread(const std::string &threadId) {
     }
 
     clearQueue();
-    threadMeta = threadManager_.getMetadata(threadId);
   }
 
+  if (manifestRecovered) {
+    emitEvent(firmius::shared::AgentError{
+        "", "Thread '" + threadId +
+                "' has a missing or corrupt agent manifest; continuing without "
+                "restoring agents: " +
+                manifestError});
+  }
   emitEvent(firmius::shared::ThreadChanged{threadId, threadMeta});
   return true;
 }
@@ -393,12 +484,38 @@ bool Harness::resumeLast() {
 
   if (threadId.empty())
     return false;
-  return switchThread(threadId);
+
+  if (switchThread(threadId)) {
+    return true;
+  }
+
+  {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    currentThreadId_.clear();
+    focusedAgentId_.clear();
+    threadAgentMap_.erase(threadId);
+    persistSessionState("", "");
+  }
+
+  std::cerr << "Warning: skipped broken last session thread '" << threadId
+            << "' during startup." << std::endl;
+  return false;
 }
 
 void Harness::send(
     const std::string &text,
     const std::vector<firmius::shared::ImageContent> &images) {
+  std::string statusMessage;
+  if (!dispatchRequestToAgent(currentThreadId_, focusedAgentId_, text, images,
+                              statusMessage)) {
+    emitEvent(firmius::shared::AgentError{"", statusMessage});
+  }
+}
+
+bool Harness::dispatchRequestToAgent(
+    const std::string &threadId, const std::string &preferredAgentId,
+    const std::string &text, const std::vector<ImageContent> &images,
+    std::string &statusMessage) {
   std::string tid;
   ThreadMetadata metadata;
   std::string fid;
@@ -410,10 +527,11 @@ void Harness::send(
 
   {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
-    if (currentThreadId_.empty()) {
+    if (currentThreadId_.empty() || threadId.empty() ||
+        currentThreadId_ != threadId) {
       noThread = true;
     } else {
-      tid = currentThreadId_;
+      tid = threadId;
 
       metadata = threadManager_.getMetadata(tid);
       metadata.lastActiveAt = static_cast<uint64_t>(
@@ -425,13 +543,15 @@ void Harness::send(
       messageId = std::to_string(
           std::chrono::steady_clock::now().time_since_epoch().count());
 
-      fid = focusedAgentId_;
+      fid = preferredAgentId.empty() ? focusedAgentId_ : preferredAgentId;
       if (fid.empty() || !AgentRegistry::instance().getAgent(fid)) {
         needsSummon = true;
         requestedId = shared::StringUtil::generateUuid();
         focusedAgentId_ = requestedId;
         threadAgentMap_[tid] = requestedId;
       } else {
+        focusedAgentId_ = fid;
+        threadAgentMap_[tid] = fid;
         auto agent = AgentRegistry::instance().getAgent(fid);
         if (agent && (agent->isRunning() || agent->isBooting())) {
           // Don't queue if agent is cancelled/interrupted - let the message go
@@ -447,8 +567,8 @@ void Harness::send(
   }
 
   if (noThread) {
-    emitEvent(firmius::shared::AgentError{"", "No current thread active"});
-    return;
+    statusMessage = "No current thread active";
+    return false;
   }
 
   emitEvent(firmius::shared::UserMessageSent{messageId, text, tid});
@@ -456,18 +576,22 @@ void Harness::send(
   if (needsSummon) {
     // Note: summonAgent will use the default model from ConfigLoader
     // which is what we want for a brand new lead agent in a thread.
-    // Images are not supported when summoning a new agent.
     Engine::instance().summonAgent(tid, metadata.leadPersona, text, true, "",
-                                   "lead", "", requestedId);
-    return;
+                                   "lead", "", requestedId, "", "", "",
+                                   images);
+    statusMessage = "Retry started on lead agent.";
+    return true;
   }
 
   if (agentRunning) {
     emitEvent(firmius::shared::MessageQueued{messageId, text});
-    return;
+    statusMessage = "Retry queued on running agent.";
+    return true;
   }
 
   Engine::instance().executeTask(fid, text, images);
+  statusMessage = "Retry started.";
+  return true;
 }
 
 bool Harness::executeWorkflow(const std::string &workflowId,
@@ -515,6 +639,8 @@ void Harness::abort() {
   }
 
   agent->interrupt();
+  emitEvent(firmius::shared::AgentInterrupted{focusedAgentId_,
+                                              agent->getContext().identity.parentId});
 
   // Clear the message queue since we're aborting the current operation
   clearQueue();
@@ -855,6 +981,8 @@ void Harness::routeEngineEvent(const firmius::shared::AppEvent &event) {
             if (ev.agentId == focusedAgentId_) {
               drainQueue();
             }
+          } else if constexpr (std::is_same_v<T, AgentError>) {
+            toEmit.push_back(ev);
           } else if constexpr (std::is_same_v<T, AgentFinished>) {
             toEmit.push_back(ev);
           } else if constexpr (std::is_same_v<T, ThreadChanged> ||
@@ -1292,6 +1420,8 @@ void Harness::interruptAndSwitchModel(const std::string &providerId,
       }
     }
     agent->interrupt();
+    emitEvent(firmius::shared::AgentInterrupted{
+        focusedAgentId_, agent->getContext().identity.parentId});
   }
 
   Engine::instance().switchAgentModel(focusedAgentId_, providerId, modelId);
@@ -1492,6 +1622,249 @@ void Harness::clearQueue() {
   while (!messageQueue_.empty()) {
     messageQueue_.pop();
   }
+}
+
+bool Harness::retryLastRequest(std::string &statusMessage) {
+  std::string threadId;
+  std::string preferredAgentId;
+  {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (currentThreadId_.empty()) {
+      statusMessage = "No current thread active.";
+      return false;
+    }
+    threadId = currentThreadId_;
+    preferredAgentId = focusedAgentId_;
+    clearQueue();
+  }
+
+  auto targetAgentId = resolveRetryTargetAgentId(threadId, preferredAgentId);
+  if (!targetAgentId.has_value()) {
+    statusMessage = "No focused agent with restorable history is available in this thread.";
+    return false;
+  }
+  const std::string agentId = *targetAgentId;
+  const bool hasResumableTurn =
+      snapshotResumableTurnForAgent(threadId, agentId).has_value();
+
+  auto resumedAgent = AgentRegistry::instance().getAgent(agentId);
+  if (!resumedAgent) {
+    AgentManifestEntry entry;
+    try {
+      auto manifest = threadManager_.readAgentManifest(threadId);
+      auto it = manifest.find(agentId);
+      if (it == manifest.end()) {
+        statusMessage = "Focused agent cannot be restored from persisted history.";
+        return false;
+      }
+      entry = it->second;
+      Engine::instance().resumeAgent(threadId, agentId, entry.persona,
+                                     entry.parentId, entry.friendlyName,
+                                     entry.title, entry.persistHistory);
+    } catch (const std::exception &e) {
+      statusMessage =
+          "Failed to restore focused agent: " + std::string(e.what());
+      return false;
+    }
+
+    if (!waitFor(
+            [&]() {
+              auto restored = AgentRegistry::instance().getAgent(agentId);
+              return restored && !restored->isBooting();
+            },
+            std::chrono::milliseconds(2000))) {
+      statusMessage = "Focused agent restore timed out.";
+      return false;
+    }
+    resumedAgent = AgentRegistry::instance().getAgent(agentId);
+  }
+
+  if (!resumedAgent) {
+    statusMessage = "Focused agent cannot be resumed.";
+    return false;
+  }
+  if (resumedAgent->isRunning() || resumedAgent->isBooting()) {
+    statusMessage = "Focused agent is busy.";
+    return false;
+  }
+
+  {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    focusedAgentId_ = agentId;
+    threadAgentMap_[threadId] = agentId;
+  }
+
+  resumedAgent->clearInterrupt();
+  resumedAgent->getMutableContext().state.currentStatus = AgentStatus::Idle;
+  try {
+    Engine::instance().resumeTask(agentId);
+  } catch (const std::exception &e) {
+    statusMessage = "Failed to awaken focused agent: " + std::string(e.what());
+    return false;
+  }
+
+  statusMessage = hasResumableTurn
+                      ? "Resuming focused agent from the last failed or cancelled turn."
+                      : "Awakening focused agent from existing thread history.";
+  return true;
+}
+
+std::optional<shared::ThreadMetadata::RetryableRequest>
+Harness::snapshotResumableTurnForAgent(const std::string &threadId,
+                                       const std::string &agentId) {
+  if (threadId.empty() || agentId.empty()) {
+    return std::nullopt;
+  }
+
+  std::shared_ptr<AgentHistory> history;
+  if (auto liveAgent = AgentRegistry::instance().getAgent(agentId)) {
+    history = liveAgent->getContext().history;
+  }
+  AgentHistory persistedHistory;
+  if (!history) {
+    try {
+      persistedHistory = threadManager_.loadAgentHistory(threadId, agentId);
+      history = std::make_shared<AgentHistory>(persistedHistory);
+    } catch (...) {
+      return std::nullopt;
+    }
+  }
+  if (!history || history->turns.empty()) {
+    return std::nullopt;
+  }
+
+  for (auto it = history->turns.rbegin(); it != history->turns.rend(); ++it) {
+    if (it->turnId.rfind("user-task-", 0) != 0 || it->messages.empty()) {
+      continue;
+    }
+
+    const auto &message = it->messages.front();
+    if (message.role != Role::User) {
+      continue;
+    }
+
+    std::optional<Role> finalRoleAfterTurn;
+    for (auto later = it.base(); later != history->turns.end(); ++later) {
+      if (later->messages.empty()) {
+        continue;
+      }
+      finalRoleAfterTurn = later->messages.back().role;
+    }
+
+    if (!finalRoleAfterTurn.has_value() ||
+        *finalRoleAfterTurn != Role::Error) {
+      return std::nullopt;
+    }
+
+    ThreadMetadata::RetryableRequest request;
+    request.targetAgentId = agentId;
+    request.turnId = it->turnId;
+    request.recordedAt = message.timestamp;
+    request.eligible = true;
+    for (const auto &part : message.content) {
+      if (auto *textPart = std::get_if<TextContent>(&part)) {
+        request.text = textPart->text;
+      } else if (auto *imagePart = std::get_if<ImageContent>(&part)) {
+        request.images.push_back(*imagePart);
+      }
+    }
+    return request;
+  }
+
+  return std::nullopt;
+}
+
+std::optional<shared::ThreadMetadata::RetryableRequest>
+Harness::recoverLastResumableTurnForThread(
+    const std::string &threadId, const std::string &preferredAgentId) {
+  if (threadId.empty()) {
+    return std::nullopt;
+  }
+
+  std::vector<std::string> candidateAgentIds;
+  {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    appendUniqueAgentId(candidateAgentIds, preferredAgentId);
+    if (threadId == currentThreadId_) {
+      appendUniqueAgentId(candidateAgentIds, focusedAgentId_);
+    }
+    auto mapped = threadAgentMap_.find(threadId);
+    if (mapped != threadAgentMap_.end()) {
+      appendUniqueAgentId(candidateAgentIds, mapped->second);
+    }
+    try {
+      const auto manifest = threadManager_.readAgentManifest(threadId);
+      for (const auto &[agentId, entry] : manifest) {
+        if (entry.parentId.empty()) {
+          appendUniqueAgentId(candidateAgentIds, agentId);
+        }
+      }
+      for (const auto &[agentId, entry] : manifest) {
+        if (!entry.parentId.empty()) {
+          appendUniqueAgentId(candidateAgentIds, agentId);
+        }
+      }
+    } catch (...) {
+    }
+  }
+
+  for (const auto &agentId : threadManager_.listAgents(threadId)) {
+    appendUniqueAgentId(candidateAgentIds, agentId);
+  }
+
+  std::optional<shared::ThreadMetadata::RetryableRequest> latest;
+  for (const auto &agentId : candidateAgentIds) {
+    auto candidate = snapshotResumableTurnForAgent(threadId, agentId);
+    if (!candidate.has_value()) {
+      continue;
+    }
+    if (!latest.has_value() || candidate->recordedAt > latest->recordedAt) {
+      latest = candidate;
+    }
+  }
+
+  return latest;
+}
+
+std::optional<std::string>
+Harness::resolveRetryTargetAgentId(const std::string &threadId,
+                                   const std::string &preferredAgentId) {
+  if (threadId.empty()) {
+    return std::nullopt;
+  }
+
+  if (!preferredAgentId.empty()) {
+    return preferredAgentId;
+  }
+
+  {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (threadId == currentThreadId_ && !focusedAgentId_.empty()) {
+      return focusedAgentId_;
+    }
+    auto mapped = threadAgentMap_.find(threadId);
+    if (mapped != threadAgentMap_.end() && !mapped->second.empty()) {
+      return mapped->second;
+    }
+    try {
+      const auto manifest = threadManager_.readAgentManifest(threadId);
+      for (const auto &[agentId, entry] : manifest) {
+        if (entry.parentId.empty()) {
+          return agentId;
+        }
+      }
+      if (!manifest.empty()) {
+        return manifest.begin()->first;
+      }
+    } catch (...) {
+    }
+  }
+
+  const auto agents = threadManager_.listAgents(threadId);
+  if (!agents.empty()) {
+    return agents.front();
+  }
+  return std::nullopt;
 }
 
 void Harness::writeInterruptionRecord() {

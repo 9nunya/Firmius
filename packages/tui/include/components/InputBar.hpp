@@ -35,6 +35,11 @@ struct InputBarModel {
   std::function<void(const std::string& title, const std::string& message)> show_notification = nullptr;
 };
 
+inline bool IsShiftEnterInput(const std::string &raw) {
+  return raw == "\x1b[13;2u" || raw == "\x1b\r" || raw == "\x1b\n" ||
+         raw == "\x1b[27;2;13~";
+}
+
 ftxui::Component InputBar(
     const std::shared_ptr<InputBarModel> &model,
     std::function<void(const std::string &,

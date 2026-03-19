@@ -213,6 +213,14 @@ TEST(Serialization, ThreadMetadataPermissionModeRoundtrip) {
   metadata.cwd = "/tmp";
   metadata.leadPersona = "lead";
   metadata.activePlanId = "plan-123";
+  metadata.lastRetryableRequest = ThreadMetadata::RetryableRequest{
+      "agent-123",
+      "user-task-9",
+      "retry this",
+      {ImageContent{"data:image/png;base64,abc", "image/png", "auto"}},
+      789,
+      true,
+  };
   metadata.permissionMode = ThreadPermissionMode::DenyAll;
   metadata.createdAt = 123;
   metadata.lastActiveAt = 456;
@@ -256,6 +264,7 @@ TEST(Serialization, ThreadMetadataActivePlanIdBackwardCompatibleDefault) {
   auto metadata = threadMetadataFromJson(doc);
   EXPECT_EQ(metadata.threadId, "thread-legacy");
   EXPECT_TRUE(metadata.activePlanId.empty());
+  EXPECT_FALSE(metadata.lastRetryableRequest.has_value());
 }
 
 TEST(Serialization, WorkLanguageToolScopesRoundtrip) {
@@ -283,6 +292,7 @@ TEST(Serialization, WorkChunkRoundtrip) {
   original.context = "Chunk 1";
   original.constraints = "No chunk files";
   original.completion = "Model compiles and round-trips";
+  original.planningGate = true;
   original.status = WorkChunkStatus::Verifying;
   original.dependsOn = {"chunk-0", "chunk-bootstrap"};
   original.assignedAgentId = "agent-lead";
@@ -308,7 +318,8 @@ TEST(Serialization, WorkChunkDefaultsForMissingFields) {
   auto chunk = workChunkFromJson(doc);
   EXPECT_EQ(chunk.id, "chunk-legacy");
   EXPECT_EQ(chunk.title, "Legacy chunk");
-  EXPECT_EQ(chunk.status, WorkChunkStatus::Draft);
+  EXPECT_EQ(chunk.status, WorkChunkStatus::Ready);
+  EXPECT_FALSE(chunk.planningGate);
   EXPECT_EQ(chunk.attemptCount, 0);
   EXPECT_TRUE(chunk.dependsOn.empty());
   EXPECT_TRUE(chunk.assignedAgentId.empty());

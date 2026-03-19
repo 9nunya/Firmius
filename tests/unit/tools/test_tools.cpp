@@ -91,6 +91,8 @@ public:
               (const std::string &, (std::function<void(const StreamEvent &)>),
                const std::vector<ImageContent> &),
               (override));
+  MOCK_METHOD(void, resume, ((std::function<void(const StreamEvent &)>)),
+              (override));
   MOCK_METHOD((const AgentContext &), getContext, (), (const, override));
   MOCK_METHOD(AgentContext &, getMutableContext, (), (override));
   MOCK_METHOD(void, interrupt, (), (override));
@@ -460,6 +462,16 @@ protected:
   static std::string anchor(int line, const std::string &content) {
     return firmius::shared::utils::Hashline::formatAnchor(line, content);
   }
+
+  static std::string readFormattedAnchor(int line, const std::string &content) {
+    return firmius::shared::utils::Hashline::formatLine(line, content);
+  }
+
+  static rapidjson::Document parseResult(const ToolResult &result) {
+    rapidjson::Document doc;
+    doc.Parse(result.data.c_str());
+    return doc;
+  }
 };
 
 TEST_F(CommandPermissionToolTest,
@@ -471,7 +483,7 @@ TEST_F(CommandPermissionToolTest,
       createJsonInput({{"command", "touch denied.txt"}, {"cwd", "/tmp/work"}});
   ToolContext ctx{mockHost, mockAgent, "test_call"};
 
-  EXPECT_CALL(mockAgent.mockEnv_->mockProcessManager(), spawnProcess(_, _, _, _))
+  EXPECT_CALL(mockAgent.mockEnv_->mockProcessManager(), spawnProcess(_, _, _, _, _))
       .Times(0);
 
   ITool *itool = &tool;
@@ -494,7 +506,7 @@ TEST_F(CommandPermissionToolTest,
 
   ToolContext ctx{mockHost, mockAgent, "test_call"};
 
-  EXPECT_CALL(mockAgent.mockEnv_->mockProcessManager(), spawnProcess(_, _, _, _))
+  EXPECT_CALL(mockAgent.mockEnv_->mockProcessManager(), spawnProcess(_, _, _, _, _))
       .Times(0);
 
   ITool *itool = &tool;
@@ -514,7 +526,7 @@ TEST_F(CommandPermissionToolTest,
   ToolContext ctx{mockHost, mockAgent, "test_call"};
 
   EXPECT_CALL(mockHost, writeFile(_, _)).Times(0);
-  EXPECT_CALL(mockAgent.mockEnv_->mockProcessManager(), spawnProcess(_, _, _, _))
+  EXPECT_CALL(mockAgent.mockEnv_->mockProcessManager(), spawnProcess(_, _, _, _, _))
       .Times(0);
 
   ITool *itool = &tool;
@@ -532,10 +544,10 @@ TEST_F(CommandPermissionToolTest,
   std::map<std::string, std::string> capturedEnv;
 
   EXPECT_CALL(mockHost, writeFile(_, _)).Times(0);
-  EXPECT_CALL(mockAgent.mockEnv_->mockProcessManager(), spawnProcess(_, _, _, _))
+  EXPECT_CALL(mockAgent.mockEnv_->mockProcessManager(), spawnProcess(_, _, _, _, _))
       .WillOnce(Invoke([&capturedEnv](const std::string &command,
                                       const std::string &, const std::string &,
-                                      const auto &env) {
+                                      const auto &env, bool) {
         EXPECT_EQ(command,
                   "python3 -c \"import os; exec(compile(os.environ['FIRMIUS_PYTHON_EXECUTE_CODE'], '<python_execute>', 'exec'))\"");
         capturedEnv = env;
@@ -599,6 +611,65 @@ TEST_F(FileEditAnchorToolTest, replaceRangeByAnchor) {
   EXPECT_TRUE(result.success);
   EXPECT_EQ(capturedWrite, "alpha\nbeta2\ngamma2\n");
   EXPECT_NE(result.data.find("\"applied_edits\":1"), std::string::npos);
+  EXPECT_NE(result.data.find("\"post_edit_slice\""), std::string::npos);
+  EXPECT_NE(result.data.find("2#"), std::string::npos);
+
+  auto doc = parseResult(result);
+  ASSERT_TRUE(doc.HasMember("operations"));
+  const auto &operation = doc["operations"].GetArray()[0];
+  ASSERT_TRUE(operation.HasMember("post_edit_context"));
+  const auto &context = operation["post_edit_context"];
+  EXPECT_EQ(context["start_line"].GetInt(), 1);
+  EXPECT_EQ(context["end_line"].GetInt(), 3);
+  ASSERT_TRUE(context.HasMember("anchors"));
+  EXPECT_EQ(context["anchors"].GetArray().Size(), 3u);
+  EXPECT_STREQ(context["anchors"].GetArray()[1].GetString(),
+               anchor(2, "beta2").c_str());
+}
+
+TEST_F(FileEditAnchorToolTest,
+       replaceRangeSanitizesHashlinePrefixesDiffMarkersAndBoundaryEchoes) {
+  const std::string path = "/tmp/work/file.txt";
+  const std::string original = "keep-a\nbeta\ngamma\nkeep-b\n";
+
+  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
+  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
+
+  auto json = createFileEditJson(
+      "file.txt",
+      {{{"op", "replace_range"},
+        {"start_anchor", anchor(2, "beta")},
+        {"end_anchor", anchor(3, "gamma")},
+        {"new_lines",
+         "keep-a\n2#8c72|+ beta2\n3#f2c5|48a8|- gamma2\nkeep-b"}}});
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+
+  ITool *itool = &tool;
+  auto result = itool->execute(json, ctx);
+
+  EXPECT_TRUE(result.success);
+  EXPECT_EQ(capturedWrite, "keep-a\nbeta2\ngamma2\nkeep-b\n");
+
+  auto doc = parseResult(result);
+  ASSERT_TRUE(doc.IsObject());
+  ASSERT_TRUE(doc.HasMember("sanitation"));
+  const auto &sanitation = doc["sanitation"];
+  EXPECT_EQ(sanitation["hashline_prefixes_stripped"].GetInt(), 2);
+  EXPECT_EQ(sanitation["malformed_hash_fragments_stripped"].GetInt(), 1);
+  EXPECT_EQ(sanitation["diff_markers_stripped"].GetInt(), 2);
+  EXPECT_EQ(sanitation["boundary_echoes_removed"].GetInt(), 2);
+  EXPECT_TRUE(sanitation["boundary_echo_removed"].GetBool());
+
+  ASSERT_TRUE(doc.HasMember("operations"));
+  const auto &operation = doc["operations"].GetArray()[0];
+  ASSERT_TRUE(operation.HasMember("old_lines"));
+  ASSERT_TRUE(operation.HasMember("new_lines"));
+  ASSERT_EQ(operation["old_lines"].GetArray().Size(), 2u);
+  EXPECT_STREQ(operation["old_lines"].GetArray()[0].GetString(), "beta");
+  EXPECT_STREQ(operation["old_lines"].GetArray()[1].GetString(), "gamma");
+  ASSERT_EQ(operation["new_lines"].GetArray().Size(), 2u);
+  EXPECT_STREQ(operation["new_lines"].GetArray()[0].GetString(), "beta2");
+  EXPECT_STREQ(operation["new_lines"].GetArray()[1].GetString(), "gamma2");
 }
 
 TEST_F(FileEditAnchorToolTest, insertAfterByAnchor) {
@@ -620,6 +691,95 @@ TEST_F(FileEditAnchorToolTest, insertAfterByAnchor) {
 
   EXPECT_TRUE(result.success);
   EXPECT_EQ(capturedWrite, "alpha\ninserted\nbeta\n");
+}
+
+TEST_F(FileEditAnchorToolTest, insertAfterRejectsReadFormattedAnchorWithHelp) {
+  const std::string path = "/tmp/work/file.txt";
+  const std::string original = "alpha\nbeta\n";
+
+  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
+  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
+  EXPECT_CALL(mockHost, writeFile(_, _)).Times(0);
+
+  auto json = createFileEditJson(
+      "file.txt",
+      {{{"op", "insert_after"},
+        {"anchor", readFormattedAnchor(1, "alpha")},
+        {"new_lines", "inserted"}}});
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+
+  ITool *itool = &tool;
+  auto result = itool->execute(json, ctx);
+
+  EXPECT_FALSE(result.success);
+  EXPECT_NE(result.error.find("Malformed anchor"), std::string::npos);
+  EXPECT_NE(result.error.find("lineNumber#hash only"), std::string::npos);
+  EXPECT_NE(result.error.find("without trailing |content"), std::string::npos);
+}
+
+TEST_F(FileEditAnchorToolTest, replaceRangeWithAnchorOnlyFailsPrecisely) {
+  const std::string path = "/tmp/work/file.txt";
+  const std::string original = "alpha\nbeta\n";
+
+  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
+  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
+  EXPECT_CALL(mockHost, writeFile(_, _)).Times(0);
+
+  auto json = createFileEditJson(
+      "file.txt",
+      {{{"op", "replace_range"}, {"anchor", anchor(2, "beta")}}});
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+
+  ITool *itool = &tool;
+  auto result = itool->execute(json, ctx);
+
+  EXPECT_FALSE(result.success);
+  EXPECT_NE(result.error.find(
+                "replace_range requires both start_anchor and end_anchor; got "
+                "anchor only"),
+            std::string::npos);
+}
+
+TEST_F(FileEditAnchorToolTest, replaceRangeMissingEndAnchorFailsPrecisely) {
+  const std::string path = "/tmp/work/file.txt";
+  const std::string original = "alpha\nbeta\n";
+
+  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
+  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
+  EXPECT_CALL(mockHost, writeFile(_, _)).Times(0);
+
+  auto json = createFileEditJson(
+      "file.txt",
+      {{{"op", "replace_range"}, {"start_anchor", anchor(2, "beta")}}});
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+
+  ITool *itool = &tool;
+  auto result = itool->execute(json, ctx);
+
+  EXPECT_FALSE(result.success);
+  EXPECT_NE(result.error.find("replace_range is missing end_anchor"),
+            std::string::npos);
+}
+
+TEST_F(FileEditAnchorToolTest, deleteRangeMissingStartAnchorFailsPrecisely) {
+  const std::string path = "/tmp/work/file.txt";
+  const std::string original = "alpha\nbeta\n";
+
+  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
+  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
+  EXPECT_CALL(mockHost, writeFile(_, _)).Times(0);
+
+  auto json = createFileEditJson(
+      "file.txt",
+      {{{"op", "delete_range"}, {"end_anchor", anchor(2, "beta")}}});
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+
+  ITool *itool = &tool;
+  auto result = itool->execute(json, ctx);
+
+  EXPECT_FALSE(result.success);
+  EXPECT_NE(result.error.find("delete_range is missing start_anchor"),
+            std::string::npos);
 }
 
 TEST_F(FileEditAnchorToolTest, insertBeforeByAnchor) {
@@ -662,6 +822,98 @@ TEST_F(FileEditAnchorToolTest, deleteRangeByAnchor) {
 
   EXPECT_TRUE(result.success);
   EXPECT_EQ(capturedWrite, "alpha\ndelta\n");
+
+  auto doc = parseResult(result);
+  const auto &operation = doc["operations"].GetArray()[0];
+  ASSERT_EQ(operation["old_lines"].GetArray().Size(), 2u);
+  EXPECT_STREQ(operation["old_lines"].GetArray()[0].GetString(), "beta");
+  EXPECT_STREQ(operation["old_lines"].GetArray()[1].GetString(), "gamma");
+  EXPECT_TRUE(operation["new_lines"].IsArray());
+  EXPECT_TRUE(operation["new_lines"].GetArray().Empty());
+}
+
+TEST_F(FileEditAnchorToolTest, insertAfterResultIncludesEmptyOldLinesAndNewLines) {
+  const std::string path = "/tmp/work/file.txt";
+  const std::string original = "alpha\nbeta\n";
+
+  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
+  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
+
+  auto json = createFileEditJson(
+      "file.txt",
+      {{{"op", "insert_after"},
+        {"anchor", anchor(1, "alpha")},
+        {"new_lines", "inserted"}}});
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+
+  ITool *itool = &tool;
+  auto result = itool->execute(json, ctx);
+
+  EXPECT_TRUE(result.success);
+  auto doc = parseResult(result);
+  const auto &operation = doc["operations"].GetArray()[0];
+  EXPECT_TRUE(operation["old_lines"].IsArray());
+  EXPECT_TRUE(operation["old_lines"].GetArray().Empty());
+  ASSERT_EQ(operation["new_lines"].GetArray().Size(), 1u);
+  EXPECT_STREQ(operation["new_lines"].GetArray()[0].GetString(), "inserted");
+}
+
+TEST_F(FileEditAnchorToolTest, suspiciousReplacementMetadataIsRejected) {
+  const std::string path = "/tmp/work/file.txt";
+  const std::string original = "alpha\nbeta\n";
+
+  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
+  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
+  EXPECT_CALL(mockHost, writeFile(_, _)).Times(0);
+
+  auto json = createFileEditJson(
+      "file.txt",
+      {{{"op", "replace_range"},
+        {"start_anchor", anchor(2, "beta")},
+        {"end_anchor", anchor(2, "beta")},
+        {"new_lines", "48a8|still bad"}}});
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+
+  ITool *itool = &tool;
+  auto result = itool->execute(json, ctx);
+
+  EXPECT_FALSE(result.success);
+  EXPECT_NE(result.error.find("still appears to contain Hashline metadata"),
+            std::string::npos);
+  EXPECT_NE(result.error.find("Remove lineNumber#hash| prefixes"),
+            std::string::npos);
+
+  rapidjson::Document doc;
+  doc.Parse(result.error.c_str());
+  ASSERT_TRUE(doc.HasMember("sanitation"));
+  EXPECT_TRUE(doc["sanitation"]["suspicious_content_found"].GetBool());
+  EXPECT_TRUE(doc["sanitation"]["suspicious_content_rejected"].GetBool());
+}
+
+TEST_F(FileEditAnchorToolTest, suspiciousReplacementDiffJunkIsRejected) {
+  const std::string path = "/tmp/work/file.txt";
+  const std::string original = "alpha\nbeta\n";
+
+  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
+  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
+  EXPECT_CALL(mockHost, writeFile(_, _)).Times(0);
+
+  auto json = createFileEditJson(
+      "file.txt",
+      {{{"op", "replace_range"},
+        {"start_anchor", anchor(2, "beta")},
+        {"end_anchor", anchor(2, "beta")},
+        {"new_lines", "+still bad"}}});
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+
+  ITool *itool = &tool;
+  auto result = itool->execute(json, ctx);
+
+  EXPECT_FALSE(result.success);
+  EXPECT_NE(result.error.find("still appears to contain diff markers"),
+            std::string::npos);
+  EXPECT_NE(result.error.find("Remove leading + / - patch markers"),
+            std::string::npos);
 }
 
 TEST_F(FileEditAnchorToolTest, staleAnchorFailsClearly) {
@@ -683,7 +935,9 @@ TEST_F(FileEditAnchorToolTest, staleAnchorFailsClearly) {
   auto result = itool->execute(json, ctx);
 
   EXPECT_FALSE(result.success);
-  EXPECT_NE(result.error.find("Reread the file"), std::string::npos);
+  EXPECT_NE(result.error.find("Stale anchor"), std::string::npos);
+  EXPECT_NE(result.error.find("Re-read the file and retry with fresh anchors"),
+            std::string::npos);
 }
 
 TEST_F(FileEditAnchorToolTest, nearbyAnchorRelocationSucceeds) {
@@ -734,6 +988,51 @@ TEST_F(FileEditAnchorToolTest, overlappingEditsAreRejected) {
   EXPECT_NE(result.error.find("Overlapping edits"), std::string::npos);
 }
 
+TEST_F(FileEditAnchorToolTest, overwriteExistingFileIsRejected) {
+  const std::string path = "/tmp/work/file.txt";
+
+  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
+  EXPECT_CALL(mockHost, writeFile(_, _)).Times(0);
+
+  auto json =
+      createJsonInput({{"path", "file.txt"}, {"content", "replacement"}});
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+
+  ITool *itool = &tool;
+  auto result = itool->execute(json, ctx);
+
+  EXPECT_FALSE(result.success);
+  EXPECT_NE(result.error.find("overwrite is disabled for existing files"),
+            std::string::npos);
+}
+
+TEST_F(FileEditAnchorToolTest, mixingEditModesIsRejected) {
+  const std::string path = "/tmp/work/file.txt";
+
+  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(false));
+  EXPECT_CALL(mockHost, writeFile(_, _)).Times(0);
+
+  auto json =
+      createJsonInput({{"path", "file.txt"}, {"content", "replacement"}});
+  auto &alloc = json.GetAllocator();
+  rapidjson::Value editArray(rapidjson::kArrayType);
+  rapidjson::Value editObj(rapidjson::kObjectType);
+  editObj.AddMember("op", makeJsonString("insert_after", alloc), alloc);
+  editObj.AddMember("anchor", makeJsonString("1#abcd", alloc), alloc);
+  rapidjson::Value newLines(rapidjson::kArrayType);
+  newLines.PushBack(makeJsonString("inserted", alloc), alloc);
+  editObj.AddMember("new_lines", newLines, alloc);
+  editArray.PushBack(editObj, alloc);
+  json.AddMember("edits", editArray, alloc);
+
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+  ITool *itool = &tool;
+  auto result = itool->execute(json, ctx);
+
+  EXPECT_FALSE(result.success);
+  EXPECT_NE(result.error.find("exactly one editing mode"), std::string::npos);
+}
+
 TEST_F(GrepToolTest, contextLines) {
   ProcessResult result;
   result.exitCode = 0;
@@ -775,9 +1074,10 @@ protected:
 TEST_F(ProcessExecuteToolTest, cwdDefaultsToAgentCwd) {
   std::string capturedCwd;
 
-  EXPECT_CALL(mockAgent.mockEnv_->mockProcessManager(), spawnProcess(_, _, _, _))
+  EXPECT_CALL(mockAgent.mockEnv_->mockProcessManager(), spawnProcess(_, _, _, _, _))
       .WillOnce(Invoke([&capturedCwd](const std::string &, const std::string &,
-                                      const std::string &cwd, const auto &) {
+                                      const std::string &cwd, const auto &,
+                                      bool) {
         capturedCwd = cwd;
         return "proc_123";
       }));
@@ -795,7 +1095,7 @@ TEST_F(ProcessExecuteToolTest, cwdDefaultsToAgentCwd) {
 }
 
 TEST_F(ProcessExecuteToolTest, timeoutHandling) {
-  EXPECT_CALL(mockAgent.mockEnv_->mockProcessManager(), spawnProcess(_, _, _, _)).WillOnce(Return("proc_123"));
+  EXPECT_CALL(mockAgent.mockEnv_->mockProcessManager(), spawnProcess(_, _, _, _, _)).WillOnce(Return("proc_123"));
 
   ProcessSnapshot runningSnapshot{true, -1, "partial output", "", 100.0};
   EXPECT_CALL(mockAgent.mockEnv_->mockProcessManager(), inspectProcess(_))

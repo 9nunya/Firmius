@@ -75,6 +75,14 @@ std::string roleToString(Role r) {
   }
   return "user";
 }
+
+std::string trimTrailingWhitespace(std::string value) {
+  while (!value.empty() &&
+         std::isspace(static_cast<unsigned char>(value.back()))) {
+    value.pop_back();
+  }
+  return value;
+}
 } // namespace
 
 BaseOpenAIProvider::BaseOpenAIProvider(std::string id,
@@ -176,6 +184,26 @@ int BaseOpenAIProvider::calculateRetryDelay(int attempt,
   double jitter = dis(gen);
 
   return static_cast<int>(baseDelay * jitter);
+}
+
+std::string BaseOpenAIProvider::formatErrorMessage(
+    const std::string &providerId, const std::string &modelId, int httpStatus,
+    const std::string &responseBody, const std::string &prefix) {
+  std::string message = prefix;
+  if (httpStatus > 0) {
+    message += " (HTTP " + std::to_string(httpStatus) + ")";
+  }
+  if (!providerId.empty()) {
+    message += "\nProvider: " + providerId;
+  }
+  if (!modelId.empty()) {
+    message += "\nModel: " + modelId;
+  }
+  const std::string rawBody = trimTrailingWhitespace(responseBody);
+  if (!rawBody.empty()) {
+    message += "\nRaw provider body:\n" + rawBody;
+  }
+  return message;
 }
 
 void BaseOpenAIProvider::stream(
@@ -335,21 +363,20 @@ void BaseOpenAIProvider::stream(
     }
 
     if (isNonRetriableStatus(static_cast<int>(responseCode))) {
-      std::string errMsg =
-          "API error (HTTP " + std::to_string(responseCode) + ")";
-      if (!ctx.buffer.empty())
-        errMsg += "\n" + ctx.buffer;
+      std::string errMsg = formatErrorMessage(
+          getId(), opts.modelId, static_cast<int>(responseCode), ctx.buffer,
+          "API error");
       onEvent(StreamError{errMsg, static_cast<int>(responseCode), ""});
       break;
     }
 
     if (isRetriableStatus(static_cast<int>(responseCode))) {
       if (attempt >= RetryConstants::MAX_RETRIES) {
-        std::string errMsg = "API error (HTTP " + std::to_string(responseCode) +
-                             ") after " + std::to_string(attempt + 1) +
-                             " attempts";
-        if (!ctx.buffer.empty())
-          errMsg += "\n" + ctx.buffer;
+        std::string errMsg =
+            formatErrorMessage(getId(), opts.modelId,
+                               static_cast<int>(responseCode), ctx.buffer,
+                               "API error after " +
+                                   std::to_string(attempt + 1) + " attempts");
 
         onEvent(StreamRetryExhausted{static_cast<int>(responseCode),
                                      attempt + 1,
@@ -373,10 +400,9 @@ void BaseOpenAIProvider::stream(
       }
       attempt++;
     } else {
-      std::string errMsg =
-          "API error (HTTP " + std::to_string(responseCode) + ")";
-      if (!ctx.buffer.empty())
-        errMsg += "\n" + ctx.buffer;
+      std::string errMsg = formatErrorMessage(
+          getId(), opts.modelId, static_cast<int>(responseCode), ctx.buffer,
+          "API error");
       onEvent(StreamError{errMsg, static_cast<int>(responseCode), ""});
       break;
     }
@@ -941,10 +967,9 @@ void BaseOpenAIProvider::generateSummary(
 
     if (isNonRetriableStatus(static_cast<int>(responseCode)) ||
         attempt >= RetryConstants::MAX_RETRIES) {
-      std::string errMsg = "Summary generation API error (HTTP " +
-                           std::to_string(responseCode) + ")";
-      if (!ctx.buffer.empty())
-        errMsg += "\n" + ctx.buffer;
+      std::string errMsg = formatErrorMessage(
+          getId(), modelId, static_cast<int>(responseCode), ctx.buffer,
+          "Summary generation API error");
       onEvent(StreamError{errMsg, static_cast<int>(responseCode), ""});
       break;
     }

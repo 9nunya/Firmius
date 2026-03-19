@@ -101,6 +101,48 @@ target_include_directories(test_harness PRIVATE
 )
 gtest_discover_tests(test_harness)
 
+add_executable(test_qwen_provider
+    provider/test_qwen_provider.cpp
+)
+target_link_libraries(test_qwen_provider PRIVATE
+    firmius::provider
+    firmius::shared
+    GTest::gtest_main
+)
+target_include_directories(test_qwen_provider PRIVATE
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_qwen_provider)
+
+add_executable(test_base_openai_provider
+    provider/test_base_openai_provider.cpp
+)
+target_link_libraries(test_base_openai_provider PRIVATE
+    firmius::provider
+    firmius::shared
+    GTest::gtest_main
+)
+target_include_directories(test_base_openai_provider PRIVATE
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_base_openai_provider)
+
+add_executable(test_provider_stream_debug_audit
+    audits/test_provider_stream_debug_audit.cpp
+)
+target_link_libraries(test_provider_stream_debug_audit PRIVATE
+    firmius::audits
+    firmius::provider
+    firmius::core
+    firmius::shared
+    GTest::gtest_main
+    CURL::libcurl
+)
+target_include_directories(test_provider_stream_debug_audit PRIVATE
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_provider_stream_debug_audit)
+
 # PurposeLoader tests
 add_executable(test_purpose_loader
     core/test_purpose_loader.cpp
@@ -114,6 +156,35 @@ target_include_directories(test_purpose_loader PRIVATE
     ${rapidjson_SOURCE_DIR}/include
 )
 gtest_discover_tests(test_purpose_loader)
+
+add_executable(test_engine_images
+    core/test_engine_images.cpp
+)
+target_link_libraries(test_engine_images PRIVATE
+    firmius::core
+    firmius::provider
+    firmius::shared
+    GTest::gtest_main
+    CURL::libcurl
+)
+target_include_directories(test_engine_images PRIVATE
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_engine_images)
+
+add_executable(test_process_manager
+    core/test_process_manager.cpp
+)
+target_link_libraries(test_process_manager PRIVATE
+    firmius::core
+    firmius::shared
+    firmius_test_mocks
+    GTest::gtest_main
+)
+target_include_directories(test_process_manager PRIVATE
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_process_manager)
 
 # SubagentTool tests
 add_executable(test_subagent_tool
@@ -242,6 +313,19 @@ target_include_directories(test_tui_hotkeys PRIVATE
 )
 gtest_discover_tests(test_tui_hotkeys)
 
+add_executable(test_input_bar
+    tui/test_input_bar.cpp
+)
+target_link_libraries(test_input_bar PRIVATE
+    firmius::shared
+    GTest::gtest_main
+)
+target_include_directories(test_input_bar PRIVATE
+    ../../packages/tui/include
+    ../../packages/tui/src
+)
+gtest_discover_tests(test_input_bar)
+
 add_executable(test_active_plan_state
     tui/test_active_plan_state.cpp
     ../../packages/tui/src/ActivePlanState.cpp
@@ -255,6 +339,191 @@ target_include_directories(test_active_plan_state PRIVATE
     ../../packages/tui/src
 )
 gtest_discover_tests(test_active_plan_state)
+
+add_executable(test_stream_state_manager_history
+    tui/test_stream_state_manager_history.cpp
+    ../../packages/tui/src/StreamStateManager.cpp
+)
+target_link_libraries(test_stream_state_manager_history PRIVATE
+    firmius::shared
+    firmius::core
+    GTest::gtest_main
+)
+target_include_directories(test_stream_state_manager_history PRIVATE
+    ../../packages/tui/include
+    ../../packages/tui/src
+    ../../packages/core/include
+    ../../packages/shared/include
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_stream_state_manager_history)
+
+add_executable(test_stream_state_manager_live
+    tui/test_stream_state_manager_live.cpp
+    ../../packages/tui/src/StreamStateManager.cpp
+)
+target_link_libraries(test_stream_state_manager_live PRIVATE
+    firmius::shared
+    firmius::core
+    GTest::gtest_main
+)
+target_include_directories(test_stream_state_manager_live PRIVATE
+    ../../packages/tui/include
+    ../../packages/tui/src
+    ../../packages/core/include
+    ../../packages/shared/include
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_stream_state_manager_live)
+
+add_executable(test_transcript_grouping
+    tui/test_transcript_grouping.cpp
+    ../../packages/tui/src/components/TranscriptGrouping.cpp
+)
+target_link_libraries(test_transcript_grouping PRIVATE
+    firmius::shared
+    GTest::gtest_main
+)
+target_include_directories(test_transcript_grouping PRIVATE
+    ../../packages/tui/include
+    ../../packages/tui/src
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_transcript_grouping)
+
+add_executable(test_chat_window_helpers
+    tui/test_chat_window_helpers.cpp
+)
+target_link_libraries(test_chat_window_helpers PRIVATE
+    firmius::shared
+    GTest::gtest_main
+)
+target_include_directories(test_chat_window_helpers PRIVATE
+    ../../packages/tui/include
+    ../../packages/tui/src
+    ../../packages/shared/include
+)
+gtest_discover_tests(test_chat_window_helpers)
+
+add_executable(test_help_overlay
+    tui/test_help_overlay.cpp
+    ../../packages/tui/src/components/Markdown.cpp
+    ../../packages/tui/src/components/ScrollableBox.cpp
+)
+target_link_libraries(test_help_overlay PRIVATE
+    GTest::gtest_main
+    ftxui::dom
+    ftxui::screen
+    ftxui::component
+)
+target_include_directories(test_help_overlay PRIVATE
+    ../../packages/tui/include
+    ../../packages/tui/src
+)
+gtest_discover_tests(test_help_overlay)
+
+add_executable(test_error_display
+    tui/test_error_display.cpp
+    ../../packages/tui/src/components/ErrorDisplay.cpp
+    ../../packages/tui/src/components/Markdown.cpp
+    ../../packages/tui/src/ThemeManager.cpp
+)
+target_link_libraries(test_error_display PRIVATE
+    firmius::shared
+    GTest::gtest_main
+    ftxui::dom
+    ftxui::screen
+    tree_sitter_all
+)
+target_include_directories(test_error_display PRIVATE
+    ../../packages/tui/include
+    ../../packages/tui/src
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_error_display)
+
+add_executable(test_plan_lane
+    tui/test_plan_lane.cpp
+    ../../packages/tui/src/components/PlanLane.cpp
+    ../../packages/tui/src/components/GlintEffect.cpp
+    ../../packages/tui/src/ThemeManager.cpp
+)
+target_link_libraries(test_plan_lane PRIVATE
+    firmius::shared
+    GTest::gtest_main
+    ftxui::dom
+    ftxui::screen
+    ftxui::component
+)
+target_include_directories(test_plan_lane PRIVATE
+    ../../packages/tui/include
+    ../../packages/tui/src
+)
+gtest_discover_tests(test_plan_lane)
+
+add_executable(test_status_bar
+    tui/test_status_bar.cpp
+    ../../packages/tui/src/components/StatusBar.cpp
+    ../../packages/tui/src/components/GlintEffect.cpp
+    ../../packages/tui/src/ThemeManager.cpp
+)
+target_link_libraries(test_status_bar PRIVATE
+    firmius::shared
+    GTest::gtest_main
+    ftxui::dom
+    ftxui::screen
+    ftxui::component
+)
+target_include_directories(test_status_bar PRIVATE
+    ../../packages/tui/include
+    ../../packages/tui/src
+)
+gtest_discover_tests(test_status_bar)
+
+add_executable(test_file_edit_tool_block
+    tui/test_file_edit_tool_block.cpp
+    ../../packages/tui/src/components/FileEditToolBlock.cpp
+    ../../packages/tui/src/components/FileEditDiff.cpp
+    ../../packages/tui/src/components/SyntaxHighlighter.cpp
+    ../../packages/tui/src/ThemeManager.cpp
+    ../../packages/tui/src/components/GlintEffect.cpp
+    ../../packages/tui/src/NotificationManager.cpp
+)
+target_link_libraries(test_file_edit_tool_block PRIVATE
+    firmius::shared
+    GTest::gtest_main
+    ftxui::dom
+    ftxui::screen
+    ftxui::component
+    tree_sitter_all
+)
+target_include_directories(test_file_edit_tool_block PRIVATE
+    ../../packages/tui/include
+    ../../packages/tui/src
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_file_edit_tool_block)
+
+add_executable(test_process_execute_tool_block
+    tui/test_process_execute_tool_block.cpp
+    ../../packages/tui/src/components/ProcessExecuteToolBlock.cpp
+    ../../packages/tui/src/components/LogWindow.cpp
+    ../../packages/tui/src/components/ANSIParser.cpp
+    ../../packages/tui/src/ThemeManager.cpp
+)
+target_link_libraries(test_process_execute_tool_block PRIVATE
+    firmius::shared
+    GTest::gtest_main
+    ftxui::dom
+    ftxui::screen
+    ftxui::component
+)
+target_include_directories(test_process_execute_tool_block PRIVATE
+    ../../packages/tui/include
+    ../../packages/tui/src
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_process_execute_tool_block)
 
 # Workflow tests
 add_executable(test_workflow

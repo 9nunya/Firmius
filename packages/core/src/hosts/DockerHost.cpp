@@ -588,11 +588,7 @@ ProcessSnapshot DockerHost::inspectBackgroundProcess(const std::string& id) {
     if (it == backgroundProcesses.end()) {
         throw std::runtime_error("Background process not found: " + id);
     }
-    auto snapshot = it->second->inspect();
-    if (!snapshot.running) {
-        backgroundProcesses.erase(it);
-    }
-    return snapshot;
+    return it->second->inspect();
 }
 
 void DockerHost::writeToBackgroundProcess(const std::string& id, const std::string& data) {

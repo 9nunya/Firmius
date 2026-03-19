@@ -55,6 +55,35 @@
 
 namespace firmius::core {
 
+namespace {
+AgentStatus inferPersistedStatus(const AgentHistory &history) {
+  for (auto it = history.turns.rbegin(); it != history.turns.rend(); ++it) {
+    if (it->messages.empty()) {
+      continue;
+    }
+    const auto &message = it->messages.back();
+    if (message.role == Role::Error) {
+      for (const auto &part : message.content) {
+        if (auto *error = std::get_if<ErrorContent>(&part)) {
+          if (error->errorName == "Agent Cancelled") {
+            return AgentStatus::Cancelled;
+          }
+          return AgentStatus::Error;
+        }
+      }
+      return AgentStatus::Error;
+    }
+    if (message.role == Role::Assistant || message.role == Role::ToolResult) {
+      return AgentStatus::Idle;
+    }
+    if (message.role == Role::User && it->turnId.rfind("user-task-", 0) == 0) {
+      return AgentStatus::Cancelled;
+    }
+  }
+  return AgentStatus::Idle;
+}
+} // namespace
+
 Engine::Engine() {
   initProviders();
 
@@ -126,7 +155,8 @@ std::string Engine::summonAgent(const std::string &threadId,
                                 const std::string &requestedAgentId,
                                 const std::string &providerId,
                                 const std::string &modelId,
-                                const std::string &variantName) {
+                                const std::string &variantName,
+                                const std::vector<firmius::shared::ImageContent> &images) {
   reap();
 
   // Suppress unused parameter warnings
@@ -148,7 +178,7 @@ std::string Engine::summonAgent(const std::string &threadId,
 
   {
     std::lock_guard<std::mutex> lock(listenerMutex);
-    fleet.emplace_back([this, threadId, agentId, personaName, task, prom,
+    fleet.emplace_back([this, threadId, agentId, personaName, task, images, prom,
                         persistHistory, parentId, friendlyName, title]() {
       bool errorBroadcast = false;
       try {
@@ -249,7 +279,7 @@ std::string Engine::summonAgent(const std::string &threadId,
         agent->run(task, [this, agentId, parentId,
                           &errorBroadcast](const StreamEvent &ev) {
           handleStreamEvent(agentId, parentId, ev, errorBroadcast);
-        });
+        }, images);
 
         const auto &turns = agent->getContext().history->turns;
         if (!turns.empty() && !turns.back().messages.empty()) {
@@ -351,6 +381,7 @@ std::string Engine::resumeAgent(const std::string &threadId,
   ctx.environment.type = metadata.hostOptions.type;
   ctx.history = std::make_shared<AgentHistory>(std::move(history));
   ctx.aggregateMetrics = aggregateHistoryMetrics(*ctx.history);
+  ctx.state.currentStatus = inferPersistedStatus(*ctx.history);
 
   std::unique_ptr<IHost> host;
   if (metadata.hostOptions.type == HostType::Docker) {
@@ -492,6 +523,7 @@ void Engine::cancelAgent(const std::string &agentId) {
   auto agent = AgentRegistry::instance().getAgent(agentId);
   if (agent) {
     agent->interrupt();
+    broadcast(AgentInterrupted{agentId, agent->getContext().identity.parentId});
   }
 }
 
@@ -533,7 +565,8 @@ void Engine::handleStreamEvent(const std::string &agentId,
     broadcast(*cc);
   } else if (auto *pod = std::get_if<ProcessOutputDelta>(&ev)) {
     broadcast(AgentProcessOutput{agentId, pod->processId, pod->output,
-                                 pod->isStderr, pod->finished, parentId});
+                                 pod->isStderr, pod->finished, pod->exitCode,
+                                 pod->durationMs, parentId});
   } else if (auto *sr = std::get_if<StreamRetrying>(&ev)) {
     broadcast(AgentRetrying{agentId, sr->attempt, sr->maxAttempts,
                             sr->httpStatus, sr->delayMs, sr->reason, parentId,
@@ -647,6 +680,81 @@ void Engine::executeTask(
 
       } catch (const std::exception &e) {
         // Only broadcast error if we haven't already done so from StreamError
+        if (!errorBroadcast) {
+          if (agent && agent->getContext().history) {
+            firmius::shared::AgentTurn errorTurn;
+            errorTurn.turnId =
+                "error-" +
+                std::to_string(agent->getContext().history->turns.size());
+            firmius::shared::Message errorMsg;
+            errorMsg.role = firmius::shared::Role::Error;
+            errorMsg.content.push_back(firmius::shared::ErrorContent{
+                "Engine Error", "Task execution failed.",
+                std::string(e.what())});
+            errorMsg.timestamp = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch())
+                    .count());
+            errorTurn.messages.push_back(errorMsg);
+            agent->getMutableContext().history->turns.push_back(errorTurn);
+            if (agent->getContext().config.persistHistory) {
+              firmius::core::Journaler jnl(
+                  agent->getContext().history->threadId, agentId);
+              jnl.appendTurn(errorTurn);
+            }
+          }
+          broadcast(AgentError{agentId, e.what(), parentId});
+        }
+        prom->set_exception(std::make_exception_ptr(e));
+      }
+    });
+  }
+}
+
+void Engine::resumeTask(const std::string &agentId) {
+  auto agent = AgentRegistry::instance().getAgent(agentId);
+  if (!agent) {
+    throw std::runtime_error("Agent not found: " + agentId);
+  }
+
+  auto prom = std::make_shared<std::promise<std::string>>();
+  {
+    std::lock_guard<std::mutex> lock(futuresMutex);
+    agentFutures[agentId] = prom->get_future().share();
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(taskThreadsMutex_);
+    taskThreads_.emplace_back([this, agentId, agent, prom]() mutable {
+      std::string parentId;
+      bool errorBroadcast = false;
+
+      try {
+        parentId = agent->getContext().identity.parentId;
+        std::string finalSummary = "No summary provided.";
+
+        agent->resume([this, agentId, parentId,
+                       &errorBroadcast](const StreamEvent &ev) {
+          handleStreamEvent(agentId, parentId, ev, errorBroadcast);
+        });
+
+        const auto &turns = agent->getContext().history->turns;
+        if (!turns.empty() && !turns.back().messages.empty()) {
+          const auto &lastMsg = turns.back().messages.back();
+          std::string content;
+          for (const auto &part : lastMsg.content) {
+            if (auto *txt = std::get_if<TextContent>(&part)) {
+              content += txt->text;
+            }
+          }
+          if (!content.empty()) {
+            finalSummary = content;
+          }
+        }
+
+        broadcast(AgentCompleted{agentId, finalSummary, parentId});
+        prom->set_value(finalSummary);
+      } catch (const std::exception &e) {
         if (!errorBroadcast) {
           if (agent && agent->getContext().history) {
             firmius::shared::AgentTurn errorTurn;

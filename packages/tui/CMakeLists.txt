@@ -31,6 +31,8 @@ target_sources(firmius PRIVATE
     src/modals/QuotasModal.cpp
     src/modals/AccountsModal.cpp
     src/components/ChatWindow.cpp
+    src/components/TranscriptGrouping.cpp
+    src/components/ErrorDisplay.cpp
     src/components/ToolBlock.cpp
     src/components/FileEditToolBlock.cpp
     src/components/FileEditDiff.cpp

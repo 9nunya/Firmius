@@ -2,12 +2,19 @@
 #include "Serialization.hpp"
 #include "utils/StringUtil.hpp"
 #include <algorithm>
+#include <cerrno>
 #include <filesystem>
 #include <fstream>
+#include <functional>
+#include <mutex>
 #include <sstream>
+#include <system_error>
+#include <unordered_map>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
 #include <chrono>
+#include <fcntl.h>
+#include <unistd.h>
 
 #include <iostream>
 
@@ -37,17 +44,73 @@ uint64_t nowEpochMs() {
             .count());
 }
 
+void fsyncDirectoryBestEffort(const std::filesystem::path& directory) {
+    const int fd = ::open(directory.c_str(), O_RDONLY | O_DIRECTORY);
+    if (fd < 0) {
+        return;
+    }
+    ::fsync(fd);
+    ::close(fd);
+}
+
+void writeStringAtomically(const std::string& content,
+                           const std::string& path) {
+    const std::filesystem::path finalPath(path);
+    std::filesystem::create_directories(finalPath.parent_path());
+
+    const std::filesystem::path tempPath =
+        finalPath.parent_path() /
+        (finalPath.filename().string() + ".tmp." +
+         shared::StringUtil::generateUuid());
+
+    const int fd = ::open(tempPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) {
+        throw std::runtime_error("Cannot write JSON file: " + path);
+    }
+
+    const char* data = content.data();
+    std::size_t remaining = content.size();
+    while (remaining > 0) {
+        const ssize_t written = ::write(fd, data, remaining);
+        if (written < 0) {
+            const int error = errno;
+            ::close(fd);
+            std::filesystem::remove(tempPath);
+            throw std::runtime_error("Cannot write JSON file: " + path +
+                                     " (" + std::generic_category().message(error) +
+                                     ")");
+        }
+        data += written;
+        remaining -= static_cast<std::size_t>(written);
+    }
+
+    if (::fsync(fd) != 0) {
+        const int error = errno;
+        ::close(fd);
+        std::filesystem::remove(tempPath);
+        throw std::runtime_error("Cannot flush JSON file: " + path +
+                                 " (" + std::generic_category().message(error) +
+                                 ")");
+    }
+    ::close(fd);
+
+    if (::rename(tempPath.c_str(), finalPath.c_str()) != 0) {
+        const int error = errno;
+        std::filesystem::remove(tempPath);
+        throw std::runtime_error("Cannot replace JSON file: " + path +
+                                 " (" + std::generic_category().message(error) +
+                                 ")");
+    }
+
+    fsyncDirectoryBestEffort(finalPath.parent_path());
+}
+
 void writeJsonDocument(const rapidjson::Document& document,
                        const std::string& path) {
     rapidjson::StringBuffer buffer;
     rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
     document.Accept(writer);
-
-    std::ofstream file(path);
-    if (!file.is_open()) {
-        throw std::runtime_error("Cannot write JSON file: " + path);
-    }
-    file << buffer.GetString();
+    writeStringAtomically(buffer.GetString(), path);
 }
 
 rapidjson::Document readJsonDocument(const std::string& path,
@@ -95,6 +158,22 @@ CommandSeverity severityFromString(const std::string& value) {
     return CommandSeverity::LOW;
 }
 
+std::shared_ptr<std::mutex> acquirePlanMutex(const std::string& threadId,
+                                             const std::string& planId) {
+    static std::mutex registryMutex;
+    static std::unordered_map<std::string, std::weak_ptr<std::mutex>> registry;
+
+    const std::string key = threadId + ":" + planId;
+    std::lock_guard<std::mutex> guard(registryMutex);
+    if (auto existing = registry[key].lock()) {
+        return existing;
+    }
+
+    auto created = std::make_shared<std::mutex>();
+    registry[key] = created;
+    return created;
+}
+
 } // namespace
 
 ThreadManager::ThreadManager(std::string basePath)
@@ -135,6 +214,24 @@ ThreadMetadata ThreadManager::getMetadata(const std::string& threadId) const {
         meta.threadId = threadId;
     }
     return meta;
+}
+
+bool ThreadManager::tryGetMetadata(const std::string& threadId,
+                                   ThreadMetadata& metadata,
+                                   std::string* error) const {
+    try {
+        metadata = getMetadata(threadId);
+        return true;
+    } catch (const std::exception& ex) {
+        if (error) {
+            *error = ex.what();
+        }
+    } catch (...) {
+        if (error) {
+            *error = "Unknown error loading thread metadata";
+        }
+    }
+    return false;
 }
 
 AgentHistory ThreadManager::loadAgentHistory(const std::string& threadId, const std::string& agentId) const {
@@ -196,13 +293,9 @@ std::vector<ThreadMetadata> ThreadManager::listThreadsWithMetadata() const {
     if (!std::filesystem::exists(dir)) return {};
     for (const auto& entry : std::filesystem::directory_iterator(dir)) {
         if (entry.is_directory()) {
-            try {
-                auto meta = getMetadata(entry.path().filename().string());
-                if (meta.threadId.empty()) {
-                    meta.threadId = entry.path().filename().string();
-                }
+            ThreadMetadata meta;
+            if (tryGetMetadata(entry.path().filename().string(), meta)) {
                 result.push_back(meta);
-            } catch (...) {
             }
         }
     }
@@ -240,6 +333,9 @@ void ThreadManager::writePlan(const std::string& threadId, const Plan& plan) {
     if (!std::filesystem::exists(threadDir)) {
         throw std::runtime_error("Thread not found: " + threadId);
     }
+
+    auto planMutex = acquirePlanMutex(threadId, plan.id);
+    std::lock_guard<std::mutex> lock(*planMutex);
 
     std::string plansDir = plansDirectoryPathFor(basePath_, threadId);
     std::filesystem::create_directories(plansDir);
@@ -301,12 +397,42 @@ void ThreadManager::updatePlan(const std::string& threadId, const Plan& plan) {
         throw std::runtime_error("Plan threadId does not match target thread");
     }
 
+    auto planMutex = acquirePlanMutex(threadId, plan.id);
+    std::lock_guard<std::mutex> lock(*planMutex);
+
     Plan existing = getPlan(threadId, plan.id);
     if (persistedPlan.createdAt == 0) {
         persistedPlan.createdAt = existing.createdAt;
     }
     persistedPlan.updatedAt = nowEpochMs();
-    writePlan(threadId, persistedPlan);
+    writeJsonDocument(toJson(persistedPlan),
+                      planPathFor(basePath_, threadId, persistedPlan.id));
+}
+
+Plan ThreadManager::mutatePlan(const std::string& threadId,
+                               const std::string& planId,
+                               const std::function<void(Plan&)>& mutator) {
+    if (planId.empty()) {
+        throw std::runtime_error("Cannot mutate plan with empty id");
+    }
+
+    auto planMutex = acquirePlanMutex(threadId, planId);
+    std::lock_guard<std::mutex> lock(*planMutex);
+
+    Plan plan = getPlan(threadId, planId);
+    mutator(plan);
+    if (plan.threadId.empty()) {
+        plan.threadId = threadId;
+    }
+    if (plan.threadId != threadId) {
+        throw std::runtime_error("Plan threadId does not match target thread");
+    }
+    if (plan.createdAt == 0) {
+        plan.createdAt = nowEpochMs();
+    }
+    plan.updatedAt = nowEpochMs();
+    writeJsonDocument(toJson(plan), planPathFor(basePath_, threadId, plan.id));
+    return plan;
 }
 
 std::map<std::string, AgentManifestEntry> ThreadManager::readAgentManifest(const std::string& threadId) const {
@@ -360,6 +486,27 @@ std::map<std::string, AgentManifestEntry> ThreadManager::readAgentManifest(const
     }
 
     return manifest;
+}
+
+bool ThreadManager::tryReadAgentManifest(
+    const std::string& threadId,
+    std::map<std::string, AgentManifestEntry>& manifest,
+    std::string* error) const {
+    try {
+        manifest = readAgentManifest(threadId);
+        return true;
+    } catch (const std::exception& ex) {
+        manifest.clear();
+        if (error) {
+            *error = ex.what();
+        }
+    } catch (...) {
+        manifest.clear();
+        if (error) {
+            *error = "Unknown error loading thread manifest";
+        }
+    }
+    return false;
 }
 
 void ThreadManager::writeAgentManifest(const std::string& threadId, const std::map<std::string, AgentManifestEntry>& manifest) {

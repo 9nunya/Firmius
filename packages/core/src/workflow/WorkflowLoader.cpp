@@ -9,8 +9,82 @@
 #include <regex>
 #include <sstream>
 #include <cctype>
+#include <unistd.h>
 
 namespace firmius::core {
+
+namespace {
+
+bool ensureWritableDirectory(const std::filesystem::path &dir) {
+  std::error_code ec;
+  std::filesystem::create_directories(dir, ec);
+  if (ec || !std::filesystem::exists(dir) || !std::filesystem::is_directory(dir)) {
+    return false;
+  }
+
+  const auto probe = dir / (".write_probe_" + firmius::shared::StringUtil::generateUuid());
+  std::ofstream out(probe);
+  if (!out.is_open()) {
+    return false;
+  }
+  out << "ok";
+  out.close();
+  std::filesystem::remove(probe, ec);
+  return true;
+}
+
+bool isUsableWorkflowDir(const std::filesystem::path &dir) {
+  try {
+    if (!std::filesystem::exists(dir) || !std::filesystem::is_directory(dir)) {
+      return false;
+    }
+    for (const auto &entry : std::filesystem::directory_iterator(dir)) {
+      if (!entry.is_regular_file() || entry.path().extension() != ".md") {
+        continue;
+      }
+      std::ifstream file(entry.path());
+      if (file.good()) {
+        return true;
+      }
+    }
+    return false;
+  } catch (...) {
+    return false;
+  }
+}
+
+std::filesystem::path resolveWritableFirmiusHome() {
+  if (const char *home = std::getenv("HOME")) {
+    const std::filesystem::path userHome = std::filesystem::path(home) / ".firmius";
+    if (ensureWritableDirectory(userHome)) {
+      return userHome;
+    }
+  }
+
+  const std::filesystem::path localHome =
+      std::filesystem::current_path() / ".firmius";
+  if (ensureWritableDirectory(localHome)) {
+    return localHome;
+  }
+
+  const std::filesystem::path tempHome =
+      std::filesystem::temp_directory_path() /
+      ("firmius-" + std::to_string(static_cast<long long>(getuid())));
+  if (ensureWritableDirectory(tempHome)) {
+    return tempHome;
+  }
+
+  return std::filesystem::temp_directory_path() / "firmius";
+}
+
+std::string ensureTrailingSlash(std::string dir) {
+  if (!dir.empty() && dir.back() != '/') {
+    dir += '/';
+  }
+  return dir;
+}
+
+} // namespace
 
 /**
  * Parse a YAML args array from frontmatter lines.
@@ -150,25 +224,29 @@ std::vector<std::string> WorkflowLoader::getWorkflowIds() const {
 }
 
 void WorkflowLoader::bootstrapDefaults(const std::string &builtinWorkflowsDir) {
-  const char *home = std::getenv("HOME");
-  if (!home)
-    return;
-
-  std::string userDir = std::string(home) + "/.firmius/workflows";
-  if (std::filesystem::exists(userDir))
-    return;
-
   if (!std::filesystem::exists(builtinWorkflowsDir))
     return;
 
-  std::filesystem::create_directories(userDir);
+  const std::filesystem::path userDir = resolveWritableFirmiusHome() / "workflows";
+  if (isUsableWorkflowDir(userDir)) {
+    return;
+  }
+
+  try {
+    std::filesystem::create_directories(userDir);
+  } catch (const std::filesystem::filesystem_error &) {
+    return;
+  }
+
   for (const auto &entry :
        std::filesystem::directory_iterator(builtinWorkflowsDir)) {
     if (entry.is_regular_file()) {
-      std::filesystem::copy_file(
-          entry.path(),
-          std::string(userDir) + "/" + entry.path().filename().string(),
-          std::filesystem::copy_options::overwrite_existing);
+      try {
+        std::filesystem::copy_file(
+            entry.path(), userDir / entry.path().filename(),
+            std::filesystem::copy_options::overwrite_existing);
+      } catch (const std::filesystem::filesystem_error &) {
+      }
     }
   }
 }
@@ -292,22 +370,19 @@ std::optional<Workflow> WorkflowLoader::loadWorkflow(const std::string &path) {
 
 std::string WorkflowLoader::getWorkflowsDir() const {
   const char *envDir = std::getenv("FIRMIUS_WORKFLOWS_DIR");
-  if (envDir && std::filesystem::exists(envDir)) {
-    std::string dir = envDir;
-    if (dir.back() != '/')
-      dir += '/';
-    return dir;
-  }
-
-  const char *home = std::getenv("HOME");
-  if (home) {
-    std::string userDir = std::string(home) + "/.firmius/workflows/";
-    if (std::filesystem::exists(userDir)) {
-      return userDir;
+  if (envDir) {
+    const std::filesystem::path dir(envDir);
+    if (isUsableWorkflowDir(dir)) {
+      return ensureTrailingSlash(dir.string());
     }
   }
 
-  return "workflows/";
+  const std::filesystem::path userDir = resolveWritableFirmiusHome() / "workflows";
+  if (isUsableWorkflowDir(userDir)) {
+    return ensureTrailingSlash(userDir.string());
+  }
+
+  return ensureTrailingSlash("workflows");
 }
 
 } // namespace firmius::core

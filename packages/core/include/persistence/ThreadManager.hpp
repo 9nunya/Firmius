@@ -3,6 +3,7 @@
 
 #include "Context.hpp"
 #include "ICommandIntent.hpp"
+#include <functional>
 #include <string>
 #include <vector>
 #include <map>
@@ -65,6 +66,8 @@ public:
      * @brief Loads metadata for a thread.
      */
     ThreadMetadata getMetadata(const std::string& threadId) const;
+    bool tryGetMetadata(const std::string& threadId, ThreadMetadata& metadata,
+                        std::string* error = nullptr) const;
 
     /**
      * @brief Loads the full history for a specific agent in a thread.
@@ -85,12 +88,17 @@ public:
     Plan getPlan(const std::string& threadId, const std::string& planId) const;
     std::vector<Plan> listPlans(const std::string& threadId) const;
     void updatePlan(const std::string& threadId, const Plan& plan);
+    Plan mutatePlan(const std::string& threadId, const std::string& planId,
+                    const std::function<void(Plan&)>& mutator);
 
     /**
      * @brief Reads the agent manifest for a thread.
      * @return Map of agentId to manifest entry.
      */
     std::map<std::string, AgentManifestEntry> readAgentManifest(const std::string& threadId) const;
+    bool tryReadAgentManifest(const std::string& threadId,
+                              std::map<std::string, AgentManifestEntry>& manifest,
+                              std::string* error = nullptr) const;
 
     /**
      * @brief Writes the agent manifest for a thread.

@@ -107,7 +107,7 @@ TEST(ActivePlanStateTest, IgnoresEventsForOtherThreads) {
 TEST(ActivePlanStateTest, CollapsedSummaryBucketsRemainCompact) {
   auto plan = makePlan("thread-1", "plan-1", "Permissions Cleanup");
   plan.chunks = {
-      makeChunk("draft", "Draft", WorkChunkStatus::Draft),
+      makeChunk("ready-2", "Ready 2", WorkChunkStatus::Ready),
       makeChunk("ready", "Ready", WorkChunkStatus::Ready),
       makeChunk("progress", "Progress", WorkChunkStatus::InProgress),
       makeChunk("implemented", "Implemented", WorkChunkStatus::Implemented),

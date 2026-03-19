@@ -52,6 +52,10 @@ shared::Plan loadPlan(ThreadManager &tm, const std::string &threadId,
 shared::WorkChunk &requireChunk(shared::Plan &plan, const std::string &chunkId);
 const shared::WorkChunk &requireChunk(const shared::Plan &plan,
                                       const std::string &chunkId);
+bool chunkDependenciesDone(const shared::Plan &plan,
+                           const shared::WorkChunk &chunk);
+bool blockChunkIfDependenciesIncomplete(const shared::Plan &plan,
+                                        shared::WorkChunk &chunk);
 bool chunkReadyForExecution(const shared::Plan &plan,
                             const shared::WorkChunk &chunk);
 void requireChunkReadyForExecution(const shared::Plan &plan,

@@ -39,6 +39,8 @@ ftxui::Component ToolBlock(const std::shared_ptr<ToolCallView> &view,
     return FileEditToolBlock(view);
   } else if (isMatch(view->name, "process_execute") || isMatch(view->name, "process_spawn")) {
     return ProcessExecuteToolBlock(view);
+  } else if (isMatch(view->name, "python_execute")) {
+    return ProcessExecuteToolBlock(view);
   } else if (isMatch(view->name, "summon_subagent")) {
     return SubagentToolBlock(view, history_getter, stream_getter);
   } else if (isMatch(view->name, "subagent_wait")) {

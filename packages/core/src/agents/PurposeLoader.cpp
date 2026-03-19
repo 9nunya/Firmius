@@ -21,6 +21,38 @@ namespace {
 const std::array<const char *, 7> kLegacyPromptFiles = {
     "brainstormer.md", "builder.md",    "coordinator.md", "firmius.md",
     "general.md",      "planner.md",    "reviewer.md"};
+
+std::string ensureTrailingSlash(std::string dir) {
+  if (!dir.empty() && dir.back() != '/') {
+    dir += '/';
+  }
+  return dir;
+}
+
+bool isReadableFile(const std::filesystem::path &path) {
+  std::ifstream file(path);
+  return file.good();
+}
+
+bool isUsablePromptsDir(const std::filesystem::path &dir) {
+  try {
+    if (!std::filesystem::exists(dir) || !std::filesystem::is_directory(dir)) {
+      return false;
+    }
+
+    for (const auto &entry : std::filesystem::directory_iterator(dir)) {
+      if (!entry.is_regular_file() || entry.path().extension() != ".md") {
+        continue;
+      }
+      if (isReadableFile(entry.path())) {
+        return true;
+      }
+    }
+    return false;
+  } catch (...) {
+    return false;
+  }
+}
 /**
  * @brief Maps a string scope identifier to the ToolScope enum.
  */
@@ -250,22 +282,23 @@ std::string PurposeLoader::loadCompactionPrompt() {
 
 std::string PurposeLoader::resolvePromptsDir() {
   const char *envDir = std::getenv("FIRMIUS_PROMPTS_DIR");
-  if (envDir && std::filesystem::exists(envDir)) {
-    std::string dir = envDir;
-    if (dir.back() != '/')
-      dir += '/';
-    return dir;
+  if (envDir) {
+    const std::filesystem::path dir(envDir);
+    if (isUsablePromptsDir(dir)) {
+      return ensureTrailingSlash(dir.string());
+    }
   }
 
   const char *home = std::getenv("HOME");
   if (home) {
-    std::string userDir = std::string(home) + "/.firmius/prompts/";
-    if (std::filesystem::exists(userDir)) {
-      return userDir;
+    const std::filesystem::path userDir =
+        std::filesystem::path(home) / ".firmius" / "prompts";
+    if (isUsablePromptsDir(userDir)) {
+      return ensureTrailingSlash(userDir.string());
     }
   }
 
-  return "prompts/";
+  return ensureTrailingSlash("prompts");
 }
 
 std::vector<std::string> PurposeLoader::listSwitchablePurposes() {
@@ -300,21 +333,36 @@ void PurposeLoader::bootstrapDefaults(const std::string &builtinPromptsDir) {
   if (!home)
     return;
 
-  std::string userDir = std::string(home) + "/.firmius/prompts";
-  if (!std::filesystem::exists(builtinPromptsDir))
+  const std::filesystem::path builtinDir(builtinPromptsDir);
+  if (!std::filesystem::exists(builtinDir))
     return;
 
-  std::filesystem::create_directories(userDir);
-  for (const auto *legacyFile : kLegacyPromptFiles) {
-    std::filesystem::remove(std::filesystem::path(userDir) / legacyFile);
+  const std::filesystem::path userDir =
+      std::filesystem::path(home) / ".firmius" / "prompts";
+
+  try {
+    std::filesystem::create_directories(userDir);
+  } catch (const std::filesystem::filesystem_error &) {
+    return;
   }
-  for (const auto &entry :
-       std::filesystem::directory_iterator(builtinPromptsDir)) {
+
+  for (const auto *legacyFile : kLegacyPromptFiles) {
+    try {
+      std::filesystem::remove(userDir / legacyFile);
+    } catch (const std::filesystem::filesystem_error &) {
+    }
+  }
+  for (const auto &entry : std::filesystem::directory_iterator(builtinDir)) {
     if (entry.is_regular_file()) {
-      std::filesystem::path target =
-          std::filesystem::path(userDir) / entry.path().filename();
-      std::filesystem::copy_file(entry.path(), target,
-                                 std::filesystem::copy_options::overwrite_existing);
+      std::filesystem::path target = userDir / entry.path().filename();
+      try {
+        std::filesystem::copy_file(
+            entry.path(), target,
+            std::filesystem::copy_options::overwrite_existing);
+      } catch (const std::filesystem::filesystem_error &) {
+        // Best-effort cache population only. Startup must continue using
+        // readable built-in prompts when the user prompt cache is unwritable.
+      }
     }
   }
 }

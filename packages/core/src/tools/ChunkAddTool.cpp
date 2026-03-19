@@ -17,8 +17,9 @@ std::shared_ptr<shared::JSONSchema> ChunkAddTool::getSchema() const {
              {"context", zString()},
              {"constraints", zString()},
              {"completion", zString()},
+             {"planning_gate", zBoolean()->setOptional()},
              {"status",
-              zEnum({"Draft", "Ready", "InProgress", "Implemented",
+              zEnum({"Ready", "InProgress", "Implemented",
                      "Verifying", "Done", "Blocked", "Failed", "Cancelled"})
                   ->setOptional()},
              {"depends_on", zArray(zString())->setOptional()},
@@ -33,32 +34,40 @@ shared::ToolResult ChunkAddTool::execute(const rapidjson::Value &input,
     worktools::requireChunkAddAccess(ctx);
     const std::string threadId = worktools::requireCurrentThreadId(ctx);
     auto tm = worktools::makeThreadManager();
-    shared::Plan plan =
-        worktools::loadPlan(tm, threadId, input["plan_id"].GetString());
+    shared::Plan updatedPlan;
+    shared::WorkChunk addedChunk;
 
-    shared::WorkChunk chunk;
-    chunk.id = shared::StringUtil::generateUuid();
-    chunk.title = input["title"].GetString();
-    chunk.goal = input["goal"].GetString();
-    chunk.context = input["context"].GetString();
-    chunk.constraints = input["constraints"].GetString();
-    chunk.completion = input["completion"].GetString();
-    chunk.status = input.HasMember("status")
-                       ? worktools::parseChunkStatus(input["status"].GetString())
-                       : shared::WorkChunkStatus::Ready;
-    chunk.dependsOn = worktools::parseStringArray(input, "depends_on");
-    chunk.createdAt = worktools::nowEpochMs();
-    chunk.updatedAt = chunk.createdAt;
-
-    plan.chunks.push_back(chunk);
-    tm.updatePlan(threadId, plan);
-    worktools::emitWorkEvent(shared::ChunkAdded{threadId, plan.id, chunk});
+    updatedPlan = tm.mutatePlan(
+        threadId, input["plan_id"].GetString(), [&](shared::Plan &plan) {
+          shared::WorkChunk chunk;
+          chunk.id = shared::StringUtil::generateUuid();
+          chunk.title = input["title"].GetString();
+          chunk.goal = input["goal"].GetString();
+          chunk.context = input["context"].GetString();
+          chunk.constraints = input["constraints"].GetString();
+          chunk.completion = input["completion"].GetString();
+          chunk.planningGate = input.HasMember("planning_gate") &&
+                               input["planning_gate"].GetBool();
+          chunk.status =
+              input.HasMember("status")
+                  ? worktools::parseChunkStatus(input["status"].GetString())
+                  : shared::WorkChunkStatus::Ready;
+          chunk.dependsOn = worktools::parseStringArray(input, "depends_on");
+          chunk.createdAt = worktools::nowEpochMs();
+          chunk.updatedAt = chunk.createdAt;
+          worktools::blockChunkIfDependenciesIncomplete(plan, chunk);
+          plan.chunks.push_back(chunk);
+          addedChunk = plan.chunks.back();
+        });
+    worktools::emitWorkEvent(
+        shared::ChunkAdded{threadId, updatedPlan.id, addedChunk});
 
     rapidjson::Document doc;
     doc.SetObject();
     auto &alloc = doc.GetAllocator();
-    doc.AddMember("chunk_id", rapidjson::Value(chunk.id.c_str(), alloc), alloc);
-    std::string status = worktools::chunkStatusToString(chunk.status);
+    doc.AddMember("chunk_id", rapidjson::Value(addedChunk.id.c_str(), alloc),
+                  alloc);
+    std::string status = worktools::chunkStatusToString(addedChunk.status);
     doc.AddMember("status", rapidjson::Value(status.c_str(), alloc), alloc);
     return shared::ToolResult::ok(doc);
   } catch (const std::exception &e) {

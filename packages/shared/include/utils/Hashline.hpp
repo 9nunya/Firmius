@@ -45,6 +45,8 @@ public:
 
     /**
      * @brief Parses an anchor in the form "lineNum#hash".
+     * @details Also accepts the read-output form "lineNum#hash|content" by
+     *          trimming everything after the first '|'.
      * @param anchor The anchor text.
      * @return Parsed anchor if valid.
      */
@@ -87,11 +89,29 @@ public:
     static std::string trimLine(std::string_view line);
 
     /**
-     * @brief Trims hashline prefixes from all lines in text.
-     * @param content Text with hashline-formatted lines.
-     * @return The clean text with all hashline prefixes removed.
+     * @brief Result of a hashline sanitation pass.
      */
+    struct SanitationResult {
+        int hashlinePrefixesStripped = 0;
+        int malformedHashFragmentsStripped = 0;
+        int diffMarkersStripped = 0;
+        int boundaryEchoesRemoved = 0;
+        bool boundaryEchoRemoved = false;
+        bool suspiciousContentFound = false;
+        bool suspiciousContentRejected = false;
+    };
+
+    /**
+     * @brief Trims hashline prefixes from all lines in text and sanitizes diff markers.
+     * @param content Text with hashline-formatted lines.
+     * @param outResult Optional output to store sanitation metadata.
+     * @return The clean text with all hashline prefixes and diff markers removed.
+     */
+    static std::string sanitizeContent(std::string_view content, SanitationResult* outResult = nullptr);
     static std::string trimAll(std::string_view content);
+    static std::string sanitizeDiffMarkers(std::string_view line);
+    static bool startsWithSuspiciousMetadata(std::string_view line) noexcept;
+    static bool startsWithSuspiciousDiffJunk(std::string_view line) noexcept;
 };
 
 } // namespace firmius::shared::utils

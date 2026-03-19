@@ -24,6 +24,8 @@ using namespace firmius::shared;
  */
 class ProviderStreamDebugAudit : public IAudit {
 public:
+    static std::string resolveModelIdArg(const std::vector<std::string>& args);
+
     std::string getId() const override;
     std::string getDescription() const override;
     AuditResult run(const std::vector<std::string>& args) override;

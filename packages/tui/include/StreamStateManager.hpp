@@ -4,6 +4,7 @@
 #include "Events.hpp"
 #include "utils/ToolView.hpp"
 #include <chrono>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -15,7 +16,7 @@ namespace firmius::tui {
 using firmius::shared::ToolCallView;
 
 struct TimelineEntry {
-  enum class Kind { ToolCall, Error };
+  enum class Kind { Thinking, Text, ToolCall, Error };
   Kind kind;
   std::string id;
   std::string message;
@@ -32,6 +33,14 @@ struct StreamState {
   bool provider_waiting = false;
   std::chrono::steady_clock::time_point thinking_start{};
   bool is_thinking = false;
+  std::string active_live_entry_id;
+  TimelineEntry::Kind active_live_entry_kind = TimelineEntry::Kind::Text;
+  bool has_active_live_entry = false;
+};
+
+struct ProcessCounts {
+  int live = 0;
+  int background = 0;
 };
 
 class StreamStateManager {
@@ -49,6 +58,7 @@ public:
   void handleAgentProcessSpawned(const shared::AgentProcessSpawned &e);
   void handleAgentProcessOutput(const shared::AgentProcessOutput &e);
   void handleAgentCompleted(const shared::AgentCompleted &e);
+  void handleAgentInterrupted(const shared::AgentInterrupted &e);
   void handleAgentSpawned(const shared::AgentSpawned &e,
                           const std::string &focused_agent_id);
   void handleAgentRetrying(const shared::AgentRetrying &e);
@@ -71,20 +81,36 @@ public:
   std::shared_ptr<ToolCallView>
   getToolView(const std::string &toolCallId) const;
   std::string getAgentTitle(const std::string &agentId) const;
+  ProcessCounts getProcessCounts(const std::string &agentId) const;
   const std::string &getRetryStatus() const;
   const std::vector<std::string> &getAccountSwaps() const;
   const std::vector<std::pair<std::string, std::string>> &
   getQueuedMessages() const;
+  int getToolCallClusterId(const std::string &toolCallId) const;
 
 private:
+  struct LiveQuickClusterState {
+    int current_cluster = 0;
+    bool prose_since_last_tool = false;
+  };
+
   void pushThinkingDuration(const std::string &agentId, float seconds);
   void pushTokenUsage(const std::string &agentId,
                       const shared::AgentMetrics &metrics);
   void clearRetryStatus();
+  void applyToolResult(const std::shared_ptr<ToolCallView> &view, bool success,
+                       const std::string &result);
+  void assignToolCallClusterId(const std::string &agentId,
+                               const std::string &toolCallId);
+  void appendLiveTimelineDelta(const std::string &agentId, TimelineEntry::Kind kind,
+                               const std::string &delta);
+  void clearActiveLiveEntry(const std::string &agentId);
+  TimelineEntry *findTimelineEntry(const std::string &entryId);
 
   std::unordered_map<std::string, StreamState> streams_;
   std::unordered_map<std::string, std::shared_ptr<ToolCallView>> tool_calls_;
   std::vector<TimelineEntry> timeline_;
+  uint64_t next_live_entry_sequence_ = 0;
 
   std::unordered_map<std::string, std::string> process_outputs_;
   std::unordered_map<std::string, std::string> subagent_outputs_;
@@ -94,6 +120,11 @@ private:
   std::unordered_map<std::string, std::string> subagent_to_parent_tool_;
   std::unordered_map<std::string, std::string> agent_titles_;
   std::unordered_map<std::string, std::string> agent_provider_model_;
+  std::unordered_map<std::string, std::string> process_to_agent_;
+  std::unordered_map<std::string, bool> process_background_state_;
+  std::unordered_map<std::string, bool> process_finished_state_;
+  std::unordered_map<std::string, LiveQuickClusterState> live_quick_clusters_;
+  std::unordered_map<std::string, int> tool_call_cluster_ids_;
 
   std::string retry_status_;
   std::vector<std::string> account_swaps_;

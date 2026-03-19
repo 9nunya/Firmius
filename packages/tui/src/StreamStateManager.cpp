@@ -9,6 +9,43 @@
 
 namespace firmius::tui {
 
+namespace {
+
+struct ParsedProcessResult {
+  std::string process_id;
+  std::string finish_reason;
+  int exit_code = 0;
+  bool exit_known = false;
+  double duration_ms = 0.0;
+};
+
+ParsedProcessResult parseProcessResult(const std::string &result) {
+  ParsedProcessResult parsed;
+  rapidjson::Document doc;
+  doc.Parse(result.c_str());
+  if (doc.HasParseError() || !doc.IsObject()) {
+    return parsed;
+  }
+
+  if (doc.HasMember("process_id") && doc["process_id"].IsString()) {
+    parsed.process_id = doc["process_id"].GetString();
+  }
+  if (doc.HasMember("finish_reason") && doc["finish_reason"].IsString()) {
+    parsed.finish_reason = doc["finish_reason"].GetString();
+  }
+  if (doc.HasMember("exit_code") && doc["exit_code"].IsInt()) {
+    parsed.exit_code = doc["exit_code"].GetInt();
+    parsed.exit_known = true;
+  }
+  if (doc.HasMember("duration_ms") && doc["duration_ms"].IsNumber()) {
+    parsed.duration_ms = doc["duration_ms"].GetDouble();
+  }
+
+  return parsed;
+}
+
+} // namespace
+
 static std::string formatDuration(float seconds) {
   if (seconds < 0.1f)
     return "<0.1s";
@@ -29,6 +66,10 @@ void StreamStateManager::handleAgentThinking(const shared::AgentThinking &e) {
   }
   s.compaction_finished = false;
   s.thinking += e.delta;
+  appendLiveTimelineDelta(e.agentId, TimelineEntry::Kind::Thinking, e.delta);
+  if (!e.delta.empty()) {
+    live_quick_clusters_[e.agentId].prose_since_last_tool = true;
+  }
   s.provider_waiting = false;
   clearRetryStatus();
 }
@@ -43,6 +84,10 @@ void StreamStateManager::handleAgentText(const shared::AgentText &e) {
   }
   s.compaction_finished = false;
   s.text += e.delta;
+  appendLiveTimelineDelta(e.agentId, TimelineEntry::Kind::Text, e.delta);
+  if (!e.delta.empty()) {
+    live_quick_clusters_[e.agentId].prose_since_last_tool = true;
+  }
   s.provider_waiting = false;
   clearRetryStatus();
 }
@@ -55,15 +100,17 @@ void StreamStateManager::handleAgentTurnCompleted(
   s.compaction_finished = false;
   s.provider_waiting = false;
   s.is_thinking = false;
+  s.has_active_live_entry = false;
+  s.active_live_entry_id.clear();
   pushTokenUsage(e.agentId, e.aggregateMetrics);
 
   // Process tool results from the turn to determine success/failure
-  std::unordered_map<std::string, bool> toolSuccessMap;
+  std::unordered_map<std::string, std::pair<bool, std::string>> toolResultMap;
   for (const auto &msg : e.turn.messages) {
     if (msg.role == shared::Role::ToolResult) {
       for (const auto &content : msg.content) {
         if (auto *trc = std::get_if<shared::ToolResultContent>(&content)) {
-          toolSuccessMap[trc->toolCallId] = trc->success;
+          toolResultMap[trc->toolCallId] = {trc->success, trc->result};
         }
       }
     }
@@ -73,15 +120,11 @@ void StreamStateManager::handleAgentTurnCompleted(
   for (auto &[toolId, view] : tool_calls_) {
     if (view && view->agentId == e.agentId &&
         view->name != "summon_subagent" &&
-        view->phase != ToolPhase::Finished) {
-      auto it = toolSuccessMap.find(toolId);
-      if (it != toolSuccessMap.end()) {
-        view->success = it->second;
-        view->phase = it->second ? ToolPhase::Finished : ToolPhase::Error;
-      } else {
-        // No result found, assume success
-        view->phase = ToolPhase::Finished;
-        view->success = true;
+        view->phase != ToolPhase::Finished &&
+        view->phase != ToolPhase::Error) {
+      auto it = toolResultMap.find(toolId);
+      if (it != toolResultMap.end()) {
+        applyToolResult(view, it->second.first, it->second.second);
       }
     }
   }
@@ -102,20 +145,49 @@ void StreamStateManager::handleAgentTurnCompleted(
 
   for (auto it = tool_calls_.begin(); it != tool_calls_.end();) {
     if (it->second && it->second->agentId == e.agentId &&
-        it->second->name != "summon_subagent") {
+        it->second->name != "summon_subagent" &&
+        it->second->phase != ToolPhase::BackgroundRunning &&
+        it->second->phase != ToolPhase::Called &&
+        it->second->phase != ToolPhase::Preparing) {
       it = tool_calls_.erase(it);
     } else {
       ++it;
     }
   }
-  timeline_.erase(std::remove_if(timeline_.begin(), timeline_.end(),
-                                 [&](const TimelineEntry &entry) {
-                                   if (entry.kind !=
-                                       TimelineEntry::Kind::ToolCall)
-                                     return false;
-                                   return entry.agentId == e.agentId;
-                                 }),
-                  timeline_.end());
+  timeline_.erase(
+      std::remove_if(
+          timeline_.begin(), timeline_.end(), [&](const TimelineEntry &entry) {
+            if (entry.agentId != e.agentId) {
+              return false;
+            }
+            if (entry.kind == TimelineEntry::Kind::Thinking ||
+                entry.kind == TimelineEntry::Kind::Text) {
+              return true;
+            }
+            if (entry.kind != TimelineEntry::Kind::ToolCall) {
+              return false;
+            }
+            auto it_tool = tool_calls_.find(entry.id);
+            if (it_tool != tool_calls_.end() && it_tool->second) {
+              auto phase = it_tool->second->phase;
+              if (phase == ToolPhase::BackgroundRunning ||
+                  phase == ToolPhase::Called || phase == ToolPhase::Preparing) {
+                return false;
+              }
+            }
+            return true;
+          }),
+      timeline_.end());
+
+  for (auto it = tool_call_cluster_ids_.begin();
+       it != tool_call_cluster_ids_.end();) {
+    if (tool_calls_.count(it->first) == 0) {
+      it = tool_call_cluster_ids_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  live_quick_clusters_[e.agentId] = {};
 }
 
 void StreamStateManager::handleAgentProviderWaiting(
@@ -134,6 +206,7 @@ void StreamStateManager::handleAgentToolCallChunk(
     it_stream->second.is_thinking = false;
     pushThinkingDuration(e.agentId, secs);
   }
+  clearActiveLiveEntry(e.agentId);
 
   auto &view = tool_calls_[e.toolCallId];
   if (!view) {
@@ -143,6 +216,7 @@ void StreamStateManager::handleAgentToolCallChunk(
     timeline_.push_back(
         {TimelineEntry::Kind::ToolCall, e.toolCallId, "", e.agentId});
   }
+  assignToolCallClusterId(e.agentId, e.toolCallId);
   view->phase = ToolPhase::Preparing;
   if (!e.nameDelta.empty()) {
     view->name += e.nameDelta;
@@ -191,6 +265,7 @@ void StreamStateManager::handleAgentToolCallChunk(
 }
 
 void StreamStateManager::handleAgentToolCall(const shared::AgentToolCall &e) {
+  clearActiveLiveEntry(e.agentId);
   auto &view = tool_calls_[e.toolCallId];
   if (!view) {
     view = std::make_shared<ToolCallView>();
@@ -198,6 +273,7 @@ void StreamStateManager::handleAgentToolCall(const shared::AgentToolCall &e) {
     timeline_.push_back(
         {TimelineEntry::Kind::ToolCall, e.toolCallId, "", e.agentId});
   }
+  assignToolCallClusterId(e.agentId, e.toolCallId);
   view->agentId = e.agentId;
   if (!e.toolName.empty())
     view->name = e.toolName;
@@ -298,6 +374,9 @@ void StreamStateManager::handleAgentProcessSpawned(
   if (!e.toolCallId.empty()) {
     process_to_toolcall_[e.processId] = e.toolCallId;
   }
+  process_to_agent_[e.processId] = e.agentId;
+  process_background_state_[e.processId] = false;
+  process_finished_state_[e.processId] = false;
 }
 
 void StreamStateManager::handleAgentProcessOutput(
@@ -306,10 +385,30 @@ void StreamStateManager::handleAgentProcessOutput(
   if (it_pid != process_to_toolcall_.end()) {
     auto tid = it_pid->second;
     auto it_tool = tool_calls_.find(tid);
-    if (it_tool != tool_calls_.end() && it_tool->second &&
-        it_tool->second->phase == ToolPhase::Called) {
-      it_tool->second->live_process_output += e.output;
+    if (it_tool != tool_calls_.end() && it_tool->second) {
+      auto &view = it_tool->second;
+      if (!e.output.empty() &&
+          (view->phase == ToolPhase::Called ||
+           view->phase == ToolPhase::BackgroundRunning)) {
+        view->live_process_output += e.output;
+      }
+      if (view->process_id.empty()) {
+        view->process_id = e.processId;
+      }
+      if (e.finished) {
+        view->process_exit_known = true;
+        view->process_exit_code = e.exitCode;
+        view->process_duration_ms = e.durationMs;
+        if (view->phase == ToolPhase::BackgroundRunning) {
+          view->phase = ToolPhase::Finished;
+          view->success = (e.exitCode == 0);
+        }
+        process_finished_state_[e.processId] = true;
+      }
     }
+  }
+  if (e.finished) {
+    process_finished_state_[e.processId] = true;
   }
 }
 
@@ -392,6 +491,15 @@ void StreamStateManager::handleAgentCompleted(const shared::AgentCompleted &e) {
   }
 }
 
+void StreamStateManager::handleAgentInterrupted(
+    const shared::AgentInterrupted &e) {
+  auto &s = streams_[e.agentId];
+  s.provider_waiting = false;
+  s.is_thinking = false;
+  clearActiveLiveEntry(e.agentId);
+  clearRetryStatus();
+}
+
 const StreamState *
 StreamStateManager::getStream(const std::string &agentId) const {
   auto it = streams_.find(agentId);
@@ -423,6 +531,28 @@ std::string StreamStateManager::getAgentTitle(
   if (it != agent_titles_.end())
     return it->second;
   return "";
+}
+
+ProcessCounts StreamStateManager::getProcessCounts(
+    const std::string &agentId) const {
+  ProcessCounts counts;
+  for (const auto &[processId, owner] : process_to_agent_) {
+    if (owner != agentId) {
+      continue;
+    }
+    auto it_finished = process_finished_state_.find(processId);
+    if (it_finished != process_finished_state_.end() && it_finished->second) {
+      continue;
+    }
+    auto it_background = process_background_state_.find(processId);
+    if (it_background != process_background_state_.end() &&
+        it_background->second) {
+      ++counts.background;
+    } else {
+      ++counts.live;
+    }
+  }
+  return counts;
 }
 
 // Transient error rendering is disabled; errors are now rendered
@@ -478,6 +608,12 @@ void StreamStateManager::handleThreadChanged() {
   timeline_.clear();
   subagent_to_parent_tool_.clear();
   streams_.clear();
+  process_to_toolcall_.clear();
+  process_to_agent_.clear();
+  process_background_state_.clear();
+  process_finished_state_.clear();
+  live_quick_clusters_.clear();
+  tool_call_cluster_ids_.clear();
 }
 
 void StreamStateManager::rebuildToolCallsFromHistory(
@@ -486,15 +622,15 @@ void StreamStateManager::rebuildToolCallsFromHistory(
   if (!history)
     return;
 
-  // First pass: collect all tool results to know success/failure
+  // First pass: collect all tool results to know success/failure.
+  // Historical turns may embed ToolResultContent under different message roles,
+  // so inspect every message part rather than relying on msg.role.
   std::unordered_map<std::string, std::pair<bool, std::string>> toolResults;
   for (const auto &turn : history->turns) {
     for (const auto &msg : turn.messages) {
-      if (msg.role == shared::Role::ToolResult) {
-        for (const auto &content : msg.content) {
-          if (auto *tr = std::get_if<shared::ToolResultContent>(&content)) {
-            toolResults[tr->toolCallId] = {tr->success, tr->result};
-          }
+      for (const auto &content : msg.content) {
+        if (auto *tr = std::get_if<shared::ToolResultContent>(&content)) {
+          toolResults[tr->toolCallId] = {tr->success, tr->result};
         }
       }
     }
@@ -520,10 +656,7 @@ void StreamStateManager::rebuildToolCallsFromHistory(
               auto it = toolResults.find(tc->id);
               if (it != toolResults.end()) {
                 // We have explicit result
-                view->success = it->second.first;
-                view->result = it->second.second;
-                view->phase = it->second.first ? ToolPhase::Finished
-                                               : ToolPhase::Error;
+                applyToolResult(view, it->second.first, it->second.second);
               } else {
                 // No explicit result - for historical data, assume success
                 // This handles summon_subagent and other tools that may not have
@@ -697,6 +830,129 @@ void StreamStateManager::rebuildToolCallsFromHistory(
 const std::vector<std::pair<std::string, std::string>> &
 StreamStateManager::getQueuedMessages() const {
   return queued_messages_;
+}
+
+int StreamStateManager::getToolCallClusterId(
+    const std::string &toolCallId) const {
+  auto it = tool_call_cluster_ids_.find(toolCallId);
+  if (it == tool_call_cluster_ids_.end()) {
+    return -1;
+  }
+  return it->second;
+}
+
+void StreamStateManager::assignToolCallClusterId(
+    const std::string &agentId, const std::string &toolCallId) {
+  if (tool_call_cluster_ids_.count(toolCallId) > 0) {
+    return;
+  }
+  auto &cluster_state = live_quick_clusters_[agentId];
+  if (cluster_state.prose_since_last_tool) {
+    cluster_state.current_cluster++;
+    cluster_state.prose_since_last_tool = false;
+  }
+  tool_call_cluster_ids_[toolCallId] = cluster_state.current_cluster;
+}
+
+void StreamStateManager::appendLiveTimelineDelta(const std::string &agentId,
+                                                 TimelineEntry::Kind kind,
+                                                 const std::string &delta) {
+  if (delta.empty()) {
+    return;
+  }
+
+  auto &stream = streams_[agentId];
+  if (stream.has_active_live_entry &&
+      stream.active_live_entry_kind == kind &&
+      !stream.active_live_entry_id.empty()) {
+    if (auto *entry = findTimelineEntry(stream.active_live_entry_id)) {
+      entry->message += delta;
+      return;
+    }
+    stream.has_active_live_entry = false;
+    stream.active_live_entry_id.clear();
+  }
+
+  TimelineEntry entry;
+  entry.kind = kind;
+  entry.agentId = agentId;
+  entry.message = delta;
+  entry.id =
+      "live:" + agentId + ":" + std::to_string(++next_live_entry_sequence_);
+  timeline_.push_back(entry);
+  stream.active_live_entry_id = entry.id;
+  stream.active_live_entry_kind = kind;
+  stream.has_active_live_entry = true;
+}
+
+void StreamStateManager::clearActiveLiveEntry(const std::string &agentId) {
+  auto it = streams_.find(agentId);
+  if (it == streams_.end()) {
+    return;
+  }
+  it->second.has_active_live_entry = false;
+  it->second.active_live_entry_id.clear();
+}
+
+TimelineEntry *StreamStateManager::findTimelineEntry(
+    const std::string &entryId) {
+  for (auto &entry : timeline_) {
+    if (entry.id == entryId) {
+      return &entry;
+    }
+  }
+  return nullptr;
+}
+
+void StreamStateManager::applyToolResult(
+    const std::shared_ptr<ToolCallView> &view, bool success,
+    const std::string &result) {
+  if (!view) {
+    return;
+  }
+
+  view->success = success;
+  view->result = result;
+  if (!success) {
+    view->phase = ToolPhase::Error;
+    return;
+  }
+
+  ParsedProcessResult parsed = parseProcessResult(result);
+  if (!parsed.process_id.empty()) {
+    view->process_id = parsed.process_id;
+    if (process_to_toolcall_.count(parsed.process_id) > 0) {
+      process_to_agent_[parsed.process_id] = view->agentId;
+      process_finished_state_[parsed.process_id] = false;
+    }
+  }
+  if (parsed.exit_known) {
+    view->process_exit_known = true;
+    view->process_exit_code = parsed.exit_code;
+  }
+  view->process_duration_ms = parsed.duration_ms;
+
+  if (view->name == "process_execute" && parsed.finish_reason == "Timeout" &&
+      !parsed.process_id.empty()) {
+    view->phase = ToolPhase::BackgroundRunning;
+    view->process_is_background = true;
+    if (process_to_toolcall_.count(parsed.process_id) > 0) {
+      process_background_state_[parsed.process_id] = true;
+    }
+    return;
+  }
+
+  if (view->name == "process_spawn" && !parsed.process_id.empty()) {
+    view->process_is_background = true;
+    if (process_to_toolcall_.count(parsed.process_id) > 0) {
+      process_background_state_[parsed.process_id] = true;
+    }
+  } else if (!parsed.process_id.empty() &&
+             process_to_toolcall_.count(parsed.process_id) > 0) {
+    process_background_state_[parsed.process_id] = false;
+  }
+
+  view->phase = ToolPhase::Finished;
 }
 
 } // namespace firmius::tui

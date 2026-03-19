@@ -39,6 +39,11 @@ std::string buildExecutorTask(const shared::Plan &plan,
   prompt << "- You own exactly this chunk: " << chunk.id << "\n";
   prompt << "- You do not own the whole plan.\n";
   prompt << "- Do not take ownership of any other chunk.\n";
+  prompt << "- Stay inside this chunk's scope. Do not silently repair sibling "
+            "chunks or broader architecture.\n";
+  prompt << "- If you discover an upstream, downstream, or cross-cutting "
+            "problem outside this chunk, report it explicitly instead of "
+            "claiming you fixed the plan.\n";
   prompt << "- You may delegate only bounded subtasks to worker/scout helpers "
             "one level deep.\n\n";
   prompt << "Plan Context\n";
@@ -52,16 +57,39 @@ std::string buildExecutorTask(const shared::Plan &plan,
   prompt << "Chunk Context: " << chunk.context << "\n";
   prompt << "Chunk Constraints: " << chunk.constraints << "\n";
   prompt << "Chunk Completion: " << chunk.completion << "\n";
+  prompt << "\nExecution Discipline\n";
+  prompt << "- Reread the exact files and anchors you touch before editing.\n";
+  prompt << "- If an anchor or local context is stale, reread and repair it "
+            "before editing; do not guess.\n";
+  prompt << "- Do not broaden the task because a nearby cleanup looks tempting.\n";
+  prompt << "- Do not claim completion, verification, or review without "
+            "evidence.\n";
+  prompt << "- Only the lead accepts work and marks a chunk Done after review; "
+            "your terminal success state is normally Implemented.\n";
+  prompt << "\nVerification Expectations\n";
+  prompt << "- Run the concrete verification needed for this chunk. Prefer the "
+            "narrowest checks that still produce real evidence.\n";
+  prompt << "- Your report must name the verification commands or tests you ran "
+            "and the outcome.\n";
+  prompt << "- If verification is blocked or incomplete, say exactly why. "
+            "Do not write 'looks correct' or equivalent guesswork.\n";
   prompt << "\nExecution State Reporting\n";
   prompt << "- If you report chunk progress with chunk_update, use plan_id=\""
          << plan.id << "\" and chunk_id=\"" << chunk.id << "\".\n";
   prompt << "- The only chunk fields you may write are: status, attempt_count, result_summary.\n";
   prompt << "- Valid chunk_update payload pattern: {\"plan_id\":\"" << plan.id
          << "\",\"chunk_id\":\"" << chunk.id
-         << "\",\"status\":\"Implemented\",\"attempt_count\":1,\"result_summary\":\"implemented and verified\"}.\n";
+         << "\",\"status\":\"Implemented\",\"attempt_count\":1,\"result_summary\":\"implemented scoped changes; verified with focused evidence\"}.\n";
   prompt << "- Do not send title, goal, context, constraints, completion, depends_on, assigned_agent_id, or review_summary through chunk_update.\n";
   prompt << "- Any design, review, dependency, or assignment fields in chunk_update will be rejected by runtime authority checks.\n";
   prompt << "- Treat execution dispatch as already started for this chunk; update status/result only when you have real progress to report.\n";
+  prompt << "- Use Implemented when the chunk changes are complete as far as you can take them with evidence.\n";
+  prompt << "- Use Blocked or Failed when you hit a real blocker; say what blocked you.\n";
+  prompt << "- Do not mark the chunk Done yourself.\n";
+  prompt << "- Report back in a compact structure the lead can review quickly:\n";
+  prompt << "  Changed: <files/behavior>\n";
+  prompt << "  Verified: <command/test and result>\n";
+  prompt << "  Blockers/Risks: <none or concrete issue>\n";
   if (!task.empty()) {
     prompt << "\nLead Notes\n" << task << "\n";
   }
@@ -121,8 +149,16 @@ void ensureExecutorChunkReadyForDispatch(const std::string &threadId,
                                          const std::string &chunkId) {
   ThreadManager tm(std::string(getenv("HOME") ? getenv("HOME") : "/tmp") +
                    "/.firmius/threads");
-  const shared::Plan plan = tm.getPlan(threadId, planId);
-  const shared::WorkChunk &chunk = findChunk(plan, chunkId);
+  shared::Plan plan = tm.getPlan(threadId, planId);
+  auto &chunk = worktools::requireChunk(plan, chunkId);
+  const shared::WorkChunk originalChunk = chunk;
+  if (worktools::blockChunkIfDependenciesIncomplete(plan, chunk)) {
+    chunk.updatedAt = worktools::nowEpochMs();
+    tm.updatePlan(threadId, plan);
+    worktools::emitWorkEvent(shared::ChunkUpdated{threadId, plan.id, chunk});
+    worktools::emitWorkEvent(shared::ChunkStatusChanged{
+        threadId, plan.id, chunk.id, originalChunk.status, chunk.status, chunk});
+  }
   worktools::requireChunkReadyForExecution(plan, chunk, "dispatch");
 }
 

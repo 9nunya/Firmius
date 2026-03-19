@@ -13,6 +13,7 @@ using namespace firmius::shared;
 namespace {
 
 constexpr int kAnchorSearchWindow = 3;
+constexpr int kPostEditContextLines = 2;
 
 struct FileBuffer {
   std::vector<std::string> lines;
@@ -31,7 +32,146 @@ struct NormalizedEdit {
   std::vector<std::string> newLines;
   std::string description;
   bool relocated = false;
+  std::vector<std::string> oldLines;
 };
+
+std::string joinStrings(const std::vector<std::string> &values,
+                        std::string_view separator) {
+  std::string result;
+  for (size_t i = 0; i < values.size(); ++i) {
+    if (i > 0) {
+      result += separator;
+    }
+    result += values[i];
+  }
+  return result;
+}
+
+std::string buildRangeAnchorRequirementMessage(
+    const FileEditOperationInput &edit,
+    const std::vector<std::string> &missingFields) {
+  if (!edit.anchor.empty() && edit.start_anchor.empty() &&
+      edit.end_anchor.empty()) {
+    return edit.op + " requires both start_anchor and end_anchor; got anchor only";
+  }
+
+  if (missingFields.size() == 1) {
+    return edit.op + " is missing " + missingFields.front();
+  }
+
+  return edit.op + " requires both start_anchor and end_anchor; missing " +
+         joinStrings(missingFields, " and ");
+}
+
+void requireRangeAnchors(const FileEditOperationInput &edit) {
+  std::vector<std::string> missingFields;
+  if (edit.start_anchor.empty()) {
+    missingFields.emplace_back("start_anchor");
+  }
+  if (edit.end_anchor.empty()) {
+    missingFields.emplace_back("end_anchor");
+  }
+
+  if (missingFields.empty()) {
+    return;
+  }
+  std::string message = buildRangeAnchorRequirementMessage(edit, missingFields);
+  if (!edit.anchor.empty()) {
+    message += ". anchor is not used for range edits";
+  }
+  throw std::runtime_error(message);
+}
+
+void requireSingleAnchor(const FileEditOperationInput &edit) {
+  if (!edit.anchor.empty()) {
+    return;
+  }
+
+  std::vector<std::string> extraFields;
+  if (!edit.start_anchor.empty()) {
+    extraFields.emplace_back("start_anchor");
+  }
+  if (!edit.end_anchor.empty()) {
+    extraFields.emplace_back("end_anchor");
+  }
+
+  std::string message = edit.op + " requires anchor";
+  if (!extraFields.empty()) {
+    message += "; " + joinStrings(extraFields, " and ") +
+               " are not used for insert edits";
+  }
+  throw std::runtime_error(message);
+}
+
+void validateEditOperation(const FileEditOperationInput &edit) {
+  if (edit.op == "replace_range" || edit.op == "delete_range") {
+    requireRangeAnchors(edit);
+    return;
+  }
+
+  if (edit.op == "insert_after" || edit.op == "insert_before") {
+    requireSingleAnchor(edit);
+    return;
+  }
+
+  throw std::runtime_error("Malformed edit op '" + edit.op +
+                           "'. Expected replace_range, insert_after, "
+                           "insert_before, or delete_range.");
+}
+
+rapidjson::Value buildHashlineSlice(
+    const FileBuffer &buffer, int startLine, int endLine,
+    rapidjson::Document::AllocatorType &alloc) {
+  rapidjson::Value slice(rapidjson::kObjectType);
+  rapidjson::Value lines(rapidjson::kArrayType);
+  rapidjson::Value anchors(rapidjson::kArrayType);
+
+  const int fileLineCount = static_cast<int>(buffer.lines.size());
+  if (fileLineCount == 0) {
+    slice.AddMember("start_line", 0, alloc);
+    slice.AddMember("end_line", 0, alloc);
+    slice.AddMember("lines", lines, alloc);
+    slice.AddMember("anchors", anchors, alloc);
+    return slice;
+  }
+
+  const int clampedStart = std::clamp(startLine, 1, fileLineCount);
+  const int clampedEnd = std::clamp(endLine, clampedStart, fileLineCount);
+
+  for (int line = clampedStart; line <= clampedEnd; ++line) {
+    const std::string anchor =
+        utils::Hashline::formatAnchor(line, buffer.lines[line - 1]);
+    const std::string formatted =
+        utils::Hashline::formatLine(line, buffer.lines[line - 1]);
+    anchors.PushBack(rapidjson::Value(anchor.c_str(), alloc).Move(), alloc);
+    lines.PushBack(rapidjson::Value(formatted.c_str(), alloc).Move(), alloc);
+  }
+
+  slice.AddMember("start_line", clampedStart, alloc);
+  slice.AddMember("end_line", clampedEnd, alloc);
+  slice.AddMember("lines", lines, alloc);
+  slice.AddMember("anchors", anchors, alloc);
+  return slice;
+}
+
+void addPostEditSlice(rapidjson::Document &doc, const FileBuffer &buffer,
+                      int startLine, int endLine) {
+  auto &alloc = doc.GetAllocator();
+  doc.AddMember("post_edit_slice",
+                buildHashlineSlice(buffer, startLine, endLine, alloc), alloc);
+}
+
+std::string describeEdit(const FileEditOperationInput &edit) {
+  if ((edit.op == "replace_range" || edit.op == "delete_range") &&
+      !edit.start_anchor.empty() && !edit.end_anchor.empty()) {
+    return edit.op + " " + edit.start_anchor + " -> " + edit.end_anchor;
+  }
+  if ((edit.op == "insert_after" || edit.op == "insert_before") &&
+      !edit.anchor.empty()) {
+    return edit.op + " " + edit.anchor;
+  }
+  return edit.op.empty() ? "edit" : edit.op;
+}
 
 std::vector<std::string> readStringArray(const rapidjson::Value &json,
                                          const char *key) {
@@ -76,14 +216,17 @@ std::string joinFileContent(const FileBuffer &buffer) {
 
 ResolvedAnchor resolveAnchor(const std::vector<std::string> &lines,
                              const std::string &anchorText) {
-  if (anchorText.empty()) {
-    throw std::runtime_error("Missing required anchor");
+  const size_t pipePos = anchorText.find('|');
+  if (pipePos != std::string::npos && pipePos + 1 < anchorText.size()) {
+    throw std::runtime_error("Malformed anchor '" + anchorText +
+                             "'. Use lineNumber#hash only, without trailing "
+                             "|content from file_read.");
   }
 
   auto parsed = utils::Hashline::parseAnchor(anchorText);
   if (!parsed) {
     throw std::runtime_error("Malformed anchor '" + anchorText +
-                             "'. Expected lineNumber#hash.");
+                             "'. Expected lineNumber#hash only.");
   }
 
   const int expectedIndex = parsed->lineNumber - 1;
@@ -112,14 +255,14 @@ ResolvedAnchor resolveAnchor(const std::vector<std::string> &lines,
   }
 
   if (matches.size() > 1) {
-    throw std::runtime_error("Anchor '" + anchorText +
-                             "' matched multiple nearby lines. Reread the file "
-                             "and try again.");
+    throw std::runtime_error("Ambiguous relocated anchor '" + anchorText +
+                             "': matched multiple nearby lines. Reread the "
+                             "file and try again.");
   }
 
-  throw std::runtime_error("Anchor '" + anchorText +
-                           "' did not match the current file. Reread the file "
-                           "and try again.");
+  throw std::runtime_error("Stale anchor '" + anchorText +
+                           "': the file changed after your last read. Re-read "
+                           "the file and retry with fresh anchors.");
 }
 
 bool editsConflict(const NormalizedEdit &left, const NormalizedEdit &right) {
@@ -142,12 +285,145 @@ bool editsConflict(const NormalizedEdit &left, const NormalizedEdit &right) {
   return left.startIndex < right.endIndex && right.startIndex < left.endIndex;
 }
 
-std::vector<NormalizedEdit> normalizeEdits(const std::vector<FileEditOperationInput> &edits,
-                                           const std::vector<std::string> &lines) {
+void mergeSanitation(utils::HashlineTrimmer::SanitationResult *totals,
+                     const utils::HashlineTrimmer::SanitationResult &delta) {
+  if (!totals) {
+    return;
+  }
+  totals->hashlinePrefixesStripped += delta.hashlinePrefixesStripped;
+  totals->malformedHashFragmentsStripped +=
+      delta.malformedHashFragmentsStripped;
+  totals->diffMarkersStripped += delta.diffMarkersStripped;
+  totals->boundaryEchoesRemoved += delta.boundaryEchoesRemoved;
+  totals->boundaryEchoRemoved =
+      totals->boundaryEchoRemoved || delta.boundaryEchoRemoved;
+  totals->suspiciousContentFound =
+      totals->suspiciousContentFound || delta.suspiciousContentFound;
+  totals->suspiciousContentRejected =
+      totals->suspiciousContentRejected || delta.suspiciousContentRejected;
+}
+
+std::vector<std::string>
+sanitizeReplacementLines(const FileEditOperationInput &edit,
+                         utils::HashlineTrimmer::SanitationResult *sanitation) {
+  std::vector<std::string> sanitized;
+  sanitized.reserve(edit.new_lines.size());
+
+  for (size_t i = 0; i < edit.new_lines.size(); ++i) {
+    utils::HashlineTrimmer::SanitationResult lineSanitation;
+    std::string line = utils::HashlineTrimmer::sanitizeContent(
+        edit.new_lines[i], &lineSanitation);
+    if (utils::HashlineTrimmer::startsWithSuspiciousMetadata(line)) {
+      lineSanitation.suspiciousContentFound = true;
+      lineSanitation.suspiciousContentRejected = true;
+      mergeSanitation(sanitation, lineSanitation);
+      throw std::runtime_error(
+          "Replacement text still appears to contain Hashline metadata. "
+          "Remove lineNumber#hash| prefixes from new_lines.");
+    }
+    if (utils::HashlineTrimmer::startsWithSuspiciousDiffJunk(line)) {
+      lineSanitation.suspiciousContentFound = true;
+      lineSanitation.suspiciousContentRejected = true;
+      mergeSanitation(sanitation, lineSanitation);
+      throw std::runtime_error(
+          "Replacement text still appears to contain diff markers. Remove "
+          "leading + / - patch markers from new_lines.");
+    }
+    mergeSanitation(sanitation, lineSanitation);
+    sanitized.push_back(std::move(line));
+  }
+
+  return sanitized;
+}
+
+void stripBoundaryEchoes(std::vector<std::string> &newLines,
+                         const std::vector<std::string> &lines, int startIndex,
+                         int endIndexExclusive,
+                         utils::HashlineTrimmer::SanitationResult *sanitation) {
+  if (!newLines.empty() && startIndex > 0 &&
+      newLines.front() == lines[startIndex - 1]) {
+    newLines.erase(newLines.begin());
+    if (sanitation) {
+      sanitation->boundaryEchoRemoved = true;
+      sanitation->boundaryEchoesRemoved++;
+    }
+  }
+
+  if (!newLines.empty() &&
+      endIndexExclusive < static_cast<int>(lines.size()) &&
+      newLines.back() == lines[endIndexExclusive]) {
+    newLines.pop_back();
+    if (sanitation) {
+      sanitation->boundaryEchoRemoved = true;
+      sanitation->boundaryEchoesRemoved++;
+    }
+  }
+}
+
+void addStringArrayMember(rapidjson::Value &target, const char *name,
+                          const std::vector<std::string> &values,
+                          rapidjson::Document::AllocatorType &alloc) {
+  rapidjson::Value array(rapidjson::kArrayType);
+  for (const auto &value : values) {
+    array.PushBack(rapidjson::Value(value.c_str(), alloc).Move(), alloc);
+  }
+  target.AddMember(rapidjson::Value(name, alloc).Move(), array, alloc);
+}
+
+void addSanitationMember(
+    rapidjson::Value &target,
+    const utils::HashlineTrimmer::SanitationResult &sanitation,
+    rapidjson::Document::AllocatorType &alloc) {
+  rapidjson::Value sanitationJson(rapidjson::kObjectType);
+  sanitationJson.AddMember("hashline_prefixes_stripped",
+                           sanitation.hashlinePrefixesStripped, alloc);
+  sanitationJson.AddMember("malformed_hash_fragments_stripped",
+                           sanitation.malformedHashFragmentsStripped, alloc);
+  sanitationJson.AddMember("diff_markers_stripped",
+                           sanitation.diffMarkersStripped, alloc);
+  sanitationJson.AddMember("boundary_echoes_removed",
+                           sanitation.boundaryEchoesRemoved, alloc);
+  sanitationJson.AddMember("boundary_echo_removed",
+                           sanitation.boundaryEchoRemoved, alloc);
+  sanitationJson.AddMember("suspicious_content_found",
+                           sanitation.suspiciousContentFound, alloc);
+  sanitationJson.AddMember("suspicious_content_rejected",
+                           sanitation.suspiciousContentRejected, alloc);
+  target.AddMember("sanitation", sanitationJson, alloc);
+}
+
+rapidjson::Value buildOperationResult(
+    const NormalizedEdit &edit, rapidjson::Document::AllocatorType &alloc) {
+  rapidjson::Value op(rapidjson::kObjectType);
+  const bool isInsertion = edit.startIndex == edit.endIndex;
+  op.AddMember("op", rapidjson::Value(edit.op.c_str(), alloc).Move(), alloc);
+  op.AddMember("description",
+               rapidjson::Value(edit.description.c_str(), alloc).Move(), alloc);
+  op.AddMember("start_line", edit.startIndex + 1, alloc);
+  op.AddMember("end_line", isInsertion ? edit.startIndex + 1 : edit.endIndex,
+               alloc);
+  op.AddMember("new_line_count", static_cast<uint32_t>(edit.newLines.size()),
+               alloc);
+  op.AddMember("old_line_count", static_cast<uint32_t>(edit.oldLines.size()),
+               alloc);
+  op.AddMember("relocated", edit.relocated, alloc);
+  addStringArrayMember(op, "old_lines", edit.oldLines, alloc);
+  addStringArrayMember(op, "new_lines", edit.newLines, alloc);
+  return op;
+}
+
+std::vector<NormalizedEdit>
+normalizeEdits(const std::vector<FileEditOperationInput> &edits,
+               const std::vector<std::string> &lines,
+               utils::HashlineTrimmer::SanitationResult *sanitation = nullptr) {
   std::vector<NormalizedEdit> normalized;
   normalized.reserve(edits.size());
 
   for (const auto &edit : edits) {
+    validateEditOperation(edit);
+    FileEditOperationInput cleanEdit = edit;
+    cleanEdit.new_lines = sanitizeReplacementLines(edit, sanitation);
+
     if (edit.op == "replace_range") {
       auto start = resolveAnchor(lines, edit.start_anchor);
       auto end = resolveAnchor(lines, edit.end_anchor);
@@ -157,14 +433,19 @@ std::vector<NormalizedEdit> normalizeEdits(const std::vector<FileEditOperationIn
                                  "' resolved after end anchor '" +
                                  edit.end_anchor + "'.");
       }
+      std::vector<std::string> oldLines(lines.begin() + start.lineIndex,
+                                        lines.begin() + end.lineIndex + 1);
+      stripBoundaryEchoes(cleanEdit.new_lines, lines, start.lineIndex,
+                          end.lineIndex + 1, sanitation);
+
       normalized.push_back({"replace_range",
                             start.lineIndex,
                             end.lineIndex + 1,
-                            edit.new_lines,
-                            "replace " + edit.start_anchor + "..." +
+                            cleanEdit.new_lines,
+                            "replace " + cleanEdit.start_anchor + "..." +
                                 edit.end_anchor,
-                            start.relocated || end.relocated});
-      continue;
+                            start.relocated || end.relocated,
+                            oldLines});
     }
 
     if (edit.op == "delete_range") {
@@ -176,13 +457,16 @@ std::vector<NormalizedEdit> normalizeEdits(const std::vector<FileEditOperationIn
                                  "' resolved after end anchor '" +
                                  edit.end_anchor + "'.");
       }
+      std::vector<std::string> oldLines(lines.begin() + start.lineIndex,
+                                        lines.begin() + end.lineIndex + 1);
       normalized.push_back({"delete_range",
                             start.lineIndex,
                             end.lineIndex + 1,
                             {},
                             "delete " + edit.start_anchor + "..." +
                                 edit.end_anchor,
-                            start.relocated || end.relocated});
+                            start.relocated || end.relocated,
+                            oldLines});
       continue;
     }
 
@@ -191,9 +475,10 @@ std::vector<NormalizedEdit> normalizeEdits(const std::vector<FileEditOperationIn
       normalized.push_back({"insert_after",
                             anchor.lineIndex + 1,
                             anchor.lineIndex + 1,
-                            edit.new_lines,
-                            "insert after " + edit.anchor,
-                            anchor.relocated});
+                            cleanEdit.new_lines,
+                            "insert after " + cleanEdit.anchor,
+                            anchor.relocated,
+                            {}});
       continue;
     }
 
@@ -202,15 +487,13 @@ std::vector<NormalizedEdit> normalizeEdits(const std::vector<FileEditOperationIn
       normalized.push_back({"insert_before",
                             anchor.lineIndex,
                             anchor.lineIndex,
-                            edit.new_lines,
-                            "insert before " + edit.anchor,
-                            anchor.relocated});
+                            cleanEdit.new_lines,
+                            "insert before " + cleanEdit.anchor,
+                            anchor.relocated,
+                            {}});
       continue;
     }
 
-    throw std::runtime_error("Malformed edit op '" + edit.op +
-                             "'. Expected replace_range, insert_after, "
-                             "insert_before, or delete_range.");
   }
 
   std::stable_sort(normalized.begin(), normalized.end(),
@@ -230,6 +513,74 @@ std::vector<NormalizedEdit> normalizeEdits(const std::vector<FileEditOperationIn
   }
 
   return normalized;
+}
+
+shared::ToolResult hashlineFailureResult(
+    const FileEditInput &input, const std::vector<std::string> &lines,
+    const std::string &message,
+    const utils::HashlineTrimmer::SanitationResult &sanitation) {
+  rapidjson::Document doc;
+  doc.SetObject();
+  auto &alloc = doc.GetAllocator();
+  doc.AddMember("path", rapidjson::Value(input.path.c_str(), alloc).Move(),
+                alloc);
+  doc.AddMember("mode", rapidjson::Value("hashline_edits", alloc).Move(),
+                alloc);
+  doc.AddMember("error", rapidjson::Value(message.c_str(), alloc).Move(),
+                alloc);
+
+  rapidjson::Value operations(rapidjson::kArrayType);
+  for (const auto &edit : input.edits) {
+    rapidjson::Value op(rapidjson::kObjectType);
+    op.AddMember("op", rapidjson::Value(edit.op.c_str(), alloc).Move(), alloc);
+    const std::string description = describeEdit(edit);
+    op.AddMember("description",
+                 rapidjson::Value(description.c_str(), alloc).Move(), alloc);
+    if (!edit.start_anchor.empty()) {
+      op.AddMember("start_anchor",
+                   rapidjson::Value(edit.start_anchor.c_str(), alloc).Move(),
+                   alloc);
+    }
+    if (!edit.end_anchor.empty()) {
+      op.AddMember("end_anchor",
+                   rapidjson::Value(edit.end_anchor.c_str(), alloc).Move(),
+                   alloc);
+    }
+    if (!edit.anchor.empty()) {
+      op.AddMember("anchor", rapidjson::Value(edit.anchor.c_str(), alloc).Move(),
+                   alloc);
+    }
+    op.AddMember("new_line_count",
+                 static_cast<uint32_t>(edit.new_lines.size()), alloc);
+
+    try {
+      const auto normalized = normalizeEdits({edit}, lines, nullptr);
+      if (!normalized.empty()) {
+        op = buildOperationResult(normalized.front(), alloc);
+      }
+    } catch (const std::exception &e) {
+      op.AddMember("error", rapidjson::Value(e.what(), alloc).Move(), alloc);
+      addStringArrayMember(op, "old_lines", {}, alloc);
+      try {
+        utils::HashlineTrimmer::SanitationResult editSanitation;
+        const auto sanitizedLines =
+            sanitizeReplacementLines(edit, &editSanitation);
+        addStringArrayMember(op, "new_lines", sanitizedLines, alloc);
+      } catch (...) {
+        addStringArrayMember(op, "new_lines", edit.new_lines, alloc);
+      }
+    }
+
+    operations.PushBack(op, alloc);
+  }
+
+  doc.AddMember("operations", operations, alloc);
+  addSanitationMember(doc, sanitation, alloc);
+
+  rapidjson::StringBuffer sb;
+  rapidjson::Writer<rapidjson::StringBuffer> writer(sb);
+  doc.Accept(writer);
+  return shared::ToolResult::fail(sb.GetString());
 }
 
 ToolResult executeLegacyReplace(const FileEditInput &input,
@@ -294,7 +645,8 @@ ToolResult executeLegacyReplace(const FileEditInput &input,
 
 shared::ToolMetadata FileEditTool::getMetadata() const {
   return {"file_edit",
-          "Edit a file on the host filesystem using Hashline anchors",
+          "Edit files with Hashline anchors: read first, copy exact line#hash "
+          "anchors, use small ops, and reread before the next edit call",
           ToolScope::FilesystemWrite};
 }
 
@@ -303,26 +655,40 @@ std::shared_ptr<shared::JSONSchema> FileEditTool::getSchema() const {
       zObject({{"op",
                 zEnum({"replace_range", "insert_after", "insert_before",
                        "delete_range"})
-                    ->describe("Hashline edit operation type")},
+                    ->describe("Hashline edit operation type. Use the "
+                               "smallest op that matches the logical change "
+                               "site.")},
                {"start_anchor",
                 zString()
                     ->describe(
-                        "Start anchor in lineNumber#hash form for range edits")
+                        "Start anchor for range edits. Use ONLY the "
+                        "lineNumber#hash anchor from file_read. Never include "
+                        "the trailing |content. Copy the exact anchor from "
+                        "file_read and do not adjust it within the same call.")
                     ->setOptional()},
                {"end_anchor",
                 zString()
                     ->describe(
-                        "End anchor in lineNumber#hash form for range edits")
+                        "End anchor for range edits. Use ONLY the "
+                        "lineNumber#hash anchor from file_read. Never include "
+                        "the trailing |content. Copy the exact anchor from "
+                        "file_read and do not adjust it within the same call.")
                     ->setOptional()},
                {"anchor",
                 zString()
                     ->describe(
-                        "Single anchor in lineNumber#hash form for insert edits")
+                        "Single anchor for insert edits. Use ONLY the "
+                        "lineNumber#hash anchor from file_read. Never include "
+                        "the trailing |content. Prefer structural lines over "
+                        "blank lines when choosing anchors.")
                     ->setOptional()},
                {"new_lines",
                 zArray(zString())
-                    ->describe("Replacement or inserted lines without trailing "
-                               "newline characters")
+                    ->describe("Plain replacement or inserted source lines "
+                               "only, without trailing newline characters. "
+                               "NEVER include Hashline prefixes, trailing "
+                               "|content, diff markers, or unchanged boundary "
+                               "echo lines from outside the replaced range.")
                     ->setOptional()}});
 
   return zObject(
@@ -330,11 +696,28 @@ std::shared_ptr<shared::JSONSchema> FileEditTool::getSchema() const {
                zString()->describe("Absolute or relative path to the file")},
               {"edits",
                zArray(editSchema)
-                   ->describe("Hashline-anchored edit operations. Prefer this "
-                              "for modifying existing files.")
+                   ->describe("Hashline operational manual for existing files: "
+                              "1) read the file or relevant range with "
+                              "file_read, 2) copy exact lineNumber#hash "
+                              "anchors, 3) use the smallest op per logical "
+                              "mutation site, 4) batch related edits for one "
+                              "file into one call, 5) reread before the next "
+                              "file_edit call on that file. ALL edits in one "
+                              "call target the ORIGINAL file snapshot. Do NOT "
+                              "adjust later anchors after earlier edits in "
+                              "the same call. replace_range and delete_range "
+                              "require BOTH start_anchor and end_anchor. "
+                              "insert_before and insert_after require "
+                              "anchor. Anchors must be lineNumber#hash only, "
+                              "never lineNumber#hash|content. new_lines must "
+                              "be plain source text only.")
                    ->setOptional()},
               {"content", zString()
-                              ->describe("Whole-file content for overwrite mode")
+                              ->describe("Whole-file content. Reserved for "
+                                         "explicit new-file creation, not the "
+                                         "normal path for editing an existing "
+                                         "file when Hashline edits are "
+                                         "available.")
                               ->setOptional()},
               {"old_string",
                zString()
@@ -415,6 +798,16 @@ shared::ToolResult FileEditTool::execute(const FileEditInput &input,
   const bool hasAnchorEdits = !input.edits.empty();
   const bool hasOverwrite = input.has_content;
   const bool hasLegacyReplace = input.has_old_string && input.has_new_string;
+  const int modeCount =
+      static_cast<int>(hasAnchorEdits) + static_cast<int>(hasOverwrite) +
+      static_cast<int>(hasLegacyReplace);
+
+  if (modeCount > 1) {
+    return shared::ToolResult::fail(
+        "file_edit accepts exactly one editing mode per call. Use either "
+        "Hashline edits, whole-file content for new-file creation, or legacy "
+        "old_string/new_string compatibility mode.");
+  }
 
   if (fileExists &&
       !ctx.agent.getEnvironment()->getWorkspace().hasFullyReadFile(
@@ -440,7 +833,13 @@ shared::ToolResult FileEditTool::execute(const FileEditInput &input,
       std::string content(data.begin(), data.end());
       FileBuffer buffer = splitFileContent(content);
 
-      auto normalized = normalizeEdits(input.edits, buffer.lines);
+      utils::HashlineTrimmer::SanitationResult sanitation;
+      std::vector<NormalizedEdit> normalized;
+      try {
+        normalized = normalizeEdits(input.edits, buffer.lines, &sanitation);
+      } catch (const std::exception &e) {
+        return hashlineFailureResult(input, buffer.lines, e.what(), sanitation);
+      }
       int removedLines = 0;
       int addedLines = 0;
       int relocatedAnchors = 0;
@@ -460,7 +859,6 @@ shared::ToolResult FileEditTool::execute(const FileEditInput &input,
         buffer.lines.insert(buffer.lines.begin() + it->startIndex,
                             it->newLines.begin(), it->newLines.end());
       }
-
       std::string updated = joinFileContent(buffer);
       ctx.host.writeFile(absolutePath,
                          std::vector<uint8_t>(updated.begin(), updated.end()));
@@ -480,26 +878,60 @@ shared::ToolResult FileEditTool::execute(const FileEditInput &input,
       resDoc.AddMember("added_lines", addedLines, alloc);
       resDoc.AddMember("relocated_anchors", relocatedAnchors, alloc);
 
+      int sliceStart = static_cast<int>(buffer.lines.empty() ? 0 : buffer.lines.size());
+      int sliceEnd = 1;
+
       rapidjson::Value operations(rapidjson::kArrayType);
+      int cumulativeDelta = 0;
       for (const auto &edit : normalized) {
-        rapidjson::Value op(rapidjson::kObjectType);
-        op.AddMember("op", rapidjson::Value(edit.op.c_str(), alloc).Move(),
-                     alloc);
+        rapidjson::Value op = buildOperationResult(edit, alloc);
+        const int removedCount = edit.endIndex - edit.startIndex;
+        const int finalStartIndex = edit.startIndex + cumulativeDelta;
+        const int finalEndIndexExclusive =
+            finalStartIndex + static_cast<int>(edit.newLines.size());
+        const int localStartLine =
+            std::max(1, finalStartIndex + 1 - kPostEditContextLines);
+        const int localEndLine = edit.newLines.empty()
+                                     ? finalStartIndex + kPostEditContextLines
+                                     : finalEndIndexExclusive + kPostEditContextLines;
         op.AddMember(
-            "description",
-            rapidjson::Value(edit.description.c_str(), alloc).Move(), alloc);
-        op.AddMember("start_line", edit.startIndex + 1, alloc);
-        op.AddMember("end_line", edit.endIndex, alloc);
-        op.AddMember("new_line_count",
-                     static_cast<uint32_t>(edit.newLines.size()), alloc);
-        op.AddMember("relocated", edit.relocated, alloc);
+            "post_edit_context",
+            buildHashlineSlice(buffer, localStartLine, localEndLine, alloc),
+            alloc);
         operations.PushBack(op, alloc);
+        cumulativeDelta += static_cast<int>(edit.newLines.size()) - removedCount;
+
+        const int insertedEndLine =
+            edit.startIndex + static_cast<int>(edit.newLines.size());
+        const int changedStartLine = edit.startIndex + 1;
+        const int changedEndLine =
+            std::max(changedStartLine,
+                     std::max(edit.endIndex, insertedEndLine));
+        sliceStart = std::min(sliceStart, changedStartLine);
+        sliceEnd = std::max(sliceEnd, changedEndLine);
       }
       resDoc.AddMember("operations", operations, alloc);
+      addSanitationMember(resDoc, sanitation, alloc);
+      if (!buffer.lines.empty()) {
+        addPostEditSlice(
+            resDoc, buffer,
+            std::max(1, sliceStart - kPostEditContextLines),
+            std::min(static_cast<int>(buffer.lines.size()),
+                     sliceEnd + kPostEditContextLines));
+      } else {
+        addPostEditSlice(resDoc, buffer, 0, 0);
+      }
       return shared::ToolResult::ok(resDoc);
     }
 
     if (hasOverwrite) {
+      if (fileExists) {
+        return shared::ToolResult::fail(
+            "Whole-file content overwrite is disabled for existing files. Use "
+            "Hashline edits for modifications; content is reserved for explicit "
+            "new-file creation.");
+      }
+
       ctx.host.writeFile(
           absolutePath,
           std::vector<uint8_t>(input.content.begin(), input.content.end()));

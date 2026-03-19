@@ -8,8 +8,8 @@
 namespace firmius::tui {
 
 ftxui::Element LogWindow(const std::vector<ftxui::Element> &lines,
-                          const std::string &footer_label,
-                          const std::string &action_label = "");
+                         const std::string &footer_label,
+                         ftxui::Element action_element = ftxui::text(""));
 
 }
 

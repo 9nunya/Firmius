@@ -60,6 +60,8 @@ struct ProcessOutputDelta {
   std::string output;
   bool isStderr;
   bool finished;
+  int exitCode = -1;
+  double durationMs = 0.0;
 
   bool operator==(const ProcessOutputDelta &other) const = default;
 };
@@ -224,6 +226,11 @@ struct AgentCompleted {
   std::string parentId = "";
   bool operator==(const AgentCompleted &) const = default;
 };
+struct AgentInterrupted {
+  std::string agentId;
+  std::string parentId = "";
+  bool operator==(const AgentInterrupted &) const = default;
+};
 struct AgentError {
   std::string agentId;
   std::string message;
@@ -259,6 +266,8 @@ struct AgentProcessOutput {
   std::string output;
   bool isStderr;
   bool finished;
+  int exitCode = -1;
+  double durationMs = 0.0;
   std::string parentId = "";
   bool operator==(const AgentProcessOutput &) const = default;
 };
@@ -356,8 +365,8 @@ struct ChunkStatusChanged {
   std::string threadId;
   std::string planId;
   std::string chunkId;
-  WorkChunkStatus oldStatus = WorkChunkStatus::Draft;
-  WorkChunkStatus newStatus = WorkChunkStatus::Draft;
+  WorkChunkStatus oldStatus = WorkChunkStatus::Ready;
+  WorkChunkStatus newStatus = WorkChunkStatus::Ready;
   WorkChunk chunk;
   bool operator==(const ChunkStatusChanged &) const = default;
 };
@@ -481,6 +490,7 @@ using EngineEvent =
     std::variant<AgentSpawned, AgentProviderWaiting, AgentRetrying,
                  AgentRetryFailed, AgentThinking, AgentText, AgentToolCall,
                  AgentToolCallChunk, AgentTurnCompleted, AgentCompleted,
+                 AgentInterrupted,
                  AgentError, AgentCompacting, AgentCompactionThinking,
                  AgentCompactionText, ContextCompacted, AgentProcessOutput,
                  AgentProcessSpawned, ModelSwitched, HistoryUndone,
@@ -492,7 +502,7 @@ using EngineEvent =
 using AppEvent = std::variant<
     AgentSpawned, AgentProviderWaiting, AgentRetrying, AgentRetryFailed,
     AgentThinking, AgentText, AgentToolCall, AgentToolCallChunk,
-    AgentTurnCompleted, AgentCompleted, AgentError, AgentCompacting,
+    AgentTurnCompleted, AgentCompleted, AgentInterrupted, AgentError, AgentCompacting,
     AgentCompactionThinking, AgentCompactionText, ContextCompacted,
     AgentProcessOutput, AgentProcessSpawned, ModelSwitched, HistoryUndone,
     AgentAccountSwitched, ThreadChanged, ThreadMetadataUpdated, PlanCreated,

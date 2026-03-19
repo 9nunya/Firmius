@@ -54,8 +54,8 @@ std::string scopeName(shared::ToolScope scope) {
 std::set<std::string> requestedChunkUpdateFields(const rapidjson::Value &input) {
   static const std::vector<std::string> kMutableFields = {
       "title",         "goal",          "context",      "constraints",
-      "completion",    "status",        "depends_on",   "attempt_count",
-      "result_summary", "review_summary"};
+      "completion",    "planning_gate", "status",       "depends_on",
+      "attempt_count", "result_summary", "review_summary"};
 
   std::set<std::string> fields;
   for (const auto &field : kMutableFields) {
@@ -334,8 +334,6 @@ shared::PlanStatus parsePlanStatus(const std::string &status) {
 
 std::string chunkStatusToString(shared::WorkChunkStatus status) {
   switch (status) {
-  case shared::WorkChunkStatus::Draft:
-    return "Draft";
   case shared::WorkChunkStatus::Ready:
     return "Ready";
   case shared::WorkChunkStatus::InProgress:
@@ -353,12 +351,12 @@ std::string chunkStatusToString(shared::WorkChunkStatus status) {
   case shared::WorkChunkStatus::Cancelled:
     return "Cancelled";
   }
-  return "Draft";
+  return "Ready";
 }
 
 shared::WorkChunkStatus parseChunkStatus(const std::string &status) {
   if (status == "Draft") {
-    return shared::WorkChunkStatus::Draft;
+    return shared::WorkChunkStatus::Ready;
   }
   if (status == "Ready") {
     return shared::WorkChunkStatus::Ready;
@@ -428,12 +426,8 @@ const shared::WorkChunk &requireChunk(const shared::Plan &plan,
   return *it;
 }
 
-bool chunkReadyForExecution(const shared::Plan &plan,
-                            const shared::WorkChunk &chunk) {
-  if (chunk.status != shared::WorkChunkStatus::Ready) {
-    return false;
-  }
-
+bool chunkDependenciesDone(const shared::Plan &plan,
+                           const shared::WorkChunk &chunk) {
   for (const auto &dependencyId : chunk.dependsOn) {
     auto it = std::find_if(plan.chunks.begin(), plan.chunks.end(),
                            [&](const shared::WorkChunk &candidate) {
@@ -445,6 +439,23 @@ bool chunkReadyForExecution(const shared::Plan &plan,
   }
 
   return true;
+}
+
+bool blockChunkIfDependenciesIncomplete(const shared::Plan &plan,
+                                        shared::WorkChunk &chunk) {
+  if (chunk.status != shared::WorkChunkStatus::Ready ||
+      chunkDependenciesDone(plan, chunk)) {
+    return false;
+  }
+
+  chunk.status = shared::WorkChunkStatus::Blocked;
+  return true;
+}
+
+bool chunkReadyForExecution(const shared::Plan &plan,
+                            const shared::WorkChunk &chunk) {
+  return chunk.status == shared::WorkChunkStatus::Ready &&
+         chunkDependenciesDone(plan, chunk);
 }
 
 void requireChunkReadyForExecution(const shared::Plan &plan,
@@ -493,6 +504,7 @@ rapidjson::Value makeChunkSummary(const shared::WorkChunk &chunk,
   rapidjson::Value summary(rapidjson::kObjectType);
   summary.AddMember("chunk_id", rapidjson::Value(chunk.id.c_str(), alloc), alloc);
   summary.AddMember("title", rapidjson::Value(chunk.title.c_str(), alloc), alloc);
+  summary.AddMember("planning_gate", chunk.planningGate, alloc);
   std::string status = chunkStatusToString(chunk.status);
   summary.AddMember("status", rapidjson::Value(status.c_str(), alloc), alloc);
 

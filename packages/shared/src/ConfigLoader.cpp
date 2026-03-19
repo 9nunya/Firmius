@@ -7,8 +7,59 @@
 #include <fstream>
 #include <filesystem>
 #include <stdexcept>
+#include <unistd.h>
 
 namespace firmius::shared {
+
+namespace {
+
+bool ensureWritableDirectory(const std::filesystem::path& dir) {
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    if (ec || !std::filesystem::exists(dir) || !std::filesystem::is_directory(dir)) {
+        return false;
+    }
+
+    auto probe = dir / (".write_probe_" + std::to_string(static_cast<long long>(getpid())));
+    std::ofstream out(probe);
+    if (!out.is_open()) {
+        return false;
+    }
+    out << "ok";
+    out.close();
+    std::filesystem::remove(probe, ec);
+    return true;
+}
+
+bool isReadableFile(const std::filesystem::path& path) {
+    std::ifstream file(path);
+    return file.good();
+}
+
+std::filesystem::path resolveFirmiusHomeForConfig() {
+    if (const char* home = getenv("HOME")) {
+        const std::filesystem::path userHome = std::filesystem::path(home) / ".firmius";
+        if (ensureWritableDirectory(userHome) || isReadableFile(userHome / "config.json")) {
+            return userHome;
+        }
+    }
+
+    const std::filesystem::path localHome = std::filesystem::current_path() / ".firmius";
+    if (ensureWritableDirectory(localHome) || isReadableFile(localHome / "config.json")) {
+        return localHome;
+    }
+
+    const std::filesystem::path tempHome =
+        std::filesystem::temp_directory_path() /
+        ("firmius-" + std::to_string(static_cast<long long>(getuid())));
+    if (ensureWritableDirectory(tempHome) || isReadableFile(tempHome / "config.json")) {
+        return tempHome;
+    }
+
+    return std::filesystem::temp_directory_path() / "firmius";
+}
+
+} // namespace
 
 ConfigLoader& ConfigLoader::instance() {
     static ConfigLoader instance;
@@ -16,8 +67,7 @@ ConfigLoader& ConfigLoader::instance() {
 }
 
 std::string ConfigLoader::getConfigPath() const {
-    std::string home = getenv("HOME") ? getenv("HOME") : "/root";
-    return home + "/.firmius/config.json";
+    return (resolveFirmiusHomeForConfig() / "config.json").string();
 }
 
 void ConfigLoader::loadImpl() {

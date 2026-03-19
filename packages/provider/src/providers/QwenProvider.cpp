@@ -2,6 +2,8 @@
 #include "providers/BackoffConstants.hpp"
 #include "utils/GCPHttpClient.hpp"
 #include "utils/InterruptibleSleep.hpp"
+#include "utils/Logger.hpp"
+#include "utils/StringUtil.hpp"
 #include <atomic>
 #include <chrono>
 #include <ctime>
@@ -12,6 +14,7 @@
 #include <rapidjson/writer.h>
 #include <sstream>
 #include <thread>
+#include <unordered_set>
 
 namespace firmius::provider {
 
@@ -33,6 +36,81 @@ const std::string QwenProvider::QWEN_MODELS_ENDPOINT =
     "https://portal.qwen.ai/v1/models";
 
 namespace {
+
+struct ToolCallValidationResult {
+  bool valid = false;
+  std::string normalizedArguments;
+  std::string reason;
+};
+
+void addTextContentItem(rapidjson::Value &content, const std::string &text,
+                        rapidjson::Document::AllocatorType &allocator) {
+  rapidjson::Value item(rapidjson::kObjectType);
+  item.AddMember("type", "text", allocator);
+  item.AddMember("text", rapidjson::Value(text.c_str(), allocator), allocator);
+  content.PushBack(item, allocator);
+}
+
+bool hasDisplayableContent(const rapidjson::Value &content) {
+  return content.IsArray() && content.Size() > 0;
+}
+
+std::string serializeJson(const rapidjson::Value &value) {
+  rapidjson::StringBuffer buffer;
+  rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+  value.Accept(writer);
+  return buffer.GetString();
+}
+
+ToolCallValidationResult
+validateToolCall(const firmius::shared::ToolCallContent &call,
+                 const std::unordered_set<std::string> &registeredToolNames) {
+  if (call.id.empty()) {
+    ToolCallValidationResult result;
+    result.valid = false;
+    result.reason = "missing tool call id";
+    return result;
+  }
+  if (call.name.empty() ||
+      registeredToolNames.find(call.name) == registeredToolNames.end()) {
+    ToolCallValidationResult result;
+    result.valid = false;
+    result.reason = "unknown tool name '" + call.name + "'";
+    return result;
+  }
+
+  rapidjson::Document parsedArgs;
+  parsedArgs.Parse(call.args.c_str());
+  if (parsedArgs.HasParseError()) {
+    ToolCallValidationResult result;
+    result.valid = false;
+    result.reason = "invalid JSON arguments";
+    return result;
+  }
+
+  ToolCallValidationResult result;
+  result.valid = true;
+  result.normalizedArguments = serializeJson(parsedArgs);
+  return result;
+}
+
+std::string
+buildSanitizationWarning(size_t droppedToolCalls, size_t droppedToolResults) {
+  std::ostringstream warning;
+  warning << "Qwen replay sanitizer omitted " << droppedToolCalls
+          << " malformed historical tool call";
+  if (droppedToolCalls != 1) {
+    warning << "s";
+  }
+  if (droppedToolResults > 0) {
+    warning << " and " << droppedToolResults << " orphaned tool result";
+    if (droppedToolResults != 1) {
+      warning << "s";
+    }
+  }
+  warning << " before provider submission.";
+  return warning.str();
+}
 
 // Stream context for CURL callback
 struct StreamContext {
@@ -305,6 +383,39 @@ std::string roleToString(firmius::shared::Role role) {
     return "system";
   }
   return "user";
+}
+
+std::string extractQwenErrorField(const rapidjson::Value &errorValue,
+                                  const char *key) {
+  if (!errorValue.IsObject() || !errorValue.HasMember(key) ||
+      !errorValue[key].IsString()) {
+    return "";
+  }
+  return errorValue[key].GetString();
+}
+
+bool bodyContainsValidationError(const std::string &responseBody) {
+  const std::string lower = firmius::shared::StringUtil::toLower(responseBody);
+  return lower.find("invalid_request_error") != std::string::npos ||
+         lower.find("invalid_parameter_error") != std::string::npos ||
+         lower.find("must be in json format") != std::string::npos ||
+         lower.find("malformed json") != std::string::npos ||
+         lower.find("json format") != std::string::npos ||
+         lower.find("schema") != std::string::npos ||
+         lower.find("validation") != std::string::npos ||
+         lower.find("tool-call") != std::string::npos ||
+         lower.find("tool call") != std::string::npos ||
+         lower.find("function.arguments") != std::string::npos;
+}
+
+int currentAccountIndex(const std::vector<OAuthAccount> &accounts,
+                        const std::string &identifier) {
+  for (size_t i = 0; i < accounts.size(); ++i) {
+    if (accounts[i].getIdentifier() == identifier) {
+      return static_cast<int>(i);
+    }
+  }
+  return -1;
 }
 
 } // namespace
@@ -1000,143 +1111,194 @@ void QwenProvider::processSSELine(
   }
 }
 
-bool QwenProvider::executeStreamRequest(
+QwenProvider::StreamAttemptResult QwenProvider::classifyStreamFailure(
+    int httpStatus, const std::string &responseBody,
+    const std::map<std::string, std::string> &headers) {
+  StreamAttemptResult result;
+  result.httpStatus = httpStatus;
+  result.errorMessage =
+      formatErrorMessage("", httpStatus, responseBody, "API error");
+
+  if (httpStatus == 401 || httpStatus == 403) {
+    result.kind = StreamAttemptKind::AuthError;
+    result.errorMessage = formatErrorMessage(
+        "", httpStatus, responseBody,
+        "Authentication failed. Token may be expired.");
+    return result;
+  }
+
+  const std::string lowerBody =
+      firmius::shared::StringUtil::toLower(responseBody);
+  bool quotaLikeError =
+      lowerBody.find("insufficient_quota") != std::string::npos ||
+      lowerBody.find("free allocated quota exceeded") != std::string::npos ||
+      lowerBody.find("quota exceeded") != std::string::npos ||
+      lowerBody.find("rate limit") != std::string::npos;
+  bool validationError = bodyContainsValidationError(responseBody);
+
+  rapidjson::Document doc;
+  doc.Parse(responseBody.c_str());
+  if (!doc.HasParseError() && doc.IsObject() && doc.HasMember("error")) {
+    const auto &errorValue = doc["error"];
+    const std::string type = firmius::shared::StringUtil::toLower(
+        extractQwenErrorField(errorValue, "type"));
+    const std::string code = firmius::shared::StringUtil::toLower(
+        extractQwenErrorField(errorValue, "code"));
+    const std::string message = firmius::shared::StringUtil::toLower(
+        extractQwenErrorField(errorValue, "message"));
+
+    quotaLikeError =
+        type.find("quota") != std::string::npos ||
+        type.find("rate_limit") != std::string::npos ||
+        code.find("quota") != std::string::npos ||
+        code.find("rate_limit") != std::string::npos ||
+        message.find("quota") != std::string::npos ||
+        message.find("rate limit") != std::string::npos ||
+        message.find("free allocated quota exceeded") != std::string::npos;
+
+    validationError = validationError ||
+                      type == "invalid_request_error" ||
+                      type == "invalid_parameter_error" ||
+                      code == "invalid_request_error" ||
+                      code == "invalid_parameter_error";
+  }
+
+  if (httpStatus == 429 || httpStatus == 1302 || httpStatus == 1305 ||
+      (httpStatus == 400 && quotaLikeError)) {
+    result.kind = StreamAttemptKind::QuotaLimited;
+    result.errorMessage = formatErrorMessage(
+        "", httpStatus, responseBody,
+        "Quota exhausted or rate limited. Switching to next account...");
+    int backoff = firmius::shared::BackoffConstants::getBackoffSeconds(0);
+    auto retryAfterIt = headers.find("retry-after");
+    if (retryAfterIt != headers.end()) {
+      try {
+        backoff = std::stoi(retryAfterIt->second);
+      } catch (...) {
+      }
+    }
+    result.retryAfterMs = backoff * 1000;
+    return result;
+  }
+
+  if (httpStatus == 0 || httpStatus >= 500 || httpStatus == 408 ||
+      httpStatus == 409 || httpStatus == 425) {
+    result.kind = StreamAttemptKind::RetryableTransient;
+    result.errorMessage =
+        formatErrorMessage("", httpStatus, responseBody,
+                           httpStatus == 0 ? "Request timeout" : "Server error");
+    return result;
+  }
+
+  if (httpStatus >= 400 && httpStatus < 500) {
+    result.kind = StreamAttemptKind::NonRetryableRequest;
+    if (validationError) {
+      result.errorMessage = formatErrorMessage(
+          "", httpStatus, responseBody, "Request validation failed.");
+    }
+    return result;
+  }
+
+  result.kind = StreamAttemptKind::RetryableTransient;
+  return result;
+}
+
+bool QwenProvider::hasAlternativeAccount(
+    const std::vector<OAuthAccount> &accounts,
+    const std::string &currentAccountIdentifier) {
+  for (const auto &account : accounts) {
+    if (account.getIdentifier() != currentAccountIdentifier) {
+      return true;
+    }
+  }
+  return false;
+}
+
+std::string
+QwenProvider::composeNoAlternateAccountError(const std::string &underlyingCause) {
+  const std::string suffix = "No alternate Qwen account available after failure.";
+  if (underlyingCause.empty()) {
+    return suffix;
+  }
+  return underlyingCause + " " + suffix;
+}
+
+std::string QwenProvider::formatErrorMessage(const std::string &modelId,
+                                             int httpStatus,
+                                             const std::string &responseBody,
+                                             const std::string &summary) {
+  std::string message = summary;
+  if (httpStatus > 0) {
+    message += " (HTTP " + std::to_string(httpStatus) + ")";
+  }
+  message += "\nProvider: qwen";
+  if (!modelId.empty()) {
+    message += "\nModel: " + modelId;
+  }
+  if (!responseBody.empty()) {
+    message += "\nRaw provider body:\n" + responseBody;
+  }
+  return message;
+}
+
+bool QwenProvider::isMeaningfulStreamEvent(const StreamEvent &event) {
+  if (auto *text = std::get_if<TextChunk>(&event)) {
+    return !text->delta.empty();
+  }
+  if (auto *thinking = std::get_if<ThinkingChunk>(&event)) {
+    return !thinking->delta.empty();
+  }
+  if (auto *tool = std::get_if<ToolCallChunk>(&event)) {
+    return !tool->nameDelta.empty() || !tool->argsDelta.empty();
+  }
+  return false;
+}
+
+std::optional<std::string> QwenProvider::validateCompletedToolCallBatch(
+    const std::vector<firmius::shared::ToolCallChunk> &calls) {
+  for (const auto &call : calls) {
+    const std::string toolName = shared::StringUtil::trim(call.nameDelta);
+    if (toolName.empty()) {
+      return "Qwen stream ended with incomplete tool-call payload (missing tool "
+             "name). Provider stream truncated during tool-call generation.";
+    }
+
+    rapidjson::Document args;
+    args.Parse(call.argsDelta.c_str());
+    if (args.HasParseError()) {
+      return "Qwen stream ended with incomplete tool-call arguments for tool '" +
+             toolName +
+             "'. Provider stream truncated during tool-call generation.";
+    }
+
+    if (!args.IsObject()) {
+      return "Qwen stream ended with malformed tool-call arguments for tool '" +
+             toolName + "'. Provider stream truncated during tool-call generation.";
+    }
+  }
+  return std::nullopt;
+}
+
+QwenProvider::StreamAttemptResult QwenProvider::executeStreamRequest(
     OAuthAccount &acc, const AgentHistory &history, const ProviderOptions &opts,
     std::function<void(const StreamEvent &)> &onEvent) {
-  // Build request body (OpenAI-compatible format)
+  const std::string modelId = opts.modelId.empty() ? "coder-model" : opts.modelId;
+  auto payload = buildRequestPayload(history, opts);
+  for (const auto &warning : payload.warnings) {
+    firmius::shared::Logger::instance().logWarning("[QwenProvider] " + warning);
+  }
+
   rapidjson::Document d;
-  d.SetObject();
+  d.Parse(payload.body.c_str());
+  if (d.HasParseError() || !d.IsObject()) {
+    StreamAttemptResult parseFailure;
+    parseFailure.kind = StreamAttemptKind::NonRetryableRequest;
+    parseFailure.httpStatus = 0;
+    parseFailure.errorMessage =
+        "Failed to build Qwen request payload from local history.";
+    return parseFailure;
+  }
   auto &a = d.GetAllocator();
-
-  // Model
-  std::string modelId = opts.modelId.empty() ? "coder-model" : opts.modelId;
-  d.AddMember("model", rapidjson::Value(modelId.c_str(), a), a);
-
-  // Stream
-  d.AddMember("stream", true, a);
-
-  // Messages
-  rapidjson::Value messages(rapidjson::kArrayType);
-  for (const auto &turn : history.turns) {
-    for (const auto &msg : turn.messages) {
-      if (msg.role == firmius::shared::Role::Error) {
-        continue;
-      }
-
-      rapidjson::Value message(rapidjson::kObjectType);
-      message.AddMember("role",
-                        rapidjson::Value(roleToString(msg.role).c_str(), a), a);
-
-      // Build content array for text/images
-      rapidjson::Value content(rapidjson::kArrayType);
-      for (const auto &part : msg.content) {
-        if (auto *txt = std::get_if<firmius::shared::TextContent>(&part)) {
-          rapidjson::Value item(rapidjson::kObjectType);
-          item.AddMember("type", "text", a);
-          item.AddMember("text", rapidjson::Value(txt->text.c_str(), a), a);
-          content.PushBack(item, a);
-        } else if (auto *img =
-                       std::get_if<firmius::shared::ImageContent>(&part)) {
-          rapidjson::Value item(rapidjson::kObjectType);
-          item.AddMember("type", "image_url", a);
-          rapidjson::Value imageUrl(rapidjson::kObjectType);
-          imageUrl.AddMember("url", rapidjson::Value(img->url.c_str(), a), a);
-          item.AddMember("image_url", imageUrl, a);
-          content.PushBack(item, a);
-        }
-      }
-
-      // Add content to message if not empty
-      if (content.Size() > 0) {
-        message.AddMember("content", content, a);
-      }
-
-      // Handle tool calls (assistant message with tool_calls)
-      for (const auto &part : msg.content) {
-        if (auto *call = std::get_if<firmius::shared::ToolCallContent>(&part)) {
-          // Add tool_calls array to the message
-          if (!message.HasMember("tool_calls")) {
-            rapidjson::Value toolCalls(rapidjson::kArrayType);
-            message.AddMember("tool_calls", toolCalls, a);
-          }
-
-          rapidjson::Value toolCall(rapidjson::kObjectType);
-          toolCall.AddMember("id", rapidjson::Value(call->id.c_str(), a), a);
-          toolCall.AddMember("type", "function", a);
-
-          rapidjson::Value function(rapidjson::kObjectType);
-          function.AddMember("name", rapidjson::Value(call->name.c_str(), a),
-                             a);
-          function.AddMember("arguments",
-                             rapidjson::Value(call->args.c_str(), a), a);
-          toolCall.AddMember("function", function, a);
-
-          message["tool_calls"].PushBack(toolCall, a);
-        }
-      }
-
-      // Handle tool results (tool role message)
-      for (const auto &part : msg.content) {
-        if (auto *result =
-                std::get_if<firmius::shared::ToolResultContent>(&part)) {
-          // Tool results are sent as separate messages with role="tool"
-          // But since we're iterating by message, we need to handle this
-          // differently For now, add result as content if this is a tool result
-          // message
-          if (msg.role == firmius::shared::Role::ToolResult) {
-            if (!message.HasMember("content") ||
-                message["content"].Size() == 0) {
-              rapidjson::Value resultContent(rapidjson::kArrayType);
-              rapidjson::Value item(rapidjson::kObjectType);
-              item.AddMember("type", "text", a);
-              item.AddMember("text",
-                             rapidjson::Value(result->result.c_str(), a), a);
-              resultContent.PushBack(item, a);
-              message.AddMember("content", resultContent, a);
-            }
-          }
-          // Add tool_call_id for tool result messages
-          if (!result->toolCallId.empty()) {
-            message.AddMember("tool_call_id",
-                              rapidjson::Value(result->toolCallId.c_str(), a),
-                              a);
-          }
-        }
-      }
-
-      messages.PushBack(message, a);
-    }
-  }
-  d.AddMember("messages", messages, a);
-
-  // Tools
-  if (!opts.tools.empty()) {
-    rapidjson::Value tools(rapidjson::kArrayType);
-    for (const auto &tool : opts.tools) {
-      rapidjson::Value toolObj(rapidjson::kObjectType);
-      toolObj.AddMember("type", "function", a);
-
-      rapidjson::Value function(rapidjson::kObjectType);
-      function.AddMember("name", rapidjson::Value(tool.name.c_str(), a), a);
-      function.AddMember("description",
-                         rapidjson::Value(tool.description.c_str(), a), a);
-
-      rapidjson::Document schemaDoc;
-      schemaDoc.Parse(tool.inputSchema.c_str());
-      if (!schemaDoc.HasParseError() && schemaDoc.IsObject()) {
-        rapidjson::Value params;
-        params.CopyFrom(schemaDoc, a);
-        function.AddMember("parameters", params, a);
-      } else {
-        rapidjson::Value params(rapidjson::kObjectType);
-        function.AddMember("parameters", params, a);
-      }
-
-      toolObj.AddMember("function", function, a);
-      tools.PushBack(toolObj, a);
-    }
-    d.AddMember("tools", tools, a);
-  }
 
   // Temperature
   d.AddMember("temperature", opts.temperature, a);
@@ -1176,10 +1338,16 @@ bool QwenProvider::executeStreamRequest(
   std::uint64_t startMs = nowMs();
   std::uint64_t firstTokenMs = 0;
   bool firstTokenEmitted = false;
+  bool emittedMeaningfulOutput = false;
   bool metricsReceived = false;
   AgentMetrics capturedMetrics;
+  std::vector<ToolCallChunk> accumulatedToolCalls;
 
   auto wrappedOnEvent = [&](const StreamEvent &ev) {
+    if (isMeaningfulStreamEvent(ev)) {
+      emittedMeaningfulOutput = true;
+    }
+
     if (std::holds_alternative<TextChunk>(ev)) {
       if (!firstTokenEmitted) {
         firstTokenMs = nowMs();
@@ -1190,6 +1358,24 @@ bool QwenProvider::executeStreamRequest(
       if (!firstTokenEmitted) {
         firstTokenMs = nowMs();
         firstTokenEmitted = true;
+      }
+      onEvent(ev);
+    } else if (std::holds_alternative<ToolCallChunk>(ev)) {
+      const auto &chunk = std::get<ToolCallChunk>(ev);
+      bool merged = false;
+      for (auto &existing : accumulatedToolCalls) {
+        if (existing.index == chunk.index) {
+          existing.nameDelta += chunk.nameDelta;
+          existing.argsDelta += chunk.argsDelta;
+          if (!chunk.id.empty()) {
+            existing.id = chunk.id;
+          }
+          merged = true;
+          break;
+        }
+      }
+      if (!merged) {
+        accumulatedToolCalls.push_back(chunk);
       }
       onEvent(ev);
     } else if (auto *met = std::get_if<AgentMetrics>(&ev)) {
@@ -1210,6 +1396,18 @@ bool QwenProvider::executeStreamRequest(
 
   // Handle response
   if (resp.code == 200) {
+    if (auto invalidBatchError =
+            validateCompletedToolCallBatch(accumulatedToolCalls)) {
+      StreamAttemptResult truncatedFailure;
+      truncatedFailure.kind = StreamAttemptKind::PartialResponseError;
+      truncatedFailure.httpStatus = 0;
+      truncatedFailure.errorMessage =
+          formatErrorMessage(modelId, 0, "", *invalidBatchError);
+      onEvent(StreamError{truncatedFailure.errorMessage,
+                          truncatedFailure.httpStatus, acc.getIdentifier()});
+      return truncatedFailure;
+    }
+
     auto endMs = nowMs();
     if (metricsReceived) {
       capturedMetrics.timing.startMs = startMs;
@@ -1218,58 +1416,222 @@ bool QwenProvider::executeStreamRequest(
       capturedMetrics.timing.endMs = endMs;
       onEvent(capturedMetrics);
     }
-    return true; // Success
+    return StreamAttemptResult{StreamAttemptKind::Success, 200, 0, ""};
   }
 
-  // Error handling
-  std::string errMsg = "API error: " + std::to_string(resp.code);
-  if (!ctx.buffer.empty()) {
-    errMsg += "\n" + ctx.buffer;
+  if (emittedMeaningfulOutput) {
+    StreamAttemptResult partialFailure;
+    partialFailure.kind = StreamAttemptKind::PartialResponseError;
+    partialFailure.httpStatus = resp.code;
+    partialFailure.errorMessage = formatErrorMessage(
+        modelId, resp.code, ctx.buffer,
+        resp.code == 0 ? "Stream interrupted after partial output."
+                       : "Stream failed after partial output.");
+    onEvent(StreamError{partialFailure.errorMessage, partialFailure.httpStatus,
+                        acc.getIdentifier()});
+    return partialFailure;
   }
 
-  if (resp.code == 401 || resp.code == 403) {
-    // Token expired or invalid - mark for refresh
+  auto result = classifyStreamFailure(resp.code, ctx.buffer, resp.headers);
+  if (!modelId.empty() &&
+      result.errorMessage.find("\nModel: ") == std::string::npos) {
+    result.errorMessage += "\nModel: " + modelId;
+  }
+  if (result.kind == StreamAttemptKind::AuthError) {
     acc.rateLimited = true;
     acc.backoffUntil =
         nowSeconds() + firmius::shared::BackoffConstants::MAX_BACKOFF;
-    onEvent(StreamError{"Authentication failed. Token may be expired.",
-                        static_cast<int>(resp.code), acc.getIdentifier()});
-  } else if (resp.code == 429 || resp.code == 1302 || resp.code == 1305 ||
-             (resp.code == 400 &&
-              (errMsg.find("insufficient_quota") != std::string::npos ||
-               errMsg.find("free allocated quota exceeded") != std::string::npos ||
-               errMsg.find("quota exceeded") != std::string::npos))) {
-    // Rate limited or quota exhausted - IMMEDIATE account switch
+  } else if (result.kind == StreamAttemptKind::QuotaLimited) {
     acc.metadata["quota:" + modelId] = "0";
-    
-    int backoff = firmius::shared::BackoffConstants::getBackoffSeconds(0);
-    if (resp.headers.count("retry-after")) {
-      try {
-        backoff = std::stoi(resp.headers.at("retry-after"));
-      } catch (...) {}
-    }
-    
     acc.rateLimited = true;
-    acc.backoffUntil = nowSeconds() + backoff;
+    acc.backoffUntil = nowSeconds() + (result.retryAfterMs / 1000);
     saveAccounts();
-
-    std::string quotaError =
-        "Quota exhausted or rate limited. Switching to next account...";
-    onEvent(StreamError{quotaError, static_cast<int>(resp.code),
-                        acc.getIdentifier()});
-  } else if (resp.code >= 500 || resp.code == 0) {
-    // Server error or timeout - DON'T mark as exhausted, just fail this attempt
-    // The retry logic will try other accounts
-    onEvent(StreamError{resp.code == 0
-                            ? "Request timeout"
-                            : "Server error: " + std::to_string(resp.code),
-                        static_cast<int>(resp.code), acc.getIdentifier()});
-  } else {
-    // Other errors (4xx) - don't mark as rate-limited, but fail this attempt
-    onEvent(
-        StreamError{errMsg, static_cast<int>(resp.code), acc.getIdentifier()});
   }
-  return false; // Failed
+  onEvent(StreamError{result.errorMessage, result.httpStatus,
+                      acc.getIdentifier()});
+  return result;
+}
+
+QwenProvider::RequestPayloadBuildResult
+QwenProvider::buildRequestPayload(const AgentHistory &history,
+                                  const ProviderOptions &opts) {
+  RequestPayloadBuildResult result;
+
+  rapidjson::Document d;
+  d.SetObject();
+  auto &a = d.GetAllocator();
+
+  std::string modelId = opts.modelId.empty() ? "coder-model" : opts.modelId;
+  d.AddMember("model", rapidjson::Value(modelId.c_str(), a), a);
+  d.AddMember("stream", true, a);
+
+  std::unordered_set<std::string> registeredToolNames;
+  for (const auto &tool : opts.tools) {
+    registeredToolNames.insert(tool.name);
+  }
+
+  rapidjson::Value messages(rapidjson::kArrayType);
+  std::unordered_set<std::string> validToolCallIds;
+
+  for (const auto &turn : history.turns) {
+    for (const auto &msg : turn.messages) {
+      if (msg.role == firmius::shared::Role::Error) {
+        continue;
+      }
+
+      rapidjson::Value message(rapidjson::kObjectType);
+      message.AddMember("role",
+                        rapidjson::Value(roleToString(msg.role).c_str(), a), a);
+
+      rapidjson::Value content(rapidjson::kArrayType);
+      for (const auto &part : msg.content) {
+        if (auto *txt = std::get_if<firmius::shared::TextContent>(&part)) {
+          addTextContentItem(content, txt->text, a);
+        } else if (auto *img =
+                       std::get_if<firmius::shared::ImageContent>(&part)) {
+          rapidjson::Value item(rapidjson::kObjectType);
+          item.AddMember("type", "image_url", a);
+          rapidjson::Value imageUrl(rapidjson::kObjectType);
+          imageUrl.AddMember("url", rapidjson::Value(img->url.c_str(), a), a);
+          item.AddMember("image_url", imageUrl, a);
+          content.PushBack(item, a);
+        }
+      }
+
+      if (hasDisplayableContent(content)) {
+        message.AddMember("content", content, a);
+      }
+
+      for (const auto &part : msg.content) {
+        if (auto *call = std::get_if<firmius::shared::ToolCallContent>(&part)) {
+          const auto validation = validateToolCall(*call, registeredToolNames);
+          if (!validation.valid) {
+            ++result.droppedToolCalls;
+            result.warnings.push_back("Dropped malformed historical tool call '" +
+                                      call->name + "': " + validation.reason +
+                                      ".");
+            continue;
+          }
+
+          if (!message.HasMember("tool_calls")) {
+            rapidjson::Value toolCalls(rapidjson::kArrayType);
+            message.AddMember("tool_calls", toolCalls, a);
+          }
+
+          rapidjson::Value toolCall(rapidjson::kObjectType);
+          toolCall.AddMember("id", rapidjson::Value(call->id.c_str(), a), a);
+          toolCall.AddMember("type", "function", a);
+
+          rapidjson::Value function(rapidjson::kObjectType);
+          function.AddMember("name", rapidjson::Value(call->name.c_str(), a),
+                             a);
+          function.AddMember(
+              "arguments",
+              rapidjson::Value(validation.normalizedArguments.c_str(), a), a);
+          toolCall.AddMember("function", function, a);
+
+          message["tool_calls"].PushBack(toolCall, a);
+          validToolCallIds.insert(call->id);
+        }
+      }
+
+      for (const auto &part : msg.content) {
+        if (auto *resultPart =
+                std::get_if<firmius::shared::ToolResultContent>(&part)) {
+          if (msg.role != firmius::shared::Role::ToolResult) {
+            continue;
+          }
+          if (resultPart->toolCallId.empty() ||
+              validToolCallIds.find(resultPart->toolCallId) ==
+                  validToolCallIds.end()) {
+            ++result.droppedToolResults;
+            result.warnings.push_back(
+                "Dropped orphaned historical tool result for tool_call_id '" +
+                resultPart->toolCallId + "'.");
+            continue;
+          }
+
+          if (!message.HasMember("content") ||
+              !hasDisplayableContent(message["content"])) {
+            rapidjson::Value resultContent(rapidjson::kArrayType);
+            addTextContentItem(resultContent, resultPart->result, a);
+            message.AddMember("content", resultContent, a);
+          }
+          if (!message.HasMember("tool_call_id")) {
+            message.AddMember(
+                "tool_call_id",
+                rapidjson::Value(resultPart->toolCallId.c_str(), a), a);
+          }
+        }
+      }
+
+      const bool hasToolCalls =
+          message.HasMember("tool_calls") && message["tool_calls"].IsArray() &&
+          message["tool_calls"].Size() > 0;
+      const bool hasToolResult =
+          message.HasMember("tool_call_id") && message["tool_call_id"].IsString();
+      const bool hasContent =
+          message.HasMember("content") && hasDisplayableContent(message["content"]);
+
+      if (hasContent || hasToolCalls || hasToolResult) {
+        messages.PushBack(message, a);
+      }
+    }
+  }
+
+  if (result.droppedToolCalls > 0 || result.droppedToolResults > 0) {
+    result.warnings.push_back(buildSanitizationWarning(
+        result.droppedToolCalls, result.droppedToolResults));
+
+    rapidjson::Value note(rapidjson::kObjectType);
+    note.AddMember("role", "system", a);
+    rapidjson::Value noteContent(rapidjson::kArrayType);
+    addTextContentItem(
+        noteContent,
+        "System note: malformed historical tool-call payloads were omitted "
+        "before this Qwen request. Continue from the remaining valid history. "
+        "If the missing step matters, ask for a retry of the last user "
+        "request.",
+        a);
+    note.AddMember("content", noteContent, a);
+    messages.PushBack(note, a);
+  }
+
+  d.AddMember("messages", messages, a);
+
+  if (!opts.tools.empty()) {
+    rapidjson::Value tools(rapidjson::kArrayType);
+    for (const auto &tool : opts.tools) {
+      rapidjson::Value toolObj(rapidjson::kObjectType);
+      toolObj.AddMember("type", "function", a);
+
+      rapidjson::Value function(rapidjson::kObjectType);
+      function.AddMember("name", rapidjson::Value(tool.name.c_str(), a), a);
+      function.AddMember("description",
+                         rapidjson::Value(tool.description.c_str(), a), a);
+
+      rapidjson::Document schemaDoc;
+      schemaDoc.Parse(tool.inputSchema.c_str());
+      if (!schemaDoc.HasParseError() && schemaDoc.IsObject()) {
+        rapidjson::Value params;
+        params.CopyFrom(schemaDoc, a);
+        function.AddMember("parameters", params, a);
+      } else {
+        rapidjson::Value params(rapidjson::kObjectType);
+        function.AddMember("parameters", params, a);
+      }
+
+      toolObj.AddMember("function", function, a);
+      tools.PushBack(toolObj, a);
+    }
+    d.AddMember("tools", tools, a);
+  }
+
+  rapidjson::StringBuffer buffer;
+  rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+  d.Accept(writer);
+  result.body = buffer.GetString();
+  return result;
 }
 
 void QwenProvider::stream(const AgentHistory &history,
@@ -1282,6 +1644,8 @@ void QwenProvider::stream(const AgentHistory &history,
   int accountSwitchCount = 0;
   std::string lastError;
   std::string lastAccountEmail;
+  std::string previousAccountEmail;
+  std::string lastSwitchCause;
   int maxAccountSwitches = std::max(3, static_cast<int>(accounts_.size()));
 
   // Try each account with retries
@@ -1317,7 +1681,10 @@ void QwenProvider::stream(const AgentHistory &history,
       }
 
       // No accounts available
-      if (!lastError.empty()) {
+      if (!lastSwitchCause.empty()) {
+        lastError = composeNoAlternateAccountError(lastSwitchCause);
+        onEvent(StreamError{lastError, -1, lastAccountEmail});
+      } else if (!lastError.empty()) {
         onEvent(StreamError{lastError, -1, lastAccountEmail});
       } else {
         onEvent(StreamError{"No accounts available.", -1, lastAccountEmail});
@@ -1327,14 +1694,21 @@ void QwenProvider::stream(const AgentHistory &history,
 
     OAuthAccount &acc = *optAcc.value();
 
-    if (accountSwitchCount > 0) {
+    if (accountSwitchCount > 0 && !previousAccountEmail.empty() &&
+        previousAccountEmail == acc.getIdentifier()) {
+      lastError = composeNoAlternateAccountError(lastSwitchCause);
+      onEvent(StreamError{lastError, -1, acc.getIdentifier()});
+      return;
+    }
+
+    if (accountSwitchCount > 0 && !previousAccountEmail.empty() &&
+        previousAccountEmail != acc.getIdentifier()) {
       onEvent(StreamAccountSwitched{acc.getIdentifier()});
     }
     lastAccountEmail = acc.getIdentifier();
 
     // Retry loop for this account (retries happen within same turn)
-    bool accountFailed = false;
-    bool wasQuotaError = false;
+    bool switchAccounts = false;
 
     for (int retryIdx = 0; retryIdx < numRetries; ++retryIdx) {
       if (retryIdx > 0) {
@@ -1350,7 +1724,8 @@ void QwenProvider::stream(const AgentHistory &history,
       }
 
       // Try the request
-      if (executeStreamRequest(acc, history, opts, onEvent)) {
+      auto attempt = executeStreamRequest(acc, history, opts, onEvent);
+      if (attempt.succeeded()) {
         // Success! Update lastUsedIndex_ so next request starts from this
         // account
         {
@@ -1366,40 +1741,68 @@ void QwenProvider::stream(const AgentHistory &history,
         return; // Success!
       }
 
-      // Check if this was a quota exhaustion error (429 or insufficient_quota)
-      if (wasQuotaError) {
-        // Quota exhausted - switch accounts immediately, no more retries
-        accountSwitchCount++;
+      switch (attempt.kind) {
+      case StreamAttemptKind::QuotaLimited:
+      case StreamAttemptKind::AuthError:
+        lastSwitchCause = attempt.errorMessage;
+        switchAccounts = true;
+        break;
+      case StreamAttemptKind::NonRetryableRequest:
+        lastError = attempt.errorMessage;
+        return;
+      case StreamAttemptKind::PartialResponseError:
+        lastError = attempt.errorMessage;
+        return;
+      case StreamAttemptKind::RetryableTransient:
+        if (retryIdx >= 2) {
+          lastSwitchCause = attempt.errorMessage;
+          switchAccounts = true;
+        }
+        break;
+      case StreamAttemptKind::Success:
         break;
       }
 
-      // For other errors (timeout, server error), retry a few times then switch
-      // After 2 retries, switch to next account
-      if (retryIdx >= 2) {
-        accountFailed = true;
-        accountSwitchCount++;
+      if (switchAccounts) {
         break;
       }
     }
 
-    // All retries exhausted for this account
-    if (accountFailed) {
-      if (wasQuotaError) {
-        continue; // Try next account
+    previousAccountEmail = acc.getIdentifier();
+
+    if (switchAccounts) {
+      if (!hasAlternativeAccount(accounts_, acc.getIdentifier())) {
+        lastError = composeNoAlternateAccountError(lastSwitchCause);
+        onEvent(StreamError{lastError, -1, acc.getIdentifier()});
+        return;
       }
-      // For non-quota errors, we already switched accounts in the loop
+
+      const int accIndex = currentAccountIndex(accounts_, acc.getIdentifier());
+      if (accIndex >= 0) {
+        std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
+        lastUsedIndex_ = (accIndex + 1) % static_cast<int>(accounts_.size());
+        saveAccounts();
+      }
+      accountSwitchCount++;
       continue;
     }
 
-    // Non-rate-limit failure after all retries
     lastError = "Exhausted all retries";
+    if (!lastSwitchCause.empty()) {
+      lastError = composeNoAlternateAccountError(lastSwitchCause);
+    }
     onEvent(StreamError{lastError, -1, lastAccountEmail});
     return;
   }
 
   // All accounts exhausted
-  onEvent(StreamError{"All accounts rate-limited or exhausted", -1,
-                      lastAccountEmail});
+  if (!lastSwitchCause.empty()) {
+    lastError = composeNoAlternateAccountError(lastSwitchCause);
+    onEvent(StreamError{lastError, -1, lastAccountEmail});
+  } else {
+    onEvent(StreamError{"All accounts rate-limited or exhausted", -1,
+                        lastAccountEmail});
+  }
 }
 
 void QwenProvider::generateSummary(

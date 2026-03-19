@@ -238,6 +238,30 @@ public:
         ftxui::hbox(std::move(ctx_items)) | ftxui::bgcolor(ctx_bg),
     });
 
+    ftxui::Element process_seg = ftxui::text("") | ftxui::bgcolor(filler_bg);
+    if (model_->live_processes > 0 || model_->background_processes > 0) {
+      std::string process_text = " " + firmius::shared::ICON_TERMINAL;
+      if (model_->live_processes > 0) {
+        process_text += " " + std::to_string(model_->live_processes);
+        if (!ultra_compact) {
+          process_text += " live";
+        }
+      }
+      if (model_->background_processes > 0) {
+        process_text += " " + std::to_string(model_->background_processes);
+        process_text += ultra_compact ? "b" : " bg";
+      }
+
+      auto process_bg = theme.status_bar.context.bg;
+      auto process_fg = theme.status_bar.context.icon;
+      process_seg = ftxui::hbox({
+          ftxui::text(firmius::shared::PL_RIGHT_SEP) |
+              ftxui::color(process_bg) | ftxui::bgcolor(filler_bg),
+          ftxui::text(process_text + " ") | ftxui::bold |
+              ftxui::color(process_fg) | ftxui::bgcolor(process_bg),
+      });
+    }
+
     return ftxui::hbox({
                status_seg,
                sep1,
@@ -246,6 +270,7 @@ public:
                pill_el,
                sep3,
                ftxui::filler() | ftxui::bgcolor(filler_bg),
+               process_seg,
                ctx_seg,
            }) |
            ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, 1);

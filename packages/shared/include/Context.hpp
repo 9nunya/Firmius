@@ -161,6 +161,17 @@ struct AgentContext {
  * @brief Metadata for a collaborative thread.
  */
 struct ThreadMetadata {
+  struct RetryableRequest {
+    std::string targetAgentId;
+    std::string turnId;
+    std::string text;
+    std::vector<ImageContent> images;
+    uint64_t recordedAt = 0;
+    bool eligible = false; ///< Deprecated compatibility field.
+
+    bool operator==(const RetryableRequest &other) const = default;
+  };
+
   std::string threadId;
   std::string title;
   HostCreationOptions hostOptions;
@@ -168,6 +179,7 @@ struct ThreadMetadata {
   std::string cwd;
   std::string leadPersona;
   std::string activePlanId;
+  std::optional<RetryableRequest> lastRetryableRequest;
   ThreadPermissionMode permissionMode = ThreadPermissionMode::Request;
   uint64_t createdAt = 0;
   uint64_t lastActiveAt = 0;
@@ -185,7 +197,8 @@ struct WorkChunk {
   std::string context;
   std::string constraints;
   std::string completion;
-  WorkChunkStatus status = WorkChunkStatus::Draft;
+  bool planningGate = false;
+  WorkChunkStatus status = WorkChunkStatus::Ready;
   std::vector<std::string> dependsOn;
   std::string assignedAgentId;
   int attemptCount = 0;

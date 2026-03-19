@@ -12,3 +12,8 @@ TEST(TUIHotkeys, PermissionCycleUsesCtrlY) {
 TEST(TUIHotkeys, OldCtrlShiftPSequenceIsRejected) {
   EXPECT_FALSE(IsPermissionCycleInput("\x1b[1;6P"));
 }
+
+TEST(TUIHotkeys, RetryLastRequestUsesCtrlR) {
+  EXPECT_TRUE(IsRetryLastRequestInput("\x12"));
+  EXPECT_TRUE(IsRetryLastRequestEvent(ftxui::Event::Special("\x12")));
+}

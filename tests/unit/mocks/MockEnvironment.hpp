@@ -16,7 +16,8 @@ public:
     using EnvMap = std::map<std::string, std::string>;
     MOCK_METHOD(std::string, spawnProcess,
                 (const std::string& command, const std::string& toolCallId,
-                 const std::string& cwd, const EnvMap& env),
+                 const std::string& cwd, const EnvMap& env,
+                 bool monitorCompletion),
                 (override));
     MOCK_METHOD(ProcessSnapshot, inspectProcess, (const std::string& id), (override));
     MOCK_METHOD(void, writeToProcess, (const std::string& id, const std::string& data), (override));

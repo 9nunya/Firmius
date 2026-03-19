@@ -19,6 +19,8 @@ struct StatusBarModel {
   uint32_t context_used = 0;
   uint32_t context_max = 0;
   bool is_active = false;
+  int live_processes = 0;
+  int background_processes = 0;
 };
 
 ftxui::Component StatusBar(const std::shared_ptr<StatusBarModel> &model);

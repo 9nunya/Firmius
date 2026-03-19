@@ -3,6 +3,7 @@
 #include "providers/BaseOAuthProvider.hpp"
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -28,6 +29,31 @@ namespace firmius::provider {
  */
 class QwenProvider : public BaseOAuthProvider {
 public:
+  enum class StreamAttemptKind {
+    Success,
+    QuotaLimited,
+    RetryableTransient,
+    NonRetryableRequest,
+    AuthError,
+    PartialResponseError,
+  };
+
+  struct StreamAttemptResult {
+    StreamAttemptKind kind = StreamAttemptKind::RetryableTransient;
+    int httpStatus = 0;
+    int retryAfterMs = 0;
+    std::string errorMessage;
+
+    bool succeeded() const { return kind == StreamAttemptKind::Success; }
+  };
+
+  struct RequestPayloadBuildResult {
+    std::string body;
+    std::vector<std::string> warnings;
+    size_t droppedToolCalls = 0;
+    size_t droppedToolResults = 0;
+  };
+
   QwenProvider();
   ~QwenProvider() override = default;
 
@@ -60,6 +86,24 @@ public:
   void processSSELine(const std::string &line,
                       std::function<void(const StreamEvent &)> &onEvent);
 
+  static StreamAttemptResult
+  classifyStreamFailure(int httpStatus, const std::string &responseBody,
+                        const std::map<std::string, std::string> &headers);
+  static bool hasAlternativeAccount(
+      const std::vector<OAuthAccount> &accounts,
+      const std::string &currentAccountIdentifier);
+  static std::string
+  composeNoAlternateAccountError(const std::string &underlyingCause);
+  static std::string formatErrorMessage(const std::string &modelId,
+                                        int httpStatus,
+                                        const std::string &responseBody,
+                                        const std::string &summary);
+  static bool isMeaningfulStreamEvent(const StreamEvent &event);
+  static std::optional<std::string> validateCompletedToolCallBatch(
+      const std::vector<firmius::shared::ToolCallChunk> &calls);
+  static RequestPayloadBuildResult
+  buildRequestPayload(const AgentHistory &history, const ProviderOptions &opts);
+
 protected:
   // OAuth configuration constants (public for use in wizard)
   static const std::string QWEN_OAUTH_CLIENT_ID;
@@ -78,9 +122,10 @@ private:
   static std::map<std::string, ModelInfo> getStaticModels();
 
   // Sends the OpenAI-compatible chat completions request
-  bool executeStreamRequest(OAuthAccount &acc, const AgentHistory &history,
-                            const ProviderOptions &opts,
-                            std::function<void(const StreamEvent &)> &onEvent);
+  StreamAttemptResult
+  executeStreamRequest(OAuthAccount &acc, const AgentHistory &history,
+                       const ProviderOptions &opts,
+                       std::function<void(const StreamEvent &)> &onEvent);
 
   static size_t sseWriteCallback(char *ptr, size_t size, size_t nmemb,
                                  void *userdata);

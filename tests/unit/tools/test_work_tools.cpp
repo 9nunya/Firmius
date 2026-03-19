@@ -42,6 +42,7 @@ public:
   void reset() override {}
   void run(const std::string &, std::function<void(const StreamEvent &)>,
            const std::vector<ImageContent> &) override {}
+  void resume(std::function<void(const StreamEvent &)>) override {}
   void interrupt() override {}
   bool isInterrupted() const override { return false; }
   void clearInterrupt() override {}
@@ -375,7 +376,7 @@ TEST_F(WorkToolsTest, planSetActiveUpdatesThreadMetadata) {
   EXPECT_EQ(event->plan.status, PlanStatus::Active);
 }
 
-TEST_F(WorkToolsTest, chunkAddAppendsChunkCorrectly) {
+TEST_F(WorkToolsTest, chunkAddBlocksDependencyIncompleteChunkInsteadOfMarkingReady) {
   const std::string planId = createPlanDirect();
   auto input = makeObject({{"plan_id", planId},
                            {"title", "Chunk title"},
@@ -395,7 +396,7 @@ TEST_F(WorkToolsTest, chunkAddAppendsChunkCorrectly) {
   const auto plan = threadManager_->getPlan(threadId_, planId);
   ASSERT_EQ(plan.chunks.size(), 1u);
   EXPECT_EQ(plan.chunks[0].id, doc["chunk_id"].GetString());
-  EXPECT_EQ(plan.chunks[0].status, WorkChunkStatus::Ready);
+  EXPECT_EQ(plan.chunks[0].status, WorkChunkStatus::Blocked);
   EXPECT_TRUE(plan.chunks[0].assignedAgentId.empty());
   ASSERT_EQ(plan.chunks[0].dependsOn.size(), 1u);
   EXPECT_EQ(plan.chunks[0].dependsOn[0], "dep-1");
@@ -405,7 +406,49 @@ TEST_F(WorkToolsTest, chunkAddAppendsChunkCorrectly) {
   EXPECT_EQ(event->threadId, threadId_);
   EXPECT_EQ(event->planId, planId);
   EXPECT_EQ(event->chunk.id, doc["chunk_id"].GetString());
+  EXPECT_EQ(event->chunk.status, WorkChunkStatus::Blocked);
   EXPECT_TRUE(event->chunk.assignedAgentId.empty());
+}
+
+TEST_F(WorkToolsTest, chunkAddKeepsChunkReadyWhenDependenciesAreDone) {
+  const std::string planId = createPlanDirect();
+  addChunkDirect(planId, "dep-1", WorkChunkStatus::Done);
+
+  auto input = makeObject({{"plan_id", planId},
+                           {"title", "Chunk title"},
+                           {"goal", "Chunk goal"},
+                           {"context", "Chunk context"},
+                           {"constraints", "Chunk constraints"},
+                           {"completion", "Chunk completion"}},
+                          {},
+                          {},
+                          {{"depends_on", {"dep-1"}}});
+
+  auto result = execute("chunk_add", input);
+  ASSERT_TRUE(result.success) << result.error;
+
+  const auto plan = threadManager_->getPlan(threadId_, planId);
+  ASSERT_EQ(plan.chunks.size(), 2u);
+  EXPECT_EQ(plan.chunks[1].status, WorkChunkStatus::Ready);
+}
+
+TEST_F(WorkToolsTest, chunkAddPersistsPlanningGateFlag) {
+  const std::string planId = createPlanDirect();
+  auto input = makeObject({{"plan_id", planId},
+                           {"title", "Design spec"},
+                           {"goal", "Resolve planner design"},
+                           {"context", "Lead doctrine"},
+                           {"constraints", "No implementation yet"},
+                           {"completion", "Reviewed design accepted"}},
+                          {},
+                          {{"planning_gate", true}});
+
+  auto result = execute("chunk_add", input);
+  ASSERT_TRUE(result.success) << result.error;
+
+  const auto plan = threadManager_->getPlan(threadId_, planId);
+  ASSERT_EQ(plan.chunks.size(), 1u);
+  EXPECT_TRUE(plan.chunks[0].planningGate);
 }
 
 TEST_F(WorkToolsTest, chunkListReturnsSummaries) {
@@ -512,6 +555,109 @@ TEST_F(WorkToolsTest, chunkReadyForExecutionRespectsDependencyStatus) {
   EXPECT_EQ(doc[0]["chunk_id"].GetString(), std::string("ready-now"));
 }
 
+TEST_F(WorkToolsTest, chunkReadyForExecutionSummaryIncludesPlanningGateFlag) {
+  const std::string planId = createPlanDirect();
+  addChunkDirect(planId, "design-gate", WorkChunkStatus::Ready);
+  auto plan = threadManager_->getPlan(threadId_, planId);
+  plan.chunks[0].planningGate = true;
+  threadManager_->updatePlan(threadId_, plan);
+
+  auto input = makeObject({{"plan_id", planId}});
+  auto result = execute("chunk_ready_for_execution", input);
+  ASSERT_TRUE(result.success) << result.error;
+
+  auto doc = parseJson(result.data);
+  ASSERT_TRUE(doc.IsArray());
+  ASSERT_EQ(doc.Size(), 1u);
+  EXPECT_TRUE(doc[0]["planning_gate"].GetBool());
+}
+
+TEST_F(WorkToolsTest, chunkUpdateCanMarkPlanningGateOnExistingChunk) {
+  const std::string planId = createPlanDirect();
+  addChunkDirect(planId, "chunk-1", WorkChunkStatus::Ready);
+
+  auto input = makeObject({{"plan_id", planId}, {"chunk_id", "chunk-1"}},
+                          {},
+                          {{"planning_gate", true}});
+  auto result = execute("chunk_update", input);
+  ASSERT_TRUE(result.success) << result.error;
+
+  const auto updatedPlan = threadManager_->getPlan(threadId_, planId);
+  EXPECT_TRUE(updatedPlan.chunks[0].planningGate);
+}
+
+TEST_F(WorkToolsTest, chunkUpdateDowngradesReadyToBlockedWhenDependenciesAreNotDone) {
+  const std::string planId = createPlanDirect();
+  addChunkDirect(planId, "dep-1", WorkChunkStatus::InProgress);
+  addChunkDirect(planId, "chunk-1", WorkChunkStatus::InProgress, {"dep-1"});
+
+  auto input = makeObject({{"plan_id", planId},
+                           {"chunk_id", "chunk-1"},
+                           {"status", "Ready"}});
+  ToolResult result;
+  const auto events =
+      captureEvents([&]() { result = execute("chunk_update", input); });
+  ASSERT_TRUE(result.success) << result.error;
+
+  const auto updatedPlan = threadManager_->getPlan(threadId_, planId);
+  EXPECT_EQ(updatedPlan.chunks[1].status, WorkChunkStatus::Blocked);
+
+  const auto *statusEvent = findEvent<ChunkStatusChanged>(events);
+  ASSERT_NE(statusEvent, nullptr);
+  EXPECT_EQ(statusEvent->oldStatus, WorkChunkStatus::InProgress);
+  EXPECT_EQ(statusEvent->newStatus, WorkChunkStatus::Blocked);
+}
+
+TEST_F(WorkToolsTest, chunkUpdateDowngradesReadyToBlockedWhenDependenciesChange) {
+  const std::string planId = createPlanDirect();
+  addChunkDirect(planId, "chunk-1", WorkChunkStatus::Ready);
+
+  auto input = makeObject({{"plan_id", planId}, {"chunk_id", "chunk-1"}},
+                          {},
+                          {},
+                          {{"depends_on", {"missing-dep"}}});
+  auto result = execute("chunk_update", input);
+  ASSERT_TRUE(result.success) << result.error;
+
+  const auto updatedPlan = threadManager_->getPlan(threadId_, planId);
+  EXPECT_EQ(updatedPlan.chunks[0].status, WorkChunkStatus::Blocked);
+  ASSERT_EQ(updatedPlan.chunks[0].dependsOn.size(), 1u);
+  EXPECT_EQ(updatedPlan.chunks[0].dependsOn[0], "missing-dep");
+}
+
+TEST_F(WorkToolsTest, leadMustRecordReviewSummaryBeforeMarkingChunkDone) {
+  const std::string planId = createPlanDirect();
+  addChunkDirect(planId, "chunk-1", WorkChunkStatus::Implemented);
+
+  auto input = makeObject({{"plan_id", planId},
+                           {"chunk_id", "chunk-1"},
+                           {"status", "Done"}});
+  auto result = execute("chunk_update", input);
+  EXPECT_FALSE(result.success);
+  EXPECT_THAT(result.error,
+              ::testing::HasSubstr("cannot be marked Done without review_summary"));
+
+  const auto updatedPlan = threadManager_->getPlan(threadId_, planId);
+  EXPECT_EQ(updatedPlan.chunks[0].status, WorkChunkStatus::Implemented);
+}
+
+TEST_F(WorkToolsTest, leadCanAcceptChunkDoneWithReviewSummary) {
+  const std::string planId = createPlanDirect();
+  addChunkDirect(planId, "chunk-1", WorkChunkStatus::Implemented);
+
+  auto input = makeObject({{"plan_id", planId},
+                           {"chunk_id", "chunk-1"},
+                           {"status", "Done"},
+                           {"review_summary", "Reviewed file changes and verified focused regression coverage."}});
+  auto result = execute("chunk_update", input);
+  ASSERT_TRUE(result.success) << result.error;
+
+  const auto updatedPlan = threadManager_->getPlan(threadId_, planId);
+  EXPECT_EQ(updatedPlan.chunks[0].status, WorkChunkStatus::Done);
+  EXPECT_EQ(updatedPlan.chunks[0].reviewSummary,
+            "Reviewed file changes and verified focused regression coverage.");
+}
+
 TEST_F(WorkToolsTest, executorCanUpdateOnlyOwnChunkExecutionFields) {
   const std::string planId = createPlanDirect();
   addChunkDirect(planId, "chunk-1", WorkChunkStatus::Ready);
@@ -537,6 +683,30 @@ TEST_F(WorkToolsTest, executorCanUpdateOnlyOwnChunkExecutionFields) {
   EXPECT_EQ(updatedPlan.chunks[0].status, WorkChunkStatus::Implemented);
   EXPECT_EQ(updatedPlan.chunks[0].attemptCount, 3);
   EXPECT_EQ(updatedPlan.chunks[0].resultSummary, "implementation complete");
+}
+
+TEST_F(WorkToolsTest, executorCannotMarkChunkDoneBeforeLeadReview) {
+  const std::string planId = createPlanDirect();
+  addChunkDirect(planId, "chunk-1", WorkChunkStatus::Implemented);
+
+  auto plan = threadManager_->getPlan(threadId_, planId);
+  plan.chunks[0].assignedAgentId = "executor-1";
+  threadManager_->updatePlan(threadId_, plan);
+
+  setAgentRole("executor",
+               {ToolScope::Semantic, ToolScope::PlanRead, ToolScope::ChunkRead,
+                ToolScope::ChunkWrite},
+               "executor-1");
+
+  auto input = makeObject({{"plan_id", planId},
+                           {"chunk_id", "chunk-1"},
+                           {"status", "Done"},
+                           {"result_summary", "looks correct"}});
+  auto result = execute("chunk_update", input);
+  EXPECT_FALSE(result.success);
+  EXPECT_THAT(result.error,
+              ::testing::HasSubstr(
+                  "Only the lead may mark a chunk Done after review"));
 }
 
 TEST_F(WorkToolsTest, executorCannotMutateAnotherChunk) {

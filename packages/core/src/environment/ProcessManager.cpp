@@ -1,7 +1,8 @@
 #include "environment/ProcessManager.hpp"
 #include "utils/StringUtil.hpp"
-#include <chrono>
 #include <algorithm>
+#include <chrono>
+#include <thread>
 
 namespace firmius::core {
 
@@ -19,7 +20,8 @@ ProcessManager::~ProcessManager() {
 std::string ProcessManager::spawnProcess(const std::string& command,
                                         const std::string& toolCallId,
                                         const std::string& cwd,
-                                        const std::map<std::string, std::string>& env) {
+                                        const std::map<std::string, std::string>& env,
+                                        bool monitorCompletion) {
     if (!active_.load()) {
         throw std::runtime_error("ProcessManager is not active");
     }
@@ -40,6 +42,10 @@ std::string ProcessManager::spawnProcess(const std::string& command,
     processIds_.insert(id);
     
     emitProcessSpawned(id, toolCallId, command);
+    if (monitorCompletion) {
+        std::lock_guard<std::mutex> lock(monitorMutex_);
+        monitorThreads_.emplace_back(&ProcessManager::monitorProcessCompletion, this, id);
+    }
     return id;
 }
 
@@ -102,22 +108,71 @@ void ProcessManager::cleanup() {
     if (!active_.exchange(false)) {
         return; // Already cleaned up
     }
-    
-    std::lock_guard<std::mutex> lock(processMutex_);
-    for (const auto& id : processIds_) {
+
+    std::vector<std::thread> monitorThreads;
+    {
+        std::lock_guard<std::mutex> lock(monitorMutex_);
+        monitorThreads.swap(monitorThreads_);
+    }
+    for (auto& thread : monitorThreads) {
+        if (thread.joinable()) {
+            thread.join();
+        }
+    }
+
+    std::vector<std::string> processIds;
+    {
+        std::lock_guard<std::mutex> lock(processMutex_);
+        processIds.assign(processIds_.begin(), processIds_.end());
+        processIds_.clear();
+        blockingProcessIds_.clear();
+    }
+
+    for (const auto& id : processIds) {
         try {
             host_->killBackgroundProcess(id);
         } catch (...) {
             // Ignore errors during cleanup
         }
     }
-    processIds_.clear();
-    blockingProcessIds_.clear();
 }
 
 size_t ProcessManager::getProcessCount() const {
     std::lock_guard<std::mutex> lock(processMutex_);
     return processIds_.size();
+}
+
+void ProcessManager::monitorProcessCompletion(const std::string& id) {
+    using namespace std::chrono_literals;
+
+    while (active_.load()) {
+        try {
+            auto snap = host_->inspectBackgroundProcess(id);
+            if (!snap.running) {
+                {
+                    std::lock_guard<std::mutex> lock(callbackMutex_);
+                    if (eventCallback_) {
+                        eventCallback_(ProcessOutputDelta{
+                            id, "", false, true, snap.exitCode, snap.elapsedMs});
+                    }
+                }
+                finishTrackedProcess(id);
+                return;
+            }
+        } catch (...) {
+            finishTrackedProcess(id);
+            return;
+        }
+        std::this_thread::sleep_for(50ms);
+    }
+}
+
+void ProcessManager::finishTrackedProcess(const std::string& id) {
+    std::lock_guard<std::mutex> lock(processMutex_);
+    processIds_.erase(id);
+    blockingProcessIds_.erase(
+        std::remove(blockingProcessIds_.begin(), blockingProcessIds_.end(), id),
+        blockingProcessIds_.end());
 }
 
 } // namespace firmius::core

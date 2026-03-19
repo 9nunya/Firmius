@@ -63,7 +63,8 @@ public:
 
   /**
    * @brief Resolves the prompts directory using the resolution chain:
-   *        $FIRMIUS_PROMPTS_DIR env var → ~/.firmius/prompts/ → ./prompts/
+   *        $FIRMIUS_PROMPTS_DIR env var → readable ~/.firmius/prompts/ →
+   *        readable ./prompts/
    * @return The path to the prompts directory with trailing slash.
    */
   static std::string resolvePromptsDir();

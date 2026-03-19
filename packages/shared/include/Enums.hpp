@@ -114,7 +114,6 @@ enum class PlanStatus : std::uint8_t {
  * @brief Lifecycle status for a work chunk embedded in a plan.
  */
 enum class WorkChunkStatus : std::uint8_t {
-  Draft,
   Ready,
   InProgress,
   Implemented,

@@ -116,8 +116,6 @@ const PlanLaneModel &ActivePlanState::model() const { return model_; }
 
 std::string ActivePlanState::statusLabel(WorkChunkStatus status) {
   switch (status) {
-  case WorkChunkStatus::Draft:
-    return "Draft";
   case WorkChunkStatus::Ready:
     return "Ready";
   case WorkChunkStatus::InProgress:
@@ -150,7 +148,6 @@ std::string ActivePlanState::collapsedSummary(const Plan &plan) {
 
   for (const auto &chunk : plan.chunks) {
     switch (chunk.status) {
-    case WorkChunkStatus::Draft:
     case WorkChunkStatus::Ready:
       ++waiting.count;
       break;

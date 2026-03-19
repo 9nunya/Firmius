@@ -57,6 +57,12 @@ public:
      */
     std::unique_ptr<APIKeyWizard> beginConnectionWizard() override;
 
+    static std::string formatErrorMessage(const std::string& providerId,
+                                          const std::string& modelId,
+                                          int httpStatus,
+                                          const std::string& responseBody,
+                                          const std::string& prefix);
+
 protected:
     std::string baseUrl;
 

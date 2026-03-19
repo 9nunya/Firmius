@@ -46,6 +46,7 @@ struct ToolResult {
   std::string data;  ///< JSON string payload (valid if success is true).
   std::string processId;
   std::string subagentId;
+  bool is_background = false;
 
   ToolResult() : success(false), data("{}") {}
 
@@ -56,6 +57,7 @@ struct ToolResult {
                        const std::string &processId = "",
                        const std::string &subagentId = "") {
     ToolResult res;
+    res.is_background = false;
     res.success = true;
     res.data = jsonData;
     res.processId = processId;

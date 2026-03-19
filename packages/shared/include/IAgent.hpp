@@ -38,6 +38,12 @@ public:
                    const std::vector<ImageContent> &images = {}) = 0;
 
   /**
+   * @brief Resumes the agent from existing context without appending a user
+   * task turn.
+   */
+  virtual void resume(std::function<void(const StreamEvent &)> onEvent) = 0;
+
+  /**
    * @brief Interrupts the current agent execution.
    */
   virtual void interrupt() = 0;

@@ -38,6 +38,7 @@ public:
   void run(const std::string &task,
            std::function<void(const StreamEvent &)> onEvent,
            const std::vector<ImageContent> &images = {}) override;
+  void resume(std::function<void(const StreamEvent &)> onEvent);
 
   void interrupt() override;
   bool isInterrupted() const override { return interrupted.load(); }
@@ -65,7 +66,8 @@ public:
   std::string
   spawnProcess(const std::string &command, const std::string &toolCallId = "",
                const std::string &cwd = "",
-               const std::map<std::string, std::string> &env = {});
+               const std::map<std::string, std::string> &env = {},
+               bool monitorCompletion = false);
   ProcessSnapshot inspectProcess(const std::string &id);
   void writeToProcess(const std::string &id, const std::string &data);
   void registerProcessId(const std::string &id);
@@ -84,6 +86,9 @@ public:
   std::string resolvePath(const std::string &inputPath) const;
 
 private:
+  void runImpl(const std::optional<std::string> &task,
+               std::function<void(const StreamEvent &)> onEvent,
+               const std::vector<ImageContent> &images);
   void compactContext(std::function<void(const shared::StreamEvent &)> onEvent);
   void executeTools(const std::vector<ToolCallChunk> &chunks,
                     std::function<void(const shared::StreamEvent &)> onEvent);

@@ -40,7 +40,8 @@ public:
                             const std::string& parentId = "", const std::string& friendlyName = "",
                             const std::string& title = "", const std::string& requestedAgentId = "",
                             const std::string& providerId = "", const std::string& modelId = "",
-                            const std::string& variantName = "");
+                            const std::string& variantName = "",
+                            const std::vector<firmius::shared::ImageContent>& images = {});
 
     /**
      * @brief Resumes an existing agent with pre-loaded history.
@@ -90,6 +91,7 @@ public:
      */
     void executeTask(const std::string& agentId, const std::string& task,
                      const std::vector<firmius::shared::ImageContent>& images = {});
+    void resumeTask(const std::string& agentId);
 
     /**
      * @brief Compacts an agent's context without resuming execution.

@@ -13,7 +13,7 @@ struct PlanLaneChunkRow {
   std::string id;
   std::string title;
   firmius::shared::WorkChunkStatus status =
-      firmius::shared::WorkChunkStatus::Draft;
+      firmius::shared::WorkChunkStatus::Ready;
   std::string status_label;
 };
 

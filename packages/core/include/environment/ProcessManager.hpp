@@ -9,6 +9,7 @@
 #include <memory>
 #include <functional>
 #include <atomic>
+#include <thread>
 
 namespace firmius::core {
 
@@ -36,7 +37,8 @@ public:
     std::string spawnProcess(const std::string& command,
                             const std::string& toolCallId,
                             const std::string& cwd,
-                            const std::map<std::string, std::string>& env) override;
+                            const std::map<std::string, std::string>& env,
+                            bool monitorCompletion = false) override;
     
     ProcessSnapshot inspectProcess(const std::string& id) override;
     void writeToProcess(const std::string& id, const std::string& data) override;
@@ -62,13 +64,18 @@ public:
     size_t getProcessCount() const;
 
 private:
+    void monitorProcessCompletion(const std::string& id);
+    void finishTrackedProcess(const std::string& id);
+
     std::shared_ptr<IHost> host_;
     std::function<void(const StreamEvent&)> eventCallback_;
     
     mutable std::mutex processMutex_;
     mutable std::mutex callbackMutex_;
+    mutable std::mutex monitorMutex_;
     std::set<std::string> processIds_;
     std::vector<std::string> blockingProcessIds_;
+    std::vector<std::thread> monitorThreads_;
     
     std::atomic<bool> active_{true};
 };

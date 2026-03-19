@@ -60,6 +60,19 @@ public:
         context_.state.currentStatus = AgentStatus::Idle;
     }
 
+    void resume(std::function<void(const StreamEvent&)> onEvent) override {
+        recordCall("resume", {});
+        context_.state.currentStatus = AgentStatus::Streaming;
+
+        if (onEvent) {
+            StreamDone done;
+            done.reason = StopReason::Stop;
+            onEvent(done);
+        }
+
+        context_.state.currentStatus = AgentStatus::Idle;
+    }
+
     void interrupt() override {
         recordCall("interrupt", {});
         interrupted_ = true;

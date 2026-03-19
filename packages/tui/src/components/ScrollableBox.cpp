@@ -79,6 +79,10 @@ bool ScrollableBoxComponent::OnEvent(ftxui::Event event) {
     }
 
     int previous = selected_;
+    int viewport_h = 0;
+    if (box_.y_max >= box_.y_min) {
+        viewport_h = box_.y_max - box_.y_min + 1;
+    }
 
     if (event.is_mouse() && event.mouse().button == ftxui::Mouse::WheelUp) {
         selected_ -= 5;
@@ -87,19 +91,24 @@ bool ScrollableBoxComponent::OnEvent(ftxui::Event event) {
         selected_ += 5;
     }
     if (event == ftxui::Event::PageDown) {
-        selected_ += 5;
+        selected_ += std::max(1, viewport_h - 2);
     }
     if (event == ftxui::Event::PageUp) {
-        selected_ -= 5;
+        selected_ -= std::max(1, viewport_h - 2);
+    }
+    if (event == ftxui::Event::ArrowDown) {
+        selected_ += 1;
+    }
+    if (event == ftxui::Event::ArrowUp) {
+        selected_ -= 1;
     }
     if (event == ftxui::Event::Home) {
         selected_ = 0;
     }
-
-    int viewport_h = 0;
-    if (box_.y_max >= box_.y_min) {
-        viewport_h = box_.y_max - box_.y_min + 1;
-    }
+    const bool is_keyboard_scroll =
+        event == ftxui::Event::ArrowUp || event == ftxui::Event::ArrowDown ||
+        event == ftxui::Event::PageUp || event == ftxui::Event::PageDown ||
+        event == ftxui::Event::Home || event == ftxui::Event::End;
 
     // Use same max_scroll formula as OnRender
     int max_scroll = std::max(0, size_ - viewport_h);
@@ -115,7 +124,7 @@ bool ScrollableBoxComponent::OnEvent(ftxui::Event event) {
     }
 
     bool child_handled = ComponentBase::OnEvent(event);
-    return previous != selected_ || child_handled || (previous != selected_);
+    return previous != selected_ || child_handled || is_keyboard_scroll;
 }
 
 bool ScrollableBoxComponent::Focusable() const {

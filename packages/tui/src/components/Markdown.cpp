@@ -390,7 +390,8 @@ ftxui::Element RenderMarkdown(const std::string &text, bool dim) {
         code_elems.push_back(e);
       }
     }
-    out.push_back(ftxui::vbox(std::move(code_elems)) | ftxui::borderLight);
+    out.push_back(ftxui::vbox(std::move(code_elems)) |
+                  ftxui::bgcolor(ftxui::Color::RGB(36, 38, 45)));
     code_lines.clear();
   };
 
