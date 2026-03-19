@@ -18,12 +18,16 @@ target_sources(firmius PRIVATE
     src/commands/ConnectCommand.cpp
     src/commands/QuotasCommand.cpp
     src/commands/AccountsCommand.cpp
+    src/commands/RouterCommand.cpp
+    src/commands/PurposesCommand.cpp
     src/commands/WorkflowsCommand.cpp
     src/modals/ModalRegistry.cpp
     src/modals/ThreadPickerModal.cpp
     src/modals/ThreadLockedModal.cpp
     src/modals/ModelPickerModal.cpp
     src/modals/ConfigDisplayModal.cpp
+    src/modals/RouterModal.cpp
+    src/modals/PurposesModal.cpp
     src/modals/PermissionPromptModal.cpp
     src/modals/OAuthWizardModal.cpp
     src/modals/APIKeyWizardModal.cpp

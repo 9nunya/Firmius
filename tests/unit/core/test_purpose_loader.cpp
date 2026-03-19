@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
+#include "agents/HintingLoader.hpp"
 #include "agents/PurposeLoader.hpp"
+#include "ConfigLoader.hpp"
 #include "Context.hpp"
 #include <filesystem>
 #include <fstream>
@@ -32,11 +34,16 @@ protected:
             return value ? std::optional<std::string>(value) : std::nullopt;
         };
         originalPromptsDirEnv = envOrEmpty("FIRMIUS_PROMPTS_DIR");
+        originalHintingDirEnv = envOrEmpty("FIRMIUS_HINTING_DIR");
         originalHomeEnv = envOrEmpty("HOME");
+        originalCwd = std::filesystem::current_path();
 
         testPromptsDir = std::filesystem::temp_directory_path() / "firmius_test_prompts";
+        testHintingDir = std::filesystem::temp_directory_path() / "firmius_test_hinting";
         std::filesystem::create_directories(testPromptsDir);
+        std::filesystem::create_directories(testHintingDir);
         setenv("FIRMIUS_PROMPTS_DIR", testPromptsDir.c_str(), 1);
+        unsetenv("FIRMIUS_HINTING_DIR");
 
         // Create a dummy base.md
         std::ofstream baseFile(testPromptsDir / "base.md");
@@ -51,18 +58,30 @@ protected:
 
     void TearDown() override {
         std::filesystem::remove_all(testPromptsDir);
+        std::filesystem::remove_all(testHintingDir);
+        std::filesystem::current_path(originalCwd);
         if (originalPromptsDirEnv.has_value()) {
             setenv("FIRMIUS_PROMPTS_DIR", originalPromptsDirEnv->c_str(), 1);
         } else {
             unsetenv("FIRMIUS_PROMPTS_DIR");
         }
+        if (originalHintingDirEnv.has_value()) {
+            setenv("FIRMIUS_HINTING_DIR", originalHintingDirEnv->c_str(), 1);
+        } else {
+            unsetenv("FIRMIUS_HINTING_DIR");
+        }
         if (originalHomeEnv.has_value()) {
             setenv("HOME", originalHomeEnv->c_str(), 1);
+        } else {
+            unsetenv("HOME");
         }
     }
 
     std::filesystem::path testPromptsDir;
+    std::filesystem::path testHintingDir;
+    std::filesystem::path originalCwd;
     std::optional<std::string> originalPromptsDirEnv;
+    std::optional<std::string> originalHintingDirEnv;
     std::optional<std::string> originalHomeEnv;
 };
 
@@ -86,8 +105,15 @@ TEST_F(PurposeLoaderTest, composeSystemPrompt_placeholders) {
     AgentContext ctx;
     ctx.environment.cwd = "/home/user/work";
     ctx.environment.identifier = "test-host";
+    ctx.config.providerId = "openai";
+    ctx.config.modelId = "gpt-5";
 
     PurposeLoader::registerPlaceholder("{{CUSTOM_VAR}}", "hello-world");
+
+    auto cfg = firmius::shared::ConfigLoader::instance().getConfig();
+    cfg.modelRouterCategories["code"] = {"openai", "gpt-5-codex", "thinking"};
+    cfg.defaultRouteCategory = "code";
+    firmius::shared::ConfigLoader::instance().updateConfig(cfg);
 
     std::string prompt = PurposeLoader::composeSystemPrompt(persona, ctx, "");
 
@@ -96,6 +122,193 @@ TEST_F(PurposeLoaderTest, composeSystemPrompt_placeholders) {
     EXPECT_TRUE(prompt.find("CWD: /home/user/work") != std::string::npos);
     EXPECT_TRUE(prompt.find("Purposes: test_coder") != std::string::npos);
     EXPECT_TRUE(prompt.find("Custom: hello-world") != std::string::npos);
+    EXPECT_TRUE(prompt.find("Model Route Categories: code") != std::string::npos);
+    EXPECT_TRUE(prompt.find("Default Route Category: code") != std::string::npos);
+}
+
+TEST(ModelHintResolverTest, DetectFamilyFromModelName) {
+    EXPECT_EQ(ModelHintResolver::detectFamily("openai", "gpt-5", ""), "gpt");
+    EXPECT_EQ(ModelHintResolver::detectFamily("foo", "openai/gpt-4o", ""), "gpt");
+    EXPECT_EQ(ModelHintResolver::detectFamily("foo", "o3-mini", ""), "gpt");
+    EXPECT_EQ(ModelHintResolver::detectFamily("anthropic", "claude-3-7-sonnet", ""), "claude");
+    EXPECT_EQ(ModelHintResolver::detectFamily("google", "gemini-2.5-pro", ""), "gemini");
+    EXPECT_EQ(ModelHintResolver::detectFamily("openrouter", "qwen-2.5-coder", ""), "qwen");
+    EXPECT_EQ(ModelHintResolver::detectFamily("openrouter", "qwq-32b", ""), "qwen");
+    EXPECT_EQ(ModelHintResolver::detectFamily("openrouter", "deepseek-chat", ""), "deepseek");
+    EXPECT_EQ(ModelHintResolver::detectFamily("openrouter", "mistral-large", ""), "generic");
+}
+
+TEST_F(PurposeLoaderTest, resolveHintingDirHonorsResolutionChain) {
+    auto envDir = testHintingDir / "env";
+    auto homeRoot = testHintingDir / "home";
+    auto userDir = homeRoot / ".firmius" / "hinting";
+    std::filesystem::create_directories(envDir);
+    std::filesystem::create_directories(userDir);
+
+    {
+        std::ofstream f(envDir / "generic.md");
+        f << "---\nname: generic\n---\nenv";
+    }
+    {
+        std::ofstream f(userDir / "generic.md");
+        f << "---\nname: generic\n---\nuser";
+    }
+
+    setenv("FIRMIUS_HINTING_DIR", envDir.c_str(), 1);
+    setenv("HOME", homeRoot.c_str(), 1);
+    EXPECT_EQ(HintingLoader::resolveHintingDir(), envDir.string() + "/");
+
+    unsetenv("FIRMIUS_HINTING_DIR");
+    EXPECT_EQ(HintingLoader::resolveHintingDir(), userDir.string() + "/");
+}
+
+TEST_F(PurposeLoaderTest, hintingLoaderParsesFrontmatterAndBody) {
+    std::filesystem::create_directories(testHintingDir);
+    setenv("FIRMIUS_HINTING_DIR", testHintingDir.c_str(), 1);
+    {
+        std::ofstream f(testHintingDir / "gpt.md");
+        f << "---\nname: gpt\ntitle: GPT Overlay\ndescription: test\nbuiltin: true\nenabled: true\npriority: 7\n---\nDo the work.\n";
+    }
+
+    auto overlay = HintingLoader::loadByFamily("gpt");
+    ASSERT_TRUE(overlay.has_value());
+    EXPECT_EQ(overlay->name, "gpt");
+    EXPECT_EQ(overlay->title, "GPT Overlay");
+    EXPECT_EQ(overlay->description, "test");
+    EXPECT_TRUE(overlay->builtin);
+    EXPECT_EQ(overlay->priority, 7);
+    EXPECT_EQ(overlay->body, "Do the work.");
+}
+
+TEST_F(PurposeLoaderTest, unknownFamilyFallsBackToGenericHinting) {
+    setenv("FIRMIUS_HINTING_DIR", testHintingDir.c_str(), 1);
+    {
+        std::ofstream f(testHintingDir / "generic.md");
+        f << "---\nname: generic\n---\nGeneric overlay.";
+    }
+
+    auto overlay = HintingLoader::loadForModel("any", "unknown-model", "");
+    ASSERT_TRUE(overlay.has_value());
+    EXPECT_EQ(overlay->name, "generic");
+    EXPECT_EQ(overlay->body, "Generic overlay.");
+}
+
+TEST_F(PurposeLoaderTest, composeSystemPromptIncludesHintingOverlay) {
+    setenv("FIRMIUS_HINTING_DIR", testHintingDir.c_str(), 1);
+    {
+        std::ofstream f(testHintingDir / "gpt.md");
+        f << "---\nname: gpt\n---\nRun checks before finishing.";
+    }
+
+    Persona persona;
+    persona.name = "test_coder";
+    persona.title = "Test Coder";
+    persona.identityPrompt = "You are a test coder.";
+
+    AgentContext ctx;
+    ctx.environment.cwd = "/home/user/work";
+    ctx.environment.identifier = "test-host";
+    ctx.config.providerId = "openai";
+    ctx.config.modelId = "gpt-4o";
+
+    std::string prompt = PurposeLoader::composeSystemPrompt(persona, ctx, "");
+    EXPECT_NE(prompt.find("# MODEL-SPECIFIC HINTING"), std::string::npos);
+    EXPECT_NE(prompt.find("Detected Family: gpt"), std::string::npos);
+    EXPECT_NE(prompt.find("Hinting File: gpt"), std::string::npos);
+    EXPECT_NE(prompt.find("Run checks before finishing."), std::string::npos);
+}
+
+TEST_F(PurposeLoaderTest, composeSystemPromptIncludesGeminiOverlay) {
+    setenv("FIRMIUS_HINTING_DIR", testHintingDir.c_str(), 1);
+    {
+        std::ofstream f(testHintingDir / "gemini.md");
+        f << "---\nname: gemini\n---\nUse tools before claims.";
+    }
+
+    Persona persona;
+    persona.name = "test_coder";
+    persona.title = "Test Coder";
+    persona.identityPrompt = "You are a test coder.";
+
+    AgentContext ctx;
+    ctx.environment.cwd = "/home/user/work";
+    ctx.environment.identifier = "test-host";
+    ctx.config.providerId = "google";
+    ctx.config.modelId = "gemini-2.5-pro";
+
+    std::string prompt = PurposeLoader::composeSystemPrompt(persona, ctx, "");
+    EXPECT_NE(prompt.find("Detected Family: gemini"), std::string::npos);
+    EXPECT_NE(prompt.find("Hinting File: gemini"), std::string::npos);
+    EXPECT_NE(prompt.find("Use tools before claims."), std::string::npos);
+}
+
+TEST_F(PurposeLoaderTest, userOverrideHintingWinsOverBuiltinHinting) {
+    auto homeRoot = testHintingDir / "override-home";
+    auto userDir = homeRoot / ".firmius" / "hinting";
+    auto fakeCwd = testHintingDir / "repo-like";
+    auto builtinDir = fakeCwd / "hinting";
+    std::filesystem::create_directories(userDir);
+    std::filesystem::create_directories(builtinDir);
+
+    {
+        std::ofstream f(userDir / "gpt.md");
+        f << "---\nname: gpt\n---\nUser override.";
+    }
+    {
+        std::ofstream f(builtinDir / "gpt.md");
+        f << "---\nname: gpt\n---\nBuiltin hint.";
+    }
+
+    unsetenv("FIRMIUS_HINTING_DIR");
+    setenv("HOME", homeRoot.c_str(), 1);
+    std::filesystem::current_path(fakeCwd);
+
+    auto overlay = HintingLoader::loadByFamily("gpt");
+    ASSERT_TRUE(overlay.has_value());
+    EXPECT_EQ(overlay->body, "User override.");
+}
+
+TEST_F(PurposeLoaderTest, malformedHintingFileFailsGracefullyToGeneric) {
+    setenv("FIRMIUS_HINTING_DIR", testHintingDir.c_str(), 1);
+    std::filesystem::current_path(testHintingDir);
+    {
+        std::ofstream f(testHintingDir / "gpt.md");
+        f << "---\nname: gpt\n---\n";
+    }
+    {
+        std::ofstream f(testHintingDir / "generic.md");
+        f << "---\nname: generic\n---\nGeneric fallback body.";
+    }
+
+    EXPECT_NO_THROW({
+        auto overlay = HintingLoader::loadForModel("openai", "gpt-4o", "");
+        ASSERT_TRUE(overlay.has_value());
+        EXPECT_EQ(overlay->name, "generic");
+    });
+}
+
+TEST_F(PurposeLoaderTest, bootstrapHintingDefaultsIgnoresUnwritableUserCache) {
+    auto builtinDir = testHintingDir / "builtin-hinting";
+    std::filesystem::create_directories(builtinDir);
+    {
+        std::ofstream f(builtinDir / "gpt.md");
+        f << "---\nname: gpt\n---\nbase";
+    }
+    {
+        std::ofstream f(builtinDir / "generic.md");
+        f << "---\nname: generic\n---\nbase";
+    }
+
+    auto fakeHome = testHintingDir / "home";
+    auto blockedParent = fakeHome / ".firmius";
+    auto blockedTarget = blockedParent / "hinting";
+    std::filesystem::create_directories(blockedParent);
+    std::ofstream blocker(blockedTarget);
+    blocker << "not-a-directory";
+    blocker.close();
+
+    setenv("HOME", fakeHome.c_str(), 1);
+    EXPECT_NO_THROW(HintingLoader::bootstrapDefaults(builtinDir.string()));
 }
 
 TEST_F(PurposeLoaderTest, resolvePromptsDirFallsBackWhenEnvDirIsUnreadableShape) {
@@ -172,4 +385,28 @@ TEST(PromptContractsTest, executorPromptRequiresVerificationEvidenceAndLeadAccep
               std::string::npos);
     EXPECT_NE(prompt.find("Do not claim completion without evidence in `result_summary`."),
               std::string::npos);
+}
+
+TEST(HintingContractsTest, builtinGptHintingDefendsAgainstAskingAndPrematureCompletion) {
+    const auto prompt = readRepoFile(repoRootFromSourceFile() / "hinting" / "gpt.md");
+
+    EXPECT_NE(prompt.find("Do not ask the user whether to run builds, tests, reads, diffs, or reviews. Do them."),
+              std::string::npos);
+    EXPECT_NE(prompt.find("If you can name the next tool call, you should usually be making it instead of summarizing it."),
+              std::string::npos);
+    EXPECT_NE(prompt.find("subagent_wait"), std::string::npos);
+    EXPECT_NE(prompt.find("file_read"), std::string::npos);
+    EXPECT_NE(prompt.find("file_edit"), std::string::npos);
+    EXPECT_NE(prompt.find("process_execute"), std::string::npos);
+}
+
+TEST(HintingContractsTest, builtinGeminiHintingDefendsAgainstNoToolAndOptimism) {
+    const auto prompt = readRepoFile(repoRootFromSourceFile() / "hinting" / "gemini.md");
+
+    EXPECT_NE(prompt.find("When the user asks you to do work, a response with no tool calls is usually a failed response."),
+              std::string::npos);
+    EXPECT_NE(prompt.find("Your optimism is not evidence."), std::string::npos);
+    EXPECT_NE(prompt.find("process_execute"), std::string::npos);
+    EXPECT_NE(prompt.find("summon_subagent"), std::string::npos);
+    EXPECT_NE(prompt.find("chunk_ready_for_execution"), std::string::npos);
 }

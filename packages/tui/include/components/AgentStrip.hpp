@@ -14,6 +14,7 @@ struct AgentStripItem {
   std::string title;
   std::string purpose;
   std::string model_name;
+  std::string model_variant;
   std::string status_text;
   float context_percent = 0.0f;
   bool is_busy = false;

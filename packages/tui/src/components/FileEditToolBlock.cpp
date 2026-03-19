@@ -6,6 +6,7 @@
 #include "utils/Icons.hpp"
 #include <ftxui/dom/elements.hpp>
 #include <rapidjson/document.h>
+#include <sstream>
 
 namespace firmius::tui {
 
@@ -96,6 +97,46 @@ std::vector<std::string> parseStringArray(const rapidjson::Value& array) {
     }
   }
   return result;
+}
+
+std::vector<std::string> splitContentLines(const std::string &content) {
+  std::vector<std::string> lines;
+  std::stringstream ss(content);
+  std::string line;
+  while (std::getline(ss, line)) {
+    lines.push_back(line);
+  }
+  return lines;
+}
+
+void maybeSynthesizeWholeFilePreview(const rapidjson::Document &args_doc,
+                                     const rapidjson::Document &result_doc,
+                                     const std::string &path_arg,
+                                     bool is_overwrite,
+                                     std::vector<EditPreview> &previews) {
+  if (!is_overwrite || !previews.empty() || !args_doc.IsObject() ||
+      !args_doc.HasMember("content") || !args_doc["content"].IsString()) {
+    return;
+  }
+
+  EditPreview preview;
+  preview.op = "overwrite_file";
+  preview.label = path_arg;
+  preview.startLine = 1;
+  preview.oldLines.clear();
+  preview.newLines = splitContentLines(args_doc["content"].GetString());
+  preview.newLineCount = static_cast<int>(preview.newLines.size());
+  preview.endLine = preview.newLineCount > 0 ? preview.newLineCount : 1;
+
+  if (result_doc.IsObject() && result_doc.HasMember("mode") &&
+      result_doc["mode"].IsString()) {
+    const std::string mode = result_doc["mode"].GetString();
+    if (mode == "overwrite") {
+      preview.op = "create_file";
+    }
+  }
+
+  previews.push_back(std::move(preview));
 }
 
 ftxui::Element renderPreviewLines(const std::vector<std::string> &lines,
@@ -251,21 +292,24 @@ ftxui::Component FileEditToolBlock(const std::shared_ptr<ToolCallView> &view) {
     std::string path_arg;
     std::vector<EditPreview> previews;
     bool is_overwrite = false;
+    rapidjson::Document args_doc;
+    args_doc.SetObject();
     if (!view->args.empty()) {
-      rapidjson::Document doc;
-      doc.Parse(view->args.c_str());
-      if (!doc.HasParseError() && doc.IsObject()) {
-        if (doc.HasMember("path") && doc["path"].IsString())
-          path_arg = doc["path"].GetString();
-        if (doc.HasMember("content") && doc["content"].IsString()) {
+      args_doc.Parse(view->args.c_str());
+      if (!args_doc.HasParseError() && args_doc.IsObject()) {
+        if (args_doc.HasMember("path") && args_doc["path"].IsString())
+          path_arg = args_doc["path"].GetString();
+        if (args_doc.HasMember("content") && args_doc["content"].IsString()) {
           is_overwrite = true;
         }
-        previews = parseEditPreviews(doc);
+        previews = parseEditPreviews(args_doc);
       }
     }
     rapidjson::Document result_doc;
     result_doc.Parse(view->result.c_str());
     mergeOperationMetadata(result_doc, previews);
+    maybeSynthesizeWholeFilePreview(args_doc, result_doc, path_arg, is_overwrite,
+                                    previews);
 
     // Get filename from path
     std::string filename = path_arg;
@@ -306,8 +350,14 @@ ftxui::Component FileEditToolBlock(const std::shared_ptr<ToolCallView> &view) {
               break;
             }
             ftxui::Elements op_rows;
-            if (!preview.oldLines.empty()) {
-              op_rows.push_back(renderOldPreviewLines(preview.oldLines, language, preview.startLine, 4, theme.tool_blocks.specific.file_edit.fg, theme.base.dim, theme.status_bar.error.normal.fg));
+            const bool show_old_lines = !preview.oldLines.empty() ||
+                                        preview.op == "create_file" ||
+                                        preview.op == "overwrite_file";
+            if (show_old_lines) {
+              op_rows.push_back(renderOldPreviewLines(
+                  preview.oldLines, language, preview.startLine, 4,
+                  theme.tool_blocks.specific.file_edit.fg, theme.base.dim,
+                  theme.status_bar.error.normal.fg));
             }
             op_rows.push_back(renderPreviewLines(preview.newLines, language, preview.startLine > 0 ? preview.startLine : 1, 4, theme.tool_blocks.specific.file_edit.fg, theme.base.dim));
             diff_elements.push_back(ftxui::vbox({

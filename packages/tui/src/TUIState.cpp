@@ -762,6 +762,7 @@ void TuiState::updateAgentStripModel() {
     item.purpose = resolvePersonaTitle(ctx.config.personaName);
     item.model_name = ctx.config.modelId; // Use modelId directly,
                                           // PrettifyModelName handles prefixes
+    item.model_variant = ctx.config.modelVariant;
     item.status_text = statusToString(ctx.state.currentStatus);
     item.is_busy = ctx.state.currentStatus == AgentStatus::Streaming ||
                    ctx.state.currentStatus == AgentStatus::ExecutingTool ||
@@ -971,17 +972,21 @@ ftxui::Component TuiState::root() {
         }
         input_component_->TakeFocus();
       });
+  auto focused_history_getter = [this]() -> const firmius::shared::AgentHistory * {
+    if (focused_agent_id_.empty()) {
+      return nullptr;
+    }
+    auto agent =
+        firmius::core::AgentRegistry::instance().getAgent(focused_agent_id_);
+    if (!agent) {
+      return history_.get();
+    }
+    return agent->getContext().history.get();
+  };
+
   auto chat = ChatWindow(
-      [this]() -> const firmius::shared::AgentHistory * {
-        if (focused_agent_id_.empty())
-          return nullptr;
-        auto agent = firmius::core::AgentRegistry::instance().getAgent(
-            focused_agent_id_);
-        if (!agent)
-          return history_.get();
-        return agent->getContext().history.get();
-      },
-      [this]() {
+      focused_history_getter,
+      [this, focused_history_getter]() {
         std::vector<ftxui::Element> live_rows;
         const auto *s = stream_state_.getStream(focused_agent_id_);
 
@@ -1034,7 +1039,8 @@ ftxui::Component TuiState::root() {
         const auto &timeline = stream_state_.getTimeline();
         const auto &tool_calls = stream_state_.getToolCalls();
         const auto persisted_tool_call_ids =
-            firmius::tui::CollectToolCallIdsFromHistory(history_.get());
+            firmius::tui::CollectToolCallIdsFromHistory(
+                focused_history_getter());
 
         // Find parent tool calls that spawned this focused subagent
         std::unordered_set<std::string> parent_tool_calls_for_subagent;
@@ -1140,13 +1146,14 @@ ftxui::Component TuiState::root() {
           return nullptr;
         return stream_state_.getStream(agentId);
       },
-      [this]() {
+      [this, focused_history_getter]() {
         std::unordered_map<int, firmius::tui::LiveQuickSummaryCluster> clusters;
         std::vector<int> cluster_order;
         const auto &timeline = stream_state_.getTimeline();
         const auto &tool_calls = stream_state_.getToolCalls();
         const auto persisted_tool_call_ids =
-            firmius::tui::CollectToolCallIdsFromHistory(history_.get());
+            firmius::tui::CollectToolCallIdsFromHistory(
+                focused_history_getter());
 
         std::unordered_set<std::string> parent_tool_calls_for_subagent;
         for (const auto &[toolCallId, view] : tool_calls) {

@@ -48,6 +48,10 @@ CollectToolCallIdsFromHistory(const shared::AgentHistory *history) {
           if (!tc->id.empty()) {
             ids.insert(tc->id);
           }
+        } else if (auto *tr = std::get_if<shared::ToolResultContent>(&part)) {
+          if (!tr->toolCallId.empty()) {
+            ids.insert(tr->toolCallId);
+          }
         }
       }
     }

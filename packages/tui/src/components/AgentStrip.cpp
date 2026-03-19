@@ -4,6 +4,7 @@
 #include "utils/Icons.hpp"
 #include "utils/ModelUtil.hpp"
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/animation.hpp>
@@ -43,6 +44,29 @@ std::string formatWorkingDuration(uint64_t elapsed_ms) {
     return std::to_string(minutes) + "m, " + std::to_string(seconds) + "s";
   }
   return std::to_string(seconds) + "s";
+}
+
+std::string prettifyVariantName(const std::string &variant) {
+  if (variant.empty()) {
+    return "";
+  }
+  std::string out = variant;
+  for (char &ch : out) {
+    if (ch == '_' || ch == '-') {
+      ch = ' ';
+    }
+  }
+  bool next_title = true;
+  for (char &ch : out) {
+    if (std::isspace(static_cast<unsigned char>(ch))) {
+      next_title = true;
+      continue;
+    }
+    ch = next_title ? static_cast<char>(std::toupper(static_cast<unsigned char>(ch)))
+                    : static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    next_title = false;
+  }
+  return out;
 }
 
 class AgentStripComponentBase : public ftxui::ComponentBase {
@@ -162,10 +186,13 @@ public:
           wide_elements.push_back(sep_skip);
         }
 
-        auto mod_el =
-            ftxui::text(" " +
-                        firmius::shared::PrettifyModelName(item.model_name) +
-                        " ") |
+        std::string pretty_model =
+            firmius::shared::PrettifyModelName(item.model_name);
+        const std::string pretty_variant = prettifyVariantName(item.model_variant);
+        if (!pretty_variant.empty()) {
+          pretty_model += " (" + pretty_variant + ")";
+        }
+        auto mod_el = ftxui::text(" " + pretty_model + " ") |
             ftxui::color(mod_fg) | ftxui::bgcolor(mod_bg);
         auto sep3 = ftxui::text(firmius::shared::PL_LEFT_SEP) |
                     ftxui::color(mod_bg) | ftxui::bgcolor(row_bg);
@@ -198,9 +225,16 @@ public:
           title_el = ftxui::text(item.title) | ftxui::bold |
                      ftxui::color(theme.agent_strip.pills.slug_fg);
         }
-        name_area = ftxui::hbox({tree_el | ftxui::bgcolor(row_bg),
-                                 icon_el | ftxui::bgcolor(row_bg),
-                                 title_el | ftxui::bgcolor(row_bg)});
+        ftxui::Elements compact_name = {tree_el | ftxui::bgcolor(row_bg),
+                                        icon_el | ftxui::bgcolor(row_bg),
+                                        title_el | ftxui::bgcolor(row_bg)};
+        const std::string pretty_variant = prettifyVariantName(item.model_variant);
+        if (!pretty_variant.empty()) {
+          compact_name.push_back(
+              ftxui::text(" (" + pretty_variant + ")") |
+              ftxui::color(theme.base.dim) | ftxui::bgcolor(row_bg));
+        }
+        name_area = ftxui::hbox(std::move(compact_name));
       }
 
       // --- 2. State Pill ---
@@ -332,7 +366,7 @@ private:
         // Wide glint
         if (glint_cache_.count(item.id + "_wide") &&
             title_cache_[item.id + "_wide"] ==
-                item.title + item.purpose + item.model_name &&
+                item.title + item.purpose + item.model_name + item.model_variant &&
             cached_theme_name_ == theme.name)
           continue;
         const auto &state = theme.agent_strip.item;
@@ -363,17 +397,20 @@ private:
             ftxui::text(" " + item.purpose + " ") | ftxui::bgcolor(purp_bg);
         auto sep2 = ftxui::text(firmius::shared::PL_LEFT_SEP) |
                     ftxui::color(purp_bg) | ftxui::bgcolor(mod_bg);
-        auto mod_el =
-            ftxui::text(" " +
-                        firmius::shared::PrettifyModelName(item.model_name) +
-                        " ") |
-            ftxui::bgcolor(mod_bg);
+        std::string pretty_model =
+            firmius::shared::PrettifyModelName(item.model_name);
+        const std::string pretty_variant = prettifyVariantName(item.model_variant);
+        if (!pretty_variant.empty()) {
+          pretty_model += " (" + pretty_variant + ")";
+        }
+        auto mod_el = ftxui::text(" " + pretty_model + " ") |
+                      ftxui::bgcolor(mod_bg);
         glint_cache_[item.id + "_wide"] = GlintEffect(
             ftxui::hbox({slug_el, sep1, purp_el, sep2, mod_el}) |
                 ftxui::color(theme.agent_strip.pills.slug_fg),
             cfg);
         title_cache_[item.id + "_wide"] =
-            item.title + item.purpose + item.model_name;
+            item.title + item.purpose + item.model_name + item.model_variant;
       }
     }
     cached_theme_name_ = ThemeManager::instance().getCurrentTheme().name;

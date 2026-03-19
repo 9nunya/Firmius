@@ -7,6 +7,12 @@
 
 namespace firmius::shared {
 
+struct ModelRouteCategory {
+    std::string providerId;
+    std::string modelId;
+    std::string variantName;
+};
+
 struct UserConfig {
     std::string defaultProviderId = "nanogpt";
     std::string defaultModelId = "zai-org/glm-4.6:thinking";
@@ -17,6 +23,9 @@ struct UserConfig {
     bool dangerouslySkipPermissions = false;
     std::map<std::string, std::string> apiKeys;           // providerId -> apiKey
     std::map<std::string, std::string> providerOptions;   // key -> value for provider-specific settings
+    std::map<std::string, ModelRouteCategory> modelRouterCategories; // category -> provider/model/variant
+    std::map<std::string, std::string> purposeRoutes; // purpose/persona -> category
+    std::string defaultRouteCategory;
 };
 
 class ConfigLoader {

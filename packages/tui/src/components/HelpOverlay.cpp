@@ -59,6 +59,8 @@ ftxui::Component HelpOverlay(TuiState &state) {
                 {{"/threads", "List threads"},
                  {"/new", "New thread"},
                  {"/models", "Pick model"},
+                 {"/router", "Manage model routing categories"},
+                 {"/purposes", "Map personas to model categories"},
                  {"/config", "View config"},
                  {"/connect", "Connect provider"},
                  {"/accounts", "Manage accounts"},
@@ -84,12 +86,19 @@ ftxui::Component HelpOverlay(TuiState &state) {
   auto scrollable = ScrollableBox(scroll_content);
   auto component = ftxui::Renderer(scrollable, [scrollable] {
     const auto &theme = ThemeManager::instance().getCurrentTheme();
-    const int width = std::max(72, ftxui::Terminal::Size().dimx - 8);
-    const int height = std::max(18, ftxui::Terminal::Size().dimy - 6);
+    const auto layout = ComputeHelpOverlayLayout(ftxui::Terminal::Size().dimx,
+                                                 ftxui::Terminal::Size().dimy);
+    auto body = ModalSection(
+        theme,
+        (scrollable->Render() | ftxui::xflex | ftxui::yflex | ftxui::yframe |
+         ftxui::vscroll_indicator),
+        theme.modals.bg);
     return FlatModalPanel(theme, "Help",
-                          ModalSection(theme, scrollable->Render(),
-                                       theme.modals.bg),
-                          width, height, theme.modals.title);
+                          body | ftxui::size(ftxui::WIDTH, ftxui::EQUAL,
+                                             layout.width - 4) |
+                              ftxui::size(ftxui::HEIGHT, ftxui::EQUAL,
+                                          layout.height - 4),
+                          layout.width, layout.height, theme.modals.title);
   });
   return ftxui::CatchEvent(component, [&state, scrollable](ftxui::Event event) {
     if (event == ftxui::Event::Escape) {

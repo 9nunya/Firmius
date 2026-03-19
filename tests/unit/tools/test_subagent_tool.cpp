@@ -1,6 +1,7 @@
 #include "AgentRegistry.hpp"
 #include "IAgent.hpp"
 #include "Engine.hpp"
+#include "ConfigLoader.hpp"
 #include "agents/AgentPermissionChecks.hpp"
 #include "agents/PurposeLoader.hpp"
 #include "persistence/ThreadManager.hpp"
@@ -141,6 +142,9 @@ protected:
       originalHome_ = existingHome;
     }
     setenv("HOME", testHome_.c_str(), 1);
+
+    firmius::shared::ConfigLoader::instance().updateConfig(
+        firmius::shared::UserConfig{});
 
     threadManager_ =
         std::make_unique<ThreadManager>((testHome_ / ".firmius" / "threads").string());
@@ -741,4 +745,111 @@ TEST_F(SubagentToolTest, workBoundPersonaRejectsLegacyRoleName) {
   EXPECT_FALSE(result.success);
   EXPECT_THAT(result.error,
               ::testing::HasSubstr("legacy role 'implementer'; use 'executor'"));
+}
+
+TEST_F(SubagentToolTest, categoryOverrideRoutesRetaskModel) {
+  const std::string threadId = createThread();
+  auto taskPromise = std::make_shared<std::promise<std::string>>();
+  auto agent = registerRetaskableAgent("coder-agent", "coder-slot", taskPromise);
+  EXPECT_CALL(*agent, setModel("openai", "gpt-5-codex", "thinking")).Times(1);
+
+  auto cfg = firmius::shared::ConfigLoader::instance().getConfig();
+  cfg.defaultProviderId = "fallback";
+  cfg.defaultModelId = "fallback-model";
+  cfg.defaultModelVariant = "fallback-variant";
+  cfg.modelRouterCategories["code"] = {"openai", "gpt-5-codex", "thinking"};
+  cfg.purposeRoutes["coder"] = "other";
+  firmius::shared::ConfigLoader::instance().updateConfig(cfg);
+
+  SubagentTool tool;
+  SubagentInput input;
+  input.persona = "coder";
+  input.task = "Use explicit category.";
+  input.agent_id = "coder-agent";
+  input.category = "code";
+  input.name = "coder-slot";
+  input.title = "Coder Slot";
+  input.async = true;
+
+  MockAgent parent;
+  AgentContext ctx_obj = makeParentContext(threadId);
+  EXPECT_CALL(parent, getContext()).WillRepeatedly(ReturnRef(ctx_obj));
+  NiceMock<MockHost> host;
+  ToolContext toolCtx{host, parent, "test-call-id"};
+
+  ToolResult result = tool.execute(input, toolCtx);
+  ASSERT_TRUE(result.success) << result.error;
+  EXPECT_THAT(result.data, ::testing::HasSubstr("\"category\":\"code\""));
+}
+
+TEST_F(SubagentToolTest, purposeRouteAppliedWhenCategoryNotProvided) {
+  const std::string threadId = createThread();
+  auto taskPromise = std::make_shared<std::promise<std::string>>();
+  auto agent =
+      registerRetaskableAgent("coder-agent", "coder-slot", taskPromise);
+  EXPECT_CALL(*agent, setModel("openrouter", "qwen-omni", "balanced")).Times(1);
+
+  auto cfg = firmius::shared::ConfigLoader::instance().getConfig();
+  cfg.defaultProviderId = "fallback";
+  cfg.defaultModelId = "fallback-model";
+  cfg.defaultModelVariant = "fallback-variant";
+  cfg.modelRouterCategories["research"] = {"openrouter", "qwen-omni",
+                                            "balanced"};
+  cfg.purposeRoutes["coder"] = "research";
+  firmius::shared::ConfigLoader::instance().updateConfig(cfg);
+
+  SubagentTool tool;
+  SubagentInput input;
+  input.persona = "coder";
+  input.task = "Use persona route.";
+  input.agent_id = "coder-agent";
+  input.name = "coder-slot";
+  input.title = "Coder Slot";
+  input.async = true;
+
+  MockAgent parent;
+  AgentContext ctx_obj = makeParentContext(threadId);
+  EXPECT_CALL(parent, getContext()).WillRepeatedly(ReturnRef(ctx_obj));
+  NiceMock<MockHost> host;
+  ToolContext toolCtx{host, parent, "test-call-id"};
+
+  ToolResult result = tool.execute(input, toolCtx);
+  ASSERT_TRUE(result.success) << result.error;
+  EXPECT_THAT(result.data, ::testing::HasSubstr("\"category\":\"research\""));
+}
+
+TEST_F(SubagentToolTest, missingCategoryFallsBackWithWarning) {
+  const std::string threadId = createThread();
+  auto taskPromise = std::make_shared<std::promise<std::string>>();
+  auto agent =
+      registerRetaskableAgent("coder-agent", "coder-slot", taskPromise);
+  EXPECT_CALL(*agent, setModel("default-provider", "default-model", ""))
+      .Times(1);
+
+  auto cfg = firmius::shared::ConfigLoader::instance().getConfig();
+  cfg.defaultProviderId = "default-provider";
+  cfg.defaultModelId = "default-model";
+  cfg.defaultModelVariant = "";
+  cfg.modelRouterCategories.clear();
+  firmius::shared::ConfigLoader::instance().updateConfig(cfg);
+
+  SubagentTool tool;
+  SubagentInput input;
+  input.persona = "coder";
+  input.task = "Missing category route.";
+  input.agent_id = "coder-agent";
+  input.category = "does-not-exist";
+  input.name = "coder-slot";
+  input.title = "Coder Slot";
+  input.async = true;
+
+  MockAgent parent;
+  AgentContext ctx_obj = makeParentContext(threadId);
+  EXPECT_CALL(parent, getContext()).WillRepeatedly(ReturnRef(ctx_obj));
+  NiceMock<MockHost> host;
+  ToolContext toolCtx{host, parent, "test-call-id"};
+
+  ToolResult result = tool.execute(input, toolCtx);
+  ASSERT_TRUE(result.success) << result.error;
+  EXPECT_THAT(result.data, ::testing::HasSubstr("routing_warning"));
 }

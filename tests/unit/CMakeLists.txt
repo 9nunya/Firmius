@@ -227,6 +227,18 @@ target_include_directories(test_model_util PRIVATE
 )
 gtest_discover_tests(test_model_util)
 
+add_executable(test_config_loader
+    shared/test_config_loader.cpp
+)
+target_link_libraries(test_config_loader PRIVATE
+    firmius::shared
+    GTest::gtest_main
+)
+target_include_directories(test_config_loader PRIVATE
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_config_loader)
+
 # TUI Markdown tests
 add_executable(test_markdown
     tui/test_markdown.cpp
@@ -479,6 +491,25 @@ target_include_directories(test_status_bar PRIVATE
     ../../packages/tui/src
 )
 gtest_discover_tests(test_status_bar)
+
+add_executable(test_agent_strip
+    tui/test_agent_strip.cpp
+    ../../packages/tui/src/components/AgentStrip.cpp
+    ../../packages/tui/src/components/GlintEffect.cpp
+    ../../packages/tui/src/ThemeManager.cpp
+)
+target_link_libraries(test_agent_strip PRIVATE
+    firmius::shared
+    GTest::gtest_main
+    ftxui::dom
+    ftxui::screen
+    ftxui::component
+)
+target_include_directories(test_agent_strip PRIVATE
+    ../../packages/tui/include
+    ../../packages/tui/src
+)
+gtest_discover_tests(test_agent_strip)
 
 add_executable(test_file_edit_tool_block
     tui/test_file_edit_tool_block.cpp

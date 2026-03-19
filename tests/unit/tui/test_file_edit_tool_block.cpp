@@ -49,6 +49,7 @@ TEST_F(FileEditToolBlockTest, FailedEditRendersAttemptedLines) {
   ftxui::Screen screen(100, 20);
   ftxui::Render(screen, element);
   std::string output = screen.ToString();
+  std::cerr << "\nCALLED OUTPUT:\n" << output << "\n";
 
   // Check for expected content in error rendering
   EXPECT_TRUE(output.find("test.cpp") != std::string::npos);
@@ -84,6 +85,7 @@ TEST_F(FileEditToolBlockTest, HydratedFailedEditRendersAttemptedLines) {
   ftxui::Screen screen(100, 20);
   ftxui::Render(screen, element);
   std::string output = screen.ToString();
+  std::cerr << "\nFINISHED OUTPUT:\n" << output << "\n";
 
   EXPECT_TRUE(output.find("test.cpp") != std::string::npos);
   EXPECT_TRUE(output.find("// replacement") != std::string::npos);
@@ -131,6 +133,59 @@ TEST_F(FileEditToolBlockTest, SuccessfulReplaceRendersActualOldAndNewLines) {
   EXPECT_TRUE(output.find("old_value") != std::string::npos);
   EXPECT_TRUE(output.find("new_value") != std::string::npos);
   EXPECT_TRUE(output.find("line 2 removed") == std::string::npos);
+}
+
+TEST_F(FileEditToolBlockTest,
+       WholeFileContentCalledRendersCreationPreviewWithEmptyOldSide) {
+  auto view = std::make_shared<ToolCallView>();
+  view->name = "file_edit";
+  view->args = R"({
+    "path": "new_file.cpp",
+    "content": "#include <iostream>\nint main() { return 0; }\n"
+  })";
+  view->result = "";
+  view->success = false;
+  view->phase = ToolPhase::Called;
+
+  auto component = FileEditToolBlock(view);
+  auto element = component->Render();
+
+  ftxui::Screen screen(160, 40);
+  ftxui::Render(screen, element);
+  std::string output = screen.ToString();
+
+  EXPECT_TRUE(output.find("Writing") != std::string::npos);
+  EXPECT_TRUE(output.find("1 ops") != std::string::npos);
+  EXPECT_TRUE(output.find("(no old lines)") != std::string::npos);
+  EXPECT_TRUE(output.find("new_file.cpp") != std::string::npos);
+}
+
+TEST_F(FileEditToolBlockTest,
+       WholeFileContentFinishedRendersCreationDiffArtifact) {
+  auto view = std::make_shared<ToolCallView>();
+  view->name = "file_edit";
+  view->args = R"({
+    "path": "new_file.cpp",
+    "content": "line one\nline two\n"
+  })";
+  view->result = R"({
+    "path": "new_file.cpp",
+    "mode": "overwrite",
+    "bytes_written": 18
+  })";
+  view->success = true;
+  view->phase = ToolPhase::Finished;
+
+  auto component = FileEditToolBlock(view);
+  auto element = component->Render();
+
+  ftxui::Screen screen(160, 40);
+  ftxui::Render(screen, element);
+  std::string output = screen.ToString();
+
+  EXPECT_TRUE(output.find("new_file.cpp") != std::string::npos);
+  EXPECT_TRUE(output.find("+2") != std::string::npos);
+  EXPECT_TRUE(output.find("line 1-2") != std::string::npos);
 }
 
 } // namespace firmius::tui

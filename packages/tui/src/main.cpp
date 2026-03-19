@@ -17,12 +17,16 @@
 #include "commands/ModelCommand.hpp"
 #include "commands/NewCommand.hpp"
 #include "commands/QuotasCommand.hpp"
+#include "commands/PurposesCommand.hpp"
+#include "commands/RouterCommand.hpp"
 #include "commands/ThreadsCommand.hpp"
 #include "commands/UndoCommand.hpp"
 #include "commands/WorkflowsCommand.hpp"
 #include "modals/ConfigDisplayModal.hpp"
 #include "modals/ModalRegistry.hpp"
 #include "modals/ModelPickerModal.hpp"
+#include "modals/PurposesModal.hpp"
+#include "modals/RouterModal.hpp"
 #include "modals/ThreadLockedModal.hpp"
 #include "modals/ThreadPickerModal.hpp"
 
@@ -59,6 +63,10 @@ int main(int argc, char **argv) {
       std::make_shared<firmius::tui::QuotasCommand>());
   firmius::tui::CommandManager::instance().registerCommand(
       std::make_shared<firmius::tui::AccountsCommand>());
+  firmius::tui::CommandManager::instance().registerCommand(
+      std::make_shared<firmius::tui::RouterCommand>());
+  firmius::tui::CommandManager::instance().registerCommand(
+      std::make_shared<firmius::tui::PurposesCommand>());
   // Note: /workflows command removed - workflows are now registered as
   // individual commands below
 
@@ -69,6 +77,10 @@ int main(int argc, char **argv) {
       std::make_shared<firmius::tui::ModelPickerModal>());
   firmius::tui::ModalRegistry::instance().registerModal(
       std::make_shared<firmius::tui::ConfigDisplayModal>());
+  firmius::tui::ModalRegistry::instance().registerModal(
+      std::make_shared<firmius::tui::RouterModal>());
+  firmius::tui::ModalRegistry::instance().registerModal(
+      std::make_shared<firmius::tui::PurposesModal>());
 
   auto &h = firmius::core::Harness::instance();
   h.init();

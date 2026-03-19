@@ -3,6 +3,7 @@
 #include "Engine.hpp"
 #include "IHost.hpp"
 #include "agents/PurposeLoader.hpp"
+#include "agents/HintingLoader.hpp"
 #include "hosts/DockerHost.hpp"
 #include "hosts/LocalHost.hpp"
 #include "persistence/Journaler.hpp"
@@ -235,6 +236,7 @@ void Harness::init() {
   std::filesystem::create_directories(getFirmiusHome());
 
   PurposeLoader::bootstrapDefaults("prompts/");
+  HintingLoader::bootstrapDefaults("hinting/");
   shared::ConfigLoader::instance().load();
 
   auto containers = DockerHost::listContainersWithLabel(OWNER_PID_LABEL);

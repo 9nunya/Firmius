@@ -6,6 +6,7 @@
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/component_base.hpp>
 #include <ftxui/dom/elements.hpp>
+#include <cctype>
 #include <vector>
 
 namespace firmius::tui {
@@ -51,6 +52,56 @@ ftxui::Color permissionModeColor(firmius::shared::ThreadPermissionMode mode,
     return theme.status_bar.error.normal.fg;
   }
   return theme.status_bar.context.icon;
+}
+
+std::string prettifyVariantName(const std::string &variant) {
+  if (variant.empty()) {
+    return "";
+  }
+  std::string out = variant;
+  for (char &ch : out) {
+    if (ch == '_' || ch == '-') {
+      ch = ' ';
+    }
+  }
+  bool next_title = true;
+  for (char &ch : out) {
+    if (std::isspace(static_cast<unsigned char>(ch))) {
+      next_title = true;
+      continue;
+    }
+    ch = next_title ? static_cast<char>(std::toupper(static_cast<unsigned char>(ch)))
+                    : static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    next_title = false;
+  }
+  return out;
+}
+
+std::string buildModelPillText(const firmius::tui::StatusBarModel &model,
+                               bool compact_mode) {
+  std::string model_text = firmius::shared::PrettifyModelName(model.model_name);
+
+  if (compact_mode) {
+    size_t last_space = model_text.rfind(' ');
+    if (last_space != std::string::npos) {
+      std::string last_word = model_text.substr(last_space + 1);
+      if (last_word == "Mini" || last_word == "Pro" || last_word == "Max" ||
+          last_word == "Ultra" || last_word == "Nano") {
+        model_text = model_text.substr(0, last_space);
+      }
+    }
+  }
+
+  const std::string variant = prettifyVariantName(model.model_variant);
+  if (!variant.empty()) {
+    model_text += " (" + variant + ")";
+  }
+
+  if (!model.purpose.empty() && !compact_mode) {
+    model_text = model.purpose + " | " + model_text;
+  }
+
+  return model_text;
 }
 
 class StatusBarComponentBase : public ftxui::ComponentBase {
@@ -121,26 +172,7 @@ public:
         ftxui::bold | ftxui::color(agent_fg) | ftxui::bgcolor(agent_bg);
 
     // 3. Model/Purpose Pill Segment
-    std::string model_text =
-        firmius::shared::PrettifyModelName(model_->model_name);
-    
-    // In compact mode, simplify model name
-    if (compact_mode) {
-      // "GPT 5.1 Codex Mini" -> "GPT 5.1"
-      size_t last_space = model_text.rfind(' ');
-      if (last_space != std::string::npos) {
-        // Check if last word is likely a qualifier (Mini, Pro, etc.)
-        std::string last_word = model_text.substr(last_space + 1);
-        if (last_word == "Mini" || last_word == "Pro" || last_word == "Max" ||
-            last_word == "Ultra" || last_word == "Nano") {
-          model_text = model_text.substr(0, last_space);
-        }
-      }
-    }
-    
-    if (!model_->purpose.empty() && !compact_mode) {
-      model_text = model_->purpose + " | " + model_text;
-    }
+    std::string model_text = buildModelPillText(*model_, compact_mode);
 
     ftxui::Element pill_el;
     bool is_working = (mode == "streaming" || mode == "executing_tool" ||
@@ -279,10 +311,7 @@ public:
 private:
   void syncGlint() {
     using namespace firmius::shared;
-    std::string model_text = PrettifyModelName(model_->model_name);
-    if (!model_->purpose.empty()) {
-      model_text = model_->purpose + " | " + model_text;
-    }
+    std::string model_text = buildModelPillText(*model_, false);
 
     const auto &theme = ThemeManager::instance().getCurrentTheme();
     if (model_text == cached_name_ && model_->status_text == cached_status_ &&

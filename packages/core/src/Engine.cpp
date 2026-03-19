@@ -159,11 +159,6 @@ std::string Engine::summonAgent(const std::string &threadId,
                                 const std::vector<firmius::shared::ImageContent> &images) {
   reap();
 
-  // Suppress unused parameter warnings
-  (void)providerId;
-  (void)modelId;
-  (void)variantName;
-
   // No limit on concurrent agents - removed to allow unlimited parallel exploration
 
   std::string agentId = requestedAgentId.empty()
@@ -179,7 +174,8 @@ std::string Engine::summonAgent(const std::string &threadId,
   {
     std::lock_guard<std::mutex> lock(listenerMutex);
     fleet.emplace_back([this, threadId, agentId, personaName, task, images, prom,
-                        persistHistory, parentId, friendlyName, title]() {
+                        persistHistory, parentId, friendlyName, title,
+                        providerId, modelId, variantName]() {
       bool errorBroadcast = false;
       try {
         // 1. Loading metadata in background thread
@@ -196,8 +192,11 @@ std::string Engine::summonAgent(const std::string &threadId,
         ctx.identity.friendlyName = parentId.empty() ? "lead" : friendlyName;
 
         const auto &userCfg = shared::ConfigLoader::instance().getConfig();
-        ctx.config.providerId = userCfg.defaultProviderId;
-        ctx.config.modelId = userCfg.defaultModelId;
+        ctx.config.providerId =
+            providerId.empty() ? userCfg.defaultProviderId : providerId;
+        ctx.config.modelId = modelId.empty() ? userCfg.defaultModelId : modelId;
+        ctx.config.modelVariant =
+            variantName.empty() ? userCfg.defaultModelVariant : variantName;
         ctx.config.temperature = userCfg.defaultTemperature;
         if (userCfg.defaultMaxTokens.has_value()) {
           ctx.config.maxTokens = userCfg.defaultMaxTokens.value();

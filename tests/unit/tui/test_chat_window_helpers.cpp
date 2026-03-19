@@ -10,6 +10,7 @@ using firmius::shared::Message;
 using firmius::shared::Role;
 using firmius::shared::TextContent;
 using firmius::shared::ToolCallContent;
+using firmius::shared::ToolResultContent;
 using firmius::shared::ToolCallView;
 using firmius::shared::ToolPhase;
 
@@ -55,6 +56,30 @@ TEST(ChatWindowHelpersTest, CollectsHistoryToolCallIdsForLiveDedupe) {
       ToolCallContent{"call-summon", "summon_subagent", R"({"task":"a"})"},
   };
   turn.messages.push_back(std::move(assistant));
+  history.turns.push_back(std::move(turn));
+
+  const auto ids = firmius::tui::CollectToolCallIdsFromHistory(&history);
+
+  EXPECT_EQ(ids.size(), 2u);
+  EXPECT_TRUE(ids.count("call-summon") > 0);
+  EXPECT_TRUE(ids.count("call-wait") > 0);
+}
+
+TEST(ChatWindowHelpersTest,
+     CollectsHistoryToolCallIdsFromToolResultsForLiveDedupe) {
+  AgentHistory history;
+  AgentTurn turn;
+  turn.turnId = "turn-1";
+
+  Message tool_result_msg;
+  tool_result_msg.role = Role::ToolResult;
+  tool_result_msg.content = {
+      ToolResultContent{"call-summon", R"({"agentId":"sub-1"})", true, "", ""},
+      ToolResultContent{"call-wait", R"({"done":true})", true, "", ""},
+      ToolResultContent{"call-summon", R"({"agentId":"sub-1"})", true, "", ""},
+  };
+
+  turn.messages.push_back(std::move(tool_result_msg));
   history.turns.push_back(std::move(turn));
 
   const auto ids = firmius::tui::CollectToolCallIdsFromHistory(&history);

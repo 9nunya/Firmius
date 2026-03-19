@@ -37,6 +37,7 @@ ftxui::Component ConfigDisplayModal::create(TuiState &state) {
   const auto config = h.getConfig();
   std::string providerId = config.defaultProviderId;
   std::string modelId = config.defaultModelId;
+  std::string modelVariant = config.defaultModelVariant;
 
   auto agentId = h.focusedAgentId();
   auto agent = agentId.empty()
@@ -46,6 +47,7 @@ ftxui::Component ConfigDisplayModal::create(TuiState &state) {
     const auto &agentConfig = agent->getContext().config;
     providerId = agentConfig.providerId;
     modelId = agentConfig.modelId;
+    modelVariant = agentConfig.modelVariant;
   }
 
   std::vector<std::string> apiKeyNames;
@@ -73,6 +75,12 @@ ftxui::Component ConfigDisplayModal::create(TuiState &state) {
         {ftxui::text("Model:       ") | ftxui::bold |
              ftxui::color(theme.modals.fg),
          ftxui::text(modelId) | ftxui::color(theme.modals.highlight_fg)}));
+    rows.push_back(ftxui::hbox(
+        {ftxui::text("Variant:     ") | ftxui::bold |
+             ftxui::color(theme.modals.fg),
+         ftxui::text(modelVariant.empty() ? "(default)" : modelVariant) |
+             ftxui::color(modelVariant.empty() ? theme.base.dim
+                                               : theme.modals.highlight_fg)}));
     rows.push_back(ftxui::hbox(
         {ftxui::text("Permissions: ") | ftxui::bold |
              ftxui::color(theme.modals.fg),

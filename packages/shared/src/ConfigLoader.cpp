@@ -133,6 +133,45 @@ void ConfigLoader::loadImpl() {
             }
         }
     }
+    if (doc.HasMember("modelRouterCategories") &&
+        doc["modelRouterCategories"].IsObject()) {
+        config_.modelRouterCategories.clear();
+        for (auto it = doc["modelRouterCategories"].MemberBegin();
+             it != doc["modelRouterCategories"].MemberEnd(); ++it) {
+            if (!it->value.IsObject()) {
+                continue;
+            }
+            ModelRouteCategory category;
+            if (it->value.HasMember("providerId") &&
+                it->value["providerId"].IsString()) {
+                category.providerId = it->value["providerId"].GetString();
+            }
+            if (it->value.HasMember("modelId") &&
+                it->value["modelId"].IsString()) {
+                category.modelId = it->value["modelId"].GetString();
+            }
+            if (it->value.HasMember("variantName") &&
+                it->value["variantName"].IsString()) {
+                category.variantName = it->value["variantName"].GetString();
+            }
+            if (!category.providerId.empty() && !category.modelId.empty()) {
+                config_.modelRouterCategories[it->name.GetString()] = category;
+            }
+        }
+    }
+    if (doc.HasMember("purposeRoutes") && doc["purposeRoutes"].IsObject()) {
+        config_.purposeRoutes.clear();
+        for (auto it = doc["purposeRoutes"].MemberBegin();
+             it != doc["purposeRoutes"].MemberEnd(); ++it) {
+            if (it->value.IsString()) {
+                config_.purposeRoutes[it->name.GetString()] = it->value.GetString();
+            }
+        }
+    }
+    if (doc.HasMember("defaultRouteCategory") &&
+        doc["defaultRouteCategory"].IsString()) {
+        config_.defaultRouteCategory = doc["defaultRouteCategory"].GetString();
+    }
 
     loaded_ = true;
 }
@@ -179,6 +218,27 @@ void ConfigLoader::save() const {
         providerOptions.AddMember(rapidjson::Value(key.c_str(), allocator), rapidjson::Value(value.c_str(), allocator), allocator);
     }
     doc.AddMember("providerOptions", providerOptions, allocator);
+
+    rapidjson::Value routerCategories(rapidjson::kObjectType);
+    for (const auto &[name, route] : config_.modelRouterCategories) {
+        rapidjson::Value routeObj(rapidjson::kObjectType);
+        routeObj.AddMember("providerId", rapidjson::Value(route.providerId.c_str(), allocator), allocator);
+        routeObj.AddMember("modelId", rapidjson::Value(route.modelId.c_str(), allocator), allocator);
+        routeObj.AddMember("variantName", rapidjson::Value(route.variantName.c_str(), allocator), allocator);
+        routerCategories.AddMember(rapidjson::Value(name.c_str(), allocator), routeObj, allocator);
+    }
+    doc.AddMember("modelRouterCategories", routerCategories, allocator);
+
+    rapidjson::Value purposeRoutes(rapidjson::kObjectType);
+    for (const auto &[purpose, category] : config_.purposeRoutes) {
+        purposeRoutes.AddMember(rapidjson::Value(purpose.c_str(), allocator),
+                                rapidjson::Value(category.c_str(), allocator),
+                                allocator);
+    }
+    doc.AddMember("purposeRoutes", purposeRoutes, allocator);
+    doc.AddMember("defaultRouteCategory",
+                  rapidjson::Value(config_.defaultRouteCategory.c_str(), allocator),
+                  allocator);
 
     rapidjson::StringBuffer buffer;
     rapidjson::PrettyWriter<rapidjson::StringBuffer> writer(buffer);

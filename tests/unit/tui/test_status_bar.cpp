@@ -27,5 +27,22 @@ TEST(StatusBarTest, RendersProcessPillWhenProcessesExist) {
   EXPECT_NE(output.find("2 bg"), std::string::npos);
 }
 
+TEST(StatusBarTest, RendersModelVariantWhenPresent) {
+  auto model = std::make_shared<StatusBarModel>();
+  model->status_text = "idle";
+  model->agent_name = "Firmius";
+  model->model_name = "openai/gpt-5";
+  model->model_variant = "thinking";
+
+  auto component = StatusBar(model);
+  auto element = component->Render();
+
+  ftxui::Screen screen(160, 1);
+  ftxui::Render(screen, element);
+  std::string output = screen.ToString();
+
+  EXPECT_NE(output.find("Thinking"), std::string::npos);
+}
+
 } // namespace
 } // namespace firmius::tui

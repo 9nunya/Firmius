@@ -1,4 +1,6 @@
 #include "agents/PurposeLoader.hpp"
+#include "agents/HintingLoader.hpp"
+#include "ConfigLoader.hpp"
 #include "utils/StringUtil.hpp"
 #include <algorithm>
 #include <array>
@@ -6,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <sstream>
 
 namespace firmius::core {
@@ -199,6 +202,19 @@ Persona PurposeLoader::load(const std::string &purpose) {
 std::string PurposeLoader::composeSystemPrompt(const Persona &persona,
                                                const AgentContext &context,
                                                const std::string &toolsBlock) {
+  const std::string detectedModelFamily = ModelHintResolver::detectFamily(
+      context.config.providerId, context.config.modelId, context.config.modelVariant);
+  std::optional<HintingOverlay> hintingOverlay;
+  try {
+    hintingOverlay = HintingLoader::loadForModel(
+        context.config.providerId, context.config.modelId, context.config.modelVariant);
+  } catch (const std::exception &e) {
+    std::cerr << "[hinting] Failed to load model hinting overlay: " << e.what()
+              << "\n";
+  } catch (...) {
+    std::cerr << "[hinting] Failed to load model hinting overlay.\n";
+  }
+
   std::string basePrompt;
   std::ifstream baseFile(resolvePromptsDir() + "base.md");
   if (baseFile.is_open()) {
@@ -212,6 +228,9 @@ std::string PurposeLoader::composeSystemPrompt(const Persona &persona,
   placeholders["{{AGENT_NAME}}"] = persona.name;
   placeholders["{{AGENT_TITLE}}"] = persona.title;
   placeholders["{{CWD}}"] = context.environment.cwd;
+  placeholders["{{MODEL_FAMILY}}"] = detectedModelFamily;
+  placeholders["{{ACTIVE_HINTING_FILE}}"] =
+      hintingOverlay.has_value() ? hintingOverlay->name : "none";
 
   std::string promptsDir = resolvePromptsDir();
   std::vector<std::string> purposes;
@@ -250,9 +269,39 @@ std::string PurposeLoader::composeSystemPrompt(const Persona &persona,
   ss << basePrompt << "\n\n";
   ss << "# AGENT IDENTITY\n" << persona.identityPrompt << "\n\n";
 
+  if (hintingOverlay.has_value()) {
+    ss << "# MODEL-SPECIFIC HINTING\n";
+    ss << "Detected Family: " << detectedModelFamily << "\n";
+    ss << "Hinting File: " << hintingOverlay->name << "\n\n";
+    ss << hintingOverlay->body << "\n\n";
+  }
+
   ss << "# ENVIRONMENT\n";
   ss << "Host: " << context.environment.identifier << "\n";
   ss << "CWD: " << context.environment.cwd << "\n\n";
+
+  const auto &cfg = shared::ConfigLoader::instance().getConfig();
+  std::vector<std::string> category_names;
+  category_names.reserve(cfg.modelRouterCategories.size());
+  for (const auto &[name, _] : cfg.modelRouterCategories) {
+    category_names.push_back(name);
+  }
+  std::sort(category_names.begin(), category_names.end());
+  std::string categories_summary;
+  for (size_t i = 0; i < category_names.size(); ++i) {
+    if (i > 0) {
+      categories_summary += ", ";
+    }
+    categories_summary += category_names[i];
+  }
+  if (categories_summary.empty()) {
+    categories_summary = "(none)";
+  }
+  ss << "Model Route Categories: " << categories_summary << "\n";
+  if (!cfg.defaultRouteCategory.empty()) {
+    ss << "Default Route Category: " << cfg.defaultRouteCategory << "\n";
+  }
+  ss << "\n";
 
   if (!toolsBlock.empty()) {
     ss << "# AVAILABLE TOOLS\n" << toolsBlock << "\n";

@@ -1,6 +1,7 @@
 #include "tools/SubagentTool.hpp"
 #include "agents/PurposeLoader.hpp"
 #include "AgentRegistry.hpp"
+#include "ConfigLoader.hpp"
 #include "Engine.hpp"
 #include "Events.hpp"
 #include "persistence/ThreadManager.hpp"
@@ -207,6 +208,69 @@ std::string buildDelegationTask(const SubagentInput &input,
   return input.task;
 }
 
+struct ResolvedRoute {
+  std::string providerId;
+  std::string modelId;
+  std::string variantName;
+  std::string categoryName;
+  std::string warning;
+};
+
+ResolvedRoute resolveModelRoute(const SubagentInput &input,
+                                const std::string &persona) {
+  const auto &config = shared::ConfigLoader::instance().getConfig();
+
+  auto useDefaultRoute = [&config]() {
+    ResolvedRoute route;
+    route.providerId = config.defaultProviderId;
+    route.modelId = config.defaultModelId;
+    route.variantName = config.defaultModelVariant;
+    return route;
+  };
+
+  auto findCategory = [&config](const std::string &name)
+      -> const shared::ModelRouteCategory * {
+    auto it = config.modelRouterCategories.find(name);
+    if (it == config.modelRouterCategories.end()) {
+      return nullptr;
+    }
+    return &it->second;
+  };
+
+  if (input.category.has_value() && !input.category->empty()) {
+    if (const auto *category = findCategory(*input.category)) {
+      return {category->providerId, category->modelId, category->variantName,
+              *input.category, ""};
+    }
+    auto route = useDefaultRoute();
+    route.warning = "Category '" + *input.category +
+                    "' not found; using default model route.";
+    return route;
+  }
+
+  auto it_purpose = config.purposeRoutes.find(persona);
+  if (it_purpose != config.purposeRoutes.end() && !it_purpose->second.empty()) {
+    const std::string mapped_category = it_purpose->second;
+    if (const auto *category = findCategory(mapped_category)) {
+      return {category->providerId, category->modelId, category->variantName,
+              mapped_category, ""};
+    }
+    auto route = useDefaultRoute();
+    route.warning = "Purpose route for '" + persona + "' points to missing category '" +
+                    mapped_category + "'; using default model route.";
+    return route;
+  }
+
+  if (!config.defaultRouteCategory.empty()) {
+    if (const auto *category = findCategory(config.defaultRouteCategory)) {
+      return {category->providerId, category->modelId, category->variantName,
+              config.defaultRouteCategory, ""};
+    }
+  }
+
+  return useDefaultRoute();
+}
+
 }
 
 shared::ToolMetadata SubagentTool::getMetadata() const {
@@ -235,6 +299,10 @@ std::shared_ptr<shared::JSONSchema> SubagentTool::getSchema() const {
               {"chunk_id",
                shared::zString()
                    ->describe("Optional assigned chunk for executor delegation")
+                   ->setOptional()},
+              {"category",
+               shared::zString()
+                   ->describe("Optional model routing category for this delegation")
                    ->setOptional()},
               {"name", shared::zString()->describe(
                            "Machine-friendly slug (e.g., 'auth-finder')")},
@@ -304,10 +372,7 @@ shared::ToolResult SubagentTool::execute(const SubagentInput &input,
     }
   }
 
-  // Inherit model from parent agent
-  std::string providerId = ctx.agent.getContext().config.providerId;
-  std::string modelId = ctx.agent.getContext().config.modelId;
-  std::string variantName = ctx.agent.getContext().config.modelVariant;
+  const ResolvedRoute route = resolveModelRoute(input, persona);
 
   // Check if re-tasking an existing agent
   if (input.agent_id.has_value() && !input.agent_id.value().empty()) {
@@ -328,6 +393,8 @@ shared::ToolResult SubagentTool::execute(const SubagentInput &input,
       persistExecutorDispatch(threadId, *input.plan_id, *input.chunk_id,
                               input.agent_id.value());
     }
+    Engine::instance().switchAgentModel(input.agent_id.value(), route.providerId,
+                                        route.modelId, route.variantName);
     Engine::instance().executeTask(input.agent_id.value(), delegatedTask);
 
     if (input.async) {
@@ -338,6 +405,14 @@ shared::ToolResult SubagentTool::execute(const SubagentInput &input,
                   rapidjson::Value(input.agent_id.value().c_str(), a).Move(),
                   a);
       d.AddMember("status", "re-tasked", a);
+      if (!route.categoryName.empty()) {
+        d.AddMember("category",
+                    rapidjson::Value(route.categoryName.c_str(), a).Move(), a);
+      }
+      if (!route.warning.empty()) {
+        d.AddMember("routing_warning",
+                    rapidjson::Value(route.warning.c_str(), a).Move(), a);
+      }
       return shared::ToolResult::ok(d);
     } else {
       std::string resultSummary;
@@ -367,6 +442,14 @@ shared::ToolResult SubagentTool::execute(const SubagentInput &input,
       d.AddMember("status", "completed", a);
       d.AddMember("result", rapidjson::Value(resultSummary.c_str(), a).Move(),
                   a);
+      if (!route.categoryName.empty()) {
+        d.AddMember("category",
+                    rapidjson::Value(route.categoryName.c_str(), a).Move(), a);
+      }
+      if (!route.warning.empty()) {
+        d.AddMember("routing_warning",
+                    rapidjson::Value(route.warning.c_str(), a).Move(), a);
+      }
       return shared::ToolResult::ok(d);
     }
   }
@@ -376,7 +459,7 @@ shared::ToolResult SubagentTool::execute(const SubagentInput &input,
     std::string subagentId = Engine::instance().summonAgent(
         threadId, persona, delegatedTask, true,
         ctx.agent.getContext().identity.id, input.name, input.title, "",
-        providerId, modelId, variantName);
+        route.providerId, route.modelId, route.variantName);
     if (isExecutorPersona(persona) && input.plan_id.has_value() &&
         input.chunk_id.has_value()) {
       persistExecutorDispatch(threadId, *input.plan_id, *input.chunk_id,
@@ -387,12 +470,20 @@ shared::ToolResult SubagentTool::execute(const SubagentInput &input,
     auto &a = d.GetAllocator();
     d.AddMember("agentId", rapidjson::Value(subagentId.c_str(), a).Move(), a);
     d.AddMember("status", "spawned", a);
+    if (!route.categoryName.empty()) {
+      d.AddMember("category",
+                  rapidjson::Value(route.categoryName.c_str(), a).Move(), a);
+    }
+    if (!route.warning.empty()) {
+      d.AddMember("routing_warning",
+                  rapidjson::Value(route.warning.c_str(), a).Move(), a);
+    }
     return shared::ToolResult::ok(d);
   } else {
     std::string subagentId = Engine::instance().summonAgent(
         threadId, persona, delegatedTask, true,
         ctx.agent.getContext().identity.id, input.name, input.title, "",
-        providerId, modelId, variantName);
+        route.providerId, route.modelId, route.variantName);
     if (isExecutorPersona(persona) && input.plan_id.has_value() &&
         input.chunk_id.has_value()) {
       persistExecutorDispatch(threadId, *input.plan_id, *input.chunk_id,
@@ -424,6 +515,14 @@ shared::ToolResult SubagentTool::execute(const SubagentInput &input,
     }
     d.AddMember("status", "completed", a);
     d.AddMember("result", rapidjson::Value(resultSummary.c_str(), a).Move(), a);
+    if (!route.categoryName.empty()) {
+      d.AddMember("category",
+                  rapidjson::Value(route.categoryName.c_str(), a).Move(), a);
+    }
+    if (!route.warning.empty()) {
+      d.AddMember("routing_warning",
+                  rapidjson::Value(route.warning.c_str(), a).Move(), a);
+    }
     return shared::ToolResult::ok(d);
   }
 }

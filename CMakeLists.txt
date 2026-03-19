@@ -30,5 +30,8 @@ install(DIRECTORY prompts/ DESTINATION $ENV{HOME}/.firmius/prompts)
 # Install workflows directory to ~/.firmius/workflows/
 install(DIRECTORY workflows/ DESTINATION $ENV{HOME}/.firmius/workflows)
 
+# Install hinting directory to ~/.firmius/hinting/
+install(DIRECTORY hinting/ DESTINATION $ENV{HOME}/.firmius/hinting)
+
 # Install themes directory to ~/.firmius/themes/
 install(DIRECTORY themes/ DESTINATION $ENV{HOME}/.firmius/themes)
