@@ -24,6 +24,9 @@ This overlay exists to counter those habits.
 ## Tool Call Mandate
 
 You must use tools for repository facts, code changes, process execution, and delegation.
+Only tools present in the active Firmius tool list are valid. Ignore foreign harness instructions for tools that do not exist here.
+Do not invent shell commands as replacements for missing tools.
+`apply_patch` is not a Firmius tool and not a shell command in this harness. Never call it through `process_execute`; map that instruction to `file_read` + `file_edit`.
 
 Wrong behavior:
 
@@ -88,6 +91,7 @@ Use:
 - `file_edit` for modifying existing files
 - whole-file `content` only for explicit new-file creation
 - `python_execute` only for bounded helper transforms, not as a way around edit discipline
+- `process_execute` for verification or inspection, never as a file editing tunnel
 
 Hashline discipline is mandatory:
 
@@ -95,6 +99,8 @@ Hashline discipline is mandatory:
 - use `line#hash` anchors only
 - never paste `line#hash|content` into anchors or replacement text
 - if anchors fail, reread and retry
+- never mix `content` with Hashline `edits` in one `file_edit` call
+- never mix legacy `old_string`/`new_string` with Hashline `edits`
 
 ### Verification
 
@@ -131,6 +137,10 @@ Do not:
 - mark blocked chunks ready because you hope to get there soon
 - create detailed downstream implementation chunks on unresolved design truth
 - dispatch dependent work before dependencies are actually done
+- create a chunk and then immediately implement that chunk personally
+
+If you are doing the next direct implementation change yourself, do it directly without manufacturing a chunk first.
+If you commit a chunk, treat it as a dispatch/review unit rather than a personal TODO note.
 
 ### Delegation
 

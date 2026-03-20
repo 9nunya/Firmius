@@ -4,10 +4,12 @@
 #include "utils/InterruptibleSleep.hpp"
 #include "utils/Logger.hpp"
 #include "utils/StringUtil.hpp"
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <ctime>
 #include <iostream>
+#include <limits>
 #include <random>
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
@@ -36,6 +38,44 @@ const std::string QwenProvider::QWEN_MODELS_ENDPOINT =
     "https://portal.qwen.ai/v1/models";
 
 namespace {
+constexpr std::uint32_t kMissingToolCallIndex =
+    std::numeric_limits<std::uint32_t>::max();
+
+bool hasToolCallIndex(const firmius::shared::ToolCallChunk &chunk) {
+  return chunk.index != kMissingToolCallIndex;
+}
+
+std::vector<firmius::shared::ToolCallChunk>::iterator
+findMatchingToolCallChunk(
+    std::vector<firmius::shared::ToolCallChunk> &accumulated,
+    const firmius::shared::ToolCallChunk &incoming) {
+  if (!incoming.id.empty()) {
+    auto byId = std::find_if(accumulated.begin(), accumulated.end(),
+                             [&](const firmius::shared::ToolCallChunk &existing) {
+                               return existing.id == incoming.id;
+                             });
+    if (byId != accumulated.end()) {
+      return byId;
+    }
+  }
+
+  if (hasToolCallIndex(incoming)) {
+    auto byIndex = std::find_if(
+        accumulated.begin(), accumulated.end(),
+        [&](const firmius::shared::ToolCallChunk &existing) {
+          if (!hasToolCallIndex(existing) || existing.index != incoming.index) {
+            return false;
+          }
+          return incoming.id.empty() || existing.id.empty() ||
+                 existing.id == incoming.id;
+        });
+    if (byIndex != accumulated.end()) {
+      return byIndex;
+    }
+  }
+
+  return accumulated.end();
+}
 
 struct ToolCallValidationResult {
   bool valid = false;
@@ -1254,6 +1294,25 @@ bool QwenProvider::isMeaningfulStreamEvent(const StreamEvent &event) {
   return false;
 }
 
+void QwenProvider::mergeAccumulatedToolCallChunk(
+    std::vector<firmius::shared::ToolCallChunk> &accumulated,
+    const firmius::shared::ToolCallChunk &incoming) {
+  auto it = findMatchingToolCallChunk(accumulated, incoming);
+  if (it == accumulated.end()) {
+    accumulated.push_back(incoming);
+    return;
+  }
+
+  if (it->id.empty() && !incoming.id.empty()) {
+    it->id = incoming.id;
+  }
+  if (!hasToolCallIndex(*it) && hasToolCallIndex(incoming)) {
+    it->index = incoming.index;
+  }
+  it->nameDelta += incoming.nameDelta;
+  it->argsDelta += incoming.argsDelta;
+}
+
 std::optional<std::string> QwenProvider::validateCompletedToolCallBatch(
     const std::vector<firmius::shared::ToolCallChunk> &calls) {
   for (const auto &call : calls) {
@@ -1362,21 +1421,7 @@ QwenProvider::StreamAttemptResult QwenProvider::executeStreamRequest(
       onEvent(ev);
     } else if (std::holds_alternative<ToolCallChunk>(ev)) {
       const auto &chunk = std::get<ToolCallChunk>(ev);
-      bool merged = false;
-      for (auto &existing : accumulatedToolCalls) {
-        if (existing.index == chunk.index) {
-          existing.nameDelta += chunk.nameDelta;
-          existing.argsDelta += chunk.argsDelta;
-          if (!chunk.id.empty()) {
-            existing.id = chunk.id;
-          }
-          merged = true;
-          break;
-        }
-      }
-      if (!merged) {
-        accumulatedToolCalls.push_back(chunk);
-      }
+      mergeAccumulatedToolCallChunk(accumulatedToolCalls, chunk);
       onEvent(ev);
     } else if (auto *met = std::get_if<AgentMetrics>(&ev)) {
       capturedMetrics = *met;

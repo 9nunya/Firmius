@@ -3,6 +3,7 @@
 #include "agents/AgentPermissionChecks.hpp"
 #include "utils/FSUtil.hpp"
 #include <chrono>
+#include <cctype>
 #include <optional>
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
@@ -34,6 +35,42 @@ shared::ToolResult ProcessExecuteTool::execute(const ProcessExecuteInput &input,
   std::string processId;
   shared::ProcessSnapshot snap;
   try {
+    std::string normalizedCommand;
+    normalizedCommand.reserve(input.command.size());
+    bool previousWasSpace = false;
+    for (char ch : input.command) {
+      if (std::isspace(static_cast<unsigned char>(ch))) {
+        if (!previousWasSpace) {
+          normalizedCommand.push_back(' ');
+          previousWasSpace = true;
+        }
+      } else {
+        normalizedCommand.push_back(
+            static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
+        previousWasSpace = false;
+      }
+    }
+    if (!normalizedCommand.empty() && normalizedCommand.front() == ' ') {
+      normalizedCommand.erase(normalizedCommand.begin());
+    }
+    if (!normalizedCommand.empty() && normalizedCommand.back() == ' ') {
+      normalizedCommand.pop_back();
+    }
+
+    const bool mentionsApplyPatch =
+        normalizedCommand == "apply_patch" ||
+        normalizedCommand.rfind("apply_patch ", 0) == 0 ||
+        normalizedCommand.find(" apply_patch ") != std::string::npos ||
+        normalizedCommand.find("| apply_patch") != std::string::npos ||
+        normalizedCommand.find("&& apply_patch") != std::string::npos ||
+        normalizedCommand.find("|| apply_patch") != std::string::npos;
+    if (mentionsApplyPatch) {
+      return shared::ToolResult::fail(
+          "Foreign tool conflict: 'apply_patch' is not available in Firmius "
+          "and must not be run via process_execute. Use file_read + file_edit "
+          "instead.");
+    }
+
     std::string effectiveCwd =
         input.cwd.empty() ? ctx.agent.getContext().environment.cwd : input.cwd;
     // Normalize path first

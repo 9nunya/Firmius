@@ -148,6 +148,161 @@ public:
     }
 };
 
+class MixedTextToolCallProvider : public firmius::provider::IProvider {
+public:
+    std::string getId() const override { return "mixed-text-tool-provider"; }
+
+    void stream(const AgentHistory&, const firmius::provider::ProviderOptions&,
+                std::function<void(const StreamEvent&)> onEvent) override {
+        if (callCount_++ == 0) {
+            onEvent(ThinkingChunk{"Planning next step.", "sig-1"});
+            onEvent(TextChunk{"I will inspect ASCII.txt first."});
+            onEvent(ToolCallChunk{"call-read", 0, "file_read",
+                                  R"({"path":"ASCII.txt"})"});
+            onEvent(StreamDone{StopReason::ToolUse});
+            return;
+        }
+
+        onEvent(TextChunk{"Inspection complete."});
+        onEvent(StreamDone{StopReason::Stop});
+    }
+
+    std::vector<ModelInfo> listModels() override {
+        ModelInfo model;
+        model.id = "mixed-text-tool-model";
+        model.provider = getId();
+        model.contextWindow = 4096;
+        return {model};
+    }
+
+    ModelInfo getModelInfo(const std::string&) override {
+        return listModels().front();
+    }
+
+    void generateSummary(const std::string&, const AgentHistory&,
+                         const std::string&,
+                         std::function<void(const StreamEvent&)> onEvent,
+                         std::atomic<bool>* = nullptr) override {
+        onEvent(TextChunk{"summary"});
+        onEvent(StreamDone{StopReason::Stop});
+    }
+
+    firmius::provider::ProviderType getProviderType() const override {
+        return firmius::provider::ProviderType::APIKey;
+    }
+
+private:
+    mutable int callCount_ = 0;
+};
+
+class ParallelInterleavedToolCallProvider : public firmius::provider::IProvider {
+public:
+    std::string getId() const override { return "parallel-interleaved-tool-provider"; }
+
+    void stream(const AgentHistory&, const firmius::provider::ProviderOptions&,
+                std::function<void(const StreamEvent&)> onEvent) override {
+        if (callCount_++ == 0) {
+            onEvent(TextChunk{"Running two reads in parallel."});
+            onEvent(ToolCallChunk{"call-a", 0, "file_read", ""});
+            onEvent(ToolCallChunk{"call-b", 1, "file_read", ""});
+
+            ToolCallChunk callAArgs;
+            callAArgs.id = "call-a";
+            callAArgs.argsDelta = R"({"path":"ASCII.txt"})";
+            onEvent(callAArgs);
+
+            ToolCallChunk callBArgs;
+            callBArgs.id = "call-b";
+            callBArgs.argsDelta = R"({"path":"CMakeLists.txt"})";
+            onEvent(callBArgs);
+
+            onEvent(StreamDone{StopReason::ToolUse});
+            return;
+        }
+
+        onEvent(TextChunk{"Parallel reads complete."});
+        onEvent(StreamDone{StopReason::Stop});
+    }
+
+    std::vector<ModelInfo> listModels() override {
+        ModelInfo model;
+        model.id = "parallel-interleaved-tool-model";
+        model.provider = getId();
+        model.contextWindow = 4096;
+        return {model};
+    }
+
+    ModelInfo getModelInfo(const std::string&) override {
+        return listModels().front();
+    }
+
+    void generateSummary(const std::string&, const AgentHistory&,
+                         const std::string&,
+                         std::function<void(const StreamEvent&)> onEvent,
+                         std::atomic<bool>* = nullptr) override {
+        onEvent(TextChunk{"summary"});
+        onEvent(StreamDone{StopReason::Stop});
+    }
+
+    firmius::provider::ProviderType getProviderType() const override {
+        return firmius::provider::ProviderType::APIKey;
+    }
+
+private:
+    mutable int callCount_ = 0;
+};
+
+class SequencedProseProvider : public firmius::provider::IProvider {
+public:
+    SequencedProseProvider(std::string providerId, std::vector<std::string> responses)
+        : providerId_(std::move(providerId)), responses_(std::move(responses)) {}
+
+    std::string getId() const override { return providerId_; }
+
+    void stream(const AgentHistory&, const firmius::provider::ProviderOptions&,
+                std::function<void(const StreamEvent&)> onEvent) override {
+        int idx = callCount_.fetch_add(1);
+        if (!responses_.empty()) {
+            const int maxIdx = static_cast<int>(responses_.size()) - 1;
+            const std::string& text =
+                responses_[static_cast<size_t>(std::min(idx, maxIdx))];
+            onEvent(TextChunk{text});
+        }
+        onEvent(StreamDone{StopReason::Stop});
+    }
+
+    std::vector<ModelInfo> listModels() override {
+        ModelInfo model;
+        model.id = providerId_ + "-model";
+        model.provider = getId();
+        model.contextWindow = 4096;
+        return {model};
+    }
+
+    ModelInfo getModelInfo(const std::string&) override {
+        return listModels().front();
+    }
+
+    void generateSummary(const std::string&, const AgentHistory&,
+                         const std::string&,
+                         std::function<void(const StreamEvent&)> onEvent,
+                         std::atomic<bool>* = nullptr) override {
+        onEvent(TextChunk{"summary"});
+        onEvent(StreamDone{StopReason::Stop});
+    }
+
+    firmius::provider::ProviderType getProviderType() const override {
+        return firmius::provider::ProviderType::APIKey;
+    }
+
+    int callCount() const { return callCount_.load(); }
+
+private:
+    std::string providerId_;
+    std::vector<std::string> responses_;
+    std::atomic<int> callCount_{0};
+};
+
 class HarnessTest : public ::testing::Test {
 protected:
     void SetUp() override {
@@ -173,6 +328,10 @@ protected:
             std::make_shared<TruncatedToolCallProvider>());
         firmius::provider::ProviderRegistry::instance().registerProvider(
             std::make_shared<ProviderDeclaredTruncatedToolCallProvider>());
+        firmius::provider::ProviderRegistry::instance().registerProvider(
+            std::make_shared<MixedTextToolCallProvider>());
+        firmius::provider::ProviderRegistry::instance().registerProvider(
+            std::make_shared<ParallelInterleavedToolCallProvider>());
         auto config = firmius::shared::ConfigLoader::instance().getConfig();
         config.defaultProviderId = "test-retry-provider";
         config.defaultModelId = "test-retry-model";
@@ -872,6 +1031,359 @@ TEST_F(HarnessTest, retryLastRequestIsUnavailableWhenFocusedAgentIsNotStopped) {
     std::string statusMessage;
     EXPECT_TRUE(harness.retryLastRequest(statusMessage));
     EXPECT_EQ(statusMessage, "Awakening focused agent from existing thread history.");
+}
+
+TEST_F(HarnessTest, MixedThinkingTextAndToolCallTurnPersistsAllAssistantContent) {
+    auto& harness = Harness::instance();
+    auto config = firmius::shared::ConfigLoader::instance().getConfig();
+    config.defaultProviderId = "mixed-text-tool-provider";
+    config.defaultModelId = "mixed-text-tool-model";
+    harness.updateConfig(config);
+
+    const std::string threadId = harness.newThread({}, "/tmp", "lead");
+    ASSERT_FALSE(threadId.empty());
+
+    harness.send("run mixed content and tool call");
+    auto agent = waitForFocusedAgent();
+    ASSERT_TRUE(waitForCondition([&]() {
+        return agent && !agent->isRunning() &&
+               agent->getContext().state.currentStatus == AgentStatus::Idle;
+    }));
+
+    const auto& history = *agent->getContext().history;
+    const AgentTurn* mixedTurn = nullptr;
+    for (const auto& turn : history.turns) {
+        if (turn.stopReason != StopReason::ToolUse || turn.messages.empty()) {
+            continue;
+        }
+        const auto& msg = turn.messages.front();
+        if (msg.role != Role::Assistant) {
+            continue;
+        }
+        bool hasToolCall = false;
+        for (const auto& part : msg.content) {
+            if (std::holds_alternative<ToolCallContent>(part)) {
+                hasToolCall = true;
+                break;
+            }
+        }
+        if (hasToolCall) {
+            mixedTurn = &turn;
+            break;
+        }
+    }
+
+    ASSERT_NE(mixedTurn, nullptr);
+    ASSERT_FALSE(mixedTurn->messages.empty());
+    const auto& mixedMsg = mixedTurn->messages.front();
+
+    const ThinkingContent* thinking = nullptr;
+    const TextContent* text = nullptr;
+    const ToolCallContent* toolCall = nullptr;
+    for (const auto& part : mixedMsg.content) {
+        if (!thinking) {
+            thinking = std::get_if<ThinkingContent>(&part);
+        }
+        if (!text) {
+            text = std::get_if<TextContent>(&part);
+        }
+        if (!toolCall) {
+            toolCall = std::get_if<ToolCallContent>(&part);
+        }
+    }
+
+    ASSERT_NE(thinking, nullptr);
+    ASSERT_NE(text, nullptr);
+    ASSERT_NE(toolCall, nullptr);
+    EXPECT_EQ(thinking->thinking, "Planning next step.");
+    EXPECT_EQ(text->text, "I will inspect ASCII.txt first.");
+    EXPECT_EQ(toolCall->id, "call-read");
+    EXPECT_EQ(toolCall->name, "file_read");
+    EXPECT_EQ(toolCall->args, R"({"path":"ASCII.txt"})");
+}
+
+TEST_F(HarnessTest, InterleavedParallelToolChunksWithMissingIndexStayValid) {
+    auto& harness = Harness::instance();
+    auto config = firmius::shared::ConfigLoader::instance().getConfig();
+    config.defaultProviderId = "parallel-interleaved-tool-provider";
+    config.defaultModelId = "parallel-interleaved-tool-model";
+    harness.updateConfig(config);
+
+    const std::string threadId = harness.newThread({}, "/tmp", "lead");
+    ASSERT_FALSE(threadId.empty());
+
+    std::atomic<bool> malformedValidatorTriggered{false};
+    int subId = harness.subscribe([&](const AppEvent& event) {
+        if (auto error = std::get_if<AgentError>(&event)) {
+            if (error->message.find("malformed streamed tool call payload") !=
+                std::string::npos) {
+                malformedValidatorTriggered = true;
+            }
+        }
+    });
+
+    harness.send("run parallel interleaved reads");
+    auto agent = waitForFocusedAgent();
+    ASSERT_TRUE(waitForCondition([&]() {
+        return agent && !agent->isRunning() &&
+               agent->getContext().state.currentStatus == AgentStatus::Idle;
+    }));
+    harness.unsubscribe(subId);
+
+    EXPECT_FALSE(malformedValidatorTriggered.load());
+
+    const auto& history = *agent->getContext().history;
+    size_t callCount = 0;
+    for (const auto& turn : history.turns) {
+        for (const auto& msg : turn.messages) {
+            for (const auto& part : msg.content) {
+                if (auto call = std::get_if<ToolCallContent>(&part)) {
+                    if (call->name == "file_read") {
+                        ++callCount;
+                        EXPECT_TRUE(call->id == "call-a" || call->id == "call-b");
+                        EXPECT_TRUE(call->args == R"({"path":"ASCII.txt"})" ||
+                                    call->args == R"({"path":"CMakeLists.txt"})");
+                    }
+                }
+            }
+        }
+    }
+    EXPECT_EQ(callCount, 2u);
+}
+
+TEST_F(HarnessTest, ProseOnlyTurnDuringActiveExecutionDoesNotTerminate) {
+    auto& harness = Harness::instance();
+    auto provider = std::make_shared<SequencedProseProvider>(
+        "sequenced-prose-active-exec",
+        std::vector<std::string>{"Status: preparing execution.", "Execution completed."});
+    firmius::provider::ProviderRegistry::instance().registerProvider(provider);
+
+    auto config = firmius::shared::ConfigLoader::instance().getConfig();
+    config.defaultProviderId = provider->getId();
+    config.defaultModelId = provider->listModels().front().id;
+    harness.updateConfig(config);
+
+    const std::string threadId = harness.newThread({}, "/tmp", "lead");
+    ASSERT_FALSE(threadId.empty());
+    auto agent = createFocusedLeadAgent(threadId);
+    ASSERT_TRUE(agent);
+
+    agent->getEnvironment()->getProcessManager().addBlockingProcessId(
+        "test-blocking-prose-loop");
+
+    harness.send("continue execution with progress narration");
+
+    ASSERT_TRUE(waitForCondition([&]() { return provider->callCount() >= 2; }));
+    agent->getEnvironment()->getProcessManager().removeBlockingProcessId(
+        "test-blocking-prose-loop");
+
+    ASSERT_TRUE(waitForCondition([&]() {
+        return !agent->isRunning() &&
+               agent->getContext().state.currentStatus == AgentStatus::Idle;
+    }));
+
+    EXPECT_GE(provider->callCount(), 2);
+}
+
+TEST_F(HarnessTest, ProseOnlyTurnInSimpleAnswerModeTerminates) {
+    auto& harness = Harness::instance();
+    auto provider = std::make_shared<SequencedProseProvider>(
+        "sequenced-prose-simple-answer",
+        std::vector<std::string>{"This is the direct answer.",
+                                 "This should never be reached."});
+    firmius::provider::ProviderRegistry::instance().registerProvider(provider);
+
+    auto config = firmius::shared::ConfigLoader::instance().getConfig();
+    config.defaultProviderId = provider->getId();
+    config.defaultModelId = provider->listModels().front().id;
+    harness.updateConfig(config);
+
+    const std::string threadId = harness.newThread({}, "/tmp", "lead");
+    ASSERT_FALSE(threadId.empty());
+    harness.send("what is this file?");
+    auto agent = waitForFocusedAgent();
+
+    ASSERT_TRUE(waitForCondition([&]() {
+        return agent && !agent->isRunning() &&
+               agent->getContext().state.currentStatus == AgentStatus::Idle;
+    }));
+
+    EXPECT_EQ(provider->callCount(), 1);
+}
+
+TEST_F(HarnessTest, LargeImplementationRequestEarlyProseWithoutActiveStateContinues) {
+    auto& harness = Harness::instance();
+    auto provider = std::make_shared<SequencedProseProvider>(
+        "sequenced-prose-early-discovery",
+        std::vector<std::string>{"Discovery summary before planning.",
+                                 "Now proceeding to concrete execution."});
+    firmius::provider::ProviderRegistry::instance().registerProvider(provider);
+
+    auto config = firmius::shared::ConfigLoader::instance().getConfig();
+    config.defaultProviderId = provider->getId();
+    config.defaultModelId = provider->listModels().front().id;
+    harness.updateConfig(config);
+
+    const std::string threadId = harness.newThread({}, "/tmp", "lead");
+    ASSERT_FALSE(threadId.empty());
+    harness.send("implement a large feature across this codebase");
+    auto agent = waitForFocusedAgent();
+
+    ASSERT_TRUE(waitForCondition([&]() {
+        return agent && !agent->isRunning() &&
+               agent->getContext().state.currentStatus == AgentStatus::Idle;
+    }));
+
+    EXPECT_EQ(provider->callCount(), 2);
+}
+
+TEST_F(HarnessTest, ActivePlanWithUnfinishedChunksKeepsLoopAliveAfterProse) {
+    auto& harness = Harness::instance();
+    auto provider = std::make_shared<SequencedProseProvider>(
+        "sequenced-prose-active-plan",
+        std::vector<std::string>{"Progress update before execution.",
+                                 "Final answer after continuation."});
+    firmius::provider::ProviderRegistry::instance().registerProvider(provider);
+
+    auto config = firmius::shared::ConfigLoader::instance().getConfig();
+    config.defaultProviderId = provider->getId();
+    config.defaultModelId = provider->listModels().front().id;
+    harness.updateConfig(config);
+
+    const std::string threadId = harness.newThread({}, "/tmp", "lead");
+    ASSERT_FALSE(threadId.empty());
+
+    ThreadManager tm((testHome_ / ".firmius" / "threads").string());
+    Plan plan;
+    plan.id = "plan-prose-continuation";
+    plan.threadId = threadId;
+    plan.title = "Execution Plan";
+    plan.objective = "Keep loop alive across prose turns";
+    plan.status = PlanStatus::Active;
+    WorkChunk chunk;
+    chunk.id = "chunk-1";
+    chunk.title = "Implement fix";
+    chunk.goal = "apply runtime change";
+    chunk.status = WorkChunkStatus::Ready;
+    plan.chunks.push_back(chunk);
+    tm.writePlan(threadId, plan);
+
+    ThreadMetadata metadata = tm.getMetadata(threadId);
+    metadata.activePlanId = plan.id;
+    tm.updateMetadata(threadId, metadata);
+
+    harness.send("continue work");
+    auto agent = waitForFocusedAgent();
+
+    ASSERT_TRUE(waitForCondition([&]() {
+        return agent && !agent->isRunning() &&
+               agent->getContext().state.currentStatus == AgentStatus::Idle;
+    }));
+
+    EXPECT_EQ(provider->callCount(), 2);
+}
+
+TEST_F(HarnessTest, NoActiveWorkInformationalAnswerStillEndsNormally) {
+    auto& harness = Harness::instance();
+    auto provider = std::make_shared<SequencedProseProvider>(
+        "sequenced-prose-no-active-work",
+        std::vector<std::string>{"Here are the findings.",
+                                 "Second turn should not execute."});
+    firmius::provider::ProviderRegistry::instance().registerProvider(provider);
+
+    auto config = firmius::shared::ConfigLoader::instance().getConfig();
+    config.defaultProviderId = provider->getId();
+    config.defaultModelId = provider->listModels().front().id;
+    harness.updateConfig(config);
+
+    const std::string threadId = harness.newThread({}, "/tmp", "lead");
+    ASSERT_FALSE(threadId.empty());
+    harness.send("inspect and report");
+    auto agent = waitForFocusedAgent();
+
+    ASSERT_TRUE(waitForCondition([&]() {
+        return agent && !agent->isRunning() &&
+               agent->getContext().state.currentStatus == AgentStatus::Idle;
+    }));
+
+    EXPECT_EQ(provider->callCount(), 1);
+}
+
+TEST_F(HarnessTest, ProseOnlyExecutionIntentLoopRemainsBoundedWithoutActiveWork) {
+    auto& harness = Harness::instance();
+    auto provider = std::make_shared<SequencedProseProvider>(
+        "sequenced-prose-bounded-loop",
+        std::vector<std::string>{"High-level status update.",
+                                 "Another prose-only status update.",
+                                 "A third prose turn that should not execute."});
+    firmius::provider::ProviderRegistry::instance().registerProvider(provider);
+
+    auto config = firmius::shared::ConfigLoader::instance().getConfig();
+    config.defaultProviderId = provider->getId();
+    config.defaultModelId = provider->listModels().front().id;
+    harness.updateConfig(config);
+
+    const std::string threadId = harness.newThread({}, "/tmp", "lead");
+    ASSERT_FALSE(threadId.empty());
+    harness.send("build and implement the requested runtime change");
+    auto agent = waitForFocusedAgent();
+
+    ASSERT_TRUE(waitForCondition([&]() {
+        return agent && !agent->isRunning() &&
+               agent->getContext().state.currentStatus == AgentStatus::Idle;
+    }));
+
+    EXPECT_EQ(provider->callCount(), 2);
+}
+
+TEST_F(HarnessTest, NoModelAuthoredStopTokenIsRequiredForCompletion) {
+    auto& harness = Harness::instance();
+    auto provider = std::make_shared<SequencedProseProvider>(
+        "sequenced-prose-no-stop-token",
+        std::vector<std::string>{"Progress report: still working.",
+                                 "Work complete with plain prose."});
+    firmius::provider::ProviderRegistry::instance().registerProvider(provider);
+
+    auto config = firmius::shared::ConfigLoader::instance().getConfig();
+    config.defaultProviderId = provider->getId();
+    config.defaultModelId = provider->listModels().front().id;
+    harness.updateConfig(config);
+
+    const std::string threadId = harness.newThread({}, "/tmp", "lead");
+    ASSERT_FALSE(threadId.empty());
+    auto agent = createFocusedLeadAgent(threadId);
+    ASSERT_TRUE(agent);
+    agent->getEnvironment()->getProcessManager().addBlockingProcessId(
+        "test-stop-token-not-required");
+
+    harness.send("continue until done");
+
+    ASSERT_TRUE(waitForCondition([&]() { return provider->callCount() >= 2; }));
+    agent->getEnvironment()->getProcessManager().removeBlockingProcessId(
+        "test-stop-token-not-required");
+
+    ASSERT_TRUE(waitForCondition([&]() {
+        return !agent->isRunning() &&
+               agent->getContext().state.currentStatus == AgentStatus::Idle;
+    }));
+
+    const auto& history = *agent->getContext().history;
+    bool foundStopToken = false;
+    for (const auto& turn : history.turns) {
+        for (const auto& msg : turn.messages) {
+            for (const auto& part : msg.content) {
+                if (const auto* text = std::get_if<TextContent>(&part)) {
+                    if (text->text.find("<done") != std::string::npos ||
+                        text->text.find("</done") != std::string::npos) {
+                        foundStopToken = true;
+                    }
+                }
+            }
+        }
+    }
+
+    EXPECT_FALSE(foundStopToken);
+    EXPECT_GE(provider->callCount(), 2);
 }
 
 TEST_F(HarnessTest, TruncatedStreamedToolCallIsRejectedBeforeExecution) {

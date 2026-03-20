@@ -1,10 +1,12 @@
 #include "agents/Agent.hpp"
+#include "AgentRegistry.hpp"
 #include "EnvLoader.hpp"
 #include "Events.hpp"
 #include "Message.hpp"
 #include "Panic.hpp"
 #include "agents/PurposeLoader.hpp"
 #include "persistence/Journaler.hpp"
+#include "persistence/ThreadManager.hpp"
 #include "providers/ProviderRegistry.hpp"
 #include "utils/FSUtil.hpp"
 #include "utils/InterruptibleSleep.hpp"
@@ -16,6 +18,7 @@
 #include <filesystem>
 #include <future>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
@@ -24,6 +27,67 @@
 namespace firmius::core {
 
 namespace {
+constexpr std::uint32_t kMissingToolCallIndex =
+    std::numeric_limits<std::uint32_t>::max();
+
+bool hasToolCallIndex(const ToolCallChunk &chunk) {
+  return chunk.index != kMissingToolCallIndex;
+}
+
+std::vector<ToolCallChunk>::iterator findMatchingToolCallChunk(
+    std::vector<ToolCallChunk> &accumulated, const ToolCallChunk &incoming) {
+  if (!incoming.id.empty()) {
+    auto byId = std::find_if(accumulated.begin(), accumulated.end(),
+                             [&](const ToolCallChunk &existing) {
+                               return existing.id == incoming.id;
+                             });
+    if (byId != accumulated.end()) {
+      return byId;
+    }
+  }
+
+  if (hasToolCallIndex(incoming)) {
+    auto byIndex = std::find_if(
+        accumulated.begin(), accumulated.end(), [&](const ToolCallChunk &existing) {
+          if (!hasToolCallIndex(existing) || existing.index != incoming.index) {
+            return false;
+          }
+          return incoming.id.empty() || existing.id.empty() ||
+                 existing.id == incoming.id;
+        });
+    if (byIndex != accumulated.end()) {
+      return byIndex;
+    }
+  }
+
+  return accumulated.end();
+}
+
+void mergeToolCallChunk(std::vector<ToolCallChunk> &accumulated,
+                        const ToolCallChunk &incoming,
+                        std::uint32_t syntheticIdSerial,
+                        std::uint32_t turnCount) {
+  auto it = findMatchingToolCallChunk(accumulated, incoming);
+  if (it == accumulated.end()) {
+    auto appended = incoming;
+    if (appended.id.empty()) {
+      appended.id = "call_" + std::to_string(turnCount) + "_" +
+                    std::to_string(syntheticIdSerial);
+    }
+    accumulated.push_back(std::move(appended));
+    return;
+  }
+
+  if (it->id.empty() && !incoming.id.empty()) {
+    it->id = incoming.id;
+  }
+  if (!hasToolCallIndex(*it) && hasToolCallIndex(incoming)) {
+    it->index = incoming.index;
+  }
+  it->nameDelta += incoming.nameDelta;
+  it->argsDelta += incoming.argsDelta;
+}
+
 bool shouldRetryProviderFailureAtAgentLayer(int httpStatus) {
   if (httpStatus < 0) {
     return false;
@@ -32,6 +96,152 @@ bool shouldRetryProviderFailureAtAgentLayer(int httpStatus) {
     return true;
   }
   return httpStatus == 408 || httpStatus == 409 || httpStatus == 425;
+}
+
+std::string threadStorageRootPath() {
+  if (const char *home = std::getenv("HOME")) {
+    return std::string(home) + "/.firmius/threads";
+  }
+  return ".firmius/threads";
+}
+
+bool planChunkNeedsFurtherWork(WorkChunkStatus status) {
+  return status != WorkChunkStatus::Done &&
+         status != WorkChunkStatus::Cancelled;
+}
+
+bool hasActivePlanWithPendingChunks(const AgentContext &context) {
+  if (!context.history || context.history->threadId.empty()) {
+    return false;
+  }
+
+  try {
+    ThreadManager tm(threadStorageRootPath());
+    ThreadMetadata metadata;
+    if (!tm.tryGetMetadata(context.history->threadId, metadata, nullptr) ||
+        metadata.activePlanId.empty()) {
+      return false;
+    }
+
+    const Plan activePlan =
+        tm.getPlan(context.history->threadId, metadata.activePlanId);
+    if (activePlan.status == PlanStatus::Done ||
+        activePlan.status == PlanStatus::Abandoned) {
+      return false;
+    }
+
+    return std::any_of(activePlan.chunks.begin(), activePlan.chunks.end(),
+                       [](const WorkChunk &chunk) {
+                         return planChunkNeedsFurtherWork(chunk.status);
+                       });
+  } catch (...) {
+    return false;
+  }
+}
+
+bool isExecutionalStatus(AgentStatus status) {
+  return status == AgentStatus::ExecutingTool ||
+         status == AgentStatus::Compacting;
+}
+
+std::string toLowerCopy(std::string value) {
+  std::transform(value.begin(), value.end(), value.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  return value;
+}
+
+bool containsAnyPhrase(const std::string &text,
+                       const std::vector<std::string> &phrases) {
+  for (const auto &phrase : phrases) {
+    if (!phrase.empty() && text.find(phrase) != std::string::npos) {
+      return true;
+    }
+  }
+  return false;
+}
+
+std::string latestUserText(const AgentContext &context) {
+  if (!context.history) {
+    return "";
+  }
+  for (auto turnIt = context.history->turns.rbegin();
+       turnIt != context.history->turns.rend(); ++turnIt) {
+    for (auto msgIt = turnIt->messages.rbegin();
+         msgIt != turnIt->messages.rend(); ++msgIt) {
+      if (msgIt->role != Role::User) {
+        continue;
+      }
+      for (const auto &part : msgIt->content) {
+        if (const auto *txt = std::get_if<TextContent>(&part)) {
+          if (!shared::StringUtil::trim(txt->text).empty()) {
+            return txt->text;
+          }
+        }
+      }
+    }
+  }
+  return "";
+}
+
+bool hasOpenExecutionIntent(const AgentContext &context) {
+  const std::string request = toLowerCopy(latestUserText(context));
+  if (request.empty()) {
+    return false;
+  }
+
+  const std::vector<std::string> executionPhrases = {
+      "implement",   "build",         "add feature", "add ",      "create ",
+      "fix ",        "refactor",      "patch",       "modify",    "change ",
+      "update ",     "write code",    "make changes","develop",   "continue working",
+      "continue the", "keep going",   "finish this", "ship",      "execute",
+      "run this task", "complete the task"};
+  const std::vector<std::string> executionContextPhrases = {
+      "codebase", "tests", "ctest", "compile", "bug", "feature", "hunk",
+      "implementation", "agent loop", "runtime", "harness"};
+  const std::vector<std::string> informationalPhrases = {
+      "what is", "what are", "why is", "why are", "how does", "explain",
+      "describe", "summarize", "summary", "tell me", "research", "find out"};
+
+  const bool hasExecutionVerb = containsAnyPhrase(request, executionPhrases);
+  const bool hasExecutionContext =
+      hasExecutionVerb || containsAnyPhrase(request, executionContextPhrases);
+  const bool isLikelyInformational =
+      containsAnyPhrase(request, informationalPhrases);
+  const bool isQuestion = request.find('?') != std::string::npos;
+
+  if (hasExecutionVerb) {
+    return true;
+  }
+  if (hasExecutionContext && !isLikelyInformational) {
+    return true;
+  }
+  if (isLikelyInformational && !hasExecutionContext) {
+    return false;
+  }
+  return !isQuestion && hasExecutionContext;
+}
+
+bool isDescendantAgentRunning(const std::string &candidateAgentId,
+                              const std::string &ancestorAgentId) {
+  if (candidateAgentId.empty() || ancestorAgentId.empty() ||
+      candidateAgentId == ancestorAgentId) {
+    return false;
+  }
+
+  auto candidate = AgentRegistry::instance().getAgent(candidateAgentId);
+  int depth = 0;
+  while (candidate && depth < 100) {
+    const auto &parentId = candidate->getContext().identity.parentId;
+    if (parentId.empty()) {
+      return false;
+    }
+    if (parentId == ancestorAgentId) {
+      return candidate->isRunning() || candidate->isBooting();
+    }
+    candidate = AgentRegistry::instance().getAgent(parentId);
+    depth++;
+  }
+  return false;
 }
 
 struct ToolCallValidationFailure {
@@ -270,9 +480,7 @@ void Agent::runImpl(const std::optional<std::string> &task,
         "\n\n# PROTOCOL STRICTNESS\n"
         "- If you are calling a tool, your message MUST contain ONLY the tool "
         "call JSON.\n"
-        "- Do NOT include any other text or thinking when calling a tool.\n"
-        "- If you emit any non-tool content, it is treated as your final "
-        "response; do not include tool calls in that turn.\n";
+        "- Do NOT include any other text or thinking when calling a tool.\n";
 
     std::string systemPrompt =
         PurposeLoader::composeSystemPrompt(persona, context, toolBlock) +
@@ -325,6 +533,8 @@ void Agent::runImpl(const std::optional<std::string> &task,
 
   int consecutiveProviderFailures = 0;
   const int maxProviderRetries = 3;
+  int consecutiveProseOnlyContinuationTurns = 0;
+  const int maxProseOnlyContinuationTurns = 1;
 
   while (!taskFinished && turnCount < maxTurns && !interrupted.load()) {
     // --- CHECK FOR CONTEXT COMPACTION ---
@@ -381,7 +591,7 @@ void Agent::runImpl(const std::optional<std::string> &task,
       bool sawContent = false;
       bool sawThinking = false;
       bool sawTool = false;
-      bool mixedContentAndTools = false;
+      std::uint32_t syntheticToolCallIdSerial = 0;
 
       // Token repetition detection for hallucination loops
       bool tokenLoopDetected = false;
@@ -400,9 +610,6 @@ void Agent::runImpl(const std::optional<std::string> &task,
 
         if (auto *txt = std::get_if<TextChunk>(&ev)) {
           onEvent(ev);
-          if (sawTool) {
-            mixedContentAndTools = true;
-          }
           // Treat pure-whitespace content as non-visible so tools can still
           // run.
           for (unsigned char c : txt->delta) {
@@ -435,30 +642,11 @@ void Agent::runImpl(const std::optional<std::string> &task,
             lastThinkingSignature = thk->signature;
           }
         } else if (auto *tcc = std::get_if<ToolCallChunk>(&ev)) {
-          if (sawContent) {
-            mixedContentAndTools = true;
-          }
           sawTool = true;
           // Emit immediately so TUI can show "Preparing" state
           onEvent(ev);
-          bool found = false;
-          for (auto &existing : accumulatedToolChunks) {
-            if (existing.index == tcc->index) {
-              existing.nameDelta += tcc->nameDelta;
-              existing.argsDelta += tcc->argsDelta;
-              if (!tcc->id.empty())
-                existing.id = tcc->id;
-              found = true;
-              break;
-            }
-          }
-          if (!found) {
-            auto newChunk = *tcc;
-            if (newChunk.id.empty())
-              newChunk.id = "call_" + std::to_string(turnCount) + "_" +
-                            std::to_string(tcc->index);
-            accumulatedToolChunks.push_back(newChunk);
-          }
+          mergeToolCallChunk(accumulatedToolChunks, *tcc,
+                             syntheticToolCallIdSerial++, turnCount);
         } else if (auto *met = std::get_if<AgentMetrics>(&ev)) {
           onEvent(ev);
           turnMetrics = *met;
@@ -484,11 +672,7 @@ void Agent::runImpl(const std::optional<std::string> &task,
       // ToolCallChunk events are now emitted immediately above
       // No need to re-emit buffered events
 
-      // If mixed content/tool output occurred, prefer tool calls and drop
-      // visible text.
-      if (mixedContentAndTools && !accumulatedToolChunks.empty()) {
-        fullResponse.clear();
-        sawContent = false;
+      if (sawTool) {
         turnStopReason = StopReason::ToolUse;
       } else if (sawContent) {
         accumulatedToolChunks.clear();
@@ -639,8 +823,55 @@ void Agent::runImpl(const std::optional<std::string> &task,
           throw std::runtime_error(
               "Provider returned empty response (timeout or model failure)");
         }
+
+        const bool hasPendingToolCalls = !context.state.pendingToolCalls.empty();
+        const bool hasBlockingProcesses = !getBlockingProcessIds().empty();
+        const bool hasExecutionStatus =
+            isExecutionalStatus(context.state.currentStatus);
+        const bool hasRunningOwnedBackgroundProcess =
+            std::any_of(context.state.ownedProcesses.begin(),
+                        context.state.ownedProcesses.end(),
+                        [&](const std::string &processId) {
+                          if (processId.empty()) {
+                            return false;
+                          }
+                          try {
+                            return inspectProcess(processId).running;
+                          } catch (...) {
+                            return false;
+                          }
+                        });
+
+        bool hasRunningDescendantSubagent = false;
+        if (!context.identity.id.empty()) {
+          for (const auto &agentId : AgentRegistry::instance().listAll()) {
+            if (isDescendantAgentRunning(agentId, context.identity.id)) {
+              hasRunningDescendantSubagent = true;
+              break;
+            }
+          }
+        }
+
+        const bool hasActivePlanWork = hasActivePlanWithPendingChunks(context);
+        const bool hasRequestContinuationIntent = hasOpenExecutionIntent(context);
+        const bool hasHarnessOwnedActiveWork =
+            hasPendingToolCalls || hasBlockingProcesses ||
+            hasRunningOwnedBackgroundProcess || hasRunningDescendantSubagent ||
+            hasActivePlanWork || hasExecutionStatus;
+        const bool shouldContinueAfterProseTurn =
+            hasHarnessOwnedActiveWork || hasRequestContinuationIntent;
+
+        if (shouldContinueAfterProseTurn &&
+            consecutiveProseOnlyContinuationTurns <
+                maxProseOnlyContinuationTurns) {
+          consecutiveProseOnlyContinuationTurns++;
+          context.state.currentStatus = AgentStatus::Idle;
+          continue;
+        }
+
         taskFinished = true;
       } else {
+        consecutiveProseOnlyContinuationTurns = 0;
         // --- State: ExecutingTool ---
         context.state.currentStatus = AgentStatus::ExecutingTool;
 

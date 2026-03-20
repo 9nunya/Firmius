@@ -21,6 +21,11 @@ TEST(ModelUtilTest, PrettifyNames) {
   EXPECT_EQ(PrettifyModelName("claude-opus-4-6-thinking"),
             "Claude Opus 4.6 Thinking"); // Based on prompt request
   EXPECT_EQ(PrettifyModelName("gemini-3.1-pro"), "Gemini 3.1 Pro");
+  EXPECT_EQ(PrettifyModelName("gpt-5.4"), "GPT 5.4");
+  EXPECT_EQ(PrettifyModelName("gpt-5.4-mini"), "GPT 5.4 Mini");
+  EXPECT_EQ(PrettifyModelName("gpt-5.3-codex"), "GPT 5.3 Codex");
+  EXPECT_EQ(PrettifyModelName("gpt-5.2-codex"), "GPT 5.2 Codex");
+  EXPECT_EQ(PrettifyModelName("gpt-5.1-codex-max"), "GPT 5.1 Codex Max");
   EXPECT_EQ(PrettifyModelName("gpt-5.1-codex-mini"), "GPT 5.1 Codex Mini");
 
   // Various 30+ tests

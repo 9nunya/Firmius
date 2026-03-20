@@ -111,6 +111,7 @@ TEST_F(PurposeLoaderTest, composeSystemPrompt_placeholders) {
     PurposeLoader::registerPlaceholder("{{CUSTOM_VAR}}", "hello-world");
 
     auto cfg = firmius::shared::ConfigLoader::instance().getConfig();
+    cfg.modelRouterCategories.clear();
     cfg.modelRouterCategories["code"] = {"openai", "gpt-5-codex", "thinking"};
     cfg.defaultRouteCategory = "code";
     firmius::shared::ConfigLoader::instance().updateConfig(cfg);
@@ -127,9 +128,11 @@ TEST_F(PurposeLoaderTest, composeSystemPrompt_placeholders) {
 }
 
 TEST(ModelHintResolverTest, DetectFamilyFromModelName) {
-    EXPECT_EQ(ModelHintResolver::detectFamily("openai", "gpt-5", ""), "gpt");
-    EXPECT_EQ(ModelHintResolver::detectFamily("foo", "openai/gpt-4o", ""), "gpt");
-    EXPECT_EQ(ModelHintResolver::detectFamily("foo", "o3-mini", ""), "gpt");
+  EXPECT_EQ(ModelHintResolver::detectFamily("openai", "gpt-5", ""), "gpt");
+  EXPECT_EQ(ModelHintResolver::detectFamily("openai", "gpt-5.4-mini", ""), "gpt");
+  EXPECT_EQ(ModelHintResolver::detectFamily("openai", "gpt-5.3-codex", ""), "gpt");
+  EXPECT_EQ(ModelHintResolver::detectFamily("foo", "openai/gpt-4o", ""), "gpt");
+  EXPECT_EQ(ModelHintResolver::detectFamily("foo", "o3-mini", ""), "gpt");
     EXPECT_EQ(ModelHintResolver::detectFamily("anthropic", "claude-3-7-sonnet", ""), "claude");
     EXPECT_EQ(ModelHintResolver::detectFamily("google", "gemini-2.5-pro", ""), "gemini");
     EXPECT_EQ(ModelHintResolver::detectFamily("openrouter", "qwen-2.5-coder", ""), "qwen");
@@ -270,6 +273,9 @@ TEST_F(PurposeLoaderTest, userOverrideHintingWinsOverBuiltinHinting) {
 
 TEST_F(PurposeLoaderTest, malformedHintingFileFailsGracefullyToGeneric) {
     setenv("FIRMIUS_HINTING_DIR", testHintingDir.c_str(), 1);
+    auto isolatedHome = testHintingDir / "isolated-home";
+    std::filesystem::create_directories(isolatedHome);
+    setenv("HOME", isolatedHome.c_str(), 1);
     std::filesystem::current_path(testHintingDir);
     {
         std::ofstream f(testHintingDir / "gpt.md");
@@ -357,6 +363,18 @@ TEST(PromptContractsTest, basePromptRequiresNarrativeTextBetweenToolEpisodes) {
               std::string::npos);
     EXPECT_NE(prompt.find("send it in a separate plain-text message between tool-call messages"),
               std::string::npos);
+    EXPECT_NE(prompt.find("Only tools that exist in the current Firmius tool list are real."),
+              std::string::npos);
+    EXPECT_NE(prompt.find("`apply_patch` is not a Firmius tool and not a shell command in this harness."),
+              std::string::npos);
+    EXPECT_NE(prompt.find("Do not call `apply_patch` through `process_execute`."),
+              std::string::npos);
+    EXPECT_NE(prompt.find("FILE_EDIT MODE DECISION (SHORT RULE):"),
+              std::string::npos);
+    EXPECT_NE(prompt.find("mix `content` with Hashline `edits` in one `file_edit` call"),
+              std::string::npos);
+    EXPECT_NE(prompt.find("MODE SELECTION EXAMPLES"),
+              std::string::npos);
 }
 
 TEST(PromptContractsTest, leadPromptRequiresAcceptanceBeforeDone) {
@@ -373,6 +391,12 @@ TEST(PromptContractsTest, leadPromptRequiresAcceptanceBeforeDone) {
     EXPECT_NE(prompt.find("After every `subagent_wait`, perform an explicit acceptance step before changing a chunk to `Done`."),
               std::string::npos);
     EXPECT_NE(prompt.find("Executors report implementation progress such as `Implemented`; the lead reviews and decides whether to accept, retry, audit, replan, or mark `Done`."),
+              std::string::npos);
+    EXPECT_NE(prompt.find("Chunks are delegated/reviewable work surfaces, not personal TODO notes."),
+              std::string::npos);
+    EXPECT_NE(prompt.find("If you intend to implement the next change personally, usually do that direct work without creating a chunk first."),
+              std::string::npos);
+    EXPECT_NE(prompt.find("After `chunk_add`, the normal next step is dispatch (`summon_subagent`) or waiting for dependency truth, not direct self-execution by lead."),
               std::string::npos);
 }
 
@@ -398,6 +422,16 @@ TEST(HintingContractsTest, builtinGptHintingDefendsAgainstAskingAndPrematureComp
     EXPECT_NE(prompt.find("file_read"), std::string::npos);
     EXPECT_NE(prompt.find("file_edit"), std::string::npos);
     EXPECT_NE(prompt.find("process_execute"), std::string::npos);
+    EXPECT_NE(prompt.find("Only tools listed in the active Firmius tool block are real."),
+              std::string::npos);
+    EXPECT_NE(prompt.find("`apply_patch` is not an available Firmius tool or shell command."),
+              std::string::npos);
+    EXPECT_NE(prompt.find("never use `process_execute` as an editing tunnel"),
+              std::string::npos);
+    EXPECT_NE(prompt.find("never mix `content` with Hashline `edits` in one `file_edit` call"),
+              std::string::npos);
+    EXPECT_NE(prompt.find("if you are personally doing the next direct change, do it without manufacturing a chunk"),
+              std::string::npos);
 }
 
 TEST(HintingContractsTest, builtinGeminiHintingDefendsAgainstNoToolAndOptimism) {
@@ -409,4 +443,14 @@ TEST(HintingContractsTest, builtinGeminiHintingDefendsAgainstNoToolAndOptimism) 
     EXPECT_NE(prompt.find("process_execute"), std::string::npos);
     EXPECT_NE(prompt.find("summon_subagent"), std::string::npos);
     EXPECT_NE(prompt.find("chunk_ready_for_execution"), std::string::npos);
+    EXPECT_NE(prompt.find("Only tools present in the active Firmius tool list are valid."),
+              std::string::npos);
+    EXPECT_NE(prompt.find("`apply_patch` is not a Firmius tool and not a shell command in this harness."),
+              std::string::npos);
+    EXPECT_NE(prompt.find("`process_execute` for verification or inspection, never as a file editing tunnel"),
+              std::string::npos);
+    EXPECT_NE(prompt.find("never mix `content` with Hashline `edits` in one `file_edit` call"),
+              std::string::npos);
+    EXPECT_NE(prompt.find("If you commit a chunk, treat it as a dispatch/review unit rather than a personal TODO note."),
+              std::string::npos);
 }

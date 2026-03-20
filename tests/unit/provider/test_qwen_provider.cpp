@@ -1,6 +1,7 @@
 #include "providers/QwenProvider.hpp"
 
 #include <gtest/gtest.h>
+#include <limits>
 #include <rapidjson/document.h>
 
 using firmius::provider::QwenProvider;
@@ -223,6 +224,69 @@ TEST(QwenProvider, MeaningfulStreamEventDetectsTextThinkingAndToolProgress) {
       StreamRetrying{1, 5, 500, 1000, "retry", "acct"}));
   EXPECT_FALSE(QwenProvider::isMeaningfulStreamEvent(
       StreamError{"boom", 500, "acct"}));
+}
+
+TEST(QwenProvider, MergeAccumulatedToolCallChunkReconstructsInterleavedParallelCalls) {
+  std::vector<ToolCallChunk> accumulated;
+
+  QwenProvider::mergeAccumulatedToolCallChunk(
+      accumulated, ToolCallChunk{"call-1", 0, "chunk_add", ""});
+  QwenProvider::mergeAccumulatedToolCallChunk(
+      accumulated, ToolCallChunk{"call-2", 1, "chunk_add", ""});
+
+  ToolCallChunk call1Args;
+  call1Args.id = "call-1";
+  call1Args.argsDelta = R"({"plan_id":"plan-1","title":"A"})";
+  QwenProvider::mergeAccumulatedToolCallChunk(accumulated, call1Args);
+
+  ToolCallChunk call2Args;
+  call2Args.id = "call-2";
+  call2Args.argsDelta = R"({"plan_id":"plan-1","title":"B"})";
+  QwenProvider::mergeAccumulatedToolCallChunk(accumulated, call2Args);
+
+  ASSERT_EQ(accumulated.size(), 2u);
+  EXPECT_EQ(accumulated[0].id, "call-1");
+  EXPECT_EQ(accumulated[0].nameDelta, "chunk_add");
+  EXPECT_EQ(accumulated[0].argsDelta, R"({"plan_id":"plan-1","title":"A"})");
+  EXPECT_EQ(accumulated[1].id, "call-2");
+  EXPECT_EQ(accumulated[1].nameDelta, "chunk_add");
+  EXPECT_EQ(accumulated[1].argsDelta, R"({"plan_id":"plan-1","title":"B"})");
+
+  EXPECT_FALSE(
+      QwenProvider::validateCompletedToolCallBatch(accumulated).has_value());
+}
+
+TEST(QwenProvider, MergeAccumulatedToolCallChunkHandlesArgsBeforeName) {
+  std::vector<ToolCallChunk> accumulated;
+
+  ToolCallChunk argsFirst;
+  argsFirst.id = "call-1";
+  argsFirst.argsDelta = R"({"path":"ASCII.txt"})";
+  QwenProvider::mergeAccumulatedToolCallChunk(accumulated, argsFirst);
+  QwenProvider::mergeAccumulatedToolCallChunk(
+      accumulated, ToolCallChunk{"call-1", 0, "file_read", ""});
+
+  ASSERT_EQ(accumulated.size(), 1u);
+  EXPECT_EQ(accumulated[0].id, "call-1");
+  EXPECT_EQ(accumulated[0].nameDelta, "file_read");
+  EXPECT_EQ(accumulated[0].argsDelta, R"({"path":"ASCII.txt"})");
+}
+
+TEST(QwenProvider,
+     MergeAccumulatedToolCallChunkDoesNotMergeAmbiguousChunksWithoutIdOrIndex) {
+  std::vector<ToolCallChunk> accumulated;
+
+  ToolCallChunk first;
+  first.nameDelta = "chunk_add";
+  ToolCallChunk second;
+  second.argsDelta = R"({"plan_id":"plan-1","title":"A"})";
+
+  QwenProvider::mergeAccumulatedToolCallChunk(accumulated, first);
+  QwenProvider::mergeAccumulatedToolCallChunk(accumulated, second);
+
+  ASSERT_EQ(accumulated.size(), 2u);
+  EXPECT_EQ(accumulated[0].index, std::numeric_limits<std::uint32_t>::max());
+  EXPECT_EQ(accumulated[1].index, std::numeric_limits<std::uint32_t>::max());
 }
 
 TEST(QwenProvider, ValidateCompletedToolCallBatchFlagsIncompleteArgs) {

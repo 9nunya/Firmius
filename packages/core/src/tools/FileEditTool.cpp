@@ -336,6 +336,22 @@ sanitizeReplacementLines(const FileEditOperationInput &edit,
   return sanitized;
 }
 
+bool hasMeaningfulHashlineEdits(const std::vector<FileEditOperationInput> &edits) {
+  return std::any_of(edits.begin(), edits.end(), [](const auto &edit) {
+    return !edit.op.empty() || !edit.start_anchor.empty() ||
+           !edit.end_anchor.empty() || !edit.anchor.empty() ||
+           !edit.new_lines.empty();
+  });
+}
+
+bool hasMeaningfulLegacyReplace(const FileEditInput &input) {
+  if (!input.has_old_string || !input.has_new_string) {
+    return false;
+  }
+
+  return !input.old_string.empty() && !input.new_string.empty();
+}
+
 void stripBoundaryEchoes(std::vector<std::string> &newLines,
                          const std::vector<std::string> &lines, int startIndex,
                          int endIndexExclusive,
@@ -795,9 +811,9 @@ shared::ToolResult FileEditTool::execute(const FileEditInput &input,
       ctx.agent.getEnvironment()->getWorkspace().resolvePath(input.path);
 
   const bool fileExists = ctx.host.exists(absolutePath);
-  const bool hasAnchorEdits = !input.edits.empty();
+  const bool hasAnchorEdits = hasMeaningfulHashlineEdits(input.edits);
   const bool hasOverwrite = input.has_content;
-  const bool hasLegacyReplace = input.has_old_string && input.has_new_string;
+  const bool hasLegacyReplace = hasMeaningfulLegacyReplace(input);
   const int modeCount =
       static_cast<int>(hasAnchorEdits) + static_cast<int>(hasOverwrite) +
       static_cast<int>(hasLegacyReplace);

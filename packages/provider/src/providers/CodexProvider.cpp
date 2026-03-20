@@ -834,6 +834,22 @@ private:
 CodexProvider::CodexProvider() : BaseOAuthProvider(kProviderId) {}
 
 std::map<std::string, ModelInfo> CodexProvider::getStaticModels() {
+  std::vector<ModelVariant> gpt54Variants = {
+      {"none", R"({"effort":"none","summary":"auto","verbosity":"medium"})"},
+      {"low", R"({"effort":"low","summary":"auto","verbosity":"medium"})"},
+      {"medium",
+       R"({"effort":"medium","summary":"auto","verbosity":"medium"})"},
+      {"high",
+       R"({"effort":"high","summary":"detailed","verbosity":"medium"})"},
+      {"xhigh",
+       R"({"effort":"xhigh","summary":"detailed","verbosity":"medium"})"}};
+
+  std::vector<ModelVariant> gpt54MiniVariants = {
+      {"medium",
+       R"({"effort":"medium","summary":"auto","verbosity":"medium"})"},
+      {"high",
+       R"({"effort":"high","summary":"detailed","verbosity":"medium"})"}};
+
   std::vector<ModelVariant> gpt52Variants = {
       {"none", R"({"effort":"none","summary":"auto","verbosity":"medium"})"},
       {"low", R"({"effort":"low","summary":"auto","verbosity":"medium"})"},
@@ -875,6 +891,8 @@ std::map<std::string, ModelInfo> CodexProvider::getStaticModels() {
       {"high",
        R"({"effort":"high","summary":"detailed","verbosity":"medium"})"}};
 
+  std::vector<ModelVariant> gpt53CodexVariants = codexVariants;
+
   std::vector<ModelVariant> gpt51Variants = {
       {"none", R"({"effort":"none","summary":"auto","verbosity":"medium"})"},
       {"low", R"({"effort":"low","summary":"auto","verbosity":"low"})"},
@@ -888,6 +906,27 @@ std::map<std::string, ModelInfo> CodexProvider::getStaticModels() {
             .contextWindow = kDefaultContextWindow,
             .modalities = {"text", "image"},
             .variants = gpt52Variants,
+            .supportsReasoning = true}},
+          {"gpt-5.4",
+           {.id = "gpt-5.4",
+            .provider = kProviderId,
+            .contextWindow = kDefaultContextWindow,
+            .modalities = {"text", "image"},
+            .variants = gpt54Variants,
+            .supportsReasoning = true}},
+          {"gpt-5.4-mini",
+           {.id = "gpt-5.4-mini",
+            .provider = kProviderId,
+            .contextWindow = kDefaultContextWindow,
+            .modalities = {"text", "image"},
+            .variants = gpt54MiniVariants,
+            .supportsReasoning = true}},
+          {"gpt-5.3-codex",
+           {.id = "gpt-5.3-codex",
+            .provider = kProviderId,
+            .contextWindow = kDefaultContextWindow,
+            .modalities = {"text", "image"},
+            .variants = gpt53CodexVariants,
             .supportsReasoning = true}},
           {"gpt-5.2-codex",
            {.id = "gpt-5.2-codex",
@@ -1085,6 +1124,12 @@ std::string CodexProvider::normalizeModelId(const std::string &modelId) {
     normalized = normalized.substr(slashPos + 1);
   normalized = StringUtil::toLower(StringUtil::trim(normalized));
 
+  if (normalized.find("gpt-5.4-mini") != std::string::npos)
+    return "gpt-5.4-mini";
+  if (normalized.find("gpt-5.4") != std::string::npos)
+    return "gpt-5.4";
+  if (normalized.find("gpt-5.3-codex") != std::string::npos)
+    return "gpt-5.3-codex";
   if (normalized.find("gpt-5.2-codex") != std::string::npos)
     return "gpt-5.2-codex";
   if (normalized.find("gpt-5.2") != std::string::npos)
@@ -1126,17 +1171,20 @@ std::string CodexProvider::resolveEffort(const std::string &modelId) {
 
 bool CodexProvider::supportsNoneEffort(const std::string &modelId) {
   std::string normalized = normalizeModelId(modelId);
-  return normalized == "gpt-5.2" || normalized == "gpt-5.1";
+  return normalized == "gpt-5.4" || normalized == "gpt-5.2" ||
+         normalized == "gpt-5.1";
 }
 
 bool CodexProvider::supportsXhighEffort(const std::string &modelId) {
   std::string normalized = normalizeModelId(modelId);
-  return normalized == "gpt-5.2" || normalized == "gpt-5.2-codex" ||
+  return normalized == "gpt-5.4" || normalized == "gpt-5.2" ||
+         normalized == "gpt-5.2-codex" ||
          normalized == "gpt-5.1-codex-max";
 }
 
 bool CodexProvider::isCodexMini(const std::string &modelId) {
-  return normalizeModelId(modelId) == "gpt-5.1-codex-mini";
+  std::string normalized = normalizeModelId(modelId);
+  return normalized == "gpt-5.1-codex-mini" || normalized == "gpt-5.4-mini";
 }
 
 std::string CodexProvider::getQuotaKey(const std::string &modelId) {

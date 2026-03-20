@@ -184,6 +184,48 @@ rapidjson::Document createFileEditJson(
   return doc;
 }
 
+void addFileEditEdits(rapidjson::Document &doc,
+                      const std::vector<std::map<std::string, std::string>> &edits) {
+  auto &alloc = doc.GetAllocator();
+  rapidjson::Value editArray(rapidjson::kArrayType);
+  for (const auto &editFields : edits) {
+    rapidjson::Value editObj(rapidjson::kObjectType);
+    rapidjson::Value newLines(rapidjson::kArrayType);
+
+    for (const auto &[key, value] : editFields) {
+      if (key == "new_lines") {
+        std::stringstream ss(value);
+        std::string line;
+        while (std::getline(ss, line, '\n')) {
+          newLines.PushBack(makeJsonString(line, alloc), alloc);
+        }
+        continue;
+      }
+      editObj.AddMember(makeJsonString(key, alloc), makeJsonString(value, alloc),
+                        alloc);
+    }
+
+    if (!newLines.Empty()) {
+      editObj.AddMember("new_lines", newLines, alloc);
+    }
+    editArray.PushBack(editObj, alloc);
+  }
+
+  doc.AddMember("edits", editArray, alloc);
+}
+
+void addFileEditLegacyNoise(rapidjson::Document &doc,
+                            const std::string &oldString = "",
+                            const std::string &newString = "",
+                            bool replaceAll = false,
+                            float fuzzyThreshold = 0.0f) {
+  auto &alloc = doc.GetAllocator();
+  doc.AddMember("old_string", makeJsonString(oldString, alloc), alloc);
+  doc.AddMember("new_string", makeJsonString(newString, alloc), alloc);
+  doc.AddMember("replace_all", replaceAll, alloc);
+  doc.AddMember("fuzzy_threshold", fuzzyThreshold, alloc);
+}
+
 class FileReadToolTest : public ::testing::Test {
 protected:
   FileReadTool tool;
@@ -1006,6 +1048,126 @@ TEST_F(FileEditAnchorToolTest, overwriteExistingFileIsRejected) {
             std::string::npos);
 }
 
+TEST_F(FileEditAnchorToolTest,
+       contentAcceptsEmptyEditsAndDefaultLegacyTransportNoise) {
+  const std::string path = "/tmp/work/file.txt";
+
+  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(false));
+  EXPECT_CALL(mockHost, writeFile(path, _)).WillOnce(Invoke(
+      [this](const std::string &, const std::vector<uint8_t> &data) {
+        capturedWrite.assign(data.begin(), data.end());
+      }));
+
+  auto json = createJsonInput({{"path", "file.txt"}, {"content", "replacement"}});
+  addFileEditEdits(json, {});
+  addFileEditLegacyNoise(json, "", "", false, 0.0f);
+
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+  ITool *itool = &tool;
+  auto result = itool->execute(json, ctx);
+
+  EXPECT_TRUE(result.success);
+  EXPECT_EQ(capturedWrite, "replacement");
+  EXPECT_NE(result.data.find("\"mode\":\"overwrite\""), std::string::npos);
+}
+
+TEST_F(FileEditAnchorToolTest,
+       contentAcceptsDefaultLegacyFlagsWithoutRealStrings) {
+  const std::string path = "/tmp/work/file.txt";
+
+  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(false));
+  EXPECT_CALL(mockHost, writeFile(path, _)).WillOnce(Invoke(
+      [this](const std::string &, const std::vector<uint8_t> &data) {
+        capturedWrite.assign(data.begin(), data.end());
+      }));
+
+  auto json = createJsonInput({{"path", "file.txt"}, {"content", "replacement"}});
+  addFileEditLegacyNoise(json, "", "", false, 0.0f);
+
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+  ITool *itool = &tool;
+  auto result = itool->execute(json, ctx);
+
+  EXPECT_TRUE(result.success);
+  EXPECT_EQ(capturedWrite, "replacement");
+  EXPECT_NE(result.data.find("\"mode\":\"overwrite\""), std::string::npos);
+}
+
+TEST_F(FileEditAnchorToolTest, contentRejectsNonEmptyHashlineEdits) {
+  const std::string path = "/tmp/work/file.txt";
+
+  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(false));
+  EXPECT_CALL(mockHost, writeFile(_, _)).Times(0);
+
+  auto json = createJsonInput({{"path", "file.txt"}, {"content", "replacement"}});
+  addFileEditEdits(json, {{{"op", "insert_after"},
+                           {"anchor", "1#abcd"},
+                           {"new_lines", "inserted"}}});
+  addFileEditLegacyNoise(json, "", "", false, 0.0f);
+
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+  ITool *itool = &tool;
+  auto result = itool->execute(json, ctx);
+
+  EXPECT_FALSE(result.success);
+  EXPECT_NE(result.error.find("exactly one editing mode"), std::string::npos);
+}
+
+TEST_F(FileEditAnchorToolTest, contentRejectsRealLegacyReplacement) {
+  const std::string path = "/tmp/work/file.txt";
+
+  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(false));
+  EXPECT_CALL(mockHost, writeFile(_, _)).Times(0);
+
+  auto json = createJsonInput({{"path", "file.txt"}, {"content", "replacement"}});
+  addFileEditLegacyNoise(json, "old text", "new text", false, 0.0f);
+
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+  ITool *itool = &tool;
+  auto result = itool->execute(json, ctx);
+
+  EXPECT_FALSE(result.success);
+  EXPECT_NE(result.error.find("exactly one editing mode"), std::string::npos);
+}
+
+TEST_F(FileEditAnchorToolTest, emptyLegacyDefaultsDoNotActivateLegacyMode) {
+  const std::string path = "/tmp/work/file.txt";
+
+  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(false));
+
+  auto json = createJsonInput({{"path", "file.txt"}});
+  addFileEditLegacyNoise(json, "", "", false, 0.0f);
+
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+  ITool *itool = &tool;
+  auto result = itool->execute(json, ctx);
+
+  EXPECT_FALSE(result.success);
+  EXPECT_NE(result.error.find("Missing edits, content, or legacy replacement parameters."),
+            std::string::npos);
+}
+
+TEST_F(FileEditAnchorToolTest, hashlineEditsStillWorkWithoutNoise) {
+  const std::string path = "/tmp/work/file.txt";
+  const std::string original = "alpha\nbeta\n";
+
+  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
+  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
+
+  auto json = createFileEditJson(
+      "file.txt",
+      {{{"op", "insert_after"},
+        {"anchor", anchor(1, "alpha")},
+        {"new_lines", "inserted"}}});
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+
+  ITool *itool = &tool;
+  auto result = itool->execute(json, ctx);
+
+  EXPECT_TRUE(result.success);
+  EXPECT_EQ(capturedWrite, "alpha\ninserted\nbeta\n");
+}
+
 TEST_F(FileEditAnchorToolTest, mixingEditModesIsRejected) {
   const std::string path = "/tmp/work/file.txt";
 
@@ -1109,6 +1271,18 @@ TEST_F(ProcessExecuteToolTest, timeoutHandling) {
 
   EXPECT_TRUE(result.success);
   EXPECT_NE(result.data.find("Timeout"), std::string::npos);
+}
+
+TEST_F(ProcessExecuteToolTest, blocksForeignApplyPatchCommand) {
+  auto json = createJsonInput({{"command", "apply_patch <<'PATCH'\n*** Begin Patch\n*** End Patch\nPATCH"}});
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+
+  ITool *itool = &tool;
+  auto result = itool->execute(json, ctx);
+
+  EXPECT_FALSE(result.success);
+  EXPECT_THAT(result.error, HasSubstr("'apply_patch' is not available in Firmius"));
+  EXPECT_THAT(result.error, HasSubstr("Use file_read + file_edit instead"));
 }
 
 class ListDirectoryToolTest : public ::testing::Test {

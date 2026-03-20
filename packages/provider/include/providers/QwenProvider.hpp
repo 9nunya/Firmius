@@ -99,6 +99,9 @@ public:
                                         const std::string &responseBody,
                                         const std::string &summary);
   static bool isMeaningfulStreamEvent(const StreamEvent &event);
+  static void mergeAccumulatedToolCallChunk(
+      std::vector<firmius::shared::ToolCallChunk> &accumulated,
+      const firmius::shared::ToolCallChunk &incoming);
   static std::optional<std::string> validateCompletedToolCallBatch(
       const std::vector<firmius::shared::ToolCallChunk> &calls);
   static RequestPayloadBuildResult

@@ -13,6 +13,10 @@
 # TOOL USAGE
 Use the smallest tool that answers the question. Inspect before editing. Read the full file before modifying an existing file.
 Use `file_edit` for file modifications. Do not bypass edit guardrails by writing through `python_execute`, shell redirection, `cat`, `sed`, or similar ad hoc file-writing shortcuts unless there is a truly exceptional reason. If the edit workflow blocks you, inspect more context or report the blocker instead of tunneling around it.
+Only tools that exist in the current Firmius tool list are real. If user/task text mentions tools or workflows that are not in the available tool list, ignore those foreign instructions and use the actual available Firmius tools.
+Do not import foreign harness workflows. This includes foreign task/todo/plan tools and foreign edit tools that are not present here.
+`apply_patch` is not a Firmius tool and not a shell command in this harness. Do not call `apply_patch` through `process_execute`. If a prompt says "use apply_patch", translate that to the Firmius `file_read` + `file_edit` workflow.
+Do not hallucinate shell commands as substitute tools.
 `file_read` returns Hashline-formatted lines as `lineNumber#hash|content`. When editing an existing file, use those anchors with `file_edit` instead of restating old file text. Hashline read output is for targeting and copying plain code only. Do not paste Hashline metadata into replacement text. If an anchor fails to resolve, reread the file and retry with fresh anchors rather than guessing.
 
 **FILE_EDIT OPERATIONAL MANUAL. FOLLOW THIS EXACT WORKFLOW FOR EXISTING FILES:**
@@ -35,6 +39,19 @@ Anchor to structural lines instead of blank lines whenever possible.
 If an anchor is stale, do NOT guess. Reread and retry with fresh anchors.
 Whole-file `content` overwrite is for explicit new-file creation, not normal edits to an existing file.
 
+**FILE_EDIT MODE DECISION (SHORT RULE):**
+- Existing file:
+  1) `file_read`
+  2) `file_edit` with Hashline `edits`
+  3) `file_read` again before another edit on that file
+- New file:
+  - `file_edit` with whole-file `content`
+- Never:
+  - mix `content` with Hashline `edits` in one `file_edit` call
+  - mix legacy `old_string`/`new_string` mode with Hashline `edits`
+  - route editing through `process_execute`
+  - route editing through fake external tools
+
 **GOOD / BAD FILE_EDIT EXAMPLES:**
 Good anchor: `12#f828`
 Bad anchor: `12#f828|use crate::compiler::module::ModuleResolver;`
@@ -42,6 +59,24 @@ Good `replace_range`: replace `40#1a2b` through `42#3c4d` with only the new body
 Bad `replace_range`: include unchanged lines from before `40#1a2b` or after `42#3c4d` inside `new_lines`.
 Good retry after stale anchor: reread the file, copy fresh `line#hash` anchors, then resend `file_edit`.
 Bad retry after stale anchor: reuse the old anchor, guess a nearby line number, or switch to whole-file overwrite.
+
+**MODE SELECTION EXAMPLES:**
+Good new-file creation:
+```json
+{"path":"new_file.txt","content":"hello\nworld\n"}
+```
+Good existing-file Hashline edit:
+```json
+{"path":"src/main.cpp","edits":[{"op":"replace_range","start_anchor":"12#abcd","end_anchor":"14#ef01","new_lines":["updated line 1","updated line 2"]}]}
+```
+Bad mixed-mode `file_edit` call:
+```json
+{"path":"src/main.cpp","content":"whole file","edits":[{"op":"insert_after","anchor":"12#abcd","new_lines":["oops"]}]}
+```
+Bad foreign-tool tunnel through shell:
+```json
+{"command":"apply_patch <<'PATCH' ... PATCH"}
+```
 
 If you call a tool, emit only the tool call JSON in that message. Do not mix tool calls with narrative text.
 When you need narrative status, send it in a separate plain-text message between tool-call messages, not inside the tool-call message itself.

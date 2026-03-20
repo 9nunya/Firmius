@@ -7,6 +7,7 @@
 #include "Metrics.hpp"
 
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <variant>
 
@@ -42,7 +43,9 @@ struct ThinkingChunk {
 struct ToolCallChunk {
   std::string
       id; ///< Unique ID for the tool call (usually sent in first chunk).
-  std::uint32_t index;   ///< Index of the tool call in parallel execution.
+  std::uint32_t index =
+      std::numeric_limits<std::uint32_t>::max(); ///< Index of the tool call in
+                                                  ///< parallel execution.
   std::string nameDelta; ///< Partial name string.
   std::string argsDelta; ///< Partial arguments JSON string.
 

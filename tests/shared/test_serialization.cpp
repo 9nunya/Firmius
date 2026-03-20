@@ -6,6 +6,7 @@
 #include "Serialization.hpp"
 #include <gtest/gtest.h>
 
+#include <limits>
 #include <map>
 #include <optional>
 #include <rapidjson/document.h>
@@ -413,6 +414,11 @@ TEST(Serialization, StreamEventRoundtrip) {
 
   EXPECT_EQ(std::get<ToolCallChunk>(toolEvent),
             std::get<ToolCallChunk>(roundtrippedTool));
+}
+
+TEST(Serialization, ToolCallChunkDefaultsToMissingIndexSentinel) {
+  ToolCallChunk chunk;
+  EXPECT_EQ(chunk.index, std::numeric_limits<std::uint32_t>::max());
 }
 
 TEST(Serialization, OptionalFields) {

@@ -4,6 +4,7 @@
 #include "ThemeManager.hpp"
 #include "harness/Harness.hpp"
 #include "modals/ModalLayout.hpp"
+#include "utils/ModelUtil.hpp"
 #include <ftxui/component/component.hpp>
 #include <ftxui/dom/elements.hpp>
 #include <memory>
@@ -38,6 +39,12 @@ ftxui::Component ConfigDisplayModal::create(TuiState &state) {
   std::string providerId = config.defaultProviderId;
   std::string modelId = config.defaultModelId;
   std::string modelVariant = config.defaultModelVariant;
+  std::string modelLabel = firmius::shared::PrettifyModelName(modelId);
+  if (modelLabel.empty() || modelLabel == modelId) {
+    modelLabel = modelId;
+  } else {
+    modelLabel += " (" + modelId + ")";
+  }
 
   auto agentId = h.focusedAgentId();
   auto agent = agentId.empty()
@@ -48,6 +55,12 @@ ftxui::Component ConfigDisplayModal::create(TuiState &state) {
     providerId = agentConfig.providerId;
     modelId = agentConfig.modelId;
     modelVariant = agentConfig.modelVariant;
+    modelLabel = firmius::shared::PrettifyModelName(modelId);
+    if (modelLabel.empty() || modelLabel == modelId) {
+      modelLabel = modelId;
+    } else {
+      modelLabel += " (" + modelId + ")";
+    }
   }
 
   std::vector<std::string> apiKeyNames;
@@ -74,7 +87,7 @@ ftxui::Component ConfigDisplayModal::create(TuiState &state) {
     rows.push_back(ftxui::hbox(
         {ftxui::text("Model:       ") | ftxui::bold |
              ftxui::color(theme.modals.fg),
-         ftxui::text(modelId) | ftxui::color(theme.modals.highlight_fg)}));
+         ftxui::text(modelLabel) | ftxui::color(theme.modals.highlight_fg)}));
     rows.push_back(ftxui::hbox(
         {ftxui::text("Variant:     ") | ftxui::bold |
              ftxui::color(theme.modals.fg),
