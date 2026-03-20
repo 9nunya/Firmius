@@ -56,5 +56,21 @@ TEST(ProcessExecuteToolBlockTest, LiveOutputDoesNotShowExit) {
   EXPECT_EQ(output.find("[exit"), std::string::npos);
 }
 
+TEST(ProcessExecuteToolBlockTest, ProcessSpawnRendersLiveBackgroundOutput) {
+  auto view = std::make_shared<ToolCallView>();
+  view->name = "process_spawn";
+  view->args = R"({"command":"tail -f app.log"})";
+  view->phase = ToolPhase::BackgroundRunning;
+  view->success = true;
+  view->process_is_background = true;
+  view->live_process_output = "line 1\n";
+  view->result = R"({"process_id":"proc-1"})";
+
+  std::string output = render(view);
+  EXPECT_NE(output.find("tail -f app.log"), std::string::npos);
+  EXPECT_NE(output.find("line 1"), std::string::npos);
+  EXPECT_NE(output.find("moved to background"), std::string::npos);
+}
+
 } // namespace
 } // namespace firmius::tui

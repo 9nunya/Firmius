@@ -415,6 +415,55 @@ HostCreationOptions hostCreationOptionsFromJson(const rapidjson::Value &v) {
   return o;
 }
 
+rapidjson::Value workTaskToJson(const WorkTask &task,
+                                rapidjson::Document::AllocatorType &a) {
+  rapidjson::Value v(rapidjson::kObjectType);
+  v.AddMember("id", rapidjson::Value(task.id.c_str(), a), a);
+  v.AddMember("title", rapidjson::Value(task.title.c_str(), a), a);
+  v.AddMember("goal", rapidjson::Value(task.goal.c_str(), a), a);
+  v.AddMember("status",
+              rapidjson::Value(workChunkStatusToString(task.status).c_str(), a),
+              a);
+  v.AddMember("notes", rapidjson::Value(task.notes.c_str(), a), a);
+  v.AddMember("verification_condition",
+              rapidjson::Value(task.verificationCondition.c_str(), a), a);
+  v.AddMember("assigned_worker_id",
+              rapidjson::Value(task.assignedWorkerId.c_str(), a), a);
+  v.AddMember("created_at", task.createdAt, a);
+  v.AddMember("updated_at", task.updatedAt, a);
+  return v;
+}
+
+WorkTask workTaskFromJsonValue(const rapidjson::Value &v) {
+  WorkTask task;
+  task.id =
+      v.HasMember("id") && v["id"].IsString() ? v["id"].GetString() : "";
+  task.title =
+      v.HasMember("title") && v["title"].IsString() ? v["title"].GetString() : "";
+  task.goal =
+      v.HasMember("goal") && v["goal"].IsString() ? v["goal"].GetString() : "";
+  task.status = v.HasMember("status") && v["status"].IsString()
+                    ? stringToWorkChunkStatus(v["status"].GetString())
+                    : WorkChunkStatus::Ready;
+  task.notes =
+      v.HasMember("notes") && v["notes"].IsString() ? v["notes"].GetString() : "";
+  task.verificationCondition =
+      v.HasMember("verification_condition") && v["verification_condition"].IsString()
+          ? v["verification_condition"].GetString()
+          : "";
+  task.assignedWorkerId =
+      v.HasMember("assigned_worker_id") && v["assigned_worker_id"].IsString()
+          ? v["assigned_worker_id"].GetString()
+          : "";
+  task.createdAt = v.HasMember("created_at") && v["created_at"].IsUint64()
+                       ? v["created_at"].GetUint64()
+                       : 0;
+  task.updatedAt = v.HasMember("updated_at") && v["updated_at"].IsUint64()
+                       ? v["updated_at"].GetUint64()
+                       : 0;
+  return task;
+}
+
 rapidjson::Value workChunkToJson(const WorkChunk &chunk,
                                  rapidjson::Document::AllocatorType &a) {
   rapidjson::Value v(rapidjson::kObjectType);
@@ -442,6 +491,33 @@ rapidjson::Value workChunkToJson(const WorkChunk &chunk,
               rapidjson::Value(chunk.reviewSummary.c_str(), a), a);
   v.AddMember("created_at", chunk.createdAt, a);
   v.AddMember("updated_at", chunk.updatedAt, a);
+
+  // V2 richer chunk spec fields
+  rapidjson::Value filesToRead(rapidjson::kArrayType);
+  for (const auto &f : chunk.filesToRead) {
+    filesToRead.PushBack(rapidjson::Value(f.c_str(), a), a);
+  }
+  v.AddMember("files_to_read", filesToRead, a);
+
+  rapidjson::Value filesToTouch(rapidjson::kArrayType);
+  for (const auto &f : chunk.filesToTouch) {
+    filesToTouch.PushBack(rapidjson::Value(f.c_str(), a), a);
+  }
+  v.AddMember("files_to_touch", filesToTouch, a);
+
+  v.AddMember("cwd", rapidjson::Value(chunk.cwd.c_str(), a), a);
+  v.AddMember("verification_condition",
+              rapidjson::Value(chunk.verificationCondition.c_str(), a), a);
+  v.AddMember("handoff_notes",
+              rapidjson::Value(chunk.handoffNotes.c_str(), a), a);
+
+  // V2 task structure
+  rapidjson::Value tasks(rapidjson::kArrayType);
+  for (const auto &task : chunk.tasks) {
+    tasks.PushBack(workTaskToJson(task, a), a);
+  }
+  v.AddMember("tasks", tasks, a);
+
   return v;
 }
 
@@ -520,6 +596,41 @@ WorkChunk workChunkFromJsonValue(const rapidjson::Value &v) {
                         : (v.HasMember("updatedAt") && v["updatedAt"].IsUint64()
                                ? v["updatedAt"].GetUint64()
                                : 0);
+
+  // V2 richer chunk spec fields
+  if (v.HasMember("files_to_read") && v["files_to_read"].IsArray()) {
+    for (const auto &f : v["files_to_read"].GetArray()) {
+      if (f.IsString()) {
+        chunk.filesToRead.push_back(f.GetString());
+      }
+    }
+  }
+  if (v.HasMember("files_to_touch") && v["files_to_touch"].IsArray()) {
+    for (const auto &f : v["files_to_touch"].GetArray()) {
+      if (f.IsString()) {
+        chunk.filesToTouch.push_back(f.GetString());
+      }
+    }
+  }
+  chunk.cwd = v.HasMember("cwd") && v["cwd"].IsString() ? v["cwd"].GetString() : "";
+  chunk.verificationCondition =
+      v.HasMember("verification_condition") && v["verification_condition"].IsString()
+          ? v["verification_condition"].GetString()
+          : "";
+  chunk.handoffNotes =
+      v.HasMember("handoff_notes") && v["handoff_notes"].IsString()
+          ? v["handoff_notes"].GetString()
+          : "";
+
+  // V2 task structure
+  if (v.HasMember("tasks") && v["tasks"].IsArray()) {
+    for (const auto &taskValue : v["tasks"].GetArray()) {
+      if (taskValue.IsObject()) {
+        chunk.tasks.push_back(workTaskFromJsonValue(taskValue));
+      }
+    }
+  }
+
   return chunk;
 }
 
@@ -1619,6 +1730,22 @@ AgentConfig agentConfigFromJsonValue(const rapidjson::Value &v) {
   if (v.HasMember("persistHistory"))
     cfg.persistHistory = v["persistHistory"].GetBool();
   return cfg;
+}
+
+// WorkTask serialization externs
+rapidjson::Document toJson(const WorkTask &task) {
+  rapidjson::Document d;
+  d.SetObject();
+  auto &a = d.GetAllocator();
+  rapidjson::Value v = workTaskToJson(task, a);
+  for (auto &m : v.GetObject()) {
+    d.AddMember(m.name, m.value, a);
+  }
+  return d;
+}
+
+WorkTask workTaskFromJson(const rapidjson::Value &v) {
+  return workTaskFromJsonValue(v);
 }
 
 std::string serializeToString(const AgentContext &ctx) {

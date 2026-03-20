@@ -303,6 +303,54 @@ private:
     std::atomic<int> callCount_{0};
 };
 
+class StopTokenToolCallProvider : public firmius::provider::IProvider {
+public:
+    std::string getId() const override { return "stop-token-tool-call-provider"; }
+
+    void stream(const AgentHistory&, const firmius::provider::ProviderOptions&,
+                std::function<void(const StreamEvent&)> onEvent) override {
+        const int call = callCount_.fetch_add(1);
+        if (call == 0) {
+            onEvent(TextChunk{"Preparing a tool call <firmius_stop/>"});
+            onEvent(ToolCallChunk{"stop-tool-1", 0, "list_directory",
+                                  R"({"path":"."})"});
+            onEvent(StreamDone{StopReason::ToolUse});
+            return;
+        }
+        onEvent(TextChunk{"Final completion summary."});
+        onEvent(StreamDone{StopReason::Stop});
+    }
+
+    std::vector<ModelInfo> listModels() override {
+        ModelInfo model;
+        model.id = "stop-token-tool-call-model";
+        model.provider = getId();
+        model.contextWindow = 4096;
+        return {model};
+    }
+
+    ModelInfo getModelInfo(const std::string&) override {
+        return listModels().front();
+    }
+
+    void generateSummary(const std::string&, const AgentHistory&,
+                         const std::string&,
+                         std::function<void(const StreamEvent&)> onEvent,
+                         std::atomic<bool>* = nullptr) override {
+        onEvent(TextChunk{"summary"});
+        onEvent(StreamDone{StopReason::Stop});
+    }
+
+    firmius::provider::ProviderType getProviderType() const override {
+        return firmius::provider::ProviderType::APIKey;
+    }
+
+    int callCount() const { return callCount_.load(); }
+
+private:
+    std::atomic<int> callCount_{0};
+};
+
 class HarnessTest : public ::testing::Test {
 protected:
     void SetUp() override {
@@ -318,6 +366,10 @@ protected:
             std::ofstream lead(promptsDir_ / "lead.md");
             lead << "---\nname: lead\ntitle: Lead\nscopes: [\"FilesystemRead\"]\n---\nLead persona";
         }
+        {
+            std::ofstream executor(promptsDir_ / "executor.md");
+            executor << "---\nname: executor\ntitle: Executor\nscopes: [\"FilesystemRead\"]\n---\nExecutor persona";
+        }
         setenv("FIRMIUS_PROMPTS_DIR", promptsDir_.c_str(), 1);
         setenv("HOME", testHome_.c_str(), 1);
         cleanupFirmiusDir();
@@ -332,11 +384,37 @@ protected:
             std::make_shared<MixedTextToolCallProvider>());
         firmius::provider::ProviderRegistry::instance().registerProvider(
             std::make_shared<ParallelInterleavedToolCallProvider>());
+        firmius::provider::ProviderRegistry::instance().registerProvider(
+            std::make_shared<StopTokenToolCallProvider>());
         auto config = firmius::shared::ConfigLoader::instance().getConfig();
         config.defaultProviderId = "test-retry-provider";
         config.defaultModelId = "test-retry-model";
         config.defaultLeadPersona = "lead";
         Harness::instance().updateConfig(config);
+    }
+
+    static bool historyContainsStopToken(const AgentHistory& history) {
+        for (const auto& turn : history.turns) {
+            for (const auto& msg : turn.messages) {
+                if (msg.role != Role::Assistant) {
+                    continue;
+                }
+                for (const auto& part : msg.content) {
+                    if (const auto* text = std::get_if<TextContent>(&part)) {
+                        if (text->text.find("<firmius_stop/>") != std::string::npos) {
+                            return true;
+                        }
+                    }
+                    if (const auto* thinking = std::get_if<ThinkingContent>(&part)) {
+                        if (thinking->thinking.find("<firmius_stop/>") !=
+                            std::string::npos) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        return false;
     }
     
     void TearDown() override {
@@ -448,6 +526,49 @@ protected:
 
     std::shared_ptr<IAgent> createFocusedLeadAgent(const std::string& threadId) {
         auto agent = createAgentWithUserTurn(threadId);
+        if (agent) {
+            EXPECT_TRUE(Harness::instance().setFocusedAgent(agent->getContext().identity.id));
+        }
+        return agent;
+    }
+
+    std::shared_ptr<IAgent> createAgentWithUserTurnPersona(
+        const std::string& threadId, const std::string& persona,
+        const std::string& friendlyName = "agent",
+        const std::string& text = "resume me",
+        const std::vector<ImageContent>& images = {}) {
+        const std::string agentId =
+            Engine::instance().createAgent(threadId, persona, true, "", friendlyName, "");
+        const bool ready = waitForCondition([&]() {
+            auto agent = AgentRegistry::instance().getAgent(agentId);
+            return agent && !agent->isBooting();
+        });
+        EXPECT_TRUE(ready);
+
+        auto agent = AgentRegistry::instance().getAgent(agentId);
+        if (agent && agent->getContext().history->turns.empty()) {
+            AgentTurn userTurn;
+            userTurn.turnId = "user-task-0";
+            Message message;
+            message.role = Role::User;
+            message.timestamp = static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::system_clock::now().time_since_epoch())
+                    .count());
+            message.content.push_back(TextContent{text});
+            for (const auto& image : images) {
+                message.content.push_back(image);
+            }
+            userTurn.messages.push_back(message);
+            agent->getMutableContext().history->turns.push_back(userTurn);
+            agent->saveHistory();
+        }
+        return agent;
+    }
+
+    std::shared_ptr<IAgent> createFocusedAgent(const std::string& threadId,
+                                               const std::string& persona) {
+        auto agent = createAgentWithUserTurnPersona(threadId, persona, persona);
         if (agent) {
             EXPECT_TRUE(Harness::instance().setFocusedAgent(agent->getContext().identity.id));
         }
@@ -1216,7 +1337,7 @@ TEST_F(HarnessTest, MultipleProseOnlyTurnsDuringActiveExecutionDoNotTerminate) {
                agent->getContext().state.currentStatus == AgentStatus::Idle;
     }));
 
-    EXPECT_EQ(provider->callCount(), 3);
+    EXPECT_GE(provider->callCount(), 3);
 }
 
 TEST_F(HarnessTest, ProseOnlyTurnInSimpleAnswerModeTerminates) {
@@ -1354,6 +1475,153 @@ TEST_F(HarnessTest, IncompleteTodoKeepsLoopAliveAfterProse) {
     }));
 
     EXPECT_EQ(provider->callCount(), 3);
+}
+
+TEST_F(HarnessTest, LeadMissingTodoWithActivePlanTriggersTodoEnforcement) {
+    auto& harness = Harness::instance();
+    auto provider = std::make_shared<SequencedProseProvider>(
+        "sequenced-prose-lead-missing-todo",
+        std::vector<std::string>{"Progress update.", "Follow-up."});
+    firmius::provider::ProviderRegistry::instance().registerProvider(provider);
+
+    auto config = firmius::shared::ConfigLoader::instance().getConfig();
+    config.defaultProviderId = provider->getId();
+    config.defaultModelId = provider->listModels().front().id;
+    harness.updateConfig(config);
+
+    const std::string threadId = harness.newThread({}, "/tmp", "lead");
+    ASSERT_FALSE(threadId.empty());
+    auto agent = createFocusedLeadAgent(threadId);
+    ASSERT_TRUE(agent);
+
+    ThreadManager tm((testHome_ / ".firmius" / "threads").string());
+    Plan plan;
+    plan.id = "plan-enforce-todo";
+    plan.threadId = threadId;
+    plan.title = "Active Plan";
+    plan.objective = "Multi-step coordination";
+    plan.strategy = "Enforce todo gating";
+    plan.status = PlanStatus::Active;
+    WorkChunk chunk;
+    chunk.id = "chunk-1";
+    chunk.title = "Coordination chunk";
+    chunk.status = WorkChunkStatus::Ready;
+    plan.chunks.push_back(chunk);
+    tm.writePlan(threadId, plan);
+
+    ThreadMetadata metadata = tm.getMetadata(threadId);
+    metadata.activePlanId = plan.id;
+    tm.updateMetadata(threadId, metadata);
+
+    harness.send("build and implement the requested runtime change");
+
+    ASSERT_TRUE(waitForCondition([&]() { return provider->callCount() >= 2; }));
+    ASSERT_TRUE(waitForCondition([&]() {
+        return agent && !agent->isRunning() &&
+               agent->getContext().state.currentStatus == AgentStatus::Idle;
+    }));
+
+    EXPECT_GE(provider->callCount(), 2);
+}
+
+TEST_F(HarnessTest, ExecutorMissingTodoWithAssignedChunkTriggersTodoEnforcement) {
+    auto& harness = Harness::instance();
+    auto provider = std::make_shared<SequencedProseProvider>(
+        "sequenced-prose-executor-missing-todo",
+        std::vector<std::string>{"Working on it.", "Follow-up."});
+    firmius::provider::ProviderRegistry::instance().registerProvider(provider);
+
+    auto config = firmius::shared::ConfigLoader::instance().getConfig();
+    config.defaultProviderId = provider->getId();
+    config.defaultModelId = provider->listModels().front().id;
+    harness.updateConfig(config);
+
+    const std::string threadId = harness.newThread({}, "/tmp", "lead");
+    ASSERT_FALSE(threadId.empty());
+    auto agent = createFocusedLeadAgent(threadId);
+    ASSERT_TRUE(agent);
+    agent->getMutableContext().config.personaName = "executor";
+
+    ThreadManager tm((testHome_ / ".firmius" / "threads").string());
+    Plan plan;
+    plan.id = "plan-exec-enforce";
+    plan.threadId = threadId;
+    plan.title = "Executor Plan";
+    plan.objective = "Execute one chunk";
+    plan.strategy = "Executor owns one chunk";
+    plan.status = PlanStatus::Active;
+    WorkChunk chunk;
+    chunk.id = "chunk-1";
+    chunk.title = "Assigned work";
+    chunk.status = WorkChunkStatus::Ready;
+    chunk.assignedAgentId = agent->getContext().identity.id;
+    plan.chunks.push_back(chunk);
+    tm.writePlan(threadId, plan);
+
+    harness.send("implement the assigned chunk");
+
+    ASSERT_TRUE(waitForCondition([&]() { return provider->callCount() >= 2; }));
+    ASSERT_TRUE(waitForCondition([&]() {
+        return agent && !agent->isRunning() &&
+               agent->getContext().state.currentStatus == AgentStatus::Idle;
+    }));
+
+    EXPECT_GE(provider->callCount(), 2);
+}
+
+TEST_F(HarnessTest, LeadTodoPresenceClearsTodoEnforcement) {
+    auto& harness = Harness::instance();
+    auto provider = std::make_shared<SequencedProseProvider>(
+        "sequenced-prose-lead-todo-present",
+        std::vector<std::string>{"Progress update.", "Should not be called."});
+    firmius::provider::ProviderRegistry::instance().registerProvider(provider);
+
+    auto config = firmius::shared::ConfigLoader::instance().getConfig();
+    config.defaultProviderId = provider->getId();
+    config.defaultModelId = provider->listModels().front().id;
+    harness.updateConfig(config);
+
+    const std::string threadId = harness.newThread({}, "/tmp", "lead");
+    ASSERT_FALSE(threadId.empty());
+    auto agent = createFocusedLeadAgent(threadId);
+    ASSERT_TRUE(agent);
+
+    ThreadManager tm((testHome_ / ".firmius" / "threads").string());
+    Plan plan;
+    plan.id = "plan-todo-present";
+    plan.threadId = threadId;
+    plan.title = "Active Plan";
+    plan.objective = "Multi-step coordination";
+    plan.strategy = "Todo already present";
+    plan.status = PlanStatus::Active;
+    WorkChunk chunk;
+    chunk.id = "chunk-1";
+    chunk.title = "Coordination chunk";
+    chunk.status = WorkChunkStatus::Ready;
+    plan.chunks.push_back(chunk);
+    tm.writePlan(threadId, plan);
+
+    ThreadMetadata metadata = tm.getMetadata(threadId);
+    metadata.activePlanId = plan.id;
+    tm.updateMetadata(threadId, metadata);
+
+    AgentTodoList todo;
+    todo.threadId = threadId;
+    todo.agentId = harness.focusedAgentId();
+    todo.nextId = 2;
+    todo.items.push_back(
+        TodoItem{1, "Coordination complete", TodoStatus::Done, "", "", 1, 1});
+    tm.writeAgentTodo(threadId, todo.agentId, todo);
+
+    harness.send("build and implement the requested runtime change");
+
+    ASSERT_TRUE(waitForCondition([&]() { return provider->callCount() >= 1; }));
+    ASSERT_TRUE(waitForCondition([&]() {
+        return agent && !agent->isRunning() &&
+               agent->getContext().state.currentStatus == AgentStatus::Idle;
+    }));
+
+    EXPECT_EQ(provider->callCount(), 1);
 }
 
 TEST_F(HarnessTest, FullyDoneTodoAllowsStopWhenNoOtherWork) {
@@ -1508,22 +1776,246 @@ TEST_F(HarnessTest, NoModelAuthoredStopTokenIsRequiredForCompletion) {
     }));
 
     const auto& history = *agent->getContext().history;
-    bool foundStopToken = false;
+    EXPECT_FALSE(historyContainsStopToken(history));
+    EXPECT_GE(provider->callCount(), 2);
+}
+
+TEST_F(HarnessTest, FinalSummaryStopTokenStopsWhenRuntimeTruthAllowsStop) {
+    auto& harness = Harness::instance();
+    auto provider = std::make_shared<SequencedProseProvider>(
+        "sequenced-prose-stop-token-allowed",
+        std::vector<std::string>{"All work complete. <firmius_stop/>",
+                                 "Should not be reached."});
+    firmius::provider::ProviderRegistry::instance().registerProvider(provider);
+
+    auto config = firmius::shared::ConfigLoader::instance().getConfig();
+    config.defaultProviderId = provider->getId();
+    config.defaultModelId = provider->listModels().front().id;
+    harness.updateConfig(config);
+
+    const std::string threadId = harness.newThread({}, "/tmp", "lead");
+    ASSERT_FALSE(threadId.empty());
+    auto agent = createFocusedLeadAgent(threadId);
+    ASSERT_TRUE(agent);
+
+    ThreadManager tm((testHome_ / ".firmius" / "threads").string());
+    AgentTodoList todo;
+    todo.threadId = threadId;
+    todo.agentId = harness.focusedAgentId();
+    todo.nextId = 2;
+    todo.items.push_back(
+        TodoItem{1, "Done item", TodoStatus::Done, "", "", 1, 1});
+    tm.writeAgentTodo(threadId, todo.agentId, todo);
+
+    std::vector<std::string> streamedText;
+    int subId = harness.subscribe([&](const AppEvent& event) {
+        if (auto text = std::get_if<AgentText>(&event)) {
+            streamedText.push_back(text->delta);
+        }
+    });
+
+    Engine::instance().executeTask(agent->getContext().identity.id, "continue work");
+
+    ASSERT_TRUE(waitForCondition([&]() { return provider->callCount() >= 1; }));
+    ASSERT_TRUE(waitForCondition([&]() {
+        return agent && !agent->isRunning() &&
+               agent->getContext().state.currentStatus == AgentStatus::Idle;
+    }));
+    harness.unsubscribe(subId);
+
+    EXPECT_EQ(provider->callCount(), 1);
+    for (const auto& chunk : streamedText) {
+        EXPECT_EQ(chunk.find("<firmius_stop/>"), std::string::npos);
+    }
+    EXPECT_FALSE(historyContainsStopToken(*agent->getContext().history));
+}
+
+TEST_F(HarnessTest, FinalSummaryStopTokenIgnoredWhenTodoIncomplete) {
+    auto& harness = Harness::instance();
+    auto provider = std::make_shared<SequencedProseProvider>(
+        "sequenced-prose-stop-token-incomplete-todo",
+        std::vector<std::string>{"Still executing. <firmius_stop/>",
+                                 "Execution complete now."});
+    firmius::provider::ProviderRegistry::instance().registerProvider(provider);
+
+    auto config = firmius::shared::ConfigLoader::instance().getConfig();
+    config.defaultProviderId = provider->getId();
+    config.defaultModelId = provider->listModels().front().id;
+    harness.updateConfig(config);
+
+    const std::string threadId = harness.newThread({}, "/tmp", "lead");
+    ASSERT_FALSE(threadId.empty());
+    auto agent = createFocusedLeadAgent(threadId);
+    ASSERT_TRUE(agent);
+
+    ThreadManager tm((testHome_ / ".firmius" / "threads").string());
+    AgentTodoList todo;
+    todo.threadId = threadId;
+    todo.agentId = harness.focusedAgentId();
+    todo.nextId = 2;
+    todo.items.push_back(
+        TodoItem{1, "Still running", TodoStatus::InProgress, "", "", 1, 1});
+    tm.writeAgentTodo(threadId, todo.agentId, todo);
+
+    harness.send("build and implement the requested runtime change");
+
+    ASSERT_TRUE(waitForCondition([&]() { return provider->callCount() >= 2; }));
+    ASSERT_TRUE(waitForCondition([&]() {
+        return agent && !agent->isRunning() &&
+               agent->getContext().state.currentStatus == AgentStatus::Idle;
+    }));
+
+    EXPECT_GE(provider->callCount(), 2);
+    EXPECT_FALSE(historyContainsStopToken(*agent->getContext().history));
+}
+
+TEST_F(HarnessTest, FinalSummaryStopTokenIgnoredWhenActivePlanIsNotDone) {
+    auto& harness = Harness::instance();
+    auto providerWithToken = std::make_shared<SequencedProseProvider>(
+        "sequenced-prose-stop-token-active-plan",
+        std::vector<std::string>{"Plan still active. <firmius_stop/>",
+                                 "Follow-up while plan is active."});
+    firmius::provider::ProviderRegistry::instance().registerProvider(
+        providerWithToken);
+
+    auto providerWithoutToken = std::make_shared<SequencedProseProvider>(
+        "sequenced-prose-no-stop-token-active-plan",
+        std::vector<std::string>{"Plan still active.",
+                                 "Follow-up while plan is active."});
+    firmius::provider::ProviderRegistry::instance().registerProvider(
+        providerWithoutToken);
+
+    auto config = firmius::shared::ConfigLoader::instance().getConfig();
+    config.defaultProviderId = providerWithToken->getId();
+    config.defaultModelId = providerWithToken->listModels().front().id;
+    harness.updateConfig(config);
+
+    const std::string threadId = harness.newThread({}, "/tmp", "lead");
+    ASSERT_FALSE(threadId.empty());
+    auto agent = createFocusedLeadAgent(threadId);
+    ASSERT_TRUE(agent);
+
+    ThreadManager tm((testHome_ / ".firmius" / "threads").string());
+    Plan plan;
+    plan.id = "plan-stop-token-not-done";
+    plan.threadId = threadId;
+    plan.title = "Execution Plan";
+    plan.objective = "Keep execution open";
+    plan.status = PlanStatus::Active;
+    tm.writePlan(threadId, plan);
+
+    ThreadMetadata metadata = tm.getMetadata(threadId);
+    metadata.activePlanId = plan.id;
+    tm.updateMetadata(threadId, metadata);
+
+    harness.send("build and implement the requested runtime change");
+
+    ASSERT_TRUE(waitForCondition([&]() {
+        return agent && !agent->isRunning() &&
+               agent->getContext().state.currentStatus == AgentStatus::Idle;
+    }));
+
+    const int withTokenCalls = providerWithToken->callCount();
+    EXPECT_FALSE(historyContainsStopToken(*agent->getContext().history));
+
+    config.defaultProviderId = providerWithoutToken->getId();
+    config.defaultModelId = providerWithoutToken->listModels().front().id;
+    harness.updateConfig(config);
+
+    const std::string controlThreadId = harness.newThread({}, "/tmp", "lead");
+    ASSERT_FALSE(controlThreadId.empty());
+    auto controlAgent = createFocusedLeadAgent(controlThreadId);
+    ASSERT_TRUE(controlAgent);
+
+    Plan controlPlan = plan;
+    controlPlan.id = "plan-stop-token-not-done-control";
+    controlPlan.threadId = controlThreadId;
+    tm.writePlan(controlThreadId, controlPlan);
+
+    ThreadMetadata controlMetadata = tm.getMetadata(controlThreadId);
+    controlMetadata.activePlanId = controlPlan.id;
+    tm.updateMetadata(controlThreadId, controlMetadata);
+
+    harness.send("build and implement the requested runtime change");
+    ASSERT_TRUE(waitForCondition([&]() {
+        return controlAgent && !controlAgent->isRunning() &&
+               controlAgent->getContext().state.currentStatus == AgentStatus::Idle;
+    }));
+
+    EXPECT_EQ(withTokenCalls, providerWithoutToken->callCount());
+    EXPECT_FALSE(historyContainsStopToken(*controlAgent->getContext().history));
+}
+
+TEST_F(HarnessTest, FinalSummaryStopTokenIgnoredWhileOwnedProcessIsBlocking) {
+    auto& harness = Harness::instance();
+    auto provider = std::make_shared<SequencedProseProvider>(
+        "sequenced-prose-stop-token-blocking-process",
+        std::vector<std::string>{"Process still running. <firmius_stop/>",
+                                 "Process completed after follow-up."});
+    firmius::provider::ProviderRegistry::instance().registerProvider(provider);
+
+    auto config = firmius::shared::ConfigLoader::instance().getConfig();
+    config.defaultProviderId = provider->getId();
+    config.defaultModelId = provider->listModels().front().id;
+    harness.updateConfig(config);
+
+    const std::string threadId = harness.newThread({}, "/tmp", "lead");
+    ASSERT_FALSE(threadId.empty());
+    auto agent = createFocusedLeadAgent(threadId);
+    ASSERT_TRUE(agent);
+    agent->getEnvironment()->getProcessManager().addBlockingProcessId(
+        "stop-token-blocking-process");
+
+    Engine::instance().executeTask(agent->getContext().identity.id, "continue work");
+
+    ASSERT_TRUE(waitForCondition([&]() { return provider->callCount() >= 2; }));
+    agent->getEnvironment()->getProcessManager().removeBlockingProcessId(
+        "stop-token-blocking-process");
+
+    ASSERT_TRUE(waitForCondition([&]() {
+        return agent && !agent->isRunning() &&
+               agent->getContext().state.currentStatus == AgentStatus::Idle;
+    }));
+
+    EXPECT_GE(provider->callCount(), 2);
+    EXPECT_FALSE(historyContainsStopToken(*agent->getContext().history));
+}
+
+TEST_F(HarnessTest, StopTokenInsideToolTurnIsIgnored) {
+    auto& harness = Harness::instance();
+    auto provider = std::make_shared<StopTokenToolCallProvider>();
+    firmius::provider::ProviderRegistry::instance().registerProvider(provider);
+
+    auto config = firmius::shared::ConfigLoader::instance().getConfig();
+    config.defaultProviderId = provider->getId();
+    config.defaultModelId = provider->listModels().front().id;
+    harness.updateConfig(config);
+
+    const std::string threadId = harness.newThread({}, "/tmp", "lead");
+    ASSERT_FALSE(threadId.empty());
+    harness.send("continue execution");
+    auto agent = waitForFocusedAgent();
+
+    ASSERT_TRUE(waitForCondition([&]() {
+        return agent && !agent->isRunning() &&
+               agent->getContext().state.currentStatus == AgentStatus::Idle;
+    }));
+
+    EXPECT_EQ(provider->callCount(), 2);
+
+    bool sawToolResult = false;
+    const auto& history = *agent->getContext().history;
     for (const auto& turn : history.turns) {
         for (const auto& msg : turn.messages) {
             for (const auto& part : msg.content) {
-                if (const auto* text = std::get_if<TextContent>(&part)) {
-                    if (text->text.find("<done") != std::string::npos ||
-                        text->text.find("</done") != std::string::npos) {
-                        foundStopToken = true;
-                    }
+                if (std::holds_alternative<ToolResultContent>(part)) {
+                    sawToolResult = true;
                 }
             }
         }
     }
-
-    EXPECT_FALSE(foundStopToken);
-    EXPECT_GE(provider->callCount(), 2);
+    EXPECT_TRUE(sawToolResult);
+    EXPECT_FALSE(historyContainsStopToken(history));
 }
 
 TEST_F(HarnessTest, TruncatedStreamedToolCallIsRejectedBeforeExecution) {

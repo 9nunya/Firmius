@@ -108,6 +108,16 @@ rapidjson::Document toJson(const WorkChunk& chunk);
 WorkChunk workChunkFromJson(const rapidjson::Value& value);
 
 /**
+ * @brief Serializes a WorkTask to a RapidJSON document.
+ */
+rapidjson::Document toJson(const WorkTask& task);
+
+/**
+ * @brief Deserializes a WorkTask from a RapidJSON value.
+ */
+WorkTask workTaskFromJson(const rapidjson::Value& value);
+
+/**
  * @brief Serializes a Plan to a RapidJSON document.
  */
 rapidjson::Document toJson(const Plan& plan);

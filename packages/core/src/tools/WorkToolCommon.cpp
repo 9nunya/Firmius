@@ -55,7 +55,10 @@ std::set<std::string> requestedChunkUpdateFields(const rapidjson::Value &input) 
   static const std::vector<std::string> kMutableFields = {
       "title",         "goal",          "context",      "constraints",
       "completion",    "planning_gate", "status",       "depends_on",
-      "attempt_count", "result_summary", "review_summary"};
+      "attempt_count", "result_summary", "review_summary", "assigned_agent_id",
+      // V2 rich chunk spec fields
+      "files_to_read", "files_to_touch", "cwd",
+      "verification_condition", "handoff_notes"};
 
   std::set<std::string> fields;
   for (const auto &field : kMutableFields) {
@@ -236,6 +239,10 @@ void requireChunkUpdateAccess(const rapidjson::Value &input,
   static const std::set<std::string> kExecutorFields = {
       "status", "attempt_count", "result_summary"};
   static const std::set<std::string> kAuditorFields = {"review_summary"};
+  // V2 rich chunk spec fields are lead-only
+  static const std::set<std::string> kV2Fields = {
+      "files_to_read", "files_to_touch", "cwd",
+      "verification_condition", "handoff_notes"};
 
   switch (role) {
   case WorkAgentRole::Lead:
@@ -246,6 +253,13 @@ void requireChunkUpdateAccess(const rapidjson::Value &input,
     if (chunk.assignedAgentId != ctx.agent.getContext().identity.id) {
       throw permissionError("executor may update only its assigned chunk");
     }
+    // Executor cannot mutate V2 rich spec fields
+    for (const auto &field : fields) {
+      if (kV2Fields.count(field) > 0) {
+        throw permissionError(
+            "executor may not mutate V2 chunk spec fields: " + field);
+      }
+    }
     if (!std::includes(kExecutorFields.begin(), kExecutorFields.end(),
                        fields.begin(), fields.end())) {
       throw permissionError(
@@ -254,6 +268,13 @@ void requireChunkUpdateAccess(const rapidjson::Value &input,
     return;
   case WorkAgentRole::Auditor:
     requireScope(ctx, shared::ToolScope::ChunkReview, "auditor chunk reviews");
+    // Auditor cannot mutate V2 rich spec fields
+    for (const auto &field : fields) {
+      if (kV2Fields.count(field) > 0) {
+        throw permissionError(
+            "auditor may not mutate V2 chunk spec fields: " + field);
+      }
+    }
     if (!std::includes(kAuditorFields.begin(), kAuditorFields.end(),
                        fields.begin(), fields.end())) {
       throw permissionError(

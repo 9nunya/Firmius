@@ -584,6 +584,9 @@ void Engine::handleStreamEvent(const std::string &agentId,
     broadcast(AgentError{agentId, msg, parentId});
   } else if (auto *sw = std::get_if<StreamAccountSwitched>(&ev)) {
     broadcast(AgentAccountSwitched{agentId, sw->accountLocator, parentId});
+  } else if (auto *ps = std::get_if<AgentProcessSpawned>(&ev)) {
+    broadcast(AgentProcessSpawned{agentId, ps->processId, ps->toolCallId,
+                                  ps->command, parentId});
   } else if (std::holds_alternative<ProviderWaiting>(ev)) {
     broadcast(AgentProviderWaiting{agentId, parentId});
   }

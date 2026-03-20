@@ -262,6 +262,8 @@ void StreamStateManager::handleAgentToolCallChunk(
       }
     }
   }
+
+  flushBufferedProcessOutputForToolCall(e.toolCallId);
 }
 
 void StreamStateManager::handleAgentToolCall(const shared::AgentToolCall &e) {
@@ -332,6 +334,8 @@ void StreamStateManager::handleAgentToolCall(const shared::AgentToolCall &e) {
       }
     }
   }
+
+  flushBufferedProcessOutputForToolCall(e.toolCallId);
 }
 
 void StreamStateManager::handleAgentCompacting(
@@ -377,36 +381,35 @@ void StreamStateManager::handleAgentProcessSpawned(
   process_to_agent_[e.processId] = e.agentId;
   process_background_state_[e.processId] = false;
   process_finished_state_[e.processId] = false;
+
+  auto it_tool = tool_calls_.find(e.toolCallId);
+  if (it_tool != tool_calls_.end() && it_tool->second) {
+    auto &view = it_tool->second;
+    if (view->process_id.empty()) {
+      view->process_id = e.processId;
+    }
+    if (view->name == "process_spawn") {
+      view->process_is_background = true;
+      process_background_state_[e.processId] = true;
+      if (view->phase == ToolPhase::Called || view->phase == ToolPhase::Preparing) {
+        view->phase = ToolPhase::BackgroundRunning;
+      }
+    }
+  }
+
+  flushBufferedProcessOutputForProcess(e.processId);
 }
 
 void StreamStateManager::handleAgentProcessOutput(
     const shared::AgentProcessOutput &e) {
-  auto it_pid = process_to_toolcall_.find(e.processId);
-  if (it_pid != process_to_toolcall_.end()) {
-    auto tid = it_pid->second;
-    auto it_tool = tool_calls_.find(tid);
-    if (it_tool != tool_calls_.end() && it_tool->second) {
-      auto &view = it_tool->second;
-      if (!e.output.empty() &&
-          (view->phase == ToolPhase::Called ||
-           view->phase == ToolPhase::BackgroundRunning)) {
-        view->live_process_output += e.output;
-      }
-      if (view->process_id.empty()) {
-        view->process_id = e.processId;
-      }
-      if (e.finished) {
-        view->process_exit_known = true;
-        view->process_exit_code = e.exitCode;
-        view->process_duration_ms = e.durationMs;
-        if (view->phase == ToolPhase::BackgroundRunning) {
-          view->phase = ToolPhase::Finished;
-          view->success = (e.exitCode == 0);
-        }
-        process_finished_state_[e.processId] = true;
-      }
-    }
+  if (process_to_agent_.count(e.processId) == 0 && !e.agentId.empty()) {
+    process_to_agent_[e.processId] = e.agentId;
   }
+
+  if (!applyProcessOutputToToolView(e)) {
+    pending_process_output_[e.processId].push_back(e);
+  }
+
   if (e.finished) {
     process_finished_state_[e.processId] = true;
   }
@@ -535,9 +538,62 @@ std::string StreamStateManager::getAgentTitle(
 
 ProcessCounts StreamStateManager::getProcessCounts(
     const std::string &agentId) const {
+  return getProcessCounts(agentId, nullptr, {});
+}
+
+ProcessCounts StreamStateManager::getProcessCounts(
+    const std::string &agentId, const ProcessRuntimeSnapshot *runtime_snapshot,
+    const std::function<bool(const std::string &)> &is_process_running) const {
   ProcessCounts counts;
+  std::unordered_set<std::string> counted_processes;
+
+  auto count_if_running = [&](const std::string &process_id,
+                              bool background) {
+    if (process_id.empty()) {
+      return;
+    }
+    if (counted_processes.count(process_id) > 0) {
+      return;
+    }
+    if (is_process_running && !is_process_running(process_id)) {
+      return;
+    }
+    counted_processes.insert(process_id);
+    if (background) {
+      ++counts.background;
+    } else {
+      ++counts.live;
+    }
+  };
+
+  if (runtime_snapshot) {
+    std::unordered_set<std::string> blocking(
+        runtime_snapshot->blocking_process_ids.begin(),
+        runtime_snapshot->blocking_process_ids.end());
+    for (const auto &process_id : blocking) {
+      count_if_running(process_id, false);
+    }
+    for (const auto &process_id : runtime_snapshot->owned_process_ids) {
+      count_if_running(process_id, blocking.count(process_id) == 0);
+    }
+  }
+
+  for (const auto &[_, view] : tool_calls_) {
+    if (!view || view->agentId != agentId || view->process_id.empty()) {
+      continue;
+    }
+    if (view->phase == ToolPhase::Called) {
+      count_if_running(view->process_id, false);
+    } else if (view->phase == ToolPhase::BackgroundRunning) {
+      count_if_running(view->process_id, true);
+    }
+  }
+
   for (const auto &[processId, owner] : process_to_agent_) {
     if (owner != agentId) {
+      continue;
+    }
+    if (counted_processes.count(processId) > 0) {
       continue;
     }
     auto it_finished = process_finished_state_.find(processId);
@@ -612,6 +668,7 @@ void StreamStateManager::handleThreadChanged() {
   process_to_agent_.clear();
   process_background_state_.clear();
   process_finished_state_.clear();
+  pending_process_output_.clear();
   live_quick_clusters_.clear();
   tool_call_cluster_ids_.clear();
 }
@@ -925,6 +982,7 @@ void StreamStateManager::applyToolResult(
       process_to_agent_[parsed.process_id] = view->agentId;
       process_finished_state_[parsed.process_id] = false;
     }
+    flushBufferedProcessOutputForProcess(parsed.process_id);
   }
   if (parsed.exit_known) {
     view->process_exit_known = true;
@@ -947,12 +1005,86 @@ void StreamStateManager::applyToolResult(
     if (process_to_toolcall_.count(parsed.process_id) > 0) {
       process_background_state_[parsed.process_id] = true;
     }
+    if (parsed.exit_known) {
+      view->phase = ToolPhase::Finished;
+    } else {
+      view->phase = ToolPhase::BackgroundRunning;
+      return;
+    }
   } else if (!parsed.process_id.empty() &&
              process_to_toolcall_.count(parsed.process_id) > 0) {
     process_background_state_[parsed.process_id] = false;
   }
 
   view->phase = ToolPhase::Finished;
+}
+
+bool StreamStateManager::applyProcessOutputToToolView(
+    const shared::AgentProcessOutput &e) {
+  auto it_pid = process_to_toolcall_.find(e.processId);
+  if (it_pid == process_to_toolcall_.end()) {
+    return false;
+  }
+
+  auto it_tool = tool_calls_.find(it_pid->second);
+  if (it_tool == tool_calls_.end() || !it_tool->second) {
+    return false;
+  }
+
+  auto &view = it_tool->second;
+  if (!e.output.empty() &&
+      (view->phase == ToolPhase::Called ||
+       view->phase == ToolPhase::BackgroundRunning)) {
+    view->live_process_output += e.output;
+  }
+  if (view->process_id.empty()) {
+    view->process_id = e.processId;
+  }
+  if (e.finished) {
+    view->process_exit_known = true;
+    view->process_exit_code = e.exitCode;
+    view->process_duration_ms = e.durationMs;
+    if (view->phase == ToolPhase::BackgroundRunning ||
+        view->name == "process_spawn") {
+      view->phase = ToolPhase::Finished;
+      view->success = (e.exitCode == 0);
+    }
+  }
+  return true;
+}
+
+void StreamStateManager::flushBufferedProcessOutputForProcess(
+    const std::string &processId) {
+  auto it = pending_process_output_.find(processId);
+  if (it == pending_process_output_.end()) {
+    return;
+  }
+
+  std::vector<shared::AgentProcessOutput> still_pending;
+  still_pending.reserve(it->second.size());
+  for (const auto &event : it->second) {
+    if (!applyProcessOutputToToolView(event)) {
+      still_pending.push_back(event);
+    }
+  }
+
+  if (still_pending.empty()) {
+    pending_process_output_.erase(it);
+  } else {
+    it->second = std::move(still_pending);
+  }
+}
+
+void StreamStateManager::flushBufferedProcessOutputForToolCall(
+    const std::string &toolCallId) {
+  if (toolCallId.empty()) {
+    return;
+  }
+  for (const auto &[process_id, mapped_tool_call] : process_to_toolcall_) {
+    if (mapped_tool_call == toolCallId) {
+      flushBufferedProcessOutputForProcess(process_id);
+    }
+  }
 }
 
 } // namespace firmius::tui

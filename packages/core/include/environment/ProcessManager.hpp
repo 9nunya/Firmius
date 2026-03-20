@@ -6,6 +6,8 @@
 #include <mutex>
 #include <set>
 #include <map>
+#include <unordered_map>
+#include <unordered_set>
 #include <memory>
 #include <functional>
 #include <atomic>
@@ -64,6 +66,22 @@ public:
     size_t getProcessCount() const;
 
 private:
+    struct PendingProcessOutput {
+        std::string output;
+        bool isStderr = false;
+        bool finished = false;
+        int exitCode = -1;
+        double durationMs = 0.0;
+    };
+
+    void emitOrBufferProcessOutputLocked(const std::string& processId,
+                                        const std::string& output,
+                                        bool isStderr,
+                                        bool finished,
+                                        int exitCode = -1,
+                                        double durationMs = 0.0);
+    void flushBufferedProcessOutputLocked(const std::string& processId);
+
     void monitorProcessCompletion(const std::string& id);
     void finishTrackedProcess(const std::string& id);
 
@@ -76,6 +94,8 @@ private:
     std::set<std::string> processIds_;
     std::vector<std::string> blockingProcessIds_;
     std::vector<std::thread> monitorThreads_;
+    std::unordered_set<std::string> spawnedEventEmitted_;
+    std::unordered_map<std::string, std::vector<PendingProcessOutput>> pendingOutput_;
     
     std::atomic<bool> active_{true};
 };

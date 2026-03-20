@@ -15,6 +15,7 @@ using firmius::shared::TextContent;
 using firmius::shared::ToolCallContent;
 using firmius::shared::ToolResultContent;
 using firmius::tui::StreamStateManager;
+using firmius::tui::ProcessRuntimeSnapshot;
 using firmius::shared::ToolPhase;
 
 TEST(StreamStateManagerHistoryTest, RebuildFindsToolResultsRegardlessOfMessageRole) {
@@ -87,6 +88,76 @@ TEST(StreamStateManagerHistoryTest,
   counts = state.getProcessCounts("agent-1");
   EXPECT_EQ(counts.live, 0);
   EXPECT_EQ(counts.background, 0);
+}
+
+TEST(StreamStateManagerHistoryTest,
+     BuffersEarlyOutputUntilSpawnAssociationArrives) {
+  StreamStateManager state;
+
+  state.handleAgentToolCall(
+      {"agent-1", "tool-1", "process_execute", R"({"command":"sleep 5"})", ""});
+  state.handleAgentProcessOutput(
+      AgentProcessOutput{"agent-1", "proc-1", "early\n", false, false, -1, 0.0, ""});
+
+  auto view = state.getToolView("tool-1");
+  ASSERT_TRUE(static_cast<bool>(view));
+  EXPECT_TRUE(view->live_process_output.empty());
+
+  state.handleAgentProcessSpawned(
+      AgentProcessSpawned{"agent-1", "proc-1", "tool-1", "sleep 5", ""});
+
+  EXPECT_EQ(view->live_process_output, "early\n");
+  EXPECT_EQ(view->process_id, "proc-1");
+}
+
+TEST(StreamStateManagerHistoryTest,
+     ProcessSpawnStaysLiveAndAcceptsOutputUntilFinished) {
+  StreamStateManager state;
+
+  state.handleAgentToolCall(
+      {"agent-1", "tool-1", "process_spawn", R"({"command":"tail -f app.log"})", ""});
+  state.handleAgentProcessSpawned(
+      AgentProcessSpawned{"agent-1", "proc-1", "tool-1", "tail -f app.log", ""});
+
+  AgentTurn turn;
+  turn.turnId = "turn-1";
+  Message tool_result;
+  tool_result.role = Role::ToolResult;
+  tool_result.content = {ToolResultContent{
+      "tool-1", R"({"process_id":"proc-1"})", true, "proc-1", ""}};
+  turn.messages.push_back(tool_result);
+  state.handleAgentTurnCompleted({"agent-1", turn, {}, ""});
+
+  auto view = state.getToolView("tool-1");
+  ASSERT_TRUE(static_cast<bool>(view));
+  EXPECT_EQ(view->phase, ToolPhase::BackgroundRunning);
+
+  state.handleAgentProcessOutput(
+      AgentProcessOutput{"agent-1", "proc-1", "tick\n", false, false, -1, 0.0, ""});
+  EXPECT_EQ(view->live_process_output, "tick\n");
+  EXPECT_EQ(view->phase, ToolPhase::BackgroundRunning);
+
+  state.handleAgentProcessOutput(
+      AgentProcessOutput{"agent-1", "proc-1", "", false, true, 0, 2000.0, ""});
+  EXPECT_EQ(view->phase, ToolPhase::Finished);
+  EXPECT_TRUE(view->success);
+}
+
+TEST(StreamStateManagerHistoryTest,
+     ProcessCountsUseRuntimeSnapshotEvenWithoutTransientMaps) {
+  StreamStateManager state;
+
+  ProcessRuntimeSnapshot runtime;
+  runtime.blocking_process_ids = {"live-1"};
+  runtime.owned_process_ids = {"live-1", "bg-1"};
+
+  auto counts = state.getProcessCounts(
+      "agent-1", &runtime, [](const std::string &process_id) {
+        return process_id == "live-1" || process_id == "bg-1";
+      });
+
+  EXPECT_EQ(counts.live, 1);
+  EXPECT_EQ(counts.background, 1);
 }
 
 } // namespace

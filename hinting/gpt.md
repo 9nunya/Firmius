@@ -29,6 +29,9 @@ This overlay exists to counter those habits.
 - Do not ask the user whether to continue with the obvious next chunk when the committed plan already answers that question.
 - Do not end with a summary when the next concrete tool call is already clear.
 - If the user asked for implementation, stay in execution mode until you have concrete evidence or a concrete blocker.
+- `<firmius_stop/>` is optional control metadata, not prose. Use it only in a true final user-facing completion summary.
+- Never emit `<firmius_stop/>` between tool calls, in progress updates, or inside tool JSON.
+- `<firmius_stop/>` does not replace real completion state (todo/plan/subagent/process/tool lifecycle truth).
 
 ## Anti-Questioning Rules
 

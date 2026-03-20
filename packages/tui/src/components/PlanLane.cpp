@@ -139,6 +139,13 @@ public:
     for (const auto &chunk : model_->chunks) {
       const auto style = styleFor(theme, chunk.status);
       std::string row_title = chunk.title;
+      
+      // V2: Show (N tasks) hint for task-bearing chunks
+      std::string task_hint;
+      if (chunk.task_count.has_value() && chunk.task_count.value() > 0) {
+        task_hint = " (" + std::to_string(chunk.task_count.value()) + " tasks)";
+      }
+      
       if (compact_mode && row_title.size() > 42) {
         row_title = row_title.substr(0, 39) + "...";
       }
@@ -156,6 +163,13 @@ public:
         title_el = title_el | ftxui::bold;
       }
       row_parts.push_back(title_el | ftxui::flex);
+      
+      // V2: Add task hint if present
+      if (!task_hint.empty()) {
+        row_parts.push_back(ftxui::text(task_hint) | ftxui::dim |
+                            ftxui::color(theme.base.dim));
+      }
+      
       row_parts.push_back(ftxui::text(chunk.status_label) | ftxui::bold |
                           ftxui::color(style.color));
       auto row = ftxui::hbox(std::move(row_parts)) | ftxui::xflex;

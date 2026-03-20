@@ -23,6 +23,12 @@ std::shared_ptr<shared::JSONSchema> ChunkAddTool::getSchema() const {
                      "Verifying", "Done", "Blocked", "Failed", "Cancelled"})
                   ->setOptional()},
              {"depends_on", zArray(zString())->setOptional()},
+             // V2 rich chunk spec fields (all optional)
+             {"files_to_read", zArray(zString())->setOptional()},
+             {"files_to_touch", zArray(zString())->setOptional()},
+             {"cwd", zString()->setOptional()},
+             {"verification_condition", zString()->setOptional()},
+             {"handoff_notes", zString()->setOptional()},
          })
       ->required(
           {"plan_id", "title", "goal", "context", "constraints", "completion"});
@@ -53,6 +59,16 @@ shared::ToolResult ChunkAddTool::execute(const rapidjson::Value &input,
                   ? worktools::parseChunkStatus(input["status"].GetString())
                   : shared::WorkChunkStatus::Ready;
           chunk.dependsOn = worktools::parseStringArray(input, "depends_on");
+          
+          // V2 rich chunk spec fields
+          chunk.filesToRead = worktools::parseStringArray(input, "files_to_read");
+          chunk.filesToTouch = worktools::parseStringArray(input, "files_to_touch");
+          chunk.cwd = input.HasMember("cwd") ? input["cwd"].GetString() : "";
+          chunk.verificationCondition = input.HasMember("verification_condition")
+              ? input["verification_condition"].GetString() : "";
+          chunk.handoffNotes = input.HasMember("handoff_notes")
+              ? input["handoff_notes"].GetString() : "";
+          
           chunk.createdAt = worktools::nowEpochMs();
           chunk.updatedAt = chunk.createdAt;
           worktools::blockChunkIfDependenciesIncomplete(plan, chunk);

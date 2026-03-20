@@ -15,6 +15,8 @@ namespace {
 
 bool isExecutorPersona(const std::string &persona) { return persona == "executor"; }
 
+bool isAuditorPersona(const std::string &persona) { return persona == "auditor"; }
+
 bool isWorkerPersona(const std::string &persona) {
   return persona == "worker" || persona == "scout";
 }
@@ -58,6 +60,81 @@ std::string buildExecutorTask(const shared::Plan &plan,
   prompt << "Chunk Context: " << chunk.context << "\n";
   prompt << "Chunk Constraints: " << chunk.constraints << "\n";
   prompt << "Chunk Completion: " << chunk.completion << "\n";
+  
+  // V2 rich chunk spec fields (only if present)
+  if (!chunk.filesToRead.empty()) {
+    prompt << "Files To Read: ";
+    for (size_t i = 0; i < chunk.filesToRead.size(); ++i) {
+      if (i > 0) prompt << ", ";
+      prompt << chunk.filesToRead[i];
+    }
+    prompt << "\n";
+  }
+  if (!chunk.filesToTouch.empty()) {
+    prompt << "Files To Touch: ";
+    for (size_t i = 0; i < chunk.filesToTouch.size(); ++i) {
+      if (i > 0) prompt << ", ";
+      prompt << chunk.filesToTouch[i];
+    }
+    prompt << "\n";
+  }
+  if (!chunk.cwd.empty()) {
+    prompt << "Working Directory: " << chunk.cwd << "\n";
+  }
+  if (!chunk.verificationCondition.empty()) {
+    prompt << "Verification Condition: " << chunk.verificationCondition << "\n";
+  }
+  if (!chunk.handoffNotes.empty()) {
+    prompt << "Handoff Notes: " << chunk.handoffNotes << "\n";
+  }
+
+  // V2 chunk-internal task structure (only if present)
+  if (!chunk.tasks.empty()) {
+    prompt << "\nChunk Tasks\n";
+    prompt << "This chunk contains " << chunk.tasks.size() << " internal tasks. ";
+    prompt << "Use these to structure your execution or delegate to workers:\n";
+    for (const auto &t : chunk.tasks) {
+      std::string statusLabel;
+      switch (t.status) {
+      case shared::WorkChunkStatus::Ready:
+        statusLabel = "Ready";
+        break;
+      case shared::WorkChunkStatus::InProgress:
+        statusLabel = "InProgress";
+        break;
+      case shared::WorkChunkStatus::Implemented:
+        statusLabel = "Implemented";
+        break;
+      case shared::WorkChunkStatus::Verifying:
+        statusLabel = "Verifying";
+        break;
+      case shared::WorkChunkStatus::Done:
+        statusLabel = "Done";
+        break;
+      case shared::WorkChunkStatus::Blocked:
+        statusLabel = "Blocked";
+        break;
+      case shared::WorkChunkStatus::Failed:
+        statusLabel = "Failed";
+        break;
+      case shared::WorkChunkStatus::Cancelled:
+        statusLabel = "Cancelled";
+        break;
+      }
+      prompt << "- [" << statusLabel << "] " << t.title;
+      if (!t.goal.empty()) {
+        prompt << ": " << t.goal;
+      }
+      if (!t.notes.empty()) {
+        prompt << " (Note: " << t.notes << ")";
+      }
+      if (!t.verificationCondition.empty()) {
+        prompt << " (Verify: " << t.verificationCondition << ")";
+      }
+      prompt << "\n";
+    }
+  }
+
   prompt << "\nExecution Discipline\n";
   prompt << "- Reread the exact files and anchors you touch before editing.\n";
   prompt << "- If an anchor or local context is stale, reread and repair it "
@@ -107,6 +184,129 @@ std::string buildWorkerTask(const std::string &task) {
   prompt << "- Complete only the bounded subtask below and return useful "
             "results to the executor.\n\n";
   prompt << "Subtask\n" << task << "\n";
+  return prompt.str();
+}
+
+std::string buildAuditorTask(const shared::Plan &plan,
+                             const shared::WorkChunk &chunk,
+                             const std::string &task) {
+  std::ostringstream prompt;
+  prompt << "You are the auditor responsible for evidence-backed review of a "
+            "single work chunk.\n\n";
+  prompt << "Auditor Contract\n";
+  prompt << "- You do NOT own execution of this chunk.\n";
+  prompt << "- Verify implementation and review evidence; do not implement.\n";
+  prompt << "- Report a clear verdict with concrete evidence or identified gaps.\n";
+  prompt << "- If evidence is missing or incomplete, say exactly what is missing.\n\n";
+
+  prompt << "Plan Context\n";
+  prompt << "Plan Title: " << plan.title << "\n";
+  prompt << "Plan Objective: " << plan.objective << "\n";
+  prompt << "Plan Strategy Summary: " << plan.strategy << "\n\n";
+
+  prompt << "Assigned Chunk\n";
+  prompt << "Chunk ID: " << chunk.id << "\n";
+  prompt << "Chunk Title: " << chunk.title << "\n";
+  prompt << "Chunk Goal: " << chunk.goal << "\n";
+  prompt << "Chunk Context: " << chunk.context << "\n";
+  prompt << "Chunk Constraints: " << chunk.constraints << "\n";
+  prompt << "Chunk Completion: " << chunk.completion << "\n";
+  prompt << "Chunk Status: " << worktools::chunkStatusToString(chunk.status)
+         << "\n";
+  if (!chunk.assignedAgentId.empty()) {
+    prompt << "Assigned Executor: " << chunk.assignedAgentId << "\n";
+  }
+  if (!chunk.resultSummary.empty()) {
+    prompt << "Result Summary: " << chunk.resultSummary << "\n";
+  }
+  if (!chunk.reviewSummary.empty()) {
+    prompt << "Review Summary: " << chunk.reviewSummary << "\n";
+  }
+
+  // V2 rich chunk spec fields (only if present)
+  if (!chunk.filesToRead.empty()) {
+    prompt << "Files To Read: ";
+    for (size_t i = 0; i < chunk.filesToRead.size(); ++i) {
+      if (i > 0) prompt << ", ";
+      prompt << chunk.filesToRead[i];
+    }
+    prompt << "\n";
+  }
+  if (!chunk.filesToTouch.empty()) {
+    prompt << "Files To Touch: ";
+    for (size_t i = 0; i < chunk.filesToTouch.size(); ++i) {
+      if (i > 0) prompt << ", ";
+      prompt << chunk.filesToTouch[i];
+    }
+    prompt << "\n";
+  }
+  if (!chunk.cwd.empty()) {
+    prompt << "Working Directory: " << chunk.cwd << "\n";
+  }
+  if (!chunk.verificationCondition.empty()) {
+    prompt << "Verification Condition: " << chunk.verificationCondition << "\n";
+  }
+  if (!chunk.handoffNotes.empty()) {
+    prompt << "Handoff Notes: " << chunk.handoffNotes << "\n";
+  }
+
+  if (!chunk.tasks.empty()) {
+    prompt << "\nChunk Tasks\n";
+    prompt << "This chunk contains " << chunk.tasks.size()
+           << " internal tasks. Use these to anchor review evidence:\n";
+    for (const auto &t : chunk.tasks) {
+      std::string statusLabel;
+      switch (t.status) {
+      case shared::WorkChunkStatus::Ready:
+        statusLabel = "Ready";
+        break;
+      case shared::WorkChunkStatus::InProgress:
+        statusLabel = "InProgress";
+        break;
+      case shared::WorkChunkStatus::Implemented:
+        statusLabel = "Implemented";
+        break;
+      case shared::WorkChunkStatus::Verifying:
+        statusLabel = "Verifying";
+        break;
+      case shared::WorkChunkStatus::Done:
+        statusLabel = "Done";
+        break;
+      case shared::WorkChunkStatus::Blocked:
+        statusLabel = "Blocked";
+        break;
+      case shared::WorkChunkStatus::Failed:
+        statusLabel = "Failed";
+        break;
+      case shared::WorkChunkStatus::Cancelled:
+        statusLabel = "Cancelled";
+        break;
+      }
+      prompt << "- [" << statusLabel << "] " << t.title;
+      if (!t.goal.empty()) {
+        prompt << ": " << t.goal;
+      }
+      if (!t.notes.empty()) {
+        prompt << " (Note: " << t.notes << ")";
+      }
+      if (!t.verificationCondition.empty()) {
+        prompt << " (Verify: " << t.verificationCondition << ")";
+      }
+      prompt << "\n";
+    }
+  }
+
+  prompt << "\nReview Discipline\n";
+  prompt << "- Prefer direct evidence: tests, logs, file diffs, or runtime checks.\n";
+  prompt << "- Do not accept claims without evidence.\n";
+  prompt << "- Provide an explicit verdict: accept, reject, or needs more evidence.\n";
+  prompt << "- Report in a compact structure the lead can act on:\n";
+  prompt << "  Verdict: <accept/reject/needs-evidence>\n";
+  prompt << "  Evidence: <commands/tests/files>\n";
+  prompt << "  Gaps/Risks: <none or concrete issue>\n";
+  if (!task.empty()) {
+    prompt << "\nLead Notes\n" << task << "\n";
+  }
   return prompt.str();
 }
 
@@ -199,6 +399,13 @@ std::string buildDelegationTask(const SubagentInput &input,
     const shared::Plan plan = loadPlan(threadId, *input.plan_id);
     const shared::WorkChunk &chunk = findChunk(plan, *input.chunk_id);
     return buildExecutorTask(plan, chunk, input.task);
+  }
+
+  if (isAuditorPersona(input.persona) && input.plan_id.has_value() &&
+      input.chunk_id.has_value()) {
+    const shared::Plan plan = loadPlan(threadId, *input.plan_id);
+    const shared::WorkChunk &chunk = findChunk(plan, *input.chunk_id);
+    return buildAuditorTask(plan, chunk, input.task);
   }
 
   if (isWorkerPersona(input.persona)) {
@@ -298,7 +505,7 @@ std::shared_ptr<shared::JSONSchema> SubagentTool::getSchema() const {
                    ->setOptional()},
               {"chunk_id",
                shared::zString()
-                   ->describe("Optional assigned chunk for executor delegation")
+                   ->describe("Optional chunk to bind for executor/auditor delegation")
                    ->setOptional()},
               {"category",
                shared::zString()

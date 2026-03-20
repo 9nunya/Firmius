@@ -644,7 +644,31 @@ void TuiState::updateStatusModel() {
         firmius::core::AgentRegistry::instance().getAgent(focused_agent_id_);
     if (agent) {
       const auto &ctx = agent->getContext();
-      auto process_counts = stream_state_.getProcessCounts(focused_agent_id_);
+      ProcessRuntimeSnapshot runtime_snapshot;
+      runtime_snapshot.owned_process_ids = ctx.state.ownedProcesses;
+      runtime_snapshot.blocking_process_ids = ctx.state.blockingProcessIds;
+      const auto manager_blocking =
+          agent->getEnvironment()->getProcessManager().getBlockingProcessIds();
+      runtime_snapshot.blocking_process_ids.insert(
+          runtime_snapshot.blocking_process_ids.end(), manager_blocking.begin(),
+          manager_blocking.end());
+      std::unordered_set<std::string> dedup_blocking(
+          runtime_snapshot.blocking_process_ids.begin(),
+          runtime_snapshot.blocking_process_ids.end());
+      runtime_snapshot.blocking_process_ids.assign(dedup_blocking.begin(),
+                                                   dedup_blocking.end());
+      auto process_counts = stream_state_.getProcessCounts(
+          focused_agent_id_, &runtime_snapshot,
+          [&](const std::string &process_id) {
+            try {
+              return agent->getEnvironment()
+                  ->getProcessManager()
+                  .inspectProcess(process_id)
+                  .running;
+            } catch (...) {
+              return false;
+            }
+          });
       status_model_->status_text = statusToString(ctx.state.currentStatus);
       status_model_->model_name =
           ctx.config.providerId + "/" + ctx.config.modelId;

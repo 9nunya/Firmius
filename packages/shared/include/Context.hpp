@@ -188,7 +188,26 @@ struct ThreadMetadata {
 };
 
 /**
- * @brief Smallest persisted unit of plan execution in V1.
+ * @brief Execution task embedded beneath a chunk (V2 work language).
+ * One level of task depth only; no nested subtasks.
+ */
+struct WorkTask {
+  std::string id;                   ///< Stable task identifier within chunk.
+  std::string title;                ///< Short task title.
+  std::string goal;                 ///< Task description / objective.
+  WorkChunkStatus status = WorkChunkStatus::Ready; ///< Task execution status.
+  std::string notes;                ///< Optional constraints or implementation notes.
+  std::string verificationCondition; ///< Plain-English verification criterion.
+  std::string assignedWorkerId;     ///< Optional worker agent ID if delegated.
+  uint64_t createdAt = 0;
+  uint64_t updatedAt = 0;
+
+  bool operator==(const WorkTask &other) const = default;
+};
+
+/**
+ * @brief Smallest persisted unit of plan execution (V2 work language).
+ * Chunks may be flat (no tasks) or task-bearing (one level of tasks).
  */
 struct WorkChunk {
   std::string id;
@@ -206,6 +225,16 @@ struct WorkChunk {
   std::string reviewSummary;
   uint64_t createdAt = 0;
   uint64_t updatedAt = 0;
+
+  // V2 richer chunk spec fields
+  std::vector<std::string> filesToRead;       ///< Files the executor should read.
+  std::vector<std::string> filesToTouch;      ///< Files expected to be modified/created.
+  std::string cwd;                            ///< Working directory for execution.
+  std::string verificationCondition;          ///< Plain-English acceptance criterion.
+  std::string handoffNotes;                   ///< Context for executor handoff.
+
+  // V2 task structure (one level deep only)
+  std::vector<WorkTask> tasks;
 
   bool operator==(const WorkChunk &other) const = default;
 };

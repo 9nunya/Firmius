@@ -24,9 +24,16 @@ std::shared_ptr<shared::JSONSchema> ChunkUpdateTool::getSchema() const {
                      "Verifying", "Done", "Blocked", "Failed", "Cancelled"})
                   ->setOptional()},
              {"depends_on", zArray(zString())->setOptional()},
+             {"assigned_agent_id", zString()->setOptional()},
              {"attempt_count", zInteger()->setOptional()},
              {"result_summary", zString()->setOptional()},
              {"review_summary", zString()->setOptional()},
+             // V2 rich chunk spec fields (all optional)
+             {"files_to_read", zArray(zString())->setOptional()},
+             {"files_to_touch", zArray(zString())->setOptional()},
+             {"cwd", zString()->setOptional()},
+             {"verification_condition", zString()->setOptional()},
+             {"handoff_notes", zString()->setOptional()},
          })
       ->required({"plan_id", "chunk_id"});
 }
@@ -39,6 +46,7 @@ shared::ToolResult ChunkUpdateTool::execute(const rapidjson::Value &input,
     shared::WorkChunk originalChunk;
     shared::WorkChunk updatedChunk;
     const bool statusWasProvided = input.HasMember("status");
+    const bool assignedAgentWasProvided = input.HasMember("assigned_agent_id");
 
     auto updatedPlan = tm.mutatePlan(
         threadId, input["plan_id"].GetString(), [&](shared::Plan &plan) {
@@ -48,6 +56,31 @@ shared::ToolResult ChunkUpdateTool::execute(const rapidjson::Value &input,
                                               chunk);
           originalChunk = chunk;
           const bool dependsOnWasProvided = input.HasMember("depends_on");
+
+          const auto effectiveStatus =
+              statusWasProvided
+                  ? worktools::parseChunkStatus(input["status"].GetString())
+                  : chunk.status;
+
+          if (assignedAgentWasProvided) {
+            const auto status = effectiveStatus;
+            const bool allowReassign =
+                status == shared::WorkChunkStatus::Ready ||
+                status == shared::WorkChunkStatus::Failed ||
+                status == shared::WorkChunkStatus::Blocked;
+            if (!allowReassign) {
+              throw std::runtime_error(
+                  "assigned_agent_id may be updated only when chunk status is "
+                  "Ready, Failed, or Blocked");
+            }
+            const std::string newAgentId =
+                input["assigned_agent_id"].GetString();
+            if (!newAgentId.empty()) {
+              worktools::validateExecutorAssignmentInvariant(
+                  tm, threadId, plan.id, chunk.id, newAgentId);
+            }
+            chunk.assignedAgentId = newAgentId;
+          }
 
           if (input.HasMember("title")) {
             chunk.title = input["title"].GetString();
@@ -68,8 +101,7 @@ shared::ToolResult ChunkUpdateTool::execute(const rapidjson::Value &input,
             chunk.planningGate = input["planning_gate"].GetBool();
           }
           if (input.HasMember("status")) {
-            chunk.status =
-                worktools::parseChunkStatus(input["status"].GetString());
+            chunk.status = effectiveStatus;
           }
           if (input.HasMember("depends_on")) {
             chunk.dependsOn = worktools::parseStringArray(input, "depends_on");
@@ -82,6 +114,22 @@ shared::ToolResult ChunkUpdateTool::execute(const rapidjson::Value &input,
           }
           if (input.HasMember("review_summary")) {
             chunk.reviewSummary = input["review_summary"].GetString();
+          }
+          // V2 rich chunk spec fields
+          if (input.HasMember("files_to_read")) {
+            chunk.filesToRead = worktools::parseStringArray(input, "files_to_read");
+          }
+          if (input.HasMember("files_to_touch")) {
+            chunk.filesToTouch = worktools::parseStringArray(input, "files_to_touch");
+          }
+          if (input.HasMember("cwd")) {
+            chunk.cwd = input["cwd"].GetString();
+          }
+          if (input.HasMember("verification_condition")) {
+            chunk.verificationCondition = input["verification_condition"].GetString();
+          }
+          if (input.HasMember("handoff_notes")) {
+            chunk.handoffNotes = input["handoff_notes"].GetString();
           }
 
           if (statusWasProvided &&
@@ -113,6 +161,11 @@ shared::ToolResult ChunkUpdateTool::execute(const rapidjson::Value &input,
 
     worktools::emitWorkEvent(
         shared::ChunkUpdated{threadId, updatedPlan.id, updatedChunk});
+    if (originalChunk.assignedAgentId != updatedChunk.assignedAgentId) {
+      worktools::emitWorkEvent(shared::ChunkAssigned{
+          threadId, updatedPlan.id, updatedChunk.id,
+          updatedChunk.assignedAgentId, updatedChunk});
+    }
     if (originalChunk.status != updatedChunk.status) {
       worktools::emitWorkEvent(shared::ChunkStatusChanged{
           threadId, updatedPlan.id, updatedChunk.id, originalChunk.status,

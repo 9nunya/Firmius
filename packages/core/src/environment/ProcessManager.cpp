@@ -31,9 +31,7 @@ std::string ProcessManager::spawnProcess(const std::string& command,
     
     proc->onOutput([this, id](const std::string& output, bool isError) {
         std::lock_guard<std::mutex> lock(callbackMutex_);
-        if (eventCallback_) {
-            eventCallback_(ProcessOutputDelta{id, output, isError, false});
-        }
+        emitOrBufferProcessOutputLocked(id, output, isError, false);
     });
     
     host_->registerBackgroundProcess(id, std::move(proc));
@@ -66,6 +64,7 @@ void ProcessManager::emitProcessSpawned(const std::string& processId,
                                        const std::string& toolCallId,
                                        const std::string& command) {
     std::lock_guard<std::mutex> lock(callbackMutex_);
+    spawnedEventEmitted_.insert(processId);
     if (eventCallback_) {
         AgentProcessSpawned event;
         event.processId = processId;
@@ -73,6 +72,7 @@ void ProcessManager::emitProcessSpawned(const std::string& processId,
         event.command = command;
         eventCallback_(event);
     }
+    flushBufferedProcessOutputLocked(processId);
 }
 
 void ProcessManager::addBlockingProcessId(const std::string& id) {
@@ -127,6 +127,11 @@ void ProcessManager::cleanup() {
         processIds_.clear();
         blockingProcessIds_.clear();
     }
+    {
+        std::lock_guard<std::mutex> lock(callbackMutex_);
+        spawnedEventEmitted_.clear();
+        pendingOutput_.clear();
+    }
 
     for (const auto& id : processIds) {
         try {
@@ -151,10 +156,8 @@ void ProcessManager::monitorProcessCompletion(const std::string& id) {
             if (!snap.running) {
                 {
                     std::lock_guard<std::mutex> lock(callbackMutex_);
-                    if (eventCallback_) {
-                        eventCallback_(ProcessOutputDelta{
-                            id, "", false, true, snap.exitCode, snap.elapsedMs});
-                    }
+                    emitOrBufferProcessOutputLocked(
+                        id, "", false, true, snap.exitCode, snap.elapsedMs);
                 }
                 finishTrackedProcess(id);
                 return;
@@ -173,6 +176,39 @@ void ProcessManager::finishTrackedProcess(const std::string& id) {
     blockingProcessIds_.erase(
         std::remove(blockingProcessIds_.begin(), blockingProcessIds_.end(), id),
         blockingProcessIds_.end());
+}
+
+void ProcessManager::emitOrBufferProcessOutputLocked(const std::string& processId,
+                                                    const std::string& output,
+                                                    bool isStderr,
+                                                    bool finished,
+                                                    int exitCode,
+                                                    double durationMs) {
+    if (spawnedEventEmitted_.count(processId) == 0) {
+        pendingOutput_[processId].push_back(
+            PendingProcessOutput{output, isStderr, finished, exitCode, durationMs});
+        return;
+    }
+    if (!eventCallback_) {
+        return;
+    }
+    eventCallback_(ProcessOutputDelta{processId, output, isStderr, finished, exitCode,
+                                      durationMs});
+}
+
+void ProcessManager::flushBufferedProcessOutputLocked(const std::string& processId) {
+    auto it = pendingOutput_.find(processId);
+    if (it == pendingOutput_.end()) {
+        return;
+    }
+    if (eventCallback_) {
+        for (const auto& pending : it->second) {
+            eventCallback_(ProcessOutputDelta{processId, pending.output,
+                                              pending.isStderr, pending.finished,
+                                              pending.exitCode, pending.durationMs});
+        }
+    }
+    pendingOutput_.erase(it);
 }
 
 } // namespace firmius::core

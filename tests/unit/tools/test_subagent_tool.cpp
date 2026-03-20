@@ -130,6 +130,10 @@ protected:
     workerFile << "---\nname: worker\ntitle: Worker\n---\nWorker identity";
     workerFile.close();
 
+    std::ofstream auditorFile(testPromptsDir / "auditor.md");
+    auditorFile << "---\nname: auditor\ntitle: Auditor\n---\nAuditor identity";
+    auditorFile.close();
+
     auto unique =
         "firmius_subagent_home_" +
         std::to_string(static_cast<long long>(
@@ -498,6 +502,101 @@ TEST_F(SubagentToolTest, executorRetaskUsesChunkAwareDelegationContext) {
   EXPECT_TRUE(updatedPlan.chunks[1].assignedAgentId.empty());
 }
 
+TEST_F(SubagentToolTest, auditorRetaskBuildsChunkAwareReviewContext) {
+  const std::string threadId = createThread();
+
+  Plan plan;
+  plan.threadId = threadId;
+  plan.id = "plan-audit";
+  plan.title = "Audit Plan";
+  plan.objective = "Verify executor output";
+  plan.strategy = "Auditor gets chunk-bound handoff";
+
+  WorkChunk chunk;
+  chunk.id = "chunk-audit";
+  chunk.title = "Audit Target";
+  chunk.goal = "Verify implementation";
+  chunk.context = "Audit context";
+  chunk.constraints = "No execution";
+  chunk.completion = "Evidence-backed verdict";
+  chunk.status = WorkChunkStatus::Implemented;
+  chunk.assignedAgentId = "executor-agent";
+  chunk.resultSummary = "Implemented scoped changes.";
+  chunk.reviewSummary = "Preliminary review exists.";
+  chunk.filesToRead = {"src/a.cpp", "include/a.hpp"};
+  chunk.filesToTouch = {"src/a.cpp"};
+  chunk.cwd = "/work/audit";
+  chunk.verificationCondition = "All unit tests pass.";
+  chunk.handoffNotes = "Focus on verification evidence.";
+
+  WorkTask task1;
+  task1.title = "Verify unit tests";
+  task1.goal = "Run focused unit tests";
+  task1.status = WorkChunkStatus::Implemented;
+  WorkTask task2;
+  task2.title = "Review diff";
+  task2.notes = "Check for scope drift";
+  task2.status = WorkChunkStatus::Ready;
+  chunk.tasks = {task1, task2};
+
+  plan.chunks = {chunk};
+  threadManager_->writePlan(threadId, plan);
+
+  auto taskPromise = std::make_shared<std::promise<std::string>>();
+  auto taskFuture = taskPromise->get_future();
+  registerRetaskableAgent("auditor-agent", "auditor-slot", taskPromise);
+
+  SubagentTool tool;
+  SubagentInput input;
+  input.persona = "auditor";
+  input.task = "Validate evidence and report verdict.";
+  input.agent_id = "auditor-agent";
+  input.plan_id = plan.id;
+  input.chunk_id = chunk.id;
+  input.name = "auditor-slot";
+  input.title = "Auditor Slot";
+  input.async = true;
+
+  MockAgent parent;
+  AgentContext ctx_obj = makeParentContext(threadId);
+  EXPECT_CALL(parent, getContext()).WillRepeatedly(ReturnRef(ctx_obj));
+
+  NiceMock<MockHost> host;
+  ToolContext toolCtx{host, parent, "test-call-id"};
+
+  ToolResult result = tool.execute(input, toolCtx);
+
+  ASSERT_TRUE(result.success) << result.error;
+  const std::string delegatedTask = taskFuture.get();
+  EXPECT_THAT(delegatedTask,
+              ::testing::HasSubstr("You are the auditor responsible for evidence-backed review"));
+  EXPECT_THAT(delegatedTask,
+              ::testing::HasSubstr("Plan Title: Audit Plan"));
+  EXPECT_THAT(delegatedTask,
+              ::testing::HasSubstr("Plan Objective: Verify executor output"));
+  EXPECT_THAT(delegatedTask,
+              ::testing::HasSubstr("Plan Strategy Summary: Auditor gets chunk-bound handoff"));
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("Chunk ID: chunk-audit"));
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("Chunk Title: Audit Target"));
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("Chunk Goal: Verify implementation"));
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("Chunk Constraints: No execution"));
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("Chunk Completion: Evidence-backed verdict"));
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("Chunk Status: Implemented"));
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("Assigned Executor: executor-agent"));
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("Result Summary: Implemented scoped changes."));
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("Review Summary: Preliminary review exists."));
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("Files To Read: src/a.cpp, include/a.hpp"));
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("Files To Touch: src/a.cpp"));
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("Working Directory: /work/audit"));
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("Verification Condition: All unit tests pass."));
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("Handoff Notes: Focus on verification evidence."));
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("Chunk Tasks"));
+  EXPECT_THAT(delegatedTask,
+              ::testing::HasSubstr("Verdict: <accept/reject/needs-evidence>"));
+  EXPECT_THAT(delegatedTask,
+              ::testing::HasSubstr("Lead Notes\nValidate evidence and report verdict."));
+}
+
 TEST_F(SubagentToolTest, workerRetaskStaysBoundedAndDoesNotClaimChunkOwnership) {
   const std::string threadId = createThread();
   const std::string planId = createPlanWithChunks(threadId);
@@ -852,4 +951,278 @@ TEST_F(SubagentToolTest, missingCategoryFallsBackWithWarning) {
   ToolResult result = tool.execute(input, toolCtx);
   ASSERT_TRUE(result.success) << result.error;
   EXPECT_THAT(result.data, ::testing::HasSubstr("routing_warning"));
+}
+
+TEST_F(SubagentToolTest, executorHandoffIncludesV2RichSpecFields) {
+  const std::string threadId = createThread();
+  
+  // Create plan with V2 rich spec fields
+  Plan plan;
+  plan.threadId = threadId;
+  plan.id = "plan-v2";
+  plan.title = "V2 Integration Test";
+  plan.objective = "Test V2 field handoff";
+  plan.strategy = "Lead uses rich chunk specs";
+
+  WorkChunk chunk;
+  chunk.id = "chunk-v2";
+  chunk.title = "V2 Rich Spec Chunk";
+  chunk.goal = "Test V2 field persistence and handoff";
+  chunk.context = "Integration test for V2 work language";
+  chunk.constraints = "Must include all V2 fields";
+  chunk.completion = "V2 fields present in executor handoff";
+  chunk.status = WorkChunkStatus::Ready;
+  
+  // V2 rich spec fields
+  chunk.filesToRead = {"src/parser/interface.hpp", "src/lexer/spec.txt"};
+  chunk.filesToTouch = {"src/parser/impl.cpp", "src/lexer/impl.cpp"};
+  chunk.cwd = "/work/language";
+  chunk.verificationCondition = "Compiler pipeline builds, unit tests pass, and parser/lexer integration works";
+  chunk.handoffNotes = "Focus on correctness over optimization. Edge cases in anchor handling.";
+
+  plan.chunks = {chunk};
+  threadManager_->writePlan(threadId, plan);
+
+  auto taskPromise = std::make_shared<std::promise<std::string>>();
+  auto taskFuture = taskPromise->get_future();
+  registerRetaskableAgent("executor-agent", "executor-slot", taskPromise);
+
+  SubagentTool tool;
+  SubagentInput input;
+  input.persona = "executor";
+  input.task = "Implement V2 chunk with rich spec.";
+  input.agent_id = "executor-agent";
+  input.plan_id = "plan-v2";
+  input.chunk_id = "chunk-v2";
+  input.name = "executor-slot";
+  input.title = "Executor Slot";
+  input.async = true;
+
+  MockAgent parent;
+  AgentContext ctx_obj = makeParentContext(threadId);
+  EXPECT_CALL(parent, getContext()).WillRepeatedly(ReturnRef(ctx_obj));
+
+  NiceMock<MockHost> host;
+  ToolContext toolCtx{host, parent, "test-call-id"};
+
+  ToolResult result = tool.execute(input, toolCtx);
+
+  ASSERT_TRUE(result.success) << result.error;
+  const std::string delegatedTask = taskFuture.get();
+  
+  // Verify V2 rich spec fields are present in executor handoff
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("Files To Read:"));
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("src/parser/interface.hpp"));
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("src/lexer/spec.txt"));
+  
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("Files To Touch:"));
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("src/parser/impl.cpp"));
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("src/lexer/impl.cpp"));
+  
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("Working Directory:"));
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("/work/language"));
+  
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("Verification Condition:"));
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("Compiler pipeline builds, unit tests pass"));
+
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("Handoff Notes:"));
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("Focus on correctness over optimization"));
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("Edge cases in anchor handling"));
+}
+
+TEST_F(SubagentToolTest, executorHandoffIncludesChunkTasks) {
+  const std::string threadId = createThread();
+  
+  // Create plan with task-bearing chunk
+  Plan plan;
+  plan.threadId = threadId;
+  plan.id = "plan-tasks";
+  plan.title = "Task-Bearing Chunk Test";
+  plan.objective = "Test task handoff";
+  plan.strategy = "Lead uses task-bearing chunks";
+
+  WorkChunk chunk;
+  chunk.id = "chunk-tasks";
+  chunk.title = "Core Infrastructure";
+  chunk.goal = "Implement core language infrastructure";
+  chunk.context = "Multi-surface implementation";
+  chunk.constraints = "No external dependencies";
+  chunk.completion = "All tasks complete";
+  chunk.status = WorkChunkStatus::Ready;
+  
+  // V2 task structure
+  WorkTask task1;
+  task1.id = "task-lexer";
+  task1.title = "Lexer impl";
+  task1.goal = "Implement lexer with token types and stream output";
+  task1.status = WorkChunkStatus::Done;
+  task1.notes = "Use existing token definitions";
+  task1.verificationCondition = "Lexer produces correct token stream";
+  
+  WorkTask task2;
+  task2.id = "task-parser";
+  task2.title = "AST+Parser impl";
+  task2.goal = "Define AST nodes and implement parser";
+  task2.status = WorkChunkStatus::InProgress;
+  
+  WorkTask task3;
+  task3.id = "task-visitor";
+  task3.title = "Visitor + Compiler";
+  task3.goal = "Implement visitor pattern and compilation";
+  task3.status = WorkChunkStatus::Ready;
+  task3.verificationCondition = "Compiler pipeline builds and unit tests pass";
+
+  chunk.tasks = {task1, task2, task3};
+  plan.chunks = {chunk};
+  threadManager_->writePlan(threadId, plan);
+
+  auto taskPromise = std::make_shared<std::promise<std::string>>();
+  auto taskFuture = taskPromise->get_future();
+  registerRetaskableAgent("executor-agent", "executor-slot", taskPromise);
+
+  SubagentTool tool;
+  SubagentInput input;
+  input.persona = "executor";
+  input.task = "Implement task-bearing chunk.";
+  input.agent_id = "executor-agent";
+  input.plan_id = "plan-tasks";
+  input.chunk_id = "chunk-tasks";
+  input.name = "executor-slot";
+  input.title = "Executor Slot";
+  input.async = true;
+
+  MockAgent parent;
+  AgentContext ctx_obj = makeParentContext(threadId);
+  EXPECT_CALL(parent, getContext()).WillRepeatedly(ReturnRef(ctx_obj));
+
+  NiceMock<MockHost> host;
+  ToolContext toolCtx{host, parent, "test-call-id"};
+
+  ToolResult result = tool.execute(input, toolCtx);
+
+  ASSERT_TRUE(result.success) << result.error;
+  const std::string delegatedTask = taskFuture.get();
+  
+  // Verify chunk tasks section is present
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("Chunk Tasks"));
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("3 internal tasks"));
+  
+  // Verify task titles appear
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("Lexer impl"));
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("AST+Parser impl"));
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("Visitor + Compiler"));
+  
+  // Verify task goals appear
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("Implement lexer with token types"));
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("Define AST nodes and implement parser"));
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("Implement visitor pattern"));
+  
+  // Verify task statuses appear
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("[Done]"));
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("[InProgress]"));
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("[Ready]"));
+  
+  // Verify task notes appear when present
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("Note:"));
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("Use existing token definitions"));
+  
+  // Verify task verification conditions appear when present
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("Verify:"));
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("Lexer produces correct token stream"));
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("Compiler pipeline builds and unit tests pass"));
+}
+
+TEST_F(SubagentToolTest, executorHandoffPreservesAllTaskStatuses) {
+  const std::string threadId = createThread();
+  
+  // Create plan with task-bearing chunk using ALL status values
+  Plan plan;
+  plan.threadId = threadId;
+  plan.id = "plan-all-statuses";
+  plan.title = "All Statuses Test";
+  plan.objective = "Test all task status rendering";
+  plan.strategy = "Test full WorkChunkStatus enum";
+
+  WorkChunk chunk;
+  chunk.id = "chunk-all-statuses";
+  chunk.title = "Full Status Coverage";
+  chunk.goal = "Test all task statuses";
+  chunk.context = "Regression test for status rendering";
+  chunk.constraints = "None";
+  chunk.completion = "All statuses rendered truthfully";
+  chunk.status = WorkChunkStatus::Ready;
+  
+  // Tasks covering statuses that were previously mislabeled
+  WorkTask taskReady;
+  taskReady.id = "task-ready";
+  taskReady.title = "Ready Task";
+  taskReady.goal = "Not started yet";
+  taskReady.status = WorkChunkStatus::Ready;
+  
+  WorkTask taskImplemented;
+  taskImplemented.id = "task-implemented";
+  taskImplemented.title = "Implemented Task";
+  taskImplemented.goal = "Implementation complete, awaiting verification";
+  taskImplemented.status = WorkChunkStatus::Implemented;
+  
+  WorkTask taskVerifying;
+  taskVerifying.id = "task-verifying";
+  taskVerifying.title = "Verifying Task";
+  taskVerifying.goal = "Running verification now";
+  taskVerifying.status = WorkChunkStatus::Verifying;
+  
+  WorkTask taskCancelled;
+  taskCancelled.id = "task-cancelled";
+  taskCancelled.title = "Cancelled Task";
+  taskCancelled.goal = "This task was cancelled";
+  taskCancelled.status = WorkChunkStatus::Cancelled;
+
+  chunk.tasks = {taskReady, taskImplemented, taskVerifying, taskCancelled};
+  plan.chunks = {chunk};
+  threadManager_->writePlan(threadId, plan);
+
+  auto taskPromise = std::make_shared<std::promise<std::string>>();
+  auto taskFuture = taskPromise->get_future();
+  registerRetaskableAgent("executor-agent", "executor-slot", taskPromise);
+
+  SubagentTool tool;
+  SubagentInput input;
+  input.persona = "executor";
+  input.task = "Test all statuses.";
+  input.agent_id = "executor-agent";
+  input.plan_id = "plan-all-statuses";
+  input.chunk_id = "chunk-all-statuses";
+  input.name = "executor-slot";
+  input.title = "Executor Slot";
+  input.async = true;
+
+  MockAgent parent;
+  AgentContext ctx_obj = makeParentContext(threadId);
+  EXPECT_CALL(parent, getContext()).WillRepeatedly(ReturnRef(ctx_obj));
+
+  NiceMock<MockHost> host;
+  ToolContext toolCtx{host, parent, "test-call-id"};
+
+  ToolResult result = tool.execute(input, toolCtx);
+
+  ASSERT_TRUE(result.success) << result.error;
+  const std::string delegatedTask = taskFuture.get();
+  
+  // Verify all task statuses are rendered truthfully (not collapsed to Ready)
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("[Ready]"));
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("[Implemented]"));
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("[Verifying]"));
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("[Cancelled]"));
+  
+  // Verify task titles appear with correct statuses
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("[Ready] Ready Task"));
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("[Implemented] Implemented Task"));
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("[Verifying] Verifying Task"));
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("[Cancelled] Cancelled Task"));
+  
+  // Verify task goals appear
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("Not started yet"));
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("Implementation complete, awaiting verification"));
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("Running verification now"));
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("This task was cancelled"));
 }

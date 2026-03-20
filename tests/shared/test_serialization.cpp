@@ -736,3 +736,208 @@ TEST(Serialization, CancelledStatusRoundtrip) {
   EXPECT_EQ(restored.state.completedActions[0], "Created test file");
   EXPECT_EQ(restored.state.completedActions[1], "Updated documentation");
 }
+
+// V2 Work Language Tests
+
+TEST(Serialization, WorkTaskRoundtrip) {
+  WorkTask original;
+  original.id = "task-1";
+  original.title = "Lexer impl";
+  original.goal = "Implement lexer with token types and stream output";
+  original.status = WorkChunkStatus::InProgress;
+  original.notes = "Use existing token definitions from spec";
+  original.verificationCondition = "Lexer produces correct token stream for test inputs";
+  original.assignedWorkerId = "worker-lexer-1";
+  original.createdAt = 100;
+  original.updatedAt = 200;
+
+  auto doc = toJson(original);
+  auto restored = workTaskFromJson(doc);
+
+  EXPECT_EQ(original, restored);
+}
+
+TEST(Serialization, WorkTaskDefaultsForMissingFields) {
+  rapidjson::Document doc;
+  doc.SetObject();
+  auto &a = doc.GetAllocator();
+  doc.AddMember("id", "task-legacy", a);
+  doc.AddMember("title", "Legacy task", a);
+
+  auto task = workTaskFromJson(doc);
+  EXPECT_EQ(task.id, "task-legacy");
+  EXPECT_EQ(task.title, "Legacy task");
+  EXPECT_EQ(task.status, WorkChunkStatus::Ready);
+  EXPECT_TRUE(task.notes.empty());
+  EXPECT_TRUE(task.verificationCondition.empty());
+  EXPECT_TRUE(task.assignedWorkerId.empty());
+}
+
+TEST(Serialization, WorkChunkWithTasksRoundtrip) {
+  WorkChunk original;
+  original.id = "chunk-1";
+  original.title = "Core Infrastructure";
+  original.goal = "Implement core language infrastructure";
+  original.context = "Multi-surface implementation chunk";
+  original.constraints = "No external dependencies";
+  original.completion = "Lexer, parser, AST, and visitor pattern working";
+  original.planningGate = false;
+  original.status = WorkChunkStatus::InProgress;
+  original.dependsOn = {"chunk-0"};
+  original.assignedAgentId = "executor-1";
+  original.attemptCount = 1;
+  original.resultSummary = "Lexer complete, parser in progress";
+  original.reviewSummary = "";
+  original.createdAt = 100;
+  original.updatedAt = 200;
+  
+  // V2 richer chunk spec fields
+  original.filesToRead = {"src/parser/interface.hpp", "src/lexer/spec.txt"};
+  original.filesToTouch = {"src/lexer/impl.cpp", "src/parser/impl.cpp", "src/ast/nodes.hpp"};
+  original.cwd = "/work/language";
+  original.verificationCondition = "Compiler pipeline builds, unit tests pass, and parser/lexer integration works";
+  original.handoffNotes = "Focus on correctness over optimization at this stage";
+  
+  // V2 task structure
+  WorkTask task1;
+  task1.id = "task-1";
+  task1.title = "Lexer impl";
+  task1.goal = "Implement lexer with token types and stream output";
+  task1.status = WorkChunkStatus::Done;
+  task1.createdAt = 101;
+  task1.updatedAt = 150;
+  
+  WorkTask task2;
+  task2.id = "task-2";
+  task2.title = "AST+Parser impl";
+  task2.goal = "Define AST nodes and implement parser";
+  task2.status = WorkChunkStatus::InProgress;
+  task2.createdAt = 151;
+  task2.updatedAt = 200;
+  
+  WorkTask task3;
+  task3.id = "task-3";
+  task3.title = "Visitor + Compiler";
+  task3.goal = "Implement visitor pattern and compilation pipeline";
+  task3.status = WorkChunkStatus::Ready;
+  
+  WorkTask task4;
+  task4.id = "task-4";
+  task4.title = "Unit tests";
+  task4.goal = "Write focused unit tests for lexer, parser, and compiler";
+  task4.status = WorkChunkStatus::Ready;
+  
+  original.tasks.push_back(task1);
+  original.tasks.push_back(task2);
+  original.tasks.push_back(task3);
+  original.tasks.push_back(task4);
+
+  auto doc = toJson(original);
+  auto restored = workChunkFromJson(doc);
+
+  EXPECT_EQ(original, restored);
+  EXPECT_EQ(restored.tasks.size(), 4u);
+  EXPECT_EQ(restored.filesToRead.size(), 2u);
+  EXPECT_EQ(restored.filesToTouch.size(), 3u);
+}
+
+TEST(Serialization, WorkChunkFlatWithoutTasksRoundtrip) {
+  WorkChunk original;
+  original.id = "chunk-flat";
+  original.title = "Project Setup";
+  original.goal = "Initialize project structure";
+  original.status = WorkChunkStatus::Done;
+  original.createdAt = 100;
+  original.updatedAt = 200;
+  // No tasks - flat chunk
+
+  auto doc = toJson(original);
+  auto restored = workChunkFromJson(doc);
+
+  EXPECT_EQ(original, restored);
+  EXPECT_TRUE(restored.tasks.empty());
+  EXPECT_TRUE(restored.filesToRead.empty());
+  EXPECT_TRUE(restored.filesToTouch.empty());
+}
+
+TEST(Serialization, WorkChunkRichSpecFieldsRoundtrip) {
+  WorkChunk original;
+  original.id = "chunk-rich";
+  original.title = "Rich Spec Chunk";
+  original.goal = "Test rich spec fields";
+  original.status = WorkChunkStatus::Ready;
+  
+  original.filesToRead = {"config.yml", "src/main.cpp"};
+  original.filesToTouch = {"src/new_feature.cpp", "tests/new_feature_test.cpp"};
+  original.cwd = "/work/project";
+  original.verificationCondition = "Build succeeds and new feature tests pass";
+  original.handoffNotes = "This chunk requires careful attention to edge cases";
+
+  auto doc = toJson(original);
+  auto restored = workChunkFromJson(doc);
+
+  EXPECT_EQ(original, restored);
+  EXPECT_EQ(restored.filesToRead.size(), 2u);
+  EXPECT_EQ(restored.filesToTouch.size(), 2u);
+  EXPECT_EQ(restored.cwd, "/work/project");
+  EXPECT_EQ(restored.verificationCondition, "Build succeeds and new feature tests pass");
+  EXPECT_EQ(restored.handoffNotes, "This chunk requires careful attention to edge cases");
+}
+
+TEST(Serialization, PlanWithMixedDepthChunksRoundtrip) {
+  Plan original;
+  original.id = "plan-v2";
+  original.threadId = "thread-1";
+  original.title = "Forge Language Implementation";
+  original.objective = "Implement language toolchain";
+  original.context = "Mixed-depth plan with flat and task-bearing chunks";
+  original.strategy = "Phase implementation by surface area";
+  original.status = PlanStatus::Active;
+  original.notes = "V2 work language plan";
+  original.createdAt = 100;
+  original.updatedAt = 200;
+  
+  // Flat chunk (no tasks)
+  WorkChunk flat_chunk;
+  flat_chunk.id = "chunk-setup";
+  flat_chunk.title = "Project Setup";
+  flat_chunk.goal = "Initialize project structure";
+  flat_chunk.status = WorkChunkStatus::Done;
+  flat_chunk.createdAt = 100;
+  flat_chunk.updatedAt = 150;
+  
+  // Task-bearing chunk
+  WorkChunk task_chunk;
+  task_chunk.id = "chunk-core";
+  task_chunk.title = "Core Infrastructure";
+  task_chunk.goal = "Implement core language infrastructure";
+  task_chunk.status = WorkChunkStatus::InProgress;
+  task_chunk.createdAt = 150;
+  task_chunk.updatedAt = 200;
+  
+  WorkTask task1;
+  task1.id = "task-lexer";
+  task1.title = "Lexer impl";
+  task1.goal = "Implement lexer";
+  task1.status = WorkChunkStatus::Done;
+  
+  WorkTask task2;
+  task2.id = "task-parser";
+  task2.title = "AST+Parser impl";
+  task2.goal = "Define AST and implement parser";
+  task2.status = WorkChunkStatus::InProgress;
+  
+  task_chunk.tasks.push_back(task1);
+  task_chunk.tasks.push_back(task2);
+  
+  original.chunks.push_back(flat_chunk);
+  original.chunks.push_back(task_chunk);
+
+  auto doc = toJson(original);
+  auto restored = planFromJson(doc);
+
+  EXPECT_EQ(original, restored);
+  EXPECT_EQ(restored.chunks.size(), 2u);
+  EXPECT_TRUE(restored.chunks[0].tasks.empty());  // Flat chunk
+  EXPECT_EQ(restored.chunks[1].tasks.size(), 2u); // Task-bearing chunk
+}

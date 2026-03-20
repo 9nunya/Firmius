@@ -250,10 +250,87 @@ void ActivePlanState::rebuildModel() {
   model_.chunks.reserve(active_plan_->chunks.size());
 
   for (const auto &chunk : active_plan_->chunks) {
-    model_.chunks.push_back(
-        PlanLaneChunkRow{chunk.id, chunk.title, chunk.status,
-                         statusLabel(chunk.status)});
+    PlanLaneChunkRow row;
+    row.id = chunk.id;
+    row.title = chunk.title;
+    row.status = chunk.status;
+    row.status_label = statusLabel(chunk.status);
+    // V2: Show task count for task-bearing chunks
+    if (!chunk.tasks.empty()) {
+      row.task_count = chunk.tasks.size();
+    }
+    model_.chunks.push_back(row);
   }
+  
+  // Rebuild focused chunk if set
+  if (focused_chunk_.has_value()) {
+    rebuildFocusedChunk();
+  }
+}
+
+void ActivePlanState::rebuildFocusedChunk() {
+  if (!focused_chunk_.has_value() || !active_plan_.has_value()) {
+    return;
+  }
+  
+  // Find the chunk in the active plan
+  auto it = std::find_if(active_plan_->chunks.begin(), active_plan_->chunks.end(),
+                         [&](const WorkChunk &chunk) {
+                           return chunk.id == focused_chunk_->chunk_id;
+                         });
+  if (it == active_plan_->chunks.end()) {
+    focused_chunk_.reset();
+    return;
+  }
+  
+  const auto &chunk = *it;
+  focused_chunk_->chunk_title = chunk.title;
+  focused_chunk_->chunk_goal = chunk.goal;
+  focused_chunk_->chunk_context = chunk.context;
+  focused_chunk_->chunk_constraints = chunk.constraints;
+  focused_chunk_->chunk_completion = chunk.completion;
+  focused_chunk_->verification_condition = chunk.verificationCondition;
+  focused_chunk_->handoff_notes = chunk.handoffNotes;
+  focused_chunk_->status = chunk.status;
+  focused_chunk_->status_label = statusLabel(chunk.status);
+  
+  // V2: Rebuild task rows
+  focused_chunk_->tasks.clear();
+  for (const auto &task : chunk.tasks) {
+    ChunkDetailModel::TaskRow task_row;
+    task_row.id = task.id;
+    task_row.title = task.title;
+    task_row.goal = task.goal;
+    task_row.status = task.status;
+    task_row.status_label = statusLabel(task.status);
+    task_row.notes = task.notes;
+    task_row.verification_condition = task.verificationCondition;
+    focused_chunk_->tasks.push_back(task_row);
+  }
+}
+
+void ActivePlanState::setFocusedChunk(const std::string &chunk_id) {
+  if (!active_plan_.has_value()) {
+    return;
+  }
+  
+  // Find the chunk
+  auto it = std::find_if(active_plan_->chunks.begin(), active_plan_->chunks.end(),
+                         [&](const WorkChunk &chunk) {
+                           return chunk.id == chunk_id;
+                         });
+  if (it == active_plan_->chunks.end()) {
+    focused_chunk_.reset();
+    return;
+  }
+  
+  focused_chunk_ = ChunkDetailModel();
+  focused_chunk_->chunk_id = chunk_id;
+  rebuildFocusedChunk();
+}
+
+const std::optional<ChunkDetailModel> &ActivePlanState::focusedChunk() const {
+  return focused_chunk_;
 }
 
 } // namespace firmius::tui

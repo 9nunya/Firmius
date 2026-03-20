@@ -20,6 +20,8 @@
 #include <iostream>
 #include <limits>
 #include <sstream>
+#include <string_view>
+#include <unordered_map>
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
@@ -27,6 +29,9 @@
 namespace firmius::core {
 
 namespace {
+std::string toLowerCopy(std::string value);
+std::string latestUserText(const AgentContext &context);
+
 constexpr std::uint32_t kMissingToolCallIndex =
     std::numeric_limits<std::uint32_t>::max();
 
@@ -110,6 +115,256 @@ struct TodoStateSnapshot {
   bool hasIncomplete = false;
 };
 
+struct PlanStateSnapshot {
+  bool hasActivePlan = false;
+  bool activePlanDone = true;
+  bool activePlanKnown = true;
+};
+
+enum class TodoEnforcementRole { Lead, Executor, Auditor, Worker, Scout, Unknown };
+
+TodoEnforcementRole todoRoleForPersona(const std::string &persona) {
+  const std::string lowered =
+      toLowerCopy(shared::StringUtil::trim(persona));
+  if (lowered == "lead") {
+    return TodoEnforcementRole::Lead;
+  }
+  if (lowered == "executor") {
+    return TodoEnforcementRole::Executor;
+  }
+  if (lowered == "auditor") {
+    return TodoEnforcementRole::Auditor;
+  }
+  if (lowered == "worker") {
+    return TodoEnforcementRole::Worker;
+  }
+  if (lowered == "scout") {
+    return TodoEnforcementRole::Scout;
+  }
+  return TodoEnforcementRole::Unknown;
+}
+
+bool hasAssignedChunk(const AgentContext &context) {
+  if (!context.history || context.history->threadId.empty()) {
+    return false;
+  }
+  if (context.identity.id.empty()) {
+    return false;
+  }
+
+  try {
+    ThreadManager tm(threadStorageRootPath());
+    for (const auto &plan : tm.listPlans(context.history->threadId)) {
+      for (const auto &chunk : plan.chunks) {
+        if (chunk.assignedAgentId == context.identity.id) {
+          return true;
+        }
+      }
+    }
+  } catch (...) {
+  }
+  return false;
+}
+
+std::unordered_map<std::string, shared::ToolScope>
+toolScopeIndex(const ToolRegistry &toolRegistry) {
+  std::unordered_map<std::string, shared::ToolScope> index;
+  for (const auto &meta : toolRegistry.listToolMetadata()) {
+    index.emplace(meta.name, meta.scope);
+  }
+  return index;
+}
+
+bool shouldEnforceTodoAfterProse(const AgentContext &context,
+                                 const TodoStateSnapshot &todoState,
+                                 const PlanStateSnapshot &planState,
+                                 bool hasExecutionIntent,
+                                 int consecutiveProseOnlyContinuationTurns) {
+  if (todoState.hasAny || !hasExecutionIntent) {
+    return false;
+  }
+
+  const std::string lastUser = latestUserText(context);
+  if (lastUser.rfind("Todo required before continuing", 0) == 0) {
+    return false;
+  }
+
+  const TodoEnforcementRole role =
+      todoRoleForPersona(context.config.personaName);
+  switch (role) {
+  case TodoEnforcementRole::Lead:
+    return planState.hasActivePlan &&
+           (!planState.activePlanKnown || !planState.activePlanDone);
+  case TodoEnforcementRole::Executor:
+    if (hasAssignedChunk(context)) {
+      return true;
+    }
+    return consecutiveProseOnlyContinuationTurns > 0;
+  case TodoEnforcementRole::Worker:
+  case TodoEnforcementRole::Auditor:
+    return consecutiveProseOnlyContinuationTurns > 0;
+  case TodoEnforcementRole::Scout:
+  case TodoEnforcementRole::Unknown:
+    return false;
+  }
+  return false;
+}
+
+bool shouldEnforceTodoBeforeTools(const AgentContext &context,
+                                  const TodoStateSnapshot &todoState,
+                                  const PlanStateSnapshot &planState,
+                                  const std::vector<ToolCallChunk> &chunks,
+                                  const ToolRegistry &toolRegistry) {
+  if (todoState.hasAny) {
+    return false;
+  }
+
+  bool hasNonTodoTool = false;
+  for (const auto &chunk : chunks) {
+    if (chunk.nameDelta != "todo_write") {
+      hasNonTodoTool = true;
+      break;
+    }
+  }
+  if (!hasNonTodoTool) {
+    return false;
+  }
+
+  const TodoEnforcementRole role =
+      todoRoleForPersona(context.config.personaName);
+  switch (role) {
+  case TodoEnforcementRole::Executor:
+  case TodoEnforcementRole::Worker:
+  case TodoEnforcementRole::Auditor:
+    return true;
+  case TodoEnforcementRole::Lead: {
+    if (planState.hasActivePlan &&
+        (!planState.activePlanKnown || !planState.activePlanDone)) {
+      return true;
+    }
+    const auto scopes = toolScopeIndex(toolRegistry);
+    for (const auto &chunk : chunks) {
+      if (chunk.nameDelta == "todo_write") {
+        continue;
+      }
+      auto it = scopes.find(chunk.nameDelta);
+      if (it == scopes.end()) {
+        continue;
+      }
+      switch (it->second) {
+      case shared::ToolScope::FilesystemWrite:
+      case shared::ToolScope::Process:
+      case shared::ToolScope::Semantic:
+      case shared::ToolScope::Git:
+      case shared::ToolScope::PlanWrite:
+      case shared::ToolScope::ChunkWrite:
+      case shared::ToolScope::ChunkAssign:
+      case shared::ToolScope::ChunkReview:
+      case shared::ToolScope::Delegation:
+        return true;
+      case shared::ToolScope::FilesystemRead:
+      case shared::ToolScope::Web:
+      case shared::ToolScope::PlanRead:
+      case shared::ToolScope::ChunkRead:
+        break;
+      }
+    }
+    return false;
+  }
+  case TodoEnforcementRole::Scout:
+  case TodoEnforcementRole::Unknown:
+    return false;
+  }
+  return false;
+}
+
+std::string todoEnforcementMessage(const AgentContext &context,
+                                   bool isToolGate) {
+  const TodoEnforcementRole role =
+      todoRoleForPersona(context.config.personaName);
+  std::string roleLabel = "work";
+  switch (role) {
+  case TodoEnforcementRole::Lead:
+    roleLabel = "coordination";
+    break;
+  case TodoEnforcementRole::Executor:
+    roleLabel = "chunk work";
+    break;
+  case TodoEnforcementRole::Auditor:
+    roleLabel = "review";
+    break;
+  case TodoEnforcementRole::Worker:
+    roleLabel = "bounded work";
+    break;
+  case TodoEnforcementRole::Scout:
+  case TodoEnforcementRole::Unknown:
+    roleLabel = "work";
+    break;
+  }
+  std::ostringstream msg;
+  msg << "Todo required before continuing multi-step " << roleLabel << ". "
+      << "Create or update your todo list with todo_write";
+  if (isToolGate) {
+    msg << " before executing tools";
+  }
+  msg << ".";
+  return msg.str();
+}
+
+struct StopTokenFilterState {
+  std::string carry;
+  bool removedToken = false;
+};
+
+constexpr std::string_view kFinalSummaryStopToken = "<firmius_stop/>";
+
+std::string stripFinalSummaryStopToken(const std::string &text, bool &removed) {
+  std::string filtered = text;
+  std::size_t pos = 0;
+  while ((pos = filtered.find(kFinalSummaryStopToken, pos)) !=
+         std::string::npos) {
+    filtered.erase(pos, kFinalSummaryStopToken.size());
+    removed = true;
+  }
+  return filtered;
+}
+
+std::string consumeVisibleDelta(StopTokenFilterState &state,
+                                const std::string &delta) {
+  if (delta.empty()) {
+    return "";
+  }
+
+  state.carry += delta;
+  std::string visible;
+  const std::size_t tokenSize = kFinalSummaryStopToken.size();
+  while (true) {
+    const std::size_t tokenPos = state.carry.find(kFinalSummaryStopToken);
+    if (tokenPos != std::string::npos) {
+      visible += state.carry.substr(0, tokenPos);
+      state.carry.erase(0, tokenPos + tokenSize);
+      state.removedToken = true;
+      continue;
+    }
+    if (state.carry.size() > tokenSize) {
+      const std::size_t emitLen = state.carry.size() - tokenSize + 1;
+      visible += state.carry.substr(0, emitLen);
+      state.carry.erase(0, emitLen);
+    }
+    break;
+  }
+  return visible;
+}
+
+std::string flushVisibleDelta(StopTokenFilterState &state) {
+  if (state.carry.empty()) {
+    return "";
+  }
+  std::string emit = std::move(state.carry);
+  state.carry.clear();
+  return stripFinalSummaryStopToken(emit, state.removedToken);
+}
+
 TodoStateSnapshot readTodoState(const AgentContext &context) {
   TodoStateSnapshot snapshot;
   if (!context.history || context.history->threadId.empty()) {
@@ -129,6 +384,34 @@ TodoStateSnapshot readTodoState(const AgentContext &context) {
                     [](const TodoItem &item) {
                       return item.status != TodoStatus::Done;
                     });
+    return snapshot;
+  } catch (...) {
+    return snapshot;
+  }
+}
+
+PlanStateSnapshot readPlanState(const AgentContext &context) {
+  PlanStateSnapshot snapshot;
+  if (!context.history || context.history->threadId.empty()) {
+    return snapshot;
+  }
+
+  try {
+    ThreadManager tm(threadStorageRootPath());
+    const ThreadMetadata metadata = tm.getMetadata(context.history->threadId);
+    if (metadata.activePlanId.empty()) {
+      return snapshot;
+    }
+    snapshot.hasActivePlan = true;
+    try {
+      const Plan plan =
+          tm.getPlan(context.history->threadId, metadata.activePlanId);
+      snapshot.activePlanDone = (plan.status == PlanStatus::Done);
+      snapshot.activePlanKnown = true;
+    } catch (...) {
+      snapshot.activePlanDone = false;
+      snapshot.activePlanKnown = false;
+    }
     return snapshot;
   } catch (...) {
     return snapshot;
@@ -587,13 +870,63 @@ void Agent::runImpl(const std::optional<std::string> &task,
       bool sawContent = false;
       bool sawThinking = false;
       bool sawTool = false;
+      bool requestedFinalSummaryStop = false;
       std::uint32_t syntheticToolCallIdSerial = 0;
+      StopTokenFilterState textStopTokenFilter;
+      StopTokenFilterState thinkingStopTokenFilter;
 
       // Token repetition detection for hallucination loops
       bool tokenLoopDetected = false;
       char lastChar = '\0';
       int consecutiveRepeatCount = 0;
       const int MAX_CONSECUTIVE_REPEAT = 15;
+
+      auto appendVisibleText = [&](const std::string &delta) {
+        if (delta.empty()) {
+          return;
+        }
+        onEvent(TextChunk{delta});
+        for (unsigned char c : delta) {
+          if (!std::isspace(c)) {
+            sawContent = true;
+            break;
+          }
+        }
+        // Check for token loop (same character repeated)
+        for (char c : delta) {
+          if (c == lastChar && !tokenLoopDetected) {
+            consecutiveRepeatCount++;
+            if (consecutiveRepeatCount >= MAX_CONSECUTIVE_REPEAT) {
+              tokenLoopDetected = true;
+            }
+          } else {
+            consecutiveRepeatCount = 1;
+            lastChar = c;
+          }
+        }
+        if (!tokenLoopDetected) {
+          fullResponse += delta;
+        }
+      };
+
+      auto appendVisibleThinking = [&](const std::string &delta) {
+        if (delta.empty()) {
+          return;
+        }
+        onEvent(ThinkingChunk{delta, ""});
+        sawThinking = true;
+        fullThinking += delta;
+      };
+
+      auto flushText = [&]() {
+        const std::string delta = flushVisibleDelta(textStopTokenFilter);
+        appendVisibleText(delta);
+      };
+
+      auto flushThinking = [&]() {
+        const std::string delta = flushVisibleDelta(thinkingStopTokenFilter);
+        appendVisibleThinking(delta);
+      };
 
       provider->stream(*context.history, opts, [&](const StreamEvent &ev) {
         if (context.state.currentStatus == AgentStatus::ProviderWaiting) {
@@ -605,51 +938,40 @@ void Agent::runImpl(const std::optional<std::string> &task,
         }
 
         if (auto *txt = std::get_if<TextChunk>(&ev)) {
-          onEvent(ev);
-          // Treat pure-whitespace content as non-visible so tools can still
-          // run.
-          for (unsigned char c : txt->delta) {
-            if (!std::isspace(c)) {
-              sawContent = true;
-              break;
-            }
-          }
-          // Check for token loop (same character repeated)
-          for (char c : txt->delta) {
-            if (c == lastChar && !tokenLoopDetected) {
-              consecutiveRepeatCount++;
-              if (consecutiveRepeatCount >= MAX_CONSECUTIVE_REPEAT) {
-                tokenLoopDetected = true;
-              }
-            } else {
-              consecutiveRepeatCount = 1;
-              lastChar = c;
-            }
-          }
-
-          if (!tokenLoopDetected) {
-            fullResponse += txt->delta;
-          }
+          flushThinking();
+          const std::string visible = consumeVisibleDelta(textStopTokenFilter, txt->delta);
+          requestedFinalSummaryStop =
+              requestedFinalSummaryStop || textStopTokenFilter.removedToken;
+          appendVisibleText(visible);
         } else if (auto *thk = std::get_if<ThinkingChunk>(&ev)) {
-          onEvent(ev);
-          sawThinking = true;
-          fullThinking += thk->delta;
+          flushText();
+          const std::string visible =
+              consumeVisibleDelta(thinkingStopTokenFilter, thk->delta);
+          appendVisibleThinking(visible);
           if (!thk->signature.empty()) {
             lastThinkingSignature = thk->signature;
           }
         } else if (auto *tcc = std::get_if<ToolCallChunk>(&ev)) {
+          flushText();
+          flushThinking();
           sawTool = true;
           // Emit immediately so TUI can show "Preparing" state
           onEvent(ev);
           mergeToolCallChunk(accumulatedToolChunks, *tcc,
                              syntheticToolCallIdSerial++, turnCount);
         } else if (auto *met = std::get_if<AgentMetrics>(&ev)) {
+          flushText();
+          flushThinking();
           onEvent(ev);
           turnMetrics = *met;
         } else if (auto *done = std::get_if<StreamDone>(&ev)) {
+          flushText();
+          flushThinking();
           onEvent(ev);
           turnStopReason = done->reason;
         } else if (auto *err = std::get_if<StreamError>(&ev)) {
+          flushText();
+          flushThinking();
           onEvent(ev);
           streamErrorStatus = err->httpStatus;
           // Don't treat abort/interrupt errors as stream errors
@@ -661,9 +983,13 @@ void Agent::runImpl(const std::optional<std::string> &task,
           }
           streamError = err->message;
         } else {
+          flushText();
+          flushThinking();
           onEvent(ev);
         }
       });
+      flushText();
+      flushThinking();
 
       // ToolCallChunk events are now emitted immediately above
       // No need to re-emit buffered events
@@ -849,12 +1175,59 @@ void Agent::runImpl(const std::optional<std::string> &task,
         }
 
         const TodoStateSnapshot todoState = readTodoState(context);
+        const PlanStateSnapshot planState = readPlanState(context);
         const bool hasIncompleteTodoState = todoState.hasIncomplete;
         const bool hasRequestContinuationIntent = hasOpenExecutionIntent(context);
+        const bool hasExecutionIntentWithoutTodo =
+            !todoState.hasAny && hasRequestContinuationIntent;
+        const bool todoAllowsStop =
+            todoState.hasAny ? !hasIncompleteTodoState
+                             : !hasExecutionIntentWithoutTodo;
+        const bool planAllowsStop =
+            !planState.hasActivePlan ||
+            (planState.activePlanKnown && planState.activePlanDone);
+        const bool hasPendingToolLifecycleActivity =
+            hasPendingToolCalls || hasExecutionStatus;
         const bool hasHarnessOwnedActiveWork =
-            hasPendingToolCalls || hasBlockingProcesses ||
+            hasPendingToolLifecycleActivity || hasBlockingProcesses ||
             hasRunningOwnedBackgroundProcess || hasRunningDescendantSubagent ||
             hasIncompleteTodoState || hasExecutionStatus;
+        const bool shouldHonorFinalSummaryStop =
+            requestedFinalSummaryStop && turnStopReason == StopReason::Stop &&
+            !hasPendingToolLifecycleActivity && !hasBlockingProcesses &&
+            !hasRunningOwnedBackgroundProcess &&
+            !hasRunningDescendantSubagent && planAllowsStop && todoAllowsStop;
+
+        if (shouldEnforceTodoAfterProse(context, todoState, planState,
+                                        hasRequestContinuationIntent,
+                                        consecutiveProseOnlyContinuationTurns)) {
+          AgentTurn todoNudgeTurn;
+          todoNudgeTurn.turnId =
+              "todo-enforcement-" + std::to_string(turnCount);
+          Message todoNudgeMsg;
+          todoNudgeMsg.role = Role::User;
+          todoNudgeMsg.content.push_back(
+              TextContent{todoEnforcementMessage(context, false)});
+          auto nudgeNow = std::chrono::system_clock::now();
+          todoNudgeMsg.timestamp = static_cast<uint64_t>(
+              std::chrono::duration_cast<std::chrono::milliseconds>(
+                  nudgeNow.time_since_epoch())
+                  .count());
+          todoNudgeTurn.messages.push_back(todoNudgeMsg);
+          context.history->turns.push_back(todoNudgeTurn);
+          if (context.config.persistHistory && journaler) {
+            journaler->appendTurn(todoNudgeTurn);
+          }
+          context.state.currentStatus = AgentStatus::Idle;
+          consecutiveProseOnlyContinuationTurns = 0;
+          continue;
+        }
+
+        if (shouldHonorFinalSummaryStop) {
+          consecutiveProseOnlyContinuationTurns = 0;
+          taskFinished = true;
+          continue;
+        }
 
         bool shouldContinueAfterProseTurn = false;
         if (hasHarnessOwnedActiveWork) {
@@ -876,6 +1249,31 @@ void Agent::runImpl(const std::optional<std::string> &task,
         taskFinished = true;
       } else {
         consecutiveProseOnlyContinuationTurns = 0;
+        const TodoStateSnapshot todoState = readTodoState(context);
+        const PlanStateSnapshot planState = readPlanState(context);
+        if (shouldEnforceTodoBeforeTools(context, todoState, planState,
+                                         accumulatedToolChunks, toolRegistry)) {
+          AgentTurn todoNudgeTurn;
+          todoNudgeTurn.turnId =
+              "todo-tool-enforcement-" + std::to_string(turnCount);
+          Message todoNudgeMsg;
+          todoNudgeMsg.role = Role::User;
+          todoNudgeMsg.content.push_back(
+              TextContent{todoEnforcementMessage(context, true)});
+          auto nudgeNow = std::chrono::system_clock::now();
+          todoNudgeMsg.timestamp = static_cast<uint64_t>(
+              std::chrono::duration_cast<std::chrono::milliseconds>(
+                  nudgeNow.time_since_epoch())
+                  .count());
+          todoNudgeTurn.messages.push_back(todoNudgeMsg);
+          context.history->turns.push_back(todoNudgeTurn);
+          if (context.config.persistHistory && journaler) {
+            journaler->appendTurn(todoNudgeTurn);
+          }
+          context.state.currentStatus = AgentStatus::Idle;
+          continue;
+        }
+
         // --- State: ExecutingTool ---
         context.state.currentStatus = AgentStatus::ExecutingTool;
 

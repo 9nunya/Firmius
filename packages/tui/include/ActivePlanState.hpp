@@ -15,6 +15,7 @@ struct PlanLaneChunkRow {
   firmius::shared::WorkChunkStatus status =
       firmius::shared::WorkChunkStatus::Ready;
   std::string status_label;
+  std::optional<size_t> task_count;  ///< V2: number of tasks in chunk (if any)
 };
 
 struct PlanLaneModel {
@@ -25,6 +26,35 @@ struct PlanLaneModel {
   std::string plan_title;
   std::string collapsed_summary;
   std::vector<PlanLaneChunkRow> chunks;
+};
+
+// V2: Executor-focused chunk detail model
+struct ChunkDetailModel {
+  bool visible = false;
+  std::string chunk_id;
+  std::string chunk_title;
+  std::string chunk_goal;
+  std::string chunk_context;
+  std::string chunk_constraints;
+  std::string chunk_completion;
+  std::string verification_condition;
+  std::string handoff_notes;
+  firmius::shared::WorkChunkStatus status =
+      firmius::shared::WorkChunkStatus::Ready;
+  std::string status_label;
+  
+  // V2 task structure
+  struct TaskRow {
+    std::string id;
+    std::string title;
+    std::string goal;
+    firmius::shared::WorkChunkStatus status =
+        firmius::shared::WorkChunkStatus::Ready;
+    std::string status_label;
+    std::string notes;
+    std::string verification_condition;
+  };
+  std::vector<TaskRow> tasks;
 };
 
 class ActivePlanState {
@@ -41,6 +71,10 @@ public:
   bool hasActivePlan() const;
   const std::optional<firmius::shared::Plan> &activePlan() const;
   const PlanLaneModel &model() const;
+  
+  // V2: Executor-focused chunk detail
+  void setFocusedChunk(const std::string &chunk_id);
+  const std::optional<ChunkDetailModel> &focusedChunk() const;
 
   static std::string statusLabel(firmius::shared::WorkChunkStatus status);
   static std::string collapsedSummary(const firmius::shared::Plan &plan);
@@ -51,9 +85,11 @@ private:
                    const firmius::shared::WorkChunk &chunk);
   void clear();
   void rebuildModel();
+  void rebuildFocusedChunk();
 
   std::optional<firmius::shared::Plan> active_plan_;
   PlanLaneModel model_;
+  std::optional<ChunkDetailModel> focused_chunk_;
 };
 
 } // namespace firmius::tui

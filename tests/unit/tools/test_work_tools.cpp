@@ -379,7 +379,7 @@ TEST_F(WorkToolsTest, planSetActiveUpdatesThreadMetadata) {
 }
 
 TEST_F(WorkToolsTest, todoWriteCreatesInitialList) {
-  auto input = makeObject({{"patch", "1. [+] Inspect code\n2. [+] Add tests"}});
+  auto input = makeObject({{"patch", "1. [ ] Inspect code\n2. [ ] Add tests"}});
   auto result = execute("todo_write", input);
   ASSERT_TRUE(result.success) << result.error;
 
@@ -390,6 +390,14 @@ TEST_F(WorkToolsTest, todoWriteCreatesInitialList) {
   EXPECT_EQ(todo.items[0].id, 1);
   EXPECT_EQ(todo.items[0].status, TodoStatus::Pending);
   EXPECT_EQ(todo.items[1].id, 2);
+}
+
+TEST_F(WorkToolsTest, todoWriteEmptyListNumberedCreationRequiresSequentialIds) {
+  auto input = makeObject({{"patch", "2. [ ] Task 2"}});
+  auto result = execute("todo_write", input);
+  EXPECT_FALSE(result.success);
+  EXPECT_THAT(result.error, ::testing::HasSubstr("Todo list is empty"));
+  EXPECT_THAT(result.error, ::testing::HasSubstr("sequential ids"));
 }
 
 TEST_F(WorkToolsTest, todoWritePatchesSingleExistingItem) {
@@ -463,7 +471,8 @@ TEST_F(WorkToolsTest, todoWriteRejectsUnknownIdForUpdate) {
   auto unknown = makeObject({{"patch", "2. [*] Task 2"}});
   auto result = execute("todo_write", unknown);
   EXPECT_FALSE(result.success);
-  EXPECT_THAT(result.error, ::testing::HasSubstr("Unknown todo id"));
+  EXPECT_THAT(result.error, ::testing::HasSubstr("Unknown todo id 2"));
+  EXPECT_THAT(result.error, ::testing::HasSubstr("Existing ids: 1"));
 }
 
 TEST_F(WorkToolsTest, todoWriteRejectsNonNextIdForAdd) {
@@ -636,6 +645,76 @@ TEST_F(WorkToolsTest, chunkUpdateOmitsStatusChangeEventWhenStatusDoesNotChange) 
 
   EXPECT_EQ(countEvents<ChunkUpdated>(events), 1u);
   EXPECT_EQ(countEvents<ChunkStatusChanged>(events), 0u);
+}
+
+TEST_F(WorkToolsTest, leadCanClearAssignedAgentForRetryWhenStatusAllows) {
+  const std::string planId = createPlanDirect();
+  addChunkDirect(planId, "chunk-1", WorkChunkStatus::Failed);
+  auto plan = threadManager_->getPlan(threadId_, planId);
+  plan.chunks[0].assignedAgentId = "executor-1";
+  threadManager_->updatePlan(threadId_, plan);
+
+  auto input = makeObject({{"plan_id", planId},
+                           {"chunk_id", "chunk-1"},
+                           {"assigned_agent_id", ""}});
+  ToolResult result;
+  const auto events =
+      captureEvents([&]() { result = execute("chunk_update", input); });
+  ASSERT_TRUE(result.success) << result.error;
+
+  const auto updatedPlan = threadManager_->getPlan(threadId_, planId);
+  EXPECT_TRUE(updatedPlan.chunks[0].assignedAgentId.empty());
+  const auto *assignedEvent = findEvent<ChunkAssigned>(events);
+  ASSERT_NE(assignedEvent, nullptr);
+  EXPECT_EQ(assignedEvent->chunkId, "chunk-1");
+  EXPECT_TRUE(assignedEvent->assignedAgentId.empty());
+}
+
+TEST_F(WorkToolsTest, leadCanReassignAssignedAgentWhenStatusAllows) {
+  const std::string planId = createPlanDirect();
+  addChunkDirect(planId, "chunk-1", WorkChunkStatus::Blocked);
+
+  auto input = makeObject({{"plan_id", planId},
+                           {"chunk_id", "chunk-1"},
+                           {"assigned_agent_id", "executor-2"}});
+  auto result = execute("chunk_update", input);
+  ASSERT_TRUE(result.success) << result.error;
+
+  const auto updatedPlan = threadManager_->getPlan(threadId_, planId);
+  EXPECT_EQ(updatedPlan.chunks[0].assignedAgentId, "executor-2");
+}
+
+TEST_F(WorkToolsTest, executorCannotReassignChunkOwnership) {
+  const std::string planId = createPlanDirect();
+  addChunkDirect(planId, "chunk-1", WorkChunkStatus::Failed);
+
+  setAgentRole("executor",
+               {ToolScope::Semantic, ToolScope::PlanRead, ToolScope::ChunkRead,
+                ToolScope::ChunkWrite},
+               "executor-1");
+
+  auto input = makeObject({{"plan_id", planId},
+                           {"chunk_id", "chunk-1"},
+                           {"assigned_agent_id", "executor-2"}});
+  auto result = execute("chunk_update", input);
+  EXPECT_FALSE(result.success);
+  EXPECT_THAT(result.error,
+              ::testing::AnyOf(
+                  ::testing::HasSubstr("executor may update only its assigned chunk"),
+                  ::testing::HasSubstr("executor may update only status")));
+}
+
+TEST_F(WorkToolsTest, assignedAgentUpdateRequiresRetryableStatus) {
+  const std::string planId = createPlanDirect();
+  addChunkDirect(planId, "chunk-1", WorkChunkStatus::InProgress);
+
+  auto input = makeObject({{"plan_id", planId},
+                           {"chunk_id", "chunk-1"},
+                           {"assigned_agent_id", ""}});
+  auto result = execute("chunk_update", input);
+  EXPECT_FALSE(result.success);
+  EXPECT_THAT(result.error,
+              ::testing::HasSubstr("assigned_agent_id may be updated"));
 }
 
 TEST_F(WorkToolsTest, chunkReadyForExecutionRespectsDependencyStatus) {
@@ -960,6 +1039,113 @@ TEST_F(WorkToolsTest, scoutCanReadButNotWriteChunkState) {
                                  {"result_summary", "nope"}});
   auto updateResult = execute("chunk_update", updateInput);
   EXPECT_FALSE(updateResult.success);
+}
+
+TEST_F(WorkToolsTest, leadCanAddChunkWithV2RichSpecFields) {
+  const std::string planId = createPlanDirect();
+  
+  auto input = makeObject({
+    {"plan_id", planId},
+    {"title", "V2 Chunk"},
+    {"goal", "Test V2 fields"},
+    {"context", "Integration test"},
+    {"constraints", "None"},
+    {"completion", "Fields persist"},
+    {"cwd", "/work/project"},
+    {"verification_condition", "Build succeeds and tests pass"},
+    {"handoff_notes", "Focus on edge cases"},
+  }, {}, {}, {
+    {"files_to_read", {"src/main.cpp", "include/header.hpp"}},
+    {"files_to_touch", {"src/new_feature.cpp"}},
+  });
+  
+  auto result = execute("chunk_add", input);
+  ASSERT_TRUE(result.success) << result.error;
+  
+  auto plan = threadManager_->getPlan(threadId_, planId);
+  ASSERT_EQ(plan.chunks.size(), 1u);
+  const auto &chunk = plan.chunks[0];
+  
+  EXPECT_EQ(chunk.title, "V2 Chunk");
+  EXPECT_EQ(chunk.filesToRead.size(), 2u);
+  EXPECT_EQ(chunk.filesToRead[0], "src/main.cpp");
+  EXPECT_EQ(chunk.filesToRead[1], "include/header.hpp");
+  EXPECT_EQ(chunk.filesToTouch.size(), 1u);
+  EXPECT_EQ(chunk.filesToTouch[0], "src/new_feature.cpp");
+  EXPECT_EQ(chunk.cwd, "/work/project");
+  EXPECT_EQ(chunk.verificationCondition, "Build succeeds and tests pass");
+  EXPECT_EQ(chunk.handoffNotes, "Focus on edge cases");
+}
+
+TEST_F(WorkToolsTest, leadCanUpdateOnlyV2RichSpecFields) {
+  const std::string planId = createPlanDirect();
+  addChunkDirect(planId, "chunk-1");
+  
+  auto input = makeObject({
+    {"plan_id", planId},
+    {"chunk_id", "chunk-1"},
+    {"cwd", "/updated/path"},
+  }, {}, {}, {
+    {"files_to_read", {"updated.cpp"}},
+  });
+  
+  auto result = execute("chunk_update", input);
+  ASSERT_TRUE(result.success) << result.error;
+  
+  auto plan = threadManager_->getPlan(threadId_, planId);
+  const auto &chunk = plan.chunks[0];
+  
+  EXPECT_EQ(chunk.filesToRead.size(), 1u);
+  EXPECT_EQ(chunk.filesToRead[0], "updated.cpp");
+  EXPECT_EQ(chunk.cwd, "/updated/path");
+}
+
+TEST_F(WorkToolsTest, executorCannotMutateV2RichSpecFields) {
+  const std::string planId = createPlanDirect();
+  const std::string chunkId = addChunkDirect(planId, "chunk-1");
+  
+  // Assign chunk to executor
+  auto plan = threadManager_->getPlan(threadId_, planId);
+  plan.chunks[0].assignedAgentId = "executor-1";
+  threadManager_->updatePlan(threadId_, plan);
+  
+  setAgentRole("executor",
+               {ToolScope::FilesystemRead, ToolScope::FilesystemWrite,
+                ToolScope::Process, ToolScope::Semantic, ToolScope::ChunkWrite,
+                ToolScope::PlanRead, ToolScope::ChunkRead},
+               "executor-1");
+  
+  auto input = makeObject({
+    {"plan_id", planId},
+    {"chunk_id", chunkId},
+  }, {}, {}, {
+    {"files_to_read", {"hacked.cpp"}},
+  });
+  
+  auto result = execute("chunk_update", input);
+  EXPECT_FALSE(result.success);
+  EXPECT_THAT(result.error,
+              ::testing::HasSubstr("executor may not mutate V2 chunk spec fields"));
+}
+
+TEST_F(WorkToolsTest, auditorCannotMutateV2RichSpecFields) {
+  const std::string planId = createPlanDirect();
+  addChunkDirect(planId, "chunk-1", WorkChunkStatus::Implemented);
+  setAgentRole("auditor",
+               {ToolScope::Semantic, ToolScope::PlanRead, ToolScope::ChunkRead,
+                ToolScope::ChunkReview},
+               "auditor-1");
+  
+  auto input = makeObject({
+    {"plan_id", planId},
+    {"chunk_id", "chunk-1"},
+    {"verification_condition", "hacked condition"},
+  });
+  
+  auto result = execute("chunk_update", input);
+  EXPECT_FALSE(result.success);
+  EXPECT_THAT(result.error,
+              ::testing::HasSubstr("auditor may not mutate V2 chunk spec fields"));
 }
 
 } // namespace

@@ -5,6 +5,7 @@
 #include "utils/ToolView.hpp"
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -41,6 +42,11 @@ struct StreamState {
 struct ProcessCounts {
   int live = 0;
   int background = 0;
+};
+
+struct ProcessRuntimeSnapshot {
+  std::vector<std::string> owned_process_ids;
+  std::vector<std::string> blocking_process_ids;
 };
 
 class StreamStateManager {
@@ -82,6 +88,9 @@ public:
   getToolView(const std::string &toolCallId) const;
   std::string getAgentTitle(const std::string &agentId) const;
   ProcessCounts getProcessCounts(const std::string &agentId) const;
+  ProcessCounts getProcessCounts(
+      const std::string &agentId, const ProcessRuntimeSnapshot *runtime_snapshot,
+      const std::function<bool(const std::string &)> &is_process_running) const;
   const std::string &getRetryStatus() const;
   const std::vector<std::string> &getAccountSwaps() const;
   const std::vector<std::pair<std::string, std::string>> &
@@ -106,6 +115,9 @@ private:
                                const std::string &delta);
   void clearActiveLiveEntry(const std::string &agentId);
   TimelineEntry *findTimelineEntry(const std::string &entryId);
+  bool applyProcessOutputToToolView(const shared::AgentProcessOutput &e);
+  void flushBufferedProcessOutputForProcess(const std::string &processId);
+  void flushBufferedProcessOutputForToolCall(const std::string &toolCallId);
 
   std::unordered_map<std::string, StreamState> streams_;
   std::unordered_map<std::string, std::shared_ptr<ToolCallView>> tool_calls_;
@@ -123,6 +135,8 @@ private:
   std::unordered_map<std::string, std::string> process_to_agent_;
   std::unordered_map<std::string, bool> process_background_state_;
   std::unordered_map<std::string, bool> process_finished_state_;
+  std::unordered_map<std::string, std::vector<shared::AgentProcessOutput>>
+      pending_process_output_;
   std::unordered_map<std::string, LiveQuickClusterState> live_quick_clusters_;
   std::unordered_map<std::string, int> tool_call_cluster_ids_;
 

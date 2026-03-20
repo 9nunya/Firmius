@@ -20,9 +20,9 @@ TEST(PlanLaneTest, CollapsedLaneSurfacesBadStates) {
   model->expanded = false;
   model->plan_title = "Transcript polish";
   model->chunks = {
-      {"1", "Investigate", firmius::shared::WorkChunkStatus::Failed, "Failed"},
-      {"2", "Patch", firmius::shared::WorkChunkStatus::Blocked, "Blocked"},
-      {"3", "Retry", firmius::shared::WorkChunkStatus::Cancelled, "Cancelled"},
+      {"1", "Investigate", firmius::shared::WorkChunkStatus::Failed, "Failed", std::nullopt},
+      {"2", "Patch", firmius::shared::WorkChunkStatus::Blocked, "Blocked", std::nullopt},
+      {"3", "Retry", firmius::shared::WorkChunkStatus::Cancelled, "Cancelled", std::nullopt},
   };
 
   auto component = firmius::tui::PlanLane(model);

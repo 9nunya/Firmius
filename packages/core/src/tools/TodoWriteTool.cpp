@@ -9,6 +9,7 @@
 #include <set>
 #include <sstream>
 #include <unordered_map>
+#include <vector>
 
 namespace firmius::core {
 
@@ -67,7 +68,9 @@ shared::TodoStatus markerToStatus(char marker) {
 
 std::vector<TodoMutation> parseMutations(const std::string &patch) {
   if (shared::StringUtil::trim(patch).empty()) {
-    throw std::runtime_error("todo patch must not be empty");
+    throw std::runtime_error(
+        "Todo patch must not be empty. Use numbered lines like "
+        "'1. [ ] First task'.");
   }
 
   static const std::regex linePattern(
@@ -87,7 +90,8 @@ std::vector<TodoMutation> parseMutations(const std::string &patch) {
     std::smatch match;
     if (!std::regex_match(rawLine, match, linePattern)) {
       throw std::runtime_error("Malformed todo line " + std::to_string(lineNo) +
-                               ": expected '<id>. [status] text'");
+                               ": expected '<id>. [status] text' (example: "
+                               "'1. [ ] First task')");
     }
     const int id = std::stoi(match[1].str());
     const char marker = match[2].str()[0];
@@ -104,6 +108,28 @@ std::vector<TodoMutation> parseMutations(const std::string &patch) {
     mutations.push_back(TodoMutation{id, marker, text, lineNo});
   }
   return mutations;
+}
+
+std::string existingIdsSummary(const std::vector<shared::TodoItem> &items) {
+  if (items.empty()) {
+    return "(none)";
+  }
+
+  std::vector<int> ids;
+  ids.reserve(items.size());
+  for (const auto &item : items) {
+    ids.push_back(item.id);
+  }
+  std::sort(ids.begin(), ids.end());
+
+  std::ostringstream out;
+  for (std::size_t i = 0; i < ids.size(); ++i) {
+    if (i > 0) {
+      out << ", ";
+    }
+    out << ids[i];
+  }
+  return out.str();
 }
 
 } // namespace
@@ -144,6 +170,42 @@ shared::ToolResult TodoWriteTool::execute(const rapidjson::Value &input,
 
     int expectedNextId = std::max(todoList.nextId, 1);
     const uint64_t now = nowEpochMs();
+    if (todoList.items.empty()) {
+      bool hasMarkerAdd = false;
+      bool hasMarkerDelete = false;
+      for (const auto &mutation : mutations) {
+        hasMarkerAdd = hasMarkerAdd || mutation.marker == '+';
+        hasMarkerDelete = hasMarkerDelete || mutation.marker == '-';
+      }
+
+      if (hasMarkerDelete) {
+        throw std::runtime_error(
+            "Todo list is empty. Create items with '1. [ ] First task' and "
+            "sequential ids.");
+      }
+
+      if (!hasMarkerAdd) {
+        int expectedId = 1;
+        for (const auto &mutation : mutations) {
+          if (mutation.id != expectedId) {
+            throw std::runtime_error(
+                "Todo list is empty. Create items with '1. [ ] First task' "
+                "and sequential ids.");
+          }
+          shared::TodoItem item;
+          item.id = mutation.id;
+          item.text = mutation.text;
+          item.status = markerToStatus(mutation.marker);
+          item.createdAt = now;
+          item.updatedAt = now;
+          todoList.items.push_back(std::move(item));
+          indexById[mutation.id] = todoList.items.size() - 1;
+          expectedId++;
+        }
+        expectedNextId = expectedId;
+      }
+    }
+
     for (const auto &mutation : mutations) {
       if (mutation.marker == '+') {
         if (mutation.id != expectedNextId) {
@@ -165,7 +227,14 @@ shared::ToolResult TodoWriteTool::execute(const rapidjson::Value &input,
 
       auto it = indexById.find(mutation.id);
       if (it == indexById.end()) {
-        throw std::runtime_error("Unknown todo id " + std::to_string(mutation.id));
+        if (todoList.items.empty()) {
+          throw std::runtime_error(
+              "Todo list is empty. Create items with '1. [ ] First task' and "
+              "sequential ids.");
+        }
+        throw std::runtime_error(
+            "Unknown todo id " + std::to_string(mutation.id) +
+            ". Existing ids: " + existingIdsSummary(todoList.items) + ".");
       }
 
       if (mutation.marker == '-') {
