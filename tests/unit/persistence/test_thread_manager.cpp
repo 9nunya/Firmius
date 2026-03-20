@@ -110,6 +110,19 @@ protected:
 
         return plan;
     }
+
+    AgentTodoList createTestTodoList(const std::string& threadId,
+                                     const std::string& agentId) {
+        AgentTodoList todo;
+        todo.threadId = threadId;
+        todo.agentId = agentId;
+        todo.nextId = 3;
+        todo.items.push_back(TodoItem{1, "Inspect files", TodoStatus::InProgress,
+                                      "chunk-1", "plan-1", 100, 150});
+        todo.items.push_back(TodoItem{2, "Run tests", TodoStatus::Pending,
+                                      "chunk-1", "plan-1", 110, 110});
+        return todo;
+    }
 };
 
 TEST_F(ThreadManagerTest, createThread_roundtrip) {
@@ -132,6 +145,50 @@ TEST_F(ThreadManagerTest, getMetadata_missingFile) {
     EXPECT_THROW({
         tm->getMetadata("nonexistent-thread-id");
     }, std::runtime_error);
+}
+
+TEST_F(ThreadManagerTest, writeAndReadAgentTodoRoundtrip) {
+    ThreadMetadata metadata = createTestMetadata();
+    std::string threadId = tm->createThread(metadata);
+    const std::string agentId = "agent-1";
+    const auto original = createTestTodoList(threadId, agentId);
+
+    tm->writeAgentTodo(threadId, agentId, original);
+    const auto restored = tm->getAgentTodo(threadId, agentId);
+
+    EXPECT_EQ(restored, original);
+}
+
+TEST_F(ThreadManagerTest, getAgentTodoMissingReturnsEmptyList) {
+    ThreadMetadata metadata = createTestMetadata();
+    std::string threadId = tm->createThread(metadata);
+
+    const auto todo = tm->getAgentTodo(threadId, "missing-agent");
+    EXPECT_EQ(todo.threadId, threadId);
+    EXPECT_EQ(todo.agentId, "missing-agent");
+    EXPECT_EQ(todo.nextId, 1);
+    EXPECT_TRUE(todo.items.empty());
+}
+
+TEST_F(ThreadManagerTest, mutateAgentTodoAppliesAtomicUpdate) {
+    ThreadMetadata metadata = createTestMetadata();
+    std::string threadId = tm->createThread(metadata);
+    const std::string agentId = "agent-1";
+    tm->writeAgentTodo(threadId, agentId, createTestTodoList(threadId, agentId));
+
+    auto mutated = tm->mutateAgentTodo(threadId, agentId, [&](AgentTodoList& todo) {
+        todo.items[0].status = TodoStatus::Done;
+        todo.items.push_back(TodoItem{3, "Finalize", TodoStatus::Pending, "", "", 200, 200});
+        todo.nextId = 4;
+    });
+
+    EXPECT_EQ(mutated.nextId, 4);
+    ASSERT_EQ(mutated.items.size(), 3u);
+    EXPECT_EQ(mutated.items[0].status, TodoStatus::Done);
+    EXPECT_EQ(mutated.items[2].id, 3);
+
+    const auto reloaded = tm->getAgentTodo(threadId, agentId);
+    EXPECT_EQ(reloaded, mutated);
 }
 
 TEST_F(ThreadManagerTest, getMetadata_corruptJson) {

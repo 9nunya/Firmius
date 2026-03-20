@@ -229,6 +229,33 @@ struct Plan {
   bool operator==(const Plan &other) const = default;
 };
 
+/**
+ * @brief Persisted per-agent todo item used as personal execution state.
+ */
+struct TodoItem {
+  int id = 0;
+  std::string text;
+  TodoStatus status = TodoStatus::Pending;
+  std::string chunkId;
+  std::string planId;
+  uint64_t createdAt = 0;
+  uint64_t updatedAt = 0;
+
+  bool operator==(const TodoItem &other) const = default;
+};
+
+/**
+ * @brief Persisted todo list for one specific agent in one thread.
+ */
+struct AgentTodoList {
+  std::string threadId;
+  std::string agentId;
+  int nextId = 1;
+  std::vector<TodoItem> items;
+
+  bool operator==(const AgentTodoList &other) const = default;
+};
+
 } // namespace firmius::shared
 
 #endif

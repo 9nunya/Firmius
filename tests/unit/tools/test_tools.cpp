@@ -11,6 +11,7 @@
 #include "tools/ProcessExecuteTool.hpp"
 #include "tools/ProcessSpawnTool.hpp"
 #include "tools/PythonExecuteTool.hpp"
+#include "tools/ToolRegistry.hpp"
 #include "utils/Hashline.hpp"
 #include <filesystem>
 #include <fstream>
@@ -513,6 +514,59 @@ protected:
     rapidjson::Document doc;
     doc.Parse(result.data.c_str());
     return doc;
+  }
+};
+
+class ToolRegistryArgumentNormalizationTest : public ::testing::Test {
+protected:
+  ToolRegistry registry;
+  NiceMock<MockHost> mockHost;
+  NiceMock<MockAgent> mockAgent;
+  std::string capturedWrite;
+
+  void SetUp() override {
+    registry.registerTool(std::make_unique<FileEditTool>());
+
+    mockAgent.defaultCtx.environment.cwd = "/tmp/work";
+    mockAgent.defaultCtx.permissions.allowOutsideCwd = false;
+    mockAgent.defaultCtx.permissions.allowedPaths = {"/tmp/work", "/tmp"};
+    mockAgent.defaultCtx.permissions.allowedScopes = {
+        ToolScope::FilesystemWrite};
+    mockAgent.mockPerms_->allowOutsideCwd_ = false;
+    mockAgent.mockPerms_->allowedPaths_ = {"/tmp/work", "/tmp"};
+    mockAgent.mockPerms_->cwd_ = "/tmp/work";
+
+    ON_CALL(mockAgent, getContext())
+        .WillByDefault(ReturnRef(mockAgent.defaultCtx));
+    ON_CALL(mockAgent, getMutableContext())
+        .WillByDefault(ReturnRef(mockAgent.defaultCtx));
+    ON_CALL(mockAgent.mockEnv_->mockWorkspace(), resolvePath(_))
+        .WillByDefault(Invoke([](const std::string &path) {
+          if (path.starts_with("/")) {
+            return path;
+          }
+          return "/tmp/work/" + path;
+        }));
+    ON_CALL(mockAgent.mockEnv_->mockWorkspace(), hasFullyReadFile(_))
+        .WillByDefault(Return(true));
+    ON_CALL(mockHost, writeFile(_, _))
+        .WillByDefault(Invoke([this](const std::string &,
+                                     const std::vector<uint8_t> &data) {
+          capturedWrite.assign(data.begin(), data.end());
+        }));
+  }
+
+  static std::vector<uint8_t> bytes(const std::string &text) {
+    return std::vector<uint8_t>(text.begin(), text.end());
+  }
+
+  static std::string anchor(int line, const std::string &content) {
+    return firmius::shared::utils::Hashline::formatAnchor(line, content);
+  }
+
+  ToolResult executeFileEdit(rapidjson::Document &input) {
+    ToolContext ctx{mockHost, mockAgent, "test_call"};
+    return registry.execute("file_edit", input, ctx);
   }
 };
 
@@ -1193,6 +1247,152 @@ TEST_F(FileEditAnchorToolTest, mixingEditModesIsRejected) {
 
   EXPECT_FALSE(result.success);
   EXPECT_NE(result.error.find("exactly one editing mode"), std::string::npos);
+}
+
+TEST_F(ToolRegistryArgumentNormalizationTest,
+       nestedQuotedFileEditKeysAreNormalizedBeforeExecution) {
+  const std::string path = "/tmp/work/file.txt";
+  const std::string original = "alpha\nbeta\n";
+
+  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
+  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
+
+  rapidjson::Document input;
+  input.SetObject();
+  auto &alloc = input.GetAllocator();
+  input.AddMember("path", makeJsonString("file.txt", alloc), alloc);
+  rapidjson::Value edits(rapidjson::kArrayType);
+  rapidjson::Value edit(rapidjson::kObjectType);
+  edit.AddMember("\"op\"", makeJsonString("insert_after", alloc), alloc);
+  edit.AddMember("\"anchor\"", makeJsonString(anchor(1, "alpha"), alloc), alloc);
+  rapidjson::Value newLines(rapidjson::kArrayType);
+  newLines.PushBack(makeJsonString("inserted", alloc), alloc);
+  edit.AddMember("\"new_lines\"", newLines, alloc);
+  edits.PushBack(edit, alloc);
+  input.AddMember("\"edits\"", edits, alloc);
+
+  auto result = executeFileEdit(input);
+
+  EXPECT_TRUE(result.success);
+  EXPECT_EQ(capturedWrite, "alpha\ninserted\nbeta\n");
+}
+
+TEST_F(ToolRegistryArgumentNormalizationTest,
+       quotedNestedKeysSurfaceRealValidationErrors) {
+  const std::string path = "/tmp/work/file.txt";
+  const std::string original = "alpha\nbeta\n";
+
+  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
+  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
+
+  rapidjson::Document input;
+  input.SetObject();
+  auto &alloc = input.GetAllocator();
+  input.AddMember("path", makeJsonString("file.txt", alloc), alloc);
+  rapidjson::Value edits(rapidjson::kArrayType);
+  rapidjson::Value edit(rapidjson::kObjectType);
+  edit.AddMember("\"op\"", makeJsonString("insert_after", alloc), alloc);
+  edit.AddMember("\"anchor\"", makeJsonString("1#abcd|alpha", alloc), alloc);
+  rapidjson::Value newLines(rapidjson::kArrayType);
+  newLines.PushBack(makeJsonString("inserted", alloc), alloc);
+  edit.AddMember("\"new_lines\"", newLines, alloc);
+  edits.PushBack(edit, alloc);
+  input.AddMember("\"edits\"", edits, alloc);
+
+  auto result = executeFileEdit(input);
+
+  EXPECT_FALSE(result.success);
+  EXPECT_THAT(result.error, HasSubstr("Malformed anchor"));
+  EXPECT_THAT(result.error,
+              ::testing::Not(HasSubstr("Missing edits, content, or legacy replacement parameters.")));
+}
+
+TEST_F(ToolRegistryArgumentNormalizationTest,
+       recursiveNormalizationWorksForArraysOfObjects) {
+  const std::string path = "/tmp/work/file.txt";
+  const std::string original = "alpha\nbeta\ngamma\n";
+
+  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
+  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
+
+  rapidjson::Document input;
+  input.SetObject();
+  auto &alloc = input.GetAllocator();
+  input.AddMember("path", makeJsonString("file.txt", alloc), alloc);
+  rapidjson::Value edits(rapidjson::kArrayType);
+
+  rapidjson::Value firstEdit(rapidjson::kObjectType);
+  firstEdit.AddMember("\"op\"", makeJsonString("insert_after", alloc), alloc);
+  firstEdit.AddMember("\"anchor\"", makeJsonString(anchor(1, "alpha"), alloc),
+                      alloc);
+  rapidjson::Value firstNewLines(rapidjson::kArrayType);
+  firstNewLines.PushBack(makeJsonString("x", alloc), alloc);
+  firstEdit.AddMember("\"new_lines\"", firstNewLines, alloc);
+  edits.PushBack(firstEdit, alloc);
+
+  rapidjson::Value secondEdit(rapidjson::kObjectType);
+  secondEdit.AddMember("\"op\"", makeJsonString("insert_before", alloc), alloc);
+  secondEdit.AddMember("\"anchor\"", makeJsonString(anchor(3, "gamma"), alloc),
+                       alloc);
+  rapidjson::Value secondNewLines(rapidjson::kArrayType);
+  secondNewLines.PushBack(makeJsonString("y", alloc), alloc);
+  secondEdit.AddMember("\"new_lines\"", secondNewLines, alloc);
+  edits.PushBack(secondEdit, alloc);
+
+  input.AddMember("\"edits\"", edits, alloc);
+
+  auto result = executeFileEdit(input);
+
+  EXPECT_TRUE(result.success);
+  EXPECT_EQ(capturedWrite, "alpha\nx\nbeta\ny\ngamma\n");
+}
+
+TEST_F(ToolRegistryArgumentNormalizationTest,
+       alreadyCorrectArgumentsRemainUnaffected) {
+  const std::string path = "/tmp/work/file.txt";
+  const std::string original = "alpha\nbeta\n";
+
+  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
+  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
+
+  auto input = createFileEditJson(
+      "file.txt",
+      {{{"op", "insert_after"},
+        {"anchor", anchor(1, "alpha")},
+        {"new_lines", "inserted"}}});
+
+  auto result = executeFileEdit(input);
+
+  EXPECT_TRUE(result.success);
+  EXPECT_EQ(capturedWrite, "alpha\ninserted\nbeta\n");
+}
+
+TEST_F(ToolRegistryArgumentNormalizationTest,
+       normalizationDoesNotInventUnrelatedKeys) {
+  const std::string path = "/tmp/work/file.txt";
+  const std::string original = "alpha\nbeta\n";
+
+  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
+  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
+
+  rapidjson::Document input;
+  input.SetObject();
+  auto &alloc = input.GetAllocator();
+  input.AddMember("path", makeJsonString("file.txt", alloc), alloc);
+  rapidjson::Value edits(rapidjson::kArrayType);
+  rapidjson::Value edit(rapidjson::kObjectType);
+  edit.AddMember("\"operation\"", makeJsonString("insert_after", alloc), alloc);
+  edit.AddMember("\"anchor\"", makeJsonString(anchor(1, "alpha"), alloc), alloc);
+  rapidjson::Value newLines(rapidjson::kArrayType);
+  newLines.PushBack(makeJsonString("inserted", alloc), alloc);
+  edit.AddMember("\"new_lines\"", newLines, alloc);
+  edits.PushBack(edit, alloc);
+  input.AddMember("\"edits\"", edits, alloc);
+
+  auto result = executeFileEdit(input);
+
+  EXPECT_FALSE(result.success);
+  EXPECT_THAT(result.error, HasSubstr("Malformed edit op"));
 }
 
 TEST_F(GrepToolTest, contextLines) {

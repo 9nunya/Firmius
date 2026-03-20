@@ -41,6 +41,7 @@
 #include "tools/ChunkListTool.hpp"
 #include "tools/ChunkReadyForExecutionTool.hpp"
 #include "tools/ChunkUpdateTool.hpp"
+#include "tools/TodoWriteTool.hpp"
 #include "tools/SubagentTerminateTool.hpp"
 #include "tools/SubagentTool.hpp"
 #include "tools/SubagentWaitTool.hpp"
@@ -128,6 +129,7 @@ Engine::Engine() {
   toolRegistry.registerTool(std::make_unique<ChunkGetTool>());
   toolRegistry.registerTool(std::make_unique<ChunkUpdateTool>());
   toolRegistry.registerTool(std::make_unique<ChunkReadyForExecutionTool>());
+  toolRegistry.registerTool(std::make_unique<TodoWriteTool>());
 }
 
 void Engine::initProviders() {

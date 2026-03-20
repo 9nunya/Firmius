@@ -118,6 +118,26 @@ rapidjson::Document toJson(const Plan& plan);
 Plan planFromJson(const rapidjson::Value& value);
 
 /**
+ * @brief Serializes a TodoItem to a RapidJSON document.
+ */
+rapidjson::Document toJson(const TodoItem& item);
+
+/**
+ * @brief Deserializes a TodoItem from a RapidJSON value.
+ */
+TodoItem todoItemFromJson(const rapidjson::Value& value);
+
+/**
+ * @brief Serializes an AgentTodoList to a RapidJSON document.
+ */
+rapidjson::Document toJson(const AgentTodoList& list);
+
+/**
+ * @brief Deserializes an AgentTodoList from a RapidJSON value.
+ */
+AgentTodoList agentTodoListFromJson(const rapidjson::Value& value);
+
+/**
  * @brief Serializes an EngineEvent to a RapidJSON document.
  */
 rapidjson::Document toJson(const EngineEvent& event);

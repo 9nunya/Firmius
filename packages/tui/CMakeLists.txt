@@ -5,6 +5,7 @@ target_sources(firmius PRIVATE
     src/TUIState.cpp
     src/TUIHotkeys.cpp
     src/ActivePlanState.cpp
+    src/WorkPanelLayout.cpp
     src/StreamStateManager.cpp
     src/NotificationManager.cpp
     src/ThemeManager.cpp
@@ -52,6 +53,7 @@ target_sources(firmius PRIVATE
     src/components/StatusBar.cpp
     src/components/AgentStrip.cpp
     src/components/PlanLane.cpp
+    src/components/TodoLane.cpp
     src/components/InputBar.cpp
     src/components/GlintEffect.cpp
     src/components/HelpOverlay.cpp

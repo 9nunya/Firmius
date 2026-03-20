@@ -486,6 +486,37 @@ target_include_directories(test_plan_lane PRIVATE
 )
 gtest_discover_tests(test_plan_lane)
 
+add_executable(test_todo_lane
+    tui/test_todo_lane.cpp
+    ../../packages/tui/src/components/TodoLane.cpp
+    ../../packages/tui/src/ThemeManager.cpp
+)
+target_link_libraries(test_todo_lane PRIVATE
+    firmius::shared
+    GTest::gtest_main
+    ftxui::dom
+    ftxui::screen
+    ftxui::component
+)
+target_include_directories(test_todo_lane PRIVATE
+    ../../packages/tui/include
+    ../../packages/tui/src
+)
+gtest_discover_tests(test_todo_lane)
+
+add_executable(test_work_panel_layout
+    tui/test_work_panel_layout.cpp
+    ../../packages/tui/src/WorkPanelLayout.cpp
+)
+target_link_libraries(test_work_panel_layout PRIVATE
+    GTest::gtest_main
+)
+target_include_directories(test_work_panel_layout PRIVATE
+    ../../packages/tui/include
+    ../../packages/tui/src
+)
+gtest_discover_tests(test_work_panel_layout)
+
 add_executable(test_status_bar
     tui/test_status_bar.cpp
     ../../packages/tui/src/components/StatusBar.cpp

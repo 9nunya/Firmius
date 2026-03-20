@@ -1,9 +1,59 @@
 #include "tools/ToolRegistry.hpp"
 #include "agents/Agent.hpp"
 #include <algorithm>
+#include <string>
 
 namespace firmius::core {
 using namespace firmius::shared;
+
+namespace {
+
+std::string normalizeObjectKey(const rapidjson::Value& key) {
+    std::string normalized = key.GetString();
+    if (normalized.size() >= 2 && normalized.front() == '"' &&
+        normalized.back() == '"') {
+        return normalized.substr(1, normalized.size() - 2);
+    }
+    return normalized;
+}
+
+void normalizeToolArgumentValue(const rapidjson::Value& input,
+                                rapidjson::Value& output,
+                                rapidjson::Document::AllocatorType& alloc) {
+    if (input.IsObject()) {
+        output.SetObject();
+        for (auto it = input.MemberBegin(); it != input.MemberEnd(); ++it) {
+            const std::string normalizedKey = normalizeObjectKey(it->name);
+            rapidjson::Value key(normalizedKey.c_str(), alloc);
+            rapidjson::Value normalizedValue;
+            normalizeToolArgumentValue(it->value, normalizedValue, alloc);
+            output.AddMember(key.Move(), normalizedValue.Move(), alloc);
+        }
+        return;
+    }
+
+    if (input.IsArray()) {
+        output.SetArray();
+        for (const auto& element : input.GetArray()) {
+            rapidjson::Value normalizedElement;
+            normalizeToolArgumentValue(element, normalizedElement, alloc);
+            output.PushBack(normalizedElement.Move(), alloc);
+        }
+        return;
+    }
+
+    output.CopyFrom(input, alloc);
+}
+
+rapidjson::Document normalizeToolArguments(const rapidjson::Value& input) {
+    rapidjson::Document normalized;
+    rapidjson::Value normalizedRoot;
+    normalizeToolArgumentValue(input, normalizedRoot, normalized.GetAllocator());
+    normalized.CopyFrom(normalizedRoot, normalized.GetAllocator());
+    return normalized;
+}
+
+} // namespace
 
 void ToolRegistry::registerTool(std::unique_ptr<shared::ITool> tool) {
     auto meta = tool->getMetadata();
@@ -52,13 +102,15 @@ shared::ToolResult ToolRegistry::execute(const std::string& name, const rapidjso
         return shared::ToolResult::fail("Permission denied: tool scope not allowed for " + name);
     }
 
+    const rapidjson::Document normalizedInput = normalizeToolArguments(input);
+
     // Validation with breadcrumbs
-    auto validation = it->second->getSchema()->validate(input);
+    auto validation = it->second->getSchema()->validate(normalizedInput);
     if (!validation.success) {
         return shared::ToolResult::fail(validation.violationToPretty());
     }
 
-    return it->second->execute(input, ctx);
+    return it->second->execute(normalizedInput, ctx);
 }
 
 }

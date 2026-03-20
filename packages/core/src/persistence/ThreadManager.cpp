@@ -37,6 +37,16 @@ std::string planPathFor(const std::string& basePath, const std::string& threadId
     return plansDirectoryPathFor(basePath, threadId) + "/" + planId + ".json";
 }
 
+std::string todosDirectoryPathFor(const std::string& basePath,
+                                  const std::string& threadId) {
+    return basePath + "/" + threadId + "/todos";
+}
+
+std::string todoPathFor(const std::string& basePath, const std::string& threadId,
+                        const std::string& agentId) {
+    return todosDirectoryPathFor(basePath, threadId) + "/" + agentId + ".json";
+}
+
 uint64_t nowEpochMs() {
     return static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -164,6 +174,22 @@ std::shared_ptr<std::mutex> acquirePlanMutex(const std::string& threadId,
     static std::unordered_map<std::string, std::weak_ptr<std::mutex>> registry;
 
     const std::string key = threadId + ":" + planId;
+    std::lock_guard<std::mutex> guard(registryMutex);
+    if (auto existing = registry[key].lock()) {
+        return existing;
+    }
+
+    auto created = std::make_shared<std::mutex>();
+    registry[key] = created;
+    return created;
+}
+
+std::shared_ptr<std::mutex> acquireTodoMutex(const std::string& threadId,
+                                             const std::string& agentId) {
+    static std::mutex registryMutex;
+    static std::unordered_map<std::string, std::weak_ptr<std::mutex>> registry;
+
+    const std::string key = threadId + ":" + agentId;
     std::lock_guard<std::mutex> guard(registryMutex);
     if (auto existing = registry[key].lock()) {
         return existing;
@@ -433,6 +459,98 @@ Plan ThreadManager::mutatePlan(const std::string& threadId,
     plan.updatedAt = nowEpochMs();
     writeJsonDocument(toJson(plan), planPathFor(basePath_, threadId, plan.id));
     return plan;
+}
+
+AgentTodoList ThreadManager::getAgentTodo(const std::string& threadId,
+                                          const std::string& agentId) const {
+    if (agentId.empty()) {
+        throw std::runtime_error("Cannot load todo list with empty agentId");
+    }
+
+    std::string path = todoPathFor(basePath_, threadId, agentId);
+    if (!std::filesystem::exists(path)) {
+        AgentTodoList empty;
+        empty.threadId = threadId;
+        empty.agentId = agentId;
+        empty.nextId = 1;
+        return empty;
+    }
+
+    rapidjson::Document d = readJsonDocument(path, "agent todo list");
+    AgentTodoList list = agentTodoListFromJson(d);
+    if (list.threadId.empty()) {
+        list.threadId = threadId;
+    }
+    if (list.agentId.empty()) {
+        list.agentId = agentId;
+    }
+    if (list.nextId <= 0) {
+        list.nextId = 1;
+    }
+    return list;
+}
+
+void ThreadManager::writeAgentTodo(const std::string& threadId,
+                                   const std::string& agentId,
+                                   const AgentTodoList& todoList) {
+    if (agentId.empty()) {
+        throw std::runtime_error("Cannot write todo list with empty agentId");
+    }
+
+    std::string threadDir = basePath_ + "/" + threadId;
+    if (!std::filesystem::exists(threadDir)) {
+        throw std::runtime_error("Thread not found: " + threadId);
+    }
+
+    auto todoMutex = acquireTodoMutex(threadId, agentId);
+    std::lock_guard<std::mutex> lock(*todoMutex);
+
+    AgentTodoList persisted = todoList;
+    if (persisted.threadId.empty()) {
+        persisted.threadId = threadId;
+    }
+    if (persisted.agentId.empty()) {
+        persisted.agentId = agentId;
+    }
+    if (persisted.threadId != threadId || persisted.agentId != agentId) {
+        throw std::runtime_error("Todo identity does not match target thread/agent");
+    }
+    if (persisted.nextId <= 0) {
+        persisted.nextId = 1;
+    }
+
+    std::string todosDir = todosDirectoryPathFor(basePath_, threadId);
+    std::filesystem::create_directories(todosDir);
+    writeJsonDocument(toJson(persisted), todoPathFor(basePath_, threadId, agentId));
+}
+
+AgentTodoList ThreadManager::mutateAgentTodo(
+    const std::string& threadId, const std::string& agentId,
+    const std::function<void(AgentTodoList&)>& mutator) {
+    if (agentId.empty()) {
+        throw std::runtime_error("Cannot mutate todo list with empty agentId");
+    }
+
+    auto todoMutex = acquireTodoMutex(threadId, agentId);
+    std::lock_guard<std::mutex> lock(*todoMutex);
+
+    AgentTodoList todoList = getAgentTodo(threadId, agentId);
+    mutator(todoList);
+    if (todoList.threadId.empty()) {
+        todoList.threadId = threadId;
+    }
+    if (todoList.agentId.empty()) {
+        todoList.agentId = agentId;
+    }
+    if (todoList.nextId <= 0) {
+        todoList.nextId = 1;
+    }
+    if (todoList.threadId != threadId || todoList.agentId != agentId) {
+        throw std::runtime_error("Todo identity does not match target thread/agent");
+    }
+
+    writeJsonDocument(toJson(todoList), todoPathFor(basePath_, threadId, agentId));
+    return todoList;
 }
 
 std::map<std::string, AgentManifestEntry> ThreadManager::readAgentManifest(const std::string& threadId) const {

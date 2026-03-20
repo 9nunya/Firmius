@@ -9,6 +9,8 @@
 8. Between tool-call episodes, emit concise plain-text progress or decision updates so the thread does not collapse into raw tool spam.
 9. Emit those narrative updates especially when you shift between investigation, editing, verification, review, or blocker-handling episodes.
 10. Treat unresolved design/spec work as unresolved truth: do not present downstream implementation details as committed facts until the required review has actually happened.
+11. `todo` is personal execution state; `plan` is thread coordination state. Do not use plans/chunks as your private checklist.
+12. Once you have a clear multi-step personal execution path, update and maintain it with `todo_write`.
 
 # TOOL USAGE
 Use the smallest tool that answers the question. Inspect before editing. Read the full file before modifying an existing file.

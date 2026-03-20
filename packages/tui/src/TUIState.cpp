@@ -5,6 +5,7 @@
 #include "ThemeManager.hpp"
 #include "TUIHotkeys.hpp"
 #include "UIState.hpp"
+#include "WorkPanelLayout.hpp"
 #include "agents/PurposeLoader.hpp"
 #include "commands/CommandManager.hpp"
 #include "components/AgentStrip.hpp"
@@ -14,6 +15,7 @@
 #include "components/InputBar.hpp"
 #include "components/Markdown.hpp"
 #include "components/PlanLane.hpp"
+#include "components/TodoLane.hpp"
 #include "components/StatusBar.hpp"
 #include "components/TitleBar.hpp"
 #include "components/TranscriptGrouping.hpp"
@@ -330,13 +332,16 @@ void TuiState::init(firmius::core::Harness &harness,
       }
       updateAgentStripModel();
       updateStatusModel();
+      updateTodoLaneModel();
     }
   };
 
   plan_lane_model_ = std::make_shared<PlanLaneModel>();
+  todo_lane_model_ = std::make_shared<TodoLaneModel>();
   active_plan_state_.setExpanded(plan_lane_expanded_);
   active_plan_state_.hydrateForThread(thread_, loadActivePlanForThread(thread_));
   updatePlanLaneModel();
+  updateTodoLaneModel();
 
   subscription_id_ =
       harness_->subscribe([this](const firmius::shared::AppEvent &ev) {
@@ -349,6 +354,7 @@ void TuiState::init(firmius::core::Harness &harness,
   updateStatusModel();
   updateAgentStripModel();
   updatePlanLaneModel();
+  updateTodoLaneModel();
 }
 
 void TuiState::attachScreen(ftxui::ScreenInteractive *screen) {
@@ -481,6 +487,7 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
           active_plan_state_.hydrateForThread(thread_,
                                               loadActivePlanForThread(thread_));
           updatePlanLaneModel();
+          updateTodoLaneModel();
           setViewMode(ViewMode::Chat);
 
           updateStatusModel();
@@ -503,6 +510,7 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
               active_plan_state_.hydrateForThread(
                   thread_, loadActivePlanForThread(thread_));
               updatePlanLaneModel();
+              updateTodoLaneModel();
             }
             if (previousMode != thread_.permissionMode) {
               NotificationManager::instance().notifyInfo(
@@ -611,10 +619,12 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
       thread_.activePlanId = plan->id;
     }
     updatePlanLaneModel();
+    updateTodoLaneModel();
   }
 
   updateStatusModel();
   updateAgentStripModel();
+  updateTodoLaneModel();
 
   if (screen_) {
     screen_->PostEvent(ftxui::Event::Custom);
@@ -861,6 +871,77 @@ void TuiState::updatePlanLaneModel() {
   *plan_lane_model_ = active_plan_state_.model();
 }
 
+std::string TuiState::findExecutorChunkTitle(
+    const std::optional<shared::Plan> &plan) const {
+  if (!plan.has_value() || focused_agent_id_.empty()) {
+    return "";
+  }
+  for (const auto &chunk : plan->chunks) {
+    if (chunk.assignedAgentId != focused_agent_id_) {
+      continue;
+    }
+    if (chunk.status == shared::WorkChunkStatus::Done ||
+        chunk.status == shared::WorkChunkStatus::Cancelled) {
+      continue;
+    }
+    return chunk.title;
+  }
+  return "";
+}
+
+void TuiState::updateTodoLaneModel() {
+  if (!todo_lane_model_) {
+    return;
+  }
+
+  todo_lane_model_->visible = false;
+  todo_lane_model_->owner_label.clear();
+  todo_lane_model_->show_chunk_header = false;
+  todo_lane_model_->chunk_title.clear();
+  todo_lane_model_->rows.clear();
+
+  if (thread_.threadId.empty() || focused_agent_id_.empty()) {
+    return;
+  }
+
+  try {
+    firmius::core::ThreadManager tm(firmiusThreadsPath());
+    const auto todo = tm.getAgentTodo(thread_.threadId, focused_agent_id_);
+    if (todo.items.empty()) {
+      return;
+    }
+
+    todo_lane_model_->visible = true;
+    todo_lane_model_->owner_label = focused_agent_id_.substr(0, 8);
+    auto focusedAgent =
+        firmius::core::AgentRegistry::instance().getAgent(focused_agent_id_);
+    if (focusedAgent) {
+      const auto &ctx = focusedAgent->getContext();
+      if (!ctx.identity.friendlyName.empty()) {
+        todo_lane_model_->owner_label = ctx.identity.friendlyName;
+      }
+      if (ctx.config.personaName == "executor") {
+        const auto activePlan = loadActivePlanForThread(thread_);
+        const std::string chunkTitle = findExecutorChunkTitle(activePlan);
+        if (!chunkTitle.empty()) {
+          todo_lane_model_->show_chunk_header = true;
+          todo_lane_model_->chunk_title = chunkTitle;
+        }
+      }
+    }
+
+    todo_lane_model_->rows.reserve(todo.items.size());
+    for (const auto &item : todo.items) {
+      todo_lane_model_->rows.push_back({item.id, item.text, item.status});
+    }
+    std::sort(todo_lane_model_->rows.begin(), todo_lane_model_->rows.end(),
+              [](const TodoLaneRow &lhs, const TodoLaneRow &rhs) {
+                return lhs.id < rhs.id;
+              });
+  } catch (...) {
+  }
+}
+
 std::optional<shared::Plan>
 TuiState::loadActivePlanForThread(const shared::ThreadMetadata &thread) const {
   if (thread.threadId.empty() || thread.activePlanId.empty()) {
@@ -883,6 +964,7 @@ ftxui::Component TuiState::root() {
   auto status_bar = StatusBar(status_model_);
   auto agent_strip = AgentStrip(agent_strip_model_);
   auto plan_lane = PlanLane(plan_lane_model_);
+  auto todo_lane = TodoLane(todo_lane_model_);
 
   auto input_bar = InputBar(
       input_model_,
@@ -1236,6 +1318,7 @@ ftxui::Component TuiState::root() {
   auto container = ftxui::Container::Vertical({
       input_bar,
       chat,
+      todo_lane,
       plan_lane,
       agent_strip,
   });
@@ -1251,7 +1334,7 @@ ftxui::Component TuiState::root() {
 
   auto base_view =
       ftxui::Renderer(container, [this, title_bar, status_bar, plan_lane,
-                                  agent_strip, input_bar, chat,
+                                  todo_lane, agent_strip, input_bar, chat,
                                   welcome_screen] {
         // Deferred modal clearing: drain here where it's safe
         if (pending_modal_clear_) {
@@ -1275,14 +1358,58 @@ ftxui::Component TuiState::root() {
         }
 
         const auto &theme = ThemeManager::instance().getCurrentTheme();
+        const auto terminal = ftxui::Terminal::Size();
+        bool isLead = false;
+        bool isExecutor = false;
+        if (!focused_agent_id_.empty()) {
+          auto focusedAgent =
+              firmius::core::AgentRegistry::instance().getAgent(focused_agent_id_);
+          if (focusedAgent) {
+            const auto &persona = focusedAgent->getContext().config.personaName;
+            isLead = (persona == "lead");
+            isExecutor = (persona == "executor");
+          }
+        }
+        const bool hasPlan = plan_lane_model_ && plan_lane_model_->visible;
+        const bool hasTodo = todo_lane_model_ && todo_lane_model_->visible;
+        const bool hasExecutorChunk =
+            hasTodo && todo_lane_model_->show_chunk_header;
+        const auto panelDecision = determineWorkPanelDecision(
+            isLead, isExecutor, hasPlan, hasTodo, hasExecutorChunk,
+            terminal.dimx, terminal.dimy, prefer_todo_panel_on_narrow_);
+
+        ftxui::Element work_panel = ftxui::text("");
+        bool show_work_panel = false;
+        if (panelDecision.kind == WorkPanelKind::SplitPlanTodo) {
+          work_panel = ftxui::hbox({
+                           plan_lane->Render() | ftxui::flex,
+                           ftxui::separator() | ftxui::color(theme.base.border),
+                           todo_lane->Render() | ftxui::flex,
+                       }) |
+                       ftxui::xflex;
+          show_work_panel = true;
+        } else if (panelDecision.kind == WorkPanelKind::SingleToggle) {
+          auto activeLabel = ftxui::text(" PANEL: " + panelDecision.activePanelLabel +
+                                         " (Ctrl+O to toggle) ") |
+                             ftxui::bold | ftxui::color(theme.base.bg) |
+                             ftxui::bgcolor(theme.base.highlight);
+          work_panel =
+              ftxui::vbox({activeLabel | ftxui::xflex,
+                           panelDecision.showPlan ? plan_lane->Render()
+                                                  : todo_lane->Render()}) |
+              ftxui::xflex;
+          show_work_panel = true;
+        } else if (panelDecision.kind == WorkPanelKind::ExecutorChunkTodo ||
+                   panelDecision.kind == WorkPanelKind::TodoOnly) {
+          work_panel = todo_lane->Render();
+          show_work_panel = true;
+        } else if (panelDecision.kind == WorkPanelKind::PlanOnly) {
+          work_panel = plan_lane->Render();
+          show_work_panel = true;
+        }
 
         // Ultra-compact bottom bar layout
         ftxui::Elements bottom_bar_children;
-        if (plan_lane_model_ && plan_lane_model_->visible) {
-          bottom_bar_children.push_back(plan_lane->Render());
-          bottom_bar_children.push_back(ftxui::separator() |
-                                        ftxui::color(theme.base.border));
-        }
         bottom_bar_children.push_back(agent_strip->Render());
         bottom_bar_children.push_back(ftxui::separator() |
                                       ftxui::color(theme.base.border));
@@ -1297,12 +1424,23 @@ ftxui::Component TuiState::root() {
         if (view_mode_ == ViewMode::Welcome) {
           main_view = ftxui::vbox({chat_area, bottom_bar}) | ftxui::flex;
         } else {
-          main_view = ftxui::vbox({
-                          title_bar->Render(),
-                          chat_area | ftxui::flex,
-                          bottom_bar,
-                      }) |
-                      ftxui::flex;
+          if (show_work_panel) {
+            main_view = ftxui::vbox({
+                            title_bar->Render(),
+                            chat_area | ftxui::flex,
+                            ftxui::separator() | ftxui::color(theme.base.border),
+                            work_panel,
+                            bottom_bar,
+                        }) |
+                        ftxui::flex;
+          } else {
+            main_view = ftxui::vbox({
+                            title_bar->Render(),
+                            chat_area | ftxui::flex,
+                            bottom_bar,
+                        }) |
+                        ftxui::flex;
+          }
         }
 
         // Layer notifications
@@ -1495,6 +1633,7 @@ ftxui::Component TuiState::root() {
 
       updateStatusModel();
       updateAgentStripModel();
+      updateTodoLaneModel();
       if (chat_component_) {
         chat_component_->OnEvent(ftxui::Event::Special("ThreadChanged"));
       }
@@ -1524,6 +1663,7 @@ ftxui::Component TuiState::root() {
               chat_component_->OnEvent(ftxui::Event::Special("ThreadChanged"));
             updateStatusModel();
             updateAgentStripModel();
+            updateTodoLaneModel();
             if (screen_)
               screen_->PostEvent(ftxui::Event::Custom);
           }
@@ -1561,6 +1701,7 @@ ftxui::Component TuiState::root() {
                     ftxui::Event::Special("ThreadChanged"));
               updateStatusModel();
               updateAgentStripModel();
+              updateTodoLaneModel();
               if (screen_)
                 screen_->PostEvent(ftxui::Event::Custom);
             }
@@ -1629,9 +1770,32 @@ ftxui::Component TuiState::root() {
 
     // Ctrl+O - Toggle plan lane expansion
     if (event == ftxui::Event::Special("\x0F")) {
-      plan_lane_expanded_ = !plan_lane_expanded_;
-      active_plan_state_.setExpanded(plan_lane_expanded_);
-      updatePlanLaneModel();
+      const auto terminal = ftxui::Terminal::Size();
+      bool isLead = false;
+      bool isExecutor = false;
+      if (!focused_agent_id_.empty()) {
+        auto focusedAgent =
+            firmius::core::AgentRegistry::instance().getAgent(focused_agent_id_);
+        if (focusedAgent) {
+          const auto &persona = focusedAgent->getContext().config.personaName;
+          isLead = (persona == "lead");
+          isExecutor = (persona == "executor");
+        }
+      }
+      const bool hasPlan = plan_lane_model_ && plan_lane_model_->visible;
+      const bool hasTodo = todo_lane_model_ && todo_lane_model_->visible;
+      const bool hasExecutorChunk =
+          hasTodo && todo_lane_model_->show_chunk_header;
+      const auto panelDecision = determineWorkPanelDecision(
+          isLead, isExecutor, hasPlan, hasTodo, hasExecutorChunk,
+          terminal.dimx, terminal.dimy, prefer_todo_panel_on_narrow_);
+      if (panelDecision.kind == WorkPanelKind::SingleToggle) {
+        prefer_todo_panel_on_narrow_ = !prefer_todo_panel_on_narrow_;
+      } else {
+        plan_lane_expanded_ = !plan_lane_expanded_;
+        active_plan_state_.setExpanded(plan_lane_expanded_);
+        updatePlanLaneModel();
+      }
       if (screen_) {
         screen_->PostEvent(ftxui::Event::Custom);
       }

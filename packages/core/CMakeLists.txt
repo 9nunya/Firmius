@@ -39,6 +39,7 @@ target_sources(firmius_core PRIVATE
     src/tools/ChunkGetTool.cpp
     src/tools/ChunkUpdateTool.cpp
     src/tools/ChunkReadyForExecutionTool.cpp
+    src/tools/TodoWriteTool.cpp
     src/agents/HintingLoader.cpp
     src/agents/PurposeLoader.cpp
     src/agents/Agent.cpp
@@ -96,6 +97,7 @@ target_sources(firmius_core PUBLIC
     include/tools/ChunkGetTool.hpp
     include/tools/ChunkUpdateTool.hpp
     include/tools/ChunkReadyForExecutionTool.hpp
+    include/tools/TodoWriteTool.hpp
     include/agents/HintingLoader.hpp
     include/agents/PurposeLoader.hpp
     include/agents/Agent.hpp

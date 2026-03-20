@@ -95,6 +95,7 @@ std::string SummarizeToolCall(const std::string &name, const std::string &args, 
     if (isMatch(name, "glob")) return "Preparing glob...";
     if (isMatch(name, "plan_")) return "Preparing plan update...";
     if (isMatch(name, "chunk_")) return "Preparing chunk update...";
+    if (isMatch(name, "todo_write")) return "Preparing todo update...";
     return "Preparing " + name + "...";
   }
 
@@ -134,6 +135,9 @@ std::string SummarizeToolCall(const std::string &name, const std::string &args, 
   }
   if (isMatch(name, "chunk_ready_for_execution")) {
     return "Find executable chunks";
+  }
+  if (isMatch(name, "todo_write")) {
+    return "Update todo list";
   }
 
   if (isMatch(name, "list_directory")) {

@@ -8,6 +8,7 @@
 #include "tools/PlanListTool.hpp"
 #include "tools/PlanSetActiveTool.hpp"
 #include "tools/PlanUpdateTool.hpp"
+#include "tools/TodoWriteTool.hpp"
 #include "tools/ToolRegistry.hpp"
 #include "IAgent.hpp"
 #include "harness/Harness.hpp"
@@ -139,6 +140,7 @@ protected:
     registry_.registerTool(std::make_unique<ChunkGetTool>());
     registry_.registerTool(std::make_unique<ChunkUpdateTool>());
     registry_.registerTool(std::make_unique<ChunkReadyForExecutionTool>());
+    registry_.registerTool(std::make_unique<TodoWriteTool>());
   }
 
   ToolResult execute(const std::string &toolName, rapidjson::Document &input) {
@@ -374,6 +376,104 @@ TEST_F(WorkToolsTest, planSetActiveUpdatesThreadMetadata) {
   EXPECT_EQ(event->planId, secondPlanId);
   EXPECT_EQ(event->plan.id, secondPlanId);
   EXPECT_EQ(event->plan.status, PlanStatus::Active);
+}
+
+TEST_F(WorkToolsTest, todoWriteCreatesInitialList) {
+  auto input = makeObject({{"patch", "1. [+] Inspect code\n2. [+] Add tests"}});
+  auto result = execute("todo_write", input);
+  ASSERT_TRUE(result.success) << result.error;
+
+  const auto todo =
+      threadManager_->getAgentTodo(threadId_, agent_.context_.identity.id);
+  ASSERT_EQ(todo.items.size(), 2u);
+  EXPECT_EQ(todo.nextId, 3);
+  EXPECT_EQ(todo.items[0].id, 1);
+  EXPECT_EQ(todo.items[0].status, TodoStatus::Pending);
+  EXPECT_EQ(todo.items[1].id, 2);
+}
+
+TEST_F(WorkToolsTest, todoWritePatchesSingleExistingItem) {
+  auto create = makeObject({{"patch", "1. [+] Task 1\n2. [+] Task 2\n3. [+] Task 3"}});
+  ASSERT_TRUE(execute("todo_write", create).success);
+
+  auto update = makeObject({{"patch", "1. [*] Task 1"}});
+  auto result = execute("todo_write", update);
+  ASSERT_TRUE(result.success) << result.error;
+
+  const auto todo =
+      threadManager_->getAgentTodo(threadId_, agent_.context_.identity.id);
+  ASSERT_EQ(todo.items.size(), 3u);
+  EXPECT_EQ(todo.items[0].status, TodoStatus::InProgress);
+  EXPECT_EQ(todo.items[1].status, TodoStatus::Pending);
+  EXPECT_EQ(todo.items[2].status, TodoStatus::Pending);
+}
+
+TEST_F(WorkToolsTest, todoWriteAddsNewItemWithNextId) {
+  auto create = makeObject({{"patch", "1. [+] Task 1"}});
+  ASSERT_TRUE(execute("todo_write", create).success);
+
+  auto add = makeObject({{"patch", "2. [+] Task 2"}});
+  auto result = execute("todo_write", add);
+  ASSERT_TRUE(result.success) << result.error;
+
+  const auto todo =
+      threadManager_->getAgentTodo(threadId_, agent_.context_.identity.id);
+  ASSERT_EQ(todo.items.size(), 2u);
+  EXPECT_EQ(todo.nextId, 3);
+  EXPECT_EQ(todo.items[1].id, 2);
+}
+
+TEST_F(WorkToolsTest, todoWriteDeletesExistingItem) {
+  auto create = makeObject({{"patch", "1. [+] Task 1\n2. [+] Task 2"}});
+  ASSERT_TRUE(execute("todo_write", create).success);
+
+  auto remove = makeObject({{"patch", "1. [-] Task 1"}});
+  auto result = execute("todo_write", remove);
+  ASSERT_TRUE(result.success) << result.error;
+
+  const auto todo =
+      threadManager_->getAgentTodo(threadId_, agent_.context_.identity.id);
+  ASSERT_EQ(todo.items.size(), 1u);
+  EXPECT_EQ(todo.items[0].id, 2);
+  EXPECT_EQ(todo.nextId, 3);
+}
+
+TEST_F(WorkToolsTest, todoWriteRejectsDuplicateIdInPatch) {
+  auto create = makeObject({{"patch", "1. [+] Task 1"}});
+  ASSERT_TRUE(execute("todo_write", create).success);
+
+  auto duplicate = makeObject(
+      {{"patch", "1. [ ] Task 1\n1. [x] Task 1 done"}});
+  auto result = execute("todo_write", duplicate);
+  EXPECT_FALSE(result.success);
+  EXPECT_THAT(result.error, ::testing::HasSubstr("Duplicate todo id"));
+}
+
+TEST_F(WorkToolsTest, todoWriteRejectsMalformedLine) {
+  auto bad = makeObject({{"patch", "bad line"}});
+  auto result = execute("todo_write", bad);
+  EXPECT_FALSE(result.success);
+  EXPECT_THAT(result.error, ::testing::HasSubstr("Malformed todo line"));
+}
+
+TEST_F(WorkToolsTest, todoWriteRejectsUnknownIdForUpdate) {
+  auto create = makeObject({{"patch", "1. [+] Task 1"}});
+  ASSERT_TRUE(execute("todo_write", create).success);
+
+  auto unknown = makeObject({{"patch", "2. [*] Task 2"}});
+  auto result = execute("todo_write", unknown);
+  EXPECT_FALSE(result.success);
+  EXPECT_THAT(result.error, ::testing::HasSubstr("Unknown todo id"));
+}
+
+TEST_F(WorkToolsTest, todoWriteRejectsNonNextIdForAdd) {
+  auto create = makeObject({{"patch", "1. [+] Task 1"}});
+  ASSERT_TRUE(execute("todo_write", create).success);
+
+  auto badAdd = makeObject({{"patch", "3. [+] Task 3"}});
+  auto result = execute("todo_write", badAdd);
+  EXPECT_FALSE(result.success);
+  EXPECT_THAT(result.error, ::testing::HasSubstr("expected next id 2"));
 }
 
 TEST_F(WorkToolsTest, chunkAddBlocksDependencyIncompleteChunkInsteadOfMarkingReady) {

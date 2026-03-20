@@ -70,7 +70,7 @@ ftxui::Component HelpOverlay(TuiState &state) {
                 {{"?", "Open help when the input is empty"},
                  {"F1", "Open help from anywhere"},
                  {"Ctrl+H", "Toggle notifications"},
-                 {"Ctrl+O", "Expand/collapse active plan lane"},
+                 {"Ctrl+O", "Toggle PLAN/TODO panel (or expand plan)"},
                  {"Enter", "Send message"},
                  {"Shift+Enter", "Insert newline"}}),
         ftxui::separator(),

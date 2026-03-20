@@ -259,6 +259,28 @@ WorkChunkStatus stringToWorkChunkStatus(const std::string &str) {
   throw std::runtime_error("Unknown WorkChunkStatus: " + str);
 }
 
+std::string todoStatusToString(TodoStatus value) {
+  switch (value) {
+  case TodoStatus::Pending:
+    return "Pending";
+  case TodoStatus::InProgress:
+    return "InProgress";
+  case TodoStatus::Done:
+    return "Done";
+  }
+  return "Pending";
+}
+
+TodoStatus stringToTodoStatus(const std::string &str) {
+  if (str == "Pending")
+    return TodoStatus::Pending;
+  if (str == "InProgress")
+    return TodoStatus::InProgress;
+  if (str == "Done")
+    return TodoStatus::Done;
+  throw std::runtime_error("Unknown TodoStatus: " + str);
+}
+
 std::string stopReasonToString(StopReason value) {
   switch (value) {
   case StopReason::Stop:
@@ -568,6 +590,95 @@ Plan planFromJsonValue(const rapidjson::Value &v) {
     }
   }
   return plan;
+}
+
+rapidjson::Value todoItemToJson(const TodoItem &item,
+                                rapidjson::Document::AllocatorType &a) {
+  rapidjson::Value v(rapidjson::kObjectType);
+  v.AddMember("id", item.id, a);
+  v.AddMember("text", rapidjson::Value(item.text.c_str(), a), a);
+  v.AddMember("status",
+              rapidjson::Value(todoStatusToString(item.status).c_str(), a), a);
+  v.AddMember("chunk_id", rapidjson::Value(item.chunkId.c_str(), a), a);
+  v.AddMember("plan_id", rapidjson::Value(item.planId.c_str(), a), a);
+  v.AddMember("created_at", item.createdAt, a);
+  v.AddMember("updated_at", item.updatedAt, a);
+  return v;
+}
+
+TodoItem todoItemFromJsonValue(const rapidjson::Value &v) {
+  TodoItem item;
+  item.id = v.HasMember("id") && v["id"].IsInt() ? v["id"].GetInt() : 0;
+  item.text =
+      v.HasMember("text") && v["text"].IsString() ? v["text"].GetString() : "";
+  item.status = v.HasMember("status") && v["status"].IsString()
+                    ? stringToTodoStatus(v["status"].GetString())
+                    : TodoStatus::Pending;
+  item.chunkId = v.HasMember("chunk_id") && v["chunk_id"].IsString()
+                     ? v["chunk_id"].GetString()
+                     : (v.HasMember("chunkId") && v["chunkId"].IsString()
+                            ? v["chunkId"].GetString()
+                            : "");
+  item.planId = v.HasMember("plan_id") && v["plan_id"].IsString()
+                    ? v["plan_id"].GetString()
+                    : (v.HasMember("planId") && v["planId"].IsString()
+                           ? v["planId"].GetString()
+                           : "");
+  item.createdAt = v.HasMember("created_at") && v["created_at"].IsUint64()
+                       ? v["created_at"].GetUint64()
+                       : (v.HasMember("createdAt") && v["createdAt"].IsUint64()
+                              ? v["createdAt"].GetUint64()
+                              : 0);
+  item.updatedAt = v.HasMember("updated_at") && v["updated_at"].IsUint64()
+                       ? v["updated_at"].GetUint64()
+                       : (v.HasMember("updatedAt") && v["updatedAt"].IsUint64()
+                              ? v["updatedAt"].GetUint64()
+                              : 0);
+  return item;
+}
+
+rapidjson::Value agentTodoListToJson(const AgentTodoList &list,
+                                     rapidjson::Document::AllocatorType &a) {
+  rapidjson::Value v(rapidjson::kObjectType);
+  v.AddMember("thread_id", rapidjson::Value(list.threadId.c_str(), a), a);
+  v.AddMember("agent_id", rapidjson::Value(list.agentId.c_str(), a), a);
+  v.AddMember("next_id", list.nextId, a);
+  rapidjson::Value items(rapidjson::kArrayType);
+  for (const auto &item : list.items) {
+    items.PushBack(todoItemToJson(item, a), a);
+  }
+  v.AddMember("items", items, a);
+  return v;
+}
+
+AgentTodoList agentTodoListFromJsonValue(const rapidjson::Value &v) {
+  AgentTodoList list;
+  list.threadId = v.HasMember("thread_id") && v["thread_id"].IsString()
+                      ? v["thread_id"].GetString()
+                      : (v.HasMember("threadId") && v["threadId"].IsString()
+                             ? v["threadId"].GetString()
+                             : "");
+  list.agentId = v.HasMember("agent_id") && v["agent_id"].IsString()
+                     ? v["agent_id"].GetString()
+                     : (v.HasMember("agentId") && v["agentId"].IsString()
+                            ? v["agentId"].GetString()
+                            : "");
+  list.nextId = v.HasMember("next_id") && v["next_id"].IsInt()
+                    ? v["next_id"].GetInt()
+                    : (v.HasMember("nextId") && v["nextId"].IsInt()
+                           ? v["nextId"].GetInt()
+                           : 1);
+  if (list.nextId <= 0) {
+    list.nextId = 1;
+  }
+  if (v.HasMember("items") && v["items"].IsArray()) {
+    for (const auto &itemValue : v["items"].GetArray()) {
+      if (itemValue.IsObject()) {
+        list.items.push_back(todoItemFromJsonValue(itemValue));
+      }
+    }
+  }
+  return list;
 }
 
 rapidjson::Value messagePartToJson(const MessagePart &p,
@@ -1233,6 +1344,30 @@ rapidjson::Document toJson(const Plan &plan) {
 
 Plan planFromJson(const rapidjson::Value &value) {
   return planFromJsonValue(value);
+}
+
+rapidjson::Document toJson(const TodoItem &item) {
+  rapidjson::Document d;
+  d.SetObject();
+  auto &a = d.GetAllocator();
+  d.CopyFrom(todoItemToJson(item, a), a);
+  return d;
+}
+
+TodoItem todoItemFromJson(const rapidjson::Value &value) {
+  return todoItemFromJsonValue(value);
+}
+
+rapidjson::Document toJson(const AgentTodoList &list) {
+  rapidjson::Document d;
+  d.SetObject();
+  auto &a = d.GetAllocator();
+  d.CopyFrom(agentTodoListToJson(list, a), a);
+  return d;
+}
+
+AgentTodoList agentTodoListFromJson(const rapidjson::Value &value) {
+  return agentTodoListFromJsonValue(value);
 }
 
 rapidjson::Document toJson(const EngineEvent &ev) {

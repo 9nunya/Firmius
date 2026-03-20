@@ -125,6 +125,15 @@ enum class WorkChunkStatus : std::uint8_t {
 };
 
 /**
+ * @brief Execution status for a per-agent todo item.
+ */
+enum class TodoStatus : std::uint8_t {
+  Pending,
+  InProgress,
+  Done
+};
+
+/**
  * @brief Reason why an LLM generation stopped.
  */
 enum class StopReason : std::uint8_t {

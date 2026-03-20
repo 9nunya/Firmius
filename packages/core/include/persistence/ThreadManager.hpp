@@ -90,6 +90,13 @@ public:
     void updatePlan(const std::string& threadId, const Plan& plan);
     Plan mutatePlan(const std::string& threadId, const std::string& planId,
                     const std::function<void(Plan&)>& mutator);
+    AgentTodoList getAgentTodo(const std::string& threadId,
+                               const std::string& agentId) const;
+    void writeAgentTodo(const std::string& threadId, const std::string& agentId,
+                        const AgentTodoList& todoList);
+    AgentTodoList mutateAgentTodo(
+        const std::string& threadId, const std::string& agentId,
+        const std::function<void(AgentTodoList&)>& mutator);
 
     /**
      * @brief Reads the agent manifest for a thread.

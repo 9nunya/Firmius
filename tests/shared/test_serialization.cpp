@@ -387,6 +387,35 @@ TEST(Serialization, PlanDefaultsForMissingFields) {
   EXPECT_TRUE(plan.chunks.empty());
 }
 
+TEST(Serialization, TodoItemRoundtrip) {
+  TodoItem original;
+  original.id = 7;
+  original.text = "Wire continuation checks";
+  original.status = TodoStatus::InProgress;
+  original.chunkId = "chunk-2";
+  original.planId = "plan-1";
+  original.createdAt = 1234;
+  original.updatedAt = 5678;
+
+  auto doc = toJson(original);
+  auto restored = todoItemFromJson(doc);
+  EXPECT_EQ(restored, original);
+}
+
+TEST(Serialization, AgentTodoListRoundtrip) {
+  AgentTodoList original;
+  original.threadId = "thread-1";
+  original.agentId = "agent-1";
+  original.nextId = 3;
+  original.items.push_back(TodoItem{1, "Inspect", TodoStatus::Done, "", "", 1, 2});
+  original.items.push_back(TodoItem{2, "Patch", TodoStatus::Pending, "chunk-1",
+                                    "plan-1", 3, 3});
+
+  auto doc = toJson(original);
+  auto restored = agentTodoListFromJson(doc);
+  EXPECT_EQ(restored, original);
+}
+
 TEST(Serialization, StreamEventRoundtrip) {
   StreamEvent textEvent = TextChunk{"Hello"};
   auto doc = toJson(textEvent);

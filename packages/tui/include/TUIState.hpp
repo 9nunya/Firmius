@@ -7,6 +7,7 @@
 #include "ActivePlanState.hpp"
 #include "StreamStateManager.hpp"
 #include "NotificationManager.hpp"
+#include "components/TodoLane.hpp"
 #include <ftxui/component/component_base.hpp>
 #include <ftxui/component/screen_interactive.hpp>
 #include <functional>
@@ -26,6 +27,7 @@ struct StatusBarModel;
 struct InputBarModel;
 struct AgentStripModel;
 struct PlanLaneModel;
+struct TodoLaneModel;
 
 class TuiState {
 public:
@@ -75,8 +77,10 @@ private:
   void updateStatusModel();
   void updateAgentStripModel();
   void updatePlanLaneModel();
+  void updateTodoLaneModel();
   std::optional<shared::Plan> loadActivePlanForThread(
       const shared::ThreadMetadata &thread) const;
+  std::string findExecutorChunkTitle(const std::optional<shared::Plan> &plan) const;
 
   firmius::core::Harness *harness_ = nullptr;
   shared::ThreadMetadata thread_;
@@ -98,6 +102,7 @@ private:
   std::shared_ptr<InputBarModel> input_model_;
   std::shared_ptr<AgentStripModel> agent_strip_model_;
   std::shared_ptr<PlanLaneModel> plan_lane_model_;
+  std::shared_ptr<TodoLaneModel> todo_lane_model_;
   ActivePlanState active_plan_state_;
 
   ViewMode view_mode_ = ViewMode::Chat;
@@ -107,6 +112,7 @@ private:
       false; // Deferred clear to avoid UB in modal handlers
   bool diffs_expanded_ = true; // Ctrl+G toggle for diff expansion
   bool plan_lane_expanded_ = false;
+  bool prefer_todo_panel_on_narrow_ = true;
 
   ftxui::Component root_component_;
   ftxui::Component chat_component_;

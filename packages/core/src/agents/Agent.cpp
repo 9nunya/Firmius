@@ -105,37 +105,33 @@ std::string threadStorageRootPath() {
   return ".firmius/threads";
 }
 
-bool planChunkNeedsFurtherWork(WorkChunkStatus status) {
-  return status != WorkChunkStatus::Done &&
-         status != WorkChunkStatus::Cancelled;
-}
+struct TodoStateSnapshot {
+  bool hasAny = false;
+  bool hasIncomplete = false;
+};
 
-bool hasActivePlanWithPendingChunks(const AgentContext &context) {
+TodoStateSnapshot readTodoState(const AgentContext &context) {
+  TodoStateSnapshot snapshot;
   if (!context.history || context.history->threadId.empty()) {
-    return false;
+    return snapshot;
+  }
+  if (context.identity.id.empty()) {
+    return snapshot;
   }
 
   try {
     ThreadManager tm(threadStorageRootPath());
-    ThreadMetadata metadata;
-    if (!tm.tryGetMetadata(context.history->threadId, metadata, nullptr) ||
-        metadata.activePlanId.empty()) {
-      return false;
-    }
-
-    const Plan activePlan =
-        tm.getPlan(context.history->threadId, metadata.activePlanId);
-    if (activePlan.status == PlanStatus::Done ||
-        activePlan.status == PlanStatus::Abandoned) {
-      return false;
-    }
-
-    return std::any_of(activePlan.chunks.begin(), activePlan.chunks.end(),
-                       [](const WorkChunk &chunk) {
-                         return planChunkNeedsFurtherWork(chunk.status);
-                       });
+    const AgentTodoList todo =
+        tm.getAgentTodo(context.history->threadId, context.identity.id);
+    snapshot.hasAny = !todo.items.empty();
+    snapshot.hasIncomplete =
+        std::any_of(todo.items.begin(), todo.items.end(),
+                    [](const TodoItem &item) {
+                      return item.status != TodoStatus::Done;
+                    });
+    return snapshot;
   } catch (...) {
-    return false;
+    return snapshot;
   }
 }
 
@@ -534,7 +530,7 @@ void Agent::runImpl(const std::optional<std::string> &task,
   int consecutiveProviderFailures = 0;
   const int maxProviderRetries = 3;
   int consecutiveProseOnlyContinuationTurns = 0;
-  const int maxProseOnlyContinuationTurns = 1;
+  const int maxProseOnlyContinuationTurns = 2;
 
   while (!taskFinished && turnCount < maxTurns && !interrupted.load()) {
     // --- CHECK FOR CONTEXT COMPACTION ---
@@ -852,14 +848,22 @@ void Agent::runImpl(const std::optional<std::string> &task,
           }
         }
 
-        const bool hasActivePlanWork = hasActivePlanWithPendingChunks(context);
+        const TodoStateSnapshot todoState = readTodoState(context);
+        const bool hasIncompleteTodoState = todoState.hasIncomplete;
         const bool hasRequestContinuationIntent = hasOpenExecutionIntent(context);
         const bool hasHarnessOwnedActiveWork =
             hasPendingToolCalls || hasBlockingProcesses ||
             hasRunningOwnedBackgroundProcess || hasRunningDescendantSubagent ||
-            hasActivePlanWork || hasExecutionStatus;
-        const bool shouldContinueAfterProseTurn =
-            hasHarnessOwnedActiveWork || hasRequestContinuationIntent;
+            hasIncompleteTodoState || hasExecutionStatus;
+
+        bool shouldContinueAfterProseTurn = false;
+        if (hasHarnessOwnedActiveWork) {
+          shouldContinueAfterProseTurn = true;
+        } else if (!todoState.hasAny && hasRequestContinuationIntent &&
+                   consecutiveProseOnlyContinuationTurns <
+                       maxProseOnlyContinuationTurns) {
+          shouldContinueAfterProseTurn = true;
+        }
 
         if (shouldContinueAfterProseTurn &&
             consecutiveProseOnlyContinuationTurns <
