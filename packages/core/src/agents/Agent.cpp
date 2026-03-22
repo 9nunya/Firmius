@@ -4,6 +4,7 @@
 #include "Events.hpp"
 #include "Message.hpp"
 #include "Panic.hpp"
+#include "Serialization.hpp"
 #include "agents/PurposeLoader.hpp"
 #include "persistence/Journaler.hpp"
 #include "persistence/ThreadManager.hpp"
@@ -16,7 +17,6 @@
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
-#include <future>
 #include <iostream>
 #include <limits>
 #include <sstream>
@@ -25,13 +25,11 @@
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
+#include <rapidjson/error/en.h>
 
 namespace firmius::core {
 
 namespace {
-std::string toLowerCopy(std::string value);
-std::string latestUserText(const AgentContext &context);
-
 constexpr std::uint32_t kMissingToolCallIndex =
     std::numeric_limits<std::uint32_t>::max();
 
@@ -110,259 +108,262 @@ std::string threadStorageRootPath() {
   return ".firmius/threads";
 }
 
-struct TodoStateSnapshot {
-  bool hasAny = false;
-  bool hasIncomplete = false;
-};
-
-struct PlanStateSnapshot {
-  bool hasActivePlan = false;
-  bool activePlanDone = true;
-  bool activePlanKnown = true;
-};
-
-enum class TodoEnforcementRole { Lead, Executor, Auditor, Worker, Scout, Unknown };
-
-TodoEnforcementRole todoRoleForPersona(const std::string &persona) {
-  const std::string lowered =
-      toLowerCopy(shared::StringUtil::trim(persona));
-  if (lowered == "lead") {
-    return TodoEnforcementRole::Lead;
-  }
-  if (lowered == "executor") {
-    return TodoEnforcementRole::Executor;
-  }
-  if (lowered == "auditor") {
-    return TodoEnforcementRole::Auditor;
-  }
-  if (lowered == "worker") {
-    return TodoEnforcementRole::Worker;
-  }
-  if (lowered == "scout") {
-    return TodoEnforcementRole::Scout;
-  }
-  return TodoEnforcementRole::Unknown;
+std::string compactionSnapshotPath(const std::string &threadId,
+                                   const std::string &agentId) {
+  return threadStorageRootPath() + "/" + threadId + "/compaction_" + agentId +
+         ".json";
 }
 
-bool hasAssignedChunk(const AgentContext &context) {
-  if (!context.history || context.history->threadId.empty()) {
-    return false;
-  }
-  if (context.identity.id.empty()) {
-    return false;
+void saveCompactionSnapshot(const std::string &threadId,
+                            const std::string &agentId,
+                            const std::string &compactionId,
+                            std::uint32_t previousContextSize,
+                            const std::vector<AgentTurn> &turns) {
+  if (threadId.empty() || agentId.empty() || compactionId.empty()) {
+    return;
   }
 
+  rapidjson::Document doc;
+  doc.SetObject();
+  auto &alloc = doc.GetAllocator();
+  doc.AddMember("compactionId", rapidjson::Value(compactionId.c_str(), alloc),
+                alloc);
+  doc.AddMember("threadId", rapidjson::Value(threadId.c_str(), alloc), alloc);
+  doc.AddMember("agentId", rapidjson::Value(agentId.c_str(), alloc), alloc);
+  doc.AddMember("previousContextSize", previousContextSize, alloc);
+
+  rapidjson::Value turnsArray(rapidjson::kArrayType);
+  for (const auto &turn : turns) {
+    rapidjson::Document turnDoc = toJson(turn);
+    rapidjson::Value turnValue;
+    turnValue.CopyFrom(turnDoc, alloc);
+    turnsArray.PushBack(turnValue, alloc);
+  }
+  doc.AddMember("turns", turnsArray, alloc);
+
+  rapidjson::StringBuffer buffer;
+  rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+  doc.Accept(writer);
+
+  std::error_code ec;
+  const std::filesystem::path path = compactionSnapshotPath(threadId, agentId);
+  std::filesystem::create_directories(path.parent_path(), ec);
+  std::ofstream out(path);
+  if (!out.is_open()) {
+    return;
+  }
+  out << buffer.GetString();
+  out.close();
+}
+
+std::string buildPlanAndTodoSnapshot(const AgentContext &context) {
+  if (!context.history || context.history->threadId.empty() ||
+      context.identity.id.empty()) {
+    return "";
+  }
+
+  std::ostringstream state;
+  auto planStatusLabel = [](PlanStatus status) -> const char * {
+    switch (status) {
+    case PlanStatus::Draft:
+      return "Draft";
+    case PlanStatus::Active:
+      return "Active";
+    case PlanStatus::Paused:
+      return "Paused";
+    case PlanStatus::Done:
+      return "Done";
+    case PlanStatus::Abandoned:
+      return "Abandoned";
+    }
+    return "Unknown";
+  };
+  auto chunkStatusLabel = [](WorkChunkStatus status) -> const char * {
+    switch (status) {
+    case WorkChunkStatus::Ready:
+      return "Ready";
+    case WorkChunkStatus::InProgress:
+      return "InProgress";
+    case WorkChunkStatus::Implemented:
+      return "Implemented";
+    case WorkChunkStatus::Verifying:
+      return "Verifying";
+    case WorkChunkStatus::Done:
+      return "Done";
+    case WorkChunkStatus::Blocked:
+      return "Blocked";
+    case WorkChunkStatus::Failed:
+      return "Failed";
+    case WorkChunkStatus::Cancelled:
+      return "Cancelled";
+    }
+    return "Unknown";
+  };
+  auto todoStatusLabel = [](TodoStatus status) -> const char * {
+    switch (status) {
+    case TodoStatus::Pending:
+      return "Pending";
+    case TodoStatus::InProgress:
+      return "InProgress";
+    case TodoStatus::Done:
+      return "Done";
+    }
+    return "Unknown";
+  };
+  auto trimForPrompt = [](const std::string &value, std::size_t maxLen) {
+    const std::string trimmed = shared::StringUtil::trim(value);
+    if (trimmed.size() <= maxLen) {
+      return trimmed;
+    }
+    return trimmed.substr(0, maxLen) + "...";
+  };
   try {
     ThreadManager tm(threadStorageRootPath());
-    for (const auto &plan : tm.listPlans(context.history->threadId)) {
-      for (const auto &chunk : plan.chunks) {
-        if (chunk.assignedAgentId == context.identity.id) {
-          return true;
+    const ThreadMetadata metadata = tm.getMetadata(context.history->threadId);
+    if (!metadata.activePlanId.empty()) {
+      state << "**Active Plan ID:** " << metadata.activePlanId << "\n";
+      try {
+        const Plan plan =
+            tm.getPlan(context.history->threadId, metadata.activePlanId);
+        state << "**Active Plan Title:** " << plan.title << "\n";
+        state << "**Active Plan Status:** " << planStatusLabel(plan.status)
+              << "\n";
+        if (!shared::StringUtil::trim(plan.objective).empty()) {
+          state << "**Plan Objective:** "
+                << trimForPrompt(plan.objective, 220) << "\n";
         }
+        if (!shared::StringUtil::trim(plan.strategy).empty()) {
+          state << "**Plan Strategy:** "
+                << trimForPrompt(plan.strategy, 220) << "\n";
+        }
+        int incompleteChunks = 0;
+        for (const auto &chunk : plan.chunks) {
+          if (chunk.status != WorkChunkStatus::Done &&
+              chunk.status != WorkChunkStatus::Cancelled) {
+            incompleteChunks++;
+          }
+        }
+        state << "**Incomplete Chunks:** " << incompleteChunks << "\n";
+        if (!plan.chunks.empty()) {
+          constexpr std::size_t kMaxChunks = 8;
+          constexpr std::size_t kMaxTasksPerChunk = 4;
+          state << "**Chunk Ledger:**\n";
+          for (std::size_t i = 0; i < plan.chunks.size() && i < kMaxChunks; ++i) {
+            const auto &chunk = plan.chunks[i];
+            state << "- [" << chunkStatusLabel(chunk.status) << "] "
+                  << trimForPrompt(chunk.title, 160);
+            if (!chunk.id.empty()) {
+              state << " (id=" << chunk.id << ")";
+            }
+            if (!chunk.assignedAgentId.empty()) {
+              state << " assignee=" << chunk.assignedAgentId;
+            }
+            state << "\n";
+            if (!shared::StringUtil::trim(chunk.goal).empty()) {
+              state << "  goal: " << trimForPrompt(chunk.goal, 220) << "\n";
+            }
+            for (std::size_t taskIndex = 0;
+                 taskIndex < chunk.tasks.size() && taskIndex < kMaxTasksPerChunk;
+                 ++taskIndex) {
+              const auto &task = chunk.tasks[taskIndex];
+              state << "  task[" << chunkStatusLabel(task.status) << "]: "
+                    << trimForPrompt(task.title, 160) << "\n";
+            }
+            if (chunk.tasks.size() > kMaxTasksPerChunk) {
+              state << "  ... " << (chunk.tasks.size() - kMaxTasksPerChunk)
+                    << " additional task(s)\n";
+            }
+          }
+          if (plan.chunks.size() > kMaxChunks) {
+            state << "- ... " << (plan.chunks.size() - kMaxChunks)
+                  << " additional chunk(s)\n";
+          }
+        }
+      } catch (...) {
+        state << "**Active Plan:** unavailable\n";
+      }
+    }
+
+    const AgentTodoList todo =
+        tm.getAgentTodo(context.history->threadId, context.identity.id);
+    if (!todo.items.empty()) {
+      int incompleteTodo = 0;
+      for (const auto &item : todo.items) {
+        if (item.status != TodoStatus::Done) {
+          incompleteTodo++;
+        }
+      }
+      state << "**Todo Items:** " << todo.items.size() << "\n";
+      state << "**Todo Incomplete:** " << incompleteTodo << "\n";
+      constexpr std::size_t kMaxTodoItems = 12;
+      state << "**Todo Ledger:**\n";
+      for (std::size_t i = 0; i < todo.items.size() && i < kMaxTodoItems; ++i) {
+        const auto &item = todo.items[i];
+        state << "- (#" << item.id << ") [" << todoStatusLabel(item.status)
+              << "] " << trimForPrompt(item.text, 220);
+        if (!item.chunkId.empty()) {
+          state << " chunk=" << item.chunkId;
+        }
+        if (!item.planId.empty()) {
+          state << " plan=" << item.planId;
+        }
+        state << "\n";
+      }
+      if (todo.items.size() > kMaxTodoItems) {
+        state << "- ... " << (todo.items.size() - kMaxTodoItems)
+              << " additional todo item(s)\n";
       }
     }
   } catch (...) {
   }
-  return false;
+
+  return state.str();
 }
 
-std::unordered_map<std::string, shared::ToolScope>
-toolScopeIndex(const ToolRegistry &toolRegistry) {
-  std::unordered_map<std::string, shared::ToolScope> index;
-  for (const auto &meta : toolRegistry.listToolMetadata()) {
-    index.emplace(meta.name, meta.scope);
-  }
-  return index;
-}
-
-bool shouldEnforceTodoAfterProse(const AgentContext &context,
-                                 const TodoStateSnapshot &todoState,
-                                 const PlanStateSnapshot &planState,
-                                 bool hasExecutionIntent,
-                                 int consecutiveProseOnlyContinuationTurns) {
-  if (todoState.hasAny || !hasExecutionIntent) {
-    return false;
-  }
-
-  const std::string lastUser = latestUserText(context);
-  if (lastUser.rfind("Todo required before continuing", 0) == 0) {
-    return false;
-  }
-
-  const TodoEnforcementRole role =
-      todoRoleForPersona(context.config.personaName);
-  switch (role) {
-  case TodoEnforcementRole::Lead:
-    return planState.hasActivePlan &&
-           (!planState.activePlanKnown || !planState.activePlanDone);
-  case TodoEnforcementRole::Executor:
-    if (hasAssignedChunk(context)) {
-      return true;
-    }
-    return consecutiveProseOnlyContinuationTurns > 0;
-  case TodoEnforcementRole::Worker:
-  case TodoEnforcementRole::Auditor:
-    return consecutiveProseOnlyContinuationTurns > 0;
-  case TodoEnforcementRole::Scout:
-  case TodoEnforcementRole::Unknown:
-    return false;
-  }
-  return false;
-}
-
-bool shouldEnforceTodoBeforeTools(const AgentContext &context,
-                                  const TodoStateSnapshot &todoState,
-                                  const PlanStateSnapshot &planState,
-                                  const std::vector<ToolCallChunk> &chunks,
-                                  const ToolRegistry &toolRegistry) {
-  if (todoState.hasAny) {
-    return false;
-  }
-
-  bool hasNonTodoTool = false;
-  for (const auto &chunk : chunks) {
-    if (chunk.nameDelta != "todo_write") {
-      hasNonTodoTool = true;
-      break;
-    }
-  }
-  if (!hasNonTodoTool) {
-    return false;
-  }
-
-  const TodoEnforcementRole role =
-      todoRoleForPersona(context.config.personaName);
-  switch (role) {
-  case TodoEnforcementRole::Executor:
-  case TodoEnforcementRole::Worker:
-  case TodoEnforcementRole::Auditor:
-    return true;
-  case TodoEnforcementRole::Lead: {
-    if (planState.hasActivePlan &&
-        (!planState.activePlanKnown || !planState.activePlanDone)) {
-      return true;
-    }
-    const auto scopes = toolScopeIndex(toolRegistry);
-    for (const auto &chunk : chunks) {
-      if (chunk.nameDelta == "todo_write") {
-        continue;
-      }
-      auto it = scopes.find(chunk.nameDelta);
-      if (it == scopes.end()) {
-        continue;
-      }
-      switch (it->second) {
-      case shared::ToolScope::FilesystemWrite:
-      case shared::ToolScope::Process:
-      case shared::ToolScope::Semantic:
-      case shared::ToolScope::Git:
-      case shared::ToolScope::PlanWrite:
-      case shared::ToolScope::ChunkWrite:
-      case shared::ToolScope::ChunkAssign:
-      case shared::ToolScope::ChunkReview:
-      case shared::ToolScope::Delegation:
-        return true;
-      case shared::ToolScope::FilesystemRead:
-      case shared::ToolScope::Web:
-      case shared::ToolScope::PlanRead:
-      case shared::ToolScope::ChunkRead:
-        break;
-      }
-    }
-    return false;
-  }
-  case TodoEnforcementRole::Scout:
-  case TodoEnforcementRole::Unknown:
-    return false;
-  }
-  return false;
-}
-
-std::string todoEnforcementMessage(const AgentContext &context,
-                                   bool isToolGate) {
-  const TodoEnforcementRole role =
-      todoRoleForPersona(context.config.personaName);
-  std::string roleLabel = "work";
-  switch (role) {
-  case TodoEnforcementRole::Lead:
-    roleLabel = "coordination";
-    break;
-  case TodoEnforcementRole::Executor:
-    roleLabel = "chunk work";
-    break;
-  case TodoEnforcementRole::Auditor:
-    roleLabel = "review";
-    break;
-  case TodoEnforcementRole::Worker:
-    roleLabel = "bounded work";
-    break;
-  case TodoEnforcementRole::Scout:
-  case TodoEnforcementRole::Unknown:
-    roleLabel = "work";
-    break;
-  }
-  std::ostringstream msg;
-  msg << "Todo required before continuing multi-step " << roleLabel << ". "
-      << "Create or update your todo list with todo_write";
-  if (isToolGate) {
-    msg << " before executing tools";
-  }
-  msg << ".";
-  return msg.str();
-}
-
-struct StopTokenFilterState {
-  std::string carry;
-  bool removedToken = false;
+struct TodoStateSnapshot {
+  bool hasAny = false;
+  bool hasIncomplete = false;
+  std::vector<TodoItem> incompleteItems;
 };
 
-constexpr std::string_view kFinalSummaryStopToken = "<firmius_stop/>";
-
-std::string stripFinalSummaryStopToken(const std::string &text, bool &removed) {
-  std::string filtered = text;
-  std::size_t pos = 0;
-  while ((pos = filtered.find(kFinalSummaryStopToken, pos)) !=
-         std::string::npos) {
-    filtered.erase(pos, kFinalSummaryStopToken.size());
-    removed = true;
+std::string todoContinuationFingerprint(const TodoStateSnapshot &todoState) {
+  std::ostringstream fingerprint;
+  for (const auto &item : todoState.incompleteItems) {
+    fingerprint << item.id << '\n' << static_cast<int>(item.status) << '\n'
+                << item.text << '\n' << item.chunkId << '\n' << item.planId
+                << "\n---\n";
   }
-  return filtered;
+  return fingerprint.str();
 }
 
-std::string consumeVisibleDelta(StopTokenFilterState &state,
-                                const std::string &delta) {
-  if (delta.empty()) {
-    return "";
+std::string todoStatusLabel(TodoStatus status) {
+  switch (status) {
+  case TodoStatus::Pending:
+    return "Pending";
+  case TodoStatus::InProgress:
+    return "InProgress";
+  case TodoStatus::Done:
+    return "Done";
   }
-
-  state.carry += delta;
-  std::string visible;
-  const std::size_t tokenSize = kFinalSummaryStopToken.size();
-  while (true) {
-    const std::size_t tokenPos = state.carry.find(kFinalSummaryStopToken);
-    if (tokenPos != std::string::npos) {
-      visible += state.carry.substr(0, tokenPos);
-      state.carry.erase(0, tokenPos + tokenSize);
-      state.removedToken = true;
-      continue;
-    }
-    if (state.carry.size() > tokenSize) {
-      const std::size_t emitLen = state.carry.size() - tokenSize + 1;
-      visible += state.carry.substr(0, emitLen);
-      state.carry.erase(0, emitLen);
-    }
-    break;
-  }
-  return visible;
+  return "Unknown";
 }
 
-std::string flushVisibleDelta(StopTokenFilterState &state) {
-  if (state.carry.empty()) {
-    return "";
+std::string buildIncompleteTodoNudge(const TodoStateSnapshot &todoState) {
+  std::ostringstream prompt;
+  prompt << "Continue working through the remaining todo items: ";
+  for (std::size_t i = 0; i < todoState.incompleteItems.size(); ++i) {
+    const auto &item = todoState.incompleteItems[i];
+    if (i > 0) {
+      prompt << ", ";
+    }
+    prompt << "#" << item.id << " [" << todoStatusLabel(item.status) << "] ";
+    if (!shared::StringUtil::trim(item.text).empty()) {
+      prompt << item.text;
+    } else {
+      prompt << "(no text)";
+    }
   }
-  std::string emit = std::move(state.carry);
-  state.carry.clear();
-  return stripFinalSummaryStopToken(emit, state.removedToken);
+  return prompt.str();
 }
 
 TodoStateSnapshot readTodoState(const AgentContext &context) {
@@ -379,38 +380,11 @@ TodoStateSnapshot readTodoState(const AgentContext &context) {
     const AgentTodoList todo =
         tm.getAgentTodo(context.history->threadId, context.identity.id);
     snapshot.hasAny = !todo.items.empty();
-    snapshot.hasIncomplete =
-        std::any_of(todo.items.begin(), todo.items.end(),
-                    [](const TodoItem &item) {
-                      return item.status != TodoStatus::Done;
-                    });
-    return snapshot;
-  } catch (...) {
-    return snapshot;
-  }
-}
-
-PlanStateSnapshot readPlanState(const AgentContext &context) {
-  PlanStateSnapshot snapshot;
-  if (!context.history || context.history->threadId.empty()) {
-    return snapshot;
-  }
-
-  try {
-    ThreadManager tm(threadStorageRootPath());
-    const ThreadMetadata metadata = tm.getMetadata(context.history->threadId);
-    if (metadata.activePlanId.empty()) {
-      return snapshot;
-    }
-    snapshot.hasActivePlan = true;
-    try {
-      const Plan plan =
-          tm.getPlan(context.history->threadId, metadata.activePlanId);
-      snapshot.activePlanDone = (plan.status == PlanStatus::Done);
-      snapshot.activePlanKnown = true;
-    } catch (...) {
-      snapshot.activePlanDone = false;
-      snapshot.activePlanKnown = false;
+    for (const auto &item : todo.items) {
+      if (item.status != TodoStatus::Done) {
+        snapshot.hasIncomplete = true;
+        snapshot.incompleteItems.push_back(item);
+      }
     }
     return snapshot;
   } catch (...) {
@@ -421,83 +395,6 @@ PlanStateSnapshot readPlanState(const AgentContext &context) {
 bool isExecutionalStatus(AgentStatus status) {
   return status == AgentStatus::ExecutingTool ||
          status == AgentStatus::Compacting;
-}
-
-std::string toLowerCopy(std::string value) {
-  std::transform(value.begin(), value.end(), value.begin(),
-                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-  return value;
-}
-
-bool containsAnyPhrase(const std::string &text,
-                       const std::vector<std::string> &phrases) {
-  for (const auto &phrase : phrases) {
-    if (!phrase.empty() && text.find(phrase) != std::string::npos) {
-      return true;
-    }
-  }
-  return false;
-}
-
-std::string latestUserText(const AgentContext &context) {
-  if (!context.history) {
-    return "";
-  }
-  for (auto turnIt = context.history->turns.rbegin();
-       turnIt != context.history->turns.rend(); ++turnIt) {
-    for (auto msgIt = turnIt->messages.rbegin();
-         msgIt != turnIt->messages.rend(); ++msgIt) {
-      if (msgIt->role != Role::User) {
-        continue;
-      }
-      for (const auto &part : msgIt->content) {
-        if (const auto *txt = std::get_if<TextContent>(&part)) {
-          if (!shared::StringUtil::trim(txt->text).empty()) {
-            return txt->text;
-          }
-        }
-      }
-    }
-  }
-  return "";
-}
-
-bool hasOpenExecutionIntent(const AgentContext &context) {
-  const std::string request = toLowerCopy(latestUserText(context));
-  if (request.empty()) {
-    return false;
-  }
-
-  const std::vector<std::string> executionPhrases = {
-      "implement",   "build",         "add feature", "add ",      "create ",
-      "fix ",        "refactor",      "patch",       "modify",    "change ",
-      "update ",     "write code",    "make changes","develop",   "continue working",
-      "continue the", "keep going",   "finish this", "ship",      "execute",
-      "run this task", "complete the task"};
-  const std::vector<std::string> executionContextPhrases = {
-      "codebase", "tests", "ctest", "compile", "bug", "feature", "hunk",
-      "implementation", "agent loop", "runtime", "harness"};
-  const std::vector<std::string> informationalPhrases = {
-      "what is", "what are", "why is", "why are", "how does", "explain",
-      "describe", "summarize", "summary", "tell me", "research", "find out"};
-
-  const bool hasExecutionVerb = containsAnyPhrase(request, executionPhrases);
-  const bool hasExecutionContext =
-      hasExecutionVerb || containsAnyPhrase(request, executionContextPhrases);
-  const bool isLikelyInformational =
-      containsAnyPhrase(request, informationalPhrases);
-  const bool isQuestion = request.find('?') != std::string::npos;
-
-  if (hasExecutionVerb) {
-    return true;
-  }
-  if (hasExecutionContext && !isLikelyInformational) {
-    return true;
-  }
-  if (isLikelyInformational && !hasExecutionContext) {
-    return false;
-  }
-  return !isQuestion && hasExecutionContext;
 }
 
 bool isDescendantAgentRunning(const std::string &candidateAgentId,
@@ -565,6 +462,34 @@ std::uint64_t Agent::nowMs() {
           .count());
 }
 
+AgentTurn Agent::makeInternalNudgeTurn(const std::string &turnIdPrefix,
+                                       const std::string &text,
+                                       Role role) const {
+  AgentTurn nudgeTurn;
+  nudgeTurn.turnId = turnIdPrefix +
+                     std::to_string(context.history ? context.history->turns.size()
+                                                    : 0);
+
+  Message nudgeMsg;
+  nudgeMsg.role = role;
+  nudgeMsg.visibility = MessageVisibility::Internal;
+  nudgeMsg.content.push_back(TextContent{text});
+  auto now = std::chrono::system_clock::now();
+  nudgeMsg.timestamp = static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          now.time_since_epoch())
+          .count());
+  nudgeTurn.messages.push_back(std::move(nudgeMsg));
+  return nudgeTurn;
+}
+
+void Agent::appendTurnToHistory(const AgentTurn &turn) {
+  context.history->turns.push_back(turn);
+  if (context.config.persistHistory && journaler) {
+    journaler->appendTurn(turn);
+  }
+}
+
 Agent::Agent(AgentContext ctx, std::shared_ptr<shared::IEnvironment> env,
              std::shared_ptr<shared::IPermissions> perms, ToolRegistry &reg,
              std::shared_ptr<Journaler> jnl)
@@ -615,26 +540,21 @@ std::shared_ptr<IHost> Agent::getHost() { return environment_->getHost(); }
 
 void Agent::interrupt() {
   interrupted = true;
-  running = false; // Allow immediate re-tasking after interrupt
+  std::shared_ptr<std::atomic<bool>> runCancelToken;
+  {
+    std::lock_guard<std::mutex> lock(cancelTokenMutex_);
+    runCancelToken = activeRunCancelToken_;
+  }
+  if (runCancelToken) {
+    runCancelToken->store(true);
+  }
 }
 
 void Agent::clearInterrupt() { interrupted = false; }
 
 void Agent::setModel(const std::string &providerId,
                      const std::string &modelId) {
-  if (running.load()) {
-    throw std::runtime_error("Cannot switch model while agent is running");
-  }
-
-  auto newProvider =
-      firmius::provider::ProviderRegistry::instance().getProvider(providerId);
-  if (!newProvider) {
-    throw std::runtime_error("Unknown provider: " + providerId);
-  }
-
-  context.config.providerId = providerId;
-  context.config.modelId = modelId;
-  provider = newProvider;
+  setModelInternal(providerId, modelId, std::nullopt);
 }
 
 void Agent::compactNow(
@@ -644,19 +564,54 @@ void Agent::compactNow(
 
 void Agent::setModel(const std::string &providerId, const std::string &modelId,
                      const std::string &variantName) {
-  if (running.load()) {
-    throw std::runtime_error("Cannot switch model while agent is running");
-  }
+  setModelInternal(providerId, modelId, variantName);
+}
 
+void Agent::setModelInternal(const std::string &providerId,
+                             const std::string &modelId,
+                             const std::optional<std::string> &variantName) {
   auto newProvider =
       firmius::provider::ProviderRegistry::instance().getProvider(providerId);
   if (!newProvider) {
     throw std::runtime_error("Unknown provider: " + providerId);
   }
 
+  std::lock_guard<std::mutex> lock(modelSwitchMutex);
+  if (running.load()) {
+    pendingModelSwitch_ = PendingModelSwitch{providerId, modelId, variantName};
+    return;
+  }
+
   context.config.providerId = providerId;
   context.config.modelId = modelId;
-  context.config.modelVariant = variantName;
+  if (variantName.has_value()) {
+    context.config.modelVariant = *variantName;
+  }
+  provider = newProvider;
+}
+
+void Agent::applyPendingModelSwitchIfAny() {
+  std::optional<PendingModelSwitch> pending;
+  {
+    std::lock_guard<std::mutex> lock(modelSwitchMutex);
+    if (!pendingModelSwitch_.has_value()) {
+      return;
+    }
+    pending = pendingModelSwitch_;
+    pendingModelSwitch_.reset();
+  }
+
+  auto newProvider = firmius::provider::ProviderRegistry::instance().getProvider(
+      pending->providerId);
+  if (!newProvider) {
+    throw std::runtime_error("Unknown provider: " + pending->providerId);
+  }
+
+  context.config.providerId = pending->providerId;
+  context.config.modelId = pending->modelId;
+  if (pending->variantName.has_value()) {
+    context.config.modelVariant = *pending->variantName;
+  }
   provider = newProvider;
 }
 
@@ -740,10 +695,37 @@ void Agent::runImpl(const std::optional<std::string> &task,
     throw std::runtime_error("Agent is already running");
   }
   running = true;
-  booting = false;
   interrupted = false;
+  const auto runCancelToken = std::make_shared<std::atomic<bool>>(false);
+  {
+    std::lock_guard<std::mutex> lock(cancelTokenMutex_);
+    activeRunCancelToken_ = runCancelToken;
+  }
+  auto markRunStopped = [this, runCancelToken]() {
+    {
+      std::lock_guard<std::mutex> runStateLock(runStateMutex_);
+      running = false;
+    }
+    runStateCv_.notify_all();
+    {
+      std::lock_guard<std::mutex> cancelLock(cancelTokenMutex_);
+      if (activeRunCancelToken_ == runCancelToken) {
+        activeRunCancelToken_.reset();
+      }
+    }
+  };
+  struct RunFinalizer {
+    std::function<void()> fn;
+    ~RunFinalizer() {
+      if (fn) {
+        fn();
+      }
+    }
+  } runFinalizer{markRunStopped};
+  booting = false;
   context.state.currentStatus = AgentStatus::Idle;
   context.state.fatalError = std::nullopt;
+  applyPendingModelSwitchIfAny();
 
   // 1. Bootstrap System Message
   if (context.history->turns.empty()) {
@@ -812,10 +794,11 @@ void Agent::runImpl(const std::optional<std::string> &task,
 
   int consecutiveProviderFailures = 0;
   const int maxProviderRetries = 3;
-  int consecutiveProseOnlyContinuationTurns = 0;
-  const int maxProseOnlyContinuationTurns = 2;
+  std::optional<std::string> lastTodoContinuationFingerprint;
 
-  while (!taskFinished && turnCount < maxTurns && !interrupted.load()) {
+  while (!taskFinished && turnCount < maxTurns && !runCancelToken->load()) {
+    applyPendingModelSwitchIfAny();
+
     // --- CHECK FOR CONTEXT COMPACTION ---
     try {
       auto model = provider->getModelInfo(context.config.modelId);
@@ -825,7 +808,7 @@ void Agent::runImpl(const std::optional<std::string> &task,
                                model.contextWindow * 0.8)) {
         compactContext(onEvent);
       }
-      if (interrupted.load())
+      if (runCancelToken->load())
         break;
     } catch (...) {
       // Compaction is best-effort
@@ -857,7 +840,7 @@ void Agent::runImpl(const std::optional<std::string> &task,
       opts.stop = context.config.stop;
       opts.tools =
           toolRegistry.getAvailableToolDefinitions(context.permissions);
-      opts.abortSignal = &interrupted;
+      opts.abortSignal = runCancelToken.get();
 
       std::vector<ToolCallChunk> accumulatedToolChunks;
       std::string fullResponse;
@@ -870,10 +853,7 @@ void Agent::runImpl(const std::optional<std::string> &task,
       bool sawContent = false;
       bool sawThinking = false;
       bool sawTool = false;
-      bool requestedFinalSummaryStop = false;
       std::uint32_t syntheticToolCallIdSerial = 0;
-      StopTokenFilterState textStopTokenFilter;
-      StopTokenFilterState thinkingStopTokenFilter;
 
       // Token repetition detection for hallucination loops
       bool tokenLoopDetected = false;
@@ -918,16 +898,6 @@ void Agent::runImpl(const std::optional<std::string> &task,
         fullThinking += delta;
       };
 
-      auto flushText = [&]() {
-        const std::string delta = flushVisibleDelta(textStopTokenFilter);
-        appendVisibleText(delta);
-      };
-
-      auto flushThinking = [&]() {
-        const std::string delta = flushVisibleDelta(thinkingStopTokenFilter);
-        appendVisibleThinking(delta);
-      };
-
       provider->stream(*context.history, opts, [&](const StreamEvent &ev) {
         if (context.state.currentStatus == AgentStatus::ProviderWaiting) {
           if (std::holds_alternative<TextChunk>(ev) ||
@@ -938,58 +908,40 @@ void Agent::runImpl(const std::optional<std::string> &task,
         }
 
         if (auto *txt = std::get_if<TextChunk>(&ev)) {
-          flushThinking();
-          const std::string visible = consumeVisibleDelta(textStopTokenFilter, txt->delta);
-          requestedFinalSummaryStop =
-              requestedFinalSummaryStop || textStopTokenFilter.removedToken;
-          appendVisibleText(visible);
+          appendVisibleText(txt->delta);
         } else if (auto *thk = std::get_if<ThinkingChunk>(&ev)) {
-          flushText();
-          const std::string visible =
-              consumeVisibleDelta(thinkingStopTokenFilter, thk->delta);
-          appendVisibleThinking(visible);
+          appendVisibleThinking(thk->delta);
           if (!thk->signature.empty()) {
             lastThinkingSignature = thk->signature;
           }
         } else if (auto *tcc = std::get_if<ToolCallChunk>(&ev)) {
-          flushText();
-          flushThinking();
           sawTool = true;
           // Emit immediately so TUI can show "Preparing" state
           onEvent(ev);
           mergeToolCallChunk(accumulatedToolChunks, *tcc,
                              syntheticToolCallIdSerial++, turnCount);
         } else if (auto *met = std::get_if<AgentMetrics>(&ev)) {
-          flushText();
-          flushThinking();
           onEvent(ev);
           turnMetrics = *met;
         } else if (auto *done = std::get_if<StreamDone>(&ev)) {
-          flushText();
-          flushThinking();
           onEvent(ev);
           turnStopReason = done->reason;
         } else if (auto *err = std::get_if<StreamError>(&ev)) {
-          flushText();
-          flushThinking();
-          onEvent(ev);
           streamErrorStatus = err->httpStatus;
-          // Don't treat abort/interrupt errors as stream errors
-          if (err->message.find("interrupted") != std::string::npos ||
-              err->message.find("aborted") != std::string::npos ||
-              err->message.find("Cancelled") != std::string::npos) {
+          if (runCancelToken->load()) {
             context.state.currentStatus = AgentStatus::Cancelled;
             return;
           }
+          onEvent(ev);
           streamError = err->message;
         } else {
-          flushText();
-          flushThinking();
           onEvent(ev);
         }
       });
-      flushText();
-      flushThinking();
+      if (runCancelToken->load()) {
+        context.state.currentStatus = AgentStatus::Cancelled;
+        break;
+      }
 
       // ToolCallChunk events are now emitted immediately above
       // No need to re-emit buffered events
@@ -1006,24 +958,11 @@ void Agent::runImpl(const std::optional<std::string> &task,
       // If token loop was detected, inject a nudge to refocus the agent
       if (tokenLoopDetected && fullResponse.empty() &&
           accumulatedToolChunks.empty()) {
-        AgentTurn loopNudgeTurn;
-        loopNudgeTurn.turnId = "loop-nudge-" + std::to_string(turnCount);
-        Message loopNudgeMsg;
-        loopNudgeMsg.role = Role::User;
-        loopNudgeMsg.content.push_back(TextContent{
+        appendTurnToHistory(makeInternalNudgeTurn(
+            "loop-nudge-",
             "Your output was cut off due to token repetition (hallucination "
-            "loop). "
-            "Please step back, refocus, and try a different approach. "
-            "Do NOT repeat the same failed actions."});
-        auto nudgeNow = std::chrono::system_clock::now();
-        loopNudgeMsg.timestamp = static_cast<uint64_t>(
-            std::chrono::duration_cast<std::chrono::milliseconds>(
-                nudgeNow.time_since_epoch())
-                .count());
-        loopNudgeTurn.messages.push_back(loopNudgeMsg);
-        context.history->turns.push_back(loopNudgeTurn);
-        if (context.config.persistHistory && journaler)
-          journaler->appendTurn(loopNudgeTurn);
+            "loop). Please step back, refocus, and try a different approach. "
+            "Do NOT repeat the same failed actions."));
 
         // Continue to next turn instead of erroring
         continue;
@@ -1033,7 +972,7 @@ void Agent::runImpl(const std::optional<std::string> &task,
       if (!streamError.empty() && fullResponse.empty() &&
           accumulatedToolChunks.empty()) {
         // Don't retry if user interrupted
-        if (interrupted.load()) {
+        if (runCancelToken->load()) {
           context.state.currentStatus = AgentStatus::Cancelled;
           return;
         }
@@ -1051,7 +990,7 @@ void Agent::runImpl(const std::optional<std::string> &task,
                                "Provider error, retrying", ""});
         // Use interruptible sleep to allow immediate cancellation
         if (!interruptibleSleep(std::chrono::seconds(retryDelaySec),
-                                &interrupted)) {
+                                runCancelToken.get())) {
           // Interrupted during retry delay
           context.state.currentStatus = AgentStatus::Cancelled;
           return;
@@ -1092,6 +1031,11 @@ void Agent::runImpl(const std::optional<std::string> &task,
 
       // Reset consecutive failure counter on success
       consecutiveProviderFailures = 0;
+
+      if (runCancelToken->load()) {
+        context.state.currentStatus = AgentStatus::Cancelled;
+        break;
+      }
 
       // --- Build assistant turn ---
       AgentTurn assistantTurn;
@@ -1138,12 +1082,12 @@ void Agent::runImpl(const std::optional<std::string> &task,
       if (accumulatedToolChunks.empty()) {
         if (fullResponse.empty() && fullThinking.empty()) {
           // Don't error if user interrupted
-          if (interrupted.load()) {
+          if (runCancelToken->load()) {
             context.state.currentStatus = AgentStatus::Cancelled;
             return;
           }
-          throw std::runtime_error(
-              "Provider returned empty response (timeout or model failure)");
+          taskFinished = true;
+          continue;
         }
 
         const bool hasPendingToolCalls = !context.state.pendingToolCalls.empty();
@@ -1174,106 +1118,36 @@ void Agent::runImpl(const std::optional<std::string> &task,
           }
         }
 
-        const TodoStateSnapshot todoState = readTodoState(context);
-        const PlanStateSnapshot planState = readPlanState(context);
-        const bool hasIncompleteTodoState = todoState.hasIncomplete;
-        const bool hasRequestContinuationIntent = hasOpenExecutionIntent(context);
-        const bool hasExecutionIntentWithoutTodo =
-            !todoState.hasAny && hasRequestContinuationIntent;
-        const bool todoAllowsStop =
-            todoState.hasAny ? !hasIncompleteTodoState
-                             : !hasExecutionIntentWithoutTodo;
-        const bool planAllowsStop =
-            !planState.hasActivePlan ||
-            (planState.activePlanKnown && planState.activePlanDone);
         const bool hasPendingToolLifecycleActivity =
             hasPendingToolCalls || hasExecutionStatus;
         const bool hasHarnessOwnedActiveWork =
             hasPendingToolLifecycleActivity || hasBlockingProcesses ||
-            hasRunningOwnedBackgroundProcess || hasRunningDescendantSubagent ||
-            hasIncompleteTodoState || hasExecutionStatus;
-        const bool shouldHonorFinalSummaryStop =
-            requestedFinalSummaryStop && turnStopReason == StopReason::Stop &&
-            !hasPendingToolLifecycleActivity && !hasBlockingProcesses &&
-            !hasRunningOwnedBackgroundProcess &&
-            !hasRunningDescendantSubagent && planAllowsStop && todoAllowsStop;
-
-        if (shouldEnforceTodoAfterProse(context, todoState, planState,
-                                        hasRequestContinuationIntent,
-                                        consecutiveProseOnlyContinuationTurns)) {
-          AgentTurn todoNudgeTurn;
-          todoNudgeTurn.turnId =
-              "todo-enforcement-" + std::to_string(turnCount);
-          Message todoNudgeMsg;
-          todoNudgeMsg.role = Role::User;
-          todoNudgeMsg.content.push_back(
-              TextContent{todoEnforcementMessage(context, false)});
-          auto nudgeNow = std::chrono::system_clock::now();
-          todoNudgeMsg.timestamp = static_cast<uint64_t>(
-              std::chrono::duration_cast<std::chrono::milliseconds>(
-                  nudgeNow.time_since_epoch())
-                  .count());
-          todoNudgeTurn.messages.push_back(todoNudgeMsg);
-          context.history->turns.push_back(todoNudgeTurn);
-          if (context.config.persistHistory && journaler) {
-            journaler->appendTurn(todoNudgeTurn);
-          }
-          context.state.currentStatus = AgentStatus::Idle;
-          consecutiveProseOnlyContinuationTurns = 0;
-          continue;
-        }
-
-        if (shouldHonorFinalSummaryStop) {
-          consecutiveProseOnlyContinuationTurns = 0;
-          taskFinished = true;
-          continue;
-        }
-
-        bool shouldContinueAfterProseTurn = false;
+            hasRunningOwnedBackgroundProcess || hasRunningDescendantSubagent;
         if (hasHarnessOwnedActiveWork) {
-          shouldContinueAfterProseTurn = true;
-        } else if (!todoState.hasAny && hasRequestContinuationIntent &&
-                   consecutiveProseOnlyContinuationTurns <
-                       maxProseOnlyContinuationTurns) {
-          shouldContinueAfterProseTurn = true;
+          context.state.currentStatus = AgentStatus::Idle;
+          continue;
         }
 
-        if (shouldContinueAfterProseTurn &&
-            consecutiveProseOnlyContinuationTurns <
-                maxProseOnlyContinuationTurns) {
-          consecutiveProseOnlyContinuationTurns++;
+        const TodoStateSnapshot todoState = readTodoState(context);
+        if (todoState.hasIncomplete) {
+          const std::string fingerprint =
+              todoContinuationFingerprint(todoState);
+          const bool repeatedTodoSnapshot =
+              lastTodoContinuationFingerprint.has_value() &&
+              *lastTodoContinuationFingerprint == fingerprint;
+          if (!repeatedTodoSnapshot) {
+            appendTurnToHistory(makeInternalNudgeTurn(
+                "todo-enforcement-", buildIncompleteTodoNudge(todoState)));
+            lastTodoContinuationFingerprint = fingerprint;
+            context.state.currentStatus = AgentStatus::Idle;
+            continue;
+          }
           context.state.currentStatus = AgentStatus::Idle;
           continue;
         }
 
         taskFinished = true;
       } else {
-        consecutiveProseOnlyContinuationTurns = 0;
-        const TodoStateSnapshot todoState = readTodoState(context);
-        const PlanStateSnapshot planState = readPlanState(context);
-        if (shouldEnforceTodoBeforeTools(context, todoState, planState,
-                                         accumulatedToolChunks, toolRegistry)) {
-          AgentTurn todoNudgeTurn;
-          todoNudgeTurn.turnId =
-              "todo-tool-enforcement-" + std::to_string(turnCount);
-          Message todoNudgeMsg;
-          todoNudgeMsg.role = Role::User;
-          todoNudgeMsg.content.push_back(
-              TextContent{todoEnforcementMessage(context, true)});
-          auto nudgeNow = std::chrono::system_clock::now();
-          todoNudgeMsg.timestamp = static_cast<uint64_t>(
-              std::chrono::duration_cast<std::chrono::milliseconds>(
-                  nudgeNow.time_since_epoch())
-                  .count());
-          todoNudgeTurn.messages.push_back(todoNudgeMsg);
-          context.history->turns.push_back(todoNudgeTurn);
-          if (context.config.persistHistory && journaler) {
-            journaler->appendTurn(todoNudgeTurn);
-          }
-          context.state.currentStatus = AgentStatus::Idle;
-          continue;
-        }
-
         // --- State: ExecutingTool ---
         context.state.currentStatus = AgentStatus::ExecutingTool;
 
@@ -1283,7 +1157,11 @@ void Agent::runImpl(const std::optional<std::string> &task,
         }
 
         auto toolStartMs = nowMs();
-        executeTools(accumulatedToolChunks, onEvent);
+        if (runCancelToken->load()) {
+          context.state.currentStatus = AgentStatus::Cancelled;
+          break;
+        }
+        executeTools(accumulatedToolChunks, onEvent, runCancelToken);
         auto toolEndMs = nowMs();
 
         // Update the turn metrics with tool execution time
@@ -1302,9 +1180,64 @@ void Agent::runImpl(const std::optional<std::string> &task,
 
         // Clear pending tool calls
         context.state.pendingToolCalls.clear();
+
+        const bool hasPendingToolCalls = !context.state.pendingToolCalls.empty();
+        const bool hasBlockingProcesses = !getBlockingProcessIds().empty();
+        const bool hasExecutionStatus =
+            isExecutionalStatus(context.state.currentStatus);
+        const bool hasRunningOwnedBackgroundProcess =
+            std::any_of(context.state.ownedProcesses.begin(),
+                        context.state.ownedProcesses.end(),
+                        [&](const std::string &processId) {
+                          if (processId.empty()) {
+                            return false;
+                          }
+                          try {
+                            return inspectProcess(processId).running;
+                          } catch (...) {
+                            return false;
+                          }
+                        });
+        bool hasRunningDescendantSubagent = false;
+        if (!context.identity.id.empty()) {
+          for (const auto &agentId : AgentRegistry::instance().listAll()) {
+            if (isDescendantAgentRunning(agentId, context.identity.id)) {
+              hasRunningDescendantSubagent = true;
+              break;
+            }
+          }
+        }
+
+        if (hasPendingToolCalls || hasExecutionStatus || hasBlockingProcesses ||
+            hasRunningOwnedBackgroundProcess || hasRunningDescendantSubagent) {
+          context.state.currentStatus = AgentStatus::Idle;
+          continue;
+        }
+
+        const TodoStateSnapshot todoState = readTodoState(context);
+        if (todoState.hasIncomplete) {
+          const std::string fingerprint =
+              todoContinuationFingerprint(todoState);
+          const bool repeatedTodoSnapshot =
+              lastTodoContinuationFingerprint.has_value() &&
+              *lastTodoContinuationFingerprint == fingerprint;
+          if (!repeatedTodoSnapshot) {
+            appendTurnToHistory(makeInternalNudgeTurn(
+                "todo-enforcement-", buildIncompleteTodoNudge(todoState)));
+            lastTodoContinuationFingerprint = fingerprint;
+            context.state.currentStatus = AgentStatus::Idle;
+            continue;
+          }
+          context.state.currentStatus = AgentStatus::Idle;
+          continue;
+        }
       }
 
     } catch (const std::exception &e) {
+      if (runCancelToken->load()) {
+        context.state.currentStatus = AgentStatus::Cancelled;
+        break;
+      }
       // --- State: Error ---
       context.state.currentStatus = AgentStatus::Error;
       context.state.fatalError = e.what();
@@ -1332,7 +1265,7 @@ void Agent::runImpl(const std::optional<std::string> &task,
   }
 
   // --- Final state ---
-  if (interrupted.load()) {
+  if (runCancelToken->load()) {
     context.state.currentStatus = AgentStatus::Cancelled;
     if (!context.history->turns.empty()) {
       const auto &lastTurn = context.history->turns.back();
@@ -1343,11 +1276,13 @@ void Agent::runImpl(const std::optional<std::string> &task,
         cancelledTurn.turnId =
             "cancelled-" + std::to_string(context.history->turns.size());
         Message cancelledMsg;
-        cancelledMsg.role = Role::Error;
-        cancelledMsg.content.push_back(ErrorContent{
+        cancelledMsg.role = Role::System;
+        cancelledMsg.visibility = MessageVisibility::Visible;
+        cancelledMsg.content.push_back(NoticeContent{
             "Agent Cancelled",
             "The agent execution was interrupted.",
-            "Execution stopped before completion and can be resumed."});
+            "Execution stopped before completion and can be resumed.",
+            NoticeSeverity::Warning});
         cancelledMsg.timestamp = nowMs();
         cancelledTurn.messages.push_back(cancelledMsg);
         context.history->turns.push_back(cancelledTurn);
@@ -1359,12 +1294,11 @@ void Agent::runImpl(const std::optional<std::string> &task,
   } else if (context.state.currentStatus != AgentStatus::Error) {
     context.state.currentStatus = AgentStatus::Idle;
   }
-
-  running = false;
 }
 
 void Agent::executeTools(const std::vector<ToolCallChunk> &chunks,
-                         std::function<void(const StreamEvent &)> onEvent) {
+                         std::function<void(const StreamEvent &)> onEvent,
+                         const std::shared_ptr<std::atomic<bool>> &runCancelToken) {
   // Check for insanity loop BEFORE executing tools
   for (const auto &chunk : chunks) {
     // Create signature: "toolName:args"
@@ -1383,27 +1317,14 @@ void Agent::executeTools(const std::vector<ToolCallChunk> &chunks,
 
     if (repeatCount >= context.config.maxIdenticalToolCalls) {
       // Inject intervention nudge
-      AgentTurn interventionTurn;
-      interventionTurn.turnId =
-          "insanity-nudge-" + std::to_string(context.history->turns.size());
-      Message interventionMsg;
-      interventionMsg.role = Role::User;
-      interventionMsg.content.push_back(
-          TextContent{"You are calling the same tool with identical arguments "
-                      "repeatedly (" +
-                      std::to_string(repeatCount + 1) +
-                      " times). This indicates an insanity loop. " +
-                      "Please stop and try a different approach. Do NOT repeat "
-                      "this tool call."});
-      auto nudgeNow = std::chrono::system_clock::now();
-      interventionMsg.timestamp = static_cast<uint64_t>(
-          std::chrono::duration_cast<std::chrono::milliseconds>(
-              nudgeNow.time_since_epoch())
-              .count());
-      interventionTurn.messages.push_back(interventionMsg);
-      context.history->turns.push_back(interventionTurn);
-      if (context.config.persistHistory && journaler)
-        journaler->appendTurn(interventionTurn);
+      AgentTurn interventionTurn = makeInternalNudgeTurn(
+          "insanity-nudge-",
+          "You are calling the same tool with identical arguments repeatedly (" +
+              std::to_string(repeatCount + 1) +
+              " times). This indicates an insanity loop. "
+              "Please stop and try a different approach. Do NOT repeat this "
+              "tool call.");
+      appendTurnToHistory(interventionTurn);
 
       // Clear the recent signatures to allow recovery
       context.state.recentToolCallSignatures.clear();
@@ -1420,82 +1341,144 @@ void Agent::executeTools(const std::vector<ToolCallChunk> &chunks,
   toolResultTurn.turnId =
       "tools-" + std::to_string(context.history->turns.size());
 
-  // Execute ALL tools in parallel using futures
-  struct ToolExecution {
+  struct ToolExecutionResult {
+    std::size_t index = 0;
     std::string toolCallId;
-    std::string name;
-    std::string args;
-    std::future<std::tuple<std::string, bool, std::string, std::string, bool>> future;
+    std::string toolName;
+    std::string toolArgs;
+    std::string resultStr;
+    bool success = false;
+    std::string resultProcessId;
+    std::string resultSubagentId;
+    bool isBackground = false;
+  };
+  struct SharedExecutionState {
+    std::mutex mutex;
+    std::condition_variable cv;
+    std::vector<std::optional<ToolExecutionResult>> results;
+    std::size_t completed = 0;
   };
 
-  std::vector<ToolExecution> executions;
-
-  // First pass: start all tool executions in parallel
-  for (const auto &chunk : chunks) {
-    if (interrupted.load())
-      break;
-
+  struct RunnableChunk {
+    ToolCallChunk chunk;
+    std::size_t index = 0;
+  };
+  std::vector<ToolExecutionResult> immediateResults;
+  std::vector<RunnableChunk> runnableChunks;
+  runnableChunks.reserve(chunks.size());
+  for (std::size_t idx = 0; idx < chunks.size(); ++idx) {
+    const auto &chunk = chunks[idx];
     rapidjson::Document input;
     input.Parse(chunk.argsDelta.c_str());
-
     if (input.HasParseError()) {
-      // Invalid JSON - create error result immediately
-      Message msg;
-      msg.role = Role::ToolResult;
-      msg.content.push_back(ToolResultContent{
-          chunk.id, "Invalid JSON arguments: " + chunk.argsDelta, false, "",
-          ""});
-      auto now = std::chrono::system_clock::now();
-      msg.timestamp = static_cast<uint64_t>(
-          std::chrono::duration_cast<std::chrono::milliseconds>(
-              now.time_since_epoch())
-              .count());
-      toolResultTurn.messages.push_back(msg);
+      ToolExecutionResult result;
+      result.index = idx;
+      result.toolCallId = chunk.id;
+      result.toolName = chunk.nameDelta;
+      result.toolArgs = chunk.argsDelta;
+      result.resultStr = "Invalid JSON arguments: " + chunk.argsDelta;
+      result.success = false;
+      immediateResults.push_back(std::move(result));
       continue;
     }
-
-    // Capture chunk data for async execution
-    std::string toolName = chunk.nameDelta;
-    std::string toolArgs = chunk.argsDelta;
-    std::string toolId = chunk.id;
-
-    // Launch tool execution in async thread
-    auto future = std::async(
-        std::launch::async,
-        [this, toolName, toolArgs,
-         toolId]() -> std::tuple<std::string, bool, std::string, std::string, bool> {
-          rapidjson::Document input;
-          input.Parse(toolArgs.c_str());
-
-          ToolContext toolCtx{*environment_->getHost(), *this, toolId};
-          auto result = toolRegistry.execute(toolName, input, toolCtx);
-
-          std::string resultStr;
-          if (result.success) {
-            resultStr = result.data;
-          } else {
-            resultStr = result.error;
-          }
-
-          return {resultStr, result.success, result.processId,
-                  result.subagentId, result.is_background};
-        });
-
-    executions.push_back({toolId, toolName, toolArgs, std::move(future)});
+    runnableChunks.push_back(RunnableChunk{chunk, idx});
   }
 
-  // Second pass: collect all results (already running in parallel)
-  for (auto &exec : executions) {
-    if (interrupted.load())
+  const auto sharedState = std::make_shared<SharedExecutionState>();
+  sharedState->results.resize(runnableChunks.size());
+  std::vector<std::thread> workers;
+  workers.reserve(runnableChunks.size());
+
+  std::shared_ptr<shared::IAgent> selfKeepAlive;
+  if (!context.identity.id.empty()) {
+    selfKeepAlive = AgentRegistry::instance().getAgent(context.identity.id);
+  }
+
+  for (std::size_t i = 0; i < runnableChunks.size(); ++i) {
+    const auto runnable = runnableChunks[i];
+    workers.emplace_back([this, sharedState, runnable, i, selfKeepAlive,
+                          runCancelToken]() {
+      (void)selfKeepAlive;
+      ToolExecutionResult execResult;
+      execResult.index = runnable.index;
+      execResult.toolCallId = runnable.chunk.id;
+      execResult.toolName = runnable.chunk.nameDelta;
+      execResult.toolArgs = runnable.chunk.argsDelta;
+      try {
+        rapidjson::Document input;
+        input.Parse(runnable.chunk.argsDelta.c_str());
+        ToolContext toolCtx{*environment_->getHost(), *this, runnable.chunk.id,
+                            runCancelToken.get()};
+        auto result =
+            toolRegistry.execute(runnable.chunk.nameDelta, input, toolCtx);
+        execResult.success = result.success;
+        execResult.resultProcessId = result.processId;
+        execResult.resultSubagentId = result.subagentId;
+        execResult.isBackground = result.is_background;
+        if (result.success) {
+          execResult.resultStr = result.data;
+        } else {
+          const std::string trimmedData = shared::StringUtil::trim(result.data);
+          execResult.resultStr =
+              (!trimmedData.empty() && trimmedData != "{}") ? result.data
+                                                            : result.error;
+        }
+      } catch (const std::exception &e) {
+        execResult.success = false;
+        execResult.resultStr = e.what();
+      }
+      {
+        std::lock_guard<std::mutex> lock(sharedState->mutex);
+        sharedState->results[i] = std::move(execResult);
+        ++sharedState->completed;
+      }
+      sharedState->cv.notify_one();
+    });
+  }
+
+  std::vector<ToolExecutionResult> collectedResults;
+  for (auto &result : immediateResults) {
+    collectedResults.push_back(std::move(result));
+  }
+  {
+    std::unique_lock<std::mutex> lock(sharedState->mutex);
+    while (sharedState->completed < runnableChunks.size() && !runCancelToken->load()) {
+      sharedState->cv.wait_for(lock, std::chrono::milliseconds(10));
+    }
+    for (std::size_t i = 0; i < sharedState->results.size(); ++i) {
+      if (sharedState->results[i].has_value()) {
+        collectedResults.push_back(std::move(*sharedState->results[i]));
+      }
+    }
+  }
+
+  for (std::size_t i = 0; i < workers.size(); ++i) {
+    if (!workers[i].joinable()) {
+      continue;
+    }
+    const bool completed =
+        (i < sharedState->results.size() && sharedState->results[i].has_value());
+    if (completed) {
+      workers[i].join();
+    } else {
+      workers[i].detach();
+    }
+  }
+
+  std::sort(collectedResults.begin(), collectedResults.end(),
+            [](const ToolExecutionResult &a, const ToolExecutionResult &b) {
+              return a.index < b.index;
+            });
+
+  for (const auto &result : collectedResults) {
+    if (runCancelToken->load()) {
       break;
-
-    auto [resultStr, success, resultProcessId, resultSubagentId, isBackground] =
-        exec.future.get();
-
+    }
     Message msg;
     msg.role = Role::ToolResult;
-    msg.content.push_back(ToolResultContent{exec.toolCallId, resultStr, success,
-                                            resultProcessId, resultSubagentId});
+    msg.content.push_back(ToolResultContent{
+        result.toolCallId, result.resultStr, result.success,
+        result.resultProcessId, result.resultSubagentId});
     auto now = std::chrono::system_clock::now();
     msg.timestamp = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1503,21 +1486,20 @@ void Agent::executeTools(const std::vector<ToolCallChunk> &chunks,
             .count());
     toolResultTurn.messages.push_back(msg);
 
-    // Track edited files for file_edit and file_write tools
-    if (success) {
+    if (result.success) {
       const bool owns_background_process =
-          !resultProcessId.empty() &&
-          (isBackground || exec.name == "process_spawn");
+          !result.resultProcessId.empty() &&
+          (result.isBackground || result.toolName == "process_spawn");
       if (owns_background_process &&
           std::find(context.state.ownedProcesses.begin(),
                     context.state.ownedProcesses.end(),
-                    resultProcessId) == context.state.ownedProcesses.end()) {
-        context.state.ownedProcesses.push_back(resultProcessId);
+                    result.resultProcessId) == context.state.ownedProcesses.end()) {
+        context.state.ownedProcesses.push_back(result.resultProcessId);
       }
 
-      if (exec.name == "file_edit" || exec.name == "file_write") {
+      if (result.toolName == "file_edit" || result.toolName == "file_write") {
         rapidjson::Document input;
-        input.Parse(exec.args.c_str());
+        input.Parse(result.toolArgs.c_str());
         if (!input.HasParseError() && input.HasMember("path")) {
           std::string filePath = input["path"].GetString();
           if (std::find(context.state.editedFiles.begin(),
@@ -1531,8 +1513,7 @@ void Agent::executeTools(const std::vector<ToolCallChunk> &chunks,
       }
     }
 
-    // Track this tool call signature after successful execution
-    std::string signature = exec.name + ":" + exec.args;
+    std::string signature = result.toolName + ":" + result.toolArgs;
     context.state.recentToolCallSignatures.push_back(signature);
   }
 
@@ -1564,6 +1545,7 @@ void Agent::compactContext(
     std::function<void(const shared::StreamEvent &)> onEvent) {
   context.state.currentStatus = AgentStatus::Compacting;
   onEvent(AgentCompacting{context.identity.id, context.identity.parentId});
+  const std::string compactionId = std::to_string(nowMs());
 
   // Build factual state preamble to preserve actual work state
   std::string factualState = "\n## FACTUAL STATE (GROUND TRUTH)\n\n";
@@ -1610,6 +1592,10 @@ void Agent::compactContext(
     factualState +=
         "**Fatal Error:** " + context.state.fatalError.value() + "\n\n";
   }
+  const std::string planAndTodoState = buildPlanAndTodoSnapshot(context);
+  if (!planAndTodoState.empty()) {
+    factualState += "**Active Work State:**\n" + planAndTodoState + "\n";
+  }
 
   std::string compactionPrompt = PurposeLoader::loadCompactionPrompt();
 
@@ -1631,19 +1617,44 @@ void Agent::compactContext(
     preservedTurns.push_back(context.history->turns.front());
   }
 
-  AgentTurn preservedLastTurn;
-  bool hasPreservedLastTurn = false;
-  if (context.history->turns.size() > 1) {
-    auto& last = context.history->turns.back();
-    if (last.messages.size() == 1 && last.messages[0].role == Role::User && last.turnId.find("user-task-") == 0) {
-      preservedLastTurn = last;
-      hasPreservedLastTurn = true;
+  std::vector<AgentTurn> preservedTailTurns;
+  std::size_t preserveTailCount = 0;
+  if (context.history->turns.size() > 2) {
+    preserveTailCount = std::min<std::size_t>(2, context.history->turns.size() - 1);
+    for (std::size_t i = context.history->turns.size() - preserveTailCount;
+         i < context.history->turns.size(); ++i) {
+      preservedTailTurns.push_back(context.history->turns[i]);
+    }
+  } else if (context.history->turns.size() > 1) {
+    preservedTailTurns.push_back(context.history->turns.back());
+    preserveTailCount = 1;
+  }
+
+  const std::size_t summarizeEnd = context.history->turns.size() - preserveTailCount;
+  std::optional<std::size_t> lastToolResultTurnIndex;
+  for (std::size_t i = summarizeEnd; i > 1; --i) {
+    const auto &candidate = context.history->turns[i - 1];
+    bool hasToolResult = false;
+    for (const auto &msg : candidate.messages) {
+      for (const auto &part : msg.content) {
+        if (std::holds_alternative<ToolResultContent>(part)) {
+          hasToolResult = true;
+          break;
+        }
+      }
+      if (hasToolResult) {
+        break;
+      }
+    }
+    if (hasToolResult) {
+      lastToolResultTurnIndex = i - 1;
+      break;
     }
   }
 
-  for (size_t i = 1; i < context.history->turns.size(); ++i) {
-    if (hasPreservedLastTurn && i == context.history->turns.size() - 1) {
-      break;
+  for (size_t i = 1; i < summarizeEnd; ++i) {
+    if (lastToolResultTurnIndex.has_value() && i == *lastToolResultTurnIndex) {
+      continue;
     }
     historyToSummarize.turns.push_back(context.history->turns[i]);
   }
@@ -1683,6 +1694,8 @@ void Agent::compactContext(
   }
 
   uint32_t oldTokens = context.aggregateMetrics.tokens.contextSize;
+  saveCompactionSnapshot(context.history->threadId, context.identity.id,
+                         compactionId, oldTokens, context.history->turns);
 
   // Rebuild history array
   std::vector<AgentTurn> newTurns;
@@ -1690,23 +1703,58 @@ void Agent::compactContext(
     newTurns.push_back(preservedTurns[0]);
   }
 
-  // Create Synthetic Memory Turn
+  AgentTurn startTurn;
+  startTurn.turnId = "compaction-start-" + compactionId;
+  Message startMsg;
+  startMsg.role = Role::System;
+  startMsg.content.push_back(
+      TextContent{"Compaction started. Preserving active work state before "
+                  "context reduction."});
+  startMsg.timestamp = nowMs();
+  startTurn.messages.push_back(startMsg);
+  newTurns.push_back(startTurn);
+
+  // Create durable compaction summary turn (system-visible, not fake user input)
   AgentTurn summaryTurn;
-  summaryTurn.turnId = "compaction-summary-" + std::to_string(nowMs());
+  summaryTurn.turnId = "compaction-summary-" + compactionId;
 
   Message summaryMsg;
-  summaryMsg.role = Role::User;
+  summaryMsg.role = Role::System;
   if (!fullThinking.empty())
     summaryMsg.content.push_back(ThinkingContent{fullThinking, ""});
   summaryMsg.content.push_back(
-      TextContent{"COMPACTION SUMMARY: " + fullSummary});
+      TextContent{"COMPACTION SUMMARY:\n" + fullSummary});
   summaryMsg.timestamp = nowMs();
 
   summaryTurn.messages.push_back(summaryMsg);
   newTurns.push_back(summaryTurn);
 
-  if (hasPreservedLastTurn) {
-    newTurns.push_back(preservedLastTurn);
+  const uint32_t compactedContextSize = 1000;
+  const uint32_t tokensSaved =
+      (oldTokens > compactedContextSize) ? oldTokens - compactedContextSize : 0;
+  AgentTurn endTurn;
+  endTurn.turnId = "compaction-end-" + compactionId;
+  Message endMsg;
+  endMsg.role = Role::System;
+  endMsg.content.push_back(TextContent{
+      "Compaction complete. tokens_saved=" + std::to_string(tokensSaved) +
+      ", context_size_after=" + std::to_string(compactedContextSize) +
+      ", compaction_id=" + compactionId});
+  endMsg.timestamp = nowMs();
+  endTurn.messages.push_back(endMsg);
+  newTurns.push_back(endTurn);
+
+  if (lastToolResultTurnIndex.has_value()) {
+    const auto &toolTurn = context.history->turns[*lastToolResultTurnIndex];
+    bool alreadyPreserved = std::any_of(
+        preservedTailTurns.begin(), preservedTailTurns.end(),
+        [&](const AgentTurn &turn) { return turn.turnId == toolTurn.turnId; });
+    if (!alreadyPreserved) {
+      newTurns.push_back(toolTurn);
+    }
+  }
+  for (const auto &tailTurn : preservedTailTurns) {
+    newTurns.push_back(tailTurn);
   }
 
   context.history->turns = std::move(newTurns);
@@ -1717,9 +1765,8 @@ void Agent::compactContext(
 
   // Reset context size to conservative estimate (system + task + summary ~1000
   // tokens) This prevents immediate re-compaction on next turn
-  context.aggregateMetrics.tokens.contextSize = 1000;
+  context.aggregateMetrics.tokens.contextSize = compactedContextSize;
 
-  uint32_t tokensSaved = (oldTokens > 1000) ? oldTokens - 1000 : 0;
   onEvent(ContextCompacted{context.identity.id, tokensSaved,
                            context.identity.parentId});
 }

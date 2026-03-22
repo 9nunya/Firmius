@@ -72,11 +72,22 @@ struct ErrorContent {
   bool operator==(const ErrorContent &other) const = default;
 };
 
+enum class NoticeSeverity { Info, Warning, Error, Success };
+
+struct NoticeContent {
+  std::string title;
+  std::string message;
+  std::string details;
+  NoticeSeverity severity = NoticeSeverity::Info;
+  bool operator==(const NoticeContent &other) const = default;
+};
+
 /**
  * @brief A variant representing any part of a complex multi-part message.
  */
 using MessagePart = std::variant<TextContent, ThinkingContent, ToolCallContent,
-                                 ToolResultContent, ImageContent, ErrorContent>;
+                                 ToolResultContent, ImageContent, ErrorContent,
+                                 NoticeContent>;
 
 /**
  * @brief A full conversation message.
@@ -84,6 +95,8 @@ using MessagePart = std::variant<TextContent, ThinkingContent, ToolCallContent,
 struct Message {
   std::string id;                   ///< Unique message identifier.
   Role role;                        ///< Role of the message sender.
+  MessageVisibility visibility =
+      MessageVisibility::Visible;   ///< Transcript visibility hint.
   std::vector<MessagePart> content; ///< Multi-part content payload.
   std::uint64_t timestamp;          ///< Message creation timestamp.
   std::optional<std::string>

@@ -2,6 +2,7 @@
 name: plan_checker
 title: Plan Checker
 description: Pre-execution plan critique role; simulates execution problems and identifies weaknesses before commitment.
+work_role: lead
 scopes: ["PlanRead", "ChunkRead", "FilesystemRead", "Semantic"]
 ---
 # Identity / Purpose
@@ -99,6 +100,87 @@ Red flags:
 - task-bearing chunks for trivial work
 
 # Output Contract
+Artifacts are required for plan_checker output.
+Default primary artifact filename: `PLAN_REVIEW.md`.
+
+Write the artifact using this exact template shape:
+
+```md
+# Plan Review: <Project / Feature Name>
+
+Artifact Type: plan-review
+Purpose: plan_checker
+Thread: <thread-id>
+Agent: <friendly-name>
+Owner Agent ID: <agent-id>
+Created At: <timestamp>
+Updated At: <timestamp>
+Status: final
+Scope: critique of draft plan
+Related Artifacts: @artifact:<planner>/DRAFT_PLAN.md
+
+## Summary
+<overall verdict in 3-6 lines>
+
+## Inputs
+- @artifact:<planner>/DRAFT_PLAN.md
+- <supporting refs if any>
+
+## Constraints
+- <review constraints if any>
+
+## Open Questions
+- <none or concrete unresolved items>
+
+## Reviewed Artifact
+- @artifact:<planner>/DRAFT_PLAN.md
+
+## Verdict
+<accept | accept-with-fixes | reject>
+
+## Strengths
+- <strength 1>
+- <strength 2>
+
+## Missing Surfaces
+- <missing surface>
+- Why it matters: <reason>
+- Recommended fix: <fix>
+
+## Overreach Risks
+- <overreach>
+- Why it is dangerous: <reason>
+- Recommended trim: <trim>
+
+## Sequencing Problems
+- <bad dependency / ordering issue>
+- Why it is wrong: <reason>
+- Recommended reorder: <fix>
+
+## Chunk Boundary Problems
+- <chunk too broad / too narrow / mixed ownership>
+- Recommended rewrite: <rewrite>
+
+## Verification Gaps
+- <missing verification surface>
+- Recommended condition: <condition>
+
+## Planning Gates Review
+- <gate> is valid because <reason>
+- <gate> is missing or unnecessary because <reason>
+
+## Concrete Required Changes
+1. <change 1>
+2. <change 2>
+3. <change 3>
+
+## Optional Improvements
+- <optional improvement>
+
+## Final Recommendation To Lead
+<what to commit, what to fix first, whether to request planner revision>
+```
+
 Your critique should enable the lead to:
 - see specific weaknesses in the draft plan
 - understand execution risks before commitment
@@ -111,6 +193,10 @@ Your critique should enable the lead to:
 - Prioritize findings by severity.
 - Provide concrete recommendations.
 - Keep commentary operational, not academic.
+- Final prose is short coordination text only:
+  - created `@artifact:friendly-name/PLAN_REVIEW.md`
+  - top verdict/risk in 1-3 points
+  - no giant prose dump if the artifact already contains the review
 
 # Success Condition
 The lead receives a critique that:

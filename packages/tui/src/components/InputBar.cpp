@@ -232,6 +232,24 @@ buildProviderSuggestions(ArgType argType, const std::string &filter) {
   return matches;
 }
 
+std::vector<std::string>
+buildAtReferenceSuggestions(const std::shared_ptr<InputBarModel> &model,
+                            const AtReferenceAutocompleteState &state) {
+  if (!model || !state.active) {
+    return {};
+  }
+  if (state.is_artifact) {
+    if (!model->complete_artifact_references) {
+      return {};
+    }
+    return model->complete_artifact_references(state.query);
+  }
+  if (!model->complete_file_references) {
+    return {};
+  }
+  return model->complete_file_references(state.query);
+}
+
 } // namespace
 
 ftxui::Component InputBar(
@@ -488,6 +506,9 @@ ftxui::Component InputBar(
 
     // Handle autocomplete navigation
     auto ac = CommandManager::instance().getAutocomplete(*model->buffer);
+    auto at_state =
+        DetectAtReferenceAutocompleteState(*model->buffer, *model->cursor);
+    auto at_suggestions = buildAtReferenceSuggestions(model, at_state);
 
     if (ac && ((ac->is_typing_command_name && !ac->command_matches.empty()) ||
                (!ac->is_typing_command_name && ac->current_arg &&
@@ -516,6 +537,17 @@ ftxui::Component InputBar(
         }
       } else {
         *suggestion_index = 0;
+      }
+    } else if (at_state.active && !at_suggestions.empty()) {
+      const size_t match_count = at_suggestions.size();
+      if (event == ftxui::Event::ArrowDown) {
+        *suggestion_index = (*suggestion_index + 1) % match_count;
+        return true;
+      }
+      if (event == ftxui::Event::ArrowUp) {
+        *suggestion_index =
+            (*suggestion_index + match_count - 1) % match_count;
+        return true;
       }
     } else {
       *suggestion_index = 0;
@@ -567,6 +599,22 @@ ftxui::Component InputBar(
             return true;
           }
         }
+      } else if (event == ftxui::Event::Tab && at_state.active &&
+                 !at_suggestions.empty()) {
+        size_t idx = static_cast<size_t>(*suggestion_index);
+        if (idx >= at_suggestions.size()) {
+          idx = 0;
+        }
+        const std::string replacement =
+            at_state.token_prefix + at_suggestions[idx] + " ";
+        model->buffer->replace(at_state.token_start,
+                               static_cast<size_t>(*model->cursor) -
+                                   at_state.token_start,
+                               replacement);
+        *model->cursor =
+            static_cast<int>(at_state.token_start + replacement.size());
+        *suggestion_index = 0;
+        return true;
       }
     }
 
@@ -642,6 +690,10 @@ ftxui::Component InputBar(
 
     auto ac = CommandManager::instance().getAutocomplete(
         model->buffer ? *model->buffer : "");
+    auto at_state = DetectAtReferenceAutocompleteState(
+        model->buffer ? *model->buffer : "",
+        model->cursor ? *model->cursor : 0);
+    auto at_suggestions = buildAtReferenceSuggestions(model, at_state);
     std::optional<ftxui::Element> autocomplete_layer;
 
     if (ac && ac->is_typing_command_name && !ac->command_matches.empty()) {
@@ -736,6 +788,33 @@ ftxui::Component InputBar(
       } else {
         autocomplete_layer = header | ftxui::bgcolor(theme.modals.bg);
       }
+    } else if (at_state.active) {
+      ftxui::Elements rows;
+      if (!at_suggestions.empty()) {
+        for (size_t i = 0; i < at_suggestions.size(); ++i) {
+          const bool is_selected = (i == static_cast<size_t>(*suggestion_index));
+          const std::string prefix = at_state.is_artifact ? "@artifact:" : "@";
+          auto label =
+              ftxui::text(" " + prefix + at_suggestions[i]) | ftxui::bold |
+              ftxui::color(is_selected ? theme.base.bg : theme.base.fg);
+          if (is_selected) {
+            label = label | ftxui::bgcolor(theme.modals.highlight_bg);
+          }
+          rows.push_back(label);
+        }
+      } else {
+        const std::string emptyLabel = at_state.is_artifact
+                                           ? "No artifact matches"
+                                           : "No file matches";
+        rows.push_back(ftxui::text(emptyLabel) | ftxui::dim | ftxui::center);
+      }
+
+      const std::string headerLabel =
+          at_state.is_artifact ? "Artifact references" : "File references";
+      autocomplete_layer =
+          ftxui::vbox({ftxui::text(headerLabel) | ftxui::bold,
+                       ftxui::separatorLight(), ftxui::vbox(rows)}) |
+          ftxui::bgcolor(theme.modals.bg);
     }
 
     // Build the input display with proper wrapping and pasted block rendering

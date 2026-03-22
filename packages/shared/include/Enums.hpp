@@ -23,6 +23,14 @@ enum class Role : std::uint8_t {
 };
 
 /**
+ * @brief Visibility level for runtime messages in transcripts.
+ */
+enum class MessageVisibility : std::uint8_t {
+  Visible,  ///< Standard user-facing transcript message.
+  Internal, ///< Runtime/internal hint hidden by default in the UI.
+};
+
+/**
  * @brief Types of execution environments supported by the engine.
  */
 enum class HostType : std::uint8_t {

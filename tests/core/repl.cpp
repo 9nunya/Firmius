@@ -34,8 +34,8 @@ void onEngineEvent(const EngineEvent& ev) {
         if (tx->agentId == focusedAgentId) std::cout << tx->delta << std::flush;
     } else if (auto* tc = std::get_if<AgentToolCall>(&ev)) {
         if (tc->agentId == focusedAgentId) std::cout << "\n\033[1;33m[Tool: " << tc->toolName << "(" << tc->toolArgs << ")]\033[0m\n";
-    } else if (auto* c = std::get_if<AgentCompleted>(&ev)) {
-        std::cout << "\n\033[1;32m[Agent Completed: " << c->agentId.substr(0, 8) << "]\033[0m\n";
+    } else if (auto* c = std::get_if<AgentFinished>(&ev)) {
+        std::cout << "\n\033[1;32m[Agent Finished: " << c->agentId.substr(0, 8) << "]\033[0m\n";
     } else if (auto* e = std::get_if<AgentError>(&ev)) {
         std::cout << "\n\033[1;31m[Agent Error (" << e->agentId.substr(0, 8) << "): " << e->message << "]\033[0m\n";
     }

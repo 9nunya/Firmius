@@ -4,6 +4,7 @@
 #include "Context.hpp"
 #include "ICommandIntent.hpp"
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 #include <map>
@@ -116,6 +117,27 @@ public:
     void writePermissionRules(const std::string& threadId, const ThreadPermissionRules& rules);
     void addCommandAllowRule(const std::string& threadId, const CommandAllowRule& rule);
     void addWriteAllowPath(const std::string& threadId, const std::string& pathPrefix);
+
+    shared::ThreadArtifactMetadata writeArtifact(
+        const std::string& threadId, const std::string& ownerAgentId,
+        const std::string& ownerFriendlyName, const std::string& filename,
+        const std::string& content, bool* created = nullptr,
+        const std::optional<std::string>& kind = std::nullopt,
+        const std::optional<std::string>& description = std::nullopt);
+    std::string readArtifact(const std::string& threadId,
+                             const std::string& ownerAgentId,
+                             const std::string& filename) const;
+    std::vector<shared::ThreadArtifactMetadata>
+    listArtifacts(const std::string& threadId) const;
+    std::vector<shared::ThreadArtifactMetadata>
+    listArtifactsForAgent(const std::string& threadId,
+                          const std::string& ownerAgentId) const;
+    std::optional<std::string>
+    findAgentIdByFriendlyName(const std::string& threadId,
+                              const std::string& friendlyName) const;
+    std::optional<std::string>
+    findFriendlyNameByAgentId(const std::string& threadId,
+                              const std::string& agentId) const;
 
 private:
     std::string basePath_;

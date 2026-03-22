@@ -1,4 +1,5 @@
 #include "Serialization.hpp"
+#include "utils/StringUtil.hpp"
 
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
@@ -37,6 +38,24 @@ Role stringToRole(const std::string &str) {
   if (str == "Error")
     return Role::Error;
   throw std::runtime_error("Unknown Role: " + str);
+}
+
+std::string messageVisibilityToString(MessageVisibility value) {
+  switch (value) {
+  case MessageVisibility::Visible:
+    return "Visible";
+  case MessageVisibility::Internal:
+    return "Internal";
+  }
+  return "Visible";
+}
+
+MessageVisibility stringToMessageVisibility(const std::string &str) {
+  if (str == "Visible")
+    return MessageVisibility::Visible;
+  if (str == "Internal")
+    return MessageVisibility::Internal;
+  throw std::runtime_error("Unknown MessageVisibility: " + str);
 }
 
 std::string hostTypeToString(HostType value) {
@@ -269,6 +288,32 @@ std::string todoStatusToString(TodoStatus value) {
     return "Done";
   }
   return "Pending";
+}
+
+std::string noticeSeverityToString(NoticeSeverity value) {
+  switch (value) {
+  case NoticeSeverity::Info:
+    return "info";
+  case NoticeSeverity::Warning:
+    return "warning";
+  case NoticeSeverity::Error:
+    return "error";
+  case NoticeSeverity::Success:
+    return "success";
+  }
+  return "info";
+}
+
+NoticeSeverity stringToNoticeSeverity(const std::string &str) {
+  if (str == "info")
+    return NoticeSeverity::Info;
+  if (str == "warning")
+    return NoticeSeverity::Warning;
+  if (str == "error")
+    return NoticeSeverity::Error;
+  if (str == "success")
+    return NoticeSeverity::Success;
+  throw std::runtime_error("Unknown NoticeSeverity: " + str);
 }
 
 TodoStatus stringToTodoStatus(const std::string &str) {
@@ -792,6 +837,87 @@ AgentTodoList agentTodoListFromJsonValue(const rapidjson::Value &v) {
   return list;
 }
 
+rapidjson::Value
+threadArtifactMetadataToJsonValue(const ThreadArtifactMetadata &metadata,
+                                  rapidjson::Document::AllocatorType &a) {
+  rapidjson::Value v(rapidjson::kObjectType);
+  v.AddMember("thread_id", rapidjson::Value(metadata.threadId.c_str(), a), a);
+  v.AddMember("owner_agent_id",
+              rapidjson::Value(metadata.ownerAgentId.c_str(), a), a);
+  v.AddMember("owner_friendly_name",
+              rapidjson::Value(metadata.ownerFriendlyName.c_str(), a), a);
+  v.AddMember("filename", rapidjson::Value(metadata.filename.c_str(), a), a);
+  v.AddMember("storage_path", rapidjson::Value(metadata.storagePath.c_str(), a),
+              a);
+  v.AddMember("created_at", metadata.createdAt, a);
+  v.AddMember("updated_at", metadata.updatedAt, a);
+  if (metadata.kind.has_value()) {
+    v.AddMember("kind", rapidjson::Value(metadata.kind->c_str(), a), a);
+  } else {
+    v.AddMember("kind", rapidjson::Value(rapidjson::kNullType), a);
+  }
+  if (metadata.description.has_value()) {
+    v.AddMember("description",
+                rapidjson::Value(metadata.description->c_str(), a), a);
+  } else {
+    v.AddMember("description", rapidjson::Value(rapidjson::kNullType), a);
+  }
+  return v;
+}
+
+ThreadArtifactMetadata
+threadArtifactMetadataFromJsonValue(const rapidjson::Value &v) {
+  ThreadArtifactMetadata metadata;
+  metadata.threadId =
+      v.HasMember("thread_id") && v["thread_id"].IsString()
+          ? v["thread_id"].GetString()
+          : (v.HasMember("threadId") && v["threadId"].IsString()
+                 ? v["threadId"].GetString()
+                 : "");
+  metadata.ownerAgentId =
+      v.HasMember("owner_agent_id") && v["owner_agent_id"].IsString()
+          ? v["owner_agent_id"].GetString()
+          : (v.HasMember("ownerAgentId") && v["ownerAgentId"].IsString()
+                 ? v["ownerAgentId"].GetString()
+                 : "");
+  metadata.ownerFriendlyName =
+      v.HasMember("owner_friendly_name") && v["owner_friendly_name"].IsString()
+          ? v["owner_friendly_name"].GetString()
+          : (v.HasMember("ownerFriendlyName") &&
+                     v["ownerFriendlyName"].IsString()
+                 ? v["ownerFriendlyName"].GetString()
+                 : "");
+  metadata.filename =
+      v.HasMember("filename") && v["filename"].IsString()
+          ? v["filename"].GetString()
+          : "";
+  metadata.storagePath =
+      v.HasMember("storage_path") && v["storage_path"].IsString()
+          ? v["storage_path"].GetString()
+          : (v.HasMember("storagePath") && v["storagePath"].IsString()
+                 ? v["storagePath"].GetString()
+                 : "");
+  metadata.createdAt =
+      v.HasMember("created_at") && v["created_at"].IsUint64()
+          ? v["created_at"].GetUint64()
+          : (v.HasMember("createdAt") && v["createdAt"].IsUint64()
+                 ? v["createdAt"].GetUint64()
+                 : 0);
+  metadata.updatedAt =
+      v.HasMember("updated_at") && v["updated_at"].IsUint64()
+          ? v["updated_at"].GetUint64()
+          : (v.HasMember("updatedAt") && v["updatedAt"].IsUint64()
+                 ? v["updatedAt"].GetUint64()
+                 : 0);
+  if (v.HasMember("kind") && v["kind"].IsString()) {
+    metadata.kind = v["kind"].GetString();
+  }
+  if (v.HasMember("description") && v["description"].IsString()) {
+    metadata.description = v["description"].GetString();
+  }
+  return metadata;
+}
+
 rapidjson::Value messagePartToJson(const MessagePart &p,
                                    rapidjson::Document::AllocatorType &a) {
   rapidjson::Value v(rapidjson::kObjectType);
@@ -824,6 +950,15 @@ rapidjson::Value messagePartToJson(const MessagePart &p,
     v.AddMember("description", rapidjson::Value(err->description.c_str(), a),
                 a);
     v.AddMember("details", rapidjson::Value(err->details.c_str(), a), a);
+  } else if (auto *notice = std::get_if<NoticeContent>(&p)) {
+    v.AddMember("type", "notice", a);
+    v.AddMember("title", rapidjson::Value(notice->title.c_str(), a), a);
+    v.AddMember("message", rapidjson::Value(notice->message.c_str(), a), a);
+    v.AddMember("details", rapidjson::Value(notice->details.c_str(), a), a);
+    v.AddMember("severity",
+                rapidjson::Value(noticeSeverityToString(notice->severity).c_str(),
+                                 a),
+                a);
   }
   return v;
 }
@@ -849,6 +984,12 @@ MessagePart messagePartFromJson(const rapidjson::Value &v) {
   if (type == "error")
     return ErrorContent{v["errorName"].GetString(),
                         v["description"].GetString(), v["details"].GetString()};
+  if (type == "notice")
+    return NoticeContent{v["title"].GetString(), v["message"].GetString(),
+                         v["details"].GetString(),
+                         v.HasMember("severity") && v["severity"].IsString()
+                             ? stringToNoticeSeverity(v["severity"].GetString())
+                             : NoticeSeverity::Info};
   throw std::runtime_error("Unknown MessagePart type: " + type);
 }
 
@@ -857,6 +998,10 @@ rapidjson::Value messageToJson(const Message &m,
   rapidjson::Value v(rapidjson::kObjectType);
   v.AddMember("id", rapidjson::Value(m.id.c_str(), a), a);
   v.AddMember("role", rapidjson::Value(roleToString(m.role).c_str(), a), a);
+  v.AddMember("visibility",
+              rapidjson::Value(
+                  messageVisibilityToString(m.visibility).c_str(), a),
+              a);
   rapidjson::Value content(rapidjson::kArrayType);
   for (const auto &p : m.content)
     content.PushBack(messagePartToJson(p, a), a);
@@ -873,12 +1018,98 @@ Message messageFromJson(const rapidjson::Value &v) {
   Message m;
   m.id = v["id"].GetString();
   m.role = stringToRole(v["role"].GetString());
+  if (v.HasMember("visibility") && v["visibility"].IsString()) {
+    m.visibility = stringToMessageVisibility(v["visibility"].GetString());
+  }
   for (const auto &p : v["content"].GetArray())
     m.content.push_back(messagePartFromJson(p));
   m.timestamp = v["timestamp"].GetUint64();
   if (v["parentId"].IsString())
     m.parentId = v["parentId"].GetString();
   return m;
+}
+
+const char *agentOutcomeKindToString(AgentOutcome::Kind kind) {
+  switch (kind) {
+  case AgentOutcome::Kind::Response:
+    return "Response";
+  case AgentOutcome::Kind::NoSummary:
+    return "NoSummary";
+  case AgentOutcome::Kind::Cancelled:
+    return "Cancelled";
+  case AgentOutcome::Kind::Failed:
+    return "Failed";
+  }
+  return "Failed";
+}
+
+rapidjson::Value agentOutcomeToJson(const AgentOutcome &outcome,
+                                    rapidjson::Document::AllocatorType &a) {
+  rapidjson::Value v(rapidjson::kObjectType);
+  v.AddMember("kind",
+              rapidjson::Value(agentOutcomeKindToString(outcome.kind), a).Move(),
+              a);
+  v.AddMember("text", rapidjson::Value(outcome.text.c_str(), a).Move(), a);
+  rapidjson::Value created(rapidjson::kArrayType);
+  for (const auto &artifact : outcome.artifacts_created) {
+    created.PushBack(threadArtifactMetadataToJsonValue(artifact, a), a);
+  }
+  v.AddMember("artifacts_created", created, a);
+  rapidjson::Value updated(rapidjson::kArrayType);
+  for (const auto &artifact : outcome.artifacts_updated) {
+    updated.PushBack(threadArtifactMetadataToJsonValue(artifact, a), a);
+  }
+  v.AddMember("artifacts_updated", updated, a);
+  return v;
+}
+
+AgentOutcome agentOutcomeFromJson(const rapidjson::Value &v) {
+  if (!v.IsObject()) {
+    throw std::runtime_error("AgentOutcome must be an object");
+  }
+  if (!v.HasMember("kind") || !v["kind"].IsString()) {
+    throw std::runtime_error("AgentOutcome.kind must be a string");
+  }
+  if (!v.HasMember("text") || !v["text"].IsString()) {
+    throw std::runtime_error("AgentOutcome.text must be a string");
+  }
+  const std::string kind = v["kind"].GetString();
+  const std::string text = v["text"].GetString();
+  AgentOutcome outcome;
+  outcome.text = text;
+  if (v.HasMember("artifacts_created") && v["artifacts_created"].IsArray()) {
+    for (const auto &artifact : v["artifacts_created"].GetArray()) {
+      if (artifact.IsObject()) {
+        outcome.artifacts_created.push_back(
+            threadArtifactMetadataFromJsonValue(artifact));
+      }
+    }
+  }
+  if (v.HasMember("artifacts_updated") && v["artifacts_updated"].IsArray()) {
+    for (const auto &artifact : v["artifacts_updated"].GetArray()) {
+      if (artifact.IsObject()) {
+        outcome.artifacts_updated.push_back(
+            threadArtifactMetadataFromJsonValue(artifact));
+      }
+    }
+  }
+  if (kind == "Response") {
+    outcome.kind = AgentOutcome::Kind::Response;
+    return outcome;
+  }
+  if (kind == "NoSummary") {
+    outcome.kind = AgentOutcome::Kind::NoSummary;
+    return outcome;
+  }
+  if (kind == "Cancelled") {
+    outcome.kind = AgentOutcome::Kind::Cancelled;
+    return outcome;
+  }
+  if (kind == "Failed") {
+    outcome.kind = AgentOutcome::Kind::Failed;
+    return outcome;
+  }
+  throw std::runtime_error("Unknown AgentOutcome kind: " + kind);
 }
 
 } // namespace
@@ -1481,6 +1712,19 @@ AgentTodoList agentTodoListFromJson(const rapidjson::Value &value) {
   return agentTodoListFromJsonValue(value);
 }
 
+rapidjson::Document toJson(const ThreadArtifactMetadata &metadata) {
+  rapidjson::Document d;
+  d.SetObject();
+  auto &a = d.GetAllocator();
+  d.CopyFrom(threadArtifactMetadataToJsonValue(metadata, a), a);
+  return d;
+}
+
+ThreadArtifactMetadata
+threadArtifactMetadataFromJson(const rapidjson::Value &value) {
+  return threadArtifactMetadataFromJsonValue(value);
+}
+
 rapidjson::Document toJson(const EngineEvent &ev) {
   rapidjson::Document d;
   d.SetObject();
@@ -1514,11 +1758,11 @@ rapidjson::Document toJson(const EngineEvent &ev) {
     d.AddMember("turn", toJson(tc->turn).Move(), a);
     d.AddMember("aggregateMetrics", toJson(tc->aggregateMetrics).Move(), a);
     d.AddMember("parentId", rapidjson::Value(tc->parentId.c_str(), a), a);
-  } else if (auto *c = std::get_if<AgentCompleted>(&ev)) {
-    d.AddMember("type", "AgentCompleted", a);
-    d.AddMember("agentId", rapidjson::Value(c->agentId.c_str(), a), a);
-    d.AddMember("summary", rapidjson::Value(c->summary.c_str(), a), a);
-    d.AddMember("parentId", rapidjson::Value(c->parentId.c_str(), a), a);
+  } else if (auto *f = std::get_if<AgentFinished>(&ev)) {
+    d.AddMember("type", "AgentFinished", a);
+    d.AddMember("agentId", rapidjson::Value(f->agentId.c_str(), a), a);
+    d.AddMember("outcome", agentOutcomeToJson(f->outcome, a), a);
+    d.AddMember("parentId", rapidjson::Value(f->parentId.c_str(), a), a);
   } else if (auto *e = std::get_if<AgentError>(&ev)) {
     d.AddMember("type", "AgentError", a);
     d.AddMember("agentId", rapidjson::Value(e->agentId.c_str(), a), a);
@@ -1586,10 +1830,15 @@ EngineEvent engineEventFromJson(const rapidjson::Value &v) {
         v["agentId"].GetString(), agentTurnFromJsonValue(v["turn"]),
         agentMetricsFromJsonValue(v["aggregateMetrics"]),
         v.HasMember("parentId") ? v["parentId"].GetString() : ""};
-  if (type == "AgentCompleted")
-    return AgentCompleted{v["agentId"].GetString(), v["summary"].GetString(),
-                          v.HasMember("parentId") ? v["parentId"].GetString()
-                                                  : ""};
+  if (type == "AgentFinished") {
+    if (!v.HasMember("outcome") || !v["outcome"].IsObject()) {
+      throw std::runtime_error("AgentFinished requires an outcome object");
+    }
+    AgentOutcome outcome = agentOutcomeFromJson(v["outcome"]);
+    return AgentFinished{v["agentId"].GetString(), outcome,
+                         v.HasMember("parentId") ? v["parentId"].GetString()
+                                                 : ""};
+  }
   if (type == "AgentError")
     return AgentError{v["agentId"].GetString(), v["message"].GetString(),
                       v.HasMember("parentId") ? v["parentId"].GetString() : ""};

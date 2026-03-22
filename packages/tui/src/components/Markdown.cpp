@@ -1,8 +1,10 @@
 #include "components/Markdown.hpp"
 #include <cctype>
+#include <functional>
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/dom/table.hpp>
 #include <ftxui/screen/terminal.hpp>
+#include <regex>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -13,6 +15,76 @@ namespace firmius::tui {
 static thread_local int g_markdown_width = 0;
 
 void SetMarkdownWidth(int width) { g_markdown_width = width; }
+
+namespace {
+
+std::string extractXmlAttribute(const std::string &attrs,
+                                const std::string &name) {
+  std::regex pattern(name + R"re(="([^"]*)")re");
+  std::smatch match;
+  if (std::regex_search(attrs, match, pattern) && match.size() >= 2) {
+    return match[1].str();
+  }
+  return "";
+}
+
+std::string collapseXmlTagReferences(const std::string &input,
+                                     const std::regex &pattern,
+                                     const std::function<std::string(
+                                         const std::smatch &)> &render) {
+  std::string output;
+  std::size_t cursor = 0;
+  for (std::sregex_iterator it(input.begin(), input.end(), pattern), end;
+       it != end; ++it) {
+    const std::size_t start = static_cast<std::size_t>(it->position());
+    const std::size_t len = static_cast<std::size_t>(it->length());
+    if (start > cursor) {
+      output.append(input, cursor, start - cursor);
+    }
+    output += render(*it);
+    cursor = start + len;
+  }
+  output.append(input, cursor, std::string::npos);
+  return output;
+}
+
+} // namespace
+
+std::string CollapseExpandedReferencesForDisplay(const std::string &text) {
+  static const std::regex artifactPattern(
+      R"(<artifact\b([^>]*)>[\s\S]*?<\/artifact>)");
+  static const std::regex filePattern(R"(<file\b([^>]*)>[\s\S]*?<\/file>)");
+
+  std::string collapsedArtifacts = collapseXmlTagReferences(
+      text, artifactPattern, [](const std::smatch &match) {
+        if (match.size() < 2) {
+          return match.str();
+        }
+        const std::string attrs = match[1].str();
+        const std::string path = extractXmlAttribute(attrs, "path");
+        if (path.empty()) {
+          return match.str();
+        }
+        return "@artifact:" + path;
+      });
+
+  return collapseXmlTagReferences(
+      collapsedArtifacts, filePattern, [](const std::smatch &match) {
+        if (match.size() < 2) {
+          return match.str();
+        }
+        const std::string attrs = match[1].str();
+        const std::string path = extractXmlAttribute(attrs, "path");
+        if (path.empty()) {
+          return match.str();
+        }
+        const std::string lines = extractXmlAttribute(attrs, "lines");
+        if (!lines.empty()) {
+          return "@" + path + ":" + lines;
+        }
+        return "@" + path;
+      });
+}
 
 static std::vector<std::string> splitLines(const std::string &text) {
   std::vector<std::string> lines;
@@ -348,6 +420,8 @@ static ftxui::Element renderInline(const std::string &text, bool dim) {
 }
 
 ftxui::Element RenderMarkdown(const std::string &text, bool dim) {
+  const std::string displayText = CollapseExpandedReferencesForDisplay(text);
+
   // Calculate effective width from terminal size if global not set
   int term_width = ftxui::Terminal::Size().dimx;
   int effective_width = g_markdown_width > 0
@@ -357,7 +431,7 @@ ftxui::Element RenderMarkdown(const std::string &text, bool dim) {
   int content_width = std::max(10, effective_width - 4);
 
   std::vector<ftxui::Element> out;
-  auto lines = splitLines(text);
+  auto lines = splitLines(displayText);
   bool in_code = false;
   std::vector<std::string> code_lines;
   std::string para_buf;

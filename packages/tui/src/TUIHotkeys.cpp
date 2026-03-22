@@ -55,4 +55,15 @@ bool IsRetryLastRequestEvent(const ftxui::Event &event) {
          IsRetryLastRequestInput(event.input());
 }
 
+bool IsVariantCycleInput(const std::string &raw) {
+  return isCtrlLetterInput(
+      raw, 'v', 'V',
+      {"\x16", "\x1b[22;5u", "\x1b[27;5;118~", "\x1b[86;5u"});
+}
+
+bool IsVariantCycleEvent(const ftxui::Event &event) {
+  return event == ftxui::Event::Special("\x16") ||
+         IsVariantCycleInput(event.input());
+}
+
 } // namespace firmius::tui

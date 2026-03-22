@@ -39,6 +39,7 @@ ftxui::Component ConfigDisplayModal::create(TuiState &state) {
   std::string providerId = config.defaultProviderId;
   std::string modelId = config.defaultModelId;
   std::string modelVariant = config.defaultModelVariant;
+  bool showInternalNudges = config.showInternalNudges;
   std::string modelLabel = firmius::shared::PrettifyModelName(modelId);
   if (modelLabel.empty() || modelLabel == modelId) {
     modelLabel = modelId;
@@ -95,6 +96,12 @@ ftxui::Component ConfigDisplayModal::create(TuiState &state) {
              ftxui::color(modelVariant.empty() ? theme.base.dim
                                                : theme.modals.highlight_fg)}));
     rows.push_back(ftxui::hbox(
+        {ftxui::text("Internal:    ") | ftxui::bold |
+             ftxui::color(theme.modals.fg),
+         ftxui::text(showInternalNudges ? "Shown" : "Hidden") |
+             ftxui::color(showInternalNudges ? theme.modals.highlight_fg
+                                             : theme.base.dim)}));
+    rows.push_back(ftxui::hbox(
         {ftxui::text("Permissions: ") | ftxui::bold |
              ftxui::color(theme.modals.fg),
          ftxui::text(hasActiveThread
@@ -144,6 +151,10 @@ ftxui::Component ConfigDisplayModal::create(TuiState &state) {
                                          : "No Active Thread   ") |
                  ftxui::color(hasActiveThread ? theme.modals.fg
                                               : theme.base.dim),
+             ftxui::text(" [I] ") | ftxui::bold |
+                 ftxui::color(theme.modals.title),
+             ftxui::text("Toggle Internal Nudges   ") |
+                 ftxui::color(theme.modals.fg),
              ftxui::text(" [ESC] ") | ftxui::bold |
                  ftxui::color(theme.base.dim),
              ftxui::text("Close") | ftxui::color(theme.modals.fg)}) |
@@ -175,6 +186,19 @@ ftxui::Component ConfigDisplayModal::create(TuiState &state) {
     if (event == ftxui::Event::Character('p') ||
         event == ftxui::Event::Character('P')) {
       state.cycleThreadPermissionMode();
+      state.deferUiMutation([&state]() {
+        state.popModalImmediate();
+        state.openModal("config_display");
+      });
+      return true;
+    }
+    if (event == ftxui::Event::Character('i') ||
+        event == ftxui::Event::Character('I')) {
+      auto &h = firmius::core::Harness::instance();
+      auto cfg = h.getConfig();
+      cfg.showInternalNudges = !cfg.showInternalNudges;
+      h.updateConfig(cfg);
+      h.saveConfig();
       state.deferUiMutation([&state]() {
         state.popModalImmediate();
         state.openModal("config_display");

@@ -3,6 +3,7 @@
 
 #include "Context.hpp"
 #include "Theme.hpp"
+#include "Message.hpp"
 #include <ftxui/dom/elements.hpp>
 #include <string>
 #include <vector>
@@ -26,6 +27,9 @@ struct ParsedErrorDetails {
 };
 
 ParsedErrorDetails ParseErrorDetails(const std::string &details);
+
+ftxui::Element RenderNoticeDisplay(const Theme &theme,
+                                   const firmius::shared::NoticeContent &notice);
 
 ftxui::Element RenderErrorDisplay(const Theme &theme,
                                    const firmius::shared::ErrorContent &error);

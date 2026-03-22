@@ -3,6 +3,7 @@
 #include "ThemeManager.hpp"
 #include "harness/Harness.hpp"
 #include "modals/ModalLayout.hpp"
+#include "utils/ModelPickerEntries.hpp"
 #include <algorithm>
 #include <ftxui/component/component.hpp>
 #include <ftxui/dom/elements.hpp>
@@ -12,8 +13,7 @@
 namespace firmius::tui {
 
 ftxui::Component ModelPickerModal::create(TuiState &state) {
-  auto models = std::make_shared<std::vector<firmius::core::ModelInfo>>();
-  auto entries = std::make_shared<std::vector<std::string>>();
+  auto entries = std::make_shared<std::vector<ModelPickerEntry>>();
   auto filtered_indices = std::make_shared<std::vector<int>>();
   auto filter_text = std::make_shared<std::string>("");
   auto selected = std::make_shared<int>(0);
@@ -21,57 +21,24 @@ ftxui::Component ModelPickerModal::create(TuiState &state) {
 
   auto display_entries = std::make_shared<std::vector<std::string>>();
 
-  auto rebuild_filtered = [entries, filtered_indices, models, filter_text,
-                           selected, display_entries]() {
-    filtered_indices->clear();
+  auto rebuild_filtered = [entries, filtered_indices, filter_text, selected,
+                           display_entries]() {
+    *filtered_indices = FilterModelPickerEntries(*entries, *filter_text);
     display_entries->clear();
-    std::string q = *filter_text;
-    std::transform(q.begin(), q.end(), q.begin(), ::tolower);
-
-    // Split query into tokens for "AND" search
-    std::vector<std::string> tokens;
-    size_t start = 0, end = 0;
-    while ((end = q.find(' ', start)) != std::string::npos) {
-      if (end != start)
-        tokens.push_back(q.substr(start, end - start));
-      start = end + 1;
+    for (int index : *filtered_indices) {
+      display_entries->push_back((*entries)[index].label);
     }
-    if (start < q.size())
-      tokens.push_back(q.substr(start));
 
-    for (int i = 0; i < (int)models->size(); ++i) {
-      std::string lower_label = (*entries)[i];
-      std::transform(lower_label.begin(), lower_label.end(),
-                     lower_label.begin(), ::tolower);
-
-      bool all_tokens_match = true;
-      for (const auto &token : tokens) {
-        if (lower_label.find(token) == std::string::npos) {
-          all_tokens_match = false;
-          break;
-        }
-      }
-
-      if (all_tokens_match) {
-        filtered_indices->push_back(i);
-        display_entries->push_back((*entries)[i]);
-      }
-    }
     if (*selected >= (int)filtered_indices->size()) {
       *selected =
           filtered_indices->empty() ? 0 : (int)filtered_indices->size() - 1;
     }
   };
 
-  auto refresh = [models, entries, filtered_indices, isLoading, selected,
-                  rebuild_filtered]() {
+  auto refresh = [entries, isLoading, rebuild_filtered]() {
     auto &h = firmius::core::Harness::instance();
     auto fetched = h.listAllModels();
-    *models = std::move(fetched);
-    entries->clear();
-    for (int i = 0; i < (int)models->size(); ++i) {
-      entries->push_back((*models)[i].provider + "/" + (*models)[i].id);
-    }
+    *entries = BuildModelPickerEntries(fetched, true);
     *isLoading = !h.isModelsLoaded();
     rebuild_filtered();
   };
@@ -155,7 +122,7 @@ ftxui::Component ModelPickerModal::create(TuiState &state) {
             theme.modals.bg));
   });
 
-  return ftxui::CatchEvent(component, [models, entries, filtered_indices,
+  return ftxui::CatchEvent(component, [entries, filtered_indices,
                                        filter_text, selected, rebuild_filtered,
                                        isLoading, subId, menu,
                                        &state](ftxui::Event event) {
@@ -178,9 +145,10 @@ ftxui::Component ModelPickerModal::create(TuiState &state) {
       rebuild_filtered();
       if (!filtered_indices->empty() &&
           *selected < (int)filtered_indices->size()) {
-        int idx = (*filtered_indices)[*selected];
-        const auto &m = (*models)[idx];
-        firmius::core::Harness::instance().switchModel(m.provider, m.id);
+        int index = (*filtered_indices)[*selected];
+        const auto &entry = (*entries)[index];
+        firmius::core::Harness::instance().switchModel(
+            entry.provider_id, entry.model_id, entry.variant_name);
       }
       firmius::core::Harness::instance().unsubscribe(subId);
       state.popModal();

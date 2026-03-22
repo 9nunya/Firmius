@@ -4,21 +4,52 @@
 #include "ConfigLoader.hpp"
 #include "Engine.hpp"
 #include "Events.hpp"
+#include "Serialization.hpp"
+#include "artifacts/ReferenceExpansion.hpp"
 #include "persistence/ThreadManager.hpp"
 #include "tools/WorkToolCommon.hpp"
 #include "utils/StringUtil.hpp"
+#include <rapidjson/document.h>
+#include <rapidjson/stringbuffer.h>
+#include <rapidjson/writer.h>
 #include <sstream>
+#include <unordered_set>
 
 namespace firmius::core {
 
 namespace {
 
-bool isExecutorPersona(const std::string &persona) { return persona == "executor"; }
+PurposeWorkRole purposeRoleForPersona(const std::string &persona) {
+  return PurposeLoader::resolveWorkRole(persona);
+}
 
-bool isAuditorPersona(const std::string &persona) { return persona == "auditor"; }
+std::optional<std::string> legacyPersonaSuggestion(const std::string &persona) {
+  const std::string lowered = shared::StringUtil::toLower(
+      shared::StringUtil::trim(persona));
+  if (lowered == "implementer") {
+    return "legacy role 'implementer'; use 'executor'";
+  }
+  if (lowered == "researcher") {
+    return "legacy role 'researcher'; use 'scout'";
+  }
+  return std::nullopt;
+}
 
-bool isWorkerPersona(const std::string &persona) {
-  return persona == "worker" || persona == "scout";
+bool isExecutorRole(PurposeWorkRole role) {
+  return role == PurposeWorkRole::Executor;
+}
+
+bool isAuditorRole(PurposeWorkRole role) {
+  return role == PurposeWorkRole::Auditor;
+}
+
+bool isWorkerLikeRole(PurposeWorkRole role) {
+  return role == PurposeWorkRole::Worker || role == PurposeWorkRole::Scout;
+}
+
+bool isRetryableWaitOutcome(const AgentOutcome &outcome) {
+  return outcome.kind == AgentOutcome::Kind::NoSummary ||
+         outcome.kind == AgentOutcome::Kind::Failed;
 }
 
 const shared::WorkChunk &
@@ -393,22 +424,23 @@ void persistExecutorDispatch(const std::string &threadId,
 }
 
 std::string buildDelegationTask(const SubagentInput &input,
-                                const std::string &threadId) {
-  if (isExecutorPersona(input.persona) && input.plan_id.has_value() &&
+                                const std::string &threadId,
+                                PurposeWorkRole role) {
+  if (isExecutorRole(role) && input.plan_id.has_value() &&
       input.chunk_id.has_value()) {
     const shared::Plan plan = loadPlan(threadId, *input.plan_id);
     const shared::WorkChunk &chunk = findChunk(plan, *input.chunk_id);
     return buildExecutorTask(plan, chunk, input.task);
   }
 
-  if (isAuditorPersona(input.persona) && input.plan_id.has_value() &&
+  if (isAuditorRole(role) && input.plan_id.has_value() &&
       input.chunk_id.has_value()) {
     const shared::Plan plan = loadPlan(threadId, *input.plan_id);
     const shared::WorkChunk &chunk = findChunk(plan, *input.chunk_id);
     return buildAuditorTask(plan, chunk, input.task);
   }
 
-  if (isWorkerPersona(input.persona)) {
+  if (isWorkerLikeRole(role)) {
     return buildWorkerTask(input.task);
   }
 
@@ -478,6 +510,103 @@ ResolvedRoute resolveModelRoute(const SubagentInput &input,
   return useDefaultRoute();
 }
 
+std::string routeLabel(const ResolvedRoute &route) {
+  return route.categoryName.empty() ? "default" : route.categoryName;
+}
+
+std::vector<ResolvedRoute> buildRouteCandidates(const SubagentInput &input,
+                                                const std::string &persona) {
+  const auto &config = shared::ConfigLoader::instance().getConfig();
+  std::vector<ResolvedRoute> routes;
+  std::unordered_set<std::string> seen;
+  auto pushUnique = [&](const ResolvedRoute &route) {
+    std::string key = route.providerId + "|" + route.modelId + "|" +
+                      route.variantName + "|" + route.categoryName;
+    if (seen.insert(key).second) {
+      routes.push_back(route);
+    }
+  };
+
+  const ResolvedRoute primary = resolveModelRoute(input, persona);
+  pushUnique(primary);
+
+  if (!config.enableSubagentRouteFallback) {
+    return routes;
+  }
+
+  std::vector<std::string> fallbackCategories = config.subagentRouteFallbackOrder;
+  if (fallbackCategories.empty()) {
+    for (const auto &[name, _] : config.modelRouterCategories) {
+      fallbackCategories.push_back(name);
+    }
+  }
+
+  for (const auto &name : fallbackCategories) {
+    auto it = config.modelRouterCategories.find(name);
+    if (it == config.modelRouterCategories.end()) {
+      continue;
+    }
+    pushUnique(ResolvedRoute{it->second.providerId, it->second.modelId,
+                             it->second.variantName, name, ""});
+  }
+  return routes;
+}
+
+void appendRoutingMetadata(rapidjson::Document &d, const ResolvedRoute &route,
+                           const std::vector<std::string> &attemptedCategories,
+                           bool fallbackUsed) {
+  auto &a = d.GetAllocator();
+  if (!route.categoryName.empty()) {
+    d.AddMember("category", rapidjson::Value(route.categoryName.c_str(), a).Move(),
+                a);
+  }
+  rapidjson::Value attempted(rapidjson::kArrayType);
+  for (const auto &category : attemptedCategories) {
+    attempted.PushBack(rapidjson::Value(category.c_str(), a).Move(), a);
+  }
+  d.AddMember("attempted_categories", attempted, a);
+  d.AddMember("fallback_used", fallbackUsed, a);
+  if (!route.warning.empty()) {
+    d.AddMember("routing_warning", rapidjson::Value(route.warning.c_str(), a).Move(),
+                a);
+  }
+}
+
+void appendOutcomeArtifacts(rapidjson::Document &d,
+                            const shared::AgentOutcome &outcome) {
+  auto &a = d.GetAllocator();
+  auto appendArray = [&](const char *key,
+                         const std::vector<shared::ThreadArtifactMetadata> &items) {
+    rapidjson::Value array(rapidjson::kArrayType);
+    for (const auto &artifact : items) {
+      rapidjson::Document artifactDoc = shared::toJson(artifact);
+      rapidjson::Value artifactValue;
+      artifactValue.CopyFrom(artifactDoc, a);
+      const std::string owner = artifact.ownerFriendlyName.empty()
+                                    ? artifact.ownerAgentId
+                                    : artifact.ownerFriendlyName;
+      const std::string reference = "@artifact:" + owner + "/" + artifact.filename;
+      artifactValue.AddMember("reference",
+                              rapidjson::Value(reference.c_str(), a).Move(), a);
+      array.PushBack(artifactValue, a);
+    }
+    d.AddMember(rapidjson::Value(key, a).Move(), array, a);
+  };
+
+  appendArray("artifacts_created", outcome.artifacts_created);
+  appendArray("artifacts_updated", outcome.artifacts_updated);
+}
+
+shared::ToolResult failWithStructuredData(const rapidjson::Document &d,
+                                          const std::string &error) {
+  shared::ToolResult result = shared::ToolResult::fail(error);
+  rapidjson::StringBuffer buffer;
+  rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+  d.Accept(writer);
+  result.data = buffer.GetString();
+  return result;
+}
+
 }
 
 shared::ToolMetadata SubagentTool::getMetadata() const {
@@ -522,21 +651,19 @@ std::shared_ptr<shared::JSONSchema> SubagentTool::getSchema() const {
 shared::ToolResult SubagentTool::execute(const SubagentInput &input,
                                          shared::ToolContext &ctx) {
   std::string persona;
+  PurposeWorkRole workRole = PurposeWorkRole::Unknown;
   try {
-    const std::string loweredPersona =
-        shared::StringUtil::toLower(shared::StringUtil::trim(input.persona));
-    if (loweredPersona == "implementer" || loweredPersona == "researcher") {
-      persona = worktools::normalizePersonaRole(input.persona, "persona");
-    } else if (input.plan_id.has_value() || input.chunk_id.has_value()) {
-      persona = worktools::normalizePersonaRole(input.persona, "persona");
-    } else {
-      persona = loweredPersona;
-    }
+    persona = shared::StringUtil::trim(input.persona);
+    workRole = purposeRoleForPersona(persona);
   } catch (const std::exception &e) {
     return shared::ToolResult::fail(e.what());
   }
 
   if (!PurposeLoader::isValid(persona)) {
+    if (auto suggestion = legacyPersonaSuggestion(persona)) {
+      return shared::ToolResult::fail("Invalid persona: '" + input.persona +
+                                      "'. " + *suggestion + ".");
+    }
     return shared::ToolResult::fail("Invalid persona: '" + input.persona +
                                     "'. Check available personas in base.md or prompts/ directory.");
   }
@@ -547,7 +674,7 @@ shared::ToolResult SubagentTool::execute(const SubagentInput &input,
         "plan_id and chunk_id must either both be provided or both be omitted");
   }
 
-  if (isExecutorPersona(persona) && input.plan_id.has_value() &&
+  if (isExecutorRole(workRole) && input.plan_id.has_value() &&
       input.chunk_id.has_value()) {
     try {
       ensureExecutorChunkReadyForDispatch(threadId, *input.plan_id,
@@ -559,15 +686,19 @@ shared::ToolResult SubagentTool::execute(const SubagentInput &input,
     }
   }
 
-  const std::string delegatedTask = [&]() -> std::string {
-    try {
-      SubagentInput normalizedInput = input;
-      normalizedInput.persona = persona;
-      return buildDelegationTask(normalizedInput, threadId);
-    } catch (const std::exception &e) {
-      throw;
-    }
-  }();
+  std::string delegatedTask;
+  try {
+    SubagentInput normalizedInput = input;
+    normalizedInput.persona = persona;
+    const std::string task =
+        buildDelegationTask(normalizedInput, threadId, workRole);
+    const std::string cwd = ctx.agent.getContext().environment.cwd;
+    delegatedTask =
+        firmius::core::artifacts::expandInboundReferences(threadId, cwd, task);
+  } catch (const std::exception &e) {
+    return shared::ToolResult::fail("Reference expansion failed: " +
+                                    std::string(e.what()));
+  }
 
   auto existingAgents = AgentRegistry::instance().listAll();
   for (const auto &agentId : existingAgents) {
@@ -579,159 +710,161 @@ shared::ToolResult SubagentTool::execute(const SubagentInput &input,
     }
   }
 
-  const ResolvedRoute route = resolveModelRoute(input, persona);
+  const std::vector<ResolvedRoute> routes = buildRouteCandidates(input, persona);
+  std::vector<std::string> attemptedCategories;
+  const bool isRetaskingExistingAgent =
+      input.agent_id.has_value() && !input.agent_id->empty();
+  std::string reusableAgentId = isRetaskingExistingAgent
+                                   ? *input.agent_id
+                                   : shared::StringUtil::generateUuid();
+  bool agentExists = isRetaskingExistingAgent;
 
-  // Check if re-tasking an existing agent
-  if (input.agent_id.has_value() && !input.agent_id.value().empty()) {
-    auto agent = AgentRegistry::instance().getAgent(input.agent_id.value());
-    if (!agent) {
-      return shared::ToolResult::fail("Agent not found: " +
-                                      input.agent_id.value());
+  auto waitForOutcome = [&](const std::string &agentId)
+      -> std::optional<AgentOutcome> {
+    while (true) {
+      auto outcome = Engine::instance().waitForAgentOutcome(
+          agentId, std::chrono::milliseconds(20));
+      if (outcome.has_value()) {
+        return outcome;
+      }
+      if (ctx.cancelRequested()) {
+        Engine::instance().cancelAgent(agentId);
+        return AgentOutcome{AgentOutcome::Kind::Cancelled,
+                            "Cancelled by parent."};
+      }
+    }
+  };
+
+  auto buildWaitResult = [&](const std::string &agentId, const ResolvedRoute &route,
+                             const AgentOutcome &outcome, bool fallbackUsed)
+      -> shared::ToolResult {
+    rapidjson::Document d;
+    d.SetObject();
+    auto &a = d.GetAllocator();
+    d.AddMember("agentId", rapidjson::Value(agentId.c_str(), a).Move(), a);
+    appendRoutingMetadata(d, route, attemptedCategories, fallbackUsed);
+    appendOutcomeArtifacts(d, outcome);
+
+    if (outcome.kind == AgentOutcome::Kind::Cancelled) {
+      d.AddMember("status", "cancelled", a);
+      d.AddMember("result", rapidjson::Value(outcome.text.c_str(), a).Move(),
+                  a);
+      return shared::ToolResult::ok(d);
+    }
+    if (outcome.kind == AgentOutcome::Kind::Failed) {
+      d.AddMember("status", "failed", a);
+      d.AddMember("error", rapidjson::Value(outcome.text.c_str(), a).Move(),
+                  a);
+      return failWithStructuredData(d, outcome.text);
+    }
+    if (outcome.kind == AgentOutcome::Kind::NoSummary) {
+      d.AddMember("status", "completed_no_summary", a);
+      d.AddMember("result", rapidjson::Value(outcome.text.c_str(), a).Move(),
+                  a);
+      return shared::ToolResult::ok(d);
     }
 
-    // Check if agent is busy
-    if (agent->getContext().state.currentStatus == AgentStatus::Streaming) {
-      return shared::ToolResult::fail("Agent is busy");
+    d.AddMember("status", "completed", a);
+    d.AddMember("result", rapidjson::Value(outcome.text.c_str(), a).Move(), a);
+    return shared::ToolResult::ok(d);
+  };
+
+  for (std::size_t i = 0; i < routes.size(); ++i) {
+    const auto &route = routes[i];
+    attemptedCategories.push_back(routeLabel(route));
+
+    if (agentExists) {
+      auto agent = AgentRegistry::instance().getAgent(reusableAgentId);
+      if (!agent) {
+        return shared::ToolResult::fail("Agent not found: " + reusableAgentId);
+      }
+      if (agent->getContext().state.currentStatus == AgentStatus::Streaming) {
+        return shared::ToolResult::fail("Agent is busy");
+      }
+      try {
+        Engine::instance().switchAgentModel(reusableAgentId, route.providerId,
+                                            route.modelId, route.variantName);
+        Engine::instance().executeTask(reusableAgentId, delegatedTask);
+      } catch (const std::exception &) {
+        if (i + 1 < routes.size()) {
+          continue;
+        }
+        return shared::ToolResult::fail(
+            "Failed to launch subagent run on all configured routes.");
+      }
+
+      if (isExecutorRole(workRole) && input.plan_id.has_value() &&
+          input.chunk_id.has_value()) {
+        persistExecutorDispatch(threadId, *input.plan_id, *input.chunk_id,
+                                reusableAgentId);
+      }
+
+      if (input.async) {
+        rapidjson::Document d;
+        d.SetObject();
+        auto &a = d.GetAllocator();
+        d.AddMember("agentId", rapidjson::Value(reusableAgentId.c_str(), a).Move(),
+                    a);
+        d.AddMember("status", "re-tasked", a);
+        appendRoutingMetadata(d, route, attemptedCategories, i > 0);
+        return shared::ToolResult::ok(d);
+      }
+
+      auto outcome = waitForOutcome(reusableAgentId);
+      if (!outcome.has_value()) {
+        return shared::ToolResult::fail(
+            "Parent agent interrupted while waiting for subagent.");
+      }
+      if (isRetryableWaitOutcome(*outcome) && i + 1 < routes.size()) {
+        continue;
+      }
+      return buildWaitResult(reusableAgentId, route, *outcome, i > 0);
     }
 
-    // Re-task existing agent
-    if (isExecutorPersona(persona) && input.plan_id.has_value() &&
+    try {
+      reusableAgentId = Engine::instance().summonAgent(
+          threadId, persona, delegatedTask, true,
+          ctx.agent.getContext().identity.id, input.name, input.title,
+          reusableAgentId, route.providerId, route.modelId, route.variantName);
+      agentExists = true;
+    } catch (const std::exception &) {
+      if (i + 1 < routes.size()) {
+        continue;
+      }
+      return shared::ToolResult::fail(
+          "Failed to summon subagent on all configured routes.");
+    }
+
+    if (isExecutorRole(workRole) && input.plan_id.has_value() &&
         input.chunk_id.has_value()) {
       persistExecutorDispatch(threadId, *input.plan_id, *input.chunk_id,
-                              input.agent_id.value());
+                              reusableAgentId);
     }
-    Engine::instance().switchAgentModel(input.agent_id.value(), route.providerId,
-                                        route.modelId, route.variantName);
-    Engine::instance().executeTask(input.agent_id.value(), delegatedTask);
 
     if (input.async) {
       rapidjson::Document d;
       d.SetObject();
       auto &a = d.GetAllocator();
-      d.AddMember("agentId",
-                  rapidjson::Value(input.agent_id.value().c_str(), a).Move(),
+      d.AddMember("agentId", rapidjson::Value(reusableAgentId.c_str(), a).Move(),
                   a);
-      d.AddMember("status", "re-tasked", a);
-      if (!route.categoryName.empty()) {
-        d.AddMember("category",
-                    rapidjson::Value(route.categoryName.c_str(), a).Move(), a);
-      }
-      if (!route.warning.empty()) {
-        d.AddMember("routing_warning",
-                    rapidjson::Value(route.warning.c_str(), a).Move(), a);
-      }
-      return shared::ToolResult::ok(d);
-    } else {
-      std::string resultSummary;
-      while (true) {
-        auto res = Engine::instance().waitForAgent(
-            input.agent_id.value(), std::chrono::milliseconds(20));
-        if (res.has_value()) {
-          resultSummary = *res;
-          break;
-        }
-        if (ctx.agent.isInterrupted()) {
-          Engine::instance().cancelAgent(input.agent_id.value());
-          return shared::ToolResult::fail(
-              "Parent agent interrupted while waiting for subagent.");
-        }
-      }
-
-      rapidjson::Document d;
-      d.SetObject();
-      auto &a = d.GetAllocator();
-      d.AddMember("agentId",
-                  rapidjson::Value(input.agent_id.value().c_str(), a).Move(),
-                  a);
-      if (resultSummary.find("Error:") == 0) {
-        return shared::ToolResult::fail(resultSummary);
-      }
-      d.AddMember("status", "completed", a);
-      d.AddMember("result", rapidjson::Value(resultSummary.c_str(), a).Move(),
-                  a);
-      if (!route.categoryName.empty()) {
-        d.AddMember("category",
-                    rapidjson::Value(route.categoryName.c_str(), a).Move(), a);
-      }
-      if (!route.warning.empty()) {
-        d.AddMember("routing_warning",
-                    rapidjson::Value(route.warning.c_str(), a).Move(), a);
-      }
+      d.AddMember("status", "spawned", a);
+      appendRoutingMetadata(d, route, attemptedCategories, i > 0);
       return shared::ToolResult::ok(d);
     }
+
+    auto outcome = waitForOutcome(reusableAgentId);
+    if (!outcome.has_value()) {
+      return shared::ToolResult::fail(
+          "Parent agent interrupted while waiting for subagent.");
+    }
+    if (isRetryableWaitOutcome(*outcome) && i + 1 < routes.size()) {
+      continue;
+    }
+    return buildWaitResult(reusableAgentId, route, *outcome, i > 0);
   }
 
-  // Original behavior: summon new agent
-  if (input.async) {
-    std::string subagentId = Engine::instance().summonAgent(
-        threadId, persona, delegatedTask, true,
-        ctx.agent.getContext().identity.id, input.name, input.title, "",
-        route.providerId, route.modelId, route.variantName);
-    if (isExecutorPersona(persona) && input.plan_id.has_value() &&
-        input.chunk_id.has_value()) {
-      persistExecutorDispatch(threadId, *input.plan_id, *input.chunk_id,
-                              subagentId);
-    }
-    rapidjson::Document d;
-    d.SetObject();
-    auto &a = d.GetAllocator();
-    d.AddMember("agentId", rapidjson::Value(subagentId.c_str(), a).Move(), a);
-    d.AddMember("status", "spawned", a);
-    if (!route.categoryName.empty()) {
-      d.AddMember("category",
-                  rapidjson::Value(route.categoryName.c_str(), a).Move(), a);
-    }
-    if (!route.warning.empty()) {
-      d.AddMember("routing_warning",
-                  rapidjson::Value(route.warning.c_str(), a).Move(), a);
-    }
-    return shared::ToolResult::ok(d);
-  } else {
-    std::string subagentId = Engine::instance().summonAgent(
-        threadId, persona, delegatedTask, true,
-        ctx.agent.getContext().identity.id, input.name, input.title, "",
-        route.providerId, route.modelId, route.variantName);
-    if (isExecutorPersona(persona) && input.plan_id.has_value() &&
-        input.chunk_id.has_value()) {
-      persistExecutorDispatch(threadId, *input.plan_id, *input.chunk_id,
-                              subagentId);
-    }
-
-    // Polling wait to support heartbeats and interrupts
-    std::string resultSummary;
-    while (true) {
-      auto res = Engine::instance().waitForAgent(
-          subagentId, std::chrono::milliseconds(20));
-      if (res.has_value()) {
-        resultSummary = *res;
-        break;
-      }
-      if (ctx.agent.isInterrupted()) {
-        Engine::instance().cancelAgent(subagentId);
-        return shared::ToolResult::fail(
-            "Parent agent interrupted while waiting for subagent.");
-      }
-    }
-
-    rapidjson::Document d;
-    d.SetObject();
-    auto &a = d.GetAllocator();
-    d.AddMember("agentId", rapidjson::Value(subagentId.c_str(), a).Move(), a);
-    if (resultSummary.find("Error:") == 0) {
-      return shared::ToolResult::fail(resultSummary);
-    }
-    d.AddMember("status", "completed", a);
-    d.AddMember("result", rapidjson::Value(resultSummary.c_str(), a).Move(), a);
-    if (!route.categoryName.empty()) {
-      d.AddMember("category",
-                  rapidjson::Value(route.categoryName.c_str(), a).Move(), a);
-    }
-    if (!route.warning.empty()) {
-      d.AddMember("routing_warning",
-                  rapidjson::Value(route.warning.c_str(), a).Move(), a);
-    }
-    return shared::ToolResult::ok(d);
-  }
+  return shared::ToolResult::fail(
+      "Subagent run failed or returned no usable summary on all routes.");
 }
 
 } // namespace firmius::core

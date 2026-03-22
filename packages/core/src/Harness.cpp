@@ -10,6 +10,7 @@
 #include "persistence/ThreadManager.hpp"
 #include "providers/BaseOAuthProvider.hpp"
 #include "providers/ProviderRegistry.hpp"
+#include "artifacts/ReferenceExpansion.hpp"
 #include "utils/FSUtil.hpp"
 #include "utils/StringUtil.hpp"
 #include "utils/ToolSummaries.hpp"
@@ -526,6 +527,9 @@ bool Harness::dispatchRequestToAgent(
   std::string requestedId;
   bool agentRunning = false;
   bool noThread = false;
+  bool expansionFailed = false;
+  std::string expansionError;
+  std::string preparedText;
 
   {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -545,23 +549,34 @@ bool Harness::dispatchRequestToAgent(
       messageId = std::to_string(
           std::chrono::steady_clock::now().time_since_epoch().count());
 
-      fid = preferredAgentId.empty() ? focusedAgentId_ : preferredAgentId;
-      if (fid.empty() || !AgentRegistry::instance().getAgent(fid)) {
-        needsSummon = true;
-        requestedId = shared::StringUtil::generateUuid();
-        focusedAgentId_ = requestedId;
-        threadAgentMap_[tid] = requestedId;
-      } else {
-        focusedAgentId_ = fid;
-        threadAgentMap_[tid] = fid;
-        auto agent = AgentRegistry::instance().getAgent(fid);
-        if (agent && (agent->isRunning() || agent->isBooting())) {
-          // Don't queue if agent is cancelled/interrupted - let the message go
-          // through
-          if (agent->getContext().state.currentStatus !=
-              AgentStatus::Cancelled) {
-            agentRunning = true;
-            messageQueue_.push({messageId, text, images});
+      try {
+        preparedText =
+            firmius::core::artifacts::expandInboundReferences(tid, metadata.cwd, text);
+      } catch (const std::exception &e) {
+        expansionFailed = true;
+        expansionError = e.what();
+      }
+
+      if (!expansionFailed) {
+        fid = preferredAgentId.empty() ? focusedAgentId_ : preferredAgentId;
+        if (fid.empty() || !AgentRegistry::instance().getAgent(fid)) {
+          needsSummon = true;
+          requestedId = shared::StringUtil::generateUuid();
+          focusedAgentId_ = requestedId;
+          threadAgentMap_[tid] = requestedId;
+        } else {
+          focusedAgentId_ = fid;
+          threadAgentMap_[tid] = fid;
+          auto agent = AgentRegistry::instance().getAgent(fid);
+          if (agent && (agent->isRunning() || agent->isBooting())) {
+            // Don't queue if agent is cancelled/interrupted - let the message go
+            // through
+            if (agent->getContext().state.currentStatus !=
+                AgentStatus::Cancelled) {
+              agentRunning = true;
+              messageQueue_.push_back(
+                  {messageId, preparedText, images, tid, fid});
+            }
           }
         }
       }
@@ -573,12 +588,16 @@ bool Harness::dispatchRequestToAgent(
     return false;
   }
 
-  emitEvent(firmius::shared::UserMessageSent{messageId, text, tid});
+  if (expansionFailed) {
+    statusMessage = "Reference expansion failed: " + expansionError;
+    return false;
+  }
 
   if (needsSummon) {
+    emitEvent(firmius::shared::UserMessageSent{messageId, text, tid});
     // Note: summonAgent will use the default model from ConfigLoader
     // which is what we want for a brand new lead agent in a thread.
-    Engine::instance().summonAgent(tid, metadata.leadPersona, text, true, "",
+    Engine::instance().summonAgent(tid, metadata.leadPersona, preparedText, true, "",
                                    "lead", "", requestedId, "", "", "",
                                    images);
     statusMessage = "Retry started on lead agent.";
@@ -586,12 +605,15 @@ bool Harness::dispatchRequestToAgent(
   }
 
   if (agentRunning) {
-    emitEvent(firmius::shared::MessageQueued{messageId, text});
+    emitEvent(
+        firmius::shared::MessageQueued{messageId, text, tid, fid});
+    emitEvent(firmius::shared::UserMessageSent{messageId, text, tid});
     statusMessage = "Retry queued on running agent.";
     return true;
   }
 
-  Engine::instance().executeTask(fid, text, images);
+  emitEvent(firmius::shared::UserMessageSent{messageId, text, tid});
+  Engine::instance().executeTask(fid, preparedText, images);
   statusMessage = "Retry started.";
   return true;
 }
@@ -621,36 +643,79 @@ bool Harness::executeWorkflow(const std::string &workflowId,
 }
 
 void Harness::abort() {
-  std::lock_guard<std::recursive_mutex> lock(mutex_);
-  if (focusedAgentId_.empty())
+  std::string focusedAgentId;
+  {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    focusedAgentId = focusedAgentId_;
+  }
+  if (focusedAgentId.empty()) {
     return;
+  }
 
-  auto agent = AgentRegistry::instance().getAgent(focusedAgentId_);
+  auto agent = AgentRegistry::instance().getAgent(focusedAgentId);
   if (!agent)
     return;
 
-  auto procIds = agent->getEnvironment()->getProcessManager().getBlockingProcessIds();
-  for (const auto &procId : procIds) {
-    try {
-      if (std::all_of(procId.begin(), procId.end(), ::isdigit)) {
-        kill(std::stoi(procId), SIGKILL);
-      }
-      agent->getHost()->killBackgroundProcess(procId);
-    } catch (...) {
-    }
-  }
-
-  agent->interrupt();
-  emitEvent(firmius::shared::AgentInterrupted{focusedAgentId_,
-                                              agent->getContext().identity.parentId});
-
-  // Clear the message queue since we're aborting the current operation
-  clearQueue();
+  Engine::instance().cancelAgent(focusedAgentId);
 
   // If focused agent is a subagent (has parentId), only interrupt it
   // If focused agent is a lead agent (no parentId), do NOT cancel async=true
   // subagents The subagent tool already handles cancellation of async=false
   // subagents when parent is interrupted
+}
+
+void Harness::abortAndFlushQueuedMessages() {
+  std::string focusedAgentId;
+  std::string threadId;
+  bool hasQueuedMessages = false;
+  {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    focusedAgentId = focusedAgentId_;
+    threadId = currentThreadId_;
+    if (!focusedAgentId.empty() && !threadId.empty()) {
+      hasQueuedMessages = std::any_of(
+          messageQueue_.begin(), messageQueue_.end(),
+          [&](const QueuedMessage &item) {
+            return item.agentId == focusedAgentId && item.threadId == threadId;
+          });
+    }
+  }
+
+  if (!hasQueuedMessages) {
+    abort();
+    return;
+  }
+
+  auto agent = AgentRegistry::instance().getAgent(focusedAgentId);
+  if (!agent) {
+    return;
+  }
+  if (!(agent->isRunning() || agent->isBooting())) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    drainQueueForAgent(focusedAgentId, threadId);
+    return;
+  }
+
+  Engine::instance().cancelAgent(focusedAgentId);
+
+  {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    backgroundThreads_.emplace_back([this, focusedAgentId, threadId](
+                                        std::stop_token stopToken) {
+      while (!stopToken.stop_requested()) {
+        auto focusedAgent = AgentRegistry::instance().getAgent(focusedAgentId);
+        if (!focusedAgent) {
+          return;
+        }
+        if (!focusedAgent->isRunning() && !focusedAgent->isBooting()) {
+          std::lock_guard<std::recursive_mutex> guard(mutex_);
+          drainQueueForAgent(focusedAgentId, threadId);
+          return;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+    });
+  }
 }
 
 int Harness::subscribe(
@@ -904,13 +969,20 @@ void Harness::routeEngineEvent(const firmius::shared::AppEvent &event) {
         },
         event);
 
+    auto resolveThreadForAgent = [&](const std::string &id) -> std::string {
+      if (id.empty()) {
+        return "";
+      }
+      auto resolvedAgent = AgentRegistry::instance().getAgent(id);
+      if (resolvedAgent && resolvedAgent->getContext().history) {
+        return resolvedAgent->getContext().history->threadId;
+      }
+      return "";
+    };
+
     bool isAgentInCurrentThread = false;
     if (!agentId.empty()) {
-      auto agent = AgentRegistry::instance().getAgent(agentId);
-      if (agent) {
-        std::string agentThreadId = agent->getContext().history->threadId;
-        isAgentInCurrentThread = (agentThreadId == currentThreadId_);
-      }
+      isAgentInCurrentThread = (resolveThreadForAgent(agentId) == currentThreadId_);
     }
 
     bool isAgentSpawnedEvent = std::holds_alternative<AgentSpawned>(event);
@@ -941,6 +1013,10 @@ void Harness::routeEngineEvent(const firmius::shared::AppEvent &event) {
             enriched.modelId = modelId;
             enriched.maxTokens = maxTokens;
             toEmit.push_back(enriched);
+            const std::string spawnedThreadId = resolveThreadForAgent(ev.agentId);
+            if (!spawnedThreadId.empty()) {
+              drainQueueForAgent(ev.agentId, spawnedThreadId);
+            }
 
             if (!currentThreadId_.empty()) {
               try {
@@ -975,18 +1051,28 @@ void Harness::routeEngineEvent(const firmius::shared::AppEvent &event) {
                 maybeGenerateTitle(currentThreadId_, firstMessage);
               }
             }
-            if (ev.agentId == focusedAgentId_) {
-              drainQueue();
-            }
-          } else if constexpr (std::is_same_v<T, AgentCompleted>) {
-            toEmit.push_back(ev);
-            if (ev.agentId == focusedAgentId_) {
-              drainQueue();
+            const std::string agentThreadId = resolveThreadForAgent(ev.agentId);
+            if (!agentThreadId.empty()) {
+              drainQueueForAgent(ev.agentId, agentThreadId);
             }
           } else if constexpr (std::is_same_v<T, AgentError>) {
             toEmit.push_back(ev);
+            const std::string agentThreadId = resolveThreadForAgent(ev.agentId);
+            if (!agentThreadId.empty()) {
+              drainQueueForAgent(ev.agentId, agentThreadId);
+            }
+          } else if constexpr (std::is_same_v<T, AgentInterrupted>) {
+            toEmit.push_back(ev);
+            const std::string agentThreadId = resolveThreadForAgent(ev.agentId);
+            if (!agentThreadId.empty()) {
+              drainQueueForAgent(ev.agentId, agentThreadId);
+            }
           } else if constexpr (std::is_same_v<T, AgentFinished>) {
             toEmit.push_back(ev);
+            const std::string agentThreadId = resolveThreadForAgent(ev.agentId);
+            if (!agentThreadId.empty()) {
+              drainQueueForAgent(ev.agentId, agentThreadId);
+            }
           } else if constexpr (std::is_same_v<T, ThreadChanged> ||
                                std::is_same_v<T, ThreadLocked> ||
                                std::is_same_v<T, ThreadDeleted> ||
@@ -1046,6 +1132,20 @@ std::vector<std::string> Harness::listAgents(const std::string &threadId) {
   return agents;
 }
 
+std::vector<shared::ThreadArtifactMetadata>
+Harness::listArtifacts(const std::string &threadId) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  const std::string tid = threadId.empty() ? currentThreadId_ : threadId;
+  if (tid.empty()) {
+    return {};
+  }
+  try {
+    return threadManager_.listArtifacts(tid);
+  } catch (...) {
+    return {};
+  }
+}
+
 bool Harness::setFocusedAgent(const std::string &agentId) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (currentThreadId_.empty() ||
@@ -1100,6 +1200,7 @@ bool Harness::switchLeadPersona(const std::string &personaName) {
                                         .count());
   Message nudgeMsg;
   nudgeMsg.role = Role::System;
+  nudgeMsg.visibility = MessageVisibility::Internal;
   nudgeMsg.content.push_back(TextContent{
       "Lead persona switched to '" + persona.title +
       "'. Follow the new persona instructions for all future turns."});
@@ -1411,19 +1512,7 @@ void Harness::interruptAndSwitchModel(const std::string &providerId,
 
   auto agent = AgentRegistry::instance().getAgent(focusedAgentId_);
   if (agent) {
-  auto procIds = agent->getEnvironment()->getProcessManager().getBlockingProcessIds();
-    for (const auto &procId : procIds) {
-      try {
-        if (std::all_of(procId.begin(), procId.end(), ::isdigit)) {
-          kill(std::stoi(procId), SIGKILL);
-        }
-        agent->getHost()->killBackgroundProcess(procId);
-      } catch (...) {
-      }
-    }
-    agent->interrupt();
-    emitEvent(firmius::shared::AgentInterrupted{
-        focusedAgentId_, agent->getContext().identity.parentId});
+    Engine::instance().cancelAgent(focusedAgentId_);
   }
 
   Engine::instance().switchAgentModel(focusedAgentId_, providerId, modelId);
@@ -1554,14 +1643,18 @@ void Harness::maybeGenerateTitle(const std::string &threadId,
   });
 }
 
-void Harness::drainQueue() {
-  if (messageQueue_.empty()) {
+void Harness::drainQueueForAgent(const std::string &agentId,
+                                 const std::string &threadId) {
+  if (messageQueue_.empty() || agentId.empty() || threadId.empty()) {
     return;
   }
 
-  std::string agentId = focusedAgentId_;
   auto agent = AgentRegistry::instance().getAgent(agentId);
   if (!agent) {
+    return;
+  }
+  if (agent->getContext().history &&
+      agent->getContext().history->threadId != threadId) {
     return;
   }
   if (agent->isRunning() || agent->isBooting()) {
@@ -1569,17 +1662,25 @@ void Harness::drainQueue() {
   }
 
   std::vector<QueuedMessage> batch;
+  std::deque<QueuedMessage> remaining;
   while (!messageQueue_.empty()) {
-    batch.push_back(messageQueue_.front());
-    messageQueue_.pop();
+    QueuedMessage item = std::move(messageQueue_.front());
+    messageQueue_.pop_front();
+    if (item.agentId == agentId && item.threadId == threadId) {
+      batch.push_back(std::move(item));
+    } else {
+      remaining.push_back(std::move(item));
+    }
   }
-
-  for (const auto &item : batch) {
-    emitEvent(firmius::shared::MessageDequeued{item.id});
-  }
+  messageQueue_ = std::move(remaining);
 
   if (batch.empty()) {
     return;
+  }
+
+  for (const auto &item : batch) {
+    emitEvent(
+        firmius::shared::MessageDequeued{item.id, item.threadId, item.agentId});
   }
 
   if (batch.size() > 1) {
@@ -1622,8 +1723,25 @@ void Harness::drainQueue() {
 
 void Harness::clearQueue() {
   while (!messageQueue_.empty()) {
-    messageQueue_.pop();
+    messageQueue_.pop_front();
   }
+}
+
+void Harness::clearQueueForAgentThread(const std::string &agentId,
+                                       const std::string &threadId) {
+  if (agentId.empty() || threadId.empty() || messageQueue_.empty()) {
+    return;
+  }
+  std::deque<QueuedMessage> remaining;
+  while (!messageQueue_.empty()) {
+    QueuedMessage item = std::move(messageQueue_.front());
+    messageQueue_.pop_front();
+    if (item.agentId == agentId && item.threadId == threadId) {
+      continue;
+    }
+    remaining.push_back(std::move(item));
+  }
+  messageQueue_ = std::move(remaining);
 }
 
 bool Harness::retryLastRequest(std::string &statusMessage) {
@@ -1637,7 +1755,7 @@ bool Harness::retryLastRequest(std::string &statusMessage) {
     }
     threadId = currentThreadId_;
     preferredAgentId = focusedAgentId_;
-    clearQueue();
+    clearQueueForAgentThread(preferredAgentId, threadId);
   }
 
   auto targetAgentId = resolveRetryTargetAgentId(threadId, preferredAgentId);
@@ -1735,6 +1853,20 @@ Harness::snapshotResumableTurnForAgent(const std::string &threadId,
     return std::nullopt;
   }
 
+  auto isCancellationNotice = [](const Message &message) {
+    if (message.role != Role::System) {
+      return false;
+    }
+    for (const auto &part : message.content) {
+      if (const auto *notice = std::get_if<NoticeContent>(&part)) {
+        if (notice->title == "Agent Cancelled") {
+          return true;
+        }
+      }
+    }
+    return false;
+  };
+
   for (auto it = history->turns.rbegin(); it != history->turns.rend(); ++it) {
     if (it->turnId.rfind("user-task-", 0) != 0 || it->messages.empty()) {
       continue;
@@ -1746,15 +1878,19 @@ Harness::snapshotResumableTurnForAgent(const std::string &threadId,
     }
 
     std::optional<Role> finalRoleAfterTurn;
+    bool sawCancellationNotice = false;
     for (auto later = it.base(); later != history->turns.end(); ++later) {
       if (later->messages.empty()) {
         continue;
       }
       finalRoleAfterTurn = later->messages.back().role;
+      sawCancellationNotice = sawCancellationNotice || isCancellationNotice(later->messages.back());
     }
 
+    const bool isCancelledTurn = it->turnId.rfind("cancelled-", 0) == 0;
     if (!finalRoleAfterTurn.has_value() ||
-        *finalRoleAfterTurn != Role::Error) {
+        (!isCancelledTurn && !sawCancellationNotice &&
+         *finalRoleAfterTurn != Role::Error)) {
       return std::nullopt;
     }
 

@@ -40,6 +40,9 @@ target_sources(firmius_core PRIVATE
     src/tools/ChunkUpdateTool.cpp
     src/tools/ChunkReadyForExecutionTool.cpp
     src/tools/TodoWriteTool.cpp
+    src/tools/ArtifactWriteTool.cpp
+    src/tools/ArtifactReadTool.cpp
+    src/tools/ArtifactListTool.cpp
     src/agents/HintingLoader.cpp
     src/agents/PurposeLoader.cpp
     src/agents/Agent.cpp
@@ -57,6 +60,7 @@ target_sources(firmius_core PRIVATE
     src/benchmarks/BenchmarkSession.cpp
     src/workflow/Workflow.cpp
     src/workflow/WorkflowLoader.cpp
+    src/artifacts/ReferenceExpansion.cpp
 )
 
 target_sources(firmius_core PUBLIC
@@ -98,6 +102,9 @@ target_sources(firmius_core PUBLIC
     include/tools/ChunkUpdateTool.hpp
     include/tools/ChunkReadyForExecutionTool.hpp
     include/tools/TodoWriteTool.hpp
+    include/tools/ArtifactWriteTool.hpp
+    include/tools/ArtifactReadTool.hpp
+    include/tools/ArtifactListTool.hpp
     include/agents/HintingLoader.hpp
     include/agents/PurposeLoader.hpp
     include/agents/Agent.hpp
@@ -116,6 +123,7 @@ target_sources(firmius_core PUBLIC
     include/benchmarks/BenchmarkSession.hpp
     include/workflow/Workflow.hpp
     include/workflow/WorkflowLoader.hpp
+    include/artifacts/ReferenceExpansion.hpp
 )
 
 target_include_directories(firmius_core PUBLIC

@@ -83,3 +83,21 @@ TEST(MarkdownTest, AutoScalingLongText) {
     
     EXPECT_TRUE(output.find("This-is-a") != std::string::npos);
 }
+
+TEST(MarkdownTest, CollapsesExpandedArtifactReferenceForDisplay) {
+    const std::string expanded =
+        "Created:\n<artifact path=\"planner/DRAFT_PLAN.md\">\n"
+        "plan body\n</artifact>\n";
+    const std::string collapsed = CollapseExpandedReferencesForDisplay(expanded);
+    EXPECT_NE(collapsed.find("@artifact:planner/DRAFT_PLAN.md"), std::string::npos);
+    EXPECT_EQ(collapsed.find("<artifact path="), std::string::npos);
+}
+
+TEST(MarkdownTest, CollapsesExpandedFileReferenceWithLineRangeForDisplay) {
+    const std::string expanded =
+        "Inspect\n<file path=\"src/file.ts\" lines=\"10-20\">\n"
+        "code\n</file>\n";
+    const std::string collapsed = CollapseExpandedReferencesForDisplay(expanded);
+    EXPECT_NE(collapsed.find("@src/file.ts:10-20"), std::string::npos);
+    EXPECT_EQ(collapsed.find("<file path="), std::string::npos);
+}

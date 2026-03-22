@@ -38,14 +38,9 @@ target_sources(firmius PRIVATE
     src/components/ChatWindow.cpp
     src/components/TranscriptGrouping.cpp
     src/components/ErrorDisplay.cpp
+    src/components/ToolPresentationBlock.cpp
     src/components/ToolBlock.cpp
-    src/components/FileEditToolBlock.cpp
     src/components/FileEditDiff.cpp
-    src/components/FileReadToolBlock.cpp
-    src/components/ListDirectoryToolBlock.cpp
-    src/components/ProcessExecuteToolBlock.cpp
-    src/components/SubagentToolBlock.cpp
-    src/components/SubagentWaitToolBlock.cpp
     src/components/LogWindow.cpp
     src/components/Markdown.cpp
     src/components/ScrollableBox.cpp
@@ -59,6 +54,13 @@ target_sources(firmius PRIVATE
     src/components/HelpOverlay.cpp
     src/components/ANSIParser.cpp
     src/components/SyntaxHighlighter.cpp
+    src/tools/ArtifactToolPresentation.cpp
+    src/tools/FileToolPresentation.cpp
+    src/tools/ProcessToolPresentation.cpp
+    src/tools/SubagentToolPresentation.cpp
+    src/tools/ToolPresentation.cpp
+    src/tools/WorkToolPresentation.cpp
+    src/utils/ReferenceAutocomplete.cpp
     src/utils/Clipboard.cpp
 )
 

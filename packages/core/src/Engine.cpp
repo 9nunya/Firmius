@@ -20,6 +20,7 @@
 #include "providers/ZaiProvider.hpp"
 #include "providers/ZenProvider.hpp"
 #include "providers/AntigravityProvider.hpp"
+#include "Serialization.hpp"
 #include "tools/FileEditTool.hpp"
 #include "tools/FileReadTool.hpp"
 #include "tools/GlobTool.hpp"
@@ -41,6 +42,9 @@
 #include "tools/ChunkListTool.hpp"
 #include "tools/ChunkReadyForExecutionTool.hpp"
 #include "tools/ChunkUpdateTool.hpp"
+#include "tools/ArtifactListTool.hpp"
+#include "tools/ArtifactReadTool.hpp"
+#include "tools/ArtifactWriteTool.hpp"
 #include "tools/TodoWriteTool.hpp"
 #include "tools/SubagentTerminateTool.hpp"
 #include "tools/SubagentTool.hpp"
@@ -50,19 +54,130 @@
 #include "utils/HistoryMetrics.hpp"
 #include <Panic.hpp>
 #include <algorithm>
+#include <filesystem>
+#include <fstream>
 #include <future>
 #include <iostream>
+#include <rapidjson/document.h>
 #include <sstream>
+#include <unordered_map>
 
 namespace firmius::core {
 
 namespace {
+std::string extractFinalSummary(const std::shared_ptr<IAgent> &agent) {
+  if (!agent || !agent->getContext().history) {
+    return "";
+  }
+  const auto &turns = agent->getContext().history->turns;
+  if (turns.empty() || turns.back().messages.empty()) {
+    return "";
+  }
+  const auto &lastMsg = turns.back().messages.back();
+  std::string content;
+  for (const auto &part : lastMsg.content) {
+    if (auto *txt = std::get_if<TextContent>(&part)) {
+      content += txt->text;
+    }
+  }
+  return content;
+}
+
+AgentOutcome makeOutcome(const std::shared_ptr<IAgent> &agent,
+                         const std::string &summary) {
+  AgentOutcome outcome;
+  if (agent && agent->getContext().state.currentStatus == AgentStatus::Error) {
+    outcome.kind = AgentOutcome::Kind::Failed;
+    if (agent->getContext().state.fatalError.has_value() &&
+        !agent->getContext().state.fatalError->empty()) {
+      outcome.text = *agent->getContext().state.fatalError;
+    } else {
+      outcome.text = summary;
+    }
+    return outcome;
+  }
+  if (agent && agent->getContext().state.currentStatus ==
+                   AgentStatus::Cancelled) {
+    outcome.kind = AgentOutcome::Kind::Cancelled;
+    outcome.text = "Cancelled";
+    return outcome;
+  }
+
+  const std::string trimmedSummary = shared::StringUtil::trim(summary);
+  if (trimmedSummary.empty()) {
+    outcome.kind = AgentOutcome::Kind::NoSummary;
+    outcome.text.clear();
+  } else {
+    outcome.kind = AgentOutcome::Kind::Response;
+    outcome.text = summary;
+  }
+  return outcome;
+}
+
+AgentOutcome makeFailedOutcome(const std::string &message) {
+  return AgentOutcome{AgentOutcome::Kind::Failed, message};
+}
+
+using ArtifactSnapshot =
+    std::unordered_map<std::string, shared::ThreadArtifactMetadata>;
+
+ArtifactSnapshot collectArtifactSnapshot(const std::string &threadId,
+                                         const std::string &agentId) {
+  ArtifactSnapshot snapshot;
+  if (threadId.empty() || agentId.empty()) {
+    return snapshot;
+  }
+
+  try {
+    ThreadManager tm(std::string(getenv("HOME") ? getenv("HOME") : "/root") +
+                     "/.firmius/threads");
+    for (const auto &artifact : tm.listArtifactsForAgent(threadId, agentId)) {
+      snapshot[artifact.filename] = artifact;
+    }
+  } catch (...) {
+  }
+  return snapshot;
+}
+
+void attachArtifactDeltasToOutcome(const std::string &threadId,
+                                   const std::string &agentId,
+                                   const ArtifactSnapshot &before,
+                                   AgentOutcome &outcome) {
+  const ArtifactSnapshot after = collectArtifactSnapshot(threadId, agentId);
+  for (const auto &[filename, artifact] : after) {
+    auto it = before.find(filename);
+    if (it == before.end()) {
+      outcome.artifacts_created.push_back(artifact);
+      continue;
+    }
+    const auto &beforeArtifact = it->second;
+    if (artifact.updatedAt != beforeArtifact.updatedAt ||
+        artifact.storagePath != beforeArtifact.storagePath ||
+        artifact.description != beforeArtifact.description ||
+        artifact.kind != beforeArtifact.kind) {
+      outcome.artifacts_updated.push_back(artifact);
+    }
+  }
+}
+
 AgentStatus inferPersistedStatus(const AgentHistory &history) {
   for (auto it = history.turns.rbegin(); it != history.turns.rend(); ++it) {
+    if (it->turnId.rfind("cancelled-", 0) == 0) {
+      return AgentStatus::Cancelled;
+    }
     if (it->messages.empty()) {
       continue;
     }
     const auto &message = it->messages.back();
+    if (message.role == Role::System) {
+      for (const auto &part : message.content) {
+        if (auto *notice = std::get_if<NoticeContent>(&part)) {
+          if (notice->title == "Agent Cancelled") {
+            return AgentStatus::Cancelled;
+          }
+        }
+      }
+    }
     if (message.role == Role::Error) {
       for (const auto &part : message.content) {
         if (auto *error = std::get_if<ErrorContent>(&part)) {
@@ -82,6 +197,89 @@ AgentStatus inferPersistedStatus(const AgentHistory &history) {
     }
   }
   return AgentStatus::Idle;
+}
+
+std::string threadStorageRootPathForUndo() {
+  if (const char *home = std::getenv("HOME")) {
+    return std::string(home) + "/.firmius/threads";
+  }
+  return ".firmius/threads";
+}
+
+bool hasCompactionMarker(const AgentTurn &turn) {
+  return turn.turnId.rfind("compaction-start-", 0) == 0 ||
+         turn.turnId.rfind("compaction-summary-", 0) == 0 ||
+         turn.turnId.rfind("compaction-end-", 0) == 0;
+}
+
+bool restoreCompactionSnapshot(AgentContext &ctx) {
+  if (!ctx.history || ctx.history->threadId.empty() || ctx.identity.id.empty()) {
+    return false;
+  }
+  const std::string path = threadStorageRootPathForUndo() + "/" +
+                           ctx.history->threadId + "/compaction_" +
+                           ctx.identity.id + ".json";
+  std::ifstream in(path);
+  if (!in.is_open()) {
+    return false;
+  }
+  std::string content((std::istreambuf_iterator<char>(in)),
+                      std::istreambuf_iterator<char>());
+  in.close();
+
+  rapidjson::Document doc;
+  doc.Parse(content.c_str());
+  if (doc.HasParseError() || !doc.IsObject() || !doc.HasMember("turns") ||
+      !doc["turns"].IsArray()) {
+    return false;
+  }
+
+  std::vector<AgentTurn> restored;
+  for (const auto &value : doc["turns"].GetArray()) {
+    restored.push_back(agentTurnFromJsonValue(value));
+  }
+  if (restored.empty()) {
+    return false;
+  }
+
+  ctx.history->turns = std::move(restored);
+  if (doc.HasMember("previousContextSize") && doc["previousContextSize"].IsUint()) {
+    ctx.aggregateMetrics.tokens.contextSize = doc["previousContextSize"].GetUint();
+  }
+  return true;
+}
+
+bool shouldAttemptCompactionRestore(const AgentContext &ctx, int count) {
+  if (!ctx.history || ctx.history->turns.size() <= 2 || count <= 0) {
+    return false;
+  }
+  const int maxRemovable = static_cast<int>(ctx.history->turns.size()) - 2;
+  const int toInspect = std::min(count, maxRemovable);
+  for (int i = 0; i < toInspect; ++i) {
+    const auto &turn = ctx.history->turns[ctx.history->turns.size() - 1 - i];
+    if (hasCompactionMarker(turn)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void cancelAgentRuntime(const std::shared_ptr<IAgent> &agent) {
+  if (!agent) {
+    return;
+  }
+  auto procIds = agent->getEnvironment()->getProcessManager().getBlockingProcessIds();
+  for (const auto &procId : procIds) {
+    try {
+      agent->getEnvironment()->getProcessManager().killProcess(procId);
+    } catch (...) {
+    }
+    try {
+      agent->getHost()->killBackgroundProcess(procId);
+    } catch (...) {
+    }
+  }
+  agent->interrupt();
 }
 } // namespace
 
@@ -130,6 +328,9 @@ Engine::Engine() {
   toolRegistry.registerTool(std::make_unique<ChunkUpdateTool>());
   toolRegistry.registerTool(std::make_unique<ChunkReadyForExecutionTool>());
   toolRegistry.registerTool(std::make_unique<TodoWriteTool>());
+  toolRegistry.registerTool(std::make_unique<ArtifactWriteTool>());
+  toolRegistry.registerTool(std::make_unique<ArtifactReadTool>());
+  toolRegistry.registerTool(std::make_unique<ArtifactListTool>());
 }
 
 void Engine::initProviders() {
@@ -167,7 +368,7 @@ std::string Engine::summonAgent(const std::string &threadId,
                             ? shared::StringUtil::generateUuid()
                             : requestedAgentId;
 
-  auto prom = std::make_shared<std::promise<std::string>>();
+  auto prom = std::make_shared<std::promise<AgentOutcome>>();
   {
     std::lock_guard<std::mutex> lock(futuresMutex);
     agentFutures[agentId] = prom->get_future().share();
@@ -179,6 +380,8 @@ std::string Engine::summonAgent(const std::string &threadId,
                         persistHistory, parentId, friendlyName, title,
                         providerId, modelId, variantName]() {
       bool errorBroadcast = false;
+      ArtifactSnapshot runStartArtifacts;
+      bool runStartArtifactsCaptured = false;
       try {
         // 1. Loading metadata in background thread
         auto metadata =
@@ -274,28 +477,25 @@ std::string Engine::summonAgent(const std::string &threadId,
                                agent->getContext().identity.friendlyName,
                                agentTitle, persistHistory});
 
-        std::string finalSummary = "No summary provided.";
-
         // 3. Execution
+        runStartArtifacts = collectArtifactSnapshot(threadId, agentId);
+        runStartArtifactsCaptured = true;
         agent->run(task, [this, agentId, parentId,
                           &errorBroadcast](const StreamEvent &ev) {
           handleStreamEvent(agentId, parentId, ev, errorBroadcast);
         }, images);
 
-        const auto &turns = agent->getContext().history->turns;
-        if (!turns.empty() && !turns.back().messages.empty()) {
-          const auto &lastMsg = turns.back().messages.back();
-          std::string content;
-          for (const auto &part : lastMsg.content) {
-            if (auto *txt = std::get_if<TextContent>(&part))
-              content += txt->text;
-          }
-          if (!content.empty())
-            finalSummary = content;
+        const std::string finalSummary = extractFinalSummary(agent);
+        AgentOutcome outcome = makeOutcome(agent, finalSummary);
+        if (runStartArtifactsCaptured) {
+          attachArtifactDeltasToOutcome(threadId, agentId, runStartArtifacts,
+                                        outcome);
         }
-
-        broadcast(AgentCompleted{agentId, finalSummary, parentId});
-        prom->set_value(finalSummary);
+        if (outcome.kind == AgentOutcome::Kind::Cancelled) {
+          broadcast(AgentInterrupted{agentId, parentId});
+        }
+        broadcast(AgentFinished{agentId, outcome, parentId});
+        prom->set_value(outcome);
 
       } catch (const std::exception &e) {
         if (!errorBroadcast) {
@@ -323,7 +523,13 @@ std::string Engine::summonAgent(const std::string &threadId,
           }
           broadcast(AgentError{agentId, e.what(), parentId});
         }
-        prom->set_exception(std::make_exception_ptr(e));
+        AgentOutcome outcome = makeFailedOutcome(std::string(e.what()));
+        if (runStartArtifactsCaptured) {
+          attachArtifactDeltasToOutcome(threadId, agentId, runStartArtifacts,
+                                        outcome);
+        }
+        broadcast(AgentFinished{agentId, outcome, parentId});
+        prom->set_value(outcome);
       }
     });
   }
@@ -483,36 +689,28 @@ std::string Engine::createAgent(const std::string &threadId,
                      title, persistHistory);
 }
 
-std::optional<std::string>
-Engine::waitForAgent(const std::string &agentId,
-                     std::optional<std::chrono::milliseconds> timeout) {
-  std::shared_future<std::string> fut;
+std::optional<AgentOutcome>
+Engine::waitForAgentOutcome(const std::string &agentId,
+                            std::optional<std::chrono::milliseconds> timeout) {
+  std::shared_future<AgentOutcome> fut;
   {
     std::lock_guard<std::mutex> lock(futuresMutex);
     auto it = agentFutures.find(agentId);
-    if (it == agentFutures.end())
-      return "Error: Agent not found or already waited on.";
+    if (it == agentFutures.end()) {
+      return makeFailedOutcome("Agent not found or already waited on.");
+    }
     fut = it->second;
   }
 
-  try {
-    if (timeout.has_value()) {
-      if (fut.wait_for(*timeout) == std::future_status::ready) {
-        std::string res = fut.get();
-        std::lock_guard<std::mutex> lock(futuresMutex);
-        agentFutures.erase(agentId);
-        return res;
-      }
-      return std::nullopt;
-    } else {
-      std::string res = fut.get();
-      std::lock_guard<std::mutex> lock(futuresMutex);
-      agentFutures.erase(agentId);
-      return res;
-    }
-  } catch (const std::exception &e) {
-    return "Error: " + std::string(e.what());
+  if (timeout.has_value() &&
+      fut.wait_for(*timeout) != std::future_status::ready) {
+    return std::nullopt;
   }
+
+  AgentOutcome outcome = fut.get();
+  std::lock_guard<std::mutex> lock(futuresMutex);
+  agentFutures.erase(agentId);
+  return outcome;
 }
 
 void Engine::addEventListener(std::function<void(const AppEvent &)> listener) {
@@ -523,7 +721,7 @@ void Engine::addEventListener(std::function<void(const AppEvent &)> listener) {
 void Engine::cancelAgent(const std::string &agentId) {
   auto agent = AgentRegistry::instance().getAgent(agentId);
   if (agent) {
-    agent->interrupt();
+    cancelAgentRuntime(agent);
     broadcast(AgentInterrupted{agentId, agent->getContext().identity.parentId});
   }
 }
@@ -576,6 +774,10 @@ void Engine::handleStreamEvent(const std::string &agentId,
     broadcast(
         AgentRetryFailed{agentId, sre->httpStatus, sre->reason, parentId});
   } else if (auto *serr = std::get_if<StreamError>(&ev)) {
+    auto agent = AgentRegistry::instance().getAgent(agentId);
+    if (agent && agent->isInterrupted()) {
+      return;
+    }
     errorBroadcast = true;
     std::string msg = serr->message;
     if (!serr->accountLocator.empty()) {
@@ -642,8 +844,11 @@ void Engine::executeTask(
   if (!agent) {
     throw std::runtime_error("Agent not found: " + agentId);
   }
+  // Mark as active before async dispatch to avoid observers seeing an
+  // immediate idle state race while the worker thread is starting.
+  agent->getMutableContext().state.currentStatus = AgentStatus::ProviderWaiting;
 
-  auto prom = std::make_shared<std::promise<std::string>>();
+  auto prom = std::make_shared<std::promise<AgentOutcome>>();
   {
     std::lock_guard<std::mutex> lock(futuresMutex);
     agentFutures[agentId] = prom->get_future().share();
@@ -653,34 +858,37 @@ void Engine::executeTask(
     std::lock_guard<std::mutex> lock(taskThreadsMutex_);
     taskThreads_.emplace_back([this, agentId, task, images, agent, prom]() mutable {
       std::string parentId = "";
+      std::string threadId = "";
       // Track if we already broadcast an error from the stream
       bool errorBroadcast = false;
+      ArtifactSnapshot runStartArtifacts;
+      bool runStartArtifactsCaptured = false;
 
       try {
         if (agent) {
           parentId = agent->getContext().identity.parentId;
+          if (agent->getContext().history) {
+            threadId = agent->getContext().history->threadId;
+          }
         }
-        std::string finalSummary = "No summary provided.";
-
+        runStartArtifacts = collectArtifactSnapshot(threadId, agentId);
+        runStartArtifactsCaptured = true;
         agent->run(task, [this, agentId, parentId,
                           &errorBroadcast](const StreamEvent &ev) {
           handleStreamEvent(agentId, parentId, ev, errorBroadcast);
         }, images);
 
-        const auto &turns = agent->getContext().history->turns;
-        if (!turns.empty() && !turns.back().messages.empty()) {
-          const auto &lastMsg = turns.back().messages.back();
-          std::string content;
-          for (const auto &part : lastMsg.content) {
-            if (auto *txt = std::get_if<TextContent>(&part))
-              content += txt->text;
-          }
-          if (!content.empty())
-            finalSummary = content;
+        const std::string finalSummary = extractFinalSummary(agent);
+        AgentOutcome outcome = makeOutcome(agent, finalSummary);
+        if (runStartArtifactsCaptured) {
+          attachArtifactDeltasToOutcome(threadId, agentId, runStartArtifacts,
+                                        outcome);
         }
-
-        broadcast(AgentCompleted{agentId, finalSummary, parentId});
-        prom->set_value(finalSummary);
+        if (outcome.kind == AgentOutcome::Kind::Cancelled) {
+          broadcast(AgentInterrupted{agentId, parentId});
+        }
+        broadcast(AgentFinished{agentId, outcome, parentId});
+        prom->set_value(outcome);
 
       } catch (const std::exception &e) {
         // Only broadcast error if we haven't already done so from StreamError
@@ -709,7 +917,13 @@ void Engine::executeTask(
           }
           broadcast(AgentError{agentId, e.what(), parentId});
         }
-        prom->set_exception(std::make_exception_ptr(e));
+        AgentOutcome outcome = makeFailedOutcome(std::string(e.what()));
+        if (runStartArtifactsCaptured) {
+          attachArtifactDeltasToOutcome(threadId, agentId, runStartArtifacts,
+                                        outcome);
+        }
+        broadcast(AgentFinished{agentId, outcome, parentId});
+        prom->set_value(outcome);
       }
     });
   }
@@ -721,7 +935,7 @@ void Engine::resumeTask(const std::string &agentId) {
     throw std::runtime_error("Agent not found: " + agentId);
   }
 
-  auto prom = std::make_shared<std::promise<std::string>>();
+  auto prom = std::make_shared<std::promise<AgentOutcome>>();
   {
     std::lock_guard<std::mutex> lock(futuresMutex);
     agentFutures[agentId] = prom->get_future().share();
@@ -731,33 +945,34 @@ void Engine::resumeTask(const std::string &agentId) {
     std::lock_guard<std::mutex> lock(taskThreadsMutex_);
     taskThreads_.emplace_back([this, agentId, agent, prom]() mutable {
       std::string parentId;
+      std::string threadId;
       bool errorBroadcast = false;
+      ArtifactSnapshot runStartArtifacts;
+      bool runStartArtifactsCaptured = false;
 
       try {
         parentId = agent->getContext().identity.parentId;
-        std::string finalSummary = "No summary provided.";
-
+        if (agent->getContext().history) {
+          threadId = agent->getContext().history->threadId;
+        }
+        runStartArtifacts = collectArtifactSnapshot(threadId, agentId);
+        runStartArtifactsCaptured = true;
         agent->resume([this, agentId, parentId,
                        &errorBroadcast](const StreamEvent &ev) {
           handleStreamEvent(agentId, parentId, ev, errorBroadcast);
         });
 
-        const auto &turns = agent->getContext().history->turns;
-        if (!turns.empty() && !turns.back().messages.empty()) {
-          const auto &lastMsg = turns.back().messages.back();
-          std::string content;
-          for (const auto &part : lastMsg.content) {
-            if (auto *txt = std::get_if<TextContent>(&part)) {
-              content += txt->text;
-            }
-          }
-          if (!content.empty()) {
-            finalSummary = content;
-          }
+        const std::string finalSummary = extractFinalSummary(agent);
+        AgentOutcome outcome = makeOutcome(agent, finalSummary);
+        if (runStartArtifactsCaptured) {
+          attachArtifactDeltasToOutcome(threadId, agentId, runStartArtifacts,
+                                        outcome);
         }
-
-        broadcast(AgentCompleted{agentId, finalSummary, parentId});
-        prom->set_value(finalSummary);
+        if (outcome.kind == AgentOutcome::Kind::Cancelled) {
+          broadcast(AgentInterrupted{agentId, parentId});
+        }
+        broadcast(AgentFinished{agentId, outcome, parentId});
+        prom->set_value(outcome);
       } catch (const std::exception &e) {
         if (!errorBroadcast) {
           if (agent && agent->getContext().history) {
@@ -784,7 +999,13 @@ void Engine::resumeTask(const std::string &agentId) {
           }
           broadcast(AgentError{agentId, e.what(), parentId});
         }
-        prom->set_exception(std::make_exception_ptr(e));
+        AgentOutcome outcome = makeFailedOutcome(std::string(e.what()));
+        if (runStartArtifactsCaptured) {
+          attachArtifactDeltasToOutcome(threadId, agentId, runStartArtifacts,
+                                        outcome);
+        }
+        broadcast(AgentFinished{agentId, outcome, parentId});
+        prom->set_value(outcome);
       }
     });
   }
@@ -831,6 +1052,17 @@ UndoResult Engine::undoAgentTurns(const std::string &agentId, int count) {
     throw std::runtime_error("Cannot undo while agent is running");
 
   auto &ctx = agent->getMutableContext();
+  if (shouldAttemptCompactionRestore(ctx, count) &&
+      restoreCompactionSnapshot(ctx)) {
+    agent->saveHistory();
+    UndoResult restored;
+    restored.compactionReversed = true;
+    restored.restoredTurns = static_cast<int>(ctx.history->turns.size());
+    broadcast(HistoryUndone{agentId, ctx.history->threadId,
+                            restored.turnsRemoved, restored.compactionReversed,
+                            ctx.identity.parentId});
+    return restored;
+  }
   auto result = HistoryEditor::undoTurns(ctx.history->turns, count);
 
   agent->saveHistory();
@@ -848,6 +1080,17 @@ UndoResult Engine::undoAgentMessages(const std::string &agentId, int count) {
     throw std::runtime_error("Cannot undo while agent is running");
 
   auto &ctx = agent->getMutableContext();
+  if (shouldAttemptCompactionRestore(ctx, count) &&
+      restoreCompactionSnapshot(ctx)) {
+    agent->saveHistory();
+    UndoResult restored;
+    restored.compactionReversed = true;
+    restored.restoredTurns = static_cast<int>(ctx.history->turns.size());
+    broadcast(HistoryUndone{agentId, ctx.history->threadId,
+                            restored.turnsRemoved, restored.compactionReversed,
+                            ctx.identity.parentId});
+    return restored;
+  }
   auto result = HistoryEditor::undoMessages(ctx.history->turns, count);
 
   agent->saveHistory();
@@ -866,6 +1109,27 @@ UndoResult Engine::undoAgentAfterTimestamp(const std::string &agentId,
     throw std::runtime_error("Cannot undo while agent is running");
 
   auto &ctx = agent->getMutableContext();
+  bool compactionAfterTimestamp = false;
+  for (std::size_t i = 2; i < ctx.history->turns.size(); ++i) {
+    const auto &turn = ctx.history->turns[i];
+    if (turn.messages.empty() || turn.messages.front().timestamp <= timestamp) {
+      continue;
+    }
+    if (hasCompactionMarker(turn)) {
+      compactionAfterTimestamp = true;
+      break;
+    }
+  }
+  if (compactionAfterTimestamp && restoreCompactionSnapshot(ctx)) {
+    agent->saveHistory();
+    UndoResult restored;
+    restored.compactionReversed = true;
+    restored.restoredTurns = static_cast<int>(ctx.history->turns.size());
+    broadcast(HistoryUndone{agentId, ctx.history->threadId,
+                            restored.turnsRemoved, restored.compactionReversed,
+                            ctx.identity.parentId});
+    return restored;
+  }
   auto result =
       HistoryEditor::undoAfterTimestamp(ctx.history->turns, timestamp);
 

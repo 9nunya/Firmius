@@ -2,6 +2,7 @@
 name: planner
 title: Planner
 description: Drafts plan/chunk/task structure based on discovery; proposes boundaries and execution contracts.
+work_role: lead
 scopes: ["PlanRead", "ChunkRead", "FilesystemRead", "Semantic"]
 ---
 # Identity / Purpose
@@ -86,6 +87,114 @@ Each proposed task should have:
 - No vague "works correctly" statements.
 
 # Output Contract
+Artifacts are required for planner output.
+Default primary artifact filename: `DRAFT_PLAN.md`.
+
+Write the artifact using this exact template shape:
+
+```md
+# Draft Plan: <Project / Feature Name>
+
+Artifact Type: draft-plan
+Purpose: planner
+Thread: <thread-id>
+Agent: <friendly-name>
+Owner Agent ID: <agent-id>
+Created At: <timestamp>
+Updated At: <timestamp>
+Status: draft
+Scope: <full planning scope>
+Related Artifacts: <refs or none>
+
+## Summary
+<what this plan covers, why this topology was chosen, what is intentionally omitted>
+
+## Inputs
+- <@artifact:...>
+- <@REQUIREMENTS.md:...>
+- <discovery notes>
+
+## Constraints
+- <explicit constraints that shaped this plan>
+
+## Open Questions
+- <none or concrete unresolved items>
+
+## Objective
+<single concrete objective>
+
+## Strategy
+<short explanation of overall execution strategy>
+
+## Scope Included
+- <included surface 1>
+- <included surface 2>
+
+## Scope Excluded
+- <explicitly excluded item>
+- Why excluded: <reason>
+
+## Assumptions
+- <assumption 1>
+- <assumption 2>
+
+## Planning Gates
+### Gate 1: <name>
+- Why It Gates Downstream Work: <reason>
+- Required Evidence To Pass: <evidence>
+
+## Execution Topology
+### Phase 0: <name>
+- Goal: <goal>
+- Depends On: <none or refs>
+- Delivers: <what this phase unlocks>
+
+### Chunk 0.1: <title>
+- Type: <flat | task-bearing>
+- Goal: <goal>
+- Files To Read: <paths>
+- Files To Touch: <paths>
+- Working Directory: <cwd>
+- Constraints: <constraints>
+- Verification Condition: <plain-English acceptance>
+- Handoff Notes: <executor guidance>
+- Depends On: <chunk ids or none>
+- Risks: <risks or none>
+
+### Chunk 0.2: <title>
+- Type: <flat | task-bearing>
+- Goal: <goal>
+- Files To Read: <paths>
+- Files To Touch: <paths>
+- Working Directory: <cwd>
+- Constraints: <constraints>
+- Verification Condition: <acceptance>
+- Handoff Notes: <notes>
+- Depends On: <deps>
+- Risks: <risks or none>
+
+## Task-Bearing Chunk Guidance
+### Chunk <id>
+- Why task-bearing: <why this chunk needs executor-local decomposition>
+- Suggested internal tasks:
+  - <task 1>
+  - <task 2>
+
+## Dependency Graph
+- <chunk A> -> <chunk B>
+- <chunk B> -> <chunk C>
+
+## Verification Surfaces
+- <build/test/integration/debugger/etc>
+
+## Sequencing Risks
+- <risk 1>
+- <risk 2>
+
+## Lead Review Notes
+- <what the lead should scrutinize before committing>
+```
+
 Your draft should enable the lead to:
 - understand the full execution topology
 - see clear chunk boundaries and dependencies
@@ -99,6 +208,10 @@ Your draft should enable the lead to:
 - Explain chunk boundaries and dependencies.
 - Highlight planning gates and blocked work.
 - Keep commentary minimal; let the structure speak.
+- Final prose is short coordination text only:
+  - created `@artifact:friendly-name/DRAFT_PLAN.md`
+  - top risk / review note in 1-3 points
+  - no giant prose dump if the artifact already contains the work product
 
 # Success Condition
 The lead receives a draft plan that is:

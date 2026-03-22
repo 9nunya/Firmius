@@ -2,6 +2,8 @@
 #define FIRMIUS_STREAM_STATE_MANAGER_HPP
 
 #include "Events.hpp"
+#include "tools/ProcessState.hpp"
+#include "tools/SubagentState.hpp"
 #include "utils/ToolView.hpp"
 #include <chrono>
 #include <cstdint>
@@ -29,6 +31,7 @@ struct StreamState {
   std::string text;
   std::string compaction_thinking;
   std::string compaction_text;
+  std::string compaction_completion;
   bool compaction_active = false;
   bool compaction_finished = false;
   bool provider_waiting = false;
@@ -49,6 +52,13 @@ struct ProcessRuntimeSnapshot {
   std::vector<std::string> blocking_process_ids;
 };
 
+struct QueuedMessageEntry {
+  std::string message_id;
+  std::string text;
+  std::string thread_id;
+  std::string agent_id;
+};
+
 class StreamStateManager {
 public:
   void handleAgentThinking(const shared::AgentThinking &e);
@@ -63,8 +73,9 @@ public:
   void handleContextCompacted(const shared::ContextCompacted &e);
   void handleAgentProcessSpawned(const shared::AgentProcessSpawned &e);
   void handleAgentProcessOutput(const shared::AgentProcessOutput &e);
-  void handleAgentCompleted(const shared::AgentCompleted &e);
+  void handleAgentFinished(const shared::AgentFinished &e);
   void handleAgentInterrupted(const shared::AgentInterrupted &e);
+  void handleAgentError(const shared::AgentError &e);
   void handleAgentSpawned(const shared::AgentSpawned &e,
                           const std::string &focused_agent_id);
   void handleAgentRetrying(const shared::AgentRetrying &e);
@@ -91,10 +102,17 @@ public:
   ProcessCounts getProcessCounts(
       const std::string &agentId, const ProcessRuntimeSnapshot *runtime_snapshot,
       const std::function<bool(const std::string &)> &is_process_running) const;
+  const NormalizedProcessState *
+  getProcessState(const std::string &processId) const;
+  const NormalizedProcessState *
+  getProcessStateForToolCall(const std::string &toolCallId) const;
+  const NormalizedSubagentState *
+  getSubagentState(const std::string &parentToolCallId) const;
+  const NormalizedSubagentState *
+  getSubagentStateForToolCall(const std::string &toolCallId) const;
   const std::string &getRetryStatus() const;
   const std::vector<std::string> &getAccountSwaps() const;
-  const std::vector<std::pair<std::string, std::string>> &
-  getQueuedMessages() const;
+  const std::vector<QueuedMessageEntry> &getQueuedMessages() const;
   int getToolCallClusterId(const std::string &toolCallId) const;
 
 private:
@@ -107,6 +125,7 @@ private:
   void pushTokenUsage(const std::string &agentId,
                       const shared::AgentMetrics &metrics);
   void clearRetryStatus();
+  void reactivateSubagentParentView(const std::string &agentId);
   void applyToolResult(const std::shared_ptr<ToolCallView> &view, bool success,
                        const std::string &result);
   void assignToolCallClusterId(const std::string &agentId,
@@ -130,11 +149,13 @@ private:
   std::unordered_map<std::string, std::string> current_process_for_agent_;
   std::unordered_map<std::string, std::string> current_subagent_for_agent_;
   std::unordered_map<std::string, std::string> subagent_to_parent_tool_;
+  std::unordered_map<std::string, NormalizedSubagentState> subagent_state_;
+  std::unordered_map<std::string, std::string> subagent_tool_to_parent_;
   std::unordered_map<std::string, std::string> agent_titles_;
   std::unordered_map<std::string, std::string> agent_provider_model_;
   std::unordered_map<std::string, std::string> process_to_agent_;
-  std::unordered_map<std::string, bool> process_background_state_;
-  std::unordered_map<std::string, bool> process_finished_state_;
+  std::unordered_map<std::string, NormalizedProcessState> process_state_;
+  std::unordered_map<std::string, std::string> last_todo_result_by_agent_;
   std::unordered_map<std::string, std::vector<shared::AgentProcessOutput>>
       pending_process_output_;
   std::unordered_map<std::string, LiveQuickClusterState> live_quick_clusters_;
@@ -142,7 +163,7 @@ private:
 
   std::string retry_status_;
   std::vector<std::string> account_swaps_;
-  std::vector<std::pair<std::string, std::string>> queued_messages_; // id, text
+  std::vector<QueuedMessageEntry> queued_messages_;
 };
 
 } // namespace firmius::tui

@@ -12,6 +12,9 @@ shared::ToolResult ProcessWaitTool::execute(const ProcessWaitInput& input, share
         int timeout = input.timeout_ms > 0 ? input.timeout_ms : 30000;
 
         while (true) {
+            if (ctx.cancelRequested()) {
+                return shared::ToolResult::fail("Interrupted");
+            }
             auto snapshot = ctx.agent.getEnvironment()->getProcessManager().inspectProcess(input.process_id);
 
             bool patternFound = false;
@@ -40,7 +43,9 @@ shared::ToolResult ProcessWaitTool::execute(const ProcessWaitInput& input, share
                 return shared::ToolResult::fail("Timeout reached while waiting for process " + input.process_id);
             }
 
-            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            if (!ctx.waitFor(std::chrono::milliseconds(25))) {
+                return shared::ToolResult::fail("Interrupted");
+            }
         }
     } catch (const std::exception& e) {
         return shared::ToolResult::fail(e.what());

@@ -80,13 +80,13 @@ SubagentStressAudit::run(const std::vector<std::string> &args) {
               std::cout << "\n[Event] StreamError: " << e.message << std::endl;
             } else if constexpr (std::is_same_v<T, StreamRetrying>) {
               retries++;
-            } else if constexpr (std::is_same_v<T, AgentCompleted>) {
+            } else if constexpr (std::is_same_v<T, AgentFinished>) {
               if (e.agentId == leadAgentId) {
-                std::cout << "\n[Event] AgentCompleted (LEAD)" << std::endl;
+                std::cout << "\n[Event] AgentFinished (LEAD)" << std::endl;
                 done = true;
                 cv.notify_one();
               } else {
-                std::cout << "\n[Event] AgentCompleted (SUB)" << std::endl;
+                std::cout << "\n[Event] AgentFinished (SUB)" << std::endl;
                 subagentCompletions++;
               }
             } else if constexpr (std::is_same_v<T, AgentSpawned>) {

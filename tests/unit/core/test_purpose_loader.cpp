@@ -3,6 +3,7 @@
 #include "agents/PurposeLoader.hpp"
 #include "ConfigLoader.hpp"
 #include "Context.hpp"
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -52,8 +53,12 @@ protected:
 
         // Create a dummy persona
         std::ofstream coderFile(testPromptsDir / "test_coder.md");
-        coderFile << "---\nname: test_coder\ntitle: Test Coder\ndescription: A test persona\nscopes: [\"fs:read\"]\nswitchable: true\ncanSpawn: true\n---\nYou are a test coder.";
+        coderFile << "---\nname: test_coder\ntitle: Test Coder\ndescription: A test persona\nwork_role: lead\nscopes: [\"fs:read\"]\nswitchable: true\ncanSpawn: true\n---\nYou are a test coder.";
         coderFile.close();
+
+        std::ofstream workerFile(testPromptsDir / "test_worker.md");
+        workerFile << "---\nname: test_worker\ntitle: Test Worker\ndescription: Another persona\nwork_role: worker\nscopes: [\"fs:read\"]\nswitchable: false\ncanSpawn: false\n---\nYou are a test worker.";
+        workerFile.close();
     }
 
     void TearDown() override {
@@ -93,7 +98,113 @@ TEST_F(PurposeLoaderTest, isValid_check) {
 TEST_F(PurposeLoaderTest, load_persona_switchable) {
     Persona persona = PurposeLoader::load("test_coder");
     EXPECT_EQ(persona.name, "test_coder");
+    EXPECT_TRUE(persona.hasWorkRole);
+    EXPECT_EQ(PurposeLoader::resolveWorkRole(persona), PurposeWorkRole::Lead);
     EXPECT_TRUE(persona.switchable);
+}
+
+TEST_F(PurposeLoaderTest, load_persona_defaultsMissingIdentityFields) {
+    std::ofstream customFile(testPromptsDir / "test_custom.md");
+    customFile << "---\nwork_role: executor\n---\nYou are a custom executor.";
+    customFile.close();
+
+    Persona persona = PurposeLoader::load("test_custom");
+    EXPECT_EQ(persona.name, "test_custom");
+    EXPECT_EQ(persona.title, "test_custom");
+    EXPECT_TRUE(persona.hasWorkRole);
+    EXPECT_EQ(persona.workRole, PurposeWorkRole::Executor);
+    EXPECT_EQ(PurposeLoader::resolveWorkRole(persona),
+              PurposeWorkRole::Executor);
+}
+
+TEST_F(PurposeLoaderTest, load_persona_acceptsQuotedWorkRoleMetadata) {
+    std::ofstream customFile(testPromptsDir / "test_quoted.md");
+    customFile << "---\nname: quoted\nwork_role: \"auditor\"\n---\nYou are a quoted auditor.";
+    customFile.close();
+
+    Persona persona = PurposeLoader::load("test_quoted");
+    EXPECT_TRUE(persona.hasWorkRole);
+    EXPECT_EQ(persona.workRole, PurposeWorkRole::Auditor);
+    EXPECT_EQ(PurposeLoader::resolveWorkRole(persona),
+              PurposeWorkRole::Auditor);
+}
+
+TEST_F(PurposeLoaderTest, load_persona_parsesCommentedFrontmatterMetadata) {
+    std::ofstream customFile(testPromptsDir / "test_rich.md");
+    customFile << "---\n"
+                  "# purpose metadata\n"
+                  "name: \"test_rich\"\n"
+                  "title: 'Rich Persona'\n"
+                  "description:  Custom metadata payload\n"
+                  "work_role: 'executor'\n"
+                  "scopes: ['fs:read', \"semantic\"]\n"
+                  "switchable: yes\n"
+                  "canSpawn: 1\n"
+                  "---\n"
+                  "You are a rich persona.";
+    customFile.close();
+
+    Persona persona = PurposeLoader::load("test_rich");
+    EXPECT_EQ(persona.name, "test_rich");
+    EXPECT_EQ(persona.title, "Rich Persona");
+    EXPECT_EQ(persona.description, "Custom metadata payload");
+    EXPECT_TRUE(persona.canSpawn);
+    EXPECT_TRUE(persona.switchable);
+    EXPECT_TRUE(persona.hasWorkRole);
+    EXPECT_EQ(persona.workRole, PurposeWorkRole::Executor);
+    ASSERT_EQ(persona.allowedScopes.size(), 2u);
+    EXPECT_EQ(persona.allowedScopes[0], ToolScope::FilesystemRead);
+    EXPECT_EQ(persona.allowedScopes[1], ToolScope::Semantic);
+    EXPECT_EQ(persona.purposeKey, "test_rich");
+  }
+
+TEST_F(PurposeLoaderTest, resolveWorkRoleFallsBackForLegacyBuiltins) {
+    EXPECT_EQ(PurposeLoader::resolveWorkRole("lead"), PurposeWorkRole::Lead);
+    EXPECT_EQ(PurposeLoader::resolveWorkRole("hotrun"), PurposeWorkRole::Lead);
+    EXPECT_EQ(PurposeLoader::resolveWorkRole("executor"),
+              PurposeWorkRole::Executor);
+}
+
+TEST_F(PurposeLoaderTest, load_personaDoesNotInferRoleFromFrontmatterName) {
+    std::ofstream customFile(testPromptsDir / "test_named_lead.md");
+    customFile << "---\nname: lead\ntitle: Custom Lead Label\n---\nYou are not actually lead-role.";
+    customFile.close();
+
+    Persona persona = PurposeLoader::load("test_named_lead");
+    EXPECT_FALSE(persona.hasWorkRole);
+    EXPECT_EQ(persona.name, "lead");
+    EXPECT_EQ(persona.purposeKey, "test_named_lead");
+    EXPECT_EQ(PurposeLoader::resolveWorkRole(persona),
+              PurposeWorkRole::Unknown);
+}
+
+TEST_F(PurposeLoaderTest, load_persona_rejects_invalidWorkRoleMetadata) {
+    std::ofstream invalidFile(testPromptsDir / "test_invalid.md");
+    invalidFile << "---\nname: test_invalid\ntitle: Bad Persona\nwork_role: wizard\n---\nYou are invalid.";
+    invalidFile.close();
+
+    EXPECT_THROW(PurposeLoader::load("test_invalid"), std::runtime_error);
+}
+
+TEST_F(PurposeLoaderTest, load_persona_rejectsMalformedScopesMetadata) {
+    std::ofstream invalidFile(testPromptsDir / "test_invalid_scopes.md");
+    invalidFile << "---\nname: test_invalid_scopes\nscopes: [\"FilesystemRead\",\n---\nYou are invalid.";
+    invalidFile.close();
+
+    EXPECT_THROW(PurposeLoader::load("test_invalid_scopes"),
+                 std::runtime_error);
+}
+
+TEST_F(PurposeLoaderTest, listPurposesIncludesNonSwitchablePersonas) {
+    const auto all = PurposeLoader::listPurposes();
+    const auto switchable = PurposeLoader::listSwitchablePurposes();
+
+    EXPECT_NE(std::find(all.begin(), all.end(), "test_coder"), all.end());
+    EXPECT_NE(std::find(all.begin(), all.end(), "test_worker"), all.end());
+    EXPECT_NE(std::find(switchable.begin(), switchable.end(), "test_coder"),
+              switchable.end());
+    EXPECT_EQ(std::find(switchable.begin(), switchable.end(), "test_worker"),
+              switchable.end());
 }
 
 TEST_F(PurposeLoaderTest, composeSystemPrompt_placeholders) {
@@ -409,6 +520,37 @@ TEST(PromptContractsTest, executorPromptRequiresVerificationEvidenceAndLeadAccep
               std::string::npos);
     EXPECT_NE(prompt.find("Do not claim completion without evidence in `result_summary`."),
               std::string::npos);
+}
+
+TEST(PromptContractsTest, basePromptDefinesRecommendedTodoShapesByRole) {
+    const auto prompt = readRepoFile(repoRootFromSourceFile() / "prompts" / "base.md");
+
+    EXPECT_NE(prompt.find("RECOMMENDED DEFAULT TODO SHAPES BY ROLE"),
+              std::string::npos);
+    EXPECT_NE(prompt.find("`hotrun`: reconstruct thread/runtime truth -> build issue ledger"),
+              std::string::npos);
+    EXPECT_NE(prompt.find("`scout`: restate bounded question -> inspect the minimum relevant files"),
+              std::string::npos);
+}
+
+TEST(PromptContractsTest, scoutPromptDefinesMultiStepTodoApproach) {
+    const auto prompt = readRepoFile(repoRootFromSourceFile() / "prompts" / "scout.md");
+
+    EXPECT_NE(prompt.find("Use `todo_write` when the reconnaissance is clearly multi-step."),
+              std::string::npos);
+    EXPECT_NE(prompt.find("Restate the bounded question in concrete terms"),
+              std::string::npos);
+    EXPECT_NE(prompt.find("If the answer is obvious after one or two direct inspections, skip the todo"),
+              std::string::npos);
+}
+
+TEST(PromptContractsTest, hotrunPromptIsSwitchableRemediationLead) {
+    const auto prompt = readRepoFile(repoRootFromSourceFile() / "prompts" / "hotrun.md");
+
+    EXPECT_NE(prompt.find("switchable: true"), std::string::npos);
+    EXPECT_NE(prompt.find("canSpawn: true"), std::string::npos);
+    EXPECT_NE(prompt.find("You are a top-level remediation lead."), std::string::npos);
+    EXPECT_NE(prompt.find("fix waves"), std::string::npos);
 }
 
 TEST(HintingContractsTest, builtinGptHintingDefendsAgainstAskingAndPrematureCompletion) {

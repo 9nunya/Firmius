@@ -1,4 +1,5 @@
 #include "tools/WorkToolCommon.hpp"
+#include "agents/PurposeLoader.hpp"
 #include "IAgent.hpp"
 #include "harness/Harness.hpp"
 #include "utils/StringUtil.hpp"
@@ -109,21 +110,22 @@ uint64_t nowEpochMs() {
 
 WorkAgentRole roleForContext(const shared::ToolContext &ctx) {
   const auto &context = ctx.agent.getContext();
-  const std::string &persona = context.config.personaName;
-  if (persona == "lead") {
+  if (context.config.personaName.empty()) {
+    return WorkAgentRole::Unknown;
+  }
+  switch (PurposeLoader::resolveWorkRole(context.config.personaName)) {
+  case PurposeWorkRole::Lead:
     return WorkAgentRole::Lead;
-  }
-  if (persona == "executor") {
+  case PurposeWorkRole::Executor:
     return WorkAgentRole::Executor;
-  }
-  if (persona == "auditor") {
-    return WorkAgentRole::Auditor;
-  }
-  if (persona == "worker") {
+  case PurposeWorkRole::Worker:
     return WorkAgentRole::Worker;
-  }
-  if (persona == "scout") {
+  case PurposeWorkRole::Auditor:
+    return WorkAgentRole::Auditor;
+  case PurposeWorkRole::Scout:
     return WorkAgentRole::Scout;
+  case PurposeWorkRole::Unknown:
+    return WorkAgentRole::Unknown;
   }
   return WorkAgentRole::Unknown;
 }

@@ -69,11 +69,32 @@ int main() {
     std::string ephemeralThread = tm.createThread(meta);
     std::string ephemeralId = engine.summonAgent(ephemeralThread, "coder", "echo ephemeral", false);
     
-    // Let's wait for them
-    engine.waitForAgent(id1).value();
-    engine.waitForAgent(id2).value();
-    engine.waitForAgent(id3).value();
-    engine.waitForAgent(ephemeralId).value();
+    auto completedOutcome = [](const std::optional<AgentOutcome>& outcome) {
+        return outcome.has_value() &&
+               (outcome->kind == AgentOutcome::Kind::Response ||
+                outcome->kind == AgentOutcome::Kind::NoSummary);
+    };
+
+    auto outcome1 = engine.waitForAgentOutcome(id1);
+    if (!outcome1.has_value() || outcome1->kind != AgentOutcome::Kind::Cancelled) {
+        std::cerr << "FAILURE: Agent 1 did not finish with a cancelled outcome!" << std::endl;
+        return 1;
+    }
+    auto outcome2 = engine.waitForAgentOutcome(id2);
+    if (!completedOutcome(outcome2)) {
+        std::cerr << "FAILURE: Agent 2 did not finish with a successful typed outcome!" << std::endl;
+        return 1;
+    }
+    auto outcome3 = engine.waitForAgentOutcome(id3);
+    if (!completedOutcome(outcome3)) {
+        std::cerr << "FAILURE: Agent 3 did not finish with a successful typed outcome!" << std::endl;
+        return 1;
+    }
+    auto ephemeralOutcome = engine.waitForAgentOutcome(ephemeralId);
+    if (!completedOutcome(ephemeralOutcome)) {
+        std::cerr << "FAILURE: Ephemeral agent did not finish with a successful typed outcome!" << std::endl;
+        return 1;
+    }
 
     // Verify ephemeral agent has no journal
     std::string journalPath = home + "/.firmius/threads/" + ephemeralThread + "/" + ephemeralId + ".jsonl";

@@ -1,8 +1,10 @@
 #include "StreamStateManager.hpp"
 #include "components/ToolBlock.hpp"
 #include "utils/ToolSummaries.hpp"
+#include "utils/StringUtil.hpp"
 #include "harness/Harness.hpp"
 #include <chrono>
+#include <sstream>
 #include <unordered_map>
 #include <unordered_set>
 #include <rapidjson/document.h>
@@ -13,10 +15,40 @@ namespace {
 
 struct ParsedProcessResult {
   std::string process_id;
+  std::string command;
+  std::string cwd;
   std::string finish_reason;
   int exit_code = 0;
   bool exit_known = false;
   double duration_ms = 0.0;
+};
+
+struct ParsedToolArgs {
+  std::string process_id;
+  std::string command;
+  std::string cwd;
+  std::string pattern;
+  std::string input;
+};
+
+struct ParsedSubagentArgs {
+  std::string agent_id;
+  std::string name;
+  std::string title;
+  std::string task;
+  std::string category;
+};
+
+struct ParsedSubagentResult {
+  std::string agent_id;
+  std::string status;
+  std::string summary;
+  std::string error;
+  bool fallback_used = false;
+  std::string route_category;
+  std::vector<std::string> attempted_categories;
+  std::vector<std::string> artifacts_created;
+  std::vector<std::string> artifacts_updated;
 };
 
 ParsedProcessResult parseProcessResult(const std::string &result) {
@@ -30,6 +62,12 @@ ParsedProcessResult parseProcessResult(const std::string &result) {
   if (doc.HasMember("process_id") && doc["process_id"].IsString()) {
     parsed.process_id = doc["process_id"].GetString();
   }
+  if (doc.HasMember("command") && doc["command"].IsString()) {
+    parsed.command = doc["command"].GetString();
+  }
+  if (doc.HasMember("cwd") && doc["cwd"].IsString()) {
+    parsed.cwd = doc["cwd"].GetString();
+  }
   if (doc.HasMember("finish_reason") && doc["finish_reason"].IsString()) {
     parsed.finish_reason = doc["finish_reason"].GetString();
   }
@@ -42,6 +80,418 @@ ParsedProcessResult parseProcessResult(const std::string &result) {
   }
 
   return parsed;
+}
+
+ParsedToolArgs parseToolArgs(const std::string &args) {
+  ParsedToolArgs parsed;
+  rapidjson::Document doc;
+  doc.Parse(args.c_str());
+  if (doc.HasParseError() || !doc.IsObject()) {
+    return parsed;
+  }
+  if (doc.HasMember("process_id") && doc["process_id"].IsString()) {
+    parsed.process_id = doc["process_id"].GetString();
+  }
+  if (doc.HasMember("command") && doc["command"].IsString()) {
+    parsed.command = doc["command"].GetString();
+  }
+  if (doc.HasMember("cwd") && doc["cwd"].IsString()) {
+    parsed.cwd = doc["cwd"].GetString();
+  }
+  if (doc.HasMember("pattern") && doc["pattern"].IsString()) {
+    parsed.pattern = doc["pattern"].GetString();
+  }
+  if (doc.HasMember("input") && doc["input"].IsString()) {
+    parsed.input = doc["input"].GetString();
+  }
+  if (doc.HasMember("code") && doc["code"].IsString()) {
+    const std::string code = doc["code"].GetString();
+    std::istringstream stream(code);
+    std::string first_line;
+    while (std::getline(stream, first_line)) {
+      if (!firmius::shared::StringUtil::trim(first_line).empty()) {
+        parsed.command = "python: " + first_line;
+        break;
+      }
+    }
+    if (parsed.command.empty()) {
+      parsed.command = "python";
+    }
+  }
+  return parsed;
+}
+
+ParsedSubagentArgs parseSubagentArgs(const std::string &args) {
+  ParsedSubagentArgs parsed;
+  rapidjson::Document doc;
+  doc.Parse(args.c_str());
+  if (doc.HasParseError() || !doc.IsObject()) {
+    return parsed;
+  }
+  if (doc.HasMember("agent_id") && doc["agent_id"].IsString()) {
+    parsed.agent_id = doc["agent_id"].GetString();
+  }
+  if (doc.HasMember("name") && doc["name"].IsString()) {
+    parsed.name = doc["name"].GetString();
+  }
+  if (doc.HasMember("title") && doc["title"].IsString()) {
+    parsed.title = doc["title"].GetString();
+  }
+  if (doc.HasMember("task") && doc["task"].IsString()) {
+    parsed.task = doc["task"].GetString();
+  }
+  if (doc.HasMember("category") && doc["category"].IsString()) {
+    parsed.category = doc["category"].GetString();
+  }
+  return parsed;
+}
+
+void appendOutputTail(std::string &tail, const std::string &delta,
+                      size_t max_chars = 1200) {
+  if (delta.empty()) {
+    return;
+  }
+  tail += delta;
+  if (tail.size() > max_chars) {
+    tail.erase(0, tail.size() - max_chars);
+  }
+}
+
+ParsedSubagentResult parseSubagentResult(const std::string &result) {
+  ParsedSubagentResult parsed;
+  rapidjson::Document doc;
+  doc.Parse(result.c_str());
+  if (doc.HasParseError() || !doc.IsObject()) {
+    return parsed;
+  }
+  if (doc.HasMember("status") && doc["status"].IsString()) {
+    parsed.status = doc["status"].GetString();
+  }
+  if (doc.HasMember("agentId") && doc["agentId"].IsString()) {
+    parsed.agent_id = doc["agentId"].GetString();
+  }
+  if (doc.HasMember("result") && doc["result"].IsString()) {
+    parsed.summary = doc["result"].GetString();
+  }
+  if (doc.HasMember("error") && doc["error"].IsString()) {
+    parsed.error = doc["error"].GetString();
+  }
+  if (doc.HasMember("fallback_used") && doc["fallback_used"].IsBool()) {
+    parsed.fallback_used = doc["fallback_used"].GetBool();
+  }
+  if (doc.HasMember("category") && doc["category"].IsString()) {
+    parsed.route_category = doc["category"].GetString();
+  }
+  if (doc.HasMember("attempted_categories") &&
+      doc["attempted_categories"].IsArray()) {
+    for (const auto &entry : doc["attempted_categories"].GetArray()) {
+      if (entry.IsString()) {
+        parsed.attempted_categories.push_back(entry.GetString());
+      }
+    }
+  }
+  auto parseArtifactArray = [](const rapidjson::Value &value) {
+    std::vector<std::string> refs;
+    if (!value.IsArray()) {
+      return refs;
+    }
+    for (const auto &item : value.GetArray()) {
+      if (item.IsString()) {
+        refs.push_back(item.GetString());
+        continue;
+      }
+      if (!item.IsObject()) {
+        continue;
+      }
+      if (item.HasMember("reference") && item["reference"].IsString()) {
+        refs.push_back(item["reference"].GetString());
+      } else if (item.HasMember("filename") && item["filename"].IsString()) {
+        refs.push_back(item["filename"].GetString());
+      }
+    }
+    return refs;
+  };
+  if (doc.HasMember("artifacts_created")) {
+    parsed.artifacts_created = parseArtifactArray(doc["artifacts_created"]);
+  }
+  if (doc.HasMember("artifacts_updated")) {
+    parsed.artifacts_updated = parseArtifactArray(doc["artifacts_updated"]);
+  }
+  return parsed;
+}
+
+std::string jsonStringMember(const rapidjson::Value &value, const char *key) {
+  if (value.IsObject() && value.HasMember(key) && value[key].IsString()) {
+    return value[key].GetString();
+  }
+  return "";
+}
+
+std::string artifactReadSummary(const std::string &args, const std::string &result) {
+  rapidjson::Document args_doc;
+  std::string label;
+  args_doc.Parse(args.c_str());
+  if (!args_doc.HasParseError() && args_doc.IsObject()) {
+    label = jsonStringMember(args_doc, "reference");
+    if (label.empty()) {
+      label = jsonStringMember(args_doc, "name");
+    }
+  }
+
+  rapidjson::Document result_doc;
+  result_doc.Parse(result.c_str());
+  if (!result_doc.HasParseError() && result_doc.IsObject()) {
+    const std::string resolved_reference = jsonStringMember(result_doc, "reference");
+    if (!resolved_reference.empty()) {
+      label = resolved_reference;
+    }
+    const rapidjson::Value &artifact =
+        result_doc.HasMember("artifact") ? result_doc["artifact"] : result_doc;
+    if (label.empty()) {
+      label = jsonStringMember(artifact, "filename");
+    }
+  }
+
+  return label.empty() ? "Loaded artifact" : ("Loaded " + label);
+}
+
+std::string summarizeHistoricalToolEntry(const std::string &name,
+                                         const std::string &args,
+                                         const std::string &result,
+                                         bool success) {
+  if (name == "artifact_read" && success) {
+    return artifactReadSummary(args, result);
+  }
+  return shared::SummarizeToolCall(name, args, shared::ToolPhase::Finished);
+}
+
+std::vector<shared::SubagentToolLogEntry>
+synthesizeHistoricalSubagentLog(const shared::AgentHistory &history,
+                                const std::string &task,
+                                const NormalizedSubagentState &subagent) {
+  std::vector<shared::SubagentToolLogEntry> entries;
+  std::unordered_map<std::string, size_t> tool_index_by_id;
+
+  if (!task.empty()) {
+    shared::SubagentToolLogEntry entry;
+    entry.summary = "Task: " + task;
+    entry.phase = shared::ToolPhase::Finished;
+    entries.push_back(std::move(entry));
+  }
+
+  for (const auto &turn : history.turns) {
+    for (const auto &msg : turn.messages) {
+      for (const auto &content : msg.content) {
+        if (auto *tc = std::get_if<shared::ToolCallContent>(&content)) {
+          shared::SubagentToolLogEntry entry;
+          entry.name = tc->name;
+          entry.args = tc->args;
+          entry.toolCallId = tc->id;
+          entry.phase = shared::ToolPhase::Finished;
+          entry.summary = shared::SummarizeToolCall(
+              tc->name, tc->args, shared::ToolPhase::Finished);
+          tool_index_by_id[tc->id] = entries.size();
+          entries.push_back(std::move(entry));
+          continue;
+        }
+
+        if (auto *tr = std::get_if<shared::ToolResultContent>(&content)) {
+          auto it_entry = tool_index_by_id.find(tr->toolCallId);
+          if (it_entry == tool_index_by_id.end()) {
+            continue;
+          }
+          auto &entry = entries[it_entry->second];
+          entry.phase = tr->success ? shared::ToolPhase::Finished
+                                    : shared::ToolPhase::Error;
+          entry.summary = summarizeHistoricalToolEntry(
+              entry.name, entry.args, tr->result, tr->success);
+          continue;
+        }
+
+        if (auto *th = std::get_if<shared::ThinkingContent>(&content)) {
+          if (th->thinking.empty()) {
+            continue;
+          }
+          shared::SubagentToolLogEntry entry;
+          entry.summary = "Thought";
+          entry.phase = shared::ToolPhase::Finished;
+          entries.push_back(std::move(entry));
+        }
+      }
+    }
+  }
+
+  if (!subagent.wait_state.empty()) {
+    shared::SubagentToolLogEntry entry;
+    if (subagent.wait_state == "completed_no_summary") {
+      entry.summary = "Done (no summary)";
+      entry.phase = shared::ToolPhase::Finished;
+    } else if (subagent.wait_state == "cancelled") {
+      entry.summary = "Cancelled";
+      entry.phase = shared::ToolPhase::Finished;
+    } else if (subagent.wait_state == "failed") {
+      entry.summary = subagent.error_text.empty() ? "Failed"
+                                                  : "Failed: " + subagent.error_text;
+      entry.phase = shared::ToolPhase::Error;
+    } else if (subagent.wait_state == "completed") {
+      entry.summary = "Done";
+      entry.phase = shared::ToolPhase::Finished;
+    }
+    if (!entry.summary.empty()) {
+      entries.push_back(std::move(entry));
+    }
+  }
+
+  return entries;
+}
+
+std::optional<shared::SubagentToolLogEntry>
+terminalSubagentLogEntry(const NormalizedSubagentState &subagent) {
+  shared::SubagentToolLogEntry entry;
+  if (subagent.wait_state == "completed") {
+    entry.summary = "Done";
+    entry.phase = shared::ToolPhase::Finished;
+  } else if (subagent.wait_state == "completed_no_summary") {
+    entry.summary = "Done (no summary)";
+    entry.phase = shared::ToolPhase::Finished;
+  } else if (subagent.wait_state == "cancelled") {
+    entry.summary = "Cancelled";
+    entry.phase = shared::ToolPhase::Finished;
+  } else if (subagent.wait_state == "failed") {
+    entry.summary =
+        subagent.error_text.empty() ? "Failed" : "Failed: " + subagent.error_text;
+    entry.phase = shared::ToolPhase::Error;
+  } else {
+    return std::nullopt;
+  }
+  return entry;
+}
+
+bool IsGenericTerminalSubagentState(const std::string &state) {
+  return state == "completed" || state == "failed";
+}
+
+int SubagentStateSpecificity(const std::string &state) {
+  if (state.empty()) {
+    return 0;
+  }
+  if (state == "spawned" || state == "re-tasked") {
+    return 1;
+  }
+  if (state == "completed_no_summary" || state == "cancelled") {
+    return 3;
+  }
+  if (IsGenericTerminalSubagentState(state)) {
+    return 2;
+  }
+  return 2;
+}
+
+bool IsInformativeSubagentLogEntry(const shared::SubagentToolLogEntry &entry) {
+  if (!entry.toolCallId.empty()) {
+    return true;
+  }
+  if (entry.summary.empty()) {
+    return false;
+  }
+  return entry.summary.rfind("Task: ", 0) != 0 && entry.summary != "Done" &&
+         entry.summary.rfind("State: ", 0) != 0;
+}
+
+size_t CountInformativeSubagentLogEntries(
+    const std::vector<shared::SubagentToolLogEntry> &entries) {
+  size_t count = 0;
+  for (const auto &entry : entries) {
+    if (IsInformativeSubagentLogEntry(entry)) {
+      ++count;
+    }
+  }
+  return count;
+}
+
+std::vector<shared::SubagentToolLogEntry> ChooseRicherSubagentLog(
+    const std::vector<shared::SubagentToolLogEntry> &left,
+    const std::vector<shared::SubagentToolLogEntry> &right) {
+  const size_t left_informative = CountInformativeSubagentLogEntries(left);
+  const size_t right_informative = CountInformativeSubagentLogEntries(right);
+  if (right_informative > left_informative) {
+    return right;
+  }
+  if (right_informative == left_informative && right.size() > left.size()) {
+    return right;
+  }
+  return left;
+}
+
+void MergeSubagentState(NormalizedSubagentState &target,
+                        const NormalizedSubagentState &source) {
+  if (target.parent_tool_call_id.empty()) {
+    target.parent_tool_call_id = source.parent_tool_call_id;
+  }
+  if (target.owner_agent_id.empty()) {
+    target.owner_agent_id = source.owner_agent_id;
+  }
+  if (target.child_agent_id.empty()) {
+    target.child_agent_id = source.child_agent_id;
+  }
+  if (target.child_title.empty()) {
+    target.child_title = source.child_title;
+  }
+  if (target.child_friendly_name.empty()) {
+    target.child_friendly_name = source.child_friendly_name;
+  }
+  if (target.task.empty()) {
+    target.task = source.task;
+  }
+
+  target.provider_waiting = target.provider_waiting || source.provider_waiting;
+  target.retrying = target.retrying || source.retrying;
+  target.account_switched = target.account_switched || source.account_switched;
+  target.fallback_used = target.fallback_used || source.fallback_used;
+
+  const int target_specificity = SubagentStateSpecificity(target.wait_state);
+  const int source_specificity = SubagentStateSpecificity(source.wait_state);
+  const bool should_take_source_wait_state =
+      !source.wait_state.empty() &&
+      (target.wait_state.empty() || source_specificity > target_specificity ||
+       (source_specificity == target_specificity &&
+        IsGenericTerminalSubagentState(target.wait_state) &&
+        !IsGenericTerminalSubagentState(source.wait_state)));
+  if (should_take_source_wait_state) {
+    target.wait_state = source.wait_state;
+    target.outcome = source.outcome;
+    target.running = source.running;
+    target.waiting = source.waiting;
+  } else if (!target.running && source.running) {
+    target.running = true;
+  } else if (!target.waiting && source.waiting) {
+    target.waiting = true;
+  }
+  if (target.outcome == SubagentOutcomeKind::Unknown &&
+      source.outcome != SubagentOutcomeKind::Unknown) {
+    target.outcome = source.outcome;
+  }
+
+  if (target.final_summary.empty()) {
+    target.final_summary = source.final_summary;
+  }
+  if (target.error_text.empty()) {
+    target.error_text = source.error_text;
+  }
+  if (target.route_category.empty()) {
+    target.route_category = source.route_category;
+  }
+  if (target.attempted_categories.empty() && !source.attempted_categories.empty()) {
+    target.attempted_categories = source.attempted_categories;
+  }
+  if (target.artifacts_created.empty() && !source.artifacts_created.empty()) {
+    target.artifacts_created = source.artifacts_created;
+  }
+  if (target.artifacts_updated.empty() && !source.artifacts_updated.empty()) {
+    target.artifacts_updated = source.artifacts_updated;
+  }
+
+  target.activity_log = ChooseRicherSubagentLog(target.activity_log, source.activity_log);
 }
 
 } // namespace
@@ -65,6 +515,7 @@ void StreamStateManager::handleAgentThinking(const shared::AgentThinking &e) {
     s.is_thinking = true;
   }
   s.compaction_finished = false;
+  s.compaction_completion.clear();
   s.thinking += e.delta;
   appendLiveTimelineDelta(e.agentId, TimelineEntry::Kind::Thinking, e.delta);
   if (!e.delta.empty()) {
@@ -83,6 +534,7 @@ void StreamStateManager::handleAgentText(const shared::AgentText &e) {
     pushThinkingDuration(e.agentId, secs);
   }
   s.compaction_finished = false;
+  s.compaction_completion.clear();
   s.text += e.delta;
   appendLiveTimelineDelta(e.agentId, TimelineEntry::Kind::Text, e.delta);
   if (!e.delta.empty()) {
@@ -98,6 +550,7 @@ void StreamStateManager::handleAgentTurnCompleted(
   s.thinking.clear();
   s.text.clear();
   s.compaction_finished = false;
+  s.compaction_completion.clear();
   s.provider_waiting = false;
   s.is_thinking = false;
   s.has_active_live_entry = false;
@@ -119,7 +572,6 @@ void StreamStateManager::handleAgentTurnCompleted(
   // Mark all pending tool calls for this agent as finished with proper success state
   for (auto &[toolId, view] : tool_calls_) {
     if (view && view->agentId == e.agentId &&
-        view->name != "summon_subagent" &&
         view->phase != ToolPhase::Finished &&
         view->phase != ToolPhase::Error) {
       auto it = toolResultMap.find(toolId);
@@ -139,6 +591,10 @@ void StreamStateManager::handleAgentTurnCompleted(
               entry.name, entry.args, ToolPhase::Finished);
           entry.phase = ToolPhase::Finished;
         }
+      }
+      auto it_state = subagent_state_.find(toolId);
+      if (it_state != subagent_state_.end()) {
+        it_state->second.activity_log = view->subagent_tool_log;
       }
     }
   }
@@ -194,6 +650,23 @@ void StreamStateManager::handleAgentProviderWaiting(
     const shared::AgentProviderWaiting &e) {
   streams_[e.agentId].provider_waiting = true;
   clearRetryStatus();
+  reactivateSubagentParentView(e.agentId);
+  auto it_parent = subagent_to_parent_tool_.find(e.agentId);
+  if (it_parent != subagent_to_parent_tool_.end()) {
+    auto &subagent = subagent_state_[it_parent->second];
+    subagent.provider_waiting = true;
+    subagent.retrying = false;
+    subagent.account_switched = false;
+    subagent.running = true;
+    subagent.wait_state = "provider_waiting";
+    shared::SubagentToolLogEntry entry;
+    entry.summary = "Provider waiting";
+    entry.phase = shared::ToolPhase::Preparing;
+    subagent.activity_log.push_back(std::move(entry));
+    while (subagent.activity_log.size() > 16) {
+      subagent.activity_log.erase(subagent.activity_log.begin());
+    }
+  }
 }
 
 void StreamStateManager::handleAgentToolCallChunk(
@@ -224,6 +697,67 @@ void StreamStateManager::handleAgentToolCallChunk(
   view->args += e.argsDelta;
   if (!view->args.empty()) {
     view->phase = ToolPhase::Called;
+    ParsedToolArgs parsed_args = parseToolArgs(view->args);
+    if (!parsed_args.process_id.empty()) {
+      view->process_id = parsed_args.process_id;
+      auto &process = process_state_[parsed_args.process_id];
+      process.process_id = parsed_args.process_id;
+      process.owner_agent_id = view->agentId;
+      if (process.origin_tool_call_id.empty()) {
+        process.origin_tool_call_id = view->toolCallId;
+      }
+      if (!parsed_args.command.empty() && process.command.empty()) {
+        process.command = parsed_args.command;
+      }
+      if (!parsed_args.cwd.empty() && process.cwd.empty()) {
+        process.cwd = parsed_args.cwd;
+      }
+      if (view->name == "process_wait") {
+        process.waiting = true;
+        process.wait_state = "waiting";
+        process.waiting_pattern = parsed_args.pattern;
+      }
+    }
+    if (view->name == "summon_subagent" || view->name == "subagent_wait") {
+      ParsedSubagentArgs parsed_subagent_args = parseSubagentArgs(view->args);
+      std::string parent_tool_id = view->toolCallId;
+      if (view->name == "subagent_wait" && !parsed_subagent_args.agent_id.empty()) {
+        auto it_parent = subagent_to_parent_tool_.find(parsed_subagent_args.agent_id);
+        if (it_parent != subagent_to_parent_tool_.end()) {
+          parent_tool_id = it_parent->second;
+        }
+      }
+      auto &subagent = subagent_state_[parent_tool_id];
+      subagent.parent_tool_call_id = parent_tool_id;
+      subagent.owner_agent_id = view->agentId;
+      subagent.waiting = (view->name == "subagent_wait");
+      subagent.running = (view->phase == ToolPhase::Called);
+      if (!parsed_subagent_args.task.empty()) {
+        subagent.task = parsed_subagent_args.task;
+      }
+      if (!parsed_subagent_args.title.empty()) {
+        subagent.child_title = parsed_subagent_args.title;
+      } else if (!parsed_subagent_args.name.empty() &&
+                 subagent.child_title.empty()) {
+        subagent.child_title = parsed_subagent_args.name;
+      }
+      if (!parsed_subagent_args.agent_id.empty()) {
+        subagent.child_agent_id = parsed_subagent_args.agent_id;
+        subagent_to_parent_tool_[parsed_subagent_args.agent_id] = parent_tool_id;
+      }
+      if (!parsed_subagent_args.category.empty() && subagent.route_category.empty()) {
+        subagent.route_category = parsed_subagent_args.category;
+      }
+      subagent.wait_state = "running";
+      subagent_tool_to_parent_[view->toolCallId] = parent_tool_id;
+
+      if (view->name == "subagent_wait") {
+        view->subagent_id = subagent.child_agent_id;
+        if (!subagent.child_title.empty()) {
+          view->subagent_title = subagent.child_title;
+        }
+      }
+    }
   }
 
   auto it_sub = subagent_to_parent_tool_.find(e.agentId);
@@ -259,6 +793,33 @@ void StreamStateManager::handleAgentToolCallChunk(
           while (log.size() > 8)
             log.erase(log.begin());
         }
+
+        auto it_state = subagent_state_.find(it_sub->second);
+        if (it_state != subagent_state_.end()) {
+          auto &activity = it_state->second.activity_log;
+          auto it_activity = std::find_if(
+              activity.begin(), activity.end(),
+              [&e](const shared::SubagentToolLogEntry &entry) {
+                return entry.toolCallId == e.toolCallId;
+              });
+          if (it_activity != activity.end()) {
+            it_activity->summary = summary;
+            it_activity->phase = phase;
+            it_activity->name = view->name;
+            it_activity->args = view->args;
+          } else {
+            shared::SubagentToolLogEntry activity_entry;
+            activity_entry.summary = summary;
+            activity_entry.phase = phase;
+            activity_entry.toolCallId = e.toolCallId;
+            activity_entry.name = view->name;
+            activity_entry.args = view->args;
+            activity.push_back(std::move(activity_entry));
+            while (activity.size() > 16) {
+              activity.erase(activity.begin());
+            }
+          }
+        }
       }
     }
   }
@@ -282,6 +843,69 @@ void StreamStateManager::handleAgentToolCall(const shared::AgentToolCall &e) {
   if (!e.toolArgs.empty())
     view->args = e.toolArgs;
   view->phase = view->args.empty() ? ToolPhase::Preparing : ToolPhase::Called;
+  if (!view->args.empty()) {
+    ParsedToolArgs parsed_args = parseToolArgs(view->args);
+    if (!parsed_args.process_id.empty()) {
+      view->process_id = parsed_args.process_id;
+      auto &process = process_state_[parsed_args.process_id];
+      process.process_id = parsed_args.process_id;
+      process.owner_agent_id = view->agentId;
+      if (process.origin_tool_call_id.empty()) {
+        process.origin_tool_call_id = view->toolCallId;
+      }
+      if (!parsed_args.command.empty() && process.command.empty()) {
+        process.command = parsed_args.command;
+      }
+      if (!parsed_args.cwd.empty() && process.cwd.empty()) {
+        process.cwd = parsed_args.cwd;
+      }
+      if (view->name == "process_wait") {
+        process.waiting = true;
+        process.wait_state = "waiting";
+        process.waiting_pattern = parsed_args.pattern;
+      }
+    }
+    if (view->name == "summon_subagent" || view->name == "subagent_wait") {
+      ParsedSubagentArgs parsed_subagent_args = parseSubagentArgs(view->args);
+      std::string parent_tool_id = view->toolCallId;
+      if (view->name == "subagent_wait" && !parsed_subagent_args.agent_id.empty()) {
+        auto it_parent = subagent_to_parent_tool_.find(parsed_subagent_args.agent_id);
+        if (it_parent != subagent_to_parent_tool_.end()) {
+          parent_tool_id = it_parent->second;
+        }
+      }
+      auto &subagent = subagent_state_[parent_tool_id];
+      subagent.parent_tool_call_id = parent_tool_id;
+      subagent.owner_agent_id = view->agentId;
+      subagent.waiting = (view->name == "subagent_wait");
+      subagent.running = (view->phase == ToolPhase::Called);
+      if (!parsed_subagent_args.task.empty()) {
+        subagent.task = parsed_subagent_args.task;
+      }
+      if (!parsed_subagent_args.title.empty()) {
+        subagent.child_title = parsed_subagent_args.title;
+      } else if (!parsed_subagent_args.name.empty() &&
+                 subagent.child_title.empty()) {
+        subagent.child_title = parsed_subagent_args.name;
+      }
+      if (!parsed_subagent_args.agent_id.empty()) {
+        subagent.child_agent_id = parsed_subagent_args.agent_id;
+        subagent_to_parent_tool_[parsed_subagent_args.agent_id] = parent_tool_id;
+      }
+      if (!parsed_subagent_args.category.empty() && subagent.route_category.empty()) {
+        subagent.route_category = parsed_subagent_args.category;
+      }
+      subagent.wait_state = "running";
+      subagent_tool_to_parent_[view->toolCallId] = parent_tool_id;
+
+      if (view->name == "subagent_wait") {
+        view->subagent_id = subagent.child_agent_id;
+        if (!subagent.child_title.empty()) {
+          view->subagent_title = subagent.child_title;
+        }
+      }
+    }
+  }
 
   auto it_sub = subagent_to_parent_tool_.find(e.agentId);
   if (it_sub != subagent_to_parent_tool_.end()) {
@@ -315,21 +939,32 @@ void StreamStateManager::handleAgentToolCall(const shared::AgentToolCall &e) {
           while (log.size() > 8)
             log.erase(log.begin());
         }
-      }
-    }
-  }
 
-  // Handle subagent_wait linking
-  if (view->name == "subagent_wait" && !view->args.empty()) {
-    rapidjson::Document doc;
-    doc.Parse(view->args.c_str());
-    if (!doc.HasParseError() && doc.IsObject()) {
-      if (doc.HasMember("agent_id") && doc["agent_id"].IsString()) {
-        std::string subId = doc["agent_id"].GetString();
-        view->subagent_id = subId;
-        auto it_title = agent_titles_.find(subId);
-        if (it_title != agent_titles_.end()) {
-          view->subagent_title = it_title->second;
+        auto it_state = subagent_state_.find(it_sub->second);
+        if (it_state != subagent_state_.end()) {
+          auto &activity = it_state->second.activity_log;
+          auto it_activity = std::find_if(
+              activity.begin(), activity.end(),
+              [&e](const shared::SubagentToolLogEntry &entry) {
+                return entry.toolCallId == e.toolCallId;
+              });
+          if (it_activity != activity.end()) {
+            it_activity->summary = summary;
+            it_activity->phase = view->phase;
+            it_activity->name = view->name;
+            it_activity->args = view->args;
+          } else {
+            shared::SubagentToolLogEntry activity_entry;
+            activity_entry.summary = summary;
+            activity_entry.phase = view->phase;
+            activity_entry.toolCallId = e.toolCallId;
+            activity_entry.name = view->name;
+            activity_entry.args = view->args;
+            activity.push_back(std::move(activity_entry));
+            while (activity.size() > 16) {
+              activity.erase(activity.begin());
+            }
+          }
         }
       }
     }
@@ -345,6 +980,7 @@ void StreamStateManager::handleAgentCompacting(
   s.compaction_finished = false;
   s.compaction_thinking.clear();
   s.compaction_text.clear();
+  s.compaction_completion.clear();
   (void)e;
 }
 
@@ -353,6 +989,7 @@ void StreamStateManager::handleAgentCompactionThinking(
   auto &s = streams_[e.agentId];
   s.compaction_active = true;
   s.compaction_finished = false;
+  s.compaction_completion.clear();
   s.compaction_thinking += e.delta;
 }
 
@@ -361,6 +998,7 @@ void StreamStateManager::handleAgentCompactionText(
   auto &s = streams_[e.agentId];
   s.compaction_active = true;
   s.compaction_finished = false;
+  s.compaction_completion.clear();
   s.compaction_text += e.delta;
 }
 
@@ -369,8 +1007,8 @@ void StreamStateManager::handleContextCompacted(
   auto &s = streams_[e.agentId];
   s.compaction_active = false;
   s.compaction_finished = true;
-  s.compaction_thinking.clear();
-  s.compaction_text.clear();
+  s.compaction_completion =
+      "Compaction complete. Tokens saved: " + std::to_string(e.tokensSaved);
 }
 
 void StreamStateManager::handleAgentProcessSpawned(
@@ -379,8 +1017,19 @@ void StreamStateManager::handleAgentProcessSpawned(
     process_to_toolcall_[e.processId] = e.toolCallId;
   }
   process_to_agent_[e.processId] = e.agentId;
-  process_background_state_[e.processId] = false;
-  process_finished_state_[e.processId] = false;
+
+  auto &process = process_state_[e.processId];
+  process.process_id = e.processId;
+  process.owner_agent_id = e.agentId;
+  process.origin_tool_call_id = e.toolCallId;
+  process.command = e.command;
+  process.running = true;
+  process.finished = false;
+  process.exit_code_known = false;
+  process.exit_code = 0;
+  process.duration_ms = 0.0;
+  process.waiting = false;
+  process.wait_state.clear();
 
   auto it_tool = tool_calls_.find(e.toolCallId);
   if (it_tool != tool_calls_.end() && it_tool->second) {
@@ -390,10 +1039,14 @@ void StreamStateManager::handleAgentProcessSpawned(
     }
     if (view->name == "process_spawn") {
       view->process_is_background = true;
-      process_background_state_[e.processId] = true;
+      process.is_background = true;
+      process.is_blocking = false;
       if (view->phase == ToolPhase::Called || view->phase == ToolPhase::Preparing) {
         view->phase = ToolPhase::BackgroundRunning;
       }
+    } else {
+      process.is_background = false;
+      process.is_blocking = true;
     }
   }
 
@@ -405,13 +1058,25 @@ void StreamStateManager::handleAgentProcessOutput(
   if (process_to_agent_.count(e.processId) == 0 && !e.agentId.empty()) {
     process_to_agent_[e.processId] = e.agentId;
   }
+  auto &process = process_state_[e.processId];
+  process.process_id = e.processId;
+  if (!e.agentId.empty()) {
+    process.owner_agent_id = e.agentId;
+  }
+  if (e.finished) {
+    process.running = false;
+    process.finished = true;
+    process.exit_code_known = true;
+    process.exit_code = e.exitCode;
+    process.duration_ms = e.durationMs;
+    process.waiting = false;
+    if (process.wait_state.empty()) {
+      process.wait_state = "completed";
+    }
+  }
 
   if (!applyProcessOutputToToolView(e)) {
     pending_process_output_[e.processId].push_back(e);
-  }
-
-  if (e.finished) {
-    process_finished_state_[e.processId] = true;
   }
 }
 
@@ -442,13 +1107,37 @@ void StreamStateManager::handleAgentSpawned(
     // If we haven't linked a subagent_id yet, and it's a name match, take it.
     if (pair.second->subagent_id.empty() || id_match || name_match) {
       subagent_to_parent_tool_[e.agentId] = pair.first;
+      subagent_tool_to_parent_[pair.first] = pair.first;
       pair.second->subagent_running = true;
+      pair.second->phase = ToolPhase::Called;
       pair.second->subagent_id = e.agentId;
       if (!e.title.empty()) {
         pair.second->subagent_title = e.title;
       }
       if (!e.friendlyName.empty())
         pair.second->subagent_slug = e.friendlyName;
+
+      auto &subagent = subagent_state_[pair.first];
+      subagent.parent_tool_call_id = pair.first;
+      subagent.owner_agent_id = pair.second->agentId;
+      subagent.child_agent_id = e.agentId;
+      subagent.child_friendly_name = e.friendlyName;
+      subagent.running = true;
+      subagent.waiting = false;
+      subagent.provider_waiting = false;
+      subagent.retrying = false;
+      subagent.account_switched = false;
+      subagent.wait_state = "running";
+      if (!e.title.empty()) {
+        subagent.child_title = e.title;
+      }
+      if (!e.friendlyName.empty()) {
+        subagent.activity_log.push_back(
+            {"Spawned " + e.friendlyName, shared::ToolPhase::Finished, "", "", ""});
+      }
+      while (subagent.activity_log.size() > 16) {
+        subagent.activity_log.erase(subagent.activity_log.begin());
+      }
       break;
     }
   }
@@ -473,23 +1162,137 @@ void StreamStateManager::pushThinkingDuration(const std::string &agentId,
   log.push_back(entry);
   while (log.size() > 8)
     log.erase(log.begin());
+  auto it_state = subagent_state_.find(it_sub->second);
+  if (it_state != subagent_state_.end()) {
+    it_state->second.activity_log.push_back(entry);
+    while (it_state->second.activity_log.size() > 16) {
+      it_state->second.activity_log.erase(it_state->second.activity_log.begin());
+    }
+  }
 }
 
 void StreamStateManager::pushTokenUsage(const std::string &,
                                         const shared::AgentMetrics &) {}
 
-void StreamStateManager::handleAgentCompleted(const shared::AgentCompleted &e) {
+void StreamStateManager::reactivateSubagentParentView(
+    const std::string &agentId) {
+  auto it_sub = subagent_to_parent_tool_.find(agentId);
+  if (it_sub == subagent_to_parent_tool_.end()) {
+    return;
+  }
+  auto it_parent = tool_calls_.find(it_sub->second);
+  if (it_parent == tool_calls_.end() || !it_parent->second) {
+    return;
+  }
+
+  auto &parentView = it_parent->second;
+  parentView->subagent_running = true;
+  parentView->phase = ToolPhase::Called;
+  auto it_state = subagent_state_.find(it_sub->second);
+  if (it_state != subagent_state_.end()) {
+    it_state->second.running = true;
+    it_state->second.provider_waiting = true;
+    it_state->second.wait_state = "provider_waiting";
+  }
+}
+
+void StreamStateManager::handleAgentFinished(const shared::AgentFinished &e) {
   auto it_sub = subagent_to_parent_tool_.find(e.agentId);
   if (it_sub != subagent_to_parent_tool_.end()) {
     auto it_parent = tool_calls_.find(it_sub->second);
     if (it_parent != tool_calls_.end() && it_parent->second) {
+      auto &parentView = it_parent->second;
+      if (e.outcome.kind == shared::AgentOutcome::Kind::Failed &&
+          parentView->phase == ToolPhase::Error) {
+        parentView->subagent_running = false;
+        return;
+      }
+
       shared::SubagentToolLogEntry entry;
-      entry.summary = "Done";
-      entry.phase = shared::ToolPhase::Finished;
+      switch (e.outcome.kind) {
+      case shared::AgentOutcome::Kind::Response:
+        entry.summary = "Done";
+        break;
+      case shared::AgentOutcome::Kind::NoSummary:
+        entry.summary = "Done (no summary)";
+        break;
+      case shared::AgentOutcome::Kind::Cancelled:
+        entry.summary = "Cancelled";
+        break;
+      case shared::AgentOutcome::Kind::Failed:
+        entry.summary = e.outcome.text.empty()
+                             ? "Failed"
+                             : "Failed: " + e.outcome.text;
+        break;
+      }
+      entry.phase = e.outcome.kind == shared::AgentOutcome::Kind::Failed
+                        ? shared::ToolPhase::Error
+                        : shared::ToolPhase::Finished;
       entry.toolCallId = "";
-      it_parent->second->subagent_tool_log.push_back(entry);
-      it_parent->second->subagent_running = false;
-      it_parent->second->phase = ToolPhase::Finished; // Mark tool as finished when subagent completes
+      parentView->subagent_tool_log.push_back(entry);
+      parentView->subagent_running = false;
+      parentView->phase =
+          e.outcome.kind == shared::AgentOutcome::Kind::Failed
+              ? ToolPhase::Error
+              : ToolPhase::Finished;
+
+      auto &subagent = subagent_state_[it_sub->second];
+      subagent.parent_tool_call_id = it_sub->second;
+      subagent.owner_agent_id = parentView->agentId;
+      subagent.running = false;
+      subagent.waiting = false;
+      subagent.provider_waiting = false;
+      subagent.retrying = false;
+      subagent.account_switched = false;
+      subagent.activity_log.push_back(entry);
+      switch (e.outcome.kind) {
+      case shared::AgentOutcome::Kind::Response:
+        subagent.outcome = SubagentOutcomeKind::Response;
+        subagent.wait_state = "completed";
+        break;
+      case shared::AgentOutcome::Kind::NoSummary:
+        subagent.outcome = SubagentOutcomeKind::NoSummary;
+        subagent.wait_state = "completed_no_summary";
+        break;
+      case shared::AgentOutcome::Kind::Cancelled:
+        subagent.outcome = SubagentOutcomeKind::Cancelled;
+        subagent.wait_state = "cancelled";
+        break;
+      case shared::AgentOutcome::Kind::Failed:
+        subagent.outcome = SubagentOutcomeKind::Failed;
+        subagent.wait_state = "failed";
+        break;
+      }
+      subagent.final_summary = e.outcome.text;
+      subagent.error_text =
+          e.outcome.kind == shared::AgentOutcome::Kind::Failed ? e.outcome.text : "";
+      subagent.artifacts_created.clear();
+      subagent.artifacts_updated.clear();
+      for (const auto &artifact : e.outcome.artifacts_created) {
+        if (!artifact.filename.empty()) {
+          const std::string owner =
+              artifact.ownerFriendlyName.empty() ? artifact.ownerAgentId
+                                                 : artifact.ownerFriendlyName;
+          subagent.artifacts_created.push_back("@artifact:" + owner + "/" +
+                                               artifact.filename);
+        } else if (!artifact.storagePath.empty()) {
+          subagent.artifacts_created.push_back(artifact.storagePath);
+        }
+      }
+      for (const auto &artifact : e.outcome.artifacts_updated) {
+        if (!artifact.filename.empty()) {
+          const std::string owner =
+              artifact.ownerFriendlyName.empty() ? artifact.ownerAgentId
+                                                 : artifact.ownerFriendlyName;
+          subagent.artifacts_updated.push_back("@artifact:" + owner + "/" +
+                                               artifact.filename);
+        } else if (!artifact.storagePath.empty()) {
+          subagent.artifacts_updated.push_back(artifact.storagePath);
+        }
+      }
+      while (subagent.activity_log.size() > 16) {
+        subagent.activity_log.erase(subagent.activity_log.begin());
+      }
     }
   }
 }
@@ -501,6 +1304,50 @@ void StreamStateManager::handleAgentInterrupted(
   s.is_thinking = false;
   clearActiveLiveEntry(e.agentId);
   clearRetryStatus();
+}
+
+void StreamStateManager::handleAgentError(const shared::AgentError &e) {
+  auto &s = streams_[e.agentId];
+  s.provider_waiting = false;
+  s.is_thinking = false;
+  clearActiveLiveEntry(e.agentId);
+  clearRetryStatus();
+
+  auto it_sub = subagent_to_parent_tool_.find(e.agentId);
+  if (it_sub == subagent_to_parent_tool_.end()) {
+    return;
+  }
+  auto it_parent = tool_calls_.find(it_sub->second);
+  if (it_parent == tool_calls_.end() || !it_parent->second) {
+    return;
+  }
+
+  auto &parentView = it_parent->second;
+  parentView->subagent_running = false;
+  parentView->phase = ToolPhase::Error;
+  shared::SubagentToolLogEntry entry;
+  entry.summary = "Failed: " + e.message;
+  entry.phase = shared::ToolPhase::Error;
+  parentView->subagent_tool_log.push_back(std::move(entry));
+  while (parentView->subagent_tool_log.size() > 8) {
+    parentView->subagent_tool_log.erase(parentView->subagent_tool_log.begin());
+  }
+
+  auto &subagent = subagent_state_[it_sub->second];
+  subagent.parent_tool_call_id = it_sub->second;
+  subagent.owner_agent_id = parentView->agentId;
+  subagent.running = false;
+  subagent.waiting = false;
+  subagent.provider_waiting = false;
+  subagent.retrying = false;
+  subagent.account_switched = false;
+  subagent.outcome = SubagentOutcomeKind::Failed;
+  subagent.wait_state = "failed";
+  subagent.error_text = e.message;
+  subagent.activity_log.push_back(parentView->subagent_tool_log.back());
+  while (subagent.activity_log.size() > 16) {
+    subagent.activity_log.erase(subagent.activity_log.begin());
+  }
 }
 
 const StreamState *
@@ -528,6 +1375,101 @@ StreamStateManager::getToolView(const std::string &toolCallId) const {
   return nullptr;
 }
 
+const NormalizedProcessState *
+StreamStateManager::getProcessState(const std::string &processId) const {
+  auto it = process_state_.find(processId);
+  if (it == process_state_.end()) {
+    return nullptr;
+  }
+  return &it->second;
+}
+
+const NormalizedProcessState *
+StreamStateManager::getProcessStateForToolCall(const std::string &toolCallId) const {
+  if (toolCallId.empty()) {
+    return nullptr;
+  }
+  for (const auto &[_, state] : process_state_) {
+    if (state.origin_tool_call_id == toolCallId) {
+      return &state;
+    }
+  }
+
+  auto it_view = tool_calls_.find(toolCallId);
+  if (it_view != tool_calls_.end() && it_view->second) {
+    const auto &view = it_view->second;
+    if (!view->process_id.empty()) {
+      auto it_process = process_state_.find(view->process_id);
+      if (it_process != process_state_.end()) {
+        return &it_process->second;
+      }
+    }
+    ParsedToolArgs parsed_args = parseToolArgs(view->args);
+    if (!parsed_args.process_id.empty()) {
+      auto it_process = process_state_.find(parsed_args.process_id);
+      if (it_process != process_state_.end()) {
+        return &it_process->second;
+      }
+    }
+  }
+  return nullptr;
+}
+
+const NormalizedSubagentState *
+StreamStateManager::getSubagentState(
+    const std::string &parentToolCallId) const {
+  auto it = subagent_state_.find(parentToolCallId);
+  if (it == subagent_state_.end()) {
+    return nullptr;
+  }
+  return &it->second;
+}
+
+const NormalizedSubagentState *
+StreamStateManager::getSubagentStateForToolCall(
+    const std::string &toolCallId) const {
+  if (toolCallId.empty()) {
+    return nullptr;
+  }
+  auto it_direct = subagent_tool_to_parent_.find(toolCallId);
+  if (it_direct != subagent_tool_to_parent_.end()) {
+    auto it_state = subagent_state_.find(it_direct->second);
+    if (it_state != subagent_state_.end()) {
+      return &it_state->second;
+    }
+  }
+
+  auto it_state = subagent_state_.find(toolCallId);
+  if (it_state != subagent_state_.end()) {
+    return &it_state->second;
+  }
+
+  auto it_view = tool_calls_.find(toolCallId);
+  if (it_view != tool_calls_.end() && it_view->second) {
+    const auto &view = it_view->second;
+    if (!view->subagent_id.empty()) {
+      auto it_parent = subagent_to_parent_tool_.find(view->subagent_id);
+      if (it_parent != subagent_to_parent_tool_.end()) {
+        auto it_state2 = subagent_state_.find(it_parent->second);
+        if (it_state2 != subagent_state_.end()) {
+          return &it_state2->second;
+        }
+      }
+    }
+    ParsedSubagentArgs parsed_args = parseSubagentArgs(view->args);
+    if (!parsed_args.agent_id.empty()) {
+      auto it_parent = subagent_to_parent_tool_.find(parsed_args.agent_id);
+      if (it_parent != subagent_to_parent_tool_.end()) {
+        auto it_state2 = subagent_state_.find(it_parent->second);
+        if (it_state2 != subagent_state_.end()) {
+          return &it_state2->second;
+        }
+      }
+    }
+  }
+  return nullptr;
+}
+
 std::string StreamStateManager::getAgentTitle(
     const std::string &agentId) const {
   auto it = agent_titles_.find(agentId);
@@ -545,64 +1487,48 @@ ProcessCounts StreamStateManager::getProcessCounts(
     const std::string &agentId, const ProcessRuntimeSnapshot *runtime_snapshot,
     const std::function<bool(const std::string &)> &is_process_running) const {
   ProcessCounts counts;
-  std::unordered_set<std::string> counted_processes;
+  std::unordered_map<std::string, NormalizedProcessState> effective;
 
-  auto count_if_running = [&](const std::string &process_id,
-                              bool background) {
-    if (process_id.empty()) {
-      return;
+  for (const auto &[process_id, state] : process_state_) {
+    if (state.owner_agent_id == agentId) {
+      effective[process_id] = state;
     }
-    if (counted_processes.count(process_id) > 0) {
-      return;
-    }
-    if (is_process_running && !is_process_running(process_id)) {
-      return;
-    }
-    counted_processes.insert(process_id);
-    if (background) {
-      ++counts.background;
-    } else {
-      ++counts.live;
-    }
-  };
+  }
 
   if (runtime_snapshot) {
     std::unordered_set<std::string> blocking(
         runtime_snapshot->blocking_process_ids.begin(),
         runtime_snapshot->blocking_process_ids.end());
-    for (const auto &process_id : blocking) {
-      count_if_running(process_id, false);
-    }
     for (const auto &process_id : runtime_snapshot->owned_process_ids) {
-      count_if_running(process_id, blocking.count(process_id) == 0);
+      auto &state = effective[process_id];
+      state.process_id = process_id;
+      state.owner_agent_id = agentId;
+      state.running = true;
+      state.finished = false;
+      state.is_blocking = blocking.count(process_id) > 0;
+      state.is_background = !state.is_blocking;
+    }
+    for (const auto &process_id : blocking) {
+      auto &state = effective[process_id];
+      state.process_id = process_id;
+      state.owner_agent_id = agentId;
+      state.running = true;
+      state.finished = false;
+      state.is_blocking = true;
+      state.is_background = false;
     }
   }
 
-  for (const auto &[_, view] : tool_calls_) {
-    if (!view || view->agentId != agentId || view->process_id.empty()) {
+  for (auto &[process_id, state] : effective) {
+    if (is_process_running) {
+      const bool running = is_process_running(process_id);
+      state.running = running;
+      state.finished = !running;
+    }
+    if (!state.running || state.finished) {
       continue;
     }
-    if (view->phase == ToolPhase::Called) {
-      count_if_running(view->process_id, false);
-    } else if (view->phase == ToolPhase::BackgroundRunning) {
-      count_if_running(view->process_id, true);
-    }
-  }
-
-  for (const auto &[processId, owner] : process_to_agent_) {
-    if (owner != agentId) {
-      continue;
-    }
-    if (counted_processes.count(processId) > 0) {
-      continue;
-    }
-    auto it_finished = process_finished_state_.find(processId);
-    if (it_finished != process_finished_state_.end() && it_finished->second) {
-      continue;
-    }
-    auto it_background = process_background_state_.find(processId);
-    if (it_background != process_background_state_.end() &&
-        it_background->second) {
+    if (state.is_background && !state.is_blocking) {
       ++counts.background;
     } else {
       ++counts.live;
@@ -622,16 +1548,69 @@ void StreamStateManager::handleAgentRetrying(const shared::AgentRetrying &e) {
   if (!e.accountLocator.empty()) {
     retry_status_ += " [Account: " + e.accountLocator + "]";
   }
+  reactivateSubagentParentView(e.agentId);
+  auto it_parent = subagent_to_parent_tool_.find(e.agentId);
+  if (it_parent != subagent_to_parent_tool_.end()) {
+    auto &subagent = subagent_state_[it_parent->second];
+    subagent.retrying = true;
+    subagent.provider_waiting = false;
+    subagent.account_switched = false;
+    subagent.running = true;
+    subagent.wait_state = "retrying";
+    shared::SubagentToolLogEntry entry;
+    entry.summary = "Retrying (" + std::to_string(e.attempt) + "/" +
+                    std::to_string(e.maxAttempts) + ")";
+    entry.phase = shared::ToolPhase::Preparing;
+    subagent.activity_log.push_back(std::move(entry));
+    while (subagent.activity_log.size() > 16) {
+      subagent.activity_log.erase(subagent.activity_log.begin());
+    }
+  }
 }
 
 void StreamStateManager::handleAgentAccountSwitched(
     const shared::AgentAccountSwitched &e) {
   account_swaps_.push_back("[Account Switch] -> " + e.accountLocator);
+  reactivateSubagentParentView(e.agentId);
+  auto it_parent = subagent_to_parent_tool_.find(e.agentId);
+  if (it_parent != subagent_to_parent_tool_.end()) {
+    auto &subagent = subagent_state_[it_parent->second];
+    subagent.account_switched = true;
+    subagent.provider_waiting = false;
+    subagent.retrying = false;
+    subagent.running = true;
+    subagent.wait_state = "account_switched";
+    shared::SubagentToolLogEntry entry;
+    entry.summary = "Account switched to " + e.accountLocator;
+    entry.phase = shared::ToolPhase::Finished;
+    subagent.activity_log.push_back(std::move(entry));
+    while (subagent.activity_log.size() > 16) {
+      subagent.activity_log.erase(subagent.activity_log.begin());
+    }
+  }
 }
 
 void StreamStateManager::handleAgentRetryFailed(
-    const shared::AgentRetryFailed &) {
+    const shared::AgentRetryFailed &e) {
   clearRetryStatus();
+  auto it_parent = subagent_to_parent_tool_.find(e.agentId);
+  if (it_parent != subagent_to_parent_tool_.end()) {
+    auto &subagent = subagent_state_[it_parent->second];
+    subagent.retrying = false;
+    subagent.provider_waiting = false;
+    subagent.running = false;
+    subagent.wait_state = "failed";
+    if (!e.reason.empty()) {
+      subagent.error_text = e.reason;
+      shared::SubagentToolLogEntry entry;
+      entry.summary = "Retry failed: " + e.reason;
+      entry.phase = shared::ToolPhase::Error;
+      subagent.activity_log.push_back(std::move(entry));
+      while (subagent.activity_log.size() > 16) {
+        subagent.activity_log.erase(subagent.activity_log.begin());
+      }
+    }
+  }
   // Transient error rendering is disabled.
 }
 
@@ -644,15 +1623,16 @@ const std::vector<std::string> &StreamStateManager::getAccountSwaps() const {
 }
 
 void StreamStateManager::handleMessageQueued(const shared::MessageQueued &e) {
-  queued_messages_.emplace_back(e.messageId, e.text);
+  queued_messages_.push_back(
+      {e.messageId, e.text, e.threadId, e.agentId});
 }
 
 void StreamStateManager::handleMessageDequeued(
     const shared::MessageDequeued &e) {
   queued_messages_.erase(std::remove_if(queued_messages_.begin(),
                                         queued_messages_.end(),
-                                        [&](const auto &pair) {
-                                          return pair.first == e.messageId;
+                                        [&](const QueuedMessageEntry &entry) {
+                                          return entry.message_id == e.messageId;
                                         }),
                          queued_messages_.end());
 }
@@ -663,11 +1643,13 @@ void StreamStateManager::handleThreadChanged() {
   tool_calls_.clear();
   timeline_.clear();
   subagent_to_parent_tool_.clear();
+  subagent_state_.clear();
+  subagent_tool_to_parent_.clear();
   streams_.clear();
   process_to_toolcall_.clear();
   process_to_agent_.clear();
-  process_background_state_.clear();
-  process_finished_state_.clear();
+  process_state_.clear();
+  last_todo_result_by_agent_.clear();
   pending_process_output_.clear();
   live_quick_clusters_.clear();
   tool_call_cluster_ids_.clear();
@@ -721,11 +1703,150 @@ void StreamStateManager::rebuildToolCallsFromHistory(
                 view->success = true;
                 view->phase = ToolPhase::Finished;
               }
+
+              if (view->name == "summon_subagent" || view->name == "subagent_wait") {
+                ParsedSubagentArgs parsed_args = parseSubagentArgs(view->args);
+                std::string parent_tool_id = tc->id;
+                if (view->name == "subagent_wait" && !parsed_args.agent_id.empty()) {
+                  auto it_parent = subagent_to_parent_tool_.find(parsed_args.agent_id);
+                  if (it_parent != subagent_to_parent_tool_.end()) {
+                    parent_tool_id = it_parent->second;
+                  }
+                }
+                auto &subagent = subagent_state_[parent_tool_id];
+                subagent.parent_tool_call_id = parent_tool_id;
+                subagent.owner_agent_id = agentId;
+                subagent_tool_to_parent_[tc->id] = parent_tool_id;
+                if (!parsed_args.title.empty()) {
+                  subagent.child_title = parsed_args.title;
+                } else if (!parsed_args.name.empty() && subagent.child_title.empty()) {
+                  subagent.child_title = parsed_args.name;
+                }
+                if (!parsed_args.task.empty()) {
+                  subagent.task = parsed_args.task;
+                }
+                if (!parsed_args.agent_id.empty()) {
+                  subagent.child_agent_id = parsed_args.agent_id;
+                  subagent_to_parent_tool_[parsed_args.agent_id] = parent_tool_id;
+                  view->subagent_id = parsed_args.agent_id;
+                }
+                if (!subagent.child_title.empty()) {
+                  view->subagent_title = subagent.child_title;
+                }
+
+                // Only backfill generic terminal state when no typed state was
+                // established from parsed tool result.
+                if (subagent.wait_state.empty()) {
+                  subagent.running = false;
+                  subagent.waiting = false;
+                  subagent.wait_state = view->success ? "completed" : "failed";
+                  if (view->success) {
+                    subagent.outcome = SubagentOutcomeKind::Response;
+                  } else {
+                    subagent.outcome = SubagentOutcomeKind::Failed;
+                  }
+                }
+              }
+
+              auto it_sub = subagent_to_parent_tool_.find(agentId);
+              if (it_sub != subagent_to_parent_tool_.end()) {
+                auto it_parent = tool_calls_.find(it_sub->second);
+                if (it_parent != tool_calls_.end() && it_parent->second) {
+                  auto it_result = toolResults.find(tc->id);
+                  const bool success =
+                      it_result != toolResults.end() ? it_result->second.first : true;
+                  const std::string result =
+                      it_result != toolResults.end() ? it_result->second.second : "";
+                  const std::string summary = summarizeHistoricalToolEntry(
+                      tc->name, tc->args, result, success);
+
+                  if (!summary.empty()) {
+                    shared::SubagentToolLogEntry entry;
+                    entry.summary = summary;
+                    entry.phase = success ? shared::ToolPhase::Finished
+                                          : shared::ToolPhase::Error;
+                    entry.toolCallId = tc->id;
+                    entry.name = tc->name;
+                    entry.args = tc->args;
+                    it_parent->second->subagent_tool_log.push_back(entry);
+                    while (it_parent->second->subagent_tool_log.size() > 8) {
+                      it_parent->second->subagent_tool_log.erase(
+                          it_parent->second->subagent_tool_log.begin());
+                    }
+
+                    auto &activity = subagent_state_[it_sub->second].activity_log;
+                    activity.push_back(std::move(entry));
+                    while (activity.size() > 16) {
+                      activity.erase(activity.begin());
+                    }
+                  }
+                }
+              }
             }
           }
         }
       }
     }
+  }
+
+  auto relink_subagent_parent = [&](const std::string &from_parent_tool_id,
+                                    const std::string &to_parent_tool_id) {
+    if (from_parent_tool_id.empty() || to_parent_tool_id.empty() ||
+        from_parent_tool_id == to_parent_tool_id) {
+      return;
+    }
+    auto source_it = subagent_state_.find(from_parent_tool_id);
+    if (source_it == subagent_state_.end()) {
+      return;
+    }
+
+    auto &target = subagent_state_[to_parent_tool_id];
+    if (target.parent_tool_call_id.empty()) {
+      target.parent_tool_call_id = to_parent_tool_id;
+    }
+    if (target.owner_agent_id.empty()) {
+      target.owner_agent_id = agentId;
+    }
+    MergeSubagentState(target, source_it->second);
+
+    for (auto &[tool_call_id, parent_tool_id] : subagent_tool_to_parent_) {
+      if (parent_tool_id == from_parent_tool_id) {
+        parent_tool_id = to_parent_tool_id;
+      }
+    }
+    for (auto &[child_agent_id, parent_tool_id] : subagent_to_parent_tool_) {
+      if (parent_tool_id == from_parent_tool_id) {
+        parent_tool_id = to_parent_tool_id;
+      }
+    }
+
+    subagent_state_.erase(source_it);
+  };
+
+  // Re-link subagent_wait calls to their summon_subagent parent once all
+  // historical results have been parsed. This keeps one normalized subagent
+  // truth record even when wait calls appear before summon calls in history.
+  for (const auto &[tool_call_id, view] : tool_calls_) {
+    if (!view || view->name != "subagent_wait") {
+      continue;
+    }
+    ParsedSubagentArgs parsed_args = parseSubagentArgs(view->args);
+    const std::string child_agent_id =
+        !view->subagent_id.empty() ? view->subagent_id : parsed_args.agent_id;
+    if (child_agent_id.empty()) {
+      continue;
+    }
+    auto parent_it = subagent_to_parent_tool_.find(child_agent_id);
+    if (parent_it == subagent_to_parent_tool_.end()) {
+      continue;
+    }
+    const std::string canonical_parent_tool_id = parent_it->second;
+    const std::string current_parent_tool_id =
+        subagent_tool_to_parent_.count(tool_call_id) > 0
+            ? subagent_tool_to_parent_[tool_call_id]
+            : tool_call_id;
+    relink_subagent_parent(current_parent_tool_id, canonical_parent_tool_id);
+    subagent_tool_to_parent_[tool_call_id] = canonical_parent_tool_id;
   }
 
   // Third pass: populate subagent_tool_log for summon_subagent tool calls
@@ -776,6 +1897,20 @@ void StreamStateManager::rebuildToolCallsFromHistory(
     if (!subagentId.empty()) {
       view->subagent_id = subagentId;
     }
+    auto &subagent = subagent_state_[toolCallId];
+    subagent.parent_tool_call_id = toolCallId;
+    subagent.owner_agent_id = view->agentId;
+    if (!subagentTitle.empty()) {
+      subagent.child_title = subagentTitle;
+    }
+    if (!subagentTask.empty()) {
+      subagent.task = subagentTask;
+    }
+    if (!subagentId.empty()) {
+      subagent.child_agent_id = subagentId;
+      subagent_to_parent_tool_[subagentId] = toolCallId;
+    }
+    subagent_tool_to_parent_[toolCallId] = toolCallId;
 
     // If we have a subagent ID, try to get its history and synthesize the log
     if (!subagentId.empty()) {
@@ -800,64 +1935,69 @@ void StreamStateManager::rebuildToolCallsFromHistory(
       }
 
       if (subHistory && !subHistory->turns.empty()) {
-        // Synthesize subagent_tool_log from subagent's history
-        std::vector<shared::SubagentToolLogEntry> logEntries;
-
-        // Add task description as first entry if available
-        if (!subagentTask.empty()) {
-          shared::SubagentToolLogEntry entry;
-          entry.summary = "Task: " + subagentTask;
-          entry.phase = shared::ToolPhase::Finished;
-          entry.toolCallId = "";
-          logEntries.push_back(std::move(entry));
-        }
-
-        // Extract tool calls from subagent's history
-        for (const auto &turn : subHistory->turns) {
-          for (const auto &msg : turn.messages) {
-            if (msg.role == shared::Role::Assistant) {
-              for (const auto &content : msg.content) {
-                if (auto *tc = std::get_if<shared::ToolCallContent>(&content)) {
-                  shared::SubagentToolLogEntry entry;
-                  entry.name = tc->name;
-                  entry.args = tc->args;
-                  entry.toolCallId = tc->id;
-                  entry.phase = shared::ToolPhase::Finished; // Historical data = completed
-                  entry.summary = shared::SummarizeToolCall(tc->name, tc->args, shared::ToolPhase::Finished);
-                  logEntries.push_back(std::move(entry));
-                } else if (auto *th = std::get_if<shared::ThinkingContent>(&content)) {
-                  if (!th->thinking.empty()) {
-                    shared::SubagentToolLogEntry entry;
-                    entry.summary = "Thought";
-                    entry.phase = shared::ToolPhase::Finished;
-                    entry.toolCallId = "";
-                    logEntries.push_back(std::move(entry));
-                  }
-                }
-              }
-            }
-          }
-        }
-
-        // Add "Done" entry only if the agent actually completed
-        if (view->success && view->phase == ToolPhase::Finished) {
-          shared::SubagentToolLogEntry doneEntry;
-          doneEntry.summary = "Done";
-          doneEntry.phase = shared::ToolPhase::Finished;
-          doneEntry.toolCallId = "";
-          logEntries.push_back(std::move(doneEntry));
-        }
-
-        // Limit log size but ensure we keep recent entries
+        auto logEntries =
+            synthesizeHistoricalSubagentLog(*subHistory, subagentTask, subagent);
         while (logEntries.size() > 8) {
           logEntries.erase(logEntries.begin());
         }
 
-        view->subagent_tool_log = std::move(logEntries);
+        auto choose_richer_log = [&](std::vector<shared::SubagentToolLogEntry> generated)
+            -> std::vector<shared::SubagentToolLogEntry> {
+          const auto is_informative = [](const shared::SubagentToolLogEntry &entry) {
+            if (!entry.toolCallId.empty()) {
+              return true;
+            }
+            return entry.summary.rfind("Task: ", 0) != 0 &&
+                   entry.summary != "Done";
+          };
+          size_t generated_informative = 0;
+          for (const auto &entry : generated) {
+            if (is_informative(entry)) {
+              ++generated_informative;
+            }
+          }
+          size_t existing_informative = 0;
+          for (const auto &entry : subagent.activity_log) {
+            if (is_informative(entry)) {
+              ++existing_informative;
+            }
+          }
+          if (existing_informative > generated_informative ||
+              (existing_informative == generated_informative &&
+               subagent.activity_log.size() > generated.size())) {
+            return subagent.activity_log;
+          }
+          return generated;
+        };
+
+        auto merged_log = choose_richer_log(std::move(logEntries));
+        if (auto terminal = terminalSubagentLogEntry(subagent);
+            terminal.has_value()) {
+          const bool has_terminal =
+              !merged_log.empty() &&
+              merged_log.back().summary == terminal->summary;
+          if (!has_terminal) {
+            merged_log.push_back(*terminal);
+          }
+        }
+        while (merged_log.size() > 8) {
+          merged_log.erase(merged_log.begin());
+        }
+        view->subagent_tool_log = merged_log;
         view->subagent_running = false;
+        subagent.activity_log = std::move(merged_log);
+        if (subagent.wait_state.empty()) {
+          subagent.running = false;
+          subagent.waiting = false;
+          subagent.wait_state = view->success ? "completed" : "failed";
+          if (view->success) {
+            subagent.outcome = SubagentOutcomeKind::Response;
+          } else {
+            subagent.outcome = SubagentOutcomeKind::Failed;
+          }
+        }
       } else {
         // No subagent history available - create minimal log
-        // Only add "Done" if the tool call indicates completion
         std::vector<shared::SubagentToolLogEntry> logEntries;
         
         if (!subagentTask.empty()) {
@@ -868,24 +2008,89 @@ void StreamStateManager::rebuildToolCallsFromHistory(
           logEntries.push_back(std::move(entry));
         }
         
-        // Add "Done" entry only if the tool call indicates completion
-        if (view->success && view->phase == ToolPhase::Finished) {
+        if (!subagent.wait_state.empty()) {
           shared::SubagentToolLogEntry doneEntry;
-          doneEntry.summary = "Done";
-          doneEntry.phase = shared::ToolPhase::Finished;
-          doneEntry.toolCallId = "";
-          logEntries.push_back(std::move(doneEntry));
+          if (subagent.wait_state == "completed") {
+            doneEntry.summary = "Done";
+            doneEntry.phase = shared::ToolPhase::Finished;
+          } else if (subagent.wait_state == "completed_no_summary") {
+            doneEntry.summary = "Done (no summary)";
+            doneEntry.phase = shared::ToolPhase::Finished;
+          } else if (subagent.wait_state == "cancelled") {
+            doneEntry.summary = "Cancelled";
+            doneEntry.phase = shared::ToolPhase::Finished;
+          } else if (subagent.wait_state == "failed") {
+            doneEntry.summary =
+                subagent.error_text.empty() ? "Failed"
+                                            : "Failed: " + subagent.error_text;
+            doneEntry.phase = shared::ToolPhase::Error;
+          }
+          if (!doneEntry.summary.empty()) {
+            logEntries.push_back(std::move(doneEntry));
+          }
         }
         
-        view->subagent_tool_log = std::move(logEntries);
+        auto choose_richer_log = [&](std::vector<shared::SubagentToolLogEntry> generated)
+            -> std::vector<shared::SubagentToolLogEntry> {
+          const auto is_informative = [](const shared::SubagentToolLogEntry &entry) {
+            if (!entry.toolCallId.empty()) {
+              return true;
+            }
+            return entry.summary.rfind("Task: ", 0) != 0 &&
+                   entry.summary != "Done";
+          };
+          size_t generated_informative = 0;
+          for (const auto &entry : generated) {
+            if (is_informative(entry)) {
+              ++generated_informative;
+            }
+          }
+          size_t existing_informative = 0;
+          for (const auto &entry : subagent.activity_log) {
+            if (is_informative(entry)) {
+              ++existing_informative;
+            }
+          }
+          if (existing_informative > generated_informative ||
+              (existing_informative == generated_informative &&
+               subagent.activity_log.size() > generated.size())) {
+            return subagent.activity_log;
+          }
+          return generated;
+        };
+
+        auto merged_log = choose_richer_log(std::move(logEntries));
+        if (auto terminal = terminalSubagentLogEntry(subagent);
+            terminal.has_value()) {
+          const bool has_terminal =
+              !merged_log.empty() &&
+              merged_log.back().summary == terminal->summary;
+          if (!has_terminal) {
+            merged_log.push_back(*terminal);
+          }
+        }
+        while (merged_log.size() > 8) {
+          merged_log.erase(merged_log.begin());
+        }
+        view->subagent_tool_log = merged_log;
         view->subagent_running = false;
+        subagent.activity_log = std::move(merged_log);
+        if (subagent.wait_state.empty()) {
+          subagent.running = false;
+          subagent.waiting = false;
+          subagent.wait_state = view->success ? "completed" : "failed";
+          if (view->success) {
+            subagent.outcome = SubagentOutcomeKind::Response;
+          } else {
+            subagent.outcome = SubagentOutcomeKind::Failed;
+          }
+        }
       }
     }
   }
 }
 
-const std::vector<std::pair<std::string, std::string>> &
-StreamStateManager::getQueuedMessages() const {
+const std::vector<QueuedMessageEntry> &StreamStateManager::getQueuedMessages() const {
   return queued_messages_;
 }
 
@@ -968,21 +2173,188 @@ void StreamStateManager::applyToolResult(
     return;
   }
 
+  if (view->name == "todo_write") {
+    auto it_previous = last_todo_result_by_agent_.find(view->agentId);
+    view->previous_result =
+        it_previous != last_todo_result_by_agent_.end() ? it_previous->second : "";
+  }
   view->success = success;
   view->result = result;
+  if (view->name == "subagent_wait" || view->name == "summon_subagent") {
+    ParsedSubagentArgs parsed_args = parseSubagentArgs(view->args);
+    ParsedSubagentResult parsedSubagent = parseSubagentResult(result);
+    std::string parent_tool_id = view->toolCallId;
+    if (view->name == "subagent_wait" && !parsed_args.agent_id.empty()) {
+      auto it_parent = subagent_to_parent_tool_.find(parsed_args.agent_id);
+      if (it_parent != subagent_to_parent_tool_.end()) {
+        parent_tool_id = it_parent->second;
+      }
+    }
+    auto &subagent = subagent_state_[parent_tool_id];
+    subagent.parent_tool_call_id = parent_tool_id;
+    subagent.owner_agent_id = view->agentId;
+    subagent.waiting = (view->name == "subagent_wait");
+    subagent.running = !subagent.waiting;
+    subagent.provider_waiting = false;
+    subagent.retrying = false;
+    subagent.account_switched = false;
+    if (!parsed_args.task.empty()) {
+      subagent.task = parsed_args.task;
+    }
+    if (!parsed_args.title.empty()) {
+      subagent.child_title = parsed_args.title;
+    } else if (!parsed_args.name.empty() && subagent.child_title.empty()) {
+      subagent.child_title = parsed_args.name;
+    }
+    if (!parsed_args.agent_id.empty()) {
+      subagent.child_agent_id = parsed_args.agent_id;
+      subagent_to_parent_tool_[parsed_args.agent_id] = parent_tool_id;
+    }
+    if (!parsedSubagent.agent_id.empty()) {
+      subagent.child_agent_id = parsedSubagent.agent_id;
+      subagent_to_parent_tool_[parsedSubagent.agent_id] = parent_tool_id;
+    }
+    subagent_tool_to_parent_[view->toolCallId] = parent_tool_id;
+
+    if (!parsedSubagent.status.empty()) {
+      view->subagent_wait_state = parsedSubagent.status;
+      view->subagent_wait_message = !parsedSubagent.error.empty()
+                                        ? parsedSubagent.error
+                                        : parsedSubagent.summary;
+      view->subagent_fallback_used = parsedSubagent.fallback_used;
+      view->subagent_route_category = parsedSubagent.route_category;
+      view->subagent_attempted_categories =
+          std::move(parsedSubagent.attempted_categories);
+      subagent.wait_state = view->subagent_wait_state;
+      subagent.final_summary = parsedSubagent.summary;
+      subagent.error_text = parsedSubagent.error;
+      subagent.fallback_used = parsedSubagent.fallback_used;
+      subagent.route_category = parsedSubagent.route_category;
+      subagent.attempted_categories = view->subagent_attempted_categories;
+      subagent.artifacts_created = parsedSubagent.artifacts_created;
+      subagent.artifacts_updated = parsedSubagent.artifacts_updated;
+    } else {
+      view->subagent_wait_state = success ? "completed" : "failed";
+      view->subagent_wait_message = result;
+      view->subagent_fallback_used = false;
+      view->subagent_route_category.clear();
+      view->subagent_attempted_categories.clear();
+      subagent.wait_state = view->subagent_wait_state;
+      subagent.final_summary = success ? result : "";
+      subagent.error_text = success ? "" : result;
+      subagent.fallback_used = false;
+      subagent.route_category.clear();
+      subagent.attempted_categories.clear();
+      subagent.artifacts_created.clear();
+      subagent.artifacts_updated.clear();
+    }
+    if (subagent.wait_state == "completed") {
+      subagent.outcome = SubagentOutcomeKind::Response;
+      subagent.running = false;
+      subagent.waiting = false;
+    } else if (subagent.wait_state == "completed_no_summary") {
+      subagent.outcome = SubagentOutcomeKind::NoSummary;
+      subagent.running = false;
+      subagent.waiting = false;
+    } else if (subagent.wait_state == "cancelled") {
+      subagent.outcome = SubagentOutcomeKind::Cancelled;
+      subagent.running = false;
+      subagent.waiting = false;
+    } else if (subagent.wait_state == "failed") {
+      subagent.outcome = SubagentOutcomeKind::Failed;
+      subagent.running = false;
+      subagent.waiting = false;
+    } else if (subagent.wait_state == "spawned" ||
+               subagent.wait_state == "re-tasked") {
+      subagent.running = true;
+      subagent.waiting = false;
+      subagent.outcome = SubagentOutcomeKind::Unknown;
+    }
+    if (!subagent.wait_state.empty()) {
+      shared::SubagentToolLogEntry entry;
+      entry.summary = "State: " + subagent.wait_state;
+      entry.phase = success ? shared::ToolPhase::Finished : shared::ToolPhase::Error;
+      subagent.activity_log.push_back(std::move(entry));
+      while (subagent.activity_log.size() > 16) {
+        subagent.activity_log.erase(subagent.activity_log.begin());
+      }
+    }
+  }
   if (!success) {
+    if (view->name == "process_wait" || view->name == "process_status" ||
+        view->name == "process_input") {
+      ParsedToolArgs parsed_args = parseToolArgs(view->args);
+      if (!parsed_args.process_id.empty()) {
+        auto &process = process_state_[parsed_args.process_id];
+        process.process_id = parsed_args.process_id;
+        if (!view->agentId.empty()) {
+          process.owner_agent_id = view->agentId;
+        }
+        if (view->name == "process_wait") {
+          process.waiting = false;
+          process.wait_state = "failed";
+          if (!parsed_args.pattern.empty()) {
+            process.waiting_pattern = parsed_args.pattern;
+          }
+        }
+      }
+    }
     view->phase = ToolPhase::Error;
     return;
   }
 
+  ParsedToolArgs parsed_args = parseToolArgs(view->args);
   ParsedProcessResult parsed = parseProcessResult(result);
-  if (!parsed.process_id.empty()) {
-    view->process_id = parsed.process_id;
-    if (process_to_toolcall_.count(parsed.process_id) > 0) {
-      process_to_agent_[parsed.process_id] = view->agentId;
-      process_finished_state_[parsed.process_id] = false;
+  std::string process_id = !parsed.process_id.empty() ? parsed.process_id : parsed_args.process_id;
+  if (!process_id.empty()) {
+    view->process_id = process_id;
+    auto &process = process_state_[process_id];
+    process.process_id = process_id;
+    process.owner_agent_id = view->agentId;
+    process.origin_tool_call_id =
+        process.origin_tool_call_id.empty() ? view->toolCallId : process.origin_tool_call_id;
+    if (!parsed.command.empty()) {
+      process.command = parsed.command;
+    } else if (!parsed_args.command.empty() && process.command.empty()) {
+      process.command = parsed_args.command;
     }
-    flushBufferedProcessOutputForProcess(parsed.process_id);
+    if (!parsed.cwd.empty()) {
+      process.cwd = parsed.cwd;
+    } else if (!parsed_args.cwd.empty() && process.cwd.empty()) {
+      process.cwd = parsed_args.cwd;
+    }
+    if (view->name == "process_wait" && !parsed_args.pattern.empty()) {
+      process.waiting_pattern = parsed_args.pattern;
+      process.waiting = false;
+      process.wait_state = "completed";
+    }
+    if (view->name == "process_wait" || view->name == "process_status") {
+      rapidjson::Document doc;
+      doc.Parse(result.c_str());
+      if (!doc.HasParseError() && doc.IsObject()) {
+        if (doc.HasMember("isRunning") && doc["isRunning"].IsBool()) {
+          process.running = doc["isRunning"].GetBool();
+          process.finished = !process.running;
+        }
+        if (doc.HasMember("exitCode") && doc["exitCode"].IsInt()) {
+          process.exit_code = doc["exitCode"].GetInt();
+          process.exit_code_known = true;
+        }
+        if (doc.HasMember("duration_ms") && doc["duration_ms"].IsNumber()) {
+          process.duration_ms = doc["duration_ms"].GetDouble();
+        }
+        if (doc.HasMember("stdout") && doc["stdout"].IsString()) {
+          appendOutputTail(process.latest_output_tail, doc["stdout"].GetString());
+        }
+        if (doc.HasMember("stderr") && doc["stderr"].IsString()) {
+          const std::string stderr_str = doc["stderr"].GetString();
+          if (!stderr_str.empty()) {
+            appendOutputTail(process.latest_output_tail, "\n[stderr]\n" + stderr_str);
+          }
+        }
+      }
+    }
+    flushBufferedProcessOutputForProcess(process_id);
   }
   if (parsed.exit_known) {
     view->process_exit_known = true;
@@ -991,19 +2363,33 @@ void StreamStateManager::applyToolResult(
   view->process_duration_ms = parsed.duration_ms;
 
   if (view->name == "process_execute" && parsed.finish_reason == "Timeout" &&
-      !parsed.process_id.empty()) {
+      !process_id.empty()) {
     view->phase = ToolPhase::BackgroundRunning;
     view->process_is_background = true;
-    if (process_to_toolcall_.count(parsed.process_id) > 0) {
-      process_background_state_[parsed.process_id] = true;
+    auto &process = process_state_[process_id];
+    process.running = true;
+    process.finished = false;
+    process.is_background = true;
+    process.is_blocking = false;
+    process.waiting = false;
+    process.wait_state.clear();
+    if (parsed.exit_known) {
+      process.exit_code_known = true;
+      process.exit_code = parsed.exit_code;
     }
     return;
   }
 
-  if (view->name == "process_spawn" && !parsed.process_id.empty()) {
+  if (view->name == "process_spawn" && !process_id.empty()) {
     view->process_is_background = true;
-    if (process_to_toolcall_.count(parsed.process_id) > 0) {
-      process_background_state_[parsed.process_id] = true;
+    auto &process = process_state_[process_id];
+    process.is_background = true;
+    process.is_blocking = false;
+    process.running = !parsed.exit_known;
+    process.finished = parsed.exit_known;
+    if (parsed.exit_known) {
+      process.exit_code_known = true;
+      process.exit_code = parsed.exit_code;
     }
     if (parsed.exit_known) {
       view->phase = ToolPhase::Finished;
@@ -1011,12 +2397,22 @@ void StreamStateManager::applyToolResult(
       view->phase = ToolPhase::BackgroundRunning;
       return;
     }
-  } else if (!parsed.process_id.empty() &&
-             process_to_toolcall_.count(parsed.process_id) > 0) {
-    process_background_state_[parsed.process_id] = false;
+  } else if (!process_id.empty()) {
+    auto &process = process_state_[process_id];
+    process.running = false;
+    process.finished = true;
+    process.is_background = false;
+    process.is_blocking = false;
+    if (parsed.exit_known) {
+      process.exit_code_known = true;
+      process.exit_code = parsed.exit_code;
+    }
   }
 
   view->phase = ToolPhase::Finished;
+  if (view->name == "todo_write") {
+    last_todo_result_by_agent_[view->agentId] = result;
+  }
 }
 
 bool StreamStateManager::applyProcessOutputToToolView(
@@ -1032,6 +2428,13 @@ bool StreamStateManager::applyProcessOutputToToolView(
   }
 
   auto &view = it_tool->second;
+  auto &process = process_state_[e.processId];
+  process.process_id = e.processId;
+  process.origin_tool_call_id = it_pid->second;
+  if (!view->agentId.empty()) {
+    process.owner_agent_id = view->agentId;
+  }
+  appendOutputTail(process.latest_output_tail, e.output);
   if (!e.output.empty() &&
       (view->phase == ToolPhase::Called ||
        view->phase == ToolPhase::BackgroundRunning)) {
@@ -1044,11 +2447,21 @@ bool StreamStateManager::applyProcessOutputToToolView(
     view->process_exit_known = true;
     view->process_exit_code = e.exitCode;
     view->process_duration_ms = e.durationMs;
+    process.running = false;
+    process.finished = true;
+    process.exit_code_known = true;
+    process.exit_code = e.exitCode;
+    process.duration_ms = e.durationMs;
+    process.waiting = false;
+    process.wait_state = "completed";
     if (view->phase == ToolPhase::BackgroundRunning ||
         view->name == "process_spawn") {
       view->phase = ToolPhase::Finished;
       view->success = (e.exitCode == 0);
     }
+  } else {
+    process.running = true;
+    process.finished = false;
   }
   return true;
 }

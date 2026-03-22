@@ -49,6 +49,8 @@ TEST_F(ConfigLoaderRouterTest, SavesAndLoadsRouterCategoriesAndPurposeRoutes) {
   cfg.modelRouterCategories["research"] = {"openrouter", "qwen-omni", ""};
   cfg.purposeRoutes["executor"] = "code";
   cfg.defaultRouteCategory = "research";
+  cfg.enableSubagentRouteFallback = true;
+  cfg.subagentRouteFallbackOrder = {"research", "code"};
 
   loader.updateConfig(cfg);
   loader.save();
@@ -64,6 +66,10 @@ TEST_F(ConfigLoaderRouterTest, SavesAndLoadsRouterCategoriesAndPurposeRoutes) {
   EXPECT_EQ(loaded.modelRouterCategories.at("code").variantName, "thinking");
   EXPECT_EQ(loaded.purposeRoutes.at("executor"), "code");
   EXPECT_EQ(loaded.defaultRouteCategory, "research");
+  EXPECT_TRUE(loaded.enableSubagentRouteFallback);
+  ASSERT_EQ(loaded.subagentRouteFallbackOrder.size(), 2u);
+  EXPECT_EQ(loaded.subagentRouteFallbackOrder[0], "research");
+  EXPECT_EQ(loaded.subagentRouteFallbackOrder[1], "code");
 }
 
 TEST_F(ConfigLoaderRouterTest, MissingRouterFieldsRemainBackwardCompatible) {
@@ -88,8 +94,9 @@ TEST_F(ConfigLoaderRouterTest, MissingRouterFieldsRemainBackwardCompatible) {
   EXPECT_TRUE(loaded.modelRouterCategories.empty());
   EXPECT_TRUE(loaded.purposeRoutes.empty());
   EXPECT_TRUE(loaded.defaultRouteCategory.empty());
+  EXPECT_TRUE(loaded.enableSubagentRouteFallback);
+  EXPECT_TRUE(loaded.subagentRouteFallbackOrder.empty());
   EXPECT_EQ(loaded.defaultProviderId, "openai");
 }
 
 } // namespace
-

@@ -20,7 +20,7 @@ int progressCallback(void* clientp, curl_off_t dltotal, curl_off_t dlnow, curl_o
     (void)ultotal;
     (void)ulnow;
     auto* ctx = static_cast<shared::ToolContext*>(clientp);
-    if (ctx && ctx->agent.isInterrupted()) {
+    if (ctx && ctx->cancelRequested()) {
         return 1;
     }
     return 0;

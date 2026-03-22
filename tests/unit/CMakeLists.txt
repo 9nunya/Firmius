@@ -70,6 +70,20 @@ target_include_directories(test_tools PRIVATE
 )
 gtest_discover_tests(test_tools)
 
+add_executable(test_artifact_tools
+    tools/test_artifact_tools.cpp
+)
+target_link_libraries(test_artifact_tools PRIVATE
+    firmius::core
+    firmius::shared
+    GTest::gtest_main
+    GTest::gmock
+)
+target_include_directories(test_artifact_tools PRIVATE
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_artifact_tools)
+
 add_executable(test_work_tools
     tools/test_work_tools.cpp
 )
@@ -199,6 +213,19 @@ target_include_directories(test_process_manager PRIVATE
 )
 gtest_discover_tests(test_process_manager)
 
+add_executable(test_reference_expansion
+    core/test_reference_expansion.cpp
+)
+target_link_libraries(test_reference_expansion PRIVATE
+    firmius::core
+    firmius::shared
+    GTest::gtest_main
+)
+target_include_directories(test_reference_expansion PRIVATE
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_reference_expansion)
+
 # SubagentTool tests
 add_executable(test_subagent_tool
     tools/test_subagent_tool.cpp
@@ -213,6 +240,21 @@ target_include_directories(test_subagent_tool PRIVATE
     ${rapidjson_SOURCE_DIR}/include
 )
 gtest_discover_tests(test_subagent_tool)
+
+add_executable(test_subagent_artifacts
+    tools/test_subagent_artifacts.cpp
+)
+target_link_libraries(test_subagent_artifacts PRIVATE
+    firmius::core
+    firmius::shared
+    firmius::provider
+    GTest::gtest_main
+    GTest::gmock
+)
+target_include_directories(test_subagent_artifacts PRIVATE
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_subagent_artifacts)
 
 # FSUtil tests
 add_executable(test_fsutil
@@ -351,6 +393,20 @@ target_include_directories(test_input_bar PRIVATE
 )
 gtest_discover_tests(test_input_bar)
 
+add_executable(test_reference_autocomplete
+    tui/test_reference_autocomplete.cpp
+    ../../packages/tui/src/utils/ReferenceAutocomplete.cpp
+)
+target_link_libraries(test_reference_autocomplete PRIVATE
+    firmius::shared
+    GTest::gtest_main
+)
+target_include_directories(test_reference_autocomplete PRIVATE
+    ../../packages/tui/include
+    ../../packages/tui/src
+)
+gtest_discover_tests(test_reference_autocomplete)
+
 add_executable(test_active_plan_state
     tui/test_active_plan_state.cpp
     ../../packages/tui/src/ActivePlanState.cpp
@@ -418,17 +474,54 @@ gtest_discover_tests(test_transcript_grouping)
 
 add_executable(test_chat_window_helpers
     tui/test_chat_window_helpers.cpp
+    ../../packages/tui/src/components/ChatWindow.cpp
+    ../../packages/tui/src/components/ToolBlock.cpp
+    ../../packages/tui/src/components/ToolPresentationBlock.cpp
+    ../../packages/tui/src/components/ErrorDisplay.cpp
+    ../../packages/tui/src/components/Markdown.cpp
+    ../../packages/tui/src/components/ScrollableBox.cpp
+    ../../packages/tui/src/components/GlintEffect.cpp
+    ../../packages/tui/src/components/SyntaxHighlighter.cpp
+    ../../packages/tui/src/components/TranscriptGrouping.cpp
+    ../../packages/tui/src/ThemeManager.cpp
+    ../../packages/tui/src/NotificationManager.cpp
+    ../../packages/tui/src/tools/ArtifactToolPresentation.cpp
+    ../../packages/tui/src/tools/FileToolPresentation.cpp
+    ../../packages/tui/src/tools/ToolPresentation.cpp
+    ../../packages/tui/src/tools/ProcessToolPresentation.cpp
+    ../../packages/tui/src/tools/SubagentToolPresentation.cpp
+    ../../packages/tui/src/tools/WorkToolPresentation.cpp
 )
 target_link_libraries(test_chat_window_helpers PRIVATE
     firmius::shared
+    firmius::core
+    tree_sitter_all
+    ftxui::dom
+    ftxui::screen
+    ftxui::component
     GTest::gtest_main
 )
 target_include_directories(test_chat_window_helpers PRIVATE
     ../../packages/tui/include
     ../../packages/tui/src
+    ../../packages/core/include
     ../../packages/shared/include
+    ${rapidjson_SOURCE_DIR}/include
 )
 gtest_discover_tests(test_chat_window_helpers)
+
+add_executable(test_model_picker_entries
+    tui/test_model_picker_entries.cpp
+)
+target_link_libraries(test_model_picker_entries PRIVATE
+    firmius::shared
+    GTest::gtest_main
+)
+target_include_directories(test_model_picker_entries PRIVATE
+    ../../packages/tui/include
+    ../../packages/shared/include
+)
+gtest_discover_tests(test_model_picker_entries)
 
 add_executable(test_help_overlay
     tui/test_help_overlay.cpp
@@ -555,50 +648,50 @@ target_include_directories(test_agent_strip PRIVATE
 )
 gtest_discover_tests(test_agent_strip)
 
-add_executable(test_file_edit_tool_block
-    tui/test_file_edit_tool_block.cpp
-    ../../packages/tui/src/components/FileEditToolBlock.cpp
-    ../../packages/tui/src/components/FileEditDiff.cpp
-    ../../packages/tui/src/components/SyntaxHighlighter.cpp
-    ../../packages/tui/src/ThemeManager.cpp
-    ../../packages/tui/src/components/GlintEffect.cpp
-    ../../packages/tui/src/NotificationManager.cpp
+add_executable(test_tool_presentation
+    tui/test_tool_presentation.cpp
+    ../../packages/tui/src/tools/ArtifactToolPresentation.cpp
+    ../../packages/tui/src/tools/FileToolPresentation.cpp
+    ../../packages/tui/src/tools/ProcessToolPresentation.cpp
+    ../../packages/tui/src/tools/SubagentToolPresentation.cpp
+    ../../packages/tui/src/tools/ToolPresentation.cpp
+    ../../packages/tui/src/tools/WorkToolPresentation.cpp
 )
-target_link_libraries(test_file_edit_tool_block PRIVATE
+target_link_libraries(test_tool_presentation PRIVATE
     firmius::shared
     GTest::gtest_main
-    ftxui::dom
-    ftxui::screen
-    ftxui::component
-    tree_sitter_all
 )
-target_include_directories(test_file_edit_tool_block PRIVATE
+target_include_directories(test_tool_presentation PRIVATE
     ../../packages/tui/include
     ../../packages/tui/src
     ${rapidjson_SOURCE_DIR}/include
 )
-gtest_discover_tests(test_file_edit_tool_block)
+gtest_discover_tests(test_tool_presentation)
 
-add_executable(test_process_execute_tool_block
-    tui/test_process_execute_tool_block.cpp
-    ../../packages/tui/src/components/ProcessExecuteToolBlock.cpp
-    ../../packages/tui/src/components/LogWindow.cpp
-    ../../packages/tui/src/components/ANSIParser.cpp
+add_executable(test_tool_presentation_block
+    tui/test_tool_presentation_block.cpp
+    ../../packages/tui/src/components/ToolPresentationBlock.cpp
+    ../../packages/tui/src/tools/ArtifactToolPresentation.cpp
+    ../../packages/tui/src/tools/FileToolPresentation.cpp
+    ../../packages/tui/src/tools/ProcessToolPresentation.cpp
+    ../../packages/tui/src/tools/SubagentToolPresentation.cpp
+    ../../packages/tui/src/tools/ToolPresentation.cpp
+    ../../packages/tui/src/tools/WorkToolPresentation.cpp
     ../../packages/tui/src/ThemeManager.cpp
 )
-target_link_libraries(test_process_execute_tool_block PRIVATE
+target_link_libraries(test_tool_presentation_block PRIVATE
     firmius::shared
     GTest::gtest_main
     ftxui::dom
     ftxui::screen
     ftxui::component
 )
-target_include_directories(test_process_execute_tool_block PRIVATE
+target_include_directories(test_tool_presentation_block PRIVATE
     ../../packages/tui/include
     ../../packages/tui/src
     ${rapidjson_SOURCE_DIR}/include
 )
-gtest_discover_tests(test_process_execute_tool_block)
+gtest_discover_tests(test_tool_presentation_block)
 
 # Workflow tests
 add_executable(test_workflow

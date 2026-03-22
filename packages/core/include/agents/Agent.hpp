@@ -12,9 +12,11 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -86,12 +88,28 @@ public:
   std::string resolvePath(const std::string &inputPath) const;
 
 private:
+  struct PendingModelSwitch {
+    std::string providerId;
+    std::string modelId;
+    std::optional<std::string> variantName;
+  };
+
+  void setModelInternal(const std::string &providerId,
+                        const std::string &modelId,
+                        const std::optional<std::string> &variantName);
+  void applyPendingModelSwitchIfAny();
+
   void runImpl(const std::optional<std::string> &task,
                std::function<void(const StreamEvent &)> onEvent,
                const std::vector<ImageContent> &images);
   void compactContext(std::function<void(const shared::StreamEvent &)> onEvent);
   void executeTools(const std::vector<ToolCallChunk> &chunks,
-                    std::function<void(const shared::StreamEvent &)> onEvent);
+                    std::function<void(const shared::StreamEvent &)> onEvent,
+                    const std::shared_ptr<std::atomic<bool>> &runCancelToken);
+  shared::AgentTurn makeInternalNudgeTurn(const std::string &turnIdPrefix,
+                                          const std::string &text,
+                                          shared::Role role = shared::Role::System) const;
+  void appendTurnToHistory(const shared::AgentTurn &turn);
   static std::uint64_t nowMs();
 
   AgentContext context;
@@ -103,6 +121,12 @@ private:
   std::atomic<bool> interrupted{false};
   std::atomic<bool> running{false};
   std::atomic<bool> booting{false};
+  std::mutex cancelTokenMutex_;
+  std::shared_ptr<std::atomic<bool>> activeRunCancelToken_;
+  mutable std::mutex runStateMutex_;
+  std::condition_variable runStateCv_;
+  std::mutex modelSwitchMutex;
+  std::optional<PendingModelSwitch> pendingModelSwitch_;
   std::mutex runMutex;
   std::function<void(const shared::StreamEvent &)> eventCallback;
   std::mutex callbackMutex;

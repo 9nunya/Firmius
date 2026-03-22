@@ -18,16 +18,6 @@
 #include <unordered_map>
 #include <vector>
 
-bool isSystemTurn(const firmius::shared::AgentTurn &turn) {
-  if (turn.messages.empty())
-    return false;
-  for (const auto &msg : turn.messages) {
-    if (msg.role != firmius::shared::Role::System)
-      return false;
-  }
-  return true;
-}
-
 static std::string rolePrefix(firmius::shared::Role role) {
   using firmius::shared::Role;
   switch (role) {
@@ -44,6 +34,9 @@ static std::string rolePrefix(firmius::shared::Role role) {
   }
   return "? ";
 }
+
+namespace firmius::tui {
+} // namespace firmius::tui
 
 namespace {
 
@@ -297,7 +290,8 @@ std::vector<ftxui::Component> BuildQuickToolClusterRows(
         nullptr, [summary = std::move(summary)] {
           const auto &theme =
               firmius::tui::ThemeManager::instance().getCurrentTheme();
-          return RenderQuickToolRow(summary, theme);
+          return firmius::tui::IndentAgentRow(
+              RenderQuickToolRow(summary, theme));
         }));
   }
 
@@ -313,7 +307,8 @@ std::vector<ftxui::Component> BuildQuickToolClusterRows(
         nullptr, [summary = std::move(failure_summary)] {
           const auto &theme =
               firmius::tui::ThemeManager::instance().getCurrentTheme();
-          return RenderQuickToolRow(summary, theme);
+          return firmius::tui::IndentAgentRow(
+              RenderQuickToolRow(summary, theme));
         }));
   }
 
@@ -326,15 +321,22 @@ public:
       std::function<const firmius::shared::AgentHistory *()> history_getter,
       std::function<std::vector<ftxui::Element>()> live_rows_provider,
       firmius::tui::ToolViewProvider tool_view_provider,
+      firmius::tui::ProcessStateGetter process_state_getter,
+      firmius::tui::SubagentStateGetter subagent_state_getter,
       firmius::tui::HistoryGetter sub_history_getter,
       firmius::tui::StreamGetter sub_stream_getter,
-      firmius::tui::LiveQuickSummaryProvider live_quick_summary_provider)
+      firmius::tui::LiveQuickSummaryProvider live_quick_summary_provider,
+      std::function<bool()> show_internal_nudges_getter)
       : history_getter_(std::move(history_getter)),
         live_rows_provider_(std::move(live_rows_provider)),
         tool_view_provider_(std::move(tool_view_provider)),
+        process_state_getter_(std::move(process_state_getter)),
+        subagent_state_getter_(std::move(subagent_state_getter)),
         sub_history_getter_(std::move(sub_history_getter)),
         sub_stream_getter_(std::move(sub_stream_getter)),
-        live_quick_summary_provider_(std::move(live_quick_summary_provider)) {
+        live_quick_summary_provider_(std::move(live_quick_summary_provider)),
+        show_internal_nudges_getter_(
+            std::move(show_internal_nudges_getter)) {
 
     history_inner_ = ftxui::Container::Vertical({});
     history_container_ = ftxui::Renderer(history_inner_, [this] {
@@ -418,6 +420,8 @@ private:
     history_inner_->DetachAllChildren();
 
     if (history) {
+      const bool showInternalNudges =
+          show_internal_nudges_getter_ ? show_internal_nudges_getter_() : false;
       std::unordered_map<std::string, bool> seen_tool_call;
       QuickToolCluster quick_cluster;
       auto flush_quick_cluster = [&](bool merge_live = false) {
@@ -453,11 +457,34 @@ private:
       for (size_t turn_index = 0; turn_index < history->turns.size();
            ++turn_index) {
         const auto &t = history->turns[turn_index];
-        if (t.messages.empty() || isSystemTurn(t))
+        if (t.messages.empty())
           continue;
 
-        bool isCompactionSummary = (t.turnId.rfind("compaction-summary-", 0) == 0);
-        if (isCompactionSummary) {
+        bool has_visible_message = false;
+        for (const auto &msg : t.messages) {
+          if (!firmius::tui::ShouldHideMessageInTranscript(
+                  msg, showInternalNudges, t.turnId)) {
+            has_visible_message = true;
+            break;
+          }
+        }
+        if (!has_visible_message) {
+          continue;
+        }
+
+        const bool isCompactionStart =
+            (t.turnId.rfind("compaction-start-", 0) == 0);
+        const bool isCompactionSummary =
+            (t.turnId.rfind("compaction-summary-", 0) == 0);
+        const bool isCompactionEnd =
+            (t.turnId.rfind("compaction-end-", 0) == 0);
+        if (isCompactionStart || isCompactionSummary || isCompactionEnd) {
+          const bool summaryHasExplicitStart =
+              isCompactionSummary && turn_index > 0 &&
+              history->turns[turn_index - 1].turnId.rfind("compaction-start-", 0) == 0;
+          const bool summaryHasExplicitEnd =
+              isCompactionSummary && (turn_index + 1) < history->turns.size() &&
+              history->turns[turn_index + 1].turnId.rfind("compaction-end-", 0) == 0;
           flush_quick_cluster();
           auto full_width_separator = [](const std::string &label) {
             int width = ftxui::Terminal::Size().dimx;
@@ -478,42 +505,53 @@ private:
           auto compaction_separator_bottom = [full_width_separator]() {
             return full_width_separator("Compaction Complete");
           };
-          auto decorateCompactionMsg = [](const ftxui::Element &content) {
-            return ftxui::hbox({ftxui::text("* ") | ftxui::bold |
-                                    ftxui::color(ftxui::Color::Yellow),
-                                content | ftxui::flex}) |
-                   ftxui::flex;
-          };
 
-          rows_.push_back(ftxui::Make<RowComponent>(nullptr, [compaction_separator]() {
-            return compaction_separator();
-          }));
+          if (isCompactionStart ||
+              (isCompactionSummary && !summaryHasExplicitStart)) {
+            rows_.push_back(
+                ftxui::Make<RowComponent>(nullptr, [compaction_separator]() {
+                  return compaction_separator();
+                }));
+          }
 
           for (const auto &msg : t.messages) {
+            if (firmius::tui::ShouldHideMessageInTranscript(
+                    msg, showInternalNudges, t.turnId)) {
+              continue;
+            }
             for (const auto &part : msg.content) {
               if (auto *txt = std::get_if<firmius::shared::TextContent>(&part)) {
                 std::string text = txt->text;
                 rows_.push_back(ftxui::Make<RowComponent>(
-                    nullptr, [decorateCompactionMsg, text = std::move(text)] {
-                      return decorateCompactionMsg(firmius::tui::RenderMarkdown(text));
+                    nullptr, [text = std::move(text)] {
+                      return firmius::tui::IndentAgentRow(
+                          firmius::tui::RenderMarkdown(text));
                     }));
               } else if (auto *thk = std::get_if<firmius::shared::ThinkingContent>(&part)) {
                 std::string thinking = thk->thinking;
                 rows_.push_back(ftxui::Make<RowComponent>(
-                    nullptr, [decorateCompactionMsg, thinking = std::move(thinking)] {
-                      return decorateCompactionMsg(firmius::tui::RenderMarkdown(thinking, true));
+                    nullptr, [thinking = std::move(thinking)] {
+                      return firmius::tui::IndentAgentRow(
+                          firmius::tui::RenderMarkdown(thinking, true));
                     }));
               }
             }
           }
 
-          rows_.push_back(ftxui::Make<RowComponent>(nullptr, [compaction_separator_bottom]() {
-            return compaction_separator_bottom();
-          }));
+          if (isCompactionEnd || (isCompactionSummary && !summaryHasExplicitEnd)) {
+            rows_.push_back(ftxui::Make<RowComponent>(
+                nullptr, [compaction_separator_bottom]() {
+                  return compaction_separator_bottom();
+                }));
+          }
           continue;
         }
 
         for (const auto &msg : t.messages) {
+          if (firmius::tui::ShouldHideMessageInTranscript(
+                  msg, showInternalNudges, t.turnId)) {
+            continue;
+          }
           const auto &theme =
               firmius::tui::ThemeManager::instance().getCurrentTheme();
           const std::string prefix = rolePrefix(msg.role);
@@ -522,12 +560,15 @@ private:
               isUser ? theme.chat.user_prefix : theme.chat.agent_prefix;
 
           auto decorateMsg = [prefixColor,
-                              prefix](const ftxui::Element &content) {
+                              prefix, isUser](const ftxui::Element &content) {
             auto e = ftxui::hbox({
                 ftxui::text(prefix) | ftxui::bold | ftxui::color(prefixColor),
                 content | ftxui::flex,
             });
-            return e | ftxui::flex;
+            if (isUser) {
+              return e | ftxui::flex;
+            }
+            return firmius::tui::IndentAgentRow(e);
           };
 
           for (const auto &part : msg.content) {
@@ -579,7 +620,9 @@ private:
               }
 
               flush_quick_cluster();
-              auto block = firmius::tui::ToolBlock(view);
+              auto block = firmius::tui::ToolBlock(
+                  view, nullptr, nullptr, process_state_getter_,
+                  subagent_state_getter_);
               auto row = ftxui::Make<RowComponent>(block, [decorateMsg, block] {
                 return decorateMsg(block->Render());
               });
@@ -614,7 +657,9 @@ private:
 
               if (!seen_tool_call[tr->toolCallId]) {
                 flush_quick_cluster();
-                auto block = firmius::tui::ToolBlock(view);
+                auto block = firmius::tui::ToolBlock(
+                    view, nullptr, nullptr, process_state_getter_,
+                    subagent_state_getter_);
                 auto row =
                     ftxui::Make<RowComponent>(block, [decorateMsg, block] {
                       return decorateMsg(block->Render());
@@ -626,10 +671,22 @@ private:
                            std::get_if<firmius::shared::ErrorContent>(&part)) {
               flush_quick_cluster();
               auto error = *err;
-              auto row = ftxui::Make<RowComponent>(nullptr, [decorateMsg, error,
-                                                            theme] {
-                return decorateMsg(RenderErrorDisplay(theme, error));
-              });
+              auto row = ftxui::Make<RowComponent>(
+                  nullptr, [error, theme] {
+                    return firmius::tui::IndentAgentRow(
+                        RenderErrorDisplay(theme, error));
+                  });
+              rows_.push_back(row);
+            } else if (auto *notice =
+                           std::get_if<firmius::shared::NoticeContent>(
+                               &part)) {
+              flush_quick_cluster();
+              auto notice_copy = *notice;
+              auto row = ftxui::Make<RowComponent>(
+                  nullptr, [notice_copy, theme] {
+                    return firmius::tui::IndentAgentRow(
+                        RenderNoticeDisplay(theme, notice_copy));
+                  });
               rows_.push_back(row);
             } else if (std::holds_alternative<firmius::shared::ImageContent>(
                            part)) {
@@ -663,9 +720,12 @@ private:
   std::function<const firmius::shared::AgentHistory *()> history_getter_;
   std::function<std::vector<ftxui::Element>()> live_rows_provider_;
   firmius::tui::ToolViewProvider tool_view_provider_;
+  firmius::tui::ProcessStateGetter process_state_getter_;
+  firmius::tui::SubagentStateGetter subagent_state_getter_;
   firmius::tui::HistoryGetter sub_history_getter_;
   firmius::tui::StreamGetter sub_stream_getter_;
   firmius::tui::LiveQuickSummaryProvider live_quick_summary_provider_;
+  std::function<bool()> show_internal_nudges_getter_;
   size_t last_turns_size_ = static_cast<size_t>(-1);
   std::vector<ftxui::Component> rows_;
   ftxui::Component history_inner_;
@@ -683,11 +743,17 @@ ftxui::Component firmius::tui::ChatWindow(
     std::function<const shared::AgentHistory *()> history_getter,
     std::function<std::vector<ftxui::Element>()> live_rows_provider,
     ToolViewProvider tool_view_provider,
+    ProcessStateGetter process_state_getter,
+    SubagentStateGetter subagent_state_getter,
     firmius::tui::HistoryGetter sub_history_getter,
     firmius::tui::StreamGetter sub_stream_getter,
-    firmius::tui::LiveQuickSummaryProvider live_quick_summary_provider) {
+    firmius::tui::LiveQuickSummaryProvider live_quick_summary_provider,
+    std::function<bool()> show_internal_nudges_getter) {
   return ftxui::Make<ChatWindowComponent>(
       std::move(history_getter), std::move(live_rows_provider),
-      std::move(tool_view_provider), std::move(sub_history_getter),
-      std::move(sub_stream_getter), std::move(live_quick_summary_provider));
+      std::move(tool_view_provider), std::move(process_state_getter),
+      std::move(subagent_state_getter),
+      std::move(sub_history_getter),
+      std::move(sub_stream_getter), std::move(live_quick_summary_provider),
+      std::move(show_internal_nudges_getter));
 }

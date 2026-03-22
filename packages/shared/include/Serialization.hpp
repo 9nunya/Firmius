@@ -148,6 +148,16 @@ rapidjson::Document toJson(const AgentTodoList& list);
 AgentTodoList agentTodoListFromJson(const rapidjson::Value& value);
 
 /**
+ * @brief Serializes thread artifact metadata to a RapidJSON document.
+ */
+rapidjson::Document toJson(const ThreadArtifactMetadata& metadata);
+
+/**
+ * @brief Deserializes thread artifact metadata from a RapidJSON value.
+ */
+ThreadArtifactMetadata threadArtifactMetadataFromJson(const rapidjson::Value& value);
+
+/**
  * @brief Serializes an EngineEvent to a RapidJSON document.
  */
 rapidjson::Document toJson(const EngineEvent& event);

@@ -7,6 +7,7 @@
 #include "persistence/ThreadManager.hpp"
 #include "tools/SubagentTool.hpp"
 #include "Context.hpp"
+#include "providers/ProviderRegistry.hpp"
 #include <atomic>
 #include <filesystem>
 #include <fstream>
@@ -17,6 +18,7 @@
 #include <thread>
 #include <vector>
 #include <set>
+#include <stdexcept>
 
 using namespace firmius::core;
 using namespace firmius::shared;
@@ -109,6 +111,96 @@ public:
   MOCK_METHOD((std::shared_ptr<IHost>), getHost, (), (override));
 };
 
+class NoSummaryProvider : public firmius::provider::IProvider {
+public:
+  explicit NoSummaryProvider(std::string providerId)
+      : providerId_(std::move(providerId)) {}
+
+  std::string getId() const override { return providerId_; }
+
+  void stream(const AgentHistory&, const firmius::provider::ProviderOptions&,
+              std::function<void(const StreamEvent&)> onEvent) override {
+    callCount_.fetch_add(1);
+    onEvent(StreamDone{StopReason::Stop});
+  }
+
+  std::vector<ModelInfo> listModels() override {
+    ModelInfo model;
+    model.id = providerId_ + "-model";
+    model.provider = getId();
+    model.contextWindow = 4096;
+    return {model};
+  }
+
+  ModelInfo getModelInfo(const std::string&) override {
+    return listModels().front();
+  }
+
+  void generateSummary(const std::string&, const AgentHistory&,
+                       const std::string&,
+                       std::function<void(const StreamEvent&)> onEvent,
+                       std::atomic<bool>* = nullptr) override {
+    onEvent(StreamDone{StopReason::Stop});
+  }
+
+  firmius::provider::ProviderType getProviderType() const override {
+    return firmius::provider::ProviderType::APIKey;
+  }
+
+  int callCount() const { return callCount_.load(); }
+
+private:
+  std::string providerId_;
+  std::atomic<int> callCount_{0};
+};
+
+class TextSummaryProvider : public firmius::provider::IProvider {
+public:
+  TextSummaryProvider(std::string providerId, std::string summary)
+      : providerId_(std::move(providerId)), summary_(std::move(summary)) {}
+
+  std::string getId() const override { return providerId_; }
+
+  void stream(const AgentHistory&, const firmius::provider::ProviderOptions&,
+              std::function<void(const StreamEvent&)> onEvent) override {
+    callCount_.fetch_add(1);
+    onEvent(TextChunk{summary_});
+    onEvent(StreamDone{StopReason::Stop});
+  }
+
+  std::vector<ModelInfo> listModels() override {
+    ModelInfo model;
+    model.id = providerId_ + "-model";
+    model.provider = getId();
+    model.contextWindow = 4096;
+    return {model};
+  }
+
+  ModelInfo getModelInfo(const std::string&) override {
+    return listModels().front();
+  }
+
+  void generateSummary(const std::string&, const AgentHistory&,
+                       const std::string&,
+                       std::function<void(const StreamEvent&)> onEvent,
+                       std::atomic<bool>* = nullptr) override {
+    callCount_.fetch_add(1);
+    onEvent(TextChunk{summary_});
+    onEvent(StreamDone{StopReason::Stop});
+  }
+
+  firmius::provider::ProviderType getProviderType() const override {
+    return firmius::provider::ProviderType::APIKey;
+  }
+
+  int callCount() const { return callCount_.load(); }
+
+private:
+  std::string providerId_;
+  std::string summary_;
+  std::atomic<int> callCount_{0};
+};
+
 class SubagentToolTest : public ::testing::Test {
 protected:
   void SetUp() override {
@@ -133,6 +225,14 @@ protected:
     std::ofstream auditorFile(testPromptsDir / "auditor.md");
     auditorFile << "---\nname: auditor\ntitle: Auditor\n---\nAuditor identity";
     auditorFile.close();
+
+    std::ofstream customExecutorFile(testPromptsDir / "custom_executor.md");
+    customExecutorFile << "---\nname: custom_executor\ntitle: Custom Executor\nwork_role: executor\n---\nCustom executor identity";
+    customExecutorFile.close();
+
+    std::ofstream customAuditorFile(testPromptsDir / "custom_auditor.md");
+    customAuditorFile << "---\nname: custom_auditor\ntitle: Custom Auditor\nwork_role: auditor\n---\nCustom auditor identity";
+    customAuditorFile.close();
 
     auto unique =
         "firmius_subagent_home_" +
@@ -286,6 +386,37 @@ protected:
           turn.messages.push_back(msg);
           agentPtr->defaultCtx.history->turns.push_back(turn);
           taskPromise->set_value(task);
+        }));
+
+    AgentRegistry::instance().registerAgent(agentId, agent);
+    registeredAgentIds_.push_back(agentId);
+    registeredAgents_.push_back(agent);
+    return agent;
+  }
+
+  std::shared_ptr<NiceMock<MockAgent>>
+  registerNoSummaryRetaskableAgent(const std::string &agentId,
+                                   const std::string &friendlyName) {
+    auto agent = std::make_shared<NiceMock<MockAgent>>();
+    auto *agentPtr = agent.get();
+    agent->defaultCtx.history = std::make_shared<AgentHistory>();
+    agent->defaultCtx.history->threadId = "test-thread";
+    agent->defaultCtx.identity.id = agentId;
+    agent->defaultCtx.identity.parentId = "parent-agent";
+    agent->defaultCtx.identity.friendlyName = friendlyName;
+    agent->defaultCtx.state.currentStatus = AgentStatus::Idle;
+
+    ON_CALL(*agent, getContext()).WillByDefault(ReturnRef(agent->defaultCtx));
+    ON_CALL(*agent, getMutableContext())
+        .WillByDefault(ReturnRef(agent->defaultCtx));
+    ON_CALL(*agent, isInterrupted()).WillByDefault(Return(false));
+    ON_CALL(*agent, isRunning()).WillByDefault(Return(false));
+    ON_CALL(*agent, isBooting()).WillByDefault(Return(false));
+    ON_CALL(*agent, run(_, _, _))
+        .WillByDefault(Invoke([agentPtr](const std::string &,
+                                         std::function<void(const StreamEvent &)>,
+                                         const std::vector<ImageContent> &) {
+          agentPtr->defaultCtx.state.currentStatus = AgentStatus::Idle;
         }));
 
     AgentRegistry::instance().registerAgent(agentId, agent);
@@ -502,6 +633,45 @@ TEST_F(SubagentToolTest, executorRetaskUsesChunkAwareDelegationContext) {
   EXPECT_TRUE(updatedPlan.chunks[1].assignedAgentId.empty());
 }
 
+TEST_F(SubagentToolTest, customExecutorRoleUsesChunkAwareDelegationContext) {
+  const std::string threadId = createThread();
+  const std::string planId = createPlanWithChunks(threadId);
+
+  auto taskPromise = std::make_shared<std::promise<std::string>>();
+  auto taskFuture = taskPromise->get_future();
+  registerRetaskableAgent("custom-executor-agent", "custom-executor-slot",
+                          taskPromise);
+
+  SubagentTool tool;
+  SubagentInput input;
+  input.persona = "custom_executor";
+  input.task = "Prioritize the parser ownership edge case.";
+  input.agent_id = "custom-executor-agent";
+  input.plan_id = planId;
+  input.chunk_id = "chunk-1";
+  input.name = "custom-executor-slot";
+  input.title = "Custom Executor Slot";
+  input.async = true;
+
+  MockAgent parent;
+  AgentContext ctx_obj = makeParentContext(threadId);
+  EXPECT_CALL(parent, getContext()).WillRepeatedly(ReturnRef(ctx_obj));
+
+  NiceMock<MockHost> host;
+  ToolContext toolCtx{host, parent, "test-call-id"};
+
+  ToolResult result = tool.execute(input, toolCtx);
+
+  ASSERT_TRUE(result.success) << result.error;
+  const std::string delegatedTask = taskFuture.get();
+  EXPECT_THAT(delegatedTask,
+              ::testing::HasSubstr("You are the executor responsible for exactly one assigned work chunk."));
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("Chunk ID: chunk-1"));
+  const Plan updatedPlan = threadManager_->getPlan(threadId, planId);
+  EXPECT_EQ(updatedPlan.chunks[0].assignedAgentId, "custom-executor-agent");
+  EXPECT_EQ(updatedPlan.chunks[0].status, WorkChunkStatus::InProgress);
+}
+
 TEST_F(SubagentToolTest, auditorRetaskBuildsChunkAwareReviewContext) {
   const std::string threadId = createThread();
 
@@ -595,6 +765,60 @@ TEST_F(SubagentToolTest, auditorRetaskBuildsChunkAwareReviewContext) {
               ::testing::HasSubstr("Verdict: <accept/reject/needs-evidence>"));
   EXPECT_THAT(delegatedTask,
               ::testing::HasSubstr("Lead Notes\nValidate evidence and report verdict."));
+}
+
+TEST_F(SubagentToolTest, customAuditorRoleBuildsChunkAwareReviewContext) {
+  const std::string threadId = createThread();
+
+  Plan plan;
+  plan.threadId = threadId;
+  plan.id = "plan-custom-audit";
+  plan.title = "Audit Plan";
+  plan.objective = "Verify executor output";
+  plan.strategy = "Auditor gets chunk-bound handoff";
+
+  WorkChunk chunk;
+  chunk.id = "chunk-custom-audit";
+  chunk.title = "Audit Target";
+  chunk.goal = "Verify implementation";
+  chunk.context = "Audit context";
+  chunk.constraints = "No execution";
+  chunk.completion = "Evidence-backed verdict";
+  chunk.status = WorkChunkStatus::Implemented;
+  chunk.assignedAgentId = "executor-agent";
+  plan.chunks = {chunk};
+  threadManager_->writePlan(threadId, plan);
+
+  auto taskPromise = std::make_shared<std::promise<std::string>>();
+  auto taskFuture = taskPromise->get_future();
+  registerRetaskableAgent("custom-auditor-agent", "custom-auditor-slot",
+                          taskPromise);
+
+  SubagentTool tool;
+  SubagentInput input;
+  input.persona = "custom_auditor";
+  input.task = "Validate evidence and report verdict.";
+  input.agent_id = "custom-auditor-agent";
+  input.plan_id = plan.id;
+  input.chunk_id = chunk.id;
+  input.name = "custom-auditor-slot";
+  input.title = "Custom Auditor Slot";
+  input.async = true;
+
+  MockAgent parent;
+  AgentContext ctx_obj = makeParentContext(threadId);
+  EXPECT_CALL(parent, getContext()).WillRepeatedly(ReturnRef(ctx_obj));
+
+  NiceMock<MockHost> host;
+  ToolContext toolCtx{host, parent, "test-call-id"};
+
+  ToolResult result = tool.execute(input, toolCtx);
+
+  ASSERT_TRUE(result.success) << result.error;
+  const std::string delegatedTask = taskFuture.get();
+  EXPECT_THAT(delegatedTask,
+              ::testing::HasSubstr("You are the auditor responsible for evidence-backed review"));
+  EXPECT_THAT(delegatedTask, ::testing::HasSubstr("Chunk ID: chunk-custom-audit"));
 }
 
 TEST_F(SubagentToolTest, workerRetaskStaysBoundedAndDoesNotClaimChunkOwnership) {
@@ -951,6 +1175,269 @@ TEST_F(SubagentToolTest, missingCategoryFallsBackWithWarning) {
   ToolResult result = tool.execute(input, toolCtx);
   ASSERT_TRUE(result.success) << result.error;
   EXPECT_THAT(result.data, ::testing::HasSubstr("routing_warning"));
+}
+
+TEST_F(SubagentToolTest, routeFallbackRetriesNextCategoryWhenEnabled) {
+  const std::string threadId = createThread();
+  auto taskPromise = std::make_shared<std::promise<std::string>>();
+  auto agent = registerRetaskableAgent("coder-agent", "coder-slot", taskPromise);
+
+  EXPECT_CALL(*agent, setModel("bad-provider", "bad-model", ""))
+      .WillOnce(::testing::Throw(std::runtime_error("provider unavailable")));
+  EXPECT_CALL(*agent, setModel("good-provider", "good-model", "")).Times(1);
+
+  auto cfg = firmius::shared::ConfigLoader::instance().getConfig();
+  cfg.defaultProviderId = "default-provider";
+  cfg.defaultModelId = "default-model";
+  cfg.modelRouterCategories["primary"] = {"bad-provider", "bad-model", ""};
+  cfg.modelRouterCategories["fallback"] = {"good-provider", "good-model", ""};
+  cfg.enableSubagentRouteFallback = true;
+  cfg.subagentRouteFallbackOrder = {"fallback"};
+  firmius::shared::ConfigLoader::instance().updateConfig(cfg);
+
+  SubagentTool tool;
+  SubagentInput input;
+  input.persona = "coder";
+  input.task = "Use fallback route.";
+  input.agent_id = "coder-agent";
+  input.category = "primary";
+  input.name = "coder-slot";
+  input.title = "Coder Slot";
+  input.async = true;
+
+  MockAgent parent;
+  AgentContext ctx_obj = makeParentContext(threadId);
+  EXPECT_CALL(parent, getContext()).WillRepeatedly(ReturnRef(ctx_obj));
+  NiceMock<MockHost> host;
+  ToolContext toolCtx{host, parent, "test-call-id"};
+
+  ToolResult result = tool.execute(input, toolCtx);
+  ASSERT_TRUE(result.success) << result.error;
+  EXPECT_THAT(result.data, ::testing::HasSubstr("\"fallback_used\":true"));
+  EXPECT_THAT(result.data, ::testing::HasSubstr("\"category\":\"fallback\""));
+}
+
+TEST_F(SubagentToolTest, routeFallbackCanBeDisabled) {
+  const std::string threadId = createThread();
+  auto taskPromise = std::make_shared<std::promise<std::string>>();
+  auto agent = registerRetaskableAgent("coder-agent", "coder-slot", taskPromise);
+
+  EXPECT_CALL(*agent, setModel("bad-provider", "bad-model", ""))
+      .WillOnce(::testing::Throw(std::runtime_error("provider unavailable")));
+  EXPECT_CALL(*agent, setModel("good-provider", "good-model", "")).Times(0);
+
+  auto cfg = firmius::shared::ConfigLoader::instance().getConfig();
+  cfg.defaultProviderId = "default-provider";
+  cfg.defaultModelId = "default-model";
+  cfg.modelRouterCategories["primary"] = {"bad-provider", "bad-model", ""};
+  cfg.modelRouterCategories["fallback"] = {"good-provider", "good-model", ""};
+  cfg.enableSubagentRouteFallback = false;
+  cfg.subagentRouteFallbackOrder = {"fallback"};
+  firmius::shared::ConfigLoader::instance().updateConfig(cfg);
+
+  SubagentTool tool;
+  SubagentInput input;
+  input.persona = "coder";
+  input.task = "Do not fallback.";
+  input.agent_id = "coder-agent";
+  input.category = "primary";
+  input.name = "coder-slot";
+  input.title = "Coder Slot";
+  input.async = true;
+
+  MockAgent parent;
+  AgentContext ctx_obj = makeParentContext(threadId);
+  EXPECT_CALL(parent, getContext()).WillRepeatedly(ReturnRef(ctx_obj));
+  NiceMock<MockHost> host;
+  ToolContext toolCtx{host, parent, "test-call-id"};
+
+  ToolResult result = tool.execute(input, toolCtx);
+  EXPECT_FALSE(result.success);
+}
+
+TEST_F(SubagentToolTest, spawnedRouteFallbackRetriesOnNoUsableSummary) {
+  const std::string threadId = createThread();
+  auto primary = std::make_shared<NoSummaryProvider>("spawn-no-summary-provider");
+  auto fallback =
+      std::make_shared<TextSummaryProvider>("spawn-summary-provider",
+                                            "fallback summary");
+  firmius::provider::ProviderRegistry::instance().registerProvider(primary);
+  firmius::provider::ProviderRegistry::instance().registerProvider(fallback);
+
+  auto cfg = firmius::shared::ConfigLoader::instance().getConfig();
+  cfg.defaultProviderId = primary->getId();
+  cfg.defaultModelId = primary->listModels().front().id;
+  cfg.modelRouterCategories["primary"] = {primary->getId(),
+                                           primary->listModels().front().id, ""};
+  cfg.modelRouterCategories["fallback"] = {fallback->getId(),
+                                           fallback->listModels().front().id, ""};
+  cfg.enableSubagentRouteFallback = true;
+  cfg.subagentRouteFallbackOrder = {"fallback"};
+  firmius::shared::ConfigLoader::instance().updateConfig(cfg);
+
+  SubagentTool tool;
+  SubagentInput input;
+  input.persona = "coder";
+  input.task = "Retry on no summary.";
+  input.category = "primary";
+  input.name = "spawn-slot";
+  input.title = "Spawn Slot";
+
+  MockAgent parent;
+  AgentContext ctx_obj = makeParentContext(threadId);
+  EXPECT_CALL(parent, getContext()).WillRepeatedly(ReturnRef(ctx_obj));
+
+  NiceMock<MockHost> host;
+  ToolContext toolCtx{host, parent, "test-call-id"};
+
+  ToolResult result = tool.execute(input, toolCtx);
+
+  ASSERT_TRUE(result.success) << result.error;
+  EXPECT_EQ(primary->callCount(), 1);
+  EXPECT_EQ(fallback->callCount(), 1);
+  EXPECT_THAT(result.data, ::testing::HasSubstr("\"fallback_used\":true"));
+  EXPECT_THAT(result.data, ::testing::HasSubstr("\"category\":\"fallback\""));
+  EXPECT_THAT(result.data, ::testing::HasSubstr("fallback summary"));
+}
+
+TEST_F(SubagentToolTest, retaskedRouteFallbackRetriesOnNoUsableSummary) {
+  const std::string threadId = createThread();
+  auto primary = std::make_shared<NoSummaryProvider>("retask-no-summary-provider");
+  auto fallback =
+      std::make_shared<TextSummaryProvider>("retask-summary-provider",
+                                            "fallback summary");
+  firmius::provider::ProviderRegistry::instance().registerProvider(primary);
+  firmius::provider::ProviderRegistry::instance().registerProvider(fallback);
+
+  auto cfg = firmius::shared::ConfigLoader::instance().getConfig();
+  cfg.defaultProviderId = primary->getId();
+  cfg.defaultModelId = primary->listModels().front().id;
+  cfg.modelRouterCategories["primary"] = {primary->getId(),
+                                           primary->listModels().front().id, ""};
+  cfg.modelRouterCategories["fallback"] = {fallback->getId(),
+                                           fallback->listModels().front().id, ""};
+  cfg.enableSubagentRouteFallback = true;
+  cfg.subagentRouteFallbackOrder = {"fallback"};
+  firmius::shared::ConfigLoader::instance().updateConfig(cfg);
+
+  auto agent = registerNoSummaryRetaskableAgent("coder-agent", "coder-slot");
+  EXPECT_CALL(*agent,
+              setModel(primary->getId(), primary->listModels().front().id, ""))
+      .Times(1);
+  EXPECT_CALL(*agent,
+              setModel(fallback->getId(), fallback->listModels().front().id, ""))
+      .Times(1);
+
+  SubagentTool tool;
+  SubagentInput input;
+  input.persona = "coder";
+  input.task = "Retry on no summary.";
+  input.agent_id = "coder-agent";
+  input.category = "primary";
+  input.name = "coder-slot";
+  input.title = "Coder Slot";
+
+  MockAgent parent;
+  AgentContext ctx_obj = makeParentContext(threadId);
+  EXPECT_CALL(parent, getContext()).WillRepeatedly(ReturnRef(ctx_obj));
+
+  NiceMock<MockHost> host;
+  ToolContext toolCtx{host, parent, "test-call-id"};
+
+  ToolResult result = tool.execute(input, toolCtx);
+
+  ASSERT_TRUE(result.success) << result.error;
+  EXPECT_THAT(result.data, ::testing::HasSubstr("\"fallback_used\":true"));
+  EXPECT_THAT(result.data, ::testing::HasSubstr("\"category\":\"fallback\""));
+}
+
+TEST_F(SubagentToolTest, cancelledRetaskDoesNotTriggerFallbackRouteClone) {
+  const std::string threadId = createThread();
+  auto agent = registerRetaskableAgent("cancel-agent", "cancel-slot",
+                                       std::make_shared<std::promise<std::string>>());
+
+  auto started = std::make_shared<std::promise<void>>();
+  auto startedFuture = started->get_future().share();
+
+  EXPECT_CALL(*agent, run(_, _, _))
+      .WillOnce(Invoke([agentPtr = agent.get(), started](const std::string &,
+                                                         std::function<void(const StreamEvent &)>,
+                                                         const std::vector<ImageContent> &) {
+        agentPtr->defaultCtx.state.currentStatus = AgentStatus::Streaming;
+        started->set_value();
+        while (agentPtr->defaultCtx.state.currentStatus != AgentStatus::Cancelled) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+
+        AgentTurn turn;
+        turn.turnId = "cancelled-" + std::to_string(agentPtr->defaultCtx.history->turns.size());
+        Message message;
+        message.role = Role::System;
+        message.visibility = MessageVisibility::Visible;
+        message.content.push_back(NoticeContent{
+            "Agent Cancelled",
+            "The agent execution was interrupted.",
+            "Execution stopped before completion and can be resumed.",
+            NoticeSeverity::Warning});
+        message.timestamp = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch())
+                .count());
+        turn.messages.push_back(message);
+        agentPtr->defaultCtx.history->turns.push_back(turn);
+        agentPtr->defaultCtx.state.currentStatus = AgentStatus::Cancelled;
+      }));
+  ON_CALL(*agent, interrupt()).WillByDefault(Invoke([agentPtr = agent.get()]() {
+    agentPtr->defaultCtx.state.currentStatus = AgentStatus::Cancelled;
+  }));
+  ON_CALL(*agent, isInterrupted())
+      .WillByDefault(Invoke([agentPtr = agent.get()]() {
+        return agentPtr->defaultCtx.state.currentStatus ==
+               AgentStatus::Cancelled;
+      }));
+
+  SubagentTool tool;
+  SubagentInput input;
+  input.persona = "coder";
+  input.task = "Cancel this run and do not clone a fallback child.";
+  input.agent_id = "cancel-agent";
+  input.category = "primary";
+  input.name = "cancel-slot";
+  input.title = "Cancel Slot";
+  input.async = false;
+
+  auto cfg = firmius::shared::ConfigLoader::instance().getConfig();
+  cfg.defaultProviderId = "default-provider";
+  cfg.defaultModelId = "default-model";
+  cfg.modelRouterCategories["primary"] = {"good-provider", "good-model", ""};
+  cfg.modelRouterCategories["fallback"] = {"fallback-provider",
+                                           "fallback-model", ""};
+  cfg.enableSubagentRouteFallback = true;
+  cfg.subagentRouteFallbackOrder = {"fallback"};
+  firmius::shared::ConfigLoader::instance().updateConfig(cfg);
+
+  EXPECT_CALL(*agent, setModel("good-provider", "good-model", ""))
+      .Times(1);
+  EXPECT_CALL(*agent, setModel("fallback-provider", "fallback-model", ""))
+      .Times(0);
+
+  MockAgent parent;
+  AgentContext ctx_obj = makeParentContext(threadId);
+  EXPECT_CALL(parent, getContext()).WillRepeatedly(ReturnRef(ctx_obj));
+  NiceMock<MockHost> host;
+  ToolContext toolCtx{host, parent, "test-call-id"};
+
+  std::thread canceller([&]() {
+    startedFuture.wait();
+    Engine::instance().cancelAgent("cancel-agent");
+  });
+
+  ToolResult result = tool.execute(input, toolCtx);
+  canceller.join();
+
+  ASSERT_TRUE(result.success) << result.error;
+  EXPECT_THAT(result.data, ::testing::HasSubstr("\"status\":\"cancelled\""));
+  EXPECT_THAT(result.data, ::testing::Not(::testing::HasSubstr("fallback_used\":true")));
 }
 
 TEST_F(SubagentToolTest, executorHandoffIncludesV2RichSpecFields) {

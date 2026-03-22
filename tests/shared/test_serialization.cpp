@@ -180,6 +180,42 @@ TEST(Serialization, MessageRoundtrip) {
   EXPECT_EQ(msg, roundtripped);
 }
 
+TEST(Serialization, MessageVisibilityRoundtripAndLegacyDefault) {
+  Message internal;
+  internal.id = "msg-internal";
+  internal.role = Role::System;
+  internal.visibility = MessageVisibility::Internal;
+  internal.content.push_back(TextContent{"internal nudge"});
+  internal.timestamp = 42;
+
+  auto doc = toJson(internal);
+  rapidjson::StringBuffer buffer;
+  rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+  doc.Accept(writer);
+
+  rapidjson::Document parsed;
+  parsed.Parse(buffer.GetString());
+  auto roundtripped = messageFromJsonValue(parsed);
+  EXPECT_EQ(roundtripped.visibility, MessageVisibility::Internal);
+
+  rapidjson::Document legacy;
+  legacy.SetObject();
+  auto &a = legacy.GetAllocator();
+  legacy.AddMember("id", "legacy", a);
+  legacy.AddMember("role", "System", a);
+  rapidjson::Value content(rapidjson::kArrayType);
+  rapidjson::Value part(rapidjson::kObjectType);
+  part.AddMember("type", "text", a);
+  part.AddMember("text", "hello", a);
+  content.PushBack(part, a);
+  legacy.AddMember("content", content, a);
+  legacy.AddMember("timestamp", 1u, a);
+  legacy.AddMember("parentId", rapidjson::Value(rapidjson::kNullType), a);
+
+  auto legacyMessage = messageFromJsonValue(legacy);
+  EXPECT_EQ(legacyMessage.visibility, MessageVisibility::Visible);
+}
+
 TEST(Serialization, AgentMetricsRoundtrip) {
   AgentMetrics metrics;
   metrics.tokens.prompt = 100;
@@ -445,6 +481,47 @@ TEST(Serialization, StreamEventRoundtrip) {
             std::get<ToolCallChunk>(roundtrippedTool));
 }
 
+TEST(Serialization, EngineEventAgentFinishedRoundtrip) {
+  EngineEvent event = AgentFinished{
+      "agent-123",
+      AgentOutcome{AgentOutcome::Kind::Response, "done"},
+      "parent-123"};
+
+  auto doc = toJson(event);
+  rapidjson::StringBuffer buffer;
+  rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+  doc.Accept(writer);
+
+  rapidjson::Document parsed;
+  parsed.Parse(buffer.GetString());
+  auto roundtripped = engineEventFromJson(parsed);
+
+  ASSERT_TRUE(std::holds_alternative<AgentFinished>(roundtripped));
+  EXPECT_EQ(std::get<AgentFinished>(roundtripped), std::get<AgentFinished>(event));
+}
+
+TEST(Serialization, EngineEventAgentFinishedWithoutOutcomeIsRejected) {
+  rapidjson::Document parsed;
+  parsed.Parse(
+      R"({"type":"AgentFinished","agentId":"agent-123","summary":"done","parentId":"parent-123"})");
+
+  EXPECT_THROW(engineEventFromJson(parsed), std::runtime_error);
+}
+
+TEST(Serialization, EngineEventAgentCompletedIsRejected) {
+  rapidjson::Document parsed;
+  parsed.Parse(R"({"type":"AgentCompleted","agentId":"agent-123","summary":"done","parentId":"parent-123"})");
+
+  EXPECT_THROW(engineEventFromJson(parsed), std::runtime_error);
+}
+
+TEST(Serialization, EngineEventAgentFinishedRejectsMalformedOutcomeKind) {
+  rapidjson::Document parsed;
+  parsed.Parse(R"({"type":"AgentFinished","agentId":"agent-123","outcome":{"kind":"Legacy","text":"done"},"parentId":"parent-123"})");
+
+  EXPECT_THROW(engineEventFromJson(parsed), std::runtime_error);
+}
+
 TEST(Serialization, ToolCallChunkDefaultsToMissingIndexSentinel) {
   ToolCallChunk chunk;
   EXPECT_EQ(chunk.index, std::numeric_limits<std::uint32_t>::max());
@@ -551,6 +628,23 @@ TEST(Serialization, ImageContentRoundtrip) {
   EXPECT_EQ(img->url, "https://example.com/img.png");
   EXPECT_EQ(img->mediaType, "image/png");
   EXPECT_EQ(img->detail, "high");
+}
+
+TEST(Serialization, NoticeContentRoundtrip) {
+  MessagePart original = NoticeContent{
+      "Agent Cancelled",
+      "The agent execution was interrupted.",
+      "Execution stopped before completion and can be resumed.",
+      NoticeSeverity::Warning};
+
+  auto doc = toJson(original);
+  auto restored = messagePartFromJsonValue(doc);
+
+  EXPECT_EQ(original, restored);
+  auto *notice = std::get_if<NoticeContent>(&restored);
+  ASSERT_NE(notice, nullptr);
+  EXPECT_EQ(notice->title, "Agent Cancelled");
+  EXPECT_EQ(notice->severity, NoticeSeverity::Warning);
 }
 
 TEST(Serialization, StreamDoneRoundtrip) {
@@ -940,4 +1034,62 @@ TEST(Serialization, PlanWithMixedDepthChunksRoundtrip) {
   EXPECT_EQ(restored.chunks.size(), 2u);
   EXPECT_TRUE(restored.chunks[0].tasks.empty());  // Flat chunk
   EXPECT_EQ(restored.chunks[1].tasks.size(), 2u); // Task-bearing chunk
+}
+
+TEST(Serialization, ThreadArtifactMetadataRoundtrip) {
+  ThreadArtifactMetadata artifact;
+  artifact.threadId = "thread-1";
+  artifact.ownerAgentId = "agent-1";
+  artifact.ownerFriendlyName = "planner";
+  artifact.filename = "DRAFT_PLAN.md";
+  artifact.storagePath = "artifacts/agent-1/DRAFT_PLAN.md";
+  artifact.createdAt = 100;
+  artifact.updatedAt = 200;
+  artifact.kind = "plan";
+  artifact.description = "Primary planning artifact";
+
+  const auto doc = toJson(artifact);
+  const auto restored = threadArtifactMetadataFromJson(doc);
+  EXPECT_EQ(restored.threadId, artifact.threadId);
+  EXPECT_EQ(restored.ownerAgentId, artifact.ownerAgentId);
+  EXPECT_EQ(restored.ownerFriendlyName, artifact.ownerFriendlyName);
+  EXPECT_EQ(restored.filename, artifact.filename);
+  EXPECT_EQ(restored.storagePath, artifact.storagePath);
+  EXPECT_EQ(restored.createdAt, artifact.createdAt);
+  EXPECT_EQ(restored.updatedAt, artifact.updatedAt);
+  EXPECT_EQ(restored.kind, artifact.kind);
+  EXPECT_EQ(restored.description, artifact.description);
+}
+
+TEST(Serialization, AgentOutcomeRoundtripPreservesArtifactMetadataArrays) {
+  AgentOutcome outcome;
+  outcome.kind = AgentOutcome::Kind::NoSummary;
+  outcome.text = "";
+
+  ThreadArtifactMetadata created;
+  created.threadId = "thread-1";
+  created.ownerAgentId = "agent-child";
+  created.ownerFriendlyName = "worker";
+  created.filename = "WORKER_REPORT.md";
+  created.storagePath = "artifacts/agent-child/WORKER_REPORT.md";
+  created.createdAt = 123;
+  created.updatedAt = 123;
+  outcome.artifacts_created.push_back(created);
+
+  ThreadArtifactMetadata updated = created;
+  updated.filename = "WORKER_REPORT.md";
+  updated.updatedAt = 456;
+  outcome.artifacts_updated.push_back(updated);
+
+  EngineEvent event = AgentFinished{"agent-1", outcome, "parent-1"};
+  const auto doc = toJson(event);
+  const auto restored = engineEventFromJson(doc);
+
+  const auto *finished = std::get_if<AgentFinished>(&restored);
+  ASSERT_NE(finished, nullptr);
+  EXPECT_EQ(finished->outcome.kind, AgentOutcome::Kind::NoSummary);
+  ASSERT_EQ(finished->outcome.artifacts_created.size(), 1u);
+  ASSERT_EQ(finished->outcome.artifacts_updated.size(), 1u);
+  EXPECT_EQ(finished->outcome.artifacts_created[0].filename, "WORKER_REPORT.md");
+  EXPECT_EQ(finished->outcome.artifacts_updated[0].updatedAt, 456u);
 }

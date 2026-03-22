@@ -18,6 +18,10 @@ namespace firmius::tui {
 
 using ToolViewProvider =
     std::function<std::shared_ptr<shared::ToolCallView>(const std::string &)>;
+using ProcessStateGetter =
+    std::function<const NormalizedProcessState *(const std::string &)>;
+using SubagentStateGetter =
+    std::function<const NormalizedSubagentState *(const std::string &)>;
 
 using HistoryGetter =
     std::function<const shared::AgentHistory *(const std::string &)>;
@@ -60,13 +64,56 @@ CollectToolCallIdsFromHistory(const shared::AgentHistory *history) {
   return ids;
 }
 
+inline bool ShouldHideMessageInTranscript(const shared::Message &msg,
+                                          bool showInternalNudges,
+                                          const std::string &turnId = "") {
+  if (msg.visibility == shared::MessageVisibility::Internal) {
+    return !showInternalNudges;
+  }
+  if (msg.role != shared::Role::System) {
+    return false;
+  }
+  if (turnId.rfind("compaction-start-", 0) == 0 ||
+      turnId.rfind("compaction-summary-", 0) == 0 ||
+      turnId.rfind("compaction-end-", 0) == 0) {
+    return false;
+  }
+  for (const auto &part : msg.content) {
+    if (std::holds_alternative<shared::NoticeContent>(part)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+inline ftxui::Element IndentAgentRow(const ftxui::Element &content,
+                                     int left_margin = 2) {
+  if (left_margin <= 0) {
+    return content;
+  }
+  return ftxui::hbox({ftxui::text(std::string(left_margin, ' ')),
+                      content | ftxui::flex}) |
+         ftxui::flex;
+}
+
+inline bool ShouldRenderFocusedSubagentToolCall(
+    const TimelineEntry &entry, const shared::ToolCallView &view,
+    const std::string &focused_agent_id) {
+  return !focused_agent_id.empty() && entry.agentId == focused_agent_id &&
+         entry.kind == TimelineEntry::Kind::ToolCall &&
+         ShouldRenderToolCallView(view);
+}
+
 ftxui::Component ChatWindow(
     std::function<const shared::AgentHistory *()> history_getter,
     std::function<std::vector<ftxui::Element>()> live_rows_provider = nullptr,
     ToolViewProvider tool_view_provider = nullptr,
+    ProcessStateGetter process_state_getter = nullptr,
+    SubagentStateGetter subagent_state_getter = nullptr,
     HistoryGetter sub_history_getter = nullptr,
     StreamGetter sub_stream_getter = nullptr,
-    LiveQuickSummaryProvider live_quick_summary_provider = nullptr);
+    LiveQuickSummaryProvider live_quick_summary_provider = nullptr,
+    std::function<bool()> show_internal_nudges_getter = nullptr);
 
 } // namespace firmius::tui
 

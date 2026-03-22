@@ -22,6 +22,8 @@
 #include <rapidjson/writer.h>
 #include <sstream>
 #include <set>
+#include <atomic>
+#include <thread>
 
 using namespace firmius::core;
 using namespace firmius::shared;
@@ -225,6 +227,30 @@ void addFileEditLegacyNoise(rapidjson::Document &doc,
   doc.AddMember("new_string", makeJsonString(newString, alloc), alloc);
   doc.AddMember("replace_all", replaceAll, alloc);
   doc.AddMember("fuzzy_threshold", fuzzyThreshold, alloc);
+}
+
+TEST(ToolContextCancellationContractTest, CancelRequestedReflectsSignal) {
+  NiceMock<MockHost> mockHost;
+  NiceMock<MockAgent> mockAgent;
+  std::atomic<bool> cancelled{false};
+  ToolContext ctx{mockHost, mockAgent, "tool-call-1", &cancelled};
+  EXPECT_FALSE(ctx.cancelRequested());
+  cancelled.store(true);
+  EXPECT_TRUE(ctx.cancelRequested());
+}
+
+TEST(ToolContextCancellationContractTest, WaitForReturnsFalseWhenCancelled) {
+  NiceMock<MockHost> mockHost;
+  NiceMock<MockAgent> mockAgent;
+  std::atomic<bool> cancelled{false};
+  ToolContext ctx{mockHost, mockAgent, "tool-call-2", &cancelled};
+  std::thread interrupter([&]() {
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    cancelled.store(true);
+  });
+  EXPECT_FALSE(ctx.waitFor(std::chrono::milliseconds(200),
+                           std::chrono::milliseconds(5)));
+  interrupter.join();
 }
 
 class FileReadToolTest : public ::testing::Test {

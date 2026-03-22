@@ -32,6 +32,16 @@ TEST(TranscriptGroupingTest, DescribesSearchesWithPatternAndPath) {
   EXPECT_EQ(descriptor.target, "\"NativeCompiler|emit\" in src/compiler");
 }
 
+TEST(TranscriptGroupingTest, DescribesDirectoryListingsCompactly) {
+  ToolCallView view;
+  view.name = "list_directory";
+  view.args = R"({"path":"/mnt/SHIT/Projects/Firmius/src/tools"})";
+
+  auto descriptor = DescribeQuickToolCall(view);
+  EXPECT_EQ(descriptor.category, QuickToolCategory::List);
+  EXPECT_EQ(descriptor.target, "src/tools");
+}
+
 TEST(TranscriptGroupingTest, UnnamedQuickToolRowsDoNotProduceDescriptors) {
   ToolCallView view;
   view.name = "   ";

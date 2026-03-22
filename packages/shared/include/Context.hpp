@@ -188,6 +188,23 @@ struct ThreadMetadata {
 };
 
 /**
+ * @brief Metadata for a thread-scoped artifact file.
+ */
+struct ThreadArtifactMetadata {
+  std::string threadId;
+  std::string ownerAgentId;
+  std::string ownerFriendlyName;
+  std::string filename;
+  std::string storagePath;
+  uint64_t createdAt = 0;
+  uint64_t updatedAt = 0;
+  std::optional<std::string> kind;
+  std::optional<std::string> description;
+
+  bool operator==(const ThreadArtifactMetadata &other) const = default;
+};
+
+/**
  * @brief Execution task embedded beneath a chunk (V2 work language).
  * One level of task depth only; no nested subtasks.
  */

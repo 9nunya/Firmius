@@ -4,6 +4,7 @@
 #include <map>
 #include <optional>
 #include <mutex>
+#include <vector>
 
 namespace firmius::shared {
 
@@ -26,6 +27,9 @@ struct UserConfig {
     std::map<std::string, ModelRouteCategory> modelRouterCategories; // category -> provider/model/variant
     std::map<std::string, std::string> purposeRoutes; // purpose/persona -> category
     std::string defaultRouteCategory;
+    bool enableSubagentRouteFallback = true;
+    std::vector<std::string> subagentRouteFallbackOrder;
+    bool showInternalNudges = false;
 };
 
 class ConfigLoader {

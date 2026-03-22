@@ -177,6 +177,8 @@ struct ThreadTitleUpdated {
 struct MessageQueued {
   std::string messageId;
   std::string text;
+  std::string threadId;
+  std::string agentId;
 };
 
 /**
@@ -184,6 +186,8 @@ struct MessageQueued {
  */
 struct MessageDequeued {
   std::string messageId;
+  std::string threadId;
+  std::string agentId;
 };
 
 /**

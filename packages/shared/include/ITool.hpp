@@ -5,11 +5,14 @@
 #include "IHost.hpp"
 #include "utils/JSONSchema.hpp"
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <memory>
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
 #include <string>
+#include <thread>
 
 /**
  * @brief Extensible tool system for agentic actions.
@@ -26,6 +29,26 @@ struct ToolContext {
   IAgent &agent; ///< The agent instance invoking the tool.
   std::string
       currentToolCallId; ///< The ID of the tool call currently executing.
+  const std::atomic<bool> *cancelSignal = nullptr; ///< Cancellation signal.
+
+  bool cancelRequested() const {
+    return cancelSignal && cancelSignal->load();
+  }
+
+  bool waitFor(std::chrono::milliseconds total,
+               std::chrono::milliseconds poll = std::chrono::milliseconds(10)) const {
+    auto elapsed = std::chrono::milliseconds(0);
+    while (elapsed < total) {
+      if (cancelRequested()) {
+        return false;
+      }
+      const auto remaining = total - elapsed;
+      const auto sleepFor = remaining < poll ? remaining : poll;
+      std::this_thread::sleep_for(sleepFor);
+      elapsed += sleepFor;
+    }
+    return !cancelRequested();
+  }
 };
 
 /**

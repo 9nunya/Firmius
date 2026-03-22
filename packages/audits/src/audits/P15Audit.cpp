@@ -33,6 +33,32 @@ shared::AuditResult P15Audit::run(const std::vector<std::string> &) {
   opts.containerName = "";
   opts.connectToExisting = false;
   opts.deleteOnExit = false;
+  auto outcomeKindToString = [](const AgentOutcome::Kind kind) {
+    switch (kind) {
+    case AgentOutcome::Kind::Response:
+      return "Response";
+    case AgentOutcome::Kind::NoSummary:
+      return "NoSummary";
+    case AgentOutcome::Kind::Cancelled:
+      return "Cancelled";
+    case AgentOutcome::Kind::Failed:
+      return "Failed";
+    }
+    return "Unknown";
+  };
+  auto logOutcome = [&](const std::string &label,
+                        const std::optional<AgentOutcome> &outcome) {
+    if (!outcome.has_value()) {
+      std::cerr << "  -> " << label << " outcome: Timeout" << std::endl;
+      return false;
+    }
+    std::cout << "  -> " << label << " outcome: "
+              << outcomeKindToString(outcome->kind) << " | "
+              << outcome->text.substr(0, 100)
+              << (outcome->text.size() > 100 ? "..." : "") << std::endl;
+    return outcome->kind == AgentOutcome::Kind::Response ||
+           outcome->kind == AgentOutcome::Kind::NoSummary;
+  };
   int exitCode = 0;
   do {
     std::string threadId = harness.newThread(opts, "/tmp", "researcher");
@@ -49,10 +75,12 @@ shared::AuditResult P15Audit::run(const std::vector<std::string> &) {
         Engine::instance().summonAgent(threadId, persona, task1, false);
     std::cout << "  -> Agent created with ID: " << agentId << std::endl;
     std::cout << "  -> Waiting for agent to complete..." << std::endl;
-    auto optResult1 = Engine::instance().waitForAgent(agentId);
-    std::string result1 = optResult1.value_or("Timeout");
-    std::cout << "  -> Task 1 result: " << result1.substr(0, 100)
-              << (result1.size() > 100 ? "..." : "") << std::endl;
+    auto optResult1 = Engine::instance().waitForAgentOutcome(agentId);
+    if (!logOutcome("Task 1", optResult1)) {
+      std::cerr << "  -> Task 1 did not complete successfully" << std::endl;
+      exitCode = 1;
+      break;
+    }
     std::cout << std::endl;
     std::cout << "[TEST 2] Re-tasking existing agent via executeTask..."
               << std::endl;
@@ -60,10 +88,12 @@ shared::AuditResult P15Audit::run(const std::vector<std::string> &) {
                         "from P15' and confirm";
     Engine::instance().executeTask(agentId, task2);
     std::cout << "  -> Re-tasking agent " << agentId << std::endl;
-    auto optResult2 = Engine::instance().waitForAgent(agentId);
-    std::string result2 = optResult2.value_or("Timeout");
-    std::cout << "  -> Task 2 result: " << result2.substr(0, 100)
-              << (result2.size() > 100 ? "..." : "") << std::endl;
+    auto optResult2 = Engine::instance().waitForAgentOutcome(agentId);
+    if (!logOutcome("Task 2", optResult2)) {
+      std::cerr << "  -> Task 2 did not complete successfully" << std::endl;
+      exitCode = 1;
+      break;
+    }
     std::cout << std::endl;
     std::cout << "[TEST 3] Verifying agent persistence in registry..."
               << std::endl;
@@ -98,7 +128,12 @@ shared::AuditResult P15Audit::run(const std::vector<std::string> &) {
     std::string agentId2 = Engine::instance().summonAgent(
         threadId, "lead", "Return 'initial task done'", false);
     std::cout << "  -> Created second agent: " << agentId2 << std::endl;
-    Engine::instance().waitForAgent(agentId2);
+    auto optResult3 = Engine::instance().waitForAgentOutcome(agentId2);
+    if (!logOutcome("Task 5", optResult3)) {
+      std::cerr << "  -> Task 5 did not complete successfully" << std::endl;
+      exitCode = 1;
+      break;
+    }
     std::cout << "  -> First task completed" << std::endl;
     std::cout << std::endl;
     std::cout << "[TEST 6] Listing active agents..." << std::endl;
@@ -121,8 +156,12 @@ shared::AuditResult P15Audit::run(const std::vector<std::string> &) {
     Engine::instance().executeTask(
         activeAgents.front(), "If you remember doing a task, please output "
                               "directly what was originally tasked for you.");
-    auto result3 = Engine::instance().waitForAgent(activeAgents.front());
-    std::cout << "  -> Result: " << result3.value_or("Timeout") << std::endl;
+    auto result3 = Engine::instance().waitForAgentOutcome(activeAgents.front());
+    if (!logOutcome("Task 7", result3)) {
+      std::cerr << "  -> Task 7 did not complete successfully" << std::endl;
+      exitCode = 1;
+      break;
+    }
     std::cout << "[TEST 8] Cleanup - terminating remaining agents..."
               << std::endl;
     for (const auto &id : activeAgents) {

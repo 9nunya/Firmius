@@ -96,6 +96,9 @@ std::string SummarizeToolCall(const std::string &name, const std::string &args, 
     if (isMatch(name, "plan_")) return "Preparing plan update...";
     if (isMatch(name, "chunk_")) return "Preparing chunk update...";
     if (isMatch(name, "todo_write")) return "Preparing todo update...";
+    if (isMatch(name, "artifact_write")) return "Preparing artifact write...";
+    if (isMatch(name, "artifact_read")) return "Preparing artifact read...";
+    if (isMatch(name, "artifact_list")) return "Preparing artifact list...";
     return "Preparing " + name + "...";
   }
 
@@ -138,6 +141,15 @@ std::string SummarizeToolCall(const std::string &name, const std::string &args, 
   }
   if (isMatch(name, "todo_write")) {
     return "Update todo list";
+  }
+  if (isMatch(name, "artifact_write")) {
+    return "Write artifact";
+  }
+  if (isMatch(name, "artifact_read")) {
+    return "Read artifact";
+  }
+  if (isMatch(name, "artifact_list")) {
+    return "List artifacts";
   }
 
   if (isMatch(name, "list_directory")) {
@@ -182,7 +194,7 @@ std::string SummarizeToolCall(const std::string &name, const std::string &args, 
     std::string cmd = "";
     if (valid && doc.HasMember("command") && doc["command"].IsString())
       cmd = doc["command"].GetString();
-    return "$ " + firstWords(cmd, 3);
+    return "$ " + cmd;
   }
   if (isMatch(name, "grep")) {
     std::string pattern = "";

@@ -3,11 +3,11 @@
 #include "Enums.hpp"
 #include <functional>
 #include <condition_variable>
+#include <deque>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <queue>
 #include <string>
 #include <thread>
 #include <unordered_set>
@@ -129,6 +129,14 @@ public:
   void abort();
 
   /**
+   * Interrupts the focused agent and preserves queued messages targeting it.
+   * If queued messages exist for the focused running agent, this waits for the
+   * current run to actually settle and then flushes the queued batch
+   * immediately.
+   */
+  void abortAndFlushQueuedMessages();
+
+  /**
    * Subscribe to Harness events.
    * Events are routed only if agentId matches the focused agent or its
    * descendants.
@@ -193,6 +201,8 @@ public:
 
   std::vector<ThreadMetadata> listThreads();
   std::vector<std::string> listAgents(const std::string &threadId = "");
+  std::vector<shared::ThreadArtifactMetadata>
+  listArtifacts(const std::string &threadId = "");
   std::vector<shared::ModelInfo> listAllModels();
   bool isModelsLoaded() const { return modelsLoaded_; }
 
@@ -207,7 +217,8 @@ public:
   getAllQuotas(const std::string &providerId);
 
   /**
-   * Switches the model for the focused agent (idle-only).
+   * Switches the model for the focused agent.
+   * Applies immediately when idle, or queues for the next turn when running.
    * @param providerId The new provider ID.
    * @param modelId The new model ID.
    */
@@ -215,7 +226,7 @@ public:
 
   /**
    * Switches the model for the focused agent with a specific variant
-   * (idle-only).
+   * Applies immediately when idle, or queues for the next turn when running.
    * @param providerId The new provider ID.
    * @param modelId The new model ID.
    * @param variantName The model variant name (e.g., "low", "medium", "max").
@@ -351,12 +362,15 @@ private:
       const std::string &preferredAgentId = "");
 
   /**
-   * Drains all queued messages and sends them to the focused agent.
-   * Called when the focused agent is available to accept new input.
+   * Drains queued messages targeting the specified agent when that agent is
+   * ready to accept new input.
    */
-  void drainQueue();
+  void drainQueueForAgent(const std::string &agentId,
+                          const std::string &threadId);
 
   void clearQueue();
+  void clearQueueForAgentThread(const std::string &agentId,
+                                const std::string &threadId);
 
   // Message queue for sending while agent is running
   // Message queue entry: messageId, text, images
@@ -364,8 +378,10 @@ private:
     std::string id;
     std::string text;
     std::vector<firmius::shared::ImageContent> images;
+    std::string threadId;
+    std::string agentId;
   };
-  std::queue<QueuedMessage> messageQueue_;
+  std::deque<QueuedMessage> messageQueue_;
 
   // Background model caching
   std::vector<shared::ModelInfo> cachedModels_;

@@ -9,7 +9,9 @@
 #include <cstdint>
 #include <limits>
 #include <string>
+#include <utility>
 #include <variant>
+#include <vector>
 
 /**
  * @brief Real-time events emitted during agent execution.
@@ -223,11 +225,30 @@ struct AgentTurnCompleted {
   std::string parentId = "";
   bool operator==(const AgentTurnCompleted &) const = default;
 };
-struct AgentCompleted {
-  std::string agentId;
-  std::string summary;
-  std::string parentId = "";
-  bool operator==(const AgentCompleted &) const = default;
+struct AgentOutcome {
+  enum class Kind {
+    Response,
+    NoSummary,
+    Cancelled,
+    Failed,
+  };
+
+  Kind kind = Kind::Failed;
+  std::string text;
+  std::vector<ThreadArtifactMetadata> artifacts_created;
+  std::vector<ThreadArtifactMetadata> artifacts_updated;
+
+  AgentOutcome() = default;
+  AgentOutcome(Kind kindValue, std::string textValue)
+      : kind(kindValue), text(std::move(textValue)) {}
+  AgentOutcome(Kind kindValue, std::string textValue,
+               std::vector<ThreadArtifactMetadata> created,
+               std::vector<ThreadArtifactMetadata> updated)
+      : kind(kindValue), text(std::move(textValue)),
+        artifacts_created(std::move(created)),
+        artifacts_updated(std::move(updated)) {}
+
+  bool operator==(const AgentOutcome &) const = default;
 };
 struct AgentInterrupted {
   std::string agentId;
@@ -449,6 +470,8 @@ struct ThreadTitleUpdated {
 struct MessageQueued {
   std::string messageId;
   std::string text;
+  std::string threadId;
+  std::string agentId;
   bool operator==(const MessageQueued &) const = default;
 };
 
@@ -457,6 +480,8 @@ struct MessageQueued {
  */
 struct MessageDequeued {
   std::string messageId;
+  std::string threadId;
+  std::string agentId;
   bool operator==(const MessageDequeued &) const = default;
 };
 
@@ -475,6 +500,8 @@ struct UserMessageSent {
  */
 struct AgentFinished {
   std::string agentId;
+  AgentOutcome outcome;
+  std::string parentId = "";
   bool operator==(const AgentFinished &) const = default;
 };
 
@@ -492,12 +519,11 @@ using StreamEvent =
 using EngineEvent =
     std::variant<AgentSpawned, AgentProviderWaiting, AgentRetrying,
                  AgentRetryFailed, AgentThinking, AgentText, AgentToolCall,
-                 AgentToolCallChunk, AgentTurnCompleted, AgentCompleted,
-                 AgentInterrupted,
+                 AgentToolCallChunk, AgentTurnCompleted, AgentInterrupted,
                  AgentError, AgentCompacting, AgentCompactionThinking,
                  AgentCompactionText, ContextCompacted, AgentProcessOutput,
                  AgentProcessSpawned, ModelSwitched, HistoryUndone,
-                 AgentAccountSwitched>;
+                 AgentAccountSwitched, AgentFinished>;
 
 /**
  * @brief Unified event type for the entire application.
@@ -505,7 +531,7 @@ using EngineEvent =
 using AppEvent = std::variant<
     AgentSpawned, AgentProviderWaiting, AgentRetrying, AgentRetryFailed,
     AgentThinking, AgentText, AgentToolCall, AgentToolCallChunk,
-    AgentTurnCompleted, AgentCompleted, AgentInterrupted, AgentError, AgentCompacting,
+    AgentTurnCompleted, AgentInterrupted, AgentError, AgentCompacting,
     AgentCompactionThinking, AgentCompactionText, ContextCompacted,
     AgentProcessOutput, AgentProcessSpawned, ModelSwitched, HistoryUndone,
     AgentAccountSwitched, ThreadChanged, ThreadMetadataUpdated, PlanCreated,

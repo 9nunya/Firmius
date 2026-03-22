@@ -3,6 +3,14 @@
 
 namespace firmius::core {
 
+namespace {
+bool isCompactionTurnId(const std::string& turnId) {
+    return turnId.find("compaction-summary-") == 0 ||
+           turnId.find("compaction-start-") == 0 ||
+           turnId.find("compaction-end-") == 0;
+}
+}
+
 UndoResult HistoryEditor::undoTurns(std::vector<AgentTurn>& turns, int count) {
     if (count <= 0 || turns.size() <= 2) {
         return {0, false, 0, false};
@@ -14,7 +22,7 @@ UndoResult HistoryEditor::undoTurns(std::vector<AgentTurn>& turns, int count) {
 
     for (int i = 0; i < toRemove; ++i) {
         const auto& turn = turns[turns.size() - 1 - i];
-        if (turn.turnId.find("compaction-summary-") == 0) {
+        if (isCompactionTurnId(turn.turnId)) {
             result.compactionReversed = true;
         }
     }
@@ -50,7 +58,7 @@ UndoResult HistoryEditor::undoMessages(std::vector<AgentTurn>& turns, int count)
 
         int remaining = count - messagesRemoved;
         if (messagesInTurn <= remaining) {
-            if (it->turnId.find("compaction-summary-") == 0) {
+            if (isCompactionTurnId(it->turnId)) {
                 result.compactionReversed = true;
             }
             messagesRemoved += messagesInTurn;
@@ -84,7 +92,7 @@ UndoResult HistoryEditor::undoAfterTimestamp(std::vector<AgentTurn>& turns, uint
 
     auto it = std::remove_if(turns.begin() + 2, turns.end(), [&](const AgentTurn& turn) {
         if (!turn.messages.empty() && turn.messages[0].timestamp > timestamp) {
-            if (turn.turnId.find("compaction-summary-") == 0) {
+            if (isCompactionTurnId(turn.turnId)) {
                 result.compactionReversed = true;
             }
             ++turnsRemoved;

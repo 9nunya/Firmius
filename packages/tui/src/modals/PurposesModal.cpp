@@ -1,10 +1,12 @@
 #include "modals/PurposesModal.hpp"
+#include "AgentRegistry.hpp"
 #include "TUIState.hpp"
 #include "ThemeManager.hpp"
 #include "agents/PurposeLoader.hpp"
 #include "harness/Harness.hpp"
 #include "modals/ModalLayout.hpp"
 #include <algorithm>
+#include <unordered_set>
 #include <ftxui/component/component.hpp>
 #include <ftxui/dom/elements.hpp>
 #include <string>
@@ -28,14 +30,36 @@ std::vector<std::string> sortedCategories(const firmius::shared::UserConfig &cfg
 
 ftxui::Component PurposesModal::create(TuiState &state) {
   auto purposes =
-      std::make_shared<std::vector<std::string>>(firmius::core::PurposeLoader::listSwitchablePurposes());
+      std::make_shared<std::vector<std::string>>(firmius::core::PurposeLoader::listPurposes());
   auto selected = std::make_shared<int>(0);
   auto message = std::make_shared<std::string>();
+
+  const auto cfg = firmius::core::Harness::instance().getConfig();
+  for (const auto &[purpose, _] : cfg.purposeRoutes) {
+    purposes->push_back(purpose);
+  }
+
+  const auto threadId = state.currentThreadId();
+  if (!threadId.empty()) {
+    auto agentIds = firmius::core::Harness::instance().listAgents(threadId);
+    for (const auto &agentId : agentIds) {
+      auto agent = firmius::core::AgentRegistry::instance().getAgent(agentId);
+      if (!agent) {
+        continue;
+      }
+      const auto &persona = agent->getContext().config.personaName;
+      if (!persona.empty()) {
+        purposes->push_back(persona);
+      }
+    }
+  }
 
   if (purposes->empty()) {
     purposes->push_back("lead");
   }
   std::sort(purposes->begin(), purposes->end());
+  purposes->erase(std::unique(purposes->begin(), purposes->end()),
+                  purposes->end());
 
   auto component = ftxui::Renderer([purposes, selected, message] {
     const auto &theme = ThemeManager::instance().getCurrentTheme();
@@ -46,7 +70,7 @@ ftxui::Component PurposesModal::create(TuiState &state) {
     rows.push_back(ftxui::text("Persona Route Mapping") | ftxui::bold |
                    ftxui::color(theme.modals.title));
     rows.push_back(
-        ftxui::text("Read-only persona list. Use ←/→ to cycle category mapping for selected persona.") |
+        ftxui::text("Use ←/→ to cycle category mapping for selected persona.") |
         ftxui::color(theme.base.dim));
     rows.push_back(ftxui::separatorLight() | ftxui::color(theme.modals.border));
 
@@ -165,4 +189,3 @@ ftxui::Component PurposesModal::create(TuiState &state) {
 }
 
 } // namespace firmius::tui
-

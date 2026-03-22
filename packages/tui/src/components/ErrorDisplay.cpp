@@ -229,6 +229,65 @@ ftxui::Element metadataRow(const Theme &theme, const std::string &label, const s
   });
 }
 
+struct NoticePalette {
+  ftxui::Color accent;
+  ftxui::Color bg;
+  ftxui::Color fg;
+};
+
+NoticePalette paletteForSeverity(const Theme &theme,
+                                 firmius::shared::NoticeSeverity severity) {
+  switch (severity) {
+  case firmius::shared::NoticeSeverity::Info:
+    return {theme.status_bar.provider_waiting.normal.fg,
+            theme.status_bar.provider_waiting.normal.bg,
+            theme.base.fg};
+  case firmius::shared::NoticeSeverity::Warning:
+    return {theme.status_bar.streaming.normal.fg,
+            theme.status_bar.streaming.normal.bg,
+            theme.base.fg};
+  case firmius::shared::NoticeSeverity::Error:
+    return {theme.status_bar.error.normal.fg, theme.status_bar.error.normal.bg,
+            theme.base.fg};
+  case firmius::shared::NoticeSeverity::Success:
+    return {theme.status_bar.idle.normal.fg, theme.status_bar.idle.normal.bg,
+            theme.base.fg};
+  }
+  return {theme.base.highlight, theme.base.bg, theme.base.fg};
+}
+
+ftxui::Element renderNoticeCard(const Theme &theme, const std::string &title,
+                                const std::string &message,
+                                const std::string &details,
+                                firmius::shared::NoticeSeverity severity,
+                                const std::vector<ftxui::Element> &extra) {
+  const auto palette = paletteForSeverity(theme, severity);
+  ftxui::Elements body;
+
+  body.push_back(ftxui::hbox({
+                     ftxui::text(" ! ") | ftxui::bold |
+                         ftxui::color(palette.accent),
+                     ftxui::text(title) | ftxui::bold |
+                         ftxui::color(palette.accent),
+                 }) |
+                 ftxui::xflex);
+
+  if (!message.empty()) {
+    body.push_back(ftxui::paragraph(message) | ftxui::color(palette.fg));
+  }
+
+  for (const auto &element : extra) {
+    body.push_back(element);
+  }
+
+  if (!details.empty()) {
+    body.push_back(ftxui::paragraph(details) | ftxui::color(theme.base.dim));
+  }
+
+  return ftxui::vbox(std::move(body)) | ftxui::color(palette.accent) |
+         ftxui::bgcolor(palette.bg) | ftxui::xflex;
+}
+
 } // namespace
 
 ParsedErrorDetails ParseErrorDetails(const std::string &details) {
@@ -331,53 +390,41 @@ ParsedErrorDetails ParseErrorDetails(const std::string &details) {
   return parsed;
 }
 
+ftxui::Element RenderNoticeDisplay(const Theme &theme,
+                                   const firmius::shared::NoticeContent &notice) {
+  return renderNoticeCard(theme, notice.title, notice.message, notice.details,
+                          notice.severity, {});
+}
+
 ftxui::Element RenderErrorDisplay(const Theme &theme,
                                    const firmius::shared::ErrorContent &error) {
   const auto parsed = ParseErrorDetails(error.details);
-  ftxui::Elements body;
-
-  // Error title/header
-  body.push_back(ftxui::hbox({
-                     ftxui::text(" ! ") | ftxui::bold |
-                         ftxui::color(theme.status_bar.error.normal.fg),
-                     ftxui::text(error.errorName) | ftxui::bold |
-                         ftxui::color(theme.status_bar.error.normal.fg),
-                 }) |
-                 ftxui::xflex);
-
-  if (!error.description.empty()) {
-    body.push_back(ftxui::paragraph(error.description) |
-                   ftxui::color(theme.base.fg));
-  }
+  ftxui::Elements extra;
 
   if (!parsed.headline.empty() && parsed.headline != error.description) {
-    body.push_back(ftxui::paragraph(parsed.headline) |
-                   ftxui::color(theme.status_bar.error.normal.fg));
+    extra.push_back(ftxui::paragraph(parsed.headline) |
+                    ftxui::color(theme.status_bar.error.normal.fg));
   }
 
-  // Metadata rows
   if (!parsed.metadata.empty()) {
     ftxui::Elements meta_rows;
     for (const auto& meta : parsed.metadata) {
       meta_rows.push_back(metadataRow(theme, meta.label, meta.content));
     }
-    body.push_back(ftxui::vbox(std::move(meta_rows)) | 
-                   ftxui::bgcolor(theme.chat.markdown.code_bg) |
-                   ftxui::color(theme.chat.markdown.code_fg));
+    extra.push_back(ftxui::vbox(std::move(meta_rows)) |
+                    ftxui::bgcolor(theme.chat.markdown.code_bg) |
+                    ftxui::color(theme.chat.markdown.code_fg));
   }
 
-  // Raw body section
   if (!parsed.raw_body_content.empty()) {
     ftxui::Elements raw_body_elements;
-    
-    // Label
+
     if (!parsed.raw_body_label.empty()) {
       raw_body_elements.push_back(
           ftxui::text(parsed.raw_body_label) | ftxui::bold |
           ftxui::color(theme.base.highlight));
     }
-    
-    // Content - either pretty JSON or raw text
+
     if (parsed.has_json && !parsed.pretty_json.empty()) {
       raw_body_elements.push_back(renderJsonBlock(theme, parsed.pretty_json));
     } else {
@@ -385,24 +432,21 @@ ftxui::Element RenderErrorDisplay(const Theme &theme,
           ftxui::paragraph(parsed.raw_body_content) | 
           ftxui::color(theme.chat.markdown.code_fg));
     }
-    
-    body.push_back(
+
+    extra.push_back(
         ftxui::vbox(std::move(raw_body_elements)) | 
         ftxui::bgcolor(theme.chat.markdown.code_bg) |
         ftxui::color(theme.chat.markdown.code_fg) |
         ftxui::xflex);
   }
-  
+
   if (!parsed.trailing_details.empty()) {
-    body.push_back(
-        ftxui::paragraph(parsed.trailing_details) | 
-        ftxui::color(theme.base.dim));
+    extra.push_back(ftxui::paragraph(parsed.trailing_details) |
+                    ftxui::color(theme.base.dim));
   }
 
-  return ftxui::vbox(std::move(body)) | 
-         ftxui::color(theme.status_bar.error.normal.fg) |
-         ftxui::bgcolor(theme.status_bar.error.normal.bg) | 
-         ftxui::xflex;
+  return renderNoticeCard(theme, error.errorName, error.description, "",
+                          firmius::shared::NoticeSeverity::Error, extra);
 }
 
 } // namespace firmius::tui

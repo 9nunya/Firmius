@@ -1,6 +1,7 @@
 #include "StreamStateManager.hpp"
 #include "components/ChatWindow.hpp"
 
+#include <algorithm>
 #include <gtest/gtest.h>
 
 namespace {
@@ -8,6 +9,12 @@ namespace {
 using firmius::shared::AgentText;
 using firmius::shared::AgentThinking;
 using firmius::shared::AgentInterrupted;
+using firmius::shared::AgentCompacting;
+using firmius::shared::ContextCompacted;
+using firmius::shared::AgentError;
+using firmius::shared::AgentFinished;
+using firmius::shared::AgentOutcome;
+using firmius::shared::AgentSpawned;
 using firmius::shared::AgentAccountSwitched;
 using firmius::shared::AgentProviderWaiting;
 using firmius::shared::AgentRetrying;
@@ -15,6 +22,9 @@ using firmius::shared::AgentToolCall;
 using firmius::shared::AgentToolCallChunk;
 using firmius::shared::AgentTurn;
 using firmius::shared::AgentTurnCompleted;
+using firmius::shared::Message;
+using firmius::shared::Role;
+using firmius::shared::ToolResultContent;
 using firmius::shared::ToolPhase;
 using firmius::tui::TimelineEntry;
 using firmius::tui::StreamStateManager;
@@ -205,6 +215,240 @@ TEST(StreamStateManagerLiveTest, InterruptClearsProviderWaitingAndRetryUiImmedia
   EXPECT_FALSE(stream->provider_waiting);
   EXPECT_TRUE(state.getRetryStatus().empty());
   EXPECT_TRUE(state.getAccountSwaps().empty());
+}
+
+TEST(StreamStateManagerLiveTest, CompactionCompletionRemainsVisibleAfterFinish) {
+  StreamStateManager state;
+  state.handleAgentCompacting(AgentCompacting{"agent-1", ""});
+  state.handleContextCompacted(ContextCompacted{"agent-1", 42, ""});
+
+  auto stream = state.getStream("agent-1");
+  ASSERT_NE(stream, nullptr);
+  EXPECT_TRUE(stream->compaction_finished);
+  EXPECT_FALSE(stream->compaction_completion.empty());
+  EXPECT_NE(stream->compaction_completion.find("42"), std::string::npos);
+}
+
+TEST(StreamStateManagerLiveTest, ChildErrorMarksParentSubagentAsFailed) {
+  StreamStateManager state;
+  state.handleAgentToolCall(
+      AgentToolCall{"parent", "tool-1", "summon_subagent",
+                    R"({"name":"child","title":"Child"})", ""});
+
+  state.handleAgentSpawned(
+      AgentSpawned{"child-id", "worker", "parent", "child", "Child", true, "", "", 0},
+      "parent");
+  state.handleAgentError(AgentError{"child-id", "boom", "parent"});
+
+  auto view = state.getToolView("tool-1");
+  ASSERT_TRUE(static_cast<bool>(view));
+  EXPECT_EQ(view->phase, ToolPhase::Error);
+  EXPECT_FALSE(view->subagent_running);
+}
+
+TEST(StreamStateManagerLiveTest,
+     RetryingSubagentReactivatesParentSummonBlockAndCanFinishSuccessfully) {
+  StreamStateManager state;
+  state.handleAgentToolCall(
+      AgentToolCall{"parent", "tool-1", "summon_subagent",
+                    R"({"name":"child","title":"Child"})", ""});
+  state.handleAgentSpawned(
+      AgentSpawned{"child-id", "worker", "parent", "child", "Child", true, "", "", 0},
+      "parent");
+  state.handleAgentError(AgentError{"child-id", "boom", "parent"});
+
+  auto view = state.getToolView("tool-1");
+  ASSERT_TRUE(static_cast<bool>(view));
+  EXPECT_EQ(view->phase, ToolPhase::Error);
+  EXPECT_FALSE(view->subagent_running);
+
+  state.handleAgentRetrying(
+      AgentRetrying{"child-id", 2, 5, 429, 4000, "Retrying request",
+                    "parent", "acct"});
+
+  view = state.getToolView("tool-1");
+  ASSERT_TRUE(static_cast<bool>(view));
+  EXPECT_EQ(view->phase, ToolPhase::Called);
+  EXPECT_TRUE(view->subagent_running);
+
+  state.handleAgentFinished(AgentFinished{
+      "child-id", AgentOutcome{AgentOutcome::Kind::Response, "All set"},
+      "parent"});
+
+  view = state.getToolView("tool-1");
+  ASSERT_TRUE(static_cast<bool>(view));
+  EXPECT_EQ(view->phase, ToolPhase::Finished);
+  EXPECT_FALSE(view->subagent_running);
+  ASSERT_FALSE(view->subagent_tool_log.empty());
+  EXPECT_EQ(view->subagent_tool_log.back().summary, "Done");
+  EXPECT_TRUE(std::any_of(view->subagent_tool_log.begin(),
+                          view->subagent_tool_log.end(),
+                          [](const firmius::shared::SubagentToolLogEntry &entry) {
+                            return entry.summary.find("Failed: boom") !=
+                                   std::string::npos;
+                          }));
+}
+
+TEST(StreamStateManagerLiveTest,
+     RetriedSubagentStillEndsInErrorWhenFinalAttemptFails) {
+  StreamStateManager state;
+  state.handleAgentToolCall(
+      AgentToolCall{"parent", "tool-1", "summon_subagent",
+                    R"({"name":"child","title":"Child"})", ""});
+  state.handleAgentSpawned(
+      AgentSpawned{"child-id", "worker", "parent", "child", "Child", true, "", "", 0},
+      "parent");
+  state.handleAgentError(AgentError{"child-id", "boom", "parent"});
+  state.handleAgentRetrying(
+      AgentRetrying{"child-id", 2, 5, 429, 4000, "Retrying request",
+                    "parent", "acct"});
+
+  state.handleAgentFinished(AgentFinished{
+      "child-id", AgentOutcome{AgentOutcome::Kind::Failed, "final boom"},
+      "parent"});
+
+  auto view = state.getToolView("tool-1");
+  ASSERT_TRUE(static_cast<bool>(view));
+  EXPECT_EQ(view->phase, ToolPhase::Error);
+  EXPECT_FALSE(view->subagent_running);
+  ASSERT_FALSE(view->subagent_tool_log.empty());
+  EXPECT_EQ(view->subagent_tool_log.back().summary, "Failed: final boom");
+}
+
+TEST(StreamStateManagerLiveTest, FinishedSubagentNoSummaryUsesTypedOutcome) {
+  StreamStateManager state;
+  state.handleAgentToolCall(
+      AgentToolCall{"parent", "tool-1", "summon_subagent",
+                    R"({"agent_id":"child-id"})", ""});
+  state.handleAgentSpawned(
+      AgentSpawned{"child-id", "worker", "parent", "child", "Child", true, "", "", 0},
+      "parent");
+  state.handleAgentFinished(AgentFinished{
+      "child-id", AgentOutcome{AgentOutcome::Kind::NoSummary, ""},
+      "parent"});
+
+  auto view = state.getToolView("tool-1");
+  ASSERT_TRUE(static_cast<bool>(view));
+  EXPECT_EQ(view->phase, ToolPhase::Finished);
+  EXPECT_FALSE(view->subagent_running);
+  ASSERT_FALSE(view->subagent_tool_log.empty());
+  EXPECT_EQ(view->subagent_tool_log.back().summary, "Done (no summary)");
+}
+
+TEST(StreamStateManagerLiveTest, FinishedSubagentResponseCancelAndFailureRenderCorrectly) {
+  StreamStateManager state;
+
+  state.handleAgentToolCall(
+      AgentToolCall{"parent", "tool-1", "summon_subagent",
+                    R"({"agent_id":"child-response"})", ""});
+  state.handleAgentSpawned(
+      AgentSpawned{"child-response", "worker", "parent", "child", "Child", true, "", "", 0},
+      "parent");
+  state.handleAgentFinished(AgentFinished{
+      "child-response", AgentOutcome{AgentOutcome::Kind::Response, "All set"},
+      "parent"});
+  auto responseView = state.getToolView("tool-1");
+  ASSERT_TRUE(static_cast<bool>(responseView));
+  ASSERT_FALSE(responseView->subagent_tool_log.empty());
+  EXPECT_EQ(responseView->subagent_tool_log.back().summary, "Done");
+
+  state.handleAgentToolCall(
+      AgentToolCall{"parent", "tool-2", "summon_subagent",
+                    R"({"agent_id":"child-cancel"})", ""});
+  state.handleAgentSpawned(
+      AgentSpawned{"child-cancel", "worker", "parent", "child", "Child", true, "", "", 0},
+      "parent");
+  state.handleAgentFinished(AgentFinished{
+      "child-cancel", AgentOutcome{AgentOutcome::Kind::Cancelled, "Stopped"},
+      "parent"});
+  auto cancelledView = state.getToolView("tool-2");
+  ASSERT_TRUE(static_cast<bool>(cancelledView));
+  ASSERT_FALSE(cancelledView->subagent_tool_log.empty());
+  EXPECT_EQ(cancelledView->subagent_tool_log.back().summary, "Cancelled");
+  EXPECT_EQ(cancelledView->phase, ToolPhase::Finished);
+
+  state.handleAgentToolCall(
+      AgentToolCall{"parent", "tool-3", "summon_subagent",
+                    R"({"agent_id":"child-fail"})", ""});
+  state.handleAgentSpawned(
+      AgentSpawned{"child-fail", "worker", "parent", "child", "Child", true, "", "", 0},
+      "parent");
+  state.handleAgentFinished(AgentFinished{
+      "child-fail", AgentOutcome{AgentOutcome::Kind::Failed, "boom"},
+      "parent"});
+  auto failedView = state.getToolView("tool-3");
+  ASSERT_TRUE(static_cast<bool>(failedView));
+  ASSERT_FALSE(failedView->subagent_tool_log.empty());
+  EXPECT_EQ(failedView->subagent_tool_log.back().summary, "Failed: boom");
+  EXPECT_EQ(failedView->phase, ToolPhase::Error);
+}
+
+TEST(StreamStateManagerLiveTest,
+     SubagentNormalizedStateTracksLifecycleRoutingAndArtifacts) {
+  StreamStateManager state;
+
+  state.handleAgentToolCall(AgentToolCall{
+      "parent", "summon-1", "summon_subagent",
+      R"({"name":"worker","title":"Worker","task":"Implement API","category":"executor"})",
+      ""});
+  state.handleAgentSpawned(AgentSpawned{"child-1", "worker", "parent", "worker",
+                                        "Worker", true, "", "", 0},
+                           "parent");
+
+  const auto *spawned = state.getSubagentStateForToolCall("summon-1");
+  ASSERT_NE(spawned, nullptr);
+  EXPECT_EQ(spawned->child_agent_id, "child-1");
+  EXPECT_EQ(spawned->child_title, "Worker");
+  EXPECT_TRUE(spawned->running);
+  EXPECT_EQ(spawned->task, "Implement API");
+
+  state.handleAgentProviderWaiting(AgentProviderWaiting{"child-1", "parent"});
+  auto *waiting = state.getSubagentStateForToolCall("summon-1");
+  ASSERT_NE(waiting, nullptr);
+  EXPECT_TRUE(waiting->provider_waiting);
+  EXPECT_EQ(waiting->wait_state, "provider_waiting");
+
+  state.handleAgentRetrying(
+      AgentRetrying{"child-1", 2, 4, 429, 2000, "retry", "parent", "acct-a"});
+  auto *retrying = state.getSubagentStateForToolCall("summon-1");
+  ASSERT_NE(retrying, nullptr);
+  EXPECT_TRUE(retrying->retrying);
+  EXPECT_EQ(retrying->wait_state, "retrying");
+
+  state.handleAgentAccountSwitched(
+      AgentAccountSwitched{"child-1", "acct-b", "parent"});
+  auto *switched = state.getSubagentStateForToolCall("summon-1");
+  ASSERT_NE(switched, nullptr);
+  EXPECT_TRUE(switched->account_switched);
+  EXPECT_EQ(switched->wait_state, "account_switched");
+
+  AgentTurn turn;
+  turn.turnId = "turn-1";
+  Message tool_result;
+  tool_result.role = Role::ToolResult;
+  tool_result.content = {ToolResultContent{
+      "summon-1",
+      R"({"agentId":"child-1","status":"completed","result":"done","fallback_used":true,"category":"scout","attempted_categories":["executor","scout"],"artifacts_created":[{"reference":"@artifact:worker/report.md"}],"artifacts_updated":[{"reference":"@artifact:worker/index.json"}]})",
+      true,
+      "",
+      ""}};
+  turn.messages.push_back(tool_result);
+  state.handleAgentTurnCompleted(AgentTurnCompleted{"parent", turn, {}, ""});
+
+  const auto *completed = state.getSubagentStateForToolCall("summon-1");
+  ASSERT_NE(completed, nullptr);
+  EXPECT_EQ(completed->wait_state, "completed");
+  EXPECT_TRUE(completed->fallback_used);
+  EXPECT_EQ(completed->route_category, "scout");
+  ASSERT_EQ(completed->attempted_categories.size(), 2u);
+  EXPECT_EQ(completed->attempted_categories[0], "executor");
+  EXPECT_EQ(completed->attempted_categories[1], "scout");
+  ASSERT_EQ(completed->artifacts_created.size(), 1u);
+  ASSERT_EQ(completed->artifacts_updated.size(), 1u);
+  EXPECT_NE(completed->artifacts_created[0].find("@artifact:worker/report.md"),
+            std::string::npos);
+  EXPECT_NE(completed->artifacts_updated[0].find("@artifact:worker/index.json"),
+            std::string::npos);
 }
 
 } // namespace

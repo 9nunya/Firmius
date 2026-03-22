@@ -47,6 +47,29 @@ std::string todoPathFor(const std::string& basePath, const std::string& threadId
     return todosDirectoryPathFor(basePath, threadId) + "/" + agentId + ".json";
 }
 
+std::string artifactsDirectoryPathFor(const std::string& basePath,
+                                      const std::string& threadId) {
+    return basePath + "/" + threadId + "/artifacts";
+}
+
+std::string artifactsManifestPathFor(const std::string& basePath,
+                                     const std::string& threadId) {
+    return artifactsDirectoryPathFor(basePath, threadId) + "/manifest.json";
+}
+
+std::string artifactRelativeStoragePath(const std::string& ownerAgentId,
+                                        const std::string& filename) {
+    return "artifacts/" + ownerAgentId + "/" + filename;
+}
+
+std::string artifactAbsoluteStoragePath(const std::string& basePath,
+                                        const std::string& threadId,
+                                        const std::string& ownerAgentId,
+                                        const std::string& filename) {
+    return basePath + "/" + threadId + "/" +
+           artifactRelativeStoragePath(ownerAgentId, filename);
+}
+
 uint64_t nowEpochMs() {
     return static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -198,6 +221,83 @@ std::shared_ptr<std::mutex> acquireTodoMutex(const std::string& threadId,
     auto created = std::make_shared<std::mutex>();
     registry[key] = created;
     return created;
+}
+
+std::shared_ptr<std::mutex> acquireArtifactsMutex(const std::string& threadId) {
+    static std::mutex registryMutex;
+    static std::unordered_map<std::string, std::weak_ptr<std::mutex>> registry;
+
+    std::lock_guard<std::mutex> guard(registryMutex);
+    if (auto existing = registry[threadId].lock()) {
+        return existing;
+    }
+
+    auto created = std::make_shared<std::mutex>();
+    registry[threadId] = created;
+    return created;
+}
+
+void validateArtifactFilename(const std::string& filename) {
+    if (filename.empty()) {
+        throw std::runtime_error("Artifact filename cannot be empty");
+    }
+    if (filename == "." || filename == "..") {
+        throw std::runtime_error("Artifact filename is invalid: " + filename);
+    }
+    if (filename.find('\0') != std::string::npos) {
+        throw std::runtime_error("Artifact filename contains NUL byte");
+    }
+    if (filename.find("..") != std::string::npos) {
+        throw std::runtime_error("Artifact filename cannot contain '..'");
+    }
+    if (filename.front() == '/' || filename.front() == '\\') {
+        throw std::runtime_error("Artifact filename must be relative");
+    }
+    if (filename.find('\\') != std::string::npos) {
+        throw std::runtime_error("Artifact filename cannot contain '\\\\'");
+    }
+}
+
+std::vector<shared::ThreadArtifactMetadata>
+readArtifactsManifestFile(const std::string& path) {
+    std::vector<shared::ThreadArtifactMetadata> artifacts;
+    if (!std::filesystem::exists(path)) {
+        return artifacts;
+    }
+
+    rapidjson::Document doc = readJsonDocument(path, "artifact manifest");
+    if (!doc.IsObject()) {
+        return artifacts;
+    }
+    if (!doc.HasMember("artifacts") || !doc["artifacts"].IsArray()) {
+        return artifacts;
+    }
+
+    for (const auto& entry : doc["artifacts"].GetArray()) {
+        if (!entry.IsObject()) {
+            continue;
+        }
+        artifacts.push_back(shared::threadArtifactMetadataFromJson(entry));
+    }
+    return artifacts;
+}
+
+void writeArtifactsManifestFile(
+    const std::string& path,
+    const std::vector<shared::ThreadArtifactMetadata>& artifacts) {
+    rapidjson::Document doc;
+    doc.SetObject();
+    auto& alloc = doc.GetAllocator();
+
+    rapidjson::Value items(rapidjson::kArrayType);
+    for (const auto& artifact : artifacts) {
+        rapidjson::Document artifactDoc = shared::toJson(artifact);
+        rapidjson::Value artifactValue;
+        artifactValue.CopyFrom(artifactDoc, alloc);
+        items.PushBack(artifactValue, alloc);
+    }
+    doc.AddMember("artifacts", items, alloc);
+    writeJsonDocument(doc, path);
 }
 
 } // namespace
@@ -800,6 +900,196 @@ void ThreadManager::addWriteAllowPath(const std::string& threadId,
         rules.writeAllowPaths.push_back(pathPrefix);
         writePermissionRules(threadId, rules);
     }
+}
+
+shared::ThreadArtifactMetadata
+ThreadManager::writeArtifact(const std::string& threadId,
+                             const std::string& ownerAgentId,
+                             const std::string& ownerFriendlyName,
+                             const std::string& filename,
+                             const std::string& content, bool* created,
+                             const std::optional<std::string>& kind,
+                             const std::optional<std::string>& description) {
+    if (threadId.empty()) {
+        throw std::runtime_error("Cannot write artifact with empty threadId");
+    }
+    if (ownerAgentId.empty()) {
+        throw std::runtime_error("Cannot write artifact with empty ownerAgentId");
+    }
+    validateArtifactFilename(filename);
+
+    std::string threadDir = basePath_ + "/" + threadId;
+    if (!std::filesystem::exists(threadDir)) {
+        throw std::runtime_error("Thread not found: " + threadId);
+    }
+
+    auto artifactsMutex = acquireArtifactsMutex(threadId);
+    std::lock_guard<std::mutex> lock(*artifactsMutex);
+
+    const std::string storagePath =
+        artifactRelativeStoragePath(ownerAgentId, filename);
+    const std::string absoluteStoragePath =
+        artifactAbsoluteStoragePath(basePath_, threadId, ownerAgentId, filename);
+    const bool fileExists = std::filesystem::exists(absoluteStoragePath);
+    writeStringAtomically(content, absoluteStoragePath);
+
+    const std::string manifestPath = artifactsManifestPathFor(basePath_, threadId);
+    auto artifacts = readArtifactsManifestFile(manifestPath);
+    const uint64_t timestamp = nowEpochMs();
+
+    auto it = std::find_if(
+        artifacts.begin(), artifacts.end(),
+        [&](const shared::ThreadArtifactMetadata& item) {
+            return item.ownerAgentId == ownerAgentId && item.filename == filename;
+        });
+
+    bool wasCreated = false;
+    if (it == artifacts.end()) {
+        shared::ThreadArtifactMetadata metadata;
+        metadata.threadId = threadId;
+        metadata.ownerAgentId = ownerAgentId;
+        metadata.ownerFriendlyName = ownerFriendlyName;
+        metadata.filename = filename;
+        metadata.storagePath = storagePath;
+        metadata.createdAt = timestamp;
+        metadata.updatedAt = timestamp;
+        metadata.kind = kind;
+        metadata.description = description;
+        artifacts.push_back(std::move(metadata));
+        it = std::prev(artifacts.end());
+        wasCreated = !fileExists;
+    } else {
+        it->threadId = threadId;
+        it->ownerAgentId = ownerAgentId;
+        it->ownerFriendlyName = ownerFriendlyName;
+        it->storagePath = storagePath;
+        if (it->createdAt == 0) {
+            it->createdAt = timestamp;
+        }
+        it->updatedAt = timestamp;
+        if (kind.has_value()) {
+            it->kind = kind;
+        }
+        if (description.has_value()) {
+            it->description = description;
+        }
+        wasCreated = false;
+    }
+
+    std::sort(artifacts.begin(), artifacts.end(),
+              [](const shared::ThreadArtifactMetadata& lhs,
+                 const shared::ThreadArtifactMetadata& rhs) {
+                  if (lhs.ownerAgentId == rhs.ownerAgentId) {
+                      return lhs.filename < rhs.filename;
+                  }
+                  return lhs.ownerAgentId < rhs.ownerAgentId;
+              });
+    writeArtifactsManifestFile(manifestPath, artifacts);
+
+    if (created) {
+        *created = wasCreated;
+    }
+    return *std::find_if(
+        artifacts.begin(), artifacts.end(),
+        [&](const shared::ThreadArtifactMetadata& item) {
+            return item.ownerAgentId == ownerAgentId && item.filename == filename;
+        });
+}
+
+std::string ThreadManager::readArtifact(const std::string& threadId,
+                                        const std::string& ownerAgentId,
+                                        const std::string& filename) const {
+    if (threadId.empty() || ownerAgentId.empty() || filename.empty()) {
+        throw std::runtime_error("Artifact selector is incomplete");
+    }
+    validateArtifactFilename(filename);
+
+    auto artifacts = listArtifacts(threadId);
+    auto it = std::find_if(
+        artifacts.begin(), artifacts.end(),
+        [&](const shared::ThreadArtifactMetadata& item) {
+            return item.ownerAgentId == ownerAgentId && item.filename == filename;
+        });
+    if (it == artifacts.end()) {
+        throw std::runtime_error("Artifact not found: " + ownerAgentId + "/" +
+                                 filename);
+    }
+
+    std::ifstream file(basePath_ + "/" + threadId + "/" + it->storagePath);
+    if (!file.is_open()) {
+        throw std::runtime_error("Cannot read artifact file: " + it->storagePath);
+    }
+    std::stringstream buffer;
+    buffer << file.rdbuf();
+    return buffer.str();
+}
+
+std::vector<shared::ThreadArtifactMetadata>
+ThreadManager::listArtifacts(const std::string& threadId) const {
+    if (threadId.empty()) {
+        return {};
+    }
+    auto artifacts = readArtifactsManifestFile(
+        artifactsManifestPathFor(basePath_, threadId));
+    std::sort(artifacts.begin(), artifacts.end(),
+              [](const shared::ThreadArtifactMetadata& lhs,
+                 const shared::ThreadArtifactMetadata& rhs) {
+                  if (lhs.ownerFriendlyName == rhs.ownerFriendlyName) {
+                      return lhs.filename < rhs.filename;
+                  }
+                  return lhs.ownerFriendlyName < rhs.ownerFriendlyName;
+              });
+    return artifacts;
+}
+
+std::vector<shared::ThreadArtifactMetadata>
+ThreadManager::listArtifactsForAgent(const std::string& threadId,
+                                     const std::string& ownerAgentId) const {
+    if (ownerAgentId.empty()) {
+        return {};
+    }
+    auto all = listArtifacts(threadId);
+    std::vector<shared::ThreadArtifactMetadata> filtered;
+    for (const auto& artifact : all) {
+        if (artifact.ownerAgentId == ownerAgentId) {
+            filtered.push_back(artifact);
+        }
+    }
+    return filtered;
+}
+
+std::optional<std::string>
+ThreadManager::findAgentIdByFriendlyName(const std::string& threadId,
+                                         const std::string& friendlyName) const {
+    if (threadId.empty() || friendlyName.empty()) {
+        return std::nullopt;
+    }
+    const auto manifest = readAgentManifest(threadId);
+    std::optional<std::string> match;
+    for (const auto& [agentId, entry] : manifest) {
+        if (entry.friendlyName != friendlyName) {
+            continue;
+        }
+        if (match.has_value() && *match != agentId) {
+            return std::nullopt;
+        }
+        match = agentId;
+    }
+    return match;
+}
+
+std::optional<std::string>
+ThreadManager::findFriendlyNameByAgentId(const std::string& threadId,
+                                         const std::string& agentId) const {
+    if (threadId.empty() || agentId.empty()) {
+        return std::nullopt;
+    }
+    const auto manifest = readAgentManifest(threadId);
+    auto it = manifest.find(agentId);
+    if (it == manifest.end()) {
+        return std::nullopt;
+    }
+    return it->second.friendlyName;
 }
 
 }

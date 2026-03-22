@@ -18,9 +18,8 @@ ftxui::Element LogWindow(const std::vector<ftxui::Element> &lines,
                            ftxui::bgcolor(theme.tool_blocks.specific.terminal.fg));
     footer_parts.push_back(ftxui::text(" ") |
                            ftxui::color(theme.tool_blocks.specific.terminal.fg));
-    footer_parts.push_back(ftxui::text(footer_label) | ftxui::bold |
-                           ftxui::color(theme.base.fg));
-    footer_parts.push_back(ftxui::filler());
+    footer_parts.push_back(ftxui::paragraph(footer_label) | ftxui::bold |
+                           ftxui::color(theme.base.fg) | ftxui::flex);
     footer_parts.push_back(action_element);
     rows.push_back(ftxui::hbox(std::move(footer_parts)) |
                    ftxui::bgcolor(theme.tool_blocks.generic_header_bg) |

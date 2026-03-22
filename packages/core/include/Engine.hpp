@@ -56,12 +56,7 @@ public:
                             const std::string& friendlyName = "",
                             const std::string& title = "");
 
-    /**
-     * @brief Waits for an agent to complete and returns its summary.
-     * @param agentId The agent ID.
-     * @param timeout Optional timeout. If timed out, returns std::nullopt.
-     */
-    std::optional<std::string> waitForAgent(const std::string& agentId, std::optional<std::chrono::milliseconds> timeout = std::nullopt);
+    std::optional<AgentOutcome> waitForAgentOutcome(const std::string& agentId, std::optional<std::chrono::milliseconds> timeout = std::nullopt);
 
     /**
      * @brief Adds a listener for all engine events.
@@ -161,7 +156,7 @@ private:
     std::vector<std::jthread> taskThreads_;
     std::mutex taskThreadsMutex_;
 
-    std::map<std::string, std::shared_future<std::string>> agentFutures;
+    std::map<std::string, std::shared_future<AgentOutcome>> agentFutures;
     std::mutex futuresMutex;
 };
 

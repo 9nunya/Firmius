@@ -32,6 +32,7 @@ struct ToolCallView {
   std::string name;
   std::string args;
   std::string result;
+  std::string previous_result;
   bool success = false;
   ToolPhase phase = ToolPhase::Preparing;
   bool show_result = false;
@@ -47,6 +48,11 @@ struct ToolCallView {
   bool subagent_running = false;
   std::string subagent_slug;
   std::string subagent_id;
+  std::string subagent_wait_state;
+  std::string subagent_wait_message;
+  bool subagent_fallback_used = false;
+  std::string subagent_route_category;
+  std::vector<std::string> subagent_attempted_categories;
 };
 
 inline bool ToolCallHasRenderableIdentity(const std::string &tool_name) {

@@ -12,10 +12,142 @@
 #include "../unit/mocks/MockPermissions.hpp"
 #include <gtest/gtest.h>
 #include <rapidjson/document.h>
+#include <algorithm>
 
 using namespace firmius::core;
 using namespace firmius::shared;
 using namespace firmius::provider;
+
+namespace {
+
+template <typename Fn>
+bool waitForCondition(Fn &&fn,
+                      std::chrono::milliseconds timeout =
+                          std::chrono::milliseconds(2000),
+                      std::chrono::milliseconds step =
+                          std::chrono::milliseconds(20)) {
+  auto deadline = std::chrono::steady_clock::now() + timeout;
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (fn()) {
+      return true;
+    }
+    std::this_thread::sleep_for(step);
+  }
+  return fn();
+}
+
+struct CancelProbeInput {
+  int loops = 8;
+  int sleepMs = 200;
+};
+
+struct CancelProbeState {
+  std::atomic<int> started{0};
+  std::atomic<int> cancelledObserved{0};
+  std::atomic<int> sideEffectsAfterNextRun{0};
+  std::atomic<bool> nextRunStarted{false};
+};
+
+class CancelProbeTool : public TypedTool<CancelProbeInput> {
+public:
+  explicit CancelProbeTool(std::shared_ptr<CancelProbeState> state)
+      : state_(std::move(state)) {}
+
+  ToolMetadata getMetadata() const override {
+    return {"cancel_probe", "Long-running cancellation probe tool",
+            ToolScope::Process};
+  }
+
+  std::shared_ptr<JSONSchema> getSchema() const override {
+    return zObject({{"loops", zNumber()}, {"sleep_ms", zNumber()}});
+  }
+
+  CancelProbeInput transform(const rapidjson::Value &json) override {
+    CancelProbeInput input;
+    if (json.HasMember("loops") && json["loops"].IsInt()) {
+      input.loops = json["loops"].GetInt();
+    }
+    if (json.HasMember("sleep_ms") && json["sleep_ms"].IsInt()) {
+      input.sleepMs = json["sleep_ms"].GetInt();
+    }
+    return input;
+  }
+
+  ToolResult execute(const CancelProbeInput &input, ToolContext &ctx) override {
+    state_->started.fetch_add(1);
+    const int loops = std::max(1, input.loops);
+    const auto sleepDuration =
+        std::chrono::milliseconds(std::max(1, input.sleepMs));
+
+    for (int i = 0; i < loops; ++i) {
+      std::this_thread::sleep_for(sleepDuration);
+      if (ctx.cancelRequested()) {
+        state_->cancelledObserved.fetch_add(1);
+        return ToolResult::fail("Interrupted");
+      }
+      if (state_->nextRunStarted.load()) {
+        state_->sideEffectsAfterNextRun.fetch_add(1);
+      }
+    }
+
+    return ToolResult::ok("{}");
+  }
+
+private:
+  std::shared_ptr<CancelProbeState> state_;
+};
+
+class CancelProbeProvider : public IProvider {
+public:
+  std::string getId() const override { return "cancel-probe-provider"; }
+
+  void stream(const AgentHistory &,
+              const firmius::provider::ProviderOptions &,
+              std::function<void(const StreamEvent &)> onEvent) override {
+    const int call = callCount_.fetch_add(1);
+    if (call == 0) {
+      onEvent(ToolCallChunk{"cancel-probe-a", 0, "cancel_probe",
+                            R"({"loops":8,"sleep_ms":250})"});
+      onEvent(ToolCallChunk{"cancel-probe-b", 1, "cancel_probe",
+                            R"({"loops":8,"sleep_ms":250})"});
+      onEvent(StreamDone{StopReason::ToolUse});
+      return;
+    }
+    onEvent(TextChunk{"follow-up done"});
+    onEvent(StreamDone{StopReason::Stop});
+  }
+
+  std::vector<ModelInfo> listModels() override {
+    ModelInfo model;
+    model.id = "cancel-probe-model";
+    model.provider = getId();
+    model.contextWindow = 4096;
+    return {model};
+  }
+
+  ModelInfo getModelInfo(const std::string &) override {
+    return listModels().front();
+  }
+
+  void generateSummary(const std::string &, const AgentHistory &,
+                       const std::string &,
+                       std::function<void(const StreamEvent &)> onEvent,
+                       std::atomic<bool> * = nullptr) override {
+    onEvent(TextChunk{"summary"});
+    onEvent(StreamDone{StopReason::Stop});
+  }
+
+  firmius::provider::ProviderType getProviderType() const override {
+    return firmius::provider::ProviderType::APIKey;
+  }
+
+  int callCount() const { return callCount_.load(); }
+
+private:
+  std::atomic<int> callCount_{0};
+};
+
+} // namespace
 
 class ProcessInteractiveTest : public ::testing::Test {
 protected:
@@ -130,4 +262,52 @@ TEST_F(ProcessInteractiveTest, PatternWaitTimeout) {
 
   EXPECT_FALSE(res.success);
   EXPECT_TRUE(res.error.find("Timeout") != std::string::npos);
+}
+
+TEST(ProcessCancellationRegressionTest,
+     DetachedRunWorkersDoNotResumeWhenNextRunStarts) {
+  Panic::init();
+
+  auto provider = std::make_shared<CancelProbeProvider>();
+  auto &providerRegistry = ProviderRegistry::instance();
+  if (!providerRegistry.getProvider(provider->getId())) {
+    providerRegistry.registerProvider(provider);
+  }
+
+  ToolRegistry registry;
+  auto probeState = std::make_shared<CancelProbeState>();
+  registry.registerTool(std::make_unique<CancelProbeTool>(probeState));
+
+  AgentContext ctx;
+  ctx.config.providerId = provider->getId();
+  ctx.config.modelId = "cancel-probe-model";
+  ctx.environment.type = HostType::Local;
+  ctx.environment.cwd = "/tmp";
+  ctx.permissions.allowedScopes = {ToolScope::Process};
+  ctx.permissions.allowedPaths = {"/tmp"};
+
+  auto host = std::make_shared<LocalHost>();
+  auto environment = std::make_shared<Environment>(
+      host, ctx.environment.cwd, [](const StreamEvent &) {});
+  auto permissions = std::make_shared<firmius::test::MockPermissions>();
+  permissions->cwd_ = ctx.environment.cwd;
+  permissions->allowedPaths_ = ctx.permissions.allowedPaths;
+
+  Agent agent(ctx, environment, permissions, registry, nullptr);
+
+  std::thread runA([&]() { agent.run("run A", [](const StreamEvent &) {}); });
+  ASSERT_TRUE(waitForCondition(
+      [&]() { return probeState->started.load() >= 1; },
+      std::chrono::milliseconds(1500)));
+  agent.interrupt();
+  runA.join();
+
+  probeState->nextRunStarted.store(true);
+  agent.run("run B", [](const StreamEvent &) {});
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(900));
+
+  EXPECT_EQ(probeState->sideEffectsAfterNextRun.load(), 0);
+  EXPECT_GE(probeState->cancelledObserved.load(), 1);
+  EXPECT_GE(provider->callCount(), 2);
 }

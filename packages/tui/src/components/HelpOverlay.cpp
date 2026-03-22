@@ -50,6 +50,8 @@ ftxui::Component HelpOverlay(TuiState &state) {
                  {kRetryLastRequestHotkeyLabel,
                   "Retry/resume the stopped focused agent"},
                  {kPermissionCycleHotkeyLabel, "Cycle thread permissions"},
+                 {kVariantCycleHotkeyLabel,
+                  "Cycle model variant on focused agent"},
                  {"/config then P", "Fallback permission mode cycle"},
                  {"Ctrl+N", "Next sibling agent"},
                  {"Ctrl+B", "Previous sibling agent"},

@@ -94,11 +94,11 @@ shared::ToolResult ProcessExecuteTool::execute(const ProcessExecuteInput &input,
     auto start = std::chrono::steady_clock::now();
 
     auto sleepDuration = std::chrono::milliseconds(1);
-    const auto maxSleep = std::chrono::milliseconds(50);
+    const auto maxSleep = std::chrono::milliseconds(20);
 
     while (true) {
       // Check for interrupt at the top of each iteration
-      if (ctx.agent.isInterrupted()) {
+      if (ctx.cancelRequested()) {
         ctx.agent.getEnvironment()->getProcessManager().removeBlockingProcessId(processId);
 
         rapidjson::Document doc;
@@ -145,7 +145,22 @@ shared::ToolResult ProcessExecuteTool::execute(const ProcessExecuteInput &input,
         return result;
       }
 
-      std::this_thread::sleep_for(sleepDuration);
+      if (!ctx.waitFor(sleepDuration)) {
+        ctx.agent.getEnvironment()->getProcessManager().removeBlockingProcessId(processId);
+        rapidjson::Document doc;
+        doc.SetObject();
+        auto &a = doc.GetAllocator();
+        doc.AddMember("exit_code", -2, a);
+        doc.AddMember("stdout",
+                      rapidjson::Value(snap.stdoutData.c_str(), a).Move(), a);
+        doc.AddMember("stderr",
+                      rapidjson::Value(snap.stderrData.c_str(), a).Move(), a);
+        doc.AddMember("duration_ms", snap.elapsedMs, a);
+        doc.AddMember("finish_reason", "Interrupted", a);
+        doc.AddMember("process_id",
+                      rapidjson::Value(processId.c_str(), a).Move(), a);
+        return shared::ToolResult::ok(doc, processId);
+      }
       if (sleepDuration < maxSleep) {
         sleepDuration = std::min(maxSleep, sleepDuration * 2);
       }

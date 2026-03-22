@@ -590,4 +590,97 @@ TEST_F(ThreadManagerTest, addPermissionRules_deduplicatesEntries) {
     EXPECT_EQ(loaded.writeAllowPaths.size(), 1u);
 }
 
+TEST_F(ThreadManagerTest, artifactWriteReadListSupportsCreateAndUpdate) {
+    ThreadMetadata metadata = createTestMetadata();
+    std::string threadId = tm->createThread(metadata);
+
+    tm->writeAgentManifest(threadId, {
+        {"agent-1", {"planner", "", "planner", "Planner", true}}
+    });
+
+    bool created = false;
+    auto first = tm->writeArtifact(threadId, "agent-1", "planner",
+                                   "REPORT.md", "v1", &created,
+                                   std::optional<std::string>{"report"},
+                                   std::optional<std::string>{"first"});
+    EXPECT_TRUE(created);
+    EXPECT_EQ(first.threadId, threadId);
+    EXPECT_EQ(first.ownerAgentId, "agent-1");
+    EXPECT_EQ(first.ownerFriendlyName, "planner");
+    EXPECT_EQ(first.filename, "REPORT.md");
+    EXPECT_EQ(first.storagePath, "artifacts/agent-1/REPORT.md");
+    EXPECT_EQ(first.kind, std::optional<std::string>{"report"});
+    EXPECT_EQ(first.description, std::optional<std::string>{"first"});
+
+    const std::string firstRead = tm->readArtifact(threadId, "agent-1", "REPORT.md");
+    EXPECT_EQ(firstRead, "v1");
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    auto second = tm->writeArtifact(threadId, "agent-1", "planner",
+                                    "REPORT.md", "v2", &created);
+    EXPECT_FALSE(created);
+    EXPECT_EQ(second.createdAt, first.createdAt);
+    EXPECT_GE(second.updatedAt, first.updatedAt);
+    EXPECT_EQ(tm->readArtifact(threadId, "agent-1", "REPORT.md"), "v2");
+
+    const auto artifacts = tm->listArtifacts(threadId);
+    ASSERT_EQ(artifacts.size(), 1u);
+    EXPECT_EQ(artifacts.front().filename, "REPORT.md");
+    EXPECT_EQ(artifacts.front().ownerFriendlyName, "planner");
+}
+
+TEST_F(ThreadManagerTest, duplicateArtifactFilenamesAcrossAgentsDoNotCollide) {
+    ThreadMetadata metadata = createTestMetadata();
+    std::string threadId = tm->createThread(metadata);
+
+    tm->writeAgentManifest(threadId, {
+        {"agent-a", {"worker", "", "worker", "Worker", true}},
+        {"agent-b", {"auditor", "", "auditor", "Auditor", true}}
+    });
+
+    bool createdA = false;
+    bool createdB = false;
+    tm->writeArtifact(threadId, "agent-a", "worker", "REPORT.md", "worker-body",
+                      &createdA);
+    tm->writeArtifact(threadId, "agent-b", "auditor", "REPORT.md", "auditor-body",
+                      &createdB);
+    EXPECT_TRUE(createdA);
+    EXPECT_TRUE(createdB);
+
+    EXPECT_EQ(tm->readArtifact(threadId, "agent-a", "REPORT.md"), "worker-body");
+    EXPECT_EQ(tm->readArtifact(threadId, "agent-b", "REPORT.md"), "auditor-body");
+
+    const auto artifacts = tm->listArtifacts(threadId);
+    ASSERT_EQ(artifacts.size(), 2u);
+    EXPECT_EQ(artifacts[0].filename, "REPORT.md");
+    EXPECT_EQ(artifacts[1].filename, "REPORT.md");
+    EXPECT_NE(artifacts[0].ownerAgentId, artifacts[1].ownerAgentId);
+}
+
+TEST_F(ThreadManagerTest, artifactsAreScopedByThread) {
+    ThreadMetadata metadataA = createTestMetadata();
+    metadataA.title = "Thread A";
+    ThreadMetadata metadataB = createTestMetadata();
+    metadataB.title = "Thread B";
+    const std::string threadA = tm->createThread(metadataA);
+    const std::string threadB = tm->createThread(metadataB);
+
+    tm->writeAgentManifest(threadA, {
+        {"agent-1", {"planner", "", "planner", "Planner", true}}
+    });
+    tm->writeAgentManifest(threadB, {
+        {"agent-2", {"planner", "", "planner", "Planner", true}}
+    });
+
+    tm->writeArtifact(threadA, "agent-1", "planner", "A.md", "thread-a");
+    tm->writeArtifact(threadB, "agent-2", "planner", "B.md", "thread-b");
+
+    const auto artifactsA = tm->listArtifacts(threadA);
+    const auto artifactsB = tm->listArtifacts(threadB);
+    ASSERT_EQ(artifactsA.size(), 1u);
+    ASSERT_EQ(artifactsB.size(), 1u);
+    EXPECT_EQ(artifactsA.front().filename, "A.md");
+    EXPECT_EQ(artifactsB.front().filename, "B.md");
+}
+
 }

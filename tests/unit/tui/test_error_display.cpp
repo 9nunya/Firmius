@@ -6,6 +6,14 @@ namespace {
 
 using firmius::tui::ParseErrorDetails;
 
+std::string renderToString(ftxui::Element element, int width = 100,
+                           int height = 18) {
+  auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(width),
+                                      ftxui::Dimension::Fixed(height));
+  Render(screen, element);
+  return screen.ToString();
+}
+
 TEST(ErrorDisplayTest, ParsesSummaryAndMetadataAndRawBodyJson) {
   const auto parsed = ParseErrorDetails(
       "Provider stream error: Quota exhausted or rate limited. Switching to next account... (HTTP 429)\n"
@@ -77,6 +85,19 @@ TEST(ErrorDisplayTest, RendersStructuredBlockWithPrettyPayload) {
   auto theme = firmius::tui::ThemeManager::instance().getCurrentTheme();
   auto element = firmius::tui::RenderErrorDisplay(theme, error);
   ASSERT_TRUE(static_cast<bool>(element));
+}
+
+TEST(ErrorDisplayTest, RendersNoticeCardWithoutErrorPrefix) {
+  firmius::shared::NoticeContent notice;
+  notice.title = "Agent Cancelled";
+  notice.message = "The agent execution was interrupted.";
+  notice.details = "Execution stopped before completion and can be resumed.";
+  notice.severity = firmius::shared::NoticeSeverity::Warning;
+
+  auto theme = firmius::tui::ThemeManager::instance().getCurrentTheme();
+  auto output = renderToString(firmius::tui::RenderNoticeDisplay(theme, notice));
+  EXPECT_NE(output.find("Agent Cancelled"), std::string::npos);
+  EXPECT_EQ(output.find("* "), std::string::npos);
 }
 
 TEST(ErrorDisplayTest, HandlesEmptyDetails) {

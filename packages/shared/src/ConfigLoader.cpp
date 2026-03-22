@@ -172,6 +172,24 @@ void ConfigLoader::loadImpl() {
         doc["defaultRouteCategory"].IsString()) {
         config_.defaultRouteCategory = doc["defaultRouteCategory"].GetString();
     }
+    if (doc.HasMember("enableSubagentRouteFallback") &&
+        doc["enableSubagentRouteFallback"].IsBool()) {
+        config_.enableSubagentRouteFallback =
+            doc["enableSubagentRouteFallback"].GetBool();
+    }
+    if (doc.HasMember("subagentRouteFallbackOrder") &&
+        doc["subagentRouteFallbackOrder"].IsArray()) {
+        config_.subagentRouteFallbackOrder.clear();
+        for (const auto &value : doc["subagentRouteFallbackOrder"].GetArray()) {
+            if (value.IsString()) {
+                config_.subagentRouteFallbackOrder.push_back(value.GetString());
+            }
+        }
+    }
+    if (doc.HasMember("showInternalNudges") &&
+        doc["showInternalNudges"].IsBool()) {
+        config_.showInternalNudges = doc["showInternalNudges"].GetBool();
+    }
 
     loaded_ = true;
 }
@@ -239,6 +257,15 @@ void ConfigLoader::save() const {
     doc.AddMember("defaultRouteCategory",
                   rapidjson::Value(config_.defaultRouteCategory.c_str(), allocator),
                   allocator);
+    doc.AddMember("enableSubagentRouteFallback",
+                  config_.enableSubagentRouteFallback, allocator);
+    rapidjson::Value fallbackOrder(rapidjson::kArrayType);
+    for (const auto &category : config_.subagentRouteFallbackOrder) {
+        fallbackOrder.PushBack(rapidjson::Value(category.c_str(), allocator),
+                               allocator);
+    }
+    doc.AddMember("subagentRouteFallbackOrder", fallbackOrder, allocator);
+    doc.AddMember("showInternalNudges", config_.showInternalNudges, allocator);
 
     rapidjson::StringBuffer buffer;
     rapidjson::PrettyWriter<rapidjson::StringBuffer> writer(buffer);

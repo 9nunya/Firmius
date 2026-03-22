@@ -1,6 +1,7 @@
 #include "agents/PurposeLoader.hpp"
 #include "agents/HintingLoader.hpp"
 #include "ConfigLoader.hpp"
+#include "utils/FrontmatterParser.hpp"
 #include "utils/StringUtil.hpp"
 #include <algorithm>
 #include <array>
@@ -24,6 +25,27 @@ namespace {
 const std::array<const char *, 7> kLegacyPromptFiles = {
     "brainstormer.md", "builder.md",    "coordinator.md", "firmius.md",
     "general.md",      "planner.md",    "reviewer.md"};
+
+PurposeWorkRole legacyWorkRoleForPurposeName(const std::string &purpose) {
+  const std::string lowered = StringUtil::toLower(StringUtil::trim(purpose));
+  if (lowered == "lead" || lowered == "hotrun" || lowered == "planner" ||
+      lowered == "plan_checker") {
+    return PurposeWorkRole::Lead;
+  }
+  if (lowered == "executor") {
+    return PurposeWorkRole::Executor;
+  }
+  if (lowered == "worker") {
+    return PurposeWorkRole::Worker;
+  }
+  if (lowered == "auditor") {
+    return PurposeWorkRole::Auditor;
+  }
+  if (lowered == "scout") {
+    return PurposeWorkRole::Scout;
+  }
+  return PurposeWorkRole::Unknown;
+}
 
 std::string ensureTrailingSlash(std::string dir) {
   if (!dir.empty() && dir.back() != '/') {
@@ -89,9 +111,53 @@ firmius::shared::ToolScope stringToScope(const std::string &s) {
     return ToolScope::ChunkReview;
   throw std::runtime_error("Unknown scope: " + s);
 }
+
+PurposeWorkRole stringToPurposeWorkRole(const std::string &value,
+                                       const std::string &fieldName) {
+  const std::string lowered = StringUtil::toLower(StringUtil::trim(value));
+  if (lowered == "lead") {
+    return PurposeWorkRole::Lead;
+  }
+  if (lowered == "executor") {
+    return PurposeWorkRole::Executor;
+  }
+  if (lowered == "worker") {
+    return PurposeWorkRole::Worker;
+  }
+  if (lowered == "auditor") {
+    return PurposeWorkRole::Auditor;
+  }
+  if (lowered == "scout") {
+    return PurposeWorkRole::Scout;
+  }
+  throw std::runtime_error(fieldName +
+                           " must be one of: lead, executor, worker, auditor, scout");
+}
 } // namespace
 
 std::map<std::string, std::string> PurposeLoader::customPlaceholders;
+
+std::string purposeWorkRoleToString(PurposeWorkRole role) {
+  switch (role) {
+  case PurposeWorkRole::Lead:
+    return "lead";
+  case PurposeWorkRole::Executor:
+    return "executor";
+  case PurposeWorkRole::Worker:
+    return "worker";
+  case PurposeWorkRole::Auditor:
+    return "auditor";
+  case PurposeWorkRole::Scout:
+    return "scout";
+  case PurposeWorkRole::Unknown:
+    return "unknown";
+  }
+  return "unknown";
+}
+
+PurposeWorkRole purposeWorkRoleFromString(const std::string &role) {
+  return stringToPurposeWorkRole(role, "work_role");
+}
 
 void PurposeLoader::registerPlaceholder(const std::string &key,
                                         const std::string &value) {
@@ -136,67 +202,62 @@ Persona PurposeLoader::load(const std::string &purpose) {
                              "'. Available purposes are: " + purposeList);
   }
 
-  std::string line;
-  std::string frontmatter;
-  std::string body;
-  bool inFrontmatter = false;
-  int dashCount = 0;
+  Persona persona;
+  persona.name = purpose;
+  persona.purposeKey = purpose;
+  std::stringstream buffer;
+  buffer << file.rdbuf();
+  const auto document = FrontmatterParser::parseMarkdown(buffer.str(), path);
+  persona.identityPrompt = StringUtil::trim(document.body);
 
-  while (std::getline(file, line)) {
-    if (line == "---") {
-      dashCount++;
-      if (dashCount == 1)
-        inFrontmatter = true;
-      else if (dashCount == 2)
-        inFrontmatter = false;
-      continue;
-    }
-
-    if (inFrontmatter)
-      frontmatter += line + "\n";
-    else
-      body += line + "\n";
+  if (auto name = FrontmatterParser::getString(document, "name")) {
+    persona.name = *name;
+  }
+  if (auto title = FrontmatterParser::getString(document, "title")) {
+    persona.title = *title;
+  }
+  if (auto description =
+          FrontmatterParser::getString(document, "description")) {
+    persona.description = *description;
+  }
+  if (auto canSpawn = FrontmatterParser::getBool(document, "canSpawn")) {
+    persona.canSpawn = *canSpawn;
+  }
+  if (auto workRole = FrontmatterParser::getString(document, "work_role")) {
+    persona.workRole = stringToPurposeWorkRole(*workRole, "work_role");
+    persona.hasWorkRole = true;
+  } else if (auto workRoleAlias =
+                 FrontmatterParser::getString(document, "workRole")) {
+    persona.workRole = stringToPurposeWorkRole(*workRoleAlias, "workRole");
+    persona.hasWorkRole = true;
+  }
+  for (const auto &scopeName :
+       FrontmatterParser::getStringArray(document, "scopes")) {
+    persona.allowedScopes.push_back(stringToScope(scopeName));
+  }
+  if (auto switchable = FrontmatterParser::getBool(document, "switchable")) {
+    persona.switchable = *switchable;
   }
 
-  Persona persona;
-  persona.identityPrompt = StringUtil::trim(body);
-
-  std::stringstream ss_fm(frontmatter);
-  while (std::getline(ss_fm, line)) {
-    auto colon = line.find(':');
-    if (colon == std::string::npos)
-      continue;
-
-    std::string key = StringUtil::trim(line.substr(0, colon));
-    std::string value = StringUtil::trim(line.substr(colon + 1));
-
-    if (key == "name")
-      persona.name = value;
-    else if (key == "title")
-      persona.title = value;
-    else if (key == "description")
-      persona.description = value;
-    else if (key == "canSpawn")
-      persona.canSpawn = (value == "true");
-    else if (key == "scopes") {
-      if (value.front() == '[' && value.back() == ']') {
-        std::string list = value.substr(1, value.size() - 2);
-        auto parts = StringUtil::split(list, ',');
-        for (auto &p : parts) {
-          std::string cleaned = p;
-          if (cleaned.front() == '"' && cleaned.back() == '"')
-            cleaned = cleaned.substr(1, cleaned.size() - 2);
-          persona.allowedScopes.push_back(stringToScope(cleaned));
-        }
-      }
-    } else if (key == "switchable") {
-      auto lowered = StringUtil::toLower(value);
-      persona.switchable = (lowered == "true" || lowered == "yes" ||
-                            lowered == "1");
-    }
+  if (persona.title.empty()) {
+    persona.title = persona.name;
   }
 
   return persona;
+}
+
+PurposeWorkRole PurposeLoader::resolveWorkRole(const Persona &persona) {
+  if (persona.hasWorkRole) {
+    return persona.workRole;
+  }
+  return legacyWorkRoleForPurposeName(persona.purposeKey);
+}
+
+PurposeWorkRole PurposeLoader::resolveWorkRole(const std::string &purpose) {
+  if (!isValid(purpose)) {
+    return legacyWorkRoleForPurposeName(purpose);
+  }
+  return resolveWorkRole(load(purpose));
 }
 
 std::string PurposeLoader::composeSystemPrompt(const Persona &persona,
@@ -351,6 +412,21 @@ std::string PurposeLoader::resolvePromptsDir() {
 }
 
 std::vector<std::string> PurposeLoader::listSwitchablePurposes() {
+  std::vector<std::string> purposes = listPurposes();
+  std::vector<std::string> switchable;
+  for (const auto &purpose : purposes) {
+    try {
+      auto persona = load(purpose);
+      if (persona.switchable) {
+        switchable.push_back(purpose);
+      }
+    } catch (...) {
+    }
+  }
+  return switchable;
+}
+
+std::vector<std::string> PurposeLoader::listPurposes() {
   std::vector<std::string> purposes;
   std::string promptsDir = resolvePromptsDir();
   if (!std::filesystem::exists(promptsDir)) {
@@ -363,13 +439,7 @@ std::vector<std::string> PurposeLoader::listSwitchablePurposes() {
     auto stem = entry.path().stem().string();
     if (stem == "base" || stem == "COMPACTION_PROMPT")
       continue;
-    try {
-      auto persona = load(stem);
-      if (persona.switchable) {
-        purposes.push_back(stem);
-      }
-    } catch (...) {
-    }
+    purposes.push_back(stem);
   }
 
   std::sort(purposes.begin(), purposes.end());

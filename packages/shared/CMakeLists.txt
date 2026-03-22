@@ -16,6 +16,7 @@ target_sources(firmius_shared PRIVATE
     src/utils/TempOAuthServer.cpp
     src/utils/GCPHttpClient.cpp
     src/utils/ModelUtil.cpp
+    src/utils/FrontmatterParser.cpp
     src/ConfigLoader.cpp
 )
 
@@ -52,6 +53,7 @@ target_sources(firmius_shared PUBLIC
     include/utils/TempOAuthServer.hpp
     include/utils/GCPHttpClient.hpp
     include/utils/ModelUtil.hpp
+    include/utils/FrontmatterParser.hpp
     include/ConfigLoader.hpp
 )
 
