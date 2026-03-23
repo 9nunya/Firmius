@@ -12,6 +12,7 @@
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
+#include <chrono>
 #include <sstream>
 #include <unordered_set>
 
@@ -735,6 +736,26 @@ shared::ToolResult SubagentTool::execute(const SubagentInput &input,
     }
   };
 
+  constexpr auto kAsyncOutcomeProbeWindow = std::chrono::milliseconds(250);
+  auto waitForOutcomeWithTimeout = [&](const std::string &agentId,
+                                       std::chrono::milliseconds timeout)
+      -> std::optional<AgentOutcome> {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+      auto outcome = Engine::instance().waitForAgentOutcome(
+          agentId, std::chrono::milliseconds(20));
+      if (outcome.has_value()) {
+        return outcome;
+      }
+      if (ctx.cancelRequested()) {
+        Engine::instance().cancelAgent(agentId);
+        return AgentOutcome{AgentOutcome::Kind::Cancelled,
+                            "Cancelled by parent."};
+      }
+    }
+    return std::nullopt;
+  };
+
   auto buildWaitResult = [&](const std::string &agentId, const ResolvedRoute &route,
                              const AgentOutcome &outcome, bool fallbackUsed)
       -> shared::ToolResult {
@@ -800,6 +821,16 @@ shared::ToolResult SubagentTool::execute(const SubagentInput &input,
       }
 
       if (input.async) {
+        auto immediateOutcome =
+            waitForOutcomeWithTimeout(reusableAgentId, kAsyncOutcomeProbeWindow);
+        if (immediateOutcome.has_value()) {
+          if (isRetryableWaitOutcome(*immediateOutcome) && i + 1 < routes.size()) {
+            continue;
+          }
+          return buildWaitResult(reusableAgentId, route, *immediateOutcome,
+                                 i > 0);
+        }
+
         rapidjson::Document d;
         d.SetObject();
         auto &a = d.GetAllocator();
@@ -842,6 +873,16 @@ shared::ToolResult SubagentTool::execute(const SubagentInput &input,
     }
 
     if (input.async) {
+      auto immediateOutcome =
+          waitForOutcomeWithTimeout(reusableAgentId, kAsyncOutcomeProbeWindow);
+      if (immediateOutcome.has_value()) {
+        if (isRetryableWaitOutcome(*immediateOutcome) && i + 1 < routes.size()) {
+          continue;
+        }
+        return buildWaitResult(reusableAgentId, route, *immediateOutcome,
+                               i > 0);
+      }
+
       rapidjson::Document d;
       d.SetObject();
       auto &a = d.GetAllocator();

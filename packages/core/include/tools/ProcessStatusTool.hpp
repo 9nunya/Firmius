@@ -14,12 +14,12 @@ struct ProcessStatusInput {
 class ProcessStatusTool : public shared::TypedTool<ProcessStatusInput> {
 public:
     shared::ToolMetadata getMetadata() const override {
-        return {"process_status", "Returns the current status and output of a background process.", ToolScope::Process};
+        return {"process_status", "Returns the current status and output of a background process (use only process IDs).", ToolScope::Process};
     }
 
     std::shared_ptr<shared::JSONSchema> getSchema() const override {
         return zObject({
-            {"process_id", zString()->describe("The UUID of the process")}
+            {"process_id", zString()->describe("The process ID from process_execute/process_spawn, not a subagent ID")}
         })->required({"process_id"});
     }
 

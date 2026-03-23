@@ -18,6 +18,14 @@ struct PlanLaneChunkRow {
   std::optional<size_t> task_count;  ///< V2: number of tasks in chunk (if any)
 };
 
+struct PlanLaneTaskRow {
+  std::string id;
+  std::string title;
+  firmius::shared::WorkChunkStatus status =
+      firmius::shared::WorkChunkStatus::Ready;
+  std::string status_label;
+};
+
 struct PlanLaneModel {
   bool visible = false;
   bool expanded = false;
@@ -26,6 +34,12 @@ struct PlanLaneModel {
   std::string plan_title;
   std::string collapsed_summary;
   std::vector<PlanLaneChunkRow> chunks;
+  // Executor-focused rendering modes
+  bool executor_task_view = false;
+  std::string executor_chunk_id;
+  std::string executor_chunk_title;
+  std::vector<PlanLaneTaskRow> executor_tasks;
+  std::string highlight_chunk_id;
 };
 
 // V2: Executor-focused chunk detail model

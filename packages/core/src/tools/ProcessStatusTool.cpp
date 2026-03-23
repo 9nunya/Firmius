@@ -1,11 +1,19 @@
 #include "tools/ProcessStatusTool.hpp"
 #include "IAgent.hpp"
+#include "AgentRegistry.hpp"
 #include <rapidjson/document.h>
 
 namespace firmius::core {
 
 shared::ToolResult ProcessStatusTool::execute(const ProcessStatusInput& input, shared::ToolContext& ctx) {
     try {
+        if (AgentRegistry::instance().getAgent(input.process_id)) {
+            return shared::ToolResult::fail(
+                "ID '" + input.process_id +
+                "' belongs to a subagent, not a process. Use subagent_wait "
+                "(or terminate_subagent) for agent IDs.");
+        }
+
         auto snapshot = ctx.agent.getEnvironment()->getProcessManager().inspectProcess(input.process_id);
         
         rapidjson::Document doc;

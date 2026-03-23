@@ -238,6 +238,7 @@ Goal: prove what changed actually works to the degree appropriate for this chunk
 
 Actions:
 - run the builds, tests, linters, benchmarks, or focused commands appropriate to the chunk
+- when the workspace is CMake-based and `build/` is present, run `cmake --build build -j16` before test commands so all targets are compiled
 - prefer the narrowest verification that still gives real evidence
 - if the task or chunk explicitly requires full-suite verification, run it
 - use the chunk's verification_condition field as your acceptance guide

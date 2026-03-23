@@ -58,7 +58,7 @@ std::set<std::string> requestedChunkUpdateFields(const rapidjson::Value &input) 
       "completion",    "planning_gate", "status",       "depends_on",
       "attempt_count", "result_summary", "review_summary", "assigned_agent_id",
       // V2 rich chunk spec fields
-      "files_to_read", "files_to_touch", "cwd",
+      "files_to_read", "files_to_touch", "cwd", "tasks",
       "verification_condition", "handoff_notes"};
 
   std::set<std::string> fields;
@@ -243,7 +243,7 @@ void requireChunkUpdateAccess(const rapidjson::Value &input,
   static const std::set<std::string> kAuditorFields = {"review_summary"};
   // V2 rich chunk spec fields are lead-only
   static const std::set<std::string> kV2Fields = {
-      "files_to_read", "files_to_touch", "cwd",
+      "files_to_read", "files_to_touch", "cwd", "tasks",
       "verification_condition", "handoff_notes"};
 
   switch (role) {
@@ -421,6 +421,58 @@ std::vector<std::string> parseStringArray(const rapidjson::Value &input,
   return values;
 }
 
+std::vector<shared::WorkTask> parseTaskArray(const rapidjson::Value &input,
+                                             const char *key) {
+  std::vector<shared::WorkTask> tasks;
+  if (!input.HasMember(key) || !input[key].IsArray()) {
+    return tasks;
+  }
+
+  for (const auto &item : input[key].GetArray()) {
+    if (!item.IsObject()) {
+      throw std::runtime_error(std::string(key) +
+                               " must contain only object entries");
+    }
+
+    if (!item.HasMember("id") || !item["id"].IsString()) {
+      throw std::runtime_error("task.id is required and must be a string");
+    }
+    if (!item.HasMember("title") || !item["title"].IsString()) {
+      throw std::runtime_error("task.title is required and must be a string");
+    }
+    if (!item.HasMember("goal") || !item["goal"].IsString()) {
+      throw std::runtime_error("task.goal is required and must be a string");
+    }
+
+    shared::WorkTask task;
+    task.id = item["id"].GetString();
+    task.title = item["title"].GetString();
+    task.goal = item["goal"].GetString();
+    task.status =
+        item.HasMember("status") && item["status"].IsString()
+            ? parseChunkStatus(item["status"].GetString())
+            : shared::WorkChunkStatus::Ready;
+    task.notes = item.HasMember("notes") && item["notes"].IsString()
+                     ? item["notes"].GetString()
+                     : "";
+    task.verificationCondition =
+        item.HasMember("verification_condition") &&
+                item["verification_condition"].IsString()
+            ? item["verification_condition"].GetString()
+            : "";
+    task.assignedWorkerId =
+        item.HasMember("assigned_worker_id") &&
+                item["assigned_worker_id"].IsString()
+            ? item["assigned_worker_id"].GetString()
+            : "";
+    task.createdAt = nowEpochMs();
+    task.updatedAt = task.createdAt;
+    tasks.push_back(std::move(task));
+  }
+
+  return tasks;
+}
+
 shared::Plan loadPlan(ThreadManager &tm, const std::string &threadId,
                       const std::string &planId) {
   return tm.getPlan(threadId, planId);
@@ -485,10 +537,30 @@ void requireChunkReadyForExecution(const shared::Plan &plan,
                                    const shared::WorkChunk &chunk,
                                    const std::string &action) {
   if (chunk.status != shared::WorkChunkStatus::Ready) {
+    std::string dependencyDetail;
+    if (chunk.status == shared::WorkChunkStatus::Blocked) {
+      for (const auto &dependencyId : chunk.dependsOn) {
+        auto it = std::find_if(plan.chunks.begin(), plan.chunks.end(),
+                               [&](const shared::WorkChunk &candidate) {
+                                 return candidate.id == dependencyId;
+                               });
+        if (it == plan.chunks.end()) {
+          dependencyDetail =
+              "; unresolved dependency '" + dependencyId + "' was not found";
+          break;
+        }
+        if (it->status != shared::WorkChunkStatus::Done) {
+          dependencyDetail = "; unresolved dependency '" + dependencyId +
+                             "' is " + chunkStatusToString(it->status);
+          break;
+        }
+      }
+    }
     throw std::runtime_error("Chunk '" + chunk.id + "' is not ready for " +
                              action + ": status is " +
                              chunkStatusToString(chunk.status) +
-                             "; chunk must be Ready and all dependencies must be Done");
+                             "; chunk must be Ready and all dependencies must be Done" +
+                             dependencyDetail);
   }
 
   for (const auto &dependencyId : chunk.dependsOn) {
@@ -538,6 +610,8 @@ rapidjson::Value makeChunkSummary(const shared::WorkChunk &chunk,
   summary.AddMember("depends_on", dependsOn, alloc);
   summary.AddMember("assigned_agent_id",
                     rapidjson::Value(chunk.assignedAgentId.c_str(), alloc),
+                    alloc);
+  summary.AddMember("task_count", static_cast<uint64_t>(chunk.tasks.size()),
                     alloc);
   return summary;
 }

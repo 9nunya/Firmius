@@ -536,9 +536,10 @@ TEST(ToolPresentationTest, PlanCreateAndPlanUpdateUseRichChangedFields) {
   create.success = true;
   create.result = R"({"plan_id":"plan-1","status":"Active","active":true})";
   ToolPresentation c = BuildToolPresentation(create);
-  const std::string *plan = FindFactValue(c, "Plan ID");
-  ASSERT_NE(plan, nullptr);
-  EXPECT_EQ(*plan, "plan-1");
+  EXPECT_EQ(c.density, firmius::tui::ToolPresentationDensity::OneLineSummary);
+  EXPECT_EQ(c.title, "󰒓 Refactor");
+  EXPECT_NE(std::find(c.footer_badges.begin(), c.footer_badges.end(), "plan-1"),
+            c.footer_badges.end());
 
   ToolCallView update;
   update.name = "plan_update";
@@ -547,11 +548,11 @@ TEST(ToolPresentationTest, PlanCreateAndPlanUpdateUseRichChangedFields) {
   update.success = true;
   update.result = R"({"plan_id":"plan-1","status":"Paused"})";
   ToolPresentation u = BuildToolPresentation(update);
-  const std::string *changed = FindFactValue(u, "Changed fields");
-  ASSERT_NE(changed, nullptr);
-  EXPECT_EQ(*changed, "3");
-  ASSERT_FALSE(u.sections.empty());
-  EXPECT_EQ(u.sections.front().title, "Updated fields");
+  EXPECT_EQ(u.density, firmius::tui::ToolPresentationDensity::OneLineSummary);
+  EXPECT_EQ(u.title, "󰒓 Refactor v2");
+  EXPECT_TRUE(u.sections.empty());
+  EXPECT_NE(std::find(u.footer_badges.begin(), u.footer_badges.end(), "3"),
+            u.footer_badges.end());
 }
 
 TEST(ToolPresentationTest, PlanGetAndPlanListShowStructuredRows) {
@@ -584,14 +585,17 @@ TEST(ToolPresentationTest, PlanGetAndPlanListShowStructuredRows) {
 TEST(ToolPresentationTest, ChunkAddGetListReadyUpdateHaveExplicitShapes) {
   ToolCallView add;
   add.name = "chunk_add";
-  add.args = R"({"plan_id":"plan-1","title":"Chunk A","goal":"goal","depends_on":["c-0"],"planning_gate":true})";
+  add.args = R"({"plan_id":"plan-1","title":"Chunk A","goal":"goal","depends_on":["c-0"],"planning_gate":true,"tasks":[{"id":"task-1","title":"Task 1","goal":"Goal 1"}]})";
   add.phase = ToolPhase::Finished;
   add.success = true;
   add.result = R"({"chunk_id":"c-1","status":"Blocked"})";
   ToolPresentation a = BuildToolPresentation(add);
-  const std::string *chunk_id = FindFactValue(a, "Chunk ID");
-  ASSERT_NE(chunk_id, nullptr);
-  EXPECT_EQ(*chunk_id, "c-1");
+  EXPECT_EQ(a.density, firmius::tui::ToolPresentationDensity::OneLineSummary);
+  EXPECT_EQ(a.title, "󰐃 Chunk A");
+  EXPECT_NE(std::find(a.footer_badges.begin(), a.footer_badges.end(), "1"),
+            a.footer_badges.end());
+  EXPECT_NE(std::find(a.footer_badges.begin(), a.footer_badges.end(), "c-1"),
+            a.footer_badges.end());
 
   ToolCallView get;
   get.name = "chunk_get";
@@ -609,11 +613,20 @@ TEST(ToolPresentationTest, ChunkAddGetListReadyUpdateHaveExplicitShapes) {
   list.phase = ToolPhase::Finished;
   list.success = true;
   list.result = R"([
-    {"chunk_id":"c-1","title":"A","status":"Ready","depends_on":[]},
+    {"chunk_id":"c-1","title":"A","status":"Ready","depends_on":[],"task_count":2},
     {"chunk_id":"c-2","title":"B","status":"Blocked","depends_on":["c-1"]}
   ])";
   ToolPresentation cl = BuildToolPresentation(list);
   EXPECT_GE(cl.sections.size(), 2u);
+  bool saw_task_count = false;
+  for (const auto &section : cl.sections) {
+    for (const auto &line : section.lines) {
+      if (line.find("2 tasks") != std::string::npos) {
+        saw_task_count = true;
+      }
+    }
+  }
+  EXPECT_TRUE(saw_task_count);
 
   ToolCallView ready;
   ready.name = "chunk_ready_for_execution";
@@ -632,9 +645,21 @@ TEST(ToolPresentationTest, ChunkAddGetListReadyUpdateHaveExplicitShapes) {
   update.success = true;
   update.result = R"({"chunk_id":"c-1","status":"InProgress"})";
   ToolPresentation u = BuildToolPresentation(update);
-  const std::string *changed = FindFactValue(u, "Changed fields");
-  ASSERT_NE(changed, nullptr);
-  EXPECT_EQ(*changed, "3");
+  EXPECT_EQ(u.density, firmius::tui::ToolPresentationDensity::OneLineSummary);
+  EXPECT_EQ(u.title, "󰐃 c-1");
+  EXPECT_NE(std::find(u.footer_badges.begin(), u.footer_badges.end(), "3"),
+            u.footer_badges.end());
+
+  ToolCallView task_update;
+  task_update.name = "chunk_update";
+  task_update.args = R"({"plan_id":"plan-1","chunk_id":"c-1","tasks":[{"id":"task-1","title":"Task 1","goal":"Goal 1"}]})";
+  task_update.phase = ToolPhase::Finished;
+  task_update.success = true;
+  task_update.result = R"({"chunk_id":"c-1","status":"Ready"})";
+  ToolPresentation task_presentation = BuildToolPresentation(task_update);
+  EXPECT_NE(std::find(task_presentation.footer_badges.begin(),
+                      task_presentation.footer_badges.end(), "1"),
+            task_presentation.footer_badges.end());
 }
 
 TEST(ToolPresentationTest, TodoWriteShowsPatchCountsAndItems) {
@@ -751,6 +776,24 @@ TEST(ToolPresentationTest, FileReadFileEditAndListDirectoryHaveExplicitStates) {
   EXPECT_EQ(*ops, "1");
   EXPECT_EQ(*adds, "1");
   EXPECT_EQ(*removes, "1");
+
+  ToolCallView overwrite_edit;
+  overwrite_edit.name = "file_edit";
+  overwrite_edit.args = R"({"path":"src/main.cpp","content":"line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\nline 9\n"})";
+  overwrite_edit.phase = ToolPhase::Finished;
+  overwrite_edit.success = true;
+  overwrite_edit.result =
+      R"({"operations":[{"op":"overwrite_file_content","description":"overwrite file content","new_lines":["line 1","line 2"]}]})";
+  ToolPresentation overwrite = BuildToolPresentation(overwrite_edit);
+  EXPECT_NE(std::find(overwrite.body_lines.begin(), overwrite.body_lines.end(),
+                      "new content:"),
+            overwrite.body_lines.end());
+  EXPECT_NE(std::find(overwrite.body_lines.begin(), overwrite.body_lines.end(),
+                      "  line 1"),
+            overwrite.body_lines.end());
+  EXPECT_NE(std::find(overwrite.body_lines.begin(), overwrite.body_lines.end(),
+                      "  ... +1 more line(s)"),
+            overwrite.body_lines.end());
 
   ToolCallView ls;
   ls.name = "list_directory";

@@ -1,7 +1,11 @@
 #include "ThemeManager.hpp"
+#include "UserPreferences.hpp"
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <rapidjson/document.h>
+#include <rapidjson/stringbuffer.h>
+#include <rapidjson/writer.h>
 
 namespace firmius::tui {
 
@@ -77,6 +81,8 @@ void ThemeManager::loadThemes() {
     fallback.name = "Fallback";
     themes_.push_back(fallback);
   }
+
+  loadPersistedSelection();
 }
 
 void ThemeManager::loadSystemThemes() {
@@ -271,6 +277,30 @@ void ThemeManager::cycleTheme() {
   if (themes_.empty())
     return;
   current_theme_index_ = (current_theme_index_ + 1) % themes_.size();
+  persistSelection();
+}
+
+void ThemeManager::loadPersistedSelection() {
+  const auto preferences = loadUserPreferences();
+  if (!preferences.theme_name.has_value()) {
+    return;
+  }
+  const std::string &wanted = *preferences.theme_name;
+  for (size_t i = 0; i < themes_.size(); ++i) {
+    if (themes_[i].name == wanted) {
+      current_theme_index_ = i;
+      return;
+    }
+  }
+}
+
+void ThemeManager::persistSelection() const {
+  if (themes_.empty() || current_theme_index_ >= themes_.size()) {
+    return;
+  }
+  UserPreferences preferences;
+  preferences.theme_name = themes_[current_theme_index_].name;
+  saveUserPreferences(preferences);
 }
 
 const Theme &ThemeManager::getCurrentTheme() const {

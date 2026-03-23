@@ -178,6 +178,9 @@ struct ThreadMetadata {
   std::string hostIdentifier;
   std::string cwd;
   std::string leadPersona;
+  bool isBenchmarkRun = false;
+  std::string benchmarkId;
+  std::string benchmarkTaskId;
   std::string activePlanId;
   std::optional<RetryableRequest> lastRetryableRequest;
   ThreadPermissionMode permissionMode = ThreadPermissionMode::Request;

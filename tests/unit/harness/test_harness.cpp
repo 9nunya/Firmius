@@ -11,6 +11,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <algorithm>
 #include <thread>
 #include <chrono>
 #include <atomic>
@@ -3500,6 +3501,10 @@ TEST_F(HarnessTest, TruncatedStreamedToolCallIsRejectedBeforeExecution) {
               std::string::npos);
     EXPECT_NE(emittedError.message.find("invalid or truncated JSON arguments"),
               std::string::npos);
+    EXPECT_NE(emittedError.message.find("Provider: truncated-tool-provider"),
+              std::string::npos);
+    EXPECT_NE(emittedError.message.find("Model: truncated-tool-model"),
+              std::string::npos);
 
     ASSERT_TRUE(waitForCondition([&]() {
         return agent && !agent->isRunning() &&
@@ -3514,6 +3519,10 @@ TEST_F(HarnessTest, TruncatedStreamedToolCallIsRejectedBeforeExecution) {
         std::get_if<ErrorContent>(&lastTurn.messages.front().content.front());
     ASSERT_NE(persistedError, nullptr);
     EXPECT_NE(persistedError->details.find("malformed streamed tool call payload"),
+              std::string::npos);
+    EXPECT_NE(persistedError->details.find("Provider: truncated-tool-provider"),
+              std::string::npos);
+    EXPECT_NE(persistedError->details.find("Model: truncated-tool-model"),
               std::string::npos);
 
     bool persistedInvalidToolCall = false;
@@ -3959,6 +3968,63 @@ TEST_F(HarnessTest, CompactionDoesNotImmediatelyRetriggerOnNextTurn) {
     EXPECT_EQ(countTurnsWithPrefix(*agent->getContext().history,
                                    "compaction-start-"),
               1u);
+}
+
+TEST_F(HarnessTest, MarkThreadAsBenchmarkPersistsMetadata) {
+    auto& harness = Harness::instance();
+    const std::string threadId = harness.newThread({}, "/tmp", "worker");
+    ASSERT_FALSE(threadId.empty());
+
+    ASSERT_TRUE(harness.markThreadAsBenchmark(threadId, "mbpp", "42"));
+
+    auto threads = harness.listThreads();
+    auto it = std::find_if(threads.begin(), threads.end(),
+                           [&](const ThreadMetadata& meta) {
+                               return meta.threadId == threadId;
+                           });
+    ASSERT_NE(it, threads.end());
+    EXPECT_TRUE(it->isBenchmarkRun);
+    EXPECT_EQ(it->benchmarkId, "mbpp");
+    EXPECT_EQ(it->benchmarkTaskId, "42");
+    EXPECT_NE(it->title.find("Benchmark: mbpp"), std::string::npos);
+
+    ThreadManager tm((testHome_ / ".firmius" / "threads").string());
+    const auto persisted = tm.getMetadata(threadId);
+    EXPECT_TRUE(persisted.isBenchmarkRun);
+    EXPECT_EQ(persisted.benchmarkId, "mbpp");
+    EXPECT_EQ(persisted.benchmarkTaskId, "42");
+}
+
+TEST_F(HarnessTest, AppendSystemMessagePersistsVisibleTranscriptTurn) {
+    auto& harness = Harness::instance();
+    const std::string threadId = harness.newThread({}, "/tmp", "lead");
+    ASSERT_FALSE(threadId.empty());
+    auto agent = createFocusedLeadAgent(threadId);
+    ASSERT_TRUE(agent);
+
+    const std::string agentId = agent->getContext().identity.id;
+    ASSERT_TRUE(harness.appendSystemMessage(agentId, "benchmark: cloning repo"));
+
+    const auto& liveHistory = *agent->getContext().history;
+    ASSERT_FALSE(liveHistory.turns.empty());
+    const auto& lastTurn = liveHistory.turns.back();
+    ASSERT_FALSE(lastTurn.messages.empty());
+    const auto& lastMessage = lastTurn.messages.front();
+    EXPECT_EQ(lastMessage.role, Role::System);
+    ASSERT_FALSE(lastMessage.content.empty());
+    auto text = std::get_if<TextContent>(&lastMessage.content.front());
+    ASSERT_NE(text, nullptr);
+    EXPECT_EQ(text->text, "benchmark: cloning repo");
+
+    ThreadManager tm((testHome_ / ".firmius" / "threads").string());
+    const auto persisted = tm.loadAgentHistory(threadId, agentId);
+    ASSERT_FALSE(persisted.turns.empty());
+    const auto& persistedMessage = persisted.turns.back().messages.front();
+    EXPECT_EQ(persistedMessage.role, Role::System);
+    auto persistedText =
+        std::get_if<TextContent>(&persistedMessage.content.front());
+    ASSERT_NE(persistedText, nullptr);
+    EXPECT_EQ(persistedText->text, "benchmark: cloning repo");
 }
 
 } // namespace

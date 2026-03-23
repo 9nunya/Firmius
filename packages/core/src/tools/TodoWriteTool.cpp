@@ -227,6 +227,20 @@ shared::ToolResult TodoWriteTool::execute(const rapidjson::Value &input,
 
       auto it = indexById.find(mutation.id);
       if (it == indexById.end()) {
+        const bool inferredAdd = mutation.marker == ' ' &&
+                                 mutation.id == expectedNextId;
+        if (inferredAdd) {
+          shared::TodoItem item;
+          item.id = mutation.id;
+          item.text = mutation.text;
+          item.status = markerToStatus(mutation.marker);
+          item.createdAt = now;
+          item.updatedAt = now;
+          todoList.items.push_back(std::move(item));
+          indexById[mutation.id] = todoList.items.size() - 1;
+          expectedNextId++;
+          continue;
+        }
         if (todoList.items.empty()) {
           throw std::runtime_error(
               "Todo list is empty. Create items with '1. [ ] First task' and "
@@ -234,7 +248,9 @@ shared::ToolResult TodoWriteTool::execute(const rapidjson::Value &input,
         }
         throw std::runtime_error(
             "Unknown todo id " + std::to_string(mutation.id) +
-            ". Existing ids: " + existingIdsSummary(todoList.items) + ".");
+            ". Existing ids: " + existingIdsSummary(todoList.items) +
+            ". To add a new item, use '" + std::to_string(expectedNextId) +
+            ". [+] <task>'.");
       }
 
       if (mutation.marker == '-') {

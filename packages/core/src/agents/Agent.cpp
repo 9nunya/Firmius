@@ -101,6 +101,26 @@ bool shouldRetryProviderFailureAtAgentLayer(int httpStatus) {
   return httpStatus == 408 || httpStatus == 409 || httpStatus == 425;
 }
 
+std::string appendProviderModelContext(const AgentConfig &config,
+                                       const std::string &message) {
+  std::string detailed = message;
+  if (!config.providerId.empty() &&
+      detailed.find("\nProvider: ") == std::string::npos) {
+    detailed += "\nProvider: " + config.providerId;
+  }
+
+  if (!config.modelId.empty() &&
+      detailed.find("\nModel: ") == std::string::npos) {
+    detailed += "\nModel: " + config.modelId;
+  }
+
+  if (!config.modelVariant.empty() &&
+      detailed.find("\nVariant: ") == std::string::npos) {
+    detailed += "\nVariant: " + config.modelVariant;
+  }
+  return detailed;
+}
+
 std::string threadStorageRootPath() {
   if (const char *home = std::getenv("HOME")) {
     return std::string(home) + "/.firmius/threads";
@@ -458,7 +478,7 @@ using namespace firmius::shared;
 std::uint64_t Agent::nowMs() {
   return static_cast<std::uint64_t>(
       std::chrono::duration_cast<std::chrono::milliseconds>(
-          std::chrono::steady_clock::now().time_since_epoch())
+          std::chrono::system_clock::now().time_since_epoch())
           .count());
 }
 
@@ -1238,9 +1258,11 @@ void Agent::runImpl(const std::optional<std::string> &task,
         context.state.currentStatus = AgentStatus::Cancelled;
         break;
       }
+      const std::string detailedError =
+          appendProviderModelContext(context.config, e.what());
       // --- State: Error ---
       context.state.currentStatus = AgentStatus::Error;
-      context.state.fatalError = e.what();
+      context.state.fatalError = detailedError;
 
       // Persist error as a system turn in history for journal survival
       AgentTurn errorTurn;
@@ -1251,7 +1273,7 @@ void Agent::runImpl(const std::optional<std::string> &task,
       errorMsg.content.push_back(
           ErrorContent{"Agent Runtime Error",
                        "The agent encountered a fatal runtime exception.",
-                       std::string(e.what())});
+                       detailedError});
       errorMsg.timestamp = nowMs();
       errorTurn.messages.push_back(errorMsg);
       context.history->turns.push_back(errorTurn);
@@ -1259,7 +1281,7 @@ void Agent::runImpl(const std::optional<std::string> &task,
         journaler->appendTurn(errorTurn);
 
       // Emit error as a StreamError event
-      onEvent(StreamError{e.what(), 0, ""});
+      onEvent(StreamError{detailedError, 0, ""});
       break;
     }
   }

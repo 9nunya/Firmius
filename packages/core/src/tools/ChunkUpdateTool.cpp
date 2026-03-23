@@ -34,6 +34,20 @@ std::shared_ptr<shared::JSONSchema> ChunkUpdateTool::getSchema() const {
              {"cwd", zString()->setOptional()},
              {"verification_condition", zString()->setOptional()},
              {"handoff_notes", zString()->setOptional()},
+             {"tasks",
+              zArray(zObject({
+                  {"id", zString()},
+                  {"title", zString()},
+                  {"goal", zString()},
+                  {"status",
+                   zEnum({"Ready", "InProgress", "Implemented", "Verifying",
+                          "Done", "Blocked", "Failed", "Cancelled"})
+                       ->setOptional()},
+                  {"notes", zString()->setOptional()},
+                  {"verification_condition", zString()->setOptional()},
+                  {"assigned_worker_id", zString()->setOptional()},
+              }))
+                  ->setOptional()},
          })
       ->required({"plan_id", "chunk_id"});
 }
@@ -130,6 +144,15 @@ shared::ToolResult ChunkUpdateTool::execute(const rapidjson::Value &input,
           }
           if (input.HasMember("handoff_notes")) {
             chunk.handoffNotes = input["handoff_notes"].GetString();
+          }
+          if (input.HasMember("tasks")) {
+            chunk.tasks = worktools::parseTaskArray(input, "tasks");
+            for (auto &task : chunk.tasks) {
+              if (task.createdAt == 0) {
+                task.createdAt = worktools::nowEpochMs();
+              }
+              task.updatedAt = worktools::nowEpochMs();
+            }
           }
 
           if (statusWasProvided &&

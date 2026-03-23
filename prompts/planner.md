@@ -66,7 +66,7 @@ Use task-bearing chunks for:
 - complex integration work
 
 ## Task Structure (for task-bearing chunks only)
-Tasks are executor-local structure. In your draft, you may propose task structure as conceptual guidance, but the executor owns the actual task persistence at runtime.
+Tasks are one-depth structure for task-bearing chunks. In your draft, propose the exact task set the lead can persist through `chunk_add`/`chunk_update` `tasks`.
 
 Each proposed task should have:
 - stable task id
@@ -75,6 +75,7 @@ Each proposed task should have:
 - status (Ready, InProgress, Done, Blocked)
 - optional notes/constraints
 - optional verification condition
+- optional assigned worker id when meaningful
 
 ## Dependency Ordering
 - Mark dependencies explicitly.

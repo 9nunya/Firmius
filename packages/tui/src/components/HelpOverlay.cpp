@@ -60,6 +60,7 @@ ftxui::Component HelpOverlay(TuiState &state) {
         section("Commands",
                 {{"/threads", "List threads"},
                  {"/new", "New thread"},
+                 {"/benchmarks", "Run benchmark from welcome screen"},
                  {"/models", "Pick model"},
                  {"/router", "Manage model routing categories"},
                  {"/purposes", "Map personas to model categories"},

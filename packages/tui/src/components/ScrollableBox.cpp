@@ -92,8 +92,10 @@ ftxui::Element ScrollableBoxComponent::OnRender() {
     }
     viewport_width_ = viewport_w;
 
-    const int contentWidth = std::max(
-        1, viewport_w - (options_.overlayScrollbar ? 0 : 2));
+    const int overlayGutter =
+        options_.overlayScrollbar ? std::max(1, options_.overlayScrollbarGutter)
+                                  : 2;
+    const int contentWidth = std::max(1, viewport_w - overlayGutter);
     if (contentWidth > 0) {
         firmius::tui::SetMarkdownWidth(std::max(10, contentWidth - 2));
     }
@@ -161,15 +163,24 @@ ftxui::Element ScrollableBoxComponent::OnRender() {
 }
 
 bool ScrollableBoxComponent::OnEvent(ftxui::Event event) {
+    bool mouse_in_main = false;
+    bool mouse_in_scrollbar = false;
     if (event.is_mouse()) {
         const auto mouse = event.mouse();
-        const bool inMainBox = box_.Contain(mouse.x, mouse.y);
-        const bool inScrollbar =
+        mouse_in_main = box_.Contain(mouse.x, mouse.y);
+        mouse_in_scrollbar =
             options_.overlayScrollbar && scrollbarBox_.Contain(mouse.x, mouse.y);
-        scrollbar_hovered_ = inScrollbar || scrollbar_dragging_;
+        scrollbar_hovered_ = mouse_in_scrollbar || scrollbar_dragging_;
 
-        if (inMainBox || inScrollbar) {
+        if (mouse_in_main || mouse_in_scrollbar) {
             TakeFocus();
+        }
+
+        if (!captured_mouse_ &&
+            (mouse.button == ftxui::Mouse::WheelUp ||
+             mouse.button == ftxui::Mouse::WheelDown) &&
+            !mouse_in_main && !mouse_in_scrollbar) {
+            return false;
         }
 
         if (options_.overlayScrollbar && captured_mouse_) {
@@ -185,7 +196,7 @@ bool ScrollableBoxComponent::OnEvent(ftxui::Event event) {
         }
 
         if (options_.overlayScrollbar && mouse.button == ftxui::Mouse::Left &&
-            mouse.motion == ftxui::Mouse::Pressed && inScrollbar &&
+            mouse.motion == ftxui::Mouse::Pressed && mouse_in_scrollbar &&
             !captured_mouse_) {
             captured_mouse_ = CaptureMouse(event);
             if (!captured_mouse_) {

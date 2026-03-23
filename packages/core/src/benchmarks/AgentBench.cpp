@@ -26,6 +26,7 @@ const std::string SCRIPT_BASE_URL = "https://raw.githubusercontent.com/THUDM/Age
 AgentBench::AgentBench(BenchmarkConfig config) : session(std::move(config)) {}
 
 std::vector<std::string> AgentBench::listTasks() {
+    session.emitLog("AgentBench: loading OS interaction tasks.");
     ensureDatasetLoaded();
     std::vector<std::string> tasks;
     if (dataset.IsArray()) {
@@ -39,22 +40,26 @@ std::vector<std::string> AgentBench::listTasks() {
 bool AgentBench::prepareTask(const std::string& taskId) {
     ensureDatasetLoaded();
     ensureScriptsFetched();
+    session.emitLog("AgentBench: preparing task " + taskId + ".");
 
     int index = std::stoi(taskId);
     if (index < 0 || index >= (int)dataset.Size()) throw std::runtime_error("Task index out of range");
 
     const auto& task = dataset[index];
 
+    session.emitLog("AgentBench: resetting /work.");
     session.getHost().exec("rm -rf /work/* /work/.* 2>/dev/null || true");
     backgroundProcessPids.clear();
 
     currentScriptDir = "dev";
 
     if (task.HasMember("create") && task["create"].IsObject() && task["create"].HasMember("init")) {
+        session.emitLog("AgentBench: running initialization scripts.");
         executeInitScripts(task["create"], currentScriptDir);
     }
 
     if (task.HasMember("start")) {
+        session.emitLog("AgentBench: starting benchmark background services.");
         executeStartCommand(task["start"], currentScriptDir);
     }
 
@@ -78,10 +83,12 @@ BenchmarkResult AgentBench::runTask(const std::string& taskId) {
 
     std::string fullPrompt = "Task: " + description + "\n\nProvide your final answer after you have found it. Do not call tools after you have found the answer.";
 
+    session.emitLog("AgentBench: running worker on task " + taskId + ".");
     auto& agent = session.getAgent();
     agent.reset();
     agent.run(fullPrompt, [](const StreamEvent&) {});
 
+    session.emitLog("AgentBench: terminating benchmark background services.");
     terminateBackgroundProcesses();
 
     BenchmarkResult result;
@@ -102,6 +109,8 @@ BenchmarkResult AgentBench::runTask(const std::string& taskId) {
 
     result.passed = passed;
     result.output = passed ? "Task passed" : "Task failed";
+    session.emitLog("AgentBench: evaluation result for task " + taskId + " = " +
+                    std::string(passed ? "PASS" : "FAIL") + ".");
     Logger::instance().logDebug("DEBUG: Evaluation result: " +
                                std::string(passed ? "PASSED" : "FAILED"));
 
@@ -123,6 +132,7 @@ void AgentBench::ensureDatasetLoaded() {
     std::string cacheFile = cacheDir + "/os_interaction_dev.json";
 
     if (!std::filesystem::exists(cacheFile)) {
+        session.emitLog("AgentBench: downloading dataset cache.");
         std::filesystem::create_directories(cacheDir);
         CURL* curl = curl_easy_init();
         std::ofstream out(cacheFile, std::ios::binary);
@@ -133,6 +143,8 @@ void AgentBench::ensureDatasetLoaded() {
         curl_easy_perform(curl);
         curl_easy_cleanup(curl);
         out.close();
+    } else {
+        session.emitLog("AgentBench: using cached dataset at " + cacheFile + ".");
     }
 
     std::ifstream in(cacheFile);
@@ -143,6 +155,7 @@ void AgentBench::ensureDatasetLoaded() {
 }
 
 void AgentBench::ensureScriptsFetched() {
+    session.emitLog("AgentBench: verifying cached helper scripts.");
     std::unordered_set<std::string> neededScripts;
 
     for (const auto& task : dataset.GetArray()) {
@@ -183,6 +196,7 @@ void AgentBench::ensureScriptsFetched() {
         std::filesystem::create_directories(std::filesystem::path(localPath).parent_path());
 
         if (!std::filesystem::exists(localPath)) {
+            session.emitLog("AgentBench: fetching script " + scriptPath + ".");
             fetchScriptFromGitHub(scriptPath, localPath);
         }
     }
@@ -273,6 +287,7 @@ void AgentBench::executeInitScripts(const rapidjson::Value& createConfig, const 
     auto runInit = [&](const rapidjson::Value& scriptObj) {
         if (scriptObj.IsNull()) return;
         auto [language, code] = loadScriptObj(scriptObj, scriptDir);
+        session.emitLog("AgentBench: running init script (" + language + ").");
         lastInitCode = code;
         auto result = executeScript(language, code, {});
         if (result.exitCode != 0) {
@@ -298,6 +313,7 @@ void AgentBench::executeInitScripts(const rapidjson::Value& createConfig, const 
 
 void AgentBench::executeStartCommand(const rapidjson::Value& startConfig, const std::string& scriptDir) {
     auto [language, startCommand] = loadScriptObj(startConfig, scriptDir);
+    session.emitLog("AgentBench: starting service command (" + language + ").");
 
     std::string cmd = startCommand;
     if (cmd.find("&") == std::string::npos) {
@@ -345,6 +361,7 @@ void AgentBench::detectAndSetUserContext() {
 
 void AgentBench::terminateBackgroundProcesses() {
     for (const auto& pid : backgroundProcessPids) {
+        session.emitLog("AgentBench: stopping background process " + pid + ".");
         session.getHost().exec("kill " + pid + " 2>/dev/null || true");
     }
     backgroundProcessPids.clear();

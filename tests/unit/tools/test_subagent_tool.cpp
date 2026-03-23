@@ -201,6 +201,53 @@ private:
   std::atomic<int> callCount_{0};
 };
 
+class ErrorProvider : public firmius::provider::IProvider {
+public:
+  ErrorProvider(std::string providerId, std::string message, int code)
+      : providerId_(std::move(providerId)),
+        message_(std::move(message)),
+        code_(code) {}
+
+  std::string getId() const override { return providerId_; }
+
+  void stream(const AgentHistory&, const firmius::provider::ProviderOptions&,
+              std::function<void(const StreamEvent&)> onEvent) override {
+    callCount_.fetch_add(1);
+    onEvent(StreamError{message_, code_, ""});
+  }
+
+  std::vector<ModelInfo> listModels() override {
+    ModelInfo model;
+    model.id = providerId_ + "-model";
+    model.provider = getId();
+    model.contextWindow = 4096;
+    return {model};
+  }
+
+  ModelInfo getModelInfo(const std::string&) override {
+    return listModels().front();
+  }
+
+  void generateSummary(const std::string&, const AgentHistory&,
+                       const std::string&,
+                       std::function<void(const StreamEvent&)> onEvent,
+                       std::atomic<bool>* = nullptr) override {
+    onEvent(StreamError{message_, code_, ""});
+  }
+
+  firmius::provider::ProviderType getProviderType() const override {
+    return firmius::provider::ProviderType::APIKey;
+  }
+
+  int callCount() const { return callCount_.load(); }
+
+private:
+  std::string providerId_;
+  std::string message_;
+  int code_ = 500;
+  std::atomic<int> callCount_{0};
+};
+
 class SubagentToolTest : public ::testing::Test {
 protected:
   void SetUp() override {
@@ -965,6 +1012,8 @@ TEST_F(SubagentToolTest, executorDispatchFailsWhenDependencyIsNotDone) {
               ::testing::HasSubstr("status is Blocked"));
   EXPECT_THAT(result.error,
               ::testing::HasSubstr("dependencies must be Done"));
+  EXPECT_THAT(result.error,
+              ::testing::HasSubstr("dependency 'dep-1'"));
 
   const Plan updatedPlan = threadManager_->getPlan(threadId, planId);
   EXPECT_TRUE(updatedPlan.chunks[1].assignedAgentId.empty());
@@ -1298,6 +1347,52 @@ TEST_F(SubagentToolTest, spawnedRouteFallbackRetriesOnNoUsableSummary) {
   EXPECT_THAT(result.data, ::testing::HasSubstr("\"fallback_used\":true"));
   EXPECT_THAT(result.data, ::testing::HasSubstr("\"category\":\"fallback\""));
   EXPECT_THAT(result.data, ::testing::HasSubstr("fallback summary"));
+}
+
+TEST_F(SubagentToolTest, spawnedAsyncRouteFallbackRetriesOnImmediateFailure) {
+  const std::string threadId = createThread();
+  auto primary = std::make_shared<ErrorProvider>("spawn-error-provider",
+                                                 "quota exhausted", 429);
+  auto fallback =
+      std::make_shared<TextSummaryProvider>("spawn-summary-provider",
+                                            "fallback summary");
+  firmius::provider::ProviderRegistry::instance().registerProvider(primary);
+  firmius::provider::ProviderRegistry::instance().registerProvider(fallback);
+
+  auto cfg = firmius::shared::ConfigLoader::instance().getConfig();
+  cfg.defaultProviderId = primary->getId();
+  cfg.defaultModelId = primary->listModels().front().id;
+  cfg.modelRouterCategories["primary"] = {primary->getId(),
+                                          primary->listModels().front().id, ""};
+  cfg.modelRouterCategories["fallback"] = {fallback->getId(),
+                                           fallback->listModels().front().id, ""};
+  cfg.enableSubagentRouteFallback = true;
+  cfg.subagentRouteFallbackOrder = {"fallback"};
+  firmius::shared::ConfigLoader::instance().updateConfig(cfg);
+
+  SubagentTool tool;
+  SubagentInput input;
+  input.persona = "coder";
+  input.task = "Retry on immediate stream error.";
+  input.category = "primary";
+  input.name = "spawn-async-slot";
+  input.title = "Spawn Async Slot";
+  input.async = true;
+
+  MockAgent parent;
+  AgentContext ctx_obj = makeParentContext(threadId);
+  EXPECT_CALL(parent, getContext()).WillRepeatedly(ReturnRef(ctx_obj));
+
+  NiceMock<MockHost> host;
+  ToolContext toolCtx{host, parent, "test-call-id"};
+
+  ToolResult result = tool.execute(input, toolCtx);
+
+  ASSERT_TRUE(result.success) << result.error;
+  EXPECT_EQ(primary->callCount(), 1);
+  EXPECT_EQ(fallback->callCount(), 1);
+  EXPECT_THAT(result.data, ::testing::HasSubstr("\"fallback_used\":true"));
+  EXPECT_THAT(result.data, ::testing::HasSubstr("\"category\":\"fallback\""));
 }
 
 TEST_F(SubagentToolTest, retaskedRouteFallbackRetriesOnNoUsableSummary) {

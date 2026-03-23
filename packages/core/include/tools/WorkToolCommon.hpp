@@ -46,6 +46,8 @@ shared::WorkChunkStatus parseChunkStatus(const std::string &status);
 
 std::vector<std::string> parseStringArray(const rapidjson::Value &input,
                                           const char *key);
+std::vector<shared::WorkTask> parseTaskArray(const rapidjson::Value &input,
+                                             const char *key);
 
 shared::Plan loadPlan(ThreadManager &tm, const std::string &threadId,
                       const std::string &planId);

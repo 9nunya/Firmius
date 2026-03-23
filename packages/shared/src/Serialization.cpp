@@ -1549,6 +1549,10 @@ rapidjson::Document toJson(const ThreadMetadata &m) {
               a);
   d.AddMember("cwd", rapidjson::Value(m.cwd.c_str(), a), a);
   d.AddMember("leadPersona", rapidjson::Value(m.leadPersona.c_str(), a), a);
+  d.AddMember("is_benchmark_run", m.isBenchmarkRun, a);
+  d.AddMember("benchmark_id", rapidjson::Value(m.benchmarkId.c_str(), a), a);
+  d.AddMember("benchmark_task_id",
+              rapidjson::Value(m.benchmarkTaskId.c_str(), a), a);
   d.AddMember("active_plan_id", rapidjson::Value(m.activePlanId.c_str(), a), a);
   if (m.lastRetryableRequest.has_value()) {
     rapidjson::Value retry(rapidjson::kObjectType);
@@ -1603,6 +1607,24 @@ ThreadMetadata threadMetadataFromJson(const rapidjson::Value &v) {
   m.leadPersona = v.HasMember("leadPersona") && v["leadPersona"].IsString()
                       ? v["leadPersona"].GetString()
                       : "";
+  m.isBenchmarkRun =
+      v.HasMember("is_benchmark_run") && v["is_benchmark_run"].IsBool()
+          ? v["is_benchmark_run"].GetBool()
+          : (v.HasMember("isBenchmarkRun") && v["isBenchmarkRun"].IsBool()
+                 ? v["isBenchmarkRun"].GetBool()
+                 : false);
+  m.benchmarkId =
+      v.HasMember("benchmark_id") && v["benchmark_id"].IsString()
+          ? v["benchmark_id"].GetString()
+          : (v.HasMember("benchmarkId") && v["benchmarkId"].IsString()
+                 ? v["benchmarkId"].GetString()
+                 : "");
+  m.benchmarkTaskId =
+      v.HasMember("benchmark_task_id") && v["benchmark_task_id"].IsString()
+          ? v["benchmark_task_id"].GetString()
+          : (v.HasMember("benchmarkTaskId") && v["benchmarkTaskId"].IsString()
+                 ? v["benchmarkTaskId"].GetString()
+                 : "");
   m.activePlanId =
       v.HasMember("active_plan_id") && v["active_plan_id"].IsString()
           ? v["active_plan_id"].GetString()

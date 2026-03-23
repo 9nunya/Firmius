@@ -259,6 +259,9 @@ bool LocalHost::exists(const std::string &path) {
 
 std::vector<shared::FileInfo> LocalHost::listDir(const std::string &path) {
   std::filesystem::path dirPath(path);
+  if (!std::filesystem::exists(dirPath)) {
+    throw std::runtime_error("Path not found: " + path);
+  }
   if (!std::filesystem::is_directory(dirPath)) {
     throw std::runtime_error("Not a directory: " + path);
   }

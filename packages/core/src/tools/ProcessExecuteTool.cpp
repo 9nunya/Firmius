@@ -13,6 +13,20 @@
 namespace firmius::core {
 using namespace firmius::shared;
 
+namespace {
+
+shared::ToolResult failWithStructuredData(const rapidjson::Document &d,
+                                          const std::string &error) {
+  shared::ToolResult result = shared::ToolResult::fail(error);
+  rapidjson::StringBuffer buffer;
+  rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+  d.Accept(writer);
+  result.data = buffer.GetString();
+  return result;
+}
+
+} // namespace
+
 shared::ToolMetadata ProcessExecuteTool::getMetadata() const {
   return {"process_execute", "Execute a command on the host",
           ToolScope::Process};
@@ -111,6 +125,7 @@ shared::ToolResult ProcessExecuteTool::execute(const ProcessExecuteInput &input,
                       rapidjson::Value(snap.stderrData.c_str(), a).Move(), a);
         doc.AddMember("duration_ms", snap.elapsedMs, a);
         doc.AddMember("finish_reason", "Interrupted", a);
+        doc.AddMember("command_success", false, a);
         doc.AddMember("process_id",
                       rapidjson::Value(processId.c_str(), a).Move(), a);
         return shared::ToolResult::ok(doc, processId);
@@ -137,6 +152,7 @@ shared::ToolResult ProcessExecuteTool::execute(const ProcessExecuteInput &input,
                       rapidjson::Value(snap.stderrData.c_str(), a).Move(), a);
         doc.AddMember("duration_ms", snap.elapsedMs, a);
         doc.AddMember("finish_reason", "Timeout", a);
+        doc.AddMember("command_success", false, a);
         doc.AddMember("process_id",
                       rapidjson::Value(processId.c_str(), a).Move(), a);
 
@@ -157,6 +173,7 @@ shared::ToolResult ProcessExecuteTool::execute(const ProcessExecuteInput &input,
                       rapidjson::Value(snap.stderrData.c_str(), a).Move(), a);
         doc.AddMember("duration_ms", snap.elapsedMs, a);
         doc.AddMember("finish_reason", "Interrupted", a);
+        doc.AddMember("command_success", false, a);
         doc.AddMember("process_id",
                       rapidjson::Value(processId.c_str(), a).Move(), a);
         return shared::ToolResult::ok(doc, processId);
@@ -178,8 +195,15 @@ shared::ToolResult ProcessExecuteTool::execute(const ProcessExecuteInput &input,
                   a);
     doc.AddMember("duration_ms", snap.elapsedMs, a);
     doc.AddMember("finish_reason", "Natural", a);
+    doc.AddMember("command_success", snap.exitCode == 0, a);
     doc.AddMember("process_id",
                   rapidjson::Value(processId.c_str(), a).Move(), a);
+
+    if (snap.exitCode != 0) {
+      return failWithStructuredData(
+          doc, "Command exited with non-zero exit code: " +
+                   std::to_string(snap.exitCode));
+    }
 
     return shared::ToolResult::ok(doc, processId);
   } catch (const std::exception &e) {

@@ -196,6 +196,12 @@ public:
   requestPermissionEscalation(PermissionEscalationRequest request);
   bool resolvePermissionEscalation(const std::string &requestId,
                                    PermissionResponse response);
+  bool markThreadAsBenchmark(const std::string &threadId,
+                             const std::string &benchmarkId,
+                             const std::string &benchmarkTaskId = "");
+  bool appendSystemMessage(
+      const std::string &agentId, const std::string &text,
+      MessageVisibility visibility = MessageVisibility::Visible);
 
   void deleteThread(const std::string &threadId);
 

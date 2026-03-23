@@ -9,6 +9,7 @@ target_sources(firmius PRIVATE
     src/StreamStateManager.cpp
     src/NotificationManager.cpp
     src/ThemeManager.cpp
+    src/UserPreferences.cpp
     src/commands/CommandManager.cpp
     src/commands/NewCommand.cpp
     src/commands/ThreadsCommand.cpp
@@ -17,6 +18,7 @@ target_sources(firmius PRIVATE
     src/commands/CompactCommand.cpp
     src/commands/ConfigCommand.cpp
     src/commands/ConnectCommand.cpp
+    src/commands/BenchmarksCommand.cpp
     src/commands/QuotasCommand.cpp
     src/commands/AccountsCommand.cpp
     src/commands/RouterCommand.cpp

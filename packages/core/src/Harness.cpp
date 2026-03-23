@@ -1419,6 +1419,78 @@ bool Harness::resolvePermissionEscalation(const std::string &requestId,
   return true;
 }
 
+bool Harness::markThreadAsBenchmark(const std::string &threadId,
+                                    const std::string &benchmarkId,
+                                    const std::string &benchmarkTaskId) {
+  if (threadId.empty() || benchmarkId.empty()) {
+    return false;
+  }
+
+  ThreadMetadata metadata;
+  {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    try {
+      metadata = threadManager_.getMetadata(threadId);
+    } catch (...) {
+      return false;
+    }
+    metadata.isBenchmarkRun = true;
+    metadata.benchmarkId = benchmarkId;
+    if (!benchmarkTaskId.empty()) {
+      metadata.benchmarkTaskId = benchmarkTaskId;
+    }
+    if (metadata.title.empty() || metadata.title == "New Thread" ||
+        metadata.title.rfind("Benchmark: ", 0) == 0) {
+      metadata.title = "Benchmark: " + metadata.benchmarkId;
+      if (!metadata.benchmarkTaskId.empty()) {
+        metadata.title += " [" + metadata.benchmarkTaskId + "]";
+      }
+    }
+    threadManager_.updateMetadata(threadId, metadata);
+  }
+
+  emitEvent(firmius::shared::ThreadMetadataUpdated{threadId, metadata});
+  return true;
+}
+
+bool Harness::appendSystemMessage(const std::string &agentId,
+                                  const std::string &text,
+                                  MessageVisibility visibility) {
+  auto agent = AgentRegistry::instance().getAgent(agentId);
+  if (!agent || text.empty()) {
+    return false;
+  }
+
+  auto &ctx = agent->getMutableContext();
+  if (!ctx.history) {
+    return false;
+  }
+
+  const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                       std::chrono::system_clock::now().time_since_epoch())
+                       .count();
+
+  AgentTurn turn;
+  turn.turnId = "system-note-" + std::to_string(now);
+
+  Message msg;
+  msg.role = Role::System;
+  msg.visibility = visibility;
+  msg.content.push_back(TextContent{text});
+  msg.timestamp = static_cast<uint64_t>(now);
+  turn.messages.push_back(msg);
+
+  ctx.history->turns.push_back(turn);
+  if (ctx.config.persistHistory) {
+    Journaler journaler(ctx.history->threadId, agentId);
+    journaler.appendTurn(turn);
+  }
+
+  emitEvent(firmius::shared::AgentTurnCompleted{
+      agentId, turn, ctx.aggregateMetrics, ctx.identity.parentId});
+  return true;
+}
+
 std::vector<ModelInfo> Harness::listAllModels() {
   {
     std::lock_guard<std::mutex> lock(modelsMutex_);

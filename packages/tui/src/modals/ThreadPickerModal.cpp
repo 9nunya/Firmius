@@ -245,7 +245,7 @@ ftxui::Component ThreadPickerModal::create(TuiState &state) {
 
     int idx = 0;
     for (const auto &t : all_threads) {
-      if (!cwd.empty() && normalizePath(t.cwd) != cwd) {
+      if (!cwd.empty() && normalizePath(t.cwd) != cwd && !t.isBenchmarkRun) {
         continue;
       }
 
@@ -298,6 +298,17 @@ ftxui::Component ThreadPickerModal::create(TuiState &state) {
         std::string agent_label = "(" + std::to_string(entry.agent_count) +
                                   (entry.agent_count == 1 ? " agent)" :
                                                            " agents)");
+        std::string benchmark_label;
+        if (entry.meta.isBenchmarkRun) {
+          benchmark_label = "BENCH";
+          if (!entry.meta.benchmarkId.empty()) {
+            benchmark_label += ":" + entry.meta.benchmarkId;
+          }
+          if (!entry.meta.benchmarkTaskId.empty()) {
+            benchmark_label += "@" +
+                               truncateText(entry.meta.benchmarkTaskId, 24);
+          }
+        }
         std::string lock_label;
         if (entry.locked_by_other && entry.locked_pid > 0) {
           lock_label = "PID: " + std::to_string(entry.locked_pid);
@@ -305,6 +316,9 @@ ftxui::Component ThreadPickerModal::create(TuiState &state) {
 
         int width = std::max(10, *list_width);
         int reserved = 2 + static_cast<int>(agent_label.size()) +
+                       (benchmark_label.empty()
+                            ? 0
+                            : 3 + static_cast<int>(benchmark_label.size())) +
                        (lock_label.empty() ? 0 : 2 + (int)lock_label.size());
         int max_title =
             std::max(8, width - reserved - 2 /*padding*/);
@@ -320,12 +334,19 @@ ftxui::Component ThreadPickerModal::create(TuiState &state) {
         ftxui::Color sub_fg = entry.locked_by_other ? theme.base.dim
                                                     : theme.base.dim;
 
-        auto top_line =
-            ftxui::hbox({ftxui::text(title) | ftxui::color(title_fg) |
-                             ftxui::bold,
-                         ftxui::text(" ") | ftxui::color(title_fg),
-                         ftxui::text(agent_label) |
-                             ftxui::color(sub_fg)});
+        ftxui::Elements top_line_elements = {
+            ftxui::text(title) | ftxui::color(title_fg) | ftxui::bold,
+            ftxui::text(" ") | ftxui::color(title_fg),
+            ftxui::text(agent_label) | ftxui::color(sub_fg),
+        };
+        if (!benchmark_label.empty()) {
+          top_line_elements.push_back(ftxui::text(" ") | ftxui::color(sub_fg));
+          top_line_elements.push_back(
+              ftxui::text(" " + benchmark_label + " ") | ftxui::bold |
+              ftxui::color(theme.modals.highlight_fg) |
+              ftxui::bgcolor(theme.modals.highlight_bg));
+        }
+        auto top_line = ftxui::hbox(std::move(top_line_elements));
 
         if (!lock_label.empty()) {
           top_line =

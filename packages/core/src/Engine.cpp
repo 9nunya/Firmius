@@ -650,6 +650,9 @@ std::string Engine::resumeAgent(const std::string &threadId,
 
       } catch (const std::exception &e) {
         auto agent = firmius::core::AgentRegistry::instance().getAgent(agentId);
+        if (agent) {
+          agent->setBooting(false);
+        }
         if (agent && agent->getContext().history) {
           firmius::shared::AgentTurn errorTurn;
           errorTurn.turnId =

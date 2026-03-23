@@ -226,6 +226,19 @@ target_include_directories(test_process_manager PRIVATE
 )
 gtest_discover_tests(test_process_manager)
 
+add_executable(test_benchmark_factory
+    core/test_benchmark_factory.cpp
+)
+target_link_libraries(test_benchmark_factory PRIVATE
+    firmius::core
+    firmius::shared
+    GTest::gtest_main
+)
+target_include_directories(test_benchmark_factory PRIVATE
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_benchmark_factory)
+
 add_executable(test_reference_expansion
     core/test_reference_expansion.cpp
 )
@@ -347,6 +360,7 @@ add_executable(test_syntax_highlighter
     ../../packages/tui/src/components/SyntaxHighlighter.cpp
     ../../packages/tui/src/NotificationManager.cpp
     ../../packages/tui/src/ThemeManager.cpp
+    ../../packages/tui/src/UserPreferences.cpp
     ../../packages/tui/src/components/GlintEffect.cpp
 )
 target_link_libraries(test_syntax_highlighter PRIVATE
@@ -497,6 +511,7 @@ add_executable(test_chat_window_helpers
     ../../packages/tui/src/components/SyntaxHighlighter.cpp
     ../../packages/tui/src/components/TranscriptGrouping.cpp
     ../../packages/tui/src/ThemeManager.cpp
+    ../../packages/tui/src/UserPreferences.cpp
     ../../packages/tui/src/NotificationManager.cpp
     ../../packages/tui/src/tools/ArtifactToolPresentation.cpp
     ../../packages/tui/src/tools/FileToolPresentation.cpp
@@ -558,6 +573,7 @@ add_executable(test_error_display
     ../../packages/tui/src/components/ErrorDisplay.cpp
     ../../packages/tui/src/components/Markdown.cpp
     ../../packages/tui/src/ThemeManager.cpp
+    ../../packages/tui/src/UserPreferences.cpp
 )
 target_link_libraries(test_error_display PRIVATE
     firmius::shared
@@ -577,7 +593,10 @@ add_executable(test_plan_lane
     tui/test_plan_lane.cpp
     ../../packages/tui/src/components/PlanLane.cpp
     ../../packages/tui/src/components/GlintEffect.cpp
+    ../../packages/tui/src/components/Markdown.cpp
+    ../../packages/tui/src/components/ScrollableBox.cpp
     ../../packages/tui/src/ThemeManager.cpp
+    ../../packages/tui/src/UserPreferences.cpp
 )
 target_link_libraries(test_plan_lane PRIVATE
     firmius::shared
@@ -595,7 +614,10 @@ gtest_discover_tests(test_plan_lane)
 add_executable(test_todo_lane
     tui/test_todo_lane.cpp
     ../../packages/tui/src/components/TodoLane.cpp
+    ../../packages/tui/src/components/Markdown.cpp
+    ../../packages/tui/src/components/ScrollableBox.cpp
     ../../packages/tui/src/ThemeManager.cpp
+    ../../packages/tui/src/UserPreferences.cpp
 )
 target_link_libraries(test_todo_lane PRIVATE
     firmius::shared
@@ -628,6 +650,7 @@ add_executable(test_status_bar
     ../../packages/tui/src/components/StatusBar.cpp
     ../../packages/tui/src/components/GlintEffect.cpp
     ../../packages/tui/src/ThemeManager.cpp
+    ../../packages/tui/src/UserPreferences.cpp
 )
 target_link_libraries(test_status_bar PRIVATE
     firmius::shared
@@ -647,6 +670,7 @@ add_executable(test_agent_strip
     ../../packages/tui/src/components/AgentStrip.cpp
     ../../packages/tui/src/components/GlintEffect.cpp
     ../../packages/tui/src/ThemeManager.cpp
+    ../../packages/tui/src/UserPreferences.cpp
 )
 target_link_libraries(test_agent_strip PRIVATE
     firmius::shared
@@ -691,6 +715,7 @@ add_executable(test_tool_presentation_block
     ../../packages/tui/src/tools/ToolPresentation.cpp
     ../../packages/tui/src/tools/WorkToolPresentation.cpp
     ../../packages/tui/src/ThemeManager.cpp
+    ../../packages/tui/src/UserPreferences.cpp
 )
 target_link_libraries(test_tool_presentation_block PRIVATE
     firmius::shared

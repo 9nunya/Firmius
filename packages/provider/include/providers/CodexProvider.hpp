@@ -34,6 +34,7 @@ private:
     std::string itemId;
     std::string callId;
     std::string name;
+    std::string arguments;
   };
 
   struct ToolCallTracker {

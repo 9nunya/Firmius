@@ -1489,23 +1489,54 @@ void CodexProvider::processSseLine(
       state.itemId = item["id"].GetString();
     if (item.HasMember("call_id") && item["call_id"].IsString())
       state.callId = item["call_id"].GetString();
-    if (item.HasMember("name") && item["name"].IsString())
-      state.name = item["name"].GetString();
+    const std::string currentName =
+        item.HasMember("name") && item["name"].IsString()
+            ? std::string(item["name"].GetString())
+            : std::string();
+    std::string currentArgs =
+        item.HasMember("arguments") && item["arguments"].IsString()
+            ? std::string(item["arguments"].GetString())
+            : std::string();
     if (state.callId.empty())
       state.callId = state.itemId;
+
+    ToolCallChunk chunk;
+    chunk.id = state.callId;
+    chunk.index = static_cast<std::uint32_t>(std::max(outputIndex, 0));
+
+    if (!currentName.empty()) {
+      if (state.name.empty()) {
+        chunk.nameDelta = currentName;
+      } else if (currentName != state.name) {
+        if (currentName.rfind(state.name, 0) == 0) {
+          chunk.nameDelta = currentName.substr(state.name.size());
+        } else {
+          chunk.nameDelta = currentName;
+        }
+      }
+      state.name = currentName;
+    }
+
+    if (!currentArgs.empty()) {
+      if (state.arguments.empty()) {
+        chunk.argsDelta = currentArgs;
+      } else if (currentArgs != state.arguments) {
+        if (currentArgs.rfind(state.arguments, 0) == 0) {
+          chunk.argsDelta = currentArgs.substr(state.arguments.size());
+        } else {
+          chunk.argsDelta = currentArgs;
+        }
+      }
+      state.arguments = currentArgs;
+    }
 
     tracker.byIndex[outputIndex] = state;
     if (!state.itemId.empty())
       tracker.indexByItemId[state.itemId] = outputIndex;
 
-    ToolCallChunk chunk;
-    chunk.id = state.callId;
-    chunk.index = static_cast<std::uint32_t>(std::max(outputIndex, 0));
-    chunk.nameDelta = state.name;
-    if (item.HasMember("arguments") && item["arguments"].IsString()) {
-      chunk.argsDelta = item["arguments"].GetString();
+    if (!chunk.nameDelta.empty() || !chunk.argsDelta.empty()) {
+      onEvent(chunk);
     }
-    onEvent(chunk);
   };
 
   if (type == "response.output_item.added" ||
@@ -1544,8 +1575,28 @@ void CodexProvider::processSseLine(
       if (it != tracker.byIndex.end())
         chunk.id = it->second.callId;
       chunk.index = static_cast<std::uint32_t>(outputIndex);
-      chunk.argsDelta = doc[argsField].GetString();
-      onEvent(chunk);
+      const std::string incomingArgs = doc[argsField].GetString();
+      if (it != tracker.byIndex.end()) {
+        if (type == "response.function_call_arguments.done") {
+          if (incomingArgs != it->second.arguments) {
+            if (incomingArgs.rfind(it->second.arguments, 0) == 0) {
+              chunk.argsDelta =
+                  incomingArgs.substr(it->second.arguments.size());
+            } else {
+              chunk.argsDelta = incomingArgs;
+            }
+          }
+          it->second.arguments = incomingArgs;
+        } else {
+          chunk.argsDelta = incomingArgs;
+          it->second.arguments += incomingArgs;
+        }
+      } else {
+        chunk.argsDelta = incomingArgs;
+      }
+      if (!chunk.argsDelta.empty()) {
+        onEvent(chunk);
+      }
     }
     return;
   }

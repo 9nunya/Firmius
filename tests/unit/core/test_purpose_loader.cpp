@@ -518,6 +518,8 @@ TEST(PromptContractsTest, executorPromptRequiresVerificationEvidenceAndLeadAccep
               std::string::npos);
     EXPECT_NE(prompt.find("Verification evidence means concrete commands, tests, or outputs, not a vibe check."),
               std::string::npos);
+    EXPECT_NE(prompt.find("run `cmake --build build -j16` before test commands so all targets are compiled"),
+              std::string::npos);
     EXPECT_NE(prompt.find("Do not claim completion without evidence in `result_summary`."),
               std::string::npos);
 }

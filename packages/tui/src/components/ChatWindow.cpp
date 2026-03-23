@@ -14,7 +14,10 @@
 #include <ftxui/component/component_base.hpp>
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/dom/node.hpp>
+#include <limits>
 #include <memory>
+#include <type_traits>
+#include <typeinfo>
 #include <unordered_map>
 #include <vector>
 
@@ -39,6 +42,74 @@ namespace firmius::tui {
 } // namespace firmius::tui
 
 namespace {
+
+constexpr int kChatTailPaddingLines = 3;
+
+template <typename T>
+void HashCombine(std::size_t &seed, const T &value) {
+  seed ^= std::hash<T>{}(value) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+}
+
+std::size_t ComputeHistoryRevision(const firmius::shared::AgentHistory *history) {
+  if (!history) {
+    return 0;
+  }
+
+  std::size_t seed = history->turns.size();
+  for (const auto &turn : history->turns) {
+    HashCombine(seed, turn.turnId);
+    HashCombine(seed, turn.messages.size());
+    for (const auto &message : turn.messages) {
+      HashCombine(seed, static_cast<int>(message.role));
+      HashCombine(seed, message.content.size());
+      for (const auto &part : message.content) {
+        std::visit(
+            [&](const auto &content) {
+              using T = std::decay_t<decltype(content)>;
+              HashCombine(seed, typeid(T).hash_code());
+              if constexpr (std::is_same_v<T, firmius::shared::TextContent>) {
+                HashCombine(seed, content.text.size());
+              } else if constexpr (std::is_same_v<T,
+                                                  firmius::shared::ThinkingContent>) {
+                HashCombine(seed, content.thinking.size());
+                HashCombine(seed, content.signature.size());
+              } else if constexpr (std::is_same_v<T,
+                                                  firmius::shared::ToolCallContent>) {
+                HashCombine(seed, content.id);
+                HashCombine(seed, content.name);
+                HashCombine(seed, content.args.size());
+              } else if constexpr (std::is_same_v<T,
+                                                  firmius::shared::ToolResultContent>) {
+                HashCombine(seed, content.toolCallId);
+                HashCombine(seed, content.result.size());
+                HashCombine(seed, content.success);
+                HashCombine(seed, content.processId);
+                HashCombine(seed, content.subagentId);
+              } else if constexpr (std::is_same_v<T,
+                                                  firmius::shared::ImageContent>) {
+                HashCombine(seed, content.url.size());
+                HashCombine(seed, content.mediaType.size());
+                HashCombine(seed, content.detail.size());
+              } else if constexpr (std::is_same_v<T,
+                                                  firmius::shared::ErrorContent>) {
+                HashCombine(seed, content.errorName.size());
+                HashCombine(seed, content.description.size());
+                HashCombine(seed, content.details.size());
+              } else if constexpr (std::is_same_v<T,
+                                                  firmius::shared::NoticeContent>) {
+                HashCombine(seed, content.title.size());
+                HashCombine(seed, content.message.size());
+                HashCombine(seed, content.details.size());
+                HashCombine(seed, static_cast<int>(content.severity));
+              }
+            },
+            part);
+      }
+    }
+  }
+
+  return seed;
+}
 
 class RowComponent : public ftxui::ComponentBase {
 public:
@@ -358,7 +429,14 @@ public:
     });
 
     tail_spacer_ =
-        ftxui::Make<RowComponent>(nullptr, [] { return ftxui::text(""); });
+        ftxui::Make<RowComponent>(nullptr, [] {
+          ftxui::Elements padding_rows;
+          padding_rows.reserve(kChatTailPaddingLines);
+          for (int i = 0; i < kChatTailPaddingLines; ++i) {
+            padding_rows.push_back(ftxui::text(" "));
+          }
+          return ftxui::vbox(std::move(padding_rows)) | ftxui::xflex;
+        });
 
     container_ = ftxui::Container::Vertical(
         {history_container_, live_rows_cmp, tail_spacer_});
@@ -377,6 +455,9 @@ public:
 
   ftxui::Element OnRender() override {
     RebuildIfNeeded();
+    if (scrollable_ && !user_scrolled_up_) {
+      scrollable_->RequestScrollToBottom();
+    }
     return scrollable_ ? scrollable_->Render() : ftxui::text("");
   }
 
@@ -385,7 +466,7 @@ public:
   bool OnEvent(ftxui::Event event) override {
     if (event == ftxui::Event::Special("ThreadChanged") ||
         event == ftxui::Event::Special("ThemeChanged")) {
-      last_turns_size_ = static_cast<size_t>(-1);
+      last_history_revision_ = std::numeric_limits<std::size_t>::max();
       RebuildIfNeeded();
       user_scrolled_up_ = false;
       return true;
@@ -400,6 +481,12 @@ public:
     if (event == ftxui::Event::ArrowDown || event == ftxui::Event::PageDown) {
       user_scrolled_up_ = false;
     }
+    if (event.is_mouse() && event.mouse().button == ftxui::Mouse::WheelUp) {
+      user_scrolled_up_ = true;
+    }
+    if (event.is_mouse() && event.mouse().button == ftxui::Mouse::WheelDown) {
+      user_scrolled_up_ = false;
+    }
 
     if (event == ftxui::Event::Custom) {
       if (scrollable_ && !user_scrolled_up_)
@@ -412,10 +499,10 @@ private:
   bool user_scrolled_up_ = false;
   void RebuildIfNeeded() {
     auto *history = history_getter_ ? history_getter_() : nullptr;
-    size_t turns_size = history ? history->turns.size() : 0;
-    if (turns_size == last_turns_size_)
+    const std::size_t history_revision = ComputeHistoryRevision(history);
+    if (history_revision == last_history_revision_)
       return;
-    last_turns_size_ = turns_size;
+    last_history_revision_ = history_revision;
 
     rows_.clear();
     history_inner_->DetachAllChildren();
@@ -564,10 +651,10 @@ private:
                               prefix, isUser](const ftxui::Element &content) {
             auto e = ftxui::hbox({
                 ftxui::text(prefix) | ftxui::bold | ftxui::color(prefixColor),
-                content | ftxui::flex,
+                content | ftxui::xflex,
             });
             if (isUser) {
-              return e | ftxui::flex;
+              return e | ftxui::xflex;
             }
             return firmius::tui::IndentAgentRow(e);
           };
@@ -713,7 +800,7 @@ private:
           ftxui::Make<RowComponent>(nullptr, [] { return ftxui::text(""); }));
     }
 
-    if (scrollable_) {
+    if (scrollable_ && !user_scrolled_up_) {
       scrollable_->RequestScrollToBottom();
     }
   }
@@ -727,7 +814,7 @@ private:
   firmius::tui::StreamGetter sub_stream_getter_;
   firmius::tui::LiveQuickSummaryProvider live_quick_summary_provider_;
   std::function<bool()> show_internal_nudges_getter_;
-  size_t last_turns_size_ = static_cast<size_t>(-1);
+  size_t last_history_revision_ = std::numeric_limits<std::size_t>::max();
   std::vector<ftxui::Component> rows_;
   ftxui::Component history_inner_;
   ftxui::Component history_container_;

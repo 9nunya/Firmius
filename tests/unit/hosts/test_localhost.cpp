@@ -178,6 +178,31 @@ TEST_F(LocalHostTest, listDir_basic) {
     EXPECT_TRUE(foundSubdir);
 }
 
+TEST_F(LocalHostTest, listDir_missingPathReportsNotFound) {
+    const auto missing = (tempDir / "does-not-exist").string();
+    EXPECT_THROW({
+        try {
+            host.listDir(missing);
+        } catch (const std::runtime_error& e) {
+            EXPECT_NE(std::string(e.what()).find("Path not found"), std::string::npos);
+            throw;
+        }
+    }, std::runtime_error);
+}
+
+TEST_F(LocalHostTest, listDir_filePathReportsNotDirectory) {
+    const auto filePath = tempDir / "single-file.txt";
+    createFile(filePath, "content");
+    EXPECT_THROW({
+        try {
+            host.listDir(filePath.string());
+        } catch (const std::runtime_error& e) {
+            EXPECT_NE(std::string(e.what()).find("Not a directory"), std::string::npos);
+            throw;
+        }
+    }, std::runtime_error);
+}
+
 TEST_F(LocalHostTest, readFile_success) {
     std::string expectedContent = "Hello, World!\nThis is a test file.\n";
     auto filePath = tempDir / "testfile.txt";

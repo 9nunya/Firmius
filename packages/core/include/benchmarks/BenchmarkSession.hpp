@@ -3,6 +3,7 @@
 
 #include "agents/Agent.hpp"
 #include "Enums.hpp"
+#include <functional>
 
 namespace firmius::core {
 
@@ -12,6 +13,11 @@ struct BenchmarkConfig {
     std::string personaName;
     std::string providerId;
     std::string modelId;
+    std::string modelVariant;
+    std::string existingThreadId;
+    std::string existingAgentId;
+    bool initializeHarness = true;
+    std::function<void(const std::string&)> logCallback;
 };
 
 class BenchmarkSession {
@@ -20,6 +26,8 @@ public:
 
     Agent& getAgent();
     shared::IHost& getHost();
+    const BenchmarkConfig& config() const;
+    void emitLog(const std::string& message) const;
 
 private:
     void ensureReady();

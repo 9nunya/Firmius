@@ -233,6 +233,11 @@ void ActivePlanState::clear() {
   model_.plan_title.clear();
   model_.collapsed_summary.clear();
   model_.chunks.clear();
+  model_.executor_task_view = false;
+  model_.executor_chunk_id.clear();
+  model_.executor_chunk_title.clear();
+  model_.executor_tasks.clear();
+  model_.highlight_chunk_id.clear();
 }
 
 void ActivePlanState::rebuildModel() {
@@ -247,6 +252,11 @@ void ActivePlanState::rebuildModel() {
   model_.plan_title = active_plan_->title;
   model_.collapsed_summary = collapsedSummary(*active_plan_);
   model_.chunks.clear();
+  model_.executor_task_view = false;
+  model_.executor_chunk_id.clear();
+  model_.executor_chunk_title.clear();
+  model_.executor_tasks.clear();
+  model_.highlight_chunk_id.clear();
   model_.chunks.reserve(active_plan_->chunks.size());
 
   for (const auto &chunk : active_plan_->chunks) {

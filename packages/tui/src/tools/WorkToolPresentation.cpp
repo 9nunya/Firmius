@@ -225,7 +225,7 @@ std::vector<std::string> CollectChangedFields(const rapidjson::Value &args) {
       "title",      "objective", "summary", "status",       "context",
       "strategy",   "goal",      "depends_on",
       "verification_condition", "files_to_read", "files_to_touch",
-      "handoff_notes", "completion", "notes", "assigned_agent_id"};
+      "handoff_notes", "completion", "notes", "assigned_agent_id", "tasks"};
   std::vector<std::string> fields;
   if (!args.IsObject()) {
     return fields;
@@ -250,10 +250,59 @@ void AddLinesIfPresent(ToolPresentationSection &section, const rapidjson::Value 
   }
 }
 
+std::string PreferPlanLabel(const rapidjson::Value &args,
+                            const rapidjson::Value *result = nullptr) {
+  const std::string title = StringMember(args, "title");
+  if (!title.empty()) {
+    return title;
+  }
+  if (result != nullptr) {
+    const std::string result_title = StringMember(*result, "title");
+    if (!result_title.empty()) {
+      return result_title;
+    }
+    const std::string plan_id = StringMember(*result, "plan_id");
+    if (!plan_id.empty()) {
+      return plan_id;
+    }
+  }
+  return StringMember(args, "plan_id");
+}
+
+std::string PreferChunkLabel(const rapidjson::Value &args,
+                             const rapidjson::Value *result = nullptr) {
+  const std::string title = StringMember(args, "title");
+  if (!title.empty()) {
+    return title;
+  }
+  if (result != nullptr) {
+    const std::string result_title = StringMember(*result, "title");
+    if (!result_title.empty()) {
+      return result_title;
+    }
+    const std::string chunk_id = StringMember(*result, "chunk_id");
+    if (!chunk_id.empty()) {
+      return chunk_id;
+    }
+  }
+  return StringMember(args, "chunk_id");
+}
+
+std::string WithFallbackLabel(const std::string &prefix,
+                              const std::string &label,
+                              const std::string &fallback) {
+  return prefix + (label.empty() ? fallback : label);
+}
+
+std::string CompactCountBadge(const char *icon, size_t count) {
+  return std::string(icon) + std::to_string(count);
+}
+
 ToolPresentation BuildPlanCreatePresentation(const ToolCallView &view) {
   ToolPresentation p;
   p.lifecycle = LifecycleFromPhase(view);
-  p.layout = ToolPresentationLayoutKind::BodyFirstPreview;
+  p.layout = ToolPresentationLayoutKind::CompactFactCard;
+  p.density = ToolPresentationDensity::OneLineSummary;
   p.subtitle = view.name;
 
   rapidjson::Document args;
@@ -261,18 +310,15 @@ ToolPresentation BuildPlanCreatePresentation(const ToolCallView &view) {
   const std::string title = has_args ? StringMember(args, "title") : "";
   const std::string objective = has_args ? StringMember(args, "objective") : "";
   if (p.lifecycle == ToolPresentationLifecycle::Preparing) {
-    p.title = "prepare plan creation";
+    p.title = WithFallbackLabel(" 󰒓 ", title, "plan");
   } else if (p.lifecycle == ToolPresentationLifecycle::Running) {
-    p.title = "creating plan";
+    p.title = WithFallbackLabel(" 󰒓 ", title, "plan");
   } else {
-    p.title = "plan created";
+    p.title = WithFallbackLabel("󰒓 ", title, "plan");
   }
-  if (!title.empty()) {
-    p.facts.push_back({"Title", title});
-    p.compact_summary = title;
-  }
+  p.compact_summary = p.title;
   if (!objective.empty()) {
-    p.facts.push_back({"Objective", objective});
+    p.footer_badges.push_back("󰍩");
   }
   if (p.lifecycle == ToolPresentationLifecycle::Error) {
     ApplyError(p, view, "plan creation failed");
@@ -286,14 +332,14 @@ ToolPresentation BuildPlanCreatePresentation(const ToolCallView &view) {
   if (ParseObject(view.result, result)) {
     const std::string plan_id = StringMember(result, "plan_id");
     if (!plan_id.empty()) {
-      p.facts.push_back({"Plan ID", plan_id});
+      p.footer_badges.push_back(plan_id);
     }
     const std::string status = StringMember(result, "status");
     if (!status.empty()) {
-      p.facts.push_back({"Status", status});
+      p.footer_badges.push_back(status);
     }
     if (result.HasMember("active") && result["active"].IsBool()) {
-      p.facts.push_back({"Active", result["active"].GetBool() ? "yes" : "no"});
+      p.footer_badges.push_back(result["active"].GetBool() ? "󰐃" : "󰓛");
     }
   }
   return p;
@@ -434,20 +480,21 @@ ToolPresentation BuildPlanSetActivePresentation(const ToolCallView &view) {
   ToolPresentation p;
   p.lifecycle = LifecycleFromPhase(view);
   p.layout = ToolPresentationLayoutKind::CompactFactCard;
+  p.density = ToolPresentationDensity::OneLineSummary;
   p.subtitle = view.name;
   rapidjson::Document args;
   ParseObject(view.args, args);
   const std::string requested_plan = StringMember(args, "plan_id");
   if (p.lifecycle == ToolPresentationLifecycle::Preparing) {
-    p.title = "prepare active plan change";
+    p.title = WithFallbackLabel(" 󰘳 ", requested_plan,
+                                "change");
   } else if (p.lifecycle == ToolPresentationLifecycle::Running) {
-    p.title = "setting active plan";
+    p.title = WithFallbackLabel(" 󰘳 ", requested_plan,
+                                "change");
   } else {
-    p.title = "active plan updated";
+    p.title = WithFallbackLabel("󰘳 ", requested_plan, "change");
   }
-  if (!requested_plan.empty()) {
-    p.facts.push_back({"Plan ID", requested_plan});
-  }
+  p.compact_summary = p.title;
   if (p.lifecycle == ToolPresentationLifecycle::Error) {
     ApplyError(p, view, "plan activation failed");
     return p;
@@ -459,11 +506,11 @@ ToolPresentation BuildPlanSetActivePresentation(const ToolCallView &view) {
   if (ParseObject(view.result, result)) {
     const std::string plan_id = StringMember(result, "plan_id");
     if (!plan_id.empty()) {
-      p.facts.push_back({"Active plan", plan_id});
+      p.footer_badges.push_back(plan_id);
     }
     const std::string status = StringMember(result, "status");
     if (!status.empty()) {
-      p.facts.push_back({"Status", status});
+      p.footer_badges.push_back(status);
     }
   }
   return p;
@@ -472,36 +519,24 @@ ToolPresentation BuildPlanSetActivePresentation(const ToolCallView &view) {
 ToolPresentation BuildPlanUpdatePresentation(const ToolCallView &view) {
   ToolPresentation p;
   p.lifecycle = LifecycleFromPhase(view);
-  p.layout = ToolPresentationLayoutKind::ResultsList;
+  p.layout = ToolPresentationLayoutKind::CompactFactCard;
+  p.density = ToolPresentationDensity::OneLineSummary;
   p.subtitle = view.name;
   rapidjson::Document args;
   const bool has_args = ParseObject(view.args, args);
+  const std::string plan_label = has_args ? PreferPlanLabel(args) : "plan";
   if (p.lifecycle == ToolPresentationLifecycle::Preparing) {
-    p.title = "prepare plan update";
+    p.title = " 󰒓 " + plan_label;
   } else if (p.lifecycle == ToolPresentationLifecycle::Running) {
-    p.title = "updating plan";
+    p.title = " 󰒓 " + plan_label;
   } else {
-    p.title = "plan updated";
+    p.title = "󰒓 " + plan_label;
   }
+  p.compact_summary = p.title;
   if (has_args) {
-    const std::string id = StringMember(args, "plan_id");
-    const std::string title = StringMember(args, "title");
-    if (!id.empty()) {
-      p.facts.push_back({"Plan ID", id});
-    }
-    if (!title.empty()) {
-      p.facts.push_back({"Title", title});
-    }
     auto fields = CollectChangedFields(args);
     if (!fields.empty()) {
-      p.facts.push_back({"Changed fields", std::to_string(fields.size())});
-      ToolPresentationSection diff;
-      diff.title = "Updated fields";
-      for (const auto &field : fields) {
-        diff.lines.push_back(field);
-        p.body_lines.push_back(field);
-      }
-      p.sections.push_back(std::move(diff));
+      p.footer_badges.push_back(CompactCountBadge("", fields.size()));
     }
   }
   if (p.lifecycle == ToolPresentationLifecycle::Error) {
@@ -515,7 +550,11 @@ ToolPresentation BuildPlanUpdatePresentation(const ToolCallView &view) {
   if (ParseObject(view.result, result)) {
     const std::string status = StringMember(result, "status");
     if (!status.empty()) {
-      p.facts.push_back({"Status", status});
+      p.footer_badges.push_back(status);
+    }
+    const std::string plan_id = StringMember(result, "plan_id");
+    if (!plan_id.empty()) {
+      p.footer_badges.push_back(plan_id);
     }
   }
   return p;
@@ -524,34 +563,37 @@ ToolPresentation BuildPlanUpdatePresentation(const ToolCallView &view) {
 ToolPresentation BuildChunkAddPresentation(const ToolCallView &view) {
   ToolPresentation p;
   p.lifecycle = LifecycleFromPhase(view);
-  p.layout = ToolPresentationLayoutKind::BodyFirstPreview;
+  p.layout = ToolPresentationLayoutKind::CompactFactCard;
+  p.density = ToolPresentationDensity::OneLineSummary;
   p.subtitle = view.name;
   rapidjson::Document args;
   const bool has_args = ParseObject(view.args, args);
+  const std::string chunk_label = has_args ? PreferChunkLabel(args) : "chunk";
   if (p.lifecycle == ToolPresentationLifecycle::Preparing) {
-    p.title = "prepare chunk add";
+    p.title = " 󰐃 " + chunk_label;
   } else if (p.lifecycle == ToolPresentationLifecycle::Running) {
-    p.title = "adding chunk";
+    p.title = " 󰐃 " + chunk_label;
   } else {
-    p.title = "chunk added";
+    p.title = "󰐃 " + chunk_label;
   }
+  p.compact_summary = p.title;
   if (has_args) {
-    p.facts.push_back({"Plan ID", StringMember(args, "plan_id")});
-    const std::string title = StringMember(args, "title");
-    if (!title.empty()) {
-      p.facts.push_back({"Title", title});
-      p.compact_summary = title;
-    }
-    const std::string goal = StringMember(args, "goal");
-    if (!goal.empty()) {
-      p.facts.push_back({"Goal", goal});
+    const std::string plan_id = StringMember(args, "plan_id");
+    if (!plan_id.empty()) {
+      p.footer_badges.push_back(plan_id);
     }
     auto deps = StringArrayMember(args, "depends_on");
     if (!deps.empty()) {
-      p.facts.push_back({"Dependencies", std::to_string(deps.size())});
+      p.footer_badges.push_back(CompactCountBadge("", deps.size()));
     }
-    if (args.HasMember("planning_gate") && args["planning_gate"].IsBool()) {
-      p.facts.push_back({"Planning gate", args["planning_gate"].GetBool() ? "yes" : "no"});
+    if (args.HasMember("tasks") && args["tasks"].IsArray() &&
+        !args["tasks"].Empty()) {
+      p.footer_badges.push_back(
+          CompactCountBadge("", static_cast<size_t>(args["tasks"].Size())));
+    }
+    if (args.HasMember("planning_gate") && args["planning_gate"].IsBool() &&
+        args["planning_gate"].GetBool()) {
+      p.footer_badges.push_back("󰐗");
     }
   }
   if (p.lifecycle == ToolPresentationLifecycle::Error) {
@@ -563,10 +605,13 @@ ToolPresentation BuildChunkAddPresentation(const ToolCallView &view) {
   }
   rapidjson::Document result;
   if (ParseObject(view.result, result)) {
-    p.facts.push_back({"Chunk ID", StringMember(result, "chunk_id")});
+    const std::string chunk_id = StringMember(result, "chunk_id");
+    if (!chunk_id.empty()) {
+      p.footer_badges.push_back(chunk_id);
+    }
     const std::string status = StringMember(result, "status");
     if (!status.empty()) {
-      p.facts.push_back({"Status", status});
+      p.footer_badges.push_back(status);
     }
   }
   return p;
@@ -669,11 +714,21 @@ ToolPresentation BuildChunkListPresentation(const ToolCallView &view) {
     const std::string status = StringMember(item, "status");
     const std::string id = StringMember(item, "chunk_id");
     const std::string title = StringMember(item, "title");
+    const size_t task_count =
+        item.IsObject() && item.HasMember("task_count") &&
+                item["task_count"].IsUint64()
+            ? static_cast<size_t>(item["task_count"].GetUint64())
+            : 0u;
     size_t dep_count = 0;
     if (item.IsObject() && item.HasMember("depends_on") && item["depends_on"].IsArray()) {
       dep_count = item["depends_on"].Size();
     }
-    by_status[status].push_back(id + " " + title + " (deps:" + std::to_string(dep_count) + ")");
+    std::string row =
+        id + " " + title + " (deps:" + std::to_string(dep_count) + ")";
+    if (task_count > 0) {
+      row += " (" + std::to_string(task_count) + " tasks)";
+    }
+    by_status[status].push_back(std::move(row));
   }
   for (auto &pair : by_status) {
     ToolPresentationSection sec;
@@ -733,33 +788,24 @@ ToolPresentation BuildChunkReadyPresentation(const ToolCallView &view) {
 ToolPresentation BuildChunkUpdatePresentation(const ToolCallView &view) {
   ToolPresentation p;
   p.lifecycle = LifecycleFromPhase(view);
-  p.layout = ToolPresentationLayoutKind::ResultsList;
+  p.layout = ToolPresentationLayoutKind::CompactFactCard;
+  p.density = ToolPresentationDensity::OneLineSummary;
   p.subtitle = view.name;
   rapidjson::Document args;
   const bool has_args = ParseObject(view.args, args);
+  const std::string chunk_label = has_args ? PreferChunkLabel(args) : "chunk";
   if (p.lifecycle == ToolPresentationLifecycle::Preparing) {
-    p.title = "prepare chunk update";
+    p.title = " 󰐃 " + chunk_label;
   } else if (p.lifecycle == ToolPresentationLifecycle::Running) {
-    p.title = "updating chunk";
+    p.title = " 󰐃 " + chunk_label;
   } else {
-    p.title = "chunk updated";
+    p.title = "󰐃 " + chunk_label;
   }
+  p.compact_summary = p.title;
   if (has_args) {
-    p.facts.push_back({"Chunk ID", StringMember(args, "chunk_id")});
-    const std::string title = StringMember(args, "title");
-    if (!title.empty()) {
-      p.facts.push_back({"Title", title});
-    }
     auto fields = CollectChangedFields(args);
     if (!fields.empty()) {
-      p.facts.push_back({"Changed fields", std::to_string(fields.size())});
-      ToolPresentationSection diff;
-      diff.title = "Updated fields";
-      for (const auto &field : fields) {
-        diff.lines.push_back(field);
-        p.body_lines.push_back(field);
-      }
-      p.sections.push_back(std::move(diff));
+      p.footer_badges.push_back(CompactCountBadge("", fields.size()));
     }
   }
   if (p.lifecycle == ToolPresentationLifecycle::Error) {
@@ -773,7 +819,11 @@ ToolPresentation BuildChunkUpdatePresentation(const ToolCallView &view) {
   if (ParseObject(view.result, result)) {
     const std::string status = StringMember(result, "status");
     if (!status.empty()) {
-      p.facts.push_back({"Status", status});
+      p.footer_badges.push_back(status);
+    }
+    const std::string chunk_id = StringMember(result, "chunk_id");
+    if (!chunk_id.empty()) {
+      p.footer_badges.push_back(chunk_id);
     }
   }
   return p;
@@ -904,7 +954,12 @@ ToolPresentation BuildWorkToolPresentation(const ToolCallView &view) {
   } else {
     presentation = BuildTodoWritePresentation(view);
   }
-  if (!IsMatch(view.name, "todo_write") && !IsMatch(view.name, "plan_list")) {
+  if (!IsMatch(view.name, "todo_write") && !IsMatch(view.name, "plan_list") &&
+      !IsMatch(view.name, "plan_create") &&
+      !IsMatch(view.name, "plan_set_active") &&
+      !IsMatch(view.name, "plan_update") &&
+      !IsMatch(view.name, "chunk_add") &&
+      !IsMatch(view.name, "chunk_update")) {
     presentation.density = ToolPresentationDensity::DetailHeavy;
   }
   return presentation;

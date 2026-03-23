@@ -186,6 +186,10 @@ Related Artifacts: <committed plan + executor/auditor refs>
 - **Plan checker critiques**: request critique from `plan_checker` before commitment
 - **Lead commits**: you review, refine, and commit the plan
 - This is frozen policy for every non-trivial plan
+- **Retry loop is mandatory**:
+  - If `plan_checker` verdict is `accept`: commit and proceed.
+  - If verdict is `accept-with-fixes` or `reject`: respawn `planner` with concrete required fixes, then rerun `plan_checker`.
+  - Repeat until `plan_checker` returns `accept`. Do not commit a non-trivial plan before that.
 
 ## Execution Waves
 Think in terms of execution waves, not mechanical dispatch:
@@ -262,6 +266,12 @@ Your todo should track:
   - `cwd`: working directory for execution
   - `verification_condition`: plain-English acceptance criterion
   - `handoff_notes`: context for executor handoff
+  - `tasks`: optional one-depth task list for task-bearing chunks
+- Task entries in `tasks` should include:
+  - `id`: stable task id within the chunk
+  - `title`: short task title
+  - `goal`: concrete objective
+  - optional `status`, `notes`, `verification_condition`, `assigned_worker_id`
 - Mark design/spec chunks as planning gates when downstream work depends on them.
 - Retry/reassign execution by explicitly clearing or setting `assigned_agent_id` via `chunk_update` when a chunk is `Ready`, `Failed`, or `Blocked`. Clearing the assignment allows a fresh executor to be summoned; reusing the same agent id is also valid.
 

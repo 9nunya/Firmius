@@ -10,8 +10,10 @@
 #include "components/TodoLane.hpp"
 #include <ftxui/component/component_base.hpp>
 #include <ftxui/component/screen_interactive.hpp>
+#include <ftxui/screen/box.hpp>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -72,6 +74,12 @@ private:
   TuiState();
   ~TuiState() = default;
 
+  void loadUserPreferences();
+  void persistUserPreferences() const;
+  void activatePermissionRequest(
+      const shared::PermissionEscalationRequest &request);
+  void clearActivePermissionRequest();
+  void promoteNextPermissionRequest();
   void onEvent(const shared::AppEvent &ev);
   std::string statusText() const;
   void updateStatusModel();
@@ -80,6 +88,8 @@ private:
   void updateTodoLaneModel();
   std::optional<shared::Plan> loadActivePlanForThread(
       const shared::ThreadMetadata &thread) const;
+  const shared::WorkChunk *
+  findExecutorChunk(const std::optional<shared::Plan> &plan) const;
   std::string findExecutorChunkTitle(const std::optional<shared::Plan> &plan) const;
 
   firmius::core::Harness *harness_ = nullptr;
@@ -111,13 +121,18 @@ private:
   bool pending_modal_clear_ =
       false; // Deferred clear to avoid UB in modal handlers
   bool diffs_expanded_ = true; // Ctrl+G toggle for diff expansion
-  bool plan_lane_expanded_ = false;
   bool prefer_todo_panel_on_narrow_ = true;
 
   ftxui::Component root_component_;
   ftxui::Component chat_component_;
   ftxui::Component input_component_;
   std::unordered_map<std::string, uint64_t> agent_work_start_ms_;
+  std::optional<shared::PermissionEscalationRequest> pending_permission_request_;
+  std::vector<shared::PermissionEscalationRequest> pending_permission_queue_;
+  std::vector<shared::PermissionResponse> pending_permission_responses_;
+  std::vector<std::string> pending_permission_labels_;
+  std::vector<ftxui::Box> pending_permission_option_boxes_;
+  int pending_permission_selected_ = 0;
   
   // Process focus mode
   std::string focused_process_id_;

@@ -2,9 +2,7 @@
 #include "Engine.hpp"
 #include "EnvLoader.hpp"
 #include "providers/ProviderRegistry.hpp"
-#include "benchmarks/MBPPBenchmark.hpp"
-#include "benchmarks/SWEBench.hpp"
-#include "benchmarks/AgentBench.hpp"
+#include "benchmarks/BenchmarkFactory.hpp"
 #include "benchmarks/BenchmarkSession.hpp"
 #include "utils/Logger.hpp"
 #include <chrono>
@@ -87,10 +85,22 @@ shared::AuditResult BenchmarksAudit::run(const std::vector<std::string> &args) {
     return result;
   }
 
-  // Normalize benchmark name
-  std::string benchLower = benchmarkName;
-  std::transform(benchLower.begin(), benchLower.end(), benchLower.begin(),
-                 [](unsigned char c) { return std::tolower(c); });
+  const auto canonicalId = canonicalBenchmarkId(benchmarkName);
+  if (!canonicalId.has_value()) {
+    Logger::instance().logError("Unknown benchmark: " + benchmarkName);
+    std::ostringstream supported;
+    const auto ids = supportedBenchmarkIds();
+    for (size_t i = 0; i < ids.size(); ++i) {
+      if (i > 0) {
+        supported << ", ";
+      }
+      supported << ids[i];
+    }
+    Logger::instance().logInfo("Supported benchmarks: " + supported.str());
+    result.exitCode = 1;
+    result.passed = false;
+    return result;
+  }
 
   // Load environment and initialize engine
   EnvLoader::load(".env.local");
@@ -119,24 +129,11 @@ shared::AuditResult BenchmarksAudit::run(const std::vector<std::string> &args) {
     config.modelId = modelId;
   }
 
-  // Create appropriate benchmark runner
-  std::unique_ptr<IBenchmark> benchmark;
-
-  if (benchLower == "mbpp" || benchLower == "mostlybasicpythonproblems") {
-    Logger::instance().logInfo("Initializing MBPP Benchmark...");
-    benchmark = std::make_unique<MBPPBenchmark>(config);
-  } else if (benchLower == "swebench" || benchLower == "swe" ||
-             benchLower == "softwareengineering") {
-    Logger::instance().logInfo("Initializing SWE-bench Benchmark...");
-    benchmark = std::make_unique<SWEBench>(config);
-  } else if (benchLower == "agentbench" || benchLower == "agent" ||
-             benchLower == "osinteraction") {
-    Logger::instance().logInfo("Initializing AgentBench...");
-    benchmark = std::make_unique<AgentBench>(config);
-  } else {
-    Logger::instance().logError("Unknown benchmark: " + benchmarkName);
-    Logger::instance().logInfo(
-        "Supported benchmarks: mbpp, swebench, agentbench");
+  Logger::instance().logInfo("Initializing benchmark runner...");
+  auto benchmark = makeBenchmark(*canonicalId, config);
+  if (!benchmark) {
+    Logger::instance().logError("Failed to initialize benchmark: " +
+                                *canonicalId);
     result.exitCode = 1;
     result.passed = false;
     return result;

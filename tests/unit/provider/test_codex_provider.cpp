@@ -247,3 +247,33 @@ TEST(CodexProvider,
   EXPECT_EQ(chunk->index, 0u);
   EXPECT_EQ(chunk->argsDelta, R"({"path":"notes.md"})");
 }
+
+TEST(CodexProvider, ProcessSseLineDoesNotDuplicateDonePayloadAfterDeltas) {
+  CodexProvider provider;
+  std::vector<StreamEvent> events;
+  AgentMetrics metrics;
+  bool metricsReceived = false;
+  bool doneReceived = false;
+  CodexProviderTestAccessor::ToolCallTracker tracker;
+  std::function<void(const StreamEvent &)> onEvent =
+      [&](const StreamEvent &event) { events.push_back(event); };
+
+  CodexProviderTestAccessor::processSseLine(
+      provider,
+      R"(data: {"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","id":"fc_3","call_id":"call_3","name":"artifact_list"}})",
+      onEvent, metrics, metricsReceived, doneReceived, tracker);
+  CodexProviderTestAccessor::processSseLine(
+      provider,
+      R"(data: {"type":"response.function_call_arguments.delta","output_index":1,"delta":"{\"path\":\"src\""}})",
+      onEvent, metrics, metricsReceived, doneReceived, tracker);
+  CodexProviderTestAccessor::processSseLine(
+      provider,
+      R"(data: {"type":"response.function_call_arguments.done","output_index":1,"arguments":"{\"path\":\"src\"}"})",
+      onEvent, metrics, metricsReceived, doneReceived, tracker);
+
+  ASSERT_EQ(events.size(), 2u);
+  const auto *chunk = std::get_if<ToolCallChunk>(&events.back());
+  ASSERT_NE(chunk, nullptr);
+  EXPECT_EQ(chunk->id, "call_3");
+  EXPECT_EQ(chunk->argsDelta, R"({"path":"src"})");
+}

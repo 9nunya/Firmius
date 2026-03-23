@@ -13,6 +13,7 @@ namespace firmius::tui {
 struct ScrollableBoxOptions {
     bool startAtBottom = false;
     bool overlayScrollbar = false;
+    int overlayScrollbarGutter = 2;
 };
 
 // Wraps `child` inside a scrollable frame that responds to wheel, page, home, and

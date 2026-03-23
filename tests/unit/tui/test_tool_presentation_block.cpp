@@ -258,6 +258,22 @@ TEST(ToolPresentationBlockTest, TierBAndTierCRenderCompactButInformative) {
   EXPECT_EQ(list_output.find("Result preview"), std::string::npos);
 }
 
+TEST(ToolPresentationBlockTest, WorkMutationsRenderAsOneLineSummaries) {
+  auto view = std::make_shared<ToolCallView>();
+  view->name = "chunk_add";
+  view->args =
+      R"({"plan_id":"plan-1","title":"Chunk A","goal":"goal","tasks":[{"id":"task-1","title":"Task 1","goal":"Goal 1"}]})";
+  view->phase = ToolPhase::Finished;
+  view->success = true;
+  view->result = R"({"chunk_id":"c-1","status":"Ready"})";
+
+  const std::string output = Render(view, 80, 8);
+  EXPECT_NE(output.find("Chunk A"), std::string::npos);
+  EXPECT_NE(output.find(""), std::string::npos);
+  EXPECT_EQ(output.find("Goal:"), std::string::npos);
+  EXPECT_EQ(output.find("Result preview"), std::string::npos);
+}
+
 TEST(ToolPresentationBlockTest, RemainingFamiliesUseCentralizedPresenters) {
   auto artifact = std::make_shared<ToolCallView>();
   artifact->name = "artifact_list";

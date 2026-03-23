@@ -40,6 +40,7 @@ const std::string QwenProvider::QWEN_MODELS_ENDPOINT =
 namespace {
 constexpr std::uint32_t kMissingToolCallIndex =
     std::numeric_limits<std::uint32_t>::max();
+constexpr int kQwenStreamTimeoutSeconds = 300;
 
 bool hasToolCallIndex(const firmius::shared::ToolCallChunk &chunk) {
   return chunk.index != kMissingToolCallIndex;
@@ -1294,6 +1295,10 @@ bool QwenProvider::isMeaningfulStreamEvent(const StreamEvent &event) {
   return false;
 }
 
+int QwenProvider::streamTimeoutSeconds() {
+  return kQwenStreamTimeoutSeconds;
+}
+
 void QwenProvider::mergeAccumulatedToolCallChunk(
     std::vector<firmius::shared::ToolCallChunk> &accumulated,
     const firmius::shared::ToolCallChunk &incoming) {
@@ -1434,10 +1439,9 @@ QwenProvider::StreamAttemptResult QwenProvider::executeStreamRequest(
   std::function<void(const StreamEvent &)> wrappedFn = wrappedOnEvent;
   StreamContext ctx{this, &wrappedFn, "", 0, opts.abortSignal};
 
-  // 30 second timeout for Qwen API
   auto resp =
-      client.streamPost(QWEN_CHAT_ENDPOINT, body, sseWriteCallback, &ctx, 30,
-                        opts.abortSignal);
+      client.streamPost(QWEN_CHAT_ENDPOINT, body, sseWriteCallback, &ctx,
+                        streamTimeoutSeconds(), opts.abortSignal);
 
   // Handle response
   if (resp.code == 200) {

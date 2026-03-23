@@ -431,6 +431,22 @@ TEST_F(WorkToolsTest, todoWriteAddsNewItemWithNextId) {
   EXPECT_EQ(todo.items[1].id, 2);
 }
 
+TEST_F(WorkToolsTest, todoWriteInfersPendingAddWhenUsingNextIdWithoutPlus) {
+  auto create = makeObject({{"patch", "1. [+] Task 1"}});
+  ASSERT_TRUE(execute("todo_write", create).success);
+
+  auto add = makeObject({{"patch", "2. [ ] Task 2"}});
+  auto result = execute("todo_write", add);
+  ASSERT_TRUE(result.success) << result.error;
+
+  const auto todo =
+      threadManager_->getAgentTodo(threadId_, agent_.context_.identity.id);
+  ASSERT_EQ(todo.items.size(), 2u);
+  EXPECT_EQ(todo.items[1].id, 2);
+  EXPECT_EQ(todo.items[1].status, TodoStatus::Pending);
+  EXPECT_EQ(todo.nextId, 3);
+}
+
 TEST_F(WorkToolsTest, todoWriteDeletesExistingItem) {
   auto create = makeObject({{"patch", "1. [+] Task 1\n2. [+] Task 2"}});
   ASSERT_TRUE(execute("todo_write", create).success);
@@ -473,6 +489,7 @@ TEST_F(WorkToolsTest, todoWriteRejectsUnknownIdForUpdate) {
   EXPECT_FALSE(result.success);
   EXPECT_THAT(result.error, ::testing::HasSubstr("Unknown todo id 2"));
   EXPECT_THAT(result.error, ::testing::HasSubstr("Existing ids: 1"));
+  EXPECT_THAT(result.error, ::testing::HasSubstr("To add a new item"));
 }
 
 TEST_F(WorkToolsTest, todoWriteRejectsNonNextIdForAdd) {
@@ -558,6 +575,48 @@ TEST_F(WorkToolsTest, chunkAddPersistsPlanningGateFlag) {
   const auto plan = threadManager_->getPlan(threadId_, planId);
   ASSERT_EQ(plan.chunks.size(), 1u);
   EXPECT_TRUE(plan.chunks[0].planningGate);
+}
+
+TEST_F(WorkToolsTest, chunkAddPersistsEmbeddedTasks) {
+  const std::string planId = createPlanDirect();
+  rapidjson::Document input;
+  input.Parse(R"({
+    "plan_id":"plan-a",
+    "title":"Chunk title",
+    "goal":"Chunk goal",
+    "context":"Chunk context",
+    "constraints":"Chunk constraints",
+    "completion":"Chunk completion",
+    "tasks":[
+      {
+        "id":"task-1",
+        "title":"Inspect renderer",
+        "goal":"Map current rendering flow",
+        "status":"Ready",
+        "notes":"Focus on scroll behavior",
+        "verification_condition":"Known rendering path documented"
+      },
+      {
+        "id":"task-2",
+        "title":"Patch layout",
+        "goal":"Fix bounded panel height",
+        "status":"Blocked"
+      }
+    ]
+  })");
+  input["plan_id"].SetString(planId.c_str(),
+                             static_cast<rapidjson::SizeType>(planId.size()),
+                             input.GetAllocator());
+
+  auto result = execute("chunk_add", input);
+  ASSERT_TRUE(result.success) << result.error;
+
+  const auto plan = threadManager_->getPlan(threadId_, planId);
+  ASSERT_EQ(plan.chunks.size(), 1u);
+  ASSERT_EQ(plan.chunks[0].tasks.size(), 2u);
+  EXPECT_EQ(plan.chunks[0].tasks[0].id, "task-1");
+  EXPECT_EQ(plan.chunks[0].tasks[0].notes, "Focus on scroll behavior");
+  EXPECT_EQ(plan.chunks[0].tasks[1].status, WorkChunkStatus::Blocked);
 }
 
 TEST_F(WorkToolsTest, chunkListReturnsSummaries) {
@@ -763,6 +822,73 @@ TEST_F(WorkToolsTest, chunkUpdateCanMarkPlanningGateOnExistingChunk) {
 
   const auto updatedPlan = threadManager_->getPlan(threadId_, planId);
   EXPECT_TRUE(updatedPlan.chunks[0].planningGate);
+}
+
+TEST_F(WorkToolsTest, chunkUpdateAcceptsTasksAsStandaloneMutation) {
+  const std::string planId = createPlanDirect();
+  addChunkDirect(planId, "chunk-1", WorkChunkStatus::Ready);
+
+  rapidjson::Document input;
+  input.SetObject();
+  auto &alloc = input.GetAllocator();
+  input.AddMember("plan_id", jsonString(planId, alloc), alloc);
+  input.AddMember("chunk_id", jsonString("chunk-1", alloc), alloc);
+
+  rapidjson::Value tasks(rapidjson::kArrayType);
+  rapidjson::Value task(rapidjson::kObjectType);
+  task.AddMember("id", jsonString("task-1", alloc), alloc);
+  task.AddMember("title", jsonString("Investigate transcript clipping", alloc), alloc);
+  task.AddMember("goal", jsonString("Pin down the chat scroll regression", alloc), alloc);
+  task.AddMember("status", jsonString("Ready", alloc), alloc);
+  tasks.PushBack(task, alloc);
+  input.AddMember("tasks", tasks, alloc);
+
+  auto result = execute("chunk_update", input);
+  ASSERT_TRUE(result.success) << result.error;
+
+  const auto updatedPlan = threadManager_->getPlan(threadId_, planId);
+  ASSERT_EQ(updatedPlan.chunks[0].tasks.size(), 1u);
+  EXPECT_EQ(updatedPlan.chunks[0].tasks[0].id, "task-1");
+  EXPECT_EQ(updatedPlan.chunks[0].tasks[0].title,
+            "Investigate transcript clipping");
+}
+
+TEST_F(WorkToolsTest, chunkUpdateCanReplaceEmbeddedTasks) {
+  const std::string planId = createPlanDirect();
+  addChunkDirect(planId, "chunk-1", WorkChunkStatus::Ready);
+
+  rapidjson::Document input;
+  input.Parse(R"({
+    "plan_id":"plan-a",
+    "chunk_id":"chunk-1",
+    "tasks":[
+      {
+        "id":"task-1",
+        "title":"Task one",
+        "goal":"Goal one",
+        "status":"InProgress"
+      },
+      {
+        "id":"task-2",
+        "title":"Task two",
+        "goal":"Goal two",
+        "verification_condition":"Task two verified"
+      }
+    ]
+  })");
+  input["plan_id"].SetString(planId.c_str(),
+                             static_cast<rapidjson::SizeType>(planId.size()),
+                             input.GetAllocator());
+
+  auto result = execute("chunk_update", input);
+  ASSERT_TRUE(result.success) << result.error;
+
+  const auto updatedPlan = threadManager_->getPlan(threadId_, planId);
+  ASSERT_EQ(updatedPlan.chunks[0].tasks.size(), 2u);
+  EXPECT_EQ(updatedPlan.chunks[0].tasks[0].status,
+            WorkChunkStatus::InProgress);
+  EXPECT_EQ(updatedPlan.chunks[0].tasks[1].verificationCondition,
+            "Task two verified");
 }
 
 TEST_F(WorkToolsTest, chunkUpdateDowngradesReadyToBlockedWhenDependenciesAreNotDone) {

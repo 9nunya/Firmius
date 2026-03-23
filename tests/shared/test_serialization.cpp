@@ -249,6 +249,9 @@ TEST(Serialization, ThreadMetadataPermissionModeRoundtrip) {
   metadata.hostIdentifier = "localhost";
   metadata.cwd = "/tmp";
   metadata.leadPersona = "lead";
+  metadata.isBenchmarkRun = true;
+  metadata.benchmarkId = "swebench";
+  metadata.benchmarkTaskId = "django__django-12774";
   metadata.activePlanId = "plan-123";
   metadata.lastRetryableRequest = ThreadMetadata::RetryableRequest{
       "agent-123",
@@ -286,6 +289,9 @@ TEST(Serialization, ThreadMetadataPermissionModeDefaultsToRequest) {
   auto metadata = threadMetadataFromJson(doc);
   EXPECT_EQ(metadata.permissionMode, ThreadPermissionMode::Request);
   EXPECT_TRUE(metadata.activePlanId.empty());
+  EXPECT_FALSE(metadata.isBenchmarkRun);
+  EXPECT_TRUE(metadata.benchmarkId.empty());
+  EXPECT_TRUE(metadata.benchmarkTaskId.empty());
 }
 
 TEST(Serialization, ThreadMetadataActivePlanIdBackwardCompatibleDefault) {

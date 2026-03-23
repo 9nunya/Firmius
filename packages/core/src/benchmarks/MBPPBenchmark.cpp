@@ -22,6 +22,7 @@ size_t writeToFile(void* ptr, size_t size, size_t nmemb, void* userdata) {
 MBPPBenchmark::MBPPBenchmark(BenchmarkConfig config) : session(std::move(config)) {}
 
 std::vector<std::string> MBPPBenchmark::listTasks() {
+    session.emitLog("MBPP: loading dataset manifest.");
     ensureDatasetLoaded();
     std::vector<std::string> tasks;
     if (dataset.IsArray()) {
@@ -36,6 +37,7 @@ bool MBPPBenchmark::prepareTask(const std::string&) {
     ensureDatasetLoaded();
     
     // Clean /work before each task
+    session.emitLog("MBPP: resetting /work for the selected task.");
     session.getHost().exec("rm -rf /work/* /work/.* 2>/dev/null || true");
     
     return true;
@@ -75,11 +77,13 @@ BenchmarkResult MBPPBenchmark::runTask(const std::string& taskId) {
     BenchmarkResult result;
     result.taskId = taskId;
 
+    session.emitLog("MBPP: running worker on task " + taskId + ".");
     auto& agent = session.getAgent();
     agent.reset();
     agent.run(fullPrompt.str(), [](const StreamEvent&) {});
 
     // Evaluate
+    session.emitLog("MBPP: evaluating generated solution.");
     std::stringstream ss;
     ss << "import json\n"
        << "import os\n"
@@ -123,6 +127,9 @@ BenchmarkResult MBPPBenchmark::runTask(const std::string& taskId) {
         result.output = "Evaluation failed. Output: " + execRes.stdoutData + "\nStderr: " + execRes.stderrData;
     }
 
+    session.emitLog("MBPP: finished evaluation for task " + taskId + " with result " +
+                    std::string(result.passed ? "PASS" : "FAIL") + ".");
+
     return result;
 }
 
@@ -134,6 +141,7 @@ void MBPPBenchmark::ensureDatasetLoaded() {
     std::string cacheFile = cacheDir + "/sanitized-mbpp.json";
     
     if (!std::filesystem::exists(cacheFile)) {
+        session.emitLog("MBPP: downloading dataset cache from Google Research.");
         std::filesystem::create_directories(cacheDir);
         CURL* curl = curl_easy_init();
         std::ofstream out(cacheFile, std::ios::binary);
@@ -144,6 +152,8 @@ void MBPPBenchmark::ensureDatasetLoaded() {
         curl_easy_perform(curl);
         curl_easy_cleanup(curl);
         out.close();
+    } else {
+        session.emitLog("MBPP: using cached dataset at " + cacheFile + ".");
     }
 
     std::ifstream in(cacheFile);

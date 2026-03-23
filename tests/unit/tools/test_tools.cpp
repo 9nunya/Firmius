@@ -9,10 +9,12 @@
 #include "tools/GrepTool.hpp"
 #include "tools/ListDirectoryTool.hpp"
 #include "tools/ProcessExecuteTool.hpp"
+#include "tools/ProcessStatusTool.hpp"
 #include "tools/ProcessSpawnTool.hpp"
 #include "tools/PythonExecuteTool.hpp"
 #include "tools/ToolRegistry.hpp"
 #include "utils/Hashline.hpp"
+#include "AgentRegistry.hpp"
 #include <filesystem>
 #include <fstream>
 #include <gmock/gmock.h>
@@ -348,6 +350,24 @@ protected:
   GlobTool tool;
   NiceMock<MockHost> mockHost;
   NiceMock<MockAgent> mockAgent;
+  std::map<std::string, FileInfo> fileInfos;
+  std::map<std::string, std::vector<FileInfo>> dirEntries;
+
+  void addEntry(const std::string &path, bool isDirectory) {
+    FileInfo info;
+    info.path = path;
+    info.name = std::filesystem::path(path).filename().string();
+    info.isDirectory = isDirectory;
+    fileInfos[path] = info;
+
+    const std::string parent = std::filesystem::path(path).parent_path().string();
+    if (!parent.empty() && parent != path) {
+      dirEntries[parent].push_back(info);
+    }
+    if (isDirectory && !dirEntries.count(path)) {
+      dirEntries[path] = {};
+    }
+  }
 
   void SetUp() override {
     mockAgent.defaultCtx.permissions.allowedPaths = {"/tmp", "/root"};
@@ -355,15 +375,28 @@ protected:
         .WillByDefault(ReturnRef(mockAgent.defaultCtx));
     ON_CALL(mockAgent.mockEnv_->mockWorkspace(), resolvePath(_))
         .WillByDefault(Invoke([](const std::string &path) { return path; }));
+    ON_CALL(mockHost, stat(_))
+        .WillByDefault(Invoke([this](const std::string &path) {
+          auto it = fileInfos.find(path);
+          if (it == fileInfos.end()) {
+            throw std::runtime_error("Path not found: " + path);
+          }
+          return it->second;
+        }));
+    ON_CALL(mockHost, listDir(_))
+        .WillByDefault(Invoke([this](const std::string &path) {
+          auto it = dirEntries.find(path);
+          if (it == dirEntries.end()) {
+            throw std::runtime_error("Path not found: " + path);
+          }
+          return it->second;
+        }));
   }
 };
 
-TEST_F(GlobToolTest, exitCode1_noMatches) {
-  ProcessResult result;
-  result.exitCode = 1;
-  result.stdoutData = "";
-
-  EXPECT_CALL(mockHost, exec(_, _, _, _)).WillOnce(Return(result));
+TEST_F(GlobToolTest, noMatchesReturnsEmptyArray) {
+  addEntry("/tmp", true);
+  addEntry("/tmp/file.cpp", false);
 
   auto json = createJsonInput({{"pattern", "*.nonexistent"}, {"path", "/tmp"}});
   ToolContext ctx{mockHost, mockAgent, "test_call"};
@@ -375,12 +408,10 @@ TEST_F(GlobToolTest, exitCode1_noMatches) {
   EXPECT_NE(toolResult.data.find("[]"), std::string::npos);
 }
 
-TEST_F(GlobToolTest, exitCode2_error) {
-  ProcessResult result;
-  result.exitCode = 2;
-  result.stderrData = "Permission denied";
-
-  EXPECT_CALL(mockHost, exec(_, _, _, _)).WillOnce(Return(result));
+TEST_F(GlobToolTest, listDirFailureReturnsError) {
+  addEntry("/root", true);
+  EXPECT_CALL(mockHost, listDir("/root"))
+      .WillOnce(::testing::Throw(std::runtime_error("Permission denied")));
 
   auto json = createJsonInput({{"pattern", "*.txt"}, {"path", "/root"}});
   ToolContext ctx{mockHost, mockAgent, "test_call"};
@@ -389,17 +420,20 @@ TEST_F(GlobToolTest, exitCode2_error) {
   auto toolResult = itool->execute(json, ctx);
 
   EXPECT_FALSE(toolResult.success);
-  EXPECT_NE(toolResult.error.find("Glob failed"), std::string::npos);
+  EXPECT_NE(toolResult.error.find("Permission denied"), std::string::npos);
 }
 
-TEST_F(GlobToolTest, patternMatching) {
-  ProcessResult result;
-  result.exitCode = 0;
-  result.stdoutData = "/tmp/file1.txt\n/tmp/file2.txt\n";
+TEST_F(GlobToolTest, patternMatchingSupportsRecursiveAndBraceWildcards) {
+  addEntry("/tmp", true);
+  addEntry("/tmp/src", true);
+  addEntry("/tmp/src/nested", true);
+  addEntry("/tmp/file1.txt", false);
+  addEntry("/tmp/src/file2.txt", false);
+  addEntry("/tmp/src/nested/file3.log", false);
+  addEntry("/tmp/src/nested/file4.txt", false);
 
-  EXPECT_CALL(mockHost, exec(_, _, _, _)).WillOnce(Return(result));
-
-  auto json = createJsonInput({{"pattern", "*.txt"}, {"path", "/tmp"}});
+  auto json =
+      createJsonInput({{"pattern", "**/*.{txt,log}"}, {"path", "/tmp"}});
   ToolContext ctx{mockHost, mockAgent, "test_call"};
 
   ITool *itool = &tool;
@@ -408,6 +442,30 @@ TEST_F(GlobToolTest, patternMatching) {
   EXPECT_TRUE(toolResult.success);
   EXPECT_NE(toolResult.data.find("file1.txt"), std::string::npos);
   EXPECT_NE(toolResult.data.find("file2.txt"), std::string::npos);
+  EXPECT_NE(toolResult.data.find("file3.log"), std::string::npos);
+  EXPECT_NE(toolResult.data.find("file4.txt"), std::string::npos);
+}
+
+TEST_F(GlobToolTest, patternMatchingSupportsCharacterClassesAndPathSegments) {
+  addEntry("/tmp", true);
+  addEntry("/tmp/src", true);
+  addEntry("/tmp/src/foo", true);
+  addEntry("/tmp/src/bar", true);
+  addEntry("/tmp/src/foo/test1.cpp", false);
+  addEntry("/tmp/src/foo/test2.cpp", false);
+  addEntry("/tmp/src/bar/testA.cpp", false);
+
+  auto json =
+      createJsonInput({{"pattern", "src/**/test[0-9].cpp"}, {"path", "/tmp"}});
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+
+  ITool *itool = &tool;
+  auto toolResult = itool->execute(json, ctx);
+
+  EXPECT_TRUE(toolResult.success);
+  EXPECT_NE(toolResult.data.find("test1.cpp"), std::string::npos);
+  EXPECT_NE(toolResult.data.find("test2.cpp"), std::string::npos);
+  EXPECT_EQ(toolResult.data.find("testA.cpp"), std::string::npos);
 }
 
 class GrepToolTest : public ::testing::Test {
@@ -430,8 +488,7 @@ TEST_F(GrepToolTest, binaryFilesSkipped) {
   result.exitCode = 1;
   result.stdoutData = "";
 
-  EXPECT_CALL(mockHost,
-              exec(HasSubstr("--binary-files=without-match"), _, _, _))
+  EXPECT_CALL(mockHost, exec(HasSubstr("rg --json --pcre2"), _, _, _))
       .WillOnce(Return(result));
 
   auto json = createJsonInput({{"pattern", "test"}, {"path", "/tmp"}});
@@ -446,7 +503,8 @@ TEST_F(GrepToolTest, exitCode1_noMatches) {
   result.exitCode = 1;
   result.stdoutData = "";
 
-  EXPECT_CALL(mockHost, exec(_, _, _, _)).WillOnce(Return(result));
+  EXPECT_CALL(mockHost, exec(HasSubstr("rg --json --pcre2"), _, _, _))
+      .WillOnce(Return(result));
 
   auto json = createJsonInput(
       {{"pattern", "nonexistent_pattern_12345"}, {"path", "/tmp"}});
@@ -457,6 +515,57 @@ TEST_F(GrepToolTest, exitCode1_noMatches) {
 
   EXPECT_TRUE(toolResult.success);
   EXPECT_NE(toolResult.data.find("[]"), std::string::npos);
+}
+
+TEST_F(GrepToolTest, parsesRipgrepJsonAndSupportsAdvancedRegexEngine) {
+  ProcessResult result;
+  result.exitCode = 0;
+  result.stdoutData =
+      R"({"type":"match","data":{"path":{"text":"/tmp/dir:with:colon/file.cpp"},"lines":{"text":"int value = 42;\n"},"line_number":6}})"
+      "\n"
+      R"({"type":"context","data":{"path":{"text":"/tmp/dir:with:colon/file.cpp"},"lines":{"text":"// before\n"},"line_number":5}})"
+      "\n";
+
+  EXPECT_CALL(mockHost, exec(HasSubstr("rg --json --pcre2"), _, _, _))
+      .WillOnce(Return(result));
+
+  auto json = createJsonInput({{"pattern", R"((?<=value\s=\s)\d+)"},
+                               {"path", "/tmp"}});
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+
+  ITool *itool = &tool;
+  auto toolResult = itool->execute(json, ctx);
+
+  EXPECT_TRUE(toolResult.success);
+  EXPECT_NE(toolResult.data.find("/tmp/dir:with:colon/file.cpp"),
+            std::string::npos);
+  EXPECT_NE(toolResult.data.find("\"line\":6"), std::string::npos);
+  EXPECT_NE(toolResult.data.find("\"line\":5"), std::string::npos);
+}
+
+TEST_F(GrepToolTest, fallsBackToPerlGrepWhenRipgrepIsUnavailable) {
+  ProcessResult unavailable;
+  unavailable.exitCode = 127;
+  unavailable.stderrData = "rg: not found";
+
+  ProcessResult fallback;
+  fallback.exitCode = 0;
+  fallback.stdoutData = "/tmp/file.txt:7:lookbehind match\n";
+
+  ::testing::InSequence sequence;
+  EXPECT_CALL(mockHost, exec(HasSubstr("rg --json --pcre2"), _, _, _))
+      .WillOnce(Return(unavailable));
+  EXPECT_CALL(mockHost, exec(HasSubstr("grep -rnHP"), _, _, _))
+      .WillOnce(Return(fallback));
+
+  auto json = createJsonInput({{"pattern", R"((?<=foo)bar)"}, {"path", "/tmp"}});
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+
+  ITool *itool = &tool;
+  auto toolResult = itool->execute(json, ctx);
+
+  EXPECT_TRUE(toolResult.success);
+  EXPECT_NE(toolResult.data.find("\"line\":7"), std::string::npos);
 }
 
 class CommandPermissionToolTest : public ::testing::Test {
@@ -1424,10 +1533,18 @@ TEST_F(ToolRegistryArgumentNormalizationTest,
 TEST_F(GrepToolTest, contextLines) {
   ProcessResult result;
   result.exitCode = 0;
-  result.stdoutData = "/tmp/file.txt-5-Before context\n/tmp/file.txt:6:Match "
-                      "line\n/tmp/file.txt-7-After context\n";
+  result.stdoutData =
+      R"({"type":"context","data":{"path":{"text":"/tmp/file.txt"},"lines":{"text":"Before context\n"},"line_number":5}})"
+      "\n"
+      R"({"type":"match","data":{"path":{"text":"/tmp/file.txt"},"lines":{"text":"Match line\n"},"line_number":6}})"
+      "\n"
+      R"({"type":"context","data":{"path":{"text":"/tmp/file.txt"},"lines":{"text":"After context\n"},"line_number":7}})"
+      "\n";
 
-  EXPECT_CALL(mockHost, exec(HasSubstr("-B 2"), _, _, _))
+  EXPECT_CALL(mockHost,
+              exec(::testing::AllOf(HasSubstr("rg --json --pcre2"),
+                                    HasSubstr("-B 2"), HasSubstr("-A 3")),
+                   _, _, _))
       .WillOnce(Return(result));
 
   auto json = createJsonInput({{"pattern", "test"}, {"path", "/tmp"}},
@@ -1509,6 +1626,54 @@ TEST_F(ProcessExecuteToolTest, blocksForeignApplyPatchCommand) {
   EXPECT_FALSE(result.success);
   EXPECT_THAT(result.error, HasSubstr("'apply_patch' is not available in Firmius"));
   EXPECT_THAT(result.error, HasSubstr("Use file_read + file_edit instead"));
+}
+
+TEST_F(ProcessExecuteToolTest, nonZeroExitReturnsFailureWithStructuredResult) {
+  EXPECT_CALL(mockAgent.mockEnv_->mockProcessManager(), spawnProcess(_, _, _, _, _))
+      .WillOnce(Return("proc_123"));
+  EXPECT_CALL(mockAgent.mockEnv_->mockProcessManager(), inspectProcess(_))
+      .WillRepeatedly(Return(ProcessSnapshot{false, 17, "out", "err", 10.0}));
+
+  auto json = createJsonInput({{"command", "false"}});
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+
+  ITool *itool = &tool;
+  auto result = itool->execute(json, ctx);
+
+  EXPECT_FALSE(result.success);
+  EXPECT_THAT(result.error, HasSubstr("non-zero exit code: 17"));
+  EXPECT_THAT(result.data, HasSubstr("\"exit_code\":17"));
+  EXPECT_THAT(result.data, HasSubstr("\"command_success\":false"));
+}
+
+class ProcessStatusToolTest : public ::testing::Test {
+protected:
+  ProcessStatusTool tool;
+  NiceMock<MockHost> mockHost;
+  NiceMock<MockAgent> mockAgent;
+
+  void SetUp() override {
+    ON_CALL(mockAgent, getContext())
+        .WillByDefault(ReturnRef(mockAgent.defaultCtx));
+    ON_CALL(mockAgent, getMutableContext())
+        .WillByDefault(ReturnRef(mockAgent.defaultCtx));
+  }
+};
+
+TEST_F(ProcessStatusToolTest, rejectsAgentIdWithActionableHint) {
+  auto otherAgent = std::make_shared<NiceMock<MockAgent>>();
+  AgentRegistry::instance().registerAgent("agent-123", otherAgent);
+
+  auto json = createJsonInput({{"process_id", "agent-123"}});
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+  ITool *itool = &tool;
+  auto result = itool->execute(json, ctx);
+
+  AgentRegistry::instance().unregisterAgent("agent-123");
+
+  EXPECT_FALSE(result.success);
+  EXPECT_THAT(result.error, HasSubstr("belongs to a subagent"));
+  EXPECT_THAT(result.error, HasSubstr("subagent_wait"));
 }
 
 class ListDirectoryToolTest : public ::testing::Test {

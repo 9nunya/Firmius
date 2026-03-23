@@ -99,6 +99,7 @@ public:
                                         const std::string &responseBody,
                                         const std::string &summary);
   static bool isMeaningfulStreamEvent(const StreamEvent &event);
+  static int streamTimeoutSeconds();
   static void mergeAccumulatedToolCallChunk(
       std::vector<firmius::shared::ToolCallChunk> &accumulated,
       const firmius::shared::ToolCallChunk &incoming);

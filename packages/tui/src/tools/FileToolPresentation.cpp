@@ -287,8 +287,27 @@ ToolPresentation BuildFileEditPresentation(const ToolCallView &view) {
   int operation_count = 0;
   int added_lines = 0;
   int removed_lines = 0;
+  bool overwrite_edit = false;
   ToolPresentationSection changes;
   changes.title = "Changes";
+  auto append_overwrite_preview = [&](const std::string &content) {
+    auto new_lines = SplitLines(content);
+    if (new_lines.empty()) {
+      changes.lines.push_back("(empty file)");
+      return;
+    }
+    constexpr size_t kPreviewLines = 8;
+    changes.lines.push_back("new content:");
+    const size_t shown = std::min(kPreviewLines, new_lines.size());
+    for (size_t i = 0; i < shown; ++i) {
+      changes.lines.push_back("  " + new_lines[i]);
+    }
+    if (new_lines.size() > shown) {
+      changes.lines.push_back("  ... +" +
+                              std::to_string(new_lines.size() - shown) +
+                              " more line(s)");
+    }
+  };
 
   if (result_doc.IsObject() && result_doc.HasMember("operations") &&
       result_doc["operations"].IsArray()) {
@@ -306,6 +325,10 @@ ToolPresentation BuildFileEditPresentation(const ToolCallView &view) {
       if (!desc.empty()) {
         changes.lines.push_back(desc);
       }
+      if (!op_name.empty() &&
+          op_name.find("overwrite") != std::string::npos) {
+        overwrite_edit = true;
+      }
       if (op.HasMember("new_lines") && op["new_lines"].IsArray()) {
         added_lines += static_cast<int>(op["new_lines"].Size());
       }
@@ -313,11 +336,15 @@ ToolPresentation BuildFileEditPresentation(const ToolCallView &view) {
         removed_lines += static_cast<int>(op["old_lines"].Size());
       }
     }
+    if (overwrite_edit && has_content_overwrite && args_doc["content"].IsString()) {
+      append_overwrite_preview(args_doc["content"].GetString());
+    }
   } else if (has_content_overwrite && args_doc["content"].IsString()) {
     auto new_lines = SplitLines(args_doc["content"].GetString());
     operation_count = 1;
     added_lines = static_cast<int>(new_lines.size());
     changes.lines.push_back("overwrite file content");
+    append_overwrite_preview(args_doc["content"].GetString());
   }
 
   if (operation_count > 0) {

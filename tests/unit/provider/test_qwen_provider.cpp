@@ -322,3 +322,7 @@ TEST(QwenProvider, ValidateCompletedToolCallBatchAcceptsValidMultiToolBatch) {
   auto error = QwenProvider::validateCompletedToolCallBatch(calls);
   EXPECT_FALSE(error.has_value());
 }
+
+TEST(QwenProvider, StreamTimeoutIsLongEnoughForLargeToolCalls) {
+  EXPECT_EQ(QwenProvider::streamTimeoutSeconds(), 300);
+}

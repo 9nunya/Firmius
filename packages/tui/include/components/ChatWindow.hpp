@@ -92,8 +92,8 @@ inline ftxui::Element IndentAgentRow(const ftxui::Element &content,
     return content;
   }
   return ftxui::hbox({ftxui::text(std::string(left_margin, ' ')),
-                      content | ftxui::flex}) |
-         ftxui::flex;
+                      content | ftxui::xflex}) |
+         ftxui::xflex;
 }
 
 inline bool ShouldRenderFocusedSubagentToolCall(

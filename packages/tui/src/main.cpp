@@ -10,6 +10,7 @@
 #include <string>
 
 #include "commands/AccountsCommand.hpp"
+#include "commands/BenchmarksCommand.hpp"
 #include "commands/CommandManager.hpp"
 #include "commands/CompactCommand.hpp"
 #include "commands/ConfigCommand.hpp"
@@ -67,6 +68,8 @@ int main(int argc, char **argv) {
       std::make_shared<firmius::tui::RouterCommand>());
   firmius::tui::CommandManager::instance().registerCommand(
       std::make_shared<firmius::tui::PurposesCommand>());
+  firmius::tui::CommandManager::instance().registerCommand(
+      std::make_shared<firmius::tui::BenchmarksCommand>());
   // Note: /workflows command removed - workflows are now registered as
   // individual commands below
 

@@ -1,6 +1,6 @@
 #include "components/PlanLane.hpp"
 #include "ThemeManager.hpp"
-#include "components/GlintEffect.hpp"
+#include "components/ScrollableBox.hpp"
 #include <ftxui/component/component.hpp>
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/terminal.hpp>
@@ -13,30 +13,29 @@ namespace {
 struct StatusStyle {
   const char *icon;
   ftxui::Color color;
-  const char *chip_label;
 };
 
 StatusStyle styleFor(const Theme &theme, shared::WorkChunkStatus status) {
   using shared::WorkChunkStatus;
   switch (status) {
   case WorkChunkStatus::Ready:
-    return {">", theme.base.highlight, "ready"};
+    return {"", theme.base.highlight};
   case WorkChunkStatus::InProgress:
-    return {"*", theme.status_bar.streaming.normal.fg, "live"};
+    return {"", theme.status_bar.streaming.normal.fg};
   case WorkChunkStatus::Implemented:
-    return {"+", theme.status_bar.executing_tool.normal.fg, "implemented"};
+    return {"󰄬", theme.status_bar.executing_tool.normal.fg};
   case WorkChunkStatus::Verifying:
-    return {"?", theme.status_bar.provider_waiting.normal.fg, "verify"};
+    return {"", theme.status_bar.provider_waiting.normal.fg};
   case WorkChunkStatus::Done:
-    return {"#", theme.status_bar.idle.normal.fg, "done"};
+    return {"", theme.status_bar.idle.normal.fg};
   case WorkChunkStatus::Blocked:
-    return {"!", theme.status_bar.error.normal.fg, "blocked"};
+    return {"", theme.status_bar.error.normal.fg};
   case WorkChunkStatus::Failed:
-    return {"x", theme.status_bar.error.normal.fg, "failed"};
+    return {"", theme.status_bar.error.normal.fg};
   case WorkChunkStatus::Cancelled:
-    return {"-", theme.base.dim, "cancelled"};
+    return {"", theme.base.dim};
   }
-  return {"?", theme.base.dim, "unknown"};
+  return {"", theme.base.dim};
 }
 
 ftxui::Element chip(const std::string &label, ftxui::Color fg,
@@ -61,7 +60,12 @@ ftxui::Color statusChipBackground(const Theme &theme,
 class PlanLaneComponentBase : public ftxui::ComponentBase {
 public:
   explicit PlanLaneComponentBase(std::shared_ptr<PlanLaneModel> model)
-      : model_(std::move(model)) {}
+      : model_(std::move(model)) {
+    body_renderer_ = ftxui::Renderer([this] { return RenderBody(); });
+    scrollable_ = ScrollableBox(
+        body_renderer_, {.startAtBottom = false, .overlayScrollbar = true});
+    Add(scrollable_);
+  }
 
   ftxui::Element OnRender() override {
     if (!model_ || !model_->visible) {
@@ -69,7 +73,27 @@ public:
     }
 
     const auto &theme = ThemeManager::instance().getCurrentTheme();
-    const bool compact_mode = ftxui::Terminal::Size().dimx < 90;
+
+    if (model_->executor_task_view) {
+      ftxui::Elements header_parts;
+      header_parts.push_back(chip("󰐃", theme.base.bg, theme.base.highlight));
+      header_parts.push_back(ftxui::text(" "));
+      header_parts.push_back(ftxui::paragraph(model_->executor_chunk_title) |
+                             ftxui::bold | ftxui::color(theme.base.fg));
+      if (!model_->executor_tasks.empty()) {
+        header_parts.push_back(ftxui::text(" "));
+        header_parts.push_back(
+            chip(" " + std::to_string(model_->executor_tasks.size()),
+                 theme.base.fg, theme.agent_strip.bg));
+      }
+      auto summary_row = ftxui::hflow(std::move(header_parts)) |
+                         ftxui::bgcolor(theme.agent_strip.bg) | ftxui::xflex;
+      auto body = scrollable_
+                      ? scrollable_->Render() | ftxui::xflex | ftxui::yflex
+                              : ftxui::text("");
+      return ftxui::vbox({summary_row, body}) |
+             ftxui::bgcolor(theme.agent_strip.bg) | ftxui::xflex;
+    }
 
     std::array<int, 8> counts = {};
     for (const auto &chunk : model_->chunks) {
@@ -77,38 +101,36 @@ public:
     }
 
     ftxui::Elements summary_parts;
-    summary_parts.push_back(ftxui::text(model_->expanded ? "▾ " : "▸ ") |
-                            ftxui::color(theme.base.dim));
-    summary_parts.push_back(chip("PLAN", theme.base.bg, theme.base.highlight));
-    summary_parts.push_back(ftxui::text(" " + model_->plan_title) |
-                            ftxui::bold | ftxui::color(theme.base.fg) |
-                            ftxui::flex);
+    summary_parts.push_back(chip("󰒓", theme.base.bg, theme.base.highlight));
+    summary_parts.push_back(ftxui::text(" "));
+    summary_parts.push_back(ftxui::paragraph(model_->plan_title) |
+                            ftxui::bold | ftxui::color(theme.base.fg));
     if (counts[static_cast<size_t>(shared::WorkChunkStatus::InProgress)] > 0) {
       summary_parts.push_back(ftxui::text(" "));
       summary_parts.push_back(chip(
-          std::to_string(
-              counts[static_cast<size_t>(shared::WorkChunkStatus::InProgress)]) +
-              " live",
+          " " +
+              std::to_string(
+                  counts[static_cast<size_t>(shared::WorkChunkStatus::InProgress)]),
           theme.base.fg, theme.status_bar.streaming.normal.fg));
     }
     if (counts[static_cast<size_t>(shared::WorkChunkStatus::Verifying)] > 0) {
       summary_parts.push_back(ftxui::text(" "));
       summary_parts.push_back(chip(
-          std::to_string(
-              counts[static_cast<size_t>(shared::WorkChunkStatus::Verifying)]) +
-              " verifying",
+          " " +
+              std::to_string(
+                  counts[static_cast<size_t>(shared::WorkChunkStatus::Verifying)]),
           theme.base.fg, theme.status_bar.provider_waiting.normal.fg));
     }
     if (counts[static_cast<size_t>(shared::WorkChunkStatus::Ready)] > 0) {
       summary_parts.push_back(ftxui::text(" "));
       summary_parts.push_back(chip(
-          std::to_string(
-              counts[static_cast<size_t>(shared::WorkChunkStatus::Ready)]) +
-              " queued",
+          " " +
+              std::to_string(
+                  counts[static_cast<size_t>(shared::WorkChunkStatus::Ready)]),
           theme.base.fg, theme.base.dim));
     }
 
-    auto summary_row = ftxui::hbox(std::move(summary_parts)) |
+    auto summary_row = ftxui::hflow(std::move(summary_parts)) |
                        ftxui::bgcolor(theme.agent_strip.bg) | ftxui::xflex;
 
     for (auto status : {shared::WorkChunkStatus::Failed,
@@ -122,69 +144,89 @@ public:
       summary_row = ftxui::hbox({
                         summary_row,
                         ftxui::text(" "),
-                        chip(std::to_string(count) + " " + style.chip_label,
+                        chip(std::string(style.icon) + " " + std::to_string(count),
                              theme.base.fg,
                              statusChipBackground(theme, status)),
                     }) |
                     ftxui::bgcolor(theme.agent_strip.bg) | ftxui::xflex;
     }
 
-    if (!model_->expanded) {
-      return summary_row | ftxui::bgcolor(theme.agent_strip.bg) | ftxui::xflex;
+    auto body = scrollable_ ? scrollable_->Render() | ftxui::xflex | ftxui::yflex
+                            : ftxui::text("");
+    return ftxui::vbox({summary_row, body}) |
+           ftxui::bgcolor(theme.agent_strip.bg) | ftxui::xflex;
+  }
+
+private:
+  ftxui::Element RenderBody() {
+    if (!model_ || !model_->visible) {
+      return ftxui::text("");
     }
 
+    const auto &theme = ThemeManager::instance().getCurrentTheme();
     ftxui::Elements rows;
-    rows.push_back(summary_row);
+
+    if (model_->executor_task_view) {
+      for (const auto &task : model_->executor_tasks) {
+        const auto style = styleFor(theme, task.status);
+        const std::string task_label =
+            (task.id.empty() ? std::string() : task.id + ". ") + task.title;
+        auto line = ftxui::paragraph(task_label) |
+            ftxui::color(task.status == shared::WorkChunkStatus::InProgress ||
+                                 task.status == shared::WorkChunkStatus::Verifying
+                             ? theme.base.highlight
+                             : theme.base.fg);
+        if (task.status == shared::WorkChunkStatus::InProgress) {
+          line = line | ftxui::bold;
+        }
+        auto row = ftxui::hbox({
+                       ftxui::text(" " + std::string(style.icon) + " ") |
+                           ftxui::bold | ftxui::color(style.color),
+                       line | ftxui::flex,
+                   }) |
+                   ftxui::xflex;
+        if (task.status == shared::WorkChunkStatus::Done) {
+          row = row | ftxui::dim | ftxui::strikethrough;
+        }
+        rows.push_back(row);
+      }
+
+      return ftxui::vbox(std::move(rows)) |
+             ftxui::bgcolor(theme.agent_strip.bg) | ftxui::xflex;
+    }
 
     for (const auto &chunk : model_->chunks) {
       const auto style = styleFor(theme, chunk.status);
-      std::string row_title = chunk.title;
-      
-      // V2: Show (N tasks) hint for task-bearing chunks
       std::string task_hint;
       if (chunk.task_count.has_value() && chunk.task_count.value() > 0) {
         task_hint = " (" + std::to_string(chunk.task_count.value()) + " tasks)";
       }
-      
-      if (compact_mode && row_title.size() > 42) {
-        row_title = row_title.substr(0, 39) + "...";
-      }
+      const bool is_highlight_chunk =
+          !model_->highlight_chunk_id.empty() &&
+          model_->highlight_chunk_id == chunk.id;
 
-      ftxui::Elements row_parts;
-      row_parts.push_back(ftxui::text(" " + std::string(style.icon) + " ") |
-                          ftxui::bold | ftxui::color(style.color));
-      auto title_el =
-          ftxui::text(row_title) |
+      auto line =
+          ftxui::paragraph(std::string(is_highlight_chunk ? "󰎤 " : "") +
+                           chunk.title + task_hint) |
           ftxui::color(chunk.status == shared::WorkChunkStatus::InProgress ||
                                chunk.status == shared::WorkChunkStatus::Verifying
                            ? theme.base.highlight
                            : theme.base.fg);
-      if (chunk.status == shared::WorkChunkStatus::InProgress) {
-        title_el = title_el | ftxui::bold;
+      if (chunk.status == shared::WorkChunkStatus::InProgress ||
+          is_highlight_chunk) {
+        line = line | ftxui::bold;
       }
-      row_parts.push_back(title_el | ftxui::flex);
-      
-      // V2: Add task hint if present
-      if (!task_hint.empty()) {
-        row_parts.push_back(ftxui::text(task_hint) | ftxui::dim |
-                            ftxui::color(theme.base.dim));
+      auto row = ftxui::hbox({
+                     ftxui::text(" " + std::string(style.icon) + " ") |
+                         ftxui::bold | ftxui::color(style.color),
+                     line | ftxui::flex,
+                 }) |
+                 ftxui::xflex;
+      if (is_highlight_chunk) {
+        row = row | ftxui::bgcolor(theme.base.bg);
       }
-      
-      row_parts.push_back(ftxui::text(chunk.status_label) | ftxui::bold |
-                          ftxui::color(style.color));
-      auto row = ftxui::hbox(std::move(row_parts)) | ftxui::xflex;
-      if (chunk.status == shared::WorkChunkStatus::InProgress) {
-        GlintConfig cfg;
-        cfg.target = GlintConfig::Target::Text;
-        cfg.gradientColors = theme.tool_blocks.glint.empty()
-                                 ? std::vector<ftxui::Color>{
-                                       style.color, theme.base.fg, style.color}
-                                 : theme.tool_blocks.glint;
-        cfg.glintSize = 10;
-        cfg.intervalSeconds = 1.2f;
-        cfg.durationSeconds = 0.9f;
-        cfg.easing = GlintEasing::EaseInOut;
-        row = GlintEffect(row, cfg)->Render();
+      if (chunk.status == shared::WorkChunkStatus::Done) {
+        row = row | ftxui::dim;
       }
       rows.push_back(row);
     }
@@ -193,8 +235,9 @@ public:
            ftxui::xflex;
   }
 
-private:
   std::shared_ptr<PlanLaneModel> model_;
+  ftxui::Component body_renderer_;
+  std::shared_ptr<ScrollableBoxComponent> scrollable_;
 };
 
 } // namespace

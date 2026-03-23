@@ -290,6 +290,33 @@ TEST(ChatWindowHelpersTest,
   EXPECT_NE(history_output.find("sleep 5"), std::string::npos);
 }
 
+TEST(ChatWindowHelpersTest, RebuildsHistoryWhenExistingTurnGainsContent) {
+  AgentHistory history;
+  AgentTurn turn;
+  turn.turnId = "turn-1";
+
+  Message assistant;
+  assistant.role = Role::Assistant;
+  assistant.content = {TextContent{"First transcript line."}};
+  turn.messages.push_back(std::move(assistant));
+  history.turns.push_back(std::move(turn));
+
+  auto chat = firmius::tui::ChatWindow(
+      [&history]() -> const AgentHistory * { return &history; }, nullptr,
+      [](const std::string &) -> std::shared_ptr<ToolCallView> {
+        return nullptr;
+      });
+
+  const std::string initial = renderComponentToString(chat, 60, 8);
+  EXPECT_NE(initial.find("First transcript line."), std::string::npos);
+
+  history.turns[0].messages[0].content.push_back(
+      TextContent{"Second transcript line added later in the same turn."});
+
+  const std::string updated = renderComponentToString(chat, 60, 8);
+  EXPECT_NE(updated.find("Second transcript line"), std::string::npos);
+}
+
 TEST(ChatWindowHelpersTest,
      HistorySummonSubagentUsesNormalizedStateFactsViaGetter) {
   AgentHistory history;

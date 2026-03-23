@@ -5,6 +5,7 @@
 #include "ThemeManager.hpp"
 #include "TUIHotkeys.hpp"
 #include "UIState.hpp"
+#include "UserPreferences.hpp"
 #include "WorkPanelLayout.hpp"
 #include "agents/PurposeLoader.hpp"
 #include "commands/CommandManager.hpp"
@@ -24,7 +25,6 @@
 #include "harness/Harness.hpp"
 #include "utils/ReferenceAutocomplete.hpp"
 #include "modals/ModalRegistry.hpp"
-#include "modals/PermissionPromptModal.hpp"
 #include "modals/ThreadLockedModal.hpp"
 #include "persistence/ThreadManager.hpp"
 #include "providers/ProviderRegistry.hpp"
@@ -204,6 +204,63 @@ static std::string permissionResponseToDisplayName(
   return "Deny";
 }
 
+static std::vector<std::string> permissionOptionLabels(
+    const shared::PermissionEscalationRequest &request) {
+  std::vector<std::string> labels = {
+      request.requestType == shared::PermissionRequestType::Edit
+          ? "Allow once"
+          : "Run once",
+      "Deny",
+  };
+  if (request.allowAlways) {
+    labels.insert(labels.begin() + 1,
+                  request.requestType == shared::PermissionRequestType::Edit
+                      ? "Always allow location"
+                      : "Always allow command");
+  }
+  return labels;
+}
+
+static std::vector<shared::PermissionResponse> permissionOptionResponses(
+    const shared::PermissionEscalationRequest &request) {
+  using Response = shared::PermissionResponse;
+  std::vector<Response> responses = {Response::AllowOnce};
+  if (request.allowAlways) {
+    responses.push_back(Response::AllowAlways);
+  }
+  responses.push_back(Response::Deny);
+  return responses;
+}
+
+static ftxui::Color permissionSeverityColor(
+    const Theme &theme, shared::CommandSeverity severity) {
+  using Severity = shared::CommandSeverity;
+  switch (severity) {
+  case Severity::VULNERABLE:
+  case Severity::HIGH:
+    return theme.status_bar.error.normal.fg;
+  case Severity::MEDIUM:
+    return theme.base.highlight;
+  case Severity::LOW:
+    return theme.base.fg;
+  }
+  return theme.base.fg;
+}
+
+static shared::ThreadPermissionMode nextPermissionMode(
+    shared::ThreadPermissionMode mode) {
+  using Mode = shared::ThreadPermissionMode;
+  switch (mode) {
+  case Mode::Request:
+    return Mode::AlwaysAllow;
+  case Mode::AlwaysAllow:
+    return Mode::DenyAll;
+  case Mode::DenyAll:
+    return Mode::Request;
+  }
+  return Mode::Request;
+}
+
 class ScreenShaderNode : public ftxui::Node {
 public:
   explicit ScreenShaderNode(ftxui::Element child)
@@ -257,7 +314,54 @@ TuiState &TuiState::instance() {
   return inst;
 }
 
-TuiState::TuiState() = default;
+TuiState::TuiState() { loadUserPreferences(); }
+
+void TuiState::loadUserPreferences() {
+  const auto preferences = firmius::tui::loadUserPreferences();
+  if (preferences.preferred_permission_mode.has_value()) {
+    thread_.permissionMode = *preferences.preferred_permission_mode;
+  }
+  if (preferences.prefer_todo_panel_on_narrow.has_value()) {
+    prefer_todo_panel_on_narrow_ =
+        *preferences.prefer_todo_panel_on_narrow;
+  }
+}
+
+void TuiState::persistUserPreferences() const {
+  UserPreferences preferences;
+  preferences.preferred_permission_mode = thread_.permissionMode;
+  preferences.prefer_todo_panel_on_narrow = prefer_todo_panel_on_narrow_;
+  saveUserPreferences(preferences);
+}
+
+void TuiState::activatePermissionRequest(
+    const shared::PermissionEscalationRequest &request) {
+  pending_permission_request_ = request;
+  pending_permission_labels_ = permissionOptionLabels(request);
+  pending_permission_responses_ = permissionOptionResponses(request);
+  pending_permission_option_boxes_.assign(pending_permission_labels_.size(),
+                                         ftxui::Box{});
+  pending_permission_selected_ = 0;
+}
+
+void TuiState::clearActivePermissionRequest() {
+  pending_permission_request_.reset();
+  pending_permission_labels_.clear();
+  pending_permission_responses_.clear();
+  pending_permission_option_boxes_.clear();
+  pending_permission_selected_ = 0;
+}
+
+void TuiState::promoteNextPermissionRequest() {
+  if (pending_permission_queue_.empty()) {
+    clearActivePermissionRequest();
+    return;
+  }
+
+  const auto nextRequest = pending_permission_queue_.front();
+  pending_permission_queue_.erase(pending_permission_queue_.begin());
+  activatePermissionRequest(nextRequest);
+}
 
 void TuiState::setViewMode(ViewMode mode) { view_mode_ = mode; }
 
@@ -320,12 +424,25 @@ void TuiState::postEvent(ftxui::Event event) {
 
 bool TuiState::cycleThreadPermissionMode() {
   if (!harness_ || thread_.threadId.empty()) {
-    NotificationManager::instance().notifyWarning(
-        "Permissions", "No active thread to update.",
+    thread_.permissionMode = nextPermissionMode(thread_.permissionMode);
+    persistUserPreferences();
+    updateStatusModel();
+    NotificationManager::instance().notifyInfo(
+        "Permissions",
+        "New threads: " + permissionModeToDisplayName(thread_.permissionMode),
         std::chrono::milliseconds(1600));
-    return false;
+    if (screen_) {
+      screen_->PostEvent(ftxui::Event::Custom);
+    }
+    return true;
   }
 
+  thread_.permissionMode = nextPermissionMode(thread_.permissionMode);
+  persistUserPreferences();
+  updateStatusModel();
+  if (screen_) {
+    screen_->PostEvent(ftxui::Event::Custom);
+  }
   harness_->cycleCurrentThreadPermissionMode();
   return true;
 }
@@ -343,6 +460,12 @@ void TuiState::init(firmius::core::Harness &harness,
                     const std::string &focused_agent_id) {
   harness_ = &harness;
   thread_ = thread;
+  if (thread_.threadId.empty()) {
+    const auto preferences = firmius::tui::loadUserPreferences();
+    if (preferences.preferred_permission_mode.has_value()) {
+      thread_.permissionMode = *preferences.preferred_permission_mode;
+    }
+  }
   focused_agent_id_ = focused_agent_id;
 
   if (!focused_agent_id_.empty()) {
@@ -466,13 +589,14 @@ void TuiState::init(firmius::core::Harness &harness,
       }
       updateAgentStripModel();
       updateStatusModel();
+      updatePlanLaneModel();
       updateTodoLaneModel();
     }
   };
 
   plan_lane_model_ = std::make_shared<PlanLaneModel>();
   todo_lane_model_ = std::make_shared<TodoLaneModel>();
-  active_plan_state_.setExpanded(plan_lane_expanded_);
+  active_plan_state_.setExpanded(true);
   active_plan_state_.hydrateForThread(thread_, loadActivePlanForThread(thread_));
   updatePlanLaneModel();
   updateTodoLaneModel();
@@ -617,7 +741,7 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
             title_model_->title = thread_.title;
             title_model_->thread_id = thread_.threadId;
           }
-          active_plan_state_.setExpanded(plan_lane_expanded_);
+          active_plan_state_.setExpanded(true);
           active_plan_state_.hydrateForThread(thread_,
                                               loadActivePlanForThread(thread_));
           updatePlanLaneModel();
@@ -640,7 +764,7 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
               title_model_->thread_id = thread_.threadId;
             }
             if (previous_active_plan_id != thread_.activePlanId) {
-              active_plan_state_.setExpanded(plan_lane_expanded_);
+              active_plan_state_.setExpanded(true);
               active_plan_state_.hydrateForThread(
                   thread_, loadActivePlanForThread(thread_));
               updatePlanLaneModel();
@@ -655,14 +779,39 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
             }
           }
         } else if constexpr (std::is_same_v<T, PermissionEscalationRequest>) {
-          auto modal = std::make_shared<PermissionPromptModal>(
-              e, [this, requestId = e.requestId](PermissionResponse response) {
-                if (harness_) {
-                  harness_->resolvePermissionEscalation(requestId, response);
-                }
-              });
-          openModalDirect(modal->create(*this));
+          auto sameRequestId = [&](const shared::PermissionEscalationRequest &request) {
+            return request.requestId == e.requestId;
+          };
+          if (pending_permission_request_ &&
+              pending_permission_request_->requestId == e.requestId) {
+            activatePermissionRequest(e);
+          } else if (std::find_if(pending_permission_queue_.begin(),
+                                  pending_permission_queue_.end(),
+                                  sameRequestId) == pending_permission_queue_.end()) {
+            if (!pending_permission_request_) {
+              activatePermissionRequest(e);
+            } else {
+              pending_permission_queue_.push_back(e);
+            }
+          }
+          if (screen_) {
+            screen_->PostEvent(ftxui::Event::Custom);
+          }
         } else if constexpr (std::is_same_v<T, PermissionEscalationResolved>) {
+          if (pending_permission_request_ &&
+              pending_permission_request_->requestId == e.requestId) {
+            promoteNextPermissionRequest();
+          } else {
+            auto it = std::remove_if(
+                pending_permission_queue_.begin(), pending_permission_queue_.end(),
+                [&](const shared::PermissionEscalationRequest &request) {
+                  return request.requestId == e.requestId;
+                });
+            if (it != pending_permission_queue_.end()) {
+              pending_permission_queue_.erase(it,
+                                              pending_permission_queue_.end());
+            }
+          }
           NotificationManager::instance().notifyInfo(
               "Permission",
               permissionResponseToDisplayName(e.response),
@@ -759,6 +908,7 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
 
   updateStatusModel();
   updateAgentStripModel();
+  updatePlanLaneModel();
   updateTodoLaneModel();
 
   if (screen_) {
@@ -1028,12 +1178,53 @@ void TuiState::updatePlanLaneModel() {
     return;
   }
   *plan_lane_model_ = active_plan_state_.model();
+  plan_lane_model_->expanded = true;
+
+  auto focusedAgent =
+      focused_agent_id_.empty()
+          ? nullptr
+          : firmius::core::AgentRegistry::instance().getAgent(focused_agent_id_);
+  if (!focusedAgent) {
+    return;
+  }
+
+  const auto role =
+      resolvePurposeWorkRole(focusedAgent->getContext().config.personaName);
+  if (!isExecutorLikeRole(role)) {
+    return;
+  }
+
+  const auto activePlan = loadActivePlanForThread(thread_);
+  const auto *executorChunk = findExecutorChunk(activePlan);
+  if (!executorChunk) {
+    return;
+  }
+
+  if (!executorChunk->tasks.empty()) {
+    plan_lane_model_->executor_task_view = true;
+    plan_lane_model_->expanded = true;
+    plan_lane_model_->executor_chunk_id = executorChunk->id;
+    plan_lane_model_->executor_chunk_title = executorChunk->title;
+    plan_lane_model_->executor_tasks.clear();
+    plan_lane_model_->executor_tasks.reserve(executorChunk->tasks.size());
+    for (const auto &task : executorChunk->tasks) {
+      PlanLaneTaskRow row;
+      row.id = task.id;
+      row.title = task.title;
+      row.status = task.status;
+      row.status_label = ActivePlanState::statusLabel(task.status);
+      plan_lane_model_->executor_tasks.push_back(std::move(row));
+    }
+  } else {
+    plan_lane_model_->expanded = true;
+    plan_lane_model_->highlight_chunk_id = executorChunk->id;
+  }
 }
 
-std::string TuiState::findExecutorChunkTitle(
-    const std::optional<shared::Plan> &plan) const {
+const shared::WorkChunk *
+TuiState::findExecutorChunk(const std::optional<shared::Plan> &plan) const {
   if (!plan.has_value() || focused_agent_id_.empty()) {
-    return "";
+    return nullptr;
   }
   for (const auto &chunk : plan->chunks) {
     if (chunk.assignedAgentId != focused_agent_id_) {
@@ -1043,9 +1234,15 @@ std::string TuiState::findExecutorChunkTitle(
         chunk.status == shared::WorkChunkStatus::Cancelled) {
       continue;
     }
-    return chunk.title;
+    return &chunk;
   }
-  return "";
+  return nullptr;
+}
+
+std::string TuiState::findExecutorChunkTitle(
+    const std::optional<shared::Plan> &plan) const {
+  const auto *chunk = findExecutorChunk(plan);
+  return chunk ? chunk->title : "";
 }
 
 void TuiState::updateTodoLaneModel() {
@@ -1167,6 +1364,7 @@ ftxui::Component TuiState::root() {
               std::string cwd = std::filesystem::current_path().string();
               std::string newThreadId = harness_->newThread(
                   {}, cwd, resolveDefaultLeadPersona(harness_));
+              harness_->setCurrentThreadPermissionMode(thread_.permissionMode);
 
               // Sync UI with the newly created lead agent
               auto agents = harness_->listAgents(newThreadId);
@@ -1192,6 +1390,7 @@ ftxui::Component TuiState::root() {
             std::string cwd = std::filesystem::current_path().string();
             std::string newThreadId = harness_->newThread(
                 {}, cwd, resolveDefaultLeadPersona(harness_));
+            harness_->setCurrentThreadPermissionMode(thread_.permissionMode);
             harness_->send(text, image_contents);
 
             // Immediately sync UI with the newly created lead agent
@@ -1522,7 +1721,7 @@ ftxui::Component TuiState::root() {
         }
 
         // AGGRESSIVELY take focus if no modals are open
-        if (modals_.empty() && input_component_) {
+        if (modals_.empty() && input_component_ && !pending_permission_request_) {
           input_component_->TakeFocus();
         }
 
@@ -1538,6 +1737,8 @@ ftxui::Component TuiState::root() {
 
         const auto &theme = ThemeManager::instance().getCurrentTheme();
         const auto terminal = ftxui::Terminal::Size();
+        const int work_panel_max_height =
+            std::clamp(std::max(6, terminal.dimy / 3), 6, 16);
         bool isLead = false;
         bool isExecutor = false;
         if (!focused_agent_id_.empty()) {
@@ -1562,9 +1763,13 @@ ftxui::Component TuiState::root() {
         bool show_work_panel = false;
         if (panelDecision.kind == WorkPanelKind::SplitPlanTodo) {
           work_panel = ftxui::hbox({
-                           plan_lane->Render() | ftxui::flex,
+                           plan_lane->Render() | ftxui::flex |
+                               ftxui::size(ftxui::HEIGHT, ftxui::LESS_THAN,
+                                           work_panel_max_height),
                            ftxui::separator() | ftxui::color(theme.base.border),
-                           todo_lane->Render() | ftxui::flex,
+                           todo_lane->Render() | ftxui::flex |
+                               ftxui::size(ftxui::HEIGHT, ftxui::LESS_THAN,
+                                           work_panel_max_height),
                        }) |
                        ftxui::xflex;
           show_work_panel = true;
@@ -1575,16 +1780,22 @@ ftxui::Component TuiState::root() {
                              ftxui::bgcolor(theme.base.highlight);
           work_panel =
               ftxui::vbox({activeLabel | ftxui::xflex,
-                           panelDecision.showPlan ? plan_lane->Render()
-                                                  : todo_lane->Render()}) |
+                           (panelDecision.showPlan ? plan_lane->Render()
+                                                   : todo_lane->Render()) |
+                               ftxui::size(ftxui::HEIGHT, ftxui::LESS_THAN,
+                                           work_panel_max_height)}) |
               ftxui::xflex;
           show_work_panel = true;
         } else if (panelDecision.kind == WorkPanelKind::ExecutorChunkTodo ||
                    panelDecision.kind == WorkPanelKind::TodoOnly) {
-          work_panel = todo_lane->Render();
+          work_panel = todo_lane->Render() |
+                       ftxui::size(ftxui::HEIGHT, ftxui::LESS_THAN,
+                                   work_panel_max_height);
           show_work_panel = true;
         } else if (panelDecision.kind == WorkPanelKind::PlanOnly) {
-          work_panel = plan_lane->Render();
+          work_panel = plan_lane->Render() |
+                       ftxui::size(ftxui::HEIGHT, ftxui::LESS_THAN,
+                                   work_panel_max_height);
           show_work_panel = true;
         }
 
@@ -1593,7 +1804,49 @@ ftxui::Component TuiState::root() {
         bottom_bar_children.push_back(agent_strip->Render());
         bottom_bar_children.push_back(ftxui::separator() |
                                       ftxui::color(theme.base.border));
-        bottom_bar_children.push_back(input_bar->Render());
+        if (pending_permission_request_) {
+          pending_permission_option_boxes_.assign(
+              pending_permission_labels_.size(), ftxui::Box{});
+          const auto &request = *pending_permission_request_;
+          const auto accent = permissionSeverityColor(theme, request.severity);
+          const std::string detail =
+              request.command.empty() ? request.targetPath : request.command;
+
+          ftxui::Elements option_rows;
+          option_rows.reserve(pending_permission_labels_.size());
+          for (size_t i = 0; i < pending_permission_labels_.size(); ++i) {
+            const bool selected =
+                static_cast<int>(i) == pending_permission_selected_;
+            option_rows.push_back(
+                ftxui::text(" " + std::to_string(i + 1) + " " +
+                            pending_permission_labels_[i] + " ") |
+                ftxui::reflect(pending_permission_option_boxes_[i]) |
+                ftxui::color(selected ? theme.modals.highlight_fg
+                                      : theme.modals.fg) |
+                ftxui::bgcolor(selected ? theme.modals.highlight_bg
+                                        : theme.input.bg));
+            if (i + 1 < pending_permission_labels_.size()) {
+              option_rows.push_back(ftxui::text(" "));
+            }
+          }
+
+          bottom_bar_children.push_back(
+              ftxui::vbox({
+                  ftxui::hbox({
+                      ftxui::text(" Permission Required ") | ftxui::bold |
+                          ftxui::color(accent),
+                      ftxui::filler(),
+                      ftxui::text("Arrows move  Enter confirm  Esc deny") |
+                          ftxui::color(theme.base.dim),
+                  }),
+                  ftxui::paragraph(request.message) | ftxui::color(theme.base.dim),
+                  ftxui::paragraph(detail) | ftxui::color(theme.input.fg),
+                  ftxui::hbox(std::move(option_rows)),
+              }) |
+              ftxui::xflex | ftxui::bgcolor(theme.input.bg));
+        } else {
+          bottom_bar_children.push_back(input_bar->Render());
+        }
         bottom_bar_children.push_back(ftxui::separator() |
                                       ftxui::color(theme.base.border));
         bottom_bar_children.push_back(status_bar->Render());
@@ -1640,8 +1893,25 @@ ftxui::Component TuiState::root() {
     return current;
   });
 
-  root_component_ = ftxui::CatchEvent(modal_renderer, [this, chat](
+  root_component_ = ftxui::CatchEvent(modal_renderer, [this, chat, plan_lane, todo_lane](
                                                           ftxui::Event event) {
+    auto resolve_inline_permission = [this](PermissionResponse response) {
+      if (!pending_permission_request_) {
+        return;
+      }
+      const std::string requestId = pending_permission_request_->requestId;
+      promoteNextPermissionRequest();
+      if (harness_) {
+        harness_->resolvePermissionEscalation(requestId, response);
+      }
+      if (input_component_) {
+        input_component_->TakeFocus();
+      }
+      if (screen_) {
+        screen_->PostEvent(ftxui::Event::Custom);
+      }
+    };
+
     if (event == ftxui::Event::Custom) {
       if (!deferred_ui_mutations_.empty()) {
         auto deferred = std::move(deferred_ui_mutations_);
@@ -1651,6 +1921,71 @@ ftxui::Component TuiState::root() {
         }
       }
       drainEvents();
+      if (chat_component_) {
+        chat_component_->OnEvent(ftxui::Event::Custom);
+      }
+      return true;
+    }
+
+    if (pending_permission_request_) {
+      const int option_count =
+          static_cast<int>(pending_permission_responses_.size());
+      if (event == ftxui::Event::Escape) {
+        resolve_inline_permission(PermissionResponse::Deny);
+        return true;
+      }
+      if (event == ftxui::Event::Return) {
+        if (pending_permission_selected_ >= 0 &&
+            pending_permission_selected_ < option_count) {
+          resolve_inline_permission(
+              pending_permission_responses_[pending_permission_selected_]);
+        } else {
+          resolve_inline_permission(PermissionResponse::Deny);
+        }
+        return true;
+      }
+      if (event == ftxui::Event::ArrowLeft || event == ftxui::Event::ArrowUp) {
+        if (option_count > 0) {
+          pending_permission_selected_ =
+              (pending_permission_selected_ + option_count - 1) % option_count;
+        }
+        return true;
+      }
+      if (event == ftxui::Event::ArrowRight ||
+          event == ftxui::Event::ArrowDown || event == ftxui::Event::Tab) {
+        if (option_count > 0) {
+          pending_permission_selected_ =
+              (pending_permission_selected_ + 1) % option_count;
+        }
+        return true;
+      }
+      if (event.is_character()) {
+        const std::string chars = event.character();
+        if (!chars.empty() &&
+            std::isdigit(static_cast<unsigned char>(chars.front()))) {
+          const int index = chars.front() - '1';
+          if (index >= 0 && index < option_count) {
+            pending_permission_selected_ = index;
+            resolve_inline_permission(pending_permission_responses_[index]);
+            return true;
+          }
+        }
+      }
+      if (event.is_mouse()) {
+        const auto mouse = event.mouse();
+        for (int i = 0; i < static_cast<int>(pending_permission_option_boxes_.size());
+             ++i) {
+          if (!pending_permission_option_boxes_[i].Contain(mouse.x, mouse.y)) {
+            continue;
+          }
+          pending_permission_selected_ = i;
+          if (mouse.button == ftxui::Mouse::Left &&
+              mouse.motion == ftxui::Mouse::Pressed && i < option_count) {
+            resolve_inline_permission(pending_permission_responses_[i]);
+          }
+          return true;
+        }
+      }
       return true;
     }
 
@@ -1704,8 +2039,14 @@ ftxui::Component TuiState::root() {
       auto &m = event.mouse();
       if (m.button == ftxui::Mouse::WheelUp ||
           m.button == ftxui::Mouse::WheelDown) {
-        if (chat_component_) {
-          return chat_component_->OnEvent(event);
+        if (plan_lane && plan_lane->OnEvent(event)) {
+          return true;
+        }
+        if (todo_lane && todo_lane->OnEvent(event)) {
+          return true;
+        }
+        if (chat_component_ && chat_component_->OnEvent(event)) {
+          return true;
         }
       }
     }
@@ -1972,10 +2313,7 @@ ftxui::Component TuiState::root() {
           terminal.dimx, terminal.dimy, prefer_todo_panel_on_narrow_);
       if (panelDecision.kind == WorkPanelKind::SingleToggle) {
         prefer_todo_panel_on_narrow_ = !prefer_todo_panel_on_narrow_;
-      } else {
-        plan_lane_expanded_ = !plan_lane_expanded_;
-        active_plan_state_.setExpanded(plan_lane_expanded_);
-        updatePlanLaneModel();
+        persistUserPreferences();
       }
       if (screen_) {
         screen_->PostEvent(ftxui::Event::Custom);

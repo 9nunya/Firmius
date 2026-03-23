@@ -1,15 +1,18 @@
 #include "benchmarks/SWEBench.hpp"
 #include "utils/Logger.hpp"
 
+#include <array>
 #include <cstdlib>
 #include <curl/curl.h>
 #include <fstream>
 #include <filesystem>
+#include <cstdio>
 #include <regex>
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
 #include <sstream>
+#include <sys/wait.h>
 #include <utility>
 
 namespace firmius::core {
@@ -70,11 +73,46 @@ void logError(Args&&... args) {
     Logger::instance().log(LogLevel::Error,
                            composeLog(std::forward<Args>(args)...));
 }
+
+struct ShellCommandResult {
+    int exitCode = -1;
+    std::string output;
+};
+
+ShellCommandResult runShellCommandCapture(const std::string& command) {
+    ShellCommandResult result;
+    std::array<char, 4096> buffer{};
+    FILE* pipe = popen((command + " 2>&1").c_str(), "r");
+    if (!pipe) {
+        result.output = "Failed to spawn shell command";
+        return result;
+    }
+
+    while (fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) != nullptr) {
+        result.output += buffer.data();
+    }
+
+    const int status = pclose(pipe);
+    if (WIFEXITED(status)) {
+        result.exitCode = WEXITSTATUS(status);
+    } else {
+        result.exitCode = status;
+    }
+    return result;
+}
+
+std::string compactOutputForLog(const std::string& text, size_t maxChars = 3000) {
+    if (text.size() <= maxChars) {
+        return text;
+    }
+    return text.substr(0, maxChars) + "\n... [truncated]";
+}
 }
 
 SWEBench::SWEBench(BenchmarkConfig config) : session(std::move(config)) {}
 
 std::vector<std::string> SWEBench::listTasks() {
+    session.emitLog("SWE-bench: loading verified task catalog.");
     ensureDatasetLoaded();
     std::vector<std::string> tasks;
     if (dataset.HasMember("rows") && dataset["rows"].IsArray()) {
@@ -105,6 +143,7 @@ bool SWEBench::prepareTask(const std::string& taskId) {
     std::vector<std::string> failToPass = parseJsonArray(failToPassStr);
 
     logInfo("\033[1;32m[SWEBench] PREPARING ENVIRONMENT for ", taskId, "\033[0m");
+    session.emitLog("SWE-bench: preparing environment for " + taskId + ".");
 
     std::string home;
     if (const char* h = std::getenv("HOME")) home = h;
@@ -120,40 +159,64 @@ bool SWEBench::prepareTask(const std::string& taskId) {
 
     if (!std::filesystem::exists(repoCacheDir)) {
         logDebug("[SWEBench][VERBOSE] Initial clone on host: ", repo, "...");
+        session.emitLog("SWE-bench: cloning https://github.com/" + repo + ".git into host cache.");
         std::filesystem::create_directories(hostCacheBase);
         std::string cloneCmd = "git clone https://github.com/" + repo + ".git " + repoCacheDir;
-        int res = std::system(cloneCmd.c_str());
-        if (res != 0) throw std::runtime_error("Failed to clone repository on host: " + repo);
+        ShellCommandResult cloneRes = runShellCommandCapture(cloneCmd);
+        if (cloneRes.exitCode != 0) {
+            logError("[SWEBench][ERROR] Host clone failed (exit=", cloneRes.exitCode, "):\n",
+                     compactOutputForLog(cloneRes.output));
+            throw std::runtime_error("Failed to clone repository on host: " + repo);
+        }
     } else {
+        session.emitLog("SWE-bench: using cached repository for " + repo + ".");
         // Check if repo is shallow (incomplete history)
         std::string shallowFile = repoCacheDir + "/.git/shallow";
         bool isShallow = std::filesystem::exists(shallowFile);
         
         if (isShallow) {
             logDebug("[SWEBench][VERBOSE] Repo is shallow, fetching full history...");
+            session.emitLog("SWE-bench: cached repo is shallow, fetching full history.");
             std::string fetchCmd = "cd " + repoCacheDir + " && git fetch --unshallow && git fetch --tags origin";
-            std::system(fetchCmd.c_str());
+            ShellCommandResult fetchRes = runShellCommandCapture(fetchCmd);
+            if (fetchRes.exitCode != 0) {
+                logError("[SWEBench][ERROR] Host unshallow fetch failed (exit=", fetchRes.exitCode, "):\n",
+                         compactOutputForLog(fetchRes.output));
+            }
         } else {
             // Ensure the commit exists in host cache
             std::string checkCmd = "cd " + repoCacheDir + " && git rev-parse --verify " + baseCommit + " >/dev/null 2>&1";
-            if (std::system(checkCmd.c_str()) != 0) {
+            ShellCommandResult checkRes = runShellCommandCapture(checkCmd);
+            if (checkRes.exitCode != 0) {
                 logDebug("[SWEBench][VERBOSE] Fetching missing commit ", baseCommit, " on host...");
+                session.emitLog("SWE-bench: fetching missing commit " + baseCommit + " into cache.");
                 // Fetch everything to be safe if a specific commit fetch fails
                 std::string fetchCmd = "cd " + repoCacheDir + " && git fetch origin && git fetch --tags origin";
-                std::system(fetchCmd.c_str());
+                ShellCommandResult fetchRes = runShellCommandCapture(fetchCmd);
+                if (fetchRes.exitCode != 0) {
+                    logError("[SWEBench][ERROR] Host fetch for missing commit failed (exit=",
+                             fetchRes.exitCode, "):\n", compactOutputForLog(fetchRes.output));
+                }
             }
         }
     }
 
     logDebug("[SWEBench][VERBOSE] Resetting /work and copying from host cache...");
+    session.emitLog("SWE-bench: resetting /work and staging repository files.");
     session.getHost().exec("rm -rf /work/* /work/.* 2>/dev/null || true");
     session.getHost().exec("mkdir -p /work");
 
     if (session.getHost().getId() != "localhost") {
         // Use docker cp for robust directory transfer
+        session.emitLog("SWE-bench: copying cached repository into docker host " +
+                        session.getHost().getId() + ".");
         std::string transferCmd = "docker cp " + repoCacheDir + "/. " + session.getHost().getId() + ":/work/";
-        int res = std::system(transferCmd.c_str());
-        if (res != 0) throw std::runtime_error("Failed to transfer repository to container using docker cp");
+        ShellCommandResult transferRes = runShellCommandCapture(transferCmd);
+        if (transferRes.exitCode != 0) {
+            logError("[SWEBench][ERROR] docker cp transfer failed (exit=",
+                     transferRes.exitCode, "):\n", compactOutputForLog(transferRes.output));
+            throw std::runtime_error("Failed to transfer repository to container using docker cp");
+        }
         
         auto gitCheck = session.getHost().exec("ls -d /work/.git");
         if (gitCheck.exitCode != 0) {
@@ -164,6 +227,7 @@ bool SWEBench::prepareTask(const std::string& taskId) {
     }
 
     logDebug("[SWEBench][VERBOSE] Checking out ", baseCommit, "...");
+    session.emitLog("SWE-bench: checking out base commit " + baseCommit + ".");
     session.getHost().exec("git config --global --add safe.directory /work", "/work");
     auto checkoutRes = session.getHost().exec("git checkout -f " + baseCommit, "/work");
     if (checkoutRes.exitCode != 0) {
@@ -180,6 +244,7 @@ bool SWEBench::prepareTask(const std::string& taskId) {
     }
 
     logDebug("[SWEBench][VERBOSE] Applying test patch...");
+    session.emitLog("SWE-bench: applying benchmark test patch.");
     session.getHost().writeFile("/work/test.patch", std::vector<uint8_t>(testPatch.begin(), testPatch.end()));
     auto applyRes = session.getHost().exec("git apply /work/test.patch", "/work");
     if (applyRes.exitCode != 0) {
@@ -189,6 +254,7 @@ bool SWEBench::prepareTask(const std::string& taskId) {
     // Fix for Python 3.10+ compatibility: collections.Mapping -> collections.abc.Mapping
     // This affects astropy's vendored configobj
     logDebug("[SWEBench][VERBOSE] Applying Python 3.10+ compatibility patches...");
+    session.emitLog("SWE-bench: applying Python compatibility patches.");
     session.getHost().exec("find . -name '*.py' -exec sed -i 's/collections\\.Mapping/collections.abc.Mapping/g' {} \\; 2>/dev/null || true", "/work");
     session.getHost().exec("find . -name '*.py' -exec sed -i 's/collections\\.Iterable/collections.abc.Iterable/g' {} \\; 2>/dev/null || true", "/work");
     session.getHost().exec("find . -name '*.py' -exec sed -i 's/collections\\.Callable/collections.abc.Callable/g' {} \\; 2>/dev/null || true", "/work");
@@ -198,6 +264,7 @@ bool SWEBench::prepareTask(const std::string& taskId) {
     session.getHost().exec("find . -name '*.py' -exec sed -i 's/collections\\.Sequence/collections.abc.Sequence/g' {} \\; 2>/dev/null || true", "/work");
 
     logDebug("[SWEBench][VERBOSE] Installing environment dependencies with uv...");
+    session.emitLog("SWE-bench: installing repository dependencies with uv.");
     
     // Force clean to ensure no version conflicts
     session.getHost().exec("uv pip uninstall --system --break-system-packages numpy setuptools wheel", "/work");
@@ -233,11 +300,13 @@ bool SWEBench::prepareTask(const std::string& taskId) {
     session.getHost().exec("sed -i '/license-files/d' pyproject.toml 2>/dev/null || true", "/work");
 
     logDebug("[SWEBench][VERBOSE] Building extension modules...");
+    session.emitLog("SWE-bench: building extension modules.");
     auto buildRes = session.getHost().exec("python3 setup.py build_ext --inplace", "/work");
     if (buildRes.exitCode != 0)
         logDebug("[SWEBench][DEBUG] Build Ext Warning (non-fatal):\n", buildRes.stderrData);
 
     logDebug("[SWEBench][VERBOSE] Installing repository in editable mode...");
+    session.emitLog("SWE-bench: installing repository into the benchmark environment.");
     // Use --no-build-isolation to use our pinned versions
     auto installRes = session.getHost().exec("uv pip install --system --no-build-isolation -e .", "/work");
     if (installRes.exitCode != 0) {
@@ -256,12 +325,14 @@ bool SWEBench::prepareTask(const std::string& taskId) {
     if (verifyRes.exitCode != 0 || verifyRes.stdoutData.find("SUCCESS") == std::string::npos) {
         logError("[SWEBench][ERROR] Environment Verification Failed. Package not importable:\n", verifyRes.stderrData);
         // Last ditch effort: install from source without editable
+        session.emitLog("SWE-bench: editable install verification failed, retrying fallback installation.");
         session.getHost().exec("python3 setup.py install --user", "/work");
         verifyRes = session.getHost().exec("python3 -c \"import " + packageName + "; print('SUCCESS')\"", "/work");
         if (verifyRes.exitCode != 0) throw std::runtime_error("Package verification failed after install");
     }
 
     logInfo("\n\033[1;33m[SWEBench] RUNNING BASELINE TESTS (EXPECTED TO FAIL)\033[0m");
+    session.emitLog("SWE-bench: running baseline failing tests before the worker starts.");
     std::map<std::string, std::string> testEnv = {{"PYTHONPATH", "/work"}};
 
     std::stringstream testCmdSS;
@@ -285,6 +356,9 @@ bool SWEBench::prepareTask(const std::string& taskId) {
 
     logInfo("[SWEBench] Baseline Results -> Passed: ", passed, ", Failed: ", failed,
            ", Errors: ", errors);
+    session.emitLog("SWE-bench: baseline results passed=" + std::to_string(passed) +
+                    ", failed=" + std::to_string(failed) +
+                    ", errors=" + std::to_string(errors) + ".");
 
     return true;
 }
@@ -306,6 +380,7 @@ BenchmarkResult SWEBench::runTask(const std::string& taskId) {
     std::vector<std::string> failToPass = parseJsonArray(failToPassStr);
 
     logInfo("\n\033[1;34m[SWEBench] SUMMONING AGENT\033[0m");
+    session.emitLog("SWE-bench: running worker on task " + taskId + ".");
     std::stringstream prompt;
     prompt << "Task: " << problemStatement << "\n\n"
            << "The repository has been cloned to /work and checked out at the base commit. "
@@ -319,6 +394,7 @@ BenchmarkResult SWEBench::runTask(const std::string& taskId) {
     agent.run(prompt.str(), [](const StreamEvent&) {});
 
     logInfo("\n\033[1;32m[SWEBench] RUNNING FINAL EVALUATION\033[0m");
+    session.emitLog("SWE-bench: running final evaluation.");
     std::stringstream testCmdSS;
     bool isDjango = (repo == "django/django");
     if (isDjango) {
@@ -338,6 +414,9 @@ BenchmarkResult SWEBench::runTask(const std::string& taskId) {
 
     logInfo("[SWEBench] Final Summary -> Passed: ", passed, ", Failed: ", failed,
            ", Errors: ", errors);
+    session.emitLog("SWE-bench: final results passed=" + std::to_string(passed) +
+                    ", failed=" + std::to_string(failed) +
+                    ", errors=" + std::to_string(errors) + ".");
 
     BenchmarkResult result;
     result.taskId = taskId;
@@ -352,6 +431,7 @@ void SWEBench::ensureDatasetLoaded() {
     std::string cacheFile = home + "/.firmius/cache/swebench_verified.json";
 
     if (!std::filesystem::exists(cacheFile)) {
+        session.emitLog("SWE-bench: downloading SWE-bench Verified dataset cache.");
         std::filesystem::create_directories(std::filesystem::path(cacheFile).parent_path());
         CURL* curl = curl_easy_init();
         std::string response;
@@ -363,6 +443,8 @@ void SWEBench::ensureDatasetLoaded() {
         std::ofstream out(cacheFile);
         out << response;
         out.close();
+    } else {
+        session.emitLog("SWE-bench: using cached dataset at " + cacheFile + ".");
     }
 
     std::ifstream in(cacheFile);

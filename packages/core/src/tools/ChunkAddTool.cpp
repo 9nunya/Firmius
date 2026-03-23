@@ -29,6 +29,20 @@ std::shared_ptr<shared::JSONSchema> ChunkAddTool::getSchema() const {
              {"cwd", zString()->setOptional()},
              {"verification_condition", zString()->setOptional()},
              {"handoff_notes", zString()->setOptional()},
+             {"tasks",
+              zArray(zObject({
+                  {"id", zString()},
+                  {"title", zString()},
+                  {"goal", zString()},
+                  {"status",
+                   zEnum({"Ready", "InProgress", "Implemented", "Verifying",
+                          "Done", "Blocked", "Failed", "Cancelled"})
+                       ->setOptional()},
+                  {"notes", zString()->setOptional()},
+                  {"verification_condition", zString()->setOptional()},
+                  {"assigned_worker_id", zString()->setOptional()},
+              }))
+                  ->setOptional()},
          })
       ->required(
           {"plan_id", "title", "goal", "context", "constraints", "completion"});
@@ -68,9 +82,14 @@ shared::ToolResult ChunkAddTool::execute(const rapidjson::Value &input,
               ? input["verification_condition"].GetString() : "";
           chunk.handoffNotes = input.HasMember("handoff_notes")
               ? input["handoff_notes"].GetString() : "";
+          chunk.tasks = worktools::parseTaskArray(input, "tasks");
           
           chunk.createdAt = worktools::nowEpochMs();
           chunk.updatedAt = chunk.createdAt;
+          for (auto &task : chunk.tasks) {
+            task.createdAt = chunk.createdAt;
+            task.updatedAt = chunk.updatedAt;
+          }
           worktools::blockChunkIfDependenciesIncomplete(plan, chunk);
           plan.chunks.push_back(chunk);
           addedChunk = plan.chunks.back();

@@ -18,6 +18,7 @@
     - `plan` = thread-level coordination structure
     - `chunk` = execution/review unit delegated to executor
     - planner drafts, plan_checker critiques, lead commits
+    - non-trivial planning uses a retry loop: planner -> plan_checker -> (if not `accept`) planner revision -> plan_checker until `accept`
     - auditor = evidence-backed review during/after execution (distinct from plan_checker)
 
 # ARTIFACT DOCTRINE
@@ -79,7 +80,7 @@ Use the shared header plus the role-specific sections below. Do not omit the rol
 - `auditor` -> `AUDIT_REPORT.md`
 
 ## Role-Specific Artifact Structure Requirements
-- `planner`:
+  - `planner`:
   - objective
   - strategy
   - scope included
@@ -87,15 +88,16 @@ Use the shared header plus the role-specific sections below. Do not omit the rol
   - assumptions
   - planning gates
   - execution topology
-  - chunks with:
-    - goal
-    - files_to_read
-    - files_to_touch
-    - cwd
-    - constraints
-    - verification condition
-    - handoff notes
-    - dependencies
+    - chunks with:
+      - goal
+      - files_to_read
+      - files_to_touch
+      - cwd
+      - tasks (for task-bearing chunks; one depth only)
+      - constraints
+      - verification condition
+      - handoff notes
+      - dependencies
     - risks
   - dependency graph
   - verification surfaces
