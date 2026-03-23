@@ -75,7 +75,8 @@ inline bool ShouldHideMessageInTranscript(const shared::Message &msg,
   }
   if (turnId.rfind("compaction-start-", 0) == 0 ||
       turnId.rfind("compaction-summary-", 0) == 0 ||
-      turnId.rfind("compaction-end-", 0) == 0) {
+      turnId.rfind("compaction-end-", 0) == 0 ||
+      turnId.rfind("system-note-", 0) == 0) {
     return false;
   }
   for (const auto &part : msg.content) {

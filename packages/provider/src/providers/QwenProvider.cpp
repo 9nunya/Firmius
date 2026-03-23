@@ -46,6 +46,17 @@ bool hasToolCallIndex(const firmius::shared::ToolCallChunk &chunk) {
   return chunk.index != kMissingToolCallIndex;
 }
 
+bool isValidJsonObjectPayload(const std::string &payload) {
+  const std::string trimmed = firmius::shared::StringUtil::trim(payload);
+  if (trimmed.empty()) {
+    return false;
+  }
+
+  rapidjson::Document parsed;
+  parsed.Parse(trimmed.c_str());
+  return !parsed.HasParseError() && parsed.IsObject();
+}
+
 std::vector<firmius::shared::ToolCallChunk>::iterator
 findMatchingToolCallChunk(
     std::vector<firmius::shared::ToolCallChunk> &accumulated,
@@ -1314,8 +1325,35 @@ void QwenProvider::mergeAccumulatedToolCallChunk(
   if (!hasToolCallIndex(*it) && hasToolCallIndex(incoming)) {
     it->index = incoming.index;
   }
-  it->nameDelta += incoming.nameDelta;
-  it->argsDelta += incoming.argsDelta;
+
+  if (!incoming.nameDelta.empty()) {
+    if (it->nameDelta.empty()) {
+      it->nameDelta = incoming.nameDelta;
+    } else if (incoming.nameDelta == it->nameDelta) {
+      // duplicate snapshot chunk; ignore
+    } else if (incoming.nameDelta.rfind(it->nameDelta, 0) == 0) {
+      it->nameDelta = incoming.nameDelta;
+    } else if (it->nameDelta.rfind(incoming.nameDelta, 0) == 0) {
+      // stale/shorter snapshot chunk; keep existing
+    } else {
+      it->nameDelta += incoming.nameDelta;
+    }
+  }
+
+  if (!incoming.argsDelta.empty()) {
+    if (it->argsDelta.empty()) {
+      it->argsDelta = incoming.argsDelta;
+    } else if (incoming.argsDelta == it->argsDelta) {
+      // duplicate snapshot chunk; ignore
+    } else if (incoming.argsDelta.rfind(it->argsDelta, 0) == 0) {
+      it->argsDelta = incoming.argsDelta;
+    } else if (isValidJsonObjectPayload(incoming.argsDelta)) {
+      // Provider sent full JSON snapshot for this call; replace.
+      it->argsDelta = incoming.argsDelta;
+    } else {
+      it->argsDelta += incoming.argsDelta;
+    }
+  }
 }
 
 std::optional<std::string> QwenProvider::validateCompletedToolCallBatch(

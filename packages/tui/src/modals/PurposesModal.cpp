@@ -28,6 +28,9 @@ std::vector<std::string> sortedCategories(const firmius::shared::UserConfig &cfg
 
 } // namespace
 
+PurposesModal::PurposesModal() = default;
+PurposesModal::~PurposesModal() = default;
+
 ftxui::Component PurposesModal::create(TuiState &state) {
   auto purposes =
       std::make_shared<std::vector<std::string>>(firmius::core::PurposeLoader::listPurposes());

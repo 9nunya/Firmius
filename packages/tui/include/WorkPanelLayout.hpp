@@ -29,6 +29,8 @@ WorkPanelDecision determineWorkPanelDecision(bool isLead, bool isExecutor,
                                              int terminalHeight,
                                              bool preferTodoOnNarrow);
 
+int computeWorkPanelMaxHeight(int terminalHeight);
+
 } // namespace firmius::tui
 
 #endif

@@ -137,6 +137,8 @@ private:
   // Process focus mode
   std::string focused_process_id_;
   bool process_focus_expanded_ = false;
+  int last_terminal_width_ = 0;
+  int last_terminal_height_ = 0;
 };
 
 } // namespace firmius::tui

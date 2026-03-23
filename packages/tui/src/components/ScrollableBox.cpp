@@ -25,6 +25,24 @@ void ScrollableBoxComponent::RequestScrollToTop() {
     selected_ = 0;
 }
 
+void ScrollableBoxComponent::RequestEnsureVisible(int line) {
+    RequestEnsureVisible(line, line);
+}
+
+void ScrollableBoxComponent::RequestEnsureVisible(int first_line,
+                                                  int last_line) {
+    has_pending_ensure_visible_ = true;
+    pending_visible_start_ = std::max(0, std::min(first_line, last_line));
+    pending_visible_end_ = std::max(0, std::max(first_line, last_line));
+}
+
+int ScrollableBoxComponent::ContentWidth() const {
+    const int overlayGutter =
+        options_.overlayScrollbar ? std::max(1, options_.overlayScrollbarGutter)
+                                  : 2;
+    return std::max(1, viewport_width_ - overlayGutter);
+}
+
 int ScrollableBoxComponent::maxScroll(int viewportHeight) const {
     return std::max(0, size_ - viewportHeight);
 }
@@ -106,18 +124,29 @@ ftxui::Element ScrollableBoxComponent::OnRender() {
             background | ftxui::size(ftxui::WIDTH, ftxui::EQUAL, contentWidth);
     }
 
-    background->ComputeRequirement();
-    size_ = background->requirement().min_y;
+    // Measure using FTXUI's iterative layout pass so wrapped paragraph/flexbox
+    // content reports its true rendered height for the current width.
+    const auto fitted = ftxui::Dimension::Fit(background, true);
+    size_ = std::max(0, fitted.dimy);
 
     int viewport_h = 0;
     if (box_.y_max >= box_.y_min) {
         viewport_h = box_.y_max - box_.y_min + 1;
     }
 
-    if (at_bottom_) {
-        selected_ = maxScroll(viewport_h);
+    const int max_scroll = maxScroll(viewport_h);
+    if (has_pending_ensure_visible_) {
+        at_bottom_ = false;
+        if (pending_visible_start_ < selected_) {
+            selected_ = pending_visible_start_;
+        } else if (pending_visible_end_ >= selected_ + viewport_h) {
+            selected_ = pending_visible_end_ - viewport_h + 1;
+        }
+        has_pending_ensure_visible_ = false;
+    } else if (at_bottom_) {
+        selected_ = max_scroll;
     }
-    selected_ = std::clamp(selected_, 0, maxScroll(viewport_h));
+    selected_ = std::clamp(selected_, 0, max_scroll);
     updateScrollbarGeometry(viewport_h);
 
     const int external_dimy = std::max(0, viewport_h - 1);

@@ -25,6 +25,9 @@ public:
 
     void RequestScrollToBottom();
     void RequestScrollToTop();
+    void RequestEnsureVisible(int line);
+    void RequestEnsureVisible(int first_line, int last_line);
+    int ContentWidth() const;
 
     ftxui::Element OnRender() override;
     bool OnEvent(ftxui::Event event) override;
@@ -51,6 +54,9 @@ private:
     bool scrollbar_hovered_ = false;
     bool scrollbar_dragging_ = false;
     int scrollbar_drag_offset_ = 0;
+    bool has_pending_ensure_visible_ = false;
+    int pending_visible_start_ = 0;
+    int pending_visible_end_ = 0;
     ftxui::CapturedMouse captured_mouse_;
 };
 

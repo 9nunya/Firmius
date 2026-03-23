@@ -582,14 +582,9 @@ bool Harness::dispatchRequestToAgent(
           threadAgentMap_[tid] = fid;
           auto agent = AgentRegistry::instance().getAgent(fid);
           if (agent && (agent->isRunning() || agent->isBooting())) {
-            // Don't queue if agent is cancelled/interrupted - let the message go
-            // through
-            if (agent->getContext().state.currentStatus !=
-                AgentStatus::Cancelled) {
-              agentRunning = true;
-              messageQueue_.push_back(
-                  {messageId, preparedText, images, tid, fid});
-            }
+            agentRunning = true;
+            messageQueue_.push_back(
+                {messageId, preparedText, images, tid, fid});
           }
         }
       }

@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "benchmarks/BenchmarkSession.hpp"
 #include "harness/Harness.hpp"
 #include "Engine.hpp"
 #include "AgentRegistry.hpp"
@@ -230,6 +231,54 @@ public:
     std::vector<ModelInfo> listModels() override {
         ModelInfo model;
         model.id = "parallel-interleaved-tool-model";
+        model.provider = getId();
+        model.contextWindow = 4096;
+        return {model};
+    }
+
+    ModelInfo getModelInfo(const std::string&) override {
+        return listModels().front();
+    }
+
+    void generateSummary(const std::string&, const AgentHistory&,
+                         const std::string&,
+                         std::function<void(const StreamEvent&)> onEvent,
+                         std::atomic<bool>* = nullptr) override {
+        onEvent(TextChunk{"summary"});
+        onEvent(StreamDone{StopReason::Stop});
+    }
+
+    firmius::provider::ProviderType getProviderType() const override {
+        return firmius::provider::ProviderType::APIKey;
+    }
+
+private:
+    mutable int callCount_ = 0;
+};
+
+class SnapshotUpdatingToolCallProvider : public firmius::provider::IProvider {
+public:
+    std::string getId() const override { return "snapshot-updating-tool-provider"; }
+
+    void stream(const AgentHistory&, const firmius::provider::ProviderOptions&,
+                std::function<void(const StreamEvent&)> onEvent) override {
+        if (callCount_++ == 0) {
+            onEvent(ToolCallChunk{"call-1", 0, "plan_list",
+                                  R"({"status":"active","limit":1})"});
+            // Simulate providers that emit full object snapshots as args mutate.
+            onEvent(ToolCallChunk{"call-1", 0, "plan_list",
+                                  R"({"status":"active","limit":12})"});
+            onEvent(StreamDone{StopReason::ToolUse});
+            return;
+        }
+
+        onEvent(TextChunk{"snapshot call executed"});
+        onEvent(StreamDone{StopReason::Stop});
+    }
+
+    std::vector<ModelInfo> listModels() override {
+        ModelInfo model;
+        model.id = "snapshot-updating-tool-model";
         model.provider = getId();
         model.contextWindow = 4096;
         return {model};
@@ -560,6 +609,60 @@ public:
     }
 
     int callCount() const { return callCount_.load(); }
+
+private:
+    std::string providerId_;
+    std::atomic<int> callCount_{0};
+};
+
+class PartialAbortAwareProvider : public firmius::provider::IProvider {
+public:
+    explicit PartialAbortAwareProvider(std::string providerId)
+        : providerId_(std::move(providerId)) {}
+
+    std::string getId() const override { return providerId_; }
+
+    void stream(const AgentHistory&, const firmius::provider::ProviderOptions& opts,
+                std::function<void(const StreamEvent&)> onEvent) override {
+        const int callIndex = callCount_.fetch_add(1);
+        if (callIndex > 0) {
+            onEvent(TextChunk{"follow-up complete"});
+            onEvent(StreamDone{StopReason::Stop});
+            return;
+        }
+
+        onEvent(ThinkingChunk{"planning partial answer", "sig-cancel"});
+        onEvent(TextChunk{"partial response before cancel"});
+        while (true) {
+            if (opts.abortSignal && opts.abortSignal->load()) {
+                onEvent(StreamError{"request interrupted", 0, ""});
+                return;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+    }
+
+    std::vector<ModelInfo> listModels() override {
+        ModelInfo model;
+        model.id = providerId_ + "-model";
+        model.provider = getId();
+        model.contextWindow = 4096;
+        return {model};
+    }
+
+    ModelInfo getModelInfo(const std::string&) override { return listModels().front(); }
+
+    void generateSummary(const std::string&, const AgentHistory&,
+                         const std::string&,
+                         std::function<void(const StreamEvent&)> onEvent,
+                         std::atomic<bool>* = nullptr) override {
+        onEvent(TextChunk{"summary"});
+        onEvent(StreamDone{StopReason::Stop});
+    }
+
+    firmius::provider::ProviderType getProviderType() const override {
+        return firmius::provider::ProviderType::APIKey;
+    }
 
 private:
     std::string providerId_;
@@ -2093,6 +2196,58 @@ TEST_F(HarnessTest, InterleavedParallelToolChunksWithMissingIndexStayValid) {
     EXPECT_EQ(callCount, 2u);
 }
 
+TEST_F(HarnessTest, SnapshotUpdatingToolArgsDoNotTriggerMalformedPayloadError) {
+    auto& harness = Harness::instance();
+    auto provider = std::make_shared<SnapshotUpdatingToolCallProvider>();
+    firmius::provider::ProviderRegistry::instance().registerProvider(provider);
+
+    auto config = firmius::shared::ConfigLoader::instance().getConfig();
+    config.defaultProviderId = provider->getId();
+    config.defaultModelId = provider->listModels().front().id;
+    harness.updateConfig(config);
+
+    const std::string threadId = harness.newThread({}, "/tmp", "lead");
+    ASSERT_FALSE(threadId.empty());
+
+    std::atomic<bool> malformedValidatorTriggered{false};
+    int subId = harness.subscribe([&](const AppEvent& event) {
+        if (auto error = std::get_if<AgentError>(&event)) {
+            if (error->message.find("malformed streamed tool call payload") !=
+                std::string::npos) {
+                malformedValidatorTriggered = true;
+            }
+        }
+    });
+
+    harness.send("trigger snapshot-updating tool args");
+    auto agent = waitForFocusedAgent();
+    ASSERT_TRUE(waitForCondition([&]() {
+        return agent && !agent->isRunning() &&
+               agent->getContext().state.currentStatus == AgentStatus::Idle;
+    }));
+    harness.unsubscribe(subId);
+
+    EXPECT_FALSE(malformedValidatorTriggered.load());
+
+    const auto& history = *agent->getContext().history;
+    bool sawPlanList = false;
+    for (const auto& turn : history.turns) {
+        for (const auto& msg : turn.messages) {
+            for (const auto& part : msg.content) {
+                if (auto call = std::get_if<ToolCallContent>(&part)) {
+                    if (call->id == "call-1") {
+                        sawPlanList = true;
+                        EXPECT_EQ(call->name, "plan_list");
+                        EXPECT_EQ(call->args,
+                                  R"({"status":"active","limit":12})");
+                    }
+                }
+            }
+        }
+    }
+    EXPECT_TRUE(sawPlanList);
+}
+
 TEST_F(HarnessTest, ProseOnlyTurnDuringActiveExecutionDoesNotTerminate) {
     auto& harness = Harness::instance();
     auto provider = std::make_shared<SequencedProseProvider>(
@@ -3257,6 +3412,77 @@ TEST_F(HarnessTest, InterruptCancellationDoesNotEmitDuplicateAgentError) {
     EXPECT_EQ(errorCount.load(), 0);
 }
 
+TEST_F(HarnessTest, CancelledPartialAssistantTurnPersistsBeforeFollowUpRequestRuns) {
+    auto& harness = Harness::instance();
+    auto provider = std::make_shared<PartialAbortAwareProvider>("partial-abort-provider");
+    firmius::provider::ProviderRegistry::instance().registerProvider(provider);
+
+    auto config = firmius::shared::ConfigLoader::instance().getConfig();
+    config.defaultProviderId = provider->getId();
+    config.defaultModelId = provider->listModels().front().id;
+    harness.updateConfig(config);
+
+    const std::string threadId = harness.newThread({}, "/tmp", "lead");
+    ASSERT_FALSE(threadId.empty());
+
+    harness.send("first request");
+    auto agent = waitForFocusedAgent();
+    ASSERT_TRUE(waitForCondition([&]() { return agent->isRunning(); },
+                                 std::chrono::milliseconds(1500)));
+
+    harness.abort();
+    harness.send("follow-up request");
+
+    ASSERT_TRUE(waitForCondition([&]() {
+        return historyContainsUserText(*agent->getContext().history,
+                                       "follow-up request");
+    }, std::chrono::milliseconds(4000)));
+    ASSERT_TRUE(waitForIdle(agent->getContext().identity.id));
+
+    int firstUserIndex = -1;
+    int cancelledAssistantIndex = -1;
+    int cancelledNoticeIndex = -1;
+    int followUpUserIndex = -1;
+    int followUpAssistantIndex = -1;
+
+    for (size_t i = 0; i < agent->getContext().history->turns.size(); ++i) {
+        const auto& turn = agent->getContext().history->turns[i];
+        if (turn.messages.empty()) {
+            continue;
+        }
+        const auto& message = turn.messages.front();
+        for (const auto& part : message.content) {
+            if (const auto* text = std::get_if<TextContent>(&part)) {
+                if (text->text == "first request") {
+                    firstUserIndex = static_cast<int>(i);
+                } else if (text->text == "partial response before cancel") {
+                    cancelledAssistantIndex = static_cast<int>(i);
+                    EXPECT_EQ(turn.stopReason, StopReason::Cancelled);
+                } else if (text->text == "follow-up request") {
+                    followUpUserIndex = static_cast<int>(i);
+                } else if (text->text == "follow-up complete") {
+                    followUpAssistantIndex = static_cast<int>(i);
+                }
+            }
+            if (const auto* notice = std::get_if<NoticeContent>(&part)) {
+                if (notice->title == "Agent Cancelled") {
+                    cancelledNoticeIndex = static_cast<int>(i);
+                }
+            }
+        }
+    }
+
+    EXPECT_GE(firstUserIndex, 0);
+    EXPECT_GE(cancelledAssistantIndex, 0);
+    EXPECT_GE(cancelledNoticeIndex, 0);
+    EXPECT_GE(followUpUserIndex, 0);
+    EXPECT_GE(followUpAssistantIndex, 0);
+    EXPECT_LT(firstUserIndex, cancelledAssistantIndex);
+    EXPECT_LT(cancelledAssistantIndex, cancelledNoticeIndex);
+    EXPECT_LT(cancelledNoticeIndex, followUpUserIndex);
+    EXPECT_LT(followUpUserIndex, followUpAssistantIndex);
+}
+
 TEST_F(HarnessTest, NonInterruptedErrorContainingCancelWordStillSurfacesAsAgentError) {
     auto& harness = Harness::instance();
     auto provider = std::make_shared<CancelWordErrorProvider>();
@@ -4025,6 +4251,57 @@ TEST_F(HarnessTest, AppendSystemMessagePersistsVisibleTranscriptTurn) {
         std::get_if<TextContent>(&persistedMessage.content.front());
     ASSERT_NE(persistedText, nullptr);
     EXPECT_EQ(persistedText->text, "benchmark: cloning repo");
+}
+
+TEST_F(HarnessTest, BenchmarkSessionRunAgentTaskEmitsLiveStreamEvents) {
+    using firmius::core::BenchmarkConfig;
+    using firmius::core::BenchmarkSession;
+    using firmius::shared::HostType;
+
+    auto& harness = Harness::instance();
+    auto config = firmius::shared::ConfigLoader::instance().getConfig();
+    config.defaultProviderId = "test-retry-provider";
+    config.defaultModelId = "test-retry-model";
+    harness.updateConfig(config);
+
+    BenchmarkConfig benchConfig;
+    benchConfig.hostOptions.type = HostType::Local;
+    benchConfig.cwd = "/tmp";
+    benchConfig.personaName = "lead";
+    benchConfig.providerId = "test-retry-provider";
+    benchConfig.modelId = "test-retry-model";
+    benchConfig.initializeHarness = false;
+
+    BenchmarkSession session(benchConfig);
+
+    std::atomic<int> providerWaitingEvents{0};
+    std::atomic<int> textEvents{0};
+    std::atomic<int> finishedEvents{0};
+
+    const int subId = harness.subscribe([&](const firmius::shared::AppEvent& event) {
+        std::visit(
+            [&](auto&& ev) {
+                using T = std::decay_t<decltype(ev)>;
+                if constexpr (std::is_same_v<T, firmius::shared::AgentProviderWaiting>) {
+                    providerWaitingEvents.fetch_add(1);
+                } else if constexpr (std::is_same_v<T, firmius::shared::AgentText>) {
+                    textEvents.fetch_add(1);
+                } else if constexpr (std::is_same_v<T, firmius::shared::AgentFinished>) {
+                    finishedEvents.fetch_add(1);
+                }
+            },
+            event);
+    });
+
+    auto outcome = session.runAgentTask(
+        "Return a short response so benchmark streaming events are emitted.");
+
+    harness.unsubscribe(subId);
+
+    EXPECT_NE(outcome.kind, firmius::shared::AgentOutcome::Kind::Failed);
+    EXPECT_GE(providerWaitingEvents.load(), 1);
+    EXPECT_GE(textEvents.load(), 1);
+    EXPECT_GE(finishedEvents.load(), 1);
 }
 
 } // namespace

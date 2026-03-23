@@ -31,6 +31,32 @@ void BenchmarkSession::emitLog(const std::string &message) const {
   }
 }
 
+shared::AgentOutcome BenchmarkSession::runAgentTask(
+    const std::string &task, const std::vector<shared::ImageContent> &images) {
+  ensureReady();
+  if (!agent_) {
+    throw std::runtime_error("Agent not available for benchmark execution");
+  }
+
+  // Keep benchmark runs deterministic task-to-task.
+  agent_->reset();
+
+  Engine::instance().executeTask(agentId_, task, images);
+  auto outcome = Engine::instance().waitForAgentOutcome(agentId_, std::nullopt);
+  if (!outcome.has_value()) {
+    throw std::runtime_error("Timed out waiting for benchmark agent outcome");
+  }
+
+  if (outcome->kind == shared::AgentOutcome::Kind::Failed) {
+    throw std::runtime_error("Benchmark agent task failed: " + outcome->text);
+  }
+  if (outcome->kind == shared::AgentOutcome::Kind::Cancelled) {
+    throw std::runtime_error("Benchmark agent task was cancelled");
+  }
+
+  return *outcome;
+}
+
 namespace {
 
 std::string findResumeFailureDetails(const std::shared_ptr<Agent> &agent) {

@@ -217,6 +217,22 @@ TEST(StreamStateManagerLiveTest, InterruptClearsProviderWaitingAndRetryUiImmedia
   EXPECT_TRUE(state.getAccountSwaps().empty());
 }
 
+TEST(StreamStateManagerLiveTest, InterruptClearsTransientLiveProseRows) {
+  StreamStateManager state;
+
+  state.handleAgentThinking(AgentThinking{"agent-1", "thinking", ""});
+  state.handleAgentText(AgentText{"agent-1", "partial response", ""});
+  ASSERT_EQ(state.getTimeline().size(), 2u);
+
+  state.handleAgentInterrupted(AgentInterrupted{"agent-1", ""});
+
+  const auto *stream = state.getStream("agent-1");
+  ASSERT_NE(stream, nullptr);
+  EXPECT_TRUE(stream->thinking.empty());
+  EXPECT_TRUE(stream->text.empty());
+  EXPECT_TRUE(state.getTimeline().empty());
+}
+
 TEST(StreamStateManagerLiveTest, CompactionCompletionRemainsVisibleAfterFinish) {
   StreamStateManager state;
   state.handleAgentCompacting(AgentCompacting{"agent-1", ""});

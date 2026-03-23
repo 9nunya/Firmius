@@ -389,9 +389,7 @@ BenchmarkResult SWEBench::runTask(const std::string& taskId) {
     for (const auto& t : failToPass) prompt << "- " << t << "\n";
     prompt << "\nFix the issue in the codebase. After finishing, provide a summary of your changes.";
 
-    auto& agent = session.getAgent();
-    agent.reset();
-    agent.run(prompt.str(), [](const StreamEvent&) {});
+    session.runAgentTask(prompt.str());
 
     logInfo("\n\033[1;32m[SWEBench] RUNNING FINAL EVALUATION\033[0m");
     session.emitLog("SWE-bench: running final evaluation.");

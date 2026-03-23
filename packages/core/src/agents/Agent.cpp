@@ -37,6 +37,65 @@ bool hasToolCallIndex(const ToolCallChunk &chunk) {
   return chunk.index != kMissingToolCallIndex;
 }
 
+bool isValidJsonObjectPayload(const std::string &payload) {
+  const std::string trimmed = shared::StringUtil::trim(payload);
+  if (trimmed.empty()) {
+    return false;
+  }
+
+  rapidjson::Document parsed;
+  parsed.Parse(trimmed.c_str());
+  return !parsed.HasParseError() && parsed.IsObject();
+}
+
+void mergeToolCallName(std::string &existing, const std::string &incoming) {
+  if (incoming.empty()) {
+    return;
+  }
+  if (existing.empty()) {
+    existing = incoming;
+    return;
+  }
+  if (incoming == existing) {
+    return;
+  }
+  if (incoming.rfind(existing, 0) == 0) {
+    existing = incoming;
+    return;
+  }
+  if (existing.rfind(incoming, 0) == 0) {
+    return;
+  }
+  existing += incoming;
+}
+
+void mergeToolCallArgs(std::string &existing, const std::string &incoming) {
+  if (incoming.empty()) {
+    return;
+  }
+  if (existing.empty()) {
+    existing = incoming;
+    return;
+  }
+  if (incoming == existing) {
+    return;
+  }
+  if (incoming.rfind(existing, 0) == 0) {
+    existing = incoming;
+    return;
+  }
+
+  // Some providers emit full JSON object snapshots rather than append-only
+  // deltas for the same tool call ID. Replace in that case to avoid producing
+  // concatenated invalid JSON at dispatch time.
+  if (isValidJsonObjectPayload(incoming)) {
+    existing = incoming;
+    return;
+  }
+
+  existing += incoming;
+}
+
 std::vector<ToolCallChunk>::iterator findMatchingToolCallChunk(
     std::vector<ToolCallChunk> &accumulated, const ToolCallChunk &incoming) {
   if (!incoming.id.empty()) {
@@ -87,8 +146,8 @@ void mergeToolCallChunk(std::vector<ToolCallChunk> &accumulated,
   if (!hasToolCallIndex(*it) && hasToolCallIndex(incoming)) {
     it->index = incoming.index;
   }
-  it->nameDelta += incoming.nameDelta;
-  it->argsDelta += incoming.argsDelta;
+  mergeToolCallName(it->nameDelta, incoming.nameDelta);
+  mergeToolCallArgs(it->argsDelta, incoming.argsDelta);
 }
 
 bool shouldRetryProviderFailureAtAgentLayer(int httpStatus) {
@@ -834,12 +893,114 @@ void Agent::runImpl(const std::optional<std::string> &task,
       // Compaction is best-effort
     }
 
-    turnCount++;
+	    turnCount++;
 
-    try {
-      // --- State: ProviderWaiting ---
-      context.state.currentStatus = AgentStatus::ProviderWaiting;
-      onEvent(ProviderWaiting{});
+    std::vector<ToolCallChunk> accumulatedToolChunks;
+    std::string fullResponse;
+    std::string fullThinking;
+    std::string lastThinkingSignature;
+    AgentMetrics turnMetrics;
+    StopReason turnStopReason = StopReason::Stop;
+    std::string streamError;
+    int streamErrorStatus = 0;
+    bool sawContent = false;
+    bool sawThinking = false;
+    bool sawTool = false;
+    std::uint32_t syntheticToolCallIdSerial = 0;
+
+    // Token repetition detection for hallucination loops
+    bool tokenLoopDetected = false;
+    char lastChar = '\0';
+    int consecutiveRepeatCount = 0;
+    const int MAX_CONSECUTIVE_REPEAT = 15;
+
+    auto appendVisibleText = [&](const std::string &delta) {
+      if (delta.empty()) {
+        return;
+      }
+      onEvent(TextChunk{delta});
+      for (unsigned char c : delta) {
+        if (!std::isspace(c)) {
+          sawContent = true;
+          break;
+        }
+      }
+      // Check for token loop (same character repeated)
+      for (char c : delta) {
+        if (c == lastChar && !tokenLoopDetected) {
+          consecutiveRepeatCount++;
+          if (consecutiveRepeatCount >= MAX_CONSECUTIVE_REPEAT) {
+            tokenLoopDetected = true;
+          }
+        } else {
+          consecutiveRepeatCount = 1;
+          lastChar = c;
+        }
+      }
+      if (!tokenLoopDetected) {
+        fullResponse += delta;
+      }
+    };
+
+    auto appendVisibleThinking = [&](const std::string &delta) {
+      if (delta.empty()) {
+        return;
+      }
+      onEvent(ThinkingChunk{delta, ""});
+      sawThinking = true;
+      fullThinking += delta;
+    };
+
+    auto persistAssistantTurn = [&](StopReason stopReason,
+                                    bool includeToolCalls) {
+      const bool hasVisibleContent = !fullThinking.empty() || !fullResponse.empty();
+      const bool hasPersistableToolCalls =
+          includeToolCalls && !accumulatedToolChunks.empty();
+      if (!hasVisibleContent && !hasPersistableToolCalls) {
+        return false;
+      }
+
+      AgentTurn assistantTurn;
+      assistantTurn.turnId =
+          "assistant-" + std::to_string(context.history->turns.size());
+      assistantTurn.stopReason = stopReason;
+      assistantTurn.metrics = turnMetrics;
+
+      context.aggregateMetrics += turnMetrics;
+
+      Message assistantMsg;
+      assistantMsg.role = Role::Assistant;
+      if (!fullThinking.empty()) {
+        assistantMsg.content.push_back(
+            ThinkingContent{fullThinking, lastThinkingSignature});
+      }
+      if (!fullResponse.empty()) {
+        assistantMsg.content.push_back(TextContent{fullResponse});
+      }
+      if (hasPersistableToolCalls) {
+        for (const auto &chunk : accumulatedToolChunks) {
+          assistantMsg.content.push_back(
+              ToolCallContent{chunk.id, chunk.nameDelta, chunk.argsDelta});
+        }
+      }
+
+      assistantMsg.timestamp = nowMs();
+      assistantTurn.messages.push_back(assistantMsg);
+      context.history->turns.push_back(assistantTurn);
+      if (context.config.persistHistory && journaler) {
+        journaler->appendTurn(assistantTurn);
+      }
+
+      onEvent(AgentTurnCompleted{context.identity.id, assistantTurn,
+                                 context.aggregateMetrics,
+                                 context.identity.parentId});
+      return true;
+    };
+
+	    try {
+	      // --- State: ProviderWaiting ---
+	      context.state.currentStatus = AgentStatus::ProviderWaiting;
+	      onEvent(ProviderWaiting{});
 
       firmius::provider::ProviderOptions opts;
       opts.modelId = context.config.modelId;
@@ -862,63 +1023,7 @@ void Agent::runImpl(const std::optional<std::string> &task,
           toolRegistry.getAvailableToolDefinitions(context.permissions);
       opts.abortSignal = runCancelToken.get();
 
-      std::vector<ToolCallChunk> accumulatedToolChunks;
-      std::string fullResponse;
-      std::string fullThinking;
-      std::string lastThinkingSignature;
-      AgentMetrics turnMetrics;
-      StopReason turnStopReason = StopReason::Stop;
-      std::string streamError;
-      int streamErrorStatus = 0;
-      bool sawContent = false;
-      bool sawThinking = false;
-      bool sawTool = false;
-      std::uint32_t syntheticToolCallIdSerial = 0;
-
-      // Token repetition detection for hallucination loops
-      bool tokenLoopDetected = false;
-      char lastChar = '\0';
-      int consecutiveRepeatCount = 0;
-      const int MAX_CONSECUTIVE_REPEAT = 15;
-
-      auto appendVisibleText = [&](const std::string &delta) {
-        if (delta.empty()) {
-          return;
-        }
-        onEvent(TextChunk{delta});
-        for (unsigned char c : delta) {
-          if (!std::isspace(c)) {
-            sawContent = true;
-            break;
-          }
-        }
-        // Check for token loop (same character repeated)
-        for (char c : delta) {
-          if (c == lastChar && !tokenLoopDetected) {
-            consecutiveRepeatCount++;
-            if (consecutiveRepeatCount >= MAX_CONSECUTIVE_REPEAT) {
-              tokenLoopDetected = true;
-            }
-          } else {
-            consecutiveRepeatCount = 1;
-            lastChar = c;
-          }
-        }
-        if (!tokenLoopDetected) {
-          fullResponse += delta;
-        }
-      };
-
-      auto appendVisibleThinking = [&](const std::string &delta) {
-        if (delta.empty()) {
-          return;
-        }
-        onEvent(ThinkingChunk{delta, ""});
-        sawThinking = true;
-        fullThinking += delta;
-      };
-
-      provider->stream(*context.history, opts, [&](const StreamEvent &ev) {
+	      provider->stream(*context.history, opts, [&](const StreamEvent &ev) {
         if (context.state.currentStatus == AgentStatus::ProviderWaiting) {
           if (std::holds_alternative<TextChunk>(ev) ||
               std::holds_alternative<ThinkingChunk>(ev) ||
@@ -959,6 +1064,7 @@ void Agent::runImpl(const std::optional<std::string> &task,
         }
       });
       if (runCancelToken->load()) {
+        persistAssistantTurn(StopReason::Cancelled, false);
         context.state.currentStatus = AgentStatus::Cancelled;
         break;
       }
@@ -1053,50 +1159,13 @@ void Agent::runImpl(const std::optional<std::string> &task,
       consecutiveProviderFailures = 0;
 
       if (runCancelToken->load()) {
+        persistAssistantTurn(StopReason::Cancelled, false);
         context.state.currentStatus = AgentStatus::Cancelled;
         break;
       }
 
       // --- Build assistant turn ---
-      AgentTurn assistantTurn;
-      assistantTurn.turnId =
-          "assistant-" + std::to_string(context.history->turns.size());
-      assistantTurn.stopReason = turnStopReason;
-
-      // Store per-turn metrics
-      assistantTurn.metrics = turnMetrics;
-
-      // Accumulate into session total
-      context.aggregateMetrics += turnMetrics;
-
-      Message assistantMsg;
-      assistantMsg.role = Role::Assistant;
-      if (!fullThinking.empty())
-        assistantMsg.content.push_back(
-            ThinkingContent{fullThinking, lastThinkingSignature});
-      if (!fullResponse.empty())
-        assistantMsg.content.push_back(TextContent{fullResponse});
-
-      for (const auto &chunk : accumulatedToolChunks) {
-        assistantMsg.content.push_back(
-            ToolCallContent{chunk.id, chunk.nameDelta, chunk.argsDelta});
-      }
-
-      auto now_end = std::chrono::system_clock::now();
-      assistantMsg.timestamp = static_cast<uint64_t>(
-          std::chrono::duration_cast<std::chrono::milliseconds>(
-              now_end.time_since_epoch())
-              .count());
-
-      assistantTurn.messages.push_back(assistantMsg);
-      context.history->turns.push_back(assistantTurn);
-      if (context.config.persistHistory && journaler)
-        journaler->appendTurn(assistantTurn);
-
-      // Broadcast turn completion
-      onEvent(AgentTurnCompleted{context.identity.id, assistantTurn,
-                                 context.aggregateMetrics,
-                                 context.identity.parentId});
+      persistAssistantTurn(turnStopReason, true);
 
       // --- Check for termination ---
       if (accumulatedToolChunks.empty()) {

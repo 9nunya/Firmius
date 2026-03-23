@@ -1,6 +1,14 @@
 #include "WorkPanelLayout.hpp"
 
+#include <algorithm>
+
 namespace firmius::tui {
+
+int computeWorkPanelMaxHeight(int terminalHeight) {
+  // Keep the lanes compact, but leave one extra line so mid-sized terminals
+  // don't feel cramped once the lane header is accounted for.
+  return std::clamp(1 + terminalHeight / 14, 5, 10);
+}
 
 WorkPanelDecision determineWorkPanelDecision(bool isLead, bool isExecutor,
                                              bool hasPlan, bool hasTodo,

@@ -78,9 +78,7 @@ BenchmarkResult MBPPBenchmark::runTask(const std::string& taskId) {
     result.taskId = taskId;
 
     session.emitLog("MBPP: running worker on task " + taskId + ".");
-    auto& agent = session.getAgent();
-    agent.reset();
-    agent.run(fullPrompt.str(), [](const StreamEvent&) {});
+    session.runAgentTask(fullPrompt.str());
 
     // Evaluate
     session.emitLog("MBPP: evaluating generated solution.");

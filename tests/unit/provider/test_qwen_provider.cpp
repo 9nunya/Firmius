@@ -272,6 +272,28 @@ TEST(QwenProvider, MergeAccumulatedToolCallChunkHandlesArgsBeforeName) {
   EXPECT_EQ(accumulated[0].argsDelta, R"({"path":"ASCII.txt"})");
 }
 
+TEST(QwenProvider, MergeAccumulatedToolCallChunkReplacesJsonSnapshots) {
+  std::vector<ToolCallChunk> accumulated;
+
+  QwenProvider::mergeAccumulatedToolCallChunk(
+      accumulated, ToolCallChunk{"call-1", 0, "plan_list", ""});
+  QwenProvider::mergeAccumulatedToolCallChunk(
+      accumulated, ToolCallChunk{"call-1", 0, "",
+                                 R"({"filter":"active","limit":1})"});
+  QwenProvider::mergeAccumulatedToolCallChunk(
+      accumulated, ToolCallChunk{"call-1", 0, "",
+                                 R"({"filter":"active","limit":12})"});
+
+  ASSERT_EQ(accumulated.size(), 1u);
+  EXPECT_EQ(accumulated[0].id, "call-1");
+  EXPECT_EQ(accumulated[0].nameDelta, "plan_list");
+  EXPECT_EQ(accumulated[0].argsDelta,
+            R"({"filter":"active","limit":12})");
+
+  EXPECT_FALSE(
+      QwenProvider::validateCompletedToolCallBatch(accumulated).has_value());
+}
+
 TEST(QwenProvider,
      MergeAccumulatedToolCallChunkDoesNotMergeAmbiguousChunksWithoutIdOrIndex) {
   std::vector<ToolCallChunk> accumulated;

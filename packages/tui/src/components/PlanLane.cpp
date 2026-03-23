@@ -186,7 +186,13 @@ private:
                    }) |
                    ftxui::xflex;
         if (task.status == shared::WorkChunkStatus::Done) {
-          row = row | ftxui::dim | ftxui::strikethrough;
+          line = line | ftxui::strikethrough;
+          row = ftxui::hbox({
+                    ftxui::text(" " + std::string(style.icon) + " ") |
+                        ftxui::bold | ftxui::color(style.color) | ftxui::dim,
+                    line | ftxui::flex,
+                }) |
+                ftxui::xflex | ftxui::dim;
         }
         rows.push_back(row);
       }

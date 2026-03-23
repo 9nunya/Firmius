@@ -84,9 +84,7 @@ BenchmarkResult AgentBench::runTask(const std::string& taskId) {
     std::string fullPrompt = "Task: " + description + "\n\nProvide your final answer after you have found it. Do not call tools after you have found the answer.";
 
     session.emitLog("AgentBench: running worker on task " + taskId + ".");
-    auto& agent = session.getAgent();
-    agent.reset();
-    agent.run(fullPrompt, [](const StreamEvent&) {});
+    session.runAgentTask(fullPrompt);
 
     session.emitLog("AgentBench: terminating benchmark background services.");
     terminateBackgroundProcesses();

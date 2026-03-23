@@ -3,6 +3,7 @@
 
 #include "agents/Agent.hpp"
 #include "Enums.hpp"
+#include "Events.hpp"
 #include <functional>
 
 namespace firmius::core {
@@ -28,6 +29,9 @@ public:
     shared::IHost& getHost();
     const BenchmarkConfig& config() const;
     void emitLog(const std::string& message) const;
+    shared::AgentOutcome runAgentTask(
+        const std::string &task,
+        const std::vector<shared::ImageContent> &images = {});
 
 private:
     void ensureReady();

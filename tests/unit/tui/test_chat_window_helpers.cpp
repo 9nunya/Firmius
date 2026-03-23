@@ -129,6 +129,15 @@ TEST(ChatWindowHelpersTest, KeepsPersistedCompactionTurnsRenderable) {
       compaction, false, "compaction-end-1"));
 }
 
+TEST(ChatWindowHelpersTest, KeepsSystemNoteTurnsRenderable) {
+  Message system_note;
+  system_note.role = Role::System;
+  system_note.content = {TextContent{"SWE-bench: cloning repository."}};
+
+  EXPECT_FALSE(firmius::tui::ShouldHideMessageInTranscript(
+      system_note, false, "system-note-123"));
+}
+
 TEST(ChatWindowHelpersTest, IndentsAgentRenderedContentWithoutMarker) {
   auto output = renderToString(
       firmius::tui::IndentAgentRow(ftxui::text("agent row")));

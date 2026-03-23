@@ -1300,17 +1300,43 @@ void StreamStateManager::handleAgentFinished(const shared::AgentFinished &e) {
 void StreamStateManager::handleAgentInterrupted(
     const shared::AgentInterrupted &e) {
   auto &s = streams_[e.agentId];
+  s.thinking.clear();
+  s.text.clear();
+  s.compaction_finished = false;
+  s.compaction_completion.clear();
   s.provider_waiting = false;
   s.is_thinking = false;
   clearActiveLiveEntry(e.agentId);
+  timeline_.erase(
+      std::remove_if(
+          timeline_.begin(), timeline_.end(), [&](const TimelineEntry &entry) {
+            return entry.agentId == e.agentId &&
+                   (entry.kind == TimelineEntry::Kind::Thinking ||
+                    entry.kind == TimelineEntry::Kind::Text);
+          }),
+      timeline_.end());
+  live_quick_clusters_[e.agentId] = {};
   clearRetryStatus();
 }
 
 void StreamStateManager::handleAgentError(const shared::AgentError &e) {
   auto &s = streams_[e.agentId];
+  s.thinking.clear();
+  s.text.clear();
+  s.compaction_finished = false;
+  s.compaction_completion.clear();
   s.provider_waiting = false;
   s.is_thinking = false;
   clearActiveLiveEntry(e.agentId);
+  timeline_.erase(
+      std::remove_if(
+          timeline_.begin(), timeline_.end(), [&](const TimelineEntry &entry) {
+            return entry.agentId == e.agentId &&
+                   (entry.kind == TimelineEntry::Kind::Thinking ||
+                    entry.kind == TimelineEntry::Kind::Text);
+          }),
+      timeline_.end());
+  live_quick_clusters_[e.agentId] = {};
   clearRetryStatus();
 
   auto it_sub = subagent_to_parent_tool_.find(e.agentId);

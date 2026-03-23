@@ -455,9 +455,6 @@ public:
 
   ftxui::Element OnRender() override {
     RebuildIfNeeded();
-    if (scrollable_ && !user_scrolled_up_) {
-      scrollable_->RequestScrollToBottom();
-    }
     return scrollable_ ? scrollable_->Render() : ftxui::text("");
   }
 
@@ -468,35 +465,17 @@ public:
         event == ftxui::Event::Special("ThemeChanged")) {
       last_history_revision_ = std::numeric_limits<std::size_t>::max();
       RebuildIfNeeded();
-      user_scrolled_up_ = false;
+      if (scrollable_) {
+        scrollable_->RequestScrollToBottom();
+      }
       return true;
     }
 
     RebuildIfNeeded();
-
-    if (event == ftxui::Event::ArrowUp || event == ftxui::Event::PageUp) {
-      user_scrolled_up_ = true;
-    }
-
-    if (event == ftxui::Event::ArrowDown || event == ftxui::Event::PageDown) {
-      user_scrolled_up_ = false;
-    }
-    if (event.is_mouse() && event.mouse().button == ftxui::Mouse::WheelUp) {
-      user_scrolled_up_ = true;
-    }
-    if (event.is_mouse() && event.mouse().button == ftxui::Mouse::WheelDown) {
-      user_scrolled_up_ = false;
-    }
-
-    if (event == ftxui::Event::Custom) {
-      if (scrollable_ && !user_scrolled_up_)
-        scrollable_->RequestScrollToBottom();
-    }
     return scrollable_ ? scrollable_->OnEvent(event) : false;
   }
 
 private:
-  bool user_scrolled_up_ = false;
   void RebuildIfNeeded() {
     auto *history = history_getter_ ? history_getter_() : nullptr;
     const std::size_t history_revision = ComputeHistoryRevision(history);
@@ -800,9 +779,6 @@ private:
           ftxui::Make<RowComponent>(nullptr, [] { return ftxui::text(""); }));
     }
 
-    if (scrollable_ && !user_scrolled_up_) {
-      scrollable_->RequestScrollToBottom();
-    }
   }
 
   std::function<const firmius::shared::AgentHistory *()> history_getter_;

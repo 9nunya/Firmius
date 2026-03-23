@@ -5,6 +5,7 @@
 namespace {
 
 using firmius::tui::WorkPanelKind;
+using firmius::tui::computeWorkPanelMaxHeight;
 using firmius::tui::determineWorkPanelDecision;
 
 TEST(WorkPanelLayoutTest, LeadGetsSplitPaneOnWideTerminalWhenPlanAndTodoExist) {
@@ -30,6 +31,13 @@ TEST(WorkPanelLayoutTest, ExecutorChunkTodoTakesPriority) {
   EXPECT_EQ(decision.kind, WorkPanelKind::ExecutorChunkTodo);
   EXPECT_FALSE(decision.showPlan);
   EXPECT_TRUE(decision.showTodo);
+}
+
+TEST(WorkPanelLayoutTest, WorkPanelHeightStaysCompactOnNormalTerminals) {
+  EXPECT_EQ(computeWorkPanelMaxHeight(32), 5);
+  EXPECT_EQ(computeWorkPanelMaxHeight(56), 5);
+  EXPECT_EQ(computeWorkPanelMaxHeight(84), 7);
+  EXPECT_EQ(computeWorkPanelMaxHeight(200), 10);
 }
 
 } // namespace

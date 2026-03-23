@@ -1737,8 +1737,18 @@ ftxui::Component TuiState::root() {
 
         const auto &theme = ThemeManager::instance().getCurrentTheme();
         const auto terminal = ftxui::Terminal::Size();
+        // ScrollableBox uses reflect(box_) and stabilizes over two passes.
+        // Trigger one extra pass whenever terminal dimensions change.
+        if (terminal.dimx != last_terminal_width_ ||
+            terminal.dimy != last_terminal_height_) {
+          last_terminal_width_ = terminal.dimx;
+          last_terminal_height_ = terminal.dimy;
+          if (screen_) {
+            screen_->PostEvent(ftxui::Event::Custom);
+          }
+        }
         const int work_panel_max_height =
-            std::clamp(std::max(6, terminal.dimy / 3), 6, 16);
+            computeWorkPanelMaxHeight(terminal.dimy);
         bool isLead = false;
         bool isExecutor = false;
         if (!focused_agent_id_.empty()) {
