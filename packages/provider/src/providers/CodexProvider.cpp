@@ -9,9 +9,14 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <cstdlib>
 #include <cmath>
 #include <cstdint>
+#include <ctime>
+#include <fstream>
 #include <iomanip>
+#include <iostream>
+#include <mutex>
 #include <optional>
 #include <random>
 #include <rapidjson/document.h>
@@ -63,6 +68,7 @@ struct VariantSettings {
 };
 
 struct TokenResult {
+  std::string idToken;
   std::string access;
   std::string refresh;
   int64_t expiresIn = 0;
@@ -91,6 +97,109 @@ int64_t nowSeconds() {
   return std::chrono::duration_cast<std::chrono::seconds>(
              std::chrono::system_clock::now().time_since_epoch())
       .count();
+}
+
+std::mutex gRawSseLogMutex;
+
+void appendRawSseLog(const char *phase, const std::string &payload) {
+  const char *logPath = std::getenv("FIRMIUS_CODEX_RAW_SSE_LOG");
+  const char *stdoutFlag = std::getenv("FIRMIUS_CODEX_RAW_SSE_STDOUT");
+  const bool mirrorToStdout =
+      stdoutFlag && stdoutFlag[0] != '\0' && stdoutFlag[0] != '0';
+  if ((!logPath || logPath[0] == '\0') && !mirrorToStdout) {
+    return;
+  }
+
+  std::lock_guard<std::mutex> lock(gRawSseLogMutex);
+  auto now = std::chrono::system_clock::now();
+  std::time_t nowTime = std::chrono::system_clock::to_time_t(now);
+  std::tm tm = {};
+#if defined(_WIN32)
+  gmtime_s(&tm, &nowTime);
+#else
+  gmtime_r(&nowTime, &tm);
+#endif
+
+  std::ostringstream prefix;
+  prefix << "[" << std::put_time(&tm, "%Y-%m-%dT%H:%M:%SZ") << "]"
+         << "[codex][" << phase << "] ";
+
+  if (logPath && logPath[0] != '\0') {
+    std::ofstream out(logPath, std::ios::app);
+    if (out.is_open()) {
+      out << prefix.str() << payload;
+      if (payload.empty() || payload.back() != '\n') {
+        out << '\n';
+      }
+    }
+  }
+
+  if (mirrorToStdout) {
+    std::cout << prefix.str() << payload;
+    if (payload.empty() || payload.back() != '\n') {
+      std::cout << '\n';
+    }
+    std::cout << std::flush;
+  }
+}
+
+bool isLikelyEmail(const std::string &value) {
+  const auto at = value.find('@');
+  return at != std::string::npos && at > 0 &&
+         value.find('.', at + 1) != std::string::npos;
+}
+
+bool isUuidLike(std::string_view value) {
+  if (value.size() != 36) {
+    return false;
+  }
+  for (std::size_t i = 0; i < value.size(); ++i) {
+    const char c = value[i];
+    if (i == 8 || i == 13 || i == 18 || i == 23) {
+      if (c != '-') {
+        return false;
+      }
+      continue;
+    }
+    if (!std::isxdigit(static_cast<unsigned char>(c))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool isEpochSecondsString(const std::string &value) {
+  if (value.empty()) {
+    return false;
+  }
+  return std::all_of(value.begin(), value.end(), [](unsigned char ch) {
+    return std::isdigit(ch);
+  });
+}
+
+std::string epochSecondsToIso8601(int64_t epochSeconds) {
+  std::time_t seconds = static_cast<std::time_t>(epochSeconds);
+  std::tm tm = {};
+#if defined(_WIN32)
+  gmtime_s(&tm, &seconds);
+#else
+  gmtime_r(&seconds, &tm);
+#endif
+  std::ostringstream oss;
+  oss << std::put_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
+  return oss.str();
+}
+
+std::string normalizeResetTimestamp(const std::string &value) {
+  std::string trimmed = StringUtil::trim(value);
+  if (!isEpochSecondsString(trimmed)) {
+    return trimmed;
+  }
+  try {
+    return epochSecondsToIso8601(std::stoll(trimmed));
+  } catch (...) {
+    return trimmed;
+  }
 }
 
 bool isUnreservedChar(char c) {
@@ -414,6 +523,13 @@ std::optional<std::string> extractEmailFromJwt(const std::string &token) {
     return std::nullopt;
   if (doc.HasMember("email") && doc["email"].IsString())
     return std::string(doc["email"].GetString());
+  if (doc.HasMember("https://api.openai.com/profile") &&
+      doc["https://api.openai.com/profile"].IsObject()) {
+    const auto &profile = doc["https://api.openai.com/profile"];
+    if (profile.HasMember("email") && profile["email"].IsString()) {
+      return std::string(profile["email"].GetString());
+    }
+  }
   if (doc.HasMember("preferred_username") &&
       doc["preferred_username"].IsString()) {
     return std::string(doc["preferred_username"].GetString());
@@ -427,6 +543,8 @@ TokenResult parseTokenResponse(const std::string &body) {
   if (doc.HasParseError() || !doc.IsObject())
     return {};
   TokenResult result;
+  if (doc.HasMember("id_token") && doc["id_token"].IsString())
+    result.idToken = doc["id_token"].GetString();
   if (doc.HasMember("access_token") && doc["access_token"].IsString())
     result.access = doc["access_token"].GetString();
   if (doc.HasMember("refresh_token") && doc["refresh_token"].IsString())
@@ -507,6 +625,76 @@ float normalizeQuotaFraction(double value) {
   if (normalized > 1.0)
     normalized = 1.0;
   return static_cast<float>(normalized);
+}
+
+std::optional<std::string> resolveCodexEmail(const OAuthAccount &acc) {
+  auto it = acc.metadata.find("email");
+  if (it != acc.metadata.end() && isLikelyEmail(it->second)) {
+    return it->second;
+  }
+  auto idToken = acc.metadata.find("id_token");
+  if (idToken != acc.metadata.end()) {
+    auto email = extractEmailFromJwt(idToken->second);
+    if (email.has_value() && isLikelyEmail(*email)) {
+      return email;
+    }
+  }
+  auto email = extractEmailFromJwt(acc.accessToken);
+  if (email.has_value() && isLikelyEmail(*email)) {
+    return email;
+  }
+  return std::nullopt;
+}
+
+bool normalizeCodexAccount(OAuthAccount &acc) {
+  bool changed = false;
+
+  if (auto email = resolveCodexEmail(acc); email.has_value()) {
+    if (acc.metadata["email"] != *email) {
+      acc.metadata["email"] = *email;
+      changed = true;
+    }
+    if (acc.identifier != *email) {
+      acc.identifier = *email;
+      changed = true;
+    }
+  } else if (acc.identifier.empty()) {
+    auto it = acc.metadata.find("chatgpt_account_id");
+    if (it != acc.metadata.end() && !it->second.empty()) {
+      acc.identifier = it->second;
+      changed = true;
+    }
+  } else if (!isLikelyEmail(acc.identifier) && isUuidLike(acc.identifier)) {
+    auto it = acc.metadata.find("chatgpt_account_id");
+    if (it != acc.metadata.end() && acc.identifier != it->second) {
+      acc.identifier = it->second;
+      changed = true;
+    }
+  }
+
+  for (auto it = acc.metadata.begin(); it != acc.metadata.end();) {
+    const bool removeQuota =
+        it->first.rfind("quota:", 0) == 0 && it->first != "quota:codex";
+    const bool removeReset = it->first.rfind("quota_reset:", 0) == 0 &&
+                             it->first != "quota_reset:codex";
+    if (removeQuota || removeReset) {
+      it = acc.metadata.erase(it);
+      changed = true;
+      continue;
+    }
+    ++it;
+  }
+
+  auto resetIt = acc.metadata.find("quota_reset:codex");
+  if (resetIt != acc.metadata.end()) {
+    std::string normalized = normalizeResetTimestamp(resetIt->second);
+    if (normalized != resetIt->second) {
+      resetIt->second = normalized;
+      changed = true;
+    }
+  }
+
+  return changed;
 }
 
 std::string roleToString(firmius::shared::Role role) {
@@ -809,8 +997,13 @@ public:
     acc.refreshToken = token.refresh;
     acc.tokenExpiration = nowSeconds() + token.expiresIn;
     acc.metadata["chatgpt_account_id"] = accountId.value();
-    auto email = extractEmailFromJwt(token.access);
-    acc.identifier = email.value_or(accountId.value());
+    if (!token.idToken.empty()) {
+      acc.metadata["id_token"] = token.idToken;
+    }
+    normalizeCodexAccount(acc);
+    if (acc.identifier.empty()) {
+      acc.identifier = accountId.value();
+    }
 
     provider_->addAccount(acc);
     return true;
@@ -831,7 +1024,20 @@ private:
   TempOAuthServer server_;
 };
 
-CodexProvider::CodexProvider() : BaseOAuthProvider(kProviderId) {}
+CodexProvider::CodexProvider() : BaseOAuthProvider(kProviderId) {
+  normalizeStoredAccounts();
+}
+
+void CodexProvider::normalizeStoredAccounts() {
+  std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
+  bool changed = false;
+  for (auto &acc : accounts_) {
+    changed = normalizeCodexAccount(acc) || changed;
+  }
+  if (changed) {
+    saveAccounts();
+  }
+}
 
 std::map<std::string, ModelInfo> CodexProvider::getStaticModels() {
   std::vector<ModelVariant> gpt54Variants = {
@@ -1013,12 +1219,12 @@ bool CodexProvider::refreshAccessToken(OAuthAccount &acc) {
   if (accountId.has_value() && !accountId->empty()) {
     acc.metadata["chatgpt_account_id"] = accountId.value();
   }
-  if (acc.identifier.empty()) {
-    auto email = extractEmailFromJwt(token.access);
-    if (email.has_value())
-      acc.identifier = email.value();
-    else if (accountId.has_value())
-      acc.identifier = accountId.value();
+  if (!token.idToken.empty()) {
+    acc.metadata["id_token"] = token.idToken;
+  }
+  normalizeCodexAccount(acc);
+  if (acc.identifier.empty() && accountId.has_value()) {
+    acc.identifier = accountId.value();
   }
 
   saveAccounts();
@@ -1047,20 +1253,20 @@ CodexProvider::getAllQuotas() const {
   std::map<std::string, std::vector<QuotaBucket>> result;
   for (const auto &acc : accounts_) {
     std::vector<QuotaBucket> buckets;
-    for (const auto &[key, val] : acc.metadata) {
-      if (key.rfind("quota:", 0) == 0) {
-        std::string model = key.substr(6);
-        float remaining = 0.0f;
-        try {
-          remaining = normalizeQuotaFraction(std::stod(val));
-        } catch (...) {
-          remaining = 0.0f;
-        }
-        std::string resetKey = "quota_reset:" + model;
-        std::string reset =
-            acc.metadata.count(resetKey) ? acc.metadata.at(resetKey) : "";
-        buckets.push_back({model, remaining, reset});
+    auto quotaIt = acc.metadata.find("quota:codex");
+    if (quotaIt != acc.metadata.end()) {
+      float remaining = 0.0f;
+      try {
+        remaining = normalizeQuotaFraction(std::stod(quotaIt->second));
+      } catch (...) {
+        remaining = 0.0f;
       }
+      std::string reset;
+      auto resetIt = acc.metadata.find("quota_reset:codex");
+      if (resetIt != acc.metadata.end()) {
+        reset = normalizeResetTimestamp(resetIt->second);
+      }
+      buckets.push_back({"codex", remaining, reset});
     }
     result[acc.getIdentifier()] = buckets;
   }
@@ -1188,7 +1394,8 @@ bool CodexProvider::isCodexMini(const std::string &modelId) {
 }
 
 std::string CodexProvider::getQuotaKey(const std::string &modelId) {
-  return normalizeModelId(modelId);
+  (void)modelId;
+  return "codex";
 }
 
 size_t CodexProvider::sseWriteCallback(char *ptr, size_t size, size_t nmemb,
@@ -1196,6 +1403,7 @@ size_t CodexProvider::sseWriteCallback(char *ptr, size_t size, size_t nmemb,
   auto *ctx = static_cast<StreamContext *>(userdata);
   if (ctx->abortSignal && ctx->abortSignal->load())
     return 0;
+  appendRawSseLog("chunk", std::string(ptr, size * nmemb));
   ctx->buffer.append(ptr, size * nmemb);
 
   size_t newlinePos;
@@ -1231,6 +1439,7 @@ void CodexProvider::processSseLine(
     return;
   if (!line.starts_with("data:"))
     return;
+  appendRawSseLog("line", line);
 
   std::string data = line.substr(5);
   data = StringUtil::trim(data);
@@ -1255,7 +1464,8 @@ void CodexProvider::processSseLine(
     return;
   }
 
-  if (type == "response.reasoning_text.delta") {
+  if (type == "response.reasoning_text.delta" ||
+      type == "response.reasoning.delta") {
     if (doc.HasMember("delta") && doc["delta"].IsString())
       onEvent(ThinkingChunk{doc["delta"].GetString(), ""});
     return;
@@ -1268,44 +1478,53 @@ void CodexProvider::processSseLine(
     return;
   }
 
-  if (type == "response.output_item.added") {
+  auto emitToolCallFromItem = [&](const rapidjson::Value &item,
+                                  int outputIndex) {
+    ToolCallState state;
+    auto existing = tracker.byIndex.find(outputIndex);
+    if (existing != tracker.byIndex.end()) {
+      state = existing->second;
+    }
+    if (item.HasMember("id") && item["id"].IsString())
+      state.itemId = item["id"].GetString();
+    if (item.HasMember("call_id") && item["call_id"].IsString())
+      state.callId = item["call_id"].GetString();
+    if (item.HasMember("name") && item["name"].IsString())
+      state.name = item["name"].GetString();
+    if (state.callId.empty())
+      state.callId = state.itemId;
+
+    tracker.byIndex[outputIndex] = state;
+    if (!state.itemId.empty())
+      tracker.indexByItemId[state.itemId] = outputIndex;
+
+    ToolCallChunk chunk;
+    chunk.id = state.callId;
+    chunk.index = static_cast<std::uint32_t>(std::max(outputIndex, 0));
+    chunk.nameDelta = state.name;
+    if (item.HasMember("arguments") && item["arguments"].IsString()) {
+      chunk.argsDelta = item["arguments"].GetString();
+    }
+    onEvent(chunk);
+  };
+
+  if (type == "response.output_item.added" ||
+      type == "response.output_item.done") {
     if (doc.HasMember("item") && doc["item"].IsObject()) {
       const auto &item = doc["item"];
       if (item.HasMember("type") && item["type"].IsString() &&
           std::string(item["type"].GetString()) == "function_call") {
-        ToolCallState state;
-        if (item.HasMember("id") && item["id"].IsString())
-          state.itemId = item["id"].GetString();
-        if (item.HasMember("call_id") && item["call_id"].IsString())
-          state.callId = item["call_id"].GetString();
-        if (item.HasMember("name") && item["name"].IsString())
-          state.name = item["name"].GetString();
-
         int outputIndex = 0;
         if (doc.HasMember("output_index") && doc["output_index"].IsInt())
           outputIndex = doc["output_index"].GetInt();
-
-        if (state.callId.empty())
-          state.callId = state.itemId;
-
-        tracker.byIndex[outputIndex] = state;
-        if (!state.itemId.empty())
-          tracker.indexByItemId[state.itemId] = outputIndex;
-
-        ToolCallChunk chunk;
-        chunk.id = state.callId;
-        chunk.index = static_cast<std::uint32_t>(outputIndex);
-        chunk.nameDelta = state.name;
-        if (item.HasMember("arguments") && item["arguments"].IsString()) {
-          chunk.argsDelta = item["arguments"].GetString();
-        }
-        onEvent(chunk);
+        emitToolCallFromItem(item, outputIndex);
       }
     }
     return;
   }
 
-  if (type == "response.function_call_arguments.delta") {
+  if (type == "response.function_call_arguments.delta" ||
+      type == "response.function_call_arguments.done") {
     int outputIndex = -1;
     if (doc.HasMember("output_index") && doc["output_index"].IsInt())
       outputIndex = doc["output_index"].GetInt();
@@ -1315,13 +1534,17 @@ void CodexProvider::processSseLine(
       if (tracker.indexByItemId.count(itemId))
         outputIndex = tracker.indexByItemId[itemId];
     }
-    if (outputIndex >= 0 && doc.HasMember("delta") && doc["delta"].IsString()) {
+    const char *argsField =
+        (type == "response.function_call_arguments.done") ? "arguments"
+                                                          : "delta";
+    if (outputIndex >= 0 && doc.HasMember(argsField) &&
+        doc[argsField].IsString()) {
       auto it = tracker.byIndex.find(outputIndex);
       ToolCallChunk chunk;
       if (it != tracker.byIndex.end())
         chunk.id = it->second.callId;
       chunk.index = static_cast<std::uint32_t>(outputIndex);
-      chunk.argsDelta = doc["delta"].GetString();
+      chunk.argsDelta = doc[argsField].GetString();
       onEvent(chunk);
     }
     return;
@@ -1376,33 +1599,13 @@ void CodexProvider::fetchAndStoreQuotas(OAuthAccount &acc) {
             acc.metadata["quota:codex"] = std::to_string(1.0f - (used / 100.0f));
           }
           if (pw.HasMember("reset_at") && pw["reset_at"].IsInt64()) {
-            acc.metadata["quota_reset:codex"] = std::to_string(pw["reset_at"].GetInt64());
-          }
-        }
-      }
-      
-      if (doc.HasMember("additional_rate_limits") && doc["additional_rate_limits"].IsArray()) {
-        const auto &arls = doc["additional_rate_limits"];
-        for (rapidjson::SizeType i = 0; i < arls.Size(); ++i) {
-          const auto &arl = arls[i];
-          if (arl.HasMember("limit_name") && arl["limit_name"].IsString() &&
-              arl.HasMember("rate_limit") && arl["rate_limit"].IsObject()) {
-            std::string name = arl["limit_name"].GetString();
-            const auto &rl = arl["rate_limit"];
-            if (rl.HasMember("primary_window") && rl["primary_window"].IsObject()) {
-              const auto &pw = rl["primary_window"];
-              if (pw.HasMember("used_percent") && pw["used_percent"].IsNumber()) {
-                float used = static_cast<float>(pw["used_percent"].GetDouble());
-                acc.metadata["quota:" + name] = std::to_string(1.0f - (used / 100.0f));
-              }
-              if (pw.HasMember("reset_at") && pw["reset_at"].IsInt64()) {
-                acc.metadata["quota_reset:" + name] = std::to_string(pw["reset_at"].GetInt64());
-              }
-            }
+            acc.metadata["quota_reset:codex"] =
+                epochSecondsToIso8601(pw["reset_at"].GetInt64());
           }
         }
       }
       acc.lastQuotaRefresh = nowSeconds();
+      normalizeCodexAccount(acc);
       saveAccounts();
     }
   }
@@ -1611,24 +1814,15 @@ void CodexProvider::stream(const AgentHistory &history,
           } catch (...) {}
         }
         if (resp.headers.count("x-codex-primary-reset-at")) {
-          acc.metadata["quota_reset:codex"] = resp.headers.at("x-codex-primary-reset-at");
-        }
-        
-        std::string quotaKey = getQuotaKey(effectiveModel);
-        if (resp.headers.count("x-" + quotaKey + "-primary-used-percent")) {
-          try {
-            float used = std::stof(resp.headers.at("x-" + quotaKey + "-primary-used-percent"));
-            acc.metadata["quota:" + quotaKey] = std::to_string(1.0f - (used / 100.0f));
-          } catch (...) {}
-        }
-        if (resp.headers.count("x-" + quotaKey + "-primary-reset-at")) {
-          acc.metadata["quota_reset:" + quotaKey] = resp.headers.at("x-" + quotaKey + "-primary-reset-at");
+          acc.metadata["quota_reset:codex"] =
+              normalizeResetTimestamp(resp.headers.at("x-codex-primary-reset-at"));
         }
 
-        if (acc.metadata.find("quota:" + quotaKey) == acc.metadata.end()) {
-          acc.metadata["quota:" + quotaKey] = "1";
+        if (acc.metadata.find("quota:codex") == acc.metadata.end()) {
+          acc.metadata["quota:codex"] = "1";
         }
-        
+
+        normalizeCodexAccount(acc);
         saveAccounts();
         return;
       }
@@ -1641,12 +1835,13 @@ void CodexProvider::stream(const AgentHistory &history,
       }
 
       if (code == 402 || code == 429) {
-        acc.metadata["quota:" + getQuotaKey(effectiveModel)] = "0";
+        acc.metadata["quota:codex"] = "0";
         if (resp.headers.count("retry-after")) {
           try {
             backoff = std::stoi(resp.headers.at("retry-after"));
           } catch (...) {}
         }
+        normalizeCodexAccount(acc);
         saveAccounts();
         markAccountRateLimited(acc, backoff);
         break;

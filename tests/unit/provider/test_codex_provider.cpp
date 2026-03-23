@@ -1,11 +1,42 @@
-#include "providers/CodexProvider.hpp"
-
-#include <gtest/gtest.h>
+#include <chrono>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <functional>
+#include <sstream>
+#include <string>
 #include <vector>
 
+#include <gtest/gtest.h>
+
+#include "providers/CodexProvider.hpp"
+
 using firmius::provider::CodexProvider;
+using firmius::shared::AgentMetrics;
+using firmius::shared::OAuthAccount;
+using firmius::shared::StreamEvent;
+using firmius::shared::ToolCallChunk;
+
+namespace firmius::provider {
+
+class CodexProviderTestAccessor {
+public:
+  using ToolCallTracker = CodexProvider::ToolCallTracker;
+
+  static void processSseLine(CodexProvider &provider, const std::string &line,
+                             std::function<void(const StreamEvent &)> &onEvent,
+                             AgentMetrics &metrics, bool &metricsReceived,
+                             bool &doneReceived, ToolCallTracker &tracker) {
+    provider.processSseLine(line, onEvent, metrics, metricsReceived,
+                            doneReceived, tracker);
+  }
+};
+
+} // namespace firmius::provider
 
 namespace {
+
+using firmius::provider::CodexProviderTestAccessor;
 
 bool containsModel(const std::vector<firmius::shared::ModelInfo> &models,
                    const std::string &id) {
@@ -15,6 +46,59 @@ bool containsModel(const std::vector<firmius::shared::ModelInfo> &models,
     }
   }
   return false;
+}
+
+std::string base64UrlEncode(const std::string &input) {
+  static const char *chars =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  std::string out;
+  int val = 0;
+  int valb = -6;
+  for (unsigned char c : input) {
+    val = (val << 8) + c;
+    valb += 8;
+    while (valb >= 0) {
+      out.push_back(chars[(val >> valb) & 0x3F]);
+      valb -= 6;
+    }
+  }
+  if (valb > -6) {
+    out.push_back(chars[((val << 8) >> (valb + 8)) & 0x3F]);
+  }
+  return out;
+}
+
+std::string makeJwt(const std::string &payloadJson) {
+  const std::string header = R"({"alg":"none","typ":"JWT"})";
+  return base64UrlEncode(header) + "." + base64UrlEncode(payloadJson) + ".sig";
+}
+
+class ScopedHomeOverride {
+public:
+  explicit ScopedHomeOverride(const std::filesystem::path &home)
+      : hadHome_(std::getenv("HOME") != nullptr),
+        originalHome_(hadHome_ ? std::getenv("HOME") : "") {
+    setenv("HOME", home.c_str(), 1);
+  }
+
+  ~ScopedHomeOverride() {
+    if (hadHome_) {
+      setenv("HOME", originalHome_.c_str(), 1);
+    } else {
+      unsetenv("HOME");
+    }
+  }
+
+private:
+  bool hadHome_ = false;
+  std::string originalHome_;
+};
+
+std::string readFile(const std::filesystem::path &path) {
+  std::ifstream in(path);
+  std::stringstream buffer;
+  buffer << in.rdbuf();
+  return buffer.str();
 }
 
 } // namespace
@@ -53,4 +137,113 @@ TEST(CodexProvider, ModelInfoNormalizesAndPreservesVariantMetadata) {
   ASSERT_EQ(gpt53Codex.variants.size(), 3u);
   EXPECT_EQ(gpt53Codex.variants.front().variantName, "low");
   EXPECT_EQ(gpt53Codex.variants.back().variantName, "high");
+}
+
+TEST(CodexProvider,
+     MigratesUuidIdentifiersToEmailsAndPrunesLegacyModelQuotaArtifacts) {
+  const auto tempHome =
+      std::filesystem::temp_directory_path() / "firmius_codex_test_home";
+  std::filesystem::remove_all(tempHome);
+  std::filesystem::create_directories(tempHome / ".firmius");
+  ScopedHomeOverride scopedHome(tempHome);
+
+  constexpr auto kAccountId = "42eac8d8-0048-4446-8a5c-28e10d1d7284";
+  constexpr auto kEmail = "blackwingbro@gmail.com";
+  const auto futureSeconds =
+      std::chrono::system_clock::to_time_t(std::chrono::system_clock::now()) +
+      86400;
+  const std::string accessToken = makeJwt(
+      std::string("{\"https://api.openai.com/profile\":{\"email\":\"") +
+      kEmail +
+      "\"},\"https://api.openai.com/auth\":{\"chatgpt_account_id\":\"" +
+      kAccountId + "\"}}");
+
+  const std::filesystem::path oauthPath = tempHome / ".firmius" / "oauth.json";
+  std::ofstream out(oauthPath);
+  out << R"({"codex":[{"identifier":")" << kAccountId
+      << R"(","refreshToken":"refresh-token","accessToken":")" << accessToken
+      << R"(","tokenExpiration":)" << futureSeconds
+      << R"(,"lastQuotaRefresh":)" << futureSeconds
+      << R"(,"metadata":{"chatgpt_account_id":")" << kAccountId
+      << R"(","quota:codex":"0.4","quota:gpt-5.4":"0.1","quota:gpt-5.4-mini":"0.2","quota_reset:codex":"1774834810","quota_reset:gpt-5.4":"1774834810"}}]})";
+  out.close();
+
+  CodexProvider provider;
+  const auto &accounts = provider.getAccounts();
+  ASSERT_EQ(accounts.size(), 1u);
+  const OAuthAccount &account = accounts.front();
+
+  EXPECT_EQ(account.identifier, kEmail);
+  ASSERT_TRUE(account.metadata.count("email"));
+  EXPECT_EQ(account.metadata.at("email"), kEmail);
+  EXPECT_FALSE(account.metadata.count("quota:gpt-5.4"));
+  EXPECT_FALSE(account.metadata.count("quota:gpt-5.4-mini"));
+  EXPECT_FALSE(account.metadata.count("quota_reset:gpt-5.4"));
+  ASSERT_TRUE(account.metadata.count("quota_reset:codex"));
+  EXPECT_NE(account.metadata.at("quota_reset:codex").find('T'),
+            std::string::npos);
+
+  const auto quotas = provider.getAllQuotas();
+  ASSERT_EQ(quotas.size(), 1u);
+  auto quotaIt = quotas.find(kEmail);
+  ASSERT_NE(quotaIt, quotas.end());
+  ASSERT_EQ(quotaIt->second.size(), 1u);
+  EXPECT_EQ(quotaIt->second.front().name, "codex");
+  EXPECT_NE(quotaIt->second.front().resetTime.find('T'), std::string::npos);
+
+  const std::string saved = readFile(oauthPath);
+  EXPECT_NE(saved.find(kEmail), std::string::npos);
+  EXPECT_EQ(saved.find("quota:gpt-5.4"), std::string::npos);
+  EXPECT_EQ(saved.find("quota:gpt-5.4-mini"), std::string::npos);
+}
+
+TEST(CodexProvider, ProcessSseLineEmitsToolChunkFromOutputItemDone) {
+  CodexProvider provider;
+  std::vector<StreamEvent> events;
+  AgentMetrics metrics;
+  bool metricsReceived = false;
+  bool doneReceived = false;
+  CodexProviderTestAccessor::ToolCallTracker tracker;
+  std::function<void(const StreamEvent &)> onEvent =
+      [&](const StreamEvent &event) { events.push_back(event); };
+
+  CodexProviderTestAccessor::processSseLine(
+      provider,
+      R"(data: {"type":"response.output_item.done","output_index":2,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"run_command"}})",
+      onEvent, metrics, metricsReceived, doneReceived, tracker);
+
+  ASSERT_EQ(events.size(), 1u);
+  const auto *chunk = std::get_if<ToolCallChunk>(&events.front());
+  ASSERT_NE(chunk, nullptr);
+  EXPECT_EQ(chunk->index, 2u);
+  EXPECT_EQ(chunk->id, "call_1");
+  EXPECT_EQ(chunk->nameDelta, "run_command");
+}
+
+TEST(CodexProvider,
+     ProcessSseLineEmitsFunctionArgumentsFromDoneEventWhenNoDeltaArrived) {
+  CodexProvider provider;
+  std::vector<StreamEvent> events;
+  AgentMetrics metrics;
+  bool metricsReceived = false;
+  bool doneReceived = false;
+  CodexProviderTestAccessor::ToolCallTracker tracker;
+  std::function<void(const StreamEvent &)> onEvent =
+      [&](const StreamEvent &event) { events.push_back(event); };
+
+  CodexProviderTestAccessor::processSseLine(
+      provider,
+      R"(data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_2","call_id":"call_2","name":"write_file"}})",
+      onEvent, metrics, metricsReceived, doneReceived, tracker);
+  CodexProviderTestAccessor::processSseLine(
+      provider,
+      R"(data: {"type":"response.function_call_arguments.done","output_index":0,"arguments":"{\"path\":\"notes.md\"}"})",
+      onEvent, metrics, metricsReceived, doneReceived, tracker);
+
+  ASSERT_EQ(events.size(), 2u);
+  const auto *chunk = std::get_if<ToolCallChunk>(&events.back());
+  ASSERT_NE(chunk, nullptr);
+  EXPECT_EQ(chunk->id, "call_2");
+  EXPECT_EQ(chunk->index, 0u);
+  EXPECT_EQ(chunk->argsDelta, R"({"path":"notes.md"})");
 }

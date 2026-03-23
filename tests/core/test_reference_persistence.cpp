@@ -275,7 +275,7 @@ TEST_F(ReferencePersistenceHarnessTest,
 }
 
 TEST_F(ReferencePersistenceHarnessTest,
-       MalformedReferenceFailsBeforeDispatchAndProviderCall) {
+       IncompleteArtifactPrefixPassesThroughAsLiteralUserText) {
   auto &harness = Harness::instance();
   const auto cwd = (testHome_ / "workspace");
   std::filesystem::create_directories(cwd);
@@ -284,9 +284,38 @@ TEST_F(ReferencePersistenceHarnessTest,
   ASSERT_FALSE(threadId.empty());
   harness.send("inspect @artifact:");
 
-  std::this_thread::sleep_for(std::chrono::milliseconds(100));
-  EXPECT_EQ(provider_->callCount(), 0);
-  EXPECT_TRUE(harness.focusedAgentId().empty());
+  auto agent = waitForFocusedAgent();
+  ASSERT_TRUE(agent);
+  ASSERT_TRUE(waitForIdle(agent->getContext().identity.id));
+  EXPECT_EQ(provider_->callCount(), 1);
+
+  const auto captured = provider_->capturedUserTexts();
+  ASSERT_FALSE(captured.empty());
+  EXPECT_EQ(captured.back(), "inspect @artifact:");
+}
+
+TEST_F(ReferencePersistenceHarnessTest,
+       TrailingArtifactPunctuationStillExpandsBeforeDispatch) {
+  auto &harness = Harness::instance();
+  const auto cwd = (testHome_ / "workspace");
+  std::filesystem::create_directories(cwd);
+
+  const std::string threadId = harness.newThread({}, cwd.string(), "lead");
+  ASSERT_FALSE(threadId.empty());
+
+  ThreadManager tm((testHome_ / ".firmius" / "threads").string());
+  tm.writeArtifact(threadId, "lead-agent", "lead", "REPORT.md", "artifact-body");
+
+  harness.send("review (@artifact:REPORT.md).");
+  auto agent = waitForFocusedAgent();
+  ASSERT_TRUE(agent);
+  ASSERT_TRUE(waitForIdle(agent->getContext().identity.id));
+
+  const auto captured = provider_->capturedUserTexts();
+  ASSERT_FALSE(captured.empty());
+  EXPECT_NE(captured.back().find("<artifact path=\"lead/REPORT.md\">"),
+            std::string::npos);
+  EXPECT_TRUE(!captured.back().empty() && captured.back().back() == '.');
 }
 
 } // namespace

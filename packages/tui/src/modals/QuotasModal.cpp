@@ -4,6 +4,10 @@
 #include "components/ScrollableBox.hpp"
 #include "harness/Harness.hpp"
 #include "modals/ModalLayout.hpp"
+#include <algorithm>
+#include <cctype>
+#include <cmath>
+#include <ctime>
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/mouse.hpp>
 #include <ftxui/dom/elements.hpp>
@@ -34,8 +38,8 @@ struct QuotaModalWidths {
 QuotaModalWidths computeQuotaModalWidths() {
   auto terminal = ftxui::Terminal::Size();
   int terminal_w = std::max(0, terminal.dimx);
-  int preferred_w = 80;
-  int padded_w = std::max(0, terminal_w - 4);
+  int preferred_w = 92;
+  int padded_w = std::max(0, terminal_w - 6);
   int window_w = std::min(preferred_w, padded_w);
   window_w = std::max(10, window_w);
   if (terminal_w > 0) {
@@ -57,20 +61,55 @@ std::time_t parseIso8601(const std::string &isoTime) {
   if (ss.fail()) {
     return 0;
   }
-  return std::mktime(&tm);
+#if defined(_WIN32)
+  return _mkgmtime(&tm);
+#else
+  return timegm(&tm);
+#endif
+}
+
+std::time_t parseResetTime(const std::string &value) {
+  if (value.empty()) {
+    return 0;
+  }
+  if (std::all_of(value.begin(), value.end(), [](unsigned char ch) {
+        return std::isdigit(ch);
+      })) {
+    try {
+      return static_cast<std::time_t>(std::stoll(value));
+    } catch (...) {
+      return 0;
+    }
+  }
+  return parseIso8601(value);
+}
+
+std::string prettifyBucketName(const std::string &bucketName) {
+  if (bucketName == "codex") {
+    return "Codex Window";
+  }
+  return bucketName;
+}
+
+std::string repeatGlyph(const std::string &glyph, int count) {
+  std::string out;
+  for (int i = 0; i < std::max(0, count); ++i) {
+    out += glyph;
+  }
+  return out;
 }
 
 /**
  * @brief Convert a timestamp to a human-readable relative time string
  */
-std::string humanizeResetTime(const std::string &isoTime) {
-  if (isoTime.empty()) {
+std::string humanizeResetTime(const std::string &rawTime) {
+  if (rawTime.empty()) {
     return "";
   }
 
-  std::time_t resetTime = parseIso8601(isoTime);
+  std::time_t resetTime = parseResetTime(rawTime);
   if (resetTime == 0) {
-    return isoTime; // Return as-is if parsing fails
+    return rawTime;
   }
 
   auto now = std::chrono::system_clock::now();
@@ -138,6 +177,7 @@ ftxui::Component QuotasModal::create(TuiState &state) {
                                            providerId = providerId_]() {
     const auto &theme = ThemeManager::instance().getCurrentTheme();
     const auto widths = computeQuotaModalWidths();
+    const int accountWidth = std::max(10, widths.inner_w - 4);
     if (*isLoading) {
       return ftxui::vbox(
           {ftxui::text("Fetching quotas...") | ftxui::center |
@@ -148,20 +188,6 @@ ftxui::Component QuotasModal::create(TuiState &state) {
     ftxui::Elements accounts_elements;
     header_hits->clear();
     header_hits->reserve(allQuotas->size());
-    int max_reset_len = 0;
-    for (const auto &[account, buckets] : *allQuotas) {
-      (void)account;
-      for (const auto &bucket : buckets) {
-        if (!bucket.resetTime.empty()) {
-          std::string humanized = humanizeResetTime(bucket.resetTime);
-          int len = static_cast<int>(humanized.size());
-          if (len > max_reset_len) {
-            max_reset_len = len;
-          }
-        }
-      }
-    }
-    int reset_reserve = std::clamp(max_reset_len + 1, 12, 28);
 
     if (allQuotas->empty()) {
       accounts_elements.push_back(
@@ -182,21 +208,19 @@ ftxui::Component QuotasModal::create(TuiState &state) {
         hit.account = account;
         header_hits->push_back(hit);
         auto &hit_box = header_hits->back().box;
-        std::string arrow = isCollapsed ? ">" : "v";
+        std::string arrow = isCollapsed ? "▸" : "▾";
         auto header_line =
             ftxui::hbox(
                 {ftxui::text(" " + arrow + " ") | ftxui::bold |
                      ftxui::color(theme.modals.highlight_fg),
-                 ftxui::text("Account: ") | ftxui::bold |
-                     ftxui::color(theme.modals.title),
                  ftxui::text(account) | ftxui::bold |
-                     ftxui::color(theme.modals.highlight_fg) | ftxui::flex}) |
-            ftxui::size(ftxui::WIDTH, ftxui::EQUAL, widths.inner_w) |
-            ftxui::bgcolor(theme.modals.highlight_bg) |
-            ftxui::reflect(hit_box);
+                     ftxui::color(theme.modals.highlight_fg) | ftxui::flex,
+                 ftxui::text(" connected ") |
+                     ftxui::color(theme.base.dim)}) |
+            ftxui::size(ftxui::WIDTH, ftxui::EQUAL, accountWidth) |
+            ftxui::bgcolor(theme.modals.highlight_bg) | ftxui::reflect(hit_box);
         bucket_elements.push_back(header_line);
-        bucket_elements.push_back(ftxui::separatorLight() |
-                                  ftxui::color(theme.modals.border));
+        bucket_elements.push_back(ftxui::text(""));
 
         if (isCollapsed) {
           // Skip rendering buckets when collapsed.
@@ -216,38 +240,56 @@ ftxui::Component QuotasModal::create(TuiState &state) {
             else if (bucket.remainingFraction < 0.5f)
               color = theme.modals.title;
 
-            // Compact mode: combine name + percentage
-            std::string compactLabel = bucket.name + " " + percentStr;
-
+            std::string humanized = humanizeResetTime(bucket.resetTime);
+            auto percentBadge = ftxui::text(" " + percentStr + " ") |
+                                ftxui::bold |
+                                ftxui::color(theme.modals.bg) |
+                                ftxui::bgcolor(color);
             ftxui::Element resetInfo = ftxui::text("");
-            if (!bucket.resetTime.empty()) {
-              std::string humanized = humanizeResetTime(bucket.resetTime);
-              resetInfo = ftxui::text(" " + humanized) |
+            if (!humanized.empty()) {
+              resetInfo = ftxui::text(" " + humanized + " ") |
                           ftxui::color(theme.base.dim) |
-                          ftxui::size(ftxui::WIDTH, ftxui::EQUAL,
-                                      reset_reserve) |
-                          ftxui::align_right;
+                          ftxui::bgcolor(theme.modals.highlight_bg);
             }
 
-            int gaugeWidth = std::max(10, widths.inner_w - reset_reserve);
-            auto gauge = ftxui::gauge(bucket.remainingFraction) |
-                         ftxui::color(color) |
-                         ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, 1) |
-                         ftxui::size(ftxui::WIDTH, ftxui::EQUAL, gaugeWidth);
-            auto label =
-                ftxui::text(" " + compactLabel) | ftxui::bold |
-                ftxui::color(theme.modals.fg) | ftxui::bgcolor(color);
-            ftxui::Element gauge_with_label =
-                ftxui::dbox({gauge, label}) | ftxui::flex;
+            int barUnits = std::clamp(accountWidth - 10, 18, 36);
+            const int filledUnits =
+                static_cast<int>(std::round(std::clamp(bucket.remainingFraction,
+                                                       0.0f, 1.0f) *
+                                            barUnits));
+            const int emptyUnits = std::max(0, barUnits - filledUnits);
+            auto meterRow =
+                ftxui::hbox({
+                    ftxui::text(repeatGlyph("█", filledUnits)) |
+                        ftxui::color(color),
+                    ftxui::text(repeatGlyph("░", emptyUnits)) |
+                        ftxui::color(theme.modals.border) | ftxui::dim,
+                    ftxui::filler(),
+                    percentBadge,
+                });
 
-            // Compact mode: label on gauge, then reset time
             bucket_elements.push_back(
-                ftxui::hbox({gauge_with_label, resetInfo}));
+                ftxui::vbox({
+                    ftxui::hbox({
+                        ftxui::text(" " + prettifyBucketName(bucket.name)) |
+                            ftxui::bold | ftxui::color(theme.modals.fg),
+                        ftxui::filler(),
+                        resetInfo,
+                    }),
+                    meterRow,
+                    ftxui::text(""),
+                }) |
+                ftxui::size(ftxui::WIDTH, ftxui::EQUAL, accountWidth));
           }
         }
-        accounts_elements.push_back(ftxui::vbox(std::move(bucket_elements)) |
-                                    ftxui::size(ftxui::WIDTH, ftxui::EQUAL,
-                                                widths.inner_w));
+        accounts_elements.push_back(
+            ftxui::hbox({
+                ftxui::text("  "),
+                ftxui::vbox(std::move(bucket_elements)) |
+                    ftxui::size(ftxui::WIDTH, ftxui::EQUAL, accountWidth) |
+                    ftxui::flex,
+                ftxui::text("  "),
+            }));
         accounts_elements.push_back(ftxui::text("")); // Spacer
       }
     }

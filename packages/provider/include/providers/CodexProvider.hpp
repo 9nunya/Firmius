@@ -27,6 +27,8 @@ public:
   std::optional<OAuthAccount *> getAvailableAccount(
       const std::optional<std::string> &modelId = std::nullopt) override;
 
+  friend class CodexProviderTestAccessor;
+
 private:
   struct ToolCallState {
     std::string itemId;
@@ -48,6 +50,7 @@ private:
   static std::string getQuotaKey(const std::string &modelId);
   static size_t sseWriteCallback(char *ptr, size_t size, size_t nmemb,
                                  void *userdata);
+  void normalizeStoredAccounts();
   void processSseLine(const std::string &line,
                       std::function<void(const StreamEvent &)> &onEvent,
                       AgentMetrics &metrics, bool &metricsReceived,

@@ -40,8 +40,7 @@ inline ftxui::Element FlatModalPanel(const Theme &theme, const std::string &titl
                        theme.modals.highlight_bg),
                    body,
                }) |
-               ftxui::bgcolor(theme.modals.bg) | ftxui::color(theme.modals.fg) |
-               ftxui::clear_under;
+               ftxui::bgcolor(theme.modals.bg) | ftxui::color(theme.modals.fg);
 
   if (max_width > 0) {
     panel = panel | ftxui::size(ftxui::WIDTH, ftxui::LESS_THAN, max_width);

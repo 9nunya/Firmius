@@ -96,6 +96,7 @@ public:
   // IProvider interface
   std::string getId() const override;
   ProviderType getProviderType() const override;
+  bool isConfigured() const override;
   
   // IProvider interface - stream, listModels, getModelInfo, generateSummary are implemented by subclasses
   bool supportsStreamUsage() const { return true; }

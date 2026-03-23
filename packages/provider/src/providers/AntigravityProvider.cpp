@@ -8,6 +8,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <fstream>
 #include <iostream>
 #include <mutex>
 #include <random>
@@ -23,6 +24,43 @@ namespace firmius::provider {
 using namespace firmius::utils;
 
 namespace {
+
+std::mutex gRawSseLogMutex;
+
+void appendRawSseLog(const char *kind, std::string_view payload) {
+  const char *path = std::getenv("FIRMIUS_ANTIGRAVITY_RAW_SSE_LOG");
+  const char *stdoutFlag = std::getenv("FIRMIUS_ANTIGRAVITY_RAW_SSE_STDOUT");
+  if ((!path || std::string_view(path).empty()) &&
+      (!stdoutFlag || std::string_view(stdoutFlag).empty())) {
+    return;
+  }
+
+  const auto now = std::chrono::system_clock::now();
+  const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                      now.time_since_epoch())
+                      .count();
+
+  std::lock_guard<std::mutex> lock(gRawSseLogMutex);
+  if (path && !std::string_view(path).empty()) {
+    std::ofstream out(path, std::ios::app);
+    if (out.is_open()) {
+      out << "[" << ms << "] [" << kind << "] ";
+      out.write(payload.data(), static_cast<std::streamsize>(payload.size()));
+      if (payload.empty() || payload.back() != '\n') {
+        out << '\n';
+      }
+    }
+  }
+  if (stdoutFlag && std::string_view(stdoutFlag).size() > 0 &&
+      std::string_view(stdoutFlag) != "0") {
+    std::cout << "[RAW_SSE " << kind << "] ";
+    std::cout.write(payload.data(), static_cast<std::streamsize>(payload.size()));
+    if (payload.empty() || payload.back() != '\n') {
+      std::cout << '\n';
+    }
+    std::cout << std::flush;
+  }
+}
 
 std::string getAntigravityVersion();
 
@@ -120,6 +158,26 @@ std::string fetchAntigravityVersionOnce() {
 }
 
 std::string getAntigravityVersion() { return fetchAntigravityVersionOnce(); }
+
+std::string serializeJsonValue(const rapidjson::Value &value) {
+  if (value.IsString()) {
+    return value.GetString();
+  }
+  rapidjson::StringBuffer sb;
+  rapidjson::Writer<rapidjson::StringBuffer> writer(sb);
+  value.Accept(writer);
+  return sb.GetString();
+}
+
+std::string extractFunctionCallArgs(const rapidjson::Value &functionCall) {
+  if (functionCall.HasMember("args")) {
+    return serializeJsonValue(functionCall["args"]);
+  }
+  if (functionCall.HasMember("arguments")) {
+    return serializeJsonValue(functionCall["arguments"]);
+  }
+  return "";
+}
 
 bool endsWithInsensitive(const std::string &value, const std::string &suffix) {
   if (value.size() < suffix.size())
@@ -339,6 +397,7 @@ size_t AntigravityProvider::sseWriteCallback(char *ptr, size_t size,
   auto *ctx = static_cast<StreamContext *>(userdata);
   if (ctx->abortSignal && ctx->abortSignal->load())
     return 0;
+  appendRawSseLog("CHUNK", std::string_view(ptr, size * nmemb));
   ctx->buffer.append(ptr, size * nmemb);
 
   size_t newlinePos;
@@ -738,6 +797,7 @@ bool AntigravityProvider::refreshAccessToken(OAuthAccount &acc) {
 void AntigravityProvider::processSSELine(
     const std::string &line,
     std::function<void(const StreamEvent &)> &onEvent) {
+  appendRawSseLog("LINE", line);
   if (line.empty() || line[0] == ':')
     return;
   std::string data = line.starts_with("data: ") ? line.substr(6) : line;
@@ -772,13 +832,16 @@ void AntigravityProvider::processSSELine(
       resp["candidates"].Size() > 0) {
     const auto &cand = resp["candidates"][0];
     if (cand.HasMember("content") && cand["content"].HasMember("parts")) {
-      for (const auto &part : cand["content"]["parts"].GetArray()) {
+      const auto &parts = cand["content"]["parts"];
+      for (rapidjson::SizeType partIndex = 0; partIndex < parts.Size();
+           ++partIndex) {
+        const auto &part = parts[partIndex];
         bool hasText = part.HasMember("text") && part["text"].IsString();
         bool hasThinking = part.HasMember("thinking") && part["thinking"].IsString();
-        bool isThinking = false;
-        if (part.HasMember("thought") && part["thought"].IsBool())
+        bool isThinking = hasThinking;
+        if (!isThinking && part.HasMember("thought") && part["thought"].IsBool())
           isThinking = part["thought"].GetBool();
-        else if (part.HasMember("type") && part["type"].IsString())
+        else if (!isThinking && part.HasMember("type") && part["type"].IsString())
           isThinking = (std::string(part["type"].GetString()) == "thinking");
 
         if (hasText || hasThinking) {
@@ -789,6 +852,9 @@ void AntigravityProvider::processSSELine(
             if (part.HasMember("thought_signature") &&
                 part["thought_signature"].IsString())
               signature = part["thought_signature"].GetString();
+            else if (part.HasMember("thoughtSignature") &&
+                     part["thoughtSignature"].IsString())
+              signature = part["thoughtSignature"].GetString();
             else if (part.HasMember("signature") && part["signature"].IsString())
               signature = part["signature"].GetString();
             onEvent(ThinkingChunk{text, signature});
@@ -798,20 +864,58 @@ void AntigravityProvider::processSSELine(
         } else if (part.HasMember("functionCall")) {
           const auto &fc = part["functionCall"];
           ToolCallChunk chunk;
-          chunk.index = toolCallCounter_++;
-          if (fc.HasMember("name"))
-            chunk.nameDelta = fc["name"].GetString();
-          if (fc.HasMember("id"))
-            chunk.id = fc["id"].GetString();
-          else
-            chunk.id = "gemini_call_" + std::to_string(chunk.index);
-          if (fc.HasMember("args")) {
-            rapidjson::StringBuffer sb;
-            rapidjson::Writer<rapidjson::StringBuffer> writer(sb);
-            fc["args"].Accept(writer);
-            chunk.argsDelta = sb.GetString();
+          const std::string streamKey =
+              fc.HasMember("id") && fc["id"].IsString()
+                  ? "id:" + std::string(fc["id"].GetString())
+                  : "part:" + std::to_string(partIndex);
+          auto &state = streamedToolCalls_[streamKey];
+          if (!state.hasIndex) {
+            state.index = toolCallCounter_++;
+            state.hasIndex = true;
+            state.emittedId =
+                fc.HasMember("id") && fc["id"].IsString()
+                    ? fc["id"].GetString()
+                    : "gemini_call_" + std::to_string(state.index);
           }
-          onEvent(chunk);
+
+          const std::string currentName =
+              fc.HasMember("name") && fc["name"].IsString()
+                  ? std::string(fc["name"].GetString())
+                  : std::string();
+          const std::string currentArgs = extractFunctionCallArgs(fc);
+
+          chunk.index = state.index;
+          chunk.id = state.emittedId;
+
+          if (!currentName.empty()) {
+            if (state.lastName.empty()) {
+              chunk.nameDelta = currentName;
+            } else if (currentName != state.lastName) {
+              if (currentName.rfind(state.lastName, 0) == 0) {
+                chunk.nameDelta = currentName.substr(state.lastName.size());
+              } else {
+                chunk.nameDelta = currentName;
+              }
+            }
+            state.lastName = currentName;
+          }
+
+          if (!currentArgs.empty()) {
+            if (state.lastArgs.empty()) {
+              chunk.argsDelta = currentArgs;
+            } else if (currentArgs != state.lastArgs) {
+              if (currentArgs.rfind(state.lastArgs, 0) == 0) {
+                chunk.argsDelta = currentArgs.substr(state.lastArgs.size());
+              } else {
+                chunk.argsDelta = currentArgs;
+              }
+            }
+            state.lastArgs = currentArgs;
+          }
+
+          if (!chunk.nameDelta.empty() || !chunk.argsDelta.empty()) {
+            onEvent(chunk);
+          }
         }
       }
     }
@@ -822,6 +926,7 @@ void AntigravityProvider::stream(
     const AgentHistory &history, const ProviderOptions &opts,
     std::function<void(const StreamEvent &)> onEvent) {
   toolCallCounter_ = 0;
+  streamedToolCalls_.clear();
   std::string requestedModel =
       opts.modelId.empty() ? "gemini-3-flash" : opts.modelId;
   std::string resolvedModel =

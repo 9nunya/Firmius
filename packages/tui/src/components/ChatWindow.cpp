@@ -370,7 +370,8 @@ public:
       });
     });
 
-    scrollable_ = firmius::tui::ScrollableBox(container_);
+    scrollable_ = firmius::tui::ScrollableBox(
+        container_, {.startAtBottom = true, .overlayScrollbar = true});
     Add(scrollable_);
   }
 

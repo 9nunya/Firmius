@@ -388,6 +388,7 @@ private:
   std::mutex modelsMutex_;
   bool isRefreshingModels_ = false;
   bool modelsLoaded_ = false;
+  bool engineListenerRegistered_ = false;
 
   // Tracking for detached background tasks (e.g. title generation)
   std::vector<std::jthread> backgroundThreads_;

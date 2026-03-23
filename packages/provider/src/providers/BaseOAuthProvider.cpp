@@ -83,6 +83,11 @@ firmius::provider::ProviderType BaseOAuthProvider::getProviderType() const {
   return firmius::provider::ProviderType::OAuth;
 }
 
+bool BaseOAuthProvider::isConfigured() const {
+  std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
+  return !accounts_.empty();
+}
+
 bool BaseOAuthProvider::isTokenExpired(const OAuthAccount &acc) const {
   // Treat as expired if we are within 5 minutes of expiration
   return getNowSeconds() >= (acc.tokenExpiration - 300);

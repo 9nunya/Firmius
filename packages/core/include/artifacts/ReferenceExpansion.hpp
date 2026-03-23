@@ -14,8 +14,9 @@ namespace firmius::core::artifacts {
  * - @path/to/file.ts
  * - @path/to/file.ts:370-500
  *
- * Throws std::runtime_error on malformed syntax, ambiguity, missing files,
- * missing artifacts, invalid ranges, or owner resolution failures.
+ * Throws std::runtime_error for recognized references that are ambiguous,
+ * missing, invalid, or fail owner resolution. Non-reference `@...` tokens are
+ * left untouched.
  */
 std::string expandInboundReferences(const std::string &threadId,
                                     const std::string &cwd,

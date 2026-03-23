@@ -38,6 +38,11 @@ firmius::provider::ProviderType BaseAPIKeyProvider::getProviderType() const {
   return firmius::provider::ProviderType::APIKey;
 }
 
+bool BaseAPIKeyProvider::isConfigured() const {
+  std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
+  return !accounts_.empty();
+}
+
 int64_t BaseAPIKeyProvider::getNowSeconds() {
   return std::chrono::duration_cast<std::chrono::seconds>(
              std::chrono::system_clock::now().time_since_epoch())

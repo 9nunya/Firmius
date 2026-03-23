@@ -1,6 +1,8 @@
 #include "modals/AccountsModal.hpp"
+
 #include "TUIState.hpp"
 #include "ThemeManager.hpp"
+#include "components/ScrollableBox.hpp"
 #include "harness/Harness.hpp"
 #include "modals/APIKeyWizardModal.hpp"
 #include "modals/ModalLayout.hpp"
@@ -8,7 +10,9 @@
 #include "providers/BaseAPIKeyProvider.hpp"
 #include "providers/BaseOAuthProvider.hpp"
 #include "providers/ProviderRegistry.hpp"
+#include <algorithm>
 #include <ftxui/component/component.hpp>
+#include <ftxui/component/mouse.hpp>
 #include <ftxui/dom/elements.hpp>
 #include <memory>
 #include <string>
@@ -29,12 +33,18 @@ ftxui::Component AccountsModal::create(TuiState &state) {
   auto isLoading = std::make_shared<bool>(true);
   auto providerId = providerId_;
   auto isAPIKeyProvider = std::make_shared<bool>(false);
+  auto rowBoxes = std::make_shared<std::vector<ftxui::Box>>();
+
+  auto accountCount = [oauthAccounts, apiKeyAccounts, isAPIKeyProvider]() {
+    return static_cast<int>(*isAPIKeyProvider ? apiKeyAccounts->size()
+                                              : oauthAccounts->size());
+  };
 
   auto refreshAccounts = [oauthAccounts, apiKeyAccounts, isLoading, providerId,
-                          isAPIKeyProvider, &state]() {
+                          isAPIKeyProvider, selected, accountCount, &state]() {
     *isLoading = true;
     std::thread([oauthAccounts, apiKeyAccounts, isLoading, providerId,
-                 isAPIKeyProvider, &state]() {
+                 isAPIKeyProvider, selected, accountCount, &state]() {
       auto provider =
           firmius::provider::ProviderRegistry::instance().getProvider(
               providerId);
@@ -52,6 +62,9 @@ ftxui::Component AccountsModal::create(TuiState &state) {
               firmius::core::Harness::instance().getAccounts(providerId);
         }
       }
+
+      const int count = accountCount();
+      *selected = count <= 0 ? 0 : std::clamp(*selected, 0, count - 1);
       *isLoading = false;
       state.postEvent(ftxui::Event::Custom);
     }).detach();
@@ -59,138 +72,205 @@ ftxui::Component AccountsModal::create(TuiState &state) {
 
   refreshAccounts();
 
-  auto component = ftxui::Renderer([oauthAccounts, apiKeyAccounts, selected,
-                                    isLoading, providerId, isAPIKeyProvider]() {
+  auto listContent = ftxui::Renderer([oauthAccounts, apiKeyAccounts, selected,
+                                      isAPIKeyProvider, rowBoxes]() {
     const auto &theme = ThemeManager::instance().getCurrentTheme();
+    const int total = static_cast<int>(*isAPIKeyProvider ? apiKeyAccounts->size()
+                                                         : oauthAccounts->size());
+    rowBoxes->assign(total, ftxui::Box{});
 
-    if (*isLoading) {
-      return FlatModalPanel(
-          theme, "Accounts: " + providerId,
-          ModalSection(
-              theme,
-              ftxui::vbox({ftxui::text("Loading accounts...") | ftxui::center |
-                               ftxui::color(theme.modals.fg),
-                           ftxui::text("") |
-                               ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, 5)}),
-              theme.modals.bg),
-          70, 18);
+    if (total == 0) {
+      return ftxui::vbox({
+          ftxui::text("No accounts connected.") | ftxui::center |
+              ftxui::color(theme.base.dim),
+      });
     }
 
     ftxui::Elements rows;
-
-    if (*isAPIKeyProvider) {
-      // Display API key accounts with safe filtering
-      for (int i = 0; i < (int)apiKeyAccounts->size(); ++i) {
+    rows.reserve(total * 2);
+    for (int i = 0; i < total; ++i) {
+      std::string identifier;
+      std::string rightBadge;
+      if (*isAPIKeyProvider) {
         const auto &acc = (*apiKeyAccounts)[i];
-        // Safe display: shows "Key #N (prefix...)"
-        std::string display = acc.identifier + " (" + acc.keyPrefix + "...)";
-        auto label = ftxui::text("  " + display + "  ");
-        if (i == *selected) {
-          label = label | ftxui::inverted | ftxui::bold |
-                  ftxui::color(theme.modals.highlight_fg) |
-                  ftxui::bgcolor(theme.modals.highlight_bg);
-        } else {
-          label = label | ftxui::color(theme.modals.fg);
-        }
-        rows.push_back(label);
+        identifier = acc.identifier + " (" + acc.keyPrefix + "...)";
+        rightBadge = "key";
+      } else {
+        identifier = (*oauthAccounts)[i].identifier;
+        rightBadge = "oauth";
       }
-    } else {
-      // Display OAuth accounts
-      for (int i = 0; i < (int)oauthAccounts->size(); ++i) {
-        auto label = ftxui::text("  " + (*oauthAccounts)[i].identifier + "  ");
-        if (i == *selected) {
-          label = label | ftxui::inverted | ftxui::bold |
-                  ftxui::color(theme.modals.highlight_fg) |
-                  ftxui::bgcolor(theme.modals.highlight_bg);
-        } else {
-          label = label | ftxui::color(theme.modals.fg);
-        }
-        rows.push_back(label);
-      }
-    }
 
-    if (rows.empty()) {
-      rows.push_back(ftxui::text("No accounts connected.") |
-                     ftxui::color(theme.base.dim) | ftxui::center);
-    }
-
-    return FlatModalPanel(
-        theme, "Manage Accounts: " + providerId,
-        ModalSection(
-            theme,
-            ftxui::vbox({
-                ftxui::text("Select an account to manage:") |
-                    ftxui::color(theme.base.dim),
-                ftxui::text(""),
-                ModalSection(
-                    theme,
-                    ftxui::vbox(rows) | ftxui::vscroll_indicator |
-                        ftxui::yframe |
-                        ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, 8),
-                    theme.base.bg),
-                ftxui::text(""),
-                ftxui::hbox(
-                    {ftxui::text(" [A] ") | ftxui::bold |
-                         ftxui::color(theme.modals.highlight_fg),
-                     ftxui::text(" Add Account   ") |
-                         ftxui::color(theme.modals.fg),
-                     ftxui::text(" [D] ") | ftxui::bold |
-                         ftxui::color(theme.status_bar.error.normal.fg),
-                     ftxui::text(" Delete Selected ") |
+      auto row = ftxui::hbox({
+                     ftxui::text("  "),
+                     ftxui::text(identifier) | ftxui::bold |
                          ftxui::color(theme.modals.fg),
                      ftxui::filler(),
-                     ftxui::text(" [ESC] ") | ftxui::bold |
+                     ftxui::text(rightBadge + "  ") |
                          ftxui::color(theme.base.dim),
-                     ftxui::text(" Close ") |
-                         ftxui::color(theme.modals.fg)}) |
-                    ftxui::center,
-                ftxui::separatorLight() | ftxui::color(theme.modals.border),
-                ftxui::hbox({ftxui::text(" ↑↓ ") | ftxui::bold |
-                                 ftxui::color(theme.modals.title),
-                             ftxui::text("navigate elements")}) |
-                    ftxui::center | ftxui::color(theme.base.dim),
-            }),
-            theme.modals.bg),
-        78, 24);
+                 }) |
+                 ftxui::reflect(rowBoxes->at(i));
+
+      if (i == *selected) {
+        row = row | ftxui::bgcolor(theme.modals.highlight_bg) |
+              ftxui::color(theme.modals.highlight_fg);
+      }
+
+      rows.push_back(row);
+      rows.push_back(ftxui::text(""));
+    }
+    return ftxui::vbox(std::move(rows));
+  });
+
+  auto scrollable = ScrollableBox(listContent);
+
+  auto component = ftxui::Renderer(scrollable, [oauthAccounts, apiKeyAccounts,
+                                                selected, isLoading, providerId,
+                                                isAPIKeyProvider, scrollable,
+                                                accountCount]() {
+    const auto &theme = ThemeManager::instance().getCurrentTheme();
+    const auto terminal = ftxui::Terminal::Size();
+    const int panelWidth = std::clamp(std::max(0, terminal.dimx - 8), 58, 90);
+    const int panelHeight = std::clamp(std::max(0, terminal.dimy - 6), 18, 24);
+    const int total = accountCount();
+    const int listHeight = std::max(6, panelHeight - 11);
+
+    if (*isLoading) {
+      return FlatModalPanel(
+          theme, "Manage Accounts: " + providerId,
+          ModalSection(
+              theme,
+              ftxui::vbox({
+                  ftxui::text("Loading accounts...") | ftxui::center |
+                      ftxui::color(theme.modals.fg),
+                  ftxui::text("") |
+                      ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, 5),
+              }),
+              theme.modals.bg),
+          panelWidth, 16);
+    }
+
+    auto body = ftxui::vbox({
+        ftxui::text("Select an account to manage:") |
+            ftxui::color(theme.base.dim),
+        ftxui::text(""),
+        ftxui::hbox({
+            ftxui::text(" Connected Accounts ") | ftxui::bold |
+                ftxui::color(theme.modals.fg),
+            ftxui::filler(),
+            ftxui::text(" " + std::to_string(total) + " total ") |
+                ftxui::bgcolor(theme.modals.highlight_bg) |
+                ftxui::color(theme.modals.highlight_fg),
+        }),
+        ftxui::text(""),
+        scrollable->Render() | ftxui::xflex |
+            ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, listHeight),
+        ftxui::text(""),
+        ftxui::hbox(
+            {ftxui::text(" [A] ") | ftxui::bold |
+                 ftxui::color(theme.modals.highlight_fg),
+             ftxui::text(" Add Account   ") | ftxui::color(theme.modals.fg),
+             ftxui::text(" [D] ") | ftxui::bold |
+                 ftxui::color(theme.status_bar.error.normal.fg),
+             ftxui::text(" Delete Selected ") |
+                 ftxui::color(theme.modals.fg),
+             ftxui::filler(),
+             ftxui::text(" [ESC] ") | ftxui::bold |
+                 ftxui::color(theme.base.dim),
+             ftxui::text(" Close ") | ftxui::color(theme.modals.fg)}) |
+            ftxui::center,
+        ftxui::separatorLight() | ftxui::color(theme.modals.border),
+        ftxui::text("↑↓ navigate, wheel scroll, click select") |
+            ftxui::center | ftxui::color(theme.base.dim),
+    });
+
+    return FlatModalPanel(theme, "Manage Accounts: " + providerId,
+                          ModalSection(theme, std::move(body), theme.modals.bg),
+                          panelWidth, panelHeight);
   });
 
   return ftxui::CatchEvent(component, [oauthAccounts, apiKeyAccounts, selected,
                                        providerId, isAPIKeyProvider,
-                                       refreshAccounts,
-                                       &state](ftxui::Event event) {
+                                       refreshAccounts, rowBoxes, scrollable,
+                                       accountCount, &state](ftxui::Event event) {
+    const auto clampSelection = [&]() {
+      const int count = accountCount();
+      *selected = count <= 0 ? 0 : std::clamp(*selected, 0, count - 1);
+    };
+
     if (event == ftxui::Event::Escape) {
       state.popModal();
       return true;
     }
-    if (event == ftxui::Event::ArrowUp) {
-      if (*selected > 0)
-        (*selected)--;
+    if (event == ftxui::Event::ArrowUp || event == ftxui::Event::PageUp ||
+        event == ftxui::Event::Home) {
+      if (event == ftxui::Event::Home) {
+        *selected = 0;
+      } else if (event == ftxui::Event::PageUp) {
+        *selected = std::max(0, *selected - 5);
+      } else if (*selected > 0) {
+        --(*selected);
+      }
+      clampSelection();
+      scrollable->OnEvent(event);
       return true;
     }
-    if (event == ftxui::Event::ArrowDown) {
-      if (*selected < (int)(*isAPIKeyProvider ? apiKeyAccounts->size()
-                                              : oauthAccounts->size()) -
-                          1)
-        (*selected)++;
+    if (event == ftxui::Event::ArrowDown || event == ftxui::Event::PageDown ||
+        event == ftxui::Event::End) {
+      const int count = accountCount();
+      if (event == ftxui::Event::End && count > 0) {
+        *selected = count - 1;
+      } else if (event == ftxui::Event::PageDown && count > 0) {
+        *selected = std::min(count - 1, *selected + 5);
+      } else if (*selected < count - 1) {
+        ++(*selected);
+      }
+      clampSelection();
+      scrollable->OnEvent(event);
       return true;
+    }
+    if (event.is_mouse()) {
+      const auto mouse = event.mouse();
+      const bool isDragRelatedLeftMouse =
+          mouse.button == ftxui::Mouse::Left ||
+          mouse.motion == ftxui::Mouse::Moved ||
+          mouse.motion == ftxui::Mouse::Released;
+      if (isDragRelatedLeftMouse && scrollable->OnEvent(event)) {
+        return true;
+      }
+      if (mouse.button == ftxui::Mouse::WheelUp && *selected > 0) {
+        --(*selected);
+      }
+      if (mouse.button == ftxui::Mouse::WheelDown &&
+          *selected < accountCount() - 1) {
+        ++(*selected);
+      }
+      clampSelection();
+      if (mouse.button == ftxui::Mouse::Left &&
+          mouse.motion == ftxui::Mouse::Pressed) {
+        for (int i = 0; i < static_cast<int>(rowBoxes->size()); ++i) {
+          if (rowBoxes->at(i).Contain(mouse.x, mouse.y)) {
+            *selected = i;
+            return true;
+          }
+        }
+      }
+      if (isDragRelatedLeftMouse) {
+        return false;
+      }
+      return scrollable->OnEvent(event);
     }
     if (event == ftxui::Event::Delete ||
         event == ftxui::Event::Character('d') ||
         event == ftxui::Event::Character('D')) {
       if (!(*isAPIKeyProvider ? apiKeyAccounts->empty()
                               : oauthAccounts->empty()) &&
-          *selected < (int)(*isAPIKeyProvider ? apiKeyAccounts->size()
-                                              : oauthAccounts->size())) {
-        std::string identifier = *isAPIKeyProvider
-                                     ? (*apiKeyAccounts)[*selected].identifier
-                                     : (*oauthAccounts)[*selected].identifier;
-        firmius::core::Harness::instance().deleteAccount(providerId,
-                                                         identifier);
+          *selected < static_cast<int>(*isAPIKeyProvider ? apiKeyAccounts->size()
+                                                         : oauthAccounts->size())) {
+        const std::string identifier = *isAPIKeyProvider
+                                           ? (*apiKeyAccounts)[*selected].identifier
+                                           : (*oauthAccounts)[*selected].identifier;
+        firmius::core::Harness::instance().deleteAccount(providerId, identifier);
         refreshAccounts();
-        if (*selected >= (int)(*isAPIKeyProvider ? apiKeyAccounts->size()
-                                                 : oauthAccounts->size()) &&
-            *selected > 0)
-          (*selected)--;
       }
       return true;
     }
@@ -200,15 +280,14 @@ ftxui::Component AccountsModal::create(TuiState &state) {
           firmius::provider::ProviderRegistry::instance().getProvider(
               providerId);
       if (provider) {
-        // Try API key provider first
         auto apiKeyProvider =
             std::dynamic_pointer_cast<firmius::provider::BaseAPIKeyProvider>(
                 provider);
         if (apiKeyProvider) {
           auto wizard = apiKeyProvider->beginConnectionWizard();
           if (wizard) {
-            auto modalObj = std::make_shared<APIKeyWizardModal>(
-                std::move(wizard), providerId);
+            auto modalObj =
+                std::make_shared<APIKeyWizardModal>(std::move(wizard), providerId);
             state.deferUiMutation([&state, modalObj]() {
               state.popModalImmediate();
               state.openModalDirect(modalObj->create(state));
@@ -217,15 +296,14 @@ ftxui::Component AccountsModal::create(TuiState &state) {
           return true;
         }
 
-        // Fall back to OAuth provider
         auto oauthProvider =
             std::dynamic_pointer_cast<firmius::provider::BaseOAuthProvider>(
                 provider);
         if (oauthProvider) {
           auto wizard = oauthProvider->beginConnectionWizard();
           if (wizard) {
-            auto modalObj = std::make_shared<OAuthWizardModal>(
-                std::move(wizard), providerId);
+            auto modalObj =
+                std::make_shared<OAuthWizardModal>(std::move(wizard), providerId);
             state.deferUiMutation([&state, modalObj]() {
               state.popModalImmediate();
               state.openModalDirect(modalObj->create(state));

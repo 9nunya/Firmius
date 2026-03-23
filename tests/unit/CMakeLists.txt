@@ -128,6 +128,19 @@ target_include_directories(test_qwen_provider PRIVATE
 )
 gtest_discover_tests(test_qwen_provider)
 
+add_executable(test_antigravity_provider
+    provider/test_antigravity_provider.cpp
+)
+target_link_libraries(test_antigravity_provider PRIVATE
+    firmius::provider
+    firmius::shared
+    GTest::gtest_main
+)
+target_include_directories(test_antigravity_provider PRIVATE
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_antigravity_provider)
+
 add_executable(test_codex_provider
     provider/test_codex_provider.cpp
 )

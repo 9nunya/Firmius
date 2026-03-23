@@ -112,8 +112,7 @@ ThreadPermissionMode nextThreadPermissionMode(ThreadPermissionMode mode) {
 }
 
 std::string getFirmiusHome() {
-  static const std::string resolvedHome = resolveWritableFirmiusHome();
-  return resolvedHome;
+  return resolveWritableFirmiusHome();
 }
 
 std::string getSessionPath() { return getFirmiusHome() + "/" + SESSION_FILE; }
@@ -220,6 +219,17 @@ Harness::Harness()
 void Harness::init() {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
 
+  threadManager_ = ThreadManager(getFirmiusHome() + "/threads");
+  currentThreadId_.clear();
+  focusedAgentId_.clear();
+  threadAgentMap_.clear();
+  {
+    std::lock_guard<std::mutex> modelLock(modelsMutex_);
+    cachedModels_.clear();
+    isRefreshingModels_ = false;
+    modelsLoaded_ = false;
+  }
+
   shared::Panic::addExtraInfo(
       PANIC_INFO_HARNESS_STATE, [this]() -> std::string {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -254,10 +264,13 @@ void Harness::init() {
     }
   }
 
-  Engine::instance().addEventListener(
-      [this](const firmius::shared::AppEvent &event) {
-        this->routeEngineEvent(event);
-      });
+  if (!engineListenerRegistered_) {
+    Engine::instance().addEventListener(
+        [this](const firmius::shared::AppEvent &event) {
+          this->routeEngineEvent(event);
+        });
+    engineListenerRegistered_ = true;
+  }
 
   std::ifstream sessionFile(getSessionPath());
   if (sessionFile.is_open()) {
@@ -1427,13 +1440,19 @@ std::vector<ModelInfo> Harness::listAllModels() {
     auto providerIds = provider::ProviderRegistry::instance().listProviderIds();
     for (const auto &pid : providerIds) {
       auto prov = provider::ProviderRegistry::instance().getProvider(pid);
-      if (prov) {
+      if (prov && prov->isConfigured()) {
         try {
           auto models = prov->listModels();
           all.insert(all.end(), models.begin(), models.end());
         } catch (...) {
         }
       }
+
+      {
+        std::lock_guard<std::mutex> innerLock(modelsMutex_);
+        cachedModels_ = all;
+      }
+      emitEvent(firmius::shared::AppEvent(firmius::shared::ModelsRefreshed{}));
     }
 
     {

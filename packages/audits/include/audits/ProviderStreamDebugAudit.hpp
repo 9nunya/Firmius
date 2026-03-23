@@ -12,8 +12,12 @@ using namespace firmius::shared;
 /**
  * @brief Debug audit that logs EVERY chunk from a provider stream to STDOUT.
  *
- * Usage: firmius_audit --audit provider_stream_debug <provider_id> [model_id] [--history-variant=<variant>]
- *        firmius_audit --audit provider_stream_debug <provider_id> [model_id] --thread-id=<threadId> [--thread-agent=<agentId>]
+ * Usage: firmius_audit --audit provider_stream_debug <provider_id> [model_id]
+ *          [--history-variant=<variant>] [--variant=<model-variant>]
+ *        firmius_audit --audit provider_stream_debug <provider_id> [model_id]
+ *          --thread-id=<threadId> [--thread-agent=<agentId>]
+ *        firmius_audit --audit provider_stream_debug <provider_id> [model_id]
+ *          [--variant=<model-variant>] --tool-preparing-suite
  * 
  * History variants for testing edge cases:
  * - normal_agentic: Standard conversation with user/assistant messages
@@ -21,6 +25,9 @@ using namespace firmius::shared;
  * - multiple_tool_results: Multiple tool results in sequence
  * - tool_then_error: Tool result followed by error message
  * - error_then_tool: Error message followed by tool result
+ * - thinking_long_tool_call: Should emit thinking plus a long streamed tool call
+ * - multi_turn_thinking_preparing: Multi-turn follow-up that should think and prepare a tool call
+ * - parallel_tool_preparing: Should think and prepare multiple tool calls in parallel
  */
 class ProviderStreamDebugAudit : public IAudit {
 public:

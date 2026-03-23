@@ -2,6 +2,7 @@
 
 #include "providers/BaseOAuthProvider.hpp"
 #include <map>
+#include <unordered_map>
 #include <rapidjson/document.h>
 #include <memory>
 
@@ -48,6 +49,14 @@ public:
   void fetchAndStoreQuotas(OAuthAccount &acc);
 
 private:
+  struct StreamedToolCallState {
+    std::string emittedId;
+    std::string lastName;
+    std::string lastArgs;
+    std::uint32_t index = 0;
+    bool hasIndex = false;
+  };
+
   // Fetches the managed project ID from Antigravity
   std::string fetchManagedProject(OAuthAccount &acc);
   // Resolves a usable project ID for streaming requests.
@@ -56,6 +65,7 @@ private:
   static std::map<std::string, ModelInfo> getStaticModels();
 
   uint32_t toolCallCounter_ = 0;
+  std::unordered_map<std::string, StreamedToolCallState> streamedToolCalls_;
 
   // Sends the internal Antigravity proxy request (v1internal:streamGenerateContent)
   void executeStreamRequest(OAuthAccount &acc, const AgentHistory &history,

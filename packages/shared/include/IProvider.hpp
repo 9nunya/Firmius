@@ -96,10 +96,16 @@ struct ProviderOptions {
     */
     virtual std::map<std::string, std::string> getQuotas() const { return {}; }
 
-    /**
-     * @brief Returns the type of authentication this provider uses.
-     */
-    virtual ProviderType getProviderType() const = 0;
+  /**
+   * @brief Returns the type of authentication this provider uses.
+   */
+  virtual ProviderType getProviderType() const = 0;
+
+  /**
+   * @brief Returns whether this provider is configured enough to be offered in
+   * interactive model pickers.
+   */
+  virtual bool isConfigured() const { return true; }
   };
 
 } // namespace firmius::provider

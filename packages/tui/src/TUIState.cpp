@@ -1635,8 +1635,7 @@ ftxui::Component TuiState::root() {
     ftxui::Element current = base_view->Render();
     for (const auto &modal : modals_) {
       current = ftxui::dbox(
-          {DarkenElement(current),
-           modal->Render() | ftxui::clear_under | ftxui::center});
+          {DarkenElement(current), modal->Render() | ftxui::center});
     }
     return current;
   });

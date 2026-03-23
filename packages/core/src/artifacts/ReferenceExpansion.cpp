@@ -20,6 +20,11 @@ struct Replacement {
   std::string value;
 };
 
+struct TokenWithSuffix {
+  std::string core;
+  std::string suffix;
+};
+
 std::string threadStorageRootPath() {
   if (const char *home = std::getenv("HOME")) {
     return std::string(home) + "/.firmius/threads";
@@ -65,6 +70,38 @@ bool isTrailingPunctuation(char c) {
   default:
     return false;
   }
+}
+
+TokenWithSuffix splitTrailingPunctuation(const std::string &token) {
+  TokenWithSuffix split{token, ""};
+  while (!split.core.empty() && isTrailingPunctuation(split.core.back())) {
+    split.suffix.insert(split.suffix.begin(), split.core.back());
+    split.core.pop_back();
+  }
+  return split;
+}
+
+bool isLikelyFileReference(const std::string &token, const std::string &cwd) {
+  static const std::regex kFilePattern(
+      R"(^@([A-Za-z0-9_./\-]+)(?::([0-9]+)-([0-9]+))?$)");
+  std::smatch match;
+  if (!std::regex_match(token, match, kFilePattern)) {
+    return false;
+  }
+
+  const std::string relativePath = match[1].str();
+  if (relativePath.find('/') != std::string::npos ||
+      relativePath.find('.') != std::string::npos) {
+    return true;
+  }
+
+  std::filesystem::path resolvedPath =
+      std::filesystem::path(relativePath).is_absolute()
+          ? std::filesystem::path(relativePath)
+          : (std::filesystem::path(cwd) / relativePath);
+  resolvedPath = resolvedPath.lexically_normal();
+  return std::filesystem::exists(resolvedPath) &&
+         std::filesystem::is_regular_file(resolvedPath);
 }
 
 std::string xmlEscape(const std::string &input) {
@@ -311,36 +348,23 @@ std::string expandInboundReferences(const std::string &threadId,
     if (!hasReferenceBoundary(text, start)) {
       continue;
     }
-    const std::string token = it->str();
-    replacements.push_back(
-        {start, length,
-         expandSingleReference(token, threadId, cwd, threadManager, artifacts)});
-  }
-
-  static const std::regex kTokenPattern(R"(@[^\s]+)");
-  for (std::sregex_iterator it(text.begin(), text.end(), kTokenPattern), end;
-       it != end; ++it) {
-    const std::size_t start = static_cast<std::size_t>(it->position());
-    const std::size_t length = static_cast<std::size_t>(it->length());
-    if (!hasReferenceBoundary(text, start)) {
+    if (start + length < text.size() && text[start + length] == ':' &&
+        it->str().rfind("@artifact:", 0) != 0) {
       continue;
     }
-
-    auto replacementIt = std::find_if(
-        replacements.begin(), replacements.end(),
-        [&](const Replacement &replacement) { return replacement.start == start; });
-    if (replacementIt == replacements.end()) {
-      throw std::runtime_error("Malformed reference syntax: " + it->str());
+    TokenWithSuffix token = splitTrailingPunctuation(it->str());
+    if (token.core.empty() || token.core == "@artifact:") {
+      continue;
     }
-
-    if (replacementIt->length < length) {
-      const std::string suffix = it->str().substr(replacementIt->length);
-      for (char c : suffix) {
-        if (!isTrailingPunctuation(c)) {
-          throw std::runtime_error("Malformed reference syntax: " + it->str());
-        }
-      }
+    if (token.core.rfind("@artifact:", 0) != 0 &&
+        !isLikelyFileReference(token.core, cwd)) {
+      continue;
     }
+    replacements.push_back(
+        {start, length,
+         expandSingleReference(token.core, threadId, cwd, threadManager,
+                               artifacts) +
+             token.suffix});
   }
 
   if (replacements.empty()) {

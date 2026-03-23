@@ -5,6 +5,7 @@
 #include "modals/ModalLayout.hpp"
 #include "utils/ModelPickerEntries.hpp"
 #include <algorithm>
+#include <atomic>
 #include <ftxui/component/component.hpp>
 #include <ftxui/dom/elements.hpp>
 #include <string>
@@ -51,6 +52,7 @@ ftxui::Component RouterModal::create(TuiState &state) {
   auto filtered_model_indices = std::make_shared<std::vector<int>>();
   auto selected_model_index = std::make_shared<int>(0);
   auto display_model_entries = std::make_shared<std::vector<std::string>>();
+  auto models_loading = std::make_shared<bool>(true);
   auto model_menu =
       ftxui::Menu(display_model_entries.get(), selected_model_index.get());
 
@@ -88,9 +90,11 @@ ftxui::Component RouterModal::create(TuiState &state) {
     }
   };
 
-  auto refreshModelEntries = [model_entries, rebuildModelFilter]() {
-    auto models = firmius::core::Harness::instance().listAllModels();
+  auto refreshModelEntries = [model_entries, rebuildModelFilter, models_loading]() {
+    auto &h = firmius::core::Harness::instance();
+    auto models = h.listAllModels();
     *model_entries = BuildModelPickerEntries(models, true);
+    *models_loading = !h.isModelsLoaded();
     rebuildModelFilter();
   };
 
@@ -113,12 +117,26 @@ ftxui::Component RouterModal::create(TuiState &state) {
   refresh();
   refreshModelEntries();
 
+  auto needsModelRefresh = std::make_shared<std::atomic<bool>>(false);
+  int subId = firmius::core::Harness::instance().subscribe(
+      [needsModelRefresh, &state](const firmius::shared::AppEvent &event) {
+        if (std::holds_alternative<firmius::shared::ModelsRefreshed>(event)) {
+          *needsModelRefresh = true;
+          state.postEvent(ftxui::Event::Custom);
+        }
+      });
+
   auto component = ftxui::Renderer(
       [categories, selected, mode, message, category_name, model_filter,
-       selectedCategory, model_menu, rebuildModelFilter]() {
+       selectedCategory, model_menu, rebuildModelFilter, refreshModelEntries,
+       needsModelRefresh, models_loading]() {
         const auto &theme = ThemeManager::instance().getCurrentTheme();
         const auto cfg = firmius::core::Harness::instance().getConfig();
 
+        if (*needsModelRefresh) {
+          *needsModelRefresh = false;
+          refreshModelEntries();
+        }
         rebuildModelFilter();
 
         ftxui::Elements rows;
@@ -180,6 +198,10 @@ ftxui::Component RouterModal::create(TuiState &state) {
               ftxui::text(*model_filter) | ftxui::underlined |
                   ftxui::color(theme.modals.fg),
           }));
+          if (*models_loading) {
+            rows.push_back(ftxui::text("Scanning providers... results populate as they arrive.") |
+                           ftxui::color(theme.base.dim));
+          }
           rows.push_back(model_menu->Render() | ftxui::vscroll_indicator |
                          ftxui::frame |
                          ftxui::size(ftxui::HEIGHT, ftxui::LESS_THAN, 10));
@@ -195,6 +217,10 @@ ftxui::Component RouterModal::create(TuiState &state) {
               ftxui::text(*model_filter) | ftxui::underlined |
                   ftxui::color(theme.modals.fg),
           }));
+          if (*models_loading) {
+            rows.push_back(ftxui::text("Scanning providers... results populate as they arrive.") |
+                           ftxui::color(theme.base.dim));
+          }
           rows.push_back(model_menu->Render() | ftxui::vscroll_indicator |
                          ftxui::frame |
                          ftxui::size(ftxui::HEIGHT, ftxui::LESS_THAN, 10));
@@ -229,9 +255,14 @@ ftxui::Component RouterModal::create(TuiState &state) {
        model_entries, filtered_model_indices, selected_model_index, model_menu,
        selectedCategory, refresh, saveConfig, rebuildModelFilter,
        refreshModelEntries](ftxui::Event event) {
+        const auto closeModal = [&]() {
+          firmius::core::Harness::instance().unsubscribe(subId);
+          state.popModal();
+        };
+
         if (event == ftxui::Event::Escape) {
           if (*mode == RouterEditMode::Browse) {
-            state.popModal();
+            closeModal();
             return true;
           }
           *mode = RouterEditMode::Browse;

@@ -413,4 +413,26 @@ TEST_F(SubagentArtifactMetadataTest,
   EXPECT_EQ(provider->callCount(), 0);
 }
 
+TEST_F(SubagentArtifactMetadataTest,
+       TrailingArtifactPunctuationStillDispatchesChildAgentSafely) {
+  auto provider = std::make_shared<ArtifactToolProvider>(
+      "subagent-artifact-provider-punctuation", true);
+  configureDefaultProvider(provider);
+
+  ThreadManager tm((testHome_ / ".firmius" / "threads").string());
+  tm.writeArtifact(threadId_, "planner-agent", "planner", "REPORT.md", "alpha");
+
+  SubagentTool tool;
+  SubagentInput input;
+  input.persona = "coder";
+  input.task = "Review (@artifact:REPORT.md). Then write a report.";
+  input.name = "child-punctuation";
+  input.title = "Child Punctuation";
+  input.async = false;
+
+  ToolContext ctx{host_, parent_, "subagent-artifacts-reference-punctuation"};
+  ToolResult result = tool.execute(input, ctx);
+  ASSERT_TRUE(result.success) << result.error;
+}
+
 } // namespace

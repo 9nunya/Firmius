@@ -118,11 +118,6 @@ TEST_F(ReferenceExpansionTest, FailsForAmbiguousArtifactAndInvalidSyntax) {
       firmius::core::artifacts::expandInboundReferences(
           threadId_, cwd_.string(), "Use @artifact:REPORT.md"),
       std::runtime_error);
-
-  EXPECT_THROW(
-      firmius::core::artifacts::expandInboundReferences(
-          threadId_, cwd_.string(), "Bad token @artifact:"),
-      std::runtime_error);
 }
 
 TEST_F(ReferenceExpansionTest, FailsForInvalidOrOutOfBoundsRanges) {
@@ -140,6 +135,29 @@ TEST_F(ReferenceExpansionTest, FailsForInvalidOrOutOfBoundsRanges) {
       firmius::core::artifacts::expandInboundReferences(
           threadId_, cwd_.string(), "Bad @src/file.ts:1-20"),
       std::runtime_error);
+}
+
+TEST_F(ReferenceExpansionTest,
+       PreservesTrailingPunctuationAroundExpandedArtifactReferences) {
+  writeManifest({{"agent-a", {"planner", "", "planner", "Planner", true}}});
+  manager_->writeArtifact(threadId_, "agent-a", "planner", "REPORT.md", "alpha");
+
+  const std::string expanded = firmius::core::artifacts::expandInboundReferences(
+      threadId_, cwd_.string(), "Review (@artifact:planner/REPORT.md).");
+  EXPECT_NE(expanded.find("<artifact path=\"planner/REPORT.md\">"),
+            std::string::npos);
+  EXPECT_TRUE(!expanded.empty() && expanded.back() == '.');
+  EXPECT_NE(expanded.find("Review ("), std::string::npos);
+}
+
+TEST_F(ReferenceExpansionTest,
+       LeavesIncompleteAndNonReferenceAtTokensUntouched) {
+  const std::string expanded = firmius::core::artifacts::expandInboundReferences(
+      threadId_, cwd_.string(),
+      "Keep @artifact: literal, mention @teammate, and keep test@example.com.");
+  EXPECT_EQ(
+      expanded,
+      "Keep @artifact: literal, mention @teammate, and keep test@example.com.");
 }
 
 } // namespace

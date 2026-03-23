@@ -36,6 +36,8 @@ private:
   ThemeManager();
   ~ThemeManager() = default;
 
+  void loadPersistedSelection();
+  void persistSelection() const;
   void
   loadSystemThemes(); // From /usr/local/share/firmius/themes or project/themes
   void loadUserThemes(); // From ~/.firmius/themes

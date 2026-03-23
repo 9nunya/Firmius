@@ -11,6 +11,7 @@
 #include <sstream>
 #include <atomic>
 #include <fstream>
+#include <set>
 
 namespace firmius::audits {
 
@@ -49,6 +50,110 @@ std::string escapeString(const std::string& s) {
 // Global flag to enable raw SSE logging for codex provider
 std::atomic<bool> gLogRawSse{false};
 std::ofstream gSseLogFile;
+
+struct ScenarioExpectations {
+    bool requireThinking = false;
+    bool requireToolChunks = false;
+    std::size_t minDistinctToolCalls = 0;
+};
+
+struct ScenarioStats {
+    int eventCount = 0;
+    int errorCount = 0;
+    int textCount = 0;
+    int thinkingCount = 0;
+    int toolChunkCount = 0;
+    std::set<std::string> toolCallIds;
+};
+
+std::vector<ToolDefinition> genericDebugTools() {
+    return {
+        {"list_files", "List files in a directory",
+         R"({"type":"object","properties":{"path":{"type":"string"}},"required":["path"]})"},
+        {"read_file", "Read a file from disk",
+         R"({"type":"object","properties":{"path":{"type":"string"}},"required":["path"]})"},
+        {"write_file", "Write file contents",
+         R"({"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]})"},
+        {"run_command", "Run a command",
+         R"({"type":"object","properties":{"command":{"type":"string"}},"required":["command"]})"},
+    };
+}
+
+std::vector<ToolDefinition> buildToolsForVariant(const std::string& variant) {
+    if (variant == "thinking_long_tool_call") {
+        return {
+            {"write_strategy_packet",
+             "Write a long strategy packet with executive summary, migration plan, and risk register",
+             R"({"type":"object","properties":{"title":{"type":"string"},"executive_summary_markdown":{"type":"string"},"migration_plan_markdown":{"type":"string"},"risk_register_markdown":{"type":"string"},"open_questions":{"type":"array","items":{"type":"string"}},"decision_log":{"type":"array","items":{"type":"string"}}},"required":["title","executive_summary_markdown","migration_plan_markdown","risk_register_markdown","open_questions","decision_log"]})"},
+        };
+    }
+    if (variant == "multi_turn_thinking_preparing") {
+        return {
+            {"revise_strategy_packet",
+             "Rewrite an existing strategy packet after major new constraints arrive",
+             R"({"type":"object","properties":{"title":{"type":"string"},"changed_constraints":{"type":"array","items":{"type":"string"}},"revised_executive_summary_markdown":{"type":"string"},"revised_migration_plan_markdown":{"type":"string"},"revised_risk_register_markdown":{"type":"string"},"validation_appendix_markdown":{"type":"string"}},"required":["title","changed_constraints","revised_executive_summary_markdown","revised_migration_plan_markdown","revised_risk_register_markdown","validation_appendix_markdown"]})"},
+        };
+    }
+    if (variant == "parallel_tool_preparing") {
+        return {
+            {"write_exec_summary",
+             "Write the executive summary document for leadership",
+             R"({"type":"object","properties":{"title":{"type":"string"},"summary_markdown":{"type":"string"},"decision_points":{"type":"array","items":{"type":"string"}}},"required":["title","summary_markdown","decision_points"]})"},
+            {"write_migration_plan",
+             "Write the detailed migration plan document for engineering",
+             R"({"type":"object","properties":{"title":{"type":"string"},"plan_markdown":{"type":"string"},"workstreams":{"type":"array","items":{"type":"string"}}},"required":["title","plan_markdown","workstreams"]})"},
+            {"write_risk_register",
+             "Write the risk register document for rollout and operations",
+             R"({"type":"object","properties":{"title":{"type":"string"},"risk_markdown":{"type":"string"},"mitigations":{"type":"array","items":{"type":"string"}}},"required":["title","risk_markdown","mitigations"]})"},
+        };
+    }
+    return genericDebugTools();
+}
+
+ScenarioExpectations expectationsForVariant(const std::string& variant) {
+    if (variant == "thinking_long_tool_call") {
+        ScenarioExpectations expectations;
+        expectations.requireThinking = true;
+        expectations.requireToolChunks = true;
+        expectations.minDistinctToolCalls = 1;
+        return expectations;
+    }
+    if (variant == "multi_turn_thinking_preparing") {
+        ScenarioExpectations expectations;
+        expectations.requireThinking = true;
+        expectations.requireToolChunks = true;
+        expectations.minDistinctToolCalls = 1;
+        return expectations;
+    }
+    if (variant == "parallel_tool_preparing") {
+        ScenarioExpectations expectations;
+        expectations.requireThinking = true;
+        expectations.requireToolChunks = true;
+        expectations.minDistinctToolCalls = 3;
+        return expectations;
+    }
+    return {};
+}
+
+std::optional<ModelVariant> findModelVariant(const std::vector<ModelInfo>& models,
+                                             const std::string& modelId,
+                                             const std::string& variantName) {
+    if (variantName.empty()) {
+        return std::nullopt;
+    }
+    for (const auto& model : models) {
+        if (model.id != modelId) {
+            continue;
+        }
+        for (const auto& variant : model.variants) {
+            if (variant.variantName == variantName) {
+                return variant;
+            }
+        }
+        break;
+    }
+    return std::nullopt;
+}
 }
 
 std::string ProviderStreamDebugAudit::getId() const { return "provider_stream_debug"; }
@@ -298,6 +403,96 @@ AgentHistory ProviderStreamDebugAudit::buildHistoryVariant(const std::string& va
         turn6.messages.push_back(assistantRetry);
         history.turns.push_back(turn6);
         
+    } else if (variant == "thinking_long_tool_call") {
+        AgentTurn turn;
+        Message msg;
+        msg.role = Role::User;
+        msg.content.push_back(TextContent{
+            "You are writing a strategy packet for a high-risk platform change. "
+            "Think carefully first, because the problem is intentionally hard: "
+            "a company must migrate from session cookies plus background API "
+            "keys to short-lived scoped service tokens, without forcing mobile "
+            "logout, while preserving auditability, supporting multi-region "
+            "failover, and surviving a staged migration where old and new auth "
+            "systems coexist for 30 days. There are conflicting goals around "
+            "latency, blast radius, token revocation, support operations, and "
+            "customer-visible incident handling. Then call exactly one tool, "
+            "`write_strategy_packet`, before any prose. Make the tool payload "
+            "long: write substantial markdown for an executive summary, a "
+            "detailed migration plan, and a risk register, each rich enough to "
+            "read like the draft of a real internal document."});
+        turn.messages.push_back(msg);
+        history.turns.push_back(turn);
+
+    } else if (variant == "multi_turn_thinking_preparing") {
+        AgentTurn turn1;
+        Message userMsg;
+        userMsg.role = Role::User;
+        userMsg.content.push_back(TextContent{
+            "We need a delivery plan for migrating our authentication service."});
+        turn1.messages.push_back(userMsg);
+        history.turns.push_back(turn1);
+
+        AgentTurn turn2;
+        Message assistantTool;
+        assistantTool.role = Role::Assistant;
+        ToolCallContent toolCall;
+        toolCall.id = "plan_call_1";
+        toolCall.name = "revise_strategy_packet";
+        toolCall.args =
+            R"({"title":"Auth migration packet v1","changed_constraints":["maintain uptime during rollout"],"revised_executive_summary_markdown":"Initial packet focusing on service-token migration and compatibility windows.","revised_migration_plan_markdown":"Phase 1 inventory, Phase 2 compatibility layer, Phase 3 shadow validation.","revised_risk_register_markdown":"Primary risks: stale sessions, token propagation lag, support confusion.","validation_appendix_markdown":"Baseline metrics and smoke checks captured."})";
+        assistantTool.content.push_back(toolCall);
+        turn2.messages.push_back(assistantTool);
+        history.turns.push_back(turn2);
+
+        AgentTurn turn3;
+        Message toolResult;
+        toolResult.role = Role::ToolResult;
+        ToolResultContent result;
+        result.toolCallId = "plan_call_1";
+        result.result =
+            R"({"status":"stored","version":"v1","notes":"Initial auth migration plan recorded."})";
+        toolResult.content.push_back(result);
+        turn3.messages.push_back(toolResult);
+        history.turns.push_back(turn3);
+
+        AgentTurn turn4;
+        Message followupUser;
+        followupUser.role = Role::User;
+        followupUser.content.push_back(TextContent{
+            "A second wave of constraints arrived after leadership review. "
+            "Think again before acting. The migration packet must now handle "
+            "multi-region failover, backwards-compatible parsing of legacy "
+            "sessions for 30 days, mobile client rollout with stale app "
+            "versions, emergency token revocation under partial outages, legal "
+            "requirements for audit retention, and a customer-support playbook "
+            "for account lockouts. Call `revise_strategy_packet` before any "
+            "prose. Make the new tool payload substantially larger than the "
+            "earlier packet and rewrite it like a serious revision, not a short "
+            "patch."});
+        turn4.messages.push_back(followupUser);
+        history.turns.push_back(turn4);
+
+    } else if (variant == "parallel_tool_preparing") {
+        AgentTurn turn;
+        Message msg;
+        msg.role = Role::User;
+        msg.content.push_back(TextContent{
+            "This is a heavy writing task with three independent deliverables "
+            "for the same risky auth migration: a leadership executive summary, "
+            "an engineering migration plan, and an operations risk register. "
+            "Think first because the tradeoffs are real: phased coexistence of "
+            "old and new auth, mobile rollout lag, regional failover, token "
+            "revocation semantics, customer support burden, and auditability. "
+            "Then prepare multiple tool calls before any prose. Call "
+            "`write_exec_summary`, `write_migration_plan`, and "
+            "`write_risk_register` in parallel. Each tool payload should carry "
+            "substantial markdown that reads like the start of a real document. "
+            "Do not merge them into one tool call and do not answer normally "
+            "before those tools are prepared."});
+        turn.messages.push_back(msg);
+        history.turns.push_back(turn);
+        
     } else {
         // Default: simple prompt
         AgentTurn turn;
@@ -325,9 +520,10 @@ shared::AuditResult ProviderStreamDebugAudit::run(const std::vector<std::string>
     result.auditId = getId();
 
     if (args.empty()) {
-        std::cerr << "Usage: firmius_audit --audit provider_stream_debug <provider_id> [model_id] [--history-variant=<variant>]" << std::endl;
-        std::cerr << "       firmius_audit --audit provider_stream_debug <provider_id> [model_id] --thread-id=<threadId> [--thread-agent=<agentId>]" << std::endl;
-        std::cerr << "Example: firmius_audit --audit provider_stream_debug qwen qwen3-coder-flash" << std::endl;
+        std::cerr << "Usage: firmius_audit --audit provider_stream_debug <provider_id> [model_id] [--history-variant=<variant>] [--variant=<model-variant>] [--raw-sse-log=<path>] [--raw-sse-stdout]" << std::endl;
+        std::cerr << "       firmius_audit --audit provider_stream_debug <provider_id> [model_id] --thread-id=<threadId> [--thread-agent=<agentId>] [--variant=<model-variant>]" << std::endl;
+        std::cerr << "       firmius_audit --audit provider_stream_debug <provider_id> [model_id] [--variant=<model-variant>] --tool-preparing-suite" << std::endl;
+        std::cerr << "Example: firmius_audit --audit provider_stream_debug antigravity claude-opus-4-6-thinking --variant=max --history-variant=thinking_long_tool_call" << std::endl;
         std::cerr << std::endl;
         std::cerr << "History variants for testing edge cases:" << std::endl;
         std::cerr << "  --history-variant=normal_agentic       Standard conversation" << std::endl;
@@ -336,6 +532,12 @@ shared::AuditResult ProviderStreamDebugAudit::run(const std::vector<std::string>
         std::cerr << "  --history-variant=tool_then_error      Tool result then error" << std::endl;
         std::cerr << "  --history-variant=error_then_tool      Error then tool result" << std::endl;
         std::cerr << "  --history-variant=mixed_agentic        Complex mixed scenario" << std::endl;
+        std::cerr << "  --history-variant=thinking_long_tool_call" << std::endl;
+        std::cerr << "  --history-variant=multi_turn_thinking_preparing" << std::endl;
+        std::cerr << "  --history-variant=parallel_tool_preparing" << std::endl;
+        std::cerr << "  --tool-preparing-suite                 Run all three preparing/thinking scenarios and fail if expected events are missing" << std::endl;
+        std::cerr << "  --raw-sse-log=/tmp/provider_sse.log    Capture raw SSE chunks and lines before parsing" << std::endl;
+        std::cerr << "  --raw-sse-stdout                      Mirror raw SSE to stdout during the run" << std::endl;
         result.exitCode = 1;
         result.passed = false;
         return result;
@@ -363,6 +565,10 @@ shared::AuditResult ProviderStreamDebugAudit::run(const std::vector<std::string>
     std::string historyVariant = "default";
     std::string threadId;
     std::string threadAgentId;
+    std::string modelVariantName;
+    std::string rawSseLogPath;
+    bool toolPreparingSuite = false;
+    bool rawSseStdout = false;
     for (const auto& arg : args) {
         if (arg.find("--history-variant=") == 0) {
             historyVariant = arg.substr(18);
@@ -370,7 +576,26 @@ shared::AuditResult ProviderStreamDebugAudit::run(const std::vector<std::string>
             threadId = arg.substr(12);
         } else if (arg.find("--thread-agent=") == 0) {
             threadAgentId = arg.substr(15);
+        } else if (arg.find("--variant=") == 0) {
+            modelVariantName = arg.substr(10);
+        } else if (arg.find("--model-variant=") == 0) {
+            modelVariantName = arg.substr(16);
+        } else if (arg == "--tool-preparing-suite") {
+            toolPreparingSuite = true;
+        } else if (arg.find("--raw-sse-log=") == 0) {
+            rawSseLogPath = arg.substr(14);
+        } else if (arg == "--raw-sse-stdout") {
+            rawSseStdout = true;
+        } else if (arg == "--raw-sse") {
+            rawSseLogPath = "/tmp/firmius_provider_raw_sse.log";
         }
+    }
+
+    if (toolPreparingSuite && !threadId.empty()) {
+        std::cerr << "--tool-preparing-suite cannot be combined with --thread-id" << std::endl;
+        result.exitCode = 1;
+        result.passed = false;
+        return result;
     }
 
     if (modelId.empty()) {
@@ -395,20 +620,172 @@ shared::AuditResult ProviderStreamDebugAudit::run(const std::vector<std::string>
         return result;
     }
 
+    ProviderOptions baseOpts;
+    baseOpts.modelId = modelId;
+    baseOpts.temperature = 0.7f;
+    if (!modelVariantName.empty()) {
+        auto variant = findModelVariant(models, modelId, modelVariantName);
+        if (!variant.has_value()) {
+            std::cerr << "Model variant not found: " << modelVariantName
+                      << " for model " << modelId << std::endl;
+            result.exitCode = 1;
+            result.passed = false;
+            return result;
+        }
+        baseOpts.modelVariantJson = variant->extraMetadataJson;
+    }
+
     std::cout << "Model: " << modelId << std::endl;
+    if (!modelVariantName.empty()) {
+        std::cout << "Model Variant: " << modelVariantName << std::endl;
+    }
+    if (!rawSseLogPath.empty()) {
+        std::cout << "Raw SSE Log: " << rawSseLogPath << std::endl;
+    }
+    if (rawSseStdout) {
+        std::cout << "Raw SSE Stdout: enabled" << std::endl;
+    }
     if (!threadId.empty()) {
         std::cout << "Thread Id: " << threadId << std::endl;
         if (!threadAgentId.empty()) {
             std::cout << "Thread Agent: " << threadAgentId << std::endl;
         }
+    } else if (toolPreparingSuite) {
+        std::cout << "Scenario Suite: tool_preparing_suite" << std::endl;
     } else {
         std::cout << "History Variant: " << historyVariant << std::endl;
     }
     std::cout << "====================================" << std::endl;
     std::cout << std::endl;
 
-    // Build history based on variant or load from thread
-    AgentHistory history;
+    if (!rawSseLogPath.empty()) {
+        std::ofstream truncate(rawSseLogPath, std::ios::trunc);
+        truncate.close();
+        setenv("FIRMIUS_ANTIGRAVITY_RAW_SSE_LOG", rawSseLogPath.c_str(), 1);
+        setenv("FIRMIUS_CODEX_RAW_SSE_LOG", rawSseLogPath.c_str(), 1);
+    } else {
+        unsetenv("FIRMIUS_ANTIGRAVITY_RAW_SSE_LOG");
+        unsetenv("FIRMIUS_CODEX_RAW_SSE_LOG");
+    }
+    if (rawSseStdout) {
+        setenv("FIRMIUS_ANTIGRAVITY_RAW_SSE_STDOUT", "1", 1);
+        setenv("FIRMIUS_CODEX_RAW_SSE_STDOUT", "1", 1);
+    } else {
+        unsetenv("FIRMIUS_ANTIGRAVITY_RAW_SSE_STDOUT");
+        unsetenv("FIRMIUS_CODEX_RAW_SSE_STDOUT");
+    }
+
+    auto runScenario = [&](const std::string& scenarioName,
+                           const AgentHistory& history,
+                           const std::vector<ToolDefinition>& tools,
+                           const ScenarioExpectations& expectations) {
+        ProviderOptions opts = baseOpts;
+        opts.tools = tools;
+
+        std::cout << "--- Scenario: " << scenarioName << " ---" << std::endl;
+        std::cout << "Tool count: " << tools.size() << std::endl;
+        for (const auto& tool : tools) {
+            std::cout << "  tool: " << tool.name << std::endl;
+        }
+        if (!rawSseLogPath.empty()) {
+            std::ofstream raw(rawSseLogPath, std::ios::app);
+            if (raw.is_open()) {
+                raw << "\n=== SCENARIO " << scenarioName << " ===\n";
+            }
+        }
+        std::cout << "--- Stream Events (timestamp | type | data) ---" << std::endl;
+
+        ScenarioStats stats;
+        provider->stream(history, opts, [&](const StreamEvent& ev) {
+            std::string ts = getTimestamp();
+            stats.eventCount++;
+
+            if (auto* txt = std::get_if<TextChunk>(&ev)) {
+                stats.textCount++;
+                std::cout << "[" << ts << "] [TEXT] \"" << escapeString(txt->delta) << "\"" << std::endl;
+            } else if (auto* thk = std::get_if<ThinkingChunk>(&ev)) {
+                stats.thinkingCount++;
+                std::cout << "[" << ts << "] [THINKING] delta=\"" << escapeString(thk->delta)
+                          << "\" signature=\"" << escapeString(thk->signature) << "\"" << std::endl;
+            } else if (auto* tcc = std::get_if<ToolCallChunk>(&ev)) {
+                stats.toolChunkCount++;
+                std::string toolKey = !tcc->id.empty()
+                                          ? tcc->id
+                                          : ("index:" + std::to_string(tcc->index));
+                stats.toolCallIds.insert(toolKey);
+                std::cout << "[" << ts << "] [TOOL_CHUNK] index=" << tcc->index
+                          << " id=" << tcc->id
+                          << " name=" << tcc->nameDelta
+                          << " args=" << escapeString(tcc->argsDelta) << std::endl;
+            } else if (auto* met = std::get_if<AgentMetrics>(&ev)) {
+                std::cout << "[" << ts << "] [METRICS] prompt=" << met->tokens.prompt
+                          << " completion=" << met->tokens.completion
+                          << " total=" << met->tokens.total
+                          << " cache_read=" << met->tokens.cacheRead
+                          << " cache_write=" << met->tokens.cacheWrite
+                          << " reasoning=" << met->tokens.reasoning
+                          << " context_size=" << met->tokens.contextSize << std::endl;
+            } else if (auto* done = std::get_if<StreamDone>(&ev)) {
+                std::string reasonStr;
+                switch (done->reason) {
+                    case StopReason::Stop: reasonStr = "stop"; break;
+                    case StopReason::ToolUse: reasonStr = "tool_use"; break;
+                    case StopReason::MaxTokens: reasonStr = "max_tokens"; break;
+                    case StopReason::ContentFilter: reasonStr = "content_filter"; break;
+                    case StopReason::Error: reasonStr = "error"; break;
+                    case StopReason::Cancelled: reasonStr = "cancelled"; break;
+                }
+                std::cout << "[" << ts << "] [STREAM_DONE] reason=" << reasonStr << std::endl;
+            } else if (auto* err = std::get_if<StreamError>(&ev)) {
+                stats.errorCount++;
+                std::cout << "[" << ts << "] [STREAM_ERROR] httpStatus=" << err->httpStatus
+                          << " account=" << err->accountLocator
+                          << " message=\"" << err->message << "\"" << std::endl;
+            } else if (auto* retry = std::get_if<StreamRetrying>(&ev)) {
+                std::cout << "[" << ts << "] [STREAM_RETRYING] attempt=" << retry->attempt
+                          << " of " << retry->maxAttempts
+                          << " delay_ms=" << retry->delayMs
+                          << " reason=\"" << retry->reason << "\"" << std::endl;
+            } else if (auto* switched = std::get_if<StreamAccountSwitched>(&ev)) {
+                std::cout << "[" << ts << "] [STREAM_ACCOUNT_SWITCHED] account="
+                          << switched->accountLocator << std::endl;
+            } else {
+                std::cout << "[" << ts << "] [UNKNOWN_EVENT] variant_index="
+                          << ev.index() << std::endl;
+            }
+            std::cout << std::flush;
+        });
+
+        bool passedScenario = stats.errorCount == 0;
+        if (expectations.requireThinking && stats.thinkingCount == 0) {
+            std::cout << "[ASSERT] Missing thinking events" << std::endl;
+            passedScenario = false;
+        }
+        if (expectations.requireToolChunks && stats.toolChunkCount == 0) {
+            std::cout << "[ASSERT] Missing tool preparing chunks" << std::endl;
+            passedScenario = false;
+        }
+        if (stats.toolCallIds.size() < expectations.minDistinctToolCalls) {
+            std::cout << "[ASSERT] Expected at least "
+                      << expectations.minDistinctToolCalls
+                      << " distinct tool calls but saw "
+                      << stats.toolCallIds.size() << std::endl;
+            passedScenario = false;
+        }
+
+        std::cout << std::endl;
+        std::cout << "=== Scenario Summary ===" << std::endl;
+        std::cout << "Events: " << stats.eventCount << std::endl;
+        std::cout << "Thinking events: " << stats.thinkingCount << std::endl;
+        std::cout << "Tool chunks: " << stats.toolChunkCount << std::endl;
+        std::cout << "Distinct tool calls: " << stats.toolCallIds.size() << std::endl;
+        std::cout << "Errors: " << stats.errorCount << std::endl;
+        std::cout << "Scenario result: " << (passedScenario ? "PASS" : "FAIL") << std::endl;
+        std::cout << std::endl;
+        return passedScenario;
+    };
+
+    bool allPassed = true;
     if (!threadId.empty()) {
         firmius::core::ThreadManager tm(getFirmiusThreadsDir());
         if (threadAgentId.empty()) {
@@ -435,74 +812,33 @@ shared::AuditResult ProviderStreamDebugAudit::run(const std::vector<std::string>
             result.passed = false;
             return result;
         }
-        history = tm.loadAgentHistory(threadId, threadAgentId);
+        AgentHistory history = tm.loadAgentHistory(threadId, threadAgentId);
+        allPassed = runScenario("thread:" + threadId, history, {}, {});
+    } else if (toolPreparingSuite) {
+        const std::vector<std::string> scenarios = {
+            "thinking_long_tool_call",
+            "multi_turn_thinking_preparing",
+            "parallel_tool_preparing",
+        };
+        for (const auto& scenario : scenarios) {
+            const bool scenarioPassed =
+                runScenario(scenario, buildHistoryVariant(scenario),
+                            buildToolsForVariant(scenario),
+                            expectationsForVariant(scenario));
+            allPassed = allPassed && scenarioPassed;
+        }
     } else {
-        history = buildHistoryVariant(historyVariant);
+        allPassed = runScenario(historyVariant, buildHistoryVariant(historyVariant),
+                                buildToolsForVariant(historyVariant),
+                                expectationsForVariant(historyVariant));
     }
 
-    ProviderOptions opts;
-    opts.modelId = modelId;
-    opts.temperature = 0.7f;
-    opts.maxTokens = std::optional<int>(100);
-
-    std::cout << "--- Stream Events (timestamp | type | data) ---" << std::endl;
-    std::atomic<int> chunkCount{0};
-    std::atomic<int> errorCount{0};
-
-    provider->stream(history, opts, [&](const StreamEvent& ev) {
-        std::string ts = getTimestamp();
-        chunkCount++;
-
-        if (auto* txt = std::get_if<TextChunk>(&ev)) {
-            std::cout << "[" << ts << "] [TEXT] \"" << escapeString(txt->delta) << "\"" << std::endl;
-        } else if (auto* thk = std::get_if<ThinkingChunk>(&ev)) {
-            std::cout << "[" << ts << "] [THINKING] delta=\"" << escapeString(thk->delta) << "\" signature=\"" << escapeString(thk->signature) << "\"" << std::endl;
-        } else if (auto* tcc = std::get_if<ToolCallChunk>(&ev)) {
-            std::cout << "[" << ts << "] [TOOL_CHUNK] index=" << tcc->index << " id=" << tcc->id << " name=" << tcc->nameDelta << " args=" << escapeString(tcc->argsDelta) << std::endl;
-        } else if (auto* met = std::get_if<AgentMetrics>(&ev)) {
-            std::cout << "[" << ts << "] [METRICS] prompt=" << met->tokens.prompt
-                      << " completion=" << met->tokens.completion
-                      << " total=" << met->tokens.total
-                      << " cache_read=" << met->tokens.cacheRead
-                      << " cache_write=" << met->tokens.cacheWrite
-                      << " reasoning=" << met->tokens.reasoning
-                      << " context_size=" << met->tokens.contextSize << std::endl;
-        } else if (auto* done = std::get_if<StreamDone>(&ev)) {
-            std::string reasonStr;
-            switch (done->reason) {
-                case StopReason::Stop: reasonStr = "stop"; break;
-                case StopReason::ToolUse: reasonStr = "tool_use"; break;
-                case StopReason::MaxTokens: reasonStr = "max_tokens"; break;
-                case StopReason::ContentFilter: reasonStr = "content_filter"; break;
-                case StopReason::Error: reasonStr = "error"; break;
-                case StopReason::Cancelled: reasonStr = "cancelled"; break;
-            }
-            std::cout << "[" << ts << "] [STREAM_DONE] reason=" << reasonStr << std::endl;
-        } else if (auto* err = std::get_if<StreamError>(&ev)) {
-            errorCount++;
-            std::cout << "[" << ts << "] [STREAM_ERROR] httpStatus=" << err->httpStatus
-                      << " account=" << err->accountLocator
-                      << " message=\"" << err->message << "\"" << std::endl;
-        } else if (auto* retry = std::get_if<StreamRetrying>(&ev)) {
-            std::cout << "[" << ts << "] [STREAM_RETRYING] attempt=" << retry->attempt
-                      << " of " << retry->maxAttempts
-                      << " delay_ms=" << retry->delayMs
-                      << " reason=\"" << retry->reason << "\"" << std::endl;
-        } else if (auto* switched = std::get_if<StreamAccountSwitched>(&ev)) {
-            std::cout << "[" << ts << "] [STREAM_ACCOUNT_SWITCHED] account=" << switched->accountLocator << std::endl;
-        } else {
-            std::cout << "[" << ts << "] [UNKNOWN_EVENT] variant_index=" << ev.index() << std::endl;
-        }
-        std::cout << std::flush;
-    });
-
-    std::cout << std::endl;
-    std::cout << "=== Summary ===" << std::endl;
-    std::cout << "Total events: " << chunkCount.load() << std::endl;
-    std::cout << "Errors: " << errorCount.load() << std::endl;
-
-    result.exitCode = errorCount.load() > 0 ? 1 : 0;
-    result.passed = errorCount.load() == 0;
+    unsetenv("FIRMIUS_ANTIGRAVITY_RAW_SSE_LOG");
+    unsetenv("FIRMIUS_ANTIGRAVITY_RAW_SSE_STDOUT");
+    unsetenv("FIRMIUS_CODEX_RAW_SSE_LOG");
+    unsetenv("FIRMIUS_CODEX_RAW_SSE_STDOUT");
+    result.exitCode = allPassed ? 0 : 1;
+    result.passed = allPassed;
     return result;
 }
 

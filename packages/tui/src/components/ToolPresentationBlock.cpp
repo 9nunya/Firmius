@@ -95,22 +95,23 @@ ftxui::Element BuildBodyWindow(const ToolPresentation &presentation, const Theme
           presentation.body_lines[output_start_index + first_output_index + i];
       body_rows.push_back(ftxui::paragraph("│ " + line) | ftxui::color(theme.base.fg));
     }
-    if (presentation.status_footer.has_value() && !presentation.status_footer->empty()) {
-      ftxui::Elements footer_parts;
-      footer_parts.push_back(ftxui::text("╰ ") | ftxui::color(theme.base.fg));
-      footer_parts.push_back(ftxui::paragraph(*presentation.status_footer) |
-                             ftxui::color(theme.base.dim) | ftxui::flex);
-      if (show_inline_toggle && toggle_button) {
-        footer_parts.push_back(ftxui::text("  ") | ftxui::dim);
-        footer_parts.push_back(toggle_button->Render());
-      }
-      body_rows.push_back(ftxui::hbox(std::move(footer_parts)));
-    } else if (show_inline_toggle && toggle_button) {
+    if (presentation.status_footer.has_value() &&
+        !presentation.status_footer->empty()) {
+      body_rows.push_back(ftxui::hbox({
+                              ftxui::text("╰ ") | ftxui::color(theme.base.fg),
+                              ftxui::paragraph(*presentation.status_footer) |
+                                  ftxui::color(theme.base.dim) |
+                                  ftxui::flex_shrink,
+                          }) |
+                          ftxui::xflex);
+    }
+    if (show_inline_toggle && toggle_button) {
       body_rows.push_back(
           ftxui::hbox({
-              ftxui::text("╰ ") | ftxui::color(theme.base.fg),
+              ftxui::text("  ") | ftxui::color(theme.base.fg),
               toggle_button->Render(),
-          }));
+          }) |
+          ftxui::xflex);
     }
   } else {
     const int max_lines = expanded ? static_cast<int>(presentation.body_lines.size())
