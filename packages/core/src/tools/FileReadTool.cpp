@@ -42,14 +42,12 @@ shared::ToolResult FileReadTool::execute(const FileReadInput &input,
     std::stringstream ss(content);
 
     std::string line;
-    std::string sliced;
     int current = 1;
     bool reachedEnd = false;
     int lines_taken = 0;
     while (std::getline(ss, line)) {
       if (current >= input.start_line &&
           (input.end_line == -1 || current <= input.end_line)) {
-        sliced += line + "\n";
         lines_taken++;
       }
       if (input.end_line != -1 && current >= input.end_line) {
@@ -66,15 +64,8 @@ shared::ToolResult FileReadTool::execute(const FileReadInput &input,
 
     // Old fully read check logic removed
 
-    std::string enhancedContent =
-        shared::utils::HashlineReadEnhancer::enhance(sliced);
-
     rapidjson::Document res;
     res.SetObject();
-    res.AddMember(
-        "content",
-        rapidjson::Value(enhancedContent.c_str(), res.GetAllocator()).Move(),
-        res.GetAllocator());
     int normalized_start = std::max(1, input.start_line);
     int normalized_end = normalized_start + lines_taken - 1;
     if (lines_taken == 0)
@@ -92,6 +83,15 @@ shared::ToolResult FileReadTool::execute(const FileReadInput &input,
     res.AddMember("line_end", normalized_end, res.GetAllocator());
     res.AddMember("lines_read", lines_taken, res.GetAllocator());
     res.AddMember("read_full", read_full, res.GetAllocator());
+    res.AddMember("reached_end", reachedEnd, res.GetAllocator());
+    res.AddMember("watch_state",
+                  rapidjson::Value("updated", res.GetAllocator()).Move(),
+                  res.GetAllocator());
+    res.AddMember("watch_scope",
+                  rapidjson::Value(read_full ? "full" : "range",
+                                   res.GetAllocator())
+                      .Move(),
+                  res.GetAllocator());
     return shared::ToolResult::ok(res);
   } catch (const std::exception &e) {
     return shared::ToolResult::fail(e.what());

@@ -16,6 +16,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <random>
@@ -50,8 +51,9 @@ constexpr char kDefaultInstructions[] =
     "You are Codex. Follow the user's instructions carefully and produce "
     "high-quality outputs.";
 constexpr std::uint32_t kDefaultContextWindow = 272000;
-constexpr int kQuotaRefreshSeconds = 3600;
+constexpr int kQuotaRefreshSeconds = 300;
 constexpr int kAccountRetryLimit = 5;
+constexpr float kQuotaAvailableThreshold = 0.01f;
 
 struct RetrySettings {
   static constexpr int BASE_DELAY_MS = 1000;
@@ -627,6 +629,77 @@ float normalizeQuotaFraction(double value) {
   return static_cast<float>(normalized);
 }
 
+std::optional<float> readCodexQuotaRemaining(const OAuthAccount &acc) {
+  auto it = acc.metadata.find("quota:codex");
+  if (it == acc.metadata.end()) {
+    return std::nullopt;
+  }
+  try {
+    return normalizeQuotaFraction(std::stod(it->second));
+  } catch (...) {
+    return std::nullopt;
+  }
+}
+
+std::optional<int64_t> parseResetTimestampSeconds(const std::string &raw) {
+  std::string trimmed = StringUtil::trim(raw);
+  if (trimmed.empty()) {
+    return std::nullopt;
+  }
+  if (isEpochSecondsString(trimmed)) {
+    try {
+      return std::stoll(trimmed);
+    } catch (...) {
+      return std::nullopt;
+    }
+  }
+
+  std::string normalized = trimmed;
+  if (!normalized.empty() && normalized.back() == 'Z' &&
+      normalized.find('.') != std::string::npos) {
+    const auto dot = normalized.find('.');
+    normalized = normalized.substr(0, dot) + "Z";
+  }
+
+  std::tm tm = {};
+  std::istringstream input(normalized);
+  input >> std::get_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
+  if (input.fail()) {
+    return std::nullopt;
+  }
+#if defined(_WIN32)
+  return static_cast<int64_t>(_mkgmtime(&tm));
+#else
+  return static_cast<int64_t>(timegm(&tm));
+#endif
+}
+
+std::optional<int64_t> readCodexResetSeconds(const OAuthAccount &acc) {
+  auto it = acc.metadata.find("quota_reset:codex");
+  if (it == acc.metadata.end()) {
+    return std::nullopt;
+  }
+  return parseResetTimestampSeconds(it->second);
+}
+
+std::string formatWaitDuration(int64_t waitSeconds) {
+  if (waitSeconds <= 0) {
+    return "0s";
+  }
+  const int64_t hours = waitSeconds / 3600;
+  const int64_t minutes = (waitSeconds % 3600) / 60;
+  const int64_t seconds = waitSeconds % 60;
+  std::ostringstream oss;
+  if (hours > 0) {
+    oss << hours << "h ";
+  }
+  if (hours > 0 || minutes > 0) {
+    oss << minutes << "m ";
+  }
+  oss << seconds << "s";
+  return oss.str();
+}
+
 std::optional<std::string> resolveCodexEmail(const OAuthAccount &acc) {
   auto it = acc.metadata.find("email");
   if (it != acc.metadata.end() && isLikelyEmail(it->second)) {
@@ -729,6 +802,12 @@ void appendMessageInput(rapidjson::Value &input,
       rapidjson::Value item(rapidjson::kObjectType);
       item.AddMember("type", "input_image", a);
       item.AddMember("image_url", rapidjson::Value(img->url.c_str(), a), a);
+      content.PushBack(item, a);
+    } else if (auto *thinking = std::get_if<firmius::shared::ThinkingContent>(&part)) {
+      // Include thinking content as output_text for assistant messages
+      rapidjson::Value item(rapidjson::kObjectType);
+      item.AddMember("type", "output_text", a);
+      item.AddMember("text", rapidjson::Value(thinking->thinking.c_str(), a), a);
       content.PushBack(item, a);
     }
   }
@@ -1028,6 +1107,8 @@ CodexProvider::CodexProvider() : BaseOAuthProvider(kProviderId) {
   normalizeStoredAccounts();
 }
 
+CodexProvider::~CodexProvider() { stopBackgroundQuotaRefresh(); }
+
 void CodexProvider::normalizeStoredAccounts() {
   std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
   bool changed = false;
@@ -1233,11 +1314,11 @@ bool CodexProvider::refreshAccessToken(OAuthAccount &acc) {
 
 void CodexProvider::refreshQuotas() {
   std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
-  
+
   if (accounts_.empty()) {
     return;
   }
-  
+
   int64_t now = nowSeconds();
   for (auto &acc : accounts_) {
     if (now - acc.lastQuotaRefresh >= kQuotaRefreshSeconds) {
@@ -1276,49 +1357,47 @@ CodexProvider::getAllQuotas() const {
 std::optional<OAuthAccount *>
 CodexProvider::getAvailableAccount(const std::optional<std::string> &modelId) {
   std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
-  if (accounts_.empty())
+  if (accounts_.empty()) {
     return std::nullopt;
+  }
 
-  std::string group = "";
-  if (modelId)
-    group = getQuotaKey(*modelId);
+  (void)modelId;
 
   int64_t now = nowSeconds();
-  int startIdx = (lastUsedIndex_ >= 0) ? lastUsedIndex_ : 0;
-  if (startIdx >= static_cast<int>(accounts_.size())) {
-    startIdx = 0;
-  }
-  int currentIdx = startIdx;
+  int bestIdx = -1;
+  float bestQuota = -1.0f;
 
-  if (!group.empty()) {
-    do {
-      auto &acc = accounts_[currentIdx];
-      if (acc.rateLimited && now > acc.backoffUntil)
-        acc.rateLimited = false;
-      if (!acc.rateLimited) {
-        bool hasQuota = true;
-        auto it = acc.metadata.find("quota:" + group);
-        if (it != acc.metadata.end()) {
-          try {
-            float remaining = normalizeQuotaFraction(std::stod(it->second));
-            hasQuota = remaining > 0.01f;
-          } catch (...) {
-            hasQuota = true;
-          }
-        }
-        if (hasQuota) {
-          if (!isTokenExpired(acc) || refreshAccessToken(acc)) {
-            lastUsedIndex_ = currentIdx;
-            saveAccounts();
-            return &acc;
-          }
-        }
-      }
-      currentIdx = (currentIdx + 1) % static_cast<int>(accounts_.size());
-    } while (currentIdx != startIdx);
+  for (int idx = 0; idx < static_cast<int>(accounts_.size()); ++idx) {
+    auto &acc = accounts_[idx];
+    if (acc.rateLimited && now > acc.backoffUntil) {
+      acc.rateLimited = false;
+    }
+    if (acc.rateLimited) {
+      continue;
+    }
+
+    auto quota = readCodexQuotaRemaining(acc);
+    if (!quota.has_value() || *quota <= kQuotaAvailableThreshold) {
+      continue;
+    }
+
+    if (isTokenExpired(acc) && !refreshAccessToken(acc)) {
+      continue;
+    }
+
+    if (bestIdx < 0 || *quota > bestQuota) {
+      bestIdx = idx;
+      bestQuota = *quota;
+    }
   }
 
-  return BaseOAuthProvider::getAvailableAccount(modelId);
+  if (bestIdx < 0) {
+    return std::nullopt;
+  }
+
+  lastUsedIndex_ = bestIdx;
+  saveAccounts();
+  return &accounts_[bestIdx];
 }
 
 std::string CodexProvider::normalizeModelId(const std::string &modelId) {
@@ -1616,7 +1695,7 @@ void CodexProvider::processSseLine(
   }
 }
 
-void CodexProvider::fetchAndStoreQuotas(OAuthAccount &acc) {
+bool CodexProvider::fetchAndStoreQuotas(OAuthAccount &acc) {
   std::string accountId;
   if (acc.metadata.count("chatgpt_account_id"))
     accountId = acc.metadata["chatgpt_account_id"];
@@ -1627,8 +1706,9 @@ void CodexProvider::fetchAndStoreQuotas(OAuthAccount &acc) {
       acc.metadata["chatgpt_account_id"] = accountId;
     }
   }
-  if (accountId.empty())
-    return;
+  if (accountId.empty()) {
+    return false;
+  }
 
   GCPHttpClient client("firmius-codex/1.0");
   client.setBearerToken(acc.accessToken);
@@ -1637,73 +1717,184 @@ void CodexProvider::fetchAndStoreQuotas(OAuthAccount &acc) {
   client.addHeader("chatgpt-account-id", accountId);
 
   auto resp = client.get(std::string(kBaseUrl) + "/wham/usage", 10);
-  if (resp.code == 200) {
-    rapidjson::Document doc;
-    doc.Parse(resp.body.c_str());
-    if (!doc.HasParseError() && doc.IsObject()) {
-      if (doc.HasMember("rate_limit") && doc["rate_limit"].IsObject()) {
-        const auto &rl = doc["rate_limit"];
-        if (rl.HasMember("primary_window") && rl["primary_window"].IsObject()) {
-          const auto &pw = rl["primary_window"];
-          if (pw.HasMember("used_percent") && pw["used_percent"].IsNumber()) {
-            float used = static_cast<float>(pw["used_percent"].GetDouble());
-            acc.metadata["quota:codex"] = std::to_string(1.0f - (used / 100.0f));
-          }
-          if (pw.HasMember("reset_at") && pw["reset_at"].IsInt64()) {
-            acc.metadata["quota_reset:codex"] =
-                epochSecondsToIso8601(pw["reset_at"].GetInt64());
-          }
-        }
+  if (resp.code != 200) {
+    return false;
+  }
+
+  rapidjson::Document doc;
+  doc.Parse(resp.body.c_str());
+  if (doc.HasParseError() || !doc.IsObject()) {
+    return false;
+  }
+
+  if (doc.HasMember("rate_limit") && doc["rate_limit"].IsObject()) {
+    const auto &rl = doc["rate_limit"];
+    if (rl.HasMember("primary_window") && rl["primary_window"].IsObject()) {
+      const auto &pw = rl["primary_window"];
+      if (pw.HasMember("used_percent") && pw["used_percent"].IsNumber()) {
+        float used = static_cast<float>(pw["used_percent"].GetDouble());
+        acc.metadata["quota:codex"] = std::to_string(1.0f - (used / 100.0f));
       }
-      acc.lastQuotaRefresh = nowSeconds();
-      normalizeCodexAccount(acc);
-      saveAccounts();
+      if (pw.HasMember("reset_at") && pw["reset_at"].IsInt64()) {
+        acc.metadata["quota_reset:codex"] =
+            epochSecondsToIso8601(pw["reset_at"].GetInt64());
+      }
     }
   }
+  acc.lastQuotaRefresh = nowSeconds();
+  normalizeCodexAccount(acc);
+  saveAccounts();
+  return true;
 }
 
 void CodexProvider::stream(const AgentHistory &history,
                            const ProviderOptions &opts,
                            std::function<void(const StreamEvent &)> onEvent) {
+  const std::string quotaBucket = "codex";
+  auto selectClosestResetAccountIndex = [&]() -> int {
+    std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
+    if (accounts_.empty()) {
+      return -1;
+    }
+    const int64_t now = nowSeconds();
+    int bestIdx = -1;
+    bool bestHasReset = false;
+    int64_t bestWaitSeconds = std::numeric_limits<int64_t>::max();
+    float bestQuota = -1.0f;
+    int64_t bestLastRefresh = std::numeric_limits<int64_t>::max();
+
+    for (int idx = 0; idx < static_cast<int>(accounts_.size()); ++idx) {
+      const auto &acc = accounts_[idx];
+      const auto quota = readCodexQuotaRemaining(acc).value_or(0.0f);
+      const auto reset = readCodexResetSeconds(acc);
+      const bool hasReset = reset.has_value();
+      const int64_t waitSeconds =
+          hasReset ? std::max<int64_t>(0, *reset - now)
+                   : std::numeric_limits<int64_t>::max();
+
+      bool choose = false;
+      if (bestIdx < 0) {
+        choose = true;
+      } else if (hasReset != bestHasReset) {
+        choose = hasReset;
+      } else if (hasReset && waitSeconds < bestWaitSeconds) {
+        choose = true;
+      } else if (hasReset && waitSeconds == bestWaitSeconds &&
+                 quota > bestQuota) {
+        choose = true;
+      } else if (!hasReset && quota > bestQuota) {
+        choose = true;
+      } else if (!hasReset && quota == bestQuota &&
+                 acc.lastQuotaRefresh < bestLastRefresh) {
+        choose = true;
+      }
+
+      if (choose) {
+        bestIdx = idx;
+        bestHasReset = hasReset;
+        bestWaitSeconds = waitSeconds;
+        bestQuota = quota;
+        bestLastRefresh = acc.lastQuotaRefresh;
+      }
+    }
+
+    return bestIdx;
+  };
+
+  auto getResetWaitForAccount = [&](const OAuthAccount &acc) -> int64_t {
+    const auto reset = readCodexResetSeconds(acc);
+    if (!reset.has_value()) {
+      return -1;
+    }
+    return std::max<int64_t>(0, *reset - nowSeconds());
+  };
+
+  auto buildNoUsageMessage = [&](const std::string &accountLocator,
+                                 int64_t waitSeconds,
+                                 bool refreshAttempted,
+                                 bool refreshSucceeded) {
+    std::ostringstream oss;
+    oss << "No usage left for account '"
+        << (accountLocator.empty() ? "unknown" : accountLocator)
+        << "' on provider '" << kProviderId << "' (quota '" << quotaBucket
+        << "').";
+    if (waitSeconds >= 0) {
+      oss << " Try again in " << formatWaitDuration(waitSeconds) << ".";
+    } else {
+      oss << " Quota reset time is unavailable.";
+    }
+    if (refreshAttempted && !refreshSucceeded) {
+      oss << " Quota refresh failed.";
+    }
+    return oss.str();
+  };
+
+  auto resolveClosestExhaustedAccountInfo =
+      [&](std::string &outAccountLocator, int64_t &outWaitSeconds) {
+    const int targetIdx = selectClosestResetAccountIndex();
+    if (targetIdx < 0) {
+      return;
+    }
+    std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
+    outAccountLocator = accounts_[targetIdx].getIdentifier();
+    outWaitSeconds = getResetWaitForAccount(accounts_[targetIdx]);
+  };
+
+  auto tryRefreshExhaustedAccounts =
+      [&](std::string &outAccountLocator, int64_t &outWaitSeconds) -> bool {
+    std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
+    bool refreshedAny = false;
+    for (auto &candidate : accounts_) {
+      if (isTokenExpired(candidate) && !refreshAccessToken(candidate)) {
+        continue;
+      }
+      refreshedAny = fetchAndStoreQuotas(candidate) || refreshedAny;
+    }
+
+    const int targetIdx = selectClosestResetAccountIndex();
+    if (targetIdx >= 0) {
+      outAccountLocator = accounts_[targetIdx].getIdentifier();
+      outWaitSeconds = getResetWaitForAccount(accounts_[targetIdx]);
+    }
+    return refreshedAny;
+  };
+
+  bool attemptedQuotaRecovery = false;
   int accountRetries = 0;
   std::string lastAccountLocator;
   while (accountRetries < kAccountRetryLimit) {
     auto optAcc = getAvailableAccount(opts.modelId);
     if (!optAcc) {
-      // All accounts rate-limited: find the one closest to unlocking
-      int64_t now = nowSeconds();
-      int64_t earliestUnlock = 0;
-      for (const auto &a : accounts_) {
-        if (a.rateLimited) {
-          if (earliestUnlock == 0 || a.backoffUntil < earliestUnlock)
-            earliestUnlock = a.backoffUntil;
+      std::string exhaustedAccount;
+      int64_t waitSeconds = -1;
+      bool refreshAttempted = false;
+      bool refreshSucceeded = false;
+
+      if (!attemptedQuotaRecovery) {
+        refreshAttempted = true;
+        attemptedQuotaRecovery = true;
+        refreshSucceeded =
+            tryRefreshExhaustedAccounts(exhaustedAccount, waitSeconds);
+
+        if (getAvailableAccount(opts.modelId).has_value()) {
+          continue;
         }
       }
-      int64_t waitSec = (earliestUnlock > now) ? (earliestUnlock - now) : 0;
-      if (waitSec > 120)
-        waitSec = 120;
-      if (waitSec > 0) {
-        onEvent(StreamRetrying{accountRetries + 1, kAccountRetryLimit, 429,
-                               static_cast<int>(waitSec * 1000),
-                               "All accounts rate-limited, waiting",
-                               lastAccountLocator});
-        std::this_thread::sleep_for(std::chrono::seconds(waitSec));
-        int64_t nowAfter = nowSeconds();
-        for (auto &a : accounts_) {
-          if (a.rateLimited && nowAfter > a.backoffUntil) {
-            a.rateLimited = false;
-            for (auto &[k, v] : a.metadata) {
-              if (k.rfind("quota:", 0) == 0 && v == "0")
-                v = "1";
-            }
-          }
-        }
-        accountRetries++;
-        continue;
+
+      if (exhaustedAccount.empty()) {
+        resolveClosestExhaustedAccountInfo(exhaustedAccount, waitSeconds);
       }
-      onEvent(StreamError{"No accounts available.", -1, ""});
+      if (exhaustedAccount.empty() && !lastAccountLocator.empty()) {
+        exhaustedAccount = lastAccountLocator;
+      }
+
+      onEvent(StreamError{
+          buildNoUsageMessage(exhaustedAccount, waitSeconds, refreshAttempted,
+                              refreshSucceeded),
+          429, exhaustedAccount});
       return;
     }
+    attemptedQuotaRecovery = false;
     OAuthAccount &acc = *optAcc.value();
     if (!lastAccountLocator.empty() &&
         lastAccountLocator != acc.getIdentifier()) {
@@ -1753,7 +1944,7 @@ void CodexProvider::stream(const AgentHistory &history,
                                acc.getIdentifier()});
         // Use interruptible sleep to allow immediate cancellation
         if (!interruptibleSleep(std::chrono::milliseconds(delayMs),
-                                opts.abortSignal)) {
+                                opts.abortController, opts.abortSignal)) {
           // Interrupted during retry delay
           return;
         }

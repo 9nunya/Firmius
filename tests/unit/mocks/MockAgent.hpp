@@ -120,6 +120,16 @@ public:
         return context_;
     }
 
+    ModelChoice getPreferredModel() const override {
+        ModelChoice choice;
+        choice.providerId = context_.config.providerId;
+        choice.modelId = context_.config.modelId;
+        if (!context_.config.modelVariant.empty()) {
+            choice.variantName = context_.config.modelVariant;
+        }
+        return choice;
+    }
+
     void compactNow(std::function<void(const StreamEvent&)> /*onEvent*/) override {
         recordCall("compactNow", {});
     }

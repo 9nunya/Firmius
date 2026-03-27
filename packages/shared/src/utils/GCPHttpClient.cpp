@@ -6,10 +6,40 @@
 #include <cstdio>
 #include <map>
 #include <algorithm>
+#include <mutex>
 
 namespace firmius::utils {
 
-GCPHttpClient::GCPHttpClient(std::string userAgent) : userAgent_(std::move(userAgent)) {}
+namespace {
+CURLSH* gCurlShare = nullptr;
+std::mutex gCurlShareMutex;
+
+void curlShareLock(CURL*, curl_lock_data, curl_lock_access, void*) {
+    gCurlShareMutex.lock();
+}
+
+void curlShareUnlock(CURL*, curl_lock_data, void*) {
+    gCurlShareMutex.unlock();
+}
+
+void ensureCurlShare() {
+    static std::once_flag initFlag;
+    std::call_once(initFlag, []() {
+        curl_global_init(CURL_GLOBAL_ALL);
+        gCurlShare = curl_share_init();
+        if (gCurlShare) {
+            curl_share_setopt(gCurlShare, CURLSHOPT_LOCKFUNC, curlShareLock);
+            curl_share_setopt(gCurlShare, CURLSHOPT_UNLOCKFUNC, curlShareUnlock);
+            curl_share_setopt(gCurlShare, CURLSHOPT_SHARE, CURL_LOCK_DATA_DNS);
+            curl_share_setopt(gCurlShare, CURLSHOPT_SHARE, CURL_LOCK_DATA_SSL_SESSION);
+        }
+    });
+}
+} // namespace
+
+GCPHttpClient::GCPHttpClient(std::string userAgent) : userAgent_(std::move(userAgent)) {
+    ensureCurlShare();
+}
 
 GCPHttpClient::~GCPHttpClient() {}
 
@@ -82,9 +112,126 @@ static size_t headerCallback(char* buffer, size_t size, size_t nitems, void* use
     return size * nitems;
 }
 
+namespace {
+
+firmius::utils::GCPHttpClient::Response performInterruptibleTransfer(
+    CURL* curl,
+    struct curl_slist* headers,
+    const std::string& url,
+    const std::string& body,
+    size_t (*writeCallback)(char*, size_t, size_t, void*),
+    void* userdata,
+    int timeoutSeconds,
+    std::atomic<bool>* abortSignal,
+    std::map<std::string, std::string>* responseHeaders) {
+    firmius::utils::GCPHttpClient::Response resp;
+
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeCallback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, userdata);
+    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, headerCallback);
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA, responseHeaders);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, static_cast<long>(timeoutSeconds));
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
+    curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(curl, CURLOPT_VERBOSE, 0L);
+
+    FILE* devnull = fopen("/dev/null", "w");
+    if (devnull) {
+        curl_easy_setopt(curl, CURLOPT_STDERR, devnull);
+    }
+
+    CURLM* multi = curl_multi_init();
+    if (!multi) {
+        if (devnull) {
+            fclose(devnull);
+        }
+        resp.error = "Failed to initialize CURL multi handle";
+        return resp;
+    }
+
+    CURLMcode multiCode = curl_multi_add_handle(multi, curl);
+    if (multiCode != CURLM_OK) {
+        curl_multi_cleanup(multi);
+        if (devnull) {
+            fclose(devnull);
+        }
+        resp.error = "Failed to add CURL handle to multi interface";
+        return resp;
+    }
+
+    int stillRunning = 0;
+    multiCode = curl_multi_perform(multi, &stillRunning);
+    CURLcode resultCode = CURLE_OK;
+    if (multiCode != CURLM_OK) {
+        resultCode = CURLE_RECV_ERROR;
+    }
+
+    while (resultCode == CURLE_OK && stillRunning > 0) {
+        if (abortSignal && abortSignal->load()) {
+            resultCode = CURLE_ABORTED_BY_CALLBACK;
+            break;
+        }
+
+        int numFds = 0;
+        multiCode = curl_multi_wait(multi, nullptr, 0, 20, &numFds);
+        if (multiCode != CURLM_OK) {
+            resultCode = CURLE_RECV_ERROR;
+            break;
+        }
+
+        if (abortSignal && abortSignal->load()) {
+            resultCode = CURLE_ABORTED_BY_CALLBACK;
+            break;
+        }
+
+        multiCode = curl_multi_perform(multi, &stillRunning);
+        if (multiCode != CURLM_OK) {
+            resultCode = CURLE_RECV_ERROR;
+            break;
+        }
+    }
+
+    if (resultCode == CURLE_OK) {
+        int messagesLeft = 0;
+        while (CURLMsg* msg = curl_multi_info_read(multi, &messagesLeft)) {
+            if (msg->msg == CURLMSG_DONE) {
+                resultCode = msg->data.result;
+            }
+        }
+    }
+
+    if (resultCode != CURLE_OK) {
+        if (abortSignal && abortSignal->load()) {
+            resp.error = "Request interrupted by user";
+        } else {
+            resp.error = curl_easy_strerror(resultCode);
+        }
+    } else {
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &resp.code);
+    }
+
+    if (responseHeaders) {
+        resp.headers = *responseHeaders;
+    }
+
+    curl_multi_remove_handle(multi, curl);
+    curl_multi_cleanup(multi);
+    if (devnull) {
+        fclose(devnull);
+    }
+    return resp;
+}
+
+} // namespace
+
 GCPHttpClient::Response GCPHttpClient::post(const std::string& url, const std::string& body, int timeoutSeconds) {
     CURL* curl = curl_easy_init();
     if (!curl) return {0, "", "Failed to initialize CURL", {}};
+    if (gCurlShare) curl_easy_setopt(curl, CURLOPT_SHARE, gCurlShare);
 
     Response resp;
     struct curl_slist* headers = prepareHeaders();
@@ -113,6 +260,7 @@ GCPHttpClient::Response GCPHttpClient::post(const std::string& url, const std::s
 GCPHttpClient::Response GCPHttpClient::get(const std::string& url, int timeoutSeconds) {
     CURL* curl = curl_easy_init();
     if (!curl) return {0, "", "Failed to initialize CURL", {}};
+    if (gCurlShare) curl_easy_setopt(curl, CURLOPT_SHARE, gCurlShare);
 
     Response resp;
     struct curl_slist* headers = prepareHeaders();
@@ -143,146 +291,20 @@ GCPHttpClient::Response GCPHttpClient::streamPost(const std::string& url,
                                                 void* userdata,
                                                 int timeoutSeconds,
                                                 std::atomic<bool>* abortSignal) {
-    // If no abort signal, use simple synchronous call
-    if (!abortSignal) {
-        CURL* curl = curl_easy_init();
-        if (!curl) return {0, "", "Failed to initialize CURL", {}};
-
-        Response resp;
-        struct curl_slist* headers = prepareHeaders();
-
-        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
-        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeCallback);
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, userdata);
-        curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, headerCallback);
-        curl_easy_setopt(curl, CURLOPT_HEADERDATA, &resp.headers);
-        curl_easy_setopt(curl, CURLOPT_TIMEOUT, static_cast<long>(timeoutSeconds));
-        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
-        curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
-
-        CURLcode res = curl_easy_perform(curl);
-        if (res != CURLE_OK) {
-            resp.error = curl_easy_strerror(res);
-        } else {
-            curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &resp.code);
-        }
-
-        curl_slist_free_all(headers);
-        curl_easy_cleanup(curl);
-        return resp;
+    CURL* curl = curl_easy_init();
+    if (!curl) {
+        return {0, "", "Failed to initialize CURL", {}};
     }
+    if (gCurlShare) curl_easy_setopt(curl, CURLOPT_SHARE, gCurlShare);
 
-    // Run CURL in a separate thread for immediate interrupt support
-    struct ThreadData {
-        CURL* curl = nullptr;
-        struct curl_slist* headers = nullptr;
-        std::promise<Response> promise;
-        std::atomic<bool>* abortSignal;
-        int timeoutSeconds;
-        FILE* stderrFile = nullptr;
-        std::map<std::string, std::string> responseHeaders;
-    };
-
-    auto threadFunc = [](ThreadData* data) {
-        Response resp;
-
-        // Check if already aborted before starting
-        if (data->abortSignal && data->abortSignal->load()) {
-            resp.error = "Request aborted before start";
-            resp.code = 0;
-            data->promise.set_value(resp);
-            if (data->headers) curl_slist_free_all(data->headers);
-            if (data->curl) curl_easy_cleanup(data->curl);
-            if (data->stderrFile) fclose(data->stderrFile);
-            delete data;
-            return;
-        }
-
-        // Set up abort callback with periodic checking
-        std::atomic<bool> localAbort{false};
-        auto checkAbortCallback = [](void* clientp, curl_off_t, curl_off_t, curl_off_t, curl_off_t) -> int {
-            auto* localFlag = static_cast<std::atomic<bool>*>(clientp);
-            return localFlag && localFlag->load() ? 1 : 0;
-        };
-
-        curl_easy_setopt(data->curl, CURLOPT_XFERINFOFUNCTION, checkAbortCallback);
-        curl_easy_setopt(data->curl, CURLOPT_XFERINFODATA, &localAbort);
-        curl_easy_setopt(data->curl, CURLOPT_NOPROGRESS, 0L);
-        curl_easy_setopt(data->curl, CURLOPT_VERBOSE, 0L); // Disable verbose output
-        
-        // Suppress progress meter output to stderr
-        FILE* devnull = fopen("/dev/null", "w");
-        if (devnull) {
-            curl_easy_setopt(data->curl, CURLOPT_STDERR, devnull);
-            data->stderrFile = devnull;
-        }
-
-        // Monitor abort signal in a separate thread
-        std::thread monitorThread([data, &localAbort]() {
-            while (!localAbort.load()) {
-                if (data->abortSignal && data->abortSignal->load()) {
-                    localAbort.store(true);
-                    break;
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            }
-        });
-
-        CURLcode res = curl_easy_perform(data->curl);
-        localAbort.store(true); // Stop monitor thread
-        monitorThread.join();
-
-        if (res != CURLE_OK) {
-            // Check if it was due to abort
-            if (data->abortSignal && data->abortSignal->load()) {
-                resp.error = "Request interrupted by user";
-            } else {
-                resp.error = curl_easy_strerror(res);
-            }
-        } else {
-            curl_easy_getinfo(data->curl, CURLINFO_RESPONSE_CODE, &resp.code);
-        }
-        resp.headers = std::move(data->responseHeaders);
-
-        data->promise.set_value(resp);
-        if (data->headers) curl_slist_free_all(data->headers);
-        if (data->curl) curl_easy_cleanup(data->curl);
-        if (data->stderrFile) fclose(data->stderrFile);
-        delete data;
-    };
-
-    ThreadData* data = new ThreadData();
-    data->curl = curl_easy_init();
-    if (!data->curl) {
-        Response resp{0, "", "Failed to initialize CURL", {}};
-        delete data;
-        return resp;
-    }
-
-    data->headers = prepareHeaders();
-    data->abortSignal = abortSignal;
-    data->timeoutSeconds = timeoutSeconds;
-
-    curl_easy_setopt(data->curl, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(data->curl, CURLOPT_POSTFIELDS, body.c_str());
-    curl_easy_setopt(data->curl, CURLOPT_HTTPHEADER, data->headers);
-    curl_easy_setopt(data->curl, CURLOPT_WRITEFUNCTION, writeCallback);
-    curl_easy_setopt(data->curl, CURLOPT_WRITEDATA, userdata);
-    curl_easy_setopt(data->curl, CURLOPT_HEADERFUNCTION, headerCallback);
-    curl_easy_setopt(data->curl, CURLOPT_HEADERDATA, &data->responseHeaders);
-    curl_easy_setopt(data->curl, CURLOPT_TIMEOUT, static_cast<long>(timeoutSeconds));
-    curl_easy_setopt(data->curl, CURLOPT_CONNECTTIMEOUT, 10L);
-    curl_easy_setopt(data->curl, CURLOPT_TCP_KEEPALIVE, 1L);
-
-    std::thread curlThread(threadFunc, data);
-    curlThread.detach();
-
-    // Wait for result
-    auto future = data->promise.get_future();
-    future.wait();
-    return future.get();
+    std::map<std::string, std::string> responseHeaders;
+    struct curl_slist* headers = prepareHeaders();
+    Response resp = performInterruptibleTransfer(
+        curl, headers, url, body, writeCallback, userdata, timeoutSeconds,
+        abortSignal, &responseHeaders);
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+    return resp;
 }
 
 } // namespace firmius::utils

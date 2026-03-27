@@ -5,13 +5,18 @@
 #include "utils/InterruptibleSleep.hpp"
 #include "utils/TempOAuthServer.hpp"
 #include "utils/StringUtil.hpp"
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <ctime>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
+#include <limits>
 #include <mutex>
 #include <random>
+#include <sstream>
 #include <set>
 
 #include <rapidjson/document.h>
@@ -24,6 +29,8 @@ namespace firmius::provider {
 using namespace firmius::utils;
 
 namespace {
+constexpr int kQuotaRefreshSeconds = 300;
+constexpr float kQuotaAvailableThreshold = 0.01f;
 
 std::mutex gRawSseLogMutex;
 
@@ -267,106 +274,232 @@ RefreshTokenParts parseRefreshTokenParts(const std::string &token) {
   return parts;
 }
 
+float normalizeQuotaFraction(double value);
 
-/**
- * @brief Maps a model ID to its quota bucket name.
- * 
- * Quota buckets:
- * - "claude" for all Claude models
- * - "gemini-flash" for Gemini Flash models
- * - "gemini-pro" for Gemini Pro models
- * 
- * Also checks if a specific model variant has quota.
- */
-std::string modelToQuotaBucket(const std::string& modelId) {
-  std::string lowerModel = modelId;
-  for (auto &c : lowerModel)
-    c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
-
-  if (lowerModel.find("claude") != std::string::npos)
+std::string modelToQuotaBucket(const std::string &modelId) {
+  std::string lowerModel = toLowerCopy(modelId);
+  if (lowerModel.find("claude") != std::string::npos) {
     return "claude";
-  
-  if (lowerModel.find("gemini-3") != std::string::npos ||
-      lowerModel.find("gemini 3") != std::string::npos ||
-      lowerModel.find("gemini-2.5") != std::string::npos) {
-    if (lowerModel.find("flash") != std::string::npos)
-      return "gemini-flash";
-    else
-      return "gemini-pro";
   }
-  
-  // Default to gemini-pro for unknown models
-  return "gemini-pro";
+  if (lowerModel.find("gemini") != std::string::npos) {
+    return (lowerModel.find("flash") != std::string::npos) ? "gemini-flash"
+                                                            : "gemini-pro";
+  }
+  return "";
 }
 
-/**
- * @brief Check if an account has quota for a given model, checking both exact match and bucket match.
- */
-bool accountHasQuota(const OAuthAccount& acc, const std::string& modelId) {
-  std::string lowerModel = toLowerCopy(modelId);
-  std::string lowerModelNoPrefix = lowerModel;
-  if (lowerModelNoPrefix.rfind("antigravity-", 0) == 0) {
-    lowerModelNoPrefix = lowerModelNoPrefix.substr(std::string("antigravity-").size());
-  }
-  
-  // First check for exact model match (including variants like gemini-3.1-pro-high-a)
-  std::string exactQuotaKey = "quota:" + lowerModel;
-  auto it = acc.metadata.find(exactQuotaKey);
-  if (it != acc.metadata.end()) {
+std::optional<float> readAccountBucketQuota(const OAuthAccount &acc,
+                                            const std::string &quotaBucket,
+                                            std::string *outBestModel = nullptr) {
+  std::optional<float> bestQuota;
+  std::string bestModel;
+  for (const auto &[key, val] : acc.metadata) {
+    if (key.rfind("quota:", 0) != 0) {
+      continue;
+    }
+    const std::string modelKey = key.substr(6);
+    if (modelToQuotaBucket(modelKey) != quotaBucket) {
+      continue;
+    }
     try {
-      if (std::stof(it->second) > 0.01f)
-        return true;
-    } catch (...) {}
-  }
-  
-  // Check for variant matches (e.g., gemini-3.1-pro matches gemini-3.1-pro-high, gemini-3.1-pro-low, etc.)
-  for (const auto &[key, val] : acc.metadata) {
-    if (key.rfind("quota:", 0) == 0) {
-      std::string quotaModel = key.substr(6);
-      std::string quotaModelLower = toLowerCopy(quotaModel);
-      std::string quotaModelNoPrefix = quotaModelLower;
-      if (quotaModelNoPrefix.rfind("antigravity-", 0) == 0) {
-        quotaModelNoPrefix = quotaModelNoPrefix.substr(std::string("antigravity-").size());
+      const float remaining = normalizeQuotaFraction(std::stod(val));
+      if (!bestQuota.has_value() || remaining > *bestQuota) {
+        bestQuota = remaining;
+        bestModel = modelKey;
       }
-      // Check if the quota model starts with our model (variant match)
-      if (quotaModelLower.find(lowerModel) == 0 ||
-          quotaModelLower.find(lowerModelNoPrefix) == 0 ||
-          quotaModelNoPrefix.find(lowerModel) == 0 ||
-          quotaModelNoPrefix.find(lowerModelNoPrefix) == 0) {
-        try {
-          if (std::stof(val) > 0.01f)
-            return true;
-        } catch (...) {}
-      }
-      // Also check if our model contains the quota model (reverse match)
-      if (lowerModel.find(quotaModelLower) == 0 ||
-          lowerModel.find(quotaModelNoPrefix) == 0 ||
-          lowerModelNoPrefix.find(quotaModelLower) == 0 ||
-          lowerModelNoPrefix.find(quotaModelNoPrefix) == 0) {
-        try {
-          if (std::stof(val) > 0.01f)
-            return true;
-        } catch (...) {}
-      }
+    } catch (...) {
     }
   }
-  
-  // Fallback to bucket matching
-  std::string bucket = modelToQuotaBucket(modelId);
-  for (const auto &[key, val] : acc.metadata) {
-    if (key.rfind("quota:", 0) == 0) {
-      std::string quotaModel = key.substr(6);
-      std::string quotaBucket = modelToQuotaBucket(quotaModel);
-      if (quotaBucket == bucket) {
-        try {
-          if (std::stof(val) > 0.01f)
-            return true;
-        } catch (...) {}
-      }
+  if (bestQuota.has_value() && outBestModel != nullptr) {
+    *outBestModel = bestModel;
+  }
+  return bestQuota;
+}
+
+std::optional<float> readBucketQuotaForSelection(const OAuthAccount &acc,
+                                                  const std::string &bucket) {
+  auto remaining = readAccountBucketQuota(acc, bucket);
+  if (!remaining.has_value() || *remaining <= kQuotaAvailableThreshold) {
+    return std::nullopt;
+  }
+  return remaining;
+}
+
+std::optional<float> readModelSpecificQuota(const OAuthAccount &acc,
+                                            const std::string &normalizedModel) {
+  std::string modelKey = normalizedModel;
+  if (modelKey.rfind("antigravity-", 0) == 0) {
+    modelKey = modelKey.substr(std::string("antigravity-").size());
+  }
+  auto it = acc.metadata.find("quota:" + modelKey);
+  if (it == acc.metadata.end()) {
+    return std::nullopt;
+  }
+  try {
+    return normalizeQuotaFraction(std::stod(it->second));
+  } catch (...) {
+    return std::nullopt;
+  }
+}
+
+std::optional<int64_t> parseResetTimestampSeconds(const std::string &raw) {
+  std::string trimmed = firmius::shared::StringUtil::trim(raw);
+  if (trimmed.empty()) {
+    return std::nullopt;
+  }
+
+  bool isEpoch = true;
+  for (char ch : trimmed) {
+    if (!std::isdigit(static_cast<unsigned char>(ch))) {
+      isEpoch = false;
+      break;
     }
   }
-  
-  return false;
+  if (isEpoch) {
+    try {
+      return std::stoll(trimmed);
+    } catch (...) {
+      return std::nullopt;
+    }
+  }
+
+  std::string normalized = trimmed;
+  if (!normalized.empty() && normalized.back() == 'Z' &&
+      normalized.find('.') != std::string::npos) {
+    const auto dot = normalized.find('.');
+    normalized = normalized.substr(0, dot) + "Z";
+  }
+
+  std::tm tm = {};
+  std::istringstream input(normalized);
+  input >> std::get_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
+  if (input.fail()) {
+    return std::nullopt;
+  }
+#if defined(_WIN32)
+  return static_cast<int64_t>(_mkgmtime(&tm));
+#else
+  return static_cast<int64_t>(timegm(&tm));
+#endif
+}
+
+int64_t getAccountBucketResetWaitSeconds(const OAuthAccount &acc,
+                                         const std::string &bucket,
+                                         int64_t nowSeconds) {
+  std::optional<int64_t> earliestReset;
+  for (const auto &[key, val] : acc.metadata) {
+    if (key.rfind("quota:", 0) != 0) {
+      continue;
+    }
+    const std::string modelKey = key.substr(6);
+    if (modelToQuotaBucket(modelKey) != bucket) {
+      continue;
+    }
+    auto resetIt = acc.metadata.find("quota_reset:" + modelKey);
+    if (resetIt == acc.metadata.end()) {
+      continue;
+    }
+    auto reset = parseResetTimestampSeconds(resetIt->second);
+    if (!reset.has_value()) {
+      continue;
+    }
+    if (!earliestReset.has_value() || *reset < *earliestReset) {
+      earliestReset = *reset;
+    }
+  }
+  if (!earliestReset.has_value()) {
+    return -1;
+  }
+  return std::max<int64_t>(0, *earliestReset - nowSeconds);
+}
+
+int selectClosestRefreshAccountIndex(const std::vector<OAuthAccount> &accounts,
+                                     const std::string &bucket) {
+  if (accounts.empty()) {
+    return -1;
+  }
+  const int64_t now = std::chrono::duration_cast<std::chrono::seconds>(
+                          std::chrono::system_clock::now().time_since_epoch())
+                          .count();
+  int bestIdx = -1;
+  bool bestHasReset = false;
+  int64_t bestWait = std::numeric_limits<int64_t>::max();
+  float bestQuota = -1.0f;
+
+  for (int idx = 0; idx < static_cast<int>(accounts.size()); ++idx) {
+    const auto &acc = accounts[idx];
+    const float quota = readAccountBucketQuota(acc, bucket).value_or(0.0f);
+    const int64_t wait = getAccountBucketResetWaitSeconds(acc, bucket, now);
+    const bool hasReset = wait >= 0;
+
+    bool choose = false;
+    if (bestIdx < 0) {
+      choose = true;
+    } else if (hasReset != bestHasReset) {
+      choose = hasReset;
+    } else if (hasReset && wait < bestWait) {
+      choose = true;
+    } else if (hasReset && wait == bestWait && quota > bestQuota) {
+      choose = true;
+    } else if (!hasReset && quota > bestQuota) {
+      choose = true;
+    }
+
+    if (choose) {
+      bestIdx = idx;
+      bestHasReset = hasReset;
+      bestWait = wait;
+      bestQuota = quota;
+    }
+  }
+
+  return bestIdx;
+}
+
+
+
+std::string formatWaitDuration(int64_t waitSeconds) {
+  if (waitSeconds <= 0) {
+    return "0s";
+  }
+  const int64_t hours = waitSeconds / 3600;
+  const int64_t minutes = (waitSeconds % 3600) / 60;
+  const int64_t seconds = waitSeconds % 60;
+  std::ostringstream oss;
+  if (hours > 0) {
+    oss << hours << "h ";
+  }
+  if (hours > 0 || minutes > 0) {
+    oss << minutes << "m ";
+  }
+  oss << seconds << "s";
+  return oss.str();
+}
+
+std::string buildNoUsageMessage(const std::string &providerId,
+                                const std::string &bucket,
+                                const std::string &accountLocator,
+                                int64_t waitSeconds, bool refreshAttempted,
+                                bool refreshSucceeded) {
+  std::ostringstream oss;
+  oss << "No usage left for account '"
+      << (accountLocator.empty() ? "unknown" : accountLocator)
+      << "' on provider '" << providerId << "' (quota '" << bucket << "').";
+  if (waitSeconds >= 0) {
+    oss << " Try again in " << formatWaitDuration(waitSeconds) << ".";
+  } else {
+    oss << " Quota reset time is unavailable.";
+  }
+  if (refreshAttempted && !refreshSucceeded) {
+    oss << " Quota refresh failed.";
+  }
+  return oss.str();
+}
+
+int64_t epochSecondsNow() {
+  return std::chrono::duration_cast<std::chrono::seconds>(
+             std::chrono::system_clock::now().time_since_epoch())
+      .count();
 }
 
 float normalizeQuotaFraction(double value) {
@@ -382,13 +515,6 @@ float normalizeQuotaFraction(double value) {
   return static_cast<float>(normalized);
 }
 
-struct StreamContext {
-  AntigravityProvider *provider;
-  std::function<void(const StreamEvent &)> *onEvent;
-  std::string buffer;
-  size_t readOffset = 0;
-  std::atomic<bool> *abortSignal;
-};
 
 } // namespace
 
@@ -412,7 +538,7 @@ size_t AntigravityProvider::sseWriteCallback(char *ptr, size_t size,
     if (line.empty())
       continue;
 
-    ctx->provider->processSSELine(std::string(line), *(ctx->onEvent));
+    ctx->provider->processSSELine(std::string(line), *ctx);
   }
 
   if (ctx->readOffset > 1024 * 1024) {
@@ -624,6 +750,8 @@ private:
 
 AntigravityProvider::AntigravityProvider() : BaseOAuthProvider("antigravity") {}
 
+AntigravityProvider::~AntigravityProvider() { stopBackgroundQuotaRefresh(); }
+
 std::map<std::string, ModelInfo> AntigravityProvider::getStaticModels() {
   std::vector<ModelVariant> variants = {{"low", "{\"effort\":\"low\"}"},
                                         {"medium", "{\"effort\":\"medium\"}"},
@@ -684,63 +812,89 @@ std::unique_ptr<OAuthWizard> AntigravityProvider::beginConnectionWizard() {
 
 std::optional<OAuthAccount *> AntigravityProvider::getAvailableAccount(
     const std::optional<std::string> &modelId) {
-  if (accounts_.empty())
+  std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
+  if (accounts_.empty()) {
     return std::nullopt;
-
-  std::string normalizedModel;
-  if (modelId) {
-    normalizedModel = normalizeAntigravityModelId(*modelId, "");
   }
 
-  int64_t now = std::chrono::duration_cast<std::chrono::seconds>(
-                    std::chrono::system_clock::now().time_since_epoch())
-                    .count();
-                    
-  // Collect all accounts with quota > 0 for this model
-  std::vector<int> qualifiedIndices;
-  
-  for (int i = 0; i < static_cast<int>(accounts_.size()); ++i) {
-    auto &acc = accounts_[i];
-    
-    // Clear stale rate limits
-    if (acc.rateLimited && now > acc.backoffUntil) {
-      acc.rateLimited = false;
-    }
-    
-    if (acc.rateLimited) {
-      continue;
-    }
-    
-    // Check if this account has quota for the requested model
-    bool hasQuota = modelId ? accountHasQuota(acc, normalizedModel) : false;
-    
-    if (hasQuota && (!isTokenExpired(acc) || refreshAccessToken(acc))) {
-      qualifiedIndices.push_back(i);
-    }
-  }
-  
-  // If we have qualified accounts, use round-robin among them
-  if (!qualifiedIndices.empty()) {
-    // Find the next account in round-robin order
-    int nextIdx = -1;
-    for (size_t i = 0; i < qualifiedIndices.size(); ++i) {
-      if (qualifiedIndices[i] > lastUsedIndex_) {
-        nextIdx = qualifiedIndices[i];
-        break;
+  const std::string requestedModel =
+      modelId.has_value() ? *modelId : "gemini-3-flash";
+  const std::string normalizedModel =
+      normalizeAntigravityModelId(requestedModel, "");
+  const std::string bucket = modelToQuotaBucket(normalizedModel);
+  const int64_t now = std::chrono::duration_cast<std::chrono::seconds>(
+                          std::chrono::system_clock::now().time_since_epoch())
+                          .count();
+
+  std::set<int> triedIndices;
+  while (true) {
+    int bestIdx = -1;
+    float bestQuota = -1.0f;
+
+    for (int idx = 0; idx < static_cast<int>(accounts_.size()); ++idx) {
+      if (triedIndices.count(idx)) {
+        continue;
+      }
+      auto &acc = accounts_[idx];
+      if (acc.rateLimited && now > acc.backoffUntil) {
+        acc.rateLimited = false;
+      }
+      if (acc.rateLimited) {
+        continue;
+      }
+
+      auto modelQuota = readModelSpecificQuota(acc, normalizedModel);
+      if (modelQuota.has_value()) {
+        if (*modelQuota <= kQuotaAvailableThreshold) {
+          continue;
+        }
+        if (bestIdx < 0 || *modelQuota > bestQuota) {
+          bestIdx = idx;
+          bestQuota = *modelQuota;
+        }
       }
     }
-    if (nextIdx == -1) {
-      // Wrap around to the first qualified account
-      nextIdx = qualifiedIndices[0];
+
+    if (bestIdx < 0) {
+      for (int idx = 0; idx < static_cast<int>(accounts_.size()); ++idx) {
+        if (triedIndices.count(idx)) {
+          continue;
+        }
+        auto &acc = accounts_[idx];
+        if (acc.rateLimited) {
+          continue;
+        }
+        auto modelQuota = readModelSpecificQuota(acc, normalizedModel);
+        if (modelQuota.has_value() && *modelQuota <= kQuotaAvailableThreshold) {
+          continue;
+        }
+        if (!modelQuota.has_value()) {
+          auto bq = readBucketQuotaForSelection(acc, bucket);
+          if (!bq.has_value()) {
+            continue;
+          }
+          if (bestIdx < 0 || *bq > bestQuota) {
+            bestIdx = idx;
+            bestQuota = *bq;
+          }
+        }
+      }
     }
-    
-    lastUsedIndex_ = nextIdx;
+
+    if (bestIdx < 0) {
+      return std::nullopt;
+    }
+
+    auto &candidate = accounts_[bestIdx];
+    if (isTokenExpired(candidate) && !refreshAccessToken(candidate)) {
+      triedIndices.insert(bestIdx);
+      continue;
+    }
+
+    lastUsedIndex_ = bestIdx;
     saveAccounts();
-    return &accounts_[nextIdx];
+    return &accounts_[bestIdx];
   }
-  
-  // Fallback: if no accounts have quota metadata, use base class logic
-  return BaseOAuthProvider::getAvailableAccount(modelId);
 }
 
 bool AntigravityProvider::refreshAccessToken(OAuthAccount &acc) {
@@ -794,9 +948,8 @@ bool AntigravityProvider::refreshAccessToken(OAuthAccount &acc) {
   return false;
 }
 
-void AntigravityProvider::processSSELine(
-    const std::string &line,
-    std::function<void(const StreamEvent &)> &onEvent) {
+void AntigravityProvider::processSSELine(const std::string &line,
+                                       StreamContext &ctx) {
   appendRawSseLog("LINE", line);
   if (line.empty() || line[0] == ':')
     return;
@@ -825,7 +978,7 @@ void AntigravityProvider::processSSELine(
       metrics.tokens.cacheRead = usage["cachedContentTokenCount"].GetUint();
     if (usage.HasMember("thoughtsTokenCount"))
       metrics.tokens.reasoning = usage["thoughtsTokenCount"].GetUint();
-    onEvent(metrics);
+    (*ctx.onEvent)(metrics);
   }
 
   if (resp.HasMember("candidates") && resp["candidates"].IsArray() &&
@@ -857,9 +1010,9 @@ void AntigravityProvider::processSSELine(
               signature = part["thoughtSignature"].GetString();
             else if (part.HasMember("signature") && part["signature"].IsString())
               signature = part["signature"].GetString();
-            onEvent(ThinkingChunk{text, signature});
+            (*ctx.onEvent)(ThinkingChunk{text, signature});
           } else {
-            onEvent(TextChunk{text});
+            (*ctx.onEvent)(TextChunk{text});
           }
         } else if (part.HasMember("functionCall")) {
           const auto &fc = part["functionCall"];
@@ -868,9 +1021,9 @@ void AntigravityProvider::processSSELine(
               fc.HasMember("id") && fc["id"].IsString()
                   ? "id:" + std::string(fc["id"].GetString())
                   : "part:" + std::to_string(partIndex);
-          auto &state = streamedToolCalls_[streamKey];
+          auto &state = ctx.streamedToolCalls[streamKey];
           if (!state.hasIndex) {
-            state.index = toolCallCounter_++;
+            state.index = ctx.toolCallCounter++;
             state.hasIndex = true;
             state.emittedId =
                 fc.HasMember("id") && fc["id"].IsString()
@@ -914,7 +1067,7 @@ void AntigravityProvider::processSSELine(
           }
 
           if (!chunk.nameDelta.empty() || !chunk.argsDelta.empty()) {
-            onEvent(chunk);
+            (*ctx.onEvent)(chunk);
           }
         }
       }
@@ -925,71 +1078,88 @@ void AntigravityProvider::processSSELine(
 void AntigravityProvider::stream(
     const AgentHistory &history, const ProviderOptions &opts,
     std::function<void(const StreamEvent &)> onEvent) {
-  toolCallCounter_ = 0;
-  streamedToolCalls_.clear();
   std::string requestedModel =
       opts.modelId.empty() ? "gemini-3-flash" : opts.modelId;
   std::string resolvedModel =
       normalizeAntigravityModelId(requestedModel, opts.modelVariantJson);
+  const std::string quotaBucket = modelToQuotaBucket(resolvedModel);
 
-  // Check if ALL accounts have quota metadata and ALL are exhausted for this
-  // model
-  {
-    bool hasAnyQuotaData = false;
-    bool hasAnyQuotaRemaining = false;
-    for (const auto &acc : accounts_) {
-      for (const auto &[key, val] : acc.metadata) {
-        if (key.rfind("quota:", 0) == 0) {
-          hasAnyQuotaData = true;
-          break;
-        }
+  auto tryRefreshExhaustedAccounts =
+      [&](std::string &outAccountLocator, int64_t &outWaitSeconds) -> bool {
+    std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
+    bool refreshedAny = false;
+    for (auto &candidate : accounts_) {
+      if (isTokenExpired(candidate) && !refreshAccessToken(candidate)) {
+        continue;
       }
-      if (accountHasQuota(acc, resolvedModel)) {
-        hasAnyQuotaRemaining = true;
-        break;
-      }
+      refreshedAny = fetchAndStoreQuotas(candidate) || refreshedAny;
     }
 
-    if (hasAnyQuotaData && !hasAnyQuotaRemaining) {
-      onEvent(StreamError{
-          "Quota exhausted for model '" + requestedModel +
-              "' across all accounts. Please wait for quota reset.",
-          429, ""});
+    const int targetIdx = selectClosestRefreshAccountIndex(accounts_, quotaBucket);
+    if (targetIdx >= 0) {
+      outAccountLocator = accounts_[targetIdx].getIdentifier();
+      outWaitSeconds = getAccountBucketResetWaitSeconds(
+          accounts_[targetIdx], quotaBucket, epochSecondsNow());
+    }
+    return refreshedAny;
+  };
+
+  auto resolveClosestExhaustedAccountInfo =
+      [&](std::string &outAccountLocator, int64_t &outWaitSeconds) {
+    std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
+    const int targetIdx = selectClosestRefreshAccountIndex(accounts_, quotaBucket);
+    if (targetIdx < 0) {
       return;
     }
-  }
+    outAccountLocator = accounts_[targetIdx].getIdentifier();
+    outWaitSeconds = getAccountBucketResetWaitSeconds(
+        accounts_[targetIdx], quotaBucket, epochSecondsNow());
+  };
 
-  // Find all accounts with quota for this model
-  std::vector<std::string> qualifiedAccounts;
-  for (const auto &acc : accounts_) {
-    if (accountHasQuota(acc, resolvedModel)) {
-      qualifiedAccounts.push_back(acc.getIdentifier());
-    }
-  }
-  
-  // Track which accounts we've already tried in this session
   std::set<std::string> triedAccounts;
-  
+  bool attemptedQuotaRecovery = false;
   int accountRetries = 0;
   std::string lastError;
   std::string lastAccountEmail;
-  // Only allow trying each qualified account once with internal retries
-  int maxAccountAttempts = std::max(1, static_cast<int>(qualifiedAccounts.size()));
-  
+  int maxAccountAttempts = 1;
+  {
+    std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
+    maxAccountAttempts = std::max(1, static_cast<int>(accounts_.size()));
+  }
+
   while (accountRetries < maxAccountAttempts) {
     auto optAcc = getAvailableAccount(resolvedModel);
     if (!optAcc) {
-      // All accounts exhausted - exit immediately
-      if (!lastError.empty()) {
-        onEvent(StreamError{lastError, -1, lastAccountEmail});
+      bool refreshAttempted = false;
+      bool refreshSucceeded = false;
+      int64_t waitSeconds = -1;
+      std::string exhaustedAccount = lastAccountEmail;
+
+      if (!attemptedQuotaRecovery) {
+        attemptedQuotaRecovery = true;
+        refreshAttempted = true;
+        refreshSucceeded =
+            tryRefreshExhaustedAccounts(exhaustedAccount, waitSeconds);
+        if (getAvailableAccount(resolvedModel).has_value()) {
+          continue;
+        }
       } else {
-        onEvent(StreamError{"All qualified accounts exhausted.", -1, lastAccountEmail});
+        resolveClosestExhaustedAccountInfo(exhaustedAccount, waitSeconds);
       }
+
+      if (exhaustedAccount.empty()) {
+        exhaustedAccount = lastAccountEmail;
+      }
+      onEvent(StreamError{
+          buildNoUsageMessage("antigravity", quotaBucket, exhaustedAccount,
+                              waitSeconds, refreshAttempted, refreshSucceeded),
+          429, exhaustedAccount});
       return;
     }
+    attemptedQuotaRecovery = false;
     OAuthAccount &acc = *optAcc.value();
     lastAccountEmail = acc.getIdentifier();
-    
+
     // Check if we've already tried this account
     if (triedAccounts.count(lastAccountEmail)) {
       if (!lastError.empty()) {
@@ -1005,7 +1175,7 @@ void AntigravityProvider::stream(
       onEvent(StreamAccountSwitched{acc.getIdentifier()});
     }
 
-    std::string effectiveProjectId = resolveProjectIdForAccount(acc, true);
+    std::string effectiveProjectId = resolveProjectIdForAccount(acc, false);
     bool projectRefreshed = false;
 
     bool shouldTryNextAccount = false;
@@ -1020,7 +1190,7 @@ void AntigravityProvider::stream(
                                retryReason, acc.getIdentifier()});
         // Use interruptible sleep to allow immediate cancellation
         if (!interruptibleSleep(std::chrono::seconds(backoffSeconds),
-                                opts.abortSignal)) {
+                                opts.abortController, opts.abortSignal)) {
           // Interrupted during retry delay
           return;
         }
@@ -1090,9 +1260,8 @@ void AntigravityProvider::stream(
           onEvent(ev);
         }
       };
-
       std::function<void(const StreamEvent &)> wrappedFn = wrappedOnEvent;
-      StreamContext ctx{this, &wrappedFn, "", 0, opts.abortSignal};
+      StreamContext ctx{this, &wrappedFn, "", 0, opts.abortSignal, 0, {}};
       bool isClaudeModel =
           effectiveModel.find("claude") != std::string::npos ||
           effectiveModel.find("Claude") != std::string::npos;
@@ -1110,6 +1279,8 @@ void AntigravityProvider::stream(
       bool success = false;
       bool retryableFailure = false;
       for (const auto& endpoint : endpoints) {
+        ctx.buffer.clear();
+        ctx.readOffset = 0;
         auto resp =
             client.streamPost(endpoint + "/v1internal:streamGenerateContent?alt=sse",
                               body, sseWriteCallback, &ctx, 300,
@@ -1185,16 +1356,32 @@ void AntigravityProvider::stream(
             continue;
           }
 
+          bool isSandboxEndpoint = endpoint.find("sandbox") != std::string::npos;
+          if (isSandboxEndpoint) {
+            lastError = "API error 403 on sandbox endpoint";
+            ctx.buffer.clear();
+            ctx.readOffset = 0;
+            continue;
+          }
           lastError = "API error 403: " + ctx.buffer;
+          markAccountRateLimited(acc, 60);
           shouldTryNextAccount = true;
           break;
         }
 
         if (resp.code == 402 || resp.code == 429) {
+          bool isSandbox = endpoint.find("sandbox") != std::string::npos;
+          if (isSandbox) {
+            lastError = "Rate limited on sandbox endpoint";
+            ctx.buffer.clear();
+            ctx.readOffset = 0;
+            continue;
+          }
           lastError = "Rate limited (HTTP " + std::to_string(resp.code) + ")";
           int backoff = firmius::shared::BackoffConstants::getBackoffSeconds(
               accountRetries);
           markAccountRateLimited(acc, backoff);
+          saveAccounts();
           shouldTryNextAccount = true;
           break;
         }
@@ -1301,6 +1488,7 @@ void AntigravityProvider::generateSummary(
 }
 
 void AntigravityProvider::refreshQuotas() {
+  std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
   // Don't update accounts if none are loaded - prevents data loss
   if (accounts_.empty()) {
     return;
@@ -1310,7 +1498,7 @@ void AntigravityProvider::refreshQuotas() {
                     std::chrono::system_clock::now().time_since_epoch())
                     .count();
   for (auto &acc : accounts_) {
-    if (now - acc.lastQuotaRefresh >= 7200) {
+    if (now - acc.lastQuotaRefresh >= kQuotaRefreshSeconds) {
       if (isTokenExpired(acc))
         refreshAccessToken(acc);
       fetchAndStoreQuotas(acc);
@@ -1499,7 +1687,7 @@ std::string AntigravityProvider::resolveProjectIdForAccount(
   return kDefaultProjectId;
 }
 
-void AntigravityProvider::fetchAndStoreQuotas(OAuthAccount &acc) {
+bool AntigravityProvider::fetchAndStoreQuotas(OAuthAccount &acc) {
   std::string projId =
       acc.metadata.count("managedProjectId")
           ? acc.metadata["managedProjectId"]
@@ -1520,30 +1708,40 @@ void AntigravityProvider::fetchAndStoreQuotas(OAuthAccount &acc) {
   auto resp = client.post(
       "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels",
       "{\"project\":\"" + projId + "\"}", 10);
-  if (resp.code == 200) {
-    rapidjson::Document doc;
-    doc.Parse(resp.body.c_str());
-    if (!doc.HasParseError() && doc.IsObject() && doc.HasMember("models")) {
-      for (auto it = doc["models"].MemberBegin();
-           it != doc["models"].MemberEnd(); ++it) {
-        if (it->value.HasMember("quotaInfo")) {
-          const auto &q = it->value["quotaInfo"];
-          float remaining =
-              normalizeQuotaFraction(q["remainingFraction"].GetDouble());
-          acc.metadata["quota:" + std::string(it->name.GetString())] =
-              std::to_string(remaining);
-          if (q.HasMember("resetTime"))
-            acc.metadata["quota_reset:" + std::string(it->name.GetString())] =
-                q["resetTime"].GetString();
-        }
-      }
-      acc.lastQuotaRefresh =
-          std::chrono::duration_cast<std::chrono::seconds>(
-              std::chrono::system_clock::now().time_since_epoch())
-              .count();
-      saveAccounts();
+  if (resp.code != 200) {
+    return false;
+  }
+
+  rapidjson::Document doc;
+  doc.Parse(resp.body.c_str());
+  if (doc.HasParseError() || !doc.IsObject() || !doc.HasMember("models")) {
+    return false;
+  }
+
+  for (auto it = doc["models"].MemberBegin(); it != doc["models"].MemberEnd();
+       ++it) {
+    if (!it->value.HasMember("quotaInfo")) {
+      continue;
+    }
+    const auto &q = it->value["quotaInfo"];
+    if (!q.HasMember("remainingFraction") || !q["remainingFraction"].IsNumber()) {
+      continue;
+    }
+    float remaining = normalizeQuotaFraction(q["remainingFraction"].GetDouble());
+    acc.metadata["quota:" + std::string(it->name.GetString())] =
+        std::to_string(remaining);
+    if (q.HasMember("resetTime") && q["resetTime"].IsString()) {
+      acc.metadata["quota_reset:" + std::string(it->name.GetString())] =
+          q["resetTime"].GetString();
     }
   }
+
+  acc.lastQuotaRefresh =
+      std::chrono::duration_cast<std::chrono::seconds>(
+          std::chrono::system_clock::now().time_since_epoch())
+          .count();
+  saveAccounts();
+  return true;
 }
 
 std::map<std::string, std::vector<QuotaBucket>>

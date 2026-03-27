@@ -8,7 +8,7 @@ class BenchmarksCommand : public ICommand {
 public:
   std::string name() const override { return "benchmarks"; }
   std::string description() const override {
-    return "Run a benchmark task from welcome screen (usage: /benchmarks <id> [task_id])";
+    return "Run a benchmark task (usage: /benchmarks <id> [task_id])";
   }
   std::vector<CommandArg> args() const override {
     return {CommandArg{"benchmark", ArgType::String, "Benchmark id", true},
@@ -18,4 +18,3 @@ public:
 };
 
 } // namespace firmius::tui
-

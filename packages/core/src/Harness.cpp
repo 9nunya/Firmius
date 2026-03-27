@@ -9,6 +9,7 @@
 #include "persistence/Journaler.hpp"
 #include "persistence/ThreadManager.hpp"
 #include "providers/BaseOAuthProvider.hpp"
+#include "providers/BaseAPIKeyProvider.hpp"
 #include "providers/ProviderRegistry.hpp"
 #include "artifacts/ReferenceExpansion.hpp"
 #include "utils/FSUtil.hpp"
@@ -305,8 +306,8 @@ void Harness::shutdown() {
   {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     toJoin = std::move(backgroundThreads_);
-    for (auto &[_, pending] : pendingPermissionRequests_) {
-      pendingRequests.push_back(pending);
+    for (const auto &entry : pendingPermissionRequests_) {
+      pendingRequests.push_back(entry.second);
     }
     pendingPermissionRequests_.clear();
 
@@ -704,7 +705,11 @@ void Harness::abortAndFlushQueuedMessages() {
     return;
   }
 
+  // Always cancel the agent when user explicitly requests cancellation.
+  // The running/booting check determines whether we wait for agent to settle before draining.
   Engine::instance().cancelAgent(focusedAgentId);
+
+
 
   {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -944,8 +949,8 @@ void Harness::emitEvent(const firmius::shared::AppEvent &event) {
   std::vector<std::function<void(const firmius::shared::AppEvent &)>> cbs;
   {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
-    for (auto &[id, cb] : subscribers_) {
-      cbs.push_back(cb);
+    for (const auto &entry : subscribers_) {
+      cbs.push_back(entry.second);
     }
   }
   for (auto &cb : cbs) {
@@ -1150,9 +1155,10 @@ Harness::listArtifacts(const std::string &threadId) {
   try {
     return threadManager_.listArtifacts(tid);
   } catch (...) {
-    return {};
   }
+  return {};
 }
+
 
 bool Harness::setFocusedAgent(const std::string &agentId) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -2186,6 +2192,24 @@ Harness::getAccounts(const std::string &providerId) {
   if (oauthProv) {
     return oauthProv->getAccounts();
   }
+
+  auto apiKeyProv = dynamic_cast<provider::BaseAPIKeyProvider *>(prov.get());
+  if (apiKeyProv) {
+    std::vector<shared::OAuthAccount> result;
+    auto accounts = apiKeyProv->getAccounts();
+    for (const auto &acc : accounts) {
+      shared::OAuthAccount oauthAcc;
+      oauthAcc.identifier = acc.identifier;
+      oauthAcc.accessToken = acc.apiKey;
+      oauthAcc.rateLimited = acc.rateLimited;
+      oauthAcc.backoffUntil = acc.backoffUntil;
+      oauthAcc.metadata = acc.metadata;
+      oauthAcc.metadata["keyPrefix"] = acc.keyPrefix;
+      result.push_back(oauthAcc);
+    }
+    return result;
+  }
+
   return {};
 }
 
@@ -2195,6 +2219,13 @@ void Harness::deleteAccount(const std::string &providerId,
   auto oauthProv = dynamic_cast<provider::BaseOAuthProvider *>(prov.get());
   if (oauthProv) {
     oauthProv->deleteAccount(identifier);
+    return;
+  }
+
+  auto apiKeyProv = dynamic_cast<provider::BaseAPIKeyProvider *>(prov.get());
+  if (apiKeyProv) {
+    apiKeyProv->deleteAccount(identifier);
+    return;
   }
 }
 

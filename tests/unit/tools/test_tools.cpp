@@ -100,6 +100,7 @@ public:
               (override));
   MOCK_METHOD((const AgentContext &), getContext, (), (const, override));
   MOCK_METHOD(AgentContext &, getMutableContext, (), (override));
+  MOCK_METHOD(ModelChoice, getPreferredModel, (), (const, override));
   MOCK_METHOD(void, interrupt, (), (override));
   MOCK_METHOD(bool, isInterrupted, (), (const, override));
   MOCK_METHOD(void, clearInterrupt, (), (override));
@@ -306,7 +307,11 @@ TEST_F(FileReadToolTest, allowedPaths_permitsInside) {
   auto result = itool->execute(json, ctx);
 
   EXPECT_TRUE(result.success);
-  EXPECT_NE(result.data.find("Line 1"), std::string::npos);
+  EXPECT_EQ(result.data.find("\"content\""), std::string::npos);
+  EXPECT_NE(result.data.find("\"line_start\":1"), std::string::npos);
+  EXPECT_NE(result.data.find("\"line_end\":3"), std::string::npos);
+  EXPECT_NE(result.data.find("\"watch_state\":\"updated\""), std::string::npos);
+  EXPECT_NE(result.data.find("\"watch_scope\":\"full\""), std::string::npos);
 }
 
 TEST_F(FileReadToolTest, allowedPaths_blocksOutside) {
@@ -338,11 +343,12 @@ TEST_F(FileReadToolTest, lineSlicing) {
   auto result = itool->execute(json, ctx);
 
   EXPECT_TRUE(result.success);
-  EXPECT_NE(result.data.find("Line 2"), std::string::npos);
-  EXPECT_NE(result.data.find("Line 3"), std::string::npos);
-  EXPECT_NE(result.data.find("Line 4"), std::string::npos);
-  EXPECT_EQ(result.data.find("Line 1"), std::string::npos);
-  EXPECT_EQ(result.data.find("Line 5"), std::string::npos);
+  EXPECT_EQ(result.data.find("\"content\""), std::string::npos);
+  EXPECT_NE(result.data.find("\"line_start\":2"), std::string::npos);
+  EXPECT_NE(result.data.find("\"line_end\":4"), std::string::npos);
+  EXPECT_NE(result.data.find("\"lines_read\":3"), std::string::npos);
+  EXPECT_NE(result.data.find("\"watch_scope\":\"range\""), std::string::npos);
+  EXPECT_NE(result.data.find("\"reached_end\":false"), std::string::npos);
 }
 
 class GlobToolTest : public ::testing::Test {
@@ -842,20 +848,20 @@ TEST_F(FileEditAnchorToolTest, replaceRangeByAnchor) {
   EXPECT_TRUE(result.success);
   EXPECT_EQ(capturedWrite, "alpha\nbeta2\ngamma2\n");
   EXPECT_NE(result.data.find("\"applied_edits\":1"), std::string::npos);
-  EXPECT_NE(result.data.find("\"post_edit_slice\""), std::string::npos);
-  EXPECT_NE(result.data.find("2#"), std::string::npos);
+  EXPECT_EQ(result.data.find("\"post_edit_slice\""), std::string::npos);
+  EXPECT_NE(result.data.find("\"diff_preview\":"), std::string::npos);
+  EXPECT_NE(result.data.find("\"watch_state\":\"refreshed\""), std::string::npos);
 
   auto doc = parseResult(result);
   ASSERT_TRUE(doc.HasMember("operations"));
   const auto &operation = doc["operations"].GetArray()[0];
-  ASSERT_TRUE(operation.HasMember("post_edit_context"));
-  const auto &context = operation["post_edit_context"];
-  EXPECT_EQ(context["start_line"].GetInt(), 1);
-  EXPECT_EQ(context["end_line"].GetInt(), 3);
-  ASSERT_TRUE(context.HasMember("anchors"));
-  EXPECT_EQ(context["anchors"].GetArray().Size(), 3u);
-  EXPECT_STREQ(context["anchors"].GetArray()[1].GetString(),
-               anchor(2, "beta2").c_str());
+  EXPECT_FALSE(operation.HasMember("post_edit_context"));
+  ASSERT_TRUE(operation.HasMember("old_lines"));
+  ASSERT_TRUE(operation.HasMember("new_lines"));
+  ASSERT_EQ(operation["old_lines"].GetArray().Size(), 2u);
+  ASSERT_EQ(operation["new_lines"].GetArray().Size(), 2u);
+  EXPECT_STREQ(operation["new_lines"].GetArray()[0].GetString(), "beta2");
+  EXPECT_STREQ(operation["new_lines"].GetArray()[1].GetString(), "gamma2");
 }
 
 TEST_F(FileEditAnchorToolTest,

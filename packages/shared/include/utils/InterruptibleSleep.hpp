@@ -1,5 +1,7 @@
 #pragma once
 
+#include "utils/AbortController.hpp"
+
 #include <atomic>
 #include <chrono>
 #include <thread>
@@ -43,6 +45,24 @@ inline bool interruptibleSleep(
   return !(abortSignal && abortSignal->load());
 }
 
+inline bool interruptibleSleep(
+    std::chrono::milliseconds totalDuration,
+    const std::shared_ptr<AbortController> &abortController,
+    const std::atomic<bool> *abortSignal = nullptr,
+    std::chrono::milliseconds intervalMs = std::chrono::milliseconds(50)) {
+  if (!abortController) {
+    return interruptibleSleep(totalDuration, abortSignal, intervalMs);
+  }
+
+  if (abortController->isCancelled() ||
+      (abortSignal && abortSignal->load())) {
+    return false;
+  }
+
+  const bool cancelled = abortController->waitForCancelFor(totalDuration);
+  return !cancelled && !(abortSignal && abortSignal->load());
+}
+
 /**
  * @brief Convenience overload for seconds-based duration
  */
@@ -52,6 +72,15 @@ inline bool interruptibleSleep(
   return interruptibleSleep(
       std::chrono::duration_cast<std::chrono::milliseconds>(totalDuration),
       abortSignal);
+}
+
+inline bool interruptibleSleep(
+    std::chrono::seconds totalDuration,
+    const std::shared_ptr<AbortController> &abortController,
+    const std::atomic<bool> *abortSignal = nullptr) {
+  return interruptibleSleep(
+      std::chrono::duration_cast<std::chrono::milliseconds>(totalDuration),
+      abortController, abortSignal);
 }
 
 } // namespace firmius::shared

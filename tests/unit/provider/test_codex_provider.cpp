@@ -197,6 +197,62 @@ TEST(CodexProvider,
   EXPECT_EQ(saved.find("quota:gpt-5.4-mini"), std::string::npos);
 }
 
+TEST(CodexProvider, AvailableAccountUsesHighestPositiveCodexQuota) {
+  const auto tempHome =
+      std::filesystem::temp_directory_path() / "firmius_codex_quota_pick_home";
+  std::filesystem::remove_all(tempHome);
+  std::filesystem::create_directories(tempHome / ".firmius");
+  ScopedHomeOverride scopedHome(tempHome);
+
+  const auto futureSeconds =
+      std::chrono::system_clock::to_time_t(std::chrono::system_clock::now()) +
+      86400;
+  const std::filesystem::path oauthPath = tempHome / ".firmius" / "oauth.json";
+  std::ofstream out(oauthPath);
+  out << R"({"codex":[)"
+      << R"({"identifier":"low@example.com","refreshToken":"r1","accessToken":"a1","tokenExpiration":)"
+      << futureSeconds
+      << R"(,"metadata":{"quota:codex":"0.2","chatgpt_account_id":"id-low"}},)"
+      << R"({"identifier":"zero@example.com","refreshToken":"r2","accessToken":"a2","tokenExpiration":)"
+      << futureSeconds
+      << R"(,"metadata":{"quota:codex":"0","chatgpt_account_id":"id-zero"}},)"
+      << R"({"identifier":"high@example.com","refreshToken":"r3","accessToken":"a3","tokenExpiration":)"
+      << futureSeconds
+      << R"(,"metadata":{"quota:codex":"0.9","chatgpt_account_id":"id-high"}}]})";
+  out.close();
+
+  CodexProvider provider;
+  auto selected = provider.getAvailableAccount(std::string("gpt-5.2-codex"));
+  ASSERT_TRUE(selected.has_value());
+  EXPECT_EQ((*selected)->getIdentifier(), "high@example.com");
+}
+
+TEST(CodexProvider, AvailableAccountRequiresPositiveCodexQuota) {
+  const auto tempHome =
+      std::filesystem::temp_directory_path() / "firmius_codex_quota_none_home";
+  std::filesystem::remove_all(tempHome);
+  std::filesystem::create_directories(tempHome / ".firmius");
+  ScopedHomeOverride scopedHome(tempHome);
+
+  const auto futureSeconds =
+      std::chrono::system_clock::to_time_t(std::chrono::system_clock::now()) +
+      86400;
+  const std::filesystem::path oauthPath = tempHome / ".firmius" / "oauth.json";
+  std::ofstream out(oauthPath);
+  out << R"({"codex":[)"
+      << R"({"identifier":"none@example.com","refreshToken":"r1","accessToken":"a1","tokenExpiration":)"
+      << futureSeconds
+      << R"(,"metadata":{"chatgpt_account_id":"id-none"}},)"
+      << R"({"identifier":"zero@example.com","refreshToken":"r2","accessToken":"a2","tokenExpiration":)"
+      << futureSeconds
+      << R"(,"metadata":{"quota:codex":"0","chatgpt_account_id":"id-zero"}}]})";
+  out.close();
+
+  CodexProvider provider;
+  auto selected = provider.getAvailableAccount(std::string("gpt-5.2-codex"));
+  EXPECT_FALSE(selected.has_value());
+}
+
 TEST(CodexProvider, ProcessSseLineEmitsToolChunkFromOutputItemDone) {
   CodexProvider provider;
   std::vector<StreamEvent> events;

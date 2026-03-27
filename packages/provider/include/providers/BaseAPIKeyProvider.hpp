@@ -2,28 +2,17 @@
 #define FIRMIUS_PROVIDER_BASE_API_KEY_PROVIDER_HPP
 
 #include "IProvider.hpp"
+#include "Enums.hpp"
 #include <string>
 #include <vector>
 #include <optional>
 #include <mutex>
 #include <memory>
+#include <map>
 
 namespace firmius::provider {
 
-/**
- * @brief Represents an API key account with rate limiting state.
- */
-struct APIKeyAccount {
-  std::string identifier;       // Display name (e.g., "Key #1", "Key #2")
-  std::string keyPrefix;        // First 5 chars of the API key for display
-  std::string apiKey;           // The actual API key
-  bool rateLimited = false;
-  int64_t backoffUntil = 0;     // Epoch seconds when backoff expires
-  std::map<std::string, std::string> metadata; // Provider-specific metadata
-
-  std::string getIdentifier() const { return identifier; }
-  std::string getMaskedDisplay() const { return keyPrefix + "..."; }
-};
+using namespace firmius::shared;
 
 /**
  * @brief Abstract wizard interface for API key connection flows.

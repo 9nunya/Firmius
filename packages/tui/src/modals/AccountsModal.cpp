@@ -27,43 +27,25 @@ AccountsModal::AccountsModal(std::string providerId)
 ftxui::Component AccountsModal::create(TuiState &state) {
   auto oauthAccounts =
       std::make_shared<std::vector<firmius::shared::OAuthAccount>>();
-  auto apiKeyAccounts =
-      std::make_shared<std::vector<firmius::provider::APIKeyAccount>>();
   auto selected = std::make_shared<int>(0);
   auto isLoading = std::make_shared<bool>(true);
   auto providerId = providerId_;
-  auto isAPIKeyProvider = std::make_shared<bool>(false);
   auto rowBoxes = std::make_shared<std::vector<ftxui::Box>>();
 
-  auto accountCount = [oauthAccounts, apiKeyAccounts, isAPIKeyProvider]() {
-    return static_cast<int>(*isAPIKeyProvider ? apiKeyAccounts->size()
-                                              : oauthAccounts->size());
+  auto accountCount = [oauthAccounts]() {
+    return static_cast<int>(oauthAccounts->size());
   };
 
-  auto refreshAccounts = [oauthAccounts, apiKeyAccounts, isLoading, providerId,
-                          isAPIKeyProvider, selected, accountCount, &state]() {
+
+  auto refreshAccounts = [oauthAccounts, isLoading, providerId, selected,
+                          accountCount, &state]() {
     *isLoading = true;
-    std::thread([oauthAccounts, apiKeyAccounts, isLoading, providerId,
-                 isAPIKeyProvider, selected, accountCount, &state]() {
-      auto provider =
-          firmius::provider::ProviderRegistry::instance().getProvider(
-              providerId);
+    std::thread([oauthAccounts, isLoading, providerId, selected, accountCount,
+                 &state]() {
+      *oauthAccounts =
+          firmius::core::Harness::instance().getAccounts(providerId);
 
-      if (provider) {
-        auto apiKeyProvider =
-            std::dynamic_pointer_cast<firmius::provider::BaseAPIKeyProvider>(
-                provider);
-        if (apiKeyProvider) {
-          *isAPIKeyProvider = true;
-          *apiKeyAccounts = apiKeyProvider->getAccounts();
-        } else {
-          *isAPIKeyProvider = false;
-          *oauthAccounts =
-              firmius::core::Harness::instance().getAccounts(providerId);
-        }
-      }
-
-      const int count = accountCount();
+      const int count = static_cast<int>(oauthAccounts->size());
       *selected = count <= 0 ? 0 : std::clamp(*selected, 0, count - 1);
       *isLoading = false;
       state.postEvent(ftxui::Event::Custom);
@@ -72,11 +54,9 @@ ftxui::Component AccountsModal::create(TuiState &state) {
 
   refreshAccounts();
 
-  auto listContent = ftxui::Renderer([oauthAccounts, apiKeyAccounts, selected,
-                                      isAPIKeyProvider, rowBoxes]() {
+  auto listContent = ftxui::Renderer([oauthAccounts, selected, rowBoxes]() {
     const auto &theme = ThemeManager::instance().getCurrentTheme();
-    const int total = static_cast<int>(*isAPIKeyProvider ? apiKeyAccounts->size()
-                                                         : oauthAccounts->size());
+    const int total = static_cast<int>(oauthAccounts->size());
     rowBoxes->assign(total, ftxui::Box{});
 
     if (total == 0) {
@@ -89,15 +69,13 @@ ftxui::Component AccountsModal::create(TuiState &state) {
     ftxui::Elements rows;
     rows.reserve(total * 2);
     for (int i = 0; i < total; ++i) {
-      std::string identifier;
-      std::string rightBadge;
-      if (*isAPIKeyProvider) {
-        const auto &acc = (*apiKeyAccounts)[i];
-        identifier = acc.identifier + " (" + acc.keyPrefix + "...)";
+      const auto &acc = (*oauthAccounts)[i];
+      std::string identifier = acc.identifier;
+      std::string rightBadge = "oauth";
+
+      if (acc.metadata.count("keyPrefix")) {
+        identifier += " (" + acc.metadata.at("keyPrefix") + "...)";
         rightBadge = "key";
-      } else {
-        identifier = (*oauthAccounts)[i].identifier;
-        rightBadge = "oauth";
       }
 
       auto row = ftxui::hbox({
@@ -123,10 +101,9 @@ ftxui::Component AccountsModal::create(TuiState &state) {
 
   auto scrollable = ScrollableBox(listContent);
 
-  auto component = ftxui::Renderer(scrollable, [oauthAccounts, apiKeyAccounts,
-                                                selected, isLoading, providerId,
-                                                isAPIKeyProvider, scrollable,
-                                                accountCount]() {
+  auto component = ftxui::Renderer(scrollable, [oauthAccounts, selected,
+                                                isLoading, providerId,
+                                                scrollable, accountCount]() {
     const auto &theme = ThemeManager::instance().getCurrentTheme();
     const auto terminal = ftxui::Terminal::Size();
     const int panelWidth = std::clamp(std::max(0, terminal.dimx - 8), 58, 90);
@@ -188,8 +165,7 @@ ftxui::Component AccountsModal::create(TuiState &state) {
                           panelWidth, panelHeight);
   });
 
-  return ftxui::CatchEvent(component, [oauthAccounts, apiKeyAccounts, selected,
-                                       providerId, isAPIKeyProvider,
+  return ftxui::CatchEvent(component, [oauthAccounts, selected, providerId,
                                        refreshAccounts, rowBoxes, scrollable,
                                        accountCount, &state](ftxui::Event event) {
     const auto clampSelection = [&]() {
@@ -262,13 +238,9 @@ ftxui::Component AccountsModal::create(TuiState &state) {
     if (event == ftxui::Event::Delete ||
         event == ftxui::Event::Character('d') ||
         event == ftxui::Event::Character('D')) {
-      if (!(*isAPIKeyProvider ? apiKeyAccounts->empty()
-                              : oauthAccounts->empty()) &&
-          *selected < static_cast<int>(*isAPIKeyProvider ? apiKeyAccounts->size()
-                                                         : oauthAccounts->size())) {
-        const std::string identifier = *isAPIKeyProvider
-                                           ? (*apiKeyAccounts)[*selected].identifier
-                                           : (*oauthAccounts)[*selected].identifier;
+      if (!oauthAccounts->empty() &&
+          *selected < static_cast<int>(oauthAccounts->size())) {
+        const std::string identifier = (*oauthAccounts)[*selected].identifier;
         firmius::core::Harness::instance().deleteAccount(providerId, identifier);
         refreshAccounts();
       }
@@ -315,6 +287,7 @@ ftxui::Component AccountsModal::create(TuiState &state) {
     }
     return false;
   });
+
 }
 
 } // namespace firmius::tui

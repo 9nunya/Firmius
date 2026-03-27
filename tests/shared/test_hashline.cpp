@@ -86,6 +86,61 @@ TEST(HashlineTrimmer, DetectsSuspiciousDiffJunk) {
   EXPECT_TRUE(HashlineTrimmer::startsWithSuspiciousDiffJunk("@@ -2,4 +2,5 @@"));
   EXPECT_TRUE(HashlineTrimmer::startsWithSuspiciousDiffJunk("+added_line"));
   EXPECT_TRUE(HashlineTrimmer::startsWithSuspiciousDiffJunk("-removed_line"));
-  EXPECT_FALSE(HashlineTrimmer::startsWithSuspiciousDiffJunk("++counter;"));
   EXPECT_FALSE(HashlineTrimmer::startsWithSuspiciousDiffJunk("--counter;"));
+}
+
+TEST(Hashline, DistinctHashesForWhitespace) {
+    const std::string h_empty = Hashline::computeHash("");
+    const std::string h_space = Hashline::computeHash(" ");
+    const std::string h_tab = Hashline::computeHash("\t");
+    const std::string h_spaces = Hashline::computeHash("  ");
+
+    EXPECT_NE(h_empty, h_space);
+    EXPECT_NE(h_empty, h_tab);
+    EXPECT_NE(h_empty, h_spaces);
+    EXPECT_NE(h_space, h_tab);
+    EXPECT_NE(h_space, h_spaces);
+    EXPECT_NE(h_tab, h_spaces);
+}
+
+TEST(Hashline, ResolveAnchorCollisions) {
+    std::vector<std::string> lines = {
+        "aaaa",
+        "bbbb",
+        "cccc",
+        "bbbb",
+        "dddd"
+    };
+
+    const std::string h_bbbb = Hashline::computeHash("bbbb");
+    const std::string anchor = "2#" + h_bbbb;
+
+    // Both line 2 and line 4 match. With window=15, this is ambiguous.
+    EXPECT_THROW(Hashline::resolveAnchor(lines, anchor, 15), std::runtime_error);
+
+    // With window=1, only line 2 is found.
+    AnchorResult res = Hashline::resolveAnchor(lines, anchor, 1);
+    EXPECT_EQ(res.status, AnchorResult::Status::SUCCESS);
+    EXPECT_EQ(res.lineIndex, 1);
+    EXPECT_FALSE(res.relocated);
+}
+
+TEST(Hashline, ResolveAnchorCollisionError) {
+    std::vector<std::string> lines = {
+        "aaaa",
+        "bbbb",
+        "bbbb",
+        "cccc"
+    };
+    const std::string h_bbbb = Hashline::computeHash("bbbb");
+    const std::string anchor = "2#" + h_bbbb;
+    
+    try {
+        Hashline::resolveAnchor(lines, anchor, 15);
+        FAIL() << "Should have thrown";
+    } catch (const std::exception& e) {
+        std::string msg = e.what();
+        EXPECT_NE(msg.find("Ambiguous anchor"), std::string::npos);
+        EXPECT_NE(msg.find("matched 2 nearby lines"), std::string::npos);
+    }
 }

@@ -82,6 +82,31 @@ void Workspace::markFileAsFullyRead(const std::string& path) {
     readFiles_.insert(path);
     fullyReadFiles_.insert(path);
     readCoverage_.erase(path);
+
+}
+
+void Workspace::recordFileEdit(const std::string& path) {
+    std::lock_guard<std::mutex> lock(fileMutex_);
+    readFiles_.erase(path);
+    fullyReadFiles_.erase(path);
+    readCoverage_.erase(path);
+}
+
+bool Workspace::isLineRead(const std::string& path, int line) const {
+    std::lock_guard<std::mutex> lock(fileMutex_);
+    if (fullyReadFiles_.count(path)) {
+        return true;
+    }
+    auto coverage = readCoverage_.get(path);
+    if (!coverage) {
+        return false;
+    }
+    for (const auto& range : coverage->ranges) {
+        if (line >= range.first && line <= range.second) {
+            return true;
+        }
+    }
+    return false;
 }
 
 std::string Workspace::getCurrentWorkingDirectory() const {

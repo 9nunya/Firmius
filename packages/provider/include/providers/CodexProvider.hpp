@@ -11,7 +11,7 @@ namespace firmius::provider {
 class CodexProvider : public BaseOAuthProvider {
 public:
   CodexProvider();
-  ~CodexProvider() override = default;
+  ~CodexProvider() override;
   std::vector<ModelInfo> listModels() override;
   ModelInfo getModelInfo(const std::string &modelId) override;
   void stream(const AgentHistory &history, const ProviderOptions &opts,
@@ -56,7 +56,7 @@ private:
                       std::function<void(const StreamEvent &)> &onEvent,
                       AgentMetrics &metrics, bool &metricsReceived,
                       bool &doneReceived, ToolCallTracker &tracker);
-  void fetchAndStoreQuotas(OAuthAccount &acc);
+  bool fetchAndStoreQuotas(OAuthAccount &acc);
 };
 
 } // namespace firmius::provider

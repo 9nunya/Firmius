@@ -440,6 +440,14 @@ hostCreationOptionsToJson(const HostCreationOptions &o,
   v.AddMember("containerName", rapidjson::Value(o.containerName.c_str(), a), a);
   v.AddMember("connectToExisting", o.connectToExisting, a);
   v.AddMember("deleteOnExit", o.deleteOnExit, a);
+  
+  // Serialize volumeMounts array
+  rapidjson::Value volumes(rapidjson::kArrayType);
+  for (const auto& vol : o.volumeMounts) {
+    volumes.PushBack(rapidjson::Value(vol.c_str(), a), a);
+  }
+  v.AddMember("volumeMounts", volumes, a);
+  
   return v;
 }
 
@@ -456,6 +464,14 @@ HostCreationOptions hostCreationOptionsFromJson(const rapidjson::Value &v) {
   }
   if (v.HasMember("deleteOnExit")) {
     o.deleteOnExit = v["deleteOnExit"].GetBool();
+  }
+  // Deserialize volumeMounts array
+  if (v.HasMember("volumeMounts") && v["volumeMounts"].IsArray()) {
+    for (const auto& vol : v["volumeMounts"].GetArray()) {
+      if (vol.IsString()) {
+        o.volumeMounts.push_back(vol.GetString());
+      }
+    }
   }
   return o;
 }
@@ -927,6 +943,7 @@ rapidjson::Value messagePartToJson(const MessagePart &p,
   } else if (auto *thk = std::get_if<ThinkingContent>(&p)) {
     v.AddMember("type", "thinking", a);
     v.AddMember("thinking", rapidjson::Value(thk->thinking.c_str(), a), a);
+    v.AddMember("signature", rapidjson::Value(thk->signature.c_str(), a), a);
   } else if (auto *tcc = std::get_if<ToolCallContent>(&p)) {
     v.AddMember("type", "toolCall", a);
     v.AddMember("id", rapidjson::Value(tcc->id.c_str(), a), a);
@@ -967,8 +984,10 @@ MessagePart messagePartFromJson(const rapidjson::Value &v) {
   std::string type = v["type"].GetString();
   if (type == "text")
     return TextContent{v["text"].GetString()};
-  if (type == "thinking")
-    return ThinkingContent{v["thinking"].GetString(), ""};
+  if (type == "thinking") {
+    std::string signature = v.HasMember("signature") ? v["signature"].GetString() : "";
+    return ThinkingContent{v["thinking"].GetString(), signature};
+  }
   if (type == "toolCall")
     return ToolCallContent{v["id"].GetString(), v["name"].GetString(),
                            v["args"].GetString()};

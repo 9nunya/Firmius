@@ -26,7 +26,7 @@ ftxui::Component ConfirmationModal::create(TuiState &state) {
         ModalSection(
             theme,
             ftxui::vbox(
-                {ftxui::text(message) | ftxui::center |
+                {ftxui::paragraph(message) | ftxui::center |
                      ftxui::color(theme.modals.fg),
                  ftxui::text(""),
                  ftxui::hbox({
@@ -40,29 +40,39 @@ ftxui::Component ConfirmationModal::create(TuiState &state) {
                  ftxui::text(" (Press Y/Enter for Yes, N/Esc for No) ") |
                      ftxui::color(theme.base.dim) | ftxui::center}),
             theme.modals.bg),
-        56, 16);
+        56, 16) |
+            ftxui::focus;
   });
 
   return ftxui::CatchEvent(component,
-                           [onConfirm, onCancel, &state](ftxui::Event event) {
-                             if (event == ftxui::Event::Character('y') ||
-                                 event == ftxui::Event::Character('Y') ||
-                                 event == ftxui::Event::Return) {
-                               state.popModal();
-                               if (onConfirm)
-                                 onConfirm();
-                               return true;
-                             }
-                             if (event == ftxui::Event::Character('n') ||
-                                 event == ftxui::Event::Character('N') ||
-                                 event == ftxui::Event::Escape) {
-                               state.popModal();
-                               if (onCancel)
-                                 onCancel();
-                               return true;
-                             }
-                             return false;
-                           });
+                             [onConfirm, onCancel, &state](ftxui::Event event) {
+                               if (event == ftxui::Event::Character('y') ||
+                                   event == ftxui::Event::Character('Y') ||
+                                   event == ftxui::Event::Return) {
+                                 state.deferUiMutation([&state, onConfirm]() {
+                                   state.popModalImmediate();
+                                   if (onConfirm) {
+                                     onConfirm();
+                                   }
+                                 });
+                                 state.postEvent(ftxui::Event::Custom);
+                                 return true;
+                               }
+                               if (event == ftxui::Event::Character('n') ||
+                                   event == ftxui::Event::Character('N') ||
+                                   event == ftxui::Event::Escape) {
+                                 state.deferUiMutation([&state, onCancel]() {
+                                   state.popModalImmediate();
+                                   if (onCancel) {
+                                     onCancel();
+                                   }
+                                 });
+                                 state.postEvent(ftxui::Event::Custom);
+                                 return true;
+                               }
+                               return false;
+                             });
+
 }
 
 } // namespace firmius::tui

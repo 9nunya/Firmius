@@ -26,7 +26,6 @@ struct InputBarModel {
   int *cursor = nullptr;
   std::string placeholder;
   std::vector<PastedBlock> pasted_blocks; // blocks embedded in buffer
-  std::vector<PastedBlock> image_tags;    // images shown above input
   bool is_focused = true;
   
   // Function to check if current model supports vision

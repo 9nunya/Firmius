@@ -8,7 +8,7 @@ namespace firmius::tui {
 
 constexpr const char *kPermissionCycleHotkeyLabel = "Ctrl+Y";
 constexpr const char *kRetryLastRequestHotkeyLabel = "Ctrl+R";
-constexpr const char *kVariantCycleHotkeyLabel = "Ctrl+V";
+constexpr const char *kVariantCycleHotkeyLabel = "Ctrl+K";
 
 bool IsPermissionCycleEvent(const ftxui::Event &event);
 bool IsPermissionCycleInput(const std::string &raw);

@@ -13,6 +13,15 @@
 namespace firmius::shared {
 
 /**
+ * @brief Represents a choice of model and provider.
+ */
+struct ModelChoice {
+  std::string providerId;
+  std::string modelId;
+  std::optional<std::string> variantName;
+};
+
+/**
  * @brief Interface for the Agent Engine.
  * 
  * Refactored to use composition: IAgent delegates environment operations
@@ -82,6 +91,12 @@ public:
   virtual void setModel(const std::string &providerId, 
                         const std::string &modelId,
                         const std::string &variantName) = 0;
+
+  /**
+   * @brief Returns the preferred model choice for this agent based on purpose
+   * or user configuration fallbacks.
+   */
+  virtual ModelChoice getPreferredModel() const = 0;
 
   /**
    * @brief Checks if the agent is currently running.

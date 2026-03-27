@@ -3,6 +3,7 @@
 #include "Serialization.hpp"
 #include "persistence/ThreadManager.hpp"
 #include "utils/StringUtil.hpp"
+#include <algorithm>
 #include <cstdlib>
 #include <rapidjson/document.h>
 
@@ -62,11 +63,27 @@ shared::ToolResult ArtifactWriteTool::execute(const ArtifactWriteInput &input,
     }
 
     ThreadManager tm(threadStorageRootPath());
+    const std::string trimmed_name = shared::StringUtil::trim(input.name);
+    std::string previous_content;
+    bool had_previous_content = false;
+    const auto existing_artifacts =
+        tm.listArtifactsForAgent(agentCtx.history->threadId, agentCtx.identity.id);
+    const auto existing_it = std::find_if(
+        existing_artifacts.begin(), existing_artifacts.end(),
+        [&](const ThreadArtifactMetadata &artifact) {
+          return artifact.filename == trimmed_name;
+        });
+    if (existing_it != existing_artifacts.end()) {
+      previous_content = tm.readArtifact(agentCtx.history->threadId,
+                                         agentCtx.identity.id, trimmed_name);
+      had_previous_content = true;
+    }
+
     bool created = false;
     const ThreadArtifactMetadata metadata = tm.writeArtifact(
         agentCtx.history->threadId, agentCtx.identity.id,
-        agentCtx.identity.friendlyName, shared::StringUtil::trim(input.name),
-        input.content, &created, input.kind, input.description);
+        agentCtx.identity.friendlyName, trimmed_name, input.content, &created,
+        input.kind, input.description);
 
     rapidjson::Document doc;
     doc.SetObject();
@@ -79,6 +96,10 @@ shared::ToolResult ArtifactWriteTool::execute(const ArtifactWriteInput &input,
     const std::string owner = displayOwnerName(metadata);
     const std::string reference = "@artifact:" + owner + "/" + metadata.filename;
     doc.AddMember("reference", rapidjson::Value(reference.c_str(), a), a);
+    if (had_previous_content) {
+      doc.AddMember("previous_content",
+                    rapidjson::Value(previous_content.c_str(), a).Move(), a);
+    }
     return ToolResult::ok(doc);
   } catch (const std::exception &e) {
     return ToolResult::fail(e.what());

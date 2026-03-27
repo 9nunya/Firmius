@@ -24,8 +24,10 @@ enum class ToolPresentationNoticeKind {
 };
 
 enum class ToolPresentationLayoutKind {
+  InlineStatusRow,
   BodyFirstStream,
   BodyFirstPreview,
+  DiffPreview,
   ResultsList,
   CompactFactCard,
 };
@@ -47,6 +49,21 @@ struct ToolPresentationSection {
   std::vector<std::string> lines;
 };
 
+struct ToolPresentationDiffLine {
+  char type = ' ';
+  int old_line = 0;
+  int new_line = 0;
+  std::string content;
+  bool highlight_background = false;
+};
+
+struct ToolPresentationDiffSection {
+  std::string title;
+  std::string meta;
+  std::optional<std::string> error_text;
+  std::vector<ToolPresentationDiffLine> lines;
+};
+
 struct ToolPresentationNotice {
   ToolPresentationNoticeKind kind = ToolPresentationNoticeKind::Info;
   std::string text;
@@ -60,6 +77,8 @@ struct ToolPresentation {
   std::string subtitle;
   std::string compact_summary;
   std::vector<std::string> body_lines;
+  std::string diff_source_name;
+  std::vector<ToolPresentationDiffSection> diff_sections;
   std::vector<ToolPresentationFact> facts;
   std::vector<ToolPresentationSection> sections;
   std::vector<std::string> footer_badges;
@@ -68,6 +87,7 @@ struct ToolPresentation {
   bool expandable = false;
   bool expanded = false;
   std::optional<std::string> error_text;
+  bool ansi_aware = false;
 };
 
 ToolPresentation BuildToolPresentation(

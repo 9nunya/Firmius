@@ -285,6 +285,215 @@ TEST_F(ThreadManagerTest, loadAgentHistory_withTurns) {
     EXPECT_EQ(history.turns[1].turnId, "turn-002");
 }
 
+TEST_F(ThreadManagerTest, loadAgentHistory_repairsOrphanedToolCalls) {
+    ThreadMetadata metadata = createTestMetadata();
+    std::string threadId = tm->createThread(metadata);
+    std::string agentId = "test-agent";
+
+    {
+        Journaler journaler(threadId, agentId);
+
+        AgentTurn toolCallTurn;
+        toolCallTurn.turnId = "turn-with-tool-call";
+        toolCallTurn.stopReason = StopReason::ToolUse;
+
+        Message assistantMsg;
+        assistantMsg.role = Role::Assistant;
+        assistantMsg.timestamp = 1000;
+        ToolCallContent call;
+        call.id = "call-orphaned-123";
+        call.name = "process_execute";
+        call.args = R"({"command":"ls"})";
+        assistantMsg.content.push_back(call);
+        toolCallTurn.messages.push_back(assistantMsg);
+
+        journaler.appendTurn(toolCallTurn);
+    }
+
+    AgentHistory history = tm->loadAgentHistory(threadId, agentId);
+
+    ASSERT_EQ(history.turns.size(), 2u);
+    EXPECT_EQ(history.turns[0].turnId, "turn-with-tool-call");
+
+    const auto& repairTurn = history.turns[1];
+    EXPECT_TRUE(repairTurn.turnId.starts_with("auto-repair-"));
+    ASSERT_EQ(repairTurn.messages.size(), 1u);
+
+    const auto& repairMsg = repairTurn.messages[0];
+    EXPECT_EQ(repairMsg.role, Role::ToolResult);
+    ASSERT_EQ(repairMsg.content.size(), 1u);
+
+    auto* result = std::get_if<ToolResultContent>(&repairMsg.content[0]);
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result->toolCallId, "call-orphaned-123");
+    EXPECT_EQ(result->result, "User aborted tool manually.");
+    EXPECT_FALSE(result->success);
+}
+
+TEST_F(ThreadManagerTest, loadAgentHistory_repairsMultipleOrphanedCalls) {
+    ThreadMetadata metadata = createTestMetadata();
+    std::string threadId = tm->createThread(metadata);
+    std::string agentId = "test-agent";
+
+    {
+        Journaler journaler(threadId, agentId);
+
+        AgentTurn multiCallTurn;
+        multiCallTurn.turnId = "turn-multi-call";
+        multiCallTurn.stopReason = StopReason::ToolUse;
+
+        Message assistantMsg;
+        assistantMsg.role = Role::Assistant;
+        assistantMsg.timestamp = 2000;
+
+        ToolCallContent call1;
+        call1.id = "call-a";
+        call1.name = "file_read";
+        call1.args = R"({"path":"file1.txt"})";
+
+        ToolCallContent call2;
+        call2.id = "call-b";
+        call2.name = "file_read";
+        call2.args = R"({"path":"file2.txt"})";
+
+        assistantMsg.content.push_back(call1);
+        assistantMsg.content.push_back(call2);
+        multiCallTurn.messages.push_back(assistantMsg);
+
+        journaler.appendTurn(multiCallTurn);
+    }
+
+    AgentHistory history = tm->loadAgentHistory(threadId, agentId);
+
+    ASSERT_EQ(history.turns.size(), 2u);
+
+    const auto& repairTurn = history.turns[1];
+    ASSERT_EQ(repairTurn.messages.size(), 2u);
+
+    auto* result1 = std::get_if<ToolResultContent>(&repairTurn.messages[0].content[0]);
+    auto* result2 = std::get_if<ToolResultContent>(&repairTurn.messages[1].content[0]);
+    ASSERT_NE(result1, nullptr);
+    ASSERT_NE(result2, nullptr);
+
+    EXPECT_TRUE(result1->toolCallId == "call-a" || result1->toolCallId == "call-b");
+    EXPECT_TRUE(result2->toolCallId == "call-a" || result2->toolCallId == "call-b");
+    EXPECT_NE(result1->toolCallId, result2->toolCallId);
+}
+
+TEST_F(ThreadManagerTest, loadAgentHistory_noRepairWhenResultsExist) {
+    ThreadMetadata metadata = createTestMetadata();
+    std::string threadId = tm->createThread(metadata);
+    std::string agentId = "test-agent";
+
+    {
+        Journaler journaler(threadId, agentId);
+
+        AgentTurn toolCallTurn;
+        toolCallTurn.turnId = "turn-with-call";
+        toolCallTurn.stopReason = StopReason::ToolUse;
+
+        Message assistantMsg;
+        assistantMsg.role = Role::Assistant;
+        assistantMsg.timestamp = 3000;
+        ToolCallContent call;
+        call.id = "call-has-result";
+        call.name = "file_read";
+        call.args = R"({"path":"test.txt"})";
+        assistantMsg.content.push_back(call);
+        toolCallTurn.messages.push_back(assistantMsg);
+
+        journaler.appendTurn(toolCallTurn);
+
+        AgentTurn toolResultTurn;
+        toolResultTurn.turnId = "turn-with-result";
+        toolResultTurn.stopReason = StopReason::Stop;
+
+        Message resultMsg;
+        resultMsg.role = Role::ToolResult;
+        resultMsg.timestamp = 4000;
+        ToolResultContent result;
+        result.toolCallId = "call-has-result";
+        result.result = R"({"content":"file contents"})";
+        result.success = true;
+        resultMsg.content.push_back(result);
+        toolResultTurn.messages.push_back(resultMsg);
+
+        journaler.appendTurn(toolResultTurn);
+    }
+
+    AgentHistory history = tm->loadAgentHistory(threadId, agentId);
+
+    EXPECT_EQ(history.turns.size(), 2u);
+    EXPECT_EQ(history.turns[0].turnId, "turn-with-call");
+    EXPECT_EQ(history.turns[1].turnId, "turn-with-result");
+}
+
+TEST_F(ThreadManagerTest, loadAgentHistory_repairsMixedOrphanedAndCompleted) {
+    ThreadMetadata metadata = createTestMetadata();
+    std::string threadId = tm->createThread(metadata);
+    std::string agentId = "test-agent";
+
+    {
+        Journaler journaler(threadId, agentId);
+
+        AgentTurn multiCallTurn;
+        multiCallTurn.turnId = "turn-mixed";
+        multiCallTurn.stopReason = StopReason::ToolUse;
+
+        Message assistantMsg;
+        assistantMsg.role = Role::Assistant;
+        assistantMsg.timestamp = 5000;
+
+        ToolCallContent call1;
+        call1.id = "call-completed";
+        call1.name = "file_read";
+        call1.args = R"({"path":"ok.txt"})";
+
+        ToolCallContent call2;
+        call2.id = "call-orphaned";
+        call2.name = "process_execute";
+        call2.args = R"({"command":"sleep 10"})";
+
+        assistantMsg.content.push_back(call1);
+        assistantMsg.content.push_back(call2);
+        multiCallTurn.messages.push_back(assistantMsg);
+
+        journaler.appendTurn(multiCallTurn);
+
+        AgentTurn resultTurn;
+        resultTurn.turnId = "turn-partial-result";
+        resultTurn.stopReason = StopReason::Stop;
+
+        Message resultMsg;
+        resultMsg.role = Role::ToolResult;
+        resultMsg.timestamp = 6000;
+        ToolResultContent result;
+        result.toolCallId = "call-completed";
+        result.result = R"({"content":"done"})";
+        result.success = true;
+        resultMsg.content.push_back(result);
+        resultTurn.messages.push_back(resultMsg);
+
+        journaler.appendTurn(resultTurn);
+    }
+
+    AgentHistory history = tm->loadAgentHistory(threadId, agentId);
+
+    ASSERT_EQ(history.turns.size(), 3u);
+    EXPECT_EQ(history.turns[0].turnId, "turn-mixed");
+    EXPECT_EQ(history.turns[1].turnId, "turn-partial-result");
+
+    const auto& repairTurn = history.turns[2];
+    EXPECT_TRUE(repairTurn.turnId.starts_with("auto-repair-"));
+    ASSERT_EQ(repairTurn.messages.size(), 1u);
+
+    auto* orphanResult = std::get_if<ToolResultContent>(&repairTurn.messages[0].content[0]);
+    ASSERT_NE(orphanResult, nullptr);
+    EXPECT_EQ(orphanResult->toolCallId, "call-orphaned");
+    EXPECT_EQ(orphanResult->result, "User aborted tool manually.");
+    EXPECT_FALSE(orphanResult->success);
+}
+
 TEST_F(ThreadManagerTest, updateMetadata_persistsPermissionMode) {
     ThreadMetadata metadata = createTestMetadata();
     std::string threadId = tm->createThread(metadata);

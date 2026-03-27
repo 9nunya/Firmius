@@ -55,7 +55,9 @@ public:
 
   const AgentContext &getContext() const override { return context; }
   AgentContext &getMutableContext() override { return context; }
-  std::shared_ptr<IHost> getHost() override;
+  std::shared_ptr<shared::IHost> getHost() override;
+
+  ModelChoice getPreferredModel() const override;
   
   std::shared_ptr<IEnvironment> getEnvironment() const override { return environment_; }
   std::shared_ptr<IPermissions> getPermissions() const override { return permissions_; }
@@ -123,11 +125,12 @@ private:
   std::atomic<bool> booting{false};
   std::mutex cancelTokenMutex_;
   std::shared_ptr<std::atomic<bool>> activeRunCancelToken_;
+  std::shared_ptr<shared::AbortController> activeRunAbortController_;
   mutable std::mutex runStateMutex_;
   std::condition_variable runStateCv_;
   std::mutex modelSwitchMutex;
   std::optional<PendingModelSwitch> pendingModelSwitch_;
-  std::mutex runMutex;
+  std::mutex runMutex_;
   std::function<void(const shared::StreamEvent &)> eventCallback;
   std::mutex callbackMutex;
   std::mutex blockingProcessMutex;

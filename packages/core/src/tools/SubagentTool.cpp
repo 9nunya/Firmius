@@ -59,8 +59,7 @@ findChunk(const shared::Plan &plan, const std::string &chunkId) {
 }
 
 shared::Plan loadPlan(const std::string &threadId, const std::string &planId) {
-  ThreadManager tm(std::string(getenv("HOME") ? getenv("HOME") : "/tmp") +
-                   "/.firmius/threads");
+  ThreadManager tm(ThreadManager::defaultBasePath());
   return tm.getPlan(threadId, planId);
 }
 
@@ -346,8 +345,7 @@ void ensureExecutorAssignmentAvailable(const std::string &threadId,
                                        const std::string &planId,
                                        const std::string &chunkId,
                                        const std::optional<std::string> &agentId) {
-  ThreadManager tm(std::string(getenv("HOME") ? getenv("HOME") : "/tmp") +
-                   "/.firmius/threads");
+  ThreadManager tm(ThreadManager::defaultBasePath());
   const shared::Plan plan = tm.getPlan(threadId, planId);
   const shared::WorkChunk &chunk = findChunk(plan, chunkId);
 
@@ -380,8 +378,7 @@ void ensureExecutorAssignmentAvailable(const std::string &threadId,
 void ensureExecutorChunkReadyForDispatch(const std::string &threadId,
                                          const std::string &planId,
                                          const std::string &chunkId) {
-  ThreadManager tm(std::string(getenv("HOME") ? getenv("HOME") : "/tmp") +
-                   "/.firmius/threads");
+  ThreadManager tm(ThreadManager::defaultBasePath());
   shared::Plan plan = tm.getPlan(threadId, planId);
   auto &chunk = worktools::requireChunk(plan, chunkId);
   const shared::WorkChunk originalChunk = chunk;
@@ -399,8 +396,7 @@ void persistExecutorDispatch(const std::string &threadId,
                              const std::string &planId,
                              const std::string &chunkId,
                              const std::string &agentId) {
-  ThreadManager tm(std::string(getenv("HOME") ? getenv("HOME") : "/tmp") +
-                   "/.firmius/threads");
+  ThreadManager tm(ThreadManager::defaultBasePath());
   shared::Plan plan = tm.getPlan(threadId, planId);
   auto &chunk = worktools::requireChunk(plan, chunkId);
   const shared::WorkChunk originalChunk = chunk;
@@ -742,7 +738,7 @@ shared::ToolResult SubagentTool::execute(const SubagentInput &input,
       -> std::optional<AgentOutcome> {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     while (std::chrono::steady_clock::now() < deadline) {
-      auto outcome = Engine::instance().waitForAgentOutcome(
+      auto outcome = Engine::instance().peekAgentOutcome(
           agentId, std::chrono::milliseconds(20));
       if (outcome.has_value()) {
         return outcome;
@@ -799,8 +795,16 @@ shared::ToolResult SubagentTool::execute(const SubagentInput &input,
       if (!agent) {
         return shared::ToolResult::fail("Agent not found: " + reusableAgentId);
       }
-      if (agent->getContext().state.currentStatus == AgentStatus::Streaming) {
-        return shared::ToolResult::fail("Agent is busy");
+      if (agent->getContext().state.currentStatus != AgentStatus::Idle) {
+        // Wait briefly for agent to become Idle if it's transitioning (e.g. finishing up previous run)
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (agent->getContext().state.currentStatus != AgentStatus::Idle &&
+               std::chrono::steady_clock::now() < deadline) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        if (agent->getContext().state.currentStatus != AgentStatus::Idle) {
+          return shared::ToolResult::fail("Agent is busy (status: " + std::to_string(static_cast<int>(agent->getContext().state.currentStatus)) + ")");
+        }
       }
       try {
         Engine::instance().switchAgentModel(reusableAgentId, route.providerId,
@@ -827,8 +831,10 @@ shared::ToolResult SubagentTool::execute(const SubagentInput &input,
           if (isRetryableWaitOutcome(*immediateOutcome) && i + 1 < routes.size()) {
             continue;
           }
-          return buildWaitResult(reusableAgentId, route, *immediateOutcome,
-                                 i > 0);
+          if (immediateOutcome->kind == AgentOutcome::Kind::Cancelled) {
+            return buildWaitResult(reusableAgentId, route, *immediateOutcome,
+                                   i > 0);
+          }
         }
 
         rapidjson::Document d;
@@ -877,17 +883,19 @@ shared::ToolResult SubagentTool::execute(const SubagentInput &input,
           waitForOutcomeWithTimeout(reusableAgentId, kAsyncOutcomeProbeWindow);
       if (immediateOutcome.has_value()) {
         if (isRetryableWaitOutcome(*immediateOutcome) && i + 1 < routes.size()) {
+          // Reset agentExists so fallback route spawns a fresh agent
+          agentExists = false;
           continue;
         }
-        return buildWaitResult(reusableAgentId, route, *immediateOutcome,
-                               i > 0);
+        if (immediateOutcome->kind == AgentOutcome::Kind::Cancelled) {
+          return buildWaitResult(reusableAgentId, route, *immediateOutcome,
+                                 i > 0);
+        }
       }
-
       rapidjson::Document d;
       d.SetObject();
       auto &a = d.GetAllocator();
-      d.AddMember("agentId", rapidjson::Value(reusableAgentId.c_str(), a).Move(),
-                  a);
+      d.AddMember("agentId", rapidjson::Value(reusableAgentId.c_str(), a).Move(), a);
       d.AddMember("status", "spawned", a);
       appendRoutingMetadata(d, route, attemptedCategories, i > 0);
       return shared::ToolResult::ok(d);
@@ -899,6 +907,8 @@ shared::ToolResult SubagentTool::execute(const SubagentInput &input,
           "Parent agent interrupted while waiting for subagent.");
     }
     if (isRetryableWaitOutcome(*outcome) && i + 1 < routes.size()) {
+      // Reset agentExists so fallback route spawns a fresh agent
+      agentExists = false;
       continue;
     }
     return buildWaitResult(reusableAgentId, route, *outcome, i > 0);

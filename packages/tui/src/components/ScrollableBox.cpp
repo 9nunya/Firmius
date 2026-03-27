@@ -2,6 +2,8 @@
 
 #include "components/Markdown.hpp"
 #include <ftxui/component/mouse.hpp>
+#include <ftxui/component/animation.hpp>
+#include <ftxui/component/screen_interactive.hpp>
 #include <ftxui/dom/elements.hpp>
 #include <algorithm>
 
@@ -107,6 +109,10 @@ ftxui::Element ScrollableBoxComponent::OnRender() {
     int viewport_w = 0;
     if (box_.x_max >= box_.x_min) {
         viewport_w = box_.x_max - box_.x_min + 1;
+    }
+    if (viewport_w != last_rendered_viewport_w_) {
+        last_rendered_viewport_w_ = viewport_w;
+        ftxui::ScreenInteractive::Active()->RequestAnimationFrame();
     }
     viewport_width_ = viewport_w;
 

@@ -14,6 +14,7 @@ target_sources(firmius_audits PRIVATE
     src/audits/ProviderAudit.cpp
     src/audits/ProviderStreamDebugAudit.cpp
     src/audits/QwenProviderAudit.cpp
+    src/audits/LoopCancellationAudit.cpp
     src/audits/QwenQuotaAudit.cpp
     src/audits/SubagentStressAudit.cpp
     src/audits/WorkflowsAudit.cpp
@@ -34,6 +35,7 @@ target_sources(firmius_audits PUBLIC
     include/audits/P15Audit.hpp
     include/audits/ProviderAudit.hpp
     include/audits/ProviderStreamDebugAudit.hpp
+    include/audits/LoopCancellationAudit.hpp
     include/audits/QwenProviderAudit.hpp
     include/audits/QwenQuotaAudit.hpp
     include/audits/SubagentStressAudit.hpp

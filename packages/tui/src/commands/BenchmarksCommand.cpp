@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <random>
 #include <thread>
 
 namespace firmius::tui {
@@ -112,11 +113,9 @@ void BenchmarksCommand::execute(CommandCtx &ctx,
     return;
   }
 
-  if (ctx.state->getViewMode() != TuiState::ViewMode::Welcome ||
-      ctx.state->hasActiveThread()) {
-    NotificationManager::instance().notifyWarning(
-        "Benchmarks", "/benchmarks only works from the welcome screen.");
-    return;
+  if (ctx.state->hasActiveThread()) {
+    NotificationManager::instance().notifyInfo(
+        "Benchmarks", "Closing current thread and starting benchmark run.");
   }
 
   const std::string benchmarkArg =
@@ -159,6 +158,11 @@ void BenchmarksCommand::execute(CommandCtx &ctx,
   hostOptions.type = firmius::shared::HostType::Docker;
   hostOptions.connectToExisting = false;
   hostOptions.deleteOnExit = true;
+  if (*canonical == "swebench") {
+    std::string home = std::getenv("HOME") ? std::getenv("HOME") : "/root";
+    const std::string cacheDir = home + "/.firmius/cache/swebench/repos";
+    hostOptions.volumeMounts.push_back(cacheDir + ":/host_cache");
+  }
 
   const std::string threadId = harness.newThread(hostOptions, "/work", "worker");
   if (threadId.empty()) {
@@ -258,13 +262,22 @@ void BenchmarksCommand::execute(CommandCtx &ctx,
         return;
       }
 
-      std::string taskId = requestedTaskId.empty() ? tasks.front() : requestedTaskId;
+      std::string taskId = requestedTaskId;
+      static thread_local std::mt19937 rng(std::random_device{}());
+      auto pickRandomTask = [&]() -> std::string {
+        std::uniform_int_distribution<size_t> dist(0, tasks.size() - 1);
+        return tasks[dist(rng)];
+      };
+      if (taskId.empty()) {
+        taskId = pickRandomTask();
+        log("No task_id provided. Randomly selected task: " + taskId + ".");
+      }
       if (!requestedTaskId.empty()) {
         const auto found = std::find(tasks.begin(), tasks.end(), requestedTaskId);
         if (found == tasks.end()) {
+          taskId = pickRandomTask();
           log("Requested task '" + requestedTaskId +
-              "' not found. Falling back to first task: " + tasks.front() + ".");
-          taskId = tasks.front();
+              "' not found. Falling back to random task: " + taskId + ".");
         }
       }
       harnessRef.markThreadAsBenchmark(threadId, canonicalBenchmark, taskId);

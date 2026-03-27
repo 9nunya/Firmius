@@ -8,10 +8,10 @@ I need you to explore the current working directory and create a comprehensive a
 **Your Task:**
 
 1. First, list the directory structure to understand what we're working with
-2. Spawn 3 subagents with the following specializations:
-   - **Subagent 1 (Code Analysis)**: Analyze source code files, identify programming languages, frameworks, and architecture patterns
-   - **Subagent 2 (Documentation)**: Review README, docs, comments, and configuration files to understand the project purpose
-   - **Subagent 3 (Dependencies)**: Examine package.json, requirements.txt, CMakeLists.txt, or other dependency files
+2. Spawn 3 scouts with the following specializations:
+   - **Scout 1 (Code Analysis)**: Analyze source code files, identify programming languages, frameworks, and architecture patterns
+   - **Scout 2 (Documentation)**: Review README, docs, comments, and configuration files to understand the project purpose
+   - **Scout 3 (Dependencies)**: Examine package.json, requirements.txt, CMakeLists.txt, or other dependency files
 
 3. Each subagent should produce a focused report on their area
 

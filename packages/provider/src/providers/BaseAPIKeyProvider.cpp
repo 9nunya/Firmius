@@ -161,8 +161,9 @@ void BaseAPIKeyProvider::loadAccounts() {
   if (doc.HasParseError() || !doc.IsObject())
     return;
 
-  if (doc.HasMember("lastUsedIndex") && doc["lastUsedIndex"].IsInt()) {
-    lastUsedIndex_ = doc["lastUsedIndex"].GetInt();
+  std::string lastUsedKey = providerId_ + "_lastUsedIndex";
+  if (doc.HasMember(lastUsedKey.c_str()) && doc[lastUsedKey.c_str()].IsInt()) {
+    lastUsedIndex_ = doc[lastUsedKey.c_str()].GetInt();
   }
 
   if (doc.HasMember(providerId_.c_str()) &&
@@ -252,13 +253,15 @@ void BaseAPIKeyProvider::saveAccounts() {
   if (doc.HasMember(providerId_.c_str())) {
     doc.RemoveMember(providerId_.c_str());
   }
-  doc.AddMember(rapidjson::Value(providerId_.c_str(), doc.GetAllocator()), arr,
-                doc.GetAllocator());
+  rapidjson::Value providerIdVal(providerId_.c_str(), doc.GetAllocator());
+  doc.AddMember(providerIdVal, arr, doc.GetAllocator());
 
-  if (doc.HasMember("lastUsedIndex")) {
-    doc.RemoveMember("lastUsedIndex");
+  std::string lastUsedKey = providerId_ + "_lastUsedIndex";
+  if (doc.HasMember(lastUsedKey.c_str())) {
+    doc.RemoveMember(lastUsedKey.c_str());
   }
-  doc.AddMember("lastUsedIndex", lastUsedIndex_, doc.GetAllocator());
+  rapidjson::Value lastUsedKeyVal(lastUsedKey.c_str(), doc.GetAllocator());
+  doc.AddMember(lastUsedKeyVal, lastUsedIndex_, doc.GetAllocator());
 
   rapidjson::StringBuffer buffer;
   rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);

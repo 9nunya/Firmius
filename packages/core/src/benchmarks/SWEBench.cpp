@@ -161,6 +161,7 @@ bool SWEBench::prepareTask(const std::string& taskId) {
         logDebug("[SWEBench][VERBOSE] Initial clone on host: ", repo, "...");
         session.emitLog("SWE-bench: cloning https://github.com/" + repo + ".git into host cache.");
         std::filesystem::create_directories(hostCacheBase);
+        // Full clone to ensure all commits are available
         std::string cloneCmd = "git clone https://github.com/" + repo + ".git " + repoCacheDir;
         ShellCommandResult cloneRes = runShellCommandCapture(cloneCmd);
         if (cloneRes.exitCode != 0) {
@@ -203,26 +204,57 @@ bool SWEBench::prepareTask(const std::string& taskId) {
 
     logDebug("[SWEBench][VERBOSE] Resetting /work and copying from host cache...");
     session.emitLog("SWE-bench: resetting /work and staging repository files.");
-    session.getHost().exec("rm -rf /work/* /work/.* 2>/dev/null || true");
-    session.getHost().exec("mkdir -p /work");
+    
+    std::string hostId = session.getHost().getId();
+    logDebug("[SWEBench][DEBUG] Host ID: ", hostId);
+    
+    // For Docker hosts, prefer mounted host cache and fall back to docker cp.
+    if (hostId != "localhost") {
+        session.getHost().exec("rm -rf /work/* /work/.[!.]* /work/..?* 2>/dev/null || true", "/work");
+        session.getHost().exec("mkdir -p /work", "/work");
 
-    if (session.getHost().getId() != "localhost") {
-        // Use docker cp for robust directory transfer
-        session.emitLog("SWE-bench: copying cached repository into docker host " +
-                        session.getHost().getId() + ".");
-        std::string transferCmd = "docker cp " + repoCacheDir + "/. " + session.getHost().getId() + ":/work/";
-        ShellCommandResult transferRes = runShellCommandCapture(transferCmd);
-        if (transferRes.exitCode != 0) {
-            logError("[SWEBench][ERROR] docker cp transfer failed (exit=",
-                     transferRes.exitCode, "):\n", compactOutputForLog(transferRes.output));
-            throw std::runtime_error("Failed to transfer repository to container using docker cp");
+        const std::string mountedRepoDir = "/host_cache/" + repo;
+        auto mountedRepoCheck = session.getHost().exec(
+            "[ -d \"" + mountedRepoDir + "/.git\" ]", "/work");
+
+        if (mountedRepoCheck.exitCode == 0) {
+            session.emitLog("SWE-bench: using volume-mounted repository (host=" + hostId + ").");
+            auto cpRes = session.getHost().exec(
+                "cp -a \"" + mountedRepoDir + "/.\" /work/", "/work");
+            if (cpRes.exitCode != 0) {
+                const std::string copyError =
+                    cpRes.stderrData.empty() ? cpRes.stdoutData : cpRes.stderrData;
+                logError("[SWEBench][ERROR] cp from /host_cache failed: ", copyError);
+                throw std::runtime_error("Failed to copy repository from volume mount: " +
+                                         copyError);
+            }
+        } else {
+            session.emitLog("SWE-bench: /host_cache not mounted; staging repository via docker cp.");
+            const std::string dockerCopyCmd =
+                "docker cp \"" + repoCacheDir + "/.\" " + hostId + ":/work/";
+            ShellCommandResult dockerCopyRes = runShellCommandCapture(dockerCopyCmd);
+            if (dockerCopyRes.exitCode != 0) {
+                logError("[SWEBench][ERROR] docker cp failed (exit=",
+                         dockerCopyRes.exitCode, "):\n",
+                         compactOutputForLog(dockerCopyRes.output));
+                throw std::runtime_error("Failed to copy repository into container: " +
+                                         dockerCopyRes.output);
+            }
         }
-        
-        auto gitCheck = session.getHost().exec("ls -d /work/.git");
+
+        // Verify .git was copied
+        auto gitCheck = session.getHost().exec("ls -la /work/.git", "/work");
+        logDebug("[SWEBench][DEBUG] .git in /work: ", gitCheck.stdoutData);
         if (gitCheck.exitCode != 0) {
-            logError("[SWEBench][ERROR] .git directory not found in /work after docker cp!");
+            const std::string verifyError =
+                gitCheck.stderrData.empty() ? gitCheck.stdoutData : gitCheck.stderrData;
+            throw std::runtime_error("Repository staging failed: /work/.git missing (" +
+                                     verifyError + ")");
         }
     } else {
+        session.emitLog("SWE-bench: using local host copy.");
+        session.getHost().exec("rm -rf /work/* /work/.[!.]* /work/..?* 2>/dev/null || true", "/work");
+        session.getHost().exec("mkdir -p /work", "/work");
         session.getHost().exec("cp -a " + repoCacheDir + "/. /work/");
     }
 
@@ -231,10 +263,18 @@ bool SWEBench::prepareTask(const std::string& taskId) {
     session.getHost().exec("git config --global --add safe.directory /work", "/work");
     auto checkoutRes = session.getHost().exec("git checkout -f " + baseCommit, "/work");
     if (checkoutRes.exitCode != 0) {
-        logDebug("[SWEBench][DEBUG] Checkout failed. The commit might be missing from the cache.");
-        // Do not try to fetch in the container if internet is disabled.
-        // We already tried to fetch on the host.
-        throw std::runtime_error("Git checkout failed in container: " + checkoutRes.stderrData);
+        logDebug("[SWEBench][DEBUG] Checkout failed. Fetching full history...");
+        session.emitLog("SWE-bench: fetching full history for commit " + baseCommit + ".");
+        // Try to fetch full history in container
+        auto fetchRes = session.getHost().exec("git fetch --unshallow 2>/dev/null || git fetch origin", "/work");
+        if (fetchRes.exitCode == 0) {
+            // Retry checkout after fetch
+            checkoutRes = session.getHost().exec("git checkout -f " + baseCommit, "/work");
+        }
+        if (checkoutRes.exitCode != 0) {
+            logDebug("[SWEBench][DEBUG] Checkout failed after fetch. The commit might be missing.");
+            throw std::runtime_error("Git checkout failed in container: " + checkoutRes.stderrData);
+        }
     }
     
     auto logRes = session.getHost().exec("git log -1 --format=%H", "/work");

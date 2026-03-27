@@ -1,5 +1,6 @@
 #include "Engine.hpp"
 #include "TUIState.hpp"
+#include "components/InputBar.hpp"
 #include "harness/Harness.hpp"
 #include "workflow/WorkflowLoader.hpp"
 #include <ftxui/component/component.hpp>
@@ -8,6 +9,7 @@
 #include <ftxui/screen/screen.hpp>
 #include <iostream>
 #include <string>
+#include <chrono>
 
 #include "commands/AccountsCommand.hpp"
 #include "commands/BenchmarksCommand.hpp"
@@ -143,9 +145,25 @@ int main(int argc, char **argv) {
   std::cout << "\x1b[?2004h" << std::flush;
 
   auto renderer = state.root();
+  auto last_ctrl_c_time = std::make_shared<std::chrono::steady_clock::time_point>(std::chrono::steady_clock::now() - std::chrono::seconds(10));
   renderer = CatchEvent(renderer, [&](Event event) {
     if (event.is_character() && event.character() == std::string(1, '\x03')) {
-      screen.ExitLoopClosure()();
+      auto now = std::chrono::steady_clock::now();
+      auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - *last_ctrl_c_time).count();
+      if (elapsed < 3000) {
+        // Second ctrl+c within 3 seconds - quit
+        screen.ExitLoopClosure()();
+        return true;
+      }
+      // First ctrl+c - clear input buffer
+      *last_ctrl_c_time = now;
+      auto &input_model = state.getInputBarModel();
+      if (input_model.buffer && !input_model.buffer->empty()) {
+        input_model.buffer->clear();
+        if (input_model.cursor) {
+          *input_model.cursor = 0;
+        }
+      }
       return true;
     }
     return false;

@@ -342,11 +342,12 @@ std::string AntigravityProtocol::prepareRequestBody(const AgentHistory &history,
           rapidjson::Value p(rapidjson::kObjectType);
           p.AddMember("text", rapidjson::Value(text->text.c_str(), a), a);
           parts.PushBack(p, a);
-        } else if (std::holds_alternative<ThinkingContent>(part)) {
-          // Do not include prior thinking blocks in request history.
-          // Antigravity rejects thinking signatures in request contents, and
-          // thinking should not be part of the conversation history.
-          continue;
+        } else if (auto *thinking = std::get_if<ThinkingContent>(&part)) {
+          // Include thinking content as text (without signature)
+          // The reference implementation strips signatures but keeps the text
+          rapidjson::Value p(rapidjson::kObjectType);
+          p.AddMember("text", rapidjson::Value(thinking->thinking.c_str(), a), a);
+          parts.PushBack(p, a);
         } else if (auto *call = std::get_if<ToolCallContent>(&part)) {
           rapidjson::Value p(rapidjson::kObjectType);
           rapidjson::Value fn(rapidjson::kObjectType);
@@ -473,6 +474,26 @@ std::string AntigravityProtocol::prepareRequestBody(const AgentHistory &history,
         contents.PushBack(modelTurn, a);
       }
       lastWasToolResult = false;
+    }
+  }
+
+  // Claude models reject requests where contents ends with a "model" role
+  // ("assistant prefill"). This can happen when the last turn in history is an
+  // assistant message with tool calls, or when a dummy model turn is appended
+  // for tool-result alternation. Append a sentinel user turn to satisfy the
+  // constraint.
+  if (isClaude && contents.Size() > 0) {
+    const auto& last = contents[contents.Size() - 1];
+    if (last.HasMember("role") && last["role"].IsString() &&
+        std::string(last["role"].GetString()) == "model") {
+      rapidjson::Value userTurn(rapidjson::kObjectType);
+      userTurn.AddMember("role", rapidjson::Value("user", a), a);
+      rapidjson::Value userParts(rapidjson::kArrayType);
+      rapidjson::Value userPart(rapidjson::kObjectType);
+      userPart.AddMember("text", rapidjson::Value("Continue.", a), a);
+      userParts.PushBack(userPart, a);
+      userTurn.AddMember("parts", userParts, a);
+      contents.PushBack(userTurn, a);
     }
   }
 

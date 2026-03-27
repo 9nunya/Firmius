@@ -74,6 +74,7 @@ public:
               (override));
   MOCK_METHOD((const AgentContext &), getContext, (), (const, override));
   MOCK_METHOD(AgentContext &, getMutableContext, (), (override));
+  MOCK_METHOD(ModelChoice, getPreferredModel, (), (const, override));
   MOCK_METHOD(void, interrupt, (), (override));
   MOCK_METHOD(bool, isInterrupted, (), (const, override));
   MOCK_METHOD(void, clearInterrupt, (), (override));
@@ -181,6 +182,9 @@ TEST_F(ArtifactToolsTest, WriteCreateUpdateAndReadRoundTrip) {
   ASSERT_FALSE(updatedJson.HasParseError());
   EXPECT_TRUE(updatedJson["updated"].GetBool());
   EXPECT_EQ(std::string(updatedJson["status"].GetString()), "updated");
+  ASSERT_TRUE(updatedJson.HasMember("previous_content"));
+  EXPECT_EQ(std::string(updatedJson["previous_content"].GetString()),
+            "first body");
 
   ArtifactReadInput readInput;
   readInput.reference = "@artifact:planner/REPORT.md";

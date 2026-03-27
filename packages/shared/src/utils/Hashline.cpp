@@ -62,7 +62,10 @@ bool parseBareHashFragment(std::string_view line, size_t& prefixLength) noexcept
 } // namespace
 
 std::string Hashline::computeHash(std::string_view content) noexcept {
-    const uint32_t hash = fnv1a_32(content);
+    uint32_t hash = fnv1a_32(content);
+    // Incorporate length for extra entropy on similar short strings
+    hash ^= static_cast<uint32_t>(content.length());
+    hash *= 0x01000193;
     // Take lower 16 bits and format as 4 hex chars
     std::stringstream ss;
     ss << std::hex << std::setw(4) << std::setfill('0') << (hash & 0xFFFF);
@@ -131,6 +134,51 @@ std::optional<HashlineAnchor> Hashline::parseAnchor(std::string_view anchor) noe
 
 bool Hashline::verifyAnchor(std::string_view expectedHash, std::string_view actualContent) noexcept {
     return computeHash(actualContent) == expectedHash;
+}
+
+AnchorResult Hashline::resolveAnchor(const std::vector<std::string>& lines,
+                                      const std::string& anchorText,
+                                      int searchWindow) {
+    const size_t pipePos = anchorText.find('|');
+    if (pipePos != std::string_view::npos && pipePos + 1 < anchorText.size()) {
+        throw std::runtime_error("Malformed anchor '" + anchorText +
+                                 "'. Use lineNumber#hash only, without trailing " +
+                                 "|content from file_read.");
+    }
+
+    auto parsed = parseAnchor(anchorText);
+    if (!parsed) {
+        return {AnchorResult::Status::MALFORMED, -1, false, "Malformed anchor: " + anchorText, "", ""};
+    }
+
+    const int expectedIndex = parsed->lineNumber - 1;
+    std::vector<int> matches;
+    const int minIndex = std::max(0, expectedIndex - searchWindow);
+    const int maxIndex = std::min(static_cast<int>(lines.size()) - 1, expectedIndex + searchWindow);
+
+    for (int index = minIndex; index <= maxIndex; ++index) {
+        if (verifyAnchor(parsed->hash, lines[index])) {
+            matches.push_back(index);
+        }
+    }
+
+    if (matches.size() == 1) {
+        return {AnchorResult::Status::SUCCESS, matches.front(), matches.front() != expectedIndex, "", "", parsed->hash};
+    }
+
+    if (matches.size() > 1) {
+        return {AnchorResult::Status::AMBIGUOUS, -1, false, 
+                "Ambiguous anchor '" + anchorText + "': matched " + std::to_string(matches.size()) + " nearby lines.", 
+                "", parsed->hash};
+    }
+
+    std::string foundHash = "";
+    if (expectedIndex >= 0 && expectedIndex < static_cast<int>(lines.size())) {
+        foundHash = computeHash(lines[expectedIndex]);
+    }
+    return {AnchorResult::Status::STALE, -1, false, 
+            "Stale anchor '" + anchorText + "': the file changed after your last read.", 
+            foundHash, parsed->hash};
 }
 
 std::string HashlineReadEnhancer::enhance(std::string_view content) {

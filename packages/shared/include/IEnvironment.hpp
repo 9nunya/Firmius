@@ -151,6 +151,20 @@ public:
     virtual void markFileAsFullyRead(const std::string& path) = 0;
 
     /**
+     * @brief Records a file modification, invalidating read ranges.
+     * @param path The absolute path.
+     */
+    virtual void recordFileEdit(const std::string& path) = 0;
+
+    /**
+     * @brief Checks if a specific line has been read for a file.
+     * @param path The absolute path.
+     * @param line The 1-indexed line number.
+     * @return True if the line has been read.
+     */
+    virtual bool isLineRead(const std::string& path, int line) const = 0;
+
+    /**
      * @brief Gets the current working directory.
      * @return The CWD.
      */

@@ -47,6 +47,7 @@ private:
     ftxui::Component child_;
     bool at_bottom_ = false;
     int viewport_width_ = 0;
+    int last_rendered_viewport_w_ = -1;
     int viewport_height_ = 0;
     int last_max_scroll_ = 0;
     int scrollbar_thumb_top_ = 0;

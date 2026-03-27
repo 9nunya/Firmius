@@ -212,6 +212,21 @@ target_include_directories(test_engine_images PRIVATE
 )
 gtest_discover_tests(test_engine_images)
 
+add_executable(test_engine_stream_events
+    core/test_engine_stream_events.cpp
+)
+target_link_libraries(test_engine_stream_events PRIVATE
+    firmius::core
+    firmius::provider
+    firmius::shared
+    GTest::gtest_main
+    CURL::libcurl
+)
+target_include_directories(test_engine_stream_events PRIVATE
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_engine_stream_events)
+
 add_executable(test_process_manager
     core/test_process_manager.cpp
 )
@@ -502,6 +517,8 @@ gtest_discover_tests(test_transcript_grouping)
 add_executable(test_chat_window_helpers
     tui/test_chat_window_helpers.cpp
     ../../packages/tui/src/components/ChatWindow.cpp
+    ../../packages/tui/src/components/DiffRenderer.cpp
+    ../../packages/tui/src/components/FileEditDiff.cpp
     ../../packages/tui/src/components/ToolBlock.cpp
     ../../packages/tui/src/components/ToolPresentationBlock.cpp
     ../../packages/tui/src/components/ErrorDisplay.cpp
@@ -511,6 +528,7 @@ add_executable(test_chat_window_helpers
     ../../packages/tui/src/components/SyntaxHighlighter.cpp
     ../../packages/tui/src/components/TranscriptGrouping.cpp
     ../../packages/tui/src/ThemeManager.cpp
+    ../../packages/tui/src/components/ANSIParser.cpp
     ../../packages/tui/src/UserPreferences.cpp
     ../../packages/tui/src/NotificationManager.cpp
     ../../packages/tui/src/tools/ArtifactToolPresentation.cpp
@@ -687,6 +705,7 @@ gtest_discover_tests(test_agent_strip)
 
 add_executable(test_tool_presentation
     tui/test_tool_presentation.cpp
+    ../../packages/tui/src/components/FileEditDiff.cpp
     ../../packages/tui/src/tools/ArtifactToolPresentation.cpp
     ../../packages/tui/src/tools/FileToolPresentation.cpp
     ../../packages/tui/src/tools/ProcessToolPresentation.cpp
@@ -707,7 +726,11 @@ gtest_discover_tests(test_tool_presentation)
 
 add_executable(test_tool_presentation_block
     tui/test_tool_presentation_block.cpp
+    ../../packages/tui/src/components/DiffRenderer.cpp
+    ../../packages/tui/src/components/FileEditDiff.cpp
+    ../../packages/tui/src/components/SyntaxHighlighter.cpp
     ../../packages/tui/src/components/ToolPresentationBlock.cpp
+    ../../packages/tui/src/components/ANSIParser.cpp
     ../../packages/tui/src/tools/ArtifactToolPresentation.cpp
     ../../packages/tui/src/tools/FileToolPresentation.cpp
     ../../packages/tui/src/tools/ProcessToolPresentation.cpp
@@ -716,17 +739,24 @@ add_executable(test_tool_presentation_block
     ../../packages/tui/src/tools/WorkToolPresentation.cpp
     ../../packages/tui/src/ThemeManager.cpp
     ../../packages/tui/src/UserPreferences.cpp
+    ../../packages/tui/src/ActivePlanState.cpp
+    ../../packages/tui/src/NotificationManager.cpp
+    ../../packages/tui/src/StreamStateManager.cpp
 )
 target_link_libraries(test_tool_presentation_block PRIVATE
     firmius::shared
+    firmius::core
     GTest::gtest_main
     ftxui::dom
     ftxui::screen
     ftxui::component
+    tree_sitter_all
 )
 target_include_directories(test_tool_presentation_block PRIVATE
     ../../packages/tui/include
     ../../packages/tui/src
+    ../../packages/core/include
+    ../../packages/shared/include
     ${rapidjson_SOURCE_DIR}/include
 )
 gtest_discover_tests(test_tool_presentation_block)
@@ -772,3 +802,17 @@ target_include_directories(test_workspace PRIVATE
     ${rapidjson_SOURCE_DIR}/include
 )
 gtest_discover_tests(test_workspace)
+
+add_executable(test_runtime_overlay
+    core/test_runtime_overlay.cpp
+)
+target_link_libraries(test_runtime_overlay PRIVATE
+    firmius::core
+    firmius::shared
+    GTest::gtest_main
+    GTest::gmock
+)
+target_include_directories(test_runtime_overlay PRIVATE
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_runtime_overlay)

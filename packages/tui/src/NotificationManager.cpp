@@ -2,6 +2,7 @@
 #include "components/GlintEffect.hpp"
 #include <algorithm>
 #include <ftxui/dom/elements.hpp>
+#include <ftxui/screen/terminal.hpp>
 #include <sstream>
 
 namespace firmius::tui {
@@ -175,6 +176,8 @@ ftxui::Color NotificationManager::getColorForType(NotificationType type) {
 ftxui::Element
 NotificationManager::renderNotification(const Notification &notif) {
   auto color = getColorForType(notif.type);
+  const int terminal_width = std::max(40, ftxui::Terminal::Size().dimx);
+  const int card_width = std::max(28, std::min(46, terminal_width - 8));
 
   // Icon based on type
   std::string icon;
@@ -196,16 +199,18 @@ NotificationManager::renderNotification(const Notification &notif) {
     break;
   }
 
-  ftxui::Elements header;
-  header.push_back(ftxui::text(icon + " ") | ftxui::bold | ftxui::color(color));
-  header.push_back(ftxui::text(notif.title) | ftxui::bold | ftxui::color(color));
-
-  std::string msg = notif.message;
-  if (msg.size() > 60)
-    msg = msg.substr(0, 57) + "…";
   ftxui::Elements body_rows;
-  body_rows.push_back(ftxui::hbox(std::move(header)));
-  body_rows.push_back(ftxui::text(" " + msg) | ftxui::color(ftxui::Color::RGB(200, 200, 220)));
+  body_rows.push_back(
+      ftxui::hbox({
+          ftxui::text(icon + " ") | ftxui::bold | ftxui::color(color),
+          ftxui::paragraph(notif.title) | ftxui::bold | ftxui::color(color) |
+              ftxui::xflex,
+      }));
+  if (!notif.message.empty()) {
+    body_rows.push_back(
+        ftxui::paragraph(notif.message) |
+        ftxui::color(ftxui::Color::RGB(200, 200, 220)));
+  }
 
   // Progress bar for progress notifications
   if (notif.type == NotificationType::Progress) {
@@ -228,17 +233,19 @@ NotificationManager::renderNotification(const Notification &notif) {
     }));
   }
 
-  auto body = ftxui::vbox({
-                  ftxui::text(""),
-                  ftxui::hbox({
-                      ftxui::text("  "),
-                      ftxui::vbox(std::move(body_rows)) | ftxui::xflex,
-                      ftxui::text("  "),
-                  }),
-                  ftxui::text(""),
-              }) |
-              ftxui::bgcolor(ftxui::Color::RGB(30, 30, 50)) |
-              ftxui::color(ftxui::Color::RGB(200, 200, 220)) | ftxui::xflex;
+  auto body =
+      ftxui::vbox({
+          ftxui::text(""),
+          ftxui::hbox({
+              ftxui::text("  "),
+              ftxui::vbox(std::move(body_rows)) | ftxui::xflex,
+              ftxui::text("  "),
+          }),
+          ftxui::text(""),
+      }) |
+      ftxui::size(ftxui::WIDTH, ftxui::EQUAL, card_width) |
+      ftxui::bgcolor(ftxui::Color::RGB(30, 30, 50)) |
+      ftxui::color(ftxui::Color::RGB(200, 200, 220));
 
   return ftxui::hbox({
       ftxui::text(" ") | ftxui::bgcolor(color),
@@ -265,7 +272,11 @@ ftxui::Element NotificationManager::render() {
   }
 
   return ftxui::vbox({
-      ftxui::vbox(notif_elements) | ftxui::align_right,
+      ftxui::hbox({
+          ftxui::filler(),
+          ftxui::vbox(notif_elements),
+          ftxui::text(" "),
+      }),
       ftxui::filler(),
   });
 }

@@ -44,6 +44,11 @@ public:
     int retryAfterMs = 0;
     std::string errorMessage;
 
+    // Header-based quota tracking (-1 means header not present)
+    int remainingRequests = -1;
+    int remainingTokens = -1;
+    int remainingRequestsDay = -1;
+
     bool succeeded() const { return kind == StreamAttemptKind::Success; }
   };
 
@@ -55,7 +60,7 @@ public:
   };
 
   QwenProvider();
-  ~QwenProvider() override = default;
+  ~QwenProvider() override;
 
   // ------------------------------------------------------------------------
   // IProvider interface overrides
@@ -124,6 +129,9 @@ protected:
 
 private:
   static std::map<std::string, ModelInfo> getStaticModels();
+
+  // Removes old per-model quota entries, keeping only unified "quota:qwen"
+  static void cleanupOldQuotaBuckets(OAuthAccount &acc);
 
   // Sends the OpenAI-compatible chat completions request
   StreamAttemptResult

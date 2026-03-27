@@ -198,7 +198,7 @@ int phase2_thread_switch(Harness &harnessInst, TestState &state,
             << harnessInst.focusedAgentId() << std::endl;
   std::string dirB = tempDir + "/thread_b";
   std::filesystem::create_directories(dirB);
-  state.threadB = harnessInst.newThread({HostType::Docker}, dirB, "lead");
+  state.threadB = harnessInst.newThread(HostCreationOptions{HostType::Docker, "", false, true, {}}, dirB, "lead");
   if (state.threadB.empty()) {
     std::cerr << "Phase 2 FAILED: Thread-B creation failed" << std::endl;
     return EXIT_PHASE2_FAILED;
@@ -601,7 +601,7 @@ int runAudit(const std::vector<std::string> &args) {
   }
   std::string dirA = tempDir.path() + "/thread_a";
   std::filesystem::create_directories(dirA);
-  state.threadA = harnessInst.newThread({HostType::Docker}, dirA, "lead");
+  state.threadA = harnessInst.newThread(HostCreationOptions{HostType::Docker, "", false, true, {}}, dirA, "lead");
   if (state.threadA.empty()) {
     std::cerr << "FAILED: Thread-A creation failed" << std::endl;
     return EXIT_GENERAL_FAILURE;

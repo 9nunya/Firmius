@@ -1,11 +1,15 @@
+#include <sys/syscall.h>
+#include <unistd.h>
 #include "agents/Agent.hpp"
 #include "AgentRegistry.hpp"
+#include "ConfigLoader.hpp"
 #include "EnvLoader.hpp"
 #include "Events.hpp"
 #include "Message.hpp"
 #include "Panic.hpp"
 #include "Serialization.hpp"
 #include "agents/PurposeLoader.hpp"
+#include "agents/RuntimeOverlay.hpp"
 #include "persistence/Journaler.hpp"
 #include "persistence/ThreadManager.hpp"
 #include "providers/ProviderRegistry.hpp"
@@ -151,10 +155,7 @@ void mergeToolCallChunk(std::vector<ToolCallChunk> &accumulated,
 }
 
 bool shouldRetryProviderFailureAtAgentLayer(int httpStatus) {
-  if (httpStatus < 0) {
-    return false;
-  }
-  if (httpStatus == 0 || httpStatus >= 500) {
+  if (httpStatus == -1 || httpStatus == 0 || httpStatus >= 500) {
     return true;
   }
   return httpStatus == 408 || httpStatus == 409 || httpStatus == 425;
@@ -178,19 +179,6 @@ std::string appendProviderModelContext(const AgentConfig &config,
     detailed += "\nVariant: " + config.modelVariant;
   }
   return detailed;
-}
-
-std::string threadStorageRootPath() {
-  if (const char *home = std::getenv("HOME")) {
-    return std::string(home) + "/.firmius/threads";
-  }
-  return ".firmius/threads";
-}
-
-std::string compactionSnapshotPath(const std::string &threadId,
-                                   const std::string &agentId) {
-  return threadStorageRootPath() + "/" + threadId + "/compaction_" + agentId +
-         ".json";
 }
 
 void saveCompactionSnapshot(const std::string &threadId,
@@ -225,7 +213,8 @@ void saveCompactionSnapshot(const std::string &threadId,
   doc.Accept(writer);
 
   std::error_code ec;
-  const std::filesystem::path path = compactionSnapshotPath(threadId, agentId);
+  const std::filesystem::path path = ThreadManager::compactionSnapshotPath(
+      ThreadManager::defaultBasePath(), threadId, agentId);
   std::filesystem::create_directories(path.parent_path(), ec);
   std::ofstream out(path);
   if (!out.is_open()) {
@@ -297,7 +286,7 @@ std::string buildPlanAndTodoSnapshot(const AgentContext &context) {
     return trimmed.substr(0, maxLen) + "...";
   };
   try {
-    ThreadManager tm(threadStorageRootPath());
+    ThreadManager tm(ThreadManager::defaultBasePath());
     const ThreadMetadata metadata = tm.getMetadata(context.history->threadId);
     if (!metadata.activePlanId.empty()) {
       state << "**Active Plan ID:** " << metadata.activePlanId << "\n";
@@ -455,7 +444,7 @@ TodoStateSnapshot readTodoState(const AgentContext &context) {
   }
 
   try {
-    ThreadManager tm(threadStorageRootPath());
+    ThreadManager tm(ThreadManager::defaultBasePath());
     const AgentTodoList todo =
         tm.getAgentTodo(context.history->threadId, context.identity.id);
     snapshot.hasAny = !todo.items.empty();
@@ -580,8 +569,21 @@ Agent::Agent(AgentContext ctx, std::shared_ptr<shared::IEnvironment> env,
 
   provider = firmius::provider::ProviderRegistry::instance().getProvider(
       context.config.providerId);
-  if (!provider)
-    throw std::runtime_error("Unknown provider: " + context.config.providerId);
+  if (!provider) {
+    auto preferred = getPreferredModel();
+    provider = firmius::provider::ProviderRegistry::instance().getProvider(
+        preferred.providerId);
+    if (!provider) {
+      throw std::runtime_error("Unknown provider: " + context.config.providerId +
+                               " (Fallback failed: " + preferred.providerId +
+                               ")");
+    }
+    context.config.providerId = preferred.providerId;
+    context.config.modelId = preferred.modelId;
+    if (preferred.variantName) {
+      context.config.modelVariant = *preferred.variantName;
+    }
+  }
 }
 
 Agent::~Agent() {
@@ -601,6 +603,11 @@ void Agent::reset() {
   context.state = {};
   interrupted = false;
   running = false;
+  {
+    std::lock_guard<std::mutex> lock(cancelTokenMutex_);
+    activeRunCancelToken_.reset();
+    activeRunAbortController_.reset();
+  }
 
   for (const auto &id : backgroundProcessIds) {
     try {
@@ -615,17 +622,74 @@ std::string Agent::resolvePath(const std::string &inputPath) const {
   return environment_->getWorkspace().resolvePath(inputPath);
 }
 
-std::shared_ptr<IHost> Agent::getHost() { return environment_->getHost(); }
+std::shared_ptr<shared::IHost> Agent::getHost() { return environment_->getHost(); }
+
+ModelChoice Agent::getPreferredModel() const {
+  const auto &config = shared::ConfigLoader::instance().getConfig();
+  auto persona = context.config.personaName;
+
+  auto useDefaultRoute = [&config]() {
+    ModelChoice choice;
+    choice.providerId = config.defaultProviderId;
+    choice.modelId = config.defaultModelId;
+    if (!config.defaultModelVariant.empty()) {
+      choice.variantName = config.defaultModelVariant;
+    }
+    return choice;
+  };
+
+  auto findCategory = [&config](const std::string &name)
+      -> const shared::ModelRouteCategory * {
+    auto it = config.modelRouterCategories.find(name);
+    if (it == config.modelRouterCategories.end()) {
+      return nullptr;
+    }
+    return &it->second;
+  };
+
+  auto it_purpose = config.purposeRoutes.find(persona);
+  if (it_purpose != config.purposeRoutes.end() && !it_purpose->second.empty()) {
+    const std::string mapped_category = it_purpose->second;
+    if (const auto *category = findCategory(mapped_category)) {
+      ModelChoice choice;
+      choice.providerId = category->providerId;
+      choice.modelId = category->modelId;
+      if (!category->variantName.empty()) {
+        choice.variantName = category->variantName;
+      }
+      return choice;
+    }
+  }
+
+  if (!config.defaultRouteCategory.empty()) {
+    if (const auto *category = findCategory(config.defaultRouteCategory)) {
+      ModelChoice choice;
+      choice.providerId = category->providerId;
+      choice.modelId = category->modelId;
+      if (!category->variantName.empty()) {
+        choice.variantName = category->variantName;
+      }
+      return choice;
+    }
+  }
+
+  return useDefaultRoute();
+}
 
 void Agent::interrupt() {
   interrupted = true;
   std::shared_ptr<std::atomic<bool>> runCancelToken;
+  std::shared_ptr<shared::AbortController> runAbortController;
   {
     std::lock_guard<std::mutex> lock(cancelTokenMutex_);
     runCancelToken = activeRunCancelToken_;
+    runAbortController = activeRunAbortController_;
   }
   if (runCancelToken) {
     runCancelToken->store(true);
+  }
+  if (runAbortController) {
+    runAbortController->cancel();
   }
 }
 
@@ -652,7 +716,26 @@ void Agent::setModelInternal(const std::string &providerId,
   auto newProvider =
       firmius::provider::ProviderRegistry::instance().getProvider(providerId);
   if (!newProvider) {
-    throw std::runtime_error("Unknown provider: " + providerId);
+    auto preferred = getPreferredModel();
+    newProvider = firmius::provider::ProviderRegistry::instance().getProvider(
+        preferred.providerId);
+    if (!newProvider) {
+      throw std::runtime_error("Unknown provider: " + providerId +
+                               " (Fallback failed: " + preferred.providerId +
+                               ")");
+    }
+    std::lock_guard<std::mutex> lock(modelSwitchMutex);
+    if (running.load()) {
+      pendingModelSwitch_ = PendingModelSwitch{preferred.providerId,
+                                               preferred.modelId,
+                                               preferred.variantName};
+      return;
+    }
+    context.config.providerId = preferred.providerId;
+    context.config.modelId = preferred.modelId;
+    context.config.modelVariant = preferred.variantName.value_or("");
+    provider = newProvider;
+    return;
   }
 
   std::lock_guard<std::mutex> lock(modelSwitchMutex);
@@ -769,18 +852,20 @@ void Agent::runImpl(const std::optional<std::string> &task,
   }
 
   // Guard against concurrent runs with mutex
-  std::lock_guard<std::mutex> lock(runMutex);
+  std::lock_guard<std::mutex> lock(runMutex_);
   if (running.load()) {
     throw std::runtime_error("Agent is already running");
   }
   running = true;
   interrupted = false;
   const auto runCancelToken = std::make_shared<std::atomic<bool>>(false);
+  const auto runAbortController = std::make_shared<shared::AbortController>();
   {
     std::lock_guard<std::mutex> lock(cancelTokenMutex_);
     activeRunCancelToken_ = runCancelToken;
+    activeRunAbortController_ = runAbortController;
   }
-  auto markRunStopped = [this, runCancelToken]() {
+  auto markRunStopped = [this, runCancelToken, runAbortController]() {
     {
       std::lock_guard<std::mutex> runStateLock(runStateMutex_);
       running = false;
@@ -790,6 +875,9 @@ void Agent::runImpl(const std::optional<std::string> &task,
       std::lock_guard<std::mutex> cancelLock(cancelTokenMutex_);
       if (activeRunCancelToken_ == runCancelToken) {
         activeRunCancelToken_.reset();
+      }
+      if (activeRunAbortController_ == runAbortController) {
+        activeRunAbortController_.reset();
       }
     }
   };
@@ -802,7 +890,7 @@ void Agent::runImpl(const std::optional<std::string> &task,
     }
   } runFinalizer{markRunStopped};
   booting = false;
-  context.state.currentStatus = AgentStatus::Idle;
+  context.state.currentStatus = AgentStatus::ProviderWaiting;
   context.state.fatalError = std::nullopt;
   applyPendingModelSwitchIfAny();
 
@@ -861,20 +949,13 @@ void Agent::runImpl(const std::optional<std::string> &task,
             .count());
     taskTurn.messages.push_back(taskMsg);
     context.history->turns.push_back(taskTurn);
-    if (context.config.persistHistory && journaler) {
-      journaler->appendTurn(taskTurn);
-    }
   }
-
-  // 3. Autonomous Loop
   bool taskFinished = false;
   int maxTurns = context.config.maxTurns > 0 ? context.config.maxTurns : 200;
   int turnCount = 0;
-
   int consecutiveProviderFailures = 0;
   const int maxProviderRetries = 3;
   std::optional<std::string> lastTodoContinuationFingerprint;
-
   while (!taskFinished && turnCount < maxTurns && !runCancelToken->load()) {
     applyPendingModelSwitchIfAny();
 
@@ -908,12 +989,6 @@ void Agent::runImpl(const std::optional<std::string> &task,
     bool sawTool = false;
     std::uint32_t syntheticToolCallIdSerial = 0;
 
-    // Token repetition detection for hallucination loops
-    bool tokenLoopDetected = false;
-    char lastChar = '\0';
-    int consecutiveRepeatCount = 0;
-    const int MAX_CONSECUTIVE_REPEAT = 15;
-
     auto appendVisibleText = [&](const std::string &delta) {
       if (delta.empty()) {
         return;
@@ -925,21 +1000,7 @@ void Agent::runImpl(const std::optional<std::string> &task,
           break;
         }
       }
-      // Check for token loop (same character repeated)
-      for (char c : delta) {
-        if (c == lastChar && !tokenLoopDetected) {
-          consecutiveRepeatCount++;
-          if (consecutiveRepeatCount >= MAX_CONSECUTIVE_REPEAT) {
-            tokenLoopDetected = true;
-          }
-        } else {
-          consecutiveRepeatCount = 1;
-          lastChar = c;
-        }
-      }
-      if (!tokenLoopDetected) {
-        fullResponse += delta;
-      }
+      fullResponse += delta;
     };
 
     auto appendVisibleThinking = [&](const std::string &delta) {
@@ -1022,8 +1083,12 @@ void Agent::runImpl(const std::optional<std::string> &task,
       opts.tools =
           toolRegistry.getAvailableToolDefinitions(context.permissions);
       opts.abortSignal = runCancelToken.get();
+      opts.abortController = runAbortController;
 
-	      provider->stream(*context.history, opts, [&](const StreamEvent &ev) {
+	      const AgentHistory requestHistory =
+	          runtime_overlay::buildRequestHistoryWithRuntimeOverlays(
+	              context, *environment_->getHost(), environment_->getWorkspace());
+	      provider->stream(requestHistory, opts, [&](const StreamEvent &ev) {
         if (context.state.currentStatus == AgentStatus::ProviderWaiting) {
           if (std::holds_alternative<TextChunk>(ev) ||
               std::holds_alternative<ThinkingChunk>(ev) ||
@@ -1081,19 +1146,6 @@ void Agent::runImpl(const std::optional<std::string> &task,
         }
       }
 
-      // If token loop was detected, inject a nudge to refocus the agent
-      if (tokenLoopDetected && fullResponse.empty() &&
-          accumulatedToolChunks.empty()) {
-        appendTurnToHistory(makeInternalNudgeTurn(
-            "loop-nudge-",
-            "Your output was cut off due to token repetition (hallucination "
-            "loop). Please step back, refocus, and try a different approach. "
-            "Do NOT repeat the same failed actions."));
-
-        // Continue to next turn instead of erroring
-        continue;
-      }
-
       // If there was a stream error and no content came back, retry
       if (!streamError.empty() && fullResponse.empty() &&
           accumulatedToolChunks.empty()) {
@@ -1112,11 +1164,11 @@ void Agent::runImpl(const std::optional<std::string> &task,
         // Emit retry event and wait briefly before retrying
         int retryDelaySec = 1 << (consecutiveProviderFailures - 1); // 1, 2, 4
         onEvent(StreamRetrying{consecutiveProviderFailures, maxProviderRetries,
-                               429, retryDelaySec * 1000,
+                               streamErrorStatus, retryDelaySec * 1000,
                                "Provider error, retrying", ""});
         // Use interruptible sleep to allow immediate cancellation
         if (!interruptibleSleep(std::chrono::seconds(retryDelaySec),
-                                runCancelToken.get())) {
+                                runAbortController, runCancelToken.get())) {
           // Interrupted during retry delay
           context.state.currentStatus = AgentStatus::Cancelled;
           return;
@@ -1224,13 +1276,15 @@ void Agent::runImpl(const std::optional<std::string> &task,
           const bool repeatedTodoSnapshot =
               lastTodoContinuationFingerprint.has_value() &&
               *lastTodoContinuationFingerprint == fingerprint;
-          if (!repeatedTodoSnapshot) {
-            appendTurnToHistory(makeInternalNudgeTurn(
-                "todo-enforcement-", buildIncompleteTodoNudge(todoState)));
-            lastTodoContinuationFingerprint = fingerprint;
-            context.state.currentStatus = AgentStatus::Idle;
-            continue;
+              
+          std::string nudgeMessage = buildIncompleteTodoNudge(todoState);
+          if (repeatedTodoSnapshot) {
+            nudgeMessage = "CRITICAL: You have incomplete items on your todo list but you stopped. You MUST use tools to make progress, or mark them as done/cancelled using the todo_write tool. Do not ignore your todo list.";
           }
+          
+          appendTurnToHistory(makeInternalNudgeTurn(
+              "todo-enforcement-", nudgeMessage));
+          lastTodoContinuationFingerprint = fingerprint;
           context.state.currentStatus = AgentStatus::Idle;
           continue;
         }
@@ -1299,7 +1353,7 @@ void Agent::runImpl(const std::optional<std::string> &task,
 
         if (hasPendingToolCalls || hasExecutionStatus || hasBlockingProcesses ||
             hasRunningOwnedBackgroundProcess || hasRunningDescendantSubagent) {
-          context.state.currentStatus = AgentStatus::Idle;
+          context.state.currentStatus = AgentStatus::ExecutingTool;
           continue;
         }
 
@@ -1310,14 +1364,16 @@ void Agent::runImpl(const std::optional<std::string> &task,
           const bool repeatedTodoSnapshot =
               lastTodoContinuationFingerprint.has_value() &&
               *lastTodoContinuationFingerprint == fingerprint;
-          if (!repeatedTodoSnapshot) {
-            appendTurnToHistory(makeInternalNudgeTurn(
-                "todo-enforcement-", buildIncompleteTodoNudge(todoState)));
-            lastTodoContinuationFingerprint = fingerprint;
-            context.state.currentStatus = AgentStatus::Idle;
-            continue;
+              
+          std::string nudgeMessage = buildIncompleteTodoNudge(todoState);
+          if (repeatedTodoSnapshot) {
+            nudgeMessage = "CRITICAL: You have incomplete items on your todo list but you stopped. You MUST use tools to make progress, or mark them as done/cancelled using the todo_write tool. Do not ignore your todo list.";
           }
-          context.state.currentStatus = AgentStatus::Idle;
+          
+          appendTurnToHistory(makeInternalNudgeTurn(
+              "todo-enforcement-", nudgeMessage));
+          lastTodoContinuationFingerprint = fingerprint;
+          context.state.currentStatus = AgentStatus::ExecutingTool;
           continue;
         }
       }
@@ -1578,6 +1634,10 @@ void Agent::executeTools(const std::vector<ToolCallChunk> &chunks,
     toolResultTurn.messages.push_back(msg);
 
     if (result.success) {
+      runtime_overlay::reconcileSuccessfulToolResult(
+          context, *environment_->getHost(), environment_->getWorkspace(),
+          result.toolName, result.toolArgs, result.resultStr);
+
       const bool owns_background_process =
           !result.resultProcessId.empty() &&
           (result.isBackground || result.toolName == "process_spawn");
@@ -1601,6 +1661,17 @@ void Agent::executeTools(const std::vector<ToolCallChunk> &chunks,
           std::string actionDesc = "Edited file: " + filePath;
           context.state.completedActions.push_back(actionDesc);
         }
+      }
+    } else if (result.toolName == "file_edit") {
+      rapidjson::Document resultDoc;
+      resultDoc.Parse(result.resultStr.c_str());
+      if (!resultDoc.HasParseError() && resultDoc.IsObject() &&
+          resultDoc.HasMember("stale_anchor") && resultDoc["stale_anchor"].IsBool() &&
+          resultDoc["stale_anchor"].GetBool() &&
+          resultDoc.HasMember("path") && resultDoc["path"].IsString()) {
+        runtime_overlay::refreshFileWatch(
+            context, *environment_->getHost(), environment_->getWorkspace(),
+            resultDoc["path"].GetString());
       }
     }
 
@@ -1775,6 +1846,11 @@ void Agent::compactContext(
         }
       },
       &interrupted);
+
+  if (interrupted.load()) {
+    context.state.currentStatus = AgentStatus::Cancelled;
+    return;
+  }
 
   // Validate summary before clearing history
   if (fullSummary.empty()) {

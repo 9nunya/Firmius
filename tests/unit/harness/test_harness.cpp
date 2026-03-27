@@ -577,12 +577,33 @@ public:
             onEvent(StreamDone{StopReason::Stop});
             return;
         }
-        while (true) {
-            if (opts.abortSignal && opts.abortSignal->load()) {
-                onEvent(StreamError{"request interrupted", 0, ""});
-                return;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            enteredStream_ = true;
+            cancelled_.store(false);
+            timedOut_.store(false);
+        }
+        enteredCv_.notify_all();
+
+        std::unique_lock<std::mutex> lock(mutex_);
+        const auto subId = opts.abortController
+            ? opts.abortController->subscribe([this]() {
+                  cancelled_.store(true);
+                  waitCv_.notify_all();
+              })
+            : 0;
+        const bool cancelled = waitCv_.wait_for(
+            lock, std::chrono::seconds(5),
+            [this]() { return cancelled_.load(); });
+        lock.unlock();
+        if (opts.abortController && subId != 0) {
+            opts.abortController->unsubscribe(subId);
+        }
+
+        if (!cancelled) {
+            timedOut_.store(true);
+            onEvent(StreamError{"provider wait timed out instead of cancelling", 0, ""});
         }
     }
 
@@ -608,11 +629,24 @@ public:
         return firmius::provider::ProviderType::APIKey;
     }
 
+    bool waitUntilEntered(std::chrono::milliseconds timeout = std::chrono::milliseconds(1500)) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return enteredCv_.wait_for(lock, timeout, [this]() { return enteredStream_; });
+    }
+
+    bool timedOut() const { return timedOut_.load(); }
+
     int callCount() const { return callCount_.load(); }
 
 private:
     std::string providerId_;
     std::atomic<int> callCount_{0};
+    mutable std::mutex mutex_;
+    std::condition_variable enteredCv_;
+    std::condition_variable waitCv_;
+    bool enteredStream_ = false;
+    std::atomic<bool> cancelled_{false};
+    std::atomic<bool> timedOut_{false};
 };
 
 class PartialAbortAwareProvider : public firmius::provider::IProvider {
@@ -3241,13 +3275,16 @@ TEST_F(HarnessTest, AbortStopsProviderWaitQuickly) {
     auto agent = waitForFocusedAgent();
     ASSERT_TRUE(waitForCondition([&]() { return agent->isRunning(); },
                                  std::chrono::milliseconds(1500)));
+    ASSERT_TRUE(provider->waitUntilEntered());
 
     const auto abortStart = std::chrono::steady_clock::now();
-    harness.abort();
+    std::thread abortThread([&]() { harness.abort(); });
+    abortThread.join();
     ASSERT_TRUE(waitForStopped(agent->getContext().identity.id));
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - abortStart);
     EXPECT_LT(elapsed.count(), 1000);
+    EXPECT_FALSE(provider->timedOut());
 }
 
 TEST_F(HarnessTest, AbortStopsRetrySleepPromptlyWithoutDuplicateError) {

@@ -7,6 +7,16 @@
 
 namespace firmius::shared::utils {
 
+struct AnchorResult {
+  enum class Status { SUCCESS, STALE, AMBIGUOUS, MALFORMED };
+  Status status = Status::SUCCESS;
+  int lineIndex = -1;
+  bool relocated = false;
+  std::string errorMessage;
+  std::string foundHash;
+  std::string expectedHash;
+};
+
 struct HashlineAnchor {
     int lineNumber = 0;
     std::string hash;
@@ -59,6 +69,18 @@ public:
      * @return true if matches, false otherwise.
      */
     static bool verifyAnchor(std::string_view expectedHash, std::string_view actualContent) noexcept;
+    /**
+     * @brief Resolves an anchor in a file buffer within a search window.
+     * @param lines The lines of the file.
+     * @param anchorText The lineNumber#hash anchor.
+     * @param searchWindow The window size to search around the expected line.
+     * @return The resolved line index and whether it was relocated.
+     * @throws std::runtime_error if the anchor is ambiguous or stale.
+     */
+    static AnchorResult resolveAnchor(const std::vector<std::string>& lines,
+                                      const std::string& anchorText,
+                                      int searchWindow = 15);
+
 };
 
 /**

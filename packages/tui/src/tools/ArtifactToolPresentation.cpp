@@ -1,7 +1,7 @@
 #include "tools/ArtifactToolPresentation.hpp"
 
+#include "components/FileEditDiff.hpp"
 #include "utils/ErrorCleaner.hpp"
-#include "utils/ToolSummaries.hpp"
 
 #include <rapidjson/document.h>
 #include <sstream>
@@ -64,6 +64,39 @@ std::vector<std::string> SplitLines(const std::string &text, size_t max_lines = 
   return lines;
 }
 
+std::vector<ToolPresentationDiffLine>
+BuildArtifactCreateLines(const std::vector<std::string> &lines) {
+  std::vector<ToolPresentationDiffLine> diff_lines;
+  diff_lines.reserve(lines.size());
+  for (size_t i = 0; i < lines.size(); ++i) {
+    ToolPresentationDiffLine line;
+    line.type = '+';
+    line.new_line = static_cast<int>(i) + 1;
+    line.content = lines[i];
+    line.highlight_background = true;
+    diff_lines.push_back(std::move(line));
+  }
+  return diff_lines;
+}
+
+std::vector<ToolPresentationDiffLine>
+BuildArtifactUpdateLines(const std::string &previous_content,
+                         const std::string &content) {
+  std::vector<ToolPresentationDiffLine> diff_lines;
+  const auto hunks = BuildDiffHunks(previous_content, content);
+  for (const auto &hunk : hunks) {
+    for (const auto &line : hunk.lines) {
+      ToolPresentationDiffLine rendered;
+      rendered.type = line.type;
+      rendered.old_line = line.oldLine;
+      rendered.new_line = line.newLine;
+      rendered.content = line.content;
+      diff_lines.push_back(std::move(rendered));
+    }
+  }
+  return diff_lines;
+}
+
 void ApplyError(ToolPresentation &presentation, const ToolCallView &view,
                 const std::string &failed_title) {
   presentation.lifecycle = ToolPresentationLifecycle::Error;
@@ -83,7 +116,7 @@ std::string ArtifactOwner(const rapidjson::Value &artifact) {
 ToolPresentation BuildArtifactWritePresentation(const ToolCallView &view) {
   ToolPresentation presentation;
   presentation.lifecycle = LifecycleFromPhase(view);
-  presentation.layout = ToolPresentationLayoutKind::ResultsList;
+  presentation.layout = ToolPresentationLayoutKind::DiffPreview;
   presentation.density = ToolPresentationDensity::DetailHeavy;
   presentation.subtitle = view.name;
 
@@ -104,6 +137,7 @@ ToolPresentation BuildArtifactWritePresentation(const ToolCallView &view) {
   if (!name.empty()) {
     presentation.compact_summary = name;
     presentation.footer_badges.push_back(name);
+    presentation.diff_source_name = name;
   }
   if (!kind.empty()) {
     presentation.footer_badges.push_back(kind);
@@ -111,6 +145,12 @@ ToolPresentation BuildArtifactWritePresentation(const ToolCallView &view) {
 
   if (presentation.lifecycle == ToolPresentationLifecycle::Error) {
     ApplyError(presentation, view, "artifact write failed");
+    if (!content.empty()) {
+      ToolPresentationDiffSection section;
+      section.title = name.empty() ? "artifact content" : name;
+      section.lines = BuildArtifactCreateLines(SplitLines(content));
+      presentation.diff_sections.push_back(std::move(section));
+    }
     return presentation;
   }
   if (presentation.lifecycle != ToolPresentationLifecycle::Success) {
@@ -128,6 +168,8 @@ ToolPresentation BuildArtifactWritePresentation(const ToolCallView &view) {
   const std::string filename = StringMember(artifact, "filename");
   const std::string resolved_kind = StringMember(artifact, "kind");
   const std::string resolved_description = StringMember(artifact, "description");
+  const std::string previous_content =
+      has_result ? StringMember(result_doc, "previous_content") : "";
 
   if (created) {
     presentation.title = "artifact created";
@@ -139,6 +181,7 @@ ToolPresentation BuildArtifactWritePresentation(const ToolCallView &view) {
   presentation.footer_badges.push_back(created ? "created" : (updated ? "updated" : "written"));
   if (!filename.empty()) {
     presentation.footer_badges.push_back(filename);
+    presentation.diff_source_name = filename;
   }
   if (!owner.empty()) {
     presentation.footer_badges.push_back(owner);
@@ -156,19 +199,34 @@ ToolPresentation BuildArtifactWritePresentation(const ToolCallView &view) {
     presentation.facts.push_back({"Description", description});
   }
 
-  auto all_lines = SplitLines(content);
-  if (!all_lines.empty()) {
-    const size_t preview_count = 5;
-    if (all_lines.size() > preview_count) {
-      presentation.expandable = true;
-      presentation.expanded = view.show_result;
-      if (view.show_result) {
-        presentation.body_lines = std::move(all_lines);
-      } else {
-        presentation.body_lines.assign(all_lines.begin(), all_lines.begin() + preview_count);
+  ToolPresentationDiffSection section;
+  section.title =
+      filename.empty() ? (name.empty() ? "artifact content" : name) : filename;
+  if (updated && !previous_content.empty()) {
+    section.meta = "updated artifact";
+    section.lines = BuildArtifactUpdateLines(previous_content, content);
+  } else {
+    section.meta = created ? "new artifact" : "artifact content";
+    section.lines = BuildArtifactCreateLines(SplitLines(content));
+  }
+  if (!section.lines.empty()) {
+    int added_lines = 0;
+    int removed_lines = 0;
+    for (const auto &line : section.lines) {
+      if (line.type == '+') {
+        added_lines++;
+      } else if (line.type == '-') {
+        removed_lines++;
       }
-    } else {
-      presentation.body_lines = std::move(all_lines);
+    }
+    presentation.diff_sections.push_back(std::move(section));
+    if (added_lines > 0) {
+      presentation.footer_badges.push_back("+" + std::to_string(added_lines));
+      presentation.facts.push_back({"Added lines", std::to_string(added_lines)});
+    }
+    if (removed_lines > 0) {
+      presentation.footer_badges.push_back("-" + std::to_string(removed_lines));
+      presentation.facts.push_back({"Removed lines", std::to_string(removed_lines)});
     }
   }
 

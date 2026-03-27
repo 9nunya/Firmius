@@ -89,8 +89,7 @@ void requireRole(const shared::ToolContext &ctx, WorkAgentRole expected,
 } // namespace
 
 ThreadManager makeThreadManager() {
-  const char *home = std::getenv("HOME");
-  return ThreadManager(std::string(home ? home : "/root") + "/.firmius/threads");
+  return ThreadManager(ThreadManager::defaultBasePath());
 }
 
 std::string requireCurrentThreadId(shared::ToolContext &ctx) {

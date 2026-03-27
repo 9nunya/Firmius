@@ -198,6 +198,7 @@ ToolPresentation BuildProcessToolPresentation(
   ToolPresentation presentation;
   presentation.lifecycle = DeriveLifecycle(view);
   presentation.layout = ToolPresentationLayoutKind::BodyFirstStream;
+  presentation.ansi_aware = true;
   presentation.density = ToolPresentationDensity::BodyFirstSummary;
 
   const ParsedProcessArgs args = ParseArgs(view.args);
@@ -251,6 +252,9 @@ ToolPresentation BuildProcessToolPresentation(
       output += "[stderr]\n" + result.stderr_data;
     }
   }
+  if (output.empty() && presentation.lifecycle == ToolPresentationLifecycle::Error) {
+    output = firmius::shared::ErrorCleaner::clean(view.result);
+  }
 
   if (IsMatch(view.name, "python_execute")) {
     presentation.title.clear();
@@ -277,16 +281,10 @@ ToolPresentation BuildProcessToolPresentation(
     presentation.facts.push_back({"Process", process_id});
   }
 
-  if (presentation.lifecycle == ToolPresentationLifecycle::Error) {
-    presentation.error_text = firmius::shared::ErrorCleaner::clean(view.result);
-    if (presentation.title.find("failed") == std::string::npos) {
-      presentation.title += " failed";
-    }
-    return presentation;
-  }
-
   std::vector<std::string> status_parts;
-  if (running && is_background) {
+  if (presentation.lifecycle == ToolPresentationLifecycle::Error) {
+    status_parts.push_back("fail");
+  } else if (running && is_background) {
     status_parts.push_back("background");
     if (!process_id.empty()) {
       status_parts.push_back("pid " + process_id);
@@ -361,7 +359,8 @@ ToolPresentation BuildProcessToolPresentation(
     presentation.expandable = true;
     presentation.expanded = view.show_result;
   }
-  if (status_parts.empty() && presentation.lifecycle == ToolPresentationLifecycle::Success) {
+  if (status_parts.empty() &&
+      presentation.lifecycle == ToolPresentationLifecycle::Success) {
     status_parts.push_back("done");
   }
   if (!status_parts.empty()) {

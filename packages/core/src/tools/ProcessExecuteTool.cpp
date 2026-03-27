@@ -155,6 +155,10 @@ shared::ToolResult ProcessExecuteTool::execute(const ProcessExecuteInput &input,
         doc.AddMember("command_success", false, a);
         doc.AddMember("process_id",
                       rapidjson::Value(processId.c_str(), a).Move(), a);
+        doc.AddMember("note",
+                      rapidjson::Value("The command is still running in the background. Use "
+                                       "process_status to check its current output or "
+                                       "process_wait to wait for its completion.", a).Move(), a);
 
         auto result = shared::ToolResult::ok(doc, processId);
         result.is_background = true;

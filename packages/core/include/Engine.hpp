@@ -17,6 +17,7 @@
 #include <map>
 #include <optional>
 #include <chrono>
+#include "utils/FastHash.hpp"
 
 namespace firmius::core {
 
@@ -57,6 +58,7 @@ public:
                             const std::string& title = "");
 
     std::optional<AgentOutcome> waitForAgentOutcome(const std::string& agentId, std::optional<std::chrono::milliseconds> timeout = std::nullopt);
+    std::optional<AgentOutcome> peekAgentOutcome(const std::string& agentId, std::optional<std::chrono::milliseconds> timeout = std::nullopt);
 
     /**
      * @brief Adds a listener for all engine events.
@@ -156,7 +158,7 @@ private:
     std::vector<std::jthread> taskThreads_;
     std::mutex taskThreadsMutex_;
 
-    std::map<std::string, std::shared_future<AgentOutcome>> agentFutures;
+    firmius::shared::utils::FastHash<std::string, std::shared_future<AgentOutcome>> agentFutures;
     std::mutex futuresMutex;
 };
 

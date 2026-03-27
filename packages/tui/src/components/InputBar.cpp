@@ -116,6 +116,25 @@ static std::string createTextBlockPlaceholder(size_t line_count) {
   return "[Pasted: " + std::to_string(line_count) + " lines]";
 }
 
+static std::string createImageBlockPlaceholder(size_t image_index) {
+  return "[Image " + std::to_string(image_index) + "]";
+}
+
+static std::vector<PastedBlock>
+collectImageBlocks(const std::vector<PastedBlock> &pasted_blocks) {
+  std::vector<PastedBlock> images;
+  for (const auto &block : pasted_blocks) {
+    if (block.type == "image") {
+      images.push_back(block);
+    }
+  }
+  std::sort(images.begin(), images.end(),
+            [](const PastedBlock &lhs, const PastedBlock &rhs) {
+              return lhs.start_pos < rhs.start_pos;
+            });
+  return images;
+}
+
 // Expand buffer content by replacing placeholders with actual pasted content
 static std::string expandPastedContent(
     const std::string &buffer,
@@ -322,11 +341,22 @@ ftxui::Component InputBar(
         bool is_likely_image = (line_count == 1 && paste_buffer->size() > 1000);
 
         if (is_likely_image) {
-          // Add as image tag above input
+          const size_t image_count = static_cast<size_t>(std::count_if(
+              model->pasted_blocks.begin(), model->pasted_blocks.end(),
+              [](const PastedBlock &block) { return block.type == "image"; }));
+          const std::string placeholder =
+              createImageBlockPlaceholder(image_count + 1);
+
+          insertText(*model->buffer, *model->cursor, placeholder);
+
           PastedBlock img_block;
           img_block.type = "image";
           img_block.id = generateBlockId();
-          model->image_tags.push_back(img_block);
+          img_block.content = *paste_buffer;
+          img_block.mime_type = "image/png";
+          img_block.start_pos = *model->cursor - placeholder.size();
+          img_block.end_pos = *model->cursor;
+          model->pasted_blocks.push_back(img_block);
         } else if (line_count >= 2) {
           // Multi-line text - create pasted block placeholder
           std::string placeholder = createTextBlockPlaceholder(line_count);
@@ -428,9 +458,10 @@ ftxui::Component InputBar(
       std::string mimeType;
       auto imageData = Clipboard::getImage(mimeType);
       if (imageData) {
-        // Generate placeholder text
-        int img_num = static_cast<int>(model->image_tags.size()) + 1;
-        std::string placeholder = "[Image " + std::to_string(img_num) + "]";
+        const size_t image_count = static_cast<size_t>(std::count_if(
+            model->pasted_blocks.begin(), model->pasted_blocks.end(),
+            [](const PastedBlock &block) { return block.type == "image"; }));
+        std::string placeholder = createImageBlockPlaceholder(image_count + 1);
         
         // Insert placeholder at cursor position
         insertText(*model->buffer, *model->cursor, placeholder);
@@ -444,9 +475,6 @@ ftxui::Component InputBar(
         img_block.start_pos = static_cast<size_t>(*model->cursor) - placeholder.size();
         img_block.end_pos = static_cast<size_t>(*model->cursor);
         model->pasted_blocks.push_back(img_block);
-        
-        // Also track in image_tags
-        model->image_tags.push_back(img_block);
         return true;
       }
       return false;
@@ -633,10 +661,9 @@ ftxui::Component InputBar(
       if (!model->buffer->empty()) {
         // Expand pasted block placeholders to actual content before submitting
         std::string expanded = expandPastedContent(*model->buffer, model->pasted_blocks);
-        on_submit(expanded, model->image_tags);
+        on_submit(expanded, collectImageBlocks(model->pasted_blocks));
         model->buffer->clear();
         model->pasted_blocks.clear();
-        model->image_tags.clear();
         *model->cursor = 0;
         *scroll_top = 0;
         // Mark as just submitted to skip next input processing
@@ -669,19 +696,6 @@ ftxui::Component InputBar(
     const auto &theme = ThemeManager::instance().getCurrentTheme();
     auto prompt =
         ftxui::text("> ") | ftxui::bold | ftxui::color(theme.input.prompt);
-
-    // Render image tags above input
-    std::optional<ftxui::Element> image_tags_el;
-    if (model && !model->image_tags.empty()) {
-      ftxui::Elements tag_elements;
-      for (size_t i = 0; i < model->image_tags.size(); ++i) {
-        auto tag = ftxui::text(" [Image " + std::to_string(i + 1) + "] ") |
-                   ftxui::color(theme.agent_strip.pills.tool_fg) |
-                   ftxui::bgcolor(theme.agent_strip.pills.tool_bg);
-        tag_elements.push_back(tag);
-      }
-      image_tags_el = ftxui::hbox(tag_elements);
-    }
 
     int total_lines = 1;
     if (model && model->buffer) {
@@ -908,93 +922,131 @@ ftxui::Component InputBar(
       // Custom rendering to show pasted blocks with special styling
       const std::string &buf = *model->buffer;
       int cursor = *model->cursor;
+      const size_t WRAP_WIDTH = std::max(20, ftxui::Terminal::Size().dimx - 10);
 
       ftxui::Elements line_elements;
       std::vector<std::string> lines = splitLines(buf);
+      std::vector<PastedBlock> sorted_blocks = model->pasted_blocks;
+      std::sort(sorted_blocks.begin(), sorted_blocks.end(),
+                [](const PastedBlock &a, const PastedBlock &b) {
+                  return a.start_pos < b.start_pos;
+                });
 
       size_t buf_pos = 0;
       for (size_t line_idx = 0; line_idx < lines.size(); ++line_idx) {
         const std::string &line = lines[line_idx];
-        ftxui::Elements line_parts;
+        const size_t line_start = buf_pos;
+        const size_t line_end = buf_pos + line.size();
+        
+        size_t current_width = 0;
+        ftxui::Elements current_line_parts;
+        bool cursor_rendered = false;
 
-        size_t line_start = buf_pos;
-        size_t line_end = buf_pos + line.size();
-
-        // Check for pasted blocks on this line
-        bool has_block = false;
-        for (const auto &block : model->pasted_blocks) {
-          if (block.type == "text" && block.start_pos >= line_start &&
-              block.start_pos <= line_end) {
-            // Render text before block
-            if (block.start_pos > line_start) {
-              std::string pre =
-                  buf.substr(line_start, block.start_pos - line_start);
-              bool cursor_here = (cursor >= static_cast<int>(line_start) &&
-                                  cursor < static_cast<int>(block.start_pos));
-              if (cursor_here) {
-                int local_cursor = cursor - line_start;
-                line_parts.push_back(ftxui::text(pre.substr(0, local_cursor)));
-                line_parts.push_back(
-                    with_cursor(ftxui::text(pre.substr(local_cursor, 1))));
-                line_parts.push_back(ftxui::text(pre.substr(local_cursor + 1)));
-              } else {
-                line_parts.push_back(ftxui::text(pre));
-              }
+        auto flush_line = [&]() {
+            if (current_line_parts.empty()) {
+                if (cursor == static_cast<int>(line_start)) {
+                    current_line_parts.push_back(with_cursor(ftxui::text(" ")));
+                    cursor_rendered = true;
+                } else {
+                    current_line_parts.push_back(ftxui::text(""));
+                }
             }
+            line_elements.push_back(ftxui::hbox(current_line_parts));
+            current_line_parts.clear();
+            current_width = 0;
+        };
 
-            // Render block placeholder with special styling
-            std::string placeholder =
-                createTextBlockPlaceholder(block.line_count);
-            bool cursor_in_block =
-                (cursor >= static_cast<int>(block.start_pos) &&
-                 cursor <= static_cast<int>(block.end_pos));
-            auto block_el = ftxui::text(" " + placeholder + " ") |
-                            ftxui::bgcolor(theme.agent_strip.pills.purpose_bg) |
-                            ftxui::color(theme.agent_strip.pills.purpose_fg);
-            if (cursor_in_block) {
-              block_el = block_el | ftxui::underlined;
+        auto append_element = [&](ftxui::Element el, size_t el_width) {
+            if (current_width + el_width > WRAP_WIDTH && current_width > 0) {
+                flush_line();
             }
-            line_parts.push_back(block_el);
+            current_line_parts.push_back(el);
+            current_width += el_width;
+        };
 
-            has_block = true;
-            buf_pos = block.end_pos;
-            break;
+        auto append_plain_with_cursor = [&](size_t segment_start, size_t segment_end) {
+            if (segment_end <= segment_start || segment_start >= buf.size()) return;
+            segment_end = std::min(segment_end, buf.size());
+            
+            size_t seg_pos = segment_start;
+            while (seg_pos < segment_end) {
+                size_t remaining_in_wrap = WRAP_WIDTH - current_width;
+                if (remaining_in_wrap == 0) {
+                    flush_line();
+                    remaining_in_wrap = WRAP_WIDTH;
+                }
+                
+                size_t chunk_len = std::min(remaining_in_wrap, segment_end - seg_pos);
+                std::string chunk = buf.substr(seg_pos, chunk_len);
+                
+                if (!cursor_rendered && cursor >= static_cast<int>(seg_pos) && cursor < static_cast<int>(seg_pos + chunk_len)) {
+                    int local_cursor = cursor - static_cast<int>(seg_pos);
+                    if (local_cursor > 0) {
+                        current_line_parts.push_back(ftxui::text(chunk.substr(0, local_cursor)));
+                    }
+                    current_line_parts.push_back(with_cursor(ftxui::text(chunk.substr(local_cursor, 1))));
+                    if (static_cast<size_t>(local_cursor + 1) < chunk.size()) {
+                        current_line_parts.push_back(ftxui::text(chunk.substr(local_cursor + 1)));
+                    }
+                    cursor_rendered = true;
+                } else {
+                    current_line_parts.push_back(ftxui::text(chunk));
+                }
+                
+                current_width += chunk_len;
+                seg_pos += chunk_len;
+            }
+        };
+
+        std::vector<const PastedBlock *> blocks_on_line;
+        for (const auto &block : sorted_blocks) {
+          if (block.start_pos >= line_start && block.start_pos < line_end) {
+            blocks_on_line.push_back(&block);
           }
         }
 
-        // Render rest of line if no block or after block
-        if (!has_block) {
-          bool cursor_here = (cursor >= static_cast<int>(line_start) &&
-                              cursor <= static_cast<int>(line_end));
-          if (cursor_here) {
-            int local_cursor = cursor - line_start;
-            // Fix: cursor position should be correct, not ahead
-            if (local_cursor <= static_cast<int>(line.size())) {
-              line_parts.push_back(ftxui::text(line.substr(0, local_cursor)));
-              if (local_cursor < static_cast<int>(line.size())) {
-                line_parts.push_back(
-                    with_cursor(ftxui::text(line.substr(local_cursor, 1))));
-                line_parts.push_back(
-                    ftxui::text(line.substr(local_cursor + 1)));
-              } else {
-                // Cursor at end of line
-                line_parts.push_back(with_cursor(ftxui::text(" ")));
-              }
-            } else {
-              line_parts.push_back(ftxui::text(line));
-            }
+        size_t segment_pos = line_start;
+        for (const auto *block_ptr : blocks_on_line) {
+          const auto &block = *block_ptr;
+          if (block.start_pos > segment_pos) {
+            append_plain_with_cursor(segment_pos, block.start_pos);
+          }
+
+          std::string placeholder;
+          if (block.end_pos > block.start_pos && block.end_pos <= buf.size()) {
+            placeholder = buf.substr(block.start_pos, block.end_pos - block.start_pos);
+          } else if (block.type == "image") {
+            placeholder = createImageBlockPlaceholder(1);
           } else {
-            line_parts.push_back(ftxui::text(line));
+            placeholder = createTextBlockPlaceholder(block.line_count);
           }
-        } else {
-          // Render text after block
-          if (buf_pos < line_end) {
-            std::string post = buf.substr(buf_pos, line_end - buf_pos);
-            line_parts.push_back(ftxui::text(post));
+          
+          std::string display_text = " " + placeholder + " ";
+          size_t block_len = display_text.size();
+
+          const bool cursor_in_block = (cursor >= static_cast<int>(block.start_pos) && cursor <= static_cast<int>(block.end_pos));
+          auto block_bg = block.type == "image" ? theme.agent_strip.pills.tool_bg : theme.agent_strip.pills.purpose_bg;
+          auto block_fg = block.type == "image" ? theme.agent_strip.pills.tool_fg : theme.agent_strip.pills.purpose_fg;
+          
+          auto block_el = ftxui::text(display_text) | ftxui::bgcolor(block_bg) | ftxui::color(block_fg);
+          if (cursor_in_block) {
+            block_el = block_el | ftxui::underlined;
+            cursor_rendered = true;
           }
+          
+          append_element(block_el, block_len);
+          segment_pos = std::min(line_end, block.end_pos);
         }
 
-        line_elements.push_back(ftxui::hbox(line_parts));
+        if (segment_pos < line_end) {
+          append_plain_with_cursor(segment_pos, line_end);
+        }
+
+        if (!cursor_rendered && cursor == static_cast<int>(line_end)) {
+            append_element(with_cursor(ftxui::text(" ")), 1);
+        }
+
+        flush_line();
         buf_pos = line_end + 1; // +1 for newline
       }
 
@@ -1106,9 +1158,6 @@ ftxui::Component InputBar(
     ftxui::Elements root_elements;
     if (autocomplete_layer) {
       root_elements.push_back(*autocomplete_layer);
-    }
-    if (image_tags_el) {
-      root_elements.push_back(*image_tags_el);
     }
     root_elements.push_back(input_area);
 

@@ -11,6 +11,7 @@
 #include <string>
 #include <thread>
 #include <unordered_set>
+#include "utils/FastHash.hpp"
 #include <vector>
 
 #include "ConfigLoader.hpp"
@@ -56,9 +57,8 @@ public:
     bool success = false;
     std::string agentId;
   };
-  std::map<std::string, DebugToolState> debugToolStates_; // toolCallId -> state
-  std::map<std::string, std::string>
-      debugAgentToolMap_; // agentId -> current toolCallId
+  firmius::shared::utils::FastHash<std::string, DebugToolState> debugToolStates_; // toolCallId -> state
+  firmius::shared::utils::FastHash<std::string, std::string> debugAgentToolMap_; // agentId -> current toolCallId
   uint64_t lastTurnCompletionTime_ =
       0; // Track last turn completion time to avoid duplicates
 
@@ -327,13 +327,11 @@ private:
   std::recursive_mutex mutex_;
 
   // Subscribers
-  std::map<int, std::function<void(const firmius::shared::AppEvent &)>>
-      subscribers_;
+  firmius::shared::utils::FastHash<int, std::function<void(const firmius::shared::AppEvent &)>> subscribers_;
   int nextSubscriptionId_ = 0;
 
   // Agent state tracking for event routing
-  std::map<std::string, std::string>
-      threadAgentMap_; // threadId -> focusedAgentId
+  firmius::shared::utils::FastHash<std::string, std::string> threadAgentMap_; // threadId -> focusedAgentId
 
   // Track which threads have had titles generated
   std::unordered_set<std::string> titleGeneratedThreads_;
@@ -345,8 +343,7 @@ private:
     PermissionResponse response = PermissionResponse::Deny;
     PermissionEscalationRequest request;
   };
-  std::map<std::string, std::shared_ptr<PendingPermissionRequest>>
-      pendingPermissionRequests_;
+  firmius::shared::utils::FastHash<std::string, std::shared_ptr<PendingPermissionRequest>> pendingPermissionRequests_;
   uint64_t nextPermissionRequestId_ = 0;
 
   void maybeGenerateTitle(const std::string &threadId,

@@ -9,6 +9,8 @@
 #include <vector>
 #include <sstream>
 #include <functional>
+#include <csignal>
+#include <cstring>
 
 namespace firmius::shared {
 
@@ -128,8 +130,35 @@ void terminateHandler() {
     std::abort();
 }
 
+void Panic::signalHandler(int sig) {
+    const char* signalName = "UNKNOWN";
+    switch (sig) {
+        case SIGSEGV: signalName = "SIGSEGV"; break;
+        case SIGBUS:  signalName = "SIGBUS";  break;
+        case SIGFPE:  signalName = "SIGFPE";  break;
+        case SIGABRT: signalName = "SIGABRT"; break;
+    }
+
+    const char* msg1 = "\n[FIRMIUS CRASH] Caught signal: ";
+    write(STDERR_FILENO, msg1, strlen(msg1));
+    write(STDERR_FILENO, signalName, strlen(signalName));
+    write(STDERR_FILENO, "\n", 1);
+
+    void* array[50];
+    int size = backtrace(array, 50);
+    backtrace_symbols_fd(array, size, STDERR_FILENO);
+
+    // Note: printExtraInfo and prePanicCallback are NOT async-signal-safe.
+    // We skip them in the signal handler to avoid deadlocks or further crashes.
+    _exit(1);
+}
+
 void Panic::init() {
     std::set_terminate(terminateHandler);
+    std::signal(SIGSEGV, Panic::signalHandler);
+    std::signal(SIGBUS, Panic::signalHandler);
+    std::signal(SIGFPE, Panic::signalHandler);
+    std::signal(SIGABRT, Panic::signalHandler);
 }
 
 void Panic::trigger(const std::string& message, const char* file, int line) {

@@ -1,5 +1,7 @@
 #include "components/ToolPresentationBlock.hpp"
 
+#include "components/DiffRenderer.hpp"
+#include "components/ANSIParser.hpp"
 #include "ThemeManager.hpp"
 #include "utils/Icons.hpp"
 #include <ftxui/component/component.hpp>
@@ -31,26 +33,16 @@ std::string NoticePrefix(ToolPresentationNoticeKind kind) {
   return "note: ";
 }
 
-std::string LifecycleBadge(const ToolPresentation &presentation) {
-  switch (presentation.lifecycle) {
-  case ToolPresentationLifecycle::Preparing:
-    return "preparing";
-  case ToolPresentationLifecycle::Running:
-    return "running";
-  case ToolPresentationLifecycle::Success:
-    return "done";
-  case ToolPresentationLifecycle::Error:
-    return "error";
-  }
-  return "";
-}
-
 int DefaultVisibleBodyLines(ToolPresentationLayoutKind layout) {
   switch (layout) {
+  case ToolPresentationLayoutKind::InlineStatusRow:
+    return 1;
   case ToolPresentationLayoutKind::BodyFirstStream:
     return 6;
   case ToolPresentationLayoutKind::BodyFirstPreview:
     return 8;
+  case ToolPresentationLayoutKind::DiffPreview:
+    return 12;
   case ToolPresentationLayoutKind::ResultsList:
     return 10;
   case ToolPresentationLayoutKind::CompactFactCard:
@@ -59,6 +51,10 @@ int DefaultVisibleBodyLines(ToolPresentationLayoutKind layout) {
   return 8;
 }
 
+// ANSI Process Rendering Contract:
+// 1. ToolPresentation::body_lines contains raw ANSI strings.
+// 2. Rendering layer parses ANSI at render-time using firmius::tui::ParseANSI.
+// 3. This maintains model compatibility and avoids coupling with FTXUI in core.
 ftxui::Element BuildBodyWindow(const ToolPresentation &presentation, const Theme &theme,
                                bool expanded, int visible_lines,
                                const ftxui::Component &toggle_button,
@@ -71,7 +67,11 @@ ftxui::Element BuildBodyWindow(const ToolPresentation &presentation, const Theme
         presentation.body_lines.front().rfind("$ ", 0) == 0) {
       command_line = presentation.body_lines.front();
       output_start_index = 1;
-      body_rows.push_back(ftxui::paragraph(command_line) | ftxui::color(theme.base.fg));
+      if (presentation.ansi_aware) {
+        body_rows.push_back(ParseANSI(command_line));
+      } else {
+        body_rows.push_back(ftxui::paragraph(command_line) | ftxui::color(theme.base.fg));
+      }
     }
     const int max_output_lines = std::max(1, visible_lines - 1);
     const int total_output_lines =
@@ -93,7 +93,14 @@ ftxui::Element BuildBodyWindow(const ToolPresentation &presentation, const Theme
     for (int i = 0; i < shown_output_lines; ++i) {
       const auto &line =
           presentation.body_lines[output_start_index + first_output_index + i];
-      body_rows.push_back(ftxui::paragraph("│ " + line) | ftxui::color(theme.base.fg));
+      if (presentation.ansi_aware) {
+        body_rows.push_back(ftxui::hbox({
+            ftxui::text("│ ") | ftxui::color(theme.base.fg),
+            ParseANSI(line) | ftxui::xflex
+        }));
+      } else {
+        body_rows.push_back(ftxui::paragraph("│ " + line) | ftxui::color(theme.base.fg));
+      }
     }
     if (presentation.status_footer.has_value() &&
         !presentation.status_footer->empty()) {
@@ -117,8 +124,15 @@ ftxui::Element BuildBodyWindow(const ToolPresentation &presentation, const Theme
     const int max_lines = expanded ? static_cast<int>(presentation.body_lines.size())
                                    : std::min<int>(visible_lines, presentation.body_lines.size());
     for (int i = 0; i < max_lines; ++i) {
-      body_rows.push_back(ftxui::paragraph("│ " + presentation.body_lines[static_cast<size_t>(i)]) |
-                          ftxui::color(theme.base.fg));
+      if (presentation.ansi_aware) {
+        body_rows.push_back(ftxui::hbox({
+            ftxui::text("│ ") | ftxui::color(theme.base.fg),
+            ParseANSI(presentation.body_lines[static_cast<size_t>(i)]) | ftxui::xflex
+        }));
+      } else {
+        body_rows.push_back(ftxui::paragraph("│ " + presentation.body_lines[static_cast<size_t>(i)]) |
+                            ftxui::color(theme.base.fg));
+      }
     }
     if (!expanded && static_cast<int>(presentation.body_lines.size()) > max_lines) {
       body_rows.push_back(
@@ -138,15 +152,11 @@ ftxui::Element BuildBodyWindow(const ToolPresentation &presentation, const Theme
 
 ftxui::Element BuildFactsFooter(const ToolPresentation &presentation, const Theme &theme) {
   std::vector<std::string> parts;
-  parts.reserve(presentation.footer_badges.size() + 1);
+  parts.reserve(presentation.footer_badges.size());
   for (const auto &badge : presentation.footer_badges) {
     if (!badge.empty()) {
       parts.push_back(badge);
     }
-  }
-  const std::string lifecycle = LifecycleBadge(presentation);
-  if (!lifecycle.empty()) {
-    parts.push_back(lifecycle);
   }
   if (!parts.empty()) {
     std::string line;
@@ -163,15 +173,11 @@ ftxui::Element BuildFactsFooter(const ToolPresentation &presentation, const Them
 
 std::string JoinBadgesInline(const ToolPresentation &presentation) {
   std::vector<std::string> parts;
-  parts.reserve(presentation.footer_badges.size() + 1);
+  parts.reserve(presentation.footer_badges.size());
   for (const auto &badge : presentation.footer_badges) {
     if (!badge.empty()) {
       parts.push_back(badge);
     }
-  }
-  const std::string lifecycle = LifecycleBadge(presentation);
-  if (!lifecycle.empty()) {
-    parts.push_back(lifecycle);
   }
   std::string out;
   for (size_t i = 0; i < parts.size(); ++i) {
@@ -181,6 +187,33 @@ std::string JoinBadgesInline(const ToolPresentation &presentation) {
     out += parts[i];
   }
   return out;
+}
+
+ftxui::Element BuildInlineStatusRow(const ToolPresentation &presentation,
+                                    const Theme &theme, const std::string &icon,
+                                    const ftxui::Color &icon_color,
+                                    const ftxui::Color &title_color, bool dim_row) {
+  ftxui::Elements row;
+  row.push_back(ftxui::text(" " + icon + " ") | ftxui::color(icon_color));
+  if (!presentation.title.empty()) {
+    row.push_back(ftxui::text(presentation.title) |
+                  ftxui::bold | ftxui::color(title_color));
+  }
+
+  const std::string badges = JoinBadgesInline(presentation);
+  if (!badges.empty()) {
+    row.push_back(ftxui::text("  " + badges) | ftxui::color(theme.base.dim));
+  }
+  if (presentation.error_text.has_value() && !presentation.error_text->empty()) {
+    row.push_back(ftxui::text("  " + *presentation.error_text) |
+                  ftxui::color(theme.status_bar.error.normal.fg));
+  }
+
+  auto line = ftxui::hbox(std::move(row));
+  if (dim_row) {
+    line = line | ftxui::dim;
+  }
+  return line | ftxui::bgcolor(theme.tool_blocks.generic_bg);
 }
 
 } // namespace
@@ -228,22 +261,34 @@ public:
       title_color = theme.status_bar.error.normal.fg;
     } else if (presentation.lifecycle == ToolPresentationLifecycle::Success) {
       icon = firmius::shared::ICON_CHECK;
+    } else if (presentation.layout == ToolPresentationLayoutKind::InlineStatusRow) {
+      icon = firmius::shared::ICON_WAIT;
     } else {
       dim_header = true;
     }
+    const bool inline_status_row =
+        presentation.layout == ToolPresentationLayoutKind::InlineStatusRow;
+    if (inline_status_row) {
+      return BuildInlineStatusRow(presentation, theme, icon, icon_color,
+                                  title_color, dim_header);
+    }
 
     const int body_visible_lines = DefaultVisibleBodyLines(presentation.layout);
+    const bool uses_diff_layout =
+        presentation.layout == ToolPresentationLayoutKind::DiffPreview;
     const bool body_has_hidden_lines =
+        !uses_diff_layout &&
         static_cast<int>(presentation.body_lines.size()) > body_visible_lines;
     const bool has_expand_details =
-        presentation.expandable ||
+        (!uses_diff_layout && presentation.expandable) ||
         body_has_hidden_lines ||
         (presentation.density == ToolPresentationDensity::DetailHeavy &&
          !presentation.sections.empty());
     const bool one_line_summary =
         presentation.density == ToolPresentationDensity::OneLineSummary;
     const bool show_expand_toggle =
-        !one_line_summary && presentation.expandable && has_expand_details && view_;
+        !one_line_summary && !uses_diff_layout && presentation.expandable &&
+        has_expand_details && view_;
     const bool expanded = show_expand_toggle ? presentation.expanded : true;
     if (show_expand_toggle) {
       view_->toggle_label = expanded ? "hide" : "show more";
@@ -296,9 +341,11 @@ public:
 
     if (!one_line_summary &&
         presentation.layout != ToolPresentationLayoutKind::CompactFactCard) {
-      auto body_window =
-          BuildBodyWindow(presentation, theme, expanded, body_visible_lines,
-                          toggle_button_, show_expand_toggle);
+      auto body_window = uses_diff_layout
+                             ? RenderToolPresentationDiffs(presentation, theme, true)
+                             : BuildBodyWindow(presentation, theme, expanded,
+                                               body_visible_lines, toggle_button_,
+                                               show_expand_toggle);
       if (body_window.get() != nullptr) {
         root_rows.push_back(body_window);
       }

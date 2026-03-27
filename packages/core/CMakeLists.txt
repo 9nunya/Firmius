@@ -45,6 +45,7 @@ target_sources(firmius_core PRIVATE
     src/tools/ArtifactListTool.cpp
     src/agents/HintingLoader.cpp
     src/agents/PurposeLoader.cpp
+    src/agents/RuntimeOverlay.cpp
     src/agents/Agent.cpp
     src/agents/AgentPermissionChecks.cpp
     src/agents/AgentPermissionChecks.cpp
@@ -108,6 +109,7 @@ target_sources(firmius_core PUBLIC
     include/tools/ArtifactListTool.hpp
     include/agents/HintingLoader.hpp
     include/agents/PurposeLoader.hpp
+    include/agents/RuntimeOverlay.hpp
     include/agents/Agent.hpp
     include/agents/AgentPermissionChecks.hpp
     include/agents/AgentPermissionChecks.hpp

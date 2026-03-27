@@ -44,6 +44,8 @@ public:
                 (override));
     MOCK_METHOD(bool, hasFullyReadFile, (const std::string& path), (const, override));
     MOCK_METHOD(void, markFileAsFullyRead, (const std::string& path), (override));
+    MOCK_METHOD(void, recordFileEdit, (const std::string& path), (override));
+    MOCK_METHOD(bool, isLineRead, (const std::string& path, int line), (const, override));
     MOCK_METHOD(std::string, getCurrentWorkingDirectory, (), (const, override));
 };
 

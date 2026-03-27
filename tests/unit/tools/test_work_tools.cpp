@@ -57,6 +57,17 @@ public:
   const AgentContext &getContext() const override { return context_; }
   AgentContext &getMutableContext() override { return context_; }
   void saveHistory() override {}
+
+  ModelChoice getPreferredModel() const override {
+    ModelChoice choice;
+    choice.providerId = context_.config.providerId;
+    choice.modelId = context_.config.modelId;
+    if (!context_.config.modelVariant.empty()) {
+      choice.variantName = context_.config.modelVariant;
+    }
+    return choice;
+  }
+
   std::shared_ptr<IEnvironment> getEnvironment() const override {
     return environment_;
   }

@@ -14,6 +14,8 @@
 namespace firmius::provider {
 
 namespace {
+constexpr auto kBackgroundQuotaRefreshInterval = std::chrono::minutes(5);
+
 std::string getOAuthJsonPath() {
   const char *homedir;
   if ((homedir = getenv("HOME")) == NULL) {
@@ -51,7 +53,7 @@ void BaseOAuthProvider::startBackgroundQuotaRefresh() {
 
     while (!stopQuotaRefresh_) {
       std::unique_lock<std::mutex> lock(quotaRefreshMutex_);
-      if (quotaRefreshCv_.wait_for(lock, std::chrono::minutes(30), [this] {
+      if (quotaRefreshCv_.wait_for(lock, kBackgroundQuotaRefreshInterval, [this] {
             return stopQuotaRefresh_.load();
           })) {
         break;

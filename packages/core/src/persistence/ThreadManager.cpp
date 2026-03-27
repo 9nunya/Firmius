@@ -3,6 +3,7 @@
 #include "utils/StringUtil.hpp"
 #include <algorithm>
 #include <cerrno>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -45,6 +46,17 @@ std::string todosDirectoryPathFor(const std::string& basePath,
 std::string todoPathFor(const std::string& basePath, const std::string& threadId,
                         const std::string& agentId) {
     return todosDirectoryPathFor(basePath, threadId) + "/" + agentId + ".json";
+}
+
+std::string liveStateDirectoryPathFor(const std::string& basePath,
+                                      const std::string& threadId) {
+    return basePath + "/" + threadId + "/live_state";
+}
+
+std::string liveStatePathFor(const std::string& basePath,
+                             const std::string& threadId,
+                             const std::string& agentId) {
+    return liveStateDirectoryPathFor(basePath, threadId) + "/" + agentId + ".json";
 }
 
 std::string artifactsDirectoryPathFor(const std::string& basePath,
@@ -223,6 +235,22 @@ std::shared_ptr<std::mutex> acquireTodoMutex(const std::string& threadId,
     return created;
 }
 
+std::shared_ptr<std::mutex> acquireLiveStateMutex(const std::string& threadId,
+                                                  const std::string& agentId) {
+    static std::mutex registryMutex;
+    static std::unordered_map<std::string, std::weak_ptr<std::mutex>> registry;
+
+    const std::string key = threadId + ":" + agentId;
+    std::lock_guard<std::mutex> guard(registryMutex);
+    if (auto existing = registry[key].lock()) {
+        return existing;
+    }
+
+    auto created = std::make_shared<std::mutex>();
+    registry[key] = created;
+    return created;
+}
+
 std::shared_ptr<std::mutex> acquireArtifactsMutex(const std::string& threadId) {
     static std::mutex registryMutex;
     static std::unordered_map<std::string, std::weak_ptr<std::mutex>> registry;
@@ -300,7 +328,130 @@ void writeArtifactsManifestFile(
     writeJsonDocument(doc, path);
 }
 
+rapidjson::Value watchedRangeToJson(const WatchedLineRange& range,
+                                    rapidjson::Document::AllocatorType& alloc) {
+    rapidjson::Value value(rapidjson::kObjectType);
+    value.AddMember("start_line", range.startLine, alloc);
+    value.AddMember("end_line", range.endLine, alloc);
+    return value;
+}
+
+WatchedLineRange watchedRangeFromJson(const rapidjson::Value& value) {
+    WatchedLineRange range;
+    if (value.IsObject()) {
+        if (value.HasMember("start_line") && value["start_line"].IsInt()) {
+            range.startLine = value["start_line"].GetInt();
+        }
+        if (value.HasMember("end_line") && value["end_line"].IsInt()) {
+            range.endLine = value["end_line"].GetInt();
+        }
+    }
+    return range;
+}
+
+rapidjson::Value watchedFileStateToJson(const WatchedFileState& watchedFile,
+                                        rapidjson::Document::AllocatorType& alloc) {
+    rapidjson::Value value(rapidjson::kObjectType);
+    value.AddMember("path", rapidjson::Value(watchedFile.path.c_str(), alloc), alloc);
+    rapidjson::Value ranges(rapidjson::kArrayType);
+    for (const auto& range : watchedFile.ranges) {
+        ranges.PushBack(watchedRangeToJson(range, alloc), alloc);
+    }
+    value.AddMember("ranges", ranges, alloc);
+    if (watchedFile.terminalLine.has_value()) {
+        value.AddMember("terminal_line", *watchedFile.terminalLine, alloc);
+    }
+    value.AddMember("fully_read", watchedFile.fullyRead, alloc);
+    value.AddMember("last_content_hash",
+                    rapidjson::Value(watchedFile.lastContentHash.c_str(), alloc), alloc);
+    value.AddMember("updated_at", watchedFile.updatedAt, alloc);
+    return value;
+}
+
+WatchedFileState watchedFileStateFromJson(const rapidjson::Value& value) {
+    WatchedFileState watchedFile;
+    if (!value.IsObject()) {
+        return watchedFile;
+    }
+
+    if (value.HasMember("path") && value["path"].IsString()) {
+        watchedFile.path = value["path"].GetString();
+    }
+    if (value.HasMember("ranges") && value["ranges"].IsArray()) {
+        for (const auto& range : value["ranges"].GetArray()) {
+            watchedFile.ranges.push_back(watchedRangeFromJson(range));
+        }
+    }
+    if (value.HasMember("terminal_line") && value["terminal_line"].IsInt()) {
+        watchedFile.terminalLine = value["terminal_line"].GetInt();
+    }
+    if (value.HasMember("fully_read") && value["fully_read"].IsBool()) {
+        watchedFile.fullyRead = value["fully_read"].GetBool();
+    }
+    if (value.HasMember("last_content_hash") && value["last_content_hash"].IsString()) {
+        watchedFile.lastContentHash = value["last_content_hash"].GetString();
+    }
+    if (value.HasMember("updated_at") && value["updated_at"].IsUint64()) {
+        watchedFile.updatedAt = value["updated_at"].GetUint64();
+    } else if (value.HasMember("updated_at") && value["updated_at"].IsInt64()) {
+        watchedFile.updatedAt = static_cast<uint64_t>(value["updated_at"].GetInt64());
+    }
+    return watchedFile;
+}
+
+rapidjson::Document liveStateToJson(const AgentLiveState& liveState) {
+    rapidjson::Document doc;
+    doc.SetObject();
+    auto& alloc = doc.GetAllocator();
+    doc.AddMember("thread_id", rapidjson::Value(liveState.threadId.c_str(), alloc), alloc);
+    doc.AddMember("agent_id", rapidjson::Value(liveState.agentId.c_str(), alloc), alloc);
+    rapidjson::Value watchedFiles(rapidjson::kArrayType);
+    for (const auto& watchedFile : liveState.watchedFiles) {
+        watchedFiles.PushBack(watchedFileStateToJson(watchedFile, alloc), alloc);
+    }
+    doc.AddMember("watched_files", watchedFiles, alloc);
+    return doc;
+}
+
+AgentLiveState liveStateFromJson(const rapidjson::Value& value) {
+    AgentLiveState liveState;
+    if (!value.IsObject()) {
+        return liveState;
+    }
+
+    if (value.HasMember("thread_id") && value["thread_id"].IsString()) {
+        liveState.threadId = value["thread_id"].GetString();
+    }
+    if (value.HasMember("agent_id") && value["agent_id"].IsString()) {
+        liveState.agentId = value["agent_id"].GetString();
+    }
+    if (value.HasMember("watched_files") && value["watched_files"].IsArray()) {
+        for (const auto& watchedFile : value["watched_files"].GetArray()) {
+            liveState.watchedFiles.push_back(watchedFileStateFromJson(watchedFile));
+        }
+    }
+    return liveState;
+}
+
 } // namespace
+
+std::string ThreadManager::defaultBasePath() {
+    if (const char* home = std::getenv("HOME")) {
+        return std::string(home) + "/.firmius/threads";
+    }
+    return ".firmius/threads";
+}
+
+std::string ThreadManager::threadDirectoryPath(const std::string& basePath,
+                                               const std::string& threadId) {
+    return basePath + "/" + threadId;
+}
+
+std::string ThreadManager::compactionSnapshotPath(const std::string& basePath,
+                                                  const std::string& threadId,
+                                                  const std::string& agentId) {
+    return threadDirectoryPath(basePath, threadId) + "/compaction_" + agentId + ".json";
+}
 
 ThreadManager::ThreadManager(std::string basePath)
     : basePath_(std::move(basePath)) {}
@@ -373,6 +524,58 @@ AgentHistory ThreadManager::loadAgentHistory(const std::string& threadId, const 
         d.Parse(line.c_str());
         history.turns.push_back(agentTurnFromJsonValue(d));
     }
+
+    // Inject synthetic results for orphaned tool calls so providers
+    // requiring 1:1 call/result pairing (Codex, OpenAI) don't reject
+    // the history with a 400 error after agent cancellation.
+    std::unordered_map<std::string, bool> toolCallIds;
+    std::unordered_map<std::string, bool> toolResultIds;
+
+    for (const auto& turn : history.turns) {
+        for (const auto& msg : turn.messages) {
+            for (const auto& part : msg.content) {
+                if (auto* tc = std::get_if<ToolCallContent>(&part)) {
+                    if (!tc->id.empty()) {
+                        toolCallIds[tc->id] = true;
+                    }
+                } else if (auto* tr = std::get_if<ToolResultContent>(&part)) {
+                    if (!tr->toolCallId.empty()) {
+                        toolResultIds[tr->toolCallId] = true;
+                    }
+                }
+            }
+        }
+    }
+
+    std::vector<std::string> orphanedCalls;
+    for (const auto& [callId, _] : toolCallIds) {
+        if (toolResultIds.find(callId) == toolResultIds.end()) {
+            orphanedCalls.push_back(callId);
+        }
+    }
+
+    if (!orphanedCalls.empty()) {
+        AgentTurn repairTurn;
+        repairTurn.turnId = "auto-repair-" + std::to_string(nowEpochMs());
+        repairTurn.stopReason = StopReason::Stop;
+
+        for (const auto& callId : orphanedCalls) {
+            Message repairMsg;
+            repairMsg.role = Role::ToolResult;
+            repairMsg.timestamp = nowEpochMs();
+
+            ToolResultContent repairResult;
+            repairResult.toolCallId = callId;
+            repairResult.result = "User aborted tool manually.";
+            repairResult.success = false;
+
+            repairMsg.content.push_back(repairResult);
+            repairTurn.messages.push_back(repairMsg);
+        }
+
+        history.turns.push_back(repairTurn);
+    }
+
     return history;
 }
 
@@ -651,6 +854,88 @@ AgentTodoList ThreadManager::mutateAgentTodo(
 
     writeJsonDocument(toJson(todoList), todoPathFor(basePath_, threadId, agentId));
     return todoList;
+}
+
+AgentLiveState ThreadManager::getAgentLiveState(const std::string& threadId,
+                                                const std::string& agentId) const {
+    if (agentId.empty()) {
+        throw std::runtime_error("Cannot load live state with empty agentId");
+    }
+
+    const std::string path = liveStatePathFor(basePath_, threadId, agentId);
+    if (!std::filesystem::exists(path)) {
+        AgentLiveState empty;
+        empty.threadId = threadId;
+        empty.agentId = agentId;
+        return empty;
+    }
+
+    rapidjson::Document d = readJsonDocument(path, "agent live state");
+    AgentLiveState liveState = liveStateFromJson(d);
+    if (liveState.threadId.empty()) {
+        liveState.threadId = threadId;
+    }
+    if (liveState.agentId.empty()) {
+        liveState.agentId = agentId;
+    }
+    return liveState;
+}
+
+void ThreadManager::writeAgentLiveState(const std::string& threadId,
+                                        const std::string& agentId,
+                                        const AgentLiveState& liveState) {
+    if (agentId.empty()) {
+        throw std::runtime_error("Cannot write live state with empty agentId");
+    }
+
+    const std::string threadDir = threadDirectoryPath(basePath_, threadId);
+    if (!std::filesystem::exists(threadDir)) {
+        throw std::runtime_error("Thread not found: " + threadId);
+    }
+
+    auto liveStateMutex = acquireLiveStateMutex(threadId, agentId);
+    std::lock_guard<std::mutex> lock(*liveStateMutex);
+
+    AgentLiveState persisted = liveState;
+    if (persisted.threadId.empty()) {
+        persisted.threadId = threadId;
+    }
+    if (persisted.agentId.empty()) {
+        persisted.agentId = agentId;
+    }
+    if (persisted.threadId != threadId || persisted.agentId != agentId) {
+        throw std::runtime_error("Live state identity does not match target thread/agent");
+    }
+
+    std::filesystem::create_directories(liveStateDirectoryPathFor(basePath_, threadId));
+    writeJsonDocument(liveStateToJson(persisted), liveStatePathFor(basePath_, threadId, agentId));
+}
+
+AgentLiveState ThreadManager::mutateAgentLiveState(
+    const std::string& threadId, const std::string& agentId,
+    const std::function<void(AgentLiveState&)>& mutator) {
+    if (agentId.empty()) {
+        throw std::runtime_error("Cannot mutate live state with empty agentId");
+    }
+
+    auto liveStateMutex = acquireLiveStateMutex(threadId, agentId);
+    std::lock_guard<std::mutex> lock(*liveStateMutex);
+
+    AgentLiveState liveState = getAgentLiveState(threadId, agentId);
+    mutator(liveState);
+    if (liveState.threadId.empty()) {
+        liveState.threadId = threadId;
+    }
+    if (liveState.agentId.empty()) {
+        liveState.agentId = agentId;
+    }
+    if (liveState.threadId != threadId || liveState.agentId != agentId) {
+        throw std::runtime_error("Live state identity does not match target thread/agent");
+    }
+
+    std::filesystem::create_directories(liveStateDirectoryPathFor(basePath_, threadId));
+    writeJsonDocument(liveStateToJson(liveState), liveStatePathFor(basePath_, threadId, agentId));
+    return liveState;
 }
 
 std::map<std::string, AgentManifestEntry> ThreadManager::readAgentManifest(const std::string& threadId) const {

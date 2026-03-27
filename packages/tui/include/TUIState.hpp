@@ -47,6 +47,8 @@ public:
   void attachScreen(ftxui::ScreenInteractive *screen);
   void shutdown();
 
+  InputBarModel& getInputBarModel();
+
   std::string getProcessOutput(const std::string &pid);
   std::string getSubagentOutput(const std::string &subagentId);
 

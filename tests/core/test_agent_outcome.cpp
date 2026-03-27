@@ -4,6 +4,7 @@
 #include "Panic.hpp"
 #include "persistence/ThreadManager.hpp"
 #include "providers/ProviderRegistry.hpp"
+#include "utils/InterruptibleSleep.hpp"
 
 #include <atomic>
 #include <algorithm>
@@ -28,6 +29,7 @@ enum class OutcomeMode {
   Response,
   NoSummary,
   Cancelled,
+  ProviderRetrySleep,
   Failed,
 };
 
@@ -54,6 +56,20 @@ public:
     case OutcomeMode::Cancelled:
       while (!opts.abortSignal || !opts.abortSignal->load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      }
+      onEvent(StreamDone{StopReason::Stop});
+      return;
+    case OutcomeMode::ProviderRetrySleep:
+      onEvent(StreamRetrying{1, 3, 429, 5000, "Provider retry wait", ""});
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        enteredRetrySleep_ = true;
+      }
+      retrySleepCv_.notify_all();
+      if (!firmius::shared::interruptibleSleep(std::chrono::seconds(5),
+                                               opts.abortController,
+                                               opts.abortSignal)) {
+        return;
       }
       onEvent(StreamDone{StopReason::Stop});
       return;
@@ -85,11 +101,66 @@ public:
     return ProviderType::APIKey;
   }
 
+  bool waitUntilRetrySleep(
+      std::chrono::milliseconds timeout = std::chrono::milliseconds(1500)) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return retrySleepCv_.wait_for(lock, timeout,
+                                  [this]() { return enteredRetrySleep_; });
+  }
+
 private:
   std::string providerId_;
   OutcomeMode mode_;
   std::string text_;
   std::atomic<int> callCount_{0};
+  std::mutex mutex_;
+  std::condition_variable retrySleepCv_;
+  bool enteredRetrySleep_ = false;
+};
+
+class HistoryCaptureProvider : public IProvider {
+public:
+  explicit HistoryCaptureProvider(std::string providerId)
+      : providerId_(std::move(providerId)) {}
+
+  std::string getId() const override { return providerId_; }
+
+  void stream(const AgentHistory &history, const ProviderOptions &,
+              std::function<void(const StreamEvent &)> onEvent) override {
+    lastHistory_ = history;
+    onEvent(TextChunk{"captured"});
+    onEvent(StreamDone{StopReason::Stop});
+  }
+
+  std::vector<ModelInfo> listModels() override {
+    ModelInfo model;
+    model.id = providerId_ + "-model";
+    model.provider = providerId_;
+    model.contextWindow = 4096;
+    return {model};
+  }
+
+  ModelInfo getModelInfo(const std::string &) override {
+    return listModels().front();
+  }
+
+  void generateSummary(const std::string &, const AgentHistory &,
+                       const std::string &,
+                       std::function<void(const StreamEvent &)> onEvent,
+                       std::atomic<bool> * = nullptr) override {
+    onEvent(TextChunk{"summary"});
+    onEvent(StreamDone{StopReason::Stop});
+  }
+
+  ProviderType getProviderType() const override {
+    return ProviderType::APIKey;
+  }
+
+  const AgentHistory &lastHistory() const { return lastHistory_; }
+
+private:
+  std::string providerId_;
+  AgentHistory lastHistory_;
 };
 
 class AgentOutcomeTest : public ::testing::Test {
@@ -234,8 +305,71 @@ TEST_F(AgentOutcomeTest, CancellationProducesCancelledOutcome) {
   EXPECT_EQ(outcome->kind, AgentOutcome::Kind::Cancelled);
 }
 
+TEST_F(AgentOutcomeTest, RuntimeOverlaysAreSentToProviderButNotPersistedToJournal) {
+  const std::string providerId =
+      "history-capture-provider-" +
+      std::to_string(static_cast<long long>(
+          providerSerial_.fetch_add(1, std::memory_order_relaxed)));
+  auto provider = std::make_shared<HistoryCaptureProvider>(providerId);
+  ProviderRegistry::instance().registerProvider(provider);
+
+  auto cfg = ConfigLoader::instance().getConfig();
+  cfg.defaultProviderId = provider->getId();
+  cfg.defaultModelId = provider->listModels().front().id;
+  ConfigLoader::instance().updateConfig(cfg);
+
+  const std::string threadId = createThread();
+  const std::string agentId =
+      Engine::instance().summonAgent(threadId, "coder", "say hello");
+
+  auto outcome = waitForOutcome(agentId);
+  ASSERT_TRUE(outcome.has_value());
+  EXPECT_EQ(outcome->kind, AgentOutcome::Kind::Response);
+
+  bool sawRuntimeWorkOverlay = false;
+  bool sawRuntimeWatchedOverlay = false;
+  for (const auto &turn : provider->lastHistory().turns) {
+    if (turn.turnId == "runtime-overlay-work-state") {
+      sawRuntimeWorkOverlay = true;
+    }
+    if (turn.turnId == "runtime-overlay-watched-files") {
+      sawRuntimeWatchedOverlay = true;
+    }
+  }
+  EXPECT_TRUE(sawRuntimeWorkOverlay);
+  EXPECT_TRUE(sawRuntimeWatchedOverlay);
+
+  ThreadManager tm((testHome_ / ".firmius" / "threads").string());
+  const AgentHistory persisted = tm.loadAgentHistory(threadId, agentId);
+  for (const auto &turn : persisted.turns) {
+    EXPECT_NE(turn.turnId, "runtime-overlay-work-state");
+    EXPECT_NE(turn.turnId, "runtime-overlay-watched-files");
+  }
+}
+
+TEST_F(AgentOutcomeTest, ProviderOwnedRetrySleepCancelsImmediately) {
+  auto provider = registerProvider(OutcomeMode::ProviderRetrySleep);
+  const std::string threadId = createThread();
+
+  const std::string agentId =
+      Engine::instance().summonAgent(threadId, "coder", "wait for provider retry");
+
+  ASSERT_TRUE(waitForAgentStarted(agentId));
+  ASSERT_TRUE(provider->waitUntilRetrySleep());
+
+  const auto cancelStart = std::chrono::steady_clock::now();
+  Engine::instance().cancelAgent(agentId);
+  auto outcome = waitForOutcome(agentId);
+  ASSERT_TRUE(outcome.has_value());
+
+  const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - cancelStart);
+  EXPECT_EQ(outcome->kind, AgentOutcome::Kind::Cancelled);
+  EXPECT_LT(elapsed.count(), 1000);
+}
+
 TEST_F(AgentOutcomeTest, FailureProducesFailedOutcome) {
-  registerProvider(OutcomeMode::Failed, "boom");
+  auto provider = registerProvider(OutcomeMode::Failed, "boom");
   const std::string threadId = createThread();
 
   const std::string agentId =
@@ -244,7 +378,8 @@ TEST_F(AgentOutcomeTest, FailureProducesFailedOutcome) {
   auto outcome = waitForOutcome(agentId);
   ASSERT_TRUE(outcome.has_value());
   EXPECT_EQ(outcome->kind, AgentOutcome::Kind::Failed);
-  EXPECT_EQ(outcome->text, "boom");
+  EXPECT_NE(outcome->text.find("boom"), std::string::npos);
+  EXPECT_NE(outcome->text.find("Provider: " + provider->getId()), std::string::npos);
 }
 
 } // namespace

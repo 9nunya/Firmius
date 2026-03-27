@@ -4,11 +4,13 @@
 #include "Context.hpp"
 #include "Enums.hpp"
 #include "Events.hpp"
+#include "utils/AbortController.hpp"
 
 #include <atomic>
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -45,6 +47,8 @@ struct ProviderOptions {
       tools; ///< List of tools available for this request.
   std::atomic<bool> *abortSignal =
       nullptr; ///< Optional signal to abort the request immediately.
+  std::shared_ptr<AbortController> abortController =
+      nullptr; ///< Optional controller for immediate out-of-band aborts.
 };
 
 /**

@@ -498,22 +498,90 @@ void TuiState::init(firmius::core::Harness &harness,
 
   // Set up vision capability check
   input_model_->check_vision_capable = [this]() -> bool {
-    if (!harness_ || focused_agent_id_.empty())
+    auto normalize_model_key = [](const std::string &value) {
+      std::string normalized;
+      normalized.reserve(value.size());
+      for (unsigned char c : value) {
+        if (std::isalnum(c)) {
+          normalized.push_back(static_cast<char>(std::tolower(c)));
+        }
+      }
+      return normalized;
+    };
+
+    auto supports_vision = [normalize_model_key](
+                               const std::string &provider_id,
+                               const std::string &model_id) -> bool {
+      if (provider_id.empty() || model_id.empty()) {
+        return false;
+      }
+      auto provider = firmius::provider::ProviderRegistry::instance().getProvider(
+          provider_id);
+      if (!provider) {
+        return false;
+      }
+      auto info = provider->getModelInfo(model_id);
+      auto supports_image = [](const firmius::shared::ModelInfo &model_info) {
+        return std::find(model_info.modalities.begin(), model_info.modalities.end(),
+                         "image") != model_info.modalities.end();
+      };
+      if (supports_image(info)) {
+        return true;
+      }
+
+      // Fallback for model aliases/variants where getModelInfo() returns a
+      // generic model without modalities.
+      const std::string requested_key = normalize_model_key(model_id);
+      if (requested_key.empty()) {
+        return false;
+      }
+      for (const auto &candidate : provider->listModels()) {
+        if (!supports_image(candidate)) {
+          continue;
+        }
+        const std::string candidate_key = normalize_model_key(candidate.id);
+        if (candidate_key.empty()) {
+          continue;
+        }
+        if (requested_key == candidate_key ||
+            requested_key.rfind(candidate_key, 0) == 0) {
+          return true;
+        }
+      }
       return false;
-    auto agent = firmius::core::AgentRegistry::instance().getAgent(
-        focused_agent_id_);
-    if (!agent)
+    };
+
+    if (!harness_) {
       return false;
-    auto &ctx =
-        const_cast<firmius::shared::AgentContext &>(agent->getContext());
-    auto provider =
-        firmius::provider::ProviderRegistry::instance().getProvider(
-            ctx.config.providerId);
-    if (!provider)
-      return false;
-    auto info = provider->getModelInfo(ctx.config.modelId);
-    return std::find(info.modalities.begin(), info.modalities.end(),
-                     "image") != info.modalities.end();
+    }
+
+    if (!focused_agent_id_.empty()) {
+      auto agent = firmius::core::AgentRegistry::instance().getAgent(
+          focused_agent_id_);
+      if (agent) {
+        auto &ctx =
+            const_cast<firmius::shared::AgentContext &>(agent->getContext());
+        if (supports_vision(ctx.config.providerId, ctx.config.modelId)) {
+          return true;
+        }
+      }
+    }
+
+    if (status_model_) {
+      const std::string &status_model_name = status_model_->model_name;
+      const size_t slash = status_model_name.find('/');
+      if (slash != std::string::npos && slash > 0 &&
+          slash + 1 < status_model_name.size()) {
+        const std::string provider_id = status_model_name.substr(0, slash);
+        const std::string model_id = status_model_name.substr(slash + 1);
+        if (supports_vision(provider_id, model_id)) {
+          return true;
+        }
+      }
+    }
+
+    const auto &cfg = harness_->getConfig();
+    return supports_vision(cfg.defaultProviderId, cfg.defaultModelId);
   };
 
   // Set up notification function
@@ -624,6 +692,10 @@ void TuiState::shutdown() {
     harness_->unsubscribe(subscription_id_);
     subscription_id_ = -1;
   }
+}
+
+InputBarModel& TuiState::getInputBarModel() {
+  return *input_model_;
 }
 
 void TuiState::drainEvents() {
@@ -1331,8 +1403,10 @@ ftxui::Component TuiState::root() {
         for (const auto &img : images) {
           if (img.type == "image") {
             firmius::shared::ImageContent content;
-            content.url = "data:" + img.mime_type + ";base64," + img.content;
-            content.mediaType = img.mime_type;
+            const std::string mime_type =
+                img.mime_type.empty() ? "image/png" : img.mime_type;
+            content.url = "data:" + mime_type + ";base64," + img.content;
+            content.mediaType = mime_type;
             content.detail = "auto";
             image_contents.push_back(content);
           }

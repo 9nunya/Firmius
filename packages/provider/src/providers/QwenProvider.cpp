@@ -770,6 +770,8 @@ private:
 
 QwenProvider::QwenProvider() : BaseOAuthProvider("qwen") {}
 
+QwenProvider::~QwenProvider() = default;
+
 std::map<std::string, ModelInfo> QwenProvider::getStaticModels() {
   std::vector<ModelVariant> coderVariants = {
       {"low", "{\"effort\":\"low\"}"},
@@ -909,16 +911,23 @@ bool QwenProvider::refreshAccessToken(OAuthAccount &acc) {
 }
 
 void QwenProvider::refreshQuotas() {
-  // Qwen OAuth free tier has no quota API endpoint.
-  // We don't track quotas - let the API tell us when we're rate limited.
+  // Local quota tracking for Qwen OAuth free tier
+  // Free tier: 1000 requests/day, resets at midnight UTC
+  // Track usage locally since Qwen doesn't provide quota headers reliably
 
-  // If no accounts loaded, can't refresh
   if (accounts_.empty()) {
     return;
   }
 
   int64_t now = nowSeconds();
   bool needsSave = false;
+
+  // Get current UTC day
+  std::time_t now_t = static_cast<std::time_t>(now);
+  std::tm *utc = std::gmtime(&now_t);
+  char todayStr[11];
+  std::strftime(todayStr, sizeof(todayStr), "%Y-%m-%d", utc);
+  std::string today(todayStr);
 
   for (auto &acc : accounts_) {
     // Refresh token if expired
@@ -928,21 +937,42 @@ void QwenProvider::refreshQuotas() {
       }
     }
 
+    // Check if day changed - reset daily counter
+    std::string lastDay = acc.metadata.count("quota_day") ? acc.metadata["quota_day"] : "";
+    if (lastDay != today) {
+      // New day - reset quota to 100%
+      acc.metadata["quota:qwen"] = "100";
+      acc.metadata["quota_day"] = today;
+      acc.metadata["quota_requests_today"] = "0";
+      acc.rateLimited = false;
+      acc.backoffUntil = 0;
+      needsSave = true;
+    }
+
+    // Calculate remaining percentage from local tracking
+    // Default free tier: 1000 requests/day
+    int requestsToday = 0;
+    if (acc.metadata.count("quota_requests_today")) {
+      try {
+        requestsToday = std::stoi(acc.metadata["quota_requests_today"]);
+      } catch (...) {
+        requestsToday = 0;
+      }
+    }
+
+    // Calculate remaining percentage (assume 1000/day for free tier)
+    int remainingPercent = std::max(0, 100 - (requestsToday * 100 / 1000));
+    acc.metadata["quota:qwen"] = std::to_string(remainingPercent);
+
     // Clear any stale rate-limiting from previous sessions
     if (acc.rateLimited && now > acc.backoffUntil) {
       acc.rateLimited = false;
-      for (auto &[k, v] : acc.metadata) {
-        if (k.rfind("quota:", 0) == 0 && v == "0") {
-          v = "1";
-        }
-      }
       needsSave = true;
     }
-    acc.backoffUntil = 0;
+
     acc.lastQuotaRefresh = now;
   }
 
-  // Only save if something actually changed (token refreshed or rate limit cleared)
   if (needsSave) {
     saveAccounts();
   }
@@ -955,32 +985,21 @@ QwenProvider::getAllQuotas() const {
   for (const auto &acc : accounts_) {
     std::vector<QuotaBucket> buckets;
 
-    // Check each model's quota
-    std::vector<std::string> models = {"coder-model", "qwen3-coder-plus",
-                                       "qwen3-coder-flash", "qwen3.5-plus",
-                                       "vision-model"};
-
-    for (const auto &model : models) {
-      std::string quotaKey = "quota:" + model;
-      std::string resetKey = "quota_reset:" + model;
-
-      float remaining = 1.0f; // Default to available
-      if (acc.metadata.count(quotaKey)) {
-        try {
-          remaining = std::stof(acc.metadata.at(quotaKey));
-        } catch (...) {
-          remaining = 1.0f;
-        }
+    float remaining = 1.0f;
+    if (acc.metadata.count("quota:qwen")) {
+      try {
+        remaining = std::stof(acc.metadata.at("quota:qwen")) / 100.0f;
+      } catch (...) {
+        remaining = 1.0f;
       }
-
-      std::string resetTime;
-      if (acc.metadata.count(resetKey)) {
-        resetTime = acc.metadata.at(resetKey);
-      }
-
-      buckets.push_back(QuotaBucket{model, remaining, resetTime});
     }
 
+    std::string resetTime;
+    if (acc.metadata.count("quota_reset:qwen")) {
+      resetTime = acc.metadata.at("quota_reset:qwen");
+    }
+
+    buckets.push_back(QuotaBucket{"quota:qwen", remaining, resetTime});
     result[acc.getIdentifier()] = buckets;
   }
 
@@ -1264,6 +1283,19 @@ bool QwenProvider::hasAlternativeAccount(
     }
   }
   return false;
+}
+
+void QwenProvider::cleanupOldQuotaBuckets(OAuthAccount &acc) {
+  std::vector<std::string> keysToRemove;
+  for (const auto &entry : acc.metadata) {
+    if (entry.first.find("quota:") == 0 && entry.first != "quota:qwen" &&
+        entry.first != "quota_strikes") {
+      keysToRemove.push_back(entry.first);
+    }
+  }
+  for (const auto &key : keysToRemove) {
+    acc.metadata.erase(key);
+  }
 }
 
 std::string
@@ -1582,6 +1614,10 @@ QwenProvider::buildRequestPayload(const AgentHistory &history,
           imageUrl.AddMember("url", rapidjson::Value(img->url.c_str(), a), a);
           item.AddMember("image_url", imageUrl, a);
           content.PushBack(item, a);
+        } else if (auto *thinking =
+                       std::get_if<firmius::shared::ThinkingContent>(&part)) {
+          // Qwen uses reasoning_content field for thinking
+          addTextContentItem(content, thinking->thinking, a);
         }
       }
 
@@ -1814,9 +1850,25 @@ void QwenProvider::stream(const AgentHistory &history,
       auto attempt = executeStreamRequest(acc, history, opts, onEvent);
       if (attempt.succeeded()) {
         // Success! Update lastUsedIndex_ so next request starts from this
-        // account
+        // account. Also increment local request counter for quota tracking.
         {
           std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
+          // Increment daily request counter for local quota tracking
+          int requestsToday = 0;
+          if (acc.metadata.count("quota_requests_today")) {
+            try {
+              requestsToday = std::stoi(acc.metadata["quota_requests_today"]);
+            } catch (...) {
+              requestsToday = 0;
+            }
+          }
+          requestsToday++;
+          acc.metadata["quota_requests_today"] = std::to_string(requestsToday);
+
+          // Update remaining percentage (assume 1000/day for free tier)
+          int remainingPercent = std::max(0, 100 - (requestsToday * 100 / 1000));
+          acc.metadata["quota:qwen"] = std::to_string(remainingPercent);
+
           for (size_t i = 0; i < accounts_.size(); i++) {
             if (&accounts_[i] == &acc) {
               lastUsedIndex_ = static_cast<int>(i);

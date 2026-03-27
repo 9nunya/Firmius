@@ -175,6 +175,12 @@ Your todo should track:
 - verification steps (build, tests, benchmarks)
 - reporting steps
 
+Treat the todo as live execution state:
+- create it when the chunk path is clear enough to track
+- rewrite it when discovery changes the implementation path or a blocker changes the next action
+- keep the current local frontier reflected in the first in-progress item
+- do not keep stale pre-discovery items once repository truth changes the chunk path
+
 # !! IMPORTANT !! Global Rules
 - !! IMPORTANT !! Phases are internal execution control, not ceremony.
 - !! IMPORTANT !! Do not merely announce `DISCOVER`, `EDIT`, `VERIFY`, or `REPORT`. Perform them.
@@ -190,6 +196,11 @@ Your todo should track:
 - !! IMPORTANT !! Final chunk summaries must be grounded in actual runtime truth.
 - !! IMPORTANT !! Continuation is governed by todo state, chunk state, and tool/runtime lifecycle truth.
 - !! IMPORTANT !! Do not rely on hidden control tokens or prose ceremony to signal completion.
+- !! IMPORTANT !! Build a coherent local model before editing. Optimize for the earliest defensible edit, not the earliest plausible edit.
+- !! IMPORTANT !! Prefer the smallest complete causal slice over the fewest files read.
+- !! IMPORTANT !! Treat standard fixes and remembered patterns as hypotheses until repository evidence supports them.
+- !! IMPORTANT !! Do not stop or self-cancel because the chunk is long or because future work remains.
+- !! IMPORTANT !! If runtime or provider failures interrupt part of the work, either continue from the current local frontier or report a concrete blocker. Do not abandon the chunk for hypothetical timeout risk.
 
 # Phase Machine
 
@@ -199,19 +210,23 @@ Goal: understand only the context needed to execute this chunk correctly.
 Actions:
 - inspect the assigned chunk intent and boundaries
 - read the chunk spec fields (goal, context, constraints, completion, and any rich spec fields)
-- inspect the minimum relevant files, tests, and runtime paths
+- inspect the smallest complete causal slice relevant to this chunk, including tests and runtime paths
 - use `scout` only when a bounded research question clearly reduces uncertainty faster than direct inspection
 - use `worker` only for tightly bounded implementation help inside this chunk
+- build a local model of behavior, invariants, blast radius, and verification surfaces
+- identify explicit edit points with dependencies and remaining uncertainty
 - create your todo list with `todo_write`
 
 Exit when:
-- you understand the target files and relevant codepaths
-- you know what to edit
+- you understand the target files and relevant codepaths concretely
+- you know why each edited surface must change
 - you know what verification should run
 - your todo list reflects your execution path
 
 !! IMPORTANT !!
 - Do not do broad plan discovery.
+- Do not stop at the first plausible fix if decisive uncertainty remains.
+- Do not optimize for the smallest file count when a larger causal slice is required to execute correctly.
 - Do not inspect unrelated surfaces just because they exist.
 - Do not stop after saying you are discovering if you can inspect the relevant files now.
 
@@ -223,6 +238,7 @@ Actions:
 - resolve local issues encountered along the way
 - keep edits bounded to the chunk objective
 - if local edit anchors or assumptions go stale, reread and repair the context before continuing
+- if discovery was insufficient and the causal model breaks, return to inspection instead of improvising from memory
 - update your todo list as you progress
 
 Exit when:
@@ -262,6 +278,7 @@ Actions:
 - summarize what was verified
 - summarize blockers or residual risks
 - call out any out-of-scope issues you noticed instead of silently absorbing them into this chunk
+- if execution paused, name the concrete blocker and next resume action
 
 Exit when:
 - chunk state is updated correctly

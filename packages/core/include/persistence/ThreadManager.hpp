@@ -40,11 +40,44 @@ struct ThreadPermissionRules {
     bool operator==(const ThreadPermissionRules& other) const = default;
 };
 
+struct WatchedLineRange {
+    int startLine = 1;
+    int endLine = 1;
+
+    bool operator==(const WatchedLineRange& other) const = default;
+};
+
+struct WatchedFileState {
+    std::string path;
+    std::vector<WatchedLineRange> ranges;
+    std::optional<int> terminalLine;
+    bool fullyRead = false;
+    std::string lastContentHash;
+    uint64_t updatedAt = 0;
+
+    bool operator==(const WatchedFileState& other) const = default;
+};
+
+struct AgentLiveState {
+    std::string threadId;
+    std::string agentId;
+    std::vector<WatchedFileState> watchedFiles;
+
+    bool operator==(const AgentLiveState& other) const = default;
+};
+
 /**
  * @brief Manages thread directory structure and metadata.
  */
 class ThreadManager {
 public:
+    static std::string defaultBasePath();
+    static std::string threadDirectoryPath(const std::string& basePath,
+                                           const std::string& threadId);
+    static std::string compactionSnapshotPath(const std::string& basePath,
+                                              const std::string& threadId,
+                                              const std::string& agentId);
+
     /**
      * @brief Constructs a ThreadManager rooted at the given base path.
      * @param basePath Directory where thread subdirectories are stored.
@@ -98,6 +131,14 @@ public:
     AgentTodoList mutateAgentTodo(
         const std::string& threadId, const std::string& agentId,
         const std::function<void(AgentTodoList&)>& mutator);
+    AgentLiveState getAgentLiveState(const std::string& threadId,
+                                     const std::string& agentId) const;
+    void writeAgentLiveState(const std::string& threadId,
+                             const std::string& agentId,
+                             const AgentLiveState& liveState);
+    AgentLiveState mutateAgentLiveState(
+        const std::string& threadId, const std::string& agentId,
+        const std::function<void(AgentLiveState&)>& mutator);
 
     /**
      * @brief Reads the agent manifest for a thread.

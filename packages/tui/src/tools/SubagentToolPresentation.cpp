@@ -2,6 +2,7 @@
 
 #include "utils/ErrorCleaner.hpp"
 #include "utils/ToolSummaries.hpp"
+#include <algorithm>
 #include <rapidjson/document.h>
 #include <sstream>
 
@@ -171,6 +172,74 @@ std::string Join(const std::vector<std::string> &values, size_t limit = 5) {
   return out;
 }
 
+std::string PreferredSubagentLabel(const std::string &friendly_name,
+                                   const std::string &title,
+                                   const std::string &agent_id) {
+  if (!friendly_name.empty()) {
+    return friendly_name;
+  }
+  if (!title.empty()) {
+    return title;
+  }
+  return agent_id;
+}
+
+std::string CompactStateBadge(const std::string &state_label) {
+  if (state_label == "completed_no_summary") {
+    return "no summary";
+  }
+  return state_label;
+}
+
+std::string FirstNonEmptyLine(const std::string &text) {
+  std::istringstream stream(text);
+  std::string line;
+  while (std::getline(stream, line)) {
+    if (!line.empty()) {
+      return line;
+    }
+  }
+  return "";
+}
+
+std::string ClampPreviewText(const std::string &text, size_t max_chars = 96) {
+  if (text.size() <= max_chars) {
+    return text;
+  }
+  if (max_chars <= 3) {
+    return text.substr(0, max_chars);
+  }
+  return text.substr(0, max_chars - 3) + "...";
+}
+
+std::vector<std::string> BuildCuratedActivityPreview(
+    const std::vector<firmius::shared::SubagentToolLogEntry> &activity) {
+  std::vector<std::string> lines;
+  lines.reserve(activity.size());
+  for (const auto &entry : activity) {
+    if (entry.summary.empty()) {
+      continue;
+    }
+    if (entry.summary.rfind("State: ", 0) == 0 || entry.summary == "Done") {
+      continue;
+    }
+    const std::string preview = "recent: " + ClampPreviewText(entry.summary);
+    if (!lines.empty() && lines.back() == preview) {
+      continue;
+    }
+    lines.push_back(preview);
+  }
+  return lines;
+}
+
+std::optional<std::string> BuildCuratedSummaryPreview(const std::string &final_summary) {
+  const std::string first_line = FirstNonEmptyLine(final_summary);
+  if (first_line.empty()) {
+    return std::nullopt;
+  }
+  return "summary: " + ClampPreviewText(first_line);
+}
+
 std::string DeriveStateLabel(const ToolCallView &view,
                              const NormalizedSubagentState *state,
                              const ParsedSubagentResult &parsed_result) {
@@ -219,10 +288,12 @@ ToolPresentation BuildSubagentToolPresentation(
     const ToolCallView &view, const NormalizedSubagentState *subagent_state) {
   ToolPresentation presentation;
   presentation.lifecycle = DeriveLifecycle(view, subagent_state);
-  presentation.layout = ToolPresentationLayoutKind::BodyFirstPreview;
-  presentation.density = IsMatch(view.name, "subagent_wait")
-                             ? ToolPresentationDensity::OneLineSummary
-                             : ToolPresentationDensity::CompactSummaryCard;
+  const bool is_wait = IsMatch(view.name, "subagent_wait");
+  const bool is_summon = IsMatch(view.name, "summon_subagent");
+  presentation.layout = is_wait ? ToolPresentationLayoutKind::InlineStatusRow
+                                : ToolPresentationLayoutKind::BodyFirstPreview;
+  presentation.density = is_wait ? ToolPresentationDensity::OneLineSummary
+                                 : ToolPresentationDensity::CompactSummaryCard;
 
   const ParsedSubagentArgs args = ParseArgs(view.args);
   const ParsedSubagentResult parsed_result = ParseResult(view.result);
@@ -245,12 +316,9 @@ ToolPresentation BuildSubagentToolPresentation(
           ? subagent_state->child_friendly_name
           : "";
   const std::string child_label =
-      !child_title.empty()
-          ? child_title
-          : (!child_friendly_name.empty()
-                 ? child_friendly_name
-                 : (!child_id.empty() ? child_id : std::string{}));
+      PreferredSubagentLabel(child_friendly_name, child_title, child_id);
   const std::string state_label = DeriveStateLabel(view, subagent_state, parsed_result);
+  const std::string compact_state = CompactStateBadge(state_label);
   const bool fallback_used = subagent_state ? subagent_state->fallback_used
                                             : parsed_result.fallback_used;
   const std::string route_category =
@@ -271,28 +339,25 @@ ToolPresentation BuildSubagentToolPresentation(
           ? subagent_state->artifacts_updated
           : parsed_result.artifacts_updated;
 
-  if (IsMatch(view.name, "summon_subagent")) {
+  if (is_summon) {
     presentation.title =
-        !child_label.empty() ? ("delegate " + child_label)
+        !child_label.empty() ? child_label
                              : SummarizeToolCall(view.name, view.args, view.phase);
   } else {
     presentation.title = !child_label.empty() ? ("waiting " + child_label) : "waiting";
   }
   presentation.subtitle.clear();
   presentation.compact_summary.clear();
-
-  const bool is_wait = IsMatch(view.name, "subagent_wait");
-  const bool is_summon = IsMatch(view.name, "summon_subagent");
-
-  if (!child_label.empty()) {
-    presentation.footer_badges.push_back(child_label);
-  }
   if (!child_id.empty() && !is_wait) {
     presentation.footer_badges.push_back("id " + child_id);
     presentation.facts.push_back({"Agent ID", child_id});
   }
-  if (!state_label.empty()) {
-    presentation.footer_badges.push_back(state_label);
+  if (!compact_state.empty()) {
+    const bool redundant_wait_state =
+        is_wait && (compact_state == "waiting" || compact_state == "running");
+    if (!redundant_wait_state) {
+      presentation.footer_badges.push_back(compact_state);
+    }
   }
   if (!is_wait && !route_category.empty() && (fallback_used || view.show_result)) {
     presentation.footer_badges.push_back("route " + route_category);
@@ -337,8 +402,8 @@ ToolPresentation BuildSubagentToolPresentation(
       subagent_state && !subagent_state->final_summary.empty()
           ? subagent_state->final_summary
           : (!parsed_result.result.empty() ? parsed_result.result : view.subagent_wait_message);
-  const size_t collapsed_lines = 5;
-  const size_t expanded_lines = 20;
+  const size_t collapsed_lines = 2;
+  const size_t expanded_lines = 4;
   const size_t max_lines = view.show_result ? expanded_lines : collapsed_lines;
   if (is_wait) {
     presentation.body_lines.clear();
@@ -364,41 +429,26 @@ ToolPresentation BuildSubagentToolPresentation(
     activity = view.subagent_tool_log;
   }
   if (is_summon && !activity.empty()) {
-    std::vector<std::string> activity_lines;
-    bool has_informative_activity = false;
-    for (const auto &entry : activity) {
-      if (!entry.summary.empty()) {
-        activity_lines.push_back(entry.summary);
-        if (entry.summary.rfind("State: ", 0) != 0) {
-          has_informative_activity = true;
-        }
-      }
-    }
-    if (has_informative_activity && !activity_lines.empty()) {
-      if (presentation.body_lines.empty()) {
-        const size_t show = std::min(max_lines, activity_lines.size());
-        presentation.body_lines.assign(activity_lines.end() - static_cast<long>(show),
-                                       activity_lines.end());
-      }
+    const std::vector<std::string> activity_lines =
+        BuildCuratedActivityPreview(activity);
+    if (!activity_lines.empty()) {
+      const size_t show = std::min(max_lines, activity_lines.size());
+      presentation.body_lines.assign(activity_lines.end() - static_cast<long>(show),
+                                     activity_lines.end());
       if (activity_lines.size() > collapsed_lines) {
         presentation.expandable = true;
       }
     }
   }
-  if (is_summon && presentation.body_lines.empty() && !final_summary.empty() &&
+  if (is_summon && presentation.body_lines.empty() &&
       presentation.lifecycle != ToolPresentationLifecycle::Preparing &&
       presentation.lifecycle != ToolPresentationLifecycle::Error) {
-    auto lines = firmius::shared::TailLines(final_summary, 200);
-    if (lines.empty()) {
-      lines.push_back(final_summary);
-    }
-    const size_t show = std::min(max_lines, lines.size());
-    presentation.body_lines.assign(lines.end() - static_cast<long>(show), lines.end());
-    if (lines.size() > collapsed_lines) {
-      presentation.expandable = true;
+    const auto summary_line = BuildCuratedSummaryPreview(final_summary);
+    if (summary_line.has_value()) {
+      presentation.body_lines.push_back(*summary_line);
     }
   }
-  presentation.expanded = view.show_result;
+  presentation.expanded = !is_wait && view.show_result;
   return presentation;
 }
 

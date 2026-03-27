@@ -2,6 +2,7 @@
 #define FIRMIUS_CORE_WORKSPACE_HPP
 
 #include "IEnvironment.hpp"
+#include "utils/FastHash.hpp"
 #include <map>
 #include <mutex>
 #include <optional>
@@ -32,6 +33,8 @@ public:
                         bool reachedEnd) override;
     bool hasFullyReadFile(const std::string& path) const override;
     void markFileAsFullyRead(const std::string& path) override;
+    void recordFileEdit(const std::string& path) override;
+    bool isLineRead(const std::string& path, int line) const override;
     std::string getCurrentWorkingDirectory() const override;
 
     /**
@@ -54,7 +57,7 @@ private:
     mutable std::mutex fileMutex_;
     std::set<std::string> readFiles_;
     std::set<std::string> fullyReadFiles_;
-    std::map<std::string, ReadCoverage> readCoverage_;
+    firmius::shared::utils::FastHash<std::string, ReadCoverage> readCoverage_;
 };
 
 } // namespace firmius::core

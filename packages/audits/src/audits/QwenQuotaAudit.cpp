@@ -40,7 +40,7 @@ shared::AuditResult QwenQuotaAudit::run(const std::vector<std::string>&) {
             for (const auto& bucket : buckets) {
                 int barWidth = 20;
                 int filled = static_cast<int>(bucket.remainingFraction * barWidth);
-                std::cout << "  [" << std::left << std::setw(15) << bucket.name << "] ";
+                std::cout << "  [" << std::left << std::setw(20) << "Qwen Unified Quota" << "] ";
                 std::cout << "[";
                 for (int i = 0; i < barWidth; ++i) {
                     if (i < filled) std::cout << "#";

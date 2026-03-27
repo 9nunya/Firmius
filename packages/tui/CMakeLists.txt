@@ -40,6 +40,7 @@ target_sources(firmius PRIVATE
     src/components/ChatWindow.cpp
     src/components/TranscriptGrouping.cpp
     src/components/ErrorDisplay.cpp
+    src/components/DiffRenderer.cpp
     src/components/ToolPresentationBlock.cpp
     src/components/ToolBlock.cpp
     src/components/FileEditDiff.cpp

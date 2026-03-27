@@ -351,8 +351,27 @@ std::string DockerHost::init() {
 
     if (!exists) {
         containerId = name;
-        std::string createCommand = "docker create --name '"
-            + containerId + "' -v /tmp:/tmp firmius-sandbox:latest tail -f /dev/null > /dev/null 2>&1";
+        // Build docker create command with volume mounts
+        std::string createCommand = "docker create --name '" + containerId + "'";
+
+        // Add volume mounts from options
+        for (const auto& volume : options.volumeMounts) {
+            createCommand += " -v " + volume;
+        }
+
+        // Add default /tmp mount if not already present
+        bool hasTmpMount = false;
+        for (const auto& volume : options.volumeMounts) {
+            if (volume.find("/tmp:") != std::string::npos) {
+                hasTmpMount = true;
+                break;
+            }
+        }
+        if (!hasTmpMount) {
+            createCommand += " -v /tmp:/tmp";
+        }
+
+        createCommand += " firmius-sandbox:latest tail -f /dev/null > /dev/null 2>&1";
         int createResult = system(createCommand.c_str());
         if (createResult != 0) {
             throw std::runtime_error("Failed to create Docker container: " + containerId);

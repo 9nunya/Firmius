@@ -80,6 +80,7 @@ public:
               (override));
   MOCK_METHOD((const AgentContext &), getContext, (), (const, override));
   MOCK_METHOD(AgentContext &, getMutableContext, (), (override));
+  MOCK_METHOD(ModelChoice, getPreferredModel, (), (const, override));
   MOCK_METHOD(void, interrupt, (), (override));
   MOCK_METHOD(bool, isInterrupted, (), (const, override));
   MOCK_METHOD(void, clearInterrupt, (), (override));

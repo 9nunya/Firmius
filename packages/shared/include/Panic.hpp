@@ -61,6 +61,8 @@ public:
     static void removeExtraInfo(const std::string& name);
 
 private:
+    static void signalHandler(int sig);
+
     struct DebugInfoEntry {
         std::string staticContent;
         DebugInfoCallback dynamicCallback;

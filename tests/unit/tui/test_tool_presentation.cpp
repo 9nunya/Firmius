@@ -224,8 +224,12 @@ TEST(ToolPresentationTest, ProcessExecuteFinishedFailurePresentation) {
 
   ToolPresentation presentation = BuildToolPresentation(view, nullptr);
   EXPECT_EQ(presentation.lifecycle, ToolPresentationLifecycle::Error);
-  ASSERT_TRUE(presentation.error_text.has_value());
-  EXPECT_NE(presentation.error_text.value().find("exit 1"), std::string::npos);
+  EXPECT_FALSE(presentation.error_text.has_value());
+  ASSERT_GE(presentation.body_lines.size(), 2u);
+  EXPECT_EQ(presentation.body_lines.front(), "$ false");
+  EXPECT_EQ(presentation.body_lines.back(), "exit 1");
+  ASSERT_TRUE(presentation.status_footer.has_value());
+  EXPECT_NE(presentation.status_footer.value().find("fail"), std::string::npos);
 }
 
 TEST(ToolPresentationTest, ProcessSpawnBackgroundPresentation) {
@@ -322,9 +326,12 @@ TEST(ToolPresentationTest, SummonSubagentRunningPresentation) {
 
   ToolPresentation presentation = BuildToolPresentation(view, nullptr, &state);
   EXPECT_EQ(presentation.lifecycle, ToolPresentationLifecycle::Running);
-  EXPECT_NE(presentation.title.find("delegate"), std::string::npos);
-  EXPECT_NE(std::find(presentation.footer_badges.begin(), presentation.footer_badges.end(),
+  EXPECT_EQ(presentation.title, "Worker");
+  EXPECT_EQ(std::find(presentation.footer_badges.begin(), presentation.footer_badges.end(),
                       "Worker"),
+            presentation.footer_badges.end());
+  EXPECT_NE(std::find(presentation.footer_badges.begin(), presentation.footer_badges.end(),
+                      "running"),
             presentation.footer_badges.end());
 }
 
@@ -407,6 +414,9 @@ TEST(ToolPresentationTest, SubagentWaitPresentationShowsOutcomeAndArtifacts) {
   state.artifacts_updated = {"@artifact:worker/index.json"};
 
   ToolPresentation presentation = BuildToolPresentation(view, nullptr, &state);
+  EXPECT_EQ(presentation.layout, ToolPresentationLayoutKind::InlineStatusRow);
+  EXPECT_TRUE(presentation.body_lines.empty());
+  EXPECT_FALSE(presentation.expandable);
   EXPECT_NE(std::find(presentation.footer_badges.begin(), presentation.footer_badges.end(),
                       "+1 artifact(s)"),
             presentation.footer_badges.end());
@@ -429,8 +439,8 @@ TEST(ToolPresentationTest, SummonUsesFriendlyNameWhenTitleAbsent) {
   state.wait_state = "running";
 
   ToolPresentation presentation = BuildToolPresentation(view, nullptr, &state);
-  EXPECT_NE(presentation.title.find("scout-worker"), std::string::npos);
-  EXPECT_NE(std::find(presentation.footer_badges.begin(), presentation.footer_badges.end(),
+  EXPECT_EQ(presentation.title, "scout-worker");
+  EXPECT_EQ(std::find(presentation.footer_badges.begin(), presentation.footer_badges.end(),
                       "scout-worker"),
             presentation.footer_badges.end());
 }
@@ -448,8 +458,9 @@ TEST(ToolPresentationTest, WaitUsesFriendlyNameWhenTitleAbsent) {
   state.wait_state = "waiting";
 
   ToolPresentation presentation = BuildToolPresentation(view, nullptr, &state);
+  EXPECT_EQ(presentation.layout, ToolPresentationLayoutKind::InlineStatusRow);
   EXPECT_NE(presentation.title.find("worker-eight"), std::string::npos);
-  EXPECT_NE(std::find(presentation.footer_badges.begin(), presentation.footer_badges.end(),
+  EXPECT_EQ(std::find(presentation.footer_badges.begin(), presentation.footer_badges.end(),
                       "worker-eight"),
             presentation.footer_badges.end());
 }
@@ -466,10 +477,32 @@ TEST(ToolPresentationTest, FallsBackToAgentIdWhenNoTitleOrFriendlyName) {
   state.wait_state = "waiting";
 
   ToolPresentation presentation = BuildToolPresentation(view, nullptr, &state);
+  EXPECT_EQ(presentation.layout, ToolPresentationLayoutKind::InlineStatusRow);
   EXPECT_NE(presentation.title.find("child-9"), std::string::npos);
-  EXPECT_NE(std::find(presentation.footer_badges.begin(), presentation.footer_badges.end(),
+  EXPECT_EQ(std::find(presentation.footer_badges.begin(), presentation.footer_badges.end(),
                       "child-9"),
             presentation.footer_badges.end());
+}
+
+TEST(ToolPresentationTest, ProcessExecuteAnsiPresentation) {
+  ToolCallView view;
+  view.name = "process_execute";
+  view.args = R"({"command":"ls"})";
+  view.phase = ToolPhase::Finished;
+  view.success = true;
+  // \u001b[32m is green
+  view.result = R"({"stdout":"\u001b[32mfile.txt\u001b[0m\n","exit_code":0})";
+
+  ToolPresentation presentation = BuildToolPresentation(view);
+  EXPECT_TRUE(presentation.ansi_aware);
+  bool found = false;
+  for (const auto &line : presentation.body_lines) {
+    if (line.find("\x1b[32mfile.txt") != std::string::npos) {
+      found = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(found);
 }
 
 TEST(ToolPresentationTest, ArtifactWriteSuccessPresentationHasReferenceAndPreview) {
@@ -483,10 +516,31 @@ TEST(ToolPresentationTest, ArtifactWriteSuccessPresentationHasReferenceAndPrevie
 
   ToolPresentation presentation = BuildToolPresentation(view);
   EXPECT_EQ(presentation.lifecycle, ToolPresentationLifecycle::Success);
+  EXPECT_EQ(presentation.layout, ToolPresentationLayoutKind::DiffPreview);
   const std::string *reference = FindFactValue(presentation, "Reference");
   ASSERT_NE(reference, nullptr);
   EXPECT_EQ(*reference, "@artifact:lead/REPORT.md");
-  EXPECT_FALSE(presentation.body_lines.empty());
+  ASSERT_EQ(presentation.diff_sections.size(), 1u);
+  ASSERT_EQ(presentation.diff_sections.front().lines.size(), 3u);
+  EXPECT_TRUE(presentation.diff_sections.front().lines.front().highlight_background);
+}
+
+TEST(ToolPresentationTest, ArtifactWriteUpdatePresentationUsesStoredPreviousContent) {
+  ToolCallView view;
+  view.name = "artifact_write";
+  view.args = R"({"name":"REPORT.md","kind":"report","content":"line1\nline2 changed\nline3\nline4"})";
+  view.phase = ToolPhase::Finished;
+  view.success = true;
+  view.result =
+      R"({"status":"updated","created":false,"updated":true,"reference":"@artifact:lead/REPORT.md","previous_content":"line1\nline2\nline3\n","artifact":{"filename":"REPORT.md","owner_friendly_name":"lead","kind":"report","description":"Weekly report"}})";
+
+  ToolPresentation presentation = BuildToolPresentation(view);
+  EXPECT_EQ(presentation.layout, ToolPresentationLayoutKind::DiffPreview);
+  ASSERT_EQ(presentation.diff_sections.size(), 1u);
+  ASSERT_EQ(presentation.diff_sections.front().lines.size(), 3u);
+  EXPECT_EQ(presentation.diff_sections.front().lines[0].type, '-');
+  EXPECT_EQ(presentation.diff_sections.front().lines[1].type, '+');
+  EXPECT_EQ(presentation.diff_sections.front().lines[2].type, '+');
 }
 
 TEST(ToolPresentationTest, ArtifactReadPreparingAndErrorStatesAreExplicit) {
@@ -748,12 +802,15 @@ TEST(ToolPresentationTest, FileReadFileEditAndListDirectoryHaveExplicitStates) {
   read.args = R"({"path":"src/main.cpp","start_line":1,"end_line":12})";
   read.phase = ToolPhase::Finished;
   read.success = true;
-  read.result = R"({"content":"a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nm\n","line_start":1,"line_end":13,"lines_read":13})";
+  read.result =
+      R"({"line_start":1,"line_end":13,"lines_read":13,"watch_state":"updated","watch_scope":"full"})";
   ToolPresentation r = BuildToolPresentation(read);
   EXPECT_EQ(r.lifecycle, ToolPresentationLifecycle::Success);
-  EXPECT_TRUE(r.expandable);
-  ASSERT_FALSE(r.sections.empty());
-  EXPECT_EQ(r.sections.front().title, "Preview");
+  EXPECT_FALSE(r.expandable);
+  EXPECT_TRUE(r.sections.empty());
+  const std::string *watch_scope = FindFactValue(r, "Watch scope");
+  ASSERT_NE(watch_scope, nullptr);
+  EXPECT_EQ(*watch_scope, "full file");
 
   ToolCallView edit;
   edit.name = "file_edit";
@@ -767,33 +824,32 @@ TEST(ToolPresentationTest, FileReadFileEditAndListDirectoryHaveExplicitStates) {
   edit.success = true;
   edit.result = R"({"operations":[{"op":"replace_range","description":"replace line","old_lines":["a"],"new_lines":["b"]}]})";
   ToolPresentation e = BuildToolPresentation(edit);
-  const std::string *ops = FindFactValue(e, "Operations");
+  EXPECT_EQ(e.layout, ToolPresentationLayoutKind::DiffPreview);
   const std::string *adds = FindFactValue(e, "Added lines");
   const std::string *removes = FindFactValue(e, "Removed lines");
-  ASSERT_NE(ops, nullptr);
   ASSERT_NE(adds, nullptr);
   ASSERT_NE(removes, nullptr);
-  EXPECT_EQ(*ops, "1");
   EXPECT_EQ(*adds, "1");
   EXPECT_EQ(*removes, "1");
+  ASSERT_EQ(e.diff_sections.size(), 1u);
+  EXPECT_TRUE(e.diff_sections.front().title.empty());
+  ASSERT_EQ(e.diff_sections.front().lines.size(), 2u);
+  EXPECT_EQ(e.diff_sections.front().lines[0].type, '-');
+  EXPECT_EQ(e.diff_sections.front().lines[1].type, '+');
 
   ToolCallView overwrite_edit;
   overwrite_edit.name = "file_edit";
   overwrite_edit.args = R"({"path":"src/main.cpp","content":"line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\nline 9\n"})";
   overwrite_edit.phase = ToolPhase::Finished;
   overwrite_edit.success = true;
-  overwrite_edit.result =
-      R"({"operations":[{"op":"overwrite_file_content","description":"overwrite file content","new_lines":["line 1","line 2"]}]})";
+  overwrite_edit.result = R"({"mode":"overwrite"})";
   ToolPresentation overwrite = BuildToolPresentation(overwrite_edit);
-  EXPECT_NE(std::find(overwrite.body_lines.begin(), overwrite.body_lines.end(),
-                      "new content:"),
-            overwrite.body_lines.end());
-  EXPECT_NE(std::find(overwrite.body_lines.begin(), overwrite.body_lines.end(),
-                      "  line 1"),
-            overwrite.body_lines.end());
-  EXPECT_NE(std::find(overwrite.body_lines.begin(), overwrite.body_lines.end(),
-                      "  ... +1 more line(s)"),
-            overwrite.body_lines.end());
+  EXPECT_EQ(overwrite.layout, ToolPresentationLayoutKind::DiffPreview);
+  ASSERT_EQ(overwrite.diff_sections.size(), 1u);
+  EXPECT_TRUE(overwrite.diff_sections.front().title.empty());
+  ASSERT_EQ(overwrite.diff_sections.front().lines.size(), 9u);
+  EXPECT_EQ(overwrite.diff_sections.front().lines.front().type, '+');
+  EXPECT_TRUE(overwrite.diff_sections.front().lines.front().highlight_background);
 
   ToolCallView ls;
   ls.name = "list_directory";
@@ -860,9 +916,22 @@ TEST(ToolPresentationTest, SummonSubagentDoesNotUseRawTaskAsInlineBodyFallback) 
   view.phase = ToolPhase::Called;
 
   ToolPresentation p = BuildToolPresentation(view, nullptr, nullptr);
-  EXPECT_TRUE(p.body_lines.empty() ||
-              p.body_lines.front().find("Investigate every failing test path") ==
-                  std::string::npos);
+  EXPECT_TRUE(p.body_lines.empty());
+}
+
+TEST(ToolPresentationTest, SummonSubagentUsesCuratedSummaryPreviewLine) {
+  ToolCallView view;
+  view.name = "summon_subagent";
+  view.args = R"({"title":"Worker","task":"Implement login"})";
+  view.phase = ToolPhase::Finished;
+  view.success = true;
+  view.result =
+      R"({"agentId":"child-1","status":"completed","result":"done line 1\ndone line 2\ndone line 3"})";
+
+  ToolPresentation p = BuildToolPresentation(view, nullptr, nullptr);
+  ASSERT_EQ(p.body_lines.size(), 1u);
+  EXPECT_NE(p.body_lines.front().find("summary: done line 1"), std::string::npos);
+  EXPECT_EQ(p.body_lines.front().find("done line 2"), std::string::npos);
 }
 
 TEST(ToolPresentationTest, SearchRowsPreserveFullPrimaryTextWithoutManualEllipsis) {

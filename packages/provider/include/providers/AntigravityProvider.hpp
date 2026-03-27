@@ -1,6 +1,8 @@
 #pragma once
 
 #include "providers/BaseOAuthProvider.hpp"
+#include <atomic>
+#include <functional>
 #include <map>
 #include <unordered_map>
 #include <rapidjson/document.h>
@@ -11,7 +13,7 @@ namespace firmius::provider {
 class AntigravityProvider : public BaseOAuthProvider {
 public:
   AntigravityProvider();
-  ~AntigravityProvider() override = default;
+  ~AntigravityProvider() override;
 
   // ------------------------------------------------------------------------
   // IProvider interface overrides
@@ -41,14 +43,6 @@ public:
   std::optional<OAuthAccount *> getAvailableAccount(
       const std::optional<std::string> &modelId = std::nullopt) override;
 
-  // Parses chunks arriving from the CURL callback.
-  void processSSELine(const std::string &line,
-                      std::function<void(const StreamEvent &)> &onEvent);
-
-  // Queries Antigravity to get quota definitions for the given account
-  void fetchAndStoreQuotas(OAuthAccount &acc);
-
-private:
   struct StreamedToolCallState {
     std::string emittedId;
     std::string lastName;
@@ -57,15 +51,28 @@ private:
     bool hasIndex = false;
   };
 
+  struct StreamContext {
+    AntigravityProvider *provider;
+    std::function<void(const StreamEvent &)> *onEvent;
+    std::string buffer;
+    size_t readOffset = 0;
+    std::atomic<bool> *abortSignal;
+    std::uint32_t toolCallCounter = 0;
+    std::unordered_map<std::string, StreamedToolCallState> streamedToolCalls;
+  };
+
+  void processSSELine(const std::string &line, StreamContext &ctx);
+
+  // Queries Antigravity to get quota definitions for the given account
+  bool fetchAndStoreQuotas(OAuthAccount &acc);
+
+
   // Fetches the managed project ID from Antigravity
   std::string fetchManagedProject(OAuthAccount &acc);
   // Resolves a usable project ID for streaming requests.
   std::string resolveProjectIdForAccount(OAuthAccount &acc, bool forceRefresh);
 
   static std::map<std::string, ModelInfo> getStaticModels();
-
-  uint32_t toolCallCounter_ = 0;
-  std::unordered_map<std::string, StreamedToolCallState> streamedToolCalls_;
 
   // Sends the internal Antigravity proxy request (v1internal:streamGenerateContent)
   void executeStreamRequest(OAuthAccount &acc, const AgentHistory &history,

@@ -57,12 +57,12 @@ bool IsRetryLastRequestEvent(const ftxui::Event &event) {
 
 bool IsVariantCycleInput(const std::string &raw) {
   return isCtrlLetterInput(
-      raw, 'v', 'V',
-      {"\x16", "\x1b[22;5u", "\x1b[27;5;118~", "\x1b[86;5u"});
+      raw, 'k', 'K',
+      {"\x0B", "\x1b[11;5u", "\x1b[27;5;107~", "\x1b[75;5u"});
 }
 
 bool IsVariantCycleEvent(const ftxui::Event &event) {
-  return event == ftxui::Event::Special("\x16") ||
+  return event == ftxui::Event::Special("\x0B") ||
          IsVariantCycleInput(event.input());
 }
 

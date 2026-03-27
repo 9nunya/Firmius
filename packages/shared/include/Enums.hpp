@@ -44,6 +44,7 @@ struct HostCreationOptions {
   std::string containerName = "";
   bool connectToExisting = false;
   bool deleteOnExit = true;
+  std::vector<std::string> volumeMounts;  // List of volume mounts in format "host_path:container_path"
 
   bool operator==(const HostCreationOptions &other) const = default;
 };
@@ -218,6 +219,21 @@ struct OAuthAccount {
   std::map<std::string, std::string> metadata;
 
   std::string getIdentifier() const { return identifier; }
+};
+
+/**
+ * @brief Represents an API key account with rate limiting state.
+ */
+struct APIKeyAccount {
+  std::string identifier;       // Display name (e.g., "Key #1", "Key #2")
+  std::string keyPrefix;        // First 5 chars of the API key for display
+  std::string apiKey;           // The actual API key
+  bool rateLimited = false;
+  int64_t backoffUntil = 0;     // Epoch seconds when backoff expires
+  std::map<std::string, std::string> metadata; // Provider-specific metadata
+
+  std::string getIdentifier() const { return identifier; }
+  std::string getMaskedDisplay() const { return keyPrefix + "..."; }
 };
 
 /**

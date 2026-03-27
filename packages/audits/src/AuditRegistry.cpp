@@ -1,5 +1,6 @@
 #include "AuditRegistry.hpp"
 #include "audits/AntigravityProviderAudit.hpp"
+#include "audits/LoopCancellationAudit.hpp"
 #include "audits/AntigravityQuotaAudit.hpp"
 #include "audits/BenchmarksAudit.hpp"
 #include "audits/CodexProviderAudit.hpp"
@@ -32,6 +33,7 @@ std::vector<std::unique_ptr<shared::IAudit>> createAudits() {
     audits.push_back(std::make_unique<OAuthWizardAudit>());
     audits.push_back(std::make_unique<WorkflowsAudit>());
     audits.push_back(std::make_unique<ProviderStreamDebugAudit>());
+    audits.push_back(std::make_unique<LoopCancellationAudit>());
     return audits;
 }
 

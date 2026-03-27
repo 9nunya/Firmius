@@ -1,3 +1,5 @@
+#include <sys/syscall.h>
+#include <unistd.h>
 #include "Engine.hpp"
 #include <string>
 #include "AgentRegistry.hpp"
@@ -70,17 +72,27 @@ std::string extractFinalSummary(const std::shared_ptr<IAgent> &agent) {
     return "";
   }
   const auto &turns = agent->getContext().history->turns;
-  if (turns.empty() || turns.back().messages.empty()) {
+  if (turns.empty()) {
     return "";
   }
-  const auto &lastMsg = turns.back().messages.back();
-  std::string content;
-  for (const auto &part : lastMsg.content) {
-    if (auto *txt = std::get_if<TextContent>(&part)) {
-      content += txt->text;
+  // Find the last Assistant turn (not User or System)
+  for (auto it = turns.rbegin(); it != turns.rend(); ++it) {
+    if (it->messages.empty()) {
+      continue;
+    }
+    const auto &msg = it->messages.back();
+    if (msg.role == Role::Assistant) {
+      std::string content;
+      for (const auto &part : msg.content) {
+        if (auto *txt = std::get_if<TextContent>(&part)) {
+          content += txt->text;
+        }
+      }
+      return content;
     }
   }
-  return content;
+  // No Assistant turn found
+  return "";
 }
 
 AgentOutcome makeOutcome(const std::shared_ptr<IAgent> &agent,
@@ -279,7 +291,6 @@ void cancelAgentRuntime(const std::shared_ptr<IAgent> &agent) {
     } catch (...) {
     }
   }
-  agent->interrupt();
 }
 } // namespace
 
@@ -447,7 +458,9 @@ std::string Engine::summonAgent(const std::string &threadId,
         std::shared_ptr<IHost> hostPtr = std::move(host);
         auto environment = std::make_shared<Environment>(
             hostPtr, ctx.environment.cwd,
-            [this](const StreamEvent &/*ev*/) { });
+            [this, agentId, parentId, errorBroadcast = false](const StreamEvent &ev) mutable {
+              handleStreamEvent(agentId, parentId, ev, errorBroadcast);
+            });
         auto permissions = std::make_shared<Permissions>(threadId, agentId);
 
         auto agent =
@@ -606,7 +619,9 @@ std::string Engine::resumeAgent(const std::string &threadId,
   std::shared_ptr<IHost> hostPtr = std::move(host);
   auto environment = std::make_shared<Environment>(
       hostPtr, ctx.environment.cwd,
-      [this](const StreamEvent &/*ev*/) { });
+      [this, agentId, parentId, errorBroadcast = false](const StreamEvent &ev) mutable {
+        handleStreamEvent(agentId, parentId, ev, errorBroadcast);
+      });
   auto permissions = std::make_shared<Permissions>(threadId, agentId);
 
   auto agent = std::make_shared<Agent>(ctx, environment, permissions, toolRegistry, jnl);
@@ -714,6 +729,27 @@ Engine::waitForAgentOutcome(const std::string &agentId,
   std::lock_guard<std::mutex> lock(futuresMutex);
   agentFutures.erase(agentId);
   return outcome;
+}
+
+std::optional<AgentOutcome>
+Engine::peekAgentOutcome(const std::string &agentId,
+                         std::optional<std::chrono::milliseconds> timeout) {
+  std::shared_future<AgentOutcome> fut;
+  {
+    std::lock_guard<std::mutex> lock(futuresMutex);
+    auto it = agentFutures.find(agentId);
+    if (it == agentFutures.end()) {
+      return makeFailedOutcome("Agent not found or already waited on.");
+    }
+    fut = it->second;
+  }
+
+  if (timeout.has_value() &&
+      fut.wait_for(*timeout) != std::future_status::ready) {
+    return std::nullopt;
+  }
+
+  return fut.get();
 }
 
 void Engine::addEventListener(std::function<void(const AppEvent &)> listener) {
@@ -849,7 +885,6 @@ void Engine::executeTask(
   }
   // Mark as active before async dispatch to avoid observers seeing an
   // immediate idle state race while the worker thread is starting.
-  agent->getMutableContext().state.currentStatus = AgentStatus::ProviderWaiting;
 
   auto prom = std::make_shared<std::promise<AgentOutcome>>();
   {
@@ -1148,7 +1183,6 @@ void Engine::shutdown() {
   for (const auto &id : activeAgents) {
     auto agent = AgentRegistry::instance().getAgent(id);
     if (agent) {
-      agent->interrupt();
     }
   }
   {

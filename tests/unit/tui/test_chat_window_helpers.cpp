@@ -428,7 +428,7 @@ TEST(ChatWindowHelpersTest,
   tool_result.role = Role::ToolResult;
   tool_result.content = {
       ToolResultContent{"read-1",
-                        R"({"content":"a\nb\nc","line_start":1,"line_end":3,"lines_read":3})",
+                        R"({"line_start":1,"line_end":3,"lines_read":3,"watch_state":"updated","watch_scope":"range"})",
                         true, "", ""},
       ToolResultContent{"ls-1",
                         R"([{"name":"core","is_directory":true},{"name":"main.cpp","is_directory":false}])",
