@@ -26,12 +26,14 @@ using ProcessStateGetter =
     std::function<const firmius::tui::NormalizedProcessState *(const std::string &)>;
 using SubagentStateGetter =
     std::function<const firmius::tui::NormalizedSubagentState *(const std::string &)>;
+using AgentFocusHandler = std::function<void(const std::string &)>;
 
 ftxui::Component ToolBlock(const std::shared_ptr<ToolCallView> &view,
                            HistoryGetter sub_history_getter = nullptr,
                            StreamGetter sub_stream_getter = nullptr,
                            ProcessStateGetter process_state_getter = nullptr,
-                           SubagentStateGetter subagent_state_getter = nullptr);
+                           SubagentStateGetter subagent_state_getter = nullptr,
+                           AgentFocusHandler agent_focus_handler = nullptr);
 
 } // namespace firmius::tui
 

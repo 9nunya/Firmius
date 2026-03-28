@@ -7,9 +7,12 @@
 #include <ftxui/component/screen_interactive.hpp>
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/screen.hpp>
+#include <atomic>
 #include <iostream>
 #include <string>
 #include <chrono>
+#include <csignal>
+#include <thread>
 
 #include "commands/AccountsCommand.hpp"
 #include "commands/BenchmarksCommand.hpp"
@@ -21,6 +24,7 @@
 #include "commands/NewCommand.hpp"
 #include "commands/QuotasCommand.hpp"
 #include "commands/PurposesCommand.hpp"
+#include "commands/QuitCommand.hpp"
 #include "commands/RouterCommand.hpp"
 #include "commands/ThreadsCommand.hpp"
 #include "commands/UndoCommand.hpp"
@@ -34,6 +38,24 @@
 #include "modals/ThreadPickerModal.hpp"
 
 using namespace ftxui;
+
+namespace {
+
+std::atomic<int> g_pending_sigint{0};
+
+extern "C" void HandleSigint(int) {
+  g_pending_sigint.fetch_add(1, std::memory_order_relaxed);
+}
+
+void InstallSigintHandler() {
+  struct sigaction action {};
+  action.sa_handler = HandleSigint;
+  sigemptyset(&action.sa_mask);
+  action.sa_flags = 0;
+  sigaction(SIGINT, &action, nullptr);
+}
+
+} // namespace
 
 int main(int argc, char **argv) {
   bool continue_last = false;
@@ -66,6 +88,8 @@ int main(int argc, char **argv) {
       std::make_shared<firmius::tui::QuotasCommand>());
   firmius::tui::CommandManager::instance().registerCommand(
       std::make_shared<firmius::tui::AccountsCommand>());
+  firmius::tui::CommandManager::instance().registerCommand(
+      std::make_shared<firmius::tui::QuitCommand>());
   firmius::tui::CommandManager::instance().registerCommand(
       std::make_shared<firmius::tui::RouterCommand>());
   firmius::tui::CommandManager::instance().registerCommand(
@@ -138,41 +162,51 @@ int main(int argc, char **argv) {
 
   auto screen = ftxui::ScreenInteractive::Fullscreen();
   screen.TrackMouse(true);
+  screen.ForceHandleCtrlC(false);
   state.attachScreen(&screen);
+  InstallSigintHandler();
 
   // Enable bracketed paste mode so terminal sends \x1b[200~ and \x1b[201~
   // sequences around pasted content, allowing us to detect multi-line pastes
   std::cout << "\x1b[?2004h" << std::flush;
 
   auto renderer = state.root();
-  auto last_ctrl_c_time = std::make_shared<std::chrono::steady_clock::time_point>(std::chrono::steady_clock::now() - std::chrono::seconds(10));
+  std::atomic<bool> sigint_bridge_running{true};
+  std::jthread sigint_bridge([&](std::stop_token st) {
+    int last_seen = 0;
+    while (!st.stop_requested() && sigint_bridge_running.load()) {
+      InstallSigintHandler();
+      const int current = g_pending_sigint.load(std::memory_order_relaxed);
+      if (current != last_seen) {
+        last_seen = current;
+        screen.PostEvent(ftxui::Event::Custom);
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+  });
+  int handled_sigints = 0;
   renderer = CatchEvent(renderer, [&](Event event) {
-    if (event.is_character() && event.character() == std::string(1, '\x03')) {
-      auto now = std::chrono::steady_clock::now();
-      auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - *last_ctrl_c_time).count();
-      if (elapsed < 3000) {
-        // Second ctrl+c within 3 seconds - quit
-        screen.ExitLoopClosure()();
-        return true;
-      }
-      // First ctrl+c - clear input buffer
-      *last_ctrl_c_time = now;
-      auto &input_model = state.getInputBarModel();
-      if (input_model.buffer && !input_model.buffer->empty()) {
-        input_model.buffer->clear();
-        if (input_model.cursor) {
-          *input_model.cursor = 0;
-        }
-      }
-      return true;
+    const int pending_sigints = g_pending_sigint.load(std::memory_order_relaxed);
+    if (pending_sigints > handled_sigints) {
+      handled_sigints = pending_sigints;
+      return state.handleCtrlC();
+    }
+    if (event == Event::CtrlC ||
+        (event.is_character() && event.character() == std::string(1, '\x03'))) {
+      return state.handleCtrlC();
     }
     return false;
   });
 
   screen.Loop(renderer);
+  sigint_bridge_running = false;
+  sigint_bridge.request_stop();
+  std::signal(SIGINT, SIG_DFL);
+  std::cout << "\x1b[?2004l" << std::flush;
+  const std::string exit_summary = state.exitSummaryText();
   state.shutdown();
   h.shutdown();
-  firmius::core::Engine::instance().shutdown();
+  std::cout << exit_summary << std::flush;
 
   return 0;
 }

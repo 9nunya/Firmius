@@ -19,11 +19,36 @@
 #include <condition_variable>
 #include <future>
 #include <mutex>
+#include <fcntl.h>
+#include <sys/file.h>
+#include <unistd.h>
 
 using namespace firmius::core;
 using namespace firmius::shared;
 
 namespace {
+
+int tryAcquireThreadLock(const std::filesystem::path& testHome,
+                         const std::string& threadId) {
+    auto lockPath = testHome / ".firmius" / "threads" / threadId / ".lock";
+    int fd = open(lockPath.c_str(), O_RDWR | O_CREAT, 0644);
+    if (fd < 0) {
+        return -1;
+    }
+    if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+void releaseThreadLockFd(int fd) {
+    if (fd < 0) {
+        return;
+    }
+    flock(fd, LOCK_UN);
+    close(fd);
+}
 
 template <typename Fn>
 bool waitForCondition(Fn&& fn,
@@ -1015,10 +1040,18 @@ private:
 
 class CompactionProbeProvider : public firmius::provider::IProvider {
 public:
+    struct ObservedCall {
+        AgentHistory history;
+    };
+
     std::string getId() const override { return "compaction-probe-provider"; }
 
-    void stream(const AgentHistory&, const firmius::provider::ProviderOptions&,
+    void stream(const AgentHistory& history, const firmius::provider::ProviderOptions&,
                 std::function<void(const StreamEvent&)> onEvent) override {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            calls_.push_back(ObservedCall{history});
+        }
         onEvent(TextChunk{"work-in-progress"});
         onEvent(StreamDone{StopReason::Stop});
     }
@@ -1059,11 +1092,18 @@ public:
         return lastCompactionPrompt_;
     }
 
+    std::vector<ObservedCall> observedCalls() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return calls_;
+    }
+
 private:
     mutable std::mutex mutex_;
     std::string lastCompactionPrompt_;
+    std::vector<ObservedCall> calls_;
     std::atomic<int> summaryCallCount_{0};
 };
+
 
 class ModelSwitchProbeProvider : public firmius::provider::IProvider {
 public:
@@ -1550,6 +1590,36 @@ TEST_F(HarnessTest, switchThread_preservesAgent) {
     bool result = Harness::instance().switchThread(threadA);
     EXPECT_TRUE(result);
     EXPECT_EQ(Harness::instance().currentThreadId(), threadA);
+}
+
+TEST_F(HarnessTest, switchThread_releasesPreviousThreadLock) {
+    std::string threadA = Harness::instance().newThread({}, "/tmp", "test");
+    ASSERT_FALSE(threadA.empty());
+    std::string threadB = Harness::instance().newThread({}, "/tmp", "test");
+    ASSERT_FALSE(threadB.empty());
+
+    int threadALock = tryAcquireThreadLock(testHome_, threadA);
+    ASSERT_GE(threadALock, 0) << "Expected previous thread lock to be released";
+    releaseThreadLockFd(threadALock);
+
+    ASSERT_TRUE(Harness::instance().switchThread(threadA));
+    int threadBLock = tryAcquireThreadLock(testHome_, threadB);
+    ASSERT_GE(threadBLock, 0) << "Expected switched-away thread lock to be released";
+    releaseThreadLockFd(threadBLock);
+}
+
+TEST_F(HarnessTest, newThread_releasesPreviousThreadLock) {
+    std::string threadA = Harness::instance().newThread({}, "/tmp", "test");
+    ASSERT_FALSE(threadA.empty());
+    std::string threadB = Harness::instance().newThread({}, "/tmp", "test");
+    ASSERT_FALSE(threadB.empty());
+
+    int threadALock = tryAcquireThreadLock(testHome_, threadA);
+    ASSERT_GE(threadALock, 0) << "Expected old thread lock to be released after creating new thread";
+    releaseThreadLockFd(threadALock);
+
+    int threadBLock = tryAcquireThreadLock(testHome_, threadB);
+    ASSERT_LT(threadBLock, 0) << "Current thread lock should still be held";
 }
 
 TEST_F(HarnessTest, newThread_savesPreviousAgent) {
@@ -4232,6 +4302,8 @@ TEST_F(HarnessTest, CompactionDoesNotImmediatelyRetriggerOnNextTurn) {
                                    "compaction-start-"),
               1u);
 }
+
+
 
 TEST_F(HarnessTest, MarkThreadAsBenchmarkPersistsMetadata) {
     auto& harness = Harness::instance();

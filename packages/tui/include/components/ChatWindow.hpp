@@ -22,6 +22,7 @@ using ProcessStateGetter =
     std::function<const NormalizedProcessState *(const std::string &)>;
 using SubagentStateGetter =
     std::function<const NormalizedSubagentState *(const std::string &)>;
+using AgentFocusHandler = std::function<void(const std::string &)>;
 
 using HistoryGetter =
     std::function<const shared::AgentHistory *(const std::string &)>;
@@ -80,8 +81,16 @@ inline bool ShouldHideMessageInTranscript(const shared::Message &msg,
     return false;
   }
   for (const auto &part : msg.content) {
-    if (std::holds_alternative<shared::NoticeContent>(part)) {
+    if (const auto *notice = std::get_if<shared::NoticeContent>(&part)) {
+      if (notice->title == "Agent Cancelled") {
+        return true;
+      }
       return false;
+    }
+    if (const auto *error = std::get_if<shared::ErrorContent>(&part)) {
+      if (error->errorName == "Agent Cancelled") {
+        return true;
+      }
     }
   }
   return true;
@@ -111,6 +120,7 @@ ftxui::Component ChatWindow(
     ToolViewProvider tool_view_provider = nullptr,
     ProcessStateGetter process_state_getter = nullptr,
     SubagentStateGetter subagent_state_getter = nullptr,
+    AgentFocusHandler agent_focus_handler = nullptr,
     HistoryGetter sub_history_getter = nullptr,
     StreamGetter sub_stream_getter = nullptr,
     LiveQuickSummaryProvider live_quick_summary_provider = nullptr,

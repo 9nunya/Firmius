@@ -531,6 +531,7 @@ add_executable(test_chat_window_helpers
     ../../packages/tui/src/components/ANSIParser.cpp
     ../../packages/tui/src/UserPreferences.cpp
     ../../packages/tui/src/NotificationManager.cpp
+    ../../packages/tui/src/utils/Clipboard.cpp
     ../../packages/tui/src/tools/ArtifactToolPresentation.cpp
     ../../packages/tui/src/tools/FileToolPresentation.cpp
     ../../packages/tui/src/tools/ToolPresentation.cpp

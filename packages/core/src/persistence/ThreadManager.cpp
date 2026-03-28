@@ -176,6 +176,82 @@ rapidjson::Document readJsonDocument(const std::string& path,
     return document;
 }
 
+rapidjson::Value compactionSnapshotToJson(
+    const CompactionSnapshot& snapshot, rapidjson::Document::AllocatorType& a) {
+    rapidjson::Value v(rapidjson::kObjectType);
+    v.AddMember("compactionId", rapidjson::Value(snapshot.compactionId.c_str(), a), a);
+    v.AddMember("threadId", rapidjson::Value(snapshot.threadId.c_str(), a), a);
+    v.AddMember("agentId", rapidjson::Value(snapshot.agentId.c_str(), a), a);
+    v.AddMember("previousContextSize", snapshot.previousContextSize, a);
+    v.AddMember("createdAt", snapshot.createdAt, a);
+    rapidjson::Value turnsArray(rapidjson::kArrayType);
+    for (const auto& turn : snapshot.turns) {
+        rapidjson::Document turnDoc = toJson(turn);
+        rapidjson::Value turnValue;
+        turnValue.CopyFrom(turnDoc, a);
+        turnsArray.PushBack(turnValue, a);
+    }
+    v.AddMember("turns", turnsArray, a);
+    return v;
+}
+
+CompactionSnapshot compactionSnapshotFromJsonValue(const rapidjson::Value& v) {
+    CompactionSnapshot snapshot;
+    if (v.HasMember("compactionId") && v["compactionId"].IsString()) {
+        snapshot.compactionId = v["compactionId"].GetString();
+    }
+    if (v.HasMember("threadId") && v["threadId"].IsString()) {
+        snapshot.threadId = v["threadId"].GetString();
+    }
+    if (v.HasMember("agentId") && v["agentId"].IsString()) {
+        snapshot.agentId = v["agentId"].GetString();
+    }
+    if (v.HasMember("previousContextSize") && v["previousContextSize"].IsUint()) {
+        snapshot.previousContextSize = v["previousContextSize"].GetUint();
+    }
+    if (v.HasMember("createdAt") && v["createdAt"].IsUint64()) {
+        snapshot.createdAt = v["createdAt"].GetUint64();
+    }
+    if (v.HasMember("turns") && v["turns"].IsArray()) {
+        for (const auto& turn : v["turns"].GetArray()) {
+            snapshot.turns.push_back(agentTurnFromJsonValue(turn));
+        }
+    }
+    return snapshot;
+}
+
+std::vector<CompactionSnapshot> loadCompactionSnapshotsFile(
+    const std::string& path) {
+    if (!std::filesystem::exists(path)) {
+        return {};
+    }
+    rapidjson::Document doc = readJsonDocument(path, "compaction snapshots");
+    std::vector<CompactionSnapshot> snapshots;
+    if (doc.HasMember("snapshots") && doc["snapshots"].IsArray()) {
+        for (const auto& value : doc["snapshots"].GetArray()) {
+            snapshots.push_back(compactionSnapshotFromJsonValue(value));
+        }
+        return snapshots;
+    }
+    if (doc.HasMember("turns") && doc["turns"].IsArray()) {
+        snapshots.push_back(compactionSnapshotFromJsonValue(doc));
+    }
+    return snapshots;
+}
+
+void writeCompactionSnapshotsFile(
+    const std::string& path, const std::vector<CompactionSnapshot>& snapshots) {
+    rapidjson::Document doc;
+    doc.SetObject();
+    auto& a = doc.GetAllocator();
+    rapidjson::Value items(rapidjson::kArrayType);
+    for (const auto& snapshot : snapshots) {
+        items.PushBack(compactionSnapshotToJson(snapshot, a), a);
+    }
+    doc.AddMember("snapshots", items, a);
+    writeJsonDocument(doc, path);
+}
+
 const char* severityToString(CommandSeverity severity) {
     switch (severity) {
     case CommandSeverity::LOW:
@@ -936,6 +1012,60 @@ AgentLiveState ThreadManager::mutateAgentLiveState(
     std::filesystem::create_directories(liveStateDirectoryPathFor(basePath_, threadId));
     writeJsonDocument(liveStateToJson(liveState), liveStatePathFor(basePath_, threadId, agentId));
     return liveState;
+}
+
+std::vector<CompactionSnapshot>
+ThreadManager::loadCompactionSnapshots(const std::string& threadId,
+                                       const std::string& agentId) const {
+    if (threadId.empty() || agentId.empty()) {
+        return {};
+    }
+    return loadCompactionSnapshotsFile(
+        compactionSnapshotPath(basePath_, threadId, agentId));
+}
+
+void ThreadManager::appendCompactionSnapshot(
+    const std::string& threadId, const std::string& agentId,
+    const CompactionSnapshot& snapshot) {
+    auto snapshots = loadCompactionSnapshots(threadId, agentId);
+    snapshots.push_back(snapshot);
+    writeCompactionSnapshotsFile(compactionSnapshotPath(basePath_, threadId, agentId),
+                                 snapshots);
+}
+
+bool ThreadManager::popCompactionSnapshot(
+    const std::string& threadId, const std::string& agentId,
+    const std::optional<std::string>& compactionId, CompactionSnapshot* removed) {
+    auto snapshots = loadCompactionSnapshots(threadId, agentId);
+    if (snapshots.empty()) {
+        return false;
+    }
+
+    auto it = snapshots.end() - 1;
+    if (compactionId.has_value()) {
+        auto reverse_it = std::find_if(
+            snapshots.rbegin(), snapshots.rend(),
+            [&](const CompactionSnapshot& snapshot) {
+                return snapshot.compactionId == *compactionId;
+            });
+        if (reverse_it == snapshots.rend()) {
+            return false;
+        }
+        it = std::prev(reverse_it.base());
+    }
+
+    if (removed) {
+        *removed = *it;
+    }
+    snapshots.erase(it);
+    const std::string path = compactionSnapshotPath(basePath_, threadId, agentId);
+    if (snapshots.empty()) {
+        std::error_code ec;
+        std::filesystem::remove(path, ec);
+        return true;
+    }
+    writeCompactionSnapshotsFile(path, snapshots);
+    return true;
 }
 
 std::map<std::string, AgentManifestEntry> ThreadManager::readAgentManifest(const std::string& threadId) const {

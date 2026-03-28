@@ -42,6 +42,15 @@ private:
     std::map<std::string, int> indexByItemId;
   };
 
+  static void consumeSsePayloadChunk(
+      const std::string &chunk, std::string &buffer, size_t &readOffset,
+      std::string &pendingEventData,
+      std::function<void(const StreamEvent &)> &onEvent, AgentMetrics &metrics,
+      bool &metricsReceived, bool &doneReceived, ToolCallTracker &tracker);
+  static void flushPendingSseEvent(
+      std::string &pendingEventData,
+      std::function<void(const StreamEvent &)> &onEvent, AgentMetrics &metrics,
+      bool &metricsReceived, bool &doneReceived, ToolCallTracker &tracker);
   static std::map<std::string, ModelInfo> getStaticModels();
   static std::string normalizeModelId(const std::string &modelId);
   static std::string resolveEffort(const std::string &modelId);

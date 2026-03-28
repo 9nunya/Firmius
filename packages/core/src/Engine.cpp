@@ -174,6 +174,9 @@ void attachArtifactDeltasToOutcome(const std::string &threadId,
 
 AgentStatus inferPersistedStatus(const AgentHistory &history) {
   for (auto it = history.turns.rbegin(); it != history.turns.rend(); ++it) {
+    if (it->stopReason == StopReason::Cancelled) {
+      return AgentStatus::Cancelled;
+    }
     if (it->turnId.rfind("cancelled-", 0) == 0) {
       return AgentStatus::Cancelled;
     }
@@ -224,40 +227,61 @@ bool hasCompactionMarker(const AgentTurn &turn) {
          turn.turnId.rfind("compaction-end-", 0) == 0;
 }
 
+std::optional<std::string> compactionIdFromTurnId(const std::string& turnId) {
+  constexpr const char* prefixes[] = {"compaction-start-", "compaction-summary-",
+                                      "compaction-end-"};
+  for (const char* prefix : prefixes) {
+    const std::string_view view(prefix);
+    if (turnId.rfind(prefix, 0) == 0) {
+      return turnId.substr(view.size());
+    }
+  }
+  return std::nullopt;
+}
+
+std::optional<std::string> latestCompactionIdInHistory(
+    const std::vector<AgentTurn>& turns) {
+  for (auto it = turns.rbegin(); it != turns.rend(); ++it) {
+    if (auto id = compactionIdFromTurnId(it->turnId); id.has_value()) {
+      return id;
+    }
+  }
+  return std::nullopt;
+}
+
 bool restoreCompactionSnapshot(AgentContext &ctx) {
   if (!ctx.history || ctx.history->threadId.empty() || ctx.identity.id.empty()) {
     return false;
   }
-  const std::string path = threadStorageRootPathForUndo() + "/" +
-                           ctx.history->threadId + "/compaction_" +
-                           ctx.identity.id + ".json";
-  std::ifstream in(path);
-  if (!in.is_open()) {
+  ThreadManager tm(threadStorageRootPathForUndo());
+  auto snapshots =
+      tm.loadCompactionSnapshots(ctx.history->threadId, ctx.identity.id);
+  if (snapshots.empty()) {
     return false;
   }
-  std::string content((std::istreambuf_iterator<char>(in)),
-                      std::istreambuf_iterator<char>());
-  in.close();
-
-  rapidjson::Document doc;
-  doc.Parse(content.c_str());
-  if (doc.HasParseError() || !doc.IsObject() || !doc.HasMember("turns") ||
-      !doc["turns"].IsArray()) {
-    return false;
+  std::optional<std::string> targetCompactionId =
+      latestCompactionIdInHistory(ctx.history->turns);
+  auto it = snapshots.end() - 1;
+  if (targetCompactionId.has_value()) {
+    auto reverse_it = std::find_if(
+        snapshots.rbegin(), snapshots.rend(),
+        [&](const CompactionSnapshot& snapshot) {
+          return snapshot.compactionId == *targetCompactionId;
+        });
+    if (reverse_it != snapshots.rend()) {
+      it = std::prev(reverse_it.base());
+    }
   }
-
-  std::vector<AgentTurn> restored;
-  for (const auto &value : doc["turns"].GetArray()) {
-    restored.push_back(agentTurnFromJsonValue(value));
-  }
-  if (restored.empty()) {
+  if (it->turns.empty()) {
     return false;
   }
 
-  ctx.history->turns = std::move(restored);
-  if (doc.HasMember("previousContextSize") && doc["previousContextSize"].IsUint()) {
-    ctx.aggregateMetrics.tokens.contextSize = doc["previousContextSize"].GetUint();
-  }
+  ctx.history->turns = it->turns;
+  ctx.aggregateMetrics.tokens.contextSize = it->previousContextSize;
+  tm.popCompactionSnapshot(ctx.history->threadId, ctx.identity.id,
+                           it->compactionId.empty()
+                               ? std::optional<std::string>{}
+                               : std::optional<std::string>{it->compactionId});
   return true;
 }
 
@@ -265,11 +289,17 @@ bool shouldAttemptCompactionRestore(const AgentContext &ctx, int count) {
   if (!ctx.history || ctx.history->turns.size() <= 2 || count <= 0) {
     return false;
   }
+  const auto latestCompactionId = latestCompactionIdInHistory(ctx.history->turns);
+  if (!latestCompactionId.has_value()) {
+    return false;
+  }
   const int maxRemovable = static_cast<int>(ctx.history->turns.size()) - 2;
   const int toInspect = std::min(count, maxRemovable);
   for (int i = 0; i < toInspect; ++i) {
-    const auto &turn = ctx.history->turns[ctx.history->turns.size() - 1 - i];
-    if (hasCompactionMarker(turn)) {
+    const auto& turn = ctx.history->turns[ctx.history->turns.size() - 1 - i];
+    const auto turnCompactionId = compactionIdFromTurnId(turn.turnId);
+    if (turnCompactionId.has_value() &&
+        *turnCompactionId == *latestCompactionId) {
       return true;
     }
   }
@@ -280,6 +310,7 @@ void cancelAgentRuntime(const std::shared_ptr<IAgent> &agent) {
   if (!agent) {
     return;
   }
+  agent->interrupt();
   auto procIds = agent->getEnvironment()->getProcessManager().getBlockingProcessIds();
   for (const auto &procId : procIds) {
     try {

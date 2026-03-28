@@ -304,7 +304,7 @@ When you need narrative status, send it in a separate plain-text message between
   - `async`: If true, returns immediately with `agent_id` instead of waiting
   - `agent_id`: ID of existing agent to re-task (omit to create new)
   - `plan_id` + `chunk_id`: When delegating to an executor, provide BOTH fields together to bind the delegation to a specific chunk within a plan. Do not provide one without the other.
-  - `category`: Optional model routing category for this delegation
+  - `category`: Optional model routing category override. Use it only when the user explicitly requested a specific route category. Otherwise omit it so purpose/default routing applies.
 - `subagent_wait`: Inputs `agent_id`.
 - `terminate_subagent`: Inputs `agent_id`.
 - `todo_write`: Takes one field `patch` with strict numbered-line syntax.

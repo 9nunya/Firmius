@@ -1,5 +1,6 @@
 #include "utils/ToolSummaries.hpp"
 #include <rapidjson/document.h>
+#include <regex>
 #include <sstream>
 
 namespace firmius::shared {
@@ -50,6 +51,23 @@ static bool isMatch(const std::string &actual, const std::string &expected) {
 static std::string stringArg(const rapidjson::Document &doc, const char *key) {
   if (doc.IsObject() && doc.HasMember(key) && doc[key].IsString()) {
     return doc[key].GetString();
+  }
+  return "";
+}
+
+static std::string partialStringArg(const std::string &args, const char *key) {
+  if (args.empty() || !key || !*key) {
+    return "";
+  }
+  try {
+    const std::string pattern =
+        std::string("\"") + key + "\"\\s*:\\s*\"([^\"]*)";
+    std::regex re(pattern);
+    std::smatch match;
+    if (std::regex_search(args, match, re) && match.size() >= 2) {
+      return match[1].str();
+    }
+  } catch (...) {
   }
   return "";
 }
@@ -106,6 +124,14 @@ std::string SummarizeToolCall(const std::string &name, const std::string &args, 
   doc.Parse(args.c_str());
   bool valid = !doc.HasParseError() && doc.IsObject();
 
+  auto bestStringArg = [&](const char *key) -> std::string {
+    std::string value = valid ? stringArg(doc, key) : "";
+    if (value.empty()) {
+      value = partialStringArg(args, key);
+    }
+    return value;
+  };
+
   if (isMatch(name, "plan_create")) {
     return "Create plan" + quotedLabel(valid ? stringArg(doc, "title") : "");
   }
@@ -146,24 +172,27 @@ std::string SummarizeToolCall(const std::string &name, const std::string &args, 
     return "Write artifact";
   }
   if (isMatch(name, "artifact_read")) {
-    return "Read artifact";
+    std::string reference = bestStringArg("reference");
+    if (reference.empty()) {
+      reference = bestStringArg("name");
+    }
+    if (reference.empty()) {
+      return "Read artifact";
+    }
+    return "Read " + reference;
   }
   if (isMatch(name, "artifact_list")) {
     return "List artifacts";
   }
 
   if (isMatch(name, "list_directory")) {
-    std::string path = "";
-    if (valid && doc.HasMember("path") && doc["path"].IsString())
-      path = doc["path"].GetString();
+    std::string path = bestStringArg("path");
     return "List " + (path.empty() ? "." : path);
   }
   if (isMatch(name, "file_read")) {
-    std::string path = "";
+    std::string path = bestStringArg("path");
     int start = -1, end = -1;
     if (valid) {
-      if (doc.HasMember("path") && doc["path"].IsString())
-        path = doc["path"].GetString();
       if (doc.HasMember("start_line") && doc["start_line"].IsInt())
         start = doc["start_line"].GetInt();
       if (doc.HasMember("end_line") && doc["end_line"].IsInt())
@@ -197,15 +226,17 @@ std::string SummarizeToolCall(const std::string &name, const std::string &args, 
     return "$ " + cmd;
   }
   if (isMatch(name, "grep")) {
-    std::string pattern = "";
-    if (valid && doc.HasMember("pattern") && doc["pattern"].IsString())
-      pattern = doc["pattern"].GetString();
+    std::string pattern = bestStringArg("pattern");
     return "Grep \"" + firstWords(pattern, 2) + "\"";
   }
   if (isMatch(name, "glob")) {
-    std::string pattern = "";
-    if (valid && doc.HasMember("pattern") && doc["pattern"].IsString())
-      pattern = doc["pattern"].GetString();
+    std::string pattern = bestStringArg("pattern");
+    if (pattern.empty()) {
+      pattern = bestStringArg("glob");
+    }
+    if (pattern.empty()) {
+      return "Glob";
+    }
     return "Glob \"" + pattern + "\"";
   }
   if (isMatch(name, "python_execute")) {

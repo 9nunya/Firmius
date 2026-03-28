@@ -6,6 +6,7 @@
 #include <cstring>
 #include <memory>
 #include <array>
+#include <sstream>
 
 static const char base64_chars[] = 
     "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -53,6 +54,32 @@ static std::string base64_encode(const unsigned char* bytes_to_encode, size_t in
 
 bool Clipboard::isWayland() { return false; }
 bool Clipboard::isX11() { return false; }
+
+bool Clipboard::setText(const std::string& text) {
+    if (!OpenClipboard(nullptr)) return false;
+    EmptyClipboard();
+    const int size = static_cast<int>(text.size()) + 1;
+    HGLOBAL handle = GlobalAlloc(GMEM_MOVEABLE, size);
+    if (!handle) {
+        CloseClipboard();
+        return false;
+    }
+    void* data = GlobalLock(handle);
+    if (!data) {
+        GlobalFree(handle);
+        CloseClipboard();
+        return false;
+    }
+    std::memcpy(data, text.c_str(), size);
+    GlobalUnlock(handle);
+    if (!SetClipboardData(CF_TEXT, handle)) {
+        GlobalFree(handle);
+        CloseClipboard();
+        return false;
+    }
+    CloseClipboard();
+    return true;
+}
 
 bool Clipboard::hasImage() {
     bool hasImg = false;
@@ -113,6 +140,22 @@ std::optional<std::string> Clipboard::getImage(std::string& mimeType) {
 
 bool Clipboard::isWayland() { return false; }
 bool Clipboard::isX11() { return false; }
+
+bool Clipboard::setText(const std::string& text) {
+#if defined(__OBJC__)
+    @autoreleasepool {
+        NSPasteboard *pasteboard = [NSPasteboard generalPasteboard];
+        [pasteboard clearContents];
+        NSString *string = [NSString stringWithUTF8String:text.c_str()];
+        return [pasteboard setString:string forType:NSPasteboardTypeString];
+    }
+#else
+    FILE* pipe = popen("pbcopy", "w");
+    if (!pipe) return false;
+    const size_t written = fwrite(text.data(), 1, text.size(), pipe);
+    return pclose(pipe) == 0 && written == text.size();
+#endif
+}
 
 #if defined(__OBJC__)
 #import <AppKit/AppKit.h>
@@ -185,12 +228,43 @@ static std::string execCmdString(const char* cmd) {
     return std::string(binary.begin(), binary.end());
 }
 
+static bool execCmdWrite(const char* cmd, const std::string& input) {
+    FILE* pipe = popen(cmd, "w");
+    if (!pipe) return false;
+    const size_t written = fwrite(input.data(), 1, input.size(), pipe);
+    const int status = pclose(pipe);
+    return status == 0 && written == input.size();
+}
+
+static bool writeOsc52(const std::string& text) {
+    const std::string encoded = base64_encode(
+        reinterpret_cast<const unsigned char*>(text.data()), text.size());
+    std::cout << "\033]52;c;" << encoded << "\a" << std::flush;
+    return true;
+}
+
 bool Clipboard::isWayland() {
     return std::getenv("WAYLAND_DISPLAY") != nullptr;
 }
 
 bool Clipboard::isX11() {
     return std::getenv("DISPLAY") != nullptr;
+}
+
+bool Clipboard::setText(const std::string& text) {
+    if (isWayland()) {
+        if (execCmdWrite("wl-copy --type text/plain 2>/dev/null", text)) {
+            return true;
+        }
+    } else if (isX11()) {
+        if (execCmdWrite("xclip -selection clipboard -in 2>/dev/null", text)) {
+            return true;
+        }
+        if (execCmdWrite("xsel --clipboard --input 2>/dev/null", text)) {
+            return true;
+        }
+    }
+    return writeOsc52(text);
 }
 
 bool Clipboard::hasImage() {
@@ -231,6 +305,10 @@ std::optional<std::string> Clipboard::getImage(std::string& mimeType) {
 
 bool Clipboard::isWayland() { return false; }
 bool Clipboard::isX11() { return false; }
+bool Clipboard::setText(const std::string& text) {
+    (void)text;
+    return false;
+}
 bool Clipboard::hasImage() { return false; }
 std::optional<std::string> Clipboard::getImage(std::string& mimeType) { return std::nullopt; }
 

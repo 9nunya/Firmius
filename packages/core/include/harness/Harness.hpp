@@ -369,7 +369,8 @@ private:
    * ready to accept new input.
    */
   void drainQueueForAgent(const std::string &agentId,
-                          const std::string &threadId);
+                         const std::string &threadId,
+                         bool allowRunningInjection = false);
 
   void clearQueue();
   void clearQueueForAgentThread(const std::string &agentId,

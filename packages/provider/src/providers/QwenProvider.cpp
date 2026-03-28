@@ -1994,7 +1994,16 @@ void QwenProvider::generateSummary(
   opts.temperature = 0.1f;
   opts.maxTokens = 16384;
   opts.abortSignal = abortSignal;
-  stream(summaryHistory, opts, onEvent);
+  auto wrappedOnEvent = [&](const StreamEvent &ev) {
+    if (auto *txt = std::get_if<TextChunk>(&ev)) {
+      onEvent(AgentCompactionText{"", txt->delta, ""});
+    } else if (auto *thk = std::get_if<ThinkingChunk>(&ev)) {
+      onEvent(AgentCompactionThinking{"", thk->delta, ""});
+    } else {
+      onEvent(ev);
+    }
+  };
+  stream(summaryHistory, opts, wrappedOnEvent);
 }
 
 } // namespace firmius::provider

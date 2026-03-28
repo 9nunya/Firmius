@@ -598,3 +598,13 @@ TEST(HintingContractsTest, builtinGeminiHintingDefendsAgainstNoToolAndOptimism) 
     EXPECT_NE(prompt.find("If you commit a chunk, treat it as a dispatch/review unit rather than a personal TODO note."),
               std::string::npos);
 }
+
+TEST(PromptContractsTest, basePromptRestrictsCategoryOverridesToUserRequests) {
+    const auto prompt = readRepoFile(repoRootFromSourceFile() / "prompts" / "base.md");
+
+    EXPECT_NE(prompt.find("Optional model routing category override."), std::string::npos);
+    EXPECT_NE(prompt.find("Use it only when the user explicitly requested a specific route category."),
+              std::string::npos);
+    EXPECT_NE(prompt.find("Otherwise omit it so purpose/default routing applies."),
+              std::string::npos);
+}

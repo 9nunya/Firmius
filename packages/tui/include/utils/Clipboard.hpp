@@ -5,6 +5,7 @@
 
 class Clipboard {
 public:
+    static bool setText(const std::string& text);
     static bool hasImage();
     
     static std::optional<std::string> getImage(std::string& mimeType);

@@ -1120,7 +1120,7 @@ TEST_F(SubagentToolTest, workBoundPersonaRejectsLegacyRoleName) {
               ::testing::HasSubstr("legacy role 'implementer'; use 'executor'"));
 }
 
-TEST_F(SubagentToolTest, categoryOverrideRoutesRetaskModel) {
+TEST_F(SubagentToolTest, explicitCategoryHonoredWhenUserRequestedInHistory) {
   const std::string threadId = createThread();
   auto taskPromise = std::make_shared<std::promise<std::string>>();
   auto agent = registerRetaskableAgent("coder-agent", "coder-slot", taskPromise);
@@ -1130,8 +1130,11 @@ TEST_F(SubagentToolTest, categoryOverrideRoutesRetaskModel) {
   cfg.defaultProviderId = "fallback";
   cfg.defaultModelId = "fallback-model";
   cfg.defaultModelVariant = "fallback-variant";
-  cfg.modelRouterCategories["code"] = {"openai", "gpt-5-codex", "thinking"};
-  cfg.purposeRoutes["coder"] = "other";
+  cfg.modelRouterCategories["gemini-fast"] = {"openai", "gpt-5-codex",
+                                               "thinking"};
+  cfg.modelRouterCategories["research"] = {"openrouter", "qwen-omni",
+                                            "balanced"};
+  cfg.purposeRoutes["coder"] = "research";
   firmius::shared::ConfigLoader::instance().updateConfig(cfg);
 
   SubagentTool tool;
@@ -1139,20 +1142,78 @@ TEST_F(SubagentToolTest, categoryOverrideRoutesRetaskModel) {
   input.persona = "coder";
   input.task = "Use explicit category.";
   input.agent_id = "coder-agent";
-  input.category = "code";
+  input.category = "gemini-fast";
   input.name = "coder-slot";
   input.title = "Coder Slot";
   input.async = true;
 
   MockAgent parent;
   AgentContext ctx_obj = makeParentContext(threadId);
+  AgentTurn userTurn;
+  Message userMessage;
+  userMessage.role = Role::User;
+  userMessage.content.push_back(
+      TextContent{"Please use the gemini-fast route for this scout."});
+  userTurn.messages.push_back(userMessage);
+  ctx_obj.history->turns.push_back(userTurn);
   EXPECT_CALL(parent, getContext()).WillRepeatedly(ReturnRef(ctx_obj));
   NiceMock<MockHost> host;
   ToolContext toolCtx{host, parent, "test-call-id"};
 
   ToolResult result = tool.execute(input, toolCtx);
   ASSERT_TRUE(result.success) << result.error;
-  EXPECT_THAT(result.data, ::testing::HasSubstr("\"category\":\"code\""));
+  EXPECT_THAT(result.data,
+              ::testing::HasSubstr("\"category\":\"gemini-fast\""));
+  EXPECT_THAT(result.data,
+              ::testing::Not(::testing::HasSubstr("routing_warning")));
+}
+
+TEST_F(SubagentToolTest, explicitCategoryIgnoredWhenUserDidNotRequestOverride) {
+  const std::string threadId = createThread();
+  auto taskPromise = std::make_shared<std::promise<std::string>>();
+  auto agent = registerRetaskableAgent("coder-agent", "coder-slot", taskPromise);
+  EXPECT_CALL(*agent, setModel("openrouter", "qwen-omni", "balanced")).Times(1);
+
+  auto cfg = firmius::shared::ConfigLoader::instance().getConfig();
+  cfg.defaultProviderId = "fallback";
+  cfg.defaultModelId = "fallback-model";
+  cfg.defaultModelVariant = "fallback-variant";
+  cfg.modelRouterCategories["gemini-fast"] = {"antigravity", "gemini-3-flash",
+                                               ""};
+  cfg.modelRouterCategories["research"] = {"openrouter", "qwen-omni",
+                                            "balanced"};
+  cfg.purposeRoutes["coder"] = "research";
+  firmius::shared::ConfigLoader::instance().updateConfig(cfg);
+
+  SubagentTool tool;
+  SubagentInput input;
+  input.persona = "coder";
+  input.task = "Analyze the repository.";
+  input.agent_id = "coder-agent";
+  input.category = "gemini-fast";
+  input.name = "coder-slot";
+  input.title = "Coder Slot";
+  input.async = true;
+
+  MockAgent parent;
+  AgentContext ctx_obj = makeParentContext(threadId);
+  AgentTurn userTurn;
+  Message userMessage;
+  userMessage.role = Role::User;
+  userMessage.content.push_back(TextContent{"Please analyze the repository."});
+  userTurn.messages.push_back(userMessage);
+  ctx_obj.history->turns.push_back(userTurn);
+  EXPECT_CALL(parent, getContext()).WillRepeatedly(ReturnRef(ctx_obj));
+  NiceMock<MockHost> host;
+  ToolContext toolCtx{host, parent, "test-call-id"};
+
+  ToolResult result = tool.execute(input, toolCtx);
+  ASSERT_TRUE(result.success) << result.error;
+  EXPECT_THAT(result.data, ::testing::HasSubstr("\"category\":\"research\""));
+  EXPECT_THAT(result.data, ::testing::HasSubstr("routing_warning"));
+  EXPECT_THAT(
+      result.data,
+      ::testing::HasSubstr("Ignored explicit category 'gemini-fast'"));
 }
 
 TEST_F(SubagentToolTest, purposeRouteAppliedWhenCategoryNotProvided) {
@@ -1189,6 +1250,82 @@ TEST_F(SubagentToolTest, purposeRouteAppliedWhenCategoryNotProvided) {
   ToolResult result = tool.execute(input, toolCtx);
   ASSERT_TRUE(result.success) << result.error;
   EXPECT_THAT(result.data, ::testing::HasSubstr("\"category\":\"research\""));
+}
+
+TEST_F(SubagentToolTest, updatedPurposeRouteAppliesOnNextExecution) {
+  const std::string threadId = createThread();
+  auto agent = std::make_shared<NiceMock<MockAgent>>();
+  auto* agentPtr = agent.get();
+  agent->defaultCtx.history = std::make_shared<AgentHistory>();
+  agent->defaultCtx.history->threadId = threadId;
+  agent->defaultCtx.identity.id = "coder-agent";
+  agent->defaultCtx.identity.parentId = "parent-agent";
+  agent->defaultCtx.identity.friendlyName = "coder-slot";
+  agent->defaultCtx.state.currentStatus = AgentStatus::Idle;
+
+  ON_CALL(*agent, getContext()).WillByDefault(ReturnRef(agent->defaultCtx));
+  ON_CALL(*agent, getMutableContext())
+      .WillByDefault(ReturnRef(agent->defaultCtx));
+  ON_CALL(*agent, isInterrupted()).WillByDefault(Return(false));
+  ON_CALL(*agent, isRunning()).WillByDefault(Return(false));
+  ON_CALL(*agent, isBooting()).WillByDefault(Return(false));
+  ON_CALL(*agent, run(_, _, _))
+      .WillByDefault(Invoke([agentPtr](const std::string &,
+                                       std::function<void(const StreamEvent &)>,
+                                       const std::vector<ImageContent> &) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(350));
+        agentPtr->defaultCtx.state.currentStatus = AgentStatus::Idle;
+      }));
+
+  AgentRegistry::instance().registerAgent("coder-agent", agent);
+  registeredAgentIds_.push_back("coder-agent");
+  registeredAgents_.push_back(agent);
+  {
+    ::testing::InSequence seq;
+    EXPECT_CALL(*agent, setModel("provider-a", "model-a", "balanced")).Times(1);
+    EXPECT_CALL(*agent, setModel("provider-b", "model-b", "high")).Times(1);
+  }
+
+  auto cfg = firmius::shared::ConfigLoader::instance().getConfig();
+  cfg.defaultProviderId = "fallback";
+  cfg.defaultModelId = "fallback-model";
+  cfg.defaultModelVariant = "";
+  cfg.modelRouterCategories.clear();
+  cfg.modelRouterCategories["research"] = {"provider-a", "model-a",
+                                            "balanced"};
+  cfg.purposeRoutes["coder"] = "research";
+  cfg.enableSubagentRouteFallback = false;
+  cfg.subagentRouteFallbackOrder.clear();
+  firmius::shared::ConfigLoader::instance().updateConfig(cfg);
+
+  SubagentTool tool;
+  SubagentInput input;
+  input.persona = "coder";
+  input.task = "Use current purpose route.";
+  input.agent_id = "coder-agent";
+  input.name = "coder-slot";
+  input.title = "Coder Slot";
+  input.async = true;
+
+  MockAgent parent;
+  AgentContext ctx_obj = makeParentContext(threadId);
+  EXPECT_CALL(parent, getContext()).WillRepeatedly(ReturnRef(ctx_obj));
+  NiceMock<MockHost> host;
+  ToolContext toolCtx{host, parent, "test-call-id"};
+
+  ToolResult first = tool.execute(input, toolCtx);
+  ASSERT_TRUE(first.success) << first.error;
+  EXPECT_THAT(first.data, ::testing::HasSubstr("\"category\":\"research\""));
+  std::this_thread::sleep_for(std::chrono::milliseconds(450));
+
+  cfg = firmius::shared::ConfigLoader::instance().getConfig();
+  cfg.modelRouterCategories["review"] = {"provider-b", "model-b", "high"};
+  cfg.purposeRoutes["coder"] = "review";
+  firmius::shared::ConfigLoader::instance().updateConfig(cfg);
+
+  ToolResult second = tool.execute(input, toolCtx);
+  ASSERT_TRUE(second.success) << second.error;
+  EXPECT_THAT(second.data, ::testing::HasSubstr("\"category\":\"review\""));
 }
 
 TEST_F(SubagentToolTest, missingCategoryFallsBackWithWarning) {

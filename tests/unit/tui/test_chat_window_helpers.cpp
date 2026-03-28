@@ -1,5 +1,6 @@
 #include "components/ChatWindow.hpp"
 #include "components/ToolBlock.hpp"
+#include "TUIState.hpp"
 
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/screen.hpp>
@@ -127,6 +128,193 @@ TEST(ChatWindowHelpersTest, KeepsPersistedCompactionTurnsRenderable) {
   compaction.content = {TextContent{"Compaction completed."}};
   EXPECT_FALSE(firmius::tui::ShouldHideMessageInTranscript(
       compaction, false, "compaction-end-1"));
+}
+
+TEST(ChatWindowHelpersTest,
+     FinishedRowsWithoutRenderableIdentityStayHidden) {
+  ToolCallView view;
+  view.phase = ToolPhase::Finished;
+  view.success = true;
+  view.name = "";
+  view.result = R"({"ok":true})";
+
+  EXPECT_FALSE(firmius::tui::ShouldRenderToolCallView(view));
+}
+
+TEST(ChatWindowHelpersTest,
+     ExpandCompactionTranscriptKeepsPreCompactionTailBeforeMarker) {
+  using firmius::core::CompactionSnapshot;
+
+  std::vector<AgentTurn> snapshot_turns;
+
+  auto makeTurn = [](std::string id, Role role, std::string text) {
+    AgentTurn turn;
+    turn.turnId = std::move(id);
+    Message msg;
+    msg.role = role;
+    msg.content = {TextContent{std::move(text)}};
+    turn.messages.push_back(std::move(msg));
+    return turn;
+  };
+
+  snapshot_turns.push_back(
+      makeTurn("bootstrap-system", Role::System, "bootstrap"));
+  snapshot_turns.push_back(makeTurn("user-task-1", Role::User, "first user"));
+  snapshot_turns.push_back(
+      makeTurn("assistant-2", Role::Assistant, "first answer"));
+  snapshot_turns.push_back(
+      makeTurn("assistant-22", Role::Assistant, "final summary before compact"));
+
+  std::vector<AgentTurn> compacted_turns;
+  compacted_turns.push_back(snapshot_turns.front());
+  compacted_turns.push_back(
+      makeTurn("compaction-start-1", Role::System, "Compaction started."));
+  compacted_turns.push_back(
+      makeTurn("compaction-summary-1", Role::System, "Compaction summary."));
+  compacted_turns.push_back(
+      makeTurn("compaction-end-1", Role::System, "Compaction complete."));
+  compacted_turns.push_back(snapshot_turns.back());
+  compacted_turns.push_back(
+      makeTurn("user-task-7", Role::User, "Can you see compaction?"));
+
+  CompactionSnapshot snapshot;
+  snapshot.compactionId = "1";
+  snapshot.turns = snapshot_turns;
+
+  std::unordered_map<std::string, CompactionSnapshot> snapshots;
+  snapshots.emplace("1", snapshot);
+
+  const auto expanded = firmius::tui::expandCompactionTranscriptForDisplay(
+      compacted_turns, snapshots);
+
+  ASSERT_EQ(expanded.size(), 8u);
+  EXPECT_EQ(expanded[0].turnId, "bootstrap-system");
+  EXPECT_EQ(expanded[1].turnId, "user-task-1");
+  EXPECT_EQ(expanded[2].turnId, "assistant-2");
+  EXPECT_EQ(expanded[3].turnId, "assistant-22");
+  EXPECT_EQ(expanded[4].turnId, "compaction-start-1");
+  EXPECT_EQ(expanded[5].turnId, "compaction-summary-1");
+  EXPECT_EQ(expanded[6].turnId, "compaction-end-1");
+  EXPECT_EQ(expanded[7].turnId, "user-task-7");
+}
+
+TEST(ChatWindowHelpersTest,
+     ExpandCompactionTranscriptSkipsDuplicatedPreservedTailButKeepsLaterTurns) {
+  using firmius::core::CompactionSnapshot;
+
+  auto makeTurn = [](std::string id, Role role, std::string text) {
+    AgentTurn turn;
+    turn.turnId = std::move(id);
+    Message msg;
+    msg.role = role;
+    msg.content = {TextContent{std::move(text)}};
+    turn.messages.push_back(std::move(msg));
+    return turn;
+  };
+
+  std::vector<AgentTurn> snapshot_turns{
+      makeTurn("bootstrap-system", Role::System, "bootstrap"),
+      makeTurn("user-task-1", Role::User, "first user"),
+      makeTurn("assistant-2", Role::Assistant, "answer"),
+      makeTurn("assistant-22", Role::Assistant, "summary before compact"),
+  };
+
+  std::vector<AgentTurn> compacted_turns{
+      snapshot_turns.front(),
+      makeTurn("compaction-start-1", Role::System, "start"),
+      makeTurn("compaction-summary-1", Role::System, "summary"),
+      makeTurn("compaction-end-1", Role::System, "end"),
+      snapshot_turns.back(),
+      makeTurn("user-task-7", Role::User, "post compact question"),
+      makeTurn("assistant-8", Role::Assistant, "post compact answer"),
+  };
+
+  CompactionSnapshot snapshot;
+  snapshot.compactionId = "1";
+  snapshot.turns = snapshot_turns;
+
+  std::unordered_map<std::string, CompactionSnapshot> snapshots;
+  snapshots.emplace("1", snapshot);
+
+  const auto expanded = firmius::tui::expandCompactionTranscriptForDisplay(
+      compacted_turns, snapshots);
+
+  ASSERT_EQ(expanded.size(), 9u);
+  EXPECT_EQ(expanded[3].turnId, "assistant-22");
+  EXPECT_EQ(expanded[4].turnId, "compaction-start-1");
+  EXPECT_EQ(expanded[5].turnId, "compaction-summary-1");
+  EXPECT_EQ(expanded[6].turnId, "compaction-end-1");
+  EXPECT_EQ(expanded[7].turnId, "user-task-7");
+  EXPECT_EQ(expanded[8].turnId, "assistant-8");
+}
+
+TEST(ChatWindowHelpersTest,
+     ExpandCompactionTranscriptPreservesToolTailAndSkipsDuplicatedReplay) {
+  using firmius::core::CompactionSnapshot;
+
+  auto makeTextTurn = [](std::string id, Role role, std::string text) {
+    AgentTurn turn;
+    turn.turnId = std::move(id);
+    Message msg;
+    msg.role = role;
+    msg.content = {TextContent{std::move(text)}};
+    turn.messages.push_back(std::move(msg));
+    return turn;
+  };
+
+  auto makeToolTurn = [](std::string id, std::string call_id) {
+    AgentTurn turn;
+    turn.turnId = std::move(id);
+    Message msg;
+    msg.role = Role::ToolResult;
+    msg.content = {ToolResultContent{std::move(call_id), "done", true, "", ""}};
+    turn.messages.push_back(std::move(msg));
+    return turn;
+  };
+
+  std::vector<AgentTurn> snapshot_turns{
+      makeTextTurn("bootstrap-system", Role::System, "bootstrap"),
+      makeTextTurn("user-task-1", Role::User, "first user"),
+      makeTextTurn("assistant-2", Role::Assistant, "answer"),
+      makeToolTurn("tools-21", "call-21"),
+      makeTextTurn("assistant-22", Role::Assistant, "summary before compact"),
+      makeTextTurn("user-task-23", Role::User, "question before compact"),
+  };
+
+  std::vector<AgentTurn> compacted_turns{
+      snapshot_turns.front(),
+      makeTextTurn("compaction-start-1", Role::System, "start"),
+      makeTextTurn("compaction-summary-1", Role::System, "summary"),
+      makeTextTurn("compaction-end-1", Role::System, "end"),
+      makeToolTurn("tools-21", "call-21"),
+      makeTextTurn("assistant-22", Role::Assistant, "summary before compact"),
+      makeTextTurn("user-task-23", Role::User, "question before compact"),
+      makeTextTurn("user-task-7", Role::User, "post compact question"),
+      makeTextTurn("assistant-8", Role::Assistant, "post compact answer"),
+  };
+
+  CompactionSnapshot snapshot;
+  snapshot.compactionId = "1";
+  snapshot.turns = snapshot_turns;
+
+  std::unordered_map<std::string, CompactionSnapshot> snapshots;
+  snapshots.emplace("1", snapshot);
+
+  const auto expanded = firmius::tui::expandCompactionTranscriptForDisplay(
+      compacted_turns, snapshots);
+
+  ASSERT_EQ(expanded.size(), 11u);
+  EXPECT_EQ(expanded[0].turnId, "bootstrap-system");
+  EXPECT_EQ(expanded[1].turnId, "user-task-1");
+  EXPECT_EQ(expanded[2].turnId, "assistant-2");
+  EXPECT_EQ(expanded[3].turnId, "tools-21");
+  EXPECT_EQ(expanded[4].turnId, "assistant-22");
+  EXPECT_EQ(expanded[5].turnId, "user-task-23");
+  EXPECT_EQ(expanded[6].turnId, "compaction-start-1");
+  EXPECT_EQ(expanded[7].turnId, "compaction-summary-1");
+  EXPECT_EQ(expanded[8].turnId, "compaction-end-1");
+  EXPECT_EQ(expanded[9].turnId, "user-task-7");
+  EXPECT_EQ(expanded[10].turnId, "assistant-8");
 }
 
 TEST(ChatWindowHelpersTest, KeepsSystemNoteTurnsRenderable) {

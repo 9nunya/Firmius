@@ -233,16 +233,42 @@ TEST(StreamStateManagerLiveTest, InterruptClearsTransientLiveProseRows) {
   EXPECT_TRUE(state.getTimeline().empty());
 }
 
-TEST(StreamStateManagerLiveTest, CompactionCompletionRemainsVisibleAfterFinish) {
+TEST(StreamStateManagerLiveTest, ContextCompactedClearsTransientCompactionState) {
   StreamStateManager state;
   state.handleAgentCompacting(AgentCompacting{"agent-1", ""});
+  state.handleAgentCompactionThinking(
+      firmius::shared::AgentCompactionThinking{"agent-1", "thinking", ""});
+  state.handleAgentCompactionText(
+      firmius::shared::AgentCompactionText{"agent-1", "summary", ""});
   state.handleContextCompacted(ContextCompacted{"agent-1", 42, ""});
 
   auto stream = state.getStream("agent-1");
   ASSERT_NE(stream, nullptr);
-  EXPECT_TRUE(stream->compaction_finished);
-  EXPECT_FALSE(stream->compaction_completion.empty());
-  EXPECT_NE(stream->compaction_completion.find("42"), std::string::npos);
+  EXPECT_FALSE(stream->compaction_active);
+  EXPECT_FALSE(stream->compaction_finished);
+  EXPECT_TRUE(stream->compaction_thinking.empty());
+  EXPECT_TRUE(stream->compaction_text.empty());
+  EXPECT_TRUE(stream->compaction_completion.empty());
+}
+
+TEST(StreamStateManagerLiveTest,
+     NewLiveOutputAfterCompactionDoesNotResurrectTransientCompactionState) {
+  StreamStateManager state;
+  state.handleAgentCompacting(AgentCompacting{"agent-1", ""});
+  state.handleAgentCompactionText(
+      firmius::shared::AgentCompactionText{"agent-1", "summary", ""});
+  state.handleContextCompacted(ContextCompacted{"agent-1", 42, ""});
+
+  state.handleAgentText(AgentText{"agent-1", "next turn output", ""});
+
+  auto stream = state.getStream("agent-1");
+  ASSERT_NE(stream, nullptr);
+  EXPECT_FALSE(stream->compaction_active);
+  EXPECT_FALSE(stream->compaction_finished);
+  EXPECT_TRUE(stream->compaction_thinking.empty());
+  EXPECT_TRUE(stream->compaction_text.empty());
+  EXPECT_TRUE(stream->compaction_completion.empty());
+  EXPECT_EQ(stream->text, "next turn output");
 }
 
 TEST(StreamStateManagerLiveTest, ChildErrorMarksParentSubagentAsFailed) {

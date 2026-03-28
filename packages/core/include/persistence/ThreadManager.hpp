@@ -66,6 +66,17 @@ struct AgentLiveState {
     bool operator==(const AgentLiveState& other) const = default;
 };
 
+struct CompactionSnapshot {
+    std::string compactionId;
+    std::string threadId;
+    std::string agentId;
+    uint32_t previousContextSize = 0;
+    uint64_t createdAt = 0;
+    std::vector<AgentTurn> turns;
+
+    bool operator==(const CompactionSnapshot& other) const = default;
+};
+
 /**
  * @brief Manages thread directory structure and metadata.
  */
@@ -139,6 +150,17 @@ public:
     AgentLiveState mutateAgentLiveState(
         const std::string& threadId, const std::string& agentId,
         const std::function<void(AgentLiveState&)>& mutator);
+    std::vector<CompactionSnapshot>
+    loadCompactionSnapshots(const std::string& threadId,
+                            const std::string& agentId) const;
+    void appendCompactionSnapshot(const std::string& threadId,
+                                  const std::string& agentId,
+                                  const CompactionSnapshot& snapshot);
+    bool popCompactionSnapshot(const std::string& threadId,
+                               const std::string& agentId,
+                               const std::optional<std::string>& compactionId =
+                                   std::nullopt,
+                               CompactionSnapshot* removed = nullptr);
 
     /**
      * @brief Reads the agent manifest for a thread.

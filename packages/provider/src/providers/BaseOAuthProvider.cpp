@@ -8,6 +8,7 @@
 #include <rapidjson/error/en.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
+#include <mutex>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -15,6 +16,7 @@ namespace firmius::provider {
 
 namespace {
 constexpr auto kBackgroundQuotaRefreshInterval = std::chrono::minutes(5);
+std::mutex g_oauth_json_mutex;
 
 std::string getOAuthJsonPath() {
   const char *homedir;
@@ -151,9 +153,10 @@ void BaseOAuthProvider::addAccount(const OAuthAccount &acc) {
 
 void BaseOAuthProvider::loadAccounts() {
   std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
-  accounts_.clear();
+  std::lock_guard<std::mutex> file_lock(g_oauth_json_mutex);
   std::string path = getOAuthJsonPath();
   if (!std::filesystem::exists(std::filesystem::path(path))) {
+    accounts_.clear();
     return;
   }
 
@@ -168,6 +171,8 @@ void BaseOAuthProvider::loadAccounts() {
 
   if (doc.HasParseError() || !doc.IsObject())
     return;
+
+  std::vector<OAuthAccount> loaded_accounts;
 
   std::string luiKey = "lastUsedIndex_" + providerId_;
   if (doc.HasMember(luiKey.c_str()) && doc[luiKey.c_str()].IsInt()) {
@@ -246,13 +251,15 @@ void BaseOAuthProvider::loadAccounts() {
       // item["backoffUntil"].IsInt64()) acc.backoffUntil =
       // item["backoffUntil"].GetInt64();
 
-      accounts_.push_back(acc);
+      loaded_accounts.push_back(std::move(acc));
     }
   }
+  accounts_ = std::move(loaded_accounts);
 }
 
 void BaseOAuthProvider::saveAccounts() {
   std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
+  std::lock_guard<std::mutex> file_lock(g_oauth_json_mutex);
   std::string path = getOAuthJsonPath();
   rapidjson::Document doc;
 
@@ -322,9 +329,12 @@ void BaseOAuthProvider::saveAccounts() {
   rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
   doc.Accept(writer);
 
-  std::ofstream ofs(path);
+  const std::string temp_path = path + ".tmp";
+  std::ofstream ofs(temp_path);
   if (ofs.is_open()) {
     ofs << buffer.GetString();
+    ofs.close();
+    std::filesystem::rename(temp_path, path);
   }
 }
 

@@ -53,6 +53,43 @@ bool isRetryableWaitOutcome(const AgentOutcome &outcome) {
          outcome.kind == AgentOutcome::Kind::Failed;
 }
 
+std::string normalizeRouteToken(const std::string& value) {
+  return shared::StringUtil::toLower(shared::StringUtil::trim(value));
+}
+
+bool userExplicitlyRequestedCategory(const shared::ToolContext& ctx,
+                                     const std::string& category) {
+  const auto& agentContext = ctx.agent.getContext();
+  if (!agentContext.history) {
+    return false;
+  }
+
+  const std::string normalizedCategory = normalizeRouteToken(category);
+  if (normalizedCategory.empty()) {
+    return false;
+  }
+
+  for (auto turnIt = agentContext.history->turns.rbegin();
+       turnIt != agentContext.history->turns.rend(); ++turnIt) {
+    for (auto msgIt = turnIt->messages.rbegin();
+         msgIt != turnIt->messages.rend(); ++msgIt) {
+      if (msgIt->role != shared::Role::User) {
+        continue;
+      }
+      for (const auto& part : msgIt->content) {
+        if (const auto* txt = std::get_if<shared::TextContent>(&part)) {
+          const std::string lowered =
+              normalizeRouteToken(txt->text);
+          if (lowered.find(normalizedCategory) != std::string::npos) {
+            return true;
+          }
+        }
+      }
+    }
+  }
+  return false;
+}
+
 const shared::WorkChunk &
 findChunk(const shared::Plan &plan, const std::string &chunkId) {
   return worktools::requireChunk(plan, chunkId);
@@ -452,8 +489,9 @@ struct ResolvedRoute {
   std::string warning;
 };
 
-ResolvedRoute resolveModelRoute(const SubagentInput &input,
-                                const std::string &persona) {
+ResolvedRoute resolveModelRoute(const std::string &persona,
+                                const std::optional<std::string>& explicitCategoryOverride = std::nullopt,
+                                const std::string& explicitCategoryWarning = "") {
   const auto &config = shared::ConfigLoader::instance().getConfig();
 
   auto useDefaultRoute = [&config]() {
@@ -473,13 +511,13 @@ ResolvedRoute resolveModelRoute(const SubagentInput &input,
     return &it->second;
   };
 
-  if (input.category.has_value() && !input.category->empty()) {
-    if (const auto *category = findCategory(*input.category)) {
+  if (explicitCategoryOverride.has_value() && !explicitCategoryOverride->empty()) {
+    if (const auto *category = findCategory(*explicitCategoryOverride)) {
       return {category->providerId, category->modelId, category->variantName,
-              *input.category, ""};
+              *explicitCategoryOverride, explicitCategoryWarning};
     }
     auto route = useDefaultRoute();
-    route.warning = "Category '" + *input.category +
+    route.warning = "Category '" + *explicitCategoryOverride +
                     "' not found; using default model route.";
     return route;
   }
@@ -511,8 +549,9 @@ std::string routeLabel(const ResolvedRoute &route) {
   return route.categoryName.empty() ? "default" : route.categoryName;
 }
 
-std::vector<ResolvedRoute> buildRouteCandidates(const SubagentInput &input,
-                                                const std::string &persona) {
+std::vector<ResolvedRoute> buildRouteCandidates(const std::string &persona,
+                                                const std::optional<std::string>& explicitCategoryOverride = std::nullopt,
+                                                const std::string& explicitCategoryWarning = "") {
   const auto &config = shared::ConfigLoader::instance().getConfig();
   std::vector<ResolvedRoute> routes;
   std::unordered_set<std::string> seen;
@@ -524,7 +563,15 @@ std::vector<ResolvedRoute> buildRouteCandidates(const SubagentInput &input,
     }
   };
 
-  const ResolvedRoute primary = resolveModelRoute(input, persona);
+  ResolvedRoute primary =
+      resolveModelRoute(persona, explicitCategoryOverride, "");
+  if (!explicitCategoryWarning.empty()) {
+    if (primary.warning.empty()) {
+      primary.warning = explicitCategoryWarning;
+    } else {
+      primary.warning = explicitCategoryWarning + " " + primary.warning;
+    }
+  }
   pushUnique(primary);
 
   if (!config.enableSubagentRouteFallback) {
@@ -635,7 +682,10 @@ std::shared_ptr<shared::JSONSchema> SubagentTool::getSchema() const {
                    ->setOptional()},
               {"category",
                shared::zString()
-                   ->describe("Optional model routing category for this delegation")
+                   ->describe("Optional model routing category override. Use only "
+                              "when the user explicitly requested a specific "
+                              "route category; otherwise omit it so "
+                              "purpose/default routing applies.")
                    ->setOptional()},
               {"name", shared::zString()->describe(
                            "Machine-friendly slug (e.g., 'auth-finder')")},
@@ -707,7 +757,21 @@ shared::ToolResult SubagentTool::execute(const SubagentInput &input,
     }
   }
 
-  const std::vector<ResolvedRoute> routes = buildRouteCandidates(input, persona);
+  std::optional<std::string> explicitCategoryOverride;
+  std::string explicitCategoryWarning;
+  if (input.category.has_value() && !input.category->empty()) {
+    if (userExplicitlyRequestedCategory(ctx, *input.category)) {
+      explicitCategoryOverride = input.category;
+    } else {
+      explicitCategoryWarning =
+          "Ignored explicit category '" + *input.category +
+          "' because only user-specified route-category overrides are honored; "
+          "using configured purpose/default routing.";
+    }
+  }
+
+  const std::vector<ResolvedRoute> routes = buildRouteCandidates(
+      persona, explicitCategoryOverride, explicitCategoryWarning);
   std::vector<std::string> attemptedCategories;
   const bool isRetaskingExistingAgent =
       input.agent_id.has_value() && !input.agent_id->empty();

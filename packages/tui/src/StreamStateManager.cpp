@@ -371,6 +371,11 @@ bool IsGenericTerminalSubagentState(const std::string &state) {
   return state == "completed" || state == "failed";
 }
 
+bool isParentInterruptedWhileWaitingMessage(const std::string &message) {
+  return message.find("Parent agent interrupted while waiting for subagent.") !=
+         std::string::npos;
+}
+
 int SubagentStateSpecificity(const std::string &state) {
   if (state.empty()) {
     return 0;
@@ -1006,9 +1011,10 @@ void StreamStateManager::handleContextCompacted(
     const shared::ContextCompacted &e) {
   auto &s = streams_[e.agentId];
   s.compaction_active = false;
-  s.compaction_finished = true;
-  s.compaction_completion =
-      "Compaction complete. Tokens saved: " + std::to_string(e.tokensSaved);
+  s.compaction_finished = false;
+  s.compaction_thinking.clear();
+  s.compaction_text.clear();
+  s.compaction_completion.clear();
 }
 
 void StreamStateManager::handleAgentProcessSpawned(
@@ -1765,6 +1771,9 @@ void StreamStateManager::rebuildToolCallsFromHistory(
                 if (subagent.wait_state.empty()) {
                   subagent.running = false;
                   subagent.waiting = false;
+                  subagent.provider_waiting = false;
+                  subagent.retrying = false;
+                  subagent.account_switched = false;
                   subagent.wait_state = view->success ? "completed" : "failed";
                   if (view->success) {
                     subagent.outcome = SubagentOutcomeKind::Response;
@@ -2012,9 +2021,12 @@ void StreamStateManager::rebuildToolCallsFromHistory(
         view->subagent_tool_log = merged_log;
         view->subagent_running = false;
         subagent.activity_log = std::move(merged_log);
+        subagent.running = false;
+        subagent.waiting = false;
+        subagent.provider_waiting = false;
+        subagent.retrying = false;
+        subagent.account_switched = false;
         if (subagent.wait_state.empty()) {
-          subagent.running = false;
-          subagent.waiting = false;
           subagent.wait_state = view->success ? "completed" : "failed";
           if (view->success) {
             subagent.outcome = SubagentOutcomeKind::Response;
@@ -2101,9 +2113,12 @@ void StreamStateManager::rebuildToolCallsFromHistory(
         view->subagent_tool_log = merged_log;
         view->subagent_running = false;
         subagent.activity_log = std::move(merged_log);
+        subagent.running = false;
+        subagent.waiting = false;
+        subagent.provider_waiting = false;
+        subagent.retrying = false;
+        subagent.account_switched = false;
         if (subagent.wait_state.empty()) {
-          subagent.running = false;
-          subagent.waiting = false;
           subagent.wait_state = view->success ? "completed" : "failed";
           if (view->success) {
             subagent.outcome = SubagentOutcomeKind::Response;
@@ -2241,6 +2256,25 @@ void StreamStateManager::applyToolResult(
       subagent_to_parent_tool_[parsedSubagent.agent_id] = parent_tool_id;
     }
     subagent_tool_to_parent_[view->toolCallId] = parent_tool_id;
+
+    const bool preserve_async_parent_state =
+        view->name == "subagent_wait" && !success &&
+        parsedSubagent.status.empty() &&
+        isParentInterruptedWhileWaitingMessage(result) &&
+        (subagent.wait_state == "spawned" || subagent.wait_state == "re-tasked" ||
+         subagent.wait_state == "running" || subagent.wait_state == "retrying" ||
+         subagent.wait_state == "account_switched" ||
+         subagent.provider_waiting || subagent.retrying || subagent.running);
+
+    if (preserve_async_parent_state) {
+      view->subagent_wait_state = "cancelled";
+      view->subagent_wait_message = result;
+      view->subagent_fallback_used = false;
+      view->subagent_route_category.clear();
+      view->subagent_attempted_categories.clear();
+      view->phase = ToolPhase::Error;
+      return;
+    }
 
     if (!parsedSubagent.status.empty()) {
       view->subagent_wait_state = parsedSubagent.status;

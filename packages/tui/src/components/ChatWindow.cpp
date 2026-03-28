@@ -9,13 +9,18 @@
 #include "components/TranscriptGrouping.hpp"
 #include "components/ToolBlock.hpp"
 #include "components/GlintEffect.hpp"
+#include "NotificationManager.hpp"
+#include "utils/Clipboard.hpp"
 #include "utils/ToolSummaries.hpp"
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/component_base.hpp>
+#include <ftxui/component/mouse.hpp>
+#include <ftxui/component/screen_interactive.hpp>
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/dom/node.hpp>
 #include <limits>
 #include <memory>
+#include <sstream>
 #include <type_traits>
 #include <typeinfo>
 #include <unordered_map>
@@ -119,7 +124,9 @@ public:
       Add(child_);
   }
 
-  ftxui::Element OnRender() override { return render_(); }
+  ftxui::Element OnRender() override {
+    return ftxui::selectionStyleReset(render_());
+  }
   bool Focusable() const override { return false; }
   bool OnEvent(ftxui::Event event) override {
     if (child_)
@@ -130,6 +137,30 @@ public:
 private:
   ftxui::Component child_;
   std::function<ftxui::Element()> render_;
+};
+
+class CopyableRowComponent : public ftxui::ComponentBase {
+public:
+  CopyableRowComponent(std::function<ftxui::Element(bool)> render,
+                       std::string copy_text)
+      : render_(std::move(render)), copy_text_(std::move(copy_text)) {}
+
+  ftxui::Element OnRender() override {
+    auto element = render_ ? render_(false) : ftxui::text("");
+    return element | ftxui::selectionBackgroundColor(ftxui::Color::RGB(72, 96, 152)) |
+           ftxui::selectionForegroundColor(ftxui::Color::RGB(245, 247, 252)) |
+           ftxui::reflect(box_);
+  }
+
+  bool Focusable() const override { return false; }
+
+  const ftxui::Box &box() const { return box_; }
+  const std::string &copyText() const { return copy_text_; }
+
+private:
+  std::function<ftxui::Element(bool)> render_;
+  std::string copy_text_;
+  ftxui::Box box_;
 };
 
 struct QuickToolCluster {
@@ -394,6 +425,7 @@ public:
       firmius::tui::ToolViewProvider tool_view_provider,
       firmius::tui::ProcessStateGetter process_state_getter,
       firmius::tui::SubagentStateGetter subagent_state_getter,
+      firmius::tui::AgentFocusHandler agent_focus_handler,
       firmius::tui::HistoryGetter sub_history_getter,
       firmius::tui::StreamGetter sub_stream_getter,
       firmius::tui::LiveQuickSummaryProvider live_quick_summary_provider,
@@ -403,6 +435,7 @@ public:
         tool_view_provider_(std::move(tool_view_provider)),
         process_state_getter_(std::move(process_state_getter)),
         subagent_state_getter_(std::move(subagent_state_getter)),
+        agent_focus_handler_(std::move(agent_focus_handler)),
         sub_history_getter_(std::move(sub_history_getter)),
         sub_stream_getter_(std::move(sub_stream_getter)),
         live_quick_summary_provider_(std::move(live_quick_summary_provider)),
@@ -471,11 +504,208 @@ public:
       return true;
     }
 
+    const bool copy_handler_consumed = HandleCopySelection(event);
+
     RebuildIfNeeded();
-    return scrollable_ ? scrollable_->OnEvent(event) : false;
+    const bool handled = scrollable_ ? scrollable_->OnEvent(event) : false;
+    FinalizePendingCopy();
+    if (copy_drag_candidate_ && event.is_mouse() &&
+        (event.mouse().button == ftxui::Mouse::WheelUp ||
+         event.mouse().button == ftxui::Mouse::WheelDown)) {
+      if (auto *screen = ftxui::ScreenInteractive::Active()) {
+        auto resumed = event.mouse();
+        resumed.button = ftxui::Mouse::Left;
+        resumed.motion = ftxui::Mouse::Moved;
+        resumed.x = last_drag_x_;
+        resumed.y = last_drag_y_;
+        screen->PostEvent(ftxui::Event::Mouse("", resumed));
+      }
+    }
+    return copy_handler_consumed || handled;
   }
 
 private:
+  bool HandleCopySelection(ftxui::Event event) {
+    if (!event.is_mouse()) {
+      return false;
+    }
+
+    RebuildIfNeeded();
+    const auto mouse = event.mouse();
+    if (mouse.button != ftxui::Mouse::Left) {
+      return false;
+    }
+
+    const int hovered = FindCopyableRowAt(mouse.x, mouse.y);
+    if (mouse.motion == ftxui::Mouse::Pressed) {
+      copy_drag_candidate_ = (hovered >= 0);
+      copy_drag_started_ = false;
+      press_x_ = mouse.x;
+      press_y_ = mouse.y;
+      last_drag_x_ = mouse.x;
+      last_drag_y_ = mouse.y;
+      return false;
+    }
+
+    if (!copy_drag_candidate_) {
+      return false;
+    }
+
+    if (mouse.motion == ftxui::Mouse::Moved) {
+      const int dx = std::abs(mouse.x - press_x_);
+      const int dy = std::abs(mouse.y - press_y_);
+      copy_drag_started_ = copy_drag_started_ || dx > 0 || dy > 0;
+      last_drag_x_ = mouse.x;
+      last_drag_y_ = mouse.y;
+      return false;
+    }
+
+    if (mouse.motion == ftxui::Mouse::Released) {
+      last_drag_x_ = mouse.x;
+      last_drag_y_ = mouse.y;
+      if (copy_drag_started_) {
+        pending_copy_release_ = true;
+        pending_release_x_ = mouse.x;
+        pending_release_y_ = mouse.y;
+      }
+      copy_drag_candidate_ = false;
+      copy_drag_started_ = false;
+      return false;
+    }
+
+    return false;
+  }
+
+  int FindCopyableRowAt(int x, int y) const {
+    for (size_t i = 0; i < copyable_rows_.size(); ++i) {
+      if (!copyable_rows_[i]) {
+        continue;
+      }
+      const auto &box = copyable_rows_[i]->box();
+      if (y >= box.y_min && y <= box.y_max &&
+          x >= box.x_min && x <= box.x_max) {
+        return static_cast<int>(i);
+      }
+    }
+    return -1;
+  }
+
+  bool IsPointInCopyableRow(int x, int y) const {
+    return FindCopyableRowAt(x, y) >= 0;
+  }
+
+  void FinalizePendingCopy() {
+    if (!pending_copy_release_) {
+      return;
+    }
+    pending_copy_release_ = false;
+    auto *screen = ftxui::ScreenInteractive::Active();
+    if (!screen) {
+      return;
+    }
+
+    std::string copied = screen->GetSelection();
+    if (copied.empty()) {
+      copied = ExtractCopyableTextFromScreen(
+          *screen, press_x_, press_y_, pending_release_x_, pending_release_y_);
+    }
+
+    if (!copied.empty() && Clipboard::setText(copied)) {
+      firmius::tui::NotificationManager::instance().notifySuccess(
+          "Copied!", "Transcript selection copied.",
+          std::chrono::milliseconds(1200));
+      ClearFrameworkSelection(*screen, pending_release_x_, pending_release_y_);
+      return;
+    }
+
+    firmius::tui::NotificationManager::instance().notifyWarning(
+        "Copy Failed", "Selection could not be copied.",
+        std::chrono::milliseconds(1500));
+  }
+
+  std::string ExtractCopyableTextFromScreen(ftxui::ScreenInteractive &screen,
+                                            int start_x, int start_y,
+                                            int end_x, int end_y) const {
+    const int x0 = std::clamp(start_x, 0, std::max(0, screen.dimx() - 1));
+    const int y0 = std::clamp(start_y, 0, std::max(0, screen.dimy() - 1));
+    const int x1 = std::clamp(end_x, 0, std::max(0, screen.dimx() - 1));
+    const int y1 = std::clamp(end_y, 0, std::max(0, screen.dimy() - 1));
+
+    const bool forward = (y0 < y1) || (y0 == y1 && x0 <= x1);
+    const int top = forward ? y0 : y1;
+    const int bottom = forward ? y1 : y0;
+
+    std::vector<std::string> lines;
+    for (int y = top; y <= bottom; ++y) {
+      int left = 0;
+      int right = screen.dimx() - 1;
+      if (forward) {
+        if (y == y0) left = x0;
+        if (y == y1) right = x1;
+      } else {
+        if (y == y1) left = x1;
+        if (y == y0) right = x0;
+      }
+
+      std::string line;
+      for (int x = left; x <= right; ++x) {
+        if (!IsPointInCopyableRow(x, y)) {
+          line.push_back(' ');
+          continue;
+        }
+        const std::string &cell = screen.at(x, y);
+        line += cell.empty() ? " " : cell;
+      }
+
+      while (!line.empty() && line.back() == ' ') {
+        line.pop_back();
+      }
+      lines.push_back(std::move(line));
+    }
+
+    while (!lines.empty() && lines.front().empty()) {
+      lines.erase(lines.begin());
+    }
+    while (!lines.empty() && lines.back().empty()) {
+      lines.pop_back();
+    }
+
+    std::ostringstream out;
+    for (size_t i = 0; i < lines.size(); ++i) {
+      if (i > 0) {
+        out << '\n';
+      }
+      out << lines[i];
+    }
+    return out.str();
+  }
+
+  void ClearFrameworkSelection(ftxui::ScreenInteractive &screen, int x, int y) {
+    ftxui::Mouse pressed;
+    pressed.button = ftxui::Mouse::Left;
+    pressed.motion = ftxui::Mouse::Pressed;
+    pressed.x = x;
+    pressed.y = y;
+
+    ftxui::Mouse released = pressed;
+    released.motion = ftxui::Mouse::Released;
+
+    screen.PostEvent(ftxui::Event::Mouse("", pressed));
+    screen.PostEvent(ftxui::Event::Mouse("", released));
+  }
+
+  void AddRow(ftxui::Component row) {
+    rows_.push_back(std::move(row));
+  }
+
+  void AddCopyableRow(std::function<ftxui::Element(bool)> render,
+                      std::string copy_text) {
+    auto row = ftxui::Make<CopyableRowComponent>(std::move(render),
+                                                 std::move(copy_text));
+    copyable_rows_.push_back(row);
+    rows_.push_back(row);
+  }
+
   void RebuildIfNeeded() {
     auto *history = history_getter_ ? history_getter_() : nullptr;
     const std::size_t history_revision = ComputeHistoryRevision(history);
@@ -484,6 +714,7 @@ private:
     last_history_revision_ = history_revision;
 
     rows_.clear();
+    copyable_rows_.clear();
     history_inner_->DetachAllChildren();
 
     if (history) {
@@ -554,17 +785,12 @@ private:
               history->turns[turn_index + 1].turnId.rfind("compaction-end-", 0) == 0;
           flush_quick_cluster();
           auto full_width_separator = [](const std::string &label) {
-            int width = ftxui::Terminal::Size().dimx;
-            std::string label_text = " " + label + " ";
-            if (width <= static_cast<int>(label_text.size())) {
-              return ftxui::text(label_text) | ftxui::dim | ftxui::center |
-                     ftxui::flex;
-            }
-            int left = (width - static_cast<int>(label_text.size())) / 2;
-            int right = width - static_cast<int>(label_text.size()) - left;
-            std::string line =
-                std::string(left, '-') + label_text + std::string(right, '-');
-            return ftxui::text(line) | ftxui::dim | ftxui::flex;
+            return ftxui::hbox({
+                       ftxui::filler() | ftxui::xflex,
+                       ftxui::text(" " + label + " ") | ftxui::dim,
+                       ftxui::filler() | ftxui::xflex,
+                   }) |
+                   ftxui::xflex;
           };
           auto compaction_separator = [full_width_separator]() {
             return full_width_separator("Compaction");
@@ -589,18 +815,20 @@ private:
             for (const auto &part : msg.content) {
               if (auto *txt = std::get_if<firmius::shared::TextContent>(&part)) {
                 std::string text = txt->text;
-                rows_.push_back(ftxui::Make<RowComponent>(
-                    nullptr, [text = std::move(text)] {
+                std::string copy_text = text;
+                AddCopyableRow([text = std::move(text)](bool selected) {
+                      (void)selected;
                       return firmius::tui::IndentAgentRow(
                           firmius::tui::RenderMarkdown(text));
-                    }));
+                    }, std::move(copy_text));
               } else if (auto *thk = std::get_if<firmius::shared::ThinkingContent>(&part)) {
                 std::string thinking = thk->thinking;
-                rows_.push_back(ftxui::Make<RowComponent>(
-                    nullptr, [thinking = std::move(thinking)] {
+                std::string copy_text = thinking;
+                AddCopyableRow([thinking = std::move(thinking)](bool selected) {
+                      (void)selected;
                       return firmius::tui::IndentAgentRow(
                           firmius::tui::RenderMarkdown(thinking, true));
-                    }));
+                    }, std::move(copy_text));
               }
             }
           }
@@ -625,9 +853,45 @@ private:
           bool isUser = (msg.role == firmius::shared::Role::User);
           ftxui::Color prefixColor =
               isUser ? theme.chat.user_prefix : theme.chat.agent_prefix;
+          auto makeTag = [&theme](const std::string &label) {
+            return ftxui::text(" " + label + " ") | ftxui::bold |
+                   ftxui::color(theme.base.bg) |
+                   ftxui::bgcolor(theme.base.highlight);
+          };
+          auto renderUserMessage = [prefixColor, prefix, theme, makeTag](
+                                       const std::string &text,
+                                       int image_count,
+                                       bool selected) {
+            ftxui::Elements body;
+            body.push_back(
+                ftxui::hbox({
+                    ftxui::text(prefix) | ftxui::bold |
+                        ftxui::color(prefixColor),
+                    firmius::tui::RenderMarkdown(text) | ftxui::xflex,
+                }) |
+                ftxui::xflex);
+            if (image_count > 0) {
+              ftxui::Elements tags;
+              for (int i = 0; i < image_count; ++i) {
+                if (i > 0) {
+                  tags.push_back(ftxui::text(" "));
+                }
+                tags.push_back(makeTag("IMAGE " + std::to_string(i + 1)));
+              }
+              body.push_back(ftxui::hbox(std::move(tags)) | ftxui::xflex);
+            }
+            const auto bubble_bg =
+                selected ? ftxui::Color::RGB(72, 96, 152) : theme.input.bg;
+            return ftxui::vbox({
+                       ftxui::text(""),
+                       ftxui::vbox(std::move(body)) | ftxui::xflex,
+                       ftxui::text(""),
+                   }) |
+                   ftxui::bgcolor(bubble_bg) | ftxui::xflex;
+          };
 
           auto decorateMsg = [prefixColor,
-                              prefix, isUser](const ftxui::Element &content) {
+                              prefix, isUser, theme](const ftxui::Element &content) {
             auto e = ftxui::hbox({
                 ftxui::text(prefix) | ftxui::bold | ftxui::color(prefixColor),
                 content | ftxui::xflex,
@@ -638,26 +902,56 @@ private:
             return firmius::tui::IndentAgentRow(e);
           };
 
+          if (isUser) {
+            flush_quick_cluster();
+            std::string user_text;
+            int image_count = 0;
+            for (const auto &part : msg.content) {
+              if (auto *txt = std::get_if<firmius::shared::TextContent>(&part)) {
+                if (!user_text.empty()) {
+                  user_text += "\n";
+                }
+                user_text += txt->text;
+              } else if (std::holds_alternative<firmius::shared::ImageContent>(part)) {
+                ++image_count;
+              }
+            }
+            std::string copy_text = user_text;
+            copyable_rows_.push_back(ftxui::Make<CopyableRowComponent>(
+                [renderUserMessage, user_text, image_count](bool selected) {
+                  return renderUserMessage(user_text, image_count, selected);
+                },
+                std::move(copy_text)));
+            rows_.push_back(copyable_rows_.back());
+            rows_.push_back(ftxui::Make<RowComponent>(
+                nullptr, [] { return ftxui::text(""); }));
+            continue;
+          }
+
           for (const auto &part : msg.content) {
             if (auto *txt = std::get_if<firmius::shared::TextContent>(&part)) {
               flush_quick_cluster();
               std::string text = txt->text;
-              auto row = ftxui::Make<RowComponent>(
-                  nullptr, [decorateMsg, text = std::move(text)] {
+              std::string copy_text = text;
+              AddCopyableRow([decorateMsg, text = std::move(text)](bool selected) {
+                    (void)selected;
                     return decorateMsg(firmius::tui::RenderMarkdown(text));
-                  });
-              rows_.push_back(row);
+                  }, std::move(copy_text));
+              rows_.push_back(ftxui::Make<RowComponent>(
+                  nullptr, [] { return ftxui::text(""); }));
             } else if (auto *thk =
                            std::get_if<firmius::shared::ThinkingContent>(
                                &part)) {
               flush_quick_cluster();
               std::string thinking = thk->thinking;
-              auto row = ftxui::Make<RowComponent>(
-                  nullptr, [decorateMsg, thinking = std::move(thinking)] {
+              std::string copy_text = thinking;
+              AddCopyableRow([decorateMsg, thinking = std::move(thinking)](bool selected) {
+                    (void)selected;
                     return decorateMsg(
                         firmius::tui::RenderMarkdown(thinking, true));
-                  });
-              rows_.push_back(row);
+                  }, std::move(copy_text));
+              rows_.push_back(ftxui::Make<RowComponent>(
+                  nullptr, [] { return ftxui::text(""); }));
             } else if (auto *tc = std::get_if<firmius::shared::ToolCallContent>(
                            &part)) {
               auto &view = tool_views_[tc->id];
@@ -688,12 +982,15 @@ private:
 
               flush_quick_cluster();
               auto block = firmius::tui::ToolBlock(
-                  view, nullptr, nullptr, process_state_getter_,
-                  subagent_state_getter_);
-              auto row = ftxui::Make<RowComponent>(block, [decorateMsg, block] {
-                return decorateMsg(block->Render());
+                  view, sub_history_getter_, sub_stream_getter_,
+                  process_state_getter_,
+                  subagent_state_getter_, agent_focus_handler_);
+              auto row = ftxui::Make<RowComponent>(block, [block] {
+                return block->Render() | ftxui::xflex;
               });
               rows_.push_back(row);
+              rows_.push_back(ftxui::Make<RowComponent>(
+                  nullptr, [] { return ftxui::text(""); }));
             } else if (auto *tr =
                            std::get_if<firmius::shared::ToolResultContent>(
                                &part)) {
@@ -714,6 +1011,10 @@ private:
                 view->phase = firmius::tui::ToolPhase::Finished;
               }
 
+              if (!firmius::tui::ShouldRenderToolCallView(*view)) {
+                continue;
+              }
+
               if (firmius::tui::IsQuickInspectionTool(view->name)) {
                 if (!seen_tool_call[tr->toolCallId]) {
                   bool is_success = (view->phase != firmius::tui::ToolPhase::Error);
@@ -725,13 +1026,16 @@ private:
               if (!seen_tool_call[tr->toolCallId]) {
                 flush_quick_cluster();
                 auto block = firmius::tui::ToolBlock(
-                    view, nullptr, nullptr, process_state_getter_,
-                    subagent_state_getter_);
+                    view, sub_history_getter_, sub_stream_getter_,
+                    process_state_getter_,
+                    subagent_state_getter_, agent_focus_handler_);
                 auto row =
-                    ftxui::Make<RowComponent>(block, [decorateMsg, block] {
-                      return decorateMsg(block->Render());
+                    ftxui::Make<RowComponent>(block, [block] {
+                      return block->Render() | ftxui::xflex;
                     });
                 rows_.push_back(row);
+                rows_.push_back(ftxui::Make<RowComponent>(
+                    nullptr, [] { return ftxui::text(""); }));
                 seen_tool_call[tr->toolCallId] = true;
               }
             } else if (auto *err =
@@ -744,6 +1048,8 @@ private:
                         RenderErrorDisplay(theme, error));
                   });
               rows_.push_back(row);
+              rows_.push_back(ftxui::Make<RowComponent>(
+                  nullptr, [] { return ftxui::text(""); }));
             } else if (auto *notice =
                            std::get_if<firmius::shared::NoticeContent>(
                                &part)) {
@@ -755,6 +1061,8 @@ private:
                         RenderNoticeDisplay(theme, notice_copy));
                   });
               rows_.push_back(row);
+              rows_.push_back(ftxui::Make<RowComponent>(
+                  nullptr, [] { return ftxui::text(""); }));
             } else if (std::holds_alternative<firmius::shared::ImageContent>(
                            part)) {
               flush_quick_cluster();
@@ -764,9 +1072,12 @@ private:
                     return decorateMsg(ftxui::text(indicator));
                   });
               rows_.push_back(row);
+              rows_.push_back(ftxui::Make<RowComponent>(
+                  nullptr, [] { return ftxui::text(""); }));
             }
           }
         }
+
       }
       flush_quick_cluster(true);
     }
@@ -786,12 +1097,14 @@ private:
   firmius::tui::ToolViewProvider tool_view_provider_;
   firmius::tui::ProcessStateGetter process_state_getter_;
   firmius::tui::SubagentStateGetter subagent_state_getter_;
+  firmius::tui::AgentFocusHandler agent_focus_handler_;
   firmius::tui::HistoryGetter sub_history_getter_;
   firmius::tui::StreamGetter sub_stream_getter_;
   firmius::tui::LiveQuickSummaryProvider live_quick_summary_provider_;
   std::function<bool()> show_internal_nudges_getter_;
   size_t last_history_revision_ = std::numeric_limits<std::size_t>::max();
   std::vector<ftxui::Component> rows_;
+  std::vector<std::shared_ptr<CopyableRowComponent>> copyable_rows_;
   ftxui::Component history_inner_;
   ftxui::Component history_container_;
   ftxui::Component container_;
@@ -799,6 +1112,15 @@ private:
   std::shared_ptr<firmius::tui::ScrollableBoxComponent> scrollable_;
   std::unordered_map<std::string, std::shared_ptr<firmius::tui::ToolCallView>>
       tool_views_;
+  bool copy_drag_candidate_ = false;
+  bool copy_drag_started_ = false;
+  bool pending_copy_release_ = false;
+  int press_x_ = -1;
+  int press_y_ = -1;
+  int last_drag_x_ = -1;
+  int last_drag_y_ = -1;
+  int pending_release_x_ = -1;
+  int pending_release_y_ = -1;
 };
 
 } // namespace
@@ -809,6 +1131,7 @@ ftxui::Component firmius::tui::ChatWindow(
     ToolViewProvider tool_view_provider,
     ProcessStateGetter process_state_getter,
     SubagentStateGetter subagent_state_getter,
+    AgentFocusHandler agent_focus_handler,
     firmius::tui::HistoryGetter sub_history_getter,
     firmius::tui::StreamGetter sub_stream_getter,
     firmius::tui::LiveQuickSummaryProvider live_quick_summary_provider,
@@ -816,7 +1139,7 @@ ftxui::Component firmius::tui::ChatWindow(
   return ftxui::Make<ChatWindowComponent>(
       std::move(history_getter), std::move(live_rows_provider),
       std::move(tool_view_provider), std::move(process_state_getter),
-      std::move(subagent_state_getter),
+      std::move(subagent_state_getter), std::move(agent_focus_handler),
       std::move(sub_history_getter),
       std::move(sub_stream_getter), std::move(live_quick_summary_provider),
       std::move(show_internal_nudges_getter));

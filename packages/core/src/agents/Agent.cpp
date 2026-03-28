@@ -189,39 +189,18 @@ void saveCompactionSnapshot(const std::string &threadId,
   if (threadId.empty() || agentId.empty() || compactionId.empty()) {
     return;
   }
-
-  rapidjson::Document doc;
-  doc.SetObject();
-  auto &alloc = doc.GetAllocator();
-  doc.AddMember("compactionId", rapidjson::Value(compactionId.c_str(), alloc),
-                alloc);
-  doc.AddMember("threadId", rapidjson::Value(threadId.c_str(), alloc), alloc);
-  doc.AddMember("agentId", rapidjson::Value(agentId.c_str(), alloc), alloc);
-  doc.AddMember("previousContextSize", previousContextSize, alloc);
-
-  rapidjson::Value turnsArray(rapidjson::kArrayType);
-  for (const auto &turn : turns) {
-    rapidjson::Document turnDoc = toJson(turn);
-    rapidjson::Value turnValue;
-    turnValue.CopyFrom(turnDoc, alloc);
-    turnsArray.PushBack(turnValue, alloc);
-  }
-  doc.AddMember("turns", turnsArray, alloc);
-
-  rapidjson::StringBuffer buffer;
-  rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
-  doc.Accept(writer);
-
-  std::error_code ec;
-  const std::filesystem::path path = ThreadManager::compactionSnapshotPath(
-      ThreadManager::defaultBasePath(), threadId, agentId);
-  std::filesystem::create_directories(path.parent_path(), ec);
-  std::ofstream out(path);
-  if (!out.is_open()) {
-    return;
-  }
-  out << buffer.GetString();
-  out.close();
+  ThreadManager tm(ThreadManager::defaultBasePath());
+  CompactionSnapshot snapshot;
+  snapshot.compactionId = compactionId;
+  snapshot.threadId = threadId;
+  snapshot.agentId = agentId;
+  snapshot.previousContextSize = previousContextSize;
+  snapshot.createdAt = static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::system_clock::now().time_since_epoch())
+          .count());
+  snapshot.turns = turns;
+  tm.appendCompactionSnapshot(threadId, agentId, snapshot);
 }
 
 std::string buildPlanAndTodoSnapshot(const AgentContext &context) {
@@ -949,6 +928,9 @@ void Agent::runImpl(const std::optional<std::string> &task,
             .count());
     taskTurn.messages.push_back(taskMsg);
     context.history->turns.push_back(taskTurn);
+    if (context.config.persistHistory && journaler) {
+      journaler->appendTurn(taskTurn);
+    }
   }
   bool taskFinished = false;
   int maxTurns = context.config.maxTurns > 0 ? context.config.maxTurns : 200;
@@ -956,6 +938,14 @@ void Agent::runImpl(const std::optional<std::string> &task,
   int consecutiveProviderFailures = 0;
   const int maxProviderRetries = 3;
   std::optional<std::string> lastTodoContinuationFingerprint;
+  auto hasQueuedUserTurnPending = [this]() {
+    if (!context.history || context.history->turns.empty()) {
+      return false;
+    }
+    const auto &lastTurn = context.history->turns.back();
+    return lastTurn.turnId.rfind("user-task-", 0) == 0 && !lastTurn.messages.empty() &&
+           lastTurn.messages.front().role == Role::User;
+  };
   while (!taskFinished && turnCount < maxTurns && !runCancelToken->load()) {
     applyPendingModelSwitchIfAny();
 
@@ -1219,6 +1209,12 @@ void Agent::runImpl(const std::optional<std::string> &task,
       // --- Build assistant turn ---
       persistAssistantTurn(turnStopReason, true);
 
+      if (hasQueuedUserTurnPending()) {
+        context.state.currentStatus = AgentStatus::ProviderWaiting;
+        onEvent(ProviderWaiting{});
+        continue;
+      }
+
       // --- Check for termination ---
       if (accumulatedToolChunks.empty()) {
         if (fullResponse.empty() && fullThinking.empty()) {
@@ -1357,6 +1353,12 @@ void Agent::runImpl(const std::optional<std::string> &task,
           continue;
         }
 
+        if (hasQueuedUserTurnPending()) {
+          context.state.currentStatus = AgentStatus::ProviderWaiting;
+          onEvent(ProviderWaiting{});
+          continue;
+        }
+
         const TodoStateSnapshot todoState = readTodoState(context);
         if (todoState.hasIncomplete) {
           const std::string fingerprint =
@@ -1414,30 +1416,6 @@ void Agent::runImpl(const std::optional<std::string> &task,
   // --- Final state ---
   if (runCancelToken->load()) {
     context.state.currentStatus = AgentStatus::Cancelled;
-    if (!context.history->turns.empty()) {
-      const auto &lastTurn = context.history->turns.back();
-      const bool alreadyCancelledTurn =
-          lastTurn.turnId.rfind("cancelled-", 0) == 0;
-      if (!alreadyCancelledTurn) {
-        AgentTurn cancelledTurn;
-        cancelledTurn.turnId =
-            "cancelled-" + std::to_string(context.history->turns.size());
-        Message cancelledMsg;
-        cancelledMsg.role = Role::System;
-        cancelledMsg.visibility = MessageVisibility::Visible;
-        cancelledMsg.content.push_back(NoticeContent{
-            "Agent Cancelled",
-            "The agent execution was interrupted.",
-            "Execution stopped before completion and can be resumed.",
-            NoticeSeverity::Warning});
-        cancelledMsg.timestamp = nowMs();
-        cancelledTurn.messages.push_back(cancelledMsg);
-        context.history->turns.push_back(cancelledTurn);
-        if (context.config.persistHistory && journaler) {
-          journaler->appendTurn(cancelledTurn);
-        }
-      }
-    }
   } else if (context.state.currentStatus != AgentStatus::Error) {
     context.state.currentStatus = AgentStatus::Idle;
   }
@@ -1838,6 +1816,14 @@ void Agent::compactContext(
           onEvent(AgentCompactionText{context.identity.id, act->delta,
                                       context.identity.parentId});
         } else if (auto *thk = std::get_if<AgentCompactionThinking>(&ev)) {
+          fullThinking += thk->delta;
+          onEvent(AgentCompactionThinking{context.identity.id, thk->delta,
+                                          context.identity.parentId});
+        } else if (auto *txt = std::get_if<TextChunk>(&ev)) {
+          fullSummary += txt->delta;
+          onEvent(AgentCompactionText{context.identity.id, txt->delta,
+                                      context.identity.parentId});
+        } else if (auto *thk = std::get_if<ThinkingChunk>(&ev)) {
           fullThinking += thk->delta;
           onEvent(AgentCompactionThinking{context.identity.id, thk->delta,
                                           context.identity.parentId});

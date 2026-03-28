@@ -21,6 +21,7 @@ target_sources(firmius PRIVATE
     src/commands/BenchmarksCommand.cpp
     src/commands/QuotasCommand.cpp
     src/commands/AccountsCommand.cpp
+    src/commands/QuitCommand.cpp
     src/commands/RouterCommand.cpp
     src/commands/PurposesCommand.cpp
     src/commands/WorkflowsCommand.cpp

@@ -7,6 +7,7 @@
 #include "ActivePlanState.hpp"
 #include "StreamStateManager.hpp"
 #include "NotificationManager.hpp"
+#include "persistence/ThreadManager.hpp"
 #include "components/TodoLane.hpp"
 #include <ftxui/component/component_base.hpp>
 #include <ftxui/component/screen_interactive.hpp>
@@ -15,6 +16,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_set>
 #include <unordered_map>
 #include <vector>
 
@@ -30,6 +32,137 @@ struct InputBarModel;
 struct AgentStripModel;
 struct PlanLaneModel;
 struct TodoLaneModel;
+
+namespace detail {
+
+inline std::optional<std::string> compactionIdFromTurnIdForDisplay(
+    const std::string& turnId) {
+  constexpr const char* prefixes[] = {"compaction-start-", "compaction-summary-",
+                                      "compaction-end-"};
+  for (const char* prefix : prefixes) {
+    const std::size_t len = std::char_traits<char>::length(prefix);
+    if (turnId.rfind(prefix, 0) == 0) {
+      return turnId.substr(len);
+    }
+  }
+  return std::nullopt;
+}
+
+inline std::size_t overlappingSnapshotSuffixLengthForDisplay(
+    const std::vector<shared::AgentTurn>& snapshotTurns,
+    const std::vector<shared::AgentTurn>& currentTurns,
+    std::size_t currentStart) {
+  const std::size_t maxCount =
+      std::min(snapshotTurns.size(), currentTurns.size() - currentStart);
+  for (std::size_t count = maxCount; count > 0; --count) {
+    bool allMatch = true;
+    for (std::size_t i = 0; i < count; ++i) {
+      if (snapshotTurns[snapshotTurns.size() - count + i].turnId !=
+          currentTurns[currentStart + i].turnId) {
+        allMatch = false;
+        break;
+      }
+    }
+    if (allMatch) {
+      return count;
+    }
+  }
+  return 0;
+}
+
+inline std::size_t overlappingRenderedPrefixLengthForDisplay(
+    const std::vector<shared::AgentTurn>& renderedTurns,
+    const std::vector<shared::AgentTurn>& snapshotTurns) {
+  const std::size_t maxCount =
+      std::min(renderedTurns.size(), snapshotTurns.size());
+  for (std::size_t count = maxCount; count > 0; --count) {
+    bool allMatch = true;
+    for (std::size_t i = 0; i < count; ++i) {
+      if (renderedTurns[renderedTurns.size() - count + i].turnId !=
+          snapshotTurns[i].turnId) {
+        allMatch = false;
+        break;
+      }
+    }
+    if (allMatch) {
+      return count;
+    }
+  }
+  return 0;
+}
+
+inline std::vector<shared::AgentTurn> expandCompactionTranscriptTurnsForDisplay(
+    const std::vector<shared::AgentTurn>& turns,
+    const std::unordered_map<std::string, core::CompactionSnapshot>& snapshots,
+    std::unordered_set<std::string>& expanded_ids) {
+  std::vector<shared::AgentTurn> result;
+  for (std::size_t i = 0; i < turns.size(); ++i) {
+    const auto compactionId = compactionIdFromTurnIdForDisplay(turns[i].turnId);
+    if (!compactionId.has_value() ||
+        turns[i].turnId.rfind("compaction-start-", 0) != 0) {
+      result.push_back(turns[i]);
+      continue;
+    }
+
+    std::size_t blockEnd = i;
+    while (blockEnd + 1 < turns.size()) {
+      const auto nextId =
+          compactionIdFromTurnIdForDisplay(turns[blockEnd + 1].turnId);
+      if (!nextId.has_value() || *nextId != *compactionId) {
+        break;
+      }
+      ++blockEnd;
+      if (turns[blockEnd].turnId.rfind("compaction-end-", 0) == 0) {
+        break;
+      }
+    }
+
+    auto snapshotIt = snapshots.find(*compactionId);
+    if (snapshotIt != snapshots.end() && !expanded_ids.count(*compactionId)) {
+      expanded_ids.insert(*compactionId);
+      const auto& snapshotTurns = snapshotIt->second.turns;
+      auto expandedSnapshot = expandCompactionTranscriptTurnsForDisplay(
+          snapshotTurns, snapshots, expanded_ids);
+      const std::size_t renderedOverlap =
+          overlappingRenderedPrefixLengthForDisplay(result, expandedSnapshot);
+      if (renderedOverlap > 0 && renderedOverlap <= expandedSnapshot.size()) {
+        expandedSnapshot.erase(expandedSnapshot.begin(),
+                               expandedSnapshot.begin() + renderedOverlap);
+      }
+      result.insert(result.end(), expandedSnapshot.begin(),
+                    expandedSnapshot.end());
+
+      for (std::size_t j = i; j <= blockEnd; ++j) {
+        result.push_back(turns[j]);
+      }
+
+      const std::size_t overlap = overlappingSnapshotSuffixLengthForDisplay(
+          snapshotTurns, turns, blockEnd + 1);
+      const std::size_t nextIndex = blockEnd + overlap + 1;
+      if (nextIndex >= turns.size()) {
+        break;
+      }
+      i = nextIndex - 1;
+      continue;
+    }
+
+    for (std::size_t j = i; j <= blockEnd; ++j) {
+      result.push_back(turns[j]);
+    }
+    i = blockEnd;
+  }
+  return result;
+}
+
+} // namespace detail
+
+inline std::vector<shared::AgentTurn> expandCompactionTranscriptForDisplay(
+    const std::vector<shared::AgentTurn>& turns,
+    const std::unordered_map<std::string, core::CompactionSnapshot>& snapshots) {
+  std::unordered_set<std::string> expanded_ids;
+  return detail::expandCompactionTranscriptTurnsForDisplay(turns, snapshots,
+                                                           expanded_ids);
+}
 
 class TuiState {
 public:
@@ -48,6 +181,11 @@ public:
   void shutdown();
 
   InputBarModel& getInputBarModel();
+  void clearInputBuffer();
+  bool handleCtrlC();
+  void requestQuit();
+  bool isQuitArmed() const;
+  std::string exitSummaryText() const;
 
   std::string getProcessOutput(const std::string &pid);
   std::string getSubagentOutput(const std::string &subagentId);
@@ -71,6 +209,7 @@ public:
   bool hasActiveThread() const;
   std::string currentThreadId() const;
   shared::ThreadPermissionMode currentThreadPermissionMode() const;
+  bool focusAgent(const std::string &agent_id);
 
 private:
   TuiState();
@@ -88,6 +227,7 @@ private:
   void updateAgentStripModel();
   void updatePlanLaneModel();
   void updateTodoLaneModel();
+  void refreshFocusedHistory();
   std::optional<shared::Plan> loadActivePlanForThread(
       const shared::ThreadMetadata &thread) const;
   const shared::WorkChunk *
@@ -141,6 +281,9 @@ private:
   bool process_focus_expanded_ = false;
   int last_terminal_width_ = 0;
   int last_terminal_height_ = 0;
+  std::optional<std::chrono::steady_clock::time_point> quit_arm_deadline_;
+  std::size_t quit_arm_generation_ = 0;
+  shared::AgentMetrics session_metrics_;
 };
 
 } // namespace firmius::tui

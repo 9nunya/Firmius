@@ -92,7 +92,8 @@ ftxui::Component InputBar(
     const std::shared_ptr<InputBarModel> &model,
     std::function<void(const std::string &,
                        const std::vector<PastedBlock> &images)>
-        on_submit);
+        on_submit,
+    std::function<void()> on_escape = nullptr);
 
 } // namespace firmius::tui
 

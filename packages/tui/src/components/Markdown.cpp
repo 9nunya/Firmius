@@ -329,15 +329,6 @@ static ftxui::Element renderInline(const std::string &text, bool dim) {
     return ftxui::text("");
   }
 
-  // For simple text without formatting, use paragraph for proper wrapping
-  if (cleaned.find('*') == std::string::npos &&
-      cleaned.find('`') == std::string::npos) {
-    auto e = ftxui::paragraph(cleaned);
-    if (dim)
-      e = e | ftxui::dim;
-    return e;
-  }
-
   // Parse inline styles (bold, italic, code) into tokens.
   struct Token {
     std::string text;

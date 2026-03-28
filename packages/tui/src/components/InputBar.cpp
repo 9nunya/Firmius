@@ -154,16 +154,17 @@ static std::string expandPastedContent(
             });
 
   for (const auto &block : sorted_blocks) {
-    if (block.type != "text")
-      continue;
-
     // Add text before this block
     if (block.start_pos > pos && block.start_pos <= buffer.size()) {
       result += buffer.substr(pos, block.start_pos - pos);
     }
 
-    // Add the actual content instead of placeholder
-    result += block.content;
+    if (block.type == "text") {
+      // Replace text placeholders with their original content.
+      result += block.content;
+    }
+    // Image placeholders are removed from submitted text; the image payload is
+    // sent separately as ImageContent.
 
     pos = block.end_pos;
   }
@@ -177,6 +178,19 @@ static std::string expandPastedContent(
 }
 
 namespace {
+
+std::string trimWhitespaceCopy(std::string value) {
+  auto is_space = [](unsigned char ch) { return std::isspace(ch); };
+  value.erase(value.begin(),
+              std::find_if(value.begin(), value.end(),
+                           [&](unsigned char ch) { return !is_space(ch); }));
+  value.erase(
+      std::find_if(value.rbegin(), value.rend(),
+                   [&](unsigned char ch) { return !is_space(ch); })
+          .base(),
+      value.end());
+  return value;
+}
 
 constexpr size_t MAX_PROVIDER_SUGGESTIONS = 6;
 
@@ -274,7 +288,8 @@ buildAtReferenceSuggestions(const std::shared_ptr<InputBarModel> &model,
 ftxui::Component InputBar(
     const std::shared_ptr<InputBarModel> &model,
     std::function<void(const std::string &, const std::vector<PastedBlock> &)>
-        on_submit) {
+        on_submit,
+    std::function<void()> on_escape) {
 
   auto scroll_top = std::make_shared<int>(0);
   auto suggestion_index = std::make_shared<int>(0);
@@ -302,7 +317,7 @@ ftxui::Component InputBar(
   auto with_keys = ftxui::CatchEvent(input, [model, on_submit, input,
                                              scroll_top, suggestion_index,
                                              in_paste, paste_buffer,
-                                             just_submitted](
+                                             just_submitted, on_escape](
                                                 ftxui::Event event) {
     if (!model || !model->buffer || !model->cursor)
       return false;
@@ -310,11 +325,22 @@ ftxui::Component InputBar(
     // Skip processing if we just submitted (let input component catch up)
     if (*just_submitted) {
       *just_submitted = false;
+      if (event == ftxui::Event::Return) {
+        return true;
+      }
       return false;
     }
 
     // Get raw input once for all handlers
     std::string raw = event.input();
+
+    if (event == ftxui::Event::Escape) {
+      if (on_escape) {
+        on_escape();
+        return true;
+      }
+      return false;
+    }
 
     // Handle bracketed paste (Ctrl+V or terminal paste)
     // Bracketed paste starts with \x1b[200~ and ends with \x1b[201~
@@ -583,8 +609,8 @@ ftxui::Component InputBar(
 
     const bool is_shift_enter = IsShiftEnterInput(raw);
 
-    if (event == ftxui::Event::Tab || (event == ftxui::Event::Return &&
-                                       !is_shift_enter)) {
+    if (!is_shift_enter &&
+        (event == ftxui::Event::Tab || event == ftxui::Event::Return)) {
       if (ac) {
         if (ac->is_typing_command_name && !ac->command_matches.empty()) {
           size_t idx = static_cast<size_t>(*suggestion_index);
@@ -658,9 +684,10 @@ ftxui::Component InputBar(
 
     // Handle Enter (submit)
     if (event == ftxui::Event::Return) {
-      if (!model->buffer->empty()) {
+      std::string expanded =
+          expandPastedContent(*model->buffer, model->pasted_blocks);
+      if (!trimWhitespaceCopy(expanded).empty()) {
         // Expand pasted block placeholders to actual content before submitting
-        std::string expanded = expandPastedContent(*model->buffer, model->pasted_blocks);
         on_submit(expanded, collectImageBlocks(model->pasted_blocks));
         model->buffer->clear();
         model->pasted_blocks.clear();
@@ -671,6 +698,9 @@ ftxui::Component InputBar(
         // Consume the event - don't let input component insert newline
         return true;
       }
+      model->buffer->clear();
+      model->pasted_blocks.clear();
+      *model->cursor = 0;
       return true;
     }
 

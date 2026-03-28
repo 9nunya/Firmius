@@ -366,6 +366,7 @@ std::string Harness::newThread(HostCreationOptions hostOptions,
       ownerPid = (fd == -2) ? lockManager_.getOwnerPid(threadId) : -1;
     } else {
       lockAcquired = true;
+      const std::string previousThreadId = currentThreadId_;
       if (!currentThreadId_.empty() && !focusedAgentId_.empty()) {
         threadAgentMap_[currentThreadId_] = focusedAgentId_;
       }
@@ -380,6 +381,9 @@ std::string Harness::newThread(HostCreationOptions hostOptions,
       focusedAgentId_.clear();
       clearQueue();
       metadata = threadManager_.getMetadata(threadId);
+      if (!previousThreadId.empty() && previousThreadId != threadId) {
+        lockManager_.release(previousThreadId);
+      }
     }
   }
 
@@ -435,6 +439,7 @@ bool Harness::switchThread(const std::string &threadId) {
 
   {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
+    const std::string previousThreadId = currentThreadId_;
     if (!currentThreadId_.empty() && !focusedAgentId_.empty()) {
       threadAgentMap_[currentThreadId_] = focusedAgentId_;
     }
@@ -464,6 +469,9 @@ bool Harness::switchThread(const std::string &threadId) {
     }
 
     clearQueue();
+    if (!previousThreadId.empty() && previousThreadId != threadId) {
+      lockManager_.release(previousThreadId);
+    }
   }
 
   if (manifestRecovered) {
@@ -1066,7 +1074,7 @@ void Harness::routeEngineEvent(const firmius::shared::AppEvent &event) {
             }
             const std::string agentThreadId = resolveThreadForAgent(ev.agentId);
             if (!agentThreadId.empty()) {
-              drainQueueForAgent(ev.agentId, agentThreadId);
+              drainQueueForAgent(ev.agentId, agentThreadId, true);
             }
           } else if constexpr (std::is_same_v<T, AgentError>) {
             toEmit.push_back(ev);
@@ -1736,7 +1744,8 @@ void Harness::maybeGenerateTitle(const std::string &threadId,
 }
 
 void Harness::drainQueueForAgent(const std::string &agentId,
-                                 const std::string &threadId) {
+                                 const std::string &threadId,
+                                 bool allowRunningInjection) {
   if (messageQueue_.empty() || agentId.empty() || threadId.empty()) {
     return;
   }
@@ -1749,7 +1758,11 @@ void Harness::drainQueueForAgent(const std::string &agentId,
       agent->getContext().history->threadId != threadId) {
     return;
   }
-  if (agent->isRunning() || agent->isBooting()) {
+  if (agent->isBooting()) {
+    return;
+  }
+  const bool agentRunning = agent->isRunning();
+  if (agentRunning && !allowRunningInjection) {
     return;
   }
 
@@ -1775,7 +1788,7 @@ void Harness::drainQueueForAgent(const std::string &agentId,
         firmius::shared::MessageDequeued{item.id, item.threadId, item.agentId});
   }
 
-  if (batch.size() > 1) {
+  auto appendQueuedUserTurn = [&](const QueuedMessage &item) {
     auto &ctx = agent->getMutableContext();
     if (ctx.history) {
       std::unique_ptr<Journaler> journaler;
@@ -1783,30 +1796,40 @@ void Harness::drainQueueForAgent(const std::string &agentId,
         journaler = std::make_unique<Journaler>(ctx.history->threadId, agentId);
       }
 
-      for (size_t i = 0; i + 1 < batch.size(); ++i) {
-        AgentTurn taskTurn;
-        taskTurn.turnId =
-            "user-task-" + std::to_string(ctx.history->turns.size());
-        Message taskMsg;
-        taskMsg.role = Role::User;
-        taskMsg.content.push_back(TextContent{batch[i].text});
+      AgentTurn taskTurn;
+      taskTurn.turnId =
+          "user-task-" + std::to_string(ctx.history->turns.size());
+      Message taskMsg;
+      taskMsg.role = Role::User;
+      taskMsg.content.push_back(TextContent{item.text});
 
-        // Add images for this message
-        for (const auto &img : batch[i].images) {
-          taskMsg.content.push_back(img);
-        }
-
-        auto now = std::chrono::system_clock::now();
-        taskMsg.timestamp = static_cast<uint64_t>(
-            std::chrono::duration_cast<std::chrono::milliseconds>(
-                now.time_since_epoch())
-                .count());
-        taskTurn.messages.push_back(taskMsg);
-        ctx.history->turns.push_back(taskTurn);
-        if (ctx.config.persistHistory && journaler) {
-          journaler->appendTurn(taskTurn);
-        }
+      for (const auto &img : item.images) {
+        taskMsg.content.push_back(img);
       }
+
+      auto now = std::chrono::system_clock::now();
+      taskMsg.timestamp = static_cast<uint64_t>(
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+              now.time_since_epoch())
+              .count());
+      taskTurn.messages.push_back(taskMsg);
+      ctx.history->turns.push_back(taskTurn);
+      if (ctx.config.persistHistory && journaler) {
+        journaler->appendTurn(taskTurn);
+      }
+    }
+  };
+
+  if (agentRunning) {
+    for (const auto &item : batch) {
+      appendQueuedUserTurn(item);
+    }
+    return;
+  }
+
+  if (batch.size() > 1) {
+    for (size_t i = 0; i + 1 < batch.size(); ++i) {
+      appendQueuedUserTurn(batch[i]);
     }
   }
 
@@ -1971,17 +1994,22 @@ Harness::snapshotResumableTurnForAgent(const std::string &threadId,
 
     std::optional<Role> finalRoleAfterTurn;
     bool sawCancellationNotice = false;
+    bool sawCancelledStopReason = false;
     for (auto later = it.base(); later != history->turns.end(); ++later) {
       if (later->messages.empty()) {
+        sawCancelledStopReason =
+            sawCancelledStopReason || later->stopReason == StopReason::Cancelled;
         continue;
       }
       finalRoleAfterTurn = later->messages.back().role;
       sawCancellationNotice = sawCancellationNotice || isCancellationNotice(later->messages.back());
+      sawCancelledStopReason =
+          sawCancelledStopReason || later->stopReason == StopReason::Cancelled;
     }
 
     const bool isCancelledTurn = it->turnId.rfind("cancelled-", 0) == 0;
     if (!finalRoleAfterTurn.has_value() ||
-        (!isCancelledTurn && !sawCancellationNotice &&
+        (!isCancelledTurn && !sawCancellationNotice && !sawCancelledStopReason &&
          *finalRoleAfterTurn != Role::Error)) {
       return std::nullopt;
     }
