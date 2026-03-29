@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <iomanip>
 #include <sstream>
+#include <unordered_map>
 
 namespace firmius::shared::utils {
 
@@ -19,6 +20,43 @@ constexpr uint32_t fnv1a_32(std::string_view data) noexcept {
     }
 
     return hash;
+}
+
+constexpr uint64_t fnv1a_64(std::string_view data) noexcept {
+    uint64_t hash = 0xcbf29ce484222325ULL;
+    for (char c : data) {
+        hash ^= static_cast<uint8_t>(c);
+        hash *= 0x100000001b3ULL;
+    }
+
+    return hash;
+}
+
+std::string hex64(uint64_t value, int width = 12) {
+    std::stringstream ss;
+    ss << std::hex << std::setw(width) << std::setfill('0')
+       << (value & ((width >= 16) ? UINT64_MAX : ((1ULL << (width * 4)) - 1ULL)));
+    return ss.str();
+}
+
+std::string buildContextFingerprint(const std::vector<std::string>& lines,
+                                    std::size_t index, std::size_t radius) {
+    std::string fingerprint;
+    for (std::ptrdiff_t offset = -static_cast<std::ptrdiff_t>(radius);
+         offset <= static_cast<std::ptrdiff_t>(radius); ++offset) {
+        const std::ptrdiff_t pos = static_cast<std::ptrdiff_t>(index) + offset;
+        if (pos < 0) {
+            fingerprint += "\x01BOF\x1f";
+            continue;
+        }
+        if (pos >= static_cast<std::ptrdiff_t>(lines.size())) {
+            fingerprint += "\x01EOF\x1f";
+            continue;
+        }
+        fingerprint += lines[static_cast<std::size_t>(pos)];
+        fingerprint += '\x1f';
+    }
+    return fingerprint;
 }
 
 bool isAllDigits(std::string_view text) noexcept {
@@ -50,7 +88,7 @@ bool parseLineHashPrefix(std::string_view line, size_t& prefixLength) noexcept {
 
 bool parseBareHashFragment(std::string_view line, size_t& prefixLength) noexcept {
     const size_t pipePos = line.find('|');
-    if (pipePos == std::string_view::npos || pipePos != 4) {
+    if (pipePos == std::string_view::npos || pipePos < 4 || pipePos > 16) {
         return false;
     }
     if (!isAllHex(line.substr(0, pipePos))) {
@@ -72,6 +110,52 @@ std::string Hashline::computeHash(std::string_view content) noexcept {
     return ss.str();
 }
 
+std::vector<std::string> Hashline::computeLineHashes(
+    const std::vector<std::string>& lines) noexcept {
+    std::vector<std::string> hashes(lines.size());
+    if (lines.empty()) {
+        return hashes;
+    }
+
+    std::vector<std::size_t> unresolved(lines.size());
+    for (std::size_t i = 0; i < lines.size(); ++i) {
+        unresolved[i] = i;
+    }
+
+    const std::size_t MAX_RADIUS = 3;
+    for (std::size_t radius = 0; radius <= MAX_RADIUS && !unresolved.empty();
+         ++radius) {
+        std::unordered_map<std::string, std::vector<std::size_t>> groups;
+        groups.reserve(unresolved.size());
+
+        for (std::size_t index : unresolved) {
+            const std::string fingerprint =
+                buildContextFingerprint(lines, index, radius);
+            groups[hex64(fnv1a_64(fingerprint))].push_back(index);
+        }
+
+        std::vector<std::size_t> nextUnresolved;
+        for (const auto& [hash, indices] : groups) {
+            if (indices.size() == 1) {
+                hashes[indices.front()] = hash;
+                continue;
+            }
+            nextUnresolved.insert(nextUnresolved.end(), indices.begin(),
+                                  indices.end());
+        }
+        unresolved = std::move(nextUnresolved);
+    }
+
+    for (std::size_t index : unresolved) {
+        std::string fingerprint = buildContextFingerprint(lines, index, lines.size());
+        fingerprint += "\x1eline:";
+        fingerprint += std::to_string(index + 1);
+        hashes[index] = hex64(fnv1a_64(fingerprint));
+    }
+
+    return hashes;
+}
+
 std::string Hashline::formatAnchor(int lineNum, std::string_view content) {
     std::string result;
     const std::string hash = computeHash(content);
@@ -82,6 +166,20 @@ std::string Hashline::formatAnchor(int lineNum, std::string_view content) {
     return result;
 }
 
+std::string Hashline::formatAnchor(const std::vector<std::string>& lines,
+                                   int lineNum) {
+    if (lineNum <= 0 || lineNum > static_cast<int>(lines.size())) {
+        return std::to_string(lineNum) + "#";
+    }
+    const auto hashes = computeLineHashes(lines);
+    std::string result;
+    result.reserve(hashes[lineNum - 1].size() + 16);
+    result += std::to_string(lineNum);
+    result += '#';
+    result += hashes[lineNum - 1];
+    return result;
+}
+
 std::string Hashline::formatLine(int lineNum, std::string_view content) {
     std::string result;
     const std::string anchor = formatAnchor(lineNum, content);
@@ -89,6 +187,20 @@ std::string Hashline::formatLine(int lineNum, std::string_view content) {
     result += anchor;
     result += '|';
     result += content;
+    return result;
+}
+
+std::string Hashline::formatLine(const std::vector<std::string>& lines,
+                                 int lineNum) {
+    if (lineNum <= 0 || lineNum > static_cast<int>(lines.size())) {
+        return std::to_string(lineNum) + "#|";
+    }
+    const std::string anchor = formatAnchor(lines, lineNum);
+    std::string result;
+    result.reserve(anchor.size() + lines[lineNum - 1].size() + 1);
+    result += anchor;
+    result += '|';
+    result += lines[lineNum - 1];
     return result;
 }
 
@@ -152,13 +264,22 @@ AnchorResult Hashline::resolveAnchor(const std::vector<std::string>& lines,
     }
 
     const int expectedIndex = parsed->lineNumber - 1;
+    const auto lineHashes = computeLineHashes(lines);
     std::vector<int> matches;
     const int minIndex = std::max(0, expectedIndex - searchWindow);
     const int maxIndex = std::min(static_cast<int>(lines.size()) - 1, expectedIndex + searchWindow);
 
     for (int index = minIndex; index <= maxIndex; ++index) {
-        if (verifyAnchor(parsed->hash, lines[index])) {
+        if (lineHashes[static_cast<std::size_t>(index)] == parsed->hash) {
             matches.push_back(index);
+        }
+    }
+
+    if (matches.empty()) {
+        for (int index = minIndex; index <= maxIndex; ++index) {
+            if (verifyAnchor(parsed->hash, lines[static_cast<std::size_t>(index)])) {
+                matches.push_back(index);
+            }
         }
     }
 
@@ -174,10 +295,11 @@ AnchorResult Hashline::resolveAnchor(const std::vector<std::string>& lines,
 
     std::string foundHash = "";
     if (expectedIndex >= 0 && expectedIndex < static_cast<int>(lines.size())) {
-        foundHash = computeHash(lines[expectedIndex]);
+        foundHash = lineHashes[static_cast<std::size_t>(expectedIndex)];
     }
     return {AnchorResult::Status::STALE, -1, false, 
-            "Stale anchor '" + anchorText + "': the file changed after your last read.", 
+            "Stale anchor '" + anchorText +
+                "': the file changed after your last read. Re-read the file and retry with fresh anchors.",
             foundHash, parsed->hash};
 }
 
@@ -185,22 +307,26 @@ std::string HashlineReadEnhancer::enhance(std::string_view content) {
     std::string result;
     result.reserve(content.size() * 1.2); // Rough estimate
 
-    int lineNum = 1;
     size_t start = 0;
     size_t end = content.find('\n');
+    std::vector<std::string> lines;
 
     while (end != std::string_view::npos) {
-        std::string_view line = content.substr(start, end - start);
-        result += Hashline::formatLine(lineNum++, line);
-        result += '\n';
+        lines.emplace_back(content.substr(start, end - start));
         start = end + 1;
         end = content.find('\n', start);
     }
 
     // Handle last line if it doesn't end with \n
     if (start < content.size()) {
-        std::string_view line = content.substr(start);
-        result += Hashline::formatLine(lineNum, line);
+        lines.emplace_back(content.substr(start));
+    }
+
+    for (std::size_t i = 0; i < lines.size(); ++i) {
+        result += Hashline::formatLine(lines, static_cast<int>(i + 1));
+        if (i + 1 < lines.size()) {
+            result += '\n';
+        }
     }
 
     return result;

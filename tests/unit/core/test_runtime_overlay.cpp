@@ -4,6 +4,7 @@
 #include "../mocks/MockHost.hpp"
 
 #include <gtest/gtest.h>
+#include <rapidjson/document.h>
 
 #include <cstdlib>
 #include <filesystem>
@@ -24,6 +25,42 @@ std::string firstTextContent(const AgentTurn& turn) {
     }
   }
   return "";
+}
+
+const ToolResultContent* findToolResultByCallId(const AgentHistory& history,
+                                                const std::string& callId) {
+  for (const auto& turn : history.turns) {
+    for (const auto& message : turn.messages) {
+      for (const auto& part : message.content) {
+        if (const auto* result = std::get_if<ToolResultContent>(&part)) {
+          if (result->toolCallId == callId) {
+            return result;
+          }
+        }
+      }
+    }
+  }
+  return nullptr;
+}
+
+std::string fileReadContentField(const ToolResultContent& result) {
+  rapidjson::Document doc;
+  doc.Parse(result.result.c_str());
+  if (doc.HasParseError() || !doc.IsObject() || !doc.HasMember("content") ||
+      !doc["content"].IsString()) {
+    return "";
+  }
+  return doc["content"].GetString();
+}
+
+std::string fileEditUpdatedFilesField(const ToolResultContent& result) {
+  rapidjson::Document doc;
+  doc.Parse(result.result.c_str());
+  if (doc.HasParseError() || !doc.IsObject() ||
+      !doc.HasMember("updated_files") || !doc["updated_files"].IsString()) {
+    return "";
+  }
+  return doc["updated_files"].GetString();
 }
 
 std::size_t countOccurrences(const std::string& haystack,
@@ -95,7 +132,7 @@ protected:
   std::shared_ptr<firmius::test::MockHost> host_;
 };
 
-TEST_F(RuntimeOverlayTest, BuildRequestHistoryAppendsLeadStateAndWatchedFiles) {
+TEST_F(RuntimeOverlayTest, BuildRequestHistoryAppendsLeadStateOnly) {
   Plan plan;
   plan.threadId = threadId_;
   plan.title = "Ship Runtime Overlay";
@@ -143,26 +180,63 @@ TEST_F(RuntimeOverlayTest, BuildRequestHistoryAppendsLeadStateAndWatchedFiles) {
 
   setFile("/work/sample.ts", "const a = 1;\nconst b = 2;\n");
 
+  context_.history->turns.push_back(AgentTurn{});
+  AgentTurn toolCallTurn;
+  toolCallTurn.stopReason = StopReason::ToolUse;
+  Message assistantMsg;
+  assistantMsg.role = Role::Assistant;
+  assistantMsg.content.push_back(
+      ToolCallContent{"call-read", "file_read", R"({"path":"sample.ts"})"});
+  toolCallTurn.messages.push_back(std::move(assistantMsg));
+  context_.history->turns.push_back(std::move(toolCallTurn));
+
+  AgentTurn toolResultTurn;
+  Message toolMsg;
+  toolMsg.role = Role::ToolResult;
+  toolMsg.content.push_back(ToolResultContent{
+      "call-read",
+      R"({"line_start":1,"line_end":2,"lines_read":2,"watch_state":"updated","watch_scope":"full"})",
+      true,
+      "",
+      ""});
+  toolResultTurn.messages.push_back(std::move(toolMsg));
+  context_.history->turns.push_back(std::move(toolResultTurn));
+
   const AgentHistory requestHistory =
       runtime_overlay::buildRequestHistoryWithRuntimeOverlays(
           context_, *host_, *workspace_);
-  ASSERT_GE(requestHistory.turns.size(), 2u);
+  ASSERT_GE(requestHistory.turns.size(), 1u);
 
-  const AgentTurn& workTurn = requestHistory.turns[requestHistory.turns.size() - 2];
-  const AgentTurn& watchedTurn = requestHistory.turns.back();
+  const AgentTurn& workTurn = requestHistory.turns.back();
 
   EXPECT_EQ(workTurn.turnId, "runtime-overlay-work-state");
-  EXPECT_EQ(watchedTurn.turnId, "runtime-overlay-watched-files");
 
   const std::string workText = firstTextContent(workTurn);
-  const std::string watchedText = firstTextContent(watchedTurn);
   EXPECT_NE(workText.find("Plan Title: Ship Runtime Overlay"), std::string::npos);
   EXPECT_NE(workText.find("#1 [Pending] Review live overlay content"),
             std::string::npos);
-  EXPECT_NE(watchedText.find("<file path=\"/work/sample.ts\">"),
+
+  const auto* toolResult = findToolResultByCallId(requestHistory, "call-read");
+  ASSERT_NE(toolResult, nullptr);
+  const std::string injectedContent = fileReadContentField(*toolResult);
+  EXPECT_NE(injectedContent.find("<file path=\"/work/sample.ts\">"),
             std::string::npos);
-  EXPECT_NE(watchedText.find("1#"), std::string::npos);
-  EXPECT_NE(watchedText.find("const a = 1;"), std::string::npos);
+  EXPECT_NE(injectedContent.find("1#"), std::string::npos);
+  EXPECT_NE(injectedContent.find("const a = 1;"), std::string::npos);
+
+  std::string allText;
+  for (const auto& turn : requestHistory.turns) {
+    allText += firstTextContent(turn);
+    for (const auto& message : turn.messages) {
+      for (const auto& part : message.content) {
+        if (const auto* result = std::get_if<ToolResultContent>(&part)) {
+          allText += fileReadContentField(*result);
+        }
+      }
+    }
+  }
+  EXPECT_EQ(countOccurrences(allText, "<file path=\"/work/sample.ts\">"), 1u);
+  EXPECT_EQ(allText.find("## WATCHED FILES"), std::string::npos);
 }
 
 TEST_F(RuntimeOverlayTest, FileReadReconciliationPersistsAndMergesWatchedCoverage) {
@@ -191,12 +265,36 @@ TEST_F(RuntimeOverlayTest, FileReadReconciliationPersistsAndMergesWatchedCoverag
   ASSERT_TRUE(liveState.watchedFiles.front().terminalLine.has_value());
   EXPECT_EQ(*liveState.watchedFiles.front().terminalLine, 6);
 
+  context_.history->turns.push_back(AgentTurn{});
+  AgentTurn toolCallTurn;
+  toolCallTurn.stopReason = StopReason::ToolUse;
+  Message assistantMsg;
+  assistantMsg.role = Role::Assistant;
+  assistantMsg.content.push_back(
+      ToolCallContent{"call-read", "file_read", R"({"path":"sample.ts"})"});
+  toolCallTurn.messages.push_back(std::move(assistantMsg));
+  context_.history->turns.push_back(std::move(toolCallTurn));
+
+  AgentTurn toolResultTurn;
+  Message toolMsg;
+  toolMsg.role = Role::ToolResult;
+  toolMsg.content.push_back(ToolResultContent{
+      "call-read",
+      R"({"line_start":4,"line_end":6,"read_full":false,"reached_end":true})",
+      true,
+      "",
+      ""});
+  toolResultTurn.messages.push_back(std::move(toolMsg));
+  context_.history->turns.push_back(std::move(toolResultTurn));
+
   const AgentHistory requestHistory =
       runtime_overlay::buildRequestHistoryWithRuntimeOverlays(
           context_, *host_, *workspace_);
-  const std::string watchedText = firstTextContent(requestHistory.turns.back());
-  EXPECT_NE(watchedText.find("six"), std::string::npos);
-  EXPECT_NE(watchedText.find("6#"), std::string::npos);
+  const auto* toolResult = findToolResultByCallId(requestHistory, "call-read");
+  ASSERT_NE(toolResult, nullptr);
+  const std::string injectedContent = fileReadContentField(*toolResult);
+  EXPECT_NE(injectedContent.find("six"), std::string::npos);
+  EXPECT_NE(injectedContent.find("6#"), std::string::npos);
 }
 
 TEST_F(RuntimeOverlayTest, WatchedFilesOverlayFlagsExternalChangesSinceLastSync) {
@@ -206,11 +304,34 @@ TEST_F(RuntimeOverlayTest, WatchedFilesOverlayFlagsExternalChangesSinceLastSync)
       context_, *host_, *workspace_, "file_read", R"({"path":"sample.ts"})",
       R"({"line_start":1,"line_end":2,"read_full":true,"reached_end":true})");
 
+  context_.history->turns.push_back(AgentTurn{});
+  AgentTurn toolCallTurn;
+  toolCallTurn.stopReason = StopReason::ToolUse;
+  Message assistantMsg;
+  assistantMsg.role = Role::Assistant;
+  assistantMsg.content.push_back(
+      ToolCallContent{"call-read", "file_read", R"({"path":"sample.ts"})"});
+  toolCallTurn.messages.push_back(std::move(assistantMsg));
+  context_.history->turns.push_back(std::move(toolCallTurn));
+
+  AgentTurn toolResultTurn;
+  Message toolMsg;
+  toolMsg.role = Role::ToolResult;
+  toolMsg.content.push_back(ToolResultContent{
+      "call-read",
+      R"({"line_start":1,"line_end":2,"read_full":true,"reached_end":true})",
+      true,
+      "",
+      ""});
+  toolResultTurn.messages.push_back(std::move(toolMsg));
+  context_.history->turns.push_back(std::move(toolResultTurn));
+
   const AgentHistory firstHistory =
       runtime_overlay::buildRequestHistoryWithRuntimeOverlays(
           context_, *host_, *workspace_);
-  const std::string firstWatched = firstTextContent(firstHistory.turns.back());
-  EXPECT_EQ(firstWatched.find("updated from disk since last sync"),
+  const auto* firstResult = findToolResultByCallId(firstHistory, "call-read");
+  ASSERT_NE(firstResult, nullptr);
+  EXPECT_EQ(fileReadContentField(*firstResult).find("updated from disk since last sync"),
             std::string::npos);
 
   setFile("/work/sample.ts", "alpha\nbeta changed\n");
@@ -218,8 +339,9 @@ TEST_F(RuntimeOverlayTest, WatchedFilesOverlayFlagsExternalChangesSinceLastSync)
   const AgentHistory secondHistory =
       runtime_overlay::buildRequestHistoryWithRuntimeOverlays(
           context_, *host_, *workspace_);
-  const std::string secondWatched = firstTextContent(secondHistory.turns.back());
-  EXPECT_NE(secondWatched.find("updated from disk since last sync"),
+  const auto* secondResult = findToolResultByCallId(secondHistory, "call-read");
+  ASSERT_NE(secondResult, nullptr);
+  EXPECT_NE(fileReadContentField(*secondResult).find("updated from disk since last sync"),
             std::string::npos);
 }
 
@@ -233,10 +355,34 @@ TEST_F(RuntimeOverlayTest, PartialWatchOverlayWarnsThatFullReadIsRequiredForEdit
       context_, *host_, *workspace_, "file_read", R"({"path":"sample.ts"})",
       R"({"line_start":2,"line_end":3,"read_full":false,"reached_end":false})");
 
+  context_.history->turns.push_back(AgentTurn{});
+  AgentTurn toolCallTurn;
+  toolCallTurn.stopReason = StopReason::ToolUse;
+  Message assistantMsg;
+  assistantMsg.role = Role::Assistant;
+  assistantMsg.content.push_back(
+      ToolCallContent{"call-read", "file_read", R"({"path":"sample.ts"})"});
+  toolCallTurn.messages.push_back(std::move(assistantMsg));
+  context_.history->turns.push_back(std::move(toolCallTurn));
+
+  AgentTurn toolResultTurn;
+  Message toolMsg;
+  toolMsg.role = Role::ToolResult;
+  toolMsg.content.push_back(ToolResultContent{
+      "call-read",
+      R"({"line_start":2,"line_end":3,"read_full":false,"reached_end":false})",
+      true,
+      "",
+      ""});
+  toolResultTurn.messages.push_back(std::move(toolMsg));
+  context_.history->turns.push_back(std::move(toolResultTurn));
+
   const AgentHistory requestHistory =
       runtime_overlay::buildRequestHistoryWithRuntimeOverlays(
           context_, *host_, *workspace_);
-  const std::string watchedText = firstTextContent(requestHistory.turns.back());
+  const auto* toolResult = findToolResultByCallId(requestHistory, "call-read");
+  ASSERT_NE(toolResult, nullptr);
+  const std::string watchedText = fileReadContentField(*toolResult);
   EXPECT_NE(
       watchedText.find(
           "partial watch only; read the entire file before editing this file"),
@@ -272,12 +418,202 @@ TEST_F(RuntimeOverlayTest, RepeatedOverlappingReadsKeepSingleWatchedEntryPerFile
   ASSERT_TRUE(liveState.watchedFiles.front().terminalLine.has_value());
   EXPECT_EQ(*liveState.watchedFiles.front().terminalLine, 10);
 
+  context_.history->turns.push_back(AgentTurn{});
+  AgentTurn toolCallTurn;
+  toolCallTurn.stopReason = StopReason::ToolUse;
+  Message assistantMsg;
+  assistantMsg.role = Role::Assistant;
+  assistantMsg.content.push_back(
+      ToolCallContent{"call-read", "file_read", R"({"path":"sample.ts"})"});
+  toolCallTurn.messages.push_back(std::move(assistantMsg));
+  context_.history->turns.push_back(std::move(toolCallTurn));
+
+  AgentTurn toolResultTurn;
+  Message toolMsg;
+  toolMsg.role = Role::ToolResult;
+  toolMsg.content.push_back(ToolResultContent{
+      "call-read",
+      R"({"line_start":7,"line_end":10,"read_full":false,"reached_end":true})",
+      true,
+      "",
+      ""});
+  toolResultTurn.messages.push_back(std::move(toolMsg));
+  context_.history->turns.push_back(std::move(toolResultTurn));
+
   const AgentHistory requestHistory =
       runtime_overlay::buildRequestHistoryWithRuntimeOverlays(
           context_, *host_, *workspace_);
-  const std::string watchedText = firstTextContent(requestHistory.turns.back());
+  const auto* toolResult = findToolResultByCallId(requestHistory, "call-read");
+  ASSERT_NE(toolResult, nullptr);
+  const std::string watchedText = fileReadContentField(*toolResult);
   EXPECT_EQ(countOccurrences(watchedText, "<file path=\"/work/sample.ts\">"), 1u);
   EXPECT_NE(watchedText.find("10#"), std::string::npos);
+}
+
+TEST_F(RuntimeOverlayTest, LatestFileReadResultReceivesWatchedContentExactlyOnce) {
+  context_.config.personaName = "worker";
+  context_.identity.id = "worker-agent";
+  setFile("/work/first.ts", "alpha\nbeta\n");
+  setFile("/work/second.ts", "one\ntwo\n");
+
+  runtime_overlay::reconcileSuccessfulToolResult(
+      context_, *host_, *workspace_, "file_read", R"({"path":"first.ts"})",
+      R"({"line_start":1,"line_end":2,"read_full":true,"reached_end":true})");
+  runtime_overlay::reconcileSuccessfulToolResult(
+      context_, *host_, *workspace_, "file_read", R"({"path":"second.ts"})",
+      R"({"line_start":1,"line_end":2,"read_full":true,"reached_end":true})");
+
+  AgentTurn callOne;
+  callOne.stopReason = StopReason::ToolUse;
+  Message callOneMsg;
+  callOneMsg.role = Role::Assistant;
+  callOneMsg.content.push_back(
+      ToolCallContent{"read-1", "file_read", R"({"path":"first.ts"})"});
+  callOne.messages.push_back(std::move(callOneMsg));
+
+  AgentTurn resultOne;
+  Message resultOneMsg;
+  resultOneMsg.role = Role::ToolResult;
+  resultOneMsg.content.push_back(ToolResultContent{
+      "read-1",
+      R"({"line_start":1,"line_end":2,"read_full":true,"reached_end":true,"content":"stale"})",
+      true,
+      "",
+      ""});
+  resultOne.messages.push_back(std::move(resultOneMsg));
+
+  AgentTurn callTwo;
+  callTwo.stopReason = StopReason::ToolUse;
+  Message callTwoMsg;
+  callTwoMsg.role = Role::Assistant;
+  callTwoMsg.content.push_back(
+      ToolCallContent{"read-2", "file_read", R"({"path":"second.ts"})"});
+  callTwo.messages.push_back(std::move(callTwoMsg));
+
+  AgentTurn resultTwo;
+  Message resultTwoMsg;
+  resultTwoMsg.role = Role::ToolResult;
+  resultTwoMsg.content.push_back(ToolResultContent{
+      "read-2",
+      R"({"line_start":1,"line_end":2,"read_full":true,"reached_end":true})",
+      true,
+      "",
+      ""});
+  resultTwo.messages.push_back(std::move(resultTwoMsg));
+
+  context_.history->turns.push_back(std::move(callOne));
+  context_.history->turns.push_back(std::move(resultOne));
+  context_.history->turns.push_back(std::move(callTwo));
+  context_.history->turns.push_back(std::move(resultTwo));
+
+  const AgentHistory requestHistory =
+      runtime_overlay::buildRequestHistoryWithRuntimeOverlays(
+          context_, *host_, *workspace_);
+
+  const auto* firstResult = findToolResultByCallId(requestHistory, "read-1");
+  const auto* secondResult = findToolResultByCallId(requestHistory, "read-2");
+  ASSERT_NE(firstResult, nullptr);
+  ASSERT_NE(secondResult, nullptr);
+
+  EXPECT_TRUE(fileReadContentField(*firstResult).empty());
+  EXPECT_EQ(firstResult->result.find("\"content\":\"stale\""), std::string::npos);
+  const std::string latestContent = fileReadContentField(*secondResult);
+  EXPECT_NE(latestContent.find("<file path=\"/work/first.ts\">"),
+            std::string::npos);
+  EXPECT_NE(latestContent.find("<file path=\"/work/second.ts\">"),
+            std::string::npos);
+
+  std::string allContext;
+  for (const auto& turn : requestHistory.turns) {
+    allContext += firstTextContent(turn);
+    for (const auto& msg : turn.messages) {
+      for (const auto& part : msg.content) {
+        if (const auto* result = std::get_if<ToolResultContent>(&part)) {
+          allContext += fileReadContentField(*result);
+        }
+      }
+    }
+  }
+  EXPECT_EQ(countOccurrences(allContext, "<file path=\"/work/first.ts\">"), 1u);
+  EXPECT_EQ(countOccurrences(allContext, "<file path=\"/work/second.ts\">"), 1u);
+  EXPECT_EQ(allContext.find("## WATCHED FILES"), std::string::npos);
+}
+
+TEST_F(RuntimeOverlayTest, LatestFileEditResultReceivesUpdatedFilesAndMarksWorkspaceRead) {
+  context_.config.personaName = "worker";
+  context_.identity.id = "worker-agent";
+  setFile("/work/sample.ts", "before\n");
+
+  runtime_overlay::reconcileSuccessfulToolResult(
+      context_, *host_, *workspace_, "file_read", R"({"path":"sample.ts"})",
+      R"({"line_start":1,"line_end":1,"read_full":true,"reached_end":true})");
+  workspace_->recordFileEdit("/work/sample.ts");
+  EXPECT_FALSE(workspace_->hasFullyReadFile("/work/sample.ts"));
+
+  runtime_overlay::reconcileSuccessfulToolResult(
+      context_, *host_, *workspace_, "file_edit", R"({"path":"sample.ts"})",
+      R"({"path":"sample.ts","mode":"hashline_edits","watch_state":"refreshed"})");
+  EXPECT_TRUE(workspace_->hasFullyReadFile("/work/sample.ts"));
+
+  AgentTurn readCall;
+  readCall.stopReason = StopReason::ToolUse;
+  Message readCallMsg;
+  readCallMsg.role = Role::Assistant;
+  readCallMsg.content.push_back(
+      ToolCallContent{"read-1", "file_read", R"({"path":"sample.ts"})"});
+  readCall.messages.push_back(std::move(readCallMsg));
+
+  AgentTurn readResult;
+  Message readResultMsg;
+  readResultMsg.role = Role::ToolResult;
+  readResultMsg.content.push_back(ToolResultContent{
+      "read-1",
+      R"({"line_start":1,"line_end":1,"read_full":true,"reached_end":true,"content":"stale"})",
+      true,
+      "",
+      ""});
+  readResult.messages.push_back(std::move(readResultMsg));
+
+  AgentTurn editCall;
+  editCall.stopReason = StopReason::ToolUse;
+  Message editCallMsg;
+  editCallMsg.role = Role::Assistant;
+  editCallMsg.content.push_back(
+      ToolCallContent{"edit-1", "file_edit", R"({"path":"sample.ts"})"});
+  editCall.messages.push_back(std::move(editCallMsg));
+
+  AgentTurn editResult;
+  Message editResultMsg;
+  editResultMsg.role = Role::ToolResult;
+  editResultMsg.content.push_back(ToolResultContent{
+      "edit-1",
+      R"({"path":"sample.ts","mode":"hashline_edits","watch_state":"refreshed"})",
+      true,
+      "",
+      ""});
+  editResult.messages.push_back(std::move(editResultMsg));
+
+  context_.history->turns.push_back(std::move(readCall));
+  context_.history->turns.push_back(std::move(readResult));
+  context_.history->turns.push_back(std::move(editCall));
+  context_.history->turns.push_back(std::move(editResult));
+
+  setFile("/work/sample.ts", "after\n");
+
+  const AgentHistory requestHistory =
+      runtime_overlay::buildRequestHistoryWithRuntimeOverlays(
+          context_, *host_, *workspace_);
+
+  const auto* readResultPart = findToolResultByCallId(requestHistory, "read-1");
+  const auto* editResultPart = findToolResultByCallId(requestHistory, "edit-1");
+  ASSERT_NE(readResultPart, nullptr);
+  ASSERT_NE(editResultPart, nullptr);
+
+  EXPECT_TRUE(fileReadContentField(*readResultPart).empty());
+  const std::string updatedFiles = fileEditUpdatedFilesField(*editResultPart);
+  EXPECT_NE(updatedFiles.find("<file path=\"/work/sample.ts\">"),
+            std::string::npos);
+  EXPECT_NE(updatedFiles.find("after"), std::string::npos);
 }
 
 } // namespace

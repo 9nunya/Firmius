@@ -4,6 +4,7 @@
 #include "tools/SubagentToolPresentation.hpp"
 #include "tools/ToolPresentation.hpp"
 #include "tools/WorkToolPresentation.hpp"
+#include "tools/PythonToolPresentation.hpp"
 
 #include "utils/ErrorCleaner.hpp"
 #include "utils/ToolSummaries.hpp"
@@ -186,6 +187,9 @@ std::optional<ToolPresentation>
 TryBuildSpecializedPresentation(const ToolCallView &view,
                                 const NormalizedProcessState *process_state,
                                 const NormalizedSubagentState *subagent_state) {
+  if (IsMatch(view.name, "python_execute")) {
+    return BuildPythonToolPresentation(view, process_state);
+  }
   if (IsProcessFamilyTool(view.name)) {
     return BuildProcessToolPresentation(view, process_state);
   }

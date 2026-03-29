@@ -42,6 +42,28 @@ constexpr std::uint32_t kMissingToolCallIndex =
     std::numeric_limits<std::uint32_t>::max();
 constexpr int kQwenStreamTimeoutSeconds = 300;
 
+std::optional<float> readQwenQuotaFraction(const OAuthAccount &acc) {
+  auto it = acc.metadata.find("quota:qwen");
+  if (it == acc.metadata.end()) {
+    return std::nullopt;
+  }
+  try {
+    float value = std::stof(it->second);
+    if (value > 1.0f) {
+      value /= 100.0f;
+    }
+    if (value < 0.0f) {
+      value = 0.0f;
+    }
+    if (value > 1.0f) {
+      value = 1.0f;
+    }
+    return value;
+  } catch (...) {
+    return std::nullopt;
+  }
+}
+
 bool hasToolCallIndex(const firmius::shared::ToolCallChunk &chunk) {
   return chunk.index != kMissingToolCallIndex;
 }
@@ -1006,6 +1028,49 @@ QwenProvider::getAllQuotas() const {
   return result;
 }
 
+std::optional<OAuthAccount *>
+QwenProvider::getAvailableAccount(const std::optional<std::string> &) {
+  std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
+  if (accounts_.empty()) {
+    return std::nullopt;
+  }
+
+  const int64_t now = nowSeconds();
+  const int preferredIdx =
+      (lastUsedIndex_ >= 0 && lastUsedIndex_ < static_cast<int>(accounts_.size()))
+          ? lastUsedIndex_
+          : -1;
+
+  int bestIdx = -1;
+  float bestQuota = -1.0f;
+
+  for (int idx = 0; idx < static_cast<int>(accounts_.size()); ++idx) {
+    auto &acc = accounts_[idx];
+    if (acc.rateLimited && now > acc.backoffUntil) {
+      acc.rateLimited = false;
+    }
+    if (acc.rateLimited) {
+      continue;
+    }
+    if (isTokenExpired(acc) && !refreshAccessToken(acc)) {
+      continue;
+    }
+
+    const float quota = readQwenQuotaFraction(acc).value_or(1.0f);
+    if (bestIdx < 0 || quota > bestQuota ||
+        (quota == bestQuota && idx == preferredIdx)) {
+      bestIdx = idx;
+      bestQuota = quota;
+    }
+  }
+
+  if (bestIdx < 0) {
+    return std::nullopt;
+  }
+
+  return &accounts_[bestIdx];
+}
+
 size_t QwenProvider::sseWriteCallback(char *ptr, size_t size, size_t nmemb,
                                       void *userdata) {
   auto *ctx = static_cast<StreamContext *>(userdata);
@@ -1239,7 +1304,7 @@ QwenProvider::StreamAttemptResult QwenProvider::classifyStreamFailure(
     result.kind = StreamAttemptKind::QuotaLimited;
     result.errorMessage = formatErrorMessage(
         "", httpStatus, responseBody,
-        "Quota exhausted or rate limited. Switching to next account...");
+        "Quota exhausted or rate limited. Retrying current account...");
     int backoff = firmius::shared::BackoffConstants::getBackoffSeconds(0);
     auto retryAfterIt = headers.find("retry-after");
     if (retryAfterIt != headers.end()) {
@@ -1561,10 +1626,12 @@ QwenProvider::StreamAttemptResult QwenProvider::executeStreamRequest(
     acc.backoffUntil =
         nowSeconds() + firmius::shared::BackoffConstants::MAX_BACKOFF;
   } else if (result.kind == StreamAttemptKind::QuotaLimited) {
-    acc.metadata["quota:" + modelId] = "0";
-    acc.rateLimited = true;
-    acc.backoffUntil = nowSeconds() + (result.retryAfterMs / 1000);
-    saveAccounts();
+    // Qwen frequently emits temporary 429s even when the account remains
+    // usable shortly after. Don't poison local quota or force account
+    // rotation based on a single response.
+    if (result.retryAfterMs > 0) {
+      acc.backoffUntil = nowSeconds() + (result.retryAfterMs / 1000);
+    }
   }
   onEvent(StreamError{result.errorMessage, result.httpStatus,
                       acc.getIdentifier()});
@@ -1760,8 +1827,8 @@ QwenProvider::buildRequestPayload(const AgentHistory &history,
 void QwenProvider::stream(const AgentHistory &history,
                           const ProviderOptions &opts,
                           std::function<void(const StreamEvent &)> onEvent) {
-  // Retry schedule: 1s -> 2s -> 3s -> 4s -> 5s (fail fast, switch accounts)
-  static const int retryDelays[] = {1, 2, 3, 4, 5};
+  // Retry the same account aggressively before considering any fallback.
+  static const int retryDelays[] = {1, 2, 3, 5, 8, 13};
   static const int numRetries = sizeof(retryDelays) / sizeof(retryDelays[0]);
 
   int accountSwitchCount = 0;
@@ -1882,6 +1949,8 @@ void QwenProvider::stream(const AgentHistory &history,
 
       switch (attempt.kind) {
       case StreamAttemptKind::QuotaLimited:
+        lastSwitchCause = attempt.errorMessage;
+        break;
       case StreamAttemptKind::AuthError:
         lastSwitchCause = attempt.errorMessage;
         switchAccounts = true;
@@ -1928,7 +1997,7 @@ void QwenProvider::stream(const AgentHistory &history,
 
     lastError = "Exhausted all retries";
     if (!lastSwitchCause.empty()) {
-      lastError = composeNoAlternateAccountError(lastSwitchCause);
+      lastError = lastSwitchCause;
     }
     onEvent(StreamError{lastError, -1, lastAccountEmail});
     return;

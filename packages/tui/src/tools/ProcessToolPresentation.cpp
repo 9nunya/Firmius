@@ -189,8 +189,7 @@ std::string JoinParts(const std::vector<std::string> &parts) {
 bool IsProcessFamilyTool(const std::string &tool_name) {
   return IsMatch(tool_name, "process_execute") ||
          IsMatch(tool_name, "process_spawn") || IsMatch(tool_name, "process_wait") ||
-         IsMatch(tool_name, "process_input") || IsMatch(tool_name, "process_status") ||
-         IsMatch(tool_name, "python_execute");
+         IsMatch(tool_name, "process_input") || IsMatch(tool_name, "process_status");
 }
 
 ToolPresentation BuildProcessToolPresentation(

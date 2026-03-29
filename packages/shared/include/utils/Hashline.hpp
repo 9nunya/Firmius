@@ -38,12 +38,25 @@ public:
     static std::string computeHash(std::string_view content) noexcept;
 
     /**
+     * @brief Computes unique per-line hashes for a full file buffer.
+     * @details Uses surrounding context to disambiguate repeated line content
+     *          and falls back to a line-specific suffix only when the entire
+     *          file context is still identical.
+     * @param lines The file lines.
+     * @return One hash per input line.
+     */
+    static std::vector<std::string> computeLineHashes(
+        const std::vector<std::string>& lines) noexcept;
+
+    /**
      * @brief Formats an anchor without line content: "lineNum#hash".
      * @param lineNum The 1-indexed line number.
      * @param content The line content used to derive the hash.
      * @return The formatted anchor string.
      */
     static std::string formatAnchor(int lineNum, std::string_view content);
+    static std::string formatAnchor(const std::vector<std::string>& lines,
+                                    int lineNum);
 
     /**
      * @brief Formats a line into the hashline pattern: "lineNum#hash|content".
@@ -52,6 +65,8 @@ public:
      * @return The formatted hashline string.
      */
     static std::string formatLine(int lineNum, std::string_view content);
+    static std::string formatLine(const std::vector<std::string>& lines,
+                                  int lineNum);
 
     /**
      * @brief Parses an anchor in the form "lineNum#hash".

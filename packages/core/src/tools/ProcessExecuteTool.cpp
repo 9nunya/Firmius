@@ -113,6 +113,10 @@ shared::ToolResult ProcessExecuteTool::execute(const ProcessExecuteInput &input,
     while (true) {
       // Check for interrupt at the top of each iteration
       if (ctx.cancelRequested()) {
+        // Get latest snapshot FIRST to capture all output before killing
+        snap = ctx.agent.getEnvironment()->getProcessManager().inspectProcess(processId);
+        // Kill the process to ensure cleanup
+        ctx.agent.getEnvironment()->getProcessManager().killProcess(processId);
         ctx.agent.getEnvironment()->getProcessManager().removeBlockingProcessId(processId);
 
         rapidjson::Document doc;

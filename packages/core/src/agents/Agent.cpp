@@ -1262,7 +1262,7 @@ void Agent::runImpl(const std::optional<std::string> &task,
             hasRunningOwnedBackgroundProcess || hasRunningDescendantSubagent;
         if (hasHarnessOwnedActiveWork) {
           context.state.currentStatus = AgentStatus::Idle;
-          continue;
+          break; // Yield loop to wait for active work to complete
         }
 
         const TodoStateSnapshot todoState = readTodoState(context);
@@ -1281,8 +1281,7 @@ void Agent::runImpl(const std::optional<std::string> &task,
           appendTurnToHistory(makeInternalNudgeTurn(
               "todo-enforcement-", nudgeMessage));
           lastTodoContinuationFingerprint = fingerprint;
-          context.state.currentStatus = AgentStatus::Idle;
-          continue;
+          continue; // Start a new iteration with the nudge turn in history
         }
 
         taskFinished = true;
@@ -1665,14 +1664,16 @@ void Agent::executeTools(const std::vector<ToolCallChunk> &chunks,
             (context.state.recentToolCallSignatures.size() - 20));
   }
 
-  context.history->turns.push_back(toolResultTurn);
-  if (context.config.persistHistory && journaler)
-    journaler->appendTurn(toolResultTurn);
+  if (!toolResultTurn.messages.empty()) {
+    context.history->turns.push_back(toolResultTurn);
+    if (context.config.persistHistory && journaler)
+      journaler->appendTurn(toolResultTurn);
+  }
 
-  // Broadcast turn completion
-  onEvent(AgentTurnCompleted{context.identity.id, toolResultTurn,
-                             context.aggregateMetrics,
-                             context.identity.parentId});
+    // Broadcast turn completion
+    onEvent(AgentTurnCompleted{context.identity.id, toolResultTurn,
+                               context.aggregateMetrics,
+                               context.identity.parentId});
 }
 
 void Agent::saveHistory() {

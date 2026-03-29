@@ -1285,4 +1285,70 @@ TEST_F(WorkToolsTest, auditorCannotMutateV2RichSpecFields) {
               ::testing::HasSubstr("auditor may not mutate V2 chunk spec fields"));
 }
 
+TEST_F(WorkToolsTest, chunkUpdateToDoneUnblocksDependentChunks) {
+  const std::string planId = createPlanDirect();
+  addChunkDirect(planId, "chunk-1", WorkChunkStatus::InProgress);
+  addChunkDirect(planId, "chunk-2", WorkChunkStatus::Blocked, {"chunk-1"});
+
+  // Verify initial state
+  {
+    const auto plan = threadManager_->getPlan(threadId_, planId);
+    ASSERT_EQ(plan.chunks.size(), 2u);
+    EXPECT_EQ(plan.chunks[1].status, WorkChunkStatus::Blocked);
+  }
+
+  // Update chunk-1 to Done
+  auto input = makeObject({{"plan_id", planId},
+                           {"chunk_id", "chunk-1"},
+                           {"status", "Done"},
+                           {"review_summary", "LGTM"}});
+  auto result = execute("chunk_update", input);
+  ASSERT_TRUE(result.success) << result.error;
+
+  // Verify chunk-2 is now Ready
+  {
+    const auto plan = threadManager_->getPlan(threadId_, planId);
+    EXPECT_EQ(plan.chunks[1].status, WorkChunkStatus::Ready);
+  }
+}
+
+TEST_F(WorkToolsTest, chunkUpdateToDoneUnblocksDependentChunksOnlyWhenAllDependenciesDone) {
+  const std::string planId = createPlanDirect();
+  addChunkDirect(planId, "chunk-1", WorkChunkStatus::InProgress);
+  addChunkDirect(planId, "chunk-2", WorkChunkStatus::InProgress);
+  addChunkDirect(planId, "chunk-3", WorkChunkStatus::Blocked, {"chunk-1", "chunk-2"});
+
+  // Update chunk-1 to Done
+  {
+    auto input = makeObject({{"plan_id", planId},
+                             {"chunk_id", "chunk-1"},
+                             {"status", "Done"},
+                             {"review_summary", "LGTM"}});
+    auto result = execute("chunk_update", input);
+    ASSERT_TRUE(result.success);
+  }
+
+  // Verify chunk-3 is still Blocked
+  {
+    const auto plan = threadManager_->getPlan(threadId_, planId);
+    EXPECT_EQ(plan.chunks[2].status, WorkChunkStatus::Blocked);
+  }
+
+  // Update chunk-2 to Done
+  {
+    auto input = makeObject({{"plan_id", planId},
+                             {"chunk_id", "chunk-2"},
+                             {"status", "Done"},
+                             {"review_summary", "LGTM"}});
+    auto result = execute("chunk_update", input);
+    ASSERT_TRUE(result.success);
+  }
+
+  // Verify chunk-3 is now Ready
+  {
+    const auto plan = threadManager_->getPlan(threadId_, planId);
+    EXPECT_EQ(plan.chunks[2].status, WorkChunkStatus::Ready);
+  }
+}
+
 } // namespace

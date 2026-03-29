@@ -160,6 +160,7 @@ private:
 
     firmius::shared::utils::FastHash<std::string, std::shared_future<AgentOutcome>> agentFutures;
     std::mutex futuresMutex;
+    firmius::shared::utils::FastHash<std::string, AgentOutcome> completedOutcomes;  // Store outcomes for multiple waits
 };
 
 }

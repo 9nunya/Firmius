@@ -62,6 +62,7 @@ target_sources(firmius PRIVATE
     src/tools/FileToolPresentation.cpp
     src/tools/ProcessToolPresentation.cpp
     src/tools/SubagentToolPresentation.cpp
+    src/tools/PythonToolPresentation.cpp
     src/tools/ToolPresentation.cpp
     src/tools/WorkToolPresentation.cpp
     src/utils/ReferenceAutocomplete.cpp

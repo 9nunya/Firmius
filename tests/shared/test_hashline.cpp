@@ -1,8 +1,69 @@
 #include "utils/Hashline.hpp"
 
+#include <filesystem>
+#include <fstream>
+#include <set>
+
 #include <gtest/gtest.h>
 
 using namespace firmius::shared::utils;
+
+namespace {
+
+std::filesystem::path findRepoRoot() {
+  auto current = std::filesystem::current_path();
+  while (!current.empty()) {
+    if (std::filesystem::exists(current / "packages" / "shared" / "include" /
+                                "utils" / "Hashline.hpp")) {
+      return current;
+    }
+    if (current == current.root_path()) {
+      break;
+    }
+    current = current.parent_path();
+  }
+  throw std::runtime_error("Unable to locate repository root");
+}
+
+std::string readTextFile(const std::filesystem::path &path) {
+  std::ifstream input(path);
+  if (!input) {
+    throw std::runtime_error("Unable to open " + path.string());
+  }
+  return std::string(std::istreambuf_iterator<char>(input),
+                     std::istreambuf_iterator<char>());
+}
+
+std::vector<std::string> splitLines(const std::string &content) {
+  std::vector<std::string> lines;
+  size_t start = 0;
+  size_t end = content.find('\n');
+  while (end != std::string::npos) {
+    lines.emplace_back(content.substr(start, end - start));
+    start = end + 1;
+    end = content.find('\n', start);
+  }
+  if (start < content.size()) {
+    lines.emplace_back(content.substr(start));
+  }
+  return lines;
+}
+
+void expectUniqueHashesForFile(const std::filesystem::path &root,
+                               const std::filesystem::path &relativePath) {
+  const auto fullPath = root / relativePath;
+  const auto content = readTextFile(fullPath);
+  const auto lines = splitLines(content);
+  ASSERT_FALSE(lines.empty()) << fullPath.string();
+
+  const auto hashes = Hashline::computeLineHashes(lines);
+  ASSERT_EQ(hashes.size(), lines.size()) << fullPath.string();
+
+  std::set<std::string> uniqueHashes(hashes.begin(), hashes.end());
+  EXPECT_EQ(uniqueHashes.size(), hashes.size()) << fullPath.string();
+}
+
+} // namespace
 
 TEST(Hashline, FormatsAndParsesAnchor) {
   const std::string anchor = Hashline::formatAnchor(12, "let value = x + 2;");
@@ -34,9 +95,10 @@ TEST(Hashline, ParsesAnchorWithTrailingPipeOnly) {
 TEST(Hashline, EnhancesReadOutputWithMatchingAnchors) {
   const std::string content = "alpha\nbeta\n";
   const std::string enhanced = HashlineReadEnhancer::enhance(content);
+  const std::vector<std::string> lines = {"alpha", "beta"};
 
-  EXPECT_NE(enhanced.find(Hashline::formatLine(1, "alpha")), std::string::npos);
-  EXPECT_NE(enhanced.find(Hashline::formatLine(2, "beta")), std::string::npos);
+  EXPECT_NE(enhanced.find(Hashline::formatLine(lines, 1)), std::string::npos);
+  EXPECT_NE(enhanced.find(Hashline::formatLine(lines, 2)), std::string::npos);
 }
 
 TEST(HashlineTrimmer, TrimsValidPrefixes) {
@@ -112,35 +174,63 @@ TEST(Hashline, ResolveAnchorCollisions) {
         "dddd"
     };
 
-    const std::string h_bbbb = Hashline::computeHash("bbbb");
-    const std::string anchor = "2#" + h_bbbb;
+    const std::string anchor = Hashline::formatAnchor(lines, 2);
+    const std::string duplicateAnchor = Hashline::formatAnchor(lines, 4);
 
-    // Both line 2 and line 4 match. With window=15, this is ambiguous.
-    EXPECT_THROW(Hashline::resolveAnchor(lines, anchor, 15), std::runtime_error);
+    EXPECT_NE(anchor, duplicateAnchor);
 
-    // With window=1, only line 2 is found.
-    AnchorResult res = Hashline::resolveAnchor(lines, anchor, 1);
+    AnchorResult res = Hashline::resolveAnchor(lines, anchor, 15);
     EXPECT_EQ(res.status, AnchorResult::Status::SUCCESS);
     EXPECT_EQ(res.lineIndex, 1);
     EXPECT_FALSE(res.relocated);
 }
 
-TEST(Hashline, ResolveAnchorCollisionError) {
+TEST(Hashline, ResolveAnchorRelocatesAcrossNearbyInsertions) {
     std::vector<std::string> lines = {
-        "aaaa",
-        "bbbb",
-        "bbbb",
-        "cccc"
+        "header",
+        "}",
+        "}",
+        "footer"
     };
-    const std::string h_bbbb = Hashline::computeHash("bbbb");
-    const std::string anchor = "2#" + h_bbbb;
-    
-    try {
-        Hashline::resolveAnchor(lines, anchor, 15);
-        FAIL() << "Should have thrown";
-    } catch (const std::exception& e) {
-        std::string msg = e.what();
-        EXPECT_NE(msg.find("Ambiguous anchor"), std::string::npos);
-        EXPECT_NE(msg.find("matched 2 nearby lines"), std::string::npos);
-    }
+    const std::string anchor = Hashline::formatAnchor(lines, 3);
+
+    std::vector<std::string> shifted = {
+        "intro",
+        "header",
+        "}",
+        "}",
+        "footer"
+    };
+
+    AnchorResult res = Hashline::resolveAnchor(shifted, anchor, 15);
+    EXPECT_EQ(res.status, AnchorResult::Status::SUCCESS);
+    EXPECT_EQ(res.lineIndex, 3);
+    EXPECT_TRUE(res.relocated);
+}
+
+TEST(Hashline, ComputesUniqueHashesForRepeatedEmptyAndBraceLines) {
+  const std::vector<std::string> lines = {
+      "",
+      "",
+      "}",
+      "}",
+      "  ",
+      "  ",
+      "tail",
+  };
+
+  const auto hashes = Hashline::computeLineHashes(lines);
+  ASSERT_EQ(hashes.size(), lines.size());
+
+  std::set<std::string> uniqueHashes(hashes.begin(), hashes.end());
+  EXPECT_EQ(uniqueHashes.size(), hashes.size());
+}
+
+TEST(Hashline, RealProjectFilesProduceUniqueLineHashes) {
+  const auto root = findRepoRoot();
+
+  expectUniqueHashesForFile(root, "packages/core/src/Engine.cpp");
+  expectUniqueHashesForFile(root, "packages/core/src/tools/FileEditTool.cpp");
+  expectUniqueHashesForFile(root, "packages/shared/src/utils/Hashline.cpp");
+  expectUniqueHashesForFile(root, "packages/provider/CMakeLists.txt");
 }

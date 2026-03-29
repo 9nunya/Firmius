@@ -3,6 +3,10 @@
 #include <gtest/gtest.h>
 #include <limits>
 #include <rapidjson/document.h>
+#include <chrono>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 
 using firmius::provider::QwenProvider;
 using firmius::provider::ProviderOptions;
@@ -47,6 +51,27 @@ rapidjson::Document parsePayload(const std::string &body) {
   return doc;
 }
 
+class ScopedHomeOverride {
+public:
+  explicit ScopedHomeOverride(const std::filesystem::path &home)
+      : hadHome_(std::getenv("HOME") != nullptr),
+        originalHome_(hadHome_ ? std::getenv("HOME") : "") {
+    setenv("HOME", home.c_str(), 1);
+  }
+
+  ~ScopedHomeOverride() {
+    if (hadHome_) {
+      setenv("HOME", originalHome_.c_str(), 1);
+    } else {
+      unsetenv("HOME");
+    }
+  }
+
+private:
+  bool hadHome_ = false;
+  std::string originalHome_;
+};
+
 } // namespace
 
 TEST(QwenProvider, InvalidRequestErrorIsNonRetryable) {
@@ -69,6 +94,34 @@ TEST(QwenProvider, QuotaErrorRemainsSwitchable) {
 
   EXPECT_EQ(result.kind, QwenProvider::StreamAttemptKind::QuotaLimited);
   EXPECT_EQ(result.retryAfterMs, 7000);
+}
+
+TEST(QwenProvider, AvailableAccountPrefersLastUsedWhenQuotaTies) {
+  const auto tempHome = std::filesystem::temp_directory_path() /
+                        "firmius_qwen_last_used_home";
+  std::filesystem::remove_all(tempHome);
+  std::filesystem::create_directories(tempHome / ".firmius");
+  ScopedHomeOverride scopedHome(tempHome);
+
+  const auto futureSeconds =
+      std::chrono::system_clock::to_time_t(std::chrono::system_clock::now()) +
+      86400;
+  const auto oauthPath = tempHome / ".firmius" / "oauth.json";
+  std::ofstream out(oauthPath);
+  out << R"({"qwen":[)"
+      << R"({"identifier":"a@example.com","refreshToken":"r1","accessToken":"a1","tokenExpiration":)"
+      << futureSeconds
+      << R"(,"metadata":{"quota:qwen":"100"}},)"
+      << R"({"identifier":"b@example.com","refreshToken":"r2","accessToken":"a2","tokenExpiration":)"
+      << futureSeconds
+      << R"(,"metadata":{"quota:qwen":"100"}}],)"
+      << R"("lastUsedIndex_qwen":1})";
+  out.close();
+
+  QwenProvider provider;
+  auto selected = provider.getAvailableAccount(std::string("coder-model"));
+  ASSERT_TRUE(selected.has_value());
+  EXPECT_EQ((*selected)->getIdentifier(), "b@example.com");
 }
 
 TEST(QwenProvider, SingleAccountHasNoAlternativeSwitchTarget) {

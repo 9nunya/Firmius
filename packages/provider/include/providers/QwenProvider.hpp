@@ -86,6 +86,8 @@ public:
 
   void refreshQuotas() override;
   std::map<std::string, std::vector<QuotaBucket>> getAllQuotas() const override;
+  std::optional<OAuthAccount *> getAvailableAccount(
+      const std::optional<std::string> &modelId = std::nullopt) override;
 
   // Parses SSE chunks arriving from the CURL callback
   void processSSELine(const std::string &line,

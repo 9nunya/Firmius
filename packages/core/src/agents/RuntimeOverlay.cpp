@@ -10,8 +10,11 @@
 #include <cstdint>
 #include <optional>
 #include <rapidjson/document.h>
+#include <rapidjson/stringbuffer.h>
+#include <rapidjson/writer.h>
 #include <sstream>
 #include <string_view>
+#include <unordered_set>
 #include <utility>
 
 namespace firmius::core::runtime_overlay {
@@ -413,7 +416,7 @@ std::string renderWatchedFileSlice(const std::string& content,
     if (lineNumber <= 0 || lineNumber > static_cast<int>(lines.size())) {
       return;
     }
-    out << shared::utils::Hashline::formatLine(lineNumber, lines[lineNumber - 1]) << "\n";
+    out << shared::utils::Hashline::formatLine(lines, lineNumber) << "\n";
     ++emitted;
   };
 
@@ -551,6 +554,101 @@ std::string buildWatchedFilesOverlay(const shared::AgentContext& context,
   return out.str();
 }
 
+std::optional<std::string> buildWatchedFilesPayload(
+    const shared::AgentContext& context, shared::IHost& host,
+    shared::IWorkspace& workspace) {
+  const std::string overlay = buildWatchedFilesOverlay(context, host, workspace);
+  const std::string prefix = "## WATCHED FILES\n";
+  if (!overlay.starts_with(prefix)) {
+    return std::nullopt;
+  }
+
+  const std::string payload = overlay.substr(prefix.size());
+  if (payload == "(none)\n" || payload == "(unavailable)\n") {
+    return std::nullopt;
+  }
+  return payload;
+}
+
+bool rewriteToolResultJsonField(std::string& jsonText, const char* fieldName,
+                                const std::optional<std::string>& fieldValue) {
+  rapidjson::Document doc;
+  doc.Parse(jsonText.c_str());
+  if (doc.HasParseError() || !doc.IsObject()) {
+    return false;
+  }
+
+  auto& alloc = doc.GetAllocator();
+  if (doc.HasMember(fieldName)) {
+    doc.RemoveMember(fieldName);
+  }
+  if (fieldValue.has_value()) {
+    doc.AddMember(rapidjson::Value(fieldName, alloc).Move(),
+                  rapidjson::Value(fieldValue->c_str(), alloc).Move(), alloc);
+  }
+
+  rapidjson::StringBuffer buffer;
+  rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+  doc.Accept(writer);
+  jsonText = buffer.GetString();
+  return true;
+}
+
+void injectWatchedFilesIntoLatestFileReadResult(
+    shared::AgentHistory& history, const std::optional<std::string>& payload) {
+  std::unordered_set<std::string> fileReadCallIds;
+  std::unordered_set<std::string> fileEditCallIds;
+  for (const auto& turn : history.turns) {
+    for (const auto& msg : turn.messages) {
+      for (const auto& part : msg.content) {
+        if (const auto* call = std::get_if<shared::ToolCallContent>(&part);
+            call) {
+          if (call->name == "file_read") {
+            fileReadCallIds.insert(call->id);
+          } else if (call->name == "file_edit" || call->name == "file_write") {
+            fileEditCallIds.insert(call->id);
+          }
+        }
+      }
+    }
+  }
+
+  shared::ToolResultContent* latestFileReadResult = nullptr;
+  shared::ToolResultContent* latestFileEditResult = nullptr;
+  for (auto& turn : history.turns) {
+    for (auto& msg : turn.messages) {
+      for (auto& part : msg.content) {
+        auto* result = std::get_if<shared::ToolResultContent>(&part);
+        if (!result) {
+          continue;
+        }
+        if (fileReadCallIds.find(result->toolCallId) != fileReadCallIds.end()) {
+          rewriteToolResultJsonField(result->result, "content", std::nullopt);
+          latestFileReadResult = result;
+        }
+        if (fileEditCallIds.find(result->toolCallId) != fileEditCallIds.end()) {
+          rewriteToolResultJsonField(result->result, "updated_files",
+                                     std::nullopt);
+          latestFileEditResult = result;
+        }
+      }
+    }
+  }
+
+  if (!payload.has_value()) {
+    return;
+  }
+  if (latestFileEditResult) {
+    rewriteToolResultJsonField(latestFileEditResult->result, "updated_files",
+                               payload);
+    return;
+  }
+  if (latestFileReadResult) {
+    rewriteToolResultJsonField(latestFileReadResult->result, "content",
+                               payload);
+  }
+}
+
 void recordFileReadWatch(const shared::AgentContext& context,
                          const shared::IWorkspace& workspace,
                          const std::string& toolArgsJson,
@@ -614,7 +712,7 @@ void recordFileReadWatch(const shared::AgentContext& context,
 }
 
 void recordFileRefreshWatch(const shared::AgentContext& context, shared::IHost& host,
-                            const shared::IWorkspace& workspace,
+                            shared::IWorkspace& workspace,
                             const std::string& toolArgsJson) {
   rapidjson::Document args;
   args.Parse(toolArgsJson.c_str());
@@ -645,6 +743,7 @@ void recordFileRefreshWatch(const shared::AgentContext& context, shared::IHost& 
       watchedFile.updatedAt = nowEpochMs();
       trimRememberedWatchedFiles(liveState);
     });
+    workspace.markFileAsFullyRead(absolutePath);
   } catch (...) {
   }
 }
@@ -653,22 +752,21 @@ void recordFileRefreshWatch(const shared::AgentContext& context, shared::IHost& 
 
 shared::AgentHistory buildRequestHistoryWithRuntimeOverlays(
     const shared::AgentContext& context, shared::IHost& host,
-    const shared::IWorkspace& workspace) {
+    shared::IWorkspace& workspace) {
   shared::AgentHistory requestHistory;
   if (context.history) {
     requestHistory = *context.history;
   }
+  injectWatchedFilesIntoLatestFileReadResult(
+      requestHistory, buildWatchedFilesPayload(context, host, workspace));
   requestHistory.turns.push_back(
       makeOverlayTurn("runtime-overlay-work-state", buildWorkOverlay(context)));
-  requestHistory.turns.push_back(makeOverlayTurn(
-      "runtime-overlay-watched-files",
-      buildWatchedFilesOverlay(context, host, workspace)));
   return requestHistory;
 }
 
 void reconcileSuccessfulToolResult(const shared::AgentContext& context,
                                    shared::IHost& host,
-                                   const shared::IWorkspace& workspace,
+                                   shared::IWorkspace& workspace,
                                    const std::string& toolName,
                                    const std::string& toolArgsJson,
                                    const std::string& resultJson) {
@@ -689,7 +787,7 @@ void reconcileSuccessfulToolResult(const shared::AgentContext& context,
 
 void refreshFileWatch(const shared::AgentContext& context,
                       shared::IHost& host,
-                      const shared::IWorkspace& workspace,
+                      shared::IWorkspace& workspace,
                       const std::string& path) {
   if (!context.history || context.history->threadId.empty() ||
       context.identity.id.empty() || path.empty()) {
@@ -717,6 +815,7 @@ void refreshFileWatch(const shared::AgentContext& context,
       watchedFile.updatedAt = nowEpochMs();
       trimRememberedWatchedFiles(liveState);
     });
+    workspace.markFileAsFullyRead(absolutePath);
   } catch (...) {
   }
 }

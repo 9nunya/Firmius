@@ -1,6 +1,7 @@
 #include "AuditRegistry.hpp"
 #include "audits/AntigravityProviderAudit.hpp"
 #include "audits/LoopCancellationAudit.hpp"
+#include "audits/ModelLoadAudit.hpp"
 #include "audits/AntigravityQuotaAudit.hpp"
 #include "audits/BenchmarksAudit.hpp"
 #include "audits/CodexProviderAudit.hpp"
@@ -14,6 +15,7 @@
 #include "audits/QwenQuotaAudit.hpp"
 #include "audits/SubagentStressAudit.hpp"
 #include "audits/WorkflowsAudit.hpp"
+#include "audits/ResumeTodoAudit.hpp"
 
 namespace firmius::audits {
 
@@ -34,6 +36,8 @@ std::vector<std::unique_ptr<shared::IAudit>> createAudits() {
     audits.push_back(std::make_unique<WorkflowsAudit>());
     audits.push_back(std::make_unique<ProviderStreamDebugAudit>());
     audits.push_back(std::make_unique<LoopCancellationAudit>());
+    audits.push_back(std::make_unique<ModelLoadAudit>());
+    audits.push_back(std::make_unique<ResumeTodoAudit>());
     return audits;
 }
 

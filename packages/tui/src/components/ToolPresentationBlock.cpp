@@ -73,6 +73,22 @@ ftxui::Element BuildBodyWindow(const ToolPresentation &presentation, const Theme
         body_rows.push_back(ftxui::paragraph(command_line) | ftxui::color(theme.base.fg));
       }
     }
+    if (!presentation.custom_body_elements.empty()) {
+      for (const auto& element : presentation.custom_body_elements) {
+        body_rows.push_back(ftxui::hbox({
+            ftxui::text("│ ") | ftxui::color(theme.base.fg),
+            element | ftxui::xflex
+        }));
+      }
+      // Add a separator between code and output if there is output
+      if (presentation.body_lines.size() > output_start_index) {
+        body_rows.push_back(ftxui::hbox({
+            ftxui::text("│ ") | ftxui::color(theme.base.fg),
+            ftxui::text("--- output ---") | ftxui::color(theme.base.dim) | ftxui::xflex
+        }));
+      }
+    }
+
     const int max_output_lines = std::max(1, visible_lines - 1);
     const int total_output_lines =
         static_cast<int>(presentation.body_lines.size() - output_start_index);
@@ -121,10 +137,16 @@ ftxui::Element BuildBodyWindow(const ToolPresentation &presentation, const Theme
           ftxui::xflex);
     }
   } else {
-    const int max_lines = expanded ? static_cast<int>(presentation.body_lines.size())
-                                   : std::min<int>(visible_lines, presentation.body_lines.size());
+    const size_t total_lines = !presentation.custom_body_elements.empty() ? presentation.custom_body_elements.size() : presentation.body_lines.size();
+    const int max_lines = expanded ? static_cast<int>(total_lines)
+                                   : std::min<int>(visible_lines, total_lines);
     for (int i = 0; i < max_lines; ++i) {
-      if (presentation.ansi_aware) {
+      if (!presentation.custom_body_elements.empty()) {
+        body_rows.push_back(ftxui::hbox({
+            ftxui::text("│ ") | ftxui::color(theme.base.fg),
+            presentation.custom_body_elements[i] | ftxui::xflex
+        }));
+      } else if (presentation.ansi_aware) {
         body_rows.push_back(ftxui::hbox({
             ftxui::text("│ ") | ftxui::color(theme.base.fg),
             ParseANSI(presentation.body_lines[static_cast<size_t>(i)]) | ftxui::xflex
@@ -134,11 +156,11 @@ ftxui::Element BuildBodyWindow(const ToolPresentation &presentation, const Theme
                             ftxui::color(theme.base.fg));
       }
     }
-    if (!expanded && static_cast<int>(presentation.body_lines.size()) > max_lines) {
+    if (!expanded && static_cast<int>(total_lines) > max_lines) {
       body_rows.push_back(
           ftxui::hbox({
             ftxui::text("│ ") | ftxui::color(theme.base.fg),
-            ftxui::text("... +" + std::to_string(static_cast<int>(presentation.body_lines.size()) - max_lines) + " more lines") |
+            ftxui::text("... +" + std::to_string(static_cast<int>(total_lines) - max_lines) + " more lines") |
             ftxui::color(theme.base.dim)
           }));
     }
@@ -278,7 +300,7 @@ public:
         presentation.layout == ToolPresentationLayoutKind::DiffPreview;
     const bool body_has_hidden_lines =
         !uses_diff_layout &&
-        static_cast<int>(presentation.body_lines.size()) > body_visible_lines;
+        static_cast<int>(!presentation.custom_body_elements.empty() ? presentation.custom_body_elements.size() : presentation.body_lines.size()) > body_visible_lines;
     const bool has_expand_details =
         (!uses_diff_layout && presentation.expandable) ||
         body_has_hidden_lines ||

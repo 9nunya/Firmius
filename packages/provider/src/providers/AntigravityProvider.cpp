@@ -31,6 +31,9 @@ using namespace firmius::utils;
 namespace {
 constexpr int kQuotaRefreshSeconds = 300;
 constexpr float kQuotaAvailableThreshold = 0.01f;
+constexpr const char *kAntigravityIdeType = "ANTIGRAVITY";
+constexpr const char *kAntigravityPlatform = "PLATFORM_UNSPECIFIED";
+constexpr const char *kAntigravityPluginType = "GEMINI";
 
 std::mutex gRawSseLogMutex;
 
@@ -230,10 +233,15 @@ std::string normalizeAntigravityModelId(const std::string &modelId,
   if (!isGemini3)
     return modelId;
 
+  const bool isAgentAlias = lower.find("-agent") != std::string::npos;
   bool isFlash = lower.find("flash") != std::string::npos;
   bool hasTierSuffix =
       endsWithInsensitive(base, "-low") || endsWithInsensitive(base, "-medium") ||
       endsWithInsensitive(base, "-high");
+
+  if (isFlash && isAgentAlias) {
+    return "antigravity-" + base;
+  }
 
   if (!isFlash && !hasTierSuffix) {
     std::string effort = "low";
@@ -248,6 +256,17 @@ std::string normalizeAntigravityModelId(const std::string &modelId,
   }
 
   return "antigravity-" + base;
+}
+
+std::string resolveStreamModelId(const std::string &requestedModel,
+                                 const std::string &variantJson,
+                                 bool hasTools) {
+  std::string resolved =
+      normalizeAntigravityModelId(requestedModel, variantJson);
+  if (hasTools && toLowerCopy(resolved) == "antigravity-gemini-3-flash") {
+    return "antigravity-gemini-3-flash-agent";
+  }
+  return resolved;
 }
 
 struct RefreshTokenParts {
@@ -342,6 +361,31 @@ std::optional<float> readModelSpecificQuota(const OAuthAccount &acc,
   }
 }
 
+std::string normalizeQuotaDisplayKey(const std::string &model) {
+  const std::string lower = toLowerCopy(model);
+  if (lower.find("claude-opus-4-6-thinking") != std::string::npos)
+    return "claude-opus-4-6-thinking";
+  if (lower.find("claude-sonnet-4-6") != std::string::npos)
+    return "claude-sonnet-4-6";
+  if (lower.find("gemini-3-flash-agent") != std::string::npos)
+    return "gemini-3-flash-agent";
+  if (lower.find("gemini-3-flash") != std::string::npos)
+    return "gemini-3-flash";
+  if (lower.find("gemini-3.1-pro") != std::string::npos)
+    return "gemini-3.1-pro";
+  if (lower.find("gemini-3-pro") != std::string::npos)
+    return "gemini-3-pro";
+  if (lower.find("gemini-2.5-pro") != std::string::npos)
+    return "gemini-2.5-pro";
+  if (lower.find("gemini-2.5-flash-thinking") != std::string::npos)
+    return "gemini-2.5-flash-thinking";
+  if (lower.find("gemini-2.5-flash-lite") != std::string::npos)
+    return "gemini-2.5-flash-lite";
+  if (lower.find("gemini-2.5-flash") != std::string::npos)
+    return "gemini-2.5-flash";
+  return "";
+}
+
 std::optional<int64_t> parseResetTimestampSeconds(const std::string &raw) {
   std::string trimmed = firmius::shared::StringUtil::trim(raw);
   if (trimmed.empty()) {
@@ -381,6 +425,50 @@ std::optional<int64_t> parseResetTimestampSeconds(const std::string &raw) {
 #else
   return static_cast<int64_t>(timegm(&tm));
 #endif
+}
+
+void storeExhaustedModelQuotaFromError(OAuthAccount &acc,
+                                       const std::string &responseBody,
+                                       const std::string &fallbackModel) {
+  rapidjson::Document doc;
+  doc.Parse(responseBody.c_str());
+  if (doc.HasParseError() || !doc.IsObject() || !doc.HasMember("error") ||
+      !doc["error"].IsObject()) {
+    return;
+  }
+
+  std::string modelKey = fallbackModel;
+  if (modelKey.rfind("antigravity-", 0) == 0) {
+    modelKey = modelKey.substr(std::string("antigravity-").size());
+  }
+  std::string resetTime;
+
+  const auto &err = doc["error"];
+  if (err.HasMember("details") && err["details"].IsArray()) {
+    for (const auto &detail : err["details"].GetArray()) {
+      if (!detail.IsObject() || !detail.HasMember("metadata") ||
+          !detail["metadata"].IsObject()) {
+        continue;
+      }
+      const auto &metadata = detail["metadata"];
+      if (metadata.HasMember("model") && metadata["model"].IsString()) {
+        modelKey = metadata["model"].GetString();
+      }
+      if (metadata.HasMember("quotaResetTimeStamp") &&
+          metadata["quotaResetTimeStamp"].IsString()) {
+        resetTime = metadata["quotaResetTimeStamp"].GetString();
+      }
+    }
+  }
+
+  if (modelKey.empty()) {
+    return;
+  }
+
+  acc.metadata["quota:" + modelKey] = "0";
+  if (!resetTime.empty()) {
+    acc.metadata["quota_reset:" + modelKey] = resetTime;
+  }
 }
 
 int64_t getAccountBucketResetWaitSeconds(const OAuthAccount &acc,
@@ -663,9 +751,15 @@ public:
     metaDoc.SetObject();
     auto &metaAlloc = metaDoc.GetAllocator();
     rapidjson::Value metadata(rapidjson::kObjectType);
-    metadata.AddMember("ideType", "ANTIGRAVITY", metaAlloc);
-    metadata.AddMember("platform", "MACOS", metaAlloc);
-    metadata.AddMember("pluginType", "GEMINI", metaAlloc);
+    metadata.AddMember("ideType",
+                       rapidjson::Value(kAntigravityIdeType, metaAlloc),
+                       metaAlloc);
+    metadata.AddMember("platform",
+                       rapidjson::Value(kAntigravityPlatform, metaAlloc),
+                       metaAlloc);
+    metadata.AddMember("pluginType",
+                       rapidjson::Value(kAntigravityPluginType, metaAlloc),
+                       metaAlloc);
     rapidjson::Value metaBody(rapidjson::kObjectType);
     metaBody.AddMember("metadata", metadata, metaAlloc);
     
@@ -820,7 +914,7 @@ std::optional<OAuthAccount *> AntigravityProvider::getAvailableAccount(
   const std::string requestedModel =
       modelId.has_value() ? *modelId : "gemini-3-flash";
   const std::string normalizedModel =
-      normalizeAntigravityModelId(requestedModel, "");
+      resolveStreamModelId(requestedModel, "", false);
   const std::string bucket = modelToQuotaBucket(normalizedModel);
   const int64_t now = std::chrono::duration_cast<std::chrono::seconds>(
                           std::chrono::system_clock::now().time_since_epoch())
@@ -830,6 +924,10 @@ std::optional<OAuthAccount *> AntigravityProvider::getAvailableAccount(
   while (true) {
     int bestIdx = -1;
     float bestQuota = -1.0f;
+    const int preferredIdx =
+        (lastUsedIndex_ >= 0 && lastUsedIndex_ < static_cast<int>(accounts_.size()))
+            ? lastUsedIndex_
+            : -1;
 
     for (int idx = 0; idx < static_cast<int>(accounts_.size()); ++idx) {
       if (triedIndices.count(idx)) {
@@ -848,7 +946,8 @@ std::optional<OAuthAccount *> AntigravityProvider::getAvailableAccount(
         if (*modelQuota <= kQuotaAvailableThreshold) {
           continue;
         }
-        if (bestIdx < 0 || *modelQuota > bestQuota) {
+        if (bestIdx < 0 || *modelQuota > bestQuota ||
+            (*modelQuota == bestQuota && idx == preferredIdx)) {
           bestIdx = idx;
           bestQuota = *modelQuota;
         }
@@ -873,7 +972,8 @@ std::optional<OAuthAccount *> AntigravityProvider::getAvailableAccount(
           if (!bq.has_value()) {
             continue;
           }
-          if (bestIdx < 0 || *bq > bestQuota) {
+          if (bestIdx < 0 || *bq > bestQuota ||
+              (*bq == bestQuota && idx == preferredIdx)) {
             bestIdx = idx;
             bestQuota = *bq;
           }
@@ -1081,7 +1181,8 @@ void AntigravityProvider::stream(
   std::string requestedModel =
       opts.modelId.empty() ? "gemini-3-flash" : opts.modelId;
   std::string resolvedModel =
-      normalizeAntigravityModelId(requestedModel, opts.modelVariantJson);
+      resolveStreamModelId(requestedModel, opts.modelVariantJson,
+                           !opts.tools.empty());
   const std::string quotaBucket = modelToQuotaBucket(resolvedModel);
 
   auto tryRefreshExhaustedAccounts =
@@ -1377,6 +1478,7 @@ void AntigravityProvider::stream(
             ctx.readOffset = 0;
             continue;
           }
+          storeExhaustedModelQuotaFromError(acc, ctx.buffer, effectiveModel);
           lastError = "Rate limited (HTTP " + std::to_string(resp.code) + ")";
           int backoff = firmius::shared::BackoffConstants::getBackoffSeconds(
               accountRetries);
@@ -1523,9 +1625,9 @@ std::string AntigravityProvider::fetchManagedProject(OAuthAccount &acc) {
   auto &a = doc.GetAllocator();
   
   rapidjson::Value metadata(rapidjson::kObjectType);
-  metadata.AddMember("ideType", "ANTIGRAVITY", a);
-  metadata.AddMember("platform", "MACOS", a);
-  metadata.AddMember("pluginType", "GEMINI", a);
+  metadata.AddMember("ideType", rapidjson::Value(kAntigravityIdeType, a), a);
+  metadata.AddMember("platform", rapidjson::Value(kAntigravityPlatform, a), a);
+  metadata.AddMember("pluginType", rapidjson::Value(kAntigravityPluginType, a), a);
   if (acc.metadata.count("projectId") && !acc.metadata["projectId"].empty()) {
     metadata.AddMember("duetProject",
                        rapidjson::Value(acc.metadata["projectId"].c_str(), a),
@@ -1545,7 +1647,7 @@ std::string AntigravityProvider::fetchManagedProject(OAuthAccount &acc) {
   client.addHeader("X-Goog-Api-Client", "google-cloud-sdk vscode_cloudshelleditor/0.1");
   client.addHeader(
       "Client-Metadata",
-      R"({"ideType":"ANTIGRAVITY","platform":"MACOS","pluginType":"GEMINI"})");
+      R"({"ideType":"ANTIGRAVITY","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"})");
 
   // Try multiple endpoints in order (prod first, then sandbox)
   const std::vector<std::string> endpoints = {
@@ -1619,7 +1721,7 @@ std::string AntigravityProvider::fetchManagedProject(OAuthAccount &acc) {
   onboardClient.addHeader("X-Goog-Api-Client", "google-cloud-sdk vscode_cloudshelleditor/0.1");
   onboardClient.addHeader(
       "Client-Metadata",
-      R"({"ideType":"ANTIGRAVITY","platform":"MACOS","pluginType":"GEMINI"})");
+      R"({"ideType":"ANTIGRAVITY","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"})");
   
   // Try onboardUser on fallback endpoints
   const std::vector<std::string> onboardEndpoints = {
@@ -1762,14 +1864,9 @@ AntigravityProvider::getAllQuotas() const {
     for (const auto &[key, val] : acc.metadata) {
       if (key.rfind("quota:", 0) == 0) {
         std::string model = key.substr(6);
-        std::string g = "unknown";
-        if (model.find("claude") != std::string::npos)
-          g = "claude";
-        else if (model.find("gemini") != std::string::npos)
-          g = (model.find("flash") != std::string::npos) ? "gemini-flash"
-                                                         : "gemini-pro";
+        std::string g = normalizeQuotaDisplayKey(model);
 
-        if (g != "unknown") {
+        if (!g.empty()) {
           float f = std::stof(val);
           if (groups.find(g) == groups.end() || f < groups[g].first) {
             std::string reset = acc.metadata.count("quota_reset:" + model)

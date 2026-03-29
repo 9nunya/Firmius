@@ -526,10 +526,41 @@ bool blockChunkIfDependenciesIncomplete(const shared::Plan &plan,
   return true;
 }
 
+bool unblockChunkIfDependenciesMet(const shared::Plan &plan,
+                                   shared::WorkChunk &chunk) {
+  if (chunk.status == shared::WorkChunkStatus::Blocked &&
+      chunkDependenciesDone(plan, chunk)) {
+    chunk.status = shared::WorkChunkStatus::Ready;
+    return true;
+  }
+  return false;
+}
+
 bool chunkReadyForExecution(const shared::Plan &plan,
                             const shared::WorkChunk &chunk) {
   return chunk.status == shared::WorkChunkStatus::Ready &&
          chunkDependenciesDone(plan, chunk);
+}
+
+bool unblockDependentChunks(shared::Plan &plan,
+                            const std::string &chunkId) {
+  bool changed = false;
+  for (auto &chunk : plan.chunks) {
+    if (chunk.status == shared::WorkChunkStatus::Blocked) {
+      bool dependsOnDone = false;
+      for (const auto &depId : chunk.dependsOn) {
+        if (depId == chunkId) {
+          dependsOnDone = true;
+          break;
+        }
+      }
+      if (dependsOnDone && chunkDependenciesDone(plan, chunk)) {
+        chunk.status = shared::WorkChunkStatus::Ready;
+        changed = true;
+      }
+    }
+  }
+  return changed;
 }
 
 void requireChunkReadyForExecution(const shared::Plan &plan,

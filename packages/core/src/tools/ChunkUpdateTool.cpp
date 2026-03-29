@@ -172,10 +172,12 @@ shared::ToolResult ChunkUpdateTool::execute(const rapidjson::Value &input,
                                        "' cannot be marked Done without "
                                        "review_summary acceptance evidence");
             }
+              worktools::unblockDependentChunks(plan, chunk.id);
           }
 
           if (statusWasProvided || dependsOnWasProvided) {
             worktools::blockChunkIfDependenciesIncomplete(plan, chunk);
+            worktools::unblockChunkIfDependenciesMet(plan, chunk);
           }
 
           chunk.updatedAt = worktools::nowEpochMs();

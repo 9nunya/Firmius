@@ -6,6 +6,7 @@ add_library(firmius::provider ALIAS firmius_provider)
 target_sources(firmius_provider PRIVATE
     src/providers/CodexProvider.cpp
     src/providers/ChutesProvider.cpp
+    src/providers/KimiProvider.cpp
     src/providers/LMStudioProvider.cpp
     src/providers/NanoGPTProvider.cpp
     src/providers/OpenRouterProvider.cpp
@@ -18,6 +19,7 @@ target_sources(firmius_provider PRIVATE
     src/providers/BaseOAuthProvider.cpp
     src/providers/QwenProvider.cpp
     src/providers/BaseAPIKeyProvider.cpp
+    src/providers/BaseAnthropicProvider.cpp
 )
 
 target_sources(firmius_provider PUBLIC
@@ -26,6 +28,7 @@ target_sources(firmius_provider PUBLIC
   FILES
     include/providers/CodexProvider.hpp
     include/providers/ChutesProvider.hpp
+    include/providers/KimiProvider.hpp
     include/providers/LMStudioProvider.hpp
     include/providers/NanoGPTProvider.hpp
     include/providers/OpenRouterProvider.hpp
@@ -39,6 +42,7 @@ target_sources(firmius_provider PUBLIC
     include/providers/OAuthWizard.hpp
     include/providers/QwenProvider.hpp
     include/providers/BaseAPIKeyProvider.hpp
+    include/providers/BaseAnthropicProvider.hpp
 )
 
 target_include_directories(firmius_provider PUBLIC

@@ -58,8 +58,12 @@ bool chunkDependenciesDone(const shared::Plan &plan,
                            const shared::WorkChunk &chunk);
 bool blockChunkIfDependenciesIncomplete(const shared::Plan &plan,
                                         shared::WorkChunk &chunk);
+bool unblockChunkIfDependenciesMet(const shared::Plan &plan,
+                                   shared::WorkChunk &chunk);
 bool chunkReadyForExecution(const shared::Plan &plan,
                             const shared::WorkChunk &chunk);
+bool unblockDependentChunks(shared::Plan &plan,
+                            const std::string &chunkId);
 void requireChunkReadyForExecution(const shared::Plan &plan,
                                    const shared::WorkChunk &chunk,
                                    const std::string &action = "dispatch");

@@ -4,6 +4,7 @@
 #include "tools/ProcessState.hpp"
 #include "tools/SubagentState.hpp"
 #include "utils/ToolView.hpp"
+#include <ftxui/dom/elements.hpp>
 #include <optional>
 #include <string>
 #include <vector>
@@ -77,6 +78,7 @@ struct ToolPresentation {
   std::string subtitle;
   std::string compact_summary;
   std::vector<std::string> body_lines;
+  std::vector<ftxui::Element> custom_body_elements;
   std::string diff_source_name;
   std::vector<ToolPresentationDiffSection> diff_sections;
   std::vector<ToolPresentationFact> facts;

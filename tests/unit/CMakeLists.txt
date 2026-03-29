@@ -536,6 +536,7 @@ add_executable(test_chat_window_helpers
     ../../packages/tui/src/tools/FileToolPresentation.cpp
     ../../packages/tui/src/tools/ToolPresentation.cpp
     ../../packages/tui/src/tools/ProcessToolPresentation.cpp
+    ../../packages/tui/src/tools/PythonToolPresentation.cpp
     ../../packages/tui/src/tools/SubagentToolPresentation.cpp
     ../../packages/tui/src/tools/WorkToolPresentation.cpp
 )
@@ -707,15 +708,26 @@ gtest_discover_tests(test_agent_strip)
 add_executable(test_tool_presentation
     tui/test_tool_presentation.cpp
     ../../packages/tui/src/components/FileEditDiff.cpp
+    ../../packages/tui/src/components/SyntaxHighlighter.cpp
+    ../../packages/tui/src/ThemeManager.cpp
+    ../../packages/tui/src/UserPreferences.cpp
+    ../../packages/tui/src/NotificationManager.cpp
+    ../../packages/tui/src/components/GlintEffect.cpp
     ../../packages/tui/src/tools/ArtifactToolPresentation.cpp
     ../../packages/tui/src/tools/FileToolPresentation.cpp
     ../../packages/tui/src/tools/ProcessToolPresentation.cpp
     ../../packages/tui/src/tools/SubagentToolPresentation.cpp
+    ../../packages/tui/src/tools/PythonToolPresentation.cpp
     ../../packages/tui/src/tools/ToolPresentation.cpp
     ../../packages/tui/src/tools/WorkToolPresentation.cpp
 )
 target_link_libraries(test_tool_presentation PRIVATE
     firmius::shared
+    firmius::core
+    ftxui::dom
+    ftxui::screen
+    ftxui::component
+    tree_sitter_all
     GTest::gtest_main
 )
 target_include_directories(test_tool_presentation PRIVATE
@@ -736,6 +748,7 @@ add_executable(test_tool_presentation_block
     ../../packages/tui/src/tools/FileToolPresentation.cpp
     ../../packages/tui/src/tools/ProcessToolPresentation.cpp
     ../../packages/tui/src/tools/SubagentToolPresentation.cpp
+    ../../packages/tui/src/tools/PythonToolPresentation.cpp
     ../../packages/tui/src/tools/ToolPresentation.cpp
     ../../packages/tui/src/tools/WorkToolPresentation.cpp
     ../../packages/tui/src/ThemeManager.cpp
