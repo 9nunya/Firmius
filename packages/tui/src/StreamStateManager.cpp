@@ -159,6 +159,10 @@ void appendOutputTail(std::string &tail, const std::string &delta,
 
 ParsedSubagentResult parseSubagentResult(const std::string &result) {
   ParsedSubagentResult parsed;
+  parsed.attempted_categories.reserve(4);
+  parsed.artifacts_created.reserve(8);
+  parsed.artifacts_updated.reserve(8);
+  
   rapidjson::Document doc;
   doc.Parse(result.c_str());
   if (doc.HasParseError() || !doc.IsObject()) {
@@ -253,6 +257,42 @@ std::string artifactReadSummary(const std::string &args, const std::string &resu
   }
 
   return label.empty() ? "Loaded artifact" : ("Loaded " + label);
+}
+
+bool shouldAppendErrorToLiveChat(const std::string &message) {
+  if (message.empty()) {
+    return false;
+  }
+
+  const std::string lower = firmius::shared::StringUtil::toLower(message);
+  const bool has_raw_body =
+      message.find("Raw provider body:") != std::string::npos ||
+      message.find("Raw body:") != std::string::npos ||
+      message.find("Response body:") != std::string::npos;
+  const bool rate_limited =
+      lower.find("http 429") != std::string::npos ||
+      lower.find("rate limit") != std::string::npos ||
+      lower.find("rate limited") != std::string::npos ||
+      lower.find("quota exhausted") != std::string::npos;
+
+  return has_raw_body && rate_limited;
+}
+
+void appendErrorToTimelineIfRelevant(std::vector<TimelineEntry> &timeline,
+                                     std::uint64_t &nextSequence,
+                                     const std::string &agentId,
+                                     const std::string &message,
+                                     bool hideErrors = false) {
+  if (hideErrors) {
+    return;
+  }
+  if (!shouldAppendErrorToLiveChat(message)) {
+    return;
+  }
+
+  timeline.push_back(TimelineEntry{
+      TimelineEntry::Kind::Error,
+      "error-" + std::to_string(++nextSequence), message, agentId});
 }
 
 std::string summarizeHistoricalToolEntry(const std::string &name,
@@ -1313,14 +1353,54 @@ void StreamStateManager::handleAgentInterrupted(
   s.provider_waiting = false;
   s.is_thinking = false;
   clearActiveLiveEntry(e.agentId);
+
+  std::unordered_set<std::string> erased_tool_ids;
+  for (auto it = tool_calls_.begin(); it != tool_calls_.end();) {
+    auto &view = it->second;
+    if (!view || view->agentId != e.agentId ||
+        (view->phase != ToolPhase::Preparing &&
+         view->phase != ToolPhase::Called &&
+         view->phase != ToolPhase::BackgroundRunning)) {
+      ++it;
+      continue;
+    }
+
+    const bool hasMeaningfulToolIdentity =
+        !view->toolCallId.empty() && (!view->name.empty() || !view->args.empty());
+    const bool isPreparationOnly = view->phase == ToolPhase::Preparing &&
+                                   view->args.empty() && view->result.empty();
+    if (!hasMeaningfulToolIdentity || isPreparationOnly) {
+      erased_tool_ids.insert(it->first);
+      it = tool_calls_.erase(it);
+      continue;
+    }
+
+    applyToolResult(view, false, "User aborted tool manually.");
+    ++it;
+  }
+
   timeline_.erase(
       std::remove_if(
           timeline_.begin(), timeline_.end(), [&](const TimelineEntry &entry) {
-            return entry.agentId == e.agentId &&
-                   (entry.kind == TimelineEntry::Kind::Thinking ||
-                    entry.kind == TimelineEntry::Kind::Text);
+            if (entry.agentId != e.agentId) {
+              return false;
+            }
+            if (entry.kind == TimelineEntry::Kind::Thinking ||
+                entry.kind == TimelineEntry::Kind::Text) {
+              return true;
+            }
+            return entry.kind == TimelineEntry::Kind::ToolCall &&
+                   erased_tool_ids.count(entry.id) > 0;
           }),
       timeline_.end());
+  for (auto it = tool_call_cluster_ids_.begin();
+       it != tool_call_cluster_ids_.end();) {
+    if (erased_tool_ids.count(it->first) > 0) {
+      it = tool_call_cluster_ids_.erase(it);
+    } else {
+      ++it;
+    }
+  }
   live_quick_clusters_[e.agentId] = {};
   clearRetryStatus();
 }
@@ -1344,6 +1424,10 @@ void StreamStateManager::handleAgentError(const shared::AgentError &e) {
       timeline_.end());
   live_quick_clusters_[e.agentId] = {};
   clearRetryStatus();
+
+  const bool hideErrors = firmius::core::Harness::instance().getConfig().hideErrors;
+  appendErrorToTimelineIfRelevant(timeline_, next_live_entry_sequence_,
+                                  e.agentId, e.message, hideErrors);
 
   auto it_sub = subagent_to_parent_tool_.find(e.agentId);
   if (it_sub == subagent_to_parent_tool_.end()) {
@@ -1580,6 +1664,8 @@ void StreamStateManager::handleAgentRetrying(const shared::AgentRetrying &e) {
   if (!e.accountLocator.empty()) {
     retry_status_ += " [Account: " + e.accountLocator + "]";
   }
+  appendErrorToTimelineIfRelevant(timeline_, next_live_entry_sequence_,
+                                  e.agentId, e.details);
   reactivateSubagentParentView(e.agentId);
   auto it_parent = subagent_to_parent_tool_.find(e.agentId);
   if (it_parent != subagent_to_parent_tool_.end()) {
@@ -1669,8 +1755,25 @@ void StreamStateManager::handleMessageDequeued(
                          queued_messages_.end());
 }
 
+void StreamStateManager::handleInternalMessageQueued(
+    const shared::InternalMessageQueued &e) {
+  queued_internal_messages_.push_back(
+      {e.messageId, e.text, e.threadId, e.agentId});
+}
+
+void StreamStateManager::handleInternalMessageDequeued(
+    const shared::InternalMessageDequeued &e) {
+  queued_internal_messages_.erase(std::remove_if(queued_internal_messages_.begin(),
+                                        queued_internal_messages_.end(),
+                                        [&](const QueuedMessageEntry &entry) {
+                                          return entry.message_id == e.messageId;
+                                        }),
+                         queued_internal_messages_.end());
+}
+
 void StreamStateManager::handleThreadChanged() {
   queued_messages_.clear();
+  queued_internal_messages_.clear();
   // Clear live tool calls - they will be rebuilt from history
   tool_calls_.clear();
   timeline_.clear();
@@ -1958,6 +2061,7 @@ void StreamStateManager::rebuildToolCallsFromHistory(
       const shared::AgentHistory* subHistory = subHistoryPtr.get();
 
       // If not available via harness, try loading from disk
+      std::unique_ptr<shared::AgentHistory> fallbackHistory;
       if (!subHistory && !threadId.empty()) {
         auto fallback_hist =
             firmius::core::ThreadManager(
@@ -1965,7 +2069,8 @@ void StreamStateManager::rebuildToolCallsFromHistory(
                 "/.firmius/threads")
                 .loadAgentHistory(threadId, subagentId);
         if (!fallback_hist.turns.empty()) {
-          subHistory = new shared::AgentHistory{std::move(fallback_hist)};
+          fallbackHistory = std::make_unique<shared::AgentHistory>(std::move(fallback_hist));
+          subHistory = fallbackHistory.get();
         }
       }
 
@@ -2133,6 +2238,10 @@ void StreamStateManager::rebuildToolCallsFromHistory(
 
 const std::vector<QueuedMessageEntry> &StreamStateManager::getQueuedMessages() const {
   return queued_messages_;
+}
+
+const std::vector<QueuedMessageEntry> &StreamStateManager::getQueuedInternalMessages() const {
+  return queued_internal_messages_;
 }
 
 int StreamStateManager::getToolCallClusterId(

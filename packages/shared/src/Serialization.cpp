@@ -1919,6 +1919,7 @@ rapidjson::Document toJson(const ModelInfo &model) {
   d.AddMember("id", rapidjson::Value(model.id.c_str(), a), a);
   d.AddMember("provider", rapidjson::Value(model.provider.c_str(), a), a);
   d.AddMember("contextWindow", model.contextWindow, a);
+  d.AddMember("maxOutputTokens", model.maxOutputTokens, a);
   rapidjson::Value mods(rapidjson::kArrayType);
   for (const auto &m : model.modalities)
     mods.PushBack(rapidjson::Value(m.c_str(), a), a);
@@ -1947,6 +1948,8 @@ ModelInfo modelInfoFromJsonValue(const rapidjson::Value &v) {
   mi.provider = v["provider"].GetString();
   if (v.HasMember("contextWindow"))
     mi.contextWindow = v["contextWindow"].GetUint();
+  if (v.HasMember("maxOutputTokens"))
+    mi.maxOutputTokens = v["maxOutputTokens"].GetUint();
   if (v.HasMember("modalities") && v["modalities"].IsArray()) {
     for (const auto &m : v["modalities"].GetArray())
       mi.modalities.push_back(m.GetString());

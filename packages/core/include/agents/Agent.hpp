@@ -28,7 +28,7 @@ using namespace firmius::shared;
 /**
  * @brief The primary Agent Engine implementation.
  */
-class Agent : public IAgent {
+class Agent : public IAgent, public std::enable_shared_from_this<Agent> {
 public:
   Agent(AgentContext context, std::shared_ptr<shared::IEnvironment> environment,
         std::shared_ptr<shared::IPermissions> permissions,

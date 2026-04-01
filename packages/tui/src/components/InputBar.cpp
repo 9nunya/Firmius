@@ -1,6 +1,8 @@
 #include "components/InputBar.hpp"
 #include "ThemeManager.hpp"
 #include "commands/CommandManager.hpp"
+#include "providers/BaseAPIKeyProvider.hpp"
+#include "providers/BaseOAuthProvider.hpp"
 #include "providers/ProviderRegistry.hpp"
 #include "NotificationManager.hpp"
 #include "utils/Clipboard.hpp"
@@ -242,6 +244,22 @@ buildProviderSuggestions(ArgType argType, const std::string &filter) {
     if (argType == ArgType::OAuthProvider &&
         type != firmius::provider::ProviderType::OAuth) {
       continue;
+    }
+    if (argType == ArgType::QuotaProvider) {
+      auto oauthProvider =
+          std::dynamic_pointer_cast<firmius::provider::BaseOAuthProvider>(
+              provider);
+      bool supportsQuota = oauthProvider != nullptr;
+      if (!supportsQuota) {
+        auto apiKeyProvider =
+            std::dynamic_pointer_cast<firmius::provider::BaseAPIKeyProvider>(
+                provider);
+        supportsQuota =
+            apiKeyProvider && apiKeyProvider->supportsQuotaTracking();
+      }
+      if (!supportsQuota) {
+        continue;
+      }
     }
     // ProviderId shows all providers (both OAuth and APIKey)
     const std::string id = provider->getId();
@@ -568,6 +586,7 @@ ftxui::Component InputBar(
                (!ac->is_typing_command_name && ac->current_arg &&
                 (ac->current_arg->type == ArgType::Provider ||
                  ac->current_arg->type == ArgType::OAuthProvider ||
+                 ac->current_arg->type == ArgType::QuotaProvider ||
                  ac->current_arg->type == ArgType::ProviderId)))) {
 
       size_t match_count = 0;
@@ -628,6 +647,7 @@ ftxui::Component InputBar(
         } else if (!ac->is_typing_command_name && ac->current_arg &&
                    (ac->current_arg->type == ArgType::Provider ||
                     ac->current_arg->type == ArgType::OAuthProvider ||
+                    ac->current_arg->type == ArgType::QuotaProvider ||
                     ac->current_arg->type == ArgType::ProviderId)) {
           auto query = ac->has_current_arg_value ? ac->current_arg_value : "";
           auto suggestions =
@@ -784,6 +804,9 @@ ftxui::Component InputBar(
       case ArgType::OAuthProvider:
         type_str = "OAuth provider";
         break;
+      case ArgType::QuotaProvider:
+        type_str = "Quota provider";
+        break;
       case ArgType::ProviderId:
         type_str = "Provider ID";
         break;
@@ -798,6 +821,7 @@ ftxui::Component InputBar(
 
       const bool wants_provider_suggestions =
           arg.type == ArgType::Provider || arg.type == ArgType::OAuthProvider ||
+          arg.type == ArgType::QuotaProvider ||
           arg.type == ArgType::ProviderId;
       if (wants_provider_suggestions) {
         std::string query =

@@ -20,9 +20,14 @@ public:
      * - {Alt+X} where X is any char
      * - {F1}-{F12}
      * - Standard keys: {Enter}, {Tab}, {Esc}, {Backspace}, {Delete}, {Up}, {Down}, {Left}, {Right}, {Home}, {End}
+     * - Escape sequences: \n, \t, \\, \r (literal backslash-n becomes newline, etc.)
      */
     static std::string translate(const std::string& input) {
         std::string result = input;
+        
+        // 0. Translate escape sequences (literal backslash-n to newline, etc.)
+        // This handles cases where LLMs send "Hello\\n" as a JSON string
+        result = translateEscapeSequences(result);
         
         // 1. Static mappings for common non-printable keys
         static const std::map<std::string, std::string> staticMap = {
@@ -74,6 +79,34 @@ public:
             result.replace(match.position(), match.length(), seq);
         }
 
+        return result;
+    }
+
+private:
+    /**
+     * @brief Translates escape sequences like \n, \t, \\, \r to their actual characters.
+     * This handles cases where LLMs send literal backslash-n instead of actual newlines.
+     */
+    static std::string translateEscapeSequences(const std::string& input) {
+        std::string result;
+        result.reserve(input.size());
+        
+        for (size_t i = 0; i < input.size(); ++i) {
+            if (input[i] == '\\' && i + 1 < input.size()) {
+                switch (input[i + 1]) {
+                    case 'n': result += '\n'; ++i; break;
+                    case 't': result += '\t'; ++i; break;
+                    case 'r': result += '\r'; ++i; break;
+                    case '\\': result += '\\'; ++i; break;
+                    case '"': result += '"'; ++i; break;
+                    case '0': result += '\0'; ++i; break;
+                    default: result += input[i]; break;
+                }
+            } else {
+                result += input[i];
+            }
+        }
+        
         return result;
     }
 };

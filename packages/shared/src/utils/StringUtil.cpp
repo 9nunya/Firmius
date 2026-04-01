@@ -16,9 +16,18 @@ std::string StringUtil::trim(const std::string &s) {
   return s.substr(first, (last - first + 1));
 }
 
+std::string StringUtil::trim(std::string_view s) {
+  auto first = s.find_first_not_of(" \t\r\n");
+  if (first == std::string_view::npos)
+    return "";
+  auto last = s.find_last_not_of(" \t\r\n");
+  return std::string(s.substr(first, (last - first + 1)));
+}
+
 std::vector<std::string> StringUtil::split(const std::string &s,
                                            char delimiter) {
   std::vector<std::string> tokens;
+  tokens.reserve(16);  // Reserve space for common case
   std::string token;
   std::istringstream tokenStream(s);
   while (std::getline(tokenStream, token, delimiter)) {
@@ -31,18 +40,28 @@ std::string StringUtil::concat(const std::vector<std::string> &arr,
                                const std::string &str) {
   if (arr.empty())
     return "";
-  return std::accumulate(
-      std::next(arr.begin()), arr.end(), arr[0],
-      [&](const std::string &total, const std::string &current) {
-        return total + str + current;
-      });
+  
+  // Pre-calculate total size to avoid reallocations
+  size_t total_size = arr.size() * str.size();
+  for (const auto &s : arr) {
+    total_size += s.size();
+  }
+  
+  std::string result;
+  result.reserve(total_size);
+  result = arr[0];
+  for (size_t i = 1; i < arr.size(); ++i) {
+    result += str;
+    result += arr[i];
+  }
+  return result;
 }
 
-bool StringUtil::startsWith(const std::string &s, const std::string &prefix) {
+bool StringUtil::startsWith(std::string_view s, std::string_view prefix) {
   return s.size() >= prefix.size() && s.compare(0, prefix.size(), prefix) == 0;
 }
 
-bool StringUtil::endsWith(const std::string &s, const std::string &suffix) {
+bool StringUtil::endsWith(std::string_view s, std::string_view suffix) {
   return s.size() >= suffix.size() &&
          s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
 }
@@ -62,8 +81,10 @@ std::string StringUtil::generateUuid() {
   return std::string(uuid);
 }
 
-std::string StringUtil::shellEscape(const std::string &s) {
-  std::string result = "'";
+std::string StringUtil::shellEscape(std::string_view s) {
+  std::string result;
+  result.reserve(s.size() + 2);  // Reserve for worst case + quotes
+  result = "'";
   for (char c : s) {
     if (c == '\'')
       result += "'\\''";

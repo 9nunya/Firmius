@@ -13,14 +13,12 @@ ftxui::Element RenderHighlightedContent(const std::string &content,
                                         const Theme &theme) {
   if (!language.empty() &&
       SyntaxHighlighter::instance().hasGrammar(language)) {
-    auto highlighted =
-        SyntaxHighlighter::instance().highlightRenderLines(content, language);
-    if (!highlighted.empty()) {
-      return highlighted.front() | ftxui::flex_shrink;
-    }
+    return SyntaxHighlighter::instance().highlightRenderWrappedLine(content,
+                                                                    language) |
+           ftxui::xflex;
   }
-  return ftxui::text(content.empty() ? " " : content) |
-         ftxui::color(theme.base.fg) | ftxui::flex_shrink;
+  return ftxui::paragraph(content.empty() ? " " : content) |
+         ftxui::color(theme.base.fg) | ftxui::xflex;
 }
 
 ftxui::Color PrefixColor(const ToolPresentationDiffLine &line,

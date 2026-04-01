@@ -236,13 +236,17 @@ std::string buildExecutorTask(const shared::Plan &plan,
   prompt << "  Changed: <files/behavior>\n";
   prompt << "  Verified: <command/test and result>\n";
   prompt << "  Blockers/Risks: <none or concrete issue>\n";
+  
+  prompt << "\n" << worktools::buildExecutorLockDoctrine() << "\n";
+  
   if (!task.empty()) {
     prompt << "\nLead Notes\n" << task << "\n";
   }
   return prompt.str();
 }
 
-std::string buildWorkerTask(const std::string &task) {
+std::string buildWorkerTask(const std::string &task,
+                            const std::optional<shared::WorkTask> &workTask) {
   std::ostringstream prompt;
   prompt << "You are a worker helper supporting your parent executor on a "
             "bounded subtask.\n\n";
@@ -251,7 +255,25 @@ std::string buildWorkerTask(const std::string &task) {
   prompt << "- You are not responsible for the whole plan.\n";
   prompt << "- Complete only the bounded subtask below and return useful "
             "results to the executor.\n\n";
+  
+  if (workTask.has_value()) {
+    prompt << "Assigned Task\n";
+    prompt << "Task ID: " << workTask->id << "\n";
+    prompt << "Task Title: " << workTask->title << "\n";
+    prompt << "Task Goal: " << workTask->goal << "\n";
+    if (!workTask->notes.empty()) {
+      prompt << "Task Notes: " << workTask->notes << "\n";
+    }
+    if (!workTask->verificationCondition.empty()) {
+      prompt << "Verification: " << workTask->verificationCondition << "\n";
+    }
+    prompt << "\n";
+  }
+  
   prompt << "Subtask\n" << task << "\n";
+  
+  prompt << "\n" << worktools::buildWorkerLockDoctrine() << "\n";
+  
   return prompt.str();
 }
 
@@ -474,8 +496,24 @@ std::string buildDelegationTask(const SubagentInput &input,
     return buildAuditorTask(plan, chunk, input.task);
   }
 
+  if (isWorkerLikeRole(role) && input.task_id.has_value() &&
+      !input.task_id->empty() && input.plan_id.has_value() &&
+      input.chunk_id.has_value()) {
+    const shared::Plan plan = loadPlan(threadId, *input.plan_id);
+    const shared::WorkChunk &chunk = findChunk(plan, *input.chunk_id);
+    
+    // Find the task
+    auto taskIt = std::find_if(chunk.tasks.begin(), chunk.tasks.end(),
+                                [&](const shared::WorkTask &t) {
+                                  return t.id == *input.task_id;
+                                });
+    if (taskIt != chunk.tasks.end()) {
+      return buildWorkerTask(input.task, *taskIt);
+    }
+  }
+
   if (isWorkerLikeRole(role)) {
-    return buildWorkerTask(input.task);
+    return buildWorkerTask(input.task, std::nullopt);
   }
 
   return input.task;
@@ -680,6 +718,10 @@ std::shared_ptr<shared::JSONSchema> SubagentTool::getSchema() const {
                shared::zString()
                    ->describe("Optional chunk to bind for executor/auditor delegation")
                    ->setOptional()},
+              {"task_id",
+               shared::zString()
+                   ->describe("Optional task ID within chunk to attach worker. Use when delegating to a worker for a specific subtask.")
+                   ->setOptional()},
               {"category",
                shared::zString()
                    ->describe("Optional model routing category override. Use only "
@@ -721,6 +763,14 @@ shared::ToolResult SubagentTool::execute(const SubagentInput &input,
         "plan_id and chunk_id must either both be provided or both be omitted");
   }
 
+  // task_id requires both plan_id and chunk_id
+  if (input.task_id.has_value() && !input.task_id->empty()) {
+    if (!input.plan_id.has_value() || !input.chunk_id.has_value()) {
+      return shared::ToolResult::fail(
+          "task_id requires both plan_id and chunk_id to be provided");
+    }
+  }
+
   if (isExecutorRole(workRole) && input.plan_id.has_value() &&
       input.chunk_id.has_value()) {
     try {
@@ -728,6 +778,45 @@ shared::ToolResult SubagentTool::execute(const SubagentInput &input,
                                           *input.chunk_id);
       ensureExecutorAssignmentAvailable(threadId, *input.plan_id, *input.chunk_id,
                                         input.agent_id);
+    } catch (const std::exception &e) {
+      return shared::ToolResult::fail(e.what());
+    }
+  }
+
+  // Worker assignment to task: validate task exists and assign worker
+  if (isWorkerLikeRole(workRole) && input.task_id.has_value() &&
+      !input.task_id->empty() && input.plan_id.has_value() &&
+      input.chunk_id.has_value()) {
+    try {
+      ThreadManager tm(ThreadManager::defaultBasePath());
+      shared::Plan plan = tm.getPlan(threadId, *input.plan_id);
+      auto &chunk = worktools::requireChunk(plan, *input.chunk_id);
+      
+      // Find the task
+      auto taskIt = std::find_if(chunk.tasks.begin(), chunk.tasks.end(),
+                                  [&](const shared::WorkTask &t) {
+                                    return t.id == *input.task_id;
+                                  });
+      if (taskIt == chunk.tasks.end()) {
+        return shared::ToolResult::fail(
+            "Task '" + *input.task_id + "' not found in chunk '" + *input.chunk_id + "'");
+      }
+      
+      // Assign worker to task if not already assigned
+      if (!taskIt->assignedWorkerId.empty() &&
+          (!input.agent_id.has_value() || taskIt->assignedWorkerId != *input.agent_id)) {
+        return shared::ToolResult::fail(
+            "Task '" + *input.task_id + "' is already assigned to worker '" +
+            taskIt->assignedWorkerId + "'");
+      }
+      
+      // Persist worker assignment
+      if (input.agent_id.has_value() && !input.agent_id->empty()) {
+        taskIt->assignedWorkerId = *input.agent_id;
+        taskIt->updatedAt = worktools::nowEpochMs();
+        chunk.updatedAt = taskIt->updatedAt;
+        tm.updatePlan(threadId, plan);
+      }
     } catch (const std::exception &e) {
       return shared::ToolResult::fail(e.what());
     }

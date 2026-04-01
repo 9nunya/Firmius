@@ -30,6 +30,7 @@ struct UserConfig {
     bool enableSubagentRouteFallback = true;
     std::vector<std::string> subagentRouteFallbackOrder;
     bool showInternalNudges = false;
+    bool hideErrors = false;                              // Hide errors in chat display
 };
 
 class ConfigLoader {

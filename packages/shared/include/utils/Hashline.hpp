@@ -8,7 +8,7 @@
 namespace firmius::shared::utils {
 
 struct AnchorResult {
-  enum class Status { SUCCESS, STALE, AMBIGUOUS, MALFORMED };
+  enum class Status { SUCCESS, STALE, AMBIGUOUS, MALFORMED, NOT_NUMERIC, OUT_OF_RANGE };
   Status status = Status::SUCCESS;
   int lineIndex = -1;
   bool relocated = false;
@@ -95,6 +95,14 @@ public:
     static AnchorResult resolveAnchor(const std::vector<std::string>& lines,
                                       const std::string& anchorText,
                                       int searchWindow = 15);
+    /**
+     * @brief Resolves a plain line number to a line index.
+     * @param lines The lines of the file.
+     * @param lineNum The 1-indexed line number.
+     * @return The resolved line index and status.
+     */
+    static AnchorResult resolveLineNumber(const std::vector<std::string>& lines,
+                                          int lineNum);
 
 };
 

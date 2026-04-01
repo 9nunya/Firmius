@@ -6,7 +6,17 @@
 
 namespace firmius::tui {
 
-enum class ArgType { String, Number, AgentId, ThreadId, Filepath, Provider, OAuthProvider, ProviderId };
+enum class ArgType {
+  String,
+  Number,
+  AgentId,
+  ThreadId,
+  Filepath,
+  Provider,
+  OAuthProvider,
+  QuotaProvider,
+  ProviderId
+};
 
 struct CommandArg {
   std::string name;

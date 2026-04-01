@@ -6,6 +6,7 @@
 #include "agents/PurposeLoader.hpp"
 #include "environment/Environment.hpp"
 #include "environment/Permissions.hpp"
+#include "harness/Harness.hpp"
 #include "hosts/DockerHost.hpp"
 #include "hosts/LocalHost.hpp"
 #include "persistence/HistoryEditor.hpp"
@@ -16,6 +17,7 @@
 #include "providers/CodexProvider.hpp"
 #include "providers/KimiProvider.hpp"
 #include "providers/NanoGPTProvider.hpp"
+#include "providers/NvidiaProvider.hpp"
 #include "providers/OpenRouterProvider.hpp"
 #include "providers/ProviderRegistry.hpp"
 #include "providers/QwenProvider.hpp"
@@ -28,6 +30,9 @@
 #include "tools/ChunkGetTool.hpp"
 #include "tools/ChunkListTool.hpp"
 #include "tools/ChunkReadyForExecutionTool.hpp"
+#include "tools/FleetLockTool.hpp"
+#include "tools/FleetLockRespondTool.hpp"
+#include "tools/FleetStatusTool.hpp"
 #include "tools/ChunkUpdateTool.hpp"
 #include "tools/FileEditTool.hpp"
 #include "tools/FileReadTool.hpp"
@@ -348,50 +353,110 @@ Engine::Engine() {
     return ss.str();
   });
 
-  toolRegistry.registerTool(std::make_unique<FileReadTool>());
-  toolRegistry.registerTool(std::make_unique<FileEditTool>());
-  toolRegistry.registerTool(std::make_unique<ProcessExecuteTool>());
-  toolRegistry.registerTool(std::make_unique<SubagentTool>());
-  toolRegistry.registerTool(std::make_unique<SubagentTerminateTool>());
-  toolRegistry.registerTool(std::make_unique<SubagentWaitTool>());
-  toolRegistry.registerTool(std::make_unique<PythonExecuteTool>());
-  toolRegistry.registerTool(std::make_unique<ListDirectoryTool>());
-  toolRegistry.registerTool(std::make_unique<GlobTool>());
-  toolRegistry.registerTool(std::make_unique<GrepTool>());
-  toolRegistry.registerTool(std::make_unique<WebFetchTool>());
-  toolRegistry.registerTool(std::make_unique<ProcessSpawnTool>());
-  toolRegistry.registerTool(std::make_unique<ProcessStatusTool>());
-  toolRegistry.registerTool(std::make_unique<ProcessWaitTool>());
-  toolRegistry.registerTool(std::make_unique<ProcessInputTool>());
-  toolRegistry.registerTool(std::make_unique<PlanCreateTool>());
-  toolRegistry.registerTool(std::make_unique<PlanListTool>());
-  toolRegistry.registerTool(std::make_unique<PlanGetTool>());
-  toolRegistry.registerTool(std::make_unique<PlanUpdateTool>());
-  toolRegistry.registerTool(std::make_unique<PlanSetActiveTool>());
-  toolRegistry.registerTool(std::make_unique<ChunkAddTool>());
-  toolRegistry.registerTool(std::make_unique<ChunkListTool>());
-  toolRegistry.registerTool(std::make_unique<ChunkGetTool>());
-  toolRegistry.registerTool(std::make_unique<ChunkUpdateTool>());
-  toolRegistry.registerTool(std::make_unique<ChunkReadyForExecutionTool>());
-  toolRegistry.registerTool(std::make_unique<TodoWriteTool>());
-  toolRegistry.registerTool(std::make_unique<ArtifactWriteTool>());
-  toolRegistry.registerTool(std::make_unique<ArtifactReadTool>());
-  toolRegistry.registerTool(std::make_unique<ArtifactListTool>());
+  toolRegistry.registerToolFactory(
+      "file_read", []() { return std::make_unique<FileReadTool>(); });
+  toolRegistry.registerToolFactory(
+      "file_edit", []() { return std::make_unique<FileEditTool>(); });
+  toolRegistry.registerToolFactory("process_execute", []() {
+    return std::make_unique<ProcessExecuteTool>();
+  });
+  toolRegistry.registerToolFactory(
+      "summon_subagent", []() { return std::make_unique<SubagentTool>(); });
+  toolRegistry.registerToolFactory("subagent_terminate", []() {
+    return std::make_unique<SubagentTerminateTool>();
+  });
+  toolRegistry.registerToolFactory(
+      "subagent_wait", []() { return std::make_unique<SubagentWaitTool>(); });
+  toolRegistry.registerToolFactory(
+      "python_execute", []() { return std::make_unique<PythonExecuteTool>(); });
+  toolRegistry.registerToolFactory(
+      "list_directory", []() { return std::make_unique<ListDirectoryTool>(); });
+  toolRegistry.registerToolFactory(
+      "glob", []() { return std::make_unique<GlobTool>(); });
+  toolRegistry.registerToolFactory(
+      "grep", []() { return std::make_unique<GrepTool>(); });
+  toolRegistry.registerToolFactory(
+      "web_fetch", []() { return std::make_unique<WebFetchTool>(); });
+  toolRegistry.registerToolFactory(
+      "process_spawn", []() { return std::make_unique<ProcessSpawnTool>(); });
+  toolRegistry.registerToolFactory(
+      "process_status", []() { return std::make_unique<ProcessStatusTool>(); });
+  toolRegistry.registerToolFactory(
+      "process_wait", []() { return std::make_unique<ProcessWaitTool>(); });
+  toolRegistry.registerToolFactory(
+      "process_input", []() { return std::make_unique<ProcessInputTool>(); });
+  toolRegistry.registerToolFactory(
+      "plan_create", []() { return std::make_unique<PlanCreateTool>(); });
+  toolRegistry.registerToolFactory(
+      "plan_list", []() { return std::make_unique<PlanListTool>(); });
+  toolRegistry.registerToolFactory(
+      "plan_get", []() { return std::make_unique<PlanGetTool>(); });
+  toolRegistry.registerToolFactory(
+      "plan_update", []() { return std::make_unique<PlanUpdateTool>(); });
+  toolRegistry.registerToolFactory("plan_set_active", []() {
+    return std::make_unique<PlanSetActiveTool>();
+  });
+  toolRegistry.registerToolFactory(
+      "chunk_add", []() { return std::make_unique<ChunkAddTool>(); });
+  toolRegistry.registerToolFactory(
+      "chunk_list", []() { return std::make_unique<ChunkListTool>(); });
+  toolRegistry.registerToolFactory(
+      "chunk_get", []() { return std::make_unique<ChunkGetTool>(); });
+  toolRegistry.registerToolFactory(
+      "chunk_update", []() { return std::make_unique<ChunkUpdateTool>(); });
+  toolRegistry.registerToolFactory("chunk_ready_for_execution", []() {
+    return std::make_unique<ChunkReadyForExecutionTool>();
+  });
+  toolRegistry.registerToolFactory(
+      "fleet_lock", []() { return std::make_unique<FleetLockTool>(); });
+  toolRegistry.registerToolFactory(
+      "fleet_lock_respond", []() { return std::make_unique<FleetLockRespondTool>(); });
+  toolRegistry.registerToolFactory(
+      "fleet_status", []() { return std::make_unique<FleetStatusTool>(); });
+  toolRegistry.registerToolFactory(
+      "todo_write", []() { return std::make_unique<TodoWriteTool>(); });
+  toolRegistry.registerToolFactory(
+      "artifact_write", []() { return std::make_unique<ArtifactWriteTool>(); });
+  toolRegistry.registerToolFactory(
+      "artifact_read", []() { return std::make_unique<ArtifactReadTool>(); });
+  toolRegistry.registerToolFactory(
+      "artifact_list", []() { return std::make_unique<ArtifactListTool>(); });
 }
 
 void Engine::initProviders() {
   auto &reg = firmius::provider::ProviderRegistry::instance();
-  reg.registerProvider(std::make_shared<firmius::provider::NanoGPTProvider>());
-  reg.registerProvider(
-      std::make_shared<firmius::provider::OpenRouterProvider>(""));
-  reg.registerProvider(std::make_shared<firmius::provider::ZaiProvider>(""));
-  reg.registerProvider(std::make_shared<firmius::provider::ZenProvider>(""));
-  reg.registerProvider(std::make_shared<firmius::provider::ChutesProvider>(""));
-  reg.registerProvider(std::make_shared<firmius::provider::CodexProvider>());
-  reg.registerProvider(
-      std::make_shared<firmius::provider::AntigravityProvider>());
-  reg.registerProvider(std::make_shared<firmius::provider::QwenProvider>());
-  reg.registerProvider(std::make_shared<firmius::provider::KimiProvider>());
+
+  // Register providers lazily via factories - instantiated only when first used
+  reg.registerProviderFactory("nanogpt", []() {
+    return std::make_shared<firmius::provider::NanoGPTProvider>();
+  });
+  reg.registerProviderFactory("nvidia", []() {
+    return std::make_shared<firmius::provider::NvidiaProvider>("");
+  });
+  reg.registerProviderFactory("openrouter", []() {
+    return std::make_shared<firmius::provider::OpenRouterProvider>("");
+  });
+  reg.registerProviderFactory("zai", []() {
+    return std::make_shared<firmius::provider::ZaiProvider>("");
+  });
+  reg.registerProviderFactory("zen", []() {
+    return std::make_shared<firmius::provider::ZenProvider>("");
+  });
+  reg.registerProviderFactory("chutes", []() {
+    return std::make_shared<firmius::provider::ChutesProvider>("");
+  });
+  reg.registerProviderFactory("codex", []() {
+    return std::make_shared<firmius::provider::CodexProvider>();
+  });
+  reg.registerProviderFactory("antigravity", []() {
+    return std::make_shared<firmius::provider::AntigravityProvider>();
+  });
+  reg.registerProviderFactory("qwen", []() {
+    return std::make_shared<firmius::provider::QwenProvider>();
+  });
+  reg.registerProviderFactory("kimi", []() {
+    return std::make_shared<firmius::provider::KimiProvider>();
+  });
 }
 
 void Engine::reap() { std::lock_guard<std::mutex> lock(listenerMutex); }
@@ -423,7 +488,7 @@ std::string Engine::summonAgent(
     fleet.emplace_back([this, threadId, agentId, personaName, task, images,
                         prom, persistHistory, parentId, friendlyName, title,
                         providerId, modelId, variantName]() {
-      bool errorBroadcast = false;
+      auto errorBroadcast = std::make_shared<std::atomic<bool>>(false);
       ArtifactSnapshot runStartArtifacts;
       bool runStartArtifactsCaptured = false;
       try {
@@ -489,10 +554,10 @@ std::string Engine::summonAgent(
 
         // Create Environment and Permissions
         std::shared_ptr<IHost> hostPtr = std::move(host);
+        auto errorBroadcast = std::make_shared<std::atomic<bool>>(false);
         auto environment = std::make_shared<Environment>(
             hostPtr, ctx.environment.cwd,
-            [this, agentId, parentId,
-             errorBroadcast = false](const StreamEvent &ev) mutable {
+            [this, agentId, parentId, errorBroadcast](const StreamEvent &ev) {
               handleStreamEvent(agentId, parentId, ev, errorBroadcast);
             });
         auto permissions = std::make_shared<Permissions>(threadId, agentId);
@@ -529,7 +594,7 @@ std::string Engine::summonAgent(
         runStartArtifactsCaptured = true;
         agent->run(
             task,
-            [this, agentId, parentId, &errorBroadcast](const StreamEvent &ev) {
+            [this, agentId, parentId, errorBroadcast](const StreamEvent &ev) {
               handleStreamEvent(agentId, parentId, ev, errorBroadcast);
             },
             images);
@@ -547,7 +612,7 @@ std::string Engine::summonAgent(
         prom->set_value(outcome);
 
       } catch (const std::exception &e) {
-        if (!errorBroadcast) {
+        if (!errorBroadcast->load(std::memory_order_relaxed)) {
           auto agent =
               firmius::core::AgentRegistry::instance().getAgent(agentId);
           if (agent && agent->getContext().history) {
@@ -653,10 +718,10 @@ std::string Engine::resumeAgent(const std::string &threadId,
 
   // Create Environment and Permissions
   std::shared_ptr<IHost> hostPtr = std::move(host);
+  auto errorBroadcast = std::make_shared<std::atomic<bool>>(false);
   auto environment = std::make_shared<Environment>(
       hostPtr, ctx.environment.cwd,
-      [this, agentId, parentId,
-       errorBroadcast = false](const StreamEvent &ev) mutable {
+      [this, agentId, parentId, errorBroadcast](const StreamEvent &ev) {
         handleStreamEvent(agentId, parentId, ev, errorBroadcast);
       });
   auto permissions = std::make_shared<Permissions>(threadId, agentId);
@@ -849,10 +914,10 @@ void Engine::broadcast(const AppEvent &event) {
   }
 }
 
-void Engine::handleStreamEvent(const std::string &agentId,
-                               const std::string &parentId,
-                               const firmius::shared::StreamEvent &ev,
-                               bool &errorBroadcast) {
+void Engine::handleStreamEvent(
+    const std::string &agentId, const std::string &parentId,
+    const firmius::shared::StreamEvent &ev,
+    const std::shared_ptr<std::atomic<bool>> &errorBroadcast) {
   if (auto *txt = std::get_if<TextChunk>(&ev)) {
     broadcast(AgentText{agentId, txt->delta, parentId});
   } else if (auto *thk = std::get_if<ThinkingChunk>(&ev)) {
@@ -862,6 +927,8 @@ void Engine::handleStreamEvent(const std::string &agentId,
                                  tcc->argsDelta, parentId});
   } else if (auto *tc = std::get_if<AgentTurnCompleted>(&ev)) {
     broadcast(*tc);
+  } else if (auto *fe = std::get_if<AgentFileEdited>(&ev)) {
+    broadcast(*fe);
   } else if (auto *ac = std::get_if<AgentCompacting>(&ev)) {
     broadcast(*ac);
   } else if (auto *act = std::get_if<AgentCompactionThinking>(&ev)) {
@@ -877,7 +944,7 @@ void Engine::handleStreamEvent(const std::string &agentId,
   } else if (auto *sr = std::get_if<StreamRetrying>(&ev)) {
     broadcast(AgentRetrying{agentId, sr->attempt, sr->maxAttempts,
                             sr->httpStatus, sr->delayMs, sr->reason, parentId,
-                            sr->accountLocator});
+                            sr->accountLocator, sr->details});
   } else if (auto *sre = std::get_if<StreamRetryExhausted>(&ev)) {
     broadcast(
         AgentRetryFailed{agentId, sre->httpStatus, sre->reason, parentId});
@@ -886,7 +953,7 @@ void Engine::handleStreamEvent(const std::string &agentId,
     if (agent && agent->isInterrupted()) {
       return;
     }
-    errorBroadcast = true;
+    errorBroadcast->store(true, std::memory_order_relaxed);
     std::string msg = serr->message;
     if (!serr->accountLocator.empty()) {
       msg += "\n\n[Account Used]: " + serr->accountLocator;
@@ -952,6 +1019,17 @@ void Engine::executeTask(
   if (!agent) {
     throw std::runtime_error("Agent not found: " + agentId);
   }
+  
+  // Drain any pending internal queue messages (e.g., fleet edit notices)
+  // before starting the new task, so the agent sees them on its next turn.
+  std::string threadId;
+  if (agent->getContext().history) {
+    threadId = agent->getContext().history->threadId;
+  }
+  if (!threadId.empty()) {
+    Harness::instance().drainInternalQueueForAgent(agentId, threadId);
+  }
+  
   // Mark as active before async dispatch to avoid observers seeing an
   // immediate idle state race while the worker thread is starting.
 
@@ -968,7 +1046,7 @@ void Engine::executeTask(
       std::string parentId = "";
       std::string threadId = "";
       // Track if we already broadcast an error from the stream
-      bool errorBroadcast = false;
+      auto errorBroadcast = std::make_shared<std::atomic<bool>>(false);
       ArtifactSnapshot runStartArtifacts;
       bool runStartArtifactsCaptured = false;
 
@@ -983,7 +1061,7 @@ void Engine::executeTask(
         runStartArtifactsCaptured = true;
         agent->run(
             task,
-            [this, agentId, parentId, &errorBroadcast](const StreamEvent &ev) {
+            [this, agentId, parentId, errorBroadcast](const StreamEvent &ev) {
               handleStreamEvent(agentId, parentId, ev, errorBroadcast);
             },
             images);
@@ -1056,7 +1134,7 @@ void Engine::resumeTask(const std::string &agentId) {
     taskThreads_.emplace_back([this, agentId, agent, prom]() mutable {
       std::string parentId;
       std::string threadId;
-      bool errorBroadcast = false;
+      auto errorBroadcast = std::make_shared<std::atomic<bool>>(false);
       ArtifactSnapshot runStartArtifacts;
       bool runStartArtifactsCaptured = false;
 
@@ -1068,7 +1146,7 @@ void Engine::resumeTask(const std::string &agentId) {
         runStartArtifacts = collectArtifactSnapshot(threadId, agentId);
         runStartArtifactsCaptured = true;
         agent->resume(
-            [this, agentId, parentId, &errorBroadcast](const StreamEvent &ev) {
+            [this, agentId, parentId, errorBroadcast](const StreamEvent &ev) {
               handleStreamEvent(agentId, parentId, ev, errorBroadcast);
             });
 
@@ -1134,19 +1212,19 @@ void Engine::compactAgent(const std::string &agentId) {
     std::lock_guard<std::mutex> lock(taskThreadsMutex_);
     taskThreads_.emplace_back([this, agentId, agent]() mutable {
       std::string parentId = "";
-      bool errorBroadcast = false;
+      auto errorBroadcast = std::make_shared<std::atomic<bool>>(false);
       try {
         if (agent) {
           parentId = agent->getContext().identity.parentId;
         }
         agent->clearInterrupt();
         agent->compactNow(
-            [this, agentId, parentId, &errorBroadcast](const StreamEvent &ev) {
+            [this, agentId, parentId, errorBroadcast](const StreamEvent &ev) {
               handleStreamEvent(agentId, parentId, ev, errorBroadcast);
             });
         agent->getMutableContext().state.currentStatus = AgentStatus::Idle;
       } catch (const std::exception &e) {
-        if (!errorBroadcast) {
+        if (!errorBroadcast->load(std::memory_order_relaxed)) {
           broadcast(AgentError{agentId, e.what(), parentId});
         }
       }

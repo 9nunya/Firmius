@@ -39,6 +39,9 @@ target_sources(firmius_core PRIVATE
     src/tools/ChunkGetTool.cpp
     src/tools/ChunkUpdateTool.cpp
     src/tools/ChunkReadyForExecutionTool.cpp
+    src/tools/FleetLockTool.cpp
+    src/tools/FleetLockRespondTool.cpp
+    src/tools/FleetStatusTool.cpp
     src/tools/TodoWriteTool.cpp
     src/tools/ArtifactWriteTool.cpp
     src/tools/ArtifactReadTool.cpp
@@ -103,6 +106,7 @@ target_sources(firmius_core PUBLIC
     include/tools/ChunkGetTool.hpp
     include/tools/ChunkUpdateTool.hpp
     include/tools/ChunkReadyForExecutionTool.hpp
+    include/tools/FleetLockTool.hpp
     include/tools/TodoWriteTool.hpp
     include/tools/ArtifactWriteTool.hpp
     include/tools/ArtifactReadTool.hpp

@@ -40,30 +40,34 @@ struct ThreadPermissionRules {
     bool operator==(const ThreadPermissionRules& other) const = default;
 };
 
-struct WatchedLineRange {
-    int startLine = 1;
-    int endLine = 1;
 
-    bool operator==(const WatchedLineRange& other) const = default;
-};
-
-struct WatchedFileState {
-    std::string path;
-    std::vector<WatchedLineRange> ranges;
-    std::optional<int> terminalLine;
-    bool fullyRead = false;
-    std::string lastContentHash;
-    uint64_t updatedAt = 0;
-
-    bool operator==(const WatchedFileState& other) const = default;
-};
 
 struct AgentLiveState {
     std::string threadId;
     std::string agentId;
-    std::vector<WatchedFileState> watchedFiles;
 
     bool operator==(const AgentLiveState& other) const = default;
+};
+
+struct FleetLock {
+    std::string lockId;
+    std::string threadId;
+    std::string rootAgentId;
+    std::string ownerAgentId;
+    std::string status;
+    std::string reason;
+    std::vector<std::string> paths;
+    std::vector<std::string> waiters;
+    uint64_t createdAt = 0;
+    uint64_t updatedAt = 0;
+
+    bool operator==(const FleetLock& other) const = default;
+};
+
+struct FleetState {
+    std::vector<FleetLock> locks;
+
+    bool operator==(const FleetState& other) const = default;
 };
 
 struct CompactionSnapshot {
@@ -150,6 +154,11 @@ public:
     AgentLiveState mutateAgentLiveState(
         const std::string& threadId, const std::string& agentId,
         const std::function<void(AgentLiveState&)>& mutator);
+    FleetState getFleetState(const std::string& threadId) const;
+    void writeFleetState(const std::string& threadId, const FleetState& state);
+    FleetState mutateFleetState(
+        const std::string& threadId,
+        const std::function<void(FleetState&)>& mutator);
     std::vector<CompactionSnapshot>
     loadCompactionSnapshots(const std::string& threadId,
                             const std::string& agentId) const;

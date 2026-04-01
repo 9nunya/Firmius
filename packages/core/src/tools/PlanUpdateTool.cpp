@@ -1,7 +1,29 @@
 #include "tools/PlanUpdateTool.hpp"
 #include "tools/WorkToolCommon.hpp"
+#include "utils/StringUtil.hpp"
 
 namespace firmius::core {
+
+namespace {
+
+bool shouldApplyOptionalField(const rapidjson::Value &input, const char *field) {
+  if (!input.HasMember(field)) {
+    return false;
+  }
+
+  const auto &value = input[field];
+  if (value.IsNull()) {
+    return false;
+  }
+  if (value.IsString()) {
+    return !firmius::shared::StringUtil::trim(
+                std::string_view(value.GetString()))
+                .empty();
+  }
+  return true;
+}
+
+} // namespace
 
 shared::ToolMetadata PlanUpdateTool::getMetadata() const {
   return {"plan_update", "Update plan fields in the current thread",
@@ -32,22 +54,22 @@ shared::ToolResult PlanUpdateTool::execute(const rapidjson::Value &input,
     shared::Plan plan =
         worktools::loadPlan(tm, threadId, input["plan_id"].GetString());
 
-    if (input.HasMember("title")) {
+    if (shouldApplyOptionalField(input, "title")) {
       plan.title = input["title"].GetString();
     }
-    if (input.HasMember("objective")) {
+    if (shouldApplyOptionalField(input, "objective")) {
       plan.objective = input["objective"].GetString();
     }
-    if (input.HasMember("context")) {
+    if (shouldApplyOptionalField(input, "context")) {
       plan.context = input["context"].GetString();
     }
-    if (input.HasMember("strategy")) {
+    if (shouldApplyOptionalField(input, "strategy")) {
       plan.strategy = input["strategy"].GetString();
     }
-    if (input.HasMember("notes")) {
+    if (shouldApplyOptionalField(input, "notes")) {
       plan.notes = input["notes"].GetString();
     }
-    if (input.HasMember("status")) {
+    if (shouldApplyOptionalField(input, "status")) {
       plan.status = worktools::parsePlanStatus(input["status"].GetString());
     }
 

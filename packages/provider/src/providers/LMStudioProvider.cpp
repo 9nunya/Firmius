@@ -27,7 +27,8 @@ LMStudioProvider::LMStudioProvider(const std::string& baseUrl)
     // LM Studio doesn't require API keys, so we don't add any accounts
 }
 
-std::map<std::string, std::string> LMStudioProvider::getHeaders() {
+std::map<std::string, std::string>
+LMStudioProvider::buildHeadersForApiKey(const std::string& /*apiKey*/) {
     return {
         {"Content-Type", "application/json"}
     };

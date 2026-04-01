@@ -1021,7 +1021,7 @@ QwenProvider::getAllQuotas() const {
       resetTime = acc.metadata.at("quota_reset:qwen");
     }
 
-    buckets.push_back(QuotaBucket{"quota:qwen", remaining, resetTime});
+    buckets.push_back(QuotaBucket{"quota:qwen", remaining, resetTime, ""});
     result[acc.getIdentifier()] = buckets;
   }
 
@@ -1037,8 +1037,9 @@ QwenProvider::getAvailableAccount(const std::optional<std::string> &) {
 
   const int64_t now = nowSeconds();
   const int preferredIdx =
-      (lastUsedIndex_ >= 0 && lastUsedIndex_ < static_cast<int>(accounts_.size()))
-          ? lastUsedIndex_
+      (lastUsedIndex_.load(std::memory_order_relaxed) >= 0 && 
+       lastUsedIndex_.load(std::memory_order_relaxed) < static_cast<int>(accounts_.size()))
+          ? lastUsedIndex_.load(std::memory_order_relaxed)
           : -1;
 
   int bestIdx = -1;
@@ -1073,6 +1074,7 @@ QwenProvider::getAvailableAccount(const std::optional<std::string> &) {
 
 size_t QwenProvider::sseWriteCallback(char *ptr, size_t size, size_t nmemb,
                                       void *userdata) {
+  if (!userdata) return 0;
   auto *ctx = static_cast<StreamContext *>(userdata);
   if (ctx->abortSignal && ctx->abortSignal->load()) {
     return 0;
@@ -1857,7 +1859,7 @@ void QwenProvider::stream(const AgentHistory &history,
       if (waitSec > 0 && waitSec <= 120) {
         onEvent(StreamRetrying{
             1, numRetries, 429, static_cast<int>(waitSec * 1000),
-            "All accounts rate-limited, waiting", lastAccountEmail});
+            "All accounts rate-limited, waiting", lastAccountEmail, ""});
         std::this_thread::sleep_for(std::chrono::seconds(waitSec));
 
         // Clear expired backoffs
@@ -1904,7 +1906,7 @@ void QwenProvider::stream(const AgentHistory &history,
       if (retryIdx > 0) {
         int delaySec = retryDelays[retryIdx - 1];
         onEvent(StreamRetrying{retryIdx, numRetries, 0, delaySec * 1000,
-                               "Retrying request", acc.getIdentifier()});
+                               "Retrying request", acc.getIdentifier(), ""});
         // Use interruptible sleep to allow immediate cancellation
         if (!interruptibleSleep(std::chrono::seconds(delaySec),
                                 opts.abortSignal)) {
@@ -1938,7 +1940,7 @@ void QwenProvider::stream(const AgentHistory &history,
 
           for (size_t i = 0; i < accounts_.size(); i++) {
             if (&accounts_[i] == &acc) {
-              lastUsedIndex_ = static_cast<int>(i);
+              lastUsedIndex_.store(static_cast<int>(i), std::memory_order_relaxed);
               saveAccounts();
               break;
             }
@@ -1988,7 +1990,7 @@ void QwenProvider::stream(const AgentHistory &history,
       const int accIndex = currentAccountIndex(accounts_, acc.getIdentifier());
       if (accIndex >= 0) {
         std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
-        lastUsedIndex_ = (accIndex + 1) % static_cast<int>(accounts_.size());
+        lastUsedIndex_.store((accIndex + 1) % static_cast<int>(accounts_.size()), std::memory_order_relaxed);
         saveAccounts();
       }
       accountSwitchCount++;

@@ -29,7 +29,7 @@ protected:
     /**
      * @brief Returns headers with authorization.
      */
-    std::map<std::string, std::string> getHeaders() override;
+    std::map<std::string, std::string> buildHeadersForApiKey(const std::string& apiKey) override;
 
     /**
      * @brief Returns "reasoning_content" as used by StepFun models.

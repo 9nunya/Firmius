@@ -5,6 +5,7 @@
 #include <set>
 
 #include <gtest/gtest.h>
+#include <gmock/gmock.h>
 
 using namespace firmius::shared::utils;
 
@@ -179,7 +180,7 @@ TEST(Hashline, ResolveAnchorCollisions) {
 
     EXPECT_NE(anchor, duplicateAnchor);
 
-    AnchorResult res = Hashline::resolveAnchor(lines, anchor, 15);
+    AnchorResult res = Hashline::resolveAnchor(lines, "2", 15);
     EXPECT_EQ(res.status, AnchorResult::Status::SUCCESS);
     EXPECT_EQ(res.lineIndex, 1);
     EXPECT_FALSE(res.relocated);
@@ -202,10 +203,10 @@ TEST(Hashline, ResolveAnchorRelocatesAcrossNearbyInsertions) {
         "footer"
     };
 
-    AnchorResult res = Hashline::resolveAnchor(shifted, anchor, 15);
+    AnchorResult res = Hashline::resolveAnchor(shifted, "4", 15);
     EXPECT_EQ(res.status, AnchorResult::Status::SUCCESS);
     EXPECT_EQ(res.lineIndex, 3);
-    EXPECT_TRUE(res.relocated);
+    EXPECT_FALSE(res.relocated);
 }
 
 TEST(Hashline, ComputesUniqueHashesForRepeatedEmptyAndBraceLines) {
@@ -233,4 +234,11 @@ TEST(Hashline, RealProjectFilesProduceUniqueLineHashes) {
   expectUniqueHashesForFile(root, "packages/core/src/tools/FileEditTool.cpp");
   expectUniqueHashesForFile(root, "packages/shared/src/utils/Hashline.cpp");
   expectUniqueHashesForFile(root, "packages/provider/CMakeLists.txt");
+}
+
+TEST(Hashline, RejectsOldHashlineFormat) {
+    std::vector<std::string> lines = {"alpha", "beta", "gamma"};
+    AnchorResult res = Hashline::resolveAnchor(lines, "2#abcd", 15);
+    EXPECT_EQ(res.status, AnchorResult::Status::MALFORMED);
+    EXPECT_THAT(res.errorMessage, ::testing::HasSubstr("no longer supported"));
 }

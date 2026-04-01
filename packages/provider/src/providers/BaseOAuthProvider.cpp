@@ -110,7 +110,9 @@ std::optional<OAuthAccount *> BaseOAuthProvider::getAvailableAccount(
     return std::nullopt;
   }
 
-  int startIdx = (lastUsedIndex_ >= 0) ? lastUsedIndex_ : 0;
+  int startIdx = (lastUsedIndex_.load(std::memory_order_relaxed) >= 0) 
+                 ? lastUsedIndex_.load(std::memory_order_relaxed) 
+                 : 0;
   if (startIdx >= static_cast<int>(accounts_.size())) {
     startIdx = 0;
   }
@@ -176,10 +178,10 @@ void BaseOAuthProvider::loadAccounts() {
 
   std::string luiKey = "lastUsedIndex_" + providerId_;
   if (doc.HasMember(luiKey.c_str()) && doc[luiKey.c_str()].IsInt()) {
-    lastUsedIndex_ = doc[luiKey.c_str()].GetInt();
+    lastUsedIndex_.store(doc[luiKey.c_str()].GetInt(), std::memory_order_relaxed);
   } else if (doc.HasMember("lastUsedIndex") && doc["lastUsedIndex"].IsInt()) {
     // Migration: read old global key as fallback
-    lastUsedIndex_ = doc["lastUsedIndex"].GetInt();
+    lastUsedIndex_.store(doc["lastUsedIndex"].GetInt(), std::memory_order_relaxed);
   }
 
   if (doc.HasMember(providerId_.c_str()) &&
@@ -318,7 +320,7 @@ void BaseOAuthProvider::saveAccounts() {
   }
   {
     rapidjson::Value name(luiKey.c_str(), doc.GetAllocator());
-    doc.AddMember(name, lastUsedIndex_, doc.GetAllocator());
+    doc.AddMember(name, lastUsedIndex_.load(std::memory_order_relaxed), doc.GetAllocator());
   }
   // Also clean up old global key if present
   if (doc.HasMember("lastUsedIndex")) {

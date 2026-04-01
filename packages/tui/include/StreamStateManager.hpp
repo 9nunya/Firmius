@@ -83,6 +83,8 @@ public:
   void handleAgentAccountSwitched(const shared::AgentAccountSwitched &e);
   void handleMessageQueued(const shared::MessageQueued &e);
   void handleMessageDequeued(const shared::MessageDequeued &e);
+  void handleInternalMessageQueued(const shared::InternalMessageQueued &e);
+  void handleInternalMessageDequeued(const shared::InternalMessageDequeued &e);
   void handleThreadChanged();
 
   // Rebuild tool calls from history when loading a thread
@@ -113,6 +115,7 @@ public:
   const std::string &getRetryStatus() const;
   const std::vector<std::string> &getAccountSwaps() const;
   const std::vector<QueuedMessageEntry> &getQueuedMessages() const;
+  const std::vector<QueuedMessageEntry> &getQueuedInternalMessages() const;
   int getToolCallClusterId(const std::string &toolCallId) const;
 
 private:
@@ -164,6 +167,7 @@ private:
   std::string retry_status_;
   std::vector<std::string> account_swaps_;
   std::vector<QueuedMessageEntry> queued_messages_;
+  std::vector<QueuedMessageEntry> queued_internal_messages_;
 };
 
 } // namespace firmius::tui

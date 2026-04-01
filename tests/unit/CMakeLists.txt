@@ -20,6 +20,7 @@ target_link_libraries(test_thread_manager PRIVATE
     firmius::core
     firmius::shared
     GTest::gtest_main
+    GTest::gmock
 )
 target_include_directories(test_thread_manager PRIVATE
     ${rapidjson_SOURCE_DIR}/include
@@ -33,6 +34,7 @@ target_link_libraries(test_journaler PRIVATE
     firmius::core
     firmius::shared
     GTest::gtest_main
+    GTest::gmock
 )
 target_include_directories(test_journaler PRIVATE
     ${rapidjson_SOURCE_DIR}/include
@@ -47,6 +49,7 @@ target_link_libraries(test_localhost PRIVATE
     firmius::core
     firmius::shared
     GTest::gtest_main
+    GTest::gmock
     CURL::libcurl
 )
 target_include_directories(test_localhost PRIVATE
@@ -63,12 +66,29 @@ target_link_libraries(test_tools PRIVATE
     firmius::shared
     GTest::gtest_main
     GTest::gmock
+    GTest::gmock
     CURL::libcurl
 )
 target_include_directories(test_tools PRIVATE
     ${rapidjson_SOURCE_DIR}/include
 )
 gtest_discover_tests(test_tools)
+
+# Web fetch tool tests (regression + real URL fetch)
+add_executable(test_web_fetch
+    tools/test_web_fetch.cpp
+)
+target_link_libraries(test_web_fetch PRIVATE
+    firmius::core
+    firmius::shared
+    GTest::gtest_main
+    GTest::gmock
+    CURL::libcurl
+)
+target_include_directories(test_web_fetch PRIVATE
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_web_fetch)
 
 add_executable(test_artifact_tools
     tools/test_artifact_tools.cpp
@@ -77,6 +97,7 @@ target_link_libraries(test_artifact_tools PRIVATE
     firmius::core
     firmius::shared
     GTest::gtest_main
+    GTest::gmock
     GTest::gmock
 )
 target_include_directories(test_artifact_tools PRIVATE
@@ -92,12 +113,64 @@ target_link_libraries(test_work_tools PRIVATE
     firmius::shared
     GTest::gtest_main
     GTest::gmock
+    GTest::gmock
     CURL::libcurl
 )
 target_include_directories(test_work_tools PRIVATE
     ${rapidjson_SOURCE_DIR}/include
 )
 gtest_discover_tests(test_work_tools)
+
+# Fleet lock tests
+add_executable(test_fleet_lock
+    tools/test_fleet_lock.cpp
+)
+target_link_libraries(test_fleet_lock PRIVATE
+    firmius::core
+    firmius::shared
+    GTest::gtest_main
+    GTest::gmock
+    GTest::gmock
+    CURL::libcurl
+)
+target_include_directories(test_fleet_lock PRIVATE
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_fleet_lock)
+
+# Fleet lock regression tests (documented test scenarios)
+add_executable(test_fleet_lock_regression
+    tools/test_fleet_lock_regression.cpp
+)
+target_link_libraries(test_fleet_lock_regression PRIVATE
+    firmius::core
+    firmius::shared
+    GTest::gtest_main
+    GTest::gmock
+    GTest::gmock
+    CURL::libcurl
+)
+target_include_directories(test_fleet_lock_regression PRIVATE
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_fleet_lock_regression)
+
+# Chunk dependency tests
+add_executable(test_chunk_dependencies
+    tools/test_chunk_dependencies.cpp
+)
+target_link_libraries(test_chunk_dependencies PRIVATE
+    firmius::core
+    firmius::shared
+    GTest::gtest_main
+    GTest::gmock
+    GTest::gmock
+    CURL::libcurl
+)
+target_include_directories(test_chunk_dependencies PRIVATE
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_chunk_dependencies)
 
 # Harness tests
 add_executable(test_harness
@@ -108,6 +181,7 @@ target_link_libraries(test_harness PRIVATE
     firmius::provider
     firmius::shared
     GTest::gtest_main
+    GTest::gmock
     CURL::libcurl
 )
 target_include_directories(test_harness PRIVATE
@@ -122,6 +196,7 @@ target_link_libraries(test_qwen_provider PRIVATE
     firmius::provider
     firmius::shared
     GTest::gtest_main
+    GTest::gmock
 )
 target_include_directories(test_qwen_provider PRIVATE
     ${rapidjson_SOURCE_DIR}/include
@@ -135,6 +210,7 @@ target_link_libraries(test_antigravity_provider PRIVATE
     firmius::provider
     firmius::shared
     GTest::gtest_main
+    GTest::gmock
 )
 target_include_directories(test_antigravity_provider PRIVATE
     ${rapidjson_SOURCE_DIR}/include
@@ -148,6 +224,7 @@ target_link_libraries(test_codex_provider PRIVATE
     firmius::provider
     firmius::shared
     GTest::gtest_main
+    GTest::gmock
 )
 target_include_directories(test_codex_provider PRIVATE
     ${rapidjson_SOURCE_DIR}/include
@@ -161,11 +238,40 @@ target_link_libraries(test_base_openai_provider PRIVATE
     firmius::provider
     firmius::shared
     GTest::gtest_main
+    GTest::gmock
 )
 target_include_directories(test_base_openai_provider PRIVATE
     ${rapidjson_SOURCE_DIR}/include
 )
 gtest_discover_tests(test_base_openai_provider)
+
+add_executable(test_nvidia_provider
+    provider/test_nvidia_provider.cpp
+)
+target_link_libraries(test_nvidia_provider PRIVATE
+    firmius::provider
+    firmius::shared
+    GTest::gtest_main
+    GTest::gmock
+)
+target_include_directories(test_nvidia_provider PRIVATE
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_nvidia_provider)
+
+add_executable(test_openrouter_provider
+    provider/test_openrouter_provider.cpp
+)
+target_link_libraries(test_openrouter_provider PRIVATE
+    firmius::provider
+    firmius::shared
+    GTest::gtest_main
+    GTest::gmock
+)
+target_include_directories(test_openrouter_provider PRIVATE
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_openrouter_provider)
 
 add_executable(test_provider_stream_debug_audit
     audits/test_provider_stream_debug_audit.cpp
@@ -176,6 +282,7 @@ target_link_libraries(test_provider_stream_debug_audit PRIVATE
     firmius::core
     firmius::shared
     GTest::gtest_main
+    GTest::gmock
     CURL::libcurl
 )
 target_include_directories(test_provider_stream_debug_audit PRIVATE
@@ -191,6 +298,7 @@ target_link_libraries(test_purpose_loader PRIVATE
     firmius::core
     firmius::shared
     GTest::gtest_main
+    GTest::gmock
 )
 target_include_directories(test_purpose_loader PRIVATE
     ${rapidjson_SOURCE_DIR}/include
@@ -205,6 +313,7 @@ target_link_libraries(test_engine_images PRIVATE
     firmius::provider
     firmius::shared
     GTest::gtest_main
+    GTest::gmock
     CURL::libcurl
 )
 target_include_directories(test_engine_images PRIVATE
@@ -220,6 +329,7 @@ target_link_libraries(test_engine_stream_events PRIVATE
     firmius::provider
     firmius::shared
     GTest::gtest_main
+    GTest::gmock
     CURL::libcurl
 )
 target_include_directories(test_engine_stream_events PRIVATE
@@ -235,6 +345,7 @@ target_link_libraries(test_process_manager PRIVATE
     firmius::shared
     firmius_test_mocks
     GTest::gtest_main
+    GTest::gmock
 )
 target_include_directories(test_process_manager PRIVATE
     ${rapidjson_SOURCE_DIR}/include
@@ -248,6 +359,7 @@ target_link_libraries(test_benchmark_factory PRIVATE
     firmius::core
     firmius::shared
     GTest::gtest_main
+    GTest::gmock
 )
 target_include_directories(test_benchmark_factory PRIVATE
     ${rapidjson_SOURCE_DIR}/include
@@ -261,6 +373,7 @@ target_link_libraries(test_reference_expansion PRIVATE
     firmius::core
     firmius::shared
     GTest::gtest_main
+    GTest::gmock
 )
 target_include_directories(test_reference_expansion PRIVATE
     ${rapidjson_SOURCE_DIR}/include
@@ -275,6 +388,7 @@ target_link_libraries(test_subagent_tool PRIVATE
     firmius::core
     firmius::shared
     GTest::gtest_main
+    GTest::gmock
     GTest::gmock
 )
 target_include_directories(test_subagent_tool PRIVATE
@@ -291,6 +405,7 @@ target_link_libraries(test_subagent_artifacts PRIVATE
     firmius::provider
     GTest::gtest_main
     GTest::gmock
+    GTest::gmock
 )
 target_include_directories(test_subagent_artifacts PRIVATE
     ${rapidjson_SOURCE_DIR}/include
@@ -304,6 +419,7 @@ add_executable(test_fsutil
 target_link_libraries(test_fsutil PRIVATE
     firmius::shared
     GTest::gtest_main
+    GTest::gmock
 )
 target_include_directories(test_fsutil PRIVATE
     ${rapidjson_SOURCE_DIR}/include
@@ -317,6 +433,7 @@ add_executable(test_model_util
 target_link_libraries(test_model_util PRIVATE
     firmius::shared
     GTest::gtest_main
+    GTest::gmock
 )
 target_include_directories(test_model_util PRIVATE
     ${rapidjson_SOURCE_DIR}/include
@@ -329,6 +446,7 @@ add_executable(test_config_loader
 target_link_libraries(test_config_loader PRIVATE
     firmius::shared
     GTest::gtest_main
+    GTest::gmock
 )
 target_include_directories(test_config_loader PRIVATE
     ${rapidjson_SOURCE_DIR}/include
@@ -343,6 +461,7 @@ add_executable(test_markdown
 target_link_libraries(test_markdown PRIVATE
     firmius::shared
     GTest::gtest_main
+    GTest::gmock
     ftxui::dom
     ftxui::screen
 )
@@ -360,6 +479,7 @@ add_executable(test_ansi_parser
 target_link_libraries(test_ansi_parser PRIVATE
     firmius::shared
     GTest::gtest_main
+    GTest::gmock
     ftxui::dom
     ftxui::screen
 )
@@ -381,6 +501,7 @@ add_executable(test_syntax_highlighter
 target_link_libraries(test_syntax_highlighter PRIVATE
     firmius::shared
     GTest::gtest_main
+    GTest::gmock
     ftxui::dom
     ftxui::screen
     ftxui::component
@@ -400,6 +521,7 @@ add_executable(test_diff_rendering
 target_link_libraries(test_diff_rendering PRIVATE
     firmius::shared
     GTest::gtest_main
+    GTest::gmock
 )
 target_include_directories(test_diff_rendering PRIVATE
     ../../packages/tui/include
@@ -414,6 +536,7 @@ add_executable(test_tui_hotkeys
 target_link_libraries(test_tui_hotkeys PRIVATE
     firmius::shared
     GTest::gtest_main
+    GTest::gmock
     ftxui::component
 )
 target_include_directories(test_tui_hotkeys PRIVATE
@@ -428,10 +551,12 @@ add_executable(test_input_bar
 target_link_libraries(test_input_bar PRIVATE
     firmius::shared
     GTest::gtest_main
+    GTest::gmock
 )
 target_include_directories(test_input_bar PRIVATE
     ../../packages/tui/include
     ../../packages/tui/src
+    ../../packages/core/include
 )
 gtest_discover_tests(test_input_bar)
 
@@ -442,6 +567,7 @@ add_executable(test_reference_autocomplete
 target_link_libraries(test_reference_autocomplete PRIVATE
     firmius::shared
     GTest::gtest_main
+    GTest::gmock
 )
 target_include_directories(test_reference_autocomplete PRIVATE
     ../../packages/tui/include
@@ -456,6 +582,7 @@ add_executable(test_active_plan_state
 target_link_libraries(test_active_plan_state PRIVATE
     firmius::shared
     GTest::gtest_main
+    GTest::gmock
 )
 target_include_directories(test_active_plan_state PRIVATE
     ../../packages/tui/include
@@ -471,6 +598,7 @@ target_link_libraries(test_stream_state_manager_history PRIVATE
     firmius::shared
     firmius::core
     GTest::gtest_main
+    GTest::gmock
 )
 target_include_directories(test_stream_state_manager_history PRIVATE
     ../../packages/tui/include
@@ -489,6 +617,7 @@ target_link_libraries(test_stream_state_manager_live PRIVATE
     firmius::shared
     firmius::core
     GTest::gtest_main
+    GTest::gmock
 )
 target_include_directories(test_stream_state_manager_live PRIVATE
     ../../packages/tui/include
@@ -506,6 +635,7 @@ add_executable(test_transcript_grouping
 target_link_libraries(test_transcript_grouping PRIVATE
     firmius::shared
     GTest::gtest_main
+    GTest::gmock
 )
 target_include_directories(test_transcript_grouping PRIVATE
     ../../packages/tui/include
@@ -548,6 +678,7 @@ target_link_libraries(test_chat_window_helpers PRIVATE
     ftxui::screen
     ftxui::component
     GTest::gtest_main
+    GTest::gmock
 )
 target_include_directories(test_chat_window_helpers PRIVATE
     ../../packages/tui/include
@@ -564,6 +695,7 @@ add_executable(test_model_picker_entries
 target_link_libraries(test_model_picker_entries PRIVATE
     firmius::shared
     GTest::gtest_main
+    GTest::gmock
 )
 target_include_directories(test_model_picker_entries PRIVATE
     ../../packages/tui/include
@@ -578,6 +710,7 @@ add_executable(test_help_overlay
 )
 target_link_libraries(test_help_overlay PRIVATE
     GTest::gtest_main
+    GTest::gmock
     ftxui::dom
     ftxui::screen
     ftxui::component
@@ -598,6 +731,7 @@ add_executable(test_error_display
 target_link_libraries(test_error_display PRIVATE
     firmius::shared
     GTest::gtest_main
+    GTest::gmock
     ftxui::dom
     ftxui::screen
     tree_sitter_all
@@ -621,6 +755,7 @@ add_executable(test_plan_lane
 target_link_libraries(test_plan_lane PRIVATE
     firmius::shared
     GTest::gtest_main
+    GTest::gmock
     ftxui::dom
     ftxui::screen
     ftxui::component
@@ -642,6 +777,7 @@ add_executable(test_todo_lane
 target_link_libraries(test_todo_lane PRIVATE
     firmius::shared
     GTest::gtest_main
+    GTest::gmock
     ftxui::dom
     ftxui::screen
     ftxui::component
@@ -658,6 +794,7 @@ add_executable(test_work_panel_layout
 )
 target_link_libraries(test_work_panel_layout PRIVATE
     GTest::gtest_main
+    GTest::gmock
 )
 target_include_directories(test_work_panel_layout PRIVATE
     ../../packages/tui/include
@@ -675,6 +812,7 @@ add_executable(test_status_bar
 target_link_libraries(test_status_bar PRIVATE
     firmius::shared
     GTest::gtest_main
+    GTest::gmock
     ftxui::dom
     ftxui::screen
     ftxui::component
@@ -695,6 +833,7 @@ add_executable(test_agent_strip
 target_link_libraries(test_agent_strip PRIVATE
     firmius::shared
     GTest::gtest_main
+    GTest::gmock
     ftxui::dom
     ftxui::screen
     ftxui::component
@@ -729,6 +868,7 @@ target_link_libraries(test_tool_presentation PRIVATE
     ftxui::component
     tree_sitter_all
     GTest::gtest_main
+    GTest::gmock
 )
 target_include_directories(test_tool_presentation PRIVATE
     ../../packages/tui/include
@@ -761,6 +901,7 @@ target_link_libraries(test_tool_presentation_block PRIVATE
     firmius::shared
     firmius::core
     GTest::gtest_main
+    GTest::gmock
     ftxui::dom
     ftxui::screen
     ftxui::component
@@ -783,6 +924,7 @@ target_link_libraries(test_workflow PRIVATE
     firmius::core
     firmius::shared
     GTest::gtest_main
+    GTest::gmock
 )
 target_include_directories(test_workflow PRIVATE
     ${rapidjson_SOURCE_DIR}/include
@@ -798,6 +940,7 @@ target_link_libraries(test_command_intent_analyzer PRIVATE
     firmius::shared
     GTest::gtest_main
     GTest::gmock
+    GTest::gmock
 )
 target_include_directories(test_command_intent_analyzer PRIVATE
     ${rapidjson_SOURCE_DIR}/include
@@ -811,6 +954,7 @@ target_link_libraries(test_workspace PRIVATE
     firmius::core
     firmius::shared
     GTest::gtest_main
+    GTest::gmock
 )
 target_include_directories(test_workspace PRIVATE
     ${rapidjson_SOURCE_DIR}/include
@@ -825,8 +969,40 @@ target_link_libraries(test_runtime_overlay PRIVATE
     firmius::shared
     GTest::gtest_main
     GTest::gmock
+    GTest::gmock
 )
 target_include_directories(test_runtime_overlay PRIVATE
     ${rapidjson_SOURCE_DIR}/include
 )
 gtest_discover_tests(test_runtime_overlay)
+
+# TerminalUtil unit tests
+add_executable(test_terminal_util
+    shared/test_terminal_util.cpp
+)
+target_link_libraries(test_terminal_util PRIVATE
+    firmius::shared
+    GTest::gtest_main
+    GTest::gmock
+)
+target_include_directories(test_terminal_util PRIVATE
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_terminal_util)
+
+# ProcessInput regression tests
+add_executable(test_process_input_regression
+    tools/test_process_input_regression.cpp
+)
+target_link_libraries(test_process_input_regression PRIVATE
+    firmius::core
+    firmius::shared
+    GTest::gtest_main
+    GTest::gmock
+    CURL::libcurl
+)
+target_include_directories(test_process_input_regression PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_process_input_regression)

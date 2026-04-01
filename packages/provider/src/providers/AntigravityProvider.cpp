@@ -608,6 +608,7 @@ float normalizeQuotaFraction(double value) {
 
 size_t AntigravityProvider::sseWriteCallback(char *ptr, size_t size,
                                              size_t nmemb, void *userdata) {
+  if (!userdata) return 0;
   auto *ctx = static_cast<StreamContext *>(userdata);
   if (ctx->abortSignal && ctx->abortSignal->load())
     return 0;
@@ -925,8 +926,9 @@ std::optional<OAuthAccount *> AntigravityProvider::getAvailableAccount(
     int bestIdx = -1;
     float bestQuota = -1.0f;
     const int preferredIdx =
-        (lastUsedIndex_ >= 0 && lastUsedIndex_ < static_cast<int>(accounts_.size()))
-            ? lastUsedIndex_
+        (lastUsedIndex_.load(std::memory_order_relaxed) >= 0 && 
+         lastUsedIndex_.load(std::memory_order_relaxed) < static_cast<int>(accounts_.size()))
+            ? lastUsedIndex_.load(std::memory_order_relaxed)
             : -1;
 
     for (int idx = 0; idx < static_cast<int>(accounts_.size()); ++idx) {
@@ -991,7 +993,7 @@ std::optional<OAuthAccount *> AntigravityProvider::getAvailableAccount(
       continue;
     }
 
-    lastUsedIndex_ = bestIdx;
+    lastUsedIndex_.store(bestIdx, std::memory_order_relaxed);
     saveAccounts();
     return &accounts_[bestIdx];
   }
@@ -1288,7 +1290,7 @@ void AntigravityProvider::stream(
             firmius::shared::BackoffConstants::getBackoffSeconds(retryAttempt -
                                                                  1);
         onEvent(StreamRetrying{retryAttempt, 4, 0, backoffSeconds * 1000,
-                               retryReason, acc.getIdentifier()});
+                               retryReason, acc.getIdentifier(), ""});
         // Use interruptible sleep to allow immediate cancellation
         if (!interruptibleSleep(std::chrono::seconds(backoffSeconds),
                                 opts.abortController, opts.abortSignal)) {
@@ -1878,7 +1880,7 @@ AntigravityProvider::getAllQuotas() const {
       }
     }
     for (auto const &[name, data] : groups)
-      buckets.push_back({name, data.first, data.second});
+      buckets.push_back({name, data.first, data.second, ""});
     result[acc.getIdentifier()] = buckets;
   }
   return result;

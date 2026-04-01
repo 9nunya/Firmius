@@ -100,6 +100,10 @@ public:
   highlightRenderLines(const std::string &code,
                        const std::string &language) const;
 
+  // Highlight and render a single line with wrapping-friendly spans.
+  ftxui::Element highlightRenderWrappedLine(const std::string &code,
+                                           const std::string &language) const;
+
   // Highlight and render to a single FTXUI element (framed vbox)
   ftxui::Element highlightRender(const std::string &code,
                                  const std::string &language,

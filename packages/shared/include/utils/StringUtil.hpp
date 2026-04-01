@@ -18,6 +18,7 @@ public:
      * @return The trimmed string.
      */
     static std::string trim(const std::string& s);
+    static std::string trim(std::string_view s);
 
     /**
      * @brief Splits a string by a delimiter.
@@ -41,7 +42,7 @@ public:
      * @param prefix The prefix.
      * @return True if s starts with prefix.
      */
-    static bool startsWith(const std::string& s, const std::string& prefix);
+    static bool startsWith(std::string_view s, std::string_view prefix);
 
     /**
      * @brief Checks if a string ends with a suffix.
@@ -49,7 +50,7 @@ public:
      * @param suffix The suffix.
      * @return True if s ends with suffix.
      */
-    static bool endsWith(const std::string& s, const std::string& suffix);
+    static bool endsWith(std::string_view s, std::string_view suffix);
 
     /**
      * @brief Converts a string to lowercase.
@@ -70,7 +71,7 @@ public:
      * @param s The raw string.
      * @return A shell-safe quoted string.
      */
-    static std::string shellEscape(const std::string& s);
+    static std::string shellEscape(std::string_view s);
 
     /**
      * @brief Calculates the Levenshtein distance between two strings.

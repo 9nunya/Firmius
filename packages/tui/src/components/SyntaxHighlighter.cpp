@@ -6,6 +6,20 @@
 
 namespace firmius::tui {
 
+namespace {
+
+void appendStyledTextParts(std::vector<ftxui::Element> &parts,
+                           const std::string &text, ftxui::Color color) {
+  if (text.empty()) {
+    return;
+  }
+  for (char ch : text) {
+    parts.push_back(ftxui::text(std::string(1, ch)) | ftxui::color(color));
+  }
+}
+
+} // namespace
+
 SyntaxHighlighter &SyntaxHighlighter::instance() {
   static SyntaxHighlighter inst;
   return inst;
@@ -562,6 +576,80 @@ SyntaxHighlighter::highlightRenderLines(const std::string &code,
   ts_parser_delete(parser);
 
   return renderedLines;
+}
+
+ftxui::Element
+SyntaxHighlighter::highlightRenderWrappedLine(const std::string &code,
+                                              const std::string &language) const {
+  if (!initialized_) {
+    const_cast<SyntaxHighlighter *>(this)->initialize();
+  }
+
+  const auto &theme = ThemeManager::instance().getCurrentTheme();
+  auto it = grammars_.find(language);
+  if (it == grammars_.end()) {
+    return ftxui::paragraph(code.empty() ? " " : code) |
+           ftxui::color(theme.base.fg);
+  }
+
+  const TSLanguage *tsLang = it->second.languageFn();
+  TSParser *parser = ts_parser_new();
+  ts_parser_set_language(parser, tsLang);
+
+  TSTree *tree = ts_parser_parse_string(parser, nullptr, code.c_str(),
+                                        static_cast<uint32_t>(code.size()));
+
+  if (!tree) {
+    ts_parser_delete(parser);
+    return ftxui::paragraph(code.empty() ? " " : code) |
+           ftxui::color(theme.base.fg);
+  }
+
+  TSNode root = ts_tree_root_node(tree);
+  std::vector<HighlightSpan> spans;
+  spans.reserve(64);
+  collectSpans(root, language, spans);
+  std::sort(spans.begin(), spans.end(),
+            [](const HighlightSpan &a, const HighlightSpan &b) {
+              return a.startByte < b.startByte;
+            });
+
+  std::vector<ftxui::Element> parts;
+  uint32_t cursor = 0;
+  const uint32_t lineEndByte = static_cast<uint32_t>(code.size());
+  for (const auto &span : spans) {
+    if (span.endByte <= cursor) {
+      continue;
+    }
+    if (span.startByte >= lineEndByte) {
+      break;
+    }
+
+    const uint32_t sStart = std::max(span.startByte, cursor);
+    const uint32_t sEnd = std::min(span.endByte, lineEndByte);
+    if (sStart > cursor) {
+      appendStyledTextParts(parts, code.substr(cursor, sStart - cursor),
+                            theme.base.fg);
+    }
+
+    appendStyledTextParts(parts, code.substr(sStart, sEnd - sStart),
+                          colorFor(span.kind));
+    cursor = sEnd;
+  }
+
+  if (cursor < lineEndByte) {
+    appendStyledTextParts(parts, code.substr(cursor, lineEndByte - cursor),
+                          theme.base.fg);
+  }
+
+  if (parts.empty()) {
+    parts.push_back(ftxui::text(" ") | ftxui::color(theme.base.fg));
+  }
+
+  ts_tree_delete(tree);
+  ts_parser_delete(parser);
+
+  return ftxui::hflow(std::move(parts));
 }
 
 ftxui::Element SyntaxHighlighter::highlightRender(const std::string &code,

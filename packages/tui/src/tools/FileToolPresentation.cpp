@@ -67,6 +67,7 @@ void ApplyError(ToolPresentation &presentation, const ToolCallView &view,
 
 std::vector<std::string> SplitLines(const std::string &text) {
   std::vector<std::string> lines;
+  lines.reserve(64);  // Reserve for common case
   std::istringstream ss(text);
   std::string line;
   while (std::getline(ss, line)) {
@@ -88,6 +89,7 @@ std::vector<std::string> ParseStringArray(const rapidjson::Value &value) {
   if (!value.IsArray()) {
     return lines;
   }
+  lines.reserve(value.GetArray().Size());
   for (const auto &entry : value.GetArray()) {
     if (entry.IsString()) {
       lines.emplace_back(entry.GetString());
@@ -116,8 +118,8 @@ std::string HumanizeEditOperation(std::string op) {
   return op;
 }
 
-bool IsHashlineHeavyDescription(const std::string &description) {
-  return description.find('#') != std::string::npos ||
+bool IsAnchorHeavyDescription(const std::string &description) {
+  return description.find("lineNumber") != std::string::npos ||
          description.find("...") != std::string::npos;
 }
 
@@ -136,6 +138,7 @@ std::string JoinDisplayParts(const std::vector<std::string> &parts) {
 }
 
 struct FileEditPreview {
+  std::string path;
   std::string op;
   std::string description;
   std::string error;
@@ -144,13 +147,25 @@ struct FileEditPreview {
   bool relocated = false;
   std::vector<std::string> old_lines;
   std::vector<std::string> new_lines;
+  int patch_line = 0;
   bool highlight_full_addition = false;
+};
+
+struct FileEditTargetArgs {
+  std::string path;
+  bool has_content_overwrite = false;
+  std::string overwrite_content;
+  bool has_patch = false;
+  std::string patch;
 };
 
 std::string BuildPreviewTitle(const FileEditPreview &preview) {
   if (!preview.description.empty() &&
-      !IsHashlineHeavyDescription(preview.description)) {
+      !IsAnchorHeavyDescription(preview.description)) {
     return preview.description;
+  }
+  if (!preview.path.empty()) {
+    return BaseName(preview.path) + ": " + HumanizeEditOperation(preview.op);
   }
   return HumanizeEditOperation(preview.op);
 }
@@ -173,7 +188,60 @@ std::string BuildPreviewMeta(const FileEditPreview &preview) {
   if (preview.relocated) {
     parts.push_back("relocated");
   }
+  if (preview.patch_line > 0) {
+    parts.push_back("patch line " + std::to_string(preview.patch_line));
+  }
+  if (!preview.path.empty()) {
+    parts.insert(parts.begin(), BaseName(preview.path));
+  }
   return JoinDisplayParts(parts);
+}
+
+std::vector<FileEditTargetArgs> ParseFileEditArgs(const rapidjson::Document &args_doc) {
+  std::vector<FileEditTargetArgs> targets;
+  if (!args_doc.IsObject()) {
+    return targets;
+  }
+
+  if (args_doc.HasMember("files") && args_doc["files"].IsArray()) {
+    for (const auto &entry : args_doc["files"].GetArray()) {
+      if (!entry.IsObject()) {
+        continue;
+      }
+      FileEditTargetArgs target;
+      target.path = StringMember(entry, "path");
+      target.has_content_overwrite =
+          entry.HasMember("content") && entry["content"].IsString();
+      if (target.has_content_overwrite) {
+        target.overwrite_content = entry["content"].GetString();
+      }
+      target.has_patch =
+          entry.HasMember("patch") && entry["patch"].IsString();
+      if (target.has_patch) {
+        target.patch = entry["patch"].GetString();
+      }
+      targets.push_back(std::move(target));
+    }
+    return targets;
+  }
+
+  FileEditTargetArgs target;
+  target.path = StringMember(args_doc, "path");
+  target.has_content_overwrite =
+      args_doc.HasMember("content") && args_doc["content"].IsString();
+  if (target.has_content_overwrite) {
+    target.overwrite_content = args_doc["content"].GetString();
+  }
+  target.has_patch =
+      args_doc.HasMember("patch") && args_doc["patch"].IsString();
+  if (target.has_patch) {
+    target.patch = args_doc["patch"].GetString();
+  }
+  if (!target.path.empty() || target.has_content_overwrite ||
+      args_doc.HasMember("edits")) {
+    targets.push_back(std::move(target));
+  }
+  return targets;
 }
 
 std::vector<ToolPresentationDiffLine>
@@ -199,7 +267,7 @@ struct PostEditSlice {
   bool valid = false;
 };
 
-std::string StripHashlinePrefix(const std::string &line) {
+std::string StripAnchorPrefix(const std::string &line) {
   const auto pipe = line.find('|');
   if (pipe == std::string::npos) {
     return line;
@@ -215,7 +283,7 @@ PostEditSlice ParsePostEditSlice(const rapidjson::Value &value) {
   slice.start_line = IntMember(value, "start_line", 1);
   for (const auto &entry : value["lines"].GetArray()) {
     if (entry.IsString()) {
-      slice.lines.push_back(StripHashlinePrefix(entry.GetString()));
+      slice.lines.push_back(StripAnchorPrefix(entry.GetString()));
     }
   }
   slice.valid = true;
@@ -523,11 +591,19 @@ ToolPresentation BuildFileEditPresentation(const ToolCallView &view) {
 
   rapidjson::Document args_doc;
   const bool has_args = ParseObject(view.args, args_doc);
-  const std::string path = has_args ? StringMember(args_doc, "path") : "";
+  const auto target_args = has_args ? ParseFileEditArgs(args_doc)
+                                    : std::vector<FileEditTargetArgs>{};
+  const bool multi_file_args = target_args.size() > 1;
+  const std::string path =
+      !target_args.empty() ? target_args.front().path : "";
   const bool has_content_overwrite =
-      has_args && args_doc.HasMember("content") && args_doc["content"].IsString();
+      !target_args.empty() && target_args.front().has_content_overwrite;
   const std::string overwrite_content =
-      has_content_overwrite ? args_doc["content"].GetString() : "";
+      !target_args.empty() ? target_args.front().overwrite_content : "";
+  const bool has_patch =
+      !target_args.empty() && target_args.front().has_patch;
+  const std::string patch =
+      !target_args.empty() ? target_args.front().patch : "";
 
   if (presentation.lifecycle == ToolPresentationLifecycle::Preparing) {
     presentation.title = "prepare file edit";
@@ -540,6 +616,14 @@ ToolPresentation BuildFileEditPresentation(const ToolCallView &view) {
     presentation.footer_badges.push_back(path);
     presentation.compact_summary = BaseName(path);
     presentation.diff_source_name = BaseName(path);
+  } else if (has_patch) {
+    presentation.title = "file patch";
+    presentation.compact_summary = "patch " + BaseName(path);
+  } else if (multi_file_args) {
+    presentation.footer_badges.push_back(
+        std::to_string(target_args.size()) + " files");
+    presentation.compact_summary =
+        std::to_string(target_args.size()) + " files";
   }
   if (presentation.lifecycle == ToolPresentationLifecycle::Preparing ||
       presentation.lifecycle == ToolPresentationLifecycle::Running) {
@@ -564,18 +648,24 @@ ToolPresentation BuildFileEditPresentation(const ToolCallView &view) {
   }
 
   std::vector<FileEditPreview> previews;
-  if (has_result && result_doc.HasMember("operations") &&
-      result_doc["operations"].IsArray()) {
-    for (const auto &op : result_doc["operations"].GetArray()) {
+  auto appendOperations =
+      [&](const rapidjson::Value &operations, const std::string &op_path,
+          bool op_has_content_overwrite, const std::string &op_overwrite_content) {
+    if (!operations.IsArray()) {
+      return;
+    }
+    for (const auto &op : operations.GetArray()) {
       if (!op.IsObject()) {
         continue;
       }
       FileEditPreview preview;
+      preview.path = op_path;
       preview.op = StringMember(op, "op");
       preview.description = StringMember(op, "description");
       preview.error = StringMember(op, "error");
       preview.start_line = IntMember(op, "start_line", 1);
       preview.end_line = IntMember(op, "end_line", preview.start_line);
+      preview.patch_line = IntMember(op, "patch_line", 0);
       preview.relocated =
           op.HasMember("relocated") && op["relocated"].IsBool() &&
           op["relocated"].GetBool();
@@ -585,18 +675,54 @@ ToolPresentation BuildFileEditPresentation(const ToolCallView &view) {
       if (op.HasMember("new_lines")) {
         preview.new_lines = ParseStringArray(op["new_lines"]);
       }
-      if (preview.op == "overwrite_file_content" && has_content_overwrite) {
-        preview.new_lines = SplitLines(overwrite_content);
+      if (preview.op == "overwrite_file_content" && op_has_content_overwrite) {
+        preview.new_lines = SplitLines(op_overwrite_content);
         preview.highlight_full_addition = true;
         preview.start_line = 1;
         preview.end_line = static_cast<int>(preview.new_lines.size());
       }
       previews.push_back(std::move(preview));
     }
+  };
+
+  if (has_result && result_doc.HasMember("files") && result_doc["files"].IsArray()) {
+    for (rapidjson::SizeType i = 0; i < result_doc["files"].Size(); ++i) {
+      const auto &file = result_doc["files"][i];
+      if (!file.IsObject()) {
+        continue;
+      }
+      const std::string file_path = StringMember(file, "path");
+      bool file_has_content_overwrite = false;
+      std::string file_overwrite_content;
+      if (i < target_args.size()) {
+        file_has_content_overwrite = target_args[i].has_content_overwrite;
+        file_overwrite_content = target_args[i].overwrite_content;
+      }
+
+      if (file.HasMember("operations")) {
+        appendOperations(file["operations"], file_path, file_has_content_overwrite,
+                         file_overwrite_content);
+      } else if (file_has_content_overwrite) {
+        FileEditPreview preview;
+        preview.path = file_path;
+        preview.op = "overwrite_file_content";
+        preview.description = "create file";
+        preview.new_lines = SplitLines(file_overwrite_content);
+        preview.highlight_full_addition = true;
+        preview.start_line = 1;
+        preview.end_line = static_cast<int>(preview.new_lines.size());
+        previews.push_back(std::move(preview));
+      }
+    }
+  } else if (has_result && result_doc.HasMember("operations") &&
+             result_doc["operations"].IsArray()) {
+    appendOperations(result_doc["operations"], path, has_content_overwrite,
+                     overwrite_content);
   }
 
   if (previews.empty() && has_content_overwrite) {
     FileEditPreview preview;
+    preview.path = path;
     preview.op = "overwrite_file_content";
     preview.description = "create file";
     preview.new_lines = SplitLines(overwrite_content);
@@ -610,10 +736,17 @@ ToolPresentation BuildFileEditPresentation(const ToolCallView &view) {
   int removed_lines = 0;
   if (presentation.lifecycle == ToolPresentationLifecycle::Success) {
     ToolPresentationDiffSection unified_section;
-    if (has_content_overwrite) {
+    if (has_patch && !multi_file_args) {
+        unified_section.title = "Patch applied";
+        if (previews.empty()) {
+            presentation.body_lines = SplitLines(patch);
+        }
+    }
+    if (has_content_overwrite && !multi_file_args) {
       unified_section.lines =
           BuildAddedDiffLines(SplitLines(overwrite_content), 1, true);
     } else if (!previews.empty() &&
+               !multi_file_args &&
                !TryBuildUnifiedSuccessDiff(result_doc, previews, unified_section)) {
       for (const auto &preview : previews) {
         auto lines = BuildPreviewDiffLines(preview);
@@ -630,6 +763,21 @@ ToolPresentation BuildFileEditPresentation(const ToolCallView &view) {
         }
       }
       presentation.diff_sections.push_back(std::move(unified_section));
+    } else if (multi_file_args) {
+      for (const auto &preview : previews) {
+        ToolPresentationDiffSection section;
+        section.title = BuildPreviewTitle(preview);
+        section.meta = BuildPreviewMeta(preview);
+        section.lines = BuildPreviewDiffLines(preview);
+        for (const auto &line : section.lines) {
+          if (line.type == '+') {
+            added_lines++;
+          } else if (line.type == '-') {
+            removed_lines++;
+          }
+        }
+        presentation.diff_sections.push_back(std::move(section));
+      }
     }
   } else {
     for (const auto &preview : previews) {

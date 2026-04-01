@@ -91,6 +91,23 @@ public:
   bool supportsStreamUsage() const { return true; }
 
   /**
+   * @brief Whether this API-key provider exposes quota/usage tracking.
+   */
+  virtual bool supportsQuotaTracking() const { return false; }
+
+  /**
+   * @brief Refresh quota information for all configured keys.
+   */
+  virtual void refreshQuotas() {}
+
+  /**
+   * @brief Returns aggregated quotas for all configured keys.
+   */
+  virtual std::map<std::string, std::vector<QuotaBucket>> getAllQuotas() const {
+    return {};
+  }
+
+  /**
    * @brief Get all configured API key accounts.
    */
   std::vector<APIKeyAccount> getAccounts() const;
@@ -116,7 +133,7 @@ public:
    * @param modelId Optional model ID for provider-specific selection logic.
    * @return Pointer to available account, or nullopt if all are rate-limited.
    */
-  std::optional<APIKeyAccount *> getAvailableAccount(
+  virtual std::optional<APIKeyAccount *> getAvailableAccount(
       const std::optional<std::string> &modelId = std::nullopt);
 
   /**
@@ -134,7 +151,7 @@ protected:
   std::string providerId_;
   mutable std::recursive_mutex accountsMutex_;
   std::vector<APIKeyAccount> accounts_;
-  int lastUsedIndex_ = 0;
+  std::atomic<int> lastUsedIndex_{0};
 
   /**
    * @brief Load accounts from keys.json.

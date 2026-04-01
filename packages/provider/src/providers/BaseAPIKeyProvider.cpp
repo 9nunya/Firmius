@@ -75,7 +75,9 @@ std::optional<APIKeyAccount *> BaseAPIKeyProvider::getAvailableAccount(
     return std::nullopt;
   }
 
-  int startIdx = (lastUsedIndex_ >= 0) ? lastUsedIndex_ : 0;
+  int startIdx = (lastUsedIndex_.load(std::memory_order_relaxed) >= 0) 
+                 ? lastUsedIndex_.load(std::memory_order_relaxed) 
+                 : 0;
   if (startIdx >= static_cast<int>(accounts_.size())) {
     startIdx = 0;
   }
@@ -92,7 +94,7 @@ std::optional<APIKeyAccount *> BaseAPIKeyProvider::getAvailableAccount(
 
     if (!acc.rateLimited) {
       // Update lastUsedIndex_ for round-robin rotation
-      lastUsedIndex_ = currentIdx;
+      lastUsedIndex_.store(currentIdx, std::memory_order_relaxed);
       return &acc;
     }
 
@@ -163,7 +165,7 @@ void BaseAPIKeyProvider::loadAccounts() {
 
   std::string lastUsedKey = providerId_ + "_lastUsedIndex";
   if (doc.HasMember(lastUsedKey.c_str()) && doc[lastUsedKey.c_str()].IsInt()) {
-    lastUsedIndex_ = doc[lastUsedKey.c_str()].GetInt();
+    lastUsedIndex_.store(doc[lastUsedKey.c_str()].GetInt(), std::memory_order_relaxed);
   }
 
   if (doc.HasMember(providerId_.c_str()) &&
@@ -261,7 +263,7 @@ void BaseAPIKeyProvider::saveAccounts() {
     doc.RemoveMember(lastUsedKey.c_str());
   }
   rapidjson::Value lastUsedKeyVal(lastUsedKey.c_str(), doc.GetAllocator());
-  doc.AddMember(lastUsedKeyVal, lastUsedIndex_, doc.GetAllocator());
+  doc.AddMember(lastUsedKeyVal, lastUsedIndex_.load(std::memory_order_relaxed), doc.GetAllocator());
 
   rapidjson::StringBuffer buffer;
   rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);

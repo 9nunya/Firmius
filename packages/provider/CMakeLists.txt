@@ -9,6 +9,7 @@ target_sources(firmius_provider PRIVATE
     src/providers/KimiProvider.cpp
     src/providers/LMStudioProvider.cpp
     src/providers/NanoGPTProvider.cpp
+    src/providers/NvidiaProvider.cpp
     src/providers/OpenRouterProvider.cpp
     src/providers/ZaiProvider.cpp
     src/providers/ZenProvider.cpp
@@ -20,6 +21,7 @@ target_sources(firmius_provider PRIVATE
     src/providers/QwenProvider.cpp
     src/providers/BaseAPIKeyProvider.cpp
     src/providers/BaseAnthropicProvider.cpp
+    src/providers/LettaProvider.cpp
 )
 
 target_sources(firmius_provider PUBLIC
@@ -31,6 +33,7 @@ target_sources(firmius_provider PUBLIC
     include/providers/KimiProvider.hpp
     include/providers/LMStudioProvider.hpp
     include/providers/NanoGPTProvider.hpp
+    include/providers/NvidiaProvider.hpp
     include/providers/OpenRouterProvider.hpp
     include/providers/ZaiProvider.hpp
     include/providers/ZenProvider.hpp
@@ -43,6 +46,7 @@ target_sources(firmius_provider PUBLIC
     include/providers/QwenProvider.hpp
     include/providers/BaseAPIKeyProvider.hpp
     include/providers/BaseAnthropicProvider.hpp
+    include/providers/LettaProvider.hpp
 )
 
 target_include_directories(firmius_provider PUBLIC

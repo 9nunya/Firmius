@@ -283,6 +283,7 @@ private:
   int last_terminal_height_ = 0;
   std::optional<std::chrono::steady_clock::time_point> quit_arm_deadline_;
   std::size_t quit_arm_generation_ = 0;
+  std::jthread quit_arm_thread_;
   shared::AgentMetrics session_metrics_;
 };
 

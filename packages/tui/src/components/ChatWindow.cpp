@@ -429,7 +429,8 @@ public:
       firmius::tui::HistoryGetter sub_history_getter,
       firmius::tui::StreamGetter sub_stream_getter,
       firmius::tui::LiveQuickSummaryProvider live_quick_summary_provider,
-      std::function<bool()> show_internal_nudges_getter)
+      std::function<bool()> show_internal_nudges_getter,
+      std::function<bool()> hide_errors_getter)
       : history_getter_(std::move(history_getter)),
         live_rows_provider_(std::move(live_rows_provider)),
         tool_view_provider_(std::move(tool_view_provider)),
@@ -440,7 +441,8 @@ public:
         sub_stream_getter_(std::move(sub_stream_getter)),
         live_quick_summary_provider_(std::move(live_quick_summary_provider)),
         show_internal_nudges_getter_(
-            std::move(show_internal_nudges_getter)) {
+            std::move(show_internal_nudges_getter)),
+        hide_errors_getter_(std::move(hide_errors_getter)) {
 
     history_inner_ = ftxui::Container::Vertical({});
     history_container_ = ftxui::Renderer(history_inner_, [this] {
@@ -720,6 +722,8 @@ private:
     if (history) {
       const bool showInternalNudges =
           show_internal_nudges_getter_ ? show_internal_nudges_getter_() : false;
+      const bool hideErrors =
+          hide_errors_getter_ ? hide_errors_getter_() : false;
       std::unordered_map<std::string, bool> seen_tool_call;
       QuickToolCluster quick_cluster;
       auto flush_quick_cluster = [&](bool merge_live = false) {
@@ -1040,16 +1044,18 @@ private:
               }
             } else if (auto *err =
                            std::get_if<firmius::shared::ErrorContent>(&part)) {
-              flush_quick_cluster();
-              auto error = *err;
-              auto row = ftxui::Make<RowComponent>(
-                  nullptr, [error, theme] {
-                    return firmius::tui::IndentAgentRow(
-                        RenderErrorDisplay(theme, error));
-                  });
-              rows_.push_back(row);
-              rows_.push_back(ftxui::Make<RowComponent>(
-                  nullptr, [] { return ftxui::text(""); }));
+              if (!hideErrors) {
+                flush_quick_cluster();
+                auto error = *err;
+                auto row = ftxui::Make<RowComponent>(
+                    nullptr, [error, theme] {
+                      return firmius::tui::IndentAgentRow(
+                          RenderErrorDisplay(theme, error));
+                    });
+                rows_.push_back(row);
+                rows_.push_back(ftxui::Make<RowComponent>(
+                    nullptr, [] { return ftxui::text(""); }));
+              }
             } else if (auto *notice =
                            std::get_if<firmius::shared::NoticeContent>(
                                &part)) {
@@ -1102,6 +1108,7 @@ private:
   firmius::tui::StreamGetter sub_stream_getter_;
   firmius::tui::LiveQuickSummaryProvider live_quick_summary_provider_;
   std::function<bool()> show_internal_nudges_getter_;
+  std::function<bool()> hide_errors_getter_;
   size_t last_history_revision_ = std::numeric_limits<std::size_t>::max();
   std::vector<ftxui::Component> rows_;
   std::vector<std::shared_ptr<CopyableRowComponent>> copyable_rows_;
@@ -1135,12 +1142,13 @@ ftxui::Component firmius::tui::ChatWindow(
     firmius::tui::HistoryGetter sub_history_getter,
     firmius::tui::StreamGetter sub_stream_getter,
     firmius::tui::LiveQuickSummaryProvider live_quick_summary_provider,
-    std::function<bool()> show_internal_nudges_getter) {
+    std::function<bool()> show_internal_nudges_getter,
+    std::function<bool()> hide_errors_getter) {
   return ftxui::Make<ChatWindowComponent>(
       std::move(history_getter), std::move(live_rows_provider),
       std::move(tool_view_provider), std::move(process_state_getter),
       std::move(subagent_state_getter), std::move(agent_focus_handler),
       std::move(sub_history_getter),
       std::move(sub_stream_getter), std::move(live_quick_summary_provider),
-      std::move(show_internal_nudges_getter));
+      std::move(show_internal_nudges_getter), std::move(hide_errors_getter));
 }

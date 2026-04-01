@@ -4,6 +4,57 @@
 
 namespace firmius::provider {
 
+namespace {
+
+std::string resolveToolResultName(const AgentHistory &history,
+                                  const ToolResultContent &result) {
+  const auto matchesResult = [&](const ToolCallContent &call) {
+    if (!result.toolCallId.empty() && !call.id.empty() &&
+        call.id == result.toolCallId) {
+      return true;
+    }
+    return false;
+  };
+
+  for (auto turnIt = history.turns.rbegin(); turnIt != history.turns.rend();
+       ++turnIt) {
+    for (auto messageIt = turnIt->messages.rbegin();
+         messageIt != turnIt->messages.rend(); ++messageIt) {
+      for (auto partIt = messageIt->content.rbegin();
+           partIt != messageIt->content.rend(); ++partIt) {
+        const auto *call = std::get_if<ToolCallContent>(&*partIt);
+        if (!call) {
+          continue;
+        }
+        if (matchesResult(*call) && !call->name.empty()) {
+          return call->name;
+        }
+      }
+    }
+  }
+
+  for (auto turnIt = history.turns.rbegin(); turnIt != history.turns.rend();
+       ++turnIt) {
+    for (auto messageIt = turnIt->messages.rbegin();
+         messageIt != turnIt->messages.rend(); ++messageIt) {
+      for (auto partIt = messageIt->content.rbegin();
+           partIt != messageIt->content.rend(); ++partIt) {
+        const auto *call = std::get_if<ToolCallContent>(&*partIt);
+        if (call && !call->name.empty()) {
+          return call->name;
+        }
+      }
+    }
+  }
+
+  if (!result.toolCallId.empty()) {
+    return "tool_result";
+  }
+  return "tool_result";
+}
+
+} // namespace
+
 std::string AntigravityProtocol::roleToString(Role r) {
   switch (r) {
   case Role::System:
@@ -397,27 +448,7 @@ std::string AntigravityProtocol::prepareRequestBody(const AgentHistory &history,
         } else if (auto *res = std::get_if<ToolResultContent>(&part)) {
           rapidjson::Value p(rapidjson::kObjectType);
           rapidjson::Value fn(rapidjson::kObjectType);
-          std::string toolName = res->toolCallId;
-          bool found = false;
-          // Search in current and previous turns for the tool call
-          for (auto rit = history.turns.rbegin(); rit != history.turns.rend();
-               ++rit) {
-            for (auto &m : rit->messages) {
-              for (auto &cp : m.content) {
-                if (auto *tc = std::get_if<ToolCallContent>(&cp)) {
-                  if (tc->id == res->toolCallId) {
-                    toolName = tc->name;
-                    found = true;
-                    break;
-                  }
-                }
-              }
-              if (found)
-                break;
-            }
-            if (found)
-              break;
-          }
+          const std::string toolName = resolveToolResultName(history, *res);
           fn.AddMember("name", rapidjson::Value(toolName.c_str(), a), a);
           if (!res->toolCallId.empty()) {
             fn.AddMember("id", rapidjson::Value(res->toolCallId.c_str(), a), a);

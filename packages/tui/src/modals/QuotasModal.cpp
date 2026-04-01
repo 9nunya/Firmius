@@ -268,17 +268,25 @@ ftxui::Component QuotasModal::create(TuiState &state) {
                     percentBadge,
                 });
 
+            ftxui::Elements bucketBody = {
+                ftxui::hbox({
+                    ftxui::text(" " + prettifyBucketName(bucket.name)) |
+                        ftxui::bold | ftxui::color(theme.modals.fg),
+                    ftxui::filler(),
+                    resetInfo,
+                }),
+                meterRow,
+            };
+
+            if (!bucket.note.empty()) {
+              bucketBody.push_back(
+                  ftxui::paragraph(" " + bucket.note) |
+                  ftxui::color(theme.base.dim));
+            }
+            bucketBody.push_back(ftxui::text(""));
+
             bucket_elements.push_back(
-                ftxui::vbox({
-                    ftxui::hbox({
-                        ftxui::text(" " + prettifyBucketName(bucket.name)) |
-                            ftxui::bold | ftxui::color(theme.modals.fg),
-                        ftxui::filler(),
-                        resetInfo,
-                    }),
-                    meterRow,
-                    ftxui::text(""),
-                }) |
+                ftxui::vbox(std::move(bucketBody)) |
                 ftxui::size(ftxui::WIDTH, ftxui::EQUAL, accountWidth));
           }
         }

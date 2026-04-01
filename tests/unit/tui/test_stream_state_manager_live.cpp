@@ -199,7 +199,8 @@ TEST(StreamStateManagerLiveTest, InterruptClearsProviderWaitingAndRetryUiImmedia
 
   state.handleAgentProviderWaiting(AgentProviderWaiting{"agent-1", ""});
   state.handleAgentRetrying(
-      AgentRetrying{"agent-1", 2, 5, 429, 4000, "Retrying request", "", "acct"});
+      AgentRetrying{"agent-1", 2, 5, 429, 4000, "Retrying request", "", "acct",
+                    ""});
   state.handleAgentAccountSwitched(AgentAccountSwitched{"agent-1", "acct", ""});
 
   auto stream = state.getStream("agent-1");
@@ -231,6 +232,44 @@ TEST(StreamStateManagerLiveTest, InterruptClearsTransientLiveProseRows) {
   EXPECT_TRUE(stream->thinking.empty());
   EXPECT_TRUE(stream->text.empty());
   EXPECT_TRUE(state.getTimeline().empty());
+}
+
+TEST(StreamStateManagerLiveTest,
+     InterruptRemovesPreparingOnlyToolBlocks) {
+  StreamStateManager state;
+
+  state.handleAgentToolCallChunk(
+      AgentToolCallChunk{0, "agent-1", "tool-prep", "file_read", "", ""});
+
+  auto view = state.getToolView("tool-prep");
+  ASSERT_TRUE(static_cast<bool>(view));
+  EXPECT_EQ(view->phase, ToolPhase::Preparing);
+
+  state.handleAgentInterrupted(AgentInterrupted{"agent-1", ""});
+
+  EXPECT_FALSE(static_cast<bool>(state.getToolView("tool-prep")));
+  EXPECT_TRUE(state.getTimeline().empty());
+}
+
+TEST(StreamStateManagerLiveTest,
+     InterruptMarksRunningToolBlocksAsAborted) {
+  StreamStateManager state;
+
+  state.handleAgentToolCall(
+      AgentToolCall{"agent-1", "tool-1", "file_read",
+                    R"({"path":"src/main.cpp"})", ""});
+
+  auto view = state.getToolView("tool-1");
+  ASSERT_TRUE(static_cast<bool>(view));
+  EXPECT_EQ(view->phase, ToolPhase::Called);
+
+  state.handleAgentInterrupted(AgentInterrupted{"agent-1", ""});
+
+  view = state.getToolView("tool-1");
+  ASSERT_TRUE(static_cast<bool>(view));
+  EXPECT_EQ(view->phase, ToolPhase::Error);
+  EXPECT_FALSE(view->success);
+  EXPECT_EQ(view->result, "User aborted tool manually.");
 }
 
 TEST(StreamStateManagerLiveTest, ContextCompactedClearsTransientCompactionState) {
@@ -289,6 +328,64 @@ TEST(StreamStateManagerLiveTest, ChildErrorMarksParentSubagentAsFailed) {
 }
 
 TEST(StreamStateManagerLiveTest,
+     RateLimitRetryWithRawBodyAppendsLiveErrorTimelineEntry) {
+  StreamStateManager state;
+
+  state.handleAgentRetrying(
+      AgentRetrying{
+          "agent-1",
+          1,
+          5,
+          429,
+          0,
+          "rate limited, switching account",
+          "",
+          "Key #1",
+          "Quota exhausted or rate limited. (HTTP 429)\n"
+          "Provider: zen\n"
+          "Model: opencode/test\n"
+          "Raw provider body:\n"
+          R"({"error":{"message":"rate limit reached","type":"rate_limit"}})"});
+
+  const auto &timeline = state.getTimeline();
+  ASSERT_EQ(timeline.size(), 1u);
+  EXPECT_EQ(timeline[0].kind, TimelineEntry::Kind::Error);
+  EXPECT_EQ(timeline[0].agentId, "agent-1");
+  EXPECT_NE(timeline[0].message.find("Raw provider body:"),
+            std::string::npos);
+}
+
+TEST(StreamStateManagerLiveTest,
+     RateLimitProviderErrorWithRawBodyAppendsLiveErrorTimelineEntry) {
+  StreamStateManager state;
+
+  state.handleAgentError(AgentError{
+      "agent-1",
+      "Provider stream error: Quota exhausted or rate limited. Switching to next account... (HTTP 429)\n"
+      "Provider: zen\n"
+      "Model: opencode/test\n"
+      "Raw provider body:\n"
+      R"({"error":{"message":"rate limit reached","type":"rate_limit"}})",
+      ""});
+
+  const auto &timeline = state.getTimeline();
+  ASSERT_EQ(timeline.size(), 1u);
+  EXPECT_EQ(timeline[0].kind, TimelineEntry::Kind::Error);
+  EXPECT_EQ(timeline[0].agentId, "agent-1");
+  EXPECT_NE(timeline[0].message.find("Raw provider body:"),
+            std::string::npos);
+}
+
+TEST(StreamStateManagerLiveTest,
+     GenericErrorDoesNotAppendLiveErrorTimelineEntry) {
+  StreamStateManager state;
+
+  state.handleAgentError(AgentError{"agent-1", "boom", ""});
+
+  EXPECT_TRUE(state.getTimeline().empty());
+}
+
+TEST(StreamStateManagerLiveTest,
      RetryingSubagentReactivatesParentSummonBlockAndCanFinishSuccessfully) {
   StreamStateManager state;
   state.handleAgentToolCall(
@@ -306,7 +403,7 @@ TEST(StreamStateManagerLiveTest,
 
   state.handleAgentRetrying(
       AgentRetrying{"child-id", 2, 5, 429, 4000, "Retrying request",
-                    "parent", "acct"});
+                    "parent", "acct", ""});
 
   view = state.getToolView("tool-1");
   ASSERT_TRUE(static_cast<bool>(view));
@@ -343,7 +440,7 @@ TEST(StreamStateManagerLiveTest,
   state.handleAgentError(AgentError{"child-id", "boom", "parent"});
   state.handleAgentRetrying(
       AgentRetrying{"child-id", 2, 5, 429, 4000, "Retrying request",
-                    "parent", "acct"});
+                    "parent", "acct", ""});
 
   state.handleAgentFinished(AgentFinished{
       "child-id", AgentOutcome{AgentOutcome::Kind::Failed, "final boom"},
@@ -451,7 +548,8 @@ TEST(StreamStateManagerLiveTest,
   EXPECT_EQ(waiting->wait_state, "provider_waiting");
 
   state.handleAgentRetrying(
-      AgentRetrying{"child-1", 2, 4, 429, 2000, "retry", "parent", "acct-a"});
+      AgentRetrying{"child-1", 2, 4, 429, 2000, "retry", "parent", "acct-a",
+                    ""});
   auto *retrying = state.getSubagentStateForToolCall("summon-1");
   ASSERT_NE(retrying, nullptr);
   EXPECT_TRUE(retrying->retrying);

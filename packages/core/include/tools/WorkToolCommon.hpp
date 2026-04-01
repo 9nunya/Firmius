@@ -64,6 +64,9 @@ bool chunkReadyForExecution(const shared::Plan &plan,
                             const shared::WorkChunk &chunk);
 bool unblockDependentChunks(shared::Plan &plan,
                             const std::string &chunkId);
+/// Reconcile all chunk dependencies in the plan - automatically unblock any chunks
+/// whose dependencies are all Done. Returns true if any chunk was unblocked.
+bool reconcileChunkDependencies(shared::Plan &plan);
 void requireChunkReadyForExecution(const shared::Plan &plan,
                                    const shared::WorkChunk &chunk,
                                    const std::string &action = "dispatch");
@@ -74,6 +77,38 @@ rapidjson::Value makeChunkSummary(const shared::WorkChunk &chunk,
                                   rapidjson::Document::AllocatorType &alloc);
 
 void emitWorkEvent(const shared::AppEvent &event);
+
+// Fleet lock utilities for executor/worker coordination
+struct FileConflictInfo {
+  std::string filePath;
+  std::string lockId;
+  std::string ownerAgentId;
+  std::string reason;
+};
+
+/// Check if any files in the given list have active locks held by other agents.
+/// Returns a list of conflicts.
+std::vector<FileConflictInfo> checkFileConflicts(
+    const std::string &threadId,
+    const std::vector<std::string> &filePaths,
+    const std::string &requestingAgentId);
+
+/// Acquire a lock for the given files. Returns lock ID on success, empty string on failure.
+std::string acquireFileLock(
+    const std::string &threadId,
+    const std::vector<std::string> &filePaths,
+    const std::string &reason,
+    const std::string &ownerAgentId,
+    int timeoutMs = -1);
+
+/// Release a lock by ID. Returns true on success.
+bool releaseFileLock(const std::string &threadId, const std::string &lockId);
+
+/// Build lock doctrine text for executor prompts.
+std::string buildExecutorLockDoctrine();
+
+/// Build lock doctrine text for worker prompts.
+std::string buildWorkerLockDoctrine();
 
 } // namespace firmius::core::worktools
 

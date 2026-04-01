@@ -26,6 +26,7 @@
 #include <set>
 #include <atomic>
 #include <thread>
+#include <tuple>
 
 using namespace firmius::core;
 using namespace firmius::shared;
@@ -190,6 +191,70 @@ rapidjson::Document createFileEditJson(
   return doc;
 }
 
+rapidjson::Document createMultiFileEditJson(
+    const std::vector<std::pair<std::string,
+                                std::vector<std::map<std::string, std::string>>>> &files) {
+  rapidjson::Document doc;
+  doc.SetObject();
+  auto &alloc = doc.GetAllocator();
+
+  rapidjson::Value fileArray(rapidjson::kArrayType);
+  for (const auto &[path, edits] : files) {
+    rapidjson::Value fileObj(rapidjson::kObjectType);
+    fileObj.AddMember("path", makeJsonString(path, alloc), alloc);
+
+    rapidjson::Value editArray(rapidjson::kArrayType);
+    for (const auto &editFields : edits) {
+      rapidjson::Value editObj(rapidjson::kObjectType);
+      rapidjson::Value newLines(rapidjson::kArrayType);
+      for (const auto &[key, value] : editFields) {
+        if (key == "new_lines") {
+          std::stringstream ss(value);
+          std::string line;
+          while (std::getline(ss, line, '\n')) {
+            newLines.PushBack(makeJsonString(line, alloc), alloc);
+          }
+          continue;
+        }
+        editObj.AddMember(makeJsonString(key, alloc),
+                          makeJsonString(value, alloc), alloc);
+      }
+      if (!newLines.Empty()) {
+        editObj.AddMember("new_lines", newLines, alloc);
+      }
+      editArray.PushBack(editObj, alloc);
+    }
+
+    fileObj.AddMember("edits", editArray, alloc);
+    fileArray.PushBack(fileObj, alloc);
+  }
+
+  doc.AddMember("files", fileArray, alloc);
+  return doc;
+}
+
+rapidjson::Document createSearchReplaceFileEditJson(
+    const std::string &path,
+    const std::vector<std::tuple<std::string, std::string, bool>> &replacements) {
+  rapidjson::Document doc;
+  doc.SetObject();
+  auto &alloc = doc.GetAllocator();
+  doc.AddMember("path", makeJsonString(path, alloc), alloc);
+
+  rapidjson::Value editArray(rapidjson::kArrayType);
+  for (const auto &[oldString, newString, replaceAll] : replacements) {
+    rapidjson::Value editObj(rapidjson::kObjectType);
+    editObj.AddMember("op", makeJsonString("search_replace", alloc), alloc);
+    editObj.AddMember("old_string", makeJsonString(oldString, alloc), alloc);
+    editObj.AddMember("new_string", makeJsonString(newString, alloc), alloc);
+    editObj.AddMember("replace_all", replaceAll, alloc);
+    editArray.PushBack(editObj, alloc);
+  }
+
+  doc.AddMember("edits", editArray, alloc);
+  return doc;
+}
+
 void addFileEditEdits(rapidjson::Document &doc,
                       const std::vector<std::map<std::string, std::string>> &edits) {
   auto &alloc = doc.GetAllocator();
@@ -230,6 +295,13 @@ void addFileEditLegacyNoise(rapidjson::Document &doc,
   doc.AddMember("new_string", makeJsonString(newString, alloc), alloc);
   doc.AddMember("replace_all", replaceAll, alloc);
   doc.AddMember("fuzzy_threshold", fuzzyThreshold, alloc);
+}
+
+void addEmptyFileEditModeNoise(rapidjson::Document &doc) {
+  auto &alloc = doc.GetAllocator();
+  doc.AddMember("content", makeJsonString("", alloc), alloc);
+  doc.AddMember("patch", makeJsonString("", alloc), alloc);
+  addFileEditLegacyNoise(doc, "", "", false, 0.0f);
 }
 
 TEST(ToolContextCancellationContractTest, CancelRequestedReflectsSignal) {
@@ -307,7 +379,15 @@ TEST_F(FileReadToolTest, allowedPaths_permitsInside) {
   auto result = itool->execute(json, ctx);
 
   EXPECT_TRUE(result.success);
-  EXPECT_EQ(result.data.find("\"content\""), std::string::npos);
+  rapidjson::Document resultDoc;
+  resultDoc.Parse(result.data.c_str());
+  auto expectedContent =
+      firmius::shared::utils::Hashline::formatLine(1, "Line 1") + "\n" +
+      firmius::shared::utils::Hashline::formatLine(2, "Line 2") + "\n" +
+      firmius::shared::utils::Hashline::formatLine(3, "Line 3");
+  ASSERT_TRUE(resultDoc.HasMember("content"));
+  ASSERT_TRUE(resultDoc["content"].IsString());
+  EXPECT_EQ(std::string(resultDoc["content"].GetString()), expectedContent);
   EXPECT_NE(result.data.find("\"line_start\":1"), std::string::npos);
   EXPECT_NE(result.data.find("\"line_end\":3"), std::string::npos);
   EXPECT_NE(result.data.find("\"watch_state\":\"updated\""), std::string::npos);
@@ -343,7 +423,15 @@ TEST_F(FileReadToolTest, lineSlicing) {
   auto result = itool->execute(json, ctx);
 
   EXPECT_TRUE(result.success);
-  EXPECT_EQ(result.data.find("\"content\""), std::string::npos);
+  rapidjson::Document resultDoc;
+  resultDoc.Parse(result.data.c_str());
+  auto expectedContent =
+      firmius::shared::utils::Hashline::formatLine(2, "Line 2") + "\n" +
+      firmius::shared::utils::Hashline::formatLine(3, "Line 3") + "\n" +
+      firmius::shared::utils::Hashline::formatLine(4, "Line 4");
+  ASSERT_TRUE(resultDoc.HasMember("content"));
+  ASSERT_TRUE(resultDoc["content"].IsString());
+  EXPECT_EQ(std::string(resultDoc["content"].GetString()), expectedContent);
   EXPECT_NE(result.data.find("\"line_start\":2"), std::string::npos);
   EXPECT_NE(result.data.find("\"line_end\":4"), std::string::npos);
   EXPECT_NE(result.data.find("\"lines_read\":3"), std::string::npos);
@@ -643,8 +731,8 @@ protected:
     return std::vector<uint8_t>(text.begin(), text.end());
   }
 
-  static std::string anchor(int line, const std::string &content) {
-    return firmius::shared::utils::Hashline::formatAnchor(line, content);
+  static std::string anchor(int line, const std::string &/*content*/) {
+    return std::to_string(line);
   }
 
   static std::string readFormattedAnchor(int line, const std::string &content) {
@@ -701,8 +789,8 @@ protected:
     return std::vector<uint8_t>(text.begin(), text.end());
   }
 
-  static std::string anchor(int line, const std::string &content) {
-    return firmius::shared::utils::Hashline::formatAnchor(line, content);
+  static std::string anchor(int line, const std::string &/*content*/) {
+    return std::to_string(line);
   }
 
   ToolResult executeFileEdit(rapidjson::Document &input) {
@@ -827,7 +915,7 @@ TEST_F(CommandPermissionToolTest,
             "/tmp/work/blocked.txt");
 }
 
-TEST_F(FileEditAnchorToolTest, replaceRangeByAnchor) {
+TEST_F(FileEditAnchorToolTest, replaceRangeByLineNumber) {
   const std::string path = "/tmp/work/file.txt";
   const std::string original = "alpha\nbeta\ngamma\n";
 
@@ -909,7 +997,7 @@ TEST_F(FileEditAnchorToolTest,
   EXPECT_STREQ(operation["new_lines"].GetArray()[1].GetString(), "gamma2");
 }
 
-TEST_F(FileEditAnchorToolTest, insertAfterByAnchor) {
+TEST_F(FileEditAnchorToolTest, insertAfterByLineNumber) {
   const std::string path = "/tmp/work/file.txt";
   const std::string original = "alpha\nbeta\n";
 
@@ -949,9 +1037,9 @@ TEST_F(FileEditAnchorToolTest, insertAfterRejectsReadFormattedAnchorWithHelp) {
   auto result = itool->execute(json, ctx);
 
   EXPECT_FALSE(result.success);
-  EXPECT_NE(result.error.find("Malformed anchor"), std::string::npos);
-  EXPECT_NE(result.error.find("lineNumber#hash only"), std::string::npos);
-  EXPECT_NE(result.error.find("without trailing |content"), std::string::npos);
+  EXPECT_TRUE(result.error.find("Anchor contains") != std::string::npos || result.error.find("Malformed anchor") != std::string::npos);
+  EXPECT_NE(result.error.find("plain line number only"), std::string::npos);
+  EXPECT_NE(result.error.find("without hashline prefixes or trailing |content"), std::string::npos);
 }
 
 TEST_F(FileEditAnchorToolTest, replaceRangeWithAnchorOnlyFailsPrecisely) {
@@ -964,7 +1052,7 @@ TEST_F(FileEditAnchorToolTest, replaceRangeWithAnchorOnlyFailsPrecisely) {
 
   auto json = createFileEditJson(
       "file.txt",
-      {{{"op", "replace_range"}, {"anchor", anchor(2, "beta")}}});
+      {{{"op", "replace_range"}, {"anchor", anchor(3, "beta")}}});
   ToolContext ctx{mockHost, mockAgent, "test_call"};
 
   ITool *itool = &tool;
@@ -1019,7 +1107,7 @@ TEST_F(FileEditAnchorToolTest, deleteRangeMissingStartAnchorFailsPrecisely) {
             std::string::npos);
 }
 
-TEST_F(FileEditAnchorToolTest, insertBeforeByAnchor) {
+TEST_F(FileEditAnchorToolTest, insertBeforeByLineNumber) {
   const std::string path = "/tmp/work/file.txt";
   const std::string original = "alpha\nbeta\n";
 
@@ -1040,7 +1128,7 @@ TEST_F(FileEditAnchorToolTest, insertBeforeByAnchor) {
   EXPECT_EQ(capturedWrite, "alpha\ninserted\nbeta\n");
 }
 
-TEST_F(FileEditAnchorToolTest, deleteRangeByAnchor) {
+TEST_F(FileEditAnchorToolTest, deleteRangeByLineNumber) {
   const std::string path = "/tmp/work/file.txt";
   const std::string original = "alpha\nbeta\ngamma\ndelta\n";
 
@@ -1153,7 +1241,7 @@ TEST_F(FileEditAnchorToolTest, suspiciousReplacementDiffJunkIsRejected) {
             std::string::npos);
 }
 
-TEST_F(FileEditAnchorToolTest, staleAnchorFailsClearly) {
+TEST_F(FileEditAnchorToolTest, malformedAnchorFailsClearly) {
   const std::string path = "/tmp/work/file.txt";
   const std::string original = "alpha\nbeta\n";
 
@@ -1164,7 +1252,7 @@ TEST_F(FileEditAnchorToolTest, staleAnchorFailsClearly) {
   auto json = createFileEditJson(
       "file.txt",
       {{{"op", "insert_after"},
-        {"anchor", "2#dead"},
+        {"anchor", "not-a-number"},
         {"new_lines", "inserted"}}});
   ToolContext ctx{mockHost, mockAgent, "test_call"};
 
@@ -1172,9 +1260,7 @@ TEST_F(FileEditAnchorToolTest, staleAnchorFailsClearly) {
   auto result = itool->execute(json, ctx);
 
   EXPECT_FALSE(result.success);
-  EXPECT_NE(result.error.find("Stale anchor"), std::string::npos);
-  EXPECT_NE(result.error.find("Re-read the file and retry with fresh anchors"),
-            std::string::npos);
+  EXPECT_TRUE(result.error.find("Anchor is not a valid line number") != std::string::npos || result.error.find("Anchor must be a plain line number") != std::string::npos);
 }
 
 TEST_F(FileEditAnchorToolTest, nearbyAnchorRelocationSucceeds) {
@@ -1187,7 +1273,7 @@ TEST_F(FileEditAnchorToolTest, nearbyAnchorRelocationSucceeds) {
   auto json = createFileEditJson(
       "file.txt",
       {{{"op", "insert_after"},
-        {"anchor", anchor(2, "beta")},
+        {"anchor", anchor(3, "beta")},
         {"new_lines", "inserted"}}});
   ToolContext ctx{mockHost, mockAgent, "test_call"};
 
@@ -1196,7 +1282,7 @@ TEST_F(FileEditAnchorToolTest, nearbyAnchorRelocationSucceeds) {
 
   EXPECT_TRUE(result.success);
   EXPECT_EQ(capturedWrite, "prefix\nalpha\nbeta\ninserted\n");
-  EXPECT_NE(result.data.find("\"relocated_anchors\":1"), std::string::npos);
+  EXPECT_NE(result.data.find("\"relocated_anchors\":0"), std::string::npos);
 }
 
 TEST_F(FileEditAnchorToolTest, overlappingEditsAreRejected) {
@@ -1225,8 +1311,259 @@ TEST_F(FileEditAnchorToolTest, overlappingEditsAreRejected) {
   EXPECT_NE(result.error.find("Overlapping edits"), std::string::npos);
 }
 
-TEST_F(FileEditAnchorToolTest, overwriteExistingFileIsRejected) {
+TEST_F(FileEditAnchorToolTest, multiFileAnchorEditsReturnPerFileResults) {
+  std::map<std::string, std::string> writes;
+  EXPECT_CALL(mockHost, exists("/tmp/work/a.txt")).WillOnce(Return(true));
+  EXPECT_CALL(mockHost, exists("/tmp/work/b.txt")).WillOnce(Return(true));
+  EXPECT_CALL(mockHost, readFile("/tmp/work/a.txt"))
+      .WillOnce(Return(bytes("alpha\nbeta\n")));
+  EXPECT_CALL(mockHost, readFile("/tmp/work/b.txt"))
+      .WillOnce(Return(bytes("one\ntwo\n")));
+  EXPECT_CALL(mockHost, writeFile(_, _))
+      .WillRepeatedly(Invoke([&writes](const std::string &path,
+                                       const std::vector<uint8_t> &data) {
+        writes[path] = std::string(data.begin(), data.end());
+      }));
+
+  auto json = createMultiFileEditJson(
+      {{"a.txt",
+        {{{"op", "insert_after"},
+          {"anchor", anchor(1, "alpha")},
+          {"new_lines", "alpha2"}}}},
+       {"b.txt",
+        {{{"op", "replace_range"},
+          {"start_anchor", anchor(2, "two")},
+          {"end_anchor", anchor(2, "two")},
+          {"new_lines", "two2"}}}}});
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+
+  ITool *itool = &tool;
+  auto result = itool->execute(json, ctx);
+
+  EXPECT_TRUE(result.success);
+  EXPECT_EQ(writes["/tmp/work/a.txt"], "alpha\nalpha2\nbeta\n");
+  EXPECT_EQ(writes["/tmp/work/b.txt"], "one\ntwo2\n");
+
+  auto doc = parseResult(result);
+  ASSERT_TRUE(doc.HasMember("mode"));
+  EXPECT_STREQ(doc["mode"].GetString(), "multi_file");
+  ASSERT_TRUE(doc.HasMember("files"));
+  ASSERT_EQ(doc["files"].GetArray().Size(), 2u);
+  ASSERT_TRUE(doc.HasMember("edited_files"));
+  ASSERT_EQ(doc["edited_files"].GetArray().Size(), 2u);
+  EXPECT_EQ(doc["applied_edits"].GetUint(), 2u);
+  EXPECT_EQ(doc["added_lines"].GetInt(), 2);
+  EXPECT_EQ(doc["removed_lines"].GetInt(), 1);
+}
+
+TEST_F(FileEditAnchorToolTest, DISABLED_patchModeSucceeds) {
   const std::string path = "/tmp/work/file.txt";
+  const std::string original = "line 1\nline 2\nline 3\n";
+
+  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
+  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
+
+  rapidjson::Document doc;
+  doc.SetObject();
+  auto &alloc = doc.GetAllocator();
+  doc.AddMember("path", makeJsonString("file.txt", alloc), alloc);
+  doc.AddMember("patch", makeJsonString("@@ 2 @@\n-line 2\n+line 2 mod", alloc), alloc);
+
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+  ITool *itool = &tool;
+  auto result = itool->execute(doc, ctx);
+
+  EXPECT_TRUE(result.success);
+  EXPECT_EQ(capturedWrite, "line 1\nline 2 mod\nline 3\n");
+}
+
+TEST_F(FileEditAnchorToolTest, searchReplaceEditsApplyMultipleOperationsInOneFile) {
+  const std::string path = "/tmp/work/file.txt";
+  const std::string original = "alpha beta\nbeta alpha\n";
+
+  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
+  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
+
+  auto json = createSearchReplaceFileEditJson(
+      "file.txt",
+      {{"alpha", "omega", true}, {"beta", "delta", true}});
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+
+  ITool *itool = &tool;
+  auto result = itool->execute(json, ctx);
+
+  EXPECT_TRUE(result.success);
+  EXPECT_EQ(capturedWrite, "omega delta\ndelta omega\n");
+
+  auto doc = parseResult(result);
+  ASSERT_TRUE(doc.HasMember("mode"));
+  EXPECT_STREQ(doc["mode"].GetString(), "search_replace_edits");
+  ASSERT_TRUE(doc.HasMember("operations"));
+  ASSERT_EQ(doc["operations"].GetArray().Size(), 2u);
+  EXPECT_STREQ(doc["operations"].GetArray()[0]["op"].GetString(),
+               "search_replace");
+  EXPECT_NE(result.data.find("\"watch_state\":\"refreshed\""), std::string::npos);
+}
+
+TEST_F(FileEditAnchorToolTest, multiFileSearchReplaceEditsReturnPerFileResults) {
+  std::map<std::string, std::string> writes;
+  EXPECT_CALL(mockHost, exists("/tmp/work/a.txt")).WillOnce(Return(true));
+  EXPECT_CALL(mockHost, exists("/tmp/work/b.txt")).WillOnce(Return(true));
+  EXPECT_CALL(mockHost, readFile("/tmp/work/a.txt"))
+      .WillOnce(Return(bytes("alpha beta\n")));
+  EXPECT_CALL(mockHost, readFile("/tmp/work/b.txt"))
+      .WillOnce(Return(bytes("one two\n")));
+  EXPECT_CALL(mockHost, writeFile(_, _))
+      .WillRepeatedly(Invoke([&writes](const std::string &path,
+                                       const std::vector<uint8_t> &data) {
+        writes[path] = std::string(data.begin(), data.end());
+      }));
+
+  rapidjson::Document json;
+  json.SetObject();
+  auto &alloc = json.GetAllocator();
+  rapidjson::Value files(rapidjson::kArrayType);
+
+  rapidjson::Value firstFile(rapidjson::kObjectType);
+  firstFile.AddMember("path", makeJsonString("a.txt", alloc), alloc);
+  rapidjson::Value firstEdits(rapidjson::kArrayType);
+  rapidjson::Value firstEdit(rapidjson::kObjectType);
+  firstEdit.AddMember("op", makeJsonString("search_replace", alloc), alloc);
+  firstEdit.AddMember("old_string", makeJsonString("alpha", alloc), alloc);
+  firstEdit.AddMember("new_string", makeJsonString("omega", alloc), alloc);
+  firstEdit.AddMember("replace_all", true, alloc);
+  firstEdits.PushBack(firstEdit, alloc);
+  firstFile.AddMember("edits", firstEdits, alloc);
+  files.PushBack(firstFile, alloc);
+
+  rapidjson::Value secondFile(rapidjson::kObjectType);
+  secondFile.AddMember("path", makeJsonString("b.txt", alloc), alloc);
+  rapidjson::Value secondEdits(rapidjson::kArrayType);
+  rapidjson::Value secondEdit(rapidjson::kObjectType);
+  secondEdit.AddMember("op", makeJsonString("search_replace", alloc), alloc);
+  secondEdit.AddMember("old_string", makeJsonString("two", alloc), alloc);
+  secondEdit.AddMember("new_string", makeJsonString("three", alloc), alloc);
+  secondEdit.AddMember("replace_all", false, alloc);
+  secondEdits.PushBack(secondEdit, alloc);
+  secondFile.AddMember("edits", secondEdits, alloc);
+  files.PushBack(secondFile, alloc);
+
+  json.AddMember("files", files, alloc);
+
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+  ITool *itool = &tool;
+  auto result = itool->execute(json, ctx);
+
+  EXPECT_TRUE(result.success);
+  EXPECT_EQ(writes["/tmp/work/a.txt"], "omega beta\n");
+  EXPECT_EQ(writes["/tmp/work/b.txt"], "one three\n");
+
+  auto doc = parseResult(result);
+  ASSERT_TRUE(doc.HasMember("mode"));
+  EXPECT_STREQ(doc["mode"].GetString(), "multi_file");
+  ASSERT_TRUE(doc.HasMember("files"));
+  ASSERT_EQ(doc["files"].GetArray().Size(), 2u);
+  EXPECT_STREQ(doc["files"].GetArray()[0]["mode"].GetString(),
+               "search_replace_edits");
+  EXPECT_STREQ(doc["files"].GetArray()[1]["mode"].GetString(),
+               "search_replace_edits");
+}
+
+TEST_F(FileEditAnchorToolTest, mixingSearchReplaceAndHashlineEditsIsRejected) {
+  const std::string path = "/tmp/work/file.txt";
+
+  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
+  EXPECT_CALL(mockHost, writeFile(_, _)).Times(0);
+
+  rapidjson::Document json;
+  json.SetObject();
+  auto &alloc = json.GetAllocator();
+  json.AddMember("path", makeJsonString("file.txt", alloc), alloc);
+  rapidjson::Value edits(rapidjson::kArrayType);
+
+  rapidjson::Value searchReplace(rapidjson::kObjectType);
+  searchReplace.AddMember("op", makeJsonString("search_replace", alloc), alloc);
+  searchReplace.AddMember("old_string", makeJsonString("alpha", alloc), alloc);
+  searchReplace.AddMember("new_string", makeJsonString("omega", alloc), alloc);
+  edits.PushBack(searchReplace, alloc);
+
+  rapidjson::Value hashlineEdit(rapidjson::kObjectType);
+  hashlineEdit.AddMember("op", makeJsonString("insert_after", alloc), alloc);
+  hashlineEdit.AddMember("anchor", makeJsonString("1", alloc), alloc);
+  rapidjson::Value newLines(rapidjson::kArrayType);
+  newLines.PushBack(makeJsonString("inserted", alloc), alloc);
+  hashlineEdit.AddMember("new_lines", newLines, alloc);
+  edits.PushBack(hashlineEdit, alloc);
+
+  json.AddMember("edits", edits, alloc);
+
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+  ITool *itool = &tool;
+  auto result = itool->execute(json, ctx);
+
+  EXPECT_FALSE(result.success);
+  EXPECT_NE(result.error.find("Do not mix search_replace edits with line-range edits"),
+            std::string::npos);
+}
+
+TEST_F(FileEditAnchorToolTest,
+       emptySiblingModeFieldsDoNotBlockLineRangeEdits) {
+  const std::string path = "/tmp/work/file.txt";
+  const std::string original = "alpha\nbeta\n";
+
+  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
+  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
+
+  auto json = createFileEditJson(
+      "file.txt",
+      {{{"op", "replace_range"},
+        {"start_anchor", "2"},
+        {"end_anchor", "2"},
+        {"new_lines", "omega"},
+        {"old_string", ""},
+        {"new_string", ""}}});
+  addEmptyFileEditModeNoise(json);
+
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+  ITool *itool = &tool;
+  auto result = itool->execute(json, ctx);
+
+  EXPECT_TRUE(result.success) << result.error;
+  EXPECT_EQ(capturedWrite, "alpha\nomega\n");
+  EXPECT_NE(result.data.find("\"mode\":\"line_range_edits\""),
+            std::string::npos);
+}
+
+TEST_F(FileEditAnchorToolTest, emptySiblingModeFieldsDoNotBlockPatchEdits) {
+  const std::string path = "/tmp/work/file.txt";
+  const std::string original = "alpha\nbeta\ngamma\n";
+
+  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
+  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
+
+  rapidjson::Document json;
+  json.SetObject();
+  auto &alloc = json.GetAllocator();
+  json.AddMember("path", makeJsonString("file.txt", alloc), alloc);
+  json.AddMember("patch",
+                 makeJsonString("@@ 2 @@\n-beta\n+omega", alloc), alloc);
+  json.AddMember("content", makeJsonString("", alloc), alloc);
+  addFileEditLegacyNoise(json, "", "", false, 0.0f);
+
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+  ITool *itool = &tool;
+  auto result = itool->execute(json, ctx);
+
+  EXPECT_TRUE(result.success) << result.error;
+  EXPECT_EQ(capturedWrite, "alpha\nomega\ngamma\n");
+  EXPECT_NE(result.data.find("\"mode\":\"patch\""), std::string::npos);
+}
+
+TEST_F(FileEditAnchorToolTest, overwriteExistingFileIsRejectedIfNotFullyRead) {
+  const std::string path = "/tmp/work/file.txt";
+
+  EXPECT_CALL(mockAgent.mockEnv_->mockWorkspace(), hasFullyReadFile(path))
+      .WillOnce(Return(false));
 
   EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
   EXPECT_CALL(mockHost, writeFile(_, _)).Times(0);
@@ -1239,8 +1576,28 @@ TEST_F(FileEditAnchorToolTest, overwriteExistingFileIsRejected) {
   auto result = itool->execute(json, ctx);
 
   EXPECT_FALSE(result.success);
-  EXPECT_NE(result.error.find("overwrite is disabled for existing files"),
+  EXPECT_NE(result.error.find("Read the full file with 'file_read'"),
             std::string::npos);
+}
+
+TEST_F(FileEditAnchorToolTest, overwriteExistingFileIsAllowedIfFullyRead) {
+  const std::string path = "/tmp/work/file.txt";
+
+  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
+  EXPECT_CALL(mockHost, writeFile(path, _)).WillOnce(Invoke(
+      [this](const std::string &, const std::vector<uint8_t> &data) {
+        capturedWrite.assign(data.begin(), data.end());
+      }));
+
+  auto json =
+      createJsonInput({{"path", "file.txt"}, {"content", "replacement"}});
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+
+  ITool *itool = &tool;
+  auto result = itool->execute(json, ctx);
+
+  EXPECT_TRUE(result.success);
+  EXPECT_EQ(capturedWrite, "replacement");
 }
 
 TEST_F(FileEditAnchorToolTest,
@@ -1296,7 +1653,7 @@ TEST_F(FileEditAnchorToolTest, contentRejectsNonEmptyHashlineEdits) {
 
   auto json = createJsonInput({{"path", "file.txt"}, {"content", "replacement"}});
   addFileEditEdits(json, {{{"op", "insert_after"},
-                           {"anchor", "1#abcd"},
+                           {"anchor", "1"},
                            {"new_lines", "inserted"}}});
   addFileEditLegacyNoise(json, "", "", false, 0.0f);
 
@@ -1305,7 +1662,7 @@ TEST_F(FileEditAnchorToolTest, contentRejectsNonEmptyHashlineEdits) {
   auto result = itool->execute(json, ctx);
 
   EXPECT_FALSE(result.success);
-  EXPECT_NE(result.error.find("exactly one editing mode"), std::string::npos);
+  EXPECT_NE(result.error.find("one editing mode per target file"), std::string::npos);
 }
 
 TEST_F(FileEditAnchorToolTest, contentRejectsRealLegacyReplacement) {
@@ -1322,7 +1679,7 @@ TEST_F(FileEditAnchorToolTest, contentRejectsRealLegacyReplacement) {
   auto result = itool->execute(json, ctx);
 
   EXPECT_FALSE(result.success);
-  EXPECT_NE(result.error.find("exactly one editing mode"), std::string::npos);
+  EXPECT_NE(result.error.find("one editing mode per target file"), std::string::npos);
 }
 
 TEST_F(FileEditAnchorToolTest, emptyLegacyDefaultsDoNotActivateLegacyMode) {
@@ -1338,11 +1695,11 @@ TEST_F(FileEditAnchorToolTest, emptyLegacyDefaultsDoNotActivateLegacyMode) {
   auto result = itool->execute(json, ctx);
 
   EXPECT_FALSE(result.success);
-  EXPECT_NE(result.error.find("Missing edits, content, or legacy replacement parameters."),
+  EXPECT_NE(result.error.find("Missing edits"),
             std::string::npos);
 }
 
-TEST_F(FileEditAnchorToolTest, hashlineEditsStillWorkWithoutNoise) {
+TEST_F(FileEditAnchorToolTest, anchorEditsStillWorkWithoutNoise) {
   const std::string path = "/tmp/work/file.txt";
   const std::string original = "alpha\nbeta\n";
 
@@ -1375,7 +1732,7 @@ TEST_F(FileEditAnchorToolTest, mixingEditModesIsRejected) {
   rapidjson::Value editArray(rapidjson::kArrayType);
   rapidjson::Value editObj(rapidjson::kObjectType);
   editObj.AddMember("op", makeJsonString("insert_after", alloc), alloc);
-  editObj.AddMember("anchor", makeJsonString("1#abcd", alloc), alloc);
+  editObj.AddMember("anchor", makeJsonString("1", alloc), alloc);
   rapidjson::Value newLines(rapidjson::kArrayType);
   newLines.PushBack(makeJsonString("inserted", alloc), alloc);
   editObj.AddMember("new_lines", newLines, alloc);
@@ -1387,7 +1744,7 @@ TEST_F(FileEditAnchorToolTest, mixingEditModesIsRejected) {
   auto result = itool->execute(json, ctx);
 
   EXPECT_FALSE(result.success);
-  EXPECT_NE(result.error.find("exactly one editing mode"), std::string::npos);
+  EXPECT_NE(result.error.find("one editing mode per target file"), std::string::npos);
 }
 
 TEST_F(ToolRegistryArgumentNormalizationTest,
@@ -1433,7 +1790,7 @@ TEST_F(ToolRegistryArgumentNormalizationTest,
   rapidjson::Value edits(rapidjson::kArrayType);
   rapidjson::Value edit(rapidjson::kObjectType);
   edit.AddMember("\"op\"", makeJsonString("insert_after", alloc), alloc);
-  edit.AddMember("\"anchor\"", makeJsonString("1#abcd|alpha", alloc), alloc);
+  edit.AddMember("\"anchor\"", makeJsonString("1|alpha", alloc), alloc);
   rapidjson::Value newLines(rapidjson::kArrayType);
   newLines.PushBack(makeJsonString("inserted", alloc), alloc);
   edit.AddMember("\"new_lines\"", newLines, alloc);

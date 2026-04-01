@@ -1,5 +1,6 @@
 #include "persistence/ThreadManager.hpp"
 #include "Serialization.hpp"
+#include "tools/WorkToolCommon.hpp"
 #include "utils/StringUtil.hpp"
 #include <algorithm>
 #include <cerrno>
@@ -404,76 +405,9 @@ void writeArtifactsManifestFile(
     writeJsonDocument(doc, path);
 }
 
-rapidjson::Value watchedRangeToJson(const WatchedLineRange& range,
-                                    rapidjson::Document::AllocatorType& alloc) {
-    rapidjson::Value value(rapidjson::kObjectType);
-    value.AddMember("start_line", range.startLine, alloc);
-    value.AddMember("end_line", range.endLine, alloc);
-    return value;
-}
 
-WatchedLineRange watchedRangeFromJson(const rapidjson::Value& value) {
-    WatchedLineRange range;
-    if (value.IsObject()) {
-        if (value.HasMember("start_line") && value["start_line"].IsInt()) {
-            range.startLine = value["start_line"].GetInt();
-        }
-        if (value.HasMember("end_line") && value["end_line"].IsInt()) {
-            range.endLine = value["end_line"].GetInt();
-        }
-    }
-    return range;
-}
 
-rapidjson::Value watchedFileStateToJson(const WatchedFileState& watchedFile,
-                                        rapidjson::Document::AllocatorType& alloc) {
-    rapidjson::Value value(rapidjson::kObjectType);
-    value.AddMember("path", rapidjson::Value(watchedFile.path.c_str(), alloc), alloc);
-    rapidjson::Value ranges(rapidjson::kArrayType);
-    for (const auto& range : watchedFile.ranges) {
-        ranges.PushBack(watchedRangeToJson(range, alloc), alloc);
-    }
-    value.AddMember("ranges", ranges, alloc);
-    if (watchedFile.terminalLine.has_value()) {
-        value.AddMember("terminal_line", *watchedFile.terminalLine, alloc);
-    }
-    value.AddMember("fully_read", watchedFile.fullyRead, alloc);
-    value.AddMember("last_content_hash",
-                    rapidjson::Value(watchedFile.lastContentHash.c_str(), alloc), alloc);
-    value.AddMember("updated_at", watchedFile.updatedAt, alloc);
-    return value;
-}
 
-WatchedFileState watchedFileStateFromJson(const rapidjson::Value& value) {
-    WatchedFileState watchedFile;
-    if (!value.IsObject()) {
-        return watchedFile;
-    }
-
-    if (value.HasMember("path") && value["path"].IsString()) {
-        watchedFile.path = value["path"].GetString();
-    }
-    if (value.HasMember("ranges") && value["ranges"].IsArray()) {
-        for (const auto& range : value["ranges"].GetArray()) {
-            watchedFile.ranges.push_back(watchedRangeFromJson(range));
-        }
-    }
-    if (value.HasMember("terminal_line") && value["terminal_line"].IsInt()) {
-        watchedFile.terminalLine = value["terminal_line"].GetInt();
-    }
-    if (value.HasMember("fully_read") && value["fully_read"].IsBool()) {
-        watchedFile.fullyRead = value["fully_read"].GetBool();
-    }
-    if (value.HasMember("last_content_hash") && value["last_content_hash"].IsString()) {
-        watchedFile.lastContentHash = value["last_content_hash"].GetString();
-    }
-    if (value.HasMember("updated_at") && value["updated_at"].IsUint64()) {
-        watchedFile.updatedAt = value["updated_at"].GetUint64();
-    } else if (value.HasMember("updated_at") && value["updated_at"].IsInt64()) {
-        watchedFile.updatedAt = static_cast<uint64_t>(value["updated_at"].GetInt64());
-    }
-    return watchedFile;
-}
 
 rapidjson::Document liveStateToJson(const AgentLiveState& liveState) {
     rapidjson::Document doc;
@@ -481,11 +415,6 @@ rapidjson::Document liveStateToJson(const AgentLiveState& liveState) {
     auto& alloc = doc.GetAllocator();
     doc.AddMember("thread_id", rapidjson::Value(liveState.threadId.c_str(), alloc), alloc);
     doc.AddMember("agent_id", rapidjson::Value(liveState.agentId.c_str(), alloc), alloc);
-    rapidjson::Value watchedFiles(rapidjson::kArrayType);
-    for (const auto& watchedFile : liveState.watchedFiles) {
-        watchedFiles.PushBack(watchedFileStateToJson(watchedFile, alloc), alloc);
-    }
-    doc.AddMember("watched_files", watchedFiles, alloc);
     return doc;
 }
 
@@ -501,12 +430,106 @@ AgentLiveState liveStateFromJson(const rapidjson::Value& value) {
     if (value.HasMember("agent_id") && value["agent_id"].IsString()) {
         liveState.agentId = value["agent_id"].GetString();
     }
-    if (value.HasMember("watched_files") && value["watched_files"].IsArray()) {
-        for (const auto& watchedFile : value["watched_files"].GetArray()) {
-            liveState.watchedFiles.push_back(watchedFileStateFromJson(watchedFile));
+    return liveState;
+}
+
+rapidjson::Value lockToJson(const FleetLock& lock,
+                            rapidjson::Document::AllocatorType& alloc) {
+    rapidjson::Value obj(rapidjson::kObjectType);
+    obj.AddMember("lock_id", rapidjson::Value(lock.lockId.c_str(), alloc), alloc);
+    obj.AddMember("thread_id", rapidjson::Value(lock.threadId.c_str(), alloc), alloc);
+    obj.AddMember("root_agent_id", rapidjson::Value(lock.rootAgentId.c_str(), alloc), alloc);
+    obj.AddMember("owner_agent_id", rapidjson::Value(lock.ownerAgentId.c_str(), alloc), alloc);
+    obj.AddMember("status", rapidjson::Value(lock.status.c_str(), alloc), alloc);
+    obj.AddMember("reason", rapidjson::Value(lock.reason.c_str(), alloc), alloc);
+    obj.AddMember("created_at", static_cast<uint64_t>(lock.createdAt), alloc);
+    obj.AddMember("updated_at", static_cast<uint64_t>(lock.updatedAt), alloc);
+
+    rapidjson::Value paths(rapidjson::kArrayType);
+    for (const auto& p : lock.paths) {
+        paths.PushBack(rapidjson::Value(p.c_str(), alloc), alloc);
+    }
+    obj.AddMember("paths", paths, alloc);
+
+    rapidjson::Value waiters(rapidjson::kArrayType);
+    for (const auto& w : lock.waiters) {
+        waiters.PushBack(rapidjson::Value(w.c_str(), alloc), alloc);
+    }
+    obj.AddMember("waiters", waiters, alloc);
+
+    return obj;
+}
+
+FleetLock lockFromJson(const rapidjson::Value& value) {
+    FleetLock lock;
+    if (!value.IsObject()) {
+        return lock;
+    }
+    if (value.HasMember("lock_id") && value["lock_id"].IsString()) {
+        lock.lockId = value["lock_id"].GetString();
+    }
+    if (value.HasMember("thread_id") && value["thread_id"].IsString()) {
+        lock.threadId = value["thread_id"].GetString();
+    }
+    if (value.HasMember("root_agent_id") && value["root_agent_id"].IsString()) {
+        lock.rootAgentId = value["root_agent_id"].GetString();
+    }
+    if (value.HasMember("owner_agent_id") && value["owner_agent_id"].IsString()) {
+        lock.ownerAgentId = value["owner_agent_id"].GetString();
+    }
+    if (value.HasMember("status") && value["status"].IsString()) {
+        lock.status = value["status"].GetString();
+    }
+    if (value.HasMember("reason") && value["reason"].IsString()) {
+        lock.reason = value["reason"].GetString();
+    }
+    if (value.HasMember("created_at") && value["created_at"].IsUint64()) {
+        lock.createdAt = value["created_at"].GetUint64();
+    }
+    if (value.HasMember("updated_at") && value["updated_at"].IsUint64()) {
+        lock.updatedAt = value["updated_at"].GetUint64();
+    }
+    if (value.HasMember("paths") && value["paths"].IsArray()) {
+        for (const auto& entry : value["paths"].GetArray()) {
+            if (entry.IsString()) {
+                lock.paths.push_back(entry.GetString());
+            }
         }
     }
-    return liveState;
+    if (value.HasMember("waiters") && value["waiters"].IsArray()) {
+        for (const auto& entry : value["waiters"].GetArray()) {
+            if (entry.IsString()) {
+                lock.waiters.push_back(entry.GetString());
+            }
+        }
+    }
+    return lock;
+}
+
+rapidjson::Document fleetStateToJson(const FleetState& state) {
+    rapidjson::Document doc;
+    doc.SetObject();
+    auto& alloc = doc.GetAllocator();
+
+    rapidjson::Value locks(rapidjson::kArrayType);
+    for (const auto& lock : state.locks) {
+        locks.PushBack(lockToJson(lock, alloc), alloc);
+    }
+    doc.AddMember("locks", locks, alloc);
+    return doc;
+}
+
+FleetState fleetStateFromJson(const rapidjson::Value& value) {
+    FleetState state;
+    if (!value.IsObject()) {
+        return state;
+    }
+    if (value.HasMember("locks") && value["locks"].IsArray()) {
+        for (const auto& entry : value["locks"].GetArray()) {
+            state.locks.push_back(lockFromJson(entry));
+        }
+    }
+    return state;
 }
 
 } // namespace
@@ -527,6 +550,12 @@ std::string ThreadManager::compactionSnapshotPath(const std::string& basePath,
                                                   const std::string& threadId,
                                                   const std::string& agentId) {
     return threadDirectoryPath(basePath, threadId) + "/compaction_" + agentId + ".json";
+}
+
+std::string fleetStatePath(const std::string& basePath,
+                           const std::string& threadId) {
+    return ThreadManager::threadDirectoryPath(basePath, threadId) +
+           "/fleet_state.json";
 }
 
 ThreadManager::ThreadManager(std::string basePath)
@@ -765,6 +794,8 @@ Plan ThreadManager::getPlan(const std::string& threadId,
     if (plan.threadId.empty()) {
         plan.threadId = threadId;
     }
+    // Automatically reconcile chunk dependencies when loading plan
+    worktools::reconcileChunkDependencies(plan);
     return plan;
 }
 
@@ -1012,6 +1043,37 @@ AgentLiveState ThreadManager::mutateAgentLiveState(
     std::filesystem::create_directories(liveStateDirectoryPathFor(basePath_, threadId));
     writeJsonDocument(liveStateToJson(liveState), liveStatePathFor(basePath_, threadId, agentId));
     return liveState;
+}
+
+FleetState ThreadManager::getFleetState(const std::string& threadId) const {
+    const std::string path = fleetStatePath(basePath_, threadId);
+    if (!std::filesystem::exists(path)) {
+        return {};
+    }
+    try {
+        rapidjson::Document d = readJsonDocument(path, "fleet state");
+        return fleetStateFromJson(d);
+    } catch (...) {
+        return {};
+    }
+}
+
+void ThreadManager::writeFleetState(const std::string& threadId,
+                                    const FleetState& state) {
+    const std::string threadDir = threadDirectoryPath(basePath_, threadId);
+    if (!std::filesystem::exists(threadDir)) {
+        throw std::runtime_error("Thread not found: " + threadId);
+    }
+    writeJsonDocument(fleetStateToJson(state), fleetStatePath(basePath_, threadId));
+}
+
+FleetState ThreadManager::mutateFleetState(
+    const std::string& threadId,
+    const std::function<void(FleetState&)>& mutator) {
+    FleetState state = getFleetState(threadId);
+    mutator(state);
+    writeFleetState(threadId, state);
+    return state;
 }
 
 std::vector<CompactionSnapshot>

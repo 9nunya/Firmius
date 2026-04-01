@@ -181,6 +181,7 @@ struct ModelInfo {
   std::string id;       ///< Unique identifier for the model (e.g., "gpt-4").
   std::string provider; ///< The provider that hosts the model.
   std::uint32_t contextWindow = 0; ///< Maximum context window size in tokens.
+  std::uint32_t maxOutputTokens = 0; ///< Maximum output token limit, if known.
   std::vector<std::string>
       modalities; ///< Supported modalities (e.g., "text", "image").
   std::vector<ModelVariant>
@@ -243,6 +244,7 @@ struct QuotaBucket {
   std::string name;
   float remainingFraction = 0.0f;
   std::string resetTime;
+  std::string note;
 };
 
 } // namespace firmius::shared

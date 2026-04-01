@@ -1,5 +1,3 @@
-#include <sys/syscall.h>
-#include <unistd.h>
 #include "agents/Agent.hpp"
 #include "AgentRegistry.hpp"
 #include "ConfigLoader.hpp"
@@ -10,6 +8,7 @@
 #include "Serialization.hpp"
 #include "agents/PurposeLoader.hpp"
 #include "agents/RuntimeOverlay.hpp"
+#include "harness/Harness.hpp"
 #include "persistence/Journaler.hpp"
 #include "persistence/ThreadManager.hpp"
 #include "providers/ProviderRegistry.hpp"
@@ -23,13 +22,15 @@
 #include <filesystem>
 #include <iostream>
 #include <limits>
-#include <sstream>
-#include <string_view>
-#include <unordered_map>
 #include <rapidjson/document.h>
+#include <rapidjson/error/en.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
-#include <rapidjson/error/en.h>
+#include <sstream>
+#include <string_view>
+#include <sys/syscall.h>
+#include <unistd.h>
+#include <unordered_map>
 
 namespace firmius::core {
 
@@ -50,6 +51,30 @@ bool isValidJsonObjectPayload(const std::string &payload) {
   rapidjson::Document parsed;
   parsed.Parse(trimmed.c_str());
   return !parsed.HasParseError() && parsed.IsObject();
+}
+
+std::vector<std::string> extractFileEditPaths(const std::string &toolArgs) {
+  std::vector<std::string> paths;
+  rapidjson::Document input;
+  input.Parse(toolArgs.c_str());
+  if (input.HasParseError() || !input.IsObject()) {
+    return paths;
+  }
+
+  if (input.HasMember("files") && input["files"].IsArray()) {
+    for (const auto &entry : input["files"].GetArray()) {
+      if (entry.IsObject() && entry.HasMember("path") &&
+          entry["path"].IsString()) {
+        paths.emplace_back(entry["path"].GetString());
+      }
+    }
+    return paths;
+  }
+
+  if (input.HasMember("path") && input["path"].IsString()) {
+    paths.emplace_back(input["path"].GetString());
+  }
+  return paths;
 }
 
 void mergeToolCallName(std::string &existing, const std::string &incoming) {
@@ -84,14 +109,7 @@ void mergeToolCallArgs(std::string &existing, const std::string &incoming) {
   if (incoming == existing) {
     return;
   }
-  if (incoming.rfind(existing, 0) == 0) {
-    existing = incoming;
-    return;
-  }
 
-  // Some providers emit full JSON object snapshots rather than append-only
-  // deltas for the same tool call ID. Replace in that case to avoid producing
-  // concatenated invalid JSON at dispatch time.
   if (isValidJsonObjectPayload(incoming)) {
     existing = incoming;
     return;
@@ -100,8 +118,9 @@ void mergeToolCallArgs(std::string &existing, const std::string &incoming) {
   existing += incoming;
 }
 
-std::vector<ToolCallChunk>::iterator findMatchingToolCallChunk(
-    std::vector<ToolCallChunk> &accumulated, const ToolCallChunk &incoming) {
+std::vector<ToolCallChunk>::iterator
+findMatchingToolCallChunk(std::vector<ToolCallChunk> &accumulated,
+                          const ToolCallChunk &incoming) {
   if (!incoming.id.empty()) {
     auto byId = std::find_if(accumulated.begin(), accumulated.end(),
                              [&](const ToolCallChunk &existing) {
@@ -114,7 +133,8 @@ std::vector<ToolCallChunk>::iterator findMatchingToolCallChunk(
 
   if (hasToolCallIndex(incoming)) {
     auto byIndex = std::find_if(
-        accumulated.begin(), accumulated.end(), [&](const ToolCallChunk &existing) {
+        accumulated.begin(), accumulated.end(),
+        [&](const ToolCallChunk &existing) {
           if (!hasToolCallIndex(existing) || existing.index != incoming.index) {
             return false;
           }
@@ -276,12 +296,12 @@ std::string buildPlanAndTodoSnapshot(const AgentContext &context) {
         state << "**Active Plan Status:** " << planStatusLabel(plan.status)
               << "\n";
         if (!shared::StringUtil::trim(plan.objective).empty()) {
-          state << "**Plan Objective:** "
-                << trimForPrompt(plan.objective, 220) << "\n";
+          state << "**Plan Objective:** " << trimForPrompt(plan.objective, 220)
+                << "\n";
         }
         if (!shared::StringUtil::trim(plan.strategy).empty()) {
-          state << "**Plan Strategy:** "
-                << trimForPrompt(plan.strategy, 220) << "\n";
+          state << "**Plan Strategy:** " << trimForPrompt(plan.strategy, 220)
+                << "\n";
         }
         int incompleteChunks = 0;
         for (const auto &chunk : plan.chunks) {
@@ -295,7 +315,8 @@ std::string buildPlanAndTodoSnapshot(const AgentContext &context) {
           constexpr std::size_t kMaxChunks = 8;
           constexpr std::size_t kMaxTasksPerChunk = 4;
           state << "**Chunk Ledger:**\n";
-          for (std::size_t i = 0; i < plan.chunks.size() && i < kMaxChunks; ++i) {
+          for (std::size_t i = 0; i < plan.chunks.size() && i < kMaxChunks;
+               ++i) {
             const auto &chunk = plan.chunks[i];
             state << "- [" << chunkStatusLabel(chunk.status) << "] "
                   << trimForPrompt(chunk.title, 160);
@@ -309,12 +330,12 @@ std::string buildPlanAndTodoSnapshot(const AgentContext &context) {
             if (!shared::StringUtil::trim(chunk.goal).empty()) {
               state << "  goal: " << trimForPrompt(chunk.goal, 220) << "\n";
             }
-            for (std::size_t taskIndex = 0;
-                 taskIndex < chunk.tasks.size() && taskIndex < kMaxTasksPerChunk;
+            for (std::size_t taskIndex = 0; taskIndex < chunk.tasks.size() &&
+                                            taskIndex < kMaxTasksPerChunk;
                  ++taskIndex) {
               const auto &task = chunk.tasks[taskIndex];
-              state << "  task[" << chunkStatusLabel(task.status) << "]: "
-                    << trimForPrompt(task.title, 160) << "\n";
+              state << "  task[" << chunkStatusLabel(task.status)
+                    << "]: " << trimForPrompt(task.title, 160) << "\n";
             }
             if (chunk.tasks.size() > kMaxTasksPerChunk) {
               state << "  ... " << (chunk.tasks.size() - kMaxTasksPerChunk)
@@ -376,9 +397,11 @@ struct TodoStateSnapshot {
 std::string todoContinuationFingerprint(const TodoStateSnapshot &todoState) {
   std::ostringstream fingerprint;
   for (const auto &item : todoState.incompleteItems) {
-    fingerprint << item.id << '\n' << static_cast<int>(item.status) << '\n'
-                << item.text << '\n' << item.chunkId << '\n' << item.planId
-                << "\n---\n";
+    fingerprint << item.id << '\n'
+                << static_cast<int>(item.status) << '\n'
+                << item.text << '\n'
+                << item.chunkId << '\n'
+                << item.planId << "\n---\n";
   }
   return fingerprint.str();
 }
@@ -409,6 +432,17 @@ std::string buildIncompleteTodoNudge(const TodoStateSnapshot &todoState) {
     } else {
       prompt << "(no text)";
     }
+  }
+  return prompt.str();
+}
+
+std::string buildEmptyProviderRetryNudge(int attempt) {
+  std::ostringstream prompt;
+  prompt << "The provider returned no visible reply, no thinking, and no tool "
+            "calls. Continue the current task. Either provide the next useful "
+            "response or call the next tool.";
+  if (attempt > 1) {
+    prompt << " This is empty response retry " << attempt << ".";
   }
   return prompt.str();
 }
@@ -491,9 +525,8 @@ validateStreamedToolCalls(const std::vector<ToolCallChunk> &chunks) {
     }
 
     if (!args.IsObject()) {
-      failures.push_back(
-          {chunk.id, "tool arguments for '" + chunk.nameDelta +
-                         "' must be a JSON object"});
+      failures.push_back({chunk.id, "tool arguments for '" + chunk.nameDelta +
+                                        "' must be a JSON object"});
     }
   }
   return failures;
@@ -513,9 +546,9 @@ AgentTurn Agent::makeInternalNudgeTurn(const std::string &turnIdPrefix,
                                        const std::string &text,
                                        Role role) const {
   AgentTurn nudgeTurn;
-  nudgeTurn.turnId = turnIdPrefix +
-                     std::to_string(context.history ? context.history->turns.size()
-                                                    : 0);
+  nudgeTurn.turnId =
+      turnIdPrefix +
+      std::to_string(context.history ? context.history->turns.size() : 0);
 
   Message nudgeMsg;
   nudgeMsg.role = role;
@@ -553,9 +586,9 @@ Agent::Agent(AgentContext ctx, std::shared_ptr<shared::IEnvironment> env,
     provider = firmius::provider::ProviderRegistry::instance().getProvider(
         preferred.providerId);
     if (!provider) {
-      throw std::runtime_error("Unknown provider: " + context.config.providerId +
-                               " (Fallback failed: " + preferred.providerId +
-                               ")");
+      throw std::runtime_error(
+          "Unknown provider: " + context.config.providerId +
+          " (Fallback failed: " + preferred.providerId + ")");
     }
     context.config.providerId = preferred.providerId;
     context.config.modelId = preferred.modelId;
@@ -601,7 +634,9 @@ std::string Agent::resolvePath(const std::string &inputPath) const {
   return environment_->getWorkspace().resolvePath(inputPath);
 }
 
-std::shared_ptr<shared::IHost> Agent::getHost() { return environment_->getHost(); }
+std::shared_ptr<shared::IHost> Agent::getHost() {
+  return environment_->getHost();
+}
 
 ModelChoice Agent::getPreferredModel() const {
   const auto &config = shared::ConfigLoader::instance().getConfig();
@@ -617,8 +652,8 @@ ModelChoice Agent::getPreferredModel() const {
     return choice;
   };
 
-  auto findCategory = [&config](const std::string &name)
-      -> const shared::ModelRouteCategory * {
+  auto findCategory =
+      [&config](const std::string &name) -> const shared::ModelRouteCategory * {
     auto it = config.modelRouterCategories.find(name);
     if (it == config.modelRouterCategories.end()) {
       return nullptr;
@@ -705,9 +740,8 @@ void Agent::setModelInternal(const std::string &providerId,
     }
     std::lock_guard<std::mutex> lock(modelSwitchMutex);
     if (running.load()) {
-      pendingModelSwitch_ = PendingModelSwitch{preferred.providerId,
-                                               preferred.modelId,
-                                               preferred.variantName};
+      pendingModelSwitch_ = PendingModelSwitch{
+          preferred.providerId, preferred.modelId, preferred.variantName};
       return;
     }
     context.config.providerId = preferred.providerId;
@@ -742,8 +776,9 @@ void Agent::applyPendingModelSwitchIfAny() {
     pendingModelSwitch_.reset();
   }
 
-  auto newProvider = firmius::provider::ProviderRegistry::instance().getProvider(
-      pending->providerId);
+  auto newProvider =
+      firmius::provider::ProviderRegistry::instance().getProvider(
+          pending->providerId);
   if (!newProvider) {
     throw std::runtime_error("Unknown provider: " + pending->providerId);
   }
@@ -761,8 +796,8 @@ std::string Agent::spawnProcess(const std::string &command,
                                 const std::string &cwd,
                                 const std::map<std::string, std::string> &env,
                                 bool monitorCompletion) {
-  return environment_->getProcessManager().spawnProcess(command, toolCallId, cwd,
-                                                        env, monitorCompletion);
+  return environment_->getProcessManager().spawnProcess(
+      command, toolCallId, cwd, env, monitorCompletion);
 }
 
 shared::ProcessSnapshot Agent::inspectProcess(const std::string &id) {
@@ -937,13 +972,16 @@ void Agent::runImpl(const std::optional<std::string> &task,
   int turnCount = 0;
   int consecutiveProviderFailures = 0;
   const int maxProviderRetries = 3;
+  int consecutiveEmptyProviderResponses = 0;
+  const int maxEmptyProviderRetries = 2;
   std::optional<std::string> lastTodoContinuationFingerprint;
   auto hasQueuedUserTurnPending = [this]() {
     if (!context.history || context.history->turns.empty()) {
       return false;
     }
     const auto &lastTurn = context.history->turns.back();
-    return lastTurn.turnId.rfind("user-task-", 0) == 0 && !lastTurn.messages.empty() &&
+    return lastTurn.turnId.rfind("user-task-", 0) == 0 &&
+           !lastTurn.messages.empty() &&
            lastTurn.messages.front().role == Role::User;
   };
   while (!taskFinished && turnCount < maxTurns && !runCancelToken->load()) {
@@ -964,7 +1002,17 @@ void Agent::runImpl(const std::optional<std::string> &task,
       // Compaction is best-effort
     }
 
-	    turnCount++;
+    // Drain any pending internal queue messages (e.g., fleet edit notices)
+    // at the start of each turn, so the agent sees them before its next action.
+    {
+      std::string tid = context.history->threadId;
+      std::string aid = context.identity.id;
+      if (!tid.empty() && !aid.empty()) {
+        Harness::instance().drainInternalQueueForAgent(aid, tid, true);
+      }
+    }
+
+    turnCount++;
 
     std::vector<ToolCallChunk> accumulatedToolChunks;
     std::string fullResponse;
@@ -1004,7 +1052,8 @@ void Agent::runImpl(const std::optional<std::string> &task,
 
     auto persistAssistantTurn = [&](StopReason stopReason,
                                     bool includeToolCalls) {
-      const bool hasVisibleContent = !fullThinking.empty() || !fullResponse.empty();
+      const bool hasVisibleContent =
+          !fullThinking.empty() || !fullResponse.empty();
       const bool hasPersistableToolCalls =
           includeToolCalls && !accumulatedToolChunks.empty();
       if (!hasVisibleContent && !hasPersistableToolCalls) {
@@ -1048,10 +1097,38 @@ void Agent::runImpl(const std::optional<std::string> &task,
       return true;
     };
 
-	    try {
-	      // --- State: ProviderWaiting ---
-	      context.state.currentStatus = AgentStatus::ProviderWaiting;
-	      onEvent(ProviderWaiting{});
+    auto persistCancelledToolResults =
+        [&](const std::vector<ToolCallChunk> &chunks,
+            const std::string &message) {
+          if (chunks.empty()) {
+            return;
+          }
+
+          AgentTurn toolResultTurn;
+          toolResultTurn.turnId =
+              "tools-" + std::to_string(context.history->turns.size());
+          for (const auto &chunk : chunks) {
+            Message msg;
+            msg.role = Role::ToolResult;
+            msg.content.push_back(
+                ToolResultContent{chunk.id, message, false, "", ""});
+            msg.timestamp = nowMs();
+            toolResultTurn.messages.push_back(std::move(msg));
+          }
+
+          context.history->turns.push_back(toolResultTurn);
+          if (context.config.persistHistory && journaler) {
+            journaler->appendTurn(toolResultTurn);
+          }
+          onEvent(AgentTurnCompleted{context.identity.id, toolResultTurn,
+                                     context.aggregateMetrics,
+                                     context.identity.parentId});
+        };
+
+    try {
+      // --- State: ProviderWaiting ---
+      context.state.currentStatus = AgentStatus::ProviderWaiting;
+      onEvent(ProviderWaiting{});
 
       firmius::provider::ProviderOptions opts;
       opts.modelId = context.config.modelId;
@@ -1075,10 +1152,10 @@ void Agent::runImpl(const std::optional<std::string> &task,
       opts.abortSignal = runCancelToken.get();
       opts.abortController = runAbortController;
 
-	      const AgentHistory requestHistory =
-	          runtime_overlay::buildRequestHistoryWithRuntimeOverlays(
-	              context, *environment_->getHost(), environment_->getWorkspace());
-	      provider->stream(requestHistory, opts, [&](const StreamEvent &ev) {
+      const AgentHistory requestHistory =
+          runtime_overlay::buildRequestHistoryWithRuntimeOverlays(
+              context, *environment_->getHost(), environment_->getWorkspace());
+      provider->stream(requestHistory, opts, [&](const StreamEvent &ev) {
         if (context.state.currentStatus == AgentStatus::ProviderWaiting) {
           if (std::holds_alternative<TextChunk>(ev) ||
               std::holds_alternative<ThinkingChunk>(ev) ||
@@ -1155,7 +1232,7 @@ void Agent::runImpl(const std::optional<std::string> &task,
         int retryDelaySec = 1 << (consecutiveProviderFailures - 1); // 1, 2, 4
         onEvent(StreamRetrying{consecutiveProviderFailures, maxProviderRetries,
                                streamErrorStatus, retryDelaySec * 1000,
-                               "Provider error, retrying", ""});
+                               "Provider error, retrying", "", ""});
         // Use interruptible sleep to allow immediate cancellation
         if (!interruptibleSleep(std::chrono::seconds(retryDelaySec),
                                 runAbortController, runCancelToken.get())) {
@@ -1190,8 +1267,8 @@ void Agent::runImpl(const std::optional<std::string> &task,
             error << "; ";
           }
           const auto &failure = malformedToolCalls[i];
-          error << "[" << (failure.toolCallId.empty() ? "unknown"
-                                                      : failure.toolCallId)
+          error << "["
+                << (failure.toolCallId.empty() ? "unknown" : failure.toolCallId)
                 << "] " << failure.message;
         }
         throw std::runtime_error(error.str());
@@ -1210,6 +1287,7 @@ void Agent::runImpl(const std::optional<std::string> &task,
       persistAssistantTurn(turnStopReason, true);
 
       if (hasQueuedUserTurnPending()) {
+        consecutiveEmptyProviderResponses = 0;
         context.state.currentStatus = AgentStatus::ProviderWaiting;
         onEvent(ProviderWaiting{});
         continue;
@@ -1217,17 +1295,22 @@ void Agent::runImpl(const std::optional<std::string> &task,
 
       // --- Check for termination ---
       if (accumulatedToolChunks.empty()) {
-        if (fullResponse.empty() && fullThinking.empty()) {
-          // Don't error if user interrupted
-          if (runCancelToken->load()) {
-            context.state.currentStatus = AgentStatus::Cancelled;
-            return;
-          }
-          taskFinished = true;
-          continue;
+        const bool emptyAssistantReply =
+            fullResponse.empty() && fullThinking.empty();
+        if (emptyAssistantReply) {
+          consecutiveEmptyProviderResponses++;
+        } else {
+          consecutiveEmptyProviderResponses = 0;
         }
 
-        const bool hasPendingToolCalls = !context.state.pendingToolCalls.empty();
+        // Don't error if user interrupted
+        if (runCancelToken->load()) {
+          context.state.currentStatus = AgentStatus::Cancelled;
+          return;
+        }
+
+        const bool hasPendingToolCalls =
+            !context.state.pendingToolCalls.empty();
         const bool hasBlockingProcesses = !getBlockingProcessIds().empty();
         const bool hasExecutionStatus =
             isExecutionalStatus(context.state.currentStatus);
@@ -1261,6 +1344,7 @@ void Agent::runImpl(const std::optional<std::string> &task,
             hasPendingToolLifecycleActivity || hasBlockingProcesses ||
             hasRunningOwnedBackgroundProcess || hasRunningDescendantSubagent;
         if (hasHarnessOwnedActiveWork) {
+          consecutiveEmptyProviderResponses = 0;
           context.state.currentStatus = AgentStatus::Idle;
           break; // Yield loop to wait for active work to complete
         }
@@ -1272,20 +1356,39 @@ void Agent::runImpl(const std::optional<std::string> &task,
           const bool repeatedTodoSnapshot =
               lastTodoContinuationFingerprint.has_value() &&
               *lastTodoContinuationFingerprint == fingerprint;
-              
+
           std::string nudgeMessage = buildIncompleteTodoNudge(todoState);
           if (repeatedTodoSnapshot) {
-            nudgeMessage = "CRITICAL: You have incomplete items on your todo list but you stopped. You MUST use tools to make progress, or mark them as done/cancelled using the todo_write tool. Do not ignore your todo list.";
+            nudgeMessage = "CRITICAL: You have incomplete items on your todo "
+                           "list but you stopped. You MUST use tools to make "
+                           "progress, or mark them as done/cancelled using the "
+                           "todo_write tool. Do not ignore your todo list.";
           }
-          
-          appendTurnToHistory(makeInternalNudgeTurn(
-              "todo-enforcement-", nudgeMessage));
+
+          appendTurnToHistory(
+              makeInternalNudgeTurn("todo-enforcement-", nudgeMessage));
           lastTodoContinuationFingerprint = fingerprint;
           continue; // Start a new iteration with the nudge turn in history
         }
 
+        if (emptyAssistantReply) {
+          if (consecutiveEmptyProviderResponses <= maxEmptyProviderRetries) {
+            appendTurnToHistory(
+                makeInternalNudgeTurn("empty-provider-retry-",
+                                      buildEmptyProviderRetryNudge(
+                                          consecutiveEmptyProviderResponses)));
+            continue;
+          }
+
+          throw std::runtime_error(
+              "Provider returned an empty response with no tool calls after " +
+              std::to_string(consecutiveEmptyProviderResponses) + " attempts.");
+        }
+
+        lastTodoContinuationFingerprint.reset();
         taskFinished = true;
       } else {
+        consecutiveEmptyProviderResponses = 0;
         // --- State: ExecutingTool ---
         context.state.currentStatus = AgentStatus::ExecutingTool;
 
@@ -1296,6 +1399,9 @@ void Agent::runImpl(const std::optional<std::string> &task,
 
         auto toolStartMs = nowMs();
         if (runCancelToken->load()) {
+          persistCancelledToolResults(accumulatedToolChunks,
+                                      "User aborted tool manually.");
+          context.state.pendingToolCalls.clear();
           context.state.currentStatus = AgentStatus::Cancelled;
           break;
         }
@@ -1319,7 +1425,8 @@ void Agent::runImpl(const std::optional<std::string> &task,
         // Clear pending tool calls
         context.state.pendingToolCalls.clear();
 
-        const bool hasPendingToolCalls = !context.state.pendingToolCalls.empty();
+        const bool hasPendingToolCalls =
+            !context.state.pendingToolCalls.empty();
         const bool hasBlockingProcesses = !getBlockingProcessIds().empty();
         const bool hasExecutionStatus =
             isExecutionalStatus(context.state.currentStatus);
@@ -1353,6 +1460,7 @@ void Agent::runImpl(const std::optional<std::string> &task,
         }
 
         if (hasQueuedUserTurnPending()) {
+          consecutiveEmptyProviderResponses = 0;
           context.state.currentStatus = AgentStatus::ProviderWaiting;
           onEvent(ProviderWaiting{});
           continue;
@@ -1365,18 +1473,22 @@ void Agent::runImpl(const std::optional<std::string> &task,
           const bool repeatedTodoSnapshot =
               lastTodoContinuationFingerprint.has_value() &&
               *lastTodoContinuationFingerprint == fingerprint;
-              
+
           std::string nudgeMessage = buildIncompleteTodoNudge(todoState);
           if (repeatedTodoSnapshot) {
-            nudgeMessage = "CRITICAL: You have incomplete items on your todo list but you stopped. You MUST use tools to make progress, or mark them as done/cancelled using the todo_write tool. Do not ignore your todo list.";
+            nudgeMessage = "CRITICAL: You have incomplete items on your todo "
+                           "list but you stopped. You MUST use tools to make "
+                           "progress, or mark them as done/cancelled using the "
+                           "todo_write tool. Do not ignore your todo list.";
           }
-          
-          appendTurnToHistory(makeInternalNudgeTurn(
-              "todo-enforcement-", nudgeMessage));
+
+          appendTurnToHistory(
+              makeInternalNudgeTurn("todo-enforcement-", nudgeMessage));
           lastTodoContinuationFingerprint = fingerprint;
           context.state.currentStatus = AgentStatus::ExecutingTool;
           continue;
         }
+        lastTodoContinuationFingerprint.reset();
       }
 
     } catch (const std::exception &e) {
@@ -1396,10 +1508,9 @@ void Agent::runImpl(const std::optional<std::string> &task,
           "error-" + std::to_string(context.history->turns.size());
       Message errorMsg;
       errorMsg.role = Role::Error;
-      errorMsg.content.push_back(
-          ErrorContent{"Agent Runtime Error",
-                       "The agent encountered a fatal runtime exception.",
-                       detailedError});
+      errorMsg.content.push_back(ErrorContent{
+          "Agent Runtime Error",
+          "The agent encountered a fatal runtime exception.", detailedError});
       errorMsg.timestamp = nowMs();
       errorTurn.messages.push_back(errorMsg);
       context.history->turns.push_back(errorTurn);
@@ -1420,9 +1531,10 @@ void Agent::runImpl(const std::optional<std::string> &task,
   }
 }
 
-void Agent::executeTools(const std::vector<ToolCallChunk> &chunks,
-                         std::function<void(const StreamEvent &)> onEvent,
-                         const std::shared_ptr<std::atomic<bool>> &runCancelToken) {
+void Agent::executeTools(
+    const std::vector<ToolCallChunk> &chunks,
+    std::function<void(const StreamEvent &)> onEvent,
+    const std::shared_ptr<std::atomic<bool>> &runCancelToken) {
   // Check for insanity loop BEFORE executing tools
   for (const auto &chunk : chunks) {
     // Create signature: "toolName:args"
@@ -1443,7 +1555,8 @@ void Agent::executeTools(const std::vector<ToolCallChunk> &chunks,
       // Inject intervention nudge
       AgentTurn interventionTurn = makeInternalNudgeTurn(
           "insanity-nudge-",
-          "You are calling the same tool with identical arguments repeatedly (" +
+          "You are calling the same tool with identical arguments repeatedly "
+          "(" +
               std::to_string(repeatCount + 1) +
               " times). This indicates an insanity loop. "
               "Please stop and try a different approach. Do NOT repeat this "
@@ -1543,9 +1656,9 @@ void Agent::executeTools(const std::vector<ToolCallChunk> &chunks,
           execResult.resultStr = result.data;
         } else {
           const std::string trimmedData = shared::StringUtil::trim(result.data);
-          execResult.resultStr =
-              (!trimmedData.empty() && trimmedData != "{}") ? result.data
-                                                            : result.error;
+          execResult.resultStr = (!trimmedData.empty() && trimmedData != "{}")
+                                     ? result.data
+                                     : result.error;
         }
       } catch (const std::exception &e) {
         execResult.success = false;
@@ -1566,12 +1679,14 @@ void Agent::executeTools(const std::vector<ToolCallChunk> &chunks,
   }
   {
     std::unique_lock<std::mutex> lock(sharedState->mutex);
-    while (sharedState->completed < runnableChunks.size() && !runCancelToken->load()) {
+    while (sharedState->completed < runnableChunks.size() &&
+           !runCancelToken->load()) {
       sharedState->cv.wait_for(lock, std::chrono::milliseconds(10));
     }
     for (std::size_t i = 0; i < sharedState->results.size(); ++i) {
       if (sharedState->results[i].has_value()) {
         collectedResults.push_back(std::move(*sharedState->results[i]));
+        sharedState->results[i].reset();
       }
     }
   }
@@ -1580,12 +1695,42 @@ void Agent::executeTools(const std::vector<ToolCallChunk> &chunks,
     if (!workers[i].joinable()) {
       continue;
     }
-    const bool completed =
-        (i < sharedState->results.size() && sharedState->results[i].has_value());
-    if (completed) {
+    // Always join worker threads to avoid use-after-free
+    // Threads that haven't completed will be joined here (may block briefly)
+    if (workers[i].joinable()) {
       workers[i].join();
-    } else {
-      workers[i].detach();
+    }
+    if (i < sharedState->results.size() &&
+        sharedState->results[i].has_value()) {
+      collectedResults.push_back(std::move(sharedState->results[i].value()));
+      sharedState->results[i].reset();
+    }
+  }
+
+  std::unordered_set<std::string> collectedToolIds;
+  for (const auto &result : collectedResults) {
+    if (!result.toolCallId.empty()) {
+      collectedToolIds.insert(result.toolCallId);
+    }
+  }
+  if (runCancelToken->load()) {
+    for (const auto &chunk : chunks) {
+      if (chunk.id.empty() || collectedToolIds.count(chunk.id) > 0) {
+        continue;
+      }
+      ToolExecutionResult cancelled;
+      const auto it = std::find_if(runnableChunks.begin(), runnableChunks.end(),
+                                   [&](const RunnableChunk &runnable) {
+                                     return runnable.chunk.id == chunk.id;
+                                   });
+      cancelled.index =
+          it != runnableChunks.end() ? it->index : collectedResults.size();
+      cancelled.toolCallId = chunk.id;
+      cancelled.toolName = chunk.nameDelta;
+      cancelled.toolArgs = chunk.argsDelta;
+      cancelled.resultStr = "User aborted tool manually.";
+      cancelled.success = false;
+      collectedResults.push_back(std::move(cancelled));
     }
   }
 
@@ -1595,14 +1740,11 @@ void Agent::executeTools(const std::vector<ToolCallChunk> &chunks,
             });
 
   for (const auto &result : collectedResults) {
-    if (runCancelToken->load()) {
-      break;
-    }
     Message msg;
     msg.role = Role::ToolResult;
-    msg.content.push_back(ToolResultContent{
-        result.toolCallId, result.resultStr, result.success,
-        result.resultProcessId, result.resultSubagentId});
+    msg.content.push_back(
+        ToolResultContent{result.toolCallId, result.resultStr, result.success,
+                          result.resultProcessId, result.resultSubagentId});
     auto now = std::chrono::system_clock::now();
     msg.timestamp = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1621,15 +1763,13 @@ void Agent::executeTools(const std::vector<ToolCallChunk> &chunks,
       if (owns_background_process &&
           std::find(context.state.ownedProcesses.begin(),
                     context.state.ownedProcesses.end(),
-                    result.resultProcessId) == context.state.ownedProcesses.end()) {
+                    result.resultProcessId) ==
+              context.state.ownedProcesses.end()) {
         context.state.ownedProcesses.push_back(result.resultProcessId);
       }
 
       if (result.toolName == "file_edit" || result.toolName == "file_write") {
-        rapidjson::Document input;
-        input.Parse(result.toolArgs.c_str());
-        if (!input.HasParseError() && input.HasMember("path")) {
-          std::string filePath = input["path"].GetString();
+        for (const auto &filePath : extractFileEditPaths(result.toolArgs)) {
           if (std::find(context.state.editedFiles.begin(),
                         context.state.editedFiles.end(),
                         filePath) == context.state.editedFiles.end()) {
@@ -1637,18 +1777,22 @@ void Agent::executeTools(const std::vector<ToolCallChunk> &chunks,
           }
           std::string actionDesc = "Edited file: " + filePath;
           context.state.completedActions.push_back(actionDesc);
+          onEvent(AgentFileEdited{context.identity.id,
+                                  context.identity.parentId, filePath,
+                                  result.toolCallId});
         }
       }
     } else if (result.toolName == "file_edit") {
       rapidjson::Document resultDoc;
       resultDoc.Parse(result.resultStr.c_str());
       if (!resultDoc.HasParseError() && resultDoc.IsObject() &&
-          resultDoc.HasMember("stale_anchor") && resultDoc["stale_anchor"].IsBool() &&
-          resultDoc["stale_anchor"].GetBool() &&
-          resultDoc.HasMember("path") && resultDoc["path"].IsString()) {
-        runtime_overlay::refreshFileWatch(
-            context, *environment_->getHost(), environment_->getWorkspace(),
-            resultDoc["path"].GetString());
+          resultDoc.HasMember("stale_anchor") &&
+          resultDoc["stale_anchor"].IsBool() &&
+          resultDoc["stale_anchor"].GetBool() && resultDoc.HasMember("path") &&
+          resultDoc["path"].IsString()) {
+        runtime_overlay::refreshFileWatch(context, *environment_->getHost(),
+                                          environment_->getWorkspace(),
+                                          resultDoc["path"].GetString());
       }
     }
 
@@ -1670,10 +1814,10 @@ void Agent::executeTools(const std::vector<ToolCallChunk> &chunks,
       journaler->appendTurn(toolResultTurn);
   }
 
-    // Broadcast turn completion
-    onEvent(AgentTurnCompleted{context.identity.id, toolResultTurn,
-                               context.aggregateMetrics,
-                               context.identity.parentId});
+  // Broadcast turn completion
+  onEvent(AgentTurnCompleted{context.identity.id, toolResultTurn,
+                             context.aggregateMetrics,
+                             context.identity.parentId});
 }
 
 void Agent::saveHistory() {
@@ -1752,7 +1896,7 @@ void Agent::compactContext(
 
   AgentHistory historyToSummarize;
   historyToSummarize.threadId = context.history->threadId;
-  
+
   std::vector<AgentTurn> preservedTurns;
   if (!context.history->turns.empty()) {
     preservedTurns.push_back(context.history->turns.front());
@@ -1761,7 +1905,8 @@ void Agent::compactContext(
   std::vector<AgentTurn> preservedTailTurns;
   std::size_t preserveTailCount = 0;
   if (context.history->turns.size() > 2) {
-    preserveTailCount = std::min<std::size_t>(2, context.history->turns.size() - 1);
+    preserveTailCount =
+        std::min<std::size_t>(2, context.history->turns.size() - 1);
     for (std::size_t i = context.history->turns.size() - preserveTailCount;
          i < context.history->turns.size(); ++i) {
       preservedTailTurns.push_back(context.history->turns[i]);
@@ -1771,7 +1916,8 @@ void Agent::compactContext(
     preserveTailCount = 1;
   }
 
-  const std::size_t summarizeEnd = context.history->turns.size() - preserveTailCount;
+  const std::size_t summarizeEnd =
+      context.history->turns.size() - preserveTailCount;
   std::optional<std::size_t> lastToolResultTurnIndex;
   for (std::size_t i = summarizeEnd; i > 1; --i) {
     const auto &candidate = context.history->turns[i - 1];
@@ -1868,7 +2014,8 @@ void Agent::compactContext(
   startTurn.messages.push_back(startMsg);
   newTurns.push_back(startTurn);
 
-  // Create durable compaction summary turn (system-visible, not fake user input)
+  // Create durable compaction summary turn (system-visible, not fake user
+  // input)
   AgentTurn summaryTurn;
   summaryTurn.turnId = "compaction-summary-" + compactionId;
 

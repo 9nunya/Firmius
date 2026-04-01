@@ -107,6 +107,7 @@ struct StreamRetrying {
   int delayMs = 0;            ///< Delay before next attempt in milliseconds.
   std::string reason;         ///< Reason for retry (e.g., "rate limited").
   std::string accountLocator; ///< Account identifier/email attempting retry.
+  std::string details;        ///< Optional structured retry details.
   bool operator==(const StreamRetrying &other) const = default;
 };
 
@@ -166,6 +167,7 @@ struct AgentRetrying {
   std::string reason;         ///< Reason for retry.
   std::string parentId;       ///< Parent agent ID.
   std::string accountLocator; ///< Account identifier/email attempting retry.
+  std::string details;        ///< Optional structured retry details.
   bool operator==(const AgentRetrying &) const = default;
 };
 
@@ -217,6 +219,13 @@ struct AgentToolCallChunk {
   std::string argsDelta;
   std::string parentId = "";
   bool operator==(const AgentToolCallChunk &) const = default;
+};
+struct AgentFileEdited {
+  std::string agentId;
+  std::string parentId = "";
+  std::string path;
+  std::string toolCallId;
+  bool operator==(const AgentFileEdited &) const = default;
 };
 struct AgentTurnCompleted {
   std::string agentId;
@@ -456,6 +465,31 @@ struct ModelsRefreshed {
 };
 
 /**
+ * @brief Emitted when a provider starts fetching its model catalog.
+ */
+struct ProviderModelsFetchStarted {
+  std::string providerId;
+  bool operator==(const ProviderModelsFetchStarted &) const = default;
+};
+
+/**
+ * @brief Emitted when a provider finishes fetching its model catalog.
+ */
+struct ProviderModelsFetchFinished {
+  std::string providerId;
+  std::string error;
+  bool operator==(const ProviderModelsFetchFinished &) const = default;
+};
+
+/**
+ * @brief Emitted when a single model is discovered and added to cache.
+ */
+struct ModelDiscovered {
+  ModelInfo model;
+  bool operator==(const ModelDiscovered &) const = default;
+};
+
+/**
  * @brief Emitted when a thread's title is updated.
  */
 struct ThreadTitleUpdated {
@@ -485,6 +519,28 @@ struct MessageDequeued {
   bool operator==(const MessageDequeued &) const = default;
 };
 
+
+/**
+ * @brief Emitted when an internal nudge message is queued while agent is running.
+ */
+struct InternalMessageQueued {
+  std::string messageId;
+  std::string text;
+  std::string threadId;
+  std::string agentId;
+  bool operator==(const InternalMessageQueued &) const = default;
+};
+
+/**
+ * @brief Emitted when a queued internal message is dequeued and sent.
+ */
+struct InternalMessageDequeued {
+  std::string messageId;
+  std::string threadId;
+  std::string agentId;
+  bool operator==(const InternalMessageDequeued &) const = default;
+};
+
 /**
  * @brief Emitted when the user sends a message.
  */
@@ -512,25 +568,25 @@ using StreamEvent =
     std::variant<TextChunk, ThinkingChunk, ToolCallChunk, AgentMetrics,
                  StreamDone, StreamError, ProviderWaiting, StreamRetrying,
                  StreamRetryExhausted, StreamAccountSwitched,
-                 AgentTurnCompleted, AgentCompacting, AgentCompactionThinking,
-                 AgentCompactionText, ContextCompacted, ProcessOutputDelta,
-                 AgentProcessSpawned>;
+                 AgentFileEdited, AgentTurnCompleted, AgentCompacting,
+                 AgentCompactionThinking, AgentCompactionText, ContextCompacted,
+                 ProcessOutputDelta, AgentProcessSpawned>;
 
 using EngineEvent =
     std::variant<AgentSpawned, AgentProviderWaiting, AgentRetrying,
                  AgentRetryFailed, AgentThinking, AgentText, AgentToolCall,
-                 AgentToolCallChunk, AgentTurnCompleted, AgentInterrupted,
-                 AgentError, AgentCompacting, AgentCompactionThinking,
-                 AgentCompactionText, ContextCompacted, AgentProcessOutput,
-                 AgentProcessSpawned, ModelSwitched, HistoryUndone,
-                 AgentAccountSwitched, AgentFinished>;
+                 AgentToolCallChunk, AgentFileEdited, AgentTurnCompleted,
+                 AgentInterrupted, AgentError, AgentCompacting,
+                 AgentCompactionThinking, AgentCompactionText, ContextCompacted,
+                 AgentProcessOutput, AgentProcessSpawned, ModelSwitched,
+                 HistoryUndone, AgentAccountSwitched, AgentFinished>;
 
 /**
  * @brief Unified event type for the entire application.
  */
 using AppEvent = std::variant<
     AgentSpawned, AgentProviderWaiting, AgentRetrying, AgentRetryFailed,
-    AgentThinking, AgentText, AgentToolCall, AgentToolCallChunk,
+    AgentThinking, AgentText, AgentToolCall, AgentToolCallChunk, AgentFileEdited,
     AgentTurnCompleted, AgentInterrupted, AgentError, AgentCompacting,
     AgentCompactionThinking, AgentCompactionText, ContextCompacted,
     AgentProcessOutput, AgentProcessSpawned, ModelSwitched, HistoryUndone,
@@ -538,8 +594,9 @@ using AppEvent = std::variant<
     PlanUpdated, PlanActivated, ChunkAdded, ChunkUpdated, ChunkAssigned,
     ChunkStatusChanged,
     PermissionEscalationRequest, PermissionEscalationResolved, ThreadLocked,
-    ThreadDeleted, ConfigUpdated, ModelsRefreshed, ThreadTitleUpdated,
-    MessageQueued, MessageDequeued, UserMessageSent, AgentFinished>;
+    ThreadDeleted, ConfigUpdated, ModelsRefreshed, ProviderModelsFetchStarted,
+    ProviderModelsFetchFinished, ModelDiscovered, ThreadTitleUpdated,
+    MessageQueued, MessageDequeued, InternalMessageQueued, InternalMessageDequeued, UserMessageSent, AgentFinished>;
 } // namespace firmius::shared
 
 #endif

@@ -3,7 +3,9 @@
 #include "utils/Hashline.hpp"
 #include "utils/StringUtil.hpp"
 #include <algorithm>
+#include <optional>
 #include <rapidjson/document.h>
+#include <regex>
 #include <sstream>
 #include <stdexcept>
 
@@ -38,6 +40,26 @@ struct NormalizationResult {
   std::vector<NormalizedEdit> normalized;
   std::vector<NormalizationError> errors;
 };
+
+struct FileEditExecutionResult {
+  bool success = false;
+  rapidjson::Document doc;
+  std::string failureMessage;
+};
+
+enum class StructuredEditMode {
+  None,
+  LineRange,
+  SearchReplace,
+  Mixed,
+};
+
+rapidjson::Value cloneJsonValue(const rapidjson::Value &value,
+                                rapidjson::Document::AllocatorType &alloc) {
+  rapidjson::Value clone;
+  clone.CopyFrom(value, alloc);
+  return clone;
+}
 
 std::string joinStrings(const std::vector<std::string> &values,
                         std::string_view separator) {
@@ -119,9 +141,42 @@ void validateEditOperation(const FileEditOperationInput &edit) {
     return;
   }
 
+  if (edit.op == "search_replace") {
+    if (!edit.has_old_string) {
+      throw std::runtime_error("search_replace requires old_string");
+    }
+    if (!edit.has_new_string) {
+      throw std::runtime_error("search_replace requires new_string");
+    }
+    if (edit.old_string.empty()) {
+      throw std::runtime_error("search_replace old_string cannot be empty");
+    }
+
+    std::vector<std::string> unusedFields;
+    if (!edit.start_anchor.empty()) {
+      unusedFields.emplace_back("start_anchor");
+    }
+    if (!edit.end_anchor.empty()) {
+      unusedFields.emplace_back("end_anchor");
+    }
+    if (!edit.anchor.empty()) {
+      unusedFields.emplace_back("anchor");
+    }
+    if (!edit.new_lines.empty()) {
+      unusedFields.emplace_back("new_lines");
+    }
+    if (!unusedFields.empty()) {
+      throw std::runtime_error(
+          "search_replace uses old_string/new_string and optional "
+          "replace_all. Remove " +
+          joinStrings(unusedFields, ", ") + ".");
+    }
+    return;
+  }
+
   throw std::runtime_error("Malformed edit op '" + edit.op +
                            "'. Expected replace_range, insert_after, "
-                           "insert_before, or delete_range.");
+                           "insert_before, delete_range, or search_replace.");
 }
 
 std::string describeEdit(const FileEditOperationInput &edit) {
@@ -132,6 +187,9 @@ std::string describeEdit(const FileEditOperationInput &edit) {
   if ((edit.op == "insert_after" || edit.op == "insert_before") &&
       !edit.anchor.empty()) {
     return edit.op + " " + edit.anchor;
+  }
+  if (edit.op == "search_replace" && edit.has_old_string) {
+    return "search_replace " + edit.old_string;
   }
   return edit.op.empty() ? "edit" : edit.op;
 }
@@ -175,6 +233,47 @@ std::string joinFileContent(const FileBuffer &buffer) {
     }
   }
   return result;
+}
+
+std::optional<NormalizedEdit>
+buildSearchReplacePreview(const std::string &before,
+                          const std::string &after,
+                          const FileEditOperationInput &edit) {
+  if (before == after) {
+    return std::nullopt;
+  }
+
+  const auto beforeBuffer = splitFileContent(before);
+  const auto afterBuffer = splitFileContent(after);
+  const auto &beforeLines = beforeBuffer.lines;
+  const auto &afterLines = afterBuffer.lines;
+
+  size_t prefix = 0;
+  while (prefix < beforeLines.size() && prefix < afterLines.size() &&
+         beforeLines[prefix] == afterLines[prefix]) {
+    ++prefix;
+  }
+
+  size_t beforeSuffix = beforeLines.size();
+  size_t afterSuffix = afterLines.size();
+  while (beforeSuffix > prefix && afterSuffix > prefix &&
+         beforeLines[beforeSuffix - 1] == afterLines[afterSuffix - 1]) {
+    --beforeSuffix;
+    --afterSuffix;
+  }
+
+  NormalizedEdit normalized;
+  normalized.op = edit.op;
+  normalized.description = describeEdit(edit);
+  normalized.startIndex = static_cast<int>(prefix);
+  normalized.endIndex = static_cast<int>(beforeSuffix);
+  normalized.oldLines.assign(beforeLines.begin() + static_cast<long>(prefix),
+                             beforeLines.begin() +
+                                 static_cast<long>(beforeSuffix));
+  normalized.newLines.assign(afterLines.begin() + static_cast<long>(prefix),
+                             afterLines.begin() +
+                                 static_cast<long>(afterSuffix));
+  return normalized;
 }
 
 bool editsConflict(const NormalizedEdit &left, const NormalizedEdit &right) {
@@ -230,8 +329,8 @@ sanitizeReplacementLines(const FileEditOperationInput &edit,
       lineSanitation.suspiciousContentRejected = true;
       mergeSanitation(sanitation, lineSanitation);
       throw std::runtime_error(
-          "Replacement text still appears to contain Hashline metadata. "
-          "Remove lineNumber#hash| prefixes from new_lines.");
+          "Replacement text still appears to contain line metadata. "
+          "Remove any line prefixes or diff markers from new_lines.");
     }
     if (utils::HashlineTrimmer::startsWithSuspiciousDiffJunk(line)) {
       lineSanitation.suspiciousContentFound = true;
@@ -248,21 +347,168 @@ sanitizeReplacementLines(const FileEditOperationInput &edit,
   return sanitized;
 }
 
-bool hasMeaningfulHashlineEdits(
-    const std::vector<FileEditOperationInput> &edits) {
-  return std::any_of(edits.begin(), edits.end(), [](const auto &edit) {
-    return !edit.op.empty() || !edit.start_anchor.empty() ||
-           !edit.end_anchor.empty() || !edit.anchor.empty() ||
-           !edit.new_lines.empty();
-  });
+bool hasMeaningfulEditInput(const FileEditOperationInput &edit) {
+  return !edit.op.empty() || !edit.start_anchor.empty() ||
+         !edit.end_anchor.empty() || !edit.anchor.empty() ||
+         !edit.new_lines.empty() || edit.has_old_string ||
+         edit.has_new_string || edit.replace_all;
 }
 
-bool hasMeaningfulLegacyReplace(const FileEditInput &input) {
+bool isSearchReplaceEdit(const FileEditOperationInput &edit) {
+  return edit.op == "search_replace" || !edit.old_string.empty() ||
+         !edit.new_string.empty();
+}
+
+StructuredEditMode
+classifyStructuredEditMode(const std::vector<FileEditOperationInput> &edits) {
+  bool sawLineRange = false;
+  bool sawSearchReplace = false;
+  for (const auto &edit : edits) {
+    if (!hasMeaningfulEditInput(edit)) {
+      continue;
+    }
+    if (isSearchReplaceEdit(edit)) {
+      sawSearchReplace = true;
+    } else {
+      sawLineRange = true;
+    }
+  }
+
+  if (sawLineRange && sawSearchReplace) {
+    return StructuredEditMode::Mixed;
+  }
+  if (sawLineRange) {
+    return StructuredEditMode::LineRange;
+  }
+  if (sawSearchReplace) {
+    return StructuredEditMode::SearchReplace;
+  }
+  return StructuredEditMode::None;
+}
+
+class PatchParser {
+public:
+  struct Hunk {
+    int startPatchLine;
+    std::string startAnchor;
+    std::string endAnchor;
+    std::vector<std::string> oldLines;
+    std::vector<std::string> newLines;
+  };
+
+  static std::vector<FileEditOperationInput>
+  parse(const std::string &patchText) {
+    std::vector<FileEditOperationInput> edits;
+    std::istringstream stream(patchText);
+    std::string line;
+    int lineNo = 0;
+
+    std::vector<Hunk> hunks;
+    static const std::regex hunkHeaderPattern(
+        R"(^@@\s+([^\s]+?)(?:\.\.\.([^\s]+?))?\s+@@$)");
+
+    Hunk *currentHunk = nullptr;
+
+    while (std::getline(stream, line)) {
+      lineNo++;
+      if (line.empty())
+        continue;
+
+      std::smatch match;
+      if (std::regex_match(line, match, hunkHeaderPattern)) {
+        hunks.push_back({lineNo,
+                         match[1].str(),
+                         match[2].matched ? match[2].str() : "",
+                         {},
+                         {}});
+        currentHunk = &hunks.back();
+        continue;
+      }
+
+      if (!currentHunk) {
+        throw std::runtime_error(
+            "Malformed patch at line " + std::to_string(lineNo) +
+            ": hunk must start with '@@ anchor @@' or '@@ start...end @@'");
+      }
+
+      if (line[0] == '-') {
+        if (!currentHunk->newLines.empty()) {
+          throw std::runtime_error("Malformed patch at line " +
+                                   std::to_string(lineNo) +
+                                   ": '-' lines (removals) must come before "
+                                   "'+' lines (additions) in a hunk");
+        }
+        currentHunk->oldLines.push_back(line.substr(1));
+      } else if (line[0] == '+') {
+        currentHunk->newLines.push_back(line.substr(1));
+      } else {
+        throw std::runtime_error("Malformed patch at line " +
+                                 std::to_string(lineNo) +
+                                 ": expected '+' or '-' line");
+      }
+    }
+
+    for (const auto &hunk : hunks) {
+      FileEditOperationInput edit;
+      edit.patch_line = hunk.startPatchLine;
+      if (hunk.oldLines.empty() && hunk.newLines.empty()) {
+        throw std::runtime_error("Malformed patch: hunk starting at line " +
+                                 std::to_string(hunk.startPatchLine) +
+                                 " has no changes");
+      }
+      if (hunk.oldLines.empty()) {
+        if (!hunk.endAnchor.empty()) {
+          throw std::runtime_error(
+              "Malformed patch: hunk starting at line " +
+              std::to_string(hunk.startPatchLine) +
+              " uses range anchor '...' but contains only '+' lines. " +
+              "Use single anchor '@@ anchor @@' for insertions.");
+        }
+        edit.op = "insert_after";
+        edit.anchor = hunk.startAnchor;
+        edit.new_lines = hunk.newLines;
+      } else if (hunk.newLines.empty()) {
+        edit.op = "delete_range";
+        edit.start_anchor = hunk.startAnchor;
+        edit.end_anchor =
+            hunk.endAnchor.empty() ? hunk.startAnchor : hunk.endAnchor;
+      } else {
+        edit.op = "replace_range";
+        edit.start_anchor = hunk.startAnchor;
+        edit.end_anchor =
+            hunk.endAnchor.empty() ? hunk.startAnchor : hunk.endAnchor;
+        edit.new_lines = hunk.newLines;
+      }
+      edits.push_back(std::move(edit));
+    }
+    return edits;
+  }
+};
+
+bool hasMeaningfulLegacyReplace(const FileEditTargetInput &input) {
   if (!input.has_old_string || !input.has_new_string) {
     return false;
   }
 
   return !input.old_string.empty() && !input.new_string.empty();
+}
+
+bool hasMeaningfulPatch(const FileEditTargetInput &input) {
+  return input.has_patch && !input.patch.empty();
+}
+
+bool hasMeaningfulOverwrite(const FileEditTargetInput &input,
+                            bool hasStructuredEdits, bool hasLegacyReplace,
+                            bool hasPatch) {
+  if (!input.has_content) {
+    return false;
+  }
+
+  if (!input.content.empty()) {
+    return true;
+  }
+
+  return !hasStructuredEdits && !hasLegacyReplace && !hasPatch;
 }
 
 void stripBoundaryEchoes(std::vector<std::string> &newLines,
@@ -398,8 +644,8 @@ normalizeEdits(const std::vector<FileEditOperationInput> &edits,
           result.errors.push_back(
               {i,
                {},
-               "Invalid replace_range: start anchor '" + edit.start_anchor +
-                   "' resolved after end anchor '" + edit.end_anchor + "'."});
+               "Invalid replace_range: start line " + edit.start_anchor +
+                   " is after end line " + edit.end_anchor + "."});
           continue;
         }
         std::vector<std::string> oldLines(lines.begin() + start.lineIndex,
@@ -409,7 +655,7 @@ normalizeEdits(const std::vector<FileEditOperationInput> &edits,
         result.normalized.push_back(
             {"replace_range", start.lineIndex, end.lineIndex + 1,
              cleanEdit.new_lines,
-             "replace " + cleanEdit.start_anchor + "..." + edit.end_anchor,
+             "replace " + edit.start_anchor + "..." + edit.end_anchor,
              start.relocated || end.relocated, oldLines});
       }
     } else if (edit.op == "delete_range") {
@@ -429,8 +675,8 @@ normalizeEdits(const std::vector<FileEditOperationInput> &edits,
           result.errors.push_back(
               {i,
                {},
-               "Invalid delete_range: start anchor '" + edit.start_anchor +
-                   "' resolved after end anchor '" + edit.end_anchor + "'."});
+               "Invalid delete_range: start line " + edit.start_anchor +
+                   " is after end line " + edit.end_anchor + "."});
           continue;
         }
         std::vector<std::string> oldLines(lines.begin() + start.lineIndex,
@@ -454,7 +700,7 @@ normalizeEdits(const std::vector<FileEditOperationInput> &edits,
                                      anchor.lineIndex + 1,
                                      anchor.lineIndex + 1,
                                      cleanEdit.new_lines,
-                                     "insert after " + cleanEdit.anchor,
+                                     "insert after " + edit.anchor,
                                      anchor.relocated,
                                      {}});
       }
@@ -468,7 +714,7 @@ normalizeEdits(const std::vector<FileEditOperationInput> &edits,
                                      anchor.lineIndex,
                                      anchor.lineIndex,
                                      cleanEdit.new_lines,
-                                     "insert before " + cleanEdit.anchor,
+                                     "insert before " + edit.anchor,
                                      anchor.relocated,
                                      {}});
       }
@@ -500,15 +746,15 @@ normalizeEdits(const std::vector<FileEditOperationInput> &edits,
   return result;
 }
 
-shared::ToolResult hashlineFailureResult(
-    const FileEditInput &input, const NormalizationResult &normResult,
+rapidjson::Document buildLineRangeFailureDoc(
+    const FileEditTargetInput &input, const NormalizationResult &normResult,
     const utils::HashlineTrimmer::SanitationResult &sanitation) {
   rapidjson::Document doc;
   doc.SetObject();
   auto &alloc = doc.GetAllocator();
   doc.AddMember("path", rapidjson::Value(input.path.c_str(), alloc).Move(),
                 alloc);
-  doc.AddMember("mode", rapidjson::Value("hashline_edits", alloc).Move(),
+  doc.AddMember("mode", rapidjson::Value("line_range_edits", alloc).Move(),
                 alloc);
   doc.AddMember(
       "error",
@@ -558,8 +804,7 @@ shared::ToolResult hashlineFailureResult(
 
     bool found = false;
     for (const auto &norm : normResult.normalized) {
-      if (norm.description.find(edit.op) !=
-          std::string::npos) { // Very rough match
+      if (norm.description.find(edit.op) != std::string::npos) {
         op = buildOperationResult(norm, alloc);
         found = true;
         break;
@@ -580,184 +825,11 @@ shared::ToolResult hashlineFailureResult(
 
   doc.AddMember("operations", operations, alloc);
   addSanitationMember(doc, sanitation, alloc);
-
-  rapidjson::StringBuffer sb;
-  rapidjson::Writer<rapidjson::StringBuffer> writer(sb);
-  doc.Accept(writer);
-  return shared::ToolResult::fail(sb.GetString());
+  return doc;
 }
 
-ToolResult executeLegacyReplace(const FileEditInput &input,
-                                const std::string &absolutePath,
-                                shared::ToolContext &ctx) {
-  auto data = ctx.host.readFile(absolutePath);
-  std::string content(data.begin(), data.end());
-
-  std::vector<size_t> matchIndices;
-  if (input.fuzzy_threshold < 1.0f) {
-    matchIndices =
-        StringUtil::findFuzzy(content, input.old_string, input.fuzzy_threshold);
-  } else {
-    size_t pos = content.find(input.old_string);
-    while (pos != std::string::npos) {
-      matchIndices.push_back(pos);
-      pos = content.find(input.old_string, pos + input.old_string.length());
-    }
-  }
-
-  if (matchIndices.empty()) {
-    return shared::ToolResult::fail(
-        "Legacy old_string not found in file (threshold=" +
-        std::to_string(input.fuzzy_threshold) + ")");
-  }
-
-  if (matchIndices.size() > 1 && !input.replace_all) {
-    return shared::ToolResult::fail(
-        "Legacy old_string matched multiple locations. Use Hashline edits "
-        "instead or set replace_all for compatibility mode.");
-  }
-
-  std::reverse(matchIndices.begin(), matchIndices.end());
-  size_t occurrences = 0;
-  for (size_t pos : matchIndices) {
-    content.replace(pos, input.old_string.length(), input.new_string);
-    ++occurrences;
-    if (!input.replace_all) {
-      break;
-    }
-  }
-
-  ctx.host.writeFile(absolutePath,
-                     std::vector<uint8_t>(content.begin(), content.end()));
-  ctx.agent.getEnvironment()->getWorkspace().recordFileEdit(absolutePath);
-
-  rapidjson::Document resDoc;
-  resDoc.SetObject();
-  resDoc.AddMember(
-      "path",
-      rapidjson::Value(input.path.c_str(), resDoc.GetAllocator()).Move(),
-      resDoc.GetAllocator());
-  resDoc.AddMember(
-      "mode",
-      rapidjson::Value("legacy_string_replace", resDoc.GetAllocator()).Move(),
-      resDoc.GetAllocator());
-  resDoc.AddMember("occurrences", static_cast<uint32_t>(occurrences),
-                   resDoc.GetAllocator());
-  return shared::ToolResult::ok(resDoc);
-}
-
-bool isAnchorRead(const std::string &absolutePath, const std::string &anchor,
-                  const IWorkspace &workspace) {
-  if (anchor.empty()) {
-    return true;
-  }
-  size_t hashPos = anchor.find('#');
-  if (hashPos == std::string::npos) {
-    return false;
-  }
-  try {
-    int line = std::stoi(anchor.substr(0, hashPos));
-    return workspace.isLineRead(absolutePath, line);
-  } catch (...) {
-    return false;
-  }
-}
-
-} // namespace
-
-shared::ToolMetadata FileEditTool::getMetadata() const {
-  return {"file_edit",
-          "Edit files with Hashline anchors: read first, copy exact line#hash "
-          "anchors, use small ops, and reread before the next edit call",
-          ToolScope::FilesystemWrite};
-}
-
-std::shared_ptr<shared::JSONSchema> FileEditTool::getSchema() const {
-  auto editSchema = zObject(
-      {{"op", zEnum({"replace_range", "insert_after", "insert_before",
-                     "delete_range"})
-                  ->describe("Hashline edit operation type. Use the "
-                             "smallest op that matches the logical change "
-                             "site.")},
-       {"start_anchor",
-        zString()
-            ->describe("Start anchor for range edits. Use ONLY the "
-                       "lineNumber#hash anchor from file_read. Never include "
-                       "the trailing |content. Copy the exact anchor from "
-                       "file_read and do not adjust it within the same call.")
-            ->setOptional()},
-       {"end_anchor",
-        zString()
-            ->describe("End anchor for range edits. Use ONLY the "
-                       "lineNumber#hash anchor from file_read. Never include "
-                       "the trailing |content. Copy the exact anchor from "
-                       "file_read and do not adjust it within the same call.")
-            ->setOptional()},
-       {"anchor",
-        zString()
-            ->describe("Single anchor for insert edits. Use ONLY the "
-                       "lineNumber#hash anchor from file_read. Never include "
-                       "the trailing |content. Prefer structural lines over "
-                       "blank lines when choosing anchors.")
-            ->setOptional()},
-       {"new_lines",
-        zArray(zString())
-            ->describe("Plain replacement or inserted source lines "
-                       "only, without trailing newline characters. "
-                       "NEVER include Hashline prefixes, trailing "
-                       "|content, diff markers, or unchanged boundary "
-                       "echo lines from outside the replaced range.")
-            ->setOptional()}});
-
-  return zObject(
-             {{"path",
-               zString()->describe("Absolute or relative path to the file")},
-              {"edits",
-               zArray(editSchema)
-                   ->describe("Hashline operational manual for existing files: "
-                              "1) read the file or relevant range with "
-                              "file_read, 2) copy exact lineNumber#hash "
-                              "anchors, 3) use the smallest op per logical "
-                              "mutation site, 4) batch related edits for one "
-                              "file into one call, 5) reread before the next "
-                              "file_edit call on that file. ALL edits in one "
-                              "call target the ORIGINAL file snapshot. Do NOT "
-                              "adjust later anchors after earlier edits in "
-                              "the same call. replace_range and delete_range "
-                              "require BOTH start_anchor and end_anchor. "
-                              "insert_before and insert_after require "
-                              "anchor. Anchors must be lineNumber#hash only, "
-                              "never lineNumber#hash|content. new_lines must "
-                              "be plain source text only.")
-                   ->setOptional()},
-              {"content", zString()
-                              ->describe("Whole-file content. Reserved for "
-                                         "explicit new-file creation, not the "
-                                         "normal path for editing an existing "
-                                         "file when Hashline edits are "
-                                         "available.")
-                              ->setOptional()},
-              {"old_string",
-               zString()
-                   ->describe("Legacy compatibility only. Prefer edits[].")
-                   ->setOptional()},
-              {"new_string",
-               zString()
-                   ->describe("Legacy compatibility only. Prefer edits[].")
-                   ->setOptional()},
-              {"replace_all",
-               zBoolean()
-                   ->describe("Legacy compatibility only for old_string mode")
-                   ->setOptional()},
-              {"fuzzy_threshold",
-               zNumber()
-                   ->describe("Legacy compatibility only for old_string mode")
-                   ->setOptional()}})
-      ->required({"path"});
-}
-
-FileEditInput FileEditTool::transform(const rapidjson::Value &json) {
-  FileEditInput input;
+FileEditTargetInput parseFileEditTarget(const rapidjson::Value &json) {
+  FileEditTargetInput input;
 
   if (json.HasMember("path") && json["path"].IsString()) {
     input.path = json["path"].GetString();
@@ -799,71 +871,248 @@ FileEditInput FileEditTool::transform(const rapidjson::Value &json) {
       if (value.HasMember("anchor") && value["anchor"].IsString()) {
         edit.anchor = value["anchor"].GetString();
       }
+      if (value.HasMember("old_string") && value["old_string"].IsString()) {
+        edit.has_old_string = true;
+        edit.old_string = value["old_string"].GetString();
+      }
+      if (value.HasMember("new_string") && value["new_string"].IsString()) {
+        edit.has_new_string = true;
+        edit.new_string = value["new_string"].GetString();
+      }
+      if (value.HasMember("replace_all") && value["replace_all"].IsBool()) {
+        edit.replace_all = value["replace_all"].GetBool();
+      }
+      if (value.HasMember("patch_line") && value["patch_line"].IsInt()) {
+        edit.patch_line = value["patch_line"].GetInt();
+      }
       edit.new_lines = readStringArray(value, "new_lines");
       input.edits.push_back(std::move(edit));
     }
   }
 
+  if (json.HasMember("patch") && json["patch"].IsString()) {
+    input.has_patch = true;
+    input.patch = json["patch"].GetString();
+  }
   return input;
 }
 
-shared::ToolResult FileEditTool::execute(const FileEditInput &input,
-                                         shared::ToolContext &ctx) {
+rapidjson::Document
+executeSearchReplaceEditsDoc(const FileEditTargetInput &input,
+                             const std::string &absolutePath,
+                             shared::ToolContext &ctx) {
+  rapidjson::Document doc;
+  doc.SetObject();
+  auto &alloc = doc.GetAllocator();
+  std::string currentContent;
+  {
+    auto data = ctx.host.readFile(absolutePath);
+    currentContent = std::string(data.begin(), data.end());
+  }
+
+  std::string newContent = currentContent;
+  int totalReplacements = 0;
+  int addedLines = 0;
+  int removedLines = 0;
+  std::vector<NormalizedEdit> normalizedEdits;
+
+  for (const auto &edit : input.edits) {
+    if (edit.op == "search_replace" && edit.has_old_string &&
+        edit.has_new_string) {
+      const std::string beforeEdit = newContent;
+      std::string searchStr = edit.old_string;
+      std::string replaceStr = edit.new_string;
+      size_t pos = 0;
+      int replacements = 0;
+
+      if (edit.replace_all) {
+        while ((pos = newContent.find(searchStr, pos)) != std::string::npos) {
+          newContent.replace(pos, searchStr.size(), replaceStr);
+          pos += replaceStr.size();
+          replacements++;
+          totalReplacements++;
+        }
+      } else {
+        pos = newContent.find(searchStr);
+        if (pos != std::string::npos) {
+          newContent.replace(pos, searchStr.size(), replaceStr);
+          replacements++;
+          totalReplacements++;
+        }
+      }
+
+      if (replacements == 0 && !edit.replace_all) {
+        doc.AddMember("error",
+                      rapidjson::Value(
+                          ("Could not find \"" + edit.old_string +
+                           "\" in the file. Ensure the file content matches.")
+                              .c_str(),
+                          alloc),
+                      alloc);
+        return doc;
+      }
+
+      if (auto preview = buildSearchReplacePreview(beforeEdit, newContent, edit)) {
+        addedLines += static_cast<int>(preview->newLines.size());
+        removedLines += static_cast<int>(preview->oldLines.size());
+        normalizedEdits.push_back(std::move(*preview));
+      }
+    }
+  }
+
+  ctx.host.writeFile(
+      absolutePath, std::vector<uint8_t>(newContent.begin(), newContent.end()));
+  ctx.agent.getEnvironment()->getWorkspace().recordFileEdit(absolutePath);
+
+  doc.AddMember("path", rapidjson::Value(input.path.c_str(), alloc).Move(),
+                alloc);
+  doc.AddMember("mode", rapidjson::Value("search_replace_edits", alloc).Move(),
+                alloc);
+  doc.AddMember("replacements", totalReplacements, alloc);
+  doc.AddMember("applied_edits",
+                static_cast<uint32_t>(normalizedEdits.size()), alloc);
+  doc.AddMember("added_lines", addedLines, alloc);
+  doc.AddMember("removed_lines", removedLines, alloc);
+  const std::string diffPreview = buildDiffPreview(normalizedEdits);
+  doc.AddMember("diff_preview",
+                rapidjson::Value(diffPreview.c_str(), alloc).Move(), alloc);
+  rapidjson::Value operations(rapidjson::kArrayType);
+  for (const auto &edit : normalizedEdits) {
+    operations.PushBack(buildOperationResult(edit, alloc), alloc);
+  }
+  doc.AddMember("operations", operations, alloc);
+  doc.AddMember("watch_state", rapidjson::Value("refreshed", alloc).Move(),
+                alloc);
+
+  return doc;
+}
+
+rapidjson::Document executeLegacyReplaceDoc(const FileEditTargetInput &input,
+                                            const std::string &absolutePath,
+                                            shared::ToolContext &ctx) {
+  rapidjson::Document doc;
+  doc.SetObject();
+  auto &alloc = doc.GetAllocator();
+
+  std::string currentContent;
+  {
+    auto data = ctx.host.readFile(absolutePath);
+    currentContent = std::string(data.begin(), data.end());
+  }
+
+  std::string newContent = currentContent;
+  size_t pos = newContent.find(input.old_string);
+
+  if (pos == std::string::npos) {
+    doc.AddMember("error",
+                  rapidjson::Value(("Could not find \"" + input.old_string +
+                                    "\" in the file.")
+                                       .c_str(),
+                                   alloc),
+                  alloc);
+    return doc;
+  }
+
+  newContent.replace(pos, input.old_string.size(), input.new_string);
+
+  ctx.host.writeFile(
+      absolutePath, std::vector<uint8_t>(newContent.begin(), newContent.end()));
+  ctx.agent.getEnvironment()->getWorkspace().recordFileEdit(absolutePath);
+
+  doc.AddMember("path", rapidjson::Value(input.path.c_str(), alloc).Move(),
+                alloc);
+  doc.AddMember("mode", rapidjson::Value("legacy_replace", alloc).Move(),
+                alloc);
+  doc.AddMember("watch_state", rapidjson::Value("refreshed", alloc).Move(),
+                alloc);
+
+  return doc;
+}
+
+FileEditExecutionResult executeSingleFileEdit(const FileEditTargetInput &input,
+                                              shared::ToolContext &ctx) {
+  FileEditExecutionResult result;
+  result.doc.SetObject();
+
+  if (input.path.empty()) {
+    result.failureMessage = "file_edit requires a path for each target file.";
+    return result;
+  }
+
   std::string absolutePath =
       ctx.agent.getEnvironment()->getWorkspace().resolvePath(input.path);
-
   const bool fileExists = ctx.host.exists(absolutePath);
-  const bool hasAnchorEdits = hasMeaningfulHashlineEdits(input.edits);
-  const bool hasOverwrite = input.has_content;
+  const StructuredEditMode structuredEditMode =
+      classifyStructuredEditMode(input.edits);
+  const bool hasAnchorEdits =
+      structuredEditMode == StructuredEditMode::LineRange;
+  const bool hasSearchReplaceEdits =
+      structuredEditMode == StructuredEditMode::SearchReplace;
   const bool hasLegacyReplace = hasMeaningfulLegacyReplace(input);
-  const int modeCount = static_cast<int>(hasAnchorEdits) +
-                        static_cast<int>(hasOverwrite) +
-                        static_cast<int>(hasLegacyReplace);
+  const bool hasPatch = hasMeaningfulPatch(input);
+  const bool hasOverwrite =
+      hasMeaningfulOverwrite(input, hasAnchorEdits || hasSearchReplaceEdits,
+                             hasLegacyReplace, hasPatch);
+  const int modeCount =
+      static_cast<int>(hasAnchorEdits) +
+      static_cast<int>(hasSearchReplaceEdits) + static_cast<int>(hasOverwrite) +
+      static_cast<int>(hasLegacyReplace) + static_cast<int>(hasPatch);
+
+  if (structuredEditMode == StructuredEditMode::Mixed) {
+    result.failureMessage =
+        "Do not mix search_replace edits with line-range edits in the "
+        "same target file. Use separate file entries or separate file_edit "
+        "calls.";
+    return result;
+  }
 
   if (modeCount > 1) {
-    return shared::ToolResult::fail(
-        "file_edit accepts exactly one editing mode per call. Use either "
-        "Hashline edits, whole-file content for new-file creation, or legacy "
-        "old_string/new_string compatibility mode.");
+    result.failureMessage =
+        "file_edit accepts one editing mode per target file. Choose either "
+        "line-range edits, search_replace edits, whole-file content, patch "
+        "mode, or legacy "
+        "old_string/new_string compatibility mode.";
+    return result;
+  }
+
+  if (modeCount == 0) {
+    result.failureMessage =
+        "Missing edits, content, patch, or legacy replacement parameters.";
+    return result;
+  }
+
+  FileEditTargetInput effectiveInput = input;
+  if (hasPatch) {
+    try {
+      effectiveInput.edits = PatchParser::parse(input.patch);
+    } catch (const std::exception &e) {
+      result.failureMessage = e.what();
+      return result;
+    }
   }
 
   if (fileExists) {
     auto &workspace = ctx.agent.getEnvironment()->getWorkspace();
     if (!workspace.hasFullyReadFile(absolutePath)) {
-      if (hasAnchorEdits) {
-        for (const auto &edit : input.edits) {
-          if (!edit.start_anchor.empty() &&
-              !isAnchorRead(absolutePath, edit.start_anchor, workspace)) {
-            return shared::ToolResult::fail(
-                "Anchor '" + edit.start_anchor +
-                "' has not been read. You must read the lines you intend to "
-                "edit. Use 'file_read' on '" +
-                input.path + "' to refresh your context.");
-          }
-          if (!edit.end_anchor.empty() &&
-              !isAnchorRead(absolutePath, edit.end_anchor, workspace)) {
-            return shared::ToolResult::fail(
-                "Anchor '" + edit.end_anchor +
-                "' has not been read. You must read the lines you intend to "
-                "edit. Use 'file_read' on '" +
-                input.path + "' to refresh your context.");
-          }
-          if (!edit.anchor.empty() &&
-              !isAnchorRead(absolutePath, edit.anchor, workspace)) {
-            return shared::ToolResult::fail(
-                "Anchor '" + edit.anchor +
-                "' has not been read. You must read the lines you intend to "
-                "edit. Use 'file_read' on '" +
-                input.path + "' to refresh your context.");
-          }
-        }
-      } else {
-        return shared::ToolResult::fail(
-            "You MUST READ the ENTIRE file before editing it. Use 'file_read' "
+      if (hasSearchReplaceEdits) {
+        result.failureMessage =
+            "Read the full file with 'file_read' before search_replace edits "
             "on '" +
             input.path +
-            "' first, then reference the returned Hashline anchors in "
-            "file_edit.");
+            "'. Search/replace mode relies on a fresh full-file snapshot.";
+        return result;
+      } else if (hasPatch) {
+        result.failureMessage =
+            "Read the full file with 'file_read' before patch edits "
+            "on '" +
+            input.path + "'. Patch mode relies on a fresh full-file snapshot.";
+        return result;
+      } else {
+        result.failureMessage =
+            "Read the full file with 'file_read' before overwriting '" +
+            input.path +
+            "'. Whole-file edits rely on a fresh full-file snapshot.";
+        return result;
       }
     }
   }
@@ -872,11 +1121,14 @@ shared::ToolResult FileEditTool::execute(const FileEditInput &input,
     ctx.agent.getPermissions()->validatePathAccess(absolutePath,
                                                    AccessMode::WRITE);
 
-    if (hasAnchorEdits) {
+    if (hasAnchorEdits || hasPatch) {
       if (!fileExists) {
-        return shared::ToolResult::fail(
-            "Hashline edits require an existing file. Use content to create a "
-            "new file.");
+        result.failureMessage =
+            (hasPatch ? "Patch mode requires an existing file."
+                      : "Line-range edits require an existing file. Use "
+                        "content when "
+                        "creating a new file.");
+        return result;
       }
 
       auto data = ctx.host.readFile(absolutePath);
@@ -884,13 +1136,31 @@ shared::ToolResult FileEditTool::execute(const FileEditInput &input,
       FileBuffer buffer = splitFileContent(content);
 
       utils::HashlineTrimmer::SanitationResult sanitation;
-      std::vector<NormalizedEdit> normalized;
       NormalizationResult normResult =
-          normalizeEdits(input.edits, buffer.lines, &sanitation);
+          normalizeEdits(effectiveInput.edits, buffer.lines, &sanitation);
       if (!normResult.errors.empty()) {
-        return hashlineFailureResult(input, normResult, sanitation);
+        result.doc =
+            buildLineRangeFailureDoc(effectiveInput, normResult, sanitation);
+        if (hasPatch) {
+          auto &alloc = result.doc.GetAllocator();
+          if (result.doc.HasMember("batch_errors") &&
+              result.doc["batch_errors"].IsArray()) {
+            for (auto &err : result.doc["batch_errors"].GetArray()) {
+              if (err.HasMember("edit_index") && err["edit_index"].IsUint()) {
+                uint32_t idx = err["edit_index"].GetUint();
+                if (idx < effectiveInput.edits.size()) {
+                  err.AddMember("patch_line",
+                                effectiveInput.edits[idx].patch_line, alloc);
+                }
+              }
+            }
+          }
+        }
+        result.failureMessage = result.doc["error"].GetString();
+        return result;
       }
-      normalized = normResult.normalized;
+
+      const auto &normalized = normResult.normalized;
       int removedLines = 0;
       int addedLines = 0;
       int relocatedAnchors = 0;
@@ -915,72 +1185,337 @@ shared::ToolResult FileEditTool::execute(const FileEditInput &input,
                          std::vector<uint8_t>(updated.begin(), updated.end()));
       ctx.agent.getEnvironment()->getWorkspace().recordFileEdit(absolutePath);
 
-      rapidjson::Document resDoc;
-      resDoc.SetObject();
-      auto &alloc = resDoc.GetAllocator();
-      resDoc.AddMember(
+      auto &alloc = result.doc.GetAllocator();
+      result.doc.AddMember(
           "path", rapidjson::Value(input.path.c_str(), alloc).Move(), alloc);
-      resDoc.AddMember("mode", rapidjson::Value("hashline_edits", alloc).Move(),
-                       alloc);
-      resDoc.AddMember("applied_edits",
-                       static_cast<uint32_t>(normalized.size()), alloc);
-      resDoc.AddMember("removed_lines", removedLines, alloc);
-      resDoc.AddMember("added_lines", addedLines, alloc);
-      resDoc.AddMember("relocated_anchors", relocatedAnchors, alloc);
+      result.doc.AddMember(
+          "mode",
+          rapidjson::Value(hasPatch ? "patch" : "line_range_edits", alloc)
+              .Move(),
+          alloc);
+      result.doc.AddMember("applied_edits",
+                           static_cast<uint32_t>(normalized.size()), alloc);
+      result.doc.AddMember("removed_lines", removedLines, alloc);
+      result.doc.AddMember("added_lines", addedLines, alloc);
+      result.doc.AddMember("relocated_anchors", relocatedAnchors, alloc);
       const std::string diffPreview = buildDiffPreview(normalized);
-      resDoc.AddMember("diff_preview",
-                       rapidjson::Value(diffPreview.c_str(), alloc).Move(),
-                       alloc);
-      resDoc.AddMember("watch_state",
-                       rapidjson::Value("refreshed", alloc).Move(), alloc);
+      result.doc.AddMember("diff_preview",
+                           rapidjson::Value(diffPreview.c_str(), alloc).Move(),
+                           alloc);
+      result.doc.AddMember("watch_state",
+                           rapidjson::Value("refreshed", alloc).Move(), alloc);
 
       rapidjson::Value operations(rapidjson::kArrayType);
       for (const auto &edit : normalized) {
-        rapidjson::Value op = buildOperationResult(edit, alloc);
-        operations.PushBack(op, alloc);
+        operations.PushBack(buildOperationResult(edit, alloc), alloc);
       }
-      resDoc.AddMember("operations", operations, alloc);
-      addSanitationMember(resDoc, sanitation, alloc);
-      return shared::ToolResult::ok(resDoc);
+      result.doc.AddMember("operations", operations, alloc);
+      addSanitationMember(result.doc, sanitation, alloc);
+      result.success = true;
+      return result;
+    }
+
+    if (hasSearchReplaceEdits) {
+      if (!fileExists) {
+        result.failureMessage =
+            "search_replace edits require an existing file. Use content when "
+            "creating a new file.";
+        return result;
+      }
+
+      result.doc =
+          executeSearchReplaceEditsDoc(effectiveInput, absolutePath, ctx);
+      if (result.doc.HasMember("error") && result.doc["error"].IsString()) {
+        result.failureMessage = result.doc["error"].GetString();
+        return result;
+      }
+      result.success = true;
+      return result;
     }
 
     if (hasOverwrite) {
-      if (fileExists) {
-        return shared::ToolResult::fail(
-            "Whole-file content overwrite is disabled for existing files. Use "
-            "Hashline edits for modifications; content is reserved for "
-            "explicit "
-            "new-file creation.");
-      }
-
       ctx.host.writeFile(
           absolutePath,
           std::vector<uint8_t>(input.content.begin(), input.content.end()));
       ctx.agent.getEnvironment()->getWorkspace().recordFileEdit(absolutePath);
+      ctx.agent.getEnvironment()->getWorkspace().recordFileRead(absolutePath, 1,
+                                                                9999, true);
+      ctx.agent.getEnvironment()->getWorkspace().markFileAsFullyRead(
+          absolutePath);
 
-      rapidjson::Document resDoc;
-      resDoc.SetObject();
-      auto &alloc = resDoc.GetAllocator();
-      resDoc.AddMember(
+      auto &alloc = result.doc.GetAllocator();
+      result.doc.AddMember(
           "path", rapidjson::Value(input.path.c_str(), alloc).Move(), alloc);
-      resDoc.AddMember("mode", rapidjson::Value("overwrite", alloc).Move(),
-                       alloc);
-      resDoc.AddMember("bytes_written",
-                       static_cast<uint32_t>(input.content.size()), alloc);
-      resDoc.AddMember("watch_state",
-                       rapidjson::Value("refreshed", alloc).Move(), alloc);
-      return shared::ToolResult::ok(resDoc);
+      result.doc.AddMember("mode", rapidjson::Value("overwrite", alloc).Move(),
+                           alloc);
+      result.doc.AddMember("bytes_written",
+                           static_cast<uint32_t>(input.content.size()), alloc);
+      result.doc.AddMember("watch_state",
+                           rapidjson::Value("refreshed", alloc).Move(), alloc);
+      result.success = true;
+      return result;
     }
 
-    if (hasLegacyReplace) {
-      return executeLegacyReplace(input, absolutePath, ctx);
-    }
-
-    return shared::ToolResult::fail(
-        "Missing edits, content, or legacy replacement parameters.");
+    result.doc = executeLegacyReplaceDoc(effectiveInput, absolutePath, ctx);
+    result.success = true;
+    return result;
   } catch (const std::exception &e) {
-    return shared::ToolResult::fail(e.what());
+    result.failureMessage = e.what();
+    return result;
   }
+}
+
+} // namespace
+
+shared::ToolMetadata FileEditTool::getMetadata() const {
+  return {"file_edit",
+          "Edit one or more files with line-number anchors: read first, use "
+          "exact line numbers, use small ops, and reread before the "
+          "next edit call",
+          ToolScope::FilesystemWrite};
+}
+
+std::shared_ptr<shared::JSONSchema> FileEditTool::getSchema() const {
+  auto editSchema = zObject(
+      {{"op", zEnum({"replace_range", "insert_after", "insert_before",
+                     "delete_range", "search_replace"})
+                  ->describe(
+                      "Edit operation type. Line-range ops use exact "
+                      "line-number anchors from file_read. search_replace uses "
+                      "old_string/new_string and can set replace_all.")},
+       {"start_anchor",
+        zString()
+            ->describe("Start anchor for range edits. Use the exact "
+                       "line number returned by file_read. Do not "
+                       "include trailing |content, and do not rewrite anchors "
+                       "within the same call. Used only by range edits.")
+            ->setOptional()},
+       {"end_anchor",
+        zString()
+            ->describe("End anchor for range edits. Use the exact "
+                       "line number returned by file_read. Do not "
+                       "include trailing |content, and do not rewrite anchors "
+                       "within the same call. Used only by range edits.")
+            ->setOptional()},
+       {"anchor",
+        zString()
+            ->describe("Single anchor for insert edits. Use the exact "
+                       "line number returned by file_read. Do not "
+                       "include trailing |content. Prefer structural lines "
+                       "over blank lines when choosing anchors. Used only by "
+                       "insert edits.")
+            ->setOptional()},
+       {"new_lines",
+        zArray(zString())
+            ->describe("Plain replacement or inserted source lines only, "
+                       "without trailing newline characters. Do not include "
+                       "line prefixes, trailing |content, diff markers, "
+                       "or unchanged boundary lines from outside the edited "
+                       "range. Used by line-range edit ops.")
+            ->setOptional()},
+       {"old_string",
+        zString()
+            ->describe("Literal text to replace when op is search_replace. "
+                       "Read the full file first and make this specific "
+                       "enough to avoid accidental matches.")
+            ->setOptional()},
+       {"new_string",
+        zString()
+            ->describe("Replacement text for search_replace. May be an empty "
+                       "string if you intend to delete the matched text.")
+            ->setOptional()},
+       {"replace_all",
+        zBoolean()
+            ->describe("Optional for search_replace. When true, replace every "
+                       "match in the file for that operation.")
+            ->setOptional()}});
+
+  auto fileSchema =
+      zObject(
+          {{"path",
+            zString()->describe("Absolute or relative path to the file")},
+           {"edits",
+            zArray(editSchema)
+                ->describe("Structured edits for one existing file. Use either "
+                           "line-range ops or search_replace ops within a "
+                           "single target file, not both.")
+                ->setOptional()},
+           {"content",
+            zString()
+                ->describe(
+                    "Whole-file content. Best for new-file creation, and "
+                    "also allowed for full overwrites after the file has "
+                    "been fully read.")
+                ->setOptional()},
+           {"patch",
+            zString()
+                ->describe(
+                    "Patch content for patch mode. Use '@@ anchor @@' or "
+                    "'@@ start...end @@' followed by '-' and '+' lines.")
+                ->setOptional()},
+           {"old_string",
+            zString()
+                ->describe("Legacy compatibility only. Prefer edits[].")
+                ->setOptional()},
+           {"new_string",
+            zString()
+                ->describe("Legacy compatibility only. Prefer edits[].")
+                ->setOptional()},
+           {"replace_all",
+            zBoolean()
+                ->describe("Legacy compatibility only for old_string mode")
+                ->setOptional()},
+           {"fuzzy_threshold",
+            zNumber()
+                ->describe("Legacy compatibility only for old_string mode")
+                ->setOptional()}})
+          ->required({"path"});
+
+  return zObject(
+             {{"path",
+               zString()->describe("Absolute or relative path to the file")},
+              {"edits",
+               zArray(editSchema)
+                   ->describe("Structured edits for a single file. Use "
+                              "line-range ops after file_read, or use "
+                              "search_replace after reading the full file. Do "
+                              "not mix the two styles within one target.")
+                   ->setOptional()},
+              {"content", zString()
+                              ->describe("Whole-file content. Best for "
+                                         "explicit new-file creation, and "
+                                         "also valid for full overwrites after "
+                                         "the file has been fully read.")
+                              ->setOptional()},
+              {"patch",
+               zString()
+                   ->describe(
+                       "Patch content for patch mode. Use '@@ anchor @@' or "
+                       "'@@ start...end @@' followed by '-' and '+' lines.")
+                   ->setOptional()},
+              {"old_string",
+               zString()
+                   ->describe("Legacy compatibility only. Prefer edits[].")
+                   ->setOptional()},
+              {"new_string",
+               zString()
+                   ->describe("Legacy compatibility only. Prefer edits[].")
+                   ->setOptional()},
+              {"replace_all",
+               zBoolean()
+                   ->describe("Legacy compatibility only for old_string mode")
+                   ->setOptional()},
+              {"fuzzy_threshold",
+               zNumber()
+                   ->describe("Legacy compatibility only for old_string mode")
+                   ->setOptional()},
+              {"files",
+               zArray(fileSchema)
+                   ->describe("Optional multi-file request. Each entry uses "
+                              "the same shape and rules as the single-file "
+                              "form. Use either top-level path/... fields or "
+                              "files[], not both.")
+                   ->setOptional()}})
+      ->required({});
+}
+
+FileEditInput FileEditTool::transform(const rapidjson::Value &json) {
+  FileEditInput input;
+  static_cast<FileEditTargetInput &>(input) = parseFileEditTarget(json);
+  if (json.HasMember("files") && json["files"].IsArray()) {
+    for (const auto &value : json["files"].GetArray()) {
+      if (!value.IsObject()) {
+        continue;
+      }
+      input.files.push_back(parseFileEditTarget(value));
+    }
+  }
+  return input;
+}
+
+shared::ToolResult FileEditTool::execute(const FileEditInput &input,
+                                         shared::ToolContext &ctx) {
+  const bool hasMultiFile = !input.files.empty();
+  const bool hasTopLevelPayload =
+      !input.path.empty() || input.has_content || !input.edits.empty() ||
+      input.has_old_string || input.has_new_string || input.has_patch;
+
+  if (hasMultiFile && hasTopLevelPayload) {
+    return shared::ToolResult::fail(
+        "Use either top-level path/content/edits/patch fields or files[] in a "
+        "single file_edit call, not both.");
+  }
+
+  if (!hasMultiFile) {
+    const auto single = executeSingleFileEdit(input, ctx);
+    if (!single.success) {
+      if (!single.doc.ObjectEmpty()) {
+        rapidjson::StringBuffer sb;
+        rapidjson::Writer<rapidjson::StringBuffer> writer(sb);
+        single.doc.Accept(writer);
+        return shared::ToolResult::fail(sb.GetString());
+      }
+      return shared::ToolResult::fail(single.failureMessage);
+    }
+    return shared::ToolResult::ok(single.doc);
+  }
+
+  rapidjson::Document aggregate;
+  aggregate.SetObject();
+  auto &alloc = aggregate.GetAllocator();
+  aggregate.AddMember("mode", rapidjson::Value("multi_file", alloc).Move(),
+                      alloc);
+
+  rapidjson::Value files(rapidjson::kArrayType);
+  rapidjson::Value editedPaths(rapidjson::kArrayType);
+  uint32_t successCount = 0;
+  uint32_t appliedEdits = 0;
+  int addedLines = 0;
+  int removedLines = 0;
+
+  for (const auto &target : input.files) {
+    auto fileResult = executeSingleFileEdit(target, ctx);
+    if (!fileResult.success) {
+      if (!fileResult.doc.ObjectEmpty()) {
+        rapidjson::StringBuffer sb;
+        rapidjson::Writer<rapidjson::StringBuffer> writer(sb);
+        fileResult.doc.Accept(writer);
+        return shared::ToolResult::fail(sb.GetString());
+      }
+      return shared::ToolResult::fail(fileResult.failureMessage);
+    }
+
+    if (fileResult.doc.HasMember("path") && fileResult.doc["path"].IsString()) {
+      editedPaths.PushBack(
+          rapidjson::Value(fileResult.doc["path"].GetString(), alloc).Move(),
+          alloc);
+    }
+    if (fileResult.doc.HasMember("applied_edits") &&
+        fileResult.doc["applied_edits"].IsUint()) {
+      appliedEdits += fileResult.doc["applied_edits"].GetUint();
+    }
+    if (fileResult.doc.HasMember("added_lines") &&
+        fileResult.doc["added_lines"].IsInt()) {
+      addedLines += fileResult.doc["added_lines"].GetInt();
+    }
+    if (fileResult.doc.HasMember("removed_lines") &&
+        fileResult.doc["removed_lines"].IsInt()) {
+      removedLines += fileResult.doc["removed_lines"].GetInt();
+    }
+
+    files.PushBack(cloneJsonValue(fileResult.doc, alloc), alloc);
+    ++successCount;
+  }
+
+  aggregate.AddMember("files", files, alloc);
+  aggregate.AddMember("edited_files", editedPaths, alloc);
+  aggregate.AddMember("file_count", successCount, alloc);
+  aggregate.AddMember("applied_edits", appliedEdits, alloc);
+  aggregate.AddMember("added_lines", addedLines, alloc);
+  aggregate.AddMember("removed_lines", removedLines, alloc);
+  aggregate.AddMember("watch_state",
+                      rapidjson::Value("refreshed", alloc).Move(), alloc);
+  return shared::ToolResult::ok(aggregate);
 }
 
 } // namespace firmius::core

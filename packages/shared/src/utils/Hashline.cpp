@@ -250,57 +250,42 @@ bool Hashline::verifyAnchor(std::string_view expectedHash, std::string_view actu
 
 AnchorResult Hashline::resolveAnchor(const std::vector<std::string>& lines,
                                       const std::string& anchorText,
-                                      int searchWindow) {
-    const size_t pipePos = anchorText.find('|');
-    if (pipePos != std::string_view::npos && pipePos + 1 < anchorText.size()) {
-        throw std::runtime_error("Malformed anchor '" + anchorText +
-                                 "'. Use lineNumber#hash only, without trailing " +
-                                 "|content from file_read.");
+                                      int /*searchWindow*/) {
+    if (anchorText.empty()) {
+        return {AnchorResult::Status::MALFORMED, -1, false, "Empty anchor", "", ""};
     }
 
-    auto parsed = parseAnchor(anchorText);
-    if (!parsed) {
-        return {AnchorResult::Status::MALFORMED, -1, false, "Malformed anchor: " + anchorText, "", ""};
+    if (anchorText.find('|') != std::string::npos) {
+        return {AnchorResult::Status::MALFORMED, -1, false,
+                "Anchor contains '|'. Use a plain line number only, without hashline prefixes or trailing |content.", "", ""};
     }
 
-    const int expectedIndex = parsed->lineNumber - 1;
-    const auto lineHashes = computeLineHashes(lines);
-    std::vector<int> matches;
-    const int minIndex = std::max(0, expectedIndex - searchWindow);
-    const int maxIndex = std::min(static_cast<int>(lines.size()) - 1, expectedIndex + searchWindow);
+    if (anchorText.find('#') != std::string::npos) {
+        return {AnchorResult::Status::MALFORMED, -1, false,
+                "The line#hash anchor format is no longer supported. Use plain line numbers (e.g. \"42\").", "", ""};
+    }
 
-    for (int index = minIndex; index <= maxIndex; ++index) {
-        if (lineHashes[static_cast<std::size_t>(index)] == parsed->hash) {
-            matches.push_back(index);
+    try {
+        size_t pos = 0;
+        int lineNum = std::stoi(anchorText, &pos);
+        if (pos != anchorText.size()) {
+            return {AnchorResult::Status::NOT_NUMERIC, -1, false, "Anchor must be a plain line number; got: " + anchorText, "", ""};
         }
+        return resolveLineNumber(lines, lineNum);
+    } catch (...) {
+        return {AnchorResult::Status::NOT_NUMERIC, -1, false, "Anchor is not a valid line number: " + anchorText, "", ""};
     }
+}
 
-    if (matches.empty()) {
-        for (int index = minIndex; index <= maxIndex; ++index) {
-            if (verifyAnchor(parsed->hash, lines[static_cast<std::size_t>(index)])) {
-                matches.push_back(index);
-            }
-        }
+AnchorResult Hashline::resolveLineNumber(const std::vector<std::string>& lines,
+                                            int lineNum) {
+    if (lineNum <= 0) {
+        return {AnchorResult::Status::OUT_OF_RANGE, -1, false, "Line number must be positive: " + std::to_string(lineNum), "", ""};
     }
-
-    if (matches.size() == 1) {
-        return {AnchorResult::Status::SUCCESS, matches.front(), matches.front() != expectedIndex, "", "", parsed->hash};
+    if (lineNum > static_cast<int>(lines.size())) {
+        return {AnchorResult::Status::OUT_OF_RANGE, -1, false, "Line number " + std::to_string(lineNum) + " is out of range for file with " + std::to_string(lines.size()) + " lines.", "", ""};
     }
-
-    if (matches.size() > 1) {
-        return {AnchorResult::Status::AMBIGUOUS, -1, false, 
-                "Ambiguous anchor '" + anchorText + "': matched " + std::to_string(matches.size()) + " nearby lines.", 
-                "", parsed->hash};
-    }
-
-    std::string foundHash = "";
-    if (expectedIndex >= 0 && expectedIndex < static_cast<int>(lines.size())) {
-        foundHash = lineHashes[static_cast<std::size_t>(expectedIndex)];
-    }
-    return {AnchorResult::Status::STALE, -1, false, 
-            "Stale anchor '" + anchorText +
-                "': the file changed after your last read. Re-read the file and retry with fresh anchors.",
-            foundHash, parsed->hash};
+    return {AnchorResult::Status::SUCCESS, lineNum - 1, false, "", "", ""};
 }
 
 std::string HashlineReadEnhancer::enhance(std::string_view content) {

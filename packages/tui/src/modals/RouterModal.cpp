@@ -38,6 +38,22 @@ bool applyTextEdit(ftxui::Event event, std::string &buffer) {
   return false;
 }
 
+std::string formatProviderList(std::vector<std::string> providerIds) {
+  std::sort(providerIds.begin(), providerIds.end());
+  if (providerIds.empty()) {
+    return "";
+  }
+
+  std::string joined;
+  for (size_t i = 0; i < providerIds.size(); ++i) {
+    if (i > 0) {
+      joined += ", ";
+    }
+    joined += providerIds[i];
+  }
+  return joined;
+}
+
 } // namespace
 
 ftxui::Component RouterModal::create(TuiState &state) {
@@ -53,6 +69,7 @@ ftxui::Component RouterModal::create(TuiState &state) {
   auto selected_model_index = std::make_shared<int>(0);
   auto display_model_entries = std::make_shared<std::vector<std::string>>();
   auto models_loading = std::make_shared<bool>(true);
+  auto fetching_providers = std::make_shared<std::vector<std::string>>();
   auto model_menu =
       ftxui::Menu(display_model_entries.get(), selected_model_index.get());
 
@@ -90,11 +107,13 @@ ftxui::Component RouterModal::create(TuiState &state) {
     }
   };
 
-  auto refreshModelEntries = [model_entries, rebuildModelFilter, models_loading]() {
+  auto refreshModelEntries =
+      [model_entries, rebuildModelFilter, models_loading, fetching_providers]() {
     auto &h = firmius::core::Harness::instance();
     auto models = h.listAllModels();
     *model_entries = BuildModelPickerEntries(models, true);
     *models_loading = !h.isModelsLoaded();
+    *fetching_providers = h.listProvidersFetchingModels();
     rebuildModelFilter();
   };
 
@@ -120,7 +139,12 @@ ftxui::Component RouterModal::create(TuiState &state) {
   auto needsModelRefresh = std::make_shared<std::atomic<bool>>(false);
   int subId = firmius::core::Harness::instance().subscribe(
       [needsModelRefresh, &state](const firmius::shared::AppEvent &event) {
-        if (std::holds_alternative<firmius::shared::ModelsRefreshed>(event)) {
+        if (std::holds_alternative<firmius::shared::ModelsRefreshed>(event) ||
+            std::holds_alternative<firmius::shared::ProviderModelsFetchStarted>(
+                event) ||
+            std::holds_alternative<firmius::shared::ProviderModelsFetchFinished>(
+                event) ||
+            std::holds_alternative<firmius::shared::ModelDiscovered>(event)) {
           *needsModelRefresh = true;
           state.postEvent(ftxui::Event::Custom);
         }
@@ -129,7 +153,7 @@ ftxui::Component RouterModal::create(TuiState &state) {
   auto component = ftxui::Renderer(
       [categories, selected, mode, message, category_name, model_filter,
        selectedCategory, model_menu, rebuildModelFilter, refreshModelEntries,
-       needsModelRefresh, models_loading]() {
+       needsModelRefresh, models_loading, fetching_providers]() {
         const auto &theme = ThemeManager::instance().getCurrentTheme();
         const auto cfg = firmius::core::Harness::instance().getConfig();
 
@@ -138,6 +162,8 @@ ftxui::Component RouterModal::create(TuiState &state) {
           refreshModelEntries();
         }
         rebuildModelFilter();
+        const std::string fetchingLabel =
+            formatProviderList(*fetching_providers);
 
         ftxui::Elements rows;
         rows.push_back(ftxui::text("Model Routing Categories") | ftxui::bold |
@@ -199,7 +225,11 @@ ftxui::Component RouterModal::create(TuiState &state) {
                   ftxui::color(theme.modals.fg),
           }));
           if (*models_loading) {
-            rows.push_back(ftxui::text("Scanning providers... results populate as they arrive.") |
+            const std::string loadingText =
+                fetchingLabel.empty()
+                    ? "Scanning providers... results populate as they arrive."
+                    : "Fetching: " + fetchingLabel;
+            rows.push_back(ftxui::text(loadingText) |
                            ftxui::color(theme.base.dim));
           }
           rows.push_back(model_menu->Render() | ftxui::vscroll_indicator |
@@ -218,7 +248,11 @@ ftxui::Component RouterModal::create(TuiState &state) {
                   ftxui::color(theme.modals.fg),
           }));
           if (*models_loading) {
-            rows.push_back(ftxui::text("Scanning providers... results populate as they arrive.") |
+            const std::string loadingText =
+                fetchingLabel.empty()
+                    ? "Scanning providers... results populate as they arrive."
+                    : "Fetching: " + fetchingLabel;
+            rows.push_back(ftxui::text(loadingText) |
                            ftxui::color(theme.base.dim));
           }
           rows.push_back(model_menu->Render() | ftxui::vscroll_indicator |

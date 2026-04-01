@@ -106,6 +106,7 @@ CurlTransferResult performInterruptibleTransfer(CURL *curl,
 }
 
 size_t sseWriteCallback(char *ptr, size_t size, size_t nmemb, void *userdata) {
+  if (!userdata) return 0;
   auto *ctx = static_cast<StreamContext *>(userdata);
   if (ctx->abortSignal && ctx->abortSignal->load())
     return 0; // Trigger CURLE_WRITE_ERROR
@@ -231,6 +232,14 @@ size_t BaseOpenAIProvider::headerCallback(char *ptr, size_t size, size_t nmemb,
         } catch (...) {
         }
       }
+    } else if (lowerHeader.find("x-ratelimit-reset:") == 0) {
+      size_t colonPos = headerLine.find(':');
+      if (colonPos != std::string::npos) {
+        try {
+          ctx->rateLimitResetMs = std::stoll(headerLine.substr(colonPos + 1));
+        } catch (...) {
+        }
+      }
     }
   }
 
@@ -289,7 +298,6 @@ void BaseOpenAIProvider::stream(
     std::function<void(const StreamEvent &)> onEvent) {
   std::string url = baseUrl + "/chat/completions";
   std::string body = prepareRequestBody(history, opts);
-  auto headerMap = getHeaders();
 
   auto startMs = nowMs();
   bool firstTokenEmitted = false;
@@ -321,23 +329,26 @@ void BaseOpenAIProvider::stream(
   };
 
   int attempt = 0;
+  int rateLimitAttempt = 0;
   CURLcode res = CURLE_OK;
   long responseCode = 0;
-
-  struct curl_slist *headers = nullptr;
-  for (const auto &[k, v] : headerMap) {
-    headers = curl_slist_append(headers, (k + ": " + v).c_str());
-  }
+  auto account = getAvailableAccount(opts.modelId);
+  APIKeyAccount *currentAccount = account ? *account : nullptr;
 
   CURL *curl = curl_easy_init();
   if (!curl) {
-    if (headers)
-      curl_slist_free_all(headers);
     onEvent(StreamError{"CURL init failed", 0, ""});
     return;
   }
 
   while (attempt <= RetryConstants::MAX_RETRIES) {
+    struct curl_slist *headers = nullptr;
+    auto headerMap = buildHeadersForApiKey(
+        currentAccount ? currentAccount->apiKey : std::string{});
+    for (const auto &[k, v] : headerMap) {
+      headers = curl_slist_append(headers, (k + ": " + v).c_str());
+    }
+
     curl_easy_reset(curl);
     std::function<void(const StreamEvent &)> wrappedFn = wrappedOnEvent;
     StreamContext ctx{this, &wrappedFn, "", 0, opts.abortSignal};
@@ -358,6 +369,10 @@ void BaseOpenAIProvider::stream(
         performInterruptibleTransfer(curl, opts.abortSignal);
     res = transfer.code;
     responseCode = transfer.responseCode;
+    if (headers) {
+      curl_slist_free_all(headers);
+      headers = nullptr;
+    }
 
     if (res != CURLE_OK) {
       if (opts.abortSignal && opts.abortSignal->load()) {
@@ -381,6 +396,30 @@ void BaseOpenAIProvider::stream(
     }
 
     if (isRetriableStatus(static_cast<int>(responseCode))) {
+      if (responseCode == 429 && currentAccount != nullptr) {
+        const std::string retryDetails = formatErrorMessage(
+            getId(), opts.modelId, static_cast<int>(responseCode), ctx.buffer,
+            "Quota exhausted or rate limited.");
+        const auto switchResult = handleRateLimitAndMaybeSwitch(
+            *currentAccount, opts.modelId, currentHeaderCtx.retryAfterMs,
+            rateLimitAttempt, currentHeaderCtx.rateLimitResetMs);
+        rateLimitAttempt++;
+        if (switchResult.switched) {
+          onEvent(StreamRetrying{attempt + 1,
+                                 RetryConstants::MAX_RETRIES,
+                                 static_cast<int>(responseCode),
+                                 0,
+                                 "rate limited, switching account",
+                                 currentAccount->getIdentifier(),
+                                 retryDetails});
+          attempt = 0;
+          auto nextAccount = getAvailableAccount(opts.modelId);
+          currentAccount = nextAccount ? *nextAccount : nullptr;
+          onEvent(StreamAccountSwitched{switchResult.nextAccountIdentifier});
+          continue;
+        }
+      }
+
       if (attempt >= RetryConstants::MAX_RETRIES) {
         std::string errMsg =
             formatErrorMessage(getId(), opts.modelId,
@@ -400,7 +439,15 @@ void BaseOpenAIProvider::stream(
           responseCode == 429 ? "rate limited" : "server error";
       onEvent(StreamRetrying{attempt + 1, RetryConstants::MAX_RETRIES,
                              static_cast<int>(responseCode), delayMs, reason,
-                             ""});
+                             currentAccount ? currentAccount->getIdentifier()
+                                            : "",
+                             responseCode == 429
+                                 ? formatErrorMessage(
+                                       getId(), opts.modelId,
+                                       static_cast<int>(responseCode),
+                                       ctx.buffer,
+                                       "Quota exhausted or rate limited.")
+                                 : ""});
 
       // Use interruptible sleep to allow immediate cancellation
       if (!interruptibleSleep(std::chrono::milliseconds(delayMs),
@@ -418,8 +465,6 @@ void BaseOpenAIProvider::stream(
     }
   }
 
-  if (headers)
-    curl_slist_free_all(headers);
   curl_easy_cleanup(curl);
 
   auto endMs = nowMs();
@@ -614,9 +659,37 @@ std::vector<ModelInfo> BaseOpenAIProvider::listModels() {
 std::map<std::string, std::string> BaseOpenAIProvider::getHeaders() {
   // Get an available account to retrieve the API key
   auto account = getAvailableAccount();
-  std::string apiKeyValue = account ? (*account)->apiKey : "";
-  return {{"Authorization", "Bearer " + apiKeyValue},
+  return buildHeadersForApiKey(account ? (*account)->apiKey : "");
+}
+
+std::map<std::string, std::string>
+BaseOpenAIProvider::buildHeadersForApiKey(const std::string &apiKey) {
+  return {{"Authorization", "Bearer " + apiKey},
           {"Content-Type", "application/json"}};
+}
+
+BaseOpenAIProvider::RateLimitSwitchResult
+BaseOpenAIProvider::handleRateLimitAndMaybeSwitch(
+    APIKeyAccount &currentAccount, const std::optional<std::string> &modelId,
+    int headerDelayMs, int rateLimitAttempt,
+    int64_t /*rateLimitResetMs*/) {
+  const int headerDelaySeconds = std::max(0, (headerDelayMs + 999) / 1000);
+  const int backoffSeconds =
+      std::max(firmius::shared::BackoffConstants::getBackoffSeconds(
+                   rateLimitAttempt),
+               headerDelaySeconds);
+
+  {
+    std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
+    markAccountRateLimited(currentAccount, backoffSeconds);
+  }
+
+  auto nextAccount = getAvailableAccount(modelId);
+  if (!nextAccount || *nextAccount == &currentAccount) {
+    return {};
+  }
+
+  return {true, (*nextAccount)->getIdentifier()};
 }
 
 std::string BaseOpenAIProvider::getReasoningFieldName() const {

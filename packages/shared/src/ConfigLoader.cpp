@@ -190,6 +190,10 @@ void ConfigLoader::loadImpl() {
         doc["showInternalNudges"].IsBool()) {
         config_.showInternalNudges = doc["showInternalNudges"].GetBool();
     }
+    if (doc.HasMember("hideErrors") &&
+        doc["hideErrors"].IsBool()) {
+        config_.hideErrors = doc["hideErrors"].GetBool();
+    }
 
     loaded_ = true;
 }
@@ -266,6 +270,7 @@ void ConfigLoader::save() const {
     }
     doc.AddMember("subagentRouteFallbackOrder", fallbackOrder, allocator);
     doc.AddMember("showInternalNudges", config_.showInternalNudges, allocator);
+    doc.AddMember("hideErrors", config_.hideErrors, allocator);
 
     rapidjson::StringBuffer buffer;
     rapidjson::PrettyWriter<rapidjson::StringBuffer> writer(buffer);

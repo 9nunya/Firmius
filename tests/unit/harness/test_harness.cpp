@@ -728,6 +728,103 @@ private:
     std::atomic<int> callCount_{0};
 };
 
+class AbortThenEmptyThenTextProvider : public firmius::provider::IProvider {
+public:
+    AbortThenEmptyThenTextProvider(std::string providerId,
+                                   std::string recoveryText)
+        : providerId_(std::move(providerId)),
+          recoveryText_(std::move(recoveryText)) {}
+
+    std::string getId() const override { return providerId_; }
+
+    void stream(const AgentHistory&, const firmius::provider::ProviderOptions& opts,
+                std::function<void(const StreamEvent&)> onEvent) override {
+        const int callIndex = callCount_.fetch_add(1);
+        if (callIndex == 0) {
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                enteredStream_ = true;
+                cancelled_.store(false);
+                timedOut_.store(false);
+            }
+            enteredCv_.notify_all();
+
+            std::unique_lock<std::mutex> lock(mutex_);
+            const auto subId = opts.abortController
+                ? opts.abortController->subscribe([this]() {
+                      cancelled_.store(true);
+                      waitCv_.notify_all();
+                  })
+                : 0;
+            const bool cancelled = waitCv_.wait_for(
+                lock, std::chrono::seconds(5),
+                [this]() { return cancelled_.load(); });
+            lock.unlock();
+            if (opts.abortController && subId != 0) {
+                opts.abortController->unsubscribe(subId);
+            }
+            if (!cancelled) {
+                timedOut_.store(true);
+                onEvent(StreamError{
+                    "provider wait timed out instead of cancelling", 0, ""});
+            }
+            return;
+        }
+
+        if (callIndex == 1) {
+            onEvent(StreamDone{StopReason::Stop});
+            return;
+        }
+
+        onEvent(TextChunk{recoveryText_});
+        onEvent(StreamDone{StopReason::Stop});
+    }
+
+    std::vector<ModelInfo> listModels() override {
+        ModelInfo model;
+        model.id = providerId_ + "-model";
+        model.provider = getId();
+        model.contextWindow = 4096;
+        return {model};
+    }
+
+    ModelInfo getModelInfo(const std::string&) override { return listModels().front(); }
+
+    void generateSummary(const std::string&, const AgentHistory&,
+                         const std::string&,
+                         std::function<void(const StreamEvent&)> onEvent,
+                         std::atomic<bool>* = nullptr) override {
+        onEvent(TextChunk{"summary"});
+        onEvent(StreamDone{StopReason::Stop});
+    }
+
+    firmius::provider::ProviderType getProviderType() const override {
+        return firmius::provider::ProviderType::APIKey;
+    }
+
+    bool waitUntilEntered(
+        std::chrono::milliseconds timeout = std::chrono::milliseconds(1500)) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return enteredCv_.wait_for(lock, timeout,
+                                   [this]() { return enteredStream_; });
+    }
+
+    bool timedOut() const { return timedOut_.load(); }
+
+    int callCount() const { return callCount_.load(); }
+
+private:
+    std::string providerId_;
+    std::string recoveryText_;
+    std::atomic<int> callCount_{0};
+    mutable std::mutex mutex_;
+    std::condition_variable enteredCv_;
+    std::condition_variable waitCv_;
+    bool enteredStream_ = false;
+    std::atomic<bool> cancelled_{false};
+    std::atomic<bool> timedOut_{false};
+};
+
 class Retry500Provider : public firmius::provider::IProvider {
 public:
     std::string getId() const override { return "retry-500-provider"; }
@@ -1404,6 +1501,25 @@ protected:
         for (const auto& turn : history.turns) {
             for (const auto& msg : turn.messages) {
                 if (msg.role != Role::User) {
+                    continue;
+                }
+                for (const auto& part : msg.content) {
+                    if (const auto* text = std::get_if<TextContent>(&part)) {
+                        if (text->text.find(needle) != std::string::npos) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    static bool historyContainsAssistantText(const AgentHistory& history,
+                                             const std::string& needle) {
+        for (const auto& turn : history.turns) {
+            for (const auto& msg : turn.messages) {
+                if (msg.role != Role::Assistant) {
                     continue;
                 }
                 for (const auto& part : msg.content) {
@@ -2954,6 +3070,33 @@ TEST_F(HarnessTest, NoActiveWorkInformationalAnswerStillEndsNormally) {
     EXPECT_EQ(provider->callCount(), 1);
 }
 
+TEST_F(HarnessTest, EmptyProviderReplyRetriesAndRecoversBeforeStopping) {
+    auto& harness = Harness::instance();
+    auto provider = std::make_shared<SequencedProseProvider>(
+        "sequenced-prose-empty-then-recover",
+        std::vector<std::string>{"", "Recovered after empty provider reply."});
+    firmius::provider::ProviderRegistry::instance().registerProvider(provider);
+
+    auto config = firmius::shared::ConfigLoader::instance().getConfig();
+    config.defaultProviderId = provider->getId();
+    config.defaultModelId = provider->listModels().front().id;
+    harness.updateConfig(config);
+
+    const std::string threadId = harness.newThread({}, "/tmp", "lead");
+    ASSERT_FALSE(threadId.empty());
+    harness.send("continue work");
+    auto agent = waitForFocusedAgent();
+
+    ASSERT_TRUE(waitForCondition([&]() {
+        return agent && !agent->isRunning() &&
+               agent->getContext().state.currentStatus == AgentStatus::Idle;
+    }));
+
+    EXPECT_EQ(provider->callCount(), 2);
+    EXPECT_TRUE(historyContainsAssistantText(
+        *agent->getContext().history, "Recovered after empty provider reply."));
+}
+
 TEST_F(HarnessTest, ProseOnlyExecutionIntentLoopRemainsBoundedWithoutActiveWork) {
     auto& harness = Harness::instance();
     auto provider = std::make_shared<SequencedProseProvider>(
@@ -3048,6 +3191,72 @@ TEST_F(HarnessTest,
 
     agent->getEnvironment()->getProcessManager().removeBlockingProcessId(
         "blocking-process-1");
+    harness.abort();
+    ASSERT_TRUE(waitForStopped(agent->getContext().identity.id));
+}
+
+TEST_F(HarnessTest, EmptyProviderReplyStillAppendsTodoEnforcementNudge) {
+    auto& harness = Harness::instance();
+    auto thirdCallStarted = std::make_shared<std::promise<void>>();
+    auto thirdCallStartedFuture = thirdCallStarted->get_future().share();
+    auto thirdCallRelease = std::make_shared<std::promise<void>>();
+    auto thirdCallReleaseFuture = thirdCallRelease->get_future().share();
+    auto provider = std::make_shared<SequenceThenBlockProvider>(
+        "sequenced-prose-empty-todo-retry",
+        std::vector<std::string>{"", "Still working.", "Still working."},
+        2, thirdCallStarted, thirdCallReleaseFuture);
+    firmius::provider::ProviderRegistry::instance().registerProvider(provider);
+
+    auto config = firmius::shared::ConfigLoader::instance().getConfig();
+    config.defaultProviderId = provider->getId();
+    config.defaultModelId = provider->listModels().front().id;
+    harness.updateConfig(config);
+
+    const std::string threadId = harness.newThread({}, "/tmp", "lead");
+    ASSERT_FALSE(threadId.empty());
+    auto agent = createFocusedLeadAgent(threadId);
+    ASSERT_TRUE(agent);
+
+    ThreadManager tm((testHome_ / ".firmius" / "threads").string());
+    AgentTodoList todo;
+    todo.threadId = threadId;
+    todo.agentId = harness.focusedAgentId();
+    todo.nextId = 2;
+    todo.items.push_back(
+        TodoItem{1, "Continue execution", TodoStatus::InProgress, "", "", 1, 1});
+    tm.writeAgentTodo(threadId, todo.agentId, todo);
+
+    harness.send("continue work");
+
+    ASSERT_TRUE(waitForCondition([&]() { return provider->callCount() >= 2; }));
+    ASSERT_TRUE(waitForCondition([&]() {
+        return thirdCallStartedFuture.wait_for(std::chrono::milliseconds(0)) ==
+               std::future_status::ready;
+    }));
+
+    bool sawTodoNudge = false;
+    for (const auto& turn : agent->getContext().history->turns) {
+        for (const auto& msg : turn.messages) {
+            if (msg.role != Role::System ||
+                msg.visibility != MessageVisibility::Internal) {
+                continue;
+            }
+            for (const auto& part : msg.content) {
+                if (const auto* txt = std::get_if<TextContent>(&part)) {
+                    if (txt->text.find(
+                            "Continue working through the remaining todo items:") !=
+                            std::string::npos &&
+                        txt->text.find("#1 [InProgress] Continue execution") !=
+                            std::string::npos) {
+                        sawTodoNudge = true;
+                    }
+                }
+            }
+        }
+    }
+    EXPECT_TRUE(sawTodoNudge);
+
+    thirdCallRelease->set_value();
     harness.abort();
     ASSERT_TRUE(waitForStopped(agent->getContext().identity.id));
 }
@@ -3355,6 +3564,84 @@ TEST_F(HarnessTest, AbortStopsProviderWaitQuickly) {
         std::chrono::steady_clock::now() - abortStart);
     EXPECT_LT(elapsed.count(), 1000);
     EXPECT_FALSE(provider->timedOut());
+}
+
+TEST_F(HarnessTest, FollowUpAfterAbortRecoversFromFirstEmptyProviderReply) {
+    auto& harness = Harness::instance();
+    auto provider = std::make_shared<AbortThenEmptyThenTextProvider>(
+        "abort-then-empty-then-text",
+        "Recovered after empty follow-up reply.");
+    firmius::provider::ProviderRegistry::instance().registerProvider(provider);
+
+    auto config = firmius::shared::ConfigLoader::instance().getConfig();
+    config.defaultProviderId = provider->getId();
+    config.defaultModelId = provider->listModels().front().id;
+    harness.updateConfig(config);
+
+    const std::string threadId = harness.newThread({}, "/tmp", "lead");
+    ASSERT_FALSE(threadId.empty());
+
+    harness.send("first request");
+    auto agent = waitForFocusedAgent();
+    ASSERT_TRUE(waitForCondition([&]() { return agent->isRunning(); },
+                                 std::chrono::milliseconds(1500)));
+    ASSERT_TRUE(provider->waitUntilEntered());
+
+    harness.abort();
+    ASSERT_TRUE(waitForStopped(agent->getContext().identity.id));
+    EXPECT_FALSE(provider->timedOut());
+
+    harness.send("follow-up request");
+
+    ASSERT_TRUE(waitForCondition([&]() { return provider->callCount() >= 3; },
+                                 std::chrono::milliseconds(4000)));
+    ASSERT_TRUE(waitForCondition([&]() {
+        return historyContainsAssistantText(
+            *agent->getContext().history,
+            "Recovered after empty follow-up reply.");
+    }, std::chrono::milliseconds(4000)));
+    ASSERT_TRUE(waitForIdle(agent->getContext().identity.id));
+
+    EXPECT_TRUE(historyContainsUserText(*agent->getContext().history,
+                                        "follow-up request"));
+}
+
+TEST_F(HarnessTest, RetryLastRequestAfterAbortRecoversFromFirstEmptyProviderReply) {
+    auto& harness = Harness::instance();
+    auto provider = std::make_shared<AbortThenEmptyThenTextProvider>(
+        "abort-then-empty-then-text-retry-last",
+        "Recovered after retry-last empty reply.");
+    firmius::provider::ProviderRegistry::instance().registerProvider(provider);
+
+    auto config = firmius::shared::ConfigLoader::instance().getConfig();
+    config.defaultProviderId = provider->getId();
+    config.defaultModelId = provider->listModels().front().id;
+    harness.updateConfig(config);
+
+    const std::string threadId = harness.newThread({}, "/tmp", "lead");
+    ASSERT_FALSE(threadId.empty());
+
+    harness.send("first request");
+    auto agent = waitForFocusedAgent();
+    ASSERT_TRUE(waitForCondition([&]() { return agent->isRunning(); },
+                                 std::chrono::milliseconds(1500)));
+    ASSERT_TRUE(provider->waitUntilEntered());
+
+    harness.abort();
+    ASSERT_TRUE(waitForStopped(agent->getContext().identity.id));
+    EXPECT_FALSE(provider->timedOut());
+
+    std::string statusMessage;
+    ASSERT_TRUE(harness.retryLastRequest(statusMessage));
+
+    ASSERT_TRUE(waitForCondition([&]() { return provider->callCount() >= 3; },
+                                 std::chrono::milliseconds(4000)));
+    ASSERT_TRUE(waitForCondition([&]() {
+        return historyContainsAssistantText(
+            *agent->getContext().history,
+            "Recovered after retry-last empty reply.");
+    }, std::chrono::milliseconds(4000)));
+    ASSERT_TRUE(waitForIdle(agent->getContext().identity.id));
 }
 
 TEST_F(HarnessTest, AbortStopsRetrySleepPromptlyWithoutDuplicateError) {

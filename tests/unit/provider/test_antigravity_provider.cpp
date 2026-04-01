@@ -1,4 +1,5 @@
 #include "providers/AntigravityProvider.hpp"
+#include "providers/AntigravityProtocol.hpp"
 
 #include <gtest/gtest.h>
 
@@ -9,11 +10,19 @@
 #include <vector>
 
 using firmius::provider::AntigravityProvider;
+using firmius::provider::AntigravityProtocol;
+using firmius::provider::ProviderOptions;
 using firmius::shared::AgentMetrics;
+using firmius::shared::AgentHistory;
+using firmius::shared::AgentTurn;
+using firmius::shared::Message;
+using firmius::shared::Role;
 using firmius::shared::StreamEvent;
 using firmius::shared::TextChunk;
 using firmius::shared::ThinkingChunk;
 using firmius::shared::ToolCallChunk;
+using firmius::shared::ToolCallContent;
+using firmius::shared::ToolResultContent;
 
 namespace {
 
@@ -50,6 +59,35 @@ std::vector<StreamEvent> collectEvents(AntigravityProvider &provider,
     provider.processSSELine(line, ctx);
   }
   return events;
+}
+
+std::string firstFunctionResponseName(const std::string &body) {
+  rapidjson::Document doc;
+  doc.Parse(body.c_str());
+  if (doc.HasParseError() || !doc.IsObject() || !doc.HasMember("request") ||
+      !doc["request"].IsObject()) {
+    return "";
+  }
+  const auto &request = doc["request"];
+  if (!request.HasMember("contents") || !request["contents"].IsArray()) {
+    return "";
+  }
+  for (const auto &turn : request["contents"].GetArray()) {
+    if (!turn.IsObject() || !turn.HasMember("parts") || !turn["parts"].IsArray()) {
+      continue;
+    }
+    for (const auto &part : turn["parts"].GetArray()) {
+      if (!part.IsObject() || !part.HasMember("functionResponse") ||
+          !part["functionResponse"].IsObject()) {
+        continue;
+      }
+      const auto &response = part["functionResponse"];
+      if (response.HasMember("name") && response["name"].IsString()) {
+        return response["name"].GetString();
+      }
+    }
+  }
+  return "";
 }
 
 } // namespace
@@ -113,6 +151,54 @@ TEST(AntigravityProvider, DuplicateFunctionCallSnapshotsAreSuppressed) {
   ASSERT_NE(chunk, nullptr);
   EXPECT_EQ(chunk->nameDelta, "file_read");
   EXPECT_EQ(chunk->argsDelta, R"({"path":"src/main.cpp"})");
+}
+
+TEST(AntigravityProvider,
+     FunctionResponseNameFallsBackToPriorToolCallHistoryWhenIdIsMissing) {
+  AgentHistory history;
+  AgentTurn callTurn;
+  Message assistant;
+  assistant.role = Role::Assistant;
+  assistant.content.push_back(
+      ToolCallContent{"", "file_read", R"({"path":"src/main.cpp"})"});
+  callTurn.messages.push_back(std::move(assistant));
+  history.turns.push_back(std::move(callTurn));
+
+  AgentTurn resultTurn;
+  Message toolResult;
+  toolResult.role = Role::ToolResult;
+  toolResult.content.push_back(
+      ToolResultContent{"", R"({"content":"ok"})", true, "", ""});
+  resultTurn.messages.push_back(std::move(toolResult));
+  history.turns.push_back(std::move(resultTurn));
+
+  ProviderOptions opts;
+  AntigravityProtocol::RequestContext ctx{
+      "antigravity-gemini-3-flash", "project", "session", "request"};
+  const std::string body =
+      AntigravityProtocol::prepareRequestBody(history, opts, ctx);
+
+  EXPECT_EQ(firstFunctionResponseName(body), "file_read");
+}
+
+TEST(AntigravityProvider,
+     FunctionResponseNameNeverFallsBackToEmptyString) {
+  AgentHistory history;
+  AgentTurn resultTurn;
+  Message toolResult;
+  toolResult.role = Role::ToolResult;
+  toolResult.content.push_back(
+      ToolResultContent{"unknown-id", R"({"content":"ok"})", true, "", ""});
+  resultTurn.messages.push_back(std::move(toolResult));
+  history.turns.push_back(std::move(resultTurn));
+
+  ProviderOptions opts;
+  AntigravityProtocol::RequestContext ctx{
+      "antigravity-gemini-3-flash", "project", "session", "request"};
+  const std::string body =
+      AntigravityProtocol::prepareRequestBody(history, opts, ctx);
+
+  EXPECT_EQ(firstFunctionResponseName(body), "tool_result");
 }
 
 TEST(AntigravityProvider, AvailableAccountUsesHighestQuotaWithinModelBucket) {

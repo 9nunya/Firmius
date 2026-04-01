@@ -30,11 +30,17 @@ struct RetryConstants {
 struct HeaderCaptureContext {
     long httpStatus = 0;                            ///< HTTP status code from response.
     int retryAfterMs = 0;                           ///< Retry-After header value in milliseconds.
+    int64_t rateLimitResetMs = 0;                   ///< x-ratelimit-reset header (Unix ms timestamp).
     bool headersParsed = false;                     ///< Whether headers have been parsed.
 };
 
 class BaseOpenAIProvider : public BaseAPIKeyProvider {
 public:
+    struct RateLimitSwitchResult {
+        bool switched = false;
+        std::string nextAccountIdentifier;
+    };
+
     BaseOpenAIProvider(std::string id, const std::string& baseUrl, const std::string& apiKey);
 
     // getId() and getProviderType() inherited from BaseAPIKeyProvider
@@ -67,6 +73,7 @@ protected:
     std::string baseUrl;
 
     virtual std::map<std::string, std::string> getHeaders();
+    virtual std::map<std::string, std::string> buildHeadersForApiKey(const std::string& apiKey);
     virtual std::string prepareRequestBody(const AgentHistory& history, const ProviderOptions& opts);
     virtual std::string getReasoningFieldName() const;
 
@@ -86,6 +93,13 @@ protected:
      * Default implementation does a linear scan of listModels(). Override for caching.
      */
     virtual ModelInfo getModelInfo(const std::string& modelId);
+
+    virtual RateLimitSwitchResult handleRateLimitAndMaybeSwitch(
+        APIKeyAccount& currentAccount,
+        const std::optional<std::string>& modelId,
+        int headerDelayMs,
+        int rateLimitAttempt,
+        int64_t rateLimitResetMs = 0);
 
 private:
     /**

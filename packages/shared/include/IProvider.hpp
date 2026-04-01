@@ -80,6 +80,17 @@ struct ProviderOptions {
   virtual std::vector<ModelInfo> listModels() = 0;
 
   /**
+   * @brief Incrementally discovers available models from this provider.
+   * Default implementation materializes listModels() and forwards each result.
+   */
+  virtual void discoverModels(
+      std::function<void(const ModelInfo &)> onModel) {
+    for (const auto &model : listModels()) {
+      onModel(model);
+    }
+  }
+
+  /**
    * @brief Returns the ModelInfo for a given model ID.
    */
   virtual ModelInfo getModelInfo(const std::string &modelId) = 0;

@@ -15,22 +15,34 @@ struct FileEditOperationInput {
     std::string end_anchor;
     std::string anchor;
     std::vector<std::string> new_lines;
+    std::string old_string;
+    std::string new_string;
+    bool has_old_string = false;
+    bool has_new_string = false;
+    bool replace_all = false;
+    int patch_line = 0;         ///< Original line in patch text (for diagnostics).
 };
 
-/**
- * @brief Input parameters for the file_edit tool.
- */
-struct FileEditInput {
+struct FileEditTargetInput {
     std::string path;           ///< Path to the file.
     std::string content;        ///< Full content for whole-file overwrite mode.
+    std::string patch;          ///< Patch content for patch mode.
+    bool has_patch = false;     ///< Whether patch was provided.
     bool has_content = false;   ///< Whether content was provided.
-    std::vector<FileEditOperationInput> edits; ///< Hashline-anchored edit operations.
+    std::vector<FileEditOperationInput> edits; ///< Line-number anchored edit operations.
     std::string old_string;     ///< Legacy substring replacement target.
     std::string new_string;     ///< Legacy substring replacement replacement text.
     bool has_old_string = false; ///< Whether old_string was provided.
     bool has_new_string = false; ///< Whether new_string was provided.
     bool replace_all = false;   ///< Legacy substring replacement flag.
     float fuzzy_threshold = 1.0f; ///< Legacy fuzzy replacement threshold.
+};
+
+/**
+ * @brief Input parameters for the file_edit tool.
+ */
+struct FileEditInput : public FileEditTargetInput {
+    std::vector<FileEditTargetInput> files; ///< Optional multi-file request payload.
 };
 
 /**

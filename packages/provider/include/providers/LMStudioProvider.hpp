@@ -32,7 +32,7 @@ protected:
     /**
      * @brief Returns minimal headers (no auth required for local inference).
      */
-    std::map<std::string, std::string> getHeaders() override;
+    std::map<std::string, std::string> buildHeadersForApiKey(const std::string& apiKey) override;
 };
 
 }

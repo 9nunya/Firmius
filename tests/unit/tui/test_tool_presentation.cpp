@@ -867,6 +867,71 @@ TEST(ToolPresentationTest, FileReadFileEditAndListDirectoryHaveExplicitStates) {
   ASSERT_FALSE(l.sections.empty());
 }
 
+TEST(ToolPresentationTest, MultiFileFileEditRendersSeparateDiffSections) {
+  ToolCallView edit;
+  edit.name = "file_edit";
+  edit.args =
+      R"({"files":[{"path":"src/a.cpp","edits":[{"op":"insert_after"}]},{"path":"src/b.cpp","edits":[{"op":"replace_range"}]}]})";
+  edit.phase = ToolPhase::Finished;
+  edit.success = true;
+  edit.result =
+      R"({"mode":"multi_file","files":[{"path":"src/a.cpp","operations":[{"op":"insert_after","description":"insert after 1#aaaa","start_line":2,"end_line":2,"old_lines":[],"new_lines":["alpha"]}]},{"path":"src/b.cpp","operations":[{"op":"replace_range","description":"replace line","start_line":3,"end_line":3,"old_lines":["old"],"new_lines":["new"]}]}]})";
+
+  ToolPresentation p = BuildToolPresentation(edit);
+  ASSERT_EQ(p.diff_sections.size(), 2u);
+  EXPECT_NE(p.diff_sections[0].meta.find("a.cpp"), std::string::npos);
+  EXPECT_NE(p.diff_sections[1].meta.find("b.cpp"), std::string::npos);
+  const std::string *adds = FindFactValue(p, "Added lines");
+  const std::string *removes = FindFactValue(p, "Removed lines");
+  ASSERT_NE(adds, nullptr);
+  ASSERT_NE(removes, nullptr);
+  EXPECT_EQ(*adds, "2");
+  EXPECT_EQ(*removes, "1");
+}
+
+TEST(ToolPresentationTest, SearchReplaceFileEditRendersDiffPreview) {
+  ToolCallView edit;
+  edit.name = "file_edit";
+  edit.args =
+      R"({"path":"src/main.cpp","edits":[{"op":"search_replace","old_string":"alpha","new_string":"omega","replace_all":true}]})";
+  edit.phase = ToolPhase::Finished;
+  edit.success = true;
+  edit.result =
+      R"({"path":"src/main.cpp","mode":"search_replace_edits","replacements":2,"applied_edits":1,"added_lines":2,"removed_lines":2,"diff_preview":"@@ search_replace alpha @@\n-alpha beta\n-beta alpha\n+omega beta\n+beta omega\n","operations":[{"op":"search_replace","description":"search_replace alpha","start_line":1,"end_line":2,"new_line_count":2,"old_line_count":2,"relocated":false,"old_lines":["alpha beta","beta alpha"],"new_lines":["omega beta","beta omega"]}],"watch_state":"refreshed"})";
+
+  ToolPresentation p = BuildToolPresentation(edit);
+  ASSERT_EQ(p.diff_sections.size(), 1u);
+  ASSERT_EQ(p.diff_sections.front().lines.size(), 4u);
+  EXPECT_EQ(p.diff_sections.front().lines[0].type, '-');
+  EXPECT_EQ(p.diff_sections.front().lines[1].type, '-');
+  EXPECT_EQ(p.diff_sections.front().lines[2].type, '+');
+  EXPECT_EQ(p.diff_sections.front().lines[3].type, '+');
+  const std::string *adds = FindFactValue(p, "Added lines");
+  const std::string *removes = FindFactValue(p, "Removed lines");
+  ASSERT_NE(adds, nullptr);
+  ASSERT_NE(removes, nullptr);
+  EXPECT_EQ(*adds, "2");
+  EXPECT_EQ(*removes, "2");
+}
+
+TEST(ToolPresentationTest, MultiFilePatchRendersSeparateDiffSectionsFromResults) {
+  ToolCallView edit;
+  edit.name = "file_edit";
+  edit.args =
+      R"({"files":[{"path":"src/a.cpp","patch":"@@ 1 @@\n-old\n+new\n"},{"path":"src/b.cpp","patch":"@@ 2 @@\n-beta\n+gamma\n"}]})";
+  edit.phase = ToolPhase::Finished;
+  edit.success = true;
+  edit.result =
+      R"({"mode":"multi_file","files":[{"path":"src/a.cpp","mode":"patch","operations":[{"op":"replace_range","description":"replace line","start_line":1,"end_line":1,"old_lines":["old"],"new_lines":["new"]}]},{"path":"src/b.cpp","mode":"patch","operations":[{"op":"replace_range","description":"replace line","start_line":2,"end_line":2,"old_lines":["beta"],"new_lines":["gamma"]}]}]})";
+
+  ToolPresentation p = BuildToolPresentation(edit);
+  ASSERT_EQ(p.diff_sections.size(), 2u);
+  EXPECT_NE(p.diff_sections[0].meta.find("a.cpp"), std::string::npos);
+  EXPECT_NE(p.diff_sections[1].meta.find("b.cpp"), std::string::npos);
+  EXPECT_EQ(p.diff_sections[0].lines.size(), 2u);
+  EXPECT_EQ(p.diff_sections[1].lines.size(), 2u);
+}
+
 TEST(ToolPresentationTest, WebFetchAndTerminateSubagentPresentersAreExplicit) {
   ToolCallView fetch;
   fetch.name = "web_fetch";

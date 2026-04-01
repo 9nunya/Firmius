@@ -106,6 +106,7 @@ performInterruptibleTransfer(CURL *curl, std::atomic<bool> *abortSignal) {
 
 size_t anthropicSSEWriteCallback(char *ptr, size_t size, size_t nmemb,
                                  void *userdata) {
+  if (!userdata) return 0;
   auto *ctx = static_cast<AnthropicStreamContext *>(userdata);
   if (ctx->abortSignal && ctx->abortSignal->load())
     return 0;
@@ -632,7 +633,7 @@ void BaseAnthropicProvider::stream(
       std::string reason =
           responseCode == 429 ? "rate limited" : "server error";
       onEvent(StreamRetrying{attempt + 1, 5, static_cast<int>(responseCode),
-                             delayMs, reason, ""});
+                             delayMs, reason, "", ""});
 
       if (!interruptibleSleep(std::chrono::milliseconds(delayMs),
                               opts.abortController, opts.abortSignal)) {

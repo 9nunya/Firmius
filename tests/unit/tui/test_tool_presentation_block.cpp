@@ -55,6 +55,16 @@ std::string Render(const std::shared_ptr<ToolCallView> &view, int width = 120,
   return screen.ToString();
 }
 
+ftxui::Screen RenderScreen(const std::shared_ptr<ToolCallView> &view,
+                           int width = 120, int height = 20) {
+  auto component = ToolPresentationBlock(
+      view, [view] { return BuildToolPresentation(*view); });
+  auto element = component->Render();
+  ftxui::Screen screen(width, height);
+  ftxui::Render(screen, element);
+  return screen;
+}
+
 size_t CountOccurrences(const std::string &text, const std::string &needle) {
   if (needle.empty()) {
     return 0;
@@ -213,6 +223,64 @@ TEST(ToolPresentationBlockTest, FileCreationDiffShowsEntireWrittenFile) {
   EXPECT_EQ(output.find("show more"), std::string::npos);
 }
 
+TEST(ToolPresentationBlockTest, MultiFileFileEditShowsBothFilesClearly) {
+  auto view = std::make_shared<ToolCallView>();
+  view->name = "file_edit";
+  view->args =
+      R"({"files":[{"path":"src/a.cpp","edits":[{"op":"insert_after"}]},{"path":"src/b.cpp","edits":[{"op":"replace_range"}]}]})";
+  view->phase = ToolPhase::Finished;
+  view->success = true;
+  view->show_result = false;
+  view->result =
+      R"({"mode":"multi_file","files":[{"path":"src/a.cpp","operations":[{"op":"insert_after","description":"insert after 1#aaaa","start_line":2,"end_line":2,"old_lines":[],"new_lines":["alpha"]}]},{"path":"src/b.cpp","operations":[{"op":"replace_range","description":"replace line","start_line":3,"end_line":3,"old_lines":["old"],"new_lines":["new"]}]}]})";
+
+  const std::string output = Render(view, 140, 40);
+  EXPECT_NE(output.find("a.cpp"), std::string::npos);
+  EXPECT_NE(output.find("b.cpp"), std::string::npos);
+  EXPECT_NE(output.find("alpha"), std::string::npos);
+  EXPECT_NE(output.find("new"), std::string::npos);
+}
+
+TEST(ToolPresentationBlockTest, SearchReplaceFileEditShowsRenderedDiff) {
+  auto view = std::make_shared<ToolCallView>();
+  view->name = "file_edit";
+  view->args =
+      R"({"path":"src/main.cpp","edits":[{"op":"search_replace","old_string":"alpha","new_string":"omega","replace_all":true}]})";
+  view->phase = ToolPhase::Finished;
+  view->success = true;
+  view->show_result = false;
+  view->result =
+      R"({"path":"src/main.cpp","mode":"search_replace_edits","replacements":2,"applied_edits":1,"added_lines":2,"removed_lines":2,"operations":[{"op":"search_replace","description":"search_replace alpha","start_line":1,"end_line":2,"new_line_count":2,"old_line_count":2,"relocated":false,"old_lines":["alpha beta","beta alpha"],"new_lines":["omega beta","beta omega"]}],"watch_state":"refreshed"})";
+
+  const std::string output = Render(view, 140, 40);
+  EXPECT_NE(output.find("main.cpp"), std::string::npos);
+  EXPECT_NE(output.find("- 1"), std::string::npos);
+  EXPECT_NE(output.find("- 2"), std::string::npos);
+  EXPECT_NE(output.find("+ 1"), std::string::npos);
+  EXPECT_NE(output.find("+ 2"), std::string::npos);
+  EXPECT_EQ(output.find("show more"), std::string::npos);
+}
+
+TEST(ToolPresentationBlockTest, MultiFilePatchShowsEachFileDiff) {
+  auto view = std::make_shared<ToolCallView>();
+  view->name = "file_edit";
+  view->args =
+      R"({"files":[{"path":"src/a.cpp","patch":"@@ 1 @@\n-old\n+new\n"},{"path":"src/b.cpp","patch":"@@ 2 @@\n-beta\n+gamma\n"}]})";
+  view->phase = ToolPhase::Finished;
+  view->success = true;
+  view->show_result = false;
+  view->result =
+      R"({"mode":"multi_file","files":[{"path":"src/a.cpp","mode":"patch","operations":[{"op":"replace_range","description":"replace line","start_line":1,"end_line":1,"old_lines":["old"],"new_lines":["new"]}]},{"path":"src/b.cpp","mode":"patch","operations":[{"op":"replace_range","description":"replace line","start_line":2,"end_line":2,"old_lines":["beta"],"new_lines":["gamma"]}]}]})";
+
+  const std::string output = Render(view, 140, 40);
+  EXPECT_NE(output.find("a.cpp"), std::string::npos);
+  EXPECT_NE(output.find("b.cpp"), std::string::npos);
+  EXPECT_NE(output.find("old"), std::string::npos);
+  EXPECT_NE(output.find("new"), std::string::npos);
+  EXPECT_NE(output.find("beta"), std::string::npos);
+  EXPECT_NE(output.find("gamma"), std::string::npos);
+}
+
 TEST(ToolPresentationBlockTest,
      ArtifactWriteUpdateShowsPersistedDiffWithoutToggle) {
   auto view = std::make_shared<ToolCallView>();
@@ -230,6 +298,48 @@ TEST(ToolPresentationBlockTest,
   EXPECT_NE(output.find("line02 changed"), std::string::npos);
   EXPECT_NE(output.find("line08"), std::string::npos);
   EXPECT_EQ(output.find("show more"), std::string::npos);
+}
+
+TEST(ToolPresentationBlockTest, DiffPreviewWrapsLongLinesUnderSameGutter) {
+  auto view = std::make_shared<ToolCallView>();
+  view->name = "file_edit";
+  view->args = R"({"path":"src/main.cpp","edits":[{"op":"replace_range"}]})";
+  view->phase = ToolPhase::Finished;
+  view->success = true;
+  view->show_result = false;
+  view->result =
+      R"({"operations":[{"op":"replace_range","description":"replace long line","start_line":139,"end_line":139,"old_lines":["short();"],"new_lines":["mod.thisIsAReallyLongFunctionNameValidator(var1, var4);"]}]})";
+
+  const auto screen = RenderScreen(view, 44, 24);
+  const std::string output = screen.ToString();
+  EXPECT_EQ(CountOccurrences(output, "+ 139"), 1u);
+
+  std::vector<std::string> lines;
+  for (int y = 0; y < screen.dimy(); ++y) {
+    std::string line;
+    for (int x = 0; x < screen.dimx(); ++x) {
+      line += screen.PixelAt(x, y).character;
+    }
+    lines.push_back(line);
+  }
+
+  bool saw_wrapped_continuation = false;
+  for (size_t i = 0; i + 1 < lines.size(); ++i) {
+    if (lines[i].find("+ 139") == std::string::npos) {
+      continue;
+    }
+    if (lines[i].find("mod.thisIsAReallyLong") == std::string::npos) {
+      continue;
+    }
+    if (lines[i + 1].find("var1, var4);") == std::string::npos) {
+      continue;
+    }
+    EXPECT_EQ(lines[i + 1].find("139"), std::string::npos);
+    saw_wrapped_continuation = true;
+    break;
+  }
+
+  EXPECT_TRUE(saw_wrapped_continuation) << output;
 }
 
 TEST(ToolPresentationBlockTest, ProcessWaitRenderIncludesPatternAndProcess) {

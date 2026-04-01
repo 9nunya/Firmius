@@ -69,8 +69,9 @@ NanoGPTProvider::NanoGPTProvider(const std::vector<std::string>& initialKeys)
     }
 }
 
-std::map<std::string, std::string> NanoGPTProvider::getHeaders() {
-    return BaseOpenAIProvider::getHeaders();
+std::map<std::string, std::string>
+NanoGPTProvider::buildHeadersForApiKey(const std::string& apiKey) {
+    return BaseOpenAIProvider::buildHeadersForApiKey(apiKey);
 }
 
 std::string NanoGPTProvider::getReasoningFieldName() const {

@@ -58,36 +58,39 @@ Users cannot read artifacts. User-facing output goes in messages.
 Use the smallest tool for the job. Inspect before editing. Read full files you plan to edit.
 
 ## file_read
-Returns Hashline format `lineNumber#hash|content` in WATCHED FILES block. That block is canonical after read.
-Partial watches are non-editable — read the full file before editing.
+Returns plain file content. Partial watches are non-editable — read the full file before editing.
 After successful `file_edit`, watched files refresh automatically — use the refreshed content for follow-up edits.
 
 ## file_edit — Existing Files
 1. `file_read` the file first
-2. Copy exact `line#hash` anchors from the read output
+2. Use 1-indexed line numbers as anchors
 3. Use smallest op per mutation site (`replace_range`, `insert_after`, `insert_before`, `delete_range`)
 4. Batch related edits in one call — all target the ORIGINAL snapshot
 5. After successful edit, reread before any further edit on same file
 
 ### Anchor Rules
-Format: `line#hash` only. NEVER include `|content`.
+Format: line number only (e.g., `"42"`). Never include `|content` or hashes.
 `replace_range` / `delete_range`: require both `start_anchor` and `end_anchor`
 `insert_after` / `insert_before`: require `anchor`
-`new_lines`: plain source text only. No Hashline prefixes, diff markers, or boundary echoes.
+`new_lines`: plain source text only. No line prefixes, diff markers, or boundary echoes.
 Do NOT adjust anchors for earlier edits within the same call.
 Prefer structural lines over blank lines for anchors.
 Stale anchor → reread and retry. Never guess.
+
+### Patch Mode (Preferred for Larger Changes)
+Use top-level `patch` for structured multi-hunk edits with line-aware diagnostics.
+Always `file_read` first and reread after patch edits before further line-range edits.
 
 ## file_edit — New Files
 Use `content` field for whole-file creation. Never mix `content` with `edits` in one call.
 
 ## Never
-Mix `content` with Hashline `edits` in one `file_edit` call
-Mix `old_string`/`new_string` with Hashline `edits`
+Mix `content` with line-range `edits` in one `file_edit` call
+Mix `old_string`/`new_string` with line-range `edits`
 Route editing through `process_execute` or `python_execute`
 
 ## Quick Reference
-Good anchor: `12#f828`
+Good anchor: `12`
 Bad anchor: `12#f828|use crate::compiler;`
 Good new file: `{"path":"new.txt","content":"hello\nworld"}`
 Bad mixed: `{"path":"f.txt","content":"...","edits":[...]}`
@@ -95,7 +98,14 @@ Bad mixed: `{"path":"f.txt","content":"...","edits":[...]}`
 ## Other Tools
 `list_directory`, `glob`, `grep`: workspace inspection
 `process_execute`: builds, tests, verification commands
-`process_spawn` / `wait` / `status` / `input`: background processes only when needed
+`process_spawn` / `wait` / `status`: background processes only when needed
+`process_input`: Send input to a background process. Supports:
+  - Literal text: `"Hello"` sends "Hello"
+  - Newlines: Use actual newlines in JSON string, or `\n` escape (translated to newline)
+  - Control tags: `{Enter}`, `{Tab}`, `{Esc}`, `{Backspace}`, `{Delete}`, `{Up}`, `{Down}`, `{Left}`, `{Right}`, `{Home}`, `{End}`, `{PageUp}`, `{PageDown}`, `{F1}`-`{F12}`
+  - Modifiers: `{Ctrl+C}` (SIGINT), `{Ctrl+D}` (EOF), `{Ctrl+Z}` (SIGTSTP), `{Alt+X}` (ESC+char)
+  - Multi-line: Each line sent with 1s delay between lines
+  - Example: `{"process_id":"abc123","input":"Hello\\n"}` sends "Hello" followed by newline
 `python_execute`: bounded transforms when simpler tools are insufficient
 `summon_subagent` / `subagent_wait` / `terminate_subagent`: agent delegation
 `web_fetch`: external URLs when allowed

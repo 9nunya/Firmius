@@ -14,6 +14,7 @@ struct SubagentInput {
     std::optional<std::string> agent_id;
     std::optional<std::string> plan_id;
     std::optional<std::string> chunk_id;
+    std::optional<std::string> task_id;       ///< Optional: attach worker to specific task within chunk
     std::optional<std::string> category;
     std::string name;   ///< Machine-friendly slug (e.g., "auth-finder")
     std::string title;  ///< Human-readable display name (e.g., "Find auth patterns")
@@ -36,6 +37,9 @@ public:
         }
         if (json.HasMember("chunk_id") && json["chunk_id"].IsString()) {
             input.chunk_id = json["chunk_id"].GetString();
+        }
+        if (json.HasMember("task_id") && json["task_id"].IsString()) {
+            input.task_id = json["task_id"].GetString();
         }
         if (json.HasMember("category") && json["category"].IsString()) {
             input.category = json["category"].GetString();

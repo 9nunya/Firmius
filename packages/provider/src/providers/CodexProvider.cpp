@@ -1347,7 +1347,7 @@ CodexProvider::getAllQuotas() const {
       if (resetIt != acc.metadata.end()) {
         reset = normalizeResetTimestamp(resetIt->second);
       }
-      buckets.push_back({"codex", remaining, reset});
+      buckets.push_back({"codex", remaining, reset, ""});
     }
     result[acc.getIdentifier()] = buckets;
   }
@@ -1395,7 +1395,7 @@ CodexProvider::getAvailableAccount(const std::optional<std::string> &modelId) {
     return std::nullopt;
   }
 
-  lastUsedIndex_ = bestIdx;
+  lastUsedIndex_.store(bestIdx, std::memory_order_relaxed);
   saveAccounts();
   return &accounts_[bestIdx];
 }
@@ -1479,6 +1479,7 @@ std::string CodexProvider::getQuotaKey(const std::string &modelId) {
 
 size_t CodexProvider::sseWriteCallback(char *ptr, size_t size, size_t nmemb,
                                        void *userdata) {
+  if (!userdata) return 0;
   auto *ctx = static_cast<StreamContext *>(userdata);
   if (ctx->abortSignal && ctx->abortSignal->load())
     return 0;
@@ -1941,7 +1942,7 @@ void CodexProvider::stream(const AgentHistory &history,
         int delayMs = calculateRetryDelay(attempt - 1);
         onEvent(StreamRetrying{attempt, RetrySettings::MAX_RETRIES,
                                lastRetryStatus, delayMs, lastRetryReason,
-                               acc.getIdentifier()});
+                               acc.getIdentifier(), ""});
         // Use interruptible sleep to allow immediate cancellation
         if (!interruptibleSleep(std::chrono::milliseconds(delayMs),
                                 opts.abortController, opts.abortSignal)) {

@@ -60,7 +60,7 @@ public:
       onEvent(StreamDone{StopReason::Stop});
       return;
     case OutcomeMode::ProviderRetrySleep:
-      onEvent(StreamRetrying{1, 3, 429, 5000, "Provider retry wait", ""});
+      onEvent(StreamRetrying{1, 3, 429, 5000, "Provider retry wait", "", ""});
       {
         std::lock_guard<std::mutex> lock(mutex_);
         enteredRetrySleep_ = true;

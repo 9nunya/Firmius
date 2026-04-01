@@ -17,6 +17,8 @@
 #include "ConfigLoader.hpp"
 #include "Context.hpp"
 #include "Events.hpp"
+#include "IAgent.hpp"
+#include "IHost.hpp"
 #include "harness/ThreadLockManager.hpp"
 #include "persistence/HistoryEditor.hpp"
 #include "persistence/ThreadManager.hpp"
@@ -24,8 +26,6 @@
 namespace firmius::core {
 
 using namespace firmius::shared;
-
-class IHost;
 
 /**
  * Harness is a singleton layer that orchestrates thread management, PID-based
@@ -196,6 +196,8 @@ public:
   requestPermissionEscalation(PermissionEscalationRequest request);
   bool resolvePermissionEscalation(const std::string &requestId,
                                    PermissionResponse response);
+  std::vector<PermissionEscalationRequest>
+  listPendingPermissionEscalations(const std::string &threadId = "");
   bool markThreadAsBenchmark(const std::string &threadId,
                              const std::string &benchmarkId,
                              const std::string &benchmarkTaskId = "");
@@ -210,7 +212,8 @@ public:
   std::vector<shared::ThreadArtifactMetadata>
   listArtifacts(const std::string &threadId = "");
   std::vector<shared::ModelInfo> listAllModels();
-  bool isModelsLoaded() const { return modelsLoaded_; }
+  bool isModelsLoaded() const;
+  std::vector<std::string> listProvidersFetchingModels() const;
 
   const UserConfig &getConfig() const;
   void updateConfig(const UserConfig &config);
@@ -298,6 +301,12 @@ private:
   Harness();
   ~Harness() = default;
 
+  // Allow Agent, Engine, and lock tools to use internal messaging
+  friend class Agent;
+  friend class Engine;
+  friend class FleetLockTool;
+  friend class FleetLockRespondTool;
+
   /**
    * Check if an agent is a descendant of another agent.
    * @param agentId The agent ID to check
@@ -371,6 +380,22 @@ private:
   void drainQueueForAgent(const std::string &agentId,
                          const std::string &threadId,
                          bool allowRunningInjection = false);
+  void drainInternalQueueForAgent(const std::string &agentId,
+                                  const std::string &threadId);
+  void drainInternalQueueForAgent(const std::string &agentId,
+                                  const std::string &threadId,
+                                  bool allowRunningInjection);
+  void queueInternalMessage(const std::string &agentId,
+                            const std::string &threadId,
+                            const std::string &text);
+  void appendInternalMessage(std::shared_ptr<shared::IAgent> agent,
+                             const std::string &text);
+  std::string resolveFleetRoot(const std::string &agentId);
+  std::vector<std::string> listFleetPeers(const std::string &agentId,
+                                          const std::string &threadId);
+  std::size_t failOwnedLocks(const std::string &agentId,
+                             const std::string &threadId,
+                             const std::string &reason);
 
   void clearQueue();
   void clearQueueForAgentThread(const std::string &agentId,
@@ -387,9 +412,19 @@ private:
   };
   std::deque<QueuedMessage> messageQueue_;
 
+  struct QueuedInternalMessage {
+    std::string id;
+    std::string text;
+    std::string threadId;
+    std::string agentId;
+  };
+  std::deque<QueuedInternalMessage> internalQueue_;
+
   // Background model caching
   std::vector<shared::ModelInfo> cachedModels_;
-  std::mutex modelsMutex_;
+  mutable std::mutex modelsMutex_;
+  std::unordered_set<std::string> cachedModelKeys_;
+  std::unordered_set<std::string> loadingModelProviders_;
   bool isRefreshingModels_ = false;
   bool modelsLoaded_ = false;
   bool engineListenerRegistered_ = false;

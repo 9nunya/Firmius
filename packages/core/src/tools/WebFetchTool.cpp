@@ -11,6 +11,7 @@ namespace firmius::core {
 
 namespace {
 size_t writeCallback(char *ptr, size_t size, size_t nmemb, void *userdata) {
+  if (!userdata) return 0;
   auto *s = static_cast<std::string *>(userdata);
   s->append(ptr, size * nmemb);
   return size * nmemb;
@@ -20,12 +21,6 @@ size_t writeCallback(char *ptr, size_t size, size_t nmemb, void *userdata) {
 shared::ToolResult WebFetchTool::execute(const WebFetchInput &input,
                                          shared::ToolContext &ctx) {
   CURL *curl = curl_easy_init();
-  curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, 0L);
-  curl_easy_setopt(curl, CURLOPT_XFERINFODATA, 0L);
-  curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
-
-  CURLcode res = curl_easy_perform(curl);
-
   if (!curl)
     return shared::ToolResult::fail("CURL init failed");
 
@@ -36,6 +31,10 @@ shared::ToolResult WebFetchTool::execute(const WebFetchInput &input,
   curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
   curl_easy_setopt(curl, CURLOPT_USERAGENT, "Firmius/1.0");
   curl_easy_setopt(curl, CURLOPT_TIMEOUT, 60L);
+  curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 1L);
+
+  CURLcode res = curl_easy_perform(curl);
+
   long httpCode = 0;
   curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
 

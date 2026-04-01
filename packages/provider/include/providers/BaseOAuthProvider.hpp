@@ -78,7 +78,7 @@ protected:
   std::string providerId_;
   std::vector<OAuthAccount> accounts_;
   mutable std::recursive_mutex accountsMutex_;
-  int lastUsedIndex_ = -1;
+  std::atomic<int> lastUsedIndex_{-1};
 
   std::thread quotaRefreshThread_;
   std::atomic<bool> stopQuotaRefresh_{false};

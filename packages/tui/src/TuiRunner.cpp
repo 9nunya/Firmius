@@ -1,17 +1,16 @@
-#include "Engine.hpp"
+#include "TuiRunner.hpp"
 #include "TUIState.hpp"
-#include "components/InputBar.hpp"
 #include "harness/Harness.hpp"
 #include "workflow/WorkflowLoader.hpp"
+#include <atomic>
+#include <chrono>
+#include <csignal>
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/screen_interactive.hpp>
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/screen.hpp>
-#include <atomic>
 #include <iostream>
 #include <string>
-#include <chrono>
-#include <csignal>
 #include <thread>
 
 #include "commands/AccountsCommand.hpp"
@@ -22,9 +21,9 @@
 #include "commands/ConnectCommand.hpp"
 #include "commands/ModelCommand.hpp"
 #include "commands/NewCommand.hpp"
-#include "commands/QuotasCommand.hpp"
 #include "commands/PurposesCommand.hpp"
 #include "commands/QuitCommand.hpp"
+#include "commands/QuotasCommand.hpp"
 #include "commands/RouterCommand.hpp"
 #include "commands/ThreadsCommand.hpp"
 #include "commands/UndoCommand.hpp"
@@ -37,18 +36,14 @@
 #include "modals/ThreadLockedModal.hpp"
 #include "modals/ThreadPickerModal.hpp"
 
-using namespace ftxui;
-
 namespace {
-
-std::atomic<int> g_pending_sigint{0};
 
 extern "C" void HandleSigint(int) {
   g_pending_sigint.fetch_add(1, std::memory_order_relaxed);
 }
 
 void InstallSigintHandler() {
-  struct sigaction action {};
+  struct sigaction action{};
   action.sa_handler = HandleSigint;
   sigemptyset(&action.sa_mask);
   action.sa_flags = 0;
@@ -57,18 +52,9 @@ void InstallSigintHandler() {
 
 } // namespace
 
-int main(int argc, char **argv) {
-  bool continue_last = false;
-  bool debugging_mode = false;
-  for (int i = 1; i < argc; ++i) {
-    std::string arg = argv[i];
-    if (arg == "-c") {
-      continue_last = true;
-    } else if (arg == "--i-am-debugging") {
-      debugging_mode = true;
-    }
-  }
+namespace firmius::tui {
 
+void runTui(bool debugging_mode, bool continue_last) {
   // Register Commands
   firmius::tui::CommandManager::instance().registerCommand(
       std::make_shared<firmius::tui::NewCommand>());
@@ -185,13 +171,14 @@ int main(int argc, char **argv) {
     }
   });
   int handled_sigints = 0;
-  renderer = CatchEvent(renderer, [&](Event event) {
-    const int pending_sigints = g_pending_sigint.load(std::memory_order_relaxed);
+  renderer = CatchEvent(renderer, [&](ftxui::Event event) {
+    const int pending_sigints =
+        g_pending_sigint.load(std::memory_order_relaxed);
     if (pending_sigints > handled_sigints) {
       handled_sigints = pending_sigints;
       return state.handleCtrlC();
     }
-    if (event == Event::CtrlC ||
+    if (event == ftxui::Event::CtrlC ||
         (event.is_character() && event.character() == std::string(1, '\x03'))) {
       return state.handleCtrlC();
     }
@@ -207,6 +194,6 @@ int main(int argc, char **argv) {
   state.shutdown();
   h.shutdown();
   std::cout << exit_summary << std::flush;
-
-  return 0;
 }
+
+} // namespace firmius::tui

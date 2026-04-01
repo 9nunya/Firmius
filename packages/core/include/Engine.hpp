@@ -147,7 +147,7 @@ private:
     void initProviders();
     void reap();
     void broadcast(const AppEvent& event);
-    void handleStreamEvent(const std::string& agentId, const std::string& parentId, const firmius::shared::StreamEvent& ev, bool& errorBroadcast);
+    void handleStreamEvent(const std::string& agentId, const std::string& parentId, const firmius::shared::StreamEvent& ev, const std::shared_ptr<std::atomic<bool>>& errorBroadcast);
 
     ToolRegistry toolRegistry;  // Owned by Engine, outlives agents
     

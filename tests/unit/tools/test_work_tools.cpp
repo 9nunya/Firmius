@@ -363,6 +363,27 @@ TEST_F(WorkToolsTest, planUpdatePerformsPartialUpdates) {
   EXPECT_EQ(event->plan.status, PlanStatus::Paused);
 }
 
+TEST_F(WorkToolsTest, planUpdateIgnoresAutoFilledEmptyOptionalStrings) {
+  const std::string planId = createPlanDirect();
+
+  auto input = makeObject({{"plan_id", planId},
+                           {"title", ""},
+                           {"objective", ""},
+                           {"context", ""},
+                           {"strategy", ""},
+                           {"notes", "kept note"}});
+  auto result = execute("plan_update", input);
+  ASSERT_TRUE(result.success) << result.error;
+
+  const auto updated = threadManager_->getPlan(threadId_, planId);
+  EXPECT_EQ(updated.title, "Plan A");
+  EXPECT_EQ(updated.objective, "Ship tool APIs");
+  EXPECT_EQ(updated.context, "Chunk 2");
+  EXPECT_EQ(updated.strategy, "Persist boring tool operations");
+  EXPECT_EQ(updated.notes, "kept note");
+  EXPECT_EQ(updated.status, PlanStatus::Draft);
+}
+
 TEST_F(WorkToolsTest, planSetActiveUpdatesThreadMetadata) {
   const std::string firstPlanId = createPlanDirect("Plan 1");
   const std::string secondPlanId = createPlanDirect("Plan 2");
@@ -777,6 +798,9 @@ TEST_F(WorkToolsTest, executorCannotReassignChunkOwnership) {
 TEST_F(WorkToolsTest, assignedAgentUpdateRequiresRetryableStatus) {
   const std::string planId = createPlanDirect();
   addChunkDirect(planId, "chunk-1", WorkChunkStatus::InProgress);
+  auto plan = threadManager_->getPlan(threadId_, planId);
+  plan.chunks[0].assignedAgentId = "executor-1";
+  threadManager_->updatePlan(threadId_, plan);
 
   auto input = makeObject({{"plan_id", planId},
                            {"chunk_id", "chunk-1"},
@@ -785,6 +809,79 @@ TEST_F(WorkToolsTest, assignedAgentUpdateRequiresRetryableStatus) {
   EXPECT_FALSE(result.success);
   EXPECT_THAT(result.error,
               ::testing::HasSubstr("assigned_agent_id may be updated"));
+}
+
+TEST_F(WorkToolsTest, chunkUpdateIgnoresAutoFilledEmptyOptionalFields) {
+  const std::string planId = createPlanDirect();
+  addChunkDirect(planId, "chunk-1", WorkChunkStatus::InProgress);
+
+  auto plan = threadManager_->getPlan(threadId_, planId);
+  plan.chunks[0].assignedAgentId = "executor-1";
+  plan.chunks[0].title = "Original title";
+  plan.chunks[0].goal = "Original goal";
+  plan.chunks[0].context = "Original context";
+  plan.chunks[0].constraints = "Original constraints";
+  plan.chunks[0].completion = "Original completion";
+  plan.chunks[0].filesToRead = {"keep.cpp"};
+  plan.chunks[0].filesToTouch = {"touch.cpp"};
+  plan.chunks[0].cwd = "/tmp/work";
+  plan.chunks[0].verificationCondition = "keep verification";
+  plan.chunks[0].handoffNotes = "keep notes";
+  WorkTask task;
+  task.id = "task-1";
+  task.title = "Existing task";
+  task.goal = "Keep task";
+  task.status = WorkChunkStatus::Ready;
+  task.createdAt = 10;
+  task.updatedAt = 10;
+  plan.chunks[0].tasks = {task};
+  threadManager_->updatePlan(threadId_, plan);
+
+  auto input = makeObject({{"plan_id", planId},
+                           {"chunk_id", "chunk-1"},
+                           {"title", ""},
+                           {"goal", ""},
+                           {"context", ""},
+                           {"constraints", ""},
+                           {"completion", ""},
+                           {"assigned_agent_id", ""},
+                           {"cwd", ""},
+                           {"verification_condition", ""},
+                           {"handoff_notes", ""},
+                           {"result_summary", "repo reviewed"},
+                           {"status", "Implemented"}},
+                          {{"attempt_count", 1}},
+                          {{"planning_gate", false}},
+                          {{"depends_on", {}},
+                           {"files_to_read", {}},
+                           {"files_to_touch", {}}});
+  auto &alloc = input.GetAllocator();
+  rapidjson::Value emptyTasks(rapidjson::kArrayType);
+  input.AddMember("tasks", emptyTasks, alloc);
+  auto result = execute("chunk_update", input);
+  ASSERT_TRUE(result.success) << result.error;
+
+  const auto updatedPlan = threadManager_->getPlan(threadId_, planId);
+  const auto &chunk = updatedPlan.chunks[0];
+  EXPECT_EQ(chunk.status, WorkChunkStatus::Implemented);
+  EXPECT_EQ(chunk.attemptCount, 1);
+  EXPECT_EQ(chunk.resultSummary, "repo reviewed");
+  EXPECT_EQ(chunk.assignedAgentId, "executor-1");
+  EXPECT_EQ(chunk.title, "Original title");
+  EXPECT_EQ(chunk.goal, "Original goal");
+  EXPECT_EQ(chunk.context, "Original context");
+  EXPECT_EQ(chunk.constraints, "Original constraints");
+  EXPECT_EQ(chunk.completion, "Original completion");
+  ASSERT_EQ(chunk.filesToRead.size(), 1u);
+  EXPECT_EQ(chunk.filesToRead[0], "keep.cpp");
+  ASSERT_EQ(chunk.filesToTouch.size(), 1u);
+  EXPECT_EQ(chunk.filesToTouch[0], "touch.cpp");
+  EXPECT_EQ(chunk.cwd, "/tmp/work");
+  EXPECT_EQ(chunk.verificationCondition, "keep verification");
+  EXPECT_EQ(chunk.handoffNotes, "keep notes");
+  ASSERT_EQ(chunk.tasks.size(), 1u);
+  EXPECT_EQ(chunk.tasks[0].id, "task-1");
+  EXPECT_EQ(chunk.tasks[0].title, "Existing task");
 }
 
 TEST_F(WorkToolsTest, chunkReadyForExecutionRespectsDependencyStatus) {

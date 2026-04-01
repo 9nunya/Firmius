@@ -1,7 +1,7 @@
-add_executable(firmius)
+add_library(firmius_tui)
+add_library(firmius::tui ALIAS firmius_tui)
 
-target_sources(firmius PRIVATE
-    src/main.cpp
+target_sources(firmius_tui PRIVATE
     src/TUIState.cpp
     src/TUIHotkeys.cpp
     src/ActivePlanState.cpp
@@ -67,11 +67,12 @@ target_sources(firmius PRIVATE
     src/tools/WorkToolPresentation.cpp
     src/utils/ReferenceAutocomplete.cpp
     src/utils/Clipboard.cpp
+    src/TuiRunner.cpp
 )
 
-target_include_directories(firmius PRIVATE src include)
+target_include_directories(firmius_tui PRIVATE src include)
 
-target_link_libraries(firmius PRIVATE
+target_link_libraries(firmius_tui PRIVATE
     firmius::core
     ftxui::screen
     ftxui::dom
@@ -80,12 +81,12 @@ target_link_libraries(firmius PRIVATE
 )
 
 # Include rapidjson headers
-target_include_directories(firmius PRIVATE
+target_include_directories(firmius_tui PRIVATE
     ${rapidjson_SOURCE_DIR}/include
     ${ftxui_SOURCE_DIR}/include
 )
 
 # Same compiler warnings as rest of project
-target_compile_options(firmius PRIVATE
+target_compile_options(firmius_tui PRIVATE
     -Wall -Wextra -Werror
 )

@@ -274,7 +274,7 @@ TEST(QwenProvider, MeaningfulStreamEventDetectsTextThinkingAndToolProgress) {
   EXPECT_FALSE(QwenProvider::isMeaningfulStreamEvent(
       ToolCallChunk{"tool-1", 0, "", ""}));
   EXPECT_FALSE(QwenProvider::isMeaningfulStreamEvent(
-      StreamRetrying{1, 5, 500, 1000, "retry", "acct"}));
+      StreamRetrying{1, 5, 500, 1000, "retry", "acct", ""}));
   EXPECT_FALSE(QwenProvider::isMeaningfulStreamEvent(
       StreamError{"boom", 500, "acct"}));
 }

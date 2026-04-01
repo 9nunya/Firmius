@@ -2,16 +2,17 @@
 #include "AgentRegistry.hpp"
 #include "Engine.hpp"
 #include "IHost.hpp"
-#include "agents/PurposeLoader.hpp"
 #include "agents/HintingLoader.hpp"
+#include "agents/PurposeLoader.hpp"
+#include "artifacts/ReferenceExpansion.hpp"
 #include "hosts/DockerHost.hpp"
 #include "hosts/LocalHost.hpp"
 #include "persistence/Journaler.hpp"
 #include "persistence/ThreadManager.hpp"
-#include "providers/BaseOAuthProvider.hpp"
 #include "providers/BaseAPIKeyProvider.hpp"
+#include "providers/BaseOAuthProvider.hpp"
 #include "providers/ProviderRegistry.hpp"
-#include "artifacts/ReferenceExpansion.hpp"
+#include "tools/WorkToolCommon.hpp"
 #include "utils/FSUtil.hpp"
 #include "utils/StringUtil.hpp"
 #include "utils/ToolSummaries.hpp"
@@ -28,9 +29,10 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-#include <chrono>
 #include <algorithm>
+#include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <curl/curl.h>
@@ -60,11 +62,13 @@ const std::string OWNER_PID_LABEL = "com.firmius.owner_pid";
 bool ensureWritableDirectory(const std::filesystem::path &dir) {
   std::error_code ec;
   std::filesystem::create_directories(dir, ec);
-  if (ec || !std::filesystem::exists(dir) || !std::filesystem::is_directory(dir)) {
+  if (ec || !std::filesystem::exists(dir) ||
+      !std::filesystem::is_directory(dir)) {
     return false;
   }
 
-  const auto probe = dir / (".write_probe_" + shared::StringUtil::generateUuid());
+  const auto probe =
+      dir / (".write_probe_" + shared::StringUtil::generateUuid());
   std::ofstream out(probe);
   if (!out.is_open()) {
     return false;
@@ -112,11 +116,16 @@ ThreadPermissionMode nextThreadPermissionMode(ThreadPermissionMode mode) {
   return ThreadPermissionMode::Request;
 }
 
-std::string getFirmiusHome() {
-  return resolveWritableFirmiusHome();
-}
+std::string getFirmiusHome() { return resolveWritableFirmiusHome(); }
 
 std::string getSessionPath() { return getFirmiusHome() + "/" + SESSION_FILE; }
+
+std::string modelCacheKey(const firmius::shared::ModelInfo &model,
+                          const std::string &providerId) {
+  const std::string provider =
+      model.provider.empty() ? providerId : model.provider;
+  return provider + "\n" + model.id;
+}
 
 void persistSessionState(const std::string &threadId,
                          const std::string &focusedAgentId) {
@@ -227,6 +236,8 @@ void Harness::init() {
   {
     std::lock_guard<std::mutex> modelLock(modelsMutex_);
     cachedModels_.clear();
+    cachedModelKeys_.clear();
+    loadingModelProviders_.clear();
     isRefreshingModels_ = false;
     modelsLoaded_ = false;
   }
@@ -433,7 +444,8 @@ bool Harness::switchThread(const std::string &threadId) {
     return false;
   }
 
-  if (!threadManager_.tryReadAgentManifest(threadId, manifest, &manifestError)) {
+  if (!threadManager_.tryReadAgentManifest(threadId, manifest,
+                                           &manifestError)) {
     manifestRecovered = true;
   }
 
@@ -527,9 +539,8 @@ bool Harness::resumeLast() {
   return false;
 }
 
-void Harness::send(
-    const std::string &text,
-    const std::vector<firmius::shared::ImageContent> &images) {
+void Harness::send(const std::string &text,
+                   const std::vector<firmius::shared::ImageContent> &images) {
   std::string statusMessage;
   if (!dispatchRequestToAgent(currentThreadId_, focusedAgentId_, text, images,
                               statusMessage)) {
@@ -537,10 +548,11 @@ void Harness::send(
   }
 }
 
-bool Harness::dispatchRequestToAgent(
-    const std::string &threadId, const std::string &preferredAgentId,
-    const std::string &text, const std::vector<ImageContent> &images,
-    std::string &statusMessage) {
+bool Harness::dispatchRequestToAgent(const std::string &threadId,
+                                     const std::string &preferredAgentId,
+                                     const std::string &text,
+                                     const std::vector<ImageContent> &images,
+                                     std::string &statusMessage) {
   std::string tid;
   ThreadMetadata metadata;
   std::string fid;
@@ -572,8 +584,8 @@ bool Harness::dispatchRequestToAgent(
           std::chrono::steady_clock::now().time_since_epoch().count());
 
       try {
-        preparedText =
-            firmius::core::artifacts::expandInboundReferences(tid, metadata.cwd, text);
+        preparedText = firmius::core::artifacts::expandInboundReferences(
+            tid, metadata.cwd, text);
       } catch (const std::exception &e) {
         expansionFailed = true;
         expansionError = e.what();
@@ -614,16 +626,15 @@ bool Harness::dispatchRequestToAgent(
     emitEvent(firmius::shared::UserMessageSent{messageId, text, tid});
     // Note: summonAgent will use the default model from ConfigLoader
     // which is what we want for a brand new lead agent in a thread.
-    Engine::instance().summonAgent(tid, metadata.leadPersona, preparedText, true, "",
-                                   "lead", "", requestedId, "", "", "",
-                                   images);
+    Engine::instance().summonAgent(tid, metadata.leadPersona, preparedText,
+                                   true, "", "lead", "", requestedId, "", "",
+                                   "", images);
     statusMessage = "Retry started on lead agent.";
     return true;
   }
 
   if (agentRunning) {
-    emitEvent(
-        firmius::shared::MessageQueued{messageId, text, tid, fid});
+    emitEvent(firmius::shared::MessageQueued{messageId, text, tid, fid});
     emitEvent(firmius::shared::UserMessageSent{messageId, text, tid});
     statusMessage = "Retry queued on running agent.";
     return true;
@@ -714,15 +725,14 @@ void Harness::abortAndFlushQueuedMessages() {
   }
 
   // Always cancel the agent when user explicitly requests cancellation.
-  // The running/booting check determines whether we wait for agent to settle before draining.
+  // The running/booting check determines whether we wait for agent to settle
+  // before draining.
   Engine::instance().cancelAgent(focusedAgentId);
-
-
 
   {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
-    backgroundThreads_.emplace_back([this, focusedAgentId, threadId](
-                                        std::stop_token stopToken) {
+    backgroundThreads_.emplace_back([this, focusedAgentId,
+                                     threadId](std::stop_token stopToken) {
       while (!stopToken.stop_requested()) {
         auto focusedAgent = AgentRegistry::instance().getAgent(focusedAgentId);
         if (!focusedAgent) {
@@ -1003,7 +1013,8 @@ void Harness::routeEngineEvent(const firmius::shared::AppEvent &event) {
 
     bool isAgentInCurrentThread = false;
     if (!agentId.empty()) {
-      isAgentInCurrentThread = (resolveThreadForAgent(agentId) == currentThreadId_);
+      isAgentInCurrentThread =
+          (resolveThreadForAgent(agentId) == currentThreadId_);
     }
 
     bool isAgentSpawnedEvent = std::holds_alternative<AgentSpawned>(event);
@@ -1034,7 +1045,8 @@ void Harness::routeEngineEvent(const firmius::shared::AppEvent &event) {
             enriched.modelId = modelId;
             enriched.maxTokens = maxTokens;
             toEmit.push_back(enriched);
-            const std::string spawnedThreadId = resolveThreadForAgent(ev.agentId);
+            const std::string spawnedThreadId =
+                resolveThreadForAgent(ev.agentId);
             if (!spawnedThreadId.empty()) {
               drainQueueForAgent(ev.agentId, spawnedThreadId);
             }
@@ -1074,25 +1086,69 @@ void Harness::routeEngineEvent(const firmius::shared::AppEvent &event) {
             }
             const std::string agentThreadId = resolveThreadForAgent(ev.agentId);
             if (!agentThreadId.empty()) {
-              drainQueueForAgent(ev.agentId, agentThreadId, true);
+              // Check if this turn contains tool calls that are about to
+              // execute
+              bool hasPendingToolCalls = false;
+              for (const auto &turnMsg : ev.turn.messages) {
+                if (turnMsg.role == Role::Assistant) {
+                  for (const auto &part : turnMsg.content) {
+                    if (std::holds_alternative<
+                            firmius::shared::ToolCallContent>(part)) {
+                      hasPendingToolCalls = true;
+                      break;
+                    }
+                  }
+                }
+              }
+
+              // Only allow injection if the agent isn't about to run tools
+              bool safeToInject = !hasPendingToolCalls;
+              drainQueueForAgent(ev.agentId, agentThreadId, safeToInject);
+            }
+          } else if constexpr (std::is_same_v<T, AgentFileEdited>) {
+            toEmit.push_back(ev);
+            const std::string agentThreadId = resolveThreadForAgent(ev.agentId);
+            if (!agentThreadId.empty()) {
+              const auto peers = listFleetPeers(ev.agentId, agentThreadId);
+              auto editorAgent = AgentRegistry::instance().getAgent(ev.agentId);
+              std::string editorName = ev.agentId;
+              if (editorAgent &&
+                  !editorAgent->getContext().identity.friendlyName.empty()) {
+                editorName = editorAgent->getContext().identity.friendlyName;
+              }
+              for (const auto &peerId : peers) {
+                std::string msg = "Fleet edit notice: peer '" + editorName +
+                                  "' edited " + ev.path +
+                                  ". Re-read before further line-range edits.";
+                queueInternalMessage(peerId, agentThreadId, msg);
+              }
             }
           } else if constexpr (std::is_same_v<T, AgentError>) {
             toEmit.push_back(ev);
             const std::string agentThreadId = resolveThreadForAgent(ev.agentId);
             if (!agentThreadId.empty()) {
               drainQueueForAgent(ev.agentId, agentThreadId);
+              drainInternalQueueForAgent(ev.agentId, agentThreadId);
+              failOwnedLocks(ev.agentId, agentThreadId,
+                             "Owner agent error: " + ev.message);
             }
           } else if constexpr (std::is_same_v<T, AgentInterrupted>) {
             toEmit.push_back(ev);
             const std::string agentThreadId = resolveThreadForAgent(ev.agentId);
             if (!agentThreadId.empty()) {
               drainQueueForAgent(ev.agentId, agentThreadId);
+              drainInternalQueueForAgent(ev.agentId, agentThreadId);
+              failOwnedLocks(ev.agentId, agentThreadId,
+                             "Owner agent interrupted.");
             }
           } else if constexpr (std::is_same_v<T, AgentFinished>) {
             toEmit.push_back(ev);
             const std::string agentThreadId = resolveThreadForAgent(ev.agentId);
             if (!agentThreadId.empty()) {
               drainQueueForAgent(ev.agentId, agentThreadId);
+              drainInternalQueueForAgent(ev.agentId, agentThreadId);
+              failOwnedLocks(ev.agentId, agentThreadId,
+                             "Owner agent exited: " + ev.outcome.text);
             }
           } else if constexpr (std::is_same_v<T, ThreadChanged> ||
                                std::is_same_v<T, ThreadLocked> ||
@@ -1167,7 +1223,6 @@ Harness::listArtifacts(const std::string &threadId) {
   return {};
 }
 
-
 bool Harness::setFocusedAgent(const std::string &agentId) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (currentThreadId_.empty() ||
@@ -1214,12 +1269,11 @@ bool Harness::switchLeadPersona(const std::string &personaName) {
   ctx.permissions.allowedScopes = persona.allowedScopes;
 
   AgentTurn nudgeTurn;
-  nudgeTurn.turnId = "system-persona-switch-" +
-                     std::to_string(std::chrono::duration_cast<
-                                        std::chrono::milliseconds>(
-                                        std::chrono::system_clock::now()
-                                            .time_since_epoch())
-                                        .count());
+  nudgeTurn.turnId =
+      "system-persona-switch-" +
+      std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
+                         std::chrono::system_clock::now().time_since_epoch())
+                         .count());
   Message nudgeMsg;
   nudgeMsg.role = Role::System;
   nudgeMsg.visibility = MessageVisibility::Internal;
@@ -1261,7 +1315,8 @@ ThreadPermissionMode Harness::currentThreadPermissionMode() {
   return threadManager_.getMetadata(currentThreadId_).permissionMode;
 }
 
-ThreadPermissionMode Harness::threadPermissionMode(const std::string &threadId) {
+ThreadPermissionMode
+Harness::threadPermissionMode(const std::string &threadId) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (threadId.empty()) {
     return ThreadPermissionMode::Request;
@@ -1273,7 +1328,8 @@ ThreadPermissionMode Harness::threadPermissionMode(const std::string &threadId) 
   }
 }
 
-ThreadPermissionRules Harness::threadPermissionRules(const std::string &threadId) {
+ThreadPermissionRules
+Harness::threadPermissionRules(const std::string &threadId) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (threadId.empty()) {
     return {};
@@ -1293,13 +1349,13 @@ bool Harness::commandMatchesPersistedAllowRule(const std::string &threadId,
 
   auto rules = threadPermissionRules(threadId);
   std::string normalized = normalizeCommandForRuleMatch(command);
-  return std::any_of(
-      rules.commandAllowRules.begin(), rules.commandAllowRules.end(),
-      [&command, &normalized](const CommandAllowRule &rule) {
-        return rule.exactCommand == command ||
-               (!rule.normalizedCommand.empty() &&
-                rule.normalizedCommand == normalized);
-      });
+  return std::any_of(rules.commandAllowRules.begin(),
+                     rules.commandAllowRules.end(),
+                     [&command, &normalized](const CommandAllowRule &rule) {
+                       return rule.exactCommand == command ||
+                              (!rule.normalizedCommand.empty() &&
+                               rule.normalizedCommand == normalized);
+                     });
 }
 
 bool Harness::pathMatchesPersistedWriteAllowRule(
@@ -1309,11 +1365,11 @@ bool Harness::pathMatchesPersistedWriteAllowRule(
   }
 
   auto rules = threadPermissionRules(threadId);
-  return std::any_of(
-      rules.writeAllowPaths.begin(), rules.writeAllowPaths.end(),
-      [&absolutePath](const std::string &pathPrefix) {
-        return shared::FSUtil::isSubpath(absolutePath, pathPrefix);
-      });
+  return std::any_of(rules.writeAllowPaths.begin(), rules.writeAllowPaths.end(),
+                     [&absolutePath](const std::string &pathPrefix) {
+                       return shared::FSUtil::isSubpath(absolutePath,
+                                                        pathPrefix);
+                     });
 }
 
 void Harness::persistCommandAllowRule(const std::string &threadId,
@@ -1351,11 +1407,13 @@ bool Harness::setCurrentThreadPermissionMode(ThreadPermissionMode mode) {
     threadManager_.updateMetadata(currentThreadId_, metadata);
   }
 
-  emitEvent(firmius::shared::ThreadMetadataUpdated{metadata.threadId, metadata});
+  emitEvent(
+      firmius::shared::ThreadMetadataUpdated{metadata.threadId, metadata});
   return true;
 }
 
-std::optional<ThreadPermissionMode> Harness::cycleCurrentThreadPermissionMode() {
+std::optional<ThreadPermissionMode>
+Harness::cycleCurrentThreadPermissionMode() {
   ThreadMetadata metadata;
   {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -1368,7 +1426,8 @@ std::optional<ThreadPermissionMode> Harness::cycleCurrentThreadPermissionMode() 
     threadManager_.updateMetadata(currentThreadId_, metadata);
   }
 
-  emitEvent(firmius::shared::ThreadMetadataUpdated{metadata.threadId, metadata});
+  emitEvent(
+      firmius::shared::ThreadMetadataUpdated{metadata.threadId, metadata});
   return metadata.permissionMode;
 }
 
@@ -1378,8 +1437,7 @@ Harness::requestPermissionEscalation(PermissionEscalationRequest request) {
   {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (request.requestId.empty()) {
-      request.requestId =
-          "perm-" + std::to_string(++nextPermissionRequestId_);
+      request.requestId = "perm-" + std::to_string(++nextPermissionRequestId_);
     }
     pending->request = request;
     pendingPermissionRequests_[request.requestId] = pending;
@@ -1426,6 +1484,26 @@ bool Harness::resolvePermissionEscalation(const std::string &requestId,
       pending->request.requestId, pending->request.threadId,
       pending->request.agentId, response});
   return true;
+}
+
+std::vector<PermissionEscalationRequest>
+Harness::listPendingPermissionEscalations(const std::string &threadId) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  std::vector<PermissionEscalationRequest> requests;
+  requests.reserve(pendingPermissionRequests_.size());
+  for (auto &entry : pendingPermissionRequests_) {
+    const auto &pending = entry.second;
+    if (!pending) {
+      continue;
+    }
+    const auto &request = pending->request;
+    if (!threadId.empty() && !request.threadId.empty() &&
+        request.threadId != threadId) {
+      continue;
+    }
+    requests.push_back(request);
+  }
+  return requests;
 }
 
 bool Harness::markThreadAsBenchmark(const std::string &threadId,
@@ -1501,53 +1579,119 @@ bool Harness::appendSystemMessage(const std::string &agentId,
 }
 
 std::vector<ModelInfo> Harness::listAllModels() {
+  std::vector<std::string> configuredProviderIds;
+  std::vector<ModelInfo> snapshot;
   {
     std::lock_guard<std::mutex> lock(modelsMutex_);
 
-    if (modelsLoaded_) {
+    if (modelsLoaded_ || isRefreshingModels_) {
       return cachedModels_;
     }
 
-    if (isRefreshingModels_) {
-      return {}; // Still loading...
-    }
-
+    cachedModels_.clear();
+    cachedModelKeys_.clear();
+    loadingModelProviders_.clear();
     isRefreshingModels_ = true;
+
+    for (const auto &providerId :
+         provider::ProviderRegistry::instance().listProviderIds()) {
+      auto provider = provider::ProviderRegistry::instance().getProvider(providerId);
+      if (!provider || !provider->isConfigured()) {
+        continue;
+      }
+      configuredProviderIds.push_back(providerId);
+      loadingModelProviders_.insert(providerId);
+    }
+    snapshot = cachedModels_;
   }
 
-  std::lock_guard<std::recursive_mutex> lock(mutex_);
-  backgroundThreads_.emplace_back([this]() {
-    std::vector<ModelInfo> all;
-    auto providerIds = provider::ProviderRegistry::instance().listProviderIds();
-    for (const auto &pid : providerIds) {
-      auto prov = provider::ProviderRegistry::instance().getProvider(pid);
-      if (prov && prov->isConfigured()) {
-        try {
-          auto models = prov->listModels();
-          all.insert(all.end(), models.begin(), models.end());
-        } catch (...) {
-        }
-      }
-
-      {
-        std::lock_guard<std::mutex> innerLock(modelsMutex_);
-        cachedModels_ = all;
-      }
-      emitEvent(firmius::shared::AppEvent(firmius::shared::ModelsRefreshed{}));
-    }
-
+  if (configuredProviderIds.empty()) {
     {
-      std::lock_guard<std::mutex> innerLock(modelsMutex_);
-      cachedModels_ = std::move(all);
+      std::lock_guard<std::mutex> lock(modelsMutex_);
       isRefreshingModels_ = false;
       modelsLoaded_ = true;
     }
-
-    // Emit event so TUI knows models are ready.
     emitEvent(firmius::shared::AppEvent(firmius::shared::ModelsRefreshed{}));
-  });
+    return snapshot;
+  }
 
-  return {};
+  auto remainingProviders =
+      std::make_shared<std::atomic<std::size_t>>(configuredProviderIds.size());
+
+  for (const auto &providerId : configuredProviderIds) {
+    emitEvent(firmius::shared::AppEvent(
+        firmius::shared::ProviderModelsFetchStarted{providerId}));
+
+    backgroundThreads_.emplace_back([this, providerId, remainingProviders]() {
+      std::string error;
+      auto provider = provider::ProviderRegistry::instance().getProvider(providerId);
+      if (!provider) {
+        error = "Provider unavailable";
+      } else {
+        try {
+          provider->discoverModels([&](const ModelInfo &discoveredModel) {
+            auto model = discoveredModel;
+            if (model.provider.empty()) {
+              model.provider = providerId;
+            }
+
+            bool inserted = false;
+            {
+              std::lock_guard<std::mutex> lock(modelsMutex_);
+              inserted =
+                  cachedModelKeys_.insert(modelCacheKey(model, providerId)).second;
+              if (inserted) {
+                cachedModels_.push_back(model);
+              }
+            }
+
+            if (inserted) {
+              emitEvent(
+                  firmius::shared::AppEvent(firmius::shared::ModelDiscovered{
+                      model}));
+              emitEvent(
+                  firmius::shared::AppEvent(firmius::shared::ModelsRefreshed{}));
+            }
+          });
+        } catch (const std::exception &ex) {
+          error = ex.what();
+        } catch (...) {
+          error = "Unknown error";
+        }
+      }
+
+      bool allFinished = false;
+      {
+        std::lock_guard<std::mutex> lock(modelsMutex_);
+        loadingModelProviders_.erase(providerId);
+        if (remainingProviders->fetch_sub(1) == 1) {
+          isRefreshingModels_ = false;
+          modelsLoaded_ = true;
+          allFinished = true;
+        }
+      }
+
+      emitEvent(firmius::shared::AppEvent(
+          firmius::shared::ProviderModelsFetchFinished{providerId, error}));
+      emitEvent(firmius::shared::AppEvent(firmius::shared::ModelsRefreshed{}));
+
+      if (allFinished) {
+        emitEvent(firmius::shared::AppEvent(firmius::shared::ModelsRefreshed{}));
+      }
+    });
+  }
+
+  return snapshot;
+}
+
+bool Harness::isModelsLoaded() const {
+  std::lock_guard<std::mutex> lock(modelsMutex_);
+  return modelsLoaded_;
+}
+
+std::vector<std::string> Harness::listProvidersFetchingModels() const {
+  std::lock_guard<std::mutex> lock(modelsMutex_);
+  return {loadingModelProviders_.begin(), loadingModelProviders_.end()};
 }
 
 const UserConfig &Harness::getConfig() const {
@@ -1661,8 +1805,8 @@ void Harness::compactFocusedAgent() {
     return;
   }
   if (agent->isRunning()) {
-    emitEvent(
-        firmius::shared::AgentError{"", "Cannot compact while agent is running"});
+    emitEvent(firmius::shared::AgentError{
+        "", "Cannot compact while agent is running"});
     return;
   }
   Engine::instance().compactAgent(focusedAgentId_);
@@ -1780,6 +1924,10 @@ void Harness::drainQueueForAgent(const std::string &agentId,
   messageQueue_ = std::move(remaining);
 
   if (batch.empty()) {
+  
+  for (const auto &item : batch) {
+    emitEvent(firmius::shared::InternalMessageDequeued{item.id, item.threadId, item.agentId});
+  }
     return;
   }
 
@@ -1833,7 +1981,8 @@ void Harness::drainQueueForAgent(const std::string &agentId,
     }
   }
 
-  Engine::instance().executeTask(agentId, batch.back().text, batch.back().images);
+  Engine::instance().executeTask(agentId, batch.back().text,
+                                 batch.back().images);
 }
 
 void Harness::clearQueue() {
@@ -1859,6 +2008,214 @@ void Harness::clearQueueForAgentThread(const std::string &agentId,
   messageQueue_ = std::move(remaining);
 }
 
+void Harness::drainInternalQueueForAgent(const std::string &agentId,
+                                         const std::string &threadId) {
+  drainInternalQueueForAgent(agentId, threadId, false);
+}
+
+void Harness::drainInternalQueueForAgent(const std::string &agentId,
+                                         const std::string &threadId,
+                                         bool allowRunningInjection) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  if (internalQueue_.empty() || agentId.empty() || threadId.empty()) {
+    return;
+  }
+  auto agent = AgentRegistry::instance().getAgent(agentId);
+  if (!agent) {
+    return;
+  }
+  if (agent->getContext().history &&
+      agent->getContext().history->threadId != threadId) {
+    return;
+  }
+  if (agent->isBooting()) {
+    return;
+  }
+  const bool agentRunning = agent->isRunning();
+  if (agentRunning && !allowRunningInjection) {
+    return;
+  }
+
+  std::vector<QueuedInternalMessage> batch;
+  std::deque<QueuedInternalMessage> remaining;
+  while (!internalQueue_.empty()) {
+    QueuedInternalMessage item = std::move(internalQueue_.front());
+    internalQueue_.pop_front();
+    if (item.agentId == agentId && item.threadId == threadId) {
+      batch.push_back(std::move(item));
+    } else {
+      remaining.push_back(std::move(item));
+    }
+  }
+  internalQueue_ = std::move(remaining);
+  if (batch.empty()) {
+    return;
+  }
+
+  // Emit dequeued events for TUI
+  for (const auto &item : batch) {
+    emitEvent(firmius::shared::InternalMessageDequeued{item.id, item.threadId, item.agentId});
+  }
+
+  if (agentRunning) {
+    // When agent is running, just append to history - the agent loop will
+    // pick it up on the next turn iteration
+    for (const auto &item : batch) {
+      appendInternalMessage(agent, item.text);
+    }
+    return;
+  }
+
+  // When agent is not running, append and let caller handle resumption
+  for (const auto &item : batch) {
+    appendInternalMessage(agent, item.text);
+  }
+}
+
+void Harness::queueInternalMessage(const std::string &agentId,
+                                   const std::string &threadId,
+                                   const std::string &text) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  if (agentId.empty() || threadId.empty() || text.empty()) {
+    return;
+  }
+  auto agent = AgentRegistry::instance().getAgent(agentId);
+  if (!agent) {
+    return;
+  }
+  if (agent->isBooting() || agent->isRunning()) {
+    QueuedInternalMessage item;
+    item.id = std::to_string(
+        std::chrono::steady_clock::now().time_since_epoch().count());
+    item.text = text;
+    item.threadId = threadId;
+    item.agentId = agentId;
+    internalQueue_.push_back(item);
+    emitEvent(firmius::shared::InternalMessageQueued{item.id, text, threadId, agentId});
+    return;
+  }
+  appendInternalMessage(agent, text);
+}
+
+void Harness::appendInternalMessage(std::shared_ptr<shared::IAgent> agent,
+                                    const std::string &text) {
+  if (!agent || text.empty()) {
+    return;
+  }
+  auto &ctx = agent->getMutableContext();
+  if (!ctx.history) {
+    return;
+  }
+
+  AgentTurn nudgeTurn;
+  nudgeTurn.turnId =
+      "fleet-nudge-" +
+      std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
+                         std::chrono::system_clock::now().time_since_epoch())
+                         .count());
+  Message nudgeMsg;
+  nudgeMsg.role = Role::System;
+  nudgeMsg.visibility = MessageVisibility::Internal;
+  nudgeMsg.content.push_back(TextContent{text});
+  nudgeMsg.timestamp = static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::system_clock::now().time_since_epoch())
+          .count());
+  nudgeTurn.messages.push_back(nudgeMsg);
+  ctx.history->turns.push_back(nudgeTurn);
+
+  if (ctx.config.persistHistory) {
+    Journaler jnl(ctx.history->threadId, ctx.identity.id);
+    jnl.appendTurn(nudgeTurn);
+  }
+}
+
+std::string Harness::resolveFleetRoot(const std::string &agentId) {
+  if (agentId.empty()) {
+    return "";
+  }
+  auto current = AgentRegistry::instance().getAgent(agentId);
+  int depth = 0;
+  while (current && depth < 100) {
+    const std::string parentId = current->getContext().identity.parentId;
+    if (parentId.empty()) {
+      return current->getContext().identity.id;
+    }
+    current = AgentRegistry::instance().getAgent(parentId);
+    depth++;
+  }
+  return agentId;
+}
+
+std::vector<std::string> Harness::listFleetPeers(const std::string &agentId,
+                                                 const std::string &threadId) {
+  std::vector<std::string> peers;
+  if (agentId.empty() || threadId.empty()) {
+    return peers;
+  }
+  const std::string root = resolveFleetRoot(agentId);
+  if (root.empty()) {
+    return peers;
+  }
+  for (const auto &candidateId : AgentRegistry::instance().listAll()) {
+    if (candidateId == agentId) {
+      continue;
+    }
+    auto candidate = AgentRegistry::instance().getAgent(candidateId);
+    if (!candidate || !candidate->getContext().history) {
+      continue;
+    }
+    if (candidate->getContext().history->threadId != threadId) {
+      continue;
+    }
+    if (resolveFleetRoot(candidateId) == root) {
+      peers.push_back(candidateId);
+    }
+  }
+  return peers;
+}
+
+std::size_t Harness::failOwnedLocks(const std::string &agentId,
+                                    const std::string &threadId,
+                                    const std::string &reason) {
+  if (agentId.empty() || threadId.empty()) {
+    return 0;
+  }
+  ThreadManager tm(ThreadManager::defaultBasePath());
+  std::size_t failed = 0;
+  std::vector<std::string> lockIds;
+  tm.mutateFleetState(threadId, [&](FleetState &state) {
+    const uint64_t now = worktools::nowEpochMs();
+    for (auto &lock : state.locks) {
+      if (lock.ownerAgentId != agentId) {
+        continue;
+      }
+      if (lock.status == "open" || lock.status.empty()) {
+        lock.status = "failed";
+        lock.reason = reason;
+        lock.updatedAt = now;
+        failed++;
+        lockIds.push_back(lock.lockId);
+      }
+    }
+  });
+  if (failed > 0) {
+    std::string joined;
+    for (size_t i = 0; i < lockIds.size(); ++i) {
+      if (i > 0) {
+        joined += ", ";
+      }
+      joined += lockIds[i];
+    }
+    std::string msg =
+        "You exited with active fleet locks still open. They were marked "
+        "failed: " +
+        joined + ". Release or fail locks explicitly before finishing.";
+    queueInternalMessage(agentId, threadId, msg);
+  }
+  return failed;
+}
+
 bool Harness::retryLastRequest(std::string &statusMessage) {
   std::string threadId;
   std::string preferredAgentId;
@@ -1875,7 +2232,8 @@ bool Harness::retryLastRequest(std::string &statusMessage) {
 
   auto targetAgentId = resolveRetryTargetAgentId(threadId, preferredAgentId);
   if (!targetAgentId.has_value()) {
-    statusMessage = "No focused agent with restorable history is available in this thread.";
+    statusMessage =
+        "No focused agent with restorable history is available in this thread.";
     return false;
   }
   const std::string agentId = *targetAgentId;
@@ -1889,7 +2247,8 @@ bool Harness::retryLastRequest(std::string &statusMessage) {
       auto manifest = threadManager_.readAgentManifest(threadId);
       auto it = manifest.find(agentId);
       if (it == manifest.end()) {
-        statusMessage = "Focused agent cannot be restored from persisted history.";
+        statusMessage =
+            "Focused agent cannot be restored from persisted history.";
         return false;
       }
       entry = it->second;
@@ -1938,9 +2297,10 @@ bool Harness::retryLastRequest(std::string &statusMessage) {
     return false;
   }
 
-  statusMessage = hasResumableTurn
-                      ? "Resuming focused agent from the last failed or cancelled turn."
-                      : "Awakening focused agent from existing thread history.";
+  statusMessage =
+      hasResumableTurn
+          ? "Resuming focused agent from the last failed or cancelled turn."
+          : "Awakening focused agent from existing thread history.";
   return true;
 }
 
@@ -1997,20 +2357,21 @@ Harness::snapshotResumableTurnForAgent(const std::string &threadId,
     bool sawCancelledStopReason = false;
     for (auto later = it.base(); later != history->turns.end(); ++later) {
       if (later->messages.empty()) {
-        sawCancelledStopReason =
-            sawCancelledStopReason || later->stopReason == StopReason::Cancelled;
+        sawCancelledStopReason = sawCancelledStopReason ||
+                                 later->stopReason == StopReason::Cancelled;
         continue;
       }
       finalRoleAfterTurn = later->messages.back().role;
-      sawCancellationNotice = sawCancellationNotice || isCancellationNotice(later->messages.back());
+      sawCancellationNotice =
+          sawCancellationNotice || isCancellationNotice(later->messages.back());
       sawCancelledStopReason =
           sawCancelledStopReason || later->stopReason == StopReason::Cancelled;
     }
 
     const bool isCancelledTurn = it->turnId.rfind("cancelled-", 0) == 0;
     if (!finalRoleAfterTurn.has_value() ||
-        (!isCancelledTurn && !sawCancellationNotice && !sawCancelledStopReason &&
-         *finalRoleAfterTurn != Role::Error)) {
+        (!isCancelledTurn && !sawCancellationNotice &&
+         !sawCancelledStopReason && *finalRoleAfterTurn != Role::Error)) {
       return std::nullopt;
     }
 
@@ -2264,6 +2625,11 @@ Harness::getAllQuotas(const std::string &providerId) {
   if (oauthProv) {
     oauthProv->refreshQuotas();
     return oauthProv->getAllQuotas();
+  }
+  auto apiKeyProv = dynamic_cast<provider::BaseAPIKeyProvider *>(prov.get());
+  if (apiKeyProv && apiKeyProv->supportsQuotaTracking()) {
+    apiKeyProv->refreshQuotas();
+    return apiKeyProv->getAllQuotas();
   }
   return {};
 }

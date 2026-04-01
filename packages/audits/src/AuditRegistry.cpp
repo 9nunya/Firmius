@@ -2,6 +2,7 @@
 #include "audits/AntigravityProviderAudit.hpp"
 #include "audits/LoopCancellationAudit.hpp"
 #include "audits/ModelLoadAudit.hpp"
+#include "audits/OpenRouterQuotaAudit.hpp"
 #include "audits/AntigravityQuotaAudit.hpp"
 #include "audits/BenchmarksAudit.hpp"
 #include "audits/CodexProviderAudit.hpp"
@@ -29,6 +30,7 @@ std::vector<std::unique_ptr<shared::IAudit>> createAudits() {
     audits.push_back(std::make_unique<AntigravityQuotaAudit>());
     audits.push_back(std::make_unique<CodexProviderAudit>());
     audits.push_back(std::make_unique<CodexQuotaAudit>());
+    audits.push_back(std::make_unique<OpenRouterQuotaAudit>());
     audits.push_back(std::make_unique<QwenProviderAudit>());
     audits.push_back(std::make_unique<QwenQuotaAudit>());
     audits.push_back(std::make_unique<HarnessChaosAudit>());

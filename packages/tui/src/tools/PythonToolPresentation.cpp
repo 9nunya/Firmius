@@ -90,6 +90,7 @@ std::vector<std::string> BuildOutputLines(const std::string &output) {
     return {};
   }
   std::vector<std::string> lines;
+  lines.reserve(32);  // Reserve for common case
   std::istringstream stream(output);
   std::string line;
   while (std::getline(stream, line)) {

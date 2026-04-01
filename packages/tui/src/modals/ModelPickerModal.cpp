@@ -16,12 +16,33 @@
 
 namespace firmius::tui {
 
+namespace {
+
+std::string formatProviderList(std::vector<std::string> providerIds) {
+  std::sort(providerIds.begin(), providerIds.end());
+  if (providerIds.empty()) {
+    return "";
+  }
+
+  std::string joined;
+  for (size_t i = 0; i < providerIds.size(); ++i) {
+    if (i > 0) {
+      joined += ", ";
+    }
+    joined += providerIds[i];
+  }
+  return joined;
+}
+
+} // namespace
+
 ftxui::Component ModelPickerModal::create(TuiState &state) {
   auto entries = std::make_shared<std::vector<ModelPickerEntry>>();
   auto filteredIndices = std::make_shared<std::vector<int>>();
   auto filterText = std::make_shared<std::string>("");
   auto selected = std::make_shared<int>(0);
   auto isLoading = std::make_shared<bool>(true);
+  auto fetchingProviders = std::make_shared<std::vector<std::string>>();
   auto rowBoxes = std::make_shared<std::vector<ftxui::Box>>();
 
   auto rebuildFiltered = [entries, filteredIndices, filterText, selected]() {
@@ -34,10 +55,11 @@ ftxui::Component ModelPickerModal::create(TuiState &state) {
     }
   };
 
-  auto refresh = [entries, isLoading, rebuildFiltered]() {
+  auto refresh = [entries, isLoading, fetchingProviders, rebuildFiltered]() {
     auto &h = firmius::core::Harness::instance();
     *entries = BuildModelPickerEntries(h.listAllModels(), true);
     *isLoading = !h.isModelsLoaded();
+    *fetchingProviders = h.listProvidersFetchingModels();
     rebuildFiltered();
   };
 
@@ -46,7 +68,12 @@ ftxui::Component ModelPickerModal::create(TuiState &state) {
   auto needsRefresh = std::make_shared<std::atomic<bool>>(false);
   int subId = firmius::core::Harness::instance().subscribe(
       [needsRefresh, &state](const firmius::shared::AppEvent &event) {
-        if (std::holds_alternative<firmius::shared::ModelsRefreshed>(event)) {
+        if (std::holds_alternative<firmius::shared::ModelsRefreshed>(event) ||
+            std::holds_alternative<firmius::shared::ProviderModelsFetchStarted>(
+                event) ||
+            std::holds_alternative<firmius::shared::ProviderModelsFetchFinished>(
+                event) ||
+            std::holds_alternative<firmius::shared::ModelDiscovered>(event)) {
           *needsRefresh = true;
           state.postEvent(ftxui::Event::Custom);
         }
@@ -101,7 +128,8 @@ ftxui::Component ModelPickerModal::create(TuiState &state) {
   auto component = ftxui::Renderer(scrollable, [entries, filteredIndices,
                                                 filterText, selected,
                                                 rebuildFiltered, isLoading,
-                                                scrollable, needsRefresh,
+                                                fetchingProviders, scrollable,
+                                                needsRefresh,
                                                 refresh]() {
     const auto &theme = ThemeManager::instance().getCurrentTheme();
     const auto terminal = ftxui::Terminal::Size();
@@ -119,21 +147,28 @@ ftxui::Component ModelPickerModal::create(TuiState &state) {
     }
     rebuildFiltered();
 
+    const std::string fetchingLabel = formatProviderList(*fetchingProviders);
+
     if (*isLoading && entries->empty()) {
+      ftxui::Elements loadingRows = {
+          ftxui::text("Scanning providers for models...") | ftxui::center |
+              ftxui::color(theme.modals.fg),
+          ftxui::text(""),
+          ftxui::text("The picker will populate as providers respond.") |
+              ftxui::center | ftxui::color(theme.base.dim),
+      };
+      if (!fetchingLabel.empty()) {
+        loadingRows.push_back(ftxui::text(""));
+        loadingRows.push_back(
+            ftxui::text("Fetching: " + fetchingLabel) | ftxui::center |
+            ftxui::color(theme.base.dim));
+      }
+      loadingRows.push_back(
+          ftxui::text("") | ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, 4));
       return FlatModalPanel(
           theme, "Select Model",
-          ModalSection(
-              theme,
-              ftxui::vbox({
-                  ftxui::text("Scanning providers for models...") |
-                      ftxui::center | ftxui::color(theme.modals.fg),
-                  ftxui::text(""),
-                  ftxui::text("The picker will populate as providers respond.") |
-                      ftxui::center | ftxui::color(theme.base.dim),
-                  ftxui::text("") |
-                      ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, 4),
-              }),
-              theme.modals.bg),
+          ModalSection(theme, ftxui::vbox(std::move(loadingRows)),
+                       theme.modals.bg),
           panelWidth, 16);
     }
 
@@ -151,6 +186,10 @@ ftxui::Component ModelPickerModal::create(TuiState &state) {
             statusBadge,
         }),
         ftxui::text(""),
+        *isLoading && !fetchingLabel.empty()
+            ? (ftxui::text("Fetching providers: " + fetchingLabel) |
+               ftxui::color(theme.base.dim))
+            : ftxui::text(""),
         ftxui::hbox({
             ftxui::text(" " + std::to_string(filteredIndices->size()) + " matches ") |
                 ftxui::color(theme.base.dim),

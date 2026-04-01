@@ -1,3 +1,5 @@
+#include "commands/AccountsCommand.hpp"
+#include "commands/QuotasCommand.hpp"
 #include "components/InputBar.hpp"
 
 #include <gtest/gtest.h>
@@ -42,4 +44,18 @@ TEST(InputBar, DoesNotActivateAutocompleteInsideWord) {
   const auto state = DetectAtReferenceAutocompleteState(
       buffer, static_cast<int>(buffer.size()));
   EXPECT_FALSE(state.active);
+}
+
+TEST(CommandArgs, AccountsCommandAcceptsAllProviderIds) {
+  firmius::tui::AccountsCommand cmd;
+  const auto args = cmd.args();
+  ASSERT_EQ(args.size(), 1u);
+  EXPECT_EQ(args.front().type, ArgType::ProviderId);
+}
+
+TEST(CommandArgs, QuotasCommandUsesQuotaProviderArgType) {
+  firmius::tui::QuotasCommand cmd;
+  const auto args = cmd.args();
+  ASSERT_EQ(args.size(), 1u);
+  EXPECT_EQ(args.front().type, ArgType::QuotaProvider);
 }

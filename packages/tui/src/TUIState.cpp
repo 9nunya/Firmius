@@ -965,16 +965,26 @@ bool TuiState::handleCtrlC() {
   if (screen_) {
     screen_->PostEvent(ftxui::Event::Custom);
   }
-  std::thread([this, generation]() {
-    std::this_thread::sleep_for(std::chrono::seconds(4));
-    if (quit_arm_generation_ != generation) {
+  // Join any existing thread before starting a new one
+  if (quit_arm_thread_.joinable()) {
+    quit_arm_thread_.request_stop();
+    quit_arm_thread_.join();
+  }
+  quit_arm_thread_ = std::jthread([this, generation](std::stop_token st) {
+    for (int i = 0; i < 40 && !st.stop_requested(); ++i) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      if (quit_arm_generation_ != generation) {
+        return;
+      }
+    }
+    if (st.stop_requested() || quit_arm_generation_ != generation) {
       return;
     }
     quit_arm_deadline_.reset();
     if (screen_) {
       screen_->PostEvent(ftxui::Event::Custom);
     }
-  }).detach();
+  });
   return true;
 }
 
@@ -1266,6 +1276,10 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
           stream_state_.handleMessageQueued(e);
         } else if constexpr (std::is_same_v<T, MessageDequeued>) {
           stream_state_.handleMessageDequeued(e);
+        } else if constexpr (std::is_same_v<T, InternalMessageQueued>) {
+          stream_state_.handleInternalMessageQueued(e);
+        } else if constexpr (std::is_same_v<T, InternalMessageDequeued>) {
+          stream_state_.handleInternalMessageDequeued(e);
         }
       },
       ev);
@@ -1915,6 +1929,8 @@ ftxui::Component TuiState::root() {
             firmius::tui::CollectToolCallIdsFromHistory(
                 focused_history_getter());
 
+        const bool hideErrors = harness_ ? harness_->getConfig().hideErrors : false;
+
         for (const auto &entry : timeline) {
           if (entry.kind == TimelineEntry::Kind::Thinking ||
               entry.kind == TimelineEntry::Kind::Text) {
@@ -1923,6 +1939,21 @@ ftxui::Component TuiState::root() {
             }
             live_rows.push_back(decorateMsg(firmius::tui::RenderMarkdown(
                 entry.message, entry.kind == TimelineEntry::Kind::Thinking)));
+            continue;
+          }
+
+          if (entry.kind == TimelineEntry::Kind::Error) {
+            if (entry.agentId != focused_agent_id_) {
+              continue;
+            }
+            if (!hideErrors) {
+              live_rows.push_back(firmius::tui::IndentAgentRow(
+                  firmius::tui::RenderErrorDisplay(
+                      theme, firmius::shared::ErrorContent{
+                                 "Provider Rate Limit",
+                                 "The provider returned a rate-limit response during this turn.",
+                                 entry.message})));
+            }
             continue;
           }
 
@@ -2004,6 +2035,25 @@ ftxui::Component TuiState::root() {
           }
         }
 
+        const auto &queued_internal = stream_state_.getQueuedInternalMessages();
+        std::vector<QueuedMessageEntry> queued_internal_for_focus;
+        queued_internal_for_focus.reserve(queued_internal.size());
+        for (const auto &entry : queued_internal) {
+          if (!entry.agent_id.empty() && entry.agent_id != focused_agent_id_) {
+            continue;
+          }
+          if (!entry.thread_id.empty() &&
+              entry.thread_id != thread_.threadId) {
+            continue;
+          }
+          queued_internal_for_focus.push_back(entry);
+        }
+
+        if (!queued_internal_for_focus.empty()) {
+          for (const auto &entry : queued_internal_for_focus) {
+            live_rows.push_back(renderUserRow(entry.text, "INTERNAL"));
+          }
+        }
         if (auto footer = loopFooter(); footer.has_value()) {
           live_rows.push_back(*footer);
         }
@@ -2116,6 +2166,12 @@ ftxui::Component TuiState::root() {
           return false;
         }
         return harness_->getConfig().showInternalNudges;
+      },
+      [this]() {
+        if (!harness_) {
+          return false;
+        }
+        return harness_->getConfig().hideErrors;
       });
   chat_component_ = chat;
   input_component_ = input_bar;
