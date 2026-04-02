@@ -53,9 +53,9 @@ public:
   // Gets the current available account, handling rotation and skipping
   // rate-limited ones. If modelId is provided, subclasses can use it to
   // check specific quotas.
-  virtual std::optional<OAuthAccount *>
-  getAvailableAccount(const std::optional<std::string> &modelId = std::nullopt);
-
+  virtual std::optional<OAuthAccount> getAvailableAccount(
+      const std::optional<std::string> &modelId = std::nullopt);
+  void updateAccount(const OAuthAccount &acc);
   void addAccount(const OAuthAccount &acc);
   void deleteAccount(const std::string &identifier);
 

@@ -224,7 +224,7 @@ TEST(CodexProvider, AvailableAccountUsesHighestPositiveCodexQuota) {
   CodexProvider provider;
   auto selected = provider.getAvailableAccount(std::string("gpt-5.2-codex"));
   ASSERT_TRUE(selected.has_value());
-  EXPECT_EQ((*selected)->getIdentifier(), "high@example.com");
+  EXPECT_EQ(selected->getIdentifier(), "high@example.com");
 }
 
 TEST(CodexProvider, AvailableAccountRequiresPositiveCodexQuota) {

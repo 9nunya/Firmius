@@ -668,6 +668,7 @@ add_executable(test_chat_window_helpers
     ../../packages/tui/src/tools/ProcessToolPresentation.cpp
     ../../packages/tui/src/tools/PythonToolPresentation.cpp
     ../../packages/tui/src/tools/SubagentToolPresentation.cpp
+    ../../packages/tui/src/tools/WebSearchToolPresentation.cpp
     ../../packages/tui/src/tools/WorkToolPresentation.cpp
 )
 target_link_libraries(test_chat_window_helpers PRIVATE
@@ -826,7 +827,9 @@ gtest_discover_tests(test_status_bar)
 add_executable(test_agent_strip
     tui/test_agent_strip.cpp
     ../../packages/tui/src/components/AgentStrip.cpp
+    ../../packages/tui/src/components/Markdown.cpp
     ../../packages/tui/src/components/GlintEffect.cpp
+    ../../packages/tui/src/components/ScrollableBox.cpp
     ../../packages/tui/src/ThemeManager.cpp
     ../../packages/tui/src/UserPreferences.cpp
 )
@@ -856,6 +859,7 @@ add_executable(test_tool_presentation
     ../../packages/tui/src/tools/FileToolPresentation.cpp
     ../../packages/tui/src/tools/ProcessToolPresentation.cpp
     ../../packages/tui/src/tools/SubagentToolPresentation.cpp
+    ../../packages/tui/src/tools/WebSearchToolPresentation.cpp
     ../../packages/tui/src/tools/PythonToolPresentation.cpp
     ../../packages/tui/src/tools/ToolPresentation.cpp
     ../../packages/tui/src/tools/WorkToolPresentation.cpp
@@ -884,10 +888,12 @@ add_executable(test_tool_presentation_block
     ../../packages/tui/src/components/SyntaxHighlighter.cpp
     ../../packages/tui/src/components/ToolPresentationBlock.cpp
     ../../packages/tui/src/components/ANSIParser.cpp
+    ../../packages/tui/src/components/GlintEffect.cpp
     ../../packages/tui/src/tools/ArtifactToolPresentation.cpp
     ../../packages/tui/src/tools/FileToolPresentation.cpp
     ../../packages/tui/src/tools/ProcessToolPresentation.cpp
     ../../packages/tui/src/tools/SubagentToolPresentation.cpp
+    ../../packages/tui/src/tools/WebSearchToolPresentation.cpp
     ../../packages/tui/src/tools/PythonToolPresentation.cpp
     ../../packages/tui/src/tools/ToolPresentation.cpp
     ../../packages/tui/src/tools/WorkToolPresentation.cpp

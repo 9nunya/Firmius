@@ -81,7 +81,11 @@ public:
 
         auto &pixel = screen.PixelAt(x, y);
         if (config_.target == GlintConfig::Target::Text) {
-          pixel.foreground_color = c;
+          if (c == pixel.background_color) {
+            pixel.foreground_color = ftxui::Color::White;
+          } else {
+            pixel.foreground_color = c;
+          }
         } else {
           pixel.background_color = c;
         }

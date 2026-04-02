@@ -14,7 +14,7 @@ bool isMatch(const std::string &actual, const std::string &expected) {
          actual.find(expected) != std::string::npos;
 }
 
-std::string shorten(const std::string &text, size_t limit = 52) {
+std::string shorten(const std::string &text, size_t limit = 512) {
   if (text.size() <= limit) {
     return text;
   }
@@ -91,8 +91,7 @@ QuickToolCategory QuickToolCategoryForName(const std::string &name) {
   if (isMatch(name, "list_directory")) {
     return QuickToolCategory::List;
   }
-  if (isMatch(name, "grep") || isMatch(name, "glob") || isMatch(name, "find") ||
-      isMatch(name, "search")) {
+  if (name == "grep" || name == "glob" || name == "find" || name == "search") {
     return QuickToolCategory::Search;
   }
   return QuickToolCategory::None;
@@ -139,7 +138,7 @@ QuickToolDescriptor DescribeQuickToolCall(const shared::ToolCallView &view) {
       pattern = stringArg(doc, "query");
     }
     auto path = relativePath(stringArg(doc, "path"));
-    auto target = "\"" + shorten(pattern.empty() ? "…" : pattern, 30) + "\"";
+    auto target = "\"" + shorten(pattern.empty() ? "…" : pattern, 512) + "\"";
     if (!path.empty()) {
       target += " in " + shorten(path);
     }

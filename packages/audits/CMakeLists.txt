@@ -21,6 +21,8 @@ target_sources(firmius_audits PRIVATE
     src/audits/SubagentStressAudit.cpp
     src/audits/WorkflowsAudit.cpp
     src/audits/ResumeTodoAudit.cpp
+    src/audits/WebFetchAudit.cpp
+    src/audits/WebSearchAudit.cpp
 )
 
 target_sources(firmius_audits PUBLIC
@@ -46,6 +48,8 @@ target_sources(firmius_audits PUBLIC
     include/audits/SubagentStressAudit.hpp
     include/audits/WorkflowsAudit.hpp
     include/audits/ResumeTodoAudit.hpp
+    include/audits/WebFetchAudit.hpp
+    include/audits/WebSearchAudit.hpp
 )
 
 target_include_directories(firmius_audits PUBLIC

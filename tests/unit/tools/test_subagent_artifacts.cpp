@@ -87,6 +87,7 @@ public:
   MOCK_METHOD(void, compactNow, (std::function<void(const StreamEvent &)>),
               (override));
   MOCK_METHOD(void, saveHistory, (), (override));
+  MOCK_METHOD(void, appendHistoryTurn, (const AgentTurn &), (override));
   MOCK_METHOD(void, setModel, (const std::string &, const std::string &),
               (override));
   MOCK_METHOD(void, setModel,

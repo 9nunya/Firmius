@@ -2,7 +2,6 @@
 
 #include "agents/PurposeLoader.hpp"
 #include "persistence/ThreadManager.hpp"
-#include "utils/Hashline.hpp"
 #include "utils/StringUtil.hpp"
 
 #include <algorithm>

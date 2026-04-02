@@ -16,6 +16,7 @@
 #include "providers/ChutesProvider.hpp"
 #include "providers/CodexProvider.hpp"
 #include "providers/KimiProvider.hpp"
+#include "providers/LettaProvider.hpp"
 #include "providers/NanoGPTProvider.hpp"
 #include "providers/NvidiaProvider.hpp"
 #include "providers/OpenRouterProvider.hpp"
@@ -30,12 +31,12 @@
 #include "tools/ChunkGetTool.hpp"
 #include "tools/ChunkListTool.hpp"
 #include "tools/ChunkReadyForExecutionTool.hpp"
-#include "tools/FleetLockTool.hpp"
-#include "tools/FleetLockRespondTool.hpp"
-#include "tools/FleetStatusTool.hpp"
 #include "tools/ChunkUpdateTool.hpp"
 #include "tools/FileEditTool.hpp"
 #include "tools/FileReadTool.hpp"
+#include "tools/FleetLockRespondTool.hpp"
+#include "tools/FleetLockTool.hpp"
+#include "tools/FleetStatusTool.hpp"
 #include "tools/GlobTool.hpp"
 #include "tools/GrepTool.hpp"
 #include "tools/ListDirectoryTool.hpp"
@@ -55,6 +56,7 @@
 #include "tools/SubagentWaitTool.hpp"
 #include "tools/TodoWriteTool.hpp"
 #include "tools/WebFetchTool.hpp"
+#include "tools/WebSearchTool.hpp"
 #include "utils/HistoryMetrics.hpp"
 #include "utils/StringUtil.hpp"
 #include <Panic.hpp>
@@ -362,7 +364,7 @@ Engine::Engine() {
   });
   toolRegistry.registerToolFactory(
       "summon_subagent", []() { return std::make_unique<SubagentTool>(); });
-  toolRegistry.registerToolFactory("subagent_terminate", []() {
+  toolRegistry.registerToolFactory("terminate_subagent", []() {
     return std::make_unique<SubagentTerminateTool>();
   });
   toolRegistry.registerToolFactory(
@@ -377,6 +379,8 @@ Engine::Engine() {
       "grep", []() { return std::make_unique<GrepTool>(); });
   toolRegistry.registerToolFactory(
       "web_fetch", []() { return std::make_unique<WebFetchTool>(); });
+  toolRegistry.registerToolFactory(
+      "web_search", []() { return std::make_unique<WebSearchTool>(); });
   toolRegistry.registerToolFactory(
       "process_spawn", []() { return std::make_unique<ProcessSpawnTool>(); });
   toolRegistry.registerToolFactory(
@@ -409,8 +413,9 @@ Engine::Engine() {
   });
   toolRegistry.registerToolFactory(
       "fleet_lock", []() { return std::make_unique<FleetLockTool>(); });
-  toolRegistry.registerToolFactory(
-      "fleet_lock_respond", []() { return std::make_unique<FleetLockRespondTool>(); });
+  toolRegistry.registerToolFactory("fleet_lock_respond", []() {
+    return std::make_unique<FleetLockRespondTool>();
+  });
   toolRegistry.registerToolFactory(
       "fleet_status", []() { return std::make_unique<FleetStatusTool>(); });
   toolRegistry.registerToolFactory(
@@ -456,6 +461,9 @@ void Engine::initProviders() {
   });
   reg.registerProviderFactory("kimi", []() {
     return std::make_shared<firmius::provider::KimiProvider>();
+  });
+  reg.registerProviderFactory("letta", []() {
+    return std::make_shared<firmius::provider::LettaProvider>();
   });
 }
 
@@ -1019,7 +1027,7 @@ void Engine::executeTask(
   if (!agent) {
     throw std::runtime_error("Agent not found: " + agentId);
   }
-  
+
   // Drain any pending internal queue messages (e.g., fleet edit notices)
   // before starting the new task, so the agent sees them on its next turn.
   std::string threadId;
@@ -1029,7 +1037,7 @@ void Engine::executeTask(
   if (!threadId.empty()) {
     Harness::instance().drainInternalQueueForAgent(agentId, threadId);
   }
-  
+
   // Mark as active before async dispatch to avoid observers seeing an
   // immediate idle state race while the worker thread is starting.
 

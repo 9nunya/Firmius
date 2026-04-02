@@ -162,6 +162,10 @@ ftxui::Element ScrollableBoxComponent::OnRender() {
         background | ftxui::focusPosition(0, focus_y) | ftxui::frame |
         ftxui::yflex | ftxui::reflect(box_);
 
+    if (!options_.showScrollbar) {
+        return frame;
+    }
+
     if (!options_.overlayScrollbar) {
         frame = frame | ftxui::vscroll_indicator;
         return frame;

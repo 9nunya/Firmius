@@ -1,17 +1,16 @@
 #include "providers/LettaProvider.hpp"
-#include "providers/BackoffConstants.hpp"
 #include "utils/GCPHttpClient.hpp"
-#include "utils/InterruptibleSleep.hpp"
 #include "utils/Logger.hpp"
 #include "utils/StringUtil.hpp"
 #include "utils/TempOAuthServer.hpp"
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <ctime>
-#include <iostream>
 #include <limits>
+#include <mutex>
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
@@ -26,6 +25,8 @@ constexpr char kProviderId[] = "letta";
 constexpr char kClientId[] = "ci-let-724dea7e98f4af6f8f370f4b1466200c";
 constexpr char kAuthBaseUrl[] = "https://app.letta.com";
 constexpr char kApiBaseUrl[] = "https://api.letta.com";
+constexpr char kSourceHeaderValue[] = "letta-code";
+constexpr char kUserAgentValue[] = "letta-code/0.21.5";
 constexpr char kDeviceCodeEndpoint[] = "/api/oauth/device/code";
 constexpr char kTokenEndpoint[] = "/api/oauth/token";
 constexpr char kModelsEndpoint[] = "/v1/models";
@@ -33,26 +34,223 @@ constexpr char kBalanceEndpoint[] = "/v1/metadata/balance";
 constexpr int kQuotaRefreshSeconds = 300;
 constexpr float kQuotaAvailableThreshold = 0.01f;
 
+// Stable device identifier for OAuth device code flow
+// Letta's OAuth server requires device_id to correlate polling with registration
+std::string getDeviceId() {
+  // Use hostname + static salt for a stable per-machine identifier
+  char hostname[256] = {};
+  if (gethostname(hostname, sizeof(hostname)) == 0) {
+    return std::string("firmius-") + hostname;
+  }
+  return "firmius-unknown";
+}
+
 int64_t nowSeconds() {
   return std::chrono::duration_cast<std::chrono::seconds>(
              std::chrono::system_clock::now().time_since_epoch())
       .count();
 }
 
-std::string urlEncode(const std::string &value) {
-  std::ostringstream escaped;
-  escaped.fill('0');
-  escaped << std::hex;
-  for (char c : value) {
-    if (std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_' ||
-        c == '.' || c == '~') {
-      escaped << c;
-    } else {
-      escaped << '%' << std::setw(2)
-              << static_cast<int>(static_cast<unsigned char>(c));
+std::string roleToLettaRole(firmius::shared::Role role) {
+  switch (role) {
+  case firmius::shared::Role::System:
+    return "system";
+  case firmius::shared::Role::User:
+    return "user";
+  case firmius::shared::Role::Assistant:
+    return "assistant";
+  case firmius::shared::Role::ToolResult:
+    return "tool";
+  case firmius::shared::Role::Error:
+    return "system";
+  }
+  return "user";
+}
+
+bool parseDataUrl(const std::string &url, std::string &mediaType,
+                  std::string &data) {
+  constexpr std::string_view prefix = "data:";
+  if (url.rfind(prefix.data(), 0) != 0) {
+    return false;
+  }
+
+  const size_t commaPos = url.find(',');
+  if (commaPos == std::string::npos || commaPos <= prefix.size()) {
+    return false;
+  }
+
+  const std::string header = url.substr(prefix.size(), commaPos - prefix.size());
+  const size_t semicolonPos = header.find(';');
+  mediaType = semicolonPos == std::string::npos ? header
+                                                : header.substr(0, semicolonPos);
+  if (mediaType.empty()) {
+    mediaType = "image/png";
+  }
+  data = url.substr(commaPos + 1);
+  return !data.empty();
+}
+
+rapidjson::Value makeTextPart(const std::string &text,
+                              rapidjson::Document::AllocatorType &alloc) {
+  rapidjson::Value part(rapidjson::kObjectType);
+  part.AddMember("type", "text", alloc);
+  part.AddMember("text", rapidjson::Value(text.c_str(), alloc), alloc);
+  return part;
+}
+
+rapidjson::Value makeImagePart(const firmius::shared::ImageContent &img,
+                               rapidjson::Document::AllocatorType &alloc) {
+  rapidjson::Value part(rapidjson::kObjectType);
+  part.AddMember("type", "image", alloc);
+
+  rapidjson::Value source(rapidjson::kObjectType);
+  std::string mediaType;
+  std::string data;
+  if (parseDataUrl(img.url, mediaType, data)) {
+    source.AddMember("type", "base64", alloc);
+    source.AddMember("mediaType", rapidjson::Value(mediaType.c_str(), alloc),
+                     alloc);
+    source.AddMember("data", rapidjson::Value(data.c_str(), alloc), alloc);
+  } else {
+    source.AddMember("type", "url", alloc);
+    source.AddMember("url", rapidjson::Value(img.url.c_str(), alloc), alloc);
+    if (!img.mediaType.empty()) {
+      source.AddMember("mediaType",
+                       rapidjson::Value(img.mediaType.c_str(), alloc), alloc);
     }
   }
-  return escaped.str();
+
+  part.AddMember("source", source, alloc);
+  return part;
+}
+
+rapidjson::Value makeToolReturnValue(
+    const firmius::shared::ToolResultContent &result,
+    rapidjson::Document::AllocatorType &alloc) {
+  rapidjson::Value value(rapidjson::kArrayType);
+  value.PushBack(makeTextPart(result.result, alloc), alloc);
+  return value;
+}
+
+rapidjson::Value makeApprovalMessage(
+    const firmius::shared::Message &msg,
+    rapidjson::Document::AllocatorType &alloc) {
+  rapidjson::Value approvalMessage(rapidjson::kObjectType);
+  approvalMessage.AddMember("type", "approval", alloc);
+
+  rapidjson::Value approvals(rapidjson::kArrayType);
+  for (const auto &part : msg.content) {
+    const auto *result =
+        std::get_if<firmius::shared::ToolResultContent>(&part);
+    if (!result || result->toolCallId.empty()) {
+      continue;
+    }
+
+    rapidjson::Value approval(rapidjson::kObjectType);
+    approval.AddMember("type", "tool", alloc);
+    approval.AddMember("tool_call_id",
+                       rapidjson::Value(result->toolCallId.c_str(), alloc),
+                       alloc);
+    approval.AddMember("tool_return", makeToolReturnValue(*result, alloc),
+                       alloc);
+    approval.AddMember(
+        "status",
+        rapidjson::Value(result->success ? "success" : "error", alloc), alloc);
+    approvals.PushBack(approval, alloc);
+  }
+
+  approvalMessage.AddMember("approvals", approvals, alloc);
+  if (!msg.id.empty()) {
+    approvalMessage.AddMember("otid", rapidjson::Value(msg.id.c_str(), alloc),
+                              alloc);
+  }
+  return approvalMessage;
+}
+
+bool buildLettaMessage(const firmius::shared::Message &msg,
+                       rapidjson::Value &outMessage,
+                       rapidjson::Document::AllocatorType &alloc) {
+  rapidjson::Value content(rapidjson::kArrayType);
+  std::string flattenedText;
+  bool hasStructuredPart = false;
+
+  for (const auto &part : msg.content) {
+    if (const auto *txt = std::get_if<firmius::shared::TextContent>(&part)) {
+      if (!txt->text.empty()) {
+        content.PushBack(makeTextPart(txt->text, alloc), alloc);
+        flattenedText += txt->text;
+      }
+    } else if (const auto *img =
+                   std::get_if<firmius::shared::ImageContent>(&part)) {
+      content.PushBack(makeImagePart(*img, alloc), alloc);
+      hasStructuredPart = true;
+    } else if (const auto *thinking =
+                   std::get_if<firmius::shared::ThinkingContent>(&part)) {
+      if (!thinking->thinking.empty()) {
+        const std::string wrapped =
+            "<thinking>\n" + thinking->thinking + "\n</thinking>";
+        content.PushBack(makeTextPart(wrapped, alloc), alloc);
+        flattenedText += wrapped;
+      }
+    } else if (const auto *call =
+                   std::get_if<firmius::shared::ToolCallContent>(&part)) {
+      std::string rendered = "[Tool Call";
+      if (!call->name.empty()) {
+        rendered += ": " + call->name;
+      }
+      if (!call->args.empty()) {
+        rendered += " args=" + call->args;
+      }
+      rendered += "]";
+      content.PushBack(makeTextPart(rendered, alloc), alloc);
+      flattenedText += rendered;
+    }
+  }
+
+  if (content.Empty()) {
+    return false;
+  }
+
+  outMessage.SetObject();
+  outMessage.AddMember("role",
+                       rapidjson::Value(roleToLettaRole(msg.role).c_str(),
+                                        alloc),
+                       alloc);
+  if (!msg.id.empty()) {
+    outMessage.AddMember("otid", rapidjson::Value(msg.id.c_str(), alloc),
+                         alloc);
+  }
+  if (hasStructuredPart || content.Size() > 1) {
+    outMessage.AddMember("content", content, alloc);
+  } else {
+    outMessage.AddMember("content",
+                         rapidjson::Value(flattenedText.c_str(), alloc), alloc);
+  }
+  return true;
+}
+
+rapidjson::Value buildClientTools(
+    const std::vector<firmius::provider::ToolDefinition> &tools,
+    rapidjson::Document::AllocatorType &alloc) {
+  rapidjson::Value clientTools(rapidjson::kArrayType);
+  for (const auto &tool : tools) {
+    rapidjson::Value toolValue(rapidjson::kObjectType);
+    toolValue.AddMember("name", rapidjson::Value(tool.name.c_str(), alloc),
+                        alloc);
+    toolValue.AddMember(
+        "description", rapidjson::Value(tool.description.c_str(), alloc),
+        alloc);
+
+    rapidjson::Document schemaDoc;
+    schemaDoc.Parse(tool.inputSchema.c_str());
+    rapidjson::Value parameters(rapidjson::kObjectType);
+    if (!schemaDoc.HasParseError() && schemaDoc.IsObject()) {
+      parameters.CopyFrom(schemaDoc, alloc);
+    }
+    toolValue.AddMember("parameters", parameters, alloc);
+    clientTools.PushBack(toolValue, alloc);
+  }
+  return clientTools;
 }
 
 } // namespace
@@ -65,16 +263,20 @@ class LettaOAuthWizard : public OAuthWizard {
 public:
   explicit LettaOAuthWizard(LettaProvider *provider) : provider_(provider) {
     // Step 1: Request device code
-    GCPHttpClient client("firmius-letta/1.0");
+    firmius::utils::GCPHttpClient client("firmius-letta/1.0");
     client.setContentType("application/json");
+    client.addHeader("X-Letta-Source", kSourceHeaderValue);
+    client.addHeader("User-Agent", kUserAgentValue);
     std::string body =
         "{\"client_id\":\"" + std::string(kClientId) + "\"}";
 
     auto resp = client.post(std::string(kAuthBaseUrl) + kDeviceCodeEndpoint,
                             body, 15);
+
     if (resp.code != 200) {
       error_ = "Failed to request device code: HTTP " +
                std::to_string(resp.code) + " " + resp.body;
+      finished_.store(true);
       return;
     }
 
@@ -82,6 +284,7 @@ public:
     doc.Parse(resp.body.c_str());
     if (doc.HasParseError() || !doc.IsObject()) {
       error_ = "Invalid device code response";
+      finished_.store(true);
       return;
     }
 
@@ -103,6 +306,7 @@ public:
 
     if (deviceCode_.empty() || userCode_.empty()) {
       error_ = "Missing device_code or user_code in response";
+      finished_.store(true);
       return;
     }
 
@@ -112,7 +316,16 @@ public:
               verificationUriComplete_ + "\n\n"
               "2. Enter this code: " +
               userCode_ + "\n\n"
-              "3. Press Enter when you've completed authorization...";
+              "3. Complete authorization in your browser. Firmius will keep "
+              "polling automatically.";
+
+    pollingThread_ = std::thread([this]() { pollForToken(); });
+  }
+
+  ~LettaOAuthWizard() override {
+    if (pollingThread_.joinable()) {
+      pollingThread_.join();
+    }
   }
 
   std::optional<WizardPrompt> nextPrompt() override {
@@ -126,20 +339,21 @@ public:
     return std::nullopt;
   }
 
-  void submitAnswer(const std::string &) override {
-    // Start polling for token
-    pollForToken();
-  }
+  void submitAnswer(const std::string &) override {}
 
-  bool isComplete() const override { return complete_ || !error_.empty(); }
+  bool isComplete() const override { return finished_.load(); }
 
   bool finalizeExchange(std::string &outErrorMessage) override {
+    if (pollingThread_.joinable()) {
+      pollingThread_.join();
+    }
+
     if (!error_.empty()) {
       outErrorMessage = error_;
       return false;
     }
 
-    if (accessToken_.empty() || refreshToken_.empty()) {
+    if (!tokenReceived_.load() || accessToken_.empty() || refreshToken_.empty()) {
       outErrorMessage = "OAuth flow did not complete successfully";
       return false;
     }
@@ -168,8 +382,10 @@ public:
 
 private:
   void pollForToken() {
-    GCPHttpClient client("firmius-letta/1.0");
+    firmius::utils::GCPHttpClient client("firmius-letta/1.0");
     client.setContentType("application/json");
+    client.addHeader("X-Letta-Source", kSourceHeaderValue);
+    client.addHeader("User-Agent", kUserAgentValue);
 
     int64_t startTime = std::chrono::duration_cast<std::chrono::seconds>(
                             std::chrono::system_clock::now().time_since_epoch())
@@ -182,10 +398,18 @@ private:
                .count() < expiresAt) {
       std::this_thread::sleep_for(std::chrono::seconds(pollInterval));
 
+      std::string deviceId = getDeviceId();
+      std::string deviceName = [&]() {
+        char h[256] = {};
+        gethostname(h, sizeof(h));
+        return std::string(h);
+      }();
       std::string body = "{\"grant_type\":\"urn:ietf:params:oauth:grant-type:"
                          "device_code\",";
       body += "\"client_id\":\"" + std::string(kClientId) + "\",";
-      body += "\"device_code\":\"" + deviceCode_ + "\"}";
+      body += "\"device_code\":\"" + deviceCode_ + "\",";
+      body += "\"device_id\":\"" + deviceId + "\",";
+      body += "\"device_name\":\"" + deviceName + "\"}";
 
       auto resp = client.post(std::string(kAuthBaseUrl) + kTokenEndpoint,
                               body, 15);
@@ -202,14 +426,17 @@ private:
           }
           if (err == "access_denied") {
             error_ = "User denied authorization";
+            finished_.store(true);
             return;
           }
           if (err == "expired_token") {
             error_ = "Device code expired";
+            finished_.store(true);
             return;
           }
         }
         error_ = "Token poll failed: HTTP " + std::to_string(resp.code);
+        finished_.store(true);
         return;
       }
 
@@ -217,6 +444,7 @@ private:
       doc.Parse(resp.body.c_str());
       if (doc.HasParseError() || !doc.IsObject()) {
         error_ = "Invalid token response";
+        finished_.store(true);
         return;
       }
 
@@ -230,19 +458,21 @@ private:
       }
 
       if (!accessToken_.empty()) {
-        complete_ = true;
+        tokenReceived_.store(true);
+        finished_.store(true);
         return;
       }
 
       error_ = "No access_token in token response";
+      finished_.store(true);
       return;
     }
 
     error_ = "OAuth polling timed out";
+    finished_.store(true);
   }
 
   static std::string extractEmailFromJwt(const std::string &token) {
-    // JWT has 3 parts separated by dots
     size_t firstDot = token.find('.');
     if (firstDot == std::string::npos)
       return "";
@@ -251,7 +481,6 @@ private:
       return "";
 
     std::string payload = token.substr(firstDot + 1, secondDot - firstDot - 1);
-    // Add padding if needed
     switch (payload.size() % 4) {
     case 2:
       payload += "==";
@@ -263,7 +492,6 @@ private:
       break;
     }
 
-    // Base64 decode (simple implementation)
     static const std::string base64_chars =
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     std::string decoded;
@@ -281,7 +509,6 @@ private:
       }
     }
 
-    // Look for email field in JSON
     rapidjson::Document d;
     d.Parse(decoded.c_str());
     if (!d.HasParseError() && d.IsObject()) {
@@ -295,9 +522,11 @@ private:
   }
 
   LettaProvider *provider_;
+  std::thread pollingThread_;
   std::string prompt_;
   bool promptShown_ = false;
-  bool complete_ = false;
+  std::atomic<bool> finished_{false};
+  std::atomic<bool> tokenReceived_{false};
   std::string error_;
 
   std::string deviceCode_;
@@ -329,90 +558,79 @@ std::map<std::string, ModelInfo> LettaProvider::getStaticModels() {
       {"auto",
        {.id = "auto",
         .provider = kProviderId,
-        .label = "Auto",
-        .description = "Automatically select the best model",
         .contextWindow = 140000,
         .modalities = {"text"},
+        .variants = {},
         .supportsReasoning = true}},
       {"auto-fast",
        {.id = "auto-fast",
         .provider = kProviderId,
-        .label = "Auto Fast",
-        .description = "Automatically select the best fast model",
         .contextWindow = 140000,
         .modalities = {"text"},
+        .variants = {},
         .supportsReasoning = true}},
       {"auto-chat",
        {.id = "auto-chat",
         .provider = kProviderId,
-        .label = "Auto Chat",
-        .description = "Automatically select the best model for chat",
         .contextWindow = 140000,
         .modalities = {"text"},
+        .variants = {},
         .supportsReasoning = true}},
       {"sonnet",
        {.id = "sonnet",
         .provider = kProviderId,
-        .label = "Sonnet 4.6",
-        .description = "Anthropic's Claude Sonnet 4.6 (high reasoning)",
         .contextWindow = 200000,
         .modalities = {"text", "image"},
+        .variants = {},
         .supportsReasoning = true}},
       {"sonnet-1m",
        {.id = "sonnet-1m",
         .provider = kProviderId,
-        .label = "Sonnet 4.6 1M",
-        .description = "Claude Sonnet 4.6 with 1M token context window",
         .contextWindow = 1000000,
         .modalities = {"text", "image"},
+        .variants = {},
         .supportsReasoning = true}},
       {"opus",
        {.id = "opus",
         .provider = kProviderId,
-        .label = "Opus 4.1",
-        .description = "Anthropic's most capable model",
         .contextWindow = 200000,
         .modalities = {"text", "image"},
+        .variants = {},
         .supportsReasoning = true}},
       {"gpt-5.2",
        {.id = "gpt-5.2",
         .provider = kProviderId,
-        .label = "GPT-5.2",
-        .description = "OpenAI GPT-5.2",
         .contextWindow = 272000,
         .modalities = {"text", "image"},
+        .variants = {},
         .supportsReasoning = true}},
       {"gpt-5.1",
        {.id = "gpt-5.1",
         .provider = kProviderId,
-        .label = "GPT-5.1",
-        .description = "OpenAI GPT-5.1",
         .contextWindow = 128000,
         .modalities = {"text", "image"},
+        .variants = {},
         .supportsReasoning = true}},
       {"gemini-2.5-pro",
        {.id = "gemini-2.5-pro",
         .provider = kProviderId,
-        .label = "Gemini 2.5 Pro",
-        .description = "Google Gemini 2.5 Pro",
         .contextWindow = 1000000,
         .modalities = {"text", "image"},
+        .variants = {},
         .supportsReasoning = true}},
       {"kimi-k2",
        {.id = "kimi-k2",
         .provider = kProviderId,
-        .label = "Kimi K2",
-        .description = "Moonshot Kimi K2",
         .contextWindow = 128000,
         .modalities = {"text"},
+        .variants = {},
         .supportsReasoning = true}},
       {"glm-4.6",
        {.id = "glm-4.6",
         .provider = kProviderId,
-        .label = "GLM 4.6",
-        .description = "Zhipu GLM 4.6",
         .contextWindow = 128000,
         .modalities = {"text"},
+        .variants = {},
         .supportsReasoning = true}},
   };
 }
@@ -428,11 +646,11 @@ ModelInfo LettaProvider::getModelInfo(const std::string &modelId) {
   auto models = getStaticModels();
   if (models.count(modelId))
     return models[modelId];
-  // Unknown model - return a generic entry
   return {.id = modelId,
           .provider = kProviderId,
           .contextWindow = 128000,
           .modalities = {"text"},
+          .variants = {},
           .supportsReasoning = true};
 }
 
@@ -445,12 +663,23 @@ std::unique_ptr<OAuthWizard> LettaProvider::beginConnectionWizard() {
 }
 
 bool LettaProvider::refreshAccessToken(OAuthAccount &acc) {
-  GCPHttpClient client("firmius-letta/1.0");
+  firmius::utils::GCPHttpClient client("firmius-letta/1.0");
   client.setContentType("application/json");
+  client.addHeader("X-Letta-Source", kSourceHeaderValue);
+  client.addHeader("User-Agent", kUserAgentValue);
 
+  std::string deviceId = getDeviceId();
+  std::string deviceName = [&]() {
+    char h[256] = {};
+    gethostname(h, sizeof(h));
+    return std::string(h);
+  }();
   std::string body = "{\"grant_type\":\"refresh_token\",";
   body += "\"client_id\":\"" + std::string(kClientId) + "\",";
-  body += "\"refresh_token\":\"" + acc.refreshToken + "\"}";
+  body += "\"refresh_token\":\"" + acc.refreshToken + "\",";
+  body += "\"refresh_token_mode\":\"new\",";
+  body += "\"device_id\":\"" + deviceId + "\",";
+  body += "\"device_name\":\"" + deviceName + "\"}";
 
   auto resp =
       client.post(std::string(kAuthBaseUrl) + kTokenEndpoint, body, 15);
@@ -486,8 +715,10 @@ bool LettaProvider::fetchAndStoreQuotas(OAuthAccount &acc) {
   if (acc.accessToken.empty())
     return false;
 
-  GCPHttpClient client("firmius-letta/1.0");
-  client.setHeader("Authorization", "Bearer " + acc.accessToken);
+  firmius::utils::GCPHttpClient client("firmius-letta/1.0");
+  client.addHeader("X-Letta-Source", kSourceHeaderValue);
+  client.addHeader("User-Agent", kUserAgentValue);
+  client.addHeader("Authorization", "Bearer " + acc.accessToken);
 
   auto resp = client.get(std::string(kApiBaseUrl) + kBalanceEndpoint, 10);
   if (resp.code != 200)
@@ -531,21 +762,18 @@ void LettaProvider::refreshQuotas() {
   bool needsSave = false;
 
   for (auto &acc : accounts_) {
-    // Refresh token if expired
     if (isTokenExpired(acc)) {
       if (!refreshAccessToken(acc)) {
         continue;
       }
     }
 
-    // Refresh quotas if stale
     if (acc.lastQuotaRefresh == 0 ||
         (now - acc.lastQuotaRefresh) > kQuotaRefreshSeconds) {
       fetchAndStoreQuotas(acc);
       needsSave = true;
     }
 
-    // Clear stale rate limiting
     if (acc.rateLimited && now > acc.backoffUntil) {
       acc.rateLimited = false;
       needsSave = true;
@@ -564,12 +792,11 @@ LettaProvider::getAllQuotas() const {
   for (const auto &acc : accounts_) {
     std::vector<QuotaBucket> buckets;
 
-    // Balance bucket
     auto balIt = acc.metadata.find("total_balance");
     if (balIt != acc.metadata.end()) {
       QuotaBucket bucket;
       bucket.name = "balance";
-      bucket.remainingFraction = 1.0f; // Letta uses credit, not rate limits
+      bucket.remainingFraction = 1.0f;
       bucket.note = "Balance: $" + balIt->second;
 
       auto tierIt = acc.metadata.find("billing_tier");
@@ -579,7 +806,6 @@ LettaProvider::getAllQuotas() const {
       buckets.push_back(bucket);
     }
 
-    // Monthly credit bucket
     auto mcIt = acc.metadata.find("monthly_credit_balance");
     if (mcIt != acc.metadata.end()) {
       QuotaBucket bucket;
@@ -608,7 +834,6 @@ size_t LettaProvider::sseWriteCallback(char *ptr, size_t size, size_t nmemb,
 
   ctx->buffer.append(ptr, total);
 
-  // Process complete lines
   while (true) {
     size_t newlinePos = ctx->buffer.find('\n', ctx->readOffset);
     if (newlinePos == std::string::npos)
@@ -618,9 +843,8 @@ size_t LettaProvider::sseWriteCallback(char *ptr, size_t size, size_t nmemb,
                                           newlinePos - ctx->readOffset);
     ctx->readOffset = newlinePos + 1;
 
-    // Check for abort
     if (ctx->abortSignal && ctx->abortSignal->load()) {
-      return 0; // Signal abort to curl
+      return 0;
     }
 
     ctx->provider->processSSELine(line, *ctx);
@@ -631,18 +855,16 @@ size_t LettaProvider::sseWriteCallback(char *ptr, size_t size, size_t nmemb,
 
 void LettaProvider::processSSELine(const std::string &line,
                                    StreamContext &ctx) {
-  // Skip empty lines and comments
   if (line.empty() || line[0] == ':')
     return;
 
-  // Parse SSE data field
   std::string data;
   if (line.rfind("data: ", 0) == 0) {
     data = line.substr(6);
   } else if (line.rfind("data:", 0) == 0) {
     data = line.substr(5);
   } else {
-    return; // Not a data line
+    return;
   }
 
   if (data == "[DONE]")
@@ -653,7 +875,6 @@ void LettaProvider::processSSELine(const std::string &line,
   if (d.HasParseError() || !d.IsObject())
     return;
 
-  // Letta uses message_type to distinguish chunk types
   if (!d.HasMember("message_type") || !d["message_type"].IsString())
     return;
 
@@ -689,7 +910,6 @@ void LettaProvider::processSSELine(const std::string &line,
       if (d["content"].IsString()) {
         delta = d["content"].GetString();
       } else if (d["content"].IsArray()) {
-        // Could be array of parts
         for (rapidjson::SizeType i = 0; i < d["content"].Size(); ++i) {
           const auto &part = d["content"][i];
           if (part.IsString()) {
@@ -707,7 +927,7 @@ void LettaProvider::processSSELine(const std::string &line,
     }
     if (!delta.empty()) {
       TextChunk tc;
-      tc.text = delta;
+      tc.delta = delta;
       (*ctx.onEvent)(tc);
     }
     return;
@@ -722,8 +942,8 @@ void LettaProvider::processSSELine(const std::string &line,
       reason = d["content"].GetString();
     }
     if (!reason.empty()) {
-      ReasoningChunk rc;
-      rc.reasoning = reason;
+      ThinkingChunk rc;
+      rc.delta = reason;
       (*ctx.onEvent)(rc);
     }
     return;
@@ -731,70 +951,46 @@ void LettaProvider::processSSELine(const std::string &line,
 
   // Handle tool_call_message
   if (msgType == "tool_call_message") {
+    if (!d.HasMember("tool_call") || !d["tool_call"].IsObject())
+      return;
     const auto &toolCall = d["tool_call"];
-    if (toolCall.IsObject()) {
-      std::string toolCallId, toolName, args;
-      if (toolCall.HasMember("tool_call_id") &&
-          toolCall["tool_call_id"].IsString())
-        toolCallId = toolCall["tool_call_id"].GetString();
-      if (toolCall.HasMember("name") && toolCall["name"].IsString())
-        toolName = toolCall["name"].GetString();
+    std::string toolCallId, toolName, args;
+    if (toolCall.HasMember("tool_call_id") &&
+        toolCall["tool_call_id"].IsString())
+      toolCallId = toolCall["tool_call_id"].GetString();
+    if (toolCall.HasMember("name") && toolCall["name"].IsString())
+      toolName = toolCall["name"].GetString();
 
-      if (toolCall.HasMember("arguments")) {
-        if (toolCall["arguments"].IsString()) {
-          args = toolCall["arguments"].GetString();
-        } else {
-          rapidjson::StringBuffer sb;
-          rapidjson::Writer<rapidjson::StringBuffer> writer(sb);
-          toolCall["arguments"].Accept(writer);
-          args = sb.GetString();
-        }
+    if (toolCall.HasMember("arguments")) {
+      if (toolCall["arguments"].IsString()) {
+        args = toolCall["arguments"].GetString();
+      } else {
+        rapidjson::StringBuffer sb;
+        rapidjson::Writer<rapidjson::StringBuffer> writer(sb);
+        toolCall["arguments"].Accept(writer);
+        args = sb.GetString();
       }
-
-      // Track tool call state for streaming
-      if (!toolCallId.empty()) {
-        auto &state = ctx.streamedToolCalls[toolCallId];
-        if (!toolName.empty())
-          state.lastName = toolName;
-        if (!args.empty())
-          state.lastArgs += args;
-
-        ToolCallChunk tc;
-        tc.id = toolCallId;
-        tc.name = toolName;
-        tc.args = state.lastArgs;
-        (*ctx.onEvent)(tc);
-      }
-    }
-    return;
-  }
-
-  // Handle tool_return_message
-  if (msgType == "tool_return_message") {
-    std::string toolCallId, result, status;
-    if (d.HasMember("tool_call_id") && d["tool_call_id"].IsString())
-      toolCallId = d["tool_call_id"].GetString();
-    if (d.HasMember("status") && d["status"].IsString())
-      status = d["status"].GetString();
-
-    // Get result from func_response or tool_return
-    if (d.HasMember("func_response")) {
-      if (d["func_response"].IsString())
-        result = d["func_response"].GetString();
-    } else if (d.HasMember("tool_return")) {
-      if (d["tool_return"].IsString())
-        result = d["tool_return"].GetString();
     }
 
     if (!toolCallId.empty()) {
-      ToolResultChunk tr;
-      tr.toolCallId = toolCallId;
-      tr.result = result;
-      tr.success = (status == "success");
-      (*ctx.onEvent)(tr);
+      auto &state = ctx.streamedToolCalls[toolCallId];
+      if (!toolName.empty())
+        state.lastName = toolName;
+      if (!args.empty())
+        state.lastArgs += args;
+
+      ToolCallChunk tc;
+      tc.id = toolCallId;
+      tc.index = 0;
+      tc.nameDelta = toolName;
+      tc.argsDelta = args;
+      (*ctx.onEvent)(tc);
     }
     return;
   }
+
+  // Handle tool_return_message — not emitted as stream event (agent handles results)
+  // We skip emitting ToolResultChunk since it's not in StreamEvent variant.
 
   // Handle api_error
   if (msgType == "api_error" || d.HasMember("error")) {
@@ -805,9 +1001,9 @@ void LettaProvider::processSSELine(const std::string &line,
         errMsg = err["message"].GetString();
     }
     if (!errMsg.empty()) {
-      ErrorChunk ec;
-      ec.error = errMsg;
-      (*ctx.onEvent)(ec);
+      StreamError se;
+      se.message = errMsg;
+      (*ctx.onEvent)(se);
     }
     return;
   }
@@ -817,146 +1013,83 @@ void LettaProvider::processSSELine(const std::string &line,
 // Stream Execution
 // ============================================================================
 
-void LettaProvider::executeStreamRequest(
+int LettaProvider::executeStreamRequest(
     OAuthAccount &acc, const AgentHistory &history, const ProviderOptions &opts,
     std::function<void(const StreamEvent &)> &onEvent) {
 
+  std::string agentError;
+  if (!ensureAgentId(acc, agentError)) {
+    onEvent(StreamError{agentError, 0, acc.identifier});
+    return 0;
+  }
+
   CURL *curl = curl_easy_init();
   if (!curl)
-    return;
+    return 0;
 
-  // Build the request URL - Letta uses agent-based API
-  // We need to send a message to the agent conversation
-  std::string url = std::string(kApiBaseUrl) + "/v1/agents";
+  // Letta uses conversations API: POST /v1/conversations/{id}/messages
+  // We use "default" conversation with agent_id in the body
+  std::string url = std::string(kApiBaseUrl) + "/v1/conversations/default/messages";
 
-  // Build JSON request body
   rapidjson::Document doc(rapidjson::kObjectType);
   rapidjson::Document::AllocatorType &alloc = doc.GetAllocator();
 
-  // Build messages array from history
   rapidjson::Value messages(rapidjson::kArrayType);
 
-  // Add system prompt from history
-  if (!history.turns.empty() && !history.turns[0].messages.empty()) {
-    rapidjson::Value sysMsg(rapidjson::kObjectType);
-    sysMsg.AddMember("role", "system", alloc);
-    std::string sysContent;
-    for (const auto &msg : history.turns[0].messages) {
-      if (msg.role == "system") {
-        if (!sysContent.empty())
-          sysContent += "\n";
-        sysContent += msg.content;
-      }
-    }
-    if (sysContent.empty())
-      sysContent = "You are a helpful coding assistant.";
-    sysMsg.AddMember("content",
-                     rapidjson::Value(sysContent.c_str(), alloc), alloc);
-    messages.PushBack(sysMsg, alloc);
-  }
-
-  // Add conversation messages
   for (const auto &turn : history.turns) {
     for (const auto &msg : turn.messages) {
-      if (msg.role == "system")
+      if (msg.role == firmius::shared::Role::Error) {
         continue;
+      }
 
-      rapidjson::Value chatMsg(rapidjson::kObjectType);
-      std::string role = (msg.role == "user") ? "user" : "assistant";
-      chatMsg.AddMember("role",
-                        rapidjson::Value(role.c_str(), alloc), alloc);
-      chatMsg.AddMember("content",
-                        rapidjson::Value(msg.content.c_str(), alloc), alloc);
-
-      // Add tool_calls if present
-      if (!msg.toolCalls.empty()) {
-        rapidjson::Value toolCallsArr(rapidjson::kArrayType);
-        for (const auto &tc : msg.toolCalls) {
-          rapidjson::Value tcObj(rapidjson::kObjectType);
-          tcObj.AddMember("id",
-                          rapidjson::Value(tc.id.c_str(), alloc), alloc);
-          tcObj.AddMember("type", "function", alloc);
-          rapidjson::Value func(rapidjson::kObjectType);
-          func.AddMember("name",
-                         rapidjson::Value(tc.name.c_str(), alloc), alloc);
-          func.AddMember("arguments",
-                         rapidjson::Value(tc.args.c_str(), alloc), alloc);
-          tcObj.AddMember("function", func, alloc);
-          toolCallsArr.PushBack(tcObj, alloc);
+      if (msg.role == firmius::shared::Role::ToolResult) {
+        rapidjson::Value approvalMessage = makeApprovalMessage(msg, alloc);
+        if (approvalMessage.HasMember("approvals") &&
+            approvalMessage["approvals"].IsArray() &&
+            !approvalMessage["approvals"].Empty()) {
+          messages.PushBack(approvalMessage, alloc);
         }
-        chatMsg.AddMember("tool_calls", toolCallsArr, alloc);
+        continue;
       }
 
-      // Add tool_call_id if present
-      if (!msg.toolCallId.empty()) {
-        chatMsg.AddMember("tool_call_id",
-                          rapidjson::Value(msg.toolCallId.c_str(), alloc),
-                          alloc);
+      rapidjson::Value lettaMsg;
+      if (!buildLettaMessage(msg, lettaMsg, alloc)) {
+        continue;
       }
-
-      messages.PushBack(chatMsg, alloc);
+      messages.PushBack(lettaMsg, alloc);
     }
   }
 
   doc.AddMember("messages", messages, alloc);
-
-  // Model
-  std::string modelId = opts.modelId.empty() ? "auto" : opts.modelId;
-  doc.AddMember("model",
-                rapidjson::Value(modelId.c_str(), alloc), alloc);
-
-  // Stream
-  doc.AddMember("stream", true, alloc);
-
-  // Temperature
-  doc.AddMember("temperature", opts.temperature, alloc);
-
-  // Max tokens
-  if (opts.maxTokens.has_value()) {
-    doc.AddMember("max_tokens",
-                  static_cast<int>(opts.maxTokens.value()), alloc);
-  }
-
-  // Tools
+  doc.AddMember("streaming", true, alloc);
+  doc.AddMember("stream_tokens", true, alloc);
+  doc.AddMember("include_pings", true, alloc);
+  doc.AddMember("background", true, alloc);
+  doc.AddMember("include_compaction_messages", true, alloc);
   if (!opts.tools.empty()) {
-    rapidjson::Value toolsArr(rapidjson::kArrayType);
-    for (const auto &tool : opts.tools) {
-      rapidjson::Value toolObj(rapidjson::kObjectType);
-      toolObj.AddMember("type", "function", alloc);
-
-      rapidjson::Value func(rapidjson::kObjectType);
-      func.AddMember("name",
-                     rapidjson::Value(tool.name.c_str(), alloc), alloc);
-      func.AddMember("description",
-                     rapidjson::Value(tool.description.c_str(), alloc),
-                     alloc);
-
-      rapidjson::Document schemaDoc;
-      schemaDoc.Parse(tool.inputSchema.c_str());
-      if (!schemaDoc.HasParseError()) {
-        rapidjson::Value schemaVal;
-        schemaVal.CopyFrom(schemaDoc, alloc);
-        func.AddMember("parameters", schemaVal, alloc);
-      }
-
-      toolObj.AddMember("function", func, alloc);
-      toolsArr.PushBack(toolObj, alloc);
-    }
-    doc.AddMember("tools", toolsArr, alloc);
+    doc.AddMember("client_tools", buildClientTools(opts.tools, alloc), alloc);
   }
 
-  // Serialize
+  const std::string agentId = acc.metadata["agent_id"];
+  doc.AddMember("agent_id", rapidjson::Value(agentId.c_str(), alloc), alloc);
+
+  if (!opts.modelId.empty() && opts.modelId != "auto") {
+    doc.AddMember("override_model",
+                  rapidjson::Value(opts.modelId.c_str(), alloc), alloc);
+  }
+
   rapidjson::StringBuffer buffer;
   rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
   doc.Accept(writer);
   std::string body = buffer.GetString();
 
-  // Setup curl
   struct curl_slist *headers = nullptr;
   headers = curl_slist_append(headers, "Content-Type: application/json");
   headers = curl_slist_append(
       headers, ("Authorization: Bearer " + acc.accessToken).c_str());
   headers = curl_slist_append(headers, "Accept: text/event-stream");
+  headers = curl_slist_append(headers, "X-Letta-Source: letta-code");
+  headers = curl_slist_append(headers, "User-Agent: firmius/1.0");
 
   curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
   curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
@@ -972,57 +1105,146 @@ void LettaProvider::executeStreamRequest(
 
   curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ctx);
   curl_easy_setopt(curl, CURLOPT_TIMEOUT, 600L);
+  curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
+  curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
 
   CURLcode res = curl_easy_perform(curl);
+  long responseCode = 0;
+  curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &responseCode);
 
   curl_slist_free_all(headers);
   curl_easy_cleanup(curl);
 
   if (res != CURLE_OK && res != CURLE_ABORTED_BY_CALLBACK) {
-    ErrorChunk ec;
-    ec.error = std::string("curl error: ") + curl_easy_strerror(res);
-    onEvent(ec);
+    StreamError se;
+    se.message = std::string("curl error: ") + curl_easy_strerror(res);
+    onEvent(se);
+    return 0;
   }
+
+  if (responseCode >= 400) {
+    StreamError se;
+    se.httpStatus = static_cast<int>(responseCode);
+    se.accountLocator = acc.identifier;
+    se.message = "Letta API error";
+    if (!ctx.buffer.empty()) {
+      se.message += ": " + ctx.buffer;
+    }
+    onEvent(se);
+    return static_cast<int>(responseCode);
+  }
+
+  if (ctx.buffer.empty()) {
+    StreamError se;
+    se.httpStatus = static_cast<int>(responseCode);
+    se.accountLocator = acc.identifier;
+    se.message = "Letta stream produced no events";
+    onEvent(se);
+    return static_cast<int>(responseCode);
+  }
+
+  onEvent(StreamDone{StopReason::Stop});
+  return static_cast<int>(responseCode);
+}
+
+bool LettaProvider::ensureAgentId(OAuthAccount &acc,
+                                  std::string &outErrorMessage) {
+  const auto existing = acc.metadata.find("agent_id");
+  if (existing != acc.metadata.end() && !existing->second.empty()) {
+    return true;
+  }
+
+  firmius::utils::GCPHttpClient client("firmius-letta/1.0");
+  client.setContentType("application/json");
+  client.addHeader("X-Letta-Source", kSourceHeaderValue);
+  client.addHeader("User-Agent", kUserAgentValue);
+  client.addHeader("Authorization", "Bearer " + acc.accessToken);
+
+  auto listResp = client.get(std::string(kApiBaseUrl) + "/v1/agents", 15);
+  if (listResp.code == 200) {
+    rapidjson::Document listDoc;
+    listDoc.Parse(listResp.body.c_str());
+    if (!listDoc.HasParseError() && listDoc.IsArray() && !listDoc.Empty()) {
+      const auto &firstAgent = listDoc[0];
+      if (firstAgent.IsObject() && firstAgent.HasMember("id") &&
+          firstAgent["id"].IsString()) {
+        acc.metadata["agent_id"] = firstAgent["id"].GetString();
+        saveAccounts();
+        return true;
+      }
+    }
+  }
+
+  auto resp = client.post(std::string(kApiBaseUrl) + "/v1/agents", "{}", 15);
+  if (resp.code != 201 && resp.code != 200) {
+    outErrorMessage = "Failed to create Letta agent: HTTP " +
+                      std::to_string(resp.code);
+    if (!resp.body.empty()) {
+      outErrorMessage += " " + resp.body;
+    }
+    return false;
+  }
+
+  rapidjson::Document doc;
+  doc.Parse(resp.body.c_str());
+  if (doc.HasParseError() || !doc.IsObject() || !doc.HasMember("id") ||
+      !doc["id"].IsString()) {
+    outErrorMessage = "Invalid Letta agent creation response";
+    return false;
+  }
+
+  acc.metadata["agent_id"] = doc["id"].GetString();
+  saveAccounts();
+  return true;
 }
 
 void LettaProvider::stream(const AgentHistory &history,
                            const ProviderOptions &opts,
                            std::function<void(const StreamEvent &)> onEvent) {
-  // Retry logic with account rotation
   static constexpr int kMaxRetries = 5;
 
   for (int attempt = 0; attempt < kMaxRetries; ++attempt) {
     auto accOpt = getAvailableAccount(opts.modelId);
     if (!accOpt) {
-      ErrorChunk ec;
-      ec.error = "No available Letta account";
-      onEvent(ec);
+      StreamError se;
+      se.message = "No available Letta account";
+      onEvent(se);
       return;
     }
 
-    OAuthAccount *acc = *accOpt;
+    OAuthAccount acc = *accOpt;
 
-    // Refresh token if needed
-    if (isTokenExpired(*acc)) {
-      if (!refreshAccessToken(*acc)) {
-        markAccountRateLimited(*acc, 60);
+    if (isTokenExpired(acc)) {
+      if (!refreshAccessToken(acc)) {
+        markAccountRateLimited(acc, 60);
+        updateAccount(acc);
         continue;
       }
+      updateAccount(acc);
     }
 
     try {
-      executeStreamRequest(*acc, history, opts, onEvent);
-      return; // Success
+      const int status = executeStreamRequest(acc, history, opts, onEvent);
+      updateAccount(acc);
+      if (status >= 200 && status < 300) {
+        return;
+      }
+
+      const int backoff = (status == 402 || status == 429) ? 60 : (1 << attempt);
+      markAccountRateLimited(acc, backoff);
+      updateAccount(acc);
+      continue;
     } catch (const std::exception &e) {
-      int backoff = BackoffConstants::computeBackoff(attempt);
-      markAccountRateLimited(*acc, backoff);
-      InterruptibleSleep::sleepFor(backoff);
+      int backoff = 1 << attempt; // exponential: 1, 2, 4, 8, 16
+      markAccountRateLimited(acc, backoff);
+      updateAccount(acc);
+      std::this_thread::sleep_for(std::chrono::seconds(backoff));
     }
   }
 
-  ErrorChunk ec;
-  ec.error = "All Letta accounts exhausted after retries";
-  onEvent(ec);
+  StreamError se;
+  se.message = "All Letta accounts exhausted after retries";
+  onEvent(se);
 }
 
 void LettaProvider::generateSummary(
@@ -1037,7 +1259,6 @@ void LettaProvider::generateSummary(
   opts.maxTokens = 4000;
   opts.abortSignal = abortSignal;
 
-  // Build a simple history with just the compaction prompt
   AgentHistory summaryHistory;
   summaryHistory.threadId = history.threadId;
 
@@ -1045,8 +1266,12 @@ void LettaProvider::generateSummary(
   turn.turnId = "summary";
 
   Message userMsg;
-  userMsg.role = "user";
-  userMsg.content = compactionPrompt;
+  userMsg.role = firmius::shared::Role::User;
+  userMsg.content.push_back(firmius::shared::TextContent{compactionPrompt});
+  userMsg.timestamp = static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::system_clock::now().time_since_epoch())
+          .count());
   turn.messages.push_back(userMsg);
 
   summaryHistory.turns.push_back(turn);

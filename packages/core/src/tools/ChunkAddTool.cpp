@@ -96,6 +96,7 @@ shared::ToolResult ChunkAddTool::execute(const rapidjson::Value &input,
         });
     worktools::emitWorkEvent(
         shared::ChunkAdded{threadId, updatedPlan.id, addedChunk});
+    worktools::emitWorkEvent(shared::PlanUpdated{threadId, updatedPlan});
 
     rapidjson::Document doc;
     doc.SetObject();

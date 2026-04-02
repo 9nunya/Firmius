@@ -225,6 +225,9 @@ struct AgentFileEdited {
   std::string parentId = "";
   std::string path;
   std::string toolCallId;
+  std::string diffPreview;
+  int addedLines = 0;
+  int removedLines = 0;
   bool operator==(const AgentFileEdited &) const = default;
 };
 struct AgentTurnCompleted {

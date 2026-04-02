@@ -103,7 +103,7 @@ void BaseOAuthProvider::markAccountRateLimited(OAuthAccount &acc,
   acc.backoffUntil = getNowSeconds() + backoffSeconds;
 }
 
-std::optional<OAuthAccount *> BaseOAuthProvider::getAvailableAccount(
+std::optional<OAuthAccount> BaseOAuthProvider::getAvailableAccount(
     const std::optional<std::string> & /*modelId*/) {
   std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
   if (accounts_.empty()) {
@@ -136,7 +136,7 @@ std::optional<OAuthAccount *> BaseOAuthProvider::getAvailableAccount(
         continue;
       }
       // Return account without updating lastUsedIndex_
-      return &acc;
+      return acc;
     }
 
     currentIdx = (currentIdx + 1) % static_cast<int>(accounts_.size());
@@ -145,6 +145,17 @@ std::optional<OAuthAccount *> BaseOAuthProvider::getAvailableAccount(
   // If all are rate limited, return the one closest to unlocking (or just the
   // next one as fallback)
   return std::nullopt;
+}
+
+void BaseOAuthProvider::updateAccount(const OAuthAccount &acc) {
+  std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
+  for (auto &existing : accounts_) {
+    if (existing.getIdentifier() == acc.getIdentifier()) {
+      existing = acc;
+      saveAccounts();
+      return;
+    }
+  }
 }
 
 void BaseOAuthProvider::addAccount(const OAuthAccount &acc) {

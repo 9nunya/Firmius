@@ -110,7 +110,7 @@ audits ──┼──► core ──► shared ◄── provider
 |---------|---------------|-------------|
 | Raw `new`/`delete` | Memory safety | Smart pointers only |
 | Vulnerable commands (`rm -rf /`, `format`) | Security | Blocked by `CommandIntentAnalyzer` |
-| Hashline prefixes in tool outputs | Parsing errors | Strip before returning |
+| LineRange prefixes in tool outputs | Parsing errors | Strip before returning |
 | Silent failure | Debug difficulty | Use `FIRMIUS_PANIC` or explicit error handling |
 | Global mutable state | Thread safety | Use singletons with mutex protection |
 

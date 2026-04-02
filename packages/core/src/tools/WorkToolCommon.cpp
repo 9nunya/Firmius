@@ -782,137 +782,134 @@ bool releaseFileLock(const std::string &threadId, const std::string &lockId) {
 
 std::string buildExecutorLockDoctrine() {
   return R"(
-## File Lock Protocol for Executors
+## Fleet Coordination Doctrine for Executors
 
-You coordinate file access when delegating to workers using `fleet_lock`. Follow this protocol:
+The goal is not "put a generic lock on every file."
+The goal is to prevent workers from colliding on unstable shared surfaces during implementation and verification.
 
-### 1. Plan Before Delegating
-- Identify all files your workers will need to read or modify
-- Check for existing locks: `fleet_lock` with `{"mode": "check", "paths": [...]}`
-- If conflicts exist, wait or reassign workers to non-conflicting files
+### Mental Model
 
-### 2. Acquire Locks Before Spawning Workers
-- Use `fleet_lock` with `{"mode": "acquire", "reason": "...", "paths": [...]}`
-- Example: `{"mode": "acquire", "reason": "Refactoring auth module", "paths": ["src/auth.cpp", "src/auth.hpp"]}`
-- Keep locks narrow: only files being actively modified
-- Store the returned `lock_id` for release later
+Think in terms of **edit ownership until stable**.
+If worker A is still modifying or stabilizing a shared surface, worker B should not race in and "help fix" that same surface during verification.
 
-### 3. Assign Workers to Non-Overlapping Files
-- Each worker should touch a distinct set of files
-- Pass explicit file lists to workers in their task description
-- Example: "Worker A: modify src/auth/login.cpp only. Worker B: modify src/auth/session.cpp only"
+### Your Responsibilities
 
-### 4. Handle Conflicts via Lock Requests
-- If workers need files locked by others, use `fleet_lock` with `mode: "request"`
-- Example: `{"mode": "request", "target_agent_id": "worker-b", "paths": ["src/auth.cpp"], "reason": "Need auth changes"}`
-- This blocks until the target worker completes and releases their lock
+1. Prefer task and file separation when delegating.
+2. Tell workers their likely edit surfaces up front when you know them.
+3. If late-wave collisions happen anyway, have workers coordinate through `fleet_lock` rather than fighting each other through repeated rereads.
 
-### 5. Release Locks Promptly
-- Call `fleet_lock` with `{"mode": "release", "lock_id": "..."}` when all workers complete
-- Do not hold locks longer than necessary
+### When Workers Should Use `request`
 
-### Lock Lifecycle Pattern
-```
-1. fleet_lock({mode: "check", paths: [...]}) → detect conflicts
-2. fleet_lock({mode: "acquire", reason: "...", paths: [...]}) → get lock_id
-3. summon_subagent(worker, task_with_files) → delegate work
-4. Wait for worker completion
-5. fleet_lock({mode: "release", lock_id: "..."}) → free resources
-```
+Workers should use `fleet_lock` with `mode: "request"` when:
+- another worker is still actively editing or stabilizing a surface they now depend on
+- peer edits are causing verification churn
+- a worker is about to "fix" a surface another worker is still changing
+
+The request means:
+"Please hold ownership of this unstable surface until your current edit/verification wave is done, then release it so I can continue."
+
+### What You Should Expect
+
+When two workers converge on the same unstable surface:
+- do NOT encourage both to edit it
+- do NOT have one worker blindly patch over the other
+- prefer one worker finishing and releasing ownership, then the other rereading and continuing
+
+### Bad Fleet Pattern
+
+Worker 1 finishes implementation, tries to build, sees a failure caused by Worker 2's in-flight edits, and immediately edits the same surface.
+This creates churn, reread loops, and false verification failures.
+
+### Good Fleet Pattern
+
+Worker 1 notices Worker 2 is still changing the shared surface.
+Worker 1 requests Worker 2 to hold ownership until stable.
+Worker 1 waits.
+Worker 2 finishes, releases ownership, and Worker 1 rereads and resumes verification.
 
 ### Tool Reference
-- `{"mode": "acquire", "reason": "...", "paths": [...], "timeout_ms": N}` - Acquire lock, wait up to N ms if contested
-- `{"mode": "release", "lock_id": "..."}` - Release a lock you own
-- `{"mode": "request", "target_agent_id": "...", "paths": [...], "reason": "..."}` - Request another agent to lock files
-- `{"mode": "wait", "lock_id": "...", "timeout_ms": N}` - Wait for specific lock to release
-- `{"mode": "check", "paths": [...]}` - Check if paths have active locks
+- `{"mode":"check","paths":[...]}` - inspect active conflicts
+- `{"mode":"acquire","reason":"...","paths":[...],"timeout_ms":N}` - claim narrow ownership of a surface you are actively editing
+- `{"mode":"release","lock_id":"..."}` - release ownership when stable
+- `{"mode":"request","target_agent_id":"...","paths":[...],"reason":"..."}` - ask another worker to hold ownership until their current wave is done
+- `{"mode":"wait","lock_id":"...","timeout_ms":N}` - wait on a known lock when appropriate
 )";
 }
 
 std::string buildWorkerLockDoctrine() {
   return R"(
-## File Lock Protocol for Workers
+## Fleet Coordination Doctrine for Workers
 
-You are a worker executing a bounded subtask. Coordinate file access WITH OTHER WORKERS directly using `fleet_lock` - do not bother your parent executor with lock conflicts.
+You coordinate directly with peer workers.
+The goal is to avoid racing on unstable shared surfaces during implementation and verification.
 
-### 1. Check Before Editing
-- Before ANY file edit, run `fleet_lock` with `{"mode": "check", "paths": [...]}`
-- Example: `{"mode": "check", "paths": ["src/auth/login.cpp"]}`
+### Correct Mental Model
 
-### 2. If Files Are Locked - WAIT, Don't Report
-- If check shows another agent holds a lock:
-  - Use `fleet_lock` with `mode: "acquire"` and `timeout_ms` to wait
-  - Example: `{"mode": "acquire", "reason": "Editing auth", "paths": ["src/auth.cpp"], "timeout_ms": 60000}`
-  - The tool blocks until the lock is released or timeout expires
-  - Only report if timeout expires
+Do NOT think:
+"Locks mean I should put a generic mutex on every file."
 
-### 3. Acquire Locks Before Editing
-- Always call `fleet_lock` with `mode: "acquire"` before making file changes
-- Include your specific files in `paths`
-- Use `timeout_ms` when you expect brief contention (30000-120000ms typical)
-- The lock ensures no other worker can edit those files simultaneously
+Think:
+"If another worker still owns an unstable surface I now depend on, I should let them finish that wave, then reread and continue."
 
-### 4. Keep Locks Narrow and Brief
-- Lock only the exact files you are modifying
-- Do not lock files you only read
-- Release locks immediately after completing edits: `{"mode": "release", "lock_id": "..."}`
+### When to Use `acquire`
 
-### 5. Self-Service Conflict Resolution
-- Workers coordinate directly through the lock system
-- No need to notify parent executor about lock waits or acquisitions
-- Only mention locks in your final summary if relevant
+Use `acquire` when you are actively editing a narrow surface and want to signal ownership while you are changing it.
 
-### Worker Lock Flow (Self-Service)
-```
-Start task
-    ↓
-Check: fleet_lock({mode: "check", paths: [...]})
-    ↓
-has_conflicts?
-    │
-    ├─YES─→ Acquire with timeout: fleet_lock({mode: "acquire", reason: "...", paths: [...], timeout_ms: N})
-    │         ↓
-    │       Timeout? ──YES──→ Report "timed out waiting for lock on [files]"
-    │         │
-    │         NO (lock acquired)
-    │         ↓
-    └─NO──→ Acquire: fleet_lock({mode: "acquire", reason: "...", paths: [...]})
-              ↓
-Do your edits
-    ↓
-Release: fleet_lock({mode: "release", lock_id: "..."})
-    ↓
-Report completion (no lock details needed unless asked)
-```
+Good use:
+- you are about to perform a real edit on known files
+- you expect brief peer overlap on the same surface
 
-### Example Worker Flow
-```
-1. "Checking for file conflicts"
-   → fleet_lock({mode: "check", paths: ["src/auth/login.cpp"]})
-   → Result: has_conflicts: true, owner: "worker-xyz"
+Bad use:
+- locking every file you read
+- locking broad areas "just in case"
 
-2. "Waiting for lock on src/auth/login.cpp"
-   → fleet_lock({mode: "acquire", reason: "Auth refactor", paths: ["src/auth/login.cpp"], timeout_ms: 60000})
-   → [blocks until worker-xyz finishes]
-   → Result: lock_id: "abc123"
+### When to Use `request`
 
-3. [Perform file edits]
+Use `request` when another worker is already the better owner of a contested surface and you need them to finish before you continue.
 
-4. "Releasing lock"
-   → fleet_lock({mode: "release", lock_id: "abc123"})
+Examples:
+- your build is failing because another worker is still editing the same API surface
+- peer edit notices show the exact file you were about to verify against
+- you are tempted to patch over a peer's in-flight work
 
-5. "Task complete: modified src/auth/login.cpp"
-   (no need to mention lock coordination - it's handled automatically)
-```
+The request means:
+"Please hold ownership of this surface until your current edit/verification wave is done, then release it so I can continue."
 
-### Key Principle
-**Workers coordinate file access directly through locks.** The parent executor delegates work and trusts workers to handle file conflicts autonomously. Only report if a lock timeout expires after a reasonable wait.
+### Preferred Worker Behavior
+
+1. If you are actively editing a narrow surface, acquire ownership narrowly.
+2. If a peer is already stabilizing the shared surface, request ownership hold from them instead of colliding.
+3. Wait.
+4. Reread after release.
+5. Continue with fresh context.
+
+### Good Example
+
+Worker 1 finished implementation and tries to verify.
+Worker 2 is still changing a shared file.
+Worker 1 does NOT immediately patch the file.
+Worker 1 requests Worker 2 to hold ownership until done.
+Worker 1 waits, rereads after release, and then continues verification.
+
+### Bad Example
+
+Worker 1 sees a failing build caused by Worker 2's in-flight edits and immediately edits the same file.
+Worker 2 rereads, changes again, and both workers churn.
+
+### Reporting Rule
+
+Do not spam your parent executor about routine waits.
+Report fleet coordination only when:
+- a wait times out
+- a request is denied and it blocks progress
+- the conflict reveals a real execution issue
 
 ### Tool Reference
-- `{"mode": "acquire", "reason": "...", "paths": [...], "timeout_ms": N}` - Acquire lock, wait up to N ms if contested
-- `{"mode": "release", "lock_id": "..."}` - Release a lock you own
-- `{"mode": "check", "paths": [...]}` - Check if paths have active locks
-- `{"mode": "wait", "lock_id": "...", "timeout_ms": N}` - Wait for specific lock to release
+- `{"mode":"check","paths":[...]}` - inspect conflicts
+- `{"mode":"acquire","reason":"...","paths":[...],"timeout_ms":N}` - claim narrow active edit ownership
+- `{"mode":"release","lock_id":"..."}` - release ownership once stable
+- `{"mode":"request","target_agent_id":"...","paths":[...],"reason":"..."}` - ask a peer to hold ownership until stable
+- `{"mode":"wait","lock_id":"...","timeout_ms":N}` - wait on known ownership state
 )";
 }
 

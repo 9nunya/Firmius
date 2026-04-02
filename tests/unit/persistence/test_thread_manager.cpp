@@ -16,6 +16,8 @@
 #include <thread>
 
 #include <rapidjson/document.h>
+#include <rapidjson/stringbuffer.h>
+#include <rapidjson/writer.h>
 
 using namespace firmius::core;
 using namespace firmius::shared;
@@ -283,6 +285,50 @@ TEST_F(ThreadManagerTest, loadAgentHistory_withTurns) {
     EXPECT_EQ(history.turns.size(), 2u);
     EXPECT_EQ(history.turns[0].turnId, "turn-001");
     EXPECT_EQ(history.turns[1].turnId, "turn-002");
+}
+
+TEST_F(ThreadManagerTest, loadAgentHistory_repairsConcatenatedJsonObjects) {
+    ThreadMetadata metadata = createTestMetadata();
+    std::string threadId = tm->createThread(metadata);
+    std::string agentId = "test-agent";
+    std::string journalPath =
+        tempDir + "/.firmius/threads/" + threadId + "/" + agentId + ".jsonl";
+
+    AgentTurn turn1 = createTestTurn("turn-001");
+    AgentTurn turn2 = createTestTurn("turn-002");
+
+    rapidjson::Document d1 = toJson(turn1);
+    rapidjson::StringBuffer b1;
+    rapidjson::Writer<rapidjson::StringBuffer> w1(b1);
+    d1.Accept(w1);
+
+    rapidjson::Document d2 = toJson(turn2);
+    rapidjson::StringBuffer b2;
+    rapidjson::Writer<rapidjson::StringBuffer> w2(b2);
+    d2.Accept(w2);
+
+    {
+        std::ofstream file(journalPath);
+        ASSERT_TRUE(file.is_open());
+        file << b1.GetString() << b2.GetString() << "\n";
+    }
+
+    AgentHistory history = tm->loadAgentHistory(threadId, agentId);
+
+    ASSERT_EQ(history.turns.size(), 2u);
+    EXPECT_EQ(history.turns[0].turnId, "turn-001");
+    EXPECT_EQ(history.turns[1].turnId, "turn-002");
+
+    std::ifstream repaired(journalPath);
+    ASSERT_TRUE(repaired.is_open());
+    std::string line1;
+    std::string line2;
+    ASSERT_TRUE(std::getline(repaired, line1));
+    ASSERT_TRUE(std::getline(repaired, line2));
+    EXPECT_FALSE(line1.empty());
+    EXPECT_FALSE(line2.empty());
+    EXPECT_EQ(line1, b1.GetString());
+    EXPECT_EQ(line2, b2.GetString());
 }
 
 TEST_F(ThreadManagerTest, loadAgentHistory_repairsOrphanedToolCalls) {

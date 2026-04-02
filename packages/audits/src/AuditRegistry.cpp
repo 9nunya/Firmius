@@ -17,6 +17,8 @@
 #include "audits/SubagentStressAudit.hpp"
 #include "audits/WorkflowsAudit.hpp"
 #include "audits/ResumeTodoAudit.hpp"
+#include "audits/WebFetchAudit.hpp"
+#include "audits/WebSearchAudit.hpp"
 
 namespace firmius::audits {
 
@@ -40,6 +42,8 @@ std::vector<std::unique_ptr<shared::IAudit>> createAudits() {
     audits.push_back(std::make_unique<LoopCancellationAudit>());
     audits.push_back(std::make_unique<ModelLoadAudit>());
     audits.push_back(std::make_unique<ResumeTodoAudit>());
+    audits.push_back(std::make_unique<WebFetchAudit>());
+    audits.push_back(std::make_unique<WebSearchAudit>());
     return audits;
 }
 

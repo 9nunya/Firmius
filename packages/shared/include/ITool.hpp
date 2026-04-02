@@ -17,6 +17,8 @@
 /**
  * @brief Extensible tool system for agentic actions.
  */
+namespace firmius::provider { class LLMSearchProviderRegistry; }
+
 namespace firmius::shared {
 
 class IAgent; // Forward declaration
@@ -30,6 +32,7 @@ struct ToolContext {
   std::string
       currentToolCallId; ///< The ID of the tool call currently executing.
   const std::atomic<bool> *cancelSignal = nullptr; ///< Cancellation signal.
+  firmius::provider::LLMSearchProviderRegistry *searchRegistry = nullptr; ///< Optional search provider registry.
 
   bool cancelRequested() const {
     return cancelSignal && cancelSignal->load();

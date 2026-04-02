@@ -138,6 +138,14 @@ public:
         recordCall("saveHistory", {});
     }
 
+    void appendHistoryTurn(const AgentTurn& turn) override {
+        recordCall("appendHistoryTurn", {{"turnId", turn.turnId}});
+        if (!context_.history) {
+            context_.history = std::make_shared<AgentHistory>();
+        }
+        context_.history->turns.push_back(turn);
+    }
+
     std::shared_ptr<IEnvironment> getEnvironment() const override {
         return environment_;
     }

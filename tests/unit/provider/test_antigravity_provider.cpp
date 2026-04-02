@@ -229,15 +229,15 @@ TEST(AntigravityProvider, AvailableAccountUsesHighestQuotaWithinModelBucket) {
 
   auto claude = provider.getAvailableAccount(std::string("claude-sonnet-4-6"));
   ASSERT_TRUE(claude.has_value());
-  EXPECT_EQ((*claude)->getIdentifier(), "b@example.com");
+  EXPECT_EQ(claude->getIdentifier(), "b@example.com");
 
   auto flash = provider.getAvailableAccount(std::string("gemini-3-flash"));
   ASSERT_TRUE(flash.has_value());
-  EXPECT_EQ((*flash)->getIdentifier(), "a@example.com");
+  EXPECT_EQ(flash->getIdentifier(), "a@example.com");
 
   auto pro = provider.getAvailableAccount(std::string("gemini-3.1-pro"));
   ASSERT_TRUE(pro.has_value());
-  EXPECT_EQ((*pro)->getIdentifier(), "c@example.com");
+  EXPECT_EQ(pro->getIdentifier(), "c@example.com");
 }
 
 TEST(AntigravityProvider, AvailableAccountRequiresPositiveQuotaInRequestedBucket) {
@@ -291,7 +291,7 @@ TEST(AntigravityProvider, FlashAgentSelectsAgentQuotaWhenPresent) {
   auto flashAgent =
       provider.getAvailableAccount(std::string("gemini-3-flash-agent"));
   ASSERT_TRUE(flashAgent.has_value());
-  EXPECT_EQ((*flashAgent)->getIdentifier(), "b@example.com");
+  EXPECT_EQ(flashAgent->getIdentifier(), "b@example.com");
 }
 
 TEST(AntigravityProvider, QuotasPreserveExactGeminiFamilies) {
@@ -356,7 +356,7 @@ TEST(AntigravityProvider, TiedQuotaPrefersLastUsedAccount) {
   AntigravityProvider provider;
   auto flash = provider.getAvailableAccount(std::string("gemini-3-flash"));
   ASSERT_TRUE(flash.has_value());
-  EXPECT_EQ((*flash)->getIdentifier(), "b@example.com");
+  EXPECT_EQ(flash->getIdentifier(), "b@example.com");
 }
 
 TEST(AntigravityProvider, QuotasUseStreamQuotaExhaustionModelState) {

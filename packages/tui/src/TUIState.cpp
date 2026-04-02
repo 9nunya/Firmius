@@ -37,6 +37,7 @@
 #include <ftxui/dom/node.hpp>
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/screen.hpp>
+#include <ftxui/screen/color_info.hpp>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -527,35 +528,63 @@ public:
   void Render(ftxui::Screen &screen) override { children_[0]->Render(screen); }
 };
 
+static_assert(sizeof(ftxui::Color) == 5, "ftxui::Color size mismatch for darkening hack");
+
 class DarkenNode : public ScreenShaderNode {
 public:
-  DarkenNode(ftxui::Element child, uint8_t alpha)
-      : ScreenShaderNode(std::move(child)),
-        overlay_(ftxui::Color::RGBA(0, 0, 0, alpha)) {}
+  DarkenNode(ftxui::Element child, float t)
+      : ScreenShaderNode(std::move(child)), t_(t) {}
 
   void Render(ftxui::Screen &screen) override {
     ScreenShaderNode::Render(screen);
+
+    auto dimColor = [this](ftxui::Color c) -> ftxui::Color {
+      struct ColorInternal {
+        uint8_t type;
+        uint8_t r;
+        uint8_t g;
+        uint8_t b;
+        uint8_t a;
+      };
+
+      if (c == ftxui::Color::Default)
+        return c;
+
+      ColorInternal *raw = reinterpret_cast<ColorInternal *>(&c);
+      float factor = 1.0f - t_;
+
+      if (raw->type == 1) { // Palette16
+        const ftxui::ColorInfo info = ftxui::GetColorInfo(static_cast<ftxui::Color::Palette16>(raw->r));
+        raw->type = 3; raw->r = info.red; raw->g = info.green; raw->b = info.blue; raw->a = 255;
+      } else if (raw->type == 2) { // Palette256
+        const ftxui::ColorInfo info = ftxui::GetColorInfo(static_cast<ftxui::Color::Palette256>(raw->r));
+        raw->type = 3; raw->r = info.red; raw->g = info.green; raw->b = info.blue; raw->a = 255;
+      }
+
+      if (raw->type == 3) { // TrueColor
+        raw->r = static_cast<uint8_t>(raw->r * factor);
+        raw->g = static_cast<uint8_t>(raw->g * factor);
+        raw->b = static_cast<uint8_t>(raw->b * factor);
+        return c;
+      }
+      return c;
+    };
+
     for (int y = box_.y_min; y <= box_.y_max; ++y) {
       for (int x = box_.x_min; x <= box_.x_max; ++x) {
         auto &pixel = screen.PixelAt(x, y);
-        if (pixel.foreground_color != ftxui::Color::Default) {
-          pixel.foreground_color =
-              ftxui::Color::Blend(pixel.foreground_color, overlay_);
-        }
-        if (pixel.background_color != ftxui::Color::Default) {
-          pixel.background_color =
-              ftxui::Color::Blend(pixel.background_color, overlay_);
-        }
+        pixel.foreground_color = dimColor(pixel.foreground_color);
+        pixel.background_color = dimColor(pixel.background_color);
       }
     }
   }
 
 private:
-  ftxui::Color overlay_;
+  float t_;
 };
 
 static ftxui::Element DarkenElement(ftxui::Element child, uint8_t alpha = 96) {
-  return std::make_shared<DarkenNode>(std::move(child), alpha);
+  return std::make_shared<DarkenNode>(std::move(child), static_cast<float>(alpha) / 255.0f);
 }
 
 TuiState &TuiState::instance() {
@@ -591,7 +620,7 @@ void TuiState::activatePermissionRequest(
   pending_permission_option_boxes_.assign(pending_permission_labels_.size(),
                                          ftxui::Box{});
   pending_permission_selected_ = 0;
-}
+  }
 
 void TuiState::clearActivePermissionRequest() {
   pending_permission_request_.reset();
@@ -1048,7 +1077,15 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
 
           if (focused_agent_id_.empty()) {
             auto agents = harness_->listAgents(thread_.threadId);
-            if (!agents.empty()) {
+            for (const auto &candidate : agents) {
+              auto agent =
+                  firmius::core::AgentRegistry::instance().getAgent(candidate);
+              if (agent && agent->getContext().identity.parentId.empty()) {
+                focused_agent_id_ = candidate;
+                break;
+              }
+            }
+            if (focused_agent_id_.empty() && !agents.empty()) {
               focused_agent_id_ = agents.front();
             }
           }
@@ -1345,6 +1382,7 @@ void TuiState::updateStatusModel() {
           ctx.config.providerId + "/" + ctx.config.modelId;
       status_model_->model_variant = ctx.config.modelVariant;
       status_model_->purpose = ctx.identity.role;
+      status_model_->title = ctx.identity.friendlyName;
       status_model_->agent_name = ctx.identity.friendlyName.empty()
                                       ? ctx.identity.name
                                       : ctx.identity.friendlyName;
@@ -1377,6 +1415,7 @@ void TuiState::updateStatusModel() {
     status_model_->model_variant.clear();
   }
   status_model_->purpose = personaTitle;
+  status_model_->title = "";
   status_model_->agent_name = personaTitle;
   status_model_->context_used = 0;
   status_model_->context_max = 0;
@@ -1539,23 +1578,23 @@ void TuiState::updateAgentStripModel() {
     return;
   }
 
-  size_t visible_rows = std::min(kAgentStripVisibleRows, total_items);
-  size_t offset = agent_strip_model_->view_offset;
-  if (offset > total_items - visible_rows) {
-    offset = total_items - visible_rows;
-  }
+  agent_strip_model_->items = std::move(all_items);
 
+  // Auto-scroll logic: scroll to the focused agent or the first busy agent
+  int target_scroll = -1;
   if (focus_found) {
-    if (focused_index < offset) {
-      offset = focused_index;
-    } else if (focused_index >= offset + visible_rows) {
-      offset = focused_index - visible_rows + 1;
+    target_scroll = static_cast<int>(focused_index);
+  } else {
+    for (size_t i = 0; i < agent_strip_model_->items.size(); ++i) {
+      if (agent_strip_model_->items[i].is_busy) {
+        target_scroll = static_cast<int>(i);
+        break;
+      }
     }
   }
 
-  agent_strip_model_->view_offset = offset;
-  for (size_t i = 0; i < visible_rows; ++i) {
-    agent_strip_model_->items.push_back(std::move(all_items[offset + i]));
+  if (target_scroll != -1 && agent_strip_model_->on_scroll_request) {
+    agent_strip_model_->on_scroll_request(target_scroll);
   }
 }
 
@@ -1565,6 +1604,7 @@ void TuiState::updatePlanLaneModel() {
   }
   *plan_lane_model_ = active_plan_state_.model();
   plan_lane_model_->expanded = true;
+  plan_lane_model_->toggle_hint.clear();
 
   auto focusedAgent =
       focused_agent_id_.empty()
@@ -1641,6 +1681,7 @@ void TuiState::updateTodoLaneModel() {
   todo_lane_model_->show_chunk_header = false;
   todo_lane_model_->chunk_title.clear();
   todo_lane_model_->rows.clear();
+  todo_lane_model_->toggle_hint.clear();
 
   if (thread_.threadId.empty() || focused_agent_id_.empty()) {
     return;
@@ -2270,17 +2311,14 @@ ftxui::Component TuiState::root() {
                        ftxui::xflex;
           show_work_panel = true;
         } else if (panelDecision.kind == WorkPanelKind::SingleToggle) {
-          auto activeLabel = ftxui::text(" PANEL: " + panelDecision.activePanelLabel +
-                                         " (Ctrl+O to toggle) ") |
-                             ftxui::bold | ftxui::color(theme.base.bg) |
-                             ftxui::bgcolor(theme.base.highlight);
-          work_panel =
-              ftxui::vbox({activeLabel | ftxui::xflex,
-                           (panelDecision.showPlan ? plan_lane->Render()
-                                                   : todo_lane->Render()) |
-                               ftxui::size(ftxui::HEIGHT, ftxui::LESS_THAN,
-                                           work_panel_max_height)}) |
-              ftxui::xflex;
+          const std::string hint = std::string(" (Ctrl+O: ") + (panelDecision.showPlan ? "TODOS" : "PLAN") + ")";
+          if (panelDecision.showPlan) {
+            plan_lane_model_->toggle_hint = hint;
+          } else {
+            todo_lane_model_->toggle_hint = hint;
+          }
+          work_panel = (panelDecision.showPlan ? plan_lane->Render() : todo_lane->Render()) |
+                       ftxui::size(ftxui::HEIGHT, ftxui::LESS_THAN, work_panel_max_height);
           show_work_panel = true;
         } else if (panelDecision.kind == WorkPanelKind::ExecutorChunkTodo ||
                    panelDecision.kind == WorkPanelKind::TodoOnly) {
@@ -2294,10 +2332,12 @@ ftxui::Component TuiState::root() {
                                    work_panel_max_height);
           show_work_panel = true;
         }
-
         // Ultra-compact bottom bar layout
         ftxui::Elements bottom_bar_children;
-        bottom_bar_children.push_back(agent_strip->Render());
+        const bool has_agent_strip = agent_strip_model_ && !agent_strip_model_->items.empty();
+        if (has_agent_strip) {
+          bottom_bar_children.push_back(agent_strip->Render());
+        }
         bottom_bar_children.push_back(ftxui::separator() |
                                       ftxui::color(input_separator_color));
         if (pending_permission_request_) {

@@ -1,10 +1,11 @@
 #include "components/PlanLane.hpp"
 #include "ThemeManager.hpp"
 #include "components/ScrollableBox.hpp"
+#include "utils/Icons.hpp"
+#include <array>
 #include <ftxui/component/component.hpp>
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/terminal.hpp>
-#include <array>
 
 namespace firmius::tui {
 
@@ -21,11 +22,11 @@ StatusStyle styleFor(const Theme &theme, shared::WorkChunkStatus status) {
   case WorkChunkStatus::Ready:
     return {"", theme.base.highlight};
   case WorkChunkStatus::InProgress:
-    return {"", theme.status_bar.streaming.normal.fg};
+    return {"", theme.base.highlight};
   case WorkChunkStatus::Implemented:
     return {"󰄬", theme.status_bar.executing_tool.normal.fg};
   case WorkChunkStatus::Verifying:
-    return {"", theme.status_bar.provider_waiting.normal.fg};
+    return {"", theme.base.highlight};
   case WorkChunkStatus::Done:
     return {"", theme.status_bar.idle.normal.fg};
   case WorkChunkStatus::Blocked:
@@ -62,8 +63,9 @@ public:
   explicit PlanLaneComponentBase(std::shared_ptr<PlanLaneModel> model)
       : model_(std::move(model)) {
     body_renderer_ = ftxui::Renderer([this] { return RenderBody(); });
-    scrollable_ = ScrollableBox(
-        body_renderer_, {.startAtBottom = false, .overlayScrollbar = true});
+    scrollable_ = ScrollableBox(body_renderer_, {.startAtBottom = false,
+                                                 .overlayScrollbar = true,
+                                                 .showScrollbar = false});
     Add(scrollable_);
   }
 
@@ -80,6 +82,9 @@ public:
       header_parts.push_back(ftxui::text(" "));
       header_parts.push_back(ftxui::paragraph(model_->executor_chunk_title) |
                              ftxui::bold | ftxui::color(theme.base.fg));
+      if (!model_->toggle_hint.empty()) {
+        header_parts.push_back(ftxui::text(model_->toggle_hint) | ftxui::dim);
+      }
       if (!model_->executor_tasks.empty()) {
         header_parts.push_back(ftxui::text(" "));
         header_parts.push_back(
@@ -90,7 +95,7 @@ public:
                          ftxui::bgcolor(theme.agent_strip.bg) | ftxui::xflex;
       auto body = scrollable_
                       ? scrollable_->Render() | ftxui::xflex | ftxui::yflex
-                              : ftxui::text("");
+                      : ftxui::text("");
       return ftxui::vbox({summary_row, body}) |
              ftxui::bgcolor(theme.agent_strip.bg) | ftxui::xflex;
     }
@@ -101,25 +106,27 @@ public:
     }
 
     ftxui::Elements summary_parts;
-    summary_parts.push_back(chip("󰒓", theme.base.bg, theme.base.highlight));
+    summary_parts.push_back(chip(" " + shared::ICON_BOOK + " ", theme.base.bg,
+                                 theme.base.highlight));
     summary_parts.push_back(ftxui::text(" "));
-    summary_parts.push_back(ftxui::paragraph(model_->plan_title) |
-                            ftxui::bold | ftxui::color(theme.base.fg));
+    summary_parts.push_back(ftxui::paragraph(model_->plan_title) | ftxui::bold |
+                            ftxui::color(theme.base.fg));
+    if (!model_->toggle_hint.empty()) {
+      summary_parts.push_back(ftxui::text(model_->toggle_hint) | ftxui::dim);
+    }
     if (counts[static_cast<size_t>(shared::WorkChunkStatus::InProgress)] > 0) {
       summary_parts.push_back(ftxui::text(" "));
-      summary_parts.push_back(chip(
-          " " +
-              std::to_string(
-                  counts[static_cast<size_t>(shared::WorkChunkStatus::InProgress)]),
-          theme.base.fg, theme.status_bar.streaming.normal.fg));
+      summary_parts.push_back(
+          chip(" " + std::to_string(counts[static_cast<size_t>(
+                            shared::WorkChunkStatus::InProgress)]),
+               theme.base.fg, theme.status_bar.streaming.normal.fg));
     }
     if (counts[static_cast<size_t>(shared::WorkChunkStatus::Verifying)] > 0) {
       summary_parts.push_back(ftxui::text(" "));
-      summary_parts.push_back(chip(
-          " " +
-              std::to_string(
-                  counts[static_cast<size_t>(shared::WorkChunkStatus::Verifying)]),
-          theme.base.fg, theme.status_bar.provider_waiting.normal.fg));
+      summary_parts.push_back(
+          chip(" " + std::to_string(counts[static_cast<size_t>(
+                            shared::WorkChunkStatus::Verifying)]),
+               theme.base.fg, theme.status_bar.provider_waiting.normal.fg));
     }
     if (counts[static_cast<size_t>(shared::WorkChunkStatus::Ready)] > 0) {
       summary_parts.push_back(ftxui::text(" "));
@@ -133,26 +140,27 @@ public:
     auto summary_row = ftxui::hflow(std::move(summary_parts)) |
                        ftxui::bgcolor(theme.agent_strip.bg) | ftxui::xflex;
 
-    for (auto status : {shared::WorkChunkStatus::Failed,
-                        shared::WorkChunkStatus::Blocked,
-                        shared::WorkChunkStatus::Cancelled}) {
+    for (auto status :
+         {shared::WorkChunkStatus::Failed, shared::WorkChunkStatus::Blocked,
+          shared::WorkChunkStatus::Cancelled}) {
       const int count = counts[static_cast<size_t>(status)];
       if (count <= 0) {
         continue;
       }
       auto style = styleFor(theme, status);
-      summary_row = ftxui::hbox({
-                        summary_row,
-                        ftxui::text(" "),
-                        chip(std::string(style.icon) + " " + std::to_string(count),
-                             theme.base.fg,
-                             statusChipBackground(theme, status)),
-                    }) |
-                    ftxui::bgcolor(theme.agent_strip.bg) | ftxui::xflex;
+      summary_row =
+          ftxui::hbox({
+              summary_row,
+              ftxui::text(" "),
+              chip(std::string(style.icon) + " " + std::to_string(count),
+                   theme.base.fg, statusChipBackground(theme, status)),
+          }) |
+          ftxui::bgcolor(theme.agent_strip.bg) | ftxui::xflex;
     }
 
-    auto body = scrollable_ ? scrollable_->Render() | ftxui::xflex | ftxui::yflex
-                            : ftxui::text("");
+    auto body = scrollable_
+                    ? scrollable_->Render() | ftxui::xflex | ftxui::yflex
+                    : ftxui::text("");
     return ftxui::vbox({summary_row, body}) |
            ftxui::bgcolor(theme.agent_strip.bg) | ftxui::xflex;
   }
@@ -171,9 +179,11 @@ private:
         const auto style = styleFor(theme, task.status);
         const std::string task_label =
             (task.id.empty() ? std::string() : task.id + ". ") + task.title;
-        auto line = ftxui::paragraph(task_label) |
+        auto line =
+            ftxui::paragraph(task_label) |
             ftxui::color(task.status == shared::WorkChunkStatus::InProgress ||
-                                 task.status == shared::WorkChunkStatus::Verifying
+                                 task.status ==
+                                     shared::WorkChunkStatus::Verifying
                              ? theme.base.highlight
                              : theme.base.fg);
         if (task.status == shared::WorkChunkStatus::InProgress) {
@@ -207,15 +217,15 @@ private:
       if (chunk.task_count.has_value() && chunk.task_count.value() > 0) {
         task_hint = " (" + std::to_string(chunk.task_count.value()) + " tasks)";
       }
-      const bool is_highlight_chunk =
-          !model_->highlight_chunk_id.empty() &&
-          model_->highlight_chunk_id == chunk.id;
+      const bool is_highlight_chunk = !model_->highlight_chunk_id.empty() &&
+                                      model_->highlight_chunk_id == chunk.id;
 
       auto line =
           ftxui::paragraph(std::string(is_highlight_chunk ? "󰎤 " : "") +
                            chunk.title + task_hint) |
           ftxui::color(chunk.status == shared::WorkChunkStatus::InProgress ||
-                               chunk.status == shared::WorkChunkStatus::Verifying
+                               chunk.status ==
+                                   shared::WorkChunkStatus::Verifying
                            ? theme.base.highlight
                            : theme.base.fg);
       if (chunk.status == shared::WorkChunkStatus::InProgress ||

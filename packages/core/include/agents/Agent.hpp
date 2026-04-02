@@ -65,6 +65,7 @@ public:
   void compactNow(
       std::function<void(const StreamEvent &)> onEvent) override;
   void saveHistory() override;
+  void appendHistoryTurn(const AgentTurn &turn) override;
 
   // Backward compatibility during transition
   std::string

@@ -57,6 +57,12 @@ public:
   const AgentContext &getContext() const override { return context_; }
   AgentContext &getMutableContext() override { return context_; }
   void saveHistory() override {}
+  void appendHistoryTurn(const AgentTurn &turn) override {
+    if (!context_.history) {
+      context_.history = std::make_shared<AgentHistory>();
+    }
+    context_.history->turns.push_back(turn);
+  }
 
   ModelChoice getPreferredModel() const override {
     ModelChoice choice;

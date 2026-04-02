@@ -5,6 +5,7 @@
 #include "tools/ToolPresentation.hpp"
 #include "tools/WorkToolPresentation.hpp"
 #include "tools/PythonToolPresentation.hpp"
+#include "tools/WebSearchToolPresentation.hpp"
 
 #include "utils/ErrorCleaner.hpp"
 #include "utils/ToolSummaries.hpp"
@@ -201,6 +202,9 @@ TryBuildSpecializedPresentation(const ToolCallView &view,
   }
   if (IsWorkFamilyTool(view.name)) {
     return BuildWorkToolPresentation(view);
+  }
+  if (IsWebSearchFamilyTool(view.name)) {
+    return BuildWebSearchToolPresentation(view);
   }
   if (IsFileFamilyTool(view.name)) {
     return BuildFileToolPresentation(view);

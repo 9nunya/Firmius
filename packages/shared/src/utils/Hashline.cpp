@@ -251,29 +251,22 @@ bool Hashline::verifyAnchor(std::string_view expectedHash, std::string_view actu
 AnchorResult Hashline::resolveAnchor(const std::vector<std::string>& lines,
                                       const std::string& anchorText,
                                       int /*searchWindow*/) {
-    if (anchorText.empty()) {
-        return {AnchorResult::Status::MALFORMED, -1, false, "Empty anchor", "", ""};
+    std::string numericPart;
+    size_t i = 0;
+    while (i < anchorText.size() && std::isdigit(static_cast<unsigned char>(anchorText[i]))) {
+        numericPart += anchorText[i];
+        ++i;
     }
 
-    if (anchorText.find('|') != std::string::npos) {
-        return {AnchorResult::Status::MALFORMED, -1, false,
-                "Anchor contains '|'. Use a plain line number only, without hashline prefixes or trailing |content.", "", ""};
-    }
-
-    if (anchorText.find('#') != std::string::npos) {
-        return {AnchorResult::Status::MALFORMED, -1, false,
-                "The line#hash anchor format is no longer supported. Use plain line numbers (e.g. \"42\").", "", ""};
+    if (numericPart.empty()) {
+        return {AnchorResult::Status::NOT_NUMERIC, -1, false, "Anchor must start with a line number; got: " + anchorText, "", ""};
     }
 
     try {
-        size_t pos = 0;
-        int lineNum = std::stoi(anchorText, &pos);
-        if (pos != anchorText.size()) {
-            return {AnchorResult::Status::NOT_NUMERIC, -1, false, "Anchor must be a plain line number; got: " + anchorText, "", ""};
-        }
+        int lineNum = std::stoi(numericPart);
         return resolveLineNumber(lines, lineNum);
     } catch (...) {
-        return {AnchorResult::Status::NOT_NUMERIC, -1, false, "Anchor is not a valid line number: " + anchorText, "", ""};
+        return {AnchorResult::Status::NOT_NUMERIC, -1, false, "Anchor contains an invalid line number: " + numericPart, "", ""};
     }
 }
 

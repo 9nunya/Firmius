@@ -9,7 +9,7 @@ target_sources(firmius_shared PRIVATE
     src/utils/StringUtil.cpp
     src/utils/HistoryMetrics.cpp
     src/utils/FSUtil.cpp
-    src/utils/Hashline.cpp
+    src/utils/LineRange.cpp
     src/utils/Logger.cpp
     src/utils/ErrorCleaner.cpp
     src/utils/ToolSummaries.cpp
@@ -17,6 +17,7 @@ target_sources(firmius_shared PRIVATE
     src/utils/GCPHttpClient.cpp
     src/utils/ModelUtil.cpp
     src/utils/FrontmatterParser.cpp
+    src/utils/Hashline.cpp
     src/ConfigLoader.cpp
 )
 
@@ -45,7 +46,7 @@ target_sources(firmius_shared PUBLIC
     include/utils/StringUtil.hpp
     include/utils/HistoryMetrics.hpp
     include/utils/FSUtil.hpp
-    include/utils/Hashline.hpp
+    include/utils/LineRange.hpp
     include/utils/Logger.hpp
     include/utils/ErrorCleaner.hpp
     include/utils/ToolSummaries.hpp
@@ -54,6 +55,7 @@ target_sources(firmius_shared PUBLIC
     include/utils/GCPHttpClient.hpp
     include/utils/ModelUtil.hpp
     include/utils/FrontmatterParser.hpp
+    include/utils/Hashline.hpp
     include/ConfigLoader.hpp
 )
 

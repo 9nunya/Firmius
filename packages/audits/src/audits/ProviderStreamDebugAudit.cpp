@@ -47,6 +47,70 @@ std::string escapeString(const std::string& s) {
     return escaped;
 }
 
+std::string roleToString(Role role) {
+    switch (role) {
+        case Role::System:
+            return "system";
+        case Role::User:
+            return "user";
+        case Role::Assistant:
+            return "assistant";
+        case Role::ToolResult:
+            return "tool";
+        case Role::Error:
+            return "error";
+    }
+    return "unknown";
+}
+
+std::string partToString(const MessagePart& part) {
+    if (const auto* txt = std::get_if<TextContent>(&part)) {
+        return "Text(\"" + escapeString(txt->text) + "\")";
+    }
+    if (const auto* thk = std::get_if<ThinkingContent>(&part)) {
+        return "Thinking(\"" + escapeString(thk->thinking) + "\")";
+    }
+    if (const auto* call = std::get_if<ToolCallContent>(&part)) {
+        return "ToolCall(id=" + call->id + ", name=" + call->name +
+               ", args=\"" + escapeString(call->args) + "\")";
+    }
+    if (const auto* result = std::get_if<ToolResultContent>(&part)) {
+        return "ToolResult(id=" + result->toolCallId +
+               ", success=" + std::string(result->success ? "true" : "false") +
+               ", result=\"" + escapeString(result->result) + "\")";
+    }
+    if (const auto* img = std::get_if<ImageContent>(&part)) {
+        return "Image(url=\"" + escapeString(img->url) + "\", mediaType=" +
+               img->mediaType + ", detail=" + img->detail + ")";
+    }
+    if (const auto* err = std::get_if<ErrorContent>(&part)) {
+        return "ErrorContent(name=" + err->errorName + ", description=\"" +
+               escapeString(err->description) + "\")";
+    }
+    if (const auto* notice = std::get_if<NoticeContent>(&part)) {
+        return "Notice(title=" + notice->title + ", message=\"" +
+               escapeString(notice->message) + "\")";
+    }
+    return "UnknownPart";
+}
+
+void printHistory(const AgentHistory& history) {
+    std::cout << "--- Input History ---" << std::endl;
+    for (size_t turnIndex = 0; turnIndex < history.turns.size(); ++turnIndex) {
+        const auto& turn = history.turns[turnIndex];
+        std::cout << "Turn " << turnIndex << " id=" << turn.turnId << std::endl;
+        for (size_t msgIndex = 0; msgIndex < turn.messages.size(); ++msgIndex) {
+            const auto& msg = turn.messages[msgIndex];
+            std::cout << "  Msg " << msgIndex << " role=" << roleToString(msg.role)
+                      << " parts=" << msg.content.size() << std::endl;
+            for (const auto& part : msg.content) {
+                std::cout << "    - " << partToString(part) << std::endl;
+            }
+        }
+    }
+    std::cout << std::endl;
+}
+
 // Global flag to enable raw SSE logging for codex provider
 std::atomic<bool> gLogRawSse{false};
 std::ofstream gSseLogFile;
@@ -156,10 +220,10 @@ std::optional<ModelVariant> findModelVariant(const std::vector<ModelInfo>& model
 }
 }
 
-std::string ProviderStreamDebugAudit::getId() const { return "provider_stream_debug"; }
+std::string ProviderStreamDebugAudit::getId() const { return "provider_full_range"; }
 
 std::string ProviderStreamDebugAudit::getDescription() const {
-    return "Debug: Log EVERY chunk from provider stream to STDOUT";
+    return "Full-range provider stream test with complex history suites and chunk logging";
 }
 
 std::string ProviderStreamDebugAudit::resolveModelIdArg(
@@ -493,6 +557,130 @@ AgentHistory ProviderStreamDebugAudit::buildHistoryVariant(const std::string& va
         turn.messages.push_back(msg);
         history.turns.push_back(turn);
         
+    } else if (variant == "tool_call_succession") {
+        AgentTurn turn1;
+        Message userMsg;
+        userMsg.role = Role::User;
+        userMsg.content.push_back(TextContent{
+            "Inspect config.json, summarize the risky values, then prepare the "
+            "next command you would run. Use tools if needed."});
+        turn1.messages.push_back(userMsg);
+        history.turns.push_back(turn1);
+
+        AgentTurn turn2;
+        Message assistantMsg;
+        assistantMsg.role = Role::Assistant;
+        assistantMsg.content.push_back(ThinkingContent{
+            "I should inspect the config first, then maybe read a second file, "
+            "then prepare a command if needed.",
+            ""});
+        ToolCallContent call1;
+        call1.id = "succession-call-1";
+        call1.name = "read_file";
+        call1.args = R"({"path":"config.json"})";
+        ToolCallContent call2;
+        call2.id = "succession-call-2";
+        call2.name = "read_file";
+        call2.args = R"({"path":"secrets.env"})";
+        assistantMsg.content.push_back(call1);
+        assistantMsg.content.push_back(call2);
+        turn2.messages.push_back(assistantMsg);
+        history.turns.push_back(turn2);
+
+        AgentTurn turn3;
+        Message result1;
+        result1.role = Role::ToolResult;
+        result1.content.push_back(ToolResultContent{
+            "succession-call-1",
+            R"({"apiBase":"https://example.invalid","featureFlags":["beta-auth"],"dangerous":true})",
+            true,
+            "",
+            ""});
+        turn3.messages.push_back(result1);
+        history.turns.push_back(turn3);
+
+        AgentTurn turn4;
+        Message result2;
+        result2.role = Role::ToolResult;
+        result2.content.push_back(ToolResultContent{
+            "succession-call-2",
+            R"({"exists":false,"error":"permission denied"})",
+            false,
+            "",
+            ""});
+        turn4.messages.push_back(result2);
+        history.turns.push_back(turn4);
+
+        AgentTurn turn5;
+        Message followup;
+        followup.role = Role::User;
+        followup.content.push_back(TextContent{
+            "Continue from those tool results. Think briefly, then prepare the "
+            "next tool call or answer."});
+        turn5.messages.push_back(followup);
+        history.turns.push_back(turn5);
+
+    } else if (variant == "image_input") {
+        AgentTurn turn;
+        Message msg;
+        msg.role = Role::User;
+        msg.content.push_back(TextContent{
+            "Describe the image briefly, then say whether it looks synthetic or hand-drawn."});
+        msg.content.push_back(ImageContent{
+            "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a0iAAAAAASUVORK5CYII=",
+            "image/png",
+            "auto"});
+        turn.messages.push_back(msg);
+        history.turns.push_back(turn);
+
+    } else if (variant == "mixed_multimodal_tool_context") {
+        AgentTurn turn1;
+        Message userMsg;
+        userMsg.role = Role::User;
+        userMsg.content.push_back(TextContent{
+            "Review this UI screenshot and the previous tool output, then decide the next action."});
+        userMsg.content.push_back(ImageContent{
+            "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a0iAAAAAASUVORK5CYII=",
+            "image/png",
+            "high"});
+        turn1.messages.push_back(userMsg);
+        history.turns.push_back(turn1);
+
+        AgentTurn turn2;
+        Message assistant;
+        assistant.role = Role::Assistant;
+        assistant.content.push_back(ThinkingContent{
+            "The screenshot likely shows a settings page. I should correlate it "
+            "with the previous file output before acting.",
+            ""});
+        ToolCallContent call;
+        call.id = "ui-call-1";
+        call.name = "read_file";
+        call.args = R"({"path":"ui/settings.json"})";
+        assistant.content.push_back(call);
+        turn2.messages.push_back(assistant);
+        history.turns.push_back(turn2);
+
+        AgentTurn turn3;
+        Message result;
+        result.role = Role::ToolResult;
+        result.content.push_back(ToolResultContent{
+            "ui-call-1",
+            R"({"theme":"light","betaFlags":["new-toolbar"],"layout":"compact"})",
+            true,
+            "",
+            ""});
+        turn3.messages.push_back(result);
+        history.turns.push_back(turn3);
+
+        AgentTurn turn4;
+        Message followup;
+        followup.role = Role::User;
+        followup.content.push_back(TextContent{
+            "Now continue. Think first, then decide whether another tool is needed."});
+        turn4.messages.push_back(followup);
+        history.turns.push_back(turn4);
+        
     } else {
         // Default: simple prompt
         AgentTurn turn;
@@ -515,15 +703,41 @@ AgentHistory ProviderStreamDebugAudit::buildHistoryVariant(const std::string& va
     return history;
 }
 
+std::vector<std::string>
+ProviderStreamDebugAudit::suiteVariants(const std::string& suiteName) const {
+    if (suiteName == "tool_preparing" || suiteName == "preparing") {
+        return {
+            "thinking_long_tool_call",
+            "multi_turn_thinking_preparing",
+            "parallel_tool_preparing",
+        };
+    }
+    if (suiteName == "full_range" || suiteName == "provider_full_range") {
+        return {
+            "normal_agentic",
+            "multiple_tool_results",
+            "tool_then_error",
+            "error_then_tool",
+            "mixed_agentic",
+            "tool_call_succession",
+            "thinking_long_tool_call",
+            "multi_turn_thinking_preparing",
+            "parallel_tool_preparing",
+            "image_input",
+            "mixed_multimodal_tool_context",
+        };
+    }
+    return {};
+}
+
 shared::AuditResult ProviderStreamDebugAudit::run(const std::vector<std::string>& args) {
     AuditResult result;
     result.auditId = getId();
 
     if (args.empty()) {
-        std::cerr << "Usage: firmius_audit --audit provider_stream_debug <provider_id> [model_id] [--history-variant=<variant>] [--variant=<model-variant>] [--raw-sse-log=<path>] [--raw-sse-stdout]" << std::endl;
-        std::cerr << "       firmius_audit --audit provider_stream_debug <provider_id> [model_id] --thread-id=<threadId> [--thread-agent=<agentId>] [--variant=<model-variant>]" << std::endl;
-        std::cerr << "       firmius_audit --audit provider_stream_debug <provider_id> [model_id] [--variant=<model-variant>] --tool-preparing-suite" << std::endl;
-        std::cerr << "Example: firmius_audit --audit provider_stream_debug antigravity claude-opus-4-6-thinking --variant=max --history-variant=thinking_long_tool_call" << std::endl;
+        std::cerr << "Usage: firmius_audit --audit provider_full_range <provider_id> [model_id] [--history-variant=<variant>] [--history-suite=<suite>] [--variant=<model-variant>] [--show-history] [--raw-sse-log=<path>] [--raw-sse-stdout]" << std::endl;
+        std::cerr << "       firmius_audit --audit provider_full_range <provider_id> [model_id] --thread-id=<threadId> [--thread-agent=<agentId>] [--variant=<model-variant>]" << std::endl;
+        std::cerr << "Example: firmius_audit --audit provider_full_range antigravity claude-opus-4-6-thinking --variant=max --history-suite=full_range --show-history" << std::endl;
         std::cerr << std::endl;
         std::cerr << "History variants for testing edge cases:" << std::endl;
         std::cerr << "  --history-variant=normal_agentic       Standard conversation" << std::endl;
@@ -535,7 +749,12 @@ shared::AuditResult ProviderStreamDebugAudit::run(const std::vector<std::string>
         std::cerr << "  --history-variant=thinking_long_tool_call" << std::endl;
         std::cerr << "  --history-variant=multi_turn_thinking_preparing" << std::endl;
         std::cerr << "  --history-variant=parallel_tool_preparing" << std::endl;
-        std::cerr << "  --tool-preparing-suite                 Run all three preparing/thinking scenarios and fail if expected events are missing" << std::endl;
+        std::cerr << "  --history-variant=tool_call_succession" << std::endl;
+        std::cerr << "  --history-variant=image_input" << std::endl;
+        std::cerr << "  --history-variant=mixed_multimodal_tool_context" << std::endl;
+        std::cerr << "  --history-suite=tool_preparing         Run all preparing/thinking scenarios" << std::endl;
+        std::cerr << "  --history-suite=full_range             Run a broad provider stress suite" << std::endl;
+        std::cerr << "  --show-history                         Print the exact AgentHistory before streaming" << std::endl;
         std::cerr << "  --raw-sse-log=/tmp/provider_sse.log    Capture raw SSE chunks and lines before parsing" << std::endl;
         std::cerr << "  --raw-sse-stdout                      Mirror raw SSE to stdout during the run" << std::endl;
         result.exitCode = 1;
@@ -555,7 +774,7 @@ shared::AuditResult ProviderStreamDebugAudit::run(const std::vector<std::string>
         return result;
     }
 
-    std::cout << "=== Provider Stream Debug Audit ===" << std::endl;
+    std::cout << "=== Provider Full Range Audit ===" << std::endl;
     std::cout << "Provider: " << providerName << std::endl;
 
     auto models = provider->listModels();
@@ -566,12 +785,15 @@ shared::AuditResult ProviderStreamDebugAudit::run(const std::vector<std::string>
     std::string threadId;
     std::string threadAgentId;
     std::string modelVariantName;
+    std::string historySuite;
     std::string rawSseLogPath;
-    bool toolPreparingSuite = false;
+    bool showHistory = false;
     bool rawSseStdout = false;
     for (const auto& arg : args) {
         if (arg.find("--history-variant=") == 0) {
             historyVariant = arg.substr(18);
+        } else if (arg.find("--history-suite=") == 0) {
+            historySuite = arg.substr(16);
         } else if (arg.find("--thread-id=") == 0) {
             threadId = arg.substr(12);
         } else if (arg.find("--thread-agent=") == 0) {
@@ -581,18 +803,20 @@ shared::AuditResult ProviderStreamDebugAudit::run(const std::vector<std::string>
         } else if (arg.find("--model-variant=") == 0) {
             modelVariantName = arg.substr(16);
         } else if (arg == "--tool-preparing-suite") {
-            toolPreparingSuite = true;
+            historySuite = "tool_preparing";
         } else if (arg.find("--raw-sse-log=") == 0) {
             rawSseLogPath = arg.substr(14);
         } else if (arg == "--raw-sse-stdout") {
             rawSseStdout = true;
         } else if (arg == "--raw-sse") {
             rawSseLogPath = "/tmp/firmius_provider_raw_sse.log";
+        } else if (arg == "--show-history") {
+            showHistory = true;
         }
     }
 
-    if (toolPreparingSuite && !threadId.empty()) {
-        std::cerr << "--tool-preparing-suite cannot be combined with --thread-id" << std::endl;
+    if (!historySuite.empty() && !threadId.empty()) {
+        std::cerr << "--history-suite cannot be combined with --thread-id" << std::endl;
         result.exitCode = 1;
         result.passed = false;
         return result;
@@ -650,10 +874,13 @@ shared::AuditResult ProviderStreamDebugAudit::run(const std::vector<std::string>
         if (!threadAgentId.empty()) {
             std::cout << "Thread Agent: " << threadAgentId << std::endl;
         }
-    } else if (toolPreparingSuite) {
-        std::cout << "Scenario Suite: tool_preparing_suite" << std::endl;
+    } else if (!historySuite.empty()) {
+        std::cout << "Scenario Suite: " << historySuite << std::endl;
     } else {
         std::cout << "History Variant: " << historyVariant << std::endl;
+    }
+    if (showHistory) {
+        std::cout << "Show History: enabled" << std::endl;
     }
     std::cout << "====================================" << std::endl;
     std::cout << std::endl;
@@ -683,6 +910,9 @@ shared::AuditResult ProviderStreamDebugAudit::run(const std::vector<std::string>
         opts.tools = tools;
 
         std::cout << "--- Scenario: " << scenarioName << " ---" << std::endl;
+        if (showHistory) {
+            printHistory(history);
+        }
         std::cout << "Tool count: " << tools.size() << std::endl;
         for (const auto& tool : tools) {
             std::cout << "  tool: " << tool.name << std::endl;
@@ -814,12 +1044,14 @@ shared::AuditResult ProviderStreamDebugAudit::run(const std::vector<std::string>
         }
         AgentHistory history = tm.loadAgentHistory(threadId, threadAgentId);
         allPassed = runScenario("thread:" + threadId, history, {}, {});
-    } else if (toolPreparingSuite) {
-        const std::vector<std::string> scenarios = {
-            "thinking_long_tool_call",
-            "multi_turn_thinking_preparing",
-            "parallel_tool_preparing",
-        };
+    } else if (!historySuite.empty()) {
+        const auto scenarios = suiteVariants(historySuite);
+        if (scenarios.empty()) {
+            std::cerr << "Unknown history suite: " << historySuite << std::endl;
+            result.exitCode = 1;
+            result.passed = false;
+            return result;
+        }
         for (const auto& scenario : scenarios) {
             const bool scenarioPassed =
                 runScenario(scenario, buildHistoryVariant(scenario),

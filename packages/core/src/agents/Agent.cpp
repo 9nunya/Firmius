@@ -11,6 +11,7 @@
 #include "harness/Harness.hpp"
 #include "persistence/Journaler.hpp"
 #include "persistence/ThreadManager.hpp"
+#include "providers/LLMSearchProviderRegistry.hpp"
 #include "providers/ProviderRegistry.hpp"
 #include "utils/FSUtil.hpp"
 #include "utils/InterruptibleSleep.hpp"
@@ -37,6 +38,10 @@ namespace firmius::core {
 namespace {
 constexpr std::uint32_t kMissingToolCallIndex =
     std::numeric_limits<std::uint32_t>::max();
+
+// Maximum accumulated response/thinking buffer size per turn (500KB)
+static constexpr std::size_t kMaxAccumulatedResponseBytes = 500 * 1024;
+static constexpr std::size_t kMaxAccumulatedThinkingBytes = 500 * 1024;
 
 bool hasToolCallIndex(const ToolCallChunk &chunk) {
   return chunk.index != kMissingToolCallIndex;
@@ -75,6 +80,59 @@ std::vector<std::string> extractFileEditPaths(const std::string &toolArgs) {
     paths.emplace_back(input["path"].GetString());
   }
   return paths;
+}
+
+struct EditedFileEventPayload {
+  std::string path;
+  std::string diffPreview;
+  int addedLines = 0;
+  int removedLines = 0;
+};
+
+std::vector<EditedFileEventPayload>
+extractFileEditEventPayloads(const std::string &toolArgs,
+                             const std::string &resultStr) {
+  std::vector<EditedFileEventPayload> payloads;
+
+  rapidjson::Document resultDoc;
+  resultDoc.Parse(resultStr.c_str());
+  if (!resultDoc.HasParseError() && resultDoc.IsObject()) {
+    auto appendFromObject = [&](const rapidjson::Value &value) {
+      if (!value.IsObject() || !value.HasMember("path") ||
+          !value["path"].IsString()) {
+        return;
+      }
+      EditedFileEventPayload payload;
+      payload.path = value["path"].GetString();
+      if (value.HasMember("diff_preview") && value["diff_preview"].IsString()) {
+        payload.diffPreview = value["diff_preview"].GetString();
+      }
+      if (value.HasMember("added_lines") && value["added_lines"].IsInt()) {
+        payload.addedLines = value["added_lines"].GetInt();
+      }
+      if (value.HasMember("removed_lines") && value["removed_lines"].IsInt()) {
+        payload.removedLines = value["removed_lines"].GetInt();
+      }
+      payloads.push_back(std::move(payload));
+    };
+
+    if (resultDoc.HasMember("files") && resultDoc["files"].IsArray()) {
+      for (const auto &entry : resultDoc["files"].GetArray()) {
+        appendFromObject(entry);
+      }
+    } else {
+      appendFromObject(resultDoc);
+    }
+  }
+
+  if (!payloads.empty()) {
+    return payloads;
+  }
+
+  for (const auto &path : extractFileEditPaths(toolArgs)) {
+    payloads.push_back(EditedFileEventPayload{path, "", 0, 0});
+  }
+  return payloads;
 }
 
 void mergeToolCallName(std::string &existing, const std::string &incoming) {
@@ -1017,6 +1075,8 @@ void Agent::runImpl(const std::optional<std::string> &task,
     std::vector<ToolCallChunk> accumulatedToolChunks;
     std::string fullResponse;
     std::string fullThinking;
+    bool responseTruncated = false;
+    bool thinkingTruncated = false;
     std::string lastThinkingSignature;
     AgentMetrics turnMetrics;
     StopReason turnStopReason = StopReason::Stop;
@@ -1038,7 +1098,19 @@ void Agent::runImpl(const std::optional<std::string> &task,
           break;
         }
       }
-      fullResponse += delta;
+      if (!responseTruncated &&
+          fullResponse.size() + delta.size() > kMaxAccumulatedResponseBytes) {
+        std::size_t remaining = kMaxAccumulatedResponseBytes - fullResponse.size();
+        if (remaining > 0) {
+          fullResponse.append(delta, 0, remaining);
+        }
+        responseTruncated = true;
+        std::cerr << "[FIRMIUS] Response buffer capped at "
+                  << kMaxAccumulatedResponseBytes << " bytes for turn "
+                  << turnCount << std::endl;
+      } else if (!responseTruncated) {
+        fullResponse += delta;
+      }
     };
 
     auto appendVisibleThinking = [&](const std::string &delta) {
@@ -1047,7 +1119,19 @@ void Agent::runImpl(const std::optional<std::string> &task,
       }
       onEvent(ThinkingChunk{delta, ""});
       sawThinking = true;
-      fullThinking += delta;
+      if (!thinkingTruncated &&
+          fullThinking.size() + delta.size() > kMaxAccumulatedThinkingBytes) {
+        std::size_t remaining = kMaxAccumulatedThinkingBytes - fullThinking.size();
+        if (remaining > 0) {
+          fullThinking.append(delta, 0, remaining);
+        }
+        thinkingTruncated = true;
+        std::cerr << "[FIRMIUS] Thinking buffer capped at "
+                  << kMaxAccumulatedThinkingBytes << " bytes for turn "
+                  << turnCount << std::endl;
+      } else if (!thinkingTruncated) {
+        fullThinking += delta;
+      }
     };
 
     auto persistAssistantTurn = [&](StopReason stopReason,
@@ -1295,8 +1379,7 @@ void Agent::runImpl(const std::optional<std::string> &task,
 
       // --- Check for termination ---
       if (accumulatedToolChunks.empty()) {
-        const bool emptyAssistantReply =
-            fullResponse.empty() && fullThinking.empty();
+        const bool emptyAssistantReply = fullResponse.empty();
         if (emptyAssistantReply) {
           consecutiveEmptyProviderResponses++;
         } else {
@@ -1645,7 +1728,8 @@ void Agent::executeTools(
         rapidjson::Document input;
         input.Parse(runnable.chunk.argsDelta.c_str());
         ToolContext toolCtx{*environment_->getHost(), *this, runnable.chunk.id,
-                            runCancelToken.get()};
+                            runCancelToken.get(),
+                            &provider::LLMSearchProviderRegistry::instance()};
         auto result =
             toolRegistry.execute(runnable.chunk.nameDelta, input, toolCtx);
         execResult.success = result.success;
@@ -1769,17 +1853,22 @@ void Agent::executeTools(
       }
 
       if (result.toolName == "file_edit" || result.toolName == "file_write") {
-        for (const auto &filePath : extractFileEditPaths(result.toolArgs)) {
+        for (const auto &file :
+             extractFileEditEventPayloads(result.toolArgs, result.resultStr)) {
+          if (file.path.empty()) {
+            continue;
+          }
           if (std::find(context.state.editedFiles.begin(),
                         context.state.editedFiles.end(),
-                        filePath) == context.state.editedFiles.end()) {
-            context.state.editedFiles.push_back(filePath);
+                        file.path) == context.state.editedFiles.end()) {
+            context.state.editedFiles.push_back(file.path);
           }
-          std::string actionDesc = "Edited file: " + filePath;
+          std::string actionDesc = "Edited file: " + file.path;
           context.state.completedActions.push_back(actionDesc);
           onEvent(AgentFileEdited{context.identity.id,
-                                  context.identity.parentId, filePath,
-                                  result.toolCallId});
+                                  context.identity.parentId, file.path,
+                                  result.toolCallId, file.diffPreview,
+                                  file.addedLines, file.removedLines});
         }
       }
     } else if (result.toolName == "file_edit") {
@@ -1825,6 +1914,8 @@ void Agent::saveHistory() {
     journaler->rewriteJournal(context.history->turns);
   }
 }
+
+void Agent::appendHistoryTurn(const AgentTurn &turn) { appendTurnToHistory(turn); }
 
 void Agent::compactContext(
     std::function<void(const shared::StreamEvent &)> onEvent) {

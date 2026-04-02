@@ -1,6 +1,7 @@
 #include "providers/AntigravityProvider.hpp"
 #include "providers/AntigravityProtocol.hpp"
 #include "providers/BackoffConstants.hpp"
+#include "providers/GoogleSearchProvider.hpp"
 #include "utils/GCPHttpClient.hpp"
 #include "utils/InterruptibleSleep.hpp"
 #include "utils/TempOAuthServer.hpp"
@@ -843,7 +844,9 @@ private:
   TempOAuthServer server_;
 };
 
-AntigravityProvider::AntigravityProvider() : BaseOAuthProvider("antigravity") {}
+AntigravityProvider::AntigravityProvider() : BaseOAuthProvider("antigravity") {
+  searchProvider_ = std::make_unique<GoogleSearchProvider>(this);
+}
 
 AntigravityProvider::~AntigravityProvider() { stopBackgroundQuotaRefresh(); }
 
@@ -905,7 +908,7 @@ std::unique_ptr<OAuthWizard> AntigravityProvider::beginConnectionWizard() {
   return std::make_unique<AntigravityOAuthWizard>(this);
 }
 
-std::optional<OAuthAccount *> AntigravityProvider::getAvailableAccount(
+std::optional<OAuthAccount> AntigravityProvider::getAvailableAccount(
     const std::optional<std::string> &modelId) {
   std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
   if (accounts_.empty()) {
@@ -995,7 +998,7 @@ std::optional<OAuthAccount *> AntigravityProvider::getAvailableAccount(
 
     lastUsedIndex_.store(bestIdx, std::memory_order_relaxed);
     saveAccounts();
-    return &accounts_[bestIdx];
+    return candidate;
   }
 }
 
@@ -1260,7 +1263,7 @@ void AntigravityProvider::stream(
       return;
     }
     attemptedQuotaRecovery = false;
-    OAuthAccount &acc = *optAcc.value();
+    OAuthAccount acc = *optAcc;
     lastAccountEmail = acc.getIdentifier();
 
     // Check if we've already tried this account
@@ -1279,6 +1282,7 @@ void AntigravityProvider::stream(
     }
 
     std::string effectiveProjectId = resolveProjectIdForAccount(acc, false);
+    updateAccount(acc);
     bool projectRefreshed = false;
 
     bool shouldTryNextAccount = false;
@@ -1447,6 +1451,7 @@ void AntigravityProvider::stream(
           if (consumerInvalid && !projectRefreshed) {
             // Attempt to refresh project context once, then retry immediately.
             effectiveProjectId = resolveProjectIdForAccount(acc, true);
+            updateAccount(acc);
             projectRefreshed = true;
             reqCtx.projectId = effectiveProjectId;
             body = AntigravityProtocol::prepareRequestBody(history, opts, reqCtx);
@@ -1468,6 +1473,7 @@ void AntigravityProvider::stream(
           }
           lastError = "API error 403: " + ctx.buffer;
           markAccountRateLimited(acc, 60);
+          updateAccount(acc);
           shouldTryNextAccount = true;
           break;
         }
@@ -1485,7 +1491,7 @@ void AntigravityProvider::stream(
           int backoff = firmius::shared::BackoffConstants::getBackoffSeconds(
               accountRetries);
           markAccountRateLimited(acc, backoff);
-          saveAccounts();
+          updateAccount(acc);
           shouldTryNextAccount = true;
           break;
         }

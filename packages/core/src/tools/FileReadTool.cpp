@@ -2,8 +2,9 @@
 #include "agents/Agent.hpp"
 #include "agents/AgentPermissionChecks.hpp"
 #include "utils/FSUtil.hpp"
-#include "utils/Hashline.hpp"
+#include "utils/LineRange.hpp"
 #include <algorithm>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -12,6 +13,9 @@
 
 namespace firmius::core {
 using namespace firmius::shared;
+
+// Maximum file size for file_read tool (2MB default)
+static constexpr std::uint64_t MAX_FILE_SIZE_BYTES = 2ULL * 1024 * 1024;
 
 shared::ToolMetadata FileReadTool::getMetadata() const {
   return {"file_read", "Read a file from the host filesystem",
@@ -41,7 +45,29 @@ shared::ToolResult FileReadTool::execute(const FileReadInput &input,
   try {
     ctx.agent.getPermissions()->validatePathAccess(
         absolutePath, firmius::shared::AccessMode::READ);
-    auto data = ctx.host.readFile(absolutePath);
+
+    // Check file size before reading to prevent bad_alloc
+    std::uint64_t fileSize = 0;
+    try {
+      fileSize = std::filesystem::file_size(absolutePath);
+    } catch (const std::exception &) {
+      // If we can't determine size, proceed with read (will be bounded below)
+    }
+
+    bool truncated = false;
+    std::vector<uint8_t> data;
+    if (fileSize > MAX_FILE_SIZE_BYTES) {
+      // Read only up to the limit
+      std::ifstream file(absolutePath, std::ios::binary);
+      if (!file.is_open())
+        throw std::runtime_error("Could not open file: " + absolutePath);
+      data.resize(MAX_FILE_SIZE_BYTES);
+      file.read(reinterpret_cast<char *>(data.data()), MAX_FILE_SIZE_BYTES);
+      data.resize(static_cast<std::size_t>(file.gcount()));
+      truncated = true;
+    } else {
+      data = ctx.host.readFile(absolutePath);
+    }
     std::string content(data.begin(), data.end());
     std::stringstream ss(content);
 
@@ -68,8 +94,6 @@ shared::ToolResult FileReadTool::execute(const FileReadInput &input,
     if (ss.eof())
       reachedEnd = true;
 
-    // Old fully read check logic removed
-
     rapidjson::Document res;
     res.SetObject();
     auto &alloc = res.GetAllocator();
@@ -91,7 +115,7 @@ shared::ToolResult FileReadTool::execute(const FileReadInput &input,
     if (!selectedLines.empty()) {
       for (std::size_t i = 0; i < selectedLines.size(); ++i) {
         enhancedContent +=
-            std::to_string(input.start_line) + "|" + selectedLines[i];
+            utils::LineRange::formatLine(input.start_line + static_cast<int>(i), selectedLines[i]);
         if (i + 1 < selectedLines.size()) {
           enhancedContent += '\n';
         }
@@ -106,11 +130,17 @@ shared::ToolResult FileReadTool::execute(const FileReadInput &input,
     res.AddMember("lines_read", lines_taken, alloc);
     res.AddMember("read_full", read_full, alloc);
     res.AddMember("reached_end", reachedEnd, alloc);
-    res.AddMember("watch_state", rapidjson::Value("updated", alloc).Move(),
-                  alloc);
     res.AddMember("watch_scope",
                   rapidjson::Value(read_full ? "full" : "range", alloc).Move(),
                   alloc);
+    if (truncated) {
+      res.AddMember("truncated", true, alloc);
+      std::string warning = "File content truncated: file size (" +
+                            std::to_string(fileSize) + " bytes) exceeds limit of " +
+                            std::to_string(MAX_FILE_SIZE_BYTES) + " bytes.";
+      res.AddMember("warning",
+                    rapidjson::Value(warning.c_str(), alloc).Move(), alloc);
+    }
     return shared::ToolResult::ok(res);
   } catch (const std::exception &e) {
     return shared::ToolResult::fail(e.what());

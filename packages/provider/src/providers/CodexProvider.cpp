@@ -1354,7 +1354,7 @@ CodexProvider::getAllQuotas() const {
   return result;
 }
 
-std::optional<OAuthAccount *>
+std::optional<OAuthAccount>
 CodexProvider::getAvailableAccount(const std::optional<std::string> &modelId) {
   std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
   if (accounts_.empty()) {
@@ -1397,7 +1397,7 @@ CodexProvider::getAvailableAccount(const std::optional<std::string> &modelId) {
 
   lastUsedIndex_.store(bestIdx, std::memory_order_relaxed);
   saveAccounts();
-  return &accounts_[bestIdx];
+  return accounts_[bestIdx];
 }
 
 std::string CodexProvider::normalizeModelId(const std::string &modelId) {
@@ -1896,7 +1896,7 @@ void CodexProvider::stream(const AgentHistory &history,
       return;
     }
     attemptedQuotaRecovery = false;
-    OAuthAccount &acc = *optAcc.value();
+    OAuthAccount acc = *optAcc;
     if (!lastAccountLocator.empty() &&
         lastAccountLocator != acc.getIdentifier()) {
       onEvent(StreamAccountSwitched{acc.getIdentifier()});
@@ -1954,6 +1954,7 @@ void CodexProvider::stream(const AgentHistory &history,
       if (isTokenExpired(acc) && !refreshAccessToken(acc)) {
         // Use unified backoff constant from shared
         markAccountRateLimited(acc, firmius::shared::BackoffConstants::MAX_BACKOFF);
+        updateAccount(acc);
         break;
       }
 
@@ -1965,7 +1966,7 @@ void CodexProvider::stream(const AgentHistory &history,
         if (extracted.has_value()) {
           accountId = extracted.value();
           acc.metadata["chatgpt_account_id"] = accountId;
-          saveAccounts();
+          updateAccount(acc);
         }
       }
 
@@ -2074,6 +2075,7 @@ void CodexProvider::stream(const AgentHistory &history,
       int backoff = firmius::shared::BackoffConstants::getBackoffSeconds(accountRetries);
       if (code == 401 || code == 403) {
         markAccountRateLimited(acc, backoff);
+        updateAccount(acc);
         break;
       }
 
@@ -2085,8 +2087,8 @@ void CodexProvider::stream(const AgentHistory &history,
           } catch (...) {}
         }
         normalizeCodexAccount(acc);
-        saveAccounts();
         markAccountRateLimited(acc, backoff);
+        updateAccount(acc);
         break;
       }
 

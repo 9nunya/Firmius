@@ -414,8 +414,10 @@ rapidjson::Value timingMetricsToJson(const TimingMetrics &m,
 }
 
 TimingMetrics timingMetricsFromJson(const rapidjson::Value &v) {
-  return {v["startMs"].GetUint64(), v["firstTokenMs"].GetUint64(),
-          v["endMs"].GetUint64(), v["toolExecutionMs"].GetUint64()};
+  return {v.HasMember("startMs") && v["startMs"].IsUint64() ? v["startMs"].GetUint64() : 0,
+          v.HasMember("firstTokenMs") && v["firstTokenMs"].IsUint64() ? v["firstTokenMs"].GetUint64() : 0,
+          v.HasMember("endMs") && v["endMs"].IsUint64() ? v["endMs"].GetUint64() : 0,
+          v.HasMember("toolExecutionMs") && v["toolExecutionMs"].IsUint64() ? v["toolExecutionMs"].GetUint64() : 0};
 }
 
 rapidjson::Value agentMetricsToJson(const AgentMetrics &m,
@@ -428,8 +430,9 @@ rapidjson::Value agentMetricsToJson(const AgentMetrics &m,
 }
 
 AgentMetrics agentMetricsFromJson(const rapidjson::Value &v) {
-  return {tokenMetricsFromJson(v["tokens"]), timingMetricsFromJson(v["timing"]),
-          v["estimatedCostUsd"].GetDouble()};
+  return {v.HasMember("tokens") && v["tokens"].IsObject() ? tokenMetricsFromJson(v["tokens"]) : TokenMetrics{},
+          v.HasMember("timing") && v["timing"].IsObject() ? timingMetricsFromJson(v["timing"]) : TimingMetrics{},
+          v.HasMember("estimatedCostUsd") && v["estimatedCostUsd"].IsNumber() ? v["estimatedCostUsd"].GetDouble() : 0.0};
 }
 
 rapidjson::Value
@@ -1009,7 +1012,8 @@ MessagePart messagePartFromJson(const rapidjson::Value &v) {
                          v.HasMember("severity") && v["severity"].IsString()
                              ? stringToNoticeSeverity(v["severity"].GetString())
                              : NoticeSeverity::Info};
-  throw std::runtime_error("Unknown MessagePart type: " + type);
+  // Unknown or missing type: return a safe default instead of throwing
+  return TextContent{};
 }
 
 rapidjson::Value messageToJson(const Message &m,
@@ -1282,78 +1286,119 @@ rapidjson::Document toJson(const AgentContext &ctx) {
 
 AgentContext fromJson(const rapidjson::Value &v) {
   AgentContext ctx;
-  ctx.identity.id = v["identity"]["id"].GetString();
-  ctx.identity.name = v["identity"]["name"].GetString();
-  ctx.identity.role = v["identity"]["role"].GetString();
-  ctx.identity.goal = v["identity"]["goal"].GetString();
-  ctx.identity.systemPrompt = v["identity"]["systemPrompt"].GetString();
-  ctx.identity.parentId = v["identity"].HasMember("parentId")
-                              ? v["identity"]["parentId"].GetString()
-                              : "";
-  ctx.identity.friendlyName = v["identity"].HasMember("friendlyName")
-                                  ? v["identity"]["friendlyName"].GetString()
-                                  : "";
-  for (const auto &s : v["permissions"]["allowedScopes"].GetArray())
-    ctx.permissions.allowedScopes.push_back(stringToToolScope(s.GetString()));
-  for (const auto &p : v["permissions"]["allowedPaths"].GetArray())
-    ctx.permissions.allowedPaths.push_back(p.GetString());
-  ctx.permissions.allowOutsideCwd =
-      v["permissions"]["allowOutsideCwd"].GetBool();
-  ctx.environment.type = stringToHostType(v["environment"]["type"].GetString());
-  ctx.environment.identifier = v["environment"]["identifier"].GetString();
-  ctx.environment.cwd = v["environment"]["cwd"].GetString();
-  for (auto it = v["environment"]["envVars"].MemberBegin();
-       it != v["environment"]["envVars"].MemberEnd(); ++it)
-    ctx.environment.envVars[it->name.GetString()] = it->value.GetString();
+  // Identity section (defensive)
+  if (v.HasMember("identity") && v["identity"].IsObject()) {
+    const auto &id = v["identity"];
+    if (id.HasMember("id") && id["id"].IsString())
+      ctx.identity.id = id["id"].GetString();
+    if (id.HasMember("name") && id["name"].IsString())
+      ctx.identity.name = id["name"].GetString();
+    if (id.HasMember("role") && id["role"].IsString())
+      ctx.identity.role = id["role"].GetString();
+    if (id.HasMember("goal") && id["goal"].IsString())
+      ctx.identity.goal = id["goal"].GetString();
+    if (id.HasMember("systemPrompt") && id["systemPrompt"].IsString())
+      ctx.identity.systemPrompt = id["systemPrompt"].GetString();
+    if (id.HasMember("parentId") && id["parentId"].IsString())
+      ctx.identity.parentId = id["parentId"].GetString();
+    if (id.HasMember("friendlyName") && id["friendlyName"].IsString())
+      ctx.identity.friendlyName = id["friendlyName"].GetString();
+  }
+  // Permissions section (defensive)
+  if (v.HasMember("permissions") && v["permissions"].IsObject()) {
+    const auto &perm = v["permissions"];
+    if (perm.HasMember("allowedScopes") && perm["allowedScopes"].IsArray()) {
+      for (const auto &s : perm["allowedScopes"].GetArray())
+        if (s.IsString()) ctx.permissions.allowedScopes.push_back(stringToToolScope(s.GetString()));
+    }
+    if (perm.HasMember("allowedPaths") && perm["allowedPaths"].IsArray()) {
+      for (const auto &p : perm["allowedPaths"].GetArray())
+        if (p.IsString()) ctx.permissions.allowedPaths.push_back(p.GetString());
+    }
+    if (perm.HasMember("allowOutsideCwd") && perm["allowOutsideCwd"].IsBool())
+      ctx.permissions.allowOutsideCwd = perm["allowOutsideCwd"].GetBool();
+  }
+  // Environment section (defensive)
+  if (v.HasMember("environment") && v["environment"].IsObject()) {
+    const auto &env = v["environment"];
+    if (env.HasMember("type") && env["type"].IsString())
+      ctx.environment.type = stringToHostType(env["type"].GetString());
+    if (env.HasMember("identifier") && env["identifier"].IsString())
+      ctx.environment.identifier = env["identifier"].GetString();
+    if (env.HasMember("cwd") && env["cwd"].IsString())
+      ctx.environment.cwd = env["cwd"].GetString();
+    if (env.HasMember("envVars") && env["envVars"].IsObject()) {
+      for (auto it = env["envVars"].MemberBegin();
+           it != env["envVars"].MemberEnd(); ++it)
+        if (it->value.IsString()) ctx.environment.envVars[it->name.GetString()] = it->value.GetString();
+    }
+  }
+  // History section (defensive)
   ctx.history = std::make_shared<AgentHistory>();
-  ctx.history->threadId = v["history"]["threadId"].GetString();
-  for (const auto &t : v["history"]["turns"].GetArray()) {
-    AgentTurn turn;
-    turn.turnId = t["turnId"].GetString();
-    for (const auto &m : t["messages"].GetArray())
-      turn.messages.push_back(messageFromJson(m));
-    turn.metrics = agentMetricsFromJson(t["metrics"]);
-    if (t.HasMember("stopReason") && t["stopReason"].IsString()) {
-      turn.stopReason = stringToStopReason(t["stopReason"].GetString());
+  if (v.HasMember("history") && v["history"].IsObject()) {
+    const auto &hist = v["history"];
+    if (hist.HasMember("threadId") && hist["threadId"].IsString())
+      ctx.history->threadId = hist["threadId"].GetString();
+    if (hist.HasMember("turns") && hist["turns"].IsArray()) {
+      for (const auto &t : hist["turns"].GetArray()) {
+        if (!t.IsObject()) continue;
+        AgentTurn turn;
+        if (t.HasMember("turnId") && t["turnId"].IsString())
+          turn.turnId = t["turnId"].GetString();
+        if (t.HasMember("messages") && t["messages"].IsArray()) {
+          for (const auto &m : t["messages"].GetArray())
+            turn.messages.push_back(messageFromJson(m));
+        }
+        if (t.HasMember("metrics") && t["metrics"].IsObject())
+          turn.metrics = agentMetricsFromJson(t["metrics"]);
+        if (t.HasMember("stopReason") && t["stopReason"].IsString()) {
+          turn.stopReason = stringToStopReason(t["stopReason"].GetString());
+        }
+        ctx.history->turns.push_back(turn);
+      }
     }
-    ctx.history->turns.push_back(turn);
   }
-  ctx.state.currentStatus =
-      stringToAgentStatus(v["state"]["currentStatus"].GetString());
-  for (const auto &p : v["state"]["pendingToolCalls"].GetArray())
-    ctx.state.pendingToolCalls.push_back(p.GetString());
-  for (const auto &p : v["state"]["ownedProcesses"].GetArray())
-    ctx.state.ownedProcesses.push_back(p.GetString());
-  if (v["state"].HasMember("readFiles") && v["state"]["readFiles"].IsArray()) {
-    for (const auto &f : v["state"]["readFiles"].GetArray())
-      ctx.state.readFiles.push_back(f.GetString());
-  }
-  if (v["state"].HasMember("fullyReadFiles") && v["state"]["fullyReadFiles"].IsArray()) {
-    for (const auto &f : v["state"]["fullyReadFiles"].GetArray())
-      ctx.state.fullyReadFiles.push_back(f.GetString());
-  }
-  if (v["state"].HasMember("editedFiles") &&
-      v["state"]["editedFiles"].IsArray()) {
-    for (const auto &f : v["state"]["editedFiles"].GetArray())
-      ctx.state.editedFiles.push_back(f.GetString());
-  }
-  if (v["state"].HasMember("completedActions") &&
-      v["state"]["completedActions"].IsArray()) {
-    for (const auto &act : v["state"]["completedActions"].GetArray())
-      ctx.state.completedActions.push_back(act.GetString());
-  }
-  if (v["state"]["fatalError"].IsString())
-    ctx.state.fatalError = v["state"]["fatalError"].GetString();
-  // Load blockingProcessIds (new format) or currentBlockingProcessId (legacy)
-  if (v["state"].HasMember("blockingProcessIds") &&
-      v["state"]["blockingProcessIds"].IsArray()) {
-    for (const auto &pid : v["state"]["blockingProcessIds"].GetArray()) {
-      ctx.state.blockingProcessIds.push_back(pid.GetString());
+  // State section (defensive)
+  if (v.HasMember("state") && v["state"].IsObject()) {
+    const auto &state = v["state"];
+    if (state.HasMember("currentStatus") && state["currentStatus"].IsString())
+      ctx.state.currentStatus = stringToAgentStatus(state["currentStatus"].GetString());
+    if (state.HasMember("pendingToolCalls") && state["pendingToolCalls"].IsArray()) {
+      for (const auto &p : state["pendingToolCalls"].GetArray())
+        if (p.IsString()) ctx.state.pendingToolCalls.push_back(p.GetString());
     }
-  } else if (v["state"].HasMember("currentBlockingProcessId") &&
-             v["state"]["currentBlockingProcessId"].IsString()) {
-    ctx.state.blockingProcessIds.push_back(
-        v["state"]["currentBlockingProcessId"].GetString());
+    if (state.HasMember("ownedProcesses") && state["ownedProcesses"].IsArray()) {
+      for (const auto &p : state["ownedProcesses"].GetArray())
+        if (p.IsString()) ctx.state.ownedProcesses.push_back(p.GetString());
+    }
+    if (state.HasMember("readFiles") && state["readFiles"].IsArray()) {
+      for (const auto &f : state["readFiles"].GetArray())
+        if (f.IsString()) ctx.state.readFiles.push_back(f.GetString());
+    }
+    if (state.HasMember("fullyReadFiles") && state["fullyReadFiles"].IsArray()) {
+      for (const auto &f : state["fullyReadFiles"].GetArray())
+        if (f.IsString()) ctx.state.fullyReadFiles.push_back(f.GetString());
+    }
+    if (state.HasMember("editedFiles") && state["editedFiles"].IsArray()) {
+      for (const auto &f : state["editedFiles"].GetArray())
+        if (f.IsString()) ctx.state.editedFiles.push_back(f.GetString());
+    }
+    if (state.HasMember("completedActions") && state["completedActions"].IsArray()) {
+      for (const auto &act : state["completedActions"].GetArray())
+        if (act.IsString()) ctx.state.completedActions.push_back(act.GetString());
+    }
+    if (state.HasMember("fatalError") && state["fatalError"].IsString())
+      ctx.state.fatalError = state["fatalError"].GetString();
+    // Load blockingProcessIds (new format) or currentBlockingProcessId (legacy)
+    if (state.HasMember("blockingProcessIds") && state["blockingProcessIds"].IsArray()) {
+      for (const auto &pid : state["blockingProcessIds"].GetArray()) {
+        if (pid.IsString()) ctx.state.blockingProcessIds.push_back(pid.GetString());
+      }
+    } else if (state.HasMember("currentBlockingProcessId") &&
+               state["currentBlockingProcessId"].IsString()) {
+      ctx.state.blockingProcessIds.push_back(
+          state["currentBlockingProcessId"].GetString());
+    }
   }
 
   if (v.HasMember("config") && v["config"].IsObject()) {
@@ -1378,7 +1423,8 @@ AgentContext fromJson(const rapidjson::Value &v) {
       ctx.config.persistHistory = cfg["persistHistory"].GetBool();
   }
 
-  ctx.aggregateMetrics = agentMetricsFromJson(v["aggregateMetrics"]);
+  if (v.HasMember("aggregateMetrics") && v["aggregateMetrics"].IsObject())
+    ctx.aggregateMetrics = agentMetricsFromJson(v["aggregateMetrics"]);
   return ctx;
 }
 
@@ -1793,6 +1839,15 @@ rapidjson::Document toJson(const EngineEvent &ev) {
     d.AddMember("toolName", rapidjson::Value(tc->toolName.c_str(), a), a);
     d.AddMember("toolArgs", rapidjson::Value(tc->toolArgs.c_str(), a), a);
     d.AddMember("parentId", rapidjson::Value(tc->parentId.c_str(), a), a);
+  } else if (auto *fe = std::get_if<AgentFileEdited>(&ev)) {
+    d.AddMember("type", "AgentFileEdited", a);
+    d.AddMember("agentId", rapidjson::Value(fe->agentId.c_str(), a), a);
+    d.AddMember("parentId", rapidjson::Value(fe->parentId.c_str(), a), a);
+    d.AddMember("path", rapidjson::Value(fe->path.c_str(), a), a);
+    d.AddMember("toolCallId", rapidjson::Value(fe->toolCallId.c_str(), a), a);
+    d.AddMember("diffPreview", rapidjson::Value(fe->diffPreview.c_str(), a), a);
+    d.AddMember("addedLines", fe->addedLines, a);
+    d.AddMember("removedLines", fe->removedLines, a);
   } else if (auto *tc = std::get_if<AgentTurnCompleted>(&ev)) {
     d.AddMember("type", "AgentTurnCompleted", a);
     d.AddMember("agentId", rapidjson::Value(tc->agentId.c_str(), a), a);
@@ -1866,6 +1921,19 @@ EngineEvent engineEventFromJson(const rapidjson::Value &v) {
         v.HasMember("toolCallId") ? v["toolCallId"].GetString() : "",
         v["toolName"].GetString(), v["toolArgs"].GetString(),
         v.HasMember("parentId") ? v["parentId"].GetString() : ""};
+  if (type == "AgentFileEdited")
+    return AgentFileEdited{
+        v["agentId"].GetString(),
+        v.HasMember("parentId") ? v["parentId"].GetString() : "",
+        v.HasMember("path") ? v["path"].GetString() : "",
+        v.HasMember("toolCallId") ? v["toolCallId"].GetString() : "",
+        v.HasMember("diffPreview") ? v["diffPreview"].GetString() : "",
+        v.HasMember("addedLines") && v["addedLines"].IsInt()
+            ? v["addedLines"].GetInt()
+            : 0,
+        v.HasMember("removedLines") && v["removedLines"].IsInt()
+            ? v["removedLines"].GetInt()
+            : 0};
   if (type == "AgentTurnCompleted")
     return AgentTurnCompleted{
         v["agentId"].GetString(), agentTurnFromJsonValue(v["turn"]),

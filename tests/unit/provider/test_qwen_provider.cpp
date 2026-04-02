@@ -121,7 +121,7 @@ TEST(QwenProvider, AvailableAccountPrefersLastUsedWhenQuotaTies) {
   QwenProvider provider;
   auto selected = provider.getAvailableAccount(std::string("coder-model"));
   ASSERT_TRUE(selected.has_value());
-  EXPECT_EQ((*selected)->getIdentifier(), "b@example.com");
+  EXPECT_EQ(selected->getIdentifier(), "b@example.com");
 }
 
 TEST(QwenProvider, SingleAccountHasNoAlternativeSwitchTarget) {

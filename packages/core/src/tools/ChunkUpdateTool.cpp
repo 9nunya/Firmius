@@ -243,6 +243,7 @@ shared::ToolResult ChunkUpdateTool::execute(const rapidjson::Value &input,
 
     worktools::emitWorkEvent(
         shared::ChunkUpdated{threadId, updatedPlan.id, updatedChunk});
+    worktools::emitWorkEvent(shared::PlanUpdated{threadId, updatedPlan});
     if (originalChunk.assignedAgentId != updatedChunk.assignedAgentId) {
       worktools::emitWorkEvent(
           shared::ChunkAssigned{threadId, updatedPlan.id, updatedChunk.id,

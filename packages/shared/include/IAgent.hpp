@@ -134,6 +134,12 @@ public:
   virtual void saveHistory() = 0;
 
   /**
+   * @brief Appends a turn to in-memory history and persists it using the
+   * agent's primary journaler.
+   */
+  virtual void appendHistoryTurn(const AgentTurn &turn) = 0;
+
+  /**
    * @brief Returns the execution environment for this agent.
    * @return Shared pointer to the environment.
    */

@@ -177,6 +177,80 @@ rapidjson::Document readJsonDocument(const std::string& path,
     return document;
 }
 
+std::vector<std::string> splitConcatenatedJsonObjects(const std::string& text) {
+    std::vector<std::string> objects;
+    std::size_t start = std::string::npos;
+    int depth = 0;
+    bool inString = false;
+    bool escape = false;
+
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        const char ch = text[i];
+
+        if (escape) {
+            escape = false;
+            continue;
+        }
+        if (ch == '\\' && inString) {
+            escape = true;
+            continue;
+        }
+        if (ch == '"') {
+            inString = !inString;
+            continue;
+        }
+        if (inString) {
+            continue;
+        }
+
+        if (ch == '{' || ch == '[') {
+            if (depth == 0) {
+                start = i;
+            }
+            ++depth;
+            continue;
+        }
+        if (ch == '}' || ch == ']') {
+            if (depth == 0) {
+                return {};
+            }
+            --depth;
+            if (depth == 0 && start != std::string::npos) {
+                objects.push_back(text.substr(start, i - start + 1));
+                start = std::string::npos;
+            }
+        }
+    }
+
+    if (depth != 0 || inString) {
+        return {};
+    }
+
+    const auto trailing = text.find_first_not_of(" \t\r\n",
+                                                 start == std::string::npos
+                                                     ? 0
+                                                     : start);
+    if (objects.empty() && trailing == std::string::npos) {
+        return {};
+    }
+
+    return objects;
+}
+
+void rewriteJournalWithRecoveredTurns(const std::string& path,
+                                      const std::vector<AgentTurn>& turns) {
+    std::string content;
+    for (const auto& turn : turns) {
+        rapidjson::Document d = toJson(turn);
+        rapidjson::StringBuffer buffer;
+        rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+        d.Accept(writer);
+        content += buffer.GetString();
+        content += "\n";
+    }
+    writeStringAtomically(content, path);
+}
+
 rapidjson::Value compactionSnapshotToJson(
     const CompactionSnapshot& snapshot, rapidjson::Document::AllocatorType& a) {
     rapidjson::Value v(rapidjson::kObjectType);
@@ -622,12 +696,63 @@ AgentHistory ThreadManager::loadAgentHistory(const std::string& threadId, const 
     std::string line;
     AgentHistory history;
     history.threadId = threadId;
+    bool repairedJournal = false;
 
     while (std::getline(file, line)) {
         if (line.empty()) continue;
         rapidjson::Document d;
         d.Parse(line.c_str());
-        history.turns.push_back(agentTurnFromJsonValue(d));
+        if (!d.HasParseError()) {
+            try {
+                history.turns.push_back(agentTurnFromJsonValue(d));
+            } catch (const std::exception& ex) {
+                std::cerr << "[Journaler] Skipping corrupted line in " << path << ": " << ex.what() << std::endl;
+                repairedJournal = true;
+            } catch (...) {
+                std::cerr << "[Journaler] Skipping corrupted line in " << path << ": unknown error" << std::endl;
+                repairedJournal = true;
+            }
+            continue;
+        }
+
+        const auto recoveredObjects = splitConcatenatedJsonObjects(line);
+        if (recoveredObjects.empty()) {
+            std::cerr << "[Journaler] Skipping malformed JSON line in " << path << std::endl;
+            repairedJournal = true;
+            continue;
+        }
+
+        repairedJournal = true;
+        for (const auto& objectText : recoveredObjects) {
+            try {
+                rapidjson::Document recoveredDoc;
+                recoveredDoc.Parse(objectText.c_str());
+                if (recoveredDoc.HasParseError()) {
+                    std::cerr << "[Journaler] Skipping unrecoverable JSON object in "
+                              << path << std::endl;
+                    continue;
+                }
+                history.turns.push_back(agentTurnFromJsonValue(recoveredDoc));
+            } catch (const std::exception& ex) {
+                std::cerr << "[Journaler] Skipping recovered object in " << path
+                          << ": " << ex.what() << std::endl;
+            } catch (...) {
+                std::cerr << "[Journaler] Skipping recovered object in " << path
+                          << ": unknown error" << std::endl;
+            }
+        }
+    }
+
+    if (repairedJournal) {
+        try {
+            rewriteJournalWithRecoveredTurns(path, history.turns);
+        } catch (const std::exception& ex) {
+            std::cerr << "[Journaler] Failed to rewrite repaired journal " << path
+                      << ": " << ex.what() << std::endl;
+        } catch (...) {
+            std::cerr << "[Journaler] Failed to rewrite repaired journal " << path
+                      << ": unknown error" << std::endl;
+        }
     }
 
     // Inject synthetic results for orphaned tool calls so providers
@@ -1223,15 +1348,7 @@ void ThreadManager::writeAgentManifest(const std::string& threadId, const std::m
         d.AddMember(rapidjson::Value(agentId.c_str(), a).Move(), obj, a);
     }
 
-    rapidjson::StringBuffer buffer;
-    rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
-    d.Accept(writer);
-
-    std::ofstream file(path);
-    if (!file.is_open()) {
-        throw std::runtime_error("Cannot write agent manifest: " + path);
-    }
-    file << buffer.GetString();
+    writeJsonDocument(d, path);
 }
 
 ThreadPermissionRules ThreadManager::readPermissionRules(const std::string& threadId) const {

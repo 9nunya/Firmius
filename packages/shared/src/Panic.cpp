@@ -11,6 +11,7 @@
 #include <functional>
 #include <csignal>
 #include <cstring>
+#include <new>
 
 namespace firmius::shared {
 
@@ -153,8 +154,18 @@ void Panic::signalHandler(int sig) {
     _exit(1);
 }
 
+void memoryPressureHandler() {
+    std::cerr << "\n[FIRMIUS] Memory allocation failed (std::bad_alloc). "
+              << "System is under memory pressure.\n";
+    printBacktrace();
+    Panic::printExtraInfo();
+    // Re-throw bad_alloc so the terminate handler can catch it
+    throw std::bad_alloc();
+}
+
 void Panic::init() {
     std::set_terminate(terminateHandler);
+    std::set_new_handler(memoryPressureHandler);
     std::signal(SIGSEGV, Panic::signalHandler);
     std::signal(SIGBUS, Panic::signalHandler);
     std::signal(SIGFPE, Panic::signalHandler);

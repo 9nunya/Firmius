@@ -6,6 +6,7 @@
 #include <fstream>
 #include <mutex>
 #include <queue>
+#include <memory>
 #include <thread>
 #include <condition_variable>
 #include <variant>
@@ -62,6 +63,7 @@ private:
 
     std::string filePath;
     std::ofstream file;
+    std::shared_ptr<std::mutex> fileMutex;
     
     std::queue<JournalOp> queue;
     std::mutex queueMutex;

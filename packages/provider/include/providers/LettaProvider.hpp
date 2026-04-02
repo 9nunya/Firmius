@@ -66,9 +66,10 @@ private:
 
   void processSSELine(const std::string &line, StreamContext &ctx);
   bool fetchAndStoreQuotas(OAuthAccount &acc);
-  void executeStreamRequest(OAuthAccount &acc, const AgentHistory &history,
-                            const ProviderOptions &opts,
-                            std::function<void(const StreamEvent &)> &onEvent);
+  bool ensureAgentId(OAuthAccount &acc, std::string &outErrorMessage);
+  int executeStreamRequest(OAuthAccount &acc, const AgentHistory &history,
+                           const ProviderOptions &opts,
+                           std::function<void(const StreamEvent &)> &onEvent);
 
   static size_t sseWriteCallback(char *ptr, size_t size, size_t nmemb,
                                  void *userdata);

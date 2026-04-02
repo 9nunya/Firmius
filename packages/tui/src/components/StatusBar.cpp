@@ -77,8 +77,8 @@ std::string prettifyVariantName(const std::string &variant) {
   return out;
 }
 
-std::string buildModelPillText(const firmius::tui::StatusBarModel &model,
-                               bool compact_mode) {
+std::string buildModelText(const firmius::tui::StatusBarModel &model,
+                           bool compact_mode) {
   std::string model_text = firmius::shared::PrettifyModelName(model.model_name);
 
   if (compact_mode) {
@@ -97,10 +97,6 @@ std::string buildModelPillText(const firmius::tui::StatusBarModel &model,
     model_text += " (" + variant + ")";
   }
 
-  if (!model.purpose.empty() && !compact_mode) {
-    model_text = model.purpose + " | " + model_text;
-  }
-
   return model_text;
 }
 
@@ -114,8 +110,6 @@ public:
       return ftxui::text("");
     }
 
-    syncGlint();
-
     const auto &theme = ThemeManager::instance().getCurrentTheme();
     std::string mode = model_->status_text;
     const auto &state = GetStateColorsForMode(mode, theme);
@@ -124,6 +118,8 @@ public:
     int term_width = ftxui::Terminal::Size().dimx;
     bool compact_mode = term_width <= 110;
     bool ultra_compact = term_width < 70;
+
+    syncGlint(compact_mode);
 
     // 1. Status Segment (Icon)
     std::string status_icon = firmius::shared::ICON_WAIT;
@@ -139,70 +135,74 @@ public:
                       ftxui::color(status_fg) | ftxui::bgcolor(status_bg);
 
     // Colors for subsequent segments
-    ftxui::Color agent_bg = theme.status_bar.agent_bg;
-    ftxui::Color agent_fg = theme.status_bar.agent_fg;
+    ftxui::Color purpose_bg = theme.agent_strip.pills.purpose_bg;
+    ftxui::Color purpose_fg = theme.agent_strip.pills.purpose_fg;
+    ftxui::Color title_bg = theme.agent_strip.pills.slug_bg;
+    ftxui::Color title_fg = theme.agent_strip.pills.slug_fg;
     ftxui::Color pill_bg = theme.status_bar.pill_bg;
     ftxui::Color pill_fg = theme.status_bar.pill_fg;
     ftxui::Color filler_bg = theme.status_bar.filler_bg;
 
     // Separators
-    auto sep1 = ftxui::text(firmius::shared::PL_LEFT_SEP) |
-                ftxui::color(status_bg) | ftxui::bgcolor(agent_bg);
-    auto sep2 = ftxui::text(firmius::shared::PL_LEFT_SEP) |
-                ftxui::color(agent_bg) | ftxui::bgcolor(pill_bg);
-    auto sep3 = ftxui::text(firmius::shared::PL_LEFT_SEP) |
-                ftxui::color(pill_bg) | ftxui::bgcolor(filler_bg);
+    auto sep_status_purpose = ftxui::text(firmius::shared::PL_LEFT_SEP) |
+                              ftxui::color(status_bg) |
+                              ftxui::bgcolor(purpose_bg);
+    auto sep_purpose_title = ftxui::text(firmius::shared::PL_LEFT_SEP) |
+                             ftxui::color(purpose_bg) |
+                             ftxui::bgcolor(title_bg);
+    auto sep_title_model = ftxui::text(firmius::shared::PL_LEFT_SEP) |
+                           ftxui::color(title_bg) | ftxui::bgcolor(pill_bg);
+    auto sep_purpose_model = ftxui::text(firmius::shared::PL_LEFT_SEP) |
+                             ftxui::color(purpose_bg) | ftxui::bgcolor(pill_bg);
+    auto sep_model_filler = ftxui::text(firmius::shared::PL_LEFT_SEP) |
+                            ftxui::color(pill_bg) | ftxui::bgcolor(filler_bg);
 
-    // 2. Agent Segment (abbreviated in compact mode)
-    std::string agent_name = firmius::shared::PrettifyModelName(model_->agent_name);
-    if (compact_mode) {
-      // Shorten agent name: "Firmius Orchestrator" -> "Firmius"
-      size_t space_pos = agent_name.find(' ');
-      if (space_pos != std::string::npos) {
-        agent_name = agent_name.substr(0, space_pos);
+    // 2. Purpose Segment
+    std::string purpose = model_->purpose;
+    if (compact_mode && purpose.length() > 8) {
+      purpose = purpose.substr(0, 8);
+    }
+    auto purpose_el = ftxui::text(" " + purpose + " ") | ftxui::bold |
+                      ftxui::color(purpose_fg) | ftxui::bgcolor(purpose_bg);
+
+    // 3. Title Segment (optional)
+    ftxui::Element title_el = ftxui::text("");
+    ftxui::Element sep_title = ftxui::text("");
+    if (!model_->title.empty()) {
+      std::string title = model_->title;
+      if (compact_mode && title.length() > 10) {
+        title = title.substr(0, 10);
       }
-      // If ultra compact, just first 4 chars
-      if (ultra_compact && agent_name.length() > 4) {
-        agent_name = agent_name.substr(0, 4);
-      }
+      title_el = ftxui::text(" " + title + " ") | ftxui::bold |
+                 ftxui::color(title_fg) | ftxui::bgcolor(title_bg);
+      sep_title = sep_purpose_title;
     }
 
-    ftxui::Element agent_name_el;
-    agent_name_el = ftxui::text(" " + agent_name + " ") |
-        ftxui::bold | ftxui::color(agent_fg) | ftxui::bgcolor(agent_bg);
-
-    // 3. Model/Purpose Pill Segment
-    std::string model_text = buildModelPillText(*model_, compact_mode);
-
-    ftxui::Element pill_el;
+    // 4. Model Segment
+    std::string model_text = buildModelText(*model_, compact_mode);
+    ftxui::Element model_el;
     bool is_working = (mode == "streaming" || mode == "executing_tool" ||
                        mode == "provider_waiting" || mode == "compacting");
     if (is_working && glint_) {
-      pill_el = glint_->Render() | ftxui::bgcolor(pill_bg);
+      model_el = glint_->Render() | ftxui::bgcolor(pill_bg);
     } else {
-      pill_el = ftxui::text(" " + model_text + " ") | ftxui::color(pill_fg) |
-                ftxui::bgcolor(pill_bg);
+      model_el = ftxui::text(" " + model_text + " ") | ftxui::color(pill_fg) |
+                 ftxui::bgcolor(pill_bg);
     }
 
-    // 4. Context Segment (Right Aligned)
+    auto sep_after_purpose =
+        model_->title.empty() ? sep_purpose_model : sep_title_model;
+
+    // 5. Context Segment (Right Aligned)
     ftxui::Color ctx_bg = theme.status_bar.context.bg;
     std::string perms_label = permissionModeToCompactLabel(model_->permission_mode);
     ftxui::Color perms_color = permissionModeColor(model_->permission_mode, theme);
     ftxui::Elements ctx_items;
 
-    if (ultra_compact) {
-      ctx_items.push_back(ftxui::text(" " + perms_label + " ") | ftxui::bold |
-                          ftxui::color(perms_color) |
-                          ftxui::bgcolor(ctx_bg));
-    } else {
-      ctx_items.push_back(ftxui::text(" perm ") | ftxui::color(theme.base.dim) |
-                          ftxui::bgcolor(ctx_bg));
-      ctx_items.push_back(ftxui::text(" " + perms_label + " ") | ftxui::bold |
-                          ftxui::color(perms_color) |
-                          ftxui::bgcolor(ctx_bg));
-    }
+    ctx_items.push_back(ftxui::text(" " + perms_label + " ") | ftxui::bold |
+                        ftxui::color(perms_color) | ftxui::bgcolor(ctx_bg));
 
-    if (model_->context_max > 0 && !ultra_compact) {
+    if (model_->context_max > 0) {
       float ratio =
           static_cast<float>(model_->context_used) / model_->context_max;
       ftxui::Color ctx_color = theme.status_bar.context.low;
@@ -215,13 +215,12 @@ public:
       snprintf(buf, sizeof(buf), "%.0f%%", ratio * 100.0f);
       std::string pct_str = buf;
 
-      if (compact_mode) {
+      if (compact_mode || ultra_compact) {
         ctx_items.push_back(ftxui::text(firmius::shared::PL_RIGHT_SOFT_SEP) |
                             ftxui::color(theme.base.dim) |
                             ftxui::bgcolor(ctx_bg));
         ctx_items.push_back(ftxui::text(" " + pct_str + " ") | ftxui::bold |
-                            ftxui::color(ctx_color) |
-                            ftxui::bgcolor(ctx_bg));
+                            ftxui::color(ctx_color) | ftxui::bgcolor(ctx_bg));
       } else {
         // Formatting helper for context numbers
         auto format_val = [](uint32_t val) -> std::string {
@@ -259,8 +258,7 @@ public:
                             ftxui::color(theme.base.dim) |
                             ftxui::bgcolor(ctx_bg));
         ctx_items.push_back(ftxui::text(" " + pct_str + " ") | ftxui::bold |
-                            ftxui::color(ctx_color) |
-                            ftxui::bgcolor(ctx_bg));
+                            ftxui::color(ctx_color) | ftxui::bgcolor(ctx_bg));
       }
     }
 
@@ -294,24 +292,24 @@ public:
       });
     }
 
-    return ftxui::hbox({
-               status_seg,
-               sep1,
-               agent_name_el,
-               sep2,
-               pill_el,
-               sep3,
-               ftxui::filler() | ftxui::bgcolor(filler_bg),
-               process_seg,
-               ctx_seg,
-           }) |
+    return ftxui::hbox({status_seg,
+                        sep_status_purpose,
+                        purpose_el,
+                        sep_title,
+                        title_el,
+                        sep_after_purpose,
+                        model_el,
+                        sep_model_filler,
+                        ftxui::filler() | ftxui::bgcolor(filler_bg),
+                        process_seg,
+                        ctx_seg}) |
            ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, 1);
   }
 
 private:
-  void syncGlint() {
+  void syncGlint(bool compact_mode) {
     using namespace firmius::shared;
-    std::string model_text = buildModelPillText(*model_, false);
+    std::string model_text = buildModelText(*model_, compact_mode);
 
     const auto &theme = ThemeManager::instance().getCurrentTheme();
     if (model_text == cached_name_ && model_->status_text == cached_status_ &&

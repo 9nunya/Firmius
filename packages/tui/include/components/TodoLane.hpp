@@ -21,6 +21,7 @@ struct TodoLaneModel {
   bool show_chunk_header = false;
   std::string chunk_title;
   std::vector<TodoLaneRow> rows;
+  std::string toggle_hint;
 };
 
 ftxui::Component TodoLane(const std::shared_ptr<TodoLaneModel> &model);

@@ -26,12 +26,13 @@ struct AgentStripItem {
   bool has_children = false; // True if this agent has subagents
 };
 
-inline constexpr size_t kAgentStripVisibleRows = 3;
+inline constexpr size_t kAgentStripVisibleRows = 4;
 
 struct AgentStripModel {
   std::vector<AgentStripItem> items;
   size_t view_offset = 0;
   std::function<void(const std::string&)> on_item_click;
+  std::function<void(int)> on_scroll_request;
 };
 
 ftxui::Component AgentStrip(const std::shared_ptr<AgentStripModel> &model);

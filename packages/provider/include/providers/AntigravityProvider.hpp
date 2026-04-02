@@ -9,6 +9,8 @@
 #include <memory>
 
 namespace firmius::provider {
+class GoogleSearchProvider;
+
 
 class AntigravityProvider : public BaseOAuthProvider {
 public:
@@ -40,7 +42,7 @@ public:
   void refreshQuotas() override;
   std::map<std::string, std::vector<QuotaBucket>> getAllQuotas() const override;
 
-  std::optional<OAuthAccount *> getAvailableAccount(
+  std::optional<OAuthAccount> getAvailableAccount(
       const std::optional<std::string> &modelId = std::nullopt) override;
 
   struct StreamedToolCallState {
@@ -74,12 +76,11 @@ public:
 
   static std::map<std::string, ModelInfo> getStaticModels();
 
-  // Sends the internal Antigravity proxy request (v1internal:streamGenerateContent)
-  void executeStreamRequest(OAuthAccount &acc, const AgentHistory &history,
-                            const ProviderOptions &opts,
-                            std::function<void(const StreamEvent &)> &onEvent);
 
   static size_t sseWriteCallback(char *ptr, size_t size, size_t nmemb, void *userdata);
+
+private:
+  std::unique_ptr<GoogleSearchProvider> searchProvider_;
 };
 
 } // namespace firmius::provider

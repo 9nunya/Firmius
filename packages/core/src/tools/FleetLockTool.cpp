@@ -224,12 +224,22 @@ shared::ToolResult FleetLockTool::execute(const FleetLockInput &input,
     std::string requestId = shared::StringUtil::generateUuid();
     
     // Queue request to target agent
-    std::string requestMsg = "LOCK_REQUEST|" + requestId + "|" + 
-                             ownerId + "|" + input.reason + "|";
-    for (size_t i = 0; i < input.paths.size(); ++i) {
-      if (i > 0) requestMsg += ",";
-      requestMsg += input.paths[i];
+    std::string requestMsg =
+        "Fleet coordination request\n"
+        "Request ID: " +
+        requestId + "\n" +
+        "Requester: " + ownerId + "\n" +
+        "Reason: " + input.reason + "\n" +
+        "Requested ownership hold for paths:\n";
+    for (const auto &path : input.paths) {
+      requestMsg += "- " + path + "\n";
     }
+    requestMsg +=
+        "\nIf you are still actively editing or stabilizing these surfaces, "
+        "claim narrow ownership with `fleet_lock` and release it when your "
+        "current edit/verification wave is done. If you are already done or "
+        "the request is irrelevant, ignore it or finish cleanly so the "
+        "requester can continue.";
     
     Harness::instance().queueInternalMessage(
         *input.target_agent_id, threadId, requestMsg);
@@ -238,37 +248,68 @@ shared::ToolResult FleetLockTool::execute(const FleetLockInput &input,
     const uint64_t start = worktools::nowEpochMs();
     const int timeout = input.timeout_ms.value_or(120000);
     
+    bool observedTargetOwnership = false;
     while (true) {
-      // Check for response in a shared state location
-      // For now, simplified: just wait and check if paths become available
-      bool pathsFree = false;
+      bool targetExists = AgentRegistry::instance().getAgent(
+                              *input.target_agent_id) != nullptr;
+      bool targetOwnsSurface = false;
+      bool conflictingOpenLock = false;
       {
         ThreadManager tm(ThreadManager::defaultBasePath());
         FleetState state = tm.getFleetState(threadId);
-        pathsFree = true;
-        for (const auto &path : input.paths) {
-          for (const auto &lock : state.locks) {
+        for (const auto &lock : state.locks) {
+          if (lockStatusOrDefault(lock) != "open") {
+            continue;
+          }
+          bool overlaps = false;
+          for (const auto &path : input.paths) {
             for (const auto &lp : lock.paths) {
-              if (lp == path && lockStatusOrDefault(lock) == "open" && 
-                  lock.ownerAgentId != ownerId && lock.ownerAgentId != input.target_agent_id) {
-                pathsFree = false;
+              if (lp == path) {
+                overlaps = true;
                 break;
               }
             }
+            if (overlaps) {
+              break;
+            }
+          }
+          if (!overlaps) {
+            continue;
+          }
+          if (lock.ownerAgentId == *input.target_agent_id) {
+            targetOwnsSurface = true;
+          } else if (lock.ownerAgentId != ownerId) {
+            conflictingOpenLock = true;
           }
         }
       }
-      
-      if (pathsFree) {
+
+      if (targetOwnsSurface) {
+        observedTargetOwnership = true;
+      }
+
+      if (observedTargetOwnership && !targetOwnsSurface) {
         rapidjson::Document doc;
         doc.SetObject();
         auto &alloc = doc.GetAllocator();
         doc.AddMember("request_id", rapidjson::Value(requestId.c_str(), alloc), alloc);
         doc.AddMember("mode", rapidjson::Value("request", alloc), alloc);
-        doc.AddMember("status", rapidjson::Value("fulfilled", alloc), alloc);
+        doc.AddMember("status", rapidjson::Value("released", alloc), alloc);
         return shared::ToolResult::ok(doc);
       }
-      
+
+      if (!targetExists && !observedTargetOwnership) {
+        rapidjson::Document doc;
+        doc.SetObject();
+        auto &alloc = doc.GetAllocator();
+        doc.AddMember("request_id", rapidjson::Value(requestId.c_str(), alloc), alloc);
+        doc.AddMember("mode", rapidjson::Value("request", alloc), alloc);
+        doc.AddMember("status",
+                      rapidjson::Value("target_unavailable", alloc), alloc);
+        doc.AddMember("conflicts_remaining", conflictingOpenLock, alloc);
+        return shared::ToolResult::ok(doc);
+      }
+
       const uint64_t now = worktools::nowEpochMs();
       if (now - start >= static_cast<uint64_t>(timeout)) {
         return shared::ToolResult::fail("Lock request timed out");

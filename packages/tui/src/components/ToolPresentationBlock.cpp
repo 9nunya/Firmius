@@ -2,6 +2,7 @@
 
 #include "components/DiffRenderer.hpp"
 #include "components/ANSIParser.hpp"
+#include "components/GlintEffect.hpp"
 #include "ThemeManager.hpp"
 #include "utils/Icons.hpp"
 #include <ftxui/component/component.hpp>
@@ -54,7 +55,6 @@ int DefaultVisibleBodyLines(ToolPresentationLayoutKind layout) {
 // ANSI Process Rendering Contract:
 // 1. ToolPresentation::body_lines contains raw ANSI strings.
 // 2. Rendering layer parses ANSI at render-time using firmius::tui::ParseANSI.
-// 3. This maintains model compatibility and avoids coupling with FTXUI in core.
 ftxui::Element BuildBodyWindow(const ToolPresentation &presentation, const Theme &theme,
                                bool expanded, int visible_lines,
                                const ftxui::Component &toggle_button,
@@ -76,14 +76,14 @@ ftxui::Element BuildBodyWindow(const ToolPresentation &presentation, const Theme
     if (!presentation.custom_body_elements.empty()) {
       for (const auto& element : presentation.custom_body_elements) {
         body_rows.push_back(ftxui::hbox({
-            ftxui::text("│ ") | ftxui::color(theme.base.fg),
+            ftxui::text("│ ") | ftxui::color(theme.base.highlight),
             element | ftxui::xflex
         }));
       }
       // Add a separator between code and output if there is output
       if (presentation.body_lines.size() > output_start_index) {
         body_rows.push_back(ftxui::hbox({
-            ftxui::text("│ ") | ftxui::color(theme.base.fg),
+            ftxui::text("│ ") | ftxui::color(theme.base.highlight),
             ftxui::text("--- output ---") | ftxui::color(theme.base.dim) | ftxui::xflex
         }));
       }
@@ -94,15 +94,15 @@ ftxui::Element BuildBodyWindow(const ToolPresentation &presentation, const Theme
         static_cast<int>(presentation.body_lines.size() - output_start_index);
     const int shown_output_lines =
         expanded ? total_output_lines : std::min(max_output_lines, total_output_lines);
-    const int hidden_output_lines = total_output_lines - shown_output_lines;
+    const int total_hidden_lines = total_output_lines - shown_output_lines;
     const int first_output_index =
         std::max<int>(0, total_output_lines - shown_output_lines);
 
-    if (hidden_output_lines > 0) {
+    if (total_hidden_lines > 0) {
       body_rows.push_back(
           ftxui::hbox({
-            ftxui::text("│ ") | ftxui::color(theme.base.fg),
-            ftxui::text("... +" + std::to_string(hidden_output_lines) + " more lines") |
+            ftxui::text("│ ") | ftxui::color(theme.base.highlight),
+            ftxui::text("... +" + std::to_string(total_hidden_lines) + " more lines") |
             ftxui::color(theme.base.dim)
           }));
     }
@@ -111,17 +111,20 @@ ftxui::Element BuildBodyWindow(const ToolPresentation &presentation, const Theme
           presentation.body_lines[output_start_index + first_output_index + i];
       if (presentation.ansi_aware) {
         body_rows.push_back(ftxui::hbox({
-            ftxui::text("│ ") | ftxui::color(theme.base.fg),
+            ftxui::text("│ ") | ftxui::color(theme.base.highlight),
             ParseANSI(line) | ftxui::xflex
         }));
       } else {
-        body_rows.push_back(ftxui::paragraph("│ " + line) | ftxui::color(theme.base.fg));
+        body_rows.push_back(ftxui::hbox({
+            ftxui::text("│ ") | ftxui::color(theme.base.highlight),
+            ftxui::paragraph(line) | ftxui::color(theme.base.fg)
+        }));
       }
     }
     if (presentation.status_footer.has_value() &&
         !presentation.status_footer->empty()) {
       body_rows.push_back(ftxui::hbox({
-                              ftxui::text("╰ ") | ftxui::color(theme.base.fg),
+                              ftxui::text("╰ ") | ftxui::color(theme.base.highlight),
                               ftxui::paragraph(*presentation.status_footer) |
                                   ftxui::color(theme.base.dim) |
                                   ftxui::flex_shrink,
@@ -143,23 +146,25 @@ ftxui::Element BuildBodyWindow(const ToolPresentation &presentation, const Theme
     for (int i = 0; i < max_lines; ++i) {
       if (!presentation.custom_body_elements.empty()) {
         body_rows.push_back(ftxui::hbox({
-            ftxui::text("│ ") | ftxui::color(theme.base.fg),
+            ftxui::text("│ ") | ftxui::color(theme.base.highlight),
             presentation.custom_body_elements[i] | ftxui::xflex
         }));
       } else if (presentation.ansi_aware) {
         body_rows.push_back(ftxui::hbox({
-            ftxui::text("│ ") | ftxui::color(theme.base.fg),
+            ftxui::text("│ ") | ftxui::color(theme.base.highlight),
             ParseANSI(presentation.body_lines[static_cast<size_t>(i)]) | ftxui::xflex
         }));
       } else {
-        body_rows.push_back(ftxui::paragraph("│ " + presentation.body_lines[static_cast<size_t>(i)]) |
-                            ftxui::color(theme.base.fg));
+        body_rows.push_back(ftxui::hbox({
+            ftxui::text("│ ") | ftxui::color(theme.base.highlight),
+            ftxui::paragraph(presentation.body_lines[static_cast<size_t>(i)]) | ftxui::color(theme.base.fg)
+        }));
       }
     }
     if (!expanded && static_cast<int>(total_lines) > max_lines) {
       body_rows.push_back(
           ftxui::hbox({
-            ftxui::text("│ ") | ftxui::color(theme.base.fg),
+            ftxui::text("│ ") | ftxui::color(theme.base.highlight),
             ftxui::text("... +" + std::to_string(static_cast<int>(total_lines) - max_lines) + " more lines") |
             ftxui::color(theme.base.dim)
           }));
@@ -168,8 +173,7 @@ ftxui::Element BuildBodyWindow(const ToolPresentation &presentation, const Theme
   if (body_rows.empty()) {
     return ftxui::emptyElement();
   }
-  return ftxui::vbox(std::move(body_rows)) |
-         ftxui::bgcolor(theme.tool_blocks.generic_header_bg);
+  return ftxui::vbox(std::move(body_rows));
 }
 
 ftxui::Element BuildFactsFooter(const ToolPresentation &presentation, const Theme &theme) {
@@ -210,6 +214,25 @@ std::string JoinBadgesInline(const ToolPresentation &presentation) {
   }
   return out;
 }
+ftxui::Element DecorateTitleWithGlint(const std::string &title,
+                                      const ftxui::Color &color,
+                                      ToolPresentationLifecycle lifecycle,
+                                      const Theme &theme) {
+  auto base = ftxui::text(title) | ftxui::bold | ftxui::color(color);
+  if (lifecycle == ToolPresentationLifecycle::Running) {
+    GlintConfig cfg;
+    cfg.gradientColors =
+        theme.tool_blocks.glint.empty()
+            ? std::vector<ftxui::Color>{ftxui::Color::White,
+                                        theme.base.highlight}
+            : theme.tool_blocks.glint;
+    cfg.durationSeconds = 0.9f;
+    cfg.intervalSeconds = 1.2f;
+    return GlintEffect(base, cfg)->Render();
+  }
+  return base;
+}
+
 
 ftxui::Element BuildInlineStatusRow(const ToolPresentation &presentation,
                                     const Theme &theme, const std::string &icon,
@@ -218,8 +241,8 @@ ftxui::Element BuildInlineStatusRow(const ToolPresentation &presentation,
   ftxui::Elements row;
   row.push_back(ftxui::text(" " + icon + " ") | ftxui::color(icon_color));
   if (!presentation.title.empty()) {
-    row.push_back(ftxui::text(presentation.title) |
-                  ftxui::bold | ftxui::color(title_color));
+    row.push_back(DecorateTitleWithGlint(presentation.title, title_color,
+                                         presentation.lifecycle, theme));
   }
 
   const std::string badges = JoinBadgesInline(presentation);
@@ -273,7 +296,7 @@ public:
     const ToolPresentation presentation = presentation_getter_();
     const auto &theme = ThemeManager::instance().getCurrentTheme();
 
-    std::string icon = firmius::shared::ICON_GEAR;
+    std::string icon = presentation.custom_icon.value_or(firmius::shared::ICON_GEAR);
     ftxui::Color icon_color = theme.tool_blocks.generic_icon;
     ftxui::Color title_color = theme.tool_blocks.generic_title;
     bool dim_header = false;
@@ -282,9 +305,11 @@ public:
       icon_color = theme.status_bar.error.normal.fg;
       title_color = theme.status_bar.error.normal.fg;
     } else if (presentation.lifecycle == ToolPresentationLifecycle::Success) {
-      icon = firmius::shared::ICON_CHECK;
+      icon = presentation.custom_icon.value_or(firmius::shared::ICON_CHECK);
     } else if (presentation.layout == ToolPresentationLayoutKind::InlineStatusRow) {
       icon = firmius::shared::ICON_WAIT;
+    } else if (presentation.custom_icon.has_value()) {
+      icon = *presentation.custom_icon;
     } else {
       dim_header = true;
     }
@@ -330,8 +355,8 @@ public:
     if (has_header_content) {
       header.push_back(ftxui::text(" " + icon + " ") | ftxui::color(icon_color));
       if (!presentation.title.empty()) {
-        header.push_back(
-            ftxui::text(presentation.title) | ftxui::bold | ftxui::color(title_color));
+        header.push_back(DecorateTitleWithGlint(presentation.title, title_color,
+                                               presentation.lifecycle, theme));
       }
       if (include_subtitle) {
         header.push_back(ftxui::text(" " + presentation.subtitle) |
@@ -375,8 +400,10 @@ public:
 
     if (!one_line_summary) {
       for (const auto &notice : presentation.notices) {
-        root_rows.push_back(ftxui::paragraph(NoticePrefix(notice.kind) + notice.text) |
-                            ftxui::color(NoticeColor(theme, notice.kind)));
+        root_rows.push_back(ftxui::hbox({
+            ftxui::text(NoticePrefix(notice.kind)) | ftxui::bold | ftxui::color(NoticeColor(theme, notice.kind)),
+            ftxui::paragraph(notice.text) | ftxui::color(theme.base.fg)
+        }));
       }
     }
 
@@ -403,7 +430,10 @@ public:
                               ftxui::color(theme.base.dim));
         }
         for (const auto &line : section.lines) {
-          root_rows.push_back(ftxui::paragraph("• " + line) | ftxui::color(theme.base.dim));
+          root_rows.push_back(ftxui::hbox({
+              ftxui::text("• ") | ftxui::color(theme.base.dim),
+              ftxui::paragraph(line) | ftxui::color(theme.base.dim)
+          }));
         }
       }
       if (!presentation.facts.empty()) {
@@ -443,7 +473,7 @@ public:
       root_rows.push_back(toggle_button_->Render());
     }
 
-    return ftxui::vbox(root_rows) | ftxui::bgcolor(theme.tool_blocks.generic_bg);
+    return ftxui::vbox(root_rows);
   }
 
 private:

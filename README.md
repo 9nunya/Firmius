@@ -6,7 +6,7 @@ The high-performance, C++ native, discipline based agent TUI.
 
 - Parallel Subagents
 - 3 OAuth Providers w/ quota tracking, 7 OpenAI Providers
-- Hashline edit
+LineRange edit
 - Watched file context management
 - Smooth (and pretty) TUI written in C++ (with FTXUI BTW :3)
 - User-definable prompts and workflows

@@ -14,6 +14,7 @@ struct ScrollableBoxOptions {
     bool startAtBottom = false;
     bool overlayScrollbar = false;
     int overlayScrollbarGutter = 2;
+    bool showScrollbar = true;
 };
 
 // Wraps `child` inside a scrollable frame that responds to wheel, page, home, and

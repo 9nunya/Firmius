@@ -1,6 +1,7 @@
 #include "components/TodoLane.hpp"
 #include "ThemeManager.hpp"
 #include "components/ScrollableBox.hpp"
+#include "utils/Icons.hpp"
 #include <ftxui/component/component.hpp>
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/dom/node.hpp>
@@ -73,8 +74,9 @@ public:
   explicit TodoLaneComponentBase(std::shared_ptr<TodoLaneModel> model)
       : model_(std::move(model)) {
     body_renderer_ = ftxui::Renderer([this] { return RenderBody(); });
-    scrollable_ = ScrollableBox(
-        body_renderer_, {.startAtBottom = false, .overlayScrollbar = true});
+    scrollable_ = ScrollableBox(body_renderer_, {.startAtBottom = false,
+                                                 .overlayScrollbar = true,
+                                                 .showScrollbar = false});
     Add(scrollable_);
   }
 
@@ -86,25 +88,26 @@ public:
     const auto &theme = ThemeManager::instance().getCurrentTheme();
     maybeAutoScrollToFocusRow(theme);
     ftxui::Elements rows;
-    rows.push_back(
-        ftxui::hbox({
-            ftxui::text(" 󰄬 ") | ftxui::bold | ftxui::color(theme.base.bg) |
-                ftxui::bgcolor(theme.base.highlight),
-            ftxui::paragraph(" " + model_->owner_label) |
-                ftxui::color(theme.base.fg),
-        }) |
-        ftxui::xflex);
-
+    rows.push_back(ftxui::hbox({
+                       ftxui::text(" " + shared::ICON_TODO + " ") |
+                           ftxui::bold | ftxui::color(theme.base.bg) |
+                           ftxui::bgcolor(theme.base.highlight),
+                       ftxui::paragraph(" " + model_->owner_label) |
+                           ftxui::color(theme.base.fg),
+                       ftxui::text(model_->toggle_hint) | ftxui::dim,
+                   }) |
+                   ftxui::xflex);
     if (model_->show_chunk_header && !model_->chunk_title.empty()) {
       rows.push_back(ftxui::paragraph("󰆧 " + model_->chunk_title) |
                      ftxui::bold | ftxui::color(theme.base.highlight));
     }
 
-    auto body = scrollable_ ? scrollable_->Render() | ftxui::xflex | ftxui::yflex
-                            : ftxui::text("");
+    auto body = scrollable_
+                    ? scrollable_->Render() | ftxui::xflex | ftxui::yflex
+                    : ftxui::text("");
     rows.push_back(body);
-    return ftxui::vbox(std::move(rows)) |
-           ftxui::bgcolor(theme.agent_strip.bg) | ftxui::xflex;
+    return ftxui::vbox(std::move(rows)) | ftxui::bgcolor(theme.agent_strip.bg) |
+           ftxui::xflex;
   }
 
 private:
@@ -134,10 +137,10 @@ private:
         line_start += std::max(1, measured.dimy);
       }
 
-      auto focus_element = buildTodoRowElement(
-                               theme, model_->rows[static_cast<size_t>(focus_index)],
-                               true) |
-                           ftxui::size(ftxui::WIDTH, ftxui::EQUAL, content_width);
+      auto focus_element =
+          buildTodoRowElement(
+              theme, model_->rows[static_cast<size_t>(focus_index)], true) |
+          ftxui::size(ftxui::WIDTH, ftxui::EQUAL, content_width);
       const auto measured_focus = ftxui::Dimension::Fit(focus_element, true);
       const int line_end = line_start + std::max(1, measured_focus.dimy) - 1;
       scrollable_->RequestEnsureVisible(line_start, line_end);
@@ -159,7 +162,8 @@ private:
     ftxui::Elements rows;
     for (size_t i = 0; i < model_->rows.size(); ++i) {
       const bool isTopActionable = i == actionableIndex;
-      rows.push_back(buildTodoRowElement(theme, model_->rows[i], isTopActionable));
+      rows.push_back(
+          buildTodoRowElement(theme, model_->rows[i], isTopActionable));
     }
 
     return ftxui::vbox(std::move(rows)) | ftxui::bgcolor(theme.agent_strip.bg) |

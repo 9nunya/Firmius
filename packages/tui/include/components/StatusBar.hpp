@@ -12,6 +12,7 @@ struct StatusBarModel {
   std::string status_text; // e.g. "IDLE", "STREAMING", etc.
   std::string model_name;  // e.g. "nanogpt/gpt-4"
   std::string purpose;     // e.g. "orchestrator"
+  std::string title;       // e.g. "Research"
   std::string agent_name;
   std::string model_variant;
   firmius::shared::ThreadPermissionMode permission_mode =

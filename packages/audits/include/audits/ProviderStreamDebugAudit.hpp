@@ -42,6 +42,7 @@ private:
      * @brief Build different history variants for testing edge cases.
      */
     AgentHistory buildHistoryVariant(const std::string& variant);
+    std::vector<std::string> suiteVariants(const std::string& suiteName) const;
 };
 
 } // namespace firmius::audits

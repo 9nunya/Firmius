@@ -1028,7 +1028,7 @@ QwenProvider::getAllQuotas() const {
   return result;
 }
 
-std::optional<OAuthAccount *>
+std::optional<OAuthAccount>
 QwenProvider::getAvailableAccount(const std::optional<std::string> &) {
   std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
   if (accounts_.empty()) {
@@ -1069,7 +1069,7 @@ QwenProvider::getAvailableAccount(const std::optional<std::string> &) {
     return std::nullopt;
   }
 
-  return &accounts_[bestIdx];
+  return accounts_[bestIdx];
 }
 
 size_t QwenProvider::sseWriteCallback(char *ptr, size_t size, size_t nmemb,
@@ -1624,15 +1624,15 @@ QwenProvider::StreamAttemptResult QwenProvider::executeStreamRequest(
     result.errorMessage += "\nModel: " + modelId;
   }
   if (result.kind == StreamAttemptKind::AuthError) {
-    acc.rateLimited = true;
-    acc.backoffUntil =
-        nowSeconds() + firmius::shared::BackoffConstants::MAX_BACKOFF;
+    markAccountRateLimited(acc, firmius::shared::BackoffConstants::MAX_BACKOFF);
+    updateAccount(acc);
   } else if (result.kind == StreamAttemptKind::QuotaLimited) {
     // Qwen frequently emits temporary 429s even when the account remains
     // usable shortly after. Don't poison local quota or force account
     // rotation based on a single response.
     if (result.retryAfterMs > 0) {
       acc.backoffUntil = nowSeconds() + (result.retryAfterMs / 1000);
+      updateAccount(acc);
     }
   }
   onEvent(StreamError{result.errorMessage, result.httpStatus,
@@ -1884,7 +1884,7 @@ void QwenProvider::stream(const AgentHistory &history,
       return;
     }
 
-    OAuthAccount &acc = *optAcc.value();
+    OAuthAccount acc = *optAcc;
 
     if (accountSwitchCount > 0 && !previousAccountEmail.empty() &&
         previousAccountEmail == acc.getIdentifier()) {
@@ -1938,14 +1938,8 @@ void QwenProvider::stream(const AgentHistory &history,
           int remainingPercent = std::max(0, 100 - (requestsToday * 100 / 1000));
           acc.metadata["quota:qwen"] = std::to_string(remainingPercent);
 
-          for (size_t i = 0; i < accounts_.size(); i++) {
-            if (&accounts_[i] == &acc) {
-              lastUsedIndex_.store(static_cast<int>(i), std::memory_order_relaxed);
-              saveAccounts();
-              break;
-            }
-          }
         }
+        updateAccount(acc);
         return; // Success!
       }
 

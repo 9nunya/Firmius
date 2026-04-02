@@ -1,4 +1,5 @@
 #include "tools/SubagentWaitTool.hpp"
+#include "AgentRegistry.hpp"
 #include "Engine.hpp"
 #include "Serialization.hpp"
 #include <rapidjson/stringbuffer.h>
@@ -72,6 +73,16 @@ shared::ToolResult SubagentWaitTool::execute(const SubagentWaitInput& input, sha
     d.SetObject();
     auto& a = d.GetAllocator();
     d.AddMember("agentId", rapidjson::Value(input.agent_id.c_str(), a).Move(), a);
+    // Resolve friendlyName from AgentRegistry
+    {
+      auto agent = AgentRegistry::instance().getAgent(input.agent_id);
+      const std::string friendlyName =
+          agent && !agent->getContext().identity.friendlyName.empty()
+              ? agent->getContext().identity.friendlyName
+              : "";
+      d.AddMember("friendlyName",
+                  rapidjson::Value(friendlyName.c_str(), a).Move(), a);
+    }
     appendOutcomeArtifacts(d, *outcome);
     if (outcome->kind == AgentOutcome::Kind::Cancelled) {
         d.AddMember("status", "cancelled", a);

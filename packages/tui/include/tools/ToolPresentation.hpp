@@ -90,6 +90,7 @@ struct ToolPresentation {
   bool expanded = false;
   std::optional<std::string> error_text;
   bool ansi_aware = false;
+  std::optional<std::string> custom_icon;
 };
 
 ToolPresentation BuildToolPresentation(

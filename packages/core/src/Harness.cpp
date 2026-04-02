@@ -118,6 +118,33 @@ ThreadPermissionMode nextThreadPermissionMode(ThreadPermissionMode mode) {
 
 std::string getFirmiusHome() { return resolveWritableFirmiusHome(); }
 
+std::string normalizePathForComparison(const std::string &path) {
+  if (path.empty()) {
+    return path;
+  }
+  std::error_code ec;
+  std::filesystem::path p(path);
+  if (!p.is_absolute()) {
+    p = std::filesystem::absolute(p, ec);
+  }
+  if (!ec) {
+    const auto canon = std::filesystem::weakly_canonical(p, ec);
+    if (!ec) {
+      return canon.string();
+    }
+  }
+  return p.string();
+}
+
+std::string currentWorkingDirectoryForComparison() {
+  std::error_code ec;
+  const auto cwd = std::filesystem::current_path(ec);
+  if (ec) {
+    return "";
+  }
+  return normalizePathForComparison(cwd.string());
+}
+
 std::string getSessionPath() { return getFirmiusHome() + "/" + SESSION_FILE; }
 
 std::string modelCacheKey(const firmius::shared::ModelInfo &model,
@@ -139,6 +166,10 @@ void persistSessionState(const std::string &threadId,
   if (!focusedAgentId.empty()) {
     doc.AddMember("focusedAgentId", rapidjson::Value(focusedAgentId.c_str(), a),
                   a);
+  }
+  const std::string cwd = currentWorkingDirectoryForComparison();
+  if (!cwd.empty()) {
+    doc.AddMember("cwd", rapidjson::Value(cwd.c_str(), a), a);
   }
 
   rapidjson::StringBuffer buffer;
@@ -192,6 +223,30 @@ std::string normalizeCommandForRuleMatch(const std::string &command) {
     }
   }
   return shared::StringUtil::trim(normalized.str());
+}
+
+std::string trimFleetDiffPreview(const std::string &diffPreview,
+                                 std::size_t maxLines = 24,
+                                 std::size_t maxChars = 1400) {
+  if (diffPreview.empty()) {
+    return "";
+  }
+  std::istringstream stream(diffPreview);
+  std::string line;
+  std::string out;
+  std::size_t lineCount = 0;
+  while (std::getline(stream, line)) {
+    if (lineCount >= maxLines || out.size() + line.size() + 1 > maxChars) {
+      out += "\n[diff truncated]";
+      break;
+    }
+    if (!out.empty()) {
+      out += '\n';
+    }
+    out += line;
+    ++lineCount;
+  }
+  return out;
 }
 
 size_t curlWriteCallback(char *ptr, size_t size, size_t nmemb, void *userdata) {
@@ -472,12 +527,20 @@ bool Harness::switchThread(const std::string &threadId) {
     }
 
     auto it = threadAgentMap_.find(threadId);
-    if (it != threadAgentMap_.end()) {
+    if (it != threadAgentMap_.end() &&
+        manifest.find(it->second) != manifest.end()) {
       focusedAgentId_ = it->second;
-    } else if (!manifest.empty()) {
-      focusedAgentId_ = manifest.begin()->first;
     } else {
       focusedAgentId_.clear();
+      for (const auto &[agentId, entry] : manifest) {
+        if (entry.parentId.empty()) {
+          focusedAgentId_ = agentId;
+          break;
+        }
+      }
+      if (focusedAgentId_.empty() && !manifest.empty()) {
+        focusedAgentId_ = manifest.begin()->first;
+      }
     }
 
     clearQueue();
@@ -514,16 +577,77 @@ bool Harness::resumeLast() {
             doc["threadId"].IsString()) {
           currentThreadId_ = doc["threadId"].GetString();
         }
+        if (!doc.HasParseError() && doc.HasMember("focusedAgentId") &&
+            doc["focusedAgentId"].IsString()) {
+          focusedAgentId_ = doc["focusedAgentId"].GetString();
+        }
       }
     }
     threadId = currentThreadId_;
   }
 
-  if (threadId.empty())
+  const std::string currentCwd = currentWorkingDirectoryForComparison();
+  auto chooseMostRecentThreadForCwd = [&](const std::string &cwd) {
+    if (cwd.empty()) {
+      return std::string{};
+    }
+    std::string bestThreadId;
+    uint64_t bestLastActiveAt = 0;
+    for (const auto &meta : threadManager_.listThreadsWithMetadata()) {
+      if (meta.isBenchmarkRun) {
+        continue;
+      }
+      if (normalizePathForComparison(meta.cwd) != cwd) {
+        continue;
+      }
+      if (bestThreadId.empty() || meta.lastActiveAt > bestLastActiveAt) {
+        bestThreadId = meta.threadId;
+        bestLastActiveAt = meta.lastActiveAt;
+      }
+    }
+    return bestThreadId;
+  };
+
+  auto savedThreadMatchesCwd = [&](const std::string &candidateThreadId) {
+    if (candidateThreadId.empty()) {
+      return false;
+    }
+    try {
+      const auto metadata = threadManager_.getMetadata(candidateThreadId);
+      return normalizePathForComparison(metadata.cwd) == currentCwd;
+    } catch (...) {
+      return false;
+    }
+  };
+
+  if (threadId.empty() || !savedThreadMatchesCwd(threadId)) {
+    threadId = chooseMostRecentThreadForCwd(currentCwd);
+    if (!threadId.empty()) {
+      std::lock_guard<std::recursive_mutex> lock(mutex_);
+      currentThreadId_ = threadId;
+      focusedAgentId_.clear();
+    }
+  }
+
+  if (threadId.empty()) {
     return false;
+  }
 
   if (switchThread(threadId)) {
     return true;
+  }
+
+  const std::string fallbackThreadId = chooseMostRecentThreadForCwd(currentCwd);
+  if (!fallbackThreadId.empty() && fallbackThreadId != threadId) {
+    {
+      std::lock_guard<std::recursive_mutex> lock(mutex_);
+      currentThreadId_ = fallbackThreadId;
+      focusedAgentId_.clear();
+      threadAgentMap_.erase(threadId);
+    }
+    if (switchThread(fallbackThreadId)) {
+      return true;
+    }
   }
 
   {
@@ -1118,8 +1242,18 @@ void Harness::routeEngineEvent(const firmius::shared::AppEvent &event) {
               }
               for (const auto &peerId : peers) {
                 std::string msg = "Fleet edit notice: peer '" + editorName +
-                                  "' edited " + ev.path +
-                                  ". Re-read before further line-range edits.";
+                                  "' edited " + ev.path + ".";
+                if (ev.addedLines > 0 || ev.removedLines > 0) {
+                  msg += "\nChange size: +" + std::to_string(ev.addedLines) +
+                         " / -" + std::to_string(ev.removedLines) + ".";
+                }
+                const std::string diffPreview =
+                    trimFleetDiffPreview(ev.diffPreview);
+                if (!diffPreview.empty()) {
+                  msg += "\n\nDiff preview:\n" + diffPreview;
+                }
+                msg +=
+                    "\n\nRe-read this surface before further edits or verification.";
                 queueInternalMessage(peerId, agentThreadId, msg);
               }
             }
@@ -1567,11 +1701,7 @@ bool Harness::appendSystemMessage(const std::string &agentId,
   msg.timestamp = static_cast<uint64_t>(now);
   turn.messages.push_back(msg);
 
-  ctx.history->turns.push_back(turn);
-  if (ctx.config.persistHistory) {
-    Journaler journaler(ctx.history->threadId, agentId);
-    journaler.appendTurn(turn);
-  }
+  agent->appendHistoryTurn(turn);
 
   emitEvent(firmius::shared::AgentTurnCompleted{
       agentId, turn, ctx.aggregateMetrics, ctx.identity.parentId});
@@ -1939,11 +2069,6 @@ void Harness::drainQueueForAgent(const std::string &agentId,
   auto appendQueuedUserTurn = [&](const QueuedMessage &item) {
     auto &ctx = agent->getMutableContext();
     if (ctx.history) {
-      std::unique_ptr<Journaler> journaler;
-      if (ctx.config.persistHistory) {
-        journaler = std::make_unique<Journaler>(ctx.history->threadId, agentId);
-      }
-
       AgentTurn taskTurn;
       taskTurn.turnId =
           "user-task-" + std::to_string(ctx.history->turns.size());
@@ -1961,10 +2086,7 @@ void Harness::drainQueueForAgent(const std::string &agentId,
               now.time_since_epoch())
               .count());
       taskTurn.messages.push_back(taskMsg);
-      ctx.history->turns.push_back(taskTurn);
-      if (ctx.config.persistHistory && journaler) {
-        journaler->appendTurn(taskTurn);
-      }
+      agent->appendHistoryTurn(taskTurn);
     }
   };
 
@@ -2122,12 +2244,7 @@ void Harness::appendInternalMessage(std::shared_ptr<shared::IAgent> agent,
           std::chrono::system_clock::now().time_since_epoch())
           .count());
   nudgeTurn.messages.push_back(nudgeMsg);
-  ctx.history->turns.push_back(nudgeTurn);
-
-  if (ctx.config.persistHistory) {
-    Journaler jnl(ctx.history->threadId, ctx.identity.id);
-    jnl.appendTurn(nudgeTurn);
-  }
+  agent->appendHistoryTurn(nudgeTurn);
 }
 
 std::string Harness::resolveFleetRoot(const std::string &agentId) {

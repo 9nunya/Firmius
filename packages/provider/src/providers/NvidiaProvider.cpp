@@ -1,5 +1,5 @@
 #include "providers/NvidiaProvider.hpp"
-
+#include "providers/NvidiaModels.hpp"
 #include "EnvLoader.hpp"
 
 #include <curl/curl.h>
@@ -323,13 +323,9 @@ void NvidiaProvider::discoverModels(
   }
 
   std::vector<firmius::shared::ModelInfo> discovered;
-  for (const auto &modelId : fetchModelIds()) {
-    auto model = fetchModelInfo(modelId);
-    if (!model.has_value()) {
-      continue;
-    }
-    discovered.push_back(*model);
-    onModel(*model);
+  for (const auto &model : NVIDIA_STATIC_MODELS) {
+    discovered.push_back(model);
+    onModel(model);
   }
 
   std::lock_guard<std::mutex> lock(modelCacheMutex_);

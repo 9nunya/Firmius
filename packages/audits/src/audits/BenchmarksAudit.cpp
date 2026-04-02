@@ -322,7 +322,7 @@ private:
     if (isOverwrite) {
       std::cout << COLOR_DIM << "    Mode: overwrite" << COLOR_RESET << "\n";
     } else if (hasEdits) {
-      std::cout << COLOR_DIM << "    Mode: Hashline edits" << COLOR_RESET << "\n";
+      std::cout << COLOR_DIM << "    Mode: LineRange edits" << COLOR_RESET << "\n";
     }
   }
 

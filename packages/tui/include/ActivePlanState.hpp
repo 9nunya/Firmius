@@ -40,6 +40,7 @@ struct PlanLaneModel {
   std::string executor_chunk_title;
   std::vector<PlanLaneTaskRow> executor_tasks;
   std::string highlight_chunk_id;
+  std::string toggle_hint;
 };
 
 // V2: Executor-focused chunk detail model

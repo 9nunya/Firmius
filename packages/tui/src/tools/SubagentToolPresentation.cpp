@@ -132,12 +132,14 @@ ParsedSubagentResult ParseResult(const std::string &result) {
   return parsed;
 }
 
-ToolPresentationLifecycle DeriveLifecycle(const ToolCallView &view,
-                                          const NormalizedSubagentState *state) {
+ToolPresentationLifecycle
+DeriveLifecycle(const ToolCallView &view,
+                const NormalizedSubagentState *state) {
   if (view.phase == ToolPhase::Preparing) {
     return ToolPresentationLifecycle::Preparing;
   }
-  if (view.phase == ToolPhase::Called || view.phase == ToolPhase::BackgroundRunning) {
+  if (view.phase == ToolPhase::Called ||
+      view.phase == ToolPhase::BackgroundRunning) {
     return ToolPresentationLifecycle::Running;
   }
   if (state && state->outcome == SubagentOutcomeKind::Failed) {
@@ -232,7 +234,8 @@ std::vector<std::string> BuildCuratedActivityPreview(
   return lines;
 }
 
-std::optional<std::string> BuildCuratedSummaryPreview(const std::string &final_summary) {
+std::optional<std::string>
+BuildCuratedSummaryPreview(const std::string &final_summary) {
   const std::string first_line = FirstNonEmptyLine(final_summary);
   if (first_line.empty()) {
     return std::nullopt;
@@ -269,7 +272,8 @@ std::string DeriveStateLabel(const ToolCallView &view,
   if (view.phase == ToolPhase::Preparing) {
     return "preparing";
   }
-  if (view.phase == ToolPhase::Called || view.phase == ToolPhase::BackgroundRunning) {
+  if (view.phase == ToolPhase::Called ||
+      view.phase == ToolPhase::BackgroundRunning) {
     return "running";
   }
   if (view.phase == ToolPhase::Error || !view.success) {
@@ -281,11 +285,13 @@ std::string DeriveStateLabel(const ToolCallView &view,
 } // namespace
 
 bool IsSubagentFamilyTool(const std::string &tool_name) {
-  return IsMatch(tool_name, "summon_subagent") || IsMatch(tool_name, "subagent_wait");
+  return IsMatch(tool_name, "summon_subagent") ||
+         IsMatch(tool_name, "subagent_wait");
 }
 
-ToolPresentation BuildSubagentToolPresentation(
-    const ToolCallView &view, const NormalizedSubagentState *subagent_state) {
+ToolPresentation
+BuildSubagentToolPresentation(const ToolCallView &view,
+                              const NormalizedSubagentState *subagent_state) {
   ToolPresentation presentation;
   presentation.lifecycle = DeriveLifecycle(view, subagent_state);
   const bool is_wait = IsMatch(view.name, "subagent_wait");
@@ -301,31 +307,33 @@ ToolPresentation BuildSubagentToolPresentation(
   const std::string child_id =
       subagent_state && !subagent_state->child_agent_id.empty()
           ? subagent_state->child_agent_id
-          : (!view.subagent_id.empty() ? view.subagent_id
-                                       : (!parsed_result.agent_id.empty()
-                                              ? parsed_result.agent_id
-                                              : args.agent_id));
+          : (!view.subagent_id.empty()
+                 ? view.subagent_id
+                 : (!parsed_result.agent_id.empty() ? parsed_result.agent_id
+                                                    : args.agent_id));
   const std::string child_title =
       subagent_state && !subagent_state->child_title.empty()
           ? subagent_state->child_title
-          : (!view.subagent_title.empty() ? view.subagent_title
-                                          : (!args.title.empty() ? args.title
-                                                                 : args.name));
+          : (!view.subagent_title.empty()
+                 ? view.subagent_title
+                 : (!args.title.empty() ? args.title : args.name));
   const std::string child_friendly_name =
       subagent_state && !subagent_state->child_friendly_name.empty()
           ? subagent_state->child_friendly_name
           : "";
   const std::string child_label =
       PreferredSubagentLabel(child_friendly_name, child_title, child_id);
-  const std::string state_label = DeriveStateLabel(view, subagent_state, parsed_result);
+  const std::string state_label =
+      DeriveStateLabel(view, subagent_state, parsed_result);
   const std::string compact_state = CompactStateBadge(state_label);
   const bool fallback_used = subagent_state ? subagent_state->fallback_used
                                             : parsed_result.fallback_used;
   const std::string route_category =
       subagent_state && !subagent_state->route_category.empty()
           ? subagent_state->route_category
-          : (!parsed_result.route_category.empty() ? parsed_result.route_category
-                                                   : args.category);
+          : (!parsed_result.route_category.empty()
+                 ? parsed_result.route_category
+                 : args.category);
   const std::vector<std::string> attempted_categories =
       subagent_state && !subagent_state->attempted_categories.empty()
           ? subagent_state->attempted_categories
@@ -341,10 +349,10 @@ ToolPresentation BuildSubagentToolPresentation(
 
   if (is_summon) {
     presentation.title =
-        !child_label.empty() ? child_label
-                             : SummarizeToolCall(view.name, view.args, view.phase);
+        !child_label.empty() ? child_label : "Summoning subagent..";
   } else {
-    presentation.title = !child_label.empty() ? ("waiting " + child_label) : "waiting";
+    presentation.title =
+        !child_label.empty() ? ("waiting " + child_label) : "waiting";
   }
   presentation.subtitle.clear();
   presentation.compact_summary.clear();
@@ -359,12 +367,14 @@ ToolPresentation BuildSubagentToolPresentation(
       presentation.footer_badges.push_back(compact_state);
     }
   }
-  if (!is_wait && !route_category.empty() && (fallback_used || view.show_result)) {
+  if (!is_wait && !route_category.empty() &&
+      (fallback_used || view.show_result)) {
     presentation.footer_badges.push_back("route " + route_category);
     presentation.facts.push_back({"Route", route_category});
   }
   if (!is_wait && !attempted_categories.empty() && view.show_result) {
-    presentation.footer_badges.push_back("attempts " + Join(attempted_categories, 0));
+    presentation.footer_badges.push_back("attempts " +
+                                         Join(attempted_categories, 0));
     presentation.facts.push_back({"Attempts", Join(attempted_categories, 0)});
   }
   if (fallback_used) {
@@ -374,14 +384,12 @@ ToolPresentation BuildSubagentToolPresentation(
     presentation.notices.push_back(std::move(notice));
   }
   if (!artifacts_created.empty()) {
-    presentation.footer_badges.push_back("+" +
-                                         std::to_string(artifacts_created.size()) +
-                                         " artifact(s)");
+    presentation.footer_badges.push_back(
+        "+" + std::to_string(artifacts_created.size()) + " artifact(s)");
   }
   if (!artifacts_updated.empty()) {
-    presentation.footer_badges.push_back("~" +
-                                         std::to_string(artifacts_updated.size()) +
-                                         " artifact(s)");
+    presentation.footer_badges.push_back(
+        "~" + std::to_string(artifacts_updated.size()) + " artifact(s)");
   }
 
   if (presentation.lifecycle == ToolPresentationLifecycle::Error) {
@@ -401,7 +409,8 @@ ToolPresentation BuildSubagentToolPresentation(
   const std::string final_summary =
       subagent_state && !subagent_state->final_summary.empty()
           ? subagent_state->final_summary
-          : (!parsed_result.result.empty() ? parsed_result.result : view.subagent_wait_message);
+          : (!parsed_result.result.empty() ? parsed_result.result
+                                           : view.subagent_wait_message);
   const size_t collapsed_lines = 2;
   const size_t expanded_lines = 4;
   const size_t max_lines = view.show_result ? expanded_lines : collapsed_lines;
@@ -433,8 +442,8 @@ ToolPresentation BuildSubagentToolPresentation(
         BuildCuratedActivityPreview(activity);
     if (!activity_lines.empty()) {
       const size_t show = std::min(max_lines, activity_lines.size());
-      presentation.body_lines.assign(activity_lines.end() - static_cast<long>(show),
-                                     activity_lines.end());
+      presentation.body_lines.assign(
+          activity_lines.end() - static_cast<long>(show), activity_lines.end());
       if (activity_lines.size() > collapsed_lines) {
         presentation.expandable = true;
       }

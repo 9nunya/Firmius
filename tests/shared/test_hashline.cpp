@@ -236,9 +236,20 @@ TEST(Hashline, RealProjectFilesProduceUniqueLineHashes) {
   expectUniqueHashesForFile(root, "packages/provider/CMakeLists.txt");
 }
 
-TEST(Hashline, RejectsOldHashlineFormat) {
+TEST(Hashline, ExtractsLeadingLineNumberFromAnchors) {
     std::vector<std::string> lines = {"alpha", "beta", "gamma"};
-    AnchorResult res = Hashline::resolveAnchor(lines, "2#abcd", 15);
-    EXPECT_EQ(res.status, AnchorResult::Status::MALFORMED);
-    EXPECT_THAT(res.errorMessage, ::testing::HasSubstr("no longer supported"));
+    
+    // Old style anchor with hash
+    AnchorResult res1 = Hashline::resolveAnchor(lines, "2#abcd", 15);
+    EXPECT_EQ(res1.status, AnchorResult::Status::SUCCESS);
+    EXPECT_EQ(res1.lineIndex, 1);
+
+    // Anchor with trailing content prefix
+    AnchorResult res2 = Hashline::resolveAnchor(lines, "3|gamma", 15);
+    EXPECT_EQ(res2.status, AnchorResult::Status::SUCCESS);
+    EXPECT_EQ(res2.lineIndex, 2);
+
+    // Malformed anchor starting with non-digits should still fail
+    AnchorResult res3 = Hashline::resolveAnchor(lines, "abc2", 15);
+    EXPECT_EQ(res3.status, AnchorResult::Status::NOT_NUMERIC);
 }

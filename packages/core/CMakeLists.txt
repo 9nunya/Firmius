@@ -24,6 +24,7 @@ target_sources(firmius_core PRIVATE
     src/tools/GlobTool.cpp
     src/tools/GrepTool.cpp
     src/tools/WebFetchTool.cpp
+    src/tools/WebSearchTool.cpp
     src/tools/ProcessSpawnTool.cpp
     src/tools/ProcessStatusTool.cpp
     src/tools/ProcessWaitTool.cpp
@@ -91,6 +92,7 @@ target_sources(firmius_core PUBLIC
     include/tools/GlobTool.hpp
     include/tools/GrepTool.hpp
     include/tools/WebFetchTool.hpp
+    include/tools/WebSearchTool.hpp
     include/tools/ProcessSpawnTool.hpp
     include/tools/ProcessStatusTool.hpp
     include/tools/ProcessWaitTool.hpp

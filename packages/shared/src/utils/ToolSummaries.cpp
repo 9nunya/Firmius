@@ -227,7 +227,7 @@ std::string SummarizeToolCall(const std::string &name, const std::string &args, 
   }
   if (isMatch(name, "grep")) {
     std::string pattern = bestStringArg("pattern");
-    return "Grep \"" + firstWords(pattern, 2) + "\"";
+    return "Grep \"" + pattern + "\"";
   }
   if (isMatch(name, "glob")) {
     std::string pattern = bestStringArg("pattern");
