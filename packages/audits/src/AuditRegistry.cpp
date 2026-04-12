@@ -1,12 +1,14 @@
 #include "AuditRegistry.hpp"
 #include "audits/AntigravityProviderAudit.hpp"
 #include "audits/LoopCancellationAudit.hpp"
+#include "audits/LspAudit.hpp"
 #include "audits/ModelLoadAudit.hpp"
 #include "audits/OpenRouterQuotaAudit.hpp"
 #include "audits/AntigravityQuotaAudit.hpp"
 #include "audits/BenchmarksAudit.hpp"
 #include "audits/CodexProviderAudit.hpp"
 #include "audits/CodexQuotaAudit.hpp"
+#include "audits/ContextBudgetAudit.hpp"
 #include "audits/HarnessChaosAudit.hpp"
 #include "audits/OAuthWizardAudit.hpp"
 #include "audits/P15Audit.hpp"
@@ -31,6 +33,7 @@ std::vector<std::unique_ptr<shared::IAudit>> createAudits() {
     audits.push_back(std::make_unique<AntigravityProviderAudit>());
     audits.push_back(std::make_unique<AntigravityQuotaAudit>());
     audits.push_back(std::make_unique<CodexProviderAudit>());
+    audits.push_back(std::make_unique<ContextBudgetAudit>());
     audits.push_back(std::make_unique<CodexQuotaAudit>());
     audits.push_back(std::make_unique<OpenRouterQuotaAudit>());
     audits.push_back(std::make_unique<QwenProviderAudit>());
@@ -40,6 +43,7 @@ std::vector<std::unique_ptr<shared::IAudit>> createAudits() {
     audits.push_back(std::make_unique<WorkflowsAudit>());
     audits.push_back(std::make_unique<ProviderStreamDebugAudit>());
     audits.push_back(std::make_unique<LoopCancellationAudit>());
+    audits.push_back(std::make_unique<LspAudit>());
     audits.push_back(std::make_unique<ModelLoadAudit>());
     audits.push_back(std::make_unique<ResumeTodoAudit>());
     audits.push_back(std::make_unique<WebFetchAudit>());

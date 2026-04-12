@@ -245,6 +245,33 @@ target_include_directories(test_base_openai_provider PRIVATE
 )
 gtest_discover_tests(test_base_openai_provider)
 
+add_executable(test_base_oauth_provider
+    provider/test_base_oauth_provider.cpp
+)
+target_link_libraries(test_base_oauth_provider PRIVATE
+    firmius::provider
+    firmius::shared
+    GTest::gtest_main
+    GTest::gmock
+)
+target_include_directories(test_base_oauth_provider PRIVATE
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_base_oauth_provider)
+
+add_executable(test_cli_options
+    cli/test_cli_options.cpp
+)
+target_link_libraries(test_cli_options PRIVATE
+    GTest::gtest_main
+    GTest::gmock
+)
+target_include_directories(test_cli_options PRIVATE
+    ${PROJECT_SOURCE_DIR}/packages/cli/include
+    ${PROJECT_SOURCE_DIR}/packages/shared/include
+)
+gtest_discover_tests(test_cli_options)
+
 add_executable(test_nvidia_provider
     provider/test_nvidia_provider.cpp
 )
@@ -337,6 +364,23 @@ target_include_directories(test_engine_stream_events PRIVATE
 )
 gtest_discover_tests(test_engine_stream_events)
 
+add_executable(test_engine_shutdown
+    core/test_engine_shutdown.cpp
+)
+target_link_libraries(test_engine_shutdown PRIVATE
+    firmius::core
+    firmius::provider
+    firmius::shared
+    firmius_test_mocks
+    GTest::gtest_main
+    GTest::gmock
+    CURL::libcurl
+)
+target_include_directories(test_engine_shutdown PRIVATE
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_engine_shutdown)
+
 add_executable(test_process_manager
     core/test_process_manager.cpp
 )
@@ -351,6 +395,77 @@ target_include_directories(test_process_manager PRIVATE
     ${rapidjson_SOURCE_DIR}/include
 )
 gtest_discover_tests(test_process_manager)
+
+add_executable(test_environment
+    core/test_environment.cpp
+)
+target_link_libraries(test_environment PRIVATE
+    firmius::core
+    firmius::shared
+    firmius_test_mocks
+    GTest::gtest_main
+    GTest::gmock
+)
+target_include_directories(test_environment PRIVATE
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_environment)
+
+add_executable(test_json_rpc_transport
+    lsp/test_json_rpc_transport.cpp
+)
+target_link_libraries(test_json_rpc_transport PRIVATE
+    firmius::core
+    firmius::shared
+    GTest::gtest_main
+    GTest::gmock
+)
+target_include_directories(test_json_rpc_transport PRIVATE
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_json_rpc_transport)
+
+add_executable(test_lsp_protocol
+    lsp/test_lsp_protocol.cpp
+)
+target_link_libraries(test_lsp_protocol PRIVATE
+    firmius::core
+    firmius::shared
+    GTest::gtest_main
+    GTest::gmock
+)
+target_include_directories(test_lsp_protocol PRIVATE
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_lsp_protocol)
+
+add_executable(test_lsp_server_registry
+    lsp/test_lsp_server_registry.cpp
+)
+target_link_libraries(test_lsp_server_registry PRIVATE
+    firmius::core
+    firmius::shared
+    GTest::gtest_main
+    GTest::gmock
+)
+target_include_directories(test_lsp_server_registry PRIVATE
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_lsp_server_registry)
+
+add_executable(test_lsp_server_manager
+    lsp/test_lsp_server_manager.cpp
+)
+target_link_libraries(test_lsp_server_manager PRIVATE
+    firmius::core
+    firmius::shared
+    GTest::gtest_main
+    GTest::gmock
+)
+target_include_directories(test_lsp_server_manager PRIVATE
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_lsp_server_manager)
 
 add_executable(test_benchmark_factory
     core/test_benchmark_factory.cpp
@@ -725,6 +840,7 @@ gtest_discover_tests(test_help_overlay)
 add_executable(test_error_display
     tui/test_error_display.cpp
     ../../packages/tui/src/components/ErrorDisplay.cpp
+    ../../packages/tui/src/components/GlintEffect.cpp
     ../../packages/tui/src/components/Markdown.cpp
     ../../packages/tui/src/ThemeManager.cpp
     ../../packages/tui/src/UserPreferences.cpp
@@ -735,6 +851,7 @@ target_link_libraries(test_error_display PRIVATE
     GTest::gmock
     ftxui::dom
     ftxui::screen
+    ftxui::component
     tree_sitter_all
 )
 target_include_directories(test_error_display PRIVATE
@@ -788,6 +905,28 @@ target_include_directories(test_todo_lane PRIVATE
     ../../packages/tui/src
 )
 gtest_discover_tests(test_todo_lane)
+
+add_executable(test_context_lane
+    tui/test_context_lane.cpp
+    ../../packages/tui/src/components/ContextLane.cpp
+    ../../packages/tui/src/components/Markdown.cpp
+    ../../packages/tui/src/components/ScrollableBox.cpp
+    ../../packages/tui/src/ThemeManager.cpp
+    ../../packages/tui/src/UserPreferences.cpp
+)
+target_link_libraries(test_context_lane PRIVATE
+    firmius::shared
+    GTest::gtest_main
+    GTest::gmock
+    ftxui::dom
+    ftxui::screen
+    ftxui::component
+)
+target_include_directories(test_context_lane PRIVATE
+    ../../packages/tui/include
+    ../../packages/tui/src
+)
+gtest_discover_tests(test_context_lane)
 
 add_executable(test_work_panel_layout
     tui/test_work_panel_layout.cpp
@@ -981,6 +1120,49 @@ target_include_directories(test_runtime_overlay PRIVATE
     ${rapidjson_SOURCE_DIR}/include
 )
 gtest_discover_tests(test_runtime_overlay)
+
+add_executable(test_rolling_context_manager
+    core/test_rolling_context_manager.cpp
+)
+target_link_libraries(test_rolling_context_manager PRIVATE
+    firmius::core
+    firmius::shared
+    GTest::gtest_main
+    GTest::gmock
+)
+target_include_directories(test_rolling_context_manager PRIVATE
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_rolling_context_manager)
+
+add_executable(test_memory_recall_tool
+    tools/test_memory_recall_tool.cpp
+)
+target_link_libraries(test_memory_recall_tool PRIVATE
+    firmius::core
+    firmius::shared
+    GTest::gtest_main
+    GTest::gmock
+)
+target_include_directories(test_memory_recall_tool PRIVATE
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_memory_recall_tool)
+
+add_executable(test_runtime_overlay_security
+    core/test_runtime_overlay_security.cpp
+)
+target_link_libraries(test_runtime_overlay_security PRIVATE
+    firmius::core
+    firmius::shared
+    GTest::gtest_main
+    GTest::gmock
+    GTest::gmock
+)
+target_include_directories(test_runtime_overlay_security PRIVATE
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_runtime_overlay_security)
 
 # TerminalUtil unit tests
 add_executable(test_terminal_util

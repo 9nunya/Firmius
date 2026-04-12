@@ -99,7 +99,13 @@ shared::ProcessSnapshot LocalHostProcess::inspect() const {
   return {!finished.load(), exitCode.load(), stdoutData, stderrData, elapsed};
 }
 
-void LocalHostProcess::kill() { ::kill(pid, SIGKILL); }
+void LocalHostProcess::kill() {
+  reapIfNeeded(false);
+  if (finished.load()) {
+    return;
+  }
+  ::kill(pid, SIGKILL);
+}
 
 void LocalHostProcess::write(const std::string &data) {
   if (stdinFd == -1 || finished)
@@ -225,8 +231,10 @@ void LocalHost::destroy() {}
 void LocalHost::cleanup() {
   std::lock_guard<std::mutex> lock(bgMutex);
   for (auto &[id, proc] : backgroundProcesses) {
-    if (proc)
+    if (proc) {
+      proc->onOutput({});
       proc->kill();
+    }
   }
   backgroundProcesses.clear();
 }
@@ -460,6 +468,7 @@ void LocalHost::killBackgroundProcess(const std::string &id) {
   std::lock_guard<std::mutex> lock(bgMutex);
   auto it = backgroundProcesses.find(id);
   if (it != backgroundProcesses.end()) {
+    it->second->onOutput({});
     it->second->kill();
   } else {
     throw std::runtime_error("Background process not found: " + id);

@@ -14,6 +14,12 @@ bool isAllDigits(std::string_view text) noexcept {
     });
 }
 
+bool isAllHex(std::string_view text) noexcept {
+    return !text.empty() && std::all_of(text.begin(), text.end(), [](unsigned char ch) {
+        return std::isxdigit(ch) != 0;
+    });
+}
+
 bool parseLinePrefix(std::string_view line, size_t& prefixLength) noexcept {
     const size_t pipePos = line.find('|');
     if (pipePos == std::string_view::npos || pipePos == 0) {
@@ -24,6 +30,44 @@ bool parseLinePrefix(std::string_view line, size_t& prefixLength) noexcept {
     }
     prefixLength = pipePos + 1;
     return true;
+}
+
+bool parseLineHashPrefix(std::string_view line, size_t& prefixLength) noexcept {
+    const size_t hashPos = line.find('#');
+    const size_t pipePos = line.find('|');
+    if (hashPos == std::string_view::npos || pipePos == std::string_view::npos ||
+        hashPos == 0 || hashPos + 1 >= pipePos) {
+        return false;
+    }
+    if (!isAllDigits(line.substr(0, hashPos)) ||
+        !isAllHex(line.substr(hashPos + 1, pipePos - hashPos - 1))) {
+        return false;
+    }
+    prefixLength = pipePos + 1;
+    return true;
+}
+
+bool parseBareHashFragment(std::string_view line, size_t& prefixLength) noexcept {
+    const size_t pipePos = line.find('|');
+    if (pipePos == std::string_view::npos || pipePos < 4 || pipePos > 16) {
+        return false;
+    }
+    if (!isAllHex(line.substr(0, pipePos))) {
+        return false;
+    }
+    prefixLength = pipePos + 1;
+    return true;
+}
+
+std::string malformedAnchorMessage(std::string_view anchorText) {
+    std::string message =
+        "Malformed anchor: Anchor must be a plain line number only, without "
+        "hashline prefixes or trailing |content.";
+    if (!anchorText.empty()) {
+        message += " Got: ";
+        message += anchorText;
+    }
+    return message;
 }
 
 } // namespace
@@ -41,22 +85,26 @@ std::string LineRange::formatLine(int lineNum, std::string_view content) {
 
 AnchorResult LineRange::resolveAnchor(const std::vector<std::string>& lines,
                                       const std::string& anchorText) {
-    std::string numericPart;
-    size_t i = 0;
-    while (i < anchorText.size() && std::isdigit(static_cast<unsigned char>(anchorText[i]))) {
-        numericPart += anchorText[i];
-        ++i;
-    }
-
-    if (numericPart.empty()) {
-        return {AnchorResult::Status::NOT_NUMERIC, -1, false, "Anchor must start with a line number; got: " + anchorText};
+    if (!isAllDigits(anchorText)) {
+        if (anchorText.find('#') != std::string::npos ||
+            anchorText.find('|') != std::string::npos) {
+            return {AnchorResult::Status::MALFORMED, -1, false,
+                    malformedAnchorMessage(anchorText)};
+        }
+        return {AnchorResult::Status::NOT_NUMERIC, -1, false,
+                "Malformed anchor: Anchor is not a valid line number. Anchor "
+                "must be a plain line number only, without hashline prefixes "
+                "or trailing |content. Got: " + anchorText};
     }
 
     try {
-        int lineNum = std::stoi(numericPart);
+        int lineNum = std::stoi(anchorText);
         return resolveLineNumber(lines, lineNum);
     } catch (...) {
-        return {AnchorResult::Status::NOT_NUMERIC, -1, false, "Anchor contains an invalid line number: " + numericPart};
+        return {AnchorResult::Status::NOT_NUMERIC, -1, false,
+                "Malformed anchor: Anchor contains an invalid line number. "
+                "Anchor must be a plain line number only, without hashline "
+                "prefixes or trailing |content. Got: " + anchorText};
     }
 }
 
@@ -110,12 +158,39 @@ std::string LineRangeTrimmer::sanitizeContent(std::string_view content, Sanitati
     auto processLine = [&](std::string_view line) {
         std::string_view remainder = line;
         size_t prefixLength = 0;
+        bool strippedHashlinePrefix = false;
 
         if (parseLinePrefix(remainder, prefixLength)) {
             remainder.remove_prefix(prefixLength);
             if (outResult) {
                 outResult->lineRangePrefixesStripped++;
             }
+        }
+
+        if (parseLineHashPrefix(remainder, prefixLength)) {
+            remainder.remove_prefix(prefixLength);
+            strippedHashlinePrefix = true;
+            if (outResult) {
+                outResult->hashlinePrefixesStripped++;
+            }
+        }
+
+        while (strippedHashlinePrefix) {
+            if (parseLineHashPrefix(remainder, prefixLength)) {
+                remainder.remove_prefix(prefixLength);
+                if (outResult) {
+                    outResult->hashlinePrefixesStripped++;
+                }
+                continue;
+            }
+            if (parseBareHashFragment(remainder, prefixLength)) {
+                remainder.remove_prefix(prefixLength);
+                if (outResult) {
+                    outResult->malformedHashFragmentsStripped++;
+                }
+                continue;
+            }
+            break;
         }
 
         std::string res(remainder);
@@ -148,7 +223,9 @@ std::string LineRangeTrimmer::sanitizeDiffMarkers(std::string_view line) {
 
 bool LineRangeTrimmer::startsWithSuspiciousMetadata(std::string_view line) noexcept {
     size_t prefixLength = 0;
-    return parseLinePrefix(line, prefixLength);
+    return parseLinePrefix(line, prefixLength) ||
+           parseLineHashPrefix(line, prefixLength) ||
+           parseBareHashFragment(line, prefixLength);
 }
 
 bool LineRangeTrimmer::startsWithSuspiciousDiffJunk(std::string_view line) noexcept {

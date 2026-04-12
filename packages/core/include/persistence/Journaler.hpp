@@ -3,7 +3,6 @@
 
 #include "Context.hpp"
 #include <string>
-#include <fstream>
 #include <mutex>
 #include <queue>
 #include <memory>
@@ -62,8 +61,9 @@ private:
     void performRewrite(const std::vector<AgentTurn>& turns);
 
     std::string filePath;
-    std::ofstream file;
-    std::shared_ptr<std::mutex> fileMutex;
+    std::string threadId_;
+    std::string agentId_;
+    std::shared_ptr<std::mutex> dbMutex;
     
     std::queue<JournalOp> queue;
     std::mutex queueMutex;

@@ -25,8 +25,12 @@ void LLMSearchProviderRegistry::unregisterProvider(const std::string& name) {
 }
 
 std::optional<std::reference_wrapper<LLMSearchProvider>> LLMSearchProviderRegistry::getFirstAvailable() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    for (const auto& provider : providers_) {
+    std::vector<std::shared_ptr<LLMSearchProvider>> providers;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        providers = providers_;
+    }
+    for (const auto& provider : providers) {
         if (provider->isAvailable()) {
             return std::ref(*provider);
         }

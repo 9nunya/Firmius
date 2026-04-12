@@ -5,6 +5,7 @@
 #include "agents/AgentPermissionChecks.hpp"
 #include "agents/PurposeLoader.hpp"
 #include "persistence/ThreadManager.hpp"
+#include "tools/SubagentTerminateTool.hpp"
 #include "tools/SubagentTool.hpp"
 #include "Context.hpp"
 #include "providers/ProviderRegistry.hpp"
@@ -15,6 +16,7 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include <optional>
+#include <rapidjson/document.h>
 #include <thread>
 #include <vector>
 #include <set>
@@ -274,6 +276,10 @@ protected:
     std::ofstream auditorFile(testPromptsDir / "auditor.md");
     auditorFile << "---\nname: auditor\ntitle: Auditor\n---\nAuditor identity";
     auditorFile.close();
+
+    std::ofstream dreamerFile(testPromptsDir / "dreamer.md");
+    dreamerFile << "---\nname: dreamer\ntitle: Dreamer\nwork_role: auditor\nscopes: [\"FilesystemRead\", \"FilesystemWrite\", \"Semantic\"]\n---\nDreamer identity";
+    dreamerFile.close();
 
     std::ofstream customExecutorFile(testPromptsDir / "custom_executor.md");
     customExecutorFile << "---\nname: custom_executor\ntitle: Custom Executor\nwork_role: executor\n---\nCustom executor identity";
@@ -946,6 +952,111 @@ TEST_F(SubagentToolTest, genericRetaskPreservesExistingSubagentFlow) {
   EXPECT_EQ(taskFuture.get(), "Scan auth middleware usage.");
 }
 
+TEST_F(SubagentToolTest, dreamModeIsRestrictedToLeadLikeParents) {
+  const std::string threadId = createThread();
+
+  SubagentTool tool;
+  SubagentInput input;
+  input.persona = "dreamer";
+  input.task = "Capture durable memory.";
+  input.name = "dream-slot";
+  input.title = "Dream Slot";
+  input.dream = true;
+
+  MockAgent parent;
+  AgentContext ctx_obj = makeParentContext(threadId, "executor");
+  EXPECT_CALL(parent, getContext()).WillRepeatedly(ReturnRef(ctx_obj));
+
+  NiceMock<MockHost> host;
+  ToolContext toolCtx{host, parent, "test-call-id"};
+
+  ToolResult result = tool.execute(input, toolCtx);
+  EXPECT_FALSE(result.success);
+  EXPECT_THAT(result.error,
+              ::testing::HasSubstr("dream summon mode is restricted"));
+}
+
+TEST_F(SubagentToolTest, dreamModeSpawnsRestrictedDreamerAndIgnoresEmptyPlanChunkIds) {
+  const std::string threadId = createThread("/tmp/source-project");
+  const std::string planId = createPlanWithChunks(threadId);
+  auto metadata = threadManager_->getMetadata(threadId);
+  metadata.activePlanId = planId;
+  threadManager_->updateMetadata(threadId, metadata);
+
+  auto provider =
+      std::make_shared<TextSummaryProvider>("dream-provider", "dream summary");
+  firmius::provider::ProviderRegistry::instance().registerProvider(provider);
+  auto cfg = firmius::shared::ConfigLoader::instance().getConfig();
+  cfg.defaultProviderId = provider->getId();
+  cfg.defaultModelId = provider->listModels().front().id;
+  firmius::shared::ConfigLoader::instance().updateConfig(cfg);
+
+  SubagentTool tool;
+  SubagentInput input;
+  input.persona = "coder";
+  input.task = "Capture durable preferences from this completed run.";
+  input.name = "dream-slot";
+  input.title = "Dream Slot";
+  input.dream = true;
+  input.plan_id = "";
+  input.chunk_id = "";
+
+  MockAgent parent;
+  AgentContext ctx_obj = makeParentContext(threadId, "lead");
+  ctx_obj.environment.cwd = "/tmp/source-project";
+  EXPECT_CALL(parent, getContext()).WillRepeatedly(ReturnRef(ctx_obj));
+
+  NiceMock<MockHost> host;
+  ToolContext toolCtx{host, parent, "test-call-id"};
+
+  ToolResult result = tool.execute(input, toolCtx);
+  ASSERT_TRUE(result.success) << result.error;
+  EXPECT_EQ(provider->callCount(), 1);
+  EXPECT_THAT(result.data, ::testing::HasSubstr("dream summary"));
+
+  rapidjson::Document doc;
+  doc.Parse(result.data.c_str());
+  ASSERT_TRUE(doc.IsObject());
+  ASSERT_TRUE(doc.HasMember("agentId"));
+  const std::string agentId = doc["agentId"].GetString();
+
+  auto agent = AgentRegistry::instance().getAgent(agentId);
+  ASSERT_NE(agent, nullptr);
+  EXPECT_EQ(agent->getContext().config.personaName, "dreamer");
+
+  const std::string expectedMemoryRoot =
+      (testHome_ / ".firmius" / "user").string();
+  EXPECT_EQ(agent->getContext().environment.cwd, expectedMemoryRoot);
+  ASSERT_EQ(agent->getContext().permissions.allowedPaths.size(), 2u);
+  EXPECT_EQ(agent->getContext().permissions.allowedPaths[0], expectedMemoryRoot);
+  EXPECT_EQ(agent->getContext().permissions.allowedPaths[1],
+            expectedMemoryRoot + "/**");
+
+  const auto &history = *agent->getContext().history;
+  bool sawLeadContext = false;
+  bool sawPlanContext = false;
+  for (const auto &turn : history.turns) {
+    for (const auto &msg : turn.messages) {
+      if (msg.role != Role::User) {
+        continue;
+      }
+      for (const auto &part : msg.content) {
+        if (const auto *text = std::get_if<TextContent>(&part)) {
+          if (text->text.find("Lead Context") != std::string::npos) {
+            sawLeadContext = true;
+          }
+          if (text->text.find("Plan Context") != std::string::npos &&
+              text->text.find("Migrate work language") != std::string::npos) {
+            sawPlanContext = true;
+          }
+        }
+      }
+    }
+  }
+  EXPECT_TRUE(sawLeadContext);
+  EXPECT_TRUE(sawPlanContext);
+}
+
 TEST_F(SubagentToolTest, executorRetaskFailsWhenChunkAlreadyOwnedByAnotherExecutor) {
   const std::string threadId = createThread();
   const std::string planId = createPlanWithChunks(threadId);
@@ -979,6 +1090,37 @@ TEST_F(SubagentToolTest, executorRetaskFailsWhenChunkAlreadyOwnedByAnotherExecut
   EXPECT_FALSE(result.success);
   EXPECT_THAT(result.error,
               ::testing::HasSubstr("already owned by executor agent"));
+}
+
+TEST_F(SubagentToolTest, TerminateSubagentReleasesStaleChunkOwnership) {
+  const std::string threadId = createThread();
+  const std::string planId = createPlanWithChunks(threadId);
+  Plan plan = threadManager_->getPlan(threadId, planId);
+  plan.chunks[0].assignedAgentId = "executor-agent";
+  plan.chunks[0].status = WorkChunkStatus::InProgress;
+  threadManager_->updatePlan(threadId, plan);
+
+  auto taskPromise = std::make_shared<std::promise<std::string>>();
+  registerRetaskableAgent("executor-agent", "executor-slot", taskPromise);
+
+  SubagentTerminateTool tool;
+  SubagentTerminateInput input;
+  input.agent_id = "executor-agent";
+
+  MockAgent parent;
+  AgentContext ctxObj = makeParentContext(threadId);
+  EXPECT_CALL(parent, getContext()).WillRepeatedly(ReturnRef(ctxObj));
+
+  NiceMock<MockHost> host;
+  ToolContext toolCtx{host, parent, "terminate-call-id"};
+
+  ToolResult result = tool.execute(input, toolCtx);
+
+  ASSERT_TRUE(result.success) << result.error;
+  const Plan updatedPlan = threadManager_->getPlan(threadId, planId);
+  EXPECT_TRUE(updatedPlan.chunks[0].assignedAgentId.empty());
+  EXPECT_EQ(updatedPlan.chunks[0].status, WorkChunkStatus::Ready);
+  EXPECT_EQ(AgentRegistry::instance().getAgent("executor-agent"), nullptr);
 }
 
 TEST_F(SubagentToolTest, executorDispatchFailsWhenDependencyIsNotDone) {
@@ -1379,6 +1521,7 @@ TEST_F(SubagentToolTest, routeFallbackRetriesNextCategoryWhenEnabled) {
   cfg.defaultModelId = "default-model";
   cfg.modelRouterCategories["primary"] = {"bad-provider", "bad-model", ""};
   cfg.modelRouterCategories["fallback"] = {"good-provider", "good-model", ""};
+  cfg.purposeRoutes["coder"] = "primary";
   cfg.enableSubagentRouteFallback = true;
   cfg.subagentRouteFallbackOrder = {"fallback"};
   firmius::shared::ConfigLoader::instance().updateConfig(cfg);
@@ -1388,7 +1531,6 @@ TEST_F(SubagentToolTest, routeFallbackRetriesNextCategoryWhenEnabled) {
   input.persona = "coder";
   input.task = "Use fallback route.";
   input.agent_id = "coder-agent";
-  input.category = "primary";
   input.name = "coder-slot";
   input.title = "Coder Slot";
   input.async = true;
@@ -1419,6 +1561,7 @@ TEST_F(SubagentToolTest, routeFallbackCanBeDisabled) {
   cfg.defaultModelId = "default-model";
   cfg.modelRouterCategories["primary"] = {"bad-provider", "bad-model", ""};
   cfg.modelRouterCategories["fallback"] = {"good-provider", "good-model", ""};
+  cfg.purposeRoutes["coder"] = "primary";
   cfg.enableSubagentRouteFallback = false;
   cfg.subagentRouteFallbackOrder = {"fallback"};
   firmius::shared::ConfigLoader::instance().updateConfig(cfg);
@@ -1428,7 +1571,6 @@ TEST_F(SubagentToolTest, routeFallbackCanBeDisabled) {
   input.persona = "coder";
   input.task = "Do not fallback.";
   input.agent_id = "coder-agent";
-  input.category = "primary";
   input.name = "coder-slot";
   input.title = "Coder Slot";
   input.async = true;
@@ -1459,6 +1601,7 @@ TEST_F(SubagentToolTest, spawnedRouteFallbackRetriesOnNoUsableSummary) {
                                            primary->listModels().front().id, ""};
   cfg.modelRouterCategories["fallback"] = {fallback->getId(),
                                            fallback->listModels().front().id, ""};
+  cfg.purposeRoutes["coder"] = "primary";
   cfg.enableSubagentRouteFallback = true;
   cfg.subagentRouteFallbackOrder = {"fallback"};
   firmius::shared::ConfigLoader::instance().updateConfig(cfg);
@@ -1467,7 +1610,6 @@ TEST_F(SubagentToolTest, spawnedRouteFallbackRetriesOnNoUsableSummary) {
   SubagentInput input;
   input.persona = "coder";
   input.task = "Retry on no summary.";
-  input.category = "primary";
   input.name = "spawn-slot";
   input.title = "Spawn Slot";
 
@@ -1505,6 +1647,7 @@ TEST_F(SubagentToolTest, spawnedAsyncRouteFallbackRetriesOnImmediateFailure) {
                                           primary->listModels().front().id, ""};
   cfg.modelRouterCategories["fallback"] = {fallback->getId(),
                                            fallback->listModels().front().id, ""};
+  cfg.purposeRoutes["coder"] = "primary";
   cfg.enableSubagentRouteFallback = true;
   cfg.subagentRouteFallbackOrder = {"fallback"};
   firmius::shared::ConfigLoader::instance().updateConfig(cfg);
@@ -1513,7 +1656,6 @@ TEST_F(SubagentToolTest, spawnedAsyncRouteFallbackRetriesOnImmediateFailure) {
   SubagentInput input;
   input.persona = "coder";
   input.task = "Retry on immediate stream error.";
-  input.category = "primary";
   input.name = "spawn-async-slot";
   input.title = "Spawn Async Slot";
   input.async = true;
@@ -1550,6 +1692,7 @@ TEST_F(SubagentToolTest, retaskedRouteFallbackRetriesOnNoUsableSummary) {
                                            primary->listModels().front().id, ""};
   cfg.modelRouterCategories["fallback"] = {fallback->getId(),
                                            fallback->listModels().front().id, ""};
+  cfg.purposeRoutes["coder"] = "primary";
   cfg.enableSubagentRouteFallback = true;
   cfg.subagentRouteFallbackOrder = {"fallback"};
   firmius::shared::ConfigLoader::instance().updateConfig(cfg);
@@ -1567,7 +1710,6 @@ TEST_F(SubagentToolTest, retaskedRouteFallbackRetriesOnNoUsableSummary) {
   input.persona = "coder";
   input.task = "Retry on no summary.";
   input.agent_id = "coder-agent";
-  input.category = "primary";
   input.name = "coder-slot";
   input.title = "Coder Slot";
 
@@ -1635,7 +1777,6 @@ TEST_F(SubagentToolTest, cancelledRetaskDoesNotTriggerFallbackRouteClone) {
   input.persona = "coder";
   input.task = "Cancel this run and do not clone a fallback child.";
   input.agent_id = "cancel-agent";
-  input.category = "primary";
   input.name = "cancel-slot";
   input.title = "Cancel Slot";
   input.async = false;
@@ -1646,6 +1787,7 @@ TEST_F(SubagentToolTest, cancelledRetaskDoesNotTriggerFallbackRouteClone) {
   cfg.modelRouterCategories["primary"] = {"good-provider", "good-model", ""};
   cfg.modelRouterCategories["fallback"] = {"fallback-provider",
                                            "fallback-model", ""};
+  cfg.purposeRoutes["coder"] = "primary";
   cfg.enableSubagentRouteFallback = true;
   cfg.subagentRouteFallbackOrder = {"fallback"};
   firmius::shared::ConfigLoader::instance().updateConfig(cfg);

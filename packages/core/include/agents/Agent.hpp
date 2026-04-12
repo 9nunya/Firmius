@@ -106,7 +106,7 @@ private:
                std::function<void(const StreamEvent &)> onEvent,
                const std::vector<ImageContent> &images);
   void compactContext(std::function<void(const shared::StreamEvent &)> onEvent);
-  void executeTools(const std::vector<ToolCallChunk> &chunks,
+  void executeTools(const std::vector<ToolCall> &calls,
                     std::function<void(const shared::StreamEvent &)> onEvent,
                     const std::shared_ptr<std::atomic<bool>> &runCancelToken);
   shared::AgentTurn makeInternalNudgeTurn(const std::string &turnIdPrefix,

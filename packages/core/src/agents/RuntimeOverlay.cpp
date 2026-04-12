@@ -1,8 +1,12 @@
 #include "agents/RuntimeOverlay.hpp"
 
+#include "agents/UserMemoryWorkspace.hpp"
+#include "agents/RollingContextManager.hpp"
 #include "agents/PurposeLoader.hpp"
+#include "agents/SkillLoader.hpp"
 #include "persistence/ThreadManager.hpp"
 #include "utils/StringUtil.hpp"
+#include "utils/FSUtil.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -306,30 +310,323 @@ std::string buildWorkOverlay(const shared::AgentContext& context) {
   return buildWorkerOverlay(context, tm, "unknown");
 }
 
+std::string buildLoadedSkillsOverlay(const shared::AgentContext& context,
+                                     shared::IHost& host) {
+  if (context.state.loadedSkills.empty() && context.state.loadedAgentMds.empty()) {
+    return "";
+  }
 
+  std::ostringstream out;
+  out << "## LOADED SKILLS\n";
 
+  if (!context.state.loadedSkills.empty()) {
+    out << "Skills\n";
+    for (const auto& skillId : context.state.loadedSkills) {
+      out << "- " << skillId << "\n";
+    }
+    out << "\n";
+  }
+
+  if (!context.state.loadedAgentMds.empty()) {
+    out << "Loaded Files\n";
+    for (const auto& path : context.state.loadedAgentMds) {
+      // Require a recorded skill root for all loaded files.
+      auto it = context.state.loadedSkillRoots.find(path);
+      if (it == context.state.loadedSkillRoots.end()) {
+        continue;
+      }
+      if (!shared::FSUtil::isCanonicalSubpath(path, it->second)) {
+        continue;
+      }
+
+      out << "### " << path << "\n";
+      try {
+        const auto data = host.readFile(path);
+        out << std::string(data.begin(), data.end()) << "\n";
+      } catch (...) {
+        out << "(unavailable)\n";
+      }
+      out << "\n";
+    }
+  }
+
+  return out.str();
+}
+
+std::string buildLoadedMcpOverlay(const shared::AgentContext& context) {
+  if (context.state.loadedMcpServers.empty()) {
+    return "";
+  }
+
+  std::ostringstream out;
+  out << "## LOADED MCP\n";
+  for (const auto& serverName : context.state.loadedMcpServers) {
+    out << "- server: " << serverName << "\n";
+
+    const auto toolsIt = context.state.loadedMcpTools.find(serverName);
+    if (toolsIt != context.state.loadedMcpTools.end() && !toolsIt->second.empty()) {
+      out << "  tools:";
+      for (const auto& toolName : toolsIt->second) {
+        out << " " << toolName;
+      }
+      out << "\n";
+    }
+
+    const auto resourcesIt = context.state.loadedMcpResources.find(serverName);
+    if (resourcesIt != context.state.loadedMcpResources.end() &&
+        !resourcesIt->second.empty()) {
+      out << "  resources:";
+      for (const auto& uri : resourcesIt->second) {
+        out << " " << uri;
+      }
+      out << "\n";
+    }
+
+    const auto promptsIt = context.state.loadedMcpPrompts.find(serverName);
+    if (promptsIt != context.state.loadedMcpPrompts.end() &&
+        !promptsIt->second.empty()) {
+      out << "  prompts:";
+      for (const auto& promptName : promptsIt->second) {
+        out << " " << promptName;
+      }
+      out << "\n";
+    }
+  }
+
+  return out.str();
+}
+
+std::string buildWatchedFilesOverlay(const shared::AgentContext& context) {
+  std::ostringstream out;
+  out << "## WATCHED FILES\n";
+
+  out << "Read Files\n";
+  if (context.state.readFiles.empty()) {
+    out << "- (none)\n";
+  } else {
+    for (const auto& path : context.state.readFiles) {
+      out << "- " << path << "\n";
+    }
+  }
+  out << "\n";
+
+  out << "Fully Read Files\n";
+  if (context.state.fullyReadFiles.empty()) {
+    out << "- (none)\n";
+  } else {
+    for (const auto& path : context.state.fullyReadFiles) {
+      out << "- " << path << "\n";
+    }
+  }
+  out << "\n";
+
+  out << "Edited Files\n";
+  if (context.state.editedFiles.empty()) {
+    out << "- (none)\n";
+  } else {
+    for (const auto& path : context.state.editedFiles) {
+      out << "- " << path << "\n";
+    }
+  }
+
+  return out.str();
+}
 
 } // namespace
 
 shared::AgentHistory buildRequestHistoryWithRuntimeOverlays(
-    const shared::AgentContext& context, shared::IHost&,
+    const shared::AgentContext& context, shared::IHost& host,
     shared::IWorkspace&) {
-  shared::AgentHistory requestHistory;
-  if (context.history) {
-    requestHistory = *context.history;
-  }
+  shared::AgentHistory requestHistory =
+      context.history ? RollingContextManager::filterHistoryForRequest(
+                            context, *context.history)
+                      : shared::AgentHistory{};
   requestHistory.turns.push_back(
       makeOverlayTurn("runtime-overlay-work-state", buildWorkOverlay(context)));
+
+  requestHistory.turns.push_back(makeOverlayTurn(
+      "runtime-overlay-watched-files", buildWatchedFilesOverlay(context)));
+
+  const std::string loadedSkillsOverlay = buildLoadedSkillsOverlay(context, host);
+  if (!loadedSkillsOverlay.empty()) {
+    requestHistory.turns.push_back(
+        makeOverlayTurn("runtime-overlay-loaded-skills", loadedSkillsOverlay));
+  }
+
+  const std::string loadedMcpOverlay = buildLoadedMcpOverlay(context);
+  if (!loadedMcpOverlay.empty()) {
+    requestHistory.turns.push_back(
+        makeOverlayTurn("runtime-overlay-loaded-mcp", loadedMcpOverlay));
+  }
+
+  const std::string rollingStatusOverlay =
+      RollingContextManager::buildStatusOverlay(context);
+  if (!rollingStatusOverlay.empty()) {
+    requestHistory.turns.push_back(
+        makeOverlayTurn("runtime-overlay-rolling-status", rollingStatusOverlay));
+  }
+
+  const std::string rollingMemoryOverlay =
+      RollingContextManager::buildMemoryOverlay(context);
+  if (!rollingMemoryOverlay.empty()) {
+    requestHistory.turns.push_back(
+        makeOverlayTurn("runtime-overlay-rolling-memory", rollingMemoryOverlay));
+  }
+
+  bool benchmarkThread = false;
+  if (context.history && !context.history->threadId.empty()) {
+    try {
+      ThreadManager tm(ThreadManager::defaultBasePath());
+      benchmarkThread = tm.getMetadata(context.history->threadId).isBenchmarkRun;
+    } catch (...) {
+    }
+  }
+
+  if (!benchmarkThread) {
+    const std::string userMemoryOverlay =
+        buildUserMemoryOverlay(context.environment.cwd);
+    if (!userMemoryOverlay.empty()) {
+      requestHistory.turns.push_back(
+          makeOverlayTurn("runtime-overlay-user-memory", userMemoryOverlay));
+    }
+  }
+
   return requestHistory;
 }
 
-void reconcileSuccessfulToolResult(const shared::AgentContext&,
+void reconcileSuccessfulToolResult(shared::AgentContext& context,
                                    shared::IHost&,
                                    shared::IWorkspace&,
+                                   const std::string& toolName,
                                    const std::string&,
-                                   const std::string&,
-                                   const std::string&) {
+                                   const std::string& resultJson) {
+  if (toolName != "skill_load" && toolName != "mcp_load") {
+    return;
+  }
+
+  rapidjson::Document result;
+  result.Parse(resultJson.c_str());
+  if (result.HasParseError() || !result.IsObject()) {
+    return;
+  }
+
+  if (toolName == "mcp_load") {
+    auto readStringArray = [](const rapidjson::Value& value) {
+      std::vector<std::string> out;
+      if (!value.IsArray()) {
+        return out;
+      }
+      for (const auto& entry : value.GetArray()) {
+        if (entry.IsString()) {
+          out.push_back(entry.GetString());
+        }
+      }
+      return out;
+    };
+
+    std::string serverName;
+    if (result.HasMember("server_name") && result["server_name"].IsString()) {
+      serverName = result["server_name"].GetString();
+    } else if (result.HasMember("server") && result["server"].IsString()) {
+      serverName = result["server"].GetString();
+    }
+    if (serverName.empty()) {
+      return;
+    }
+
+    if (std::find(context.state.loadedMcpServers.begin(),
+                  context.state.loadedMcpServers.end(),
+                  serverName) == context.state.loadedMcpServers.end()) {
+      context.state.loadedMcpServers.push_back(serverName);
+    }
+
+    if (result.HasMember("loaded_tools")) {
+      context.state.loadedMcpTools[serverName] =
+          readStringArray(result["loaded_tools"]);
+    } else if (result.HasMember("tools")) {
+      context.state.loadedMcpTools[serverName] =
+          readStringArray(result["tools"]);
+    }
+
+    if (result.HasMember("loaded_resources")) {
+      context.state.loadedMcpResources[serverName] =
+          readStringArray(result["loaded_resources"]);
+    } else if (result.HasMember("resources")) {
+      context.state.loadedMcpResources[serverName] =
+          readStringArray(result["resources"]);
+    }
+
+    if (result.HasMember("loaded_prompts")) {
+      context.state.loadedMcpPrompts[serverName] =
+          readStringArray(result["loaded_prompts"]);
+    } else if (result.HasMember("prompts")) {
+      context.state.loadedMcpPrompts[serverName] =
+          readStringArray(result["prompts"]);
+    }
+    return;
+  }
+
+  if (result.HasMember("skill_id") && result["skill_id"].IsString()) {
+    const std::string skillId = result["skill_id"].GetString();
+    if (!skillId.empty() &&
+        std::find(context.state.loadedSkills.begin(),
+                  context.state.loadedSkills.end(),
+                  skillId) == context.state.loadedSkills.end()) {
+      context.state.loadedSkills.push_back(skillId);
+    }
+  }
+
+  if (result.HasMember("path") && result["path"].IsString()) {
+    const std::string path = result["path"].GetString();
+    if (result.HasMember("skill_root") && result["skill_root"].IsString()) {
+      const std::string skillRoot = result["skill_root"].GetString();
+      const auto allowedDirs = SkillLoader::resolveSkillsDirs();
+      bool allowed = false;
+      for (const auto& dir : allowedDirs) {
+        if (shared::FSUtil::isCanonicalSubpath(skillRoot, dir)) {
+          allowed = true;
+          break;
+        }
+      }
+      if (allowed && !path.empty()) {
+        if (std::find(context.state.loadedAgentMds.begin(),
+                      context.state.loadedAgentMds.end(),
+                      path) == context.state.loadedAgentMds.end()) {
+          context.state.loadedAgentMds.push_back(path);
+        }
+        context.state.loadedSkillRoots[path] = skillRoot;
+      }
+    }
+  }
 }
+
+void reconstructStateFromHistory(shared::AgentContext& context,
+                                 shared::IHost& host,
+                                 shared::IWorkspace& workspace) {
+  if (!context.history) return;
+
+  std::unordered_map<std::string, shared::ToolCallContent> pendingCalls;
+
+  for (const auto& turn : context.history->turns) {
+    for (const auto& msg : turn.messages) {
+      for (const auto& part : msg.content) {
+        if (const auto* tc = std::get_if<shared::ToolCallContent>(&part)) {
+          if (!tc->id.empty()) {
+            pendingCalls[tc->id] = *tc;
+          }
+        } else if (const auto* tr = std::get_if<shared::ToolResultContent>(&part)) {
+          if (tr->success) {
+            auto it = pendingCalls.find(tr->toolCallId);
+            if (it != pendingCalls.end()) {
+              reconcileSuccessfulToolResult(context, host, workspace, it->second.name, it->second.args, tr->result);
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
 
 void refreshFileWatch(const shared::AgentContext&,
                       shared::IHost&,

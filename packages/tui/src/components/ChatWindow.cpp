@@ -11,7 +11,11 @@
 #include "components/GlintEffect.hpp"
 #include "NotificationManager.hpp"
 #include "utils/Clipboard.hpp"
+#include "utils/Icons.hpp"
 #include "utils/ToolSummaries.hpp"
+#include <iomanip>
+#include <algorithm>
+#include <cctype>
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/component_base.hpp>
 #include <ftxui/component/mouse.hpp>
@@ -49,6 +53,56 @@ namespace firmius::tui {
 namespace {
 
 constexpr int kChatTailPaddingLines = 3;
+
+std::string transcriptPreview(const std::string &text) {
+  return firmius::tui::ClampTranscriptTextForDisplay(text);
+}
+
+std::string normalizeRollingFieldValue(const std::string &value) {
+  std::string normalized = value;
+  std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                 [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+  return normalized;
+}
+
+bool isObservationNotice(const firmius::shared::NoticeContent &notice) {
+  if (!notice.rollingMetadata) {
+    return false;
+  }
+  return normalizeRollingFieldValue(notice.rollingMetadata->eventKind) ==
+         "observation";
+}
+
+int observationLifecycleRank(const std::string &lifecycle) {
+  const auto normalized = normalizeRollingFieldValue(lifecycle);
+  if (normalized == "start" || normalized == "buffering" ||
+      normalized == "inprogress" || normalized == "in_progress") {
+    return 0;
+  }
+  if (normalized == "complete" || normalized == "completed" ||
+      normalized == "done" || normalized == "finished" ||
+      normalized == "success") {
+    return 1;
+  }
+  if (normalized == "activate" || normalized == "activated" ||
+      normalized == "activation") {
+    return 2;
+  }
+  return -1;
+}
+
+std::optional<std::string> observationRangeKey(
+    const firmius::shared::RollingNoticeMetadata &meta) {
+  if (!meta.sourceStartTurnId || !meta.sourceEndTurnId) {
+    return std::nullopt;
+  }
+  return *meta.sourceStartTurnId + "\x1F" + *meta.sourceEndTurnId;
+}
+
+struct ObservationNoticeRenderState {
+  int lifecycle_rank = -1;
+  size_t sequence = 0;
+};
 
 template <typename T>
 void HashCombine(std::size_t &seed, const T &value) {
@@ -106,7 +160,29 @@ std::size_t ComputeHistoryRevision(const firmius::shared::AgentHistory *history)
                 HashCombine(seed, content.message.size());
                 HashCombine(seed, content.details.size());
                 HashCombine(seed, static_cast<int>(content.severity));
+                if (content.rollingMetadata) {
+                  const auto &meta = *content.rollingMetadata;
+                  HashCombine(seed, meta.eventKind);
+                  HashCombine(seed, meta.lifecycle);
+                  if (meta.modelLabel)
+                    HashCombine(seed, *meta.modelLabel);
+                  if (meta.sourceStartTurnId)
+                    HashCombine(seed, *meta.sourceStartTurnId);
+                  if (meta.sourceEndTurnId)
+                    HashCombine(seed, *meta.sourceEndTurnId);
+                  if (meta.sourceTurnCount)
+                    HashCombine(seed, *meta.sourceTurnCount);
+                  if (meta.sourceChunkCount)
+                    HashCombine(seed, *meta.sourceChunkCount);
+                  if (meta.sourceTokens)
+                    HashCombine(seed, *meta.sourceTokens);
+                  if (meta.summaryTokens)
+                    HashCombine(seed, *meta.summaryTokens);
+                  if (meta.savedTokens)
+                    HashCombine(seed, *meta.savedTokens);
+                }
               }
+
             },
             part);
       }
@@ -114,6 +190,71 @@ std::size_t ComputeHistoryRevision(const firmius::shared::AgentHistory *history)
   }
 
   return seed;
+}
+
+std::string formatCompactCount(uint32_t value) {
+  std::ostringstream out;
+  if (value >= 1000000) {
+    out << std::fixed << std::setprecision(1)
+        << (static_cast<double>(value) / 1000000.0);
+    std::string text = out.str();
+    if (text.size() > 2 && text.substr(text.size() - 2) == ".0") {
+      text.erase(text.size() - 2);
+    }
+    return text + "M";
+  }
+  if (value >= 1000) {
+    out << std::fixed << std::setprecision(1)
+        << (static_cast<double>(value) / 1000.0);
+    std::string text = out.str();
+    if (text.size() > 2 && text.substr(text.size() - 2) == ".0") {
+      text.erase(text.size() - 2);
+    }
+    return text + "k";
+  }
+  return std::to_string(value);
+}
+
+std::string formatDurationMs(uint64_t durationMs) {
+  const uint64_t totalSeconds = durationMs / 1000;
+  const uint64_t minutes = totalSeconds / 60;
+  const uint64_t seconds = totalSeconds % 60;
+  std::ostringstream out;
+  if (minutes > 0) {
+    out << minutes << "m" << seconds << "s";
+  } else {
+    out << seconds << "s";
+  }
+  return out.str();
+}
+
+std::optional<std::string> buildTurnFooterSummary(
+    const firmius::shared::AgentTurn &turn) {
+  const auto &metrics = turn.metrics;
+  const bool hasTiming = metrics.timing.endMs > metrics.timing.startMs;
+  const bool hasTokens = metrics.context.sentTokens > 0 ||
+                         metrics.tokens.completion > 0 ||
+                         metrics.context.rawPromptTokens > 0 ||
+                         metrics.context.billedPromptTokens > 0;
+  if (!hasTiming && !hasTokens) {
+    return std::nullopt;
+  }
+
+  std::ostringstream out;
+  out << firmius::shared::ICON_CHECK << " done";
+  if (hasTiming) {
+    out << " · " << formatDurationMs(metrics.timing.endMs -
+                                     metrics.timing.startMs);
+  }
+  if (hasTokens) {
+    out << " · \xE2\x86\x91" << formatCompactCount(metrics.context.sentTokens);
+    if (metrics.context.billedPromptTokens > 0 &&
+        metrics.context.billedPromptTokens != metrics.context.sentTokens) {
+      out << "/" << formatCompactCount(metrics.context.billedPromptTokens);
+    }
+    out << " \xE2\x86\x93" << formatCompactCount(metrics.tokens.completion);
+  }
+  return out.str();
 }
 
 class RowComponent : public ftxui::ComponentBase {
@@ -199,34 +340,30 @@ struct QuickToolCluster {
 ftxui::Element RenderQuickToolRow(const firmius::tui::QuickToolGroupSummary &summary,
                                   const firmius::tui::Theme &theme) {
   const bool live = summary.has_preparing || summary.has_live;
-  std::string keyword;
+  std::string action;
+  std::string icon = firmius::shared::ICON_TOOL;
   switch (summary.category) {
   case firmius::tui::QuickToolCategory::Read:
-    keyword = summary.has_error ? "Failed Reading" : (live ? "Reading..." : "Read");
+    icon = firmius::shared::ICON_FILE;
+    action = live ? "reading" : "read";
     break;
   case firmius::tui::QuickToolCategory::List:
-    keyword = summary.has_error ? "Failed Listing" : (live ? "Listing..." : "Listed");
+    icon = firmius::shared::ICON_FOLDER;
+    action = live ? "listing" : "listed";
     break;
   case firmius::tui::QuickToolCategory::Search:
-    keyword = summary.has_error ? "Failed Search" : (live ? "Searching..." : "Search");
+    icon = firmius::shared::ICON_SEARCH;
+    action = live ? "searching" : "searched";
     break;
   case firmius::tui::QuickToolCategory::None:
     return ftxui::text("");
   }
+  if (summary.has_error) {
+    action = "failed";
+  }
   const int live_count = summary.preparing_count + summary.live_count;
-  if (live && live_count > 1) {
-    keyword += " (x" + std::to_string(live_count) + ")";
-  }
 
-  std::vector<std::string> deduped_targets;
-  std::unordered_map<std::string, bool> seen_targets;
-  for (const auto &target : summary.targets) {
-    if (target.empty() || seen_targets[target]) {
-      continue;
-    }
-    seen_targets[target] = true;
-    deduped_targets.push_back(target);
-  }
+  const auto deduped_targets = firmius::tui::DedupeQuickToolTargets(summary.targets);
 
   std::string joined_targets;
   for (size_t i = 0; i < deduped_targets.size(); ++i) {
@@ -236,62 +373,58 @@ ftxui::Element RenderQuickToolRow(const firmius::tui::QuickToolGroupSummary &sum
     joined_targets += deduped_targets[i];
   }
 
-  auto accent = theme.status_bar.executing_tool.normal.fg;
-  auto bullet_color = theme.base.dim;
+  auto pill_bg = theme.agent_strip.pills.tool_bg;
+  auto pill_fg = theme.agent_strip.pills.tool_fg;
   auto target_color = theme.base.fg;
 
   if (summary.category == firmius::tui::QuickToolCategory::Search) {
-    accent = theme.tool_blocks.specific.file_read.fg;
+    pill_bg = theme.tool_blocks.specific.wait.bg;
+    pill_fg = theme.tool_blocks.specific.wait.fg;
   } else if (summary.category == firmius::tui::QuickToolCategory::List) {
-    accent = theme.tool_blocks.specific.ls.fg;
+    pill_bg = theme.tool_blocks.specific.ls.bg;
+    pill_fg = theme.tool_blocks.specific.ls.fg;
   } else if (summary.category == firmius::tui::QuickToolCategory::Read) {
-    accent = theme.tool_blocks.specific.file_read.fg;
+    pill_bg = theme.tool_blocks.specific.file_read.bg;
+    pill_fg = theme.tool_blocks.specific.file_read.fg;
   }
 
   if (summary.has_error) {
-    accent = theme.status_bar.error.normal.fg;
-    bullet_color = theme.status_bar.error.normal.fg;
+    pill_bg = theme.status_bar.error.normal.bg;
+    pill_fg = theme.status_bar.error.normal.fg;
     target_color = theme.status_bar.error.normal.fg;
   } else if (summary.has_live) {
-    accent = theme.status_bar.streaming.normal.fg;
-    target_color = theme.base.fg;
+    pill_bg = theme.status_bar.streaming.normal.bg;
+    pill_fg = theme.status_bar.streaming.normal.fg;
   } else if (summary.has_preparing) {
-    accent = theme.status_bar.executing_tool.normal.fg;
-    target_color = theme.base.fg;
+    pill_bg = theme.status_bar.executing_tool.normal.bg;
+    pill_fg = theme.status_bar.executing_tool.normal.fg;
   }
 
-  auto keyword_el = ftxui::text(keyword) | ftxui::bold | ftxui::color(accent);
-  auto targets_el =
+  auto pill = ftxui::text(" " + icon + " " + action + " ") | ftxui::bold |
+              ftxui::color(pill_fg) | ftxui::bgcolor(pill_bg);
+  if (live) {
+    firmius::tui::GlintConfig cfg;
+    cfg.target = firmius::tui::GlintConfig::Target::Background;
+    cfg.gradientColors = {pill_bg, theme.base.highlight, pill_bg};
+    cfg.glintSize = 8;
+    cfg.intervalSeconds = summary.has_live ? 0.9f : 1.4f;
+    cfg.durationSeconds = summary.has_live ? 0.8f : 1.0f;
+    cfg.easing = firmius::tui::GlintEasing::EaseInOut;
+    pill = firmius::tui::GlintEffect(pill, cfg)->Render();
+  }
+
+  ftxui::Elements row_items = {
+      pill,
+      ftxui::text(" "),
       ftxui::paragraph(joined_targets.empty() ? "." : joined_targets) |
-      ftxui::color(target_color) | ftxui::flex;
-  if (summary.has_live) {
-    targets_el = targets_el | ftxui::bold;
+          ftxui::color(target_color) | ftxui::flex,
+  };
+  if (live && live_count > 1) {
+    row_items.push_back(ftxui::text(" "));
+    row_items.push_back(ftxui::text("\xC3\x97" + std::to_string(live_count)) |
+                        ftxui::bold | ftxui::color(theme.base.highlight));
   }
-
-  auto row_base = ftxui::hbox({
-                      ftxui::text("· ") | ftxui::color(bullet_color),
-                      keyword_el,
-                      ftxui::text(" ") | ftxui::color(bullet_color),
-                      targets_el,
-                  }) |
-                  ftxui::bgcolor(theme.tool_blocks.generic_bg) | ftxui::xflex;
-
-  if (!summary.has_preparing && !summary.has_live) {
-    return row_base;
-  }
-
-  firmius::tui::GlintConfig cfg;
-  cfg.target = firmius::tui::GlintConfig::Target::Text;
-  cfg.gradientColors = theme.tool_blocks.glint.empty()
-                           ? std::vector<ftxui::Color>{accent, theme.base.fg,
-                                                       accent}
-                           : theme.tool_blocks.glint;
-  cfg.glintSize = 10;
-  cfg.intervalSeconds = summary.has_live ? 1.1f : 1.8f;
-  cfg.durationSeconds = summary.has_live ? 0.9f : 1.1f;
-  cfg.easing = firmius::tui::GlintEasing::EaseInOut;
-  auto glint = firmius::tui::GlintEffect(row_base, cfg);
-  return glint->Render();
+  return ftxui::hbox(std::move(row_items)) | ftxui::xflex;
 }
 
 std::vector<ftxui::Component> BuildQuickToolClusterRows(
@@ -756,6 +889,44 @@ private:
         }
       };
 
+      std::unordered_map<std::string, ObservationNoticeRenderState>
+          latest_observation_notice_by_range;
+      size_t observation_notice_sequence = 0;
+      for (size_t turn_index = 0; turn_index < history->turns.size();
+           ++turn_index) {
+        const auto &t = history->turns[turn_index];
+        for (const auto &msg : t.messages) {
+          if (firmius::tui::ShouldHideMessageInTranscript(
+                  msg, showInternalNudges, t.turnId)) {
+            continue;
+          }
+          for (const auto &part : msg.content) {
+            auto *notice = std::get_if<firmius::shared::NoticeContent>(&part);
+            if (!notice || !isObservationNotice(*notice)) {
+              continue;
+            }
+            const auto &meta = *notice->rollingMetadata;
+            const auto range_key = observationRangeKey(meta);
+            if (!range_key.has_value()) {
+              continue;
+            }
+            const int lifecycle_rank = observationLifecycleRank(meta.lifecycle);
+            if (lifecycle_rank < 0) {
+              continue;
+            }
+            const size_t sequence = observation_notice_sequence++;
+            auto &entry = latest_observation_notice_by_range[*range_key];
+            if (lifecycle_rank > entry.lifecycle_rank ||
+                (lifecycle_rank == entry.lifecycle_rank &&
+                 sequence >= entry.sequence)) {
+              entry.lifecycle_rank = lifecycle_rank;
+              entry.sequence = sequence;
+            }
+          }
+        }
+      }
+
+      observation_notice_sequence = 0;
       for (size_t turn_index = 0; turn_index < history->turns.size();
            ++turn_index) {
         const auto &t = history->turns[turn_index];
@@ -823,7 +994,8 @@ private:
                 AddCopyableRow([text = std::move(text)](bool selected) {
                       (void)selected;
                       return firmius::tui::IndentAgentRow(
-                          firmius::tui::RenderMarkdown(text));
+                          firmius::tui::RenderMarkdown(
+                              transcriptPreview(text)));
                     }, std::move(copy_text));
               } else if (auto *thk = std::get_if<firmius::shared::ThinkingContent>(&part)) {
                 std::string thinking = thk->thinking;
@@ -831,7 +1003,8 @@ private:
                 AddCopyableRow([thinking = std::move(thinking)](bool selected) {
                       (void)selected;
                       return firmius::tui::IndentAgentRow(
-                          firmius::tui::RenderMarkdown(thinking, true));
+                          firmius::tui::RenderMarkdown(
+                              transcriptPreview(thinking), true));
                     }, std::move(copy_text));
               }
             }
@@ -871,7 +1044,8 @@ private:
                 ftxui::hbox({
                     ftxui::text(prefix) | ftxui::bold |
                         ftxui::color(prefixColor),
-                    firmius::tui::RenderMarkdown(text) | ftxui::xflex,
+                    firmius::tui::RenderMarkdown(
+                        transcriptPreview(text)) | ftxui::xflex,
                 }) |
                 ftxui::xflex);
             if (image_count > 0) {
@@ -939,7 +1113,8 @@ private:
               std::string copy_text = text;
               AddCopyableRow([decorateMsg, text = std::move(text)](bool selected) {
                     (void)selected;
-                    return decorateMsg(firmius::tui::RenderMarkdown(text));
+                    return decorateMsg(firmius::tui::RenderMarkdown(
+                        transcriptPreview(text)));
                   }, std::move(copy_text));
               rows_.push_back(ftxui::Make<RowComponent>(
                   nullptr, [] { return ftxui::text(""); }));
@@ -952,7 +1127,8 @@ private:
               AddCopyableRow([decorateMsg, thinking = std::move(thinking)](bool selected) {
                     (void)selected;
                     return decorateMsg(
-                        firmius::tui::RenderMarkdown(thinking, true));
+                        firmius::tui::RenderMarkdown(
+                            transcriptPreview(thinking), true));
                   }, std::move(copy_text));
               rows_.push_back(ftxui::Make<RowComponent>(
                   nullptr, [] { return ftxui::text(""); }));
@@ -1061,6 +1237,27 @@ private:
                                &part)) {
               flush_quick_cluster();
               auto notice_copy = *notice;
+              bool suppress_notice = false;
+              if (isObservationNotice(notice_copy)) {
+                const auto &meta = *notice_copy.rollingMetadata;
+                const auto range_key = observationRangeKey(meta);
+                const int lifecycle_rank =
+                    observationLifecycleRank(meta.lifecycle);
+                if (range_key.has_value() && lifecycle_rank >= 0) {
+                  const size_t sequence = observation_notice_sequence++;
+                  auto latest_it =
+                      latest_observation_notice_by_range.find(*range_key);
+                  if (latest_it != latest_observation_notice_by_range.end()) {
+                    const auto &latest = latest_it->second;
+                    suppress_notice = latest.lifecycle_rank > lifecycle_rank ||
+                                      (latest.lifecycle_rank == lifecycle_rank &&
+                                       latest.sequence > sequence);
+                  }
+                }
+              }
+              if (suppress_notice) {
+                continue;
+              }
               auto row = ftxui::Make<RowComponent>(
                   nullptr, [notice_copy, theme] {
                     return firmius::tui::IndentAgentRow(
@@ -1082,6 +1279,22 @@ private:
                   nullptr, [] { return ftxui::text(""); }));
             }
           }
+        }
+
+        if (auto footer = buildTurnFooterSummary(t); footer.has_value()) {
+          flush_quick_cluster();
+          const auto &theme =
+              firmius::tui::ThemeManager::instance().getCurrentTheme();
+          auto footer_text = *footer;
+          auto row = ftxui::Make<RowComponent>(
+              nullptr, [footer_text, theme] {
+                return firmius::tui::IndentAgentRow(
+                    ftxui::text(footer_text) |
+                    ftxui::color(theme.chat.timestamp));
+              });
+          rows_.push_back(row);
+          rows_.push_back(ftxui::Make<RowComponent>(
+              nullptr, [] { return ftxui::text(""); }));
         }
 
       }

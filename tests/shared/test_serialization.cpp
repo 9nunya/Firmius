@@ -4,6 +4,7 @@
 #include "Message.hpp"
 #include "Metrics.hpp"
 #include "Serialization.hpp"
+#include "utils/HistoryMetrics.hpp"
 #include <gtest/gtest.h>
 
 #include <limits>
@@ -227,6 +228,12 @@ TEST(Serialization, AgentMetricsRoundtrip) {
   metrics.timing.endMs = 2000;
   metrics.timing.toolExecutionMs = 500;
   metrics.estimatedCostUsd = 0.0015;
+  metrics.context.sentTokens = 220;
+  metrics.context.rawPromptTokens = 180;
+  metrics.context.billedPromptTokens = 150;
+  metrics.context.reserveTokens = 5;
+  metrics.context.buckets.push_back({"system_prompt", 90, 80});
+  metrics.context.buckets.push_back({"conversation_history", 110, 95});
 
   auto doc = toJson(metrics);
   rapidjson::StringBuffer buffer;
@@ -485,6 +492,20 @@ TEST(Serialization, StreamEventRoundtrip) {
 
   EXPECT_EQ(std::get<ToolCallChunk>(toolEvent),
             std::get<ToolCallChunk>(roundtrippedTool));
+
+  StreamEvent finalToolEvent =
+      ToolCall{"call-2", 1, "file_read", R"({"path":"README.md"})"};
+  doc = toJson(finalToolEvent);
+  buffer.Clear();
+  writer.Reset(buffer);
+  doc.Accept(writer);
+  json = buffer.GetString();
+
+  parsed.Parse(json.c_str());
+  auto roundtrippedFinalTool = streamEventFromJsonValue(parsed);
+
+  EXPECT_EQ(std::get<ToolCall>(finalToolEvent),
+            std::get<ToolCall>(roundtrippedFinalTool));
 }
 
 TEST(Serialization, EngineEventAgentFinishedRoundtrip) {
@@ -641,7 +662,8 @@ TEST(Serialization, NoticeContentRoundtrip) {
       "Agent Cancelled",
       "The agent execution was interrupted.",
       "Execution stopped before completion and can be resumed.",
-      NoticeSeverity::Warning};
+      NoticeSeverity::Warning,
+      std::nullopt};
 
   auto doc = toJson(original);
   auto restored = messagePartFromJsonValue(doc);
@@ -651,6 +673,80 @@ TEST(Serialization, NoticeContentRoundtrip) {
   ASSERT_NE(notice, nullptr);
   EXPECT_EQ(notice->title, "Agent Cancelled");
   EXPECT_EQ(notice->severity, NoticeSeverity::Warning);
+  EXPECT_FALSE(notice->rollingMetadata.has_value());
+}
+
+TEST(Serialization, NoticeContentRollingSparseStartRoundtrip) {
+  RollingNoticeMetadata rolling;
+  rolling.eventKind = "roll";
+  rolling.lifecycle = "start";
+  rolling.sourceStartTurnId = "turn-100";
+  rolling.sourceEndTurnId = "turn-104";
+  rolling.sourceTurnCount = 5;
+  rolling.sourceChunkCount = 2;
+
+  MessagePart original = NoticeContent{
+      "Rolling Started",
+      "Preparing rolling summary.",
+      "Gathering source turns before summarization.",
+      NoticeSeverity::Info,
+      rolling};
+
+  auto doc = toJson(original);
+  auto restored = messagePartFromJsonValue(doc);
+
+  EXPECT_EQ(original, restored);
+  auto *notice = std::get_if<NoticeContent>(&restored);
+  ASSERT_NE(notice, nullptr);
+  ASSERT_TRUE(notice->rollingMetadata.has_value());
+  EXPECT_EQ(notice->rollingMetadata->eventKind, "roll");
+  EXPECT_EQ(notice->rollingMetadata->lifecycle, "start");
+  EXPECT_EQ(notice->rollingMetadata->sourceStartTurnId,
+            std::optional<std::string>("turn-100"));
+  EXPECT_EQ(notice->rollingMetadata->sourceEndTurnId,
+            std::optional<std::string>("turn-104"));
+  EXPECT_EQ(notice->rollingMetadata->sourceTurnCount,
+            std::optional<std::uint32_t>(5));
+  EXPECT_EQ(notice->rollingMetadata->sourceChunkCount,
+            std::optional<std::uint32_t>(2));
+  EXPECT_FALSE(notice->rollingMetadata->sourceTokens.has_value());
+  EXPECT_FALSE(notice->rollingMetadata->summaryTokens.has_value());
+  EXPECT_FALSE(notice->rollingMetadata->savedTokens.has_value());
+}
+
+TEST(Serialization, NoticeContentRollingCompletionRoundtrip) {
+  RollingNoticeMetadata rolling;
+  rolling.eventKind = "roll";
+  rolling.lifecycle = "complete";
+  rolling.modelLabel = "gpt-5.4-mini";
+  rolling.sourceTokens = 3240;
+  rolling.summaryTokens = 912;
+  rolling.savedTokens = 2328;
+
+  MessagePart original = NoticeContent{
+      "Rolling Complete",
+      "Inserted compact summary.",
+      "Context reduced after summary insertion.",
+      NoticeSeverity::Success,
+      rolling};
+
+  auto doc = toJson(original);
+  auto restored = messagePartFromJsonValue(doc);
+
+  EXPECT_EQ(original, restored);
+  auto *notice = std::get_if<NoticeContent>(&restored);
+  ASSERT_NE(notice, nullptr);
+  ASSERT_TRUE(notice->rollingMetadata.has_value());
+  EXPECT_EQ(notice->rollingMetadata->eventKind, "roll");
+  EXPECT_EQ(notice->rollingMetadata->lifecycle, "complete");
+  EXPECT_EQ(notice->rollingMetadata->modelLabel,
+            std::optional<std::string>("gpt-5.4-mini"));
+  EXPECT_EQ(notice->rollingMetadata->sourceTokens,
+            std::optional<std::uint32_t>(3240));
+  EXPECT_EQ(notice->rollingMetadata->summaryTokens,
+            std::optional<std::uint32_t>(912));
+  EXPECT_EQ(notice->rollingMetadata->savedTokens,
+            std::optional<std::uint32_t>(2328));
 }
 
 TEST(Serialization, StreamDoneRoundtrip) {
@@ -705,6 +801,14 @@ TEST(Serialization, AgentConfigRoundtrip) {
   original.maxTokens = 4096;
   original.stop = {"<stop />", "###"};
   original.persistHistory = false;
+  original.rollingMemory.enabled = true;
+  original.rollingMemory.mode = "rolling_forever";
+  original.rollingMemory.preset = "balanced";
+  original.rollingMemory.targetOccupancyRatio = 0.57f;
+  original.rollingMemory.bufferOccupancyRatio = 0.47f;
+  original.rollingMemory.emergencyOccupancyRatio = 0.66f;
+  original.rollingMemory.observer = {true, "openai", "gpt-5.4-mini", "fast"};
+  original.rollingMemory.reflector = {true, "anthropic", "claude-haiku", ""};
 
   auto doc = toJson(original);
   auto restored = agentConfigFromJsonValue(doc);
@@ -713,6 +817,9 @@ TEST(Serialization, AgentConfigRoundtrip) {
   EXPECT_EQ(restored.modelId, "gpt-4o");
   EXPECT_EQ(restored.maxTurns, 50);
   EXPECT_EQ(restored.persistHistory, false);
+  EXPECT_EQ(restored.rollingMemory.mode, "rolling_forever");
+  EXPECT_EQ(restored.rollingMemory.preset, "balanced");
+  EXPECT_EQ(restored.rollingMemory.observer.modelId, "gpt-5.4-mini");
   ASSERT_EQ(restored.stop.size(), 2u);
   EXPECT_EQ(restored.stop[0], "<stop />");
 }
@@ -735,6 +842,9 @@ TEST(Serialization, AgentConfigInContext) {
   original.config.maxTokens = 8192;
   original.config.stop = {"STOP"};
   original.config.persistHistory = false;
+  original.config.rollingMemory.enabled = true;
+  original.config.rollingMemory.mode = "rolling_forever";
+  original.config.rollingMemory.observer = {true, "openai", "gpt-5.4-mini", ""};
 
   std::string json = serializeToString(original);
   auto restored = deserializeFromString(json);
@@ -746,6 +856,8 @@ TEST(Serialization, AgentConfigInContext) {
   ASSERT_TRUE(restored.config.maxTokens.has_value());
   EXPECT_EQ(restored.config.maxTokens.value(), 8192u);
   EXPECT_EQ(restored.config.persistHistory, false);
+  EXPECT_EQ(restored.config.rollingMemory.mode, "rolling_forever");
+  EXPECT_EQ(restored.config.rollingMemory.observer.providerId, "openai");
 }
 
 TEST(Serialization, ModelInfoRoundtrip) {
@@ -806,6 +918,28 @@ TEST(Serialization, AgentMetricsAccumulation) {
 
   // Cost: additive
   EXPECT_DOUBLE_EQ(aggregate.estimatedCostUsd, 0.015);
+}
+
+TEST(Serialization, AggregateHistoryMetricsKeepsLastMeaningfulContextSize) {
+  AgentHistory history;
+
+  AgentTurn turn1;
+  turn1.turnId = "turn-1";
+  turn1.metrics.tokens.prompt = 120;
+  turn1.metrics.tokens.contextSize = 2048;
+  turn1.metrics.tokens.total = 180;
+  history.turns.push_back(turn1);
+
+  AgentTurn turn2;
+  turn2.turnId = "turn-2";
+  turn2.metrics.tokens.prompt = 0;
+  turn2.metrics.tokens.contextSize = 0;
+  turn2.metrics.tokens.total = 0;
+  history.turns.push_back(turn2);
+
+  AgentMetrics aggregate = aggregateHistoryMetrics(history);
+
+  EXPECT_EQ(aggregate.tokens.contextSize, 2048u);
 }
 
 TEST(Serialization, CancelledStatusRoundtrip) {
@@ -1098,4 +1232,53 @@ TEST(Serialization, AgentOutcomeRoundtripPreservesArtifactMetadataArrays) {
   ASSERT_EQ(finished->outcome.artifacts_updated.size(), 1u);
   EXPECT_EQ(finished->outcome.artifacts_created[0].filename, "WORKER_REPORT.md");
   EXPECT_EQ(finished->outcome.artifacts_updated[0].updatedAt, 456u);
+}
+
+TEST(Serialization, AgentStateSkillsRoundtrip) {
+  AgentContext original;
+  original.state.loadedSkills = {"skill-1", "skill-2"};
+  original.state.loadedAgentMds = {"/work/a.md", "/work/b.md"};
+  original.environment.type = HostType::Local;
+  original.history->threadId = "thread-skills";
+
+  std::string json = serializeToString(original);
+  auto restored = deserializeFromString(json);
+
+  EXPECT_EQ(restored.state.loadedSkills, original.state.loadedSkills);
+  EXPECT_EQ(restored.state.loadedAgentMds, original.state.loadedAgentMds);
+}
+
+TEST(Serialization, AgentContextSerializationExplicitSkillRoots) {
+  AgentContext original;
+  original.state.loadedSkills = {"skill-1"};
+  original.state.loadedAgentMds = {"/work/a.md"};
+  original.state.loadedSkillRoots["/work/a.md"] = "/home/user/.agents/skills/skill-1";
+  original.environment.type = HostType::Local;
+  original.history->threadId = "thread-skill-roots";
+
+  std::string json = serializeToString(original);
+  auto restored = deserializeFromString(json);
+
+  EXPECT_EQ(restored.state.loadedSkills, original.state.loadedSkills);
+  EXPECT_EQ(restored.state.loadedAgentMds, original.state.loadedAgentMds);
+  EXPECT_EQ(restored.state.loadedSkillRoots, original.state.loadedSkillRoots);
+  EXPECT_EQ(restored.state.loadedSkillRoots["/work/a.md"], "/home/user/.agents/skills/skill-1");
+}
+
+TEST(Serialization, AgentStateLoadedMcpRoundtrip) {
+  AgentContext original;
+  original.state.loadedMcpServers = {"demo"};
+  original.state.loadedMcpTools["demo"] = {"tool.alpha", "tool.beta"};
+  original.state.loadedMcpResources["demo"] = {"res://alpha"};
+  original.state.loadedMcpPrompts["demo"] = {"prompt.alpha"};
+  original.environment.type = HostType::Local;
+  original.history->threadId = "thread-mcp-state";
+
+  std::string json = serializeToString(original);
+  auto restored = deserializeFromString(json);
+
+  EXPECT_EQ(restored.state.loadedMcpServers, original.state.loadedMcpServers);
+  EXPECT_EQ(restored.state.loadedMcpTools, original.state.loadedMcpTools);
+  EXPECT_EQ(restored.state.loadedMcpResources, original.state.loadedMcpResources);
+  EXPECT_EQ(restored.state.loadedMcpPrompts, original.state.loadedMcpPrompts);
 }

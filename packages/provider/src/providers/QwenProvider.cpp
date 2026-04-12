@@ -1002,23 +1002,26 @@ void QwenProvider::refreshQuotas() {
 
 std::map<std::string, std::vector<QuotaBucket>>
 QwenProvider::getAllQuotas() const {
+  std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
   std::map<std::string, std::vector<QuotaBucket>> result;
 
   for (const auto &acc : accounts_) {
     std::vector<QuotaBucket> buckets;
 
     float remaining = 1.0f;
-    if (acc.metadata.count("quota:qwen")) {
+    if (auto remainingIt = acc.metadata.find("quota:qwen");
+        remainingIt != acc.metadata.end()) {
       try {
-        remaining = std::stof(acc.metadata.at("quota:qwen")) / 100.0f;
+        remaining = std::stof(remainingIt->second) / 100.0f;
       } catch (...) {
         remaining = 1.0f;
       }
     }
 
     std::string resetTime;
-    if (acc.metadata.count("quota_reset:qwen")) {
-      resetTime = acc.metadata.at("quota_reset:qwen");
+    if (auto resetIt = acc.metadata.find("quota_reset:qwen");
+        resetIt != acc.metadata.end()) {
+      resetTime = resetIt->second;
     }
 
     buckets.push_back(QuotaBucket{"quota:qwen", remaining, resetTime, ""});

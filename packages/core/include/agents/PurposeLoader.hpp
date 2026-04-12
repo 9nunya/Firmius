@@ -89,6 +89,35 @@ public:
   static std::string loadCompactionPrompt();
 
   /**
+   * @brief Resolves AGENTS.md at the project root (cwd/AGENTS.md), if present.
+   * @return Canonical AGENTS.md path when readable.
+   */
+  static std::optional<std::string>
+  resolveProjectRootAgentsPath(const AgentContext &context);
+
+  /**
+   * @brief Loads project-root AGENTS.md into runtime context state once.
+   * @return True when AGENTS.md was newly recorded.
+   */
+  static bool loadProjectRootAgentsIntoContext(AgentContext &context);
+
+  /**
+   * @brief Discovers ancestor AGENTS.md files for a target file path.
+   * Traversal stops at project root and skips project-root AGENTS.md.
+   */
+  static std::vector<std::string>
+  discoverAncestorAgentsPaths(const std::string &targetPath,
+                              const AgentContext &context);
+
+  /**
+   * @brief Records discovered AGENTS.md files into runtime state using
+   * loadedAgentMds + loadedSkillRoots with deduplication.
+   * @return Number of newly recorded AGENTS.md files.
+   */
+  static std::size_t loadDiscoveredAgentsForPath(AgentContext &context,
+                                                 const std::string &targetPath);
+
+  /**
    * @brief Resolves the prompts directory using the resolution chain:
    *        $FIRMIUS_PROMPTS_DIR env var → readable ~/.firmius/prompts/ →
    *        readable ./prompts/

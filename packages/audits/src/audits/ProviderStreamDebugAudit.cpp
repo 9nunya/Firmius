@@ -1,17 +1,23 @@
 #include "audits/ProviderStreamDebugAudit.hpp"
+#include "AgentRegistry.hpp"
 #include "Engine.hpp"
 #include "EnvLoader.hpp"
+#include "harness/Harness.hpp"
 #include "persistence/ThreadManager.hpp"
 #include "providers/ProviderRegistry.hpp"
 #include "providers/CodexProvider.hpp"
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <filesystem>
 #include <iomanip>
 #include <iostream>
+#include <mutex>
 #include <sstream>
 #include <atomic>
 #include <fstream>
 #include <set>
+#include <thread>
 
 namespace firmius::audits {
 
@@ -218,19 +224,80 @@ std::optional<ModelVariant> findModelVariant(const std::vector<ModelInfo>& model
     }
     return std::nullopt;
 }
+
+std::string readFileContents(const std::string& path) {
+    std::ifstream input(path);
+    if (!input.is_open()) {
+        throw std::runtime_error("Failed to open prompt file: " + path);
+    }
+    std::ostringstream buffer;
+    buffer << input.rdbuf();
+    return buffer.str();
+}
+
+std::optional<std::string> consumeOptionValue(const std::vector<std::string>& args,
+                                              size_t& index,
+                                              const std::string& arg,
+                                              const std::string& longName,
+                                              const std::string& shortName = "") {
+    const std::string longPrefix = longName + "=";
+    const std::string shortPrefix =
+        shortName.empty() ? std::string() : shortName + "=";
+    if (arg == longName || (!shortName.empty() && arg == shortName)) {
+        if (index + 1 >= args.size()) {
+            throw std::runtime_error("Missing value for option: " + arg);
+        }
+        ++index;
+        return args[index];
+    }
+    if (arg.rfind(longPrefix, 0) == 0) {
+        return arg.substr(longPrefix.size());
+    }
+    if (!shortPrefix.empty() && arg.rfind(shortPrefix, 0) == 0) {
+        return arg.substr(shortPrefix.size());
+    }
+    return std::nullopt;
+}
+
+template <typename Fn>
+bool waitForCondition(Fn&& fn,
+                      std::chrono::milliseconds timeout,
+                      std::chrono::milliseconds step =
+                          std::chrono::milliseconds(100)) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (fn()) {
+            return true;
+        }
+        std::this_thread::sleep_for(step);
+    }
+    return fn();
+}
 }
 
 std::string ProviderStreamDebugAudit::getId() const { return "provider_full_range"; }
 
 std::string ProviderStreamDebugAudit::getDescription() const {
-    return "Full-range provider stream test with complex history suites and chunk logging";
+    return "provider_full_range: Full-range provider stream test with complex history suites and chunk logging";
 }
 
 std::string ProviderStreamDebugAudit::resolveModelIdArg(
     const std::vector<std::string>& args) {
     for (size_t i = 1; i < args.size(); ++i) {
-        if (!args[i].empty() && args[i].rfind("--", 0) != 0) {
-            return args[i];
+        const auto& arg = args[i];
+        const bool consumesNext =
+            arg == "-p" || arg == "--purpose" || arg == "-x" ||
+            arg == "--provider" || arg == "-m" || arg == "--model" ||
+            arg == "-v" || arg == "--variant" || arg == "-C" ||
+            arg == "--cwd" || arg == "--model-variant" || arg == "-f" ||
+            arg == "--prompt-file" ||
+            arg == "--prompt-text" || arg == "--timeout-seconds";
+        if (consumesNext) {
+            ++i;
+            continue;
+        }
+        if (!arg.empty() && arg[0] != '-') {
+            return arg;
         }
     }
     return "";
@@ -737,6 +804,7 @@ shared::AuditResult ProviderStreamDebugAudit::run(const std::vector<std::string>
     if (args.empty()) {
         std::cerr << "Usage: firmius_audit --audit provider_full_range <provider_id> [model_id] [--history-variant=<variant>] [--history-suite=<suite>] [--variant=<model-variant>] [--show-history] [--raw-sse-log=<path>] [--raw-sse-stdout]" << std::endl;
         std::cerr << "       firmius_audit --audit provider_full_range <provider_id> [model_id] --thread-id=<threadId> [--thread-agent=<agentId>] [--variant=<model-variant>]" << std::endl;
+        std::cerr << "       firmius_audit --audit provider_full_range --live-agent -x <provider> -m <model> -p <purpose> [-v <variant>] -C <cwd> -f <prompt-file> [--timeout-seconds=<n>]" << std::endl;
         std::cerr << "Example: firmius_audit --audit provider_full_range antigravity claude-opus-4-6-thinking --variant=max --history-suite=full_range --show-history" << std::endl;
         std::cerr << std::endl;
         std::cerr << "History variants for testing edge cases:" << std::endl;
@@ -765,32 +833,54 @@ shared::AuditResult ProviderStreamDebugAudit::run(const std::vector<std::string>
     EnvLoader::load(".env.local");
     firmius::core::Engine::instance();
 
-    std::string providerName = args[0];
-    auto provider = ProviderRegistry::instance().getProvider(providerName);
-    if (!provider) {
-        std::cerr << "Unknown provider: " << providerName << std::endl;
-        result.exitCode = 1;
-        result.passed = false;
-        return result;
-    }
-
-    std::cout << "=== Provider Full Range Audit ===" << std::endl;
-    std::cout << "Provider: " << providerName << std::endl;
-
-    auto models = provider->listModels();
-    std::string modelId = resolveModelIdArg(args);
-    
-    // Parse history variant and thread flags
+    std::string providerName;
+    std::string modelId;
     std::string historyVariant = "default";
     std::string threadId;
     std::string threadAgentId;
     std::string modelVariantName;
     std::string historySuite;
     std::string rawSseLogPath;
+    std::string purpose = "lead";
+    std::string cwd;
+    std::string promptFile;
+    std::string promptText;
     bool showHistory = false;
     bool rawSseStdout = false;
-    for (const auto& arg : args) {
-        if (arg.find("--history-variant=") == 0) {
+    bool liveAgent = false;
+    int timeoutSeconds = 900;
+    std::vector<std::string> positionals;
+    for (size_t i = 0; i < args.size(); ++i) {
+        const auto& arg = args[i];
+        if (auto value = consumeOptionValue(args, i, arg, "--provider", "-x")) {
+            providerName = *value;
+        } else if (auto value =
+                       consumeOptionValue(args, i, arg, "--model", "-m")) {
+            modelId = *value;
+        } else if (auto value =
+                       consumeOptionValue(args, i, arg, "--purpose", "-p")) {
+            purpose = *value;
+        } else if (auto value =
+                       consumeOptionValue(args, i, arg, "--variant", "-v")) {
+            modelVariantName = *value;
+        } else if (auto value =
+                       consumeOptionValue(args, i, arg, "--model-variant")) {
+            modelVariantName = *value;
+        } else if (auto value =
+                       consumeOptionValue(args, i, arg, "--cwd", "-C")) {
+            cwd = *value;
+        } else if (auto value =
+                       consumeOptionValue(args, i, arg, "--prompt-file", "-f")) {
+            promptFile = *value;
+        } else if (auto value =
+                       consumeOptionValue(args, i, arg, "--prompt-text")) {
+            promptText = *value;
+        } else if (auto value =
+                       consumeOptionValue(args, i, arg, "--timeout-seconds")) {
+            timeoutSeconds = std::max(1, std::stoi(*value));
+        } else if (arg == "--live-agent" || arg == "--harness-live") {
+            liveAgent = true;
+        } else if (arg.find("--history-variant=") == 0) {
             historyVariant = arg.substr(18);
         } else if (arg.find("--history-suite=") == 0) {
             historySuite = arg.substr(16);
@@ -812,6 +902,19 @@ shared::AuditResult ProviderStreamDebugAudit::run(const std::vector<std::string>
             rawSseLogPath = "/tmp/firmius_provider_raw_sse.log";
         } else if (arg == "--show-history") {
             showHistory = true;
+        } else if (!arg.empty() && arg[0] != '-') {
+            positionals.push_back(arg);
+        }
+    }
+
+    if (providerName.empty() && !positionals.empty()) {
+        providerName = positionals[0];
+    }
+    if (modelId.empty()) {
+        if (liveAgent && positionals.size() > 1) {
+            modelId = positionals[1];
+        } else {
+            modelId = resolveModelIdArg(args);
         }
     }
 
@@ -821,6 +924,19 @@ shared::AuditResult ProviderStreamDebugAudit::run(const std::vector<std::string>
         result.passed = false;
         return result;
     }
+
+    auto provider = ProviderRegistry::instance().getProvider(providerName);
+    if (!provider) {
+        std::cerr << "Unknown provider: " << providerName << std::endl;
+        result.exitCode = 1;
+        result.passed = false;
+        return result;
+    }
+
+    std::cout << "=== Provider Full Range Audit ===" << std::endl;
+    std::cout << "Provider: " << providerName << std::endl;
+
+    auto models = provider->listModels();
 
     if (modelId.empty()) {
         // Pick a reasonable default
@@ -863,6 +979,17 @@ shared::AuditResult ProviderStreamDebugAudit::run(const std::vector<std::string>
     if (!modelVariantName.empty()) {
         std::cout << "Model Variant: " << modelVariantName << std::endl;
     }
+    if (liveAgent) {
+        std::cout << "Mode: live-agent" << std::endl;
+        std::cout << "Purpose: " << purpose << std::endl;
+        std::cout << "Timeout Seconds: " << timeoutSeconds << std::endl;
+        if (!cwd.empty()) {
+            std::cout << "Cwd: " << cwd << std::endl;
+        }
+        if (!promptFile.empty()) {
+            std::cout << "Prompt File: " << promptFile << std::endl;
+        }
+    }
     if (!rawSseLogPath.empty()) {
         std::cout << "Raw SSE Log: " << rawSseLogPath << std::endl;
     }
@@ -901,6 +1028,136 @@ shared::AuditResult ProviderStreamDebugAudit::run(const std::vector<std::string>
         unsetenv("FIRMIUS_ANTIGRAVITY_RAW_SSE_STDOUT");
         unsetenv("FIRMIUS_CODEX_RAW_SSE_STDOUT");
     }
+
+    auto runLiveAgentScenario = [&]() {
+        if (cwd.empty()) {
+            cwd = std::filesystem::current_path().string();
+        }
+        if (promptText.empty() && !promptFile.empty()) {
+            promptText = readFileContents(promptFile);
+        }
+        if (promptText.empty()) {
+            std::cerr << "Live-agent mode requires --prompt-file or --prompt-text" << std::endl;
+            return false;
+        }
+
+        auto& harness = firmius::core::Harness::instance();
+        harness.init();
+        harness.debugLogging = true;
+
+        HostCreationOptions hostOptions;
+        const std::string liveThreadId = harness.newThread(hostOptions, cwd, purpose);
+        if (liveThreadId.empty()) {
+            std::cerr << "Failed to create live-agent thread" << std::endl;
+            harness.shutdown();
+            return false;
+        }
+
+        if (modelVariantName.empty()) {
+            harness.switchModel(providerName, modelId);
+        } else {
+            harness.switchModel(providerName, modelId, modelVariantName);
+        }
+
+        std::cout << "--- Live Agent ---" << std::endl;
+        std::cout << "Thread: " << liveThreadId << std::endl;
+
+        std::mutex eventMutex;
+        std::string finalError;
+        std::string observedAgentId = harness.focusedAgentId();
+        int subId = harness.subscribe([&](const AppEvent& ev) {
+            if (auto* spawned = std::get_if<AgentSpawned>(&ev)) {
+                if (spawned->parentId.empty()) {
+                    std::lock_guard<std::mutex> lock(eventMutex);
+                    if (observedAgentId.empty()) {
+                        observedAgentId = spawned->agentId;
+                    }
+                }
+            } else if (auto* error = std::get_if<AgentError>(&ev)) {
+                std::lock_guard<std::mutex> lock(eventMutex);
+                if (observedAgentId.empty() && !error->agentId.empty()) {
+                    observedAgentId = error->agentId;
+                }
+                if (finalError.empty()) {
+                    finalError = error->message;
+                }
+            }
+        });
+
+        harness.send(promptText);
+        {
+            std::lock_guard<std::mutex> lock(eventMutex);
+            if (observedAgentId.empty()) {
+                observedAgentId = harness.focusedAgentId();
+            }
+            std::cout << "Agent: " << observedAgentId << std::endl;
+        }
+        const bool completed = waitForCondition(
+            [&]() {
+                std::string agentId;
+                {
+                    std::lock_guard<std::mutex> lock(eventMutex);
+                    if (observedAgentId.empty()) {
+                        observedAgentId = harness.focusedAgentId();
+                    }
+                    agentId = observedAgentId;
+                }
+                if (agentId.empty()) {
+                    return false;
+                }
+                auto agent =
+                    firmius::core::AgentRegistry::instance().getAgent(agentId);
+                if (!agent) {
+                    return false;
+                }
+                if (agent->isRunning() || agent->isBooting()) {
+                    return false;
+                }
+                const auto status = agent->getContext().state.currentStatus;
+                return status == AgentStatus::Idle || status == AgentStatus::Error ||
+                       status == AgentStatus::Cancelled;
+            },
+            std::chrono::seconds(timeoutSeconds),
+            std::chrono::milliseconds(250));
+
+        harness.unsubscribe(subId);
+
+        bool passed = completed;
+        std::string finalAgentId;
+        {
+            std::lock_guard<std::mutex> lock(eventMutex);
+            finalAgentId = observedAgentId.empty() ? harness.focusedAgentId()
+                                                   : observedAgentId;
+        }
+        auto agent =
+            firmius::core::AgentRegistry::instance().getAgent(finalAgentId);
+        std::cout << "--- Live Agent Summary ---" << std::endl;
+        std::cout << "Completed: " << (completed ? "yes" : "no") << std::endl;
+        std::cout << "Agent: " << finalAgentId << std::endl;
+        if (!agent) {
+            std::cout << "Status: missing agent" << std::endl;
+            passed = false;
+        } else {
+            const auto status = agent->getContext().state.currentStatus;
+            std::cout << "Status: " << static_cast<int>(status) << std::endl;
+            passed = passed && status != AgentStatus::Error &&
+                     status != AgentStatus::Cancelled;
+        }
+
+        const auto artifacts = harness.listArtifacts(liveThreadId);
+        std::cout << "Artifacts: " << artifacts.size() << std::endl;
+        for (const auto& artifact : artifacts) {
+            std::cout << "  artifact: " << artifact.ownerFriendlyName << "/"
+                      << artifact.filename << std::endl;
+        }
+        if (!finalError.empty()) {
+            std::cout << "Error: " << finalError << std::endl;
+            passed = false;
+        }
+
+        harness.shutdown();
+        return passed;
+    };
 
     auto runScenario = [&](const std::string& scenarioName,
                            const AgentHistory& history,
@@ -1016,7 +1273,9 @@ shared::AuditResult ProviderStreamDebugAudit::run(const std::vector<std::string>
     };
 
     bool allPassed = true;
-    if (!threadId.empty()) {
+    if (liveAgent) {
+        allPassed = runLiveAgentScenario();
+    } else if (!threadId.empty()) {
         firmius::core::ThreadManager tm(getFirmiusThreadsDir());
         if (threadAgentId.empty()) {
             auto manifest = tm.readAgentManifest(threadId);

@@ -15,6 +15,7 @@ using firmius::provider::CodexProvider;
 using firmius::shared::AgentMetrics;
 using firmius::shared::OAuthAccount;
 using firmius::shared::StreamEvent;
+using firmius::shared::ToolCall;
 using firmius::shared::ToolCallChunk;
 
 namespace firmius::provider {
@@ -253,6 +254,72 @@ TEST(CodexProvider, AvailableAccountRequiresPositiveCodexQuota) {
   EXPECT_FALSE(selected.has_value());
 }
 
+TEST(CodexProvider, StructuredWindowsExposePlanTierAndBlockWeeklyExhaustion) {
+  const auto tempHome = std::filesystem::temp_directory_path() /
+                        "firmius_codex_structured_windows_home";
+  std::filesystem::remove_all(tempHome);
+  std::filesystem::create_directories(tempHome / ".firmius");
+  ScopedHomeOverride scopedHome(tempHome);
+
+  const auto futureSeconds =
+      std::chrono::system_clock::to_time_t(std::chrono::system_clock::now()) +
+      86400;
+  const std::string accessToken = makeJwt(
+      R"({"https://api.openai.com/profile":{"email":"window@example.com"},"https://api.openai.com/auth":{"chatgpt_account_id":"id-window"},"chatgpt_plan_type":"pro"})");
+  const std::filesystem::path oauthPath = tempHome / ".firmius" / "oauth.json";
+  std::ofstream out(oauthPath);
+  out << R"({"codex":[)"
+      << R"({"identifier":"window@example.com","refreshToken":"r1","accessToken":")"
+      << accessToken << R"(","tokenExpiration":)" << futureSeconds
+      << R"(,"metadata":{"chatgpt_account_id":"id-window","quota:codex":"1","quota:codex:primary":"1","quota_reset:codex:primary":"1774834810","quota_window_minutes:codex:primary":"300","quota:codex:secondary":"0","quota_reset:codex:secondary":"1775000000","quota_window_minutes:codex:secondary":"10080"}}]})";
+  out.close();
+
+  CodexProvider provider;
+  const auto &accounts = provider.getAccounts();
+  ASSERT_EQ(accounts.size(), 1u);
+  ASSERT_TRUE(accounts.front().metadata.count("chatgpt_plan_type"));
+  EXPECT_EQ(accounts.front().metadata.at("chatgpt_plan_type"), "pro");
+
+  const auto quotas = provider.getAllQuotas();
+  auto quotaIt = quotas.find("window@example.com");
+  ASSERT_NE(quotaIt, quotas.end());
+  ASSERT_EQ(quotaIt->second.size(), 2u);
+  EXPECT_EQ(quotaIt->second[0].name, "5h limit");
+  EXPECT_EQ(quotaIt->second[1].name, "weekly limit");
+  EXPECT_EQ(quotaIt->second[0].note, "Plan: Pro");
+  EXPECT_TRUE(quotaIt->second[1].note.empty());
+
+  auto selected = provider.getAvailableAccount(std::string("gpt-5.2-codex"));
+  EXPECT_FALSE(selected.has_value());
+}
+
+TEST(CodexProvider, AvailableAccountUsesControllingWindowAcrossAccounts) {
+  const auto tempHome = std::filesystem::temp_directory_path() /
+                        "firmius_codex_controlling_window_home";
+  std::filesystem::remove_all(tempHome);
+  std::filesystem::create_directories(tempHome / ".firmius");
+  ScopedHomeOverride scopedHome(tempHome);
+
+  const auto futureSeconds =
+      std::chrono::system_clock::to_time_t(std::chrono::system_clock::now()) +
+      86400;
+  const std::filesystem::path oauthPath = tempHome / ".firmius" / "oauth.json";
+  std::ofstream out(oauthPath);
+  out << R"({"codex":[)"
+      << R"({"identifier":"blocked@example.com","refreshToken":"r1","accessToken":"a1","tokenExpiration":)"
+      << futureSeconds
+      << R"(,"metadata":{"chatgpt_account_id":"id-blocked","quota:codex":"1","quota:codex:primary":"1","quota_window_minutes:codex:primary":"300","quota:codex:secondary":"0","quota_window_minutes:codex:secondary":"10080"}},)"
+      << R"({"identifier":"usable@example.com","refreshToken":"r2","accessToken":"a2","tokenExpiration":)"
+      << futureSeconds
+      << R"(,"metadata":{"chatgpt_account_id":"id-usable","quota:codex:primary":"0.4","quota_window_minutes:codex:primary":"300","quota:codex:secondary":"0.3","quota_window_minutes:codex:secondary":"10080"}}]})";
+  out.close();
+
+  CodexProvider provider;
+  auto selected = provider.getAvailableAccount(std::string("gpt-5.2-codex"));
+  ASSERT_TRUE(selected.has_value());
+  EXPECT_EQ(selected->getIdentifier(), "usable@example.com");
+}
+
 TEST(CodexProvider, ProcessSseLineEmitsToolChunkFromOutputItemDone) {
   CodexProvider provider;
   std::vector<StreamEvent> events;
@@ -296,12 +363,17 @@ TEST(CodexProvider,
       R"(data: {"type":"response.function_call_arguments.done","output_index":0,"arguments":"{\"path\":\"notes.md\"}"})",
       onEvent, metrics, metricsReceived, doneReceived, tracker);
 
-  ASSERT_EQ(events.size(), 2u);
-  const auto *chunk = std::get_if<ToolCallChunk>(&events.back());
+  ASSERT_EQ(events.size(), 3u);
+  const auto *chunk = std::get_if<ToolCallChunk>(&events[1]);
   ASSERT_NE(chunk, nullptr);
   EXPECT_EQ(chunk->id, "call_2");
   EXPECT_EQ(chunk->index, 0u);
   EXPECT_EQ(chunk->argsDelta, R"({"path":"notes.md"})");
+  const auto *finalCall = std::get_if<ToolCall>(&events.back());
+  ASSERT_NE(finalCall, nullptr);
+  EXPECT_EQ(finalCall->id, "call_2");
+  EXPECT_EQ(finalCall->name, "write_file");
+  EXPECT_EQ(finalCall->args, R"({"path":"notes.md"})");
 }
 
 TEST(CodexProvider, ProcessSseLineDoesNotDuplicateDonePayloadAfterDeltas) {
@@ -327,9 +399,64 @@ TEST(CodexProvider, ProcessSseLineDoesNotDuplicateDonePayloadAfterDeltas) {
       R"(data: {"type":"response.function_call_arguments.done","output_index":1,"arguments":"{\"path\":\"src\"}"})",
       onEvent, metrics, metricsReceived, doneReceived, tracker);
 
-  ASSERT_EQ(events.size(), 2u);
-  const auto *chunk = std::get_if<ToolCallChunk>(&events.back());
+  ASSERT_EQ(events.size(), 3u);
+  const auto *chunk = std::get_if<ToolCallChunk>(&events[1]);
   ASSERT_NE(chunk, nullptr);
   EXPECT_EQ(chunk->id, "call_3");
   EXPECT_EQ(chunk->argsDelta, R"({"path":"src"})");
+  const auto *finalCall = std::get_if<ToolCall>(&events.back());
+  ASSERT_NE(finalCall, nullptr);
+  EXPECT_EQ(finalCall->id, "call_3");
+  EXPECT_EQ(finalCall->name, "artifact_list");
+  EXPECT_EQ(finalCall->args, R"({"path":"src"})");
+}
+
+TEST(CodexProvider, ProcessSseLineFinalizesLongInterleavedToolCalls) {
+  CodexProvider provider;
+  std::vector<StreamEvent> events;
+  AgentMetrics metrics;
+  bool metricsReceived = false;
+  bool doneReceived = false;
+  CodexProviderTestAccessor::ToolCallTracker tracker;
+  std::function<void(const StreamEvent &)> onEvent =
+      [&](const StreamEvent &event) { events.push_back(event); };
+
+  CodexProviderTestAccessor::processSseLine(
+      provider,
+      R"(data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_10","call_id":"call_10","name":"artifact_write"}})",
+      onEvent, metrics, metricsReceived, doneReceived, tracker);
+  CodexProviderTestAccessor::processSseLine(
+      provider,
+      R"(data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\"path\":\"plans/repair.md\",\"content\":\""})",
+      onEvent, metrics, metricsReceived, doneReceived, tracker);
+  CodexProviderTestAccessor::processSseLine(
+      provider,
+      R"(data: {"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","id":"fc_11","call_id":"call_11","name":"search"}})",
+      onEvent, metrics, metricsReceived, doneReceived, tracker);
+  CodexProviderTestAccessor::processSseLine(
+      provider,
+      R"(data: {"type":"response.function_call_arguments.done","output_index":1,"arguments":"{\"query\":\"tool finalization\"}"})",
+      onEvent, metrics, metricsReceived, doneReceived, tracker);
+  CodexProviderTestAccessor::processSseLine(
+      provider,
+      R"(data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"draft body"})",
+      onEvent, metrics, metricsReceived, doneReceived, tracker);
+  CodexProviderTestAccessor::processSseLine(
+      provider,
+      R"(data: {"type":"response.function_call_arguments.done","output_index":0,"arguments":"{\"path\":\"plans/repair.md\",\"content\":\"draft body\"}"})",
+      onEvent, metrics, metricsReceived, doneReceived, tracker);
+
+  ASSERT_EQ(events.size(), 8u);
+  const auto *searchFinal = std::get_if<ToolCall>(&events[4]);
+  ASSERT_NE(searchFinal, nullptr);
+  EXPECT_EQ(searchFinal->id, "call_11");
+  EXPECT_EQ(searchFinal->name, "search");
+  EXPECT_EQ(searchFinal->args, R"({"query":"tool finalization"})");
+
+  const auto *artifactFinal = std::get_if<ToolCall>(&events.back());
+  ASSERT_NE(artifactFinal, nullptr);
+  EXPECT_EQ(artifactFinal->id, "call_10");
+  EXPECT_EQ(artifactFinal->name, "artifact_write");
+  EXPECT_EQ(artifactFinal->args,
+            R"({"path":"plans/repair.md","content":"draft body"})");
 }

@@ -1,6 +1,8 @@
 #include "components/ErrorDisplay.hpp"
 
 #include "components/Markdown.hpp"
+#include "components/GlintEffect.hpp"
+#include "utils/Icons.hpp"
 #include <algorithm>
 #include <cctype>
 #include <rapidjson/document.h>
@@ -290,6 +292,220 @@ ftxui::Element renderNoticeCard(const Theme &theme, const std::string &title,
 
 } // namespace
 
+bool isRollingLifecycleActive(const std::string &lifecycle) {
+  std::string normalized = lifecycle;
+  std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                 [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+  static const std::vector<std::string> terminal_states = {
+      "complete", "completed", "success", "failed", "cancelled",
+      "canceled", "done", "finished", "error"};
+  return std::find(terminal_states.begin(), terminal_states.end(), normalized) ==
+         terminal_states.end();
+}
+
+std::string normalizeRollingField(const std::string &value) {
+  std::string normalized = value;
+  std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                 [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+  return normalized;
+}
+
+bool isObservationEventKind(const std::string &event_kind) {
+  return normalizeRollingField(event_kind) == "observation";
+}
+
+bool isObservationSummarizingLifecycle(const std::string &lifecycle) {
+  const auto normalized = normalizeRollingField(lifecycle);
+  static const std::vector<std::string> states = {"start", "buffering",
+                                                  "inprogress", "in_progress"};
+  return std::find(states.begin(), states.end(), normalized) != states.end();
+}
+
+bool isObservationCompletedLifecycle(const std::string &lifecycle) {
+  const auto normalized = normalizeRollingField(lifecycle);
+  static const std::vector<std::string> states = {"complete", "completed",
+                                                  "done", "finished", "success"};
+  return std::find(states.begin(), states.end(), normalized) != states.end();
+}
+
+bool isObservationActivatedLifecycle(const std::string &lifecycle) {
+  const auto normalized = normalizeRollingField(lifecycle);
+  static const std::vector<std::string> states = {"activate", "activated",
+                                                  "activation"};
+  return std::find(states.begin(), states.end(), normalized) != states.end();
+}
+
+std::string rollingRangeText(const firmius::shared::RollingNoticeMetadata &meta) {
+  const std::string start = meta.sourceStartTurnId ? *meta.sourceStartTurnId : "?";
+  const std::string end = meta.sourceEndTurnId ? *meta.sourceEndTurnId : "?";
+  return start + " .. " + end;
+}
+
+ftxui::Element renderRollingFactRow(const Theme &theme, const std::string &label,
+                                    const std::string &value) {
+  return ftxui::hbox({
+      ftxui::text(label + ": ") | ftxui::color(theme.base.dim),
+      ftxui::paragraph(value) | ftxui::color(theme.base.fg),
+  });
+}
+
+ftxui::Element renderObservationNoticeCompact(
+    const Theme &theme, const firmius::shared::RollingNoticeMetadata &meta,
+    const bool summarizing, const bool completed, const bool activated) {
+  const auto accent = theme.status_bar.compacting.normal.fg;
+  const std::string range = rollingRangeText(meta);
+
+  std::string icon = firmius::shared::ICON_WAIT;
+  std::string text;
+  std::string stat;
+  if (summarizing) {
+    text = "Observing turns " + range + "...";
+    if (meta.sourceTokens) {
+      stat = "↑" + std::to_string(*meta.sourceTokens) + " src";
+    }
+  } else if (completed) {
+    icon = firmius::shared::ICON_CHECK;
+    text = "Observed turns " + range + ".";
+    if (meta.summaryTokens) {
+      stat = "↓" + std::to_string(*meta.summaryTokens) + " out";
+    }
+  } else if (activated) {
+    icon = firmius::shared::ICON_BRAIN;
+    text = "Activated observation for turns " + range + ".";
+  }
+
+  auto text_element = ftxui::text(text) | ftxui::color(theme.base.fg);
+  if (summarizing) {
+    GlintConfig glint_cfg;
+    glint_cfg.target = GlintConfig::Target::Text;
+    glint_cfg.gradientColors = {theme.base.fg, theme.base.highlight, theme.base.fg};
+    glint_cfg.glintSize = 8;
+    glint_cfg.intervalSeconds = 0.9f;
+    glint_cfg.durationSeconds = 0.8f;
+    glint_cfg.easing = GlintEasing::EaseInOut;
+    text_element = GlintEffect(text_element, glint_cfg)->Render();
+  }
+
+  ftxui::Elements row;
+  row.push_back(ftxui::text(icon + " ") | ftxui::bold | ftxui::color(accent));
+  row.push_back(text_element);
+  if (!stat.empty()) {
+    row.push_back(ftxui::text(" " + stat) | ftxui::color(theme.base.dim));
+  }
+
+  return ftxui::hbox(std::move(row)) | ftxui::xflex;
+}
+
+ftxui::Element renderRollingNotice(const Theme &theme,
+                                   const firmius::shared::NoticeContent &notice) {
+  const auto &meta = *notice.rollingMetadata;
+  const bool observation = isObservationEventKind(meta.eventKind);
+  const bool observation_summarizing =
+      observation && isObservationSummarizingLifecycle(meta.lifecycle);
+  const bool observation_completed =
+      observation && isObservationCompletedLifecycle(meta.lifecycle);
+  const bool observation_activated =
+      observation && isObservationActivatedLifecycle(meta.lifecycle);
+  if (observation &&
+      (observation_summarizing || observation_completed ||
+       observation_activated)) {
+    return renderObservationNoticeCompact(theme, meta, observation_summarizing,
+                                          observation_completed,
+                                          observation_activated);
+  }
+
+  const bool active = isRollingLifecycleActive(meta.lifecycle);
+
+  const auto accent = theme.status_bar.compacting.normal.fg;
+  const auto bg = theme.status_bar.compacting.normal.bg;
+
+  auto brand = ftxui::text(" ROLLING MEMORY ") | ftxui::bold |
+               ftxui::color(accent);
+
+  ftxui::Elements header_parts;
+  header_parts.push_back(ftxui::text(" ") | ftxui::bgcolor(accent));
+  header_parts.push_back(brand);
+  if (active) {
+    auto active_badge = ftxui::text(" [ ACTIVE ] ") | ftxui::bold |
+                        ftxui::color(theme.status_bar.streaming.normal.fg);
+    header_parts.push_back(active_badge);
+  }
+  header_parts.push_back(ftxui::text(" [" + meta.lifecycle + "] ") | ftxui::bold |
+                         ftxui::color(theme.base.fg));
+  if (!meta.eventKind.empty()) {
+    header_parts.push_back(ftxui::text(" " + meta.eventKind + " ") |
+                           ftxui::color(theme.base.dim));
+  }
+
+  ftxui::Elements facts;
+  if (meta.modelLabel) {
+    facts.push_back(renderRollingFactRow(theme, "Model", *meta.modelLabel));
+  }
+  if (meta.sourceStartTurnId || meta.sourceEndTurnId) {
+    const std::string start =
+        meta.sourceStartTurnId ? *meta.sourceStartTurnId : "?";
+    const std::string end =
+        meta.sourceEndTurnId ? *meta.sourceEndTurnId : "?";
+    facts.push_back(renderRollingFactRow(theme, "Range", start + " -> " + end));
+  }
+  if (meta.sourceTurnCount) {
+    facts.push_back(renderRollingFactRow(theme, "Turns",
+                                         std::to_string(*meta.sourceTurnCount)));
+  }
+  if (meta.sourceChunkCount) {
+    facts.push_back(renderRollingFactRow(theme, "Chunks",
+                                         std::to_string(*meta.sourceChunkCount)));
+  }
+  if (meta.sourceTokens) {
+    facts.push_back(renderRollingFactRow(theme, "Source tokens",
+                                         std::to_string(*meta.sourceTokens)));
+  }
+  if (meta.summaryTokens) {
+    facts.push_back(renderRollingFactRow(theme, "Summary tokens",
+                                         std::to_string(*meta.summaryTokens)));
+  }
+  if (meta.savedTokens) {
+    facts.push_back(renderRollingFactRow(theme, "Saved tokens",
+                                         std::to_string(*meta.savedTokens)));
+  }
+
+  ftxui::Elements body;
+  auto header = ftxui::hbox(std::move(header_parts)) | ftxui::xflex;
+  if (active) {
+    GlintConfig glint_cfg;
+    glint_cfg.target = GlintConfig::Target::Background;
+    glint_cfg.gradientColors = {theme.status_bar.compacting.normal.bg,
+                                theme.base.highlight,
+                                theme.status_bar.compacting.normal.bg};
+    glint_cfg.glintSize = 10;
+    glint_cfg.intervalSeconds = 0.9f;
+    glint_cfg.durationSeconds = 0.8f;
+    glint_cfg.easing = GlintEasing::EaseInOut;
+    header = GlintEffect(header, glint_cfg)->Render();
+  }
+  body.push_back(header);
+  if (!notice.title.empty()) {
+    body.push_back(ftxui::text(notice.title) | ftxui::bold |
+                   ftxui::color(theme.base.fg));
+  }
+  if (!notice.message.empty()) {
+    body.push_back(ftxui::paragraph(notice.message) | ftxui::color(theme.base.fg));
+  }
+  if (!facts.empty()) {
+    body.push_back(ftxui::vbox(std::move(facts)) |
+                   ftxui::bgcolor(theme.chat.markdown.code_bg) |
+                   ftxui::color(theme.chat.markdown.code_fg));
+  }
+  if (!notice.details.empty()) {
+    body.push_back(ftxui::paragraph(notice.details) | ftxui::color(theme.base.dim));
+  }
+
+  return ftxui::vbox(std::move(body)) | ftxui::borderStyled(ftxui::ROUNDED) |
+         ftxui::color(accent) | ftxui::bgcolor(bg) | ftxui::xflex;
+}
+
+
+
 ParsedErrorDetails ParseErrorDetails(const std::string &details) {
   ParsedErrorDetails parsed;
   if (details.empty()) return parsed;
@@ -392,9 +608,13 @@ ParsedErrorDetails ParseErrorDetails(const std::string &details) {
 
 ftxui::Element RenderNoticeDisplay(const Theme &theme,
                                    const firmius::shared::NoticeContent &notice) {
+  if (notice.rollingMetadata) {
+    return renderRollingNotice(theme, notice);
+  }
   return renderNoticeCard(theme, notice.title, notice.message, notice.details,
                           notice.severity, {});
 }
+
 
 ftxui::Element RenderErrorDisplay(const Theme &theme,
                                    const firmius::shared::ErrorContent &error) {

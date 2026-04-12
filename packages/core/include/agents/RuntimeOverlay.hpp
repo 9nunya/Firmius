@@ -12,7 +12,7 @@ shared::AgentHistory buildRequestHistoryWithRuntimeOverlays(
     const shared::AgentContext& context, shared::IHost& host,
     shared::IWorkspace& workspace);
 
-void reconcileSuccessfulToolResult(const shared::AgentContext& context,
+void reconcileSuccessfulToolResult(shared::AgentContext& context,
                                    shared::IHost& host,
                                    shared::IWorkspace& workspace,
                                    const std::string& toolName,
@@ -23,6 +23,10 @@ void refreshFileWatch(const shared::AgentContext& context,
                       shared::IHost& host,
                       shared::IWorkspace& workspace,
                       const std::string& path);
+void reconstructStateFromHistory(shared::AgentContext& context,
+                               shared::IHost& host,
+                               shared::IWorkspace& workspace);
+
 
 } // namespace firmius::core::runtime_overlay
 

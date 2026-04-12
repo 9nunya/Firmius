@@ -1,4 +1,5 @@
 #include "benchmarks/AgentBench.hpp"
+#include "agents/ContextBudget.hpp"
 #include "utils/Logger.hpp"
 #include <curl/curl.h>
 #include <fstream>
@@ -107,6 +108,9 @@ BenchmarkResult AgentBench::runTask(const std::string& taskId) {
 
     result.passed = passed;
     result.output = passed ? "Task passed" : "Task failed";
+    result.metrics = session.getAgent().getContext().aggregateMetrics;
+    result.output += "\nMetrics: " +
+                     summarizeContextWindowMetrics(result.metrics.context, 4);
     session.emitLog("AgentBench: evaluation result for task " + taskId + " = " +
                     std::string(passed ? "PASS" : "FAIL") + ".");
     Logger::instance().logDebug("DEBUG: Evaluation result: " +

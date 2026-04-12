@@ -1,8 +1,10 @@
 #ifndef FIRMIUS_SHARED_METRICS_HPP
 #define FIRMIUS_SHARED_METRICS_HPP
 
-#include <cstdint>
 #include <algorithm>
+#include <cstdint>
+#include <string>
+#include <vector>
 
 /**
  * @brief Telemetry and performance tracking types.
@@ -26,6 +28,35 @@ struct TokenMetrics {
 };
 
 /**
+ * @brief One labeled contribution to the context sent to the model.
+ */
+struct ContextBucketMetrics {
+  std::string label;              ///< Stable bucket label.
+  std::uint32_t estimatedTokens = 0; ///< Pre-send estimate for this bucket.
+  std::uint32_t actualTokens = 0;    ///< Reconciled prompt-token share.
+
+  bool operator==(const ContextBucketMetrics& other) const = default;
+};
+
+/**
+ * @brief Latest context accounting snapshot for a model request.
+ */
+struct ContextWindowMetrics {
+  std::uint32_t sentTokens = 0;        ///< Estimated total prompt tokens before provider usage arrives.
+  std::uint32_t rawPromptTokens = 0;   ///< Provider-reported prompt/context total before cache subtraction.
+  std::uint32_t billedPromptTokens = 0; ///< Provider-billed prompt tokens after cache subtraction.
+  std::uint32_t reserveTokens = 0;     ///< Unallocated remainder after reconciliation.
+  std::vector<ContextBucketMetrics> buckets;
+
+  [[nodiscard]] bool empty() const {
+    return sentTokens == 0 && rawPromptTokens == 0 && billedPromptTokens == 0 &&
+           reserveTokens == 0 && buckets.empty();
+  }
+
+  bool operator==(const ContextWindowMetrics& other) const = default;
+};
+
+/**
  * @brief Tracks latency and execution timing.
  */
 struct TimingMetrics {
@@ -44,6 +75,7 @@ struct AgentMetrics {
   TokenMetrics tokens;      ///< Token consumption details.
   TimingMetrics timing;     ///< Latency details.
   double estimatedCostUsd = 0.0; ///< Calculated cost of the request.
+  ContextWindowMetrics context;   ///< Latest context-bucketing snapshot.
 
   /**
    * @brief Accumulates metrics from another instance.
@@ -71,6 +103,9 @@ struct AgentMetrics {
     timing.endMs = std::max(timing.endMs, other.timing.endMs);
     timing.toolExecutionMs += other.timing.toolExecutionMs;
     estimatedCostUsd += other.estimatedCostUsd;
+    if (!other.context.empty()) {
+      context = other.context;
+    }
     return *this;
   }
 

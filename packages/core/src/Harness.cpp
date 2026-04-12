@@ -2,6 +2,7 @@
 #include "AgentRegistry.hpp"
 #include "Engine.hpp"
 #include "IHost.hpp"
+#include "agents/ContextBudget.hpp"
 #include "agents/HintingLoader.hpp"
 #include "agents/PurposeLoader.hpp"
 #include "artifacts/ReferenceExpansion.hpp"
@@ -168,7 +169,7 @@ void persistSessionState(const std::string &threadId,
                   a);
   }
   const std::string cwd = currentWorkingDirectoryForComparison();
-  if (!cwd.empty()) {
+  if (!threadId.empty() && !cwd.empty()) {
     doc.AddMember("cwd", rapidjson::Value(cwd.c_str(), a), a);
   }
 
@@ -315,6 +316,7 @@ void Harness::init() {
 
   PurposeLoader::bootstrapDefaults("prompts/");
   HintingLoader::bootstrapDefaults("hinting/");
+  WorkflowLoader::bootstrapDefaults("workflows/");
   shared::ConfigLoader::instance().load();
 
   auto containers = DockerHost::listContainersWithLabel(OWNER_PID_LABEL);
@@ -608,19 +610,7 @@ bool Harness::resumeLast() {
     return bestThreadId;
   };
 
-  auto savedThreadMatchesCwd = [&](const std::string &candidateThreadId) {
-    if (candidateThreadId.empty()) {
-      return false;
-    }
-    try {
-      const auto metadata = threadManager_.getMetadata(candidateThreadId);
-      return normalizePathForComparison(metadata.cwd) == currentCwd;
-    } catch (...) {
-      return false;
-    }
-  };
-
-  if (threadId.empty() || !savedThreadMatchesCwd(threadId)) {
+  if (threadId.empty()) {
     threadId = chooseMostRecentThreadForCwd(currentCwd);
     if (!threadId.empty()) {
       std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -941,14 +931,6 @@ void Harness::emitEvent(const firmius::shared::AppEvent &event) {
             }
             state.name += ev.nameDelta;
             state.args += ev.argsDelta;
-            if (state.phase == DebugToolPhase::Preparing &&
-                !state.args.empty()) {
-              // Transition to Called phase when we have args
-              state.phase = DebugToolPhase::Called;
-              std::string summary = SummarizeToolCall(
-                  state.name, state.args, firmius::shared::ToolPhase::Called);
-              std::cout << "\n--> Called: " << summary << std::endl;
-            }
           } else if constexpr (std::is_same_v<T, AgentToolCall>) {
             // Track complete tool call
             auto &state = debugToolStates_[ev.toolCallId];
@@ -968,13 +950,10 @@ void Harness::emitEvent(const firmius::shared::AppEvent &event) {
             if (!ev.toolArgs.empty())
               state.args = ev.toolArgs;
             debugAgentToolMap_[ev.agentId] = ev.toolCallId;
-            if (isNewCall && !ev.toolArgs.empty()) {
-              // If args came with the call, also show Called
-              state.phase = DebugToolPhase::Called;
-              std::string summary = SummarizeToolCall(
-                  state.name, state.args, firmius::shared::ToolPhase::Called);
-              std::cout << "\n--> Called: " << summary << std::endl;
-            }
+            state.phase = DebugToolPhase::Called;
+            std::string summary = SummarizeToolCall(
+                state.name, state.args, firmius::shared::ToolPhase::Called);
+            std::cout << "\n--> Called: " << summary << std::endl;
           } else if constexpr (std::is_same_v<T, AgentTurnCompleted>) {
             // Get context size from aggregate metrics
             uint32_t contextSize = ev.aggregateMetrics.tokens.contextSize;
@@ -1024,6 +1003,11 @@ void Harness::emitEvent(const firmius::shared::AppEvent &event) {
               std::cout << "\n-- " << shortId << " " << displayName << " T"
                         << turnNum << " (CTX: " << contextSize << ") ["
                         << modelInfo << "] --" << std::endl;
+              const std::string contextSummary =
+                  summarizeContextWindowMetrics(ev.aggregateMetrics.context, 3);
+              if (!contextSummary.empty() && contextSummary != "sent=0") {
+                std::cout << "   context> " << contextSummary << std::endl;
+              }
             }
 
             // Show tool results from this turn (Finished phase)
@@ -2679,16 +2663,14 @@ std::shared_ptr<shared::AgentHistory>
 Harness::getAgentHistoryPtr(const std::string &agentId) const {
   std::lock_guard<std::recursive_mutex> lock(
       const_cast<std::recursive_mutex &>(mutex_));
-  if (!agentId.empty()) {
-    auto agent = AgentRegistry::instance().getAgent(agentId);
-    if (agent) {
-      return agent->getContext().history;
-    }
-  }
   if (currentThreadId_.empty())
-    return std::make_shared<shared::AgentHistory>();
-  return std::make_shared<shared::AgentHistory>(
-      threadManager_.loadAgentHistory(currentThreadId_, agentId));
+    return nullptr;
+
+  auto history = threadManager_.loadAgentHistory(currentThreadId_, agentId);
+  if (history.turns.empty()) {
+    return nullptr;
+  }
+  return std::make_shared<shared::AgentHistory>(std::move(history));
 }
 
 std::vector<shared::OAuthAccount>

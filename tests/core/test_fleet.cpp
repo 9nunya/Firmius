@@ -268,15 +268,13 @@ int main() {
     return 1;
   }
 
-  const std::string journalPath = ThreadManager::defaultBasePath() + "/" +
-                                  ephemeralThread + "/" + ephemeralId +
-                                  ".jsonl";
-  if (std::filesystem::exists(journalPath)) {
-    std::cerr << "FAILURE: Journal file exists for ephemeral agent!"
+  auto ephemeralHistory = tm.loadAgentHistory(ephemeralThread, ephemeralId);
+  if (!ephemeralHistory.turns.empty()) {
+    std::cerr << "FAILURE: Persisted turns exist for ephemeral agent!"
               << std::endl;
     return 1;
   }
-  std::cout << "Verified: No journal for ephemeral agent." << std::endl;
+  std::cout << "Verified: No persisted history for ephemeral agent." << std::endl;
 
   std::cout << "Total events captured: " << eventCount.load() << std::endl;
   std::cout << "Total turn completions: " << turnCount.load() << std::endl;

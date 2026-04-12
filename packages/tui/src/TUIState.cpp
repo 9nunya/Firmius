@@ -7,6 +7,8 @@
 #include "UIState.hpp"
 #include "UserPreferences.hpp"
 #include "WorkPanelLayout.hpp"
+#include "agents/ContextBudget.hpp"
+#include "agents/RollingContextManager.hpp"
 #include "agents/PurposeLoader.hpp"
 #include "commands/CommandManager.hpp"
 #include "components/AgentStrip.hpp"
@@ -27,12 +29,17 @@
 #include "modals/ModalRegistry.hpp"
 #include "modals/ThreadLockedModal.hpp"
 #include "persistence/ThreadManager.hpp"
+#include "providers/BaseAPIKeyProvider.hpp"
+#include "providers/BaseOAuthProvider.hpp"
 #include "providers/ProviderRegistry.hpp"
+#include "utils/Icons.hpp"
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
+#include <ftxui/component/animation.hpp>
 #include <ftxui/component/component.hpp>
 #include <ftxui/dom/node.hpp>
 #include <ftxui/dom/elements.hpp>
@@ -48,6 +55,91 @@
 namespace firmius::tui {
 
 using namespace firmius::shared;
+
+namespace detail {
+
+std::string summarizeQuotaBucketsForModel(
+    const std::vector<firmius::shared::QuotaBucket> &buckets,
+    const std::string &modelId) {
+  if (buckets.empty()) {
+    return "";
+  }
+
+  auto normalize = [](std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char c) {
+                     return static_cast<char>(std::tolower(c));
+                   });
+    std::replace(value.begin(), value.end(), '_', '-');
+    value.erase(std::remove_if(value.begin(), value.end(),
+                               [](unsigned char c) { return std::isspace(c); }),
+                value.end());
+    return value;
+  };
+
+  auto icon = [](const std::string &name) {
+    std::string lower = name;
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+                   [](unsigned char c) {
+                     return static_cast<char>(std::tolower(c));
+                   });
+    if (lower.find("5h") != std::string::npos ||
+        lower.find("hour") != std::string::npos) {
+      return std::string("󱑂");
+    }
+    if (lower.find("weekly") != std::string::npos ||
+        lower.find("week") != std::string::npos) {
+      return std::string("󰃭");
+    }
+    if (lower.find("monthly") != std::string::npos ||
+        lower.find("month") != std::string::npos) {
+      return std::string("󰃮");
+    }
+    if (lower.find("annual") != std::string::npos ||
+        lower.find("year") != std::string::npos) {
+      return std::string("󰸗");
+    }
+    if (lower.find("credit") != std::string::npos ||
+        lower.find("balance") != std::string::npos) {
+      return std::string("󰆧");
+    }
+    if (lower.find("qwen") != std::string::npos) {
+      return std::string("󰘦");
+    }
+    return std::string(firmius::shared::ICON_WARNING);
+  };
+
+  auto format = [&icon](const firmius::shared::QuotaBucket &bucket) {
+    std::ostringstream out;
+    out << icon(bucket.name) << " " << std::fixed
+        << std::setprecision(0) << (bucket.remainingFraction * 100.0f) << "%";
+    return out.str();
+  };
+
+  const std::string normalizedModel = normalize(modelId);
+  if (!normalizedModel.empty()) {
+    for (const auto &bucket : buckets) {
+      if (normalize(bucket.name) == normalizedModel) {
+        return format(bucket);
+      }
+    }
+
+    for (const auto &bucket : buckets) {
+      const std::string normalizedBucket = normalize(bucket.name);
+      if (normalizedBucket.empty()) {
+        continue;
+      }
+      if (normalizedBucket.find(normalizedModel) != std::string::npos ||
+          normalizedModel.find(normalizedBucket) != std::string::npos) {
+        return format(bucket);
+      }
+    }
+  }
+
+  return format(buckets.front());
+}
+
+} // namespace detail
 
 namespace {
 
@@ -223,30 +315,22 @@ const firmius::shared::AgentHistory* resolveAgentHistoryForThread(
     firmius::core::Harness* harness, const std::string& thread_id,
     const std::string& agent_id,
     std::shared_ptr<firmius::shared::AgentHistory>* owned_history = nullptr) {
-  if (!harness || agent_id.empty()) {
+  (void)harness;
+  if (agent_id.empty()) {
     return nullptr;
-  }
-  auto live = harness->getAgentHistoryPtr(agent_id);
-  if (live) {
-    if (owned_history) {
-      *owned_history = expandHistoryForTranscript(thread_id, agent_id, *live);
-      return owned_history->get();
-    }
-    return live.get();
   }
   if (thread_id.empty()) {
     return nullptr;
   }
-  auto fallback_hist =
-      firmius::core::ThreadManager(
-          std::string(std::getenv("HOME") ? std::getenv("HOME") : "/tmp") +
-          "/.firmius/threads")
-          .loadAgentHistory(thread_id, agent_id);
-  if (fallback_hist.turns.empty()) {
+  auto history = firmius::core::ThreadManager(
+                     firmius::core::ThreadManager::defaultBasePath())
+                     .loadAgentHistory(thread_id, agent_id);
+  if (history.turns.empty()) {
     return nullptr;
   }
   if (owned_history) {
-    *owned_history = expandHistoryForTranscript(thread_id, agent_id, fallback_hist);
+    *owned_history =
+        expandHistoryForTranscript(thread_id, agent_id, history);
     return owned_history->get();
   }
   return nullptr;
@@ -303,6 +387,112 @@ static std::string statusToString(shared::AgentStatus status) {
   return "unknown";
 }
 
+static std::string formatCompactCount(uint32_t value) {
+  std::ostringstream out;
+  if (value >= 1000000) {
+    out << std::fixed << std::setprecision(1)
+        << (static_cast<double>(value) / 1000000.0);
+    std::string text = out.str();
+    if (text.size() > 2 && text.substr(text.size() - 2) == ".0") {
+      text.erase(text.size() - 2);
+    }
+    return text + "M";
+  }
+  if (value >= 1000) {
+    out << std::fixed << std::setprecision(1)
+        << (static_cast<double>(value) / 1000.0);
+    std::string text = out.str();
+    if (text.size() > 2 && text.substr(text.size() - 2) == ".0") {
+      text.erase(text.size() - 2);
+    }
+    return text + "k";
+  }
+  return std::to_string(value);
+}
+
+static std::string formatDurationFromMs(uint64_t durationMs) {
+  const uint64_t totalSeconds = durationMs / 1000;
+  const uint64_t minutes = totalSeconds / 60;
+  const uint64_t seconds = totalSeconds % 60;
+  std::ostringstream out;
+  if (minutes > 0) {
+    out << minutes << "m" << seconds << "s";
+  } else {
+    out << seconds << "s";
+  }
+  return out.str();
+}
+
+struct CurrentQuotaDisplay {
+  std::string accountLabel;
+  std::string usageLabel;
+};
+
+static std::string compactAccountLabel(const std::string &identifier) {
+  std::string label = identifier;
+  const auto at = label.find('@');
+  if (at != std::string::npos) {
+    label = label.substr(0, at);
+  }
+  if (label.size() > 12) {
+    label = label.substr(0, 11) + "…";
+  }
+  return label;
+}
+
+static CurrentQuotaDisplay resolveCurrentQuotaDisplay(
+    const std::shared_ptr<firmius::provider::IProvider> &provider,
+    const std::string &modelId) {
+  CurrentQuotaDisplay display;
+  if (!provider) {
+    return display;
+  }
+
+  try {
+    if (auto oauth =
+            std::dynamic_pointer_cast<firmius::provider::BaseOAuthProvider>(
+                provider)) {
+      auto current = oauth->getAvailableAccount(modelId);
+      if (!current.has_value()) {
+        return display;
+      }
+      display.accountLabel = compactAccountLabel(current->identifier);
+      const auto quotas = oauth->getAllQuotas();
+      auto it = quotas.find(current->identifier);
+      if (it != quotas.end()) {
+        display.usageLabel =
+            detail::summarizeQuotaBucketsForModel(it->second, modelId);
+      } else if (auto balIt = current->metadata.find("total_balance");
+                 balIt != current->metadata.end()) {
+        display.usageLabel = "balance $" + balIt->second;
+      }
+      return display;
+    }
+
+    if (auto api =
+            std::dynamic_pointer_cast<firmius::provider::BaseAPIKeyProvider>(
+                provider)) {
+      auto current = api->getAvailableAccount(modelId);
+      if (!current.has_value() || *current == nullptr) {
+        return display;
+      }
+      display.accountLabel = compactAccountLabel((*current)->identifier);
+      if (api->supportsQuotaTracking()) {
+        const auto quotas = api->getAllQuotas();
+        auto it = quotas.find((*current)->identifier);
+        if (it != quotas.end()) {
+          display.usageLabel =
+              detail::summarizeQuotaBucketsForModel(it->second, modelId);
+        }
+      }
+    }
+  } catch (...) {
+    return CurrentQuotaDisplay{};
+  }
+
+  return display;
+}
+
 static std::string resolveDefaultLeadPersona(
     const firmius::core::Harness *harness) {
   std::string fallback = "lead";
@@ -329,10 +519,6 @@ static firmius::core::PurposeWorkRole resolvePurposeWorkRole(
   } catch (...) {
     return firmius::core::PurposeWorkRole::Unknown;
   }
-}
-
-static bool isLeadLikeRole(firmius::core::PurposeWorkRole role) {
-  return role == firmius::core::PurposeWorkRole::Lead;
 }
 
 static bool isExecutorLikeRole(firmius::core::PurposeWorkRole role) {
@@ -599,16 +785,11 @@ void TuiState::loadUserPreferences() {
   if (preferences.preferred_permission_mode.has_value()) {
     thread_.permissionMode = *preferences.preferred_permission_mode;
   }
-  if (preferences.prefer_todo_panel_on_narrow.has_value()) {
-    prefer_todo_panel_on_narrow_ =
-        *preferences.prefer_todo_panel_on_narrow;
-  }
 }
 
 void TuiState::persistUserPreferences() const {
   UserPreferences preferences;
   preferences.preferred_permission_mode = thread_.permissionMode;
-  preferences.prefer_todo_panel_on_narrow = prefer_todo_panel_on_narrow_;
   saveUserPreferences(preferences);
 }
 
@@ -916,10 +1097,12 @@ void TuiState::init(firmius::core::Harness &harness,
 
   plan_lane_model_ = std::make_shared<PlanLaneModel>();
   todo_lane_model_ = std::make_shared<TodoLaneModel>();
+  context_lane_model_ = std::make_shared<ContextLaneModel>();
   active_plan_state_.setExpanded(true);
   active_plan_state_.hydrateForThread(thread_, loadActivePlanForThread(thread_));
   updatePlanLaneModel();
   updateTodoLaneModel();
+  updateContextLaneModel();
 
   subscription_id_ =
       harness_->subscribe([this](const firmius::shared::AppEvent &ev) {
@@ -1043,6 +1226,12 @@ std::string TuiState::exitSummaryText() const {
   out << "Total billed tokens: " << session_metrics_.tokens.total << "\n";
   out << "Estimated cost: $" << std::fixed << std::setprecision(4)
       << session_metrics_.estimatedCostUsd << "\n";
+  if (!session_metrics_.context.empty()) {
+    out << "Context summary: "
+        << firmius::core::summarizeContextWindowMetrics(
+               session_metrics_.context, 4)
+        << "\n";
+  }
   return out.str();
 }
 
@@ -1107,52 +1296,27 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
 
           // First pass: create all tool calls for all agents
           for (const auto &agent_id : all_agents) {
-            auto agent_hist = harness_->getAgentHistoryPtr(agent_id);
-            std::shared_ptr<firmius::shared::AgentHistory> owned_hist;
-            if (!agent_hist) {
-              // Try loading from disk
-              auto fallback_hist =
-                  firmius::core::ThreadManager(
-                      std::string(std::getenv("HOME") ? std::getenv("HOME")
-                                                      : "/tmp") +
-                      "/.firmius/threads")
-                      .loadAgentHistory(thread_.threadId, agent_id);
-              if (!fallback_hist.turns.empty()) {
-                owned_hist = std::make_shared<firmius::shared::AgentHistory>(
-                    std::move(fallback_hist));
-                agent_hist = owned_hist;
-              }
-            }
-            if (agent_hist) {
+            auto agent_hist = firmius::core::ThreadManager(
+                                  firmius::core::ThreadManager::defaultBasePath())
+                                  .loadAgentHistory(thread_.threadId, agent_id);
+            if (!agent_hist.turns.empty()) {
               // Pass false for populate_subagent_log - just create tool calls
               stream_state_.rebuildToolCallsFromHistory(
-                  agent_id, agent_hist.get(), thread_.threadId, false);
+                  agent_id, &agent_hist, thread_.threadId, false);
             }
           }
 
           // Second pass: populate subagent_tool_log for all summon_subagent
           // calls
           for (const auto &agent_id : all_agents) {
-            auto agent_hist = harness_->getAgentHistoryPtr(agent_id);
-            std::shared_ptr<firmius::shared::AgentHistory> owned_hist;
-            if (!agent_hist) {
-              auto fallback_hist =
-                  firmius::core::ThreadManager(
-                      std::string(std::getenv("HOME") ? std::getenv("HOME")
-                                                      : "/tmp") +
-                      "/.firmius/threads")
-                      .loadAgentHistory(thread_.threadId, agent_id);
-              if (!fallback_hist.turns.empty()) {
-                owned_hist = std::make_shared<firmius::shared::AgentHistory>(
-                    std::move(fallback_hist));
-                agent_hist = owned_hist;
-              }
-            }
-            if (agent_hist) {
+            auto agent_hist = firmius::core::ThreadManager(
+                                  firmius::core::ThreadManager::defaultBasePath())
+                                  .loadAgentHistory(thread_.threadId, agent_id);
+            if (!agent_hist.turns.empty()) {
               // Pass true for populate_subagent_log - populate
               // subagent_tool_log
               stream_state_.rebuildToolCallsFromHistory(
-                  agent_id, agent_hist.get(), thread_.threadId, true);
+                  agent_id, &agent_hist, thread_.threadId, true);
             }
           }
 
@@ -1247,6 +1411,12 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
           stream_state_.handleAgentCompactionText(e);
         } else if constexpr (std::is_same_v<T, ContextCompacted>) {
           stream_state_.handleContextCompacted(e);
+          if (e.agentId.empty() || e.agentId == focused_agent_id_) {
+            refreshFocusedHistory();
+            if (chat_component_) {
+              chat_component_->OnEvent(ftxui::Event::Special("ThreadChanged"));
+            }
+          }
         } else if constexpr (std::is_same_v<T, AgentProcessSpawned>) {
           stream_state_.handleAgentProcessSpawned(e);
         } else if constexpr (std::is_same_v<T, AgentProcessOutput>) {
@@ -1282,6 +1452,12 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
           if (e.agentId.empty() && !e.message.empty()) {
             NotificationManager::instance().notifyWarning(
                 "Thread Recovery", e.message, std::chrono::milliseconds(5000));
+          } else if (detail::shouldNotifyHiddenChatError(
+                         focused_agent_id_, e.agentId,
+                         harness_ ? harness_->getConfig().hideErrors : false) &&
+                     !e.message.empty()) {
+            NotificationManager::instance().notifyError("Agent Error",
+                                                        e.message, false);
           }
         } else if constexpr (std::is_same_v<T, AgentRetrying>) {
           stream_state_.handleAgentRetrying(e);
@@ -1378,6 +1554,13 @@ void TuiState::updateStatusModel() {
             }
           });
       status_model_->status_text = statusToString(ctx.state.currentStatus);
+      if (agent->isRunning() &&
+          ctx.state.currentStatus == AgentStatus::Idle) {
+        const auto *stream = stream_state_.getStream(focused_agent_id_);
+        status_model_->status_text =
+            (stream && stream->provider_waiting) ? "provider_waiting"
+                                                 : "streaming";
+      }
       status_model_->model_name =
           ctx.config.providerId + "/" + ctx.config.modelId;
       status_model_->model_variant = ctx.config.modelVariant;
@@ -1387,17 +1570,26 @@ void TuiState::updateStatusModel() {
                                       ? ctx.identity.name
                                       : ctx.identity.friendlyName;
       status_model_->context_used = ctx.aggregateMetrics.tokens.contextSize;
+      status_model_->sent_prompt = ctx.aggregateMetrics.context.sentTokens;
+      status_model_->billed_prompt =
+          ctx.aggregateMetrics.context.billedPromptTokens;
+      status_model_->completion_tokens = ctx.aggregateMetrics.tokens.completion;
+      status_model_->estimated_cost_usd = ctx.aggregateMetrics.estimatedCostUsd;
+      status_model_->bucket_summary =
+          firmius::core::summarizeContextWindowMetrics(
+              ctx.aggregateMetrics.context, 3);
       auto provider =
           firmius::provider::ProviderRegistry::instance().getProvider(
               ctx.config.providerId);
       if (provider) {
         auto info = provider->getModelInfo(ctx.config.modelId);
         status_model_->context_max = info.contextWindow;
+        const auto quotaDisplay =
+            resolveCurrentQuotaDisplay(provider, ctx.config.modelId);
+        status_model_->account_label = quotaDisplay.accountLabel;
+        status_model_->quota_usage = quotaDisplay.usageLabel;
       }
-      status_model_->is_active =
-          ctx.state.currentStatus == AgentStatus::Streaming ||
-          ctx.state.currentStatus == AgentStatus::ExecutingTool ||
-          ctx.state.currentStatus == AgentStatus::ProviderWaiting;
+      status_model_->is_active = agent->isRunning();
       status_model_->live_processes = process_counts.live;
       status_model_->background_processes = process_counts.background;
       return;
@@ -1419,6 +1611,13 @@ void TuiState::updateStatusModel() {
   status_model_->agent_name = personaTitle;
   status_model_->context_used = 0;
   status_model_->context_max = 0;
+  status_model_->sent_prompt = 0;
+  status_model_->billed_prompt = 0;
+  status_model_->completion_tokens = 0;
+  status_model_->estimated_cost_usd = 0.0;
+  status_model_->account_label.clear();
+  status_model_->quota_usage.clear();
+  status_model_->bucket_summary.clear();
   status_model_->is_active = false;
   status_model_->live_processes = 0;
   status_model_->background_processes = 0;
@@ -1507,10 +1706,14 @@ void TuiState::updateAgentStripModel() {
     item.model_name = ctx.config.modelId; // Use modelId directly,
                                           // PrettifyModelName handles prefixes
     item.model_variant = ctx.config.modelVariant;
-    item.status_text = statusToString(ctx.state.currentStatus);
-    item.is_busy = ctx.state.currentStatus == AgentStatus::Streaming ||
-                   ctx.state.currentStatus == AgentStatus::ExecutingTool ||
-                   ctx.state.currentStatus == AgentStatus::ProviderWaiting;
+    item.status_text =
+        (child->isRunning() && ctx.state.currentStatus == AgentStatus::Idle)
+            ? ((stream_state_.getStream(id) &&
+                stream_state_.getStream(id)->provider_waiting)
+                   ? "provider_waiting"
+                   : "streaming")
+            : statusToString(ctx.state.currentStatus);
+    item.is_busy = child->isRunning();
     if (item.is_busy) {
       auto it = agent_work_start_ms_.find(id);
       if (it == agent_work_start_ms_.end()) {
@@ -1725,6 +1928,188 @@ void TuiState::updateTodoLaneModel() {
   }
 }
 
+void TuiState::updateContextLaneModel() {
+  auto shortenBucketLabel = [](const std::string &label) {
+    if (label == "system_prompt") return std::string("system");
+    if (label == "conversation_history") return std::string("history");
+    if (label == "rolling_observations") return std::string("memory");
+    if (label == "rolling_status") return std::string("memory-status");
+    if (label == "tool_results") return std::string("tools");
+    if (label == "retrieval_results") return std::string("recall");
+    if (label == "user_message") return std::string("user");
+    if (label == "assistant_response") return std::string("assistant");
+    return label;
+  };
+
+  if (!context_lane_model_) {
+    return;
+  }
+
+  context_lane_model_->visible = false;
+  context_lane_model_->owner_label.clear();
+  context_lane_model_->toggle_hint.clear();
+  context_lane_model_->model_label.clear();
+  context_lane_model_->account_label.clear();
+  context_lane_model_->quota_label.clear();
+  context_lane_model_->context_ratio = 0.0f;
+  context_lane_model_->context_label.clear();
+  context_lane_model_->usage_label.clear();
+  context_lane_model_->cost_label.clear();
+  context_lane_model_->bucket_labels.clear();
+  context_lane_model_->memory_labels.clear();
+  context_lane_model_->rolling_memory = {};
+  if (focused_agent_id_.empty()) {
+    return;
+  }
+
+  auto agent =
+      firmius::core::AgentRegistry::instance().getAgent(focused_agent_id_);
+  if (!agent) {
+    return;
+  }
+
+  const auto &ctx = agent->getContext();
+  const auto *liveMetrics = stream_state_.getLatestMetrics(focused_agent_id_);
+  const auto &metrics = liveMetrics ? *liveMetrics : ctx.aggregateMetrics;
+
+  auto provider = firmius::provider::ProviderRegistry::instance().getProvider(
+      ctx.config.providerId);
+  const auto quotaDisplay =
+      resolveCurrentQuotaDisplay(provider, ctx.config.modelId);
+  uint32_t contextWindow = 0;
+  if (provider) {
+    contextWindow = provider->getModelInfo(ctx.config.modelId).contextWindow;
+  }
+
+  context_lane_model_->visible = true;
+  context_lane_model_->owner_label =
+      (ctx.identity.friendlyName.empty() ? ctx.identity.name
+                                         : ctx.identity.friendlyName) +
+      " context";
+  context_lane_model_->model_label =
+      ctx.config.providerId + "/" + ctx.config.modelId;
+  context_lane_model_->account_label = quotaDisplay.accountLabel;
+  context_lane_model_->quota_label = quotaDisplay.usageLabel;
+  if (contextWindow > 0) {
+    context_lane_model_->context_ratio =
+        static_cast<float>(metrics.tokens.contextSize) / contextWindow;
+    context_lane_model_->context_label =
+        formatCompactCount(metrics.tokens.contextSize) + "/" +
+        formatCompactCount(contextWindow);
+  } else if (metrics.tokens.contextSize > 0) {
+    context_lane_model_->context_label =
+        formatCompactCount(metrics.tokens.contextSize);
+  }
+
+  std::ostringstream usage;
+  usage << "\xE2\x86\x91" << formatCompactCount(metrics.context.sentTokens);
+  if (metrics.context.billedPromptTokens > 0 &&
+      metrics.context.billedPromptTokens != metrics.context.sentTokens) {
+    usage << "/" << formatCompactCount(metrics.context.billedPromptTokens);
+  }
+  usage << "  \xE2\x86\x93" << formatCompactCount(metrics.tokens.completion);
+  context_lane_model_->usage_label = usage.str();
+
+  if (metrics.estimatedCostUsd > 0.0) {
+    std::ostringstream out;
+    out << "$" << std::fixed << std::setprecision(4)
+        << metrics.estimatedCostUsd;
+    context_lane_model_->cost_label = out.str();
+  }
+
+  const auto rankedBuckets =
+      firmius::core::rankContextBuckets(metrics.context);
+  for (const auto &bucket : rankedBuckets) {
+    const auto tokens =
+        bucket.actualTokens > 0 ? bucket.actualTokens : bucket.estimatedTokens;
+    if (tokens == 0) {
+      continue;
+    }
+    context_lane_model_->bucket_labels.push_back(
+        shortenBucketLabel(bucket.label) + " " + formatCompactCount(tokens));
+    if (context_lane_model_->bucket_labels.size() >= 2) {
+      break;
+    }
+  }
+
+  const auto rolling =
+      firmius::core::RollingContextManager::resolveThresholds(ctx);
+  if (rolling.enabled) {
+    auto &rollingModel = context_lane_model_->rolling_memory;
+    rollingModel.enabled = true;
+    rollingModel.mode_label = ctx.config.rollingMemory.mode.empty()
+                                  ? std::string("rolling_forever")
+                                  : ctx.config.rollingMemory.mode;
+    rollingModel.preset_label = rolling.preset;
+    if (ctx.config.rollingMemory.observer.enabled &&
+        !ctx.config.rollingMemory.observer.providerId.empty() &&
+        !ctx.config.rollingMemory.observer.modelId.empty()) {
+      rollingModel.model_label = ctx.config.rollingMemory.observer.providerId +
+                                 "/" + ctx.config.rollingMemory.observer.modelId;
+    } else {
+      rollingModel.model_label =
+          ctx.config.providerId + "/" + ctx.config.modelId;
+    }
+    rollingModel.context_window_tokens = rolling.contextWindow;
+    if (rolling.contextWindow > 0) {
+      rollingModel.context_occupancy_ratio =
+          static_cast<float>(metrics.tokens.contextSize) /
+          static_cast<float>(rolling.contextWindow);
+    } else {
+      rollingModel.context_occupancy_ratio = context_lane_model_->context_ratio;
+    }
+    rollingModel.buffer_threshold_ratio = rolling.bufferOccupancyRatio;
+    rollingModel.target_threshold_ratio = rolling.targetOccupancyRatio;
+    rollingModel.emergency_threshold_ratio = rolling.emergencyOccupancyRatio;
+    rollingModel.buffer_threshold_tokens = rolling.bufferThresholdTokens;
+    rollingModel.target_threshold_tokens = rolling.targetThresholdTokens;
+    rollingModel.emergency_threshold_tokens = rolling.emergencyThresholdTokens;
+    rollingModel.retained_tail_tokens = rolling.retainedTailTokens;
+
+    if (ctx.history && !ctx.history->threadId.empty() && !ctx.identity.id.empty()) {
+      try {
+        firmius::core::ThreadManager tm(
+            firmius::core::ThreadManager::defaultBasePath());
+        const auto rollingState =
+            tm.loadRollingMemoryState(ctx.history->threadId, ctx.identity.id);
+        rollingModel.observation_in_flight = rollingState.observationInFlight;
+        rollingModel.reflection_in_flight = rollingState.reflectionInFlight;
+        for (const auto &chunk : rollingState.observationChunks) {
+          if (chunk.superseded) {
+            continue;
+          }
+          if (chunk.active) {
+            ++rollingModel.active_observations;
+          } else if (chunk.buffered) {
+            ++rollingModel.buffered_observations;
+          }
+          rollingModel.source_tokens += chunk.sourceTokens;
+          rollingModel.summary_tokens += chunk.summaryTokens;
+          if (chunk.sourceTokens > chunk.summaryTokens) {
+            rollingModel.saved_tokens +=
+                (chunk.sourceTokens - chunk.summaryTokens);
+          }
+        }
+        for (const auto &chunk : rollingState.reflectionChunks) {
+          if (chunk.superseded) {
+            continue;
+          }
+          if (chunk.active) {
+            ++rollingModel.active_reflections;
+          }
+          rollingModel.source_tokens += chunk.sourceTokens;
+          rollingModel.summary_tokens += chunk.summaryTokens;
+          if (chunk.sourceTokens > chunk.summaryTokens) {
+            rollingModel.saved_tokens +=
+                (chunk.sourceTokens - chunk.summaryTokens);
+          }
+        }
+      } catch (...) {
+      }
+    }
+  }
+}
+
 std::optional<shared::Plan>
 TuiState::loadActivePlanForThread(const shared::ThreadMetadata &thread) const {
   if (thread.threadId.empty() || thread.activePlanId.empty()) {
@@ -1748,6 +2133,7 @@ ftxui::Component TuiState::root() {
   auto agent_strip = AgentStrip(agent_strip_model_);
   auto plan_lane = PlanLane(plan_lane_model_);
   auto todo_lane = TodoLane(todo_lane_model_);
+  auto context_lane = ContextLane(context_lane_model_);
 
   auto input_bar = InputBar(
       input_model_,
@@ -1875,7 +2261,9 @@ ftxui::Component TuiState::root() {
           ftxui::Elements line{
               ftxui::text("> ") | ftxui::bold |
                   ftxui::color(theme.chat.user_prefix),
-              firmius::tui::RenderMarkdown(text) | ftxui::xflex,
+              firmius::tui::RenderMarkdown(
+                  firmius::tui::ClampTranscriptTextForDisplay(text)) |
+                  ftxui::xflex,
           };
           if (!tag.empty()) {
             line.push_back(ftxui::text(" "));
@@ -1900,26 +2288,36 @@ ftxui::Component TuiState::root() {
             return std::nullopt;
           }
           const auto &ctx = agent->getContext();
-          std::string status;
-          if (agent->isRunning() && s && s->provider_waiting) {
-            status = "provider waiting";
-          } else if (agent->isRunning()) {
-            status = "running";
-          } else if (ctx.state.currentStatus == firmius::shared::AgentStatus::Cancelled) {
-            status = "interrupted";
-          } else if (ctx.state.currentStatus == firmius::shared::AgentStatus::Idle) {
-            status = "completed";
-          } else {
+          if (!agent->isRunning()) {
             return std::nullopt;
           }
-          std::string purpose = ctx.config.personaName;
-          std::string model = ctx.config.modelId;
-          std::string line = status;
-          if (!purpose.empty()) {
-            line += "  " + purpose;
+          ftxui::animation::RequestAnimationFrame();
+          const bool waiting = s && s->provider_waiting;
+          std::string line =
+              waiting ? firmius::shared::ICON_WAIT + " wait"
+                      : firmius::shared::ICON_GEAR + " live";
+          const std::string title =
+              ctx.identity.friendlyName.empty()
+                  ? resolvePersonaTitle(ctx.config.personaName)
+                  : ctx.identity.friendlyName;
+          if (!title.empty()) {
+            line += " · " + title;
           }
-          if (!model.empty()) {
-            line += "  " + model;
+          if (!ctx.config.modelId.empty()) {
+            line += " · " + ctx.config.modelId;
+          }
+          auto it = agent_work_start_ms_.find(focused_agent_id_);
+          const auto nowMs = static_cast<uint64_t>(
+              std::chrono::duration_cast<std::chrono::milliseconds>(
+                  std::chrono::steady_clock::now().time_since_epoch())
+                  .count());
+          if (it == agent_work_start_ms_.end()) {
+            it = agent_work_start_ms_.emplace(focused_agent_id_, nowMs).first;
+          }
+          if (it != agent_work_start_ms_.end()) {
+            if (nowMs > it->second) {
+              line += " · " + formatDurationFromMs(nowMs - it->second);
+            }
           }
           return firmius::tui::IndentAgentRow(
                      ftxui::text(line) | ftxui::color(theme.chat.timestamp)) |
@@ -1950,11 +2348,16 @@ ftxui::Component TuiState::root() {
             live_rows.push_back(compaction_separator());
             if (!s->compaction_thinking.empty()) {
               live_rows.push_back(decorateMsg(
-                  firmius::tui::RenderMarkdown(s->compaction_thinking, true)));
+                  firmius::tui::RenderMarkdown(
+                      firmius::tui::ClampTranscriptTextForDisplay(
+                          s->compaction_thinking),
+                      true)));
             }
             if (!s->compaction_text.empty()) {
               live_rows.push_back(decorateMsg(
-                  firmius::tui::RenderMarkdown(s->compaction_text)));
+                  firmius::tui::RenderMarkdown(
+                      firmius::tui::ClampTranscriptTextForDisplay(
+                          s->compaction_text))));
             }
             live_rows.push_back(compaction_separator_bottom());
           }
@@ -1979,7 +2382,8 @@ ftxui::Component TuiState::root() {
               continue;
             }
             live_rows.push_back(decorateMsg(firmius::tui::RenderMarkdown(
-                entry.message, entry.kind == TimelineEntry::Kind::Thinking)));
+                firmius::tui::ClampTranscriptTextForDisplay(entry.message),
+                entry.kind == TimelineEntry::Kind::Thinking)));
             continue;
           }
 
@@ -2056,6 +2460,10 @@ ftxui::Component TuiState::root() {
           live_rows.push_back(decorateMsg(tool_row));
         }
 
+        if (auto footer = loopFooter(); footer.has_value()) {
+          live_rows.push_back(*footer);
+        }
+
         const auto &queued = stream_state_.getQueuedMessages();
         std::vector<QueuedMessageEntry> queued_for_focus;
         queued_for_focus.reserve(queued.size());
@@ -2068,12 +2476,6 @@ ftxui::Component TuiState::root() {
             continue;
           }
           queued_for_focus.push_back(entry);
-        }
-
-        if (!queued_for_focus.empty()) {
-          for (const auto &entry : queued_for_focus) {
-            live_rows.push_back(renderUserRow(entry.text, "QUEUED"));
-          }
         }
 
         const auto &queued_internal = stream_state_.getQueuedInternalMessages();
@@ -2095,8 +2497,10 @@ ftxui::Component TuiState::root() {
             live_rows.push_back(renderUserRow(entry.text, "INTERNAL"));
           }
         }
-        if (auto footer = loopFooter(); footer.has_value()) {
-          live_rows.push_back(*footer);
+        if (!queued_for_focus.empty()) {
+          for (const auto &entry : queued_for_focus) {
+            live_rows.push_back(renderUserRow(entry.text, "QUEUED"));
+          }
         }
 
         return live_rows;
@@ -2222,6 +2626,7 @@ ftxui::Component TuiState::root() {
       chat,
       todo_lane,
       plan_lane,
+      context_lane,
       agent_strip,
   });
 
@@ -2236,8 +2641,9 @@ ftxui::Component TuiState::root() {
 
   auto base_view =
       ftxui::Renderer(container, [this, title_bar, status_bar, plan_lane,
-                                  todo_lane, agent_strip, input_bar, chat,
+                                  todo_lane, context_lane, agent_strip, input_bar, chat,
                                   welcome_screen] {
+        updateContextLaneModel();
         // Deferred modal clearing: drain here where it's safe
         if (pending_modal_clear_) {
           modals_.clear();
@@ -2276,60 +2682,69 @@ ftxui::Component TuiState::root() {
         }
         const int work_panel_max_height =
             computeWorkPanelMaxHeight(terminal.dimy);
-        bool isLead = false;
-        bool isExecutor = false;
-        if (!focused_agent_id_.empty()) {
-          auto focusedAgent =
-              firmius::core::AgentRegistry::instance().getAgent(focused_agent_id_);
-          if (focusedAgent) {
-            const auto role = resolvePurposeWorkRole(
-                focusedAgent->getContext().config.personaName);
-            isLead = isLeadLikeRole(role);
-            isExecutor = isExecutorLikeRole(role);
-          }
-        }
+        const int context_panel_height =
+            std::max(work_panel_max_height, std::min(terminal.dimy / 3, 14));
         const bool hasPlan = plan_lane_model_ && plan_lane_model_->visible;
         const bool hasTodo = todo_lane_model_ && todo_lane_model_->visible;
-        const bool hasExecutorChunk =
-            hasTodo && todo_lane_model_->show_chunk_header;
-        const auto panelDecision = determineWorkPanelDecision(
-            isLead, isExecutor, hasPlan, hasTodo, hasExecutorChunk,
-            terminal.dimx, terminal.dimy, prefer_todo_panel_on_narrow_);
+        const bool hasContext =
+            context_lane_model_ && context_lane_model_->visible;
+        const auto visibleTab =
+            normalizeWorkPanelTab(selected_work_panel_tab_, hasPlan, hasTodo,
+                                  hasContext);
+        selected_work_panel_tab_ = visibleTab;
 
         ftxui::Element work_panel = ftxui::text("");
         bool show_work_panel = false;
-        if (panelDecision.kind == WorkPanelKind::SplitPlanTodo) {
-          work_panel = ftxui::hbox({
-                           plan_lane->Render() | ftxui::flex |
-                               ftxui::size(ftxui::HEIGHT, ftxui::LESS_THAN,
-                                           work_panel_max_height),
-                           ftxui::separator() | ftxui::color(theme.base.border),
-                           todo_lane->Render() | ftxui::flex |
-                               ftxui::size(ftxui::HEIGHT, ftxui::LESS_THAN,
-                                           work_panel_max_height),
-                       }) |
-                       ftxui::xflex;
-          show_work_panel = true;
-        } else if (panelDecision.kind == WorkPanelKind::SingleToggle) {
-          const std::string hint = std::string(" (Ctrl+O: ") + (panelDecision.showPlan ? "TODOS" : "PLAN") + ")";
-          if (panelDecision.showPlan) {
-            plan_lane_model_->toggle_hint = hint;
-          } else {
-            todo_lane_model_->toggle_hint = hint;
+        const auto tabs = availableWorkPanelTabs(hasPlan, hasTodo, hasContext);
+        if (!tabs.empty()) {
+          auto renderTab = [&](WorkPanelTab tab) {
+            const bool selected = tab == visibleTab;
+            const std::string icon =
+                tab == WorkPanelTab::Plan
+                    ? shared::ICON_BOOK
+                    : (tab == WorkPanelTab::Todo ? shared::ICON_TODO
+                                                 : shared::ICON_CONTEXT);
+            std::string label =
+                tab == WorkPanelTab::Plan
+                    ? "PLAN"
+                    : (tab == WorkPanelTab::Todo ? "TODO" : "CONTEXT");
+            std::string text_str = selected ? (" " + icon + " " + label + " ") : (" " + icon + " ");
+            return ftxui::text(text_str) | ftxui::bold |
+                   ftxui::color(selected ? theme.base.bg : theme.base.dim) |
+                   ftxui::bgcolor(selected ? theme.base.highlight
+                                           : theme.agent_strip.bg);
+          };
+
+          ftxui::Element kb_hint =
+              ftxui::text(" Ctrl+O to cycle ") | ftxui::color(theme.base.dim);
+
+          ftxui::Element selected_panel = ftxui::text("");
+          int panel_height = work_panel_max_height;
+          if (visibleTab == WorkPanelTab::Plan && hasPlan) {
+            selected_panel = plan_lane->Render();
+          } else if (visibleTab == WorkPanelTab::Todo && hasTodo) {
+            selected_panel = todo_lane->Render();
+          } else if (visibleTab == WorkPanelTab::Context && hasContext) {
+            selected_panel = context_lane->Render();
+            panel_height = context_panel_height;
           }
-          work_panel = (panelDecision.showPlan ? plan_lane->Render() : todo_lane->Render()) |
-                       ftxui::size(ftxui::HEIGHT, ftxui::LESS_THAN, work_panel_max_height);
-          show_work_panel = true;
-        } else if (panelDecision.kind == WorkPanelKind::ExecutorChunkTodo ||
-                   panelDecision.kind == WorkPanelKind::TodoOnly) {
-          work_panel = todo_lane->Render() |
-                       ftxui::size(ftxui::HEIGHT, ftxui::LESS_THAN,
-                                   work_panel_max_height);
-          show_work_panel = true;
-        } else if (panelDecision.kind == WorkPanelKind::PlanOnly) {
-          work_panel = plan_lane->Render() |
-                       ftxui::size(ftxui::HEIGHT, ftxui::LESS_THAN,
-                                   work_panel_max_height);
+
+          ftxui::Elements tab_elements;
+          for (std::size_t i = 0; i < tabs.size(); ++i) {
+            if (i > 0) {
+              tab_elements.push_back(ftxui::text(" "));
+            }
+            tab_elements.push_back(renderTab(tabs[i]));
+          }
+          work_panel =
+              ftxui::vbox({
+                  ftxui::hbox({ftxui::hbox(std::move(tab_elements)), ftxui::filler(), kb_hint}) |
+                      ftxui::bgcolor(theme.agent_strip.bg) | ftxui::xflex,
+                  selected_panel |
+                      ftxui::size(ftxui::HEIGHT, ftxui::LESS_THAN,
+                                  panel_height),
+              }) |
+              ftxui::xflex;
           show_work_panel = true;
         }
         // Ultra-compact bottom bar layout
@@ -2429,8 +2844,8 @@ ftxui::Component TuiState::root() {
     return current;
   });
 
-  auto routed_component = ftxui::CatchEvent(modal_renderer, [this, chat, plan_lane, todo_lane](
-                                                             ftxui::Event event) {
+  auto routed_component = ftxui::CatchEvent(modal_renderer, [this, chat, plan_lane, todo_lane, context_lane](
+                                                ftxui::Event event) {
     auto resolve_inline_permission = [this](PermissionResponse response) {
       if (!pending_permission_request_) {
         return;
@@ -2575,10 +2990,22 @@ ftxui::Component TuiState::root() {
       auto &m = event.mouse();
       if (m.button == ftxui::Mouse::WheelUp ||
           m.button == ftxui::Mouse::WheelDown) {
-        if (plan_lane && plan_lane->OnEvent(event)) {
+        const bool hasPlan = plan_lane_model_ && plan_lane_model_->visible;
+        const bool hasTodo = todo_lane_model_ && todo_lane_model_->visible;
+        const bool hasContext =
+            context_lane_model_ && context_lane_model_->visible;
+        const auto visibleTab = normalizeWorkPanelTab(
+            selected_work_panel_tab_, hasPlan, hasTodo, hasContext);
+        if (visibleTab == WorkPanelTab::Context && context_lane &&
+            context_lane->OnEvent(event)) {
           return true;
         }
-        if (todo_lane && todo_lane->OnEvent(event)) {
+        if (visibleTab == WorkPanelTab::Plan && plan_lane &&
+            plan_lane->OnEvent(event)) {
+          return true;
+        }
+        if (visibleTab == WorkPanelTab::Todo && todo_lane &&
+            todo_lane->OnEvent(event)) {
           return true;
         }
         if (chat_component_ && chat_component_->OnEvent(event)) {
@@ -2815,35 +3242,19 @@ ftxui::Component TuiState::root() {
       return true;
     }
 
-    // Ctrl+O - Toggle plan lane expansion
+    // Ctrl+O - Cycle work-lane tabs
     if (event == ftxui::Event::Special("\x0F")) {
-      const auto terminal = ftxui::Terminal::Size();
-      bool isLead = false;
-      bool isExecutor = false;
-      if (!focused_agent_id_.empty()) {
-        auto focusedAgent =
-            firmius::core::AgentRegistry::instance().getAgent(focused_agent_id_);
-        if (focusedAgent) {
-          const auto role = resolvePurposeWorkRole(
-              focusedAgent->getContext().config.personaName);
-          isLead = isLeadLikeRole(role);
-          isExecutor = isExecutorLikeRole(role);
-        }
-      }
       const bool hasPlan = plan_lane_model_ && plan_lane_model_->visible;
       const bool hasTodo = todo_lane_model_ && todo_lane_model_->visible;
-      const bool hasExecutorChunk =
-          hasTodo && todo_lane_model_->show_chunk_header;
-      const auto panelDecision = determineWorkPanelDecision(
-          isLead, isExecutor, hasPlan, hasTodo, hasExecutorChunk,
-          terminal.dimx, terminal.dimy, prefer_todo_panel_on_narrow_);
-      if (panelDecision.kind == WorkPanelKind::SingleToggle) {
-        prefer_todo_panel_on_narrow_ = !prefer_todo_panel_on_narrow_;
-        persistUserPreferences();
-      }
+      const bool hasContext =
+          context_lane_model_ && context_lane_model_->visible;
+      selected_work_panel_tab_ =
+          nextWorkPanelTab(selected_work_panel_tab_, hasPlan, hasTodo,
+                           hasContext);
       if (screen_) {
         screen_->PostEvent(ftxui::Event::Custom);
       }
+      persistUserPreferences();
       return true;
     }
 

@@ -112,7 +112,9 @@ ftxui::Element ScrollableBoxComponent::OnRender() {
     }
     if (viewport_w != last_rendered_viewport_w_) {
         last_rendered_viewport_w_ = viewport_w;
-        ftxui::ScreenInteractive::Active()->RequestAnimationFrame();
+        if (auto *screen = ftxui::ScreenInteractive::Active()) {
+            screen->RequestAnimationFrame();
+        }
     }
     viewport_width_ = viewport_w;
 

@@ -9,11 +9,17 @@
 #include <chrono>
 #include <cmath>
 #include <ctime>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
 #include <limits>
 #include <mutex>
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
+#include <pwd.h>
 #include <sstream>
 #include <thread>
 
@@ -34,6 +40,44 @@ constexpr char kBalanceEndpoint[] = "/v1/metadata/balance";
 constexpr int kQuotaRefreshSeconds = 300;
 constexpr float kQuotaAvailableThreshold = 0.01f;
 
+std::mutex gRawSseLogMutex;
+
+[[maybe_unused]] void appendRawSseLog(const char *kind,
+                                      std::string_view payload) {
+  const char *path = std::getenv("FIRMIUS_LETTA_RAW_SSE_LOG");
+  const char *stdoutFlag = std::getenv("FIRMIUS_LETTA_RAW_SSE_STDOUT");
+  if ((!path || std::string_view(path).empty()) &&
+      (!stdoutFlag || std::string_view(stdoutFlag).empty())) {
+    return;
+  }
+
+  const auto now = std::chrono::system_clock::now();
+  const auto ms =
+      std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch())
+          .count();
+
+  std::lock_guard<std::mutex> lock(gRawSseLogMutex);
+  if (path && !std::string_view(path).empty()) {
+    std::ofstream out(path, std::ios::app);
+    if (out.is_open()) {
+      out << "[" << ms << "] [" << kind << "] ";
+      out.write(payload.data(), static_cast<std::streamsize>(payload.size()));
+      if (payload.empty() || payload.back() != '\n') {
+        out << '\n';
+      }
+    }
+  }
+  if (stdoutFlag && std::string_view(stdoutFlag).size() > 0 &&
+      std::string_view(stdoutFlag) != "0") {
+    std::cout << "[LETTA_RAW_SSE " << kind << "] ";
+    std::cout.write(payload.data(), static_cast<std::streamsize>(payload.size()));
+    if (payload.empty() || payload.back() != '\n') {
+      std::cout << '\n';
+    }
+    std::cout << std::flush;
+  }
+}
+
 // Stable device identifier for OAuth device code flow
 // Letta's OAuth server requires device_id to correlate polling with registration
 std::string getDeviceId() {
@@ -49,6 +93,151 @@ int64_t nowSeconds() {
   return std::chrono::duration_cast<std::chrono::seconds>(
              std::chrono::system_clock::now().time_since_epoch())
       .count();
+}
+
+std::optional<OAuthAccount> loadLettaCliSettingsAccount() {
+  std::string home;
+  if (const char *homeEnv = std::getenv("HOME");
+      homeEnv && std::string_view(homeEnv).size() > 0) {
+    home = homeEnv;
+  } else {
+    if (const passwd *pw = getpwuid(getuid()); pw && pw->pw_dir) {
+      home = pw->pw_dir;
+    }
+  }
+  if (home.empty()) {
+    return std::nullopt;
+  }
+
+  const std::filesystem::path settingsPath =
+      std::filesystem::path(home) / ".letta" / "settings.json";
+  if (!std::filesystem::exists(settingsPath)) {
+    return std::nullopt;
+  }
+
+  std::ifstream ifs(settingsPath);
+  if (!ifs.is_open()) {
+    return std::nullopt;
+  }
+
+  const std::string content((std::istreambuf_iterator<char>(ifs)),
+                            std::istreambuf_iterator<char>());
+  rapidjson::Document doc;
+  doc.Parse(content.c_str());
+  if (doc.HasParseError() || !doc.IsObject()) {
+    return std::nullopt;
+  }
+
+  std::string accessToken;
+  if (doc.HasMember("env") && doc["env"].IsObject()) {
+    const auto &env = doc["env"];
+    if (env.HasMember("LETTA_API_KEY") && env["LETTA_API_KEY"].IsString()) {
+      accessToken = env["LETTA_API_KEY"].GetString();
+    }
+  }
+  if (accessToken.empty()) {
+    return std::nullopt;
+  }
+
+  OAuthAccount acc;
+  acc.identifier = "letta-cli-settings";
+  acc.accessToken = accessToken;
+  if (doc.HasMember("refreshToken") && doc["refreshToken"].IsString()) {
+    acc.refreshToken = doc["refreshToken"].GetString();
+  }
+
+  const int64_t now = nowSeconds();
+  acc.tokenExpiration = now + 86400 * 365;
+  if (doc.HasMember("tokenExpiresAt") && doc["tokenExpiresAt"].IsInt64()) {
+    const int64_t expiresAt = doc["tokenExpiresAt"].GetInt64();
+    if (expiresAt > now + 60) {
+      acc.tokenExpiration = expiresAt;
+    }
+  }
+
+  if (doc.HasMember("lastSession") && doc["lastSession"].IsObject()) {
+    const auto &lastSession = doc["lastSession"];
+    if (lastSession.HasMember("agentId") && lastSession["agentId"].IsString()) {
+      acc.metadata["agent_id"] = lastSession["agentId"].GetString();
+    }
+  }
+  acc.metadata["auth_source"] = "letta_settings";
+  acc.metadata["ephemeral"] = "1";
+  return acc;
+}
+
+[[maybe_unused]] bool isAutoAliasModel(const std::string &modelId) {
+  return modelId.empty() || modelId == "auto" || modelId == "auto-fast" ||
+         modelId == "auto-chat";
+}
+
+[[maybe_unused]] StopReason mapLettaStopReason(const std::string &reason) {
+  if (reason == "tool_use" || reason == "tool_calls" || reason == "tool_call") {
+    return StopReason::ToolUse;
+  }
+  if (reason == "max_tokens" || reason == "length") {
+    return StopReason::MaxTokens;
+  }
+  if (reason == "content_filter") {
+    return StopReason::ContentFilter;
+  }
+  if (reason == "cancelled") {
+    return StopReason::Cancelled;
+  }
+  return StopReason::Stop;
+}
+
+[[maybe_unused]] bool
+parseBalanceValue(const std::map<std::string, std::string> &metadata,
+                  double &outBalance) {
+  auto parseField = [&](const char *key, double &out) -> bool {
+    auto it = metadata.find(key);
+    if (it == metadata.end() || it->second.empty()) {
+      return false;
+    }
+    try {
+      out = std::stod(it->second);
+      return true;
+    } catch (...) {
+      return false;
+    }
+  };
+
+  double total = 0.0;
+  if (parseField("total_balance", total)) {
+    outBalance = total;
+    return true;
+  }
+
+  double monthly = 0.0;
+  double purchased = 0.0;
+  const bool hasMonthly = parseField("monthly_credit_balance", monthly);
+  const bool hasPurchased = parseField("purchased_credit_balance", purchased);
+  if (hasMonthly || hasPurchased) {
+    outBalance = monthly + purchased;
+    return true;
+  }
+
+  return false;
+}
+
+[[maybe_unused]] bool shouldTreatAsStaleAgentFailure(int statusCode,
+                                                     const std::string &body) {
+  if (statusCode != 400 && statusCode != 401 && statusCode != 403 &&
+      statusCode != 404) {
+    return false;
+  }
+  std::string lowered = body;
+  std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+                 [](unsigned char c) {
+                   return static_cast<char>(std::tolower(c));
+                 });
+  return lowered.find("agent") != std::string::npos &&
+         (lowered.find("not found") != std::string::npos ||
+          lowered.find("invalid") != std::string::npos ||
+          lowered.find("unauthorized") != std::string::npos ||
+          lowered.find("forbidden") != std::string::npos ||
+          lowered.find("permission") != std::string::npos);
 }
 
 std::string roleToLettaRole(firmius::shared::Role role) {
@@ -251,6 +440,12 @@ rapidjson::Value buildClientTools(
     clientTools.PushBack(toolValue, alloc);
   }
   return clientTools;
+}
+rapidjson::Value buildClientSkills(
+    rapidjson::Document::AllocatorType &alloc) {
+  (void)alloc;
+  rapidjson::Value clientSkills(rapidjson::kArrayType);
+  return clientSkills;
 }
 
 } // namespace
@@ -787,6 +982,7 @@ void LettaProvider::refreshQuotas() {
 
 std::map<std::string, std::vector<QuotaBucket>>
 LettaProvider::getAllQuotas() const {
+  std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
   std::map<std::string, std::vector<QuotaBucket>> result;
 
   for (const auto &acc : accounts_) {
@@ -821,6 +1017,78 @@ LettaProvider::getAllQuotas() const {
   }
 
   return result;
+}
+
+std::optional<OAuthAccount>
+LettaProvider::getAvailableAccount(const std::optional<std::string> & /*modelId*/) {
+  std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
+
+  auto tryCliFallback = [&]() -> std::optional<OAuthAccount> {
+    return loadLettaCliSettingsAccount();
+  };
+
+  if (auto cliAcc = tryCliFallback()) {
+    return cliAcc;
+  }
+
+  if (accounts_.empty()) {
+    return std::nullopt;
+  }
+
+  const int64_t now = nowSeconds();
+  const int accountCount = static_cast<int>(accounts_.size());
+  int startIdx = lastUsedIndex_.load(std::memory_order_relaxed);
+  if (startIdx < 0 || startIdx >= accountCount) {
+    startIdx = 0;
+  } else {
+    startIdx = (startIdx + 1) % accountCount;
+  }
+
+  int selectedIdx = -1;
+  bool stateChanged = false;
+
+  for (int offset = 0; offset < accountCount; ++offset) {
+    const int idx = (startIdx + offset) % accountCount;
+    OAuthAccount &acc = accounts_[idx];
+
+    if (acc.rateLimited && now > acc.backoffUntil) {
+      acc.rateLimited = false;
+      stateChanged = true;
+    }
+    if (acc.rateLimited) {
+      continue;
+    }
+
+    if (isTokenExpired(acc) && !refreshAccessToken(acc)) {
+      markAccountRateLimited(acc, 60);
+      stateChanged = true;
+      continue;
+    }
+
+    if (acc.lastQuotaRefresh == 0 ||
+        (now - acc.lastQuotaRefresh) > kQuotaRefreshSeconds) {
+      fetchAndStoreQuotas(acc);
+    }
+
+    selectedIdx = idx;
+    break;
+  }
+
+  if (selectedIdx < 0) {
+    if (stateChanged) {
+      saveAccounts();
+    }
+    return tryCliFallback();
+  }
+
+  if (lastUsedIndex_.load(std::memory_order_relaxed) != selectedIdx) {
+    lastUsedIndex_.store(selectedIdx, std::memory_order_relaxed);
+    stateChanged = true;
+  }
+  if (stateChanged) {
+    saveAccounts();
+  }
+  return accounts_[selectedIdx];
 }
 
 // ============================================================================
@@ -867,21 +1135,137 @@ void LettaProvider::processSSELine(const std::string &line,
     return;
   }
 
-  if (data == "[DONE]")
+  data = StringUtil::trim(data);
+  if (data.empty() || data == "[DONE]")
     return;
+
+  appendRawSseLog("line", line);
 
   rapidjson::Document d;
   d.Parse(data.c_str());
   if (d.HasParseError() || !d.IsObject())
     return;
 
-  if (!d.HasMember("message_type") || !d["message_type"].IsString())
+  auto valueToString = [](const rapidjson::Value &value) {
+    if (value.IsString()) {
+      return std::string(value.GetString());
+    }
+    rapidjson::StringBuffer sb;
+    rapidjson::Writer<rapidjson::StringBuffer> writer(sb);
+    value.Accept(writer);
+    return std::string(sb.GetString());
+  };
+
+  std::string msgType;
+  if (d.HasMember("message_type") && d["message_type"].IsString()) {
+    msgType = d["message_type"].GetString();
+  } else if (d.HasMember("type") && d["type"].IsString()) {
+    msgType = d["type"].GetString();
+  }
+
+  if (msgType == "ping") {
     return;
+  }
 
-  std::string msgType = d["message_type"].GetString();
+  auto emitError = [&](const std::string &message) {
+    if (message.empty()) {
+      return;
+    }
+    ctx.sawTypedEvent = true;
+    ctx.sawProtocolError = true;
+    StreamError se;
+    se.message = message;
+    (*ctx.onEvent)(se);
+  };
 
-  // Handle usage_statistics
+  auto parseToolCallFields = [&](const rapidjson::Value &toolCall,
+                                 std::string &toolCallId,
+                                 std::string &toolName,
+                                 std::string &args) {
+    if (toolCall.HasMember("tool_call_id") &&
+        toolCall["tool_call_id"].IsString()) {
+      toolCallId = toolCall["tool_call_id"].GetString();
+    } else if (toolCall.HasMember("tool_callId") &&
+               toolCall["tool_callId"].IsString()) {
+      toolCallId = toolCall["tool_callId"].GetString();
+    } else if (toolCall.HasMember("id") && toolCall["id"].IsString()) {
+      toolCallId = toolCall["id"].GetString();
+    }
+    if (toolCall.HasMember("name") && toolCall["name"].IsString()) {
+      toolName = toolCall["name"].GetString();
+    } else if (toolCall.HasMember("tool_name") &&
+               toolCall["tool_name"].IsString()) {
+      toolName = toolCall["tool_name"].GetString();
+    }
+    if (toolCall.HasMember("arguments")) {
+      args = valueToString(toolCall["arguments"]);
+    } else if (toolCall.HasMember("args") && toolCall["args"].IsString()) {
+      args = toolCall["args"].GetString();
+    } else if (toolCall.HasMember("tool_args") &&
+               toolCall["tool_args"].IsString()) {
+      args = toolCall["tool_args"].GetString();
+    }
+  };
+
+  auto emitToolCallChunk = [&](const std::string &toolCallId,
+                               const std::string &toolName,
+                               const std::string &args) {
+    if (toolCallId.empty()) {
+      return;
+    }
+    auto &state = ctx.streamedToolCalls[toolCallId];
+    if (!state.hasIndex) {
+      state.index = ctx.toolCallCounter++;
+      state.hasIndex = true;
+      state.emittedId = toolCallId;
+    }
+    if (!toolName.empty()) {
+      state.lastName = toolName;
+    }
+    if (!args.empty()) {
+      state.lastArgs += args;
+    }
+    ctx.sawTypedEvent = true;
+    ToolCallChunk tc;
+    tc.id = toolCallId;
+    tc.index = state.index;
+    tc.nameDelta = toolName;
+    tc.argsDelta = args;
+    (*ctx.onEvent)(tc);
+  };
+
+  auto handleToolCallPayload = [&](const rapidjson::Value &payload,
+                                   bool emitChunk) {
+    std::string toolCallId;
+    std::string toolName;
+    std::string args;
+    parseToolCallFields(payload, toolCallId, toolName, args);
+    if (toolCallId.empty()) {
+      return;
+    }
+    if (emitChunk) {
+      emitToolCallChunk(toolCallId, toolName, args);
+    } else {
+      ctx.sawTypedEvent = true;
+      ctx.streamedToolCalls.erase(toolCallId);
+    }
+  };
+
+  if ((d.HasMember("error_message") && d["error_message"].IsString()) ||
+      msgType == "error_message") {
+    const std::string message = d.HasMember("error_message") &&
+                                        d["error_message"].IsString()
+                                    ? d["error_message"].GetString()
+                                    : (d.HasMember("message") &&
+                                               d["message"].IsString()
+                                           ? d["message"].GetString()
+                                           : "Letta stream error");
+    emitError(message);
+    return;
+  }
+
   if (msgType == "usage_statistics") {
+    ctx.sawTypedEvent = true;
     AgentMetrics metrics;
     if (d.HasMember("prompt_tokens") && d["prompt_tokens"].IsInt()) {
       metrics.tokens.prompt = d["prompt_tokens"].GetInt();
@@ -893,7 +1277,8 @@ void LettaProvider::processSSELine(const std::string &line,
     if (d.HasMember("total_tokens") && d["total_tokens"].IsInt()) {
       metrics.tokens.total = d["total_tokens"].GetInt();
     }
-    if (d.HasMember("cached_input_tokens") && d["cached_input_tokens"].IsInt()) {
+    if (d.HasMember("cached_input_tokens") &&
+        d["cached_input_tokens"].IsInt()) {
       metrics.tokens.cacheRead = d["cached_input_tokens"].GetInt();
     }
     if (d.HasMember("reasoning_tokens") && d["reasoning_tokens"].IsInt()) {
@@ -903,8 +1288,8 @@ void LettaProvider::processSSELine(const std::string &line,
     return;
   }
 
-  // Handle assistant_message (text content)
   if (msgType == "assistant_message") {
+    ctx.sawTypedEvent = true;
     std::string delta;
     if (d.HasMember("content")) {
       if (d["content"].IsString()) {
@@ -920,7 +1305,8 @@ void LettaProvider::processSSELine(const std::string &line,
           }
         }
       } else if (d["content"].IsObject()) {
-        if (d["content"].HasMember("text") && d["content"]["text"].IsString()) {
+        if (d["content"].HasMember("text") &&
+            d["content"]["text"].IsString()) {
           delta = d["content"]["text"].GetString();
         }
       }
@@ -933,8 +1319,8 @@ void LettaProvider::processSSELine(const std::string &line,
     return;
   }
 
-  // Handle reasoning_message (thinking/reasoning content)
   if (msgType == "reasoning_message") {
+    ctx.sawTypedEvent = true;
     std::string reason;
     if (d.HasMember("reasoning") && d["reasoning"].IsString()) {
       reason = d["reasoning"].GetString();
@@ -949,62 +1335,99 @@ void LettaProvider::processSSELine(const std::string &line,
     return;
   }
 
-  // Handle tool_call_message
-  if (msgType == "tool_call_message") {
-    if (!d.HasMember("tool_call") || !d["tool_call"].IsObject())
-      return;
-    const auto &toolCall = d["tool_call"];
-    std::string toolCallId, toolName, args;
-    if (toolCall.HasMember("tool_call_id") &&
-        toolCall["tool_call_id"].IsString())
-      toolCallId = toolCall["tool_call_id"].GetString();
-    if (toolCall.HasMember("name") && toolCall["name"].IsString())
-      toolName = toolCall["name"].GetString();
-
-    if (toolCall.HasMember("arguments")) {
-      if (toolCall["arguments"].IsString()) {
-        args = toolCall["arguments"].GetString();
-      } else {
-        rapidjson::StringBuffer sb;
-        rapidjson::Writer<rapidjson::StringBuffer> writer(sb);
-        toolCall["arguments"].Accept(writer);
-        args = sb.GetString();
+  if (msgType == "approval_request_message") {
+    if (d.HasMember("tool_call") && d["tool_call"].IsObject()) {
+      handleToolCallPayload(d["tool_call"], true);
+    } else if (d.HasMember("tool_calls") && d["tool_calls"].IsArray()) {
+      ctx.sawTypedEvent = true;
+      for (const auto &toolCall : d["tool_calls"].GetArray()) {
+        if (toolCall.IsObject()) {
+          handleToolCallPayload(toolCall, true);
+        }
       }
-    }
-
-    if (!toolCallId.empty()) {
-      auto &state = ctx.streamedToolCalls[toolCallId];
-      if (!toolName.empty())
-        state.lastName = toolName;
-      if (!args.empty())
-        state.lastArgs += args;
-
-      ToolCallChunk tc;
-      tc.id = toolCallId;
-      tc.index = 0;
-      tc.nameDelta = toolName;
-      tc.argsDelta = args;
-      (*ctx.onEvent)(tc);
+    } else if (d.HasMember("approval_request") &&
+               d["approval_request"].IsObject()) {
+      handleToolCallPayload(d["approval_request"], true);
     }
     return;
   }
 
-  // Handle tool_return_message — not emitted as stream event (agent handles results)
-  // We skip emitting ToolResultChunk since it's not in StreamEvent variant.
+  if (msgType == "tool_call_message") {
+    if (d.HasMember("tool_call") && d["tool_call"].IsObject()) {
+      handleToolCallPayload(d["tool_call"], true);
+    } else if (d.HasMember("tool_calls") && d["tool_calls"].IsArray()) {
+      ctx.sawTypedEvent = true;
+      for (const auto &toolCall : d["tool_calls"].GetArray()) {
+        if (toolCall.IsObject()) {
+          handleToolCallPayload(toolCall, true);
+        }
+      }
+    }
+    return;
+  }
 
-  // Handle api_error
+  if (msgType == "tool_return_message") {
+    ctx.sawTypedEvent = true;
+    auto clearToolCallState = [&](const std::string &toolCallId) {
+      if (!toolCallId.empty()) {
+        ctx.streamedToolCalls.erase(toolCallId);
+      }
+    };
+    if (d.HasMember("tool_call_id") && d["tool_call_id"].IsString()) {
+      clearToolCallState(d["tool_call_id"].GetString());
+    } else if (d.HasMember("tool_call") && d["tool_call"].IsObject()) {
+      std::string toolCallId;
+      std::string toolName;
+      std::string args;
+      parseToolCallFields(d["tool_call"], toolCallId, toolName, args);
+      clearToolCallState(toolCallId);
+    } else if (d.HasMember("tool_returns") && d["tool_returns"].IsArray()) {
+      for (const auto &toolReturn : d["tool_returns"].GetArray()) {
+        if (!toolReturn.IsObject()) {
+          continue;
+        }
+        std::string toolCallId;
+        std::string toolName;
+        std::string args;
+        parseToolCallFields(toolReturn, toolCallId, toolName, args);
+        clearToolCallState(toolCallId);
+      }
+    }
+    return;
+  }
+
+  if (msgType == "stop_reason") {
+    ctx.sawTypedEvent = true;
+    if (d.HasMember("stop_reason") && d["stop_reason"].IsString()) {
+      ctx.stopReason = mapLettaStopReason(d["stop_reason"].GetString());
+      ctx.sawStopReason = true;
+    } else if (d.HasMember("reason") && d["reason"].IsString()) {
+      ctx.stopReason = mapLettaStopReason(d["reason"].GetString());
+      ctx.sawStopReason = true;
+    }
+    return;
+  }
+
   if (msgType == "api_error" || d.HasMember("error")) {
+    ctx.sawTypedEvent = true;
     std::string errMsg;
     if (d.HasMember("error") && d["error"].IsObject()) {
       const auto &err = d["error"];
-      if (err.HasMember("message") && err["message"].IsString())
+      if (err.HasMember("message") && err["message"].IsString()) {
         errMsg = err["message"].GetString();
+      } else if (err.HasMember("error") && err["error"].IsString()) {
+        errMsg = err["error"].GetString();
+      } else {
+        errMsg = valueToString(err);
+      }
+    } else if (d.HasMember("error") && d["error"].IsString()) {
+      errMsg = d["error"].GetString();
+    } else if (d.HasMember("message") && d["message"].IsString()) {
+      errMsg = d["message"].GetString();
+    } else if (d.HasMember("error_message") && d["error_message"].IsString()) {
+      errMsg = d["error_message"].GetString();
     }
-    if (!errMsg.empty()) {
-      StreamError se;
-      se.message = errMsg;
-      (*ctx.onEvent)(se);
-    }
+    emitError(errMsg);
     return;
   }
 }
@@ -1023,13 +1446,20 @@ int LettaProvider::executeStreamRequest(
     return 0;
   }
 
+  std::string conversationId;
+  std::string conversationError;
+  if (!ensureConversationId(acc, conversationId, conversationError)) {
+    onEvent(StreamError{conversationError, 0, acc.identifier});
+    return 0;
+  }
+
   CURL *curl = curl_easy_init();
   if (!curl)
     return 0;
 
   // Letta uses conversations API: POST /v1/conversations/{id}/messages
-  // We use "default" conversation with agent_id in the body
-  std::string url = std::string(kApiBaseUrl) + "/v1/conversations/default/messages";
+  std::string url = std::string(kApiBaseUrl) + "/v1/conversations/" +
+                    conversationId + "/messages";
 
   rapidjson::Document doc(rapidjson::kObjectType);
   rapidjson::Document::AllocatorType &alloc = doc.GetAllocator();
@@ -1065,13 +1495,14 @@ int LettaProvider::executeStreamRequest(
   doc.AddMember("stream_tokens", true, alloc);
   doc.AddMember("include_pings", true, alloc);
   doc.AddMember("background", true, alloc);
+  doc.AddMember("client_skills", buildClientSkills(alloc), alloc);
+  doc.AddMember("client_tools", buildClientTools(opts.tools, alloc), alloc);
   doc.AddMember("include_compaction_messages", true, alloc);
-  if (!opts.tools.empty()) {
-    doc.AddMember("client_tools", buildClientTools(opts.tools, alloc), alloc);
-  }
 
   const std::string agentId = acc.metadata["agent_id"];
-  doc.AddMember("agent_id", rapidjson::Value(agentId.c_str(), alloc), alloc);
+  if (!agentId.empty()) {
+    doc.AddMember("agent_id", rapidjson::Value(agentId.c_str(), alloc), alloc);
+  }
 
   if (!opts.modelId.empty() && opts.modelId != "auto") {
     doc.AddMember("override_model",
@@ -1089,7 +1520,7 @@ int LettaProvider::executeStreamRequest(
       headers, ("Authorization: Bearer " + acc.accessToken).c_str());
   headers = curl_slist_append(headers, "Accept: text/event-stream");
   headers = curl_slist_append(headers, "X-Letta-Source: letta-code");
-  headers = curl_slist_append(headers, "User-Agent: firmius/1.0");
+  headers = curl_slist_append(headers, "User-Agent: letta-code/0.21.5");
 
   curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
   curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
@@ -1134,19 +1565,20 @@ int LettaProvider::executeStreamRequest(
     return static_cast<int>(responseCode);
   }
 
-  if (ctx.buffer.empty()) {
+  if (!ctx.sawTypedEvent) {
     StreamError se;
     se.httpStatus = static_cast<int>(responseCode);
     se.accountLocator = acc.identifier;
-    se.message = "Letta stream produced no events";
+    se.message = "Letta stream produced no meaningful events";
     onEvent(se);
     return static_cast<int>(responseCode);
   }
 
-  onEvent(StreamDone{StopReason::Stop});
+  if (!ctx.sawProtocolError) {
+    onEvent(StreamDone{ctx.sawStopReason ? ctx.stopReason : StopReason::Stop});
+  }
   return static_cast<int>(responseCode);
 }
-
 bool LettaProvider::ensureAgentId(OAuthAccount &acc,
                                   std::string &outErrorMessage) {
   const auto existing = acc.metadata.find("agent_id");
@@ -1198,6 +1630,81 @@ bool LettaProvider::ensureAgentId(OAuthAccount &acc,
   return true;
 }
 
+std::string urlEncode(const std::string &value) {
+  std::ostringstream escaped;
+  escaped.fill('0');
+  escaped << std::hex << std::uppercase;
+  for (unsigned char c : value) {
+    if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+      escaped << static_cast<char>(c);
+    } else {
+      escaped << '%' << std::setw(2) << static_cast<int>(c);
+    }
+  }
+  return escaped.str();
+}
+
+bool LettaProvider::ensureConversationId(OAuthAccount &acc,
+                                         std::string &outConversationId,
+                                         std::string &outErrorMessage) {
+  auto existing = acc.metadata.find("conversation_id");
+  if (existing != acc.metadata.end() && !existing->second.empty() &&
+      existing->second != "default") {
+    outConversationId = existing->second;
+    return true;
+  }
+
+  const auto agentIt = acc.metadata.find("agent_id");
+  if (agentIt == acc.metadata.end() || agentIt->second.empty()) {
+    outErrorMessage = "Missing Letta agent_id for conversation creation";
+    return false;
+  }
+
+  firmius::utils::GCPHttpClient client("firmius-letta/1.0");
+  client.setContentType("application/json");
+  client.addHeader("X-Letta-Source", kSourceHeaderValue);
+  client.addHeader("User-Agent", kUserAgentValue);
+  client.addHeader("Authorization", "Bearer " + acc.accessToken);
+
+  const std::string url = std::string(kApiBaseUrl) + "/v1/conversations?agent_id=" +
+                          urlEncode(agentIt->second);
+  const auto resp = client.post(url, "", 15);
+  if (resp.code != 200 && resp.code != 201) {
+    outErrorMessage = "Failed to create Letta conversation: HTTP " +
+                      std::to_string(resp.code);
+    if (!resp.body.empty()) {
+      outErrorMessage += " " + resp.body;
+    }
+    return false;
+  }
+
+  rapidjson::Document doc;
+  doc.Parse(resp.body.c_str());
+  if (doc.HasParseError() || !doc.IsObject()) {
+    outErrorMessage = "Invalid Letta conversation creation response";
+    return false;
+  }
+
+  std::string conversationId;
+  if (doc.HasMember("id") && doc["id"].IsString()) {
+    conversationId = doc["id"].GetString();
+  } else if (doc.HasMember("conversation_id") &&
+             doc["conversation_id"].IsString()) {
+    conversationId = doc["conversation_id"].GetString();
+  }
+  if (conversationId.empty()) {
+    outErrorMessage = "Missing conversation id in Letta response";
+    return false;
+  }
+
+  acc.metadata["conversation_id"] = conversationId;
+  outConversationId = conversationId;
+  if (acc.metadata["ephemeral"] != "1") {
+    saveAccounts();
+  }
+  return true;
+}
+
 void LettaProvider::stream(const AgentHistory &history,
                            const ProviderOptions &opts,
                            std::function<void(const StreamEvent &)> onEvent) {
@@ -1206,8 +1713,27 @@ void LettaProvider::stream(const AgentHistory &history,
   for (int attempt = 0; attempt < kMaxRetries; ++attempt) {
     auto accOpt = getAvailableAccount(opts.modelId);
     if (!accOpt) {
+      int rateLimitedAccounts = 0;
+      int totalAccounts = 0;
+      {
+        const int64_t now = nowSeconds();
+        std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
+        totalAccounts = static_cast<int>(accounts_.size());
+        for (const auto &existing : accounts_) {
+          if (existing.rateLimited && now <= existing.backoffUntil) {
+            ++rateLimitedAccounts;
+          }
+        }
+      }
+
       StreamError se;
       se.message = "No available Letta account";
+      if (totalAccounts > 0 && rateLimitedAccounts == totalAccounts) {
+        se.message += " (all accounts currently rate-limited/backing off)";
+      } else if (rateLimitedAccounts > 0) {
+        se.message += " (" + std::to_string(rateLimitedAccounts) +
+                      " account(s) currently rate-limited/backing off)";
+      }
       onEvent(se);
       return;
     }
@@ -1228,6 +1754,13 @@ void LettaProvider::stream(const AgentHistory &history,
       updateAccount(acc);
       if (status >= 200 && status < 300) {
         return;
+      }
+
+      if (status == 402) {
+        acc.metadata["total_balance"] = "0";
+        acc.metadata["monthly_credit_balance"] = "0";
+        acc.metadata["purchased_credit_balance"] = "0";
+        acc.lastQuotaRefresh = nowSeconds();
       }
 
       const int backoff = (status == 402 || status == 429) ? 60 : (1 << attempt);

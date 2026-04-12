@@ -4,6 +4,7 @@
 #include "AgentRegistry.hpp"
 #include "harness/Harness.hpp"
 #include "Panic.hpp"
+#include "agents/ContextBudget.hpp"
 #include "providers/ProviderRegistry.hpp"
 #include "benchmarks/BenchmarkFactory.hpp"
 #include "benchmarks/BenchmarkSession.hpp"
@@ -129,11 +130,6 @@ private:
     
     view.args += ev.argsDelta;
     
-    if (view.phase == ToolPhase::Preparing && !view.args.empty() && hasJsonBraces(view.args)) {
-      view.phase = ToolPhase::Called;
-      std::string summary = SummarizeToolCall(view.name, view.args, ToolPhase::Called);
-      std::cout << "\r" << COLOR_CYAN << "  → " << COLOR_GREEN << summary << COLOR_RESET << "\n";
-    }
   }
 
   void handleEvent(const AgentToolCall& ev) {
@@ -152,11 +148,14 @@ private:
     
     if (!ev.toolArgs.empty()) {
       view.args = ev.toolArgs;
-      view.phase = ToolPhase::Called;
-      std::string summary = SummarizeToolCall(view.name, view.args, ToolPhase::Called);
-      if (view.phase == ToolPhase::Preparing) {
-        std::cout << "\r" << COLOR_CYAN << "  → " << COLOR_GREEN << summary << COLOR_RESET << "\n";
-      }
+    }
+    const bool transitioned = view.phase == ToolPhase::Preparing;
+    view.phase = ToolPhase::Called;
+    std::string summary =
+        SummarizeToolCall(view.name, view.args, ToolPhase::Called);
+    if (transitioned) {
+      std::cout << "\r" << COLOR_CYAN << "  → " << COLOR_GREEN << summary
+                << COLOR_RESET << "\n";
     }
   }
 
@@ -172,6 +171,13 @@ private:
       std::cout << COLOR_RESET;
       thinkingOpen = false;
       textOpen = false;
+    }
+
+    const std::string contextSummary =
+        summarizeContextWindowMetrics(ev.aggregateMetrics.context, 3);
+    if (!contextSummary.empty() && contextSummary != "sent=0") {
+      std::cout << COLOR_DIM << "  context> " << contextSummary << COLOR_RESET
+                << "\n";
     }
     
     // Print tool results
@@ -504,7 +510,16 @@ shared::AuditResult BenchmarksAudit::run(const std::vector<std::string> &args) {
   std::cout << "║ Tokens:    " << std::left << std::setw(48) << taskResult.metrics.tokens.total << "║\n";
   std::cout << "║ Prompt:    " << std::left << std::setw(48) << taskResult.metrics.tokens.prompt << "║\n";
   std::cout << "║ Complete:  " << std::left << std::setw(48) << taskResult.metrics.tokens.completion << "║\n";
+  std::cout << "║ Sent ctx:  " << std::left << std::setw(48) << taskResult.metrics.context.sentTokens << "║\n";
+  std::cout << "║ Raw ctx:   " << std::left << std::setw(48) << taskResult.metrics.context.rawPromptTokens << "║\n";
   std::cout << "╚═══════════════════════════════════════════════════════════╝" << COLOR_RESET << "\n";
+
+  const std::string contextSummary =
+      summarizeContextWindowMetrics(taskResult.metrics.context, 4);
+  if (!contextSummary.empty() && contextSummary != "sent=0") {
+    std::cout << COLOR_DIM << "Context breakdown: " << contextSummary
+              << COLOR_RESET << "\n";
+  }
 
   if (!taskResult.output.empty()) {
     std::cout << "\n" << COLOR_BOLD << "Output:" << COLOR_RESET << "\n";

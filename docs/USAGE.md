@@ -12,16 +12,18 @@ work instructions, and how it should report to its peers (if any)
 - Lead
 This agent is like the top-level overseer. It'll take your task and start discovery, trying to find an optimal execution path.
 It decides if multi-agent orchestration is needed, or if it can be done by it's self. This is the starting point.
-The lead can mutate and create PLANS in the active thread. These PLANS must be drafted, and then CHECKED by `planner` and `plan_checker` agents.
+Discovery-, diagnosis-, audit-, and other read-only tasks should usually stay on the lead's todo/direct lane instead of becoming plans.
+When the work needs delegated execution, the lead can mutate and create PLANS in the active thread.
+Small plans (roughly `<= 3` chunks) may be committed directly by lead; larger plans should go through `planner` + `plan_checker`.
 When it reaches execution, it will delegate each plan chunk to an executor, paralellizing where possible.
 - Executor
 This is the agent that gets shit done. It directly modifies code according to the chunk, or manages it's own worker subagents to complete the chunk sub-tasks. After it's done, it generates a worker report artifact, and dies. Purpose fulfilled. Bye bye!!
 - Planner
-Self-explanatory, but important! This agent must use a good SOTA model (gpt 5.4 best :O) because it plans the entire execution graph. It'll perform any discovery not mentioned / given by lead, and formulate a DRAFT plan with chunks and subchunks. It writes that to an artifact, and DIES!! X_X
+Self-explanatory, but important! This agent must use a good SOTA model (gpt 5.4 best :O) because it plans the entire execution graph. It takes lead's completed discovery context and formulates a DRAFT plan with chunks and subchunks. It should not be used as a substitute for unfinished diagnosis or repo familiarization. It writes that to an artifact, and DIES!! X_X
 - Plan Checker
 Draft plans are.. NOT always perfect. Sometimes the planner is too vague, sometimes it makes circular dependencies.. and someone needs to check that. That SOMEONE is a clump of ones and zeros constantly changing.. an AGENT, DUMMY! This agent checks the drafted plan against a predefined and calibrated constraint set i wrote, and responds with a verdict: Accept, or Accept with FIXES. Lead sees this, and if ACCEPT, it exits the plan workflow, and commits the plan with it's tools. If accept with fixes, then it respawns the planner subagent to fix the plan based on the criteria provided by the plan checker subagent.
 - Worker
-General purpose. May be used by the lead, planner, executor, or scouts.. Bottom of the barrel. Puny little agent.
+General purpose, but executor-owned in the normal flow. Workers handle bounded chunk tasks delegated by an executor rather than owning chunks or top-level planning.
 - Scout
 Used for searching or retrieving information. Read-only, owns no part of the plan.
 

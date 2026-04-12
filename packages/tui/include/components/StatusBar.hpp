@@ -19,6 +19,13 @@ struct StatusBarModel {
       firmius::shared::ThreadPermissionMode::Request;
   uint32_t context_used = 0;
   uint32_t context_max = 0;
+  uint32_t sent_prompt = 0;
+  uint32_t billed_prompt = 0;
+  uint32_t completion_tokens = 0;
+  double estimated_cost_usd = 0.0;
+  std::string account_label;
+  std::string quota_usage;
+  std::string bucket_summary;
   bool is_active = false;
   int live_processes = 0;
   int background_processes = 0;

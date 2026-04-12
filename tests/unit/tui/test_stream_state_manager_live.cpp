@@ -1,4 +1,5 @@
 #include "StreamStateManager.hpp"
+#include "ConfigLoader.hpp"
 #include "components/ChatWindow.hpp"
 
 #include <algorithm>
@@ -176,7 +177,7 @@ TEST(StreamStateManagerLiveTest, ArgsBeforeNameChunkDoesNotRenderUntilNameArrive
 
   auto view = state.getToolView("tool-1");
   ASSERT_TRUE(static_cast<bool>(view));
-  EXPECT_EQ(view->phase, ToolPhase::Called);
+  EXPECT_EQ(view->phase, ToolPhase::Preparing);
   EXPECT_EQ(view->args, R"({"path":"src/main.cpp"})");
   EXPECT_TRUE(view->name.empty());
   EXPECT_FALSE(firmius::shared::ToolCallHasRenderableIdentity(*view));
@@ -187,11 +188,19 @@ TEST(StreamStateManagerLiveTest, ArgsBeforeNameChunkDoesNotRenderUntilNameArrive
 
   view = state.getToolView("tool-1");
   ASSERT_TRUE(static_cast<bool>(view));
-  EXPECT_EQ(view->phase, ToolPhase::Called);
+  EXPECT_EQ(view->phase, ToolPhase::Preparing);
   EXPECT_EQ(view->name, "file_read");
   EXPECT_EQ(view->args, R"({"path":"src/main.cpp"})");
   EXPECT_TRUE(firmius::shared::ToolCallHasRenderableIdentity(*view));
   EXPECT_TRUE(firmius::tui::ShouldRenderToolCallView(*view));
+
+  state.handleAgentToolCall(
+      AgentToolCall{"agent-1", "tool-1", "file_read",
+                    R"({"path":"src/main.cpp"})", ""});
+
+  view = state.getToolView("tool-1");
+  ASSERT_TRUE(static_cast<bool>(view));
+  EXPECT_EQ(view->phase, ToolPhase::Called);
 }
 
 TEST(StreamStateManagerLiveTest, InterruptClearsProviderWaitingAndRetryUiImmediately) {
@@ -327,6 +336,38 @@ TEST(StreamStateManagerLiveTest, ChildErrorMarksParentSubagentAsFailed) {
   EXPECT_FALSE(view->subagent_running);
 }
 
+TEST(StreamStateManagerLiveTest, ChildErrorWithEmptyParentLogRecordsFailureActivity) {
+  StreamStateManager state;
+  state.handleAgentToolCall(
+      AgentToolCall{"parent", "tool-1", "summon_subagent",
+                    R"({"name":"child","title":"Child"})", ""});
+
+  state.handleAgentSpawned(
+      AgentSpawned{"child-id", "worker", "parent", "child", "Child", true, "", "", 0},
+      "parent");
+
+  const auto *subagentBeforeError = state.getSubagentStateForToolCall("tool-1");
+  ASSERT_NE(subagentBeforeError, nullptr);
+  const size_t activityCountBeforeError =
+      subagentBeforeError->activity_log.size();
+
+  state.handleAgentError(AgentError{"child-id", "boom", "parent"});
+
+  auto view = state.getToolView("tool-1");
+  ASSERT_TRUE(static_cast<bool>(view));
+  ASSERT_FALSE(view->subagent_tool_log.empty());
+  EXPECT_EQ(view->subagent_tool_log.back().summary, "Failed: boom");
+  EXPECT_EQ(view->phase, ToolPhase::Error);
+
+  const auto *subagentAfterError = state.getSubagentStateForToolCall("tool-1");
+  ASSERT_NE(subagentAfterError, nullptr);
+  ASSERT_GE(subagentAfterError->activity_log.size(),
+            activityCountBeforeError + 1);
+  EXPECT_EQ(subagentAfterError->activity_log.back().summary, "Failed: boom");
+  EXPECT_EQ(subagentAfterError->outcome,
+            firmius::tui::SubagentOutcomeKind::Failed);
+}
+
 TEST(StreamStateManagerLiveTest,
      RateLimitRetryWithRawBodyAppendsLiveErrorTimelineEntry) {
   StreamStateManager state;
@@ -358,6 +399,9 @@ TEST(StreamStateManagerLiveTest,
 TEST(StreamStateManagerLiveTest,
      RateLimitProviderErrorWithRawBodyAppendsLiveErrorTimelineEntry) {
   StreamStateManager state;
+  auto config = firmius::shared::ConfigLoader::instance().getConfig();
+  config.hideErrors = false;
+  firmius::shared::ConfigLoader::instance().updateConfig(config);
 
   state.handleAgentError(AgentError{
       "agent-1",

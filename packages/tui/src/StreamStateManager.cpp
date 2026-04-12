@@ -1,9 +1,12 @@
+#include "agents/ContextBudget.hpp"
 #include "StreamStateManager.hpp"
 #include "components/ToolBlock.hpp"
 #include "utils/ToolSummaries.hpp"
 #include "utils/StringUtil.hpp"
 #include "harness/Harness.hpp"
+#include "persistence/ThreadManager.hpp"
 #include <chrono>
+#include <iomanip>
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
@@ -539,6 +542,43 @@ void MergeSubagentState(NormalizedSubagentState &target,
   target.activity_log = ChooseRicherSubagentLog(target.activity_log, source.activity_log);
 }
 
+std::string formatCompactCount(uint32_t value) {
+  if (value >= 1000000) {
+    std::ostringstream out;
+    out << std::fixed << std::setprecision(1)
+        << (static_cast<double>(value) / 1000000.0);
+    auto text = out.str();
+    if (text.size() > 2 && text.substr(text.size() - 2) == ".0") {
+      text.erase(text.size() - 2);
+    }
+    return text + "M";
+  }
+  if (value >= 1000) {
+    std::ostringstream out;
+    out << std::fixed << std::setprecision(1)
+        << (static_cast<double>(value) / 1000.0);
+    auto text = out.str();
+    if (text.size() > 2 && text.substr(text.size() - 2) == ".0") {
+      text.erase(text.size() - 2);
+    }
+    return text + "k";
+  }
+  return std::to_string(value);
+}
+
+std::string formatDurationMs(uint64_t durationMs) {
+  const uint64_t totalSeconds = durationMs / 1000;
+  const uint64_t minutes = totalSeconds / 60;
+  const uint64_t seconds = totalSeconds % 60;
+  std::ostringstream out;
+  if (minutes > 0) {
+    out << minutes << "m" << seconds << "s";
+  } else {
+    out << seconds << "s";
+  }
+  return out.str();
+}
+
 } // namespace
 
 static std::string formatDuration(float seconds) {
@@ -601,6 +641,50 @@ void StreamStateManager::handleAgentTurnCompleted(
   s.has_active_live_entry = false;
   s.active_live_entry_id.clear();
   pushTokenUsage(e.agentId, e.aggregateMetrics);
+  {
+    auto &summaries = completed_run_summaries_[e.agentId];
+    CompletedRunSummary summary;
+    const std::string title = getAgentTitle(e.agentId);
+    const std::string model =
+        agent_provider_model_.count(e.agentId) ? agent_provider_model_[e.agentId]
+                                               : "";
+    const uint64_t durationMs =
+        e.turn.metrics.timing.endMs > e.turn.metrics.timing.startMs
+            ? (e.turn.metrics.timing.endMs - e.turn.metrics.timing.startMs)
+            : 0;
+    std::ostringstream row;
+    row << "completed";
+    if (!title.empty()) {
+      row << " · " << title;
+    }
+    if (!model.empty()) {
+      row << " · " << model;
+    }
+    if (durationMs > 0) {
+      row << " · " << formatDurationMs(durationMs);
+    }
+    if (e.turn.metrics.context.sentTokens > 0 ||
+        e.turn.metrics.tokens.completion > 0) {
+      row << " · ↑ " << formatCompactCount(e.turn.metrics.context.sentTokens);
+      if (e.turn.metrics.context.billedPromptTokens > 0 &&
+          e.turn.metrics.context.billedPromptTokens !=
+              e.turn.metrics.context.sentTokens) {
+        row << "/" << formatCompactCount(
+                            e.turn.metrics.context.billedPromptTokens);
+      }
+      row << " ↓ " << formatCompactCount(e.turn.metrics.tokens.completion);
+    }
+    const std::string contextSummary =
+        firmius::core::summarizeContextWindowMetrics(e.turn.metrics.context, 2);
+    if (!contextSummary.empty() && contextSummary != "sent=0") {
+      row << " · " << contextSummary;
+    }
+    summary.text = row.str();
+    summaries.push_back(std::move(summary));
+    while (summaries.size() > 6) {
+      summaries.erase(summaries.begin());
+    }
+  }
 
   // Process tool results from the turn to determine success/failure
   std::unordered_map<std::string, std::pair<bool, std::string>> toolResultMap;
@@ -740,70 +824,6 @@ void StreamStateManager::handleAgentToolCallChunk(
     view->name += e.nameDelta;
   }
   view->args += e.argsDelta;
-  if (!view->args.empty()) {
-    view->phase = ToolPhase::Called;
-    ParsedToolArgs parsed_args = parseToolArgs(view->args);
-    if (!parsed_args.process_id.empty()) {
-      view->process_id = parsed_args.process_id;
-      auto &process = process_state_[parsed_args.process_id];
-      process.process_id = parsed_args.process_id;
-      process.owner_agent_id = view->agentId;
-      if (process.origin_tool_call_id.empty()) {
-        process.origin_tool_call_id = view->toolCallId;
-      }
-      if (!parsed_args.command.empty() && process.command.empty()) {
-        process.command = parsed_args.command;
-      }
-      if (!parsed_args.cwd.empty() && process.cwd.empty()) {
-        process.cwd = parsed_args.cwd;
-      }
-      if (view->name == "process_wait") {
-        process.waiting = true;
-        process.wait_state = "waiting";
-        process.waiting_pattern = parsed_args.pattern;
-      }
-    }
-    if (view->name == "summon_subagent" || view->name == "subagent_wait") {
-      ParsedSubagentArgs parsed_subagent_args = parseSubagentArgs(view->args);
-      std::string parent_tool_id = view->toolCallId;
-      if (view->name == "subagent_wait" && !parsed_subagent_args.agent_id.empty()) {
-        auto it_parent = subagent_to_parent_tool_.find(parsed_subagent_args.agent_id);
-        if (it_parent != subagent_to_parent_tool_.end()) {
-          parent_tool_id = it_parent->second;
-        }
-      }
-      auto &subagent = subagent_state_[parent_tool_id];
-      subagent.parent_tool_call_id = parent_tool_id;
-      subagent.owner_agent_id = view->agentId;
-      subagent.waiting = (view->name == "subagent_wait");
-      subagent.running = (view->phase == ToolPhase::Called);
-      if (!parsed_subagent_args.task.empty()) {
-        subagent.task = parsed_subagent_args.task;
-      }
-      if (!parsed_subagent_args.title.empty()) {
-        subagent.child_title = parsed_subagent_args.title;
-      } else if (!parsed_subagent_args.name.empty() &&
-                 subagent.child_title.empty()) {
-        subagent.child_title = parsed_subagent_args.name;
-      }
-      if (!parsed_subagent_args.agent_id.empty()) {
-        subagent.child_agent_id = parsed_subagent_args.agent_id;
-        subagent_to_parent_tool_[parsed_subagent_args.agent_id] = parent_tool_id;
-      }
-      if (!parsed_subagent_args.category.empty() && subagent.route_category.empty()) {
-        subagent.route_category = parsed_subagent_args.category;
-      }
-      subagent.wait_state = "running";
-      subagent_tool_to_parent_[view->toolCallId] = parent_tool_id;
-
-      if (view->name == "subagent_wait") {
-        view->subagent_id = subagent.child_agent_id;
-        if (!subagent.child_title.empty()) {
-          view->subagent_title = subagent.child_title;
-        }
-      }
-    }
-  }
 
   auto it_sub = subagent_to_parent_tool_.find(e.agentId);
   if (it_sub != subagent_to_parent_tool_.end()) {
@@ -887,7 +907,7 @@ void StreamStateManager::handleAgentToolCall(const shared::AgentToolCall &e) {
     view->name = e.toolName;
   if (!e.toolArgs.empty())
     view->args = e.toolArgs;
-  view->phase = view->args.empty() ? ToolPhase::Preparing : ToolPhase::Called;
+  view->phase = ToolPhase::Called;
   if (!view->args.empty()) {
     ParsedToolArgs parsed_args = parseToolArgs(view->args);
     if (!parsed_args.process_id.empty()) {
@@ -1217,8 +1237,10 @@ void StreamStateManager::pushThinkingDuration(const std::string &agentId,
   }
 }
 
-void StreamStateManager::pushTokenUsage(const std::string &,
-                                        const shared::AgentMetrics &) {}
+void StreamStateManager::pushTokenUsage(const std::string &agentId,
+                                        const shared::AgentMetrics &metrics) {
+  latest_metrics_[agentId] = metrics;
+}
 
 void StreamStateManager::reactivateSubagentParentView(
     const std::string &agentId) {
@@ -1444,6 +1466,7 @@ void StreamStateManager::handleAgentError(const shared::AgentError &e) {
   shared::SubagentToolLogEntry entry;
   entry.summary = "Failed: " + e.message;
   entry.phase = shared::ToolPhase::Error;
+  const auto activityEntry = entry;
   parentView->subagent_tool_log.push_back(std::move(entry));
   while (parentView->subagent_tool_log.size() > 8) {
     parentView->subagent_tool_log.erase(parentView->subagent_tool_log.begin());
@@ -1460,10 +1483,28 @@ void StreamStateManager::handleAgentError(const shared::AgentError &e) {
   subagent.outcome = SubagentOutcomeKind::Failed;
   subagent.wait_state = "failed";
   subagent.error_text = e.message;
-  subagent.activity_log.push_back(parentView->subagent_tool_log.back());
+  subagent.activity_log.push_back(activityEntry);
   while (subagent.activity_log.size() > 16) {
     subagent.activity_log.erase(subagent.activity_log.begin());
   }
+}
+
+const shared::AgentMetrics *
+StreamStateManager::getLatestMetrics(const std::string &agentId) const {
+  auto it = latest_metrics_.find(agentId);
+  if (it == latest_metrics_.end()) {
+    return nullptr;
+  }
+  return &it->second;
+}
+
+const std::vector<CompletedRunSummary> *
+StreamStateManager::getCompletedRunSummaries(const std::string &agentId) const {
+  auto it = completed_run_summaries_.find(agentId);
+  if (it == completed_run_summaries_.end()) {
+    return nullptr;
+  }
+  return &it->second;
 }
 
 const StreamState *
@@ -2055,22 +2096,24 @@ void StreamStateManager::rebuildToolCallsFromHistory(
       // Register the mapping from subagent to parent tool call
       subagent_to_parent_tool_[subagentId] = toolCallId;
 
-      // Try to get the subagent's history from the harness
-      auto &harness = firmius::core::Harness::instance();
-      auto subHistoryPtr = harness.getAgentHistoryPtr(subagentId);
-      const shared::AgentHistory* subHistory = subHistoryPtr.get();
-
-      // If not available via harness, try loading from disk
       std::unique_ptr<shared::AgentHistory> fallbackHistory;
-      if (!subHistory && !threadId.empty()) {
-        auto fallback_hist =
+      const shared::AgentHistory* subHistory = nullptr;
+      if (!threadId.empty()) {
+        auto persisted =
             firmius::core::ThreadManager(
-                std::string(std::getenv("HOME") ? std::getenv("HOME") : "/tmp") +
-                "/.firmius/threads")
+                firmius::core::ThreadManager::defaultBasePath())
                 .loadAgentHistory(threadId, subagentId);
-        if (!fallback_hist.turns.empty()) {
-          fallbackHistory = std::make_unique<shared::AgentHistory>(std::move(fallback_hist));
+        if (!persisted.turns.empty()) {
+          fallbackHistory =
+              std::make_unique<shared::AgentHistory>(std::move(persisted));
           subHistory = fallbackHistory.get();
+        }
+      }
+      if (!subHistory) {
+        auto &harness = firmius::core::Harness::instance();
+        auto subHistoryPtr = harness.getAgentHistoryPtr(subagentId);
+        if (subHistoryPtr) {
+          subHistory = subHistoryPtr.get();
         }
       }
 

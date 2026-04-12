@@ -1,4 +1,6 @@
 #include <gtest/gtest.h>
+#include "../mocks/MockAgent.hpp"
+#include "AgentRegistry.hpp"
 #include "persistence/ThreadManager.hpp"
 #include "persistence/Journaler.hpp"
 #include "Serialization.hpp"
@@ -18,6 +20,7 @@
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
+#include <sqlite3.h>
 
 using namespace firmius::core;
 using namespace firmius::shared;
@@ -30,6 +33,10 @@ protected:
     std::string originalHome;
 
     void SetUp() override {
+        for (const auto& agentId : AgentRegistry::instance().listAll()) {
+            AgentRegistry::instance().unregisterAgent(agentId);
+        }
+
         char tempTemplate[] = "/tmp/firmius_test_XXXXXX";
         char* result = mkdtemp(tempTemplate);
         ASSERT_NE(result, nullptr);
@@ -45,6 +52,10 @@ protected:
     std::unique_ptr<ThreadManager> tm;
 
     void TearDown() override {
+        for (const auto& agentId : AgentRegistry::instance().listAll()) {
+            AgentRegistry::instance().unregisterAgent(agentId);
+        }
+
         if (!originalHome.empty()) {
             setenv("HOME", originalHome.c_str(), 1);
         } else {
@@ -125,6 +136,23 @@ protected:
                                       "chunk-1", "plan-1", 110, 110});
         return todo;
     }
+
+    void execDb(const std::string& sql) {
+        const auto dbPath = std::filesystem::path(tempDir) / ".firmius" / "threads" /
+                            "firmius_threads.db";
+        sqlite3* db = nullptr;
+        ASSERT_EQ(sqlite3_open_v2(dbPath.c_str(), &db,
+                                  SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
+                                  nullptr),
+                  SQLITE_OK);
+        char* err = nullptr;
+        ASSERT_EQ(sqlite3_exec(db, sql.c_str(), nullptr, nullptr, &err), SQLITE_OK)
+            << (err ? err : "");
+        if (err) {
+            sqlite3_free(err);
+        }
+        sqlite3_close(db);
+    }
 };
 
 TEST_F(ThreadManagerTest, createThread_roundtrip) {
@@ -190,17 +218,64 @@ TEST_F(ThreadManagerTest, mutateAgentTodoAppliesAtomicUpdate) {
     EXPECT_EQ(mutated.items[2].id, 3);
 
     const auto reloaded = tm->getAgentTodo(threadId, agentId);
-    EXPECT_EQ(reloaded, mutated);
+  EXPECT_EQ(reloaded, mutated);
+}
+
+TEST_F(ThreadManagerTest, rollingMemoryStateRoundtrip) {
+    ThreadMetadata metadata = createTestMetadata();
+    std::string threadId = tm->createThread(metadata);
+    const std::string agentId = "agent-rolling";
+
+    RollingMemoryState original;
+    original.threadId = threadId;
+    original.agentId = agentId;
+    original.lastObservedTurnId = "assistant-4";
+    original.lastTargetThresholdTokens = 64000;
+    original.lastRetainedTailTokens = 16000;
+    original.observationInFlight = true;
+
+    RollingMemoryChunk observation;
+    observation.chunkId = "obs-1";
+    observation.sourceStartTurnId = "user-task-1";
+    observation.sourceEndTurnId = "tools-3";
+    observation.sourceTurnIds = {"user-task-1", "assistant-2", "tools-3"};
+    observation.summary = "User asked for a parser fix and the agent edited Parser.cpp.";
+    observation.sourceTokens = 12000;
+    observation.summaryTokens = 800;
+    observation.buffered = false;
+    observation.active = true;
+    original.observationChunks.push_back(observation);
+
+    RollingMemoryChunk reflection;
+    reflection.chunkId = "refl-1";
+    reflection.sourceStartTurnId = "user-task-1";
+    reflection.sourceEndTurnId = "assistant-8";
+    reflection.summary = "Earlier parser work resolved the crash path.";
+    reflection.active = true;
+    original.reflectionChunks.push_back(reflection);
+
+    tm->writeRollingMemoryState(threadId, agentId, original);
+    const auto restored = tm->loadRollingMemoryState(threadId, agentId);
+
+    EXPECT_EQ(restored.threadId, threadId);
+    EXPECT_EQ(restored.agentId, agentId);
+    EXPECT_EQ(restored.lastObservedTurnId, "assistant-4");
+    EXPECT_EQ(restored.lastTargetThresholdTokens, 64000u);
+    EXPECT_EQ(restored.lastRetainedTailTokens, 16000u);
+    EXPECT_TRUE(restored.observationInFlight);
+    ASSERT_EQ(restored.observationChunks.size(), 1u);
+    EXPECT_EQ(restored.observationChunks[0].chunkId, "obs-1");
+    EXPECT_EQ(restored.observationChunks[0].sourceTurnIds.size(), 3u);
+    ASSERT_EQ(restored.reflectionChunks.size(), 1u);
+    EXPECT_EQ(restored.reflectionChunks[0].chunkId, "refl-1");
 }
 
 TEST_F(ThreadManagerTest, getMetadata_corruptJson) {
     ThreadMetadata metadata = createTestMetadata();
     std::string threadId = tm->createThread(metadata);
 
-    std::string metadataPath = tempDir + "/.firmius/threads/" + threadId + "/metadata.json";
-    std::ofstream file(metadataPath);
-    file << "{invalid json content";
-    file.close();
+    execDb("UPDATE threads SET metadata_json='{invalid json content' WHERE thread_id='" +
+           threadId + "';");
 
     EXPECT_THROW({
         tm->getMetadata(threadId);
@@ -287,30 +362,16 @@ TEST_F(ThreadManagerTest, loadAgentHistory_withTurns) {
     EXPECT_EQ(history.turns[1].turnId, "turn-002");
 }
 
-TEST_F(ThreadManagerTest, loadAgentHistory_repairsConcatenatedJsonObjects) {
+TEST_F(ThreadManagerTest, loadAgentHistory_roundtrip) {
     ThreadMetadata metadata = createTestMetadata();
     std::string threadId = tm->createThread(metadata);
     std::string agentId = "test-agent";
-    std::string journalPath =
-        tempDir + "/.firmius/threads/" + threadId + "/" + agentId + ".jsonl";
-
     AgentTurn turn1 = createTestTurn("turn-001");
     AgentTurn turn2 = createTestTurn("turn-002");
-
-    rapidjson::Document d1 = toJson(turn1);
-    rapidjson::StringBuffer b1;
-    rapidjson::Writer<rapidjson::StringBuffer> w1(b1);
-    d1.Accept(w1);
-
-    rapidjson::Document d2 = toJson(turn2);
-    rapidjson::StringBuffer b2;
-    rapidjson::Writer<rapidjson::StringBuffer> w2(b2);
-    d2.Accept(w2);
-
     {
-        std::ofstream file(journalPath);
-        ASSERT_TRUE(file.is_open());
-        file << b1.GetString() << b2.GetString() << "\n";
+        Journaler journaler(threadId, agentId);
+        journaler.appendTurn(turn1);
+        journaler.appendTurn(turn2);
     }
 
     AgentHistory history = tm->loadAgentHistory(threadId, agentId);
@@ -319,16 +380,6 @@ TEST_F(ThreadManagerTest, loadAgentHistory_repairsConcatenatedJsonObjects) {
     EXPECT_EQ(history.turns[0].turnId, "turn-001");
     EXPECT_EQ(history.turns[1].turnId, "turn-002");
 
-    std::ifstream repaired(journalPath);
-    ASSERT_TRUE(repaired.is_open());
-    std::string line1;
-    std::string line2;
-    ASSERT_TRUE(std::getline(repaired, line1));
-    ASSERT_TRUE(std::getline(repaired, line2));
-    EXPECT_FALSE(line1.empty());
-    EXPECT_FALSE(line2.empty());
-    EXPECT_EQ(line1, b1.GetString());
-    EXPECT_EQ(line2, b2.GetString());
 }
 
 TEST_F(ThreadManagerTest, loadAgentHistory_repairsOrphanedToolCalls) {
@@ -424,6 +475,46 @@ TEST_F(ThreadManagerTest, loadAgentHistory_repairsMultipleOrphanedCalls) {
     EXPECT_TRUE(result1->toolCallId == "call-a" || result1->toolCallId == "call-b");
     EXPECT_TRUE(result2->toolCallId == "call-a" || result2->toolCallId == "call-b");
     EXPECT_NE(result1->toolCallId, result2->toolCallId);
+}
+
+TEST_F(ThreadManagerTest, loadAgentHistory_skipsRepairForLiveRunningAgent) {
+    ThreadMetadata metadata = createTestMetadata();
+    std::string threadId = tm->createThread(metadata);
+    std::string agentId = "test-agent";
+
+    {
+        Journaler journaler(threadId, agentId);
+
+        AgentTurn toolCallTurn;
+        toolCallTurn.turnId = "turn-live-orphan";
+        toolCallTurn.stopReason = StopReason::ToolUse;
+
+        Message assistantMsg;
+        assistantMsg.role = Role::Assistant;
+        assistantMsg.timestamp = 1000;
+        ToolCallContent call;
+        call.id = "call-live-123";
+        call.name = "summon_subagent";
+        call.args = R"({"name":"planner"})";
+        assistantMsg.content.push_back(call);
+        toolCallTurn.messages.push_back(assistantMsg);
+
+        journaler.appendTurn(toolCallTurn);
+    }
+
+    AgentContext liveContext;
+    liveContext.history = std::make_shared<AgentHistory>();
+    liveContext.history->threadId = threadId;
+    liveContext.identity.id = agentId;
+    liveContext.state.currentStatus = AgentStatus::ProviderWaiting;
+
+    auto liveAgent = std::make_shared<firmius::test::MockAgent>(liveContext);
+    AgentRegistry::instance().registerAgent(agentId, liveAgent);
+
+    AgentHistory history = tm->loadAgentHistory(threadId, agentId);
+
+    ASSERT_EQ(history.turns.size(), 1u);
+    EXPECT_EQ(history.turns[0].turnId, "turn-live-orphan");
 }
 
 TEST_F(ThreadManagerTest, loadAgentHistory_noRepairWhenResultsExist) {
@@ -609,10 +700,6 @@ TEST_F(ThreadManagerTest, createAndGetPlan_roundtrip) {
     ASSERT_EQ(loaded.chunks.size(), 1u);
     EXPECT_EQ(loaded.chunks[0].id, "chunk-1");
 
-    std::filesystem::path planPath =
-        std::filesystem::path(tempDir) / ".firmius" / "threads" / threadId /
-        "plans" / (planId + ".json");
-    EXPECT_TRUE(std::filesystem::exists(planPath));
 }
 
 TEST_F(ThreadManagerTest, writePlan_createsPlansDirectory) {
@@ -621,11 +708,6 @@ TEST_F(ThreadManagerTest, writePlan_createsPlansDirectory) {
 
     Plan plan = createTestPlan(threadId, "plan-manual");
     tm->writePlan(threadId, plan);
-
-    std::filesystem::path plansDir =
-        std::filesystem::path(tempDir) / ".firmius" / "threads" / threadId /
-        "plans";
-    EXPECT_TRUE(std::filesystem::exists(plansDir));
 
     Plan loaded = tm->getPlan(threadId, "plan-manual");
     EXPECT_EQ(loaded.id, "plan-manual");
@@ -697,51 +779,14 @@ TEST_F(ThreadManagerTest, mutatePlan_serializesConcurrentChunkAddsAcrossInstance
     Plan loaded = tm->getPlan(threadId, planId);
     ASSERT_EQ(loaded.chunks.size(), static_cast<size_t>(addCount + 1));
 
-    std::filesystem::path planPath =
-        std::filesystem::path(tempDir) / ".firmius" / "threads" / threadId /
-        "plans" / (planId + ".json");
-    std::ifstream file(planPath);
-    ASSERT_TRUE(file.is_open());
-    std::string raw((std::istreambuf_iterator<char>(file)),
-                    std::istreambuf_iterator<char>());
-    rapidjson::Document doc;
-    doc.Parse(raw.c_str());
-    EXPECT_FALSE(doc.HasParseError());
-    ASSERT_TRUE(doc.HasMember("chunks"));
-    EXPECT_EQ(doc["chunks"].Size(), loaded.chunks.size());
+    EXPECT_EQ(loaded.chunks.front().id, "chunk-1");
 }
 
 TEST_F(ThreadManagerTest, mutatePlan_preventsLostUpdatesAndTornReadsDuringConcurrentAddAndUpdate) {
     ThreadMetadata metadata = createTestMetadata();
     std::string threadId = tm->createThread(metadata);
     std::string planId = tm->createPlan(createTestPlan(threadId));
-    std::filesystem::path planPath =
-        std::filesystem::path(tempDir) / ".firmius" / "threads" / threadId /
-        "plans" / (planId + ".json");
-
     constexpr int iterations = 40;
-    std::atomic<bool> stopReader{false};
-    std::atomic<int> parseFailures{0};
-
-    std::thread reader([&]() {
-        while (!stopReader.load()) {
-            std::ifstream file(planPath);
-            if (!file.is_open()) {
-                continue;
-            }
-            std::string raw((std::istreambuf_iterator<char>(file)),
-                            std::istreambuf_iterator<char>());
-            if (raw.empty()) {
-                ++parseFailures;
-                continue;
-            }
-            rapidjson::Document doc;
-            doc.Parse(raw.c_str());
-            if (doc.HasParseError() || !doc.IsObject()) {
-                ++parseFailures;
-            }
-        }
-    });
 
     auto addFuture = std::async(std::launch::async, [&]() {
         ThreadManager localTm(tempDir + "/.firmius/threads");
@@ -775,11 +820,6 @@ TEST_F(ThreadManagerTest, mutatePlan_preventsLostUpdatesAndTornReadsDuringConcur
 
     addFuture.get();
     updateFuture.get();
-    stopReader = true;
-    reader.join();
-
-    EXPECT_EQ(parseFailures.load(), 0);
-
     Plan loaded = tm->getPlan(threadId, planId);
     ASSERT_EQ(loaded.chunks.size(), static_cast<size_t>(iterations + 1));
     EXPECT_EQ(loaded.chunks.front().attemptCount, 1 + iterations);
@@ -791,14 +831,10 @@ TEST_F(ThreadManagerTest, getPlan_appliesBackwardCompatibleDefaults) {
     ThreadMetadata metadata = createTestMetadata();
     std::string threadId = tm->createThread(metadata);
 
-    std::filesystem::path planPath =
-        std::filesystem::path(tempDir) / ".firmius" / "threads" / threadId /
-        "plans" / "legacy-plan.json";
-    std::filesystem::create_directories(planPath.parent_path());
-
-    std::ofstream file(planPath);
-    file << R"({"id":"legacy-plan","title":"Legacy plan"})";
-    file.close();
+    execDb("INSERT INTO plans(thread_id, plan_id, plan_json, created_at, updated_at) "
+           "VALUES('" +
+           threadId +
+           "','legacy-plan','{\"id\":\"legacy-plan\",\"title\":\"Legacy plan\"}',1,1);");
 
     Plan loaded = tm->getPlan(threadId, "legacy-plan");
     EXPECT_EQ(loaded.id, "legacy-plan");

@@ -1,8 +1,9 @@
 #include "tools/FileReadTool.hpp"
 #include "agents/Agent.hpp"
 #include "agents/AgentPermissionChecks.hpp"
+#include "agents/PurposeLoader.hpp"
 #include "utils/FSUtil.hpp"
-#include "utils/LineRange.hpp"
+#include "utils/Hashline.hpp"
 #include <algorithm>
 #include <cstdint>
 #include <filesystem>
@@ -45,6 +46,8 @@ shared::ToolResult FileReadTool::execute(const FileReadInput &input,
   try {
     ctx.agent.getPermissions()->validatePathAccess(
         absolutePath, firmius::shared::AccessMode::READ);
+    PurposeLoader::loadDiscoveredAgentsForPath(ctx.agent.getMutableContext(),
+                                               absolutePath);
 
     // Check file size before reading to prevent bad_alloc
     std::uint64_t fileSize = 0;
@@ -115,7 +118,9 @@ shared::ToolResult FileReadTool::execute(const FileReadInput &input,
     if (!selectedLines.empty()) {
       for (std::size_t i = 0; i < selectedLines.size(); ++i) {
         enhancedContent +=
-            utils::LineRange::formatLine(input.start_line + static_cast<int>(i), selectedLines[i]);
+            utils::Hashline::formatLine(input.start_line +
+                                            static_cast<int>(i),
+                                        selectedLines[i]);
         if (i + 1 < selectedLines.size()) {
           enhancedContent += '\n';
         }
@@ -132,6 +137,8 @@ shared::ToolResult FileReadTool::execute(const FileReadInput &input,
     res.AddMember("reached_end", reachedEnd, alloc);
     res.AddMember("watch_scope",
                   rapidjson::Value(read_full ? "full" : "range", alloc).Move(),
+                  alloc);
+    res.AddMember("watch_state", rapidjson::Value("updated", alloc).Move(),
                   alloc);
     if (truncated) {
       res.AddMember("truncated", true, alloc);

@@ -3,6 +3,7 @@
 #include "Engine.hpp"
 #include "EnvLoader.hpp"
 #include "Panic.hpp"
+#include "agents/ContextBudget.hpp"
 #include "agents/PurposeLoader.hpp"
 #include "harness/Harness.hpp"
 #include <chrono>
@@ -53,6 +54,15 @@ shared::AgentOutcome BenchmarkSession::runAgentTask(
   if (outcome->kind == shared::AgentOutcome::Kind::Cancelled) {
     throw std::runtime_error("Benchmark agent task was cancelled");
   }
+
+  const auto &metrics = agent_->getContext().aggregateMetrics;
+  emitLog("Benchmark metrics: prompt=" +
+          std::to_string(metrics.tokens.prompt) + " completion=" +
+          std::to_string(metrics.tokens.completion) + " reasoning=" +
+          std::to_string(metrics.tokens.reasoning) + " total=" +
+          std::to_string(metrics.tokens.total) + " cost=$" +
+          std::to_string(metrics.estimatedCostUsd) + " " +
+          summarizeContextWindowMetrics(metrics.context, 3));
 
   return *outcome;
 }
@@ -121,6 +131,17 @@ void BenchmarkSession::ensureReady() {
     if (threadId_.empty()) {
       throw std::runtime_error("Failed to create benchmark thread");
     }
+  }
+
+  try {
+    const auto metadata = harness.listThreads();
+    auto it = std::find_if(
+        metadata.begin(), metadata.end(),
+        [&](const auto &thread) { return thread.threadId == threadId_; });
+    if (it == metadata.end() || !it->isBenchmarkRun) {
+      harness.markThreadAsBenchmark(threadId_, "benchmark");
+    }
+  } catch (...) {
   }
 
   if (!config_.existingAgentId.empty()) {

@@ -250,9 +250,7 @@ bool GoogleSearchProvider::isAvailable() const {
     if (!antigravity_) {
         return false;
     }
-    // Check if there are any authenticated accounts available
-    auto optAccount = antigravity_->getAvailableAccount();
-    return optAccount.has_value();
+    return antigravity_->isConfigured();
 }
 
 SearchResult GoogleSearchProvider::search(const std::string& query,

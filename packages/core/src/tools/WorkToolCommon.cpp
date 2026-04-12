@@ -72,6 +72,23 @@ bool shouldTreatAsRequestedField(const rapidjson::Value &input,
   return true;
 }
 
+bool hasMeaningfulRequestedFieldOtherThanAssignment(
+    const rapidjson::Value &input) {
+  static const std::vector<std::string> kFields = {
+      "title",         "goal",          "context",      "constraints",
+      "completion",    "planning_gate", "status",       "depends_on",
+      "attempt_count", "result_summary", "review_summary",
+      "files_to_read", "files_to_touch", "cwd", "tasks",
+      "verification_condition", "handoff_notes"};
+
+  for (const auto &field : kFields) {
+    if (shouldTreatAsRequestedField(input, field.c_str())) {
+      return true;
+    }
+  }
+  return false;
+}
+
 std::set<std::string> requestedChunkUpdateFields(const rapidjson::Value &input) {
   static const std::vector<std::string> kMutableFields = {
       "title",         "goal",          "context",      "constraints",
@@ -84,7 +101,16 @@ std::set<std::string> requestedChunkUpdateFields(const rapidjson::Value &input) 
   std::set<std::string> fields;
   for (const auto &field : kMutableFields) {
     if (field == "assigned_agent_id" && input.HasMember(field.c_str())) {
-      fields.insert(field);
+      const auto &value = input[field.c_str()];
+      if (!value.IsString()) {
+        fields.insert(field);
+        continue;
+      }
+      const bool empty =
+          shared::StringUtil::trim(std::string_view(value.GetString())).empty();
+      if (!empty || !hasMeaningfulRequestedFieldOtherThanAssignment(input)) {
+        fields.insert(field);
+      }
       continue;
     }
     if (shouldTreatAsRequestedField(input, field.c_str())) {
@@ -115,6 +141,41 @@ std::string lockStatusOrDefault(const FleetLock &lock) {
     return lock.status;
   }
   return "open";
+}
+
+const shared::WorkChunk *findChunkById(const shared::Plan &plan,
+                                       std::string_view chunkId) {
+  auto it = std::find_if(plan.chunks.begin(), plan.chunks.end(),
+                         [&](const shared::WorkChunk &chunk) {
+                           return chunk.id == chunkId;
+                         });
+  if (it == plan.chunks.end()) {
+    return nullptr;
+  }
+  return &*it;
+}
+
+const shared::WorkChunk *findChunkByUniqueTitle(const shared::Plan &plan,
+                                                std::string_view title) {
+  const shared::WorkChunk *match = nullptr;
+  for (const auto &chunk : plan.chunks) {
+    if (chunk.title != title) {
+      continue;
+    }
+    if (match != nullptr) {
+      return nullptr;
+    }
+    match = &chunk;
+  }
+  return match;
+}
+
+const shared::WorkChunk *findDependencyChunk(const shared::Plan &plan,
+                                             const std::string &dependencyRef) {
+  if (const auto *byId = findChunkById(plan, dependencyRef)) {
+    return byId;
+  }
+  return findChunkByUniqueTitle(plan, dependencyRef);
 }
 
 } // namespace
@@ -262,7 +323,94 @@ void requireChunkUpdateAccess(const rapidjson::Value &input,
                               const shared::Plan &,
                               const shared::WorkChunk &chunk) {
   const auto role = roleForContext(ctx);
-  const auto fields = requestedChunkUpdateFields(input);
+  auto fields = requestedChunkUpdateFields(input);
+
+  auto eraseIfUnchanged = [&](const char *field, const auto &currentValue,
+                              const auto &incomingValue) {
+    if (incomingValue == currentValue) {
+      fields.erase(field);
+    }
+  };
+
+  if (fields.count("title") && shouldTreatAsRequestedField(input, "title")) {
+    eraseIfUnchanged("title", chunk.title,
+                     std::string(input["title"].GetString()));
+  }
+  if (fields.count("goal") && shouldTreatAsRequestedField(input, "goal")) {
+    eraseIfUnchanged("goal", chunk.goal, std::string(input["goal"].GetString()));
+  }
+  if (fields.count("context") && shouldTreatAsRequestedField(input, "context")) {
+    eraseIfUnchanged("context", chunk.context,
+                     std::string(input["context"].GetString()));
+  }
+  if (fields.count("constraints") &&
+      shouldTreatAsRequestedField(input, "constraints")) {
+    eraseIfUnchanged("constraints", chunk.constraints,
+                     std::string(input["constraints"].GetString()));
+  }
+  if (fields.count("completion") &&
+      shouldTreatAsRequestedField(input, "completion")) {
+    eraseIfUnchanged("completion", chunk.completion,
+                     std::string(input["completion"].GetString()));
+  }
+  if (fields.count("planning_gate") && input.HasMember("planning_gate")) {
+    eraseIfUnchanged("planning_gate", chunk.planningGate,
+                     input["planning_gate"].GetBool());
+  }
+  if (fields.count("status") && shouldTreatAsRequestedField(input, "status")) {
+    eraseIfUnchanged("status", chunk.status,
+                     parseChunkStatus(input["status"].GetString()));
+  }
+  if (fields.count("depends_on") && shouldTreatAsRequestedField(input, "depends_on")) {
+    eraseIfUnchanged("depends_on", chunk.dependsOn,
+                     parseStringArray(input, "depends_on"));
+  }
+  if (fields.count("attempt_count") && input.HasMember("attempt_count")) {
+    eraseIfUnchanged("attempt_count", chunk.attemptCount,
+                     input["attempt_count"].GetInt());
+  }
+  if (fields.count("result_summary") &&
+      shouldTreatAsRequestedField(input, "result_summary")) {
+    eraseIfUnchanged("result_summary", chunk.resultSummary,
+                     std::string(input["result_summary"].GetString()));
+  }
+  if (fields.count("review_summary") &&
+      shouldTreatAsRequestedField(input, "review_summary")) {
+    eraseIfUnchanged("review_summary", chunk.reviewSummary,
+                     std::string(input["review_summary"].GetString()));
+  }
+  if (fields.count("assigned_agent_id") &&
+      input.HasMember("assigned_agent_id") &&
+      input["assigned_agent_id"].IsString()) {
+    eraseIfUnchanged("assigned_agent_id", chunk.assignedAgentId,
+                     std::string(input["assigned_agent_id"].GetString()));
+  }
+  if (fields.count("files_to_read") &&
+      shouldTreatAsRequestedField(input, "files_to_read")) {
+    eraseIfUnchanged("files_to_read", chunk.filesToRead,
+                     parseStringArray(input, "files_to_read"));
+  }
+  if (fields.count("files_to_touch") &&
+      shouldTreatAsRequestedField(input, "files_to_touch")) {
+    eraseIfUnchanged("files_to_touch", chunk.filesToTouch,
+                     parseStringArray(input, "files_to_touch"));
+  }
+  if (fields.count("cwd") && shouldTreatAsRequestedField(input, "cwd")) {
+    eraseIfUnchanged("cwd", chunk.cwd, std::string(input["cwd"].GetString()));
+  }
+  if (fields.count("tasks") && shouldTreatAsRequestedField(input, "tasks")) {
+    eraseIfUnchanged("tasks", chunk.tasks, parseTaskArray(input, "tasks"));
+  }
+  if (fields.count("verification_condition") &&
+      shouldTreatAsRequestedField(input, "verification_condition")) {
+    eraseIfUnchanged("verification_condition", chunk.verificationCondition,
+                     std::string(input["verification_condition"].GetString()));
+  }
+  if (fields.count("handoff_notes") &&
+      shouldTreatAsRequestedField(input, "handoff_notes")) {
+    eraseIfUnchanged("handoff_notes", chunk.handoffNotes,
+                     std::string(input["handoff_notes"].GetString()));
+  }
 
   if (fields.empty()) {
     throw permissionError("chunk update requires at least one mutable field");
@@ -534,11 +682,9 @@ const shared::WorkChunk &requireChunk(const shared::Plan &plan,
 bool chunkDependenciesDone(const shared::Plan &plan,
                            const shared::WorkChunk &chunk) {
   for (const auto &dependencyId : chunk.dependsOn) {
-    auto it = std::find_if(plan.chunks.begin(), plan.chunks.end(),
-                           [&](const shared::WorkChunk &candidate) {
-                             return candidate.id == dependencyId;
-                           });
-    if (it == plan.chunks.end() || it->status != shared::WorkChunkStatus::Done) {
+    const auto *dependency = findDependencyChunk(plan, dependencyId);
+    if (dependency == nullptr ||
+        dependency->status != shared::WorkChunkStatus::Done) {
       return false;
     }
   }
@@ -579,8 +725,9 @@ bool unblockDependentChunks(shared::Plan &plan,
   for (auto &chunk : plan.chunks) {
     if (chunk.status == shared::WorkChunkStatus::Blocked) {
       bool dependsOnDone = false;
-      for (const auto &depId : chunk.dependsOn) {
-        if (depId == chunkId) {
+      for (const auto &dependencyRef : chunk.dependsOn) {
+        const auto *dependency = findDependencyChunk(plan, dependencyRef);
+        if (dependency != nullptr && dependency->id == chunkId) {
           dependsOnDone = true;
           break;
         }
@@ -616,18 +763,15 @@ void requireChunkReadyForExecution(const shared::Plan &plan,
     std::string dependencyDetail;
     if (chunk.status == shared::WorkChunkStatus::Blocked) {
       for (const auto &dependencyId : chunk.dependsOn) {
-        auto it = std::find_if(plan.chunks.begin(), plan.chunks.end(),
-                               [&](const shared::WorkChunk &candidate) {
-                                 return candidate.id == dependencyId;
-                               });
-        if (it == plan.chunks.end()) {
+        const auto *dependency = findDependencyChunk(plan, dependencyId);
+        if (dependency == nullptr) {
           dependencyDetail =
               "; unresolved dependency '" + dependencyId + "' was not found";
           break;
         }
-        if (it->status != shared::WorkChunkStatus::Done) {
+        if (dependency->status != shared::WorkChunkStatus::Done) {
           dependencyDetail = "; unresolved dependency '" + dependencyId +
-                             "' is " + chunkStatusToString(it->status);
+                             "' is " + chunkStatusToString(dependency->status);
           break;
         }
       }
@@ -640,19 +784,17 @@ void requireChunkReadyForExecution(const shared::Plan &plan,
   }
 
   for (const auto &dependencyId : chunk.dependsOn) {
-    auto it = std::find_if(plan.chunks.begin(), plan.chunks.end(),
-                           [&](const shared::WorkChunk &candidate) {
-                             return candidate.id == dependencyId;
-                           });
-    if (it == plan.chunks.end()) {
+    const auto *dependency = findDependencyChunk(plan, dependencyId);
+    if (dependency == nullptr) {
       throw std::runtime_error("Chunk '" + chunk.id + "' is not ready for " +
                                action + ": dependency '" + dependencyId +
                                "' was not found");
     }
-    if (it->status != shared::WorkChunkStatus::Done) {
+    if (dependency->status != shared::WorkChunkStatus::Done) {
       throw std::runtime_error("Chunk '" + chunk.id + "' is not ready for " +
                                action + ": dependency '" + dependencyId +
-                               "' is " + chunkStatusToString(it->status) +
+                               "' is " +
+                               chunkStatusToString(dependency->status) +
                                "; dependencies must be Done");
     }
   }

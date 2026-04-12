@@ -45,6 +45,7 @@ void Environment::cleanup() {
     processManager_.cleanup();
     
     if (host_) {
+        host_->cleanup();
         host_->destroy();
     }
     

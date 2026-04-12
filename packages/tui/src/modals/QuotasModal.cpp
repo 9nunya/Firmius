@@ -16,7 +16,6 @@
 #include <iomanip>
 #include <sstream>
 #include <string>
-#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -86,9 +85,11 @@ std::time_t parseResetTime(const std::string &value) {
 
 std::string prettifyBucketName(const std::string &bucketName) {
   if (bucketName == "codex") {
-    return "Codex Window";
+    return "Codex limit";
   }
-  return bucketName;
+  std::string pretty = bucketName;
+  std::replace(pretty.begin(), pretty.end(), '_', ' ');
+  return pretty;
 }
 
 std::string repeatGlyph(const std::string &glyph, int count) {
@@ -159,31 +160,20 @@ QuotasModal::QuotasModal(std::string providerId)
     : providerId_(std::move(providerId)) {}
 
 ftxui::Component QuotasModal::create(TuiState &state) {
+  (void)state;
   auto allQuotas = std::make_shared<
       std::map<std::string, std::vector<firmius::shared::QuotaBucket>>>();
-  auto isLoading = std::make_shared<bool>(true);
   auto collapsed =
       std::make_shared<std::unordered_map<std::string, bool>>();
   auto header_hits = std::make_shared<std::vector<HeaderHit>>();
 
-  std::thread([allQuotas, isLoading, providerId = providerId_, &state]() {
-    *allQuotas = firmius::core::Harness::instance().getAllQuotas(providerId);
-    *isLoading = false;
-    state.postEvent(ftxui::Event::Custom);
-  }).detach();
+  *allQuotas = firmius::core::Harness::instance().getAllQuotas(providerId_);
 
-  auto content_renderer = ftxui::Renderer([allQuotas, isLoading, collapsed,
-                                           header_hits,
+  auto content_renderer = ftxui::Renderer([allQuotas, collapsed, header_hits,
                                            providerId = providerId_]() {
     const auto &theme = ThemeManager::instance().getCurrentTheme();
     const auto widths = computeQuotaModalWidths();
     const int accountWidth = std::max(10, widths.inner_w - 4);
-    if (*isLoading) {
-      return ftxui::vbox(
-          {ftxui::text("Fetching quotas...") | ftxui::center |
-               ftxui::color(theme.modals.fg),
-           ftxui::text("") | ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, 5)});
-    }
 
     ftxui::Elements accounts_elements;
     header_hits->clear();
@@ -307,7 +297,7 @@ ftxui::Component QuotasModal::create(TuiState &state) {
   auto scrollable_content = ScrollableBox(content_renderer);
 
   auto window_renderer =
-      ftxui::Renderer(scrollable_content, [scrollable_content, isLoading,
+      ftxui::Renderer(scrollable_content, [scrollable_content,
                                            providerId = providerId_]() {
         const auto &theme = ThemeManager::instance().getCurrentTheme();
         const auto widths = computeQuotaModalWidths();
@@ -333,8 +323,7 @@ ftxui::Component QuotasModal::create(TuiState &state) {
 
   return ftxui::CatchEvent(
       window_renderer,
-      [&state, isLoading, scrollable_content, collapsed,
-       header_hits](ftxui::Event event) {
+      [&state, scrollable_content, collapsed, header_hits](ftxui::Event event) {
         if (event == ftxui::Event::Escape || event == ftxui::Event::Return) {
           state.popModal();
           return true;

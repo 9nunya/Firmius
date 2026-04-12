@@ -2,19 +2,36 @@
 #include "IAgent.hpp"
 #include "ITool.hpp"
 #include "agents/AgentPermissionChecks.hpp"
+#include "agents/PurposeLoader.hpp"
 #include "hosts/LocalHost.hpp"
 #include "tools/FileReadTool.hpp"
 #include "tools/FileEditTool.hpp"
 #include "tools/GlobTool.hpp"
 #include "tools/GrepTool.hpp"
 #include "tools/ListDirectoryTool.hpp"
+#include "tools/LspDiagnosticsTool.hpp"
+#include "tools/LspTool.hpp"
 #include "tools/ProcessExecuteTool.hpp"
 #include "tools/ProcessStatusTool.hpp"
 #include "tools/ProcessSpawnTool.hpp"
 #include "tools/PythonExecuteTool.hpp"
+#include "tools/SkillLoadTool.hpp"
 #include "tools/ToolRegistry.hpp"
+#include "tools/McpCallTool.hpp"
+#include "tools/McpGetPromptTool.hpp"
+#include "tools/McpListTool.hpp"
+#include "tools/McpLoadTool.hpp"
+#include "tools/McpReadResourceTool.hpp"
+#include "tools/McpSearchTool.hpp"
 #include "utils/Hashline.hpp"
+#include "ConfigLoader.hpp"
 #include "AgentRegistry.hpp"
+#include "lsp/LspServerManager.hpp"
+#include "lsp/LspServerRegistry.hpp"
+#include "lsp/LspServerSpec.hpp"
+#include "mcp/McpClient.hpp"
+#include "mcp/McpStdioSession.hpp"
+#include "mcp/McpHttpSession.hpp"
 #include <filesystem>
 #include <fstream>
 #include <gmock/gmock.h>
@@ -27,6 +44,8 @@
 #include <atomic>
 #include <thread>
 #include <tuple>
+#include <optional>
+#include <cstdlib>
 
 using namespace firmius::core;
 using namespace firmius::shared;
@@ -305,6 +324,148 @@ void addEmptyFileEditModeNoise(rapidjson::Document &doc) {
   addFileEditLegacyNoise(doc, "", "", false, 0.0f);
 }
 
+std::string lspTestUniqueSuffix() {
+  return std::to_string(
+      std::chrono::steady_clock::now().time_since_epoch().count());
+}
+
+class ScopedLspTestDir {
+public:
+  ScopedLspTestDir() {
+    path_ = std::filesystem::temp_directory_path() /
+            ("firmius_tools_lsp_test_" + lspTestUniqueSuffix());
+    std::filesystem::create_directories(path_);
+  }
+
+  ~ScopedLspTestDir() {
+    std::error_code ec;
+    std::filesystem::remove_all(path_, ec);
+  }
+
+  const std::filesystem::path &path() const { return path_; }
+
+private:
+  std::filesystem::path path_;
+};
+
+std::string writeDeterministicLspStub(const std::filesystem::path &scriptPath) {
+  const std::string script = R"SCRIPT(#!/usr/bin/env bash
+set -euo pipefail
+
+send_msg() {
+  local payload="$1"
+  printf 'Content-Length: %d\r\n\r\n%s' "${#payload}" "${payload}"
+}
+
+emit_diagnostics() {
+  local body="$1"
+  local uri="$2"
+  local diagnostics='[]'
+
+  if [[ "${body}" == *"triple_error_warning"* ]]; then
+    diagnostics='[{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}},"severity":1,"message":"first fail"},{"range":{"start":{"line":1,"character":0},"end":{"line":1,"character":1}},"severity":1,"message":"second fail"},{"range":{"start":{"line":2,"character":0},"end":{"line":2,"character":1}},"severity":2,"message":"be careful"}]'
+  elif [[ "${body}" == *"beta"* ]]; then
+    diagnostics='[{"range":{"start":{"line":1,"character":0},"end":{"line":1,"character":4}},"severity":1,"message":"broken call"},{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}},"severity":2,"message":"weak type"}]'
+  fi
+
+  local notification="{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"uri\":\"${uri}\",\"diagnostics\":${diagnostics}}}"
+  send_msg "${notification}"
+}
+
+while true; do
+  content_length=""
+  while IFS= read -r line; do
+    line="${line%$'\r'}"
+    [[ -z "${line}" ]] && break
+    if [[ "${line}" == Content-Length:* ]]; then
+      content_length="${line#Content-Length: }"
+    fi
+  done || exit 0
+
+  [[ -z "${content_length}" ]] && continue
+  IFS= read -r -N "${content_length}" body || exit 0
+
+  method=""
+  req_id="null"
+  req_uri="file:///dev/null"
+  if [[ "${body}" =~ \"method\":\"([^\"]+)\" ]]; then
+    method="${BASH_REMATCH[1]}"
+  fi
+  if [[ "${body}" =~ \"id\":([0-9]+) ]]; then
+    req_id="${BASH_REMATCH[1]}"
+  fi
+  if [[ "${body}" =~ \"uri\":\"([^\"]+)\" ]]; then
+    req_uri="${BASH_REMATCH[1]}"
+  fi
+
+  if [[ "${method}" == "initialize" ]]; then
+    response="{\"jsonrpc\":\"2.0\",\"id\":${req_id},\"result\":{\"capabilities\":{\"referencesProvider\":true}}}"
+    send_msg "${response}"
+  elif [[ "${method}" == "shutdown" ]]; then
+    response="{\"jsonrpc\":\"2.0\",\"id\":${req_id},\"result\":null}"
+    send_msg "${response}"
+  elif [[ "${method}" == "exit" ]]; then
+    exit 0
+  elif [[ "${method}" == "textDocument/didOpen" || "${method}" == "textDocument/didChange" ]]; then
+    emit_diagnostics "${body}" "${req_uri}"
+  elif [[ "${method}" == "textDocument/references" ]]; then
+    response="{\"jsonrpc\":\"2.0\",\"id\":${req_id},\"result\":[{\"uri\":\"${req_uri}\",\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":5}}}]}"
+    send_msg "${response}"
+  elif [[ "${req_id}" != "null" ]]; then
+    response="{\"jsonrpc\":\"2.0\",\"id\":${req_id},\"result\":null}"
+    send_msg "${response}"
+  fi
+done
+)SCRIPT";
+
+  std::ofstream out(scriptPath);
+  out << script;
+  out.close();
+
+  std::filesystem::permissions(
+      scriptPath,
+      std::filesystem::perms::owner_read | std::filesystem::perms::owner_write |
+          std::filesystem::perms::owner_exec | std::filesystem::perms::group_read |
+          std::filesystem::perms::group_exec | std::filesystem::perms::others_read |
+          std::filesystem::perms::others_exec,
+      std::filesystem::perm_options::replace);
+
+  return scriptPath.string();
+}
+
+class StubLspHarness {
+public:
+  StubLspHarness()
+      : serverId_("tools-stub-" + lspTestUniqueSuffix()),
+        extension_(".lspstub" + lspTestUniqueSuffix()) {
+    workspace_ = tempDir_.path() / "workspace";
+    scriptPath_ = tempDir_.path() / "stub_lsp.sh";
+    std::filesystem::create_directories(workspace_);
+
+    LspServerSpec spec;
+    spec.id = serverId_;
+    spec.defaultLanguageId = "plaintext";
+    spec.extensions = {extension_};
+    spec.commands = {{writeDeterministicLspStub(scriptPath_)}};
+    LspServerRegistry::instance().registerCustomSpec(std::move(spec));
+  }
+
+  ~StubLspHarness() {
+    LspServerManager::instance().shutdownServer(serverId_, workspace_.string());
+  }
+
+  std::string serverId() const { return serverId_; }
+  std::string filePath(const std::string &stem) const {
+    return (workspace_ / (stem + extension_)).string();
+  }
+
+private:
+  ScopedLspTestDir tempDir_;
+  std::string serverId_;
+  std::string extension_;
+  std::filesystem::path workspace_;
+  std::filesystem::path scriptPath_;
+};
 TEST(ToolContextCancellationContractTest, CancelRequestedReflectsSignal) {
   NiceMock<MockHost> mockHost;
   NiceMock<MockAgent> mockAgent;
@@ -438,6 +599,287 @@ TEST_F(FileReadToolTest, lineSlicing) {
   EXPECT_NE(result.data.find("\"lines_read\":3"), std::string::npos);
   EXPECT_NE(result.data.find("\"watch_scope\":\"range\""), std::string::npos);
   EXPECT_NE(result.data.find("\"reached_end\":false"), std::string::npos);
+}
+TEST_F(FileReadToolTest, fileReadLoadsNearestAgentsWithoutReloadingRoot) {
+  std::filesystem::create_directories("/tmp/work");
+  const std::filesystem::path rootAgentsPath = "/tmp/work/AGENTS.md";
+  const std::filesystem::path nestedRoot = "/tmp/work/agents_file_read_test";
+  const std::filesystem::path packageDir = nestedRoot / "pkg";
+  const std::filesystem::path moduleDir = packageDir / "module";
+  const std::filesystem::path packageAgentsPath = packageDir / "AGENTS.md";
+  const std::filesystem::path moduleAgentsPath = moduleDir / "AGENTS.md";
+  const std::filesystem::path targetFilePath = moduleDir / "target.txt";
+
+  std::filesystem::remove_all(nestedRoot);
+  std::filesystem::remove(rootAgentsPath);
+  std::filesystem::create_directories(moduleDir);
+
+  {
+    std::ofstream rootAgents(rootAgentsPath);
+    rootAgents << "root guidance";
+  }
+  {
+    std::ofstream packageAgents(packageAgentsPath);
+    packageAgents << "package guidance";
+  }
+  {
+    std::ofstream moduleAgents(moduleAgentsPath);
+    moduleAgents << "module guidance";
+  }
+  {
+    std::ofstream targetFile(targetFilePath);
+    targetFile << "hello\n";
+  }
+
+  ASSERT_TRUE(PurposeLoader::loadProjectRootAgentsIntoContext(
+      mockAgent.defaultCtx));
+
+  auto json =
+      createJsonInput({{"path", "agents_file_read_test/pkg/module/target.txt"}});
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+
+  ITool *itool = &tool;
+  auto result = itool->execute(json, ctx);
+  EXPECT_TRUE(result.success) << result.error;
+
+  const std::string canonicalRootAgents =
+      std::filesystem::weakly_canonical(rootAgentsPath).string();
+  const std::string canonicalPackageAgents =
+      std::filesystem::weakly_canonical(packageAgentsPath).string();
+  const std::string canonicalModuleAgents =
+      std::filesystem::weakly_canonical(moduleAgentsPath).string();
+
+  EXPECT_EQ(std::count(mockAgent.defaultCtx.state.loadedAgentMds.begin(),
+                       mockAgent.defaultCtx.state.loadedAgentMds.end(),
+                       canonicalRootAgents),
+            1);
+  EXPECT_EQ(std::count(mockAgent.defaultCtx.state.loadedAgentMds.begin(),
+                       mockAgent.defaultCtx.state.loadedAgentMds.end(),
+                       canonicalPackageAgents),
+            1);
+  EXPECT_EQ(std::count(mockAgent.defaultCtx.state.loadedAgentMds.begin(),
+                       mockAgent.defaultCtx.state.loadedAgentMds.end(),
+                       canonicalModuleAgents),
+            1);
+
+  std::filesystem::remove_all(nestedRoot);
+  std::filesystem::remove(rootAgentsPath);
+}
+
+class SkillLoadToolTest : public ::testing::Test {
+protected:
+  SkillLoadTool tool;
+  NiceMock<MockHost> mockHost;
+  NiceMock<MockAgent> mockAgent;
+  std::filesystem::path tempRoot;
+  std::filesystem::path skillsRoot;
+  std::optional<std::string> previousSkillsDir;
+
+  void SetUp() override {
+    tempRoot = "/tmp/firmius_skill_load_tool_test";
+    skillsRoot = tempRoot / "skills";
+    std::filesystem::remove_all(tempRoot);
+    std::filesystem::create_directories(skillsRoot);
+
+    if (const char *existing = std::getenv("FIRMIUS_SKILLS_DIR")) {
+      previousSkillsDir = std::string(existing);
+    }
+
+    setenv("FIRMIUS_SKILLS_DIR", skillsRoot.string().c_str(), 1);
+
+    mockAgent.defaultCtx.environment.cwd = "/tmp/work";
+    mockAgent.defaultCtx.permissions.allowOutsideCwd = false;
+    mockAgent.defaultCtx.permissions.allowedPaths = {skillsRoot.string(),
+                                                     "/tmp/work", "/tmp"};
+
+    mockAgent.mockPerms_->allowOutsideCwd_ = false;
+    mockAgent.mockPerms_->allowedPaths_ = {skillsRoot.string(), "/tmp/work",
+                                           "/tmp"};
+    mockAgent.mockPerms_->cwd_ = "/tmp/work";
+
+    ON_CALL(mockAgent, getContext())
+        .WillByDefault(ReturnRef(mockAgent.defaultCtx));
+    ON_CALL(mockAgent, getMutableContext())
+        .WillByDefault(ReturnRef(mockAgent.defaultCtx));
+    ON_CALL(mockAgent.mockEnv_->mockWorkspace(), resolvePath(_))
+        .WillByDefault(Invoke([](const std::string &path) {
+          if (path.starts_with("/")) {
+            return path;
+          }
+          return "/tmp/work/" + path;
+        }));
+    ON_CALL(mockHost, readFile(_))
+        .WillByDefault(Invoke([](const std::string &path) {
+          std::ifstream file(path, std::ios::binary);
+          if (!file.is_open()) {
+            return std::vector<uint8_t>{};
+          }
+          return std::vector<uint8_t>(
+              (std::istreambuf_iterator<char>(file)),
+              std::istreambuf_iterator<char>());
+        }));
+  }
+
+  void TearDown() override {
+    if (previousSkillsDir.has_value()) {
+      setenv("FIRMIUS_SKILLS_DIR", previousSkillsDir->c_str(), 1);
+    } else {
+      unsetenv("FIRMIUS_SKILLS_DIR");
+    }
+    std::filesystem::remove_all(tempRoot);
+  }
+
+  static rapidjson::Document parseResult(const ToolResult &result) {
+    rapidjson::Document doc;
+    doc.Parse(result.data.c_str());
+    return doc;
+  }
+};
+
+TEST_F(SkillLoadToolTest, loadsTopLevelSkillEntrypoint) {
+  const std::filesystem::path skillDir = skillsRoot / "planner";
+  std::filesystem::create_directories(skillDir);
+  std::ofstream skillFile(skillDir / "SKILL.md");
+  skillFile << "---\n";
+  skillFile << "name: Planner Skill\n";
+  skillFile << "description: Planning helper\n";
+  skillFile << "---\n";
+  skillFile << "Use this skill for planning tasks.\n";
+  skillFile.close();
+
+  auto json = createJsonInput({{"what", "planner"}});
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+
+  ITool *itool = &tool;
+  auto result = itool->execute(json, ctx);
+
+  EXPECT_TRUE(result.success) << result.error;
+  auto doc = parseResult(result);
+  ASSERT_TRUE(doc.IsObject());
+  EXPECT_STREQ(doc["skill_id"].GetString(), "planner");
+  EXPECT_STREQ(doc["name"].GetString(), "Planner Skill");
+  EXPECT_STREQ(doc["description"].GetString(), "Planning helper");
+  EXPECT_STREQ(doc["relative_path"].GetString(), "SKILL.md");
+  EXPECT_NE(std::string(doc["path"].GetString()).find("/planner/SKILL.md"),
+            std::string::npos);
+  EXPECT_NE(std::string(doc["content"].GetString()).find("Use this skill"),
+            std::string::npos);
+}
+
+TEST_F(SkillLoadToolTest, loadsNestedSkillReferencePath) {
+  const std::filesystem::path skillDir = skillsRoot / "reviewer";
+  const std::filesystem::path refsDir = skillDir / "references";
+  std::filesystem::create_directories(refsDir);
+
+  std::ofstream skillFile(skillDir / "SKILL.md");
+  skillFile << "---\nname: Reviewer\ndescription: Review helper\n---\nBody\n";
+  skillFile.close();
+
+  std::ofstream referenceFile(refsDir / "checklist.md");
+  referenceFile << "- item 1\n- item 2\n";
+  referenceFile.close();
+
+  auto json =
+      createJsonInput({{"what", "reviewer/references/checklist.md"}});
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+
+  ITool *itool = &tool;
+  auto result = itool->execute(json, ctx);
+
+  EXPECT_TRUE(result.success) << result.error;
+  auto doc = parseResult(result);
+  ASSERT_TRUE(doc.IsObject());
+  EXPECT_STREQ(doc["skill_id"].GetString(), "reviewer");
+  EXPECT_STREQ(doc["relative_path"].GetString(),
+               "references/checklist.md");
+  EXPECT_NE(std::string(doc["path"].GetString())
+                .find("/reviewer/references/checklist.md"),
+            std::string::npos);
+  EXPECT_NE(std::string(doc["content"].GetString()).find("item 2"),
+            std::string::npos);
+}
+
+TEST_F(SkillLoadToolTest, rejectsTraversalOutsideSkillRoot) {
+  const std::filesystem::path skillDir = skillsRoot / "writer";
+  std::filesystem::create_directories(skillDir);
+
+  std::ofstream skillFile(skillDir / "SKILL.md");
+  skillFile << "---\nname: Writer\n---\nBody\n";
+  skillFile.close();
+
+  auto json = createJsonInput({{"what", "writer/../outside.md"}});
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+
+  ITool *itool = &tool;
+  auto result = itool->execute(json, ctx);
+
+  EXPECT_FALSE(result.success);
+  EXPECT_NE(result.error.find("cannot traverse outside"), std::string::npos);
+}
+
+TEST_F(SkillLoadToolTest, rejectsSymlinkEscapingSkillRoot) {
+  const std::filesystem::path skillDir = skillsRoot / "attacker";
+  std::filesystem::create_directories(skillDir);
+
+  std::ofstream skillFile(skillDir / "SKILL.md");
+  skillFile << "---\nname: Attacker\n---\nBody\n";
+  skillFile.close();
+
+  const std::filesystem::path secretsFile = tempRoot / "secrets.txt";
+  std::ofstream secret(secretsFile);
+  secret << "sensitive information\n";
+  secret.close();
+
+  // Create a symlink inside the skill root pointing outside
+  std::error_code ec;
+  std::filesystem::create_symlink(secretsFile, skillDir / "link_to_secrets.txt", ec);
+  if (ec) {
+    GTEST_SKIP() << "Symlinks not supported in this environment: " << ec.message();
+  }
+
+  auto json = createJsonInput({{"what", "attacker/link_to_secrets.txt"}});
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+
+  ITool *itool = &tool;
+  auto result = itool->execute(json, ctx);
+
+  EXPECT_FALSE(result.success);
+  EXPECT_NE(result.error.find("stay within the skill root"), std::string::npos);
+}
+
+
+TEST_F(SkillLoadToolTest, allowsSymlinkWithinSkillRoot) {
+  const std::filesystem::path skillDir = skillsRoot / "honest";
+  const std::filesystem::path dataDir = skillDir / "data";
+  std::filesystem::create_directories(dataDir);
+
+  std::ofstream skillFile(skillDir / "SKILL.md");
+  skillFile << "---\nname: Honest\n---\nBody\n";
+  skillFile.close();
+
+  const std::filesystem::path internalFile = dataDir / "internal.txt";
+  std::ofstream internal(internalFile);
+  internal << "internal data\n";
+  internal.close();
+
+  // Create a symlink inside the skill root pointing inside
+  std::error_code ec;
+  std::filesystem::create_symlink(internalFile, skillDir / "link_to_internal.txt", ec);
+  if (ec) {
+    GTEST_SKIP() << "Symlinks not supported in this environment: " << ec.message();
+  }
+
+  auto json = createJsonInput({{"what", "honest/link_to_internal.txt"}});
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+
+  ITool *itool = &tool;
+  auto result = itool->execute(json, ctx);
+
+  EXPECT_TRUE(result.success) << result.error;
+  auto doc = parseResult(result);
+  EXPECT_STREQ(doc["relative_path"].GetString(), "link_to_internal.txt");
+  EXPECT_NE(std::string(doc["content"].GetString()).find("internal data"),
+            std::string::npos);
 }
 
 class GlobToolTest : public ::testing::Test {
@@ -721,6 +1163,8 @@ protected:
         }));
     ON_CALL(mockAgent.mockEnv_->mockWorkspace(), hasFullyReadFile(_))
         .WillByDefault(Return(true));
+    ON_CALL(mockAgent.mockEnv_->mockWorkspace(), getCurrentWorkingDirectory())
+        .WillByDefault(Return("/tmp/work"));
     ON_CALL(mockHost, writeFile(_, _))
         .WillByDefault(Invoke([this](const std::string &,
                                      const std::vector<uint8_t> &data) {
@@ -779,6 +1223,8 @@ protected:
         }));
     ON_CALL(mockAgent.mockEnv_->mockWorkspace(), hasFullyReadFile(_))
         .WillByDefault(Return(true));
+    ON_CALL(mockAgent.mockEnv_->mockWorkspace(), getCurrentWorkingDirectory())
+        .WillByDefault(Return("/tmp/work"));
     ON_CALL(mockHost, writeFile(_, _))
         .WillByDefault(Invoke([this](const std::string &,
                                      const std::vector<uint8_t> &data) {
@@ -1470,6 +1916,146 @@ TEST_F(FileEditAnchorToolTest, multiFileSearchReplaceEditsReturnPerFileResults) 
                "search_replace_edits");
 }
 
+TEST_F(FileEditAnchorToolTest, successfulEditIncludesNewLspErrors) {
+  StubLspHarness harness;
+  const std::string path = harness.filePath("sample");
+  {
+    std::ofstream out(path);
+    out << "alpha = 1\nprint(alpha)\n";
+  }
+
+  EXPECT_CALL(mockHost, exists(path)).WillRepeatedly(Return(true));
+  EXPECT_CALL(mockHost, readFile(path))
+      .WillRepeatedly(Invoke([](const std::string &readPath) {
+        std::ifstream in(readPath, std::ios::binary);
+        return std::vector<uint8_t>((std::istreambuf_iterator<char>(in)),
+                                    std::istreambuf_iterator<char>());
+      }));
+  EXPECT_CALL(mockHost, writeFile(path, _))
+      .WillOnce(Invoke([this](const std::string &writePath,
+                              const std::vector<uint8_t> &data) {
+        capturedWrite.assign(data.begin(), data.end());
+        std::ofstream out(writePath, std::ios::binary);
+        out.write(reinterpret_cast<const char *>(data.data()),
+                  static_cast<std::streamsize>(data.size()));
+      }));
+
+  auto json = createSearchReplaceFileEditJson(
+      path,
+      {std::make_tuple("print(alpha)", "print(alpha, beta)", false)});
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+  ITool *itool = &tool;
+  auto result = itool->execute(json, ctx);
+
+  ASSERT_TRUE(result.success) << result.error;
+  EXPECT_EQ(capturedWrite, "alpha = 1\nprint(alpha, beta)\n");
+  auto doc = parseResult(result);
+  ASSERT_TRUE(doc.HasMember("lsp"));
+  const auto &lsp = doc["lsp"];
+  EXPECT_TRUE(lsp["checked"].GetBool());
+  EXPECT_TRUE(lsp["available"].GetBool());
+  EXPECT_STREQ(lsp["server_id"].GetString(), harness.serverId().c_str());
+  EXPECT_EQ(lsp["errors"].GetInt(), 1);
+  EXPECT_EQ(lsp["warnings"].GetInt(), 1);
+  EXPECT_EQ(lsp["new_error_count"].GetInt(), 1);
+  EXPECT_EQ(lsp["new_warning_count"].GetInt(), 1);
+  ASSERT_TRUE(lsp["new_errors"].IsArray());
+  ASSERT_EQ(lsp["new_errors"].Size(), 1u);
+  EXPECT_STREQ(lsp["new_errors"][0].GetString(), "ERROR [2:1] broken call");
+}
+
+TEST(LspSemanticToolsTest, diagnosticsToolReturnsStructuredNativePayload) {
+  LspDiagnosticsTool tool;
+  NiceMock<MockHost> mockHost;
+  NiceMock<MockAgent> mockAgent;
+  StubLspHarness harness;
+
+  const std::string path = harness.filePath("diag");
+  {
+    std::ofstream out(path);
+    out << "triple_error_warning\n";
+  }
+
+  mockAgent.defaultCtx.environment.cwd = std::filesystem::path(path).parent_path().string();
+  mockAgent.defaultCtx.permissions.allowOutsideCwd = false;
+  mockAgent.defaultCtx.permissions.allowedPaths = {mockAgent.defaultCtx.environment.cwd, "/tmp"};
+  mockAgent.mockPerms_->allowOutsideCwd_ = false;
+  mockAgent.mockPerms_->allowedPaths_ = mockAgent.defaultCtx.permissions.allowedPaths;
+  mockAgent.mockPerms_->cwd_ = mockAgent.defaultCtx.environment.cwd;
+  ON_CALL(mockAgent, getContext()).WillByDefault(ReturnRef(mockAgent.defaultCtx));
+  ON_CALL(mockAgent, getMutableContext())
+      .WillByDefault(ReturnRef(mockAgent.defaultCtx));
+  ON_CALL(mockAgent.mockEnv_->mockWorkspace(), resolvePath(_))
+      .WillByDefault(Invoke([](const std::string &p) { return p; }));
+  ON_CALL(mockAgent.mockEnv_->mockWorkspace(), getCurrentWorkingDirectory())
+      .WillByDefault(Return(mockAgent.defaultCtx.environment.cwd));
+
+  auto json = createJsonInput({{"path", path}});
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+  ITool *itool = &tool;
+  auto result = itool->execute(json, ctx);
+
+  ASSERT_TRUE(result.success) << result.error;
+  rapidjson::Document doc;
+  doc.Parse(result.data.c_str());
+  ASSERT_TRUE(doc.IsObject());
+  EXPECT_TRUE(doc["available"].GetBool());
+  EXPECT_STREQ(doc["server_id"].GetString(), harness.serverId().c_str());
+  EXPECT_EQ(doc["summary"]["errors"].GetInt(), 2);
+  EXPECT_EQ(doc["summary"]["warnings"].GetInt(), 1);
+}
+
+TEST(LspSemanticToolsTest, lspToolPassesThroughNativeSemanticQueryResults) {
+  LspTool tool;
+  NiceMock<MockHost> mockHost;
+  NiceMock<MockAgent> mockAgent;
+  StubLspHarness harness;
+
+  const std::string path = harness.filePath("refs");
+  {
+    std::ofstream out(path);
+    out << "hello refs\n";
+  }
+
+  mockAgent.defaultCtx.environment.cwd = std::filesystem::path(path).parent_path().string();
+  mockAgent.defaultCtx.permissions.allowOutsideCwd = false;
+  mockAgent.defaultCtx.permissions.allowedPaths = {mockAgent.defaultCtx.environment.cwd, "/tmp"};
+  mockAgent.mockPerms_->allowOutsideCwd_ = false;
+  mockAgent.mockPerms_->allowedPaths_ = mockAgent.defaultCtx.permissions.allowedPaths;
+  mockAgent.mockPerms_->cwd_ = mockAgent.defaultCtx.environment.cwd;
+  ON_CALL(mockAgent, getContext()).WillByDefault(ReturnRef(mockAgent.defaultCtx));
+  ON_CALL(mockAgent, getMutableContext())
+      .WillByDefault(ReturnRef(mockAgent.defaultCtx));
+  ON_CALL(mockAgent.mockEnv_->mockWorkspace(), resolvePath(_))
+      .WillByDefault(Invoke([](const std::string &p) { return p; }));
+  ON_CALL(mockAgent.mockEnv_->mockWorkspace(), getCurrentWorkingDirectory())
+      .WillByDefault(Return(mockAgent.defaultCtx.environment.cwd));
+
+  rapidjson::Document json;
+  json.SetObject();
+  auto &alloc = json.GetAllocator();
+  json.AddMember("operation", makeJsonString("references", alloc), alloc);
+  json.AddMember("path", makeJsonString(path, alloc), alloc);
+  json.AddMember("line", 1, alloc);
+  json.AddMember("character", 1, alloc);
+
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+  ITool *itool = &tool;
+  auto result = itool->execute(json, ctx);
+
+  ASSERT_TRUE(result.success) << result.error;
+  rapidjson::Document doc;
+  doc.Parse(result.data.c_str());
+  ASSERT_TRUE(doc.IsObject());
+  EXPECT_TRUE(doc["available"].GetBool());
+  ASSERT_TRUE(doc["result"].IsArray());
+  ASSERT_EQ(doc["result"].Size(), 1u);
+  ASSERT_TRUE(doc["result"][0].IsObject());
+  ASSERT_TRUE(doc["result"][0].HasMember("uri"));
+  EXPECT_NE(std::string(doc["result"][0]["uri"].GetString()).find(path),
+            std::string::npos);
+}
+
 TEST_F(FileEditAnchorToolTest, mixingSearchReplaceAndHashlineEditsIsRejected) {
   const std::string path = "/tmp/work/file.txt";
 
@@ -2101,4 +2687,643 @@ TEST_F(ListDirectoryToolTest, includeHidden_respected) {
   EXPECT_TRUE(result.success);
   EXPECT_EQ(result.data.find(".hidden"), std::string::npos);
   EXPECT_NE(result.data.find("visible"), std::string::npos);
+}
+
+namespace {
+
+std::string frameMcpJson(const std::string &json) {
+  return "Content-Length: " + std::to_string(json.size()) + "\r\n\r\n" + json;
+}
+
+} // namespace
+
+TEST(McpClientSubstrateTest, initializeListCallAndShutdownLifecycle) {
+  NiceMock<MockHost> mockHost;
+  NiceMock<MockAgent> mockAgent;
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+
+  auto mockProcess = std::make_unique<NiceMock<MockHostProcess>>();
+  auto *process = mockProcess.get();
+
+  bool running = true;
+  std::string stdoutBuffer;
+  std::vector<std::string> writes;
+
+  ON_CALL(*process, inspect())
+      .WillByDefault(Invoke([&]() {
+        return ProcessSnapshot{running, 0, stdoutBuffer, "", 0.0};
+      }));
+  ON_CALL(*process, isRunning()).WillByDefault(Invoke([&]() { return running; }));
+
+  EXPECT_CALL(*process, kill()).WillRepeatedly(Invoke([&]() { running = false; }));
+  EXPECT_CALL(*process, write(_)).WillRepeatedly(Invoke([&](const std::string &payload) {
+    writes.push_back(payload);
+    if (payload.find("\"method\":\"initialize\"") != std::string::npos) {
+      stdoutBuffer += frameMcpJson(
+          R"({"jsonrpc":"2.0","id":1,"result":{"capabilities":{"tools":{}}}})");
+    } else if (payload.find("\"method\":\"tools/list\"") != std::string::npos) {
+      stdoutBuffer += frameMcpJson(
+          R"({"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo_tool"}]}})");
+    } else if (payload.find("\"method\":\"tools/call\"") != std::string::npos) {
+      stdoutBuffer += frameMcpJson(
+          R"({"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"ok"}]}})");
+    } else if (payload.find("\"method\":\"shutdown\"") != std::string::npos) {
+      stdoutBuffer += frameMcpJson(
+          R"({"jsonrpc":"2.0","id":4,"result":{}})");
+    }
+  }));
+
+  {
+    mcp::McpClient client(std::move(mockProcess), ctx);
+    client.initialize(1000);
+
+    auto listed = client.listTools(1000);
+    ASSERT_TRUE(listed.HasMember("result"));
+    ASSERT_TRUE(listed["result"].HasMember("tools"));
+    ASSERT_EQ(listed["result"]["tools"].GetArray().Size(), 1u);
+
+    rapidjson::Document args;
+    args.SetObject();
+    args.AddMember("input", "hello", args.GetAllocator());
+    auto called = client.callTool("echo_tool", args, 1000);
+    ASSERT_TRUE(called.HasMember("result"));
+  }
+
+  EXPECT_THAT(writes[0], HasSubstr("\"method\":\"initialize\""));
+  EXPECT_THAT(writes[1], HasSubstr("\"method\":\"initialized\""));
+  EXPECT_THAT(writes[2], HasSubstr("\"method\":\"tools/list\""));
+  EXPECT_THAT(writes[3], HasSubstr("\"method\":\"tools/call\""));
+  EXPECT_THAT(writes[4], HasSubstr("\"method\":\"shutdown\""));
+  EXPECT_THAT(writes[5], HasSubstr("\"method\":\"exit\""));
+}
+
+TEST(McpClientSubstrateTest, initializeFailsWhenCapabilitiesToolsMissing) {
+  NiceMock<MockHost> mockHost;
+  NiceMock<MockAgent> mockAgent;
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+
+  auto mockProcess = std::make_unique<NiceMock<MockHostProcess>>();
+  auto *process = mockProcess.get();
+
+  bool running = true;
+  std::string stdoutBuffer;
+  ON_CALL(*process, inspect())
+      .WillByDefault(Invoke([&]() {
+        return ProcessSnapshot{running, 0, stdoutBuffer, "", 0.0};
+      }));
+  EXPECT_CALL(*process, kill()).WillRepeatedly(Invoke([&]() { running = false; }));
+  EXPECT_CALL(*process, write(_)).WillRepeatedly(Invoke([&](const std::string &payload) {
+    if (payload.find("\"method\":\"initialize\"") != std::string::npos) {
+      stdoutBuffer += frameMcpJson(
+          R"({"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}})");
+    }
+  }));
+
+  mcp::McpClient client(std::move(mockProcess), ctx);
+  EXPECT_THROW(client.initialize(1000), std::runtime_error);
+}
+
+TEST(McpClientSubstrateTest, stdioSessionTimeoutKillsProcess) {
+  NiceMock<MockHost> mockHost;
+  NiceMock<MockAgent> mockAgent;
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+
+  auto mockProcess = std::make_unique<NiceMock<MockHostProcess>>();
+  auto *process = mockProcess.get();
+
+  bool running = true;
+  ON_CALL(*process, inspect())
+      .WillByDefault(Invoke([&]() {
+        return ProcessSnapshot{running, 0, "", "", 0.0};
+      }));
+  EXPECT_CALL(*process, write(_)).Times(1);
+  EXPECT_CALL(*process, kill()).WillRepeatedly(Invoke([&]() { running = false; }));
+
+  mcp::McpStdioSession session(*process, ctx);
+  rapidjson::Document params;
+  params.SetObject();
+
+  EXPECT_THROW(
+      session.sendRequest(1, "initialize", params, 30, "initialize"),
+      std::runtime_error);
+}
+
+TEST(McpClientSubstrateTest, httpSessionInitializeListCallAndShutdownLifecycle) {
+  NiceMock<MockHost> mockHost;
+  NiceMock<MockAgent> mockAgent;
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+
+  std::vector<std::string> methods;
+  mcp::McpHttpSender sender = [&](const mcp::McpHttpTransportConfig &,
+                                  const std::string &requestBody, int) {
+    rapidjson::Document req;
+    req.Parse(requestBody.c_str());
+    methods.push_back(req["method"].GetString());
+
+    const std::string method = req["method"].GetString();
+    if (method == "initialize") {
+      return mcp::McpHttpResponse{
+          200,
+          R"({"jsonrpc":"2.0","id":1,"result":{"capabilities":{"tools":{}}}})",
+          "",
+          {}};
+    }
+    if (method == "tools/list") {
+      return mcp::McpHttpResponse{
+          200,
+          R"({"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo_tool"}]}})",
+          "",
+          {}};
+    }
+    if (method == "tools/call") {
+      return mcp::McpHttpResponse{
+          200,
+          R"({"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"ok"}]}})",
+          "",
+          {}};
+    }
+    if (method == "shutdown") {
+      return mcp::McpHttpResponse{200, R"({"jsonrpc":"2.0","id":4,"result":{}})", "", {}};
+    }
+    return mcp::McpHttpResponse{200, R"({"jsonrpc":"2.0","result":{}})", "", {}};
+  };
+
+  mcp::McpHttpTransportConfig httpConfig;
+  httpConfig.url = "https://example.invalid/mcp";
+  auto session = std::make_unique<mcp::McpHttpSession>(httpConfig, ctx, sender);
+
+  {
+    mcp::McpClient client(std::move(session), ctx);
+    client.initialize(1000);
+    auto listed = client.listTools(1000);
+    ASSERT_TRUE(listed.HasMember("result"));
+    ASSERT_TRUE(listed["result"].HasMember("tools"));
+    ASSERT_EQ(listed["result"]["tools"].GetArray().Size(), 1u);
+
+    rapidjson::Document args;
+    args.SetObject();
+    args.AddMember("input", "hello", args.GetAllocator());
+    auto called = client.callTool("echo_tool", args, 1000);
+    ASSERT_TRUE(called.HasMember("result"));
+  }
+
+  ASSERT_GE(methods.size(), 6u);
+  EXPECT_EQ(methods[0], "initialize");
+  EXPECT_EQ(methods[1], "initialized");
+  EXPECT_EQ(methods[2], "tools/list");
+  EXPECT_EQ(methods[3], "tools/call");
+  EXPECT_EQ(methods[4], "shutdown");
+  EXPECT_EQ(methods[5], "exit");
+  EXPECT_THAT(methods, ::testing::Not(::testing::Contains(std::string("$/cancelRequest"))));
+  EXPECT_THAT(methods, ::testing::Not(::testing::Contains(std::string("notifications/cancelled"))));
+}
+
+TEST(McpClientSubstrateTest, httpSessionSurfacesSenderError) {
+  NiceMock<MockHost> mockHost;
+  NiceMock<MockAgent> mockAgent;
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+
+  mcp::McpHttpSender sender = [](const mcp::McpHttpTransportConfig &,
+                                  const std::string &, int) {
+    return mcp::McpHttpResponse{0, "", "auth rejected", {}};
+  };
+
+  mcp::McpHttpTransportConfig httpConfig;
+  httpConfig.url = "https://example.invalid/mcp";
+  auto session = std::make_unique<mcp::McpHttpSession>(httpConfig, ctx, sender);
+  mcp::McpClient client(std::move(session), ctx);
+
+  try {
+    client.initialize(1000);
+    FAIL() << "Expected initialize to throw";
+  } catch (const std::runtime_error &e) {
+    EXPECT_THAT(std::string(e.what()), HasSubstr("auth rejected"));
+  }
+}
+
+TEST(McpClientSubstrateTest, httpSessionRejectsSseStreamResponseAsDeferred) {
+  NiceMock<MockHost> mockHost;
+  NiceMock<MockAgent> mockAgent;
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+
+  mcp::McpHttpSender sender = [](const mcp::McpHttpTransportConfig &,
+                                  const std::string &, int) {
+    return mcp::McpHttpResponse{
+        200,
+        "event: message\n"
+        "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n\n",
+        "",
+        {{"content-type", "text/event-stream"}}};
+  };
+
+  mcp::McpHttpTransportConfig httpConfig;
+  httpConfig.url = "https://example.invalid/mcp";
+  auto session = std::make_unique<mcp::McpHttpSession>(httpConfig, ctx, sender);
+  mcp::McpClient client(std::move(session), ctx);
+
+  try {
+    client.initialize(1000);
+    FAIL() << "Expected initialize to throw for SSE stream response";
+  } catch (const std::runtime_error &e) {
+    EXPECT_THAT(std::string(e.what()), HasSubstr("invalid JSON"));
+  }
+}
+
+TEST(McpCallToolParityTest, stdioHappyPathUsesMcpClientLifecycle) {
+  NiceMock<MockHost> mockHost;
+  NiceMock<MockAgent> mockAgent;
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+
+  auto &loader = ConfigLoader::instance();
+  const UserConfig original = loader.getConfig();
+  UserConfig cfg = original;
+  cfg.mcpServers.clear();
+  McpServerConfig server;
+  server.transport = "stdio";
+  server.command = "npx";
+  server.args = {"-y", "example-server"};
+  server.cwd = "/tmp";
+  server.enabled = true;
+  cfg.mcpServers["demo"] = server;
+  loader.updateConfig(cfg);
+
+  auto mockProcess = std::make_unique<NiceMock<MockHostProcess>>();
+  auto *process = mockProcess.get();
+
+  bool running = true;
+  std::string stdoutBuffer;
+  std::vector<std::string> writes;
+
+  ON_CALL(*process, inspect())
+      .WillByDefault(Invoke([&]() {
+        return ProcessSnapshot{running, 0, stdoutBuffer, "", 0.0};
+      }));
+  ON_CALL(*process, isRunning()).WillByDefault(Invoke([&]() { return running; }));
+  EXPECT_CALL(*process, kill()).WillRepeatedly(Invoke([&]() { running = false; }));
+  EXPECT_CALL(*process, write(_)).WillRepeatedly(Invoke([&](const std::string &payload) {
+    writes.push_back(payload);
+    if (payload.find("\"method\":\"initialize\"") != std::string::npos) {
+      stdoutBuffer += frameMcpJson(
+          R"({"jsonrpc":"2.0","id":1,"result":{"capabilities":{"tools":{}}}})");
+    } else if (payload.find("\"method\":\"tools/list\"") != std::string::npos) {
+      stdoutBuffer += frameMcpJson(
+          R"({"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo_tool"}]}})");
+    } else if (payload.find("\"method\":\"tools/call\"") != std::string::npos) {
+      stdoutBuffer += frameMcpJson(
+          R"({"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"ok"}]}})");
+    } else if (payload.find("\"method\":\"shutdown\"") != std::string::npos) {
+      stdoutBuffer += frameMcpJson(
+          R"({"jsonrpc":"2.0","id":4,"result":{}})");
+    }
+  }));
+  EXPECT_CALL(mockHost, spawn(_, _, _)).WillOnce(Return(ByMove(std::move(mockProcess))));
+
+  McpCallTool tool;
+  rapidjson::Document input;
+  input.SetObject();
+  auto &a = input.GetAllocator();
+  input.AddMember("server_name", rapidjson::Value("demo", a).Move(), a);
+  input.AddMember("tool_name", rapidjson::Value("echo_tool", a).Move(), a);
+  input.AddMember("timeout_ms", 1000, a);
+  rapidjson::Value args(rapidjson::kObjectType);
+  args.AddMember("input", rapidjson::Value("hello", a).Move(), a);
+  input.AddMember("arguments", args, a);
+
+  ITool *itool = &tool;
+  auto result = itool->execute(input, ctx);
+  EXPECT_TRUE(result.success) << result.error;
+
+  rapidjson::Document out;
+  out.Parse(result.data.c_str());
+  ASSERT_FALSE(out.HasParseError());
+  ASSERT_TRUE(out.IsObject());
+  EXPECT_STREQ(out["server_name"].GetString(), "demo");
+  EXPECT_STREQ(out["tool_name"].GetString(), "echo_tool");
+  ASSERT_TRUE(out.HasMember("remote_result"));
+
+  ASSERT_GE(writes.size(), 6u);
+  EXPECT_THAT(writes[0], HasSubstr("\"method\":\"initialize\""));
+  EXPECT_THAT(writes[1], HasSubstr("\"method\":\"initialized\""));
+  EXPECT_THAT(writes[2], HasSubstr("\"method\":\"tools/list\""));
+  EXPECT_THAT(writes[3], HasSubstr("\"method\":\"tools/call\""));
+  EXPECT_THAT(writes[4], HasSubstr("\"method\":\"shutdown\""));
+  EXPECT_THAT(writes[5], HasSubstr("\"method\":\"exit\""));
+
+  loader.updateConfig(original);
+}
+
+TEST(McpCallToolParityTest, unsupportedTransportFailsExplicitly) {
+  NiceMock<MockHost> mockHost;
+  NiceMock<MockAgent> mockAgent;
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+
+  auto &loader = ConfigLoader::instance();
+  const UserConfig original = loader.getConfig();
+  UserConfig cfg = original;
+  cfg.mcpServers.clear();
+  McpServerConfig server;
+  server.transport = "remote";
+  server.command = "ignored";
+  server.enabled = true;
+  cfg.mcpServers["remote_server"] = server;
+  loader.updateConfig(cfg);
+
+  EXPECT_CALL(mockHost, spawn(_, _, _)).Times(0);
+
+  McpCallTool tool;
+  rapidjson::Document input;
+  input.SetObject();
+  auto &a = input.GetAllocator();
+  input.AddMember("server_name", rapidjson::Value("remote_server", a).Move(), a);
+  input.AddMember("tool_name", rapidjson::Value("echo_tool", a).Move(), a);
+  rapidjson::Value args(rapidjson::kObjectType);
+  input.AddMember("arguments", args, a);
+
+  ITool *itool = &tool;
+  auto result = itool->execute(input, ctx);
+  EXPECT_FALSE(result.success);
+  EXPECT_THAT(result.error, HasSubstr("Unsupported MCP transport"));
+
+  loader.updateConfig(original);
+}
+
+TEST(McpCallToolParityTest, httpTransportFailsExplicitlyWithoutStdioFallback) {
+  NiceMock<MockHost> mockHost;
+  NiceMock<MockAgent> mockAgent;
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+
+  auto &loader = ConfigLoader::instance();
+  const UserConfig original = loader.getConfig();
+  UserConfig cfg = original;
+  cfg.mcpServers.clear();
+  McpServerConfig server;
+  server.transport = "http";
+  server.url = "https://example.invalid/mcp";
+  server.allowInsecureTls = true;
+  // Populate stdio fields too; tool must not silently downgrade to stdio.
+  server.command = "npx";
+  server.args = {"-y", "example-server"};
+  server.enabled = true;
+  cfg.mcpServers["http_server"] = server;
+  loader.updateConfig(cfg);
+
+  EXPECT_CALL(mockHost, spawn(_, _, _)).Times(0);
+
+  McpCallTool tool;
+  rapidjson::Document input;
+  input.SetObject();
+  auto &a = input.GetAllocator();
+  input.AddMember("server_name", rapidjson::Value("http_server", a).Move(), a);
+  input.AddMember("tool_name", rapidjson::Value("echo_tool", a).Move(), a);
+  input.AddMember("timeout_ms", 200, a);
+  rapidjson::Value args(rapidjson::kObjectType);
+  input.AddMember("arguments", args, a);
+
+  ITool *itool = &tool;
+  auto result = itool->execute(input, ctx);
+  EXPECT_FALSE(result.success);
+  EXPECT_THAT(result.error, HasSubstr("allowInsecureTls"));
+
+  loader.updateConfig(original);
+}
+
+TEST(McpDiscoveryLoadAccessToolTest, mcpListSummarizesCapabilitiesFromServer) {
+  NiceMock<MockHost> mockHost;
+  NiceMock<MockAgent> mockAgent;
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+
+  auto &loader = ConfigLoader::instance();
+  const UserConfig original = loader.getConfig();
+  UserConfig cfg = original;
+  cfg.mcpServers.clear();
+  McpServerConfig server;
+  server.transport = "stdio";
+  server.command = "npx";
+  server.args = {"-y", "example-server"};
+  server.cwd = "/tmp";
+  server.enabled = true;
+  cfg.mcpServers["demo"] = server;
+  loader.updateConfig(cfg);
+
+  auto mockProcess = std::make_unique<NiceMock<MockHostProcess>>();
+  auto *process = mockProcess.get();
+  bool running = true;
+  std::string stdoutBuffer;
+
+  ON_CALL(*process, inspect()).WillByDefault(Invoke([&]() {
+    return ProcessSnapshot{running, 0, stdoutBuffer, "", 0.0};
+  }));
+  ON_CALL(*process, isRunning()).WillByDefault(Invoke([&]() { return running; }));
+  EXPECT_CALL(*process, kill()).WillRepeatedly(Invoke([&]() { running = false; }));
+  EXPECT_CALL(*process, write(_)).WillRepeatedly(Invoke([&](const std::string &payload) {
+    if (payload.find("\"method\":\"initialize\"") != std::string::npos) {
+      stdoutBuffer += frameMcpJson(
+          R"({"jsonrpc":"2.0","id":1,"result":{"capabilities":{"tools":{}}}})");
+    } else if (payload.find("\"method\":\"tools/list\"") != std::string::npos) {
+      stdoutBuffer += frameMcpJson(
+          R"({"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"tool.alpha"},{"name":"tool.beta"}]}})");
+    } else if (payload.find("\"method\":\"resources/list\"") != std::string::npos) {
+      stdoutBuffer += frameMcpJson(
+          R"({"jsonrpc":"2.0","id":3,"result":{"resources":[{"uri":"res://alpha"}]}})");
+    } else if (payload.find("\"method\":\"prompts/list\"") != std::string::npos) {
+      stdoutBuffer += frameMcpJson(
+          R"({"jsonrpc":"2.0","id":4,"result":{"prompts":[{"name":"prompt.alpha"}]}})");
+    } else if (payload.find("\"method\":\"shutdown\"") != std::string::npos) {
+      stdoutBuffer += frameMcpJson(
+          R"({"jsonrpc":"2.0","id":5,"result":{}})");
+    }
+  }));
+  EXPECT_CALL(mockHost, spawn(_, _, _)).WillOnce(Return(ByMove(std::move(mockProcess))));
+
+  McpListTool tool;
+  rapidjson::Document input;
+  input.SetObject();
+  input.AddMember("server_name", "demo", input.GetAllocator());
+
+  ITool *itool = &tool;
+  auto result = itool->execute(input, ctx);
+  EXPECT_TRUE(result.success) << result.error;
+
+  rapidjson::Document out;
+  out.Parse(result.data.c_str());
+  ASSERT_FALSE(out.HasParseError());
+  ASSERT_TRUE(out.HasMember("servers"));
+  ASSERT_TRUE(out["servers"].IsArray());
+  ASSERT_EQ(out["servers"].GetArray().Size(), 1u);
+  const auto &entry = out["servers"][0];
+  EXPECT_STREQ(entry["server_name"].GetString(), "demo");
+  ASSERT_EQ(entry["tools"].GetArray().Size(), 2u);
+  ASSERT_EQ(entry["resources"].GetArray().Size(), 1u);
+  ASSERT_EQ(entry["prompts"].GetArray().Size(), 1u);
+
+  loader.updateConfig(original);
+}
+
+TEST(McpDiscoveryLoadAccessToolTest, mcpSearchFiltersByQuery) {
+  NiceMock<MockHost> mockHost;
+  NiceMock<MockAgent> mockAgent;
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+
+  auto &loader = ConfigLoader::instance();
+  const UserConfig original = loader.getConfig();
+  UserConfig cfg = original;
+  cfg.mcpServers.clear();
+  McpServerConfig server;
+  server.transport = "stdio";
+  server.command = "npx";
+  server.args = {"-y", "example-server"};
+  server.enabled = true;
+  cfg.mcpServers["demo"] = server;
+  loader.updateConfig(cfg);
+
+  auto mockProcess = std::make_unique<NiceMock<MockHostProcess>>();
+  auto *process = mockProcess.get();
+  bool running = true;
+  std::string stdoutBuffer;
+
+  ON_CALL(*process, inspect()).WillByDefault(Invoke([&]() {
+    return ProcessSnapshot{running, 0, stdoutBuffer, "", 0.0};
+  }));
+  ON_CALL(*process, isRunning()).WillByDefault(Invoke([&]() { return running; }));
+  EXPECT_CALL(*process, kill()).WillRepeatedly(Invoke([&]() { running = false; }));
+  EXPECT_CALL(*process, write(_)).WillRepeatedly(Invoke([&](const std::string &payload) {
+    if (payload.find("\"method\":\"initialize\"") != std::string::npos) {
+      stdoutBuffer += frameMcpJson(
+          R"({"jsonrpc":"2.0","id":1,"result":{"capabilities":{"tools":{}}}})");
+    } else if (payload.find("\"method\":\"tools/list\"") != std::string::npos) {
+      stdoutBuffer += frameMcpJson(
+          R"({"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"alpha.tool","description":"find alpha"},{"name":"beta.tool","description":"other"}]}})");
+    } else if (payload.find("\"method\":\"resources/list\"") != std::string::npos) {
+      stdoutBuffer += frameMcpJson(
+          R"({"jsonrpc":"2.0","id":3,"result":{"resources":[{"uri":"res://alpha"}]}})");
+    } else if (payload.find("\"method\":\"prompts/list\"") != std::string::npos) {
+      stdoutBuffer += frameMcpJson(
+          R"({"jsonrpc":"2.0","id":4,"result":{"prompts":[{"name":"prompt.alpha"}]}})");
+    } else if (payload.find("\"method\":\"shutdown\"") != std::string::npos) {
+      stdoutBuffer += frameMcpJson(
+          R"({"jsonrpc":"2.0","id":5,"result":{}})");
+    }
+  }));
+  EXPECT_CALL(mockHost, spawn(_, _, _)).WillOnce(Return(ByMove(std::move(mockProcess))));
+
+  McpSearchTool tool;
+  rapidjson::Document input;
+  input.SetObject();
+  auto &a = input.GetAllocator();
+  input.AddMember("query", rapidjson::Value("alpha", a).Move(), a);
+  input.AddMember("server_name", rapidjson::Value("demo", a).Move(), a);
+
+  ITool *itool = &tool;
+  auto result = itool->execute(input, ctx);
+  EXPECT_TRUE(result.success) << result.error;
+
+  rapidjson::Document out;
+  out.Parse(result.data.c_str());
+  ASSERT_FALSE(out.HasParseError());
+  ASSERT_EQ(out["servers"].GetArray().Size(), 1u);
+  const auto &entry = out["servers"][0];
+  ASSERT_EQ(entry["tools"].GetArray().Size(), 1u);
+  EXPECT_STREQ(entry["tools"][0].GetString(), "alpha.tool");
+  ASSERT_EQ(entry["resources"].GetArray().Size(), 1u);
+  ASSERT_EQ(entry["prompts"].GetArray().Size(), 1u);
+
+  loader.updateConfig(original);
+}
+
+TEST(McpDiscoveryLoadAccessToolTest, mcpLoadReturnsLoadedSelections) {
+  NiceMock<MockHost> mockHost;
+  NiceMock<MockAgent> mockAgent;
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+
+  auto &loader = ConfigLoader::instance();
+  const UserConfig original = loader.getConfig();
+  UserConfig cfg = original;
+  cfg.mcpServers.clear();
+  McpServerConfig server;
+  server.transport = "stdio";
+  server.command = "npx";
+  server.args = {"-y", "example-server"};
+  server.enabled = true;
+  cfg.mcpServers["demo"] = server;
+  loader.updateConfig(cfg);
+
+  auto mockProcess = std::make_unique<NiceMock<MockHostProcess>>();
+  auto *process = mockProcess.get();
+  bool running = true;
+  std::string stdoutBuffer;
+
+  ON_CALL(*process, inspect()).WillByDefault(Invoke([&]() {
+    return ProcessSnapshot{running, 0, stdoutBuffer, "", 0.0};
+  }));
+  ON_CALL(*process, isRunning()).WillByDefault(Invoke([&]() { return running; }));
+  EXPECT_CALL(*process, kill()).WillRepeatedly(Invoke([&]() { running = false; }));
+  EXPECT_CALL(*process, write(_)).WillRepeatedly(Invoke([&](const std::string &payload) {
+    if (payload.find("\"method\":\"initialize\"") != std::string::npos) {
+      stdoutBuffer += frameMcpJson(
+          R"({"jsonrpc":"2.0","id":1,"result":{"capabilities":{"tools":{}}}})");
+    } else if (payload.find("\"method\":\"tools/list\"") != std::string::npos) {
+      stdoutBuffer += frameMcpJson(
+          R"({"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"tool.alpha"}]}})");
+    } else if (payload.find("\"method\":\"resources/list\"") != std::string::npos) {
+      stdoutBuffer += frameMcpJson(
+          R"({"jsonrpc":"2.0","id":3,"result":{"resources":[{"uri":"res://alpha"}]}})");
+    } else if (payload.find("\"method\":\"prompts/list\"") != std::string::npos) {
+      stdoutBuffer += frameMcpJson(
+          R"({"jsonrpc":"2.0","id":4,"result":{"prompts":[{"name":"prompt.alpha"}]}})");
+    } else if (payload.find("\"method\":\"shutdown\"") != std::string::npos) {
+      stdoutBuffer += frameMcpJson(
+          R"({"jsonrpc":"2.0","id":5,"result":{}})");
+    }
+  }));
+  EXPECT_CALL(mockHost, spawn(_, _, _)).WillOnce(Return(ByMove(std::move(mockProcess))));
+
+  McpLoadTool tool;
+  rapidjson::Document input;
+  input.Parse(R"({"server_name":"demo","tools":["tool.alpha"],"resources":["res://alpha"],"prompts":["prompt.alpha"]})");
+
+  ITool *itool = &tool;
+  auto result = itool->execute(input, ctx);
+  EXPECT_TRUE(result.success) << result.error;
+
+  rapidjson::Document out;
+  out.Parse(result.data.c_str());
+  ASSERT_FALSE(out.HasParseError());
+  EXPECT_STREQ(out["server_name"].GetString(), "demo");
+  ASSERT_EQ(out["loaded_tools"].GetArray().Size(), 1u);
+  ASSERT_EQ(out["loaded_resources"].GetArray().Size(), 1u);
+  ASSERT_EQ(out["loaded_prompts"].GetArray().Size(), 1u);
+
+  loader.updateConfig(original);
+}
+
+TEST(McpDiscoveryLoadAccessToolTest, mcpReadResourceRequiresLoadedState) {
+  NiceMock<MockHost> mockHost;
+  NiceMock<MockAgent> mockAgent;
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+
+  EXPECT_CALL(mockAgent, getContext()).WillRepeatedly(ReturnRef(mockAgent.defaultCtx));
+  McpReadResourceTool tool;
+  rapidjson::Document input;
+  input.Parse(R"({"server_name":"demo","uri":"res://alpha"})");
+
+  ITool *itool = &tool;
+  auto result = itool->execute(input, ctx);
+  EXPECT_FALSE(result.success);
+  EXPECT_THAT(result.error, HasSubstr("MCP server is not loaded"));
+}
+
+TEST(McpDiscoveryLoadAccessToolTest, mcpGetPromptRequiresLoadedState) {
+  NiceMock<MockHost> mockHost;
+  NiceMock<MockAgent> mockAgent;
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+
+  EXPECT_CALL(mockAgent, getContext()).WillRepeatedly(ReturnRef(mockAgent.defaultCtx));
+  McpGetPromptTool tool;
+  rapidjson::Document input;
+  input.Parse(R"({"server_name":"demo","prompt_name":"prompt.alpha"})");
+
+  ITool *itool = &tool;
+  auto result = itool->execute(input, ctx);
+  EXPECT_FALSE(result.success);
+  EXPECT_THAT(result.error, HasSubstr("MCP server is not loaded"));
 }

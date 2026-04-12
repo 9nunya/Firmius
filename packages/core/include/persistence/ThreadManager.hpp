@@ -81,6 +81,43 @@ struct CompactionSnapshot {
     bool operator==(const CompactionSnapshot& other) const = default;
 };
 
+struct RollingMemoryChunk {
+    std::string chunkId;
+    std::string sourceStartTurnId;
+    std::string sourceEndTurnId;
+    std::vector<std::string> sourceTurnIds;
+    std::string summary;
+    std::string currentTask;
+    std::string suggestedResponse;
+    std::uint32_t sourceTokens = 0;
+    std::uint32_t summaryTokens = 0;
+    std::uint64_t createdAt = 0;
+    bool buffered = false;
+    bool active = false;
+    bool superseded = false;
+
+    bool operator==(const RollingMemoryChunk& other) const = default;
+};
+
+struct RollingMemoryState {
+    std::string threadId;
+    std::string agentId;
+    std::string lastObservedTurnId;
+    std::string lastReflectedObservationId;
+    std::uint32_t lastContextWindow = 0;
+    std::uint32_t lastBufferThresholdTokens = 0;
+    std::uint32_t lastTargetThresholdTokens = 0;
+    std::uint32_t lastEmergencyThresholdTokens = 0;
+    std::uint32_t lastRetainedTailTokens = 0;
+    std::uint64_t lastUpdatedAt = 0;
+    bool observationInFlight = false;
+    bool reflectionInFlight = false;
+    std::vector<RollingMemoryChunk> observationChunks;
+    std::vector<RollingMemoryChunk> reflectionChunks;
+
+    bool operator==(const RollingMemoryState& other) const = default;
+};
+
 /**
  * @brief Manages thread directory structure and metadata.
  */
@@ -170,6 +207,11 @@ public:
                                const std::optional<std::string>& compactionId =
                                    std::nullopt,
                                CompactionSnapshot* removed = nullptr);
+    RollingMemoryState loadRollingMemoryState(const std::string& threadId,
+                                              const std::string& agentId) const;
+    void writeRollingMemoryState(const std::string& threadId,
+                                 const std::string& agentId,
+                                 const RollingMemoryState& state);
 
     /**
      * @brief Reads the agent manifest for a thread.

@@ -1,5 +1,4 @@
 #include "components/ToolBlock.hpp"
-#include "AgentRegistry.hpp"
 #include "ThemeManager.hpp"
 #include "components/GlintEffect.hpp"
 #include "components/ToolPresentationBlock.hpp"
@@ -122,25 +121,6 @@ SubagentDescriptor DescribeSubagent(const std::shared_ptr<ToolCallView>& view,
   }
   FillFromSubagentArgs(desc, view);
   FillFromSubagentResult(desc, view);
-
-  auto agent = desc.agent_id.empty()
-                   ? nullptr
-                   : firmius::core::AgentRegistry::instance().getAgent(desc.agent_id);
-  if (agent) {
-    const auto& ctx = agent->getContext();
-    if (desc.title.empty()) {
-      desc.title = ctx.identity.name;
-    }
-    if (desc.friendly_name.empty()) {
-      desc.friendly_name = ctx.identity.friendlyName;
-    }
-    desc.purpose = !ctx.identity.role.empty() ? ctx.identity.role
-                                              : ctx.config.personaName;
-    desc.model = firmius::shared::PrettifyModelName(ctx.config.modelId);
-    if (!ctx.config.modelVariant.empty()) {
-      desc.model += " (" + ctx.config.modelVariant + ")";
-    }
-  }
   if (desc.title.empty()) {
     desc.title = !desc.friendly_name.empty() ? desc.friendly_name
                  : !desc.task.empty()        ? desc.task
@@ -417,6 +397,27 @@ public:
     if (!desc.agent_id.empty()) {
       if (!meta_parts.empty()) meta_parts.push_back(ftxui::text("  •  ") | ftxui::color(theme.base.dim));
       meta_parts.push_back(ftxui::text(desc.agent_id.substr(0, 8)) | ftxui::color(theme.base.dim));
+    }
+    if (!desc.task.empty()) {
+      if (!meta_parts.empty()) meta_parts.push_back(ftxui::text("  •  ") | ftxui::color(theme.base.dim));
+      meta_parts.push_back(
+          ftxui::text(ClampLine(desc.task, 28)) | ftxui::color(theme.base.dim));
+    }
+    if (state && !state->artifacts_created.empty()) {
+      if (!meta_parts.empty()) meta_parts.push_back(ftxui::text("  •  ") | ftxui::color(theme.base.dim));
+      meta_parts.push_back(ftxui::text(
+                               "+" +
+                               std::to_string(state->artifacts_created.size()) +
+                               " artifact(s)") |
+                           ftxui::color(theme.base.dim));
+    }
+    if (state && !state->artifacts_updated.empty()) {
+      if (!meta_parts.empty()) meta_parts.push_back(ftxui::text("  •  ") | ftxui::color(theme.base.dim));
+      meta_parts.push_back(ftxui::text(
+                               "~" +
+                               std::to_string(state->artifacts_updated.size()) +
+                               " artifact(s)") |
+                           ftxui::color(theme.base.dim));
     }
 
     std::vector<RenderedLogLine> log_lines =

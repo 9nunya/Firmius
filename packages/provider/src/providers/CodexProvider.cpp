@@ -23,6 +23,7 @@
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
+#include <set>
 #include <sstream>
 #include <string_view>
 #include <thread>
@@ -54,6 +55,8 @@ constexpr std::uint32_t kDefaultContextWindow = 272000;
 constexpr int kQuotaRefreshSeconds = 300;
 constexpr int kAccountRetryLimit = 5;
 constexpr float kQuotaAvailableThreshold = 0.01f;
+constexpr std::array<std::string_view, 2> kQuotaWindows = {"primary",
+                                                            "secondary"};
 
 struct RetrySettings {
   static constexpr int BASE_DELAY_MS = 1000;
@@ -629,8 +632,101 @@ float normalizeQuotaFraction(double value) {
   return static_cast<float>(normalized);
 }
 
-std::optional<float> readCodexQuotaRemaining(const OAuthAccount &acc) {
-  auto it = acc.metadata.find("quota:codex");
+std::string normalizeCodexLimitId(std::string_view raw) {
+  std::string normalized =
+      StringUtil::toLower(StringUtil::trim(std::string(raw)));
+  std::replace(normalized.begin(), normalized.end(), '-', '_');
+  std::replace(normalized.begin(), normalized.end(), '.', '_');
+  return normalized;
+}
+
+std::string quotaAggregateKey(std::string_view limitId) {
+  return "quota:" + std::string(limitId);
+}
+
+std::string quotaResetAggregateKey(std::string_view limitId) {
+  return "quota_reset:" + std::string(limitId);
+}
+
+std::string quotaWindowKey(std::string_view limitId, std::string_view window) {
+  return "quota:" + std::string(limitId) + ":" + std::string(window);
+}
+
+std::string quotaWindowResetKey(std::string_view limitId,
+                                std::string_view window) {
+  return "quota_reset:" + std::string(limitId) + ":" + std::string(window);
+}
+
+std::string quotaWindowMinutesKey(std::string_view limitId,
+                                  std::string_view window) {
+  return "quota_window_minutes:" + std::string(limitId) + ":" +
+         std::string(window);
+}
+
+std::string quotaLimitNameKey(std::string_view limitId) {
+  return "quota_limit_name:" + std::string(limitId);
+}
+
+std::string quotaCreditsHasKey(std::string_view limitId) {
+  return "quota_credits_has:" + std::string(limitId);
+}
+
+std::string quotaCreditsUnlimitedKey(std::string_view limitId) {
+  return "quota_credits_unlimited:" + std::string(limitId);
+}
+
+std::string quotaCreditsBalanceKey(std::string_view limitId) {
+  return "quota_credits_balance:" + std::string(limitId);
+}
+
+bool isLegacyCodexModelQuotaId(std::string_view limitId) {
+  const std::string normalized = normalizeCodexLimitId(limitId);
+  return normalized == "gpt_5_4" || normalized == "gpt_5_4_mini" ||
+         normalized == "gpt_5_3_codex" || normalized == "gpt_5_2_codex" ||
+         normalized == "gpt_5_2" || normalized == "gpt_5_1_codex_max" ||
+         normalized == "gpt_5_1_codex" || normalized == "gpt_5_1_codex_mini" ||
+         normalized == "gpt_5_1" || normalized == "gpt_5_codex" ||
+         normalized == "gpt_5_codex_mini";
+}
+
+std::optional<std::string> limitIdFromMetadataKey(const std::string &key,
+                                                  std::string_view prefix) {
+  if (key.rfind(prefix, 0) != 0) {
+    return std::nullopt;
+  }
+  std::string suffix = key.substr(prefix.size());
+  if (suffix.empty()) {
+    return std::nullopt;
+  }
+  const auto colon = suffix.find(':');
+  if (colon != std::string::npos) {
+    suffix = suffix.substr(0, colon);
+  }
+  if (suffix.empty()) {
+    return std::nullopt;
+  }
+  return normalizeCodexLimitId(suffix);
+}
+
+void clearStoredCodexQuotaMetadata(OAuthAccount &acc) {
+  for (auto it = acc.metadata.begin(); it != acc.metadata.end();) {
+    const std::string &key = it->first;
+    const bool remove =
+        key.rfind("quota:", 0) == 0 || key.rfind("quota_reset:", 0) == 0 ||
+        key.rfind("quota_window_minutes:", 0) == 0 ||
+        key.rfind("quota_limit_name:", 0) == 0 ||
+        key.rfind("quota_credits_", 0) == 0;
+    if (!remove) {
+      ++it;
+      continue;
+    }
+    it = acc.metadata.erase(it);
+  }
+}
+
+std::optional<float> readQuotaRemainingKey(const OAuthAccount &acc,
+                                           const std::string &key) {
+  auto it = acc.metadata.find(key);
   if (it == acc.metadata.end()) {
     return std::nullopt;
   }
@@ -639,6 +735,61 @@ std::optional<float> readCodexQuotaRemaining(const OAuthAccount &acc) {
   } catch (...) {
     return std::nullopt;
   }
+}
+
+std::optional<int64_t> readInt64Metadata(const OAuthAccount &acc,
+                                         const std::string &key) {
+  auto it = acc.metadata.find(key);
+  if (it == acc.metadata.end()) {
+    return std::nullopt;
+  }
+  try {
+    return std::stoll(StringUtil::trim(it->second));
+  } catch (...) {
+    return std::nullopt;
+  }
+}
+
+std::optional<bool> readBoolMetadata(const OAuthAccount &acc,
+                                     const std::string &key) {
+  auto it = acc.metadata.find(key);
+  if (it == acc.metadata.end()) {
+    return std::nullopt;
+  }
+  std::string lowered = StringUtil::toLower(StringUtil::trim(it->second));
+  if (lowered == "1" || lowered == "true") {
+    return true;
+  }
+  if (lowered == "0" || lowered == "false") {
+    return false;
+  }
+  return std::nullopt;
+}
+
+struct StoredQuotaWindow {
+  float remainingFraction = 0.0f;
+  std::optional<int64_t> resetSeconds;
+  std::optional<int64_t> windowMinutes;
+};
+
+std::optional<float> readCodexQuotaRemaining(const OAuthAccount &acc) {
+  std::optional<float> controlling;
+  for (const auto window : kQuotaWindows) {
+    const auto remaining =
+        readQuotaRemainingKey(acc, quotaWindowKey("codex", window));
+    if (!remaining.has_value()) {
+      continue;
+    }
+    if (!controlling.has_value()) {
+      controlling = *remaining;
+      continue;
+    }
+    controlling = std::min(*controlling, *remaining);
+  }
+  if (controlling.has_value()) {
+    return controlling;
+  }
+  return readQuotaRemainingKey(acc, "quota:codex");
 }
 
 std::optional<int64_t> parseResetTimestampSeconds(const std::string &raw) {
@@ -674,7 +825,56 @@ std::optional<int64_t> parseResetTimestampSeconds(const std::string &raw) {
 #endif
 }
 
+std::optional<StoredQuotaWindow> readStoredQuotaWindow(const OAuthAccount &acc,
+                                                       std::string_view limitId,
+                                                       std::string_view window) {
+  const auto remaining =
+      readQuotaRemainingKey(acc, quotaWindowKey(limitId, window));
+  if (!remaining.has_value()) {
+    return std::nullopt;
+  }
+
+  StoredQuotaWindow stored;
+  stored.remainingFraction = *remaining;
+  auto resetIt = acc.metadata.find(quotaWindowResetKey(limitId, window));
+  if (resetIt != acc.metadata.end()) {
+    stored.resetSeconds = parseResetTimestampSeconds(resetIt->second);
+  }
+  stored.windowMinutes =
+      readInt64Metadata(acc, quotaWindowMinutesKey(limitId, window));
+  return stored;
+}
+
+bool isEarlierReset(const std::optional<int64_t> &lhs,
+                    const std::optional<int64_t> &rhs) {
+  if (lhs.has_value() != rhs.has_value()) {
+    return lhs.has_value();
+  }
+  if (!lhs.has_value()) {
+    return false;
+  }
+  return *lhs < *rhs;
+}
+
 std::optional<int64_t> readCodexResetSeconds(const OAuthAccount &acc) {
+  std::optional<StoredQuotaWindow> controlling;
+  for (const auto window : kQuotaWindows) {
+    const auto stored = readStoredQuotaWindow(acc, "codex", window);
+    if (!stored.has_value()) {
+      continue;
+    }
+    if (!controlling.has_value() ||
+        stored->remainingFraction + 1e-6f < controlling->remainingFraction ||
+        (std::fabs(stored->remainingFraction - controlling->remainingFraction) <=
+             1e-6f &&
+         isEarlierReset(stored->resetSeconds, controlling->resetSeconds))) {
+      controlling = stored;
+    }
+  }
+  if (controlling.has_value() && controlling->resetSeconds.has_value()) {
+    return controlling->resetSeconds;
+  }
+
   auto it = acc.metadata.find("quota_reset:codex");
   if (it == acc.metadata.end()) {
     return std::nullopt;
@@ -719,6 +919,282 @@ std::optional<std::string> resolveCodexEmail(const OAuthAccount &acc) {
   return std::nullopt;
 }
 
+std::optional<std::string> extractPlanTypeFromJwt(const std::string &token) {
+  auto firstDot = token.find('.');
+  if (firstDot == std::string::npos)
+    return std::nullopt;
+  auto secondDot = token.find('.', firstDot + 1);
+  if (secondDot == std::string::npos)
+    return std::nullopt;
+  std::string payload = token.substr(firstDot + 1, secondDot - firstDot - 1);
+  auto bytes = base64UrlDecode(payload);
+  if (bytes.empty())
+    return std::nullopt;
+  std::string json(bytes.begin(), bytes.end());
+  rapidjson::Document doc;
+  doc.Parse(json.c_str());
+  if (doc.HasParseError() || !doc.IsObject())
+    return std::nullopt;
+  if (doc.HasMember("chatgpt_plan_type") && doc["chatgpt_plan_type"].IsString()) {
+    return normalizeCodexLimitId(doc["chatgpt_plan_type"].GetString());
+  }
+  if (doc.HasMember("https://api.openai.com/auth") &&
+      doc["https://api.openai.com/auth"].IsObject()) {
+    const auto &auth = doc["https://api.openai.com/auth"];
+    if (auth.HasMember("chatgpt_plan_type") &&
+        auth["chatgpt_plan_type"].IsString()) {
+      return normalizeCodexLimitId(auth["chatgpt_plan_type"].GetString());
+    }
+  }
+  return std::nullopt;
+}
+
+std::optional<std::string> resolveCodexPlanType(const OAuthAccount &acc) {
+  auto idToken = acc.metadata.find("id_token");
+  if (idToken != acc.metadata.end()) {
+    auto plan = extractPlanTypeFromJwt(idToken->second);
+    if (plan.has_value() && !plan->empty()) {
+      return plan;
+    }
+  }
+  auto plan = extractPlanTypeFromJwt(acc.accessToken);
+  if (plan.has_value() && !plan->empty()) {
+    return plan;
+  }
+  auto it = acc.metadata.find("chatgpt_plan_type");
+  if (it != acc.metadata.end() && !StringUtil::trim(it->second).empty()) {
+    return normalizeCodexLimitId(it->second);
+  }
+  return std::nullopt;
+}
+
+std::string planTypeDisplayName(std::string_view rawPlanType) {
+  const std::string normalized = normalizeCodexLimitId(rawPlanType);
+  if (normalized == "free")
+    return "Free";
+  if (normalized == "go")
+    return "Go";
+  if (normalized == "plus")
+    return "Plus";
+  if (normalized == "pro")
+    return "Pro";
+  if (normalized == "team")
+    return "Team";
+  if (normalized == "self_serve_business_usage_based")
+    return "Self Serve Business Usage Based";
+  if (normalized == "business")
+    return "Business";
+  if (normalized == "enterprise_cbp_usage_based")
+    return "Enterprise CBP Usage Based";
+  if (normalized == "enterprise" || normalized == "hc")
+    return "Enterprise";
+  if (normalized == "education" || normalized == "edu")
+    return "Edu";
+
+  std::string display = normalized;
+  bool capitalizeNext = true;
+  for (char &ch : display) {
+    if (ch == '_') {
+      ch = ' ';
+      capitalizeNext = true;
+      continue;
+    }
+    if (capitalizeNext && std::isalpha(static_cast<unsigned char>(ch))) {
+      ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+      capitalizeNext = false;
+    } else if (ch == ' ') {
+      capitalizeNext = true;
+    }
+  }
+  return display;
+}
+
+std::string humanizeLimitId(std::string_view rawLimitId) {
+  std::string out(rawLimitId);
+  std::replace(out.begin(), out.end(), '_', ' ');
+  std::replace(out.begin(), out.end(), '-', ' ');
+  return out;
+}
+
+std::string formatQuotaWindowLabel(const std::optional<int64_t> &windowMinutes,
+                                   std::string_view fallback) {
+  if (!windowMinutes.has_value()) {
+    return std::string(fallback);
+  }
+
+  constexpr int64_t kMinutesPerHour = 60;
+  constexpr int64_t kMinutesPerDay = 24 * kMinutesPerHour;
+  constexpr int64_t kMinutesPerWeek = 7 * kMinutesPerDay;
+  constexpr int64_t kMinutesPerMonth = 30 * kMinutesPerDay;
+  constexpr int64_t kRoundingBiasMinutes = 3;
+
+  const int64_t minutes = std::max<int64_t>(0, *windowMinutes);
+  if (minutes <= kMinutesPerDay + kRoundingBiasMinutes) {
+    const int64_t hours =
+        std::max<int64_t>(1, (minutes + kRoundingBiasMinutes) / kMinutesPerHour);
+    return std::to_string(hours) + "h";
+  }
+  if (minutes <= kMinutesPerWeek + kRoundingBiasMinutes) {
+    return "weekly";
+  }
+  if (minutes <= kMinutesPerMonth + kRoundingBiasMinutes) {
+    return "monthly";
+  }
+  return "annual";
+}
+
+std::string buildQuotaBucketName(std::string_view limitId,
+                                 const std::string &limitDisplayName,
+                                 std::string_view windowName,
+                                 const std::optional<int64_t> &windowMinutes) {
+  const std::string label = formatQuotaWindowLabel(
+      windowMinutes, windowName == "primary" ? "5h" : "weekly");
+  if (limitId == "codex") {
+    return label + " limit";
+  }
+
+  const std::string prefix =
+      limitDisplayName.empty() ? humanizeLimitId(limitId) : limitDisplayName;
+  return prefix + " " + label + " limit";
+}
+
+std::string buildCreditsDisplay(const OAuthAccount &acc,
+                                std::string_view limitId) {
+  const auto hasCredits = readBoolMetadata(acc, quotaCreditsHasKey(limitId));
+  if (!hasCredits.value_or(false)) {
+    return "";
+  }
+  const auto unlimited =
+      readBoolMetadata(acc, quotaCreditsUnlimitedKey(limitId)).value_or(false);
+  if (unlimited) {
+    return "Credits: unlimited";
+  }
+
+  auto balanceIt = acc.metadata.find(quotaCreditsBalanceKey(limitId));
+  if (balanceIt == acc.metadata.end() ||
+      StringUtil::trim(balanceIt->second).empty()) {
+    return "Credits: tracked";
+  }
+  return "Credits: " + StringUtil::trim(balanceIt->second);
+}
+
+struct ParsedQuotaWindow {
+  float remainingFraction = 0.0f;
+  std::string resetTime;
+  std::optional<int64_t> windowMinutes;
+};
+
+struct ParsedQuotaLimit {
+  std::string limitId;
+  std::string limitName;
+  std::optional<ParsedQuotaWindow> primary;
+  std::optional<ParsedQuotaWindow> secondary;
+};
+
+std::optional<ParsedQuotaWindow>
+parseQuotaWindowObject(const rapidjson::Value &window) {
+  if (!window.IsObject() || !window.HasMember("used_percent") ||
+      !window["used_percent"].IsNumber()) {
+    return std::nullopt;
+  }
+
+  ParsedQuotaWindow parsed;
+  const float used = static_cast<float>(window["used_percent"].GetDouble());
+  parsed.remainingFraction = normalizeQuotaFraction(1.0 - (used / 100.0));
+
+  if (window.HasMember("reset_at")) {
+    if (window["reset_at"].IsInt64()) {
+      parsed.resetTime = epochSecondsToIso8601(window["reset_at"].GetInt64());
+    } else if (window["reset_at"].IsString()) {
+      parsed.resetTime = normalizeResetTimestamp(window["reset_at"].GetString());
+    }
+  }
+
+  if (window.HasMember("window_duration_mins") &&
+      window["window_duration_mins"].IsInt64()) {
+    parsed.windowMinutes = window["window_duration_mins"].GetInt64();
+  } else if (window.HasMember("limit_window_seconds") &&
+             window["limit_window_seconds"].IsInt64()) {
+    const int64_t seconds = window["limit_window_seconds"].GetInt64();
+    parsed.windowMinutes = std::max<int64_t>(1, (seconds + 59) / 60);
+  }
+
+  return parsed;
+}
+
+void storeParsedQuotaWindow(OAuthAccount &acc, std::string_view limitId,
+                            std::string_view windowName,
+                            const ParsedQuotaWindow &window) {
+  acc.metadata[quotaWindowKey(limitId, windowName)] =
+      std::to_string(window.remainingFraction);
+  if (!window.resetTime.empty()) {
+    acc.metadata[quotaWindowResetKey(limitId, windowName)] = window.resetTime;
+  }
+  if (window.windowMinutes.has_value()) {
+    acc.metadata[quotaWindowMinutesKey(limitId, windowName)] =
+        std::to_string(*window.windowMinutes);
+  }
+}
+
+void storeParsedQuotaLimit(OAuthAccount &acc, const ParsedQuotaLimit &limit) {
+  if (!limit.limitName.empty()) {
+    acc.metadata[quotaLimitNameKey(limit.limitId)] = limit.limitName;
+  }
+
+  std::vector<ParsedQuotaWindow> windows;
+  if (limit.primary.has_value()) {
+    storeParsedQuotaWindow(acc, limit.limitId, "primary", *limit.primary);
+    windows.push_back(*limit.primary);
+  }
+  if (limit.secondary.has_value()) {
+    storeParsedQuotaWindow(acc, limit.limitId, "secondary", *limit.secondary);
+    windows.push_back(*limit.secondary);
+  }
+  if (windows.empty()) {
+    return;
+  }
+
+  const ParsedQuotaWindow *controlling = &windows.front();
+  for (const auto &window : windows) {
+    const auto windowReset =
+        parseResetTimestampSeconds(window.resetTime).value_or(0);
+    const auto controllingReset =
+        parseResetTimestampSeconds(controlling->resetTime).value_or(0);
+    if (window.remainingFraction + 1e-6f < controlling->remainingFraction ||
+        (std::fabs(window.remainingFraction - controlling->remainingFraction) <=
+             1e-6f &&
+         (!window.resetTime.empty() &&
+          (controlling->resetTime.empty() || windowReset < controllingReset)))) {
+      controlling = &window;
+    }
+  }
+
+  acc.metadata[quotaAggregateKey(limit.limitId)] =
+      std::to_string(controlling->remainingFraction);
+  if (!controlling->resetTime.empty()) {
+    acc.metadata[quotaResetAggregateKey(limit.limitId)] = controlling->resetTime;
+  }
+}
+
+void storeCreditsMetadata(OAuthAccount &acc, std::string_view limitId,
+                          const rapidjson::Value &credits) {
+  if (!credits.IsObject()) {
+    return;
+  }
+
+  if (credits.HasMember("has_credits") && credits["has_credits"].IsBool()) {
+    acc.metadata[quotaCreditsHasKey(limitId)] =
+        credits["has_credits"].GetBool() ? "true" : "false";
+  }
+  if (credits.HasMember("unlimited") && credits["unlimited"].IsBool()) {
+    acc.metadata[quotaCreditsUnlimitedKey(limitId)] =
+        credits["unlimited"].GetBool() ? "true" : "false";
+  }
+  if (credits.HasMember("balance") && credits["balance"].IsString()) {
+    acc.metadata[quotaCreditsBalanceKey(limitId)] = credits["balance"].GetString();
+  }
+}
+
 bool normalizeCodexAccount(OAuthAccount &acc) {
   bool changed = false;
 
@@ -745,12 +1221,25 @@ bool normalizeCodexAccount(OAuthAccount &acc) {
     }
   }
 
+  if (auto planType = resolveCodexPlanType(acc); planType.has_value()) {
+    if (acc.metadata["chatgpt_plan_type"] != *planType) {
+      acc.metadata["chatgpt_plan_type"] = *planType;
+      changed = true;
+    }
+  }
+
   for (auto it = acc.metadata.begin(); it != acc.metadata.end();) {
-    const bool removeQuota =
-        it->first.rfind("quota:", 0) == 0 && it->first != "quota:codex";
-    const bool removeReset = it->first.rfind("quota_reset:", 0) == 0 &&
-                             it->first != "quota_reset:codex";
-    if (removeQuota || removeReset) {
+    const auto quotaId = limitIdFromMetadataKey(it->first, "quota:");
+    const auto resetId = limitIdFromMetadataKey(it->first, "quota_reset:");
+    const auto windowId =
+        limitIdFromMetadataKey(it->first, "quota_window_minutes:");
+    const bool removeLegacyQuota =
+        quotaId.has_value() && isLegacyCodexModelQuotaId(*quotaId);
+    const bool removeLegacyReset =
+        resetId.has_value() && isLegacyCodexModelQuotaId(*resetId);
+    const bool removeLegacyWindow =
+        windowId.has_value() && isLegacyCodexModelQuotaId(*windowId);
+    if (removeLegacyQuota || removeLegacyReset || removeLegacyWindow) {
       it = acc.metadata.erase(it);
       changed = true;
       continue;
@@ -758,11 +1247,13 @@ bool normalizeCodexAccount(OAuthAccount &acc) {
     ++it;
   }
 
-  auto resetIt = acc.metadata.find("quota_reset:codex");
-  if (resetIt != acc.metadata.end()) {
-    std::string normalized = normalizeResetTimestamp(resetIt->second);
-    if (normalized != resetIt->second) {
-      resetIt->second = normalized;
+  for (auto &[key, value] : acc.metadata) {
+    if (key.rfind("quota_reset:", 0) != 0) {
+      continue;
+    }
+    std::string normalized = normalizeResetTimestamp(value);
+    if (normalized != value) {
+      value = normalized;
       changed = true;
     }
   }
@@ -1331,23 +1822,121 @@ void CodexProvider::refreshQuotas() {
 
 std::map<std::string, std::vector<QuotaBucket>>
 CodexProvider::getAllQuotas() const {
+  std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
   std::map<std::string, std::vector<QuotaBucket>> result;
   for (const auto &acc : accounts_) {
     std::vector<QuotaBucket> buckets;
-    auto quotaIt = acc.metadata.find("quota:codex");
-    if (quotaIt != acc.metadata.end()) {
-      float remaining = 0.0f;
-      try {
-        remaining = normalizeQuotaFraction(std::stod(quotaIt->second));
-      } catch (...) {
-        remaining = 0.0f;
+    std::set<std::string> limitIds;
+    for (const auto &[key, _] : acc.metadata) {
+      if (auto limitId = limitIdFromMetadataKey(key, "quota:");
+          limitId.has_value()) {
+        limitIds.insert(*limitId);
       }
+      if (auto limitId = limitIdFromMetadataKey(key, "quota_reset:");
+          limitId.has_value()) {
+        limitIds.insert(*limitId);
+      }
+      if (auto limitId = limitIdFromMetadataKey(key, "quota_window_minutes:");
+          limitId.has_value()) {
+        limitIds.insert(*limitId);
+      }
+      if (auto limitId = limitIdFromMetadataKey(key, "quota_limit_name:");
+          limitId.has_value()) {
+        limitIds.insert(*limitId);
+      }
+    }
+
+    std::vector<std::string> orderedLimitIds(limitIds.begin(), limitIds.end());
+    std::sort(orderedLimitIds.begin(), orderedLimitIds.end(),
+              [](const std::string &lhs, const std::string &rhs) {
+                if (lhs == "codex" || rhs == "codex") {
+                  return lhs == "codex";
+                }
+                return lhs < rhs;
+              });
+
+    bool attachedAccountContext = false;
+    for (const auto &limitId : orderedLimitIds) {
+      std::string limitDisplayName;
+      auto limitNameIt = acc.metadata.find(quotaLimitNameKey(limitId));
+      if (limitNameIt != acc.metadata.end()) {
+        limitDisplayName = humanizeLimitId(limitNameIt->second);
+      } else if (limitId != "codex") {
+        limitDisplayName = humanizeLimitId(limitId);
+      }
+
+      std::string accountContext;
+      if (!attachedAccountContext) {
+        auto planIt = acc.metadata.find("chatgpt_plan_type");
+        if (planIt != acc.metadata.end() &&
+            !StringUtil::trim(planIt->second).empty()) {
+          accountContext = "Plan: " + planTypeDisplayName(planIt->second);
+        }
+        const std::string credits = buildCreditsDisplay(acc, limitId);
+        if (!credits.empty()) {
+          if (!accountContext.empty()) {
+            accountContext += " | ";
+          }
+          accountContext += credits;
+        }
+      }
+
+      bool pushedWindowBucket = false;
+      for (const auto window : kQuotaWindows) {
+        const auto stored = readStoredQuotaWindow(acc, limitId, window);
+        if (!stored.has_value()) {
+          continue;
+        }
+
+        std::string reset;
+        auto resetIt = acc.metadata.find(quotaWindowResetKey(limitId, window));
+        if (resetIt != acc.metadata.end()) {
+          reset = normalizeResetTimestamp(resetIt->second);
+        }
+
+        std::string note;
+        if (!attachedAccountContext && !accountContext.empty()) {
+          note = accountContext;
+          attachedAccountContext = true;
+        }
+
+        buckets.push_back({buildQuotaBucketName(limitId, limitDisplayName, window,
+                                                stored->windowMinutes),
+                           stored->remainingFraction, reset, note});
+        pushedWindowBucket = true;
+      }
+
+      if (pushedWindowBucket) {
+        continue;
+      }
+
+      const auto aggregate = readQuotaRemainingKey(acc, quotaAggregateKey(limitId));
+      if (!aggregate.has_value()) {
+        continue;
+      }
+
       std::string reset;
-      auto resetIt = acc.metadata.find("quota_reset:codex");
+      auto resetIt = acc.metadata.find(quotaResetAggregateKey(limitId));
       if (resetIt != acc.metadata.end()) {
         reset = normalizeResetTimestamp(resetIt->second);
       }
-      buckets.push_back({"codex", remaining, reset, ""});
+
+      std::string note;
+      if (!attachedAccountContext && !accountContext.empty()) {
+        note = accountContext;
+        attachedAccountContext = true;
+      }
+
+      std::string bucketName;
+      if (limitId == "codex") {
+        bucketName = "codex";
+      } else {
+        bucketName =
+            (limitDisplayName.empty() ? humanizeLimitId(limitId)
+                                      : limitDisplayName) +
+            " limit";
+      }
+      buckets.push_back({bucketName, *aggregate, reset, note});
     }
     result[acc.getIdentifier()] = buckets;
   }
@@ -1619,6 +2208,24 @@ void CodexProvider::processSseLine(
     }
   };
 
+  auto emitFinalToolCallForIndex = [&](int outputIndex) {
+    auto it = tracker.byIndex.find(outputIndex);
+    if (it == tracker.byIndex.end()) {
+      return;
+    }
+    auto &state = it->second;
+    if (state.finalized || state.name.empty() || state.arguments.empty()) {
+      return;
+    }
+    state.finalized = true;
+    ToolCall call;
+    call.id = state.callId;
+    call.index = static_cast<std::uint32_t>(std::max(outputIndex, 0));
+    call.name = state.name;
+    call.args = state.arguments;
+    onEvent(call);
+  };
+
   if (type == "response.output_item.added" ||
       type == "response.output_item.done") {
     if (doc.HasMember("item") && doc["item"].IsObject()) {
@@ -1629,6 +2236,9 @@ void CodexProvider::processSseLine(
         if (doc.HasMember("output_index") && doc["output_index"].IsInt())
           outputIndex = doc["output_index"].GetInt();
         emitToolCallFromItem(item, outputIndex);
+        if (type == "response.output_item.done") {
+          emitFinalToolCallForIndex(outputIndex);
+        }
       }
     }
     return;
@@ -1676,6 +2286,9 @@ void CodexProvider::processSseLine(
       }
       if (!chunk.argsDelta.empty()) {
         onEvent(chunk);
+      }
+      if (type == "response.function_call_arguments.done") {
+        emitFinalToolCallForIndex(outputIndex);
       }
     }
     return;
@@ -1728,24 +2341,74 @@ bool CodexProvider::fetchAndStoreQuotas(OAuthAccount &acc) {
     return false;
   }
 
+  clearStoredCodexQuotaMetadata(acc);
+
+  if (doc.HasMember("plan_type") && doc["plan_type"].IsString()) {
+    acc.metadata["chatgpt_plan_type"] =
+        normalizeCodexLimitId(doc["plan_type"].GetString());
+  }
+
+  bool storedAnyQuota = false;
+  auto storeLimitFromRateLimitObject =
+      [&](const rapidjson::Value &rateLimit, std::string limitId,
+          const std::string &limitName) {
+        if (!rateLimit.IsObject()) {
+          return;
+        }
+
+        ParsedQuotaLimit parsed;
+        parsed.limitId = normalizeCodexLimitId(limitId);
+        parsed.limitName = limitName;
+        if (rateLimit.HasMember("primary_window")) {
+          parsed.primary = parseQuotaWindowObject(rateLimit["primary_window"]);
+        }
+        if (rateLimit.HasMember("secondary_window")) {
+          parsed.secondary = parseQuotaWindowObject(rateLimit["secondary_window"]);
+        }
+        if (!parsed.primary.has_value() && !parsed.secondary.has_value()) {
+          return;
+        }
+        storeParsedQuotaLimit(acc, parsed);
+        storedAnyQuota = true;
+      };
+
   if (doc.HasMember("rate_limit") && doc["rate_limit"].IsObject()) {
-    const auto &rl = doc["rate_limit"];
-    if (rl.HasMember("primary_window") && rl["primary_window"].IsObject()) {
-      const auto &pw = rl["primary_window"];
-      if (pw.HasMember("used_percent") && pw["used_percent"].IsNumber()) {
-        float used = static_cast<float>(pw["used_percent"].GetDouble());
-        acc.metadata["quota:codex"] = std::to_string(1.0f - (used / 100.0f));
+    storeLimitFromRateLimitObject(doc["rate_limit"], "codex", "");
+  }
+  if (doc.HasMember("credits")) {
+    storeCreditsMetadata(acc, "codex", doc["credits"]);
+  }
+  if (doc.HasMember("additional_rate_limits") &&
+      doc["additional_rate_limits"].IsArray()) {
+    for (const auto &item : doc["additional_rate_limits"].GetArray()) {
+      if (!item.IsObject() || !item.HasMember("rate_limit") ||
+          !item["rate_limit"].IsObject()) {
+        continue;
       }
-      if (pw.HasMember("reset_at") && pw["reset_at"].IsInt64()) {
-        acc.metadata["quota_reset:codex"] =
-            epochSecondsToIso8601(pw["reset_at"].GetInt64());
+
+      std::string limitId = "codex_other";
+      if (item.HasMember("metered_feature") && item["metered_feature"].IsString()) {
+        limitId = item["metered_feature"].GetString();
+      } else if (item.HasMember("limit_name") && item["limit_name"].IsString()) {
+        limitId = item["limit_name"].GetString();
+      }
+
+      std::string limitName;
+      if (item.HasMember("limit_name") && item["limit_name"].IsString()) {
+        limitName = item["limit_name"].GetString();
+      }
+
+      storeLimitFromRateLimitObject(item["rate_limit"], limitId, limitName);
+      if (item.HasMember("credits")) {
+        storeCreditsMetadata(acc, normalizeCodexLimitId(limitId), item["credits"]);
       }
     }
   }
+
   acc.lastQuotaRefresh = nowSeconds();
   normalizeCodexAccount(acc);
   saveAccounts();
-  return true;
+  return storedAnyQuota;
 }
 
 void CodexProvider::stream(const AgentHistory &history,
@@ -2050,19 +2713,74 @@ void CodexProvider::stream(const AgentHistory &history,
         if (!doneReceived) {
           onEvent(StreamDone{StopReason::Stop});
         }
-        
-        if (resp.headers.count("x-codex-primary-used-percent")) {
+
+        ParsedQuotaLimit headerLimit;
+        headerLimit.limitId = "codex";
+        if (auto primaryUsedIt =
+                resp.headers.find("x-codex-primary-used-percent");
+            primaryUsedIt != resp.headers.end()) {
           try {
-            float used = std::stof(resp.headers.at("x-codex-primary-used-percent"));
-            acc.metadata["quota:codex"] = std::to_string(1.0f - (used / 100.0f));
-          } catch (...) {}
+            ParsedQuotaWindow primary;
+            const float used = std::stof(primaryUsedIt->second);
+            primary.remainingFraction =
+                normalizeQuotaFraction(1.0 - (used / 100.0));
+            if (auto resetIt = resp.headers.find("x-codex-primary-reset-at");
+                resetIt != resp.headers.end()) {
+              primary.resetTime =
+                  normalizeResetTimestamp(resetIt->second);
+            }
+            if (auto windowIt =
+                    resp.headers.find("x-codex-primary-window-minutes");
+                windowIt != resp.headers.end()) {
+              primary.windowMinutes = std::stoll(windowIt->second);
+            }
+            headerLimit.primary = primary;
+          } catch (...) {
+          }
         }
-        if (resp.headers.count("x-codex-primary-reset-at")) {
-          acc.metadata["quota_reset:codex"] =
-              normalizeResetTimestamp(resp.headers.at("x-codex-primary-reset-at"));
+        if (auto secondaryUsedIt =
+                resp.headers.find("x-codex-secondary-used-percent");
+            secondaryUsedIt != resp.headers.end()) {
+          try {
+            ParsedQuotaWindow secondary;
+            const float used = std::stof(secondaryUsedIt->second);
+            secondary.remainingFraction =
+                normalizeQuotaFraction(1.0 - (used / 100.0));
+            if (auto resetIt = resp.headers.find("x-codex-secondary-reset-at");
+                resetIt != resp.headers.end()) {
+              secondary.resetTime =
+                  normalizeResetTimestamp(resetIt->second);
+            }
+            if (auto windowIt =
+                    resp.headers.find("x-codex-secondary-window-minutes");
+                windowIt != resp.headers.end()) {
+              secondary.windowMinutes = std::stoll(windowIt->second);
+            }
+            headerLimit.secondary = secondary;
+          } catch (...) {
+          }
+        }
+        if (headerLimit.primary.has_value() || headerLimit.secondary.has_value()) {
+          storeParsedQuotaLimit(acc, headerLimit);
+        }
+        if (auto creditsIt =
+                resp.headers.find("x-codex-credits-has-credits");
+            creditsIt != resp.headers.end()) {
+          acc.metadata[quotaCreditsHasKey("codex")] = creditsIt->second;
+        }
+        if (auto unlimitedIt =
+                resp.headers.find("x-codex-credits-unlimited");
+            unlimitedIt != resp.headers.end()) {
+          acc.metadata[quotaCreditsUnlimitedKey("codex")] =
+              unlimitedIt->second;
+        }
+        if (auto balanceIt =
+                resp.headers.find("x-codex-credits-balance");
+            balanceIt != resp.headers.end()) {
+          acc.metadata[quotaCreditsBalanceKey("codex")] = balanceIt->second;
         }
 
-        if (acc.metadata.find("quota:codex") == acc.metadata.end()) {
+        if (!readCodexQuotaRemaining(acc).has_value()) {
           acc.metadata["quota:codex"] = "1";
         }
 
@@ -2081,9 +2799,10 @@ void CodexProvider::stream(const AgentHistory &history,
 
       if (code == 402 || code == 429) {
         acc.metadata["quota:codex"] = "0";
-        if (resp.headers.count("retry-after")) {
+        if (auto retryAfterIt = resp.headers.find("retry-after");
+            retryAfterIt != resp.headers.end()) {
           try {
-            backoff = std::stoi(resp.headers.at("retry-after"));
+            backoff = std::stoi(retryAfterIt->second);
           } catch (...) {}
         }
         normalizeCodexAccount(acc);
@@ -2144,7 +2863,29 @@ void CodexProvider::generateSummary(
       if (msg.role == Role::System) {
         continue;
       }
-      filteredTurn.messages.push_back(msg);
+      if (msg.role == Role::ToolResult) {
+        continue;
+      }
+
+      Message sanitizedMsg;
+      sanitizedMsg.role = msg.role;
+      sanitizedMsg.timestamp = msg.timestamp;
+      sanitizedMsg.parentId = msg.parentId;
+      sanitizedMsg.id = msg.id;
+
+      for (const auto &part : msg.content) {
+        if (auto *txt = std::get_if<TextContent>(&part)) {
+          sanitizedMsg.content.push_back(*txt);
+        } else if (auto *img = std::get_if<ImageContent>(&part)) {
+          sanitizedMsg.content.push_back(*img);
+        } else if (auto *thinking = std::get_if<ThinkingContent>(&part)) {
+          sanitizedMsg.content.push_back(*thinking);
+        }
+      }
+
+      if (!sanitizedMsg.content.empty()) {
+        filteredTurn.messages.push_back(std::move(sanitizedMsg));
+      }
     }
     if (!filteredTurn.messages.empty()) {
       summaryHistory.turns.push_back(filteredTurn);

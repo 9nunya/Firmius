@@ -596,6 +596,30 @@ TEST_F(WorkToolsTest, chunkAddKeepsChunkReadyWhenDependenciesAreDone) {
   EXPECT_EQ(plan.chunks[1].status, WorkChunkStatus::Ready);
 }
 
+TEST_F(WorkToolsTest, chunkAddTreatsExactDependencyTitlesAsSatisfiedDependencies) {
+  const std::string planId = createPlanDirect();
+  addChunkDirect(planId, "dep-1", WorkChunkStatus::Done);
+
+  auto input = makeObject({{"plan_id", planId},
+                           {"title", "Chunk title"},
+                           {"goal", "Chunk goal"},
+                           {"context", "Chunk context"},
+                           {"constraints", "Chunk constraints"},
+                           {"completion", "Chunk completion"}},
+                          {},
+                          {},
+                          {{"depends_on", {"Chunk dep-1"}}});
+
+  auto result = execute("chunk_add", input);
+  ASSERT_TRUE(result.success) << result.error;
+
+  const auto plan = threadManager_->getPlan(threadId_, planId);
+  ASSERT_EQ(plan.chunks.size(), 2u);
+  EXPECT_EQ(plan.chunks[1].status, WorkChunkStatus::Ready);
+  ASSERT_EQ(plan.chunks[1].dependsOn.size(), 1u);
+  EXPECT_EQ(plan.chunks[1].dependsOn[0], "Chunk dep-1");
+}
+
 TEST_F(WorkToolsTest, chunkAddPersistsPlanningGateFlag) {
   const std::string planId = createPlanDirect();
   auto input = makeObject({{"plan_id", planId},
@@ -888,6 +912,45 @@ TEST_F(WorkToolsTest, chunkUpdateIgnoresAutoFilledEmptyOptionalFields) {
   ASSERT_EQ(chunk.tasks.size(), 1u);
   EXPECT_EQ(chunk.tasks[0].id, "task-1");
   EXPECT_EQ(chunk.tasks[0].title, "Existing task");
+}
+
+TEST_F(WorkToolsTest, executorChunkUpdateIgnoresAutoFilledNoopFields) {
+  const std::string planId = createPlanDirect();
+  addChunkDirect(planId, "chunk-1", WorkChunkStatus::InProgress);
+
+  auto plan = threadManager_->getPlan(threadId_, planId);
+  plan.chunks[0].assignedAgentId = "executor-1";
+  plan.chunks[0].planningGate = false;
+  threadManager_->updatePlan(threadId_, plan);
+
+  setAgentRole("executor",
+               {ToolScope::Semantic, ToolScope::PlanRead, ToolScope::ChunkRead,
+                ToolScope::ChunkWrite},
+               "executor-1");
+
+  auto input = makeObject({{"plan_id", planId},
+                           {"chunk_id", "chunk-1"},
+                           {"assigned_agent_id", ""},
+                           {"result_summary", "done with evidence"},
+                           {"status", "Implemented"}},
+                          {{"attempt_count", 1}},
+                          {{"planning_gate", false}},
+                          {{"depends_on", {}},
+                           {"files_to_read", {}},
+                           {"files_to_touch", {}}});
+  auto &alloc = input.GetAllocator();
+  rapidjson::Value emptyTasks(rapidjson::kArrayType);
+  input.AddMember("tasks", emptyTasks, alloc);
+
+  auto result = execute("chunk_update", input);
+  ASSERT_TRUE(result.success) << result.error;
+
+  const auto updatedPlan = threadManager_->getPlan(threadId_, planId);
+  const auto &chunk = updatedPlan.chunks[0];
+  EXPECT_EQ(chunk.status, WorkChunkStatus::Implemented);
+  EXPECT_EQ(chunk.attemptCount, 1);
+  EXPECT_EQ(chunk.resultSummary, "done with evidence");
+  EXPECT_EQ(chunk.assignedAgentId, "executor-1");
 }
 
 TEST_F(WorkToolsTest, chunkReadyForExecutionRespectsDependencyStatus) {
@@ -1413,6 +1476,25 @@ TEST_F(WorkToolsTest, chunkUpdateToDoneUnblocksDependentChunks) {
     const auto plan = threadManager_->getPlan(threadId_, planId);
     EXPECT_EQ(plan.chunks[1].status, WorkChunkStatus::Ready);
   }
+}
+
+TEST_F(WorkToolsTest,
+       chunkUpdateToDoneUnblocksDependentChunksWithTitleDependencies) {
+  const std::string planId = createPlanDirect();
+  addChunkDirect(planId, "chunk-1", WorkChunkStatus::InProgress);
+  addChunkDirect(planId, "chunk-2", WorkChunkStatus::Blocked,
+                 {"Chunk chunk-1"});
+
+  auto input = makeObject({{"plan_id", planId},
+                           {"chunk_id", "chunk-1"},
+                           {"status", "Done"},
+                           {"review_summary", "LGTM"}});
+  auto result = execute("chunk_update", input);
+  ASSERT_TRUE(result.success) << result.error;
+
+  const auto plan = threadManager_->getPlan(threadId_, planId);
+  ASSERT_EQ(plan.chunks.size(), 2u);
+  EXPECT_EQ(plan.chunks[1].status, WorkChunkStatus::Ready);
 }
 
 TEST_F(WorkToolsTest, chunkUpdateToDoneUnblocksDependentChunksOnlyWhenAllDependenciesDone) {

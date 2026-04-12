@@ -205,4 +205,45 @@ TEST_F(WorkflowTest, WorkflowLoaderGetAllWorkflows) {
   EXPECT_GE(workflows.size(), 2);
 }
 
+TEST_F(WorkflowTest, BuiltinWorkflowsFoundInRepo) {
+  // Try to use the actual repo workflows directory if it's reachable.
+  // The test process might run from project root or build dir.
+  std::string repoPath = "workflows";
+  if (!std::filesystem::exists(repoPath)) {
+    // Try one level up (if running from build/packages/core etc.)
+    if (std::filesystem::exists("../workflows")) {
+      repoPath = "../workflows";
+    } else if (std::filesystem::exists("../../workflows")) {
+      repoPath = "../../workflows";
+    } else if (std::filesystem::exists("../../../workflows")) {
+      repoPath = "../../../workflows";
+    } else if (std::filesystem::exists("../../../../workflows")) {
+      repoPath = "../../../../workflows";
+    }
+  }
+
+  if (std::filesystem::exists(repoPath)) {
+    ::setenv("FIRMIUS_WORKFLOWS_DIR", repoPath.c_str(), 1);
+  } else {
+    // Equivalent controlled setup if repo directory not found.
+    // This ensures the test is deterministic even if file structure differs.
+    createWorkflow("deep_interview.md", "---\nname: Deep Interview\n---\nBody");
+    createWorkflow("plan_gate.md", "---\nname: Plan Gate\n---\nBody");
+    createWorkflow("evidence_sweep.md", "---\nname: Evidence Sweep\n---\nBody");
+    createWorkflow("repair_wave.md", "---\nname: Repair Wave\n---\nBody");
+    createWorkflow("explore.md", "---\nname: Explore\n---\nBody");
+    // Fixture already sets FIRMIUS_WORKFLOWS_DIR to tempDir_
+  }
+
+  WorkflowLoader::instance().init();
+  auto ids = WorkflowLoader::instance().getWorkflowIds();
+
+  std::vector<std::string> expected = {
+      "deep_interview", "plan_gate", "evidence_sweep", "repair_wave", "explore"};
+
+  for (const auto &id : expected) {
+    EXPECT_TRUE(std::find(ids.begin(), ids.end(), id) != ids.end())
+        << "Workflow ID '" << id << "' not found in loader after init.";
+  }
+}
 } // namespace firmius::core

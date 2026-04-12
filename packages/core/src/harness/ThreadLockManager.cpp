@@ -13,12 +13,45 @@ namespace {
 const std::string FIRMIUS_DIR = ".firmius";
 const std::string LOCK_FILE = ".lock";
 
+bool ensureWritableDirectory(const std::filesystem::path &dir) {
+  std::error_code ec;
+  std::filesystem::create_directories(dir, ec);
+  if (ec || !std::filesystem::exists(dir) ||
+      !std::filesystem::is_directory(dir)) {
+    return false;
+  }
+
+  const auto probe = dir / ".write_probe";
+  std::ofstream out(probe);
+  if (!out.is_open()) {
+    return false;
+  }
+  out << "ok";
+  out.close();
+  std::filesystem::remove(probe, ec);
+  return true;
+}
+
 std::string getFirmiusHome() {
   const char *home = std::getenv("HOME");
-  if (!home) {
-    home = "/tmp";
+  if (home) {
+    const std::filesystem::path userHome =
+        std::filesystem::path(home) / FIRMIUS_DIR;
+    if (ensureWritableDirectory(userHome)) {
+      return userHome.string();
+    }
   }
-  return std::string(home) + "/" + FIRMIUS_DIR;
+
+  const std::filesystem::path localHome =
+      std::filesystem::current_path() / FIRMIUS_DIR;
+  if (ensureWritableDirectory(localHome)) {
+    return localHome.string();
+  }
+
+  const std::filesystem::path tempHome =
+      std::filesystem::temp_directory_path() / "firmius";
+  ensureWritableDirectory(tempHome);
+  return tempHome.string();
 }
 
 std::string getThreadDir(const std::string &threadId) {

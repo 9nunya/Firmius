@@ -2,10 +2,12 @@
 #include "EnvLoader.hpp"
 #include "Panic.hpp"
 #include "harness/Harness.hpp"
+#include <chrono>
 #include <condition_variable>
 #include <iostream>
 #include <mutex>
 #include <string>
+#include <thread>
 
 namespace firmius::audits {
 
@@ -60,13 +62,21 @@ SubagentStressAudit::run(const std::vector<std::string> &args) {
     std::mutex mtx;
     std::condition_variable cv;
     bool done = false;
-    bool hadOutput = false;
+    bool timedOut = false;
     int subId = harness.subscribe([&](const AppEvent &ev) {
       std::visit(
           [&](auto &&e) {
             using T = std::decay_t<decltype(e)>;
-            if constexpr (std::is_same_v<T, AgentError>) {
-              if (e.agentId == leadAgentId) {
+            if constexpr (std::is_same_v<T, AgentSpawned>) {
+              if (leadAgentId.empty() && e.parentId.empty()) {
+                leadAgentId = e.agentId;
+                std::cout << "\n[Event] AgentSpawned (LEAD)" << std::endl;
+              } else if (!leadAgentId.empty() && e.agentId != leadAgentId) {
+                subagentSpawns++;
+                std::cout << "\n[Event] AgentSpawned (SUB)" << std::endl;
+              }
+            } else if constexpr (std::is_same_v<T, AgentError>) {
+              if (!leadAgentId.empty() && e.agentId == leadAgentId) {
                 std::cout << "\n[Event] AgentError (LEAD): " << e.message
                           << std::endl;
                 done = true;
@@ -81,7 +91,7 @@ SubagentStressAudit::run(const std::vector<std::string> &args) {
             } else if constexpr (std::is_same_v<T, StreamRetrying>) {
               retries++;
             } else if constexpr (std::is_same_v<T, AgentFinished>) {
-              if (e.agentId == leadAgentId) {
+              if (!leadAgentId.empty() && e.agentId == leadAgentId) {
                 std::cout << "\n[Event] AgentFinished (LEAD)" << std::endl;
                 done = true;
                 cv.notify_one();
@@ -89,37 +99,58 @@ SubagentStressAudit::run(const std::vector<std::string> &args) {
                 std::cout << "\n[Event] AgentFinished (SUB)" << std::endl;
                 subagentCompletions++;
               }
-            } else if constexpr (std::is_same_v<T, AgentSpawned>) {
-              if (e.agentId != leadAgentId) {
-                subagentSpawns++;
-                std::cout << "\n[Event] AgentSpawned (SUB)" << std::endl;
-              }
             }
           },
           ev);
     });
     std::cout << "\n> User: " << prompt << std::endl;
     harness.send(prompt);
+    if (leadAgentId.empty()) {
+      const auto deadline = std::chrono::steady_clock::now() +
+                            std::chrono::seconds(10);
+      while (leadAgentId.empty() &&
+             std::chrono::steady_clock::now() < deadline) {
+        leadAgentId = harness.focusedAgentId();
+        if (!leadAgentId.empty()) {
+          break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      }
+    }
+    if (leadAgentId.empty()) {
+      std::cout << "[Audit] Timeout waiting for lead agent creation."
+                << std::endl;
+      harness.unsubscribe(subId);
+      return false;
+    }
     std::unique_lock<std::mutex> lk(mtx);
-    cv.wait(lk, [&] { return done; });
+    if (!cv.wait_for(lk, std::chrono::seconds(120), [&] { return done; })) {
+      timedOut = true;
+      std::cout << "[Audit] Timeout waiting for lead completion."
+                << std::endl;
+    }
     harness.unsubscribe(subId);
+    if (timedOut) {
+      harness.abort();
+    }
     std::cout << std::endl;
-    return hadOutput;
+    return !timedOut && done;
   };
   std::cout << "--- Phase 1: Audit Execution ---" << std::endl;
-  runTurn("Look closely at the 'packages' directory in this project. Delegate "
-          "each package folder in 'packages' to be read by a separate subagent "
-          "concurrently (do not wait for one to finish before starting the "
-          "next). Wait for their results, then return the compiled summary of "
-          "what each package does. There are 4 packages: core, provider, "
-          "shared, tui.");
+  const bool turnCompleted = runTurn(
+      "Look closely at the 'packages' directory in this project. Delegate "
+      "each package folder in 'packages' to be read by a separate subagent "
+      "concurrently (do not wait for one to finish before starting the "
+      "next). Wait for their results, then return the compiled summary of "
+      "what each package does. There are 4 packages: core, provider, "
+      "shared, tui.");
   std::cout << "\nAudit complete." << std::endl;
   std::cout << "Subagent Spawns: " << subagentSpawns << std::endl;
   std::cout << "Subagent Completions: " << subagentCompletions << std::endl;
   std::cout << "Stream Errors: " << streamErrors << std::endl;
   std::cout << "Provider Retries: " << retries << std::endl;
   harness.shutdown();
-  if (subagentSpawns >= 2 && subagentCompletions >= 2) {
+  if (turnCompleted && subagentSpawns >= 2 && subagentCompletions >= 2) {
     std::cout << "\033[1;32mAUDIT PASSED\033[0m: Successfully spawned and "
                  "completed multiple subagents."
               << std::endl;

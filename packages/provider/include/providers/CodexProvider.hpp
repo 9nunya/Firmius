@@ -35,6 +35,7 @@ private:
     std::string callId;
     std::string name;
     std::string arguments;
+    bool finalized = false;
   };
 
   struct ToolCallTracker {

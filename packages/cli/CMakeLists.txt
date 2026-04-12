@@ -10,6 +10,8 @@ target_link_libraries(firmius PRIVATE
 )
 
 target_include_directories(firmius PRIVATE
+  $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/packages/cli/include>
+  $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/packages/shared/include>
   $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/packages/tui/include>
   $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/packages/web/include>
   $<INSTALL_INTERFACE:include>

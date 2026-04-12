@@ -1,86 +1,53 @@
 #include "persistence/ThreadManager.hpp"
+
+#include "AgentRegistry.hpp"
 #include "Serialization.hpp"
 #include "tools/WorkToolCommon.hpp"
 #include "utils/StringUtil.hpp"
-#include <algorithm>
-#include <cerrno>
-#include <cstdlib>
-#include <filesystem>
-#include <fstream>
-#include <functional>
-#include <mutex>
-#include <sstream>
-#include <system_error>
-#include <unordered_map>
+
+#include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
-#include <chrono>
-#include <fcntl.h>
-#include <unistd.h>
+#include <sqlite3.h>
 
-#include <iostream>
+#include <algorithm>
+#include <chrono>
+#include <cstdlib>
+#include <filesystem>
+#include <functional>
+#include <fstream>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 namespace firmius::core {
 
 namespace {
 
-std::string permissionRulesPathFor(const std::string& basePath,
-                                   const std::string& threadId) {
-    return basePath + "/" + threadId + "/permissions.json";
-}
+using shared::StringUtil;
 
-std::string plansDirectoryPathFor(const std::string& basePath,
-                                  const std::string& threadId) {
-    return basePath + "/" + threadId + "/plans";
-}
+bool ensureWritableDirectory(const std::filesystem::path& dir) {
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    if (ec || !std::filesystem::exists(dir) || !std::filesystem::is_directory(dir)) {
+        return false;
+    }
 
-std::string planPathFor(const std::string& basePath, const std::string& threadId,
-                        const std::string& planId) {
-    return plansDirectoryPathFor(basePath, threadId) + "/" + planId + ".json";
-}
-
-std::string todosDirectoryPathFor(const std::string& basePath,
-                                  const std::string& threadId) {
-    return basePath + "/" + threadId + "/todos";
-}
-
-std::string todoPathFor(const std::string& basePath, const std::string& threadId,
-                        const std::string& agentId) {
-    return todosDirectoryPathFor(basePath, threadId) + "/" + agentId + ".json";
-}
-
-std::string liveStateDirectoryPathFor(const std::string& basePath,
-                                      const std::string& threadId) {
-    return basePath + "/" + threadId + "/live_state";
-}
-
-std::string liveStatePathFor(const std::string& basePath,
-                             const std::string& threadId,
-                             const std::string& agentId) {
-    return liveStateDirectoryPathFor(basePath, threadId) + "/" + agentId + ".json";
-}
-
-std::string artifactsDirectoryPathFor(const std::string& basePath,
-                                      const std::string& threadId) {
-    return basePath + "/" + threadId + "/artifacts";
-}
-
-std::string artifactsManifestPathFor(const std::string& basePath,
-                                     const std::string& threadId) {
-    return artifactsDirectoryPathFor(basePath, threadId) + "/manifest.json";
-}
-
-std::string artifactRelativeStoragePath(const std::string& ownerAgentId,
-                                        const std::string& filename) {
-    return "artifacts/" + ownerAgentId + "/" + filename;
-}
-
-std::string artifactAbsoluteStoragePath(const std::string& basePath,
-                                        const std::string& threadId,
-                                        const std::string& ownerAgentId,
-                                        const std::string& filename) {
-    return basePath + "/" + threadId + "/" +
-           artifactRelativeStoragePath(ownerAgentId, filename);
+    const auto probe = dir / (".write_probe_" + StringUtil::generateUuid());
+    std::ofstream out(probe);
+    if (!out.is_open()) {
+        return false;
+    }
+    out << "ok";
+    out.close();
+    std::filesystem::remove(probe, ec);
+    return true;
 }
 
 uint64_t nowEpochMs() {
@@ -90,171 +57,448 @@ uint64_t nowEpochMs() {
             .count());
 }
 
-void fsyncDirectoryBestEffort(const std::filesystem::path& directory) {
-    const int fd = ::open(directory.c_str(), O_RDONLY | O_DIRECTORY);
-    if (fd < 0) {
-        return;
-    }
-    ::fsync(fd);
-    ::close(fd);
+std::string dbPathForBase(const std::string& basePath) {
+    return (std::filesystem::path(basePath) / "firmius_threads.db").string();
 }
 
-void writeStringAtomically(const std::string& content,
-                           const std::string& path) {
-    const std::filesystem::path finalPath(path);
-    std::filesystem::create_directories(finalPath.parent_path());
-
-    const std::filesystem::path tempPath =
-        finalPath.parent_path() /
-        (finalPath.filename().string() + ".tmp." +
-         shared::StringUtil::generateUuid());
-
-    const int fd = ::open(tempPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) {
-        throw std::runtime_error("Cannot write JSON file: " + path);
-    }
-
-    const char* data = content.data();
-    std::size_t remaining = content.size();
-    while (remaining > 0) {
-        const ssize_t written = ::write(fd, data, remaining);
-        if (written < 0) {
-            const int error = errno;
-            ::close(fd);
-            std::filesystem::remove(tempPath);
-            throw std::runtime_error("Cannot write JSON file: " + path +
-                                     " (" + std::generic_category().message(error) +
-                                     ")");
-        }
-        data += written;
-        remaining -= static_cast<std::size_t>(written);
-    }
-
-    if (::fsync(fd) != 0) {
-        const int error = errno;
-        ::close(fd);
-        std::filesystem::remove(tempPath);
-        throw std::runtime_error("Cannot flush JSON file: " + path +
-                                 " (" + std::generic_category().message(error) +
-                                 ")");
-    }
-    ::close(fd);
-
-    if (::rename(tempPath.c_str(), finalPath.c_str()) != 0) {
-        const int error = errno;
-        std::filesystem::remove(tempPath);
-        throw std::runtime_error("Cannot replace JSON file: " + path +
-                                 " (" + std::generic_category().message(error) +
-                                 ")");
-    }
-
-    fsyncDirectoryBestEffort(finalPath.parent_path());
-}
-
-void writeJsonDocument(const rapidjson::Document& document,
-                       const std::string& path) {
+std::string rapidJsonToString(const rapidjson::Document& d) {
     rapidjson::StringBuffer buffer;
     rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
-    document.Accept(writer);
-    writeStringAtomically(buffer.GetString(), path);
+    d.Accept(writer);
+    return buffer.GetString();
 }
 
-rapidjson::Document readJsonDocument(const std::string& path,
-                                     const std::string& errorContext) {
-    std::ifstream file(path);
-    if (!file.is_open()) {
-        throw std::runtime_error("Cannot open " + errorContext + ": " + path);
+rapidjson::Document parseJson(const std::string& text,
+                              const std::string& context) {
+    rapidjson::Document d;
+    d.Parse(text.c_str());
+    if (d.HasParseError()) {
+        throw std::runtime_error("Invalid JSON in " + context);
     }
-
-    std::stringstream buffer;
-    buffer << file.rdbuf();
-
-    rapidjson::Document document;
-    document.Parse(buffer.str().c_str());
-    if (document.HasParseError()) {
-        throw std::runtime_error("Invalid JSON in " + errorContext + ": " + path);
-    }
-    return document;
+    return d;
 }
 
-std::vector<std::string> splitConcatenatedJsonObjects(const std::string& text) {
-    std::vector<std::string> objects;
-    std::size_t start = std::string::npos;
-    int depth = 0;
-    bool inString = false;
-    bool escape = false;
-
-    for (std::size_t i = 0; i < text.size(); ++i) {
-        const char ch = text[i];
-
-        if (escape) {
-            escape = false;
-            continue;
-        }
-        if (ch == '\\' && inString) {
-            escape = true;
-            continue;
-        }
-        if (ch == '"') {
-            inString = !inString;
-            continue;
-        }
-        if (inString) {
-            continue;
-        }
-
-        if (ch == '{' || ch == '[') {
-            if (depth == 0) {
-                start = i;
-            }
-            ++depth;
-            continue;
-        }
-        if (ch == '}' || ch == ']') {
-            if (depth == 0) {
-                return {};
-            }
-            --depth;
-            if (depth == 0 && start != std::string::npos) {
-                objects.push_back(text.substr(start, i - start + 1));
-                start = std::string::npos;
-            }
-        }
-    }
-
-    if (depth != 0 || inString) {
-        return {};
-    }
-
-    const auto trailing = text.find_first_not_of(" \t\r\n",
-                                                 start == std::string::npos
-                                                     ? 0
-                                                     : start);
-    if (objects.empty() && trailing == std::string::npos) {
-        return {};
-    }
-
-    return objects;
+void throwSqliteError(sqlite3* db, const std::string& context) {
+    throw std::runtime_error(context + ": " +
+                             std::string(sqlite3_errmsg(db)));
 }
 
-void rewriteJournalWithRecoveredTurns(const std::string& path,
-                                      const std::vector<AgentTurn>& turns) {
-    std::string content;
-    for (const auto& turn : turns) {
-        rapidjson::Document d = toJson(turn);
-        rapidjson::StringBuffer buffer;
-        rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
-        d.Accept(writer);
-        content += buffer.GetString();
-        content += "\n";
+void execSql(sqlite3* db, const std::string& sql,
+             const std::string& context) {
+    char* errMsg = nullptr;
+    if (sqlite3_exec(db, sql.c_str(), nullptr, nullptr, &errMsg) != SQLITE_OK) {
+        const std::string message = errMsg ? errMsg : "unknown sqlite error";
+        if (errMsg) {
+            sqlite3_free(errMsg);
+        }
+        throw std::runtime_error(context + ": " + message);
     }
-    writeStringAtomically(content, path);
+}
+
+class Statement {
+public:
+    Statement(sqlite3* db, const std::string& sql,
+              const std::string& context)
+        : db_(db) {
+        if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt_, nullptr) != SQLITE_OK) {
+            throwSqliteError(db_, context);
+        }
+    }
+
+    ~Statement() {
+        if (stmt_) {
+            sqlite3_finalize(stmt_);
+        }
+    }
+
+    sqlite3_stmt* get() const { return stmt_; }
+
+private:
+    sqlite3* db_ = nullptr;
+    sqlite3_stmt* stmt_ = nullptr;
+};
+
+void bindText(sqlite3_stmt* stmt, int index, const std::string& value) {
+    if (sqlite3_bind_text(stmt, index, value.c_str(), -1, SQLITE_TRANSIENT) !=
+        SQLITE_OK) {
+        throw std::runtime_error("Failed to bind sqlite text parameter");
+    }
+}
+
+void bindOptionalText(sqlite3_stmt* stmt, int index,
+                      const std::optional<std::string>& value) {
+    if (value.has_value()) {
+        bindText(stmt, index, *value);
+        return;
+    }
+    if (sqlite3_bind_null(stmt, index) != SQLITE_OK) {
+        throw std::runtime_error("Failed to bind sqlite null parameter");
+    }
+}
+
+template <typename Fn>
+auto withImmediateTransaction(sqlite3* db, Fn&& fn) {
+    execSql(db, "BEGIN IMMEDIATE;", "Failed to begin sqlite transaction");
+    try {
+        if constexpr (std::is_void_v<decltype(fn())>) {
+            fn();
+            execSql(db, "COMMIT;", "Failed to commit sqlite transaction");
+            return;
+        } else {
+            auto result = fn();
+            execSql(db, "COMMIT;", "Failed to commit sqlite transaction");
+            return result;
+        }
+    } catch (...) {
+        sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
+        throw;
+    }
+}
+
+struct SqliteConnection {
+    explicit SqliteConnection(const std::string& dbPath) {
+        if (sqlite3_open_v2(dbPath.c_str(), &db,
+                            SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE |
+                                SQLITE_OPEN_FULLMUTEX,
+                            nullptr) != SQLITE_OK) {
+            const std::string err = db ? sqlite3_errmsg(db) : "unknown sqlite error";
+            if (db) {
+                sqlite3_close(db);
+                db = nullptr;
+            }
+            throw std::runtime_error("Failed to open thread database: " + err);
+        }
+
+        execSql(db, "PRAGMA busy_timeout=5000;",
+                "Failed to set sqlite busy timeout");
+        sqlite3_exec(db, "PRAGMA journal_mode=WAL;", nullptr, nullptr, nullptr);
+        execSql(db, "PRAGMA synchronous=NORMAL;",
+                "Failed to configure sqlite synchronous mode");
+        execSql(db, "PRAGMA temp_store=MEMORY;",
+                "Failed to configure sqlite temp store");
+        execSql(db, "PRAGMA foreign_keys=ON;",
+                "Failed to enable sqlite foreign keys");
+
+        execSql(db,
+                "CREATE TABLE IF NOT EXISTS threads ("
+                " thread_id TEXT PRIMARY KEY,"
+                " metadata_json TEXT NOT NULL,"
+                " created_at INTEGER NOT NULL,"
+                " last_active_at INTEGER NOT NULL"
+                ");"
+                "CREATE TABLE IF NOT EXISTS thread_states ("
+                " thread_id TEXT PRIMARY KEY,"
+                " agent_manifest_json TEXT,"
+                " permission_rules_json TEXT,"
+                " fleet_state_json TEXT"
+                ");"
+                "CREATE TABLE IF NOT EXISTS agent_turns ("
+                " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                " thread_id TEXT NOT NULL,"
+                " agent_id TEXT NOT NULL,"
+                " turn_json TEXT NOT NULL"
+                ");"
+                "CREATE INDEX IF NOT EXISTS idx_agent_turns_thread_agent"
+                " ON agent_turns(thread_id, agent_id, id);"
+                "CREATE TABLE IF NOT EXISTS plans ("
+                " thread_id TEXT NOT NULL,"
+                " plan_id TEXT NOT NULL,"
+                " plan_json TEXT NOT NULL,"
+                " created_at INTEGER NOT NULL,"
+                " updated_at INTEGER NOT NULL,"
+                " PRIMARY KEY(thread_id, plan_id)"
+                ");"
+                "CREATE TABLE IF NOT EXISTS agent_todos ("
+                " thread_id TEXT NOT NULL,"
+                " agent_id TEXT NOT NULL,"
+                " todo_json TEXT NOT NULL,"
+                " PRIMARY KEY(thread_id, agent_id)"
+                ");"
+                "CREATE TABLE IF NOT EXISTS agent_live_state ("
+                " thread_id TEXT NOT NULL,"
+                " agent_id TEXT NOT NULL,"
+                " state_json TEXT NOT NULL,"
+                " PRIMARY KEY(thread_id, agent_id)"
+                ");"
+                "CREATE TABLE IF NOT EXISTS rolling_memory_state ("
+                " thread_id TEXT NOT NULL,"
+                " agent_id TEXT NOT NULL,"
+                " state_json TEXT NOT NULL,"
+                " PRIMARY KEY(thread_id, agent_id)"
+                ");"
+                "CREATE TABLE IF NOT EXISTS compaction_snapshots ("
+                " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                " thread_id TEXT NOT NULL,"
+                " agent_id TEXT NOT NULL,"
+                " compaction_id TEXT NOT NULL,"
+                " snapshot_json TEXT NOT NULL"
+                ");"
+                "CREATE INDEX IF NOT EXISTS idx_compaction_thread_agent"
+                " ON compaction_snapshots(thread_id, agent_id, id);"
+                "CREATE TABLE IF NOT EXISTS artifacts ("
+                " thread_id TEXT NOT NULL,"
+                " owner_agent_id TEXT NOT NULL,"
+                " owner_friendly_name TEXT NOT NULL,"
+                " filename TEXT NOT NULL,"
+                " storage_path TEXT NOT NULL,"
+                " content TEXT NOT NULL,"
+                " kind TEXT,"
+                " description TEXT,"
+                " created_at INTEGER NOT NULL,"
+                " updated_at INTEGER NOT NULL,"
+                " PRIMARY KEY(thread_id, owner_agent_id, filename)"
+                ");",
+                "Failed to initialize thread database schema");
+    }
+
+    ~SqliteConnection() {
+        if (db) {
+            sqlite3_close(db);
+            db = nullptr;
+        }
+    }
+
+    sqlite3* db = nullptr;
+};
+
+std::shared_ptr<SqliteConnection> acquireConnection(const std::string& basePath) {
+    const std::string dbPath = dbPathForBase(basePath);
+    std::filesystem::create_directories(basePath);
+    return std::make_shared<SqliteConnection>(dbPath);
+}
+
+void ensureThreadExists(sqlite3* db, const std::string& threadId) {
+    Statement stmt(db, "SELECT 1 FROM threads WHERE thread_id=? LIMIT 1;",
+                   "Failed to prepare thread existence query");
+    bindText(stmt.get(), 1, threadId);
+    if (sqlite3_step(stmt.get()) == SQLITE_ROW) {
+        return;
+    }
+    throw std::runtime_error("Thread not found: " + threadId);
+}
+
+bool agentHasActiveLiveRun(const std::string& threadId,
+                           const std::string& agentId) {
+    auto agent = AgentRegistry::instance().getAgent(agentId);
+    if (!agent) {
+        return false;
+    }
+
+    const auto& ctx = agent->getContext();
+    if (!ctx.history || ctx.history->threadId != threadId) {
+        return false;
+    }
+
+    return agent->isRunning() || agent->isBooting();
+}
+
+rapidjson::Document liveStateToJson(const AgentLiveState& liveState) {
+    rapidjson::Document doc;
+    doc.SetObject();
+    auto& alloc = doc.GetAllocator();
+    doc.AddMember("thread_id", rapidjson::Value(liveState.threadId.c_str(), alloc),
+                  alloc);
+    doc.AddMember("agent_id", rapidjson::Value(liveState.agentId.c_str(), alloc),
+                  alloc);
+    return doc;
+}
+
+AgentLiveState liveStateFromJson(const rapidjson::Value& value) {
+    AgentLiveState liveState;
+    if (!value.IsObject()) {
+        return liveState;
+    }
+
+    if (value.HasMember("thread_id") && value["thread_id"].IsString()) {
+        liveState.threadId = value["thread_id"].GetString();
+    }
+    if (value.HasMember("agent_id") && value["agent_id"].IsString()) {
+        liveState.agentId = value["agent_id"].GetString();
+    }
+    return liveState;
+}
+
+rapidjson::Value rollingMemoryChunkToJson(const RollingMemoryChunk& chunk,
+                                          rapidjson::Document::AllocatorType& a) {
+    rapidjson::Value v(rapidjson::kObjectType);
+    v.AddMember("chunkId", rapidjson::Value(chunk.chunkId.c_str(), a), a);
+    v.AddMember("sourceStartTurnId",
+                rapidjson::Value(chunk.sourceStartTurnId.c_str(), a), a);
+    v.AddMember("sourceEndTurnId",
+                rapidjson::Value(chunk.sourceEndTurnId.c_str(), a), a);
+    rapidjson::Value ids(rapidjson::kArrayType);
+    for (const auto& id : chunk.sourceTurnIds) {
+        ids.PushBack(rapidjson::Value(id.c_str(), a), a);
+    }
+    v.AddMember("sourceTurnIds", ids, a);
+    v.AddMember("summary", rapidjson::Value(chunk.summary.c_str(), a), a);
+    v.AddMember("currentTask", rapidjson::Value(chunk.currentTask.c_str(), a), a);
+    v.AddMember("suggestedResponse",
+                rapidjson::Value(chunk.suggestedResponse.c_str(), a), a);
+    v.AddMember("sourceTokens", chunk.sourceTokens, a);
+    v.AddMember("summaryTokens", chunk.summaryTokens, a);
+    v.AddMember("createdAt", chunk.createdAt, a);
+    v.AddMember("buffered", chunk.buffered, a);
+    v.AddMember("active", chunk.active, a);
+    v.AddMember("superseded", chunk.superseded, a);
+    return v;
+}
+
+RollingMemoryChunk rollingMemoryChunkFromJson(const rapidjson::Value& value) {
+    RollingMemoryChunk chunk;
+    if (!value.IsObject()) {
+        return chunk;
+    }
+    if (value.HasMember("chunkId") && value["chunkId"].IsString()) {
+        chunk.chunkId = value["chunkId"].GetString();
+    }
+    if (value.HasMember("sourceStartTurnId") &&
+        value["sourceStartTurnId"].IsString()) {
+        chunk.sourceStartTurnId = value["sourceStartTurnId"].GetString();
+    }
+    if (value.HasMember("sourceEndTurnId") && value["sourceEndTurnId"].IsString()) {
+        chunk.sourceEndTurnId = value["sourceEndTurnId"].GetString();
+    }
+    if (value.HasMember("sourceTurnIds") && value["sourceTurnIds"].IsArray()) {
+        for (const auto& id : value["sourceTurnIds"].GetArray()) {
+            if (id.IsString()) {
+                chunk.sourceTurnIds.push_back(id.GetString());
+            }
+        }
+    }
+    if (value.HasMember("summary") && value["summary"].IsString()) {
+        chunk.summary = value["summary"].GetString();
+    }
+    if (value.HasMember("currentTask") && value["currentTask"].IsString()) {
+        chunk.currentTask = value["currentTask"].GetString();
+    }
+    if (value.HasMember("suggestedResponse") && value["suggestedResponse"].IsString()) {
+        chunk.suggestedResponse = value["suggestedResponse"].GetString();
+    }
+    if (value.HasMember("sourceTokens") && value["sourceTokens"].IsUint()) {
+        chunk.sourceTokens = value["sourceTokens"].GetUint();
+    }
+    if (value.HasMember("summaryTokens") && value["summaryTokens"].IsUint()) {
+        chunk.summaryTokens = value["summaryTokens"].GetUint();
+    }
+    if (value.HasMember("createdAt") && value["createdAt"].IsUint64()) {
+        chunk.createdAt = value["createdAt"].GetUint64();
+    }
+    if (value.HasMember("buffered") && value["buffered"].IsBool()) {
+        chunk.buffered = value["buffered"].GetBool();
+    }
+    if (value.HasMember("active") && value["active"].IsBool()) {
+        chunk.active = value["active"].GetBool();
+    }
+    if (value.HasMember("superseded") && value["superseded"].IsBool()) {
+        chunk.superseded = value["superseded"].GetBool();
+    }
+    return chunk;
+}
+
+rapidjson::Document rollingMemoryStateToJson(const RollingMemoryState& state) {
+    rapidjson::Document d;
+    d.SetObject();
+    auto& a = d.GetAllocator();
+    d.AddMember("threadId", rapidjson::Value(state.threadId.c_str(), a), a);
+    d.AddMember("agentId", rapidjson::Value(state.agentId.c_str(), a), a);
+    d.AddMember("lastObservedTurnId",
+                rapidjson::Value(state.lastObservedTurnId.c_str(), a), a);
+    d.AddMember("lastReflectedObservationId",
+                rapidjson::Value(state.lastReflectedObservationId.c_str(), a), a);
+    d.AddMember("lastContextWindow", state.lastContextWindow, a);
+    d.AddMember("lastBufferThresholdTokens", state.lastBufferThresholdTokens, a);
+    d.AddMember("lastTargetThresholdTokens", state.lastTargetThresholdTokens, a);
+    d.AddMember("lastEmergencyThresholdTokens", state.lastEmergencyThresholdTokens,
+                a);
+    d.AddMember("lastRetainedTailTokens", state.lastRetainedTailTokens, a);
+    d.AddMember("lastUpdatedAt", state.lastUpdatedAt, a);
+    d.AddMember("observationInFlight", state.observationInFlight, a);
+    d.AddMember("reflectionInFlight", state.reflectionInFlight, a);
+
+    rapidjson::Value observations(rapidjson::kArrayType);
+    for (const auto& chunk : state.observationChunks) {
+        observations.PushBack(rollingMemoryChunkToJson(chunk, a), a);
+    }
+    d.AddMember("observationChunks", observations, a);
+
+    rapidjson::Value reflections(rapidjson::kArrayType);
+    for (const auto& chunk : state.reflectionChunks) {
+        reflections.PushBack(rollingMemoryChunkToJson(chunk, a), a);
+    }
+    d.AddMember("reflectionChunks", reflections, a);
+    return d;
+}
+
+RollingMemoryState rollingMemoryStateFromJson(const rapidjson::Value& value) {
+    RollingMemoryState state;
+    if (!value.IsObject()) {
+        return state;
+    }
+    if (value.HasMember("threadId") && value["threadId"].IsString()) {
+        state.threadId = value["threadId"].GetString();
+    }
+    if (value.HasMember("agentId") && value["agentId"].IsString()) {
+        state.agentId = value["agentId"].GetString();
+    }
+    if (value.HasMember("lastObservedTurnId") &&
+        value["lastObservedTurnId"].IsString()) {
+        state.lastObservedTurnId = value["lastObservedTurnId"].GetString();
+    }
+    if (value.HasMember("lastReflectedObservationId") &&
+        value["lastReflectedObservationId"].IsString()) {
+        state.lastReflectedObservationId =
+            value["lastReflectedObservationId"].GetString();
+    }
+    if (value.HasMember("lastContextWindow") && value["lastContextWindow"].IsUint()) {
+        state.lastContextWindow = value["lastContextWindow"].GetUint();
+    }
+    if (value.HasMember("lastBufferThresholdTokens") &&
+        value["lastBufferThresholdTokens"].IsUint()) {
+        state.lastBufferThresholdTokens = value["lastBufferThresholdTokens"].GetUint();
+    }
+    if (value.HasMember("lastTargetThresholdTokens") &&
+        value["lastTargetThresholdTokens"].IsUint()) {
+        state.lastTargetThresholdTokens = value["lastTargetThresholdTokens"].GetUint();
+    }
+    if (value.HasMember("lastEmergencyThresholdTokens") &&
+        value["lastEmergencyThresholdTokens"].IsUint()) {
+        state.lastEmergencyThresholdTokens =
+            value["lastEmergencyThresholdTokens"].GetUint();
+    }
+    if (value.HasMember("lastRetainedTailTokens") &&
+        value["lastRetainedTailTokens"].IsUint()) {
+        state.lastRetainedTailTokens = value["lastRetainedTailTokens"].GetUint();
+    }
+    if (value.HasMember("lastUpdatedAt") && value["lastUpdatedAt"].IsUint64()) {
+        state.lastUpdatedAt = value["lastUpdatedAt"].GetUint64();
+    }
+    if (value.HasMember("observationInFlight") &&
+        value["observationInFlight"].IsBool()) {
+        state.observationInFlight = value["observationInFlight"].GetBool();
+    }
+    if (value.HasMember("reflectionInFlight") &&
+        value["reflectionInFlight"].IsBool()) {
+        state.reflectionInFlight = value["reflectionInFlight"].GetBool();
+    }
+    if (value.HasMember("observationChunks") && value["observationChunks"].IsArray()) {
+        for (const auto& chunk : value["observationChunks"].GetArray()) {
+            state.observationChunks.push_back(rollingMemoryChunkFromJson(chunk));
+        }
+    }
+    if (value.HasMember("reflectionChunks") && value["reflectionChunks"].IsArray()) {
+        for (const auto& chunk : value["reflectionChunks"].GetArray()) {
+            state.reflectionChunks.push_back(rollingMemoryChunkFromJson(chunk));
+        }
+    }
+    return state;
 }
 
 rapidjson::Value compactionSnapshotToJson(
     const CompactionSnapshot& snapshot, rapidjson::Document::AllocatorType& a) {
     rapidjson::Value v(rapidjson::kObjectType);
-    v.AddMember("compactionId", rapidjson::Value(snapshot.compactionId.c_str(), a), a);
+    v.AddMember("compactionId", rapidjson::Value(snapshot.compactionId.c_str(), a),
+                a);
     v.AddMember("threadId", rapidjson::Value(snapshot.threadId.c_str(), a), a);
     v.AddMember("agentId", rapidjson::Value(snapshot.agentId.c_str(), a), a);
     v.AddMember("previousContextSize", snapshot.previousContextSize, a);
@@ -295,38 +539,6 @@ CompactionSnapshot compactionSnapshotFromJsonValue(const rapidjson::Value& v) {
     return snapshot;
 }
 
-std::vector<CompactionSnapshot> loadCompactionSnapshotsFile(
-    const std::string& path) {
-    if (!std::filesystem::exists(path)) {
-        return {};
-    }
-    rapidjson::Document doc = readJsonDocument(path, "compaction snapshots");
-    std::vector<CompactionSnapshot> snapshots;
-    if (doc.HasMember("snapshots") && doc["snapshots"].IsArray()) {
-        for (const auto& value : doc["snapshots"].GetArray()) {
-            snapshots.push_back(compactionSnapshotFromJsonValue(value));
-        }
-        return snapshots;
-    }
-    if (doc.HasMember("turns") && doc["turns"].IsArray()) {
-        snapshots.push_back(compactionSnapshotFromJsonValue(doc));
-    }
-    return snapshots;
-}
-
-void writeCompactionSnapshotsFile(
-    const std::string& path, const std::vector<CompactionSnapshot>& snapshots) {
-    rapidjson::Document doc;
-    doc.SetObject();
-    auto& a = doc.GetAllocator();
-    rapidjson::Value items(rapidjson::kArrayType);
-    for (const auto& snapshot : snapshots) {
-        items.PushBack(compactionSnapshotToJson(snapshot, a), a);
-    }
-    doc.AddMember("snapshots", items, a);
-    writeJsonDocument(doc, path);
-}
-
 const char* severityToString(CommandSeverity severity) {
     switch (severity) {
     case CommandSeverity::LOW:
@@ -354,66 +566,46 @@ CommandSeverity severityFromString(const std::string& value) {
     return CommandSeverity::LOW;
 }
 
-std::shared_ptr<std::mutex> acquirePlanMutex(const std::string& threadId,
-                                             const std::string& planId) {
-    static std::mutex registryMutex;
-    static std::unordered_map<std::string, std::weak_ptr<std::mutex>> registry;
-
-    const std::string key = threadId + ":" + planId;
-    std::lock_guard<std::mutex> guard(registryMutex);
-    if (auto existing = registry[key].lock()) {
-        return existing;
+std::string stateFieldForColumn(const std::string& column) {
+    if (column == "agent_manifest_json" || column == "permission_rules_json" ||
+        column == "fleet_state_json") {
+        return column;
     }
-
-    auto created = std::make_shared<std::mutex>();
-    registry[key] = created;
-    return created;
+    throw std::runtime_error("Invalid thread state column");
 }
 
-std::shared_ptr<std::mutex> acquireTodoMutex(const std::string& threadId,
-                                             const std::string& agentId) {
-    static std::mutex registryMutex;
-    static std::unordered_map<std::string, std::weak_ptr<std::mutex>> registry;
-
-    const std::string key = threadId + ":" + agentId;
-    std::lock_guard<std::mutex> guard(registryMutex);
-    if (auto existing = registry[key].lock()) {
-        return existing;
+std::optional<std::string> readThreadStateField(sqlite3* db,
+                                                const std::string& threadId,
+                                                const std::string& column) {
+    Statement stmt(db,
+                   "SELECT " + stateFieldForColumn(column) +
+                       " FROM thread_states WHERE thread_id=?;",
+                   "Failed to prepare thread state read");
+    bindText(stmt.get(), 1, threadId);
+    if (sqlite3_step(stmt.get()) != SQLITE_ROW) {
+        return std::nullopt;
     }
-
-    auto created = std::make_shared<std::mutex>();
-    registry[key] = created;
-    return created;
+    if (sqlite3_column_type(stmt.get(), 0) == SQLITE_NULL) {
+        return std::nullopt;
+    }
+    const auto* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 0));
+    return text ? std::optional<std::string>(text) : std::nullopt;
 }
 
-std::shared_ptr<std::mutex> acquireLiveStateMutex(const std::string& threadId,
-                                                  const std::string& agentId) {
-    static std::mutex registryMutex;
-    static std::unordered_map<std::string, std::weak_ptr<std::mutex>> registry;
-
-    const std::string key = threadId + ":" + agentId;
-    std::lock_guard<std::mutex> guard(registryMutex);
-    if (auto existing = registry[key].lock()) {
-        return existing;
+void writeThreadStateField(sqlite3* db, const std::string& threadId,
+                           const std::string& column,
+                           const std::optional<std::string>& value) {
+    const std::string c = stateFieldForColumn(column);
+    Statement stmt(
+        db,
+        "INSERT INTO thread_states(thread_id, " + c + ") VALUES(?, ?) "
+        "ON CONFLICT(thread_id) DO UPDATE SET " + c + "=excluded." + c + ";",
+        "Failed to prepare thread state write");
+    bindText(stmt.get(), 1, threadId);
+    bindOptionalText(stmt.get(), 2, value);
+    if (sqlite3_step(stmt.get()) != SQLITE_DONE) {
+        throwSqliteError(db, "Failed to write thread state");
     }
-
-    auto created = std::make_shared<std::mutex>();
-    registry[key] = created;
-    return created;
-}
-
-std::shared_ptr<std::mutex> acquireArtifactsMutex(const std::string& threadId) {
-    static std::mutex registryMutex;
-    static std::unordered_map<std::string, std::weak_ptr<std::mutex>> registry;
-
-    std::lock_guard<std::mutex> guard(registryMutex);
-    if (auto existing = registry[threadId].lock()) {
-        return existing;
-    }
-
-    auto created = std::make_shared<std::mutex>();
-    registry[threadId] = created;
-    return created;
 }
 
 void validateArtifactFilename(const std::string& filename) {
@@ -437,234 +629,129 @@ void validateArtifactFilename(const std::string& filename) {
     }
 }
 
-std::vector<shared::ThreadArtifactMetadata>
-readArtifactsManifestFile(const std::string& path) {
-    std::vector<shared::ThreadArtifactMetadata> artifacts;
-    if (!std::filesystem::exists(path)) {
-        return artifacts;
+std::shared_ptr<std::mutex> acquirePlanMutex(const std::string& threadId,
+                                             const std::string& planId) {
+    static std::mutex registryMutex;
+    static std::unordered_map<std::string, std::weak_ptr<std::mutex>> registry;
+    const std::string key = threadId + ":" + planId;
+    std::lock_guard<std::mutex> guard(registryMutex);
+    if (auto existing = registry[key].lock()) {
+        return existing;
     }
-
-    rapidjson::Document doc = readJsonDocument(path, "artifact manifest");
-    if (!doc.IsObject()) {
-        return artifacts;
-    }
-    if (!doc.HasMember("artifacts") || !doc["artifacts"].IsArray()) {
-        return artifacts;
-    }
-
-    for (const auto& entry : doc["artifacts"].GetArray()) {
-        if (!entry.IsObject()) {
-            continue;
-        }
-        artifacts.push_back(shared::threadArtifactMetadataFromJson(entry));
-    }
-    return artifacts;
+    auto created = std::make_shared<std::mutex>();
+    registry[key] = created;
+    return created;
 }
 
-void writeArtifactsManifestFile(
-    const std::string& path,
-    const std::vector<shared::ThreadArtifactMetadata>& artifacts) {
-    rapidjson::Document doc;
-    doc.SetObject();
-    auto& alloc = doc.GetAllocator();
-
-    rapidjson::Value items(rapidjson::kArrayType);
-    for (const auto& artifact : artifacts) {
-        rapidjson::Document artifactDoc = shared::toJson(artifact);
-        rapidjson::Value artifactValue;
-        artifactValue.CopyFrom(artifactDoc, alloc);
-        items.PushBack(artifactValue, alloc);
+std::shared_ptr<std::mutex> acquireTodoMutex(const std::string& threadId,
+                                             const std::string& agentId) {
+    static std::mutex registryMutex;
+    static std::unordered_map<std::string, std::weak_ptr<std::mutex>> registry;
+    const std::string key = threadId + ":" + agentId;
+    std::lock_guard<std::mutex> guard(registryMutex);
+    if (auto existing = registry[key].lock()) {
+        return existing;
     }
-    doc.AddMember("artifacts", items, alloc);
-    writeJsonDocument(doc, path);
-}
-
-
-
-
-
-rapidjson::Document liveStateToJson(const AgentLiveState& liveState) {
-    rapidjson::Document doc;
-    doc.SetObject();
-    auto& alloc = doc.GetAllocator();
-    doc.AddMember("thread_id", rapidjson::Value(liveState.threadId.c_str(), alloc), alloc);
-    doc.AddMember("agent_id", rapidjson::Value(liveState.agentId.c_str(), alloc), alloc);
-    return doc;
-}
-
-AgentLiveState liveStateFromJson(const rapidjson::Value& value) {
-    AgentLiveState liveState;
-    if (!value.IsObject()) {
-        return liveState;
-    }
-
-    if (value.HasMember("thread_id") && value["thread_id"].IsString()) {
-        liveState.threadId = value["thread_id"].GetString();
-    }
-    if (value.HasMember("agent_id") && value["agent_id"].IsString()) {
-        liveState.agentId = value["agent_id"].GetString();
-    }
-    return liveState;
-}
-
-rapidjson::Value lockToJson(const FleetLock& lock,
-                            rapidjson::Document::AllocatorType& alloc) {
-    rapidjson::Value obj(rapidjson::kObjectType);
-    obj.AddMember("lock_id", rapidjson::Value(lock.lockId.c_str(), alloc), alloc);
-    obj.AddMember("thread_id", rapidjson::Value(lock.threadId.c_str(), alloc), alloc);
-    obj.AddMember("root_agent_id", rapidjson::Value(lock.rootAgentId.c_str(), alloc), alloc);
-    obj.AddMember("owner_agent_id", rapidjson::Value(lock.ownerAgentId.c_str(), alloc), alloc);
-    obj.AddMember("status", rapidjson::Value(lock.status.c_str(), alloc), alloc);
-    obj.AddMember("reason", rapidjson::Value(lock.reason.c_str(), alloc), alloc);
-    obj.AddMember("created_at", static_cast<uint64_t>(lock.createdAt), alloc);
-    obj.AddMember("updated_at", static_cast<uint64_t>(lock.updatedAt), alloc);
-
-    rapidjson::Value paths(rapidjson::kArrayType);
-    for (const auto& p : lock.paths) {
-        paths.PushBack(rapidjson::Value(p.c_str(), alloc), alloc);
-    }
-    obj.AddMember("paths", paths, alloc);
-
-    rapidjson::Value waiters(rapidjson::kArrayType);
-    for (const auto& w : lock.waiters) {
-        waiters.PushBack(rapidjson::Value(w.c_str(), alloc), alloc);
-    }
-    obj.AddMember("waiters", waiters, alloc);
-
-    return obj;
-}
-
-FleetLock lockFromJson(const rapidjson::Value& value) {
-    FleetLock lock;
-    if (!value.IsObject()) {
-        return lock;
-    }
-    if (value.HasMember("lock_id") && value["lock_id"].IsString()) {
-        lock.lockId = value["lock_id"].GetString();
-    }
-    if (value.HasMember("thread_id") && value["thread_id"].IsString()) {
-        lock.threadId = value["thread_id"].GetString();
-    }
-    if (value.HasMember("root_agent_id") && value["root_agent_id"].IsString()) {
-        lock.rootAgentId = value["root_agent_id"].GetString();
-    }
-    if (value.HasMember("owner_agent_id") && value["owner_agent_id"].IsString()) {
-        lock.ownerAgentId = value["owner_agent_id"].GetString();
-    }
-    if (value.HasMember("status") && value["status"].IsString()) {
-        lock.status = value["status"].GetString();
-    }
-    if (value.HasMember("reason") && value["reason"].IsString()) {
-        lock.reason = value["reason"].GetString();
-    }
-    if (value.HasMember("created_at") && value["created_at"].IsUint64()) {
-        lock.createdAt = value["created_at"].GetUint64();
-    }
-    if (value.HasMember("updated_at") && value["updated_at"].IsUint64()) {
-        lock.updatedAt = value["updated_at"].GetUint64();
-    }
-    if (value.HasMember("paths") && value["paths"].IsArray()) {
-        for (const auto& entry : value["paths"].GetArray()) {
-            if (entry.IsString()) {
-                lock.paths.push_back(entry.GetString());
-            }
-        }
-    }
-    if (value.HasMember("waiters") && value["waiters"].IsArray()) {
-        for (const auto& entry : value["waiters"].GetArray()) {
-            if (entry.IsString()) {
-                lock.waiters.push_back(entry.GetString());
-            }
-        }
-    }
-    return lock;
-}
-
-rapidjson::Document fleetStateToJson(const FleetState& state) {
-    rapidjson::Document doc;
-    doc.SetObject();
-    auto& alloc = doc.GetAllocator();
-
-    rapidjson::Value locks(rapidjson::kArrayType);
-    for (const auto& lock : state.locks) {
-        locks.PushBack(lockToJson(lock, alloc), alloc);
-    }
-    doc.AddMember("locks", locks, alloc);
-    return doc;
-}
-
-FleetState fleetStateFromJson(const rapidjson::Value& value) {
-    FleetState state;
-    if (!value.IsObject()) {
-        return state;
-    }
-    if (value.HasMember("locks") && value["locks"].IsArray()) {
-        for (const auto& entry : value["locks"].GetArray()) {
-            state.locks.push_back(lockFromJson(entry));
-        }
-    }
-    return state;
+    auto created = std::make_shared<std::mutex>();
+    registry[key] = created;
+    return created;
 }
 
 } // namespace
 
 std::string ThreadManager::defaultBasePath() {
     if (const char* home = std::getenv("HOME")) {
-        return std::string(home) + "/.firmius/threads";
+        const std::filesystem::path userPath =
+            std::filesystem::path(home) / ".firmius" / "threads";
+        if (ensureWritableDirectory(userPath)) {
+            return userPath.string();
+        }
     }
-    return ".firmius/threads";
+
+    const std::filesystem::path localPath =
+        std::filesystem::current_path() / ".firmius" / "threads";
+    if (ensureWritableDirectory(localPath)) {
+        return localPath.string();
+    }
+
+    const std::filesystem::path tempPath =
+        std::filesystem::temp_directory_path() / "firmius" / "threads";
+    ensureWritableDirectory(tempPath);
+    return tempPath.string();
 }
 
 std::string ThreadManager::threadDirectoryPath(const std::string& basePath,
                                                const std::string& threadId) {
-    return basePath + "/" + threadId;
+    return (std::filesystem::path(basePath) / threadId).string();
 }
 
 std::string ThreadManager::compactionSnapshotPath(const std::string& basePath,
                                                   const std::string& threadId,
                                                   const std::string& agentId) {
-    return threadDirectoryPath(basePath, threadId) + "/compaction_" + agentId + ".json";
-}
-
-std::string fleetStatePath(const std::string& basePath,
-                           const std::string& threadId) {
-    return ThreadManager::threadDirectoryPath(basePath, threadId) +
-           "/fleet_state.json";
+    return threadDirectoryPath(basePath, threadId) + "/compaction_" + agentId +
+           ".json";
 }
 
 ThreadManager::ThreadManager(std::string basePath)
-    : basePath_(std::move(basePath)) {}
+    : basePath_(std::move(basePath)) {
+    std::filesystem::create_directories(basePath_);
+    (void)acquireConnection(basePath_);
+}
 
 std::vector<std::string> ThreadManager::listThreads() const {
+    auto conn = acquireConnection(basePath_);
+    Statement stmt(conn->db,
+                   "SELECT thread_id FROM threads ORDER BY created_at ASC, thread_id ASC;",
+                   "Failed to prepare list threads query");
     std::vector<std::string> threads;
-    std::string dir = basePath_;
-    if (!std::filesystem::exists(dir)) return {};
-
-    for (const auto& entry : std::filesystem::directory_iterator(dir)) {
-        if (entry.is_directory()) {
-            threads.push_back(entry.path().filename().string());
+    while (sqlite3_step(stmt.get()) == SQLITE_ROW) {
+        const auto* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 0));
+        if (text) {
+            threads.emplace_back(text);
         }
     }
     return threads;
 }
 
 std::string ThreadManager::createThread(const ThreadMetadata& metadata) {
-    std::string threadId = shared::StringUtil::generateUuid();
-    std::string dir = basePath_ + "/" + threadId;
-    std::filesystem::create_directories(dir);
+    auto conn = acquireConnection(basePath_);
 
-    ThreadMetadata meta = metadata;
-    meta.threadId = threadId;
-    meta.createdAt = nowEpochMs();
-    meta.lastActiveAt = meta.createdAt;
+    ThreadMetadata persisted = metadata;
+    persisted.threadId = StringUtil::generateUuid();
+    persisted.createdAt = nowEpochMs();
+    persisted.lastActiveAt = persisted.createdAt;
 
-    writeJsonDocument(toJson(meta), dir + "/metadata.json");
-    return threadId;
+    std::filesystem::create_directories(
+        std::filesystem::path(basePath_) / persisted.threadId);
+
+    Statement stmt(conn->db,
+                   "INSERT INTO threads(thread_id, metadata_json, created_at, last_active_at)"
+                   " VALUES(?, ?, ?, ?);",
+                   "Failed to prepare create thread statement");
+    bindText(stmt.get(), 1, persisted.threadId);
+    bindText(stmt.get(), 2, rapidJsonToString(toJson(persisted)));
+    sqlite3_bind_int64(stmt.get(), 3, static_cast<sqlite3_int64>(persisted.createdAt));
+    sqlite3_bind_int64(stmt.get(), 4, static_cast<sqlite3_int64>(persisted.lastActiveAt));
+    if (sqlite3_step(stmt.get()) != SQLITE_DONE) {
+        throwSqliteError(conn->db, "Failed to create thread");
+    }
+
+    return persisted.threadId;
 }
 
 ThreadMetadata ThreadManager::getMetadata(const std::string& threadId) const {
-    std::string path = basePath_ + "/" + threadId + "/metadata.json";
-    rapidjson::Document d = readJsonDocument(path, "thread metadata");
+    auto conn = acquireConnection(basePath_);
+    Statement stmt(conn->db,
+                   "SELECT metadata_json FROM threads WHERE thread_id=?;",
+                   "Failed to prepare thread metadata query");
+    bindText(stmt.get(), 1, threadId);
+    if (sqlite3_step(stmt.get()) != SQLITE_ROW) {
+        throw std::runtime_error("Thread not found: " + threadId);
+    }
+
+    const auto* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 0));
+    const std::string json = text ? text : "";
+    auto d = parseJson(json, "thread metadata");
     auto meta = threadMetadataFromJson(d);
     if (meta.threadId.empty()) {
         meta.threadId = threadId;
@@ -690,74 +777,33 @@ bool ThreadManager::tryGetMetadata(const std::string& threadId,
     return false;
 }
 
-AgentHistory ThreadManager::loadAgentHistory(const std::string& threadId, const std::string& agentId) const {
-    std::string path = basePath_ + "/" + threadId + "/" + agentId + ".jsonl";
-    std::ifstream file(path);
-    std::string line;
+AgentHistory ThreadManager::loadAgentHistory(const std::string& threadId,
+                                             const std::string& agentId) const {
+    auto conn = acquireConnection(basePath_);
+
     AgentHistory history;
     history.threadId = threadId;
-    bool repairedJournal = false;
 
-    while (std::getline(file, line)) {
-        if (line.empty()) continue;
-        rapidjson::Document d;
-        d.Parse(line.c_str());
-        if (!d.HasParseError()) {
-            try {
-                history.turns.push_back(agentTurnFromJsonValue(d));
-            } catch (const std::exception& ex) {
-                std::cerr << "[Journaler] Skipping corrupted line in " << path << ": " << ex.what() << std::endl;
-                repairedJournal = true;
-            } catch (...) {
-                std::cerr << "[Journaler] Skipping corrupted line in " << path << ": unknown error" << std::endl;
-                repairedJournal = true;
-            }
+    Statement stmt(conn->db,
+                   "SELECT turn_json FROM agent_turns "
+                   "WHERE thread_id=? AND agent_id=? ORDER BY id ASC;",
+                   "Failed to prepare agent history query");
+    bindText(stmt.get(), 1, threadId);
+    bindText(stmt.get(), 2, agentId);
+
+    while (sqlite3_step(stmt.get()) == SQLITE_ROW) {
+        const auto* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 0));
+        if (!text) {
             continue;
         }
-
-        const auto recoveredObjects = splitConcatenatedJsonObjects(line);
-        if (recoveredObjects.empty()) {
-            std::cerr << "[Journaler] Skipping malformed JSON line in " << path << std::endl;
-            repairedJournal = true;
-            continue;
-        }
-
-        repairedJournal = true;
-        for (const auto& objectText : recoveredObjects) {
-            try {
-                rapidjson::Document recoveredDoc;
-                recoveredDoc.Parse(objectText.c_str());
-                if (recoveredDoc.HasParseError()) {
-                    std::cerr << "[Journaler] Skipping unrecoverable JSON object in "
-                              << path << std::endl;
-                    continue;
-                }
-                history.turns.push_back(agentTurnFromJsonValue(recoveredDoc));
-            } catch (const std::exception& ex) {
-                std::cerr << "[Journaler] Skipping recovered object in " << path
-                          << ": " << ex.what() << std::endl;
-            } catch (...) {
-                std::cerr << "[Journaler] Skipping recovered object in " << path
-                          << ": unknown error" << std::endl;
-            }
-        }
-    }
-
-    if (repairedJournal) {
         try {
-            rewriteJournalWithRecoveredTurns(path, history.turns);
-        } catch (const std::exception& ex) {
-            std::cerr << "[Journaler] Failed to rewrite repaired journal " << path
-                      << ": " << ex.what() << std::endl;
+            auto d = parseJson(text, "agent history row");
+            history.turns.push_back(agentTurnFromJsonValue(d));
         } catch (...) {
-            std::cerr << "[Journaler] Failed to rewrite repaired journal " << path
-                      << ": unknown error" << std::endl;
+            // Skip malformed rows rather than failing thread resume.
         }
     }
 
-    // Inject synthetic results for orphaned tool calls so providers
-    // requiring 1:1 call/result pairing (Codex, OpenAI) don't reject
-    // the history with a 400 error after agent cancellation.
     std::unordered_map<std::string, bool> toolCallIds;
     std::unordered_map<std::string, bool> toolResultIds;
 
@@ -784,7 +830,7 @@ AgentHistory ThreadManager::loadAgentHistory(const std::string& threadId, const 
         }
     }
 
-    if (!orphanedCalls.empty()) {
+    if (!orphanedCalls.empty() && !agentHasActiveLiveRun(threadId, agentId)) {
         AgentTurn repairTurn;
         repairTurn.turnId = "auto-repair-" + std::to_string(nowEpochMs());
         repairTurn.stopReason = StopReason::Stop;
@@ -803,59 +849,111 @@ AgentHistory ThreadManager::loadAgentHistory(const std::string& threadId, const 
             repairTurn.messages.push_back(repairMsg);
         }
 
-        history.turns.push_back(repairTurn);
+        history.turns.push_back(std::move(repairTurn));
     }
 
     return history;
 }
 
 std::vector<std::string> ThreadManager::listAgents(const std::string& threadId) const {
-    std::vector<std::string> agents;
-    std::string dir = basePath_ + "/" + threadId;
-    if (!std::filesystem::exists(dir)) return {};
+    auto conn = acquireConnection(basePath_);
+    Statement stmt(conn->db,
+                   "SELECT DISTINCT agent_id FROM agent_turns WHERE thread_id=? "
+                   "ORDER BY agent_id ASC;",
+                   "Failed to prepare list agents query");
+    bindText(stmt.get(), 1, threadId);
 
-    for (const auto& entry : std::filesystem::directory_iterator(dir)) {
-        if (entry.is_regular_file() && entry.path().extension() == ".jsonl") {
-            agents.push_back(entry.path().stem().string());
+    std::vector<std::string> agents;
+    while (sqlite3_step(stmt.get()) == SQLITE_ROW) {
+        const auto* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 0));
+        if (text) {
+            agents.emplace_back(text);
         }
     }
     return agents;
 }
 
-void ThreadManager::updateHostIdentifier(const std::string& threadId, const std::string& hostIdentifier) {
+void ThreadManager::updateHostIdentifier(const std::string& threadId,
+                                         const std::string& hostIdentifier) {
     auto metadata = getMetadata(threadId);
     metadata.hostIdentifier = hostIdentifier;
-    
-    std::string dir = basePath_ + "/" + threadId;
-    writeJsonDocument(toJson(metadata), dir + "/metadata.json");
+    updateMetadata(threadId, metadata);
 }
 
 void ThreadManager::deleteThread(const std::string& threadId) {
-    std::string dir = basePath_ + "/" + threadId;
-    if (!std::filesystem::exists(dir)) {
-        throw std::runtime_error("Thread not found: " + threadId);
-    }
-    std::filesystem::remove_all(dir);
+    auto conn = acquireConnection(basePath_);
+    withImmediateTransaction(conn->db, [&]() {
+        const std::vector<std::string> deletes = {
+            "DELETE FROM threads WHERE thread_id=?;",
+            "DELETE FROM thread_states WHERE thread_id=?;",
+            "DELETE FROM agent_turns WHERE thread_id=?;",
+            "DELETE FROM plans WHERE thread_id=?;",
+            "DELETE FROM agent_todos WHERE thread_id=?;",
+            "DELETE FROM agent_live_state WHERE thread_id=?;",
+            "DELETE FROM rolling_memory_state WHERE thread_id=?;",
+            "DELETE FROM compaction_snapshots WHERE thread_id=?;",
+            "DELETE FROM artifacts WHERE thread_id=?;",
+        };
+        for (const auto& sql : deletes) {
+            Statement stmt(conn->db, sql, "Failed to prepare thread delete");
+            bindText(stmt.get(), 1, threadId);
+            if (sqlite3_step(stmt.get()) != SQLITE_DONE) {
+                throwSqliteError(conn->db, "Failed to delete thread data");
+            }
+        }
+    });
+
+    std::error_code ec;
+    std::filesystem::remove_all(std::filesystem::path(basePath_) / threadId, ec);
 }
 
-void ThreadManager::updateMetadata(const std::string& threadId, const ThreadMetadata& metadata) {
-    std::string dir = basePath_ + "/" + threadId;
-    if (!std::filesystem::exists(dir)) {
-        throw std::runtime_error("Thread not found: " + threadId);
+void ThreadManager::updateMetadata(const std::string& threadId,
+                                   const ThreadMetadata& metadata) {
+    auto conn = acquireConnection(basePath_);
+    ensureThreadExists(conn->db, threadId);
+
+    ThreadMetadata persisted = metadata;
+    if (persisted.threadId.empty()) {
+        persisted.threadId = threadId;
     }
-    writeJsonDocument(toJson(metadata), dir + "/metadata.json");
+    Statement stmt(conn->db,
+                   "UPDATE threads SET metadata_json=?, created_at=?, last_active_at=? "
+                   "WHERE thread_id=?;",
+                   "Failed to prepare metadata update");
+    bindText(stmt.get(), 1, rapidJsonToString(toJson(persisted)));
+    sqlite3_bind_int64(stmt.get(), 2, static_cast<sqlite3_int64>(persisted.createdAt));
+    sqlite3_bind_int64(stmt.get(), 3,
+                       static_cast<sqlite3_int64>(persisted.lastActiveAt));
+    bindText(stmt.get(), 4, threadId);
+    if (sqlite3_step(stmt.get()) != SQLITE_DONE) {
+        throwSqliteError(conn->db, "Failed to update thread metadata");
+    }
 }
 
 std::vector<ThreadMetadata> ThreadManager::listThreadsWithMetadata() const {
+    auto conn = acquireConnection(basePath_);
+    Statement stmt(conn->db,
+                   "SELECT thread_id, metadata_json FROM threads ORDER BY created_at ASC;",
+                   "Failed to prepare list metadata query");
+
     std::vector<ThreadMetadata> result;
-    std::string dir = basePath_;
-    if (!std::filesystem::exists(dir)) return {};
-    for (const auto& entry : std::filesystem::directory_iterator(dir)) {
-        if (entry.is_directory()) {
-            ThreadMetadata meta;
-            if (tryGetMetadata(entry.path().filename().string(), meta)) {
-                result.push_back(meta);
+    while (sqlite3_step(stmt.get()) == SQLITE_ROW) {
+        const auto* threadIdText =
+            reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 0));
+        const auto* metadataText =
+            reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 1));
+        if (!threadIdText || !metadataText) {
+            continue;
+        }
+        try {
+            auto d = parseJson(metadataText, "thread metadata");
+            auto meta = threadMetadataFromJson(d);
+            if (meta.threadId.empty()) {
+                meta.threadId = threadIdText;
             }
+            result.push_back(std::move(meta));
+        } catch (...) {
+            // Skip malformed metadata rows.
         }
     }
     return result;
@@ -866,12 +964,12 @@ std::string ThreadManager::createPlan(const Plan& plan) {
     if (persistedPlan.threadId.empty()) {
         throw std::runtime_error("Cannot create plan with empty threadId");
     }
-    if (!std::filesystem::exists(basePath_ + "/" + persistedPlan.threadId)) {
-        throw std::runtime_error("Thread not found: " + persistedPlan.threadId);
-    }
+
+    auto conn = acquireConnection(basePath_);
+    ensureThreadExists(conn->db, persistedPlan.threadId);
 
     if (persistedPlan.id.empty()) {
-        persistedPlan.id = shared::StringUtil::generateUuid();
+        persistedPlan.id = StringUtil::generateUuid();
     }
     const uint64_t timestamp = nowEpochMs();
     if (persistedPlan.createdAt == 0) {
@@ -888,30 +986,52 @@ void ThreadManager::writePlan(const std::string& threadId, const Plan& plan) {
         throw std::runtime_error("Cannot write plan with empty id");
     }
 
-    std::string threadDir = basePath_ + "/" + threadId;
-    if (!std::filesystem::exists(threadDir)) {
-        throw std::runtime_error("Thread not found: " + threadId);
-    }
-
-    auto planMutex = acquirePlanMutex(threadId, plan.id);
-    std::lock_guard<std::mutex> lock(*planMutex);
-
-    std::string plansDir = plansDirectoryPathFor(basePath_, threadId);
-    std::filesystem::create_directories(plansDir);
+    auto conn = acquireConnection(basePath_);
+    ensureThreadExists(conn->db, threadId);
 
     Plan persistedPlan = plan;
     if (persistedPlan.threadId.empty()) {
         persistedPlan.threadId = threadId;
     }
 
-    writeJsonDocument(toJson(persistedPlan),
-                      planPathFor(basePath_, threadId, persistedPlan.id));
+    Statement stmt(conn->db,
+                   "INSERT INTO plans(thread_id, plan_id, plan_json, created_at, updated_at)"
+                   " VALUES(?, ?, ?, ?, ?)"
+                   " ON CONFLICT(thread_id, plan_id) DO UPDATE SET"
+                   " plan_json=excluded.plan_json,"
+                   " created_at=excluded.created_at,"
+                   " updated_at=excluded.updated_at;",
+                   "Failed to prepare write plan statement");
+    bindText(stmt.get(), 1, threadId);
+    bindText(stmt.get(), 2, persistedPlan.id);
+    bindText(stmt.get(), 3, rapidJsonToString(toJson(persistedPlan)));
+    sqlite3_bind_int64(stmt.get(), 4,
+                       static_cast<sqlite3_int64>(persistedPlan.createdAt));
+    sqlite3_bind_int64(stmt.get(), 5,
+                       static_cast<sqlite3_int64>(persistedPlan.updatedAt));
+    if (sqlite3_step(stmt.get()) != SQLITE_DONE) {
+        throwSqliteError(conn->db, "Failed to write plan");
+    }
 }
 
 Plan ThreadManager::getPlan(const std::string& threadId,
                             const std::string& planId) const {
-    std::string path = planPathFor(basePath_, threadId, planId);
-    rapidjson::Document d = readJsonDocument(path, "plan");
+    auto conn = acquireConnection(basePath_);
+    Statement stmt(conn->db,
+                   "SELECT plan_json FROM plans WHERE thread_id=? AND plan_id=?;",
+                   "Failed to prepare get plan query");
+    bindText(stmt.get(), 1, threadId);
+    bindText(stmt.get(), 2, planId);
+    if (sqlite3_step(stmt.get()) != SQLITE_ROW) {
+        throw std::runtime_error("Plan not found: " + planId);
+    }
+
+    const auto* jsonText = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 0));
+    if (!jsonText) {
+        throw std::runtime_error("Plan row is empty: " + planId);
+    }
+
+    auto d = parseJson(jsonText, "plan");
     Plan plan = planFromJson(d);
     if (plan.id.empty()) {
         plan.id = planId;
@@ -919,29 +1039,26 @@ Plan ThreadManager::getPlan(const std::string& threadId,
     if (plan.threadId.empty()) {
         plan.threadId = threadId;
     }
-    // Automatically reconcile chunk dependencies when loading plan
     worktools::reconcileChunkDependencies(plan);
     return plan;
 }
 
 std::vector<Plan> ThreadManager::listPlans(const std::string& threadId) const {
-    std::vector<Plan> plans;
-    std::string plansDir = plansDirectoryPathFor(basePath_, threadId);
-    if (!std::filesystem::exists(plansDir)) {
-        return plans;
-    }
+    auto conn = acquireConnection(basePath_);
+    Statement stmt(conn->db,
+                   "SELECT plan_id FROM plans WHERE thread_id=? ORDER BY plan_id ASC;",
+                   "Failed to prepare list plans query");
+    bindText(stmt.get(), 1, threadId);
 
-    for (const auto& entry : std::filesystem::directory_iterator(plansDir)) {
-        if (!entry.is_regular_file() || entry.path().extension() != ".json") {
+    std::vector<Plan> plans;
+    while (sqlite3_step(stmt.get()) == SQLITE_ROW) {
+        const auto* planIdText =
+            reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 0));
+        if (!planIdText) {
             continue;
         }
-
-        Plan plan = getPlan(threadId, entry.path().stem().string());
-        plans.push_back(std::move(plan));
+        plans.push_back(getPlan(threadId, planIdText));
     }
-
-    std::sort(plans.begin(), plans.end(),
-              [](const Plan& lhs, const Plan& rhs) { return lhs.id < rhs.id; });
     return plans;
 }
 
@@ -949,6 +1066,9 @@ void ThreadManager::updatePlan(const std::string& threadId, const Plan& plan) {
     if (plan.id.empty()) {
         throw std::runtime_error("Cannot update plan with empty id");
     }
+
+    auto planMutex = acquirePlanMutex(threadId, plan.id);
+    std::lock_guard<std::mutex> lock(*planMutex);
 
     Plan persistedPlan = plan;
     if (persistedPlan.threadId.empty()) {
@@ -958,16 +1078,12 @@ void ThreadManager::updatePlan(const std::string& threadId, const Plan& plan) {
         throw std::runtime_error("Plan threadId does not match target thread");
     }
 
-    auto planMutex = acquirePlanMutex(threadId, plan.id);
-    std::lock_guard<std::mutex> lock(*planMutex);
-
-    Plan existing = getPlan(threadId, plan.id);
+    const Plan existing = getPlan(threadId, plan.id);
     if (persistedPlan.createdAt == 0) {
         persistedPlan.createdAt = existing.createdAt;
     }
     persistedPlan.updatedAt = nowEpochMs();
-    writeJsonDocument(toJson(persistedPlan),
-                      planPathFor(basePath_, threadId, persistedPlan.id));
+    writePlan(threadId, persistedPlan);
 }
 
 Plan ThreadManager::mutatePlan(const std::string& threadId,
@@ -979,7 +1095,6 @@ Plan ThreadManager::mutatePlan(const std::string& threadId,
 
     auto planMutex = acquirePlanMutex(threadId, planId);
     std::lock_guard<std::mutex> lock(*planMutex);
-
     Plan plan = getPlan(threadId, planId);
     mutator(plan);
     if (plan.threadId.empty()) {
@@ -992,7 +1107,7 @@ Plan ThreadManager::mutatePlan(const std::string& threadId,
         plan.createdAt = nowEpochMs();
     }
     plan.updatedAt = nowEpochMs();
-    writeJsonDocument(toJson(plan), planPathFor(basePath_, threadId, plan.id));
+    writePlan(threadId, plan);
     return plan;
 }
 
@@ -1002,8 +1117,14 @@ AgentTodoList ThreadManager::getAgentTodo(const std::string& threadId,
         throw std::runtime_error("Cannot load todo list with empty agentId");
     }
 
-    std::string path = todoPathFor(basePath_, threadId, agentId);
-    if (!std::filesystem::exists(path)) {
+    auto conn = acquireConnection(basePath_);
+    Statement stmt(conn->db,
+                   "SELECT todo_json FROM agent_todos WHERE thread_id=? AND agent_id=?;",
+                   "Failed to prepare get todo query");
+    bindText(stmt.get(), 1, threadId);
+    bindText(stmt.get(), 2, agentId);
+
+    if (sqlite3_step(stmt.get()) != SQLITE_ROW) {
         AgentTodoList empty;
         empty.threadId = threadId;
         empty.agentId = agentId;
@@ -1011,7 +1132,8 @@ AgentTodoList ThreadManager::getAgentTodo(const std::string& threadId,
         return empty;
     }
 
-    rapidjson::Document d = readJsonDocument(path, "agent todo list");
+    const auto* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 0));
+    auto d = parseJson(text ? text : "{}", "agent todo list");
     AgentTodoList list = agentTodoListFromJson(d);
     if (list.threadId.empty()) {
         list.threadId = threadId;
@@ -1032,13 +1154,8 @@ void ThreadManager::writeAgentTodo(const std::string& threadId,
         throw std::runtime_error("Cannot write todo list with empty agentId");
     }
 
-    std::string threadDir = basePath_ + "/" + threadId;
-    if (!std::filesystem::exists(threadDir)) {
-        throw std::runtime_error("Thread not found: " + threadId);
-    }
-
-    auto todoMutex = acquireTodoMutex(threadId, agentId);
-    std::lock_guard<std::mutex> lock(*todoMutex);
+    auto conn = acquireConnection(basePath_);
+    ensureThreadExists(conn->db, threadId);
 
     AgentTodoList persisted = todoList;
     if (persisted.threadId.empty()) {
@@ -1054,9 +1171,16 @@ void ThreadManager::writeAgentTodo(const std::string& threadId,
         persisted.nextId = 1;
     }
 
-    std::string todosDir = todosDirectoryPathFor(basePath_, threadId);
-    std::filesystem::create_directories(todosDir);
-    writeJsonDocument(toJson(persisted), todoPathFor(basePath_, threadId, agentId));
+    Statement stmt(conn->db,
+                   "INSERT INTO agent_todos(thread_id, agent_id, todo_json) VALUES(?, ?, ?) "
+                   "ON CONFLICT(thread_id, agent_id) DO UPDATE SET todo_json=excluded.todo_json;",
+                   "Failed to prepare write todo statement");
+    bindText(stmt.get(), 1, threadId);
+    bindText(stmt.get(), 2, agentId);
+    bindText(stmt.get(), 3, rapidJsonToString(toJson(persisted)));
+    if (sqlite3_step(stmt.get()) != SQLITE_DONE) {
+        throwSqliteError(conn->db, "Failed to write agent todo list");
+    }
 }
 
 AgentTodoList ThreadManager::mutateAgentTodo(
@@ -1068,7 +1192,6 @@ AgentTodoList ThreadManager::mutateAgentTodo(
 
     auto todoMutex = acquireTodoMutex(threadId, agentId);
     std::lock_guard<std::mutex> lock(*todoMutex);
-
     AgentTodoList todoList = getAgentTodo(threadId, agentId);
     mutator(todoList);
     if (todoList.threadId.empty()) {
@@ -1083,8 +1206,7 @@ AgentTodoList ThreadManager::mutateAgentTodo(
     if (todoList.threadId != threadId || todoList.agentId != agentId) {
         throw std::runtime_error("Todo identity does not match target thread/agent");
     }
-
-    writeJsonDocument(toJson(todoList), todoPathFor(basePath_, threadId, agentId));
+    writeAgentTodo(threadId, agentId, todoList);
     return todoList;
 }
 
@@ -1094,23 +1216,30 @@ AgentLiveState ThreadManager::getAgentLiveState(const std::string& threadId,
         throw std::runtime_error("Cannot load live state with empty agentId");
     }
 
-    const std::string path = liveStatePathFor(basePath_, threadId, agentId);
-    if (!std::filesystem::exists(path)) {
+    auto conn = acquireConnection(basePath_);
+    Statement stmt(conn->db,
+                   "SELECT state_json FROM agent_live_state WHERE thread_id=? AND agent_id=?;",
+                   "Failed to prepare get live state query");
+    bindText(stmt.get(), 1, threadId);
+    bindText(stmt.get(), 2, agentId);
+
+    if (sqlite3_step(stmt.get()) != SQLITE_ROW) {
         AgentLiveState empty;
         empty.threadId = threadId;
         empty.agentId = agentId;
         return empty;
     }
 
-    rapidjson::Document d = readJsonDocument(path, "agent live state");
-    AgentLiveState liveState = liveStateFromJson(d);
-    if (liveState.threadId.empty()) {
-        liveState.threadId = threadId;
+    const auto* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 0));
+    auto d = parseJson(text ? text : "{}", "agent live state");
+    AgentLiveState state = liveStateFromJson(d);
+    if (state.threadId.empty()) {
+        state.threadId = threadId;
     }
-    if (liveState.agentId.empty()) {
-        liveState.agentId = agentId;
+    if (state.agentId.empty()) {
+        state.agentId = agentId;
     }
-    return liveState;
+    return state;
 }
 
 void ThreadManager::writeAgentLiveState(const std::string& threadId,
@@ -1120,13 +1249,8 @@ void ThreadManager::writeAgentLiveState(const std::string& threadId,
         throw std::runtime_error("Cannot write live state with empty agentId");
     }
 
-    const std::string threadDir = threadDirectoryPath(basePath_, threadId);
-    if (!std::filesystem::exists(threadDir)) {
-        throw std::runtime_error("Thread not found: " + threadId);
-    }
-
-    auto liveStateMutex = acquireLiveStateMutex(threadId, agentId);
-    std::lock_guard<std::mutex> lock(*liveStateMutex);
+    auto conn = acquireConnection(basePath_);
+    ensureThreadExists(conn->db, threadId);
 
     AgentLiveState persisted = liveState;
     if (persisted.threadId.empty()) {
@@ -1135,12 +1259,17 @@ void ThreadManager::writeAgentLiveState(const std::string& threadId,
     if (persisted.agentId.empty()) {
         persisted.agentId = agentId;
     }
-    if (persisted.threadId != threadId || persisted.agentId != agentId) {
-        throw std::runtime_error("Live state identity does not match target thread/agent");
-    }
 
-    std::filesystem::create_directories(liveStateDirectoryPathFor(basePath_, threadId));
-    writeJsonDocument(liveStateToJson(persisted), liveStatePathFor(basePath_, threadId, agentId));
+    Statement stmt(conn->db,
+                   "INSERT INTO agent_live_state(thread_id, agent_id, state_json) VALUES(?, ?, ?) "
+                   "ON CONFLICT(thread_id, agent_id) DO UPDATE SET state_json=excluded.state_json;",
+                   "Failed to prepare write live state statement");
+    bindText(stmt.get(), 1, threadId);
+    bindText(stmt.get(), 2, agentId);
+    bindText(stmt.get(), 3, rapidJsonToString(liveStateToJson(persisted)));
+    if (sqlite3_step(stmt.get()) != SQLITE_DONE) {
+        throwSqliteError(conn->db, "Failed to write live state");
+    }
 }
 
 AgentLiveState ThreadManager::mutateAgentLiveState(
@@ -1150,34 +1279,137 @@ AgentLiveState ThreadManager::mutateAgentLiveState(
         throw std::runtime_error("Cannot mutate live state with empty agentId");
     }
 
-    auto liveStateMutex = acquireLiveStateMutex(threadId, agentId);
-    std::lock_guard<std::mutex> lock(*liveStateMutex);
+    AgentLiveState state = getAgentLiveState(threadId, agentId);
+    mutator(state);
+    if (state.threadId.empty()) {
+        state.threadId = threadId;
+    }
+    if (state.agentId.empty()) {
+        state.agentId = agentId;
+    }
+    writeAgentLiveState(threadId, agentId, state);
+    return state;
+}
 
-    AgentLiveState liveState = getAgentLiveState(threadId, agentId);
-    mutator(liveState);
-    if (liveState.threadId.empty()) {
-        liveState.threadId = threadId;
-    }
-    if (liveState.agentId.empty()) {
-        liveState.agentId = agentId;
-    }
-    if (liveState.threadId != threadId || liveState.agentId != agentId) {
-        throw std::runtime_error("Live state identity does not match target thread/agent");
+RollingMemoryState ThreadManager::loadRollingMemoryState(
+    const std::string& threadId, const std::string& agentId) const {
+    if (agentId.empty()) {
+        throw std::runtime_error(
+            "Cannot load rolling memory state with empty agentId");
     }
 
-    std::filesystem::create_directories(liveStateDirectoryPathFor(basePath_, threadId));
-    writeJsonDocument(liveStateToJson(liveState), liveStatePathFor(basePath_, threadId, agentId));
-    return liveState;
+    auto conn = acquireConnection(basePath_);
+    Statement stmt(conn->db,
+                   "SELECT state_json FROM rolling_memory_state WHERE thread_id=? AND agent_id=?;",
+                   "Failed to prepare get rolling memory query");
+    bindText(stmt.get(), 1, threadId);
+    bindText(stmt.get(), 2, agentId);
+
+    if (sqlite3_step(stmt.get()) != SQLITE_ROW) {
+        RollingMemoryState empty;
+        empty.threadId = threadId;
+        empty.agentId = agentId;
+        return empty;
+    }
+
+    const auto* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 0));
+    auto d = parseJson(text ? text : "{}", "rolling memory state");
+    RollingMemoryState state = rollingMemoryStateFromJson(d);
+    if (state.threadId.empty()) {
+        state.threadId = threadId;
+    }
+    if (state.agentId.empty()) {
+        state.agentId = agentId;
+    }
+    return state;
+}
+
+void ThreadManager::writeRollingMemoryState(const std::string& threadId,
+                                            const std::string& agentId,
+                                            const RollingMemoryState& state) {
+    if (agentId.empty()) {
+        throw std::runtime_error(
+            "Cannot write rolling memory state with empty agentId");
+    }
+
+    auto conn = acquireConnection(basePath_);
+    ensureThreadExists(conn->db, threadId);
+
+    RollingMemoryState persisted = state;
+    if (persisted.threadId.empty()) {
+        persisted.threadId = threadId;
+    }
+    if (persisted.agentId.empty()) {
+        persisted.agentId = agentId;
+    }
+    persisted.lastUpdatedAt = nowEpochMs();
+
+    Statement stmt(conn->db,
+                   "INSERT INTO rolling_memory_state(thread_id, agent_id, state_json) VALUES(?, ?, ?) "
+                   "ON CONFLICT(thread_id, agent_id) DO UPDATE SET state_json=excluded.state_json;",
+                   "Failed to prepare rolling memory write");
+    bindText(stmt.get(), 1, threadId);
+    bindText(stmt.get(), 2, agentId);
+    bindText(stmt.get(), 3, rapidJsonToString(rollingMemoryStateToJson(persisted)));
+    if (sqlite3_step(stmt.get()) != SQLITE_DONE) {
+        throwSqliteError(conn->db, "Failed to write rolling memory state");
+    }
 }
 
 FleetState ThreadManager::getFleetState(const std::string& threadId) const {
-    const std::string path = fleetStatePath(basePath_, threadId);
-    if (!std::filesystem::exists(path)) {
-        return {};
-    }
+    auto conn = acquireConnection(basePath_);
     try {
-        rapidjson::Document d = readJsonDocument(path, "fleet state");
-        return fleetStateFromJson(d);
+        auto value = readThreadStateField(conn->db, threadId, "fleet_state_json");
+        if (!value.has_value()) {
+            return {};
+        }
+        auto d = parseJson(*value, "fleet state");
+        FleetState state;
+        if (d.IsObject() && d.HasMember("locks") && d["locks"].IsArray()) {
+            for (const auto& entry : d["locks"].GetArray()) {
+                FleetLock lock;
+                if (entry.HasMember("lock_id") && entry["lock_id"].IsString()) {
+                    lock.lockId = entry["lock_id"].GetString();
+                }
+                if (entry.HasMember("thread_id") && entry["thread_id"].IsString()) {
+                    lock.threadId = entry["thread_id"].GetString();
+                }
+                if (entry.HasMember("root_agent_id") && entry["root_agent_id"].IsString()) {
+                    lock.rootAgentId = entry["root_agent_id"].GetString();
+                }
+                if (entry.HasMember("owner_agent_id") && entry["owner_agent_id"].IsString()) {
+                    lock.ownerAgentId = entry["owner_agent_id"].GetString();
+                }
+                if (entry.HasMember("status") && entry["status"].IsString()) {
+                    lock.status = entry["status"].GetString();
+                }
+                if (entry.HasMember("reason") && entry["reason"].IsString()) {
+                    lock.reason = entry["reason"].GetString();
+                }
+                if (entry.HasMember("created_at") && entry["created_at"].IsUint64()) {
+                    lock.createdAt = entry["created_at"].GetUint64();
+                }
+                if (entry.HasMember("updated_at") && entry["updated_at"].IsUint64()) {
+                    lock.updatedAt = entry["updated_at"].GetUint64();
+                }
+                if (entry.HasMember("paths") && entry["paths"].IsArray()) {
+                    for (const auto& p : entry["paths"].GetArray()) {
+                        if (p.IsString()) {
+                            lock.paths.emplace_back(p.GetString());
+                        }
+                    }
+                }
+                if (entry.HasMember("waiters") && entry["waiters"].IsArray()) {
+                    for (const auto& w : entry["waiters"].GetArray()) {
+                        if (w.IsString()) {
+                            lock.waiters.emplace_back(w.GetString());
+                        }
+                    }
+                }
+                state.locks.push_back(std::move(lock));
+            }
+        }
+        return state;
     } catch (...) {
         return {};
     }
@@ -1185,11 +1417,41 @@ FleetState ThreadManager::getFleetState(const std::string& threadId) const {
 
 void ThreadManager::writeFleetState(const std::string& threadId,
                                     const FleetState& state) {
-    const std::string threadDir = threadDirectoryPath(basePath_, threadId);
-    if (!std::filesystem::exists(threadDir)) {
-        throw std::runtime_error("Thread not found: " + threadId);
+    auto conn = acquireConnection(basePath_);
+    ensureThreadExists(conn->db, threadId);
+
+    rapidjson::Document d;
+    d.SetObject();
+    auto& a = d.GetAllocator();
+    rapidjson::Value locks(rapidjson::kArrayType);
+    for (const auto& lock : state.locks) {
+        rapidjson::Value obj(rapidjson::kObjectType);
+        obj.AddMember("lock_id", rapidjson::Value(lock.lockId.c_str(), a), a);
+        obj.AddMember("thread_id", rapidjson::Value(lock.threadId.c_str(), a), a);
+        obj.AddMember("root_agent_id", rapidjson::Value(lock.rootAgentId.c_str(), a), a);
+        obj.AddMember("owner_agent_id", rapidjson::Value(lock.ownerAgentId.c_str(), a), a);
+        obj.AddMember("status", rapidjson::Value(lock.status.c_str(), a), a);
+        obj.AddMember("reason", rapidjson::Value(lock.reason.c_str(), a), a);
+        obj.AddMember("created_at", static_cast<uint64_t>(lock.createdAt), a);
+        obj.AddMember("updated_at", static_cast<uint64_t>(lock.updatedAt), a);
+
+        rapidjson::Value paths(rapidjson::kArrayType);
+        for (const auto& p : lock.paths) {
+            paths.PushBack(rapidjson::Value(p.c_str(), a), a);
+        }
+        obj.AddMember("paths", paths, a);
+
+        rapidjson::Value waiters(rapidjson::kArrayType);
+        for (const auto& w : lock.waiters) {
+            waiters.PushBack(rapidjson::Value(w.c_str(), a), a);
+        }
+        obj.AddMember("waiters", waiters, a);
+        locks.PushBack(obj, a);
     }
-    writeJsonDocument(fleetStateToJson(state), fleetStatePath(basePath_, threadId));
+    d.AddMember("locks", locks, a);
+
+    writeThreadStateField(conn->db, threadId, "fleet_state_json",
+                          rapidJsonToString(d));
 }
 
 FleetState ThreadManager::mutateFleetState(
@@ -1207,75 +1469,118 @@ ThreadManager::loadCompactionSnapshots(const std::string& threadId,
     if (threadId.empty() || agentId.empty()) {
         return {};
     }
-    return loadCompactionSnapshotsFile(
-        compactionSnapshotPath(basePath_, threadId, agentId));
+
+    auto conn = acquireConnection(basePath_);
+    Statement stmt(conn->db,
+                   "SELECT snapshot_json FROM compaction_snapshots "
+                   "WHERE thread_id=? AND agent_id=? ORDER BY id ASC;",
+                   "Failed to prepare compaction snapshot read");
+    bindText(stmt.get(), 1, threadId);
+    bindText(stmt.get(), 2, agentId);
+
+    std::vector<CompactionSnapshot> snapshots;
+    while (sqlite3_step(stmt.get()) == SQLITE_ROW) {
+        const auto* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 0));
+        if (!text) {
+            continue;
+        }
+        auto d = parseJson(text, "compaction snapshot");
+        snapshots.push_back(compactionSnapshotFromJsonValue(d));
+    }
+    return snapshots;
 }
 
 void ThreadManager::appendCompactionSnapshot(
     const std::string& threadId, const std::string& agentId,
     const CompactionSnapshot& snapshot) {
-    auto snapshots = loadCompactionSnapshots(threadId, agentId);
-    snapshots.push_back(snapshot);
-    writeCompactionSnapshotsFile(compactionSnapshotPath(basePath_, threadId, agentId),
-                                 snapshots);
+    auto conn = acquireConnection(basePath_);
+
+    rapidjson::Document doc;
+    doc.SetObject();
+    auto& alloc = doc.GetAllocator();
+    auto value = compactionSnapshotToJson(snapshot, alloc);
+    doc.CopyFrom(value, alloc);
+
+    Statement stmt(conn->db,
+                   "INSERT INTO compaction_snapshots(thread_id, agent_id, compaction_id, snapshot_json) "
+                   "VALUES(?, ?, ?, ?);",
+                   "Failed to prepare compaction snapshot write");
+    bindText(stmt.get(), 1, threadId);
+    bindText(stmt.get(), 2, agentId);
+    bindText(stmt.get(), 3, snapshot.compactionId);
+    bindText(stmt.get(), 4, rapidJsonToString(doc));
+    if (sqlite3_step(stmt.get()) != SQLITE_DONE) {
+        throwSqliteError(conn->db, "Failed to append compaction snapshot");
+    }
 }
 
 bool ThreadManager::popCompactionSnapshot(
     const std::string& threadId, const std::string& agentId,
     const std::optional<std::string>& compactionId, CompactionSnapshot* removed) {
-    auto snapshots = loadCompactionSnapshots(threadId, agentId);
-    if (snapshots.empty()) {
+    auto conn = acquireConnection(basePath_);
+
+    Statement query(conn->db,
+                    "SELECT id, snapshot_json, compaction_id FROM compaction_snapshots "
+                    "WHERE thread_id=? AND agent_id=? ORDER BY id ASC;",
+                    "Failed to prepare compaction snapshot pop query");
+    bindText(query.get(), 1, threadId);
+    bindText(query.get(), 2, agentId);
+
+    struct Row {
+        sqlite3_int64 id = 0;
+        std::string json;
+        std::string compactionId;
+    };
+    std::vector<Row> rows;
+    while (sqlite3_step(query.get()) == SQLITE_ROW) {
+        const auto* jsonText =
+            reinterpret_cast<const char*>(sqlite3_column_text(query.get(), 1));
+        const auto* compactionIdText =
+            reinterpret_cast<const char*>(sqlite3_column_text(query.get(), 2));
+        rows.push_back(Row{sqlite3_column_int64(query.get(), 0),
+                           jsonText ? jsonText : "",
+                           compactionIdText ? compactionIdText : ""});
+    }
+    if (rows.empty()) {
         return false;
     }
 
-    auto it = snapshots.end() - 1;
+    auto it = rows.end() - 1;
     if (compactionId.has_value()) {
-        auto reverse_it = std::find_if(
-            snapshots.rbegin(), snapshots.rend(),
-            [&](const CompactionSnapshot& snapshot) {
-                return snapshot.compactionId == *compactionId;
-            });
-        if (reverse_it == snapshots.rend()) {
+        auto reverseIt = std::find_if(rows.rbegin(), rows.rend(), [&](const Row& row) {
+            return row.compactionId == *compactionId;
+        });
+        if (reverseIt == rows.rend()) {
             return false;
         }
-        it = std::prev(reverse_it.base());
+        it = std::prev(reverseIt.base());
     }
 
     if (removed) {
-        *removed = *it;
+        auto d = parseJson(it->json, "compaction snapshot");
+        *removed = compactionSnapshotFromJsonValue(d);
     }
-    snapshots.erase(it);
-    const std::string path = compactionSnapshotPath(basePath_, threadId, agentId);
-    if (snapshots.empty()) {
-        std::error_code ec;
-        std::filesystem::remove(path, ec);
-        return true;
+
+    Statement del(conn->db,
+                  "DELETE FROM compaction_snapshots WHERE id=?;",
+                  "Failed to prepare compaction snapshot delete");
+    sqlite3_bind_int64(del.get(), 1, it->id);
+    if (sqlite3_step(del.get()) != SQLITE_DONE) {
+        throwSqliteError(conn->db, "Failed to delete compaction snapshot");
     }
-    writeCompactionSnapshotsFile(path, snapshots);
     return true;
 }
 
-std::map<std::string, AgentManifestEntry> ThreadManager::readAgentManifest(const std::string& threadId) const {
-    std::string path = basePath_ + "/" + threadId + "/agents.json";
+std::map<std::string, AgentManifestEntry>
+ThreadManager::readAgentManifest(const std::string& threadId) const {
+    auto conn = acquireConnection(basePath_);
+    auto json = readThreadStateField(conn->db, threadId, "agent_manifest_json");
     std::map<std::string, AgentManifestEntry> manifest;
-
-    if (!std::filesystem::exists(path)) {
-        return manifest; // empty
+    if (!json.has_value()) {
+        return manifest;
     }
 
-    std::ifstream file(path);
-    if (!file.is_open()) {
-        throw std::runtime_error("Cannot open agent manifest: " + path);
-    }
-    std::stringstream buffer;
-    buffer << file.rdbuf();
-
-    rapidjson::Document d;
-    d.Parse(buffer.str().c_str());
-    if (d.HasParseError()) {
-        throw std::runtime_error("Invalid JSON in agent manifest: " + path);
-    }
-
+    auto d = parseJson(*json, "agent manifest");
     if (!d.IsObject()) {
         return manifest;
     }
@@ -1299,7 +1604,7 @@ std::map<std::string, AgentManifestEntry> ThreadManager::readAgentManifest(const
         if (val.HasMember("persistHistory") && val["persistHistory"].IsBool()) {
             entry.persistHistory = val["persistHistory"].GetBool();
         } else {
-            entry.persistHistory = true; // default
+            entry.persistHistory = true;
         }
 
         manifest[m.name.GetString()] = entry;
@@ -1329,10 +1634,10 @@ bool ThreadManager::tryReadAgentManifest(
     return false;
 }
 
-void ThreadManager::writeAgentManifest(const std::string& threadId, const std::map<std::string, AgentManifestEntry>& manifest) {
-    std::string dir = basePath_ + "/" + threadId;
-    std::filesystem::create_directories(dir);
-    std::string path = dir + "/agents.json";
+void ThreadManager::writeAgentManifest(
+    const std::string& threadId,
+    const std::map<std::string, AgentManifestEntry>& manifest) {
+    auto conn = acquireConnection(basePath_);
 
     rapidjson::Document d;
     d.SetObject();
@@ -1348,37 +1653,26 @@ void ThreadManager::writeAgentManifest(const std::string& threadId, const std::m
         d.AddMember(rapidjson::Value(agentId.c_str(), a).Move(), obj, a);
     }
 
-    writeJsonDocument(d, path);
+    writeThreadStateField(conn->db, threadId, "agent_manifest_json",
+                          rapidJsonToString(d));
 }
 
-ThreadPermissionRules ThreadManager::readPermissionRules(const std::string& threadId) const {
-    ThreadPermissionRules rules;
-    std::string path = permissionRulesPathFor(basePath_, threadId);
+ThreadPermissionRules ThreadManager::readPermissionRules(
+    const std::string& threadId) const {
+    auto conn = acquireConnection(basePath_);
+    auto json = readThreadStateField(conn->db, threadId, "permission_rules_json");
 
-    if (!std::filesystem::exists(path)) {
+    ThreadPermissionRules rules;
+    if (!json.has_value()) {
         return rules;
     }
 
-    std::ifstream file(path);
-    if (!file.is_open()) {
-        throw std::runtime_error("Cannot open permission rules: " + path);
-    }
-
-    std::stringstream buffer;
-    buffer << file.rdbuf();
-
-    rapidjson::Document d;
-    d.Parse(buffer.str().c_str());
-    if (d.HasParseError()) {
-        throw std::runtime_error("Invalid JSON in permission rules: " + path);
-    }
-
+    auto d = parseJson(*json, "permission rules");
     if (!d.IsObject()) {
         return rules;
     }
 
-    if (d.HasMember("command_allow_rules") &&
-        d["command_allow_rules"].IsArray()) {
+    if (d.HasMember("command_allow_rules") && d["command_allow_rules"].IsArray()) {
         for (const auto& ruleValue : d["command_allow_rules"].GetArray()) {
             if (!ruleValue.IsObject()) {
                 continue;
@@ -1400,18 +1694,15 @@ ThreadPermissionRules ThreadManager::readPermissionRules(const std::string& thre
             }
             if (ruleValue.HasMember("severity") &&
                 ruleValue["severity"].IsString()) {
-                rule.severity =
-                    severityFromString(ruleValue["severity"].GetString());
+                rule.severity = severityFromString(ruleValue["severity"].GetString());
             }
-
             if (!rule.exactCommand.empty()) {
                 rules.commandAllowRules.push_back(std::move(rule));
             }
         }
     }
 
-    if (d.HasMember("write_allow_paths") &&
-        d["write_allow_paths"].IsArray()) {
+    if (d.HasMember("write_allow_paths") && d["write_allow_paths"].IsArray()) {
         for (const auto& pathValue : d["write_allow_paths"].GetArray()) {
             if (pathValue.IsString()) {
                 rules.writeAllowPaths.push_back(pathValue.GetString());
@@ -1424,9 +1715,7 @@ ThreadPermissionRules ThreadManager::readPermissionRules(const std::string& thre
 
 void ThreadManager::writePermissionRules(const std::string& threadId,
                                          const ThreadPermissionRules& rules) {
-    std::string dir = basePath_ + "/" + threadId;
-    std::filesystem::create_directories(dir);
-    std::string path = permissionRulesPathFor(basePath_, threadId);
+    auto conn = acquireConnection(basePath_);
 
     rapidjson::Document d;
     d.SetObject();
@@ -1437,12 +1726,10 @@ void ThreadManager::writePermissionRules(const std::string& threadId,
         rapidjson::Value entry(rapidjson::kObjectType);
         entry.AddMember("exact_command",
                         rapidjson::Value(rule.exactCommand.c_str(), a).Move(), a);
-        entry.AddMember(
-            "normalized_command",
-            rapidjson::Value(rule.normalizedCommand.c_str(), a).Move(), a);
-        entry.AddMember(
-            "primary_command",
-            rapidjson::Value(rule.primaryCommand.c_str(), a).Move(), a);
+        entry.AddMember("normalized_command",
+                        rapidjson::Value(rule.normalizedCommand.c_str(), a).Move(), a);
+        entry.AddMember("primary_command",
+                        rapidjson::Value(rule.primaryCommand.c_str(), a).Move(), a);
         entry.AddMember("severity",
                         rapidjson::Value(severityToString(rule.severity), a).Move(),
                         a);
@@ -1456,15 +1743,8 @@ void ThreadManager::writePermissionRules(const std::string& threadId,
     }
     d.AddMember("write_allow_paths", writePaths, a);
 
-    rapidjson::StringBuffer buffer;
-    rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
-    d.Accept(writer);
-
-    std::ofstream file(path);
-    if (!file.is_open()) {
-        throw std::runtime_error("Cannot write permission rules: " + path);
-    }
-    file << buffer.GetString();
+    writeThreadStateField(conn->db, threadId, "permission_rules_json",
+                          rapidJsonToString(d));
 }
 
 void ThreadManager::addCommandAllowRule(const std::string& threadId,
@@ -1485,25 +1765,23 @@ void ThreadManager::addCommandAllowRule(const std::string& threadId,
 void ThreadManager::addWriteAllowPath(const std::string& threadId,
                                       const std::string& pathPrefix) {
     auto rules = readPermissionRules(threadId);
-    auto exists = std::any_of(
-        rules.writeAllowPaths.begin(), rules.writeAllowPaths.end(),
-        [&pathPrefix](const std::string& existing) {
-            return existing == pathPrefix;
-        });
+    auto exists =
+        std::any_of(rules.writeAllowPaths.begin(), rules.writeAllowPaths.end(),
+                    [&pathPrefix](const std::string& existing) {
+                        return existing == pathPrefix;
+                    });
     if (!exists) {
         rules.writeAllowPaths.push_back(pathPrefix);
         writePermissionRules(threadId, rules);
     }
 }
 
-shared::ThreadArtifactMetadata
-ThreadManager::writeArtifact(const std::string& threadId,
-                             const std::string& ownerAgentId,
-                             const std::string& ownerFriendlyName,
-                             const std::string& filename,
-                             const std::string& content, bool* created,
-                             const std::optional<std::string>& kind,
-                             const std::optional<std::string>& description) {
+shared::ThreadArtifactMetadata ThreadManager::writeArtifact(
+    const std::string& threadId, const std::string& ownerAgentId,
+    const std::string& ownerFriendlyName, const std::string& filename,
+    const std::string& content, bool* created,
+    const std::optional<std::string>& kind,
+    const std::optional<std::string>& description) {
     if (threadId.empty()) {
         throw std::runtime_error("Cannot write artifact with empty threadId");
     }
@@ -1512,82 +1790,87 @@ ThreadManager::writeArtifact(const std::string& threadId,
     }
     validateArtifactFilename(filename);
 
-    std::string threadDir = basePath_ + "/" + threadId;
-    if (!std::filesystem::exists(threadDir)) {
-        throw std::runtime_error("Thread not found: " + threadId);
-    }
+    auto conn = acquireConnection(basePath_);
+    ensureThreadExists(conn->db, threadId);
 
-    auto artifactsMutex = acquireArtifactsMutex(threadId);
-    std::lock_guard<std::mutex> lock(*artifactsMutex);
-
-    const std::string storagePath =
-        artifactRelativeStoragePath(ownerAgentId, filename);
-    const std::string absoluteStoragePath =
-        artifactAbsoluteStoragePath(basePath_, threadId, ownerAgentId, filename);
-    const bool fileExists = std::filesystem::exists(absoluteStoragePath);
-    writeStringAtomically(content, absoluteStoragePath);
-
-    const std::string manifestPath = artifactsManifestPathFor(basePath_, threadId);
-    auto artifacts = readArtifactsManifestFile(manifestPath);
     const uint64_t timestamp = nowEpochMs();
+    const std::string storagePath = "artifacts/" + ownerAgentId + "/" + filename;
 
-    auto it = std::find_if(
-        artifacts.begin(), artifacts.end(),
-        [&](const shared::ThreadArtifactMetadata& item) {
-            return item.ownerAgentId == ownerAgentId && item.filename == filename;
-        });
+    Statement existingStmt(
+        conn->db,
+        "SELECT created_at FROM artifacts WHERE thread_id=? AND owner_agent_id=? AND filename=?;",
+        "Failed to prepare artifact existence query");
+    bindText(existingStmt.get(), 1, threadId);
+    bindText(existingStmt.get(), 2, ownerAgentId);
+    bindText(existingStmt.get(), 3, filename);
 
-    bool wasCreated = false;
-    if (it == artifacts.end()) {
-        shared::ThreadArtifactMetadata metadata;
-        metadata.threadId = threadId;
-        metadata.ownerAgentId = ownerAgentId;
-        metadata.ownerFriendlyName = ownerFriendlyName;
-        metadata.filename = filename;
-        metadata.storagePath = storagePath;
-        metadata.createdAt = timestamp;
-        metadata.updatedAt = timestamp;
-        metadata.kind = kind;
-        metadata.description = description;
-        artifacts.push_back(std::move(metadata));
-        it = std::prev(artifacts.end());
-        wasCreated = !fileExists;
-    } else {
-        it->threadId = threadId;
-        it->ownerAgentId = ownerAgentId;
-        it->ownerFriendlyName = ownerFriendlyName;
-        it->storagePath = storagePath;
-        if (it->createdAt == 0) {
-            it->createdAt = timestamp;
-        }
-        it->updatedAt = timestamp;
-        if (kind.has_value()) {
-            it->kind = kind;
-        }
-        if (description.has_value()) {
-            it->description = description;
-        }
+    uint64_t createdAt = timestamp;
+    bool wasCreated = true;
+    if (sqlite3_step(existingStmt.get()) == SQLITE_ROW) {
         wasCreated = false;
+        createdAt = static_cast<uint64_t>(sqlite3_column_int64(existingStmt.get(), 0));
     }
 
-    std::sort(artifacts.begin(), artifacts.end(),
-              [](const shared::ThreadArtifactMetadata& lhs,
-                 const shared::ThreadArtifactMetadata& rhs) {
-                  if (lhs.ownerAgentId == rhs.ownerAgentId) {
-                      return lhs.filename < rhs.filename;
-                  }
-                  return lhs.ownerAgentId < rhs.ownerAgentId;
-              });
-    writeArtifactsManifestFile(manifestPath, artifacts);
+    Statement upsert(
+        conn->db,
+        "INSERT INTO artifacts(thread_id, owner_agent_id, owner_friendly_name, filename, "
+        "storage_path, content, kind, description, created_at, updated_at) "
+        "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(thread_id, owner_agent_id, filename) DO UPDATE SET "
+        "owner_friendly_name=excluded.owner_friendly_name, "
+        "storage_path=excluded.storage_path, "
+        "content=excluded.content, "
+        "kind=COALESCE(excluded.kind, artifacts.kind), "
+        "description=COALESCE(excluded.description, artifacts.description), "
+        "updated_at=excluded.updated_at;",
+        "Failed to prepare artifact upsert");
+
+    bindText(upsert.get(), 1, threadId);
+    bindText(upsert.get(), 2, ownerAgentId);
+    bindText(upsert.get(), 3, ownerFriendlyName);
+    bindText(upsert.get(), 4, filename);
+    bindText(upsert.get(), 5, storagePath);
+    bindText(upsert.get(), 6, content);
+    bindOptionalText(upsert.get(), 7, kind);
+    bindOptionalText(upsert.get(), 8, description);
+    sqlite3_bind_int64(upsert.get(), 9, static_cast<sqlite3_int64>(createdAt));
+    sqlite3_bind_int64(upsert.get(), 10, static_cast<sqlite3_int64>(timestamp));
+
+    if (sqlite3_step(upsert.get()) != SQLITE_DONE) {
+        throwSqliteError(conn->db, "Failed to write artifact");
+    }
 
     if (created) {
         *created = wasCreated;
     }
-    return *std::find_if(
-        artifacts.begin(), artifacts.end(),
-        [&](const shared::ThreadArtifactMetadata& item) {
-            return item.ownerAgentId == ownerAgentId && item.filename == filename;
-        });
+
+    shared::ThreadArtifactMetadata metadata;
+    metadata.threadId = threadId;
+    metadata.ownerAgentId = ownerAgentId;
+    metadata.ownerFriendlyName = ownerFriendlyName;
+    metadata.filename = filename;
+    metadata.storagePath = storagePath;
+    metadata.createdAt = createdAt;
+    metadata.updatedAt = timestamp;
+    if (kind.has_value()) {
+        metadata.kind = kind;
+    }
+    if (description.has_value()) {
+        metadata.description = description;
+    }
+
+    if (!wasCreated) {
+        auto all = listArtifactsForAgent(threadId, ownerAgentId);
+        for (const auto& item : all) {
+            if (item.filename == filename) {
+                metadata.kind = item.kind;
+                metadata.description = item.description;
+                metadata.createdAt = item.createdAt;
+            }
+        }
+    }
+
+    return metadata;
 }
 
 std::string ThreadManager::readArtifact(const std::string& threadId,
@@ -1598,24 +1881,20 @@ std::string ThreadManager::readArtifact(const std::string& threadId,
     }
     validateArtifactFilename(filename);
 
-    auto artifacts = listArtifacts(threadId);
-    auto it = std::find_if(
-        artifacts.begin(), artifacts.end(),
-        [&](const shared::ThreadArtifactMetadata& item) {
-            return item.ownerAgentId == ownerAgentId && item.filename == filename;
-        });
-    if (it == artifacts.end()) {
+    auto conn = acquireConnection(basePath_);
+    Statement stmt(conn->db,
+                   "SELECT content FROM artifacts WHERE thread_id=? AND owner_agent_id=? AND filename=?;",
+                   "Failed to prepare artifact read");
+    bindText(stmt.get(), 1, threadId);
+    bindText(stmt.get(), 2, ownerAgentId);
+    bindText(stmt.get(), 3, filename);
+    if (sqlite3_step(stmt.get()) != SQLITE_ROW) {
         throw std::runtime_error("Artifact not found: " + ownerAgentId + "/" +
                                  filename);
     }
 
-    std::ifstream file(basePath_ + "/" + threadId + "/" + it->storagePath);
-    if (!file.is_open()) {
-        throw std::runtime_error("Cannot read artifact file: " + it->storagePath);
-    }
-    std::stringstream buffer;
-    buffer << file.rdbuf();
-    return buffer.str();
+    const auto* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 0));
+    return text ? text : "";
 }
 
 std::vector<shared::ThreadArtifactMetadata>
@@ -1623,16 +1902,40 @@ ThreadManager::listArtifacts(const std::string& threadId) const {
     if (threadId.empty()) {
         return {};
     }
-    auto artifacts = readArtifactsManifestFile(
-        artifactsManifestPathFor(basePath_, threadId));
-    std::sort(artifacts.begin(), artifacts.end(),
-              [](const shared::ThreadArtifactMetadata& lhs,
-                 const shared::ThreadArtifactMetadata& rhs) {
-                  if (lhs.ownerFriendlyName == rhs.ownerFriendlyName) {
-                      return lhs.filename < rhs.filename;
-                  }
-                  return lhs.ownerFriendlyName < rhs.ownerFriendlyName;
-              });
+
+    auto conn = acquireConnection(basePath_);
+    Statement stmt(
+        conn->db,
+        "SELECT owner_agent_id, owner_friendly_name, filename, storage_path, kind, description, created_at, updated_at "
+        "FROM artifacts WHERE thread_id=? ORDER BY owner_friendly_name ASC, filename ASC;",
+        "Failed to prepare artifact list");
+    bindText(stmt.get(), 1, threadId);
+
+    std::vector<shared::ThreadArtifactMetadata> artifacts;
+    while (sqlite3_step(stmt.get()) == SQLITE_ROW) {
+        shared::ThreadArtifactMetadata m;
+        m.threadId = threadId;
+        const auto* ownerAgent = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 0));
+        const auto* ownerFriendly = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 1));
+        const auto* filename = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 2));
+        const auto* storagePath = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 3));
+        const auto* kind = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 4));
+        const auto* description = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 5));
+
+        m.ownerAgentId = ownerAgent ? ownerAgent : "";
+        m.ownerFriendlyName = ownerFriendly ? ownerFriendly : "";
+        m.filename = filename ? filename : "";
+        m.storagePath = storagePath ? storagePath : "";
+        if (kind) {
+            m.kind = std::string(kind);
+        }
+        if (description) {
+            m.description = std::string(description);
+        }
+        m.createdAt = static_cast<uint64_t>(sqlite3_column_int64(stmt.get(), 6));
+        m.updatedAt = static_cast<uint64_t>(sqlite3_column_int64(stmt.get(), 7));
+        artifacts.push_back(std::move(m));
+    }
     return artifacts;
 }
 
@@ -1642,6 +1945,7 @@ ThreadManager::listArtifactsForAgent(const std::string& threadId,
     if (ownerAgentId.empty()) {
         return {};
     }
+
     auto all = listArtifacts(threadId);
     std::vector<shared::ThreadArtifactMetadata> filtered;
     for (const auto& artifact : all) {
@@ -1686,4 +1990,4 @@ ThreadManager::findFriendlyNameByAgentId(const std::string& threadId,
     return it->second.friendlyName;
 }
 
-}
+} // namespace firmius::core

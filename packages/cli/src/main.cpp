@@ -1,32 +1,31 @@
+#include "CliOptions.hpp"
 #include "TuiRunner.hpp"
 #include "WebRunner.hpp"
+#include <exception>
+#include <iostream>
 #include <string>
 
 int main(int argc, char **argv) {
-  bool continue_last = false;
-  bool debugging_mode = false;
-  bool web = false;
-  std::string web_hostname = "127.0.0.1";
-  int web_port = 9173;
-
-  for (int i = 1; i < argc; ++i) {
-    std::string arg = argv[i];
-
-    if (arg == "web" && i == 1) {
-      web = true;
-    } else if (arg == "-c" && !web) {
-      continue_last = true;
-    } else if (arg == "--i-am-debugging" && !web) {
-      debugging_mode = true;
-    } else if ((arg == "--host" || arg == "-h") && web) {
-      web_hostname = argv[i + 1];
-    }
+  firmius::cli::CliOptions cliOptions;
+  try {
+    cliOptions = firmius::cli::parseCliOptions(argc, argv);
+  } catch (const std::exception &e) {
+    std::cerr << e.what() << std::endl;
+    return 1;
   }
 
-  if (!web)
-    firmius::tui::runTui(debugging_mode, continue_last);
-  else
-    firmius::web::runWeb(web_hostname, web_port);
+  if (!cliOptions.web) {
+    firmius::tui::TuiLaunchOptions options;
+    options.debuggingMode = cliOptions.debuggingMode;
+    options.continueLast = cliOptions.continueLast;
+    options.initialPrompt = cliOptions.initialPrompt;
+    options.initialCwd = cliOptions.initialCwd;
+    options.quitWhenIdle = cliOptions.quitWhenIdle;
+    options.permissionMode = cliOptions.permissionMode;
+    firmius::tui::runTui(options);
+  } else {
+    firmius::web::runWeb(cliOptions.webHostname, cliOptions.webPort);
+  }
 
   return 0;
 }

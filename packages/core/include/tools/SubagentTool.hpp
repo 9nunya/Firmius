@@ -11,6 +11,7 @@ struct SubagentInput {
     std::string persona;
     std::string task;
     bool async = false;
+    bool dream = false;
     std::optional<std::string> agent_id;
     std::optional<std::string> plan_id;
     std::optional<std::string> chunk_id;
@@ -29,6 +30,9 @@ public:
         MAP_STRING(persona, "persona")
         MAP_STRING(task, "task")
         MAP_BOOL(async, "async")
+        if (json.HasMember("dream") && json["dream"].IsBool()) {
+            input.dream = json["dream"].GetBool();
+        }
         if (json.HasMember("agent_id") && json["agent_id"].IsString()) {
             input.agent_id = json["agent_id"].GetString();
         }

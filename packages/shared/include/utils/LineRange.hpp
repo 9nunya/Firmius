@@ -41,7 +41,8 @@ public:
     /**
      * @brief Resolves an anchor in a file buffer.
      * @param lines The lines of the file.
-     * @param anchorText The line number anchor (may contain trailing garbage).
+     * @param anchorText The line number anchor. Must be a plain decimal line
+     *        number, without hashline prefixes or trailing |content.
      * @return The resolved line index and status.
      */
     static AnchorResult resolveAnchor(const std::vector<std::string>& lines,
@@ -88,6 +89,8 @@ public:
      */
     struct SanitationResult {
         int lineRangePrefixesStripped = 0;
+        int hashlinePrefixesStripped = 0;
+        int malformedHashFragmentsStripped = 0;
         int diffMarkersStripped = 0;
         int boundaryEchoesRemoved = 0;
         bool boundaryEchoRemoved = false;

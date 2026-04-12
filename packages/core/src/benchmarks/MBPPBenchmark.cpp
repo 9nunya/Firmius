@@ -1,4 +1,5 @@
 #include "benchmarks/MBPPBenchmark.hpp"
+#include "agents/ContextBudget.hpp"
 #include <curl/curl.h>
 #include <fstream>
 #include <iostream>
@@ -127,6 +128,9 @@ BenchmarkResult MBPPBenchmark::runTask(const std::string& taskId) {
 
     session.emitLog("MBPP: finished evaluation for task " + taskId + " with result " +
                     std::string(result.passed ? "PASS" : "FAIL") + ".");
+    result.metrics = session.getAgent().getContext().aggregateMetrics;
+    result.output += "\nMetrics: " +
+                     summarizeContextWindowMetrics(result.metrics.context, 4);
 
     return result;
 }

@@ -62,4 +62,31 @@ bool FSUtil::isSubpath(const std::string &path,
   return false;
 }
 
+bool FSUtil::isCanonicalSubpath(const std::filesystem::path &candidate,
+                               const std::filesystem::path &root) {
+  try {
+    if (!std::filesystem::exists(root)) {
+      return false;
+    }
+    const auto canonicalRoot = std::filesystem::canonical(root);
+    const auto canonicalCandidate = std::filesystem::weakly_canonical(candidate);
+
+    auto rootIt = canonicalRoot.begin();
+    auto rootEnd = canonicalRoot.end();
+    auto candIt = canonicalCandidate.begin();
+    auto candEnd = canonicalCandidate.end();
+
+    while (rootIt != rootEnd && candIt != candEnd) {
+      if (*rootIt != *candIt) {
+        return false;
+      }
+      ++rootIt;
+      ++candIt;
+    }
+
+    return rootIt == rootEnd;
+  } catch (...) {
+    return false;
+  }
+}
 } // namespace firmius::shared

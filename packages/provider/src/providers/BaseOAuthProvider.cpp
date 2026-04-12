@@ -18,6 +18,12 @@ namespace {
 constexpr auto kBackgroundQuotaRefreshInterval = std::chrono::minutes(5);
 std::mutex g_oauth_json_mutex;
 
+std::filesystem::path makeOAuthTempPath(const std::filesystem::path &path) {
+  const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+  return path.string() + ".tmp." + std::to_string(::getpid()) + "." +
+         std::to_string(nonce);
+}
+
 std::string getOAuthJsonPath() {
   const char *homedir;
   if ((homedir = getenv("HOME")) == NULL) {
@@ -90,6 +96,11 @@ firmius::provider::ProviderType BaseOAuthProvider::getProviderType() const {
 bool BaseOAuthProvider::isConfigured() const {
   std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
   return !accounts_.empty();
+}
+
+std::vector<OAuthAccount> BaseOAuthProvider::getAccounts() const {
+  std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
+  return accounts_;
 }
 
 bool BaseOAuthProvider::isTokenExpired(const OAuthAccount &acc) const {
@@ -273,12 +284,12 @@ void BaseOAuthProvider::loadAccounts() {
 void BaseOAuthProvider::saveAccounts() {
   std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
   std::lock_guard<std::mutex> file_lock(g_oauth_json_mutex);
-  std::string path = getOAuthJsonPath();
+  const std::filesystem::path finalPath = getOAuthJsonPath();
   rapidjson::Document doc;
 
   // Load existing file to not overwrite other providers
-  if (std::filesystem::exists(std::filesystem::path(path))) {
-    std::ifstream ifs(path);
+  if (std::filesystem::exists(finalPath)) {
+    std::ifstream ifs(finalPath);
     if (ifs.is_open()) {
       std::string content((std::istreambuf_iterator<char>(ifs)),
                           std::istreambuf_iterator<char>());
@@ -342,12 +353,38 @@ void BaseOAuthProvider::saveAccounts() {
   rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
   doc.Accept(writer);
 
-  const std::string temp_path = path + ".tmp";
-  std::ofstream ofs(temp_path);
-  if (ofs.is_open()) {
+  const auto parent = finalPath.parent_path();
+  std::error_code ec;
+  if (!parent.empty()) {
+    std::filesystem::create_directories(parent, ec);
+    if (ec) {
+      throw std::runtime_error("Cannot prepare OAuth state directory: " +
+                               parent.string() + " (" + ec.message() + ")");
+    }
+  }
+
+  const std::filesystem::path tempPath = makeOAuthTempPath(finalPath);
+  {
+    std::ofstream ofs(tempPath, std::ios::binary | std::ios::trunc);
+    if (!ofs.is_open()) {
+      throw std::runtime_error("Cannot open temporary OAuth state file: " +
+                               tempPath.string());
+    }
     ofs << buffer.GetString();
-    ofs.close();
-    std::filesystem::rename(temp_path, path);
+    ofs.flush();
+    if (!ofs) {
+      std::filesystem::remove(tempPath, ec);
+      throw std::runtime_error("Cannot write temporary OAuth state file: " +
+                               tempPath.string());
+    }
+  }
+
+  std::filesystem::rename(tempPath, finalPath, ec);
+  if (ec) {
+    std::error_code cleanupEc;
+    std::filesystem::remove(tempPath, cleanupEc);
+    throw std::runtime_error("Cannot replace OAuth state file: " +
+                             finalPath.string() + " (" + ec.message() + ")");
   }
 }
 

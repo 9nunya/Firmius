@@ -37,6 +37,7 @@ Evaluate the draft against these questions:
 1. **Discovery Grounding**
 - Is the plan rooted in a coherent system model?
 - Are the proposed edit points plausible and specific?
+- Is this an execution plan, or is it really a plan to continue discovery/diagnosis that should have stayed in lead todo/scout mode?
 
 2. **Chunk Specificity**
 - Are chunk goals explicit?
@@ -92,6 +93,7 @@ If you return `accept-with-fixes` or `reject`, explicitly tell the lead whether 
 
 Do NOT:
 - say "looks good overall" without checking execution topology
+- accept a plan whose chunks are mostly discovery/diagnosis placeholders instead of executable delegated work
 - accept a large plan with no task-bearing chunks where worker delegation is clearly needed
 - accept vague verification conditions
 - confuse yourself with `auditor`

@@ -15,6 +15,10 @@ using firmius::shared::Role;
 using firmius::shared::TextContent;
 using firmius::shared::ToolCallContent;
 using firmius::shared::ToolResultContent;
+using firmius::shared::NoticeContent;
+using firmius::shared::NoticeSeverity;
+using firmius::shared::RollingNoticeMetadata;
+
 using firmius::shared::ToolCallView;
 using firmius::shared::ToolPhase;
 using firmius::tui::TimelineEntry;
@@ -111,6 +115,17 @@ TEST(ChatWindowHelpersTest,
   EXPECT_EQ(ids.size(), 2u);
   EXPECT_TRUE(ids.count("call-summon") > 0);
   EXPECT_TRUE(ids.count("call-wait") > 0);
+}
+
+TEST(ChatWindowHelpersTest, HiddenChatErrorNotificationOnlyFiresForFocusedAgent) {
+  EXPECT_TRUE(firmius::tui::detail::shouldNotifyHiddenChatError(
+      "agent-1", "agent-1", true));
+  EXPECT_FALSE(firmius::tui::detail::shouldNotifyHiddenChatError(
+      "agent-1", "agent-2", true));
+  EXPECT_FALSE(firmius::tui::detail::shouldNotifyHiddenChatError(
+      "agent-1", "agent-1", false));
+  EXPECT_FALSE(firmius::tui::detail::shouldNotifyHiddenChatError(
+      "", "agent-1", true));
 }
 
 TEST(ChatWindowHelpersTest, KeepsPersistedCompactionTurnsRenderable) {
@@ -514,6 +529,76 @@ TEST(ChatWindowHelpersTest, RebuildsHistoryWhenExistingTurnGainsContent) {
   EXPECT_NE(updated.find("Second transcript line"), std::string::npos);
 }
 
+TEST(ChatWindowHelpersTest, RebuildsHistoryWhenNoticeMetadataChanges) {
+  AgentHistory history;
+  AgentTurn turn;
+  turn.turnId = "turn-1";
+
+  Message system_notice;
+  system_notice.role = Role::System;
+  NoticeContent notice;
+  notice.title = "Rolling Context";
+  notice.message = "Context compacted.";
+  RollingNoticeMetadata rolling_meta{};
+  rolling_meta.eventKind = "compaction";
+  rolling_meta.lifecycle = "complete";
+  rolling_meta.savedTokens = 1000;
+  notice.rollingMetadata = rolling_meta;
+  system_notice.content = {notice};
+  turn.messages.push_back(std::move(system_notice));
+  history.turns.push_back(std::move(turn));
+
+  auto chat = firmius::tui::ChatWindow(
+      [&history]() -> const AgentHistory * { return &history; }, nullptr,
+      [](const std::string &) -> std::shared_ptr<ToolCallView> {
+        return nullptr;
+      });
+
+  const std::string initial = renderComponentToString(chat, 90, 10);
+  EXPECT_NE(initial.find("Context compacted."), std::string::npos);
+  EXPECT_NE(initial.find("Saved tokens:"), std::string::npos);
+  EXPECT_NE(initial.find("1000"), std::string::npos);
+
+  // Metadata-only change should alter history revision and force rebuild.
+  auto &notice_ref =
+      std::get<NoticeContent>(history.turns[0].messages[0].content[0]);
+  notice_ref.rollingMetadata->savedTokens = 2000;
+
+  const std::string updated = renderComponentToString(chat, 90, 10);
+  EXPECT_NE(updated.find("Context compacted."), std::string::npos);
+  EXPECT_NE(updated.find("Saved tokens:"), std::string::npos);
+  EXPECT_NE(updated.find("2000"), std::string::npos);
+  EXPECT_EQ(updated.find("1000"), std::string::npos);
+}
+
+
+TEST(ChatWindowHelpersTest, RendersFullOversizedTranscriptBodiesWithoutClampBanner) {
+  AgentHistory history;
+  AgentTurn turn;
+  turn.turnId = "turn-1";
+
+  std::string huge = "Large transcript heading\n";
+  for (int i = 0; i < 6000; ++i) {
+    huge += "body line " + std::to_string(i) + "\n";
+  }
+
+  Message assistant;
+  assistant.role = Role::Assistant;
+  assistant.content = {TextContent{huge}};
+  turn.messages.push_back(std::move(assistant));
+  history.turns.push_back(std::move(turn));
+
+  auto chat = firmius::tui::ChatWindow(
+      [&history]() -> const AgentHistory * { return &history; }, nullptr,
+      [](const std::string &) -> std::shared_ptr<ToolCallView> {
+        return nullptr;
+      });
+
+  const std::string output = renderComponentToString(chat, 100, 24);
+  EXPECT_FALSE(output.empty());
+  EXPECT_EQ(output.find("UI preview truncated"), std::string::npos);
+}
+
 TEST(ChatWindowHelpersTest,
      HistorySummonSubagentUsesNormalizedStateFactsViaGetter) {
   AgentHistory history;
@@ -631,10 +716,161 @@ TEST(ChatWindowHelpersTest,
       [](const std::string &) -> std::shared_ptr<ToolCallView> { return nullptr; });
 
   const std::string output = renderComponentToString(chat, 140, 24);
-  EXPECT_NE(output.find("Read"), std::string::npos);
+  EXPECT_NE(output.find("read"), std::string::npos);
   EXPECT_NE(output.find("src/main.cpp:1-3"), std::string::npos);
-  EXPECT_NE(output.find("Listed"), std::string::npos);
+  EXPECT_NE(output.find("listed"), std::string::npos);
   EXPECT_NE(output.find("src"), std::string::npos);
+}
+
+TEST(ChatWindowHelpersTest, ObservationNoticesCollapseToLatestLifecycleForRange) {
+  AgentHistory history;
+  AgentTurn turn;
+  turn.turnId = "turn-1";
+
+  Message system_notice;
+  system_notice.role = Role::System;
+
+  NoticeContent start_notice;
+  RollingNoticeMetadata start_meta{};
+  start_meta.eventKind = "Observation";
+  start_meta.lifecycle = "start";
+  start_meta.sourceStartTurnId = "A";
+  start_meta.sourceEndTurnId = "B";
+  start_meta.sourceTokens = 111;
+  start_notice.rollingMetadata = start_meta;
+
+  NoticeContent complete_notice;
+  RollingNoticeMetadata complete_meta{};
+  complete_meta.eventKind = "observation";
+  complete_meta.lifecycle = "COMPLETE";
+  complete_meta.sourceStartTurnId = "A";
+  complete_meta.sourceEndTurnId = "B";
+  complete_meta.summaryTokens = 222;
+  complete_notice.rollingMetadata = complete_meta;
+
+  NoticeContent activate_notice;
+  RollingNoticeMetadata activate_meta{};
+  activate_meta.eventKind = "observation";
+  activate_meta.lifecycle = "activate";
+  activate_meta.sourceStartTurnId = "A";
+  activate_meta.sourceEndTurnId = "B";
+  activate_notice.rollingMetadata = activate_meta;
+
+  system_notice.content = {start_notice, complete_notice, activate_notice};
+  turn.messages.push_back(std::move(system_notice));
+  history.turns.push_back(std::move(turn));
+
+  auto chat = firmius::tui::ChatWindow(
+      [&history]() -> const AgentHistory * { return &history; }, nullptr,
+      [](const std::string &) -> std::shared_ptr<ToolCallView> { return nullptr; });
+
+  const std::string output = renderComponentToString(chat, 120, 12);
+  EXPECT_EQ(output.find("Observing turns A .. B..."), std::string::npos);
+  EXPECT_EQ(output.find("Observed turns A .. B."), std::string::npos);
+  EXPECT_NE(output.find("Activated observation for turns A .. B."),
+            std::string::npos);
+}
+
+TEST(ChatWindowHelpersTest, ObservationNoticesKeepLatestAtSameLifecycleRank) {
+  AgentHistory history;
+  AgentTurn turn;
+  turn.turnId = "turn-1";
+
+  Message system_notice;
+  system_notice.role = Role::System;
+
+  NoticeContent complete_old;
+  RollingNoticeMetadata complete_old_meta{};
+  complete_old_meta.eventKind = "observation";
+  complete_old_meta.lifecycle = "complete";
+  complete_old_meta.sourceStartTurnId = "C";
+  complete_old_meta.sourceEndTurnId = "D";
+  complete_old_meta.summaryTokens = 10;
+  complete_old.rollingMetadata = complete_old_meta;
+
+  NoticeContent complete_new;
+  RollingNoticeMetadata complete_new_meta{};
+  complete_new_meta.eventKind = "observation";
+  complete_new_meta.lifecycle = "completed";
+  complete_new_meta.sourceStartTurnId = "C";
+  complete_new_meta.sourceEndTurnId = "D";
+  complete_new_meta.summaryTokens = 20;
+  complete_new.rollingMetadata = complete_new_meta;
+
+  system_notice.content = {complete_old, complete_new};
+  turn.messages.push_back(std::move(system_notice));
+  history.turns.push_back(std::move(turn));
+
+  auto chat = firmius::tui::ChatWindow(
+      [&history]() -> const AgentHistory * { return &history; }, nullptr,
+      [](const std::string &) -> std::shared_ptr<ToolCallView> { return nullptr; });
+
+  const std::string output = renderComponentToString(chat, 120, 12);
+  EXPECT_NE(output.find("Observed turns C .. D."), std::string::npos);
+  EXPECT_EQ(output.find("↓10 out"), std::string::npos);
+  EXPECT_NE(output.find("↓20 out"), std::string::npos);
+}
+
+TEST(ChatWindowHelpersTest, ObservationCollapseDoesNotAffectNonObservationNotices) {
+  AgentHistory history;
+  AgentTurn turn;
+  turn.turnId = "turn-1";
+
+  Message system_notice;
+  system_notice.role = Role::System;
+
+  NoticeContent observation_notice;
+  RollingNoticeMetadata observation_meta{};
+  observation_meta.eventKind = "observation";
+  observation_meta.lifecycle = "start";
+  observation_meta.sourceStartTurnId = "E";
+  observation_meta.sourceEndTurnId = "F";
+  observation_notice.rollingMetadata = observation_meta;
+
+  NoticeContent generic_notice;
+  generic_notice.title = "Rolling Context";
+  generic_notice.message = "Context compacted.";
+  generic_notice.details = "Execution stopped before completion.";
+  generic_notice.severity = NoticeSeverity::Warning;
+
+  system_notice.content = {observation_notice, generic_notice};
+  turn.messages.push_back(std::move(system_notice));
+  history.turns.push_back(std::move(turn));
+
+  auto chat = firmius::tui::ChatWindow(
+      [&history]() -> const AgentHistory * { return &history; }, nullptr,
+      [](const std::string &) -> std::shared_ptr<ToolCallView> { return nullptr; });
+
+  const std::string output = renderComponentToString(chat, 120, 14);
+  EXPECT_NE(output.find("Observing turns E .. F..."), std::string::npos);
+  EXPECT_NE(output.find("Rolling Context"), std::string::npos);
+}
+
+TEST(ChatWindowHelpersTest, TurnFooterUsesCompactDoneSummary) {
+  AgentHistory history;
+  AgentTurn turn;
+  turn.turnId = "turn-1";
+  turn.metrics.timing.startMs = 1000;
+  turn.metrics.timing.endMs = 6500;
+  turn.metrics.context.sentTokens = 2400;
+  turn.metrics.context.billedPromptTokens = 3000;
+  turn.metrics.tokens.completion = 180;
+
+  Message assistant;
+  assistant.role = Role::Assistant;
+  assistant.content = {TextContent{"Finished."}};
+  turn.messages.push_back(std::move(assistant));
+  history.turns.push_back(std::move(turn));
+
+  auto chat = firmius::tui::ChatWindow(
+      [&history]() -> const AgentHistory * { return &history; }, nullptr,
+      [](const std::string &) -> std::shared_ptr<ToolCallView> { return nullptr; });
+
+  const std::string output = renderComponentToString(chat, 100, 12);
+  EXPECT_NE(output.find("done"), std::string::npos);
+  EXPECT_NE(output.find("5s"), std::string::npos);
+  EXPECT_NE(output.find("↑2.4k/3k"), std::string::npos);
+  EXPECT_NE(output.find("↓180"), std::string::npos);
 }
 
 } // namespace

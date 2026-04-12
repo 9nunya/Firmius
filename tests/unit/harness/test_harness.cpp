@@ -22,6 +22,7 @@
 #include <fcntl.h>
 #include <sys/file.h>
 #include <unistd.h>
+#include <sqlite3.h>
 
 using namespace firmius::core;
 using namespace firmius::shared;
@@ -48,6 +49,19 @@ void releaseThreadLockFd(int fd) {
     }
     flock(fd, LOCK_UN);
     close(fd);
+}
+
+void execSqlAt(const std::filesystem::path& dbPath, const std::string& sql) {
+    sqlite3* db = nullptr;
+    ASSERT_EQ(sqlite3_open_v2(dbPath.c_str(), &db, SQLITE_OPEN_READWRITE, nullptr),
+              SQLITE_OK);
+    char* err = nullptr;
+    ASSERT_EQ(sqlite3_exec(db, sql.c_str(), nullptr, nullptr, &err), SQLITE_OK)
+        << (err ? err : "");
+    if (err) {
+        sqlite3_free(err);
+    }
+    sqlite3_close(db);
 }
 
 template <typename Fn>
@@ -175,6 +189,120 @@ public:
     firmius::provider::ProviderType getProviderType() const override {
         return firmius::provider::ProviderType::APIKey;
     }
+};
+
+class RecoveringProviderDeclaredTruncatedToolCallProvider
+    : public firmius::provider::IProvider {
+public:
+    std::string getId() const override {
+        return "recovering-provider-declared-truncated-tool-provider";
+    }
+
+    void stream(const AgentHistory&, const firmius::provider::ProviderOptions&,
+                std::function<void(const StreamEvent&)> onEvent) override {
+        if (callCount_++ == 0) {
+            onEvent(ToolCallChunk{"call-retry-1", 0, "file_read",
+                                  R"({"path":"/tmp/ASCII.txt")"});
+            onEvent(StreamError{
+                "Qwen stream ended with incomplete tool-call arguments for tool "
+                "'file_read'. Provider stream truncated during tool-call generation.",
+                0, "qwen-test-account"});
+            return;
+        }
+        if (callCount_ == 2) {
+            onEvent(ToolCall{"call-retry-2", 0, "file_read",
+                             R"({"path":"/tmp/ASCII.txt"})"});
+            onEvent(StreamDone{StopReason::ToolUse});
+            return;
+        }
+
+        onEvent(TextChunk{"Recovered after provider-declared truncation."});
+        onEvent(StreamDone{StopReason::Stop});
+    }
+
+    std::vector<ModelInfo> listModels() override {
+        ModelInfo model;
+        model.id = "recovering-provider-declared-truncated-tool-model";
+        model.provider = getId();
+        model.contextWindow = 4096;
+        return {model};
+    }
+
+    ModelInfo getModelInfo(const std::string&) override {
+        return listModels().front();
+    }
+
+    void generateSummary(const std::string&, const AgentHistory&,
+                         const std::string&,
+                         std::function<void(const StreamEvent&)> onEvent,
+                         std::atomic<bool>* = nullptr) override {
+        onEvent(TextChunk{"summary"});
+        onEvent(StreamDone{StopReason::Stop});
+    }
+
+    firmius::provider::ProviderType getProviderType() const override {
+        return firmius::provider::ProviderType::APIKey;
+    }
+
+private:
+    mutable int callCount_ = 0;
+};
+
+class RecoveringMixedTruncatedToolCallProvider
+    : public firmius::provider::IProvider {
+public:
+    std::string getId() const override {
+        return "recovering-mixed-truncated-tool-provider";
+    }
+
+    void stream(const AgentHistory&, const firmius::provider::ProviderOptions&,
+                std::function<void(const StreamEvent&)> onEvent) override {
+        if (callCount_++ == 0) {
+            onEvent(TextChunk{"Preparing parallel work."});
+            onEvent(ToolCall{"call-finished", 1, "plan_list",
+                             R"({"status":"active"})"});
+            onEvent(ToolCallChunk{"call-unfinished", 0, "file_read",
+                                  R"({"path":"/tmp/ASCII.txt")"});
+            onEvent(StreamDone{StopReason::ToolUse});
+            return;
+        }
+        if (callCount_ == 2) {
+            onEvent(ToolCall{"call-final", 0, "file_read",
+                             R"({"path":"/tmp/ASCII.txt"})"});
+            onEvent(StreamDone{StopReason::ToolUse});
+            return;
+        }
+
+        onEvent(TextChunk{"Recovered after mixed truncated tool batch."});
+        onEvent(StreamDone{StopReason::Stop});
+    }
+
+    std::vector<ModelInfo> listModels() override {
+        ModelInfo model;
+        model.id = "recovering-mixed-truncated-tool-model";
+        model.provider = getId();
+        model.contextWindow = 4096;
+        return {model};
+    }
+
+    ModelInfo getModelInfo(const std::string&) override {
+        return listModels().front();
+    }
+
+    void generateSummary(const std::string&, const AgentHistory&,
+                         const std::string&,
+                         std::function<void(const StreamEvent&)> onEvent,
+                         std::atomic<bool>* = nullptr) override {
+        onEvent(TextChunk{"summary"});
+        onEvent(StreamDone{StopReason::Stop});
+    }
+
+    firmius::provider::ProviderType getProviderType() const override {
+        return firmius::provider::ProviderType::APIKey;
+    }
+
+private:
+    mutable int callCount_ = 0;
 };
 
 class MixedTextToolCallProvider : public firmius::provider::IProvider {
@@ -1381,6 +1509,159 @@ private:
     bool releaseFirstCall_{false};
 };
 
+class ToolDefinitionsProbeProvider : public firmius::provider::IProvider {
+public:
+    struct ObservedCall {
+        std::vector<std::string> toolNames;
+    };
+
+    ToolDefinitionsProbeProvider(std::string providerId, std::string modelId)
+        : providerId_(std::move(providerId)), modelId_(std::move(modelId)) {}
+
+    std::string getId() const override { return providerId_; }
+
+    void stream(const AgentHistory&, const firmius::provider::ProviderOptions& opts,
+                std::function<void(const StreamEvent&)> onEvent) override {
+        std::vector<std::string> names;
+        names.reserve(opts.tools.size());
+        for (const auto& def : opts.tools) {
+            names.push_back(def.name);
+        }
+        {
+            std::lock_guard<std::mutex> lock(callsMutex_);
+            calls_.push_back(ObservedCall{std::move(names)});
+        }
+        onEvent(TextChunk{"captured tools"});
+        onEvent(StreamDone{StopReason::Stop});
+    }
+
+    std::vector<ModelInfo> listModels() override {
+        ModelInfo model;
+        model.id = modelId_;
+        model.provider = providerId_;
+        model.contextWindow = 4096;
+        return {model};
+    }
+
+    ModelInfo getModelInfo(const std::string&) override { return listModels().front(); }
+
+    void generateSummary(const std::string&, const AgentHistory&,
+                         const std::string&,
+                         std::function<void(const StreamEvent&)> onEvent,
+                         std::atomic<bool>* = nullptr) override {
+        onEvent(TextChunk{"summary"});
+        onEvent(StreamDone{StopReason::Stop});
+    }
+
+    firmius::provider::ProviderType getProviderType() const override {
+        return firmius::provider::ProviderType::APIKey;
+    }
+
+    std::vector<ObservedCall> observedCalls() const {
+        std::lock_guard<std::mutex> lock(callsMutex_);
+        return calls_;
+    }
+
+    int callCount() const {
+        std::lock_guard<std::mutex> lock(callsMutex_);
+        return static_cast<int>(calls_.size());
+    }
+
+private:
+    std::string providerId_;
+    std::string modelId_;
+    mutable std::mutex callsMutex_;
+    std::vector<ObservedCall> calls_;
+};
+
+class DynamicMcpUnknownToolProvider : public firmius::provider::IProvider {
+public:
+    std::string getId() const override { return "dynamic-mcp-unknown-tool-provider"; }
+
+    void stream(const AgentHistory&, const firmius::provider::ProviderOptions&,
+                std::function<void(const StreamEvent&)> onEvent) override {
+        if (callCount_.fetch_add(1) == 0) {
+            onEvent(ToolCallChunk{"dyn-mcp-1", 0, "mcp__ghostserver__missingtool",
+                                  R"({})"});
+            onEvent(StreamDone{StopReason::ToolUse});
+            return;
+        }
+        onEvent(TextChunk{"done"});
+        onEvent(StreamDone{StopReason::Stop});
+    }
+
+    std::vector<ModelInfo> listModels() override {
+        ModelInfo model;
+        model.id = "dynamic-mcp-unknown-tool-model";
+        model.provider = getId();
+        model.contextWindow = 4096;
+        return {model};
+    }
+
+    ModelInfo getModelInfo(const std::string&) override { return listModels().front(); }
+
+    void generateSummary(const std::string&, const AgentHistory&,
+                         const std::string&,
+                         std::function<void(const StreamEvent&)> onEvent,
+                         std::atomic<bool>* = nullptr) override {
+        onEvent(TextChunk{"summary"});
+        onEvent(StreamDone{StopReason::Stop});
+    }
+
+    firmius::provider::ProviderType getProviderType() const override {
+        return firmius::provider::ProviderType::APIKey;
+    }
+
+    int callCount() const { return callCount_.load(); }
+
+private:
+    std::atomic<int> callCount_{0};
+};
+
+class DynamicMcpSuccessProvider : public firmius::provider::IProvider {
+public:
+    std::string getId() const override { return "dynamic-mcp-success-provider"; }
+
+    void stream(const AgentHistory&, const firmius::provider::ProviderOptions&,
+                std::function<void(const StreamEvent&)> onEvent) override {
+        if (callCount_.fetch_add(1) == 0) {
+            onEvent(ToolCall{"dyn-mcp-success-1", 0, "mcp__server1__tool1",
+                            R"({"message":"hello"})"});
+            onEvent(StreamDone{StopReason::ToolUse});
+            return;
+        }
+        onEvent(TextChunk{"dynamic mcp success"});
+        onEvent(StreamDone{StopReason::Stop});
+    }
+
+    std::vector<ModelInfo> listModels() override {
+        ModelInfo model;
+        model.id = "dynamic-mcp-success-model";
+        model.provider = getId();
+        model.contextWindow = 4096;
+        return {model};
+    }
+
+    ModelInfo getModelInfo(const std::string&) override { return listModels().front(); }
+
+    void generateSummary(const std::string&, const AgentHistory&,
+                         const std::string&,
+                         std::function<void(const StreamEvent&)> onEvent,
+                         std::atomic<bool>* = nullptr) override {
+        onEvent(TextChunk{"summary"});
+        onEvent(StreamDone{StopReason::Stop});
+    }
+
+    firmius::provider::ProviderType getProviderType() const override {
+        return firmius::provider::ProviderType::APIKey;
+    }
+
+    int callCount() const { return callCount_.load(); }
+
+private:
+    std::atomic<int> callCount_{0};
+};
+
 class HarnessTest : public ::testing::Test {
 protected:
     void SetUp() override {
@@ -1414,6 +1695,10 @@ protected:
             std::make_shared<TruncatedToolCallProvider>());
         firmius::provider::ProviderRegistry::instance().registerProvider(
             std::make_shared<ProviderDeclaredTruncatedToolCallProvider>());
+        firmius::provider::ProviderRegistry::instance().registerProvider(
+            std::make_shared<RecoveringProviderDeclaredTruncatedToolCallProvider>());
+        firmius::provider::ProviderRegistry::instance().registerProvider(
+            std::make_shared<RecoveringMixedTruncatedToolCallProvider>());
         firmius::provider::ProviderRegistry::instance().registerProvider(
             std::make_shared<MixedTextToolCallProvider>());
         firmius::provider::ProviderRegistry::instance().registerProvider(
@@ -1760,7 +2045,9 @@ TEST_F(HarnessTest, switchThread_missingMetadataReturnsFalseAndEmitsWarning) {
     ThreadMetadata brokenMetadata;
     brokenMetadata.title = "Broken Thread";
     std::string brokenThread = tm.createThread(brokenMetadata);
-    std::filesystem::remove(testHome_ / ".firmius" / "threads" / brokenThread / "metadata.json");
+    execSqlAt(testHome_ / ".firmius" / "threads" / "firmius_threads.db",
+              "UPDATE threads SET metadata_json='{broken' WHERE thread_id='" +
+                  brokenThread + "';");
 
     std::promise<AgentError> warningPromise;
     auto warningFuture = warningPromise.get_future();
@@ -1785,10 +2072,11 @@ TEST_F(HarnessTest, switchThread_corruptManifestRecoversAndEmitsWarning) {
     metadata.title = "Manifest Recovery";
     std::string threadId = tm.createThread(metadata);
 
-    {
-        std::ofstream manifest(testHome_ / ".firmius" / "threads" / threadId / "agents.json");
-        manifest << "{not json";
-    }
+    execSqlAt(testHome_ / ".firmius" / "threads" / "firmius_threads.db",
+              "INSERT INTO thread_states(thread_id, agent_manifest_json) VALUES('" +
+                  threadId +
+                  "', '{not json') ON CONFLICT(thread_id) DO UPDATE SET "
+                  "agent_manifest_json='{not json';");
 
     std::promise<AgentError> warningPromise;
     auto warningFuture = warningPromise.get_future();
@@ -1813,7 +2101,9 @@ TEST_F(HarnessTest, resumeLast_brokenThreadClearsSessionAndReturnsFalse) {
     ThreadMetadata brokenMetadata;
     brokenMetadata.title = "Broken Startup Thread";
     std::string brokenThread = tm.createThread(brokenMetadata);
-    std::filesystem::remove(testHome_ / ".firmius" / "threads" / brokenThread / "metadata.json");
+    execSqlAt(testHome_ / ".firmius" / "threads" / "firmius_threads.db",
+              "UPDATE threads SET metadata_json='{broken' WHERE thread_id='" +
+                  brokenThread + "';");
 
     {
         std::ofstream sessionFile(testHome_ / ".firmius" / "last_session.json");
@@ -2380,7 +2670,8 @@ TEST_F(HarnessTest, InterleavedParallelToolChunksWithMissingIndexStayValid) {
     std::atomic<bool> malformedValidatorTriggered{false};
     int subId = harness.subscribe([&](const AppEvent& event) {
         if (auto error = std::get_if<AgentError>(&event)) {
-            if (error->message.find("malformed streamed tool call payload") !=
+            if (error->message.find(
+                    "Tool call stream ended before a finalized payload was emitted") !=
                 std::string::npos) {
                 malformedValidatorTriggered = true;
             }
@@ -2432,7 +2723,8 @@ TEST_F(HarnessTest, SnapshotUpdatingToolArgsDoNotTriggerMalformedPayloadError) {
     std::atomic<bool> malformedValidatorTriggered{false};
     int subId = harness.subscribe([&](const AppEvent& event) {
         if (auto error = std::get_if<AgentError>(&event)) {
-            if (error->message.find("malformed streamed tool call payload") !=
+            if (error->message.find(
+                    "Tool call stream ended before a finalized payload was emitted") !=
                 std::string::npos) {
                 malformedValidatorTriggered = true;
             }
@@ -2930,6 +3222,8 @@ TEST_F(HarnessTest, MissingTodoDoesNotBlockReadOnlyToolTurn) {
 
     harness.send("inspect the workspace and continue implementation");
 
+    ASSERT_TRUE(waitForCondition([&]() { return provider->callCount() >= 1; },
+                                 std::chrono::milliseconds(4000)));
     ASSERT_TRUE(waitForCondition([&]() {
         return agent && !agent->isRunning() &&
                agent->getContext().state.currentStatus == AgentStatus::Idle;
@@ -4096,7 +4390,8 @@ TEST_F(HarnessTest, TruncatedStreamedToolCallIsRejectedBeforeExecution) {
     std::atomic<bool> captured{false};
     int subId = harness.subscribe([&](const AppEvent& event) {
         if (auto error = std::get_if<AgentError>(&event)) {
-            if (error->message.find("malformed streamed tool call payload") !=
+            if (error->message.find(
+                    "Tool call stream ended before a finalized payload was emitted") !=
                 std::string::npos) {
                 bool expected = false;
                 if (captured.compare_exchange_strong(expected, true)) {
@@ -4117,7 +4412,8 @@ TEST_F(HarnessTest, TruncatedStreamedToolCallIsRejectedBeforeExecution) {
     auto emittedError = errorFuture.get();
     harness.unsubscribe(subId);
 
-    EXPECT_NE(emittedError.message.find("malformed streamed tool call payload"),
+    EXPECT_NE(emittedError.message.find(
+                  "Tool call stream ended before a finalized payload was emitted"),
               std::string::npos);
     EXPECT_NE(emittedError.message.find("invalid or truncated JSON arguments"),
               std::string::npos);
@@ -4138,7 +4434,8 @@ TEST_F(HarnessTest, TruncatedStreamedToolCallIsRejectedBeforeExecution) {
     const auto* persistedError =
         std::get_if<ErrorContent>(&lastTurn.messages.front().content.front());
     ASSERT_NE(persistedError, nullptr);
-    EXPECT_NE(persistedError->details.find("malformed streamed tool call payload"),
+    EXPECT_NE(persistedError->details.find(
+                  "Tool call stream ended before a finalized payload was emitted"),
               std::string::npos);
     EXPECT_NE(persistedError->details.find("Provider: truncated-tool-provider"),
               std::string::npos);
@@ -4196,7 +4493,8 @@ TEST_F(HarnessTest,
             "'chunk_add'."),
         std::string::npos);
     EXPECT_EQ(
-        emittedError.message.find("malformed streamed tool call payload"),
+        emittedError.message.find(
+            "Tool call stream ended before a finalized payload was emitted"),
         std::string::npos);
 
     auto agent = waitForFocusedAgent();
@@ -4216,8 +4514,141 @@ TEST_F(HarnessTest,
                   "Provider stream truncated during tool-call generation"),
               std::string::npos);
     EXPECT_EQ(
-        persistedError->details.find("malformed streamed tool call payload"),
+        persistedError->details.find(
+            "Tool call stream ended before a finalized payload was emitted"),
         std::string::npos);
+}
+
+TEST_F(HarnessTest, ProviderDeclaredTruncatedToolStreamRetriesAndRecovers) {
+    std::ofstream("/tmp/ASCII.txt") << "hello from retry";
+
+    auto& harness = Harness::instance();
+    auto config = firmius::shared::ConfigLoader::instance().getConfig();
+    config.defaultProviderId =
+        "recovering-provider-declared-truncated-tool-provider";
+    config.defaultModelId =
+        "recovering-provider-declared-truncated-tool-model";
+    harness.updateConfig(config);
+
+    const std::string threadId = harness.newThread({}, "/tmp", "lead");
+    ASSERT_FALSE(threadId.empty());
+
+    std::atomic<bool> sawRetry{false};
+    std::atomic<bool> sawError{false};
+    int subId = harness.subscribe([&](const AppEvent& event) {
+        if (auto retry = std::get_if<AgentRetrying>(&event)) {
+            if (retry->reason.find("Tool-call stream truncated") !=
+                std::string::npos) {
+                sawRetry = true;
+            }
+        }
+        if (std::holds_alternative<AgentError>(event)) {
+            sawError = true;
+        }
+    });
+
+    harness.send("recover from provider-declared truncation");
+    auto agent = waitForFocusedAgent();
+    ASSERT_TRUE(waitForCondition([&]() {
+        return agent && !agent->isRunning() &&
+               agent->getContext().state.currentStatus == AgentStatus::Idle;
+    }, std::chrono::milliseconds(5000)));
+    harness.unsubscribe(subId);
+
+    EXPECT_TRUE(sawRetry.load());
+    EXPECT_FALSE(sawError.load());
+
+    const auto& history = *agent->getContext().history;
+    bool sawRecoveredText = false;
+    bool sawRecoveredToolCall = false;
+    for (const auto& turn : history.turns) {
+        for (const auto& msg : turn.messages) {
+            for (const auto& part : msg.content) {
+                if (auto txt = std::get_if<TextContent>(&part)) {
+                    if (txt->text.find(
+                            "Recovered after provider-declared truncation.") !=
+                        std::string::npos) {
+                        sawRecoveredText = true;
+                    }
+                }
+                if (auto call = std::get_if<ToolCallContent>(&part)) {
+                    if (call->name == "file_read" &&
+                        call->args == R"({"path":"/tmp/ASCII.txt"})") {
+                        sawRecoveredToolCall = true;
+                    }
+                }
+            }
+        }
+    }
+    EXPECT_TRUE(sawRecoveredText);
+    EXPECT_TRUE(sawRecoveredToolCall);
+}
+
+TEST_F(HarnessTest, MixedTruncatedToolBatchRetriesAndRecovers) {
+    std::ofstream("/tmp/ASCII.txt") << "hello from mixed retry";
+
+    auto& harness = Harness::instance();
+    auto config = firmius::shared::ConfigLoader::instance().getConfig();
+    config.defaultProviderId = "recovering-mixed-truncated-tool-provider";
+    config.defaultModelId = "recovering-mixed-truncated-tool-model";
+    harness.updateConfig(config);
+
+    const std::string threadId = harness.newThread({}, "/tmp", "lead");
+    ASSERT_FALSE(threadId.empty());
+
+    std::atomic<bool> sawRetry{false};
+    std::atomic<bool> sawError{false};
+    int subId = harness.subscribe([&](const AppEvent& event) {
+        if (auto retry = std::get_if<AgentRetrying>(&event)) {
+            if (retry->reason.find("Tool-call stream truncated") !=
+                std::string::npos) {
+                sawRetry = true;
+            }
+        }
+        if (std::holds_alternative<AgentError>(event)) {
+            sawError = true;
+        }
+    });
+
+    harness.send("recover from mixed truncated tool batch");
+    auto agent = waitForFocusedAgent();
+    ASSERT_TRUE(waitForCondition([&]() {
+        return agent && !agent->isRunning() &&
+               agent->getContext().state.currentStatus == AgentStatus::Idle;
+    }, std::chrono::milliseconds(5000)));
+    harness.unsubscribe(subId);
+
+    EXPECT_TRUE(sawRetry.load());
+    EXPECT_FALSE(sawError.load());
+
+    const auto& history = *agent->getContext().history;
+    bool sawRecoveredText = false;
+    bool sawRecoveredToolCall = false;
+    bool sawPartialFinalizedCall = false;
+    for (const auto& turn : history.turns) {
+        for (const auto& msg : turn.messages) {
+            for (const auto& part : msg.content) {
+                if (auto txt = std::get_if<TextContent>(&part)) {
+                    if (txt->text.find("Recovered after mixed truncated tool batch.") !=
+                        std::string::npos) {
+                        sawRecoveredText = true;
+                    }
+                }
+                if (auto call = std::get_if<ToolCallContent>(&part)) {
+                    if (call->id == "call-finished") {
+                        sawPartialFinalizedCall = true;
+                    }
+                    if (call->name == "file_read" &&
+                        call->args == R"({"path":"/tmp/ASCII.txt"})") {
+                        sawRecoveredToolCall = true;
+                    }
+                }
+            }
+        }
+    }
+    EXPECT_TRUE(sawRecoveredText);
+    EXPECT_TRUE(sawRecoveredToolCall);
+    EXPECT_FALSE(sawPartialFinalizedCall);
 }
 
 TEST_F(HarnessTest, CompactionLifecycleMarkersPersistAcrossReloadFromDisk) {
@@ -4487,6 +4918,204 @@ TEST_F(HarnessTest, RunningQueuedModelSwitchLastWriteWins) {
     EXPECT_EQ(calls[1].modelId, "queued-candidate-b");
 }
 
+TEST_F(HarnessTest, ProviderOptionsToolsIncludeDynamicMcpOnlyForOwningAgentState) {
+    auto& harness = Harness::instance();
+    auto provider = std::make_shared<ToolDefinitionsProbeProvider>(
+        "dynamic-mcp-tools-visibility-provider",
+        "dynamic-mcp-tools-visibility-model");
+    firmius::provider::ProviderRegistry::instance().registerProvider(provider);
+
+    auto config = firmius::shared::ConfigLoader::instance().getConfig();
+    config.defaultProviderId = provider->getId();
+    config.defaultModelId = provider->listModels().front().id;
+    harness.updateConfig(config);
+
+    const std::string threadId = harness.newThread({}, "/tmp", "lead");
+    ASSERT_FALSE(threadId.empty());
+    auto agentWithMcp = createFocusedLeadAgent(threadId);
+    ASSERT_TRUE(agentWithMcp);
+    auto agentWithoutMcp = createAgentWithUserTurn(threadId, "worker-no-mcp");
+    ASSERT_TRUE(agentWithoutMcp);
+
+    auto& loadedState = agentWithMcp->getMutableContext().state;
+    loadedState.loadedMcpServers = {"server1"};
+    loadedState.loadedMcpTools.clear();
+    loadedState.loadedMcpTools["server1"] = {"tool1"};
+    const std::string dynamicToolName = "mcp__server1__tool1";
+
+    ASSERT_TRUE(harness.setFocusedAgent(agentWithMcp->getContext().identity.id));
+    harness.send("capture tools for loaded MCP agent");
+    ASSERT_TRUE(waitForCondition([&]() { return provider->callCount() >= 1; },
+                                 std::chrono::milliseconds(4000)));
+    ASSERT_TRUE(waitForIdle(agentWithMcp->getContext().identity.id));
+
+    ASSERT_TRUE(harness.setFocusedAgent(agentWithoutMcp->getContext().identity.id));
+    harness.send("capture tools for unloaded MCP agent");
+    ASSERT_TRUE(waitForCondition([&]() { return provider->callCount() >= 2; },
+                                 std::chrono::milliseconds(4000)));
+    ASSERT_TRUE(waitForIdle(agentWithoutMcp->getContext().identity.id));
+
+    const auto calls = provider->observedCalls();
+    ASSERT_GE(calls.size(), 2u);
+
+    const auto hasTool = [&](const ToolDefinitionsProbeProvider::ObservedCall& call,
+                             const std::string& toolName) {
+        return std::find(call.toolNames.begin(), call.toolNames.end(), toolName) !=
+               call.toolNames.end();
+    };
+
+    EXPECT_TRUE(hasTool(calls[0], dynamicToolName));
+    EXPECT_FALSE(hasTool(calls[1], dynamicToolName));
+}
+
+TEST_F(HarnessTest, UnknownDynamicMcpToolCallReturnsClearFailureToolResult) {
+    auto& harness = Harness::instance();
+    auto provider = std::make_shared<DynamicMcpUnknownToolProvider>();
+    firmius::provider::ProviderRegistry::instance().registerProvider(provider);
+
+    auto config = firmius::shared::ConfigLoader::instance().getConfig();
+    config.defaultProviderId = provider->getId();
+    config.defaultModelId = provider->listModels().front().id;
+    harness.updateConfig(config);
+
+    const std::string threadId = harness.newThread({}, "/tmp", "lead");
+    ASSERT_FALSE(threadId.empty());
+    auto agent = createFocusedLeadAgent(threadId);
+    ASSERT_TRUE(agent);
+
+    harness.send("trigger unknown dynamic mcp tool");
+    ASSERT_TRUE(waitForIdle(agent->getContext().identity.id));
+    ASSERT_TRUE(waitForCondition([&]() { return provider->callCount() >= 2; },
+                                 std::chrono::milliseconds(4000)));
+
+    const ToolResultContent* dynamicFailure = nullptr;
+    for (const auto& turn : agent->getContext().history->turns) {
+        for (const auto& msg : turn.messages) {
+            for (const auto& part : msg.content) {
+                if (const auto* result = std::get_if<ToolResultContent>(&part)) {
+                    if (!result->success &&
+                        result->result.find("MCP server is not loaded: ghostserver") !=
+                            std::string::npos) {
+                        dynamicFailure = result;
+                    }
+                }
+            }
+        }
+    }
+
+    ASSERT_NE(dynamicFailure, nullptr);
+    EXPECT_FALSE(dynamicFailure->success);
+    EXPECT_NE(dynamicFailure->result.find("MCP server is not loaded: ghostserver"),
+              std::string::npos);
+}
+
+TEST_F(HarnessTest, LoadedDynamicMcpToolCallExecutesSuccessfullyThroughAgentLoop) {
+    auto& harness = Harness::instance();
+    auto provider = std::make_shared<DynamicMcpSuccessProvider>();
+    firmius::provider::ProviderRegistry::instance().registerProvider(provider);
+
+    const auto serverScript = testHome_ / "dynamic-mcp-server.sh";
+    {
+        std::ofstream out(serverScript);
+        out << R"(#!/usr/bin/env bash
+set -euo pipefail
+
+send_msg() {
+  local payload="$1"
+  printf 'Content-Length: %d\r\n\r\n%s' "${#payload}" "${payload}"
+}
+
+while true; do
+  content_length=""
+  while IFS= read -r line; do
+    line="${line%$'\r'}"
+    [[ -z "${line}" ]] && break
+    if [[ "${line}" == Content-Length:* ]]; then
+      content_length="${line#Content-Length: }"
+    fi
+  done || exit 0
+
+  [[ -z "${content_length}" ]] && continue
+  IFS= read -r -N "${content_length}" body || exit 0
+
+  method=""
+  req_id="null"
+  if [[ "${body}" =~ \"method\"[[:space:]]*:[[:space:]]*\"([^\"]+)\" ]]; then
+    method="${BASH_REMATCH[1]}"
+  fi
+  if [[ "${body}" =~ \"id\"[[:space:]]*:[[:space:]]*([0-9]+) ]]; then
+    req_id="${BASH_REMATCH[1]}"
+  fi
+
+  if [[ "${method}" == "initialize" ]]; then
+    send_msg "{\"jsonrpc\":\"2.0\",\"id\":${req_id},\"result\":{\"capabilities\":{\"tools\":{}}}}"
+  elif [[ "${method}" == "tools/list" ]]; then
+    send_msg "{\"jsonrpc\":\"2.0\",\"id\":${req_id},\"result\":{\"tools\":[{\"name\":\"tool1\"}]}}"
+  elif [[ "${method}" == "tools/call" ]]; then
+    send_msg "{\"jsonrpc\":\"2.0\",\"id\":${req_id},\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"ok from mcp\"}]}}"
+  elif [[ "${method}" == "shutdown" ]]; then
+    send_msg "{\"jsonrpc\":\"2.0\",\"id\":${req_id},\"result\":null}"
+  elif [[ "${method}" == "exit" ]]; then
+    exit 0
+  fi
+done
+)";
+    }
+    std::filesystem::permissions(
+        serverScript,
+        std::filesystem::perms::owner_read |
+            std::filesystem::perms::owner_write |
+            std::filesystem::perms::owner_exec,
+        std::filesystem::perm_options::replace);
+
+    auto config = firmius::shared::ConfigLoader::instance().getConfig();
+    config.defaultProviderId = provider->getId();
+    config.defaultModelId = provider->listModels().front().id;
+    firmius::shared::McpServerConfig serverCfg;
+    serverCfg.transport = "stdio";
+    serverCfg.command = serverScript.string();
+    serverCfg.cwd = testHome_.string();
+    config.mcpServers["server1"] = serverCfg;
+    harness.updateConfig(config);
+
+    const std::string threadId = harness.newThread({}, "/tmp", "lead");
+    ASSERT_FALSE(threadId.empty());
+    ASSERT_TRUE(harness.setCurrentThreadPermissionMode(
+                ThreadPermissionMode::AlwaysAllow));
+    auto agent = createFocusedLeadAgent(threadId);
+    ASSERT_TRUE(agent);
+
+    auto& loadedState = agent->getMutableContext().state;
+    loadedState.loadedMcpServers = {"server1"};
+    loadedState.loadedMcpTools.clear();
+    loadedState.loadedMcpTools["server1"] = {"tool1"};
+
+    harness.send("run loaded dynamic mcp tool");
+    ASSERT_TRUE(waitForIdle(agent->getContext().identity.id));
+    ASSERT_TRUE(waitForCondition([&]() { return provider->callCount() >= 2; },
+                                 std::chrono::milliseconds(4000)));
+
+    const ToolResultContent* successResult = nullptr;
+    for (const auto& turn : agent->getContext().history->turns) {
+        for (const auto& msg : turn.messages) {
+            for (const auto& part : msg.content) {
+                if (const auto* result = std::get_if<ToolResultContent>(&part)) {
+                    if (result->success &&
+                        result->result.find("ok from mcp") != std::string::npos) {
+                        successResult = result;
+                    }
+                }
+            }
+        }
+    }
+
+    ASSERT_NE(successResult, nullptr);
+    EXPECT_FALSE(successResult->toolCallId.empty());
+    EXPECT_NE(successResult->result.find("ok from mcp"), std::string::npos);
+    EXPECT_TRUE(historyContainsAssistantText(*agent->getContext().history,
+                                             "dynamic mcp success"));
+}
+
 TEST_F(HarnessTest, CompactionSnapshotIncludesChunkTasksAndTodoTexts) {
     auto& harness = Harness::instance();
     auto provider = std::make_shared<CompactionProbeProvider>();
@@ -4590,6 +5219,55 @@ TEST_F(HarnessTest, CompactionDoesNotImmediatelyRetriggerOnNextTurn) {
               1u);
 }
 
+TEST_F(HarnessTest, CompactionDoesNotImmediatelyRetriggerAfterResumeFromDisk) {
+    auto& harness = Harness::instance();
+    auto provider = std::make_shared<CompactionProbeProvider>();
+    firmius::provider::ProviderRegistry::instance().registerProvider(provider);
+    auto config = firmius::shared::ConfigLoader::instance().getConfig();
+    config.defaultProviderId = provider->getId();
+    config.defaultModelId = provider->listModels().front().id;
+    harness.updateConfig(config);
+
+    const std::string threadId = harness.newThread({}, "/tmp", "lead");
+    ASSERT_FALSE(threadId.empty());
+    auto agent = createFocusedLeadAgent(threadId);
+    ASSERT_TRUE(agent);
+    const std::string agentId = agent->getContext().identity.id;
+
+    ASSERT_TRUE(sendAndWaitForIdle(harness, "pass one", agent));
+    ASSERT_TRUE(sendAndWaitForIdle(harness, "pass two", agent));
+    agent->getMutableContext().aggregateMetrics.tokens.contextSize = 5000;
+
+    harness.compactFocusedAgent();
+    ASSERT_TRUE(waitForCondition([&]() {
+        return countTurnsWithPrefix(*agent->getContext().history,
+                                    "compaction-start-") == 1;
+    }, std::chrono::milliseconds(4000)));
+    EXPECT_EQ(provider->summaryCallCount(), 1);
+
+    Engine::instance().terminateAgent(agentId);
+    ASSERT_TRUE(waitForCondition([&]() {
+        return AgentRegistry::instance().getAgent(agentId) == nullptr;
+    }, std::chrono::milliseconds(2000)));
+
+    Engine::instance().resumeAgent(threadId, agentId, "lead", "", "lead",
+                                   "Lead", true);
+    ASSERT_TRUE(waitForCondition([&]() {
+        auto resumed = AgentRegistry::instance().getAgent(agentId);
+        return resumed && !resumed->isBooting();
+    }, std::chrono::milliseconds(4000)));
+
+    auto resumed = AgentRegistry::instance().getAgent(agentId);
+    ASSERT_TRUE(resumed);
+    EXPECT_TRUE(harness.setFocusedAgent(agentId));
+
+    ASSERT_TRUE(sendAndWaitForIdle(harness, "post-reload continuation", resumed));
+    EXPECT_EQ(provider->summaryCallCount(), 1);
+    EXPECT_EQ(countTurnsWithPrefix(*resumed->getContext().history,
+                                   "compaction-start-"),
+              1u);
+}
+
 
 
 TEST_F(HarnessTest, MarkThreadAsBenchmarkPersistsMetadata) {
@@ -4649,6 +5327,44 @@ TEST_F(HarnessTest, AppendSystemMessagePersistsVisibleTranscriptTurn) {
     EXPECT_EQ(persistedText->text, "benchmark: cloning repo");
 }
 
+TEST_F(HarnessTest, GetAgentHistoryPtrReturnsDetachedPersistedSnapshot) {
+    auto& harness = Harness::instance();
+    const std::string threadId = harness.newThread({}, "/tmp", "lead");
+    ASSERT_FALSE(threadId.empty());
+    auto agent = createFocusedLeadAgent(threadId);
+    ASSERT_TRUE(agent);
+
+    const std::string agentId = agent->getContext().identity.id;
+    ASSERT_TRUE(harness.appendSystemMessage(agentId, "persisted turn"));
+    agent->saveHistory();
+
+    ThreadManager tm((testHome_ / ".firmius" / "threads").string());
+    ASSERT_TRUE(waitForCondition([&]() {
+        return !tm.loadAgentHistory(threadId, agentId).turns.empty();
+    }));
+    const auto persistedBeforeMutation = tm.loadAgentHistory(threadId, agentId);
+    const std::size_t persistedTurnCount = persistedBeforeMutation.turns.size();
+
+    AgentTurn transientTurn;
+    transientTurn.turnId = "user-task-live-only";
+    Message transientMessage;
+    transientMessage.role = Role::User;
+    transientMessage.content.push_back(TextContent{"live-only mutation"});
+    transientTurn.messages.push_back(std::move(transientMessage));
+    agent->getMutableContext().history->turns.push_back(std::move(transientTurn));
+    ASSERT_EQ(agent->getContext().history->turns.size(), persistedTurnCount + 1);
+
+    auto snapshot = harness.getAgentHistoryPtr(agentId);
+    ASSERT_TRUE(snapshot);
+    EXPECT_NE(snapshot.get(), agent->getContext().history.get());
+    EXPECT_EQ(snapshot->turns.size(), persistedTurnCount);
+    ASSERT_FALSE(snapshot->turns.empty());
+    const auto& lastMessage = snapshot->turns.back().messages.front();
+    auto text = std::get_if<TextContent>(&lastMessage.content.front());
+    ASSERT_NE(text, nullptr);
+    EXPECT_EQ(text->text, "persisted turn");
+}
+
 TEST_F(HarnessTest, BenchmarkSessionRunAgentTaskEmitsLiveStreamEvents) {
     using firmius::core::BenchmarkConfig;
     using firmius::core::BenchmarkSession;
@@ -4700,4 +5416,21 @@ TEST_F(HarnessTest, BenchmarkSessionRunAgentTaskEmitsLiveStreamEvents) {
     EXPECT_GE(finishedEvents.load(), 1);
 }
 
+
+TEST_F(HarnessTest, init_bootstrapsWorkflows) {
+    // Harness::init() was already called in SetUp().
+    // Verify builtin workflow files are seeded into HOME/.firmius/workflows.
+    const std::filesystem::path workflowsDir = testHome_ / ".firmius" / "workflows";
+    EXPECT_TRUE(std::filesystem::exists(workflowsDir));
+    EXPECT_TRUE(std::filesystem::is_directory(workflowsDir));
+
+    const std::vector<std::string> expected = {
+        "explore.md", "deep_interview.md", "plan_gate.md",
+        "evidence_sweep.md", "repair_wave.md"};
+    for (const auto &filename : expected) {
+        const auto path = workflowsDir / filename;
+        EXPECT_TRUE(std::filesystem::exists(path)) << path.string();
+        EXPECT_TRUE(std::filesystem::is_regular_file(path)) << path.string();
+    }
+}
 } // namespace

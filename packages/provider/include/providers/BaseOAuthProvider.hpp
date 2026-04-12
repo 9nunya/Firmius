@@ -59,7 +59,7 @@ public:
   void addAccount(const OAuthAccount &acc);
   void deleteAccount(const std::string &identifier);
 
-  const std::vector<OAuthAccount> &getAccounts() const { return accounts_; }
+  std::vector<OAuthAccount> getAccounts() const;
 
   /**
    * @brief Returns aggregated quotas for all accounts.

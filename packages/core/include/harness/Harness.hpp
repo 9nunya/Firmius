@@ -291,8 +291,8 @@ public:
 
   /**
    * @brief Gets a shared history pointer for a specific agent.
-   * If the agent is active, this returns the live in-memory history.
-   * Otherwise, it returns a new shared_ptr loaded from disk.
+   * This always returns a detached snapshot loaded from the thread journal.
+   * It never exposes the live in-memory history owned by an active agent.
    */
   std::shared_ptr<shared::AgentHistory>
   getAgentHistoryPtr(const std::string &agentId) const;

@@ -11,34 +11,62 @@
 namespace firmius::utils {
 
 namespace {
-CURLSH* gCurlShare = nullptr;
-std::mutex gCurlShareMutex;
+struct CurlRuntime;
+void curlShareLock(CURL*, curl_lock_data, curl_lock_access, void* userdata);
+void curlShareUnlock(CURL*, curl_lock_data, void* userdata);
 
-void curlShareLock(CURL*, curl_lock_data, curl_lock_access, void*) {
-    gCurlShareMutex.lock();
-}
+struct CurlRuntime {
+    std::mutex shareMutex;
+    CURLSH* share = nullptr;
+    bool globalInitialized = false;
 
-void curlShareUnlock(CURL*, curl_lock_data, void*) {
-    gCurlShareMutex.unlock();
-}
-
-void ensureCurlShare() {
-    static std::once_flag initFlag;
-    std::call_once(initFlag, []() {
-        curl_global_init(CURL_GLOBAL_ALL);
-        gCurlShare = curl_share_init();
-        if (gCurlShare) {
-            curl_share_setopt(gCurlShare, CURLSHOPT_LOCKFUNC, curlShareLock);
-            curl_share_setopt(gCurlShare, CURLSHOPT_UNLOCKFUNC, curlShareUnlock);
-            curl_share_setopt(gCurlShare, CURLSHOPT_SHARE, CURL_LOCK_DATA_DNS);
-            curl_share_setopt(gCurlShare, CURLSHOPT_SHARE, CURL_LOCK_DATA_SSL_SESSION);
+    CurlRuntime() {
+        if (curl_global_init(CURL_GLOBAL_ALL) != CURLE_OK) {
+            return;
         }
-    });
+        globalInitialized = true;
+        share = curl_share_init();
+        if (!share) {
+            return;
+        }
+
+        curl_share_setopt(share, CURLSHOPT_LOCKFUNC, curlShareLock);
+        curl_share_setopt(share, CURLSHOPT_UNLOCKFUNC, curlShareUnlock);
+        curl_share_setopt(share, CURLSHOPT_USERDATA, this);
+        curl_share_setopt(share, CURLSHOPT_SHARE, CURL_LOCK_DATA_DNS);
+        curl_share_setopt(share, CURLSHOPT_SHARE, CURL_LOCK_DATA_SSL_SESSION);
+    }
+
+    ~CurlRuntime() {
+        if (share) {
+            curl_share_cleanup(share);
+            share = nullptr;
+        }
+        if (globalInitialized) {
+            curl_global_cleanup();
+        }
+    }
+
+    CurlRuntime(const CurlRuntime&) = delete;
+    CurlRuntime& operator=(const CurlRuntime&) = delete;
+};
+
+void curlShareLock(CURL*, curl_lock_data, curl_lock_access, void* userdata) {
+    static_cast<CurlRuntime*>(userdata)->shareMutex.lock();
+}
+
+void curlShareUnlock(CURL*, curl_lock_data, void* userdata) {
+    static_cast<CurlRuntime*>(userdata)->shareMutex.unlock();
+}
+
+CurlRuntime& curlRuntime() {
+    static CurlRuntime runtime;
+    return runtime;
 }
 } // namespace
 
 GCPHttpClient::GCPHttpClient(std::string userAgent) : userAgent_(std::move(userAgent)) {
-    ensureCurlShare();
+    (void)curlRuntime();
 }
 
 GCPHttpClient::~GCPHttpClient() {}
@@ -231,7 +259,7 @@ firmius::utils::GCPHttpClient::Response performInterruptibleTransfer(
 GCPHttpClient::Response GCPHttpClient::post(const std::string& url, const std::string& body, int timeoutSeconds) {
     CURL* curl = curl_easy_init();
     if (!curl) return {0, "", "Failed to initialize CURL", {}};
-    if (gCurlShare) curl_easy_setopt(curl, CURLOPT_SHARE, gCurlShare);
+    if (curlRuntime().share) curl_easy_setopt(curl, CURLOPT_SHARE, curlRuntime().share);
 
     Response resp;
     struct curl_slist* headers = prepareHeaders();
@@ -260,7 +288,7 @@ GCPHttpClient::Response GCPHttpClient::post(const std::string& url, const std::s
 GCPHttpClient::Response GCPHttpClient::get(const std::string& url, int timeoutSeconds) {
     CURL* curl = curl_easy_init();
     if (!curl) return {0, "", "Failed to initialize CURL", {}};
-    if (gCurlShare) curl_easy_setopt(curl, CURLOPT_SHARE, gCurlShare);
+    if (curlRuntime().share) curl_easy_setopt(curl, CURLOPT_SHARE, curlRuntime().share);
 
     Response resp;
     struct curl_slist* headers = prepareHeaders();
@@ -295,7 +323,7 @@ GCPHttpClient::Response GCPHttpClient::streamPost(const std::string& url,
     if (!curl) {
         return {0, "", "Failed to initialize CURL", {}};
     }
-    if (gCurlShare) curl_easy_setopt(curl, CURLOPT_SHARE, gCurlShare);
+    if (curlRuntime().share) curl_easy_setopt(curl, CURLOPT_SHARE, curlRuntime().share);
 
     std::map<std::string, std::string> responseHeaders;
     struct curl_slist* headers = prepareHeaders();

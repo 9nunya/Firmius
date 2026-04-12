@@ -86,6 +86,10 @@ std::string CollapseExpandedReferencesForDisplay(const std::string &text) {
       });
 }
 
+std::string ClampTranscriptTextForDisplay(const std::string &text) {
+  return text;
+}
+
 static std::vector<std::string> splitLines(const std::string &text) {
   std::vector<std::string> lines;
   std::stringstream ss(text);

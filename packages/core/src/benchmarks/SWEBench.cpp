@@ -1,4 +1,5 @@
 #include "benchmarks/SWEBench.hpp"
+#include "agents/ContextBudget.hpp"
 #include "utils/Logger.hpp"
 
 #include <array>
@@ -459,7 +460,10 @@ BenchmarkResult SWEBench::runTask(const std::string& taskId) {
     BenchmarkResult result;
     result.taskId = taskId;
     result.passed = (failed == 0 && errors == 0 && passed >= (int)failToPass.size());
-    result.output = "Final (Passed=" + std::to_string(passed) + ", Failed=" + std::to_string(failed) + ")";
+    result.metrics = session.getAgent().getContext().aggregateMetrics;
+    result.output = "Final (Passed=" + std::to_string(passed) + ", Failed=" +
+                    std::to_string(failed) + ")\nMetrics: " +
+                    summarizeContextWindowMetrics(result.metrics.context, 4);
     return result;
 }
 

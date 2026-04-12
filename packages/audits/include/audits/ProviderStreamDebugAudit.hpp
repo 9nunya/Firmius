@@ -10,13 +10,13 @@ namespace firmius::audits {
 using namespace firmius::shared;
 
 /**
- * @brief Debug audit that logs EVERY chunk from a provider stream to STDOUT.
+ * @brief Debug audit exposed as provider_full_range that logs EVERY chunk from a provider stream to STDOUT.
  *
- * Usage: firmius_audit --audit provider_stream_debug <provider_id> [model_id]
+ * Usage: firmius_audit --audit provider_full_range <provider_id> [model_id]
  *          [--history-variant=<variant>] [--variant=<model-variant>]
- *        firmius_audit --audit provider_stream_debug <provider_id> [model_id]
+ *        firmius_audit --audit provider_full_range <provider_id> [model_id]
  *          --thread-id=<threadId> [--thread-agent=<agentId>]
- *        firmius_audit --audit provider_stream_debug <provider_id> [model_id]
+ *        firmius_audit --audit provider_full_range <provider_id> [model_id]
  *          [--variant=<model-variant>] --tool-preparing-suite
  * 
  * History variants for testing edge cases:

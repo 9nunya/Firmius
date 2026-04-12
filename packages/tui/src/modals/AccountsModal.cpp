@@ -16,7 +16,6 @@
 #include <ftxui/dom/elements.hpp>
 #include <memory>
 #include <string>
-#include <thread>
 #include <vector>
 
 namespace firmius::tui {
@@ -28,7 +27,6 @@ ftxui::Component AccountsModal::create(TuiState &state) {
   auto oauthAccounts =
       std::make_shared<std::vector<firmius::shared::OAuthAccount>>();
   auto selected = std::make_shared<int>(0);
-  auto isLoading = std::make_shared<bool>(true);
   auto providerId = providerId_;
   auto rowBoxes = std::make_shared<std::vector<ftxui::Box>>();
 
@@ -36,20 +34,13 @@ ftxui::Component AccountsModal::create(TuiState &state) {
     return static_cast<int>(oauthAccounts->size());
   };
 
-
-  auto refreshAccounts = [oauthAccounts, isLoading, providerId, selected,
+  auto refreshAccounts = [oauthAccounts, providerId, selected,
                           accountCount, &state]() {
-    *isLoading = true;
-    std::thread([oauthAccounts, isLoading, providerId, selected, accountCount,
-                 &state]() {
-      *oauthAccounts =
-          firmius::core::Harness::instance().getAccounts(providerId);
-
-      const int count = static_cast<int>(oauthAccounts->size());
-      *selected = count <= 0 ? 0 : std::clamp(*selected, 0, count - 1);
-      *isLoading = false;
-      state.postEvent(ftxui::Event::Custom);
-    }).detach();
+    (void)accountCount;
+    (void)state;
+    *oauthAccounts = firmius::core::Harness::instance().getAccounts(providerId);
+    const int count = static_cast<int>(oauthAccounts->size());
+    *selected = count <= 0 ? 0 : std::clamp(*selected, 0, count - 1);
   };
 
   refreshAccounts();
@@ -73,8 +64,9 @@ ftxui::Component AccountsModal::create(TuiState &state) {
       std::string identifier = acc.identifier;
       std::string rightBadge = "oauth";
 
-      if (acc.metadata.count("keyPrefix")) {
-        identifier += " (" + acc.metadata.at("keyPrefix") + "...)";
+      if (auto keyPrefixIt = acc.metadata.find("keyPrefix");
+          keyPrefixIt != acc.metadata.end()) {
+        identifier += " (" + keyPrefixIt->second + "...)";
         rightBadge = "key";
       }
 
@@ -102,29 +94,14 @@ ftxui::Component AccountsModal::create(TuiState &state) {
   auto scrollable = ScrollableBox(listContent);
 
   auto component = ftxui::Renderer(scrollable, [oauthAccounts, selected,
-                                                isLoading, providerId,
-                                                scrollable, accountCount]() {
+                                                providerId, scrollable,
+                                                accountCount]() {
     const auto &theme = ThemeManager::instance().getCurrentTheme();
     const auto terminal = ftxui::Terminal::Size();
     const int panelWidth = std::clamp(std::max(0, terminal.dimx - 8), 58, 90);
     const int panelHeight = std::clamp(std::max(0, terminal.dimy - 6), 18, 24);
     const int total = accountCount();
     const int listHeight = std::max(6, panelHeight - 11);
-
-    if (*isLoading) {
-      return FlatModalPanel(
-          theme, "Manage Accounts: " + providerId,
-          ModalSection(
-              theme,
-              ftxui::vbox({
-                  ftxui::text("Loading accounts...") | ftxui::center |
-                      ftxui::color(theme.modals.fg),
-                  ftxui::text("") |
-                      ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, 5),
-              }),
-              theme.modals.bg),
-          panelWidth, 16);
-    }
 
     auto body = ftxui::vbox({
         ftxui::text("Select an account to manage:") |

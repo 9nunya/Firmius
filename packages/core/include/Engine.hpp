@@ -23,6 +23,11 @@ namespace firmius::core {
 
 using namespace firmius::shared;
 
+struct SummonAgentOverrides {
+    std::optional<std::string> cwdOverride;
+    std::optional<std::vector<std::string>> allowedPathsOverride;
+};
+
 /**
  * @brief The fleet commander. Manages agent lifecycles and event distribution.
  */
@@ -42,7 +47,8 @@ public:
                             const std::string& title = "", const std::string& requestedAgentId = "",
                             const std::string& providerId = "", const std::string& modelId = "",
                             const std::string& variantName = "",
-                            const std::vector<firmius::shared::ImageContent>& images = {});
+                            const std::vector<firmius::shared::ImageContent>& images = {},
+                            const std::optional<SummonAgentOverrides>& overrides = std::nullopt);
 
     /**
      * @brief Resumes an existing agent with pre-loaded history.

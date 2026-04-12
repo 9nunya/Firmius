@@ -52,6 +52,7 @@ The draft must include:
 
 Your topology must be grounded in discovery-backed edit points.
 Do not invent architecture because it "seems likely."
+If root cause, edit points, or verification surfaces are still unknown, say discovery is insufficient rather than inventing a discovery plan.
 
 Every chunk should answer:
 - what is being changed
@@ -132,6 +133,7 @@ Critical rules:
 # Bad Planning Patterns
 
 Do NOT:
+- turn unresolved diagnosis into plan chunks like "investigate", "inspect", or "understand issue"
 - create vague chunks like "implementation"
 - push all complexity into one executor-owned chunk
 - omit `tasks` when worker delegation is clearly useful

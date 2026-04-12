@@ -148,41 +148,40 @@ TEST_F(JournalerTest, appendTurn_concurrent) {
     EXPECT_EQ(history.turns.size(), static_cast<size_t>(numThreads * turnsPerThread));
 }
 
-TEST_F(JournalerTest, constructor_createsDirectory) {
-    std::string threadDir = tempDir + "/.firmius/threads/" + threadId;
-    std::string agentFile = threadDir + "/" + agentId + ".jsonl";
-
-    EXPECT_FALSE(std::filesystem::exists(threadDir));
-
+TEST_F(JournalerTest, rewriteJournal_replacesExistingTurns) {
     {
         Journaler journaler(threadId, agentId);
-        AgentTurn turn = createTestTurn("turn-001");
-        journaler.appendTurn(turn);
+        journaler.appendTurn(createTestTurn("turn-001"));
+        journaler.appendTurn(createTestTurn("turn-002"));
+        journaler.rewriteJournal({createTestTurn("turn-r1"), createTestTurn("turn-r2")});
     }
 
-    EXPECT_TRUE(std::filesystem::exists(threadDir));
-    EXPECT_TRUE(std::filesystem::exists(agentFile));
+    AgentHistory history = tm->loadAgentHistory(threadId, agentId);
+    ASSERT_EQ(history.turns.size(), 2u);
+    EXPECT_EQ(history.turns[0].turnId, "turn-r1");
+    EXPECT_EQ(history.turns[1].turnId, "turn-r2");
 }
 
-TEST_F(JournalerTest, destructor_closesFile) {
-    std::string agentFile = tempDir + "/.firmius/threads/" + threadId + "/" + agentId + ".jsonl";
+TEST_F(JournalerTest, persistsUserRoleMessages) {
+    AgentTurn turn;
+    turn.turnId = "turn-user-001";
+    turn.stopReason = StopReason::Stop;
+    Message userMessage;
+    userMessage.id = "msg-user-001";
+    userMessage.role = Role::User;
+    userMessage.timestamp = 123;
+    userMessage.content.push_back(TextContent{"hello from user"});
+    turn.messages.push_back(userMessage);
 
     {
         Journaler journaler(threadId, agentId);
-        AgentTurn turn = createTestTurn("turn-001");
         journaler.appendTurn(turn);
-
-        EXPECT_TRUE(std::filesystem::exists(agentFile));
     }
 
-    std::ifstream file(agentFile);
-    ASSERT_TRUE(file.is_open());
-
-    std::string line;
-    std::getline(file, line);
-    EXPECT_FALSE(line.empty());
-
-    file.close();
+    AgentHistory history = tm->loadAgentHistory(threadId, agentId);
+    ASSERT_EQ(history.turns.size(), 1u);
+    ASSERT_EQ(history.turns[0].messages.size(), 1u);
+    EXPECT_EQ(history.turns[0].messages[0].role, Role::User);
 }
 
 }

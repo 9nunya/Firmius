@@ -15,6 +15,7 @@ inline const std::string PL_RIGHT_SOFT_SEP = "";
 inline const std::string ICON_AGENT = "";
 inline const std::string ICON_TOOL = "󱌣";
 inline const std::string ICON_CONTEXT = "󰧑";
+inline const std::string ICON_BRAIN = "󰧑";
 inline const std::string ICON_METRICS = "󰓅";
 inline const std::string ICON_ERROR = "󰅚";
 inline const std::string ICON_WARNING = "󰀪";

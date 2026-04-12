@@ -6,7 +6,9 @@
 #include "Message.hpp"
 #include "Panic.hpp"
 #include "Serialization.hpp"
+#include "agents/ContextBudget.hpp"
 #include "agents/PurposeLoader.hpp"
+#include "agents/RollingContextManager.hpp"
 #include "agents/RuntimeOverlay.hpp"
 #include "harness/Harness.hpp"
 #include "persistence/Journaler.hpp"
@@ -16,6 +18,7 @@
 #include "utils/FSUtil.hpp"
 #include "utils/InterruptibleSleep.hpp"
 #include "utils/StringUtil.hpp"
+#include "tools/McpToolUtil.hpp"
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -32,6 +35,7 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace firmius::core {
 
@@ -42,6 +46,23 @@ constexpr std::uint32_t kMissingToolCallIndex =
 // Maximum accumulated response/thinking buffer size per turn (500KB)
 static constexpr std::size_t kMaxAccumulatedResponseBytes = 500 * 1024;
 static constexpr std::size_t kMaxAccumulatedThinkingBytes = 500 * 1024;
+static constexpr std::size_t kMaxPersistedResponseBytes = 32 * 1024;
+static constexpr std::size_t kMaxPersistedThinkingBytes = 16 * 1024;
+
+std::string clampPersistedAssistantBody(const std::string &text,
+                                        std::size_t maxBytes,
+                                        const char *label) {
+  if (text.size() <= maxBytes) {
+    return text;
+  }
+
+  std::ostringstream out;
+  out << text.substr(0, maxBytes);
+  out << "\n\n[Assistant " << label << " truncated for persistence: "
+      << (text.size() - maxBytes)
+      << " additional bytes omitted.]";
+  return out.str();
+}
 
 bool hasToolCallIndex(const ToolCallChunk &chunk) {
   return chunk.index != kMissingToolCallIndex;
@@ -232,6 +253,81 @@ void mergeToolCallChunk(std::vector<ToolCallChunk> &accumulated,
   mergeToolCallArgs(it->argsDelta, incoming.argsDelta);
 }
 
+std::vector<ToolCall>::iterator findMatchingToolCall(
+    std::vector<ToolCall> &accumulated, const ToolCall &incoming) {
+  if (!incoming.id.empty()) {
+    auto byId = std::find_if(accumulated.begin(), accumulated.end(),
+                             [&](const ToolCall &existing) {
+                               return existing.id == incoming.id;
+                             });
+    if (byId != accumulated.end()) {
+      return byId;
+    }
+  }
+
+  if (incoming.index != kMissingToolCallIndex) {
+    auto byIndex = std::find_if(
+        accumulated.begin(), accumulated.end(),
+        [&](const ToolCall &existing) {
+          if (existing.index != incoming.index) {
+            return false;
+          }
+          return incoming.id.empty() || existing.id.empty() ||
+                 existing.id == incoming.id;
+        });
+    if (byIndex != accumulated.end()) {
+      return byIndex;
+    }
+  }
+
+  return accumulated.end();
+}
+
+void mergeFinalToolCall(std::vector<ToolCall> &accumulated,
+                        const ToolCall &incoming) {
+  auto it = findMatchingToolCall(accumulated, incoming);
+  if (it == accumulated.end()) {
+    accumulated.push_back(incoming);
+    return;
+  }
+
+  if (it->id.empty() && !incoming.id.empty()) {
+    it->id = incoming.id;
+  }
+  if (it->index == kMissingToolCallIndex &&
+      incoming.index != kMissingToolCallIndex) {
+    it->index = incoming.index;
+  }
+  if (!incoming.name.empty()) {
+    it->name = incoming.name;
+  }
+  if (!incoming.args.empty()) {
+    it->args = incoming.args;
+  }
+}
+
+std::vector<ToolCall>
+materializeFinalToolCalls(const std::vector<ToolCallChunk> &chunks) {
+  std::vector<ToolCall> calls;
+  calls.reserve(chunks.size());
+  for (const auto &chunk : chunks) {
+    calls.push_back(ToolCall{chunk.id, chunk.index, chunk.nameDelta,
+                             chunk.argsDelta});
+  }
+  return calls;
+}
+
+bool isChunkFinalized(const ToolCallChunk &chunk,
+                      const std::vector<ToolCall> &calls) {
+  return std::any_of(calls.begin(), calls.end(), [&](const ToolCall &call) {
+    if (!chunk.id.empty() && !call.id.empty() && chunk.id == call.id) {
+      return true;
+    }
+    return hasToolCallIndex(chunk) && call.index != kMissingToolCallIndex &&
+           chunk.index == call.index;
+  });
+}
+
 bool shouldRetryProviderFailureAtAgentLayer(int httpStatus) {
   if (httpStatus == -1 || httpStatus == 0 || httpStatus >= 500) {
     return true;
@@ -257,6 +353,146 @@ std::string appendProviderModelContext(const AgentConfig &config,
     detailed += "\nVariant: " + config.modelVariant;
   }
   return detailed;
+}
+std::string encodeDynamicMcpNamePart(const std::string &value) {
+  std::ostringstream out;
+  out << std::hex << std::uppercase;
+  for (unsigned char ch : value) {
+    if (std::isalnum(ch)) {
+      out << static_cast<char>(ch);
+      continue;
+    }
+    out << "_x";
+    out.width(2);
+    out.fill('0');
+    out << static_cast<int>(ch);
+    out << "_";
+  }
+  return out.str();
+}
+
+std::string decodeDynamicMcpNamePart(const std::string &value) {
+  std::string decoded;
+  decoded.reserve(value.size());
+  for (std::size_t i = 0; i < value.size();) {
+    if (i + 4 < value.size() && value[i] == '_' && value[i + 1] == 'x' &&
+        std::isxdigit(static_cast<unsigned char>(value[i + 2])) &&
+        std::isxdigit(static_cast<unsigned char>(value[i + 3])) &&
+        value[i + 4] == '_') {
+      std::string hex = value.substr(i + 2, 2);
+      const int parsed = std::stoi(hex, nullptr, 16);
+      decoded.push_back(static_cast<char>(parsed));
+      i += 5;
+      continue;
+    }
+    decoded.push_back(value[i]);
+    ++i;
+  }
+  return decoded;
+}
+
+std::string buildDynamicMcpToolName(const std::string &serverName,
+                                    const std::string &toolName) {
+  return "mcp__" + encodeDynamicMcpNamePart(serverName) + "__" +
+         encodeDynamicMcpNamePart(toolName);
+}
+
+bool parseDynamicMcpToolName(const std::string &name, std::string &serverName,
+                             std::string &toolName) {
+  constexpr std::string_view kPrefix = "mcp__";
+  if (name.rfind(kPrefix.data(), 0) != 0) {
+    return false;
+  }
+
+  const std::string encoded = name.substr(kPrefix.size());
+  const std::size_t delim = encoded.find("__");
+  if (delim == std::string::npos || delim == 0 || delim + 2 >= encoded.size()) {
+    return false;
+  }
+
+  serverName = decodeDynamicMcpNamePart(encoded.substr(0, delim));
+  toolName = decodeDynamicMcpNamePart(encoded.substr(delim + 2));
+  return !serverName.empty() && !toolName.empty();
+}
+
+void appendDynamicMcpToolDefinitions(const AgentContext &context,
+                                     std::vector<provider::ToolDefinition> &defs) {
+  std::unordered_set<std::string> seen;
+  seen.reserve(defs.size() + context.state.loadedMcpTools.size());
+  for (const auto &def : defs) {
+    seen.insert(def.name);
+  }
+
+  for (const auto &serverName : context.state.loadedMcpServers) {
+    const auto loadedToolsIt = context.state.loadedMcpTools.find(serverName);
+    if (loadedToolsIt == context.state.loadedMcpTools.end()) {
+      continue;
+    }
+    for (const auto &toolName : loadedToolsIt->second) {
+      if (toolName.empty()) {
+        continue;
+      }
+      const std::string dynamicName = buildDynamicMcpToolName(serverName, toolName);
+      if (seen.count(dynamicName) > 0) {
+        continue;
+      }
+      provider::ToolDefinition dynamicDef;
+      dynamicDef.name = dynamicName;
+      dynamicDef.description =
+          "Invoke loaded MCP tool '" + toolName + "' on server '" + serverName +
+          "'.";
+      dynamicDef.inputSchema = R"({"type":"object","additionalProperties":true})";
+      defs.push_back(std::move(dynamicDef));
+      seen.insert(dynamicName);
+    }
+  }
+}
+
+std::vector<provider::ToolDefinition> getProviderToolDefinitions(
+    const AgentContext &context, const ToolRegistry &toolRegistry) {
+  auto defs = toolRegistry.getAvailableToolDefinitions(context.permissions);
+  appendDynamicMcpToolDefinitions(context, defs);
+  return defs;
+}
+
+std::optional<shared::ToolResult> executeDynamicMcpToolCall(
+    const AgentContext &context, const std::string &toolName,
+    const rapidjson::Document &toolInput, ToolRegistry &toolRegistry,
+    ToolContext &toolCtx) {
+  std::string serverName;
+  std::string remoteToolName;
+  if (!parseDynamicMcpToolName(toolName, serverName, remoteToolName)) {
+    return std::nullopt;
+  }
+
+  if (std::find(context.state.loadedMcpServers.begin(),
+                context.state.loadedMcpServers.end(),
+                serverName) == context.state.loadedMcpServers.end()) {
+    return shared::ToolResult::fail("MCP server is not loaded: " + serverName);
+  }
+
+  const auto loadedToolsIt = context.state.loadedMcpTools.find(serverName);
+  if (loadedToolsIt == context.state.loadedMcpTools.end() ||
+      std::find(loadedToolsIt->second.begin(), loadedToolsIt->second.end(),
+                remoteToolName) == loadedToolsIt->second.end()) {
+    return shared::ToolResult::fail("Loaded MCP tool not available on server '" +
+                                    serverName + "': " + remoteToolName);
+  }
+
+  rapidjson::Document mcpCallInput;
+  mcpCallInput.SetObject();
+  auto &alloc = mcpCallInput.GetAllocator();
+  mcpCallInput.AddMember(
+      "server_name",
+      rapidjson::Value(serverName.c_str(), alloc).Move(), alloc);
+  mcpCallInput.AddMember(
+      "tool_name",
+      rapidjson::Value(remoteToolName.c_str(), alloc).Move(), alloc);
+  rapidjson::Value argsValue;
+  argsValue.CopyFrom(toolInput, alloc);
+  mcpCallInput.AddMember("arguments", argsValue.Move(), alloc);
+
+  return toolRegistry.execute("mcp_call", mcpCallInput, toolCtx);
 }
 
 void saveCompactionSnapshot(const std::string &threadId,
@@ -505,6 +741,13 @@ std::string buildEmptyProviderRetryNudge(int attempt) {
   return prompt.str();
 }
 
+std::string buildActiveWorkContinuationNudge() {
+  return "Runtime work is still active (tool lifecycle, blocking process, "
+         "background process, or descendant subagent). Continue coordinating "
+         "until it settles. If there is nothing new to do yet, give a concise "
+         "progress update and keep monitoring.";
+}
+
 TodoStateSnapshot readTodoState(const AgentContext &context) {
   TodoStateSnapshot snapshot;
   if (!context.history || context.history->threadId.empty()) {
@@ -588,6 +831,23 @@ validateStreamedToolCalls(const std::vector<ToolCallChunk> &chunks) {
     }
   }
   return failures;
+}
+
+std::string buildToolStreamRetryNudge(const std::string &details,
+                                      int attempt,
+                                      int maxAttempts) {
+  std::string nudge =
+      "The previous response ended during tool-call generation before every "
+      "tool call was fully finalized. Retry the entire pending tool-call "
+      "batch from scratch in your next response. Do not continue from the "
+      "partial payload. Emit only complete tool calls with full JSON object "
+      "arguments before any normal prose.";
+  if (!details.empty()) {
+    nudge += "\nObserved failure: " + details;
+  }
+  nudge += "\nRetry attempt " + std::to_string(attempt) + " of " +
+           std::to_string(maxAttempts) + ".";
+  return nudge;
 }
 } // namespace
 
@@ -968,12 +1228,12 @@ void Agent::runImpl(const std::optional<std::string> &task,
 
   // 1. Bootstrap System Message
   if (context.history->turns.empty()) {
-    auto toolDefs =
-        toolRegistry.getAvailableToolDefinitions(context.permissions);
+    auto toolDefs = getProviderToolDefinitions(context, toolRegistry);
     std::string personaName = context.config.personaName.empty()
                                   ? "lead"
                                   : context.config.personaName;
     Persona persona = PurposeLoader::load(personaName);
+    PurposeLoader::loadProjectRootAgentsIntoContext(context);
     std::string toolBlock = PurposeLoader::buildToolsBlock(toolDefs);
 
     std::string protocolAddon =
@@ -985,6 +1245,7 @@ void Agent::runImpl(const std::optional<std::string> &task,
     std::string systemPrompt =
         PurposeLoader::composeSystemPrompt(persona, context, toolBlock) +
         protocolAddon;
+    context.identity.systemPrompt = systemPrompt;
 
     AgentTurn turn;
     turn.turnId = "bootstrap-system";
@@ -1030,8 +1291,11 @@ void Agent::runImpl(const std::optional<std::string> &task,
   int turnCount = 0;
   int consecutiveProviderFailures = 0;
   const int maxProviderRetries = 3;
+  int consecutiveTruncatedToolRetries = 0;
+  const int maxTruncatedToolRetries = 2;
   int consecutiveEmptyProviderResponses = 0;
-  const int maxEmptyProviderRetries = 2;
+  const int maxEmptyProviderRetries =
+      context.identity.parentId.empty() ? 2 : 0;
   std::optional<std::string> lastTodoContinuationFingerprint;
   auto hasQueuedUserTurnPending = [this]() {
     if (!context.history || context.history->turns.empty()) {
@@ -1042,16 +1306,53 @@ void Agent::runImpl(const std::optional<std::string> &task,
            !lastTurn.messages.empty() &&
            lastTurn.messages.front().role == Role::User;
   };
+  auto retryTruncatedToolStream = [&](const std::string &details,
+                                      int httpStatus) -> bool {
+    consecutiveTruncatedToolRetries++;
+    if (consecutiveTruncatedToolRetries > maxTruncatedToolRetries) {
+      return false;
+    }
+    constexpr int retryDelayMs = 250;
+    onEvent(StreamRetrying{consecutiveTruncatedToolRetries,
+                           maxTruncatedToolRetries, httpStatus,
+                           retryDelayMs, "Tool-call stream truncated, retrying",
+                           "", details});
+    appendTurnToHistory(makeInternalNudgeTurn(
+        "tool-stream-retry-",
+        buildToolStreamRetryNudge(details, consecutiveTruncatedToolRetries,
+                                  maxTruncatedToolRetries)));
+    if (!interruptibleSleep(std::chrono::milliseconds(retryDelayMs),
+                            runAbortController, runCancelToken.get())) {
+      context.state.currentStatus = AgentStatus::Cancelled;
+      return true;
+    }
+    return true;
+  };
   while (!taskFinished && turnCount < maxTurns && !runCancelToken->load()) {
     applyPendingModelSwitchIfAny();
 
-    // --- CHECK FOR CONTEXT COMPACTION ---
+    // --- CHECK FOR ROLLING MEMORY / LEGACY COMPACTION ---
     try {
       auto model = provider->getModelInfo(context.config.modelId);
       bool forceCompact = (std::getenv("FORCE_COMPACTION") != nullptr);
-      if (forceCompact || (model.contextWindow > 0 &&
-                           context.aggregateMetrics.tokens.contextSize >
-                               model.contextWindow * 0.8)) {
+      const bool legacyCompaction =
+          !context.config.rollingMemory.enabled ||
+          context.config.rollingMemory.mode == "legacy_compaction";
+      if (!legacyCompaction) {
+        auto persistRollingTurn = [&](const AgentTurn &turn) {
+          context.history->turns.push_back(turn);
+          if (context.config.persistHistory && journaler) {
+            journaler->appendTurn(turn);
+          }
+          onEvent(AgentTurnCompleted{context.identity.id, turn,
+                                     context.aggregateMetrics,
+                                     context.identity.parentId});
+        };
+        RollingContextManager::maintain(context, *provider, persistRollingTurn,
+                                        runCancelToken.get());
+      } else if (forceCompact || (model.contextWindow > 0 &&
+                                  context.aggregateMetrics.tokens.contextSize >
+                                      model.contextWindow * 0.8)) {
         compactContext(onEvent);
       }
       if (runCancelToken->load())
@@ -1073,6 +1374,7 @@ void Agent::runImpl(const std::optional<std::string> &task,
     turnCount++;
 
     std::vector<ToolCallChunk> accumulatedToolChunks;
+    std::vector<ToolCall> finalizedToolCalls;
     std::string fullResponse;
     std::string fullThinking;
     bool responseTruncated = false;
@@ -1139,7 +1441,7 @@ void Agent::runImpl(const std::optional<std::string> &task,
       const bool hasVisibleContent =
           !fullThinking.empty() || !fullResponse.empty();
       const bool hasPersistableToolCalls =
-          includeToolCalls && !accumulatedToolChunks.empty();
+          includeToolCalls && !finalizedToolCalls.empty();
       if (!hasVisibleContent && !hasPersistableToolCalls) {
         return false;
       }
@@ -1156,15 +1458,19 @@ void Agent::runImpl(const std::optional<std::string> &task,
       assistantMsg.role = Role::Assistant;
       if (!fullThinking.empty()) {
         assistantMsg.content.push_back(
-            ThinkingContent{fullThinking, lastThinkingSignature});
+            ThinkingContent{clampPersistedAssistantBody(
+                                fullThinking, kMaxPersistedThinkingBytes,
+                                "thinking"),
+                            lastThinkingSignature});
       }
       if (!fullResponse.empty()) {
-        assistantMsg.content.push_back(TextContent{fullResponse});
+        assistantMsg.content.push_back(TextContent{clampPersistedAssistantBody(
+            fullResponse, kMaxPersistedResponseBytes, "response")});
       }
       if (hasPersistableToolCalls) {
-        for (const auto &chunk : accumulatedToolChunks) {
+        for (const auto &call : finalizedToolCalls) {
           assistantMsg.content.push_back(
-              ToolCallContent{chunk.id, chunk.nameDelta, chunk.argsDelta});
+              ToolCallContent{call.id, call.name, call.args});
         }
       }
 
@@ -1182,20 +1488,20 @@ void Agent::runImpl(const std::optional<std::string> &task,
     };
 
     auto persistCancelledToolResults =
-        [&](const std::vector<ToolCallChunk> &chunks,
+        [&](const std::vector<ToolCall> &calls,
             const std::string &message) {
-          if (chunks.empty()) {
+          if (calls.empty()) {
             return;
           }
 
           AgentTurn toolResultTurn;
           toolResultTurn.turnId =
               "tools-" + std::to_string(context.history->turns.size());
-          for (const auto &chunk : chunks) {
+          for (const auto &call : calls) {
             Message msg;
             msg.role = Role::ToolResult;
             msg.content.push_back(
-                ToolResultContent{chunk.id, message, false, "", ""});
+                ToolResultContent{call.id, message, false, "", ""});
             msg.timestamp = nowMs();
             toolResultTurn.messages.push_back(std::move(msg));
           }
@@ -1231,19 +1537,22 @@ void Agent::runImpl(const std::optional<std::string> &task,
         opts.maxTokens = context.config.maxTokens;
       }
       opts.stop = context.config.stop;
-      opts.tools =
-          toolRegistry.getAvailableToolDefinitions(context.permissions);
+      opts.tools = getProviderToolDefinitions(context, toolRegistry);
       opts.abortSignal = runCancelToken.get();
       opts.abortController = runAbortController;
 
       const AgentHistory requestHistory =
           runtime_overlay::buildRequestHistoryWithRuntimeOverlays(
               context, *environment_->getHost(), environment_->getWorkspace());
+      const auto requestContextEstimate =
+          estimateContextWindowMetrics(requestHistory, opts.tools);
+      turnMetrics.context = requestContextEstimate;
       provider->stream(requestHistory, opts, [&](const StreamEvent &ev) {
         if (context.state.currentStatus == AgentStatus::ProviderWaiting) {
           if (std::holds_alternative<TextChunk>(ev) ||
               std::holds_alternative<ThinkingChunk>(ev) ||
-              std::holds_alternative<ToolCallChunk>(ev)) {
+              std::holds_alternative<ToolCallChunk>(ev) ||
+              std::holds_alternative<ToolCall>(ev)) {
             context.state.currentStatus = AgentStatus::Streaming;
           }
         }
@@ -1261,9 +1570,17 @@ void Agent::runImpl(const std::optional<std::string> &task,
           onEvent(ev);
           mergeToolCallChunk(accumulatedToolChunks, *tcc,
                              syntheticToolCallIdSerial++, turnCount);
-        } else if (auto *met = std::get_if<AgentMetrics>(&ev)) {
+        } else if (auto *tc = std::get_if<ToolCall>(&ev)) {
+          sawTool = true;
           onEvent(ev);
+          mergeFinalToolCall(finalizedToolCalls, *tc);
+        } else if (auto *met = std::get_if<AgentMetrics>(&ev)) {
           turnMetrics = *met;
+          if (turnMetrics.context.buckets.empty()) {
+            turnMetrics.context = requestContextEstimate;
+          }
+          reconcileContextWindowMetrics(turnMetrics);
+          onEvent(turnMetrics);
         } else if (auto *done = std::get_if<StreamDone>(&ev)) {
           onEvent(ev);
           turnStopReason = done->reason;
@@ -1273,7 +1590,6 @@ void Agent::runImpl(const std::optional<std::string> &task,
             context.state.currentStatus = AgentStatus::Cancelled;
             return;
           }
-          onEvent(ev);
           streamError = err->message;
         } else {
           onEvent(ev);
@@ -1288,10 +1604,11 @@ void Agent::runImpl(const std::optional<std::string> &task,
       // ToolCallChunk events are now emitted immediately above
       // No need to re-emit buffered events
 
-      if (sawTool) {
+      if (!finalizedToolCalls.empty() || sawTool) {
         turnStopReason = StopReason::ToolUse;
       } else if (sawContent) {
         accumulatedToolChunks.clear();
+        finalizedToolCalls.clear();
         if (turnStopReason == StopReason::ToolUse) {
           turnStopReason = StopReason::Stop;
         }
@@ -1299,7 +1616,7 @@ void Agent::runImpl(const std::optional<std::string> &task,
 
       // If there was a stream error and no content came back, retry
       if (!streamError.empty() && fullResponse.empty() &&
-          accumulatedToolChunks.empty()) {
+          finalizedToolCalls.empty() && accumulatedToolChunks.empty()) {
         // Don't retry if user interrupted
         if (runCancelToken->load()) {
           context.state.currentStatus = AgentStatus::Cancelled;
@@ -1334,32 +1651,93 @@ void Agent::runImpl(const std::optional<std::string> &task,
           streamError.find("incomplete tool-call arguments for tool") !=
               std::string::npos;
       if (!streamError.empty() && providerDeclaredToolStreamTruncation) {
+        if (retryTruncatedToolStream(streamError, streamErrorStatus)) {
+          if (context.state.currentStatus == AgentStatus::Cancelled) {
+            return;
+          }
+          continue;
+        }
         throw std::runtime_error("Provider stream error: " + streamError);
       }
 
-      const auto malformedToolCalls =
-          validateStreamedToolCalls(accumulatedToolChunks);
-      if (!malformedToolCalls.empty()) {
-        std::ostringstream error;
-        error << "Provider emitted malformed streamed tool call payload";
-        if (malformedToolCalls.size() > 1) {
-          error << "s";
+      std::vector<ToolCallChunk> unresolvedToolChunks;
+      unresolvedToolChunks.reserve(accumulatedToolChunks.size());
+      for (const auto &chunk : accumulatedToolChunks) {
+        if (!isChunkFinalized(chunk, finalizedToolCalls)) {
+          unresolvedToolChunks.push_back(chunk);
         }
-        error << ": ";
-        for (std::size_t i = 0; i < malformedToolCalls.size(); ++i) {
-          if (i > 0) {
-            error << "; ";
+      }
+
+      if (finalizedToolCalls.empty() && !accumulatedToolChunks.empty()) {
+        const auto malformedToolCalls =
+            validateStreamedToolCalls(accumulatedToolChunks);
+        if (!malformedToolCalls.empty()) {
+          std::ostringstream error;
+          error << "Tool call stream ended before a finalized payload was "
+                   "emitted: ";
+          for (std::size_t i = 0; i < malformedToolCalls.size(); ++i) {
+            if (i > 0) {
+              error << "; ";
+            }
+            const auto &failure = malformedToolCalls[i];
+            error << "["
+                  << (failure.toolCallId.empty() ? "unknown"
+                                                 : failure.toolCallId)
+                  << "] " << failure.message;
           }
-          const auto &failure = malformedToolCalls[i];
-          error << "["
-                << (failure.toolCallId.empty() ? "unknown" : failure.toolCallId)
-                << "] " << failure.message;
+          if (retryTruncatedToolStream(error.str(), streamErrorStatus)) {
+            if (context.state.currentStatus == AgentStatus::Cancelled) {
+              return;
+            }
+            continue;
+          }
+          throw std::runtime_error(error.str());
+        }
+
+        finalizedToolCalls = materializeFinalToolCalls(accumulatedToolChunks);
+        for (const auto &call : finalizedToolCalls) {
+          onEvent(call);
+        }
+      } else if (!unresolvedToolChunks.empty()) {
+        const auto malformedToolCalls =
+            validateStreamedToolCalls(unresolvedToolChunks);
+        std::ostringstream error;
+        error << "Tool call stream ended before a finalized payload was "
+                 "emitted: ";
+        if (malformedToolCalls.empty()) {
+          for (std::size_t i = 0; i < unresolvedToolChunks.size(); ++i) {
+            if (i > 0) {
+              error << "; ";
+            }
+            const auto &chunk = unresolvedToolChunks[i];
+            error << "["
+                  << (chunk.id.empty() ? "unknown" : chunk.id)
+                  << "] tool call never finalized";
+          }
+        } else {
+          for (std::size_t i = 0; i < malformedToolCalls.size(); ++i) {
+            if (i > 0) {
+              error << "; ";
+            }
+            const auto &failure = malformedToolCalls[i];
+            error << "["
+                  << (failure.toolCallId.empty() ? "unknown"
+                                                 : failure.toolCallId)
+                  << "] " << failure.message;
+          }
+        }
+        if (retryTruncatedToolStream(error.str(), streamErrorStatus)) {
+          if (context.state.currentStatus == AgentStatus::Cancelled) {
+            return;
+          }
+          continue;
         }
         throw std::runtime_error(error.str());
       }
 
       // Reset consecutive failure counter on success
       consecutiveProviderFailures = 0;
+      consecutiveTruncatedToolRetries = 0;
 
       if (runCancelToken->load()) {
         persistAssistantTurn(StopReason::Cancelled, false);
@@ -1368,9 +1746,10 @@ void Agent::runImpl(const std::optional<std::string> &task,
       }
 
       // --- Build assistant turn ---
-      persistAssistantTurn(turnStopReason, true);
+      const bool persistedAssistantTurn =
+          persistAssistantTurn(turnStopReason, true);
 
-      if (hasQueuedUserTurnPending()) {
+      if (persistedAssistantTurn && hasQueuedUserTurnPending()) {
         consecutiveEmptyProviderResponses = 0;
         context.state.currentStatus = AgentStatus::ProviderWaiting;
         onEvent(ProviderWaiting{});
@@ -1378,7 +1757,7 @@ void Agent::runImpl(const std::optional<std::string> &task,
       }
 
       // --- Check for termination ---
-      if (accumulatedToolChunks.empty()) {
+      if (finalizedToolCalls.empty()) {
         const bool emptyAssistantReply = fullResponse.empty();
         if (emptyAssistantReply) {
           consecutiveEmptyProviderResponses++;
@@ -1426,12 +1805,6 @@ void Agent::runImpl(const std::optional<std::string> &task,
         const bool hasHarnessOwnedActiveWork =
             hasPendingToolLifecycleActivity || hasBlockingProcesses ||
             hasRunningOwnedBackgroundProcess || hasRunningDescendantSubagent;
-        if (hasHarnessOwnedActiveWork) {
-          consecutiveEmptyProviderResponses = 0;
-          context.state.currentStatus = AgentStatus::Idle;
-          break; // Yield loop to wait for active work to complete
-        }
-
         const TodoStateSnapshot todoState = readTodoState(context);
         if (todoState.hasIncomplete) {
           const std::string fingerprint =
@@ -1454,7 +1827,14 @@ void Agent::runImpl(const std::optional<std::string> &task,
           continue; // Start a new iteration with the nudge turn in history
         }
 
-        if (emptyAssistantReply) {
+        const bool cleanNoSummary =
+            emptyAssistantReply && turnStopReason == StopReason::Stop &&
+            streamError.empty() && !hasHarnessOwnedActiveWork;
+        if (cleanNoSummary) {
+          consecutiveEmptyProviderResponses = 0;
+          lastTodoContinuationFingerprint.reset();
+          taskFinished = true;
+        } else if (emptyAssistantReply) {
           if (consecutiveEmptyProviderResponses <= maxEmptyProviderRetries) {
             appendTurnToHistory(
                 makeInternalNudgeTurn("empty-provider-retry-",
@@ -1468,6 +1848,22 @@ void Agent::runImpl(const std::optional<std::string> &task,
               std::to_string(consecutiveEmptyProviderResponses) + " attempts.");
         }
 
+        if (hasHarnessOwnedActiveWork) {
+          consecutiveEmptyProviderResponses = 0;
+          appendTurnToHistory(makeInternalNudgeTurn(
+              "active-work-continuation-",
+              buildActiveWorkContinuationNudge()));
+          if (!interruptibleSleep(std::chrono::milliseconds(250),
+                                  runAbortController,
+                                  runCancelToken.get())) {
+            context.state.currentStatus = AgentStatus::Cancelled;
+            return;
+          }
+          context.state.currentStatus = AgentStatus::ProviderWaiting;
+          onEvent(ProviderWaiting{});
+          continue;
+        }
+
         lastTodoContinuationFingerprint.reset();
         taskFinished = true;
       } else {
@@ -1476,19 +1872,19 @@ void Agent::runImpl(const std::optional<std::string> &task,
         context.state.currentStatus = AgentStatus::ExecutingTool;
 
         // Track pending tool calls
-        for (const auto &chunk : accumulatedToolChunks) {
-          context.state.pendingToolCalls.push_back(chunk.id);
+        for (const auto &call : finalizedToolCalls) {
+          context.state.pendingToolCalls.push_back(call.id);
         }
 
         auto toolStartMs = nowMs();
         if (runCancelToken->load()) {
-          persistCancelledToolResults(accumulatedToolChunks,
+          persistCancelledToolResults(finalizedToolCalls,
                                       "User aborted tool manually.");
           context.state.pendingToolCalls.clear();
           context.state.currentStatus = AgentStatus::Cancelled;
           break;
         }
-        executeTools(accumulatedToolChunks, onEvent, runCancelToken);
+        executeTools(finalizedToolCalls, onEvent, runCancelToken);
         auto toolEndMs = nowMs();
 
         // Update the turn metrics with tool execution time
@@ -1615,13 +2011,13 @@ void Agent::runImpl(const std::optional<std::string> &task,
 }
 
 void Agent::executeTools(
-    const std::vector<ToolCallChunk> &chunks,
+    const std::vector<ToolCall> &calls,
     std::function<void(const StreamEvent &)> onEvent,
     const std::shared_ptr<std::atomic<bool>> &runCancelToken) {
   // Check for insanity loop BEFORE executing tools
-  for (const auto &chunk : chunks) {
+  for (const auto &call : calls) {
     // Create signature: "toolName:args"
-    std::string signature = chunk.nameDelta + ":" + chunk.argsDelta;
+    std::string signature = call.name + ":" + call.args;
 
     // Check if this exact call has been repeated consecutively
     int repeatCount = 0;
@@ -1685,23 +2081,25 @@ void Agent::executeTools(
   };
   std::vector<ToolExecutionResult> immediateResults;
   std::vector<RunnableChunk> runnableChunks;
-  runnableChunks.reserve(chunks.size());
-  for (std::size_t idx = 0; idx < chunks.size(); ++idx) {
-    const auto &chunk = chunks[idx];
+  runnableChunks.reserve(calls.size());
+  for (std::size_t idx = 0; idx < calls.size(); ++idx) {
+    const auto &call = calls[idx];
     rapidjson::Document input;
-    input.Parse(chunk.argsDelta.c_str());
+    input.Parse(call.args.c_str());
     if (input.HasParseError()) {
       ToolExecutionResult result;
       result.index = idx;
-      result.toolCallId = chunk.id;
-      result.toolName = chunk.nameDelta;
-      result.toolArgs = chunk.argsDelta;
-      result.resultStr = "Invalid JSON arguments: " + chunk.argsDelta;
+      result.toolCallId = call.id;
+      result.toolName = call.name;
+      result.toolArgs = call.args;
+      result.resultStr = "Invalid JSON arguments: " + call.args;
       result.success = false;
       immediateResults.push_back(std::move(result));
       continue;
     }
-    runnableChunks.push_back(RunnableChunk{chunk, idx});
+    runnableChunks.push_back(
+        RunnableChunk{ToolCallChunk{call.id, call.index, call.name, call.args},
+                      idx});
   }
 
   const auto sharedState = std::make_shared<SharedExecutionState>();
@@ -1730,8 +2128,12 @@ void Agent::executeTools(
         ToolContext toolCtx{*environment_->getHost(), *this, runnable.chunk.id,
                             runCancelToken.get(),
                             &provider::LLMSearchProviderRegistry::instance()};
-        auto result =
-            toolRegistry.execute(runnable.chunk.nameDelta, input, toolCtx);
+        auto dynamicMcpResult = executeDynamicMcpToolCall(
+            context, runnable.chunk.nameDelta, input, toolRegistry, toolCtx);
+        auto result = dynamicMcpResult.has_value()
+                          ? *dynamicMcpResult
+                          : toolRegistry.execute(runnable.chunk.nameDelta, input,
+                                                 toolCtx);
         execResult.success = result.success;
         execResult.resultProcessId = result.processId;
         execResult.resultSubagentId = result.subagentId;
@@ -1798,20 +2200,20 @@ void Agent::executeTools(
     }
   }
   if (runCancelToken->load()) {
-    for (const auto &chunk : chunks) {
-      if (chunk.id.empty() || collectedToolIds.count(chunk.id) > 0) {
+    for (const auto &call : calls) {
+      if (call.id.empty() || collectedToolIds.count(call.id) > 0) {
         continue;
       }
       ToolExecutionResult cancelled;
       const auto it = std::find_if(runnableChunks.begin(), runnableChunks.end(),
                                    [&](const RunnableChunk &runnable) {
-                                     return runnable.chunk.id == chunk.id;
+                                     return runnable.chunk.id == call.id;
                                    });
       cancelled.index =
           it != runnableChunks.end() ? it->index : collectedResults.size();
-      cancelled.toolCallId = chunk.id;
-      cancelled.toolName = chunk.nameDelta;
-      cancelled.toolArgs = chunk.argsDelta;
+      cancelled.toolCallId = call.id;
+      cancelled.toolName = call.name;
+      cancelled.toolArgs = call.args;
       cancelled.resultStr = "User aborted tool manually.";
       cancelled.success = false;
       collectedResults.push_back(std::move(cancelled));
@@ -1979,6 +2381,9 @@ void Agent::compactContext(
   std::string fullCompactionPrompt = factualState + compactionPrompt;
   std::string fullSummary;
   std::string fullThinking;
+  std::string compactionStreamError;
+  int compactionStreamErrorStatus = 0;
+  std::string compactionStreamErrorAccount;
 
   if (interrupted.load()) {
     context.state.currentStatus = AgentStatus::Cancelled;
@@ -2010,6 +2415,7 @@ void Agent::compactContext(
   const std::size_t summarizeEnd =
       context.history->turns.size() - preserveTailCount;
   std::optional<std::size_t> lastToolResultTurnIndex;
+  std::optional<std::size_t> pairedToolCallTurnIndex;
   for (std::size_t i = summarizeEnd; i > 1; --i) {
     const auto &candidate = context.history->turns[i - 1];
     bool hasToolResult = false;
@@ -2030,8 +2436,52 @@ void Agent::compactContext(
     }
   }
 
+  if (lastToolResultTurnIndex.has_value()) {
+    std::unordered_set<std::string> toolCallIds;
+    const auto &toolTurn = context.history->turns[*lastToolResultTurnIndex];
+    for (const auto &msg : toolTurn.messages) {
+      for (const auto &part : msg.content) {
+        if (const auto *toolResult = std::get_if<ToolResultContent>(&part)) {
+          if (!toolResult->toolCallId.empty()) {
+            toolCallIds.insert(toolResult->toolCallId);
+          }
+        }
+      }
+    }
+
+    if (!toolCallIds.empty()) {
+      for (std::size_t i = *lastToolResultTurnIndex; i > 1; --i) {
+        const auto &candidate = context.history->turns[i - 1];
+        bool matched = false;
+        for (const auto &msg : candidate.messages) {
+          if (msg.role != Role::Assistant) {
+            continue;
+          }
+          for (const auto &part : msg.content) {
+            if (const auto *toolCall = std::get_if<ToolCallContent>(&part)) {
+              if (toolCallIds.count(toolCall->id) > 0) {
+                matched = true;
+                break;
+              }
+            }
+          }
+          if (matched) {
+            break;
+          }
+        }
+        if (matched) {
+          pairedToolCallTurnIndex = i - 1;
+          break;
+        }
+      }
+    }
+  }
+
   for (size_t i = 1; i < summarizeEnd; ++i) {
     if (lastToolResultTurnIndex.has_value() && i == *lastToolResultTurnIndex) {
+      continue;
+    }
+    if (pairedToolCallTurnIndex.has_value() && i == *pairedToolCallTurnIndex) {
       continue;
     }
     historyToSummarize.turns.push_back(context.history->turns[i]);
@@ -2065,6 +2515,11 @@ void Agent::compactContext(
           fullThinking += thk->delta;
           onEvent(AgentCompactionThinking{context.identity.id, thk->delta,
                                           context.identity.parentId});
+        } else if (auto *err = std::get_if<StreamError>(&ev)) {
+          compactionStreamError = err->message;
+          compactionStreamErrorStatus = err->httpStatus;
+          compactionStreamErrorAccount = err->accountLocator;
+          onEvent(ev);
         } else {
           onEvent(ev);
         }
@@ -2078,8 +2533,33 @@ void Agent::compactContext(
 
   // Validate summary before clearing history
   if (fullSummary.empty()) {
-    onEvent(StreamError{"Context compaction failed: Empty summary generated", 0,
-                        ""});
+    std::string message;
+    int httpStatus = 0;
+    std::string accountLocator;
+    if (!compactionStreamError.empty()) {
+      message = appendProviderModelContext(context.config,
+                                           "Context compaction failed: " +
+                                               compactionStreamError);
+      httpStatus = compactionStreamErrorStatus;
+      accountLocator = compactionStreamErrorAccount;
+
+      AgentTurn errorTurn;
+      errorTurn.turnId =
+          "error-" + std::to_string(context.history->turns.size());
+      Message errorMsg;
+      errorMsg.role = Role::Error;
+      errorMsg.content.push_back(ErrorContent{
+          "Compaction Error", "The agent failed to compact context.", message});
+      errorMsg.timestamp = nowMs();
+      errorTurn.messages.push_back(errorMsg);
+      context.history->turns.push_back(errorTurn);
+      if (context.config.persistHistory && journaler) {
+        journaler->appendTurn(errorTurn);
+      }
+    } else {
+      message = "Context compaction failed: Empty summary generated";
+    }
+    onEvent(StreamError{message, httpStatus, accountLocator});
     context.state.currentStatus = AgentStatus::Idle;
     return;
   }
@@ -2119,6 +2599,7 @@ void Agent::compactContext(
   summaryMsg.timestamp = nowMs();
 
   summaryTurn.messages.push_back(summaryMsg);
+  summaryTurn.metrics.tokens.contextSize = 1000;
   newTurns.push_back(summaryTurn);
 
   const uint32_t compactedContextSize = 1000;
@@ -2126,6 +2607,7 @@ void Agent::compactContext(
       (oldTokens > compactedContextSize) ? oldTokens - compactedContextSize : 0;
   AgentTurn endTurn;
   endTurn.turnId = "compaction-end-" + compactionId;
+  endTurn.metrics.tokens.contextSize = compactedContextSize;
   Message endMsg;
   endMsg.role = Role::System;
   endMsg.content.push_back(TextContent{
@@ -2137,6 +2619,15 @@ void Agent::compactContext(
   newTurns.push_back(endTurn);
 
   if (lastToolResultTurnIndex.has_value()) {
+    if (pairedToolCallTurnIndex.has_value()) {
+      const auto &callTurn = context.history->turns[*pairedToolCallTurnIndex];
+      bool alreadyPreservedCall = std::any_of(
+          preservedTailTurns.begin(), preservedTailTurns.end(),
+          [&](const AgentTurn &turn) { return turn.turnId == callTurn.turnId; });
+      if (!alreadyPreservedCall) {
+        newTurns.push_back(callTurn);
+      }
+    }
     const auto &toolTurn = context.history->turns[*lastToolResultTurnIndex];
     bool alreadyPreserved = std::any_of(
         preservedTailTurns.begin(), preservedTailTurns.end(),

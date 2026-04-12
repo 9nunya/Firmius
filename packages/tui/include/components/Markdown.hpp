@@ -10,6 +10,7 @@ namespace firmius::tui {
 void SetMarkdownWidth(int width);
 
 std::string CollapseExpandedReferencesForDisplay(const std::string &text);
+std::string ClampTranscriptTextForDisplay(const std::string &text);
 
 ftxui::Element RenderMarkdown(const std::string& text, bool dim = false);
 

@@ -1,5 +1,6 @@
 #include "tools/FileEditTool.hpp"
 #include "agents/Agent.hpp"
+#include "lsp/LspService.hpp"
 #include "utils/LineRange.hpp"
 #include "utils/StringUtil.hpp"
 #include <algorithm>
@@ -302,6 +303,9 @@ void mergeSanitation(utils::LineRangeTrimmer::SanitationResult *totals,
     return;
   }
   totals->lineRangePrefixesStripped += delta.lineRangePrefixesStripped;
+  totals->hashlinePrefixesStripped += delta.hashlinePrefixesStripped;
+  totals->malformedHashFragmentsStripped +=
+      delta.malformedHashFragmentsStripped;
   totals->diffMarkersStripped += delta.diffMarkersStripped;
   totals->boundaryEchoesRemoved += delta.boundaryEchoesRemoved;
   totals->boundaryEchoRemoved =
@@ -327,8 +331,9 @@ sanitizeReplacementLines(const FileEditOperationInput &edit,
       lineSanitation.suspiciousContentRejected = true;
       mergeSanitation(sanitation, lineSanitation);
       throw std::runtime_error(
-          "Replacement text still appears to contain LineRange metadata. "
-          "Remove any line prefixes or diff markers from new_lines.");
+          "Replacement text still appears to contain Hashline metadata. "
+          "Remove lineNumber#hash| prefixes or trailing hash fragments from "
+          "new_lines.");
     }
     if (utils::LineRangeTrimmer::startsWithSuspiciousDiffJunk(line)) {
       lineSanitation.suspiciousContentFound = true;
@@ -549,6 +554,12 @@ void addSanitationMember(
   rapidjson::Value sanitationJson(rapidjson::kObjectType);
   sanitationJson.AddMember("linerange_prefixes_stripped",
                            sanitation.lineRangePrefixesStripped, alloc);
+  sanitationJson.AddMember("line_range_prefixes_stripped",
+                           sanitation.lineRangePrefixesStripped, alloc);
+  sanitationJson.AddMember("hashline_prefixes_stripped",
+                           sanitation.hashlinePrefixesStripped, alloc);
+  sanitationJson.AddMember("malformed_hash_fragments_stripped",
+                           sanitation.malformedHashFragmentsStripped, alloc);
   sanitationJson.AddMember("diff_markers_stripped",
                            sanitation.diffMarkersStripped, alloc);
   sanitationJson.AddMember("boundary_echoes_removed",
@@ -1072,6 +1083,11 @@ FileEditExecutionResult executeSingleFileEdit(const FileEditTargetInput &input,
   try {
     ctx.agent.getPermissions()->validatePathAccess(absolutePath,
                                                    AccessMode::WRITE);
+    std::unique_ptr<rapidjson::Document> beforeLsp;
+    if (fileExists) {
+      beforeLsp = std::make_unique<rapidjson::Document>(
+          collectFileLspDiagnostics(absolutePath, ctx));
+    }
 
     if (hasAnchorEdits || hasPatch) {
       if (!fileExists) {
@@ -1163,6 +1179,9 @@ FileEditExecutionResult executeSingleFileEdit(const FileEditTargetInput &input,
       }
       result.doc.AddMember("operations", operations, alloc);
       addSanitationMember(result.doc, sanitation, alloc);
+      auto afterLsp = collectFileLspDiagnostics(absolutePath, ctx);
+      attachFileEditLspSummary(result.doc, absolutePath, beforeLsp.get(),
+                               &afterLsp);
       result.success = true;
       return result;
     }
@@ -1181,11 +1200,24 @@ FileEditExecutionResult executeSingleFileEdit(const FileEditTargetInput &input,
         result.failureMessage = result.doc["error"].GetString();
         return result;
       }
+      auto afterLsp = collectFileLspDiagnostics(absolutePath, ctx);
+      attachFileEditLspSummary(result.doc, absolutePath, beforeLsp.get(),
+                               &afterLsp);
       result.success = true;
       return result;
     }
 
     if (hasOverwrite) {
+      if (fileExists &&
+          !ctx.agent.getEnvironment()->getWorkspace().hasFullyReadFile(
+              absolutePath)) {
+        result.failureMessage =
+            "Refusing to overwrite an existing file that has not been fully "
+            "read in this thread. Read the full file with 'file_read' before "
+            "using content overwrite mode.";
+        return result;
+      }
+
       ctx.host.writeFile(
           absolutePath,
           std::vector<uint8_t>(input.content.begin(), input.content.end()));
@@ -1200,11 +1232,17 @@ FileEditExecutionResult executeSingleFileEdit(const FileEditTargetInput &input,
                            static_cast<uint32_t>(input.content.size()), alloc);
       result.doc.AddMember("watch_state",
                            rapidjson::Value("refreshed", alloc).Move(), alloc);
+      auto afterLsp = collectFileLspDiagnostics(absolutePath, ctx);
+      attachFileEditLspSummary(result.doc, absolutePath, beforeLsp.get(),
+                               &afterLsp);
       result.success = true;
       return result;
     }
 
     result.doc = executeLegacyReplaceDoc(effectiveInput, absolutePath, ctx);
+    auto afterLsp = collectFileLspDiagnostics(absolutePath, ctx);
+    attachFileEditLspSummary(result.doc, absolutePath, beforeLsp.get(),
+                             &afterLsp);
     result.success = true;
     return result;
   } catch (const std::exception &e) {
@@ -1391,7 +1429,9 @@ shared::ToolResult FileEditTool::execute(const FileEditInput &input,
   if (hasMultiFile && hasTopLevelPayload) {
     return shared::ToolResult::fail(
         "Use either top-level path/content/edits/patch fields or files[] in a "
-        "single file_edit call, not both.");
+        "single file_edit call, not both. For multi-file creates or edits, use "
+        "files[] only; writing a new file will create parent directories "
+        "automatically.");
   }
 
   if (!hasMultiFile) {

@@ -467,6 +467,116 @@ TEST_F(PurposeLoaderTest, bootstrapDefaultsIgnoresUnwritableUserPromptCache) {
     EXPECT_NO_THROW(PurposeLoader::bootstrapDefaults(builtinDir.string()));
 }
 
+TEST_F(PurposeLoaderTest, loadProjectRootAgentsIntoContextLoadsRootOnce) {
+    const auto projectRoot = std::filesystem::temp_directory_path() /
+                             "firmius_agents_root_bootstrap_test";
+    std::filesystem::remove_all(projectRoot);
+    std::filesystem::create_directories(projectRoot);
+
+    const auto rootAgentsPath = projectRoot / "AGENTS.md";
+    {
+        std::ofstream rootAgents(rootAgentsPath);
+        rootAgents << "Root guidance";
+    }
+
+    AgentContext context;
+    context.environment.cwd = projectRoot.string();
+
+    EXPECT_TRUE(PurposeLoader::loadProjectRootAgentsIntoContext(context));
+    EXPECT_FALSE(PurposeLoader::loadProjectRootAgentsIntoContext(context));
+
+    const std::string canonicalRootAgents =
+        std::filesystem::weakly_canonical(rootAgentsPath).string();
+    const std::string canonicalRoot =
+        std::filesystem::weakly_canonical(projectRoot).string();
+
+    EXPECT_EQ(std::count(context.state.loadedAgentMds.begin(),
+                         context.state.loadedAgentMds.end(),
+                         canonicalRootAgents),
+              1);
+    EXPECT_EQ(context.state.loadedSkillRoots[canonicalRootAgents],
+              canonicalRoot);
+
+    std::filesystem::remove_all(projectRoot);
+}
+
+TEST_F(PurposeLoaderTest,
+       loadDiscoveredAgentsForPathFindsAncestorsAndSkipsRootReload) {
+    const auto projectRoot = std::filesystem::temp_directory_path() /
+                             "firmius_agents_discovery_test";
+    const auto packageDir = projectRoot / "pkg";
+    const auto moduleDir = packageDir / "module";
+    std::filesystem::remove_all(projectRoot);
+    std::filesystem::create_directories(moduleDir);
+
+    const auto rootAgentsPath = projectRoot / "AGENTS.md";
+    const auto packageAgentsPath = packageDir / "AGENTS.md";
+    const auto moduleAgentsPath = moduleDir / "AGENTS.md";
+    const auto targetPath = moduleDir / "feature.cpp";
+
+    {
+        std::ofstream rootAgents(rootAgentsPath);
+        rootAgents << "Root guidance";
+    }
+    {
+        std::ofstream packageAgents(packageAgentsPath);
+        packageAgents << "Package guidance";
+    }
+    {
+        std::ofstream moduleAgents(moduleAgentsPath);
+        moduleAgents << "Module guidance";
+    }
+    {
+        std::ofstream targetFile(targetPath);
+        targetFile << "int x = 1;\n";
+    }
+
+    AgentContext context;
+    context.environment.cwd = projectRoot.string();
+
+    ASSERT_TRUE(PurposeLoader::loadProjectRootAgentsIntoContext(context));
+    const std::string canonicalRootAgents =
+        std::filesystem::weakly_canonical(rootAgentsPath).string();
+    const std::string canonicalPackageAgents =
+        std::filesystem::weakly_canonical(packageAgentsPath).string();
+    const std::string canonicalModuleAgents =
+        std::filesystem::weakly_canonical(moduleAgentsPath).string();
+
+    const std::size_t added =
+        PurposeLoader::loadDiscoveredAgentsForPath(context, targetPath.string());
+    EXPECT_EQ(added, 2u);
+    EXPECT_EQ(std::count(context.state.loadedAgentMds.begin(),
+                         context.state.loadedAgentMds.end(),
+                         canonicalRootAgents),
+              1);
+    EXPECT_EQ(std::count(context.state.loadedAgentMds.begin(),
+                         context.state.loadedAgentMds.end(),
+                         canonicalPackageAgents),
+              1);
+    EXPECT_EQ(std::count(context.state.loadedAgentMds.begin(),
+                         context.state.loadedAgentMds.end(),
+                         canonicalModuleAgents),
+              1);
+
+    const std::size_t addedAgain =
+        PurposeLoader::loadDiscoveredAgentsForPath(context, targetPath.string());
+    EXPECT_EQ(addedAgain, 0u);
+    EXPECT_EQ(std::count(context.state.loadedAgentMds.begin(),
+                         context.state.loadedAgentMds.end(),
+                         canonicalRootAgents),
+              1);
+    EXPECT_EQ(std::count(context.state.loadedAgentMds.begin(),
+                         context.state.loadedAgentMds.end(),
+                         canonicalPackageAgents),
+              1);
+    EXPECT_EQ(std::count(context.state.loadedAgentMds.begin(),
+                         context.state.loadedAgentMds.end(),
+                         canonicalModuleAgents),
+              1);
+
+    std::filesystem::remove_all(projectRoot);
+}
+
 TEST(PromptContractsTest, basePromptRequiresNarrativeTextBetweenToolEpisodes) {
     const auto prompt = readRepoFile(repoRootFromSourceFile() / "prompts" / "base.md");
 
@@ -491,6 +601,14 @@ TEST(PromptContractsTest, basePromptRequiresNarrativeTextBetweenToolEpisodes) {
 TEST(PromptContractsTest, leadPromptRequiresAcceptanceBeforeDone) {
     const auto prompt = readRepoFile(repoRootFromSourceFile() / "prompts" / "lead.md");
 
+    EXPECT_NE(prompt.find("Not every task deserves a thread plan."),
+              std::string::npos);
+    EXPECT_NE(prompt.find("Use the TODO/direct lane when the task is:"),
+              std::string::npos);
+    EXPECT_NE(prompt.find("do NOT create a plan whose only purpose is to continue discovery or diagnose the issue"),
+              std::string::npos);
+    EXPECT_NE(prompt.find("if you are personally doing the next direct change, do it in the TODO/direct lane without manufacturing a chunk"),
+              std::string::npos);
     EXPECT_NE(prompt.find("Executor self-report is not acceptance. The lead must review before any chunk becomes `Done`."),
               std::string::npos);
     EXPECT_NE(prompt.find("Do not create detailed downstream implementation chunks that assume an unresolved design/spec decision as committed truth."),
@@ -509,6 +627,10 @@ TEST(PromptContractsTest, leadPromptRequiresAcceptanceBeforeDone) {
               std::string::npos);
     EXPECT_NE(prompt.find("After `chunk_add`, the normal next step is dispatch (`summon_subagent`) or waiting for dependency truth, not direct self-execution by lead."),
               std::string::npos);
+    EXPECT_NE(prompt.find("If the user explicitly forbids planner / plan_checker for this turn, obey that constraint and use direct commit even when the work projects above 3 chunks."),
+              std::string::npos);
+    EXPECT_NE(prompt.find("depends_on` may reference exact chunk titles from the same commit batch; runtime will resolve those title references after commit"),
+              std::string::npos);
 }
 
 TEST(PromptContractsTest, executorPromptRequiresVerificationEvidenceAndLeadAcceptance) {
@@ -521,6 +643,8 @@ TEST(PromptContractsTest, executorPromptRequiresVerificationEvidenceAndLeadAccep
     EXPECT_NE(prompt.find("run `cmake --build build -j16` before test commands so all targets are compiled"),
               std::string::npos);
     EXPECT_NE(prompt.find("Do not claim completion without evidence in `result_summary`."),
+              std::string::npos);
+    EXPECT_NE(prompt.find("If the chunk owns a greenfield surface and the target directory is absent, that is not a blocker"),
               std::string::npos);
 }
 
@@ -553,6 +677,29 @@ TEST(PromptContractsTest, hotrunPromptIsSwitchableRemediationLead) {
     EXPECT_NE(prompt.find("canSpawn: true"), std::string::npos);
     EXPECT_NE(prompt.find("You are a top-level remediation lead."), std::string::npos);
     EXPECT_NE(prompt.find("fix waves"), std::string::npos);
+    EXPECT_NE(prompt.find("Treat the issue ledger and todo list as diagnosis state, not as a committed plan."),
+              std::string::npos);
+    EXPECT_NE(prompt.find("Before dispatching executors for a fix wave, commit that wave as plan/chunks with clear verification."),
+              std::string::npos);
+    EXPECT_NE(prompt.find("If the user explicitly says to dream now, use `summon_subagent` with `dream: true`"),
+              std::string::npos);
+}
+
+TEST(PromptContractsTest, alternateLeadPromptsDefineTodoVsPlanTransitions) {
+    const auto fastPrompt = readRepoFile(repoRootFromSourceFile() / "prompts" / "fast.md");
+    const auto plannerPrompt = readRepoFile(repoRootFromSourceFile() / "prompts" / "planner.md");
+    const auto checkerPrompt = readRepoFile(repoRootFromSourceFile() / "prompts" / "plan_checker.md");
+
+    EXPECT_NE(fastPrompt.find("do NOT create plan/chunks for pure discovery or diagnosis"),
+              std::string::npos);
+    EXPECT_NE(fastPrompt.find("do NOT dispatch top-level workers directly from `fast`"),
+              std::string::npos);
+    EXPECT_NE(fastPrompt.find("If the user explicitly says to dream now, use `summon_subagent` with `dream: true`"),
+              std::string::npos);
+    EXPECT_NE(plannerPrompt.find("If root cause, edit points, or verification surfaces are still unknown, say discovery is insufficient rather than inventing a discovery plan."),
+              std::string::npos);
+    EXPECT_NE(checkerPrompt.find("Is this an execution plan, or is it really a plan to continue discovery/diagnosis that should have stayed in lead todo/scout mode?"),
+              std::string::npos);
 }
 
 TEST(HintingContractsTest, builtinGptHintingDefendsAgainstAskingAndPrematureCompletion) {
@@ -575,6 +722,8 @@ TEST(HintingContractsTest, builtinGptHintingDefendsAgainstAskingAndPrematureComp
     EXPECT_NE(prompt.find("never mix `content` with Hashline `edits` in one `file_edit` call"),
               std::string::npos);
     EXPECT_NE(prompt.find("if you are personally doing the next direct change, do it without manufacturing a chunk"),
+              std::string::npos);
+    EXPECT_NE(prompt.find("If the tool error already tells you the repair shape, apply that repair in the very next tool call"),
               std::string::npos);
 }
 

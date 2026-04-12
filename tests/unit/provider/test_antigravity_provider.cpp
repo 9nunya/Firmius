@@ -1,16 +1,23 @@
 #include "providers/AntigravityProvider.hpp"
 #include "providers/AntigravityProtocol.hpp"
+#include "providers/LLMSearchProvider.hpp"
+#include "providers/LLMSearchProviderRegistry.hpp"
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <future>
 #include <filesystem>
 #include <fstream>
+#include <thread>
 #include <vector>
 
 using firmius::provider::AntigravityProvider;
 using firmius::provider::AntigravityProtocol;
+using firmius::provider::LLMSearchProvider;
+using firmius::provider::LLMSearchProviderRegistry;
 using firmius::provider::ProviderOptions;
 using firmius::shared::AgentMetrics;
 using firmius::shared::AgentHistory;
@@ -90,7 +97,126 @@ std::string firstFunctionResponseName(const std::string &body) {
   return "";
 }
 
+class BlockingSearchProvider : public LLMSearchProvider {
+public:
+  explicit BlockingSearchProvider(std::shared_future<void> release)
+      : release_(std::move(release)) {}
+
+  std::string name() const override { return "blocking-search-test"; }
+
+  bool isAvailable() const override {
+    entered_.store(true, std::memory_order_relaxed);
+    while (release_.wait_for(std::chrono::milliseconds(5)) !=
+           std::future_status::ready) {
+    }
+    return false;
+  }
+
+  firmius::provider::SearchResult
+  search(const std::string &, const std::vector<std::string> &) override {
+    return {};
+  }
+
+  bool entered() const { return entered_.load(std::memory_order_relaxed); }
+
+private:
+  std::shared_future<void> release_;
+  mutable std::atomic<bool> entered_{false};
+};
+
+class ReadySearchProvider : public LLMSearchProvider {
+public:
+  std::string name() const override { return "ready-search-test"; }
+
+  bool isAvailable() const override { return true; }
+
+  firmius::provider::SearchResult
+  search(const std::string &, const std::vector<std::string> &) override {
+    return {};
+  }
+};
+
+class CountingAntigravityProvider : public AntigravityProvider {
+public:
+  bool configured = false;
+  mutable std::atomic<int> isConfiguredCalls{0};
+  mutable std::atomic<int> availableAccountCalls{0};
+
+  bool isConfigured() const override {
+    ++isConfiguredCalls;
+    return configured;
+  }
+
+  std::optional<firmius::shared::OAuthAccount>
+  getAvailableAccount(const std::optional<std::string> &modelId =
+                          std::nullopt) override {
+    (void)modelId;
+    ++availableAccountCalls;
+    return std::nullopt;
+  }
+};
+
 } // namespace
+
+TEST(SearchProviderRegistry, AvailabilityChecksDoNotHoldRegistryMutex) {
+  auto &registry = LLMSearchProviderRegistry::instance();
+  registry.unregisterProvider("blocking-search-test");
+  registry.unregisterProvider("ready-search-test");
+
+  std::promise<void> releasePromise;
+  auto release = releasePromise.get_future().share();
+  auto blocking = std::make_shared<BlockingSearchProvider>(release);
+  auto ready = std::make_shared<ReadySearchProvider>();
+  registry.registerProvider(blocking);
+  registry.registerProvider(ready);
+
+  auto lookup = std::async(std::launch::async, [&registry]() {
+    return registry.getFirstAvailable();
+  });
+
+  for (int i = 0; i < 50 && !blocking->entered(); ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  ASSERT_TRUE(blocking->entered());
+
+  auto listNames = std::async(std::launch::async, [&registry]() {
+    return registry.listProviderNames();
+  });
+  EXPECT_EQ(listNames.wait_for(std::chrono::milliseconds(100)),
+            std::future_status::ready);
+
+  releasePromise.set_value();
+
+  auto first = lookup.get();
+  ASSERT_TRUE(first.has_value());
+  EXPECT_EQ(first->get().name(), "ready-search-test");
+
+  registry.unregisterProvider("blocking-search-test");
+  registry.unregisterProvider("ready-search-test");
+}
+
+TEST(GoogleSearchProvider, AvailabilityCheckDoesNotProbeAccounts) {
+  const auto tempHome =
+      std::filesystem::temp_directory_path() /
+      "firmius_google_search_is_available_home";
+  std::filesystem::remove_all(tempHome);
+  std::filesystem::create_directories(tempHome / ".firmius");
+  ScopedHomeOverride scopedHome(tempHome);
+
+  auto &registry = LLMSearchProviderRegistry::instance();
+  registry.unregisterProvider("google-search");
+
+  CountingAntigravityProvider provider;
+  provider.configured = true;
+
+  auto first = registry.getFirstAvailable();
+  ASSERT_TRUE(first.has_value());
+  EXPECT_EQ(first->get().name(), "google-search");
+  EXPECT_GT(provider.isConfiguredCalls.load(), 0);
+  EXPECT_EQ(provider.availableAccountCalls.load(), 0);
+
+  registry.unregisterProvider("google-search");
+}
 
 TEST(AntigravityProvider,
      ThinkingFieldWithoutExplicitTypeStillEmitsThinkingChunk) {
@@ -238,6 +364,23 @@ TEST(AntigravityProvider, AvailableAccountUsesHighestQuotaWithinModelBucket) {
   auto pro = provider.getAvailableAccount(std::string("gemini-3.1-pro"));
   ASSERT_TRUE(pro.has_value());
   EXPECT_EQ(pro->getIdentifier(), "c@example.com");
+}
+
+TEST(AntigravityProvider, StaticModelsIncludeSupportedGeminiFlashVariantsOnly) {
+  const auto models = AntigravityProvider::getStaticModels();
+
+  EXPECT_EQ(models.count("gemini-3-flash"), 1u);
+  EXPECT_EQ(models.count("gemini-2.5-flash"), 1u);
+  EXPECT_EQ(models.count("gemini-2.5-flash-lite"), 1u);
+  EXPECT_EQ(models.count("gemini-2.5-flash-thinking"), 1u);
+
+  EXPECT_EQ(models.count("gemini-3-flash-agent"), 0u);
+  EXPECT_EQ(models.count("gemini-3-pro"), 0u);
+
+  EXPECT_EQ(models.at("gemini-3-flash").contextWindow, 1048576u);
+  EXPECT_EQ(models.at("gemini-2.5-flash").contextWindow, 1048576u);
+  EXPECT_EQ(models.at("gemini-2.5-flash-lite").contextWindow, 1048576u);
+  EXPECT_EQ(models.at("gemini-2.5-flash-thinking").contextWindow, 1048576u);
 }
 
 TEST(AntigravityProvider, AvailableAccountRequiresPositiveQuotaInRequestedBucket) {
@@ -391,4 +534,34 @@ TEST(AntigravityProvider, QuotasUseStreamQuotaExhaustionModelState) {
   EXPECT_EQ(bucketMap.count("claude-sonnet-4-6"), 1u);
   EXPECT_FLOAT_EQ(bucketMap["claude-opus-4-6-thinking"], 0.0f);
   EXPECT_FLOAT_EQ(bucketMap["claude-sonnet-4-6"], 0.2f);
+}
+
+TEST(AntigravityProvider, QuotasDoNotRequireResetMetadataToRender) {
+  const auto tempHome = std::filesystem::temp_directory_path() /
+                        "firmius_antigravity_quota_missing_reset_home";
+  std::filesystem::remove_all(tempHome);
+  std::filesystem::create_directories(tempHome / ".firmius");
+  ScopedHomeOverride scopedHome(tempHome);
+
+  const auto futureSeconds =
+      std::chrono::system_clock::to_time_t(std::chrono::system_clock::now()) +
+      86400;
+  const std::filesystem::path oauthPath = tempHome / ".firmius" / "oauth.json";
+  std::ofstream out(oauthPath);
+  out << R"({"antigravity":[)"
+      << R"({"identifier":"a@example.com","refreshToken":"r1","accessToken":"a1","tokenExpiration":)"
+      << futureSeconds
+      << R"(,"metadata":{"quota:claude-sonnet-4-6":"0.4","quota:gemini-3-flash":"bogus"}}]})";
+  out.close();
+
+  AntigravityProvider provider;
+  std::map<std::string, std::vector<firmius::shared::QuotaBucket>> quotas;
+  EXPECT_NO_THROW(quotas = provider.getAllQuotas());
+
+  auto it = quotas.find("a@example.com");
+  ASSERT_NE(it, quotas.end());
+  ASSERT_EQ(it->second.size(), 1u);
+  EXPECT_EQ(it->second.front().name, "claude-sonnet-4-6");
+  EXPECT_FLOAT_EQ(it->second.front().remainingFraction, 0.4f);
+  EXPECT_TRUE(it->second.front().resetTime.empty());
 }

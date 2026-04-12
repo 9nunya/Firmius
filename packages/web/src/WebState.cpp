@@ -227,10 +227,6 @@ AgentHistory expandHistoryForTranscript(const std::string &threadId,
 
 AgentHistory loadExpandedAgentHistory(const std::string &threadId,
                                       const std::string &agentId) {
-  auto historyPtr = Harness::instance().getAgentHistoryPtr(agentId);
-  if (historyPtr) {
-    return expandHistoryForTranscript(threadId, agentId, *historyPtr);
-  }
   if (threadId.empty() || agentId.empty()) {
     return {};
   }
@@ -894,6 +890,7 @@ Json::Value serializeQuotaBucket(const firmius::shared::QuotaBucket &bucket) {
   out["name"] = bucket.name;
   out["remainingFraction"] = bucket.remainingFraction;
   out["resetTime"] = bucket.resetTime;
+  out["note"] = bucket.note;
   return out;
 }
 

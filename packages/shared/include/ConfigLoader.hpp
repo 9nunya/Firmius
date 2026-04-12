@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Context.hpp"
+
 #include <string>
 #include <map>
 #include <optional>
@@ -14,7 +16,28 @@ struct ModelRouteCategory {
     std::string variantName;
 };
 
+
+struct McpServerConfig {
+    std::string transport = "stdio";
+
+    // stdio transport fields
+    std::string command;
+    std::vector<std::string> args;
+    std::map<std::string, std::string> env;
+    std::string cwd;
+
+    // http transport fields
+    std::string url;
+    std::string authHeader = "Authorization";
+    std::string authBearerToken;
+    bool allowInsecureTls = false;
+    std::string caCertPath;
+
+    bool enabled = true;
+};
+using McpStdioServerConfig = McpServerConfig;
 struct UserConfig {
+    using RollingMemoryConfig = firmius::shared::AgentConfig::RollingMemoryConfig;
     std::string defaultProviderId = "nanogpt";
     std::string defaultModelId = "zai-org/glm-4.6:thinking";
     std::string defaultModelVariant;                      // Selected model variant (e.g., "low", "medium", "max")
@@ -31,6 +54,8 @@ struct UserConfig {
     std::vector<std::string> subagentRouteFallbackOrder;
     bool showInternalNudges = false;
     bool hideErrors = false;                              // Hide errors in chat display
+    RollingMemoryConfig rollingMemory;
+    std::map<std::string, McpServerConfig> mcpServers; // serverName -> MCP server config
 };
 
 class ConfigLoader {

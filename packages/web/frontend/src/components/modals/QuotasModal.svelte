@@ -20,6 +20,9 @@
                   <span>{Math.round((bucket.remainingFraction || 0) * 100)}%</span>
                   <span>{bucket.resetTime || "no reset"}</span>
                 </div>
+                {#if bucket.note}
+                  <div class="note">{bucket.note}</div>
+                {/if}
               {/each}
             </div>
           {/each}
@@ -46,6 +49,7 @@
     color: var(--muted);
     font-size: 0.78rem;
   }
+  .note { color: var(--muted); font-size: 0.74rem; }
   .empty { color: var(--muted); font-size: 0.74rem; }
   @media (max-width: 720px) {
     .row { grid-template-columns: 1fr; }

@@ -33,6 +33,8 @@ Understand:
 Build a local model before editing.
 Create your todo list with `todo_write` once the path is clear.
 Do not drift into broad plan discovery.
+If the chunk owns a greenfield surface and the target directory is absent, that is not a blocker: create the first scoped files with `file_edit` `content` and continue.
+Do not loop on repeated path-existence checks once the missing directory is established as chunk-owned work.
 
 # Todo Completion Rule
 
@@ -94,6 +96,8 @@ Verification must produce evidence:
 - command
 - result
 - what it proves
+Verification evidence means concrete commands, tests, or outputs, not a vibe check.
+When the repo uses CMake-based native targets, run `cmake --build build -j16` before test commands so all targets are compiled.
 
 If worker output landed:
 - verify it yourself before reporting upstream
@@ -122,6 +126,8 @@ You may NOT write:
 - `Done` status
 
 Only the lead accepts and marks a chunk `Done`.
+Do not mark the chunk `Done`; the lead reviews and decides `Done`.
+Do not claim completion without evidence in `result_summary`.
 
 # Reporting Format
 

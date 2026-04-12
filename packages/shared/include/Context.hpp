@@ -66,8 +66,16 @@ struct AgentState {
   std::vector<std::string>
       pendingToolCalls; ///< IDs of tools currently executing.
   std::vector<std::string>
-      ownedProcesses;                 ///< IDs of spawned background processes.
+      ownedProcesses; ///< IDs of spawned background processes.
+  std::vector<std::string> loadedSkills; // SKILL IDs of loaded skills.
+  std::vector<std::string>
+      loadedAgentMds;                 // AGENT.md paths that are loaded, broh
+  std::map<std::string, std::string> loadedSkillRoots; // Path -> SkillRoot mapping.
   std::vector<std::string> readFiles; ///< Paths of files read in this session.
+  std::vector<std::string> loadedMcpServers; // MCP server names with loaded selections.
+  std::map<std::string, std::vector<std::string>> loadedMcpTools; // server -> loaded tool names.
+  std::map<std::string, std::vector<std::string>> loadedMcpResources; // server -> loaded resource URIs.
+  std::map<std::string, std::vector<std::string>> loadedMcpPrompts; // server -> loaded prompt names.
   std::vector<std::string>
       fullyReadFiles; ///< Set of paths that were read entirely
   std::vector<std::string>
@@ -91,9 +99,37 @@ struct AgentState {
  * @brief Generation and lifecycle configuration for an agent.
  */
 struct AgentConfig {
+  struct RollingModelConfig {
+    bool enabled = false;
+    std::string providerId;
+    std::string modelId;
+    std::string variantName;
+
+    bool operator==(const RollingModelConfig &other) const = default;
+  };
+
+  struct RollingMemoryConfig {
+    bool enabled = true;
+    std::string mode = "rolling_forever";
+    std::string preset = "balanced";
+    float targetOccupancyRatio = 0.57f;
+    float bufferOccupancyRatio = 0.47f;
+    float emergencyOccupancyRatio = 0.66f;
+    float reflectionOccupancyRatio = 0.32f;
+    float retainTailRatio = 0.18f;
+    std::uint32_t minimumRetainedTailTokens = 4096;
+    std::uint32_t minimumChunkTokens = 8192;
+    bool emitEventTurns = true;
+    RollingModelConfig observer;
+    RollingModelConfig reflector;
+    RollingModelConfig workingMemoryUpdater;
+
+    bool operator==(const RollingMemoryConfig &other) const = default;
+  };
+
   std::string providerId = "nanogpt"; ///< LLM provider identifier.
   std::string modelId;                ///< LLM model identifier.
-  std::string modelVariant; ///< Selected model variant (if applicable).
+  std::string modelVariant;         ///< Selected model variant (if applicable).
   std::string personaName = "lead"; ///< Persona to load from prompts/.
   int maxTurns = 200;       ///< Maximum autonomous turns before stopping.
   float temperature = 0.7f; ///< LLM generation temperature.
@@ -103,6 +139,7 @@ struct AgentConfig {
       true; ///< If false, agent runs detached with no journal.
   int maxIdenticalToolCalls =
       5; ///< Max consecutive identical tool calls before intervention
+  RollingMemoryConfig rollingMemory;
 
   bool operator==(const AgentConfig &other) const = default;
 };
@@ -212,13 +249,13 @@ struct ThreadArtifactMetadata {
  * One level of task depth only; no nested subtasks.
  */
 struct WorkTask {
-  std::string id;                   ///< Stable task identifier within chunk.
-  std::string title;                ///< Short task title.
-  std::string goal;                 ///< Task description / objective.
+  std::string id;    ///< Stable task identifier within chunk.
+  std::string title; ///< Short task title.
+  std::string goal;  ///< Task description / objective.
   WorkChunkStatus status = WorkChunkStatus::Ready; ///< Task execution status.
-  std::string notes;                ///< Optional constraints or implementation notes.
+  std::string notes; ///< Optional constraints or implementation notes.
   std::string verificationCondition; ///< Plain-English verification criterion.
-  std::string assignedWorkerId;     ///< Optional worker agent ID if delegated.
+  std::string assignedWorkerId;      ///< Optional worker agent ID if delegated.
   uint64_t createdAt = 0;
   uint64_t updatedAt = 0;
 
@@ -247,11 +284,12 @@ struct WorkChunk {
   uint64_t updatedAt = 0;
 
   // V2 richer chunk spec fields
-  std::vector<std::string> filesToRead;       ///< Files the executor should read.
-  std::vector<std::string> filesToTouch;      ///< Files expected to be modified/created.
-  std::string cwd;                            ///< Working directory for execution.
-  std::string verificationCondition;          ///< Plain-English acceptance criterion.
-  std::string handoffNotes;                   ///< Context for executor handoff.
+  std::vector<std::string> filesToRead; ///< Files the executor should read.
+  std::vector<std::string>
+      filesToTouch;                  ///< Files expected to be modified/created.
+  std::string cwd;                   ///< Working directory for execution.
+  std::string verificationCondition; ///< Plain-English acceptance criterion.
+  std::string handoffNotes;          ///< Context for executor handoff.
 
   // V2 task structure (one level deep only)
   std::vector<WorkTask> tasks;

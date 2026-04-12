@@ -89,4 +89,50 @@ Body text.
   EXPECT_EQ(doc.body, "Body text.\n");
 }
 
+TEST(FrontmatterParserTest, ParsesIntegers) {
+  const auto doc = FrontmatterParser::parseMarkdown(
+      R"md(---
+priority: 42
+negative: -10
+---
+Body text.
+)md",
+      "integers.md");
+
+  EXPECT_EQ(FrontmatterParser::getInt(doc, "priority").value(), 42);
+  EXPECT_EQ(FrontmatterParser::getInt(doc, "negative").value(), -10);
+}
+
+TEST(FrontmatterParserTest, ParsesListOfMaps) {
+  const auto doc = FrontmatterParser::parseMarkdown(
+      R"md(---
+args:
+  - name: arg1
+    type: string
+    optional: true
+  - name: arg2
+    type: number
+    optional: false
+---
+Body text.
+)md",
+      "list-of-maps.md");
+
+  auto args = FrontmatterParser::getArray(doc, "args");
+  ASSERT_TRUE(args.has_value());
+  ASSERT_EQ(args->size(), 2u);
+
+  auto arg1 = std::get_if<firmius::shared::FrontmatterValue::Map>(&(*args)[0].value);
+  ASSERT_NE(arg1, nullptr);
+  EXPECT_EQ(std::get<std::string>((*arg1)["name"].value), "arg1");
+  EXPECT_EQ(std::get<std::string>((*arg1)["type"].value), "string");
+  EXPECT_EQ(std::get<bool>((*arg1)["optional"].value), true);
+
+  auto arg2 = std::get_if<firmius::shared::FrontmatterValue::Map>(&(*args)[1].value);
+  ASSERT_NE(arg2, nullptr);
+  EXPECT_EQ(std::get<std::string>((*arg2)["name"].value), "arg2");
+  EXPECT_EQ(std::get<std::string>((*arg2)["type"].value), "number");
+  EXPECT_EQ(std::get<bool>((*arg2)["optional"].value), false);
+}
+
 } // namespace

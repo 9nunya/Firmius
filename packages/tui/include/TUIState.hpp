@@ -7,7 +7,9 @@
 #include "ActivePlanState.hpp"
 #include "StreamStateManager.hpp"
 #include "NotificationManager.hpp"
+#include "WorkPanelLayout.hpp"
 #include "persistence/ThreadManager.hpp"
+#include "components/ContextLane.hpp"
 #include "components/TodoLane.hpp"
 #include <ftxui/component/component_base.hpp>
 #include <ftxui/component/screen_interactive.hpp>
@@ -32,6 +34,7 @@ struct InputBarModel;
 struct AgentStripModel;
 struct PlanLaneModel;
 struct TodoLaneModel;
+struct ContextLaneModel;
 
 namespace detail {
 
@@ -164,6 +167,17 @@ inline std::vector<shared::AgentTurn> expandCompactionTranscriptForDisplay(
                                                            expanded_ids);
 }
 
+namespace detail {
+
+inline bool shouldNotifyHiddenChatError(const std::string& focused_agent_id,
+                                        const std::string& error_agent_id,
+                                        bool hide_errors) {
+  return hide_errors && !focused_agent_id.empty() &&
+         error_agent_id == focused_agent_id;
+}
+
+} // namespace detail
+
 class TuiState {
 public:
   static TuiState &instance();
@@ -227,6 +241,7 @@ private:
   void updateAgentStripModel();
   void updatePlanLaneModel();
   void updateTodoLaneModel();
+  void updateContextLaneModel();
   void refreshFocusedHistory();
   std::optional<shared::Plan> loadActivePlanForThread(
       const shared::ThreadMetadata &thread) const;
@@ -255,6 +270,7 @@ private:
   std::shared_ptr<AgentStripModel> agent_strip_model_;
   std::shared_ptr<PlanLaneModel> plan_lane_model_;
   std::shared_ptr<TodoLaneModel> todo_lane_model_;
+  std::shared_ptr<ContextLaneModel> context_lane_model_;
   ActivePlanState active_plan_state_;
 
   ViewMode view_mode_ = ViewMode::Chat;
@@ -263,7 +279,7 @@ private:
   bool pending_modal_clear_ =
       false; // Deferred clear to avoid UB in modal handlers
   bool diffs_expanded_ = true; // Ctrl+G toggle for diff expansion
-  bool prefer_todo_panel_on_narrow_ = true;
+  WorkPanelTab selected_work_panel_tab_ = WorkPanelTab::Context;
 
   ftxui::Component root_component_;
   ftxui::Component chat_component_;

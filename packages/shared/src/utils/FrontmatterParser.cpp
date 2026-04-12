@@ -68,6 +68,15 @@ FrontmatterValue parseScalarValue(const std::string &rawValue) {
     return FrontmatterValue{boolValue};
   }
 
+  try {
+    std::size_t pos = 0;
+    long long val = std::stoll(trimmed, &pos);
+    if (pos == trimmed.size()) {
+      return FrontmatterValue{static_cast<int64_t>(val)};
+    }
+  } catch (...) {
+  }
+
   return FrontmatterValue{trimmed};
 }
 
@@ -93,7 +102,7 @@ FrontmatterValue parseArrayValue(const std::string &rawValue,
         source, lineNumber, "Expected a bracketed string array"));
   }
 
-  std::vector<std::string> values;
+  FrontmatterValue::Array values;
   const std::string inner = trimmed.substr(1, trimmed.size() - 2);
   std::size_t i = 0;
   while (i < inner.size()) {
@@ -142,7 +151,7 @@ FrontmatterValue parseArrayValue(const std::string &rawValue,
       throw std::runtime_error(frontmatterError(
           source, lineNumber, "Array elements must not be empty"));
     }
-    values.push_back(item);
+    values.push_back(FrontmatterValue{item});
 
     while (i < inner.size() &&
            std::isspace(static_cast<unsigned char>(inner[i]))) {
@@ -223,28 +232,91 @@ FrontmatterParser::parse(std::string_view frontmatter, const std::string &source
   std::map<std::string, FrontmatterValue> values;
   const auto lines = splitLines(frontmatter);
   for (std::size_t i = 0; i < lines.size(); ++i) {
-    const std::string line = StringUtil::trim(lines[i]);
-    if (line.empty() || line.front() == '#') {
+    const std::string line = lines[i];
+    const std::string trimmedLine = StringUtil::trim(line);
+    if (trimmedLine.empty() || trimmedLine.front() == '#') {
       continue;
     }
-    const auto colon = line.find(':');
+    const auto colon = trimmedLine.find(':');
     if (colon == std::string::npos) {
-      throw std::runtime_error(frontmatterError(
-          source, i + 1, "Expected 'key: value' metadata line"));
+      continue;
     }
 
-    const std::string key = StringUtil::trim(line.substr(0, colon));
-    const std::string rawValue = line.substr(colon + 1);
+    const std::string key = StringUtil::trim(trimmedLine.substr(0, colon));
+    const std::string rawValue = trimmedLine.substr(colon + 1);
     if (key.empty()) {
-      throw std::runtime_error(
-          frontmatterError(source, i + 1, "Frontmatter key must not be empty"));
+      continue;
     }
 
     const std::string trimmedValue = StringUtil::trim(rawValue);
-    if (!trimmedValue.empty() && trimmedValue.front() == '[') {
-      values[key] = parseArrayValue(trimmedValue, source, i + 1);
+    if (!trimmedValue.empty()) {
+      if (trimmedValue.front() == '[') {
+        values[key] = parseArrayValue(trimmedValue, source, i + 1);
+      } else {
+        values[key] = parseScalarValue(rawValue);
+      }
     } else {
-      values[key] = parseScalarValue(rawValue);
+      // Potential block structure (list of maps for WorkflowLoader)
+      if (i + 1 < lines.size()) {
+        std::size_t j = i + 1;
+        while (j < lines.size() && StringUtil::trim(lines[j]).empty()) {
+          j++;
+        }
+        if (j < lines.size()) {
+          const std::string &nextLine = lines[j];
+          // Check indentation: block must be indented
+          bool hasIndent = false;
+          for (char c : nextLine) {
+            if (c == ' ' || c == '\t') {
+              hasIndent = true;
+              break;
+            }
+            if (!std::isspace(static_cast<unsigned char>(c))) break;
+          }
+          
+          if (hasIndent && StringUtil::trim(nextLine)[0] == '-') {
+            FrontmatterValue::Array array;
+            std::optional<FrontmatterValue::Map> currentMap;
+            while (j < lines.size()) {
+              std::string l = lines[j];
+              std::string lt = StringUtil::trim(l);
+              if (lt.empty()) {
+                j++;
+                continue;
+              }
+              
+              bool lineHasIndent = false;
+              for (char c : l) {
+                if (c == ' ' || c == '\t') {
+                  lineHasIndent = true;
+                  break;
+                }
+                if (!std::isspace(static_cast<unsigned char>(c))) break;
+              }
+              if (!lineHasIndent) break;
+
+              if (lt[0] == '-') {
+                if (currentMap) array.push_back(FrontmatterValue{*currentMap});
+                currentMap = FrontmatterValue::Map{};
+                lt = StringUtil::trim(lt.substr(1));
+              }
+              auto cPos = lt.find(':');
+              if (cPos != std::string::npos) {
+                if (!currentMap) currentMap = FrontmatterValue::Map{};
+                std::string k = StringUtil::trim(lt.substr(0, cPos));
+                std::string v = StringUtil::trim(lt.substr(cPos + 1));
+                (*currentMap)[k] = parseScalarValue(v);
+              }
+              j++;
+            }
+            if (currentMap) array.push_back(FrontmatterValue{*currentMap});
+            if (!array.empty()) {
+              values[key] = FrontmatterValue{array};
+              i = j - 1;
+            }
+          }
+        }
+      }
     }
   }
   return values;
@@ -302,10 +374,61 @@ FrontmatterParser::getStringArray(const FrontmatterDocument &document,
     return {};
   }
   if (const auto *arrayValue = std::get_if<FrontmatterValue::Array>(&value->value)) {
-    return *arrayValue;
+    std::vector<std::string> result;
+    for (const auto &item : *arrayValue) {
+      if (const auto *s = std::get_if<std::string>(&item.value)) {
+        result.push_back(*s);
+      }
+    }
+    return result;
   }
   throw std::runtime_error("Frontmatter key '" + key +
                            "' must be a string array");
+}
+
+std::optional<int64_t>
+FrontmatterParser::getInt(const FrontmatterDocument &document,
+                           const std::string &key) {
+  const auto *value = find(document, key);
+  if (!value) {
+    return std::nullopt;
+  }
+  if (const auto *intValue = std::get_if<int64_t>(&value->value)) {
+    return *intValue;
+  }
+  if (const auto *stringValue = std::get_if<std::string>(&value->value)) {
+    try {
+      return std::stoll(*stringValue);
+    } catch (...) {
+    }
+  }
+  throw std::runtime_error("Frontmatter key '" + key + "' must be an integer");
+}
+
+std::optional<FrontmatterValue::Map>
+FrontmatterParser::getMap(const FrontmatterDocument &document,
+                           const std::string &key) {
+  const auto *value = find(document, key);
+  if (!value) {
+    return std::nullopt;
+  }
+  if (const auto *mapValue = std::get_if<FrontmatterValue::Map>(&value->value)) {
+    return *mapValue;
+  }
+  throw std::runtime_error("Frontmatter key '" + key + "' must be a map");
+}
+
+std::optional<FrontmatterValue::Array>
+FrontmatterParser::getArray(const FrontmatterDocument &document,
+                             const std::string &key) {
+  const auto *value = find(document, key);
+  if (!value) {
+    return std::nullopt;
+  }
+  if (const auto *arrayValue = std::get_if<FrontmatterValue::Array>(&value->value)) {
+    return *arrayValue;
+  }
+  throw std::runtime_error("Frontmatter key '" + key + "' must be an array");
 }
 
 } // namespace firmius::shared

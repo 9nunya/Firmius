@@ -582,6 +582,92 @@ ToolPresentation BuildListDirectoryPresentation(const ToolCallView &view) {
   return presentation;
 }
 
+void AppendLspDetailsFromObject(const rapidjson::Value &lsp,
+                                const std::string &path,
+                                ToolPresentation &presentation) {
+  if (!lsp.IsObject()) {
+    return;
+  }
+
+  const bool checked =
+      lsp.HasMember("checked") && lsp["checked"].IsBool() && lsp["checked"].GetBool();
+  const bool available =
+      lsp.HasMember("available") && lsp["available"].IsBool() && lsp["available"].GetBool();
+  const std::string pathLabel = path.empty() ? "file" : BaseName(path);
+
+  if (checked) {
+    presentation.facts.push_back({"LSP", available ? "checked" : "unavailable"});
+  }
+  const std::string serverId = StringMember(lsp, "server_id");
+  if (!serverId.empty()) {
+    presentation.facts.push_back({"LSP server", serverId});
+  }
+
+  const int errors = IntMember(lsp, "errors", 0);
+  const int warnings = IntMember(lsp, "warnings", 0);
+  const int newErrors = IntMember(lsp, "new_error_count", 0);
+  const int newWarnings = IntMember(lsp, "new_warning_count", 0);
+
+  if (errors > 0) {
+    presentation.footer_badges.push_back("lsp:E" + std::to_string(errors));
+    presentation.facts.push_back({"LSP errors", std::to_string(errors)});
+  }
+  if (warnings > 0) {
+    presentation.footer_badges.push_back("lsp:W" + std::to_string(warnings));
+    presentation.facts.push_back({"LSP warnings", std::to_string(warnings)});
+  }
+  if (newErrors > 0) {
+    presentation.footer_badges.push_back("new:E" + std::to_string(newErrors));
+    presentation.facts.push_back({"New LSP errors", std::to_string(newErrors)});
+  }
+  if (newWarnings > 0) {
+    presentation.footer_badges.push_back("new:W" + std::to_string(newWarnings));
+    presentation.facts.push_back(
+        {"New LSP warnings", std::to_string(newWarnings)});
+  }
+
+  const std::string error = StringMember(lsp, "error");
+  if (!available && !error.empty()) {
+    presentation.notices.push_back(
+        {ToolPresentationNoticeKind::Info,
+         "LSP unavailable for " + pathLabel + ": " + error});
+  }
+
+  const auto newErrorIssues =
+      lsp.HasMember("new_errors") ? ParseStringArray(lsp["new_errors"])
+                                  : std::vector<std::string>{};
+  const auto newWarningIssues =
+      lsp.HasMember("new_warnings") ? ParseStringArray(lsp["new_warnings"])
+                                    : std::vector<std::string>{};
+  const auto issues = lsp.HasMember("issues") ? ParseStringArray(lsp["issues"])
+                                               : std::vector<std::string>{};
+  const auto warningIssues =
+      lsp.HasMember("warning_issues")
+          ? ParseStringArray(lsp["warning_issues"])
+          : std::vector<std::string>{};
+
+  ToolPresentationSection section;
+  if (!newErrorIssues.empty() || !newWarningIssues.empty()) {
+    section.title = "New LSP issues: " + pathLabel;
+    section.lines.insert(section.lines.end(), newErrorIssues.begin(),
+                         newErrorIssues.end());
+    section.lines.insert(section.lines.end(), newWarningIssues.begin(),
+                         newWarningIssues.end());
+    presentation.notices.push_back(
+        {ToolPresentationNoticeKind::Warning,
+         "New LSP issues detected in " + pathLabel});
+  } else if (!issues.empty() || !warningIssues.empty()) {
+    section.title = "LSP issues: " + pathLabel;
+    section.lines.insert(section.lines.end(), issues.begin(), issues.end());
+    section.lines.insert(section.lines.end(), warningIssues.begin(),
+                         warningIssues.end());
+  }
+
+  if (!section.lines.empty()) {
+    presentation.sections.push_back(std::move(section));
+  }
+}
+
 ToolPresentation BuildFileEditPresentation(const ToolCallView &view) {
   ToolPresentation presentation;
   presentation.lifecycle = LifecycleFromPhase(view);
@@ -805,6 +891,19 @@ ToolPresentation BuildFileEditPresentation(const ToolCallView &view) {
   if (removed_lines > 0) {
     presentation.footer_badges.push_back("-" + std::to_string(removed_lines));
     presentation.facts.push_back({"Removed lines", std::to_string(removed_lines)});
+  }
+
+  if (has_result && result_doc.HasMember("lsp")) {
+    AppendLspDetailsFromObject(result_doc["lsp"], path, presentation);
+  }
+  if (has_result && result_doc.HasMember("files") && result_doc["files"].IsArray()) {
+    for (const auto &file : result_doc["files"].GetArray()) {
+      if (!file.IsObject() || !file.HasMember("lsp")) {
+        continue;
+      }
+      AppendLspDetailsFromObject(file["lsp"], StringMember(file, "path"),
+                                 presentation);
+    }
   }
 
   return presentation;

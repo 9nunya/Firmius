@@ -2,6 +2,7 @@
 #define FIRMIUS_SHARED_FRONTMATTER_PARSER_HPP
 
 #include <map>
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -11,8 +12,13 @@
 namespace firmius::shared {
 
 struct FrontmatterValue {
-  using Array = std::vector<std::string>;
-  using Value = std::variant<std::string, bool, Array>;
+  struct Array : std::vector<FrontmatterValue> {
+    using std::vector<FrontmatterValue>::vector;
+  };
+  struct Map : std::map<std::string, FrontmatterValue> {
+    using std::map<std::string, FrontmatterValue>::map;
+  };
+  using Value = std::variant<std::string, bool, int64_t, Array, Map>;
 
   Value value;
 };
@@ -37,6 +43,12 @@ public:
   getBool(const FrontmatterDocument &document, const std::string &key);
   static std::vector<std::string>
   getStringArray(const FrontmatterDocument &document, const std::string &key);
+  static std::optional<int64_t>
+  getInt(const FrontmatterDocument &document, const std::string &key);
+  static std::optional<FrontmatterValue::Map>
+  getMap(const FrontmatterDocument &document, const std::string &key);
+  static std::optional<FrontmatterValue::Array>
+  getArray(const FrontmatterDocument &document, const std::string &key);
 };
 
 } // namespace firmius::shared

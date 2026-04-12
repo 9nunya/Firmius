@@ -406,7 +406,10 @@ void DockerHost::cleanup() {
     
     std::lock_guard<std::mutex> lock(bgMutex);
     for (auto& [id, proc] : backgroundProcesses) {
-        if (proc) proc->kill();
+        if (proc) {
+            proc->onOutput({});
+            proc->kill();
+        }
     }
     backgroundProcesses.clear();
 }
@@ -623,6 +626,7 @@ void DockerHost::killBackgroundProcess(const std::string& id) {
     std::lock_guard<std::mutex> lock(bgMutex);
     auto it = backgroundProcesses.find(id);
     if (it != backgroundProcesses.end()) {
+        it->second->onOutput({});
         it->second->kill();
     } else {
         throw std::runtime_error("Background process not found: " + id);

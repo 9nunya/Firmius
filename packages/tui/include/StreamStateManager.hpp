@@ -59,6 +59,10 @@ struct QueuedMessageEntry {
   std::string agent_id;
 };
 
+struct CompletedRunSummary {
+  std::string text;
+};
+
 class StreamStateManager {
 public:
   void handleAgentThinking(const shared::AgentThinking &e);
@@ -117,6 +121,9 @@ public:
   const std::vector<QueuedMessageEntry> &getQueuedMessages() const;
   const std::vector<QueuedMessageEntry> &getQueuedInternalMessages() const;
   int getToolCallClusterId(const std::string &toolCallId) const;
+  const shared::AgentMetrics *getLatestMetrics(const std::string &agentId) const;
+  const std::vector<CompletedRunSummary> *
+  getCompletedRunSummaries(const std::string &agentId) const;
 
 private:
   struct LiveQuickClusterState {
@@ -158,6 +165,9 @@ private:
   std::unordered_map<std::string, std::string> agent_provider_model_;
   std::unordered_map<std::string, std::string> process_to_agent_;
   std::unordered_map<std::string, NormalizedProcessState> process_state_;
+  std::unordered_map<std::string, shared::AgentMetrics> latest_metrics_;
+  std::unordered_map<std::string, std::vector<CompletedRunSummary>>
+      completed_run_summaries_;
   std::unordered_map<std::string, std::string> last_todo_result_by_agent_;
   std::unordered_map<std::string, std::vector<shared::AgentProcessOutput>>
       pending_process_output_;

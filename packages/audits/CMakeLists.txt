@@ -7,6 +7,7 @@ target_sources(firmius_audits PRIVATE
     src/audits/AntigravityQuotaAudit.cpp
     src/audits/BenchmarksAudit.cpp
     src/audits/CodexProviderAudit.cpp
+    src/audits/ContextBudgetAudit.cpp
     src/audits/CodexQuotaAudit.cpp
     src/audits/HarnessChaosAudit.cpp
     src/audits/OAuthWizardAudit.cpp
@@ -15,6 +16,7 @@ target_sources(firmius_audits PRIVATE
     src/audits/ProviderStreamDebugAudit.cpp
     src/audits/QwenProviderAudit.cpp
     src/audits/LoopCancellationAudit.cpp
+    src/audits/LspAudit.cpp
     src/audits/ModelLoadAudit.cpp
     src/audits/OpenRouterQuotaAudit.cpp
     src/audits/QwenQuotaAudit.cpp
@@ -34,6 +36,7 @@ target_sources(firmius_audits PUBLIC
     include/audits/AntigravityQuotaAudit.hpp
     include/audits/BenchmarksAudit.hpp
     include/audits/CodexProviderAudit.hpp
+    include/audits/ContextBudgetAudit.hpp
     include/audits/CodexQuotaAudit.hpp
     include/audits/HarnessChaosAudit.hpp
     include/audits/OAuthWizardAudit.hpp
@@ -41,6 +44,7 @@ target_sources(firmius_audits PUBLIC
     include/audits/ProviderAudit.hpp
     include/audits/ProviderStreamDebugAudit.hpp
     include/audits/LoopCancellationAudit.hpp
+    include/audits/LspAudit.hpp
     include/audits/ModelLoadAudit.hpp
     include/audits/OpenRouterQuotaAudit.hpp
     include/audits/QwenProviderAudit.hpp

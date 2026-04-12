@@ -3,8 +3,10 @@
 
 #include "Enums.hpp"
 
+#include <cstdint>
 #include <optional>
 #include <string>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -74,11 +76,47 @@ struct ErrorContent {
 
 enum class NoticeSeverity { Info, Warning, Error, Success };
 
+/**
+ * @brief Optional sparse rolling-memory metadata for notice events.
+ *
+ * The payload is event-local: eventKind + lifecycle are required when present,
+ * while model/range/token facts are optional and should only be attached when
+ * known for that specific event.
+ */
+struct RollingNoticeMetadata {
+  std::string eventKind;
+  std::string lifecycle;
+
+  std::optional<std::string> modelLabel;
+  std::optional<std::string> sourceStartTurnId;
+  std::optional<std::string> sourceEndTurnId;
+  std::optional<std::uint32_t> sourceTurnCount;
+  std::optional<std::uint32_t> sourceChunkCount;
+  std::optional<std::uint32_t> sourceTokens;
+  std::optional<std::uint32_t> summaryTokens;
+  std::optional<std::uint32_t> savedTokens;
+
+  bool operator==(const RollingNoticeMetadata &other) const = default;
+};
+
 struct NoticeContent {
   std::string title;
   std::string message;
   std::string details;
   NoticeSeverity severity = NoticeSeverity::Info;
+  std::optional<RollingNoticeMetadata> rollingMetadata;
+
+  NoticeContent() = default;
+  NoticeContent(std::string title, std::string message, std::string details,
+                NoticeSeverity severity = NoticeSeverity::Info,
+                std::optional<RollingNoticeMetadata> rollingMetadata =
+                    std::nullopt)
+      : title(std::move(title)),
+        message(std::move(message)),
+        details(std::move(details)),
+        severity(severity),
+        rollingMetadata(std::move(rollingMetadata)) {}
+
   bool operator==(const NoticeContent &other) const = default;
 };
 

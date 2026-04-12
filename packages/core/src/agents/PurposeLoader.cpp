@@ -1,7 +1,8 @@
 #include "agents/PurposeLoader.hpp"
-#include "agents/HintingLoader.hpp"
 #include "ConfigLoader.hpp"
+#include "agents/HintingLoader.hpp"
 #include "utils/FrontmatterParser.hpp"
+#include "utils/FSUtil.hpp"
 #include "utils/StringUtil.hpp"
 #include <algorithm>
 #include <array>
@@ -11,6 +12,7 @@
 #include <iostream>
 #include <optional>
 #include <sstream>
+#include <vector>
 
 namespace firmius::core {
 
@@ -23,8 +25,8 @@ using namespace firmius::shared;
 
 namespace {
 const std::array<const char *, 7> kLegacyPromptFiles = {
-    "brainstormer.md", "builder.md",    "coordinator.md", "firmius.md",
-    "general.md",      "planner.md",    "reviewer.md"};
+    "brainstormer.md", "builder.md", "coordinator.md", "firmius.md",
+    "general.md",      "planner.md", "reviewer.md"};
 
 PurposeWorkRole legacyWorkRoleForPurposeName(const std::string &purpose) {
   const std::string lowered = StringUtil::toLower(StringUtil::trim(purpose));
@@ -113,7 +115,7 @@ firmius::shared::ToolScope stringToScope(const std::string &s) {
 }
 
 PurposeWorkRole stringToPurposeWorkRole(const std::string &value,
-                                       const std::string &fieldName) {
+                                        const std::string &fieldName) {
   const std::string lowered = StringUtil::toLower(StringUtil::trim(value));
   if (lowered == "lead") {
     return PurposeWorkRole::Lead;
@@ -130,8 +132,52 @@ PurposeWorkRole stringToPurposeWorkRole(const std::string &value,
   if (lowered == "scout") {
     return PurposeWorkRole::Scout;
   }
-  throw std::runtime_error(fieldName +
-                           " must be one of: lead, executor, worker, auditor, scout");
+  throw std::runtime_error(
+      fieldName + " must be one of: lead, executor, worker, auditor, scout");
+}
+
+std::optional<std::filesystem::path>
+canonicalProjectRoot(const AgentContext &context) {
+  if (StringUtil::trim(context.environment.cwd).empty()) {
+    return std::nullopt;
+  }
+
+  try {
+    const std::filesystem::path cwdPath(context.environment.cwd);
+    return std::filesystem::weakly_canonical(cwdPath);
+  } catch (...) {
+    return std::nullopt;
+  }
+}
+
+std::optional<std::filesystem::path>
+canonicalAgentsFileForDir(const std::filesystem::path &dir) {
+  try {
+    const std::filesystem::path candidate = dir / "AGENTS.md";
+    if (!std::filesystem::exists(candidate) ||
+        !std::filesystem::is_regular_file(candidate)) {
+      return std::nullopt;
+    }
+    return std::filesystem::weakly_canonical(candidate);
+  } catch (...) {
+    return std::nullopt;
+  }
+}
+
+bool hasLoadedAgentsPath(const AgentContext &context,
+                         const std::string &canonicalPath) {
+  return std::find(context.state.loadedAgentMds.begin(),
+                   context.state.loadedAgentMds.end(),
+                   canonicalPath) != context.state.loadedAgentMds.end();
+}
+
+void recordLoadedAgentsPath(AgentContext &context,
+                            const std::string &canonicalAgentsPath,
+                            const std::string &projectRoot) {
+  if (!hasLoadedAgentsPath(context, canonicalAgentsPath)) {
+    context.state.loadedAgentMds.push_back(canonicalAgentsPath);
+  }
+  context.state.loadedSkillRoots[canonicalAgentsPath] = projectRoot;
 }
 } // namespace
 
@@ -264,11 +310,13 @@ std::string PurposeLoader::composeSystemPrompt(const Persona &persona,
                                                const AgentContext &context,
                                                const std::string &toolsBlock) {
   const std::string detectedModelFamily = ModelHintResolver::detectFamily(
-      context.config.providerId, context.config.modelId, context.config.modelVariant);
+      context.config.providerId, context.config.modelId,
+      context.config.modelVariant);
   std::optional<HintingOverlay> hintingOverlay;
   try {
-    hintingOverlay = HintingLoader::loadForModel(
-        context.config.providerId, context.config.modelId, context.config.modelVariant);
+    hintingOverlay = HintingLoader::loadForModel(context.config.providerId,
+                                                 context.config.modelId,
+                                                 context.config.modelVariant);
   } catch (const std::exception &e) {
     std::cerr << "[hinting] Failed to load model hinting overlay: " << e.what()
               << "\n";
@@ -340,6 +388,10 @@ std::string PurposeLoader::composeSystemPrompt(const Persona &persona,
   ss << "# ENVIRONMENT\n";
   ss << "Host: " << context.environment.identifier << "\n";
   ss << "CWD: " << context.environment.cwd << "\n\n";
+  ss << "MODEL: " << context.config.modelId << "\n\n";
+
+  ss << "Purposes Registered (you use these in summon_subagent): "
+     << purposeList << "\n\n";
 
   const auto &cfg = shared::ConfigLoader::instance().getConfig();
   std::vector<std::string> category_names;
@@ -365,12 +417,14 @@ std::string PurposeLoader::composeSystemPrompt(const Persona &persona,
   ss << "\n";
 
   if (!toolsBlock.empty()) {
-    ss << "# AVAILABLE TOOLS\n" << toolsBlock << "\n";
+    // literally not even needed
+    // ss << "# AVAILABLE TOOLS\n" << toolsBlock << "\n";
   }
 
   return ss.str();
 }
 
+// deprecated
 std::string PurposeLoader::buildToolsBlock(
     const std::vector<firmius::provider::ToolDefinition> &tools) {
   std::stringstream ss;
@@ -388,6 +442,116 @@ std::string PurposeLoader::loadCompactionPrompt() {
   std::stringstream buffer;
   buffer << file.rdbuf();
   return buffer.str();
+}
+
+std::optional<std::string>
+PurposeLoader::resolveProjectRootAgentsPath(const AgentContext &context) {
+  const auto projectRoot = canonicalProjectRoot(context);
+  if (!projectRoot.has_value()) {
+    return std::nullopt;
+  }
+
+  const auto rootAgents = canonicalAgentsFileForDir(*projectRoot);
+  if (!rootAgents.has_value()) {
+    return std::nullopt;
+  }
+
+  return rootAgents->string();
+}
+
+bool PurposeLoader::loadProjectRootAgentsIntoContext(AgentContext &context) {
+  const auto projectRoot = canonicalProjectRoot(context);
+  if (!projectRoot.has_value()) {
+    return false;
+  }
+
+  const auto rootAgents = canonicalAgentsFileForDir(*projectRoot);
+  if (!rootAgents.has_value()) {
+    return false;
+  }
+
+  const std::string rootAgentsPath = rootAgents->string();
+  if (hasLoadedAgentsPath(context, rootAgentsPath)) {
+    context.state.loadedSkillRoots[rootAgentsPath] = projectRoot->string();
+    return false;
+  }
+
+  recordLoadedAgentsPath(context, rootAgentsPath, projectRoot->string());
+  return true;
+}
+
+std::vector<std::string>
+PurposeLoader::discoverAncestorAgentsPaths(const std::string &targetPath,
+                                           const AgentContext &context) {
+  std::vector<std::string> discovered;
+  const auto projectRoot = canonicalProjectRoot(context);
+  if (!projectRoot.has_value()) {
+    return discovered;
+  }
+
+  std::filesystem::path current;
+  try {
+    current =
+        std::filesystem::weakly_canonical(std::filesystem::path(targetPath));
+  } catch (...) {
+    return discovered;
+  }
+
+  if (!std::filesystem::is_directory(current)) {
+    current = current.parent_path();
+  }
+
+  if (current.empty()) {
+    return discovered;
+  }
+
+  while (!current.empty() && current != *projectRoot &&
+         FSUtil::isCanonicalSubpath(current, *projectRoot)) {
+    const auto candidate = canonicalAgentsFileForDir(current);
+    if (candidate.has_value()) {
+      const std::string candidatePath = candidate->string();
+      if (std::find(discovered.begin(), discovered.end(), candidatePath) ==
+          discovered.end()) {
+        discovered.push_back(candidatePath);
+      }
+    }
+
+    const auto parent = current.parent_path();
+    if (parent == current) {
+      break;
+    }
+    current = parent;
+  }
+
+  return discovered;
+}
+
+std::size_t
+PurposeLoader::loadDiscoveredAgentsForPath(AgentContext &context,
+                                           const std::string &targetPath) {
+  const auto projectRoot = canonicalProjectRoot(context);
+  if (!projectRoot.has_value()) {
+    return 0;
+  }
+
+  const std::optional<std::string> rootAgentsPath =
+      resolveProjectRootAgentsPath(context);
+  const std::vector<std::string> discovered =
+      discoverAncestorAgentsPaths(targetPath, context);
+
+  std::size_t addedCount = 0;
+  for (const auto &path : discovered) {
+    if (rootAgentsPath.has_value() && path == *rootAgentsPath) {
+      continue;
+    }
+    if (hasLoadedAgentsPath(context, path)) {
+      continue;
+    }
+    recordLoadedAgentsPath(context, path, projectRoot->string());
+    addedCount++;
+  }
+
+  return addedCount;
 }
 
 std::string PurposeLoader::resolvePromptsDir() {

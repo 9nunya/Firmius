@@ -1,4 +1,5 @@
 #include <atomic>
+#include "Enums.hpp"
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/screen_interactive.hpp>
 #include <ftxui/dom/elements.hpp>
@@ -14,6 +15,16 @@ extern "C" void HandleSigint(int);
 
 namespace firmius::tui {
 
-void runTui(bool debugging_mode, bool continue_last);
+struct TuiLaunchOptions {
+  bool debuggingMode = false;
+  bool continueLast = false;
+  bool quitWhenIdle = false;
+  firmius::shared::ThreadPermissionMode permissionMode =
+      firmius::shared::ThreadPermissionMode::Request;
+  std::string initialPrompt;
+  std::string initialCwd;
+};
+
+void runTui(const TuiLaunchOptions &options);
 
 } // namespace firmius::tui

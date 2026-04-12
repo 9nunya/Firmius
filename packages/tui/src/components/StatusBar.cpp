@@ -6,7 +6,9 @@
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/component_base.hpp>
 #include <ftxui/dom/elements.hpp>
+#include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <vector>
 
 namespace firmius::tui {
@@ -98,6 +100,35 @@ std::string buildModelText(const firmius::tui::StatusBarModel &model,
   }
 
   return model_text;
+}
+
+std::string formatCompactCount(uint32_t value) {
+  if (value >= 1000000) {
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%.1fM", value / 1000000.0f);
+    return buf;
+  }
+  if (value >= 1000) {
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%.1fk", value / 1000.0f);
+    return buf;
+  }
+  return std::to_string(value);
+}
+
+std::string formatPromptSummary(const firmius::tui::StatusBarModel &model) {
+  if (model.sent_prompt == 0 && model.billed_prompt == 0) {
+    return "";
+  }
+
+  const uint32_t visiblePrompt =
+      model.sent_prompt > 0 ? model.sent_prompt : model.billed_prompt;
+  std::string summary = formatCompactCount(visiblePrompt);
+  if (model.sent_prompt > 0 && model.billed_prompt > 0 &&
+      model.sent_prompt != model.billed_prompt) {
+    summary += "/" + formatCompactCount(model.billed_prompt);
+  }
+  return summary;
 }
 
 class StatusBarComponentBase : public ftxui::ComponentBase {
@@ -205,14 +236,15 @@ public:
     if (model_->context_max > 0) {
       float ratio =
           static_cast<float>(model_->context_used) / model_->context_max;
+      float display_ratio = std::clamp(ratio, 0.0f, 1.0f);
       ftxui::Color ctx_color = theme.status_bar.context.low;
-      if (ratio > 0.85f)
+      if (display_ratio > 0.85f)
         ctx_color = theme.status_bar.context.high;
-      else if (ratio > 0.60f)
+      else if (display_ratio > 0.60f)
         ctx_color = theme.status_bar.context.medium;
 
       char buf[32];
-      snprintf(buf, sizeof(buf), "%.0f%%", ratio * 100.0f);
+      snprintf(buf, sizeof(buf), "%.0f%%", display_ratio * 100.0f);
       std::string pct_str = buf;
 
       if (compact_mode || ultra_compact) {
@@ -222,30 +254,9 @@ public:
         ctx_items.push_back(ftxui::text(" " + pct_str + " ") | ftxui::bold |
                             ftxui::color(ctx_color) | ftxui::bgcolor(ctx_bg));
       } else {
-        // Formatting helper for context numbers
-        auto format_val = [](uint32_t val) -> std::string {
-          if (val >= 1000000) {
-            char val_buf[32];
-            snprintf(val_buf, sizeof(val_buf), "%.1fM", val / 1000000.0f);
-            std::string s = val_buf;
-            if (s.size() > 3 && s.substr(s.size() - 3) == ".0M") {
-              return s.substr(0, s.size() - 3) + "M";
-            }
-            return s;
-          } else if (val >= 1000) {
-            char val_buf[32];
-            snprintf(val_buf, sizeof(val_buf), "%.1fk", val / 1000.0f);
-            std::string s = val_buf;
-            if (s.size() > 3 && s.substr(s.size() - 3) == ".0k") {
-              return s.substr(0, s.size() - 3) + "k";
-            }
-            return s;
-          }
-          return std::to_string(val);
-        };
-
-        std::string combined_ctx = format_val(model_->context_used) + " / " +
-                                   format_val(model_->context_max);
+        std::string combined_ctx =
+            formatCompactCount(model_->context_used) + " / " +
+            formatCompactCount(model_->context_max);
 
         ctx_items.push_back(ftxui::text(firmius::shared::PL_RIGHT_SOFT_SEP) |
                             ftxui::color(theme.base.dim) |
@@ -262,13 +273,35 @@ public:
       }
     }
 
-    ftxui::Element ctx_seg = ftxui::hbox({
-        ftxui::text(firmius::shared::PL_RIGHT_SEP) | ftxui::color(ctx_bg) |
-            ftxui::bgcolor(filler_bg),
-        ftxui::hbox(std::move(ctx_items)) | ftxui::bgcolor(ctx_bg),
-    });
+    ftxui::Color current_bg = filler_bg;
 
-    ftxui::Element process_seg = ftxui::text("") | ftxui::bgcolor(filler_bg);
+    ftxui::Element token_seg = ftxui::text("");
+    const std::string prompt_summary = formatPromptSummary(*model_);
+    if (!prompt_summary.empty() || model_->completion_tokens > 0) {
+      std::string token_text;
+      if (!prompt_summary.empty()) {
+        token_text += std::string(" ↑ ") + prompt_summary;
+      }
+      if (model_->completion_tokens > 0) {
+        if (!token_text.empty()) {
+          token_text += " ";
+        }
+        token_text += std::string("↓ ") +
+                      formatCompactCount(model_->completion_tokens);
+      }
+
+      auto token_bg = theme.agent_strip.pills.model_bg;
+      auto token_fg = theme.agent_strip.pills.model_fg;
+      token_seg = ftxui::hbox({
+          ftxui::text(firmius::shared::PL_RIGHT_SEP) |
+              ftxui::color(token_bg) | ftxui::bgcolor(current_bg),
+          ftxui::text(token_text + " ") | ftxui::bold |
+              ftxui::color(token_fg) | ftxui::bgcolor(token_bg),
+      });
+      current_bg = token_bg;
+    }
+
+    ftxui::Element process_seg = ftxui::text("");
     if (model_->live_processes > 0 || model_->background_processes > 0) {
       std::string process_text = " " + firmius::shared::ICON_TERMINAL;
       if (model_->live_processes > 0) {
@@ -282,15 +315,22 @@ public:
         process_text += ultra_compact ? "b" : " bg";
       }
 
-      auto process_bg = theme.status_bar.context.bg;
-      auto process_fg = theme.status_bar.context.icon;
+      auto process_bg = theme.status_bar.executing_tool.normal.bg;
+      auto process_fg = theme.status_bar.executing_tool.normal.fg;
       process_seg = ftxui::hbox({
           ftxui::text(firmius::shared::PL_RIGHT_SEP) |
-              ftxui::color(process_bg) | ftxui::bgcolor(filler_bg),
+              ftxui::color(process_bg) | ftxui::bgcolor(current_bg),
           ftxui::text(process_text + " ") | ftxui::bold |
               ftxui::color(process_fg) | ftxui::bgcolor(process_bg),
       });
+      current_bg = process_bg;
     }
+
+    ftxui::Element ctx_seg = ftxui::hbox({
+        ftxui::text(firmius::shared::PL_RIGHT_SEP) | ftxui::color(ctx_bg) |
+            ftxui::bgcolor(current_bg),
+        ftxui::hbox(std::move(ctx_items)) | ftxui::bgcolor(ctx_bg),
+    });
 
     return ftxui::hbox({status_seg,
                         sep_status_purpose,
@@ -301,6 +341,7 @@ public:
                         model_el,
                         sep_model_filler,
                         ftxui::filler() | ftxui::bgcolor(filler_bg),
+                        token_seg,
                         process_seg,
                         ctx_seg}) |
            ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, 1);

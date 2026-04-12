@@ -27,8 +27,14 @@ public:
      * @return True if path is within allowedRoot.
      */
     static bool isSubpath(const std::string& path, const std::string& allowedRoot);
+    /**
+     * @brief Checks if a path (resolved via weakly_canonical) is within a root (resolved via canonical).
+     * @param candidate The path to check.
+     * @param root The root directory.
+     * @return True if the canonicalized candidate is within the canonicalized root.
+     */
+    static bool isCanonicalSubpath(const std::filesystem::path& candidate, const std::filesystem::path& root);
 };
-
 }
 
 #endif

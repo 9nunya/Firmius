@@ -17,6 +17,7 @@ target_sources(firmius_tui PRIVATE
     src/commands/UndoCommand.cpp
     src/commands/CompactCommand.cpp
     src/commands/ConfigCommand.cpp
+    src/commands/MemoryCommand.cpp
     src/commands/ConnectCommand.cpp
     src/commands/BenchmarksCommand.cpp
     src/commands/QuotasCommand.cpp
@@ -30,6 +31,7 @@ target_sources(firmius_tui PRIVATE
     src/modals/ThreadLockedModal.cpp
     src/modals/ModelPickerModal.cpp
     src/modals/ConfigDisplayModal.cpp
+    src/modals/RollingMemorySettingsModal.cpp
     src/modals/RouterModal.cpp
     src/modals/PurposesModal.cpp
     src/modals/PermissionPromptModal.cpp
@@ -50,6 +52,7 @@ target_sources(firmius_tui PRIVATE
     src/components/ScrollableBox.cpp
     src/components/TitleBar.cpp
     src/components/StatusBar.cpp
+    src/components/ContextLane.cpp
     src/components/AgentStrip.cpp
     src/components/PlanLane.cpp
     src/components/TodoLane.cpp

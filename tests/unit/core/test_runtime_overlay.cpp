@@ -7,6 +7,7 @@
 
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <string>
 
@@ -70,6 +71,18 @@ protected:
 
   void setFile(const std::string& path, const std::string& content) {
     host_->writeFile(path, std::vector<uint8_t>(content.begin(), content.end()));
+  }
+
+  AgentTurn makeTurn(const std::string& turnId, Role role,
+                     const std::string& text) {
+    AgentTurn turn;
+    turn.turnId = turnId;
+    Message msg;
+    msg.role = role;
+    msg.timestamp = 1;
+    msg.content.push_back(TextContent{text});
+    turn.messages.push_back(std::move(msg));
+    return turn;
   }
 
   std::string tempDir_;
@@ -146,11 +159,16 @@ TEST_F(RuntimeOverlayTest, BuildRequestHistoryAppendsLeadStateOnly) {
           context_, *host_, *workspace_);
   ASSERT_GE(requestHistory.turns.size(), 1u);
 
-  const AgentTurn& workTurn = requestHistory.turns.back();
+  const AgentTurn *workTurn = nullptr;
+  for (const auto &turn : requestHistory.turns) {
+    if (turn.turnId == "runtime-overlay-work-state") {
+      workTurn = &turn;
+      break;
+    }
+  }
+  ASSERT_NE(workTurn, nullptr);
 
-  EXPECT_EQ(workTurn.turnId, "runtime-overlay-work-state");
-
-  const std::string workText = firstTextContent(workTurn);
+  const std::string workText = firstTextContent(*workTurn);
   EXPECT_NE(workText.find("Plan Title: Ship Runtime Overlay"), std::string::npos);
   EXPECT_NE(workText.find("#1 [Pending] Review live overlay content"),
             std::string::npos);
@@ -167,7 +185,15 @@ TEST_F(RuntimeOverlayTest, BuildRequestHistoryAppendsWorkerState) {
           context_, *host_, *workspace_);
   ASSERT_GE(history.turns.size(), 1u);
 
-  const std::string workText = firstTextContent(history.turns.back());
+  const AgentTurn *workTurn = nullptr;
+  for (const auto &turn : history.turns) {
+    if (turn.turnId == "runtime-overlay-work-state") {
+      workTurn = &turn;
+      break;
+    }
+  }
+  ASSERT_NE(workTurn, nullptr);
+  const std::string workText = firstTextContent(*workTurn);
   EXPECT_NE(workText.find("Role: worker"), std::string::npos);
 }
 
@@ -180,7 +206,428 @@ TEST_F(RuntimeOverlayTest, BuildRequestHistoryAppendsExecutorState) {
           context_, *host_, *workspace_);
   ASSERT_GE(history.turns.size(), 1u);
 
-  const std::string workText = firstTextContent(history.turns.back());
+  const AgentTurn *workTurn = nullptr;
+  for (const auto &turn : history.turns) {
+    if (turn.turnId == "runtime-overlay-work-state") {
+      workTurn = &turn;
+      break;
+    }
+  }
+  ASSERT_NE(workTurn, nullptr);
+  const std::string workText = firstTextContent(*workTurn);
   EXPECT_NE(workText.find("Role: executor"), std::string::npos);
 }
+
+TEST_F(RuntimeOverlayTest, BuildRequestHistoryAppendsUserMemoryOverlay) {
+  const std::filesystem::path userRoot =
+      std::filesystem::path(tempDir_) / ".firmius" / "user";
+  std::filesystem::create_directories(userRoot);
+  {
+    std::ofstream out(userRoot / "USER.md");
+    out << "# USER\n\n- Prefers concise summaries.\n";
+  }
+  {
+    std::ofstream out(userRoot / "BEHAVIOR.md");
+    out << "# BEHAVIOR\n\n- Run tests after code changes.\n";
+  }
+
+  const auto history = runtime_overlay::buildRequestHistoryWithRuntimeOverlays(
+      context_, *host_, *workspace_);
+
+  bool foundUserMemory = false;
+  for (const auto &turn : history.turns) {
+    if (turn.turnId != "runtime-overlay-user-memory") {
+      continue;
+    }
+    foundUserMemory = true;
+    const std::string text = firstTextContent(turn);
+    EXPECT_NE(text.find("## USER MEMORY"), std::string::npos);
+    EXPECT_NE(text.find("Prefers concise summaries"), std::string::npos);
+    EXPECT_NE(text.find("Run tests after code changes"), std::string::npos);
+  }
+  EXPECT_TRUE(foundUserMemory);
+}
+
+TEST_F(RuntimeOverlayTest, BuildRequestHistorySkipsUserMemoryOverlayForBenchmarkThreads) {
+  auto metadata = threadManager_->getMetadata(threadId_);
+  metadata.isBenchmarkRun = true;
+  metadata.benchmarkId = "swebench";
+  threadManager_->updateMetadata(threadId_, metadata);
+
+  const std::filesystem::path userRoot =
+      std::filesystem::path(tempDir_) / ".firmius" / "user";
+  std::filesystem::create_directories(userRoot);
+  {
+    std::ofstream out(userRoot / "USER.md");
+    out << "# USER\n\n- Should not appear.\n";
+  }
+
+  const auto history = runtime_overlay::buildRequestHistoryWithRuntimeOverlays(
+      context_, *host_, *workspace_);
+
+  for (const auto &turn : history.turns) {
+    EXPECT_NE(turn.turnId, "runtime-overlay-user-memory");
+  }
+}
+
+TEST_F(RuntimeOverlayTest, BuildRequestHistoryAddsRollingStatusOverlay) {
+  context_.config.rollingMemory.enabled = true;
+  context_.config.rollingMemory.mode = "rolling_forever";
+
+  const auto history = runtime_overlay::buildRequestHistoryWithRuntimeOverlays(
+      context_, *host_, *workspace_);
+
+  bool found = false;
+  for (const auto &turn : history.turns) {
+    if (turn.turnId == "runtime-overlay-rolling-status") {
+      found = true;
+      const auto text = firstTextContent(turn);
+      EXPECT_NE(text.find("ROLLING MEMORY STATUS"), std::string::npos);
+      EXPECT_NE(text.find("Target threshold"), std::string::npos);
+    }
+  }
+  EXPECT_TRUE(found);
+}
+
+TEST_F(RuntimeOverlayTest, BuildRequestHistoryOmitsRollingStatusOverlayWhenDisabled) {
+  context_.config.rollingMemory.mode = "disabled";
+  const auto history = runtime_overlay::buildRequestHistoryWithRuntimeOverlays(
+      context_, *host_, *workspace_);
+
+  for (const auto &turn : history.turns) {
+    EXPECT_NE(turn.turnId, "runtime-overlay-rolling-status");
+  }
+}
+
+TEST_F(RuntimeOverlayTest, BuildRequestHistoryAddsRollingMemoryOverlayFromState) {
+  RollingMemoryState state;
+  state.threadId = threadId_;
+  state.agentId = context_.identity.id;
+  RollingMemoryChunk chunk;
+  chunk.chunkId = "obs-1";
+  chunk.active = true;
+  chunk.sourceStartTurnId = "user-1";
+  chunk.sourceEndTurnId = "assistant-2";
+  chunk.summary = "Remember parser work.";
+  state.observationChunks.push_back(chunk);
+  threadManager_->writeRollingMemoryState(threadId_, context_.identity.id, state);
+
+  const auto history = runtime_overlay::buildRequestHistoryWithRuntimeOverlays(
+      context_, *host_, *workspace_);
+
+  bool found = false;
+  for (const auto &turn : history.turns) {
+    if (turn.turnId == "runtime-overlay-rolling-memory") {
+      found = true;
+      const auto text = firstTextContent(turn);
+      EXPECT_NE(text.find("Remember parser work"), std::string::npos);
+    }
+  }
+  EXPECT_TRUE(found);
+}
+
+TEST_F(RuntimeOverlayTest, BuildRequestHistoryOmitsRollingMemoryOverlayWithoutActiveChunks) {
+  const auto history = runtime_overlay::buildRequestHistoryWithRuntimeOverlays(
+      context_, *host_, *workspace_);
+
+  for (const auto &turn : history.turns) {
+    EXPECT_NE(turn.turnId, "runtime-overlay-rolling-memory");
+  }
+}
+
+TEST_F(RuntimeOverlayTest, BuildRequestHistoryFiltersCoveredHistoryTurns) {
+  context_.history->turns.push_back(AgentTurn{});
+  context_.history->turns.back().turnId = "bootstrap-system";
+  context_.history->turns.push_back(makeTurn("user-1", Role::User, "old user"));
+  context_.history->turns.push_back(makeTurn("assistant-2", Role::Assistant, "old assistant"));
+  context_.history->turns.push_back(makeTurn("user-3", Role::User, "recent user"));
+  context_.config.rollingMemory.preset = "custom";
+  context_.config.rollingMemory.retainTailRatio = 0.0f;
+  context_.config.rollingMemory.minimumRetainedTailTokens = 1;
+
+  RollingMemoryState state;
+  state.threadId = threadId_;
+  state.agentId = context_.identity.id;
+  RollingMemoryChunk chunk;
+  chunk.chunkId = "obs-1";
+  chunk.active = true;
+  chunk.sourceTurnIds = {"user-1", "assistant-2"};
+  chunk.summary = "old conversation";
+  state.observationChunks.push_back(chunk);
+  threadManager_->writeRollingMemoryState(threadId_, context_.identity.id, state);
+
+  const auto history = runtime_overlay::buildRequestHistoryWithRuntimeOverlays(
+      context_, *host_, *workspace_);
+  bool sawOldUser = false;
+  bool sawRecentUser = false;
+  for (const auto &turn : history.turns) {
+    const auto text = firstTextContent(turn);
+    if (text.find("old user") != std::string::npos) {
+      sawOldUser = true;
+    }
+    if (text.find("recent user") != std::string::npos) {
+      sawRecentUser = true;
+    }
+  }
+  EXPECT_FALSE(sawOldUser);
+  EXPECT_TRUE(sawRecentUser);
+}
+
+TEST_F(RuntimeOverlayTest, BuildRequestHistoryKeepsRecentTailEvenWhenCovered) {
+  context_.history->turns.push_back(AgentTurn{});
+  context_.history->turns.back().turnId = "bootstrap-system";
+  context_.history->turns.push_back(makeTurn("user-1", Role::User, "tail user"));
+  context_.config.rollingMemory.minimumRetainedTailTokens = 100000;
+
+  RollingMemoryState state;
+  state.threadId = threadId_;
+  state.agentId = context_.identity.id;
+  RollingMemoryChunk chunk;
+  chunk.chunkId = "obs-1";
+  chunk.active = true;
+  chunk.sourceTurnIds = {"user-1"};
+  chunk.summary = "tail summary";
+  state.observationChunks.push_back(chunk);
+  threadManager_->writeRollingMemoryState(threadId_, context_.identity.id, state);
+
+  const auto history = runtime_overlay::buildRequestHistoryWithRuntimeOverlays(
+      context_, *host_, *workspace_);
+  bool sawTail = false;
+  for (const auto &turn : history.turns) {
+    if (firstTextContent(turn).find("tail user") != std::string::npos) {
+      sawTail = true;
+    }
+  }
+  EXPECT_TRUE(sawTail);
+}
 } // namespace
+
+TEST_F(RuntimeOverlayTest, ReconcileSkillLoadUpdatesState) {
+  std::string skillsDir = tempDir_ + "/.agents/skills";
+  std::filesystem::create_directories(skillsDir);
+  setenv("FIRMIUS_SKILLS_DIR", skillsDir.c_str(), 1);
+
+  const std::string skillRoot = skillsDir + "/test-skill";
+  std::filesystem::create_directories(skillRoot);
+  const std::string path = skillRoot + "/test-agent.md";
+
+  // 1. Valid authorized path
+  const std::string validResultJson = R"({"skill_id":"test-skill","path":")" + path + R"(","skill_root":")" + skillRoot + R"("})";
+  runtime_overlay::reconcileSuccessfulToolResult(context_, *host_, *workspace_,
+                                                 "skill_load", R"({"id":"test-skill"})", validResultJson);
+
+  EXPECT_EQ(context_.state.loadedSkills.size(), 1u);
+  EXPECT_EQ(context_.state.loadedSkills[0], "test-skill");
+  EXPECT_EQ(context_.state.loadedAgentMds.size(), 1u);
+  EXPECT_EQ(context_.state.loadedAgentMds[0], path);
+  EXPECT_EQ(context_.state.loadedSkillRoots[path], skillRoot);
+
+  // 2. Unauthorized path (outside skills dir)
+  const std::string invalidPath = "/tmp/malicious.md";
+  const std::string invalidResultJson = R"({"skill_id":"evil-skill","path":")" + invalidPath + R"(","skill_root":"/tmp"})";
+  runtime_overlay::reconcileSuccessfulToolResult(context_, *host_, *workspace_,
+                                                 "skill_load", R"({"id":"evil-skill"})", invalidResultJson);
+
+  // Should have loaded the skill ID, but NOT the path/root if it's untrusted
+  EXPECT_EQ(context_.state.loadedSkills.size(), 2u);
+  EXPECT_EQ(context_.state.loadedAgentMds.size(), 1u); // still only the first one
+  EXPECT_EQ(context_.state.loadedSkillRoots.size(), 1u);
+}
+
+TEST_F(RuntimeOverlayTest, BuildRequestHistoryAppendsLoadedSkillsOverlay) {
+  context_.state.loadedSkills = {"skill-a", "skill-b"};
+  context_.state.loadedAgentMds = {"/work/agent-x.md"};
+  setFile("/work/agent-x.md", "Agent X Instructions\n");
+  context_.state.loadedSkillRoots["/work/agent-x.md"] = "/";
+
+  const auto history =
+      runtime_overlay::buildRequestHistoryWithRuntimeOverlays(
+          context_, *host_, *workspace_);
+  
+  // Should have work state overlay AND loaded skills overlay
+  ASSERT_GE(history.turns.size(), 2u);
+
+  bool foundSkills = false;
+  for (const auto& turn : history.turns) {
+    if (turn.turnId == "runtime-overlay-loaded-skills") {
+      foundSkills = true;
+      const std::string text = firstTextContent(turn);
+      EXPECT_NE(text.find("## LOADED SKILLS"), std::string::npos);
+      EXPECT_NE(text.find("- skill-a"), std::string::npos);
+      EXPECT_NE(text.find("- skill-b"), std::string::npos);
+      EXPECT_NE(text.find("### /work/agent-x.md"), std::string::npos);
+      EXPECT_NE(text.find("Agent X Instructions"), std::string::npos);
+    }
+  }
+  EXPECT_TRUE(foundSkills);
+
+}
+
+TEST_F(RuntimeOverlayTest, BuildLoadedSkillsOverlayFailsClosedOnMissingRoot) {
+  context_.state.loadedAgentMds = {"/work/untracked.md"};
+  setFile("/work/untracked.md", "Secret instructions\n");
+
+  const auto history =
+      runtime_overlay::buildRequestHistoryWithRuntimeOverlays(
+          context_, *host_, *workspace_);
+
+  bool foundSkills = false;
+  for (const auto& turn : history.turns) {
+    if (turn.turnId == "runtime-overlay-loaded-skills") {
+      foundSkills = true;
+      const std::string text = firstTextContent(turn);
+      EXPECT_EQ(text.find("### /work/untracked.md"), std::string::npos);
+      EXPECT_EQ(text.find("(unavailable: missing recorded root)"), std::string::npos);
+      EXPECT_EQ(text.find("Secret instructions"), std::string::npos);
+    }
+  }
+  EXPECT_TRUE(foundSkills);
+}
+
+TEST_F(RuntimeOverlayTest, BuildLoadedSkillsOverlayFailsOnSecurityViolation) {
+  context_.state.loadedAgentMds = {"/etc/passwd"};
+  context_.state.loadedSkillRoots["/etc/passwd"] = "/work";
+  // MockHost might not care, but FSUtil::isCanonicalSubpath will.
+  setFile("/etc/passwd", "root:x:0:0:root:/root:/bin/bash\n");
+
+  const auto history =
+      runtime_overlay::buildRequestHistoryWithRuntimeOverlays(
+          context_, *host_, *workspace_);
+
+  bool foundSkills = false;
+  for (const auto& turn : history.turns) {
+    if (turn.turnId == "runtime-overlay-loaded-skills") {
+      foundSkills = true;
+      const std::string text = firstTextContent(turn);
+      EXPECT_EQ(text.find("### /etc/passwd"), std::string::npos);
+      EXPECT_EQ(text.find("(unavailable: security violation)"), std::string::npos);
+      EXPECT_EQ(text.find("root:x:0:0"), std::string::npos);
+    }
+  }
+  EXPECT_TRUE(foundSkills);
+}
+
+TEST_F(RuntimeOverlayTest, ReconstructStateFromHistoryRecoversLoadedSkills) {
+  std::string skillsDir = tempDir_ + "/.agents/skills";
+  std::filesystem::create_directories(skillsDir);
+  setenv("FIRMIUS_SKILLS_DIR", skillsDir.c_str(), 1);
+
+  const std::string skillRoot = skillsDir + "/test-skill";
+  std::filesystem::create_directories(skillRoot);
+  const std::string path = skillRoot + "/test-skill.md";
+
+  AgentTurn turn1;
+  Message msg1;
+  msg1.role = Role::Assistant;
+  msg1.content.push_back(ToolCallContent{"call-1", "skill_load", R"({"what":"test-skill"})"});
+  turn1.messages.push_back(std::move(msg1));
+  context_.history->turns.push_back(std::move(turn1));
+
+  AgentTurn turn2;
+  Message msg2;
+  msg2.role = Role::ToolResult;
+  msg2.content.push_back(ToolResultContent{"call-1", R"({"skill_id":"test-skill","path":")" + path + R"(","skill_root":")" + skillRoot + R"("})", true, "", ""});
+  turn2.messages.push_back(std::move(msg2));
+  context_.history->turns.push_back(std::move(turn2));
+
+  // State should be empty initially
+  EXPECT_TRUE(context_.state.loadedSkills.empty());
+  EXPECT_TRUE(context_.state.loadedAgentMds.empty());
+
+  runtime_overlay::reconstructStateFromHistory(context_, *host_, *workspace_);
+
+  // State should be reconstructed
+  EXPECT_EQ(context_.state.loadedSkills.size(), 1u);
+  EXPECT_EQ(context_.state.loadedSkills[0], "test-skill");
+  EXPECT_EQ(context_.state.loadedAgentMds.size(), 1u);
+  EXPECT_EQ(context_.state.loadedAgentMds[0], path);
+}
+
+TEST_F(RuntimeOverlayTest, ReconcileMcpLoadUpdatesState) {
+  const std::string resultJson =
+      R"({"server_name":"demo","loaded_tools":["tool.alpha","tool.beta"],"loaded_resources":["res://alpha"],"loaded_prompts":["prompt.alpha"]})";
+
+  runtime_overlay::reconcileSuccessfulToolResult(
+      context_, *host_, *workspace_, "mcp_load", R"({"server_name":"demo"})",
+      resultJson);
+
+  ASSERT_EQ(context_.state.loadedMcpServers.size(), 1u);
+  EXPECT_EQ(context_.state.loadedMcpServers[0], "demo");
+  ASSERT_EQ(context_.state.loadedMcpTools.size(), 1u);
+  EXPECT_EQ(context_.state.loadedMcpTools["demo"].size(), 2u);
+  EXPECT_EQ(context_.state.loadedMcpTools["demo"][0], "tool.alpha");
+  EXPECT_EQ(context_.state.loadedMcpTools["demo"][1], "tool.beta");
+  ASSERT_EQ(context_.state.loadedMcpResources.size(), 1u);
+  EXPECT_EQ(context_.state.loadedMcpResources["demo"][0], "res://alpha");
+  ASSERT_EQ(context_.state.loadedMcpPrompts.size(), 1u);
+  EXPECT_EQ(context_.state.loadedMcpPrompts["demo"][0], "prompt.alpha");
+}
+
+TEST_F(RuntimeOverlayTest, ReconstructStateFromHistoryRecoversMcpLoadState) {
+  AgentTurn turn1;
+  Message msg1;
+  msg1.role = Role::Assistant;
+  msg1.content.push_back(
+      ToolCallContent{"call-mcp-1", "mcp_load", R"({"server_name":"demo"})"});
+  turn1.messages.push_back(std::move(msg1));
+  context_.history->turns.push_back(std::move(turn1));
+
+  AgentTurn turn2;
+  Message msg2;
+  msg2.role = Role::ToolResult;
+  msg2.content.push_back(ToolResultContent{
+      "call-mcp-1",
+      R"({"server_name":"demo","loaded_tools":["tool.alpha"],"loaded_resources":["res://alpha"],"loaded_prompts":["prompt.alpha"]})",
+      true,
+      "",
+      ""});
+  turn2.messages.push_back(std::move(msg2));
+  context_.history->turns.push_back(std::move(turn2));
+
+  runtime_overlay::reconstructStateFromHistory(context_, *host_, *workspace_);
+
+  ASSERT_EQ(context_.state.loadedMcpServers.size(), 1u);
+  EXPECT_EQ(context_.state.loadedMcpServers[0], "demo");
+  ASSERT_EQ(context_.state.loadedMcpTools.size(), 1u);
+  EXPECT_EQ(context_.state.loadedMcpTools["demo"][0], "tool.alpha");
+  ASSERT_EQ(context_.state.loadedMcpResources.size(), 1u);
+  EXPECT_EQ(context_.state.loadedMcpResources["demo"][0], "res://alpha");
+  ASSERT_EQ(context_.state.loadedMcpPrompts.size(), 1u);
+  EXPECT_EQ(context_.state.loadedMcpPrompts["demo"][0], "prompt.alpha");
+}
+
+TEST_F(RuntimeOverlayTest, BuildRequestHistoryAppendsLoadedMcpSummaryWhenPresent) {
+  context_.state.loadedMcpServers = {"demo"};
+  context_.state.loadedMcpTools["demo"] = {"tool.alpha"};
+  context_.state.loadedMcpResources["demo"] = {"res://alpha"};
+  context_.state.loadedMcpPrompts["demo"] = {"prompt.alpha"};
+
+  const auto history =
+      runtime_overlay::buildRequestHistoryWithRuntimeOverlays(
+          context_, *host_, *workspace_);
+
+  bool foundMcpSummary = false;
+  for (const auto& turn : history.turns) {
+    const std::string text = firstTextContent(turn);
+    if (turn.turnId == "runtime-overlay-loaded-mcp") {
+      foundMcpSummary = true;
+      EXPECT_NE(text.find("LOADED MCP"), std::string::npos);
+      EXPECT_NE(text.find("demo"), std::string::npos);
+      EXPECT_NE(text.find("tool.alpha"), std::string::npos);
+      EXPECT_NE(text.find("res://alpha"), std::string::npos);
+      EXPECT_NE(text.find("prompt.alpha"), std::string::npos);
+    }
+  }
+
+  EXPECT_TRUE(foundMcpSummary);
+}
+
+TEST_F(RuntimeOverlayTest, BuildRequestHistoryOmitsLoadedMcpSummaryWhenEmpty) {
+  const auto history =
+      runtime_overlay::buildRequestHistoryWithRuntimeOverlays(
+          context_, *host_, *workspace_);
+
+  for (const auto& turn : history.turns) {
+    EXPECT_NE(turn.turnId, "runtime-overlay-loaded-mcp");
+  }
+}

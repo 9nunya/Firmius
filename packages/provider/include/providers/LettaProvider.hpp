@@ -39,13 +39,15 @@ public:
   void refreshQuotas() override;
   std::map<std::string, std::vector<QuotaBucket>> getAllQuotas() const override;
 
+  std::optional<OAuthAccount> getAvailableAccount(
+      const std::optional<std::string> &modelId = std::nullopt) override;
+
   // ------------------------------------------------------------------------
   // Letta-specific helpers
   // ------------------------------------------------------------------------
 
   static std::map<std::string, ModelInfo> getStaticModels();
 
-private:
   struct StreamedToolCallState {
     std::string emittedId;
     std::string lastName;
@@ -62,11 +64,19 @@ private:
     std::atomic<bool> *abortSignal;
     std::uint32_t toolCallCounter = 0;
     std::unordered_map<std::string, StreamedToolCallState> streamedToolCalls;
+    bool sawTypedEvent = false;
+    bool sawStopReason = false;
+    bool sawProtocolError = false;
+    StopReason stopReason = StopReason::Stop;
   };
 
   void processSSELine(const std::string &line, StreamContext &ctx);
+
+private:
   bool fetchAndStoreQuotas(OAuthAccount &acc);
   bool ensureAgentId(OAuthAccount &acc, std::string &outErrorMessage);
+  bool ensureConversationId(OAuthAccount &acc, std::string &outConversationId,
+                            std::string &outErrorMessage);
   int executeStreamRequest(OAuthAccount &acc, const AgentHistory &history,
                            const ProviderOptions &opts,
                            std::function<void(const StreamEvent &)> &onEvent);

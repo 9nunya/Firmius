@@ -1,4 +1,5 @@
 #include "agents/HintingLoader.hpp"
+#include "utils/FrontmatterParser.hpp"
 #include "utils/StringUtil.hpp"
 #include <cstdlib>
 #include <filesystem>
@@ -172,68 +173,27 @@ HintingLoader::loadFromPath(const std::string &family, const std::string &path) 
     return std::nullopt;
   }
 
-  std::string line;
-  std::string frontmatter;
-  std::string body;
-  bool inFrontmatter = false;
-  int dashCount = 0;
+  std::stringstream buffer;
+  buffer << file.rdbuf();
+  std::string content = buffer.str();
 
-  while (std::getline(file, line)) {
-    if (line == "---") {
-      dashCount++;
-      if (dashCount == 1) {
-        inFrontmatter = true;
-      } else if (dashCount == 2) {
-        inFrontmatter = false;
-      }
-      continue;
-    }
-
-    if (inFrontmatter) {
-      frontmatter += line + "\n";
-    } else {
-      body += line + "\n";
-    }
+  FrontmatterDocument doc;
+  try {
+    doc = FrontmatterParser::parseMarkdown(content, path);
+  } catch (const std::exception &e) {
+    std::cerr << "[hinting] Failed to parse frontmatter in '" << path << "': " << e.what() << "\n";
+    return std::nullopt;
   }
 
   HintingOverlay overlay;
-  overlay.name = family;
-  overlay.title = family;
-  overlay.description = "";
-  overlay.enabled = true;
-  overlay.body = StringUtil::trim(body);
+  overlay.name = FrontmatterParser::getString(doc, "name").value_or(family);
+  overlay.title = FrontmatterParser::getString(doc, "title").value_or(family);
+  overlay.description = FrontmatterParser::getString(doc, "description").value_or("");
+  overlay.builtin = FrontmatterParser::getBool(doc, "builtin").value_or(false);
+  overlay.enabled = FrontmatterParser::getBool(doc, "enabled").value_or(true);
+  overlay.priority = static_cast<int>(FrontmatterParser::getInt(doc, "priority").value_or(0));
+  overlay.body = StringUtil::trim(doc.body);
   overlay.sourcePath = path;
-
-  std::stringstream ss(frontmatter);
-  while (std::getline(ss, line)) {
-    const auto colon = line.find(':');
-    if (colon == std::string::npos) {
-      continue;
-    }
-
-    const std::string key = StringUtil::trim(line.substr(0, colon));
-    const std::string value = StringUtil::trim(line.substr(colon + 1));
-    const std::string lowered = StringUtil::toLower(value);
-
-    if (key == "name") {
-      overlay.name = value;
-    } else if (key == "title") {
-      overlay.title = value;
-    } else if (key == "description") {
-      overlay.description = value;
-    } else if (key == "builtin") {
-      overlay.builtin = (lowered == "true" || lowered == "yes" || lowered == "1");
-    } else if (key == "enabled") {
-      overlay.enabled = !(lowered == "false" || lowered == "no" || lowered == "0");
-    } else if (key == "priority") {
-      try {
-        overlay.priority = std::stoi(value);
-      } catch (...) {
-        std::cerr << "[hinting] Failed to parse priority in '" << path
-                  << "'. Using default 0.\n";
-      }
-    }
-  }
 
   if (overlay.body.empty()) {
     std::cerr << "[hinting] Hinting file '" << path

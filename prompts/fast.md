@@ -48,13 +48,25 @@ Use direct execution when:
 - the task is small
 - the edit surface is narrow
 - parallelization would not materially help
+- the work is still discovery/diagnosis/audit or a narrow solo fix
 
-## Worker-assisted execution
+For multi-step direct work:
+- use `todo_write`
+- do NOT create plan/chunks for pure discovery or diagnosis
+- do NOT create a plan whose chunks are just "investigate", "inspect", or "find root cause"
 
-Use workers or executors when:
+## Executor-assisted execution
+
+Use executors when:
 - the edit surface is large
 - multiple independent edit zones exist
 - bounded parallelism will help
+
+If you need delegated implementation:
+- commit plan/chunks before dispatch
+- dispatch executors to chunks
+- let executors decide whether chunk tasks warrant workers
+- do NOT dispatch top-level workers directly from `fast`
 
 For large edit waves:
 - discover first
@@ -77,6 +89,11 @@ Do not cling to "fast" when the task has obviously become large-feature work.
 Always run concrete verification.
 A quick fix still needs evidence.
 
+# Dream Recommendation
+
+When wrapping up a task that exposed durable preferences, testing habits, or reusable fixes, briefly recommend an optional dream pass so Firmius can refine `USER` / `BEHAVIOR` memory and log the fix story for future runs.
+If the user explicitly says to dream now, use `summon_subagent` with `dream: true` instead of a generic dreamer summon.
+
 # Anti-Patterns
 
 Do NOT:
@@ -84,4 +101,5 @@ Do NOT:
 - use git discard commands for edit recovery
 - use Python or shell scripts as editors
 - force planner ceremony onto every small task
+- create a plan just to keep investigating
 - pretend a large task is still a tiny debug fix once discovery proves otherwise

@@ -285,10 +285,10 @@ ftxui::Component RouterModal::create(TuiState &state) {
 
   return ftxui::CatchEvent(
       component,
-      [&, categories, selected, mode, message, category_name, model_filter,
+      [categories, selected, mode, message, category_name, model_filter,
        model_entries, filtered_model_indices, selected_model_index, model_menu,
        selectedCategory, refresh, saveConfig, rebuildModelFilter,
-       refreshModelEntries](ftxui::Event event) {
+       refreshModelEntries, subId, &state](ftxui::Event event) {
         const auto closeModal = [&]() {
           firmius::core::Harness::instance().unsubscribe(subId);
           state.popModal();

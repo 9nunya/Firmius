@@ -59,6 +59,247 @@ std::filesystem::path resolveFirmiusHomeForConfig() {
     return std::filesystem::temp_directory_path() / "firmius";
 }
 
+rapidjson::Value toJson(const AgentConfig::RollingModelConfig& model,
+                        rapidjson::Document::AllocatorType& allocator) {
+    rapidjson::Value v(rapidjson::kObjectType);
+    v.AddMember("enabled", model.enabled, allocator);
+    v.AddMember("providerId", rapidjson::Value(model.providerId.c_str(), allocator), allocator);
+    v.AddMember("modelId", rapidjson::Value(model.modelId.c_str(), allocator), allocator);
+    v.AddMember("variantName", rapidjson::Value(model.variantName.c_str(), allocator), allocator);
+    return v;
+}
+
+void rollingModelConfigFromJson(const rapidjson::Value& v,
+                                AgentConfig::RollingModelConfig& model) {
+    if (!v.IsObject()) {
+        return;
+    }
+    if (v.HasMember("enabled") && v["enabled"].IsBool()) {
+        model.enabled = v["enabled"].GetBool();
+    }
+    if (v.HasMember("providerId") && v["providerId"].IsString()) {
+        model.providerId = v["providerId"].GetString();
+    }
+    if (v.HasMember("modelId") && v["modelId"].IsString()) {
+        model.modelId = v["modelId"].GetString();
+    }
+    if (v.HasMember("variantName") && v["variantName"].IsString()) {
+        model.variantName = v["variantName"].GetString();
+    }
+}
+
+rapidjson::Value toJson(const UserConfig::RollingMemoryConfig& config,
+                        rapidjson::Document::AllocatorType& allocator) {
+    rapidjson::Value v(rapidjson::kObjectType);
+    v.AddMember("enabled", config.enabled, allocator);
+    v.AddMember("mode", rapidjson::Value(config.mode.c_str(), allocator), allocator);
+    v.AddMember("preset", rapidjson::Value(config.preset.c_str(), allocator), allocator);
+    v.AddMember("targetOccupancyRatio", config.targetOccupancyRatio, allocator);
+    v.AddMember("bufferOccupancyRatio", config.bufferOccupancyRatio, allocator);
+    v.AddMember("emergencyOccupancyRatio", config.emergencyOccupancyRatio, allocator);
+    v.AddMember("reflectionOccupancyRatio", config.reflectionOccupancyRatio, allocator);
+    v.AddMember("retainTailRatio", config.retainTailRatio, allocator);
+    v.AddMember("minimumRetainedTailTokens", config.minimumRetainedTailTokens, allocator);
+    v.AddMember("minimumChunkTokens", config.minimumChunkTokens, allocator);
+    v.AddMember("emitEventTurns", config.emitEventTurns, allocator);
+    v.AddMember("observer", toJson(config.observer, allocator), allocator);
+    v.AddMember("reflector", toJson(config.reflector, allocator), allocator);
+    v.AddMember("workingMemoryUpdater", toJson(config.workingMemoryUpdater, allocator), allocator);
+    return v;
+}
+
+void rollingMemoryConfigFromJson(const rapidjson::Value& v,
+                                 UserConfig::RollingMemoryConfig& config) {
+    if (!v.IsObject()) {
+        return;
+    }
+    if (v.HasMember("enabled") && v["enabled"].IsBool()) {
+        config.enabled = v["enabled"].GetBool();
+    }
+    if (v.HasMember("mode") && v["mode"].IsString()) {
+        config.mode = v["mode"].GetString();
+    }
+    if (v.HasMember("preset") && v["preset"].IsString()) {
+        config.preset = v["preset"].GetString();
+    }
+    if (v.HasMember("targetOccupancyRatio") && v["targetOccupancyRatio"].IsNumber()) {
+        config.targetOccupancyRatio = v["targetOccupancyRatio"].GetFloat();
+    }
+    if (v.HasMember("bufferOccupancyRatio") && v["bufferOccupancyRatio"].IsNumber()) {
+        config.bufferOccupancyRatio = v["bufferOccupancyRatio"].GetFloat();
+    }
+    if (v.HasMember("emergencyOccupancyRatio") && v["emergencyOccupancyRatio"].IsNumber()) {
+        config.emergencyOccupancyRatio = v["emergencyOccupancyRatio"].GetFloat();
+    }
+    if (v.HasMember("reflectionOccupancyRatio") && v["reflectionOccupancyRatio"].IsNumber()) {
+        config.reflectionOccupancyRatio = v["reflectionOccupancyRatio"].GetFloat();
+    }
+    if (v.HasMember("retainTailRatio") && v["retainTailRatio"].IsNumber()) {
+        config.retainTailRatio = v["retainTailRatio"].GetFloat();
+    }
+    if (v.HasMember("minimumRetainedTailTokens") && v["minimumRetainedTailTokens"].IsUint()) {
+        config.minimumRetainedTailTokens = v["minimumRetainedTailTokens"].GetUint();
+    }
+    if (v.HasMember("minimumChunkTokens") && v["minimumChunkTokens"].IsUint()) {
+        config.minimumChunkTokens = v["minimumChunkTokens"].GetUint();
+    }
+    if (v.HasMember("emitEventTurns") && v["emitEventTurns"].IsBool()) {
+        config.emitEventTurns = v["emitEventTurns"].GetBool();
+    }
+    if (v.HasMember("observer")) {
+        rollingModelConfigFromJson(v["observer"], config.observer);
+    }
+    if (v.HasMember("reflector")) {
+        rollingModelConfigFromJson(v["reflector"], config.reflector);
+    }
+    if (v.HasMember("workingMemoryUpdater")) {
+        rollingModelConfigFromJson(v["workingMemoryUpdater"], config.workingMemoryUpdater);
+    }
+}
+
+rapidjson::Value toJsonMcpStdioPayload(const McpServerConfig& config,
+                                   rapidjson::Document::AllocatorType& allocator) {
+    rapidjson::Value v(rapidjson::kObjectType);
+    v.AddMember("command", rapidjson::Value(config.command.c_str(), allocator), allocator);
+    rapidjson::Value args(rapidjson::kArrayType);
+    for (const auto& arg : config.args) {
+        args.PushBack(rapidjson::Value(arg.c_str(), allocator), allocator);
+    }
+    v.AddMember("args", args, allocator);
+    rapidjson::Value env(rapidjson::kObjectType);
+    for (const auto& [key, value] : config.env) {
+        env.AddMember(rapidjson::Value(key.c_str(), allocator),
+                      rapidjson::Value(value.c_str(), allocator),
+                      allocator);
+    }
+    v.AddMember("env", env, allocator);
+    v.AddMember("cwd", rapidjson::Value(config.cwd.c_str(), allocator), allocator);
+    v.AddMember("enabled", config.enabled, allocator);
+    return v;
+}
+
+rapidjson::Value toJsonMcpHttpPayload(const McpServerConfig& config,
+                                  rapidjson::Document::AllocatorType& allocator) {
+    rapidjson::Value v(rapidjson::kObjectType);
+    v.AddMember("url", rapidjson::Value(config.url.c_str(), allocator), allocator);
+    v.AddMember("authHeader", rapidjson::Value(config.authHeader.c_str(), allocator), allocator);
+    v.AddMember("authBearerToken", rapidjson::Value(config.authBearerToken.c_str(), allocator), allocator);
+    v.AddMember("allowInsecureTls", config.allowInsecureTls, allocator);
+    v.AddMember("caCertPath", rapidjson::Value(config.caCertPath.c_str(), allocator), allocator);
+    v.AddMember("enabled", config.enabled, allocator);
+    return v;
+}
+
+rapidjson::Value toJsonMcpServerConfig(const McpServerConfig& config,
+                                   rapidjson::Document::AllocatorType& allocator) {
+    rapidjson::Value v(rapidjson::kObjectType);
+    v.AddMember("transport", rapidjson::Value(config.transport.c_str(), allocator), allocator);
+    if (config.transport == "http") {
+        v.AddMember("http", toJsonMcpHttpPayload(config, allocator), allocator);
+    } else {
+        v.AddMember("stdio", toJsonMcpStdioPayload(config, allocator), allocator);
+    }
+    return v;
+}
+
+void mcpStdioPayloadFromJson(const rapidjson::Value& v,
+                                  McpServerConfig& config) {
+    if (!v.IsObject()) {
+        return;
+    }
+    if (v.HasMember("command") && v["command"].IsString()) {
+        config.command = v["command"].GetString();
+    }
+    if (v.HasMember("args") && v["args"].IsArray()) {
+        config.args.clear();
+        for (const auto& value : v["args"].GetArray()) {
+            if (value.IsString()) {
+                config.args.push_back(value.GetString());
+            }
+        }
+    }
+    if (v.HasMember("env") && v["env"].IsObject()) {
+        config.env.clear();
+        for (auto it = v["env"].MemberBegin(); it != v["env"].MemberEnd(); ++it) {
+            if (it->value.IsString()) {
+                config.env[it->name.GetString()] = it->value.GetString();
+            }
+        }
+    }
+    if (v.HasMember("cwd") && v["cwd"].IsString()) {
+        config.cwd = v["cwd"].GetString();
+    }
+    if (v.HasMember("enabled") && v["enabled"].IsBool()) {
+        config.enabled = v["enabled"].GetBool();
+    }
+}
+
+void mcpHttpPayloadFromJson(const rapidjson::Value& v,
+                                 McpServerConfig& config) {
+    if (!v.IsObject()) {
+        return;
+    }
+    if (v.HasMember("url") && v["url"].IsString()) {
+        config.url = v["url"].GetString();
+    }
+    if (v.HasMember("authHeader") && v["authHeader"].IsString()) {
+        config.authHeader = v["authHeader"].GetString();
+    }
+    if (v.HasMember("authBearerToken") && v["authBearerToken"].IsString()) {
+        config.authBearerToken = v["authBearerToken"].GetString();
+    }
+    if (v.HasMember("allowInsecureTls") && v["allowInsecureTls"].IsBool()) {
+        config.allowInsecureTls = v["allowInsecureTls"].GetBool();
+    }
+    if (v.HasMember("caCertPath") && v["caCertPath"].IsString()) {
+        config.caCertPath = v["caCertPath"].GetString();
+    }
+    if (v.HasMember("enabled") && v["enabled"].IsBool()) {
+        config.enabled = v["enabled"].GetBool();
+    }
+}
+
+void mcpServerConfigFromJson(const rapidjson::Value& v,
+                             McpServerConfig& config) {
+    if (!v.IsObject()) {
+        return;
+    }
+
+    if (v.HasMember("transport") && v["transport"].IsString()) {
+        config.transport = v["transport"].GetString();
+    }
+
+    if (v.HasMember("http")) {
+        config.transport = "http";
+        mcpHttpPayloadFromJson(v["http"], config);
+        return;
+    }
+
+    if (v.HasMember("stdio")) {
+        config.transport = "stdio";
+        mcpStdioPayloadFromJson(v["stdio"], config);
+        return;
+    }
+
+    const bool hasLegacyHttpFields =
+        v.HasMember("url") || v.HasMember("authHeader") ||
+        v.HasMember("authBearerToken") || v.HasMember("allowInsecureTls") ||
+        v.HasMember("caCertPath");
+    if (hasLegacyHttpFields || config.transport == "http") {
+        config.transport = "http";
+        mcpHttpPayloadFromJson(v, config);
+        return;
+    }
+
+    const bool hasLegacyStdioFields =
+        v.HasMember("command") || v.HasMember("args") || v.HasMember("env") ||
+        v.HasMember("cwd") || v.HasMember("enabled");
+    if (hasLegacyStdioFields || config.transport == "stdio") {
+        config.transport = "stdio";
+        mcpStdioPayloadFromJson(v, config);
+    }
+}
+
 } // namespace
 
 ConfigLoader& ConfigLoader::instance() {
@@ -194,6 +435,21 @@ void ConfigLoader::loadImpl() {
         doc["hideErrors"].IsBool()) {
         config_.hideErrors = doc["hideErrors"].GetBool();
     }
+    if (doc.HasMember("rollingMemory")) {
+        rollingMemoryConfigFromJson(doc["rollingMemory"], config_.rollingMemory);
+    }
+    if (doc.HasMember("mcpServers") && doc["mcpServers"].IsObject()) {
+        config_.mcpServers.clear();
+        for (auto it = doc["mcpServers"].MemberBegin();
+             it != doc["mcpServers"].MemberEnd(); ++it) {
+            if (!it->value.IsObject()) {
+                continue;
+            }
+            McpServerConfig server;
+            mcpServerConfigFromJson(it->value, server);
+            config_.mcpServers[it->name.GetString()] = server;
+        }
+    }
 
     loaded_ = true;
 }
@@ -271,6 +527,15 @@ void ConfigLoader::save() const {
     doc.AddMember("subagentRouteFallbackOrder", fallbackOrder, allocator);
     doc.AddMember("showInternalNudges", config_.showInternalNudges, allocator);
     doc.AddMember("hideErrors", config_.hideErrors, allocator);
+    doc.AddMember("rollingMemory", toJson(config_.rollingMemory, allocator),
+                  allocator);
+    rapidjson::Value mcpServers(rapidjson::kObjectType);
+    for (const auto& [name, server] : config_.mcpServers) {
+        mcpServers.AddMember(rapidjson::Value(name.c_str(), allocator),
+                             toJsonMcpServerConfig(server, allocator),
+                             allocator);
+    }
+    doc.AddMember("mcpServers", mcpServers, allocator);
 
     rapidjson::StringBuffer buffer;
     rapidjson::PrettyWriter<rapidjson::StringBuffer> writer(buffer);

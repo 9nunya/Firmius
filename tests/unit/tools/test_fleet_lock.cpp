@@ -10,6 +10,7 @@
 #include <gtest/gtest.h>
 #include <rapidjson/document.h>
 #include <chrono>
+#include <cstdlib>
 
 using namespace firmius::core;
 using namespace firmius::shared;
@@ -21,15 +22,16 @@ using ::testing::IsEmpty;
 
 namespace {
 
-const std::string kTestThreadBasePath = "/tmp/firmius_test_threads";
-
-void cleanupTestThread(const std::string &threadId) {
-  std::filesystem::remove_all(kTestThreadBasePath + "/" + threadId);
+void cleanupTestThread(const std::filesystem::path &threadsBase,
+                       const std::string &threadId) {
+  std::filesystem::remove_all(threadsBase / threadId);
 }
 
-std::string createTestThread() {
-  std::string threadId = "test-thread-" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
-  std::filesystem::create_directories(kTestThreadBasePath + "/" + threadId);
+std::string createTestThread(const std::filesystem::path &threadsBase) {
+  std::string threadId =
+      "test-thread-" +
+      std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
+  std::filesystem::create_directories(threadsBase / threadId);
   return threadId;
 }
 
@@ -106,17 +108,41 @@ protected:
   std::unique_ptr<ThreadManager> tm_;
   std::shared_ptr<LocalHost> host_;
   std::shared_ptr<TestAgent> agent_;
+  std::filesystem::path testHome_;
+  std::filesystem::path threadsBase_;
+  std::string originalHome_;
+  bool hadHome_ = false;
 
   void SetUp() override {
-    testThreadId_ = createTestThread();
-    testAgentId_ = "test-agent-" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
-    tm_ = std::make_unique<ThreadManager>(kTestThreadBasePath);
+    testHome_ = std::filesystem::temp_directory_path() /
+                ("firmius_fleet_lock_home_" +
+                 std::to_string(std::chrono::system_clock::now()
+                                    .time_since_epoch()
+                                    .count()));
+    threadsBase_ = testHome_ / ".firmius" / "threads";
+    std::filesystem::create_directories(threadsBase_);
+    hadHome_ = std::getenv("HOME") != nullptr;
+    originalHome_ = hadHome_ ? std::getenv("HOME") : "";
+    setenv("HOME", testHome_.c_str(), 1);
+
+    testThreadId_ = createTestThread(threadsBase_);
+    testAgentId_ = "test-agent-" +
+                   std::to_string(std::chrono::system_clock::now()
+                                      .time_since_epoch()
+                                      .count());
+    tm_ = std::make_unique<ThreadManager>(ThreadManager::defaultBasePath());
     host_ = std::make_shared<LocalHost>();
     agent_ = std::make_shared<TestAgent>(testThreadId_, testAgentId_);
   }
 
   void TearDown() override {
-    cleanupTestThread(testThreadId_);
+    cleanupTestThread(threadsBase_, testThreadId_);
+    std::filesystem::remove_all(testHome_);
+    if (hadHome_) {
+      setenv("HOME", originalHome_.c_str(), 1);
+    } else {
+      unsetenv("HOME");
+    }
   }
 
   ToolContext makeToolContext() {
@@ -134,7 +160,7 @@ TEST_F(FleetLockToolTest, AcquireModeRequiresReason) {
 
   auto result = tool.execute(input, ctx);
   EXPECT_FALSE(result.success);
-  EXPECT_THAT(result.data, HasSubstr("reason"));
+  EXPECT_THAT(result.error, HasSubstr("reason"));
 }
 
 TEST_F(FleetLockToolTest, AcquireModeRequiresPaths) {
@@ -147,7 +173,7 @@ TEST_F(FleetLockToolTest, AcquireModeRequiresPaths) {
 
   auto result = tool.execute(input, ctx);
   EXPECT_FALSE(result.success);
-  EXPECT_THAT(result.data, HasSubstr("paths"));
+  EXPECT_THAT(result.error, HasSubstr("paths"));
 }
 
 TEST_F(FleetLockToolTest, AcquireModeCreatesLock) {
@@ -184,7 +210,7 @@ TEST_F(FleetLockToolTest, ReleaseModeRequiresLockId) {
 
   auto result = tool.execute(input, ctx);
   EXPECT_FALSE(result.success);
-  EXPECT_THAT(result.data, HasSubstr("lock_id"));
+  EXPECT_THAT(result.error, HasSubstr("lock_id"));
 }
 
 TEST_F(FleetLockToolTest, ReleaseModeFailsForNonExistentLock) {
@@ -197,7 +223,7 @@ TEST_F(FleetLockToolTest, ReleaseModeFailsForNonExistentLock) {
 
   auto result = tool.execute(input, ctx);
   EXPECT_FALSE(result.success);
-  EXPECT_THAT(result.data, HasSubstr("not found"));
+  EXPECT_THAT(result.error, HasSubstr("not found"));
 }
 
 TEST_F(FleetLockToolTest, ReleaseModeSuccessfullyReleasesLock) {
@@ -300,7 +326,7 @@ TEST_F(FleetLockToolTest, WaitModeTimesOut) {
   auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
 
   EXPECT_FALSE(waitResult.success);
-  EXPECT_THAT(waitResult.data, HasSubstr("timed out"));
+  EXPECT_THAT(waitResult.error, HasSubstr("timed out"));
   EXPECT_GE(duration.count(), 100);
 }
 
@@ -315,7 +341,7 @@ TEST_F(FleetLockToolTest, RequestModeRequiresTargetAgentId) {
 
   auto result = tool.execute(input, ctx);
   EXPECT_FALSE(result.success);
-  EXPECT_THAT(result.data, HasSubstr("target_agent_id"));
+  EXPECT_THAT(result.error, HasSubstr("target_agent_id"));
 }
 
 TEST_F(FleetLockToolTest, RequestModeRequiresPaths) {
@@ -328,7 +354,7 @@ TEST_F(FleetLockToolTest, RequestModeRequiresPaths) {
 
   auto result = tool.execute(input, ctx);
   EXPECT_FALSE(result.success);
-  EXPECT_THAT(result.data, HasSubstr("paths"));
+  EXPECT_THAT(result.error, HasSubstr("paths"));
 }
 
 TEST_F(FleetLockToolTest, FleetStatusToolReturnsAllLocks) {
@@ -419,16 +445,40 @@ protected:
   std::string testAgentId_;
   std::shared_ptr<TestAgent> agent_;
   std::shared_ptr<LocalHost> host_;
+  std::filesystem::path testHome_;
+  std::filesystem::path threadsBase_;
+  std::string originalHome_;
+  bool hadHome_ = false;
 
   void SetUp() override {
-    testThreadId_ = createTestThread();
-    testAgentId_ = "test-agent-" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
+    testHome_ = std::filesystem::temp_directory_path() /
+                ("firmius_fleet_lock_respond_home_" +
+                 std::to_string(std::chrono::system_clock::now()
+                                    .time_since_epoch()
+                                    .count()));
+    threadsBase_ = testHome_ / ".firmius" / "threads";
+    std::filesystem::create_directories(threadsBase_);
+    hadHome_ = std::getenv("HOME") != nullptr;
+    originalHome_ = hadHome_ ? std::getenv("HOME") : "";
+    setenv("HOME", testHome_.c_str(), 1);
+
+    testThreadId_ = createTestThread(threadsBase_);
+    testAgentId_ = "test-agent-" +
+                   std::to_string(std::chrono::system_clock::now()
+                                      .time_since_epoch()
+                                      .count());
     host_ = std::make_shared<LocalHost>();
     agent_ = std::make_shared<TestAgent>(testThreadId_, testAgentId_);
   }
 
   void TearDown() override {
-    cleanupTestThread(testThreadId_);
+    cleanupTestThread(threadsBase_, testThreadId_);
+    std::filesystem::remove_all(testHome_);
+    if (hadHome_) {
+      setenv("HOME", originalHome_.c_str(), 1);
+    } else {
+      unsetenv("HOME");
+    }
   }
 
   ToolContext makeToolContext() {

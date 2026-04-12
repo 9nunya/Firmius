@@ -58,6 +58,22 @@ struct ToolCallChunk {
 };
 
 /**
+ * @brief A finalized tool call request with a complete executable payload.
+ */
+struct ToolCall {
+  std::string id;
+  std::uint32_t index =
+      std::numeric_limits<std::uint32_t>::max();
+  std::string name;
+  std::string args;
+
+  bool operator==(const ToolCall &other) const {
+    return id == other.id && index == other.index && name == other.name &&
+           args == other.args;
+  }
+};
+
+/**
  * @brief A delta chunk of a background process output.
  */
 struct ProcessOutputDelta {
@@ -568,7 +584,7 @@ struct AgentFinished {
  * @brief A variant representing any single event in an agent's output stream.
  */
 using StreamEvent =
-    std::variant<TextChunk, ThinkingChunk, ToolCallChunk, AgentMetrics,
+    std::variant<TextChunk, ThinkingChunk, ToolCallChunk, ToolCall, AgentMetrics,
                  StreamDone, StreamError, ProviderWaiting, StreamRetrying,
                  StreamRetryExhausted, StreamAccountSwitched,
                  AgentFileEdited, AgentTurnCompleted, AgentCompacting,

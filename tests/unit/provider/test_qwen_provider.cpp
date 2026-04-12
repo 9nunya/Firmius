@@ -124,6 +124,36 @@ TEST(QwenProvider, AvailableAccountPrefersLastUsedWhenQuotaTies) {
   EXPECT_EQ(selected->getIdentifier(), "b@example.com");
 }
 
+TEST(QwenProvider, QuotasIgnoreMalformedMetadataWithoutThrowing) {
+  const auto tempHome = std::filesystem::temp_directory_path() /
+                        "firmius_qwen_quota_malformed_home";
+  std::filesystem::remove_all(tempHome);
+  std::filesystem::create_directories(tempHome / ".firmius");
+  ScopedHomeOverride scopedHome(tempHome);
+
+  const auto futureSeconds =
+      std::chrono::system_clock::to_time_t(std::chrono::system_clock::now()) +
+      86400;
+  const auto oauthPath = tempHome / ".firmius" / "oauth.json";
+  std::ofstream out(oauthPath);
+  out << R"({"qwen":[)"
+      << R"({"identifier":"a@example.com","refreshToken":"r1","accessToken":"a1","tokenExpiration":)"
+      << futureSeconds
+      << R"(,"metadata":{"quota:qwen":"oops"}}]})";
+  out.close();
+
+  QwenProvider provider;
+  std::map<std::string, std::vector<firmius::shared::QuotaBucket>> quotas;
+  EXPECT_NO_THROW(quotas = provider.getAllQuotas());
+
+  auto it = quotas.find("a@example.com");
+  ASSERT_NE(it, quotas.end());
+  ASSERT_EQ(it->second.size(), 1u);
+  EXPECT_EQ(it->second.front().name, "quota:qwen");
+  EXPECT_FLOAT_EQ(it->second.front().remainingFraction, 1.0f);
+  EXPECT_TRUE(it->second.front().resetTime.empty());
+}
+
 TEST(QwenProvider, SingleAccountHasNoAlternativeSwitchTarget) {
   OAuthAccount account;
   account.identifier = "only@example.com";

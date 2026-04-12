@@ -13,6 +13,7 @@
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
 #include <chrono>
+#include <filesystem>
 #include <sstream>
 #include <unordered_set>
 
@@ -46,6 +47,24 @@ bool isAuditorRole(PurposeWorkRole role) {
 
 bool isWorkerLikeRole(PurposeWorkRole role) {
   return role == PurposeWorkRole::Worker || role == PurposeWorkRole::Scout;
+}
+
+std::optional<std::string> normalizeOptionalString(
+    const std::optional<std::string> &value) {
+  if (!value.has_value()) {
+    return std::nullopt;
+  }
+  const std::string trimmed = shared::StringUtil::trim(*value);
+  if (trimmed.empty()) {
+    return std::nullopt;
+  }
+  return trimmed;
+}
+
+bool callerMayUseDreamMode(const shared::ToolContext &ctx) {
+  const std::string lowered = shared::StringUtil::toLower(
+      shared::StringUtil::trim(ctx.agent.getContext().config.personaName));
+  return lowered == "lead" || lowered == "fast" || lowered == "hotrun";
 }
 
 bool isRetryableWaitOutcome(const AgentOutcome &outcome) {
@@ -98,6 +117,20 @@ findChunk(const shared::Plan &plan, const std::string &chunkId) {
 shared::Plan loadPlan(const std::string &threadId, const std::string &planId) {
   ThreadManager tm(ThreadManager::defaultBasePath());
   return tm.getPlan(threadId, planId);
+}
+
+std::optional<shared::Plan> loadRequestedOrActivePlan(
+    const std::string &threadId,
+    const std::optional<std::string> &requestedPlanId) {
+  ThreadManager tm(ThreadManager::defaultBasePath());
+  if (requestedPlanId.has_value() && !requestedPlanId->empty()) {
+    return tm.getPlan(threadId, *requestedPlanId);
+  }
+  const auto metadata = tm.getMetadata(threadId);
+  if (!metadata.activePlanId.empty()) {
+    return tm.getPlan(threadId, metadata.activePlanId);
+  }
+  return std::nullopt;
 }
 
 std::string buildExecutorTask(const shared::Plan &plan,
@@ -205,6 +238,9 @@ std::string buildExecutorTask(const shared::Plan &plan,
 
   prompt << "\nExecution Discipline\n";
   prompt << "- Reread the exact files and anchors you touch before editing.\n";
+  prompt << "- If the target directory or files do not exist yet, that is not "
+            << "a blocker for greenfield chunk work; create the first scoped "
+            << "files directly with file_edit content.\n";
   prompt << "- If an anchor or local context is stale, reread and repair it "
             "before editing; do not guess.\n";
   prompt << "- Do not broaden the task because a nearby cleanup looks tempting.\n";
@@ -519,6 +555,41 @@ std::string buildDelegationTask(const SubagentInput &input,
   return input.task;
 }
 
+std::string buildDreamerTask(const SubagentInput &input,
+                             const std::string &threadId,
+                             const shared::ToolContext &ctx,
+                             const std::string &memoryRoot) {
+  std::ostringstream prompt;
+  prompt << "You are being summoned in restricted dream mode by a lead agent.\n\n";
+  prompt << "Dream Sandbox\n";
+  prompt << "- Working directory: " << memoryRoot << "\n";
+  prompt << "- Read/write only under that directory.\n";
+  prompt << "- Do not modify the project repository itself.\n";
+  prompt << "- Prefer USER.md, BEHAVIOR.md, and project-specific notes under projects/.\n\n";
+
+  const auto &parentCtx = ctx.agent.getContext();
+  prompt << "Lead Context\n";
+  prompt << "- Parent persona: " << parentCtx.config.personaName << "\n";
+  prompt << "- Source workspace: " << parentCtx.environment.cwd << "\n";
+  prompt << "- Thread ID: " << threadId << "\n\n";
+
+  if (auto plan = loadRequestedOrActivePlan(threadId, input.plan_id);
+      plan.has_value()) {
+    prompt << "Plan Context\n";
+    prompt << "- Title: " << plan->title << "\n";
+    prompt << "- Objective: " << plan->objective << "\n";
+    prompt << "- Strategy: " << plan->strategy << "\n";
+    prompt << "- Chunks:\n";
+    for (const auto &chunk : plan->chunks) {
+      prompt << "  - " << chunk.title << " (" << chunk.id << ")\n";
+    }
+    prompt << "\n";
+  }
+
+  prompt << "Lead Dream Request\n" << input.task << "\n";
+  return prompt.str();
+}
+
 struct ResolvedRoute {
   std::string providerId;
   std::string modelId;
@@ -739,10 +810,25 @@ std::shared_ptr<shared::JSONSchema> SubagentTool::getSchema() const {
 
 shared::ToolResult SubagentTool::execute(const SubagentInput &input,
                                          shared::ToolContext &ctx) {
+  SubagentInput normalizedInput = input;
+  normalizedInput.agent_id = normalizeOptionalString(input.agent_id);
+  normalizedInput.plan_id = normalizeOptionalString(input.plan_id);
+  normalizedInput.chunk_id = normalizeOptionalString(input.chunk_id);
+  normalizedInput.task_id = normalizeOptionalString(input.task_id);
+  normalizedInput.category = normalizeOptionalString(input.category);
+
   std::string persona;
   PurposeWorkRole workRole = PurposeWorkRole::Unknown;
   try {
-    persona = shared::StringUtil::trim(input.persona);
+    if (normalizedInput.dream) {
+      if (!callerMayUseDreamMode(ctx)) {
+        return shared::ToolResult::fail(
+            "dream summon mode is restricted to lead, fast, or hotrun agents");
+      }
+      persona = "dreamer";
+    } else {
+      persona = shared::StringUtil::trim(input.persona);
+    }
     workRole = purposeRoleForPersona(persona);
   } catch (const std::exception &e) {
     return shared::ToolResult::fail(e.what());
@@ -750,69 +836,74 @@ shared::ToolResult SubagentTool::execute(const SubagentInput &input,
 
   if (!PurposeLoader::isValid(persona)) {
     if (auto suggestion = legacyPersonaSuggestion(persona)) {
-      return shared::ToolResult::fail("Invalid persona: '" + input.persona +
+      return shared::ToolResult::fail("Invalid persona: '" + persona +
                                       "'. " + *suggestion + ".");
     }
-    return shared::ToolResult::fail("Invalid persona: '" + input.persona +
+    return shared::ToolResult::fail("Invalid persona: '" + persona +
                                     "'. Check available personas in base.md or prompts/ directory.");
   }
 
   std::string threadId = ctx.agent.getContext().history->threadId;
-  if (input.plan_id.has_value() != input.chunk_id.has_value()) {
+  if (normalizedInput.plan_id.has_value() != normalizedInput.chunk_id.has_value()) {
     return shared::ToolResult::fail(
         "plan_id and chunk_id must either both be provided or both be omitted");
   }
 
   // task_id requires both plan_id and chunk_id
-  if (input.task_id.has_value() && !input.task_id->empty()) {
-    if (!input.plan_id.has_value() || !input.chunk_id.has_value()) {
+  if (normalizedInput.task_id.has_value() && !normalizedInput.task_id->empty()) {
+    if (!normalizedInput.plan_id.has_value() || !normalizedInput.chunk_id.has_value()) {
       return shared::ToolResult::fail(
           "task_id requires both plan_id and chunk_id to be provided");
     }
   }
 
-  if (isExecutorRole(workRole) && input.plan_id.has_value() &&
-      input.chunk_id.has_value()) {
+  if (isExecutorRole(workRole) && normalizedInput.plan_id.has_value() &&
+      normalizedInput.chunk_id.has_value()) {
     try {
-      ensureExecutorChunkReadyForDispatch(threadId, *input.plan_id,
-                                          *input.chunk_id);
-      ensureExecutorAssignmentAvailable(threadId, *input.plan_id, *input.chunk_id,
-                                        input.agent_id);
+      ensureExecutorChunkReadyForDispatch(threadId, *normalizedInput.plan_id,
+                                          *normalizedInput.chunk_id);
+      ensureExecutorAssignmentAvailable(threadId, *normalizedInput.plan_id,
+                                        *normalizedInput.chunk_id,
+                                        normalizedInput.agent_id);
     } catch (const std::exception &e) {
       return shared::ToolResult::fail(e.what());
     }
   }
 
   // Worker assignment to task: validate task exists and assign worker
-  if (isWorkerLikeRole(workRole) && input.task_id.has_value() &&
-      !input.task_id->empty() && input.plan_id.has_value() &&
-      input.chunk_id.has_value()) {
+  if (isWorkerLikeRole(workRole) && normalizedInput.task_id.has_value() &&
+      !normalizedInput.task_id->empty() && normalizedInput.plan_id.has_value() &&
+      normalizedInput.chunk_id.has_value()) {
     try {
       ThreadManager tm(ThreadManager::defaultBasePath());
-      shared::Plan plan = tm.getPlan(threadId, *input.plan_id);
-      auto &chunk = worktools::requireChunk(plan, *input.chunk_id);
+      shared::Plan plan = tm.getPlan(threadId, *normalizedInput.plan_id);
+      auto &chunk = worktools::requireChunk(plan, *normalizedInput.chunk_id);
       
       // Find the task
       auto taskIt = std::find_if(chunk.tasks.begin(), chunk.tasks.end(),
                                   [&](const shared::WorkTask &t) {
-                                    return t.id == *input.task_id;
+                                    return t.id == *normalizedInput.task_id;
                                   });
       if (taskIt == chunk.tasks.end()) {
         return shared::ToolResult::fail(
-            "Task '" + *input.task_id + "' not found in chunk '" + *input.chunk_id + "'");
+            "Task '" + *normalizedInput.task_id + "' not found in chunk '" +
+            *normalizedInput.chunk_id + "'");
       }
       
       // Assign worker to task if not already assigned
       if (!taskIt->assignedWorkerId.empty() &&
-          (!input.agent_id.has_value() || taskIt->assignedWorkerId != *input.agent_id)) {
+          (!normalizedInput.agent_id.has_value() ||
+           taskIt->assignedWorkerId != *normalizedInput.agent_id)) {
         return shared::ToolResult::fail(
-            "Task '" + *input.task_id + "' is already assigned to worker '" +
+            "Task '" + *normalizedInput.task_id +
+            "' is already assigned to worker '" +
             taskIt->assignedWorkerId + "'");
       }
       
       // Persist worker assignment
-      if (input.agent_id.has_value() && !input.agent_id->empty()) {
-        taskIt->assignedWorkerId = *input.agent_id;
+      if (normalizedInput.agent_id.has_value() &&
+          !normalizedInput.agent_id->empty()) {
+        taskIt->assignedWorkerId = *normalizedInput.agent_id;
         taskIt->updatedAt = worktools::nowEpochMs();
         chunk.updatedAt = taskIt->updatedAt;
         tm.updatePlan(threadId, plan);
@@ -823,11 +914,22 @@ shared::ToolResult SubagentTool::execute(const SubagentInput &input,
   }
 
   std::string delegatedTask;
+  std::optional<SummonAgentOverrides> summonOverrides;
   try {
-    SubagentInput normalizedInput = input;
     normalizedInput.persona = persona;
-    const std::string task =
-        buildDelegationTask(normalizedInput, threadId, workRole);
+    std::string task;
+    if (normalizedInput.dream) {
+      const std::string home = std::getenv("HOME") ? std::getenv("HOME") : "/root";
+      const std::string memoryRoot = home + "/.firmius/user";
+      std::filesystem::create_directories(memoryRoot);
+      task = buildDreamerTask(normalizedInput, threadId, ctx, memoryRoot);
+      summonOverrides = SummonAgentOverrides{
+          .cwdOverride = memoryRoot,
+          .allowedPathsOverride =
+              std::vector<std::string>{memoryRoot, memoryRoot + "/**"}};
+    } else {
+      task = buildDelegationTask(normalizedInput, threadId, workRole);
+    }
     const std::string cwd = ctx.agent.getContext().environment.cwd;
     delegatedTask =
         firmius::core::artifacts::expandInboundReferences(threadId, cwd, task);
@@ -839,21 +941,21 @@ shared::ToolResult SubagentTool::execute(const SubagentInput &input,
   auto existingAgents = AgentRegistry::instance().listAll();
   for (const auto &agentId : existingAgents) {
     auto agent = AgentRegistry::instance().getAgent(agentId);
-    if (agent && agent->getContext().identity.friendlyName == input.name &&
-        (!input.agent_id.has_value() || agentId != *input.agent_id)) {
-      return shared::ToolResult::fail("Agent name '" + input.name +
+    if (agent && agent->getContext().identity.friendlyName == normalizedInput.name &&
+        (!normalizedInput.agent_id.has_value() || agentId != *normalizedInput.agent_id)) {
+      return shared::ToolResult::fail("Agent name '" + normalizedInput.name +
                                       "' already exists in this thread");
     }
   }
 
   std::optional<std::string> explicitCategoryOverride;
   std::string explicitCategoryWarning;
-  if (input.category.has_value() && !input.category->empty()) {
-    if (userExplicitlyRequestedCategory(ctx, *input.category)) {
-      explicitCategoryOverride = input.category;
+  if (normalizedInput.category.has_value() && !normalizedInput.category->empty()) {
+    if (userExplicitlyRequestedCategory(ctx, *normalizedInput.category)) {
+      explicitCategoryOverride = normalizedInput.category;
     } else {
       explicitCategoryWarning =
-          "Ignored explicit category '" + *input.category +
+          "Ignored explicit category '" + *normalizedInput.category +
           "' because only user-specified route-category overrides are honored; "
           "using configured purpose/default routing.";
     }
@@ -863,9 +965,9 @@ shared::ToolResult SubagentTool::execute(const SubagentInput &input,
       persona, explicitCategoryOverride, explicitCategoryWarning);
   std::vector<std::string> attemptedCategories;
   const bool isRetaskingExistingAgent =
-      input.agent_id.has_value() && !input.agent_id->empty();
+      normalizedInput.agent_id.has_value() && !normalizedInput.agent_id->empty();
   std::string reusableAgentId = isRetaskingExistingAgent
-                                   ? *input.agent_id
+                                   ? *normalizedInput.agent_id
                                    : shared::StringUtil::generateUuid();
   bool agentExists = isRetaskingExistingAgent;
 
@@ -971,9 +1073,10 @@ shared::ToolResult SubagentTool::execute(const SubagentInput &input,
             "Failed to launch subagent run on all configured routes.");
       }
 
-      if (isExecutorRole(workRole) && input.plan_id.has_value() &&
-          input.chunk_id.has_value()) {
-        persistExecutorDispatch(threadId, *input.plan_id, *input.chunk_id,
+      if (isExecutorRole(workRole) && normalizedInput.plan_id.has_value() &&
+          normalizedInput.chunk_id.has_value()) {
+        persistExecutorDispatch(threadId, *normalizedInput.plan_id,
+                                *normalizedInput.chunk_id,
                                 reusableAgentId);
       }
 
@@ -1014,8 +1117,9 @@ shared::ToolResult SubagentTool::execute(const SubagentInput &input,
     try {
       reusableAgentId = Engine::instance().summonAgent(
           threadId, persona, delegatedTask, true,
-          ctx.agent.getContext().identity.id, input.name, input.title,
-          reusableAgentId, route.providerId, route.modelId, route.variantName);
+          ctx.agent.getContext().identity.id, normalizedInput.name,
+          normalizedInput.title, reusableAgentId, route.providerId,
+          route.modelId, route.variantName, {}, summonOverrides);
       agentExists = true;
     } catch (const std::exception &) {
       if (i + 1 < routes.size()) {
@@ -1025,9 +1129,10 @@ shared::ToolResult SubagentTool::execute(const SubagentInput &input,
           "Failed to summon subagent on all configured routes.");
     }
 
-    if (isExecutorRole(workRole) && input.plan_id.has_value() &&
-        input.chunk_id.has_value()) {
-      persistExecutorDispatch(threadId, *input.plan_id, *input.chunk_id,
+    if (isExecutorRole(workRole) && normalizedInput.plan_id.has_value() &&
+        normalizedInput.chunk_id.has_value()) {
+      persistExecutorDispatch(threadId, *normalizedInput.plan_id,
+                              *normalizedInput.chunk_id,
                               reusableAgentId);
     }
 

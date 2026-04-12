@@ -859,7 +859,28 @@ std::map<std::string, ModelInfo> AntigravityProvider::getStaticModels() {
   return {{"gemini-3-flash",
            {.id = "gemini-3-flash",
             .provider = "antigravity",
-            .contextWindow = 1000000,
+            .contextWindow = 1048576,
+            .modalities = {"text", "image"},
+            .variants = variants,
+            .supportsReasoning = true}},
+          {"gemini-2.5-flash",
+           {.id = "gemini-2.5-flash",
+            .provider = "antigravity",
+            .contextWindow = 1048576,
+            .modalities = {"text", "image"},
+            .variants = variants,
+            .supportsReasoning = true}},
+          {"gemini-2.5-flash-lite",
+           {.id = "gemini-2.5-flash-lite",
+            .provider = "antigravity",
+            .contextWindow = 1048576,
+            .modalities = {"text", "image"},
+            .variants = variants,
+            .supportsReasoning = true}},
+          {"gemini-2.5-flash-thinking",
+           {.id = "gemini-2.5-flash-thinking",
+            .provider = "antigravity",
+            .contextWindow = 1048576,
             .modalities = {"text", "image"},
             .variants = variants,
             .supportsReasoning = true}},
@@ -1865,6 +1886,7 @@ bool AntigravityProvider::fetchAndStoreQuotas(OAuthAccount &acc) {
 
 std::map<std::string, std::vector<QuotaBucket>>
 AntigravityProvider::getAllQuotas() const {
+  std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
   std::map<std::string, std::vector<QuotaBucket>> result;
   for (const auto &acc : accounts_) {
     std::vector<QuotaBucket> buckets;
@@ -1875,11 +1897,19 @@ AntigravityProvider::getAllQuotas() const {
         std::string g = normalizeQuotaDisplayKey(model);
 
         if (!g.empty()) {
-          float f = std::stof(val);
-          if (groups.find(g) == groups.end() || f < groups[g].first) {
-            std::string reset = acc.metadata.count("quota_reset:" + model)
-                                    ? acc.metadata.at("quota_reset:" + model)
-                                    : "";
+          float f = 0.0f;
+          try {
+            f = std::stof(val);
+          } catch (...) {
+            continue;
+          }
+          auto groupIt = groups.find(g);
+          if (groupIt == groups.end() || f < groupIt->second.first) {
+            std::string reset;
+            if (auto resetIt = acc.metadata.find("quota_reset:" + model);
+                resetIt != acc.metadata.end()) {
+              reset = resetIt->second;
+            }
             groups[g] = {f, reset};
           }
         }

@@ -4,6 +4,7 @@
 #include "Serialization.hpp"
 #include "agents/Agent.hpp"
 #include "agents/PurposeLoader.hpp"
+#include "agents/RuntimeOverlay.hpp"
 #include "environment/Environment.hpp"
 #include "environment/Permissions.hpp"
 #include "harness/Harness.hpp"
@@ -27,6 +28,13 @@
 #include "tools/ArtifactListTool.hpp"
 #include "tools/ArtifactReadTool.hpp"
 #include "tools/ArtifactWriteTool.hpp"
+#include "tools/MemoryRecallTool.hpp"
+#include "tools/McpCallTool.hpp"
+#include "tools/McpGetPromptTool.hpp"
+#include "tools/McpListTool.hpp"
+#include "tools/McpLoadTool.hpp"
+#include "tools/McpReadResourceTool.hpp"
+#include "tools/McpSearchTool.hpp"
 #include "tools/ChunkAddTool.hpp"
 #include "tools/ChunkGetTool.hpp"
 #include "tools/ChunkListTool.hpp"
@@ -40,6 +48,8 @@
 #include "tools/GlobTool.hpp"
 #include "tools/GrepTool.hpp"
 #include "tools/ListDirectoryTool.hpp"
+#include "tools/LspDiagnosticsTool.hpp"
+#include "tools/LspTool.hpp"
 #include "tools/PlanCreateTool.hpp"
 #include "tools/PlanGetTool.hpp"
 #include "tools/PlanListTool.hpp"
@@ -51,12 +61,15 @@
 #include "tools/ProcessStatusTool.hpp"
 #include "tools/ProcessWaitTool.hpp"
 #include "tools/PythonExecuteTool.hpp"
+#include "tools/SkillLoadTool.hpp"
 #include "tools/SubagentTerminateTool.hpp"
 #include "tools/SubagentTool.hpp"
 #include "tools/SubagentWaitTool.hpp"
 #include "tools/TodoWriteTool.hpp"
 #include "tools/WebFetchTool.hpp"
 #include "tools/WebSearchTool.hpp"
+#include "tools/WorkToolCommon.hpp"
+#include "lsp/LspServerManager.hpp"
 #include "utils/HistoryMetrics.hpp"
 #include "utils/StringUtil.hpp"
 #include <Panic.hpp>
@@ -136,6 +149,54 @@ AgentOutcome makeOutcome(const std::shared_ptr<IAgent> &agent,
 
 AgentOutcome makeFailedOutcome(const std::string &message) {
   return AgentOutcome{AgentOutcome::Kind::Failed, message};
+}
+
+void releaseOwnedChunksForTerminalAgent(const std::shared_ptr<IAgent> &agent,
+                                        const AgentOutcome &outcome) {
+  if (!agent || !agent->getContext().history) {
+    return;
+  }
+
+  const std::string threadId = agent->getContext().history->threadId;
+  const std::string agentId = agent->getContext().identity.id;
+  if (threadId.empty() || agentId.empty()) {
+    return;
+  }
+
+  ThreadManager tm(ThreadManager::defaultBasePath());
+  for (auto plan : tm.listPlans(threadId)) {
+    bool changed = false;
+    for (auto &chunk : plan.chunks) {
+      if (chunk.assignedAgentId != agentId) {
+        continue;
+      }
+
+      const auto originalChunk = chunk;
+      chunk.assignedAgentId.clear();
+      if ((outcome.kind == AgentOutcome::Kind::Cancelled ||
+           outcome.kind == AgentOutcome::Kind::Failed) &&
+          chunk.status == WorkChunkStatus::InProgress) {
+        chunk.status = WorkChunkStatus::Ready;
+      }
+      chunk.updatedAt = worktools::nowEpochMs();
+      changed = true;
+
+      worktools::emitWorkEvent(shared::ChunkUpdated{
+          threadId, plan.id, chunk});
+      worktools::emitWorkEvent(shared::ChunkAssigned{
+          threadId, plan.id, chunk.id, chunk.assignedAgentId, chunk});
+      if (originalChunk.status != chunk.status) {
+        worktools::emitWorkEvent(shared::ChunkStatusChanged{
+            threadId, plan.id, chunk.id, originalChunk.status, chunk.status,
+            chunk});
+      }
+    }
+
+    if (changed) {
+      tm.updatePlan(threadId, plan);
+      worktools::emitWorkEvent(shared::PlanUpdated{threadId, plan});
+    }
+  }
 }
 
 using ArtifactSnapshot =
@@ -359,6 +420,26 @@ Engine::Engine() {
       "file_read", []() { return std::make_unique<FileReadTool>(); });
   toolRegistry.registerToolFactory(
       "file_edit", []() { return std::make_unique<FileEditTool>(); });
+  toolRegistry.registerToolFactory(
+      "mcp_call", []() { return std::make_unique<McpCallTool>(); });
+  toolRegistry.registerToolFactory(
+      "mcp_list", []() { return std::make_unique<McpListTool>(); });
+  toolRegistry.registerToolFactory(
+      "mcp_search", []() { return std::make_unique<McpSearchTool>(); });
+  toolRegistry.registerToolFactory(
+      "mcp_load", []() { return std::make_unique<McpLoadTool>(); });
+  toolRegistry.registerToolFactory(
+      "mcp_read_resource",
+      []() { return std::make_unique<McpReadResourceTool>(); });
+  toolRegistry.registerToolFactory(
+      "mcp_get_prompt",
+      []() { return std::make_unique<McpGetPromptTool>(); });
+  toolRegistry.registerToolFactory("lsp", []() {
+    return std::make_unique<LspTool>();
+  });
+  toolRegistry.registerToolFactory("lsp_diagnostics", []() {
+    return std::make_unique<LspDiagnosticsTool>();
+  });
   toolRegistry.registerToolFactory("process_execute", []() {
     return std::make_unique<ProcessExecuteTool>();
   });
@@ -389,6 +470,8 @@ Engine::Engine() {
       "process_wait", []() { return std::make_unique<ProcessWaitTool>(); });
   toolRegistry.registerToolFactory(
       "process_input", []() { return std::make_unique<ProcessInputTool>(); });
+  toolRegistry.registerToolFactory(
+      "skill_load", []() { return std::make_unique<SkillLoadTool>(); });
   toolRegistry.registerToolFactory(
       "plan_create", []() { return std::make_unique<PlanCreateTool>(); });
   toolRegistry.registerToolFactory(
@@ -426,6 +509,8 @@ Engine::Engine() {
       "artifact_read", []() { return std::make_unique<ArtifactReadTool>(); });
   toolRegistry.registerToolFactory(
       "artifact_list", []() { return std::make_unique<ArtifactListTool>(); });
+  toolRegistry.registerToolFactory(
+      "memory_recall", []() { return std::make_unique<MemoryRecallTool>(); });
 }
 
 void Engine::initProviders() {
@@ -475,7 +560,8 @@ std::string Engine::summonAgent(
     const std::string &friendlyName, const std::string &title,
     const std::string &requestedAgentId, const std::string &providerId,
     const std::string &modelId, const std::string &variantName,
-    const std::vector<firmius::shared::ImageContent> &images) {
+    const std::vector<firmius::shared::ImageContent> &images,
+    const std::optional<SummonAgentOverrides> &overrides) {
   reap();
 
   // No limit on concurrent agents - removed to allow unlimited parallel
@@ -495,7 +581,7 @@ std::string Engine::summonAgent(
     std::lock_guard<std::mutex> lock(listenerMutex);
     fleet.emplace_back([this, threadId, agentId, personaName, task, images,
                         prom, persistHistory, parentId, friendlyName, title,
-                        providerId, modelId, variantName]() {
+                        providerId, modelId, variantName, overrides]() {
       auto errorBroadcast = std::make_shared<std::atomic<bool>>(false);
       ArtifactSnapshot runStartArtifacts;
       bool runStartArtifactsCaptured = false;
@@ -523,6 +609,7 @@ std::string Engine::summonAgent(
         if (userCfg.defaultMaxTokens.has_value()) {
           ctx.config.maxTokens = userCfg.defaultMaxTokens.value();
         }
+        ctx.config.rollingMemory = userCfg.rollingMemory;
         ctx.config.persistHistory = persistHistory;
         ctx.config.personaName = personaName;
         ctx.identity.name = persona.name;
@@ -533,16 +620,20 @@ std::string Engine::summonAgent(
         if (userCfg.dangerouslySkipPermissions) {
           ctx.permissions.allowedPaths = {"/**"};
         } else {
-          ctx.permissions.allowedPaths = {metadata.cwd + "/**",
-                                          "/tmp/**",
-                                          "/work/**",
-                                          home + "/.agent/skills/**",
-                                          home + "/.firmius/**",
-                                          home + "/.gemini/**"};
+          ctx.permissions.allowedPaths = {
+              metadata.cwd + "/**", "/tmp/**", "/work/**",
+              home + "/.agents/skills/**", home + "/.gemini/**", home + "/.firmius/**"};
           ctx.permissions.allowedPaths.push_back(metadata.cwd);
         }
+        if (overrides.has_value() &&
+            overrides->allowedPathsOverride.has_value()) {
+          ctx.permissions.allowedPaths = *overrides->allowedPathsOverride;
+        }
 
-        ctx.environment.cwd = metadata.cwd;
+        ctx.environment.cwd =
+            (overrides.has_value() && overrides->cwdOverride.has_value())
+                ? *overrides->cwdOverride
+                : metadata.cwd;
         ctx.environment.identifier = metadata.hostIdentifier;
         ctx.environment.type = metadata.hostOptions.type;
         ctx.history = std::make_shared<AgentHistory>();
@@ -613,6 +704,7 @@ std::string Engine::summonAgent(
           attachArtifactDeltasToOutcome(threadId, agentId, runStartArtifacts,
                                         outcome);
         }
+        releaseOwnedChunksForTerminalAgent(agent, outcome);
         if (outcome.kind == AgentOutcome::Kind::Cancelled) {
           broadcast(AgentInterrupted{agentId, parentId});
         }
@@ -650,6 +742,8 @@ std::string Engine::summonAgent(
           attachArtifactDeltasToOutcome(threadId, agentId, runStartArtifacts,
                                         outcome);
         }
+        releaseOwnedChunksForTerminalAgent(
+            firmius::core::AgentRegistry::instance().getAgent(agentId), outcome);
         broadcast(AgentFinished{agentId, outcome, parentId});
         prom->set_value(outcome);
       }
@@ -694,14 +788,15 @@ std::string Engine::resumeAgent(const std::string &threadId,
   if (userCfg.defaultMaxTokens.has_value()) {
     ctx.config.maxTokens = userCfg.defaultMaxTokens.value();
   }
+  ctx.config.rollingMemory = userCfg.rollingMemory;
   ctx.config.persistHistory = persistHistory;
   ctx.config.personaName = personaName;
   ctx.permissions.allowedScopes = persona.allowedScopes;
 
   std::string home = getenv("HOME") ? getenv("HOME") : "/root";
   ctx.permissions.allowedPaths = {metadata.cwd + "/**", "/tmp/**", "/work/**",
-                                  home + "/.agent/skills/**",
-                                  home + "/.firmius/**"};
+                                  home + "/.agents/skills/**",
+                                  home + "/.gemini/**", home + "/.firmius/**"};
   // Explicitly allow CWD and . (which resolves to CWD)
   ctx.permissions.allowedPaths.push_back(metadata.cwd);
 
@@ -737,6 +832,7 @@ std::string Engine::resumeAgent(const std::string &threadId,
   auto agent =
       std::make_shared<Agent>(ctx, environment, permissions, toolRegistry, jnl);
   permissions->bindContext(agent->getContext());
+  runtime_overlay::reconstructStateFromHistory(agent->getMutableContext(), *agent->getHost(), agent->getEnvironment()->getWorkspace());
   agent->setBooting(true);
   AgentRegistry::instance().registerAgent(agentId, agent);
 
@@ -933,6 +1029,9 @@ void Engine::handleStreamEvent(
   } else if (auto *tcc = std::get_if<ToolCallChunk>(&ev)) {
     broadcast(AgentToolCallChunk{tcc->index, agentId, tcc->id, tcc->nameDelta,
                                  tcc->argsDelta, parentId});
+  } else if (auto *tc = std::get_if<ToolCall>(&ev)) {
+    broadcast(
+        AgentToolCall{agentId, tc->id, tc->name, tc->args, parentId});
   } else if (auto *tc = std::get_if<AgentTurnCompleted>(&ev)) {
     broadcast(*tc);
   } else if (auto *fe = std::get_if<AgentFileEdited>(&ev)) {
@@ -1080,6 +1179,7 @@ void Engine::executeTask(
           attachArtifactDeltasToOutcome(threadId, agentId, runStartArtifacts,
                                         outcome);
         }
+        releaseOwnedChunksForTerminalAgent(agent, outcome);
         if (outcome.kind == AgentOutcome::Kind::Cancelled) {
           broadcast(AgentInterrupted{agentId, parentId});
         }
@@ -1118,6 +1218,7 @@ void Engine::executeTask(
           attachArtifactDeltasToOutcome(threadId, agentId, runStartArtifacts,
                                         outcome);
         }
+        releaseOwnedChunksForTerminalAgent(agent, outcome);
         broadcast(AgentFinished{agentId, outcome, parentId});
         prom->set_value(outcome);
       }
@@ -1164,6 +1265,7 @@ void Engine::resumeTask(const std::string &agentId) {
           attachArtifactDeltasToOutcome(threadId, agentId, runStartArtifacts,
                                         outcome);
         }
+        releaseOwnedChunksForTerminalAgent(agent, outcome);
         if (outcome.kind == AgentOutcome::Kind::Cancelled) {
           broadcast(AgentInterrupted{agentId, parentId});
         }
@@ -1200,6 +1302,7 @@ void Engine::resumeTask(const std::string &agentId) {
           attachArtifactDeltasToOutcome(threadId, agentId, runStartArtifacts,
                                         outcome);
         }
+        releaseOwnedChunksForTerminalAgent(agent, outcome);
         broadcast(AgentFinished{agentId, outcome, parentId});
         prom->set_value(outcome);
       }
@@ -1337,10 +1440,12 @@ UndoResult Engine::undoAgentAfterTimestamp(const std::string &agentId,
 }
 
 void Engine::shutdown() {
+  LspServerManager::instance().shutdownAll();
   auto activeAgents = AgentRegistry::instance().listAll();
   for (const auto &id : activeAgents) {
     auto agent = AgentRegistry::instance().getAgent(id);
     if (agent) {
+      cancelAgentRuntime(agent);
     }
   }
   {

@@ -283,17 +283,18 @@ public:
 
       // --- 4. Context Pill ---
       ftxui::Color ctx_bg = theme.agent_strip.pills.context_bg;
+      float display_context_percent = std::clamp(item.context_percent, 0.0f, 1.0f);
       ftxui::Color ctx_color = theme.status_bar.context.low;
-      if (item.context_percent > 0.85f)
+      if (display_context_percent > 0.85f)
         ctx_color = theme.status_bar.context.high;
-      else if (item.context_percent > 0.60f)
+      else if (display_context_percent > 0.60f)
         ctx_color = theme.status_bar.context.medium;
 
       char buf[32];
-      snprintf(buf, sizeof(buf), "%.1f%%", item.context_percent * 100.0f);
+      snprintf(buf, sizeof(buf), "%.1f%%", display_context_percent * 100.0f);
       auto ctx_pill =
           ftxui::hbox({
-              ftxui::text(" " + firmius::shared::ICON_TOOL + " ") |
+              ftxui::text(" " + firmius::shared::ICON_CONTEXT + " ") |
                   ftxui::color(ctx_color),
               ftxui::text(std::string(buf) + " ") | ftxui::color(ctx_color),
           }) |

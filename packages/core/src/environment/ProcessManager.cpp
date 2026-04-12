@@ -30,6 +30,9 @@ std::string ProcessManager::spawnProcess(const std::string& command,
     auto proc = host_->spawn(command, cwd, env);
     
     proc->onOutput([this, id](const std::string& output, bool isError) {
+        if (!active_.load()) {
+            return;
+        }
         std::lock_guard<std::mutex> lock(callbackMutex_);
         emitOrBufferProcessOutputLocked(id, output, isError, false);
     });

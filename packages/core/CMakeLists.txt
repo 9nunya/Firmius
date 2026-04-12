@@ -1,5 +1,6 @@
 find_package(CURL REQUIRED)
 find_package(Threads REQUIRED)
+find_package(SQLite3 REQUIRED)
 
 add_library(firmius_core STATIC)
 add_library(firmius::core ALIAS firmius_core)
@@ -14,8 +15,19 @@ target_sources(firmius_core PRIVATE
     src/environment/Permissions.cpp
     src/tools/FileReadTool.cpp
     src/tools/FileEditTool.cpp
+    src/tools/LspDiagnosticsTool.cpp
+    src/tools/LspTool.cpp
     src/tools/ProcessExecuteTool.cpp
+    src/tools/McpCallTool.cpp
+    src/tools/McpListTool.cpp
+    src/tools/McpSearchTool.cpp
+    src/tools/McpLoadTool.cpp
+    src/tools/McpReadResourceTool.cpp
+    src/tools/McpGetPromptTool.cpp
     src/tools/ToolRegistry.cpp
+    src/mcp/McpStdioSession.cpp
+    src/mcp/McpHttpSession.cpp
+    src/mcp/McpClient.cpp
     src/tools/SubagentTool.cpp
     src/tools/SubagentWaitTool.cpp
     src/tools/SubagentTerminateTool.cpp
@@ -29,6 +41,7 @@ target_sources(firmius_core PRIVATE
     src/tools/ProcessStatusTool.cpp
     src/tools/ProcessWaitTool.cpp
     src/tools/ProcessInputTool.cpp
+    src/tools/SkillLoadTool.cpp
     src/tools/WorkToolCommon.cpp
     src/tools/PlanCreateTool.cpp
     src/tools/PlanListTool.cpp
@@ -47,9 +60,14 @@ target_sources(firmius_core PRIVATE
     src/tools/ArtifactWriteTool.cpp
     src/tools/ArtifactReadTool.cpp
     src/tools/ArtifactListTool.cpp
+    src/tools/MemoryRecallTool.cpp
     src/agents/HintingLoader.cpp
+    src/agents/SkillLoader.cpp
     src/agents/PurposeLoader.cpp
     src/agents/RuntimeOverlay.cpp
+    src/agents/RollingContextManager.cpp
+    src/agents/ContextBudget.cpp
+    src/agents/UserMemoryWorkspace.cpp
     src/agents/Agent.cpp
     src/agents/AgentPermissionChecks.cpp
     src/agents/AgentPermissionChecks.cpp
@@ -67,6 +85,11 @@ target_sources(firmius_core PRIVATE
     src/workflow/Workflow.cpp
     src/workflow/WorkflowLoader.cpp
     src/artifacts/ReferenceExpansion.cpp
+    src/lsp/JsonRpcTransport.cpp
+    src/lsp/LspClient.cpp
+    src/lsp/LspServerRegistry.cpp
+    src/lsp/LspServerManager.cpp
+    src/lsp/LspService.cpp
 )
 
 target_sources(firmius_core PUBLIC
@@ -82,7 +105,20 @@ target_sources(firmius_core PUBLIC
     include/environment/Permissions.hpp
     include/tools/FileReadTool.hpp
     include/tools/FileEditTool.hpp
+    include/tools/LspDiagnosticsTool.hpp
+    include/tools/LspTool.hpp
+    include/tools/McpCallTool.hpp
+    include/tools/McpListTool.hpp
+    include/tools/McpSearchTool.hpp
+    include/tools/McpLoadTool.hpp
+    include/tools/McpReadResourceTool.hpp
+    include/tools/McpGetPromptTool.hpp
+    include/tools/McpToolUtil.hpp
     include/tools/ProcessExecuteTool.hpp
+    include/mcp/IMcpSession.hpp
+    include/mcp/McpStdioSession.hpp
+    include/mcp/McpHttpSession.hpp
+    include/mcp/McpClient.hpp
     include/tools/ToolRegistry.hpp
     include/tools/SubagentTool.hpp
     include/tools/SubagentWaitTool.hpp
@@ -97,6 +133,7 @@ target_sources(firmius_core PUBLIC
     include/tools/ProcessStatusTool.hpp
     include/tools/ProcessWaitTool.hpp
     include/tools/ProcessInputTool.hpp
+    include/tools/SkillLoadTool.hpp
     include/tools/WorkToolCommon.hpp
     include/tools/PlanCreateTool.hpp
     include/tools/PlanListTool.hpp
@@ -113,9 +150,14 @@ target_sources(firmius_core PUBLIC
     include/tools/ArtifactWriteTool.hpp
     include/tools/ArtifactReadTool.hpp
     include/tools/ArtifactListTool.hpp
+    include/tools/MemoryRecallTool.hpp
     include/agents/HintingLoader.hpp
+    include/agents/SkillLoader.hpp
     include/agents/PurposeLoader.hpp
     include/agents/RuntimeOverlay.hpp
+    include/agents/RollingContextManager.hpp
+    include/agents/ContextBudget.hpp
+    include/agents/UserMemoryWorkspace.hpp
     include/agents/Agent.hpp
     include/agents/AgentPermissionChecks.hpp
     include/agents/AgentPermissionChecks.hpp
@@ -134,6 +176,13 @@ target_sources(firmius_core PUBLIC
     include/workflow/Workflow.hpp
     include/workflow/WorkflowLoader.hpp
     include/artifacts/ReferenceExpansion.hpp
+    include/lsp/LspProtocol.hpp
+    include/lsp/JsonRpcTransport.hpp
+    include/lsp/LspClient.hpp
+    include/lsp/LspServerSpec.hpp
+    include/lsp/LspServerRegistry.hpp
+    include/lsp/LspServerManager.hpp
+    include/lsp/LspService.hpp
 )
 
 target_include_directories(firmius_core PUBLIC
@@ -147,6 +196,7 @@ target_link_libraries(firmius_core PUBLIC
     firmius::provider
     CURL::libcurl
     Threads::Threads
+    SQLite3::SQLite3
     uuid
 )
 
