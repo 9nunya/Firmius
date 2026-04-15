@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "local-http": {
+      "transport": "http",
+      "http": {
+        "url": "http://127.0.0.1:3001/mcp",
+        "authHeader": "Authorization",
+        "authBearerToken": "",
+        "allowInsecureTls": false,
+        "caCertPath": "",
+        "enabled": false
+      }
+    }
+  }
+}

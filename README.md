@@ -1,38 +1,86 @@
 # FIRMIUS
 
-The high-performance, C++ native, discipline based agent TUI.
+Firmius is a C++-native agent cockpit for people who want **actual orchestration** instead of one polite assistant pretending to be a whole company.
 
-## Features
+It is still pre-alpha. It is still a little feral. And the old README was straight-up out of date — because a LOT more of this thing is real now.
 
-- Parallel Subagents
-- 3 OAuth Providers w/ quota tracking, 7 OpenAI Providers
-LineRange edit
-- Watched file context management
-- Smooth (and pretty) TUI written in C++ (with FTXUI BTW :3)
-- User-definable prompts and workflows
-- Hinting prompts for these damn models to GET TO WORK!!
-- PRETTY CUSTOM THEMES!! (Ctrl+T switch :D)
+## OK, SO WHAT ACTUALLY EXISTS NOW?
 
-## I KNOW I KNOW, THESE DONT EXIST YET
+- **Real multi-agent execution** — subagents, plan/chunk workflows, worker handoffs, and file-lock coordination for parallel work.
+- **Workflow markdown that turns into slash commands** — built-ins bootstrap into `~/.firmius/workflows/`, and every `.md` becomes a `/command`.
+- **Rolling memory that is more than dumb truncation** — occupancy presets, observer/reflector passes, and a reserved working-memory updater slot.
+- **Watched-file overlays + exact turn recall** — agents keep live awareness of what they read, fully read, and edited.
+- **Thread-scoped artifacts** — real handoff files with references like `@artifact:lead/REPORT.md`.
+- **MCP over both `stdio` and `http`** — not vapor, not “coming soon”, actually implemented.
+- **Real LSP-backed code intel** — hover, definition, references, implementation, symbols, and diagnostics.
+- **Web fetch + web search built in** — plus a pluggable search-provider registry.
+- **Localhost OR Docker execution hosts** — depending on how spicy you want the run to be.
+- **Provider/account plumbing that is way fatter than the old README admitted** — `nanogpt`, `nvidia`, `openrouter`, `zai`, `zen`, `chutes`, `codex`, `antigravity`, `qwen`, `kimi`, `letta`.
+- **Benchmark mode** for `mbpp`, `swebench`, and `agentbench`.
+- **TUI first, but browser mode exists too** via `firmius web`.
 
-- No skills.. yet :D
-- Linux only.. POSIX headers EVERYWHERE! No windows, OR MAC!
-- MCP
-- LSP integration
-- Ralph loop for the extremists
-- Plugin ecosystem
-- Segfault mitigations.. (yikes)
-- Custom OpenAI/Anthropic-like providers
+## QUICK START, NO TED TALK
 
-## BUT
+```bash
+cmake -S . -B build
+cmake --build build -j$(nproc)
+```
 
-- It WORKS! This is a highly capable agentic coding TUI, capable of orchestrating long and exhausting tasks!
-- Less memory usage than.. most TUIs.
+Run the TUI:
 
-## IN SUMMARY
+```bash
+./build/packages/cli/firmius
+```
 
-This is like.. PRE-ALPHA. Less than V1. Less than V0!! This is a very rough draft of what firmius will end up being.
-Firmius is just one product. This will be used to make LONGER-TERM agents (WINK WINK OPENCLAW IM COMING FOR YOU!!)
+Continue the last session:
 
-> [!NOTE]
-> Ignore the commit logs :D
+```bash
+./build/packages/cli/firmius -c
+```
+
+Fire a one-shot prompt into a fresh thread:
+
+```bash
+./build/packages/cli/firmius --prompt "audit this repo" --quit-when-idle
+```
+
+Start the web runner instead of the TUI:
+
+```bash
+./build/packages/cli/firmius web
+```
+
+See the audit/benchmark CLI surfaces:
+
+```bash
+./build/packages/audits/firmius_audit --list
+```
+
+## COMMANDS YOU'LL PROBABLY TOUCH FIRST
+
+- `/new` — new thread, clean slate, go crazy.
+- `/threads` — switch threads.
+- `/models` — switch the focused model.
+- `/connect` — attach a provider with OAuth or API-key flow.
+- `/accounts` / `/quotas` — inspect provider state instead of guessing.
+- `/memory` — rolling-memory settings, presets, and maintenance-model picks.
+- `/router` — define routing categories.
+- `/purposes` — map personas to routing categories.
+- `/mcp` — open MCP config/connections UI.
+- `/benchmarks` — launch Docker-backed benchmark runs.
+- `/undo` — rip back the last N turns.
+
+## DOCS, BUT LIKE... THE USEFUL ONES
+
+- `docs/USAGE.md` — how to drive the thing without fighting it.
+- `docs/TOUR.md` — the under-advertised stuff Firmius already has.
+- `docs/MCP.md` — current MCP behavior, caveats, and flow.
+- `examples/mcp/` — credential-free starter configs and tool-call examples.
+
+## HONESTY HOUR
+
+- **Linux / POSIX first.** This repo still has POSIX energy all over it.
+- **Still pre-alpha.** Fast, capable, useful... also sharp in places.
+- **Not every provider/model combo is equally battle-tested.** Some paths are way more cooked than others.
+- **MCP TLS extras are parsed, but not fully wired yet.** `stdio` and plain `http` are the happy paths right now.
+- **This is not the polished SaaS product page version of itself yet.** It is the garage-built “why is this kinda cracked already?” version.

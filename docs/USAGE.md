@@ -1,41 +1,249 @@
-# USAGE TUT
+# HOW TO DRIVE THIS THING WITHOUT YELLING AT IT TOO MUCH
 
-WOW, so you actually wanna use Firmius!?!? THANKS!!
+OK... so you actually wanna USE Firmius now. SICK.
 
-## Purposes
+This doc is the practical surface: how to launch it, how to move around, and where the “oh wait that feature is real now?” stuff lives.
 
-In Firmius, there are purposes. A "purpose" is basically the system prompt and manifest for an agent. It defines it's personality,
-work instructions, and how it should report to its peers (if any)
+## 1) Start the beast
 
-### Default personas
+Build it first:
 
-- Lead
-This agent is like the top-level overseer. It'll take your task and start discovery, trying to find an optimal execution path.
-It decides if multi-agent orchestration is needed, or if it can be done by it's self. This is the starting point.
-Discovery-, diagnosis-, audit-, and other read-only tasks should usually stay on the lead's todo/direct lane instead of becoming plans.
-When the work needs delegated execution, the lead can mutate and create PLANS in the active thread.
-Small plans (roughly `<= 3` chunks) may be committed directly by lead; larger plans should go through `planner` + `plan_checker`.
-When it reaches execution, it will delegate each plan chunk to an executor, paralellizing where possible.
-- Executor
-This is the agent that gets shit done. It directly modifies code according to the chunk, or manages it's own worker subagents to complete the chunk sub-tasks. After it's done, it generates a worker report artifact, and dies. Purpose fulfilled. Bye bye!!
-- Planner
-Self-explanatory, but important! This agent must use a good SOTA model (gpt 5.4 best :O) because it plans the entire execution graph. It takes lead's completed discovery context and formulates a DRAFT plan with chunks and subchunks. It should not be used as a substitute for unfinished diagnosis or repo familiarization. It writes that to an artifact, and DIES!! X_X
-- Plan Checker
-Draft plans are.. NOT always perfect. Sometimes the planner is too vague, sometimes it makes circular dependencies.. and someone needs to check that. That SOMEONE is a clump of ones and zeros constantly changing.. an AGENT, DUMMY! This agent checks the drafted plan against a predefined and calibrated constraint set i wrote, and responds with a verdict: Accept, or Accept with FIXES. Lead sees this, and if ACCEPT, it exits the plan workflow, and commits the plan with it's tools. If accept with fixes, then it respawns the planner subagent to fix the plan based on the criteria provided by the plan checker subagent.
-- Worker
-General purpose, but executor-owned in the normal flow. Workers handle bounded chunk tasks delegated by an executor rather than owning chunks or top-level planning.
-- Scout
-Used for searching or retrieving information. Read-only, owns no part of the plan.
+```bash
+cmake -S . -B build
+cmake --build build -j$(nproc)
+```
 
-OK.. you know purposes now.. GREAT! That's the surface level. Let's get to the nitty gritty, fritty!
+Then run the normal TUI:
 
-## Providers
+```bash
+./build/packages/cli/firmius
+```
 
-OK, now let's get to the actual part where all this intelligence comes from.. PROVIDERS!!
-In firmius, there are two types of providers: OAuth, and APIKey based providers.
-OAuth providers use accounts with retry/switch logic to execute stream requests. They also manage quota, token refresh, etc..
-APIKey providers just talk to the api and done. Nothing else to note.. You only need an api key to operate them. Also, they support multiple api keys per provider, so they have retry/switch logic too.
-To add a provider, simply use the /connect command, second arg the ID of the provider you wanna connect!
-OAuth providers have a nice pretty wizard to help you through the process, and so do API key providers! YAY!
-To view all accounts for an **OAuth** provider, use `/accounts <id>`. It'll list all accounts.
-To view quotas for an **OAuth** provider, use `/quotas <id>`. It will list all quotas for all accounts in that provider.
+Useful launch variants:
+
+```bash
+# Continue the last session
+./build/packages/cli/firmius -c
+
+# Start a fresh thread and immediately send a prompt
+./build/packages/cli/firmius --prompt "map this repo"
+
+# Same thing, but read the prompt from a file
+./build/packages/cli/firmius --prompt-file task.md
+
+# Start in a specific working directory
+./build/packages/cli/firmius --cwd /path/to/repo
+
+# Exit automatically once the launched prompt settles
+./build/packages/cli/firmius --prompt "do the thing" --quit-when-idle
+
+# Permission modes
+./build/packages/cli/firmius --permission-mode request
+./build/packages/cli/firmius --permission-mode always-allow
+./build/packages/cli/firmius --permission-mode deny-all
+
+# Browser runner instead of the TUI
+./build/packages/cli/firmius web
+
+# Browser runner with an explicit host
+./build/packages/cli/firmius web --host 0.0.0.0
+```
+
+Notes:
+
+- `request` is the default permission mode.
+- `always-allow` and `deny-all` also accept the short aliases `allow` and `deny`.
+- `firmius web` binds to `127.0.0.1:9173` by default. Host is overrideable; port is currently fixed in the CLI surface.
+
+## 2) Slash commands that matter
+
+These are the core built-in commands registered by the TUI right now:
+
+| Command | What it does |
+| --- | --- |
+| `/new` | Create a new thread. |
+| `/threads` | Switch to an existing thread. |
+| `/models` | Switch the focused model. |
+| `/undo [count]` | Undo the last N turns. |
+| `/config` | Show current config. |
+| `/memory` | Configure rolling memory models and occupancy presets. |
+| `/connect <provider>` | Attach a provider with OAuth or API-key flow. |
+| `/accounts <provider>` | List accounts/keys for a provider. |
+| `/quotas <provider>` | Show provider quotas when supported. |
+| `/router` | Manage model routing categories. |
+| `/purposes` | Map personas to route categories. |
+| `/mcp` | Open the MCP connections/config UI. |
+| `/benchmarks <id> [task_id]` | Launch a benchmark run. |
+| `/quit` | Exit cleanly. |
+
+## 3) Purposes are the job system
+
+In Firmius, a “purpose” is the system prompt + operating contract for an agent. It's not just flavor text. It decides what lane that agent owns.
+
+The default cast you should know:
+
+- **Lead** — discovery, routing, review, final decisions.
+- **Executor** — edits code and lands chunk work.
+- **Planner** — drafts execution structure when work gets bigger.
+- **Plan Checker** — yells at bad plans until they stop being bad.
+- **Worker** — executor-owned bounded subtask goblin.
+- **Scout** — read-only reconnaissance gremlin.
+
+Use:
+
+- `/purposes` to map a persona to a routing category.
+- `/router` to define what those route categories actually point at.
+
+So yeah — you can decide that `planner` should go to one model lane, `executor` to another, and `lead` to the “think harder, be less stupid” lane.
+
+## 4) Workflows are just markdown, which rules
+
+Firmius bootstraps built-in workflow files into `~/.firmius/workflows/` and then registers **every workflow markdown file as its own slash command**.
+
+Built-in examples in this repo:
+
+- `/explore`
+- `/deep_interview`
+- `/evidence_sweep`
+- `/repair_wave`
+
+The command name comes from the file stem, not the pretty display title.
+
+You can also add your own `.md` files under:
+
+```text
+~/.firmius/workflows/
+```
+
+Or override the workflow directory entirely with:
+
+```bash
+FIRMIUS_WORKFLOWS_DIR=/some/other/folder ./build/packages/cli/firmius
+```
+
+Minimal example:
+
+```md
+---
+name: Repo Explore
+description: Map the repo and report the sharp edges
+args:
+  - name: target
+    type: string
+    description: What to inspect
+---
+
+Investigate $1 and give me the real shape of the codebase.
+```
+
+Save that as `repo_explore.md`, restart Firmius, and boom: `/repo_explore` exists.
+
+## 5) Providers, accounts, quotas, and other API nonsense
+
+Firmius supports a mix of OAuth-backed and API-key-backed providers.
+
+Current lazy-registered provider IDs in code:
+
+- `nanogpt`
+- `nvidia`
+- `openrouter`
+- `zai`
+- `zen`
+- `chutes`
+- `codex`
+- `antigravity`
+- `qwen`
+- `kimi`
+- `letta`
+
+Practical flow:
+
+1. `/connect <provider>`
+2. complete the wizard
+3. `/accounts <provider>` if you wanna inspect what got stored
+4. `/quotas <provider>` if the provider tracks quota buckets
+
+Also important: Firmius is not stuck on one account/key per provider. The provider layer has retry/switch logic, so this isn't “paste one secret and pray”.
+
+## 6) Memory is not just truncation anymore
+
+`/memory` opens the rolling-memory config UI.
+
+Stuff you can tune there right now:
+
+- mode: `rolling_forever`, `legacy_compaction`, or `disabled`
+- preset: `aggressive`, `balanced`, `extended`, or `custom`
+- target / buffer / emergency occupancy thresholds
+- retained tail ratio
+- minimum retained tail tokens
+- minimum chunk tokens
+- dedicated model picks for:
+  - observer
+  - reflector
+  - working-memory updater
+
+Under the hood, Firmius also keeps runtime overlays for:
+
+- active work state
+- watched files (`read`, `fully read`, `edited`)
+- loaded skills
+- loaded MCP capabilities
+- rolling-memory status
+- durable user/project memory
+
+The durable memory workspace lives under `~/.firmius/user/` and includes:
+
+- `USER.md`
+- `BEHAVIOR.md`
+- per-project fix logs
+
+So yes... it remembers more than “the last few turns before the context window explodes”.
+
+## 7) Benchmarks and audits
+
+Benchmark mode is built in.
+
+In the TUI:
+
+```text
+/benchmarks mbpp
+/benchmarks swebench
+/benchmarks agentbench
+```
+
+Notes:
+
+- benchmark runs spin up a Docker-backed worker lane
+- Docker needs to be alive
+- the image `firmius-sandbox:latest` needs to exist first
+
+There is also a dedicated audit CLI:
+
+```bash
+./build/packages/audits/firmius_audit --list
+```
+
+That surface includes workflow audits, LSP audits, provider audits, quota audits, web fetch/search audits, harness chaos audits, benchmark audits, and more.
+
+## 8) Threading / persistence / recovery
+
+Firmius persists way more than just “chat messages”.
+
+The thread database tracks:
+
+- thread metadata
+- agent turns
+- plans
+- todos
+- live agent state
+- rolling-memory state
+- compaction snapshots
+- artifacts
+
+So when you use `-c`, switch threads, undo turns, or hand artifacts between agents... that's real persistence, not just vibes.
+
+## 9) Where to go next
+
+- Want the big feature tour? `docs/TOUR.md`
+- Want MCP specifics? `docs/MCP.md`
+- Want credential-free MCP starter files? `examples/mcp/`
