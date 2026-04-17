@@ -41,8 +41,12 @@ int main(int argc, char** argv) {
     for (size_t i = 0; i < args.size(); ++i) {
         const std::string& arg = args[i];
         if (arg == "--list" || arg == "-l") {
-            listOnly = true;
-        } else if (arg == "--help" || arg == "-h") {
+            if (auditId.empty()) {
+                listOnly = true;
+            } else {
+                auditArgs.push_back(arg);
+            }
+        } else if ((arg == "--help" || arg == "-h") && auditId.empty()) {
             showHelp = true;
         } else if (arg == "--audit" && i + 1 < args.size()) {
             auditId = args[++i];

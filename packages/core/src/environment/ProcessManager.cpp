@@ -99,6 +99,7 @@ std::vector<std::string> ProcessManager::getBlockingProcessIds() {
 void ProcessManager::killProcess(const std::string& id) {
     try {
         host_->killBackgroundProcess(id);
+        host_->releaseBackgroundProcess(id);
     } catch (...) {
         // Ignore errors during kill
     }
@@ -139,6 +140,7 @@ void ProcessManager::cleanup() {
     for (const auto& id : processIds) {
         try {
             host_->killBackgroundProcess(id);
+            host_->releaseBackgroundProcess(id);
         } catch (...) {
             // Ignore errors during cleanup
         }
@@ -162,18 +164,25 @@ void ProcessManager::monitorProcessCompletion(const std::string& id) {
                     emitOrBufferProcessOutputLocked(
                         id, "", false, true, snap.exitCode, snap.elapsedMs);
                 }
-                finishTrackedProcess(id);
+                finishTrackedProcess(id, false);
                 return;
             }
         } catch (...) {
-            finishTrackedProcess(id);
+            finishTrackedProcess(id, false);
             return;
         }
         std::this_thread::sleep_for(50ms);
     }
 }
 
-void ProcessManager::finishTrackedProcess(const std::string& id) {
+void ProcessManager::finishTrackedProcess(const std::string& id, bool releaseHostState) {
+    if (releaseHostState) {
+        try {
+            host_->releaseBackgroundProcess(id);
+        } catch (...) {
+            // Ignore release failures while tearing down manager bookkeeping
+        }
+    }
     std::lock_guard<std::mutex> lock(processMutex_);
     processIds_.erase(id);
     blockingProcessIds_.erase(

@@ -1,19 +1,17 @@
 #include "benchmarks/SWEBench.hpp"
 #include "agents/ContextBudget.hpp"
+#include "hosts/LocalHost.hpp"
 #include "utils/Logger.hpp"
 
-#include <array>
 #include <cstdlib>
 #include <curl/curl.h>
 #include <fstream>
 #include <filesystem>
-#include <cstdio>
 #include <regex>
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
 #include <sstream>
-#include <sys/wait.h>
 #include <utility>
 
 namespace firmius::core {
@@ -82,22 +80,15 @@ struct ShellCommandResult {
 
 ShellCommandResult runShellCommandCapture(const std::string& command) {
     ShellCommandResult result;
-    std::array<char, 4096> buffer{};
-    FILE* pipe = popen((command + " 2>&1").c_str(), "r");
-    if (!pipe) {
-        result.output = "Failed to spawn shell command";
-        return result;
-    }
-
-    while (fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) != nullptr) {
-        result.output += buffer.data();
-    }
-
-    const int status = pclose(pipe);
-    if (WIFEXITED(status)) {
-        result.exitCode = WEXITSTATUS(status);
-    } else {
-        result.exitCode = status;
+    LocalHost host;
+    const auto execRes = host.exec(command);
+    result.exitCode = execRes.exitCode;
+    result.output = execRes.stdoutData;
+    if (!execRes.stderrData.empty()) {
+        if (!result.output.empty() && result.output.back() != '\n') {
+            result.output += '\n';
+        }
+        result.output += execRes.stderrData;
     }
     return result;
 }

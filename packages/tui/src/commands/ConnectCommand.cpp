@@ -20,14 +20,17 @@ void ConnectCommand::execute(CommandCtx &ctx,
   auto provider =
       firmius::provider::ProviderRegistry::instance().getProvider(providerName);
   if (!provider) {
-    // Ideally we'd log this or show a toast, but for now we just fail silently
     return;
   }
 
-  // Check if it's an OAuth provider
-  auto oauthProvider =
-      std::dynamic_pointer_cast<firmius::provider::BaseOAuthProvider>(provider);
-  if (oauthProvider) {
+  switch (provider->getProviderType()) {
+  case firmius::provider::ProviderType::OAuth: {
+    auto oauthProvider =
+        std::dynamic_pointer_cast<firmius::provider::BaseOAuthProvider>(provider);
+    if (!oauthProvider) {
+      return;
+    }
+
     auto startWizard = [oauthProvider, providerName, state = ctx.state]() {
       auto wizard = oauthProvider->beginConnectionWizard();
       if (!wizard)
@@ -50,11 +53,13 @@ void ConnectCommand::execute(CommandCtx &ctx,
     }
     return;
   }
+  case firmius::provider::ProviderType::APIKey: {
+    auto apiKeyProvider =
+        std::dynamic_pointer_cast<firmius::provider::BaseAPIKeyProvider>(provider);
+    if (!apiKeyProvider) {
+      return;
+    }
 
-  // Check if it's an API key provider
-  auto apiKeyProvider =
-      std::dynamic_pointer_cast<firmius::provider::BaseAPIKeyProvider>(provider);
-  if (apiKeyProvider) {
     auto startWizard = [apiKeyProvider, providerName, state = ctx.state]() {
       auto wizard = apiKeyProvider->beginConnectionWizard();
       if (!wizard)
@@ -67,17 +72,17 @@ void ConnectCommand::execute(CommandCtx &ctx,
 
     auto accounts = apiKeyProvider->getAccounts();
     if (!accounts.empty()) {
-      // Show confirmation modal when adding another API key
       auto confirmModal = std::make_shared<ConfirmationModal>(
           " API Key Exists ",
-          "An API key already exists for " + providerName + 
-          ". Adding another key will enable automatic rotation and rate limit backoff. Continue?",
+          "An API key already exists for " + providerName +
+              ". Adding another key will enable automatic rotation and rate limit backoff. Continue?",
           startWizard);
       ctx.state->openModalDirect(confirmModal->create(*ctx.state));
     } else {
       startWizard();
     }
     return;
+  }
   }
 }
 

@@ -1,14 +1,15 @@
 #ifndef FIRMIUS_PROVIDER_BASE_API_KEY_PROVIDER_HPP
 #define FIRMIUS_PROVIDER_BASE_API_KEY_PROVIDER_HPP
 
-#include "IProvider.hpp"
 #include "Enums.hpp"
+#include "IProvider.hpp"
+#include "providers/OAuthWizard.hpp"
+#include <map>
+#include <memory>
+#include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
-#include <optional>
-#include <mutex>
-#include <memory>
-#include <map>
 
 namespace firmius::provider {
 
@@ -20,7 +21,7 @@ using namespace firmius::shared;
 class APIKeyWizard {
 public:
   virtual ~APIKeyWizard() = default;
-  virtual std::optional<std::string> nextPrompt() = 0;
+  virtual std::optional<firmius::WizardPrompt> nextPrompt() = 0;
   virtual void submitAnswer(const std::string &answer) = 0;
   virtual bool isComplete() const = 0;
   virtual bool finalizeExchange(std::string &outApiKey,
@@ -33,9 +34,14 @@ public:
  */
 class SimpleAPIKeyWizard : public APIKeyWizard {
 public:
-  SimpleAPIKeyWizard() : prompt_("Enter your API key:") {}
+  SimpleAPIKeyWizard() {
+    prompt_.message = "Enter your API key:";
+    prompt_.placeholder = "sk-...";
+    prompt_.submitLabel = "Save Key";
+    prompt_.isSecret = true;
+  }
 
-  std::optional<std::string> nextPrompt() override {
+  std::optional<firmius::WizardPrompt> nextPrompt() override {
     if (!promptShown_) {
       promptShown_ = true;
       return prompt_;
@@ -65,7 +71,7 @@ public:
   }
 
 private:
-  std::string prompt_;
+  firmius::WizardPrompt prompt_;
   bool promptShown_ = false;
   std::string apiKey_;
   bool isComplete_ = false;
@@ -73,7 +79,7 @@ private:
 
 /**
  * @brief Base class for providers that use API key authentication.
- * 
+ *
  * Supports multiple API keys with rotation and rate limit backoff.
  * Keys are persisted to ~/.firmius/keys.json
  */
@@ -86,8 +92,9 @@ public:
   std::string getId() const override;
   ProviderType getProviderType() const override;
   bool isConfigured() const override;
-  
-  // IProvider interface - stream, listModels, getModelInfo, generateSummary are implemented by subclasses
+
+  // IProvider interface - stream, listModels, getModelInfo, generateSummary are
+  // implemented by subclasses
   bool supportsStreamUsage() const { return true; }
 
   /**
@@ -143,7 +150,8 @@ public:
 
   /**
    * @brief Begin the API key connection wizard.
-   * @return Wizard instance or nullptr if provider doesn't support interactive setup.
+   * @return Wizard instance or nullptr if provider doesn't support interactive
+   * setup.
    */
   virtual std::unique_ptr<APIKeyWizard> beginConnectionWizard() = 0;
 

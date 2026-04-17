@@ -5,6 +5,7 @@
 #include "utils/StringUtil.hpp"
 #include "harness/Harness.hpp"
 #include "persistence/ThreadManager.hpp"
+#include <algorithm>
 #include <chrono>
 #include <iomanip>
 #include <sstream>
@@ -53,6 +54,25 @@ struct ParsedSubagentResult {
   std::vector<std::string> artifacts_created;
   std::vector<std::string> artifacts_updated;
 };
+
+std::string ltrimLeadingBlankLines(std::string text) {
+  size_t pos = 0;
+  while (pos < text.size()) {
+    const size_t line_end = text.find('\n', pos);
+    const std::string_view line =
+        line_end == std::string::npos
+            ? std::string_view(text).substr(pos)
+            : std::string_view(text).substr(pos, line_end - pos);
+    if (!firmius::shared::StringUtil::trim(line).empty()) {
+      break;
+    }
+    if (line_end == std::string::npos) {
+      return "";
+    }
+    pos = line_end + 1;
+  }
+  return text.substr(pos);
+}
 
 ParsedProcessResult parseProcessResult(const std::string &result) {
   ParsedProcessResult parsed;
@@ -232,6 +252,96 @@ std::string jsonStringMember(const rapidjson::Value &value, const char *key) {
     return value[key].GetString();
   }
   return "";
+}
+
+bool isFileEditLikeToolName(const std::string &name) {
+  return name == "file_edit" || name == "file_write";
+}
+
+void mergeFileEditSignal(shared::ToolCallView &view,
+                         const shared::FileEditSignal &signal) {
+  if (signal.path.empty()) {
+    return;
+  }
+
+  auto it = std::find_if(
+      view.fileEditEvents.begin(), view.fileEditEvents.end(),
+      [&](const shared::FileEditSignal &existing) {
+        return existing.path == signal.path;
+      });
+  if (it == view.fileEditEvents.end()) {
+    view.fileEditEvents.push_back(signal);
+    return;
+  }
+
+  if (!signal.diffPreview.empty()) {
+    it->diffPreview = signal.diffPreview;
+  }
+  if (signal.addedLines > 0 || it->addedLines == 0) {
+    it->addedLines = signal.addedLines;
+  }
+  if (signal.removedLines > 0 || it->removedLines == 0) {
+    it->removedLines = signal.removedLines;
+  }
+}
+
+std::vector<shared::FileEditSignal>
+parseFileEditSignalsFromResult(const std::string &result) {
+  std::vector<shared::FileEditSignal> signals;
+
+  rapidjson::Document doc;
+  doc.Parse(result.c_str());
+  if (doc.HasParseError() || !doc.IsObject()) {
+    return signals;
+  }
+
+  auto appendSignal = [&](const rapidjson::Value &value) {
+    if (!value.IsObject()) {
+      return;
+    }
+
+    shared::FileEditSignal signal;
+    if (value.HasMember("path") && value["path"].IsString()) {
+      signal.path = value["path"].GetString();
+    }
+    if (signal.path.empty()) {
+      return;
+    }
+    if (value.HasMember("diff_preview") && value["diff_preview"].IsString()) {
+      signal.diffPreview = value["diff_preview"].GetString();
+    }
+    if (value.HasMember("added_lines") && value["added_lines"].IsInt()) {
+      signal.addedLines = value["added_lines"].GetInt();
+    }
+    if (value.HasMember("removed_lines") && value["removed_lines"].IsInt()) {
+      signal.removedLines = value["removed_lines"].GetInt();
+    }
+    signals.push_back(std::move(signal));
+  };
+
+  if (doc.HasMember("files") && doc["files"].IsArray()) {
+    for (const auto &entry : doc["files"].GetArray()) {
+      appendSignal(entry);
+    }
+  } else {
+    appendSignal(doc);
+  }
+
+  return signals;
+}
+
+bool shouldRetainCompletedToolCall(const shared::ToolCallView &view) {
+  if (view.name == "summon_subagent") {
+    return true;
+  }
+
+  if (view.phase == shared::ToolPhase::BackgroundRunning ||
+      view.phase == shared::ToolPhase::Called ||
+      view.phase == shared::ToolPhase::Preparing) {
+    return true;
+  }
+
+  return isFileEditLikeToolName(view.name) || !view.fileEditEvents.empty();
 }
 
 std::string artifactReadSummary(const std::string &args, const std::string &result) {
@@ -601,9 +711,13 @@ void StreamStateManager::handleAgentThinking(const shared::AgentThinking &e) {
   }
   s.compaction_finished = false;
   s.compaction_completion.clear();
-  s.thinking += e.delta;
-  appendLiveTimelineDelta(e.agentId, TimelineEntry::Kind::Thinking, e.delta);
-  if (!e.delta.empty()) {
+  std::string delta = e.delta;
+  if (s.thinking.empty()) {
+    delta = ltrimLeadingBlankLines(delta);
+  }
+  s.thinking += delta;
+  appendLiveTimelineDelta(e.agentId, TimelineEntry::Kind::Thinking, delta);
+  if (!firmius::shared::StringUtil::trim(delta).empty()) {
     live_quick_clusters_[e.agentId].prose_since_last_tool = true;
   }
   s.provider_waiting = false;
@@ -620,9 +734,13 @@ void StreamStateManager::handleAgentText(const shared::AgentText &e) {
   }
   s.compaction_finished = false;
   s.compaction_completion.clear();
-  s.text += e.delta;
-  appendLiveTimelineDelta(e.agentId, TimelineEntry::Kind::Text, e.delta);
-  if (!e.delta.empty()) {
+  std::string delta = e.delta;
+  if (s.text.empty()) {
+    delta = ltrimLeadingBlankLines(delta);
+  }
+  s.text += delta;
+  appendLiveTimelineDelta(e.agentId, TimelineEntry::Kind::Text, delta);
+  if (!firmius::shared::StringUtil::trim(delta).empty()) {
     live_quick_clusters_[e.agentId].prose_since_last_tool = true;
   }
   s.provider_waiting = false;
@@ -686,14 +804,14 @@ void StreamStateManager::handleAgentTurnCompleted(
     }
   }
 
-  // Process tool results from the turn to determine success/failure
+  // Process tool results from the turn to determine success/failure.
+  // Tool results may appear under assistant or tool-result roles depending on
+  // how the turn was reconstructed, so inspect every content part.
   std::unordered_map<std::string, std::pair<bool, std::string>> toolResultMap;
   for (const auto &msg : e.turn.messages) {
-    if (msg.role == shared::Role::ToolResult) {
-      for (const auto &content : msg.content) {
-        if (auto *trc = std::get_if<shared::ToolResultContent>(&content)) {
-          toolResultMap[trc->toolCallId] = {trc->success, trc->result};
-        }
+    for (const auto &content : msg.content) {
+      if (auto *trc = std::get_if<shared::ToolResultContent>(&content)) {
+        toolResultMap[trc->toolCallId] = {trc->success, trc->result};
       }
     }
   }
@@ -701,8 +819,9 @@ void StreamStateManager::handleAgentTurnCompleted(
   // Mark all pending tool calls for this agent as finished with proper success state
   for (auto &[toolId, view] : tool_calls_) {
     if (view && view->agentId == e.agentId &&
-        view->phase != ToolPhase::Finished &&
-        view->phase != ToolPhase::Error) {
+        (view->phase != ToolPhase::Error &&
+         (view->phase != ToolPhase::Finished ||
+          isFileEditLikeToolName(view->name)))) {
       auto it = toolResultMap.find(toolId);
       if (it != toolResultMap.end()) {
         applyToolResult(view, it->second.first, it->second.second);
@@ -730,10 +849,7 @@ void StreamStateManager::handleAgentTurnCompleted(
 
   for (auto it = tool_calls_.begin(); it != tool_calls_.end();) {
     if (it->second && it->second->agentId == e.agentId &&
-        it->second->name != "summon_subagent" &&
-        it->second->phase != ToolPhase::BackgroundRunning &&
-        it->second->phase != ToolPhase::Called &&
-        it->second->phase != ToolPhase::Preparing) {
+        !shouldRetainCompletedToolCall(*it->second)) {
       it = tool_calls_.erase(it);
     } else {
       ++it;
@@ -753,12 +869,9 @@ void StreamStateManager::handleAgentTurnCompleted(
               return false;
             }
             auto it_tool = tool_calls_.find(entry.id);
-            if (it_tool != tool_calls_.end() && it_tool->second) {
-              auto phase = it_tool->second->phase;
-              if (phase == ToolPhase::BackgroundRunning ||
-                  phase == ToolPhase::Called || phase == ToolPhase::Preparing) {
+            if (it_tool != tool_calls_.end() && it_tool->second &&
+                shouldRetainCompletedToolCall(*it_tool->second)) {
                 return false;
-              }
             }
             return true;
           }),
@@ -1036,6 +1149,37 @@ void StreamStateManager::handleAgentToolCall(const shared::AgentToolCall &e) {
   }
 
   flushBufferedProcessOutputForToolCall(e.toolCallId);
+}
+
+void StreamStateManager::handleAgentFileEdited(
+    const shared::AgentFileEdited &e) {
+  const std::string tool_call_id =
+      !e.toolCallId.empty()
+          ? e.toolCallId
+          : ("file-edit-" + e.agentId + "-" +
+             std::to_string(++next_live_entry_sequence_));
+
+  auto &view = tool_calls_[tool_call_id];
+  if (!view) {
+    view = std::make_shared<ToolCallView>();
+    view->toolCallId = tool_call_id;
+    timeline_.push_back(
+        {TimelineEntry::Kind::ToolCall, tool_call_id, "", e.agentId});
+  }
+
+  assignToolCallClusterId(e.agentId, tool_call_id);
+  view->agentId = e.agentId;
+  if (view->name.empty()) {
+    view->name = "file_edit";
+  }
+  if (view->phase != ToolPhase::Error) {
+    view->phase = ToolPhase::Called;
+    view->success = true;
+  }
+
+  mergeFileEditSignal(*view, shared::FileEditSignal{
+                                 e.path, e.diffPreview, e.addedLines,
+                                 e.removedLines});
 }
 
 void StreamStateManager::handleAgentCompacting(
@@ -2312,7 +2456,7 @@ void StreamStateManager::assignToolCallClusterId(
 void StreamStateManager::appendLiveTimelineDelta(const std::string &agentId,
                                                  TimelineEntry::Kind kind,
                                                  const std::string &delta) {
-  if (delta.empty()) {
+  if (firmius::shared::StringUtil::trim(delta).empty()) {
     return;
   }
 
@@ -2373,6 +2517,12 @@ void StreamStateManager::applyToolResult(
   }
   view->success = success;
   view->result = result;
+  const bool file_edit_like = isFileEditLikeToolName(view->name);
+  if (success && file_edit_like) {
+    for (const auto &signal : parseFileEditSignalsFromResult(result)) {
+      mergeFileEditSignal(*view, signal);
+    }
+  }
   if (view->name == "subagent_wait" || view->name == "summon_subagent") {
     ParsedSubagentArgs parsed_args = parseSubagentArgs(view->args);
     ParsedSubagentResult parsedSubagent = parseSubagentResult(result);
@@ -2512,6 +2662,11 @@ void StreamStateManager::applyToolResult(
       }
     }
     view->phase = ToolPhase::Error;
+    return;
+  }
+
+  if (file_edit_like) {
+    view->phase = ToolPhase::Finished;
     return;
   }
 

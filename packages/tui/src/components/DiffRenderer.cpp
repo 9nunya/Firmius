@@ -98,7 +98,8 @@ ftxui::Element RenderToolPresentationDiffs(const ToolPresentation &presentation,
                      ftxui::color(theme.status_bar.error.normal.fg));
     }
     if (section.lines.empty()) {
-      rows.push_back(ftxui::text("(no textual changes)") |
+      rows.push_back(
+          ftxui::text(section.empty_state_text.value_or("(no textual changes)")) |
                      ftxui::color(theme.base.dim));
       continue;
     }

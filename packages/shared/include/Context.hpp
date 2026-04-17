@@ -139,6 +139,10 @@ struct AgentConfig {
       true; ///< If false, agent runs detached with no journal.
   int maxIdenticalToolCalls =
       5; ///< Max consecutive identical tool calls before intervention
+  int maxInsanityRetries = 2;        ///< Max retry attempts when insanity is detected
+  bool insanityDetectionEnabled = true;
+  int insanityRepetitionThreshold = 3; ///< Min consecutive repeats to flag
+  std::uint64_t insanityMaxTokenThreshold = 50000; ///< Max tokens before flagging
   RollingMemoryConfig rollingMemory;
 
   bool operator==(const AgentConfig &other) const = default;

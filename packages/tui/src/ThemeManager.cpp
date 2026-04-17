@@ -1,5 +1,6 @@
 #include "ThemeManager.hpp"
 #include "UserPreferences.hpp"
+#include "utils/PlatformPaths.hpp"
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -91,12 +92,12 @@ void ThemeManager::loadSystemThemes() {
 }
 
 void ThemeManager::loadUserThemes() {
-  std::string home = getenv("HOME") ? getenv("HOME") : "/root";
-  std::string user_dir = home + "/.firmius/themes";
+  const std::filesystem::path userDir =
+      firmius::shared::PlatformPaths::firmiusHomeDir() / "themes";
 
-  if (std::filesystem::exists(user_dir) &&
-      std::filesystem::is_directory(user_dir)) {
-    for (const auto &entry : std::filesystem::directory_iterator(user_dir)) {
+  if (std::filesystem::exists(userDir) &&
+      std::filesystem::is_directory(userDir)) {
+    for (const auto &entry : std::filesystem::directory_iterator(userDir)) {
       if (entry.path().extension() == ".json") {
         try {
           themes_.push_back(loadThemeFromFile(entry.path().string()));

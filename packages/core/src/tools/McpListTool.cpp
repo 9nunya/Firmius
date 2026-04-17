@@ -2,8 +2,13 @@
 
 #include "ConfigLoader.hpp"
 #include "tools/McpToolUtil.hpp"
+#include <algorithm>
+#include <optional>
 
 namespace firmius::core {
+namespace {
+constexpr int kOptionalCapabilityTimeoutMs = 1000;
+}
 
 shared::ToolMetadata McpListTool::getMetadata() const {
   return {"mcp_list",
@@ -45,15 +50,28 @@ shared::ToolResult McpListTool::execute(const McpListInput &input,
 
       client->initialize(timeoutMs);
       const rapidjson::Document toolsResponse = client->listTools(timeoutMs);
-      const rapidjson::Document resourcesResponse = client->listResources(timeoutMs);
-      const rapidjson::Document promptsResponse = client->listPrompts(timeoutMs);
+
+      std::optional<rapidjson::Document> resourcesResponse;
+      try {
+        resourcesResponse.emplace(
+            client->listResources(std::min(timeoutMs, kOptionalCapabilityTimeoutMs)));
+      } catch (...) {
+      }
+
+      std::optional<rapidjson::Document> promptsResponse;
+      try {
+        promptsResponse.emplace(
+            client->listPrompts(std::min(timeoutMs, kOptionalCapabilityTimeoutMs)));
+      } catch (...) {
+      }
 
       rapidjson::Value serverObj(rapidjson::kObjectType);
       serverObj.AddMember("server_name", rapidjson::Value(serverName.c_str(), a).Move(), a);
 
       rapidjson::Value toolNames(rapidjson::kArrayType);
       const auto &toolsResult = toolsResponse["result"];
-      if (toolsResult.IsObject() && toolsResult.HasMember("tools") && toolsResult["tools"].IsArray()) {
+      if (toolsResult.IsObject() && toolsResult.HasMember("tools") &&
+          toolsResult["tools"].IsArray()) {
         for (const auto &tool : toolsResult["tools"].GetArray()) {
           if (tool.IsObject() && tool.HasMember("name") && tool["name"].IsString()) {
             toolNames.PushBack(rapidjson::Value(tool["name"].GetString(), a).Move(), a);
@@ -63,22 +81,32 @@ shared::ToolResult McpListTool::execute(const McpListInput &input,
       serverObj.AddMember("tools", toolNames, a);
 
       rapidjson::Value resourceUris(rapidjson::kArrayType);
-      const auto &resourcesResult = resourcesResponse["result"];
-      if (resourcesResult.IsObject() && resourcesResult.HasMember("resources") && resourcesResult["resources"].IsArray()) {
-        for (const auto &resource : resourcesResult["resources"].GetArray()) {
-          if (resource.IsObject() && resource.HasMember("uri") && resource["uri"].IsString()) {
-            resourceUris.PushBack(rapidjson::Value(resource["uri"].GetString(), a).Move(), a);
+      if (resourcesResponse.has_value()) {
+        const auto &resourcesResult = (*resourcesResponse)["result"];
+        if (resourcesResult.IsObject() && resourcesResult.HasMember("resources") &&
+            resourcesResult["resources"].IsArray()) {
+          for (const auto &resource : resourcesResult["resources"].GetArray()) {
+            if (resource.IsObject() && resource.HasMember("uri") &&
+                resource["uri"].IsString()) {
+              resourceUris.PushBack(
+                  rapidjson::Value(resource["uri"].GetString(), a).Move(), a);
+            }
           }
         }
       }
       serverObj.AddMember("resources", resourceUris, a);
 
       rapidjson::Value promptNames(rapidjson::kArrayType);
-      const auto &promptsResult = promptsResponse["result"];
-      if (promptsResult.IsObject() && promptsResult.HasMember("prompts") && promptsResult["prompts"].IsArray()) {
-        for (const auto &prompt : promptsResult["prompts"].GetArray()) {
-          if (prompt.IsObject() && prompt.HasMember("name") && prompt["name"].IsString()) {
-            promptNames.PushBack(rapidjson::Value(prompt["name"].GetString(), a).Move(), a);
+      if (promptsResponse.has_value()) {
+        const auto &promptsResult = (*promptsResponse)["result"];
+        if (promptsResult.IsObject() && promptsResult.HasMember("prompts") &&
+            promptsResult["prompts"].IsArray()) {
+          for (const auto &prompt : promptsResult["prompts"].GetArray()) {
+            if (prompt.IsObject() && prompt.HasMember("name") &&
+                prompt["name"].IsString()) {
+              promptNames.PushBack(
+                  rapidjson::Value(prompt["name"].GetString(), a).Move(), a);
+            }
           }
         }
       }

@@ -228,9 +228,17 @@ std::string lexicalRelativePath(const std::string &path, const std::string &root
   return normalizeSlashes(relative.generic_string());
 }
 
+constexpr size_t kMaxGlobVisitedNodes = 20000;
+constexpr size_t kMaxGlobMatches = 1000;
+
 void collectGlobMatches(shared::IHost &host, const std::string &rootPath,
                         const std::string &currentPath, const std::string &pattern,
-                        std::vector<std::string> &matches) {
+                        std::vector<std::string> &matches, size_t &visitedNodes) {
+  if (visitedNodes >= kMaxGlobVisitedNodes || matches.size() >= kMaxGlobMatches) {
+    return;
+  }
+  ++visitedNodes;
+
   const auto info = host.stat(currentPath);
   const std::string relativePath = lexicalRelativePath(currentPath, rootPath);
   const std::string basename = normalizeSlashes(info.name);
@@ -250,7 +258,7 @@ void collectGlobMatches(shared::IHost &host, const std::string &rootPath,
               return lhs.path < rhs.path;
             });
   for (const auto &entry : entries) {
-    collectGlobMatches(host, rootPath, entry.path, pattern, matches);
+    collectGlobMatches(host, rootPath, entry.path, pattern, matches, visitedNodes);
   }
 }
 
@@ -264,18 +272,24 @@ shared::ToolResult GlobTool::execute(const GlobInput &input,
     // Security check
     ctx.agent.getPermissions()->validatePathAccess(absPath, firmius::shared::AccessMode::READ);
 
-    rapidjson::Document doc;
-    doc.SetArray();
-    auto &a = doc.GetAllocator();
-
     std::vector<std::string> matches;
-    collectGlobMatches(ctx.host, absPath, absPath, input.pattern, matches);
+    size_t visitedNodes = 0;
+    collectGlobMatches(ctx.host, absPath, absPath, input.pattern, matches, visitedNodes);
     std::sort(matches.begin(), matches.end());
     matches.erase(std::unique(matches.begin(), matches.end()), matches.end());
 
+    bool budgetHit = visitedNodes >= kMaxGlobVisitedNodes || matches.size() >= kMaxGlobMatches;
+
+    rapidjson::Document doc;
+    doc.SetObject();
+    auto &a = doc.GetAllocator();
+
+    rapidjson::Value results(rapidjson::kArrayType);
     for (const auto &match : matches) {
-      doc.PushBack(rapidjson::Value(match.c_str(), a).Move(), a);
+      results.PushBack(rapidjson::Value(match.c_str(), a).Move(), a);
     }
+    doc.AddMember("results", results, a);
+    doc.AddMember("budget_hit", budgetHit, a);
 
     return shared::ToolResult::ok(doc);
   } catch (const std::exception &e) {

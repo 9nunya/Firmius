@@ -15,9 +15,8 @@ It is still pre-alpha. It is still a little feral. And the old README was straig
 - **Real LSP-backed code intel** — hover, definition, references, implementation, symbols, and diagnostics.
 - **Web fetch + web search built in** — plus a pluggable search-provider registry.
 - **Localhost OR Docker execution hosts** — depending on how spicy you want the run to be.
-- **Provider/account plumbing that is way fatter than the old README admitted** — `nanogpt`, `nvidia`, `openrouter`, `zai`, `zen`, `chutes`, `codex`, `antigravity`, `qwen`, `kimi`, `letta`.
+- **Provider/account plumbing that is way fatter than the old README admitted** — `nanogpt`, `nvidia`, `openrouter`, `zai`, `zen`, `chutes`, `codex`, `antigravity`, `qwen`, `kimi`, `kilo`.
 - **Benchmark mode** for `mbpp`, `swebench`, and `agentbench`.
-- **TUI first, but browser mode exists too** via `firmius web`.
 
 ## QUICK START, NO TED TALK
 
@@ -42,12 +41,6 @@ Fire a one-shot prompt into a fresh thread:
 
 ```bash
 ./build/packages/cli/firmius --prompt "audit this repo" --quit-when-idle
-```
-
-Start the web runner instead of the TUI:
-
-```bash
-./build/packages/cli/firmius web
 ```
 
 See the audit/benchmark CLI surfaces:

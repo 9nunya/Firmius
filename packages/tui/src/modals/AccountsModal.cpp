@@ -62,6 +62,10 @@ ftxui::Component AccountsModal::create(TuiState &state) {
     for (int i = 0; i < total; ++i) {
       const auto &acc = (*oauthAccounts)[i];
       std::string identifier = acc.identifier;
+      if (auto emailIt = acc.metadata.find("email");
+          emailIt != acc.metadata.end() && !emailIt->second.empty()) {
+        identifier = emailIt->second;
+      }
       std::string rightBadge = "oauth";
 
       if (auto keyPrefixIt = acc.metadata.find("keyPrefix");
@@ -229,35 +233,39 @@ ftxui::Component AccountsModal::create(TuiState &state) {
           firmius::provider::ProviderRegistry::instance().getProvider(
               providerId);
       if (provider) {
-        auto apiKeyProvider =
-            std::dynamic_pointer_cast<firmius::provider::BaseAPIKeyProvider>(
-                provider);
-        if (apiKeyProvider) {
-          auto wizard = apiKeyProvider->beginConnectionWizard();
-          if (wizard) {
-            auto modalObj =
-                std::make_shared<APIKeyWizardModal>(std::move(wizard), providerId);
-            state.deferUiMutation([&state, modalObj]() {
-              state.popModalImmediate();
-              state.openModalDirect(modalObj->create(state));
-            });
+        switch (provider->getProviderType()) {
+        case firmius::provider::ProviderType::APIKey: {
+          auto apiKeyProvider = std::dynamic_pointer_cast<
+              firmius::provider::BaseAPIKeyProvider>(provider);
+          if (apiKeyProvider) {
+            auto wizard = apiKeyProvider->beginConnectionWizard();
+            if (wizard) {
+              auto modalObj = std::make_shared<APIKeyWizardModal>(
+                  std::move(wizard), providerId);
+              state.deferUiMutation([&state, modalObj]() {
+                state.popModalImmediate();
+                state.openModalDirect(modalObj->create(state));
+              });
+            }
           }
           return true;
         }
-
-        auto oauthProvider =
-            std::dynamic_pointer_cast<firmius::provider::BaseOAuthProvider>(
-                provider);
-        if (oauthProvider) {
-          auto wizard = oauthProvider->beginConnectionWizard();
-          if (wizard) {
-            auto modalObj =
-                std::make_shared<OAuthWizardModal>(std::move(wizard), providerId);
-            state.deferUiMutation([&state, modalObj]() {
-              state.popModalImmediate();
-              state.openModalDirect(modalObj->create(state));
-            });
+        case firmius::provider::ProviderType::OAuth: {
+          auto oauthProvider = std::dynamic_pointer_cast<
+              firmius::provider::BaseOAuthProvider>(provider);
+          if (oauthProvider) {
+            auto wizard = oauthProvider->beginConnectionWizard();
+            if (wizard) {
+              auto modalObj = std::make_shared<OAuthWizardModal>(
+                  std::move(wizard), providerId);
+              state.deferUiMutation([&state, modalObj]() {
+                state.popModalImmediate();
+                state.openModalDirect(modalObj->create(state));
+              });
+            }
           }
+          return true;
+        }
         }
       }
       return true;

@@ -1,5 +1,7 @@
 #include "ConfigLoader.hpp"
 
+#include "utils/PlatformPaths.hpp"
+
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
@@ -7,7 +9,6 @@
 #include <fstream>
 #include <filesystem>
 #include <stdexcept>
-#include <unistd.h>
 
 namespace firmius::shared {
 
@@ -20,12 +21,11 @@ bool ensureWritableDirectory(const std::filesystem::path& dir) {
         return false;
     }
 
-    auto probe = dir / (".write_probe_" + std::to_string(static_cast<long long>(getpid())));
-    std::ofstream out(probe);
+    const auto probe = dir / ".write_probe";
+    std::ofstream out(probe, std::ios::app);
     if (!out.is_open()) {
         return false;
     }
-    out << "ok";
     out.close();
     std::filesystem::remove(probe, ec);
     return true;
@@ -37,26 +37,22 @@ bool isReadableFile(const std::filesystem::path& path) {
 }
 
 std::filesystem::path resolveFirmiusHomeForConfig() {
-    if (const char* home = getenv("HOME")) {
-        const std::filesystem::path userHome = std::filesystem::path(home) / ".firmius";
-        if (ensureWritableDirectory(userHome) || isReadableFile(userHome / "config.json")) {
-            return userHome;
-        }
+    const std::filesystem::path homeDir = PlatformPaths::firmiusHomeDir();
+    if (ensureWritableDirectory(homeDir) || isReadableFile(homeDir / "config.json")) {
+        return homeDir;
     }
 
-    const std::filesystem::path localHome = std::filesystem::current_path() / ".firmius";
-    if (ensureWritableDirectory(localHome) || isReadableFile(localHome / "config.json")) {
-        return localHome;
+    const std::filesystem::path dataDir = PlatformPaths::firmiusDataDir();
+    if (ensureWritableDirectory(dataDir) || isReadableFile(dataDir / "config.json")) {
+        return dataDir;
     }
 
-    const std::filesystem::path tempHome =
-        std::filesystem::temp_directory_path() /
-        ("firmius-" + std::to_string(static_cast<long long>(getuid())));
-    if (ensureWritableDirectory(tempHome) || isReadableFile(tempHome / "config.json")) {
-        return tempHome;
+    const std::filesystem::path tempDir = PlatformPaths::firmiusTempDir();
+    if (ensureWritableDirectory(tempDir) || isReadableFile(tempDir / "config.json")) {
+        return tempDir;
     }
 
-    return std::filesystem::temp_directory_path() / "firmius";
+    return homeDir;
 }
 
 rapidjson::Value toJson(const AgentConfig::RollingModelConfig& model,
@@ -383,19 +379,43 @@ void ConfigLoader::loadImpl() {
                 continue;
             }
             ModelRouteCategory category;
-            if (it->value.HasMember("providerId") &&
-                it->value["providerId"].IsString()) {
-                category.providerId = it->value["providerId"].GetString();
+            if (it->value.HasMember("models") && it->value["models"].IsArray()) {
+                const auto &modelsArr = it->value["models"];
+                for (rapidjson::SizeType i = 0; i < modelsArr.Size(); ++i) {
+                    const auto &m = modelsArr[i];
+                    if (m.IsObject() && m.HasMember("providerId") &&
+                        m["providerId"].IsString() && m.HasMember("modelId") &&
+                        m["modelId"].IsString()) {
+                        ModelOption opt;
+                        opt.providerId = m["providerId"].GetString();
+                        opt.modelId = m["modelId"].GetString();
+                        if (m.HasMember("variantName") && m["variantName"].IsString()) {
+                            opt.variantName = m["variantName"].GetString();
+                        }
+                        category.models.push_back(opt);
+                    }
+                }
+            } else if (it->value.IsObject()) {
+                // Legacy single-model format
+                ModelOption opt;
+                if (it->value.HasMember("providerId") &&
+                    it->value["providerId"].IsString()) {
+                    opt.providerId = it->value["providerId"].GetString();
+                }
+                if (it->value.HasMember("modelId") &&
+                    it->value["modelId"].IsString()) {
+                    opt.modelId = it->value["modelId"].GetString();
+                }
+                if (it->value.HasMember("variantName") &&
+                    it->value["variantName"].IsString()) {
+                    opt.variantName = it->value["variantName"].GetString();
+                }
+                if (!opt.providerId.empty() && !opt.modelId.empty()) {
+                    category.models.push_back(opt);
+                }
             }
-            if (it->value.HasMember("modelId") &&
-                it->value["modelId"].IsString()) {
-                category.modelId = it->value["modelId"].GetString();
-            }
-            if (it->value.HasMember("variantName") &&
-                it->value["variantName"].IsString()) {
-                category.variantName = it->value["variantName"].GetString();
-            }
-            if (!category.providerId.empty() && !category.modelId.empty()) {
+
+            if (!category.models.empty()) {
                 config_.modelRouterCategories[it->name.GetString()] = category;
             }
         }
@@ -500,10 +520,23 @@ void ConfigLoader::save() const {
     rapidjson::Value routerCategories(rapidjson::kObjectType);
     for (const auto &[name, route] : config_.modelRouterCategories) {
         rapidjson::Value routeObj(rapidjson::kObjectType);
-        routeObj.AddMember("providerId", rapidjson::Value(route.providerId.c_str(), allocator), allocator);
-        routeObj.AddMember("modelId", rapidjson::Value(route.modelId.c_str(), allocator), allocator);
-        routeObj.AddMember("variantName", rapidjson::Value(route.variantName.c_str(), allocator), allocator);
-        routerCategories.AddMember(rapidjson::Value(name.c_str(), allocator), routeObj, allocator);
+        rapidjson::Value modelsArr(rapidjson::kArrayType);
+        for (const auto &opt : route.models) {
+            rapidjson::Value optObj(rapidjson::kObjectType);
+            optObj.AddMember("providerId",
+                             rapidjson::Value(opt.providerId.c_str(), allocator),
+                             allocator);
+            optObj.AddMember("modelId",
+                             rapidjson::Value(opt.modelId.c_str(), allocator),
+                             allocator);
+            optObj.AddMember("variantName",
+                             rapidjson::Value(opt.variantName.c_str(), allocator),
+                             allocator);
+            modelsArr.PushBack(optObj, allocator);
+        }
+        routeObj.AddMember("models", modelsArr, allocator);
+        routerCategories.AddMember(rapidjson::Value(name.c_str(), allocator),
+                                   routeObj, allocator);
     }
     doc.AddMember("modelRouterCategories", routerCategories, allocator);
 
@@ -563,4 +596,23 @@ void ConfigLoader::updateConfig(const UserConfig& config) {
     loaded_ = true;
 }
 
+void ConfigLoader::setPreferredModelKey(const std::string& category, const std::string& key) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    preferredModelKey_[category] = key;
+}
+
+std::string ConfigLoader::getPreferredModelKey(const std::string& category) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = preferredModelKey_.find(category);
+    if (it != preferredModelKey_.end()) {
+        return it->second;
+    }
+    return "";
+}
+
+void ConfigLoader::clearPreferredModelKey(const std::string& category) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    preferredModelKey_.erase(category);
+}
+// test insertion
 } // namespace firmius::shared

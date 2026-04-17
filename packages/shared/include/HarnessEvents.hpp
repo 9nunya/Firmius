@@ -214,10 +214,6 @@ struct AgentRetryFailed {
 /**
  * Emitted when the user sends a message.
  */
-struct UserMessageSent {
-  std::string messageId;
-  std::string text;
-  std::string threadId;
 };
 
 struct AgentFinished {

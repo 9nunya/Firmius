@@ -134,6 +134,16 @@ public:
     virtual ProcessSnapshot inspectBackgroundProcess(const std::string& id) = 0;
 
     /**
+     * @brief Releases host-side process state for a background process.
+     *
+     * Hosts should preserve any bounded final snapshot state needed for safe post-completion
+     * inspection while dropping heavyweight live process machinery.
+     *
+     * @param id The process ID.
+     */
+    virtual void releaseBackgroundProcess(const std::string& id) = 0;
+
+    /**
      * @brief Writes data to a background process's stdin.
      * @param id The process ID.
      * @param data The data to write.

@@ -7,15 +7,19 @@
 namespace firmius::core {
 
 /**
- * Manages process-level file locks (flock) for thread directories.
+ * Manages process-level file locks for thread directories.
  * Each thread gets an exclusive lock file to prevent concurrent access
  * from multiple Firmius processes.
+ *
+ * POSIX uses flock-based locking, while Windows uses a file-lock backend.
  */
 class ThreadLockManager {
 public:
   /**
-   * Acquire an exclusive flock on a thread's lock file.
+   * Acquire an exclusive lock on a thread's lock file.
    * Writes the current PID into the lock file on success.
+   * If the lock file advertises a dead PID, the stale lock file is removed
+   * and acquisition is retried.
    * @param threadId The thread ID to lock
    * @return File descriptor (>= 0) on success, -1 on error, -2 if already
    * locked

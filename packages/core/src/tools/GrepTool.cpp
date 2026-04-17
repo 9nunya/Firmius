@@ -24,8 +24,8 @@ bool commandLooksUnavailable(const ProcessResult &result) {
 
 std::string buildRipgrepCommand(const GrepInput &input,
                                 const std::string &absPath) {
-  std::string command = "rg --json --pcre2 --hidden --no-ignore --line-number "
-                        "--with-filename --binary -e " +
+  std::string command = "rg --json --pcre2 --line-number "
+                        "--with-filename -e " +
                         shared::StringUtil::shellEscape(input.pattern);
   if (input.context_before > 0) {
     command += " -B " + std::to_string(input.context_before);
@@ -41,7 +41,7 @@ std::string buildGrepCommand(const GrepInput &input, const std::string &absPath,
                              bool perlMode) {
   std::string command = "grep -rnH";
   command += perlMode ? "P" : "E";
-  command += " --binary-files=without-match -e " +
+  command += " -e " +
              shared::StringUtil::shellEscape(input.pattern);
   if (input.context_before > 0) {
     command += " -B " + std::to_string(input.context_before);
@@ -53,7 +53,7 @@ std::string buildGrepCommand(const GrepInput &input, const std::string &absPath,
   return command;
 }
 
-bool appendRipgrepJsonLine(const std::string &line, rapidjson::Document &doc) {
+bool appendRipgrepJsonLine(const std::string &line, rapidjson::Value &results, rapidjson::Document::AllocatorType &alloc) {
   if (line.empty()) {
     return true;
   }
@@ -85,7 +85,6 @@ bool appendRipgrepJsonLine(const std::string &line, rapidjson::Document &doc) {
     return false;
   }
 
-  auto &alloc = doc.GetAllocator();
   rapidjson::Value value(rapidjson::kObjectType);
   value.AddMember("file",
                   rapidjson::Value(path["text"].GetString(), alloc).Move(), alloc);
@@ -98,29 +97,36 @@ bool appendRipgrepJsonLine(const std::string &line, rapidjson::Document &doc) {
   value.AddMember("content", rapidjson::Value(content.c_str(), alloc).Move(),
                   alloc);
   value.AddMember("is_match", type == "match", alloc);
-  doc.PushBack(value, alloc);
+  results.PushBack(value, alloc);
   return true;
 }
 
-bool parseRipgrepOutput(const std::string &stdoutData, rapidjson::Document &doc) {
+bool parseRipgrepOutput(const std::string &stdoutData, rapidjson::Value &results, rapidjson::Document::AllocatorType &alloc, bool &budgetHit) {
   std::istringstream stream(stdoutData);
   std::string line;
   while (std::getline(stream, line)) {
-    if (!appendRipgrepJsonLine(line, doc)) {
+    if (results.Size() >= 2000) {
+      budgetHit = true;
+      return true;
+    }
+    if (!appendRipgrepJsonLine(line, results, alloc)) {
       return false;
     }
   }
   return true;
 }
 
-bool parseGrepOutput(const std::string &stdoutData, rapidjson::Document &doc) {
+bool parseGrepOutput(const std::string &stdoutData, rapidjson::Value &results, rapidjson::Document::AllocatorType &alloc, bool &budgetHit) {
   std::istringstream stream(stdoutData);
   std::string line;
   static const std::regex matchRegex(R"(:([0-9]+):)");
   static const std::regex contextRegex(R"(-([0-9]+)-)");
 
-  auto &alloc = doc.GetAllocator();
   while (std::getline(stream, line)) {
+    if (results.Size() >= 2000) {
+      budgetHit = true;
+      return true;
+    }
     if (line.empty() || line == "--") {
       continue;
     }
@@ -161,7 +167,7 @@ bool parseGrepOutput(const std::string &stdoutData, rapidjson::Document &doc) {
     value.AddMember("content",
                     rapidjson::Value(content.c_str(), alloc).Move(), alloc);
     value.AddMember("is_match", isMatch, alloc);
-    doc.PushBack(value, alloc);
+    results.PushBack(value, alloc);
   }
 
   return true;
@@ -177,27 +183,44 @@ shared::ToolResult GrepTool::execute(const GrepInput &input,
     ctx.agent.getPermissions()->validatePathAccess(absPath, firmius::shared::AccessMode::READ);
 
     rapidjson::Document doc;
-    doc.SetArray();
+    doc.SetObject();
+    auto &alloc = doc.GetAllocator();
+    rapidjson::Value results(rapidjson::kArrayType);
+    bool budgetHit = false;
 
-    auto ripgrepResult = ctx.host.exec(buildRipgrepCommand(input, absPath));
+    auto ripgrepResult = ctx.host.exec(buildRipgrepCommand(input, absPath), "", {}, std::chrono::milliseconds(10000));
+    if (ripgrepResult.finishReason == shared::ProcessFinishReason::Timeout) {
+      return shared::ToolResult::fail("Grep failed: command timed out after 10 seconds");
+    }
+
     if (ripgrepResult.exitCode == 0) {
-      if (!parseRipgrepOutput(ripgrepResult.stdoutData, doc)) {
+      if (!parseRipgrepOutput(ripgrepResult.stdoutData, results, alloc, budgetHit)) {
         return shared::ToolResult::fail("Grep failed: malformed ripgrep JSON output");
       }
+      doc.AddMember("results", results, alloc);
+      doc.AddMember("budget_hit", budgetHit, alloc);
       return shared::ToolResult::ok(doc);
     }
 
     if (ripgrepResult.exitCode == 1) {
+      doc.AddMember("results", results, alloc);
+      doc.AddMember("budget_hit", false, alloc);
       return shared::ToolResult::ok(doc);
     }
 
     ProcessResult fallbackResult;
     if (commandLooksUnavailable(ripgrepResult)) {
-      fallbackResult = ctx.host.exec(buildGrepCommand(input, absPath, true));
+      fallbackResult = ctx.host.exec(buildGrepCommand(input, absPath, true), "", {}, std::chrono::milliseconds(10000));
+      if (fallbackResult.finishReason == shared::ProcessFinishReason::Timeout) {
+        return shared::ToolResult::fail("Grep failed: command timed out after 10 seconds");
+      }
       if (fallbackResult.exitCode != 0 && fallbackResult.exitCode != 1 &&
           fallbackResult.stderrData.find("support for the -P option") !=
               std::string::npos) {
-        fallbackResult = ctx.host.exec(buildGrepCommand(input, absPath, false));
+        fallbackResult = ctx.host.exec(buildGrepCommand(input, absPath, false), "", {}, std::chrono::milliseconds(10000));
+        if (fallbackResult.finishReason == shared::ProcessFinishReason::Timeout) {
+          return shared::ToolResult::fail("Grep failed: command timed out after 10 seconds");
+        }
       }
     } else {
       fallbackResult = ripgrepResult;
@@ -208,9 +231,11 @@ shared::ToolResult GrepTool::execute(const GrepInput &input,
     }
 
     if (fallbackResult.exitCode == 0) {
-      parseGrepOutput(fallbackResult.stdoutData, doc);
+      parseGrepOutput(fallbackResult.stdoutData, results, alloc, budgetHit);
     }
 
+    doc.AddMember("results", results, alloc);
+    doc.AddMember("budget_hit", budgetHit, alloc);
     return shared::ToolResult::ok(doc);
   } catch (const std::exception &e) {
     return shared::ToolResult::fail(e.what());

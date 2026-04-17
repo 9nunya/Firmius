@@ -1,4 +1,5 @@
 #include "agents/UserMemoryWorkspace.hpp"
+#include "utils/PlatformPaths.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -33,12 +34,10 @@ bool ensureWritableDirectory(const std::filesystem::path &dir) {
 }
 
 std::string firmiusHome() {
-  if (const char *home = std::getenv("HOME")) {
-    const std::filesystem::path userHome =
-        std::filesystem::path(home) / ".firmius";
-    if (ensureWritableDirectory(userHome)) {
-      return userHome.string();
-    }
+  const std::filesystem::path sharedHome =
+      firmius::shared::PlatformPaths::firmiusHomeDir();
+  if (ensureWritableDirectory(sharedHome)) {
+    return sharedHome.string();
   }
   const std::filesystem::path localHome =
       std::filesystem::current_path() / ".firmius";

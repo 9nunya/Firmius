@@ -150,7 +150,7 @@ Current provider IDs wired into engine startup:
 - `antigravity`
 - `qwen`
 - `kimi`
-- `letta`
+- `kilo`
 
 There is also provider/account state, quota tracking where supported, and a separate search-provider registry used by web search.
 
@@ -187,19 +187,7 @@ That means the workflow surface is:
 
 Honestly? This deserves way more bragging than it used to get.
 
-## 12) There is browser mode too
-
-If you don't want the terminal UI, you can run:
-
-```bash
-./build/packages/cli/firmius web
-```
-
-Default bind is `127.0.0.1:9173`.
-
-So no, Firmius is not “just the FTXUI app” anymore.
-
-## 13) Under the hood, persistence is doing real work
+## 12) Under the hood, persistence is doing real work
 
 Thread storage tracks:
 

@@ -19,9 +19,11 @@ enum class RouterEditMode {
   Browse,
   AddName,
   AddPickModel,
-  EditPickModel,
+  Detail,
+  DetailPickModel,
   Rename,
-  ConfirmDelete
+  ConfirmDelete,
+  ConfirmDeleteModel
 };
 
 bool applyTextEdit(ftxui::Event event, std::string &buffer) {
@@ -72,6 +74,8 @@ ftxui::Component RouterModal::create(TuiState &state) {
   auto fetching_providers = std::make_shared<std::vector<std::string>>();
   auto model_menu =
       ftxui::Menu(display_model_entries.get(), selected_model_index.get());
+
+  auto selected_detail_index = std::make_shared<int>(0);
 
   auto refresh = [categories, selected]() {
     const auto cfg = firmius::core::Harness::instance().getConfig();
@@ -153,7 +157,8 @@ ftxui::Component RouterModal::create(TuiState &state) {
   auto component = ftxui::Renderer(
       [categories, selected, mode, message, category_name, model_filter,
        selectedCategory, model_menu, rebuildModelFilter, refreshModelEntries,
-       needsModelRefresh, models_loading, fetching_providers]() {
+       needsModelRefresh, models_loading, fetching_providers,
+       selected_detail_index]() {
         const auto &theme = ThemeManager::instance().getCurrentTheme();
         const auto cfg = firmius::core::Harness::instance().getConfig();
 
@@ -173,28 +178,74 @@ ftxui::Component RouterModal::create(TuiState &state) {
         rows.push_back(
             ftxui::separatorLight() | ftxui::color(theme.modals.border));
 
-        if (categories->empty()) {
-          rows.push_back(ftxui::text("No categories configured yet.") |
-                         ftxui::color(theme.base.dim));
-        } else {
-          for (size_t i = 0; i < categories->size(); ++i) {
-            const auto &name = (*categories)[i];
-            auto it = cfg.modelRouterCategories.find(name);
-            if (it == cfg.modelRouterCategories.end()) {
-              continue;
+        if (*mode == RouterEditMode::Browse || *mode == RouterEditMode::AddName ||
+            *mode == RouterEditMode::ConfirmDelete ||
+            *mode == RouterEditMode::Rename) {
+          if (categories->empty()) {
+            rows.push_back(ftxui::text("No categories configured yet.") |
+                           ftxui::color(theme.base.dim));
+          } else {
+            for (size_t i = 0; i < categories->size(); ++i) {
+              const auto &name = (*categories)[i];
+              auto it = cfg.modelRouterCategories.find(name);
+              if (it == cfg.modelRouterCategories.end()) {
+                continue;
+              }
+              const bool is_selected = static_cast<int>(i) == *selected;
+              const bool is_default = cfg.defaultRouteCategory == name;
+
+              std::string model_info;
+              if (it->second.models.empty()) {
+                model_info = "no models";
+              } else if (it->second.models.size() == 1) {
+                const auto &m = it->second.models.front();
+                model_info = m.providerId + "/" + m.modelId;
+                if (!m.variantName.empty()) {
+                  model_info += " (" + m.variantName + ")";
+                }
+              } else {
+                model_info =
+                    std::to_string(it->second.models.size()) + " models";
+              }
+
+              const std::string line = (is_selected ? "> " : "  ") + name +
+                                       (is_default ? " [default]" : "") +
+                                       " -> " + model_info;
+              rows.push_back(ftxui::text(line) |
+                             ftxui::color(is_selected
+                                              ? theme.modals.highlight_fg
+                                              : theme.modals.fg));
             }
-            const bool is_selected = static_cast<int>(i) == *selected;
-            const bool is_default = cfg.defaultRouteCategory == name;
-            const std::string variant = it->second.variantName.empty()
-                                            ? " (default variant)"
-                                            : " (" + it->second.variantName + ")";
-            const std::string line = (is_selected ? "> " : "  ") + name +
-                                     (is_default ? " [default]" : "") + " -> " +
-                                     it->second.providerId + "/" +
-                                     it->second.modelId + variant;
-            rows.push_back(ftxui::text(line) |
-                           ftxui::color(is_selected ? theme.modals.highlight_fg
-                                                    : theme.modals.fg));
+          }
+        } else if (*mode == RouterEditMode::Detail ||
+                   *mode == RouterEditMode::ConfirmDeleteModel) {
+          const std::string name = selectedCategory();
+          auto it = cfg.modelRouterCategories.find(name);
+          if (it != cfg.modelRouterCategories.end()) {
+            rows.push_back(ftxui::text("Category: " + name) | ftxui::bold |
+                           ftxui::color(theme.modals.fg));
+            rows.push_back(ftxui::text("Models in this category:") |
+                           ftxui::color(theme.base.dim));
+
+            const auto &models = it->second.models;
+            if (models.empty()) {
+              rows.push_back(ftxui::text("  No models added yet.") |
+                             ftxui::color(theme.base.dim));
+            } else {
+              for (size_t i = 0; i < models.size(); ++i) {
+                const auto &m = models[i];
+                const bool is_selected = static_cast<int>(i) == *selected_detail_index;
+                std::string line = (is_selected ? "> " : "  ");
+                line += m.providerId + "/" + m.modelId;
+                if (!m.variantName.empty()) {
+                  line += " (" + m.variantName + ")";
+                }
+                rows.push_back(ftxui::text(line) |
+                               ftxui::color(is_selected
+                                                ? theme.modals.highlight_fg
+                                                : theme.modals.fg));
+              }
+            }
           }
         }
 
@@ -207,7 +258,12 @@ ftxui::Component RouterModal::create(TuiState &state) {
         switch (*mode) {
         case RouterEditMode::Browse:
           rows.push_back(
-              ftxui::text("↑↓ select | A add | E edit model | R rename | D delete | S set default | X clear default | Esc close") |
+              ftxui::text("↑↓ select | Enter view detail | A add category | R rename | D delete | S set default | X clear default | Esc close") |
+              ftxui::color(theme.base.dim));
+          break;
+        case RouterEditMode::Detail:
+          rows.push_back(
+              ftxui::text("↑↓ select model | A add model | D remove model | Esc back") |
               ftxui::color(theme.base.dim));
           break;
         case RouterEditMode::AddName:
@@ -217,8 +273,8 @@ ftxui::Component RouterModal::create(TuiState &state) {
                          ftxui::color(theme.base.dim));
           break;
         case RouterEditMode::AddPickModel:
-          rows.push_back(ftxui::text("Add Category: pick model + variant") |
-                         ftxui::bold);
+        case RouterEditMode::DetailPickModel:
+          rows.push_back(ftxui::text("Pick model + variant") | ftxui::bold);
           rows.push_back(ftxui::hbox({
               ftxui::text("Filter: ") | ftxui::color(theme.modals.fg),
               ftxui::text(*model_filter) | ftxui::underlined |
@@ -235,32 +291,8 @@ ftxui::Component RouterModal::create(TuiState &state) {
           rows.push_back(model_menu->Render() | ftxui::vscroll_indicator |
                          ftxui::frame |
                          ftxui::size(ftxui::HEIGHT, ftxui::LESS_THAN, 10));
-          rows.push_back(ftxui::text(
-                             "Enter to save category with selected model/variant") |
+          rows.push_back(ftxui::text("Enter to add selected model/variant") |
                          ftxui::color(theme.base.dim));
-          break;
-        case RouterEditMode::EditPickModel:
-          rows.push_back(ftxui::text("Edit Category: pick model + variant") |
-                         ftxui::bold);
-          rows.push_back(ftxui::hbox({
-              ftxui::text("Filter: ") | ftxui::color(theme.modals.fg),
-              ftxui::text(*model_filter) | ftxui::underlined |
-                  ftxui::color(theme.modals.fg),
-          }));
-          if (*models_loading) {
-            const std::string loadingText =
-                fetchingLabel.empty()
-                    ? "Scanning providers... results populate as they arrive."
-                    : "Fetching: " + fetchingLabel;
-            rows.push_back(ftxui::text(loadingText) |
-                           ftxui::color(theme.base.dim));
-          }
-          rows.push_back(model_menu->Render() | ftxui::vscroll_indicator |
-                         ftxui::frame |
-                         ftxui::size(ftxui::HEIGHT, ftxui::LESS_THAN, 10));
-          rows.push_back(
-              ftxui::text("Enter to update selected category") |
-              ftxui::color(theme.base.dim));
           break;
         case RouterEditMode::Rename:
           rows.push_back(ftxui::text("Rename Category: new name") |
@@ -268,11 +300,27 @@ ftxui::Component RouterModal::create(TuiState &state) {
           rows.push_back(ftxui::text(*category_name) | ftxui::underlined);
           break;
         case RouterEditMode::ConfirmDelete:
-          rows.push_back(ftxui::text("Delete '" + selectedCategory() +
+          rows.push_back(ftxui::text("Delete category '" + selectedCategory() +
                                      "'? [y/N]") |
                          ftxui::bold |
                          ftxui::color(theme.status_bar.error.normal.fg));
           break;
+        case RouterEditMode::ConfirmDeleteModel: {
+          const std::string name = selectedCategory();
+          auto it = cfg.modelRouterCategories.find(name);
+          std::string modelName = "model";
+          if (it != cfg.modelRouterCategories.end() &&
+              *selected_detail_index >= 0 &&
+              *selected_detail_index < static_cast<int>(it->second.models.size())) {
+            const auto &m = it->second.models[*selected_detail_index];
+            modelName = m.providerId + "/" + m.modelId;
+          }
+          rows.push_back(ftxui::text("Remove '" + modelName + "' from '" +
+                                     name + "'? [y/N]") |
+                         ftxui::bold |
+                         ftxui::color(theme.status_bar.error.normal.fg));
+          break;
+        }
         }
 
         return FlatModalPanel(
@@ -288,7 +336,7 @@ ftxui::Component RouterModal::create(TuiState &state) {
       [categories, selected, mode, message, category_name, model_filter,
        model_entries, filtered_model_indices, selected_model_index, model_menu,
        selectedCategory, refresh, saveConfig, rebuildModelFilter,
-       refreshModelEntries, subId, &state](ftxui::Event event) {
+       refreshModelEntries, subId, &state, selected_detail_index](ftxui::Event event) {
         const auto closeModal = [&]() {
           firmius::core::Harness::instance().unsubscribe(subId);
           state.popModal();
@@ -316,6 +364,13 @@ ftxui::Component RouterModal::create(TuiState &state) {
             }
             return true;
           }
+          if (event == ftxui::Event::Return) {
+            if (!categories->empty()) {
+              *selected_detail_index = 0;
+              *mode = RouterEditMode::Detail;
+            }
+            return true;
+          }
           if (event == ftxui::Event::Character('a') ||
               event == ftxui::Event::Character('A')) {
             category_name->clear();
@@ -324,15 +379,6 @@ ftxui::Component RouterModal::create(TuiState &state) {
             *message = "";
             refreshModelEntries();
             *mode = RouterEditMode::AddName;
-            return true;
-          }
-          if ((event == ftxui::Event::Character('e') ||
-               event == ftxui::Event::Character('E')) &&
-              !categories->empty()) {
-            model_filter->clear();
-            *selected_model_index = 0;
-            refreshModelEntries();
-            *mode = RouterEditMode::EditPickModel;
             return true;
           }
           if ((event == ftxui::Event::Character('r') ||
@@ -365,6 +411,67 @@ ftxui::Component RouterModal::create(TuiState &state) {
             return true;
           }
           return false;
+        }
+
+        if (*mode == RouterEditMode::Detail) {
+          const std::string name = selectedCategory();
+          auto cfg = firmius::core::Harness::instance().getConfig();
+          auto it = cfg.modelRouterCategories.find(name);
+          if (it == cfg.modelRouterCategories.end()) {
+            *mode = RouterEditMode::Browse;
+            return true;
+          }
+
+          if (event == ftxui::Event::ArrowUp) {
+            if (*selected_detail_index > 0) {
+              --(*selected_detail_index);
+            }
+            return true;
+          }
+          if (event == ftxui::Event::ArrowDown) {
+            if (*selected_detail_index + 1 < static_cast<int>(it->second.models.size())) {
+              ++(*selected_detail_index);
+            }
+            return true;
+          }
+          if (event == ftxui::Event::Character('a') ||
+              event == ftxui::Event::Character('A')) {
+            model_filter->clear();
+            *selected_model_index = 0;
+            *message = "";
+            refreshModelEntries();
+            *mode = RouterEditMode::DetailPickModel;
+            return true;
+          }
+          if (event == ftxui::Event::Character('d') ||
+              event == ftxui::Event::Character('D')) {
+            if (!it->second.models.empty()) {
+              *mode = RouterEditMode::ConfirmDeleteModel;
+            }
+            return true;
+          }
+          return false;
+        }
+
+        if (*mode == RouterEditMode::ConfirmDeleteModel) {
+          if (event == ftxui::Event::Character('y') ||
+              event == ftxui::Event::Character('Y')) {
+            const std::string name = selectedCategory();
+            auto cfg = firmius::core::Harness::instance().getConfig();
+            auto it = cfg.modelRouterCategories.find(name);
+            if (it != cfg.modelRouterCategories.end()) {
+              if (*selected_detail_index >= 0 &&
+                  *selected_detail_index < static_cast<int>(it->second.models.size())) {
+                it->second.models.erase(it->second.models.begin() + *selected_detail_index);
+                if (*selected_detail_index >= static_cast<int>(it->second.models.size())) {
+                  *selected_detail_index = std::max(0, static_cast<int>(it->second.models.size()) - 1);
+                }
+                saveConfig(cfg, "Removed model from '" + name + "'.");
+              }
+            }
+          }
+          *mode = RouterEditMode::Detail;
+          return true;
         }
 
         if (*mode == RouterEditMode::ConfirmDelete) {
@@ -451,8 +558,7 @@ ftxui::Component RouterModal::create(TuiState &state) {
           return applyTextEdit(event, *category_name);
         }
 
-        if (*mode == RouterEditMode::AddPickModel ||
-            *mode == RouterEditMode::EditPickModel) {
+        if (*mode == RouterEditMode::DetailPickModel) {
           if (event == ftxui::Event::ArrowUp || event == ftxui::Event::ArrowDown ||
               event.is_mouse()) {
             return model_menu->OnEvent(event);
@@ -486,16 +592,58 @@ ftxui::Component RouterModal::create(TuiState &state) {
           const auto &entry = (*model_entries)[modelIndex];
 
           auto cfg = firmius::core::Harness::instance().getConfig();
-          if (*mode == RouterEditMode::AddPickModel) {
-            cfg.modelRouterCategories[*category_name] = {
-                entry.provider_id, entry.model_id, entry.variant_name};
-            saveConfig(cfg, "Added category '" + *category_name + "'.");
-          } else {
-            const std::string cat = selectedCategory();
-            cfg.modelRouterCategories[cat] = {entry.provider_id, entry.model_id,
-                                              entry.variant_name};
-            saveConfig(cfg, "Updated category '" + cat + "'.");
+          const std::string catName = selectedCategory();
+          auto it = cfg.modelRouterCategories.find(catName);
+          if (it != cfg.modelRouterCategories.end()) {
+            it->second.models.push_back(
+                {entry.provider_id, entry.model_id, entry.variant_name});
+            saveConfig(cfg, "Added model to category '" + catName + "'.");
           }
+          refresh();
+          *mode = RouterEditMode::Detail;
+          return true;
+        }
+
+        if (*mode == RouterEditMode::AddPickModel) {
+          if (event == ftxui::Event::ArrowUp || event == ftxui::Event::ArrowDown ||
+              event.is_mouse()) {
+            return model_menu->OnEvent(event);
+          }
+          if (event == ftxui::Event::Backspace) {
+            if (!model_filter->empty()) {
+              model_filter->pop_back();
+              *selected_model_index = 0;
+              rebuildModelFilter();
+            }
+            return true;
+          }
+          if (event.is_character()) {
+            *model_filter += event.character();
+            *selected_model_index = 0;
+            rebuildModelFilter();
+            return true;
+          }
+          if (event != ftxui::Event::Return) {
+            return false;
+          }
+
+          if (filtered_model_indices->empty() ||
+              *selected_model_index >=
+                  static_cast<int>(filtered_model_indices->size())) {
+            *message = "Select a model first.";
+            return true;
+          }
+
+          const int modelIndex = (*filtered_model_indices)[*selected_model_index];
+          const auto &entry = (*model_entries)[modelIndex];
+
+          auto cfg = firmius::core::Harness::instance().getConfig();
+          shared::ModelRouteCategory cat;
+          cat.models.push_back(
+              {entry.provider_id, entry.model_id, entry.variant_name});
+          cfg.modelRouterCategories[*category_name] = cat;
+          saveConfig(cfg, "Added category '" + *category_name + "'.");
+
           refresh();
           *mode = RouterEditMode::Browse;
           return true;

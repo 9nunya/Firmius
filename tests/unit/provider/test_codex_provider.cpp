@@ -123,6 +123,7 @@ TEST(CodexProvider, ModelInfoNormalizesAndPreservesVariantMetadata) {
 
   const auto gpt54 = provider.getModelInfo("openai/gpt-5.4");
   EXPECT_EQ(gpt54.id, "gpt-5.4");
+  EXPECT_EQ(gpt54.contextWindow, 1000000u);
   ASSERT_EQ(gpt54.variants.size(), 5u);
   EXPECT_EQ(gpt54.variants.front().variantName, "none");
   EXPECT_EQ(gpt54.variants.back().variantName, "xhigh");

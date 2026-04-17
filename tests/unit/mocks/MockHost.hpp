@@ -83,6 +83,7 @@ public:
     void cleanup() override {
         recordCall("cleanup", {});
         backgroundProcesses_.clear();
+        completedSnapshots_.clear();
     }
 
     /**
@@ -292,6 +293,7 @@ public:
      */
     void registerBackgroundProcess(const std::string& id, std::unique_ptr<IHostProcess> proc) override {
         recordCall("registerBackgroundProcess", {{"id", id}});
+        completedSnapshots_.erase(id);
         backgroundProcesses_[id] = std::move(proc);
     }
 
@@ -305,7 +307,16 @@ public:
         
         auto it = backgroundProcesses_.find(id);
         if (it != backgroundProcesses_.end()) {
-            return it->second->inspect();
+            auto snapshot = it->second->inspect();
+            if (!snapshot.running) {
+                completedSnapshots_[id] = snapshot;
+            }
+            return snapshot;
+        }
+        
+        auto completedIt = completedSnapshots_.find(id);
+        if (completedIt != completedSnapshots_.end()) {
+            return completedIt->second;
         }
         
         ProcessSnapshot snapshot;
@@ -313,6 +324,15 @@ public:
         snapshot.exitCode = -1;
         snapshot.elapsedMs = 0;
         return snapshot;
+    }
+
+    void releaseBackgroundProcess(const std::string& id) override {
+        recordCall("releaseBackgroundProcess", {{"id", id}});
+        auto it = backgroundProcesses_.find(id);
+        if (it != backgroundProcesses_.end()) {
+            completedSnapshots_[id] = it->second->inspect();
+            backgroundProcesses_.erase(it);
+        }
     }
 
     /**
@@ -551,6 +571,7 @@ private:
     std::map<std::string, ProcessResult> execPatternResults_;
     std::map<std::string, MockHostProcessConfig> spawnConfigs_;
     std::map<std::string, std::unique_ptr<IHostProcess>> backgroundProcesses_;
+    std::map<std::string, ProcessSnapshot> completedSnapshots_;
 
     void recordCall(const std::string& method, const std::map<std::string, std::string>& params) {
         MockHostCall call;

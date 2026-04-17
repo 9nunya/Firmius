@@ -5,6 +5,7 @@
 #include "utils/Icons.hpp"
 #include "utils/ModelUtil.hpp"
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <ftxui/component/animation.hpp>
@@ -18,6 +19,18 @@
 #include <set>
 
 namespace firmius::tui {
+void noteTuiRequestAnimationFrameFromAgentStripSpinner() __attribute__((weak));
+}
+
+namespace {
+inline void NoteAgentStripSpinnerRafIfAvailable() {
+  if (firmius::tui::noteTuiRequestAnimationFrameFromAgentStripSpinner) {
+    firmius::tui::noteTuiRequestAnimationFrameFromAgentStripSpinner();
+  }
+}
+}
+
+namespace firmius::tui {
 
 namespace {
 
@@ -28,8 +41,15 @@ std::string spinnerFrame() {
   auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                 now.time_since_epoch())
                 .count();
-  size_t idx = static_cast<size_t>((ms / 80) % frames.size());
-  ftxui::animation::RequestAnimationFrame();
+  const auto frame_bucket = ms / 80;
+  static std::atomic<long long> last_requested_bucket{-1};
+  size_t idx = static_cast<size_t>(frame_bucket % frames.size());
+  const long long expected =
+      last_requested_bucket.exchange(frame_bucket, std::memory_order_relaxed);
+  if (expected != frame_bucket) {
+    NoteAgentStripSpinnerRafIfAvailable();
+    ftxui::animation::RequestAnimationFrame();
+  }
   return frames[idx];
 }
 
@@ -75,7 +95,13 @@ public:
   explicit AgentStripComponentBase(std::shared_ptr<AgentStripModel> model)
       : model_(std::move(model)) {
     auto body_renderer = ftxui::Renderer([this] { return RenderBody(); });
-    scrollable_ = ScrollableBox(body_renderer, {.showScrollbar = false});
+    scrollable_ = ScrollableBox(
+        body_renderer,
+        {.showScrollbar = false,
+         .measurement_signature_getter =
+             [this]() {
+               return model_ ? model_->layout_generation : 0u;
+             }});
     Add(scrollable_);
     if (model_) {
       model_->on_scroll_request = [this](int line) {
@@ -123,8 +149,14 @@ public:
 
     size_t count = model_->items.size();
     row_boxes_.resize(count);
-    auto term_size = ftxui::Terminal::Size();
-    bool wide_mode = term_size.dimx > 110;
+    int available_width = 0;
+    if (box_.x_max >= box_.x_min) {
+      available_width = box_.x_max - box_.x_min + 1;
+    }
+    if (available_width <= 0) {
+      available_width = ftxui::Terminal::Size().dimx;
+    }
+    bool wide_mode = available_width > 110;
     uint64_t now_ms =
         static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
                                   std::chrono::steady_clock::now().time_since_epoch())

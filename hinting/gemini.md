@@ -50,7 +50,7 @@ Do not double down on internal reasoning against repository evidence.
 
 Only tools present in the active Firmius tool list are valid.
 `apply_patch` is not a Firmius tool and not a shell command in this harness.
-never mix `content` with Hashline `edits` in one `file_edit` call
+never mix `content` with line-range `edits` in one `file_edit` call
 If you commit a chunk, treat it as a dispatch/review unit rather than a personal TODO note.
 
 ## Send Progress Updates

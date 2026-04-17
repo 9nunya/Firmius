@@ -72,6 +72,7 @@ public:
   void handleAgentProviderWaiting(const shared::AgentProviderWaiting &e);
   void handleAgentToolCallChunk(const shared::AgentToolCallChunk &e);
   void handleAgentToolCall(const shared::AgentToolCall &e);
+  void handleAgentFileEdited(const shared::AgentFileEdited &e);
   void handleAgentCompactionThinking(const shared::AgentCompactionThinking &e);
   void handleAgentCompactionText(const shared::AgentCompactionText &e);
   void handleContextCompacted(const shared::ContextCompacted &e);

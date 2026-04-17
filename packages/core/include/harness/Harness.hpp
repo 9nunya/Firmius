@@ -214,6 +214,7 @@ public:
   std::vector<shared::ModelInfo> listAllModels();
   bool isModelsLoaded() const;
   std::vector<std::string> listProvidersFetchingModels() const;
+  void invalidateModelCache();
 
   const UserConfig &getConfig() const;
   void updateConfig(const UserConfig &config);

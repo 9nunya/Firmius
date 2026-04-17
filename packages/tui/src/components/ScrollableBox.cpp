@@ -8,6 +8,18 @@
 #include <algorithm>
 
 namespace firmius::tui {
+void noteTuiRequestAnimationFrameFromScrollableBoxWidthChange() __attribute__((weak));
+}
+
+namespace {
+inline void NoteScrollableRafIfAvailable() {
+  if (firmius::tui::noteTuiRequestAnimationFrameFromScrollableBoxWidthChange) {
+    firmius::tui::noteTuiRequestAnimationFrameFromScrollableBoxWidthChange();
+  }
+}
+}
+
+namespace firmius::tui {
 
 ScrollableBoxComponent::ScrollableBoxComponent(ftxui::Component child,
                                                ScrollableBoxOptions options)
@@ -36,6 +48,14 @@ void ScrollableBoxComponent::RequestEnsureVisible(int first_line,
     has_pending_ensure_visible_ = true;
     pending_visible_start_ = std::max(0, std::min(first_line, last_line));
     pending_visible_end_ = std::max(0, std::max(first_line, last_line));
+}
+
+void ScrollableBoxComponent::InvalidateLayout() {
+    layout_dirty_ = true;
+    if (auto *screen = ftxui::ScreenInteractive::Active()) {
+        NoteScrollableRafIfAvailable();
+        screen->RequestAnimationFrame();
+    }
 }
 
 int ScrollableBoxComponent::ContentWidth() const {
@@ -113,6 +133,7 @@ ftxui::Element ScrollableBoxComponent::OnRender() {
     if (viewport_w != last_rendered_viewport_w_) {
         last_rendered_viewport_w_ = viewport_w;
         if (auto *screen = ftxui::ScreenInteractive::Active()) {
+            NoteScrollableRafIfAvailable();
             screen->RequestAnimationFrame();
         }
     }
@@ -132,10 +153,21 @@ ftxui::Element ScrollableBoxComponent::OnRender() {
             background | ftxui::size(ftxui::WIDTH, ftxui::EQUAL, contentWidth);
     }
 
-    // Measure using FTXUI's iterative layout pass so wrapped paragraph/flexbox
-    // content reports its true rendered height for the current width.
-    const auto fitted = ftxui::Dimension::Fit(background, true);
-    size_ = std::max(0, fitted.dimy);
+    const std::size_t measurement_signature =
+        options_.measurement_signature_getter
+            ? options_.measurement_signature_getter()
+            : 0;
+    if (layout_dirty_ || measured_viewport_width_ != viewport_w ||
+        (options_.measurement_signature_getter &&
+         measured_signature_ != measurement_signature)) {
+        // Measure using FTXUI's iterative layout pass so wrapped paragraph/flexbox
+        // content reports its true rendered height for the current width.
+        const auto fitted = ftxui::Dimension::Fit(background, true);
+        size_ = std::max(0, fitted.dimy);
+        measured_viewport_width_ = viewport_w;
+        measured_signature_ = measurement_signature;
+        layout_dirty_ = false;
+    }
 
     int viewport_h = 0;
     if (box_.y_max >= box_.y_min) {
@@ -302,6 +334,15 @@ bool ScrollableBoxComponent::OnEvent(ftxui::Event event) {
     updateScrollbarGeometry(viewport_height_);
 
     const bool childHandled = ComponentBase::OnEvent(event);
+    if (childHandled) {
+        InvalidateLayout();
+    }
+    if (previous != selected_) {
+        if (auto *screen = ftxui::ScreenInteractive::Active()) {
+            NoteScrollableRafIfAvailable();
+            screen->RequestAnimationFrame();
+        }
+    }
     return previous != selected_ || childHandled || isKeyboardScroll ||
            scrollbar_dragging_;
 }

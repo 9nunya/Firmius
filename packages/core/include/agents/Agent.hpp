@@ -21,6 +21,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "agents/StreamSanityDetector.hpp"
 namespace firmius::core {
 
 using namespace firmius::shared;
@@ -138,6 +139,7 @@ private:
 
   std::unordered_set<std::string> backgroundProcessIds;
 };
+
 
 } // namespace firmius::core
 

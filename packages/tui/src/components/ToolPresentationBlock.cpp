@@ -8,7 +8,7 @@
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/component_base.hpp>
 #include <ftxui/dom/elements.hpp>
-#include <algorithm>
+
 
 namespace firmius::tui {
 
@@ -39,7 +39,7 @@ int DefaultVisibleBodyLines(ToolPresentationLayoutKind layout) {
   case ToolPresentationLayoutKind::InlineStatusRow:
     return 1;
   case ToolPresentationLayoutKind::BodyFirstStream:
-    return 6;
+    return 5;
   case ToolPresentationLayoutKind::BodyFirstPreview:
     return 8;
   case ToolPresentationLayoutKind::DiffPreview:
@@ -94,18 +94,8 @@ ftxui::Element BuildBodyWindow(const ToolPresentation &presentation, const Theme
         static_cast<int>(presentation.body_lines.size() - output_start_index);
     const int shown_output_lines =
         expanded ? total_output_lines : std::min(max_output_lines, total_output_lines);
-    const int total_hidden_lines = total_output_lines - shown_output_lines;
     const int first_output_index =
         std::max<int>(0, total_output_lines - shown_output_lines);
-
-    if (total_hidden_lines > 0) {
-      body_rows.push_back(
-          ftxui::hbox({
-            ftxui::text("│ ") | ftxui::color(theme.base.highlight),
-            ftxui::text("... +" + std::to_string(total_hidden_lines) + " more lines") |
-            ftxui::color(theme.base.dim)
-          }));
-    }
     for (int i = 0; i < shown_output_lines; ++i) {
       const auto &line =
           presentation.body_lines[output_start_index + first_output_index + i];
@@ -141,9 +131,7 @@ ftxui::Element BuildBodyWindow(const ToolPresentation &presentation, const Theme
     }
   } else {
     const size_t total_lines = !presentation.custom_body_elements.empty() ? presentation.custom_body_elements.size() : presentation.body_lines.size();
-    const int max_lines = expanded ? static_cast<int>(total_lines)
-                                   : std::min<int>(visible_lines, total_lines);
-    for (int i = 0; i < max_lines; ++i) {
+    for (size_t i = 0; i < total_lines; ++i) {
       if (!presentation.custom_body_elements.empty()) {
         body_rows.push_back(ftxui::hbox({
             ftxui::text("│ ") | ftxui::color(theme.base.highlight),
@@ -152,22 +140,14 @@ ftxui::Element BuildBodyWindow(const ToolPresentation &presentation, const Theme
       } else if (presentation.ansi_aware) {
         body_rows.push_back(ftxui::hbox({
             ftxui::text("│ ") | ftxui::color(theme.base.highlight),
-            ParseANSI(presentation.body_lines[static_cast<size_t>(i)]) | ftxui::xflex
+            ParseANSI(presentation.body_lines[i]) | ftxui::xflex
         }));
       } else {
         body_rows.push_back(ftxui::hbox({
             ftxui::text("│ ") | ftxui::color(theme.base.highlight),
-            ftxui::paragraph(presentation.body_lines[static_cast<size_t>(i)]) | ftxui::color(theme.base.fg)
+            ftxui::paragraph(presentation.body_lines[i]) | ftxui::color(theme.base.fg)
         }));
       }
-    }
-    if (!expanded && static_cast<int>(total_lines) > max_lines) {
-      body_rows.push_back(
-          ftxui::hbox({
-            ftxui::text("│ ") | ftxui::color(theme.base.highlight),
-            ftxui::text("... +" + std::to_string(static_cast<int>(total_lines) - max_lines) + " more lines") |
-            ftxui::color(theme.base.dim)
-          }));
     }
   }
   if (body_rows.empty()) {
@@ -338,7 +318,8 @@ public:
         has_expand_details && view_;
     const bool expanded = show_expand_toggle ? presentation.expanded : true;
     if (show_expand_toggle) {
-      view_->toggle_label = expanded ? "hide" : "show more";
+      view_->toggle_label = expanded ? presentation.toggle_labels.expanded
+                                     : presentation.toggle_labels.collapsed;
     }
     const std::string one_line_badges = JoinBadgesInline(presentation);
     const bool has_one_line_error =
@@ -427,12 +408,12 @@ public:
       for (const auto &section : presentation.sections) {
         if (!section.title.empty()) {
           root_rows.push_back(ftxui::text(section.title) | ftxui::bold |
-                              ftxui::color(theme.base.dim));
+                              ftxui::color(NoticeColor(theme, section.kind)));
         }
         for (const auto &line : section.lines) {
           root_rows.push_back(ftxui::hbox({
-              ftxui::text("• ") | ftxui::color(theme.base.dim),
-              ftxui::paragraph(line) | ftxui::color(theme.base.dim)
+              ftxui::text("• ") | ftxui::color(NoticeColor(theme, section.kind)),
+              ftxui::paragraph(line) | ftxui::color(theme.base.fg)
           }));
         }
       }

@@ -3,6 +3,7 @@
 #include "environment/ProcessManager.hpp"
 #include "mocks/MockHost.hpp"
 #include "mocks/MockHostProcess.hpp"
+#include "hosts/LocalHost.hpp"
 
 #include <chrono>
 #include <thread>
@@ -112,6 +113,7 @@ TEST(ProcessManagerTest, monitorUsesHostInspectionWithoutDestroyingFinishedProce
         EXPECT_EQ(finished->exitCode, 0);
     }
 
+    EXPECT_TRUE(host->wasCalledWith("releaseBackgroundProcess", {{"id", processId}}));
     const auto snapshot = host->inspectBackgroundProcess(processId);
     EXPECT_FALSE(snapshot.running);
     EXPECT_EQ(snapshot.exitCode, 0);
@@ -140,4 +142,60 @@ TEST(ProcessManagerTest, EmitsSpawnBeforeImmediateOutputDelta) {
     EXPECT_EQ(delta.processId, processId);
     EXPECT_EQ(delta.output, "booting\n");
     EXPECT_FALSE(delta.finished);
+}
+
+TEST(ProcessManagerTest, LocalHostCompletedSnapshotPreservesStdoutAndStderr) {
+    auto host = std::make_shared<LocalHost>();
+    std::vector<StreamEvent> events;
+    std::mutex eventsMutex;
+    ProcessManager manager(host, [&](const StreamEvent& event) {
+        std::lock_guard<std::mutex> lock(eventsMutex);
+        events.push_back(event);
+    });
+
+    const std::string processId = manager.spawnProcess(
+        "printf 'stdout-visible\\n'; printf 'stderr-visible\\n' >&2",
+        "tool-1", "/tmp", {}, true);
+
+    for (int i = 0; i < 200; ++i) {
+        {
+            std::lock_guard<std::mutex> lock(eventsMutex);
+            if (findFinishedDelta(events, processId) != nullptr) {
+                break;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    std::vector<ProcessOutputDelta> deltas;
+    {
+        std::lock_guard<std::mutex> lock(eventsMutex);
+        for (const auto& event : events) {
+            if (const auto* delta = std::get_if<ProcessOutputDelta>(&event)) {
+                if (delta->processId == processId) {
+                    deltas.push_back(*delta);
+                }
+            }
+        }
+    }
+
+    ASSERT_FALSE(deltas.empty());
+    bool sawStdout = false;
+    bool sawStderr = false;
+    for (const auto& delta : deltas) {
+        if (!delta.isStderr && delta.output.find("stdout-visible") != std::string::npos) {
+            sawStdout = true;
+        }
+        if (delta.isStderr && delta.output.find("stderr-visible") != std::string::npos) {
+            sawStderr = true;
+        }
+    }
+    EXPECT_TRUE(sawStdout);
+    EXPECT_TRUE(sawStderr);
+
+    const auto snapshot = host->inspectBackgroundProcess(processId);
+    EXPECT_FALSE(snapshot.running);
+    EXPECT_EQ(snapshot.exitCode, 0);
+    EXPECT_NE(snapshot.stdoutData.find("stdout-visible"), std::string::npos);
+    EXPECT_NE(snapshot.stderrData.find("stderr-visible"), std::string::npos);
 }

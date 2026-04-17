@@ -1,70 +1,169 @@
 #include "hosts/LocalHost.hpp"
 #include "utils/StringUtil.hpp"
+
 #include <chrono>
 #include <cstring>
-#include <fcntl.h>
 #include <filesystem>
 #include <fstream>
-#include <iostream>
 #include <optional>
-#include <poll.h>
-#include <pwd.h>
-#include <signal.h>
-#include <sys/wait.h>
 #include <thread>
+
+#if defined(_WIN32)
+#include <windows.h>
+#else
+#include <cerrno>
+#include <csignal>
+#include <fcntl.h>
+#include <pwd.h>
+#include <sys/wait.h>
 #include <unistd.h>
+#endif
 
 namespace firmius::core {
 
 using namespace firmius::shared;
 
-/**
- * @file LocalHost.cpp
- * @brief Implementation of the local machine execution host.
- */
-
 namespace {
-/**
- * @brief Sets a file descriptor to non-blocking mode.
- */
+#if defined(_WIN32)
+std::string escapeForCmd(const std::string &command) {
+  std::string escaped;
+  escaped.reserve(command.size() + 8);
+  for (char ch : command) {
+    if (ch == '"') {
+      escaped += '\\';
+    }
+    escaped += ch;
+  }
+  return escaped;
+}
+
+std::string buildWindowsShellCommand(const std::string &command) {
+  return "cmd.exe /S /C \"" + escapeForCmd(command) + "\"";
+}
+
+std::vector<char>
+buildWindowsEnvironmentBlock(const std::map<std::string, std::string> &overrides) {
+  std::map<std::string, std::string> merged;
+
+  LPCH env = GetEnvironmentStringsA();
+  if (env) {
+    for (LPCH it = env; *it != '\0'; it += std::strlen(it) + 1) {
+      std::string entry(it);
+      auto sep = entry.find('=');
+      if (sep == std::string::npos || sep == 0) {
+        continue;
+      }
+      merged[entry.substr(0, sep)] = entry.substr(sep + 1);
+    }
+    FreeEnvironmentStringsA(env);
+  }
+
+  for (const auto &[k, v] : overrides) {
+    merged[k] = v;
+  }
+
+  std::vector<char> block;
+  for (const auto &[k, v] : merged) {
+    std::string line = k + "=" + v;
+    block.insert(block.end(), line.begin(), line.end());
+    block.push_back('\0');
+  }
+  block.push_back('\0');
+  return block;
+}
+#else
 void setNonBlocking(int fd) {
   int flags = fcntl(fd, F_GETFL, 0);
-  fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+  if (flags >= 0) {
+    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+  }
 }
+#endif
 } // namespace
 
-LocalHostProcess::LocalHostProcess(pid_t pid, int stdoutFd, int stderrFd,
-                                   int stdinFd)
-    : pid(pid), stdoutFd(stdoutFd), stderrFd(stderrFd), stdinFd(stdinFd) {
+struct LocalHostProcess::Impl {
+#if defined(_WIN32)
+  HANDLE processHandle = nullptr;
+  HANDLE threadHandle = nullptr;
+  HANDLE stdoutRead = nullptr;
+  HANDLE stderrRead = nullptr;
+  HANDLE stdinWrite = nullptr;
+  DWORD pid = 0;
+#else
+  pid_t pid = -1;
+  pid_t processGroupId = -1;
+  int stdoutFd = -1;
+  int stderrFd = -1;
+  int stdinFd = -1;
+#endif
+};
+
+LocalHostProcess::LocalHostProcess(std::unique_ptr<Impl> impl)
+    : impl(std::move(impl)) {
   startTime = std::chrono::steady_clock::now();
-  setNonBlocking(stdoutFd);
-  setNonBlocking(stderrFd);
-  captureThread = std::thread(&LocalHostProcess::captureLoop, this);
+#if !defined(_WIN32)
+  setNonBlocking(this->impl->stdoutFd);
+  setNonBlocking(this->impl->stderrFd);
+#endif
+  stdoutThread = std::thread(&LocalHostProcess::captureLoop, this, false);
+  stderrThread = std::thread(&LocalHostProcess::captureLoop, this, true);
 }
 
 LocalHostProcess::~LocalHostProcess() {
-  if (captureThread.joinable()) {
-    captureThread.join();
+  try {
+    kill();
+    reapIfNeeded(true);
+  } catch (...) {
   }
-  if (stdoutFd != -1)
-    close(stdoutFd);
-  if (stderrFd != -1)
-    close(stderrFd);
-  if (stdinFd != -1)
-    close(stdinFd);
+
+  joinCaptureThreads();
+
+#if defined(_WIN32)
+  if (impl->stdoutRead) {
+    CloseHandle(impl->stdoutRead);
+    impl->stdoutRead = nullptr;
+  }
+  if (impl->stderrRead) {
+    CloseHandle(impl->stderrRead);
+    impl->stderrRead = nullptr;
+  }
+  if (impl->stdinWrite) {
+    CloseHandle(impl->stdinWrite);
+    impl->stdinWrite = nullptr;
+  }
+  if (impl->threadHandle) {
+    CloseHandle(impl->threadHandle);
+    impl->threadHandle = nullptr;
+  }
+  if (impl->processHandle) {
+    CloseHandle(impl->processHandle);
+    impl->processHandle = nullptr;
+  }
+#else
+  if (impl->stdoutFd != -1) {
+    close(impl->stdoutFd);
+    impl->stdoutFd = -1;
+  }
+  if (impl->stderrFd != -1) {
+    close(impl->stderrFd);
+    impl->stderrFd = -1;
+  }
+  if (impl->stdinFd != -1) {
+    close(impl->stdinFd);
+    impl->stdinFd = -1;
+  }
+#endif
 }
 
 void LocalHostProcess::onOutput(
     std::function<void(const std::string &, bool isError)> cb) {
   std::lock_guard<std::mutex> lock(callbackMutex);
-  callback = cb;
+  callback = std::move(cb);
 }
 
 shared::ProcessResult LocalHostProcess::wait() {
   reapIfNeeded(true);
-  if (captureThread.joinable()) {
-    captureThread.join();
-  }
+  joinCaptureThreads();
 
   auto end = std::chrono::steady_clock::now();
   double duration =
@@ -83,7 +182,10 @@ shared::ProcessResult LocalHostProcess::wait() {
 }
 
 shared::ProcessSnapshot LocalHostProcess::inspect() const {
-  const_cast<LocalHostProcess *>(this)->reapIfNeeded(false);
+  auto *nonConstThis = const_cast<LocalHostProcess *>(this);
+  if (nonConstThis->reapIfNeeded(false)) {
+    nonConstThis->joinCaptureThreads();
+  }
 
   std::string stdoutData;
   std::string stderrData;
@@ -104,27 +206,69 @@ void LocalHostProcess::kill() {
   if (finished.load()) {
     return;
   }
-  ::kill(pid, SIGKILL);
+#if defined(_WIN32)
+  if (!TerminateProcess(impl->processHandle, 1)) {
+    throw std::runtime_error("TerminateProcess failed");
+  }
+#else
+  const pid_t processGroupId =
+      impl->processGroupId > 0 ? impl->processGroupId : impl->pid;
+  if (processGroupId > 0) {
+    if (::kill(-processGroupId, SIGKILL) != 0 && errno != ESRCH) {
+      throw std::runtime_error("killpg failed");
+    }
+  }
+  if (::kill(impl->pid, SIGKILL) != 0 && errno != ESRCH) {
+    throw std::runtime_error("kill failed");
+  }
+#endif
 }
 
 void LocalHostProcess::write(const std::string &data) {
-  if (stdinFd == -1 || finished)
+  if (finished.load()) {
     return;
+  }
+
+#if defined(_WIN32)
+  if (!impl->stdinWrite) {
+    return;
+  }
   size_t totalWritten = 0;
   while (totalWritten < data.size()) {
-    ssize_t res = ::write(stdinFd, data.data() + totalWritten,
-                          data.size() - totalWritten);
-    if (res < 0) {
-      if (errno == EINTR)
-        continue;
-      if (errno == EAGAIN || errno == EWOULDBLOCK)
-        break;
+    DWORD written = 0;
+    if (!WriteFile(impl->stdinWrite, data.data() + totalWritten,
+                   static_cast<DWORD>(data.size() - totalWritten), &written,
+                   nullptr)) {
       throw std::runtime_error("Write to process failed");
     }
-    if (res == 0)
+    if (written == 0) {
       break;
-    totalWritten += res;
+    }
+    totalWritten += written;
   }
+#else
+  if (impl->stdinFd == -1) {
+    return;
+  }
+  size_t totalWritten = 0;
+  while (totalWritten < data.size()) {
+    ssize_t res = ::write(impl->stdinFd, data.data() + totalWritten,
+                          data.size() - totalWritten);
+    if (res < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        break;
+      }
+      throw std::runtime_error("Write to process failed");
+    }
+    if (res == 0) {
+      break;
+    }
+    totalWritten += static_cast<size_t>(res);
+  }
+#endif
 }
 
 bool LocalHostProcess::isRunning() {
@@ -133,57 +277,110 @@ bool LocalHostProcess::isRunning() {
 }
 
 std::string LocalHostProcess::getSystemId() const {
-  return std::to_string(pid);
+#if defined(_WIN32)
+  return std::to_string(static_cast<unsigned long>(impl->pid));
+#else
+  return std::to_string(impl->pid);
+#endif
 }
 
-void LocalHostProcess::captureLoop() {
-  struct pollfd fds[2];
-  fds[0].fd = stdoutFd;
-  fds[0].events = POLLIN;
-  fds[1].fd = stderrFd;
-  fds[1].events = POLLIN;
-
+void LocalHostProcess::captureLoop(bool isError) {
   char buf[4096];
-  while (fds[0].fd != -1 || fds[1].fd != -1) {
-    int res = poll(fds, 2, 100);
-    if (res < 0) {
-      if (errno == EINTR)
-        continue;
+
+#if defined(_WIN32)
+  HANDLE readHandle = isError ? impl->stderrRead : impl->stdoutRead;
+  if (!readHandle) {
+    return;
+  }
+
+  while (true) {
+    DWORD bytes = 0;
+    BOOL ok = ReadFile(readHandle, buf, sizeof(buf), &bytes, nullptr);
+    if (!ok || bytes == 0) {
       break;
     }
 
-    for (int i = 0; i < 2; ++i) {
-      if (fds[i].fd == -1)
-        continue;
-
-      if (fds[i].revents & (POLLIN | POLLHUP | POLLERR)) {
-        ssize_t bytes = read(fds[i].fd, buf, sizeof(buf));
-        if (bytes > 0) {
-          std::string data(buf, bytes);
-          std::function<void(const std::string &, bool)> currentCallback;
-          {
-            std::lock_guard<std::mutex> lock(callbackMutex);
-            if (i == 0)
-              stdoutBuffer += data;
-            else
-              stderrBuffer += data;
-            currentCallback = callback;
-          }
-          if (currentCallback)
-            currentCallback(data, i == 1);
-        } else if (bytes == 0 ||
-                   (bytes < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
-          close(fds[i].fd);
-          if (i == 0)
-            stdoutFd = -1;
-          else
-            stderrFd = -1;
-          fds[i].fd = -1;
+    std::string data(buf, bytes);
+    std::function<void(const std::string &, bool)> currentCallback;
+    {
+      std::lock_guard<std::mutex> lock(callbackMutex);
+      if (isError) {
+        if (stderrBuffer.size() < 10 * 1024 * 1024) {
+          stderrBuffer += data;
+        }
+      } else {
+        if (stdoutBuffer.size() < 10 * 1024 * 1024) {
+          stdoutBuffer += data;
         }
       }
+      currentCallback = callback;
+    }
+      currentCallback = callback;
+    }
+    if (currentCallback) {
+      currentCallback(data, isError);
     }
   }
+#else
+  int &fd = isError ? impl->stderrFd : impl->stdoutFd;
+  if (fd == -1) {
+    return;
+  }
+
+  while (true) {
+    ssize_t bytes = read(fd, buf, sizeof(buf));
+    if (bytes > 0) {
+      std::string data(buf, static_cast<size_t>(bytes));
+      std::function<void(const std::string &, bool)> currentCallback;
+      {
+        std::lock_guard<std::mutex> lock(callbackMutex);
+        if (isError) {
+          if (stderrBuffer.size() < 10 * 1024 * 1024) {
+            stderrBuffer += data;
+          }
+        } else {
+          if (stdoutBuffer.size() < 10 * 1024 * 1024) {
+            stdoutBuffer += data;
+          }
+        }
+        currentCallback = callback;
+      }
+      if (currentCallback) {
+        currentCallback(data, isError);
+      }
+      continue;
+    }
+
+    if (bytes == 0) {
+      close(fd);
+      fd = -1;
+      break;
+    }
+
+    if (errno == EINTR) {
+      continue;
+    }
+    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      continue;
+    }
+
+    close(fd);
+    fd = -1;
+    break;
+  }
+#endif
+
   reapIfNeeded(false);
+}
+
+void LocalHostProcess::joinCaptureThreads() {
+  if (stdoutThread.joinable()) {
+    stdoutThread.join();
+  }
+  if (stderrThread.joinable()) {
+    stderrThread.join();
+  }
 }
 
 bool LocalHostProcess::reapIfNeeded(bool block) {
@@ -196,12 +393,32 @@ bool LocalHostProcess::reapIfNeeded(bool block) {
     return true;
   }
 
+#if defined(_WIN32)
+  DWORD waitRes =
+      WaitForSingleObject(impl->processHandle, block ? INFINITE : 0);
+  if (waitRes == WAIT_TIMEOUT) {
+    return false;
+  }
+  if (waitRes != WAIT_OBJECT_0) {
+    return false;
+  }
+
+  DWORD status = 0;
+  if (!GetExitCodeProcess(impl->processHandle, &status)) {
+    return false;
+  }
+
+  exitCode.store(static_cast<int>(status));
+  reaped = true;
+  finished.store(true);
+  return true;
+#else
   int status = 0;
-  pid_t res = waitpid(pid, &status, block ? 0 : WNOHANG);
+  pid_t res = waitpid(impl->pid, &status, block ? 0 : WNOHANG);
   if (res == 0) {
     return false;
   }
-  if (res == pid) {
+  if (res == impl->pid) {
     exitCode.store(decodeExitStatus(status));
     reaped = true;
     finished = true;
@@ -213,9 +430,13 @@ bool LocalHostProcess::reapIfNeeded(bool block) {
     return true;
   }
   return false;
+#endif
 }
 
 int LocalHostProcess::decodeExitStatus(int status) {
+#if defined(_WIN32)
+  return status;
+#else
   if (WIFEXITED(status)) {
     return WEXITSTATUS(status);
   }
@@ -223,10 +444,38 @@ int LocalHostProcess::decodeExitStatus(int status) {
     return 128 + WTERMSIG(status);
   }
   return -1;
+#endif
 }
 
 std::string LocalHost::init() { return "localhost"; }
+
 void LocalHost::destroy() {}
+
+void LocalHost::promoteCompletedProcessLocked(
+    const std::string &id, std::unique_ptr<IHostProcess> proc,
+    const shared::ProcessSnapshot &snapshot) {
+  (void)proc;
+  completedBackgroundProcesses[id] = {snapshot, std::chrono::steady_clock::now()};
+  while (completedBackgroundProcesses.size() > kMaxCompletedBackgroundProcesses) {
+    auto oldest = completedBackgroundProcesses.begin();
+    for (auto it = std::next(completedBackgroundProcesses.begin());
+         it != completedBackgroundProcesses.end(); ++it) {
+      if (it->second.completedAt < oldest->second.completedAt) {
+        oldest = it;
+      }
+    }
+    completedBackgroundProcesses.erase(oldest);
+  }
+}
+
+std::map<std::string, LocalHost::CompletedProcessSnapshot>::iterator
+LocalHost::touchCompletedProcessLocked(const std::string &id) {
+  auto it = completedBackgroundProcesses.find(id);
+  if (it != completedBackgroundProcesses.end()) {
+    it->second.completedAt = std::chrono::steady_clock::now();
+  }
+  return it;
+}
 
 void LocalHost::cleanup() {
   std::lock_guard<std::mutex> lock(bgMutex);
@@ -237,6 +486,7 @@ void LocalHost::cleanup() {
     }
   }
   backgroundProcesses.clear();
+  completedBackgroundProcesses.clear();
 }
 
 void LocalHost::setUser(const std::string &user) { currentUser = user; }
@@ -326,11 +576,7 @@ shared::FileInfo LocalHost::stat(const std::string &path) {
         std::chrono::file_clock::to_sys(ftime));
     modMs = sctp.time_since_epoch().count();
   }
-  return {fspath.filename().string(),
-          fspath.string(),
-          size,
-          isDir,
-          isSymlink,
+  return {fspath.filename().string(), fspath.string(), size, isDir, isSymlink,
           modMs};
 }
 
@@ -341,16 +587,12 @@ LocalHost::exec(const std::string &command, const std::string &cwd,
   auto start = std::chrono::steady_clock::now();
   auto proc = spawn(command, cwd, env);
 
-  // We don't have an ID here, but we can still capture output if needed.
-  // However, exec is usually for synchronous small tasks.
-  // If we want EngineEvents, we need an ID.
-
   if (!timeout.has_value()) {
     auto res = proc->wait();
     res.finishReason = ProcessFinishReason::Natural;
     res.durationMs = std::chrono::duration<double, std::milli>(
-                         std::chrono::steady_clock::now() - start)
-                         .count();
+                       std::chrono::steady_clock::now() - start)
+                       .count();
     return res;
   }
 
@@ -361,8 +603,8 @@ LocalHost::exec(const std::string &command, const std::string &cwd,
       auto res = proc->wait();
       res.finishReason = ProcessFinishReason::Natural;
       res.durationMs = std::chrono::duration<double, std::milli>(
-                           std::chrono::steady_clock::now() - start)
-                           .count();
+                         std::chrono::steady_clock::now() - start)
+                         .count();
       return res;
     }
 
@@ -393,12 +635,80 @@ LocalHost::exec(const std::string &command, const std::string &cwd,
 std::unique_ptr<shared::IHostProcess>
 LocalHost::spawn(const std::string &command, const std::string &cwd,
                  const std::map<std::string, std::string> &env) {
+#if defined(_WIN32)
+  SECURITY_ATTRIBUTES sa;
+  sa.nLength = sizeof(SECURITY_ATTRIBUTES);
+  sa.lpSecurityDescriptor = nullptr;
+  sa.bInheritHandle = TRUE;
+
+  HANDLE outRead = nullptr;
+  HANDLE outWrite = nullptr;
+  HANDLE errRead = nullptr;
+  HANDLE errWrite = nullptr;
+  HANDLE inRead = nullptr;
+  HANDLE inWrite = nullptr;
+
+  if (!CreatePipe(&outRead, &outWrite, &sa, 0) ||
+      !CreatePipe(&errRead, &errWrite, &sa, 0) ||
+      !CreatePipe(&inRead, &inWrite, &sa, 0)) {
+    throw std::runtime_error("CreatePipe failed");
+  }
+
+  SetHandleInformation(outRead, HANDLE_FLAG_INHERIT, 0);
+  SetHandleInformation(errRead, HANDLE_FLAG_INHERIT, 0);
+  SetHandleInformation(inWrite, HANDLE_FLAG_INHERIT, 0);
+
+  STARTUPINFOA si{};
+  si.cb = sizeof(STARTUPINFOA);
+  si.dwFlags = STARTF_USESTDHANDLES;
+  si.hStdInput = inRead;
+  si.hStdOutput = outWrite;
+  si.hStdError = errWrite;
+
+  PROCESS_INFORMATION pi{};
+
+  std::string shellCommand = buildWindowsShellCommand(command);
+  std::vector<char> commandLine(shellCommand.begin(), shellCommand.end());
+  commandLine.push_back('\0');
+
+  std::vector<char> envBlock = buildWindowsEnvironmentBlock(env);
+  LPVOID envPtr = env.empty() ? nullptr : envBlock.data();
+
+  BOOL ok = CreateProcessA(
+      nullptr, commandLine.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW,
+      envPtr, cwd.empty() ? nullptr : cwd.c_str(), &si, &pi);
+
+  CloseHandle(outWrite);
+  CloseHandle(errWrite);
+  CloseHandle(inRead);
+
+  if (!ok) {
+    CloseHandle(outRead);
+    CloseHandle(errRead);
+    CloseHandle(inWrite);
+    throw std::runtime_error("CreateProcess failed");
+  }
+
+  auto processImpl = std::make_unique<LocalHostProcess::Impl>();
+  processImpl->processHandle = pi.hProcess;
+  processImpl->threadHandle = pi.hThread;
+  processImpl->stdoutRead = outRead;
+  processImpl->stderrRead = errRead;
+  processImpl->stdinWrite = inWrite;
+  processImpl->pid = pi.dwProcessId;
+
+  return std::make_unique<LocalHostProcess>(std::move(processImpl));
+#else
   int outPipe[2], errPipe[2], inPipe[2];
   if (pipe(outPipe) != 0 || pipe(errPipe) != 0 || pipe(inPipe) != 0)
     throw std::runtime_error("Pipe failed");
 
   pid_t pid = fork();
   if (pid == 0) {
+    if (setpgid(0, 0) != 0) {
+      _exit(127);
+    }
+
     if (!currentUser.empty()) {
       struct passwd *pw = getpwnam(currentUser.c_str());
       if (pw)
@@ -427,20 +737,39 @@ LocalHost::spawn(const std::string &command, const std::string &cwd,
 
     execl("/bin/sh", "sh", "-c", command.c_str(), nullptr);
     _exit(127);
-  } else if (pid > 0) {
+  }
+
+  if (pid < 0) {
     close(inPipe[0]);
+    close(inPipe[1]);
+    close(outPipe[0]);
     close(outPipe[1]);
+    close(errPipe[0]);
     close(errPipe[1]);
-    return std::make_unique<LocalHostProcess>(pid, outPipe[0], errPipe[0],
-                                              inPipe[1]);
-  } else {
     throw std::runtime_error("Fork failed");
   }
+
+  close(inPipe[0]);
+  close(outPipe[1]);
+  close(errPipe[1]);
+
+  (void)setpgid(pid, pid);
+
+  auto processImpl = std::make_unique<LocalHostProcess::Impl>();
+  processImpl->pid = pid;
+  processImpl->processGroupId = pid;
+  processImpl->stdoutFd = outPipe[0];
+  processImpl->stderrFd = errPipe[0];
+  processImpl->stdinFd = inPipe[1];
+
+  return std::make_unique<LocalHostProcess>(std::move(processImpl));
+#endif
 }
 
 void LocalHost::registerBackgroundProcess(const std::string &id,
                                           std::unique_ptr<IHostProcess> proc) {
   std::lock_guard<std::mutex> lock(bgMutex);
+  completedBackgroundProcesses.erase(id);
   backgroundProcesses[id] = std::move(proc);
 }
 
@@ -448,10 +777,36 @@ shared::ProcessSnapshot
 LocalHost::inspectBackgroundProcess(const std::string &id) {
   std::lock_guard<std::mutex> lock(bgMutex);
   auto it = backgroundProcesses.find(id);
-  if (it == backgroundProcesses.end()) {
+  if (it != backgroundProcesses.end()) {
+    auto snapshot = it->second->inspect();
+    if (!snapshot.running) {
+      auto proc = std::move(it->second);
+      backgroundProcesses.erase(it);
+      promoteCompletedProcessLocked(id, std::move(proc), snapshot);
+    }
+    return snapshot;
+  }
+  auto completedIt = touchCompletedProcessLocked(id);
+  if (completedIt == completedBackgroundProcesses.end()) {
     throw std::runtime_error("Background process not found: " + id);
   }
-  return it->second->inspect();
+  return completedIt->second.snapshot;
+}
+
+void LocalHost::releaseBackgroundProcess(const std::string &id) {
+  std::lock_guard<std::mutex> lock(bgMutex);
+  auto it = backgroundProcesses.find(id);
+  if (it != backgroundProcesses.end()) {
+    auto snapshot = it->second->inspect();
+    auto proc = std::move(it->second);
+    backgroundProcesses.erase(it);
+    promoteCompletedProcessLocked(id, std::move(proc), snapshot);
+    return;
+  }
+  auto completedIt = completedBackgroundProcesses.find(id);
+  if (completedIt != completedBackgroundProcesses.end()) {
+    completedIt->second.completedAt = std::chrono::steady_clock::now();
+  }
 }
 
 void LocalHost::writeToBackgroundProcess(const std::string &id,
@@ -459,6 +814,13 @@ void LocalHost::writeToBackgroundProcess(const std::string &id,
   std::lock_guard<std::mutex> lock(bgMutex);
   auto it = backgroundProcesses.find(id);
   if (it == backgroundProcesses.end()) {
+    throw std::runtime_error("Background process not found: " + id);
+  }
+  auto snapshot = it->second->inspect();
+  if (!snapshot.running) {
+    auto proc = std::move(it->second);
+    backgroundProcesses.erase(it);
+    promoteCompletedProcessLocked(id, std::move(proc), snapshot);
     throw std::runtime_error("Background process not found: " + id);
   }
   it->second->write(data);
@@ -470,8 +832,16 @@ void LocalHost::killBackgroundProcess(const std::string &id) {
   if (it != backgroundProcesses.end()) {
     it->second->onOutput({});
     it->second->kill();
+    auto snapshot = it->second->inspect();
+    auto proc = std::move(it->second);
+    backgroundProcesses.erase(it);
+    promoteCompletedProcessLocked(id, std::move(proc), snapshot);
   } else {
-    throw std::runtime_error("Background process not found: " + id);
+    auto completedIt = completedBackgroundProcesses.find(id);
+    if (completedIt == completedBackgroundProcesses.end()) {
+      throw std::runtime_error("Background process not found: " + id);
+    }
+    completedIt->second.completedAt = std::chrono::steady_clock::now();
   }
 }
 

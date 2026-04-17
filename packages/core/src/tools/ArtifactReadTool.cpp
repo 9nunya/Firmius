@@ -14,12 +14,7 @@ namespace {
 constexpr const char *kArtifactPrefix = "@artifact:";
 constexpr const char *kArtifactPrefixBare = "artifact:";
 
-std::string threadStorageRootPath() {
-  if (const char *home = std::getenv("HOME")) {
-    return std::string(home) + "/.firmius/threads";
-  }
-  return ".firmius/threads";
-}
+std::string threadStorageRootPath() { return ThreadManager::defaultBasePath(); }
 
 rapidjson::Value jsonFromArtifactMetadata(const ThreadArtifactMetadata &metadata,
                                           rapidjson::Document::AllocatorType &a) {

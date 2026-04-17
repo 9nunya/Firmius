@@ -106,6 +106,35 @@ int64_t nowSeconds() {
 
 std::mutex gRawSseLogMutex;
 
+void appendOptionalCodexDebugLog(const char *envVar, const char *phase,
+                                 const std::string &payload) {
+  const char *logPath = std::getenv(envVar);
+  if (!logPath || logPath[0] == '\0') {
+    return;
+  }
+
+  std::lock_guard<std::mutex> lock(gRawSseLogMutex);
+  std::ofstream out(logPath, std::ios::app);
+  if (!out.is_open()) {
+    return;
+  }
+
+  auto now = std::chrono::system_clock::now();
+  std::time_t nowTime = std::chrono::system_clock::to_time_t(now);
+  std::tm tm = {};
+#if defined(_WIN32)
+  gmtime_s(&tm, &nowTime);
+#else
+  gmtime_r(&nowTime, &tm);
+#endif
+
+  out << "[" << std::put_time(&tm, "%Y-%m-%dT%H:%M:%SZ") << "]"
+      << "[codex][" << phase << "] " << payload;
+  if (payload.empty() || payload.back() != '\n') {
+    out << '\n';
+  }
+}
+
 void appendRawSseLog(const char *phase, const std::string &payload) {
   const char *logPath = std::getenv("FIRMIUS_CODEX_RAW_SSE_LOG");
   const char *stdoutFlag = std::getenv("FIRMIUS_CODEX_RAW_SSE_STDOUT");
@@ -1294,12 +1323,11 @@ void appendMessageInput(rapidjson::Value &input,
       item.AddMember("type", "input_image", a);
       item.AddMember("image_url", rapidjson::Value(img->url.c_str(), a), a);
       content.PushBack(item, a);
-    } else if (auto *thinking = std::get_if<firmius::shared::ThinkingContent>(&part)) {
-      // Include thinking content as output_text for assistant messages
-      rapidjson::Value item(rapidjson::kObjectType);
-      item.AddMember("type", "output_text", a);
-      item.AddMember("text", rapidjson::Value(thinking->thinking.c_str(), a), a);
-      content.PushBack(item, a);
+    } else if (std::holds_alternative<firmius::shared::ThinkingContent>(part)) {
+      // Do not replay prior hidden reasoning back to the Codex Responses API.
+      // Historical thinking traces are not required for continuity and can
+      // trigger request validation issues on stricter model backends.
+      continue;
     }
   }
 
@@ -1518,7 +1546,12 @@ public:
   std::optional<WizardPrompt> nextPrompt() override {
     if (!promptShown_) {
       promptShown_ = true;
-      return WizardPrompt{prompt_, false};
+      WizardPrompt prompt;
+      prompt.message = prompt_;
+      prompt.allowFreeformInput = false;
+      prompt.allowEmptyInput = true;
+      prompt.submitLabel = "Open Browser / Wait";
+      return prompt;
     }
     return std::nullopt;
   }
@@ -1688,7 +1721,7 @@ std::map<std::string, ModelInfo> CodexProvider::getStaticModels() {
           {"gpt-5.4",
            {.id = "gpt-5.4",
             .provider = kProviderId,
-            .contextWindow = kDefaultContextWindow,
+            .contextWindow = 1000000,
             .modalities = {"text", "image"},
             .variants = gpt54Variants,
             .supportsReasoning = true}},
@@ -2641,6 +2674,7 @@ void CodexProvider::stream(const AgentHistory &history,
 
       std::string body =
           buildRequestBody(history, opts, effectiveModel, variant);
+      appendOptionalCodexDebugLog("FIRMIUS_CODEX_REQUEST_LOG", "request", body);
 
       GCPHttpClient client("firmius-codex/1.0");
       client.setBearerToken(acc.accessToken);
@@ -2691,6 +2725,10 @@ void CodexProvider::stream(const AgentHistory &history,
       auto resp = client.streamPost(std::string(kBaseUrl) + kResponsesPath,
                                     body, sseWriteCallback, &ctx, 300,
                                     opts.abortSignal);
+      if (!resp.body.empty()) {
+        appendOptionalCodexDebugLog("FIRMIUS_CODEX_RESPONSE_LOG", "response",
+                                    resp.body);
+      }
 
       if (opts.abortSignal && opts.abortSignal->load()) {
         onEvent(StreamDone{StopReason::Cancelled});

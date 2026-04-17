@@ -5,6 +5,7 @@
 #include "TUIHotkeys.hpp"
 #include "components/ScrollableBox.hpp"
 #include "harness/Harness.hpp"
+#include "harness/ThreadLockManager.hpp"
 #include "modals/ModalLayout.hpp"
 #include "persistence/ThreadManager.hpp"
 #include "utils/Clipboard.hpp"
@@ -18,29 +19,33 @@
 #include <cstdlib>
 #include <ctime>
 #include <filesystem>
-#include <fstream>
 #include <optional>
 #include <string>
 #include <vector>
 
-#include <fcntl.h>
-#include <sys/file.h>
-#include <unistd.h>
-
+#if defined(_WIN32)
+#include <time.h>
+#endif
 namespace {
 
-const char *kFirmiusDir = ".firmius";
-const char *kThreadsDir = "threads";
-const char *kLockFile = ".lock";
-
-std::filesystem::path getThreadsBase() {
-  const char *home = std::getenv("HOME");
-  if (!home || std::string(home).empty()) {
-    home = "/tmp";
+std::optional<int> lockedPidByOther(const std::string &thread_id) {
+  firmius::core::ThreadLockManager lockManager;
+  const int acquireResult = lockManager.acquire(thread_id);
+  if (acquireResult >= 0) {
+    lockManager.release(thread_id);
+    return std::nullopt;
   }
-  return std::filesystem::path(home) / kFirmiusDir / kThreadsDir;
-}
 
+  if (acquireResult != -2) {
+    return std::nullopt;
+  }
+
+  const int pid = lockManager.getOwnerPid(thread_id);
+  if (pid <= 0) {
+    return std::nullopt;
+  }
+  return pid;
+}
 std::string normalizePath(const std::string &path) {
   if (path.empty())
     return path;
@@ -178,7 +183,11 @@ std::string formatTime(uint64_t timestamp_ms) {
     return "";
   std::time_t t = static_cast<std::time_t>(timestamp_ms / 1000);
   std::tm tm {};
+#if defined(_WIN32)
+  localtime_s(&tm, &t);
+#else
   localtime_r(&t, &tm);
+#endif
   char buf[64];
   if (std::strftime(buf, sizeof(buf), "%I:%M %p", &tm) == 0)
     return "";
@@ -263,43 +272,6 @@ ThreadSearchData inspectThreadTranscript(firmius::core::ThreadManager &tm,
   }
   data.searchBlob = toLower(flattenText(flattened));
   return data;
-}
-
-int readLockPid(const std::filesystem::path &lock_path) {
-  std::ifstream lf(lock_path);
-  if (!lf.is_open())
-    return -1;
-  int pid = -1;
-  lf >> pid;
-  return pid;
-}
-
-std::optional<int> lockedPidByOther(const std::string &thread_id) {
-  std::filesystem::path lock_path = getThreadsBase() / thread_id / kLockFile;
-  std::error_code ec;
-  if (!std::filesystem::exists(lock_path, ec))
-    return std::nullopt;
-
-  int fd = open(lock_path.c_str(), O_RDWR);
-  if (fd < 0)
-    return std::nullopt;
-
-  if (flock(fd, LOCK_EX | LOCK_NB) == 0) {
-    flock(fd, LOCK_UN);
-    close(fd);
-    return std::nullopt;
-  }
-
-  if (errno != EWOULDBLOCK) {
-    close(fd);
-    return std::nullopt;
-  }
-
-  int pid = readLockPid(lock_path);
-  close(fd);
-  if (pid <= 0)
-    return std::nullopt;
-  return pid;
 }
 
 struct ThreadEntry {

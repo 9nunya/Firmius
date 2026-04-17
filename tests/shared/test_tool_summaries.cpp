@@ -46,7 +46,7 @@ TEST(ToolSummaries, SummarizesWorkLanguageTools) {
             "Python \"print('hi')\"");
   EXPECT_EQ(SummarizeToolCall(
                 "file_edit",
-                R"({"path":"src/foo.rs","edits":[{"op":"insert_after","anchor":"12#f828","new_lines":["let x = 1;"]},{"op":"delete_range","start_anchor":"18#a1bc","end_anchor":"19#beef"}]})",
+                R"({"path":"src/foo.rs","edits":[{"op":"insert_after","anchor":"12","new_lines":["let x = 1;"]},{"op":"delete_range","start_anchor":"18","end_anchor":"19"}]})",
                 ToolPhase::Called),
             "Edit src/foo.rs (2 ops)");
   EXPECT_EQ(SummarizeToolCall("file_edit",

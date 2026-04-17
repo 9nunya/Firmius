@@ -1,6 +1,5 @@
 #include "hosts/DockerHost.hpp"
 #include "utils/StringUtil.hpp"
-#include <cstdlib>
 #include <curl/easy.h>
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
@@ -188,6 +187,11 @@ public:
     }
 
     ProcessSnapshot inspect() const override {
+        auto* nonConstThis = const_cast<DockerHostProcess*>(this);
+        if (finished.load() && nonConstThis->streamThread.joinable()) {
+            nonConstThis->streamThread.join();
+        }
+
         std::lock_guard<std::mutex> lock(callbackMutex);
         auto now = std::chrono::steady_clock::now();
         double elapsed = std::chrono::duration<double, std::milli>(now - startTime).count();
@@ -351,38 +355,47 @@ std::string DockerHost::init() {
 
     if (!exists) {
         containerId = name;
-        // Build docker create command with volume mounts
-        std::string createCommand = "docker create --name '" + containerId + "'";
 
-        // Add volume mounts from options
+        rapidjson::Document createDoc;
+        createDoc.SetObject();
+        auto& alloc = createDoc.GetAllocator();
+        createDoc.AddMember("Image", rapidjson::Value("firmius-sandbox:latest", alloc), alloc);
+
+        rapidjson::Value cmd(rapidjson::kArrayType);
+        cmd.PushBack("tail", alloc);
+        cmd.PushBack("-f", alloc);
+        cmd.PushBack("/dev/null", alloc);
+        createDoc.AddMember("Cmd", cmd, alloc);
+
+        rapidjson::Value hostConfig(rapidjson::kObjectType);
+        rapidjson::Value binds(rapidjson::kArrayType);
         for (const auto& volume : options.volumeMounts) {
-            createCommand += " -v " + volume;
+            binds.PushBack(rapidjson::Value(volume.c_str(), alloc), alloc);
         }
+        // Portability stance: do not inject implicit host /tmp binds here.
+        // AgentBench/SWEBench helpers are expected to use host-owned writable paths
+        // (for example under /work) unless callers explicitly request additional mounts.
+        hostConfig.AddMember("Binds", binds, alloc);
+        createDoc.AddMember("HostConfig", hostConfig, alloc);
 
-        // Add default /tmp mount if not already present
-        bool hasTmpMount = false;
-        for (const auto& volume : options.volumeMounts) {
-            if (volume.find("/tmp:") != std::string::npos) {
-                hasTmpMount = true;
-                break;
-            }
-        }
-        if (!hasTmpMount) {
-            createCommand += " -v /tmp:/tmp";
-        }
+        rapidjson::StringBuffer createBuffer;
+        rapidjson::Writer<rapidjson::StringBuffer> createWriter(createBuffer);
+        createDoc.Accept(createWriter);
 
-        createCommand += " firmius-sandbox:latest tail -f /dev/null > /dev/null 2>&1";
-        int createResult = system(createCommand.c_str());
-        if (createResult != 0) {
-            throw std::runtime_error("Failed to create Docker container: " + containerId);
+        std::string createRes = request("POST", "/containers/create?name=" + containerId, createBuffer.GetString());
+        rapidjson::Document createResp;
+        createResp.Parse(createRes.c_str());
+        if (createResp.HasParseError() || !createResp.IsObject() || !createResp.HasMember("Id")) {
+            throw std::runtime_error("Failed to create Docker container: " + containerId + " (response: " + createRes + ")");
         }
+        containerId = createResp["Id"].GetString();
     }
 
     if (!running) {
-        std::string startCommand = "docker start '" + containerId + "' > /dev/null 2>&1";
-        int startResult = system(startCommand.c_str());
-        if (startResult != 0) {
-            throw std::runtime_error("Failed to start Docker container: " + containerId);
+        try {
+            request("POST", "/containers/" + containerId + "/start", "");
+        } catch (const std::exception& ex) {
+            throw std::runtime_error("Failed to start Docker container: " + containerId + " (" + std::string(ex.what()) + ")");
         }
     }
 
@@ -393,6 +406,32 @@ std::string DockerHost::init() {
     return containerId;
 }
 void DockerHost::destroy() {}
+
+void DockerHost::promoteCompletedProcessLocked(
+    const std::string& id, std::unique_ptr<shared::IHostProcess> proc,
+    const shared::ProcessSnapshot& snapshot) {
+    (void)proc;
+    completedBackgroundProcesses[id] = {snapshot, std::chrono::steady_clock::now()};
+    while (completedBackgroundProcesses.size() > kMaxCompletedBackgroundProcesses) {
+        auto oldest = completedBackgroundProcesses.begin();
+        for (auto it = std::next(completedBackgroundProcesses.begin());
+             it != completedBackgroundProcesses.end(); ++it) {
+            if (it->second.completedAt < oldest->second.completedAt) {
+                oldest = it;
+            }
+        }
+        completedBackgroundProcesses.erase(oldest);
+    }
+}
+
+std::map<std::string, DockerHost::CompletedProcessSnapshot>::iterator
+DockerHost::touchCompletedProcessLocked(const std::string& id) {
+    auto it = completedBackgroundProcesses.find(id);
+    if (it != completedBackgroundProcesses.end()) {
+        it->second.completedAt = std::chrono::steady_clock::now();
+    }
+    return it;
+}
 
 void DockerHost::cleanup() {
     if (options.deleteOnExit) {
@@ -412,6 +451,7 @@ void DockerHost::cleanup() {
         }
     }
     backgroundProcesses.clear();
+    completedBackgroundProcesses.clear();
 }
 
 void DockerHost::setUser(const std::string& user) {
@@ -601,22 +641,56 @@ std::unique_ptr<IHostProcess> DockerHost::spawn(const std::string& command, cons
 
 void DockerHost::registerBackgroundProcess(const std::string& id, std::unique_ptr<IHostProcess> proc) {
     std::lock_guard<std::mutex> lock(bgMutex);
+    completedBackgroundProcesses.erase(id);
     backgroundProcesses[id] = std::move(proc);
 }
 
 ProcessSnapshot DockerHost::inspectBackgroundProcess(const std::string& id) {
     std::lock_guard<std::mutex> lock(bgMutex);
     auto it = backgroundProcesses.find(id);
-    if (it == backgroundProcesses.end()) {
+    if (it != backgroundProcesses.end()) {
+        auto snapshot = it->second->inspect();
+        if (!snapshot.running) {
+            auto proc = std::move(it->second);
+            backgroundProcesses.erase(it);
+            promoteCompletedProcessLocked(id, std::move(proc), snapshot);
+        }
+        return snapshot;
+    }
+    auto completedIt = touchCompletedProcessLocked(id);
+    if (completedIt == completedBackgroundProcesses.end()) {
         throw std::runtime_error("Background process not found: " + id);
     }
-    return it->second->inspect();
+    return completedIt->second.snapshot;
+}
+
+void DockerHost::releaseBackgroundProcess(const std::string& id) {
+    std::lock_guard<std::mutex> lock(bgMutex);
+    auto it = backgroundProcesses.find(id);
+    if (it != backgroundProcesses.end()) {
+        auto snapshot = it->second->inspect();
+        auto proc = std::move(it->second);
+        backgroundProcesses.erase(it);
+        promoteCompletedProcessLocked(id, std::move(proc), snapshot);
+        return;
+    }
+    auto completedIt = completedBackgroundProcesses.find(id);
+    if (completedIt != completedBackgroundProcesses.end()) {
+        completedIt->second.completedAt = std::chrono::steady_clock::now();
+    }
 }
 
 void DockerHost::writeToBackgroundProcess(const std::string& id, const std::string& data) {
     std::lock_guard<std::mutex> lock(bgMutex);
     auto it = backgroundProcesses.find(id);
     if (it == backgroundProcesses.end()) {
+        throw std::runtime_error("Background process not found: " + id);
+    }
+    auto snapshot = it->second->inspect();
+    if (!snapshot.running) {
+        auto proc = std::move(it->second);
+        backgroundProcesses.erase(it);
+        promoteCompletedProcessLocked(id, std::move(proc), snapshot);
         throw std::runtime_error("Background process not found: " + id);
     }
     it->second->write(data);
@@ -628,8 +702,16 @@ void DockerHost::killBackgroundProcess(const std::string& id) {
     if (it != backgroundProcesses.end()) {
         it->second->onOutput({});
         it->second->kill();
+        auto snapshot = it->second->inspect();
+        auto proc = std::move(it->second);
+        backgroundProcesses.erase(it);
+        promoteCompletedProcessLocked(id, std::move(proc), snapshot);
     } else {
-        throw std::runtime_error("Background process not found: " + id);
+        auto completedIt = completedBackgroundProcesses.find(id);
+        if (completedIt == completedBackgroundProcesses.end()) {
+            throw std::runtime_error("Background process not found: " + id);
+        }
+        completedIt->second.completedAt = std::chrono::steady_clock::now();
     }
 }
 

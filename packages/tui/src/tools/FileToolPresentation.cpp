@@ -2,10 +2,12 @@
 
 #include "components/FileEditDiff.hpp"
 #include "utils/ErrorCleaner.hpp"
+#include "utils/Icons.hpp"
 
 #include <algorithm>
 #include <rapidjson/document.h>
 #include <sstream>
+#include <unordered_map>
 
 namespace firmius::tui {
 
@@ -193,6 +195,167 @@ std::string BuildPreviewMeta(const FileEditPreview &preview) {
   }
   if (!preview.path.empty()) {
     parts.insert(parts.begin(), BaseName(preview.path));
+  }
+  return JoinDisplayParts(parts);
+}
+
+std::string TrimCopy(std::string value) {
+  const auto first = value.find_first_not_of(" \t\r\n");
+  if (first == std::string::npos) {
+    return "";
+  }
+  const auto last = value.find_last_not_of(" \t\r\n");
+  return value.substr(first, last - first + 1);
+}
+
+struct ParsedFallbackDiffPreview {
+  std::vector<std::string> headings;
+  std::vector<ToolPresentationDiffLine> lines;
+};
+
+ParsedFallbackDiffPreview ParseFallbackDiffPreview(const std::string &preview_text) {
+  ParsedFallbackDiffPreview parsed;
+  for (const auto &line : SplitLines(preview_text)) {
+    if (line.rfind("@@ ", 0) == 0) {
+      std::string heading = line.substr(3);
+      if (heading.size() >= 3 &&
+          heading.compare(heading.size() - 3, 3, " @@") == 0) {
+        heading.erase(heading.size() - 3);
+      }
+      heading = TrimCopy(heading);
+      if (!heading.empty()) {
+        parsed.headings.push_back(std::move(heading));
+      }
+      continue;
+    }
+    if (line.empty()) {
+      continue;
+    }
+    if (line[0] != '+' && line[0] != '-') {
+      continue;
+    }
+    ToolPresentationDiffLine diff_line;
+    diff_line.type = line[0];
+    diff_line.content = line.substr(1);
+    parsed.lines.push_back(std::move(diff_line));
+  }
+  return parsed;
+}
+
+void MergeFileEditSignal(std::vector<firmius::shared::FileEditSignal> &signals,
+                         const firmius::shared::FileEditSignal &incoming) {
+  if (incoming.path.empty()) {
+    return;
+  }
+  auto it = std::find_if(signals.begin(), signals.end(),
+                         [&](const firmius::shared::FileEditSignal &signal) {
+                           return signal.path == incoming.path;
+                         });
+  if (it == signals.end()) {
+    signals.push_back(incoming);
+    return;
+  }
+  if (!incoming.diffPreview.empty()) {
+    it->diffPreview = incoming.diffPreview;
+  }
+  if (incoming.addedLines > 0 || it->addedLines == 0) {
+    it->addedLines = incoming.addedLines;
+  }
+  if (incoming.removedLines > 0 || it->removedLines == 0) {
+    it->removedLines = incoming.removedLines;
+  }
+}
+
+std::vector<firmius::shared::FileEditSignal>
+CollectFallbackFileEditSignals(const ToolCallView &view,
+                               const rapidjson::Document &result_doc,
+                               bool has_result) {
+  std::vector<firmius::shared::FileEditSignal> signals = view.fileEditEvents;
+  if (!has_result) {
+    return signals;
+  }
+
+  auto appendSignal = [&](const rapidjson::Value &value) {
+    if (!value.IsObject()) {
+      return;
+    }
+    firmius::shared::FileEditSignal signal;
+    signal.path = StringMember(value, "path");
+    if (signal.path.empty()) {
+      return;
+    }
+    signal.diffPreview = StringMember(value, "diff_preview");
+    signal.addedLines = IntMember(value, "added_lines", 0);
+    signal.removedLines = IntMember(value, "removed_lines", 0);
+    MergeFileEditSignal(signals, signal);
+  };
+
+  if (result_doc.HasMember("files") && result_doc["files"].IsArray()) {
+    for (const auto &entry : result_doc["files"].GetArray()) {
+      appendSignal(entry);
+    }
+  } else {
+    appendSignal(result_doc);
+  }
+
+  return signals;
+}
+
+std::string BuildChangeCountLabel(size_t count) {
+  return std::to_string(count) + (count == 1 ? " change" : " changes");
+}
+
+std::string SummarizeEditKinds(const std::vector<FileEditPreview> &previews,
+                               const std::vector<std::string> &fallback_headings) {
+  std::vector<std::string> labels;
+  auto append_label = [&](std::string label) {
+    label = TrimCopy(std::move(label));
+    if (label.empty()) {
+      return;
+    }
+    if (std::find(labels.begin(), labels.end(), label) == labels.end()) {
+      labels.push_back(std::move(label));
+    }
+  };
+
+  for (const auto &preview : previews) {
+    append_label(HumanizeEditOperation(preview.op));
+  }
+  for (const auto &heading : fallback_headings) {
+    if (!IsAnchorHeavyDescription(heading)) {
+      append_label(heading);
+    }
+  }
+
+  if (labels.empty()) {
+    return "";
+  }
+  if (labels.size() > 3) {
+    return labels[0] + ", " + labels[1] + ", +" +
+           std::to_string(labels.size() - 2) + " more";
+  }
+  return JoinDisplayParts(labels);
+}
+
+std::string BuildGroupedFileMeta(size_t change_count,
+                                 const std::string &kind_summary,
+                                 int added_lines, int removed_lines,
+                                 bool summary_only) {
+  std::vector<std::string> parts;
+  if (change_count > 0) {
+    parts.push_back(BuildChangeCountLabel(change_count));
+  }
+  if (!kind_summary.empty()) {
+    parts.push_back(kind_summary);
+  }
+  if (added_lines > 0) {
+    parts.push_back("+" + std::to_string(added_lines));
+  }
+  if (removed_lines > 0) {
+    parts.push_back("-" + std::to_string(removed_lines));
+  }
+  if (summary_only) {
+    parts.push_back("summary only");
   }
   return JoinDisplayParts(parts);
 }
@@ -595,35 +758,58 @@ void AppendLspDetailsFromObject(const rapidjson::Value &lsp,
       lsp.HasMember("available") && lsp["available"].IsBool() && lsp["available"].GetBool();
   const std::string pathLabel = path.empty() ? "file" : BaseName(path);
 
-  if (checked) {
-    presentation.facts.push_back({"LSP", available ? "checked" : "unavailable"});
-  }
   const std::string serverId = StringMember(lsp, "server_id");
-  if (!serverId.empty()) {
-    presentation.facts.push_back({"LSP server", serverId});
-  }
 
   const int errors = IntMember(lsp, "errors", 0);
   const int warnings = IntMember(lsp, "warnings", 0);
   const int newErrors = IntMember(lsp, "new_error_count", 0);
   const int newWarnings = IntMember(lsp, "new_warning_count", 0);
 
+  std::vector<std::string> summaryLines;
+  if (checked) {
+    std::string line = available ? "checked" : "unavailable";
+    if (!serverId.empty()) {
+      line += " via " + serverId;
+    }
+    summaryLines.push_back(line);
+  } else if (!serverId.empty()) {
+    summaryLines.push_back("server: " + serverId);
+  }
+
+  std::vector<std::string> totals;
   if (errors > 0) {
-    presentation.footer_badges.push_back("lsp:E" + std::to_string(errors));
-    presentation.facts.push_back({"LSP errors", std::to_string(errors)});
+    totals.push_back(std::to_string(errors) + " error" +
+                     (errors == 1 ? "" : "s"));
   }
   if (warnings > 0) {
-    presentation.footer_badges.push_back("lsp:W" + std::to_string(warnings));
-    presentation.facts.push_back({"LSP warnings", std::to_string(warnings)});
+    totals.push_back(std::to_string(warnings) + " warning" +
+                     (warnings == 1 ? "" : "s"));
   }
+  if (!totals.empty()) {
+    summaryLines.push_back("current: " + JoinDisplayParts(totals));
+  }
+
+  std::vector<std::string> deltas;
   if (newErrors > 0) {
-    presentation.footer_badges.push_back("new:E" + std::to_string(newErrors));
-    presentation.facts.push_back({"New LSP errors", std::to_string(newErrors)});
+    deltas.push_back(std::to_string(newErrors) + " new error" +
+                     (newErrors == 1 ? "" : "s"));
   }
   if (newWarnings > 0) {
-    presentation.footer_badges.push_back("new:W" + std::to_string(newWarnings));
-    presentation.facts.push_back(
-        {"New LSP warnings", std::to_string(newWarnings)});
+    deltas.push_back(std::to_string(newWarnings) + " new warning" +
+                     (newWarnings == 1 ? "" : "s"));
+  }
+  if (!deltas.empty()) {
+    summaryLines.push_back("delta: " + JoinDisplayParts(deltas));
+  }
+
+  if (!summaryLines.empty()) {
+    ToolPresentationSection summary;
+    summary.title = "Diagnostics summary · " + pathLabel;
+    summary.kind = newErrors > 0 || newWarnings > 0
+                       ? ToolPresentationNoticeKind::Warning
+                       : ToolPresentationNoticeKind::Info;
+    summary.lines = std::move(summaryLines);
+    presentation.sections.push_back(std::move(summary));
   }
 
   const std::string error = StringMember(lsp, "error");
@@ -648,16 +834,15 @@ void AppendLspDetailsFromObject(const rapidjson::Value &lsp,
 
   ToolPresentationSection section;
   if (!newErrorIssues.empty() || !newWarningIssues.empty()) {
-    section.title = "New LSP issues: " + pathLabel;
+    section.title = "New diagnostics · " + pathLabel;
+    section.kind = ToolPresentationNoticeKind::Warning;
     section.lines.insert(section.lines.end(), newErrorIssues.begin(),
                          newErrorIssues.end());
     section.lines.insert(section.lines.end(), newWarningIssues.begin(),
                          newWarningIssues.end());
-    presentation.notices.push_back(
-        {ToolPresentationNoticeKind::Warning,
-         "New LSP issues detected in " + pathLabel});
   } else if (!issues.empty() || !warningIssues.empty()) {
-    section.title = "LSP issues: " + pathLabel;
+    section.title = "Diagnostics · " + pathLabel;
+    section.kind = ToolPresentationNoticeKind::Warning;
     section.lines.insert(section.lines.end(), issues.begin(), issues.end());
     section.lines.insert(section.lines.end(), warningIssues.begin(),
                          warningIssues.end());
@@ -673,54 +858,91 @@ ToolPresentation BuildFileEditPresentation(const ToolCallView &view) {
   presentation.lifecycle = LifecycleFromPhase(view);
   presentation.layout = ToolPresentationLayoutKind::DiffPreview;
   presentation.density = ToolPresentationDensity::DetailHeavy;
-  presentation.subtitle = view.name;
+  presentation.custom_icon = firmius::shared::ICON_FILE_EDIT;
 
   rapidjson::Document args_doc;
   const bool has_args = ParseObject(view.args, args_doc);
   const auto target_args = has_args ? ParseFileEditArgs(args_doc)
                                     : std::vector<FileEditTargetArgs>{};
-  const bool multi_file_args = target_args.size() > 1;
-  const std::string path =
-      !target_args.empty() ? target_args.front().path : "";
+
+  rapidjson::Document result_doc;
+  const bool has_result = ParseObject(view.result, result_doc);
+  auto fallback_signals =
+      CollectFallbackFileEditSignals(view, result_doc, has_result);
+
+  std::vector<std::string> ordered_paths;
+  auto append_path = [&](const std::string &candidate) {
+    if (candidate.empty()) {
+      return;
+    }
+    if (std::find(ordered_paths.begin(), ordered_paths.end(), candidate) ==
+        ordered_paths.end()) {
+      ordered_paths.push_back(candidate);
+    }
+  };
+
+  for (const auto &target : target_args) {
+    append_path(target.path);
+  }
+  if (has_result && result_doc.HasMember("files") && result_doc["files"].IsArray()) {
+    for (const auto &entry : result_doc["files"].GetArray()) {
+      append_path(StringMember(entry, "path"));
+    }
+  } else if (has_result) {
+    append_path(StringMember(result_doc, "path"));
+  }
+  for (const auto &signal : fallback_signals) {
+    append_path(signal.path);
+  }
+
+  const std::string primary_path =
+      !ordered_paths.empty()
+          ? ordered_paths.front()
+          : (!target_args.empty() ? target_args.front().path : "");
   const bool has_content_overwrite =
       !target_args.empty() && target_args.front().has_content_overwrite;
   const std::string overwrite_content =
       !target_args.empty() ? target_args.front().overwrite_content : "";
-  const bool has_patch =
-      !target_args.empty() && target_args.front().has_patch;
-  const std::string patch =
-      !target_args.empty() ? target_args.front().patch : "";
+  const size_t file_count = ordered_paths.size();
+  const size_t display_file_count =
+      file_count > 0 ? file_count : target_args.size();
+  const bool multi_file = file_count > 1 || target_args.size() > 1;
+
+  if (multi_file && display_file_count > 0) {
+    presentation.footer_badges.push_back(std::to_string(display_file_count) + " files");
+  } else if (!primary_path.empty()) {
+    presentation.diff_source_name = BaseName(primary_path);
+  }
 
   if (presentation.lifecycle == ToolPresentationLifecycle::Preparing) {
-    presentation.title = "prepare file edit";
-  } else if (presentation.lifecycle == ToolPresentationLifecycle::Running) {
-    presentation.title = "editing file";
-  } else {
-    presentation.title = "file edit";
-  }
-  if (!path.empty()) {
-    presentation.footer_badges.push_back(path);
-    presentation.compact_summary = BaseName(path);
-    presentation.diff_source_name = BaseName(path);
-  } else if (has_patch) {
-    presentation.title = "file patch";
-    presentation.compact_summary = "patch " + BaseName(path);
-  } else if (multi_file_args) {
-    presentation.footer_badges.push_back(
-        std::to_string(target_args.size()) + " files");
-    presentation.compact_summary =
-        std::to_string(target_args.size()) + " files";
-  }
-  if (presentation.lifecycle == ToolPresentationLifecycle::Preparing ||
-      presentation.lifecycle == ToolPresentationLifecycle::Running) {
+    presentation.title =
+        multi_file ? "prepare file edits"
+                   : (primary_path.empty() ? "prepare file edit"
+                                           : "prepare edit " + BaseName(primary_path));
+    presentation.compact_summary = presentation.title;
     return presentation;
   }
-
-  rapidjson::Document result_doc;
-  const bool has_result = ParseObject(view.result, result_doc);
-
+  if (presentation.lifecycle == ToolPresentationLifecycle::Running) {
+    if (!ordered_paths.empty()) {
+      presentation.title =
+          multi_file ? ("edited " + std::to_string(display_file_count) + " files")
+                     : ("edited " + BaseName(primary_path));
+      presentation.compact_summary = presentation.title;
+      presentation.notices.push_back(
+          {ToolPresentationNoticeKind::Info, "Running diagnostics…"});
+    } else {
+      presentation.title =
+          multi_file ? "editing " + std::to_string(display_file_count) + " files"
+                     : (primary_path.empty() ? "editing file"
+                                             : "editing " + BaseName(primary_path));
+      presentation.compact_summary = presentation.title;
+    }
+  }
   if (presentation.lifecycle == ToolPresentationLifecycle::Error) {
-    presentation.title = "file edit failed";
+    presentation.title =
+        multi_file ? "failed to edit files"
+                   : (primary_path.empty() ? "file edit failed"
+                                           : "failed to edit " + BaseName(primary_path));
     if (has_result) {
       const std::string top_level_error = StringMember(result_doc, "error");
       if (!top_level_error.empty()) {
@@ -731,45 +953,52 @@ ToolPresentation BuildFileEditPresentation(const ToolCallView &view) {
     } else {
       presentation.error_text = firmius::shared::ErrorCleaner::clean(view.result);
     }
+  } else {
+    presentation.title =
+        multi_file ? "edited " + std::to_string(display_file_count) + " files"
+                   : (primary_path.empty() ? "edited file"
+                                           : "edited " + BaseName(primary_path));
   }
+  presentation.compact_summary = presentation.title;
 
   std::vector<FileEditPreview> previews;
   auto appendOperations =
       [&](const rapidjson::Value &operations, const std::string &op_path,
-          bool op_has_content_overwrite, const std::string &op_overwrite_content) {
-    if (!operations.IsArray()) {
-      return;
-    }
-    for (const auto &op : operations.GetArray()) {
-      if (!op.IsObject()) {
-        continue;
-      }
-      FileEditPreview preview;
-      preview.path = op_path;
-      preview.op = StringMember(op, "op");
-      preview.description = StringMember(op, "description");
-      preview.error = StringMember(op, "error");
-      preview.start_line = IntMember(op, "start_line", 1);
-      preview.end_line = IntMember(op, "end_line", preview.start_line);
-      preview.patch_line = IntMember(op, "patch_line", 0);
-      preview.relocated =
-          op.HasMember("relocated") && op["relocated"].IsBool() &&
-          op["relocated"].GetBool();
-      if (op.HasMember("old_lines")) {
-        preview.old_lines = ParseStringArray(op["old_lines"]);
-      }
-      if (op.HasMember("new_lines")) {
-        preview.new_lines = ParseStringArray(op["new_lines"]);
-      }
-      if (preview.op == "overwrite_file_content" && op_has_content_overwrite) {
-        preview.new_lines = SplitLines(op_overwrite_content);
-        preview.highlight_full_addition = true;
-        preview.start_line = 1;
-        preview.end_line = static_cast<int>(preview.new_lines.size());
-      }
-      previews.push_back(std::move(preview));
-    }
-  };
+          bool op_has_content_overwrite,
+          const std::string &op_overwrite_content) {
+        if (!operations.IsArray()) {
+          return;
+        }
+        for (const auto &op : operations.GetArray()) {
+          if (!op.IsObject()) {
+            continue;
+          }
+          FileEditPreview preview;
+          preview.path = op_path;
+          preview.op = StringMember(op, "op");
+          preview.description = StringMember(op, "description");
+          preview.error = StringMember(op, "error");
+          preview.start_line = IntMember(op, "start_line", 1);
+          preview.end_line = IntMember(op, "end_line", preview.start_line);
+          preview.patch_line = IntMember(op, "patch_line", 0);
+          preview.relocated =
+              op.HasMember("relocated") && op["relocated"].IsBool() &&
+              op["relocated"].GetBool();
+          if (op.HasMember("old_lines")) {
+            preview.old_lines = ParseStringArray(op["old_lines"]);
+          }
+          if (op.HasMember("new_lines")) {
+            preview.new_lines = ParseStringArray(op["new_lines"]);
+          }
+          if (preview.op == "overwrite_file_content" && op_has_content_overwrite) {
+            preview.new_lines = SplitLines(op_overwrite_content);
+            preview.highlight_full_addition = true;
+            preview.start_line = 1;
+            preview.end_line = static_cast<int>(preview.new_lines.size());
+          }
+          previews.push_back(std::move(preview));
+        }
+      };
 
   if (has_result && result_doc.HasMember("files") && result_doc["files"].IsArray()) {
     for (rapidjson::SizeType i = 0; i < result_doc["files"].Size(); ++i) {
@@ -802,13 +1031,13 @@ ToolPresentation BuildFileEditPresentation(const ToolCallView &view) {
     }
   } else if (has_result && result_doc.HasMember("operations") &&
              result_doc["operations"].IsArray()) {
-    appendOperations(result_doc["operations"], path, has_content_overwrite,
-                     overwrite_content);
+    appendOperations(result_doc["operations"], primary_path,
+                     has_content_overwrite, overwrite_content);
   }
 
   if (previews.empty() && has_content_overwrite) {
     FileEditPreview preview;
-    preview.path = path;
+    preview.path = primary_path;
     preview.op = "overwrite_file_content";
     preview.description = "create file";
     preview.new_lines = SplitLines(overwrite_content);
@@ -818,51 +1047,166 @@ ToolPresentation BuildFileEditPresentation(const ToolCallView &view) {
     previews.push_back(std::move(preview));
   }
 
+  if (ordered_paths.empty()) {
+    for (const auto &preview : previews) {
+      append_path(preview.path);
+    }
+  }
+  for (auto &preview : previews) {
+    if (preview.path.empty() && ordered_paths.size() == 1) {
+      preview.path = ordered_paths.front();
+    }
+  }
+
+  std::unordered_map<std::string, const firmius::shared::FileEditSignal *>
+      signals_by_path;
+  for (const auto &signal : fallback_signals) {
+    if (!signal.path.empty()) {
+      signals_by_path[signal.path] = &signal;
+    }
+  }
+
   int added_lines = 0;
   int removed_lines = 0;
-  if (presentation.lifecycle == ToolPresentationLifecycle::Success) {
-    ToolPresentationDiffSection unified_section;
-    if (has_patch && !multi_file_args) {
-        unified_section.title = "Patch applied";
-        if (previews.empty()) {
-            presentation.body_lines = SplitLines(patch);
-        }
-    }
-    if (has_content_overwrite && !multi_file_args) {
-      unified_section.lines =
-          BuildAddedDiffLines(SplitLines(overwrite_content), 1, true);
-    } else if (!previews.empty() &&
-               !multi_file_args &&
-               !TryBuildUnifiedSuccessDiff(result_doc, previews, unified_section)) {
-      for (const auto &preview : previews) {
-        auto lines = BuildPreviewDiffLines(preview);
-        unified_section.lines.insert(unified_section.lines.end(), lines.begin(),
-                                     lines.end());
-      }
-    }
-    if (!unified_section.lines.empty()) {
-      for (const auto &line : unified_section.lines) {
+  if (presentation.lifecycle == ToolPresentationLifecycle::Success ||
+      presentation.lifecycle == ToolPresentationLifecycle::Running) {
+    const bool live_preview_only =
+        presentation.lifecycle == ToolPresentationLifecycle::Running;
+    auto accumulate_section = [&](const ToolPresentationDiffSection &section,
+                                  int fallback_added,
+                                  int fallback_removed) -> std::pair<int, int> {
+      int added = 0;
+      int removed = 0;
+      for (const auto &line : section.lines) {
         if (line.type == '+') {
-          added_lines++;
+          ++added;
         } else if (line.type == '-') {
-          removed_lines++;
+          ++removed;
         }
       }
-      presentation.diff_sections.push_back(std::move(unified_section));
-    } else if (multi_file_args) {
-      for (const auto &preview : previews) {
-        ToolPresentationDiffSection section;
-        section.title = BuildPreviewTitle(preview);
-        section.meta = BuildPreviewMeta(preview);
-        section.lines = BuildPreviewDiffLines(preview);
-        for (const auto &line : section.lines) {
-          if (line.type == '+') {
-            added_lines++;
-          } else if (line.type == '-') {
-            removed_lines++;
+      if (added == 0 && removed == 0) {
+        added = fallback_added;
+        removed = fallback_removed;
+      }
+      return {added, removed};
+    };
+
+    auto build_summary_only_text = []() {
+      return std::optional<std::string>(
+          "edited file; diff preview unavailable");
+    };
+
+    if (!multi_file) {
+      ToolPresentationDiffSection section;
+      if (has_content_overwrite &&
+          presentation.lifecycle == ToolPresentationLifecycle::Success) {
+        section.lines = BuildAddedDiffLines(SplitLines(overwrite_content), 1, true);
+      } else if (presentation.lifecycle == ToolPresentationLifecycle::Success &&
+                 !previews.empty() &&
+                 !TryBuildUnifiedSuccessDiff(result_doc, previews, section)) {
+        for (const auto &preview : previews) {
+          auto lines = BuildPreviewDiffLines(preview);
+          section.lines.insert(section.lines.end(), lines.begin(), lines.end());
+        }
+      }
+
+      const firmius::shared::FileEditSignal *signal = nullptr;
+      if (!primary_path.empty()) {
+        auto it_signal = signals_by_path.find(primary_path);
+        if (it_signal != signals_by_path.end()) {
+          signal = it_signal->second;
+        }
+      } else if (!fallback_signals.empty()) {
+        signal = &fallback_signals.front();
+      }
+
+      ParsedFallbackDiffPreview parsed_fallback;
+      if (section.lines.empty() && signal != nullptr) {
+        parsed_fallback = ParseFallbackDiffPreview(signal->diffPreview);
+        section.lines = parsed_fallback.lines;
+        if (section.lines.empty()) {
+          section.empty_state_text = build_summary_only_text();
+        }
+      } else if (section.lines.empty() && live_preview_only && !previews.empty()) {
+        for (const auto &preview : previews) {
+          auto lines = BuildPreviewDiffLines(preview);
+          section.lines.insert(section.lines.end(), lines.begin(), lines.end());
+        }
+      }
+
+      const auto [section_added, section_removed] = accumulate_section(
+          section, signal != nullptr ? signal->addedLines : 0,
+          signal != nullptr ? signal->removedLines : 0);
+      added_lines += section_added;
+      removed_lines += section_removed;
+      section.meta = BuildGroupedFileMeta(
+          !previews.empty() ? previews.size() : (signal != nullptr ? 1u : 0u),
+          SummarizeEditKinds(
+              previews, signal != nullptr ? parsed_fallback.headings
+                                          : std::vector<std::string>{}),
+          section_added, section_removed, section.lines.empty());
+      if (!section.lines.empty() || section.empty_state_text.has_value() ||
+          !section.meta.empty()) {
+        presentation.diff_sections.push_back(std::move(section));
+      }
+    } else {
+      for (const auto &file_path : ordered_paths) {
+        std::vector<const FileEditPreview *> file_previews;
+        file_previews.reserve(previews.size());
+        for (const auto &preview : previews) {
+          if (preview.path == file_path) {
+            file_previews.push_back(&preview);
           }
         }
-        presentation.diff_sections.push_back(std::move(section));
+
+        const firmius::shared::FileEditSignal *signal = nullptr;
+        auto it_signal = signals_by_path.find(file_path);
+        if (it_signal != signals_by_path.end()) {
+          signal = it_signal->second;
+        }
+
+        ToolPresentationDiffSection section;
+        section.title = file_path;
+        std::vector<FileEditPreview> previews_for_summary;
+        previews_for_summary.reserve(file_previews.size());
+        for (const auto *preview : file_previews) {
+          previews_for_summary.push_back(*preview);
+          auto lines = BuildPreviewDiffLines(*preview);
+          section.lines.insert(section.lines.end(), lines.begin(), lines.end());
+        }
+
+        ParsedFallbackDiffPreview parsed_fallback;
+        if (section.lines.empty() && signal != nullptr) {
+          parsed_fallback = ParseFallbackDiffPreview(signal->diffPreview);
+          section.lines = parsed_fallback.lines;
+          if (section.lines.empty()) {
+            section.empty_state_text = build_summary_only_text();
+          }
+        } else if (section.lines.empty() && live_preview_only &&
+                   !file_previews.empty()) {
+          for (const auto *preview : file_previews) {
+            auto lines = BuildPreviewDiffLines(*preview);
+            section.lines.insert(section.lines.end(), lines.begin(), lines.end());
+          }
+        }
+
+        const auto [section_added, section_removed] = accumulate_section(
+            section, signal != nullptr ? signal->addedLines : 0,
+            signal != nullptr ? signal->removedLines : 0);
+        added_lines += section_added;
+        removed_lines += section_removed;
+        section.meta = BuildGroupedFileMeta(
+            !file_previews.empty() ? file_previews.size()
+                                   : (signal != nullptr ? 1u : 0u),
+            SummarizeEditKinds(
+                previews_for_summary,
+                signal != nullptr ? parsed_fallback.headings
+                                  : std::vector<std::string>{}),
+            section_added, section_removed, section.lines.empty());
+        if (!section.lines.empty() || section.empty_state_text.has_value() ||
+            !section.meta.empty()) {
+          presentation.diff_sections.push_back(std::move(section));
+        }
       }
     }
   } else {
@@ -884,6 +1228,13 @@ ToolPresentation BuildFileEditPresentation(const ToolCallView &view) {
       presentation.diff_sections.push_back(std::move(section));
     }
   }
+
+  if (multi_file && display_file_count > 0) {
+    presentation.facts.push_back({"Files", std::to_string(display_file_count)});
+  }
+  if (!previews.empty()) {
+    presentation.footer_badges.push_back(BuildChangeCountLabel(previews.size()));
+  }
   if (added_lines > 0) {
     presentation.footer_badges.push_back("+" + std::to_string(added_lines));
     presentation.facts.push_back({"Added lines", std::to_string(added_lines)});
@@ -893,8 +1244,17 @@ ToolPresentation BuildFileEditPresentation(const ToolCallView &view) {
     presentation.facts.push_back({"Removed lines", std::to_string(removed_lines)});
   }
 
+  if (presentation.lifecycle == ToolPresentationLifecycle::Running &&
+      multi_file && !ordered_paths.empty() && presentation.diff_sections.empty()) {
+    ToolPresentationSection section;
+    section.title = "Edited files";
+    section.kind = ToolPresentationNoticeKind::Info;
+    section.lines = ordered_paths;
+    presentation.sections.push_back(std::move(section));
+  }
+
   if (has_result && result_doc.HasMember("lsp")) {
-    AppendLspDetailsFromObject(result_doc["lsp"], path, presentation);
+    AppendLspDetailsFromObject(result_doc["lsp"], primary_path, presentation);
   }
   if (has_result && result_doc.HasMember("files") && result_doc["files"].IsArray()) {
     for (const auto &file : result_doc["files"].GetArray()) {
@@ -1038,15 +1398,16 @@ ToolPresentation BuildSubagentTerminatePresentation(const ToolCallView &view) {
 
 bool IsFileFamilyTool(const std::string &tool_name) {
   return IsMatch(tool_name, "file_read") || IsMatch(tool_name, "file_edit") ||
-         IsMatch(tool_name, "list_directory") || IsMatch(tool_name, "web_fetch") ||
-         IsMatch(tool_name, "subagent_terminate") || IsMatch(tool_name, "terminate_subagent");
+         IsMatch(tool_name, "file_write") || IsMatch(tool_name, "list_directory") ||
+         IsMatch(tool_name, "web_fetch") || IsMatch(tool_name, "subagent_terminate") ||
+         IsMatch(tool_name, "terminate_subagent");
 }
 
 ToolPresentation BuildFileToolPresentation(const ToolCallView &view) {
   if (IsMatch(view.name, "file_read")) {
     return BuildFileReadPresentation(view);
   }
-  if (IsMatch(view.name, "file_edit")) {
+  if (IsMatch(view.name, "file_edit") || IsMatch(view.name, "file_write")) {
     return BuildFileEditPresentation(view);
   }
   if (IsMatch(view.name, "list_directory")) {

@@ -118,4 +118,24 @@ TEST_F(BaseOAuthProviderTest, GetAccountsReturnsStableSnapshotCopy) {
   EXPECT_EQ(latest.back().identifier, "second@example.com");
 }
 
+TEST_F(BaseOAuthProviderTest, AddedAccountPersistsAcrossProviderRestart) {
+  {
+    TestBaseOAuthProvider provider;
+    provider.addAccount(makeAccount("persisted@example.com"));
+
+    const auto accounts = provider.getAccounts();
+    ASSERT_EQ(accounts.size(), 1u);
+    EXPECT_EQ(accounts.front().identifier, "persisted@example.com");
+  }
+
+  TestBaseOAuthProvider reloadedProvider;
+  const auto reloadedAccounts = reloadedProvider.getAccounts();
+  ASSERT_EQ(reloadedAccounts.size(), 1u);
+  EXPECT_EQ(reloadedAccounts.front().identifier, "persisted@example.com");
+  EXPECT_EQ(reloadedAccounts.front().refreshToken,
+            "refresh-persisted@example.com");
+  EXPECT_EQ(reloadedAccounts.front().accessToken,
+            "access-persisted@example.com");
+}
+
 } // namespace

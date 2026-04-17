@@ -16,6 +16,7 @@ target_sources(firmius_shared PRIVATE
     src/utils/TempOAuthServer.cpp
     src/utils/GCPHttpClient.cpp
     src/utils/ModelUtil.cpp
+    src/utils/PlatformPaths.cpp
     src/utils/FrontmatterParser.cpp
     src/utils/Hashline.cpp
     src/ConfigLoader.cpp
@@ -56,6 +57,7 @@ target_sources(firmius_shared PUBLIC
     include/utils/ModelUtil.hpp
     include/utils/FrontmatterParser.hpp
     include/utils/Hashline.hpp
+    include/utils/PlatformPaths.hpp
     include/ConfigLoader.hpp
 )
 

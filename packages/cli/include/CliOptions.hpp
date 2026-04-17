@@ -11,12 +11,9 @@ namespace firmius::cli {
 struct CliOptions {
   bool continueLast = false;
   bool debuggingMode = false;
-  bool web = false;
   bool quitWhenIdle = false;
   firmius::shared::ThreadPermissionMode permissionMode =
       firmius::shared::ThreadPermissionMode::Request;
-  std::string webHostname = "127.0.0.1";
-  int webPort = 9173;
   std::string initialPrompt;
   std::string initialCwd;
 };
@@ -60,24 +57,20 @@ inline CliOptions parseCliOptions(int argc, char **argv) {
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
 
-    if (arg == "web" && i == 1) {
-      options.web = true;
-    } else if (arg == "-c" && !options.web) {
+    if (arg == "-c") {
       options.continueLast = true;
-    } else if (arg == "--i-am-debugging" && !options.web) {
+    } else if (arg == "--i-am-debugging") {
       options.debuggingMode = true;
-    } else if ((arg == "--host" || arg == "-h") && options.web) {
-      options.webHostname = requireOptionValue(argc, argv, i, arg);
-    } else if ((arg == "--prompt" || arg == "-p") && !options.web) {
+    } else if (arg == "--prompt" || arg == "-p") {
       options.initialPrompt = requireOptionValue(argc, argv, i, arg);
-    } else if ((arg == "--prompt-file" || arg == "-P") && !options.web) {
+    } else if (arg == "--prompt-file" || arg == "-P") {
       options.initialPrompt =
           readPromptFile(requireOptionValue(argc, argv, i, arg));
-    } else if ((arg == "--cwd" || arg == "-C") && !options.web) {
+    } else if (arg == "--cwd" || arg == "-C") {
       options.initialCwd = requireOptionValue(argc, argv, i, arg);
-    } else if (arg == "--quit-when-idle" && !options.web) {
+    } else if (arg == "--quit-when-idle") {
       options.quitWhenIdle = true;
-    } else if (arg == "--permission-mode" && !options.web) {
+    } else if (arg == "--permission-mode") {
       options.permissionMode = parsePermissionMode(
           requireOptionValue(argc, argv, i, arg));
     }

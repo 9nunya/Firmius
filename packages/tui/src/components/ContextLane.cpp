@@ -13,16 +13,6 @@ namespace firmius::tui {
 
 namespace {
 
-std::string shorten(std::string text, std::size_t limit) {
-  if (text.size() <= limit) {
-    return text;
-  }
-  if (limit <= 3) {
-    return text.substr(0, limit);
-  }
-  return text.substr(0, limit - 1) + "…";
-}
-
 std::string repeatGlyph(const std::string &glyph, int count) {
   std::string out;
   for (int i = 0; i < std::max(0, count); ++i) {
@@ -30,6 +20,8 @@ std::string repeatGlyph(const std::string &glyph, int count) {
   }
   return out;
 }
+
+std::unordered_map<std::string, ftxui::Color> getBucketColors(const Theme &theme);
 
 ftxui::Element pill(const std::string &icon, const std::string &label,
                     ftxui::Color fg, ftxui::Color bg) {
@@ -48,21 +40,73 @@ ftxui::Color contextColor(const Theme &theme, float ratio) {
   return theme.status_bar.context.low;
 }
 
-ftxui::Element contextMeter(const Theme &theme, float ratio) {
-  constexpr int kMeterUnits = 14;
-  const float clamped = std::clamp(ratio, 0.0f, 1.0f);
-  const int filled =
-      std::clamp(static_cast<int>(std::round(clamped * kMeterUnits)), 0,
-                 kMeterUnits);
-  const int empty = kMeterUnits - filled;
-  const auto color = contextColor(theme, clamped);
+ftxui::Element unifiedContextBar(const Theme &theme, const ContextLaneModel &model) {
+  const int barWidth = ftxui::Terminal::Size().dimx - 30;
+  const float totalRatio = std::clamp(model.context_ratio, 0.0f, 1.0f);
+  const int totalFilledWidth = static_cast<int>(std::round(totalRatio * barWidth));
+  
+  auto bucketColors = getBucketColors(theme);
+  
+  ftxui::Elements segments;
+  int allocated = 0;
+  
+  // Calculate total bucket tokens for relative scaling
+  uint32_t totalBucketTokens = 0;
+  for (const auto &bucket : model.context_buckets) {
+    totalBucketTokens += bucket.tokens;
+  }
+  
+  // Render each context bucket in chronological order (left to right)
+  for (const auto &bucket : model.context_buckets) {
+    if (bucket.tokens == 0) continue;
+    
+    // Scale bucket width proportionally to its share of the total filled space
+    const float bucketShare = totalBucketTokens > 0 
+        ? static_cast<float>(bucket.tokens) / totalBucketTokens
+        : 0.0f;
+    const int width = std::max(1, static_cast<int>(std::round(bucketShare * totalFilledWidth)));
+    if (allocated + width > totalFilledWidth) break;
+    
+    auto colorIt = bucketColors.find(bucket.label);
+    ftxui::Color color = colorIt != bucketColors.end() 
+        ? colorIt->second 
+        : theme.status_bar.context.low;
+    
+    segments.push_back(ftxui::text(repeatGlyph("█", width)) 
+        | ftxui::color(color) | ftxui::bold);
+    
+    allocated += width;
+  }
+  
+  // Add empty space for remaining context window
+  const int emptyWidth = barWidth - totalFilledWidth;
+  if (emptyWidth > 0) {
+    segments.push_back(ftxui::text(repeatGlyph("░", emptyWidth)) 
+        | ftxui::color(theme.base.border));
+  }
+  
+  return ftxui::hbox(std::move(segments));
+}
 
-  return ftxui::hbox({
-      ftxui::text(repeatGlyph("█", filled)) | ftxui::bold |
-          ftxui::color(color),
-      ftxui::text(repeatGlyph("░", empty)) |
-          ftxui::color(theme.base.border),
-  });
+std::unordered_map<std::string, ftxui::Color> getBucketColors(const Theme &theme) {
+  return {
+    {"system", theme.status_bar.context.high},        // Fixed system prompt (leftmost)
+    {"skills", theme.tool_blocks.generic_icon},       // Loaded skills
+    {"files", theme.tool_blocks.specific.file_read.fg}, // Watched files
+    {"plan", theme.syntax.constant},                  // Live work state
+    {"memory", theme.status_bar.context.medium},      // Rolling observations
+    {"history", theme.chat.user_prefix},              // Conversation history
+    {"tools", theme.tool_blocks.specific.terminal.fg},// Tool schemas & history
+    {"tool_history", theme.tool_blocks.specific.terminal.fg},
+    {"tool_schemas", theme.tool_blocks.specific.file_edit.fg},
+    {"user", theme.chat.user_prefix},                 // Latest user message
+    {"assistant", theme.chat.agent_prefix},           // Assistant response
+    {"recall", theme.syntax.string},                  // Retrieval results
+    {"images", theme.syntax.comment},                 // Image attachments
+    {"rolling", theme.status_bar.context.medium},
+    {"observations", theme.status_bar.context.medium},
+    {"messages", theme.chat.user_prefix},
+  };
 }
 
 std::string formatCompactCount(std::uint32_t value) {
@@ -88,35 +132,6 @@ std::string formatCompactCount(std::uint32_t value) {
   return std::to_string(value);
 }
 
-std::string rollingRailGlyphs(float occupancyRatio, float bufferRatio,
-                             float targetRatio, float emergencyRatio) {
-  constexpr int kUnits = 22;
-  std::vector<std::string> rail(static_cast<std::size_t>(kUnits), "░");
-  const int filled = std::clamp(
-      static_cast<int>(std::round(std::clamp(occupancyRatio, 0.0f, 1.0f) *
-                                  static_cast<float>(kUnits))),
-      0, kUnits);
-  for (int i = 0; i < filled; ++i) {
-    rail[static_cast<std::size_t>(i)] = "█";
-  }
-  auto mark = [&](float ratio, const std::string &glyph) {
-    const int idx = std::clamp(
-        static_cast<int>(std::round(std::clamp(ratio, 0.0f, 1.0f) *
-                                    static_cast<float>(kUnits - 1))),
-        0, kUnits - 1);
-    rail[static_cast<std::size_t>(idx)] = glyph;
-  };
-  mark(bufferRatio, "B");
-  mark(targetRatio, "T");
-  mark(emergencyRatio, "E");
-  std::string out;
-  out.reserve(static_cast<std::size_t>(kUnits * 3));
-  for (const auto &glyph : rail) {
-    out += glyph;
-  }
-  return out;
-}
-
 } // namespace
 
 class ContextLaneComponentBase : public ftxui::ComponentBase {
@@ -140,28 +155,27 @@ private:
     }
 
     const auto &theme = ThemeManager::instance().getCurrentTheme();
-    int term_width = ftxui::Terminal::Size().dimx;
-    bool compact_mode = term_width <= 110;
-    bool ultra_compact = term_width < 70;
     ftxui::Elements rows;
     ftxui::Elements chips;
-    if (!model_->model_label.empty() && !ultra_compact) {
+    
+    // Model/account chips (NO TRUNCATION)
+    if (!model_->model_label.empty()) {
       chips.push_back(
-          pill(firmius::shared::ICON_CHIP, shorten(model_->model_label, compact_mode ? 20 : 40),
+          pill(firmius::shared::ICON_CHIP, model_->model_label,
                theme.agent_strip.pills.model_fg,
                theme.agent_strip.pills.model_bg));
     }
     if (!model_->account_label.empty()) {
       if (!chips.empty()) chips.push_back(ftxui::text(" "));
       chips.push_back(
-          pill(firmius::shared::ICON_PERSONA, shorten(model_->account_label, ultra_compact ? 12 : compact_mode ? 20 : 40),
+          pill(firmius::shared::ICON_PERSONA, model_->account_label,
                theme.agent_strip.pills.slug_fg,
                theme.agent_strip.pills.slug_bg));
     }
     if (!model_->quota_label.empty()) {
       if (!chips.empty()) chips.push_back(ftxui::text(" "));
       chips.push_back(
-          pill("󰾆", shorten(model_->quota_label, ultra_compact ? 12 : compact_mode ? 20 : 40),
+          pill("󰾆", model_->quota_label,
                theme.agent_strip.pills.state_fg,
                theme.agent_strip.pills.state_bg));
     }
@@ -173,90 +187,73 @@ private:
     char pct_buf[16];
     std::snprintf(pct_buf, sizeof(pct_buf), "%.0f%%", ratio * 100.0f);
     const auto ctx_color = contextColor(theme, ratio);
-    std::string metrics_text = model_->usage_label;
+
+    // Unified context bar (main visualization)
+    rows.push_back(
+        ftxui::hbox({
+            ftxui::text(" " + firmius::shared::ICON_CONTEXT + " ") |
+                ftxui::color(theme.status_bar.context.icon),
+            unifiedContextBar(theme, *model_) | ftxui::xflex,
+            ftxui::text(" " + std::string(pct_buf)) | ftxui::bold |
+                ftxui::color(ctx_color),
+            model_->context_label.empty()
+                ? ftxui::text("")
+                : ftxui::text("  " + model_->context_label) |
+                      ftxui::color(theme.base.dim),
+        }) |
+        ftxui::xflex);
+
+    // Metrics and bucket labels
+    ftxui::Elements metric_row;
+    if (!model_->usage_label.empty()) {
+      metric_row.push_back(ftxui::text("  " + firmius::shared::ICON_METRICS + " " + model_->usage_label) |
+                          ftxui::color(theme.base.dim));
+    }
     if (!model_->cost_label.empty()) {
-      if (!metrics_text.empty()) {
-        metrics_text += " · ";
+      if (!metric_row.empty()) metric_row.push_back(ftxui::text("  "));
+      metric_row.push_back(ftxui::text(model_->cost_label) | ftxui::color(theme.base.dim));
+    }
+    if (!model_->bucket_labels.empty()) {
+      if (!metric_row.empty()) metric_row.push_back(ftxui::text("  "));
+      metric_row.push_back(ftxui::text(firmius::shared::ICON_BOOK + " ") | ftxui::color(theme.base.dim));
+      for (std::size_t i = 0; i < model_->bucket_labels.size(); ++i) {
+        if (i > 0) metric_row.push_back(ftxui::text(" · ") | ftxui::color(theme.base.dim));
+        metric_row.push_back(ftxui::text(model_->bucket_labels[i]) | ftxui::color(theme.base.dim));
       }
-      metrics_text += model_->cost_label;
     }
-
-    std::string bucket_text;
-    for (std::size_t i = 0; i < model_->bucket_labels.size(); ++i) {
-      if (i > 0) {
-        bucket_text += " · ";
-      }
-      bucket_text += model_->bucket_labels[i];
-    }
-
-    std::string trailing_text;
-    if (!metrics_text.empty()) {
-      trailing_text += " " + firmius::shared::ICON_METRICS + " " +
-                       shorten(metrics_text, ultra_compact ? 15 : compact_mode ? 25 : 50);
-    }
-    if (!bucket_text.empty()) {
-      if (!trailing_text.empty()) {
-        trailing_text += "   ";
-      }
-      trailing_text += " " + firmius::shared::ICON_BOOK + " " +
-                       shorten(bucket_text, ultra_compact ? 10 : compact_mode ? 20 : 40);
-    }
-    if (ultra_compact) {
-      rows.push_back(
-          ftxui::hbox({
-              ftxui::text(" " + firmius::shared::ICON_CONTEXT + " ") |
-                  ftxui::color(theme.status_bar.context.icon),
-              contextMeter(theme, ratio) | ftxui::xflex,
-              ftxui::text(" " + std::string(pct_buf)) | ftxui::bold |
-                  ftxui::color(ctx_color),
-          }) |
-          ftxui::xflex);
-    } else {
-      rows.push_back(
-          ftxui::hbox({
-              ftxui::text(" " + firmius::shared::ICON_CONTEXT + " ") |
-                  ftxui::color(theme.status_bar.context.icon),
-              contextMeter(theme, ratio) | ftxui::xflex,
-              ftxui::text(" " + std::string(pct_buf)) | ftxui::bold |
-                  ftxui::color(ctx_color),
-              model_->context_label.empty()
-                  ? ftxui::text("")
-                  : ftxui::text("  " + shorten(model_->context_label, compact_mode ? 25 : 40)) |
-                        ftxui::color(theme.base.dim),
-              trailing_text.empty()
-                  ? ftxui::text("")
-                  : ftxui::text("  " + trailing_text) |
-                        ftxui::color(theme.base.dim),
-          }) |
-          ftxui::xflex);
+    if (!metric_row.empty()) {
+      rows.push_back(ftxui::hbox(std::move(metric_row)) | ftxui::xflex);
     }
 
     if (model_->rolling_memory.enabled) {
       const auto &rolling = model_->rolling_memory;
       ftxui::Elements rolling_chips;
+      
+      // Rolling memory mode
       rolling_chips.push_back(
-          pill("🧠", shorten(rolling.mode_label.empty() ? std::string("rolling")
-                                                      : rolling.mode_label,
-                             compact_mode ? 18 : 28),
+          pill(firmius::shared::ICON_BRAIN, rolling.mode_label.empty() ? std::string("rolling") : rolling.mode_label,
                theme.agent_strip.pills.state_fg,
                theme.agent_strip.pills.state_bg));
+      
       if (!rolling.preset_label.empty()) {
         rolling_chips.push_back(ftxui::text(" "));
         rolling_chips.push_back(
-            pill("⚙", shorten(rolling.preset_label, compact_mode ? 14 : 20),
+            pill(firmius::shared::ICON_GEAR, rolling.preset_label,
                  theme.agent_strip.pills.slug_fg,
                  theme.agent_strip.pills.slug_bg));
       }
-      if (!rolling.model_label.empty() && !ultra_compact) {
+      
+      if (!rolling.model_label.empty()) {
         rolling_chips.push_back(ftxui::text(" "));
         rolling_chips.push_back(
-            pill(firmius::shared::ICON_CHIP,
-                 shorten(rolling.model_label, compact_mode ? 22 : 36),
+            pill(firmius::shared::ICON_CHIP, rolling.model_label,
                  theme.agent_strip.pills.model_fg,
                  theme.agent_strip.pills.model_bg));
       }
+      
       rows.push_back(ftxui::hbox(std::move(rolling_chips)) | ftxui::xflex);
 
+      // Activity chips
       ftxui::Elements activity_chips;
       activity_chips.push_back(
           pill("◍", "obs " + std::to_string(rolling.active_observations),
@@ -272,6 +269,7 @@ private:
           pill("◌", "buf " + std::to_string(rolling.buffered_observations),
                theme.agent_strip.pills.slug_fg,
                theme.agent_strip.pills.slug_bg));
+      
       if (rolling.observation_in_flight || rolling.reflection_in_flight) {
         activity_chips.push_back(ftxui::text(" "));
         std::string inflight = "active";
@@ -287,39 +285,42 @@ private:
                  theme.status_bar.compacting.normal.fg,
                  theme.status_bar.compacting.normal.bg));
       }
-      rows.push_back(ftxui::hbox(std::move(activity_chips)) | ftxui::xflex);
+      
+       rows.push_back(ftxui::hbox(std::move(activity_chips)) | ftxui::xflex);
 
-      const float occupancy = std::clamp(rolling.context_occupancy_ratio, 0.0f, 1.0f);
-      char occBuf[8];
-      std::snprintf(occBuf, sizeof(occBuf), "%.0f%%", occupancy * 100.0f);
-      const auto rollingColor = contextColor(theme, occupancy);
-      rows.push_back(ftxui::hbox({
-                        ftxui::text("  rail ") | ftxui::color(theme.base.dim),
-                        ftxui::text(rollingRailGlyphs(
-                                        occupancy, rolling.buffer_threshold_ratio,
-                                        rolling.target_threshold_ratio,
-                                        rolling.emergency_threshold_ratio)) |
-                            ftxui::bold | ftxui::color(rollingColor),
-                        ftxui::text(" " + std::string(occBuf)) | ftxui::bold |
-                            ftxui::color(rollingColor),
-                        ftxui::text("  B" +
-                                    std::to_string(static_cast<int>(std::round(
-                                        rolling.buffer_threshold_ratio * 100.0f))) +
-                                    " T" +
-                                    std::to_string(static_cast<int>(std::round(
-                                        rolling.target_threshold_ratio * 100.0f))) +
-                                    " E" +
-                                    std::to_string(static_cast<int>(std::round(
-                                        rolling.emergency_threshold_ratio *
-                                        100.0f)))) |
-                            ftxui::color(theme.base.dim),
-                      }) |
-                      ftxui::xflex);
+      // Dynamic context bucket legend showing actual buckets present
+      ftxui::Elements legend;
+      legend.push_back(ftxui::text("  ") | ftxui::color(theme.base.dim));
+      
+      auto bucketColors = getBucketColors(theme);
+      int bucketCount = 0;
+      for (const auto &bucket : model_->context_buckets) {
+        if (bucket.tokens == 0 || bucketCount >= 6) continue;
+        
+        if (bucketCount > 0) {
+          legend.push_back(ftxui::text("   ") | ftxui::color(theme.base.dim));
+        }
+        
+        auto colorIt = bucketColors.find(bucket.label);
+        ftxui::Color color = colorIt != bucketColors.end() 
+            ? colorIt->second 
+            : theme.status_bar.context.low;
+            
+        legend.push_back(ftxui::text("█") | ftxui::color(color));
+        legend.push_back(ftxui::text(" " + bucket.label) | ftxui::color(theme.base.dim));
+        bucketCount++;
+      }
+      
+      if (bucketCount > 0) {
+        rows.push_back(ftxui::hbox(std::move(legend)) | ftxui::xflex);
+      }
 
+      // Compression stats (NO TRUNCATION)
       std::string compressionText =
           "src " + formatCompactCount(rolling.source_tokens) +
           " · sum " + formatCompactCount(rolling.summary_tokens) +
           " · saved " + formatCompactCount(rolling.saved_tokens);
+          
       if (rolling.source_tokens > 0 && rolling.saved_tokens > 0) {
         const int savedPct = static_cast<int>(std::round(
             (static_cast<double>(rolling.saved_tokens) /
@@ -327,13 +328,15 @@ private:
             100.0));
         compressionText += " (" + std::to_string(savedPct) + "%)";
       }
+      
       compressionText += " · tail " + formatCompactCount(rolling.retained_tail_tokens);
-      rows.push_back(ftxui::text("  " + shorten(compressionText, compact_mode ? 72 : 104)) |
+      
+      rows.push_back(ftxui::text("  " + compressionText) |
                      ftxui::color(theme.base.dim));
+                     
     } else if (!model_->memory_labels.empty()) {
       for (const auto &label : model_->memory_labels) {
-        rows.push_back(ftxui::text("  🧠 " +
-                                    shorten(label, compact_mode ? 64 : 96)) |
+        rows.push_back(ftxui::text("  " + firmius::shared::ICON_BRAIN + " " + label) |
                        ftxui::color(theme.base.dim));
       }
     }

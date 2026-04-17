@@ -99,7 +99,7 @@ void McpClient::initialize(const int timeoutMs) {
 
   rapidjson::Document initializedParams;
   initializedParams.SetObject();
-  session_->sendNotification("initialized", initializedParams);
+  session_->sendNotification("notifications/initialized", initializedParams);
 
   initialized_ = true;
 }
@@ -188,27 +188,11 @@ rapidjson::Document McpClient::callTool(const std::string &toolName,
 }
 
 void McpClient::shutdown(const int timeoutMs) {
+  (void)timeoutMs;
   if (shutdownSent_) {
     return;
   }
   shutdownSent_ = true;
-
-  if (initialized_) {
-    try {
-      rapidjson::Document nullParams;
-      nullParams.SetNull();
-      (void)session_->sendRequest(nextId_++, "shutdown", nullParams, timeoutMs,
-                                  "shutdown");
-    } catch (...) {
-    }
-
-    try {
-      rapidjson::Document exitParams;
-      exitParams.SetObject();
-      session_->sendNotification("exit", exitParams);
-    } catch (...) {
-    }
-  }
 
   initialized_ = false;
 

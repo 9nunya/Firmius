@@ -532,7 +532,13 @@ bool AgentBench::evaluateByCheckScripts(const std::string& answer, const rapidjs
 }
 
 ProcessResult AgentBench::executeScript(const std::string& language, const std::string& code, const std::vector<std::string>& params) {
-    std::string scriptPath = "/tmp/agentbench_script";
+    const std::string scriptDir = "/work/.firmius/agentbench";
+    auto mkdirRes = session.getHost().exec("mkdir -p " + scriptDir);
+    if (mkdirRes.exitCode != 0) {
+        throw std::runtime_error("Failed to create AgentBench script directory: " + mkdirRes.stderrData);
+    }
+
+    std::string scriptPath = scriptDir + "/agentbench_script";
     if (language == "bash") {
         scriptPath += ".sh";
         session.getHost().writeFile(scriptPath, std::vector<uint8_t>(code.begin(), code.end()));
@@ -554,8 +560,9 @@ ProcessResult AgentBench::executeScript(const std::string& language, const std::
         scriptPath += ext;
         session.getHost().writeFile(scriptPath, std::vector<uint8_t>(code.begin(), code.end()));
 
+        const std::string binaryPath = scriptDir + "/agentbench_runner";
         std::string compiler = (language == "c++") ? "g++" : "gcc";
-        auto compileResult = session.getHost().exec(compiler + " -o /tmp/a.out " + scriptPath + " 2>&1");
+        auto compileResult = session.getHost().exec(compiler + " -o " + binaryPath + " " + scriptPath + " 2>&1");
 
         if (compileResult.exitCode != 0) {
             ProcessResult res;
@@ -566,7 +573,7 @@ ProcessResult AgentBench::executeScript(const std::string& language, const std::
             return res;
         }
 
-        std::string cmd = "/tmp/a.out";
+        std::string cmd = binaryPath;
         for (const auto& param : params) {
             cmd += " " + param;
         }

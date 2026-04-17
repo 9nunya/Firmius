@@ -667,7 +667,12 @@ public:
   std::optional<WizardPrompt> nextPrompt() override {
     if (!promptShown_) {
       promptShown_ = true;
-      return WizardPrompt{prompt_, false};
+      WizardPrompt prompt;
+      prompt.message = prompt_;
+      prompt.allowFreeformInput = false;
+      prompt.allowEmptyInput = true;
+      prompt.submitLabel = "Open Browser / Wait";
+      return prompt;
     }
     return std::nullopt;
   }

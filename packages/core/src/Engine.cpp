@@ -17,7 +17,8 @@
 #include "providers/ChutesProvider.hpp"
 #include "providers/CodexProvider.hpp"
 #include "providers/KimiProvider.hpp"
-#include "providers/LettaProvider.hpp"
+#include "providers/KiloProvider.hpp"
+#include "providers/KiroProvider.hpp"
 #include "providers/NanoGPTProvider.hpp"
 #include "providers/NvidiaProvider.hpp"
 #include "providers/OpenRouterProvider.hpp"
@@ -210,8 +211,7 @@ ArtifactSnapshot collectArtifactSnapshot(const std::string &threadId,
   }
 
   try {
-    ThreadManager tm(std::string(getenv("HOME") ? getenv("HOME") : "/root") +
-                     "/.firmius/threads");
+    ThreadManager tm(ThreadManager::defaultBasePath());
     for (const auto &artifact : tm.listArtifactsForAgent(threadId, agentId)) {
       snapshot[artifact.filename] = artifact;
     }
@@ -283,12 +283,7 @@ AgentStatus inferPersistedStatus(const AgentHistory &history) {
   return AgentStatus::Idle;
 }
 
-std::string threadStorageRootPathForUndo() {
-  if (const char *home = std::getenv("HOME")) {
-    return std::string(home) + "/.firmius/threads";
-  }
-  return ".firmius/threads";
-}
+std::string threadStorageRootPathForUndo() { return ThreadManager::defaultBasePath(); }
 
 bool hasCompactionMarker(const AgentTurn &turn) {
   return turn.turnId.rfind("compaction-start-", 0) == 0 ||
@@ -544,13 +539,16 @@ void Engine::initProviders() {
   reg.registerProviderFactory("qwen", []() {
     return std::make_shared<firmius::provider::QwenProvider>();
   });
-  reg.registerProviderFactory("kimi", []() {
-    return std::make_shared<firmius::provider::KimiProvider>();
-  });
-  reg.registerProviderFactory("letta", []() {
-    return std::make_shared<firmius::provider::LettaProvider>();
-  });
-}
+   reg.registerProviderFactory("kimi", []() {
+     return std::make_shared<firmius::provider::KimiProvider>();
+   });
+   reg.registerProviderFactory("kilo", []() {
+     return std::make_shared<firmius::provider::KiloProvider>();
+   });
+   reg.registerProviderFactory("kiro", []() {
+     return std::make_shared<firmius::provider::KiroProvider>();
+   });
+  }
 
 void Engine::reap() { std::lock_guard<std::mutex> lock(listenerMutex); }
 
@@ -588,9 +586,7 @@ std::string Engine::summonAgent(
       try {
         // 1. Loading metadata in background thread
         auto metadata =
-            ThreadManager(
-                std::string(getenv("HOME") ? getenv("HOME") : "/root") +
-                "/.firmius/threads")
+            ThreadManager(ThreadManager::defaultBasePath())
                 .getMetadata(threadId);
         auto persona = PurposeLoader::load(personaName);
 
@@ -610,6 +606,10 @@ std::string Engine::summonAgent(
           ctx.config.maxTokens = userCfg.defaultMaxTokens.value();
         }
         ctx.config.rollingMemory = userCfg.rollingMemory;
+        ctx.config.insanityDetectionEnabled = userCfg.insanityDetectionEnabled;
+        ctx.config.insanityRepetitionThreshold = userCfg.insanityRepetitionThreshold;
+        ctx.config.insanityMaxTokenThreshold = userCfg.insanityMaxTokenThreshold;
+        ctx.config.maxInsanityRetries = userCfg.maxInsanityRetries;
         ctx.config.persistHistory = persistHistory;
         ctx.config.personaName = personaName;
         ctx.identity.name = persona.name;
@@ -672,13 +672,10 @@ std::string Engine::summonAgent(
 
         // Refresh metadata for potential host update
         auto currentMeta =
-            ThreadManager(
-                std::string(getenv("HOME") ? getenv("HOME") : "/root") +
-                "/.firmius/threads")
+            ThreadManager(ThreadManager::defaultBasePath())
                 .getMetadata(threadId);
         if (currentMeta.hostIdentifier != actualHostId) {
-          ThreadManager(std::string(getenv("HOME") ? getenv("HOME") : "/root") +
-                        "/.firmius/threads")
+          ThreadManager(ThreadManager::defaultBasePath())
               .updateHostIdentifier(threadId, actualHostId);
           agent->getMutableContext().environment.identifier = actualHostId;
         }
@@ -766,13 +763,11 @@ std::string Engine::resumeAgent(const std::string &threadId,
   }
 
   auto metadata =
-      ThreadManager(std::string(getenv("HOME") ? getenv("HOME") : "/root") +
-                    "/.firmius/threads")
+      ThreadManager(ThreadManager::defaultBasePath())
           .getMetadata(threadId);
   auto persona = PurposeLoader::load(personaName);
   auto history =
-      ThreadManager(std::string(getenv("HOME") ? getenv("HOME") : "/root") +
-                    "/.firmius/threads")
+      ThreadManager(ThreadManager::defaultBasePath())
           .loadAgentHistory(threadId, agentId);
 
   AgentContext ctx;
@@ -789,6 +784,10 @@ std::string Engine::resumeAgent(const std::string &threadId,
     ctx.config.maxTokens = userCfg.defaultMaxTokens.value();
   }
   ctx.config.rollingMemory = userCfg.rollingMemory;
+  ctx.config.insanityDetectionEnabled = userCfg.insanityDetectionEnabled;
+  ctx.config.insanityRepetitionThreshold = userCfg.insanityRepetitionThreshold;
+  ctx.config.insanityMaxTokenThreshold = userCfg.insanityMaxTokenThreshold;
+  ctx.config.maxInsanityRetries = userCfg.maxInsanityRetries;
   ctx.config.persistHistory = persistHistory;
   ctx.config.personaName = personaName;
   ctx.permissions.allowedScopes = persona.allowedScopes;
@@ -848,13 +847,10 @@ std::string Engine::resumeAgent(const std::string &threadId,
         std::string actualHostId = agent->getHost()->init();
 
         auto metadata =
-            ThreadManager(
-                std::string(getenv("HOME") ? getenv("HOME") : "/root") +
-                "/.firmius/threads")
+            ThreadManager(ThreadManager::defaultBasePath())
                 .getMetadata(threadId);
         if (metadata.hostIdentifier != actualHostId) {
-          ThreadManager(std::string(getenv("HOME") ? getenv("HOME") : "/root") +
-                        "/.firmius/threads")
+          ThreadManager(ThreadManager::defaultBasePath())
               .updateHostIdentifier(threadId, actualHostId);
           agent->getMutableContext().environment.identifier = actualHostId;
         }
@@ -1456,6 +1452,12 @@ void Engine::shutdown() {
     std::lock_guard<std::mutex> lock(listenerMutex);
     fleet.clear();
   }
+}
+
+std::vector<firmius::provider::ToolDefinition>
+Engine::getAvailableToolDefinitionsForPermissions(
+    const firmius::shared::AgentPermissions &permissions) const {
+  return toolRegistry.getAvailableToolDefinitions(permissions);
 }
 
 } // namespace firmius::core

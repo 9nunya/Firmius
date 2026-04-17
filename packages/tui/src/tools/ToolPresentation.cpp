@@ -6,6 +6,7 @@
 #include "tools/WorkToolPresentation.hpp"
 #include "tools/PythonToolPresentation.hpp"
 #include "tools/WebSearchToolPresentation.hpp"
+#include "tools/McpToolPresentation.hpp"
 
 #include "utils/ErrorCleaner.hpp"
 #include "utils/ToolSummaries.hpp"
@@ -206,6 +207,9 @@ TryBuildSpecializedPresentation(const ToolCallView &view,
   if (IsWebSearchFamilyTool(view.name)) {
     return BuildWebSearchToolPresentation(view);
   }
+  if (IsMcpFamilyTool(view.name)) {
+    return BuildMcpToolPresentation(view);
+  }
   if (IsFileFamilyTool(view.name)) {
     return BuildFileToolPresentation(view);
   }
@@ -267,34 +271,31 @@ ToolPresentation BuildGenericPresentation(const ToolCallView &view) {
     return presentation;
   }
 
-  constexpr int kMaxPreviewLines = 5;
   const int total_line_count = CountLines(view.result);
-  presentation.expandable = true;
-  presentation.expanded = view.show_result;
+  presentation.expandable = false;
+  presentation.expanded = false;
   presentation.facts.push_back({"Output lines", std::to_string(total_line_count)});
 
   ToolPresentationSection section;
-  section.title = "Result preview";
-  section.lines = TailLines(view.result, kMaxPreviewLines);
+  section.title = "Result";
+  // Split result into lines
+  std::istringstream result_stream(view.result);
+  std::string result_line;
+  while (std::getline(result_stream, result_line)) {
+    section.lines.push_back(result_line);
+  }
   presentation.body_lines = section.lines;
   presentation.sections.push_back(std::move(section));
-
-  if (total_line_count > kMaxPreviewLines) {
-    ToolPresentationNotice notice;
-    notice.kind = ToolPresentationNoticeKind::Info;
-    notice.text = "Showing last " + std::to_string(kMaxPreviewLines) +
-                  " of " + std::to_string(total_line_count) + " lines";
-    presentation.notices.push_back(std::move(notice));
-  }
 
   return presentation;
 }
 
 } // namespace
 
-ToolPresentation BuildToolPresentation(const ToolCallView &view,
-                                       const NormalizedProcessState *process_state,
-                                       const NormalizedSubagentState *subagent_state) {
+ToolPresentation BuildToolPresentation(
+    const firmius::shared::ToolCallView &view,
+    const NormalizedProcessState *process_state,
+    const NormalizedSubagentState *subagent_state) {
   if (auto specialized =
           TryBuildSpecializedPresentation(view, process_state, subagent_state)) {
     return *specialized;

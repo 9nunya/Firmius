@@ -1,6 +1,7 @@
 #include "agents/HintingLoader.hpp"
 #include "utils/FrontmatterParser.hpp"
 #include "utils/StringUtil.hpp"
+#include "utils/PlatformPaths.hpp"
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -141,13 +142,9 @@ std::vector<std::string> HintingLoader::resolveHintingDirs() {
     }
   }
 
-  const char *home = std::getenv("HOME");
-  if (home) {
-    const std::filesystem::path userDir =
-        std::filesystem::path(home) / ".firmius" / "hinting";
-    if (isUsableHintingDir(userDir)) {
-      dirs.push_back(ensureTrailingSlash(userDir.string()));
-    }
+  const std::filesystem::path userDir = PlatformPaths::firmiusHomeDir() / "hinting";
+  if (isUsableHintingDir(userDir)) {
+    dirs.push_back(ensureTrailingSlash(userDir.string()));
   }
 
   const std::filesystem::path builtinDir("hinting");
@@ -241,18 +238,12 @@ HintingLoader::loadForModel(const std::string &providerId,
 }
 
 void HintingLoader::bootstrapDefaults(const std::string &builtinHintingDir) {
-  const char *home = std::getenv("HOME");
-  if (!home) {
-    return;
-  }
-
   const std::filesystem::path builtinDir(builtinHintingDir);
   if (!std::filesystem::exists(builtinDir)) {
     return;
   }
 
-  const std::filesystem::path userDir =
-      std::filesystem::path(home) / ".firmius" / "hinting";
+  const std::filesystem::path userDir = PlatformPaths::firmiusHomeDir() / "hinting";
   try {
     std::filesystem::create_directories(userDir);
   } catch (const std::filesystem::filesystem_error &) {

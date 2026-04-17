@@ -1,24 +1,21 @@
 #include "ActivePlanState.hpp"
 #include "TUIState.hpp"
-#include "AgentRegistry.hpp"
-#include "NotificationManager.hpp"
+
 #include "ThemeManager.hpp"
-#include "TUIHotkeys.hpp"
-#include "UIState.hpp"
 #include "UserPreferences.hpp"
-#include "WorkPanelLayout.hpp"
-#include "agents/ContextBudget.hpp"
-#include "agents/RollingContextManager.hpp"
-#include "agents/PurposeLoader.hpp"
-#include "commands/CommandManager.hpp"
 #include "components/AgentStrip.hpp"
 #include "components/ChatWindow.hpp"
-#include "components/GlintEffect.hpp"
-#include "components/HelpOverlay.hpp"
+#include "components/ContextLane.hpp"
 #include "components/InputBar.hpp"
 #include "components/Markdown.hpp"
+#include "components/HelpOverlay.hpp"
 #include "components/PlanLane.hpp"
+#include "components/StatusBar.hpp"
 #include "components/TodoLane.hpp"
+#include "agents/ContextBudget.hpp"
+#include "agents/PurposeLoader.hpp"
+#include "agents/RollingContextManager.hpp"
+#include "AgentRegistry.hpp"
 #include "components/StatusBar.hpp"
 #include "components/TitleBar.hpp"
 #include "components/TranscriptGrouping.hpp"
@@ -33,6 +30,11 @@
 #include "providers/BaseOAuthProvider.hpp"
 #include "providers/ProviderRegistry.hpp"
 #include "utils/Icons.hpp"
+#include "utils/PlatformPaths.hpp"
+#include "commands/ICommand.hpp"
+#include "commands/CommandManager.hpp"
+#include "TUIHotkeys.hpp"
+#include "UIState.hpp"
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -51,11 +53,242 @@
 #include <thread>
 #include <sstream>
 #include <iomanip>
+#include <atomic>
+#include <cstdint>
 
 namespace firmius::tui {
 
 using namespace firmius::shared;
 
+
+namespace {
+bool parseTuiStartupProfilingEnabledFromEnv() {
+  const char *raw = std::getenv("FIRMIUS_TUI_STARTUP_PROFILE");
+  if (!raw) {
+    return false;
+  }
+  std::string value(raw);
+  for (char &ch : value) {
+    ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+  }
+  if (value.empty() || value == "0" || value == "false" || value == "off" ||
+      value == "no") {
+    return false;
+  }
+  return true;
+}
+
+struct TuiProfilingStats {
+  std::atomic<uint64_t> app_event_enqueued{0};
+  std::atomic<uint64_t> custom_event_posted{0};
+  std::atomic<uint64_t> custom_event_drained{0};
+  std::atomic<uint64_t> on_event_dispatch_count{0};
+  std::atomic<int64_t> on_event_dispatch_ns{0};
+  std::atomic<uint64_t> thread_changed_count{0};
+  std::atomic<int64_t> thread_changed_ns{0};
+  std::atomic<uint64_t> rebuild_tool_calls_count{0};
+  std::atomic<int64_t> rebuild_tool_calls_ns{0};
+  std::atomic<uint64_t> chat_window_rebuild_count{0};
+  std::atomic<int64_t> chat_window_rebuild_ns{0};
+  std::atomic<uint64_t> raf_state_count{0};
+  std::atomic<uint64_t> raf_scrollable_width_change_count{0};
+  std::atomic<uint64_t> raf_agent_strip_spinner_count{0};
+};
+
+TuiProfilingStats &tuiProfilingStats() {
+  static TuiProfilingStats stats;
+  return stats;
+}
+
+double nanosToMillis(int64_t nanos) {
+  return static_cast<double>(nanos) / 1000000.0;
+}
+
+template <typename T>
+void HashCombine(std::size_t &seed, const T &value) {
+  seed ^= std::hash<T>{}(value) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+}
+
+std::shared_ptr<firmius::shared::AgentHistory> EnsureTranscriptHistory(
+    std::shared_ptr<firmius::shared::AgentHistory> &history,
+    const std::string &thread_id) {
+  if (!history) {
+    history = std::make_shared<firmius::shared::AgentHistory>();
+  }
+  if (history->threadId.empty()) {
+    history->threadId = thread_id;
+  }
+  return history;
+}
+
+} // namespace
+
+bool isTuiStartupProfilingEnabled() {
+  static bool enabled = parseTuiStartupProfilingEnabledFromEnv();
+  return enabled;
+}
+
+void noteTuiAppEventEnqueued() {
+  if (!isTuiStartupProfilingEnabled()) {
+    return;
+  }
+  tuiProfilingStats().app_event_enqueued.fetch_add(1, std::memory_order_relaxed);
+}
+
+void noteTuiCustomEventPosted() {
+  if (!isTuiStartupProfilingEnabled()) {
+    return;
+  }
+  tuiProfilingStats().custom_event_posted.fetch_add(1, std::memory_order_relaxed);
+}
+
+void noteTuiCustomEventDrained() {
+  if (!isTuiStartupProfilingEnabled()) {
+    return;
+  }
+  tuiProfilingStats().custom_event_drained.fetch_add(1, std::memory_order_relaxed);
+}
+
+void noteTuiOnEventDispatch(std::chrono::nanoseconds elapsed) {
+  if (!isTuiStartupProfilingEnabled()) {
+    return;
+  }
+  auto &stats = tuiProfilingStats();
+  stats.on_event_dispatch_count.fetch_add(1, std::memory_order_relaxed);
+  stats.on_event_dispatch_ns.fetch_add(static_cast<int64_t>(elapsed.count()),
+                                      std::memory_order_relaxed);
+}
+
+void noteTuiThreadChanged(std::chrono::nanoseconds elapsed) {
+  if (!isTuiStartupProfilingEnabled()) {
+    return;
+  }
+  auto &stats = tuiProfilingStats();
+  stats.thread_changed_count.fetch_add(1, std::memory_order_relaxed);
+  stats.thread_changed_ns.fetch_add(static_cast<int64_t>(elapsed.count()),
+                                    std::memory_order_relaxed);
+}
+
+void noteTuiRebuildToolCalls(std::chrono::nanoseconds elapsed) {
+  if (!isTuiStartupProfilingEnabled()) {
+    return;
+  }
+  auto &stats = tuiProfilingStats();
+  stats.rebuild_tool_calls_count.fetch_add(1, std::memory_order_relaxed);
+  stats.rebuild_tool_calls_ns.fetch_add(static_cast<int64_t>(elapsed.count()),
+                                        std::memory_order_relaxed);
+}
+
+void noteTuiChatWindowRebuild(std::chrono::nanoseconds elapsed) {
+  if (!isTuiStartupProfilingEnabled()) {
+    return;
+  }
+  auto &stats = tuiProfilingStats();
+  stats.chat_window_rebuild_count.fetch_add(1, std::memory_order_relaxed);
+  stats.chat_window_rebuild_ns.fetch_add(static_cast<int64_t>(elapsed.count()),
+                                         std::memory_order_relaxed);
+}
+
+void noteTuiRequestAnimationFrameFromState() {
+  if (!isTuiStartupProfilingEnabled()) {
+    return;
+  }
+  tuiProfilingStats().raf_state_count.fetch_add(1, std::memory_order_relaxed);
+}
+
+void noteTuiRequestAnimationFrameFromScrollableBoxWidthChange() {
+  if (!isTuiStartupProfilingEnabled()) {
+    return;
+  }
+  tuiProfilingStats().raf_scrollable_width_change_count.fetch_add(
+      1, std::memory_order_relaxed);
+}
+
+void noteTuiRequestAnimationFrameFromAgentStripSpinner() {
+  if (!isTuiStartupProfilingEnabled()) {
+    return;
+  }
+  tuiProfilingStats().raf_agent_strip_spinner_count.fetch_add(
+      1, std::memory_order_relaxed);
+}
+
+std::string tuiProfilingSummaryText() {
+  if (!isTuiStartupProfilingEnabled()) {
+    return "";
+  }
+
+  const auto &stats = tuiProfilingStats();
+  std::ostringstream out;
+  out << "TUI Profiling\n";
+  out << "AppEvent enqueued: "
+      << stats.app_event_enqueued.load(std::memory_order_relaxed) << "\n";
+  out << "Event::Custom posted: "
+      << stats.custom_event_posted.load(std::memory_order_relaxed) << "\n";
+  out << "Event::Custom drained: "
+      << stats.custom_event_drained.load(std::memory_order_relaxed) << "\n";
+
+  const uint64_t onEventCount =
+      stats.on_event_dispatch_count.load(std::memory_order_relaxed);
+  const int64_t onEventNs =
+      stats.on_event_dispatch_ns.load(std::memory_order_relaxed);
+  out << "onEvent dispatches: " << onEventCount << " ("
+      << std::fixed << std::setprecision(3) << nanosToMillis(onEventNs)
+      << " ms total";
+  if (onEventCount > 0) {
+    out << ", " << nanosToMillis(onEventNs) / static_cast<double>(onEventCount)
+        << " ms avg";
+  }
+  out << ")\n";
+
+  const uint64_t threadChangedCount =
+      stats.thread_changed_count.load(std::memory_order_relaxed);
+  const int64_t threadChangedNs =
+      stats.thread_changed_ns.load(std::memory_order_relaxed);
+  out << "ThreadChanged handled: " << threadChangedCount << " ("
+      << nanosToMillis(threadChangedNs) << " ms total";
+  if (threadChangedCount > 0) {
+    out << ", "
+        << nanosToMillis(threadChangedNs) /
+               static_cast<double>(threadChangedCount)
+        << " ms avg";
+  }
+  out << ")\n";
+
+  const uint64_t rebuildCount =
+      stats.rebuild_tool_calls_count.load(std::memory_order_relaxed);
+  const int64_t rebuildNs =
+      stats.rebuild_tool_calls_ns.load(std::memory_order_relaxed);
+  out << "rebuildToolCallsFromHistory: " << rebuildCount << " ("
+      << nanosToMillis(rebuildNs) << " ms total";
+  if (rebuildCount > 0) {
+    out << ", " << nanosToMillis(rebuildNs) / static_cast<double>(rebuildCount)
+        << " ms avg";
+  }
+  out << ")\n";
+
+  const uint64_t chatRebuildCount =
+      stats.chat_window_rebuild_count.load(std::memory_order_relaxed);
+  const int64_t chatRebuildNs =
+      stats.chat_window_rebuild_ns.load(std::memory_order_relaxed);
+  out << "ChatWindow rebuilds: " << chatRebuildCount << " ("
+      << nanosToMillis(chatRebuildNs) << " ms total";
+  if (chatRebuildCount > 0) {
+    out << ", "
+        << nanosToMillis(chatRebuildNs) / static_cast<double>(chatRebuildCount)
+        << " ms avg";
+  }
+  out << ")\n";
+
+  out << "RequestAnimationFrame counts: state="
+      << stats.raf_state_count.load(std::memory_order_relaxed)
+      << ", scrollable_width_change="
+      << stats.raf_scrollable_width_change_count.load(std::memory_order_relaxed)
+      << ", agent_strip_spinner="
+      << stats.raf_agent_strip_spinner_count.load(std::memory_order_relaxed)
+      << "\n";
+
+  return out.str();
+}
 namespace detail {
 
 std::string summarizeQuotaBucketsForModel(
@@ -292,8 +525,7 @@ std::shared_ptr<firmius::shared::AgentHistory> expandHistoryForTranscript(
   }
 
   firmius::core::ThreadManager tm(
-      std::string(std::getenv("HOME") ? std::getenv("HOME") : "/tmp") +
-      "/.firmius/threads");
+      (firmius::shared::PlatformPaths::firmiusHomeDir() / "threads").string());
   const auto snapshotList = tm.loadCompactionSnapshots(thread_id, agent_id);
   if (snapshotList.empty()) {
     return std::make_shared<firmius::shared::AgentHistory>(base_history);
@@ -526,8 +758,8 @@ static bool isExecutorLikeRole(firmius::core::PurposeWorkRole role) {
 }
 
 static std::string firmiusThreadsPath() {
-  return std::string(std::getenv("HOME") ? std::getenv("HOME") : "/tmp") +
-         "/.firmius/threads";
+  return (firmius::shared::PlatformPaths::firmiusHomeDir() / "threads")
+      .string();
 }
 
 static std::vector<std::string> getSwitchableLeadPersonas() {
@@ -876,9 +1108,17 @@ void TuiState::deferUiMutation(std::function<void()> action) {
 }
 
 void TuiState::postEvent(ftxui::Event event) {
-  if (screen_) {
-    screen_->PostEvent(event);
+  if (!screen_) {
+    return;
   }
+  if (event == ftxui::Event::Custom) {
+    if (custom_event_pending_) {
+      return;
+    }
+    custom_event_pending_ = true;
+    noteTuiCustomEventPosted();
+  }
+  screen_->PostEvent(event);
 }
 
 bool TuiState::cycleThreadPermissionMode() {
@@ -891,7 +1131,7 @@ bool TuiState::cycleThreadPermissionMode() {
         "New threads: " + permissionModeToDisplayName(thread_.permissionMode),
         std::chrono::milliseconds(1600));
     if (screen_) {
-      screen_->PostEvent(ftxui::Event::Custom);
+      postEvent(ftxui::Event::Custom);
     }
     return true;
   }
@@ -900,7 +1140,7 @@ bool TuiState::cycleThreadPermissionMode() {
   persistUserPreferences();
   updateStatusModel();
   if (screen_) {
-    screen_->PostEvent(ftxui::Event::Custom);
+    postEvent(ftxui::Event::Custom);
   }
   harness_->cycleCurrentThreadPermissionMode();
   return true;
@@ -1038,47 +1278,59 @@ void TuiState::init(firmius::core::Harness &harness,
   };
 
   input_model_->complete_file_references = [this](const std::string &query) {
-    std::vector<std::string> allPaths;
     const std::filesystem::path root = thread_.cwd.empty()
                                            ? std::filesystem::current_path()
                                            : std::filesystem::path(thread_.cwd);
     std::error_code ec;
     if (!std::filesystem::exists(root, ec)) {
+      file_reference_cache_ready_ = false;
+      file_reference_cache_paths_.clear();
       return std::vector<std::string>{};
     }
 
-    for (std::filesystem::recursive_directory_iterator it(
-             root, std::filesystem::directory_options::skip_permission_denied,
-             ec),
-         end;
-         it != end; it.increment(ec)) {
-      if (ec) {
-        ec.clear();
-        continue;
-      }
-      const auto name = it->path().filename().string();
-      if (it->is_directory(ec)) {
-        if (name == ".git" || name == "build" || name == ".firmius") {
-          it.disable_recursion_pending();
-        }
-        continue;
-      }
-      if (!it->is_regular_file(ec)) {
-        continue;
-      }
+    if (!file_reference_cache_ready_ || file_reference_cache_root_ != root) {
+      file_reference_cache_root_ = root;
+      file_reference_cache_paths_.clear();
 
-      const auto rel = std::filesystem::relative(it->path(), root, ec);
-      if (ec) {
-        ec.clear();
-        continue;
+      size_t visited = 0;
+      for (std::filesystem::recursive_directory_iterator it(
+               root, std::filesystem::directory_options::skip_permission_denied,
+               ec),
+           end;
+           it != end; it.increment(ec)) {
+        if (++visited > 20000 || file_reference_cache_paths_.size() >= 1000) {
+          break;
+        }
+        if (ec) {
+          ec.clear();
+          continue;
+        }
+        const auto name = it->path().filename().string();
+        if (it->is_directory(ec)) {
+          // Skip hidden directories and known heavyweight/generated dirs
+          if ((!name.empty() && name[0] == '.') ||
+              name == "node_modules" || name == "build" || name == "dist" ||
+              name == "__pycache__" || name == "target" || name == "vendor" ||
+              name == "_build" || name == "out" || name == "coverage" ||
+              name == "uploads" || name == ".output" || name == "CMakeFiles") {
+            it.disable_recursion_pending();
+          }
+          continue;
+        }
+        if (!it->is_regular_file(ec)) {
+          continue;
+        }
+
+        const auto rel = std::filesystem::relative(it->path(), root, ec);
+        if (ec) {
+          ec.clear();
+          continue;
+        }
+        file_reference_cache_paths_.push_back(rel.generic_string());
       }
-      const std::string relPath = rel.generic_string();
-      allPaths.push_back(relPath);
-      if (allPaths.size() >= 1000) {
-        break;
-      }
+      file_reference_cache_ready_ = true;
     }
-    return BuildFileReferenceSuggestions(allPaths, query, 8);
+    return BuildFileReferenceSuggestions(file_reference_cache_paths_, query, 8);
   };
 
   input_model_->complete_artifact_references = [this](const std::string &query) {
@@ -1107,15 +1359,18 @@ void TuiState::init(firmius::core::Harness &harness,
   subscription_id_ =
       harness_->subscribe([this](const firmius::shared::AppEvent &ev) {
         event_queue_.push(ev);
+        noteTuiAppEventEnqueued();
         if (screen_) {
-          screen_->PostEvent(ftxui::Event::Custom);
+          postEvent(ftxui::Event::Custom);
         }
       });
 
-  updateStatusModel();
-  updateAgentStripModel();
-  updatePlanLaneModel();
-  updateTodoLaneModel();
+  requestRefresh(RefreshFlags::Status);
+  requestRefresh(RefreshFlags::AgentStrip);
+  requestRefresh(RefreshFlags::PlanLane);
+  requestRefresh(RefreshFlags::TodoLane);
+  requestRefresh(RefreshFlags::ContextLane);
+  applyPendingRefreshes();
 }
 
 bool TuiState::focusAgent(const std::string &agent_id) {
@@ -1124,13 +1379,13 @@ bool TuiState::focusAgent(const std::string &agent_id) {
   }
   focused_agent_id_ = agent_id;
   refreshFocusedHistory();
-  if (chat_component_) {
-    chat_component_->OnEvent(ftxui::Event::Special("ThreadChanged"));
-  }
-  updateAgentStripModel();
-  updateStatusModel();
-  updatePlanLaneModel();
-  updateTodoLaneModel();
+  requestRefresh(RefreshFlags::AgentStrip);
+  requestRefresh(RefreshFlags::Status);
+  requestRefresh(RefreshFlags::PlanLane);
+  requestRefresh(RefreshFlags::TodoLane);
+  requestRefresh(RefreshFlags::ContextLane);
+  notifyChatTranscriptChanged();
+  applyPendingRefreshes();
   return true;
 }
 
@@ -1175,7 +1430,7 @@ bool TuiState::handleCtrlC() {
       "Exit Armed", "Press Ctrl+C again within 4s to quit.",
       std::chrono::milliseconds(1800));
   if (screen_) {
-    screen_->PostEvent(ftxui::Event::Custom);
+    postEvent(ftxui::Event::Custom);
   }
   // Join any existing thread before starting a new one
   if (quit_arm_thread_.joinable()) {
@@ -1194,7 +1449,7 @@ bool TuiState::handleCtrlC() {
     }
     quit_arm_deadline_.reset();
     if (screen_) {
-      screen_->PostEvent(ftxui::Event::Custom);
+      postEvent(ftxui::Event::Custom);
     }
   });
   return true;
@@ -1232,21 +1487,67 @@ std::string TuiState::exitSummaryText() const {
                session_metrics_.context, 4)
         << "\n";
   }
+  const std::string profiling = tuiProfilingSummaryText();
+  if (!profiling.empty()) {
+    out << profiling;
+  }
   return out.str();
 }
 
 void TuiState::drainEvents() {
+  custom_event_pending_ = false;
+  noteTuiCustomEventDrained();
   for (const auto &ev : event_queue_.drainAll()) {
     onEvent(ev);
+  }
+  applyPendingRefreshes();
+}
+
+void TuiState::requestRefresh(RefreshFlags flags) {
+  pending_refresh_flags_ |= static_cast<unsigned int>(flags);
+}
+
+void TuiState::notifyChatTranscriptChanged() {
+  requestRefresh(RefreshFlags::ChatTranscript);
+}
+
+void TuiState::applyPendingRefreshes() {
+  const unsigned int flags = pending_refresh_flags_;
+  if (flags == 0) {
+    return;
+  }
+  pending_refresh_flags_ = 0;
+
+  if (flags & static_cast<unsigned int>(RefreshFlags::Status)) {
+    updateStatusModel();
+  }
+  if (flags & static_cast<unsigned int>(RefreshFlags::AgentStrip)) {
+    updateAgentStripModel();
+  }
+  if (flags & static_cast<unsigned int>(RefreshFlags::PlanLane)) {
+    updatePlanLaneModel();
+  }
+  if (flags & static_cast<unsigned int>(RefreshFlags::TodoLane)) {
+    updateTodoLaneModel();
+  }
+  if (flags & static_cast<unsigned int>(RefreshFlags::ContextLane)) {
+    updateContextLaneModel();
+  }
+  if ((flags & static_cast<unsigned int>(RefreshFlags::ChatTranscript)) &&
+      chat_component_) {
+    chat_component_->OnEvent(ftxui::Event::Special("ThreadChanged"));
   }
 }
 
 void TuiState::onEvent(const shared::AppEvent &ev) {
+  const auto on_event_begin = std::chrono::steady_clock::now();
+  requestRefresh(RefreshFlags::Status);
+  requestRefresh(RefreshFlags::ContextLane);
+
   std::visit(
       [&](auto &&e) {
         using T = std::decay_t<decltype(e)>;
 
-        updateStatusModel();
         if constexpr (std::is_same_v<T, AgentThinking>) {
           stream_state_.handleAgentThinking(e);
         } else if constexpr (std::is_same_v<T, AgentText>) {
@@ -1254,70 +1555,110 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
         } else if constexpr (std::is_same_v<T, AgentTurnCompleted>) {
           stream_state_.handleAgentTurnCompleted(e);
           session_metrics_ += e.turn.metrics;
+          // Append completed turns to the in-memory transcript immediately.
+          // Live stream rows are cleared on completion, so without this the UI
+          // can briefly render neither live nor persisted content.
+          if (e.agentId == focused_agent_id_) {
+            auto transcript_history =
+                EnsureTranscriptHistory(history_, thread_.threadId);
+            transcript_history->turns.push_back(e.turn);
+          }
+          notifyChatTranscriptChanged();
         } else if constexpr (std::is_same_v<T, AgentProviderWaiting>) {
           stream_state_.handleAgentProviderWaiting(e);
         } else if constexpr (std::is_same_v<T, AgentToolCallChunk>) {
           stream_state_.handleAgentToolCallChunk(e);
         } else if constexpr (std::is_same_v<T, AgentToolCall>) {
           stream_state_.handleAgentToolCall(e);
+        } else if constexpr (std::is_same_v<T, AgentFileEdited>) {
+          stream_state_.handleAgentFileEdited(e);
         } else if constexpr (std::is_same_v<T, ThreadChanged>) {
+          const auto thread_changed_begin = std::chrono::steady_clock::now();
           thread_ = e.metadata;
-          focused_agent_id_ = harness_->focusedAgentId();
+          focused_agent_id_ = harness_ ? harness_->focusedAgentId() : std::string();
 
+          auto all_agents = harness_ ? harness_->listAgents(thread_.threadId)
+                                     : std::vector<std::string>{};
           if (focused_agent_id_.empty()) {
-            auto agents = harness_->listAgents(thread_.threadId);
-            for (const auto &candidate : agents) {
-              auto agent =
-                  firmius::core::AgentRegistry::instance().getAgent(candidate);
+            for (const auto &candidate : all_agents) {
+              auto agent = firmius::core::AgentRegistry::instance().getAgent(candidate);
               if (agent && agent->getContext().identity.parentId.empty()) {
                 focused_agent_id_ = candidate;
                 break;
               }
             }
-            if (focused_agent_id_.empty() && !agents.empty()) {
-              focused_agent_id_ = agents.front();
+            if (focused_agent_id_.empty() && !all_agents.empty()) {
+              focused_agent_id_ = all_agents.front();
             }
-          }
-
-          if (!focused_agent_id_.empty()) {
-            refreshFocusedHistory();
-          } else {
-            history_ = nullptr;
           }
 
           pending_modal_clear_ = true;
           stream_state_.handleThreadChanged();
 
-          // Rebuild tool calls from history for ALL agents in the thread
-          // This ensures parent agents' summon_subagent tool calls get their
-          // subagent_tool_log populated from subagent histories
-          // Process agents in order (lead agent first, then subagents)
-          auto all_agents = harness_->listAgents(thread_.threadId);
-
-          // First pass: create all tool calls for all agents
+          firmius::core::ThreadManager thread_manager(
+              firmius::core::ThreadManager::defaultBasePath());
+          std::vector<std::pair<std::string, firmius::shared::AgentHistory>>
+              loaded_histories;
+          loaded_histories.reserve(all_agents.size());
           for (const auto &agent_id : all_agents) {
-            auto agent_hist = firmius::core::ThreadManager(
-                                  firmius::core::ThreadManager::defaultBasePath())
-                                  .loadAgentHistory(thread_.threadId, agent_id);
+            auto agent_hist = thread_manager.loadAgentHistory(thread_.threadId, agent_id);
             if (!agent_hist.turns.empty()) {
-              // Pass false for populate_subagent_log - just create tool calls
-              stream_state_.rebuildToolCallsFromHistory(
-                  agent_id, &agent_hist, thread_.threadId, false);
+              loaded_histories.emplace_back(agent_id, std::move(agent_hist));
             }
           }
 
-          // Second pass: populate subagent_tool_log for all summon_subagent
-          // calls
-          for (const auto &agent_id : all_agents) {
-            auto agent_hist = firmius::core::ThreadManager(
-                                  firmius::core::ThreadManager::defaultBasePath())
-                                  .loadAgentHistory(thread_.threadId, agent_id);
-            if (!agent_hist.turns.empty()) {
-              // Pass true for populate_subagent_log - populate
-              // subagent_tool_log
-              stream_state_.rebuildToolCallsFromHistory(
-                  agent_id, &agent_hist, thread_.threadId, true);
+          history_.reset();
+          for (auto &entry : loaded_histories) {
+            if (entry.first == focused_agent_id_) {
+              history_ = expandHistoryForTranscript(thread_.threadId, entry.first, entry.second);
+              break;
             }
+          }
+
+          std::vector<const std::pair<std::string, firmius::shared::AgentHistory> *>
+              histories_with_subagents;
+          histories_with_subagents.reserve(loaded_histories.size());
+          for (const auto &entry : loaded_histories) {
+            bool has_summon_subagent = false;
+            for (const auto &turn : entry.second.turns) {
+              for (const auto &msg : turn.messages) {
+                for (const auto &content : msg.content) {
+                  if (const auto *tc =
+                          std::get_if<firmius::shared::ToolCallContent>(&content);
+                      tc && tc->name == "summon_subagent") {
+                    has_summon_subagent = true;
+                    break;
+                  }
+                }
+                if (has_summon_subagent) {
+                  break;
+                }
+              }
+              if (has_summon_subagent) {
+                break;
+              }
+            }
+            if (has_summon_subagent) {
+              histories_with_subagents.push_back(&entry);
+            }
+          }
+
+          for (const auto &entry : loaded_histories) {
+            auto rebuild_begin = std::chrono::steady_clock::now();
+            stream_state_.rebuildToolCallsFromHistory(entry.first, &entry.second,
+                                                      thread_.threadId, false);
+            noteTuiRebuildToolCalls(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - rebuild_begin));
+          }
+          for (const auto *entry : histories_with_subagents) {
+              auto rebuild_begin = std::chrono::steady_clock::now();
+              stream_state_.rebuildToolCallsFromHistory(entry->first, &entry->second,
+                                                        thread_.threadId,
+                                                        true);
+              noteTuiRebuildToolCalls(
+                  std::chrono::duration_cast<std::chrono::nanoseconds>(
+                      std::chrono::steady_clock::now() - rebuild_begin));
           }
 
           if (title_model_) {
@@ -1325,18 +1666,18 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
             title_model_->thread_id = thread_.threadId;
           }
           active_plan_state_.setExpanded(true);
-          active_plan_state_.hydrateForThread(thread_,
-                                              loadActivePlanForThread(thread_));
-          updatePlanLaneModel();
-          updateTodoLaneModel();
+          active_plan_state_.hydrateForThread(thread_, loadActivePlanForThread(thread_));
           setViewMode(ViewMode::Chat);
 
-          updateStatusModel();
-          updateAgentStripModel();
+          requestRefresh(RefreshFlags::Status);
+          requestRefresh(RefreshFlags::AgentStrip);
+          requestRefresh(RefreshFlags::PlanLane);
+          requestRefresh(RefreshFlags::TodoLane);
+          requestRefresh(RefreshFlags::ContextLane);
+          notifyChatTranscriptChanged();
 
-          if (chat_component_) {
-            chat_component_->OnEvent(ftxui::Event::Special("ThreadChanged"));
-          }
+          noteTuiThreadChanged(std::chrono::duration_cast<std::chrono::nanoseconds>(
+              std::chrono::steady_clock::now() - thread_changed_begin));
         } else if constexpr (std::is_same_v<T, ThreadMetadataUpdated>) {
           if (e.threadId == thread_.threadId) {
             const std::string previous_active_plan_id = thread_.activePlanId;
@@ -1350,8 +1691,8 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
               active_plan_state_.setExpanded(true);
               active_plan_state_.hydrateForThread(
                   thread_, loadActivePlanForThread(thread_));
-              updatePlanLaneModel();
-              updateTodoLaneModel();
+              requestRefresh(RefreshFlags::PlanLane);
+              requestRefresh(RefreshFlags::TodoLane);
             }
             if (previousMode != thread_.permissionMode) {
               NotificationManager::instance().notifyInfo(
@@ -1359,6 +1700,7 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
                   "Thread mode: " +
                       permissionModeToDisplayName(thread_.permissionMode),
                   std::chrono::milliseconds(1500));
+              requestRefresh(RefreshFlags::Status);
             }
           }
         } else if constexpr (std::is_same_v<T, PermissionEscalationRequest>) {
@@ -1378,7 +1720,7 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
             }
           }
           if (screen_) {
-            screen_->PostEvent(ftxui::Event::Custom);
+            postEvent(ftxui::Event::Custom);
           }
         } else if constexpr (std::is_same_v<T, PermissionEscalationResolved>) {
           if (pending_permission_request_ &&
@@ -1413,9 +1755,7 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
           stream_state_.handleContextCompacted(e);
           if (e.agentId.empty() || e.agentId == focused_agent_id_) {
             refreshFocusedHistory();
-            if (chat_component_) {
-              chat_component_->OnEvent(ftxui::Event::Special("ThreadChanged"));
-            }
+            notifyChatTranscriptChanged();
           }
         } else if constexpr (std::is_same_v<T, AgentProcessSpawned>) {
           stream_state_.handleAgentProcessSpawned(e);
@@ -1425,23 +1765,37 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
           if (e.parentId.empty() && focused_agent_id_.empty()) {
             focused_agent_id_ = e.agentId;
             refreshFocusedHistory();
-            if (chat_component_) {
-              chat_component_->OnEvent(ftxui::Event::Special("ThreadChanged"));
-            }
+            notifyChatTranscriptChanged();
           }
           stream_state_.handleAgentSpawned(e, focused_agent_id_);
+          requestRefresh(RefreshFlags::AgentStrip);
         } else if constexpr (std::is_same_v<T, UserMessageSent>) {
           if (focused_agent_id_.empty()) {
-            focused_agent_id_ = harness_->focusedAgentId();
+            focused_agent_id_ = harness_ ? harness_->focusedAgentId() : std::string();
             refreshFocusedHistory();
           }
-          if (chat_component_) {
-            chat_component_->OnEvent(ftxui::Event::Special("ThreadChanged"));
+          if (e.threadId == thread_.threadId) {
+            auto transcript_history =
+                EnsureTranscriptHistory(history_, thread_.threadId);
+            shared::AgentTurn turn;
+            turn.turnId = "user-live-" + e.messageId;
+            shared::Message message;
+            message.id = e.messageId;
+            message.role = shared::Role::User;
+            message.timestamp = static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch())
+                    .count());
+            message.content = {shared::TextContent{e.text}};
+            for (const auto &img : e.images) {
+              message.content.push_back(img);
+            }
+            turn.messages.push_back(std::move(message));
+            transcript_history->turns.push_back(std::move(turn));
           }
+          notifyChatTranscriptChanged();
         } else if constexpr (std::is_same_v<T, HistoryUndone>) {
-          if (chat_component_) {
-            chat_component_->OnEvent(ftxui::Event::Special("ThreadChanged"));
-          }
+          notifyChatTranscriptChanged();
         } else if constexpr (std::is_same_v<T, AgentAccountSwitched>) {
           stream_state_.handleAgentAccountSwitched(e);
           NotificationManager::instance().notifyInfo(
@@ -1459,6 +1813,7 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
             NotificationManager::instance().notifyError("Agent Error",
                                                         e.message, false);
           }
+          requestRefresh(RefreshFlags::AgentStrip);
         } else if constexpr (std::is_same_v<T, AgentRetrying>) {
           stream_state_.handleAgentRetrying(e);
           std::string retryMsg = "Attempt " + std::to_string(e.attempt) + "/" +
@@ -1470,16 +1825,20 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
           NotificationManager::instance().notifyWarning(
               "Retrying", retryMsg,
               std::chrono::milliseconds(std::max(e.delayMs, 3000)));
+          requestRefresh(RefreshFlags::AgentStrip);
         } else if constexpr (std::is_same_v<T, AgentRetryFailed>) {
           stream_state_.handleAgentRetryFailed(e);
           NotificationManager::instance().notifyError(
               "Retry Failed",
               e.reason.empty() ? "All retry attempts exhausted" : e.reason,
               false);
+          requestRefresh(RefreshFlags::AgentStrip);
         } else if constexpr (std::is_same_v<T, AgentFinished>) {
           stream_state_.handleAgentFinished(e);
+          requestRefresh(RefreshFlags::AgentStrip);
         } else if constexpr (std::is_same_v<T, AgentInterrupted>) {
           stream_state_.handleAgentInterrupted(e);
+          requestRefresh(RefreshFlags::AgentStrip);
         } else if constexpr (std::is_same_v<T, ThreadTitleUpdated>) {
           if (title_model_) {
             title_model_->title = e.title;
@@ -1501,18 +1860,18 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
     if (const auto &plan = active_plan_state_.activePlan(); plan.has_value()) {
       thread_.activePlanId = plan->id;
     }
-    updatePlanLaneModel();
-    updateTodoLaneModel();
+    requestRefresh(RefreshFlags::PlanLane);
+    requestRefresh(RefreshFlags::TodoLane);
   }
 
-  updateStatusModel();
-  updateAgentStripModel();
-  updatePlanLaneModel();
-  updateTodoLaneModel();
+  applyPendingRefreshes();
 
   if (screen_) {
-    screen_->PostEvent(ftxui::Event::Custom);
+    postEvent(ftxui::Event::Custom);
   }
+
+  noteTuiOnEventDispatch(std::chrono::duration_cast<std::chrono::nanoseconds>(
+      std::chrono::steady_clock::now() - on_event_begin));
 }
 
 std::string TuiState::statusText() const { return "unknown"; }
@@ -1626,6 +1985,7 @@ void TuiState::updateStatusModel() {
 void TuiState::updateAgentStripModel() {
   if (!agent_strip_model_)
     return;
+  ++agent_strip_model_->layout_generation;
   agent_strip_model_->items.clear();
   if (focused_agent_id_.empty())
     return;
@@ -2019,17 +2379,33 @@ void TuiState::updateContextLaneModel() {
 
   const auto rankedBuckets =
       firmius::core::rankContextBuckets(metrics.context);
+  
+  // Calculate total tokens across all buckets for ratio calculation
+  uint32_t totalBucketTokens = 0;
   for (const auto &bucket : rankedBuckets) {
-    const auto tokens =
-        bucket.actualTokens > 0 ? bucket.actualTokens : bucket.estimatedTokens;
-    if (tokens == 0) {
-      continue;
-    }
+    const auto tokens = bucket.actualTokens > 0 ? bucket.actualTokens : bucket.estimatedTokens;
+    totalBucketTokens += tokens;
+  }
+  
+  // Populate context_buckets with ALL buckets in order
+  context_lane_model_->context_buckets.clear();
+  for (const auto &bucket : rankedBuckets) {
+    const auto tokens = bucket.actualTokens > 0 ? bucket.actualTokens : bucket.estimatedTokens;
+    if (tokens == 0) continue;
+    
+        ContextBucket cb;
+    cb.label = shortenBucketLabel(bucket.label);
+    cb.tokens = tokens;
+    cb.ratio = totalBucketTokens > 0 ? static_cast<float>(tokens) / totalBucketTokens : 0.0f;
+    context_lane_model_->context_buckets.push_back(cb);
+  }
+  
+  // Keep old bucket_labels for backward compatibility (top 2)
+  context_lane_model_->bucket_labels.clear();
+  for (std::size_t i = 0; i < context_lane_model_->context_buckets.size() && i < 2; ++i) {
     context_lane_model_->bucket_labels.push_back(
-        shortenBucketLabel(bucket.label) + " " + formatCompactCount(tokens));
-    if (context_lane_model_->bucket_labels.size() >= 2) {
-      break;
-    }
+        context_lane_model_->context_buckets[i].label + " " + 
+        formatCompactCount(context_lane_model_->context_buckets[i].tokens));
   }
 
   const auto rolling =
@@ -2235,14 +2611,7 @@ ftxui::Component TuiState::root() {
         }
       });
   auto focused_history_getter = [this]() -> const firmius::shared::AgentHistory * {
-    static thread_local std::shared_ptr<firmius::shared::AgentHistory>
-        owned_history;
-    owned_history.reset();
-    if (focused_agent_id_.empty()) {
-      return nullptr;
-    }
-    return resolveAgentHistoryForThread(harness_, thread_.threadId,
-                                        focused_agent_id_, &owned_history);
+    return history_.get();
   };
 
   auto chat = ChatWindow(
@@ -2278,7 +2647,7 @@ ftxui::Component TuiState::root() {
                  }) |
                  ftxui::bgcolor(theme.input.bg) | ftxui::xflex;
         };
-        auto loopFooter = [this, &theme, s]() -> std::optional<ftxui::Element> {
+        auto loopFooter = [this, &theme]() -> std::optional<ftxui::Element> {
           if (focused_agent_id_.empty()) {
             return std::nullopt;
           }
@@ -2291,17 +2660,19 @@ ftxui::Component TuiState::root() {
           if (!agent->isRunning()) {
             return std::nullopt;
           }
-          ftxui::animation::RequestAnimationFrame();
-          const bool waiting = s && s->provider_waiting;
-          std::string line =
-              waiting ? firmius::shared::ICON_WAIT + " wait"
-                      : firmius::shared::ICON_GEAR + " live";
+          const auto now = std::chrono::steady_clock::now();
+          if (now - last_live_raf_request_ >= std::chrono::milliseconds(100)) {
+            last_live_raf_request_ = now;
+            noteTuiRequestAnimationFrameFromState();
+            ftxui::animation::RequestAnimationFrame();
+          }
+          std::string line;
           const std::string title =
               ctx.identity.friendlyName.empty()
                   ? resolvePersonaTitle(ctx.config.personaName)
                   : ctx.identity.friendlyName;
           if (!title.empty()) {
-            line += " · " + title;
+            line += title;
           }
           if (!ctx.config.modelId.empty()) {
             line += " · " + ctx.config.modelId;
@@ -2381,8 +2752,13 @@ ftxui::Component TuiState::root() {
             if (entry.agentId != focused_agent_id_) {
               continue;
             }
+            const auto trimmed =
+                firmius::tui::ClampTranscriptTextForDisplay(entry.message);
+            if (trimmed.empty()) {
+              continue;
+            }
             live_rows.push_back(decorateMsg(firmius::tui::RenderMarkdown(
-                firmius::tui::ClampTranscriptTextForDisplay(entry.message),
+                trimmed,
                 entry.kind == TimelineEntry::Kind::Thinking)));
             continue;
           }
@@ -2607,6 +2983,66 @@ ftxui::Component TuiState::root() {
         return result;
       },
       [this]() {
+        std::size_t signature = 0;
+        HashCombine(signature, focused_agent_id_);
+        HashCombine(signature, thread_.threadId);
+
+        if (const auto *s = stream_state_.getStream(focused_agent_id_)) {
+          HashCombine(signature, s->thinking.size());
+          HashCombine(signature, s->text.size());
+          HashCombine(signature, s->compaction_thinking.size());
+          HashCombine(signature, s->compaction_text.size());
+          HashCombine(signature, s->compaction_completion.size());
+          HashCombine(signature, s->compaction_active);
+          HashCombine(signature, s->compaction_finished);
+          HashCombine(signature, s->provider_waiting);
+        }
+
+        const auto &timeline = stream_state_.getTimeline();
+        HashCombine(signature, timeline.size());
+        for (const auto &entry : timeline) {
+          if (entry.agentId != focused_agent_id_) {
+            continue;
+          }
+          HashCombine(signature, entry.id);
+          HashCombine(signature, static_cast<int>(entry.kind));
+          HashCombine(signature, entry.message.size());
+        }
+
+        const auto &tool_calls = stream_state_.getToolCalls();
+        HashCombine(signature, tool_calls.size());
+        for (const auto &[id, view] : tool_calls) {
+          if (!view || view->agentId != focused_agent_id_) {
+            continue;
+          }
+          HashCombine(signature, id);
+          HashCombine(signature, static_cast<int>(view->phase));
+          HashCombine(signature, view->name);
+          HashCombine(signature, view->args.size());
+          HashCombine(signature, view->result.size());
+          HashCombine(signature, view->success);
+        }
+
+        for (const auto &entry : stream_state_.getQueuedMessages()) {
+          if ((!entry.agent_id.empty() && entry.agent_id != focused_agent_id_) ||
+              (!entry.thread_id.empty() && entry.thread_id != thread_.threadId)) {
+            continue;
+          }
+          HashCombine(signature, entry.message_id);
+          HashCombine(signature, entry.text.size());
+        }
+        for (const auto &entry : stream_state_.getQueuedInternalMessages()) {
+          if ((!entry.agent_id.empty() && entry.agent_id != focused_agent_id_) ||
+              (!entry.thread_id.empty() && entry.thread_id != thread_.threadId)) {
+            continue;
+          }
+          HashCombine(signature, entry.message_id);
+          HashCombine(signature, entry.text.size());
+        }
+
+        return signature;
+      },
+      [this]() {
         if (!harness_) {
           return false;
         }
@@ -2643,7 +3079,6 @@ ftxui::Component TuiState::root() {
       ftxui::Renderer(container, [this, title_bar, status_bar, plan_lane,
                                   todo_lane, context_lane, agent_strip, input_bar, chat,
                                   welcome_screen] {
-        updateContextLaneModel();
         // Deferred modal clearing: drain here where it's safe
         if (pending_modal_clear_) {
           modals_.clear();
@@ -2677,7 +3112,7 @@ ftxui::Component TuiState::root() {
           last_terminal_width_ = terminal.dimx;
           last_terminal_height_ = terminal.dimy;
           if (screen_) {
-            screen_->PostEvent(ftxui::Event::Custom);
+            postEvent(ftxui::Event::Custom);
           }
         }
         const int work_panel_max_height =
@@ -2859,7 +3294,7 @@ ftxui::Component TuiState::root() {
         input_component_->TakeFocus();
       }
       if (screen_) {
-        screen_->PostEvent(ftxui::Event::Custom);
+        postEvent(ftxui::Event::Custom);
       }
     };
 
@@ -3115,11 +3550,12 @@ ftxui::Component TuiState::root() {
       updateStatusModel();
       updateAgentStripModel();
       updateTodoLaneModel();
+      updateContextLaneModel();
       if (chat_component_) {
         chat_component_->OnEvent(ftxui::Event::Special("ThreadChanged"));
       }
       if (screen_) {
-        screen_->PostEvent(ftxui::Event::Custom);
+        postEvent(ftxui::Event::Custom);
       }
 
       NotificationManager::instance().notifyInfo(
@@ -3141,8 +3577,9 @@ ftxui::Component TuiState::root() {
             updateStatusModel();
             updateAgentStripModel();
             updateTodoLaneModel();
+            updateContextLaneModel();
             if (screen_)
-              screen_->PostEvent(ftxui::Event::Custom);
+              postEvent(ftxui::Event::Custom);
           }
         }
       }
@@ -3176,8 +3613,9 @@ ftxui::Component TuiState::root() {
             updateStatusModel();
             updateAgentStripModel();
             updateTodoLaneModel();
+            updateContextLaneModel();
             if (screen_)
-              screen_->PostEvent(ftxui::Event::Custom);
+              postEvent(ftxui::Event::Custom);
           }
         }
       }
@@ -3252,7 +3690,7 @@ ftxui::Component TuiState::root() {
           nextWorkPanelTab(selected_work_panel_tab_, hasPlan, hasTodo,
                            hasContext);
       if (screen_) {
-        screen_->PostEvent(ftxui::Event::Custom);
+        postEvent(ftxui::Event::Custom);
       }
       persistUserPreferences();
       return true;
@@ -3342,7 +3780,7 @@ ftxui::Component TuiState::root() {
             input_component_->TakeFocus();
           }
           if (screen_) {
-            screen_->PostEvent(ftxui::Event::Custom);
+            postEvent(ftxui::Event::Custom);
           }
           return true;
         }

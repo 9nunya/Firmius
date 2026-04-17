@@ -30,6 +30,18 @@
 #include <unordered_map>
 #include <vector>
 
+namespace firmius::tui {
+void noteTuiChatWindowRebuild(std::chrono::nanoseconds) __attribute__((weak));
+}
+
+namespace {
+inline void NoteTuiChatWindowRebuildIfAvailable(std::chrono::nanoseconds elapsed) {
+  if (firmius::tui::noteTuiChatWindowRebuild) {
+    firmius::tui::noteTuiChatWindowRebuild(elapsed);
+  }
+}
+}
+
 static std::string rolePrefix(firmius::shared::Role role) {
   using firmius::shared::Role;
   switch (role) {
@@ -104,92 +116,126 @@ struct ObservationNoticeRenderState {
   size_t sequence = 0;
 };
 
+struct HistoryRenderSignature {
+  const firmius::shared::AgentHistory *history = nullptr;
+  std::size_t turn_count = 0;
+  std::size_t cheap_key = 0;
+  bool show_internal_nudges = false;
+  bool hide_errors = false;
+
+  bool operator==(const HistoryRenderSignature &other) const {
+    return history == other.history && turn_count == other.turn_count &&
+           cheap_key == other.cheap_key &&
+           show_internal_nudges == other.show_internal_nudges &&
+           hide_errors == other.hide_errors;
+  }
+
+  bool operator!=(const HistoryRenderSignature &other) const {
+    return !(*this == other);
+  }
+};
+
 template <typename T>
 void HashCombine(std::size_t &seed, const T &value) {
   seed ^= std::hash<T>{}(value) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
 }
 
-std::size_t ComputeHistoryRevision(const firmius::shared::AgentHistory *history) {
+std::size_t BuildHistoryCheapRenderKey(
+    const firmius::shared::AgentHistory *history) {
   if (!history) {
     return 0;
   }
 
-  std::size_t seed = history->turns.size();
-  for (const auto &turn : history->turns) {
-    HashCombine(seed, turn.turnId);
-    HashCombine(seed, turn.messages.size());
-    for (const auto &message : turn.messages) {
-      HashCombine(seed, static_cast<int>(message.role));
-      HashCombine(seed, message.content.size());
-      for (const auto &part : message.content) {
+  std::size_t key = history->turns.size();
+  const auto sample_turn = [&](const firmius::shared::AgentTurn &turn) {
+    HashCombine(key, turn.turnId);
+    HashCombine(key, turn.messages.size());
+    if (!turn.messages.empty()) {
+      const auto &message = turn.messages.back();
+      HashCombine(key, static_cast<int>(message.role));
+      HashCombine(key, static_cast<int>(message.visibility));
+      HashCombine(key, message.content.size());
+      if (!message.content.empty()) {
         std::visit(
             [&](const auto &content) {
               using T = std::decay_t<decltype(content)>;
-              HashCombine(seed, typeid(T).hash_code());
+              HashCombine(key, typeid(T).hash_code());
               if constexpr (std::is_same_v<T, firmius::shared::TextContent>) {
-                HashCombine(seed, content.text.size());
-              } else if constexpr (std::is_same_v<T,
-                                                  firmius::shared::ThinkingContent>) {
-                HashCombine(seed, content.thinking.size());
-                HashCombine(seed, content.signature.size());
-              } else if constexpr (std::is_same_v<T,
-                                                  firmius::shared::ToolCallContent>) {
-                HashCombine(seed, content.id);
-                HashCombine(seed, content.name);
-                HashCombine(seed, content.args.size());
-              } else if constexpr (std::is_same_v<T,
-                                                  firmius::shared::ToolResultContent>) {
-                HashCombine(seed, content.toolCallId);
-                HashCombine(seed, content.result.size());
-                HashCombine(seed, content.success);
-                HashCombine(seed, content.processId);
-                HashCombine(seed, content.subagentId);
-              } else if constexpr (std::is_same_v<T,
-                                                  firmius::shared::ImageContent>) {
-                HashCombine(seed, content.url.size());
-                HashCombine(seed, content.mediaType.size());
-                HashCombine(seed, content.detail.size());
-              } else if constexpr (std::is_same_v<T,
-                                                  firmius::shared::ErrorContent>) {
-                HashCombine(seed, content.errorName.size());
-                HashCombine(seed, content.description.size());
-                HashCombine(seed, content.details.size());
-              } else if constexpr (std::is_same_v<T,
-                                                  firmius::shared::NoticeContent>) {
-                HashCombine(seed, content.title.size());
-                HashCombine(seed, content.message.size());
-                HashCombine(seed, content.details.size());
-                HashCombine(seed, static_cast<int>(content.severity));
+                HashCombine(key, content.text.size());
+              } else if constexpr (std::is_same_v<T, firmius::shared::ThinkingContent>) {
+                HashCombine(key, content.thinking.size());
+                HashCombine(key, content.signature.size());
+              } else if constexpr (std::is_same_v<T, firmius::shared::ToolCallContent>) {
+                HashCombine(key, content.id);
+                HashCombine(key, content.name);
+                HashCombine(key, content.args.size());
+              } else if constexpr (std::is_same_v<T, firmius::shared::ToolResultContent>) {
+                HashCombine(key, content.toolCallId);
+                HashCombine(key, content.result.size());
+                HashCombine(key, content.success);
+              } else if constexpr (std::is_same_v<T, firmius::shared::ImageContent>) {
+                HashCombine(key, content.url.size());
+                HashCombine(key, content.mediaType.size());
+              } else if constexpr (std::is_same_v<T, firmius::shared::ErrorContent>) {
+                HashCombine(key, content.errorName);
+                HashCombine(key, content.description.size());
+              } else if constexpr (std::is_same_v<T, firmius::shared::NoticeContent>) {
+                HashCombine(key, content.title);
+                HashCombine(key, content.message.size());
+                HashCombine(key, static_cast<int>(content.severity));
                 if (content.rollingMetadata) {
-                  const auto &meta = *content.rollingMetadata;
-                  HashCombine(seed, meta.eventKind);
-                  HashCombine(seed, meta.lifecycle);
-                  if (meta.modelLabel)
-                    HashCombine(seed, *meta.modelLabel);
-                  if (meta.sourceStartTurnId)
-                    HashCombine(seed, *meta.sourceStartTurnId);
-                  if (meta.sourceEndTurnId)
-                    HashCombine(seed, *meta.sourceEndTurnId);
-                  if (meta.sourceTurnCount)
-                    HashCombine(seed, *meta.sourceTurnCount);
-                  if (meta.sourceChunkCount)
-                    HashCombine(seed, *meta.sourceChunkCount);
-                  if (meta.sourceTokens)
-                    HashCombine(seed, *meta.sourceTokens);
-                  if (meta.summaryTokens)
-                    HashCombine(seed, *meta.summaryTokens);
-                  if (meta.savedTokens)
-                    HashCombine(seed, *meta.savedTokens);
+                  HashCombine(key, content.rollingMetadata->eventKind);
+                  HashCombine(key, content.rollingMetadata->lifecycle);
+                  if (content.rollingMetadata->sourceStartTurnId) {
+                    HashCombine(key, *content.rollingMetadata->sourceStartTurnId);
+                  }
+                  if (content.rollingMetadata->sourceEndTurnId) {
+                    HashCombine(key, *content.rollingMetadata->sourceEndTurnId);
+                  }
+                  if (content.rollingMetadata->sourceTurnCount) {
+                    HashCombine(key, *content.rollingMetadata->sourceTurnCount);
+                  }
+                  if (content.rollingMetadata->sourceChunkCount) {
+                    HashCombine(key, *content.rollingMetadata->sourceChunkCount);
+                  }
+                  if (content.rollingMetadata->sourceTokens) {
+                    HashCombine(key, *content.rollingMetadata->sourceTokens);
+                  }
+                  if (content.rollingMetadata->summaryTokens) {
+                    HashCombine(key, *content.rollingMetadata->summaryTokens);
+                  }
+                  if (content.rollingMetadata->savedTokens) {
+                    HashCombine(key, *content.rollingMetadata->savedTokens);
+                  }
                 }
               }
-
             },
-            part);
+            message.content.back());
       }
     }
+  };
+
+  sample_turn(history->turns.front());
+  if (history->turns.size() > 1) {
+    sample_turn(history->turns.back());
+  }
+  return key;
+}
+
+HistoryRenderSignature BuildHistoryRenderSignature(
+    const firmius::shared::AgentHistory *history, bool show_internal_nudges,
+    bool hide_errors) {
+  HistoryRenderSignature signature;
+  signature.history = history;
+  signature.show_internal_nudges = show_internal_nudges;
+  signature.hide_errors = hide_errors;
+  if (!history) {
+    return signature;
   }
 
-  return seed;
+  signature.turn_count = history->turns.size();
+  signature.cheap_key = BuildHistoryCheapRenderKey(history);
+  return signature;
 }
 
 std::string formatCompactCount(uint32_t value) {
@@ -229,7 +275,7 @@ std::string formatDurationMs(uint64_t durationMs) {
 }
 
 std::optional<std::string> buildTurnFooterSummary(
-    const firmius::shared::AgentTurn &turn) {
+    const firmius::shared::AgentTurn &turn, size_t turn_number) {
   const auto &metrics = turn.metrics;
   const bool hasTiming = metrics.timing.endMs > metrics.timing.startMs;
   const bool hasTokens = metrics.context.sentTokens > 0 ||
@@ -242,6 +288,9 @@ std::optional<std::string> buildTurnFooterSummary(
 
   std::ostringstream out;
   out << firmius::shared::ICON_CHECK << " done";
+  if (turn_number > 0) {
+    out << " · turn " << turn_number;
+  }
   if (hasTiming) {
     out << " · " << formatDurationMs(metrics.timing.endMs -
                                      metrics.timing.startMs);
@@ -562,6 +611,7 @@ public:
       firmius::tui::HistoryGetter sub_history_getter,
       firmius::tui::StreamGetter sub_stream_getter,
       firmius::tui::LiveQuickSummaryProvider live_quick_summary_provider,
+      std::function<std::size_t()> live_measurement_signature_getter,
       std::function<bool()> show_internal_nudges_getter,
       std::function<bool()> hide_errors_getter)
       : history_getter_(std::move(history_getter)),
@@ -573,6 +623,8 @@ public:
         sub_history_getter_(std::move(sub_history_getter)),
         sub_stream_getter_(std::move(sub_stream_getter)),
         live_quick_summary_provider_(std::move(live_quick_summary_provider)),
+        live_measurement_signature_getter_(
+            std::move(live_measurement_signature_getter)),
         show_internal_nudges_getter_(
             std::move(show_internal_nudges_getter)),
         hide_errors_getter_(std::move(hide_errors_getter)) {
@@ -617,12 +669,23 @@ public:
     });
 
     scrollable_ = firmius::tui::ScrollableBox(
-        container_, {.startAtBottom = true, .overlayScrollbar = true});
+        container_,
+        {.startAtBottom = true,
+         .overlayScrollbar = true,
+         .measurement_signature_getter =
+             [this]() {
+               std::size_t seed = last_history_signature_.turn_count;
+               HashCombine(seed, last_history_signature_.cheap_key);
+               if (live_measurement_signature_getter_) {
+                 HashCombine(seed, live_measurement_signature_getter_());
+               }
+               return seed;
+             }});
     Add(scrollable_);
   }
 
   ftxui::Element OnRender() override {
-    RebuildIfNeeded();
+    EnsureHistoryRows();
     return scrollable_ ? scrollable_->Render() : ftxui::text("");
   }
 
@@ -631,8 +694,8 @@ public:
   bool OnEvent(ftxui::Event event) override {
     if (event == ftxui::Event::Special("ThreadChanged") ||
         event == ftxui::Event::Special("ThemeChanged")) {
-      last_history_revision_ = std::numeric_limits<std::size_t>::max();
-      RebuildIfNeeded();
+      MarkHistoryDirty(true);
+      EnsureHistoryRows();
       if (scrollable_) {
         scrollable_->RequestScrollToBottom();
       }
@@ -640,8 +703,10 @@ public:
     }
 
     const bool copy_handler_consumed = HandleCopySelection(event);
-
-    RebuildIfNeeded();
+    EnsureHistoryRows();
+    if (scrollable_ && !event.is_mouse()) {
+      scrollable_->InvalidateLayout();
+    }
     const bool handled = scrollable_ ? scrollable_->OnEvent(event) : false;
     FinalizePendingCopy();
     if (copy_drag_candidate_ && event.is_mouse() &&
@@ -665,7 +730,7 @@ private:
       return false;
     }
 
-    RebuildIfNeeded();
+    EnsureHistoryRows();
     const auto mouse = event.mouse();
     if (mouse.button != ftxui::Mouse::Left) {
       return false;
@@ -842,21 +907,26 @@ private:
   }
 
   void RebuildIfNeeded() {
-    auto *history = history_getter_ ? history_getter_() : nullptr;
-    const std::size_t history_revision = ComputeHistoryRevision(history);
-    if (history_revision == last_history_revision_)
+    const auto signature = currentHistorySignature();
+    if (!history_dirty_ && signature == last_history_signature_) {
       return;
-    last_history_revision_ = history_revision;
+    }
+    history_dirty_ = false;
+    last_history_signature_ = signature;
+    if (scrollable_) {
+      scrollable_->InvalidateLayout();
+    }
+
+    auto *history = signature.history;
+    const bool showInternalNudges = signature.show_internal_nudges;
+    const bool hideErrors = signature.hide_errors;
+    const auto rebuild_begin = std::chrono::steady_clock::now();
 
     rows_.clear();
     copyable_rows_.clear();
     history_inner_->DetachAllChildren();
 
     if (history) {
-      const bool showInternalNudges =
-          show_internal_nudges_getter_ ? show_internal_nudges_getter_() : false;
-      const bool hideErrors =
-          hide_errors_getter_ ? hide_errors_getter_() : false;
       std::unordered_map<std::string, bool> seen_tool_call;
       QuickToolCluster quick_cluster;
       auto flush_quick_cluster = [&](bool merge_live = false) {
@@ -1281,7 +1351,8 @@ private:
           }
         }
 
-        if (auto footer = buildTurnFooterSummary(t); footer.has_value()) {
+        if (auto footer = buildTurnFooterSummary(t, turn_index + 1);
+            footer.has_value()) {
           flush_quick_cluster();
           const auto &theme =
               firmius::tui::ThemeManager::instance().getCurrentTheme();
@@ -1309,6 +1380,28 @@ private:
           ftxui::Make<RowComponent>(nullptr, [] { return ftxui::text(""); }));
     }
 
+    NoteTuiChatWindowRebuildIfAvailable(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now() - rebuild_begin));
+  }
+
+  HistoryRenderSignature currentHistorySignature() const {
+    auto *history = history_getter_ ? history_getter_() : nullptr;
+    const bool showInternalNudges =
+        show_internal_nudges_getter_ ? show_internal_nudges_getter_() : false;
+    const bool hideErrors =
+        hide_errors_getter_ ? hide_errors_getter_() : false;
+    return BuildHistoryRenderSignature(history, showInternalNudges, hideErrors);
+  }
+
+  void MarkHistoryDirty(bool reset_signature = false) {
+    history_dirty_ = true;
+    if (reset_signature) {
+      last_history_signature_ = {};
+    }
+  }
+
+  void EnsureHistoryRows() {
+    RebuildIfNeeded();
   }
 
   std::function<const firmius::shared::AgentHistory *()> history_getter_;
@@ -1320,9 +1413,11 @@ private:
   firmius::tui::HistoryGetter sub_history_getter_;
   firmius::tui::StreamGetter sub_stream_getter_;
   firmius::tui::LiveQuickSummaryProvider live_quick_summary_provider_;
+  std::function<std::size_t()> live_measurement_signature_getter_;
   std::function<bool()> show_internal_nudges_getter_;
   std::function<bool()> hide_errors_getter_;
-  size_t last_history_revision_ = std::numeric_limits<std::size_t>::max();
+  HistoryRenderSignature last_history_signature_{};
+  bool history_dirty_ = true;
   std::vector<ftxui::Component> rows_;
   std::vector<std::shared_ptr<CopyableRowComponent>> copyable_rows_;
   ftxui::Component history_inner_;
@@ -1355,6 +1450,7 @@ ftxui::Component firmius::tui::ChatWindow(
     firmius::tui::HistoryGetter sub_history_getter,
     firmius::tui::StreamGetter sub_stream_getter,
     firmius::tui::LiveQuickSummaryProvider live_quick_summary_provider,
+    std::function<std::size_t()> live_measurement_signature_getter,
     std::function<bool()> show_internal_nudges_getter,
     std::function<bool()> hide_errors_getter) {
   return ftxui::Make<ChatWindowComponent>(
@@ -1363,5 +1459,6 @@ ftxui::Component firmius::tui::ChatWindow(
       std::move(subagent_state_getter), std::move(agent_focus_handler),
       std::move(sub_history_getter),
       std::move(sub_stream_getter), std::move(live_quick_summary_provider),
+      std::move(live_measurement_signature_getter),
       std::move(show_internal_nudges_getter), std::move(hide_errors_getter));
 }

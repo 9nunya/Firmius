@@ -60,6 +60,8 @@ public:
               (override));
   MOCK_METHOD(ProcessSnapshot, inspectBackgroundProcess, (const std::string &),
               (override));
+  MOCK_METHOD(void, releaseBackgroundProcess, (const std::string &),
+              (override));
   MOCK_METHOD(void, writeToBackgroundProcess,
               (const std::string &, const std::string &), (override));
   MOCK_METHOD(void, killBackgroundProcess, (const std::string &), (override));
@@ -1273,10 +1275,8 @@ TEST_F(SubagentToolTest, explicitCategoryHonoredWhenUserRequestedInHistory) {
   cfg.defaultProviderId = "fallback";
   cfg.defaultModelId = "fallback-model";
   cfg.defaultModelVariant = "fallback-variant";
-  cfg.modelRouterCategories["gemini-fast"] = {"openai", "gpt-5-codex",
-                                               "thinking"};
-  cfg.modelRouterCategories["research"] = {"openrouter", "qwen-omni",
-                                            "balanced"};
+  cfg.modelRouterCategories["gemini-fast"].models = {{"openai", "gpt-5-codex", "thinking"}};
+  cfg.modelRouterCategories["research"].models = {{"openrouter", "qwen-omni", "balanced"}};
   cfg.purposeRoutes["coder"] = "research";
   firmius::shared::ConfigLoader::instance().updateConfig(cfg);
 
@@ -1321,10 +1321,8 @@ TEST_F(SubagentToolTest, explicitCategoryIgnoredWhenUserDidNotRequestOverride) {
   cfg.defaultProviderId = "fallback";
   cfg.defaultModelId = "fallback-model";
   cfg.defaultModelVariant = "fallback-variant";
-  cfg.modelRouterCategories["gemini-fast"] = {"antigravity", "gemini-3-flash",
-                                               ""};
-  cfg.modelRouterCategories["research"] = {"openrouter", "qwen-omni",
-                                            "balanced"};
+  cfg.modelRouterCategories["gemini-fast"].models = {{"antigravity", "gemini-3-flash", ""}};
+  cfg.modelRouterCategories["research"].models = {{"openrouter", "qwen-omni", "balanced"}};
   cfg.purposeRoutes["coder"] = "research";
   firmius::shared::ConfigLoader::instance().updateConfig(cfg);
 
@@ -1370,8 +1368,7 @@ TEST_F(SubagentToolTest, purposeRouteAppliedWhenCategoryNotProvided) {
   cfg.defaultProviderId = "fallback";
   cfg.defaultModelId = "fallback-model";
   cfg.defaultModelVariant = "fallback-variant";
-  cfg.modelRouterCategories["research"] = {"openrouter", "qwen-omni",
-                                            "balanced"};
+  cfg.modelRouterCategories["research"].models = {{"openrouter", "qwen-omni", "balanced"}};
   cfg.purposeRoutes["coder"] = "research";
   firmius::shared::ConfigLoader::instance().updateConfig(cfg);
 
@@ -1434,8 +1431,7 @@ TEST_F(SubagentToolTest, updatedPurposeRouteAppliesOnNextExecution) {
   cfg.defaultModelId = "fallback-model";
   cfg.defaultModelVariant = "";
   cfg.modelRouterCategories.clear();
-  cfg.modelRouterCategories["research"] = {"provider-a", "model-a",
-                                            "balanced"};
+  cfg.modelRouterCategories["research"].models = {{"provider-a", "model-a", "balanced"}};
   cfg.purposeRoutes["coder"] = "research";
   cfg.enableSubagentRouteFallback = false;
   cfg.subagentRouteFallbackOrder.clear();
@@ -1462,7 +1458,7 @@ TEST_F(SubagentToolTest, updatedPurposeRouteAppliesOnNextExecution) {
   std::this_thread::sleep_for(std::chrono::milliseconds(450));
 
   cfg = firmius::shared::ConfigLoader::instance().getConfig();
-  cfg.modelRouterCategories["review"] = {"provider-b", "model-b", "high"};
+  cfg.modelRouterCategories["review"].models = {{"provider-b", "model-b", "high"}};
   cfg.purposeRoutes["coder"] = "review";
   firmius::shared::ConfigLoader::instance().updateConfig(cfg);
 
@@ -1519,8 +1515,8 @@ TEST_F(SubagentToolTest, routeFallbackRetriesNextCategoryWhenEnabled) {
   auto cfg = firmius::shared::ConfigLoader::instance().getConfig();
   cfg.defaultProviderId = "default-provider";
   cfg.defaultModelId = "default-model";
-  cfg.modelRouterCategories["primary"] = {"bad-provider", "bad-model", ""};
-  cfg.modelRouterCategories["fallback"] = {"good-provider", "good-model", ""};
+  cfg.modelRouterCategories["primary"].models = {{"bad-provider", "bad-model", ""}};
+  cfg.modelRouterCategories["fallback"].models = {{"good-provider", "good-model", ""}};
   cfg.purposeRoutes["coder"] = "primary";
   cfg.enableSubagentRouteFallback = true;
   cfg.subagentRouteFallbackOrder = {"fallback"};
@@ -1559,8 +1555,8 @@ TEST_F(SubagentToolTest, routeFallbackCanBeDisabled) {
   auto cfg = firmius::shared::ConfigLoader::instance().getConfig();
   cfg.defaultProviderId = "default-provider";
   cfg.defaultModelId = "default-model";
-  cfg.modelRouterCategories["primary"] = {"bad-provider", "bad-model", ""};
-  cfg.modelRouterCategories["fallback"] = {"good-provider", "good-model", ""};
+  cfg.modelRouterCategories["primary"].models = {{"bad-provider", "bad-model", ""}};
+  cfg.modelRouterCategories["fallback"].models = {{"good-provider", "good-model", ""}};
   cfg.purposeRoutes["coder"] = "primary";
   cfg.enableSubagentRouteFallback = false;
   cfg.subagentRouteFallbackOrder = {"fallback"};
@@ -1597,10 +1593,8 @@ TEST_F(SubagentToolTest, spawnedRouteFallbackRetriesOnNoUsableSummary) {
   auto cfg = firmius::shared::ConfigLoader::instance().getConfig();
   cfg.defaultProviderId = primary->getId();
   cfg.defaultModelId = primary->listModels().front().id;
-  cfg.modelRouterCategories["primary"] = {primary->getId(),
-                                           primary->listModels().front().id, ""};
-  cfg.modelRouterCategories["fallback"] = {fallback->getId(),
-                                           fallback->listModels().front().id, ""};
+  cfg.modelRouterCategories["primary"].models = {{primary->getId(), primary->listModels().front().id, ""}};
+  cfg.modelRouterCategories["fallback"].models = {{fallback->getId(), fallback->listModels().front().id, ""}};
   cfg.purposeRoutes["coder"] = "primary";
   cfg.enableSubagentRouteFallback = true;
   cfg.subagentRouteFallbackOrder = {"fallback"};
@@ -1643,10 +1637,8 @@ TEST_F(SubagentToolTest, spawnedAsyncRouteFallbackRetriesOnImmediateFailure) {
   auto cfg = firmius::shared::ConfigLoader::instance().getConfig();
   cfg.defaultProviderId = primary->getId();
   cfg.defaultModelId = primary->listModels().front().id;
-  cfg.modelRouterCategories["primary"] = {primary->getId(),
-                                          primary->listModels().front().id, ""};
-  cfg.modelRouterCategories["fallback"] = {fallback->getId(),
-                                           fallback->listModels().front().id, ""};
+  cfg.modelRouterCategories["primary"].models = {{primary->getId(), primary->listModels().front().id, ""}};
+  cfg.modelRouterCategories["fallback"].models = {{fallback->getId(), fallback->listModels().front().id, ""}};
   cfg.purposeRoutes["coder"] = "primary";
   cfg.enableSubagentRouteFallback = true;
   cfg.subagentRouteFallbackOrder = {"fallback"};
@@ -1688,10 +1680,8 @@ TEST_F(SubagentToolTest, retaskedRouteFallbackRetriesOnNoUsableSummary) {
   auto cfg = firmius::shared::ConfigLoader::instance().getConfig();
   cfg.defaultProviderId = primary->getId();
   cfg.defaultModelId = primary->listModels().front().id;
-  cfg.modelRouterCategories["primary"] = {primary->getId(),
-                                           primary->listModels().front().id, ""};
-  cfg.modelRouterCategories["fallback"] = {fallback->getId(),
-                                           fallback->listModels().front().id, ""};
+  cfg.modelRouterCategories["primary"].models = {{primary->getId(), primary->listModels().front().id, ""}};
+  cfg.modelRouterCategories["fallback"].models = {{fallback->getId(), fallback->listModels().front().id, ""}};
   cfg.purposeRoutes["coder"] = "primary";
   cfg.enableSubagentRouteFallback = true;
   cfg.subagentRouteFallbackOrder = {"fallback"};
@@ -1784,9 +1774,8 @@ TEST_F(SubagentToolTest, cancelledRetaskDoesNotTriggerFallbackRouteClone) {
   auto cfg = firmius::shared::ConfigLoader::instance().getConfig();
   cfg.defaultProviderId = "default-provider";
   cfg.defaultModelId = "default-model";
-  cfg.modelRouterCategories["primary"] = {"good-provider", "good-model", ""};
-  cfg.modelRouterCategories["fallback"] = {"fallback-provider",
-                                           "fallback-model", ""};
+  cfg.modelRouterCategories["primary"].models = {{"good-provider", "good-model", ""}};
+  cfg.modelRouterCategories["fallback"].models = {{"fallback-provider", "fallback-model", ""}};
   cfg.purposeRoutes["coder"] = "primary";
   cfg.enableSubagentRouteFallback = true;
   cfg.subagentRouteFallbackOrder = {"fallback"};

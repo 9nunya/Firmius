@@ -78,7 +78,7 @@ size_t CountOccurrences(const std::string &text, const std::string &needle) {
   return count;
 }
 
-TEST(ToolPresentationBlockTest, CollapsedGenericToolRender) {
+TEST(ToolPresentationBlockTest, GenericToolRendersAllLinesWithoutToggle) {
   auto view = std::make_shared<ToolCallView>();
   view->name = "custom_tool";
   view->phase = ToolPhase::Finished;
@@ -88,21 +88,9 @@ TEST(ToolPresentationBlockTest, CollapsedGenericToolRender) {
 
   const std::string output = Render(view);
   EXPECT_NE(output.find("custom_tool"), std::string::npos);
-  EXPECT_NE(output.find("show"), std::string::npos);
-  EXPECT_EQ(output.find("zeta"), std::string::npos);
-}
-
-TEST(ToolPresentationBlockTest, ExpandedGenericToolRender) {
-  auto view = std::make_shared<ToolCallView>();
-  view->name = "custom_tool";
-  view->phase = ToolPhase::Finished;
-  view->success = true;
-  view->show_result = true;
-  view->result = "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\n";
-
-  const std::string output = Render(view, 120, 120);
-  EXPECT_NE(output.find("hide"), std::string::npos);
-  EXPECT_NE(output.find("custom_tool"), std::string::npos);
+  // Generic tools no longer truncate — all lines visible, no toggle.
+  EXPECT_EQ(output.find("show more"), std::string::npos);
+  EXPECT_EQ(output.find("show less"), std::string::npos);
 }
 
 TEST(ToolPresentationBlockTest, ErrorStateRender) {
@@ -239,6 +227,76 @@ TEST(ToolPresentationBlockTest, MultiFileFileEditShowsBothFilesClearly) {
   EXPECT_NE(output.find("b.cpp"), std::string::npos);
   EXPECT_NE(output.find("alpha"), std::string::npos);
   EXPECT_NE(output.find("new"), std::string::npos);
+}
+
+TEST(ToolPresentationBlockTest,
+     FileEditFallbackSummaryStaysVisibleWithoutDiffDetails) {
+  auto view = std::make_shared<ToolCallView>();
+  view->name = "file_edit";
+  view->args = R"({"path":"src/main.cpp"})";
+  view->phase = ToolPhase::Finished;
+  view->success = true;
+  view->show_result = false;
+  view->result = R"({"path":"src/main.cpp"})";
+  view->fileEditEvents.push_back({"src/main.cpp", "", 2, 1});
+
+  const std::string output = Render(view, 140, 20);
+  EXPECT_NE(output.find("edited main.cpp"), std::string::npos);
+  EXPECT_NE(output.find("diff preview unavailable"), std::string::npos);
+  EXPECT_NE(output.find("+2"), std::string::npos);
+  EXPECT_NE(output.find("-1"), std::string::npos);
+}
+
+TEST(ToolPresentationBlockTest,
+     FileWriteFallbackSummaryStaysVisibleWithoutDiffDetails) {
+  auto view = std::make_shared<ToolCallView>();
+  view->name = "file_write";
+  view->args = R"({"path":"src/write.cpp","content":"hello\n"})";
+  view->phase = ToolPhase::Finished;
+  view->success = true;
+  view->show_result = false;
+  view->result = R"({"path":"src/write.cpp","added_lines":1,"removed_lines":0})";
+  view->fileEditEvents.push_back({"src/write.cpp", "", 1, 0});
+
+  const std::string output = Render(view, 140, 20);
+  EXPECT_NE(output.find("edited write.cpp"), std::string::npos);
+  EXPECT_NE(output.find("hello"), std::string::npos);
+  EXPECT_NE(output.find("+1"), std::string::npos);
+}
+
+TEST(ToolPresentationBlockTest,
+     RunningFileEditShowsWaitingDiagnosticsStateWithEditedPath) {
+  auto view = std::make_shared<ToolCallView>();
+  view->name = "file_edit";
+  view->args = R"({"path":"src/main.cpp","edits":[{"op":"replace_range"}]})";
+  view->phase = ToolPhase::Called;
+  view->success = true;
+  view->fileEditEvents.push_back(
+      {"src/main.cpp", "@@ replace 8...9 @@\n-old\n+new\n", 1, 1});
+
+  const std::string output = Render(view, 140, 20);
+  EXPECT_NE(output.find("edited main.cpp"), std::string::npos);
+  EXPECT_NE(output.find("Running diagnostics"), std::string::npos);
+  EXPECT_NE(output.find("old"), std::string::npos);
+  EXPECT_NE(output.find("new"), std::string::npos);
+}
+
+TEST(ToolPresentationBlockTest,
+     RunningMultiFileEditShowsEditedFilesBeforeCompletion) {
+  auto view = std::make_shared<ToolCallView>();
+  view->name = "file_edit";
+  view->args =
+      R"({"files":[{"path":"src/a.cpp"},{"path":"src/b.cpp"}]})";
+  view->phase = ToolPhase::Called;
+  view->success = true;
+  view->fileEditEvents.push_back({"src/a.cpp", "", 1, 1});
+  view->fileEditEvents.push_back({"src/b.cpp", "", 1, 0});
+
+  const std::string output = Render(view, 140, 20);
+  EXPECT_NE(output.find("edited 2 files"), std::string::npos);
+  EXPECT_NE(output.find("Running diagnostics"), std::string::npos);
+  EXPECT_NE(output.find("src/a.cpp"), std::string::npos);
+  EXPECT_NE(output.find("src/b.cpp"), std::string::npos);
 }
 
 TEST(ToolPresentationBlockTest, SearchReplaceFileEditShowsRenderedDiff) {
@@ -940,5 +998,71 @@ TEST(ToolPresentationBlockTest, IntegratedAnsiLiveStreamRegression) {
   EXPECT_EQ(view->phase, ToolPhase::Finished);
   EXPECT_TRUE(view->process_exit_known);
   EXPECT_EQ(view->process_exit_code, 0);
+}
+
+TEST(ToolPresentationBlockTest, McpCollapsedAndExpandedCardsUseRawToggleLabels) {
+  auto view = std::make_shared<ToolCallView>();
+  view->name = "mcp_call";
+  view->args = R"({"server_name":"demo","tool_name":"echo"})";
+  view->phase = ToolPhase::Finished;
+  view->success = true;
+  view->show_result = false;
+  view->result = "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\n";
+
+  const std::string collapsed = Render(view, 140, 28);
+  EXPECT_NE(collapsed.find("show raw"), std::string::npos);
+
+  view->show_result = true;
+  const std::string expanded = Render(view, 140, 28);
+  EXPECT_NE(expanded.find("hide raw"), std::string::npos);
+}
+
+TEST(ToolPresentationBlockTest,
+     McpCallCardShowsLifecycleFactsAndRawContractWithoutGenericPreview) {
+  auto view = std::make_shared<ToolCallView>();
+  view->name = "mcp_call";
+  view->args = R"({"server_name":"demo","tool_name":"echo"})";
+  view->phase = ToolPhase::Finished;
+  view->success = true;
+  view->show_result = false;
+  view->result = "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\n";
+
+  const std::string collapsed = Render(view, 140, 28);
+  EXPECT_NE(collapsed.find("mcp_call"), std::string::npos);
+  EXPECT_NE(collapsed.find("demo"), std::string::npos);
+  EXPECT_NE(collapsed.find("echo"), std::string::npos);
+  EXPECT_NE(collapsed.find("Raw payload hidden"), std::string::npos);
+  EXPECT_NE(collapsed.find("show raw"), std::string::npos);
+  EXPECT_EQ(collapsed.find("Result preview"), std::string::npos);
+
+  view->show_result = true;
+  const std::string expanded = Render(view, 140, 60);
+  EXPECT_NE(expanded.find("line 1"), std::string::npos);
+  EXPECT_NE(expanded.find("line 6"), std::string::npos);
+  EXPECT_NE(expanded.find("hide raw"), std::string::npos);
+}
+
+TEST(ToolPresentationBlockTest,
+     DynamicMcpCardShowsCuratedIdentityAndRawToggleWithoutGenericPreview) {
+  auto view = std::make_shared<ToolCallView>();
+  view->name = "mcp__server1__tool1";
+  view->phase = ToolPhase::Finished;
+  view->success = true;
+  view->show_result = false;
+  view->result = "alpha\nbeta\ngamma\ndelta\nepsilon\nzeta\n";
+
+  const std::string collapsed = Render(view, 140, 28);
+  EXPECT_NE(collapsed.find("mcp__server1__tool1"), std::string::npos);
+  EXPECT_NE(collapsed.find("server1"), std::string::npos);
+  EXPECT_NE(collapsed.find("tool1"), std::string::npos);
+  EXPECT_NE(collapsed.find("Raw payload hidden"), std::string::npos);
+  EXPECT_NE(collapsed.find("show raw"), std::string::npos);
+  EXPECT_EQ(collapsed.find("Result preview"), std::string::npos);
+
+  view->show_result = true;
+  const std::string expanded = Render(view, 140, 60);
+  EXPECT_NE(expanded.find("alpha"), std::string::npos);
+  EXPECT_NE(expanded.find("zeta"), std::string::npos);
+  EXPECT_NE(expanded.find("hide raw"), std::string::npos);
 }
 } // namespace

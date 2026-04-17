@@ -19,6 +19,7 @@
 #include "utils/InterruptibleSleep.hpp"
 #include "utils/StringUtil.hpp"
 #include "tools/McpToolUtil.hpp"
+#include "tools/McpCallTool.hpp"
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -457,8 +458,7 @@ std::vector<provider::ToolDefinition> getProviderToolDefinitions(
 
 std::optional<shared::ToolResult> executeDynamicMcpToolCall(
     const AgentContext &context, const std::string &toolName,
-    const rapidjson::Document &toolInput, ToolRegistry &toolRegistry,
-    ToolContext &toolCtx) {
+    const rapidjson::Document &toolInput, ToolContext &toolCtx) {
   std::string serverName;
   std::string remoteToolName;
   if (!parseDynamicMcpToolName(toolName, serverName, remoteToolName)) {
@@ -492,7 +492,9 @@ std::optional<shared::ToolResult> executeDynamicMcpToolCall(
   argsValue.CopyFrom(toolInput, alloc);
   mcpCallInput.AddMember("arguments", argsValue.Move(), alloc);
 
-  return toolRegistry.execute("mcp_call", mcpCallInput, toolCtx);
+  McpCallTool mcpCallTool;
+  const McpCallInput typedInput = mcpCallTool.transform(mcpCallInput);
+  return mcpCallTool.execute(typedInput, toolCtx);
 }
 
 void saveCompactionSnapshot(const std::string &threadId,
@@ -979,29 +981,53 @@ ModelChoice Agent::getPreferredModel() const {
     return &it->second;
   };
 
+  auto resolveFromCategory = [&](const std::string &categoryName,
+                                 const shared::ModelRouteCategory &category)
+      -> std::optional<ModelChoice> {
+    if (category.models.empty()) {
+      return std::nullopt;
+    }
+
+    // Check for runtime preferred model for this category
+    std::string preferredKey =
+        shared::ConfigLoader::instance().getPreferredModelKey(categoryName);
+    if (!preferredKey.empty()) {
+      for (const auto &opt : category.models) {
+        if (opt.providerId + ":" + opt.modelId == preferredKey) {
+          ModelChoice choice;
+          choice.providerId = opt.providerId;
+          choice.modelId = opt.modelId;
+          choice.variantName = opt.variantName;
+          return choice;
+        }
+      }
+    }
+
+    // Default to first model
+    const auto &opt = category.models.front();
+    ModelChoice choice;
+    choice.providerId = opt.providerId;
+    choice.modelId = opt.modelId;
+    choice.variantName = opt.variantName;
+    return choice;
+  };
+
   auto it_purpose = config.purposeRoutes.find(persona);
   if (it_purpose != config.purposeRoutes.end() && !it_purpose->second.empty()) {
     const std::string mapped_category = it_purpose->second;
     if (const auto *category = findCategory(mapped_category)) {
-      ModelChoice choice;
-      choice.providerId = category->providerId;
-      choice.modelId = category->modelId;
-      if (!category->variantName.empty()) {
-        choice.variantName = category->variantName;
+      if (auto choice = resolveFromCategory(mapped_category, *category)) {
+        return *choice;
       }
-      return choice;
     }
   }
 
   if (!config.defaultRouteCategory.empty()) {
     if (const auto *category = findCategory(config.defaultRouteCategory)) {
-      ModelChoice choice;
-      choice.providerId = category->providerId;
-      choice.modelId = category->modelId;
-      if (!category->variantName.empty()) {
-        choice.variantName = category->variantName;
+      if (auto choice =
+              resolveFromCategory(config.defaultRouteCategory, *category)) {
+        return *choice;
       }
-      return choice;
     }
   }
 
@@ -1296,6 +1322,7 @@ void Agent::runImpl(const std::optional<std::string> &task,
   int consecutiveEmptyProviderResponses = 0;
   const int maxEmptyProviderRetries =
       context.identity.parentId.empty() ? 2 : 0;
+  int consecutiveInsanityRetries = 0;
   std::optional<std::string> lastTodoContinuationFingerprint;
   auto hasQueuedUserTurnPending = [this]() {
     if (!context.history || context.history->turns.empty()) {
@@ -1541,12 +1568,28 @@ void Agent::runImpl(const std::optional<std::string> &task,
       opts.abortSignal = runCancelToken.get();
       opts.abortController = runAbortController;
 
-      const AgentHistory requestHistory =
-          runtime_overlay::buildRequestHistoryWithRuntimeOverlays(
-              context, *environment_->getHost(), environment_->getWorkspace());
+      AgentHistory requestHistory;
+      if (context.config.providerId == "codex") {
+        requestHistory =
+            context.history ? RollingContextManager::filterHistoryForRequest(
+                                  context, *context.history)
+                            : AgentHistory{};
+      } else {
+        requestHistory = runtime_overlay::buildRequestHistoryWithRuntimeOverlays(
+            context, *environment_->getHost(), environment_->getWorkspace());
+      }
       const auto requestContextEstimate =
           estimateContextWindowMetrics(requestHistory, opts.tools);
       turnMetrics.context = requestContextEstimate;
+      // Insanity detection setup
+      StreamSanityDetector::Config detectorConfig;
+      detectorConfig.enabled = context.config.insanityDetectionEnabled;
+      detectorConfig.minConsecutiveRepeats = context.config.insanityRepetitionThreshold;
+      detectorConfig.maxTokenThreshold = context.config.insanityMaxTokenThreshold;
+      StreamSanityDetector detector(detectorConfig);
+      bool insanityDetectedThisTurn = false;
+      std::string insanityReason;
+      bool insanityAbortTriggered = false;
       provider->stream(requestHistory, opts, [&](const StreamEvent &ev) {
         if (context.state.currentStatus == AgentStatus::ProviderWaiting) {
           if (std::holds_alternative<TextChunk>(ev) ||
@@ -1559,10 +1602,36 @@ void Agent::runImpl(const std::optional<std::string> &task,
 
         if (auto *txt = std::get_if<TextChunk>(&ev)) {
           appendVisibleText(txt->delta);
+          // Insanity detection
+          if (!insanityDetectedThisTurn) {
+            detector.addDelta(txt->delta);
+            auto checkResult = detector.check();
+            if (checkResult.isInsane) {
+              insanityDetectedThisTurn = true;
+              insanityReason = checkResult.reason;
+              insanityAbortTriggered = true;
+              streamError = "Insanity detected: " + checkResult.reason;
+              runAbortController->cancel();
+              return;
+            }
+          }
         } else if (auto *thk = std::get_if<ThinkingChunk>(&ev)) {
           appendVisibleThinking(thk->delta);
           if (!thk->signature.empty()) {
             lastThinkingSignature = thk->signature;
+          }
+          // Insanity detection
+          if (!insanityDetectedThisTurn) {
+            detector.addDelta(thk->delta);
+            auto checkResult = detector.check();
+            if (checkResult.isInsane) {
+              insanityDetectedThisTurn = true;
+              insanityReason = checkResult.reason;
+              insanityAbortTriggered = true;
+              streamError = "Insanity detected: " + checkResult.reason;
+              runAbortController->cancel();
+              return;
+            }
           }
         } else if (auto *tcc = std::get_if<ToolCallChunk>(&ev)) {
           sawTool = true;
@@ -1596,9 +1665,14 @@ void Agent::runImpl(const std::optional<std::string> &task,
         }
       });
       if (runCancelToken->load()) {
-        persistAssistantTurn(StopReason::Cancelled, false);
-        context.state.currentStatus = AgentStatus::Cancelled;
-        break;
+        if (insanityAbortTriggered) {
+          // Clear the cancel flag; this is an insanity-triggered abort, not a user cancel.
+          runCancelToken->store(false);
+        } else {
+          persistAssistantTurn(StopReason::Cancelled, false);
+          context.state.currentStatus = AgentStatus::Cancelled;
+          break;
+        }
       }
 
       // ToolCallChunk events are now emitted immediately above
@@ -1614,6 +1688,45 @@ void Agent::runImpl(const std::optional<std::string> &task,
         }
       }
 
+      // Final insanity check (if not already detected during streaming)
+      if (!insanityDetectedThisTurn && detector.getTotalTokens() > 0) {
+        auto finalCheck = detector.check();
+        if (finalCheck.isInsane) {
+          insanityDetectedThisTurn = true;
+          insanityReason = finalCheck.reason;
+        }
+      }
+
+      // Handle insanity detection (retry or exhaust)
+      if (insanityDetectedThisTurn) {
+        if (consecutiveInsanityRetries < context.config.maxInsanityRetries) {
+          consecutiveInsanityRetries++;
+          // The problematic turn was not yet persisted (we aborted before persistAssistantTurn).
+          // Add an intervention nudge turn to guide recovery.
+          AgentTurn interventionTurn = makeInternalNudgeTurn(
+              "insanity-intervention-",
+              "The previous turn exhibited signs of degenerate output "
+              "(repetition/gibberish). Please recover and continue constructively.");
+          appendTurnToHistory(interventionTurn);
+          // Emit retry event
+          onEvent(StreamRetrying{
+              consecutiveInsanityRetries,
+              context.config.maxInsanityRetries,
+              0, // httpStatus
+              0, // delayMs
+              "Insanity detected: " + insanityReason,
+              "", ""});
+          // Continue to next iteration to retry this turn
+          continue;
+        } else {
+          // Exhausted retries: throw to be caught as fatal error
+          throw std::runtime_error(
+              "Insanity detection exhausted after " +
+              std::to_string(consecutiveInsanityRetries) + " retries: " +
+              insanityReason);
+        }
+      }
+
       // If there was a stream error and no content came back, retry
       if (!streamError.empty() && fullResponse.empty() &&
           finalizedToolCalls.empty() && accumulatedToolChunks.empty()) {
@@ -1622,11 +1735,90 @@ void Agent::runImpl(const std::optional<std::string> &task,
           context.state.currentStatus = AgentStatus::Cancelled;
           return;
         }
+
+        auto rotateAndContinue = [&]() -> bool {
+          const auto &config = shared::ConfigLoader::instance().getConfig();
+          auto findActiveCategory = [&]() -> std::string {
+            auto it_purpose =
+                config.purposeRoutes.find(context.config.personaName);
+            if (it_purpose != config.purposeRoutes.end() &&
+                !it_purpose->second.empty()) {
+              return it_purpose->second;
+            }
+            return config.defaultRouteCategory;
+          };
+
+          std::string activeCategoryName = findActiveCategory();
+          if (activeCategoryName.empty()) {
+            return false;
+          }
+
+          auto it_cat = config.modelRouterCategories.find(activeCategoryName);
+          if (it_cat == config.modelRouterCategories.end() ||
+              it_cat->second.models.size() <= 1) {
+            return false;
+          }
+
+          const auto &models = it_cat->second.models;
+          int currentIndex = -1;
+          for (int i = 0; i < static_cast<int>(models.size()); ++i) {
+            if (models[i].providerId == provider->getId() &&
+                models[i].modelId == opts.modelId) {
+              currentIndex = i;
+              break;
+            }
+          }
+
+          if (currentIndex < 0) {
+            return false;
+          }
+
+          int nextIndex = (currentIndex + 1) % static_cast<int>(models.size());
+          // If we looped back to the same model, we've exhausted the category
+          if (nextIndex == currentIndex) {
+            return false;
+          }
+
+          const auto &nextModel = models[nextIndex];
+          std::string nextKey = nextModel.providerId + ":" + nextModel.modelId;
+
+          onEvent(StreamRetrying{
+              0, 0, streamErrorStatus, 0,
+              "Model retries exhausted, rotating to next model in category '" +
+                  activeCategoryName + "': " + nextKey,
+              "", ""});
+
+          shared::ConfigLoader::instance().setPreferredModelKey(
+              activeCategoryName, nextKey);
+
+          // Queue the actual model switch so applyPendingModelSwitchIfAny()
+          // picks it up at the top of the next loop iteration.
+          {
+            std::lock_guard<std::mutex> lock(modelSwitchMutex);
+            pendingModelSwitch_ = PendingModelSwitch{
+                nextModel.providerId, nextModel.modelId,
+                nextModel.variantName.empty()
+                    ? std::nullopt
+                    : std::optional<std::string>(nextModel.variantName)};
+          }
+
+          // Reset error and continue loop to re-resolve provider and stream
+          streamError = "";
+          consecutiveProviderFailures = 0;
+          return true;
+        };
+
         if (!shouldRetryProviderFailureAtAgentLayer(streamErrorStatus)) {
+          if (rotateAndContinue()) {
+            continue;
+          }
           throw std::runtime_error("Provider stream error: " + streamError);
         }
         consecutiveProviderFailures++;
         if (consecutiveProviderFailures > maxProviderRetries) {
+          if (rotateAndContinue()) {
+            continue;
+          }
           throw std::runtime_error("Provider stream error: " + streamError);
         }
         // Emit retry event and wait briefly before retrying
@@ -1657,6 +1849,84 @@ void Agent::runImpl(const std::optional<std::string> &task,
           }
           continue;
         }
+
+        // --- Model Rotation for Truncation Failure ---
+        auto rotateAndContinue = [&]() -> bool {
+          const auto &config = shared::ConfigLoader::instance().getConfig();
+          auto findActiveCategory = [&]() -> std::string {
+            auto it_purpose =
+                config.purposeRoutes.find(context.config.personaName);
+            if (it_purpose != config.purposeRoutes.end() &&
+                !it_purpose->second.empty()) {
+              return it_purpose->second;
+            }
+            return config.defaultRouteCategory;
+          };
+
+          std::string activeCategoryName = findActiveCategory();
+          if (activeCategoryName.empty()) {
+            return false;
+          }
+
+          auto it_cat = config.modelRouterCategories.find(activeCategoryName);
+          if (it_cat == config.modelRouterCategories.end() ||
+              it_cat->second.models.size() <= 1) {
+            return false;
+          }
+
+          const auto &models = it_cat->second.models;
+          int currentIndex = -1;
+          for (int i = 0; i < static_cast<int>(models.size()); ++i) {
+            if (models[i].providerId == provider->getId() &&
+                models[i].modelId == opts.modelId) {
+              currentIndex = i;
+              break;
+            }
+          }
+
+          if (currentIndex < 0) {
+            return false;
+          }
+
+          int nextIndex = (currentIndex + 1) % static_cast<int>(models.size());
+          if (nextIndex == currentIndex) {
+            return false;
+          }
+
+          const auto &nextModel = models[nextIndex];
+          std::string nextKey = nextModel.providerId + ":" + nextModel.modelId;
+
+          onEvent(StreamRetrying{
+              0, 0, streamErrorStatus, 0,
+              "Tool stream truncation retries exhausted, rotating to next "
+              "model in category '" +
+                  activeCategoryName + "': " + nextKey,
+              "", ""});
+
+          shared::ConfigLoader::instance().setPreferredModelKey(
+              activeCategoryName, nextKey);
+
+          // Queue the actual model switch so applyPendingModelSwitchIfAny()
+          // picks it up at the top of the next loop iteration.
+          {
+            std::lock_guard<std::mutex> lock(modelSwitchMutex);
+            pendingModelSwitch_ = PendingModelSwitch{
+                nextModel.providerId, nextModel.modelId,
+                nextModel.variantName.empty()
+                    ? std::nullopt
+                    : std::optional<std::string>(nextModel.variantName)};
+          }
+
+          streamError = "";
+          consecutiveProviderFailures = 0;
+          return true;
+        };
+
+        if (rotateAndContinue()) {
+          continue;
+        }
+        // --- End Model Rotation ---
+
         throw std::runtime_error("Provider stream error: " + streamError);
       }
 
@@ -1738,6 +2008,7 @@ void Agent::runImpl(const std::optional<std::string> &task,
       // Reset consecutive failure counter on success
       consecutiveProviderFailures = 0;
       consecutiveTruncatedToolRetries = 0;
+      consecutiveInsanityRetries = 0;
 
       if (runCancelToken->load()) {
         persistAssistantTurn(StopReason::Cancelled, false);
@@ -2129,7 +2400,7 @@ void Agent::executeTools(
                             runCancelToken.get(),
                             &provider::LLMSearchProviderRegistry::instance()};
         auto dynamicMcpResult = executeDynamicMcpToolCall(
-            context, runnable.chunk.nameDelta, input, toolRegistry, toolCtx);
+            context, runnable.chunk.nameDelta, input, toolCtx);
         auto result = dynamicMcpResult.has_value()
                           ? *dynamicMcpResult
                           : toolRegistry.execute(runnable.chunk.nameDelta, input,

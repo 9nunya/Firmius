@@ -25,6 +25,7 @@ target_sources(firmius_audits PRIVATE
     src/audits/ResumeTodoAudit.cpp
     src/audits/WebFetchAudit.cpp
     src/audits/WebSearchAudit.cpp
+    src/audits/McpAudit.cpp
 )
 
 target_sources(firmius_audits PUBLIC
@@ -54,6 +55,7 @@ target_sources(firmius_audits PUBLIC
     include/audits/ResumeTodoAudit.hpp
     include/audits/WebFetchAudit.hpp
     include/audits/WebSearchAudit.hpp
+    include/audits/McpAudit.hpp
 )
 
 target_include_directories(firmius_audits PUBLIC

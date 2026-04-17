@@ -567,6 +567,7 @@ struct UserMessageSent {
   std::string messageId;
   std::string text;
   std::string threadId;
+  std::vector<firmius::shared::ImageContent> images;
   bool operator==(const UserMessageSent &) const = default;
 };
 

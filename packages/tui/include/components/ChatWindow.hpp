@@ -124,6 +124,7 @@ ftxui::Component ChatWindow(
     HistoryGetter sub_history_getter = nullptr,
     StreamGetter sub_stream_getter = nullptr,
     LiveQuickSummaryProvider live_quick_summary_provider = nullptr,
+    std::function<std::size_t()> live_measurement_signature_getter = nullptr,
     std::function<bool()> show_internal_nudges_getter = nullptr,
     std::function<bool()> hide_errors_getter = nullptr);
 

@@ -868,6 +868,7 @@ TEST(ChatWindowHelpersTest, TurnFooterUsesCompactDoneSummary) {
 
   const std::string output = renderComponentToString(chat, 100, 12);
   EXPECT_NE(output.find("done"), std::string::npos);
+  EXPECT_NE(output.find("turn 1"), std::string::npos);
   EXPECT_NE(output.find("5s"), std::string::npos);
   EXPECT_NE(output.find("↑2.4k/3k"), std::string::npos);
   EXPECT_NE(output.find("↓180"), std::string::npos);

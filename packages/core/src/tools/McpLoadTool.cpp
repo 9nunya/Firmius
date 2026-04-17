@@ -4,6 +4,7 @@
 #include "tools/McpToolUtil.hpp"
 
 #include <algorithm>
+#include <optional>
 
 namespace firmius::core {
 namespace {
@@ -87,8 +88,14 @@ shared::ToolResult McpLoadTool::execute(const McpLoadInput &input,
 
     client->initialize(timeoutMs);
     const rapidjson::Document toolsResponse = client->listTools(timeoutMs);
-    const rapidjson::Document resourcesResponse = client->listResources(timeoutMs);
-    const rapidjson::Document promptsResponse = client->listPrompts(timeoutMs);
+    std::optional<rapidjson::Document> resourcesResponse;
+    if (!input.resources.empty()) {
+      resourcesResponse.emplace(client->listResources(timeoutMs));
+    }
+    std::optional<rapidjson::Document> promptsResponse;
+    if (!input.prompts.empty()) {
+      promptsResponse.emplace(client->listPrompts(timeoutMs));
+    }
 
     std::vector<std::string> availableTools;
     const auto &toolsResult = toolsResponse["result"];
@@ -101,21 +108,30 @@ shared::ToolResult McpLoadTool::execute(const McpLoadInput &input,
     }
 
     std::vector<std::string> availableResources;
-    const auto &resourcesResult = resourcesResponse["result"];
-    if (resourcesResult.IsObject() && resourcesResult.HasMember("resources") && resourcesResult["resources"].IsArray()) {
-      for (const auto &resource : resourcesResult["resources"].GetArray()) {
-        if (resource.IsObject() && resource.HasMember("uri") && resource["uri"].IsString()) {
-          availableResources.push_back(resource["uri"].GetString());
+    if (resourcesResponse.has_value()) {
+      const auto &resourcesResult = (*resourcesResponse)["result"];
+      if (resourcesResult.IsObject() &&
+          resourcesResult.HasMember("resources") &&
+          resourcesResult["resources"].IsArray()) {
+        for (const auto &resource : resourcesResult["resources"].GetArray()) {
+          if (resource.IsObject() && resource.HasMember("uri") &&
+              resource["uri"].IsString()) {
+            availableResources.push_back(resource["uri"].GetString());
+          }
         }
       }
     }
 
     std::vector<std::string> availablePrompts;
-    const auto &promptsResult = promptsResponse["result"];
-    if (promptsResult.IsObject() && promptsResult.HasMember("prompts") && promptsResult["prompts"].IsArray()) {
-      for (const auto &prompt : promptsResult["prompts"].GetArray()) {
-        if (prompt.IsObject() && prompt.HasMember("name") && prompt["name"].IsString()) {
-          availablePrompts.push_back(prompt["name"].GetString());
+    if (promptsResponse.has_value()) {
+      const auto &promptsResult = (*promptsResponse)["result"];
+      if (promptsResult.IsObject() && promptsResult.HasMember("prompts") &&
+          promptsResult["prompts"].IsArray()) {
+        for (const auto &prompt : promptsResult["prompts"].GetArray()) {
+          if (prompt.IsObject() && prompt.HasMember("name") &&
+              prompt["name"].IsString()) {
+            availablePrompts.push_back(prompt["name"].GetString());
+          }
         }
       }
     }

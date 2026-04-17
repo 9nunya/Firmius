@@ -114,21 +114,7 @@ void requireSingleAnchor(const FileEditOperationInput &edit) {
   if (!edit.anchor.empty()) {
     return;
   }
-
-  std::vector<std::string> extraFields;
-  if (!edit.start_anchor.empty()) {
-    extraFields.emplace_back("start_anchor");
-  }
-  if (!edit.end_anchor.empty()) {
-    extraFields.emplace_back("end_anchor");
-  }
-
-  std::string message = edit.op + " requires anchor";
-  if (!extraFields.empty()) {
-    message += "; " + joinStrings(extraFields, " and ") +
-               " are not used for insert edits";
-  }
-  throw std::runtime_error(message);
+  throw std::runtime_error(edit.op + " requires anchor");
 }
 
 void validateEditOperation(const FileEditOperationInput &edit) {
@@ -151,26 +137,6 @@ void validateEditOperation(const FileEditOperationInput &edit) {
     }
     if (edit.old_string.empty()) {
       throw std::runtime_error("search_replace old_string cannot be empty");
-    }
-
-    std::vector<std::string> unusedFields;
-    if (!edit.start_anchor.empty()) {
-      unusedFields.emplace_back("start_anchor");
-    }
-    if (!edit.end_anchor.empty()) {
-      unusedFields.emplace_back("end_anchor");
-    }
-    if (!edit.anchor.empty()) {
-      unusedFields.emplace_back("anchor");
-    }
-    if (!edit.new_lines.empty()) {
-      unusedFields.emplace_back("new_lines");
-    }
-    if (!unusedFields.empty()) {
-      throw std::runtime_error(
-          "search_replace uses old_string/new_string and optional "
-          "replace_all. Remove " +
-          joinStrings(unusedFields, ", ") + ".");
     }
     return;
   }
@@ -351,15 +317,59 @@ sanitizeReplacementLines(const FileEditOperationInput &edit,
 }
 
 bool hasMeaningfulEditInput(const FileEditOperationInput &edit) {
-  return !edit.op.empty() || !edit.start_anchor.empty() ||
-         !edit.end_anchor.empty() || !edit.anchor.empty() ||
-         !edit.new_lines.empty() || edit.has_old_string ||
-         edit.has_new_string || edit.replace_all;
+  if (!edit.op.empty() || !edit.start_anchor.empty() ||
+      !edit.end_anchor.empty() || !edit.anchor.empty() ||
+      !edit.new_lines.empty()) {
+    return true;
+  }
+
+  if (!edit.old_string.empty()) {
+    return true;
+  }
+
+  if (edit.has_new_string && (edit.has_old_string || !edit.old_string.empty())) {
+    return true;
+  }
+
+  if (edit.replace_all &&
+      (edit.has_old_string || edit.has_new_string || !edit.old_string.empty() ||
+       !edit.new_string.empty())) {
+    return true;
+  }
+
+  return false;
+}
+
+void sanitizeEditOperation(FileEditOperationInput &edit) {
+  if (edit.op.empty() && !edit.old_string.empty() &&
+      (edit.has_new_string || !edit.new_string.empty())) {
+    edit.op = "search_replace";
+  }
+  if (edit.op != "search_replace") {
+    if (edit.has_old_string && edit.old_string.empty()) {
+      edit.has_old_string = false;
+    }
+    if (edit.has_new_string && edit.new_string.empty()) {
+      edit.has_new_string = false;
+    }
+  }
+}
+
+void sanitizeTargetInput(FileEditTargetInput &input) {
+  for (auto &edit : input.edits) {
+    sanitizeEditOperation(edit);
+  }
+  input.edits.erase(
+      std::remove_if(input.edits.begin(), input.edits.end(),
+                     [](const FileEditOperationInput &edit) {
+                       return !hasMeaningfulEditInput(edit);
+                     }),
+      input.edits.end());
 }
 
 bool isSearchReplaceEdit(const FileEditOperationInput &edit) {
   return edit.op == "search_replace" || !edit.old_string.empty() ||
-         !edit.new_string.empty();
+         (!edit.new_string.empty() && edit.has_new_string);
 }
 
 StructuredEditMode
@@ -393,8 +403,13 @@ class PatchParser {
 public:
   struct Hunk {
     int startPatchLine;
+    int oldStartLine = 0;
+    int oldCount = 0;
+    int newStartLine = 0;
+    int newCount = 0;
     std::string startAnchor;
     std::string endAnchor;
+    std::vector<std::string> contextLines;
     std::vector<std::string> oldLines;
     std::vector<std::string> newLines;
   };
@@ -407,79 +422,122 @@ public:
     int lineNo = 0;
 
     std::vector<Hunk> hunks;
-    static const std::regex hunkHeaderPattern(
+    static const std::regex githubPattern(
+        R"(^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@.*)");
+    static const std::regex anchorPattern(
         R"(^@@\s+([^\s]+?)(?:\.\.\.([^\s]+?))?\s+@@$)");
 
     Hunk *currentHunk = nullptr;
+    bool inHunk = false;
+    bool pastChanges = false;
 
     while (std::getline(stream, line)) {
       lineNo++;
-      if (line.empty())
-        continue;
+      if (line.empty() && !inHunk) continue;
+      if (line.rfind("--- ", 0) == 0 || line.rfind("+++ ", 0) == 0) continue;
 
       std::smatch match;
-      if (std::regex_match(line, match, hunkHeaderPattern)) {
-        hunks.push_back({lineNo,
-                         match[1].str(),
-                         match[2].matched ? match[2].str() : "",
-                         {},
-                         {}});
+      if (std::regex_match(line, match, githubPattern)) {
+        hunks.push_back({});
         currentHunk = &hunks.back();
+        currentHunk->startPatchLine = lineNo;
+        currentHunk->oldStartLine = std::stoi(match[1].str());
+        currentHunk->oldCount = match[2].matched ? std::stoi(match[2].str()) : 1;
+        currentHunk->newStartLine = std::stoi(match[3].str());
+        currentHunk->newCount = match[4].matched ? std::stoi(match[4].str()) : 1;
+        inHunk = true;
+        pastChanges = false;
         continue;
       }
 
-      if (!currentHunk) {
-        throw std::runtime_error(
-            "Malformed patch at line " + std::to_string(lineNo) +
-            ": hunk must start with '@@ anchor @@' or '@@ start...end @@'");
+      if (std::regex_match(line, match, anchorPattern)) {
+        hunks.push_back({});
+        currentHunk = &hunks.back();
+        currentHunk->startPatchLine = lineNo;
+        currentHunk->startAnchor = match[1].str();
+        currentHunk->endAnchor = match[2].matched ? match[2].str() : "";
+        inHunk = true;
+        pastChanges = false;
+        continue;
       }
 
-      if (line[0] == '-') {
-        if (!currentHunk->newLines.empty()) {
+      if (!inHunk) {
+        throw std::runtime_error(
+            "Malformed patch at line " + std::to_string(lineNo) +
+            ": expected '@@ -n,m +n,m @@' or '@@ anchor @@'");
+      }
+
+      if (line.empty()) { currentHunk->newLines.push_back(""); continue; }
+
+      char prefix = line[0];
+      std::string content = line.substr(1);
+
+      if (prefix == '-') {
+        if (pastChanges && !currentHunk->newLines.empty()) {
           throw std::runtime_error("Malformed patch at line " +
-                                   std::to_string(lineNo) +
-                                   ": '-' lines (removals) must come before "
-                                   "'+' lines (additions) in a hunk");
+              std::to_string(lineNo) + ": '-' after '+' in hunk");
         }
-        currentHunk->oldLines.push_back(line.substr(1));
-      } else if (line[0] == '+') {
-        currentHunk->newLines.push_back(line.substr(1));
-      } else {
-        throw std::runtime_error("Malformed patch at line " +
-                                 std::to_string(lineNo) +
-                                 ": expected '+' or '-' line");
+        currentHunk->oldLines.push_back(content);
+      } else if (prefix == '+') {
+        currentHunk->newLines.push_back(content);
+        pastChanges = true;
+      } else if (prefix == ' ') {
+        if (!pastChanges && currentHunk->oldLines.empty()) {
+          currentHunk->contextLines.push_back(content);
+        }
+      } else if (prefix == '\\') {
+        continue;
       }
     }
 
     for (const auto &hunk : hunks) {
       FileEditOperationInput edit;
       edit.patch_line = hunk.startPatchLine;
+
       if (hunk.oldLines.empty() && hunk.newLines.empty()) {
-        throw std::runtime_error("Malformed patch: hunk starting at line " +
-                                 std::to_string(hunk.startPatchLine) +
-                                 " has no changes");
+        throw std::runtime_error("Malformed patch: hunk at line " +
+            std::to_string(hunk.startPatchLine) + " has no changes");
       }
-      if (hunk.oldLines.empty()) {
-        if (!hunk.endAnchor.empty()) {
-          throw std::runtime_error(
-              "Malformed patch: hunk starting at line " +
-              std::to_string(hunk.startPatchLine) +
-              " uses range anchor '...' but contains only '+' lines. " +
-              "Use single anchor '@@ anchor @@' for insertions.");
+
+      if (!hunk.startAnchor.empty()) {
+        if (hunk.oldLines.empty()) {
+          if (!hunk.endAnchor.empty()) {
+            throw std::runtime_error("Malformed patch: range anchor with only '+' lines");
+          }
+          edit.op = "insert_after";
+          edit.anchor = hunk.startAnchor;
+        } else if (hunk.newLines.empty()) {
+          edit.op = "delete_range";
+          edit.start_anchor = hunk.startAnchor;
+          edit.end_anchor = hunk.endAnchor.empty() ? hunk.startAnchor : hunk.endAnchor;
+        } else {
+          edit.op = "replace_range";
+          edit.start_anchor = hunk.startAnchor;
+          edit.end_anchor = hunk.endAnchor.empty() ? hunk.startAnchor : hunk.endAnchor;
         }
-        edit.op = "insert_after";
-        edit.anchor = hunk.startAnchor;
         edit.new_lines = hunk.newLines;
-      } else if (hunk.newLines.empty()) {
-        edit.op = "delete_range";
-        edit.start_anchor = hunk.startAnchor;
-        edit.end_anchor =
-            hunk.endAnchor.empty() ? hunk.startAnchor : hunk.endAnchor;
       } else {
-        edit.op = "replace_range";
-        edit.start_anchor = hunk.startAnchor;
-        edit.end_anchor =
-            hunk.endAnchor.empty() ? hunk.startAnchor : hunk.endAnchor;
+        int startLine = hunk.oldStartLine + static_cast<int>(hunk.contextLines.size());
+        int endLine = startLine + static_cast<int>(hunk.oldLines.size()) - 1;
+
+        if (hunk.oldLines.empty()) {
+          int insertAfter = hunk.oldStartLine + static_cast<int>(hunk.contextLines.size()) - 1;
+          if (hunk.contextLines.empty()) {
+            edit.op = "insert_before";
+            edit.anchor = "1";
+          } else {
+            edit.op = "insert_after";
+            edit.anchor = std::to_string(insertAfter);
+          }
+        } else if (hunk.newLines.empty()) {
+          edit.op = "delete_range";
+          edit.start_anchor = std::to_string(startLine);
+          edit.end_anchor = std::to_string(endLine);
+        } else {
+          edit.op = "replace_range";
+          edit.start_anchor = std::to_string(startLine);
+          edit.end_anchor = std::to_string(endLine);
+        }
         edit.new_lines = hunk.newLines;
       }
       edits.push_back(std::move(edit));
@@ -487,6 +545,7 @@ public:
     return edits;
   }
 };
+
 
 bool hasMeaningfulLegacyReplace(const FileEditTargetInput &input) {
   if (!input.has_old_string || !input.has_new_string) {
@@ -496,22 +555,120 @@ bool hasMeaningfulLegacyReplace(const FileEditTargetInput &input) {
   return !input.old_string.empty() && !input.new_string.empty();
 }
 
+bool hasMeaningfulLegacyPayload(const FileEditTargetInput &input) {
+  return !input.old_string.empty() || !input.new_string.empty();
+}
+
 bool hasMeaningfulPatch(const FileEditTargetInput &input) {
   return input.has_patch && !input.patch.empty();
 }
 
-bool hasMeaningfulOverwrite(const FileEditTargetInput &input,
+bool hasContentOnlyEnvelope(const FileEditTargetInput &input,
                             bool hasStructuredEdits, bool hasLegacyReplace,
                             bool hasPatch) {
   if (!input.has_content) {
     return false;
   }
 
-  if (!input.content.empty()) {
+  return !hasStructuredEdits && !hasLegacyReplace && !hasPatch;
+}
+
+bool hasMeaningfulOverwrite(const FileEditTargetInput &input,
+                            bool hasStructuredEdits, bool hasLegacyReplace,
+                            bool hasPatch) {
+  return hasContentOnlyEnvelope(input, hasStructuredEdits, hasLegacyReplace,
+                                hasPatch) &&
+         !input.content.empty();
+}
+
+bool hasMeaningfulTopLevelPayloadForMultiFile(const FileEditInput &input) {
+  if (!input.path.empty()) {
     return true;
   }
 
-  return !hasStructuredEdits && !hasLegacyReplace && !hasPatch;
+  if (input.has_content && !input.content.empty()) {
+    return true;
+  }
+
+  if (hasMeaningfulPatch(input)) {
+    return true;
+  }
+
+  if (hasMeaningfulLegacyPayload(input)) {
+    return true;
+  }
+
+  return std::any_of(input.edits.begin(), input.edits.end(),
+                     [](const FileEditOperationInput &edit) {
+                       return hasMeaningfulEditInput(edit);
+                     });
+}
+
+bool hasMeaningfulTargetEnvelope(const FileEditTargetInput &input) {
+  if (!input.path.empty()) {
+    return true;
+  }
+
+  if (input.has_content && !input.content.empty()) {
+    return true;
+  }
+
+  if (hasMeaningfulPatch(input) || hasMeaningfulLegacyPayload(input)) {
+    return true;
+  }
+
+  return std::any_of(input.edits.begin(), input.edits.end(),
+                     [](const FileEditOperationInput &edit) {
+                       return hasMeaningfulEditInput(edit);
+                     });
+}
+
+std::vector<std::string>
+collectMeaningfulTopLevelFieldsForMultiFile(const FileEditInput &input) {
+  std::vector<std::string> fields;
+
+  if (!input.path.empty()) {
+    fields.emplace_back("path");
+  }
+  if (input.has_content && !input.content.empty()) {
+    fields.emplace_back("content");
+  }
+  if (hasMeaningfulPatch(input)) {
+    fields.emplace_back("patch");
+  }
+  if (std::any_of(input.edits.begin(), input.edits.end(),
+                  [](const FileEditOperationInput &edit) {
+                    return hasMeaningfulEditInput(edit);
+                  })) {
+    fields.emplace_back("edits");
+  }
+  if (hasMeaningfulLegacyPayload(input)) {
+    fields.emplace_back("old_string/new_string");
+  }
+
+  return fields;
+}
+
+std::string buildMultiFileMixedModeError(const FileEditInput &input) {
+  const auto fields = collectMeaningfulTopLevelFieldsForMultiFile(input);
+  std::string message =
+      "file_edit files[] mode ignores semantically inert wrapper defaults such "
+      "as content:\"\", patch:\"\", edits:[], old_string:\"\", new_string:\"\", "
+      "replace_all:false, and fuzzy_threshold:0. ";
+
+  if (!fields.empty()) {
+    message += "This request still mixes files[] with meaningful top-level ";
+    message += joinStrings(fields, ", ");
+    message +=
+        ". Move those fields into each files[] entry or remove them from the "
+        "top level.";
+  } else {
+    message +=
+        "Use files[] by itself, or use a single top-level target without "
+        "files[].";
+  }
+
+  return message;
 }
 
 void stripBoundaryEchoes(std::vector<std::string> &newLines,
@@ -875,7 +1032,9 @@ FileEditTargetInput parseFileEditTarget(const rapidjson::Value &json) {
         edit.patch_line = value["patch_line"].GetInt();
       }
       edit.new_lines = readStringArray(value, "new_lines");
-      input.edits.push_back(std::move(edit));
+      if (hasMeaningfulEditInput(edit)) {
+        input.edits.push_back(std::move(edit));
+      }
     }
   }
 
@@ -886,10 +1045,101 @@ FileEditTargetInput parseFileEditTarget(const rapidjson::Value &json) {
   return input;
 }
 
+std::optional<std::string>
+preflightValidateFileEditTarget(const FileEditTargetInput &input,
+                                shared::ToolContext &ctx) {
+  if (input.path.empty()) {
+    return std::string("file_edit requires a path for each target file.");
+  }
+
+  const std::string absolutePath =
+      ctx.agent.getEnvironment()->getWorkspace().resolvePath(input.path);
+  const bool fileExists = ctx.host.exists(absolutePath);
+  const StructuredEditMode structuredEditMode =
+      classifyStructuredEditMode(input.edits);
+  const bool hasAnchorEdits =
+      structuredEditMode == StructuredEditMode::LineRange;
+  const bool hasSearchReplaceEdits =
+      structuredEditMode == StructuredEditMode::SearchReplace;
+  const bool hasLegacyReplace = hasMeaningfulLegacyReplace(input);
+  const bool hasPatch = hasMeaningfulPatch(input);
+  const bool hasMeaningfulContentPayload =
+      input.has_content && !input.content.empty();
+  const bool hasContentEnvelope =
+      hasContentOnlyEnvelope(input, hasAnchorEdits || hasSearchReplaceEdits,
+                             hasLegacyReplace, hasPatch);
+  const bool hasEmptyCreate =
+      hasContentEnvelope && input.content.empty() && !fileExists;
+  const int modeCount =
+      static_cast<int>(hasAnchorEdits) +
+      static_cast<int>(hasSearchReplaceEdits) +
+      static_cast<int>(hasMeaningfulContentPayload) +
+      static_cast<int>(hasLegacyReplace) + static_cast<int>(hasPatch) +
+      static_cast<int>(hasEmptyCreate);
+
+  if (structuredEditMode == StructuredEditMode::Mixed) {
+    return std::string(
+        "Do not mix search_replace edits with line-range edits in the "
+        "same target file. Use separate file entries or separate file_edit "
+        "calls.");
+  }
+
+  if (modeCount > 1) {
+    return std::string(
+        "file_edit accepts one editing mode per target file. Choose either "
+        "line-range edits, search_replace edits, whole-file content, patch "
+        "mode, or legacy old_string/new_string compatibility mode.");
+  }
+
+  if (modeCount == 0) {
+    if (hasContentEnvelope && input.content.empty() && fileExists) {
+      return std::string(
+          "Missing edits, content, patch, or legacy replacement parameters. "
+          "Ignored inert content:\"\" for the existing file. To clear a "
+          "file, use an explicit patch or line-range edit after reading it.");
+    }
+    return std::string(
+        "Missing edits, content, patch, or legacy replacement parameters.");
+  }
+
+  if (hasPatch) {
+    try {
+      (void)PatchParser::parse(input.patch);
+    } catch (const std::exception &e) {
+      return std::string(e.what());
+    }
+  }
+
+  if ((hasAnchorEdits || hasPatch) && !fileExists) {
+    return std::string(hasPatch ? "Patch mode requires an existing file."
+                                : "Line-range edits require an existing file. "
+                                  "Use content when creating a new file.");
+  }
+
+  if (hasSearchReplaceEdits && !fileExists) {
+    return std::string(
+        "search_replace edits require an existing file. Use content when "
+        "creating a new file.");
+  }
+
+  if ((hasMeaningfulContentPayload || hasEmptyCreate) && fileExists &&
+      !ctx.agent.getEnvironment()->getWorkspace().hasFullyReadFile(
+          absolutePath)) {
+    return std::string(
+        "Refusing to overwrite an existing file that has not been fully "
+        "read in this thread. Read the full file with 'file_read' before "
+        "using content overwrite mode.");
+  }
+
+  return std::nullopt;
+}
+
 rapidjson::Document
 executeSearchReplaceEditsDoc(const FileEditTargetInput &input,
                              const std::string &absolutePath,
-                             shared::ToolContext &ctx) {
+                             shared::ToolContext &ctx,
+                             std::unique_ptr<rapidjson::Document> *beforeLspOut =
+                                 nullptr) {
   rapidjson::Document doc;
   doc.SetObject();
   auto &alloc = doc.GetAllocator();
@@ -949,6 +1199,10 @@ executeSearchReplaceEditsDoc(const FileEditTargetInput &input,
     }
   }
 
+  if (beforeLspOut != nullptr) {
+    *beforeLspOut = std::make_unique<rapidjson::Document>(
+        collectFileLspDiagnostics(absolutePath, ctx));
+  }
   ctx.host.writeFile(
       absolutePath, std::vector<uint8_t>(newContent.begin(), newContent.end()));
   ctx.agent.getEnvironment()->getWorkspace().recordFileEdit(absolutePath);
@@ -978,7 +1232,9 @@ executeSearchReplaceEditsDoc(const FileEditTargetInput &input,
 
 rapidjson::Document executeLegacyReplaceDoc(const FileEditTargetInput &input,
                                             const std::string &absolutePath,
-                                            shared::ToolContext &ctx) {
+                                            shared::ToolContext &ctx,
+                                            std::unique_ptr<rapidjson::Document> *beforeLspOut =
+                                                nullptr) {
   rapidjson::Document doc;
   doc.SetObject();
   auto &alloc = doc.GetAllocator();
@@ -1004,6 +1260,10 @@ rapidjson::Document executeLegacyReplaceDoc(const FileEditTargetInput &input,
 
   newContent.replace(pos, input.old_string.size(), input.new_string);
 
+  if (beforeLspOut != nullptr) {
+    *beforeLspOut = std::make_unique<rapidjson::Document>(
+        collectFileLspDiagnostics(absolutePath, ctx));
+  }
   ctx.host.writeFile(
       absolutePath, std::vector<uint8_t>(newContent.begin(), newContent.end()));
   ctx.agent.getEnvironment()->getWorkspace().recordFileEdit(absolutePath);
@@ -1039,13 +1299,22 @@ FileEditExecutionResult executeSingleFileEdit(const FileEditTargetInput &input,
       structuredEditMode == StructuredEditMode::SearchReplace;
   const bool hasLegacyReplace = hasMeaningfulLegacyReplace(input);
   const bool hasPatch = hasMeaningfulPatch(input);
+  const bool hasMeaningfulContentPayload =
+      input.has_content && !input.content.empty();
+  const bool hasContentEnvelope =
+      hasContentOnlyEnvelope(input, hasAnchorEdits || hasSearchReplaceEdits,
+                             hasLegacyReplace, hasPatch);
   const bool hasOverwrite =
       hasMeaningfulOverwrite(input, hasAnchorEdits || hasSearchReplaceEdits,
                              hasLegacyReplace, hasPatch);
+  const bool hasEmptyCreate =
+      hasContentEnvelope && input.content.empty() && !fileExists;
   const int modeCount =
       static_cast<int>(hasAnchorEdits) +
-      static_cast<int>(hasSearchReplaceEdits) + static_cast<int>(hasOverwrite) +
-      static_cast<int>(hasLegacyReplace) + static_cast<int>(hasPatch);
+      static_cast<int>(hasSearchReplaceEdits) +
+      static_cast<int>(hasMeaningfulContentPayload) +
+      static_cast<int>(hasLegacyReplace) + static_cast<int>(hasPatch) +
+      static_cast<int>(hasEmptyCreate);
 
   if (structuredEditMode == StructuredEditMode::Mixed) {
     result.failureMessage =
@@ -1065,8 +1334,15 @@ FileEditExecutionResult executeSingleFileEdit(const FileEditTargetInput &input,
   }
 
   if (modeCount == 0) {
-    result.failureMessage =
-        "Missing edits, content, patch, or legacy replacement parameters.";
+    if (hasContentEnvelope && input.content.empty() && fileExists) {
+      result.failureMessage =
+          "Missing edits, content, patch, or legacy replacement parameters. "
+          "Ignored inert content:\"\" for the existing file. To clear a file, "
+          "use an explicit patch or line-range edit after reading it.";
+    } else {
+      result.failureMessage =
+          "Missing edits, content, patch, or legacy replacement parameters.";
+    }
     return result;
   }
 
@@ -1083,11 +1359,13 @@ FileEditExecutionResult executeSingleFileEdit(const FileEditTargetInput &input,
   try {
     ctx.agent.getPermissions()->validatePathAccess(absolutePath,
                                                    AccessMode::WRITE);
-    std::unique_ptr<rapidjson::Document> beforeLsp;
-    if (fileExists) {
-      beforeLsp = std::make_unique<rapidjson::Document>(
+    auto collectBeforeLsp = [&]() -> std::unique_ptr<rapidjson::Document> {
+      if (!fileExists) {
+        return nullptr;
+      }
+      return std::make_unique<rapidjson::Document>(
           collectFileLspDiagnostics(absolutePath, ctx));
-    }
+    };
 
     if (hasAnchorEdits || hasPatch) {
       if (!fileExists) {
@@ -1141,6 +1419,7 @@ FileEditExecutionResult executeSingleFileEdit(const FileEditTargetInput &input,
         }
       }
 
+      auto beforeLsp = collectBeforeLsp();
       for (auto it = normalized.rbegin(); it != normalized.rend(); ++it) {
         auto begin = buffer.lines.begin() + it->startIndex;
         auto end = buffer.lines.begin() + it->endIndex;
@@ -1194,8 +1473,9 @@ FileEditExecutionResult executeSingleFileEdit(const FileEditTargetInput &input,
         return result;
       }
 
-      result.doc =
-          executeSearchReplaceEditsDoc(effectiveInput, absolutePath, ctx);
+      std::unique_ptr<rapidjson::Document> beforeLsp;
+      result.doc = executeSearchReplaceEditsDoc(effectiveInput, absolutePath,
+                                                ctx, &beforeLsp);
       if (result.doc.HasMember("error") && result.doc["error"].IsString()) {
         result.failureMessage = result.doc["error"].GetString();
         return result;
@@ -1207,7 +1487,7 @@ FileEditExecutionResult executeSingleFileEdit(const FileEditTargetInput &input,
       return result;
     }
 
-    if (hasOverwrite) {
+    if (hasOverwrite || hasEmptyCreate) {
       if (fileExists &&
           !ctx.agent.getEnvironment()->getWorkspace().hasFullyReadFile(
               absolutePath)) {
@@ -1218,6 +1498,7 @@ FileEditExecutionResult executeSingleFileEdit(const FileEditTargetInput &input,
         return result;
       }
 
+      auto beforeLsp = collectBeforeLsp();
       ctx.host.writeFile(
           absolutePath,
           std::vector<uint8_t>(input.content.begin(), input.content.end()));
@@ -1239,7 +1520,13 @@ FileEditExecutionResult executeSingleFileEdit(const FileEditTargetInput &input,
       return result;
     }
 
-    result.doc = executeLegacyReplaceDoc(effectiveInput, absolutePath, ctx);
+    std::unique_ptr<rapidjson::Document> beforeLsp;
+    result.doc =
+        executeLegacyReplaceDoc(effectiveInput, absolutePath, ctx, &beforeLsp);
+    if (result.doc.HasMember("error") && result.doc["error"].IsString()) {
+      result.failureMessage = result.doc["error"].GetString();
+      return result;
+    }
     auto afterLsp = collectFileLspDiagnostics(absolutePath, ctx);
     attachFileEditLspSummary(result.doc, absolutePath, beforeLsp.get(),
                              &afterLsp);
@@ -1297,7 +1584,9 @@ std::shared_ptr<shared::JSONSchema> FileEditTool::getSchema() const {
                        "without trailing newline characters. Do not include "
                        "line prefixes, trailing |content, diff markers, "
                        "or unchanged boundary lines from outside the edited "
-                       "range. Used by line-range edit ops.")
+                       "range. Used by line-range edit ops. Empty or missing "
+                       "new_lines is fine for delete_range and inert empty "
+                       "transport placeholders are ignored.")
             ->setOptional()},
        {"old_string",
         zString()
@@ -1324,14 +1613,17 @@ std::shared_ptr<shared::JSONSchema> FileEditTool::getSchema() const {
             zArray(editSchema)
                 ->describe("Structured edits for one existing file. Use either "
                            "line-range ops or search_replace ops within a "
-                           "single target file, not both.")
+                           "single target file, not both. Empty edit arrays "
+                           "or empty placeholder edit objects are ignored.")
                 ->setOptional()},
            {"content",
             zString()
                 ->describe(
                     "Whole-file content. Best for new-file creation, and "
                     "also allowed for full overwrites after the file has "
-                    "been fully read.")
+                    "been fully read. content:\"\" is meaningful for creating "
+                    "a new empty file; for an existing file it is treated as "
+                    "inert unless that is the only explicit intent.")
                 ->setOptional()},
            {"patch",
             zString()
@@ -1365,13 +1657,19 @@ std::shared_ptr<shared::JSONSchema> FileEditTool::getSchema() const {
                    ->describe("Structured edits for a single file. Use "
                               "line-range ops after file_read, or use "
                               "search_replace after reading the full file. Do "
-                              "not mix the two styles within one target.")
+                              "not mix the two styles within one target. "
+                              "Empty edit arrays or empty placeholder edit "
+                              "objects are ignored.")
                    ->setOptional()},
               {"content", zString()
                               ->describe("Whole-file content. Best for "
                                          "explicit new-file creation, and "
                                          "also valid for full overwrites after "
-                                         "the file has been fully read.")
+                                         "the file has been fully read. "
+                                         "content:\"\" creates a new empty "
+                                         "file but is otherwise inert noise "
+                                         "unless it is the only explicit "
+                                         "intent.")
                               ->setOptional()},
               {"patch",
                zString()
@@ -1400,7 +1698,9 @@ std::shared_ptr<shared::JSONSchema> FileEditTool::getSchema() const {
                    ->describe("Optional multi-file request. Each entry uses "
                               "the same shape and rules as the single-file "
                               "form. Use either top-level path/... fields or "
-                              "files[], not both.")
+                              "files[], not both. Semantically inert wrapper "
+                              "defaults like empty edits, empty patch, and "
+                              "empty legacy strings are ignored.")
                    ->setOptional()}})
       ->required({});
 }
@@ -1421,21 +1721,28 @@ FileEditInput FileEditTool::transform(const rapidjson::Value &json) {
 
 shared::ToolResult FileEditTool::execute(const FileEditInput &input,
                                          shared::ToolContext &ctx) {
-  const bool hasMultiFile = !input.files.empty();
+  FileEditInput normalized = input;
+  sanitizeTargetInput(normalized);
+  for (auto &target : normalized.files) {
+    sanitizeTargetInput(target);
+  }
+  normalized.files.erase(
+      std::remove_if(normalized.files.begin(), normalized.files.end(),
+                     [](const FileEditTargetInput &target) {
+                       return !hasMeaningfulTargetEnvelope(target);
+                     }),
+      normalized.files.end());
+
+  const bool hasMultiFile = !normalized.files.empty();
   const bool hasTopLevelPayload =
-      !input.path.empty() || input.has_content || !input.edits.empty() ||
-      input.has_old_string || input.has_new_string || input.has_patch;
+      hasMeaningfulTopLevelPayloadForMultiFile(normalized);
 
   if (hasMultiFile && hasTopLevelPayload) {
-    return shared::ToolResult::fail(
-        "Use either top-level path/content/edits/patch fields or files[] in a "
-        "single file_edit call, not both. For multi-file creates or edits, use "
-        "files[] only; writing a new file will create parent directories "
-        "automatically.");
+    return shared::ToolResult::fail(buildMultiFileMixedModeError(normalized));
   }
 
   if (!hasMultiFile) {
-    const auto single = executeSingleFileEdit(input, ctx);
+    const auto single = executeSingleFileEdit(normalized, ctx);
     if (!single.success) {
       if (!single.doc.ObjectEmpty()) {
         rapidjson::StringBuffer sb;
@@ -1461,7 +1768,13 @@ shared::ToolResult FileEditTool::execute(const FileEditInput &input,
   int addedLines = 0;
   int removedLines = 0;
 
-  for (const auto &target : input.files) {
+  for (const auto &target : normalized.files) {
+    if (auto validationError = preflightValidateFileEditTarget(target, ctx)) {
+      return shared::ToolResult::fail(*validationError);
+    }
+  }
+
+  for (const auto &target : normalized.files) {
     auto fileResult = executeSingleFileEdit(target, ctx);
     if (!fileResult.success) {
       if (!fileResult.doc.ObjectEmpty()) {

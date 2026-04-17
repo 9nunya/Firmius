@@ -7,13 +7,18 @@
 #include <optional>
 #include <mutex>
 #include <vector>
+#include <unordered_map>
 
 namespace firmius::shared {
 
-struct ModelRouteCategory {
+struct ModelOption {
     std::string providerId;
     std::string modelId;
     std::string variantName;
+};
+
+struct ModelRouteCategory {
+    std::vector<ModelOption> models;
 };
 
 
@@ -55,6 +60,10 @@ struct UserConfig {
     bool showInternalNudges = false;
     bool hideErrors = false;                              // Hide errors in chat display
     RollingMemoryConfig rollingMemory;
+    bool insanityDetectionEnabled = true;
+    int insanityRepetitionThreshold = 3;
+    std::uint64_t insanityMaxTokenThreshold = 50000;
+    int maxInsanityRetries = 2;
     std::map<std::string, McpServerConfig> mcpServers; // serverName -> MCP server config
 };
 
@@ -66,6 +75,10 @@ public:
     void save() const;
 
     const UserConfig& getConfig() const;
+    // Runtime preferred model tracking per category (not persisted)
+    void setPreferredModelKey(const std::string& category, const std::string& key) const;
+    std::string getPreferredModelKey(const std::string& category) const;
+    void clearPreferredModelKey(const std::string& category) const;
     void updateConfig(const UserConfig& config);
 
     std::string getConfigPath() const;
@@ -77,6 +90,7 @@ private:
 
     void loadImpl();
 
+    mutable std::unordered_map<std::string, std::string> preferredModelKey_;
     UserConfig config_;
     mutable std::mutex mutex_;
     bool loaded_ = false;

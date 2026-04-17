@@ -31,7 +31,6 @@ TEST(CliOptionsTest, ParsesDirectPromptStartupFlags) {
   const auto options =
       firmius::cli::parseCliOptions(static_cast<int>(argv.size()), argv.data());
 
-  EXPECT_FALSE(options.web);
   EXPECT_EQ(options.initialPrompt, "build a full project");
   EXPECT_EQ(options.initialCwd, "/mnt/SHIT/Projects");
   EXPECT_TRUE(options.quitWhenIdle);

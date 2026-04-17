@@ -63,5 +63,5 @@ Only tools listed in the active Firmius tool block are real.
 `apply_patch` is not an available Firmius tool or shell command.
 Use `file_read`, `file_edit`, `process_execute`, and `subagent_wait` deliberately.
 never use `process_execute` as an editing tunnel
-never mix `content` with Hashline `edits` in one `file_edit` call
+never mix `content` with line-range `edits` in one `file_edit` call
 if you are personally doing the next direct change, do it without manufacturing a chunk

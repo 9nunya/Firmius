@@ -1,5 +1,5 @@
 find_package(CURL REQUIRED)
-
+find_package(SQLite3 REQUIRED)
 add_library(firmius_provider STATIC)
 add_library(firmius::provider ALIAS firmius_provider)
 
@@ -7,6 +7,7 @@ target_sources(firmius_provider PRIVATE
     src/providers/CodexProvider.cpp
     src/providers/ChutesProvider.cpp
     src/providers/KimiProvider.cpp
+    src/providers/KiloProvider.cpp
     src/providers/LMStudioProvider.cpp
     src/providers/NanoGPTProvider.cpp
     src/providers/NvidiaProvider.cpp
@@ -20,10 +21,10 @@ target_sources(firmius_provider PRIVATE
     src/providers/AntigravityProtocol.cpp
     src/providers/BaseOAuthProvider.cpp
     src/providers/QwenProvider.cpp
+    src/providers/KiroProvider.cpp
     src/providers/BaseAPIKeyProvider.cpp
-    src/providers/BaseAnthropicProvider.cpp
-    src/providers/LettaProvider.cpp
-    src/providers/LLMSearchProviderRegistry.cpp
+     src/providers/BaseAnthropicProvider.cpp
+     src/providers/LLMSearchProviderRegistry.cpp
     src/providers/GoogleSearchProvider.cpp
 )
 
@@ -34,6 +35,7 @@ target_sources(firmius_provider PUBLIC
     include/providers/CodexProvider.hpp
     include/providers/ChutesProvider.hpp
     include/providers/KimiProvider.hpp
+    include/providers/KiloProvider.hpp
     include/providers/LMStudioProvider.hpp
     include/providers/NanoGPTProvider.hpp
     include/providers/NvidiaProvider.hpp
@@ -48,9 +50,9 @@ target_sources(firmius_provider PUBLIC
     include/providers/BaseOAuthProvider.hpp
     include/providers/OAuthWizard.hpp
     include/providers/QwenProvider.hpp
+    include/providers/KiroProvider.hpp
     include/providers/BaseAPIKeyProvider.hpp
     include/providers/BaseAnthropicProvider.hpp
-    include/providers/LettaProvider.hpp
     include/providers/LLMSearchProvider.hpp
     include/providers/LLMSearchProviderRegistry.hpp
     include/providers/GoogleSearchProvider.hpp
@@ -64,6 +66,7 @@ target_include_directories(firmius_provider PUBLIC
 target_link_libraries(firmius_provider PUBLIC
     firmius::shared
     CURL::libcurl
+    SQLite3::SQLite3
 )
 
 target_include_directories(firmius_provider PRIVATE

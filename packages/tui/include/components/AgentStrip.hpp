@@ -31,6 +31,7 @@ inline constexpr size_t kAgentStripVisibleRows = 4;
 struct AgentStripModel {
   std::vector<AgentStripItem> items;
   size_t view_offset = 0;
+  std::size_t layout_generation = 0;
   std::function<void(const std::string&)> on_item_click;
   std::function<void(int)> on_scroll_request;
 };

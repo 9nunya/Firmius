@@ -40,7 +40,7 @@ if(FIRMIUS_FETCHCONTENT_OFFLINE)
       "Disallow FetchContent network access" FORCE)
 endif()
 
-if(FIRMIUS_FETCHCONTENT_VERBOSE)
+if(FETCHCONTENT_VERBOSE)
   message(STATUS "FetchContent cache base: ${FETCHCONTENT_BASE_DIR}")
   if(FIRMIUS_FETCHCONTENT_OFFLINE)
     message(STATUS "FetchContent offline mode enabled")
@@ -81,18 +81,7 @@ FetchContent_Declare(
 
 set(FTXUI_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
 
-FetchContent_Declare(
-  drogon
-  GIT_REPOSITORY https://github.com/drogonframework/drogon
-  GIT_TAG v1.7.5
-  GIT_SHALLOW TRUE
-  GIT_PROGRESS ${_firmius_git_progress}
-)
-
-set(BUILD_CTL OFF CACHE BOOL "" FORCE)
-set(DROGON_INSTALL OFF CACHE BOOL "" FORCE)
-
-FetchContent_MakeAvailable(rapidjson googletest ftxui drogon)
+FetchContent_MakeAvailable(rapidjson googletest ftxui)
 
 # Tree-sitter core + language parsers (compiled in at build time)
 include(cmake/TreeSitter.cmake)

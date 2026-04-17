@@ -32,6 +32,12 @@ struct RollingMemoryLaneModel {
   std::uint32_t saved_tokens = 0;
 };
 
+struct ContextBucket {
+  std::string label;
+  std::uint32_t tokens = 0;
+  float ratio = 0.0f;
+};
+
 struct ContextLaneModel {
   bool visible = false;
   std::string owner_label;
@@ -44,6 +50,7 @@ struct ContextLaneModel {
   std::string usage_label;
   std::string cost_label;
   std::vector<std::string> bucket_labels;
+  std::vector<ContextBucket> context_buckets;
   std::vector<std::string> memory_labels;
   RollingMemoryLaneModel rolling_memory;
 };

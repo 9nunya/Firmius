@@ -15,6 +15,7 @@
 #include <ftxui/component/screen_interactive.hpp>
 #include <ftxui/screen/box.hpp>
 #include <functional>
+#include <filesystem>
 #include <memory>
 #include <optional>
 #include <string>
@@ -22,6 +23,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include <chrono>
 namespace firmius::core {
 class Harness;
 }
@@ -35,6 +37,19 @@ struct AgentStripModel;
 struct PlanLaneModel;
 struct TodoLaneModel;
 struct ContextLaneModel;
+
+bool isTuiStartupProfilingEnabled();
+void noteTuiAppEventEnqueued();
+void noteTuiCustomEventPosted();
+void noteTuiCustomEventDrained();
+void noteTuiOnEventDispatch(std::chrono::nanoseconds elapsed);
+void noteTuiThreadChanged(std::chrono::nanoseconds elapsed);
+void noteTuiRebuildToolCalls(std::chrono::nanoseconds elapsed);
+void noteTuiChatWindowRebuild(std::chrono::nanoseconds elapsed);
+void noteTuiRequestAnimationFrameFromState();
+void noteTuiRequestAnimationFrameFromScrollableBoxWidthChange();
+void noteTuiRequestAnimationFrameFromAgentStripSpinner();
+std::string tuiProfilingSummaryText();
 
 namespace detail {
 
@@ -235,7 +250,20 @@ private:
       const shared::PermissionEscalationRequest &request);
   void clearActivePermissionRequest();
   void promoteNextPermissionRequest();
+  enum class RefreshFlags : unsigned int {
+    None = 0,
+    Status = 1u << 0,
+    AgentStrip = 1u << 1,
+    PlanLane = 1u << 2,
+    TodoLane = 1u << 3,
+    ContextLane = 1u << 4,
+    ChatTranscript = 1u << 5,
+  };
+
   void onEvent(const shared::AppEvent &ev);
+  void requestRefresh(RefreshFlags flags);
+  void applyPendingRefreshes();
+  void notifyChatTranscriptChanged();
   std::string statusText() const;
   void updateStatusModel();
   void updateAgentStripModel();
@@ -258,6 +286,8 @@ private:
 
   firmius::shared::EventQueue<shared::AppEvent> event_queue_;
   void drainEvents();
+  unsigned int pending_refresh_flags_ = 0;
+  bool custom_event_pending_ = false;
 
   StreamStateManager stream_state_;
 
@@ -285,6 +315,9 @@ private:
   ftxui::Component chat_component_;
   ftxui::Component input_component_;
   std::unordered_map<std::string, uint64_t> agent_work_start_ms_;
+  std::filesystem::path file_reference_cache_root_;
+  std::vector<std::string> file_reference_cache_paths_;
+  bool file_reference_cache_ready_ = false;
   std::optional<shared::PermissionEscalationRequest> pending_permission_request_;
   std::vector<shared::PermissionEscalationRequest> pending_permission_queue_;
   std::vector<shared::PermissionResponse> pending_permission_responses_;
@@ -300,6 +333,7 @@ private:
   std::optional<std::chrono::steady_clock::time_point> quit_arm_deadline_;
   std::size_t quit_arm_generation_ = 0;
   std::jthread quit_arm_thread_;
+  std::chrono::steady_clock::time_point last_live_raf_request_{};
   shared::AgentMetrics session_metrics_;
 };
 

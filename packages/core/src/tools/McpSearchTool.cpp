@@ -2,12 +2,15 @@
 
 #include "ConfigLoader.hpp"
 #include "tools/McpToolUtil.hpp"
+#include <optional>
 
 #include <algorithm>
 #include <cctype>
 
 namespace firmius::core {
 namespace {
+
+constexpr int kOptionalCapabilityTimeoutMs = 1000;
 
 std::string lower(std::string value) {
   std::transform(value.begin(), value.end(), value.begin(),
@@ -68,8 +71,20 @@ shared::ToolResult McpSearchTool::execute(const McpSearchInput &input,
 
       client->initialize(timeoutMs);
       const rapidjson::Document toolsResponse = client->listTools(timeoutMs);
-      const rapidjson::Document resourcesResponse = client->listResources(timeoutMs);
-      const rapidjson::Document promptsResponse = client->listPrompts(timeoutMs);
+
+      std::optional<rapidjson::Document> resourcesResponse;
+      try {
+        resourcesResponse.emplace(
+            client->listResources(std::min(timeoutMs, kOptionalCapabilityTimeoutMs)));
+      } catch (...) {
+      }
+
+      std::optional<rapidjson::Document> promptsResponse;
+      try {
+        promptsResponse.emplace(
+            client->listPrompts(std::min(timeoutMs, kOptionalCapabilityTimeoutMs)));
+      } catch (...) {
+      }
 
       rapidjson::Value matchedTools(rapidjson::kArrayType);
       const auto &toolsResult = toolsResponse["result"];
@@ -89,26 +104,36 @@ shared::ToolResult McpSearchTool::execute(const McpSearchInput &input,
       }
 
       rapidjson::Value matchedResources(rapidjson::kArrayType);
-      const auto &resourcesResult = resourcesResponse["result"];
-      if (resourcesResult.IsObject() && resourcesResult.HasMember("resources") && resourcesResult["resources"].IsArray()) {
-        for (const auto &resource : resourcesResult["resources"].GetArray()) {
-          if (resource.IsObject() && resource.HasMember("uri") && resource["uri"].IsString()) {
-            const std::string uri = resource["uri"].GetString();
-            if (containsInsensitive(uri, input.query)) {
-              matchedResources.PushBack(rapidjson::Value(uri.c_str(), a).Move(), a);
+      if (resourcesResponse.has_value()) {
+        const auto &resourcesResult = (*resourcesResponse)["result"];
+        if (resourcesResult.IsObject() && resourcesResult.HasMember("resources") &&
+            resourcesResult["resources"].IsArray()) {
+          for (const auto &resource : resourcesResult["resources"].GetArray()) {
+            if (resource.IsObject() && resource.HasMember("uri") &&
+                resource["uri"].IsString()) {
+              const std::string uri = resource["uri"].GetString();
+              if (containsInsensitive(uri, input.query)) {
+                matchedResources.PushBack(
+                    rapidjson::Value(uri.c_str(), a).Move(), a);
+              }
             }
           }
         }
       }
 
       rapidjson::Value matchedPrompts(rapidjson::kArrayType);
-      const auto &promptsResult = promptsResponse["result"];
-      if (promptsResult.IsObject() && promptsResult.HasMember("prompts") && promptsResult["prompts"].IsArray()) {
-        for (const auto &prompt : promptsResult["prompts"].GetArray()) {
-          if (prompt.IsObject() && prompt.HasMember("name") && prompt["name"].IsString()) {
-            const std::string name = prompt["name"].GetString();
-            if (containsInsensitive(name, input.query)) {
-              matchedPrompts.PushBack(rapidjson::Value(name.c_str(), a).Move(), a);
+      if (promptsResponse.has_value()) {
+        const auto &promptsResult = (*promptsResponse)["result"];
+        if (promptsResult.IsObject() && promptsResult.HasMember("prompts") &&
+            promptsResult["prompts"].IsArray()) {
+          for (const auto &prompt : promptsResult["prompts"].GetArray()) {
+            if (prompt.IsObject() && prompt.HasMember("name") &&
+                prompt["name"].IsString()) {
+              const std::string name = prompt["name"].GetString();
+              if (containsInsensitive(name, input.query)) {
+                matchedPrompts.PushBack(
+                    rapidjson::Value(name.c_str(), a).Move(), a);
+              }
             }
           }
         }

@@ -622,8 +622,11 @@ ResolvedRoute resolveModelRoute(const std::string &persona,
 
   if (explicitCategoryOverride.has_value() && !explicitCategoryOverride->empty()) {
     if (const auto *category = findCategory(*explicitCategoryOverride)) {
-      return {category->providerId, category->modelId, category->variantName,
-              *explicitCategoryOverride, explicitCategoryWarning};
+      if (!category->models.empty()) {
+        const auto &opt = category->models.front();
+        return {opt.providerId, opt.modelId, opt.variantName,
+                *explicitCategoryOverride, explicitCategoryWarning};
+      }
     }
     auto route = useDefaultRoute();
     route.warning = "Category '" + *explicitCategoryOverride +
@@ -635,8 +638,11 @@ ResolvedRoute resolveModelRoute(const std::string &persona,
   if (it_purpose != config.purposeRoutes.end() && !it_purpose->second.empty()) {
     const std::string mapped_category = it_purpose->second;
     if (const auto *category = findCategory(mapped_category)) {
-      return {category->providerId, category->modelId, category->variantName,
-              mapped_category, ""};
+      if (!category->models.empty()) {
+        const auto &opt = category->models.front();
+        return {opt.providerId, opt.modelId, opt.variantName,
+                mapped_category, ""};
+      }
     }
     auto route = useDefaultRoute();
     route.warning = "Purpose route for '" + persona + "' points to missing category '" +
@@ -646,8 +652,11 @@ ResolvedRoute resolveModelRoute(const std::string &persona,
 
   if (!config.defaultRouteCategory.empty()) {
     if (const auto *category = findCategory(config.defaultRouteCategory)) {
-      return {category->providerId, category->modelId, category->variantName,
-              config.defaultRouteCategory, ""};
+      if (!category->models.empty()) {
+        const auto &opt = category->models.front();
+        return {opt.providerId, opt.modelId, opt.variantName,
+                config.defaultRouteCategory, ""};
+      }
     }
   }
 
@@ -696,11 +705,12 @@ std::vector<ResolvedRoute> buildRouteCandidates(const std::string &persona,
 
   for (const auto &name : fallbackCategories) {
     auto it = config.modelRouterCategories.find(name);
-    if (it == config.modelRouterCategories.end()) {
+    if (it == config.modelRouterCategories.end() || it->second.models.empty()) {
       continue;
     }
-    pushUnique(ResolvedRoute{it->second.providerId, it->second.modelId,
-                             it->second.variantName, name, ""});
+    const auto &opt = it->second.models.front();
+    pushUnique(ResolvedRoute{opt.providerId, opt.modelId,
+                             opt.variantName, name, ""});
   }
   return routes;
 }

@@ -25,12 +25,7 @@ struct TokenWithSuffix {
   std::string suffix;
 };
 
-std::string threadStorageRootPath() {
-  if (const char *home = std::getenv("HOME")) {
-    return std::string(home) + "/.firmius/threads";
-  }
-  return ".firmius/threads";
-}
+std::string threadStorageRootPath() { return ThreadManager::defaultBasePath(); }
 
 bool hasReferenceBoundary(const std::string &text, std::size_t atPos) {
   if (atPos == 0) {

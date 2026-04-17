@@ -42,3 +42,5 @@ packages/tui/.turbo
 packages/web/.turbo
 build
 python_input.txt
+/output.txt
+/.pre-commit-config.yaml

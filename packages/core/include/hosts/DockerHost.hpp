@@ -48,6 +48,7 @@ public:
 
     void registerBackgroundProcess(const std::string& id, std::unique_ptr<shared::IHostProcess> proc) override;
     shared::ProcessSnapshot inspectBackgroundProcess(const std::string& id) override;
+    void releaseBackgroundProcess(const std::string& id) override;
     void writeToBackgroundProcess(const std::string& id, const std::string& data) override;
     void killBackgroundProcess(const std::string& id) override;
 
@@ -59,6 +60,19 @@ public:
     static std::vector<ContainerInfo> listContainersWithLabel(const std::string& label);
 
 private:
+    struct CompletedProcessSnapshot {
+        shared::ProcessSnapshot snapshot;
+        std::chrono::steady_clock::time_point completedAt;
+    };
+
+    static constexpr size_t kMaxCompletedBackgroundProcesses = 64;
+
+    void promoteCompletedProcessLocked(const std::string& id,
+                                       std::unique_ptr<shared::IHostProcess> proc,
+                                       const shared::ProcessSnapshot& snapshot);
+    std::map<std::string, CompletedProcessSnapshot>::iterator
+    touchCompletedProcessLocked(const std::string& id);
+
     /**
      * @brief Internal helper to send a request to the Docker Engine API.
      * @param method HTTP method.
@@ -75,6 +89,7 @@ private:
     std::vector<std::string> containerIds;
     std::mutex requestMutex;  ///< Guards the shared curl handle in request().
     std::map<std::string, std::unique_ptr<shared::IHostProcess>> backgroundProcesses;
+    std::map<std::string, CompletedProcessSnapshot> completedBackgroundProcesses;
     mutable std::mutex bgMutex;
 };
 

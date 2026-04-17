@@ -15,6 +15,7 @@
 #include "providers/ProviderRegistry.hpp"
 #include "tools/WorkToolCommon.hpp"
 #include "utils/FSUtil.hpp"
+#include "utils/PlatformPaths.hpp"
 #include "utils/StringUtil.hpp"
 #include "utils/ToolSummaries.hpp"
 #include "workflow/WorkflowLoader.hpp"
@@ -25,10 +26,14 @@
 #include <Serialization.hpp>
 
 #include <memory>
+#if defined(_WIN32)
+#include <windows.h>
+#else
 #include <signal.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -36,6 +41,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <cerrno>
 #include <curl/curl.h>
 #include <filesystem>
 #include <fstream>
@@ -44,6 +50,7 @@
 #include <rapidjson/writer.h>
 #include <sstream>
 #include <thread>
+#include <limits>
 
 #include <iostream>
 
@@ -96,13 +103,12 @@ std::string resolveWritableFirmiusHome() {
   }
 
   const std::filesystem::path tempHome =
-      std::filesystem::temp_directory_path() /
-      ("firmius-" + std::to_string(static_cast<long long>(getuid())));
+      shared::PlatformPaths::firmiusTempDir();
   if (ensureWritableDirectory(tempHome)) {
     return tempHome.string();
   }
 
-  return (std::filesystem::temp_directory_path() / "firmius").string();
+  return tempHome.string();
 }
 
 ThreadPermissionMode nextThreadPermissionMode(ThreadPermissionMode mode) {
@@ -184,7 +190,27 @@ void persistSessionState(const std::string &threadId,
   }
 }
 
-bool isPidAlive(pid_t pid) { return kill(pid, 0) == 0 || errno == EPERM; }
+bool isPidAlive(long long pidValue) {
+  if (pidValue <= 0) {
+    return false;
+  }
+#if defined(_WIN32)
+  if (pidValue > static_cast<long long>(std::numeric_limits<DWORD>::max())) {
+    return false;
+  }
+  HANDLE process =
+      OpenProcess(SYNCHRONIZE, FALSE, static_cast<DWORD>(pidValue));
+  if (process == nullptr) {
+    return false;
+  }
+  const DWORD waitResult = WaitForSingleObject(process, 0);
+  CloseHandle(process);
+  return waitResult == WAIT_TIMEOUT;
+#else
+  const pid_t pid = static_cast<pid_t>(pidValue);
+  return kill(pid, 0) == 0 || errno == EPERM;
+#endif
+}
 
 void appendUniqueAgentId(std::vector<std::string> &agentIds,
                          const std::string &agentId) {
@@ -308,7 +334,11 @@ void Harness::init() {
            << (focusedAgentId_.empty() ? "<none>" : focusedAgentId_) << "\n";
         ss << "Locked Threads: " << lockManager_.size() << "\n";
         ss << "Subscribers: " << subscribers_.size() << "\n";
-        ss << "PID: " << getpid() << "\n";
+#if defined(_WIN32)
+        ss << "PID: " << static_cast<long long>(GetCurrentProcessId()) << "\n";
+#else
+        ss << "PID: " << static_cast<long long>(getpid()) << "\n";
+#endif
         return ss.str();
       });
 
@@ -324,7 +354,7 @@ void Harness::init() {
     auto it = container.labels.find(OWNER_PID_LABEL);
     if (it != container.labels.end()) {
       try {
-        pid_t ownerPid = std::stoi(it->second);
+        const long long ownerPid = std::stoll(it->second);
         if (!isPidAlive(ownerPid)) {
           killDockerContainer(container.id);
         }
@@ -737,7 +767,7 @@ bool Harness::dispatchRequestToAgent(const std::string &threadId,
   }
 
   if (needsSummon) {
-    emitEvent(firmius::shared::UserMessageSent{messageId, text, tid});
+    emitEvent(firmius::shared::UserMessageSent{messageId, text, tid, images});
     // Note: summonAgent will use the default model from ConfigLoader
     // which is what we want for a brand new lead agent in a thread.
     Engine::instance().summonAgent(tid, metadata.leadPersona, preparedText,
@@ -749,12 +779,12 @@ bool Harness::dispatchRequestToAgent(const std::string &threadId,
 
   if (agentRunning) {
     emitEvent(firmius::shared::MessageQueued{messageId, text, tid, fid});
-    emitEvent(firmius::shared::UserMessageSent{messageId, text, tid});
+    emitEvent(firmius::shared::UserMessageSent{messageId, text, tid, images});
     statusMessage = "Retry queued on running agent.";
     return true;
   }
 
-  emitEvent(firmius::shared::UserMessageSent{messageId, text, tid});
+  emitEvent(firmius::shared::UserMessageSent{messageId, text, tid, images});
   Engine::instance().executeTask(fid, preparedText, images);
   statusMessage = "Retry started.";
   return true;
@@ -1806,6 +1836,18 @@ bool Harness::isModelsLoaded() const {
 std::vector<std::string> Harness::listProvidersFetchingModels() const {
   std::lock_guard<std::mutex> lock(modelsMutex_);
   return {loadingModelProviders_.begin(), loadingModelProviders_.end()};
+}
+
+void Harness::invalidateModelCache() {
+  {
+    std::lock_guard<std::mutex> lock(modelsMutex_);
+    cachedModels_.clear();
+    cachedModelKeys_.clear();
+    loadingModelProviders_.clear();
+    isRefreshingModels_ = false;
+    modelsLoaded_ = false;
+  }
+  emitEvent(firmius::shared::AppEvent(firmius::shared::ModelsRefreshed{}));
 }
 
 const UserConfig &Harness::getConfig() const {

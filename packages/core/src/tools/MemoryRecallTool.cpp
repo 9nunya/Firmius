@@ -11,12 +11,7 @@ namespace firmius::core {
 
 namespace {
 
-std::string threadStorageRootPath() {
-  if (const char *home = std::getenv("HOME")) {
-    return std::string(home) + "/.firmius/threads";
-  }
-  return ".firmius/threads";
-}
+std::string threadStorageRootPath() { return ThreadManager::defaultBasePath(); }
 
 std::string renderTurn(const shared::AgentTurn &turn, bool includeSystem) {
   std::ostringstream out;

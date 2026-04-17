@@ -245,6 +245,20 @@ target_include_directories(test_base_openai_provider PRIVATE
 )
 gtest_discover_tests(test_base_openai_provider)
 
+add_executable(test_base_api_key_provider
+    provider/test_base_api_key_provider.cpp
+)
+target_link_libraries(test_base_api_key_provider PRIVATE
+    firmius::provider
+    firmius::shared
+    GTest::gtest_main
+    GTest::gmock
+)
+target_include_directories(test_base_api_key_provider PRIVATE
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_base_api_key_provider)
+
 add_executable(test_base_oauth_provider
     provider/test_base_oauth_provider.cpp
 )
@@ -299,6 +313,20 @@ target_include_directories(test_openrouter_provider PRIVATE
     ${rapidjson_SOURCE_DIR}/include
 )
 gtest_discover_tests(test_openrouter_provider)
+
+add_executable(test_kiro_provider
+    provider/test_kiro_provider.cpp
+)
+target_link_libraries(test_kiro_provider PRIVATE
+    firmius::provider
+    firmius::shared
+    GTest::gtest_main
+    GTest::gmock
+)
+target_include_directories(test_kiro_provider PRIVATE
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_kiro_provider)
 
 add_executable(test_provider_stream_debug_audit
     audits/test_provider_stream_debug_audit.cpp
@@ -784,6 +812,7 @@ add_executable(test_chat_window_helpers
     ../../packages/tui/src/tools/PythonToolPresentation.cpp
     ../../packages/tui/src/tools/SubagentToolPresentation.cpp
     ../../packages/tui/src/tools/WebSearchToolPresentation.cpp
+    ../../packages/tui/src/tools/McpToolPresentation.cpp
     ../../packages/tui/src/tools/WorkToolPresentation.cpp
 )
 target_link_libraries(test_chat_window_helpers PRIVATE
@@ -1001,6 +1030,7 @@ add_executable(test_tool_presentation
     ../../packages/tui/src/tools/WebSearchToolPresentation.cpp
     ../../packages/tui/src/tools/PythonToolPresentation.cpp
     ../../packages/tui/src/tools/ToolPresentation.cpp
+    ../../packages/tui/src/tools/McpToolPresentation.cpp
     ../../packages/tui/src/tools/WorkToolPresentation.cpp
 )
 target_link_libraries(test_tool_presentation PRIVATE
@@ -1035,6 +1065,7 @@ add_executable(test_tool_presentation_block
     ../../packages/tui/src/tools/WebSearchToolPresentation.cpp
     ../../packages/tui/src/tools/PythonToolPresentation.cpp
     ../../packages/tui/src/tools/ToolPresentation.cpp
+    ../../packages/tui/src/tools/McpToolPresentation.cpp
     ../../packages/tui/src/tools/WorkToolPresentation.cpp
     ../../packages/tui/src/ThemeManager.cpp
     ../../packages/tui/src/UserPreferences.cpp
@@ -1134,6 +1165,19 @@ target_include_directories(test_rolling_context_manager PRIVATE
     ${rapidjson_SOURCE_DIR}/include
 )
 gtest_discover_tests(test_rolling_context_manager)
+add_executable(test_stream_insanity
+    core/test_stream_insanity.cpp
+)
+target_link_libraries(test_stream_insanity PRIVATE
+    firmius::core
+    firmius::shared
+    GTest::gtest_main
+    GTest::gmock
+)
+target_include_directories(test_stream_insanity PRIVATE
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_stream_insanity)
 
 add_executable(test_memory_recall_tool
     tools/test_memory_recall_tool.cpp
@@ -1194,3 +1238,22 @@ target_include_directories(test_process_input_regression PRIVATE
     ${rapidjson_SOURCE_DIR}/include
 )
 gtest_discover_tests(test_process_input_regression)
+
+# Web backend placeholder tests
+add_executable(test_web_backend_placeholder
+    web/test_web_backend_placeholder.cpp
+)
+target_link_libraries(test_web_backend_placeholder PRIVATE
+    firmius::web
+    GTest::gtest_main
+    GTest::gmock
+)
+gtest_discover_tests(test_web_backend_placeholder)
+
+# Web frontend placeholder integration lane
+add_test(
+    NAME test_web_frontend_placeholder
+    COMMAND ${CMAKE_COMMAND}
+        -DTEST_ROOT=${CMAKE_CURRENT_SOURCE_DIR}/web/frontend
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/web/frontend/run_frontend_placeholder.cmake
+)

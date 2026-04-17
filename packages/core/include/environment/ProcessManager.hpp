@@ -83,7 +83,7 @@ private:
     void flushBufferedProcessOutputLocked(const std::string& processId);
 
     void monitorProcessCompletion(const std::string& id);
-    void finishTrackedProcess(const std::string& id);
+    void finishTrackedProcess(const std::string& id, bool releaseHostState);
 
     std::shared_ptr<IHost> host_;
     std::function<void(const StreamEvent&)> eventCallback_;

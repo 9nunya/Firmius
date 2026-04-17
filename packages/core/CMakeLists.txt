@@ -68,6 +68,7 @@ target_sources(firmius_core PRIVATE
     src/agents/RollingContextManager.cpp
     src/agents/ContextBudget.cpp
     src/agents/UserMemoryWorkspace.cpp
+    src/agents/StreamSanityDetector.cpp
     src/agents/Agent.cpp
     src/agents/AgentPermissionChecks.cpp
     src/agents/AgentPermissionChecks.cpp
@@ -158,6 +159,7 @@ target_sources(firmius_core PUBLIC
     include/agents/RollingContextManager.hpp
     include/agents/ContextBudget.hpp
     include/agents/UserMemoryWorkspace.hpp
+    include/agents/StreamSanityDetector.hpp
     include/agents/Agent.hpp
     include/agents/AgentPermissionChecks.hpp
     include/agents/AgentPermissionChecks.hpp

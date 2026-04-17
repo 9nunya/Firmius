@@ -21,6 +21,7 @@ using firmius::shared::AgentProviderWaiting;
 using firmius::shared::AgentRetrying;
 using firmius::shared::AgentToolCall;
 using firmius::shared::AgentToolCallChunk;
+using firmius::shared::AgentFileEdited;
 using firmius::shared::AgentTurn;
 using firmius::shared::AgentTurnCompleted;
 using firmius::shared::Message;
@@ -49,6 +50,25 @@ TEST(StreamStateManagerLiveTest, LiveProseAndThinkingBecomeTimelineEntries) {
   EXPECT_EQ(timeline[0].message, "Hello world");
   EXPECT_EQ(timeline[1].kind, TimelineEntry::Kind::Thinking);
   EXPECT_EQ(timeline[1].message, "thinking");
+}
+
+TEST(StreamStateManagerLiveTest, LeadingBlankLinesAreTrimmedFromFirstLiveChunks) {
+  StreamStateManager state;
+
+  state.handleAgentText(AgentText{"agent-1", "\n\nHello", ""});
+  state.handleAgentText(AgentText{"agent-1", "\nworld", ""});
+  state.handleAgentThinking(AgentThinking{"agent-1", "\n\nThinking", ""});
+  state.handleAgentThinking(AgentThinking{"agent-1", "\nmore", ""});
+
+  auto stream = state.getStream("agent-1");
+  ASSERT_NE(stream, nullptr);
+  EXPECT_EQ(stream->text, "Hello\nworld");
+  EXPECT_EQ(stream->thinking, "Thinking\nmore");
+
+  const auto &timeline = state.getTimeline();
+  ASSERT_EQ(timeline.size(), 2u);
+  EXPECT_EQ(timeline[0].message, "Hello\nworld");
+  EXPECT_EQ(timeline[1].message, "Thinking\nmore");
 }
 
 TEST(StreamStateManagerLiveTest, ProseBeforeAndAfterToolAreDistinctTimelineSegments) {
@@ -125,6 +145,195 @@ TEST(StreamStateManagerLiveTest, TurnCompletedClearsTransientProseTimelineRows) 
   EXPECT_EQ(timeline[0].id, "tool-1");
 }
 
+TEST(StreamStateManagerLiveTest,
+     SuccessfulSingleFileEditRemainsVisibleAfterTurnCompletion) {
+  StreamStateManager state;
+
+  state.handleAgentToolCall(
+      AgentToolCall{"agent-1", "tool-edit", "file_edit",
+                    R"({"path":"src/main.cpp","edits":[{"op":"replace_range"}]})",
+                    ""});
+  state.handleAgentFileEdited(AgentFileEdited{
+      "agent-1", "", "src/main.cpp", "tool-edit",
+      "@@ replace range @@\n-old value\n+new value\n", 1, 1});
+
+  AgentTurn turn;
+  turn.turnId = "turn-edit";
+  Message tool_result;
+  tool_result.role = Role::ToolResult;
+  tool_result.content = {
+      ToolResultContent{"tool-edit", R"({"path":"src/main.cpp"})", true, "", ""}};
+  turn.messages.push_back(tool_result);
+
+  state.handleAgentTurnCompleted(AgentTurnCompleted{"agent-1", turn, {}, ""});
+
+  auto view = state.getToolView("tool-edit");
+  ASSERT_TRUE(static_cast<bool>(view));
+  EXPECT_EQ(view->phase, ToolPhase::Finished);
+  EXPECT_TRUE(view->success);
+  EXPECT_EQ(view->result, R"({"path":"src/main.cpp"})");
+  ASSERT_EQ(view->fileEditEvents.size(), 1u);
+  EXPECT_EQ(view->fileEditEvents.front().path, "src/main.cpp");
+
+  const auto &timeline = state.getTimeline();
+  ASSERT_EQ(timeline.size(), 1u);
+  EXPECT_EQ(timeline.front().id, "tool-edit");
+}
+
+TEST(StreamStateManagerLiveTest,
+     FileEditBecomesVisibleBeforeTurnCompletionAfterFirstFileMutation) {
+  StreamStateManager state;
+
+  state.handleAgentToolCall(
+      AgentToolCall{"agent-1", "tool-edit", "file_edit",
+                    R"({"path":"src/main.cpp","edits":[{"op":"replace_range"}]})",
+                    ""});
+  state.handleAgentFileEdited(AgentFileEdited{
+      "agent-1", "", "src/main.cpp", "tool-edit",
+      "@@ replace range @@\n-old value\n+new value\n", 1, 1});
+
+  auto view = state.getToolView("tool-edit");
+  ASSERT_TRUE(static_cast<bool>(view));
+  EXPECT_EQ(view->phase, ToolPhase::Called);
+  EXPECT_TRUE(view->success);
+  ASSERT_EQ(view->fileEditEvents.size(), 1u);
+  EXPECT_EQ(view->fileEditEvents.front().path, "src/main.cpp");
+
+  const auto &timeline = state.getTimeline();
+  ASSERT_EQ(timeline.size(), 1u);
+  EXPECT_EQ(timeline.front().id, "tool-edit");
+}
+
+TEST(StreamStateManagerLiveTest,
+     SuccessfulMultiFileEditRemainsVisibleAfterTurnCompletion) {
+  StreamStateManager state;
+
+  state.handleAgentToolCall(
+      AgentToolCall{"agent-1", "tool-edit", "file_edit",
+                    R"({"files":[{"path":"src/a.cpp"},{"path":"src/b.cpp"}]})",
+                    ""});
+  state.handleAgentFileEdited(AgentFileEdited{
+      "agent-1", "", "src/a.cpp", "tool-edit",
+      "@@ replace @@\n-old a\n+new a\n", 1, 1});
+  state.handleAgentFileEdited(AgentFileEdited{
+      "agent-1", "", "src/b.cpp", "tool-edit",
+      "@@ insert @@\n+new b\n", 1, 0});
+
+  AgentTurn turn;
+  turn.turnId = "turn-edit";
+  Message tool_result;
+  tool_result.role = Role::ToolResult;
+  tool_result.content = {ToolResultContent{
+      "tool-edit",
+      R"({"files":[{"path":"src/a.cpp"},{"path":"src/b.cpp"}]})",
+      true,
+      "",
+      ""}};
+  turn.messages.push_back(tool_result);
+
+  state.handleAgentTurnCompleted(AgentTurnCompleted{"agent-1", turn, {}, ""});
+
+  auto view = state.getToolView("tool-edit");
+  ASSERT_TRUE(static_cast<bool>(view));
+  EXPECT_EQ(view->phase, ToolPhase::Finished);
+  EXPECT_TRUE(view->success);
+  EXPECT_EQ(
+      view->result,
+      R"({"files":[{"path":"src/a.cpp"},{"path":"src/b.cpp"}]})");
+  ASSERT_EQ(view->fileEditEvents.size(), 2u);
+  EXPECT_EQ(view->fileEditEvents[0].path, "src/a.cpp");
+  EXPECT_EQ(view->fileEditEvents[1].path, "src/b.cpp");
+
+  const auto &timeline = state.getTimeline();
+  ASSERT_EQ(timeline.size(), 1u);
+  EXPECT_EQ(timeline.front().id, "tool-edit");
+}
+
+TEST(StreamStateManagerLiveTest,
+     MultiFileEditBecomesVisiblePerFileBeforeTurnCompletion) {
+  StreamStateManager state;
+
+  state.handleAgentToolCall(
+      AgentToolCall{"agent-1", "tool-edit", "file_edit",
+                    R"({"files":[{"path":"src/a.cpp"},{"path":"src/b.cpp"}]})",
+                    ""});
+  state.handleAgentFileEdited(AgentFileEdited{
+      "agent-1", "", "src/a.cpp", "tool-edit",
+      "@@ replace @@\n-old a\n+new a\n", 1, 1});
+  state.handleAgentFileEdited(AgentFileEdited{
+      "agent-1", "", "src/b.cpp", "tool-edit",
+      "@@ insert @@\n+new b\n", 1, 0});
+
+  auto view = state.getToolView("tool-edit");
+  ASSERT_TRUE(static_cast<bool>(view));
+  EXPECT_EQ(view->phase, ToolPhase::Called);
+  ASSERT_EQ(view->fileEditEvents.size(), 2u);
+  EXPECT_EQ(view->fileEditEvents[0].path, "src/a.cpp");
+  EXPECT_EQ(view->fileEditEvents[1].path, "src/b.cpp");
+}
+
+TEST(StreamStateManagerLiveTest,
+     MainAgentFileEditEventCreatesVisibleToolStateWithoutPriorToolCall) {
+  StreamStateManager state;
+
+  state.handleAgentFileEdited(AgentFileEdited{
+      "agent-main", "", "src/only.cpp", "tool-edit", "", 0, 0});
+
+  auto view = state.getToolView("tool-edit");
+  ASSERT_TRUE(static_cast<bool>(view));
+  EXPECT_EQ(view->agentId, "agent-main");
+  EXPECT_EQ(view->name, "file_edit");
+  EXPECT_EQ(view->phase, ToolPhase::Called);
+  EXPECT_TRUE(view->success);
+  ASSERT_EQ(view->fileEditEvents.size(), 1u);
+  EXPECT_EQ(view->fileEditEvents.front().path, "src/only.cpp");
+
+  const auto &timeline = state.getTimeline();
+  ASSERT_EQ(timeline.size(), 1u);
+  EXPECT_EQ(timeline.front().kind, TimelineEntry::Kind::ToolCall);
+  EXPECT_EQ(timeline.front().id, "tool-edit");
+}
+
+TEST(StreamStateManagerLiveTest,
+     FileWriteResultUsesSameDurableVisibilityPathAfterTurnCompletion) {
+  StreamStateManager state;
+
+  state.handleAgentToolCall(
+      AgentToolCall{"agent-1", "tool-write", "file_write",
+                    R"({"path":"src/write.cpp","content":"hello\n"})", ""});
+  state.handleAgentFileEdited(AgentFileEdited{
+      "agent-1", "", "src/write.cpp", "tool-write",
+      "@@ overwrite @@\n+hello\n", 1, 0});
+
+  AgentTurn turn;
+  turn.turnId = "turn-write";
+  Message tool_result;
+  tool_result.role = Role::ToolResult;
+  tool_result.content = {ToolResultContent{
+      "tool-write",
+      R"({"path":"src/write.cpp","added_lines":1,"removed_lines":0})",
+      true,
+      "",
+      ""}};
+  turn.messages.push_back(tool_result);
+
+  state.handleAgentTurnCompleted(AgentTurnCompleted{"agent-1", turn, {}, ""});
+
+  auto view = state.getToolView("tool-write");
+  ASSERT_TRUE(static_cast<bool>(view));
+  EXPECT_EQ(view->phase, ToolPhase::Finished);
+  EXPECT_TRUE(view->success);
+  EXPECT_EQ(
+      view->result,
+      R"({"path":"src/write.cpp","added_lines":1,"removed_lines":0})");
+  ASSERT_EQ(view->fileEditEvents.size(), 1u);
+  EXPECT_EQ(view->fileEditEvents.front().path, "src/write.cpp");
+
+  const auto &timeline = state.getTimeline();
+  ASSERT_EQ(timeline.size(), 1u);
+  EXPECT_EQ(timeline.front().id, "tool-write");
+}
+
 TEST(StreamStateManagerLiveTest, ProseBreaksQuickToolClusters) {
   StreamStateManager state;
 
@@ -147,6 +356,27 @@ TEST(StreamStateManagerLiveTest, ProseBreaksQuickToolClusters) {
 
   int cluster_three = state.getToolCallClusterId("tool-3");
   EXPECT_GT(cluster_three, cluster_one);
+}
+
+TEST(StreamStateManagerLiveTest, WhitespaceOnlyProseDoesNotBreakQuickToolClusters) {
+  StreamStateManager state;
+
+  state.handleAgentToolCall(
+      AgentToolCall{"agent-1", "tool-1", "file_read",
+                    R"({"path":"a.cpp"})", ""});
+  state.handleAgentText(AgentText{"agent-1", "\n\n   \t", ""});
+  state.handleAgentThinking(AgentThinking{"agent-1", "\n\r\n", ""});
+  state.handleAgentToolCall(
+      AgentToolCall{"agent-1", "tool-2", "file_read",
+                    R"({"path":"b.cpp"})", ""});
+
+  EXPECT_EQ(state.getToolCallClusterId("tool-1"),
+            state.getToolCallClusterId("tool-2"));
+
+  const auto &timeline = state.getTimeline();
+  ASSERT_EQ(timeline.size(), 2u);
+  EXPECT_EQ(timeline[0].id, "tool-1");
+  EXPECT_EQ(timeline[1].id, "tool-2");
 }
 
 TEST(StreamStateManagerLiveTest,

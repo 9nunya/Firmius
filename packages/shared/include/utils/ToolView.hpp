@@ -26,6 +26,13 @@ struct SubagentToolLogEntry {
   std::string args;  // Store tool args for summary regeneration
 };
 
+struct FileEditSignal {
+  std::string path;
+  std::string diffPreview;
+  int addedLines = 0;
+  int removedLines = 0;
+};
+
 struct ToolCallView {
   std::string agentId;
   std::string toolCallId;
@@ -53,6 +60,7 @@ struct ToolCallView {
   bool subagent_fallback_used = false;
   std::string subagent_route_category;
   std::vector<std::string> subagent_attempted_categories;
+  std::vector<FileEditSignal> fileEditEvents;
 };
 
 inline bool ToolCallHasRenderableIdentity(const std::string &tool_name) {

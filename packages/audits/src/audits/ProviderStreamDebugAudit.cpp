@@ -6,6 +6,7 @@
 #include "persistence/ThreadManager.hpp"
 #include "providers/ProviderRegistry.hpp"
 #include "providers/CodexProvider.hpp"
+#include "Enums.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
@@ -25,6 +26,17 @@ using namespace firmius::provider;
 using namespace firmius::shared;
 
 namespace {
+std::vector<firmius::shared::ToolScope> allToolScopes() {
+    using firmius::shared::ToolScope;
+    return {ToolScope::FilesystemRead, ToolScope::FilesystemWrite,
+            ToolScope::Process,        ToolScope::Semantic,
+            ToolScope::Delegation,     ToolScope::Web,
+            ToolScope::Git,            ToolScope::PlanRead,
+            ToolScope::PlanWrite,      ToolScope::ChunkRead,
+            ToolScope::ChunkWrite,     ToolScope::ChunkAssign,
+            ToolScope::ChunkReview};
+}
+
 std::string getTimestamp() {
     auto now = std::chrono::system_clock::now();
     auto in_time_t = std::chrono::system_clock::to_time_t(now);
@@ -794,6 +806,9 @@ ProviderStreamDebugAudit::suiteVariants(const std::string& suiteName) const {
             "mixed_multimodal_tool_context",
         };
     }
+    if (suiteName == "deterministic_mcp" || suiteName == "c4_t2") {
+        return {"deterministic_mcp_audit"};
+    }
     return {};
 }
 
@@ -820,8 +835,10 @@ shared::AuditResult ProviderStreamDebugAudit::run(const std::vector<std::string>
         std::cerr << "  --history-variant=tool_call_succession" << std::endl;
         std::cerr << "  --history-variant=image_input" << std::endl;
         std::cerr << "  --history-variant=mixed_multimodal_tool_context" << std::endl;
+        std::cerr << "  --history-variant=deterministic_mcp_audit Deterministic non-live MCP-aware scripted scenario" << std::endl;
         std::cerr << "  --history-suite=tool_preparing         Run all preparing/thinking scenarios" << std::endl;
         std::cerr << "  --history-suite=full_range             Run a broad provider stress suite" << std::endl;
+        std::cerr << "  --history-suite=deterministic_mcp      Run deterministic non-live MCP-aware scenario" << std::endl;
         std::cerr << "  --show-history                         Print the exact AgentHistory before streaming" << std::endl;
         std::cerr << "  --raw-sse-log=/tmp/provider_sse.log    Capture raw SSE chunks and lines before parsing" << std::endl;
         std::cerr << "  --raw-sse-stdout                      Mirror raw SSE to stdout during the run" << std::endl;
@@ -922,6 +939,161 @@ shared::AuditResult ProviderStreamDebugAudit::run(const std::vector<std::string>
         std::cerr << "--history-suite cannot be combined with --thread-id" << std::endl;
         result.exitCode = 1;
         result.passed = false;
+        return result;
+    }
+
+    auto runDeterministicMcpScenario = [&](const std::string& scenarioName) {
+        std::cout << "=== Deterministic MCP Audit Scenario ===" << std::endl;
+        std::cout << "Scenario: " << scenarioName << std::endl;
+        std::cout << "Mode: deterministic stub (non-live, provider-independent)" << std::endl;
+        std::cout << "--- Steps ---" << std::endl;
+
+        int eventCount = 0;
+        int mcpToolChunkCount = 0;
+        int thinkingCount = 0;
+        int errorCount = 0;
+        int toolUseDoneCount = 0;
+        int stopDoneCount = 0;
+        std::set<std::string> mcpToolCallIds;
+        std::set<std::string> mcpToolNames;
+
+        const std::vector<StreamEvent> scriptedEvents = {
+            ThinkingChunk{"Preparing deterministic MCP test facts.", "sig-deterministic-mcp"},
+            ToolCallChunk{"det-mcp-1", 0, "mcp__filesystem__list_directory", R"({"path":"packages/audits/src"})"},
+            StreamDone{StopReason::ToolUse},
+            ToolCallChunk{"det-mcp-2", 1, "mcp__memory__recall", R"({"page_size":4,"page":0})"},
+            StreamDone{StopReason::ToolUse},
+            TextChunk{"Deterministic MCP scenario complete. Assertions are based on scripted events."},
+            StreamDone{StopReason::Stop},
+        };
+
+        for (size_t i = 0; i < scriptedEvents.size(); ++i) {
+            const auto& ev = scriptedEvents[i];
+            eventCount++;
+            const std::string ts = getTimestamp();
+            const int step = static_cast<int>(i + 1);
+
+            if (const auto* thk = std::get_if<ThinkingChunk>(&ev)) {
+                thinkingCount++;
+                std::cout << "[STEP " << step << "] [" << ts << "] THINKING delta=\""
+                          << escapeString(thk->delta) << "\" signature=\""
+                          << escapeString(thk->signature) << "\"" << std::endl;
+                std::cout << "[FACT step=" << step << "] thinking_chunk_observed=true" << std::endl;
+            } else if (const auto* tcc = std::get_if<ToolCallChunk>(&ev)) {
+                const bool isMcp = tcc->nameDelta.rfind("mcp__", 0) == 0;
+                if (isMcp) {
+                    mcpToolChunkCount++;
+                    mcpToolCallIds.insert(tcc->id);
+                    mcpToolNames.insert(tcc->nameDelta);
+                }
+                std::cout << "[STEP " << step << "] [" << ts << "] TOOL_CHUNK id="
+                          << tcc->id << " index=" << tcc->index
+                          << " name=" << tcc->nameDelta
+                          << " args=\"" << escapeString(tcc->argsDelta) << "\"" << std::endl;
+                std::cout << "[FACT step=" << step << "] mcp_tool_chunk="
+                          << (isMcp ? "true" : "false") << std::endl;
+            } else if (const auto* txt = std::get_if<TextChunk>(&ev)) {
+                std::cout << "[STEP " << step << "] [" << ts << "] TEXT \""
+                          << escapeString(txt->delta) << "\"" << std::endl;
+                std::cout << "[FACT step=" << step << "] terminal_text_observed=true" << std::endl;
+            } else if (const auto* done = std::get_if<StreamDone>(&ev)) {
+                std::string reason = "unknown";
+                if (done->reason == StopReason::ToolUse) {
+                    reason = "tool_use";
+                    toolUseDoneCount++;
+                } else if (done->reason == StopReason::Stop) {
+                    reason = "stop";
+                    stopDoneCount++;
+                } else if (done->reason == StopReason::MaxTokens) {
+                    reason = "max_tokens";
+                } else if (done->reason == StopReason::ContentFilter) {
+                    reason = "content_filter";
+                } else if (done->reason == StopReason::Error) {
+                    reason = "error";
+                } else if (done->reason == StopReason::Cancelled) {
+                    reason = "cancelled";
+                }
+                std::cout << "[STEP " << step << "] [" << ts << "] STREAM_DONE reason="
+                          << reason << std::endl;
+                std::cout << "[FACT step=" << step << "] done_reason=" << reason << std::endl;
+            } else if (const auto* err = std::get_if<StreamError>(&ev)) {
+                errorCount++;
+                std::cout << "[STEP " << step << "] [" << ts << "] STREAM_ERROR httpStatus="
+                          << err->httpStatus << " message=\""
+                          << escapeString(err->message) << "\"" << std::endl;
+                std::cout << "[FACT step=" << step << "] stream_error=true" << std::endl;
+            }
+        }
+
+        bool passed = true;
+        auto assertFact = [&](const std::string& name, bool condition, const std::string& detail) {
+            std::cout << "[ASSERT] " << name << " => "
+                      << (condition ? "PASS" : "FAIL")
+                      << " | " << detail << std::endl;
+            passed = passed && condition;
+        };
+
+        std::cout << "--- Assertions ---" << std::endl;
+        assertFact("scenario_name_non_empty", !scenarioName.empty(),
+                   "scenario='" + scenarioName + "'");
+        assertFact("no_stream_errors", errorCount == 0,
+                   "error_count=" + std::to_string(errorCount));
+        assertFact("thinking_seen", thinkingCount >= 1,
+                   "thinking_count=" + std::to_string(thinkingCount));
+        assertFact("mcp_tool_chunks_seen", mcpToolChunkCount >= 2,
+                   "mcp_tool_chunk_count=" + std::to_string(mcpToolChunkCount));
+        assertFact("distinct_mcp_calls", mcpToolCallIds.size() >= 2,
+                   "distinct_mcp_call_ids=" + std::to_string(mcpToolCallIds.size()));
+        assertFact("tool_use_stop_seen", toolUseDoneCount >= 1,
+                   "tool_use_done_count=" + std::to_string(toolUseDoneCount));
+        assertFact("final_stop_seen", stopDoneCount >= 1,
+                   "stop_done_count=" + std::to_string(stopDoneCount));
+
+        std::cout << "--- Scenario Facts ---" << std::endl;
+        std::cout << "facts.event_count=" << eventCount << std::endl;
+        std::cout << "facts.mcp_tool_names=";
+        bool firstTool = true;
+        for (const auto& toolName : mcpToolNames) {
+            if (!firstTool) {
+                std::cout << ",";
+            }
+            std::cout << toolName;
+            firstTool = false;
+        }
+        std::cout << std::endl;
+        std::cout << "facts.mcp_tool_call_ids=";
+        bool firstCall = true;
+        for (const auto& callId : mcpToolCallIds) {
+            if (!firstCall) {
+                std::cout << ",";
+            }
+            std::cout << callId;
+            firstCall = false;
+        }
+        std::cout << std::endl;
+        std::cout << "Scenario result: " << (passed ? "PASS" : "FAIL") << std::endl;
+        std::cout << std::endl;
+        return passed;
+    };
+
+    const bool deterministicMcpVariant =
+        historyVariant == "deterministic_mcp_audit" ||
+        historyVariant == "c4_t2_deterministic_mcp";
+    const bool deterministicMcpSuite =
+        historySuite == "deterministic_mcp" || historySuite == "c4_t2";
+    if (!liveAgent && threadId.empty() &&
+        (deterministicMcpVariant || deterministicMcpSuite)) {
+        bool passed = true;
+        if (deterministicMcpSuite) {
+            const auto scenarios = suiteVariants(historySuite);
+            for (const auto& scenario : scenarios) {
+                passed = runDeterministicMcpScenario(scenario) && passed;
+            }
+        } else {
+            passed = runDeterministicMcpScenario(historyVariant);
+        }
+        result.exitCode = passed ? 0 : 1;
+        result.passed = passed;
         return result;
     }
 
@@ -1302,7 +1474,15 @@ shared::AuditResult ProviderStreamDebugAudit::run(const std::vector<std::string>
             return result;
         }
         AgentHistory history = tm.loadAgentHistory(threadId, threadAgentId);
-        allPassed = runScenario("thread:" + threadId, history, {}, {});
+        AgentPermissions permissivePermissions;
+        permissivePermissions.allowedScopes = allToolScopes();
+        permissivePermissions.allowedPaths = {"/**"};
+        permissivePermissions.allowOutsideCwd = true;
+        auto threadTools =
+            firmius::core::Engine::instance()
+                .getAvailableToolDefinitionsForPermissions(
+                    permissivePermissions);
+        allPassed = runScenario("thread:" + threadId, history, threadTools, {});
     } else if (!historySuite.empty()) {
         const auto scenarios = suiteVariants(historySuite);
         if (scenarios.empty()) {

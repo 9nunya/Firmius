@@ -4,6 +4,7 @@
 #include "harness/Harness.hpp"
 #include <chrono>
 #include <condition_variable>
+#include <filesystem>
 #include <iostream>
 #include <mutex>
 #include <sstream>
@@ -15,6 +16,8 @@ using namespace firmius::core;
 using namespace firmius::shared;
 
 namespace {
+constexpr auto kLeadSpawnTimeout = std::chrono::seconds(20);
+constexpr auto kAuditCompletionTimeout = std::chrono::seconds(180);
 
 struct AuditState {
     std::mutex mtx;
@@ -24,6 +27,9 @@ struct AuditState {
     std::string errorMessage;
     int subagentSpawns = 0;
     int subagentCompletions = 0;
+    bool sawWebSearchToolCall = false;
+    bool sawAnyAgentText = false;
+    bool sawAgentTextAfterWebSearch = false;
 };
 
 } // namespace
@@ -76,7 +82,8 @@ AuditResult WebSearchAudit::run(const std::vector<std::string>& args) {
     opts.containerName = "";
     opts.deleteOnExit = false;
 
-    std::string threadId = harness.newThread(opts, "/home/nunya/Projects/Firmius", "lead");
+    const std::string workingDir = std::filesystem::current_path().string();
+    std::string threadId = harness.newThread(opts, workingDir, "lead");
     if (threadId.empty()) {
         std::cerr << "Failed to create harness thread\n";
         result.exitCode = 1;
@@ -121,28 +128,57 @@ AuditResult WebSearchAudit::run(const std::vector<std::string>& args) {
                 }
             } else if constexpr (std::is_same_v<T, AgentText>) {
                 std::cout << e.delta << std::flush;
+                std::lock_guard<std::mutex> lk(state.mtx);
+                state.sawAnyAgentText = true;
+                if (state.sawWebSearchToolCall) {
+                    state.sawAgentTextAfterWebSearch = true;
+                }
             } else if constexpr (std::is_same_v<T, AgentThinking>) {
                 // skip thinking output in audit
             } else if constexpr (std::is_same_v<T, AgentToolCall>) {
                 std::cout << "\n[Tool] " << e.toolName << std::flush;
+                if (e.toolName == "web_search") {
+                    std::lock_guard<std::mutex> lk(state.mtx);
+                    state.sawWebSearchToolCall = true;
+                }
             }
         }, ev);
     });
 
-    // Wait for the lead agent to spawn before sending the prompt.
-    {
-        std::unique_lock<std::mutex> lk(leadIdMtx);
-        leadIdCv.wait(lk, [&] { return leadIdReady; });
-    }
-    std::cout << "Lead agent: " << leadAgentId << "\n";
-
     std::string prompt = "Use the web_search tool to search for: " + query;
     std::cout << "\n> User: " << prompt << "\n";
     harness.send(prompt);
+    {
+        std::unique_lock<std::mutex> lk(leadIdMtx);
+        if (!leadIdCv.wait_for(lk, kLeadSpawnTimeout, [&] {
+                if (leadIdReady) {
+                    return true;
+                }
+                const std::string focused = harness.focusedAgentId();
+                if (!focused.empty()) {
+                    leadAgentId = focused;
+                    leadIdReady = true;
+                    return true;
+                }
+                return false;
+            })) {
+            harness.unsubscribe(subId);
+            harness.shutdown();
+            std::cerr << "AUDIT FAILED: timed out waiting for lead agent spawn\n";
+            result.exitCode = 1;
+            result.passed = false;
+            result.output = "lead agent spawn timeout";
+            return result;
+        }
+    }
+    std::cout << "Lead agent: " << leadAgentId << "\n";
 
     {
         std::unique_lock<std::mutex> lk(state.mtx);
-        state.cv.wait(lk, [&] { return state.done; });
+        if (!state.cv.wait_for(lk, kAuditCompletionTimeout, [&] { return state.done; })) {
+            state.hadError = true;
+            state.errorMessage = "timed out waiting for lead agent completion";
+        }
     }
 
     harness.unsubscribe(subId);
@@ -153,6 +189,9 @@ AuditResult WebSearchAudit::run(const std::vector<std::string>& args) {
     out << "error=" << (state.hadError ? state.errorMessage : "none") << "\n";
     out << "subagent_spawns=" << state.subagentSpawns << "\n";
     out << "subagent_completions=" << state.subagentCompletions << "\n";
+    out << "saw_web_search_tool_call=" << (state.sawWebSearchToolCall ? "true" : "false") << "\n";
+    out << "saw_any_agent_text=" << (state.sawAnyAgentText ? "true" : "false") << "\n";
+    out << "saw_agent_text_after_web_search=" << (state.sawAgentTextAfterWebSearch ? "true" : "false") << "\n";
 
     harness.shutdown();
 
@@ -175,6 +214,20 @@ AuditResult WebSearchAudit::run(const std::vector<std::string>& args) {
     // Normal mode: we expect success
     if (state.hadError) {
         std::cerr << "AUDIT FAILED: Agent error: " << state.errorMessage << "\n";
+        result.exitCode = 1;
+        result.passed = false;
+        result.output = out.str();
+        return result;
+    }
+    if (!state.sawWebSearchToolCall) {
+        std::cerr << "AUDIT FAILED: lead agent never invoked web_search tool\n";
+        result.exitCode = 1;
+        result.passed = false;
+        result.output = out.str();
+        return result;
+    }
+    if (!state.sawAnyAgentText || !state.sawAgentTextAfterWebSearch) {
+        std::cerr << "AUDIT FAILED: no agent result text observed after web_search tool call\n";
         result.exitCode = 1;
         result.passed = false;
         result.output = out.str();

@@ -1,4 +1,5 @@
 #include "AuditRegistry.hpp"
+#include "audits/McpAudit.hpp"
 #include "audits/AntigravityProviderAudit.hpp"
 #include "audits/LoopCancellationAudit.hpp"
 #include "audits/LspAudit.hpp"
@@ -26,6 +27,7 @@ namespace firmius::audits {
 
 std::vector<std::unique_ptr<shared::IAudit>> createAudits() {
     std::vector<std::unique_ptr<shared::IAudit>> audits;
+    audits.push_back(std::make_unique<McpAudit>());
     audits.push_back(std::make_unique<BenchmarksAudit>());
     audits.push_back(std::make_unique<ProviderAudit>());
     audits.push_back(std::make_unique<P15Audit>());

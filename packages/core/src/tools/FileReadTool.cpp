@@ -117,10 +117,9 @@ shared::ToolResult FileReadTool::execute(const FileReadInput &input,
     std::string enhancedContent;
     if (!selectedLines.empty()) {
       for (std::size_t i = 0; i < selectedLines.size(); ++i) {
-        enhancedContent +=
-            utils::Hashline::formatLine(input.start_line +
-                                            static_cast<int>(i),
-                                        selectedLines[i]);
+        enhancedContent += std::to_string(input.start_line + static_cast<int>(i));
+        enhancedContent += '|';
+        enhancedContent += selectedLines[i];
         if (i + 1 < selectedLines.size()) {
           enhancedContent += '\n';
         }

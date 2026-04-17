@@ -1,4 +1,5 @@
 #include "UserPreferences.hpp"
+#include "utils/PlatformPaths.hpp"
 
 #include <cstdlib>
 #include <filesystem>
@@ -12,9 +13,7 @@ namespace firmius::tui {
 namespace {
 
 std::filesystem::path preferencesPath() {
-  const char *home = std::getenv("HOME");
-  std::filesystem::path base = home ? home : "/root";
-  base /= ".firmius";
+  std::filesystem::path base = firmius::shared::PlatformPaths::firmiusHomeDir();
   std::error_code ec;
   std::filesystem::create_directories(base, ec);
   return base / "preferences.json";
@@ -66,9 +65,9 @@ rapidjson::Document loadPreferencesDocument() {
 }
 
 std::optional<std::string> loadLegacyThemeSelection() {
-  const char *home = std::getenv("HOME");
-  std::filesystem::path legacyPath = home ? home : "/root";
-  legacyPath /= ".firmius/theme_selection.json";
+  const std::filesystem::path legacyPath =
+      firmius::shared::PlatformPaths::firmiusHomeDir() /
+      "theme_selection.json";
 
   std::ifstream file(legacyPath);
   if (!file.is_open()) {

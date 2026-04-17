@@ -223,7 +223,7 @@ TEST_F(PurposeLoaderTest, composeSystemPrompt_placeholders) {
 
     auto cfg = firmius::shared::ConfigLoader::instance().getConfig();
     cfg.modelRouterCategories.clear();
-    cfg.modelRouterCategories["code"] = {"openai", "gpt-5-codex", "thinking"};
+    cfg.modelRouterCategories["code"].models = {{"openai", "gpt-5-codex", "thinking"}};
     cfg.defaultRouteCategory = "code";
     firmius::shared::ConfigLoader::instance().updateConfig(cfg);
 
@@ -592,7 +592,7 @@ TEST(PromptContractsTest, basePromptRequiresNarrativeTextBetweenToolEpisodes) {
               std::string::npos);
     EXPECT_NE(prompt.find("FILE_EDIT MODE DECISION (SHORT RULE):"),
               std::string::npos);
-    EXPECT_NE(prompt.find("mix `content` with Hashline `edits` in one `file_edit` call"),
+    EXPECT_NE(prompt.find("mix `content` with line-range `edits` in one `file_edit` call"),
               std::string::npos);
     EXPECT_NE(prompt.find("MODE SELECTION EXAMPLES"),
               std::string::npos);
@@ -719,7 +719,7 @@ TEST(HintingContractsTest, builtinGptHintingDefendsAgainstAskingAndPrematureComp
               std::string::npos);
     EXPECT_NE(prompt.find("never use `process_execute` as an editing tunnel"),
               std::string::npos);
-    EXPECT_NE(prompt.find("never mix `content` with Hashline `edits` in one `file_edit` call"),
+    EXPECT_NE(prompt.find("never mix `content` with line-range `edits` in one `file_edit` call"),
               std::string::npos);
     EXPECT_NE(prompt.find("if you are personally doing the next direct change, do it without manufacturing a chunk"),
               std::string::npos);
@@ -742,7 +742,7 @@ TEST(HintingContractsTest, builtinGeminiHintingDefendsAgainstNoToolAndOptimism) 
               std::string::npos);
     EXPECT_NE(prompt.find("`process_execute` for verification or inspection, never as a file editing tunnel"),
               std::string::npos);
-    EXPECT_NE(prompt.find("never mix `content` with Hashline `edits` in one `file_edit` call"),
+    EXPECT_NE(prompt.find("never mix `content` with line-range `edits` in one `file_edit` call"),
               std::string::npos);
     EXPECT_NE(prompt.find("If you commit a chunk, treat it as a dispatch/review unit rather than a personal TODO note."),
               std::string::npos);

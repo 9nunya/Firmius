@@ -43,6 +43,43 @@ TEST(StreamStateManagerHistoryTest, RebuildFindsToolResultsRegardlessOfMessageRo
 }
 
 TEST(StreamStateManagerHistoryTest,
+     RebuildPreservesFileEditFallbackSignalsFromHistory) {
+  AgentHistory history;
+  AgentTurn turn;
+  turn.turnId = "turn-file-edit";
+
+  Message assistant;
+  assistant.role = Role::Assistant;
+  assistant.content = {ToolCallContent{
+      "tool-edit", "file_edit", R"({"path":"src/main.cpp"})"}};
+
+  Message tool_result;
+  tool_result.role = Role::ToolResult;
+  tool_result.content = {ToolResultContent{
+      "tool-edit",
+      R"({"path":"src/main.cpp","added_lines":3,"removed_lines":1,"diff_preview":"@@ replace @@\n-old\n+new\n"})",
+      true,
+      "",
+      ""}};
+
+  turn.messages.push_back(std::move(assistant));
+  turn.messages.push_back(std::move(tool_result));
+  history.turns.push_back(std::move(turn));
+
+  StreamStateManager state;
+  state.rebuildToolCallsFromHistory("agent-1", &history, "thread-1", false);
+
+  auto view = state.getToolView("tool-edit");
+  ASSERT_TRUE(static_cast<bool>(view));
+  ASSERT_EQ(view->fileEditEvents.size(), 1u);
+  EXPECT_EQ(view->fileEditEvents.front().path, "src/main.cpp");
+  EXPECT_EQ(view->fileEditEvents.front().addedLines, 3);
+  EXPECT_EQ(view->fileEditEvents.front().removedLines, 1);
+  EXPECT_NE(view->fileEditEvents.front().diffPreview.find("@@ replace @@"),
+            std::string::npos);
+}
+
+TEST(StreamStateManagerHistoryTest,
      TimeoutProcessMovesToBackgroundAndFinishesLater) {
   StreamStateManager state;
 

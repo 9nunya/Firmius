@@ -7,6 +7,7 @@
 #include "Events.hpp"
 #include "persistence/HistoryEditor.hpp"
 #include "tools/ToolRegistry.hpp"
+#include "Context.hpp"
 #include <string>
 #include <vector>
 #include <functional>
@@ -147,6 +148,10 @@ public:
      * @brief Shuts down the engine and waits for all threads to finish.
      */
     void shutdown();
+
+    std::vector<firmius::provider::ToolDefinition>
+    getAvailableToolDefinitionsForPermissions(
+        const firmius::shared::AgentPermissions &permissions) const;
 
 private:
     Engine();

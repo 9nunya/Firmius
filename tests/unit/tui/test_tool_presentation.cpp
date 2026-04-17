@@ -46,9 +46,9 @@ TEST(ToolPresentationTest, FinishedSuccessGenericPresentation) {
 
   ToolPresentation presentation = BuildToolPresentation(view);
   EXPECT_EQ(presentation.lifecycle, ToolPresentationLifecycle::Success);
-  EXPECT_TRUE(presentation.expandable);
+  EXPECT_FALSE(presentation.expandable);
   ASSERT_EQ(presentation.sections.size(), 1u);
-  EXPECT_EQ(presentation.sections[0].title, "Result preview");
+  EXPECT_EQ(presentation.sections[0].title, "Result");
   ASSERT_EQ(presentation.sections[0].lines.size(), 2u);
   EXPECT_EQ(presentation.sections[0].lines[0], "line 1");
 }
@@ -67,7 +67,7 @@ TEST(ToolPresentationTest, FinishedErrorGenericPresentation) {
   EXPECT_NE(presentation.title.find("failed"), std::string::npos);
 }
 
-TEST(ToolPresentationTest, LongResultUsesTailPreviewAndNotice) {
+TEST(ToolPresentationTest, LongResultShowsAllLinesWithoutTruncation) {
   ToolCallView view;
   view.name = "mystery_tool";
   view.phase = ToolPhase::Finished;
@@ -75,15 +75,13 @@ TEST(ToolPresentationTest, LongResultUsesTailPreviewAndNotice) {
   view.result = "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\n";
 
   ToolPresentation presentation = BuildToolPresentation(view);
-  EXPECT_TRUE(presentation.expandable);
+  EXPECT_FALSE(presentation.expandable);
   EXPECT_FALSE(presentation.expanded);
   ASSERT_EQ(presentation.sections.size(), 1u);
-  ASSERT_EQ(presentation.sections[0].lines.size(), 5u);
-  EXPECT_EQ(presentation.sections[0].lines.front(), "line 4");
+  ASSERT_EQ(presentation.sections[0].lines.size(), 8u);
+  EXPECT_EQ(presentation.sections[0].lines.front(), "line 1");
   EXPECT_EQ(presentation.sections[0].lines.back(), "line 8");
-  ASSERT_EQ(presentation.notices.size(), 1u);
-  EXPECT_NE(presentation.notices[0].text.find("last 5 of 8 lines"),
-            std::string::npos);
+  EXPECT_TRUE(presentation.notices.empty());
 }
 
 TEST(ToolPresentationTest, FactsNoticesAndUnknownTitleContract) {
@@ -818,13 +816,15 @@ TEST(ToolPresentationTest, FileReadFileEditAndListDirectoryHaveExplicitStates) {
   edit.phase = ToolPhase::Called;
   ToolPresentation e_running = BuildToolPresentation(edit);
   EXPECT_EQ(e_running.lifecycle, ToolPresentationLifecycle::Running);
-  EXPECT_NE(e_running.title.find("editing"), std::string::npos);
+  EXPECT_EQ(e_running.title, "edited main.cpp");
 
   edit.phase = ToolPhase::Finished;
   edit.success = true;
   edit.result = R"({"operations":[{"op":"replace_range","description":"replace line","old_lines":["a"],"new_lines":["b"]}]})";
   ToolPresentation e = BuildToolPresentation(edit);
   EXPECT_EQ(e.layout, ToolPresentationLayoutKind::DiffPreview);
+  EXPECT_NE(e.title.find("main.cpp"), std::string::npos);
+  ASSERT_TRUE(e.custom_icon.has_value());
   const std::string *adds = FindFactValue(e, "Added lines");
   const std::string *removes = FindFactValue(e, "Removed lines");
   ASSERT_NE(adds, nullptr);
@@ -879,14 +879,142 @@ TEST(ToolPresentationTest, MultiFileFileEditRendersSeparateDiffSections) {
 
   ToolPresentation p = BuildToolPresentation(edit);
   ASSERT_EQ(p.diff_sections.size(), 2u);
-  EXPECT_NE(p.diff_sections[0].meta.find("a.cpp"), std::string::npos);
-  EXPECT_NE(p.diff_sections[1].meta.find("b.cpp"), std::string::npos);
+  EXPECT_EQ(p.diff_sections[0].title, "src/a.cpp");
+  EXPECT_EQ(p.diff_sections[1].title, "src/b.cpp");
+  EXPECT_NE(p.diff_sections[0].meta.find("1 change"), std::string::npos);
+  EXPECT_NE(p.diff_sections[1].meta.find("1 change"), std::string::npos);
   const std::string *adds = FindFactValue(p, "Added lines");
   const std::string *removes = FindFactValue(p, "Removed lines");
   ASSERT_NE(adds, nullptr);
   ASSERT_NE(removes, nullptr);
   EXPECT_EQ(*adds, "2");
   EXPECT_EQ(*removes, "1");
+}
+
+TEST(ToolPresentationTest, MultiFileFileEditGroupsMultipleOperationsByFile) {
+  ToolCallView edit;
+  edit.name = "file_edit";
+  edit.args =
+      R"({"files":[{"path":"src/a.cpp","edits":[{"op":"insert_after"},{"op":"replace_range"}]},{"path":"src/b.cpp","edits":[{"op":"delete_range"}]}]})";
+  edit.phase = ToolPhase::Finished;
+  edit.success = true;
+  edit.result =
+      R"({"mode":"multi_file","files":[{"path":"src/a.cpp","operations":[{"op":"insert_after","description":"insert after 1#aaaa","start_line":2,"end_line":2,"old_lines":[],"new_lines":["alpha"]},{"op":"replace_range","description":"replace 3#bbbb...4#cccc","start_line":3,"end_line":4,"old_lines":["old1","old2"],"new_lines":["new1","new2"]}]},{"path":"src/b.cpp","operations":[{"op":"delete_range","description":"delete 8#dddd...9#eeee","start_line":8,"end_line":9,"old_lines":["x","y"],"new_lines":[]}]}]})";
+
+  ToolPresentation p = BuildToolPresentation(edit);
+  ASSERT_EQ(p.diff_sections.size(), 2u);
+  EXPECT_EQ(p.diff_sections[0].title, "src/a.cpp");
+  EXPECT_NE(p.diff_sections[0].meta.find("2 changes"), std::string::npos);
+  EXPECT_NE(p.diff_sections[0].meta.find("insert after"), std::string::npos);
+  EXPECT_NE(p.diff_sections[0].meta.find("replace range"), std::string::npos);
+  EXPECT_EQ(p.diff_sections[0].meta.find("1#aaaa"), std::string::npos);
+  EXPECT_EQ(p.diff_sections[0].meta.find("3#bbbb"), std::string::npos);
+  EXPECT_EQ(p.diff_sections[1].title, "src/b.cpp");
+}
+
+TEST(ToolPresentationTest,
+     FileEditFallsBackToDurableEditedFileSummaryWhenDiffDetailsMissing) {
+  ToolCallView edit;
+  edit.name = "file_edit";
+  edit.args = R"({"path":"src/main.cpp"})";
+  edit.phase = ToolPhase::Finished;
+  edit.success = true;
+  edit.result = R"({"path":"src/main.cpp"})";
+  edit.fileEditEvents.push_back(
+      {"src/main.cpp", "", 3, 1});
+
+  ToolPresentation p = BuildToolPresentation(edit);
+  EXPECT_NE(p.title.find("main.cpp"), std::string::npos);
+  ASSERT_EQ(p.diff_sections.size(), 1u);
+  EXPECT_TRUE(p.diff_sections.front().lines.empty());
+  ASSERT_TRUE(p.diff_sections.front().empty_state_text.has_value());
+  EXPECT_NE(p.diff_sections.front().empty_state_text.value().find("diff preview unavailable"),
+            std::string::npos);
+  const std::string *adds = FindFactValue(p, "Added lines");
+  const std::string *removes = FindFactValue(p, "Removed lines");
+  ASSERT_NE(adds, nullptr);
+  ASSERT_NE(removes, nullptr);
+  EXPECT_EQ(*adds, "3");
+  EXPECT_EQ(*removes, "1");
+}
+
+TEST(ToolPresentationTest,
+     FileWriteFallsBackToDurableEditedFileSummaryWhenDiffDetailsMissing) {
+  ToolCallView edit;
+  edit.name = "file_write";
+  edit.args = R"({"path":"src/write.cpp","content":"hello\n"})";
+  edit.phase = ToolPhase::Finished;
+  edit.success = true;
+  edit.result = R"({"path":"src/write.cpp","added_lines":1,"removed_lines":0})";
+  edit.fileEditEvents.push_back(
+      {"src/write.cpp", "", 1, 0});
+
+  ToolPresentation p = BuildToolPresentation(edit);
+  EXPECT_NE(p.title.find("write.cpp"), std::string::npos);
+  ASSERT_EQ(p.diff_sections.size(), 1u);
+  EXPECT_FALSE(p.diff_sections.front().lines.empty());
+  EXPECT_FALSE(p.diff_sections.front().empty_state_text.has_value());
+  const std::string *adds = FindFactValue(p, "Added lines");
+  ASSERT_NE(adds, nullptr);
+  EXPECT_EQ(*adds, "1");
+}
+
+TEST(ToolPresentationTest, RunningFileEditShowsEditedPathAndWaitingDiagnostics) {
+  ToolCallView edit;
+  edit.name = "file_edit";
+  edit.args = R"({"path":"src/main.cpp","edits":[{"op":"replace_range"}]})";
+  edit.phase = ToolPhase::Called;
+  edit.success = true;
+  edit.fileEditEvents.push_back(
+      {"src/main.cpp", "", 1, 1});
+
+  ToolPresentation p = BuildToolPresentation(edit);
+  EXPECT_EQ(p.lifecycle, ToolPresentationLifecycle::Running);
+  EXPECT_NE(p.title.find("main.cpp"), std::string::npos);
+  EXPECT_EQ(p.title, "edited main.cpp");
+  ASSERT_FALSE(p.notices.empty());
+  EXPECT_NE(p.notices.front().text.find("Running diagnostics"), std::string::npos);
+  ASSERT_EQ(p.diff_sections.size(), 1u);
+  EXPECT_TRUE(p.diff_sections.front().lines.empty());
+  EXPECT_TRUE(p.diff_sections.front().empty_state_text.has_value());
+}
+
+TEST(ToolPresentationTest, RunningFileEditShowsLiveDiffWhileDiagnosticsPending) {
+  ToolCallView edit;
+  edit.name = "file_edit";
+  edit.args =
+      R"({"path":"src/main.cpp","edits":[{"op":"replace_range","start_anchor":"12","end_anchor":"12","new_lines":["new value"]}]})";
+  edit.phase = ToolPhase::Called;
+  edit.success = true;
+  edit.fileEditEvents.push_back(
+      {"src/main.cpp", "@@ replace range @@\n-old value\n+new value\n", 1, 1});
+
+  ToolPresentation p = BuildToolPresentation(edit);
+  EXPECT_EQ(p.lifecycle, ToolPresentationLifecycle::Running);
+  ASSERT_EQ(p.diff_sections.size(), 1u);
+  ASSERT_EQ(p.diff_sections.front().lines.size(), 2u);
+  EXPECT_EQ(p.diff_sections.front().lines[0].type, '-');
+  EXPECT_EQ(p.diff_sections.front().lines[0].content, "old value");
+  EXPECT_EQ(p.diff_sections.front().lines[1].type, '+');
+  EXPECT_EQ(p.diff_sections.front().lines[1].content, "new value");
+}
+
+TEST(ToolPresentationTest, RunningMultiFileEditShowsEditedFilesBeforeFinalResult) {
+  ToolCallView edit;
+  edit.name = "file_edit";
+  edit.args =
+      R"({"files":[{"path":"src/a.cpp"},{"path":"src/b.cpp"}]})";
+  edit.phase = ToolPhase::Called;
+  edit.success = true;
+  edit.fileEditEvents.push_back({"src/a.cpp", "", 1, 1});
+  edit.fileEditEvents.push_back({"src/b.cpp", "", 1, 0});
+
+  ToolPresentation p = BuildToolPresentation(edit);
+  EXPECT_EQ(p.lifecycle, ToolPresentationLifecycle::Running);
+  EXPECT_EQ(p.title, "edited 2 files");
+  ASSERT_FALSE(p.notices.empty());
+  EXPECT_NE(p.notices.front().text.find("Running diagnostics"), std::string::npos);
+  ASSERT_EQ(p.diff_sections.size(), 2u);
 }
 
 TEST(ToolPresentationTest, SearchReplaceFileEditRendersDiffPreview) {
@@ -914,6 +1042,26 @@ TEST(ToolPresentationTest, SearchReplaceFileEditRendersDiffPreview) {
   EXPECT_EQ(*removes, "2");
 }
 
+
+TEST(ToolPresentationTest, FileEditDiagnosticsMoveOutOfFooterIntoSections) {
+  ToolCallView edit;
+  edit.name = "file_edit";
+  edit.args = R"({"path":"src/main.cpp","edits":[{"op":"replace_range"}]})";
+  edit.phase = ToolPhase::Finished;
+  edit.success = true;
+  edit.result = R"({"operations":[{"op":"replace_range","description":"replace line","old_lines":["a"],"new_lines":["b"]}],"lsp":{"checked":true,"available":true,"server_id":"clangd","errors":1,"warnings":2,"new_error_count":0,"new_warning_count":1,"new_warnings":["WARN [4:2] unused variable"]}})";
+
+  ToolPresentation p = BuildToolPresentation(edit);
+  EXPECT_EQ(std::find(p.footer_badges.begin(), p.footer_badges.end(), "lsp:W2"),
+            p.footer_badges.end());
+  EXPECT_EQ(std::find(p.footer_badges.begin(), p.footer_badges.end(), "new:W1"),
+            p.footer_badges.end());
+  ASSERT_FALSE(p.sections.empty());
+  EXPECT_NE(p.sections.back().title.find("New diagnostics"), std::string::npos);
+  EXPECT_NE(p.sections.back().lines.front().find("WARN [4:2] unused variable"),
+            std::string::npos);
+}
+
 TEST(ToolPresentationTest, MultiFilePatchRendersSeparateDiffSectionsFromResults) {
   ToolCallView edit;
   edit.name = "file_edit";
@@ -926,8 +1074,8 @@ TEST(ToolPresentationTest, MultiFilePatchRendersSeparateDiffSectionsFromResults)
 
   ToolPresentation p = BuildToolPresentation(edit);
   ASSERT_EQ(p.diff_sections.size(), 2u);
-  EXPECT_NE(p.diff_sections[0].meta.find("a.cpp"), std::string::npos);
-  EXPECT_NE(p.diff_sections[1].meta.find("b.cpp"), std::string::npos);
+  EXPECT_EQ(p.diff_sections[0].title, "src/a.cpp");
+  EXPECT_EQ(p.diff_sections[1].title, "src/b.cpp");
   EXPECT_EQ(p.diff_sections[0].lines.size(), 2u);
   EXPECT_EQ(p.diff_sections[1].lines.size(), 2u);
 }
@@ -1017,4 +1165,98 @@ TEST(ToolPresentationTest, SearchRowsPreserveFullPrimaryTextWithoutManualEllipsi
             std::string::npos);
 }
 
+
+TEST(ToolPresentationTest, McpCallUsesCuratedFactsAndCollapsedRawByDefault) {
+  ToolCallView view;
+  view.name = "mcp_call";
+  view.args = R"({"server_name":"demo","tool_name":"echo"})";
+  view.phase = ToolPhase::Finished;
+  view.success = true;
+  view.show_result = false;
+  view.result = R"({"server_name":"demo","tool_name":"echo","remote_result":{"items":[1,2],"ok":true}})";
+
+  ToolPresentation collapsed = BuildToolPresentation(view);
+  EXPECT_NE(collapsed.title.find("MCP call echo @ demo"), std::string::npos);
+  const std::string *server = FindFactValue(collapsed, "Server");
+  const std::string *tool = FindFactValue(collapsed, "Tool");
+  const std::string *shape = FindFactValue(collapsed, "Remote result");
+  ASSERT_NE(server, nullptr);
+  ASSERT_NE(tool, nullptr);
+  ASSERT_NE(shape, nullptr);
+  EXPECT_EQ(*server, "demo");
+  EXPECT_EQ(*tool, "echo");
+  EXPECT_EQ(*shape, "object(2 fields)");
+  EXPECT_TRUE(collapsed.expandable);
+  EXPECT_FALSE(collapsed.expanded);
+  EXPECT_EQ(collapsed.toggle_labels.collapsed, "show raw");
+  EXPECT_EQ(collapsed.toggle_labels.expanded, "hide raw");
+  EXPECT_TRUE(collapsed.body_lines.empty());
+  ASSERT_FALSE(collapsed.notices.empty());
+  EXPECT_NE(collapsed.notices.front().text.find("Raw payload hidden"),
+            std::string::npos);
+}
+
+TEST(ToolPresentationTest, McpDynamicToolDecodesServerAndToolIdentity) {
+  ToolCallView view;
+  view.name = "mcp__server_x2D_one__search_x2F_docs";
+  view.args = R"({"arguments":{"q":"hello"}})";
+  view.phase = ToolPhase::Finished;
+  view.success = true;
+  view.show_result = false;
+  view.result = R"({"remote_result":[{"id":1}]})";
+
+  ToolPresentation presentation = BuildToolPresentation(view);
+  EXPECT_NE(presentation.title.find("MCP tool search/docs @ server-one"),
+            std::string::npos);
+  const std::string *server = FindFactValue(presentation, "Server");
+  const std::string *tool = FindFactValue(presentation, "Tool");
+  ASSERT_NE(server, nullptr);
+  ASSERT_NE(tool, nullptr);
+  EXPECT_EQ(*server, "server-one");
+  EXPECT_EQ(*tool, "search/docs");
+}
+
+TEST(ToolPresentationTest, McpLoadShowsLoadedCountsAndExpandedRawLines) {
+  ToolCallView view;
+  view.name = "mcp_load";
+  view.args = R"({"server_name":"demo","tools":["a","b"],"resources":["r1"],"prompts":["p1"]})";
+  view.phase = ToolPhase::Finished;
+  view.success = true;
+  view.show_result = true;
+  view.result = R"({"server_name":"demo","loaded_tools":["a","b"],"loaded_resources":["r1"],"loaded_prompts":["p1"]})";
+
+  ToolPresentation presentation = BuildToolPresentation(view);
+  EXPECT_NE(presentation.title.find("MCP load demo"), std::string::npos);
+  const std::string *tools = FindFactValue(presentation, "Loaded tools");
+  const std::string *resources = FindFactValue(presentation, "Loaded resources");
+  const std::string *prompts = FindFactValue(presentation, "Loaded prompts");
+  ASSERT_NE(tools, nullptr);
+  ASSERT_NE(resources, nullptr);
+  ASSERT_NE(prompts, nullptr);
+  EXPECT_EQ(*tools, "2");
+  EXPECT_EQ(*resources, "1");
+  EXPECT_EQ(*prompts, "1");
+  EXPECT_TRUE(presentation.expandable);
+  EXPECT_TRUE(presentation.expanded);
+  EXPECT_FALSE(presentation.body_lines.empty());
+}
+
+TEST(ToolPresentationTest, McpLifecycleErrorPreservesErrorAndRawToggleContract) {
+  ToolCallView view;
+  view.name = "mcp_get_prompt";
+  view.args = R"({"server_name":"demo","prompt_name":"p1"})";
+  view.phase = ToolPhase::Error;
+  view.success = false;
+  view.show_result = false;
+  view.result = "MCP prompt failed: not loaded";
+
+  ToolPresentation presentation = BuildToolPresentation(view);
+  EXPECT_EQ(presentation.lifecycle, ToolPresentationLifecycle::Error);
+  ASSERT_TRUE(presentation.error_text.has_value());
+  EXPECT_NE(presentation.error_text.value().find("not loaded"), std::string::npos);
+  EXPECT_TRUE(presentation.expandable);
+  EXPECT_FALSE(presentation.expanded);
+  EXPECT_EQ(presentation.toggle_labels.collapsed, "show raw");
+  EXPECT_EQ(presentation.toggle_labels.expanded, "hide raw");
+}
 } // namespace

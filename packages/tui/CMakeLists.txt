@@ -19,6 +19,7 @@ target_sources(firmius_tui PRIVATE
     src/commands/ConfigCommand.cpp
     src/commands/MemoryCommand.cpp
     src/commands/ConnectCommand.cpp
+    src/commands/McpCommand.cpp
     src/commands/BenchmarksCommand.cpp
     src/commands/QuotasCommand.cpp
     src/commands/AccountsCommand.cpp
@@ -34,6 +35,7 @@ target_sources(firmius_tui PRIVATE
     src/modals/RollingMemorySettingsModal.cpp
     src/modals/RouterModal.cpp
     src/modals/PurposesModal.cpp
+    src/modals/McpModal.cpp
     src/modals/PermissionPromptModal.cpp
     src/modals/OAuthWizardModal.cpp
     src/modals/APIKeyWizardModal.cpp
@@ -67,6 +69,7 @@ target_sources(firmius_tui PRIVATE
     src/tools/SubagentToolPresentation.cpp
     src/tools/PythonToolPresentation.cpp
     src/tools/WebSearchToolPresentation.cpp
+    src/tools/McpToolPresentation.cpp
     src/tools/ToolPresentation.cpp
     src/tools/WorkToolPresentation.cpp
     src/utils/ReferenceAutocomplete.cpp

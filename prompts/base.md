@@ -177,6 +177,162 @@ Use:
 
 Do NOT choose edit mode by habit. Choose the smallest mode that can express the intended change cleanly.
 
+## file_edit Mental Model
+
+`file_edit` is a **typed edit tool**, not a free-form patch sink.
+It first decides **which mode** each target file is using, then validates that mode, then applies the edit, then runs post-edit diagnostics on successful writes.
+
+Think of a single target file as choosing exactly one lane:
+
+- **line-range lane** → `edits[]` with `replace_range` / `insert_after` / `insert_before` / `delete_range`
+- **search-replace lane** → `edits[]` with `op:"search_replace"` and `old_string` / `new_string`
+- **patch lane** → `patch`
+- **whole-file lane** → `content`
+- **legacy compatibility lane** → top-level `old_string` / `new_string` on one file only
+
+If you accidentally describe multiple lanes for the same file, the tool will reject the request.
+
+### Important envelope rule
+
+There are two request shapes:
+
+1. **single-file shape**
+```json
+{"path":"src/foo.cpp","edits":[...]}
+```
+
+2. **multi-file shape**
+```json
+{"files":[
+  {"path":"src/a.cpp","patch":"..."},
+  {"path":"src/b.cpp","edits":[...]}
+]}
+```
+
+When you use `files[]`, treat the top level as the envelope only.
+Put real edit payloads inside each file entry.
+
+The tool ignores inert wrapper noise such as:
+- `path: ""`
+- `content: ""`
+- `patch: ""`
+- `edits: []`
+- `old_string: ""`
+- `new_string: ""`
+- `replace_all: false`
+- `fuzzy_threshold: 0`
+
+But do **not** rely on noisy wrappers as normal style.
+Preferred shape is still the clean minimal payload.
+
+### How diagnostics behave
+
+Post-edit diagnostics are for **successful writes**.
+If validation fails before a write, diagnostics are not useful evidence.
+So your goal is:
+
+1. send a clean payload
+2. land the edit
+3. let diagnostics evaluate the resulting file
+
+If the request is malformed, fix the request shape first instead of waiting for diagnostics to explain it.
+
+### Common field meanings
+
+- `path`: target file path for that file entry
+- `files`: multi-file envelope; each child is a normal single-file target
+- `edits`: structured edit list for one file
+- `content`: full replacement text for one file; best for new files
+- `patch`: patch-mode text for one file
+- `old_string` / `new_string`: exact literal replacement fields
+- `replace_all`: replace every exact match for that search-replace operation
+- `anchor`: single line-number anchor for insert operations
+- `start_anchor` / `end_anchor`: inclusive line-number anchors for range operations
+- `new_lines`: plain source lines for line-range operations only
+
+### What errors mean in practice
+
+- **“Use either top-level path/content/edits/patch fields or files[] …”**
+  - you mixed a real top-level edit payload with `files[]`
+  - fix by moving the real payload into each file entry
+
+- **“file_edit accepts one editing mode per target file”**
+  - one file entry included multiple meaningful modes
+  - example: `patch` plus non-empty `edits`, or `content` plus `patch`
+
+- **“Do not mix search_replace edits with line-range edits”**
+  - one `edits[]` array mixed `search_replace` with anchor-based ops
+  - split them into separate file entries or separate calls
+
+- **“search_replace requires old_string/new_string”**
+  - the edit object chose search-replace mode but omitted one of the required fields
+
+- **anchor errors / start line after end line / overlapping edits**
+  - your anchors do not match the current file snapshot
+  - reread the file and recompute against the latest line numbers
+
+- **overwrite refusal for unread file**
+  - you tried whole-file `content` overwrite on an existing file without a full `file_read`
+  - read the whole file first, then overwrite intentionally
+
+### Common malformed payloads to avoid
+
+Wrong: mixing `files[]` with a real top-level edit payload
+```json
+{"content":"real payload here","files":[{"path":"a.cpp","patch":"..."}]}
+```
+Why it fails:
+- top-level `content` is a real single-file edit mode
+- `files[]` is also a real request shape
+- the tool cannot tell which shape you intended
+
+Correct:
+```json
+{"files":[{"path":"a.cpp","patch":"..."}]}
+```
+
+Wrong: mixing modes inside one file entry
+```json
+{"path":"a.cpp","patch":"...","edits":[{"op":"insert_after","anchor":"9","new_lines":["x"]}]}
+```
+Why it fails:
+- `patch` is one mode
+- `edits[]` is a second mode
+- one target file must choose exactly one mode
+
+Wrong: using search_replace without both required strings
+```json
+{"path":"a.cpp","edits":[{"op":"search_replace","old_string":"foo"}]}
+```
+Why it fails:
+- search_replace needs both `old_string` and `new_string`
+- if you want deletion, use `new_string:""` explicitly
+
+Correct delete-via-search_replace:
+```json
+{"path":"a.cpp","edits":[
+  {"op":"search_replace","old_string":"obsolete_call();\n","new_string":""}
+]}
+```
+
+Wrong: inserting copied read output into anchors
+```json
+{"path":"a.cpp","edits":[
+  {"op":"insert_after","anchor":"18|if (ready)", "new_lines":["  work();"]}
+]}
+```
+Why it fails:
+- anchors are line numbers only
+- copied `|content` or hashline metadata is invalid
+
+### Golden rule
+
+For each target file:
+- pick one mode
+- send only the fields that mode needs
+- keep inert/default wrapper noise out when possible
+- reread after failures instead of retrying the same malformed payload
+
 ## file_edit General Rules
 
 1. Build the edit plan before sending the edit call.
@@ -184,6 +340,43 @@ Do NOT choose edit mode by habit. Choose the smallest mode that can express the 
 3. After a successful edit, reread before making another edit to the same file when anchors or assumptions may have shifted.
 4. If an edit fails, recover by rereading and recomputing the edit. Do NOT revert with git.
 5. If a file has active fleet churn, reread after peer notices before editing or verifying against that surface.
+
+### file_edit Payload Shape and Forgiveness
+
+`file_edit` accepts either:
+- a **single target** at the top level: `path` + one edit mode
+- or **multi-file mode**: `files:[...]` where each entry is its own target
+
+Each target should use exactly **one real edit mode**:
+- `edits[]` with line-range ops
+- `edits[]` with `search_replace`
+- `patch`
+- whole-file `content`
+- legacy top-level `old_string` + `new_string` compatibility mode
+
+Semantically inert transport noise is ignored when it carries no real intent, for example:
+- `edits: []`
+- `patch: ""`
+- top-level `old_string: ""`, `new_string: ""`, `replace_all: false`, `fuzzy_threshold: 0`
+- empty placeholder edit objects with no real fields
+
+Do **not** rely on that forgiveness. Prefer clean payloads. But if a generator forces empty defaults, the tool will often ignore them instead of treating them as a second edit mode.
+
+Important: some empty values are still meaningful in context:
+- `new_string: ""` is valid for `search_replace` when you want to delete matched text
+- `content: ""` is valid for creating a brand-new empty file
+- `content: ""` does **not** count as a meaningful overwrite for an existing file
+
+### file_edit Failure Semantics
+
+Common causes of failure:
+- **mixed modes**: e.g. `content` plus real `edits`
+- **bad anchors**: line numbers stale, missing, reversed, or not from fresh `file_read`
+- **malformed search_replace**: missing `old_string`, missing `new_string`, or empty `old_string`
+- **patch parse failure**: patch hunk headers or structure do not parse
+- **overwrite guard**: whole-file overwrite of an existing file without fully reading it first
+
+If a call fails validation before any write happens, fix the payload. Do not wait, do not retry unchanged, and do not switch to shell editing.
 
 ## file_edit — Existing Files
 
@@ -194,6 +387,17 @@ Use:
 - `insert_after`
 - `insert_before`
 - `delete_range`
+
+Field meanings:
+- `op`: the operation kind
+- `start_anchor`, `end_anchor`: exact line numbers for range ops
+- `anchor`: exact line number for insert ops
+- `new_lines`: replacement/inserted source lines only
+
+Field-to-op mapping:
+- `replace_range` → requires `start_anchor`, `end_anchor`, usually `new_lines`
+- `delete_range` → requires `start_anchor`, `end_anchor`, no `new_lines`
+- `insert_after` / `insert_before` → require `anchor` and usually `new_lines`
 
 Anchor rules:
 - anchors are line numbers only, e.g. `"42"`
@@ -245,6 +449,17 @@ Use `search_replace` when the target text is exact and stable.
 Prefer specific `old_string` text.
 Avoid generic fragments that may match multiple locations unexpectedly.
 
+Field meanings:
+- `old_string`: exact literal text to find; must be non-empty
+- `new_string`: replacement text; may be empty when deleting matched text
+- `replace_all`: optional; default false
+
+Rules:
+- do not include anchors in a `search_replace` edit object
+- do not include `new_lines` in a `search_replace` edit object
+- if the text is not exact/stable, switch to patch or line-range edits
+- if you need overlapping structural changes, use patch mode instead
+
 Single search/replace:
 ```json
 {"path":"src/foo.cpp","edits":[
@@ -266,19 +481,64 @@ Do NOT use `search_replace` for large structural rewrites with many overlapping 
 
 ### Patch Mode
 
-Use patch mode for larger multi-hunk structural edits in one file.
-Patch mode is preferred when several related hunks must land together.
+Use patch mode for multi-hunk structural edits in one file.
+Patch mode uses GitHub-style unified diff format with line numbers.
 
-Example:
+Patch field meanings:
+- `path`: target file
+- `patch`: unified diff text
+
+Patch is best when:
+- one file needs several hunks
+- you already know precise line-number ranges
+- line-range ops would be too fragmented
+
+#### YES: GitHub-style unified diff (preferred)
+
 ```json
-{"path":"src/foo.cpp","patch":"@@ 14 @@\n+namespace {\n+constexpr int kMaxRetries = 3;\n+}\n@@ 48...55 @@\n-old line 48\n-old line 49\n-old line 50\n+new line 48\n+new line 49\n+new line 50\n@@ 90...92 @@\n-old line 90\n-old line 91\n-old line 92\n"}
+{"path":"src/foo.cpp","patch":"--- a/src/foo.cpp\n+++ b/src/foo.cpp\n@@ -14,1 +14,4 @@\n+namespace {\n+constexpr int kMaxRetries = 3;\n+}\n@@ -48,3 +48,3 @@\n line 47\n-old line 48\n-old line 49\n-old line 50\n+new line 48\n+new line 49\n+new line 50\n line 51"}
 ```
 
-Multi-hunk patch guidance:
-- removals (`-`) come before additions (`+`) within each hunk
-- use single-anchor hunks for insertions
-- use range hunks for replacements/deletions
-- split gigantic changes into smaller logical hunks if readability or recovery would suffer
+Key elements:
+- `@@ -oldStart,oldCount +newStart,newCount @@` hunk headers with line numbers
+- Context lines (space prefix) help locate changes
+- `-` prefix for lines to remove
+- `+` prefix for lines to add
+- `---` and `+++` file headers are optional
+
+#### YES: Simple replacement with context
+
+```json
+{"path":"src/utils.cpp","patch":"@@ -10,3 +10,3 @@\n void process() {\n-  int x = 0;\n+  int x = 1;\n }"}
+```
+
+#### YES: Multi-hunk patch
+
+```json
+{"path":"src/main.cpp","patch":"@@ -5,2 +5,3 @@\n #include <iostream>\n+#include <string>\n@@ -20,1 +21,1 @@\n-  return 0;\n+  return 1;"}
+```
+
+#### NO: Legacy anchor format (still works but deprecated)
+
+```json
+{"path":"src/foo.cpp","patch":"@@ 14 @@\n+new line"}
+```
+
+Use GitHub-style `@@ -n,m +n,m @@` headers instead of anchor-based headers.
+
+#### Patch Mode Rules
+
+DO:
+- Use `@@ -oldStart,oldCount +newStart,newCount @@` hunk headers
+- Include context lines (space-prefixed) for reliable matching
+- Put removals (`-`) before additions (`+`) within each hunk
+- Read the file first to get accurate line numbers
+
+DO NOT:
+- Mix patch mode with `edits[]` in the same file target
+- Use anchor-based `@@ anchor @@` format (use line numbers instead)
+- Omit context lines when the change location might be ambiguous
+- Include trailing `|content` in line numbers
 
 ### Multi-File Edit Example
 
@@ -316,7 +576,18 @@ Writing a new file creates parent directories automatically.
 If the intended directory does not exist yet, create the first scoped file directly instead of looping on directory-existence checks.
 
 Do NOT mix `content` with `edits` or `patch` in one target.
-Never mix `content` with Hashline `edits` in one `file_edit` call.
+Never mix `content` with line-range `edits` in one `file_edit` call.
+
+### Mode Selection Heuristics
+
+Choose the narrowest mode that matches reality:
+- **one exact local change with stable line numbers** → line-range edit
+- **exact literal substitution** → `search_replace`
+- **multiple hunks in one existing file** → `patch`
+- **new file** → `content`
+- **full overwrite of an existing file** → only after fully reading the file
+
+If you are unsure, do another `file_read` first and then pick the smallest honest mode.
 
 ## Failed Edit Recovery
 
@@ -346,6 +617,25 @@ When an edit fails:
 - do NOT route the edit through shell text-processing commands
 - do NOT guess new anchors from memory
 - do NOT keep retrying the same broken edit call unchanged
+
+### Practical Error-to-Fix Mapping
+
+- Error about **one editing mode per target file**
+  - Remove the extra real mode.
+  - Empty/default wrapper fields may be ignored, but real content plus real edits still conflict.
+
+- Error about **missing edits/content/patch**
+  - You sent only inert defaults.
+  - Add a real mode payload.
+
+- Error about **requires anchor / start_anchor / end_anchor**
+  - You chose a line-range op but omitted required line numbers.
+
+- Error about **Could not find** text
+  - Reread the file and use the exact current literal text.
+
+- Error about **must fully read file before overwrite**
+  - Use `file_read` on the whole file before sending whole-file `content` for an existing file.
 
 ## Never
 

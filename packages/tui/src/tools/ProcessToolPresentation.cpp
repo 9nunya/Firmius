@@ -346,7 +346,7 @@ ToolPresentation BuildProcessToolPresentation(
   if (!cwd.empty()) {
     presentation.facts.push_back({"cwd", cwd});
   }
-  const size_t visible_body_lines = 6;
+  const size_t visible_body_lines = 5;
   const size_t prefix_lines = !command.empty() ? 1u : 0u;
   const size_t visible_stream_lines =
       visible_body_lines > prefix_lines ? visible_body_lines - prefix_lines : 1u;

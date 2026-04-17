@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <memory>
 
 #include <ftxui/component/component_base.hpp>
@@ -15,6 +16,7 @@ struct ScrollableBoxOptions {
     bool overlayScrollbar = false;
     int overlayScrollbarGutter = 2;
     bool showScrollbar = true;
+    std::function<std::size_t()> measurement_signature_getter = nullptr;
 };
 
 // Wraps `child` inside a scrollable frame that responds to wheel, page, home, and
@@ -28,6 +30,7 @@ public:
     void RequestScrollToTop();
     void RequestEnsureVisible(int line);
     void RequestEnsureVisible(int first_line, int last_line);
+    void InvalidateLayout();
     int ContentWidth() const;
 
     ftxui::Element OnRender() override;
@@ -59,6 +62,9 @@ private:
     bool has_pending_ensure_visible_ = false;
     int pending_visible_start_ = 0;
     int pending_visible_end_ = 0;
+    bool layout_dirty_ = true;
+    int measured_viewport_width_ = -1;
+    std::size_t measured_signature_ = 0;
     ftxui::CapturedMouse captured_mouse_;
 };
 

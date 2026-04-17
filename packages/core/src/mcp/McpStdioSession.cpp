@@ -6,6 +6,7 @@
 #include <rapidjson/error/en.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
+#include <iostream>
 #include <stdexcept>
 
 namespace firmius::core::mcp {
@@ -66,8 +67,9 @@ rapidjson::Document McpStdioSession::sendRequest(const int id,
   request.AddMember("params", copiedParams, a);
 
   const std::string body = jsonToString(request);
-  const std::string framed =
-      "Content-Length: " + std::to_string(body.size()) + "\r\n\r\n" + body;
+  // Standard MCP stdio transport uses newline-delimited JSON ONLY.
+  // Headers like Content-Length are for HTTP/LSP and confuse standard MCP servers.
+  const std::string framed = body + "\n";
   process_.write(framed);
 
   return readResponseForId(id, timeoutMs, stage);
@@ -86,8 +88,8 @@ void McpStdioSession::sendNotification(const std::string &method,
   request.AddMember("params", copiedParams, a);
 
   const std::string body = jsonToString(request);
-  const std::string framed =
-      "Content-Length: " + std::to_string(body.size()) + "\r\n\r\n" + body;
+  // Standard MCP stdio transport uses newline-delimited JSON ONLY.
+  const std::string framed = body + "\n";
   process_.write(framed);
 }
 
@@ -133,43 +135,62 @@ rapidjson::Document McpStdioSession::readNextFramedJson(const int timeoutMs,
     const auto snapshot = process_.inspect();
     const std::string &stdoutData = snapshot.stdoutData;
 
-    if (stdoutOffset_ < stdoutData.size()) {
+    while (stdoutOffset_ < stdoutData.size()) {
+      // Try to find Content-Length framing first
       const std::size_t headerPos = stdoutData.find("Content-Length:", stdoutOffset_);
-      if (headerPos == std::string::npos) {
-        throw std::runtime_error("MCP " + stage +
-                                 " response missing Content-Length header");
-      }
-
-      const std::size_t lineEnd = stdoutData.find("\r\n", headerPos);
-      if (lineEnd != std::string::npos) {
-        const std::string headerLine = stdoutData.substr(headerPos, lineEnd - headerPos);
-        const std::size_t colonPos = headerLine.find(':');
-        if (colonPos == std::string::npos) {
-          throw std::runtime_error("MCP " + stage +
-                                   " response Content-Length malformed");
-        }
-
-        std::size_t contentLength = 0;
-        try {
-          const std::string lenText =
-              shared::StringUtil::trim(headerLine.substr(colonPos + 1));
-          contentLength = static_cast<std::size_t>(std::stoul(lenText));
-        } catch (...) {
-          throw std::runtime_error("MCP " + stage +
-                                   " response Content-Length is invalid");
-        }
-
+      if (headerPos != std::string::npos) {
+        const std::size_t lineEnd = stdoutData.find("\r\n", headerPos);
         const std::size_t bodyMarker = stdoutData.find("\r\n\r\n", headerPos);
-        if (bodyMarker != std::string::npos) {
-          const std::size_t payloadStart = bodyMarker + 4;
-          if (stdoutData.size() >= payloadStart + contentLength) {
-            const std::string payload =
-                stdoutData.substr(payloadStart, contentLength);
-            stdoutOffset_ = payloadStart + contentLength;
-            return parseJsonOrThrow(payload, "MCP " + stage + " response");
+        
+        if (lineEnd != std::string::npos && bodyMarker != std::string::npos) {
+          const std::string headerLine = stdoutData.substr(headerPos, lineEnd - headerPos);
+          const std::size_t colonPos = headerLine.find(':');
+          
+          if (colonPos != std::string::npos) {
+            try {
+              const std::string lenText = shared::StringUtil::trim(headerLine.substr(colonPos + 1));
+              const std::size_t contentLength = static_cast<std::size_t>(std::stoul(lenText));
+              const std::size_t payloadStart = bodyMarker + 4;
+              
+              if (stdoutData.size() >= payloadStart + contentLength) {
+                const std::string payload = stdoutData.substr(payloadStart, contentLength);
+                stdoutOffset_ = payloadStart + contentLength;
+                return parseJsonOrThrow(payload, "MCP " + stage + " response");
+              }
+              // Need more data for framed payload
+              break;
+            } catch (...) {
+              // Fall back to line-based if Content-Length is invalid
+            }
           }
         }
       }
+
+      // Try line-delimited JSON
+      const std::size_t nextNewline = stdoutData.find('\n', stdoutOffset_);
+      if (nextNewline != std::string::npos) {
+        std::string line = stdoutData.substr(stdoutOffset_, nextNewline - stdoutOffset_);
+        stdoutOffset_ = nextNewline + 1;
+        line = shared::StringUtil::trim(line);
+        
+        if (!line.empty()) {
+          if (line.find("Content-Length:") == 0) {
+              // Skip Content-Length headers in line-based mode
+              continue;
+          }
+          if (line[0] == '{') {
+            try {
+              return parseJsonOrThrow(line, "MCP " + stage + " response");
+            } catch (...) {
+              // Not valid JSON, might be a log message or partial framed header, keep looking
+            }
+          }
+        }
+        continue;
+      }
+
+      // No more complete messages in current buffer
+      break;
     }
 
     if (!snapshot.running) {

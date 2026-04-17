@@ -41,19 +41,12 @@ Useful launch variants:
 ./build/packages/cli/firmius --permission-mode request
 ./build/packages/cli/firmius --permission-mode always-allow
 ./build/packages/cli/firmius --permission-mode deny-all
-
-# Browser runner instead of the TUI
-./build/packages/cli/firmius web
-
-# Browser runner with an explicit host
-./build/packages/cli/firmius web --host 0.0.0.0
 ```
 
 Notes:
 
 - `request` is the default permission mode.
 - `always-allow` and `deny-all` also accept the short aliases `allow` and `deny`.
-- `firmius web` binds to `127.0.0.1:9173` by default. Host is overrideable; port is currently fixed in the CLI surface.
 
 ## 2) Slash commands that matter
 
@@ -154,7 +147,7 @@ Current lazy-registered provider IDs in code:
 - `antigravity`
 - `qwen`
 - `kimi`
-- `letta`
+- `kilo`
 
 Practical flow:
 
@@ -240,7 +233,7 @@ The thread database tracks:
 - compaction snapshots
 - artifacts
 
-So when you use `-c`, switch threads, undo turns, or hand artifacts between agents... that's real persistence, not just vibes.
+Which is why artifacts, undo, resume, memory recall, and planning state all feel like part of the same machine instead of a pile of disconnected hacks.
 
 ## 9) Where to go next
 

@@ -67,6 +67,18 @@ target_link_libraries(test_reference_persistence PRIVATE
 target_include_directories(test_reference_persistence PRIVATE ${rapidjson_SOURCE_DIR}/include)
 gtest_discover_tests(test_reference_persistence)
 
+add_executable(test_model_rotation test_model_rotation.cpp)
+target_link_libraries(test_model_rotation PRIVATE
+    firmius::core
+    firmius::provider
+    firmius::shared
+    CURL::libcurl
+    GTest::gtest_main
+    uuid
+)
+target_include_directories(test_model_rotation PRIVATE ${rapidjson_SOURCE_DIR}/include)
+gtest_discover_tests(test_model_rotation)
+
 target_include_directories(test_permissions PRIVATE ${rapidjson_SOURCE_DIR}/include)
 target_include_directories(test_swebench_prep PRIVATE ${rapidjson_SOURCE_DIR}/include)
 target_include_directories(test_utils PRIVATE ${rapidjson_SOURCE_DIR}/include)

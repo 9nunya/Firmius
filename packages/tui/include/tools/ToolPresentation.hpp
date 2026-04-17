@@ -47,6 +47,7 @@ struct ToolPresentationFact {
 
 struct ToolPresentationSection {
   std::string title;
+  ToolPresentationNoticeKind kind = ToolPresentationNoticeKind::Info;
   std::vector<std::string> lines;
 };
 
@@ -62,12 +63,18 @@ struct ToolPresentationDiffSection {
   std::string title;
   std::string meta;
   std::optional<std::string> error_text;
+  std::optional<std::string> empty_state_text;
   std::vector<ToolPresentationDiffLine> lines;
 };
 
 struct ToolPresentationNotice {
   ToolPresentationNoticeKind kind = ToolPresentationNoticeKind::Info;
   std::string text;
+};
+
+struct ToolPresentationToggleLabels {
+  std::string collapsed = "show more";
+  std::string expanded = "hide";
 };
 
 struct ToolPresentation {
@@ -91,6 +98,7 @@ struct ToolPresentation {
   std::optional<std::string> error_text;
   bool ansi_aware = false;
   std::optional<std::string> custom_icon;
+  ToolPresentationToggleLabels toggle_labels;
 };
 
 ToolPresentation BuildToolPresentation(

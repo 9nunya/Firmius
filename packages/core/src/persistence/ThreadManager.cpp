@@ -3,6 +3,7 @@
 #include "AgentRegistry.hpp"
 #include "Serialization.hpp"
 #include "tools/WorkToolCommon.hpp"
+#include "utils/PlatformPaths.hpp"
 #include "utils/StringUtil.hpp"
 
 #include <rapidjson/document.h>
@@ -660,12 +661,10 @@ std::shared_ptr<std::mutex> acquireTodoMutex(const std::string& threadId,
 } // namespace
 
 std::string ThreadManager::defaultBasePath() {
-    if (const char* home = std::getenv("HOME")) {
-        const std::filesystem::path userPath =
-            std::filesystem::path(home) / ".firmius" / "threads";
-        if (ensureWritableDirectory(userPath)) {
-            return userPath.string();
-        }
+    const std::filesystem::path sharedHomePath =
+        firmius::shared::PlatformPaths::firmiusHomeDir() / "threads";
+    if (ensureWritableDirectory(sharedHomePath)) {
+        return sharedHomePath.string();
     }
 
     const std::filesystem::path localPath =

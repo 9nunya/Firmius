@@ -45,6 +45,8 @@ public:
               (const std::string &, (std::unique_ptr<IHostProcess>)), (override));
   MOCK_METHOD(ProcessSnapshot, inspectBackgroundProcess, (const std::string &),
               (override));
+  MOCK_METHOD(void, releaseBackgroundProcess, (const std::string &),
+              (override));
   MOCK_METHOD(void, writeToBackgroundProcess,
               (const std::string &, const std::string &), (override));
   MOCK_METHOD(void, killBackgroundProcess, (const std::string &), (override));

@@ -22,6 +22,7 @@
 #include <fcntl.h>
 #include <sys/file.h>
 #include <unistd.h>
+#include <sys/wait.h>
 #include <sqlite3.h>
 
 using namespace firmius::core;
@@ -50,6 +51,24 @@ void releaseThreadLockFd(int fd) {
     flock(fd, LOCK_UN);
     close(fd);
 }
+
+class ScopedChildProcess {
+public:
+    explicit ScopedChildProcess(pid_t pid = -1) : pid_(pid) {}
+    ~ScopedChildProcess() {
+        if (pid_ <= 0) {
+            return;
+        }
+        kill(pid_, SIGKILL);
+        int status = 0;
+        waitpid(pid_, &status, 0);
+    }
+
+    pid_t get() const { return pid_; }
+
+private:
+    pid_t pid_;
+};
 
 void execSqlAt(const std::filesystem::path& dbPath, const std::string& sql) {
     sqlite3* db = nullptr;
@@ -598,6 +617,55 @@ public:
     std::vector<ModelInfo> listModels() override {
         ModelInfo model;
         model.id = "tool-call-model";
+        model.provider = getId();
+        model.contextWindow = 4096;
+        return {model};
+    }
+
+    ModelInfo getModelInfo(const std::string&) override {
+        return listModels().front();
+    }
+
+    void generateSummary(const std::string&, const AgentHistory&,
+                         const std::string&,
+                         std::function<void(const StreamEvent&)> onEvent,
+                         std::atomic<bool>* = nullptr) override {
+        onEvent(TextChunk{"summary"});
+        onEvent(StreamDone{StopReason::Stop});
+    }
+
+    firmius::provider::ProviderType getProviderType() const override {
+        return firmius::provider::ProviderType::APIKey;
+    }
+
+    int callCount() const { return callCount_.load(); }
+
+private:
+    std::atomic<int> callCount_{0};
+};
+
+class ProcessExecuteToolCallProvider : public firmius::provider::IProvider {
+public:
+    std::string getId() const override { return "process-execute-tool-provider"; }
+
+    void stream(const AgentHistory&, const firmius::provider::ProviderOptions&,
+                std::function<void(const StreamEvent&)> onEvent) override {
+        const int call = callCount_.fetch_add(1);
+        if (call == 0) {
+            onEvent(TextChunk{"Running a process execution tool call."});
+            onEvent(ToolCallChunk{
+                "process-exec-1", 0, "process_execute",
+                R"({"command":"printf 'stdout-visible\n'; printf 'stderr-visible\n' >&2","cwd":"/tmp","timeout_ms":4000})"});
+            onEvent(StreamDone{StopReason::ToolUse});
+            return;
+        }
+        onEvent(TextChunk{"Process execution complete."});
+        onEvent(StreamDone{StopReason::Stop});
+    }
+
+    std::vector<ModelInfo> listModels() override {
+        ModelInfo model;
+        model.id = "process-execute-tool-model";
         model.provider = getId();
         model.contextWindow = 4096;
         return {model};
@@ -2023,6 +2091,73 @@ TEST_F(HarnessTest, newThread_releasesPreviousThreadLock) {
     ASSERT_LT(threadBLock, 0) << "Current thread lock should still be held";
 }
 
+TEST_F(HarnessTest, threadLockManager_removesStaleDeadPidLockFileAndReacquires) {
+    const std::string threadId = "stale-dead-pid-thread";
+    auto threadDir = testHome_ / ".firmius" / "threads" / threadId;
+    std::filesystem::create_directories(threadDir);
+    auto lockPath = threadDir / ".lock";
+
+    std::ofstream lockFile(lockPath);
+    ASSERT_TRUE(lockFile.is_open());
+    lockFile << "999999";
+    lockFile.close();
+
+    int readyPipe[2];
+    ASSERT_EQ(pipe(readyPipe), 0);
+    int releasePipe[2];
+    ASSERT_EQ(pipe(releasePipe), 0);
+
+    pid_t child = fork();
+    ASSERT_GE(child, 0);
+    if (child == 0) {
+        close(readyPipe[0]);
+        close(releasePipe[1]);
+
+        int fd = open(lockPath.c_str(), O_RDWR);
+        if (fd < 0) {
+            _exit(10);
+        }
+        if (flock(fd, LOCK_EX) != 0) {
+            close(fd);
+            _exit(11);
+        }
+
+        char ready = 'R';
+        if (write(readyPipe[1], &ready, 1) != 1) {
+            flock(fd, LOCK_UN);
+            close(fd);
+            _exit(12);
+        }
+
+        char release = 0;
+        (void)read(releasePipe[0], &release, 1);
+        flock(fd, LOCK_UN);
+        close(fd);
+        _exit(0);
+    }
+
+    close(readyPipe[1]);
+    close(releasePipe[0]);
+    ScopedChildProcess childGuard(child);
+
+    char ready = 0;
+    ASSERT_EQ(read(readyPipe[0], &ready, 1), 1);
+    EXPECT_EQ(ready, 'R');
+    close(readyPipe[0]);
+
+    ThreadLockManager manager;
+    int fd = manager.acquire(threadId);
+    EXPECT_GE(fd, 0);
+    EXPECT_EQ(manager.getOwnerPid(threadId), static_cast<int>(getpid()));
+    EXPECT_TRUE(std::filesystem::exists(lockPath));
+
+    manager.release(threadId);
+
+    char release = 'X';
+    ASSERT_EQ(write(releasePipe[1], &release, 1), 1);
+    close(releasePipe[1]);
+}
+
 TEST_F(HarnessTest, newThread_savesPreviousAgent) {
     std::string threadA = Harness::instance().newThread({}, "/tmp", "test");
     ASSERT_FALSE(threadA.empty()) << "Failed to create thread A";
@@ -3242,6 +3377,57 @@ TEST_F(HarnessTest, MissingTodoDoesNotBlockReadOnlyToolTurn) {
         }
     }
     EXPECT_TRUE(sawToolResult);
+}
+
+TEST_F(HarnessTest, ProcessExecuteToolResultPreservesStdoutAndStderrInHistory) {
+    auto& harness = Harness::instance();
+    auto provider = std::make_shared<ProcessExecuteToolCallProvider>();
+    firmius::provider::ProviderRegistry::instance().registerProvider(provider);
+    auto config = firmius::shared::ConfigLoader::instance().getConfig();
+    config.defaultProviderId = provider->getId();
+    config.defaultModelId = provider->listModels().front().id;
+    harness.updateConfig(config);
+
+    const std::string threadId = harness.newThread({}, "/tmp", "lead");
+    ASSERT_FALSE(threadId.empty());
+    ASSERT_TRUE(harness.setCurrentThreadPermissionMode(
+                ThreadPermissionMode::AlwaysAllow));
+    auto agent = createFocusedLeadAgent(threadId);
+    ASSERT_TRUE(agent);
+    agent->getMutableContext().config.personaName = "executor";
+
+    harness.send("run a local command and continue implementation");
+
+    ASSERT_TRUE(waitForCondition([&]() { return provider->callCount() >= 1; },
+                                 std::chrono::milliseconds(4000)));
+    ASSERT_TRUE(waitForCondition([&]() {
+        return agent && !agent->isRunning() &&
+               agent->getContext().state.currentStatus == AgentStatus::Idle;
+    }, std::chrono::milliseconds(4000)));
+
+    const ToolResultContent* processResult = nullptr;
+    for (const auto& turn : agent->getContext().history->turns) {
+        for (const auto& msg : turn.messages) {
+            for (const auto& part : msg.content) {
+                if (const auto* result = std::get_if<ToolResultContent>(&part)) {
+                    if (result->toolCallId == "process-exec-1") {
+                        processResult = result;
+                    }
+                }
+            }
+        }
+    }
+
+    ASSERT_NE(processResult, nullptr);
+    EXPECT_TRUE(processResult->success) << processResult->result;
+    EXPECT_NE(processResult->result.find("stdout-visible"), std::string::npos)
+        << processResult->result;
+    EXPECT_NE(processResult->result.find("stderr-visible"), std::string::npos)
+        << processResult->result;
+    EXPECT_NE(processResult->result.find("\"stdout\":"), std::string::npos)
+        << processResult->result;
+    EXPECT_NE(processResult->result.find("\"stderr\":"), std::string::npos)
+        << processResult->result;
 }
 
 TEST_F(HarnessTest, LeadTodoPresenceClearsTodoEnforcement) {
