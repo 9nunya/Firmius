@@ -1,8 +1,8 @@
 #include "tools/FleetLockTool.hpp"
+#include "tools/WorkSupport.hpp"
 #include "AgentRegistry.hpp"
 #include "harness/Harness.hpp"
 #include "persistence/ThreadManager.hpp"
-#include "tools/WorkToolCommon.hpp"
 #include "utils/StringUtil.hpp"
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
@@ -65,7 +65,7 @@ FleetLock *findLockByPaths(FleetState &state, const std::vector<std::string> &pa
 
 shared::ToolMetadata FleetLockTool::getMetadata() const {
   return {"fleet_lock",
-          "Acquire, release, request, or check file locks for worker coordination.",
+          "Fleet coordination operations: acquire, release, request, wait, or check file locks.",
           shared::ToolScope::Delegation};
 }
 
@@ -90,7 +90,7 @@ std::shared_ptr<shared::JSONSchema> FleetLockTool::getSchema() const {
 
 shared::ToolResult FleetLockTool::execute(const FleetLockInput &input,
                                           shared::ToolContext &ctx) {
-  const std::string threadId = worktools::requireCurrentThreadId(ctx);
+  const std::string threadId = work::requireCurrentThreadId(ctx);
   const auto &identity = ctx.agent.getContext().identity;
   const std::string ownerId = identity.id;
   
@@ -113,7 +113,7 @@ shared::ToolResult FleetLockTool::execute(const FleetLockInput &input,
     if (existingLock && existingLock->ownerAgentId != ownerId) {
       // Wait for lock if timeout specified
       if (input.timeout_ms.has_value() && *input.timeout_ms > 0) {
-        const uint64_t start = worktools::nowEpochMs();
+        const uint64_t start = work::nowEpochMs();
         while (true) {
           bool lockReleased = false;
           tm.mutateFleetState(threadId, [&](FleetState &state) {
@@ -133,7 +133,7 @@ shared::ToolResult FleetLockTool::execute(const FleetLockInput &input,
             break;
           }
           
-          const uint64_t now = worktools::nowEpochMs();
+          const uint64_t now = work::nowEpochMs();
           if (now - start >= static_cast<uint64_t>(*input.timeout_ms)) {
             return shared::ToolResult::fail("Lock acquire timed out");
           }
@@ -154,7 +154,7 @@ shared::ToolResult FleetLockTool::execute(const FleetLockInput &input,
     lock.reason = input.reason;
     lock.paths = input.paths;
     lock.status = "open";
-    lock.createdAt = worktools::nowEpochMs();
+    lock.createdAt = work::nowEpochMs();
     lock.updatedAt = lock.createdAt;
 
     tm.mutateFleetState(threadId, [&](FleetState &state) {
@@ -194,7 +194,7 @@ shared::ToolResult FleetLockTool::execute(const FleetLockInput &input,
         return;
       }
       lock->status = "released";
-      lock->updatedAt = worktools::nowEpochMs();
+      lock->updatedAt = work::nowEpochMs();
       released = true;
     });
     
@@ -245,7 +245,7 @@ shared::ToolResult FleetLockTool::execute(const FleetLockInput &input,
         *input.target_agent_id, threadId, requestMsg);
     
     // Wait for response
-    const uint64_t start = worktools::nowEpochMs();
+    const uint64_t start = work::nowEpochMs();
     const int timeout = input.timeout_ms.value_or(120000);
     
     bool observedTargetOwnership = false;
@@ -310,7 +310,7 @@ shared::ToolResult FleetLockTool::execute(const FleetLockInput &input,
         return shared::ToolResult::ok(doc);
       }
 
-      const uint64_t now = worktools::nowEpochMs();
+      const uint64_t now = work::nowEpochMs();
       if (now - start >= static_cast<uint64_t>(timeout)) {
         return shared::ToolResult::fail("Lock request timed out");
       }
@@ -324,7 +324,7 @@ shared::ToolResult FleetLockTool::execute(const FleetLockInput &input,
     }
     
     ThreadManager tm(ThreadManager::defaultBasePath());
-    const uint64_t start = worktools::nowEpochMs();
+    const uint64_t start = work::nowEpochMs();
     
     while (true) {
       bool lockReleased = false;
@@ -351,7 +351,7 @@ shared::ToolResult FleetLockTool::execute(const FleetLockInput &input,
       }
       
       if (input.timeout_ms.has_value()) {
-        const uint64_t now = worktools::nowEpochMs();
+        const uint64_t now = work::nowEpochMs();
         if (now - start >= static_cast<uint64_t>(*input.timeout_ms)) {
           return shared::ToolResult::fail("Lock wait timed out");
         }

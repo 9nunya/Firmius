@@ -46,9 +46,13 @@ void noteTuiOnEventDispatch(std::chrono::nanoseconds elapsed);
 void noteTuiThreadChanged(std::chrono::nanoseconds elapsed);
 void noteTuiRebuildToolCalls(std::chrono::nanoseconds elapsed);
 void noteTuiChatWindowRebuild(std::chrono::nanoseconds elapsed);
+void noteTuiFrameRendered(std::chrono::nanoseconds elapsed);
+void noteTuiModalOpenRequested(const std::string &name);
+void noteTuiModalFirstPaint(const std::string &name);
 void noteTuiRequestAnimationFrameFromState();
 void noteTuiRequestAnimationFrameFromScrollableBoxWidthChange();
 void noteTuiRequestAnimationFrameFromAgentStripSpinner();
+void noteTuiRequestAnimationFrameFromGlintEffect();
 std::string tuiProfilingSummaryText();
 
 namespace detail {
@@ -226,7 +230,8 @@ public:
   ViewMode getViewMode() const;
 
   void openModal(const std::string &name);
-  void openModalDirect(ftxui::Component modal);
+  void openModalDirect(ftxui::Component modal,
+                       const std::string &modal_name = "");
   void popModal();
   void popModalImmediate();
   void replaceModalDirect(ftxui::Component modal);
@@ -238,6 +243,7 @@ public:
   bool hasActiveThread() const;
   std::string currentThreadId() const;
   shared::ThreadPermissionMode currentThreadPermissionMode() const;
+  bool needsAnimationTick() const;
   bool focusAgent(const std::string &agent_id);
 
 private:
@@ -271,6 +277,10 @@ private:
   void updateTodoLaneModel();
   void updateContextLaneModel();
   void refreshFocusedHistory();
+  void rebuildEditableUserMessages();
+  bool isEditModeSelection(uint64_t timestamp) const;
+  void selectEditableMessageByTimestamp(uint64_t timestamp);
+  bool commitSelectedEditableMessageToInput();
   std::optional<shared::Plan> loadActivePlanForThread(
       const shared::ThreadMetadata &thread) const;
   const shared::WorkChunk *
@@ -310,11 +320,29 @@ private:
       false; // Deferred clear to avoid UB in modal handlers
   bool diffs_expanded_ = true; // Ctrl+G toggle for diff expansion
   WorkPanelTab selected_work_panel_tab_ = WorkPanelTab::Context;
+  bool show_agent_strip_ = true;
+  bool show_work_panel_ = true;
+  int agent_strip_visible_rows_ = 4;
+  int work_panel_height_override_ = 0;
+  bool edit_mode_active_ = false;
+  struct EditableUserMessage {
+    uint64_t timestamp = 0;
+    std::string text;
+    std::vector<shared::ImageContent> images;
+  };
+  std::optional<EditableUserMessage> pending_edit_message_;
+  std::vector<EditableUserMessage> editable_user_messages_;
+  int selected_editable_message_index_ = -1;
+  bool suppress_next_history_undone_refresh_ = false;
 
   ftxui::Component root_component_;
   ftxui::Component chat_component_;
   ftxui::Component input_component_;
   std::unordered_map<std::string, uint64_t> agent_work_start_ms_;
+  std::unordered_map<std::string, std::shared_ptr<shared::AgentHistory>>
+      agent_history_cache_;
+  std::unordered_map<std::string, std::unordered_set<std::string>>
+      agent_persisted_tool_call_ids_cache_;
   std::filesystem::path file_reference_cache_root_;
   std::vector<std::string> file_reference_cache_paths_;
   bool file_reference_cache_ready_ = false;
@@ -330,11 +358,23 @@ private:
   bool process_focus_expanded_ = false;
   int last_terminal_width_ = 0;
   int last_terminal_height_ = 0;
+  ftxui::Box work_panel_separator_box_;
+  ftxui::Box agent_strip_separator_box_;
+  ftxui::CapturedMouse active_drag_mouse_;
+  enum class DragTarget { None, WorkPanel, AgentStrip };
+  DragTarget active_drag_target_ = DragTarget::None;
+  int drag_origin_y_ = 0;
+  int drag_origin_work_panel_height_ = 0;
+  int drag_origin_agent_strip_rows_ = 0;
   std::optional<std::chrono::steady_clock::time_point> quit_arm_deadline_;
   std::size_t quit_arm_generation_ = 0;
+  shared::AgentMetrics session_metrics_;
   std::jthread quit_arm_thread_;
   std::chrono::steady_clock::time_point last_live_raf_request_{};
-  shared::AgentMetrics session_metrics_;
+  std::optional<std::string> pending_profile_modal_name_;
+  std::unordered_set<std::string> painted_profile_modals_;
+public:
+  void handleAppEvent(const shared::AppEvent &ev);
 };
 
 } // namespace firmius::tui

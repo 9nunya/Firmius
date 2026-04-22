@@ -42,6 +42,12 @@ void SyntaxHighlighter::initialize() {
       .languageFn = tree_sitter_cpp,
   };
 
+  grammars_["bash"] = GrammarInfo{
+      .name = "Bash",
+      .fileExtensions = {".sh", ".bash", ".zsh"},
+      .languageFn = tree_sitter_bash,
+  };
+
   grammars_["java"] = GrammarInfo{
       .name = "Java",
       .fileExtensions = {".java"},
@@ -215,7 +221,10 @@ static bool isKeywordText(const char *text) {
       // YAML / TOML (few keywords)
       "true", "false", "null", "yes", "no", "on", "off",
       // Common
-      "True", "False", "None", nullptr};
+      "True", "False", "None",
+      // Bash extras
+      "then", "fi", "esac", "until", "done", "select", "time",
+      nullptr};
   for (int i = 0; keywords[i]; ++i) {
     if (strcmp(text, keywords[i]) == 0)
       return true;

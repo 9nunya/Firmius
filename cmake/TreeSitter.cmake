@@ -154,6 +154,15 @@ FetchContent_Declare(
   SOURCE_SUBDIR  _none
 )
 
+FetchContent_Declare(
+  ts_parser_bash
+  GIT_REPOSITORY https://github.com/tree-sitter/tree-sitter-bash.git
+  GIT_TAG        v0.23.3
+  GIT_SHALLOW    TRUE
+  GIT_PROGRESS   ${_firmius_git_progress}
+  SOURCE_SUBDIR  _none
+)
+
 # Download all sources (SOURCE_SUBDIR _none prevents add_subdirectory)
 FetchContent_MakeAvailable(
   tree_sitter
@@ -171,6 +180,7 @@ FetchContent_MakeAvailable(
   ts_parser_lua
   ts_parser_luau
   ts_parser_markdown
+  ts_parser_bash
 )
 
 # ─── Tree-sitter core static library ────────────────────────────────────────
@@ -221,6 +231,7 @@ add_ts_parser(ts_lang_cmake      "${ts_parser_cmake_SOURCE_DIR}")
 add_ts_parser(ts_lang_lua        "${ts_parser_lua_SOURCE_DIR}")
 add_ts_parser(ts_lang_luau       "${ts_parser_luau_SOURCE_DIR}")
 add_ts_parser(ts_lang_markdown   "${ts_parser_markdown_SOURCE_DIR}/tree-sitter-markdown")
+add_ts_parser(ts_lang_bash       "${ts_parser_bash_SOURCE_DIR}")
 
 # TypeScript has its parser in typescript/src/ subdirectory
 add_library(ts_lang_typescript STATIC
@@ -257,4 +268,5 @@ target_link_libraries(tree_sitter_all INTERFACE
   ts_lang_lua
   ts_lang_luau
   ts_lang_markdown
+  ts_lang_bash
 )

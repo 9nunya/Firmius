@@ -53,7 +53,7 @@ public:
     if (width <= 0 || config_.glintSize <= 0)
       return;
 
-    float glint_size = static_cast<float>(config_.glintSize);
+    float glint_size = static_cast<float>(std::min(config_.glintSize, width));
     float start_x = static_cast<float>(box_.x_min) - glint_size;
     float end_x = static_cast<float>(box_.x_max) + glint_size;
     float exact_pos = start_x + (end_x - start_x) * progress_;
@@ -81,6 +81,9 @@ public:
 
         auto &pixel = screen.PixelAt(x, y);
         if (config_.target == GlintConfig::Target::Text) {
+          if (pixel.character.empty() || pixel.character == " ") {
+            continue;
+          }
           if (c == pixel.background_color) {
             pixel.foreground_color = ftxui::Color::White;
           } else {
@@ -128,18 +131,22 @@ public:
     auto now = std::chrono::steady_clock::now();
     float elapsed =
         std::chrono::duration<float>(now - global_start_time).count();
-    float cycle_duration = config_.durationSeconds + config_.intervalSeconds;
+    const float width_scale =
+        std::max(1.6f, static_cast<float>(config_.glintSize) / 10.0f);
+    const float effective_duration = config_.durationSeconds * width_scale;
+    const float effective_interval = config_.intervalSeconds * 1.4f;
+    float cycle_duration = effective_duration + effective_interval;
 
-    if (cycle_duration <= 0.0f || config_.durationSeconds <= 0.0f) {
+    if (cycle_duration <= 0.0f || effective_duration <= 0.0f) {
       return child_;
     }
 
     float cycle_time = std::fmod(elapsed, cycle_duration);
-    bool animating = cycle_time <= config_.durationSeconds;
+    bool animating = cycle_time <= effective_duration;
 
     if (animating) {
       ftxui::animation::RequestAnimationFrame();
-      float progress = cycle_time / config_.durationSeconds;
+      float progress = std::min(1.0f, cycle_time / effective_duration);
       if (config_.easing) {
         progress = config_.easing(progress);
       }

@@ -33,9 +33,9 @@ parseSkillSelector(const std::string &rawWhat) {
 } // namespace
 
 shared::ToolMetadata SkillLoadTool::getMetadata() const {
-  return {"skill_load",
-          "Load a skill SKILL.md or nested skill reference file from ~/.agents/skills",
-          shared::ToolScope::FilesystemRead};
+  return {"Skill",
+          "Load a skill entrypoint or nested skill file from ~/.agents/skills",
+          shared::ToolScope::Semantic};
 }
 
 std::shared_ptr<shared::JSONSchema> SkillLoadTool::getSchema() const {

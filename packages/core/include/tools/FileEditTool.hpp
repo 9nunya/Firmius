@@ -20,44 +20,70 @@ struct FileEditOperationInput {
     bool has_old_string = false;
     bool has_new_string = false;
     bool replace_all = false;
-    int patch_line = 0;         ///< Original line in patch text (for diagnostics).
+    int patch_line = 0; ///< Original line in patch text (for diagnostics).
 };
 
-struct FileEditTargetInput {
-    std::string path;           ///< Path to the file.
-    std::string content;        ///< Full content for whole-file overwrite mode.
-    std::string patch;          ///< Patch content for patch mode.
-    bool has_patch = false;     ///< Whether patch was provided.
-    bool has_content = false;   ///< Whether content was provided.
-    std::vector<FileEditOperationInput> edits; ///< Line-number anchored edit operations.
-    std::string old_string;     ///< Legacy substring replacement target.
-    std::string new_string;     ///< Legacy substring replacement replacement text.
-    bool has_old_string = false; ///< Whether old_string was provided.
-    bool has_new_string = false; ///< Whether new_string was provided.
-    bool replace_all = false;   ///< Legacy substring replacement flag.
-    float fuzzy_threshold = 1.0f; ///< Legacy fuzzy replacement threshold.
+struct FilePatchInput {
+    std::string patch;
+    bool validate_only = false;
 };
 
-/**
- * @brief Input parameters for the file_edit tool.
- */
-struct FileEditInput : public FileEditTargetInput {
-    std::vector<FileEditTargetInput> files; ///< Optional multi-file request payload.
+struct FileWriteInput {
+    std::string path;
+    std::string content;
+    bool validate_only = false;
 };
 
-/**
- * @brief Tool for editing or overwriting files on the host filesystem.
- */
-class FileEditTool : public shared::TypedTool<FileEditInput> {
+struct FileReplaceInput {
+    struct Replacement {
+        std::string old_string;
+        std::string new_string;
+        bool replace_all = false;
+    };
+
+    std::string path;
+    std::vector<Replacement> replacements;
+    bool validate_only = false;
+};
+
+struct FileRangeInput {
+    std::string path;
+    std::vector<FileEditOperationInput> operations;
+    bool validate_only = false;
+};
+
+class FileEditTool : public shared::TypedTool<FilePatchInput> {
 public:
     shared::ToolMetadata getMetadata() const override;
     std::shared_ptr<shared::JSONSchema> getSchema() const override;
-
-    FileEditInput transform(const rapidjson::Value& json) override;
-
-    shared::ToolResult execute(const FileEditInput& input, shared::ToolContext& ctx) override;
+    FilePatchInput transform(const rapidjson::Value& json) override;
+    shared::ToolResult execute(const FilePatchInput& input, shared::ToolContext& ctx) override;
 };
 
-}
+class FileWriteTool : public shared::TypedTool<FileWriteInput> {
+public:
+    shared::ToolMetadata getMetadata() const override;
+    std::shared_ptr<shared::JSONSchema> getSchema() const override;
+    FileWriteInput transform(const rapidjson::Value& json) override;
+    shared::ToolResult execute(const FileWriteInput& input, shared::ToolContext& ctx) override;
+};
+
+class FileReplaceTool : public shared::TypedTool<FileReplaceInput> {
+public:
+    shared::ToolMetadata getMetadata() const override;
+    std::shared_ptr<shared::JSONSchema> getSchema() const override;
+    FileReplaceInput transform(const rapidjson::Value& json) override;
+    shared::ToolResult execute(const FileReplaceInput& input, shared::ToolContext& ctx) override;
+};
+
+class FileRangeTool : public shared::TypedTool<FileRangeInput> {
+public:
+    shared::ToolMetadata getMetadata() const override;
+    std::shared_ptr<shared::JSONSchema> getSchema() const override;
+    FileRangeInput transform(const rapidjson::Value& json) override;
+    shared::ToolResult execute(const FileRangeInput& input, shared::ToolContext& ctx) override;
+};
+
+} // namespace firmius::core
 
 #endif

@@ -41,7 +41,7 @@ std::string spinnerFrame() {
   auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                 now.time_since_epoch())
                 .count();
-  const auto frame_bucket = ms / 80;
+  const auto frame_bucket = ms / 250;
   static std::atomic<long long> last_requested_bucket{-1};
   size_t idx = static_cast<size_t>(frame_bucket % frames.size());
   const long long expected =
@@ -135,7 +135,9 @@ public:
       return ftxui::text("");
     }
     const auto &theme = ThemeManager::instance().getCurrentTheme();
-    size_t count = std::min(model_->items.size(), kAgentStripVisibleRows);
+    size_t count =
+        std::min(model_->items.size(),
+                 std::max<size_t>(1, model_->visible_rows));
     return ftxui::vbox({
                ftxui::separator() | ftxui::color(theme.base.border),
                scrollable_->Render() | ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, (int)count),

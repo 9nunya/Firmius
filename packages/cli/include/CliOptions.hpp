@@ -9,6 +9,8 @@
 namespace firmius::cli {
 
 struct CliOptions {
+  enum class Mode { Tui };
+  Mode mode = Mode::Tui;
   bool continueLast = false;
   bool debuggingMode = false;
   bool quitWhenIdle = false;
@@ -16,6 +18,7 @@ struct CliOptions {
       firmius::shared::ThreadPermissionMode::Request;
   std::string initialPrompt;
   std::string initialCwd;
+  std::string threadId;
 };
 
 inline firmius::shared::ThreadPermissionMode parsePermissionMode(
@@ -58,6 +61,9 @@ inline CliOptions parseCliOptions(int argc, char **argv) {
     const std::string arg = argv[i];
 
     if (arg == "-c") {
+      options.continueLast = true;
+    } else if (arg == "--thread-id") {
+      options.threadId = requireOptionValue(argc, argv, i, arg);
       options.continueLast = true;
     } else if (arg == "--i-am-debugging") {
       options.debuggingMode = true;

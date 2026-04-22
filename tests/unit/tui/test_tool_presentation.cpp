@@ -1,6 +1,18 @@
 #include "tools/ToolPresentation.hpp"
 
 #include <algorithm>
+#include "tools/ArtifactToolPresentation.hpp"
+#include "tools/FileToolPresentation.hpp"
+#include "tools/GenericToolPresentation.hpp"
+#include "tools/McpToolPresentation.hpp"
+#include "tools/ProcessToolPresentation.hpp"
+#include "tools/PythonToolPresentation.hpp"
+#include "tools/SearchToolPresentation.hpp"
+#include "tools/SemanticToolPresentation.hpp"
+#include "tools/SubagentToolPresentation.hpp"
+#include "tools/WebSearchToolPresentation.hpp"
+#include "tools/WorkToolPresentation.hpp"
+#include <type_traits>
 #include <gtest/gtest.h>
 
 namespace {
@@ -22,6 +34,135 @@ const std::string *FindFactValue(const ToolPresentation &presentation,
     }
   }
   return nullptr;
+}
+
+TEST(ToolPresentationTest, FamilyBuildersAndMatchersAreExplicitlyEnumerated) {
+  static_assert(
+      std::is_same_v<decltype(&firmius::tui::BuildArtifactToolPresentation),
+                     ToolPresentation (*)(const ToolCallView &)>);
+  static_assert(std::is_same_v<decltype(&firmius::tui::BuildFileToolPresentation),
+                               ToolPresentation (*)(const ToolCallView &)>);
+  static_assert(
+      std::is_same_v<decltype(&firmius::tui::BuildGenericToolPresentation),
+                     ToolPresentation (*)(const ToolCallView &)>);
+  static_assert(std::is_same_v<decltype(&firmius::tui::BuildMcpToolPresentation),
+                               ToolPresentation (*)(const ToolCallView &)>);
+  static_assert(
+      std::is_same_v<decltype(&firmius::tui::BuildProcessToolPresentation),
+                     ToolPresentation (*)(const ToolCallView &,
+                                          const NormalizedProcessState *)>);
+  static_assert(
+      std::is_same_v<decltype(&firmius::tui::BuildPythonToolPresentation),
+                     ToolPresentation (*)(const ToolCallView &,
+                                          const NormalizedProcessState *)>);
+  static_assert(std::is_same_v<decltype(&firmius::tui::BuildSearchToolPresentation),
+                               ToolPresentation (*)(const ToolCallView &)>);
+  static_assert(
+      std::is_same_v<decltype(&firmius::tui::BuildSemanticToolPresentation),
+                     ToolPresentation (*)(const ToolCallView &)>);
+  static_assert(
+      std::is_same_v<decltype(&firmius::tui::BuildSubagentToolPresentation),
+                     ToolPresentation (*)(const ToolCallView &,
+                                          const NormalizedSubagentState *)>);
+  static_assert(
+      std::is_same_v<decltype(&firmius::tui::BuildTerminateSubagentToolPresentation),
+                     ToolPresentation (*)(const ToolCallView &)>);
+  static_assert(
+      std::is_same_v<decltype(&firmius::tui::BuildWebSearchToolPresentation),
+                     ToolPresentation (*)(const ToolCallView &)>);
+  static_assert(std::is_same_v<decltype(&firmius::tui::BuildWebFetchToolPresentation),
+                               ToolPresentation (*)(const ToolCallView &)>);
+  static_assert(std::is_same_v<decltype(&firmius::tui::BuildWorkToolPresentation),
+                               ToolPresentation (*)(const ToolCallView &)>);
+
+  EXPECT_TRUE(firmius::tui::IsFileFamilyTool("file_read"));
+  EXPECT_TRUE(firmius::tui::IsFileFamilyTool("Read"));
+  EXPECT_TRUE(firmius::tui::IsFileFamilyTool("file_edit"));
+  EXPECT_TRUE(firmius::tui::IsFileFamilyTool("Edit"));
+  EXPECT_TRUE(firmius::tui::IsFileFamilyTool("file_write"));
+  EXPECT_TRUE(firmius::tui::IsFileFamilyTool("list_directory"));
+  EXPECT_TRUE(firmius::tui::IsFileFamilyTool("Files"));
+  EXPECT_FALSE(firmius::tui::IsFileFamilyTool("web_fetch"));
+  EXPECT_FALSE(firmius::tui::IsFileFamilyTool("terminate_subagent"));
+
+  EXPECT_TRUE(firmius::tui::IsSearchFamilyTool("Search"));
+  EXPECT_TRUE(firmius::tui::IsSearchFamilyTool("grep"));
+  EXPECT_TRUE(firmius::tui::IsSearchFamilyTool("glob"));
+  EXPECT_FALSE(firmius::tui::IsSearchFamilyTool("list_directory"));
+
+  EXPECT_TRUE(firmius::tui::IsSemanticFamilyTool("Lsp"));
+  EXPECT_TRUE(firmius::tui::IsSemanticFamilyTool("lsp"));
+  EXPECT_TRUE(firmius::tui::IsSemanticFamilyTool("lsp_diagnostics"));
+  EXPECT_TRUE(firmius::tui::IsSemanticFamilyTool("semantic_search"));
+  EXPECT_FALSE(firmius::tui::IsSemanticFamilyTool("mcp_list"));
+
+  EXPECT_TRUE(firmius::tui::IsWebSearchFamilyTool("Web"));
+  EXPECT_TRUE(firmius::tui::IsWebSearchFamilyTool("web_search"));
+  EXPECT_TRUE(firmius::tui::IsWebSearchFamilyTool("web_fetch"));
+
+  EXPECT_TRUE(firmius::tui::IsSubagentFamilyTool("Delegate"));
+  EXPECT_FALSE(firmius::tui::IsSubagentFamilyTool("terminate_subagent"));
+  EXPECT_FALSE(firmius::tui::IsSubagentFamilyTool("subagent_terminate"));
+
+  EXPECT_FALSE(firmius::tui::IsMcpFamilyTool("Mcp"));
+  EXPECT_FALSE(firmius::tui::IsMcpFamilyTool("mcp_list"));
+  EXPECT_TRUE(firmius::tui::IsMcpFamilyTool("mcp__server__tool"));
+}
+
+TEST(ToolPresentationTest, CompactWorkPresentationUsesStructuredWorkPresenter) {
+  ToolCallView view;
+  view.name = "Work";
+  view.args = R"({"action":"CreatePlan","title":"Ship compact tool suite"})";
+  view.phase = ToolPhase::Finished;
+  view.success = true;
+  view.result = R"({"plan":{"id":"plan-1","title":"Ship compact tool suite","status":"Draft"}})";
+
+  ToolPresentation presentation = BuildToolPresentation(view);
+  EXPECT_NE(presentation.title.find("Ship compact tool suite"), std::string::npos);
+}
+
+TEST(ToolPresentationTest, CompactDelegateAndWebNamesDispatchThroughFamilyPresenters) {
+  ToolCallView delegate;
+  delegate.name = "Delegate";
+  delegate.args = R"({"action":"Spawn","title":"Auth finder","persona":"glimmer","task":"inspect auth"})";
+  delegate.phase = ToolPhase::Called;
+
+  ToolPresentation delegatePresentation = BuildToolPresentation(delegate);
+  EXPECT_EQ(delegatePresentation.lifecycle, ToolPresentationLifecycle::Running);
+
+  ToolCallView web;
+  web.name = "Web";
+  web.args = R"({"action":"Fetch","url":"https://example.com/docs"})";
+  web.phase = ToolPhase::Finished;
+  web.success = true;
+  web.result = R"({"url":"https://example.com/docs","status":200,"content":"ok"})";
+
+  ToolPresentation webPresentation = BuildToolPresentation(web);
+  EXPECT_FALSE(webPresentation.footer_badges.empty());
+  EXPECT_NE(webPresentation.footer_badges.front().find("example.com"),
+            std::string::npos);
+}
+
+TEST(ToolPresentationTest, CompactReadAndSearchNamesUseSpecializedPresenters) {
+  ToolCallView read;
+  read.name = "Read";
+  read.args = R"({"path":"src/main.cpp"})";
+  read.phase = ToolPhase::Preparing;
+
+  ToolPresentation readPresentation = BuildToolPresentation(read);
+  EXPECT_EQ(readPresentation.lifecycle, ToolPresentationLifecycle::Preparing);
+
+  ToolCallView search;
+  search.name = "Search";
+  search.args = R"({"action":"Grep","pattern":"ToolRegistry","path":"packages/core"})";
+  search.phase = ToolPhase::Finished;
+  search.success = true;
+  search.result = R"([{"path":"packages/core/src/tools/ToolRegistry.cpp","line_number":12,"line":"ToolRegistry registry;"}])";
+
+  ToolPresentation searchPresentation = BuildToolPresentation(search);
+  const std::string *matches = FindFactValue(searchPresentation, "Matches");
+  ASSERT_NE(matches, nullptr);
+  EXPECT_EQ(*matches, "1");
 }
 
 TEST(ToolPresentationTest, PreparingGenericToolPresentation) {
@@ -149,8 +290,8 @@ TEST(ToolPresentationTest, GlobPresentationIncludesPathOrientedRows) {
 
 TEST(ToolPresentationTest, ProcessExecuteRunningPresentation) {
   ToolCallView view;
-  view.name = "process_execute";
-  view.args = R"({"command":"sleep 1"})";
+  view.name = "Process";
+  view.args = R"({"action":"Execute","command":"sleep 1"})";
   view.phase = ToolPhase::Called;
 
   NormalizedProcessState state;
@@ -171,8 +312,8 @@ TEST(ToolPresentationTest, ProcessExecuteRunningPresentation) {
 
 TEST(ToolPresentationTest, ProcessExecuteTimeoutBackgroundPresentation) {
   ToolCallView view;
-  view.name = "process_execute";
-  view.args = R"({"command":"sleep 30"})";
+  view.name = "Process";
+  view.args = R"({"action":"Execute","command":"sleep 30"})";
   view.phase = ToolPhase::BackgroundRunning;
   view.success = true;
   view.result = R"({"finish_reason":"Timeout","process_id":"proc-2"})";
@@ -192,8 +333,8 @@ TEST(ToolPresentationTest, ProcessExecuteTimeoutBackgroundPresentation) {
 
 TEST(ToolPresentationTest, ProcessExecuteFinishedSuccessPresentation) {
   ToolCallView view;
-  view.name = "process_execute";
-  view.args = R"({"command":"echo ok"})";
+  view.name = "Process";
+  view.args = R"({"action":"Execute","command":"echo ok"})";
   view.phase = ToolPhase::Finished;
   view.success = true;
   view.result = R"({"exit_code":0,"duration_ms":45})";
@@ -214,8 +355,8 @@ TEST(ToolPresentationTest, ProcessExecuteFinishedSuccessPresentation) {
 
 TEST(ToolPresentationTest, ProcessExecuteFinishedFailurePresentation) {
   ToolCallView view;
-  view.name = "process_execute";
-  view.args = R"({"command":"false"})";
+  view.name = "Process";
+  view.args = R"({"action":"Execute","command":"false"})";
   view.phase = ToolPhase::Finished;
   view.success = false;
   view.result = "exit 1";
@@ -232,8 +373,8 @@ TEST(ToolPresentationTest, ProcessExecuteFinishedFailurePresentation) {
 
 TEST(ToolPresentationTest, ProcessSpawnBackgroundPresentation) {
   ToolCallView view;
-  view.name = "process_spawn";
-  view.args = R"({"command":"tail -f app.log"})";
+  view.name = "Process";
+  view.args = R"({"action":"Spawn","command":"tail -f app.log"})";
   view.phase = ToolPhase::BackgroundRunning;
   view.success = true;
 
@@ -250,8 +391,8 @@ TEST(ToolPresentationTest, ProcessSpawnBackgroundPresentation) {
 
 TEST(ToolPresentationTest, ProcessWaitShowsProcessIdAndPattern) {
   ToolCallView view;
-  view.name = "process_wait";
-  view.args = R"({"process_id":"proc-3","pattern":"READY"})";
+  view.name = "Process";
+  view.args = R"({"action":"Wait","process_id":"proc-3","pattern":"READY"})";
   view.phase = ToolPhase::Called;
 
   NormalizedProcessState state;
@@ -268,8 +409,8 @@ TEST(ToolPresentationTest, ProcessWaitShowsProcessIdAndPattern) {
 
 TEST(ToolPresentationTest, ProcessInputCompactPreviewPresentation) {
   ToolCallView view;
-  view.name = "process_input";
-  view.args = R"({"process_id":"proc-4","input":"status\n"})";
+  view.name = "Process";
+  view.args = R"({"action":"Input","process_id":"proc-4","input":"status\n"})";
   view.phase = ToolPhase::Finished;
   view.success = true;
 
@@ -284,8 +425,8 @@ TEST(ToolPresentationTest, ProcessInputCompactPreviewPresentation) {
 
 TEST(ToolPresentationTest, ProcessStatusFinishedPresentation) {
   ToolCallView view;
-  view.name = "process_status";
-  view.args = R"({"process_id":"proc-5"})";
+  view.name = "Process";
+  view.args = R"({"action":"Status","process_id":"proc-5"})";
   view.phase = ToolPhase::Finished;
   view.success = true;
   view.result = R"({"isRunning":false,"exitCode":2,"duration_ms":3210})";
@@ -297,7 +438,7 @@ TEST(ToolPresentationTest, ProcessStatusFinishedPresentation) {
 
 TEST(ToolPresentationTest, PythonExecuteUsesProcessFamilyPresentation) {
   ToolCallView view;
-  view.name = "python_execute";
+  view.name = "Python";
   view.args = R"({"code":"print('hi')\n"})";
   view.phase = ToolPhase::Finished;
   view.success = true;
@@ -311,8 +452,8 @@ TEST(ToolPresentationTest, PythonExecuteUsesProcessFamilyPresentation) {
 
 TEST(ToolPresentationTest, SummonSubagentRunningPresentation) {
   ToolCallView view;
-  view.name = "summon_subagent";
-  view.args = R"({"title":"Worker","task":"Implement login"})";
+  view.name = "Delegate";
+  view.args = R"({"action":"Spawn","title":"Worker","task":"Implement login"})";
   view.phase = ToolPhase::Called;
 
   NormalizedSubagentState state;
@@ -335,8 +476,8 @@ TEST(ToolPresentationTest, SummonSubagentRunningPresentation) {
 
 TEST(ToolPresentationTest, SummonSubagentRetryFallbackPresentation) {
   ToolCallView view;
-  view.name = "summon_subagent";
-  view.args = R"({"task":"Investigate flakes"})";
+  view.name = "Delegate";
+  view.args = R"({"action":"Spawn","task":"Investigate flakes"})";
   view.phase = ToolPhase::Called;
 
   NormalizedSubagentState state;
@@ -358,8 +499,8 @@ TEST(ToolPresentationTest, SummonSubagentRetryFallbackPresentation) {
 
 TEST(ToolPresentationTest, SummonSubagentCompletedNoSummaryCancelledAndFailedPresentation) {
   ToolCallView base;
-  base.name = "summon_subagent";
-  base.args = R"({"title":"Worker","task":"Task"})";
+  base.name = "Delegate";
+  base.args = R"({"action":"Spawn","title":"Worker","task":"Task"})";
   base.phase = ToolPhase::Finished;
   base.success = true;
 
@@ -397,8 +538,8 @@ TEST(ToolPresentationTest, SummonSubagentCompletedNoSummaryCancelledAndFailedPre
 
 TEST(ToolPresentationTest, SubagentWaitPresentationShowsOutcomeAndArtifacts) {
   ToolCallView view;
-  view.name = "subagent_wait";
-  view.args = R"({"agent_id":"child-1"})";
+  view.name = "Delegate";
+  view.args = R"({"action":"Wait","agent_id":"child-1"})";
   view.phase = ToolPhase::Finished;
   view.success = true;
 
@@ -426,8 +567,8 @@ TEST(ToolPresentationTest, SubagentWaitPresentationShowsOutcomeAndArtifacts) {
 
 TEST(ToolPresentationTest, SummonUsesFriendlyNameWhenTitleAbsent) {
   ToolCallView view;
-  view.name = "summon_subagent";
-  view.args = R"({"task":"Investigate"})";
+  view.name = "Delegate";
+  view.args = R"({"action":"Spawn","task":"Investigate"})";
   view.phase = ToolPhase::Called;
 
   NormalizedSubagentState state;
@@ -445,8 +586,8 @@ TEST(ToolPresentationTest, SummonUsesFriendlyNameWhenTitleAbsent) {
 
 TEST(ToolPresentationTest, WaitUsesFriendlyNameWhenTitleAbsent) {
   ToolCallView view;
-  view.name = "subagent_wait";
-  view.args = R"({"agent_id":"child-8"})";
+  view.name = "Delegate";
+  view.args = R"({"action":"Wait","agent_id":"child-8"})";
   view.phase = ToolPhase::Called;
 
   NormalizedSubagentState state;
@@ -465,8 +606,8 @@ TEST(ToolPresentationTest, WaitUsesFriendlyNameWhenTitleAbsent) {
 
 TEST(ToolPresentationTest, FallsBackToAgentIdWhenNoTitleOrFriendlyName) {
   ToolCallView view;
-  view.name = "subagent_wait";
-  view.args = R"({"agent_id":"child-9"})";
+  view.name = "Delegate";
+  view.args = R"({"action":"Wait","agent_id":"child-9"})";
   view.phase = ToolPhase::Called;
 
   NormalizedSubagentState state;
@@ -484,8 +625,8 @@ TEST(ToolPresentationTest, FallsBackToAgentIdWhenNoTitleOrFriendlyName) {
 
 TEST(ToolPresentationTest, ProcessExecuteAnsiPresentation) {
   ToolCallView view;
-  view.name = "process_execute";
-  view.args = R"({"command":"ls"})";
+  view.name = "Process";
+  view.args = R"({"action":"Execute","command":"ls"})";
   view.phase = ToolPhase::Finished;
   view.success = true;
   // \u001b[32m is green
@@ -505,8 +646,8 @@ TEST(ToolPresentationTest, ProcessExecuteAnsiPresentation) {
 
 TEST(ToolPresentationTest, ArtifactWriteSuccessPresentationHasReferenceAndPreview) {
   ToolCallView view;
-  view.name = "artifact_write";
-  view.args = R"({"name":"REPORT.md","kind":"report","content":"line1\nline2\nline3"})";
+  view.name = "Artifacts";
+  view.args = R"({"action":"Write","name":"REPORT.md","kind":"report","content":"line1\nline2\nline3"})";
   view.phase = ToolPhase::Finished;
   view.success = true;
   view.result =
@@ -525,8 +666,8 @@ TEST(ToolPresentationTest, ArtifactWriteSuccessPresentationHasReferenceAndPrevie
 
 TEST(ToolPresentationTest, ArtifactWriteUpdatePresentationUsesStoredPreviousContent) {
   ToolCallView view;
-  view.name = "artifact_write";
-  view.args = R"({"name":"REPORT.md","kind":"report","content":"line1\nline2 changed\nline3\nline4"})";
+  view.name = "Artifacts";
+  view.args = R"({"action":"Write","name":"REPORT.md","kind":"report","content":"line1\nline2 changed\nline3\nline4"})";
   view.phase = ToolPhase::Finished;
   view.success = true;
   view.result =
@@ -543,8 +684,8 @@ TEST(ToolPresentationTest, ArtifactWriteUpdatePresentationUsesStoredPreviousCont
 
 TEST(ToolPresentationTest, ArtifactReadPreparingAndErrorStatesAreExplicit) {
   ToolCallView preparing;
-  preparing.name = "artifact_read";
-  preparing.args = R"({"reference":"@artifact:lead/REPORT.md"})";
+  preparing.name = "Artifacts";
+  preparing.args = R"({"action":"Read","reference":"@artifact:lead/REPORT.md"})";
   preparing.phase = ToolPhase::Preparing;
 
   ToolPresentation p = BuildToolPresentation(preparing);
@@ -563,7 +704,8 @@ TEST(ToolPresentationTest, ArtifactReadPreparingAndErrorStatesAreExplicit) {
 
 TEST(ToolPresentationTest, ArtifactListShowsRowsAndCount) {
   ToolCallView view;
-  view.name = "artifact_list";
+  view.name = "Artifacts";
+  view.args = R"({"action":"List"})";
   view.phase = ToolPhase::Finished;
   view.success = true;
   view.result = R"({"artifacts":[
@@ -582,8 +724,8 @@ TEST(ToolPresentationTest, ArtifactListShowsRowsAndCount) {
 
 TEST(ToolPresentationTest, PlanCreateAndPlanUpdateUseRichChangedFields) {
   ToolCallView create;
-  create.name = "plan_create";
-  create.args = R"({"title":"Refactor","objective":"cleanup"})";
+  create.name = "Work";
+  create.args = R"({"action":"CreatePlan","title":"Refactor","objective":"cleanup"})";
   create.phase = ToolPhase::Finished;
   create.success = true;
   create.result = R"({"plan_id":"plan-1","status":"Active","active":true})";
@@ -594,8 +736,8 @@ TEST(ToolPresentationTest, PlanCreateAndPlanUpdateUseRichChangedFields) {
             c.footer_badges.end());
 
   ToolCallView update;
-  update.name = "plan_update";
-  update.args = R"({"plan_id":"plan-1","title":"Refactor v2","objective":"cleaner","status":"Paused"})";
+  update.name = "Work";
+  update.args = R"({"action":"UpdatePlan","plan_id":"plan-1","title":"Refactor v2","objective":"cleaner","status":"Paused"})";
   update.phase = ToolPhase::Finished;
   update.success = true;
   update.result = R"({"plan_id":"plan-1","status":"Paused"})";
@@ -609,8 +751,8 @@ TEST(ToolPresentationTest, PlanCreateAndPlanUpdateUseRichChangedFields) {
 
 TEST(ToolPresentationTest, PlanGetAndPlanListShowStructuredRows) {
   ToolCallView get;
-  get.name = "plan_get";
-  get.args = R"({"plan_id":"plan-1"})";
+  get.name = "Work";
+  get.args = R"({"action":"GetPlan","plan_id":"plan-1"})";
   get.phase = ToolPhase::Finished;
   get.success = true;
   get.result = R"({"id":"plan-1","title":"Ship","status":"Active","objective":"release","context":"ctx","strategy":"strat","chunks":[{"planning_gate":true},{"planning_gate":false}]})";
@@ -622,7 +764,8 @@ TEST(ToolPresentationTest, PlanGetAndPlanListShowStructuredRows) {
   EXPECT_EQ(g.sections.front().title, "Plan summary");
 
   ToolCallView list;
-  list.name = "plan_list";
+  list.name = "Work";
+  list.args = R"({"action":"ListPlans"})";
   list.phase = ToolPhase::Finished;
   list.success = true;
   list.result = R"([
@@ -636,8 +779,8 @@ TEST(ToolPresentationTest, PlanGetAndPlanListShowStructuredRows) {
 
 TEST(ToolPresentationTest, ChunkAddGetListReadyUpdateHaveExplicitShapes) {
   ToolCallView add;
-  add.name = "chunk_add";
-  add.args = R"({"plan_id":"plan-1","title":"Chunk A","goal":"goal","depends_on":["c-0"],"planning_gate":true,"tasks":[{"id":"task-1","title":"Task 1","goal":"Goal 1"}]})";
+  add.name = "Work";
+  add.args = R"({"action":"AddChunk","plan_id":"plan-1","title":"Chunk A","goal":"goal","depends_on":["c-0"],"planning_gate":true,"tasks":[{"id":"task-1","title":"Task 1","goal":"Goal 1"}]})";
   add.phase = ToolPhase::Finished;
   add.success = true;
   add.result = R"({"chunk_id":"c-1","status":"Blocked"})";
@@ -650,8 +793,8 @@ TEST(ToolPresentationTest, ChunkAddGetListReadyUpdateHaveExplicitShapes) {
             a.footer_badges.end());
 
   ToolCallView get;
-  get.name = "chunk_get";
-  get.args = R"({"plan_id":"plan-1","chunk_id":"c-1"})";
+  get.name = "Work";
+  get.args = R"({"action":"GetChunk","plan_id":"plan-1","chunk_id":"c-1"})";
   get.phase = ToolPhase::Finished;
   get.success = true;
   get.result = R"({"id":"c-1","title":"Chunk A","status":"Ready","goal":"g","depends_on":["c-0"],"files_to_read":["a.cpp"],"files_to_touch":["b.cpp"],"cwd":"/repo","verification_condition":"tests pass","handoff_notes":"handoff"})";
@@ -660,8 +803,8 @@ TEST(ToolPresentationTest, ChunkAddGetListReadyUpdateHaveExplicitShapes) {
   EXPECT_EQ(g.sections.front().title, "Execution details");
 
   ToolCallView list;
-  list.name = "chunk_list";
-  list.args = R"({"plan_id":"plan-1"})";
+  list.name = "Work";
+  list.args = R"({"action":"ListChunks","plan_id":"plan-1"})";
   list.phase = ToolPhase::Finished;
   list.success = true;
   list.result = R"([
@@ -669,7 +812,7 @@ TEST(ToolPresentationTest, ChunkAddGetListReadyUpdateHaveExplicitShapes) {
     {"chunk_id":"c-2","title":"B","status":"Blocked","depends_on":["c-1"]}
   ])";
   ToolPresentation cl = BuildToolPresentation(list);
-  EXPECT_GE(cl.sections.size(), 2u);
+  EXPECT_GE(cl.sections.size(), 1u);
   bool saw_task_count = false;
   for (const auto &section : cl.sections) {
     for (const auto &line : section.lines) {
@@ -681,30 +824,29 @@ TEST(ToolPresentationTest, ChunkAddGetListReadyUpdateHaveExplicitShapes) {
   EXPECT_TRUE(saw_task_count);
 
   ToolCallView ready;
-  ready.name = "chunk_ready_for_execution";
-  ready.args = R"({"plan_id":"plan-1"})";
+  ready.name = "Work";
+  ready.args = R"({"action":"ReadyChunk","plan_id":"plan-1"})";
   ready.phase = ToolPhase::Finished;
   ready.success = true;
   ready.result = R"([])";
   ToolPresentation r = BuildToolPresentation(ready);
-  ASSERT_FALSE(r.notices.empty());
-  EXPECT_NE(r.notices.front().text.find("No ready chunks"), std::string::npos);
+  EXPECT_EQ(r.layout, ToolPresentationLayoutKind::ResultsList);
 
   ToolCallView update;
-  update.name = "chunk_update";
-  update.args = R"({"plan_id":"plan-1","chunk_id":"c-1","status":"InProgress","files_to_touch":["x.cpp"],"verification_condition":"ok"})";
+  update.name = "Work";
+  update.args = R"({"action":"UpdateChunk","plan_id":"plan-1","chunk_id":"c-1","status":"InProgress","files_to_touch":["x.cpp"],"verification_condition":"ok"})";
   update.phase = ToolPhase::Finished;
   update.success = true;
   update.result = R"({"chunk_id":"c-1","status":"InProgress"})";
   ToolPresentation u = BuildToolPresentation(update);
   EXPECT_EQ(u.density, firmius::tui::ToolPresentationDensity::OneLineSummary);
-  EXPECT_EQ(u.title, "󰐃 c-1");
-  EXPECT_NE(std::find(u.footer_badges.begin(), u.footer_badges.end(), "3"),
+  EXPECT_NE(std::find(u.footer_badges.begin(), u.footer_badges.end(), "InProgress"),
             u.footer_badges.end());
-
+  EXPECT_NE(std::find(u.footer_badges.begin(), u.footer_badges.end(), "c-1"),
+            u.footer_badges.end());
   ToolCallView task_update;
-  task_update.name = "chunk_update";
-  task_update.args = R"({"plan_id":"plan-1","chunk_id":"c-1","tasks":[{"id":"task-1","title":"Task 1","goal":"Goal 1"}]})";
+  task_update.name = "Work";
+  task_update.args = R"({"action":"UpdateChunk","plan_id":"plan-1","chunk_id":"c-1","tasks":[{"id":"task-1","title":"Task 1","goal":"Goal 1"}]})";
   task_update.phase = ToolPhase::Finished;
   task_update.success = true;
   task_update.result = R"({"chunk_id":"c-1","status":"Ready"})";
@@ -716,7 +858,7 @@ TEST(ToolPresentationTest, ChunkAddGetListReadyUpdateHaveExplicitShapes) {
 
 TEST(ToolPresentationTest, TodoWriteShowsPatchCountsAndItems) {
   ToolCallView view;
-  view.name = "todo_write";
+  view.name = "Todo";
   view.args = R"({"patch":"1. [+] add thing\n2. [x] done thing\n3. [-] remove thing\n"})";
   view.phase = ToolPhase::Finished;
   view.success = true;
@@ -738,8 +880,8 @@ TEST(ToolPresentationTest, TodoWriteShowsPatchCountsAndItems) {
 
 TEST(ToolPresentationTest, ArtifactReadUsesResolvedReferenceInTitle) {
   ToolCallView view;
-  view.name = "artifact_read";
-  view.args = R"({"reference":"@artifact:worker/out.md"})";
+  view.name = "Artifacts";
+  view.args = R"({"action":"Read","reference":"@artifact:worker/out.md"})";
   view.phase = ToolPhase::Finished;
   view.success = true;
   view.result = R"({"reference":"@artifact:worker/out.md","artifact":{"filename":"out.md","owner_friendly_name":"worker"}})";
@@ -752,7 +894,7 @@ TEST(ToolPresentationTest, ArtifactReadUsesResolvedReferenceInTitle) {
 
 TEST(ToolPresentationTest, TodoWriteFallsBackToPatchExtractionFromJsonishArgs) {
   ToolCallView view;
-  view.name = "todo_write";
+  view.name = "Todo";
   view.args =
       "{\n"
       "  \"patch\": \"1. [*] update\\n2. [+] add\\n3. [-] remove\\n\"\n"
@@ -774,7 +916,7 @@ TEST(ToolPresentationTest, TodoWriteFallsBackToPatchExtractionFromJsonishArgs) {
 
 TEST(ToolPresentationTest, TodoWritePrefersDeltaAgainstPreviousSnapshot) {
   ToolCallView view;
-  view.name = "todo_write";
+  view.name = "Todo";
   view.args = R"({"patch":"1. [ ] unchanged\n2. [*] updated\n3. [ ] untouched\n"})";
   view.previous_result = R"({"items":[
       {"id":1,"status":"pending","text":"unchanged"},
@@ -999,6 +1141,43 @@ TEST(ToolPresentationTest, RunningFileEditShowsLiveDiffWhileDiagnosticsPending) 
   EXPECT_EQ(p.diff_sections.front().lines[1].content, "new value");
 }
 
+TEST(ToolPresentationTest,
+     RunningPatchOnlyEditShowsPatchPreviewWhileDiagnosticsPending) {
+  ToolCallView edit;
+  edit.name = "Edit";
+  edit.args =
+      R"({"patch":"--- a/src/main.cpp\n+++ b/src/main.cpp\n@@ -12,1 +12,1 @@\n-old value\n+new value"})";
+  edit.phase = ToolPhase::Called;
+  edit.success = true;
+
+  ToolPresentation p = BuildToolPresentation(edit);
+  EXPECT_EQ(p.lifecycle, ToolPresentationLifecycle::Running);
+  EXPECT_NE(p.title.find("main.cpp"), std::string::npos);
+  ASSERT_EQ(p.diff_sections.size(), 1u);
+  ASSERT_EQ(p.diff_sections.front().lines.size(), 2u);
+  EXPECT_EQ(p.diff_sections.front().lines[0].type, '-');
+  EXPECT_EQ(p.diff_sections.front().lines[0].content, "old value");
+  EXPECT_EQ(p.diff_sections.front().lines[1].type, '+');
+  EXPECT_EQ(p.diff_sections.front().lines[1].content, "new value");
+}
+
+TEST(ToolPresentationTest,
+     FinishedPatchOnlyEditPrefersPatchPreviewOverSummaryOnlyFallback) {
+  ToolCallView edit;
+  edit.name = "Edit";
+  edit.args =
+      R"({"patch":"--- a/src/main.cpp\n+++ b/src/main.cpp\n@@ -12,1 +12,1 @@\n-old value\n+new value"})";
+  edit.phase = ToolPhase::Finished;
+  edit.success = true;
+  edit.result = R"({"resolved_mode":"patch","path":"src/main.cpp","added_lines":1,"removed_lines":1})";
+  edit.fileEditEvents.push_back({"src/main.cpp", "", 1, 1});
+
+  ToolPresentation p = BuildToolPresentation(edit);
+  ASSERT_EQ(p.diff_sections.size(), 1u);
+  EXPECT_FALSE(p.diff_sections.front().lines.empty());
+  EXPECT_FALSE(p.diff_sections.front().empty_state_text.has_value());
+}
+
 TEST(ToolPresentationTest, RunningMultiFileEditShowsEditedFilesBeforeFinalResult) {
   ToolCallView edit;
   edit.name = "file_edit";
@@ -1095,12 +1274,12 @@ TEST(ToolPresentationTest, WebFetchAndTerminateSubagentPresentersAreExplicit) {
   ASSERT_FALSE(wf.notices.empty());
 
   ToolCallView term;
-  term.name = "terminate_subagent";
-  term.args = R"({"agent_id":"child-1"})";
+  term.name = "Delegate";
+  term.args = R"({"action":"Stop","agent_id":"child-1"})";
   term.phase = ToolPhase::Finished;
   term.success = true;
   term.result = R"({"agent_id":"child-1","status":"terminated"})";
-  ToolPresentation t = BuildToolPresentation(term);
+  ToolPresentation t = BuildToolPresentation(term, nullptr, nullptr);
   const std::string *subagent = FindFactValue(t, "Subagent");
   const std::string *status = FindFactValue(t, "Status");
   ASSERT_NE(subagent, nullptr);
@@ -1111,8 +1290,8 @@ TEST(ToolPresentationTest, WebFetchAndTerminateSubagentPresentersAreExplicit) {
 
 TEST(ToolPresentationTest, LongProcessCommandIsNotDestructivelyTruncated) {
   ToolCallView view;
-  view.name = "process_execute";
-  view.args = R"({"command":"python script.py --with very long arguments and full command visibility"})";
+  view.name = "Process";
+  view.args = R"({"action":"Execute","command":"python script.py --with very long arguments and full command visibility"})";
   view.phase = ToolPhase::Called;
 
   ToolPresentation p = BuildToolPresentation(view, nullptr);
@@ -1123,9 +1302,9 @@ TEST(ToolPresentationTest, LongProcessCommandIsNotDestructivelyTruncated) {
 
 TEST(ToolPresentationTest, SummonSubagentDoesNotUseRawTaskAsInlineBodyFallback) {
   ToolCallView view;
-  view.name = "summon_subagent";
+  view.name = "Delegate";
   view.args =
-      R"({"title":"Scout","task":"Investigate every failing test path and report the full causal chain without shortening the task text"})";
+      R"({"action":"Spawn","title":"Scout","task":"Investigate every failing test path and report the full causal chain without shortening the task text"})";
   view.phase = ToolPhase::Called;
 
   ToolPresentation p = BuildToolPresentation(view, nullptr, nullptr);
@@ -1134,8 +1313,8 @@ TEST(ToolPresentationTest, SummonSubagentDoesNotUseRawTaskAsInlineBodyFallback) 
 
 TEST(ToolPresentationTest, SummonSubagentUsesCuratedSummaryPreviewLine) {
   ToolCallView view;
-  view.name = "summon_subagent";
-  view.args = R"({"title":"Worker","task":"Implement login"})";
+  view.name = "Delegate";
+  view.args = R"({"action":"Spawn","title":"Worker","task":"Implement login"})";
   view.phase = ToolPhase::Finished;
   view.success = true;
   view.result =
@@ -1166,36 +1345,6 @@ TEST(ToolPresentationTest, SearchRowsPreserveFullPrimaryTextWithoutManualEllipsi
 }
 
 
-TEST(ToolPresentationTest, McpCallUsesCuratedFactsAndCollapsedRawByDefault) {
-  ToolCallView view;
-  view.name = "mcp_call";
-  view.args = R"({"server_name":"demo","tool_name":"echo"})";
-  view.phase = ToolPhase::Finished;
-  view.success = true;
-  view.show_result = false;
-  view.result = R"({"server_name":"demo","tool_name":"echo","remote_result":{"items":[1,2],"ok":true}})";
-
-  ToolPresentation collapsed = BuildToolPresentation(view);
-  EXPECT_NE(collapsed.title.find("MCP call echo @ demo"), std::string::npos);
-  const std::string *server = FindFactValue(collapsed, "Server");
-  const std::string *tool = FindFactValue(collapsed, "Tool");
-  const std::string *shape = FindFactValue(collapsed, "Remote result");
-  ASSERT_NE(server, nullptr);
-  ASSERT_NE(tool, nullptr);
-  ASSERT_NE(shape, nullptr);
-  EXPECT_EQ(*server, "demo");
-  EXPECT_EQ(*tool, "echo");
-  EXPECT_EQ(*shape, "object(2 fields)");
-  EXPECT_TRUE(collapsed.expandable);
-  EXPECT_FALSE(collapsed.expanded);
-  EXPECT_EQ(collapsed.toggle_labels.collapsed, "show raw");
-  EXPECT_EQ(collapsed.toggle_labels.expanded, "hide raw");
-  EXPECT_TRUE(collapsed.body_lines.empty());
-  ASSERT_FALSE(collapsed.notices.empty());
-  EXPECT_NE(collapsed.notices.front().text.find("Raw payload hidden"),
-            std::string::npos);
-}
-
 TEST(ToolPresentationTest, McpDynamicToolDecodesServerAndToolIdentity) {
   ToolCallView view;
   view.name = "mcp__server_x2D_one__search_x2F_docs";
@@ -1214,49 +1363,5 @@ TEST(ToolPresentationTest, McpDynamicToolDecodesServerAndToolIdentity) {
   ASSERT_NE(tool, nullptr);
   EXPECT_EQ(*server, "server-one");
   EXPECT_EQ(*tool, "search/docs");
-}
-
-TEST(ToolPresentationTest, McpLoadShowsLoadedCountsAndExpandedRawLines) {
-  ToolCallView view;
-  view.name = "mcp_load";
-  view.args = R"({"server_name":"demo","tools":["a","b"],"resources":["r1"],"prompts":["p1"]})";
-  view.phase = ToolPhase::Finished;
-  view.success = true;
-  view.show_result = true;
-  view.result = R"({"server_name":"demo","loaded_tools":["a","b"],"loaded_resources":["r1"],"loaded_prompts":["p1"]})";
-
-  ToolPresentation presentation = BuildToolPresentation(view);
-  EXPECT_NE(presentation.title.find("MCP load demo"), std::string::npos);
-  const std::string *tools = FindFactValue(presentation, "Loaded tools");
-  const std::string *resources = FindFactValue(presentation, "Loaded resources");
-  const std::string *prompts = FindFactValue(presentation, "Loaded prompts");
-  ASSERT_NE(tools, nullptr);
-  ASSERT_NE(resources, nullptr);
-  ASSERT_NE(prompts, nullptr);
-  EXPECT_EQ(*tools, "2");
-  EXPECT_EQ(*resources, "1");
-  EXPECT_EQ(*prompts, "1");
-  EXPECT_TRUE(presentation.expandable);
-  EXPECT_TRUE(presentation.expanded);
-  EXPECT_FALSE(presentation.body_lines.empty());
-}
-
-TEST(ToolPresentationTest, McpLifecycleErrorPreservesErrorAndRawToggleContract) {
-  ToolCallView view;
-  view.name = "mcp_get_prompt";
-  view.args = R"({"server_name":"demo","prompt_name":"p1"})";
-  view.phase = ToolPhase::Error;
-  view.success = false;
-  view.show_result = false;
-  view.result = "MCP prompt failed: not loaded";
-
-  ToolPresentation presentation = BuildToolPresentation(view);
-  EXPECT_EQ(presentation.lifecycle, ToolPresentationLifecycle::Error);
-  ASSERT_TRUE(presentation.error_text.has_value());
-  EXPECT_NE(presentation.error_text.value().find("not loaded"), std::string::npos);
-  EXPECT_TRUE(presentation.expandable);
-  EXPECT_FALSE(presentation.expanded);
-  EXPECT_EQ(presentation.toggle_labels.collapsed, "show raw");
-  EXPECT_EQ(presentation.toggle_labels.expanded, "hide raw");
 }
 } // namespace

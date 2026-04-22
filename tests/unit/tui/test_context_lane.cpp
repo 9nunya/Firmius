@@ -58,20 +58,36 @@ TEST(ContextLaneTest, RendersStructuredRollingMemorySurface) {
   model->rolling_memory.summary_tokens = 52000;
   model->rolling_memory.saved_tokens = 76000;
   model->rolling_memory.retained_tail_tokens = 24000;
+  model->rolling_memory.canonical_anchor_count = 4;
+  model->rolling_memory.bridge_packet_count = 1;
+  model->rolling_memory.latest_bridge_id = "bridge-42";
+  model->rolling_memory.bridge_target =
+      "ship parser recovery with an intentionally very long target name for truncation";
+  model->rolling_memory.bridge_hint =
+      "resume from preserved anchor packet while keeping this hint visibly truncated";
 
   const std::string output = render(model, 140, 14);
   EXPECT_NE(output.find("rolling_forever"), std::string::npos);
   EXPECT_NE(output.find("aggressive"), std::string::npos);
   EXPECT_NE(output.find("gpt-5.4-mini"), std::string::npos);
+  EXPECT_NE(output.find("Rolling memory"), std::string::npos);
+  EXPECT_NE(output.find("Activity"), std::string::npos);
+  EXPECT_NE(output.find("Thresholds"), std::string::npos);
+  EXPECT_NE(output.find("Bridge"), std::string::npos);
   EXPECT_NE(output.find("obs 2"), std::string::npos);
   EXPECT_NE(output.find("refl 1"), std::string::npos);
   EXPECT_NE(output.find("buf 3"), std::string::npos);
-  EXPECT_NE(output.find("rail"), std::string::npos);
-  EXPECT_NE(output.find("B45 T57 E66"), std::string::npos);
   EXPECT_NE(output.find("src 128k"), std::string::npos);
   EXPECT_NE(output.find("sum 52k"), std::string::npos);
   EXPECT_NE(output.find("saved 76k"), std::string::npos);
   EXPECT_NE(output.find("tail 24k"), std::string::npos);
+  EXPECT_NE(output.find("anchors 4"), std::string::npos);
+  EXPECT_NE(output.find("bridges 1"), std::string::npos);
+  EXPECT_NE(output.find("bridge-42"), std::string::npos);
+  EXPECT_NE(output.find("ship parser recovery with an intentionally very"),
+            std::string::npos);
+  EXPECT_NE(output.find("resume from preserved anchor packet while keep"),
+            std::string::npos);
 }
 
 TEST(ContextLaneTest, RendersInFlightRollingIndicators) {

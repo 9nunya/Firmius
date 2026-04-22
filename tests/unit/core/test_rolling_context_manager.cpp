@@ -468,6 +468,32 @@ TEST_F(RollingContextManagerTest, MaintainCanCreateReflectionFromActiveObservati
   EXPECT_TRUE(reloaded.reflectionChunks.front().active);
 }
 
+TEST_F(RollingContextManagerTest, MaintainCreatesWorkingMemoryBridgePacket) {
+  auto ctx = makeContext();
+  ctx.config.rollingMemory.minimumChunkTokens = 1;
+  RollingMemoryState state;
+  state.threadId = threadId_;
+  state.agentId = ctx.identity.id;
+  RollingMemoryChunk chunk;
+  chunk.chunkId = "obs-1";
+  chunk.active = true;
+  chunk.summary = "Parser crash investigation";
+  chunk.activeGoal = "ship parser fix";
+  state.observationChunks.push_back(chunk);
+  RollingMemoryAnchorRecord anchor;
+  anchor.anchorId = "anchor-1";
+  anchor.anchorType = "constraint";
+  anchor.canonicalText = "Preserve parser backward compatibility.";
+  anchor.importance = "critical";
+  state.anchors.push_back(anchor);
+  tm_->writeRollingMemoryState(threadId_, ctx.identity.id, state);
+  DummyProvider dummyProvider;
+  RollingContextManager::maintain(ctx, dummyProvider, [&](const AgentTurn &) {});
+  const auto reloaded = tm_->loadRollingMemoryState(threadId_, ctx.identity.id);
+  ASSERT_FALSE(reloaded.bridges.empty());
+  EXPECT_FALSE(reloaded.bridges.back().targetTaskSignature.empty());
+}
+
 TEST_F(RollingContextManagerTest, StatusOverlayReflectsCountsFromState) {
   auto ctx = makeContext();
   RollingMemoryState state;
@@ -488,11 +514,16 @@ TEST_F(RollingContextManagerTest, StatusOverlayReflectsCountsFromState) {
   reflection.summary = "c";
   reflection.active = true;
   state.reflectionChunks.push_back(reflection);
+  RollingMemoryAnchorRecord anchor;
+  anchor.anchorId = "anchor-1";
+  anchor.canonicalText = "Preserve parser backward compatibility.";
+  state.anchors.push_back(anchor);
   tm_->writeRollingMemoryState(threadId_, ctx.identity.id, state);
   const auto text = RollingContextManager::buildStatusOverlay(ctx);
   EXPECT_NE(text.find("Active reflections: 1"), std::string::npos);
   EXPECT_NE(text.find("Active observations: 1"), std::string::npos);
   EXPECT_NE(text.find("Buffered observations: 1"), std::string::npos);
+  EXPECT_NE(text.find("Canonical anchors: 1"), std::string::npos);
 }
 
 TEST_F(RollingContextManagerTest, MaintainDoesNotSummarizeBootstrapTurn) {

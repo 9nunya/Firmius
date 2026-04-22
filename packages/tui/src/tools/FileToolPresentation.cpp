@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <rapidjson/document.h>
+#include <regex>
 #include <sstream>
 #include <unordered_map>
 
@@ -159,6 +160,11 @@ struct FileEditTargetArgs {
   std::string overwrite_content;
   bool has_patch = false;
   std::string patch;
+};
+
+struct PatchPreviewTarget {
+  std::string path;
+  std::vector<FileEditPreview> previews;
 };
 
 std::string BuildPreviewTitle(const FileEditPreview &preview) {
@@ -400,11 +406,123 @@ std::vector<FileEditTargetArgs> ParseFileEditArgs(const rapidjson::Document &arg
   if (target.has_patch) {
     target.patch = args_doc["patch"].GetString();
   }
-  if (!target.path.empty() || target.has_content_overwrite ||
+  if (target.has_patch && target.path.empty()) {
+    std::istringstream stream(target.patch);
+    std::string line;
+    std::string current_path;
+    std::ostringstream current_patch;
+    bool saw_headers = false;
+    auto flush_target = [&]() {
+      if (current_path.empty()) {
+        return;
+      }
+      FileEditTargetArgs split_target;
+      split_target.path = current_path;
+      split_target.has_patch = true;
+      split_target.patch = current_patch.str();
+      targets.push_back(std::move(split_target));
+      current_path.clear();
+      current_patch.str("");
+      current_patch.clear();
+    };
+    while (std::getline(stream, line)) {
+      if (line.rfind("--- ", 0) == 0) {
+        flush_target();
+        saw_headers = true;
+      }
+      if (line.rfind("+++ ", 0) == 0) {
+        std::string path = line.substr(4);
+        if (path.rfind("a/", 0) == 0 || path.rfind("b/", 0) == 0) {
+          path = path.substr(2);
+        }
+        current_path = path;
+      }
+      if (saw_headers) {
+        if (!current_patch.str().empty()) {
+          current_patch << '\n';
+        }
+        current_patch << line;
+      }
+    }
+    flush_target();
+    if (!targets.empty()) {
+      return targets;
+    }
+  }
+  if (!target.path.empty() || target.has_content_overwrite || target.has_patch ||
       args_doc.HasMember("edits")) {
     targets.push_back(std::move(target));
   }
   return targets;
+}
+
+std::vector<FileEditPreview> BuildPatchPreviewsFromText(const std::string &path,
+                                                        const std::string &patch) {
+  std::vector<FileEditPreview> previews;
+  std::istringstream stream(patch);
+  std::string line;
+  static const std::regex headerPattern(
+      R"(^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@.*)");
+  int oldLine = 0;
+  int newLine = 0;
+  bool inHunk = false;
+  FileEditPreview current;
+  auto flush = [&]() {
+    if (current.op.empty()) {
+      return;
+    }
+    if (current.end_line <= 0) {
+      current.end_line =
+          current.start_line + static_cast<int>(current.old_lines.size()) - 1;
+      if (current.old_lines.empty()) {
+        current.end_line = current.start_line;
+      }
+    }
+    previews.push_back(std::move(current));
+    current = {};
+  };
+
+  while (std::getline(stream, line)) {
+    if (line.rfind("--- ", 0) == 0 || line.rfind("+++ ", 0) == 0 ||
+        line.rfind("diff --git ", 0) == 0) {
+      continue;
+    }
+    std::smatch match;
+    if (std::regex_match(line, match, headerPattern)) {
+      flush();
+      oldLine = std::stoi(match[1].str());
+      newLine = std::stoi(match[3].str());
+      inHunk = true;
+      continue;
+    }
+    if (!inHunk || line.empty()) {
+      continue;
+    }
+    char prefix = line[0];
+    std::string content = line.size() > 1 ? line.substr(1) : "";
+    if (prefix == ' ') {
+      flush();
+      oldLine++;
+      newLine++;
+      continue;
+    }
+    if (current.op.empty()) {
+      current.path = path;
+      current.start_line = oldLine > 0 ? oldLine : newLine;
+    }
+    if (prefix == '-') {
+      current.old_lines.push_back(content);
+      current.op = current.new_lines.empty() ? "delete_range" : "replace_range";
+      oldLine++;
+      current.end_line = oldLine - 1;
+    } else if (prefix == '+') {
+      current.new_lines.push_back(content);
+      current.op = current.old_lines.empty() ? "insert_after" : "replace_range";
+      newLine++;
+    }
+  }
+  flush();
+  return previews;
 }
 
 std::vector<ToolPresentationDiffLine>
@@ -1047,6 +1165,17 @@ ToolPresentation BuildFileEditPresentation(const ToolCallView &view) {
     previews.push_back(std::move(preview));
   }
 
+  if (previews.empty()) {
+    for (const auto &target : target_args) {
+      if (target.has_patch && !target.patch.empty()) {
+        auto patch_previews = BuildPatchPreviewsFromText(target.path, target.patch);
+        previews.insert(previews.end(),
+                        std::make_move_iterator(patch_previews.begin()),
+                        std::make_move_iterator(patch_previews.end()));
+      }
+    }
+  }
+
   if (ordered_paths.empty()) {
     for (const auto &preview : previews) {
       append_path(preview.path);
@@ -1125,7 +1254,14 @@ ToolPresentation BuildFileEditPresentation(const ToolCallView &view) {
         parsed_fallback = ParseFallbackDiffPreview(signal->diffPreview);
         section.lines = parsed_fallback.lines;
         if (section.lines.empty()) {
-          section.empty_state_text = build_summary_only_text();
+          if (!previews.empty()) {
+            for (const auto &preview : previews) {
+              auto lines = BuildPreviewDiffLines(preview);
+              section.lines.insert(section.lines.end(), lines.begin(), lines.end());
+            }
+          } else {
+            section.empty_state_text = build_summary_only_text();
+          }
         }
       } else if (section.lines.empty() && live_preview_only && !previews.empty()) {
         for (const auto &preview : previews) {
@@ -1180,7 +1316,14 @@ ToolPresentation BuildFileEditPresentation(const ToolCallView &view) {
           parsed_fallback = ParseFallbackDiffPreview(signal->diffPreview);
           section.lines = parsed_fallback.lines;
           if (section.lines.empty()) {
-            section.empty_state_text = build_summary_only_text();
+            if (!file_previews.empty()) {
+              for (const auto *preview : file_previews) {
+                auto lines = BuildPreviewDiffLines(*preview);
+                section.lines.insert(section.lines.end(), lines.begin(), lines.end());
+              }
+            } else {
+              section.empty_state_text = build_summary_only_text();
+            }
           }
         } else if (section.lines.empty() && live_preview_only &&
                    !file_previews.empty()) {
@@ -1253,6 +1396,14 @@ ToolPresentation BuildFileEditPresentation(const ToolCallView &view) {
     presentation.sections.push_back(std::move(section));
   }
 
+  if (presentation.lifecycle == ToolPresentationLifecycle::Running &&
+      !previews.empty() && presentation.diff_sections.empty()) {
+    ToolPresentationNotice notice;
+    notice.kind = ToolPresentationNoticeKind::Info;
+    notice.text = "Rendering patch preview while diagnostics refresh…";
+    presentation.notices.push_back(std::move(notice));
+  }
+
   if (has_result && result_doc.HasMember("lsp")) {
     AppendLspDetailsFromObject(result_doc["lsp"], primary_path, presentation);
   }
@@ -1268,155 +1419,47 @@ ToolPresentation BuildFileEditPresentation(const ToolCallView &view) {
 
   return presentation;
 }
-
-ToolPresentation BuildWebFetchPresentation(const ToolCallView &view) {
-  ToolPresentation presentation;
-  presentation.lifecycle = LifecycleFromPhase(view);
-  presentation.layout = ToolPresentationLayoutKind::BodyFirstPreview;
-  presentation.density = ToolPresentationDensity::DetailHeavy;
-  presentation.subtitle = view.name;
-
-  rapidjson::Document args_doc;
-  const bool has_args = ParseObject(view.args, args_doc);
-  const std::string url = has_args ? StringMember(args_doc, "url") : "";
-
-  if (presentation.lifecycle == ToolPresentationLifecycle::Preparing) {
-    presentation.title = "prepare URL fetch";
-  } else if (presentation.lifecycle == ToolPresentationLifecycle::Running) {
-    presentation.title = "fetching URL";
-  } else {
-    presentation.title = "web fetch";
-  }
-  if (!url.empty()) {
-    presentation.footer_badges.push_back(url);
-  }
-
-  if (presentation.lifecycle == ToolPresentationLifecycle::Error) {
-    ApplyError(presentation, view, "web fetch failed");
-    return presentation;
-  }
-  if (presentation.lifecycle != ToolPresentationLifecycle::Success) {
-    return presentation;
-  }
-
-  rapidjson::Document result_doc;
-  if (!ParseObject(view.result, result_doc)) {
-    return presentation;
-  }
-  if (result_doc.HasMember("size") && result_doc["size"].IsUint64()) {
-    presentation.footer_badges.push_back(
-        std::to_string(result_doc["size"].GetUint64()) + " bytes");
-    presentation.facts.push_back(
-        {"Size", std::to_string(result_doc["size"].GetUint64()) + " bytes"});
-  }
-  const std::string redirected = StringMember(result_doc, "redirected_to");
-  if (!redirected.empty()) {
-    presentation.notices.push_back(
-        {ToolPresentationNoticeKind::Info, "Large response saved to " + redirected});
-  }
-  const std::string instruction = StringMember(result_doc, "instruction");
-  if (!instruction.empty()) {
-    presentation.notices.push_back(
-        {ToolPresentationNoticeKind::Info, "Follow-up: " + instruction});
-    ToolPresentationSection followup;
-    followup.title = "Follow-up";
-    followup.lines.push_back(instruction);
-    presentation.sections.push_back(std::move(followup));
-    presentation.expandable = true;
-    presentation.expanded = view.show_result;
-  }
-  const std::string content = StringMember(result_doc, "content");
-  auto lines = SplitLines(content);
-  if (!lines.empty()) {
-    ToolPresentationSection section;
-    section.title = "Excerpt";
-    const size_t shown = std::min<size_t>(8, lines.size());
-    section.lines.assign(lines.begin(), lines.begin() + static_cast<long>(shown));
-    presentation.body_lines = section.lines;
-    presentation.sections.push_back(std::move(section));
-    if (lines.size() > shown) {
-      presentation.expandable = true;
-      presentation.expanded = view.show_result;
-      presentation.notices.push_back(
-          {ToolPresentationNoticeKind::Info,
-           "Showing first " + std::to_string(shown) + " lines"});
-    }
-  }
-  return presentation;
-}
-
-ToolPresentation BuildSubagentTerminatePresentation(const ToolCallView &view) {
-  ToolPresentation presentation;
-  presentation.lifecycle = LifecycleFromPhase(view);
-  presentation.layout = ToolPresentationLayoutKind::CompactFactCard;
-  presentation.density = ToolPresentationDensity::DetailHeavy;
-  presentation.subtitle = view.name;
-
-  rapidjson::Document args_doc;
-  const bool has_args = ParseObject(view.args, args_doc);
-  std::string target = has_args ? StringMember(args_doc, "agent_id") : "";
-  if (target.empty()) {
-    target = has_args ? StringMember(args_doc, "subagent_id") : "";
-  }
-
-  if (presentation.lifecycle == ToolPresentationLifecycle::Preparing) {
-    presentation.title = "prepare subagent termination";
-  } else if (presentation.lifecycle == ToolPresentationLifecycle::Running) {
-    presentation.title = "terminating subagent";
-  } else {
-    presentation.title = "subagent terminated";
-  }
-  if (!target.empty()) {
-    presentation.footer_badges.push_back(target);
-  }
-
-  if (presentation.lifecycle == ToolPresentationLifecycle::Error) {
-    ApplyError(presentation, view, "subagent termination failed");
-    return presentation;
-  }
-  if (presentation.lifecycle != ToolPresentationLifecycle::Success) {
-    return presentation;
-  }
-
-  rapidjson::Document result_doc;
-  if (ParseObject(view.result, result_doc)) {
-    const std::string result_target = StringMember(result_doc, "agent_id");
-    if (!result_target.empty()) {
-      presentation.footer_badges.push_back(result_target);
-      presentation.facts.push_back({"Subagent", result_target});
-    }
-    const std::string status = StringMember(result_doc, "status");
-    if (!status.empty()) {
-      presentation.footer_badges.push_back(status);
-      presentation.facts.push_back({"Status", status});
-    }
-  }
-  return presentation;
-}
-
 } // namespace
 
+
+bool IsFileReadFamilyTool(const std::string &tool_name) {
+  return IsMatch(tool_name, "file_read") || tool_name == "Read";
+}
+
+bool IsFileWriteFamilyTool(const std::string &tool_name) {
+  return IsMatch(tool_name, "file_edit") || IsMatch(tool_name, "file_write") ||
+         tool_name == "Edit" || tool_name == "EditWrite" ||
+         tool_name == "EditReplace" || tool_name == "EditRange";
+}
+
+bool IsDirectoryFamilyTool(const std::string &tool_name) {
+  return IsMatch(tool_name, "list_directory") || tool_name == "Files";
+}
+
 bool IsFileFamilyTool(const std::string &tool_name) {
-  return IsMatch(tool_name, "file_read") || IsMatch(tool_name, "file_edit") ||
-         IsMatch(tool_name, "file_write") || IsMatch(tool_name, "list_directory") ||
-         IsMatch(tool_name, "web_fetch") || IsMatch(tool_name, "subagent_terminate") ||
-         IsMatch(tool_name, "terminate_subagent");
+  return IsFileReadFamilyTool(tool_name) || IsFileWriteFamilyTool(tool_name) ||
+         IsDirectoryFamilyTool(tool_name);
 }
 
 ToolPresentation BuildFileToolPresentation(const ToolCallView &view) {
-  if (IsMatch(view.name, "file_read")) {
+  rapidjson::Document args_doc;
+  const bool has_args = !view.args.empty() && !args_doc.Parse(view.args.c_str()).HasParseError() && args_doc.IsObject();
+  const std::string action = (has_args && args_doc.HasMember("action") && args_doc["action"].IsString())
+                                 ? args_doc["action"].GetString()
+                                 : "";
+  if (view.name == "Files" && action == "Read") {
     return BuildFileReadPresentation(view);
   }
-  if (IsMatch(view.name, "file_edit") || IsMatch(view.name, "file_write")) {
-    return BuildFileEditPresentation(view);
-  }
-  if (IsMatch(view.name, "list_directory")) {
+  if (view.name == "Files") {
     return BuildListDirectoryPresentation(view);
   }
-  if (IsMatch(view.name, "web_fetch")) {
-    return BuildWebFetchPresentation(view);
+  if (IsFileReadFamilyTool(view.name)) {
+    return BuildFileReadPresentation(view);
   }
-  return BuildSubagentTerminatePresentation(view);
+  if (IsFileWriteFamilyTool(view.name)) {
+    return BuildFileEditPresentation(view);
+  }
+  return BuildListDirectoryPresentation(view);
 }
 
 } // namespace firmius::tui

@@ -15,6 +15,7 @@ using firmius::shared::ToolPhase;
 namespace {
 
 struct ParsedProcessArgs {
+  std::string action;
   std::string process_id;
   std::string command;
   std::string cwd;
@@ -38,13 +39,6 @@ struct ParsedProcessResult {
   std::string stderr_data;
 };
 
-bool IsMatch(const std::string &actual, const std::string &expected) {
-  if (actual.empty() || expected.empty()) {
-    return false;
-  }
-  return actual.find(expected) != std::string::npos;
-}
-
 ToolPresentationLifecycle DeriveLifecycle(const ToolCallView &view) {
   if (view.phase == ToolPhase::Preparing) {
     return ToolPresentationLifecycle::Preparing;
@@ -66,6 +60,9 @@ ParsedProcessArgs ParseArgs(const std::string &args) {
   doc.Parse(args.c_str());
   if (doc.HasParseError() || !doc.IsObject()) {
     return parsed;
+  }
+  if (doc.HasMember("action") && doc["action"].IsString()) {
+    parsed.action = doc["action"].GetString();
   }
   if (doc.HasMember("process_id") && doc["process_id"].IsString()) {
     parsed.process_id = doc["process_id"].GetString();
@@ -187,9 +184,7 @@ std::string JoinParts(const std::vector<std::string> &parts) {
 } // namespace
 
 bool IsProcessFamilyTool(const std::string &tool_name) {
-  return IsMatch(tool_name, "process_execute") ||
-         IsMatch(tool_name, "process_spawn") || IsMatch(tool_name, "process_wait") ||
-         IsMatch(tool_name, "process_input") || IsMatch(tool_name, "process_status");
+  return tool_name == "Process" || tool_name == "Python" || tool_name == "process_execute" || tool_name == "process_wait" || tool_name == "process_status";
 }
 
 ToolPresentation BuildProcessToolPresentation(
@@ -201,6 +196,16 @@ ToolPresentation BuildProcessToolPresentation(
   presentation.density = ToolPresentationDensity::BodyFirstSummary;
 
   const ParsedProcessArgs args = ParseArgs(view.args);
+  std::string action = args.action;
+  if (action.empty()) {
+    if (view.name == "process_execute") {
+      action = "Execute";
+    } else if (view.name == "process_wait") {
+      action = "Wait";
+    } else if (view.name == "process_status") {
+      action = "Status";
+    }
+  }
   const ParsedProcessResult result = ParseResult(view.result);
   const std::string process_id =
       !args.process_id.empty()
@@ -255,17 +260,17 @@ ToolPresentation BuildProcessToolPresentation(
     output = firmius::shared::ErrorCleaner::clean(view.result);
   }
 
-  if (IsMatch(view.name, "python_execute")) {
+  if (view.name == "Python") {
     presentation.title.clear();
-  } else if (IsMatch(view.name, "process_execute")) {
+  } else if (action == "Execute") {
     presentation.title.clear();
-  } else if (IsMatch(view.name, "process_spawn")) {
+  } else if (action == "Spawn") {
     presentation.title.clear();
-  } else if (IsMatch(view.name, "process_wait")) {
+  } else if (action == "Wait") {
     presentation.title = process_id.empty() ? "wait" : ("wait " + process_id);
-  } else if (IsMatch(view.name, "process_input")) {
+  } else if (action == "Input") {
     presentation.title = process_id.empty() ? "input" : ("input " + process_id);
-  } else if (IsMatch(view.name, "process_status")) {
+  } else if (action == "Status") {
     presentation.title = process_id.empty() ? "status" : ("status " + process_id);
   } else {
     presentation.title = SummarizeToolCall(view.name, view.args, view.phase);
@@ -306,7 +311,7 @@ ToolPresentation BuildProcessToolPresentation(
     status_parts.push_back(duration);
   }
 
-  if (IsMatch(view.name, "process_wait")) {
+  if (action == "Wait") {
     presentation.layout = ToolPresentationLayoutKind::BodyFirstStream;
     if (!args.pattern.empty()) {
       presentation.facts.push_back({"Pattern", args.pattern});
@@ -321,7 +326,7 @@ ToolPresentation BuildProcessToolPresentation(
     }
   }
 
-  if (IsMatch(view.name, "process_input")) {
+  if (action == "Input") {
     presentation.layout = ToolPresentationLayoutKind::BodyFirstStream;
     if (!args.input.empty()) {
       presentation.body_lines.push_back(args.input);
@@ -329,7 +334,7 @@ ToolPresentation BuildProcessToolPresentation(
     }
   }
 
-  if (IsMatch(view.name, "process_execute") &&
+  if (action == "Execute" &&
       view.phase == ToolPhase::BackgroundRunning &&
       result.finish_reason == "Timeout") {
     ToolPresentationNotice notice;
@@ -346,10 +351,11 @@ ToolPresentation BuildProcessToolPresentation(
   if (!cwd.empty()) {
     presentation.facts.push_back({"cwd", cwd});
   }
-  const size_t visible_body_lines = 5;
+  const bool is_execute = (action == "Execute" || action == "execute");
+  const size_t visible_body_lines = is_execute ? 4 : 1000;
   const size_t prefix_lines = !command.empty() ? 1u : 0u;
   const size_t visible_stream_lines =
-      visible_body_lines > prefix_lines ? visible_body_lines - prefix_lines : 1u;
+      (visible_body_lines > prefix_lines) ? (visible_body_lines - prefix_lines) : 1u;
   const size_t stream_line_count =
       presentation.body_lines.size() > prefix_lines
           ? presentation.body_lines.size() - prefix_lines

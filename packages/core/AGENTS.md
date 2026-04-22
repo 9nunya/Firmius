@@ -58,7 +58,7 @@ packages/core/
   - File: `FileReadTool`, `FileEditTool`, `GlobTool`, `GrepTool`
   - Process: `ProcessExecuteTool`, `ProcessSpawnTool`, `ProcessWaitTool`
   - Subagent: `SubagentTool`, `SubagentWaitTool`, `SubagentTerminateTool`
-  - Plan/Chunk: `PlanCreateTool`, `ChunkAddTool`, `TodoWriteTool`
+  - Plan/Chunk: `Work`
   - Web: `WebFetchTool`
   - Python: `PythonExecuteTool`
   - Artifact: `ArtifactWriteTool`, `ArtifactReadTool`, `ArtifactListTool`

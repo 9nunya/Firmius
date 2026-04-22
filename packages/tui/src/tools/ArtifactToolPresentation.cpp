@@ -13,11 +13,6 @@ namespace {
 using firmius::shared::ToolCallView;
 using firmius::shared::ToolPhase;
 
-bool IsMatch(const std::string &actual, const std::string &expected) {
-  return !actual.empty() && !expected.empty() &&
-         actual.find(expected) != std::string::npos;
-}
-
 ToolPresentationLifecycle LifecycleFromPhase(const ToolCallView &view) {
   if (view.phase == ToolPhase::Preparing) {
     return ToolPresentationLifecycle::Preparing;
@@ -40,6 +35,16 @@ bool ParseObject(const std::string &json, rapidjson::Document &doc) {
 std::string StringMember(const rapidjson::Value &value, const char *key) {
   if (value.IsObject() && value.HasMember(key) && value[key].IsString()) {
     return value[key].GetString();
+  }
+  return "";
+}
+
+std::string ExtractAction(const std::string &args) {
+  rapidjson::Document doc;
+  doc.Parse(args.c_str());
+  if (!doc.HasParseError() && doc.IsObject() && doc.HasMember("action") &&
+      doc["action"].IsString()) {
+    return doc["action"].GetString();
   }
   return "";
 }
@@ -371,15 +376,22 @@ ToolPresentation BuildArtifactListPresentation(const ToolCallView &view) {
 } // namespace
 
 bool IsArtifactFamilyTool(const std::string &tool_name) {
-  return IsMatch(tool_name, "artifact_write") || IsMatch(tool_name, "artifact_read") ||
-         IsMatch(tool_name, "artifact_list");
+  return tool_name == "Artifacts" || tool_name == "artifact_write" || tool_name == "artifact_read" || tool_name == "artifact_list";
 }
 
 ToolPresentation BuildArtifactToolPresentation(const ToolCallView &view) {
-  if (IsMatch(view.name, "artifact_write")) {
+  std::string action = ExtractAction(view.args);
+  if (action.empty()) {
+    if (view.name == "artifact_write") {
+      action = "Write";
+    } else if (view.name == "artifact_read") {
+      action = "Read";
+    }
+  }
+  if (action == "Write") {
     return BuildArtifactWritePresentation(view);
   }
-  if (IsMatch(view.name, "artifact_read")) {
+  if (action == "Read") {
     return BuildArtifactReadPresentation(view);
   }
   return BuildArtifactListPresentation(view);

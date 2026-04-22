@@ -525,6 +525,7 @@ struct MessageQueued {
   std::string text;
   std::string threadId;
   std::string agentId;
+  std::vector<firmius::shared::ImageContent> images;
   bool operator==(const MessageQueued &) const = default;
 };
 

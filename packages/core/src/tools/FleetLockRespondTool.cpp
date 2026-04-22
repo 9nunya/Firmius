@@ -1,7 +1,7 @@
 #include "tools/FleetLockRespondTool.hpp"
+#include "tools/WorkSupport.hpp"
 #include "AgentRegistry.hpp"
 #include "persistence/ThreadManager.hpp"
-#include "tools/WorkToolCommon.hpp"
 #include "utils/StringUtil.hpp"
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
@@ -11,7 +11,7 @@ namespace firmius::core {
 
 shared::ToolMetadata FleetLockRespondTool::getMetadata() const {
   return {"fleet_lock_respond",
-          "Accept or deny a lock request from another worker agent.",
+          "Fleet coordination operations: accept or deny a lock request from another agent.",
           shared::ToolScope::Delegation};
 }
 
@@ -28,7 +28,7 @@ std::shared_ptr<shared::JSONSchema> FleetLockRespondTool::getSchema() const {
 
 shared::ToolResult FleetLockRespondTool::execute(const FleetLockRespondInput &input,
                                                  shared::ToolContext &ctx) {
-  const std::string threadId = worktools::requireCurrentThreadId(ctx);
+  const std::string threadId = work::requireCurrentThreadId(ctx);
   const auto &identity = ctx.agent.getContext().identity;
   const std::string ownerId = identity.id;
   
@@ -43,7 +43,7 @@ shared::ToolResult FleetLockRespondTool::execute(const FleetLockRespondInput &in
     lock.rootAgentId = ownerId;
     lock.reason = "Lock request " + input.request_id + " accepted";
     lock.status = "open";
-    lock.createdAt = worktools::nowEpochMs();
+    lock.createdAt = work::nowEpochMs();
     lock.updatedAt = lock.createdAt;
     
     // Extract paths from the request message if available

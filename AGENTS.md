@@ -2,13 +2,13 @@
 
 **Project**: Firmius — AI Agent Orchestration System  
 **Stack**: C++20, CMake, FTXUI, RapidJSON, GoogleTest  
-**Structure**: Monorepo (5 packages, ~366 source files, ~68k LOC)
+**Structure**: Monorepo (6 packages, ~366 source files, ~68k LOC)
 
 ---
 
 ## OVERVIEW
 
-Firmius is a terminal-based AI agent orchestration platform. It manages fleets of LLM-powered agents that can execute tools, spawn subagents, and interact with local or Docker-based execution environments. The architecture separates concerns into interface definitions (`shared`), orchestration logic (`core`), LLM provider implementations (`provider`), terminal UI (`tui`), and evaluation harnesses (`audits`).
+Firmius is a terminal-based AI agent orchestration platform. It manages fleets of LLM-powered agents that can execute tools, spawn subagents, and interact with local or Docker-based execution environments. The architecture separates concerns into interface definitions (`shared`), orchestration logic (`core`), LLM provider implementations (`provider`), terminal UI (`tui`), terminal entrypoint (`cli`), and evaluation harnesses (`audits`).
 
 ---
 
@@ -21,7 +21,8 @@ Firmius is a terminal-based AI agent orchestration platform. It manages fleets o
 │   ├── core/            # Engine, Harness, Agents, Tools, Hosts, Persistence
 │   ├── provider/        # LLM provider implementations (15+ providers)
 │   ├── tui/             # Terminal UI (FTXUI-based components, modals, commands)
-│   └── audits/          # Benchmarking and evaluation harnesses
+│   ├── audits/          # Benchmarking and evaluation harnesses
+│   └── cli/             # Terminal entrypoint and application launch surface
 ├── tests/               # Unit tests, integration tests, mocks
 ├── prompts/             # Agent persona definitions
 ├── workflows/           # Workflow command definitions

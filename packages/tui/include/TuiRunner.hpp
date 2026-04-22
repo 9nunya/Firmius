@@ -23,6 +23,7 @@ struct TuiLaunchOptions {
       firmius::shared::ThreadPermissionMode::Request;
   std::string initialPrompt;
   std::string initialCwd;
+  std::string threadId;
 };
 
 void runTui(const TuiLaunchOptions &options);

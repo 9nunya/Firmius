@@ -14,33 +14,33 @@ namespace firmius::core::mcp {
 
 class McpClient {
 public:
-  McpClient(std::unique_ptr<shared::IHostProcess> process,
-            shared::ToolContext &ctx);
-  McpClient(const McpHttpTransportConfig &httpConfig, shared::ToolContext &ctx);
-  McpClient(std::unique_ptr<IMcpSession> session, shared::ToolContext &ctx);
+  McpClient(std::unique_ptr<shared::IHostProcess> process);
+  McpClient(const McpHttpTransportConfig &httpConfig);
+  McpClient(std::unique_ptr<IMcpSession> session);
   ~McpClient();
 
   McpClient(const McpClient &) = delete;
   McpClient &operator=(const McpClient &) = delete;
 
-  void initialize(int timeoutMs);
-  rapidjson::Document listTools(int timeoutMs);
+  void initialize(int timeoutMs, shared::ToolContext *ctx = nullptr);
+  rapidjson::Document listTools(int timeoutMs, shared::ToolContext *ctx = nullptr);
   rapidjson::Document callTool(const std::string &toolName,
                                const rapidjson::Document &arguments,
-                               int timeoutMs);
-  rapidjson::Document listResources(int timeoutMs);
-  rapidjson::Document listPrompts(int timeoutMs);
-  rapidjson::Document readResource(const std::string &resourceUri, int timeoutMs);
+                               int timeoutMs, shared::ToolContext *ctx = nullptr);
+  rapidjson::Document listResources(int timeoutMs, shared::ToolContext *ctx = nullptr);
+  rapidjson::Document listPrompts(int timeoutMs, shared::ToolContext *ctx = nullptr);
+  rapidjson::Document readResource(const std::string &resourceUri, int timeoutMs, shared::ToolContext *ctx = nullptr);
   rapidjson::Document getPrompt(const std::string &promptName,
                                const rapidjson::Document &arguments,
-                               int timeoutMs);
+                               int timeoutMs, shared::ToolContext *ctx = nullptr);
+
+  void shutdown(int timeoutMs = 2000);
+  bool isInitialized() const { return initialized_; }
 
 private:
-  void shutdown(int timeoutMs = 2000);
   void validateInitializeResult(const rapidjson::Document &response) const;
 
   std::unique_ptr<shared::IHostProcess> process_;
-  shared::ToolContext &ctx_;
   std::unique_ptr<IMcpSession> session_;
   int nextId_ = 1;
   bool initialized_ = false;

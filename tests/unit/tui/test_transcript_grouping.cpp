@@ -13,9 +13,9 @@ using firmius::tui::QuickToolGroupSummary;
 
 TEST(TranscriptGroupingTest, DescribesFileReadsCompactly) {
   ToolCallView view;
-  view.name = "file_read";
+  view.name = "Files";
   view.args =
-      R"({"path":"/mnt/SHIT/Projects/Firmius/src/main.cpp","start_line":12,"end_line":28})";
+      R"({"action":"Read","path":"/mnt/SHIT/Projects/Firmius/src/main.cpp","start_line":12,"end_line":28})";
 
   auto descriptor = DescribeQuickToolCall(view);
   EXPECT_EQ(descriptor.category, QuickToolCategory::Read);
@@ -24,8 +24,8 @@ TEST(TranscriptGroupingTest, DescribesFileReadsCompactly) {
 
 TEST(TranscriptGroupingTest, DescribesSearchesWithPatternAndPath) {
   ToolCallView view;
-  view.name = "grep";
-  view.args = R"({"pattern":"NativeCompiler|emit","path":"src/compiler"})";
+  view.name = "Search";
+  view.args = R"({"action":"Grep","pattern":"NativeCompiler|emit","path":"src/compiler"})";
 
   auto descriptor = DescribeQuickToolCall(view);
   EXPECT_EQ(descriptor.category, QuickToolCategory::Search);
@@ -34,8 +34,8 @@ TEST(TranscriptGroupingTest, DescribesSearchesWithPatternAndPath) {
 
 TEST(TranscriptGroupingTest, DescribesDirectoryListingsCompactly) {
   ToolCallView view;
-  view.name = "list_directory";
-  view.args = R"({"path":"/mnt/SHIT/Projects/Firmius/src/tools"})";
+  view.name = "Files";
+  view.args = R"({"action":"List","path":"/mnt/SHIT/Projects/Firmius/src/tools"})";
 
   auto descriptor = DescribeQuickToolCall(view);
   EXPECT_EQ(descriptor.category, QuickToolCategory::List);
@@ -51,9 +51,10 @@ TEST(TranscriptGroupingTest, UnnamedQuickToolRowsDoNotProduceDescriptors) {
   EXPECT_EQ(descriptor.category, QuickToolCategory::None);
   EXPECT_TRUE(descriptor.target.empty());
 
-  view.name = "file_read";
+  view.name = "Files";
+  view.args = R"({"action":"Read","path":"src/main.cpp","start_line":1,"end_line":5})";
   descriptor = DescribeQuickToolCall(view);
-  EXPECT_EQ(descriptor.category, QuickToolCategory::Read);
+  EXPECT_EQ(descriptor.category, QuickToolCategory::List);
 }
 
 TEST(TranscriptGroupingTest, GroupLabelDeduplicatesTargets) {

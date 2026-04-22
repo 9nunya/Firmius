@@ -317,6 +317,8 @@ public:
   ftxui::Element OnRender() override {
     return ftxui::selectionStyleReset(render_());
   }
+  const ftxui::Box &box() const { return box_; }
+
   bool Focusable() const override { return false; }
   bool OnEvent(ftxui::Event event) override {
     if (child_)
@@ -327,6 +329,7 @@ public:
 private:
   ftxui::Component child_;
   std::function<ftxui::Element()> render_;
+  ftxui::Box box_;
 };
 
 class CopyableRowComponent : public ftxui::ComponentBase {
@@ -613,7 +616,10 @@ public:
       firmius::tui::LiveQuickSummaryProvider live_quick_summary_provider,
       std::function<std::size_t()> live_measurement_signature_getter,
       std::function<bool()> show_internal_nudges_getter,
-      std::function<bool()> hide_errors_getter)
+      std::function<bool()> hide_errors_getter,
+      firmius::tui::EditableModeEnabledGetter editable_mode_enabled_getter,
+      firmius::tui::EditableMessageSelectedGetter editable_message_selected_getter,
+      firmius::tui::EditableMessageClickHandler editable_message_click_handler)
       : history_getter_(std::move(history_getter)),
         live_rows_provider_(std::move(live_rows_provider)),
         tool_view_provider_(std::move(tool_view_provider)),
@@ -627,7 +633,10 @@ public:
             std::move(live_measurement_signature_getter)),
         show_internal_nudges_getter_(
             std::move(show_internal_nudges_getter)),
-        hide_errors_getter_(std::move(hide_errors_getter)) {
+        hide_errors_getter_(std::move(hide_errors_getter)),
+        editable_mode_enabled_getter_(std::move(editable_mode_enabled_getter)),
+        editable_message_selected_getter_(std::move(editable_message_selected_getter)),
+        editable_message_click_handler_(std::move(editable_message_click_handler)) {
 
     history_inner_ = ftxui::Container::Vertical({});
     history_container_ = ftxui::Renderer(history_inner_, [this] {
@@ -637,16 +646,7 @@ public:
       }
       return ftxui::vbox(std::move(elements));
     });
-
-    auto live_rows_cmp = ftxui::Make<RowComponent>(nullptr, [this] {
-      if (!live_rows_provider_)
-        return ftxui::text("");
-      auto rows = live_rows_provider_();
-      if (rows.empty())
-        return ftxui::text("");
-
-      return ftxui::vbox(std::move(rows));
-    });
+    history_container_ = ftxui::Renderer(history_inner_, [this] { return RenderHistoryWindow(); });
 
     tail_spacer_ =
         ftxui::Make<RowComponent>(nullptr, [] {
@@ -657,6 +657,12 @@ public:
           }
           return ftxui::vbox(std::move(padding_rows)) | ftxui::xflex;
         });
+    auto live_rows_cmp = ftxui::Renderer([this] {
+      if (!live_rows_provider_) {
+        return ftxui::vbox(ftxui::Elements{});
+      }
+      return ftxui::vbox(live_rows_provider_());
+    });
 
     container_ = ftxui::Container::Vertical(
         {history_container_, live_rows_cmp, tail_spacer_});
@@ -692,6 +698,12 @@ public:
   bool Focusable() const override { return false; }
 
   bool OnEvent(ftxui::Event event) override {
+    if (event == ftxui::Event::Special("TranscriptChanged")) {
+      MarkHistoryDirty(false);
+      EnsureHistoryRows();
+      return true;
+    }
+
     if (event == ftxui::Event::Special("ThreadChanged") ||
         event == ftxui::Event::Special("ThemeChanged")) {
       MarkHistoryDirty(true);
@@ -906,6 +918,127 @@ private:
     rows_.push_back(row);
   }
 
+  static constexpr int kDefaultEstimatedRowHeight = 4;
+  static constexpr int kVirtualizationOverscanLines = 12;
+
+  int ReadMeasuredRowHeight(size_t index) const {
+    if (index >= rows_.size()) {
+      return kDefaultEstimatedRowHeight;
+    }
+    if (auto measured = std::dynamic_pointer_cast<RowComponent>(rows_[index])) {
+      const auto &box = measured->box();
+      if (box.y_max >= box.y_min) {
+        return std::max(1, box.y_max - box.y_min + 1);
+      }
+    }
+    if (auto copyable =
+            std::dynamic_pointer_cast<CopyableRowComponent>(rows_[index])) {
+      const auto &box = copyable->box();
+      if (box.y_max >= box.y_min) {
+        return std::max(1, box.y_max - box.y_min + 1);
+      }
+    }
+    return row_height_cache_[index];
+  }
+
+  void RefreshCachedVisibleHeights() {
+    if (row_height_cache_.empty() || last_visible_end_ <= last_visible_start_) {
+      return;
+    }
+    const size_t end = std::min(last_visible_end_, row_height_cache_.size());
+    for (size_t i = last_visible_start_; i < end; ++i) {
+      row_height_cache_[i] = ReadMeasuredRowHeight(i);
+    }
+  }
+
+
+  ftxui::Element RenderHistoryWindow() {
+    if (rows_.empty()) {
+      return ftxui::text("");
+    }
+    if (row_height_cache_.size() != rows_.size()) {
+      row_height_cache_.assign(rows_.size(), kDefaultEstimatedRowHeight);
+    }
+
+    RefreshCachedVisibleHeights();
+
+    size_t start = 0;
+    size_t end = rows_.size();
+    int top_padding = 0;
+    int bottom_padding = 0;
+    if (scrollable_ && scrollable_->ViewportHeight() > 0) {
+      const int viewport_height = scrollable_->ViewportHeight();
+      const int scroll_offset = scrollable_->ScrollOffset();
+
+      const bool has_measured_window =
+          last_visible_end_ > last_visible_start_ &&
+          last_visible_end_ <= row_height_cache_.size();
+
+      // Fallback path for startup / low-turn / unstable-height cases:
+      // render the full transcript until we have one trustworthy measured window.
+      // This prevents the cut-off/flicker bug caused by seeding virtualization
+      // from guessed row heights near the bottom of chat.
+      const bool should_virtualize = has_measured_window &&
+                                     rows_.size() > static_cast<size_t>(viewport_height * 3);
+
+      if (should_virtualize) {
+        const int target_top =
+            std::max(0, scroll_offset - kVirtualizationOverscanLines);
+        const int target_bottom = scroll_offset + viewport_height +
+                                  kVirtualizationOverscanLines;
+        int cumulative = 0;
+        start = rows_.size();
+        end = rows_.size();
+        for (size_t i = 0; i < row_height_cache_.size(); ++i) {
+          const int next = cumulative + row_height_cache_[i];
+          if (start == rows_.size() && next > target_top) {
+            start = i;
+            top_padding = cumulative;
+          }
+          if (next >= target_bottom) {
+            end = i + 1;
+            cumulative = next;
+            break;
+          }
+          cumulative = next;
+        }
+        if (start == rows_.size()) {
+          start = 0;
+          top_padding = 0;
+        }
+        if (end == rows_.size()) {
+          cumulative = 0;
+          for (size_t i = 0; i < row_height_cache_.size(); ++i) {
+            cumulative += row_height_cache_[i];
+          }
+        }
+        if (end < start) {
+          start = 0;
+          end = rows_.size();
+          top_padding = 0;
+          bottom_padding = 0;
+        } else {
+          for (size_t i = end; i < row_height_cache_.size(); ++i) {
+            bottom_padding += row_height_cache_[i];
+          }
+        }
+      } else {
+        start = 0;
+        end = rows_.size();
+        top_padding = 0;
+        bottom_padding = 0;
+      }
+    }
+    last_visible_start_ = start;
+    last_visible_end_ = end;
+
+    ftxui::Elements elements;
+    if (top_padding > 0) elements.push_back(ftxui::text("") | ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, top_padding));
+    for (size_t i = start; i < end; ++i) elements.push_back(history_inner_->ChildAt(i)->Render());
+    if (bottom_padding > 0) elements.push_back(ftxui::text("") | ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, bottom_padding));
+    return ftxui::vbox(std::move(elements));
+  }
+
   void RebuildIfNeeded() {
     const auto signature = currentHistorySignature();
     if (!history_dirty_ && signature == last_history_signature_) {
@@ -920,6 +1053,9 @@ private:
     auto *history = signature.history;
     const bool showInternalNudges = signature.show_internal_nudges;
     const bool hideErrors = signature.hide_errors;
+    row_height_cache_.clear();
+    last_visible_start_ = 0;
+    last_visible_end_ = 0;
     const auto rebuild_begin = std::chrono::steady_clock::now();
 
     rows_.clear();
@@ -927,8 +1063,16 @@ private:
     history_inner_->DetachAllChildren();
 
     if (history) {
+      size_t estimated_rows = 0;
+      for (const auto &turn : history->turns) {
+        estimated_rows += std::max<size_t>(1, turn.messages.size() * 2);
+      }
+      rows_.reserve(estimated_rows);
+      copyable_rows_.reserve(estimated_rows / 2 + 8);
+
       std::unordered_map<std::string, bool> seen_tool_call;
       QuickToolCluster quick_cluster;
+      std::vector<std::string> pending_turn_footers;
       auto flush_quick_cluster = [&](bool merge_live = false) {
         std::vector<firmius::tui::LiveQuickSummaryCluster> live_clusters;
         if (merge_live && live_quick_summary_provider_) {
@@ -942,12 +1086,45 @@ private:
           start_index = 1;
         }
 
-        auto grouped_rows =
-            BuildQuickToolClusterRows(quick_cluster, merge_cluster);
-        for (auto &row : grouped_rows) {
-          rows_.push_back(row);
+        bool rendered_grouped_quick_rows = false;
+        {
+          auto grouped_rows =
+              BuildQuickToolClusterRows(quick_cluster, merge_cluster);
+          for (auto &row : grouped_rows) {
+            rows_.push_back(row);
+          }
+          quick_cluster.clear();
+          rendered_grouped_quick_rows = !grouped_rows.empty();
         }
-        quick_cluster.clear();
+
+        // IMPORTANT: Turn footers ("done · turn N · …") are not meaningful
+        // conversational content, and should not break quick-tool clustering.
+        // We buffer them so that consecutive tool-only turns still render as a
+        // single quick-tools block.
+        std::vector<std::string> footer_texts_to_render;
+        if (rendered_grouped_quick_rows && !pending_turn_footers.empty()) {
+          // When multiple tool-only turns collapse into a single grouped quick-tool
+          // row, do not spam one footer per consumed turn beneath that group.
+          // Keep only the latest turn footer as the boundary marker.
+          footer_texts_to_render.push_back(pending_turn_footers.back());
+        } else {
+          footer_texts_to_render = pending_turn_footers;
+        }
+
+        for (const auto &footer_text : footer_texts_to_render) {
+          const auto &theme =
+              firmius::tui::ThemeManager::instance().getCurrentTheme();
+          auto row = ftxui::Make<RowComponent>(
+              nullptr, [footer_text, theme] {
+                return firmius::tui::IndentAgentRow(
+                    ftxui::text(footer_text) |
+                    ftxui::color(theme.chat.timestamp));
+              });
+          rows_.push_back(row);
+          rows_.push_back(ftxui::Make<RowComponent>(
+              nullptr, [] { return ftxui::text(""); }));
+        }
+        pending_turn_footers.clear();
 
         QuickToolCluster empty_cluster;
         for (size_t i = start_index; i < live_clusters.size(); ++i) {
@@ -1353,21 +1530,8 @@ private:
 
         if (auto footer = buildTurnFooterSummary(t, turn_index + 1);
             footer.has_value()) {
-          flush_quick_cluster();
-          const auto &theme =
-              firmius::tui::ThemeManager::instance().getCurrentTheme();
-          auto footer_text = *footer;
-          auto row = ftxui::Make<RowComponent>(
-              nullptr, [footer_text, theme] {
-                return firmius::tui::IndentAgentRow(
-                    ftxui::text(footer_text) |
-                    ftxui::color(theme.chat.timestamp));
-              });
-          rows_.push_back(row);
-          rows_.push_back(ftxui::Make<RowComponent>(
-              nullptr, [] { return ftxui::text(""); }));
+          pending_turn_footers.push_back(*footer);
         }
-
       }
       flush_quick_cluster(true);
     }
@@ -1416,12 +1580,18 @@ private:
   std::function<std::size_t()> live_measurement_signature_getter_;
   std::function<bool()> show_internal_nudges_getter_;
   std::function<bool()> hide_errors_getter_;
+  firmius::tui::EditableModeEnabledGetter editable_mode_enabled_getter_;
+  firmius::tui::EditableMessageSelectedGetter editable_message_selected_getter_;
+  firmius::tui::EditableMessageClickHandler editable_message_click_handler_;
   HistoryRenderSignature last_history_signature_{};
   bool history_dirty_ = true;
   std::vector<ftxui::Component> rows_;
   std::vector<std::shared_ptr<CopyableRowComponent>> copyable_rows_;
   ftxui::Component history_inner_;
   ftxui::Component history_container_;
+  std::vector<int> row_height_cache_;
+  size_t last_visible_start_ = 0;
+  size_t last_visible_end_ = 0;
   ftxui::Component container_;
   ftxui::Component tail_spacer_;
   std::shared_ptr<firmius::tui::ScrollableBoxComponent> scrollable_;
@@ -1452,7 +1622,10 @@ ftxui::Component firmius::tui::ChatWindow(
     firmius::tui::LiveQuickSummaryProvider live_quick_summary_provider,
     std::function<std::size_t()> live_measurement_signature_getter,
     std::function<bool()> show_internal_nudges_getter,
-    std::function<bool()> hide_errors_getter) {
+    std::function<bool()> hide_errors_getter,
+    EditableModeEnabledGetter editable_mode_enabled_getter,
+    EditableMessageSelectedGetter editable_message_selected_getter,
+    EditableMessageClickHandler editable_message_click_handler) {
   return ftxui::Make<ChatWindowComponent>(
       std::move(history_getter), std::move(live_rows_provider),
       std::move(tool_view_provider), std::move(process_state_getter),
@@ -1460,5 +1633,8 @@ ftxui::Component firmius::tui::ChatWindow(
       std::move(sub_history_getter),
       std::move(sub_stream_getter), std::move(live_quick_summary_provider),
       std::move(live_measurement_signature_getter),
-      std::move(show_internal_nudges_getter), std::move(hide_errors_getter));
+      std::move(show_internal_nudges_getter), std::move(hide_errors_getter),
+      std::move(editable_mode_enabled_getter),
+      std::move(editable_message_selected_getter),
+      std::move(editable_message_click_handler));
 }

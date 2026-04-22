@@ -52,10 +52,6 @@ void ScrollableBoxComponent::RequestEnsureVisible(int first_line,
 
 void ScrollableBoxComponent::InvalidateLayout() {
     layout_dirty_ = true;
-    if (auto *screen = ftxui::ScreenInteractive::Active()) {
-        NoteScrollableRafIfAvailable();
-        screen->RequestAnimationFrame();
-    }
 }
 
 int ScrollableBoxComponent::ContentWidth() const {
@@ -132,10 +128,6 @@ ftxui::Element ScrollableBoxComponent::OnRender() {
     }
     if (viewport_w != last_rendered_viewport_w_) {
         last_rendered_viewport_w_ = viewport_w;
-        if (auto *screen = ftxui::ScreenInteractive::Active()) {
-            NoteScrollableRafIfAvailable();
-            screen->RequestAnimationFrame();
-        }
     }
     viewport_width_ = viewport_w;
 
@@ -337,14 +329,7 @@ bool ScrollableBoxComponent::OnEvent(ftxui::Event event) {
     if (childHandled) {
         InvalidateLayout();
     }
-    if (previous != selected_) {
-        if (auto *screen = ftxui::ScreenInteractive::Active()) {
-            NoteScrollableRafIfAvailable();
-            screen->RequestAnimationFrame();
-        }
-    }
-    return previous != selected_ || childHandled || isKeyboardScroll ||
-           scrollbar_dragging_;
+    return previous != selected_ || childHandled || isKeyboardScroll || scrollbar_dragging_;
 }
 
 bool ScrollableBoxComponent::Focusable() const {

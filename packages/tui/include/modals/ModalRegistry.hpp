@@ -23,7 +23,8 @@ public:
 
   /// Look up a modal by name, call create(), and push onto state.
   /// Returns false if the modal name is not found.
-  bool openModal(const std::string &name, TuiState &state);
+  bool openModal(const std::string &name, TuiState &state,
+                  bool profile_open = true);
 
 private:
   ModalRegistry() = default;

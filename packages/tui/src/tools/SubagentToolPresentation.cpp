@@ -34,11 +34,14 @@ struct ParsedSubagentResult {
   std::vector<std::string> artifacts_updated;
 };
 
-bool IsMatch(const std::string &actual, const std::string &expected) {
-  if (actual.empty() || expected.empty()) {
-    return false;
+std::string ExtractAction(const ToolCallView &view) {
+  rapidjson::Document doc;
+  doc.Parse(view.args.c_str());
+  if (!doc.HasParseError() && doc.IsObject() && doc.HasMember("action") &&
+      doc["action"].IsString()) {
+    return doc["action"].GetString();
   }
-  return actual.find(expected) != std::string::npos;
+  return "";
 }
 
 ParsedSubagentArgs ParseArgs(const std::string &args) {
@@ -103,11 +106,11 @@ ParsedSubagentResult ParseResult(const std::string &result) {
   if (doc.HasMember("status") && doc["status"].IsString()) {
     parsed.status = doc["status"].GetString();
   }
-  if (doc.HasMember("result") && doc["result"].IsString()) {
-    parsed.result = doc["result"].GetString();
-  }
   if (doc.HasMember("error") && doc["error"].IsString()) {
     parsed.error = doc["error"].GetString();
+  }
+  if (doc.HasMember("result") && doc["result"].IsString()) {
+    parsed.result = doc["result"].GetString();
   }
   if (doc.HasMember("fallback_used") && doc["fallback_used"].IsBool()) {
     parsed.fallback_used = doc["fallback_used"].GetBool();
@@ -285,8 +288,52 @@ std::string DeriveStateLabel(const ToolCallView &view,
 } // namespace
 
 bool IsSubagentFamilyTool(const std::string &tool_name) {
-  return IsMatch(tool_name, "summon_subagent") ||
-         IsMatch(tool_name, "subagent_wait");
+  return tool_name == "Delegate" || tool_name == "summon_subagent" || tool_name == "subagent_wait";
+}
+
+ToolPresentation BuildTerminateSubagentToolPresentation(
+    const ToolCallView &view) {
+  ToolPresentation presentation;
+  presentation.lifecycle = DeriveLifecycle(view, nullptr);
+  presentation.layout = ToolPresentationLayoutKind::CompactFactCard;
+  presentation.density = ToolPresentationDensity::DetailHeavy;
+  presentation.subtitle = view.name;
+
+  const ParsedSubagentArgs args = ParseArgs(view.args);
+  std::string target = args.agent_id;
+
+  if (presentation.lifecycle == ToolPresentationLifecycle::Preparing) {
+    presentation.title = "prepare subagent termination";
+  } else if (presentation.lifecycle == ToolPresentationLifecycle::Running) {
+    presentation.title = "terminating subagent";
+  } else {
+    presentation.title = "subagent terminated";
+  }
+  if (!target.empty()) {
+    presentation.footer_badges.push_back(target);
+  }
+
+  if (presentation.lifecycle == ToolPresentationLifecycle::Error) {
+    presentation.error_text = firmius::shared::ErrorCleaner::clean(view.result);
+    presentation.title = "subagent termination failed";
+    return presentation;
+  }
+  if (presentation.lifecycle != ToolPresentationLifecycle::Success) {
+    return presentation;
+  }
+
+  const ParsedSubagentResult parsed_result = ParseResult(view.result);
+  if (!parsed_result.agent_id.empty()) {
+    presentation.footer_badges.push_back(parsed_result.agent_id);
+    presentation.facts.push_back({"Subagent", parsed_result.agent_id});
+  } else if (!target.empty()) {
+    presentation.facts.push_back({"Subagent", target});
+  }
+  if (!parsed_result.status.empty()) {
+    presentation.facts.push_back({"Status", parsed_result.status});
+  }
+
+  return presentation;
 }
 
 ToolPresentation
@@ -294,8 +341,19 @@ BuildSubagentToolPresentation(const ToolCallView &view,
                               const NormalizedSubagentState *subagent_state) {
   ToolPresentation presentation;
   presentation.lifecycle = DeriveLifecycle(view, subagent_state);
-  const bool is_wait = IsMatch(view.name, "subagent_wait");
-  const bool is_summon = IsMatch(view.name, "summon_subagent");
+  std::string action = ExtractAction(view);
+  if (action.empty()) {
+    if (view.name == "summon_subagent") {
+      action = "Spawn";
+    } else if (view.name == "subagent_wait") {
+      action = "Wait";
+    }
+  }
+  const bool is_summon = action == "Spawn";
+  const bool is_wait = action == "Wait";
+  if (!is_wait && !is_summon) {
+    return BuildTerminateSubagentToolPresentation(view);
+  }
   presentation.layout = is_wait ? ToolPresentationLayoutKind::InlineStatusRow
                                 : ToolPresentationLayoutKind::BodyFirstPreview;
   presentation.density = is_wait ? ToolPresentationDensity::OneLineSummary

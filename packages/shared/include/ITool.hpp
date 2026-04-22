@@ -58,7 +58,7 @@ struct ToolContext {
  * @brief Metadata describing a tool.
  */
 struct ToolMetadata {
-  std::string name;        ///< Unique tool name.
+  std::string name;        ///< Unique internal/public callable tool name.
   std::string description; ///< Human/LLM-readable description.
   ToolScope scope;         ///< Security scope required to run.
 };

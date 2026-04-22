@@ -30,20 +30,20 @@ const std::array<const char *, 7> kLegacyPromptFiles = {
 
 PurposeWorkRole legacyWorkRoleForPurposeName(const std::string &purpose) {
   const std::string lowered = StringUtil::toLower(StringUtil::trim(purpose));
-  if (lowered == "lead" || lowered == "hotrun" || lowered == "planner" ||
-      lowered == "plan_checker") {
+  if (lowered == "aster" || lowered == "meridian" || lowered == "vellum" ||
+      lowered == "harbor" || lowered == "fast") {
     return PurposeWorkRole::Lead;
   }
-  if (lowered == "executor") {
+  if (lowered == "forge") {
     return PurposeWorkRole::Executor;
   }
-  if (lowered == "worker") {
+  if (lowered == "ember") {
     return PurposeWorkRole::Worker;
   }
-  if (lowered == "auditor") {
+  if (lowered == "witness" || lowered == "loom") {
     return PurposeWorkRole::Auditor;
   }
-  if (lowered == "scout") {
+  if (lowered == "glimmer") {
     return PurposeWorkRole::Scout;
   }
   return PurposeWorkRole::Unknown;
@@ -117,23 +117,24 @@ firmius::shared::ToolScope stringToScope(const std::string &s) {
 PurposeWorkRole stringToPurposeWorkRole(const std::string &value,
                                         const std::string &fieldName) {
   const std::string lowered = StringUtil::toLower(StringUtil::trim(value));
-  if (lowered == "lead") {
+  if (lowered == "lead" || lowered == "aster" || lowered == "meridian" ||
+      lowered == "vellum" || lowered == "harbor" || lowered == "fast") {
     return PurposeWorkRole::Lead;
   }
-  if (lowered == "executor") {
+  if (lowered == "executor" || lowered == "forge") {
     return PurposeWorkRole::Executor;
   }
-  if (lowered == "worker") {
+  if (lowered == "worker" || lowered == "ember") {
     return PurposeWorkRole::Worker;
   }
-  if (lowered == "auditor") {
+  if (lowered == "auditor" || lowered == "witness" || lowered == "loom") {
     return PurposeWorkRole::Auditor;
   }
-  if (lowered == "scout") {
+  if (lowered == "scout" || lowered == "glimmer") {
     return PurposeWorkRole::Scout;
   }
   throw std::runtime_error(
-      fieldName + " must be one of: lead, executor, worker, auditor, scout");
+      fieldName + " must be one of: aster, meridian, vellum, glimmer, forge, ember, witness, harbor, loom, fast");
 }
 
 std::optional<std::filesystem::path>
@@ -186,15 +187,15 @@ std::map<std::string, std::string> PurposeLoader::customPlaceholders;
 std::string purposeWorkRoleToString(PurposeWorkRole role) {
   switch (role) {
   case PurposeWorkRole::Lead:
-    return "lead";
+    return "aster";
   case PurposeWorkRole::Executor:
-    return "executor";
+    return "forge";
   case PurposeWorkRole::Worker:
-    return "worker";
+    return "ember";
   case PurposeWorkRole::Auditor:
-    return "auditor";
+    return "witness";
   case PurposeWorkRole::Scout:
-    return "scout";
+    return "glimmer";
   case PurposeWorkRole::Unknown:
     return "unknown";
   }

@@ -1,5 +1,5 @@
 #include "utils/TerminalUtil.hpp"
-#include "tools/ProcessInputTool.hpp"
+#include "tools/ProcessTool.hpp"
 #include "../mocks/MockAgent.hpp"
 #include "../mocks/MockHost.hpp"
 #include "../mocks/MockHostProcess.hpp"
@@ -19,25 +19,33 @@ protected:
         mockEnv = std::make_shared<MockEnvironment>(mockHost);
         mockPerms = std::make_shared<MockPermissions>();
         mockPerms->allowedPaths_ = {"/tmp"};
-        
+
         AgentContext ctx;
         ctx.permissions.allowedScopes = {ToolScope::Process};
         ctx.permissions.allowedPaths = {"/tmp"};
         ctx.environment.cwd = "/tmp";
-        
+
         mockAgent = std::make_unique<MockAgent>(ctx, mockEnv, mockPerms);
-        tool = std::make_unique<ProcessInputTool>();
+        tool = std::make_unique<ProcessTool>();
     }
-    
+
+    ToolResult executeInput(const std::string& processId, const std::string& text) {
+        rapidjson::Document doc;
+        doc.SetObject();
+        auto& alloc = doc.GetAllocator();
+        doc.AddMember("action", rapidjson::Value("Input", alloc).Move(), alloc);
+        doc.AddMember("process_id", rapidjson::Value(processId.c_str(), alloc).Move(), alloc);
+        doc.AddMember("input", rapidjson::Value(text.c_str(), alloc).Move(), alloc);
+        ToolContext ctx{*mockHost, *mockAgent, "test_call"};
+        return tool->execute(doc, ctx);
+    }
+
     std::shared_ptr<MockHost> mockHost;
     std::shared_ptr<MockEnvironment> mockEnv;
     std::shared_ptr<MockPermissions> mockPerms;
     std::unique_ptr<MockAgent> mockAgent;
-    std::unique_ptr<ProcessInputTool> tool;
+    std::unique_ptr<ProcessTool> tool;
 };
-
-// ===== TERMINAL UTIL UNIT TESTS =====
-// These tests verify the escape sequence translation fix
 
 TEST_F(ProcessInputRegressionTest, EscapeSequenceNewline) {
     std::string input = "Hello\\nWorld";
@@ -78,25 +86,25 @@ TEST_F(ProcessInputRegressionTest, ControlTagTab) {
 TEST_F(ProcessInputRegressionTest, CtrlCTranslatedToETX) {
     std::string result = TerminalUtil::translate("{Ctrl+C}");
     EXPECT_EQ(result.size(), 1u);
-    EXPECT_EQ(result[0], '\x03'); // ASCII ETX
+    EXPECT_EQ(result[0], '\x03');
 }
 
 TEST_F(ProcessInputRegressionTest, CtrlDTranslatedToEOT) {
     std::string result = TerminalUtil::translate("{Ctrl+D}");
     EXPECT_EQ(result.size(), 1u);
-    EXPECT_EQ(result[0], '\x04'); // ASCII EOT
+    EXPECT_EQ(result[0], '\x04');
 }
 
 TEST_F(ProcessInputRegressionTest, CtrlZTranslatedToSUB) {
     std::string result = TerminalUtil::translate("{Ctrl+Z}");
     EXPECT_EQ(result.size(), 1u);
-    EXPECT_EQ(result[0], '\x1a'); // ASCII SUB
+    EXPECT_EQ(result[0], '\x1a');
 }
 
 TEST_F(ProcessInputRegressionTest, AltModifier) {
     std::string result = TerminalUtil::translate("{Alt+A}");
     EXPECT_EQ(result.size(), 2u);
-    EXPECT_EQ(result[0], '\x1b'); // ESC
+    EXPECT_EQ(result[0], '\x1b');
     EXPECT_EQ(result[1], 'A');
 }
 
@@ -125,97 +133,65 @@ TEST_F(ProcessInputRegressionTest, LiteralNewlinePreserved) {
     EXPECT_EQ(result, "Hello\nWorld");
 }
 
-// ===== PROCESS INPUT TOOL REGRESSION TESTS =====
-// These tests verify the tool returns meaningful feedback
-
-// REGRESSION: Tool should return meaningful feedback, not empty JSON
 TEST_F(ProcessInputRegressionTest, ToolReturnsMeaningfulFeedback) {
-    // Setup: Mock the ProcessManager to accept writes
     ON_CALL(mockEnv->mockProcessManager(), writeToProcess(testing::_, testing::_))
         .WillByDefault(testing::Invoke([this](const std::string& id, const std::string& data) {
-            // Forward to mock host
             mockHost->writeToBackgroundProcess(id, data);
         }));
-    
-    // Create and register a mock background process
+
     MockHostProcessConfig procConfig;
     procConfig.systemId = "test-process-1";
     procConfig.running = true;
     auto mockProcess = std::make_unique<MockHostProcess>(procConfig);
     mockHost->registerBackgroundProcess("test-proc-id", std::move(mockProcess));
-    
-    ProcessInputInput input;
-    input.process_id = "test-proc-id";
-    input.input = "Hello\\n";
-    
-    ToolContext ctx{*mockHost, *mockAgent, "test_call"};
-    auto result = tool->execute(input, ctx);
-    
+
+    auto result = executeInput("test-proc-id", "Hello\\n");
     ASSERT_TRUE(result.success);
-    
-    // CRITICAL: Result should NOT be empty "{}"
     EXPECT_NE(result.data, "{}") << "REGRESSION: Tool must return meaningful feedback";
-    
+
     rapidjson::Document doc;
     doc.Parse(result.data.c_str());
-    
     EXPECT_TRUE(doc.HasMember("sent"));
     EXPECT_EQ(std::string(doc["sent"].GetString()), "Hello\n");
     EXPECT_TRUE(doc.HasMember("chars"));
     EXPECT_EQ(doc["chars"].GetInt(), 6);
 }
 
-// REGRESSION: Tool should translate escape sequences before sending
 TEST_F(ProcessInputRegressionTest, ToolTranslatesEscapeSequences) {
     ON_CALL(mockEnv->mockProcessManager(), writeToProcess(testing::_, testing::_))
         .WillByDefault(testing::Invoke([this](const std::string& id, const std::string& data) {
             mockHost->writeToBackgroundProcess(id, data);
         }));
-    
+
     MockHostProcessConfig procConfig;
     procConfig.systemId = "test-process-1";
     procConfig.running = true;
     auto mockProcess = std::make_unique<MockHostProcess>(procConfig);
     mockHost->registerBackgroundProcess("test-proc-id", std::move(mockProcess));
-    
-    ProcessInputInput input;
-    input.process_id = "test-proc-id";
-    input.input = "Hello\\nWorld";
-    
-    ToolContext ctx{*mockHost, *mockAgent, "test_call"};
-    auto result = tool->execute(input, ctx);
-    
+
+    auto result = executeInput("test-proc-id", "Hello\\nWorld");
     ASSERT_TRUE(result.success);
-    
-    // Verify the result shows translated content
+
     rapidjson::Document doc;
     doc.Parse(result.data.c_str());
     EXPECT_EQ(std::string(doc["sent"].GetString()), "Hello\nWorld");
 }
 
-// REGRESSION: Tool should translate control tags before sending
 TEST_F(ProcessInputRegressionTest, ToolTranslatesControlTags) {
     ON_CALL(mockEnv->mockProcessManager(), writeToProcess(testing::_, testing::_))
         .WillByDefault(testing::Invoke([this](const std::string& id, const std::string& data) {
             mockHost->writeToBackgroundProcess(id, data);
         }));
-    
+
     MockHostProcessConfig procConfig;
     procConfig.systemId = "test-process-1";
     procConfig.running = true;
     auto mockProcess = std::make_unique<MockHostProcess>(procConfig);
     mockHost->registerBackgroundProcess("test-proc-id", std::move(mockProcess));
-    
-    ProcessInputInput input;
-    input.process_id = "test-proc-id";
-    input.input = "{Ctrl+C}";
-    
-    ToolContext ctx{*mockHost, *mockAgent, "test_call"};
-    auto result = tool->execute(input, ctx);
-    
+
+    auto result = executeInput("test-proc-id", "{Ctrl+C}");
     ASSERT_TRUE(result.success);
-    
-    // Verify the result shows translated content (Ctrl+C = ETX = 0x03)
+
     rapidjson::Document doc;
     doc.Parse(result.data.c_str());
     std::string sent = doc["sent"].GetString();
@@ -223,28 +199,21 @@ TEST_F(ProcessInputRegressionTest, ToolTranslatesControlTags) {
     EXPECT_EQ(sent[0], '\x03');
 }
 
-// UNIT TEST: Empty input handled gracefully
 TEST_F(ProcessInputRegressionTest, EmptyInput) {
     ON_CALL(mockEnv->mockProcessManager(), writeToProcess(testing::_, testing::_))
         .WillByDefault(testing::Invoke([this](const std::string& id, const std::string& data) {
             mockHost->writeToBackgroundProcess(id, data);
         }));
-    
+
     MockHostProcessConfig procConfig;
     procConfig.systemId = "test-process-1";
     procConfig.running = true;
     auto mockProcess = std::make_unique<MockHostProcess>(procConfig);
     mockHost->registerBackgroundProcess("test-proc-id", std::move(mockProcess));
-    
-    ProcessInputInput input;
-    input.process_id = "test-proc-id";
-    input.input = "";
-    
-    ToolContext ctx{*mockHost, *mockAgent, "test_call"};
-    auto result = tool->execute(input, ctx);
-    
+
+    auto result = executeInput("test-proc-id", "");
     ASSERT_TRUE(result.success);
-    
+
     rapidjson::Document doc;
     doc.Parse(result.data.c_str());
     EXPECT_TRUE(doc.HasMember("sent"));

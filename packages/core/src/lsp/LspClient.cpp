@@ -229,6 +229,7 @@ void LspClient::openDocument(const std::string& path, const std::string& languag
     {
         std::lock_guard<std::mutex> lock(m_docMutex);
         m_openDocuments.insert(uri);
+        m_documentContents[uri] = text;
     }
 }
 
@@ -254,6 +255,11 @@ void LspClient::changeDocument(const std::string& path, const std::string& text)
 
     rapidjson::Value paramsValue(params, alloc);
     m_transport.sendNotification("textDocument/didChange", paramsValue);
+
+    {
+        std::lock_guard<std::mutex> lock(m_docMutex);
+        m_documentContents[uri] = text;
+    }
 }
 
 void LspClient::closeDocument(const std::string& path) {
@@ -273,11 +279,15 @@ void LspClient::closeDocument(const std::string& path) {
     {
         std::lock_guard<std::mutex> lock(m_docMutex);
         m_openDocuments.erase(uri);
+        m_documentContents.erase(uri);
     }
 }
 
 bool LspClient::touchFile(const std::string& path, const std::string& languageId, bool waitForDiags, int timeoutMs) {
-    // Read file content from disk
+    constexpr int kColdDiagnosticsWaitCapMs = 3000;
+    constexpr int kWarmDiagnosticsWaitCapMs = 800;
+    constexpr int kPostDiagnosticsSettleMs = 50;
+
     std::ifstream file(path);
     if (!file.is_open()) return false;
 
@@ -287,14 +297,21 @@ bool LspClient::touchFile(const std::string& path, const std::string& languageId
 
     std::string uri = fileUri(path);
 
-    // Check if document is already open
     bool alreadyOpen = false;
+    bool contentChanged = true;
     {
         std::lock_guard<std::mutex> lock(m_docMutex);
         alreadyOpen = m_openDocuments.count(uri) > 0;
+        auto it = m_documentContents.find(uri);
+        if (it != m_documentContents.end() && it->second == content) {
+            contentChanged = false;
+        }
     }
 
-    // Clear received flag before sending so we can detect fresh diagnostics
+    if (alreadyOpen && !contentChanged) {
+        return true;
+    }
+
     if (waitForDiags) {
         std::lock_guard<std::mutex> lock(m_diagMutex);
         m_diagReceived.erase(uri);
@@ -308,9 +325,13 @@ bool LspClient::touchFile(const std::string& path, const std::string& languageId
 
     bool gotDiags = true;
     if (waitForDiags) {
-        gotDiags = waitForDiagnostics(uri, timeoutMs);
-        // Post-diagnostic settling delay matching proven Python bridge behavior
-        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        const int waitCapMs = alreadyOpen ? kWarmDiagnosticsWaitCapMs
+                                          : kColdDiagnosticsWaitCapMs;
+        const int waitMs = std::min(timeoutMs, waitCapMs);
+        gotDiags = waitForDiagnostics(uri, waitMs);
+        if (gotDiags) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(kPostDiagnosticsSettleMs));
+        }
     }
 
     return gotDiags;

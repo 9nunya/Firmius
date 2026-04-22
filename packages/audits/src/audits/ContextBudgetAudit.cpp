@@ -54,7 +54,7 @@ shared::AuditResult ContextBudgetAudit::run(const std::vector<std::string> &args
   EnvLoader::load(".env.local");
 
   std::string cwd = std::filesystem::current_path().string();
-  std::string persona = "lead";
+  std::string persona = "aster";
   std::string providerId;
   std::string modelId;
   std::string modelVariant;

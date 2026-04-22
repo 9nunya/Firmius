@@ -160,7 +160,7 @@ TEST_F(RuntimeOverlaySecurityTest, ReconstructStateFromHistoryAcceptsAuthorizedR
   EXPECT_EQ(context_.state.loadedSkillRoots["/work/test-skill.md"], authorizedRoot);
 }
 
-TEST_F(RuntimeOverlaySecurityTest, ReconcileMcpLoadRejectsMissingServerName) {
+TEST_F(RuntimeOverlaySecurityTest, ReconcileNonSkillToolDoesNotMutateLoadedMcpState) {
   context_.state.loadedMcpServers = {"existing"};
   context_.state.loadedMcpTools["existing"] = {"tool.persist"};
 
@@ -178,7 +178,7 @@ TEST_F(RuntimeOverlaySecurityTest, ReconcileMcpLoadRejectsMissingServerName) {
   EXPECT_TRUE(context_.state.loadedMcpPrompts.empty());
 }
 
-TEST_F(RuntimeOverlaySecurityTest, ReconstructMcpLoadRejectsMalformedServerNameType) {
+TEST_F(RuntimeOverlaySecurityTest, ReconstructHistoryIgnoresLegacyMcpLoadCalls) {
   AgentTurn turn1;
   Message msg1;
   msg1.role = Role::Assistant;
@@ -207,7 +207,7 @@ TEST_F(RuntimeOverlaySecurityTest, ReconstructMcpLoadRejectsMalformedServerNameT
   EXPECT_TRUE(context_.state.loadedMcpPrompts.empty());
 }
 
-TEST_F(RuntimeOverlaySecurityTest, BuildRequestHistoryOmitsLoadedMcpOverlayWhenStateRejected) {
+TEST_F(RuntimeOverlaySecurityTest, BuildRequestHistoryOmitsLoadedMcpOverlayWhenNoStateWasAccepted) {
   runtime_overlay::reconcileSuccessfulToolResult(
       context_, *host_, *workspace_, "mcp_load", R"({})",
       R"({"loaded_tools":["tool.alpha"]})");

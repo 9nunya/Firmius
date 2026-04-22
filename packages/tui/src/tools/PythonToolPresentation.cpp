@@ -118,6 +118,7 @@ ToolPresentation BuildPythonToolPresentation(
   const ParsedPythonResult result = ParseResult(view.result);
 
   if (!args.code.empty()) {
+    presentation.body_lines.push_back("$ python");
     if (SyntaxHighlighter::instance().hasGrammar("python")) {
       presentation.custom_body_elements =
           SyntaxHighlighter::instance().highlightRenderLines(args.code, "python");

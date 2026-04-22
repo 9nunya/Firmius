@@ -7,6 +7,9 @@
 namespace firmius::tui {
 
 bool IsFileFamilyTool(const std::string &tool_name);
+bool IsFileReadFamilyTool(const std::string &tool_name);
+bool IsFileWriteFamilyTool(const std::string &tool_name);
+bool IsDirectoryFamilyTool(const std::string &tool_name);
 
 ToolPresentation BuildFileToolPresentation(const firmius::shared::ToolCallView &view);
 

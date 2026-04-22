@@ -8,6 +8,8 @@
 namespace firmius::tui {
 
 bool IsSubagentFamilyTool(const std::string &tool_name);
+ToolPresentation BuildTerminateSubagentToolPresentation(
+    const firmius::shared::ToolCallView &view);
 
 ToolPresentation BuildSubagentToolPresentation(
     const firmius::shared::ToolCallView &view,

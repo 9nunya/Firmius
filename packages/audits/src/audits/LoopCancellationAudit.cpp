@@ -37,7 +37,7 @@ shared::AuditResult LoopCancellationAudit::run(const std::vector<std::string> &)
   opts.type = HostType::Docker;
   opts.deleteOnExit = true;
 
-  std::string threadId = harness.newThread(opts, "/work", "lead");
+  std::string threadId = harness.newThread(opts, "/work", "aster");
   if (threadId.empty()) {
     std::cerr << "[Audit] Failed to create thread." << std::endl;
     result.passed = false;

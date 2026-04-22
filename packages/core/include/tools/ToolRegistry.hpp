@@ -7,6 +7,7 @@
 #include <memory>
 #include <vector>
 #include <functional>
+#include <mutex>
 
 namespace firmius::core {
 
@@ -74,7 +75,8 @@ private:
      */
     shared::ITool* getTool(const std::string& name) const;
 
-    std::map<std::string, std::unique_ptr<shared::ITool>> tools;
+    mutable std::mutex mutex_;
+    mutable std::map<std::string, std::unique_ptr<shared::ITool>> tools;
     mutable std::map<std::string, ToolFactory> factories;
     /**
      * @brief Truncates tool result if it is too long.

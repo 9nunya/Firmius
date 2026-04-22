@@ -858,7 +858,7 @@ shared::AuditResult ProviderStreamDebugAudit::run(const std::vector<std::string>
     std::string modelVariantName;
     std::string historySuite;
     std::string rawSseLogPath;
-    std::string purpose = "lead";
+    std::string purpose = "aster";
     std::string cwd;
     std::string promptFile;
     std::string promptText;
@@ -1452,7 +1452,7 @@ shared::AuditResult ProviderStreamDebugAudit::run(const std::vector<std::string>
         if (threadAgentId.empty()) {
             auto manifest = tm.readAgentManifest(threadId);
             for (const auto& entry : manifest) {
-                if (entry.second.friendlyName == "lead") {
+                if (entry.second.friendlyName == "aster") {
                     threadAgentId = entry.first;
                     break;
                 }

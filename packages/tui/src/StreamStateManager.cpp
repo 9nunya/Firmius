@@ -28,6 +28,7 @@ struct ParsedProcessResult {
 };
 
 struct ParsedToolArgs {
+  std::string action;
   std::string process_id;
   std::string command;
   std::string cwd;
@@ -36,6 +37,7 @@ struct ParsedToolArgs {
 };
 
 struct ParsedSubagentArgs {
+  std::string action;
   std::string agent_id;
   std::string name;
   std::string title;
@@ -54,6 +56,34 @@ struct ParsedSubagentResult {
   std::vector<std::string> artifacts_created;
   std::vector<std::string> artifacts_updated;
 };
+
+bool isProcessAction(const shared::ToolCallView &view,
+                     const ParsedToolArgs &args,
+                     std::string_view action) {
+  if (view.name == "Process") {
+    return args.action == action;
+  }
+  if (action == "Execute") return view.name == "process_execute";
+  if (action == "Spawn") return view.name == "process_spawn";
+  if (action == "Wait") return view.name == "process_wait";
+  if (action == "Status") return view.name == "process_status";
+  if (action == "Input") return view.name == "process_input";
+  return false;
+}
+
+bool isDelegateAction(const shared::ToolCallView &view,
+                      const ParsedSubagentArgs &args,
+                      std::string_view action) {
+  if (view.name == "Delegate") {
+    return args.action == action;
+  }
+  if (action == "Spawn") return view.name == "summon_subagent";
+  if (action == "Wait") return view.name == "subagent_wait";
+  if (action == "Stop") {
+    return view.name == "terminate_subagent" || view.name == "subagent_terminate";
+  }
+  return false;
+}
 
 std::string ltrimLeadingBlankLines(std::string text) {
   size_t pos = 0;
@@ -115,6 +145,9 @@ ParsedToolArgs parseToolArgs(const std::string &args) {
   if (doc.HasMember("process_id") && doc["process_id"].IsString()) {
     parsed.process_id = doc["process_id"].GetString();
   }
+  if (doc.HasMember("action") && doc["action"].IsString()) {
+    parsed.action = doc["action"].GetString();
+  }
   if (doc.HasMember("command") && doc["command"].IsString()) {
     parsed.command = doc["command"].GetString();
   }
@@ -153,6 +186,9 @@ ParsedSubagentArgs parseSubagentArgs(const std::string &args) {
   }
   if (doc.HasMember("agent_id") && doc["agent_id"].IsString()) {
     parsed.agent_id = doc["agent_id"].GetString();
+  }
+  if (doc.HasMember("action") && doc["action"].IsString()) {
+    parsed.action = doc["action"].GetString();
   }
   if (doc.HasMember("name") && doc["name"].IsString()) {
     parsed.name = doc["name"].GetString();
@@ -254,8 +290,59 @@ std::string jsonStringMember(const rapidjson::Value &value, const char *key) {
   return "";
 }
 
+std::vector<std::string> parseStringArrayMember(const rapidjson::Value &value,
+                                                const char *key) {
+  std::vector<std::string> lines;
+  if (!value.IsObject() || !value.HasMember(key) || !value[key].IsArray()) {
+    return lines;
+  }
+  for (const auto &entry : value[key].GetArray()) {
+    if (entry.IsString()) {
+      lines.emplace_back(entry.GetString());
+    }
+  }
+  return lines;
+}
+
+std::string buildDiffPreviewFromOperations(const rapidjson::Value &value) {
+  if (!value.IsObject() || !value.HasMember("operations") ||
+      !value["operations"].IsArray()) {
+    return "";
+  }
+  std::ostringstream out;
+  bool wrote_any = false;
+  for (const auto &op : value["operations"].GetArray()) {
+    if (!op.IsObject()) {
+      continue;
+    }
+    const std::string description =
+        jsonStringMember(op, "description").empty()
+            ? jsonStringMember(op, "op")
+            : jsonStringMember(op, "description");
+    const auto oldLines = parseStringArrayMember(op, "old_lines");
+    const auto newLines = parseStringArrayMember(op, "new_lines");
+    if (oldLines.empty() && newLines.empty()) {
+      continue;
+    }
+    if (wrote_any) {
+      out << "\n";
+    }
+    out << "@@ " << (description.empty() ? "edit" : description) << " @@\n";
+    for (const auto &line : oldLines) {
+      out << "-" << line << "\n";
+    }
+    for (const auto &line : newLines) {
+      out << "+" << line << "\n";
+    }
+    wrote_any = true;
+  }
+  return out.str();
+}
+
 bool isFileEditLikeToolName(const std::string &name) {
-  return name == "file_edit" || name == "file_write";
+  return name == "Edit" || name == "file_edit" || name == "file_write" ||
+         name == "Write" || name == "EditWrite" || name == "EditReplace" ||
+         name == "EditRange";
 }
 
 void mergeFileEditSignal(shared::ToolCallView &view,
@@ -310,6 +397,9 @@ parseFileEditSignalsFromResult(const std::string &result) {
     if (value.HasMember("diff_preview") && value["diff_preview"].IsString()) {
       signal.diffPreview = value["diff_preview"].GetString();
     }
+    if (signal.diffPreview.empty()) {
+      signal.diffPreview = buildDiffPreviewFromOperations(value);
+    }
     if (value.HasMember("added_lines") && value["added_lines"].IsInt()) {
       signal.addedLines = value["added_lines"].GetInt();
     }
@@ -331,7 +421,7 @@ parseFileEditSignalsFromResult(const std::string &result) {
 }
 
 bool shouldRetainCompletedToolCall(const shared::ToolCallView &view) {
-  if (view.name == "summon_subagent") {
+  if (view.name == "Delegate" || view.name == "summon_subagent") {
     return true;
   }
 
@@ -831,7 +921,7 @@ void StreamStateManager::handleAgentTurnCompleted(
 
   // Mark all pending subagent tool log entries as finished and update summaries
   for (auto &[toolId, view] : tool_calls_) {
-    if (view && view->name == "summon_subagent") {
+    if (view && (view->name == "Delegate" || view->name == "summon_subagent")) {
       for (auto &entry : view->subagent_tool_log) {
         if (entry.phase != ToolPhase::Finished && !entry.name.empty()) {
           // Regenerate summary with stored name/args
@@ -1037,16 +1127,16 @@ void StreamStateManager::handleAgentToolCall(const shared::AgentToolCall &e) {
       if (!parsed_args.cwd.empty() && process.cwd.empty()) {
         process.cwd = parsed_args.cwd;
       }
-      if (view->name == "process_wait") {
+      if (view->name == "Process" && parsed_args.action == "Wait") {
         process.waiting = true;
         process.wait_state = "waiting";
         process.waiting_pattern = parsed_args.pattern;
       }
     }
-    if (view->name == "summon_subagent" || view->name == "subagent_wait") {
+    if (view->name == "Delegate") {
       ParsedSubagentArgs parsed_subagent_args = parseSubagentArgs(view->args);
       std::string parent_tool_id = view->toolCallId;
-      if (view->name == "subagent_wait" && !parsed_subagent_args.agent_id.empty()) {
+      if (parsed_subagent_args.action == "Wait" && !parsed_subagent_args.agent_id.empty()) {
         auto it_parent = subagent_to_parent_tool_.find(parsed_subagent_args.agent_id);
         if (it_parent != subagent_to_parent_tool_.end()) {
           parent_tool_id = it_parent->second;
@@ -1055,7 +1145,7 @@ void StreamStateManager::handleAgentToolCall(const shared::AgentToolCall &e) {
       auto &subagent = subagent_state_[parent_tool_id];
       subagent.parent_tool_call_id = parent_tool_id;
       subagent.owner_agent_id = view->agentId;
-      subagent.waiting = (view->name == "subagent_wait");
+      subagent.waiting = (parsed_subagent_args.action == "Wait");
       subagent.running = (view->phase == ToolPhase::Called);
       if (!parsed_subagent_args.task.empty()) {
         subagent.task = parsed_subagent_args.task;
@@ -1076,7 +1166,7 @@ void StreamStateManager::handleAgentToolCall(const shared::AgentToolCall &e) {
       subagent.wait_state = "running";
       subagent_tool_to_parent_[view->toolCallId] = parent_tool_id;
 
-      if (view->name == "subagent_wait") {
+      if (parsed_subagent_args.action == "Wait") {
         view->subagent_id = subagent.child_agent_id;
         if (!subagent.child_title.empty()) {
           view->subagent_title = subagent.child_title;
@@ -1244,10 +1334,11 @@ void StreamStateManager::handleAgentProcessSpawned(
   auto it_tool = tool_calls_.find(e.toolCallId);
   if (it_tool != tool_calls_.end() && it_tool->second) {
     auto &view = it_tool->second;
+    ParsedToolArgs parsed_args = parseToolArgs(view->args);
     if (view->process_id.empty()) {
       view->process_id = e.processId;
     }
-    if (view->name == "process_spawn") {
+    if (isProcessAction(*view, parsed_args, "Spawn")) {
       view->process_is_background = true;
       process.is_background = true;
       process.is_blocking = false;
@@ -1303,7 +1394,7 @@ void StreamStateManager::handleAgentSpawned(
   for (auto &pair : tool_calls_) {
     if (!pair.second || pair.second->agentId != e.parentId)
       continue;
-    if (pair.second->name != "summon_subagent")
+    if (pair.second->name != "Delegate" && pair.second->name != "summon_subagent")
       continue;
 
     // Check if this tool call is likely the one that spawned this agent
@@ -1849,6 +1940,58 @@ void StreamStateManager::handleAgentRetrying(const shared::AgentRetrying &e) {
   if (!e.accountLocator.empty()) {
     retry_status_ += " [Account: " + e.accountLocator + "]";
   }
+
+  // If we're retrying a provider request, any in-flight tool calls from the
+  // prior attempt may never receive a result. Ensure they don't remain stuck in
+  // Preparing/Called forever.
+  {
+    std::unordered_set<std::string> erased_tool_ids;
+    for (auto it = tool_calls_.begin(); it != tool_calls_.end();) {
+      auto &view = it->second;
+      if (!view || view->agentId != e.agentId ||
+          (view->phase != ToolPhase::Preparing &&
+           view->phase != ToolPhase::Called &&
+           view->phase != ToolPhase::BackgroundRunning)) {
+        ++it;
+        continue;
+      }
+
+      const bool hasMeaningfulToolIdentity =
+          !view->toolCallId.empty() && (!view->name.empty() || !view->args.empty());
+      const bool isPreparationOnly = view->phase == ToolPhase::Preparing &&
+                                     view->args.empty() && view->result.empty();
+      if (!hasMeaningfulToolIdentity || isPreparationOnly) {
+        erased_tool_ids.insert(it->first);
+        it = tool_calls_.erase(it);
+        continue;
+      }
+
+      applyToolResult(view, false,
+                      "Retrying request; previous tool call attempt was cancelled.");
+      ++it;
+    }
+
+    if (!erased_tool_ids.empty()) {
+      timeline_.erase(
+          std::remove_if(timeline_.begin(), timeline_.end(),
+                         [&](const TimelineEntry &entry) {
+                           return entry.agentId == e.agentId &&
+                                  entry.kind == TimelineEntry::Kind::ToolCall &&
+                                  erased_tool_ids.count(entry.id) > 0;
+                         }),
+          timeline_.end());
+      for (auto it = tool_call_cluster_ids_.begin();
+           it != tool_call_cluster_ids_.end();) {
+        if (erased_tool_ids.count(it->first) > 0) {
+          it = tool_call_cluster_ids_.erase(it);
+        } else {
+          ++it;
+        }
+      }
+    }
+    live_quick_clusters_[e.agentId] = {};
+  }
+
   appendErrorToTimelineIfRelevant(timeline_, next_live_entry_sequence_,
                                   e.agentId, e.details);
   reactivateSubagentParentView(e.agentId);
@@ -1927,7 +2070,8 @@ const std::vector<std::string> &StreamStateManager::getAccountSwaps() const {
 
 void StreamStateManager::handleMessageQueued(const shared::MessageQueued &e) {
   queued_messages_.push_back(
-      {e.messageId, e.text, e.threadId, e.agentId});
+      {e.messageId, e.text, e.threadId, e.agentId,
+       static_cast<int>(e.images.size())});
 }
 
 void StreamStateManager::handleMessageDequeued(
@@ -1943,7 +2087,7 @@ void StreamStateManager::handleMessageDequeued(
 void StreamStateManager::handleInternalMessageQueued(
     const shared::InternalMessageQueued &e) {
   queued_internal_messages_.push_back(
-      {e.messageId, e.text, e.threadId, e.agentId});
+      {e.messageId, e.text, e.threadId, e.agentId, 0});
 }
 
 void StreamStateManager::handleInternalMessageDequeued(
@@ -2024,10 +2168,10 @@ void StreamStateManager::rebuildToolCallsFromHistory(
                 view->phase = ToolPhase::Finished;
               }
 
-              if (view->name == "summon_subagent" || view->name == "subagent_wait") {
+              if (view->name == "Delegate" || view->name == "summon_subagent" || view->name == "subagent_wait") {
                 ParsedSubagentArgs parsed_args = parseSubagentArgs(view->args);
                 std::string parent_tool_id = tc->id;
-                if (view->name == "subagent_wait" && !parsed_args.agent_id.empty()) {
+                if (isDelegateAction(*view, parsed_args, "Wait") && !parsed_args.agent_id.empty()) {
                   auto it_parent = subagent_to_parent_tool_.find(parsed_args.agent_id);
                   if (it_parent != subagent_to_parent_tool_.end()) {
                     parent_tool_id = it_parent->second;
@@ -2150,7 +2294,7 @@ void StreamStateManager::rebuildToolCallsFromHistory(
   // historical results have been parsed. This keeps one normalized subagent
   // truth record even when wait calls appear before summon calls in history.
   for (const auto &[tool_call_id, view] : tool_calls_) {
-    if (!view || view->name != "subagent_wait") {
+    if (!view || !(view->name == "Delegate" || view->name == "subagent_wait")) {
       continue;
     }
     ParsedSubagentArgs parsed_args = parseSubagentArgs(view->args);
@@ -2178,7 +2322,7 @@ void StreamStateManager::rebuildToolCallsFromHistory(
     return;
     
   for (auto &[toolCallId, view] : tool_calls_) {
-    if (!view || view->name != "summon_subagent" || view->args.empty())
+    if (!view || !(view->name == "Delegate" || view->name == "summon_subagent") || view->args.empty())
       continue;
 
     // Parse args to extract agent_id or agent name
@@ -2242,7 +2386,12 @@ void StreamStateManager::rebuildToolCallsFromHistory(
 
       std::unique_ptr<shared::AgentHistory> fallbackHistory;
       const shared::AgentHistory* subHistory = nullptr;
-      if (!threadId.empty()) {
+      auto &harness = firmius::core::Harness::instance();
+      auto subHistoryPtr = harness.getAgentHistoryPtr(subagentId);
+      if (subHistoryPtr && !subHistoryPtr->turns.empty()) {
+        subHistory = subHistoryPtr.get();
+      }
+      if (!subHistory && !threadId.empty()) {
         auto persisted =
             firmius::core::ThreadManager(
                 firmius::core::ThreadManager::defaultBasePath())
@@ -2251,13 +2400,6 @@ void StreamStateManager::rebuildToolCallsFromHistory(
           fallbackHistory =
               std::make_unique<shared::AgentHistory>(std::move(persisted));
           subHistory = fallbackHistory.get();
-        }
-      }
-      if (!subHistory) {
-        auto &harness = firmius::core::Harness::instance();
-        auto subHistoryPtr = harness.getAgentHistoryPtr(subagentId);
-        if (subHistoryPtr) {
-          subHistory = subHistoryPtr.get();
         }
       }
 
@@ -2510,24 +2652,25 @@ void StreamStateManager::applyToolResult(
     return;
   }
 
-  if (view->name == "todo_write") {
+  if (view->name == "Todo" || view->name == "todo_write") {
     auto it_previous = last_todo_result_by_agent_.find(view->agentId);
     view->previous_result =
         it_previous != last_todo_result_by_agent_.end() ? it_previous->second : "";
   }
   view->success = success;
   view->result = result;
+  ParsedToolArgs parsed_args = parseToolArgs(view->args);
   const bool file_edit_like = isFileEditLikeToolName(view->name);
   if (success && file_edit_like) {
     for (const auto &signal : parseFileEditSignalsFromResult(result)) {
       mergeFileEditSignal(*view, signal);
     }
   }
-  if (view->name == "subagent_wait" || view->name == "summon_subagent") {
+  if (view->name == "Delegate" || view->name == "subagent_wait" || view->name == "summon_subagent") {
     ParsedSubagentArgs parsed_args = parseSubagentArgs(view->args);
     ParsedSubagentResult parsedSubagent = parseSubagentResult(result);
     std::string parent_tool_id = view->toolCallId;
-    if (view->name == "subagent_wait" && !parsed_args.agent_id.empty()) {
+    if (isDelegateAction(*view, parsed_args, "Wait") && !parsed_args.agent_id.empty()) {
       auto it_parent = subagent_to_parent_tool_.find(parsed_args.agent_id);
       if (it_parent != subagent_to_parent_tool_.end()) {
         parent_tool_id = it_parent->second;
@@ -2536,7 +2679,7 @@ void StreamStateManager::applyToolResult(
     auto &subagent = subagent_state_[parent_tool_id];
     subagent.parent_tool_call_id = parent_tool_id;
     subagent.owner_agent_id = view->agentId;
-    subagent.waiting = (view->name == "subagent_wait");
+    subagent.waiting = isDelegateAction(*view, parsed_args, "Wait");
     subagent.running = !subagent.waiting;
     subagent.provider_waiting = false;
     subagent.retrying = false;
@@ -2560,7 +2703,7 @@ void StreamStateManager::applyToolResult(
     subagent_tool_to_parent_[view->toolCallId] = parent_tool_id;
 
     const bool preserve_async_parent_state =
-        view->name == "subagent_wait" && !success &&
+        isDelegateAction(*view, parsed_args, "Wait") && !success &&
         parsedSubagent.status.empty() &&
         isParentInterruptedWhileWaitingMessage(result) &&
         (subagent.wait_state == "spawned" || subagent.wait_state == "re-tasked" ||
@@ -2643,16 +2786,15 @@ void StreamStateManager::applyToolResult(
     }
   }
   if (!success) {
-    if (view->name == "process_wait" || view->name == "process_status" ||
-        view->name == "process_input") {
-      ParsedToolArgs parsed_args = parseToolArgs(view->args);
+    if (isProcessAction(*view, parsed_args, "Wait") || isProcessAction(*view, parsed_args, "Status") ||
+        isProcessAction(*view, parsed_args, "Input")) {
       if (!parsed_args.process_id.empty()) {
         auto &process = process_state_[parsed_args.process_id];
         process.process_id = parsed_args.process_id;
         if (!view->agentId.empty()) {
           process.owner_agent_id = view->agentId;
         }
-        if (view->name == "process_wait") {
+        if (isProcessAction(*view, parsed_args, "Wait")) {
           process.waiting = false;
           process.wait_state = "failed";
           if (!parsed_args.pattern.empty()) {
@@ -2670,7 +2812,6 @@ void StreamStateManager::applyToolResult(
     return;
   }
 
-  ParsedToolArgs parsed_args = parseToolArgs(view->args);
   ParsedProcessResult parsed = parseProcessResult(result);
   std::string process_id = !parsed.process_id.empty() ? parsed.process_id : parsed_args.process_id;
   if (!process_id.empty()) {
@@ -2690,12 +2831,12 @@ void StreamStateManager::applyToolResult(
     } else if (!parsed_args.cwd.empty() && process.cwd.empty()) {
       process.cwd = parsed_args.cwd;
     }
-    if (view->name == "process_wait" && !parsed_args.pattern.empty()) {
+    if (isProcessAction(*view, parsed_args, "Wait") && !parsed_args.pattern.empty()) {
       process.waiting_pattern = parsed_args.pattern;
       process.waiting = false;
       process.wait_state = "completed";
     }
-    if (view->name == "process_wait" || view->name == "process_status") {
+    if (isProcessAction(*view, parsed_args, "Wait") || isProcessAction(*view, parsed_args, "Status")) {
       rapidjson::Document doc;
       doc.Parse(result.c_str());
       if (!doc.HasParseError() && doc.IsObject()) {
@@ -2729,7 +2870,7 @@ void StreamStateManager::applyToolResult(
   }
   view->process_duration_ms = parsed.duration_ms;
 
-  if (view->name == "process_execute" && parsed.finish_reason == "Timeout" &&
+  if (isProcessAction(*view, parsed_args, "Execute") && parsed.finish_reason == "Timeout" &&
       !process_id.empty()) {
     view->phase = ToolPhase::BackgroundRunning;
     view->process_is_background = true;
@@ -2747,7 +2888,7 @@ void StreamStateManager::applyToolResult(
     return;
   }
 
-  if (view->name == "process_spawn" && !process_id.empty()) {
+  if (isProcessAction(*view, parsed_args, "Spawn") && !process_id.empty()) {
     view->process_is_background = true;
     auto &process = process_state_[process_id];
     process.is_background = true;
@@ -2777,7 +2918,7 @@ void StreamStateManager::applyToolResult(
   }
 
   view->phase = ToolPhase::Finished;
-  if (view->name == "todo_write") {
+  if (view->name == "Todo" || view->name == "todo_write") {
     last_todo_result_by_agent_[view->agentId] = result;
   }
 }
@@ -2795,6 +2936,7 @@ bool StreamStateManager::applyProcessOutputToToolView(
   }
 
   auto &view = it_tool->second;
+  ParsedToolArgs parsed_args = parseToolArgs(view->args);
   auto &process = process_state_[e.processId];
   process.process_id = e.processId;
   process.origin_tool_call_id = it_pid->second;
@@ -2822,7 +2964,7 @@ bool StreamStateManager::applyProcessOutputToToolView(
     process.waiting = false;
     process.wait_state = "completed";
     if (view->phase == ToolPhase::BackgroundRunning ||
-        view->name == "process_spawn") {
+        isProcessAction(*view, parsed_args, "Spawn")) {
       view->phase = ToolPhase::Finished;
       view->success = (e.exitCode == 0);
     }

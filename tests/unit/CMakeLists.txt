@@ -345,6 +345,21 @@ target_include_directories(test_provider_stream_debug_audit PRIVATE
 )
 gtest_discover_tests(test_provider_stream_debug_audit)
 
+add_executable(test_lsp_audit
+    audits/test_lsp_audit.cpp
+)
+target_link_libraries(test_lsp_audit PRIVATE
+    firmius::audits
+    firmius::core
+    firmius::shared
+    GTest::gtest_main
+    GTest::gmock
+)
+target_include_directories(test_lsp_audit PRIVATE
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_lsp_audit)
+
 # PurposeLoader tests
 add_executable(test_purpose_loader
     core/test_purpose_loader.cpp
@@ -814,6 +829,9 @@ add_executable(test_chat_window_helpers
     ../../packages/tui/src/tools/WebSearchToolPresentation.cpp
     ../../packages/tui/src/tools/McpToolPresentation.cpp
     ../../packages/tui/src/tools/WorkToolPresentation.cpp
+    ../../packages/tui/src/tools/SearchToolPresentation.cpp
+    ../../packages/tui/src/tools/SemanticToolPresentation.cpp
+    ../../packages/tui/src/tools/GenericToolPresentation.cpp
 )
 target_link_libraries(test_chat_window_helpers PRIVATE
     firmius::shared
@@ -833,6 +851,56 @@ target_include_directories(test_chat_window_helpers PRIVATE
     ${rapidjson_SOURCE_DIR}/include
 )
 gtest_discover_tests(test_chat_window_helpers)
+
+add_executable(test_chat_window_quick_tool_grouping
+    tui/test_chat_window_quick_tool_grouping.cpp
+    ../../packages/tui/src/components/ChatWindow.cpp
+    ../../packages/tui/src/components/DiffRenderer.cpp
+    ../../packages/tui/src/components/FileEditDiff.cpp
+    ../../packages/tui/src/components/ToolBlock.cpp
+    ../../packages/tui/src/components/ToolPresentationBlock.cpp
+    ../../packages/tui/src/components/ErrorDisplay.cpp
+    ../../packages/tui/src/components/Markdown.cpp
+    ../../packages/tui/src/components/ScrollableBox.cpp
+    ../../packages/tui/src/components/GlintEffect.cpp
+    ../../packages/tui/src/components/SyntaxHighlighter.cpp
+    ../../packages/tui/src/components/TranscriptGrouping.cpp
+    ../../packages/tui/src/components/ANSIParser.cpp
+    ../../packages/tui/src/ThemeManager.cpp
+    ../../packages/tui/src/UserPreferences.cpp
+    ../../packages/tui/src/NotificationManager.cpp
+    ../../packages/tui/src/utils/Clipboard.cpp
+    ../../packages/tui/src/tools/ArtifactToolPresentation.cpp
+    ../../packages/tui/src/tools/FileToolPresentation.cpp
+    ../../packages/tui/src/tools/ToolPresentation.cpp
+    ../../packages/tui/src/tools/ProcessToolPresentation.cpp
+    ../../packages/tui/src/tools/PythonToolPresentation.cpp
+    ../../packages/tui/src/tools/SubagentToolPresentation.cpp
+    ../../packages/tui/src/tools/WebSearchToolPresentation.cpp
+    ../../packages/tui/src/tools/McpToolPresentation.cpp
+    ../../packages/tui/src/tools/WorkToolPresentation.cpp
+    ../../packages/tui/src/tools/SearchToolPresentation.cpp
+    ../../packages/tui/src/tools/SemanticToolPresentation.cpp
+    ../../packages/tui/src/tools/GenericToolPresentation.cpp
+)
+target_link_libraries(test_chat_window_quick_tool_grouping PRIVATE
+    firmius::shared
+    firmius::core
+    tree_sitter_all
+    ftxui::dom
+    ftxui::screen
+    ftxui::component
+    GTest::gtest_main
+    GTest::gmock
+)
+target_include_directories(test_chat_window_quick_tool_grouping PRIVATE
+    ../../packages/tui/include
+    ../../packages/tui/src
+    ../../packages/core/include
+    ../../packages/shared/include
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_chat_window_quick_tool_grouping)
 
 add_executable(test_model_picker_entries
     tui/test_model_picker_entries.cpp
@@ -1032,6 +1100,9 @@ add_executable(test_tool_presentation
     ../../packages/tui/src/tools/ToolPresentation.cpp
     ../../packages/tui/src/tools/McpToolPresentation.cpp
     ../../packages/tui/src/tools/WorkToolPresentation.cpp
+    ../../packages/tui/src/tools/SearchToolPresentation.cpp
+    ../../packages/tui/src/tools/SemanticToolPresentation.cpp
+    ../../packages/tui/src/tools/GenericToolPresentation.cpp
 )
 target_link_libraries(test_tool_presentation PRIVATE
     firmius::shared
@@ -1050,6 +1121,52 @@ target_include_directories(test_tool_presentation PRIVATE
 )
 gtest_discover_tests(test_tool_presentation)
 
+
+add_executable(test_notification_manager
+    tui/test_notification_manager.cpp
+    ../../packages/tui/src/NotificationManager.cpp
+    ../../packages/tui/src/components/GlintEffect.cpp
+    ../../packages/tui/src/ThemeManager.cpp
+    ../../packages/tui/src/UserPreferences.cpp
+    ../../packages/tui/src/components/Markdown.cpp
+    ../../packages/tui/src/components/ScrollableBox.cpp
+)
+target_link_libraries(test_notification_manager PRIVATE
+    firmius::shared
+    GTest::gtest_main
+    GTest::gmock
+    ftxui::dom
+    ftxui::screen
+    ftxui::component
+)
+target_include_directories(test_notification_manager PRIVATE
+    ../../packages/tui/include
+    ../../packages/tui/src
+)
+gtest_discover_tests(test_notification_manager)
+
+add_executable(test_notification_layering
+    tui/test_notification_layering.cpp
+    ../../packages/tui/src/NotificationManager.cpp
+    ../../packages/tui/src/components/GlintEffect.cpp
+    ../../packages/tui/src/ThemeManager.cpp
+    ../../packages/tui/src/UserPreferences.cpp
+    ../../packages/tui/src/components/Markdown.cpp
+    ../../packages/tui/src/components/ScrollableBox.cpp
+)
+target_link_libraries(test_notification_layering PRIVATE
+    firmius::shared
+    GTest::gtest_main
+    GTest::gmock
+    ftxui::dom
+    ftxui::screen
+    ftxui::component
+)
+target_include_directories(test_notification_layering PRIVATE
+    ../../packages/tui/include
+    ../../packages/tui/src
+)
+gtest_discover_tests(test_notification_layering)
 add_executable(test_tool_presentation_block
     tui/test_tool_presentation_block.cpp
     ../../packages/tui/src/components/DiffRenderer.cpp
@@ -1067,6 +1184,9 @@ add_executable(test_tool_presentation_block
     ../../packages/tui/src/tools/ToolPresentation.cpp
     ../../packages/tui/src/tools/McpToolPresentation.cpp
     ../../packages/tui/src/tools/WorkToolPresentation.cpp
+    ../../packages/tui/src/tools/SearchToolPresentation.cpp
+    ../../packages/tui/src/tools/SemanticToolPresentation.cpp
+    ../../packages/tui/src/tools/GenericToolPresentation.cpp
     ../../packages/tui/src/ThemeManager.cpp
     ../../packages/tui/src/UserPreferences.cpp
     ../../packages/tui/src/ActivePlanState.cpp
@@ -1239,21 +1359,3 @@ target_include_directories(test_process_input_regression PRIVATE
 )
 gtest_discover_tests(test_process_input_regression)
 
-# Web backend placeholder tests
-add_executable(test_web_backend_placeholder
-    web/test_web_backend_placeholder.cpp
-)
-target_link_libraries(test_web_backend_placeholder PRIVATE
-    firmius::web
-    GTest::gtest_main
-    GTest::gmock
-)
-gtest_discover_tests(test_web_backend_placeholder)
-
-# Web frontend placeholder integration lane
-add_test(
-    NAME test_web_frontend_placeholder
-    COMMAND ${CMAKE_COMMAND}
-        -DTEST_ROOT=${CMAKE_CURRENT_SOURCE_DIR}/web/frontend
-        -P ${CMAKE_CURRENT_SOURCE_DIR}/web/frontend/run_frontend_placeholder.cmake
-)

@@ -101,3 +101,31 @@ TEST(MarkdownTest, CollapsesExpandedFileReferenceWithLineRangeForDisplay) {
     EXPECT_NE(collapsed.find("@src/file.ts:10-20"), std::string::npos);
     EXPECT_EQ(collapsed.find("<file path="), std::string::npos);
 }
+
+TEST(MarkdownTest, CollapsesExpandedArtifactReferenceWithSingleQuotedAttributes) {
+    const std::string expanded =
+        "Created:\n<artifact path='planner/DRAFT_PLAN.md'>\n"
+        "plan body\n</artifact>\n";
+    const std::string collapsed = CollapseExpandedReferencesForDisplay(expanded);
+    EXPECT_NE(collapsed.find("@artifact:planner/DRAFT_PLAN.md"), std::string::npos);
+    EXPECT_EQ(collapsed.find("<artifact path='"), std::string::npos);
+}
+
+TEST(MarkdownTest, LeavesUnclosedArtifactTagUnchanged) {
+    const std::string expanded =
+        "Created:\n<artifact path=\"planner/DRAFT_PLAN.md\">\n"
+        "plan body\n";
+    const std::string collapsed = CollapseExpandedReferencesForDisplay(expanded);
+    EXPECT_EQ(collapsed, expanded);
+}
+
+TEST(MarkdownTest, CollapsesNestedArtifactWithoutRegexBacktracking) {
+    std::string expanded = "<artifact path=\"outer.md\">";
+    for (int i = 0; i < 500; ++i) {
+        expanded += "<artifact path=\"inner.md\">payload";
+    }
+    expanded += "</artifact>";
+
+    const std::string collapsed = CollapseExpandedReferencesForDisplay(expanded);
+    EXPECT_NE(collapsed.find("@artifact:outer.md"), std::string::npos);
+}

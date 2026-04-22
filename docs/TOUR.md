@@ -1,120 +1,86 @@
-# STUFF THAT ACTUALLY EXISTS NOW
+# Product tour
 
-This is the doc the old README should've had.
+Firmius is built for people who want agent systems with actual runtime discipline.
 
-If you're trying to figure out what Firmius can do **today**, and not what past-me forgot to brag about, start here.
+This is the fast tour of what makes it different.
 
-## 1) This is not “one assistant with tools”
+## 1. Multi-agent orchestration is the center of the product
 
-Firmius has a real orchestration surface.
+Firmius is not a single assistant pretending to be a team.
 
-That means:
+It supports:
 
-- subagents can be summoned, waited on, and terminated
-- plans can be created, updated, and activated
-- chunks can be added, inspected, and marked ready for execution
-- workers can coordinate with **fleet/file locks** so two agents don't body-slam the same shared file at once
-- agents can hand off work through **thread-scoped artifacts**
+- subagent spawn, wait, and termination flows
+- explicit role lanes like lead, planner, executor, scout, and worker
+- plans and chunks as first-class execution structure
+- thread-scoped artifacts for clean handoffs
+- coordination primitives that keep parallel work from trampling shared files
 
-The artifact bit is especially nice.
+If you need agents to do more than talk nicely, this is the layer that matters.
 
-You can hand things around with references like:
+## 2. Terminal-native on purpose
 
-```text
-@artifact:lead/REPORT.md
-```
+Firmius is a terminal product.
 
-Which means you are not forced to stuff every intermediate report into one giant wall of chat sludge.
+That is not a temporary compromise. It is the advantage.
 
-## 2) Memory does more than politely forget stuff
+The UI stays close to the work, close to the repo, close to the tools, and close to the long-running sessions that make orchestration valuable. No browser wrapper, no split-brain product story, no fake simplicity that falls apart once the work gets serious.
 
-Firmius has rolling memory with actual structure:
+## 3. MCP is a real runtime feature
 
-- occupancy targets
-- buffer/emergency thresholds
-- balanced/aggressive/extended/custom presets
-- observer passes
-- reflector passes
-- a reserved working-memory updater slot
+Firmius supports MCP over `stdio` and `http`, including:
 
-It also injects runtime overlays for:
+- automatic MCP server initialization for configured servers
+- resource reads and prompt resolution through the runtime
+- direct dynamic tool exposure as `mcp__<server>__<tool>`
 
-- current work state
-- watched files
-- loaded skills
-- loaded MCP state
-- rolling-memory status
-- durable user/project memory
+That means MCP is integrated into the workflow, not stapled on top of it.
 
-Durable memory gets its own workspace under `~/.firmius/user/` with:
+## 4. Rolling memory is engineered, not improvised
 
-- `USER.md`
-- `BEHAVIOR.md`
-- workspace-specific fix logs
+Firmius does not rely on “summarize harder” as its memory strategy.
 
-So yeah... there is a real “learned memory / project memory” lane here now.
+You get:
 
-## 3) Watched files are first-class context
+- occupancy targets and thresholds
+- balanced, aggressive, extended, and custom presets
+- observer and reflector passes
+- a dedicated working-memory updater lane
+- watched-file overlays
+- durable user and project memory
+- exact turn recall when compressed context is not enough
 
-Firmius keeps a live overlay of what the agent:
+This is the difference between an agent staying coherent and an agent slowly becoming fiction.
+
+## 5. Watched files are first-class context
+
+Firmius tracks what the runtime has:
 
 - read
 - fully read
 - edited
 
-That sounds small until you realize how much less dumb the agent gets when it can see what parts of the repo it already touched.
+That sounds small until you use it in a large repo. The agent stops wasting turns rediscovering its own work and gets much better at staying grounded in what actually changed.
 
-This is one of those features that doesn't sound flashy, but it quietly makes the whole system less chaotic.
+## 6. The tool surface is built for real work
 
-## 4) Exact turn recall exists too
+Firmius agents can use:
 
-There is a `memory_recall` tool for pulling exact preserved turns by:
-
-- exact turn range
-- cursor turn id
-- simple paging
-
-Which is VERY different from “ehhh just summarize it and hope nothing important got vaporized”.
-
-## 5) The tool surface is kind of nasty now (compliment)
-
-Firmius agents currently have real access to stuff like:
-
-- file read/edit
-- process execute/spawn/status/wait/input
+- file and directory tools
+- grep, glob, and edit flows
+- process execution and interactive subprocess control
 - Python execution
-- glob / grep / directory listing
-- web fetch
-- web search
-- MCP discovery/load/call/read/get
-- LSP semantic queries
-- LSP diagnostics
-- plan/chunk/todo tools
-- artifact tools
+- dynamic MCP tools from configured servers
+- LSP semantic queries and diagnostics
 - memory recall
+- planning, todos, and artifacts
+- web fetch and web search inside the runtime
 
-That's not a toy toolkit anymore.
+This is not “LLM plus two accessories.” It is a working toolbelt.
 
-## 6) MCP is not pretend anymore
+## 7. LSP support keeps agents out of the guesswork lane
 
-MCP support is implemented for:
-
-- `stdio`
-- `http`
-
-The rough shape:
-
-- discover with `mcp_list` / `mcp_search`
-- load what you care about with `mcp_load`
-- call tools with `mcp_call`
-- read loaded resources/prompts with `mcp_read_resource` / `mcp_get_prompt`
-- loaded tools can also appear as dynamic `mcp__<server>__<tool>` entries
-
-See `docs/MCP.md` and `examples/mcp/` for the exact flow.
-
-## 7) LSP is here, which means the agents can stop guessing
-
-Firmius has real LSP-backed semantic ops:
+Firmius includes real semantic code intelligence:
 
 - hover
 - definition
@@ -122,23 +88,16 @@ Firmius has real LSP-backed semantic ops:
 - implementation
 - document symbols
 - workspace symbols
-- call hierarchy helpers
 - diagnostics
+- call hierarchy helpers
 
-This matters because “grep + vibes” is not the same as semantic code intel.
+That means agents can navigate code like a coding tool should, instead of pretending keyword search is good enough.
 
-## 8) Local or Docker execution? Pick your poison.
+## 8. Provider routing is part of the architecture
 
-Threads can run on:
+Firmius supports multiple providers and lets you route different purposes to different model lanes.
 
-- localhost
-- Docker sandboxes
-
-That means you can keep normal repo work local, and still shove benchmark runs / dirtier execution lanes into containers when needed.
-
-## 9) Providers are not a tiny hardcoded afterthought
-
-Current provider IDs wired into engine startup:
+Current provider set includes:
 
 - `nanogpt`
 - `nvidia`
@@ -152,47 +111,27 @@ Current provider IDs wired into engine startup:
 - `kimi`
 - `kilo`
 
-There is also provider/account state, quota tracking where supported, and a separate search-provider registry used by web search.
+That matters because planning, execution, review, and memory maintenance do not all need the same model profile.
 
-So the provider layer is not just “paste API key, pray, and if it dies it dies”.
+## 9. Workflows are editable markdown, not hardcoded ceremony
 
-## 10) Benchmark mode is built into the main app
+Built-in workflows live in `workflows/`.
+Firmius bootstraps them into `~/.firmius/workflows/` and turns each markdown file into a slash command.
 
-`/benchmarks` in the TUI can kick off:
+That gives you a workflow system that is:
 
-- `mbpp`
-- `swebench`
-- `agentbench`
-
-And the dedicated audit CLI exposes a whole extra verification lane:
-
-```bash
-./build/packages/audits/firmius_audit --list
-```
-
-There are audits for workflows, providers, LSP, quotas, web fetch/search, resume behavior, harness chaos, benchmarks, and more.
-
-## 11) Workflow markdown -> slash command is one of the coolest parts
-
-Built-in workflows ship in `workflows/`.
-On startup, Firmius bootstraps them into `~/.firmius/workflows/` if needed.
-Then each markdown file becomes its own slash command.
-
-That means the workflow surface is:
-
+- versionable
+- inspectable
 - user-editable
-- easy to version
-- dead simple to extend
-- not locked behind a recompile
+- fast to extend
 
-Honestly? This deserves way more bragging than it used to get.
+The result is more open than a hidden prompt system and more practical than rebuilding the app for every workflow tweak.
 
-## 12) Under the hood, persistence is doing real work
+## 10. Persistence is doing real product work
 
-Thread storage tracks:
+Firmius thread storage keeps:
 
-- metadata
-- manifests / permission rules / fleet state
+- thread metadata
 - agent turns
 - plans
 - todos
@@ -201,11 +140,28 @@ Thread storage tracks:
 - compaction snapshots
 - artifacts
 
-Which is why artifacts, undo, resume, memory recall, and planning state all feel like part of the same machine instead of a pile of disconnected hacks.
+That is why undo, resume, recall, artifacts, and planning feel like one product instead of disconnected features.
 
-## In summary
+## 11. Audits and benchmarks are built in
 
-Firmius is still rough.
-But it is rough in the fun way now.
+Firmius is opinionated about verification.
 
-The repo already has a lot of the “oh damn, that's actually in here?” features people normally don't expect until way later.
+You can run benchmark flows like:
+
+- `mbpp`
+- `swebench`
+- `agentbench`
+
+And the audit CLI gives you a separate lane for validation:
+
+```bash
+./build/packages/audits/firmius_audit --list
+```
+
+That is a big part of the product story: not just doing work, but checking whether the runtime deserves your trust.
+
+## Bottom line
+
+Firmius is for people who are done pretending agent orchestration is solved by nicer chat chrome.
+
+It is faster, more honest, and more capable because it is built around the runtime problems that other tools usually hide.

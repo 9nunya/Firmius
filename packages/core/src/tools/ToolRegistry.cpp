@@ -58,10 +58,24 @@ rapidjson::Document normalizeToolArguments(const rapidjson::Value &input) {
   return normalized;
 }
 
+bool isAllowedCompactWorkTool(const AgentPermissions &perms) {
+  const auto &allowed = perms.allowedScopes;
+  using firmius::shared::ToolScope;
+  const ToolScope required[] = {
+      ToolScope::PlanRead, ToolScope::PlanWrite, ToolScope::ChunkRead,
+      ToolScope::ChunkWrite, ToolScope::ChunkAssign, ToolScope::ChunkReview};
+  return std::any_of(std::begin(required), std::end(required),
+                     [&](ToolScope scope) {
+                       return std::find(allowed.begin(), allowed.end(), scope) !=
+                              allowed.end();
+                     });
+}
+
 } // namespace
 
 void ToolRegistry::registerTool(std::unique_ptr<shared::ITool> tool) {
   auto meta = tool->getMetadata();
+  std::lock_guard<std::mutex> lock(mutex_);
   tools[meta.name] = std::move(tool);
 }
 
@@ -69,51 +83,63 @@ void ToolRegistry::registerToolFactory(const std::string &name,
                                        ToolFactory factory) {
   if (!factory)
     return;
+  std::lock_guard<std::mutex> lock(mutex_);
   factories[name] = std::move(factory);
 }
 
 shared::ITool *ToolRegistry::getTool(const std::string &name) const {
-  // First check if already instantiated
-  auto it = tools.find(name);
-  if (it != tools.end()) {
-    return it->second.get();
-  }
-
-  // Check if we have a factory for lazy instantiation
-  auto factory_it = factories.find(name);
-  if (factory_it != factories.end()) {
-    auto tool = factory_it->second();
-    if (tool) {
-      auto meta = tool->getMetadata();
-      // Use non-const access through const_cast (safe because we're modifying
-      // our own data)
-      auto &nonConstTools =
-          const_cast<std::map<std::string, std::unique_ptr<shared::ITool>> &>(
-              tools);
-      nonConstTools[meta.name] = std::move(tool);
-      return nonConstTools[name].get();
+  ToolFactory factory;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = tools.find(name);
+    if (it != tools.end()) {
+      return it->second.get();
     }
+
+    auto factoryIt = factories.find(name);
+    if (factoryIt == factories.end()) {
+      return nullptr;
+    }
+    factory = factoryIt->second;
   }
 
-  return nullptr;
+  auto tool = factory ? factory() : nullptr;
+  if (!tool) {
+    return nullptr;
+  }
+
+  auto meta = tool->getMetadata();
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto existing = tools.find(name);
+  if (existing != tools.end()) {
+    return existing->second.get();
+  }
+
+  auto [insertedIt, inserted] = tools.emplace(meta.name, std::move(tool));
+  return insertedIt != tools.end() ? insertedIt->second.get() : nullptr;
 }
 
 std::vector<shared::ToolMetadata> ToolRegistry::listToolMetadata() const {
   std::vector<shared::ToolMetadata> metas;
+  std::vector<ToolFactory> pendingFactories;
 
-  // Add instantiated tools
-  for (const auto &[name, tool] : tools) {
-    metas.push_back(tool->getMetadata());
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto &[name, tool] : tools) {
+      metas.push_back(tool->getMetadata());
+    }
+
+    for (const auto &[name, factory] : factories) {
+      if (tools.find(name) == tools.end()) {
+        pendingFactories.push_back(factory);
+      }
+    }
   }
 
-  // Add factory-registered tools (not yet instantiated)
-  // We need to create them temporarily to get metadata
-  for (const auto &[name, factory] : factories) {
-    if (tools.find(name) == tools.end()) {
-      auto tool = factory();
-      if (tool) {
-        metas.push_back(tool->getMetadata());
-      }
+  for (const auto &factory : pendingFactories) {
+    auto tool = factory ? factory() : nullptr;
+    if (tool) {
+      metas.push_back(tool->getMetadata());
     }
   }
 
@@ -123,29 +149,42 @@ std::vector<shared::ToolMetadata> ToolRegistry::listToolMetadata() const {
 std::vector<firmius::provider::ToolDefinition>
 ToolRegistry::getAvailableToolDefinitions(const AgentPermissions &perms) const {
   std::vector<firmius::provider::ToolDefinition> defs;
+  std::vector<ToolFactory> pendingFactories;
   auto &allowed = perms.allowedScopes;
 
-  for (const auto &[name, tool] : tools) {
-    auto meta = tool->getMetadata();
-    if (std::find(allowed.begin(), allowed.end(), meta.scope) !=
-        allowed.end()) {
-      defs.push_back(
-          {meta.name, meta.description, tool->getSchema()->toString()});
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto &[name, tool] : tools) {
+      auto meta = tool->getMetadata();
+      const bool permitted =
+          meta.name == "Work" ? isAllowedCompactWorkTool(perms)
+                               : std::find(allowed.begin(), allowed.end(),
+                                           meta.scope) != allowed.end();
+      if (permitted) {
+        defs.push_back({meta.name, meta.description,
+                        tool->getSchema()->toString()});
+      }
+    }
+
+    for (const auto &[name, factory] : factories) {
+      if (tools.find(name) == tools.end()) {
+        pendingFactories.push_back(factory);
+      }
     }
   }
 
-  // Include tools from factories (not yet instantiated)
-  for (const auto &[name, factory] : factories) {
-    if (tools.find(name) == tools.end()) {
-      auto tool = factory();
-      if (tool) {
-        auto meta = tool->getMetadata();
-        if (std::find(allowed.begin(), allowed.end(), meta.scope) !=
-            allowed.end()) {
-          defs.push_back(
-              {meta.name, meta.description, tool->getSchema()->toString()});
-        }
-      }
+  for (const auto &factory : pendingFactories) {
+    auto tool = factory ? factory() : nullptr;
+    if (!tool) {
+      continue;
+    }
+    auto meta = tool->getMetadata();
+    const bool permitted =
+        meta.name == "Work" ? isAllowedCompactWorkTool(perms)
+                             : std::find(allowed.begin(), allowed.end(),
+                                         meta.scope) != allowed.end();
+    if (permitted) {
+      defs.push_back({meta.name, meta.description, tool->getSchema()->toString()});
     }
   }
 
@@ -172,8 +211,12 @@ shared::ToolResult ToolRegistry::execute(const std::string &name,
 
   // Security check
   auto &perms = ctx.agent.getContext().permissions;
-  if (std::find(perms.allowedScopes.begin(), perms.allowedScopes.end(),
-                meta.scope) == perms.allowedScopes.end()) {
+  const bool permitted =
+      meta.name == "Work" ? isAllowedCompactWorkTool(perms)
+                           : std::find(perms.allowedScopes.begin(),
+                                       perms.allowedScopes.end(),
+                                       meta.scope) != perms.allowedScopes.end();
+  if (!permitted) {
     return shared::ToolResult::fail(
         "Permission denied: tool scope not allowed for " + name);
   }

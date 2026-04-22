@@ -27,7 +27,7 @@ TEST(StreamStateManagerHistoryTest, RebuildFindsToolResultsRegardlessOfMessageRo
   assistant.role = Role::Assistant;
   assistant.content = {
       TextContent{"working"},
-      ToolCallContent{"tool-1", "file_read", R"({"path":"src/main.rs"})"},
+      ToolCallContent{"tool-1", "Files", R"({"action":"Read","path":"src/main.rs"})"},
       ToolResultContent{"tool-1", R"({"content":"fn main() {}"})", true, "", ""},
   };
   turn.messages.push_back(assistant);
@@ -51,7 +51,7 @@ TEST(StreamStateManagerHistoryTest,
   Message assistant;
   assistant.role = Role::Assistant;
   assistant.content = {ToolCallContent{
-      "tool-edit", "file_edit", R"({"path":"src/main.cpp"})"}};
+      "tool-edit", "Edit", R"({"path":"src/main.cpp"})"}};
 
   Message tool_result;
   tool_result.role = Role::ToolResult;
@@ -80,11 +80,50 @@ TEST(StreamStateManagerHistoryTest,
 }
 
 TEST(StreamStateManagerHistoryTest,
+     RebuildDerivesFileEditFallbackSignalsFromOperationsWhenPreviewMissing) {
+  AgentHistory history;
+  AgentTurn turn;
+  turn.turnId = "turn-file-edit-ops";
+
+  Message assistant;
+  assistant.role = Role::Assistant;
+  assistant.content = {ToolCallContent{
+      "tool-edit", "Edit", R"({"path":"src/main.cpp","content":"hello\nworld\n"})"}};
+
+  Message tool_result;
+  tool_result.role = Role::ToolResult;
+  tool_result.content = {ToolResultContent{
+      "tool-edit",
+      R"({"path":"src/main.cpp","mode":"overwrite","applied_edits":1,"added_lines":2,"removed_lines":0,"operations":[{"op":"overwrite_file_content","description":"create file","start_line":1,"end_line":2,"old_lines":[],"new_lines":["hello","world"]}]})",
+      true,
+      "",
+      ""}};
+
+  turn.messages.push_back(std::move(assistant));
+  turn.messages.push_back(std::move(tool_result));
+  history.turns.push_back(std::move(turn));
+
+  StreamStateManager state;
+  state.rebuildToolCallsFromHistory("agent-1", &history, "thread-1", false);
+
+  auto view = state.getToolView("tool-edit");
+  ASSERT_TRUE(static_cast<bool>(view));
+  ASSERT_EQ(view->fileEditEvents.size(), 1u);
+  EXPECT_EQ(view->fileEditEvents.front().path, "src/main.cpp");
+  EXPECT_EQ(view->fileEditEvents.front().addedLines, 2);
+  EXPECT_EQ(view->fileEditEvents.front().removedLines, 0);
+  EXPECT_NE(view->fileEditEvents.front().diffPreview.find("@@ create file @@"),
+            std::string::npos);
+  EXPECT_NE(view->fileEditEvents.front().diffPreview.find("+hello"),
+            std::string::npos);
+}
+
+TEST(StreamStateManagerHistoryTest,
      TimeoutProcessMovesToBackgroundAndFinishesLater) {
   StreamStateManager state;
 
   state.handleAgentToolCall(
-      {"agent-1", "tool-1", "process_execute", R"({"command":"sleep 5"})", ""});
+      {"agent-1", "tool-1", "Process", R"({"action":"Execute","command":"sleep 5"})", ""});
   state.handleAgentProcessSpawned(
       AgentProcessSpawned{"agent-1", "proc-1", "tool-1", "sleep 5", ""});
 
@@ -144,7 +183,7 @@ TEST(StreamStateManagerHistoryTest,
   StreamStateManager state;
 
   state.handleAgentToolCall(
-      {"agent-1", "tool-1", "process_execute", R"({"command":"sleep 5"})", ""});
+      {"agent-1", "tool-1", "Process", R"({"action":"Execute","command":"sleep 5"})", ""});
   state.handleAgentProcessOutput(
       AgentProcessOutput{"agent-1", "proc-1", "early\n", false, false, -1, 0.0, ""});
 
@@ -169,7 +208,7 @@ TEST(StreamStateManagerHistoryTest,
   StreamStateManager state;
 
   state.handleAgentToolCall(
-      {"agent-1", "tool-1", "process_spawn", R"({"command":"tail -f app.log"})", ""});
+      {"agent-1", "tool-1", "Process", R"({"action":"Spawn","command":"tail -f app.log"})", ""});
   state.handleAgentProcessSpawned(
       AgentProcessSpawned{"agent-1", "proc-1", "tool-1", "tail -f app.log", ""});
 
@@ -178,7 +217,7 @@ TEST(StreamStateManagerHistoryTest,
   Message tool_result;
   tool_result.role = Role::ToolResult;
   tool_result.content = {ToolResultContent{
-      "tool-1", R"({"process_id":"proc-1"})", true, "proc-1", ""}};
+      "tool-1", R"({"action":"Status","process_id":"proc-1"})", true, "proc-1", ""}};
   turn.messages.push_back(tool_result);
   state.handleAgentTurnCompleted({"agent-1", turn, {}, ""});
 
@@ -223,7 +262,7 @@ TEST(StreamStateManagerHistoryTest,
      SpawnedProcessEntersNormalizedStateImmediately) {
   StreamStateManager state;
   state.handleAgentToolCall(
-      {"agent-1", "tool-1", "process_spawn", R"({"command":"tail -f app.log"})", ""});
+      {"agent-1", "tool-1", "Process", R"({"action":"Spawn","command":"tail -f app.log"})", ""});
   state.handleAgentProcessSpawned(
       AgentProcessSpawned{"agent-1", "proc-1", "tool-1", "tail -f app.log", ""});
 
@@ -240,11 +279,11 @@ TEST(StreamStateManagerHistoryTest,
      ProcessCountsAreDerivedFromNormalizedStateByOwnerAgent) {
   StreamStateManager state;
   state.handleAgentToolCall(
-      {"agent-a", "tool-a", "process_spawn", R"({"command":"tail -f a.log"})", ""});
+      {"agent-a", "tool-a", "Process", R"({"action":"Spawn","command":"tail -f a.log"})", ""});
   state.handleAgentProcessSpawned(
       AgentProcessSpawned{"agent-a", "proc-a", "tool-a", "tail -f a.log", ""});
   state.handleAgentToolCall(
-      {"agent-b", "tool-b", "process_spawn", R"({"command":"tail -f b.log"})", ""});
+      {"agent-b", "tool-b", "Process", R"({"action":"Spawn","command":"tail -f b.log"})", ""});
   state.handleAgentProcessSpawned(
       AgentProcessSpawned{"agent-b", "proc-b", "tool-b", "tail -f b.log", ""});
 
@@ -261,7 +300,7 @@ TEST(StreamStateManagerHistoryTest,
   StreamStateManager state;
 
   state.handleAgentToolCall(
-      {"agent-1", "tool-origin", "process_execute", R"({"command":"sleep 5"})", ""});
+      {"agent-1", "tool-origin", "Process", R"({"action":"Execute","command":"sleep 5"})", ""});
   state.handleAgentProcessSpawned(
       AgentProcessSpawned{"agent-1", "proc-1", "tool-origin", "sleep 5", ""});
 
@@ -279,14 +318,14 @@ TEST(StreamStateManagerHistoryTest,
   state.handleAgentTurnCompleted({"agent-1", turn, {}, ""});
 
   state.handleAgentToolCall(
-      {"agent-1", "tool-wait", "process_wait",
-       R"({"process_id":"proc-1","pattern":"READY"})", ""});
+      {"agent-1", "tool-wait", "Process",
+       R"({"action":"Wait","process_id":"proc-1","pattern":"READY"})", ""});
   state.handleAgentToolCall(
-      {"agent-1", "tool-status", "process_status",
-       R"({"process_id":"proc-1"})", ""});
+      {"agent-1", "tool-status", "Process",
+       R"({"action":"Status","process_id":"proc-1"})", ""});
   state.handleAgentToolCall(
-      {"agent-1", "tool-input", "process_input",
-       R"({"process_id":"proc-1","input":"status\n"})", ""});
+      {"agent-1", "tool-input", "Process",
+       R"({"action":"Input","process_id":"proc-1","input":"status\n"})", ""});
 
   const auto *origin = state.getProcessStateForToolCall("tool-origin");
   const auto *wait = state.getProcessStateForToolCall("tool-wait");
@@ -306,17 +345,89 @@ TEST(StreamStateManagerHistoryTest,
 }
 
 TEST(StreamStateManagerHistoryTest,
+     DistinctAgentsRetainTranscriptAndShellStateAcrossFocusLikeSwitches) {
+  StreamStateManager state;
+
+  state.handleAgentToolCall(
+      {"agent-a", "tool-a", "Process", R"({"action":"Spawn","command":"tail -f agent-a.log"})", ""});
+  state.handleAgentProcessSpawned(
+      AgentProcessSpawned{"agent-a", "proc-a", "tool-a", "tail -f agent-a.log", ""});
+  state.handleAgentProcessOutput(
+      AgentProcessOutput{"agent-a", "proc-a", "agent-a output\n", false, false, -1,
+                         0.0, ""});
+
+  AgentTurn turn_a;
+  turn_a.turnId = "turn-a";
+  Message assistant_a;
+  assistant_a.role = Role::Assistant;
+  assistant_a.content = {
+      TextContent{"Agent A transcript"},
+      ToolResultContent{"tool-a", R"({"process_id":"proc-a"})", true, "proc-a",
+                        ""},
+  };
+  turn_a.messages.push_back(std::move(assistant_a));
+  state.handleAgentTurnCompleted({"agent-a", turn_a, {}, ""});
+
+  state.handleAgentToolCall(
+      {"agent-b", "tool-b", "Process", R"({"action":"Spawn","command":"tail -f agent-b.log"})", ""});
+  state.handleAgentProcessSpawned(
+      AgentProcessSpawned{"agent-b", "proc-b", "tool-b", "tail -f agent-b.log", ""});
+  state.handleAgentProcessOutput(
+      AgentProcessOutput{"agent-b", "proc-b", "agent-b output\n", false, false, -1,
+                         0.0, ""});
+
+  AgentTurn turn_b;
+  turn_b.turnId = "turn-b";
+  Message assistant_b;
+  assistant_b.role = Role::Assistant;
+  assistant_b.content = {
+      TextContent{"Agent B transcript"},
+      ToolResultContent{"tool-b", R"({"process_id":"proc-b"})", true, "proc-b",
+                        ""},
+  };
+  turn_b.messages.push_back(std::move(assistant_b));
+  state.handleAgentTurnCompleted({"agent-b", turn_b, {}, ""});
+
+  auto view_a = state.getToolView("tool-a");
+  auto view_b = state.getToolView("tool-b");
+  ASSERT_TRUE(static_cast<bool>(view_a));
+  ASSERT_TRUE(static_cast<bool>(view_b));
+  EXPECT_EQ(view_a->process_id, "proc-a");
+  EXPECT_EQ(view_b->process_id, "proc-b");
+  EXPECT_EQ(view_a->live_process_output, "agent-a output\n");
+  EXPECT_EQ(view_b->live_process_output, "agent-b output\n");
+  EXPECT_EQ(view_a->phase, ToolPhase::BackgroundRunning);
+  EXPECT_EQ(view_b->phase, ToolPhase::BackgroundRunning);
+
+  auto process_a = state.getProcessStateForToolCall("tool-a");
+  auto process_b = state.getProcessStateForToolCall("tool-b");
+  ASSERT_NE(process_a, nullptr);
+  ASSERT_NE(process_b, nullptr);
+  EXPECT_EQ(process_a->owner_agent_id, "agent-a");
+  EXPECT_EQ(process_b->owner_agent_id, "agent-b");
+  EXPECT_EQ(process_a->latest_output_tail, "agent-a output\n");
+  EXPECT_EQ(process_b->latest_output_tail, "agent-b output\n");
+
+  const auto counts_a = state.getProcessCounts("agent-a");
+  const auto counts_b = state.getProcessCounts("agent-b");
+  EXPECT_EQ(counts_a.live, 0);
+  EXPECT_EQ(counts_a.background, 1);
+  EXPECT_EQ(counts_b.live, 0);
+  EXPECT_EQ(counts_b.background, 1);
+}
+
+TEST(StreamStateManagerHistoryTest,
      SubagentStateLookupResolvesSummonAndWaitForSameChildAgent) {
   StreamStateManager state;
 
-  state.handleAgentToolCall({"parent", "summon-1", "summon_subagent",
+  state.handleAgentToolCall({"parent", "summon-1", "Delegate",
                              R"({"name":"worker","title":"Worker","task":"Do task"})",
                              ""});
   state.handleAgentSpawned(
       {"child-1", "worker", "parent", "worker", "Worker", true, "", "", 0},
       "parent");
   state.handleAgentToolCall(
-      {"parent", "wait-1", "subagent_wait", R"({"agent_id":"child-1"})", ""});
+      {"parent", "wait-1", "Delegate", R"({"action":"Wait","agent_id":"child-1"})", ""});
 
   AgentTurn turn;
   turn.turnId = "turn-1";
@@ -351,9 +462,9 @@ TEST(StreamStateManagerHistoryTest,
   Message assistant;
   assistant.role = Role::Assistant;
   assistant.content = {
-      ToolCallContent{"summon-1", "summon_subagent",
+      ToolCallContent{"summon-1", "Delegate",
                       R"({"title":"Worker","task":"Implement feature"})"},
-      ToolCallContent{"wait-1", "subagent_wait", R"({"agent_id":"child-1"})"},
+      ToolCallContent{"wait-1", "Delegate", R"({"action":"Wait","agent_id":"child-1"})"},
   };
   Message tool_result;
   tool_result.role = Role::ToolResult;
@@ -394,7 +505,7 @@ TEST(StreamStateManagerHistoryTest,
   Message assistant;
   assistant.role = Role::Assistant;
   assistant.content = {
-      ToolCallContent{"wait-typed", "subagent_wait", R"({"agent_id":"child-typed"})"},
+      ToolCallContent{"wait-typed", "Delegate", R"({"action":"Wait","agent_id":"child-typed"})"},
   };
   Message tool_result;
   tool_result.role = Role::ToolResult;
@@ -429,7 +540,7 @@ TEST(StreamStateManagerHistoryTest, RebuildPreservesTypedCancelledOutcome) {
   Message assistant;
   assistant.role = Role::Assistant;
   assistant.content = {
-      ToolCallContent{"wait-cancelled", "subagent_wait",
+      ToolCallContent{"wait-cancelled", "Delegate",
                       R"({"agent_id":"child-cancelled"})"},
   };
   Message tool_result;
@@ -459,7 +570,7 @@ TEST(StreamStateManagerHistoryTest, RebuildPreservesTypedSpawnedRouteState) {
   Message assistant;
   assistant.role = Role::Assistant;
   assistant.content = {
-      ToolCallContent{"summon-spawned", "summon_subagent",
+      ToolCallContent{"summon-spawned", "Delegate",
                       R"({"title":"Worker","task":"Investigate"})"},
   };
   Message tool_result;
@@ -492,8 +603,8 @@ TEST(StreamStateManagerHistoryTest,
   Message assistant;
   assistant.role = Role::Assistant;
   assistant.content = {
-      ToolCallContent{"wait-1", "subagent_wait", R"({"agent_id":"child-1"})"},
-      ToolCallContent{"summon-1", "summon_subagent",
+      ToolCallContent{"wait-1", "Delegate", R"({"action":"Wait","agent_id":"child-1"})"},
+      ToolCallContent{"summon-1", "Delegate",
                       R"({"title":"Worker","task":"Inspect requirements"})"},
   };
   Message tool_result;
@@ -537,9 +648,9 @@ TEST(StreamStateManagerHistoryTest,
   Message assistant;
   assistant.role = Role::Assistant;
   assistant.content = {
-      ToolCallContent{"summon-2", "summon_subagent",
+      ToolCallContent{"summon-2", "Delegate",
                       R"({"title":"Worker","task":"Inspect requirements"})"},
-      ToolCallContent{"wait-2", "subagent_wait", R"({"agent_id":"child-2"})"},
+      ToolCallContent{"wait-2", "Delegate", R"({"action":"Wait","agent_id":"child-2"})"},
   };
   Message tool_result;
   tool_result.role = Role::ToolResult;
@@ -574,9 +685,9 @@ TEST(StreamStateManagerHistoryTest,
   Message child_assistant;
   child_assistant.role = Role::Assistant;
   child_assistant.content = {
-      ToolCallContent{"child-list", "list_directory", R"({"path":"."})"},
-      ToolCallContent{"child-read", "artifact_read",
-                      R"({"reference":"@artifact:dir-researcher/WORKER_REPORT.md"})"},
+      ToolCallContent{"child-list", "Files", R"({"action":"List","path":"."})"},
+      ToolCallContent{"child-read", "Artifacts",
+                      R"({"action":"Read","reference":"@artifact:dir-researcher/WORKER_REPORT.md"})"},
   };
   Message child_result;
   child_result.role = Role::ToolResult;
@@ -598,9 +709,9 @@ TEST(StreamStateManagerHistoryTest,
   Message assistant;
   assistant.role = Role::Assistant;
   assistant.content = {
-      ToolCallContent{"summon-1", "summon_subagent",
+      ToolCallContent{"summon-1", "Delegate",
                       R"({"title":"Worker","task":"Inspect requirements"})"},
-      ToolCallContent{"wait-1", "subagent_wait", R"({"agent_id":"child-1"})"},
+      ToolCallContent{"wait-1", "Delegate", R"({"action":"Wait","agent_id":"child-1"})"},
   };
   Message tool_result;
   tool_result.role = Role::ToolResult;
@@ -635,7 +746,7 @@ TEST(StreamStateManagerHistoryTest,
       view->subagent_tool_log.begin(), view->subagent_tool_log.end(),
       [](const firmius::shared::SubagentToolLogEntry &entry) {
         return entry.summary ==
-               "Loaded @artifact:dir-researcher/WORKER_REPORT.md";
+               "Read @artifact:dir-researcher/WORKER_REPORT.md";
       }));
   EXPECT_EQ(view->subagent_tool_log.back().summary, "Done");
 }

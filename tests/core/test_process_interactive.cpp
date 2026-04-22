@@ -4,10 +4,7 @@
 #include "hosts/LocalHost.hpp"
 #include "providers/NanoGPTProvider.hpp"
 #include "providers/ProviderRegistry.hpp"
-#include "tools/ProcessInputTool.hpp"
-#include "tools/ProcessSpawnTool.hpp"
-#include "tools/ProcessStatusTool.hpp"
-#include "tools/ProcessWaitTool.hpp"
+#include "tools/ProcessTool.hpp"
 #include "tools/ToolRegistry.hpp"
 #include "../unit/mocks/MockPermissions.hpp"
 #include <gtest/gtest.h>
@@ -170,10 +167,7 @@ protected:
     ctx.permissions.allowedPaths = {"/tmp"};
 
     // Registry and tools
-    registry.registerTool(std::make_unique<ProcessSpawnTool>());
-    registry.registerTool(std::make_unique<ProcessInputTool>());
-    registry.registerTool(std::make_unique<ProcessStatusTool>());
-    registry.registerTool(std::make_unique<ProcessWaitTool>());
+    registry.registerTool(std::make_unique<ProcessTool>());
 
     auto localHost = std::make_shared<LocalHost>();
     hostRaw = localHost.get();

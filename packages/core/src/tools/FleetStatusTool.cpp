@@ -1,7 +1,7 @@
 #include "tools/FleetStatusTool.hpp"
+#include "tools/WorkSupport.hpp"
 #include "AgentRegistry.hpp"
 #include "persistence/ThreadManager.hpp"
-#include "tools/WorkToolCommon.hpp"
 #include <rapidjson/document.h>
 
 namespace firmius::core {
@@ -57,7 +57,7 @@ rapidjson::Value lockToJson(const FleetLock &lock,
 
 shared::ToolMetadata FleetStatusTool::getMetadata() const {
   return {"fleet_status",
-          "Return current fleet locks for the thread or a specific root agent.",
+          "Fleet coordination operations: inspect current locks for the thread or a specific root agent.",
           shared::ToolScope::Delegation};
 }
 
@@ -72,7 +72,7 @@ std::shared_ptr<shared::JSONSchema> FleetStatusTool::getSchema() const {
 
 shared::ToolResult FleetStatusTool::execute(const FleetStatusInput &input,
                                             shared::ToolContext &ctx) {
-  const std::string threadId = worktools::requireCurrentThreadId(ctx);
+  const std::string threadId = work::requireCurrentThreadId(ctx);
   ThreadManager tm(ThreadManager::defaultBasePath());
   FleetState state = tm.getFleetState(threadId);
 

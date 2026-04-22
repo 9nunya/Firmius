@@ -73,9 +73,9 @@ std::string renderTurn(const shared::AgentTurn &turn, bool includeSystem) {
 } // namespace
 
 shared::ToolMetadata MemoryRecallTool::getMetadata() const {
-  return {"memory_recall",
-          "Recall exact preserved thread turns by turn id or simple paging.",
-          shared::ToolScope::Semantic};
+  return {"Memory",
+          "Recall exact preserved thread turns by id or paging.",
+          ToolScope::Semantic};
 }
 
 std::shared_ptr<shared::JSONSchema> MemoryRecallTool::getSchema() const {

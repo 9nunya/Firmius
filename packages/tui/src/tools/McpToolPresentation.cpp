@@ -47,13 +47,6 @@ std::string StringMember(const rapidjson::Value &value, const char *key) {
   return "";
 }
 
-int ArrayMemberCount(const rapidjson::Value &value, const char *key) {
-  if (value.IsObject() && value.HasMember(key) && value[key].IsArray()) {
-    return static_cast<int>(value[key].Size());
-  }
-  return -1;
-}
-
 std::vector<std::string> SplitLines(const std::string &text) {
   std::vector<std::string> lines;
   std::istringstream stream(text);
@@ -150,17 +143,10 @@ void AddRawToggleContract(ToolPresentation &presentation,
   presentation.notices.push_back(std::move(notice));
 }
 
-void AddNonNegativeCountFact(ToolPresentation &presentation, const std::string &key,
-                             int value) {
-  if (value >= 0) {
-    presentation.facts.push_back({key, std::to_string(value)});
-  }
-}
-
 } // namespace
 
 bool IsMcpFamilyTool(const std::string &tool_name) {
-  return tool_name.rfind("mcp_", 0) == 0 || tool_name.rfind("mcp__", 0) == 0;
+  return tool_name.rfind("mcp__", 0) == 0;
 }
 
 ToolPresentation BuildMcpToolPresentation(const ToolCallView &view) {
@@ -227,95 +213,16 @@ ToolPresentation BuildMcpToolPresentation(const ToolCallView &view) {
     }
   };
 
-  if (view.name == "mcp_call" || view.name.rfind("mcp__", 0) == 0) {
-    const bool dynamic = view.name.rfind("mcp__", 0) == 0;
-    presentation.title = (!tool_name.empty() && !server_name.empty())
-                             ? (dynamic ? "MCP tool " + tool_name + " @ " + server_name
-                                        : "MCP call " + tool_name + " @ " + server_name)
-                             : (dynamic ? "MCP dynamic tool call" : "MCP tool call");
-
-    if (has_result_object && result_doc.HasMember("remote_result")) {
-      presentation.facts.push_back(
-          {"Remote result", SummarizeValueShape(result_doc["remote_result"])});
-    }
-    add_identity();
-  } else if (view.name == "mcp_load") {
-    presentation.title = !server_name.empty() ? ("MCP load " + server_name) : "MCP load";
-    add_identity();
-    if (has_result_object) {
-      AddNonNegativeCountFact(presentation, "Loaded tools",
-                              ArrayMemberCount(result_doc, "loaded_tools"));
-      AddNonNegativeCountFact(presentation, "Loaded resources",
-                              ArrayMemberCount(result_doc, "loaded_resources"));
-      AddNonNegativeCountFact(presentation, "Loaded prompts",
-                              ArrayMemberCount(result_doc, "loaded_prompts"));
-    }
-  } else if (view.name == "mcp_list") {
-    presentation.title = !server_name.empty() ? ("MCP capabilities " + server_name)
-                                               : "MCP capabilities";
-    add_identity();
-    if (has_result_object && result_doc.HasMember("servers") &&
-        result_doc["servers"].IsArray()) {
-      const auto &servers = result_doc["servers"].GetArray();
-      presentation.facts.push_back(
-          {"Servers", std::to_string(static_cast<int>(servers.Size()))});
-      for (rapidjson::SizeType i = 0; i < servers.Size() && i < 3; ++i) {
-        const auto &entry = servers[i];
-        if (!entry.IsObject()) {
-          continue;
-        }
-        const std::string name = StringMember(entry, "server_name");
-        if (name.empty()) {
-          continue;
-        }
-        const int tools = ArrayMemberCount(entry, "tools");
-        const int resources = ArrayMemberCount(entry, "resources");
-        const int prompts = ArrayMemberCount(entry, "prompts");
-        ToolPresentationSection section;
-        section.title = "Server";
-        section.lines = {name + " • tools " + std::to_string(std::max(0, tools)) +
-                         " • resources " + std::to_string(std::max(0, resources)) +
-                         " • prompts " + std::to_string(std::max(0, prompts))};
-        presentation.sections.push_back(std::move(section));
-      }
-    }
-  } else if (view.name == "mcp_search") {
-    const std::string query = has_args ? StringMember(args_doc, "query") : "";
-    presentation.title = query.empty() ? "MCP search" : ("MCP search \"" + query + "\"");
-    add_identity();
-    if (has_result_object && result_doc.HasMember("servers") &&
-        result_doc["servers"].IsArray()) {
-      int match_count = 0;
-      for (const auto &entry : result_doc["servers"].GetArray()) {
-        if (!entry.IsObject()) {
-          continue;
-        }
-        match_count += std::max(0, ArrayMemberCount(entry, "tools"));
-        match_count += std::max(0, ArrayMemberCount(entry, "resources"));
-        match_count += std::max(0, ArrayMemberCount(entry, "prompts"));
-      }
-      presentation.facts.push_back({"Matches", std::to_string(match_count)});
-    }
-  } else if (view.name == "mcp_read_resource") {
-    presentation.title = resource_uri.empty() ? "MCP read resource"
-                                               : ("MCP resource " + resource_uri);
-    add_identity();
-    if (has_result_object && result_doc.HasMember("remote_result")) {
-      presentation.facts.push_back(
-          {"Remote result", SummarizeValueShape(result_doc["remote_result"])});
-    }
-  } else if (view.name == "mcp_get_prompt") {
-    presentation.title = prompt_name.empty() ? "MCP get prompt"
-                                              : ("MCP prompt " + prompt_name);
-    add_identity();
-    if (has_result_object && result_doc.HasMember("remote_result")) {
-      presentation.facts.push_back(
-          {"Remote result", SummarizeValueShape(result_doc["remote_result"])});
-    }
+  if (!tool_name.empty() && !server_name.empty()) {
+    presentation.title = "MCP tool " + tool_name + " @ " + server_name;
   } else {
-    presentation.title = SummarizeToolCall(view.name, view.args, view.phase);
-    add_identity();
+    presentation.title = "MCP dynamic tool call";
   }
+  if (has_result_object && result_doc.HasMember("remote_result")) {
+    presentation.facts.push_back(
+        {"Remote result", SummarizeValueShape(result_doc["remote_result"])});
+  }
+  add_identity();
 
   presentation.compact_summary = presentation.title;
 

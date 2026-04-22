@@ -19,7 +19,6 @@
 #include "utils/InterruptibleSleep.hpp"
 #include "utils/StringUtil.hpp"
 #include "tools/McpToolUtil.hpp"
-#include "tools/McpCallTool.hpp"
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -111,10 +110,89 @@ struct EditedFileEventPayload {
   int removedLines = 0;
 };
 
+std::vector<std::string> parseStringArrayMember(const rapidjson::Value &value,
+                                                const char *key) {
+  std::vector<std::string> lines;
+  if (!value.IsObject() || !value.HasMember(key) || !value[key].IsArray()) {
+    return lines;
+  }
+  for (const auto &entry : value[key].GetArray()) {
+    if (entry.IsString()) {
+      lines.emplace_back(entry.GetString());
+    }
+  }
+  return lines;
+}
+
+std::string buildDiffPreviewFromOperations(const rapidjson::Value &value) {
+  if (!value.IsObject() || !value.HasMember("operations") ||
+      !value["operations"].IsArray()) {
+    return "";
+  }
+  std::ostringstream out;
+  bool wrote_any = false;
+  for (const auto &op : value["operations"].GetArray()) {
+    if (!op.IsObject()) {
+      continue;
+    }
+    const std::string description =
+        op.HasMember("description") && op["description"].IsString()
+            ? op["description"].GetString()
+            : (op.HasMember("op") && op["op"].IsString() ? op["op"].GetString()
+                                                           : "edit");
+    const auto oldLines = parseStringArrayMember(op, "old_lines");
+    const auto newLines = parseStringArrayMember(op, "new_lines");
+    if (oldLines.empty() && newLines.empty()) {
+      continue;
+    }
+    if (wrote_any) {
+      out << "\n";
+    }
+    out << "@@ " << description << " @@\n";
+    for (const auto &line : oldLines) {
+      out << "-" << line << "\n";
+    }
+    for (const auto &line : newLines) {
+      out << "+" << line << "\n";
+    }
+    wrote_any = true;
+  }
+  return out.str();
+}
+
+std::unordered_map<std::string, std::string>
+extractOverwriteContentByPath(const std::string &toolArgs) {
+  std::unordered_map<std::string, std::string> contents;
+  rapidjson::Document input;
+  input.Parse(toolArgs.c_str());
+  if (input.HasParseError() || !input.IsObject()) {
+    return contents;
+  }
+
+  auto appendFromObject = [&](const rapidjson::Value &value) {
+    if (!value.IsObject() || !value.HasMember("path") || !value["path"].IsString() ||
+        !value.HasMember("content") || !value["content"].IsString()) {
+      return;
+    }
+    contents[value["path"].GetString()] = value["content"].GetString();
+  };
+
+  if (input.HasMember("files") && input["files"].IsArray()) {
+    for (const auto &entry : input["files"].GetArray()) {
+      appendFromObject(entry);
+    }
+    return contents;
+  }
+
+  appendFromObject(input);
+  return contents;
+}
+
 std::vector<EditedFileEventPayload>
 extractFileEditEventPayloads(const std::string &toolArgs,
                              const std::string &resultStr) {
   std::vector<EditedFileEventPayload> payloads;
+  const auto overwriteContents = extractOverwriteContentByPath(toolArgs);
 
   rapidjson::Document resultDoc;
   resultDoc.Parse(resultStr.c_str());
@@ -129,11 +207,32 @@ extractFileEditEventPayloads(const std::string &toolArgs,
       if (value.HasMember("diff_preview") && value["diff_preview"].IsString()) {
         payload.diffPreview = value["diff_preview"].GetString();
       }
+      if (payload.diffPreview.empty()) {
+        payload.diffPreview = buildDiffPreviewFromOperations(value);
+      }
       if (value.HasMember("added_lines") && value["added_lines"].IsInt()) {
         payload.addedLines = value["added_lines"].GetInt();
       }
       if (value.HasMember("removed_lines") && value["removed_lines"].IsInt()) {
         payload.removedLines = value["removed_lines"].GetInt();
+      }
+      if (payload.diffPreview.empty()) {
+        auto overwriteIt = overwriteContents.find(payload.path);
+        if (overwriteIt != overwriteContents.end()) {
+          std::istringstream stream(overwriteIt->second);
+          std::string line;
+          std::ostringstream preview;
+          preview << "@@ overwrite file @@\n";
+          int added = 0;
+          while (std::getline(stream, line)) {
+            preview << "+" << line << "\n";
+            ++added;
+          }
+          payload.diffPreview = preview.str();
+          if (payload.addedLines == 0) {
+            payload.addedLines = added;
+          }
+        }
       }
       payloads.push_back(std::move(payload));
     };
@@ -424,25 +523,21 @@ void appendDynamicMcpToolDefinitions(const AgentContext &context,
     seen.insert(def.name);
   }
 
-  for (const auto &serverName : context.state.loadedMcpServers) {
-    const auto loadedToolsIt = context.state.loadedMcpTools.find(serverName);
-    if (loadedToolsIt == context.state.loadedMcpTools.end()) {
-      continue;
-    }
-    for (const auto &toolName : loadedToolsIt->second) {
-      if (toolName.empty()) {
+  for (const auto &[serverName, toolDefs] : context.state.loadedMcpToolDefinitions) {
+    for (const auto &toolDef : toolDefs) {
+      if (toolDef.name.empty()) {
         continue;
       }
-      const std::string dynamicName = buildDynamicMcpToolName(serverName, toolName);
+      const std::string dynamicName = buildDynamicMcpToolName(serverName, toolDef.name);
       if (seen.count(dynamicName) > 0) {
         continue;
       }
       provider::ToolDefinition dynamicDef;
       dynamicDef.name = dynamicName;
-      dynamicDef.description =
-          "Invoke loaded MCP tool '" + toolName + "' on server '" + serverName +
-          "'.";
-      dynamicDef.inputSchema = R"({"type":"object","additionalProperties":true})";
+      dynamicDef.description = toolDef.description.empty()
+          ? ("Invoke loaded MCP tool '" + toolDef.name + "' on server '" + serverName + "'.")
+          : toolDef.description;
+      dynamicDef.inputSchema = toolDef.inputSchema;
       defs.push_back(std::move(dynamicDef));
       seen.insert(dynamicName);
     }
@@ -492,9 +587,36 @@ std::optional<shared::ToolResult> executeDynamicMcpToolCall(
   argsValue.CopyFrom(toolInput, alloc);
   mcpCallInput.AddMember("arguments", argsValue.Move(), alloc);
 
-  McpCallTool mcpCallTool;
-  const McpCallInput typedInput = mcpCallTool.transform(mcpCallInput);
-  return mcpCallTool.execute(typedInput, toolCtx);
+  auto &agent = dynamic_cast<Agent &>(toolCtx.agent);
+  auto client = agent.getMcpClient(serverName, toolCtx);
+  if (!client) {
+    return shared::ToolResult::fail("Failed to get MCP client for: " + serverName);
+  }
+
+  if (!client->isInitialized()) {
+    client->initialize(mcp_tools::kDefaultTimeoutMs, &toolCtx);
+  }
+
+  try {
+    const rapidjson::Document callResponse =
+        client->callTool(remoteToolName, toolInput, mcp_tools::kDefaultTimeoutMs, &toolCtx);
+
+    rapidjson::Document out;
+    out.SetObject();
+    auto &a = out.GetAllocator();
+    out.AddMember("server_name",
+                  rapidjson::Value(serverName.c_str(), a).Move(), a);
+    out.AddMember("tool_name", rapidjson::Value(remoteToolName.c_str(), a).Move(),
+                  a);
+
+    rapidjson::Value remoteResult;
+    remoteResult.CopyFrom(callResponse["result"], a);
+    out.AddMember("remote_result", remoteResult, a);
+
+    return shared::ToolResult::ok(out);
+  } catch (const std::exception &e) {
+    return shared::ToolResult::fail(e.what());
+  }
 }
 
 void saveCompactionSnapshot(const std::string &threadId,
@@ -916,9 +1038,125 @@ Agent::Agent(AgentContext ctx, std::shared_ptr<shared::IEnvironment> env,
       context.config.modelVariant = *preferred.variantName;
     }
   }
+
+  initializeMcpServers();
+}
+
+std::shared_ptr<mcp::McpClient> Agent::getMcpClient(const std::string &serverName, shared::ToolContext &toolCtx) {
+  auto client = mcpManager_.getClient(serverName);
+  if (client) {
+    return client;
+  }
+
+  const auto &config = shared::ConfigLoader::instance().getConfig();
+  const auto it = config.mcpServers.find(serverName);
+  if (it == config.mcpServers.end()) {
+    return nullptr;
+  }
+
+  const auto &server = it->second;
+  if (!server.enabled) {
+    return nullptr;
+  }
+
+  if (server.transport == "stdio") {
+    if (shared::StringUtil::trim(server.command).empty()) {
+      return nullptr;
+    }
+
+    const std::string command = mcp_tools::composeCommand(server);
+    auto process = toolCtx.host.spawn(command, server.cwd, server.env);
+    if (!process) {
+      return nullptr;
+    }
+
+    client = std::make_shared<mcp::McpClient>(std::move(process));
+  } else if (server.transport == "http") {
+    if (shared::StringUtil::trim(server.url).empty()) {
+      return nullptr;
+    }
+
+    mcp::McpHttpTransportConfig httpConfig;
+    httpConfig.url = server.url;
+    httpConfig.authHeader = server.authHeader;
+    httpConfig.authBearerToken = server.authBearerToken;
+    httpConfig.allowInsecureTls = server.allowInsecureTls;
+    httpConfig.caCertPath = server.caCertPath;
+
+    client = std::make_shared<mcp::McpClient>(httpConfig);
+  } else {
+    return nullptr;
+  }
+
+  mcpManager_.registerClient(serverName, client);
+  return client;
+}
+
+void Agent::initializeMcpServers() {
+  const auto &config = shared::ConfigLoader::instance().getConfig();
+  for (const auto &[name, server] : config.mcpServers) {
+    if (!server.enabled) {
+      continue;
+    }
+
+    // Create a transient tool context for initialization
+    // We use a dummy cancel token that is never set to true during init
+    static std::atomic<bool> neverCancel{false};
+    ToolContext toolCtx{*environment_->getHost(), *this, "", &neverCancel,
+                        &provider::LLMSearchProviderRegistry::instance()};
+
+    auto client = getMcpClient(name, toolCtx);
+    if (!client) {
+      continue;
+    }
+
+    try {
+      if (!client->isInitialized()) {
+        client->initialize(mcp_tools::kDefaultTimeoutMs);
+      }
+
+      const rapidjson::Document toolsResponse =
+          client->listTools(mcp_tools::kDefaultTimeoutMs);
+      const auto &toolsResult = toolsResponse["result"];
+      if (toolsResult.IsObject() && toolsResult.HasMember("tools") &&
+          toolsResult["tools"].IsArray()) {
+        std::vector<std::string> toolNames;
+        std::vector<AgentState::DynamicMcpTool> toolDefs;
+        for (const auto &tool : toolsResult["tools"].GetArray()) {
+          if (tool.IsObject() && tool.HasMember("name") &&
+              tool["name"].IsString()) {
+            std::string toolName = tool["name"].GetString();
+            toolNames.push_back(toolName);
+
+            AgentState::DynamicMcpTool def;
+            def.name = toolName;
+            if (tool.HasMember("description") && tool["description"].IsString()) {
+              def.description = tool["description"].GetString();
+            }
+            if (tool.HasMember("inputSchema") && tool["inputSchema"].IsObject()) {
+              rapidjson::StringBuffer sb;
+              rapidjson::Writer<rapidjson::StringBuffer> writer(sb);
+              tool["inputSchema"].Accept(writer);
+              def.inputSchema = sb.GetString();
+            } else {
+              def.inputSchema = R"({"type":"object","additionalProperties":true})";
+            }
+            toolDefs.push_back(std::move(def));
+          }
+        }
+        context.state.loadedMcpServers.push_back(name);
+        context.state.loadedMcpTools[name] = std::move(toolNames);
+        context.state.loadedMcpToolDefinitions[name] = std::move(toolDefs);
+      }
+    } catch (const std::exception &e) {
+      std::cerr << "Failed to initialize MCP server '" << name
+                << "': " << e.what() << std::endl;
+    }
+  }
 }
 
 Agent::~Agent() {
+  mcpManager_.shutdown();
   for (const auto &id : backgroundProcessIds) {
     try {
       environment_->getHost()->killBackgroundProcess(id);
@@ -1256,9 +1494,26 @@ void Agent::runImpl(const std::optional<std::string> &task,
   if (context.history->turns.empty()) {
     auto toolDefs = getProviderToolDefinitions(context, toolRegistry);
     std::string personaName = context.config.personaName.empty()
-                                  ? "lead"
+                                  ? "aster"
                                   : context.config.personaName;
-    Persona persona = PurposeLoader::load(personaName);
+    std::string effectivePersonaName = personaName;
+    Persona persona;
+    try {
+      persona = PurposeLoader::load(personaName);
+    } catch (const std::exception &e) {
+      auto available = PurposeLoader::listPurposes();
+      if (available.empty()) {
+        throw;
+      }
+      effectivePersonaName = available.front();
+      std::cerr << "[purpose] Failed to load persona '" << personaName << "' ("
+                << e.what() << "); falling back to '" << effectivePersonaName
+                << "'.\n";
+      persona = PurposeLoader::load(effectivePersonaName);
+    }
+    if (effectivePersonaName != personaName) {
+      context.config.personaName = effectivePersonaName;
+    }
     PurposeLoader::loadProjectRootAgentsIntoContext(context);
     std::string toolBlock = PurposeLoader::buildToolsBlock(toolDefs);
 

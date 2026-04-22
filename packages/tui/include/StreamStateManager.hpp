@@ -57,6 +57,7 @@ struct QueuedMessageEntry {
   std::string text;
   std::string thread_id;
   std::string agent_id;
+  int image_count = 0;
 };
 
 struct CompletedRunSummary {

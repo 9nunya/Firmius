@@ -81,14 +81,49 @@ struct CompactionSnapshot {
     bool operator==(const CompactionSnapshot& other) const = default;
 };
 
+struct RollingMemoryAnchorRecord {
+    std::string anchorId;
+    std::string anchorType;
+    std::string canonicalText;
+    std::string exactQuote;
+    std::string importance;
+    std::string volatility;
+    std::vector<std::string> retrievalTags;
+    std::vector<std::string> sourceTurnIds;
+
+    bool operator==(const RollingMemoryAnchorRecord& other) const = default;
+};
+
+struct RollingMemoryBridgeRecord {
+    std::string bridgeId;
+    std::string targetTaskSignature;
+    std::vector<std::string> relevantAnchorIds;
+    std::vector<std::string> relevantEpisodeIds;
+    std::vector<std::string> relevantReflectionIds;
+    std::string rationale;
+    std::string executionHint;
+    std::uint64_t createdAt = 0;
+
+    bool operator==(const RollingMemoryBridgeRecord& other) const = default;
+};
+
 struct RollingMemoryChunk {
     std::string chunkId;
     std::string sourceStartTurnId;
     std::string sourceEndTurnId;
     std::vector<std::string> sourceTurnIds;
+    std::string chunkKind = "episode";
     std::string summary;
     std::string currentTask;
     std::string suggestedResponse;
+    std::string activeGoal;
+    std::vector<std::string> keyActions;
+    std::vector<std::string> keyToolResults;
+    std::vector<std::string> openLoops;
+    std::vector<std::string> filesSurfaces;
+    std::vector<std::string> retrievalTags;
+    std::vector<std::string> derivedFromChunkIds;
+    std::vector<std::string> anchorIds;
     std::uint32_t sourceTokens = 0;
     std::uint32_t summaryTokens = 0;
     std::uint64_t createdAt = 0;
@@ -113,8 +148,12 @@ struct RollingMemoryState {
     bool observationInFlight = false;
     bool reflectionInFlight = false;
     std::vector<RollingMemoryChunk> observationChunks;
+    bool bridgeInFlight = false;
     std::vector<RollingMemoryChunk> reflectionChunks;
 
+    std::vector<RollingMemoryAnchorRecord> anchors;
+    std::vector<RollingMemoryBridgeRecord> bridges;
+    std::string lastBridgeId;
     bool operator==(const RollingMemoryState& other) const = default;
 };
 

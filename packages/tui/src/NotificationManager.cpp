@@ -1,5 +1,7 @@
 #include "NotificationManager.hpp"
+
 #include "components/GlintEffect.hpp"
+
 #include <algorithm>
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/terminal.hpp>
@@ -12,10 +14,9 @@ NotificationManager &NotificationManager::instance() {
   return inst;
 }
 
-std::string
-NotificationManager::notifyInfo(const std::string &title,
-                                const std::string &message,
-                                std::chrono::milliseconds duration) {
+std::string NotificationManager::notifyInfo(const std::string &title,
+                                           const std::string &message,
+                                           std::chrono::milliseconds duration) {
   Notification notif;
   notif.id = "notif_" + std::to_string(++notificationCounter_);
   notif.title = title;
@@ -28,10 +29,9 @@ NotificationManager::notifyInfo(const std::string &title,
   return notif.id;
 }
 
-std::string
-NotificationManager::notifySuccess(const std::string &title,
-                                   const std::string &message,
-                                   std::chrono::milliseconds duration) {
+std::string NotificationManager::notifySuccess(
+    const std::string &title, const std::string &message,
+    std::chrono::milliseconds duration) {
   Notification notif;
   notif.id = "notif_" + std::to_string(++notificationCounter_);
   notif.title = title;
@@ -44,10 +44,9 @@ NotificationManager::notifySuccess(const std::string &title,
   return notif.id;
 }
 
-std::string
-NotificationManager::notifyWarning(const std::string &title,
-                                   const std::string &message,
-                                   std::chrono::milliseconds duration) {
+std::string NotificationManager::notifyWarning(
+    const std::string &title, const std::string &message,
+    std::chrono::milliseconds duration) {
   Notification notif;
   notif.id = "notif_" + std::to_string(++notificationCounter_);
   notif.title = title;
@@ -61,8 +60,8 @@ NotificationManager::notifyWarning(const std::string &title,
 }
 
 std::string NotificationManager::notifyError(const std::string &title,
-                                             const std::string &message,
-                                             bool persistent) {
+                                            const std::string &message,
+                                            bool persistent) {
   Notification notif;
   notif.id = "notif_" + std::to_string(++notificationCounter_);
   notif.title = title;
@@ -78,9 +77,9 @@ std::string NotificationManager::notifyError(const std::string &title,
 }
 
 std::string NotificationManager::notifyProgress(const std::string &title,
-                                                const std::string &message,
-                                                float progress,
-                                                bool persistent) {
+                                               const std::string &message,
+                                               float progress,
+                                               bool persistent) {
   Notification notif;
   notif.id = "notif_" + std::to_string(++notificationCounter_);
   notif.title = title;
@@ -95,7 +94,7 @@ std::string NotificationManager::notifyProgress(const std::string &title,
 }
 
 void NotificationManager::updateProgress(const std::string &id, float progress,
-                                         const std::string &label) {
+                                        const std::string &label) {
   for (auto &notif : notifications_) {
     if (notif.id == id) {
       notif.progress = progress;
@@ -173,8 +172,7 @@ ftxui::Color NotificationManager::getColorForType(NotificationType type) {
   return ftxui::Color::White;
 }
 
-ftxui::Element
-NotificationManager::renderNotification(const Notification &notif) {
+ftxui::Element NotificationManager::renderNotification(const Notification &notif) {
   auto color = getColorForType(notif.type);
   const int terminal_width = std::max(40, ftxui::Terminal::Size().dimx);
   const int card_width = std::max(28, std::min(46, terminal_width - 8));
@@ -200,16 +198,14 @@ NotificationManager::renderNotification(const Notification &notif) {
   }
 
   ftxui::Elements body_rows;
-  body_rows.push_back(
-      ftxui::hbox({
-          ftxui::text(icon + " ") | ftxui::bold | ftxui::color(color),
-          ftxui::paragraph(notif.title) | ftxui::bold | ftxui::color(color) |
-              ftxui::xflex,
-      }));
+  body_rows.push_back(ftxui::hbox({
+      ftxui::text(icon + " ") | ftxui::bold | ftxui::color(color),
+      ftxui::paragraph(notif.title) | ftxui::bold | ftxui::color(color) |
+          ftxui::xflex,
+  }));
   if (!notif.message.empty()) {
-    body_rows.push_back(
-        ftxui::paragraph(notif.message) |
-        ftxui::color(ftxui::Color::RGB(200, 200, 220)));
+    body_rows.push_back(ftxui::paragraph(notif.message) |
+                        ftxui::color(ftxui::Color::RGB(200, 200, 220)));
   }
 
   // Progress bar for progress notifications
@@ -233,24 +229,24 @@ NotificationManager::renderNotification(const Notification &notif) {
     }));
   }
 
-  auto body =
-      ftxui::vbox({
-          ftxui::text(""),
-          ftxui::hbox({
-              ftxui::text("  "),
-              ftxui::vbox(std::move(body_rows)) | ftxui::xflex,
-              ftxui::text("  "),
-          }),
-          ftxui::text(""),
-      }) |
-      ftxui::size(ftxui::WIDTH, ftxui::EQUAL, card_width) |
-      ftxui::bgcolor(ftxui::Color::RGB(30, 30, 50)) |
-      ftxui::color(ftxui::Color::RGB(200, 200, 220));
+  auto body = ftxui::vbox({
+      ftxui::text(""),
+      ftxui::hbox({
+          ftxui::text("  "),
+          ftxui::vbox(std::move(body_rows)) | ftxui::xflex,
+          ftxui::text("  "),
+      }),
+      ftxui::text(""),
+  }) |
+              ftxui::size(ftxui::WIDTH, ftxui::EQUAL, card_width) |
+              ftxui::bgcolor(ftxui::Color::RGB(30, 30, 50)) |
+              ftxui::color(ftxui::Color::RGB(200, 200, 220));
 
   return ftxui::hbox({
-      ftxui::text(" ") | ftxui::bgcolor(color),
-      body,
-  });
+             ftxui::text(" ") | ftxui::bgcolor(color),
+             body,
+         }) |
+         ftxui::clear_under;
 }
 
 ftxui::Element NotificationManager::render() {
@@ -261,7 +257,7 @@ ftxui::Element NotificationManager::render() {
   }
 
   // Show max 4 notifications at once
-  size_t count = std::min(notifications_.size(), size_t(4));
+  const size_t count = std::min(notifications_.size(), size_t(4));
 
   ftxui::Elements notif_elements;
   for (size_t i = 0; i < count; ++i) {
@@ -271,14 +267,16 @@ ftxui::Element NotificationManager::render() {
     notif_elements.push_back(renderNotification(notifications_[i]));
   }
 
+  // Keep the overlay anchored near the top-right of the screen, but let the
+  // notification card itself handle clearing its own occupied cells.
   return ftxui::vbox({
-      ftxui::hbox({
-          ftxui::filler(),
-          ftxui::vbox(notif_elements),
-          ftxui::text(" "),
-      }),
-      ftxui::filler(),
-  });
+             ftxui::hbox({
+                 ftxui::filler(),
+                 ftxui::vbox(std::move(notif_elements)),
+                 ftxui::text(" "),
+             }),
+             ftxui::filler(),
+         });
 }
 
 } // namespace firmius::tui

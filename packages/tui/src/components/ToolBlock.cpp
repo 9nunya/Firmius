@@ -494,7 +494,8 @@ ftxui::Component ToolBlock(const std::shared_ptr<ToolCallView> &view,
   (void)history_getter;
   (void)stream_getter;
 
-  if (view->name == "summon_subagent") {
+  if (view->name == "Delegate" &&
+      view->args.find("\"action\":\"Spawn\"") != std::string::npos) {
     return ftxui::Make<SubagentToolBlockComponent>(
         view, std::move(history_getter), std::move(stream_getter),
         std::move(subagent_state_getter), std::move(agent_focus_handler));

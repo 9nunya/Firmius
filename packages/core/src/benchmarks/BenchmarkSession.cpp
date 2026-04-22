@@ -120,7 +120,7 @@ void BenchmarkSession::ensureReady() {
     config_.cwd = "/work";
   }
   if (config_.personaName.empty()) {
-    config_.personaName = "lead";
+    config_.personaName = "aster";
   }
 
   if (!config_.existingThreadId.empty()) {

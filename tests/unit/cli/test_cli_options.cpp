@@ -19,6 +19,18 @@ std::vector<char *> makeArgv(std::vector<std::string> &args) {
 
 } // namespace
 
+TEST(CliOptionsTest, DefaultsToTuiMode) {
+  std::vector<std::string> args = {"firmius"};
+  auto argv = makeArgv(args);
+
+  const auto options =
+      firmius::cli::parseCliOptions(static_cast<int>(argv.size()), argv.data());
+
+  EXPECT_EQ(options.mode, firmius::cli::CliOptions::Mode::Tui);
+  EXPECT_FALSE(options.continueLast);
+  EXPECT_FALSE(options.debuggingMode);
+}
+
 TEST(CliOptionsTest, ParsesDirectPromptStartupFlags) {
   std::vector<std::string> args = {"firmius",
                                    "--prompt",
@@ -71,6 +83,7 @@ TEST(CliOptionsTest, ParsesPermissionMode) {
   EXPECT_EQ(options.permissionMode,
             firmius::shared::ThreadPermissionMode::AlwaysAllow);
 }
+
 
 TEST(CliOptionsTest, MissingPromptFileThrows) {
   std::vector<std::string> args = {"firmius", "--prompt-file",

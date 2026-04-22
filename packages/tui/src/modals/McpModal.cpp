@@ -8,7 +8,9 @@
 
 #include <algorithm>
 #include <ftxui/component/component.hpp>
+#include <ftxui/component/component_options.hpp>
 #include <ftxui/dom/elements.hpp>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -22,18 +24,18 @@ enum class McpModalMode {
   ConfirmDelete,
 };
 
-bool applyTextEdit(ftxui::Event event, std::string &buffer) {
-  if (event == ftxui::Event::Backspace) {
-    if (!buffer.empty()) {
-      buffer.pop_back();
-    }
-    return true;
-  }
-  if (event.is_character()) {
-    buffer += event.character();
-    return true;
-  }
-  return false;
+// Ctrl+S is ASCII 0x13.
+bool IsCtrlSaveEvent(const ftxui::Event &event) {
+  return event.is_character() && event.character() == std::string(1, '\x13');
+}
+
+ftxui::Component OneLineInput(std::string *content, const std::string &placeholder,
+                              bool password = false) {
+  auto option = ftxui::InputOption::Default();
+  option.content = content;
+  option.placeholder = placeholder;
+  option.password = password;
+  return ftxui::Input(option);
 }
 
 } // namespace
@@ -46,7 +48,38 @@ ftxui::Component McpModal::create(TuiState &state) {
 
   auto edit_original_name = std::make_shared<std::string>();
   auto form = std::make_shared<McpModalForm>();
-  auto edit_field = std::make_shared<int>(0);
+
+  // Edit mode UI backing state.
+  auto transport_labels = std::make_shared<std::vector<std::string>>(
+      std::vector<std::string>{"stdio", "http"});
+  auto transport_selected = std::make_shared<int>(0);
+
+  auto enabled_labels = std::make_shared<std::vector<std::string>>(
+      std::vector<std::string>{"enabled", "disabled"});
+  auto enabled_selected = std::make_shared<int>(0);
+
+  auto tls_labels = std::make_shared<std::vector<std::string>>(
+      std::vector<std::string>{"verify TLS", "allow insecure"});
+  auto tls_selected = std::make_shared<int>(0);
+
+  auto edit_container = std::make_shared<ftxui::Component>();
+  auto edit_renderer = std::make_shared<ftxui::Component>();
+
+  // Individual edit components (rebuilt when switching transport).
+  auto name_input = std::make_shared<ftxui::Component>();
+  auto transport_radio = std::make_shared<ftxui::Component>();
+  auto enabled_radio = std::make_shared<ftxui::Component>();
+
+  auto cmd_input = std::make_shared<ftxui::Component>();
+  auto args_input = std::make_shared<ftxui::Component>();
+  auto env_input = std::make_shared<ftxui::Component>();
+  auto cwd_input = std::make_shared<ftxui::Component>();
+
+  auto url_input = std::make_shared<ftxui::Component>();
+  auto header_input = std::make_shared<ftxui::Component>();
+  auto token_input = std::make_shared<ftxui::Component>();
+  auto tls_radio = std::make_shared<ftxui::Component>();
+  auto ca_input = std::make_shared<ftxui::Component>();
 
   auto refresh_names = [server_names, selected]() {
     const auto cfg = firmius::core::Harness::instance().getConfig();
@@ -57,7 +90,9 @@ ftxui::Component McpModal::create(TuiState &state) {
     }
     std::sort(server_names->begin(), server_names->end());
     if (*selected >= static_cast<int>(server_names->size())) {
-      *selected = server_names->empty() ? 0 : static_cast<int>(server_names->size() - 1);
+      *selected = server_names->empty()
+                      ? 0
+                      : static_cast<int>(server_names->size() - 1);
     }
   };
 
@@ -77,18 +112,128 @@ ftxui::Component McpModal::create(TuiState &state) {
     *message = ok_message;
   };
 
-  auto begin_add = [form, edit_original_name, edit_field, mode, message]() {
+  auto syncEditStateFromForm =
+      [form, transport_selected, enabled_selected, tls_selected]() {
+        *transport_selected = (form->transport == "http") ? 1 : 0;
+        *enabled_selected = form->enabled ? 0 : 1;
+        *tls_selected = form->allow_insecure_tls ? 1 : 0;
+      };
+
+  auto applyEditStateToForm =
+      [form, transport_selected, enabled_selected, tls_selected]() {
+        form->transport = (*transport_selected == 1) ? "http" : "stdio";
+        form->enabled = (*enabled_selected == 0);
+        form->allow_insecure_tls = (*tls_selected == 1);
+        if (form->auth_header.empty()) {
+          form->auth_header = "Authorization";
+        }
+      };
+
+  auto rebuildEditComponents =
+      [=]() {
+        // Build components.
+        *name_input = OneLineInput(&form->name, "required (e.g. playwright)");
+        *transport_radio =
+            ftxui::Radiobox(transport_labels.get(), transport_selected.get());
+        *enabled_radio =
+            ftxui::Radiobox(enabled_labels.get(), enabled_selected.get());
+
+        *cmd_input = OneLineInput(&form->command, "npx / node / python / …");
+        *args_input = OneLineInput(&form->args_text,
+                                   "-y, package, arg1, arg2 (comma separated)");
+        *env_input = OneLineInput(&form->env_text, "K=V; K2=V2 (semicolon separated)");
+        *cwd_input = OneLineInput(&form->cwd, "(optional) working directory");
+
+        *url_input = OneLineInput(&form->url, "https://…");
+        *header_input = OneLineInput(&form->auth_header, "Authorization");
+        *token_input =
+            OneLineInput(&form->auth_bearer_token, "(optional)", true);
+        *tls_radio = ftxui::Radiobox(tls_labels.get(), tls_selected.get());
+        *ca_input = OneLineInput(&form->ca_cert_path, "(optional) /path/to/ca.pem");
+
+        // Build container in a fixed order for tab navigation.
+        std::vector<ftxui::Component> fields;
+        fields.push_back(*name_input);
+        fields.push_back(*transport_radio);
+        fields.push_back(*enabled_radio);
+
+        const bool is_http = (*transport_selected == 1);
+        if (is_http) {
+          fields.push_back(*url_input);
+          fields.push_back(*header_input);
+          fields.push_back(*token_input);
+          fields.push_back(*tls_radio);
+          fields.push_back(*ca_input);
+        } else {
+          fields.push_back(*cmd_input);
+          fields.push_back(*args_input);
+          fields.push_back(*env_input);
+          fields.push_back(*cwd_input);
+        }
+
+        *edit_container = ftxui::Container::Vertical(std::move(fields));
+
+        // Render helper.
+        *edit_renderer = ftxui::Renderer(
+            *edit_container,
+            [=] {
+              const auto &theme = ThemeManager::instance().getCurrentTheme();
+
+              auto row = [&](const std::string &label,
+                             const ftxui::Component &component) {
+                return ftxui::hbox({
+                    ftxui::text(label) | ftxui::color(theme.base.dim) |
+                        ftxui::size(ftxui::WIDTH, ftxui::EQUAL, 18),
+                    component->Render() | ftxui::xflex,
+                });
+              };
+
+              ftxui::Elements rows;
+              rows.push_back(
+                  ftxui::text(edit_original_name->empty() ? "Create MCP server"
+                                                         : "Edit MCP server") |
+                  ftxui::bold | ftxui::color(theme.modals.title));
+              rows.push_back(ftxui::separatorLight() |
+                             ftxui::color(theme.modals.border));
+
+              rows.push_back(row("Name", *name_input));
+              rows.push_back(row("Transport", *transport_radio));
+              rows.push_back(row("Enabled", *enabled_radio));
+
+              const bool is_http = (*transport_selected == 1);
+              if (is_http) {
+                rows.push_back(row("URL", *url_input));
+                rows.push_back(row("Auth header", *header_input));
+                rows.push_back(row("Bearer token", *token_input));
+                rows.push_back(row("TLS", *tls_radio));
+                rows.push_back(row("CA cert", *ca_input));
+              } else {
+                rows.push_back(row("Command", *cmd_input));
+                rows.push_back(row("Args", *args_input));
+                rows.push_back(row("Env", *env_input));
+                rows.push_back(row("CWD", *cwd_input));
+              }
+
+              return ftxui::vbox(std::move(rows));
+            });
+      };
+
+  auto begin_add = [=]() {
     *form = McpModalForm{};
     form->name = "filesystem";
     applyMcpTemplate(*form, McpTemplateKind::StdioFilesystem);
     edit_original_name->clear();
-    *edit_field = 0;
     *mode = McpModalMode::Edit;
-    *message = "Adding a new MCP server. Save writes persistent config only.";
+    *message = "Adding a new MCP server (saved to config only).";
+
+    syncEditStateFromForm();
+    rebuildEditComponents();
+    if (*name_input) {
+      (*name_input)->TakeFocus();
+    }
   };
 
-  auto begin_edit = [selected_name, form, edit_original_name, edit_field, mode,
-                     message]() {
+  auto begin_edit = [=]() {
     const auto name = selected_name();
     if (name.empty()) {
       return;
@@ -102,323 +247,236 @@ ftxui::Component McpModal::create(TuiState &state) {
 
     *form = mcpFormFromServer(name, it->second);
     *edit_original_name = name;
-    *edit_field = 0;
     *mode = McpModalMode::Edit;
     *message = "Editing server '" + name + "'.";
+
+    syncEditStateFromForm();
+    rebuildEditComponents();
+    if (*name_input) {
+      (*name_input)->TakeFocus();
+    }
   };
 
   refresh_names();
+  syncEditStateFromForm();
+  rebuildEditComponents();
 
-  auto component = ftxui::Renderer(
-      [server_names, selected, mode, message, selected_name, form, edit_field,
-       edit_original_name]() {
-        const auto &theme = ThemeManager::instance().getCurrentTheme();
-        const auto cfg = firmius::core::Harness::instance().getConfig();
+  auto renderer = ftxui::Renderer([=] {
+    const auto &theme = ThemeManager::instance().getCurrentTheme();
+    const auto cfg = firmius::core::Harness::instance().getConfig();
 
-        ftxui::Elements rows;
-        rows.push_back(ftxui::text("MCP servers") | ftxui::bold |
-                       ftxui::color(theme.modals.title));
-        rows.push_back(ftxui::text("Saved config only. Runtime-loaded MCP state is managed separately.") |
+    ftxui::Elements rows;
+    rows.push_back(ftxui::text("MCP servers") | ftxui::bold |
+                   ftxui::color(theme.modals.title));
+    rows.push_back(
+        ftxui::text("Edits here update your saved config (~/.firmius/config.json). (Tip: for Playwright, set Name=playwright, Command=npx, Args=-y, @playwright/mcp@latest)") |
+        ftxui::color(theme.base.dim));
+    rows.push_back(ftxui::separatorLight() | ftxui::color(theme.modals.border));
+
+    if (*mode == McpModalMode::Browse || *mode == McpModalMode::ConfirmDelete) {
+      if (server_names->empty()) {
+        rows.push_back(ftxui::text("No MCP servers configured.") |
                        ftxui::color(theme.base.dim));
+      } else {
+        for (size_t i = 0; i < server_names->size(); ++i) {
+          const std::string &name = (*server_names)[i];
+          auto it = cfg.mcpServers.find(name);
+          if (it == cfg.mcpServers.end()) {
+            continue;
+          }
+
+          const bool is_selected = static_cast<int>(i) == *selected;
+          const std::string line =
+              (is_selected ? "> " : "  ") + name + " [" +
+              (it->second.enabled ? "enabled" : "disabled") + "] (" +
+              (it->second.transport.empty() ? "stdio" : it->second.transport) +
+              ")";
+          rows.push_back(
+              ftxui::text(line) |
+              ftxui::color(is_selected ? theme.modals.highlight_fg
+                                       : theme.modals.fg));
+        }
+      }
+
+      rows.push_back(ftxui::separatorLight() |
+                     ftxui::color(theme.modals.border));
+      if (*mode == McpModalMode::ConfirmDelete) {
+        rows.push_back(ftxui::text("Delete '" + selected_name() + "'? [y/N]") |
+                       ftxui::bold |
+                       ftxui::color(theme.status_bar.error.normal.fg));
+      } else {
         rows.push_back(
-            ftxui::separatorLight() | ftxui::color(theme.modals.border));
+            ftxui::text(
+                "↑↓ select | A add | Enter/E edit | X enable/disable | D delete | Esc close") |
+            ftxui::color(theme.base.dim));
+      }
+    } else {
+      rows.push_back((*edit_renderer)->Render() | ftxui::color(theme.modals.fg));
+      rows.push_back(ftxui::separatorLight() |
+                     ftxui::color(theme.modals.border));
+      rows.push_back(
+          ftxui::text(
+              "Tab/Shift+Tab move | Ctrl+S save | Esc cancel | F1 stdio filesystem | F2 stdio custom | F3 HTTP | (no letter hotkeys while typing)") |
+          ftxui::color(theme.base.dim));
+    }
 
-        if (*mode == McpModalMode::Browse || *mode == McpModalMode::ConfirmDelete) {
-          if (server_names->empty()) {
-            rows.push_back(ftxui::text("No MCP servers configured yet.") |
-                           ftxui::color(theme.base.dim));
-          } else {
-            for (size_t i = 0; i < server_names->size(); ++i) {
-              const std::string &name = (*server_names)[i];
-              auto it = cfg.mcpServers.find(name);
-              if (it == cfg.mcpServers.end()) {
-                continue;
-              }
+    if (!message->empty()) {
+      rows.push_back(ftxui::separatorLight() | ftxui::color(theme.modals.border));
+      rows.push_back(ftxui::text(*message) | ftxui::color(theme.base.dim));
+    }
 
-              const bool is_selected = static_cast<int>(i) == *selected;
-              const std::string line =
-                  (is_selected ? "> " : "  ") + name + " [" +
-                  (it->second.enabled ? "enabled" : "disabled") + "] " +
-                  "(" + (it->second.transport.empty() ? "stdio" : it->second.transport) + ")";
-              rows.push_back(ftxui::text(line) |
-                             ftxui::color(is_selected ? theme.modals.highlight_fg
-                                                      : theme.modals.fg));
-            }
-          }
+    return FlatModalPanel(
+        theme, "MCP",
+        ModalSection(theme,
+                     ftxui::vbox(std::move(rows)) | ftxui::yframe |
+                         ftxui::vscroll_indicator | ftxui::yflex,
+                     theme.modals.bg),
+        112, 30);
+  });
 
-          rows.push_back(
-              ftxui::separatorLight() | ftxui::color(theme.modals.border));
-          if (*mode == McpModalMode::ConfirmDelete) {
-            rows.push_back(ftxui::text("Delete '" + selected_name() + "'? [y/N]") |
-                           ftxui::bold |
-                           ftxui::color(theme.status_bar.error.normal.fg));
-          } else {
-            rows.push_back(ftxui::text(
-                               "↑↓ select | A add | E edit | X enable/disable | D delete | Enter edit | Esc close") |
-                           ftxui::color(theme.base.dim));
-          }
-        } else {
-          const bool is_http = form->transport == "http";
-          const std::vector<std::string> fields =
-              is_http
-                  ? std::vector<std::string>{"Name", "Transport", "Enabled", "URL",
-                                             "Auth header", "Bearer token",
-                                             "Allow insecure TLS", "CA cert path"}
-                  : std::vector<std::string>{"Name", "Transport", "Enabled", "Command",
-                                             "Args (comma)", "Env (K=V; K2=V2)", "CWD"};
-          if (*edit_field >= static_cast<int>(fields.size())) {
-            *edit_field = static_cast<int>(fields.size() - 1);
-          }
+  return ftxui::CatchEvent(renderer, [=, &state](ftxui::Event event) {
+    if (event == ftxui::Event::Escape) {
+      if (*mode == McpModalMode::Browse) {
+        state.popModal();
+      } else {
+        *mode = McpModalMode::Browse;
+        *message = "Edit cancelled.";
+      }
+      return true;
+    }
 
-          rows.push_back(ftxui::text(edit_original_name->empty()
-                                         ? "Create server"
-                                         : "Edit server") |
-                         ftxui::bold);
-
-          auto render_field = [&rows, &theme, edit_field](int idx,
-                                                           const std::string &label,
-                                                           const std::string &value) {
-            const bool active = idx == *edit_field;
-            const std::string prefix = active ? "> " : "  ";
-            rows.push_back(
-                ftxui::text(prefix + label + ": " + value) |
-                ftxui::color(active ? theme.modals.highlight_fg : theme.modals.fg));
-          };
-
-          render_field(0, "Name", form->name.empty() ? "<required>" : form->name);
-          render_field(1, "Transport", form->transport);
-          render_field(2, "Enabled", form->enabled ? "true" : "false");
-
-          if (is_http) {
-            render_field(3, "URL", form->url);
-            render_field(4, "Auth header", form->auth_header);
-            render_field(5, "Bearer token",
-                         form->auth_bearer_token.empty() ? "<empty>" : "***");
-            render_field(6, "Allow insecure TLS",
-                         form->allow_insecure_tls ? "true" : "false");
-            render_field(7, "CA cert path",
-                         form->ca_cert_path.empty() ? "<empty>" : form->ca_cert_path);
-          } else {
-            render_field(3, "Command", form->command);
-            render_field(4, "Args (comma)", form->args_text);
-            render_field(5, "Env (K=V;...)", form->env_text);
-            render_field(6, "CWD", form->cwd);
-          }
-
-          rows.push_back(
-              ftxui::separatorLight() | ftxui::color(theme.modals.border));
-          rows.push_back(ftxui::text("Templates: [1] stdio filesystem  [2] stdio custom  [3] HTTP generic") |
-                         ftxui::color(theme.base.dim));
-          rows.push_back(ftxui::text("Arrows move field | text keys edit text | Space toggles booleans") |
-                         ftxui::color(theme.base.dim));
-          rows.push_back(ftxui::text("W save | Esc cancel edit") |
-                         ftxui::color(theme.base.dim));
-        }
-
-        if (!message->empty()) {
-          rows.push_back(
-              ftxui::separatorLight() | ftxui::color(theme.modals.border));
-          rows.push_back(ftxui::text(*message) | ftxui::color(theme.base.dim));
-        }
-
-        return FlatModalPanel(
-            theme, "MCP",
-            ModalSection(theme, ftxui::vbox(std::move(rows)) | ftxui::yframe |
-                                    ftxui::vscroll_indicator | ftxui::yflex,
-                         theme.modals.bg),
-            112, 30);
-      });
-
-  return ftxui::CatchEvent(
-      component,
-      [server_names, selected, mode, message, selected_name, save_config,
-       refresh_names, begin_add, begin_edit, form, edit_field, edit_original_name,
-       &state](ftxui::Event event) {
-        if (event == ftxui::Event::Escape) {
-          if (*mode == McpModalMode::Browse) {
-            state.popModal();
-          } else {
-            *mode = McpModalMode::Browse;
-            *message = "Edit cancelled.";
-          }
-          return true;
-        }
-
-        if (*mode == McpModalMode::ConfirmDelete) {
-          if (event == ftxui::Event::Character('y') ||
-              event == ftxui::Event::Character('Y')) {
-            const std::string name = selected_name();
-            if (!name.empty()) {
-              auto cfg = firmius::core::Harness::instance().getConfig();
-              deleteMcpServer(cfg.mcpServers, name);
-              save_config(cfg, "Deleted server '" + name + "'.");
-              refresh_names();
-            }
-          }
-          *mode = McpModalMode::Browse;
-          return true;
-        }
-
-        if (*mode == McpModalMode::Browse) {
-          if (event == ftxui::Event::ArrowUp) {
-            if (*selected > 0) {
-              --(*selected);
-            }
-            return true;
-          }
-          if (event == ftxui::Event::ArrowDown) {
-            if (*selected + 1 < static_cast<int>(server_names->size())) {
-              ++(*selected);
-            }
-            return true;
-          }
-          if (event == ftxui::Event::Character('a') ||
-              event == ftxui::Event::Character('A')) {
-            begin_add();
-            return true;
-          }
-          if (event == ftxui::Event::Character('e') ||
-              event == ftxui::Event::Character('E') ||
-              event == ftxui::Event::Return) {
-            begin_edit();
-            return true;
-          }
-          if ((event == ftxui::Event::Character('d') ||
-               event == ftxui::Event::Character('D')) &&
-              !selected_name().empty()) {
-            *mode = McpModalMode::ConfirmDelete;
-            return true;
-          }
-          if ((event == ftxui::Event::Character('x') ||
-               event == ftxui::Event::Character('X')) &&
-              !selected_name().empty()) {
-            auto cfg = firmius::core::Harness::instance().getConfig();
-            toggleMcpServerEnabled(cfg.mcpServers, selected_name());
-            save_config(cfg, "Toggled enabled state for '" + selected_name() + "'.");
-            refresh_names();
-            return true;
-          }
-          return false;
-        }
-
-        const bool is_http = form->transport == "http";
-        const int max_field = is_http ? 7 : 6;
-
-        if (event == ftxui::Event::ArrowUp) {
-          if (*edit_field > 0) {
-            --(*edit_field);
-          }
-          return true;
-        }
-        if (event == ftxui::Event::ArrowDown) {
-          if (*edit_field < max_field) {
-            ++(*edit_field);
-          }
-          return true;
-        }
-
-        if (event == ftxui::Event::Character('1')) {
-          applyMcpTemplate(*form, McpTemplateKind::StdioFilesystem);
-          *message = "Applied stdio filesystem template.";
-          return true;
-        }
-        if (event == ftxui::Event::Character('2')) {
-          applyMcpTemplate(*form, McpTemplateKind::StdioCustom);
-          *message = "Applied stdio custom template.";
-          return true;
-        }
-        if (event == ftxui::Event::Character('3')) {
-          applyMcpTemplate(*form, McpTemplateKind::HttpGeneric);
-          *message = "Applied HTTP generic template.";
-          return true;
-        }
-
-        if (event == ftxui::Event::Character('w') ||
-            event == ftxui::Event::Character('W')) {
+    if (*mode == McpModalMode::ConfirmDelete) {
+      if (event == ftxui::Event::Character('y') ||
+          event == ftxui::Event::Character('Y')) {
+        const std::string name = selected_name();
+        if (!name.empty()) {
           auto cfg = firmius::core::Harness::instance().getConfig();
-          const auto result = upsertMcpServer(cfg.mcpServers, *edit_original_name, *form);
-          if (result == McpSaveResult::EmptyName) {
-            *message = "Server name is required.";
-            return true;
-          }
-          if (result == McpSaveResult::RenameCollision) {
-            *message = "A server with that name already exists.";
-            return true;
-          }
-
-          save_config(cfg, "Saved server '" + trimMcpText(form->name) + "'.");
+          deleteMcpServer(cfg.mcpServers, name);
+          save_config(cfg, "Deleted server '" + name + "'.");
           refresh_names();
-          const auto it = std::find(server_names->begin(), server_names->end(),
-                                    trimMcpText(form->name));
-          if (it != server_names->end()) {
-            *selected = static_cast<int>(std::distance(server_names->begin(), it));
-          }
-          *mode = McpModalMode::Browse;
-          return true;
         }
+      }
+      *mode = McpModalMode::Browse;
+      return true;
+    }
 
-        if (*edit_field == 1) {
-          if (event == ftxui::Event::Character('h') ||
-              event == ftxui::Event::Character('H')) {
-            form->transport = "http";
-            if (form->auth_header.empty()) {
-              form->auth_header = "Authorization";
-            }
-            return true;
-          }
-          if (event == ftxui::Event::Character('s') ||
-              event == ftxui::Event::Character('S')) {
-            form->transport = "stdio";
-            return true;
-          }
+    if (*mode == McpModalMode::Browse) {
+      if (event == ftxui::Event::ArrowUp) {
+        if (*selected > 0) {
+          --(*selected);
         }
+        return true;
+      }
+      if (event == ftxui::Event::ArrowDown) {
+        if (*selected + 1 < static_cast<int>(server_names->size())) {
+          ++(*selected);
+        }
+        return true;
+      }
+      if (event == ftxui::Event::Character('a') ||
+          event == ftxui::Event::Character('A')) {
+        begin_add();
+        return true;
+      }
+      if (event == ftxui::Event::Character('e') ||
+          event == ftxui::Event::Character('E') || event == ftxui::Event::Return) {
+        begin_edit();
+        return true;
+      }
+      if ((event == ftxui::Event::Character('d') ||
+           event == ftxui::Event::Character('D')) &&
+          !selected_name().empty()) {
+        *mode = McpModalMode::ConfirmDelete;
+        return true;
+      }
+      if ((event == ftxui::Event::Character('x') ||
+           event == ftxui::Event::Character('X')) &&
+          !selected_name().empty()) {
+        auto cfg = firmius::core::Harness::instance().getConfig();
+        toggleMcpServerEnabled(cfg.mcpServers, selected_name());
+        save_config(cfg,
+                    "Toggled enabled state for '" + selected_name() + "'.");
+        refresh_names();
+        return true;
+      }
+      return false;
+    }
 
-        if (*edit_field == 2 || (is_http && *edit_field == 6)) {
-          if (event == ftxui::Event::Character(' ') || event == ftxui::Event::Return) {
-            if (*edit_field == 2) {
-              form->enabled = !form->enabled;
-            } else {
-              form->allow_insecure_tls = !form->allow_insecure_tls;
-            }
-            return true;
-          }
-        }
+    // Edit mode.
+    if (event == ftxui::Event::F1) {
+      applyMcpTemplate(*form, McpTemplateKind::StdioFilesystem);
+      syncEditStateFromForm();
+      rebuildEditComponents();
+      *message = "Applied stdio filesystem template.";
+      if (*name_input) {
+        (*name_input)->TakeFocus();
+      }
+      return true;
+    }
+    if (event == ftxui::Event::F2) {
+      applyMcpTemplate(*form, McpTemplateKind::StdioCustom);
+      syncEditStateFromForm();
+      rebuildEditComponents();
+      *message = "Applied stdio custom template.";
+      if (*name_input) {
+        (*name_input)->TakeFocus();
+      }
+      return true;
+    }
+    if (event == ftxui::Event::F3) {
+      applyMcpTemplate(*form, McpTemplateKind::HttpGeneric);
+      syncEditStateFromForm();
+      rebuildEditComponents();
+      *message = "Applied HTTP generic template.";
+      if (*name_input) {
+        (*name_input)->TakeFocus();
+      }
+      return true;
+    }
 
-        if (*edit_field == 0) {
-          return applyTextEdit(event, form->name);
-        }
+    if (IsCtrlSaveEvent(event)) {
+      applyEditStateToForm();
 
-        if (!is_http) {
-          if (*edit_field == 3) {
-            return applyTextEdit(event, form->command);
-          }
-          if (*edit_field == 4) {
-            return applyTextEdit(event, form->args_text);
-          }
-          if (*edit_field == 5) {
-            return applyTextEdit(event, form->env_text);
-          }
-          if (*edit_field == 6) {
-            return applyTextEdit(event, form->cwd);
-          }
-          return false;
-        }
+      auto cfg = firmius::core::Harness::instance().getConfig();
+      const auto result =
+          upsertMcpServer(cfg.mcpServers, *edit_original_name, *form);
+      if (result == McpSaveResult::EmptyName) {
+        *message = "Server name is required.";
+        return true;
+      }
+      if (result == McpSaveResult::RenameCollision) {
+        *message = "A server with that name already exists.";
+        return true;
+      }
 
-        if (*edit_field == 3) {
-          return applyTextEdit(event, form->url);
-        }
-        if (*edit_field == 4) {
-          return applyTextEdit(event, form->auth_header);
-        }
-        if (*edit_field == 5) {
-          return applyTextEdit(event, form->auth_bearer_token);
-        }
-        if (*edit_field == 7) {
-          return applyTextEdit(event, form->ca_cert_path);
-        }
+      save_config(cfg, "Saved server '" + trimMcpText(form->name) + "'.");
+      refresh_names();
+      const auto it = std::find(server_names->begin(), server_names->end(),
+                                trimMcpText(form->name));
+      if (it != server_names->end()) {
+        *selected = static_cast<int>(std::distance(server_names->begin(), it));
+      }
+      *mode = McpModalMode::Browse;
+      return true;
+    }
 
-        return false;
-      });
+    // Let focused widget handle keypresses.
+    if (*edit_container && (*edit_container)->OnEvent(event)) {
+      const std::string desired_transport =
+          (*transport_selected == 1) ? "http" : "stdio";
+      if (form->transport != desired_transport) {
+        form->transport = desired_transport;
+        rebuildEditComponents();
+        // Keep focus roughly stable after rebuilding.
+        if (*edit_container) {
+          (*edit_container)->TakeFocus();
+        }
+      }
+      return true;
+    }
+
+    return false;
+  });
 }
 
 } // namespace firmius::tui

@@ -2,7 +2,7 @@
 
 #include "AgentRegistry.hpp"
 #include "Serialization.hpp"
-#include "tools/WorkToolCommon.hpp"
+#include "tools/WorkSupport.hpp"
 #include "utils/PlatformPaths.hpp"
 #include "utils/StringUtil.hpp"
 
@@ -319,6 +319,90 @@ AgentLiveState liveStateFromJson(const rapidjson::Value& value) {
     return liveState;
 }
 
+rapidjson::Value stringVectorToJson(const std::vector<std::string>& values,
+                                    rapidjson::Document::AllocatorType& a) {
+    rapidjson::Value arr(rapidjson::kArrayType);
+    for (const auto& value : values) {
+        arr.PushBack(rapidjson::Value(value.c_str(), a), a);
+    }
+    return arr;
+}
+
+std::vector<std::string> stringVectorFromJson(const rapidjson::Value& value) {
+    std::vector<std::string> out;
+    if (!value.IsArray()) {
+        return out;
+    }
+    for (const auto& item : value.GetArray()) {
+        if (item.IsString()) {
+            out.push_back(item.GetString());
+        }
+    }
+    return out;
+}
+
+rapidjson::Value rollingMemoryAnchorToJson(
+    const RollingMemoryAnchorRecord& anchor,
+    rapidjson::Document::AllocatorType& a) {
+    rapidjson::Value v(rapidjson::kObjectType);
+    v.AddMember("anchorId", rapidjson::Value(anchor.anchorId.c_str(), a), a);
+    v.AddMember("anchorType", rapidjson::Value(anchor.anchorType.c_str(), a), a);
+    v.AddMember("canonicalText", rapidjson::Value(anchor.canonicalText.c_str(), a), a);
+    v.AddMember("exactQuote", rapidjson::Value(anchor.exactQuote.c_str(), a), a);
+    v.AddMember("importance", rapidjson::Value(anchor.importance.c_str(), a), a);
+    v.AddMember("volatility", rapidjson::Value(anchor.volatility.c_str(), a), a);
+    v.AddMember("retrievalTags", stringVectorToJson(anchor.retrievalTags, a), a);
+    v.AddMember("sourceTurnIds", stringVectorToJson(anchor.sourceTurnIds, a), a);
+    return v;
+}
+
+RollingMemoryAnchorRecord rollingMemoryAnchorFromJson(const rapidjson::Value& value) {
+    RollingMemoryAnchorRecord anchor;
+    if (!value.IsObject()) {
+        return anchor;
+    }
+    if (value.HasMember("anchorId") && value["anchorId"].IsString()) anchor.anchorId = value["anchorId"].GetString();
+    if (value.HasMember("anchorType") && value["anchorType"].IsString()) anchor.anchorType = value["anchorType"].GetString();
+    if (value.HasMember("canonicalText") && value["canonicalText"].IsString()) anchor.canonicalText = value["canonicalText"].GetString();
+    if (value.HasMember("exactQuote") && value["exactQuote"].IsString()) anchor.exactQuote = value["exactQuote"].GetString();
+    if (value.HasMember("importance") && value["importance"].IsString()) anchor.importance = value["importance"].GetString();
+    if (value.HasMember("volatility") && value["volatility"].IsString()) anchor.volatility = value["volatility"].GetString();
+    if (value.HasMember("retrievalTags")) anchor.retrievalTags = stringVectorFromJson(value["retrievalTags"]);
+    if (value.HasMember("sourceTurnIds")) anchor.sourceTurnIds = stringVectorFromJson(value["sourceTurnIds"]);
+    return anchor;
+}
+
+rapidjson::Value rollingMemoryBridgeToJson(
+    const RollingMemoryBridgeRecord& bridge,
+    rapidjson::Document::AllocatorType& a) {
+    rapidjson::Value v(rapidjson::kObjectType);
+    v.AddMember("bridgeId", rapidjson::Value(bridge.bridgeId.c_str(), a), a);
+    v.AddMember("targetTaskSignature", rapidjson::Value(bridge.targetTaskSignature.c_str(), a), a);
+    v.AddMember("relevantAnchorIds", stringVectorToJson(bridge.relevantAnchorIds, a), a);
+    v.AddMember("relevantEpisodeIds", stringVectorToJson(bridge.relevantEpisodeIds, a), a);
+    v.AddMember("relevantReflectionIds", stringVectorToJson(bridge.relevantReflectionIds, a), a);
+    v.AddMember("rationale", rapidjson::Value(bridge.rationale.c_str(), a), a);
+    v.AddMember("executionHint", rapidjson::Value(bridge.executionHint.c_str(), a), a);
+    v.AddMember("createdAt", bridge.createdAt, a);
+    return v;
+}
+
+RollingMemoryBridgeRecord rollingMemoryBridgeFromJson(const rapidjson::Value& value) {
+    RollingMemoryBridgeRecord bridge;
+    if (!value.IsObject()) {
+        return bridge;
+    }
+    if (value.HasMember("bridgeId") && value["bridgeId"].IsString()) bridge.bridgeId = value["bridgeId"].GetString();
+    if (value.HasMember("targetTaskSignature") && value["targetTaskSignature"].IsString()) bridge.targetTaskSignature = value["targetTaskSignature"].GetString();
+    if (value.HasMember("relevantAnchorIds")) bridge.relevantAnchorIds = stringVectorFromJson(value["relevantAnchorIds"]);
+    if (value.HasMember("relevantEpisodeIds")) bridge.relevantEpisodeIds = stringVectorFromJson(value["relevantEpisodeIds"]);
+    if (value.HasMember("relevantReflectionIds")) bridge.relevantReflectionIds = stringVectorFromJson(value["relevantReflectionIds"]);
+    if (value.HasMember("rationale") && value["rationale"].IsString()) bridge.rationale = value["rationale"].GetString();
+    if (value.HasMember("executionHint") && value["executionHint"].IsString()) bridge.executionHint = value["executionHint"].GetString();
+    if (value.HasMember("createdAt") && value["createdAt"].IsUint64()) bridge.createdAt = value["createdAt"].GetUint64();
+    return bridge;
+}
+
 rapidjson::Value rollingMemoryChunkToJson(const RollingMemoryChunk& chunk,
                                           rapidjson::Document::AllocatorType& a) {
     rapidjson::Value v(rapidjson::kObjectType);
@@ -332,10 +416,19 @@ rapidjson::Value rollingMemoryChunkToJson(const RollingMemoryChunk& chunk,
         ids.PushBack(rapidjson::Value(id.c_str(), a), a);
     }
     v.AddMember("sourceTurnIds", ids, a);
+    v.AddMember("chunkKind", rapidjson::Value(chunk.chunkKind.c_str(), a), a);
     v.AddMember("summary", rapidjson::Value(chunk.summary.c_str(), a), a);
     v.AddMember("currentTask", rapidjson::Value(chunk.currentTask.c_str(), a), a);
     v.AddMember("suggestedResponse",
                 rapidjson::Value(chunk.suggestedResponse.c_str(), a), a);
+    v.AddMember("activeGoal", rapidjson::Value(chunk.activeGoal.c_str(), a), a);
+    v.AddMember("keyActions", stringVectorToJson(chunk.keyActions, a), a);
+    v.AddMember("keyToolResults", stringVectorToJson(chunk.keyToolResults, a), a);
+    v.AddMember("openLoops", stringVectorToJson(chunk.openLoops, a), a);
+    v.AddMember("filesSurfaces", stringVectorToJson(chunk.filesSurfaces, a), a);
+    v.AddMember("retrievalTags", stringVectorToJson(chunk.retrievalTags, a), a);
+    v.AddMember("derivedFromChunkIds", stringVectorToJson(chunk.derivedFromChunkIds, a), a);
+    v.AddMember("anchorIds", stringVectorToJson(chunk.anchorIds, a), a);
     v.AddMember("sourceTokens", chunk.sourceTokens, a);
     v.AddMember("summaryTokens", chunk.summaryTokens, a);
     v.AddMember("createdAt", chunk.createdAt, a);
@@ -370,12 +463,17 @@ RollingMemoryChunk rollingMemoryChunkFromJson(const rapidjson::Value& value) {
     if (value.HasMember("summary") && value["summary"].IsString()) {
         chunk.summary = value["summary"].GetString();
     }
-    if (value.HasMember("currentTask") && value["currentTask"].IsString()) {
-        chunk.currentTask = value["currentTask"].GetString();
-    }
-    if (value.HasMember("suggestedResponse") && value["suggestedResponse"].IsString()) {
-        chunk.suggestedResponse = value["suggestedResponse"].GetString();
-    }
+    if (value.HasMember("chunkKind") && value["chunkKind"].IsString()) chunk.chunkKind = value["chunkKind"].GetString();
+    if (value.HasMember("currentTask") && value["currentTask"].IsString()) chunk.currentTask = value["currentTask"].GetString();
+    if (value.HasMember("suggestedResponse") && value["suggestedResponse"].IsString()) chunk.suggestedResponse = value["suggestedResponse"].GetString();
+    if (value.HasMember("activeGoal") && value["activeGoal"].IsString()) chunk.activeGoal = value["activeGoal"].GetString();
+    if (value.HasMember("keyActions")) chunk.keyActions = stringVectorFromJson(value["keyActions"]);
+    if (value.HasMember("keyToolResults")) chunk.keyToolResults = stringVectorFromJson(value["keyToolResults"]);
+    if (value.HasMember("openLoops")) chunk.openLoops = stringVectorFromJson(value["openLoops"]);
+    if (value.HasMember("filesSurfaces")) chunk.filesSurfaces = stringVectorFromJson(value["filesSurfaces"]);
+    if (value.HasMember("retrievalTags")) chunk.retrievalTags = stringVectorFromJson(value["retrievalTags"]);
+    if (value.HasMember("derivedFromChunkIds")) chunk.derivedFromChunkIds = stringVectorFromJson(value["derivedFromChunkIds"]);
+    if (value.HasMember("anchorIds")) chunk.anchorIds = stringVectorFromJson(value["anchorIds"]);
     if (value.HasMember("sourceTokens") && value["sourceTokens"].IsUint()) {
         chunk.sourceTokens = value["sourceTokens"].GetUint();
     }
@@ -417,6 +515,8 @@ rapidjson::Document rollingMemoryStateToJson(const RollingMemoryState& state) {
     d.AddMember("observationInFlight", state.observationInFlight, a);
     d.AddMember("reflectionInFlight", state.reflectionInFlight, a);
 
+    d.AddMember("bridgeInFlight", state.bridgeInFlight, a);
+    d.AddMember("lastBridgeId", rapidjson::Value(state.lastBridgeId.c_str(), a), a);
     rapidjson::Value observations(rapidjson::kArrayType);
     for (const auto& chunk : state.observationChunks) {
         observations.PushBack(rollingMemoryChunkToJson(chunk, a), a);
@@ -428,6 +528,18 @@ rapidjson::Document rollingMemoryStateToJson(const RollingMemoryState& state) {
         reflections.PushBack(rollingMemoryChunkToJson(chunk, a), a);
     }
     d.AddMember("reflectionChunks", reflections, a);
+
+    rapidjson::Value anchors(rapidjson::kArrayType);
+    for (const auto& anchor : state.anchors) {
+        anchors.PushBack(rollingMemoryAnchorToJson(anchor, a), a);
+    }
+    d.AddMember("anchors", anchors, a);
+
+    rapidjson::Value bridges(rapidjson::kArrayType);
+    for (const auto& bridge : state.bridges) {
+        bridges.PushBack(rollingMemoryBridgeToJson(bridge, a), a);
+    }
+    d.AddMember("bridges", bridges, a);
     return d;
 }
 
@@ -482,6 +594,12 @@ RollingMemoryState rollingMemoryStateFromJson(const rapidjson::Value& value) {
         value["reflectionInFlight"].IsBool()) {
         state.reflectionInFlight = value["reflectionInFlight"].GetBool();
     }
+    if (value.HasMember("bridgeInFlight") && value["bridgeInFlight"].IsBool()) {
+        state.bridgeInFlight = value["bridgeInFlight"].GetBool();
+    }
+    if (value.HasMember("lastBridgeId") && value["lastBridgeId"].IsString()) {
+        state.lastBridgeId = value["lastBridgeId"].GetString();
+    }
     if (value.HasMember("observationChunks") && value["observationChunks"].IsArray()) {
         for (const auto& chunk : value["observationChunks"].GetArray()) {
             state.observationChunks.push_back(rollingMemoryChunkFromJson(chunk));
@@ -490,6 +608,16 @@ RollingMemoryState rollingMemoryStateFromJson(const rapidjson::Value& value) {
     if (value.HasMember("reflectionChunks") && value["reflectionChunks"].IsArray()) {
         for (const auto& chunk : value["reflectionChunks"].GetArray()) {
             state.reflectionChunks.push_back(rollingMemoryChunkFromJson(chunk));
+        }
+    }
+    if (value.HasMember("anchors") && value["anchors"].IsArray()) {
+        for (const auto& anchor : value["anchors"].GetArray()) {
+            state.anchors.push_back(rollingMemoryAnchorFromJson(anchor));
+        }
+    }
+    if (value.HasMember("bridges") && value["bridges"].IsArray()) {
+        for (const auto& bridge : value["bridges"].GetArray()) {
+            state.bridges.push_back(rollingMemoryBridgeFromJson(bridge));
         }
     }
     return state;
@@ -1038,7 +1166,7 @@ Plan ThreadManager::getPlan(const std::string& threadId,
     if (plan.threadId.empty()) {
         plan.threadId = threadId;
     }
-    worktools::reconcileChunkDependencies(plan);
+    work::reconcileChunkDependencies(plan);
     return plan;
 }
 

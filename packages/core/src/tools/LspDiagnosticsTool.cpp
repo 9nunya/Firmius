@@ -8,8 +8,8 @@ using namespace firmius::shared;
 
 shared::ToolMetadata LspDiagnosticsTool::getMetadata() const {
   return {"lsp_diagnostics",
-          "Run real LSP diagnostics for one file or a project slice and return warnings/errors.",
-          ToolScope::Semantic};
+          "Language-server operations: run diagnostics for a file or project slice and return warnings/errors.",
+          shared::ToolScope::Semantic};
 }
 
 std::shared_ptr<shared::JSONSchema> LspDiagnosticsTool::getSchema() const {

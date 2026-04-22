@@ -32,13 +32,12 @@ rapidjson::Document parseJsonOrThrow(const std::string &jsonText,
 
 } // namespace
 
-McpHttpSession::McpHttpSession(const McpHttpTransportConfig &config,
-                               shared::ToolContext &ctx)
-    : McpHttpSession(config, ctx, &McpHttpSession::defaultSend) {}
+McpHttpSession::McpHttpSession(const McpHttpTransportConfig &config)
+    : McpHttpSession(config, &McpHttpSession::defaultSend) {}
 
 McpHttpSession::McpHttpSession(const McpHttpTransportConfig &config,
-                               shared::ToolContext &ctx, McpHttpSender sender)
-    : config_(config), ctx_(ctx), sender_(std::move(sender)) {
+                               McpHttpSender sender)
+    : config_(config), sender_(std::move(sender)) {
   if (!sender_) {
     throw std::runtime_error("MCP HTTP sender is not configured");
   }
@@ -48,7 +47,8 @@ rapidjson::Document McpHttpSession::sendRequest(const int id,
                                                 const std::string &method,
                                                 const rapidjson::Value &params,
                                                 const int timeoutMs,
-                                                const std::string &stage) {
+                                                const std::string &stage,
+                                                shared::ToolContext *ctx) {
   rapidjson::Document request;
   request.SetObject();
   auto &a = request.GetAllocator();
@@ -60,7 +60,7 @@ rapidjson::Document McpHttpSession::sendRequest(const int id,
   copiedParams.CopyFrom(params, a);
   request.AddMember("params", copiedParams, a);
 
-  return sendJsonRpc(request, timeoutMs, stage);
+  return sendJsonRpc(request, timeoutMs, stage, ctx);
 }
 
 void McpHttpSession::sendNotification(const std::string &method,
@@ -75,13 +75,14 @@ void McpHttpSession::sendNotification(const std::string &method,
   copiedParams.CopyFrom(params, a);
   request.AddMember("params", copiedParams, a);
 
-  (void)sendJsonRpc(request, 2000, method);
+  (void)sendJsonRpc(request, 2000, method, nullptr);
 }
 
 rapidjson::Document McpHttpSession::sendJsonRpc(const rapidjson::Document &request,
                                                 const int timeoutMs,
-                                                const std::string &stage) const {
-  if (ctx_.cancelRequested()) {
+                                                const std::string &stage,
+                                                shared::ToolContext *ctx) const {
+  if (ctx && ctx->cancelRequested()) {
     throw std::runtime_error("Interrupted");
   }
 
@@ -104,7 +105,7 @@ rapidjson::Document McpHttpSession::sendJsonRpc(const rapidjson::Document &reque
     throw std::runtime_error("MCP " + stage + " HTTP response body is empty");
   }
 
-  if (ctx_.cancelRequested()) {
+  if (ctx && ctx->cancelRequested()) {
     throw std::runtime_error("Interrupted");
   }
 

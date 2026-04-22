@@ -8,7 +8,7 @@
 namespace firmius::core {
 
 shared::ToolMetadata WebSearchTool::getMetadata() const {
-    return {"web_search", "Perform a web search and return results", ToolScope::Web};
+    return {"web_search", "Web operations: perform a web search and return results.", ToolScope::Web};
 }
 
 std::shared_ptr<shared::JSONSchema> WebSearchTool::getSchema() const {

@@ -83,7 +83,7 @@ AuditResult WebSearchAudit::run(const std::vector<std::string>& args) {
     opts.deleteOnExit = false;
 
     const std::string workingDir = std::filesystem::current_path().string();
-    std::string threadId = harness.newThread(opts, workingDir, "lead");
+    std::string threadId = harness.newThread(opts, workingDir, "aster");
     if (threadId.empty()) {
         std::cerr << "Failed to create harness thread\n";
         result.exitCode = 1;

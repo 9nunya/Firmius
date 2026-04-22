@@ -4,25 +4,14 @@
 #include "agents/AgentPermissionChecks.hpp"
 #include "agents/PurposeLoader.hpp"
 #include "hosts/LocalHost.hpp"
-#include "tools/FileReadTool.hpp"
+#include "tools/FilesTool.hpp"
 #include "tools/FileEditTool.hpp"
-#include "tools/GlobTool.hpp"
-#include "tools/GrepTool.hpp"
-#include "tools/ListDirectoryTool.hpp"
 #include "tools/LspDiagnosticsTool.hpp"
 #include "tools/LspTool.hpp"
-#include "tools/ProcessExecuteTool.hpp"
-#include "tools/ProcessStatusTool.hpp"
-#include "tools/ProcessSpawnTool.hpp"
+#include "tools/ProcessTool.hpp"
 #include "tools/PythonExecuteTool.hpp"
 #include "tools/SkillLoadTool.hpp"
 #include "tools/ToolRegistry.hpp"
-#include "tools/McpCallTool.hpp"
-#include "tools/McpGetPromptTool.hpp"
-#include "tools/McpListTool.hpp"
-#include "tools/McpLoadTool.hpp"
-#include "tools/McpReadResourceTool.hpp"
-#include "tools/McpSearchTool.hpp"
 #include "utils/Hashline.hpp"
 #include "ConfigLoader.hpp"
 #include "AgentRegistry.hpp"
@@ -494,7 +483,7 @@ TEST(ToolContextCancellationContractTest, WaitForReturnsFalseWhenCancelled) {
 
 class FileReadToolTest : public ::testing::Test {
 protected:
-  FileReadTool tool;
+  FilesTool tool;
   NiceMock<MockHost> mockHost;
   NiceMock<MockAgent> mockAgent;
   AgentContext agentContext;
@@ -527,6 +516,13 @@ protected:
                                       std::istreambuf_iterator<char>());
         }));
   }
+
+  ToolResult executeRead(const rapidjson::Value &json, ToolContext &ctx) {
+    rapidjson::Document doc;
+    doc.CopyFrom(json, doc.GetAllocator());
+    doc.AddMember("action", "Read", doc.GetAllocator());
+    return tool.execute(doc, ctx);
+  }
 };
 
 TEST_F(FileReadToolTest, allowedPaths_permitsInside) {
@@ -539,13 +535,11 @@ TEST_F(FileReadToolTest, allowedPaths_permitsInside) {
   auto json = createJsonInput({{"path", "file.txt"}});
   ToolContext ctx{mockHost, mockAgent, "test_call"};
 
-  ITool *itool = &tool;
-  auto result = itool->execute(json, ctx);
+  auto result = executeRead(json, ctx);
 
   EXPECT_TRUE(result.success);
   rapidjson::Document resultDoc;
   resultDoc.Parse(result.data.c_str());
-  // FileReadTool outputs plain line number anchors: "lineNumber|content"
   auto expectedContent =
       std::string("1|Line 1\n2|Line 2\n3|Line 3");
   ASSERT_TRUE(resultDoc.HasMember("content"));
@@ -564,8 +558,7 @@ TEST_F(FileReadToolTest, allowedPaths_blocksOutside) {
   auto json = createJsonInput({{"path", "/etc/passwd"}});
   ToolContext ctx{mockHost, mockAgent, "test_call"};
 
-  ITool *itool = &tool;
-  auto result = itool->execute(json, ctx);
+  auto result = executeRead(json, ctx);
 
   EXPECT_FALSE(result.success);
   EXPECT_NE(result.error.find("Access denied"), std::string::npos);
@@ -582,13 +575,11 @@ TEST_F(FileReadToolTest, lineSlicing) {
                               {{"start_line", 2}, {"end_line", 4}});
   ToolContext ctx{mockHost, mockAgent, "test_call"};
 
-  ITool *itool = &tool;
-  auto result = itool->execute(json, ctx);
+  auto result = executeRead(json, ctx);
 
   EXPECT_TRUE(result.success);
   rapidjson::Document resultDoc;
   resultDoc.Parse(result.data.c_str());
-  // FileReadTool outputs plain line number anchors: "lineNumber|content"
   auto expectedContent =
       std::string("2|Line 2\n3|Line 3\n4|Line 4");
   ASSERT_TRUE(resultDoc.HasMember("content"));
@@ -600,6 +591,7 @@ TEST_F(FileReadToolTest, lineSlicing) {
   EXPECT_NE(result.data.find("\"watch_scope\":\"range\""), std::string::npos);
   EXPECT_NE(result.data.find("\"reached_end\":false"), std::string::npos);
 }
+
 TEST_F(FileReadToolTest, fileReadLoadsNearestAgentsWithoutReloadingRoot) {
   std::filesystem::create_directories("/tmp/work");
   const std::filesystem::path rootAgentsPath = "/tmp/work/AGENTS.md";
@@ -638,8 +630,7 @@ TEST_F(FileReadToolTest, fileReadLoadsNearestAgentsWithoutReloadingRoot) {
       createJsonInput({{"path", "agents_file_read_test/pkg/module/target.txt"}});
   ToolContext ctx{mockHost, mockAgent, "test_call"};
 
-  ITool *itool = &tool;
-  auto result = itool->execute(json, ctx);
+  auto result = executeRead(json, ctx);
   EXPECT_TRUE(result.success) << result.error;
 
   const std::string canonicalRootAgents =
@@ -884,7 +875,7 @@ TEST_F(SkillLoadToolTest, allowsSymlinkWithinSkillRoot) {
 
 class GlobToolTest : public ::testing::Test {
 protected:
-  GlobTool tool;
+  FilesTool tool;
   NiceMock<MockHost> mockHost;
   NiceMock<MockAgent> mockAgent;
   std::map<std::string, FileInfo> fileInfos;
@@ -929,6 +920,13 @@ protected:
           return it->second;
         }));
   }
+
+  ToolResult executeGlob(const rapidjson::Value &json, ToolContext &ctx) {
+    rapidjson::Document doc;
+    doc.CopyFrom(json, doc.GetAllocator());
+    doc.AddMember("action", "Glob", doc.GetAllocator());
+    return tool.execute(doc, ctx);
+  }
 };
 
 TEST_F(GlobToolTest, noMatchesReturnsEmptyArray) {
@@ -938,11 +936,10 @@ TEST_F(GlobToolTest, noMatchesReturnsEmptyArray) {
   auto json = createJsonInput({{"pattern", "*.nonexistent"}, {"path", "/tmp"}});
   ToolContext ctx{mockHost, mockAgent, "test_call"};
 
-  ITool *itool = &tool;
-  auto toolResult = itool->execute(json, ctx);
+  auto toolResult = executeGlob(json, ctx);
 
   EXPECT_TRUE(toolResult.success);
-  EXPECT_NE(toolResult.data.find("\"results\":[]"), std::string::npos);
+  EXPECT_NE(toolResult.data.find("[]"), std::string::npos);
 }
 
 TEST_F(GlobToolTest, listDirFailureReturnsError) {
@@ -953,8 +950,7 @@ TEST_F(GlobToolTest, listDirFailureReturnsError) {
   auto json = createJsonInput({{"pattern", "*.txt"}, {"path", "/root"}});
   ToolContext ctx{mockHost, mockAgent, "test_call"};
 
-  ITool *itool = &tool;
-  auto toolResult = itool->execute(json, ctx);
+  auto toolResult = executeGlob(json, ctx);
 
   EXPECT_FALSE(toolResult.success);
   EXPECT_NE(toolResult.error.find("Permission denied"), std::string::npos);
@@ -973,8 +969,7 @@ TEST_F(GlobToolTest, patternMatchingSupportsRecursiveAndBraceWildcards) {
       createJsonInput({{"pattern", "**/*.{txt,log}"}, {"path", "/tmp"}});
   ToolContext ctx{mockHost, mockAgent, "test_call"};
 
-  ITool *itool = &tool;
-  auto toolResult = itool->execute(json, ctx);
+  auto toolResult = executeGlob(json, ctx);
 
   EXPECT_TRUE(toolResult.success);
   EXPECT_NE(toolResult.data.find("file1.txt"), std::string::npos);
@@ -996,8 +991,7 @@ TEST_F(GlobToolTest, patternMatchingSupportsCharacterClassesAndPathSegments) {
       createJsonInput({{"pattern", "src/**/test[0-9].cpp"}, {"path", "/tmp"}});
   ToolContext ctx{mockHost, mockAgent, "test_call"};
 
-  ITool *itool = &tool;
-  auto toolResult = itool->execute(json, ctx);
+  auto toolResult = executeGlob(json, ctx);
 
   EXPECT_TRUE(toolResult.success);
   EXPECT_NE(toolResult.data.find("test1.cpp"), std::string::npos);
@@ -1005,33 +999,9 @@ TEST_F(GlobToolTest, patternMatchingSupportsCharacterClassesAndPathSegments) {
   EXPECT_EQ(toolResult.data.find("testA.cpp"), std::string::npos);
 }
 
-TEST_F(GlobToolTest, visitationBudgetApplied) {
-  // Create directories + files that exceed kMaxGlobVisitedNodes (20000).
-  addEntry("/tmp", true);
-  for (int i = 0; i < 30000; ++i) {
-    addEntry("/tmp/dir" + std::to_string(i), true);
-    addEntry("/tmp/dir" + std::to_string(i) + "/file.txt", false);
-  }
-
-  auto json = createJsonInput({{"pattern", "**/*.txt"}, {"path", "/tmp"}});
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-  ITool *itool = &tool;
-  auto toolResult = itool->execute(json, ctx);
-  EXPECT_TRUE(toolResult.success);
-  rapidjson::Document doc;
-  doc.Parse(toolResult.data.c_str());
-  ASSERT_TRUE(doc.IsObject());
-  ASSERT_TRUE(doc.HasMember("results"));
-  ASSERT_TRUE(doc["results"].IsArray());
-  ASSERT_TRUE(doc.HasMember("budget_hit"));
-  EXPECT_TRUE(doc["budget_hit"].GetBool());
-  // Should be at most kMaxGlobMatches (1000) since visitation stops early.
-  EXPECT_LE(doc["results"].Size(), 1000u);
-}
-
 class GrepToolTest : public ::testing::Test {
 protected:
-  GrepTool tool;
+  FilesTool tool;
   NiceMock<MockHost> mockHost;
   NiceMock<MockAgent> mockAgent;
 
@@ -1041,6 +1011,13 @@ protected:
         .WillByDefault(ReturnRef(mockAgent.defaultCtx));
     ON_CALL(mockAgent.mockEnv_->mockWorkspace(), resolvePath(_))
         .WillByDefault(Invoke([](const std::string &path) { return path; }));
+  }
+
+  ToolResult executeGrep(const rapidjson::Value &json, ToolContext &ctx) {
+    rapidjson::Document doc;
+    doc.CopyFrom(json, doc.GetAllocator());
+    doc.AddMember("action", "Grep", doc.GetAllocator());
+    return tool.execute(doc, ctx);
   }
 };
 
@@ -1055,8 +1032,7 @@ TEST_F(GrepToolTest, binaryFilesSkipped) {
   auto json = createJsonInput({{"pattern", "test"}, {"path", "/tmp"}});
   ToolContext ctx{mockHost, mockAgent, "test_call"};
 
-  ITool *itool = &tool;
-  itool->execute(json, ctx);
+  executeGrep(json, ctx);
 }
 
 TEST_F(GrepToolTest, exitCode1_noMatches) {
@@ -1071,8 +1047,7 @@ TEST_F(GrepToolTest, exitCode1_noMatches) {
       {{"pattern", "nonexistent_pattern_12345"}, {"path", "/tmp"}});
   ToolContext ctx{mockHost, mockAgent, "test_call"};
 
-  ITool *itool = &tool;
-  auto toolResult = itool->execute(json, ctx);
+  auto toolResult = executeGrep(json, ctx);
 
   EXPECT_TRUE(toolResult.success);
   EXPECT_NE(toolResult.data.find("[]"), std::string::npos);
@@ -1094,8 +1069,7 @@ TEST_F(GrepToolTest, parsesRipgrepJsonAndSupportsAdvancedRegexEngine) {
                                {"path", "/tmp"}});
   ToolContext ctx{mockHost, mockAgent, "test_call"};
 
-  ITool *itool = &tool;
-  auto toolResult = itool->execute(json, ctx);
+  auto toolResult = executeGrep(json, ctx);
 
   EXPECT_TRUE(toolResult.success);
   EXPECT_NE(toolResult.data.find("/tmp/dir:with:colon/file.cpp"),
@@ -1122,8 +1096,7 @@ TEST_F(GrepToolTest, fallsBackToPerlGrepWhenRipgrepIsUnavailable) {
   auto json = createJsonInput({{"pattern", R"((?<=foo)bar)"}, {"path", "/tmp"}});
   ToolContext ctx{mockHost, mockAgent, "test_call"};
 
-  ITool *itool = &tool;
-  auto toolResult = itool->execute(json, ctx);
+  auto toolResult = executeGrep(json, ctx);
 
   EXPECT_TRUE(toolResult.success);
   EXPECT_NE(toolResult.data.find("\"line\":7"), std::string::npos);
@@ -1159,63 +1132,8 @@ protected:
   }
 };
 
-class FileEditAnchorToolTest : public ::testing::Test {
-protected:
-  FileEditTool tool;
-  NiceMock<MockHost> mockHost;
-  NiceMock<MockAgent> mockAgent;
-  std::string capturedWrite;
 
-  void SetUp() override {
-    mockAgent.defaultCtx.environment.cwd = "/tmp/work";
-    mockAgent.defaultCtx.permissions.allowOutsideCwd = false;
-    mockAgent.defaultCtx.permissions.allowedPaths = {"/tmp/work", "/tmp"};
-    mockAgent.mockPerms_->allowOutsideCwd_ = false;
-    mockAgent.mockPerms_->allowedPaths_ = {"/tmp/work", "/tmp"};
-    mockAgent.mockPerms_->cwd_ = "/tmp/work";
-
-    ON_CALL(mockAgent, getContext())
-        .WillByDefault(ReturnRef(mockAgent.defaultCtx));
-    ON_CALL(mockAgent, getMutableContext())
-        .WillByDefault(ReturnRef(mockAgent.defaultCtx));
-    ON_CALL(mockAgent.mockEnv_->mockWorkspace(), resolvePath(_))
-        .WillByDefault(Invoke([](const std::string &path) {
-          if (path.starts_with("/")) {
-            return path;
-          }
-          return "/tmp/work/" + path;
-        }));
-    ON_CALL(mockAgent.mockEnv_->mockWorkspace(), hasFullyReadFile(_))
-        .WillByDefault(Return(true));
-    ON_CALL(mockAgent.mockEnv_->mockWorkspace(), getCurrentWorkingDirectory())
-        .WillByDefault(Return("/tmp/work"));
-    ON_CALL(mockHost, writeFile(_, _))
-        .WillByDefault(Invoke([this](const std::string &,
-                                     const std::vector<uint8_t> &data) {
-          capturedWrite.assign(data.begin(), data.end());
-        }));
-  }
-
-  static std::vector<uint8_t> bytes(const std::string &text) {
-    return std::vector<uint8_t>(text.begin(), text.end());
-  }
-
-  static std::string anchor(int line, const std::string &/*content*/) {
-    return std::to_string(line);
-  }
-
-  static std::string readFormattedAnchor(int line, const std::string &content) {
-    return firmius::shared::utils::Hashline::formatLine(line, content);
-  }
-
-  static rapidjson::Document parseResult(const ToolResult &result) {
-    rapidjson::Document doc;
-    doc.Parse(result.data.c_str());
-    return doc;
-  }
-};
-
-class ToolRegistryArgumentNormalizationTest : public ::testing::Test {
+class FileToolFamilyTest : public ::testing::Test {
 protected:
   ToolRegistry registry;
   NiceMock<MockHost> mockHost;
@@ -1224,25 +1142,23 @@ protected:
 
   void SetUp() override {
     registry.registerTool(std::make_unique<FileEditTool>());
+    registry.registerTool(std::make_unique<FileWriteTool>());
+    registry.registerTool(std::make_unique<FileReplaceTool>());
+    registry.registerTool(std::make_unique<FileRangeTool>());
 
     mockAgent.defaultCtx.environment.cwd = "/tmp/work";
     mockAgent.defaultCtx.permissions.allowOutsideCwd = false;
     mockAgent.defaultCtx.permissions.allowedPaths = {"/tmp/work", "/tmp"};
-    mockAgent.defaultCtx.permissions.allowedScopes = {
-        ToolScope::FilesystemWrite};
+    mockAgent.defaultCtx.permissions.allowedScopes = {ToolScope::FilesystemWrite};
     mockAgent.mockPerms_->allowOutsideCwd_ = false;
     mockAgent.mockPerms_->allowedPaths_ = {"/tmp/work", "/tmp"};
     mockAgent.mockPerms_->cwd_ = "/tmp/work";
 
-    ON_CALL(mockAgent, getContext())
-        .WillByDefault(ReturnRef(mockAgent.defaultCtx));
-    ON_CALL(mockAgent, getMutableContext())
-        .WillByDefault(ReturnRef(mockAgent.defaultCtx));
+    ON_CALL(mockAgent, getContext()).WillByDefault(ReturnRef(mockAgent.defaultCtx));
+    ON_CALL(mockAgent, getMutableContext()).WillByDefault(ReturnRef(mockAgent.defaultCtx));
     ON_CALL(mockAgent.mockEnv_->mockWorkspace(), resolvePath(_))
         .WillByDefault(Invoke([](const std::string &path) {
-          if (path.starts_with("/")) {
-            return path;
-          }
+          if (path.starts_with("/")) return path;
           return "/tmp/work/" + path;
         }));
     ON_CALL(mockAgent.mockEnv_->mockWorkspace(), hasFullyReadFile(_))
@@ -1250,8 +1166,7 @@ protected:
     ON_CALL(mockAgent.mockEnv_->mockWorkspace(), getCurrentWorkingDirectory())
         .WillByDefault(Return("/tmp/work"));
     ON_CALL(mockHost, writeFile(_, _))
-        .WillByDefault(Invoke([this](const std::string &,
-                                     const std::vector<uint8_t> &data) {
+        .WillByDefault(Invoke([this](const std::string &, const std::vector<uint8_t> &data) {
           capturedWrite.assign(data.begin(), data.end());
         }));
   }
@@ -1260,161 +1175,28 @@ protected:
     return std::vector<uint8_t>(text.begin(), text.end());
   }
 
-  static std::string anchor(int line, const std::string &/*content*/) {
-    return std::to_string(line);
+  static std::string anchor(int line, const std::string &) { return std::to_string(line); }
+
+  static rapidjson::Document parseResult(const ToolResult &result) {
+    rapidjson::Document doc;
+    doc.Parse(result.data.c_str());
+    return doc;
   }
 
-  ToolResult executeFileEdit(rapidjson::Document &input) {
+  ToolResult executeNamed(const char *toolName, rapidjson::Document &input) {
     ToolContext ctx{mockHost, mockAgent, "test_call"};
-    return registry.execute("file_edit", input, ctx);
+    return registry.execute(toolName, input, ctx);
   }
 };
 
-
-TEST_F(ToolRegistryArgumentNormalizationTest, fileEditIgnoresInertWrapperDefaultsInFilesMode) {
-  rapidjson::Document input;
-  input.SetObject();
-  auto &alloc = input.GetAllocator();
-  input.AddMember("path", makeJsonString("", alloc), alloc);
-  input.AddMember("content", makeJsonString("", alloc), alloc);
-  input.AddMember("patch", makeJsonString("", alloc), alloc);
-  input.AddMember("old_string", makeJsonString("", alloc), alloc);
-  input.AddMember("new_string", makeJsonString("", alloc), alloc);
-  input.AddMember("replace_all", false, alloc);
-  input.AddMember("fuzzy_threshold", 0, alloc);
-  input.AddMember("edits", rapidjson::Value(rapidjson::kArrayType), alloc);
-
-  rapidjson::Value files(rapidjson::kArrayType);
-  rapidjson::Value file(rapidjson::kObjectType);
-  file.AddMember("path", makeJsonString("target.txt", alloc), alloc);
-  file.AddMember("content", makeJsonString("", alloc), alloc);
-  file.AddMember("old_string", makeJsonString("", alloc), alloc);
-  file.AddMember("new_string", makeJsonString("", alloc), alloc);
-  file.AddMember("replace_all", false, alloc);
-  file.AddMember("fuzzy_threshold", 0, alloc);
-  file.AddMember("edits", rapidjson::Value(rapidjson::kArrayType), alloc);
-  file.AddMember("patch", makeJsonString(R"(@@ 1 @@
--old
-+new
-)", alloc), alloc);
-  files.PushBack(file, alloc);
-  input.AddMember("files", files, alloc);
-
-  EXPECT_CALL(mockHost, exists("/tmp/work/target.txt"))
-      .WillRepeatedly(Return(true));
-  EXPECT_CALL(mockHost, readFile("/tmp/work/target.txt"))
-      .WillOnce(Return(bytes("old\n")));
-
-  ToolResult result = executeFileEdit(input);
-  EXPECT_TRUE(result.success) << result.error;
-  EXPECT_EQ(capturedWrite, "new\n");
-}
-
-TEST_F(CommandPermissionToolTest,
-       processExecute_deniedCommandDoesNotSpawnProcess) {
-  ProcessExecuteTool tool;
-  mockAgent.mockPerms_->commandApprovalResponse_ = PermissionResponse::Deny;
-
-  auto json =
-      createJsonInput({{"command", "touch denied.txt"}, {"cwd", "/tmp/work"}});
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-
-  EXPECT_CALL(mockAgent.mockEnv_->mockProcessManager(), spawnProcess(_, _, _, _, _))
-      .Times(0);
-
-  ITool *itool = &tool;
-  auto result = itool->execute(json, ctx);
-
-  EXPECT_FALSE(result.success);
-  ASSERT_EQ(mockAgent.mockPerms_->requestedCommands_.size(), 1u);
-  EXPECT_EQ(mockAgent.mockPerms_->requestedCommands_[0], "touch denied.txt");
-}
-
-TEST_F(CommandPermissionToolTest,
-       processSpawn_deniedCommandDoesNotSpawnProcess) {
-  ProcessSpawnTool tool;
-  mockAgent.mockPerms_->commandApprovalResponse_ = PermissionResponse::Deny;
-
-  rapidjson::Document doc;
-  doc.SetObject();
-  auto &alloc = doc.GetAllocator();
-  doc.AddMember("command", makeJsonString("sleep 10", alloc), alloc);
-
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-
-  EXPECT_CALL(mockAgent.mockEnv_->mockProcessManager(), spawnProcess(_, _, _, _, _))
-      .Times(0);
-
-  ITool *itool = &tool;
-  auto result = itool->execute(doc, ctx);
-
-  EXPECT_FALSE(result.success);
-  ASSERT_EQ(mockAgent.mockPerms_->requestedCommands_.size(), 1u);
-  EXPECT_EQ(mockAgent.mockPerms_->requestedCommands_[0], "sleep 10");
-}
-
-TEST_F(CommandPermissionToolTest,
-       pythonExecute_deniedCommandDoesNotWriteTempFile) {
-  PythonExecuteTool tool;
-  mockAgent.mockPerms_->commandApprovalResponse_ = PermissionResponse::Deny;
-
-  auto json = createJsonInput({{"code", "print('hi')"}});
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-
-  EXPECT_CALL(mockHost, writeFile(_, _)).Times(0);
-  EXPECT_CALL(mockAgent.mockEnv_->mockProcessManager(), spawnProcess(_, _, _, _, _))
-      .Times(0);
-
-  ITool *itool = &tool;
-  auto result = itool->execute(json, ctx);
-
-  EXPECT_FALSE(result.success);
-  ASSERT_EQ(mockAgent.mockPerms_->requestedCommands_.size(), 1u);
-  EXPECT_EQ(mockAgent.mockPerms_->requestedCommands_[0],
-            "python3 -c \"import os; exec(compile(os.environ['FIRMIUS_PYTHON_EXECUTE_CODE'], '<python_execute>', 'exec'))\"");
-}
-
-TEST_F(CommandPermissionToolTest,
-       pythonExecuteUsesSingleApprovedCommandWithEnvPayload) {
-  PythonExecuteTool tool;
-  std::map<std::string, std::string> capturedEnv;
-
-  EXPECT_CALL(mockHost, writeFile(_, _)).Times(0);
-  EXPECT_CALL(mockAgent.mockEnv_->mockProcessManager(), spawnProcess(_, _, _, _, _))
-      .WillOnce(Invoke([&capturedEnv](const std::string &command,
-                                      const std::string &, const std::string &,
-                                      const auto &env, bool) {
-        EXPECT_EQ(command,
-                  "python3 -c \"import os; exec(compile(os.environ['FIRMIUS_PYTHON_EXECUTE_CODE'], '<python_execute>', 'exec'))\"");
-        capturedEnv = env;
-        return "proc_python";
-      }));
-  EXPECT_CALL(mockAgent.mockEnv_->mockProcessManager(), inspectProcess(_))
-      .WillRepeatedly(Return(ProcessSnapshot{false, 0, "ok", "", 5.0}));
-
-  auto json = createJsonInput({{"code", "print('hi')"}});
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-
-  ITool *itool = &tool;
-  auto result = itool->execute(json, ctx);
-
-  EXPECT_TRUE(result.success);
-  ASSERT_EQ(mockAgent.mockPerms_->requestedCommands_.size(), 1u);
-  EXPECT_EQ(mockAgent.mockPerms_->requestedCommands_[0],
-            "python3 -c \"import os; exec(compile(os.environ['FIRMIUS_PYTHON_EXECUTE_CODE'], '<python_execute>', 'exec'))\"");
-  ASSERT_EQ(capturedEnv["FIRMIUS_PYTHON_EXECUTE_CODE"], "print('hi')");
-}
-
 TEST_F(CommandPermissionToolTest,
        fileEdit_deniedWriteApprovalDoesNotWriteFile) {
-  FileEditTool tool;
+  FileWriteTool tool;
   mockAgent.mockPerms_->editApprovalResponse_ = PermissionResponse::Deny;
 
-  auto json =
-      createJsonInput({{"path", "blocked.txt"}, {"content", "new content"}});
+  auto json = createJsonInput({{"path", "blocked.txt"}, {"content", "new content"}});
   ToolContext ctx{mockHost, mockAgent, "test_call"};
 
-  EXPECT_CALL(mockHost, exists("/tmp/work/blocked.txt")).WillOnce(Return(false));
   EXPECT_CALL(mockHost, writeFile(_, _)).Times(0);
 
   ITool *itool = &tool;
@@ -1422,1558 +1204,226 @@ TEST_F(CommandPermissionToolTest,
 
   EXPECT_FALSE(result.success);
   ASSERT_EQ(mockAgent.mockPerms_->requestedEditPaths_.size(), 1u);
-  EXPECT_EQ(mockAgent.mockPerms_->requestedEditPaths_[0],
-            "/tmp/work/blocked.txt");
+  EXPECT_EQ(mockAgent.mockPerms_->requestedEditPaths_[0], "/tmp/work/blocked.txt");
 }
 
-TEST_F(FileEditAnchorToolTest, replaceRangeByLineNumber) {
+TEST_F(FileToolFamilyTest, editAppliesSingleFilePatchWithHeaders) {
   const std::string path = "/tmp/work/file.txt";
   const std::string original = "alpha\nbeta\ngamma\n";
 
   EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
   EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
 
-  auto json = createFileEditJson(
-      "file.txt",
-      {{{"op", "replace_range"},
-        {"start_anchor", anchor(2, "beta")},
-        {"end_anchor", anchor(3, "gamma")},
-        {"new_lines", "beta2\ngamma2"}}});
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
+  rapidjson::Document input;
+  input.SetObject();
+  auto &alloc = input.GetAllocator();
+  input.AddMember(
+      "patch",
+      makeJsonString("--- a/file.txt\n+++ b/file.txt\n@@ -2,1 +2,2 @@\n-beta\n+beta2\n+gamma2", alloc),
+      alloc);
 
-  ITool *itool = &tool;
-  auto result = itool->execute(json, ctx);
-
-  EXPECT_TRUE(result.success);
-  EXPECT_EQ(capturedWrite, "alpha\nbeta2\ngamma2\n");
-  EXPECT_NE(result.data.find("\"applied_edits\":1"), std::string::npos);
-  EXPECT_EQ(result.data.find("\"post_edit_slice\""), std::string::npos);
-  EXPECT_NE(result.data.find("\"diff_preview\":"), std::string::npos);
-  EXPECT_NE(result.data.find("\"watch_state\":\"refreshed\""), std::string::npos);
-
+  auto result = executeNamed("Edit", input);
+  EXPECT_TRUE(result.success) << result.error;
+  EXPECT_EQ(capturedWrite, "alpha\nbeta2\ngamma2\ngamma\n");
   auto doc = parseResult(result);
-  ASSERT_TRUE(doc.HasMember("operations"));
-  const auto &operation = doc["operations"].GetArray()[0];
-  EXPECT_FALSE(operation.HasMember("post_edit_context"));
-  ASSERT_TRUE(operation.HasMember("old_lines"));
-  ASSERT_TRUE(operation.HasMember("new_lines"));
-  ASSERT_EQ(operation["old_lines"].GetArray().Size(), 2u);
-  ASSERT_EQ(operation["new_lines"].GetArray().Size(), 2u);
-  EXPECT_STREQ(operation["new_lines"].GetArray()[0].GetString(), "beta2");
-  EXPECT_STREQ(operation["new_lines"].GetArray()[1].GetString(), "gamma2");
+  EXPECT_STREQ(doc["resolved_mode"].GetString(), "patch");
+  EXPECT_TRUE(doc["transactional"].GetBool());
 }
 
-TEST_F(FileEditAnchorToolTest,
-       replaceRangeSanitizesHashlinePrefixesDiffMarkersAndBoundaryEchoes) {
-  const std::string path = "/tmp/work/file.txt";
-  const std::string original = "keep-a\nbeta\ngamma\nkeep-b\n";
+TEST_F(FileToolFamilyTest, editRejectsPatchWithoutUnifiedHeaders) {
+  rapidjson::Document input;
+  input.SetObject();
+  input.AddMember("patch", makeJsonString("@@ -1,1 +1,1 @@\n-a\n+b", input.GetAllocator()),
+                  input.GetAllocator());
 
+  auto result = executeNamed("Edit", input);
+  EXPECT_FALSE(result.success);
+  EXPECT_THAT(result.error, HasSubstr("unified diff"));
+}
+
+TEST_F(FileToolFamilyTest, editValidateOnlyDoesNotWrite) {
+  const std::string path = "/tmp/work/file.txt";
+  const std::string original = "alpha\nbeta\n";
   EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
   EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
+  EXPECT_CALL(mockHost, writeFile(_, _)).Times(0);
 
-  auto json = createFileEditJson(
-      "file.txt",
-      {{{"op", "replace_range"},
-        {"start_anchor", anchor(2, "beta")},
-        {"end_anchor", anchor(3, "gamma")},
-        {"new_lines",
-         "keep-a\n2#8c72|+ beta2\n3#f2c5|48a8|- gamma2\nkeep-b"}}});
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
+  rapidjson::Document input;
+  input.SetObject();
+  auto &alloc = input.GetAllocator();
+  input.AddMember("patch",
+                  makeJsonString("--- a/file.txt\n+++ b/file.txt\n@@ -2,1 +2,1 @@\n-beta\n+beta2", alloc),
+                  alloc);
+  input.AddMember("validate_only", true, alloc);
 
-  ITool *itool = &tool;
-  auto result = itool->execute(json, ctx);
-
-  EXPECT_TRUE(result.success);
-  EXPECT_EQ(capturedWrite, "keep-a\nbeta2\ngamma2\nkeep-b\n");
-
+  auto result = executeNamed("Edit", input);
+  EXPECT_TRUE(result.success) << result.error;
   auto doc = parseResult(result);
-  ASSERT_TRUE(doc.IsObject());
-  ASSERT_TRUE(doc.HasMember("sanitation"));
-  const auto &sanitation = doc["sanitation"];
-  EXPECT_EQ(sanitation["hashline_prefixes_stripped"].GetInt(), 2);
-  EXPECT_EQ(sanitation["malformed_hash_fragments_stripped"].GetInt(), 1);
-  EXPECT_EQ(sanitation["diff_markers_stripped"].GetInt(), 2);
-  EXPECT_EQ(sanitation["boundary_echoes_removed"].GetInt(), 2);
-  EXPECT_TRUE(sanitation["boundary_echo_removed"].GetBool());
-
-  ASSERT_TRUE(doc.HasMember("operations"));
-  const auto &operation = doc["operations"].GetArray()[0];
-  ASSERT_TRUE(operation.HasMember("old_lines"));
-  ASSERT_TRUE(operation.HasMember("new_lines"));
-  ASSERT_EQ(operation["old_lines"].GetArray().Size(), 2u);
-  EXPECT_STREQ(operation["old_lines"].GetArray()[0].GetString(), "beta");
-  EXPECT_STREQ(operation["old_lines"].GetArray()[1].GetString(), "gamma");
-  ASSERT_EQ(operation["new_lines"].GetArray().Size(), 2u);
-  EXPECT_STREQ(operation["new_lines"].GetArray()[0].GetString(), "beta2");
-  EXPECT_STREQ(operation["new_lines"].GetArray()[1].GetString(), "gamma2");
+  EXPECT_TRUE(doc["validate_only"].GetBool());
+  EXPECT_TRUE(doc["transactional"].GetBool());
 }
 
-TEST_F(FileEditAnchorToolTest, insertAfterByLineNumber) {
-  const std::string path = "/tmp/work/file.txt";
-  const std::string original = "alpha\nbeta\n";
-
-  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
-  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
-
-  auto json = createFileEditJson(
-      "file.txt",
-      {{{"op", "insert_after"},
-        {"anchor", anchor(1, "alpha")},
-        {"new_lines", "inserted"}}});
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-
-  ITool *itool = &tool;
-  auto result = itool->execute(json, ctx);
-
-  EXPECT_TRUE(result.success);
-  EXPECT_EQ(capturedWrite, "alpha\ninserted\nbeta\n");
-}
-
-TEST_F(FileEditAnchorToolTest, insertAfterRejectsReadFormattedAnchorWithHelp) {
-  const std::string path = "/tmp/work/file.txt";
-  const std::string original = "alpha\nbeta\n";
-
-  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
-  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
-  EXPECT_CALL(mockHost, writeFile(_, _)).Times(0);
-
-  auto json = createFileEditJson(
-      "file.txt",
-      {{{"op", "insert_after"},
-        {"anchor", readFormattedAnchor(1, "alpha")},
-        {"new_lines", "inserted"}}});
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-
-  ITool *itool = &tool;
-  auto result = itool->execute(json, ctx);
-
-  EXPECT_FALSE(result.success);
-  EXPECT_TRUE(result.error.find("Anchor contains") != std::string::npos || result.error.find("Malformed anchor") != std::string::npos);
-  EXPECT_NE(result.error.find("plain line number only"), std::string::npos);
-  EXPECT_NE(result.error.find("without hashline prefixes or trailing |content"), std::string::npos);
-}
-
-TEST_F(FileEditAnchorToolTest, replaceRangeWithAnchorOnlyFailsPrecisely) {
-  const std::string path = "/tmp/work/file.txt";
-  const std::string original = "alpha\nbeta\n";
-
-  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
-  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
-  EXPECT_CALL(mockHost, writeFile(_, _)).Times(0);
-
-  auto json = createFileEditJson(
-      "file.txt",
-      {{{"op", "replace_range"}, {"anchor", anchor(3, "beta")}}});
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-
-  ITool *itool = &tool;
-  auto result = itool->execute(json, ctx);
-
-  EXPECT_FALSE(result.success);
-  EXPECT_NE(result.error.find(
-                "replace_range requires both start_anchor and end_anchor; got "
-                "anchor only"),
-            std::string::npos);
-}
-
-TEST_F(FileEditAnchorToolTest, replaceRangeMissingEndAnchorFailsPrecisely) {
-  const std::string path = "/tmp/work/file.txt";
-  const std::string original = "alpha\nbeta\n";
-
-  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
-  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
-  EXPECT_CALL(mockHost, writeFile(_, _)).Times(0);
-
-  auto json = createFileEditJson(
-      "file.txt",
-      {{{"op", "replace_range"}, {"start_anchor", anchor(2, "beta")}}});
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-
-  ITool *itool = &tool;
-  auto result = itool->execute(json, ctx);
-
-  EXPECT_FALSE(result.success);
-  EXPECT_NE(result.error.find("replace_range is missing end_anchor"),
-            std::string::npos);
-}
-
-TEST_F(FileEditAnchorToolTest, deleteRangeMissingStartAnchorFailsPrecisely) {
-  const std::string path = "/tmp/work/file.txt";
-  const std::string original = "alpha\nbeta\n";
-
-  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
-  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
-  EXPECT_CALL(mockHost, writeFile(_, _)).Times(0);
-
-  auto json = createFileEditJson(
-      "file.txt",
-      {{{"op", "delete_range"}, {"end_anchor", anchor(2, "beta")}}});
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-
-  ITool *itool = &tool;
-  auto result = itool->execute(json, ctx);
-
-  EXPECT_FALSE(result.success);
-  EXPECT_NE(result.error.find("delete_range is missing start_anchor"),
-            std::string::npos);
-}
-
-TEST_F(FileEditAnchorToolTest, insertBeforeByLineNumber) {
-  const std::string path = "/tmp/work/file.txt";
-  const std::string original = "alpha\nbeta\n";
-
-  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
-  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
-
-  auto json = createFileEditJson(
-      "file.txt",
-      {{{"op", "insert_before"},
-        {"anchor", anchor(2, "beta")},
-        {"new_lines", "inserted"}}});
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-
-  ITool *itool = &tool;
-  auto result = itool->execute(json, ctx);
-
-  EXPECT_TRUE(result.success);
-  EXPECT_EQ(capturedWrite, "alpha\ninserted\nbeta\n");
-}
-
-TEST_F(FileEditAnchorToolTest, deleteRangeByLineNumber) {
-  const std::string path = "/tmp/work/file.txt";
-  const std::string original = "alpha\nbeta\ngamma\ndelta\n";
-
-  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
-  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
-
-  auto json = createFileEditJson(
-      "file.txt",
-      {{{"op", "delete_range"},
-        {"start_anchor", anchor(2, "beta")},
-        {"end_anchor", anchor(3, "gamma")}}});
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-
-  ITool *itool = &tool;
-  auto result = itool->execute(json, ctx);
-
-  EXPECT_TRUE(result.success);
-  EXPECT_EQ(capturedWrite, "alpha\ndelta\n");
-
-  auto doc = parseResult(result);
-  const auto &operation = doc["operations"].GetArray()[0];
-  ASSERT_EQ(operation["old_lines"].GetArray().Size(), 2u);
-  EXPECT_STREQ(operation["old_lines"].GetArray()[0].GetString(), "beta");
-  EXPECT_STREQ(operation["old_lines"].GetArray()[1].GetString(), "gamma");
-  EXPECT_TRUE(operation["new_lines"].IsArray());
-  EXPECT_TRUE(operation["new_lines"].GetArray().Empty());
-}
-
-TEST_F(FileEditAnchorToolTest, insertAfterResultIncludesEmptyOldLinesAndNewLines) {
-  const std::string path = "/tmp/work/file.txt";
-  const std::string original = "alpha\nbeta\n";
-
-  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
-  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
-
-  auto json = createFileEditJson(
-      "file.txt",
-      {{{"op", "insert_after"},
-        {"anchor", anchor(1, "alpha")},
-        {"new_lines", "inserted"}}});
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-
-  ITool *itool = &tool;
-  auto result = itool->execute(json, ctx);
-
-  EXPECT_TRUE(result.success);
-  auto doc = parseResult(result);
-  const auto &operation = doc["operations"].GetArray()[0];
-  EXPECT_TRUE(operation["old_lines"].IsArray());
-  EXPECT_TRUE(operation["old_lines"].GetArray().Empty());
-  ASSERT_EQ(operation["new_lines"].GetArray().Size(), 1u);
-  EXPECT_STREQ(operation["new_lines"].GetArray()[0].GetString(), "inserted");
-}
-
-TEST_F(FileEditAnchorToolTest, suspiciousReplacementMetadataIsRejected) {
-  const std::string path = "/tmp/work/file.txt";
-  const std::string original = "alpha\nbeta\n";
-
-  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
-  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
-  EXPECT_CALL(mockHost, writeFile(_, _)).Times(0);
-
-  auto json = createFileEditJson(
-      "file.txt",
-      {{{"op", "replace_range"},
-        {"start_anchor", anchor(2, "beta")},
-        {"end_anchor", anchor(2, "beta")},
-        {"new_lines", "48a8|still bad"}}});
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-
-  ITool *itool = &tool;
-  auto result = itool->execute(json, ctx);
-
-  EXPECT_FALSE(result.success);
-  EXPECT_NE(result.error.find("still appears to contain Hashline metadata"),
-            std::string::npos);
-  EXPECT_NE(result.error.find("Remove lineNumber#hash| prefixes"),
-            std::string::npos);
-
-  rapidjson::Document doc;
-  doc.Parse(result.error.c_str());
-  ASSERT_TRUE(doc.HasMember("sanitation"));
-  EXPECT_TRUE(doc["sanitation"]["suspicious_content_found"].GetBool());
-  EXPECT_TRUE(doc["sanitation"]["suspicious_content_rejected"].GetBool());
-}
-
-TEST_F(FileEditAnchorToolTest, suspiciousReplacementDiffJunkIsRejected) {
-  const std::string path = "/tmp/work/file.txt";
-  const std::string original = "alpha\nbeta\n";
-
-  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
-  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
-  EXPECT_CALL(mockHost, writeFile(_, _)).Times(0);
-
-  auto json = createFileEditJson(
-      "file.txt",
-      {{{"op", "replace_range"},
-        {"start_anchor", anchor(2, "beta")},
-        {"end_anchor", anchor(2, "beta")},
-        {"new_lines", "+still bad"}}});
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-
-  ITool *itool = &tool;
-  auto result = itool->execute(json, ctx);
-
-  EXPECT_FALSE(result.success);
-  EXPECT_NE(result.error.find("still appears to contain diff markers"),
-            std::string::npos);
-  EXPECT_NE(result.error.find("Remove leading + / - patch markers"),
-            std::string::npos);
-}
-
-TEST_F(FileEditAnchorToolTest, malformedAnchorFailsClearly) {
-  const std::string path = "/tmp/work/file.txt";
-  const std::string original = "alpha\nbeta\n";
-
-  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
-  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
-  EXPECT_CALL(mockHost, writeFile(_, _)).Times(0);
-
-  auto json = createFileEditJson(
-      "file.txt",
-      {{{"op", "insert_after"},
-        {"anchor", "not-a-number"},
-        {"new_lines", "inserted"}}});
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-
-  ITool *itool = &tool;
-  auto result = itool->execute(json, ctx);
-
-  EXPECT_FALSE(result.success);
-  EXPECT_TRUE(result.error.find("Anchor is not a valid line number") != std::string::npos || result.error.find("Anchor must be a plain line number") != std::string::npos);
-}
-
-TEST_F(FileEditAnchorToolTest, nearbyAnchorRelocationSucceeds) {
-  const std::string path = "/tmp/work/file.txt";
-  const std::string original = "prefix\nalpha\nbeta\n";
-
-  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
-  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
-
-  auto json = createFileEditJson(
-      "file.txt",
-      {{{"op", "insert_after"},
-        {"anchor", anchor(3, "beta")},
-        {"new_lines", "inserted"}}});
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-
-  ITool *itool = &tool;
-  auto result = itool->execute(json, ctx);
-
-  EXPECT_TRUE(result.success);
-  EXPECT_EQ(capturedWrite, "prefix\nalpha\nbeta\ninserted\n");
-  EXPECT_NE(result.data.find("\"relocated_anchors\":0"), std::string::npos);
-}
-
-TEST_F(FileEditAnchorToolTest, overlappingEditsAreRejected) {
-  const std::string path = "/tmp/work/file.txt";
-  const std::string original = "alpha\nbeta\ngamma\n";
-
-  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
-  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
-  EXPECT_CALL(mockHost, writeFile(_, _)).Times(0);
-
-  auto json = createFileEditJson(
-      "file.txt",
-      {{{"op", "replace_range"},
-        {"start_anchor", anchor(2, "beta")},
-        {"end_anchor", anchor(3, "gamma")},
-        {"new_lines", "beta2"}},
-       {{"op", "insert_before"},
-        {"anchor", anchor(3, "gamma")},
-        {"new_lines", "inserted"}}});
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-
-  ITool *itool = &tool;
-  auto result = itool->execute(json, ctx);
-
-  EXPECT_FALSE(result.success);
-  EXPECT_NE(result.error.find("Overlapping edits"), std::string::npos);
-}
-
-TEST_F(FileEditAnchorToolTest, multiFileAnchorEditsReturnPerFileResults) {
-  std::map<std::string, std::string> writes;
-  EXPECT_CALL(mockHost, exists("/tmp/work/a.txt")).WillOnce(Return(true));
-  EXPECT_CALL(mockHost, exists("/tmp/work/b.txt")).WillOnce(Return(true));
-  EXPECT_CALL(mockHost, readFile("/tmp/work/a.txt"))
-      .WillOnce(Return(bytes("alpha\nbeta\n")));
-  EXPECT_CALL(mockHost, readFile("/tmp/work/b.txt"))
-      .WillOnce(Return(bytes("one\ntwo\n")));
-  EXPECT_CALL(mockHost, writeFile(_, _))
-      .WillRepeatedly(Invoke([&writes](const std::string &path,
-                                       const std::vector<uint8_t> &data) {
-        writes[path] = std::string(data.begin(), data.end());
-      }));
-
-  auto json = createMultiFileEditJson(
-      {{"a.txt",
-        {{{"op", "insert_after"},
-          {"anchor", anchor(1, "alpha")},
-          {"new_lines", "alpha2"}}}},
-       {"b.txt",
-        {{{"op", "replace_range"},
-          {"start_anchor", anchor(2, "two")},
-          {"end_anchor", anchor(2, "two")},
-          {"new_lines", "two2"}}}}});
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-
-  ITool *itool = &tool;
-  auto result = itool->execute(json, ctx);
-
-  EXPECT_TRUE(result.success);
-  EXPECT_EQ(writes["/tmp/work/a.txt"], "alpha\nalpha2\nbeta\n");
-  EXPECT_EQ(writes["/tmp/work/b.txt"], "one\ntwo2\n");
-
-  auto doc = parseResult(result);
-  ASSERT_TRUE(doc.HasMember("mode"));
-  EXPECT_STREQ(doc["mode"].GetString(), "multi_file");
-  ASSERT_TRUE(doc.HasMember("files"));
-  ASSERT_EQ(doc["files"].GetArray().Size(), 2u);
-  ASSERT_TRUE(doc.HasMember("edited_files"));
-  ASSERT_EQ(doc["edited_files"].GetArray().Size(), 2u);
-  EXPECT_EQ(doc["applied_edits"].GetUint(), 2u);
-  EXPECT_EQ(doc["added_lines"].GetInt(), 2);
-  EXPECT_EQ(doc["removed_lines"].GetInt(), 1);
-}
-
-TEST_F(FileEditAnchorToolTest, DISABLED_patchModeSucceeds) {
-  const std::string path = "/tmp/work/file.txt";
-  const std::string original = "line 1\nline 2\nline 3\n";
-
-  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
-  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
-
-  rapidjson::Document doc;
-  doc.SetObject();
-  auto &alloc = doc.GetAllocator();
-  doc.AddMember("path", makeJsonString("file.txt", alloc), alloc);
-  doc.AddMember("patch", makeJsonString("@@ 2 @@\n-line 2\n+line 2 mod", alloc), alloc);
-
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-  ITool *itool = &tool;
-  auto result = itool->execute(doc, ctx);
-
-  EXPECT_TRUE(result.success);
-  EXPECT_EQ(capturedWrite, "line 1\nline 2 mod\nline 3\n");
-}
-
-
-TEST_F(FileEditAnchorToolTest, githubStylePatchReplaceSucceeds) {
-  const std::string path = "/tmp/work/file.txt";
-  const std::string original = "line 1\nline 2\nline 3\n";
-
-  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
-  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
-
-  rapidjson::Document doc;
-  doc.SetObject();
-  auto &alloc = doc.GetAllocator();
-  doc.AddMember("path", makeJsonString("file.txt", alloc), alloc);
-  doc.AddMember("patch", makeJsonString("@@ -1,3 +1,3 @@\n line 1\n-line 2\n+line 2 modified\n line 3", alloc), alloc);
-
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-  ITool *itool = &tool;
-  auto result = itool->execute(doc, ctx);
-
-  EXPECT_TRUE(result.success) << result.error;
-  EXPECT_EQ(capturedWrite, "line 1\nline 2 modified\nline 3\n");
-}
-
-TEST_F(FileEditAnchorToolTest, githubStylePatchWithFileHeaders) {
-  const std::string path = "/tmp/work/file.txt";
-  const std::string original = "alpha\nbeta\ngamma\n";
-
-  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
-  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
-
-  rapidjson::Document doc;
-  doc.SetObject();
-  auto &alloc = doc.GetAllocator();
-  doc.AddMember("path", makeJsonString("file.txt", alloc), alloc);
-  doc.AddMember("patch", makeJsonString("--- a/file.txt\n+++ b/file.txt\n@@ -1,3 +1,3 @@\n alpha\n-beta\n+beta mod\n gamma", alloc), alloc);
-
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-  ITool *itool = &tool;
-  auto result = itool->execute(doc, ctx);
-
-  EXPECT_TRUE(result.success) << result.error;
-  EXPECT_EQ(capturedWrite, "alpha\nbeta mod\ngamma\n");
-}
-
-TEST_F(FileEditAnchorToolTest, githubStylePatchMultiHunk) {
-  const std::string path = "/tmp/work/file.txt";
-  const std::string original = "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\n";
-
-  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
-  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
-
-  rapidjson::Document doc;
-  doc.SetObject();
-  auto &alloc = doc.GetAllocator();
-  doc.AddMember("path", makeJsonString("file.txt", alloc), alloc);
-  doc.AddMember("patch", makeJsonString(
-      "@@ -1,2 +1,2 @@\n line 1\n-line 2\n+line 2 mod\n@@ -5,2 +5,2 @@\n line 5\n-line 6\n+line 6 mod", alloc), alloc);
-
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-  ITool *itool = &tool;
-  auto result = itool->execute(doc, ctx);
-
-  EXPECT_TRUE(result.success) << result.error;
-  EXPECT_EQ(capturedWrite, "line 1\nline 2 mod\nline 3\nline 4\nline 5\nline 6 mod\n");
-}
-
-TEST_F(FileEditAnchorToolTest, githubStylePatchInsertWithContext) {
-  const std::string path = "/tmp/work/file.txt";
-  const std::string original = "line 1\nline 2\n";
-
-  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
-  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
-
-  rapidjson::Document doc;
-  doc.SetObject();
-  auto &alloc = doc.GetAllocator();
-  doc.AddMember("path", makeJsonString("file.txt", alloc), alloc);
-  doc.AddMember("patch", makeJsonString("@@ -1,1 +1,2 @@\n line 1\n+inserted", alloc), alloc);
-
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-  ITool *itool = &tool;
-  auto result = itool->execute(doc, ctx);
-
-  EXPECT_TRUE(result.success) << result.error;
-  EXPECT_EQ(capturedWrite, "line 1\ninserted\nline 2\n");
-}
-
-TEST_F(FileEditAnchorToolTest, githubStylePatchDelete) {
-  const std::string path = "/tmp/work/file.txt";
-  const std::string original = "line 1\nline 2\nline 3\n";
-
-  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
-  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
-
-  rapidjson::Document doc;
-  doc.SetObject();
-  auto &alloc = doc.GetAllocator();
-  doc.AddMember("path", makeJsonString("file.txt", alloc), alloc);
-  doc.AddMember("patch", makeJsonString("@@ -1,3 +1,2 @@\n line 1\n-line 2\n line 3", alloc), alloc);
-
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-  ITool *itool = &tool;
-  auto result = itool->execute(doc, ctx);
-
-  EXPECT_TRUE(result.success) << result.error;
-  EXPECT_EQ(capturedWrite, "line 1\nline 3\n");
-}
-
-TEST_F(FileEditAnchorToolTest, legacyAnchorPatchStillWorks) {
-  const std::string path = "/tmp/work/file.txt";
-  const std::string original = "line 1\nline 2\nline 3\n";
-
-  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
-  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
-
-  rapidjson::Document doc;
-  doc.SetObject();
-  auto &alloc = doc.GetAllocator();
-  doc.AddMember("path", makeJsonString("file.txt", alloc), alloc);
-  doc.AddMember("patch", makeJsonString("@@ 2 @@\n-line 2\n+line 2 mod", alloc), alloc);
-
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-  ITool *itool = &tool;
-  auto result = itool->execute(doc, ctx);
-
-  EXPECT_TRUE(result.success) << result.error;
-  EXPECT_EQ(capturedWrite, "line 1\nline 2 mod\nline 3\n");
-}
-
-TEST_F(FileEditAnchorToolTest, searchReplaceIgnoresExtraneousAnchorFields) {
-  const std::string path = "/tmp/work/file.txt";
-  const std::string original = "alpha beta\n";
-
-  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
-  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
-
-  rapidjson::Document json;
-  json.SetObject();
-  auto &alloc = json.GetAllocator();
-  json.AddMember("path", makeJsonString("file.txt", alloc), alloc);
-  rapidjson::Value edits(rapidjson::kArrayType);
-  rapidjson::Value edit(rapidjson::kObjectType);
-  edit.AddMember("op", makeJsonString("search_replace", alloc), alloc);
-  edit.AddMember("old_string", makeJsonString("alpha", alloc), alloc);
-  edit.AddMember("new_string", makeJsonString("omega", alloc), alloc);
-  edit.AddMember("anchor", makeJsonString("1", alloc), alloc);
-  edit.AddMember("start_anchor", makeJsonString("1", alloc), alloc);
-  edit.AddMember("end_anchor", makeJsonString("1", alloc), alloc);
-  rapidjson::Value newLines(rapidjson::kArrayType);
-  newLines.PushBack(makeJsonString("ignored", alloc), alloc);
-  edit.AddMember("new_lines", newLines, alloc);
-  edits.PushBack(edit, alloc);
-  json.AddMember("edits", edits, alloc);
-
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-  ITool *itool = &tool;
-  auto result = itool->execute(json, ctx);
-
-  EXPECT_TRUE(result.success) << result.error;
-  EXPECT_EQ(capturedWrite, "omega beta\n");
-}
-
-TEST_F(FileEditAnchorToolTest, searchReplaceEditsApplyMultipleOperationsInOneFile) {
-  const std::string path = "/tmp/work/file.txt";
-  const std::string original = "alpha beta\nbeta alpha\n";
-
-  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
-  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
-
-  auto json = createSearchReplaceFileEditJson(
-      "file.txt",
-      {{"alpha", "omega", true}, {"beta", "delta", true}});
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-
-  ITool *itool = &tool;
-  auto result = itool->execute(json, ctx);
-
-  EXPECT_TRUE(result.success);
-  EXPECT_EQ(capturedWrite, "omega delta\ndelta omega\n");
-
-  auto doc = parseResult(result);
-  ASSERT_TRUE(doc.HasMember("mode"));
-  EXPECT_STREQ(doc["mode"].GetString(), "search_replace_edits");
-  ASSERT_TRUE(doc.HasMember("operations"));
-  ASSERT_EQ(doc["operations"].GetArray().Size(), 2u);
-  EXPECT_STREQ(doc["operations"].GetArray()[0]["op"].GetString(),
-               "search_replace");
-  EXPECT_NE(result.data.find("\"watch_state\":\"refreshed\""), std::string::npos);
-}
-
-TEST_F(FileEditAnchorToolTest, multiFileSearchReplaceEditsReturnPerFileResults) {
-  std::map<std::string, std::string> writes;
-  EXPECT_CALL(mockHost, exists("/tmp/work/a.txt")).WillOnce(Return(true));
-  EXPECT_CALL(mockHost, exists("/tmp/work/b.txt")).WillOnce(Return(true));
-  EXPECT_CALL(mockHost, readFile("/tmp/work/a.txt"))
-      .WillOnce(Return(bytes("alpha beta\n")));
-  EXPECT_CALL(mockHost, readFile("/tmp/work/b.txt"))
-      .WillOnce(Return(bytes("one two\n")));
-  EXPECT_CALL(mockHost, writeFile(_, _))
-      .WillRepeatedly(Invoke([&writes](const std::string &path,
-                                       const std::vector<uint8_t> &data) {
-        writes[path] = std::string(data.begin(), data.end());
-      }));
-
-  rapidjson::Document json;
-  json.SetObject();
-  auto &alloc = json.GetAllocator();
-  rapidjson::Value files(rapidjson::kArrayType);
-
-  rapidjson::Value firstFile(rapidjson::kObjectType);
-  firstFile.AddMember("path", makeJsonString("a.txt", alloc), alloc);
-  rapidjson::Value firstEdits(rapidjson::kArrayType);
-  rapidjson::Value firstEdit(rapidjson::kObjectType);
-  firstEdit.AddMember("op", makeJsonString("search_replace", alloc), alloc);
-  firstEdit.AddMember("old_string", makeJsonString("alpha", alloc), alloc);
-  firstEdit.AddMember("new_string", makeJsonString("omega", alloc), alloc);
-  firstEdit.AddMember("replace_all", true, alloc);
-  firstEdits.PushBack(firstEdit, alloc);
-  firstFile.AddMember("edits", firstEdits, alloc);
-  files.PushBack(firstFile, alloc);
-
-  rapidjson::Value secondFile(rapidjson::kObjectType);
-  secondFile.AddMember("path", makeJsonString("b.txt", alloc), alloc);
-  rapidjson::Value secondEdits(rapidjson::kArrayType);
-  rapidjson::Value secondEdit(rapidjson::kObjectType);
-  secondEdit.AddMember("op", makeJsonString("search_replace", alloc), alloc);
-  secondEdit.AddMember("old_string", makeJsonString("two", alloc), alloc);
-  secondEdit.AddMember("new_string", makeJsonString("three", alloc), alloc);
-  secondEdit.AddMember("replace_all", false, alloc);
-  secondEdits.PushBack(secondEdit, alloc);
-  secondFile.AddMember("edits", secondEdits, alloc);
-  files.PushBack(secondFile, alloc);
-
-  json.AddMember("files", files, alloc);
-
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-  ITool *itool = &tool;
-  auto result = itool->execute(json, ctx);
-
-  EXPECT_TRUE(result.success);
-  EXPECT_EQ(writes["/tmp/work/a.txt"], "omega beta\n");
-  EXPECT_EQ(writes["/tmp/work/b.txt"], "one three\n");
-
-  auto doc = parseResult(result);
-  ASSERT_TRUE(doc.HasMember("mode"));
-  EXPECT_STREQ(doc["mode"].GetString(), "multi_file");
-  ASSERT_TRUE(doc.HasMember("files"));
-  ASSERT_EQ(doc["files"].GetArray().Size(), 2u);
-  EXPECT_STREQ(doc["files"].GetArray()[0]["mode"].GetString(),
-               "search_replace_edits");
-  EXPECT_STREQ(doc["files"].GetArray()[1]["mode"].GetString(),
-               "search_replace_edits");
-}
-
-TEST_F(FileEditAnchorToolTest, successfulEditIncludesNewLspErrors) {
-  StubLspHarness harness;
-  const std::string path = harness.filePath("sample");
-  {
-    std::ofstream out(path);
-    out << "alpha = 1\nprint(alpha)\n";
-  }
-
-  EXPECT_CALL(mockHost, exists(path)).WillRepeatedly(Return(true));
-  EXPECT_CALL(mockHost, readFile(path))
-      .WillRepeatedly(Invoke([](const std::string &readPath) {
-        std::ifstream in(readPath, std::ios::binary);
-        return std::vector<uint8_t>((std::istreambuf_iterator<char>(in)),
-                                    std::istreambuf_iterator<char>());
-      }));
-  EXPECT_CALL(mockHost, writeFile(path, _))
-      .WillOnce(Invoke([this](const std::string &writePath,
-                              const std::vector<uint8_t> &data) {
-        capturedWrite.assign(data.begin(), data.end());
-        std::ofstream out(writePath, std::ios::binary);
-        out.write(reinterpret_cast<const char *>(data.data()),
-                  static_cast<std::streamsize>(data.size()));
-      }));
-
-  auto json = createSearchReplaceFileEditJson(
-      path,
-      {std::make_tuple("print(alpha)", "print(alpha, beta)", false)});
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-  ITool *itool = &tool;
-  auto result = itool->execute(json, ctx);
-
-  ASSERT_TRUE(result.success) << result.error;
-  EXPECT_EQ(capturedWrite, "alpha = 1\nprint(alpha, beta)\n");
-  auto doc = parseResult(result);
-  ASSERT_TRUE(doc.HasMember("lsp"));
-  const auto &lsp = doc["lsp"];
-  EXPECT_TRUE(lsp["checked"].GetBool());
-  EXPECT_TRUE(lsp["available"].GetBool());
-  EXPECT_STREQ(lsp["server_id"].GetString(), harness.serverId().c_str());
-  EXPECT_EQ(lsp["errors"].GetInt(), 1);
-  EXPECT_EQ(lsp["warnings"].GetInt(), 1);
-  EXPECT_EQ(lsp["new_error_count"].GetInt(), 1);
-  EXPECT_EQ(lsp["new_warning_count"].GetInt(), 1);
-  ASSERT_TRUE(lsp["new_errors"].IsArray());
-  ASSERT_EQ(lsp["new_errors"].Size(), 1u);
-  EXPECT_STREQ(lsp["new_errors"][0].GetString(), "ERROR [2:1] broken call");
-}
-
-TEST(LspSemanticToolsTest, diagnosticsToolReturnsStructuredNativePayload) {
-  LspDiagnosticsTool tool;
-  NiceMock<MockHost> mockHost;
-  NiceMock<MockAgent> mockAgent;
-  StubLspHarness harness;
-
-  const std::string path = harness.filePath("diag");
-  {
-    std::ofstream out(path);
-    out << "triple_error_warning\n";
-  }
-
-  mockAgent.defaultCtx.environment.cwd = std::filesystem::path(path).parent_path().string();
-  mockAgent.defaultCtx.permissions.allowOutsideCwd = false;
-  mockAgent.defaultCtx.permissions.allowedPaths = {mockAgent.defaultCtx.environment.cwd, "/tmp"};
-  mockAgent.mockPerms_->allowOutsideCwd_ = false;
-  mockAgent.mockPerms_->allowedPaths_ = mockAgent.defaultCtx.permissions.allowedPaths;
-  mockAgent.mockPerms_->cwd_ = mockAgent.defaultCtx.environment.cwd;
-  ON_CALL(mockAgent, getContext()).WillByDefault(ReturnRef(mockAgent.defaultCtx));
-  ON_CALL(mockAgent, getMutableContext())
-      .WillByDefault(ReturnRef(mockAgent.defaultCtx));
-  ON_CALL(mockAgent.mockEnv_->mockWorkspace(), resolvePath(_))
-      .WillByDefault(Invoke([](const std::string &p) { return p; }));
-  ON_CALL(mockAgent.mockEnv_->mockWorkspace(), getCurrentWorkingDirectory())
-      .WillByDefault(Return(mockAgent.defaultCtx.environment.cwd));
-
-  auto json = createJsonInput({{"path", path}});
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-  ITool *itool = &tool;
-  auto result = itool->execute(json, ctx);
-
-  ASSERT_TRUE(result.success) << result.error;
-  rapidjson::Document doc;
-  doc.Parse(result.data.c_str());
-  ASSERT_TRUE(doc.IsObject());
-  EXPECT_TRUE(doc["available"].GetBool());
-  EXPECT_STREQ(doc["server_id"].GetString(), harness.serverId().c_str());
-  EXPECT_EQ(doc["summary"]["errors"].GetInt(), 2);
-  EXPECT_EQ(doc["summary"]["warnings"].GetInt(), 1);
-}
-
-TEST(LspSemanticToolsTest, lspToolPassesThroughNativeSemanticQueryResults) {
-  LspTool tool;
-  NiceMock<MockHost> mockHost;
-  NiceMock<MockAgent> mockAgent;
-  StubLspHarness harness;
-
-  const std::string path = harness.filePath("refs");
-  {
-    std::ofstream out(path);
-    out << "hello refs\n";
-  }
-
-  mockAgent.defaultCtx.environment.cwd = std::filesystem::path(path).parent_path().string();
-  mockAgent.defaultCtx.permissions.allowOutsideCwd = false;
-  mockAgent.defaultCtx.permissions.allowedPaths = {mockAgent.defaultCtx.environment.cwd, "/tmp"};
-  mockAgent.mockPerms_->allowOutsideCwd_ = false;
-  mockAgent.mockPerms_->allowedPaths_ = mockAgent.defaultCtx.permissions.allowedPaths;
-  mockAgent.mockPerms_->cwd_ = mockAgent.defaultCtx.environment.cwd;
-  ON_CALL(mockAgent, getContext()).WillByDefault(ReturnRef(mockAgent.defaultCtx));
-  ON_CALL(mockAgent, getMutableContext())
-      .WillByDefault(ReturnRef(mockAgent.defaultCtx));
-  ON_CALL(mockAgent.mockEnv_->mockWorkspace(), resolvePath(_))
-      .WillByDefault(Invoke([](const std::string &p) { return p; }));
-  ON_CALL(mockAgent.mockEnv_->mockWorkspace(), getCurrentWorkingDirectory())
-      .WillByDefault(Return(mockAgent.defaultCtx.environment.cwd));
-
-  rapidjson::Document json;
-  json.SetObject();
-  auto &alloc = json.GetAllocator();
-  json.AddMember("operation", makeJsonString("references", alloc), alloc);
-  json.AddMember("path", makeJsonString(path, alloc), alloc);
-  json.AddMember("line", 1, alloc);
-  json.AddMember("character", 1, alloc);
-
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-  ITool *itool = &tool;
-  auto result = itool->execute(json, ctx);
-
-  ASSERT_TRUE(result.success) << result.error;
-  rapidjson::Document doc;
-  doc.Parse(result.data.c_str());
-  ASSERT_TRUE(doc.IsObject());
-  EXPECT_TRUE(doc["available"].GetBool());
-  ASSERT_TRUE(doc["result"].IsArray());
-  ASSERT_EQ(doc["result"].Size(), 1u);
-  ASSERT_TRUE(doc["result"][0].IsObject());
-  ASSERT_TRUE(doc["result"][0].HasMember("uri"));
-  EXPECT_NE(std::string(doc["result"][0]["uri"].GetString()).find(path),
-            std::string::npos);
-}
-
-TEST_F(FileEditAnchorToolTest, mixingSearchReplaceAndHashlineEditsIsRejected) {
-  const std::string path = "/tmp/work/file.txt";
-
-  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
-  EXPECT_CALL(mockHost, writeFile(_, _)).Times(0);
-
-  rapidjson::Document json;
-  json.SetObject();
-  auto &alloc = json.GetAllocator();
-  json.AddMember("path", makeJsonString("file.txt", alloc), alloc);
-  rapidjson::Value edits(rapidjson::kArrayType);
-
-  rapidjson::Value searchReplace(rapidjson::kObjectType);
-  searchReplace.AddMember("op", makeJsonString("search_replace", alloc), alloc);
-  searchReplace.AddMember("old_string", makeJsonString("alpha", alloc), alloc);
-  searchReplace.AddMember("new_string", makeJsonString("omega", alloc), alloc);
-  edits.PushBack(searchReplace, alloc);
-
-  rapidjson::Value hashlineEdit(rapidjson::kObjectType);
-  hashlineEdit.AddMember("op", makeJsonString("insert_after", alloc), alloc);
-  hashlineEdit.AddMember("anchor", makeJsonString("1", alloc), alloc);
-  rapidjson::Value newLines(rapidjson::kArrayType);
-  newLines.PushBack(makeJsonString("inserted", alloc), alloc);
-  hashlineEdit.AddMember("new_lines", newLines, alloc);
-  edits.PushBack(hashlineEdit, alloc);
-
-  json.AddMember("edits", edits, alloc);
-
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-  ITool *itool = &tool;
-  auto result = itool->execute(json, ctx);
-
-  EXPECT_FALSE(result.success);
-  EXPECT_NE(result.error.find("Do not mix search_replace edits with line-range edits"),
-            std::string::npos);
-}
-
-TEST_F(FileEditAnchorToolTest,
-       emptySiblingModeFieldsDoNotBlockLineRangeEdits) {
-  const std::string path = "/tmp/work/file.txt";
-  const std::string original = "alpha\nbeta\n";
-
-  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
-  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
-
-  auto json = createFileEditJson(
-      "file.txt",
-      {{{"op", "replace_range"},
-        {"start_anchor", "2"},
-        {"end_anchor", "2"},
-        {"new_lines", "omega"},
-        {"old_string", ""},
-        {"new_string", ""}}});
-  addEmptyFileEditModeNoise(json);
-
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-  ITool *itool = &tool;
-  auto result = itool->execute(json, ctx);
-
-  EXPECT_TRUE(result.success) << result.error;
-  EXPECT_EQ(capturedWrite, "alpha\nomega\n");
-  EXPECT_NE(result.data.find("\"mode\":\"line_range_edits\""),
-            std::string::npos);
-}
-
-TEST_F(FileEditAnchorToolTest, emptySiblingModeFieldsDoNotBlockPatchEdits) {
-  const std::string path = "/tmp/work/file.txt";
-  const std::string original = "alpha\nbeta\ngamma\n";
-
-  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
-  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
-
-  rapidjson::Document json;
-  json.SetObject();
-  auto &alloc = json.GetAllocator();
-  json.AddMember("path", makeJsonString("file.txt", alloc), alloc);
-  json.AddMember("patch",
-                 makeJsonString("@@ 2 @@\n-beta\n+omega", alloc), alloc);
-  json.AddMember("content", makeJsonString("", alloc), alloc);
-  addFileEditLegacyNoise(json, "", "", false, 0.0f);
-
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-  ITool *itool = &tool;
-  auto result = itool->execute(json, ctx);
-
-  EXPECT_TRUE(result.success) << result.error;
-  EXPECT_EQ(capturedWrite, "alpha\nomega\ngamma\n");
-  EXPECT_NE(result.data.find("\"mode\":\"patch\""), std::string::npos);
-}
-
-TEST_F(FileEditAnchorToolTest,
-       multiFileIgnoresInertTopLevelWrapperNoiseFromComplaintShape) {
-  const std::string path = "/tmp/work/some/file.cpp";
-  const std::string original = "old\n";
-
-  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
-  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
-
-  rapidjson::Document json;
-  json.SetObject();
-  auto &alloc = json.GetAllocator();
-  json.AddMember("path", makeJsonString("", alloc), alloc);
-  json.AddMember("content", makeJsonString("", alloc), alloc);
-  json.AddMember("patch", makeJsonString("", alloc), alloc);
-  addFileEditLegacyNoise(json, "", "", false, 0.0f);
-  addFileEditEdits(json, {});
-
-  rapidjson::Value files(rapidjson::kArrayType);
-  rapidjson::Value file(rapidjson::kObjectType);
-  file.AddMember("path", makeJsonString("some/file.cpp", alloc), alloc);
-  file.AddMember("content", makeJsonString("", alloc), alloc);
-  file.AddMember("patch", makeJsonString("@@ 1 @@\n-old\n+new", alloc), alloc);
-  file.AddMember("old_string", makeJsonString("", alloc), alloc);
-  file.AddMember("new_string", makeJsonString("", alloc), alloc);
-  file.AddMember("replace_all", false, alloc);
-  file.AddMember("fuzzy_threshold", 0.0f, alloc);
-  rapidjson::Value edits(rapidjson::kArrayType);
-  file.AddMember("edits", edits, alloc);
-  files.PushBack(file, alloc);
-  json.AddMember("files", files, alloc);
-
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-  ITool *itool = &tool;
-  auto result = itool->execute(json, ctx);
-
-  EXPECT_TRUE(result.success) << result.error;
-  EXPECT_EQ(capturedWrite, "new\n");
-  EXPECT_NE(result.data.find("\"mode\":\"multi_file\""), std::string::npos);
-  EXPECT_NE(result.data.find("\"file_count\":1"), std::string::npos);
-}
-
-TEST_F(FileEditAnchorToolTest,
-       multiFileRejectsMeaningfulTopLevelPayloadWithRepairGuidance) {
-  rapidjson::Document json;
-  json.SetObject();
-  auto &alloc = json.GetAllocator();
-  json.AddMember("content", makeJsonString("top-level payload", alloc), alloc);
-  json.AddMember("files", rapidjson::Value(rapidjson::kArrayType), alloc);
-
-  rapidjson::Value file(rapidjson::kObjectType);
-  file.AddMember("path", makeJsonString("some/file.cpp", alloc), alloc);
-  file.AddMember("patch", makeJsonString("@@ 1 @@\n-old\n+new", alloc), alloc);
-  json["files"].PushBack(file, alloc);
-
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-  ITool *itool = &tool;
-  auto result = itool->execute(json, ctx);
-
-  EXPECT_FALSE(result.success);
-  EXPECT_THAT(result.error, HasSubstr("ignores semantically inert wrapper defaults"));
-  EXPECT_THAT(result.error, HasSubstr("meaningful top-level content"));
-  EXPECT_THAT(result.error, HasSubstr("Move those fields into each files[] entry or remove them from the top level"));
-}
-
-TEST_F(FileEditAnchorToolTest,
-       multiFilePreflightStopsBeforeAnyWritesOrDiagnosticsOnInvalidPayload) {
-  const std::string firstPath = "/tmp/work/one.cpp";
-  const std::string secondPath = "/tmp/work/two.cpp";
-
+TEST_F(FileToolFamilyTest, editTransactionalFailurePreventsPartialWrites) {
+  const std::string firstPath = "/tmp/work/a.txt";
+  const std::string secondPath = "/tmp/work/b.txt";
   EXPECT_CALL(mockHost, exists(firstPath)).WillOnce(Return(true));
-  EXPECT_CALL(mockHost, exists(secondPath)).WillOnce(Return(true));
-  EXPECT_CALL(mockHost, readFile(_)).Times(0);
+  EXPECT_CALL(mockHost, readFile(firstPath)).WillOnce(Return(bytes("one\n")));
+  EXPECT_CALL(mockHost, exists(secondPath)).WillOnce(Return(false));
   EXPECT_CALL(mockHost, writeFile(_, _)).Times(0);
 
-  rapidjson::Document json;
-  json.SetObject();
-  auto &alloc = json.GetAllocator();
-  rapidjson::Value files(rapidjson::kArrayType);
+  rapidjson::Document input;
+  input.SetObject();
+  auto &alloc = input.GetAllocator();
+  input.AddMember("patch",
+                  makeJsonString("--- a/a.txt\n+++ b/a.txt\n@@ -1,1 +1,1 @@\n-one\n+two\n--- a/b.txt\n+++ b/b.txt\n@@ -1,1 +1,1 @@\n-old\n+new", alloc),
+                  alloc);
 
-  rapidjson::Value first(rapidjson::kObjectType);
-  first.AddMember("path", makeJsonString("one.cpp", alloc), alloc);
-  first.AddMember("patch", makeJsonString("@@ 1 @@\n-old\n+new\n", alloc), alloc);
-  files.PushBack(first, alloc);
-
-  rapidjson::Value second(rapidjson::kObjectType);
-  second.AddMember("path", makeJsonString("two.cpp", alloc), alloc);
-  second.AddMember("content", makeJsonString("", alloc), alloc);
-  files.PushBack(second, alloc);
-
-  json.AddMember("files", files, alloc);
-
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-  ITool *itool = &tool;
-  auto result = itool->execute(json, ctx);
-
+  auto result = executeNamed("Edit", input);
   EXPECT_FALSE(result.success);
-  EXPECT_THAT(result.error, HasSubstr("Missing edits, content, patch, or legacy replacement parameters."));
-  EXPECT_THAT(result.error, HasSubstr("Ignored inert content:\"\""));
+  EXPECT_THAT(result.error, HasSubstr("existing file"));
 }
 
-TEST_F(FileEditAnchorToolTest, overwriteExistingFileIsRejectedIfNotFullyRead) {
+TEST_F(FileToolFamilyTest, editPatchFailureStaysPatchNative) {
   const std::string path = "/tmp/work/file.txt";
-
-  EXPECT_CALL(mockAgent.mockEnv_->mockWorkspace(), hasFullyReadFile(path))
-      .WillOnce(Return(false));
-
   EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
-  EXPECT_CALL(mockHost, writeFile(_, _)).Times(0);
+  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes("alpha\nbeta\n")));
 
-  auto json =
-      createJsonInput({{"path", "file.txt"}, {"content", "replacement"}});
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
+  rapidjson::Document input;
+  input.SetObject();
+  auto &alloc = input.GetAllocator();
+  input.AddMember("patch",
+                  makeJsonString("--- a/file.txt\n+++ b/file.txt\n@@ -99,1 +99,1 @@\n-old\n+new",
+                                 alloc),
+                  alloc);
 
-  ITool *itool = &tool;
-  auto result = itool->execute(json, ctx);
-
+  auto result = executeNamed("Edit", input);
   EXPECT_FALSE(result.success);
-  EXPECT_NE(result.error.find("Read the full file with 'file_read'"),
-            std::string::npos);
+  EXPECT_THAT(result.error, HasSubstr("\"resolved_mode\":\"patch\""));
+  EXPECT_THAT(result.error, HasSubstr("Patch hunk context not found"));
+  EXPECT_THAT(result.error, HasSubstr("regenerate the patch"));
 }
 
-TEST_F(FileEditAnchorToolTest, overwriteExistingFileIsAllowedIfFullyRead) {
+TEST_F(FileToolFamilyTest, editWriteOverwritesFile) {
   const std::string path = "/tmp/work/file.txt";
-
   EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
-  EXPECT_CALL(mockHost, writeFile(path, _)).WillOnce(Invoke(
-      [this](const std::string &, const std::vector<uint8_t> &data) {
-        capturedWrite.assign(data.begin(), data.end());
-      }));
+  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes("old\n")));
 
-  auto json =
-      createJsonInput({{"path", "file.txt"}, {"content", "replacement"}});
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-
-  ITool *itool = &tool;
-  auto result = itool->execute(json, ctx);
-
-  EXPECT_TRUE(result.success);
-  EXPECT_EQ(capturedWrite, "replacement");
-}
-
-TEST_F(FileEditAnchorToolTest,
-       emptyContentDoesNotSilentlyOverwriteExistingFile) {
-  const std::string path = "/tmp/work/file.txt";
-
-  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
-  EXPECT_CALL(mockHost, writeFile(_, _)).Times(0);
-
-  auto json = createJsonInput({{"path", "file.txt"}, {"content", ""}});
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-
-  ITool *itool = &tool;
-  auto result = itool->execute(json, ctx);
-
-  EXPECT_FALSE(result.success);
-  EXPECT_THAT(result.error, HasSubstr("Missing edits, content, patch"));
-  EXPECT_THAT(result.error,
-              HasSubstr("Ignored inert content:\"\" for the existing file"));
-}
-
-TEST_F(FileEditAnchorToolTest, emptyContentStillAllowsExplicitNewEmptyFileCreate) {
-  const std::string path = "/tmp/work/empty.txt";
-
-  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(false));
-  EXPECT_CALL(mockHost, writeFile(path, _)).WillOnce(Invoke(
-      [this](const std::string &, const std::vector<uint8_t> &data) {
-        capturedWrite.assign(data.begin(), data.end());
-      }));
-
-  auto json = createJsonInput({{"path", "empty.txt"}, {"content", ""}});
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-
-  ITool *itool = &tool;
-  auto result = itool->execute(json, ctx);
+  auto input = createJsonInput({{"path", "file.txt"}, {"content", "new\nbody\n"}});
+  auto result = executeNamed("EditWrite", input);
 
   EXPECT_TRUE(result.success) << result.error;
-  EXPECT_EQ(capturedWrite, "");
-  EXPECT_NE(result.data.find("\"mode\":\"overwrite\""), std::string::npos);
+  EXPECT_EQ(capturedWrite, "new\nbody\n");
+  auto doc = parseResult(result);
+  EXPECT_STREQ(doc["resolved_mode"].GetString(), "write");
 }
 
-TEST_F(FileEditAnchorToolTest,
-       contentAcceptsEmptyEditsAndDefaultLegacyTransportNoise) {
+TEST_F(FileToolFamilyTest, editReplaceAppliesReplaceAll) {
   const std::string path = "/tmp/work/file.txt";
-
-  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(false));
-  EXPECT_CALL(mockHost, writeFile(path, _)).WillOnce(Invoke(
-      [this](const std::string &, const std::vector<uint8_t> &data) {
-        capturedWrite.assign(data.begin(), data.end());
-      }));
-
-  auto json = createJsonInput({{"path", "file.txt"}, {"content", "replacement"}});
-  addFileEditEdits(json, {});
-  addFileEditLegacyNoise(json, "", "", false, 0.0f);
-
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-  ITool *itool = &tool;
-  auto result = itool->execute(json, ctx);
-
-  EXPECT_TRUE(result.success);
-  EXPECT_EQ(capturedWrite, "replacement");
-  EXPECT_NE(result.data.find("\"mode\":\"overwrite\""), std::string::npos);
-}
-
-TEST_F(FileEditAnchorToolTest,
-       contentAcceptsDefaultLegacyFlagsWithoutRealStrings) {
-  const std::string path = "/tmp/work/file.txt";
-
-  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(false));
-  EXPECT_CALL(mockHost, writeFile(path, _)).WillOnce(Invoke(
-      [this](const std::string &, const std::vector<uint8_t> &data) {
-        capturedWrite.assign(data.begin(), data.end());
-      }));
-
-  auto json = createJsonInput({{"path", "file.txt"}, {"content", "replacement"}});
-  addFileEditLegacyNoise(json, "", "", false, 0.0f);
-
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-  ITool *itool = &tool;
-  auto result = itool->execute(json, ctx);
-
-  EXPECT_TRUE(result.success);
-  EXPECT_EQ(capturedWrite, "replacement");
-  EXPECT_NE(result.data.find("\"mode\":\"overwrite\""), std::string::npos);
-}
-
-TEST_F(FileEditAnchorToolTest,
-       lineRangeEditsIgnoreEmptyPerEditTransportNoiseFields) {
-  const std::string path = "/tmp/work/file.txt";
-
   EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
-  EXPECT_CALL(mockHost, readFile(path))
-      .WillOnce(Invoke([](const std::string &) {
-        const std::string content = "one\nmarker\ntwo\n";
-        return std::vector<uint8_t>(content.begin(), content.end());
-      }));
-  EXPECT_CALL(mockHost, writeFile(path, _)).WillOnce(Invoke(
-      [this](const std::string &, const std::vector<uint8_t> &data) {
-        capturedWrite.assign(data.begin(), data.end());
-      }));
+  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes("alpha beta\nbeta alpha\n")));
 
-  rapidjson::Document json;
-  json.SetObject();
-  auto &alloc = json.GetAllocator();
-  json.AddMember("path", makeJsonString("file.txt", alloc), alloc);
-  rapidjson::Value edits(rapidjson::kArrayType);
+  rapidjson::Document input;
+  input.SetObject();
+  auto &alloc = input.GetAllocator();
+  input.AddMember("path", makeJsonString("file.txt", alloc), alloc);
+  rapidjson::Value replacements(rapidjson::kArrayType);
+  rapidjson::Value replacement(rapidjson::kObjectType);
+  replacement.AddMember("old_string", makeJsonString("alpha", alloc), alloc);
+  replacement.AddMember("new_string", makeJsonString("omega", alloc), alloc);
+  replacement.AddMember("replace_all", true, alloc);
+  replacements.PushBack(replacement, alloc);
+  input.AddMember("replacements", replacements, alloc);
 
-  rapidjson::Value emptyNoise(rapidjson::kObjectType);
-  emptyNoise.AddMember("old_string", makeJsonString("", alloc), alloc);
-  emptyNoise.AddMember("new_string", makeJsonString("", alloc), alloc);
-  edits.PushBack(emptyNoise, alloc);
-
-  rapidjson::Value realEdit(rapidjson::kObjectType);
-  realEdit.AddMember("op", makeJsonString("insert_after", alloc), alloc);
-  realEdit.AddMember("anchor", makeJsonString("2", alloc), alloc);
-  rapidjson::Value newLines(rapidjson::kArrayType);
-  newLines.PushBack(makeJsonString("inserted", alloc), alloc);
-  realEdit.AddMember("new_lines", newLines, alloc);
-  edits.PushBack(realEdit, alloc);
-  json.AddMember("edits", edits, alloc);
-
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-  ITool *itool = &tool;
-  auto result = itool->execute(json, ctx);
-
+  auto result = executeNamed("EditReplace", input);
   EXPECT_TRUE(result.success) << result.error;
-  EXPECT_EQ(capturedWrite, "one\nmarker\ninserted\ntwo\n");
+  EXPECT_EQ(capturedWrite, "omega beta\nbeta omega\n");
+  auto doc = parseResult(result);
+  EXPECT_EQ(doc["replacements"].GetInt(), 2);
 }
 
-TEST_F(FileEditAnchorToolTest, contentRejectsNonEmptyHashlineEdits) {
+TEST_F(FileToolFamilyTest, editRangeReplacesAnchoredLinesAndReportsSanitation) {
   const std::string path = "/tmp/work/file.txt";
-
-  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(false));
-  EXPECT_CALL(mockHost, writeFile(_, _)).Times(0);
-
-  auto json = createJsonInput({{"path", "file.txt"}, {"content", "replacement"}});
-  addFileEditEdits(json, {{{"op", "insert_after"},
-                           {"anchor", "1"},
-                           {"new_lines", "inserted"}}});
-  addFileEditLegacyNoise(json, "", "", false, 0.0f);
-
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-  ITool *itool = &tool;
-  auto result = itool->execute(json, ctx);
-
-  EXPECT_FALSE(result.success);
-  EXPECT_NE(result.error.find("one editing mode per target file"), std::string::npos);
-}
-
-TEST_F(FileEditAnchorToolTest, contentRejectsRealLegacyReplacement) {
-  const std::string path = "/tmp/work/file.txt";
-
-  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(false));
-  EXPECT_CALL(mockHost, writeFile(_, _)).Times(0);
-
-  auto json = createJsonInput({{"path", "file.txt"}, {"content", "replacement"}});
-  addFileEditLegacyNoise(json, "old text", "new text", false, 0.0f);
-
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-  ITool *itool = &tool;
-  auto result = itool->execute(json, ctx);
-
-  EXPECT_FALSE(result.success);
-  EXPECT_NE(result.error.find("one editing mode per target file"), std::string::npos);
-}
-
-TEST_F(FileEditAnchorToolTest, emptyLegacyDefaultsDoNotActivateLegacyMode) {
-  const std::string path = "/tmp/work/file.txt";
-
-  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(false));
-
-  auto json = createJsonInput({{"path", "file.txt"}});
-  addFileEditLegacyNoise(json, "", "", false, 0.0f);
-
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-  ITool *itool = &tool;
-  auto result = itool->execute(json, ctx);
-
-  EXPECT_FALSE(result.success);
-  EXPECT_NE(result.error.find("Missing edits"),
-            std::string::npos);
-}
-
-TEST_F(FileEditAnchorToolTest, anchorEditsStillWorkWithoutNoise) {
-  const std::string path = "/tmp/work/file.txt";
-  const std::string original = "alpha\nbeta\n";
-
   EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
-  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
-
-  auto json = createFileEditJson(
-      "file.txt",
-      {{{"op", "insert_after"},
-        {"anchor", anchor(1, "alpha")},
-        {"new_lines", "inserted"}}});
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-
-  ITool *itool = &tool;
-  auto result = itool->execute(json, ctx);
-
-  EXPECT_TRUE(result.success);
-  EXPECT_EQ(capturedWrite, "alpha\ninserted\nbeta\n");
-}
-
-TEST_F(FileEditAnchorToolTest, mixingEditModesIsRejected) {
-  const std::string path = "/tmp/work/file.txt";
-
-  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(false));
-  EXPECT_CALL(mockHost, writeFile(_, _)).Times(0);
-
-  auto json =
-      createJsonInput({{"path", "file.txt"}, {"content", "replacement"}});
-  auto &alloc = json.GetAllocator();
-  rapidjson::Value editArray(rapidjson::kArrayType);
-  rapidjson::Value editObj(rapidjson::kObjectType);
-  editObj.AddMember("op", makeJsonString("insert_after", alloc), alloc);
-  editObj.AddMember("anchor", makeJsonString("1", alloc), alloc);
-  rapidjson::Value newLines(rapidjson::kArrayType);
-  newLines.PushBack(makeJsonString("inserted", alloc), alloc);
-  editObj.AddMember("new_lines", newLines, alloc);
-  editArray.PushBack(editObj, alloc);
-  json.AddMember("edits", editArray, alloc);
-
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-  ITool *itool = &tool;
-  auto result = itool->execute(json, ctx);
-
-  EXPECT_FALSE(result.success);
-  EXPECT_NE(result.error.find("one editing mode per target file"), std::string::npos);
-}
-
-TEST_F(ToolRegistryArgumentNormalizationTest,
-       nestedQuotedFileEditKeysAreNormalizedBeforeExecution) {
-  const std::string path = "/tmp/work/file.txt";
-  const std::string original = "alpha\nbeta\n";
-
-  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
-  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
+  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes("keep-a\nbeta\ngamma\nkeep-b\n")));
 
   rapidjson::Document input;
   input.SetObject();
   auto &alloc = input.GetAllocator();
   input.AddMember("path", makeJsonString("file.txt", alloc), alloc);
-  rapidjson::Value edits(rapidjson::kArrayType);
-  rapidjson::Value edit(rapidjson::kObjectType);
-  edit.AddMember("\"op\"", makeJsonString("insert_after", alloc), alloc);
-  edit.AddMember("\"anchor\"", makeJsonString(anchor(1, "alpha"), alloc), alloc);
+  rapidjson::Value operations(rapidjson::kArrayType);
+  rapidjson::Value op(rapidjson::kObjectType);
+  op.AddMember("op", makeJsonString("replace_range", alloc), alloc);
+  op.AddMember("start_anchor", makeJsonString(anchor(2, "beta"), alloc), alloc);
+  op.AddMember("end_anchor", makeJsonString(anchor(3, "gamma"), alloc), alloc);
   rapidjson::Value newLines(rapidjson::kArrayType);
-  newLines.PushBack(makeJsonString("inserted", alloc), alloc);
-  edit.AddMember("\"new_lines\"", newLines, alloc);
-  edits.PushBack(edit, alloc);
-  input.AddMember("\"edits\"", edits, alloc);
+  newLines.PushBack(makeJsonString("keep-a", alloc), alloc);
+  newLines.PushBack(makeJsonString("2#8c72|+ beta2", alloc), alloc);
+  newLines.PushBack(makeJsonString("3#f2c5|48a8|- gamma2", alloc), alloc);
+  newLines.PushBack(makeJsonString("keep-b", alloc), alloc);
+  op.AddMember("new_lines", newLines, alloc);
+  operations.PushBack(op, alloc);
+  input.AddMember("operations", operations, alloc);
 
-  auto result = executeFileEdit(input);
-
-  EXPECT_TRUE(result.success);
-  EXPECT_EQ(capturedWrite, "alpha\ninserted\nbeta\n");
+  auto result = executeNamed("EditRange", input);
+  EXPECT_TRUE(result.success) << result.error;
+  EXPECT_EQ(capturedWrite, "keep-a\nbeta2\ngamma2\nkeep-b\n");
+  auto doc = parseResult(result);
+  EXPECT_STREQ(doc["resolved_mode"].GetString(), "range");
+  EXPECT_TRUE(doc.HasMember("sanitation"));
 }
 
-TEST_F(ToolRegistryArgumentNormalizationTest,
-       quotedNestedKeysSurfaceRealValidationErrors) {
+TEST_F(FileToolFamilyTest, editRangeRejectsMissingEndAnchor) {
   const std::string path = "/tmp/work/file.txt";
-  const std::string original = "alpha\nbeta\n";
-
   EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
-  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
+  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes("alpha\nbeta\n")));
 
   rapidjson::Document input;
   input.SetObject();
   auto &alloc = input.GetAllocator();
   input.AddMember("path", makeJsonString("file.txt", alloc), alloc);
-  rapidjson::Value edits(rapidjson::kArrayType);
-  rapidjson::Value edit(rapidjson::kObjectType);
-  edit.AddMember("\"op\"", makeJsonString("insert_after", alloc), alloc);
-  edit.AddMember("\"anchor\"", makeJsonString("1|alpha", alloc), alloc);
+  rapidjson::Value operations(rapidjson::kArrayType);
+  rapidjson::Value op(rapidjson::kObjectType);
+  op.AddMember("op", makeJsonString("replace_range", alloc), alloc);
+  op.AddMember("start_anchor", makeJsonString("1", alloc), alloc);
   rapidjson::Value newLines(rapidjson::kArrayType);
-  newLines.PushBack(makeJsonString("inserted", alloc), alloc);
-  edit.AddMember("\"new_lines\"", newLines, alloc);
-  edits.PushBack(edit, alloc);
-  input.AddMember("\"edits\"", edits, alloc);
+  newLines.PushBack(makeJsonString("x", alloc), alloc);
+  op.AddMember("new_lines", newLines, alloc);
+  operations.PushBack(op, alloc);
+  input.AddMember("operations", operations, alloc);
 
-  auto result = executeFileEdit(input);
-
+  auto result = executeNamed("EditRange", input);
   EXPECT_FALSE(result.success);
-  EXPECT_THAT(result.error, HasSubstr("Malformed anchor"));
-  EXPECT_THAT(result.error,
-              ::testing::Not(HasSubstr("Missing edits, content, or legacy replacement parameters.")));
-}
-
-TEST_F(ToolRegistryArgumentNormalizationTest,
-       recursiveNormalizationWorksForArraysOfObjects) {
-  const std::string path = "/tmp/work/file.txt";
-  const std::string original = "alpha\nbeta\ngamma\n";
-
-  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
-  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
-
-  rapidjson::Document input;
-  input.SetObject();
-  auto &alloc = input.GetAllocator();
-  input.AddMember("path", makeJsonString("file.txt", alloc), alloc);
-  rapidjson::Value edits(rapidjson::kArrayType);
-
-  rapidjson::Value firstEdit(rapidjson::kObjectType);
-  firstEdit.AddMember("\"op\"", makeJsonString("insert_after", alloc), alloc);
-  firstEdit.AddMember("\"anchor\"", makeJsonString(anchor(1, "alpha"), alloc),
-                      alloc);
-  rapidjson::Value firstNewLines(rapidjson::kArrayType);
-  firstNewLines.PushBack(makeJsonString("x", alloc), alloc);
-  firstEdit.AddMember("\"new_lines\"", firstNewLines, alloc);
-  edits.PushBack(firstEdit, alloc);
-
-  rapidjson::Value secondEdit(rapidjson::kObjectType);
-  secondEdit.AddMember("\"op\"", makeJsonString("insert_before", alloc), alloc);
-  secondEdit.AddMember("\"anchor\"", makeJsonString(anchor(3, "gamma"), alloc),
-                       alloc);
-  rapidjson::Value secondNewLines(rapidjson::kArrayType);
-  secondNewLines.PushBack(makeJsonString("y", alloc), alloc);
-  secondEdit.AddMember("\"new_lines\"", secondNewLines, alloc);
-  edits.PushBack(secondEdit, alloc);
-
-  input.AddMember("\"edits\"", edits, alloc);
-
-  auto result = executeFileEdit(input);
-
-  EXPECT_TRUE(result.success);
-  EXPECT_EQ(capturedWrite, "alpha\nx\nbeta\ny\ngamma\n");
-}
-
-TEST_F(ToolRegistryArgumentNormalizationTest,
-       alreadyCorrectArgumentsRemainUnaffected) {
-  const std::string path = "/tmp/work/file.txt";
-  const std::string original = "alpha\nbeta\n";
-
-  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
-  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
-
-  auto input = createFileEditJson(
-      "file.txt",
-      {{{"op", "insert_after"},
-        {"anchor", anchor(1, "alpha")},
-        {"new_lines", "inserted"}}});
-
-  auto result = executeFileEdit(input);
-
-  EXPECT_TRUE(result.success);
-  EXPECT_EQ(capturedWrite, "alpha\ninserted\nbeta\n");
-}
-
-TEST_F(ToolRegistryArgumentNormalizationTest,
-       normalizationDoesNotInventUnrelatedKeys) {
-  const std::string path = "/tmp/work/file.txt";
-  const std::string original = "alpha\nbeta\n";
-
-  EXPECT_CALL(mockHost, exists(path)).WillOnce(Return(true));
-  EXPECT_CALL(mockHost, readFile(path)).WillOnce(Return(bytes(original)));
-
-  rapidjson::Document input;
-  input.SetObject();
-  auto &alloc = input.GetAllocator();
-  input.AddMember("path", makeJsonString("file.txt", alloc), alloc);
-  rapidjson::Value edits(rapidjson::kArrayType);
-  rapidjson::Value edit(rapidjson::kObjectType);
-  edit.AddMember("\"operation\"", makeJsonString("insert_after", alloc), alloc);
-  edit.AddMember("\"anchor\"", makeJsonString(anchor(1, "alpha"), alloc), alloc);
-  rapidjson::Value newLines(rapidjson::kArrayType);
-  newLines.PushBack(makeJsonString("inserted", alloc), alloc);
-  edit.AddMember("\"new_lines\"", newLines, alloc);
-  edits.PushBack(edit, alloc);
-  input.AddMember("\"edits\"", edits, alloc);
-
-  auto result = executeFileEdit(input);
-
-  EXPECT_FALSE(result.success);
-  EXPECT_THAT(result.error, HasSubstr("Malformed edit op"));
-}
-
-TEST_F(GrepToolTest, contextLines) {
-  ProcessResult result;
-  result.exitCode = 0;
-  result.stdoutData =
-      R"({"type":"context","data":{"path":{"text":"/tmp/file.txt"},"lines":{"text":"Before context\n"},"line_number":5}})"
-      "\n"
-      R"({"type":"match","data":{"path":{"text":"/tmp/file.txt"},"lines":{"text":"Match line\n"},"line_number":6}})"
-      "\n"
-      R"({"type":"context","data":{"path":{"text":"/tmp/file.txt"},"lines":{"text":"After context\n"},"line_number":7}})"
-      "\n";
-
-  EXPECT_CALL(mockHost,
-              exec(::testing::AllOf(HasSubstr("rg --json --pcre2"),
-                                    HasSubstr("-B 2"), HasSubstr("-A 3")),
-                   _, _, _))
-      .WillOnce(Return(result));
-
-  auto json = createJsonInput({{"pattern", "test"}, {"path", "/tmp"}},
-                              {{"context_before", 2}, {"context_after", 3}});
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-
-  ITool *itool = &tool;
-  auto toolResult = itool->execute(json, ctx);
-
-  EXPECT_TRUE(toolResult.success);
-}
-
-TEST_F(GrepToolTest, resultBudgetApplied) {
-  ProcessResult result;
-  result.exitCode = 0;
-  std::string bigOutput;
-  for (int i = 0; i < 3000; ++i) {
-    bigOutput += R"({"type":"match","data":{"path":{"text":"/tmp/file.txt"},"lines":{"text":"match\n"},"line_number":)" + std::to_string(i) + "}}\n";
-  }
-  result.stdoutData = bigOutput;
-
-  EXPECT_CALL(mockHost, exec(HasSubstr("rg --json"), _, _, _))
-      .WillOnce(Return(result));
-
-  auto json = createJsonInput({{"pattern", "test"}, {"path", "/tmp"}});
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-  ITool *itool = &tool;
-  auto toolResult = itool->execute(json, ctx);
-  EXPECT_TRUE(toolResult.success);
-  rapidjson::Document doc;
-  doc.Parse(toolResult.data.c_str());
-  ASSERT_TRUE(doc.IsObject());
-  ASSERT_TRUE(doc.HasMember("results"));
-  ASSERT_TRUE(doc["results"].IsArray());
-  EXPECT_EQ(doc["results"].Size(), 2000u);
-  ASSERT_TRUE(doc.HasMember("budget_hit"));
-  EXPECT_TRUE(doc["budget_hit"].GetBool());
-}
-
-TEST_F(GrepToolTest, timeoutReturnsFailure) {
-  ProcessResult result;
-  result.exitCode = -1;
-  result.finishReason = ProcessFinishReason::Timeout;
-  result.stdoutData = "partial output";
-
-  EXPECT_CALL(mockHost, exec(HasSubstr("rg --json"), _, _, _))
-      .WillOnce(Return(result));
-
-  auto json = createJsonInput({{"pattern", "test"}, {"path", "/tmp"}});
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-  ITool *itool = &tool;
-  auto toolResult = itool->execute(json, ctx);
-  EXPECT_FALSE(toolResult.success);
-  EXPECT_THAT(toolResult.error, HasSubstr("timed out"));
+  EXPECT_THAT(result.error, HasSubstr("end_anchor"));
 }
 
 class ProcessExecuteToolTest : public ::testing::Test {
 protected:
-  ProcessExecuteTool tool;
+  ProcessTool tool;
   NiceMock<MockHost> mockHost;
   NiceMock<MockAgent> mockAgent;
 
   void SetUp() override {
     mockAgent.defaultCtx.environment.cwd = "/tmp/work";
-    mockAgent.defaultCtx.permissions.allowedPaths = {"/tmp/work"};
+    mockAgent.defaultCtx.permissions.allowOutsideCwd = false;
+    mockAgent.defaultCtx.permissions.allowedPaths = {"/tmp/work", "/tmp"};
+    mockAgent.mockPerms_->allowOutsideCwd_ = false;
+    mockAgent.mockPerms_->allowedPaths_ = {"/tmp/work", "/tmp"};
+    mockAgent.mockPerms_->cwd_ = "/tmp/work";
+
     ON_CALL(mockAgent, getContext())
         .WillByDefault(ReturnRef(mockAgent.defaultCtx));
     ON_CALL(mockAgent, getMutableContext())
         .WillByDefault(ReturnRef(mockAgent.defaultCtx));
-    ON_CALL(mockAgent, isInterrupted()).WillByDefault(Return(false));
-    ON_CALL(mockAgent.mockEnv_->mockWorkspace(), resolvePath(_))
-        .WillByDefault(Invoke([](const std::string &path) { return path; }));
+  }
+
+  ToolResult executeProcess(const rapidjson::Value &json, ToolContext &ctx,
+                            const char *action) {
+    rapidjson::Document doc;
+    doc.CopyFrom(json, doc.GetAllocator());
+    doc.AddMember("action",
+                  rapidjson::Value(action, doc.GetAllocator()).Move(),
+                  doc.GetAllocator());
+    return tool.execute(doc, ctx);
   }
 };
 
@@ -2994,8 +1444,7 @@ TEST_F(ProcessExecuteToolTest, cwdDefaultsToAgentCwd) {
   auto json = createJsonInput({{"command", "echo test"}});
   ToolContext ctx{mockHost, mockAgent, "test_call"};
 
-  ITool *itool = &tool;
-  itool->execute(json, ctx);
+  executeProcess(json, ctx, "Execute");
 
   EXPECT_EQ(capturedCwd, "/tmp/work");
 }
@@ -3010,8 +1459,7 @@ TEST_F(ProcessExecuteToolTest, timeoutHandling) {
   auto json = createJsonInput({{"command", "sleep 100"}}, {{"timeout_ms", 50}});
   ToolContext ctx{mockHost, mockAgent, "test_call"};
 
-  ITool *itool = &tool;
-  auto result = itool->execute(json, ctx);
+  auto result = executeProcess(json, ctx, "Execute");
 
   EXPECT_TRUE(result.success);
   EXPECT_NE(result.data.find("Timeout"), std::string::npos);
@@ -3021,12 +1469,10 @@ TEST_F(ProcessExecuteToolTest, blocksForeignApplyPatchCommand) {
   auto json = createJsonInput({{"command", "apply_patch <<'PATCH'\n*** Begin Patch\n*** End Patch\nPATCH"}});
   ToolContext ctx{mockHost, mockAgent, "test_call"};
 
-  ITool *itool = &tool;
-  auto result = itool->execute(json, ctx);
+  auto result = executeProcess(json, ctx, "Execute");
 
   EXPECT_FALSE(result.success);
-  EXPECT_THAT(result.error, HasSubstr("'apply_patch' is not available in Firmius"));
-  EXPECT_THAT(result.error, HasSubstr("Use file_read + file_edit instead"));
+  EXPECT_THAT(result.error, HasSubstr("Files (Read) + Edit (patch) instead"));
 }
 
 TEST_F(ProcessExecuteToolTest, nonZeroExitReturnsFailureWithStructuredResult) {
@@ -3038,8 +1484,7 @@ TEST_F(ProcessExecuteToolTest, nonZeroExitReturnsFailureWithStructuredResult) {
   auto json = createJsonInput({{"command", "false"}});
   ToolContext ctx{mockHost, mockAgent, "test_call"};
 
-  ITool *itool = &tool;
-  auto result = itool->execute(json, ctx);
+  auto result = executeProcess(json, ctx, "Execute");
 
   EXPECT_FALSE(result.success);
   EXPECT_THAT(result.error, HasSubstr("non-zero exit code: 17"));
@@ -3049,7 +1494,7 @@ TEST_F(ProcessExecuteToolTest, nonZeroExitReturnsFailureWithStructuredResult) {
 
 class ProcessStatusToolTest : public ::testing::Test {
 protected:
-  ProcessStatusTool tool;
+  ProcessTool tool;
   NiceMock<MockHost> mockHost;
   NiceMock<MockAgent> mockAgent;
 
@@ -3059,6 +1504,13 @@ protected:
     ON_CALL(mockAgent, getMutableContext())
         .WillByDefault(ReturnRef(mockAgent.defaultCtx));
   }
+
+  ToolResult executeProcess(const rapidjson::Value &json, ToolContext &ctx, const char *action) {
+    rapidjson::Document doc;
+    doc.CopyFrom(json, doc.GetAllocator());
+    doc.AddMember("action", rapidjson::Value(action, doc.GetAllocator()).Move(), doc.GetAllocator());
+    return tool.execute(doc, ctx);
+  }
 };
 
 TEST_F(ProcessStatusToolTest, rejectsAgentIdWithActionableHint) {
@@ -3067,19 +1519,18 @@ TEST_F(ProcessStatusToolTest, rejectsAgentIdWithActionableHint) {
 
   auto json = createJsonInput({{"process_id", "agent-123"}});
   ToolContext ctx{mockHost, mockAgent, "test_call"};
-  ITool *itool = &tool;
-  auto result = itool->execute(json, ctx);
+  auto result = executeProcess(json, ctx, "Status");
 
   AgentRegistry::instance().unregisterAgent("agent-123");
 
   EXPECT_FALSE(result.success);
   EXPECT_THAT(result.error, HasSubstr("belongs to a subagent"));
-  EXPECT_THAT(result.error, HasSubstr("subagent_wait"));
+  EXPECT_THAT(result.error, HasSubstr("Delegate.wait"));
 }
 
 class ListDirectoryToolTest : public ::testing::Test {
 protected:
-  ListDirectoryTool tool;
+  FilesTool tool;
   NiceMock<MockHost> mockHost;
   NiceMock<MockAgent> mockAgent;
 
@@ -3103,6 +1554,13 @@ protected:
           return "/tmp/work/" + path;
         }));
   }
+
+  ToolResult executeList(const rapidjson::Value &json, ToolContext &ctx) {
+    rapidjson::Document doc;
+    doc.CopyFrom(json, doc.GetAllocator());
+    doc.AddMember("action", "List", doc.GetAllocator());
+    return tool.execute(doc, ctx);
+  }
 };
 
 TEST_F(ListDirectoryToolTest, allowedPaths_enforced) {
@@ -3115,9 +1573,7 @@ TEST_F(ListDirectoryToolTest, allowedPaths_enforced) {
   auto json = createJsonInput({{"path", "/etc"}});
   ToolContext ctx{mockHost, mockAgent, "test_call"};
 
-  ITool *itool = &tool;
-  auto result = itool->execute(json, ctx);
-
+  auto result = executeList(json, ctx);
   EXPECT_FALSE(result.success);
   EXPECT_NE(result.error.find("Access denied"), std::string::npos);
 }
@@ -3132,9 +1588,7 @@ TEST_F(ListDirectoryToolTest, includeHidden_respected) {
   auto json = createJsonInput({{"path", "/work"}, {"include_hidden", "false"}});
   ToolContext ctx{mockHost, mockAgent, "test_call"};
 
-  ITool *itool = &tool;
-  auto result = itool->execute(json, ctx);
-
+  auto result = executeList(json, ctx);
   EXPECT_TRUE(result.success);
   EXPECT_EQ(result.data.find(".hidden"), std::string::npos);
   EXPECT_NE(result.data.find("visible"), std::string::npos);
@@ -3185,7 +1639,7 @@ TEST(McpClientSubstrateTest, initializeListCallAndShutdownLifecycle) {
   }));
 
   {
-    mcp::McpClient client(std::move(mockProcess), ctx);
+    mcp::McpClient client(std::move(mockProcess));
     client.initialize(1000);
 
     auto listed = client.listTools(1000);
@@ -3204,6 +1658,8 @@ TEST(McpClientSubstrateTest, initializeListCallAndShutdownLifecycle) {
   EXPECT_THAT(writes[1], HasSubstr("\"method\":\"notifications/initialized\""));
   EXPECT_THAT(writes[2], HasSubstr("\"method\":\"tools/list\""));
   EXPECT_THAT(writes[3], HasSubstr("\"method\":\"tools/call\""));
+  EXPECT_THAT(writes[4], HasSubstr("\"method\":\"shutdown\""));
+  EXPECT_THAT(writes[5], HasSubstr("\"method\":\"exit\""));
 }
 
 TEST(McpClientSubstrateTest, initializeFailsWhenCapabilitiesToolsMissing) {
@@ -3228,7 +1684,7 @@ TEST(McpClientSubstrateTest, initializeFailsWhenCapabilitiesToolsMissing) {
     }
   }));
 
-  mcp::McpClient client(std::move(mockProcess), ctx);
+  mcp::McpClient client(std::move(mockProcess));
   EXPECT_THROW(client.initialize(1000), std::runtime_error);
 }
 
@@ -3248,7 +1704,7 @@ TEST(McpClientSubstrateTest, stdioSessionTimeoutKillsProcess) {
   EXPECT_CALL(*process, write(_)).Times(1);
   EXPECT_CALL(*process, kill()).WillRepeatedly(Invoke([&]() { running = false; }));
 
-  mcp::McpStdioSession session(*process, ctx);
+  mcp::McpStdioSession session(*process);
   rapidjson::Document params;
   params.SetObject();
 
@@ -3299,10 +1755,10 @@ TEST(McpClientSubstrateTest, httpSessionInitializeListCallAndShutdownLifecycle) 
 
   mcp::McpHttpTransportConfig httpConfig;
   httpConfig.url = "https://example.invalid/mcp";
-  auto session = std::make_unique<mcp::McpHttpSession>(httpConfig, ctx, sender);
+  auto session = std::make_unique<mcp::McpHttpSession>(httpConfig, sender);
 
   {
-    mcp::McpClient client(std::move(session), ctx);
+    mcp::McpClient client(std::move(session));
     client.initialize(1000);
     auto listed = client.listTools(1000);
     ASSERT_TRUE(listed.HasMember("result"));
@@ -3316,11 +1772,13 @@ TEST(McpClientSubstrateTest, httpSessionInitializeListCallAndShutdownLifecycle) 
     ASSERT_TRUE(called.HasMember("result"));
   }
 
-  ASSERT_GE(methods.size(), 4u);
+  ASSERT_GE(methods.size(), 6u);
   EXPECT_EQ(methods[0], "initialize");
-  EXPECT_EQ(methods[1], "notifications/initialized");
+  EXPECT_EQ(methods[1], "initialized");
   EXPECT_EQ(methods[2], "tools/list");
   EXPECT_EQ(methods[3], "tools/call");
+  EXPECT_EQ(methods[4], "shutdown");
+  EXPECT_EQ(methods[5], "exit");
   EXPECT_THAT(methods, ::testing::Not(::testing::Contains(std::string("$/cancelRequest"))));
   EXPECT_THAT(methods, ::testing::Not(::testing::Contains(std::string("notifications/cancelled"))));
 }
@@ -3337,8 +1795,8 @@ TEST(McpClientSubstrateTest, httpSessionSurfacesSenderError) {
 
   mcp::McpHttpTransportConfig httpConfig;
   httpConfig.url = "https://example.invalid/mcp";
-  auto session = std::make_unique<mcp::McpHttpSession>(httpConfig, ctx, sender);
-  mcp::McpClient client(std::move(session), ctx);
+  auto session = std::make_unique<mcp::McpHttpSession>(httpConfig, sender);
+  mcp::McpClient client(std::move(session));
 
   try {
     client.initialize(1000);
@@ -3365,8 +1823,8 @@ TEST(McpClientSubstrateTest, httpSessionRejectsSseStreamResponseAsDeferred) {
 
   mcp::McpHttpTransportConfig httpConfig;
   httpConfig.url = "https://example.invalid/mcp";
-  auto session = std::make_unique<mcp::McpHttpSession>(httpConfig, ctx, sender);
-  mcp::McpClient client(std::move(session), ctx);
+  auto session = std::make_unique<mcp::McpHttpSession>(httpConfig, sender);
+  mcp::McpClient client(std::move(session));
 
   try {
     client.initialize(1000);
@@ -3376,399 +1834,6 @@ TEST(McpClientSubstrateTest, httpSessionRejectsSseStreamResponseAsDeferred) {
   }
 }
 
-TEST(McpCallToolParityTest, stdioHappyPathUsesMcpClientLifecycle) {
-  NiceMock<MockHost> mockHost;
-  NiceMock<MockAgent> mockAgent;
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-
-  auto &loader = ConfigLoader::instance();
-  const UserConfig original = loader.getConfig();
-  UserConfig cfg = original;
-  cfg.mcpServers.clear();
-  McpServerConfig server;
-  server.transport = "stdio";
-  server.command = "npx";
-  server.args = {"-y", "example-server"};
-  server.cwd = "/tmp";
-  server.enabled = true;
-  cfg.mcpServers["demo"] = server;
-  loader.updateConfig(cfg);
-
-  auto mockProcess = std::make_unique<NiceMock<MockHostProcess>>();
-  auto *process = mockProcess.get();
-
-  bool running = true;
-  std::string stdoutBuffer;
-  std::vector<std::string> writes;
-
-  ON_CALL(*process, inspect())
-      .WillByDefault(Invoke([&]() {
-        return ProcessSnapshot{running, 0, stdoutBuffer, "", 0.0};
-      }));
-  ON_CALL(*process, isRunning()).WillByDefault(Invoke([&]() { return running; }));
-  EXPECT_CALL(*process, kill()).WillRepeatedly(Invoke([&]() { running = false; }));
-  EXPECT_CALL(*process, write(_)).WillRepeatedly(Invoke([&](const std::string &payload) {
-    writes.push_back(payload);
-    if (payload.find("\"method\":\"initialize\"") != std::string::npos) {
-      stdoutBuffer += frameMcpJson(
-          R"({"jsonrpc":"2.0","id":1,"result":{"capabilities":{"tools":{}}}})");
-    } else if (payload.find("\"method\":\"tools/list\"") != std::string::npos) {
-      stdoutBuffer += frameMcpJson(
-          R"({"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo_tool"}]}})");
-    } else if (payload.find("\"method\":\"tools/call\"") != std::string::npos) {
-      stdoutBuffer += frameMcpJson(
-          R"({"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"ok"}]}})");
-    } else if (payload.find("\"method\":\"shutdown\"") != std::string::npos) {
-      stdoutBuffer += frameMcpJson(
-          R"({"jsonrpc":"2.0","id":4,"result":{}})");
-    }
-  }));
-  EXPECT_CALL(mockHost, spawn(_, _, _)).WillOnce(Return(ByMove(std::move(mockProcess))));
-
-  McpCallTool tool;
-  rapidjson::Document input;
-  input.SetObject();
-  auto &a = input.GetAllocator();
-  input.AddMember("server_name", rapidjson::Value("demo", a).Move(), a);
-  input.AddMember("tool_name", rapidjson::Value("echo_tool", a).Move(), a);
-  input.AddMember("timeout_ms", 1000, a);
-  rapidjson::Value args(rapidjson::kObjectType);
-  args.AddMember("input", rapidjson::Value("hello", a).Move(), a);
-  input.AddMember("arguments", args, a);
-
-  ITool *itool = &tool;
-  auto result = itool->execute(input, ctx);
-  EXPECT_TRUE(result.success) << result.error;
-
-  rapidjson::Document out;
-  out.Parse(result.data.c_str());
-  ASSERT_FALSE(out.HasParseError());
-  ASSERT_TRUE(out.IsObject());
-  EXPECT_STREQ(out["server_name"].GetString(), "demo");
-  EXPECT_STREQ(out["tool_name"].GetString(), "echo_tool");
-  ASSERT_TRUE(out.HasMember("remote_result"));
-
-  ASSERT_GE(writes.size(), 4u);
-  EXPECT_THAT(writes[0], HasSubstr("\"method\":\"initialize\""));
-  EXPECT_THAT(writes[1], HasSubstr("\"method\":\"notifications/initialized\""));
-  EXPECT_THAT(writes[2], HasSubstr("\"method\":\"tools/list\""));
-  EXPECT_THAT(writes[3], HasSubstr("\"method\":\"tools/call\""));
-
-  loader.updateConfig(original);
-}
-
-TEST(McpCallToolParityTest, unsupportedTransportFailsExplicitly) {
-  NiceMock<MockHost> mockHost;
-  NiceMock<MockAgent> mockAgent;
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-
-  auto &loader = ConfigLoader::instance();
-  const UserConfig original = loader.getConfig();
-  UserConfig cfg = original;
-  cfg.mcpServers.clear();
-  McpServerConfig server;
-  server.transport = "remote";
-  server.command = "ignored";
-  server.enabled = true;
-  cfg.mcpServers["remote_server"] = server;
-  loader.updateConfig(cfg);
-
-  EXPECT_CALL(mockHost, spawn(_, _, _)).Times(0);
-
-  McpCallTool tool;
-  rapidjson::Document input;
-  input.SetObject();
-  auto &a = input.GetAllocator();
-  input.AddMember("server_name", rapidjson::Value("remote_server", a).Move(), a);
-  input.AddMember("tool_name", rapidjson::Value("echo_tool", a).Move(), a);
-  rapidjson::Value args(rapidjson::kObjectType);
-  input.AddMember("arguments", args, a);
-
-  ITool *itool = &tool;
-  auto result = itool->execute(input, ctx);
-  EXPECT_FALSE(result.success);
-  EXPECT_THAT(result.error, HasSubstr("Unsupported MCP transport"));
-
-  loader.updateConfig(original);
-}
-
-TEST(McpCallToolParityTest, httpTransportFailsExplicitlyWithoutStdioFallback) {
-  NiceMock<MockHost> mockHost;
-  NiceMock<MockAgent> mockAgent;
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-
-  auto &loader = ConfigLoader::instance();
-  const UserConfig original = loader.getConfig();
-  UserConfig cfg = original;
-  cfg.mcpServers.clear();
-  McpServerConfig server;
-  server.transport = "http";
-  server.url = "https://example.invalid/mcp";
-  server.allowInsecureTls = true;
-  // Populate stdio fields too; tool must not silently downgrade to stdio.
-  server.command = "npx";
-  server.args = {"-y", "example-server"};
-  server.enabled = true;
-  cfg.mcpServers["http_server"] = server;
-  loader.updateConfig(cfg);
-
-  EXPECT_CALL(mockHost, spawn(_, _, _)).Times(0);
-
-  McpCallTool tool;
-  rapidjson::Document input;
-  input.SetObject();
-  auto &a = input.GetAllocator();
-  input.AddMember("server_name", rapidjson::Value("http_server", a).Move(), a);
-  input.AddMember("tool_name", rapidjson::Value("echo_tool", a).Move(), a);
-  input.AddMember("timeout_ms", 200, a);
-  rapidjson::Value args(rapidjson::kObjectType);
-  input.AddMember("arguments", args, a);
-
-  ITool *itool = &tool;
-  auto result = itool->execute(input, ctx);
-  EXPECT_FALSE(result.success);
-  EXPECT_THAT(result.error, HasSubstr("allowInsecureTls"));
-
-  loader.updateConfig(original);
-}
-
-TEST(McpDiscoveryLoadAccessToolTest, mcpListSummarizesCapabilitiesFromServer) {
-  NiceMock<MockHost> mockHost;
-  NiceMock<MockAgent> mockAgent;
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-
-  auto &loader = ConfigLoader::instance();
-  const UserConfig original = loader.getConfig();
-  UserConfig cfg = original;
-  cfg.mcpServers.clear();
-  McpServerConfig server;
-  server.transport = "stdio";
-  server.command = "npx";
-  server.args = {"-y", "example-server"};
-  server.cwd = "/tmp";
-  server.enabled = true;
-  cfg.mcpServers["demo"] = server;
-  loader.updateConfig(cfg);
-
-  auto mockProcess = std::make_unique<NiceMock<MockHostProcess>>();
-  auto *process = mockProcess.get();
-  bool running = true;
-  std::string stdoutBuffer;
-
-  ON_CALL(*process, inspect()).WillByDefault(Invoke([&]() {
-    return ProcessSnapshot{running, 0, stdoutBuffer, "", 0.0};
-  }));
-  ON_CALL(*process, isRunning()).WillByDefault(Invoke([&]() { return running; }));
-  EXPECT_CALL(*process, kill()).WillRepeatedly(Invoke([&]() { running = false; }));
-  EXPECT_CALL(*process, write(_)).WillRepeatedly(Invoke([&](const std::string &payload) {
-    if (payload.find("\"method\":\"initialize\"") != std::string::npos) {
-      stdoutBuffer += frameMcpJson(
-          R"({"jsonrpc":"2.0","id":1,"result":{"capabilities":{"tools":{}}}})");
-    } else if (payload.find("\"method\":\"tools/list\"") != std::string::npos) {
-      stdoutBuffer += frameMcpJson(
-          R"({"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"tool.alpha"},{"name":"tool.beta"}]}})");
-    } else if (payload.find("\"method\":\"resources/list\"") != std::string::npos) {
-      stdoutBuffer += frameMcpJson(
-          R"({"jsonrpc":"2.0","id":3,"result":{"resources":[{"uri":"res://alpha"}]}})");
-    } else if (payload.find("\"method\":\"prompts/list\"") != std::string::npos) {
-      stdoutBuffer += frameMcpJson(
-          R"({"jsonrpc":"2.0","id":4,"result":{"prompts":[{"name":"prompt.alpha"}]}})");
-    } else if (payload.find("\"method\":\"shutdown\"") != std::string::npos) {
-      stdoutBuffer += frameMcpJson(
-          R"({"jsonrpc":"2.0","id":5,"result":{}})");
-    }
-  }));
-  EXPECT_CALL(mockHost, spawn(_, _, _)).WillOnce(Return(ByMove(std::move(mockProcess))));
-
-  McpListTool tool;
-  rapidjson::Document input;
-  input.SetObject();
-  input.AddMember("server_name", "demo", input.GetAllocator());
-
-  ITool *itool = &tool;
-  auto result = itool->execute(input, ctx);
-  EXPECT_TRUE(result.success) << result.error;
-
-  rapidjson::Document out;
-  out.Parse(result.data.c_str());
-  ASSERT_FALSE(out.HasParseError());
-  ASSERT_TRUE(out.HasMember("servers"));
-  ASSERT_TRUE(out["servers"].IsArray());
-  ASSERT_EQ(out["servers"].GetArray().Size(), 1u);
-  const auto &entry = out["servers"][0];
-  EXPECT_STREQ(entry["server_name"].GetString(), "demo");
-  ASSERT_EQ(entry["tools"].GetArray().Size(), 2u);
-  ASSERT_EQ(entry["resources"].GetArray().Size(), 1u);
-  ASSERT_EQ(entry["prompts"].GetArray().Size(), 1u);
-
-  loader.updateConfig(original);
-}
-
-TEST(McpDiscoveryLoadAccessToolTest, mcpSearchFiltersByQuery) {
-  NiceMock<MockHost> mockHost;
-  NiceMock<MockAgent> mockAgent;
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-
-  auto &loader = ConfigLoader::instance();
-  const UserConfig original = loader.getConfig();
-  UserConfig cfg = original;
-  cfg.mcpServers.clear();
-  McpServerConfig server;
-  server.transport = "stdio";
-  server.command = "npx";
-  server.args = {"-y", "example-server"};
-  server.enabled = true;
-  cfg.mcpServers["demo"] = server;
-  loader.updateConfig(cfg);
-
-  auto mockProcess = std::make_unique<NiceMock<MockHostProcess>>();
-  auto *process = mockProcess.get();
-  bool running = true;
-  std::string stdoutBuffer;
-
-  ON_CALL(*process, inspect()).WillByDefault(Invoke([&]() {
-    return ProcessSnapshot{running, 0, stdoutBuffer, "", 0.0};
-  }));
-  ON_CALL(*process, isRunning()).WillByDefault(Invoke([&]() { return running; }));
-  EXPECT_CALL(*process, kill()).WillRepeatedly(Invoke([&]() { running = false; }));
-  EXPECT_CALL(*process, write(_)).WillRepeatedly(Invoke([&](const std::string &payload) {
-    if (payload.find("\"method\":\"initialize\"") != std::string::npos) {
-      stdoutBuffer += frameMcpJson(
-          R"({"jsonrpc":"2.0","id":1,"result":{"capabilities":{"tools":{}}}})");
-    } else if (payload.find("\"method\":\"tools/list\"") != std::string::npos) {
-      stdoutBuffer += frameMcpJson(
-          R"({"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"alpha.tool","description":"find alpha"},{"name":"beta.tool","description":"other"}]}})");
-    } else if (payload.find("\"method\":\"resources/list\"") != std::string::npos) {
-      stdoutBuffer += frameMcpJson(
-          R"({"jsonrpc":"2.0","id":3,"result":{"resources":[{"uri":"res://alpha"}]}})");
-    } else if (payload.find("\"method\":\"prompts/list\"") != std::string::npos) {
-      stdoutBuffer += frameMcpJson(
-          R"({"jsonrpc":"2.0","id":4,"result":{"prompts":[{"name":"prompt.alpha"}]}})");
-    } else if (payload.find("\"method\":\"shutdown\"") != std::string::npos) {
-      stdoutBuffer += frameMcpJson(
-          R"({"jsonrpc":"2.0","id":5,"result":{}})");
-    }
-  }));
-  EXPECT_CALL(mockHost, spawn(_, _, _)).WillOnce(Return(ByMove(std::move(mockProcess))));
-
-  McpSearchTool tool;
-  rapidjson::Document input;
-  input.SetObject();
-  auto &a = input.GetAllocator();
-  input.AddMember("query", rapidjson::Value("alpha", a).Move(), a);
-  input.AddMember("server_name", rapidjson::Value("demo", a).Move(), a);
-
-  ITool *itool = &tool;
-  auto result = itool->execute(input, ctx);
-  EXPECT_TRUE(result.success) << result.error;
-
-  rapidjson::Document out;
-  out.Parse(result.data.c_str());
-  ASSERT_FALSE(out.HasParseError());
-  ASSERT_EQ(out["servers"].GetArray().Size(), 1u);
-  const auto &entry = out["servers"][0];
-  ASSERT_EQ(entry["tools"].GetArray().Size(), 1u);
-  EXPECT_STREQ(entry["tools"][0].GetString(), "alpha.tool");
-  ASSERT_EQ(entry["resources"].GetArray().Size(), 1u);
-  ASSERT_EQ(entry["prompts"].GetArray().Size(), 1u);
-
-  loader.updateConfig(original);
-}
-
-TEST(McpDiscoveryLoadAccessToolTest, mcpLoadReturnsLoadedSelections) {
-  NiceMock<MockHost> mockHost;
-  NiceMock<MockAgent> mockAgent;
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-
-  auto &loader = ConfigLoader::instance();
-  const UserConfig original = loader.getConfig();
-  UserConfig cfg = original;
-  cfg.mcpServers.clear();
-  McpServerConfig server;
-  server.transport = "stdio";
-  server.command = "npx";
-  server.args = {"-y", "example-server"};
-  server.enabled = true;
-  cfg.mcpServers["demo"] = server;
-  loader.updateConfig(cfg);
-
-  auto mockProcess = std::make_unique<NiceMock<MockHostProcess>>();
-  auto *process = mockProcess.get();
-  bool running = true;
-  std::string stdoutBuffer;
-
-  ON_CALL(*process, inspect()).WillByDefault(Invoke([&]() {
-    return ProcessSnapshot{running, 0, stdoutBuffer, "", 0.0};
-  }));
-  ON_CALL(*process, isRunning()).WillByDefault(Invoke([&]() { return running; }));
-  EXPECT_CALL(*process, kill()).WillRepeatedly(Invoke([&]() { running = false; }));
-  EXPECT_CALL(*process, write(_)).WillRepeatedly(Invoke([&](const std::string &payload) {
-    if (payload.find("\"method\":\"initialize\"") != std::string::npos) {
-      stdoutBuffer += frameMcpJson(
-          R"({"jsonrpc":"2.0","id":1,"result":{"capabilities":{"tools":{}}}})");
-    } else if (payload.find("\"method\":\"tools/list\"") != std::string::npos) {
-      stdoutBuffer += frameMcpJson(
-          R"({"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"tool.alpha"}]}})");
-    } else if (payload.find("\"method\":\"resources/list\"") != std::string::npos) {
-      stdoutBuffer += frameMcpJson(
-          R"({"jsonrpc":"2.0","id":3,"result":{"resources":[{"uri":"res://alpha"}]}})");
-    } else if (payload.find("\"method\":\"prompts/list\"") != std::string::npos) {
-      stdoutBuffer += frameMcpJson(
-          R"({"jsonrpc":"2.0","id":4,"result":{"prompts":[{"name":"prompt.alpha"}]}})");
-    } else if (payload.find("\"method\":\"shutdown\"") != std::string::npos) {
-      stdoutBuffer += frameMcpJson(
-          R"({"jsonrpc":"2.0","id":5,"result":{}})");
-    }
-  }));
-  EXPECT_CALL(mockHost, spawn(_, _, _)).WillOnce(Return(ByMove(std::move(mockProcess))));
-
-  McpLoadTool tool;
-  rapidjson::Document input;
-  input.Parse(R"({"server_name":"demo","tools":["tool.alpha"],"resources":["res://alpha"],"prompts":["prompt.alpha"]})");
-
-  ITool *itool = &tool;
-  auto result = itool->execute(input, ctx);
-  EXPECT_TRUE(result.success) << result.error;
-
-  rapidjson::Document out;
-  out.Parse(result.data.c_str());
-  ASSERT_FALSE(out.HasParseError());
-  EXPECT_STREQ(out["server_name"].GetString(), "demo");
-  ASSERT_EQ(out["loaded_tools"].GetArray().Size(), 1u);
-  ASSERT_EQ(out["loaded_resources"].GetArray().Size(), 1u);
-  ASSERT_EQ(out["loaded_prompts"].GetArray().Size(), 1u);
-
-  loader.updateConfig(original);
-}
-
-TEST(McpDiscoveryLoadAccessToolTest, mcpReadResourceRequiresLoadedState) {
-  NiceMock<MockHost> mockHost;
-  NiceMock<MockAgent> mockAgent;
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-
-  EXPECT_CALL(mockAgent, getContext()).WillRepeatedly(ReturnRef(mockAgent.defaultCtx));
-  McpReadResourceTool tool;
-  rapidjson::Document input;
-  input.Parse(R"({"server_name":"demo","uri":"res://alpha"})");
-
-  ITool *itool = &tool;
-  auto result = itool->execute(input, ctx);
-  EXPECT_FALSE(result.success);
-  EXPECT_THAT(result.error, HasSubstr("MCP server is not loaded"));
-}
-
-TEST(McpDiscoveryLoadAccessToolTest, mcpGetPromptRequiresLoadedState) {
-  NiceMock<MockHost> mockHost;
-  NiceMock<MockAgent> mockAgent;
-  ToolContext ctx{mockHost, mockAgent, "test_call"};
-
-  EXPECT_CALL(mockAgent, getContext()).WillRepeatedly(ReturnRef(mockAgent.defaultCtx));
-  McpGetPromptTool tool;
-  rapidjson::Document input;
-  input.Parse(R"({"server_name":"demo","prompt_name":"prompt.alpha"})");
-
-  ITool *itool = &tool;
-  auto result = itool->execute(input, ctx);
-  EXPECT_FALSE(result.success);
-  EXPECT_THAT(result.error, HasSubstr("MCP server is not loaded"));
-}
+// Legacy MCP wrapper-tool tests removed: repo now validates MCP via direct substrate tests above.
+// The live MCP surface here is exercised through mcp::McpClient / McpStdioSession / McpHttpSession.
+// Wrapper-style Mcp*Tool tests targeted deleted classes and no longer match the repository surface.

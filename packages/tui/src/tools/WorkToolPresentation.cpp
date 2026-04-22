@@ -15,11 +15,6 @@ namespace {
 using firmius::shared::ToolCallView;
 using firmius::shared::ToolPhase;
 
-bool IsMatch(const std::string &actual, const std::string &expected) {
-  return !actual.empty() && !expected.empty() &&
-         actual.find(expected) != std::string::npos;
-}
-
 ToolPresentationLifecycle LifecycleFromPhase(const ToolCallView &view) {
   if (view.phase == ToolPhase::Preparing) {
     return ToolPresentationLifecycle::Preparing;
@@ -37,6 +32,17 @@ ToolPresentationLifecycle LifecycleFromPhase(const ToolCallView &view) {
 bool ParseObject(const std::string &json, rapidjson::Document &doc) {
   doc.Parse(json.c_str());
   return !doc.HasParseError() && doc.IsObject();
+}
+
+std::string ExtractAction(const ToolCallView &view) {
+  rapidjson::Document doc;
+  if (!ParseObject(view.args, doc)) {
+    return "";
+  }
+  if (doc.HasMember("action") && doc["action"].IsString()) {
+    return doc["action"].GetString();
+  }
+  return "";
 }
 
 bool ParseArray(const std::string &json, rapidjson::Document &doc) {
@@ -302,7 +308,7 @@ ToolPresentation BuildPlanCreatePresentation(const ToolCallView &view) {
   ToolPresentation p;
   p.lifecycle = LifecycleFromPhase(view);
   p.layout = ToolPresentationLayoutKind::CompactFactCard;
-  p.density = ToolPresentationDensity::CompactSummaryCard;
+  p.density = ToolPresentationDensity::OneLineSummary;
   p.subtitle = view.name;
 
   rapidjson::Document args;
@@ -589,7 +595,7 @@ ToolPresentation BuildChunkAddPresentation(const ToolCallView &view) {
   ToolPresentation p;
   p.lifecycle = LifecycleFromPhase(view);
   p.layout = ToolPresentationLayoutKind::CompactFactCard;
-  p.density = ToolPresentationDensity::CompactSummaryCard;
+  p.density = ToolPresentationDensity::OneLineSummary;
   p.subtitle = view.name;
   rapidjson::Document args;
   const bool has_args = ParseObject(view.args, args);
@@ -854,7 +860,7 @@ ToolPresentation BuildChunkUpdatePresentation(const ToolCallView &view) {
   ToolPresentation p;
   p.lifecycle = LifecycleFromPhase(view);
   p.layout = ToolPresentationLayoutKind::CompactFactCard;
-  p.density = ToolPresentationDensity::CompactSummaryCard;
+  p.density = ToolPresentationDensity::OneLineSummary;
   p.subtitle = view.name;
   rapidjson::Document args;
   const bool has_args = ParseObject(view.args, args);
@@ -906,10 +912,6 @@ ToolPresentation BuildChunkUpdatePresentation(const ToolCallView &view) {
       changes.push_back("tasks: " + std::to_string(args["tasks"].Size()) + " subtask(s)");
     }
     
-    // Assigned worker
-    if (args.HasMember("assigned_worker_id") && args["assigned_worker_id"].IsString()) {
-      changes.push_back("worker: " + std::string(args["assigned_worker_id"].GetString()));
-    }
     
     if (!changes.empty()) {
       for (const auto &c : changes) {
@@ -1250,50 +1252,53 @@ ToolPresentation BuildFleetStatusPresentation(const ToolCallView &view) {
 } // namespace
 
 bool IsWorkFamilyTool(const std::string &tool_name) {
-  return IsMatch(tool_name, "plan_") || IsMatch(tool_name, "chunk_") ||
-         IsMatch(tool_name, "todo_write") || IsMatch(tool_name, "fleet_lock") ||
-         IsMatch(tool_name, "fleet_status");
+  return tool_name == "Work" || tool_name == "Todo" || tool_name == "Fleet" || tool_name == "todo_write" || tool_name == "chunk_add" || tool_name == "chunk_get" || tool_name == "plan_get" || tool_name == "plan_list";
 }
 
 ToolPresentation BuildWorkToolPresentation(const ToolCallView &view) {
   ToolPresentation presentation;
-  if (IsMatch(view.name, "plan_create")) {
+  std::string action = ExtractAction(view);
+  if (action.empty()) {
+    if (view.name == "todo_write") action = "TodoWrite";
+    else if (view.name == "chunk_add") action = "AddChunk";
+    else if (view.name == "chunk_get") action = "GetChunk";
+    else if (view.name == "plan_get") action = "GetPlan";
+    else if (view.name == "plan_list") action = "ListPlans";
+  }
+  if (action == "CreatePlan") {
     presentation = BuildPlanCreatePresentation(view);
-  } else if (IsMatch(view.name, "plan_get")) {
+  } else if (action == "GetPlan") {
     presentation = BuildPlanGetPresentation(view);
-  } else if (IsMatch(view.name, "plan_list")) {
+  } else if (action == "ListPlans") {
     presentation = BuildPlanListPresentation(view);
-  } else if (IsMatch(view.name, "plan_set_active")) {
+  } else if (action == "ActivatePlan") {
     presentation = BuildPlanSetActivePresentation(view);
-  } else if (IsMatch(view.name, "plan_update")) {
+  } else if (action == "UpdatePlan") {
     presentation = BuildPlanUpdatePresentation(view);
-  } else if (IsMatch(view.name, "chunk_add")) {
+  } else if (action == "AddChunk") {
     presentation = BuildChunkAddPresentation(view);
-  } else if (IsMatch(view.name, "chunk_get")) {
+  } else if (action == "GetChunk") {
     presentation = BuildChunkGetPresentation(view);
-  } else if (IsMatch(view.name, "chunk_list")) {
+  } else if (action == "ListChunks") {
     presentation = BuildChunkListPresentation(view);
-  } else if (IsMatch(view.name, "chunk_ready_for_execution")) {
+  } else if (action == "ReadyChunk") {
     presentation = BuildChunkReadyPresentation(view);
-  } else if (IsMatch(view.name, "chunk_update")) {
+  } else if (action == "UpdateChunk") {
     presentation = BuildChunkUpdatePresentation(view);
-  } else if (IsMatch(view.name, "fleet_lock")) {
+  } else if (action == "Lock") {
     presentation = BuildFleetLockPresentation(view);
-  } else if (IsMatch(view.name, "fleet_lock_respond")) {
+  } else if (action == "Respond") {
     presentation = BuildFleetLockRespondPresentation(view);
-  } else if (IsMatch(view.name, "fleet_status")) {
+  } else if (action == "Status") {
     presentation = BuildFleetStatusPresentation(view);
   } else {
     presentation = BuildTodoWritePresentation(view);
   }
-  if (!IsMatch(view.name, "todo_write") && !IsMatch(view.name, "plan_list") &&
-      !IsMatch(view.name, "plan_create") &&
-      !IsMatch(view.name, "plan_set_active") &&
-      !IsMatch(view.name, "plan_update") &&
-      !IsMatch(view.name, "chunk_add") &&
-      !IsMatch(view.name, "chunk_update") &&
-      !IsMatch(view.name, "fleet_lock") &&
-      !IsMatch(view.name, "fleet_status")) {
+  if (view.name != "Todo" && action != "ListPlans" &&
+      action != "CreatePlan" && action != "ActivatePlan" &&
+      action != "UpdatePlan" && action != "AddChunk" &&
+      action != "UpdateChunk" && action != "Lock" &&
+      action != "Status") {
     presentation.density = ToolPresentationDensity::DetailHeavy;
   }
   return presentation;

@@ -13,6 +13,7 @@
 #include "persistence/HistoryEditor.hpp"
 #include "persistence/Journaler.hpp"
 #include "persistence/ThreadManager.hpp"
+#include "tools/WorkSupport.hpp"
 #include "providers/AntigravityProvider.hpp"
 #include "providers/ChutesProvider.hpp"
 #include "providers/CodexProvider.hpp"
@@ -26,50 +27,23 @@
 #include "providers/QwenProvider.hpp"
 #include "providers/ZaiProvider.hpp"
 #include "providers/ZenProvider.hpp"
-#include "tools/ArtifactListTool.hpp"
-#include "tools/ArtifactReadTool.hpp"
-#include "tools/ArtifactWriteTool.hpp"
+#include "tools/ArtifactsTool.hpp"
+#include "tools/LspTool.hpp"
+#include "tools/DelegateTool.hpp"
 #include "tools/MemoryRecallTool.hpp"
-#include "tools/McpCallTool.hpp"
-#include "tools/McpGetPromptTool.hpp"
-#include "tools/McpListTool.hpp"
-#include "tools/McpLoadTool.hpp"
-#include "tools/McpReadResourceTool.hpp"
-#include "tools/McpSearchTool.hpp"
-#include "tools/ChunkAddTool.hpp"
-#include "tools/ChunkGetTool.hpp"
-#include "tools/ChunkListTool.hpp"
-#include "tools/ChunkReadyForExecutionTool.hpp"
-#include "tools/ChunkUpdateTool.hpp"
 #include "tools/FileEditTool.hpp"
-#include "tools/FileReadTool.hpp"
+#include "tools/FilesTool.hpp"
+#include "tools/FleetTool.hpp"
 #include "tools/FleetLockRespondTool.hpp"
 #include "tools/FleetLockTool.hpp"
 #include "tools/FleetStatusTool.hpp"
-#include "tools/GlobTool.hpp"
-#include "tools/GrepTool.hpp"
-#include "tools/ListDirectoryTool.hpp"
 #include "tools/LspDiagnosticsTool.hpp"
-#include "tools/LspTool.hpp"
-#include "tools/PlanCreateTool.hpp"
-#include "tools/PlanGetTool.hpp"
-#include "tools/PlanListTool.hpp"
-#include "tools/PlanSetActiveTool.hpp"
-#include "tools/PlanUpdateTool.hpp"
-#include "tools/ProcessExecuteTool.hpp"
-#include "tools/ProcessInputTool.hpp"
-#include "tools/ProcessSpawnTool.hpp"
-#include "tools/ProcessStatusTool.hpp"
-#include "tools/ProcessWaitTool.hpp"
+#include "tools/ProcessTool.hpp"
 #include "tools/PythonExecuteTool.hpp"
 #include "tools/SkillLoadTool.hpp"
-#include "tools/SubagentTerminateTool.hpp"
-#include "tools/SubagentTool.hpp"
-#include "tools/SubagentWaitTool.hpp"
 #include "tools/TodoWriteTool.hpp"
-#include "tools/WebFetchTool.hpp"
-#include "tools/WebSearchTool.hpp"
-#include "tools/WorkToolCommon.hpp"
+#include "tools/WebTool.hpp"
+#include "tools/WorkTool.hpp"
 #include "lsp/LspServerManager.hpp"
 #include "utils/HistoryMetrics.hpp"
 #include "utils/StringUtil.hpp"
@@ -89,6 +63,200 @@
 namespace firmius::core {
 
 namespace {
+struct ReverseFileEditOperation {
+  std::string path;
+  std::string description;
+  int startLine = 1;
+  int endLine = 0;
+  std::vector<std::string> oldLines;
+  std::vector<std::string> newLines;
+};
+
+std::vector<std::string> splitLinesForUndo(const std::string &content) {
+  std::vector<std::string> lines;
+  std::stringstream ss(content);
+  std::string line;
+  while (std::getline(ss, line)) {
+    lines.push_back(line);
+  }
+  return lines;
+}
+
+std::string joinLinesForUndo(const std::vector<std::string> &lines) {
+  std::ostringstream out;
+  for (std::size_t i = 0; i < lines.size(); ++i) {
+    if (i > 0) {
+      out << '\n';
+    }
+    out << lines[i];
+  }
+  if (!lines.empty()) {
+    out << '\n';
+  }
+  return out.str();
+}
+
+std::vector<std::string> parseStringArrayMember(const rapidjson::Value &value,
+                                                const char *key) {
+  std::vector<std::string> lines;
+  if (!value.IsObject() || !value.HasMember(key) || !value[key].IsArray()) {
+    return lines;
+  }
+  for (const auto &entry : value[key].GetArray()) {
+    if (entry.IsString()) {
+      lines.emplace_back(entry.GetString());
+    }
+  }
+  return lines;
+}
+
+std::vector<ReverseFileEditOperation>
+extractReverseOperationsFromToolResult(const std::string &resultJson) {
+  std::vector<ReverseFileEditOperation> operations;
+  rapidjson::Document doc;
+  doc.Parse(resultJson.c_str());
+  if (doc.HasParseError() || !doc.IsObject()) {
+    return operations;
+  }
+
+  auto appendFromObject = [&](const rapidjson::Value &value) {
+    if (!value.IsObject() || !value.HasMember("path") || !value["path"].IsString() ||
+        !value.HasMember("operations") || !value["operations"].IsArray()) {
+      return;
+    }
+    const std::string path = value["path"].GetString();
+    for (const auto &op : value["operations"].GetArray()) {
+      if (!op.IsObject()) {
+        continue;
+      }
+      ReverseFileEditOperation reverse;
+      reverse.path = path;
+      if (op.HasMember("description") && op["description"].IsString()) {
+        reverse.description = op["description"].GetString();
+      }
+      if (op.HasMember("start_line") && op["start_line"].IsInt()) {
+        reverse.startLine = op["start_line"].GetInt();
+      }
+      if (op.HasMember("end_line") && op["end_line"].IsInt()) {
+        reverse.endLine = op["end_line"].GetInt();
+      } else {
+        reverse.endLine = reverse.startLine;
+      }
+      reverse.oldLines = parseStringArrayMember(op, "old_lines");
+      reverse.newLines = parseStringArrayMember(op, "new_lines");
+      operations.push_back(std::move(reverse));
+    }
+  };
+
+  if (doc.HasMember("files") && doc["files"].IsArray()) {
+    for (const auto &file : doc["files"].GetArray()) {
+      appendFromObject(file);
+    }
+  } else {
+    appendFromObject(doc);
+  }
+  return operations;
+}
+
+std::vector<ReverseFileEditOperation>
+collectReverseFileEditsFromTurns(const std::vector<AgentTurn> &removedTurns) {
+  std::vector<ReverseFileEditOperation> reverseOps;
+  for (auto turnIt = removedTurns.rbegin(); turnIt != removedTurns.rend(); ++turnIt) {
+    std::unordered_map<std::string, std::string> toolNamesById;
+    for (const auto &msg : turnIt->messages) {
+      for (const auto &part : msg.content) {
+        if (const auto *tc = std::get_if<ToolCallContent>(&part)) {
+          toolNamesById[tc->id] = tc->name;
+        }
+      }
+    }
+    for (const auto &msg : turnIt->messages) {
+      for (const auto &part : msg.content) {
+        const auto *tr = std::get_if<ToolResultContent>(&part);
+        if (!tr || !tr->success) {
+          continue;
+        }
+        const auto toolIt = toolNamesById.find(tr->toolCallId);
+        if (toolIt == toolNamesById.end()) {
+          continue;
+        }
+        const std::string &toolName = toolIt->second;
+        if (toolName != "Edit" && toolName != "file_edit" &&
+            toolName != "file_write" && toolName != "Write") {
+          continue;
+        }
+        auto extracted = extractReverseOperationsFromToolResult(tr->result);
+        std::reverse(extracted.begin(), extracted.end());
+        reverseOps.insert(reverseOps.end(), extracted.begin(), extracted.end());
+      }
+    }
+  }
+  return reverseOps;
+}
+
+void applyReverseFileEdits(const std::shared_ptr<IAgent> &agent,
+                           const std::vector<ReverseFileEditOperation> &operations) {
+  if (!agent) {
+    return;
+  }
+  for (const auto &op : operations) {
+    if (op.path.empty()) {
+      continue;
+    }
+    const std::string absolutePath =
+        agent->getEnvironment()->getWorkspace().resolvePath(op.path);
+    std::vector<std::string> currentLines;
+    try {
+      if (agent->getHost()->exists(absolutePath)) {
+        const auto data = agent->getHost()->readFile(absolutePath);
+        currentLines = splitLinesForUndo(
+            std::string(data.begin(), data.end()));
+      }
+    } catch (...) {
+    }
+
+    const int startIndex = std::max(0, op.startLine - 1);
+    const int expectedNewCount = static_cast<int>(op.newLines.size());
+    const int eraseEnd =
+        std::min(static_cast<int>(currentLines.size()), startIndex + expectedNewCount);
+
+    if (startIndex <= static_cast<int>(currentLines.size())) {
+      currentLines.erase(currentLines.begin() + startIndex,
+                         currentLines.begin() + eraseEnd);
+      currentLines.insert(currentLines.begin() + startIndex, op.oldLines.begin(),
+                          op.oldLines.end());
+    } else if (!op.oldLines.empty()) {
+      currentLines.insert(currentLines.end(), op.oldLines.begin(), op.oldLines.end());
+    }
+
+    const std::string restored = joinLinesForUndo(currentLines);
+    agent->getHost()->writeFile(
+        absolutePath,
+        std::vector<uint8_t>(restored.begin(), restored.end()));
+    agent->getEnvironment()->getWorkspace().recordFileEdit(absolutePath);
+  }
+}
+
+template <typename UndoFn>
+UndoResult applyUndoAndRestoreFiles(const std::shared_ptr<IAgent> &agent,
+                                    UndoFn &&undoFn) {
+  UndoResult result;
+  if (!agent || !agent->getContext().history) {
+    return result;
+  }
+  auto &turns = agent->getMutableContext().history->turns;
+  const auto beforeTurns = turns;
+  result = undoFn(turns);
+  const std::size_t remaining = turns.size();
+  std::vector<AgentTurn> removedTurns;
+  if (beforeTurns.size() > remaining) {
+    removedTurns.assign(beforeTurns.begin() + static_cast<long>(remaining),
+                        beforeTurns.end());
+  }
+  applyReverseFileEdits(agent, collectReverseFileEditsFromTurns(removedTurns));
+  return result;
+}
+
 std::string extractFinalSummary(const std::shared_ptr<IAgent> &agent) {
   if (!agent || !agent->getContext().history) {
     return "";
@@ -179,15 +347,15 @@ void releaseOwnedChunksForTerminalAgent(const std::shared_ptr<IAgent> &agent,
           chunk.status == WorkChunkStatus::InProgress) {
         chunk.status = WorkChunkStatus::Ready;
       }
-      chunk.updatedAt = worktools::nowEpochMs();
+      chunk.updatedAt = work::nowEpochMs();
       changed = true;
 
-      worktools::emitWorkEvent(shared::ChunkUpdated{
+      work::emitWorkEvent(shared::ChunkUpdated{
           threadId, plan.id, chunk});
-      worktools::emitWorkEvent(shared::ChunkAssigned{
+      work::emitWorkEvent(shared::ChunkAssigned{
           threadId, plan.id, chunk.id, chunk.assignedAgentId, chunk});
       if (originalChunk.status != chunk.status) {
-        worktools::emitWorkEvent(shared::ChunkStatusChanged{
+        work::emitWorkEvent(shared::ChunkStatusChanged{
             threadId, plan.id, chunk.id, originalChunk.status, chunk.status,
             chunk});
       }
@@ -195,7 +363,7 @@ void releaseOwnedChunksForTerminalAgent(const std::shared_ptr<IAgent> &agent,
 
     if (changed) {
       tm.updatePlan(threadId, plan);
-      worktools::emitWorkEvent(shared::PlanUpdated{threadId, plan});
+      work::emitWorkEvent(shared::PlanUpdated{threadId, plan});
     }
   }
 }
@@ -412,100 +580,37 @@ Engine::Engine() {
   });
 
   toolRegistry.registerToolFactory(
-      "file_read", []() { return std::make_unique<FileReadTool>(); });
+      "Files", []() { return std::make_unique<FilesTool>(); });
   toolRegistry.registerToolFactory(
-      "file_edit", []() { return std::make_unique<FileEditTool>(); });
+      "Edit", []() { return std::make_unique<FileEditTool>(); });
   toolRegistry.registerToolFactory(
-      "mcp_call", []() { return std::make_unique<McpCallTool>(); });
+      "EditWrite", []() { return std::make_unique<FileWriteTool>(); });
   toolRegistry.registerToolFactory(
-      "mcp_list", []() { return std::make_unique<McpListTool>(); });
+      "EditReplace", []() { return std::make_unique<FileReplaceTool>(); });
   toolRegistry.registerToolFactory(
-      "mcp_search", []() { return std::make_unique<McpSearchTool>(); });
+      "EditRange", []() { return std::make_unique<FileRangeTool>(); });
   toolRegistry.registerToolFactory(
-      "mcp_load", []() { return std::make_unique<McpLoadTool>(); });
+      "Web", []() { return std::make_unique<WebTool>(); });
   toolRegistry.registerToolFactory(
-      "mcp_read_resource",
-      []() { return std::make_unique<McpReadResourceTool>(); });
+      "Process", []() { return std::make_unique<ProcessTool>(); });
   toolRegistry.registerToolFactory(
-      "mcp_get_prompt",
-      []() { return std::make_unique<McpGetPromptTool>(); });
-  toolRegistry.registerToolFactory("lsp", []() {
-    return std::make_unique<LspTool>();
-  });
-  toolRegistry.registerToolFactory("lsp_diagnostics", []() {
-    return std::make_unique<LspDiagnosticsTool>();
-  });
-  toolRegistry.registerToolFactory("process_execute", []() {
-    return std::make_unique<ProcessExecuteTool>();
-  });
+      "Delegate", []() { return std::make_unique<DelegateTool>(); });
   toolRegistry.registerToolFactory(
-      "summon_subagent", []() { return std::make_unique<SubagentTool>(); });
-  toolRegistry.registerToolFactory("terminate_subagent", []() {
-    return std::make_unique<SubagentTerminateTool>();
-  });
+      "Python", []() { return std::make_unique<PythonExecuteTool>(); });
   toolRegistry.registerToolFactory(
-      "subagent_wait", []() { return std::make_unique<SubagentWaitTool>(); });
+      "Skill", []() { return std::make_unique<SkillLoadTool>(); });
   toolRegistry.registerToolFactory(
-      "python_execute", []() { return std::make_unique<PythonExecuteTool>(); });
+      "Work", []() { return std::make_unique<WorkTool>(); });
   toolRegistry.registerToolFactory(
-      "list_directory", []() { return std::make_unique<ListDirectoryTool>(); });
+      "Fleet", []() { return std::make_unique<FleetTool>(); });
   toolRegistry.registerToolFactory(
-      "glob", []() { return std::make_unique<GlobTool>(); });
+      "Todo", []() { return std::make_unique<TodoWriteTool>(); });
   toolRegistry.registerToolFactory(
-      "grep", []() { return std::make_unique<GrepTool>(); });
+      "Artifacts", []() { return std::make_unique<ArtifactsTool>(); });
   toolRegistry.registerToolFactory(
-      "web_fetch", []() { return std::make_unique<WebFetchTool>(); });
+      "Memory", []() { return std::make_unique<MemoryRecallTool>(); });
   toolRegistry.registerToolFactory(
-      "web_search", []() { return std::make_unique<WebSearchTool>(); });
-  toolRegistry.registerToolFactory(
-      "process_spawn", []() { return std::make_unique<ProcessSpawnTool>(); });
-  toolRegistry.registerToolFactory(
-      "process_status", []() { return std::make_unique<ProcessStatusTool>(); });
-  toolRegistry.registerToolFactory(
-      "process_wait", []() { return std::make_unique<ProcessWaitTool>(); });
-  toolRegistry.registerToolFactory(
-      "process_input", []() { return std::make_unique<ProcessInputTool>(); });
-  toolRegistry.registerToolFactory(
-      "skill_load", []() { return std::make_unique<SkillLoadTool>(); });
-  toolRegistry.registerToolFactory(
-      "plan_create", []() { return std::make_unique<PlanCreateTool>(); });
-  toolRegistry.registerToolFactory(
-      "plan_list", []() { return std::make_unique<PlanListTool>(); });
-  toolRegistry.registerToolFactory(
-      "plan_get", []() { return std::make_unique<PlanGetTool>(); });
-  toolRegistry.registerToolFactory(
-      "plan_update", []() { return std::make_unique<PlanUpdateTool>(); });
-  toolRegistry.registerToolFactory("plan_set_active", []() {
-    return std::make_unique<PlanSetActiveTool>();
-  });
-  toolRegistry.registerToolFactory(
-      "chunk_add", []() { return std::make_unique<ChunkAddTool>(); });
-  toolRegistry.registerToolFactory(
-      "chunk_list", []() { return std::make_unique<ChunkListTool>(); });
-  toolRegistry.registerToolFactory(
-      "chunk_get", []() { return std::make_unique<ChunkGetTool>(); });
-  toolRegistry.registerToolFactory(
-      "chunk_update", []() { return std::make_unique<ChunkUpdateTool>(); });
-  toolRegistry.registerToolFactory("chunk_ready_for_execution", []() {
-    return std::make_unique<ChunkReadyForExecutionTool>();
-  });
-  toolRegistry.registerToolFactory(
-      "fleet_lock", []() { return std::make_unique<FleetLockTool>(); });
-  toolRegistry.registerToolFactory("fleet_lock_respond", []() {
-    return std::make_unique<FleetLockRespondTool>();
-  });
-  toolRegistry.registerToolFactory(
-      "fleet_status", []() { return std::make_unique<FleetStatusTool>(); });
-  toolRegistry.registerToolFactory(
-      "todo_write", []() { return std::make_unique<TodoWriteTool>(); });
-  toolRegistry.registerToolFactory(
-      "artifact_write", []() { return std::make_unique<ArtifactWriteTool>(); });
-  toolRegistry.registerToolFactory(
-      "artifact_read", []() { return std::make_unique<ArtifactReadTool>(); });
-  toolRegistry.registerToolFactory(
-      "artifact_list", []() { return std::make_unique<ArtifactListTool>(); });
-  toolRegistry.registerToolFactory(
-      "memory_recall", []() { return std::make_unique<MemoryRecallTool>(); });
+      "Lsp", []() { return std::make_unique<LspTool>(); });
 }
 
 void Engine::initProviders() {
@@ -588,12 +693,26 @@ std::string Engine::summonAgent(
         auto metadata =
             ThreadManager(ThreadManager::defaultBasePath())
                 .getMetadata(threadId);
-        auto persona = PurposeLoader::load(personaName);
+        std::string effectivePersonaName = personaName;
+        Persona persona;
+        try {
+          persona = PurposeLoader::load(personaName);
+        } catch (const std::exception &e) {
+          auto available = PurposeLoader::listPurposes();
+          if (available.empty()) {
+            throw;
+          }
+          effectivePersonaName = available.front();
+          std::cerr << "[purpose] Failed to load persona '" << personaName
+                    << "' (" << e.what() << "); falling back to '"
+                    << effectivePersonaName << "'.\n";
+          persona = PurposeLoader::load(effectivePersonaName);
+        }
 
         AgentContext ctx;
         ctx.identity.id = agentId;
         ctx.identity.parentId = parentId;
-        ctx.identity.friendlyName = parentId.empty() ? "lead" : friendlyName;
+        ctx.identity.friendlyName = parentId.empty() ? "aster" : friendlyName;
 
         const auto &userCfg = shared::ConfigLoader::instance().getConfig();
         ctx.config.providerId =
@@ -611,7 +730,7 @@ std::string Engine::summonAgent(
         ctx.config.insanityMaxTokenThreshold = userCfg.insanityMaxTokenThreshold;
         ctx.config.maxInsanityRetries = userCfg.maxInsanityRetries;
         ctx.config.persistHistory = persistHistory;
-        ctx.config.personaName = personaName;
+        ctx.config.personaName = effectivePersonaName;
         ctx.identity.name = persona.name;
         ctx.identity.role = persona.title;
         ctx.permissions.allowedScopes = persona.allowedScopes;
@@ -765,7 +884,21 @@ std::string Engine::resumeAgent(const std::string &threadId,
   auto metadata =
       ThreadManager(ThreadManager::defaultBasePath())
           .getMetadata(threadId);
-  auto persona = PurposeLoader::load(personaName);
+  std::string effectivePersonaName = personaName;
+  Persona persona;
+  try {
+    persona = PurposeLoader::load(personaName);
+  } catch (const std::exception &e) {
+    auto available = PurposeLoader::listPurposes();
+    if (available.empty()) {
+      throw;
+    }
+    effectivePersonaName = available.front();
+    std::cerr << "[purpose] Failed to load persona '" << personaName << "' ("
+              << e.what() << "); falling back to '" << effectivePersonaName
+              << "'.\n";
+    persona = PurposeLoader::load(effectivePersonaName);
+  }
   auto history =
       ThreadManager(ThreadManager::defaultBasePath())
           .loadAgentHistory(threadId, agentId);
@@ -773,7 +906,7 @@ std::string Engine::resumeAgent(const std::string &threadId,
   AgentContext ctx;
   ctx.identity.id = agentId;
   ctx.identity.parentId = parentId;
-  ctx.identity.friendlyName = parentId.empty() ? "lead" : friendlyName;
+  ctx.identity.friendlyName = parentId.empty() ? "aster" : friendlyName;
   ctx.identity.name = persona.name;
   ctx.identity.role = title.empty() ? persona.title : title;
   const auto &userCfg = shared::ConfigLoader::instance().getConfig();
@@ -789,7 +922,7 @@ std::string Engine::resumeAgent(const std::string &threadId,
   ctx.config.insanityMaxTokenThreshold = userCfg.insanityMaxTokenThreshold;
   ctx.config.maxInsanityRetries = userCfg.maxInsanityRetries;
   ctx.config.persistHistory = persistHistory;
-  ctx.config.personaName = personaName;
+  ctx.config.personaName = effectivePersonaName;
   ctx.permissions.allowedScopes = persona.allowedScopes;
 
   std::string home = getenv("HOME") ? getenv("HOME") : "/root";
@@ -860,7 +993,29 @@ std::string Engine::resumeAgent(const std::string &threadId,
         // queues every message into the void.
         agent->setBooting(false);
 
-        auto persona = PurposeLoader::load(personaName);
+        std::string effectivePersonaName = personaName;
+        Persona persona;
+        try {
+          persona = PurposeLoader::load(personaName);
+        } catch (const std::exception &e) {
+          auto available = PurposeLoader::listPurposes();
+          if (available.empty()) {
+            throw;
+          }
+          effectivePersonaName = available.front();
+          std::cerr << "[purpose] Failed to load persona '" << personaName
+                    << "' (" << e.what() << "); falling back to '"
+                    << effectivePersonaName << "'.\n";
+          persona = PurposeLoader::load(effectivePersonaName);
+        }
+
+        // If the persona was invalid when resuming, update the agent's
+        // persisted identity so subsequent operations reflect the fallback.
+        agent->getMutableContext().config.personaName = effectivePersonaName;
+        agent->getMutableContext().identity.name = persona.name;
+        agent->getMutableContext().identity.role = title.empty() ? persona.title : title;
+        agent->getMutableContext().permissions.allowedScopes = persona.allowedScopes;
+
         std::string agentTitle = title.empty() ? persona.title : title;
         broadcast(AgentSpawned{agentId, personaName, parentId,
                                agent->getContext().identity.friendlyName,
@@ -1358,7 +1513,9 @@ UndoResult Engine::undoAgentTurns(const std::string &agentId, int count) {
                             ctx.identity.parentId});
     return restored;
   }
-  auto result = HistoryEditor::undoTurns(ctx.history->turns, count);
+  auto result = applyUndoAndRestoreFiles(agent, [&](std::vector<AgentTurn> &turns) {
+    return HistoryEditor::undoTurns(turns, count);
+  });
 
   agent->saveHistory();
 
@@ -1386,7 +1543,9 @@ UndoResult Engine::undoAgentMessages(const std::string &agentId, int count) {
                             ctx.identity.parentId});
     return restored;
   }
-  auto result = HistoryEditor::undoMessages(ctx.history->turns, count);
+  auto result = applyUndoAndRestoreFiles(agent, [&](std::vector<AgentTurn> &turns) {
+    return HistoryEditor::undoMessages(turns, count);
+  });
 
   agent->saveHistory();
 
@@ -1425,8 +1584,9 @@ UndoResult Engine::undoAgentAfterTimestamp(const std::string &agentId,
                             ctx.identity.parentId});
     return restored;
   }
-  auto result =
-      HistoryEditor::undoAfterTimestamp(ctx.history->turns, timestamp);
+  auto result = applyUndoAndRestoreFiles(agent, [&](std::vector<AgentTurn> &turns) {
+    return HistoryEditor::undoAfterTimestamp(turns, timestamp);
+  });
 
   agent->saveHistory();
 

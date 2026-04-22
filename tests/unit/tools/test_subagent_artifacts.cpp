@@ -5,8 +5,7 @@
 #include "IHost.hpp"
 #include "persistence/ThreadManager.hpp"
 #include "providers/ProviderRegistry.hpp"
-#include "tools/SubagentTool.hpp"
-#include "tools/SubagentWaitTool.hpp"
+#include "tools/DelegateTool.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -24,6 +23,62 @@ using namespace firmius::shared;
 using namespace firmius::provider;
 using ::testing::NiceMock;
 using ::testing::ReturnRef;
+
+struct SubagentInput {
+  std::string persona;
+  std::string task;
+  std::string title;
+  std::string name;
+  std::optional<std::string> agent_id;
+  std::optional<std::string> plan_id;
+  std::optional<std::string> chunk_id;
+  std::optional<std::string> task_id;
+  std::optional<std::string> category;
+  bool async = false;
+  bool dream = false;
+};
+
+struct SubagentWaitInput {
+  std::string agent_id;
+};
+
+class SubagentTool {
+public:
+  ToolResult execute(const SubagentInput &input, ToolContext &ctx) {
+    rapidjson::Document doc;
+    doc.SetObject();
+    auto &alloc = doc.GetAllocator();
+    doc.AddMember("action", rapidjson::Value("Spawn", alloc).Move(), alloc);
+    doc.AddMember("persona", rapidjson::Value(input.persona.c_str(), alloc).Move(), alloc);
+    doc.AddMember("task", rapidjson::Value(input.task.c_str(), alloc).Move(), alloc);
+    doc.AddMember("name", rapidjson::Value(input.name.c_str(), alloc).Move(), alloc);
+    doc.AddMember("title", rapidjson::Value(input.title.c_str(), alloc).Move(), alloc);
+    doc.AddMember("async", input.async, alloc);
+    doc.AddMember("dream", input.dream, alloc);
+    if (input.agent_id) doc.AddMember("agent_id", rapidjson::Value(input.agent_id->c_str(), alloc).Move(), alloc);
+    if (input.plan_id) doc.AddMember("plan_id", rapidjson::Value(input.plan_id->c_str(), alloc).Move(), alloc);
+    if (input.chunk_id) doc.AddMember("chunk_id", rapidjson::Value(input.chunk_id->c_str(), alloc).Move(), alloc);
+    if (input.task_id) doc.AddMember("task_id", rapidjson::Value(input.task_id->c_str(), alloc).Move(), alloc);
+    if (input.category) doc.AddMember("category", rapidjson::Value(input.category->c_str(), alloc).Move(), alloc);
+    return tool_.execute(doc, ctx);
+  }
+private:
+  DelegateTool tool_;
+};
+
+class SubagentWaitTool {
+public:
+  ToolResult execute(const SubagentWaitInput &input, ToolContext &ctx) {
+    rapidjson::Document doc;
+    doc.SetObject();
+    auto &alloc = doc.GetAllocator();
+    doc.AddMember("action", rapidjson::Value("Wait", alloc).Move(), alloc);
+    doc.AddMember("agent_id", rapidjson::Value(input.agent_id.c_str(), alloc).Move(), alloc);
+    return tool_.execute(doc, ctx);
+  }
+private:
+  DelegateTool tool_;
+};
 
 namespace {
 
@@ -112,8 +167,8 @@ public:
               std::function<void(const StreamEvent &)> onEvent) override {
     const int n = callCount_.fetch_add(1);
     if (n == 0) {
-      onEvent(ToolCallChunk{"artifact-write-1", 0, "artifact_write",
-                            R"({"name":"WORKER_REPORT.md","content":"artifact-body"})"});
+      onEvent(ToolCallChunk{"artifact-write-1", 0, "Artifacts",
+                            R"({"action":"Write","name":"WORKER_REPORT.md","kind":"text/markdown","owner_agent_id":"child-agent","owner_friendly_name":"child","description":"artifact-body","content":"artifact-body"})"});
       onEvent(StreamDone{StopReason::ToolUse});
       return;
     }

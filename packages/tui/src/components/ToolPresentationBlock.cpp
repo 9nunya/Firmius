@@ -5,6 +5,7 @@
 #include "components/GlintEffect.hpp"
 #include "ThemeManager.hpp"
 #include "utils/Icons.hpp"
+#include "components/SyntaxHighlighter.hpp"
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/component_base.hpp>
 #include <ftxui/dom/elements.hpp>
@@ -68,7 +69,11 @@ ftxui::Element BuildBodyWindow(const ToolPresentation &presentation, const Theme
       command_line = presentation.body_lines.front();
       output_start_index = 1;
       if (presentation.ansi_aware) {
-        body_rows.push_back(ParseANSI(command_line));
+        if (command_line.rfind("$ ", 0) != 0) {
+          body_rows.push_back(ParseANSI(command_line));
+        } else {
+          body_rows.push_back(ftxui::paragraph(command_line) | ftxui::color(theme.base.fg));
+        }
       } else {
         body_rows.push_back(ftxui::paragraph(command_line) | ftxui::color(theme.base.fg));
       }

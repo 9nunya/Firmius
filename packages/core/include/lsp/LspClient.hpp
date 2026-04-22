@@ -73,6 +73,7 @@ private:
     mutable std::mutex m_docMutex;
     std::unordered_set<std::string> m_openDocuments;
     std::unordered_map<std::string, int> m_documentVersions;
+    std::unordered_map<std::string, std::string> m_documentContents;
 
     // Diagnostic storage
     mutable std::mutex m_diagMutex;

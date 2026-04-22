@@ -338,6 +338,7 @@ void ConfigLoader::loadImpl() {
     if (doc.HasMember("defaultModelVariant") && doc["defaultModelVariant"].IsString()) {
         config_.defaultModelVariant = doc["defaultModelVariant"].GetString();
     }
+    config_.defaultLeadPersona = "aster";
     if (doc.HasMember("defaultLeadPersona") && doc["defaultLeadPersona"].IsString()) {
         config_.defaultLeadPersona = doc["defaultLeadPersona"].GetString();
     }

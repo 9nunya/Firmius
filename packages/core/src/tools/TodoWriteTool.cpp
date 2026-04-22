@@ -1,6 +1,7 @@
 #include "tools/TodoWriteTool.hpp"
+#include "tools/WorkSupport.hpp"
+#include "persistence/ThreadManager.hpp"
 #include "IAgent.hpp"
-#include "tools/WorkToolCommon.hpp"
 #include "utils/StringUtil.hpp"
 
 #include <algorithm>
@@ -135,8 +136,8 @@ std::string existingIdsSummary(const std::vector<shared::TodoItem> &items) {
 } // namespace
 
 shared::ToolMetadata TodoWriteTool::getMetadata() const {
-  return {"todo_write",
-          "Patch the calling agent's todo list using strict numbered syntax",
+  return {"Todo",
+          "Update the calling agent's execution state with strict numbered syntax.",
           shared::ToolScope::Semantic};
 }
 
@@ -152,14 +153,14 @@ shared::ToolResult TodoWriteTool::execute(const rapidjson::Value &input,
     }
 
     const auto &agentContext = ctx.agent.getContext();
-    const std::string threadId = worktools::requireCurrentThreadId(ctx);
+    const std::string threadId = work::requireCurrentThreadId(ctx);
     const std::string agentId = agentContext.identity.id;
     if (agentId.empty()) {
       throw std::runtime_error("Cannot mutate todo list without agent id");
     }
 
     const auto mutations = parseMutations(input["patch"].GetString());
-    auto tm = worktools::makeThreadManager();
+    ThreadManager tm(ThreadManager::defaultBasePath());
     auto todoList = tm.getAgentTodo(threadId, agentId);
 
     std::unordered_map<int, size_t> indexById;

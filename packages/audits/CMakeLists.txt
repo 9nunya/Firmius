@@ -8,6 +8,8 @@ target_sources(firmius_audits PRIVATE
     src/audits/BenchmarksAudit.cpp
     src/audits/CodexProviderAudit.cpp
     src/audits/ContextBudgetAudit.cpp
+    src/audits/EditToolAudit.cpp
+    src/audits/EditHistoryAudit.cpp
     src/audits/CodexQuotaAudit.cpp
     src/audits/HarnessChaosAudit.cpp
     src/audits/OAuthWizardAudit.cpp
@@ -25,7 +27,8 @@ target_sources(firmius_audits PRIVATE
     src/audits/ResumeTodoAudit.cpp
     src/audits/WebFetchAudit.cpp
     src/audits/WebSearchAudit.cpp
-    src/audits/McpAudit.cpp
+    src/audits/TuiPerformanceAudit.cpp
+    src/audits/ReasoningTraceAudit.cpp
 )
 
 target_sources(firmius_audits PUBLIC
@@ -38,6 +41,8 @@ target_sources(firmius_audits PUBLIC
     include/audits/BenchmarksAudit.hpp
     include/audits/CodexProviderAudit.hpp
     include/audits/ContextBudgetAudit.hpp
+    include/audits/EditToolAudit.hpp
+    include/audits/EditHistoryAudit.hpp
     include/audits/CodexQuotaAudit.hpp
     include/audits/HarnessChaosAudit.hpp
     include/audits/OAuthWizardAudit.hpp
@@ -55,7 +60,8 @@ target_sources(firmius_audits PUBLIC
     include/audits/ResumeTodoAudit.hpp
     include/audits/WebFetchAudit.hpp
     include/audits/WebSearchAudit.hpp
-    include/audits/McpAudit.hpp
+    include/audits/TuiPerformanceAudit.hpp
+    include/audits/ReasoningTraceAudit.hpp
 )
 
 target_include_directories(firmius_audits PUBLIC
@@ -64,6 +70,7 @@ target_include_directories(firmius_audits PUBLIC
 )
 
 target_link_libraries(firmius_audits PUBLIC
+    firmius::tui
     firmius::core
     firmius::provider
     firmius::shared
@@ -71,6 +78,7 @@ target_link_libraries(firmius_audits PUBLIC
 
 target_include_directories(firmius_audits PRIVATE
   ${rapidjson_SOURCE_DIR}/include
+  ${CMAKE_SOURCE_DIR}/packages/tui/include
 )
 
 add_executable(firmius_audit)

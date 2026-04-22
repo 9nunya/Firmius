@@ -28,7 +28,7 @@ shared::AuditResult ResumeTodoAudit::run(const std::vector<std::string> &) {
     auto &harness = Harness::instance();
     harness.init();
 
-    std::string threadId = harness.newThread({}, "/tmp", "lead");
+    std::string threadId = harness.newThread({}, "/tmp", "aster");
     std::cout << "[Audit] Thread ID: " << threadId << std::endl;
     harness.switchModel("antigravity", "gemini-3-flash", harness.focusedAgentId());
     if (threadId.empty()) {

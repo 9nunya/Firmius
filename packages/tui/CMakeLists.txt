@@ -72,12 +72,16 @@ target_sources(firmius_tui PRIVATE
     src/tools/McpToolPresentation.cpp
     src/tools/ToolPresentation.cpp
     src/tools/WorkToolPresentation.cpp
+    src/tools/SearchToolPresentation.cpp
+    src/tools/SemanticToolPresentation.cpp
+    src/tools/GenericToolPresentation.cpp
     src/utils/ReferenceAutocomplete.cpp
     src/utils/Clipboard.cpp
     src/TuiRunner.cpp
 )
 
-target_include_directories(firmius_tui PRIVATE src include)
+target_include_directories(firmius_tui PUBLIC include)
+target_include_directories(firmius_tui PRIVATE src)
 
 target_link_libraries(firmius_tui PRIVATE
     firmius::core

@@ -11,7 +11,7 @@ void NewCommand::execute(CommandCtx &ctx, const std::vector<ParsedArg> &args) {
   std::string cwd = std::filesystem::current_path().string();
   auto cfg = h.getConfig();
   std::string lead =
-      cfg.defaultLeadPersona.empty() ? "lead" : cfg.defaultLeadPersona;
+      cfg.defaultLeadPersona.empty() ? "aster" : cfg.defaultLeadPersona;
   h.newThread({}, cwd, lead);
 }
 

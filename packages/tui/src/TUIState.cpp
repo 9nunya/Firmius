@@ -51,6 +51,7 @@
 #include <unordered_set>
 #include <vector>
 #include <thread>
+#include <iostream>
 #include <sstream>
 #include <iomanip>
 #include <atomic>
@@ -92,7 +93,12 @@ struct TuiProfilingStats {
   std::atomic<int64_t> chat_window_rebuild_ns{0};
   std::atomic<uint64_t> raf_state_count{0};
   std::atomic<uint64_t> raf_scrollable_width_change_count{0};
+  std::mutex modal_profile_mutex;
+  std::unordered_map<std::string, std::chrono::steady_clock::time_point>
+      modal_open_requested_at;
   std::atomic<uint64_t> raf_agent_strip_spinner_count{0};
+  std::atomic<uint64_t> frame_render_count{0};
+  std::atomic<int64_t> frame_render_ns{0};
 };
 
 TuiProfilingStats &tuiProfilingStats() {
@@ -109,6 +115,53 @@ void HashCombine(std::size_t &seed, const T &value) {
   seed ^= std::hash<T>{}(value) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
 }
 
+std::size_t buildFocusedChatLiveMeasurementSignature(
+    const std::string &focused_agent_id, const std::string &thread_id,
+    const std::unordered_set<std::string> &persisted_tool_call_ids) {
+    const std::string &focused_agent_id, const std::string &thread_id) {
+  std::size_t signature = 0;
+  HashCombine(signature, focused_agent_id);
+  HashCombine(signature, persisted_tool_call_ids.size());
+  HashCombine(signature, thread_id);
+
+  auto bucket = [](std::size_t size) { return size / 512; };
+
+  if (const auto *s = stream_state.getStream(focused_agent_id)) {
+    HashCombine(signature, bucket(s->thinking.size()));
+    HashCombine(signature, bucket(s->text.size()));
+    HashCombine(signature, bucket(s->compaction_thinking.size()));
+    HashCombine(signature, bucket(s->compaction_text.size()));
+    HashCombine(signature, bucket(s->compaction_completion.size()));
+    HashCombine(signature, s->compaction_active);
+    HashCombine(signature, s->compaction_finished);
+    HashCombine(signature, s->provider_waiting);
+  }
+
+  std::size_t focused_timeline = 0;
+  for (const auto &entry : stream_state.getTimeline()) {
+    if (entry.agentId == focused_agent_id) {
+      focused_timeline++;
+      HashCombine(signature, static_cast<int>(entry.kind));
+    }
+  }
+  HashCombine(signature, focused_timeline);
+
+  std::size_t focused_tool_calls = 0;
+  for (const auto &[id, view] : stream_state.getToolCalls()) {
+    (void)id;
+    if (view && view->agentId == focused_agent_id) {
+      focused_tool_calls++;
+      HashCombine(signature, static_cast<int>(view->phase));
+      HashCombine(signature, view->success);
+    }
+  }
+  HashCombine(signature, focused_tool_calls);
+
+  return signature;
+}
+
+
+const std::unordered_set<std::string> kEmptyToolCallIdSet{};
 std::shared_ptr<firmius::shared::AgentHistory> EnsureTranscriptHistory(
     std::shared_ptr<firmius::shared::AgentHistory> &history,
     const std::string &thread_id) {
@@ -187,6 +240,44 @@ void noteTuiChatWindowRebuild(std::chrono::nanoseconds elapsed) {
   stats.chat_window_rebuild_count.fetch_add(1, std::memory_order_relaxed);
   stats.chat_window_rebuild_ns.fetch_add(static_cast<int64_t>(elapsed.count()),
                                          std::memory_order_relaxed);
+}
+
+void noteTuiFrameRendered(std::chrono::nanoseconds elapsed) {
+  if (!isTuiStartupProfilingEnabled()) {
+    return;
+  }
+  auto &stats = tuiProfilingStats();
+  stats.frame_render_count.fetch_add(1, std::memory_order_relaxed);
+  stats.frame_render_ns.fetch_add(static_cast<int64_t>(elapsed.count()),
+                                  std::memory_order_relaxed);
+}
+void noteTuiModalOpenRequested(const std::string &name) {
+  if (!isTuiStartupProfilingEnabled() || name.empty()) {
+    return;
+  }
+  auto &stats = tuiProfilingStats();
+  std::lock_guard<std::mutex> lock(stats.modal_profile_mutex);
+  stats.modal_open_requested_at[name] = std::chrono::steady_clock::now();
+}
+
+void noteTuiModalFirstPaint(const std::string &name) {
+  if (!isTuiStartupProfilingEnabled() || name.empty()) {
+    return;
+  }
+  auto &stats = tuiProfilingStats();
+  std::lock_guard<std::mutex> lock(stats.modal_profile_mutex);
+  auto it = stats.modal_open_requested_at.find(name);
+  if (it == stats.modal_open_requested_at.end()) {
+    return;
+  }
+  const auto elapsed = std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - it->second).count();
+  std::ostringstream out;
+  out << std::fixed << std::setprecision(3);
+  out << "[tui_modal_profile] {\"name\":\"" << name
+      << "\",\"first_paint_ms\":" << elapsed << "}\n";
+  std::cerr << out.str();
+  stats.modal_open_requested_at.erase(it);
 }
 
 void noteTuiRequestAnimationFrameFromState() {
@@ -275,6 +366,19 @@ std::string tuiProfilingSummaryText() {
   if (chatRebuildCount > 0) {
     out << ", "
         << nanosToMillis(chatRebuildNs) / static_cast<double>(chatRebuildCount)
+        << " ms avg";
+  }
+  out << ")\n";
+
+  const uint64_t frameRenderCount =
+      stats.frame_render_count.load(std::memory_order_relaxed);
+  const int64_t frameRenderNs =
+      stats.frame_render_ns.load(std::memory_order_relaxed);
+  out << "Frame renders: " << frameRenderCount << " ("
+      << nanosToMillis(frameRenderNs) << " ms total";
+  if (frameRenderCount > 0) {
+    out << ", "
+        << nanosToMillis(frameRenderNs) / static_cast<double>(frameRenderCount)
         << " ms avg";
   }
   out << ")\n";
@@ -547,22 +651,47 @@ const firmius::shared::AgentHistory* resolveAgentHistoryForThread(
     firmius::core::Harness* harness, const std::string& thread_id,
     const std::string& agent_id,
     std::shared_ptr<firmius::shared::AgentHistory>* owned_history = nullptr) {
-  (void)harness;
   if (agent_id.empty()) {
     return nullptr;
   }
   if (thread_id.empty()) {
     return nullptr;
   }
-  auto history = firmius::core::ThreadManager(
-                     firmius::core::ThreadManager::defaultBasePath())
-                     .loadAgentHistory(thread_id, agent_id);
-  if (history.turns.empty()) {
+
+  const firmius::shared::AgentHistory* base_history = nullptr;
+  std::shared_ptr<firmius::shared::AgentHistory> loaded_history;
+
+  if (auto agent = firmius::core::AgentRegistry::instance().getAgent(agent_id)) {
+    const auto& ctx = agent->getContext();
+    if (ctx.history && ctx.history->threadId == thread_id && !ctx.history->turns.empty()) {
+      base_history = ctx.history.get();
+    }
+  }
+
+  if (!base_history && harness) {
+    auto history_ptr = harness->getAgentHistoryPtr(agent_id);
+    if (history_ptr && history_ptr->threadId == thread_id && !history_ptr->turns.empty()) {
+      loaded_history = std::move(history_ptr);
+      base_history = loaded_history.get();
+    }
+  }
+
+  if (!base_history) {
+    auto history = firmius::core::ThreadManager(
+                       firmius::core::ThreadManager::defaultBasePath())
+                       .loadAgentHistory(thread_id, agent_id);
+    if (history.turns.empty()) {
+      return nullptr;
+    }
+    loaded_history = std::make_shared<firmius::shared::AgentHistory>(std::move(history));
+    base_history = loaded_history.get();
+  }
+
+  if (!base_history || base_history->turns.empty()) {
     return nullptr;
   }
   if (owned_history) {
-    *owned_history =
-        expandHistoryForTranscript(thread_id, agent_id, history);
+    *owned_history = expandHistoryForTranscript(thread_id, agent_id, *base_history);
     return owned_history->get();
   }
   return nullptr;
@@ -727,13 +856,21 @@ static CurrentQuotaDisplay resolveCurrentQuotaDisplay(
 
 static std::string resolveDefaultLeadPersona(
     const firmius::core::Harness *harness) {
-  std::string fallback = "lead";
-  if (!harness)
-    return fallback;
-  const auto &cfg = harness->getConfig();
-  if (!cfg.defaultLeadPersona.empty())
-    return cfg.defaultLeadPersona;
-  return fallback;
+  if (harness) {
+    const auto &cfg = harness->getConfig();
+    if (!cfg.defaultLeadPersona.empty() &&
+        firmius::core::PurposeLoader::isValid(cfg.defaultLeadPersona)) {
+      return cfg.defaultLeadPersona;
+    }
+  }
+  if (firmius::core::PurposeLoader::isValid("aster")) {
+    return "aster";
+  }
+  const auto purposes = firmius::core::PurposeLoader::listPurposes();
+  if (!purposes.empty()) {
+    return purposes.front();
+  }
+  return "aster";
 }
 
 static std::string resolvePersonaTitle(const std::string &personaName) {
@@ -765,7 +902,7 @@ static std::string firmiusThreadsPath() {
 static std::vector<std::string> getSwitchableLeadPersonas() {
   auto purposes = firmius::core::PurposeLoader::listSwitchablePurposes();
   if (purposes.empty()) {
-    purposes.push_back("lead");
+    purposes.push_back("aster");
   }
   return purposes;
 }
@@ -834,6 +971,7 @@ focusCycleCandidates(const std::string &focusedAgentId) {
 void TuiState::refreshFocusedHistory() {
   if (!harness_ || focused_agent_id_.empty()) {
     history_.reset();
+    rebuildEditableUserMessages();
     return;
   }
 
@@ -841,9 +979,131 @@ void TuiState::refreshFocusedHistory() {
   if (resolveAgentHistoryForThread(harness_, thread_.threadId, focused_agent_id_,
                                    &owned_history)) {
     history_ = std::move(owned_history);
+    agent_history_cache_[focused_agent_id_] = history_;
+    agent_persisted_tool_call_ids_cache_[focused_agent_id_] =
+        firmius::tui::CollectToolCallIdsFromHistory(history_.get());
   } else {
     history_.reset();
+    agent_history_cache_.erase(focused_agent_id_);
+    agent_persisted_tool_call_ids_cache_.erase(focused_agent_id_);
   }
+  rebuildEditableUserMessages();
+}
+
+void TuiState::rebuildEditableUserMessages() {
+  editable_user_messages_.clear();
+  selected_editable_message_index_ = -1;
+  if (!history_) {
+    return;
+  }
+  for (const auto &turn : history_->turns) {
+    for (const auto &message : turn.messages) {
+      if (message.role != shared::Role::User) {
+        continue;
+      }
+      EditableUserMessage item;
+      item.timestamp = message.timestamp;
+      for (const auto &content : message.content) {
+        if (const auto *text = std::get_if<shared::TextContent>(&content)) {
+          if (!item.text.empty()) {
+            item.text += "\n";
+          }
+          item.text += text->text;
+        } else if (const auto *image =
+                       std::get_if<shared::ImageContent>(&content)) {
+          item.images.push_back(*image);
+        }
+      }
+      editable_user_messages_.push_back(std::move(item));
+    }
+  }
+  if (!editable_user_messages_.empty()) {
+    selected_editable_message_index_ =
+        static_cast<int>(editable_user_messages_.size()) - 1;
+  }
+}
+
+bool TuiState::isEditModeSelection(uint64_t timestamp) const {
+  return edit_mode_active_ && selected_editable_message_index_ >= 0 &&
+         selected_editable_message_index_ <
+             static_cast<int>(editable_user_messages_.size()) &&
+         editable_user_messages_[selected_editable_message_index_].timestamp ==
+             timestamp;
+}
+
+void TuiState::selectEditableMessageByTimestamp(uint64_t timestamp) {
+  for (int i = 0; i < static_cast<int>(editable_user_messages_.size()); ++i) {
+    if (editable_user_messages_[i].timestamp == timestamp) {
+      selected_editable_message_index_ = i;
+      edit_mode_active_ = true;
+      if (input_model_) {
+        input_model_->is_focused = false;
+      }
+      if (chat_component_) {
+        chat_component_->OnEvent(ftxui::Event::Special("TranscriptChanged"));
+      }
+      if (screen_) {
+        postEvent(ftxui::Event::Custom);
+      }
+      return;
+    }
+  }
+}
+
+bool TuiState::commitSelectedEditableMessageToInput() {
+  if (selected_editable_message_index_ < 0 ||
+      selected_editable_message_index_ >=
+          static_cast<int>(editable_user_messages_.size())) {
+    return false;
+  }
+  const auto selected =
+      editable_user_messages_[selected_editable_message_index_];
+  pending_edit_message_ = selected;
+
+  if (input_model_ && input_model_->buffer && input_model_->cursor) {
+    *input_model_->buffer = selected.text;
+    *input_model_->cursor =
+        static_cast<int>(input_model_->buffer->size());
+    input_model_->pasted_blocks.clear();
+    for (size_t i = 0; i < selected.images.size(); ++i) {
+      const auto &image = selected.images[i];
+      const std::string placeholder =
+          "[Image " + std::to_string(i + 1) + "]";
+      const size_t start_pos = input_model_->buffer->size();
+      input_model_->buffer->append(placeholder);
+      PastedBlock block;
+      block.type = "image";
+      block.id = "edit-image-" + std::to_string(i);
+      const auto comma = image.url.find(",");
+      block.content = image.url.rfind("data:", 0) == 0 &&
+                              comma != std::string::npos
+                          ? image.url.substr(comma + 1)
+                          : image.url;
+      block.mime_type = image.mediaType;
+      block.start_pos = start_pos;
+      block.end_pos = input_model_->buffer->size();
+      input_model_->pasted_blocks.push_back(std::move(block));
+    }
+    *input_model_->cursor = static_cast<int>(input_model_->buffer->size());
+  }
+  edit_mode_active_ = false;
+  if (input_model_) {
+    input_model_->is_focused = true;
+  }
+  if (input_component_) {
+    input_component_->TakeFocus();
+  }
+  NotificationManager::instance().notifyInfo(
+      "Rewrite Staged",
+      "Editing an earlier message. Press Enter to apply, or Esc to cancel.",
+      std::chrono::milliseconds(2500));
+  if (screen_) {
+    if (chat_component_) {
+      chat_component_->OnEvent(ftxui::Event::Special("ThreadChanged"));
+    }
+    postEvent(ftxui::Event::Custom);
+  }
+  return true;
 }
 
 static std::string permissionModeToDisplayName(
@@ -1017,11 +1277,21 @@ void TuiState::loadUserPreferences() {
   if (preferences.preferred_permission_mode.has_value()) {
     thread_.permissionMode = *preferences.preferred_permission_mode;
   }
+  show_agent_strip_ = preferences.show_agent_strip.value_or(true);
+  show_work_panel_ = preferences.show_work_panel.value_or(true);
+  agent_strip_visible_rows_ =
+      std::max(1, preferences.agent_strip_rows.value_or(4));
+  work_panel_height_override_ =
+      std::max(0, preferences.work_panel_height.value_or(0));
 }
 
 void TuiState::persistUserPreferences() const {
   UserPreferences preferences;
   preferences.preferred_permission_mode = thread_.permissionMode;
+  preferences.show_agent_strip = show_agent_strip_;
+  preferences.show_work_panel = show_work_panel_;
+  preferences.agent_strip_rows = agent_strip_visible_rows_;
+  preferences.work_panel_height = work_panel_height_override_;
   saveUserPreferences(preferences);
 }
 
@@ -1059,11 +1329,16 @@ void TuiState::setViewMode(ViewMode mode) { view_mode_ = mode; }
 TuiState::ViewMode TuiState::getViewMode() const { return view_mode_; }
 
 void TuiState::openModal(const std::string &name) {
-  firmius::tui::ModalRegistry::instance().openModal(name, *this);
+  firmius::tui::ModalRegistry::instance().openModal(name, *this, true);
 }
 
-void TuiState::openModalDirect(ftxui::Component modal) {
+void TuiState::openModalDirect(ftxui::Component modal,
+                               const std::string &modal_name) {
   modals_.push_back(modal);
+  if (!modal_name.empty()) {
+    pending_profile_modal_name_ = modal_name;
+    painted_profile_modals_.erase(modal_name);
+  }
   if (modal) {
     modal->TakeFocus();
   }
@@ -1535,8 +1810,12 @@ void TuiState::applyPendingRefreshes() {
   }
   if ((flags & static_cast<unsigned int>(RefreshFlags::ChatTranscript)) &&
       chat_component_) {
-    chat_component_->OnEvent(ftxui::Event::Special("ThreadChanged"));
+    chat_component_->OnEvent(ftxui::Event::Special("TranscriptChanged"));
   }
+}
+
+void TuiState::handleAppEvent(const shared::AppEvent &ev) {
+  onEvent(ev);
 }
 
 void TuiState::onEvent(const shared::AppEvent &ev) {
@@ -1550,8 +1829,12 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
 
         if constexpr (std::is_same_v<T, AgentThinking>) {
           stream_state_.handleAgentThinking(e);
+          requestRefresh(RefreshFlags::AgentStrip);
+          requestRefresh(RefreshFlags::Status);
         } else if constexpr (std::is_same_v<T, AgentText>) {
           stream_state_.handleAgentText(e);
+          requestRefresh(RefreshFlags::AgentStrip);
+          requestRefresh(RefreshFlags::Status);
         } else if constexpr (std::is_same_v<T, AgentTurnCompleted>) {
           stream_state_.handleAgentTurnCompleted(e);
           session_metrics_ += e.turn.metrics;
@@ -1562,14 +1845,24 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
             auto transcript_history =
                 EnsureTranscriptHistory(history_, thread_.threadId);
             transcript_history->turns.push_back(e.turn);
+            agent_history_cache_[focused_agent_id_] = transcript_history;
+            agent_persisted_tool_call_ids_cache_[focused_agent_id_] =
+                firmius::tui::CollectToolCallIdsFromHistory(
+                    transcript_history.get());
           }
           notifyChatTranscriptChanged();
         } else if constexpr (std::is_same_v<T, AgentProviderWaiting>) {
           stream_state_.handleAgentProviderWaiting(e);
         } else if constexpr (std::is_same_v<T, AgentToolCallChunk>) {
           stream_state_.handleAgentToolCallChunk(e);
+          requestRefresh(RefreshFlags::AgentStrip);
+          requestRefresh(RefreshFlags::Status);
+          requestRefresh(RefreshFlags::ContextLane);
         } else if constexpr (std::is_same_v<T, AgentToolCall>) {
           stream_state_.handleAgentToolCall(e);
+          requestRefresh(RefreshFlags::AgentStrip);
+          requestRefresh(RefreshFlags::Status);
+          requestRefresh(RefreshFlags::ContextLane);
         } else if constexpr (std::is_same_v<T, AgentFileEdited>) {
           stream_state_.handleAgentFileEdited(e);
         } else if constexpr (std::is_same_v<T, ThreadChanged>) {
@@ -1595,70 +1888,34 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
           pending_modal_clear_ = true;
           stream_state_.handleThreadChanged();
 
-          firmius::core::ThreadManager thread_manager(
-              firmius::core::ThreadManager::defaultBasePath());
-          std::vector<std::pair<std::string, firmius::shared::AgentHistory>>
-              loaded_histories;
-          loaded_histories.reserve(all_agents.size());
-          for (const auto &agent_id : all_agents) {
-            auto agent_hist = thread_manager.loadAgentHistory(thread_.threadId, agent_id);
-            if (!agent_hist.turns.empty()) {
-              loaded_histories.emplace_back(agent_id, std::move(agent_hist));
-            }
-          }
+          agent_history_cache_.clear();
+          agent_persisted_tool_call_ids_cache_.clear();
 
-          history_.reset();
-          for (auto &entry : loaded_histories) {
-            if (entry.first == focused_agent_id_) {
-              history_ = expandHistoryForTranscript(thread_.threadId, entry.first, entry.second);
-              break;
-            }
-          }
+          refreshFocusedHistory();
 
-          std::vector<const std::pair<std::string, firmius::shared::AgentHistory> *>
-              histories_with_subagents;
-          histories_with_subagents.reserve(loaded_histories.size());
-          for (const auto &entry : loaded_histories) {
-            bool has_summon_subagent = false;
-            for (const auto &turn : entry.second.turns) {
-              for (const auto &msg : turn.messages) {
-                for (const auto &content : msg.content) {
-                  if (const auto *tc =
-                          std::get_if<firmius::shared::ToolCallContent>(&content);
-                      tc && tc->name == "summon_subagent") {
-                    has_summon_subagent = true;
-                    break;
-                  }
-                }
-                if (has_summon_subagent) {
-                  break;
-                }
-              }
-              if (has_summon_subagent) {
-                break;
-              }
-            }
-            if (has_summon_subagent) {
-              histories_with_subagents.push_back(&entry);
-            }
-          }
-
-          for (const auto &entry : loaded_histories) {
-            auto rebuild_begin = std::chrono::steady_clock::now();
-            stream_state_.rebuildToolCallsFromHistory(entry.first, &entry.second,
-                                                      thread_.threadId, false);
-            noteTuiRebuildToolCalls(
-                std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    std::chrono::steady_clock::now() - rebuild_begin));
-          }
-          for (const auto *entry : histories_with_subagents) {
+          if (!focused_agent_id_.empty()) {
+            if (history_) {
               auto rebuild_begin = std::chrono::steady_clock::now();
-              stream_state_.rebuildToolCallsFromHistory(entry->first, &entry->second,
-                                                        thread_.threadId,
-                                                        true);
+              stream_state_.rebuildToolCallsFromHistory(focused_agent_id_, history_.get(),
+                                                        thread_.threadId, false);
               noteTuiRebuildToolCalls(
                   std::chrono::duration_cast<std::chrono::nanoseconds>(
                       std::chrono::steady_clock::now() - rebuild_begin));
+            } else {
+              auto agent =
+                  firmius::core::AgentRegistry::instance().getAgent(focused_agent_id_);
+              const auto *live_history =
+                  agent && agent->getContext().history ? agent->getContext().history.get()
+                                                      : nullptr;
+              if (live_history && !live_history->turns.empty()) {
+                auto rebuild_begin = std::chrono::steady_clock::now();
+                stream_state_.rebuildToolCallsFromHistory(focused_agent_id_, live_history,
+                                                          thread_.threadId, false);
+                noteTuiRebuildToolCalls(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() - rebuild_begin));
+              }
+            }
           }
 
           if (title_model_) {
@@ -1792,9 +2049,23 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
             }
             turn.messages.push_back(std::move(message));
             transcript_history->turns.push_back(std::move(turn));
+            if (!focused_agent_id_.empty()) {
+              agent_history_cache_[focused_agent_id_] = transcript_history;
+            }
           }
           notifyChatTranscriptChanged();
         } else if constexpr (std::is_same_v<T, HistoryUndone>) {
+          if (e.threadId == thread_.threadId &&
+              (e.agentId.empty() || e.agentId == focused_agent_id_)) {
+            if (suppress_next_history_undone_refresh_) {
+              suppress_next_history_undone_refresh_ = false;
+            } else {
+              refreshFocusedHistory();
+            }
+            requestRefresh(RefreshFlags::Status);
+            requestRefresh(RefreshFlags::AgentStrip);
+            requestRefresh(RefreshFlags::ContextLane);
+          }
           notifyChatTranscriptChanged();
         } else if constexpr (std::is_same_v<T, AgentAccountSwitched>) {
           stream_state_.handleAgentAccountSwitched(e);
@@ -1928,15 +2199,17 @@ void TuiState::updateStatusModel() {
       status_model_->agent_name = ctx.identity.friendlyName.empty()
                                       ? ctx.identity.name
                                       : ctx.identity.friendlyName;
-      status_model_->context_used = ctx.aggregateMetrics.tokens.contextSize;
-      status_model_->sent_prompt = ctx.aggregateMetrics.context.sentTokens;
-      status_model_->billed_prompt =
-          ctx.aggregateMetrics.context.billedPromptTokens;
-      status_model_->completion_tokens = ctx.aggregateMetrics.tokens.completion;
-      status_model_->estimated_cost_usd = ctx.aggregateMetrics.estimatedCostUsd;
+      const shared::AgentMetrics *latest_metrics =
+          stream_state_.getLatestMetrics(focused_agent_id_);
+      const shared::AgentMetrics &metrics =
+          latest_metrics ? *latest_metrics : ctx.aggregateMetrics;
+      status_model_->context_used = metrics.tokens.contextSize;
+      status_model_->sent_prompt = metrics.context.sentTokens;
+      status_model_->billed_prompt = metrics.context.billedPromptTokens;
+      status_model_->completion_tokens = metrics.tokens.completion;
+      status_model_->estimated_cost_usd = metrics.estimatedCostUsd;
       status_model_->bucket_summary =
-          firmius::core::summarizeContextWindowMetrics(
-              ctx.aggregateMetrics.context, 3);
+          firmius::core::summarizeContextWindowMetrics(metrics.context, 3);
       auto provider =
           firmius::provider::ProviderRegistry::instance().getProvider(
               ctx.config.providerId);
@@ -1986,6 +2259,8 @@ void TuiState::updateAgentStripModel() {
   if (!agent_strip_model_)
     return;
   ++agent_strip_model_->layout_generation;
+  agent_strip_model_->visible_rows =
+      static_cast<size_t>(std::max(1, agent_strip_visible_rows_));
   agent_strip_model_->items.clear();
   if (focused_agent_id_.empty())
     return;
@@ -2084,13 +2359,18 @@ void TuiState::updateAgentStripModel() {
     } else {
       agent_work_start_ms_.erase(id);
     }
+    const shared::AgentMetrics *latest_metrics =
+        stream_state_.getLatestMetrics(id);
     auto provider = firmius::provider::ProviderRegistry::instance().getProvider(
         ctx.config.providerId);
     if (provider) {
       auto info = provider->getModelInfo(ctx.config.modelId);
       if (info.contextWindow > 0) {
+        const auto context_size =
+            latest_metrics ? latest_metrics->tokens.contextSize
+                           : ctx.aggregateMetrics.tokens.contextSize;
         item.context_percent =
-            static_cast<float>(ctx.aggregateMetrics.tokens.contextSize) /
+            static_cast<float>(context_size) /
             info.contextWindow;
       }
     }
@@ -2450,6 +2730,9 @@ void TuiState::updateContextLaneModel() {
             tm.loadRollingMemoryState(ctx.history->threadId, ctx.identity.id);
         rollingModel.observation_in_flight = rollingState.observationInFlight;
         rollingModel.reflection_in_flight = rollingState.reflectionInFlight;
+        rollingModel.bridge_packet_count = rollingState.bridges.size();
+        rollingModel.canonical_anchor_count = rollingState.anchors.size();
+        rollingModel.latest_bridge_id = rollingState.lastBridgeId;
         for (const auto &chunk : rollingState.observationChunks) {
           if (chunk.superseded) {
             continue;
@@ -2479,6 +2762,15 @@ void TuiState::updateContextLaneModel() {
             rollingModel.saved_tokens +=
                 (chunk.sourceTokens - chunk.summaryTokens);
           }
+        }
+        if (!rollingState.bridges.empty()) {
+          const auto &bridge = rollingState.bridges.back();
+          rollingModel.bridge_target = bridge.targetTaskSignature;
+          rollingModel.bridge_hint = bridge.executionHint;
+        }
+        if (rollingState.bridgeInFlight) {
+          rollingModel.observation_in_flight =
+              rollingModel.observation_in_flight || rollingState.bridgeInFlight;
         }
       } catch (...) {
       }
@@ -2515,6 +2807,34 @@ ftxui::Component TuiState::root() {
       input_model_,
       [this](const std::string &text,
              const std::vector<firmius::tui::PastedBlock> &images) {
+        auto applyPendingRewriteIfNeeded = [this]() -> bool {
+          if (!pending_edit_message_ || !harness_) {
+            return true;
+          }
+          const uint64_t cutoff =
+              pending_edit_message_->timestamp > 0
+                  ? pending_edit_message_->timestamp - 1
+                  : 0;
+          suppress_next_history_undone_refresh_ = true;
+          const auto result = harness_->undoAfterTimestamp(cutoff);
+          suppress_next_history_undone_refresh_ = false;
+          if (result.turnsRemoved == 0) {
+            NotificationManager::instance().notifyWarning(
+                "Rewrite Not Applied",
+                "Could not prune the earlier turn for rewrite.",
+                std::chrono::milliseconds(2500));
+            return false;
+          }
+          pending_edit_message_.reset();
+          refreshFocusedHistory();
+          notifyChatTranscriptChanged();
+          requestRefresh(RefreshFlags::Status);
+          requestRefresh(RefreshFlags::AgentStrip);
+          requestRefresh(RefreshFlags::ContextLane);
+          applyPendingRefreshes();
+          return true;
+        };
+
         // Convert pasted image blocks to ImageContent
         std::vector<firmius::shared::ImageContent> image_contents;
         for (const auto &img : images) {
@@ -2597,6 +2917,9 @@ ftxui::Component TuiState::root() {
           setViewMode(ViewMode::Chat);
         } else {
           if (harness_) {
+            if (!applyPendingRewriteIfNeeded()) {
+              return;
+            }
             harness_->send(text, image_contents);
           }
         }
@@ -2604,6 +2927,21 @@ ftxui::Component TuiState::root() {
       },
       [this]() {
         if (pending_permission_request_) {
+          return;
+        }
+        if (pending_edit_message_) {
+          pending_edit_message_.reset();
+          if (input_model_ && input_model_->buffer && input_model_->cursor) {
+            input_model_->buffer->clear();
+            input_model_->pasted_blocks.clear();
+            *input_model_->cursor = 0;
+          }
+          NotificationManager::instance().notifyInfo(
+              "Rewrite Cancelled", "Skipped applying the staged rewrite.",
+              std::chrono::milliseconds(2000));
+          if (screen_) {
+            postEvent(ftxui::Event::Custom);
+          }
           return;
         }
         if (harness_) {
@@ -2616,7 +2954,7 @@ ftxui::Component TuiState::root() {
 
   auto chat = ChatWindow(
       focused_history_getter,
-      [this, focused_history_getter]() {
+      [this]() {
         std::vector<ftxui::Element> live_rows;
         const auto *s = stream_state_.getStream(focused_agent_id_);
         const auto &theme =
@@ -2625,24 +2963,39 @@ ftxui::Component TuiState::root() {
         auto decorateMsg = [](const ftxui::Element &content) {
           return firmius::tui::IndentAgentRow(content);
         };
-        auto renderUserRow = [&theme](const std::string &text,
-                                      const std::string &tag = "") {
-          ftxui::Elements line{
-              ftxui::text("> ") | ftxui::bold |
-                  ftxui::color(theme.chat.user_prefix),
-              firmius::tui::RenderMarkdown(
-                  firmius::tui::ClampTranscriptTextForDisplay(text)) |
-                  ftxui::xflex,
+        auto renderTag = [&theme](const std::string &label) {
+          return ftxui::text(" " + label + " ") | ftxui::bold |
+                 ftxui::color(theme.base.bg) |
+                 ftxui::bgcolor(theme.base.highlight);
+        };
+        auto renderUserRow = [&theme, &renderTag](const std::string &text,
+                                      const std::string &tag = "",
+                                      int image_count = 0) {
+          ftxui::Elements body{
+              ftxui::hbox({
+                  ftxui::text("> ") | ftxui::bold |
+                      ftxui::color(theme.chat.user_prefix),
+                  firmius::tui::RenderMarkdown(
+                      firmius::tui::ClampTranscriptTextForDisplay(text)) |
+                      ftxui::xflex,
+              }) | ftxui::xflex,
           };
-          if (!tag.empty()) {
-            line.push_back(ftxui::text(" "));
-            line.push_back(ftxui::text(" " + tag + " ") | ftxui::bold |
-                           ftxui::color(theme.base.bg) |
-                           ftxui::bgcolor(theme.base.highlight));
+          if (image_count > 0 || !tag.empty()) {
+            ftxui::Elements tags;
+            if (!tag.empty()) {
+              tags.push_back(renderTag(tag));
+            }
+            for (int i = 0; i < image_count; ++i) {
+              if (!tags.empty()) {
+                tags.push_back(ftxui::text(" "));
+              }
+              tags.push_back(renderTag("IMAGE " + std::to_string(i + 1)));
+            }
+            body.push_back(ftxui::hbox(std::move(tags)) | ftxui::xflex);
           }
           return ftxui::vbox({
                      ftxui::text(""),
-                     ftxui::hbox(std::move(line)) | ftxui::xflex,
+                     ftxui::vbox(std::move(body)) | ftxui::xflex,
                      ftxui::text(""),
                  }) |
                  ftxui::bgcolor(theme.input.bg) | ftxui::xflex;
@@ -2740,9 +3093,12 @@ ftxui::Component TuiState::root() {
 
         const auto &timeline = stream_state_.getTimeline();
         const auto &tool_calls = stream_state_.getToolCalls();
-        const auto persisted_tool_call_ids =
-            firmius::tui::CollectToolCallIdsFromHistory(
-                focused_history_getter());
+        const auto persisted_tool_call_ids_it =
+            agent_persisted_tool_call_ids_cache_.find(focused_agent_id_);
+        const auto &persisted_tool_call_ids =
+            persisted_tool_call_ids_it != agent_persisted_tool_call_ids_cache_.end()
+                ? persisted_tool_call_ids_it->second
+                : kEmptyToolCallIdSet;
 
         const bool hideErrors = harness_ ? harness_->getConfig().hideErrors : false;
 
@@ -2804,11 +3160,9 @@ ftxui::Component TuiState::root() {
 
           auto sub_history_getter = [this](const std::string &agentId)
               -> const firmius::shared::AgentHistory * {
-            static thread_local std::shared_ptr<firmius::shared::AgentHistory>
-                owned_history;
-            owned_history.reset();
-            return resolveAgentHistoryForThread(harness_, thread_.threadId,
-                                                agentId, &owned_history);
+            auto it = agent_history_cache_.find(agentId);
+            return it != agent_history_cache_.end() ? it->second.get()
+                                                    : nullptr;
           };
           auto sub_stream_getter = [this](const std::string &agentId)
               -> const firmius::tui::StreamState * {
@@ -2868,14 +3222,18 @@ ftxui::Component TuiState::root() {
           queued_internal_for_focus.push_back(entry);
         }
 
-        if (!queued_internal_for_focus.empty()) {
+        const bool showInternalNudges =
+            harness_ ? harness_->getConfig().showInternalNudges : false;
+        if (showInternalNudges && !queued_internal_for_focus.empty()) {
           for (const auto &entry : queued_internal_for_focus) {
-            live_rows.push_back(renderUserRow(entry.text, "INTERNAL"));
+            live_rows.push_back(
+                renderUserRow(entry.text, "INTERNAL", entry.image_count));
           }
         }
         if (!queued_for_focus.empty()) {
           for (const auto &entry : queued_for_focus) {
-            live_rows.push_back(renderUserRow(entry.text, "QUEUED"));
+            live_rows.push_back(
+                renderUserRow(entry.text, "QUEUED", entry.image_count));
           }
         }
 
@@ -2897,25 +3255,25 @@ ftxui::Component TuiState::root() {
       },
       [this](
           const std::string &agentId) -> const firmius::shared::AgentHistory * {
-        static thread_local std::shared_ptr<firmius::shared::AgentHistory>
-            owned_history;
-        owned_history.reset();
-        return resolveAgentHistoryForThread(harness_, thread_.threadId,
-                                            agentId, &owned_history);
+        auto it = agent_history_cache_.find(agentId);
+        return it != agent_history_cache_.end() ? it->second.get() : nullptr;
       },
       [this](const std::string &agentId) -> const firmius::tui::StreamState * {
         if (agentId.empty())
           return nullptr;
         return stream_state_.getStream(agentId);
       },
-      [this, focused_history_getter]() {
+      [this]() {
         std::unordered_map<int, firmius::tui::LiveQuickSummaryCluster> clusters;
         std::vector<int> cluster_order;
         const auto &timeline = stream_state_.getTimeline();
         const auto &tool_calls = stream_state_.getToolCalls();
-        const auto persisted_tool_call_ids =
-            firmius::tui::CollectToolCallIdsFromHistory(
-                focused_history_getter());
+        const auto persisted_tool_call_ids_it =
+            agent_persisted_tool_call_ids_cache_.find(focused_agent_id_);
+        const auto &persisted_tool_call_ids =
+            persisted_tool_call_ids_it != agent_persisted_tool_call_ids_cache_.end()
+                ? persisted_tool_call_ids_it->second
+                : kEmptyToolCallIdSet;
 
         for (const auto &entry : timeline) {
           if (entry.kind != TimelineEntry::Kind::ToolCall) {
@@ -2981,69 +3339,17 @@ ftxui::Component TuiState::root() {
           result.push_back(std::move(clusters[cluster_id]));
         }
         return result;
-      },
-      [this]() {
-        std::size_t signature = 0;
-        HashCombine(signature, focused_agent_id_);
-        HashCombine(signature, thread_.threadId);
-
-        if (const auto *s = stream_state_.getStream(focused_agent_id_)) {
-          HashCombine(signature, s->thinking.size());
-          HashCombine(signature, s->text.size());
-          HashCombine(signature, s->compaction_thinking.size());
-          HashCombine(signature, s->compaction_text.size());
-          HashCombine(signature, s->compaction_completion.size());
-          HashCombine(signature, s->compaction_active);
-          HashCombine(signature, s->compaction_finished);
-          HashCombine(signature, s->provider_waiting);
-        }
-
-        const auto &timeline = stream_state_.getTimeline();
-        HashCombine(signature, timeline.size());
-        for (const auto &entry : timeline) {
-          if (entry.agentId != focused_agent_id_) {
-            continue;
-          }
-          HashCombine(signature, entry.id);
-          HashCombine(signature, static_cast<int>(entry.kind));
-          HashCombine(signature, entry.message.size());
-        }
-
-        const auto &tool_calls = stream_state_.getToolCalls();
-        HashCombine(signature, tool_calls.size());
-        for (const auto &[id, view] : tool_calls) {
-          if (!view || view->agentId != focused_agent_id_) {
-            continue;
-          }
-          HashCombine(signature, id);
-          HashCombine(signature, static_cast<int>(view->phase));
-          HashCombine(signature, view->name);
-          HashCombine(signature, view->args.size());
-          HashCombine(signature, view->result.size());
-          HashCombine(signature, view->success);
-        }
-
-        for (const auto &entry : stream_state_.getQueuedMessages()) {
-          if ((!entry.agent_id.empty() && entry.agent_id != focused_agent_id_) ||
-              (!entry.thread_id.empty() && entry.thread_id != thread_.threadId)) {
-            continue;
-          }
-          HashCombine(signature, entry.message_id);
-          HashCombine(signature, entry.text.size());
-        }
-        for (const auto &entry : stream_state_.getQueuedInternalMessages()) {
-          if ((!entry.agent_id.empty() && entry.agent_id != focused_agent_id_) ||
-              (!entry.thread_id.empty() && entry.thread_id != thread_.threadId)) {
-            continue;
-          }
-          HashCombine(signature, entry.message_id);
-          HashCombine(signature, entry.text.size());
-        }
-
-        return signature;
-      },
-      [this]() {
-        if (!harness_) {
+      }, [this]() { return buildFocusedChatLiveMeasurementSignature(
+                      stream_state_, focused_agent_id_, thread_.threadId); },
+      }, [this]() {
+        const auto persisted_it =
+            agent_persisted_tool_call_ids_cache_.find(focused_agent_id_);
+        const auto &persisted =
+            persisted_it != agent_persisted_tool_call_ids_cache_.end()
+                ? persisted_it->second
+                : kEmptyToolCallIdSet;
+        return buildFocusedChatLiveMeasurementSignature(
+            stream_state_, focused_agent_id_, thread_.threadId, persisted); },
           return false;
         }
         return harness_->getConfig().showInternalNudges;
@@ -3053,7 +3359,10 @@ ftxui::Component TuiState::root() {
           return false;
         }
         return harness_->getConfig().hideErrors;
-      });
+      },
+      [this]() { return edit_mode_active_; },
+      [this](uint64_t timestamp) { return isEditModeSelection(timestamp); },
+      [this](uint64_t timestamp) { selectEditableMessageByTimestamp(timestamp); });
   chat_component_ = chat;
   input_component_ = input_bar;
 
@@ -3085,8 +3394,12 @@ ftxui::Component TuiState::root() {
           pending_modal_clear_ = false;
         }
 
-        // AGGRESSIVELY take focus if no modals are open
-        if (modals_.empty() && input_component_ && !pending_permission_request_) {
+    // AGGRESSIVELY take focus if no modals are open
+        if (input_model_) {
+          input_model_->is_focused = !edit_mode_active_;
+        }
+        if (modals_.empty() && input_component_ && !pending_permission_request_ &&
+            !edit_mode_active_) {
           input_component_->TakeFocus();
         }
 
@@ -3131,7 +3444,7 @@ ftxui::Component TuiState::root() {
         ftxui::Element work_panel = ftxui::text("");
         bool show_work_panel = false;
         const auto tabs = availableWorkPanelTabs(hasPlan, hasTodo, hasContext);
-        if (!tabs.empty()) {
+        if (show_work_panel_ && !tabs.empty()) {
           auto renderTab = [&](WorkPanelTab tab) {
             const bool selected = tab == visibleTab;
             const std::string icon =
@@ -3154,14 +3467,20 @@ ftxui::Component TuiState::root() {
               ftxui::text(" Ctrl+O to cycle ") | ftxui::color(theme.base.dim);
 
           ftxui::Element selected_panel = ftxui::text("");
-          int panel_height = work_panel_max_height;
+          int panel_height = work_panel_height_override_ > 0
+                                 ? std::min(work_panel_height_override_,
+                                            std::max(4, terminal.dimy - 8))
+                                 : work_panel_max_height;
           if (visibleTab == WorkPanelTab::Plan && hasPlan) {
             selected_panel = plan_lane->Render();
           } else if (visibleTab == WorkPanelTab::Todo && hasTodo) {
             selected_panel = todo_lane->Render();
           } else if (visibleTab == WorkPanelTab::Context && hasContext) {
             selected_panel = context_lane->Render();
-            panel_height = context_panel_height;
+            panel_height = work_panel_height_override_ > 0
+                               ? std::min(work_panel_height_override_,
+                                          std::max(4, terminal.dimy - 8))
+                               : context_panel_height;
           }
 
           ftxui::Elements tab_elements;
@@ -3184,12 +3503,15 @@ ftxui::Component TuiState::root() {
         }
         // Ultra-compact bottom bar layout
         ftxui::Elements bottom_bar_children;
-        const bool has_agent_strip = agent_strip_model_ && !agent_strip_model_->items.empty();
+        const bool has_agent_strip =
+            show_agent_strip_ && agent_strip_model_ &&
+            !agent_strip_model_->items.empty();
         if (has_agent_strip) {
           bottom_bar_children.push_back(agent_strip->Render());
         }
-        bottom_bar_children.push_back(ftxui::separator() |
-                                      ftxui::color(input_separator_color));
+        bottom_bar_children.push_back((ftxui::separator() |
+                                      ftxui::color(input_separator_color)) |
+                                      ftxui::reflect(agent_strip_separator_box_));
         if (pending_permission_request_) {
           pending_permission_option_boxes_.assign(
               pending_permission_labels_.size(), ftxui::Box{});
@@ -3230,6 +3552,10 @@ ftxui::Component TuiState::root() {
                   ftxui::hbox(std::move(option_rows)),
               }) |
               ftxui::xflex | ftxui::bgcolor(theme.input.bg));
+        } else if (edit_mode_active_) {
+          bottom_bar_children.push_back(
+              (input_bar->Render() | ftxui::dim) |
+              ftxui::bgcolor(theme.input.bg));
         } else {
           bottom_bar_children.push_back(input_bar->Render());
         }
@@ -3247,7 +3573,8 @@ ftxui::Component TuiState::root() {
             main_view = ftxui::vbox({
                             title_bar->Render(),
                             chat_area | ftxui::flex,
-                            ftxui::separator() | ftxui::color(theme.base.border),
+                            (ftxui::separator() | ftxui::color(theme.base.border)) |
+                                ftxui::reflect(work_panel_separator_box_),
                             work_panel,
                             bottom_bar,
                         }) |
@@ -3262,20 +3589,28 @@ ftxui::Component TuiState::root() {
           }
         }
 
-        // Layer notifications
-        auto notifications = NotificationManager::instance().render();
-        main_view = ftxui::dbox({main_view, notifications});
-
         return main_view | ftxui::bgcolor(theme.base.bg);
       });
 
   // Layer modals using dbox
   auto modal_renderer = ftxui::Renderer(base_view, [this, base_view]() {
+    const auto render_begin = std::chrono::steady_clock::now();
     ftxui::Element current = base_view->Render();
     for (const auto &modal : modals_) {
       current = ftxui::dbox(
           {DarkenElement(current), modal->Render() | ftxui::center});
     }
+    if (pending_profile_modal_name_.has_value() &&
+        !painted_profile_modals_.count(*pending_profile_modal_name_)) {
+      painted_profile_modals_.insert(*pending_profile_modal_name_);
+      noteTuiModalFirstPaint(*pending_profile_modal_name_);
+      pending_profile_modal_name_.reset();
+    }
+    // Layer notifications above modals (must be last so they are always visible).
+    auto notifications = NotificationManager::instance().render();
+    current = ftxui::dbox({current, notifications});
+    noteTuiFrameRendered(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now() - render_begin));
     return current;
   });
 
@@ -3422,6 +3757,58 @@ ftxui::Component TuiState::root() {
     }
 
     if (event.is_mouse()) {
+      const auto mouse = event.mouse();
+      if (mouse.button == ftxui::Mouse::Left &&
+          mouse.motion == ftxui::Mouse::Pressed) {
+        if (show_work_panel_ &&
+            work_panel_separator_box_.Contain(mouse.x, mouse.y)) {
+          if (screen_) {
+            active_drag_mouse_ = screen_->CaptureMouse();
+          }
+          active_drag_target_ = DragTarget::WorkPanel;
+          drag_origin_y_ = mouse.y;
+          drag_origin_work_panel_height_ =
+              work_panel_height_override_ > 0 ? work_panel_height_override_ : 10;
+          return true;
+        }
+        if (show_agent_strip_ &&
+            agent_strip_separator_box_.Contain(mouse.x, mouse.y)) {
+          if (screen_) {
+            active_drag_mouse_ = screen_->CaptureMouse();
+          }
+          active_drag_target_ = DragTarget::AgentStrip;
+          drag_origin_y_ = mouse.y;
+          drag_origin_agent_strip_rows_ = agent_strip_visible_rows_;
+          return true;
+        }
+      }
+      if (active_drag_target_ != DragTarget::None &&
+          mouse.motion == ftxui::Mouse::Moved) {
+        const int delta = drag_origin_y_ - mouse.y;
+        if (active_drag_target_ == DragTarget::WorkPanel) {
+          work_panel_height_override_ =
+              std::clamp(drag_origin_work_panel_height_ + delta, 4,
+                         std::max(6, last_terminal_height_ - 8));
+        } else if (active_drag_target_ == DragTarget::AgentStrip) {
+          agent_strip_visible_rows_ =
+              std::clamp(drag_origin_agent_strip_rows_ + delta, 1, 12);
+          updateAgentStripModel();
+        }
+        persistUserPreferences();
+        if (screen_) {
+          postEvent(ftxui::Event::Custom);
+        }
+        return true;
+      }
+      if (active_drag_target_ != DragTarget::None &&
+          mouse.motion == ftxui::Mouse::Released) {
+        active_drag_mouse_.reset();
+        active_drag_target_ = DragTarget::None;
+        return true;
+      }
+    }
+
+    if (event.is_mouse()) {
       auto &m = event.mouse();
       if (m.button == ftxui::Mouse::WheelUp ||
           m.button == ftxui::Mouse::WheelDown) {
@@ -3455,6 +3842,19 @@ ftxui::Component TuiState::root() {
       }
     }
     if (event == ftxui::Event::Escape) {
+      if (edit_mode_active_) {
+        edit_mode_active_ = false;
+        if (input_model_) {
+          input_model_->is_focused = true;
+        }
+        if (chat_component_) {
+          chat_component_->OnEvent(ftxui::Event::Special("ThreadChanged"));
+        }
+        if (screen_) {
+          postEvent(ftxui::Event::Custom);
+        }
+        return true;
+      }
       if (!modals_.empty()) {
         popModal();
         return true;
@@ -3677,6 +4077,87 @@ ftxui::Component TuiState::root() {
     // Ctrl+H - Toggle notifications
     if (event == ftxui::Event::Special("\x08")) {
       NotificationManager::instance().toggleVisibility();
+      return true;
+    }
+
+    // Ctrl+E - Toggle edit mode / apply selected edit
+    if (event == ftxui::Event::Special("\x05")) {
+      if (!edit_mode_active_) {
+        rebuildEditableUserMessages();
+        edit_mode_active_ = !editable_user_messages_.empty();
+      if (edit_mode_active_ && input_model_) {
+          input_model_->is_focused = false;
+        }
+        if (chat_component_) {
+          chat_component_->OnEvent(ftxui::Event::Special("ThreadChanged"));
+        }
+      } else if (selected_editable_message_index_ >= 0) {
+        commitSelectedEditableMessageToInput();
+      } else {
+        edit_mode_active_ = false;
+        if (input_model_) {
+          input_model_->is_focused = true;
+        }
+        if (chat_component_) {
+          chat_component_->OnEvent(ftxui::Event::Special("ThreadChanged"));
+        }
+      }
+      if (screen_) {
+        postEvent(ftxui::Event::Custom);
+      }
+      return true;
+    }
+
+    if (edit_mode_active_ && event == ftxui::Event::Return) {
+      if (selected_editable_message_index_ >= 0) {
+        commitSelectedEditableMessageToInput();
+      }
+      return true;
+    }
+
+    if (edit_mode_active_ &&
+        (event == ftxui::Event::ArrowUp || event == ftxui::Event::ArrowDown)) {
+      if (!editable_user_messages_.empty()) {
+        const int dir = event == ftxui::Event::ArrowUp ? -1 : 1;
+        if (selected_editable_message_index_ < 0) {
+          selected_editable_message_index_ = 0;
+        } else {
+          selected_editable_message_index_ = std::clamp(
+              selected_editable_message_index_ + dir, 0,
+              static_cast<int>(editable_user_messages_.size()) - 1);
+        }
+        if (screen_) {
+          if (chat_component_) {
+            chat_component_->OnEvent(ftxui::Event::Special("ThreadChanged"));
+          }
+          postEvent(ftxui::Event::Custom);
+        }
+      }
+      return true;
+    }
+    if (edit_mode_active_ &&
+        (event.is_character() || event == ftxui::Event::Backspace ||
+         event == ftxui::Event::Delete || event == ftxui::Event::Tab)) {
+      return true;
+    }
+
+    // F6 - toggle agent strip
+    if (event == ftxui::Event::F6) {
+      show_agent_strip_ = !show_agent_strip_;
+      persistUserPreferences();
+      if (screen_) {
+        postEvent(ftxui::Event::Custom);
+      }
+      return true;
+    }
+
+    // F7 - toggle work panel
+    if (event == ftxui::Event::F7) {
+      show_work_panel_ = !show_work_panel_;
+      persistUserPreferences();
+      if (screen_) {
+        postEvent(ftxui::Event::Custom);
+      }
       return true;
     }
 

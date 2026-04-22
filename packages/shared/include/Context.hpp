@@ -27,7 +27,7 @@ struct AgentIdentity {
   std::string goal;         ///< High-level mission goal.
   std::string systemPrompt; ///< Raw persona instructions.
   std::string parentId;     ///< ID of the parent agent (empty for root agents).
-  std::string friendlyName; ///< Machine-friendly slug name (e.g., "lead",
+  std::string friendlyName; ///< Machine-friendly slug name (e.g., "aster",
                             ///< "auth-finder").
 
   bool operator==(const AgentIdentity &other) const = default;
@@ -74,6 +74,14 @@ struct AgentState {
   std::vector<std::string> readFiles; ///< Paths of files read in this session.
   std::vector<std::string> loadedMcpServers; // MCP server names with loaded selections.
   std::map<std::string, std::vector<std::string>> loadedMcpTools; // server -> loaded tool names.
+  struct DynamicMcpTool {
+    std::string name;
+    std::string description;
+    std::string inputSchema;
+
+    bool operator==(const DynamicMcpTool &other) const = default;
+  };
+  std::map<std::string, std::vector<DynamicMcpTool>> loadedMcpToolDefinitions; // server -> loaded tool defs.
   std::map<std::string, std::vector<std::string>> loadedMcpResources; // server -> loaded resource URIs.
   std::map<std::string, std::vector<std::string>> loadedMcpPrompts; // server -> loaded prompt names.
   std::vector<std::string>
@@ -130,7 +138,7 @@ struct AgentConfig {
   std::string providerId = "nanogpt"; ///< LLM provider identifier.
   std::string modelId;                ///< LLM model identifier.
   std::string modelVariant;         ///< Selected model variant (if applicable).
-  std::string personaName = "lead"; ///< Persona to load from prompts/.
+  std::string personaName = "aster"; ///< Persona to load from prompts/.
   int maxTurns = 200;       ///< Maximum autonomous turns before stopping.
   float temperature = 0.7f; ///< LLM generation temperature.
   std::optional<std::uint32_t> maxTokens; ///< Optional max output tokens.

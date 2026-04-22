@@ -72,7 +72,7 @@ AuditResult WebFetchAudit::run(const std::vector<std::string>& args) {
     opts.containerName = "";
     opts.deleteOnExit = false;
 
-    std::string threadId = harness.newThread(opts, "/home/nunya/Projects/Firmius", "lead");
+    std::string threadId = harness.newThread(opts, "/home/nunya/Projects/Firmius", "aster");
     if (threadId.empty()) {
         std::cerr << "Failed to create harness thread\n";
         result.exitCode = 1;

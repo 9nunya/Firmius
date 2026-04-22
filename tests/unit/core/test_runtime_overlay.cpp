@@ -169,15 +169,14 @@ TEST_F(RuntimeOverlayTest, BuildRequestHistoryAppendsLeadStateOnly) {
   ASSERT_NE(workTurn, nullptr);
 
   const std::string workText = firstTextContent(*workTurn);
-  EXPECT_NE(workText.find("Plan Title: Ship Runtime Overlay"), std::string::npos);
-  EXPECT_NE(workText.find("#1 [Pending] Review live overlay content"),
-            std::string::npos);
+  EXPECT_FALSE(workText.empty());
+  EXPECT_NE(workText.find("Review live overlay content"), std::string::npos);
 
 }
 
 
 TEST_F(RuntimeOverlayTest, BuildRequestHistoryAppendsWorkerState) {
-  context_.config.personaName = "worker";
+  context_.config.personaName = "ember";
   context_.identity.id = "worker-agent";
 
   const auto history =
@@ -194,11 +193,11 @@ TEST_F(RuntimeOverlayTest, BuildRequestHistoryAppendsWorkerState) {
   }
   ASSERT_NE(workTurn, nullptr);
   const std::string workText = firstTextContent(*workTurn);
-  EXPECT_NE(workText.find("Role: worker"), std::string::npos);
+  EXPECT_NE(workText.find("Role: ember"), std::string::npos);
 }
 
 TEST_F(RuntimeOverlayTest, BuildRequestHistoryAppendsExecutorState) {
-  context_.config.personaName = "executor";
+  context_.config.personaName = "forge";
   context_.identity.id = "executor-agent";
 
   const auto history =
@@ -215,7 +214,7 @@ TEST_F(RuntimeOverlayTest, BuildRequestHistoryAppendsExecutorState) {
   }
   ASSERT_NE(workTurn, nullptr);
   const std::string workText = firstTextContent(*workTurn);
-  EXPECT_NE(workText.find("Role: executor"), std::string::npos);
+  EXPECT_NE(workText.find("Role: forge"), std::string::npos);
 }
 
 TEST_F(RuntimeOverlayTest, BuildRequestHistoryAppendsUserMemoryOverlay) {
@@ -310,20 +309,49 @@ TEST_F(RuntimeOverlayTest, BuildRequestHistoryAddsRollingMemoryOverlayFromState)
   chunk.sourceEndTurnId = "assistant-2";
   chunk.summary = "Remember parser work.";
   state.observationChunks.push_back(chunk);
+  RollingMemoryAnchorRecord anchor;
+  anchor.anchorId = "anchor-1";
+  anchor.anchorType = "constraint";
+  anchor.canonicalText = "Preserve parser backward compatibility.";
+  anchor.importance = "critical";
+  state.anchors.push_back(anchor);
+  RollingMemoryBridgeRecord bridge;
+  bridge.bridgeId = "bridge-1";
+  bridge.targetTaskSignature = "ship parser fix";
+  bridge.executionHint = "resume from anchor packet";
+  bridge.relevantAnchorIds = {"anchor-1"};
+  state.bridges.push_back(bridge);
+  state.lastBridgeId = bridge.bridgeId;
   threadManager_->writeRollingMemoryState(threadId_, context_.identity.id, state);
 
   const auto history = runtime_overlay::buildRequestHistoryWithRuntimeOverlays(
       context_, *host_, *workspace_);
 
-  bool found = false;
+  bool foundMemory = false;
+  bool foundStatus = false;
   for (const auto &turn : history.turns) {
     if (turn.turnId == "runtime-overlay-rolling-memory") {
-      found = true;
+      foundMemory = true;
       const auto text = firstTextContent(turn);
+      SCOPED_TRACE(text);
       EXPECT_NE(text.find("Remember parser work"), std::string::npos);
+      EXPECT_NE(text.find("Canonical anchors"), std::string::npos);
+      EXPECT_NE(text.find("Preserve parser backward compatibility."), std::string::npos);
+      EXPECT_NE(text.find("Working-memory bridge"), std::string::npos);
+      EXPECT_NE(text.find("ship parser fix"), std::string::npos);
+      EXPECT_NE(text.find("resume from anchor packet"), std::string::npos);
+    } else if (turn.turnId == "runtime-overlay-rolling-status") {
+      foundStatus = true;
+      const auto text = firstTextContent(turn);
+      SCOPED_TRACE(text);
+      EXPECT_NE(text.find("ROLLING MEMORY STATUS"), std::string::npos);
+      EXPECT_NE(text.find("Canonical anchors: 1"), std::string::npos);
+      EXPECT_NE(text.find("Bridge packets: 1"), std::string::npos);
+      EXPECT_NE(text.find("Latest bridge: bridge-1"), std::string::npos);
     }
   }
-  EXPECT_TRUE(found);
+  EXPECT_TRUE(foundMemory);
+  EXPECT_TRUE(foundStatus);
 }
 
 TEST_F(RuntimeOverlayTest, BuildRequestHistoryOmitsRollingMemoryOverlayWithoutActiveChunks) {
@@ -543,7 +571,7 @@ TEST_F(RuntimeOverlayTest, ReconstructStateFromHistoryRecoversLoadedSkills) {
   EXPECT_EQ(context_.state.loadedAgentMds[0], path);
 }
 
-TEST_F(RuntimeOverlayTest, ReconcileMcpLoadUpdatesState) {
+TEST_F(RuntimeOverlayTest, ReconcileLegacyMcpLoadNoLongerUpdatesState) {
   const std::string resultJson =
       R"({"server_name":"demo","loaded_tools":["tool.alpha","tool.beta"],"loaded_resources":["res://alpha"],"loaded_prompts":["prompt.alpha"]})";
 
@@ -551,19 +579,13 @@ TEST_F(RuntimeOverlayTest, ReconcileMcpLoadUpdatesState) {
       context_, *host_, *workspace_, "mcp_load", R"({"server_name":"demo"})",
       resultJson);
 
-  ASSERT_EQ(context_.state.loadedMcpServers.size(), 1u);
-  EXPECT_EQ(context_.state.loadedMcpServers[0], "demo");
-  ASSERT_EQ(context_.state.loadedMcpTools.size(), 1u);
-  EXPECT_EQ(context_.state.loadedMcpTools["demo"].size(), 2u);
-  EXPECT_EQ(context_.state.loadedMcpTools["demo"][0], "tool.alpha");
-  EXPECT_EQ(context_.state.loadedMcpTools["demo"][1], "tool.beta");
-  ASSERT_EQ(context_.state.loadedMcpResources.size(), 1u);
-  EXPECT_EQ(context_.state.loadedMcpResources["demo"][0], "res://alpha");
-  ASSERT_EQ(context_.state.loadedMcpPrompts.size(), 1u);
-  EXPECT_EQ(context_.state.loadedMcpPrompts["demo"][0], "prompt.alpha");
+  EXPECT_TRUE(context_.state.loadedMcpServers.empty());
+  EXPECT_TRUE(context_.state.loadedMcpTools.empty());
+  EXPECT_TRUE(context_.state.loadedMcpResources.empty());
+  EXPECT_TRUE(context_.state.loadedMcpPrompts.empty());
 }
 
-TEST_F(RuntimeOverlayTest, ReconstructStateFromHistoryRecoversMcpLoadState) {
+TEST_F(RuntimeOverlayTest, ReconstructStateFromHistoryIgnoresLegacyMcpLoadState) {
   AgentTurn turn1;
   Message msg1;
   msg1.role = Role::Assistant;
@@ -586,40 +608,10 @@ TEST_F(RuntimeOverlayTest, ReconstructStateFromHistoryRecoversMcpLoadState) {
 
   runtime_overlay::reconstructStateFromHistory(context_, *host_, *workspace_);
 
-  ASSERT_EQ(context_.state.loadedMcpServers.size(), 1u);
-  EXPECT_EQ(context_.state.loadedMcpServers[0], "demo");
-  ASSERT_EQ(context_.state.loadedMcpTools.size(), 1u);
-  EXPECT_EQ(context_.state.loadedMcpTools["demo"][0], "tool.alpha");
-  ASSERT_EQ(context_.state.loadedMcpResources.size(), 1u);
-  EXPECT_EQ(context_.state.loadedMcpResources["demo"][0], "res://alpha");
-  ASSERT_EQ(context_.state.loadedMcpPrompts.size(), 1u);
-  EXPECT_EQ(context_.state.loadedMcpPrompts["demo"][0], "prompt.alpha");
-}
-
-TEST_F(RuntimeOverlayTest, BuildRequestHistoryAppendsLoadedMcpSummaryWhenPresent) {
-  context_.state.loadedMcpServers = {"demo"};
-  context_.state.loadedMcpTools["demo"] = {"tool.alpha"};
-  context_.state.loadedMcpResources["demo"] = {"res://alpha"};
-  context_.state.loadedMcpPrompts["demo"] = {"prompt.alpha"};
-
-  const auto history =
-      runtime_overlay::buildRequestHistoryWithRuntimeOverlays(
-          context_, *host_, *workspace_);
-
-  bool foundMcpSummary = false;
-  for (const auto& turn : history.turns) {
-    const std::string text = firstTextContent(turn);
-    if (turn.turnId == "runtime-overlay-loaded-mcp") {
-      foundMcpSummary = true;
-      EXPECT_NE(text.find("LOADED MCP"), std::string::npos);
-      EXPECT_NE(text.find("demo"), std::string::npos);
-      EXPECT_NE(text.find("tool.alpha"), std::string::npos);
-      EXPECT_NE(text.find("res://alpha"), std::string::npos);
-      EXPECT_NE(text.find("prompt.alpha"), std::string::npos);
-    }
-  }
-
-  EXPECT_TRUE(foundMcpSummary);
+  EXPECT_TRUE(context_.state.loadedMcpServers.empty());
+  EXPECT_TRUE(context_.state.loadedMcpTools.empty());
+  EXPECT_TRUE(context_.state.loadedMcpResources.empty());
+  EXPECT_TRUE(context_.state.loadedMcpPrompts.empty());
 }
 
 TEST_F(RuntimeOverlayTest, BuildRequestHistoryOmitsLoadedMcpSummaryWhenEmpty) {

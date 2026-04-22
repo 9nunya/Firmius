@@ -13,7 +13,7 @@
 #include "providers/BaseAPIKeyProvider.hpp"
 #include "providers/BaseOAuthProvider.hpp"
 #include "providers/ProviderRegistry.hpp"
-#include "tools/WorkToolCommon.hpp"
+#include "tools/WorkSupport.hpp"
 #include "utils/FSUtil.hpp"
 #include "utils/PlatformPaths.hpp"
 #include "utils/StringUtil.hpp"
@@ -65,7 +65,31 @@ using namespace firmius::shared;
 namespace {
 const std::string FIRMIUS_DIR = ".firmius";
 const std::string SESSION_FILE = "last_session.json";
+const std::string PROJECT_SESSIONS_FILE = "last_sessions.json";
 const std::string OWNER_PID_LABEL = "com.firmius.owner_pid";
+
+std::string resolveRunnableLeadPersona(const std::string &requestedPersona) {
+  if (!requestedPersona.empty() && PurposeLoader::isValid(requestedPersona)) {
+    return requestedPersona;
+  }
+
+  const auto &cfg = shared::ConfigLoader::instance().getConfig();
+  if (!cfg.defaultLeadPersona.empty() &&
+      PurposeLoader::isValid(cfg.defaultLeadPersona)) {
+    return cfg.defaultLeadPersona;
+  }
+
+  if (PurposeLoader::isValid("aster")) {
+    return "aster";
+  }
+
+  const auto available = PurposeLoader::listPurposes();
+  if (!available.empty()) {
+    return available.front();
+  }
+
+  return requestedPersona.empty() ? "aster" : requestedPersona;
+}
 
 bool ensureWritableDirectory(const std::filesystem::path &dir) {
   std::error_code ec;
@@ -154,6 +178,126 @@ std::string currentWorkingDirectoryForComparison() {
 
 std::string getSessionPath() { return getFirmiusHome() + "/" + SESSION_FILE; }
 
+std::string getProjectSessionsPath(const std::string &cwd) {
+  if (cwd.empty()) {
+    return "";
+  }
+
+  std::filesystem::path projectDir = std::filesystem::path(cwd) / FIRMIUS_DIR;
+  if (!ensureWritableDirectory(projectDir)) {
+    return "";
+  }
+  return (projectDir / PROJECT_SESSIONS_FILE).string();
+}
+
+struct ProjectSessionEntry {
+  std::string threadId;
+  std::string focusedAgentId;
+  std::string cwd;
+  uint64_t lastActiveAt = 0;
+};
+
+std::vector<ProjectSessionEntry> loadProjectSessions(const std::string &cwd) {
+  std::vector<ProjectSessionEntry> out;
+  const std::string path = getProjectSessionsPath(cwd);
+  if (path.empty()) {
+    return out;
+  }
+
+  std::ifstream in(path);
+  if (!in.is_open()) {
+    return out;
+  }
+  std::string content((std::istreambuf_iterator<char>(in)),
+                      std::istreambuf_iterator<char>());
+  in.close();
+
+  rapidjson::Document doc;
+  doc.Parse(content.c_str());
+  if (doc.HasParseError()) {
+    return out;
+  }
+
+  auto parseEntry = [&](const rapidjson::Value &v)
+      -> std::optional<ProjectSessionEntry> {
+    if (!v.IsObject()) {
+      return std::nullopt;
+    }
+    ProjectSessionEntry e;
+    if (v.HasMember("threadId") && v["threadId"].IsString()) {
+      e.threadId = v["threadId"].GetString();
+    }
+    if (v.HasMember("focusedAgentId") && v["focusedAgentId"].IsString()) {
+      e.focusedAgentId = v["focusedAgentId"].GetString();
+    }
+    if (v.HasMember("cwd") && v["cwd"].IsString()) {
+      e.cwd = v["cwd"].GetString();
+    }
+    if (v.HasMember("lastActiveAt") && v["lastActiveAt"].IsUint64()) {
+      e.lastActiveAt = v["lastActiveAt"].GetUint64();
+    }
+    if (e.threadId.empty()) {
+      return std::nullopt;
+    }
+    return e;
+  };
+
+  if (doc.IsArray()) {
+    for (const auto &v : doc.GetArray()) {
+      auto entry = parseEntry(v);
+      if (entry.has_value()) {
+        out.push_back(*entry);
+      }
+    }
+  } else if (doc.IsObject() && doc.HasMember("sessions") &&
+             doc["sessions"].IsArray()) {
+    for (const auto &v : doc["sessions"].GetArray()) {
+      auto entry = parseEntry(v);
+      if (entry.has_value()) {
+        out.push_back(*entry);
+      }
+    }
+  }
+  return out;
+}
+
+void persistProjectSessions(const std::string &cwd,
+                            const std::vector<ProjectSessionEntry> &sessions) {
+  const std::string path = getProjectSessionsPath(cwd);
+  if (path.empty()) {
+    return;
+  }
+
+  rapidjson::Document doc;
+  doc.SetArray();
+  auto &a = doc.GetAllocator();
+  for (const auto &s : sessions) {
+    rapidjson::Value obj(rapidjson::kObjectType);
+    obj.AddMember("threadId", rapidjson::Value(s.threadId.c_str(), a), a);
+    if (!s.focusedAgentId.empty()) {
+      obj.AddMember("focusedAgentId",
+                    rapidjson::Value(s.focusedAgentId.c_str(), a), a);
+    }
+    if (!s.cwd.empty()) {
+      obj.AddMember("cwd", rapidjson::Value(s.cwd.c_str(), a), a);
+    }
+    if (s.lastActiveAt != 0) {
+      obj.AddMember("lastActiveAt", s.lastActiveAt, a);
+    }
+    doc.PushBack(obj, a);
+  }
+
+  rapidjson::StringBuffer buffer;
+  rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+  doc.Accept(writer);
+
+  std::ofstream out(path);
+  if (out.is_open()) {
+    out << buffer.GetString();
+    out.close();
+  }
+}
+
 std::string modelCacheKey(const firmius::shared::ModelInfo &model,
                           const std::string &providerId) {
   const std::string provider =
@@ -163,6 +307,11 @@ std::string modelCacheKey(const firmius::shared::ModelInfo &model,
 
 void persistSessionState(const std::string &threadId,
                          const std::string &focusedAgentId) {
+  const uint64_t nowMs = static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::system_clock::now().time_since_epoch())
+          .count());
+
   rapidjson::Document doc;
   doc.SetObject();
   auto &a = doc.GetAllocator();
@@ -187,6 +336,27 @@ void persistSessionState(const std::string &threadId,
   if (sessionFile.is_open()) {
     sessionFile << buffer.GetString();
     sessionFile.close();
+  }
+
+  // Also keep a per-project MRU list.
+  if (!threadId.empty() && !cwd.empty()) {
+    auto sessions = loadProjectSessions(cwd);
+    sessions.erase(std::remove_if(sessions.begin(), sessions.end(),
+                                  [&](const ProjectSessionEntry &e) {
+                                    return e.threadId == threadId;
+                                  }),
+                   sessions.end());
+    ProjectSessionEntry head;
+    head.threadId = threadId;
+    head.focusedAgentId = focusedAgentId;
+    head.cwd = cwd;
+    head.lastActiveAt = nowMs;
+    sessions.insert(sessions.begin(), head);
+    constexpr std::size_t kMaxSessions = 6;
+    if (sessions.size() > kMaxSessions) {
+      sessions.resize(kMaxSessions);
+    }
+    persistProjectSessions(cwd, sessions);
   }
 }
 
@@ -371,20 +541,32 @@ void Harness::init() {
     engineListenerRegistered_ = true;
   }
 
-  std::ifstream sessionFile(getSessionPath());
-  if (sessionFile.is_open()) {
-    std::string content((std::istreambuf_iterator<char>(sessionFile)),
-                        std::istreambuf_iterator<char>());
-    sessionFile.close();
+  // Load last session from project-local MRU list first (per workspace dir),
+  // then fall back to the global last_session.json.
+  {
+    const std::string cwd = currentWorkingDirectoryForComparison();
+    const auto sessions = loadProjectSessions(cwd);
+    if (!sessions.empty()) {
+      currentThreadId_ = sessions.front().threadId;
+      focusedAgentId_ = sessions.front().focusedAgentId;
+    } else {
+      std::ifstream sessionFile(getSessionPath());
+      if (sessionFile.is_open()) {
+        std::string content((std::istreambuf_iterator<char>(sessionFile)),
+                            std::istreambuf_iterator<char>());
+        sessionFile.close();
 
-    rapidjson::Document doc;
-    doc.Parse(content.c_str());
-    if (!doc.HasParseError()) {
-      if (doc.HasMember("threadId") && doc["threadId"].IsString()) {
-        currentThreadId_ = doc["threadId"].GetString();
-      }
-      if (doc.HasMember("focusedAgentId") && doc["focusedAgentId"].IsString()) {
-        focusedAgentId_ = doc["focusedAgentId"].GetString();
+        rapidjson::Document doc;
+        doc.Parse(content.c_str());
+        if (!doc.HasParseError()) {
+          if (doc.HasMember("threadId") && doc["threadId"].IsString()) {
+            currentThreadId_ = doc["threadId"].GetString();
+          }
+          if (doc.HasMember("focusedAgentId") &&
+              doc["focusedAgentId"].IsString()) {
+            focusedAgentId_ = doc["focusedAgentId"].GetString();
+          }
+        }
       }
     }
 
@@ -449,12 +631,7 @@ std::string Harness::newThread(HostCreationOptions hostOptions,
       finalCwd = "/work";
     }
     newMeta.cwd = finalCwd;
-    std::string effectiveLead = leadPersona;
-    if (effectiveLead.empty()) {
-      const auto &cfg = shared::ConfigLoader::instance().getConfig();
-      effectiveLead =
-          cfg.defaultLeadPersona.empty() ? "lead" : cfg.defaultLeadPersona;
-    }
+    std::string effectiveLead = resolveRunnableLeadPersona(leadPersona);
     newMeta.leadPersona = effectiveLead;
 
     threadId = threadManager_.createThread(newMeta);
@@ -597,21 +774,28 @@ bool Harness::resumeLast() {
   {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (currentThreadId_.empty()) {
-      std::ifstream sessionFile(getSessionPath());
-      if (sessionFile.is_open()) {
-        std::string content((std::istreambuf_iterator<char>(sessionFile)),
-                            std::istreambuf_iterator<char>());
-        sessionFile.close();
+      const std::string cwd = currentWorkingDirectoryForComparison();
+      const auto sessions = loadProjectSessions(cwd);
+      if (!sessions.empty()) {
+        currentThreadId_ = sessions.front().threadId;
+        focusedAgentId_ = sessions.front().focusedAgentId;
+      } else {
+        std::ifstream sessionFile(getSessionPath());
+        if (sessionFile.is_open()) {
+          std::string content((std::istreambuf_iterator<char>(sessionFile)),
+                              std::istreambuf_iterator<char>());
+          sessionFile.close();
 
-        rapidjson::Document doc;
-        doc.Parse(content.c_str());
-        if (!doc.HasParseError() && doc.HasMember("threadId") &&
-            doc["threadId"].IsString()) {
-          currentThreadId_ = doc["threadId"].GetString();
-        }
-        if (!doc.HasParseError() && doc.HasMember("focusedAgentId") &&
-            doc["focusedAgentId"].IsString()) {
-          focusedAgentId_ = doc["focusedAgentId"].GetString();
+          rapidjson::Document doc;
+          doc.Parse(content.c_str());
+          if (!doc.HasParseError() && doc.HasMember("threadId") &&
+              doc["threadId"].IsString()) {
+            currentThreadId_ = doc["threadId"].GetString();
+          }
+          if (!doc.HasParseError() && doc.HasMember("focusedAgentId") &&
+              doc["focusedAgentId"].IsString()) {
+            focusedAgentId_ = doc["focusedAgentId"].GetString();
+          }
         }
       }
     }
@@ -718,6 +902,11 @@ bool Harness::dispatchRequestToAgent(const std::string &threadId,
       tid = threadId;
 
       metadata = threadManager_.getMetadata(tid);
+      const std::string resolvedLeadPersona =
+          resolveRunnableLeadPersona(metadata.leadPersona);
+      if (resolvedLeadPersona != metadata.leadPersona) {
+        metadata.leadPersona = resolvedLeadPersona;
+      }
       metadata.lastActiveAt = static_cast<uint64_t>(
           std::chrono::duration_cast<std::chrono::milliseconds>(
               std::chrono::system_clock::now().time_since_epoch())
@@ -771,15 +960,14 @@ bool Harness::dispatchRequestToAgent(const std::string &threadId,
     // Note: summonAgent will use the default model from ConfigLoader
     // which is what we want for a brand new lead agent in a thread.
     Engine::instance().summonAgent(tid, metadata.leadPersona, preparedText,
-                                   true, "", "lead", "", requestedId, "", "",
+                                   true, "", "aster", "", requestedId, "", "",
                                    "", images);
     statusMessage = "Retry started on lead agent.";
     return true;
   }
 
   if (agentRunning) {
-    emitEvent(firmius::shared::MessageQueued{messageId, text, tid, fid});
-    emitEvent(firmius::shared::UserMessageSent{messageId, text, tid, images});
+    emitEvent(firmius::shared::MessageQueued{messageId, text, tid, fid, images});
     statusMessage = "Retry queued on running agent.";
     return true;
   }
@@ -1083,9 +1271,7 @@ void Harness::emitEvent(const firmius::shared::AppEvent &event) {
               }
             }
           } else if constexpr (std::is_same_v<T, AgentText>) {
-            // Don't print text in debug mode - it will be shown in turn summary
-            // Only print if we're NOT in debug logging mode
-            // (subscribers still get the event)
+            std::cout << ev.delta << std::flush;
           } else if constexpr (std::is_same_v<T, AgentProcessSpawned>) {
             std::cout << "[Process Spawned] " << ev.command << std::endl;
           } else if constexpr (std::is_same_v<T, AgentProcessOutput>) {
@@ -1940,13 +2126,49 @@ UndoResult Harness::undoMessages(int count) {
 
 UndoResult Harness::undoAfterTimestamp(uint64_t timestamp) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
-  if (focusedAgentId_.empty()) {
-    emitEvent(firmius::shared::AgentError{"", "No focused agent for undo"});
+  if (currentThreadId_.empty()) {
+    emitEvent(firmius::shared::AgentError{"", "No active thread for undo"});
     return {};
   }
-  auto result =
-      Engine::instance().undoAgentAfterTimestamp(focusedAgentId_, timestamp);
-  return result;
+  UndoResult aggregate;
+  bool anyApplied = false;
+  for (const auto &agentId : listAgents(currentThreadId_)) {
+    auto agent = AgentRegistry::instance().getAgent(agentId);
+    if (!agent || agent->isRunning()) {
+      continue;
+    }
+    const auto &history = agent->getContext().history;
+    if (!history) {
+      continue;
+    }
+    bool hasTurnAfterTimestamp = false;
+    for (const auto &turn : history->turns) {
+      for (const auto &msg : turn.messages) {
+        if (msg.timestamp > timestamp) {
+          hasTurnAfterTimestamp = true;
+          break;
+        }
+      }
+      if (hasTurnAfterTimestamp) {
+        break;
+      }
+    }
+    if (!hasTurnAfterTimestamp) {
+      continue;
+    }
+    auto result = Engine::instance().undoAgentAfterTimestamp(agentId, timestamp);
+    aggregate.turnsRemoved += result.turnsRemoved;
+    aggregate.restoredTurns += result.restoredTurns;
+    aggregate.compactionReversed =
+        aggregate.compactionReversed || result.compactionReversed;
+    aggregate.willExceedContext =
+        aggregate.willExceedContext || result.willExceedContext;
+    anyApplied = true;
+  }
+  if (!anyApplied) {
+    emitEvent(firmius::shared::AgentError{"", "No undoable history after timestamp"});
+  }
+  return aggregate;
 }
 
 void Harness::compactFocusedAgent() {
@@ -2090,6 +2312,9 @@ void Harness::drainQueueForAgent(const std::string &agentId,
   for (const auto &item : batch) {
     emitEvent(
         firmius::shared::MessageDequeued{item.id, item.threadId, item.agentId});
+    emitEvent(
+        firmius::shared::UserMessageSent{item.id, item.text, item.threadId,
+                                         item.images});
   }
 
   auto appendQueuedUserTurn = [&](const QueuedMessage &item) {
@@ -2328,7 +2553,7 @@ std::size_t Harness::failOwnedLocks(const std::string &agentId,
   std::size_t failed = 0;
   std::vector<std::string> lockIds;
   tm.mutateFleetState(threadId, [&](FleetState &state) {
-    const uint64_t now = worktools::nowEpochMs();
+    const uint64_t now = work::nowEpochMs();
     for (auto &lock : state.locks) {
       if (lock.ownerAgentId != agentId) {
         continue;

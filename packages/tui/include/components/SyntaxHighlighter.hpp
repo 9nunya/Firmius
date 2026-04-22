@@ -27,6 +27,7 @@ const TSLanguage *tree_sitter_cmake(void);
 const TSLanguage *tree_sitter_lua(void);
 const TSLanguage *tree_sitter_luau(void);
 const TSLanguage *tree_sitter_markdown(void);
+const TSLanguage *tree_sitter_bash(void);
 }
 
 namespace firmius::tui {

@@ -43,7 +43,7 @@ createClientForServer(const std::string &serverName,
       return nullptr;
     }
 
-    return std::make_unique<mcp::McpClient>(std::move(process), ctx);
+    return std::make_unique<mcp::McpClient>(std::move(process));
   }
 
   if (server.transport == "http") {
@@ -58,7 +58,7 @@ createClientForServer(const std::string &serverName,
     httpConfig.authBearerToken = server.authBearerToken;
     httpConfig.allowInsecureTls = server.allowInsecureTls;
     httpConfig.caCertPath = server.caCertPath;
-    return std::make_unique<mcp::McpClient>(httpConfig, ctx);
+    return std::make_unique<mcp::McpClient>(httpConfig);
   }
 
   error = "Unsupported MCP transport for server '" + serverName + "': " +

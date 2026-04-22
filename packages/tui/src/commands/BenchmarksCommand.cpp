@@ -164,7 +164,7 @@ void BenchmarksCommand::execute(CommandCtx &ctx,
     hostOptions.volumeMounts.push_back(cacheDir + ":/host_cache");
   }
 
-  const std::string threadId = harness.newThread(hostOptions, "/work", "worker");
+  const std::string threadId = harness.newThread(hostOptions, "/work", "forge");
   if (threadId.empty()) {
     NotificationManager::instance().notifyError(
         "Benchmarks", "Failed to create benchmark thread.", false);
@@ -175,7 +175,7 @@ void BenchmarksCommand::execute(CommandCtx &ctx,
   std::string agentId;
   try {
     agentId = firmius::core::Engine::instance().createAgent(
-        threadId, "worker", true, "", "worker", "Benchmark Worker");
+        threadId, "forge", true, "", "forge", "Benchmark Forge");
   } catch (const std::exception &ex) {
     NotificationManager::instance().notifyError(
         "Benchmarks", "Failed to create worker agent: " + std::string(ex.what()),
@@ -239,7 +239,7 @@ void BenchmarksCommand::execute(CommandCtx &ctx,
       firmius::core::BenchmarkConfig benchmarkConfig;
       benchmarkConfig.hostOptions.type = firmius::shared::HostType::Docker;
       benchmarkConfig.cwd = "/work";
-      benchmarkConfig.personaName = "worker";
+      benchmarkConfig.personaName = "forge";
       benchmarkConfig.providerId = config.defaultProviderId;
       benchmarkConfig.modelId = config.defaultModelId;
       benchmarkConfig.modelVariant = config.defaultModelVariant;

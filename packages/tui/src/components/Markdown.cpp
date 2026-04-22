@@ -4,10 +4,12 @@
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/dom/table.hpp>
 #include <ftxui/screen/terminal.hpp>
-#include <regex>
+#include <optional>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <vector>
+#include <unordered_map>
 
 namespace firmius::tui {
 
@@ -18,65 +20,222 @@ void SetMarkdownWidth(int width) { g_markdown_width = width; }
 
 namespace {
 
-std::string extractXmlAttribute(const std::string &attrs,
-                                const std::string &name) {
-  std::regex pattern(name + R"re(="([^"]*)")re");
-  std::smatch match;
-  if (std::regex_search(attrs, match, pattern) && match.size() >= 2) {
-    return match[1].str();
+struct MarkdownCacheKey {
+  std::string text;
+  bool dim;
+  int width;
+
+  bool operator==(const MarkdownCacheKey& other) const {
+    return text == other.text && dim == other.dim && width == other.width;
+  }
+};
+
+struct MarkdownCacheHasher {
+  std::size_t operator()(const MarkdownCacheKey& key) const {
+    std::size_t h = std::hash<std::string>{}(key.text);
+    h ^= std::hash<bool>{}(key.dim) + 0x9e3779b9 + (h << 6) + (h >> 2);
+    h ^= std::hash<int>{}(key.width) + 0x9e3779b9 + (h << 6) + (h >> 2);
+    return h;
+  }
+};
+
+using MarkdownCache = std::unordered_map<MarkdownCacheKey, ftxui::Element, MarkdownCacheHasher>;
+
+MarkdownCache& getMarkdownCache() {
+  static thread_local MarkdownCache cache;
+  return cache;
+}
+
+std::vector<MarkdownCacheKey>& getMarkdownCacheOrder() {
+  static thread_local std::vector<MarkdownCacheKey> order;
+  return order;
+}
+
+void rememberMarkdownCacheKey(const MarkdownCacheKey& key) {
+  auto& order = getMarkdownCacheOrder();
+  order.push_back(key);
+  constexpr std::size_t kMaxEntries = 20000;
+  constexpr std::size_t kTrimTo = 16000;
+  if (order.size() > kMaxEntries) {
+    auto& cache = getMarkdownCache();
+    const std::size_t drop_count = order.size() - kTrimTo;
+    for (std::size_t i = 0; i < drop_count; ++i) cache.erase(order[i]);
+    order.erase(order.begin(), order.begin() + static_cast<std::ptrdiff_t>(drop_count));
+  }
+}
+
+std::string_view trimAsciiWhitespace(std::string_view value) {
+  while (!value.empty() &&
+         std::isspace(static_cast<unsigned char>(value.front()))) {
+    value.remove_prefix(1);
+  }
+  while (!value.empty() &&
+         std::isspace(static_cast<unsigned char>(value.back()))) {
+    value.remove_suffix(1);
+  }
+  return value;
+}
+
+std::string extractXmlAttribute(std::string_view attrs,
+                                std::string_view name) {
+  std::size_t pos = 0;
+  while (pos < attrs.size()) {
+    while (pos < attrs.size() &&
+           std::isspace(static_cast<unsigned char>(attrs[pos]))) {
+      ++pos;
+    }
+    if (pos >= attrs.size()) {
+      break;
+    }
+
+    const std::size_t keyStart = pos;
+    while (pos < attrs.size() && attrs[pos] != '=' &&
+           !std::isspace(static_cast<unsigned char>(attrs[pos]))) {
+      ++pos;
+    }
+    const std::string_view key = attrs.substr(keyStart, pos - keyStart);
+
+    while (pos < attrs.size() &&
+           std::isspace(static_cast<unsigned char>(attrs[pos]))) {
+      ++pos;
+    }
+    if (pos >= attrs.size() || attrs[pos] != '=') {
+      while (pos < attrs.size() && attrs[pos] != '>' &&
+             !std::isspace(static_cast<unsigned char>(attrs[pos]))) {
+        ++pos;
+      }
+      continue;
+    }
+    ++pos;
+
+    while (pos < attrs.size() &&
+           std::isspace(static_cast<unsigned char>(attrs[pos]))) {
+      ++pos;
+    }
+    if (pos >= attrs.size()) {
+      break;
+    }
+
+    std::string_view value;
+    if (attrs[pos] == '"' || attrs[pos] == '\'') {
+      const char quote = attrs[pos++];
+      const std::size_t valueStart = pos;
+      while (pos < attrs.size() && attrs[pos] != quote) {
+        ++pos;
+      }
+      value = attrs.substr(valueStart, pos - valueStart);
+      if (pos < attrs.size()) {
+        ++pos;
+      }
+    } else {
+      const std::size_t valueStart = pos;
+      while (pos < attrs.size() &&
+             !std::isspace(static_cast<unsigned char>(attrs[pos])) &&
+             attrs[pos] != '>') {
+        ++pos;
+      }
+      value = attrs.substr(valueStart, pos - valueStart);
+    }
+
+    if (key == name) {
+      return std::string(value);
+    }
   }
   return "";
 }
 
-std::string collapseXmlTagReferences(const std::string &input,
-                                     const std::regex &pattern,
-                                     const std::function<std::string(
-                                         const std::smatch &)> &render) {
+std::optional<std::size_t> findTagEnd(std::string_view input,
+                                      std::size_t start) {
+  bool inQuote = false;
+  char quote = '\0';
+  for (std::size_t i = start; i < input.size(); ++i) {
+    const char ch = input[i];
+    if (inQuote) {
+      if (ch == quote) {
+        inQuote = false;
+      }
+      continue;
+    }
+    if (ch == '"' || ch == '\'') {
+      inQuote = true;
+      quote = ch;
+      continue;
+    }
+    if (ch == '>') {
+      return i;
+    }
+  }
+  return std::nullopt;
+}
+
+std::string collapseXmlTagReferences(
+    std::string_view input, std::string_view tagName,
+    const std::function<std::string(std::string_view, std::string_view)> &render) {
+  const std::string openTag = "<" + std::string(tagName);
+  const std::string closeTag = "</" + std::string(tagName) + ">";
+
   std::string output;
   std::size_t cursor = 0;
-  for (std::sregex_iterator it(input.begin(), input.end(), pattern), end;
-       it != end; ++it) {
-    const std::size_t start = static_cast<std::size_t>(it->position());
-    const std::size_t len = static_cast<std::size_t>(it->length());
-    if (start > cursor) {
-      output.append(input, cursor, start - cursor);
+  while (cursor < input.size()) {
+    const std::size_t start = input.find(openTag, cursor);
+    if (start == std::string_view::npos) {
+      output.append(input.substr(cursor));
+      break;
     }
-    output += render(*it);
-    cursor = start + len;
+
+    output.append(input.substr(cursor, start - cursor));
+
+    const std::size_t nameEnd = start + openTag.size();
+    if (nameEnd < input.size()) {
+      const char next = input[nameEnd];
+      if (!std::isspace(static_cast<unsigned char>(next)) && next != '>') {
+        output.append(input.substr(start, openTag.size()));
+        cursor = nameEnd;
+        continue;
+      }
+    }
+
+    const auto tagEnd = findTagEnd(input, nameEnd);
+    if (!tagEnd.has_value()) {
+      output.append(input.substr(start));
+      break;
+    }
+
+    const std::size_t contentStart = *tagEnd + 1;
+    const std::size_t close = input.find(closeTag, contentStart);
+    if (close == std::string_view::npos) {
+      output.append(input.substr(start));
+      break;
+    }
+
+    const std::string_view attrs =
+        trimAsciiWhitespace(input.substr(nameEnd, *tagEnd - nameEnd));
+    const std::string_view fullTag =
+        input.substr(start, close + closeTag.size() - start);
+    output += render(attrs, fullTag);
+    cursor = close + closeTag.size();
   }
-  output.append(input, cursor, std::string::npos);
   return output;
 }
 
 } // namespace
 
 std::string CollapseExpandedReferencesForDisplay(const std::string &text) {
-  static const std::regex artifactPattern(
-      R"(<artifact\b([^>]*)>[\s\S]*?<\/artifact>)");
-  static const std::regex filePattern(R"(<file\b([^>]*)>[\s\S]*?<\/file>)");
-
-  std::string collapsedArtifacts = collapseXmlTagReferences(
-      text, artifactPattern, [](const std::smatch &match) {
-        if (match.size() < 2) {
-          return match.str();
-        }
-        const std::string attrs = match[1].str();
+  const std::string collapsedArtifacts = collapseXmlTagReferences(
+      text, "artifact", [](std::string_view attrs, std::string_view fullTag) {
         const std::string path = extractXmlAttribute(attrs, "path");
         if (path.empty()) {
-          return match.str();
+          return std::string(fullTag);
         }
         return "@artifact:" + path;
       });
 
   return collapseXmlTagReferences(
-      collapsedArtifacts, filePattern, [](const std::smatch &match) {
-        if (match.size() < 2) {
-          return match.str();
-        }
-        const std::string attrs = match[1].str();
+      collapsedArtifacts, "file",
+      [](std::string_view attrs, std::string_view fullTag) {
         const std::string path = extractXmlAttribute(attrs, "path");
         if (path.empty()) {
-          return match.str();
+          return std::string(fullTag);
         }
         const std::string lines = extractXmlAttribute(attrs, "lines");
         if (!lines.empty()) {
@@ -89,12 +248,14 @@ std::string CollapseExpandedReferencesForDisplay(const std::string &text) {
 std::string ClampTranscriptTextForDisplay(const std::string &text) {
   size_t start = 0;
   while (start < text.size() &&
-         std::isspace(static_cast<unsigned char>(text[start])))
+         std::isspace(static_cast<unsigned char>(text[start]))) {
     start++;
+  }
   size_t end = text.size();
   while (end > start &&
-         std::isspace(static_cast<unsigned char>(text[end - 1])))
+         std::isspace(static_cast<unsigned char>(text[end - 1]))) {
     end--;
+  }
   return text.substr(start, end - start);
 }
 
@@ -423,15 +584,21 @@ static ftxui::Element renderInline(const std::string &text, bool dim) {
 }
 
 ftxui::Element RenderMarkdown(const std::string &text, bool dim) {
-  const std::string displayText = CollapseExpandedReferencesForDisplay(text);
-
   // Calculate effective width from terminal size if global not set
   int term_width = ftxui::Terminal::Size().dimx;
   int effective_width = g_markdown_width > 0
                             ? g_markdown_width
                             : (term_width > 0 ? term_width : 80);
-  // Reserve space for borders, prefixes, and padding
-  int content_width = std::max(10, effective_width - 4);
+
+  // Check cache
+  MarkdownCacheKey key{text, dim, effective_width};
+  auto& cache = getMarkdownCache();
+  auto it = cache.find(key);
+  if (it != cache.end()) {
+    return it->second;
+  }
+
+  const std::string displayText = CollapseExpandedReferencesForDisplay(text);
 
   std::vector<ftxui::Element> out;
   auto lines = splitLines(displayText);
@@ -451,7 +618,7 @@ ftxui::Element RenderMarkdown(const std::string &text, bool dim) {
       return;
     std::vector<ftxui::Element> code_elems;
     // Use smaller wrap for code on narrow terminals
-    const size_t kCodeWrap = static_cast<size_t>(std::max(10, content_width));
+    const size_t kCodeWrap = static_cast<size_t>(std::max(10, effective_width - 4));
     for (const auto &l : code_lines) {
       if (l.size() <= kCodeWrap) {
         auto e = ftxui::text(l);
@@ -507,7 +674,7 @@ ftxui::Element RenderMarkdown(const std::string &text, bool dim) {
       size_t num_cols = header.size();
       if (num_cols == 0)
         num_cols = 1;
-      int col_width = content_width / static_cast<int>(num_cols);
+      int col_width = (effective_width - 4) / static_cast<int>(num_cols);
       // Ensure at least some minimum width per column
       col_width = std::max(5, col_width);
 
@@ -548,8 +715,7 @@ ftxui::Element RenderMarkdown(const std::string &text, bool dim) {
       }
 
       out.push_back(table.Render() |
-                    ftxui::size(ftxui::WIDTH, ftxui::LESS_THAN, content_width));
-      continue;
+                    ftxui::size(ftxui::WIDTH, ftxui::LESS_THAN, effective_width - 4));
       continue;
     }
 
@@ -593,10 +759,17 @@ ftxui::Element RenderMarkdown(const std::string &text, bool dim) {
     flush_para();
   }
 
+  ftxui::Element result;
   if (out.empty()) {
-    return ftxui::text("");
+    result = ftxui::text("");
+  } else {
+    result = ftxui::vbox(std::move(out));
   }
-  return ftxui::vbox(std::move(out));
+
+  // Add to cache (limited size to avoid memory leak in long-running app)
+  cache[key] = result;
+  rememberMarkdownCacheKey(key);
+  return result;
 }
 
 #ifdef __GNUC__

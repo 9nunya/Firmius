@@ -6,6 +6,7 @@
 namespace firmius::tui {
 
 bool IsWebSearchFamilyTool(const std::string &tool_name);
+ToolPresentation BuildWebFetchToolPresentation(const firmius::shared::ToolCallView &view);
 
 ToolPresentation BuildWebSearchToolPresentation(const firmius::shared::ToolCallView &view);
 

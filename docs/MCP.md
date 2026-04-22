@@ -1,30 +1,23 @@
-# MCP IN FIRMIUS (YEAH, IT'S REAL NOW)
+# MCP in Firmius
 
-Old docs used to talk about MCP like it was some distant prophecy.
+Firmius treats MCP like infrastructure, not a demo feature.
 
-Nope.
-This doc covers the MCP behavior that is **actually implemented in the code right now**.
+If an agent runtime claims MCP support, it should do more than list a server and hope for the best. Firmius supports the full day-to-day flow: configure servers, inspect capabilities, load what matters into runtime state, call tools, read resources, resolve prompts, and surface loaded tools directly inside the agent tool list.
 
-For starter configs without credentials, go peek at `examples/mcp/`.
+## Supported transports
 
-## What transport modes exist?
-
-Firmius supports these `mcpServers` transport values today:
+Firmius currently supports these `mcpServers` transport values:
 
 - `stdio`
 - `http`
 
-`remote` is **not** its own separate transport key in the current parser/runtime.
-
-## Where the config lives
-
-MCP servers are configured in:
+## Where MCP config lives
 
 ```text
 ~/.firmius/config.json
 ```
 
-Top-level key:
+Top-level shape:
 
 ```json
 {
@@ -32,11 +25,9 @@ Top-level key:
 }
 ```
 
-Each server is keyed by server name.
+Each entry is keyed by server name.
 
 ## Canonical config shape
-
-This is the canonical nested shape written by the config loader:
 
 ```json
 {
@@ -70,145 +61,58 @@ This is the canonical nested shape written by the config loader:
 }
 ```
 
-## Important notes before you get clever
+## How MCP works in Firmius
 
-- Legacy flat fields are still accepted on load for backward compatibility.
-- Save output gets normalized back into the nested canonical shape above.
-- Disabled servers are ignored by `mcp_list` and `mcp_search`.
-- `allowInsecureTls` and `caCertPath` are parsed, but current HTTP runtime still errors if you try to use them.
+> Runtime note: the old static MCP helper tools are being retired from the live tool surface.
 
-So yeah... `stdio` and straightforward `http` are the happy paths right now.
+The runtime path that matters is:
 
-## The tool model, minus the mystery
+1. configure MCP servers in config
+2. load capabilities into runtime state through the MCP manager path
+3. let loaded MCP tools surface dynamically as real callable tool names
 
-### Discovery
-
-Use these first:
-
-- `mcp_list` — list tools/resources/prompts on enabled configured server(s)
-- `mcp_search` — search capability names/descriptions across enabled configured server(s)
-
-### Loading runtime state
-
-`mcp_load` validates your requested tools/resources/prompts against live server capabilities and stores the selection in runtime state.
-
-Loaded state is tracked in the runtime overlay via:
-
-- `loadedMcpServers`
-- `loadedMcpTools`
-- `loadedMcpResources`
-- `loadedMcpPrompts`
-
-### Reads that DO require loaded state
-
-These need a successful `mcp_load` first:
-
-- `mcp_read_resource`
-- `mcp_get_prompt`
-
-### Calls that do NOT require loaded state
-
-`mcp_call` is looser.
-
-It validates the requested server/tool against live `tools/list`, but it does **not** require a prior `mcp_load` to succeed.
-
-### Dynamic tool exposure
-
-After a successful `mcp_load`, loaded MCP tools can also appear as dynamic tool names in this shape:
+Dynamic loaded MCP tools appear as:
 
 ```text
 mcp__<server>__<tool>
 ```
 
-That means you can go from generic MCP discovery into a tighter “this specific remote tool is now in the live tool list” flow.
+Runtime state still tracks:
 
-## Credential-free quick flow
+`loadedMcpServers`
+`loadedMcpTools`
+`loadedMcpResources`
+`loadedMcpPrompts`
 
-Wanna test MCP without turning this into a credential-management side quest? Use the local filesystem stdio server from `examples/mcp/config.filesystem-stdio.json`.
+That means the system can move from MCP setup into a tighter active tool surface for the thread without depending on a permanent static MCP family in the registry.
 
-### 1) List server capabilities
+## Dynamic MCP flow
 
-Tool: `mcp_list`
+For a zero-credential setup, use the filesystem example in [`examples/mcp/`](../examples/mcp/).
 
-```json
-{"server_name":"filesystem"}
+Typical flow:
+
+1. configure the server
+2. load the capability set into runtime state
+3. call the dynamic tool name that appears after loading
+
+Example dynamic tool name:
+
+```text
+mcp__filesystem__read_file
 ```
 
-### 2) Search what is available
+## Common failure cases
 
-Tool: `mcp_search`
+`Unknown MCP server` — the name is missing from `mcpServers`
+`MCP server is disabled` — the transport exists but `enabled` is false
+`MCP server command is empty` — `stdio.command` is missing
+`MCP server URL is empty` — `http.url` is missing
+`MCP server is not loaded` — the runtime has not accepted that server into loaded state
+`Loaded MCP tool not available on server` — the dynamic tool was not actually loaded for that server
 
-```json
-{"query":"read","server_name":"filesystem"}
-```
+## Why this matters
 
-### 3) Load what you want for this run
+Firmius still supports real MCP-backed work, but the durable runtime surface is the dynamic loaded tool itself, not a permanently advertised static MCP helper family.
 
-Tool: `mcp_load`
-
-```json
-{
-  "server_name":"filesystem",
-  "tools":["read_file"],
-  "resources":[],
-  "prompts":[]
-}
-```
-
-### 4) Call a remote MCP tool
-
-Tool: `mcp_call`
-
-```json
-{
-  "server_name":"filesystem",
-  "tool_name":"read_file",
-  "arguments":{"path":"/tmp/example.txt"}
-}
-```
-
-### 5) Load and read a resource or prompt
-
-Tool: `mcp_load`
-
-```json
-{
-  "server_name":"filesystem",
-  "resources":["file:///tmp/example.txt"],
-  "prompts":[]
-}
-```
-
-Tool: `mcp_read_resource`
-
-```json
-{"server_name":"filesystem","uri":"file:///tmp/example.txt"}
-```
-
-Tool: `mcp_get_prompt`
-
-```json
-{"server_name":"filesystem","prompt_name":"example_prompt","arguments":{}}
-```
-
-## Common failure causes
-
-- `Unknown MCP server` — the name is not present under `mcpServers`.
-- `MCP server is disabled` — set `enabled: true` on the active transport block.
-- `MCP server command is empty` — your `stdio.command` is missing.
-- `MCP server URL is empty` — your `http.url` is missing.
-- `MCP server is not loaded` — you tried a load-required read/get flow without `mcp_load`.
-- `MCP resource is not loaded...` — include the URI in `mcp_load`.
-- `MCP prompt is not loaded...` — include the prompt in `mcp_load`.
-
-## Short version
-
-If you just want the least annoying path:
-
-1. use the filesystem stdio example
-2. `mcp_list`
-3. `mcp_search`
-4. `mcp_load`
-5. `mcp_call`
-
-That's the happy path. Keep it boring first. Then get weird.
+That keeps the live tool block smaller and pushes the thread toward the real tool contract it can actually call.

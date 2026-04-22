@@ -41,24 +41,20 @@ void ensureJsonRpcSuccessOrThrow(const rapidjson::Document &response,
 
 } // namespace
 
-McpClient::McpClient(std::unique_ptr<shared::IHostProcess> process,
-                     shared::ToolContext &ctx)
-    : process_(std::move(process)), ctx_(ctx) {
+McpClient::McpClient(std::unique_ptr<shared::IHostProcess> process)
+    : process_(std::move(process)) {
   if (!process_) {
     throw std::runtime_error("MCP process handle is null");
   }
-  session_ = std::make_unique<McpStdioSession>(*process_, ctx_);
+  session_ = std::make_unique<McpStdioSession>(*process_);
 }
 
-McpClient::McpClient(const McpHttpTransportConfig &httpConfig,
-                     shared::ToolContext &ctx)
-    : ctx_(ctx) {
-  session_ = std::make_unique<McpHttpSession>(httpConfig, ctx_);
+McpClient::McpClient(const McpHttpTransportConfig &httpConfig) {
+  session_ = std::make_unique<McpHttpSession>(httpConfig);
 }
 
-McpClient::McpClient(std::unique_ptr<IMcpSession> session,
-                     shared::ToolContext &ctx)
-    : ctx_(ctx), session_(std::move(session)) {
+McpClient::McpClient(std::unique_ptr<IMcpSession> session)
+    : session_(std::move(session)) {
   if (!session_) {
     throw std::runtime_error("MCP session handle is null");
   }
@@ -78,7 +74,7 @@ McpClient::~McpClient() {
   }
 }
 
-void McpClient::initialize(const int timeoutMs) {
+void McpClient::initialize(const int timeoutMs, shared::ToolContext *ctx) {
   rapidjson::Document initParams;
   initParams.SetObject();
   auto &a = initParams.GetAllocator();
@@ -93,7 +89,7 @@ void McpClient::initialize(const int timeoutMs) {
 
   rapidjson::Document initResponse =
       session_->sendRequest(nextId_++, "initialize", initParams, timeoutMs,
-                            "initialize");
+                            "initialize", ctx);
   ensureJsonRpcSuccessOrThrow(initResponse, "initialize");
   validateInitializeResult(initResponse);
 
@@ -104,41 +100,41 @@ void McpClient::initialize(const int timeoutMs) {
   initialized_ = true;
 }
 
-rapidjson::Document McpClient::listTools(const int timeoutMs) {
+rapidjson::Document McpClient::listTools(const int timeoutMs, shared::ToolContext *ctx) {
   rapidjson::Document listParams;
   listParams.SetObject();
 
   rapidjson::Document listResponse =
       session_->sendRequest(nextId_++, "tools/list", listParams, timeoutMs,
-                            "tools/list");
+                            "tools/list", ctx);
   ensureJsonRpcSuccessOrThrow(listResponse, "tools/list");
   return listResponse;
 }
 
-rapidjson::Document McpClient::listResources(const int timeoutMs) {
+rapidjson::Document McpClient::listResources(const int timeoutMs, shared::ToolContext *ctx) {
   rapidjson::Document params;
   params.SetObject();
 
   rapidjson::Document response =
       session_->sendRequest(nextId_++, "resources/list", params, timeoutMs,
-                            "resources/list");
+                            "resources/list", ctx);
   ensureJsonRpcSuccessOrThrow(response, "resources/list");
   return response;
 }
 
-rapidjson::Document McpClient::listPrompts(const int timeoutMs) {
+rapidjson::Document McpClient::listPrompts(const int timeoutMs, shared::ToolContext *ctx) {
   rapidjson::Document params;
   params.SetObject();
 
   rapidjson::Document response =
       session_->sendRequest(nextId_++, "prompts/list", params, timeoutMs,
-                            "prompts/list");
+                            "prompts/list", ctx);
   ensureJsonRpcSuccessOrThrow(response, "prompts/list");
   return response;
 }
 
 rapidjson::Document McpClient::readResource(const std::string &resourceUri,
-                                             const int timeoutMs) {
+                                             const int timeoutMs, shared::ToolContext *ctx) {
   rapidjson::Document params;
   params.SetObject();
   auto &a = params.GetAllocator();
@@ -146,14 +142,14 @@ rapidjson::Document McpClient::readResource(const std::string &resourceUri,
 
   rapidjson::Document response =
       session_->sendRequest(nextId_++, "resources/read", params, timeoutMs,
-                            "resources/read");
+                            "resources/read", ctx);
   ensureJsonRpcSuccessOrThrow(response, "resources/read");
   return response;
 }
 
 rapidjson::Document McpClient::getPrompt(const std::string &promptName,
                                           const rapidjson::Document &arguments,
-                                          const int timeoutMs) {
+                                          const int timeoutMs, shared::ToolContext *ctx) {
   rapidjson::Document params;
   params.SetObject();
   auto &a = params.GetAllocator();
@@ -164,14 +160,14 @@ rapidjson::Document McpClient::getPrompt(const std::string &promptName,
 
   rapidjson::Document response =
       session_->sendRequest(nextId_++, "prompts/get", params, timeoutMs,
-                            "prompts/get");
+                            "prompts/get", ctx);
   ensureJsonRpcSuccessOrThrow(response, "prompts/get");
   return response;
 }
 
 rapidjson::Document McpClient::callTool(const std::string &toolName,
                                         const rapidjson::Document &arguments,
-                                        const int timeoutMs) {
+                                        const int timeoutMs, shared::ToolContext *ctx) {
   rapidjson::Document callParams;
   callParams.SetObject();
   auto &a = callParams.GetAllocator();
@@ -182,7 +178,7 @@ rapidjson::Document McpClient::callTool(const std::string &toolName,
 
   rapidjson::Document callResponse =
       session_->sendRequest(nextId_++, "tools/call", callParams, timeoutMs,
-                            "tools/call");
+                            "tools/call", ctx);
   ensureJsonRpcSuccessOrThrow(callResponse, "tools/call");
   return callResponse;
 }
@@ -201,10 +197,7 @@ void McpClient::shutdown(const int timeoutMs) {
   }
 
   try {
-    if (process_->inspect().running) {
-      (void)ctx_.waitFor(std::chrono::milliseconds(50));
-    }
-    if (process_->inspect().running) {
+    if (process_ && process_->inspect().running) {
       process_->kill();
     }
   } catch (...) {

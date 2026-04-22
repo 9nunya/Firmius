@@ -14,7 +14,7 @@ struct WebFetchInput {
 class WebFetchTool : public shared::TypedTool<WebFetchInput> {
 public:
     shared::ToolMetadata getMetadata() const override {
-        return {"web_fetch", "Fetch content from a URL", ToolScope::Web};
+        return {"web_fetch", "Web operations: fetch content from a URL.", ToolScope::Web};
     }
 
     std::shared_ptr<shared::JSONSchema> getSchema() const override {

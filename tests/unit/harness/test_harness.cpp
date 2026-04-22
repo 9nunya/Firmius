@@ -1742,6 +1742,10 @@ protected:
             base << "Base prompt";
         }
         {
+            std::ofstream aster(promptsDir_ / "aster.md");
+            aster << "---\nname: aster\ntitle: Aster\nwork_role: lead\nswitchable: true\nscopes: [\"FilesystemRead\"]\n---\nAster persona";
+        }
+        {
             std::ofstream lead(promptsDir_ / "lead.md");
             lead << "---\nname: lead\ntitle: Lead\nwork_role: lead\nscopes: [\"FilesystemRead\"]\n---\nLead persona";
         }
@@ -4988,6 +4992,46 @@ TEST_F(HarnessTest, IdleAgentModelSwitchAppliesImmediately) {
     const auto& ctx = agent->getContext();
     EXPECT_EQ(ctx.config.providerId, newProvider->getId());
     EXPECT_EQ(ctx.config.modelId, "idle-new-model");
+}
+
+TEST_F(HarnessTest, NewThreadFallsBackWhenConfiguredLeadPersonaIsMissing) {
+    auto& harness = Harness::instance();
+
+    std::filesystem::remove(promptsDir_ / "lead.md");
+    auto config = firmius::shared::ConfigLoader::instance().getConfig();
+    config.defaultLeadPersona = "lead";
+    harness.updateConfig(config);
+
+    const std::string threadId = harness.newThread({}, "/tmp", "");
+    ASSERT_FALSE(threadId.empty());
+
+    firmius::core::ThreadManager tm(
+        (testHome_ / ".firmius" / "threads").string());
+    const auto metadata = tm.getMetadata(threadId);
+    EXPECT_EQ(metadata.leadPersona, "aster");
+}
+
+TEST_F(HarnessTest, SendFallsBackWhenThreadLeadPersonaIsMissing) {
+    auto& harness = Harness::instance();
+    const std::string threadId = harness.newThread({}, "/tmp", "lead");
+    ASSERT_FALSE(threadId.empty());
+    ASSERT_TRUE(harness.switchThread(threadId));
+
+    std::filesystem::remove(promptsDir_ / "lead.md");
+
+    harness.send("hello after persona removal");
+    auto agent = waitForFocusedAgent();
+    ASSERT_TRUE(agent);
+    ASSERT_TRUE(waitForStopped(agent->getContext().identity.id));
+
+    const auto& history = *agent->getContext().history;
+    EXPECT_TRUE(historyContainsUserText(history, "hello after persona removal"));
+    EXPECT_TRUE(historyContainsAssistantText(history, "resumed"));
+
+    firmius::core::ThreadManager tm(
+        (testHome_ / ".firmius" / "threads").string());
+    const auto metadata = tm.getMetadata(threadId);
+    EXPECT_EQ(metadata.leadPersona, "aster");
 }
 
 TEST_F(HarnessTest, RunningFocusedAgentSwitchIsQueuedAndAppliesNextTurn) {

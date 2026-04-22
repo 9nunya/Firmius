@@ -12,7 +12,7 @@ namespace firmius::core {
 using namespace firmius::shared;
 
 shared::ToolMetadata PythonExecuteTool::getMetadata() const {
-  return {"python_execute", "Executes arbitrary Python code on the host.",
+  return {"Python", "Executes arbitrary Python code on the host.",
           shared::ToolScope::Process};
 }
 

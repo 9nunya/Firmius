@@ -394,11 +394,13 @@ std::string AntigravityProtocol::prepareRequestBody(const AgentHistory &history,
           p.AddMember("text", rapidjson::Value(text->text.c_str(), a), a);
           parts.PushBack(p, a);
         } else if (auto *thinking = std::get_if<ThinkingContent>(&part)) {
-          // Include thinking content as text (without signature)
-          // The reference implementation strips signatures but keeps the text
-          rapidjson::Value p(rapidjson::kObjectType);
-          p.AddMember("text", rapidjson::Value(thinking->thinking.c_str(), a), a);
-          parts.PushBack(p, a);
+          (void)thinking;  // intentionally unused - we skip historical thinking
+          // Skip prior hidden reasoning from history.
+          // Historical thinking traces are not required for continuity and
+          // including them can cause the model to suppress separate thinking
+          // output on subsequent turns (observed on Gemini 3 / Antigravity).
+          // The model will still emit fresh thinking chunks for the current turn.
+          continue;
         } else if (auto *call = std::get_if<ToolCallContent>(&part)) {
           rapidjson::Value p(rapidjson::kObjectType);
           rapidjson::Value fn(rapidjson::kObjectType);

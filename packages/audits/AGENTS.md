@@ -62,6 +62,25 @@ packages/audits/
 ./build/packages/audits/firmius_audit
 ```
 
+
+### Reasoning Trace Continuity (Gemini 3 / Antigravity)
+
+This audit is intended to reproduce and then prevent a regression where Gemini 3 Flash / antigravity Gemini 3* models only emit reasoning/thinking deltas on the first turn, and then stop emitting them on subsequent turns (especially after tool results).
+
+**Build** (once core is green):
+```bash
+cmake --build build --target firmius_audit
+```
+
+**Run**:
+```bash
+./build/packages/audits/firmius_audit --audit reasoning_trace_continuity
+```
+
+**Expected**:
+Fails on broken builds: turn 2+ reports `0 thinking chunks`.
+Passes after the provider fix: all turns report `>0 thinking chunks`.
+
 ---
 
 ## ANTI-PATTERNS

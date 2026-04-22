@@ -1,25 +1,23 @@
-# HOW TO DRIVE THIS THING WITHOUT YELLING AT IT TOO MUCH
+# Usage
 
-OK... so you actually wanna USE Firmius now. SICK.
+This is the practical guide for getting Firmius running and using the parts that matter first.
 
-This doc is the practical surface: how to launch it, how to move around, and where the “oh wait that feature is real now?” stuff lives.
-
-## 1) Start the beast
-
-Build it first:
+## Build
 
 ```bash
 cmake -S . -B build
 cmake --build build -j$(nproc)
 ```
 
-Then run the normal TUI:
+## Launch
+
+Start the main TUI:
 
 ```bash
 ./build/packages/cli/firmius
 ```
 
-Useful launch variants:
+Useful variants:
 
 ```bash
 # Continue the last session
@@ -28,7 +26,7 @@ Useful launch variants:
 # Start a fresh thread and immediately send a prompt
 ./build/packages/cli/firmius --prompt "map this repo"
 
-# Same thing, but read the prompt from a file
+# Read the prompt from a file
 ./build/packages/cli/firmius --prompt-file task.md
 
 # Start in a specific working directory
@@ -45,70 +43,68 @@ Useful launch variants:
 
 Notes:
 
-- `request` is the default permission mode.
-- `always-allow` and `deny-all` also accept the short aliases `allow` and `deny`.
+- `request` is the default permission mode
+- `always-allow` and `deny-all` also accept `allow` and `deny`
 
-## 2) Slash commands that matter
+## Commands worth learning first
 
-These are the core built-in commands registered by the TUI right now:
-
-| Command | What it does |
+| Command | Purpose |
 | --- | --- |
-| `/new` | Create a new thread. |
-| `/threads` | Switch to an existing thread. |
-| `/models` | Switch the focused model. |
-| `/undo [count]` | Undo the last N turns. |
-| `/config` | Show current config. |
-| `/memory` | Configure rolling memory models and occupancy presets. |
-| `/connect <provider>` | Attach a provider with OAuth or API-key flow. |
-| `/accounts <provider>` | List accounts/keys for a provider. |
-| `/quotas <provider>` | Show provider quotas when supported. |
-| `/router` | Manage model routing categories. |
-| `/purposes` | Map personas to route categories. |
-| `/mcp` | Open the MCP connections/config UI. |
-| `/benchmarks <id> [task_id]` | Launch a benchmark run. |
-| `/quit` | Exit cleanly. |
+| `/new` | Create a new thread |
+| `/threads` | Switch to another thread |
+| `/models` | Change the focused model |
+| `/undo [count]` | Rewind the last N turns |
+| `/config` | View current config |
+| `/memory` | Configure rolling-memory behavior |
+| `/connect <provider>` | Add a provider account |
+| `/accounts <provider>` | Inspect stored accounts or keys |
+| `/quotas <provider>` | View provider quota state when supported |
+| `/router` | Manage routing categories |
+| `/purposes` | Map purposes to routes |
+| `/mcp` | Configure MCP servers and connections |
+| `/benchmarks <id> [task_id]` | Run a benchmark lane |
+| `/quit` | Exit cleanly |
 
-## 3) Purposes are the job system
+## Purpose lanes
 
-In Firmius, a “purpose” is the system prompt + operating contract for an agent. It's not just flavor text. It decides what lane that agent owns.
+A purpose in Firmius is not just flavor text. It defines how an agent participates in the session.
 
-The default cast you should know:
+The default cast:
 
-- **Lead** — discovery, routing, review, final decisions.
-- **Executor** — edits code and lands chunk work.
-- **Planner** — drafts execution structure when work gets bigger.
-- **Plan Checker** — yells at bad plans until they stop being bad.
-- **Worker** — executor-owned bounded subtask goblin.
-- **Scout** — read-only reconnaissance gremlin.
+- **Lead** — routing, review, and high-level decisions
+- **Executor** — code changes and chunk execution
+- **Planner** — execution structure for larger work
+- **Plan Checker** — plan validation and pushback
+- **Worker** — bounded delegated execution
+- **Scout** — read-only exploration
 
 Use:
 
-- `/purposes` to map a persona to a routing category.
-- `/router` to define what those route categories actually point at.
+- `/purposes` to decide which route a purpose uses
+- `/router` to define which model lane each route points to
 
-So yeah — you can decide that `planner` should go to one model lane, `executor` to another, and `lead` to the “think harder, be less stupid” lane.
+This is how you stop treating every model like it should do every job equally well.
 
-## 4) Workflows are just markdown, which rules
+## Workflows
 
-Firmius bootstraps built-in workflow files into `~/.firmius/workflows/` and then registers **every workflow markdown file as its own slash command**.
+Firmius turns workflow markdown into slash commands.
 
-Built-in examples in this repo:
+Built-in files ship in `workflows/`, are bootstrapped into `~/.firmius/workflows/`, and then registered by filename.
+
+Examples in this repo:
 
 - `/explore`
 - `/deep_interview`
 - `/evidence_sweep`
 - `/repair_wave`
 
-The command name comes from the file stem, not the pretty display title.
-
-You can also add your own `.md` files under:
+You can add your own `.md` files under:
 
 ```text
 ~/.firmius/workflows/
 ```
 
-Or override the workflow directory entirely with:
+Or override the directory entirely:
 
 ```bash
 FIRMIUS_WORKFLOWS_DIR=/some/other/folder ./build/packages/cli/firmius
@@ -126,16 +122,16 @@ args:
     description: What to inspect
 ---
 
-Investigate $1 and give me the real shape of the codebase.
+Investigate $1 and explain the real shape of the codebase.
 ```
 
-Save that as `repo_explore.md`, restart Firmius, and boom: `/repo_explore` exists.
+Save that as `repo_explore.md`, restart Firmius, and `/repo_explore` becomes available.
 
-## 5) Providers, accounts, quotas, and other API nonsense
+## Providers and model routing
 
-Firmius supports a mix of OAuth-backed and API-key-backed providers.
+Firmius supports multiple providers and does not force the entire product through one account or one model lane.
 
-Current lazy-registered provider IDs in code:
+Current provider IDs include:
 
 - `nanogpt`
 - `nvidia`
@@ -149,24 +145,22 @@ Current lazy-registered provider IDs in code:
 - `kimi`
 - `kilo`
 
-Practical flow:
+Typical flow:
 
 1. `/connect <provider>`
-2. complete the wizard
-3. `/accounts <provider>` if you wanna inspect what got stored
-4. `/quotas <provider>` if the provider tracks quota buckets
+2. complete the setup flow
+3. `/accounts <provider>` to inspect what is stored
+4. `/quotas <provider>` when the provider exposes quota state
 
-Also important: Firmius is not stuck on one account/key per provider. The provider layer has retry/switch logic, so this isn't “paste one secret and pray”.
+## Memory and recall
 
-## 6) Memory is not just truncation anymore
+Open `/memory` to configure the rolling-memory system.
 
-`/memory` opens the rolling-memory config UI.
-
-Stuff you can tune there right now:
+Current controls include:
 
 - mode: `rolling_forever`, `legacy_compaction`, or `disabled`
 - preset: `aggressive`, `balanced`, `extended`, or `custom`
-- target / buffer / emergency occupancy thresholds
+- target, buffer, and emergency occupancy thresholds
 - retained tail ratio
 - minimum retained tail tokens
 - minimum chunk tokens
@@ -175,28 +169,33 @@ Stuff you can tune there right now:
   - reflector
   - working-memory updater
 
-Under the hood, Firmius also keeps runtime overlays for:
+Firmius also maintains runtime overlays for:
 
 - active work state
-- watched files (`read`, `fully read`, `edited`)
+- watched files
 - loaded skills
-- loaded MCP capabilities
+- loaded MCP state
 - rolling-memory status
-- durable user/project memory
+- durable user and project memory
 
-The durable memory workspace lives under `~/.firmius/user/` and includes:
+Durable memory lives under `~/.firmius/user/` and includes `USER.md`, `BEHAVIOR.md`, and project-specific logs.
 
-- `USER.md`
-- `BEHAVIOR.md`
-- per-project fix logs
+## MCP flow
 
-So yes... it remembers more than “the last few turns before the context window explodes”.
+Firmius supports MCP over `stdio` and `http`.
 
-## 7) Benchmarks and audits
+Recommended first run:
 
-Benchmark mode is built in.
+1. copy an example from `examples/mcp/`
+2. configure a filesystem server
+3. confirm the configured server is enabled
+4. call the resulting dynamic tool name such as `mcp__<server>__<tool>`
 
-In the TUI:
+For the current MCP runtime model, see [`docs/MCP.md`](MCP.md).
+
+## Benchmarks and audits
+
+Benchmarks are available directly from the TUI:
 
 ```text
 /benchmarks mbpp
@@ -206,9 +205,9 @@ In the TUI:
 
 Notes:
 
-- benchmark runs spin up a Docker-backed worker lane
-- Docker needs to be alive
-- the image `firmius-sandbox:latest` needs to exist first
+- benchmark runs use a Docker-backed worker lane
+- Docker needs to be available
+- the `firmius-sandbox:latest` image needs to exist first
 
 There is also a dedicated audit CLI:
 
@@ -216,27 +215,25 @@ There is also a dedicated audit CLI:
 ./build/packages/audits/firmius_audit --list
 ```
 
-That surface includes workflow audits, LSP audits, provider audits, quota audits, web fetch/search audits, harness chaos audits, benchmark audits, and more.
+That surface covers workflow, provider, MCP, LSP, quota, harness, benchmark, and other validation lanes.
 
-## 8) Threading / persistence / recovery
+## Persistence
 
-Firmius persists way more than just “chat messages”.
+Firmius persists more than messages. Threads keep:
 
-The thread database tracks:
-
-- thread metadata
+- metadata
 - agent turns
 - plans
 - todos
-- live agent state
+- live state
 - rolling-memory state
 - compaction snapshots
 - artifacts
 
-Which is why artifacts, undo, resume, memory recall, and planning state all feel like part of the same machine instead of a pile of disconnected hacks.
+That is why resume, undo, recall, and handoffs stay coherent across longer sessions.
 
-## 9) Where to go next
+## Next stops
 
-- Want the big feature tour? `docs/TOUR.md`
-- Want MCP specifics? `docs/MCP.md`
-- Want credential-free MCP starter files? `examples/mcp/`
+- Want the product-level overview? [`docs/TOUR.md`](TOUR.md)
+- Want MCP specifics? [`docs/MCP.md`](MCP.md)
+- Want examples you can paste into config? [`examples/mcp/`](../examples/mcp/)

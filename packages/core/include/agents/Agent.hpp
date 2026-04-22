@@ -21,6 +21,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "mcp/McpManager.hpp"
 #include "agents/StreamSanityDetector.hpp"
 namespace firmius::core {
 
@@ -53,6 +54,7 @@ public:
   bool isRunning() const override { return running.load(); }
   bool isBooting() const override { return booting.load(); }
   void setBooting(bool b) override { booting = b; }
+  void initializeMcpServers();
 
   const AgentContext &getContext() const override { return context; }
   AgentContext &getMutableContext() override { return context; }
@@ -90,6 +92,9 @@ public:
   bool hasFullyReadFile(const std::string &path) const;
   void markFileAsFullyRead(const std::string &path);
   std::string resolvePath(const std::string &inputPath) const;
+
+  mcp::McpManager &getMcpManager() { return mcpManager_; }
+  std::shared_ptr<mcp::McpClient> getMcpClient(const std::string &serverName, shared::ToolContext &toolCtx);
 
 private:
   struct PendingModelSwitch {
@@ -137,6 +142,7 @@ private:
   std::mutex callbackMutex;
   std::mutex blockingProcessMutex;
 
+  mcp::McpManager mcpManager_;
   std::unordered_set<std::string> backgroundProcessIds;
 };
 

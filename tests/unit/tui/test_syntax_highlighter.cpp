@@ -1,6 +1,7 @@
 #include "components/SyntaxHighlighter.hpp"
 #include <algorithm>
 #include <ftxui/dom/elements.hpp>
+#include <ftxui/screen/screen.hpp>
 #include <gtest/gtest.h>
 
 namespace firmius::tui {
@@ -31,6 +32,7 @@ TEST_F(SyntaxHighlighterTest, DetectLanguageFromExtension) {
   EXPECT_EQ(highlighter_.detectLanguage("config.toml"), "toml");
   EXPECT_EQ(highlighter_.detectLanguage("test.c"), "c");
   EXPECT_EQ(highlighter_.detectLanguage("Main.java"), "java");
+  EXPECT_EQ(highlighter_.detectLanguage("script.sh"), "bash");
 }
 
 TEST_F(SyntaxHighlighterTest, DetectLanguageUnknown) {
@@ -43,6 +45,7 @@ TEST_F(SyntaxHighlighterTest, GetAvailableLanguages) {
   // All grammars are built-in, so list should not be empty
   EXPECT_FALSE(langs.empty());
   EXPECT_TRUE(std::find(langs.begin(), langs.end(), "cpp") != langs.end());
+  EXPECT_TRUE(std::find(langs.begin(), langs.end(), "bash") != langs.end());
 }
 
 TEST_F(SyntaxHighlighterTest, HasGrammarInitiallyTrue) {
@@ -51,6 +54,7 @@ TEST_F(SyntaxHighlighterTest, HasGrammarInitiallyTrue) {
   EXPECT_TRUE(highlighter_.hasGrammar("rust"));
   EXPECT_TRUE(highlighter_.hasGrammar("python"));
   EXPECT_TRUE(highlighter_.hasGrammar("javascript"));
+  EXPECT_TRUE(highlighter_.hasGrammar("bash"));
   EXPECT_FALSE(highlighter_.hasGrammar("nonexistent"));
 }
 
@@ -74,6 +78,17 @@ TEST_F(SyntaxHighlighterTest, HighlightRenderKnownLanguage) {
   std::string code = "fn main() { println!(\"Hello\"); }";
   auto element = highlighter_.highlightRender(code, "rust", false);
   EXPECT_TRUE(element != nullptr);
+}
+
+TEST_F(SyntaxHighlighterTest, BashHighlighting) {
+  std::string code = "if [ $x -eq 1 ]; then echo \"true\"; fi";
+  auto element = highlighter_.highlightRenderWrappedLine(code, "bash");
+  EXPECT_TRUE(element != nullptr);
+  
+  ftxui::Screen screen(80, 1);
+  ftxui::Render(screen, element);
+  std::string output = screen.ToString();
+  EXPECT_NE(output.find("echo"), std::string::npos);
 }
 
 TEST_F(SyntaxHighlighterTest, HighlightRenderWithLineNumbers) {
@@ -122,6 +137,9 @@ TEST_F(SyntaxHighlighterTest, FileExtensionMapping) {
       {"data.yml", "yaml"},
       {"config.toml", "toml"},
       {"Main.java", "java"},
+      {"run.sh", "bash"},
+      {"init.bash", "bash"},
+      {"setup.zsh", "bash"},
   };
 
   for (const auto &[filename, expected] : testCases) {

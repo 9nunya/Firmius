@@ -20,6 +20,8 @@ int main(int argc, char **argv) {
   options.initialCwd = cliOptions.initialCwd;
   options.quitWhenIdle = cliOptions.quitWhenIdle;
   options.permissionMode = cliOptions.permissionMode;
+  options.threadId = cliOptions.threadId;
+
   firmius::tui::runTui(options);
 
   return 0;

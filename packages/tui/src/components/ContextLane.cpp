@@ -29,6 +29,22 @@ ftxui::Element pill(const std::string &icon, const std::string &label,
          ftxui::color(fg) | ftxui::bgcolor(bg);
 }
 
+std::string truncateText(const std::string &text, std::size_t max_len) {
+  if (max_len == 0 || text.size() <= max_len) {
+    return text;
+  }
+  if (max_len <= 1) {
+    return "…";
+  }
+  return text.substr(0, max_len - 1) + "…";
+}
+
+ftxui::Element detailLine(const std::string &label, const std::string &value,
+                          ftxui::Color color, std::size_t max_len = 0) {
+  const std::string visible = max_len > 0 ? truncateText(value, max_len) : value;
+  return ftxui::text("  " + label + visible) | ftxui::color(color);
+}
+
 ftxui::Color contextColor(const Theme &theme, float ratio) {
   const float clamped = std::clamp(ratio, 0.0f, 1.0f);
   if (clamped > 0.85f) {
@@ -188,20 +204,19 @@ private:
     std::snprintf(pct_buf, sizeof(pct_buf), "%.0f%%", ratio * 100.0f);
     const auto ctx_color = contextColor(theme, ratio);
 
-    // Unified context bar (main visualization)
-    rows.push_back(
-        ftxui::hbox({
-            ftxui::text(" " + firmius::shared::ICON_CONTEXT + " ") |
-                ftxui::color(theme.status_bar.context.icon),
-            unifiedContextBar(theme, *model_) | ftxui::xflex,
-            ftxui::text(" " + std::string(pct_buf)) | ftxui::bold |
-                ftxui::color(ctx_color),
-            model_->context_label.empty()
-                ? ftxui::text("")
-                : ftxui::text("  " + model_->context_label) |
-                      ftxui::color(theme.base.dim),
-        }) |
-        ftxui::xflex);
+    ftxui::Elements context_header;
+    context_header.push_back(
+        ftxui::text(" " + firmius::shared::ICON_CONTEXT + " ") |
+            ftxui::color(theme.status_bar.context.icon));
+    context_header.push_back(unifiedContextBar(theme, *model_) | ftxui::xflex);
+    context_header.push_back(
+        ftxui::text(" " + std::string(pct_buf)) | ftxui::bold |
+            ftxui::color(ctx_color));
+    if (!model_->context_label.empty()) {
+      context_header.push_back(
+          ftxui::text("  " + model_->context_label) | ftxui::color(theme.base.dim));
+    }
+    rows.push_back(ftxui::hbox(std::move(context_header)) | ftxui::xflex);
 
     // Metrics and bucket labels
     ftxui::Elements metric_row;
@@ -227,33 +242,32 @@ private:
 
     if (model_->rolling_memory.enabled) {
       const auto &rolling = model_->rolling_memory;
-      ftxui::Elements rolling_chips;
-      
-      // Rolling memory mode
-      rolling_chips.push_back(
-          pill(firmius::shared::ICON_BRAIN, rolling.mode_label.empty() ? std::string("rolling") : rolling.mode_label,
+      rows.push_back(ftxui::text("  Rolling memory") | ftxui::bold |
+                     ftxui::color(theme.base.fg));
+
+      ftxui::Elements rolling_summary;
+      rolling_summary.push_back(
+          pill(firmius::shared::ICON_BRAIN,
+               rolling.mode_label.empty() ? std::string("rolling")
+                                          : rolling.mode_label,
                theme.agent_strip.pills.state_fg,
                theme.agent_strip.pills.state_bg));
-      
       if (!rolling.preset_label.empty()) {
-        rolling_chips.push_back(ftxui::text(" "));
-        rolling_chips.push_back(
+        rolling_summary.push_back(ftxui::text(" "));
+        rolling_summary.push_back(
             pill(firmius::shared::ICON_GEAR, rolling.preset_label,
                  theme.agent_strip.pills.slug_fg,
                  theme.agent_strip.pills.slug_bg));
       }
-      
       if (!rolling.model_label.empty()) {
-        rolling_chips.push_back(ftxui::text(" "));
-        rolling_chips.push_back(
+        rolling_summary.push_back(ftxui::text(" "));
+        rolling_summary.push_back(
             pill(firmius::shared::ICON_CHIP, rolling.model_label,
                  theme.agent_strip.pills.model_fg,
                  theme.agent_strip.pills.model_bg));
       }
-      
-      rows.push_back(ftxui::hbox(std::move(rolling_chips)) | ftxui::xflex);
+      rows.push_back(ftxui::hbox(std::move(rolling_summary)) | ftxui::xflex);
 
-      // Activity chips
       ftxui::Elements activity_chips;
       activity_chips.push_back(
           pill("◍", "obs " + std::to_string(rolling.active_observations),
@@ -269,7 +283,6 @@ private:
           pill("◌", "buf " + std::to_string(rolling.buffered_observations),
                theme.agent_strip.pills.slug_fg,
                theme.agent_strip.pills.slug_bg));
-      
       if (rolling.observation_in_flight || rolling.reflection_in_flight) {
         activity_chips.push_back(ftxui::text(" "));
         std::string inflight = "active";
@@ -285,42 +298,55 @@ private:
                  theme.status_bar.compacting.normal.fg,
                  theme.status_bar.compacting.normal.bg));
       }
-      
-       rows.push_back(ftxui::hbox(std::move(activity_chips)) | ftxui::xflex);
+      rows.push_back(
+          ftxui::hbox({ftxui::text("  Activity") | ftxui::bold |
+                          ftxui::color(theme.base.dim),
+                      ftxui::text(" "),
+                      ftxui::hbox(std::move(activity_chips))}) |
+          ftxui::xflex);
 
-      // Dynamic context bucket legend showing actual buckets present
-      ftxui::Elements legend;
-      legend.push_back(ftxui::text("  ") | ftxui::color(theme.base.dim));
-      
+      ftxui::Elements bucket_line;
+      bucket_line.push_back(ftxui::text("  Buckets") | ftxui::bold |
+                            ftxui::color(theme.base.dim));
+      bucket_line.push_back(ftxui::text(": ") | ftxui::color(theme.base.dim));
       auto bucketColors = getBucketColors(theme);
       int bucketCount = 0;
       for (const auto &bucket : model_->context_buckets) {
         if (bucket.tokens == 0 || bucketCount >= 6) continue;
-        
         if (bucketCount > 0) {
-          legend.push_back(ftxui::text("   ") | ftxui::color(theme.base.dim));
+          bucket_line.push_back(ftxui::text("   ") | ftxui::color(theme.base.dim));
         }
-        
         auto colorIt = bucketColors.find(bucket.label);
-        ftxui::Color color = colorIt != bucketColors.end() 
-            ? colorIt->second 
-            : theme.status_bar.context.low;
-            
-        legend.push_back(ftxui::text("█") | ftxui::color(color));
-        legend.push_back(ftxui::text(" " + bucket.label) | ftxui::color(theme.base.dim));
-        bucketCount++;
+        ftxui::Color color = colorIt != bucketColors.end() ? colorIt->second
+                                                           : theme.status_bar.context.low;
+        bucket_line.push_back(ftxui::text("█") | ftxui::color(color));
+        bucket_line.push_back(ftxui::text(" " + bucket.label) |
+                              ftxui::color(theme.base.dim));
+        ++bucketCount;
       }
-      
       if (bucketCount > 0) {
-        rows.push_back(ftxui::hbox(std::move(legend)) | ftxui::xflex);
+        rows.push_back(ftxui::hbox(std::move(bucket_line)) | ftxui::xflex);
       }
 
-      // Compression stats (NO TRUNCATION)
+      ftxui::Elements thresholds_row;
+      thresholds_row.push_back(ftxui::text("  Thresholds") | ftxui::bold |
+                               ftxui::color(theme.base.dim));
+      thresholds_row.push_back(
+          ftxui::text(" buffer " + formatCompactCount(rolling.buffer_threshold_tokens)) |
+          ftxui::color(theme.base.dim));
+      thresholds_row.push_back(
+          ftxui::text(" · target " + formatCompactCount(rolling.target_threshold_tokens)) |
+          ftxui::color(theme.base.dim));
+      thresholds_row.push_back(
+          ftxui::text(" · emergency " +
+                     formatCompactCount(rolling.emergency_threshold_tokens)) |
+          ftxui::color(theme.base.dim));
+      rows.push_back(ftxui::hbox(std::move(thresholds_row)) | ftxui::xflex);
+
       std::string compressionText =
-          "src " + formatCompactCount(rolling.source_tokens) +
+          "  Compression src " + formatCompactCount(rolling.source_tokens) +
           " · sum " + formatCompactCount(rolling.summary_tokens) +
           " · saved " + formatCompactCount(rolling.saved_tokens);
-          
       if (rolling.source_tokens > 0 && rolling.saved_tokens > 0) {
         const int savedPct = static_cast<int>(std::round(
             (static_cast<double>(rolling.saved_tokens) /
@@ -328,12 +354,25 @@ private:
             100.0));
         compressionText += " (" + std::to_string(savedPct) + "%)";
       }
-      
       compressionText += " · tail " + formatCompactCount(rolling.retained_tail_tokens);
-      
-      rows.push_back(ftxui::text("  " + compressionText) |
-                     ftxui::color(theme.base.dim));
-                     
+      rows.push_back(ftxui::text(compressionText) | ftxui::color(theme.base.dim));
+
+      std::string bridgeText =
+          "  Bridge anchors " + std::to_string(rolling.canonical_anchor_count) +
+          " · bridges " + std::to_string(rolling.bridge_packet_count);
+      if (!rolling.latest_bridge_id.empty()) {
+        bridgeText += " · latest " + rolling.latest_bridge_id;
+      }
+      rows.push_back(ftxui::text(bridgeText) | ftxui::color(theme.base.dim));
+
+      if (!rolling.bridge_target.empty()) {
+        rows.push_back(detailLine("target ", rolling.bridge_target,
+                                  theme.base.dim, 48));
+      }
+      if (!rolling.bridge_hint.empty()) {
+        rows.push_back(detailLine("hint   ", rolling.bridge_hint,
+                                  theme.base.dim, 48));
+      }
     } else if (!model_->memory_labels.empty()) {
       for (const auto &label : model_->memory_labels) {
         rows.push_back(ftxui::text("  " + firmius::shared::ICON_BRAIN + " " + label) |
@@ -345,6 +384,7 @@ private:
   }
 
   std::shared_ptr<ContextLaneModel> model_;
+
 };
 
 ftxui::Component ContextLane(const std::shared_ptr<ContextLaneModel> &model) {

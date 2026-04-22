@@ -1,9 +1,7 @@
 #include "IAgent.hpp"
 #include "IHost.hpp"
 #include "persistence/ThreadManager.hpp"
-#include "tools/ArtifactListTool.hpp"
-#include "tools/ArtifactReadTool.hpp"
-#include "tools/ArtifactWriteTool.hpp"
+#include "tools/ArtifactsTool.hpp"
 
 #include <chrono>
 #include <cstdlib>
@@ -154,17 +152,18 @@ protected:
 };
 
 TEST_F(ArtifactToolsTest, WriteCreateUpdateAndReadRoundTrip) {
-  ArtifactWriteTool writeTool;
-  ArtifactReadTool readTool;
+  ArtifactsTool tool;
   ToolContext ctx{host_, parent_, "artifact-tools-create-update"};
 
-  ArtifactWriteInput createInput;
-  createInput.name = "REPORT.md";
-  createInput.content = "first body";
-  createInput.kind = "report";
-  createInput.description = "initial";
-
-  ToolResult created = writeTool.execute(createInput, ctx);
+  rapidjson::Document createDoc;
+  createDoc.SetObject();
+  auto &ca = createDoc.GetAllocator();
+  createDoc.AddMember("action", rapidjson::Value("Write", ca), ca);
+  createDoc.AddMember("name", rapidjson::Value("REPORT.md", ca), ca);
+  createDoc.AddMember("content", rapidjson::Value("first body", ca), ca);
+  createDoc.AddMember("kind", rapidjson::Value("report", ca), ca);
+  createDoc.AddMember("description", rapidjson::Value("initial", ca), ca);
+  ToolResult created = tool.execute(createDoc, ctx);
   ASSERT_TRUE(created.success) << created.error;
 
   rapidjson::Document createdJson;
@@ -175,10 +174,13 @@ TEST_F(ArtifactToolsTest, WriteCreateUpdateAndReadRoundTrip) {
   EXPECT_EQ(std::string(createdJson["reference"].GetString()),
             "@artifact:planner/REPORT.md");
 
-  ArtifactWriteInput updateInput;
-  updateInput.name = "REPORT.md";
-  updateInput.content = "second body";
-  ToolResult updated = writeTool.execute(updateInput, ctx);
+  rapidjson::Document updateDoc;
+  updateDoc.SetObject();
+  auto &ua = updateDoc.GetAllocator();
+  updateDoc.AddMember("action", rapidjson::Value("Write", ua), ua);
+  updateDoc.AddMember("name", rapidjson::Value("REPORT.md", ua), ua);
+  updateDoc.AddMember("content", rapidjson::Value("second body", ua), ua);
+  ToolResult updated = tool.execute(updateDoc, ctx);
   ASSERT_TRUE(updated.success) << updated.error;
   rapidjson::Document updatedJson;
   updatedJson.Parse(updated.data.c_str());
@@ -189,9 +191,12 @@ TEST_F(ArtifactToolsTest, WriteCreateUpdateAndReadRoundTrip) {
   EXPECT_EQ(std::string(updatedJson["previous_content"].GetString()),
             "first body");
 
-  ArtifactReadInput readInput;
-  readInput.reference = "@artifact:planner/REPORT.md";
-  ToolResult read = readTool.execute(readInput, ctx);
+  rapidjson::Document readDoc;
+  readDoc.SetObject();
+  auto &ra = readDoc.GetAllocator();
+  readDoc.AddMember("action", rapidjson::Value("Read", ra), ra);
+  readDoc.AddMember("reference", rapidjson::Value("@artifact:planner/REPORT.md", ra), ra);
+  ToolResult read = tool.execute(readDoc, ctx);
   ASSERT_TRUE(read.success) << read.error;
   rapidjson::Document readJson;
   readJson.Parse(read.data.c_str());
@@ -205,9 +210,9 @@ TEST_F(ArtifactToolsTest, ListIncludesDisambiguatedDisplaysForDuplicateFilenames
   manager_->writeArtifact(threadId_, "agent-2", "auditor", "REPORT.md",
                           "auditor-body");
 
-  ArtifactListTool listTool;
+  ArtifactsTool listTool;
   ToolContext ctx{host_, parent_, "artifact-tools-list"};
-  rapidjson::Document doc = objectDoc();
+  rapidjson::Document doc = objectDoc(); auto &a = doc.GetAllocator(); doc.AddMember("action", rapidjson::Value("List", a), a);
   ToolResult listed = listTool.execute(doc, ctx);
   ASSERT_TRUE(listed.success) << listed.error;
 
@@ -232,10 +237,9 @@ TEST_F(ArtifactToolsTest, ReadFailsForAmbiguousFilenameWithoutOwnerSelector) {
   manager_->writeArtifact(threadId_, "agent-1", "planner", "REPORT.md", "A");
   manager_->writeArtifact(threadId_, "agent-2", "auditor", "REPORT.md", "B");
 
-  ArtifactReadTool readTool;
+  ArtifactsTool readTool;
   ToolContext ctx{host_, parent_, "artifact-tools-read-ambiguous"};
-  ArtifactReadInput input;
-  input.name = "REPORT.md";
+  rapidjson::Document input; input.SetObject(); auto &a = input.GetAllocator(); input.AddMember("action", rapidjson::Value("Read", a), a); input.AddMember("name", rapidjson::Value("REPORT.md", a), a);
 
   ToolResult result = readTool.execute(input, ctx);
   EXPECT_FALSE(result.success);

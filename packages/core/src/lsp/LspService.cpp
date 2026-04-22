@@ -480,7 +480,8 @@ rapidjson::Document runLspRequest(const LspRequest &request,
 
     if (!absolutePath.empty() && fs::exists(absolutePath)) {
       const std::string languageId = spec->languageIdForPath(absolutePath);
-      client->touchFile(absolutePath, languageId, true,
+      const bool waitForFileDiagnostics = !request.project;
+      client->touchFile(absolutePath, languageId, waitForFileDiagnostics,
                         request.timeout_ms);
     }
 

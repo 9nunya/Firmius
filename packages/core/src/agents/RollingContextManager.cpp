@@ -141,15 +141,95 @@ struct SummaryPayload {
   std::string summary;
   std::string currentTask;
   std::string suggestedResponse;
+  std::string activeGoal;
+  std::vector<std::string> keyActions;
+  std::vector<std::string> keyToolResults;
+  std::vector<std::string> openLoops;
+  std::vector<std::string> filesSurfaces;
+  std::vector<std::string> retrievalTags;
+  std::vector<RollingMemoryAnchorRecord> anchors;
 };
+
+std::vector<std::string> extractXmlList(const std::string &text,
+                                        const std::string &containerTag,
+                                        const std::string &itemTag) {
+  std::vector<std::string> items;
+  const std::string container = extractXmlTag(text, containerTag);
+  if (container.empty()) {
+    return items;
+  }
+  const std::string open = "<" + itemTag + ">";
+  const std::string close = "</" + itemTag + ">";
+  std::size_t pos = 0;
+  while (true) {
+    const auto start = container.find(open, pos);
+    if (start == std::string::npos) {
+      break;
+    }
+    const auto end = container.find(close, start + open.size());
+    if (end == std::string::npos) {
+      break;
+    }
+    const std::string value = shared::StringUtil::trim(
+        container.substr(start + open.size(), end - (start + open.size())));
+    if (!value.empty()) {
+      items.push_back(value);
+    }
+    pos = end + close.size();
+  }
+  return items;
+}
+
+std::vector<RollingMemoryAnchorRecord>
+extractAnchors(const std::string &text) {
+  std::vector<RollingMemoryAnchorRecord> anchors;
+  const std::string container = extractXmlTag(text, "canonical_anchors");
+  if (container.empty()) {
+    return anchors;
+  }
+  const std::string open = "<anchor>";
+  const std::string close = "</anchor>";
+  std::size_t pos = 0;
+  while (true) {
+    const auto start = container.find(open, pos);
+    if (start == std::string::npos) {
+      break;
+    }
+    const auto end = container.find(close, start + open.size());
+    if (end == std::string::npos) {
+      break;
+    }
+    const std::string body =
+        container.substr(start + open.size(), end - (start + open.size()));
+    RollingMemoryAnchorRecord anchor;
+    anchor.anchorType = extractXmlTag(body, "type");
+    anchor.canonicalText = extractXmlTag(body, "text");
+    anchor.exactQuote = extractXmlTag(body, "exact_quote");
+    anchor.importance = extractXmlTag(body, "importance");
+    anchor.volatility = extractXmlTag(body, "volatility");
+    anchor.retrievalTags = extractXmlList(body, "retrieval_tags", "item");
+    if (!anchor.canonicalText.empty()) {
+      anchors.push_back(std::move(anchor));
+    }
+    pos = end + close.size();
+  }
+  return anchors;
+}
 
 SummaryPayload parseSummaryPayload(const std::string &raw) {
   SummaryPayload payload;
   payload.summary = extractXmlTag(raw, "summary");
   payload.currentTask = extractXmlTag(raw, "current_task");
   payload.suggestedResponse = extractXmlTag(raw, "suggested_response");
+  payload.activeGoal = extractXmlTag(raw, "active_goal");
+  payload.keyActions = extractXmlList(raw, "key_actions", "item");
+  payload.keyToolResults = extractXmlList(raw, "key_tool_results", "item");
+  payload.openLoops = extractXmlList(raw, "open_loops", "item");
+  payload.filesSurfaces = extractXmlList(raw, "files_surfaces", "item");
+  payload.retrievalTags = extractXmlList(raw, "retrieval_tags", "item");
   if (payload.summary.empty()) {
     payload.summary = shared::StringUtil::trim(raw);
+  payload.anchors = extractAnchors(raw);
   }
   return payload;
 }
@@ -183,8 +263,7 @@ std::string renderTurnForPrompt(const shared::AgentTurn &turn) {
       firstPart = false;
       if (const auto *txt = std::get_if<shared::TextContent>(&part)) {
         out << txt->text;
-      } else if (const auto *thinking =
-                     std::get_if<shared::ThinkingContent>(&part)) {
+      } else if (const auto *thinking = std::get_if<shared::ThinkingContent>(&part)) {
         out << "<thinking>" << thinking->thinking << "</thinking>";
       } else if (const auto *toolCall =
                      std::get_if<shared::ToolCallContent>(&part)) {
@@ -212,6 +291,38 @@ std::string renderTurnForPrompt(const shared::AgentTurn &turn) {
   return out.str();
 }
 
+std::string buildWorkingMemoryPrompt(
+    const std::vector<const RollingMemoryChunk *> &activeReflections,
+    const std::vector<const RollingMemoryChunk *> &activeObservations,
+    const std::vector<RollingMemoryAnchorRecord> &anchors) {
+  std::ostringstream out;
+  out << "You are Firmius working-memory bridge composer.\n"
+         "Assemble a task-scoped memory packet from canonical anchors, active reflections, and active observations.\n"
+         "Return XML exactly in this shape:\n"
+         "<summary>...</summary>\n"
+         "<active_goal>...</active_goal>\n"
+         "<current_task>...</current_task>\n"
+         "<suggested_response>...</suggested_response>\n"
+         "<retrieval_tags><item>...</item></retrieval_tags>\n"
+         "<open_loops><item>...</item></open_loops>\n"
+         "<files_surfaces><item>...</item></files_surfaces>\n"
+         "Prefer canonical anchors first, then reflections, then live episodes.\n"
+         "Do not hallucinate missing facts; only compose from the supplied memory surfaces.\n\n";
+  out << "Canonical anchors:\n";
+  for (const auto &anchor : anchors) {
+    out << "- [" << anchor.anchorType << "] " << anchor.canonicalText << "\n";
+  }
+  out << "\nActive reflections:\n";
+  for (const auto *chunk : activeReflections) {
+    out << "- " << chunk->summary << "\n";
+  }
+  out << "\nActive observations:\n";
+  for (const auto *chunk : activeObservations) {
+    out << "- " << chunk->summary << "\n";
+  }
+  return out.str();
+}
+
 std::string buildObservationPrompt(const std::vector<shared::AgentTurn> &turns) {
   std::ostringstream out;
   out << "You are Firmius rolling memory observer.\n"
@@ -221,8 +332,27 @@ std::string buildObservationPrompt(const std::vector<shared::AgentTurn> &turns) 
          "results, user preferences, and failure modes.\n"
          "Return XML exactly in this shape:\n"
          "<summary>...</summary>\n"
+         "<active_goal>...</active_goal>\n"
          "<current_task>...</current_task>\n"
          "<suggested_response>...</suggested_response>\n\n"
+         "<key_actions><item>...</item></key_actions>\n"
+         "<key_tool_results><item>...</item></key_tool_results>\n"
+         "<open_loops><item>...</item></open_loops>\n"
+         "<files_surfaces><item>...</item></files_surfaces>\n"
+         "<retrieval_tags><item>...</item></retrieval_tags>\n"
+         "<canonical_anchors>\n"
+         "  <anchor>\n"
+         "    <type>objective|constraint|acceptance|decision|tool_result|blocker|preference</type>\n"
+         "    <text>...</text>\n"
+         "    <exact_quote>...</exact_quote>\n"
+         "    <importance>critical|high|medium</importance>\n"
+         "    <volatility>stable|situational</volatility>\n"
+         "    <retrieval_tags><item>...</item></retrieval_tags>\n"
+         "  </anchor>\n"
+         "</canonical_anchors>\n"
+         "Use anchors for facts that should survive aggressive compaction.\n"
+         "Do not omit exact old constraints if they still govern current work.\n"
+         "Prefer concise, structured extraction over elegant prose.\n"
          "Conversation segment:\n";
   for (const auto &turn : turns) {
     out << renderTurnForPrompt(turn) << "\n";
@@ -237,8 +367,16 @@ std::string buildReflectionPrompt(const std::vector<RollingMemoryChunk> &chunks)
          "compact summary while preserving chronology, unresolved goals, and "
          "important facts.\n"
          "Return XML exactly in this shape:\n"
+         "<active_goal>...</active_goal>\n"
          "<summary>...</summary>\n"
          "<current_task>...</current_task>\n"
+         "<key_actions><item>...</item></key_actions>\n"
+         "<key_tool_results><item>...</item></key_tool_results>\n"
+         "<open_loops><item>...</item></open_loops>\n"
+         "<files_surfaces><item>...</item></files_surfaces>\n"
+         "<retrieval_tags><item>...</item></retrieval_tags>\n"
+         "Focus on durable invariants, repeated failures, strategic cautions, and what the actor should still believe after context shrinks.\n"
+         "Do not merely paraphrase the observation summaries.\n"
          "<suggested_response>...</suggested_response>\n\n"
          "Observation chunks:\n";
   for (const auto &chunk : chunks) {
@@ -380,6 +518,44 @@ shared::AgentTurn makeRollingEventTurn(const std::string &eventId,
   msg.content.push_back(std::move(notice));
   turn.messages.push_back(std::move(msg));
   return turn;
+}
+
+RollingMemoryBridgeRecord buildBridgeRecord(
+    const RollingMemoryState &state,
+    const std::vector<const RollingMemoryChunk *> &activeReflections,
+    const std::vector<const RollingMemoryChunk *> &activeObservations) {
+  RollingMemoryBridgeRecord bridge;
+  bridge.bridgeId = "bridge-" + std::to_string(nowEpochMs());
+  if (!activeReflections.empty() &&
+      !activeReflections.front()->activeGoal.empty()) {
+    bridge.targetTaskSignature = activeReflections.front()->activeGoal;
+  } else if (!activeObservations.empty() &&
+             !activeObservations.front()->activeGoal.empty()) {
+    bridge.targetTaskSignature = activeObservations.front()->activeGoal;
+  }
+  for (const auto &anchor : state.anchors) {
+    if (anchor.importance == "critical" || anchor.importance == "high") {
+      bridge.relevantAnchorIds.push_back(anchor.anchorId);
+    }
+  }
+  for (const auto *chunk : activeReflections) {
+    bridge.relevantReflectionIds.push_back(chunk->chunkId);
+  }
+  for (const auto *chunk : activeObservations) {
+    bridge.relevantEpisodeIds.push_back(chunk->chunkId);
+  }
+  bridge.rationale =
+      "Bridge active rolling memory into a task-scoped packet using durable "
+      "anchors first, then reflections, then live episodes.";
+  if (!activeReflections.empty() &&
+      !activeReflections.front()->suggestedResponse.empty()) {
+    bridge.executionHint = activeReflections.front()->suggestedResponse;
+  } else if (!activeObservations.empty() &&
+             !activeObservations.front()->suggestedResponse.empty()) {
+    bridge.executionHint = activeObservations.front()->suggestedResponse;
+  }
+  bridge.createdAt = nowEpochMs();
+  return bridge;
 }
 
 std::string formatMaintenanceModelLabel(
@@ -633,6 +809,12 @@ void RollingContextManager::maintain(shared::AgentContext &context,
     chunk.currentTask = payload.currentTask;
     chunk.suggestedResponse = payload.suggestedResponse;
     chunk.sourceTokens = sourceTokens;
+    chunk.activeGoal = payload.activeGoal;
+    chunk.keyActions = payload.keyActions;
+    chunk.keyToolResults = payload.keyToolResults;
+    chunk.openLoops = payload.openLoops;
+    chunk.filesSurfaces = payload.filesSurfaces;
+    chunk.retrievalTags = payload.retrievalTags;
     chunk.summaryTokens = estimateTokensForText(chunk.summary);
     chunk.createdAt = nowEpochMs();
     chunk.buffered = !activateImmediately;
@@ -643,6 +825,19 @@ void RollingContextManager::maintain(shared::AgentContext &context,
     state.lastObservedTurnId = chunk.sourceEndTurnId;
     state.observationChunks.push_back(std::move(chunk));
     const auto &createdChunk = state.observationChunks.back();
+    for (std::size_t i = 0; i < payload.anchors.size(); ++i) {
+      auto anchor = payload.anchors[i];
+      if (anchor.anchorId.empty()) {
+        anchor.anchorId = state.observationChunks.back().chunkId + "-anchor-" +
+                          std::to_string(i + 1);
+      }
+      if (anchor.sourceTurnIds.empty()) {
+        anchor.sourceTurnIds = state.observationChunks.back().sourceTurnIds;
+      }
+      state.anchors.push_back(std::move(anchor));
+      state.observationChunks.back().anchorIds.push_back(
+          state.anchors.back().anchorId);
+    }
 
     state.observationInFlight = false;
     saveState(context, state);
@@ -783,6 +978,12 @@ void RollingContextManager::maintain(shared::AgentContext &context,
         reflection.summary = payload.summary;
         reflection.currentTask = payload.currentTask;
         reflection.suggestedResponse = payload.suggestedResponse;
+        reflection.activeGoal = payload.activeGoal;
+        reflection.keyActions = payload.keyActions;
+        reflection.keyToolResults = payload.keyToolResults;
+        reflection.openLoops = payload.openLoops;
+        reflection.filesSurfaces = payload.filesSurfaces;
+        reflection.retrievalTags = payload.retrievalTags;
         reflection.sourceTokens = total;
         reflection.summaryTokens = estimateTokensForText(reflection.summary);
         reflection.createdAt = nowEpochMs();
@@ -791,6 +992,10 @@ void RollingContextManager::maintain(shared::AgentContext &context,
           reflection.sourceTurnIds.insert(reflection.sourceTurnIds.end(),
                                           chunk.sourceTurnIds.begin(),
                                           chunk.sourceTurnIds.end());
+        }
+        for (const auto &chunk : toReflect) {
+          reflection.derivedFromChunkIds.push_back(chunk.chunkId);
+          reflection.anchorIds.insert(reflection.anchorIds.end(), chunk.anchorIds.begin(), chunk.anchorIds.end());
         }
         for (auto &chunk : state.observationChunks) {
           if (std::find_if(toReflect.begin(), toReflect.end(),
@@ -828,6 +1033,45 @@ void RollingContextManager::maintain(shared::AgentContext &context,
     }
   }
 
+
+  if (!state.observationChunks.empty() || !state.reflectionChunks.empty()) {
+    std::vector<const RollingMemoryChunk *> activeReflectionPtrs;
+    std::vector<const RollingMemoryChunk *> activeObservationViewPtrs;
+    for (const auto &chunk : state.reflectionChunks) {
+      if (chunk.active && !chunk.superseded) activeReflectionPtrs.push_back(&chunk);
+    }
+    for (const auto &chunk : state.observationChunks) {
+      if (chunk.active && !chunk.superseded) activeObservationViewPtrs.push_back(&chunk);
+    }
+    const auto updaterChoice = resolveMaintenanceModel(
+        context.config, context.config.rollingMemory.workingMemoryUpdater);
+    SummaryPayload bridgePayload = generateSummaryForPrompt(
+        updaterChoice,
+        buildWorkingMemoryPrompt(activeReflectionPtrs, activeObservationViewPtrs,
+                                 state.anchors),
+        abortSignal);
+    RollingMemoryBridgeRecord bridge = buildBridgeRecord(
+        state, activeReflectionPtrs, activeObservationViewPtrs);
+    if (!bridgePayload.activeGoal.empty()) {
+      bridge.targetTaskSignature = bridgePayload.activeGoal;
+    }
+    if (!bridgePayload.suggestedResponse.empty()) {
+      bridge.executionHint = bridgePayload.suggestedResponse;
+    }
+    if (!bridgePayload.currentTask.empty() && bridge.rationale.empty()) {
+      bridge.rationale = bridgePayload.currentTask;
+    }
+    state.bridgeInFlight = true;
+    if (!state.lastBridgeId.empty() && !state.bridges.empty() &&
+        state.bridges.back().bridgeId == state.lastBridgeId) {
+      state.lastBridgeId = bridge.bridgeId;
+      state.bridges.back() = std::move(bridge);
+    } else {
+      state.lastBridgeId = bridge.bridgeId;
+      state.bridges.push_back(std::move(bridge));
+    }
+    state.bridgeInFlight = false;
+  }
   saveState(context, state);
 }
 
@@ -907,6 +1151,7 @@ RollingContextManager::filterHistoryForRequest(const shared::AgentContext &conte
               }
             }
           }
+
         }
       }
     }
@@ -941,29 +1186,76 @@ std::string RollingContextManager::buildMemoryOverlay(
       activeObservations.push_back(&chunk);
     }
   }
-  if (activeReflections.empty() && activeObservations.empty()) {
+  if (activeReflections.empty() && activeObservations.empty() &&
+      state.anchors.empty() && state.bridges.empty()) {
     return "";
+  }
+
+  const RollingMemoryBridgeRecord *latestBridge = nullptr;
+  if (!state.bridges.empty()) {
+    latestBridge = &state.bridges.back();
   }
 
   std::ostringstream out;
   out << "## ROLLING MEMORY\n";
+
+  if (latestBridge != nullptr) {
+    out << "\nWorking-memory bridge\n";
+    if (!latestBridge->targetTaskSignature.empty()) {
+      out << "- target: " << latestBridge->targetTaskSignature << "\n";
+    }
+    if (!latestBridge->bridgeId.empty()) {
+      out << "- bridge_id: " << latestBridge->bridgeId << "\n";
+    }
+    out << "- anchors: " << latestBridge->relevantAnchorIds.size() << "\n";
+    out << "- episodes: " << latestBridge->relevantEpisodeIds.size() << "\n";
+    out << "- reflections: " << latestBridge->relevantReflectionIds.size() << "\n";
+    if (!latestBridge->executionHint.empty()) out << "- hint: " << latestBridge->executionHint << "\n";
+    if (!latestBridge->rationale.empty()) out << "- rationale: " << latestBridge->rationale << "\n";
+  }
+  if (!state.anchors.empty()) {
+    out << "Canonical anchors\n";
+    for (std::size_t i = 0; i < std::min<std::size_t>(5, state.anchors.size()); ++i) {
+      const auto &anchor = state.anchors[i];
+      out << "- [" << (anchor.anchorType.empty() ? "anchor" : anchor.anchorType)
+          << "] " << anchor.canonicalText;
+      if (!anchor.importance.empty()) out << " {importance=" << anchor.importance << "}";
+      if (!anchor.volatility.empty()) out << " {volatility=" << anchor.volatility << "}";
+      if (!anchor.sourceTurnIds.empty()) out << " {turns=" << anchor.sourceTurnIds.front()
+                                             << (anchor.sourceTurnIds.size() > 1 ? ".." + anchor.sourceTurnIds.back() : "") << "}";
+      out << "\n";
+      if (!anchor.exactQuote.empty()) out << "  quote: " << anchor.exactQuote << "\n";
+    }
+    out << "\n";
+  }
+
   if (!activeReflections.empty()) {
     out << "Active reflections\n";
     for (std::size_t i = 0; i < std::min<std::size_t>(2, activeReflections.size()); ++i) {
       const auto *chunk = activeReflections[i];
       out << "- [" << chunk->sourceStartTurnId << " .. "
-          << chunk->sourceEndTurnId << "] " << chunk->summary << "\n";
+          << chunk->sourceEndTurnId << "] " << chunk->summary;
+      if (!chunk->activeGoal.empty()) {
+        out << " (goal: " << chunk->activeGoal << ")";
+      }
+      out << "\n";
     }
     out << "\n";
   }
+
   if (!activeObservations.empty()) {
     out << "Active observations\n";
     for (std::size_t i = 0; i < std::min<std::size_t>(3, activeObservations.size()); ++i) {
       const auto *chunk = activeObservations[i];
       out << "- [" << chunk->sourceStartTurnId << " .. "
-          << chunk->sourceEndTurnId << "] " << chunk->summary << "\n";
+          << chunk->sourceEndTurnId << "] " << chunk->summary;
+      if (!chunk->activeGoal.empty()) {
+        out << " (goal: " << chunk->activeGoal << ")";
+      }
+      out << "\n";
     }
   }
+
   return out.str();
 }
 
@@ -976,6 +1268,7 @@ std::string RollingContextManager::buildStatusOverlay(
   const auto thresholds = resolveThresholds(context);
   const auto state = loadState(context);
   std::size_t bufferedObservations = 0;
+  const std::size_t criticalAnchors = std::count_if(state.anchors.begin(), state.anchors.end(), [](const auto &a) { return a.importance == "critical"; });
   std::size_t activeObservations = 0;
   std::size_t activeReflections = 0;
   std::string continuationHint;
@@ -987,6 +1280,9 @@ std::string RollingContextManager::buildStatusOverlay(
       ++activeObservations;
       if (continuationHint.empty() && !chunk.suggestedResponse.empty()) {
         continuationHint = chunk.suggestedResponse;
+      }
+      if (continuationHint.empty() && !chunk.activeGoal.empty()) {
+        continuationHint = chunk.activeGoal;
       }
     }
   }
@@ -1003,6 +1299,7 @@ std::string RollingContextManager::buildStatusOverlay(
   out << "## ROLLING MEMORY STATUS\n";
   out << "Preset: " << thresholds.preset << "\n";
   out << "Context window: " << thresholds.contextWindow << "\n";
+  out << "Critical anchors: " << criticalAnchors << "\n";
   out << "Buffer threshold: " << thresholds.bufferThresholdTokens << "\n";
   out << "Target threshold: " << thresholds.targetThresholdTokens << "\n";
   out << "Emergency threshold: " << thresholds.emergencyThresholdTokens << "\n";
@@ -1016,6 +1313,10 @@ std::string RollingContextManager::buildStatusOverlay(
   out << "Active reflections: " << activeReflections << "\n";
   out << "Active observations: " << activeObservations << "\n";
   out << "Buffered observations: " << bufferedObservations << "\n";
+  out << "Canonical anchors: " << state.anchors.size() << "\n";
+  out << "Bridge packets: " << state.bridges.size() << "\n";
+  if (!state.lastBridgeId.empty()) out << "Latest bridge: " << state.lastBridgeId << "\n";
+  if (state.bridgeInFlight) out << "Bridge in flight: yes\n";
   if (!continuationHint.empty()) {
     out << "Suggested continuation: " << continuationHint << "\n";
   }

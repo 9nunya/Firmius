@@ -5,51 +5,74 @@
 using namespace firmius::shared;
 
 TEST(ToolSummaries, SummarizesWorkLanguageTools) {
-  EXPECT_EQ(SummarizeToolCall("plan_create",
-                              R"({"title":"Implement Linux x86_64 backend"})",
+  EXPECT_EQ(SummarizeToolCall("Files", R"({"action":"Read","path":"src/foo.rs"})",
                               ToolPhase::Called),
-            "Create plan \"Implement Linux x86_64 backend\"");
-  EXPECT_EQ(SummarizeToolCall("plan_update",
-                              R"({"title":"Implement Linux x86_64 backend"})",
+            "Read src/foo.rs");
+  EXPECT_EQ(SummarizeToolCall("Edit",
+                              R"({"path":"src/foo.rs","edits":[{"op":"insert_after","anchor":"12","new_lines":["let x = 1;"]}]})",
                               ToolPhase::Called),
-            "Update plan \"Implement Linux x86_64 backend\"");
-  EXPECT_EQ(SummarizeToolCall("plan_get", R"({"plan_id":"plan-1"})",
+            "Edit src/foo.rs (1 ops)");
+  EXPECT_EQ(SummarizeToolCall("Work",
+                              R"({"action":"CreatePlan","title":"Implement Linux x86_64 backend"})",
                               ToolPhase::Called),
-            "Load plan");
-  EXPECT_EQ(SummarizeToolCall("plan_list", "{}", ToolPhase::Called),
-            "List plans");
-  EXPECT_EQ(SummarizeToolCall("plan_set_active", R"({"plan_id":"plan-1"})",
+            "Work \"Implement Linux x86_64 backend\"");
+  EXPECT_EQ(SummarizeToolCall("Process",
+                              R"({"action":"Execute","command":"echo hi"})",
                               ToolPhase::Called),
-            "Set active plan");
+            "$ echo hi");
+  EXPECT_EQ(SummarizeToolCall("Delegate",
+                              R"({"action":"Spawn","title":"Auth finder"})",
+                              ToolPhase::Called),
+            "Delegate \"Auth finder\"");
+  EXPECT_EQ(SummarizeToolCall("Web",
+                              R"({"action":"Search","query":"firmius tool suite"})",
+                              ToolPhase::Called),
+            "Search the web for \"firmius tool suite\"");
+  EXPECT_EQ(SummarizeToolCall("Work",
+                              R"({"action":"CreatePlan","title":"Implement Linux x86_64 backend"})",
+                              ToolPhase::Called),
+            "Work \"Implement Linux x86_64 backend\"");
+  EXPECT_EQ(SummarizeToolCall("Work",
+                              R"({"action":"UpdatePlan","title":"Implement Linux x86_64 backend"})",
+                              ToolPhase::Called),
+            "Work \"Implement Linux x86_64 backend\"");
+  EXPECT_EQ(SummarizeToolCall("Work", R"({"action":"GetPlan","plan_id":"plan-1"})",
+                              ToolPhase::Called),
+            "Work plan \"plan-1\"");
+  EXPECT_EQ(SummarizeToolCall("Work", R"({"action":"ListPlans"})", ToolPhase::Called),
+            "Work operation");
+  EXPECT_EQ(SummarizeToolCall("Work", R"({"action":"ActivatePlan","plan_id":"plan-1"})",
+                              ToolPhase::Called),
+            "Work plan \"plan-1\"");
 
-  EXPECT_EQ(SummarizeToolCall("chunk_add",
-                              R"({"title":"Inventory Xen semantics"})",
+  EXPECT_EQ(SummarizeToolCall("Work",
+                              R"({"action":"AddChunk","title":"Inventory Xen semantics"})",
                               ToolPhase::Called),
-            "Add chunk \"Inventory Xen semantics\"");
-  EXPECT_EQ(SummarizeToolCall("chunk_get",
-                              R"({"title":"Inventory Xen semantics"})",
+            "Work \"Inventory Xen semantics\"");
+  EXPECT_EQ(SummarizeToolCall("Work",
+                              R"({"action":"GetChunk","title":"Inventory Xen semantics"})",
                               ToolPhase::Called),
-            "Load chunk \"Inventory Xen semantics\"");
-  EXPECT_EQ(SummarizeToolCall("chunk_list", R"({"plan_id":"plan-1"})",
+            "Work \"Inventory Xen semantics\"");
+  EXPECT_EQ(SummarizeToolCall("Work", R"({"action":"ListChunks","plan_id":"plan-1"})",
                               ToolPhase::Called),
-            "List chunks");
-  EXPECT_EQ(SummarizeToolCall("chunk_update",
-                              R"({"title":"Architect Native Backend"})",
+            "Work plan \"plan-1\"");
+  EXPECT_EQ(SummarizeToolCall("Work",
+                              R"({"action":"UpdateChunk","title":"Architect Native Backend"})",
                               ToolPhase::Called),
-            "Update chunk \"Architect Native Backend\"");
-  EXPECT_EQ(SummarizeToolCall("chunk_ready_for_execution",
-                              R"({"plan_id":"plan-1"})", ToolPhase::Called),
-            "Find executable chunks");
-  EXPECT_EQ(SummarizeToolCall("python_execute",
+            "Work \"Architect Native Backend\"");
+  EXPECT_EQ(SummarizeToolCall("Work",
+                              R"({"action":"ReadyChunk","plan_id":"plan-1"})", ToolPhase::Called),
+            "Work plan \"plan-1\"");
+  EXPECT_EQ(SummarizeToolCall("Python",
                               R"({"code":"print('hi')\n"})",
                               ToolPhase::Called),
             "Python \"print('hi')\"");
   EXPECT_EQ(SummarizeToolCall(
-                "file_edit",
+                "Edit",
                 R"({"path":"src/foo.rs","edits":[{"op":"insert_after","anchor":"12","new_lines":["let x = 1;"]},{"op":"delete_range","start_anchor":"18","end_anchor":"19"}]})",
                 ToolPhase::Called),
             "Edit src/foo.rs (2 ops)");
-  EXPECT_EQ(SummarizeToolCall("file_edit",
+  EXPECT_EQ(SummarizeToolCall("Edit",
                               R"({"path":"src/foo.rs","content":"fn main() {}\n"})",
                               ToolPhase::Called),
             "Overwrite src/foo.rs");

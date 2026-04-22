@@ -46,15 +46,15 @@ int extractIntId(const rapidjson::Value &id) {
 
 } // namespace
 
-McpStdioSession::McpStdioSession(shared::IHostProcess &process,
-                                 shared::ToolContext &ctx)
-    : process_(process), ctx_(ctx) {}
+McpStdioSession::McpStdioSession(shared::IHostProcess &process)
+    : process_(process) {}
 
 rapidjson::Document McpStdioSession::sendRequest(const int id,
                                                  const std::string &method,
                                                  const rapidjson::Value &params,
                                                  const int timeoutMs,
-                                                 const std::string &stage) {
+                                                 const std::string &stage,
+                                                 shared::ToolContext *ctx) {
   rapidjson::Document request;
   request.SetObject();
   auto &a = request.GetAllocator();
@@ -72,7 +72,7 @@ rapidjson::Document McpStdioSession::sendRequest(const int id,
   const std::string framed = body + "\n";
   process_.write(framed);
 
-  return readResponseForId(id, timeoutMs, stage);
+  return readResponseForId(id, timeoutMs, stage, ctx);
 }
 
 void McpStdioSession::sendNotification(const std::string &method,
@@ -95,9 +95,10 @@ void McpStdioSession::sendNotification(const std::string &method,
 
 rapidjson::Document McpStdioSession::readResponseForId(const int expectedId,
                                                        const int timeoutMs,
-                                                       const std::string &stage) {
+                                                       const std::string &stage,
+                                                       shared::ToolContext *ctx) {
   while (true) {
-    rapidjson::Document message = readNextFramedJson(timeoutMs, stage);
+    rapidjson::Document message = readNextFramedJson(timeoutMs, stage, ctx);
 
     if (!message.IsObject()) {
       throw std::runtime_error("MCP " + stage + " response is not a JSON object");
@@ -123,11 +124,12 @@ rapidjson::Document McpStdioSession::readResponseForId(const int expectedId,
 }
 
 rapidjson::Document McpStdioSession::readNextFramedJson(const int timeoutMs,
-                                                        const std::string &stage) {
+                                                        const std::string &stage,
+                                                        shared::ToolContext *ctx) {
   const auto start = std::chrono::steady_clock::now();
 
   while (true) {
-    if (ctx_.cancelRequested()) {
+    if (ctx && ctx->cancelRequested()) {
       process_.kill();
       throw std::runtime_error("Interrupted");
     }
@@ -209,7 +211,7 @@ rapidjson::Document McpStdioSession::readNextFramedJson(const int timeoutMs,
                                "ms");
     }
 
-    if (!ctx_.waitFor(std::chrono::milliseconds(10))) {
+    if (ctx && !ctx->waitFor(std::chrono::milliseconds(10))) {
       process_.kill();
       throw std::runtime_error("Interrupted");
     }

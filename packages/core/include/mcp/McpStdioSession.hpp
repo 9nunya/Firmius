@@ -12,23 +12,25 @@ namespace firmius::core::mcp {
 
 class McpStdioSession : public IMcpSession {
 public:
-  McpStdioSession(shared::IHostProcess &process, shared::ToolContext &ctx);
+  McpStdioSession(shared::IHostProcess &process);
 
   rapidjson::Document sendRequest(int id, const std::string &method,
                                   const rapidjson::Value &params,
                                   int timeoutMs,
-                                  const std::string &stage) override;
+                                  const std::string &stage,
+                                  shared::ToolContext *ctx = nullptr) override;
   void sendNotification(const std::string &method,
                         const rapidjson::Value &params) override;
 
 private:
   rapidjson::Document readResponseForId(int expectedId, int timeoutMs,
-                                        const std::string &stage);
+                                        const std::string &stage,
+                                        shared::ToolContext *ctx = nullptr);
   rapidjson::Document readNextFramedJson(int timeoutMs,
-                                         const std::string &stage);
+                                         const std::string &stage,
+                                         shared::ToolContext *ctx = nullptr);
 
   shared::IHostProcess &process_;
-  shared::ToolContext &ctx_;
   std::size_t stdoutOffset_ = 0;
 };
 

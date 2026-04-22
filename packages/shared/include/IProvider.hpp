@@ -28,7 +28,7 @@ enum class ProviderType : std::uint8_t { OAuth, APIKey };
  * @brief Schema definition for an LLM-compatible tool.
  */
 struct ToolDefinition {
-  std::string name;        ///< Name of the tool.
+  std::string name;        ///< Unique callable name of the tool.
   std::string description; ///< Description for the LLM.
   std::string inputSchema; ///< JSON Schema for the tool's input.
 };

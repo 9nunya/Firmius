@@ -4,7 +4,7 @@
 // Uses ThreadManager directly to set up test scenarios, then verifies
 // that reconcileChunkDependencies() correctly unblocks dependent chunks.
 
-#include "tools/WorkToolCommon.hpp"
+#include "tools/WorkSupport.hpp"
 #include "persistence/ThreadManager.hpp"
 
 #include <gmock/gmock.h>
@@ -53,7 +53,7 @@ std::string createTestPlan(ThreadManager &tm, const std::string &threadId) {
   plan.context = "Testing context";
   plan.notes = "Test notes";
   plan.status = PlanStatus::Active;
-  plan.createdAt = worktools::nowEpochMs();
+  plan.createdAt = work::nowEpochMs();
   plan.updatedAt = plan.createdAt;
   return tm.createPlan(plan);
 }
@@ -72,12 +72,12 @@ std::string addChunk(ThreadManager &tm, const std::string &threadId,
   chunk.completion = title + " completed";
   chunk.status = status;
   chunk.dependsOn = dependsOn;
-  chunk.createdAt = worktools::nowEpochMs();
+  chunk.createdAt = work::nowEpochMs();
   chunk.updatedAt = chunk.createdAt;
   
   // Block chunk if dependencies are not met
   if (!dependsOn.empty() && status == WorkChunkStatus::Ready) {
-    worktools::blockChunkIfDependenciesIncomplete(plan, chunk);
+    work::blockChunkIfDependenciesIncomplete(plan, chunk);
   }
   
   plan.chunks.push_back(chunk);
@@ -91,7 +91,7 @@ void markChunkDone(ThreadManager &tm, const std::string &threadId,
   for (auto &chunk : plan.chunks) {
     if (chunk.id == chunkId) {
       chunk.status = WorkChunkStatus::Done;
-      chunk.updatedAt = worktools::nowEpochMs();
+      chunk.updatedAt = work::nowEpochMs();
       break;
     }
   }

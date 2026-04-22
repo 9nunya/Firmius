@@ -34,27 +34,28 @@ using McpHttpSender =
 
 class McpHttpSession : public IMcpSession {
 public:
-  McpHttpSession(const McpHttpTransportConfig &config, shared::ToolContext &ctx);
-  McpHttpSession(const McpHttpTransportConfig &config, shared::ToolContext &ctx,
+  McpHttpSession(const McpHttpTransportConfig &config);
+  McpHttpSession(const McpHttpTransportConfig &config,
                  McpHttpSender sender);
 
   rapidjson::Document sendRequest(int id, const std::string &method,
                                   const rapidjson::Value &params,
                                   int timeoutMs,
-                                  const std::string &stage) override;
+                                  const std::string &stage,
+                                  shared::ToolContext *ctx = nullptr) override;
   void sendNotification(const std::string &method,
                         const rapidjson::Value &params) override;
 
 private:
   rapidjson::Document sendJsonRpc(const rapidjson::Document &request,
                                   int timeoutMs,
-                                  const std::string &stage) const;
+                                  const std::string &stage,
+                                  shared::ToolContext *ctx = nullptr) const;
   static McpHttpResponse defaultSend(const McpHttpTransportConfig &config,
                                      const std::string &requestBody,
                                      int timeoutMs);
 
   McpHttpTransportConfig config_;
-  shared::ToolContext &ctx_;
   McpHttpSender sender_;
 };
 

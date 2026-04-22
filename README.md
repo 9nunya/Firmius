@@ -1,79 +1,144 @@
-# FIRMIUS
+# Firmius
 
-Firmius is a C++-native agent cockpit for people who want **actual orchestration** instead of one polite assistant pretending to be a whole company.
+**Firmius is the terminal-native control room for serious agent orchestration.**
 
-It is still pre-alpha. It is still a little feral. And the old README was straight-up out of date — because a LOT more of this thing is real now.
+Most agent apps give you one assistant with a nicer skin. Firmius gives you a real operating surface: multiple agents, explicit roles, runtime memory, MCP, semantic code intel, durable threads, artifacts, workflows, benchmarks, and enough control to run actual work instead of roleplaying it.
 
-## OK, SO WHAT ACTUALLY EXISTS NOW?
+If you want a polished toy, this is not that.
+If you want a fast, opinionated, C++-native system that can coordinate real agent work without pretending the hard parts do not exist, you're in the right repo.
 
-- **Real multi-agent execution** — subagents, plan/chunk workflows, worker handoffs, and file-lock coordination for parallel work.
-- **Workflow markdown that turns into slash commands** — built-ins bootstrap into `~/.firmius/workflows/`, and every `.md` becomes a `/command`.
-- **Rolling memory that is more than dumb truncation** — occupancy presets, observer/reflector passes, and a reserved working-memory updater slot.
-- **Watched-file overlays + exact turn recall** — agents keep live awareness of what they read, fully read, and edited.
-- **Thread-scoped artifacts** — real handoff files with references like `@artifact:lead/REPORT.md`.
-- **MCP over both `stdio` and `http`** — not vapor, not “coming soon”, actually implemented.
-- **Real LSP-backed code intel** — hover, definition, references, implementation, symbols, and diagnostics.
-- **Web fetch + web search built in** — plus a pluggable search-provider registry.
-- **Localhost OR Docker execution hosts** — depending on how spicy you want the run to be.
-- **Provider/account plumbing that is way fatter than the old README admitted** — `nanogpt`, `nvidia`, `openrouter`, `zai`, `zen`, `chutes`, `codex`, `antigravity`, `qwen`, `kimi`, `kilo`.
-- **Benchmark mode** for `mbpp`, `swebench`, and `agentbench`.
+## Why Firmius is better
 
-## QUICK START, NO TED TALK
+Because orchestration is the product here — not a checkbox.
+
+- **Real multi-agent execution** with subagents, handoffs, plans, chunking, and worker coordination.
+- **Terminal-first by design** with no split focus on a web package or browser wrapper.
+- **MCP that actually works** across discovery, loading, dynamic tool exposure, prompts, resources, and tool calls.
+- **LSP-backed code intelligence** so agents can navigate code semantically instead of doing grep cosplay.
+- **Rolling memory with structure** instead of blunt truncation and wishful thinking.
+- **Thread-scoped artifacts and exact recall** so long-running work stays inspectable and recoverable.
+- **Workflow markdown that becomes slash commands** because extensibility should not require a recompile.
+- **Provider and routing control** so different roles can use different models for different jobs.
+- **Docker-backed audit and benchmark lanes** when you want proof, not vibes.
+
+## What you get
+
+### Orchestration that feels like a system, not a demo
+
+Firmius ships with the primitives that matter when agents stop being a novelty:
+
+- lead / planner / executor / scout / worker purpose lanes
+- subagent spawning, waiting, and termination
+- plan and chunk lifecycle tools
+- file-aware coordination and locking
+- thread-scoped artifacts like `@artifact:lead/REPORT.md`
+- undo, resume, and durable thread state
+
+### Memory that holds up under real sessions
+
+Firmius keeps more than a shrinking transcript:
+
+- rolling memory modes and occupancy presets
+- observer and reflector passes
+- a dedicated working-memory updater lane
+- watched-file overlays for read / fully-read / edited state
+- durable user and project memory under `~/.firmius/user/`
+- exact turn recall when summaries are not enough
+
+### Tooling that can actually move work forward
+
+Out of the box, Firmius agents can work with:
+
+- files, directories, grep, glob, and patch-style edits
+- process execution and interactive subprocess control
+- Python execution
+- MCP servers over `stdio` and `http`
+- LSP hover, definition, references, symbols, and diagnostics
+- web fetch and search tools inside the agent runtime
+- artifact, planning, todo, and memory tooling
+
+## Quick start
 
 ```bash
 cmake -S . -B build
 cmake --build build -j$(nproc)
 ```
 
-Run the TUI:
+Launch the TUI:
 
 ```bash
 ./build/packages/cli/firmius
 ```
 
-Continue the last session:
+Continue your last session:
 
 ```bash
 ./build/packages/cli/firmius -c
 ```
 
-Fire a one-shot prompt into a fresh thread:
+Run a one-shot prompt in a fresh thread:
 
 ```bash
 ./build/packages/cli/firmius --prompt "audit this repo" --quit-when-idle
 ```
 
-See the audit/benchmark CLI surfaces:
+See available audit surfaces:
 
 ```bash
 ./build/packages/audits/firmius_audit --list
 ```
 
-## COMMANDS YOU'LL PROBABLY TOUCH FIRST
+## Core commands
 
-- `/new` — new thread, clean slate, go crazy.
-- `/threads` — switch threads.
-- `/models` — switch the focused model.
-- `/connect` — attach a provider with OAuth or API-key flow.
-- `/accounts` / `/quotas` — inspect provider state instead of guessing.
-- `/memory` — rolling-memory settings, presets, and maintenance-model picks.
-- `/router` — define routing categories.
-- `/purposes` — map personas to routing categories.
-- `/mcp` — open MCP config/connections UI.
-- `/benchmarks` — launch Docker-backed benchmark runs.
-- `/undo` — rip back the last N turns.
+| Command | What it does |
+| --- | --- |
+| `/new` | Start a fresh thread |
+| `/threads` | Switch threads |
+| `/models` | Change the focused model |
+| `/connect` | Attach a provider account |
+| `/accounts` / `/quotas` | Inspect provider state |
+| `/memory` | Tune rolling-memory behavior |
+| `/router` | Define routing categories |
+| `/purposes` | Map roles to routes |
+| `/mcp` | Manage MCP servers and connections |
+| `/benchmarks` | Launch benchmark runs |
+| `/undo` | Rewind the last N turns |
 
-## DOCS, BUT LIKE... THE USEFUL ONES
+## Repo map
 
-- `docs/USAGE.md` — how to drive the thing without fighting it.
-- `docs/TOUR.md` — the under-advertised stuff Firmius already has.
-- `docs/MCP.md` — current MCP behavior, caveats, and flow.
-- `examples/mcp/` — credential-free starter configs and tool-call examples.
+```text
+packages/
+├── audits   - benchmark and evaluation harnesses
+├── cli      - entrypoint and application launch surface
+├── core     - engine, agents, tools, hosts, persistence
+├── provider - model providers and search providers
+├── shared   - interfaces, events, serialization, config
+└── tui      - terminal UI components, commands, modals
+```
 
-## HONESTY HOUR
+## Documentation
 
-- **Linux / POSIX first.** This repo still has POSIX energy all over it.
-- **Still pre-alpha.** Fast, capable, useful... also sharp in places.
-- **Not every provider/model combo is equally battle-tested.** Some paths are way more cooked than others.
-- **MCP TLS extras are parsed, but not fully wired yet.** `stdio` and plain `http` are the happy paths right now.
-- **This is not the polished SaaS product page version of itself yet.** It is the garage-built “why is this kinda cracked already?” version.
+- [`docs/USAGE.md`](docs/USAGE.md) — how to run Firmius day to day
+- [`docs/TOUR.md`](docs/TOUR.md) — the feature tour
+- [`docs/MCP.md`](docs/MCP.md) — MCP architecture, config, and workflow
+- [`examples/mcp/`](examples/mcp/) — ready-to-steal MCP examples
+
+## Current status
+
+Firmius is pre-alpha, but it is already useful in exactly the places where most agent products still feel fake:
+
+- long-running repo work
+- multi-step execution with recoverable state
+- provider routing and role specialization
+- tool-rich coding and analysis sessions
+- benchmark and audit flows that need containment
+
+## Philosophy
+
+Firmius is built around one belief:
+
+> if agents are going to do real work, the runtime has to be honest about state, tools, coordination, and failure.
+
+That is why this repo is opinionated.
+That is why it is terminal-first.
+That is why MCP, memory, orchestration, and verification are treated like first-class systems instead of launch-day copy.

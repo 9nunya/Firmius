@@ -230,13 +230,14 @@ std::string extractMessageText(const firmius::shared::Message &msg,
 
 struct ThreadSearchData {
   LastUserMessage lastUser;
-  std::string searchBlob;
+  std::string allUserText;  // all user prompts across all agents
+  std::string searchBlob;   // combined search blob used for fuzzy match
 };
-
 ThreadSearchData inspectThreadTranscript(firmius::core::ThreadManager &tm,
                                          const std::string &thread_id) {
   ThreadSearchData data;
   std::vector<std::string> searchChunks;
+  std::vector<std::string> userChunks;
   searchChunks.push_back(thread_id);
 
   for (const auto &agentId : tm.listAgents(thread_id)) {
@@ -248,15 +249,29 @@ ThreadSearchData inspectThreadTranscript(firmius::core::ThreadManager &tm,
           if (!text.empty()) {
             searchChunks.push_back(text);
           }
-          if (msg.role == firmius::shared::Role::User &&
-              msg.timestamp >= data.lastUser.timestamp) {
-            data.lastUser.timestamp = msg.timestamp;
-            data.lastUser.text = text;
-            data.lastUser.found = true;
+          if (msg.role == firmius::shared::Role::User) {
+            if (!text.empty()) {
+              userChunks.push_back(text);
+            }
+            if (msg.timestamp >= data.lastUser.timestamp) {
+              data.lastUser.timestamp = msg.timestamp;
+              data.lastUser.text = text;
+              data.lastUser.found = true;
+            }
           }
         }
       }
     } catch (...) {
+    }
+  }
+
+  // Flatten all user prompts (across all agents) for UI display and search.
+  {
+    std::string flattenedUser;
+    for (const auto &chunk : userChunks) {
+      if (chunk.empty()) continue;
+      if (!flattenedUser.empty()) flattenedUser.push_back(' ');
+      flattenedUser += chunk;
     }
   }
 
@@ -279,6 +294,7 @@ struct ThreadEntry {
   int agent_count = 0;
   std::string last_user_text;
   uint64_t last_user_timestamp = 0;
+  std::string all_user_text;
   std::string search_blob;
   bool locked_by_other = false;
   int locked_pid = -1;
@@ -297,6 +313,10 @@ ftxui::Component ThreadPickerModal::create(TuiState &state) {
   auto list_rows = std::make_shared<std::vector<std::string>>();
   auto list_width = std::make_shared<int>(80);
   auto row_boxes = std::make_shared<std::vector<ftxui::Box>>();
+
+  enum class SortMode { LastActive, Title, CreatedAt };
+  auto sort_mode = std::make_shared<SortMode>(SortMode::LastActive);
+  auto show_all = std::make_shared<bool>(false);
 
   std::error_code cwd_ec;
   auto cwd_path = std::filesystem::current_path(cwd_ec);
@@ -341,15 +361,18 @@ ftxui::Component ThreadPickerModal::create(TuiState &state) {
       };
 
   auto refresh_threads =
-      [all_threads_ptr, filtered_indices, selected, &h, cwd, rebuild_filtered] {
+      [all_threads_ptr, filtered_indices, selected, &h, cwd, rebuild_filtered,
+       sort_mode, show_all] {
     auto all_threads = h.listThreads();
     all_threads_ptr->clear();
     firmius::core::ThreadManager tm(
         firmius::core::ThreadManager::defaultBasePath());
 
     for (const auto &t : all_threads) {
-      if (!cwd.empty() && normalizePath(t.cwd) != cwd && !t.isBenchmarkRun) {
-        continue;
+      if (!*show_all) {
+        if (!cwd.empty() && normalizePath(t.cwd) != cwd && !t.isBenchmarkRun) {
+          continue;
+        }
       }
 
       ThreadEntry entry;
@@ -361,10 +384,13 @@ ftxui::Component ThreadPickerModal::create(TuiState &state) {
         entry.last_user_text = transcript.lastUser.text;
         entry.last_user_timestamp = transcript.lastUser.timestamp;
       }
-      entry.search_blob =
-          toLower(flattenText(t.threadId + " " +
-                              (t.title.empty() ? "" : t.title) + " " +
-                              transcript.searchBlob));
+      entry.all_user_text = transcript.allUserText;
+
+      // Search blob includes thread id/title plus ALL user prompts across all
+      // agents (not just the most recent user message).
+      entry.search_blob = toLower(flattenText(
+          t.threadId + " " + (t.title.empty() ? "" : t.title) + " " +
+          transcript.allUserText));
 
       auto locked_pid = lockedPidByOther(t.threadId);
       if (locked_pid.has_value()) {
@@ -372,8 +398,21 @@ ftxui::Component ThreadPickerModal::create(TuiState &state) {
         entry.locked_pid = *locked_pid;
       }
 
-      all_threads_ptr->push_back(entry);
+      all_threads_ptr->push_back(std::move(entry));
     }
+
+    // Sort visible list first, then apply fuzzy scoring.
+    std::stable_sort(all_threads_ptr->begin(), all_threads_ptr->end(),
+                     [&](const ThreadEntry &a, const ThreadEntry &b) {
+                       if (*sort_mode == SortMode::Title) {
+                         return toLower(a.meta.title) < toLower(b.meta.title);
+                       }
+                       if (*sort_mode == SortMode::CreatedAt) {
+                         return a.meta.createdAt > b.meta.createdAt;
+                       }
+                       // Default: last active first
+                       return a.meta.lastActiveAt > b.meta.lastActiveAt;
+                     });
 
     rebuild_filtered();
     if (*selected >= static_cast<int>(filtered_indices->size())) {
@@ -447,11 +486,12 @@ ftxui::Component ThreadPickerModal::create(TuiState &state) {
                   : (isSelected ? theme.modals.highlight_fg : theme.modals.fg);
           ftxui::Color sub_fg = theme.base.dim;
 
-          ftxui::Elements top_line_elements = {
-              ftxui::text(title) | ftxui::color(title_fg) | ftxui::bold,
-              ftxui::text(" ") | ftxui::color(title_fg),
-              ftxui::text(agent_label) | ftxui::color(sub_fg),
-          };
+          ftxui::Elements top_line_elements;
+          top_line_elements.reserve(6);
+          top_line_elements.push_back(ftxui::text(title) |
+                                      ftxui::color(title_fg) | ftxui::bold);
+          top_line_elements.push_back(ftxui::text(" ") | ftxui::color(title_fg));
+          top_line_elements.push_back(ftxui::text(agent_label) | ftxui::color(sub_fg));
           if (!benchmark_label.empty()) {
             top_line_elements.push_back(ftxui::text(" ") | ftxui::color(sub_fg));
             top_line_elements.push_back(
@@ -472,9 +512,18 @@ ftxui::Component ThreadPickerModal::create(TuiState &state) {
               entry.last_user_text.empty() ? "No user messages yet"
                                            : flattenText(entry.last_user_text);
 
-          int time_width = time_label.empty() ? 0 : static_cast<int>(time_label.size()) + 1;
-          int max_msg = std::max(8, width - time_width - 8);
-          user_text = truncateText(user_text, max_msg);
+          // Ensure the right-side time label always has space, even on narrow
+          // terminals. Constrain the left preview element width explicitly.
+          const int time_width = time_label.empty()
+                                     ? 0
+                                     : static_cast<int>(time_label.size()) + 1;
+          const int min_preview = 14;
+          const int gap = 2; // visual space before time
+          const int prefix_suffix = 6; // -> "" + a trailing space
+          const int preview_reserved = prefix_suffix + gap;
+          int max_left_text_width =
+              std::max(min_preview, width - time_width - preview_reserved);
+          user_text = truncateText(user_text, max_left_text_width);
 
           auto msg_left =
               ftxui::text("-> \"" + user_text + "\"") | ftxui::color(sub_fg);
@@ -482,9 +531,14 @@ ftxui::Component ThreadPickerModal::create(TuiState &state) {
           if (time_label.empty()) {
             msg_line = msg_left;
           } else {
-            msg_line =
-                ftxui::hbox({msg_left, ftxui::filler(),
-                             ftxui::text(time_label) | ftxui::color(sub_fg)});
+            msg_line = ftxui::hbox({
+                msg_left |
+                    ftxui::size(ftxui::WIDTH, ftxui::LESS_THAN,
+                               max_left_text_width + prefix_suffix) |
+                    ftxui::xflex,
+                ftxui::text(std::string(gap, ' ')) | ftxui::color(sub_fg),
+                ftxui::text(time_label) | ftxui::color(sub_fg),
+            });
           }
 
           auto id_line =
@@ -504,24 +558,39 @@ ftxui::Component ThreadPickerModal::create(TuiState &state) {
       });
 
   auto scrollable = ScrollableBox(
-      listContent, {.startAtBottom = false, .overlayScrollbar = true});
+      listContent, {.startAtBottom = false, .overlayScrollbar = false});
   scrollable->RequestScrollToTop();
-
   auto modal_renderer =
       ftxui::Renderer(scrollable, [scrollable, list_rows, filtered_indices,
                                    filter_text, all_threads_ptr, selected,
-                                   list_width] {
+                                   list_width, sort_mode, show_all] {
         const auto &theme = ThemeManager::instance().getCurrentTheme();
+
+        const auto sortLabel = [&]() -> std::string {
+          switch (*sort_mode) {
+          case SortMode::Title:
+            return "Title";
+          case SortMode::CreatedAt:
+            return "Created";
+          case SortMode::LastActive:
+          default:
+            return "Last Active";
+          }
+        }();
+        const std::string scopeLabel = *show_all ? "All" : "Project";
         auto term = ftxui::Terminal::Size();
-        int modal_width = std::min(100, std::max(20, term.dimx - 6));
-        if (modal_width > term.dimx) {
-          modal_width = term.dimx;
-        }
-        int content_width = std::max(10, modal_width - 4);
-        if (content_width > modal_width) {
-          content_width = modal_width;
-        }
+        const int term_w = std::max(0, term.dimx);
+        const int term_h = std::max(0, term.dimy);
+
+        // Width: scale up on wide terminals, keep margins, avoid overflow.
+        int modal_width = std::clamp(term_w - 6, 32, 180);
+        // Height: adapt to small-height terminals too.
+        int modal_height = std::clamp(term_h - 6, 14, 28);
+
+        int content_width = std::max(20, modal_width - 4);
         *list_width = content_width;
+
+        const int list_max_h = std::max(6, modal_height - 10);
 
         if (all_threads_ptr->empty()) {
           return FlatModalPanel(
@@ -548,40 +617,52 @@ ftxui::Component ThreadPickerModal::create(TuiState &state) {
             theme, "Select Thread",
             ModalSection(
                 theme,
-                ftxui::vbox(
-                    {ftxui::hbox({
-                         ftxui::text("Search: ") | ftxui::color(theme.modals.fg),
-                         ftxui::text(*filter_text) | ftxui::underlined |
-                             ftxui::color(theme.modals.fg),
-                     }),
-                     ftxui::text(""),
-                     ftxui::hbox({
-                         ftxui::text(" " + std::to_string(filtered_indices->size()) +
-                                     " matches ") |
-                             ftxui::color(theme.base.dim),
-                         ftxui::filler(),
-                         ftxui::text(selected_id.empty()
-                                         ? ""
-                                         : "selected: " + selected_id) |
-                             ftxui::color(theme.base.dim),
-                     }),
-                     ftxui::separatorLight() |
-                         ftxui::color(theme.modals.border),
-                     scrollable->Render() | ftxui::xflex |
-                         ftxui::size(ftxui::HEIGHT, ftxui::LESS_THAN, 18),
-                     ftxui::text(""),
-                     ftxui::text(
-                         "Type to fuzzy-search. Enter switches. Ctrl+Y copies thread ID. ESC cancels.") |
-                         ftxui::color(theme.base.dim)}),
+                ftxui::vbox({
+                    ftxui::hbox({
+                        ftxui::text("Search: ") | ftxui::color(theme.modals.fg),
+                        ftxui::text(*filter_text) | ftxui::underlined |
+                            ftxui::color(theme.modals.fg),
+                    }),
+                    ftxui::text(""),
+                    ftxui::hbox({
+                        ftxui::text(" " + std::to_string(filtered_indices->size()) +
+                                    " matches ") |
+                            ftxui::color(theme.base.dim),
+                        ftxui::text("  ") | ftxui::color(theme.base.dim),
+                        ftxui::text("Sort: " + sortLabel) |
+                            ftxui::color(theme.base.dim),
+                        ftxui::text("  ") | ftxui::color(theme.base.dim),
+                        ftxui::text("Scope: " + scopeLabel) |
+                            ftxui::color(theme.base.dim),
+                    }),
+                    ftxui::hbox({
+                        ftxui::filler(),
+                        ftxui::text(selected_id.empty()
+                                        ? ""
+                                        : "selected: " + truncateText(selected_id, 28)) |
+                            ftxui::color(theme.base.dim),
+                    }),
+                    ftxui::separatorLight() | ftxui::color(theme.modals.border),
+                    scrollable->Render() | ftxui::xflex |
+                        ftxui::size(ftxui::HEIGHT, ftxui::LESS_THAN, list_max_h),
+                    ftxui::text(""),
+                    ftxui::hbox({
+                        ftxui::text("S:sort  A:all  ") |
+                            ftxui::color(theme.base.dim),
+                        ftxui::filler(),
+                        ftxui::text("Enter:switch  Ctrl+Y:copy  ESC:cancel") |
+                            ftxui::color(theme.base.dim),
+                    }),
+                }),
                 theme.modals.bg),
-            modal_width, 24);
+            modal_width, modal_height);
       });
 
   return ftxui::CatchEvent(
       modal_renderer,
       [all_threads_ptr, filtered_indices, filter_text, selected, row_boxes,
-       scrollable, rebuild_filtered, &state,
-       &h](ftxui::Event event) {
+       scrollable, rebuild_filtered, &state, &h, refresh_threads, sort_mode,
+       show_all](ftxui::Event event) {
     const auto copySelectedThreadId = [&]() {
       rebuild_filtered();
       if (filtered_indices->empty() ||
@@ -601,6 +682,32 @@ ftxui::Component ThreadPickerModal::create(TuiState &state) {
 
     if (IsPermissionCycleEvent(event)) {
       return copySelectedThreadId();
+    }
+
+    // Sorting / filtering toggles.
+    // - 's' cycles sort: last-active -> title -> created-at -> last-active
+    // - 'a' toggles show-all (across all workspace dirs) vs current dir only
+    if (event == ftxui::Event::Character('s') ||
+        event == ftxui::Event::Character('S')) {
+      if (*sort_mode == SortMode::LastActive) {
+        *sort_mode = SortMode::Title;
+      } else if (*sort_mode == SortMode::Title) {
+        *sort_mode = SortMode::CreatedAt;
+      } else {
+        *sort_mode = SortMode::LastActive;
+      }
+      *selected = 0;
+      refresh_threads();
+      scrollable->RequestScrollToTop();
+      return true;
+    }
+    if (event == ftxui::Event::Character('a') ||
+        event == ftxui::Event::Character('A')) {
+      *show_all = !*show_all;
+      *selected = 0;
+      refresh_threads();
+      scrollable->RequestScrollToTop();
+      return true;
     }
 
     if (event == ftxui::Event::Return) {

@@ -1,6 +1,7 @@
 #ifndef FIRMIUS_CORE_MCP_IMCP_SESSION_HPP
 #define FIRMIUS_CORE_MCP_IMCP_SESSION_HPP
 
+#include "ITool.hpp"
 #include <rapidjson/document.h>
 
 #include <string>
@@ -14,7 +15,8 @@ public:
   virtual rapidjson::Document sendRequest(int id, const std::string &method,
                                           const rapidjson::Value &params,
                                           int timeoutMs,
-                                          const std::string &stage) = 0;
+                                          const std::string &stage,
+                                          shared::ToolContext *ctx = nullptr) = 0;
   virtual void sendNotification(const std::string &method,
                                 const rapidjson::Value &params) = 0;
 };

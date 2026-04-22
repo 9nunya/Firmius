@@ -61,7 +61,8 @@ void ApplyError(ToolPresentation &presentation, const ToolCallView &view,
 } // namespace
 
 bool IsWebSearchFamilyTool(const std::string &tool_name) {
-  return IsMatch(tool_name, "web_search");
+  return tool_name == "Web" || IsMatch(tool_name, "web_search") ||
+         IsMatch(tool_name, "web_fetch");
 }
 
 ToolPresentation BuildWebSearchToolPresentation(const ToolCallView &view) {
@@ -92,7 +93,7 @@ ToolPresentation BuildWebSearchToolPresentation(const ToolCallView &view) {
       return presentation;
   }
 
-  const rapidjson::Value* results_array = nullptr;
+  const rapidjson::Value *results_array = nullptr;
   if (result_doc.IsArray()) {
     results_array = &result_doc;
   } else if (result_doc.IsObject()) {
@@ -111,6 +112,88 @@ ToolPresentation BuildWebSearchToolPresentation(const ToolCallView &view) {
     presentation.footer_badges.push_back(std::to_string(results_array->Size()) + " results");
   }
 
+  return presentation;
+}
+
+ToolPresentation BuildWebFetchToolPresentation(const ToolCallView &view) {
+  ToolPresentation presentation;
+  presentation.lifecycle = LifecycleFromPhase(view);
+  presentation.layout = ToolPresentationLayoutKind::BodyFirstPreview;
+  presentation.density = ToolPresentationDensity::DetailHeavy;
+  presentation.subtitle = view.name;
+  presentation.custom_icon = firmius::shared::ICON_SEARCH;
+
+  rapidjson::Document args_doc;
+  const bool has_args = ParseObject(view.args, args_doc);
+  const std::string url = has_args ? StringMember(args_doc, "url") : "";
+
+  if (presentation.lifecycle == ToolPresentationLifecycle::Preparing) {
+    presentation.title = "prepare URL fetch";
+  } else if (presentation.lifecycle == ToolPresentationLifecycle::Running) {
+    presentation.title = "fetching URL";
+  } else {
+    presentation.title = "web fetch";
+  }
+  if (!url.empty()) {
+    presentation.footer_badges.push_back(url);
+  }
+
+  if (presentation.lifecycle == ToolPresentationLifecycle::Error) {
+    ApplyError(presentation, view, "web fetch failed");
+    return presentation;
+  }
+  if (presentation.lifecycle != ToolPresentationLifecycle::Success) {
+    return presentation;
+  }
+
+  rapidjson::Document result_doc;
+  if (!ParseObject(view.result, result_doc)) {
+    return presentation;
+  }
+  if (result_doc.HasMember("size") && result_doc["size"].IsUint64()) {
+    presentation.footer_badges.push_back(
+        std::to_string(result_doc["size"].GetUint64()) + " bytes");
+    presentation.facts.push_back(
+        {"Size", std::to_string(result_doc["size"].GetUint64()) + " bytes"});
+  }
+  const std::string redirected = StringMember(result_doc, "redirected_to");
+  if (!redirected.empty()) {
+    presentation.notices.push_back(
+        {ToolPresentationNoticeKind::Info, "Large response saved to " + redirected});
+  }
+  const std::string instruction = StringMember(result_doc, "instruction");
+  if (!instruction.empty()) {
+    presentation.notices.push_back(
+        {ToolPresentationNoticeKind::Info, "Follow-up: " + instruction});
+    ToolPresentationSection followup;
+    followup.title = "Follow-up";
+    followup.lines.push_back(instruction);
+    presentation.sections.push_back(std::move(followup));
+    presentation.expandable = true;
+    presentation.expanded = view.show_result;
+  }
+  const std::string content = StringMember(result_doc, "content");
+  std::istringstream stream(content);
+  std::string line;
+  std::vector<std::string> lines;
+  while (std::getline(stream, line)) {
+    lines.push_back(line);
+  }
+  if (!lines.empty()) {
+    ToolPresentationSection section;
+    section.title = "Excerpt";
+    const size_t shown = std::min<size_t>(8, lines.size());
+    section.lines.assign(lines.begin(), lines.begin() + static_cast<long>(shown));
+    presentation.body_lines = section.lines;
+    presentation.sections.push_back(std::move(section));
+    if (lines.size() > shown) {
+      presentation.expandable = true;
+      presentation.expanded = view.show_result;
+      presentation.notices.push_back(
+          {ToolPresentationNoticeKind::Info,
+           "Showing first " + std::to_string(shown) + " lines"});
+    }
+  }
   return presentation;
 }
 

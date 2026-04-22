@@ -9,11 +9,6 @@ namespace firmius::tui {
 
 namespace {
 
-bool isMatch(const std::string &actual, const std::string &expected) {
-  return !actual.empty() && !expected.empty() &&
-         actual.find(expected) != std::string::npos;
-}
-
 std::string shorten(const std::string &text, size_t limit = 512) {
   if (text.size() <= limit) {
     return text;
@@ -85,13 +80,10 @@ std::string joinTargets(const std::vector<std::string> &targets) {
 } // namespace
 
 QuickToolCategory QuickToolCategoryForName(const std::string &name) {
-  if (isMatch(name, "file_read") || isMatch(name, "read_file")) {
-    return QuickToolCategory::Read;
-  }
-  if (isMatch(name, "list_directory")) {
+  if (name == "Files") {
     return QuickToolCategory::List;
   }
-  if (name == "grep" || name == "glob" || name == "find" || name == "search") {
+  if (name == "Search") {
     return QuickToolCategory::Search;
   }
   return QuickToolCategory::None;
@@ -110,13 +102,20 @@ QuickToolDescriptor DescribeQuickToolCall(const shared::ToolCallView &view) {
   if (!shared::ToolCallHasRenderableIdentity(view)) {
     return descriptor;
   }
+  rapidjson::Document doc;
+  doc.Parse(view.args.c_str());
+  const std::string action = stringArg(doc, "action");
+
   descriptor.category = QuickToolCategoryForName(view.name);
+  if (view.name == "Files" && action == "Read") {
+    descriptor.category = QuickToolCategory::Read;
+  } else if (view.name == "Files" &&
+             (action == "Grep" || action == "Glob")) {
+    descriptor.category = QuickToolCategory::Search;
+  }
   if (!IsQuickToolCategory(descriptor.category)) {
     return descriptor;
   }
-
-  rapidjson::Document doc;
-  doc.Parse(view.args.c_str());
 
   if (descriptor.category == QuickToolCategory::Read) {
     auto path = relativePath(stringArg(doc, "path"));

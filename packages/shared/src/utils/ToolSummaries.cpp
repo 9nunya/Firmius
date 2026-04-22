@@ -104,19 +104,24 @@ static std::string firstNonEmptyLine(const std::string &text) {
 
 std::string SummarizeToolCall(const std::string &name, const std::string &args, ToolPhase phase) {
   if (phase == ToolPhase::Preparing) {
-    if (isMatch(name, "file_edit")) return "Preparing edit...";
-    if (isMatch(name, "file_read")) return "Preparing read...";
-    if (isMatch(name, "process_execute") || isMatch(name, "process_spawn")) return "Writing command...";
-    if (isMatch(name, "summon_subagent")) return "Summoning subagent...";
-    if (isMatch(name, "subagent_wait")) return "Awaiting subagent...";
-    if (isMatch(name, "grep")) return "Preparing grep...";
-    if (isMatch(name, "glob")) return "Preparing glob...";
-    if (isMatch(name, "plan_")) return "Preparing plan update...";
-    if (isMatch(name, "chunk_")) return "Preparing chunk update...";
-    if (isMatch(name, "todo_write")) return "Preparing todo update...";
-    if (isMatch(name, "artifact_write")) return "Preparing artifact write...";
-    if (isMatch(name, "artifact_read")) return "Preparing artifact read...";
-    if (isMatch(name, "artifact_list")) return "Preparing artifact list...";
+    if (name == "Edit") return "Preparing edit...";
+    if (name == "Files") return "Preparing filesystem query...";
+    if (name == "Process")
+      return "Preparing process operation...";
+    if (name == "Delegate")
+      return "Preparing delegation...";
+    if (name == "Work" || name == "Todo" || name == "Fleet")
+      return "Preparing work update...";
+    if (name == "Artifacts")
+      return "Preparing artifact operation...";
+    if (name == "Memory")
+      return "Preparing memory recall...";
+    if (name == "Lsp")
+      return "Preparing language-server query...";
+    if (name == "Web")
+      return "Preparing web operation...";
+    if (name == "Skill")
+      return "Preparing skill load...";
     return "Preparing " + name + "...";
   }
 
@@ -132,114 +137,164 @@ std::string SummarizeToolCall(const std::string &name, const std::string &args, 
     return value;
   };
 
-  if (isMatch(name, "plan_create")) {
-    return "Create plan" + quotedLabel(valid ? stringArg(doc, "title") : "");
-  }
-  if (isMatch(name, "plan_update")) {
-    std::string title = valid ? stringArg(doc, "title") : "";
-    return "Update plan" + quotedLabel(title);
-  }
-  if (isMatch(name, "plan_get")) {
-    return "Load plan";
-  }
-  if (isMatch(name, "plan_list")) {
-    return "List plans";
-  }
-  if (isMatch(name, "plan_set_active")) {
-    return "Set active plan";
-  }
-  if (isMatch(name, "chunk_add")) {
-    return "Add chunk" + quotedLabel(valid ? stringArg(doc, "title") : "");
-  }
-  if (isMatch(name, "chunk_get")) {
-    std::string title = valid ? stringArg(doc, "title") : "";
-    return "Load chunk" + quotedLabel(title);
-  }
-  if (isMatch(name, "chunk_list")) {
-    return "List chunks";
-  }
-  if (isMatch(name, "chunk_update")) {
-    std::string title = valid ? stringArg(doc, "title") : "";
-    return "Update chunk" + quotedLabel(title);
-  }
-  if (isMatch(name, "chunk_ready_for_execution")) {
-    return "Find executable chunks";
-  }
-  if (isMatch(name, "todo_write")) {
-    return "Update todo list";
-  }
-  if (isMatch(name, "artifact_write")) {
-    return "Write artifact";
-  }
-  if (isMatch(name, "artifact_read")) {
-    std::string reference = bestStringArg("reference");
-    if (reference.empty()) {
-      reference = bestStringArg("name");
+  if (name == "Work") {
+    std::string title = bestStringArg("title");
+    std::string planId = bestStringArg("plan_id");
+    std::string chunkId = bestStringArg("chunk_id");
+    if (!chunkId.empty()) {
+      return "Work chunk" + quotedLabel(!title.empty() ? title : chunkId);
     }
-    if (reference.empty()) {
-      return "Read artifact";
+    if (!planId.empty()) {
+      return "Work plan" + quotedLabel(!title.empty() ? title : planId);
     }
-    return "Read " + reference;
-  }
-  if (isMatch(name, "artifact_list")) {
-    return "List artifacts";
+    if (!title.empty()) {
+      return "Work" + quotedLabel(title);
+    }
+    return "Work operation";
   }
 
-  if (isMatch(name, "list_directory")) {
-    std::string path = bestStringArg("path");
-    return "List " + (path.empty() ? "." : path);
+  if (name == "Todo") {
+    return "Update todo list";
   }
-  if (isMatch(name, "file_read")) {
-    std::string path = bestStringArg("path");
-    int start = -1, end = -1;
-    if (valid) {
-      if (doc.HasMember("start_line") && doc["start_line"].IsInt())
-        start = doc["start_line"].GetInt();
-      if (doc.HasMember("end_line") && doc["end_line"].IsInt())
-        end = doc["end_line"].GetInt();
+  if (name == "Artifacts") {
+    const std::string action = bestStringArg("action");
+    if (action == "Read") {
+      std::string reference = bestStringArg("reference");
+      if (reference.empty()) {
+        reference = bestStringArg("name");
+      }
+      return reference.empty() ? "Read artifact" : "Read " + reference;
     }
-    std::string s = "Read " + path;
-    if (start >= 0 && end >= 0)
-      s += "[" + std::to_string(start) + ":" + std::to_string(end) + "]";
-    return s;
+    if (action == "List") {
+      return "List artifacts";
+    }
+    return "Write artifact";
   }
-  if (isMatch(name, "file_edit")) {
-    std::string path = "";
+
+  if (name == "Files") {
+    const std::string action = bestStringArg("action");
+    if (action == "Read") {
+      std::string path = bestStringArg("path");
+      int start = -1, end = -1;
+      if (valid) {
+        if (doc.HasMember("start_line") && doc["start_line"].IsInt())
+          start = doc["start_line"].GetInt();
+        if (doc.HasMember("end_line") && doc["end_line"].IsInt())
+          end = doc["end_line"].GetInt();
+      }
+      std::string s = "Read " + path;
+      if (start >= 0 && end >= 0)
+        s += "[" + std::to_string(start) + ":" + std::to_string(end) + "]";
+      return s;
+    }
+    if (action == "Grep") {
+      std::string pattern = bestStringArg("pattern");
+      return "Search \"" + pattern + "\"";
+    }
+    if (action == "Glob") {
+      std::string pattern = bestStringArg("pattern");
+      if (pattern.empty()) pattern = bestStringArg("glob");
+      return pattern.empty() ? "Find files" : "Find \"" + pattern + "\"";
+    }
+    std::string path = bestStringArg("path");
+    if (path.empty()) path = ".";
+    return "List " + path;
+  }
+  if (name == "Edit") {
+    std::string path = bestStringArg("path");
+    if (path.empty()) {
+      path = bestStringArg("filename");
+    }
+
+    // Prefer to differentiate edit lanes when payload is valid JSON.
+    if (valid) {
+      if (doc.HasMember("edits") && doc["edits"].IsArray()) {
+        return "Edit " + path + " (" + std::to_string(doc["edits"].Size()) + " ops)";
+      }
+      if (doc.HasMember("content") && doc["content"].IsString()) {
+        return "Overwrite " + path;
+      }
+      if (doc.HasMember("patch") && doc["patch"].IsString()) {
+        return "Apply patch";
+      }
+      if (doc.HasMember("files") && doc["files"].IsArray()) {
+        return "Apply patch";
+      }
+    }
+
+    return "Apply patch";
+  }
+  if (name == "EditWrite") {
+    std::string path = bestStringArg("path");
+    return "Write " + path;
+  }
+  if (name == "EditReplace") {
+    std::string path = bestStringArg("path");
+    size_t replacementCount = 0;
+    if (valid && doc.HasMember("replacements") && doc["replacements"].IsArray()) {
+      replacementCount = doc["replacements"].Size();
+    }
+    return replacementCount > 0
+               ? "Replace in " + path + " (" + std::to_string(replacementCount) + " ops)"
+               : "Replace in " + path;
+  }
+  if (name == "EditRange") {
+    std::string path = bestStringArg("path");
     size_t editCount = 0;
-    bool overwrite = false;
-    if (valid && doc.HasMember("path") && doc["path"].IsString())
-      path = doc["path"].GetString();
-    if (valid && doc.HasMember("edits") && doc["edits"].IsArray())
-      editCount = doc["edits"].Size();
-    if (valid && doc.HasMember("content") && doc["content"].IsString())
-      overwrite = true;
-    if (overwrite)
-      return "Overwrite " + path;
+    if (valid && doc.HasMember("operations") && doc["operations"].IsArray())
+      editCount = doc["operations"].Size();
     if (editCount > 0)
-      return "Edit " + path + " (" + std::to_string(editCount) + " ops)";
-    return "Edit " + path;
+      return "Range edit " + path + " (" + std::to_string(editCount) + " ops)";
+    return "Range edit " + path;
   }
-  if (isMatch(name, "process_execute") || isMatch(name, "process_spawn")) {
-    std::string cmd = "";
-    if (valid && doc.HasMember("command") && doc["command"].IsString())
-      cmd = doc["command"].GetString();
+  if (name == "Process") {
+    const std::string action = bestStringArg("action");
+    if (action == "Status") return "Inspect process";
+    if (action == "Input") return "Send process input";
+    if (action == "Wait") return "Wait for process";
+    std::string cmd = bestStringArg("command");
     return "$ " + cmd;
   }
-  if (isMatch(name, "grep")) {
-    std::string pattern = bestStringArg("pattern");
-    return "Grep \"" + pattern + "\"";
-  }
-  if (isMatch(name, "glob")) {
-    std::string pattern = bestStringArg("pattern");
-    if (pattern.empty()) {
-      pattern = bestStringArg("glob");
+  if (name == "Delegate") {
+    const std::string action = bestStringArg("action");
+    if (action == "Wait") {
+      std::string title = bestStringArg("title");
+      if (title.empty()) title = bestStringArg("name");
+      return !title.empty() ? "Wait for " + title : "Await subagent";
     }
-    if (pattern.empty()) {
-      return "Glob";
+    if (action == "Stop") {
+      return "Stop subagent";
     }
-    return "Glob \"" + pattern + "\"";
+    std::string title = bestStringArg("title");
+    if (title.empty()) title = bestStringArg("name");
+    return title.empty() ? "Delegate subagent" : "Delegate \"" + firstWords(title, 3) + "\"";
   }
-  if (isMatch(name, "python_execute")) {
+  if (name == "Memory") {
+    return "Recall memory";
+  }
+  if (name == "Lsp") {
+    std::string op = bestStringArg("operation");
+    return op.empty() ? "LSP query" : "LSP " + op;
+  }
+  if (name == "Web") {
+    const std::string action = bestStringArg("action");
+    if (action == "Search") {
+      std::string query = bestStringArg("query");
+      return query.empty() ? "Web search"
+                           : "Search the web for \"" + firstWords(query, 6) + "\"";
+    }
+    std::string url = bestStringArg("url");
+    auto pos = url.find("://");
+    if (pos != std::string::npos) url = url.substr(pos + 3);
+    auto slash = url.find('/');
+    if (slash != std::string::npos) url = url.substr(0, slash);
+    return "Fetch " + url;
+  }
+  if (name == "Skill") {
+    std::string what = bestStringArg("what");
+    return what.empty() ? "Load skill" : "Load skill \"" + what + "\"";
+  }
+  if (name == "Python" || isMatch(name, "python_execute")) {
     std::string code = valid ? stringArg(doc, "code") : "";
     std::string firstLine = firstNonEmptyLine(code);
     if (!firstLine.empty()) {
@@ -250,51 +305,6 @@ std::string SummarizeToolCall(const std::string &name, const std::string &args, 
       return "Python " + std::to_string(lineCount) + " lines";
     }
     return "Python exec";
-  }
-  if (isMatch(name, "web_fetch")) {
-    std::string url = "";
-    if (valid && doc.HasMember("url") && doc["url"].IsString())
-      url = doc["url"].GetString();
-    auto pos = url.find("://");
-    if (pos != std::string::npos) {
-      url = url.substr(pos + 3);
-    }
-    auto slash = url.find('/');
-    if (slash != std::string::npos) {
-      url = url.substr(0, slash);
-    }
-    return "Fetch " + url;
-  }
-  if (isMatch(name, "summon_subagent")) {
-    std::string title = "";
-    if (valid && doc.HasMember("title") && doc["title"].IsString())
-      title = doc["title"].GetString();
-    if (title.empty() && valid && doc.HasMember("name") &&
-        doc["name"].IsString())
-      title = doc["name"].GetString();
-    return "Subagent \"" + firstWords(title, 3) + "\"";
-  }
-  if (isMatch(name, "subagent_wait")) {
-    std::string title = "";
-    if (valid && doc.HasMember("title") && doc["title"].IsString())
-      title = doc["title"].GetString();
-    if (title.empty() && valid && doc.HasMember("name") && doc["name"].IsString())
-      title = doc["name"].GetString();
-    
-    if (!title.empty()) return "Wait for " + title;
-    return "Await subagent";
-  }
-  if (isMatch(name, "subagent_terminate")) {
-    return "Kill subagent";
-  }
-  if (isMatch(name, "process_status")) {
-    return "Process status";
-  }
-  if (isMatch(name, "process_input")) {
-    return "Process input";
-  }
-  if (isMatch(name, "process_wait")) {
-    return "Process wait";
   }
 
   return name;

@@ -13,53 +13,29 @@ target_sources(firmius_core PRIVATE
     src/environment/Workspace.cpp
     src/environment/Environment.cpp
     src/environment/Permissions.cpp
-    src/tools/FileReadTool.cpp
     src/tools/FileEditTool.cpp
-    src/tools/LspDiagnosticsTool.cpp
+    src/tools/FilesTool.cpp
+    src/tools/WebTool.cpp
+    src/tools/ProcessTool.cpp
+    src/tools/DelegateTool.cpp
+    src/tools/WorkTool.cpp
+    src/tools/FleetTool.cpp
+    src/tools/ArtifactsTool.cpp
     src/tools/LspTool.cpp
-    src/tools/ProcessExecuteTool.cpp
-    src/tools/McpCallTool.cpp
-    src/tools/McpListTool.cpp
-    src/tools/McpSearchTool.cpp
-    src/tools/McpLoadTool.cpp
-    src/tools/McpReadResourceTool.cpp
-    src/tools/McpGetPromptTool.cpp
+    src/tools/LspDiagnosticsTool.cpp
+    src/tools/LspQueryTool.cpp
     src/tools/ToolRegistry.cpp
     src/mcp/McpStdioSession.cpp
     src/mcp/McpHttpSession.cpp
     src/mcp/McpClient.cpp
-    src/tools/SubagentTool.cpp
-    src/tools/SubagentWaitTool.cpp
-    src/tools/SubagentTerminateTool.cpp
     src/tools/PythonExecuteTool.cpp
-    src/tools/ListDirectoryTool.cpp
-    src/tools/GlobTool.cpp
-    src/tools/GrepTool.cpp
     src/tools/WebFetchTool.cpp
     src/tools/WebSearchTool.cpp
-    src/tools/ProcessSpawnTool.cpp
-    src/tools/ProcessStatusTool.cpp
-    src/tools/ProcessWaitTool.cpp
-    src/tools/ProcessInputTool.cpp
     src/tools/SkillLoadTool.cpp
-    src/tools/WorkToolCommon.cpp
-    src/tools/PlanCreateTool.cpp
-    src/tools/PlanListTool.cpp
-    src/tools/PlanGetTool.cpp
-    src/tools/PlanUpdateTool.cpp
-    src/tools/PlanSetActiveTool.cpp
-    src/tools/ChunkAddTool.cpp
-    src/tools/ChunkListTool.cpp
-    src/tools/ChunkGetTool.cpp
-    src/tools/ChunkUpdateTool.cpp
-    src/tools/ChunkReadyForExecutionTool.cpp
     src/tools/FleetLockTool.cpp
     src/tools/FleetLockRespondTool.cpp
     src/tools/FleetStatusTool.cpp
     src/tools/TodoWriteTool.cpp
-    src/tools/ArtifactWriteTool.cpp
-    src/tools/ArtifactReadTool.cpp
-    src/tools/ArtifactListTool.cpp
     src/tools/MemoryRecallTool.cpp
     src/agents/HintingLoader.cpp
     src/agents/SkillLoader.cpp
@@ -70,7 +46,6 @@ target_sources(firmius_core PRIVATE
     src/agents/UserMemoryWorkspace.cpp
     src/agents/StreamSanityDetector.cpp
     src/agents/Agent.cpp
-    src/agents/AgentPermissionChecks.cpp
     src/agents/AgentPermissionChecks.cpp
     src/persistence/Journaler.cpp
     src/persistence/ThreadManager.cpp
@@ -104,53 +79,29 @@ target_sources(firmius_core PUBLIC
     include/environment/Workspace.hpp
     include/environment/Environment.hpp
     include/environment/Permissions.hpp
-    include/tools/FileReadTool.hpp
     include/tools/FileEditTool.hpp
-    include/tools/LspDiagnosticsTool.hpp
+    include/tools/FilesTool.hpp
+    include/tools/WebTool.hpp
+    include/tools/ProcessTool.hpp
+    include/tools/DelegateTool.hpp
+    include/tools/WorkTool.hpp
+    include/tools/FleetTool.hpp
+    include/tools/ArtifactsTool.hpp
     include/tools/LspTool.hpp
-    include/tools/McpCallTool.hpp
-    include/tools/McpListTool.hpp
-    include/tools/McpSearchTool.hpp
-    include/tools/McpLoadTool.hpp
-    include/tools/McpReadResourceTool.hpp
-    include/tools/McpGetPromptTool.hpp
+    include/tools/LspDiagnosticsTool.hpp
+    include/tools/LspQueryTool.hpp
     include/tools/McpToolUtil.hpp
-    include/tools/ProcessExecuteTool.hpp
     include/mcp/IMcpSession.hpp
     include/mcp/McpStdioSession.hpp
     include/mcp/McpHttpSession.hpp
     include/mcp/McpClient.hpp
     include/tools/ToolRegistry.hpp
-    include/tools/SubagentTool.hpp
-    include/tools/SubagentWaitTool.hpp
-    include/tools/SubagentTerminateTool.hpp
     include/tools/PythonExecuteTool.hpp
-    include/tools/ListDirectoryTool.hpp
-    include/tools/GlobTool.hpp
-    include/tools/GrepTool.hpp
     include/tools/WebFetchTool.hpp
     include/tools/WebSearchTool.hpp
-    include/tools/ProcessSpawnTool.hpp
-    include/tools/ProcessStatusTool.hpp
-    include/tools/ProcessWaitTool.hpp
-    include/tools/ProcessInputTool.hpp
     include/tools/SkillLoadTool.hpp
-    include/tools/WorkToolCommon.hpp
-    include/tools/PlanCreateTool.hpp
-    include/tools/PlanListTool.hpp
-    include/tools/PlanGetTool.hpp
-    include/tools/PlanUpdateTool.hpp
-    include/tools/PlanSetActiveTool.hpp
-    include/tools/ChunkAddTool.hpp
-    include/tools/ChunkListTool.hpp
-    include/tools/ChunkGetTool.hpp
-    include/tools/ChunkUpdateTool.hpp
-    include/tools/ChunkReadyForExecutionTool.hpp
     include/tools/FleetLockTool.hpp
     include/tools/TodoWriteTool.hpp
-    include/tools/ArtifactWriteTool.hpp
-    include/tools/ArtifactReadTool.hpp
-    include/tools/ArtifactListTool.hpp
     include/tools/MemoryRecallTool.hpp
     include/agents/HintingLoader.hpp
     include/agents/SkillLoader.hpp
@@ -161,7 +112,6 @@ target_sources(firmius_core PUBLIC
     include/agents/UserMemoryWorkspace.hpp
     include/agents/StreamSanityDetector.hpp
     include/agents/Agent.hpp
-    include/agents/AgentPermissionChecks.hpp
     include/agents/AgentPermissionChecks.hpp
     include/persistence/Journaler.hpp
     include/persistence/ThreadManager.hpp

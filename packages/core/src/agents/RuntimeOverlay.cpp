@@ -212,7 +212,7 @@ std::string buildLeadOverlay(const shared::AgentContext& context,
                              ThreadManager& tm) {
   std::ostringstream out;
   out << "## LIVE WORK STATE\n";
-  out << "Role: lead\n";
+  out << "Role: aster\n";
 
   if (!context.history || context.history->threadId.empty()) {
     out << "Thread: unavailable\n\n";
@@ -257,7 +257,7 @@ std::string buildExecutorOverlay(const shared::AgentContext& context,
                                  ThreadManager& tm) {
   std::ostringstream out;
   out << "## LIVE WORK STATE\n";
-  out << "Role: executor\n";
+  out << "Role: forge\n";
 
   const auto located = locateAssignedChunk(
       tm, context.history ? context.history->threadId : "", context.identity.id);
@@ -301,9 +301,9 @@ std::string buildWorkOverlay(const shared::AgentContext& context) {
   case PurposeWorkRole::Auditor:
     return buildExecutorOverlay(context, tm);
   case PurposeWorkRole::Worker:
-    return buildWorkerOverlay(context, tm, "worker");
+    return buildWorkerOverlay(context, tm, "ember");
   case PurposeWorkRole::Scout:
-    return buildWorkerOverlay(context, tm, "scout");
+    return buildWorkerOverlay(context, tm, "glimmer");
   case PurposeWorkRole::Unknown:
     return buildWorkerOverlay(context, tm, "unknown");
   }
@@ -500,69 +500,13 @@ void reconcileSuccessfulToolResult(shared::AgentContext& context,
                                    const std::string& toolName,
                                    const std::string&,
                                    const std::string& resultJson) {
-  if (toolName != "skill_load" && toolName != "mcp_load") {
+  if (toolName != "skill_load") {
     return;
   }
 
   rapidjson::Document result;
   result.Parse(resultJson.c_str());
   if (result.HasParseError() || !result.IsObject()) {
-    return;
-  }
-
-  if (toolName == "mcp_load") {
-    auto readStringArray = [](const rapidjson::Value& value) {
-      std::vector<std::string> out;
-      if (!value.IsArray()) {
-        return out;
-      }
-      for (const auto& entry : value.GetArray()) {
-        if (entry.IsString()) {
-          out.push_back(entry.GetString());
-        }
-      }
-      return out;
-    };
-
-    std::string serverName;
-    if (result.HasMember("server_name") && result["server_name"].IsString()) {
-      serverName = result["server_name"].GetString();
-    } else if (result.HasMember("server") && result["server"].IsString()) {
-      serverName = result["server"].GetString();
-    }
-    if (serverName.empty()) {
-      return;
-    }
-
-    if (std::find(context.state.loadedMcpServers.begin(),
-                  context.state.loadedMcpServers.end(),
-                  serverName) == context.state.loadedMcpServers.end()) {
-      context.state.loadedMcpServers.push_back(serverName);
-    }
-
-    if (result.HasMember("loaded_tools")) {
-      context.state.loadedMcpTools[serverName] =
-          readStringArray(result["loaded_tools"]);
-    } else if (result.HasMember("tools")) {
-      context.state.loadedMcpTools[serverName] =
-          readStringArray(result["tools"]);
-    }
-
-    if (result.HasMember("loaded_resources")) {
-      context.state.loadedMcpResources[serverName] =
-          readStringArray(result["loaded_resources"]);
-    } else if (result.HasMember("resources")) {
-      context.state.loadedMcpResources[serverName] =
-          readStringArray(result["resources"]);
-    }
-
-    if (result.HasMember("loaded_prompts")) {
-      context.state.loadedMcpPrompts[serverName] =
-          readStringArray(result["loaded_prompts"]);
-    } else if (result.HasMember("prompts")) {
-      context.state.loadedMcpPrompts[serverName] =
-          readStringArray(result["prompts"]);
-    }
     return;
   }
 

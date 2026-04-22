@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <ftxui/component/component_base.hpp>
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace firmius::tui {
@@ -30,6 +31,11 @@ struct RollingMemoryLaneModel {
   std::uint32_t source_tokens = 0;
   std::uint32_t summary_tokens = 0;
   std::uint32_t saved_tokens = 0;
+  std::size_t canonical_anchor_count = 0;
+  std::size_t bridge_packet_count = 0;
+  std::string latest_bridge_id;
+  std::string bridge_target;
+  std::string bridge_hint;
 };
 
 struct ContextBucket {

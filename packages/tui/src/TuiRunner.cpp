@@ -1,6 +1,7 @@
 #include "TuiRunner.hpp"
 #include "AgentRegistry.hpp"
 #include "TUIState.hpp"
+#include "agents/PurposeLoader.hpp"
 #include "harness/Harness.hpp"
 #include "workflow/WorkflowLoader.hpp"
 #include <atomic>
@@ -67,13 +68,17 @@ void InstallSigintHandler() {
 #endif
 }
 
-void RestoreDefaultSigintHandler() {
-  std::signal(SIGINT, SIG_DFL);
-}
-
 std::string defaultLeadPersona(const firmius::core::Harness &harness) {
   const auto &cfg = harness.getConfig();
-  return cfg.defaultLeadPersona.empty() ? "lead" : cfg.defaultLeadPersona;
+  if (!cfg.defaultLeadPersona.empty() &&
+      firmius::core::PurposeLoader::isValid(cfg.defaultLeadPersona)) {
+    return cfg.defaultLeadPersona;
+  }
+  if (firmius::core::PurposeLoader::isValid("aster")) {
+    return "aster";
+  }
+  const auto purposes = firmius::core::PurposeLoader::listPurposes();
+  return purposes.empty() ? "aster" : purposes.front();
 }
 
 bool parseStartupProfileEnabledFromEnv() {
@@ -307,12 +312,19 @@ void runTui(const TuiLaunchOptions &options) {
     std::string cwd = "/work";
     auto cfg = h.getConfig();
     std::string lead =
-        cfg.defaultLeadPersona.empty() ? "lead" : cfg.defaultLeadPersona;
+        cfg.defaultLeadPersona.empty() ? "aster" : cfg.defaultLeadPersona;
     if (!h.newThread(opts, cwd, lead).empty()) {
       thread_loaded = true;
       threadPath = "new_thread_debugging_mode";
     } else {
       threadPath = "new_thread_debugging_mode_failed";
+    }
+  } else if (!options.threadId.empty()) {
+    if (h.switchThread(options.threadId)) {
+      thread_loaded = true;
+      threadPath = "switch_thread:" + options.threadId;
+    } else {
+      threadPath = "switch_thread_failed:" + options.threadId;
     }
   } else if (options.continueLast) {
     if (h.resumeLast()) {
@@ -452,7 +464,6 @@ void runTui(const TuiLaunchOptions &options) {
   sigint_bridge_running = false;
   sigint_bridge.request_stop();
   idle_exit_bridge.request_stop();
-  RestoreDefaultSigintHandler();
   std::cout << "\x1b[?2004l" << std::flush;
   startupProfiler.completePhase("shutdown_bridges_and_terminal");
 

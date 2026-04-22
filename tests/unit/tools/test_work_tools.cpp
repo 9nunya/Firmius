@@ -1,15 +1,7 @@
-#include "tools/ChunkAddTool.hpp"
-#include "tools/ChunkGetTool.hpp"
-#include "tools/ChunkListTool.hpp"
-#include "tools/ChunkReadyForExecutionTool.hpp"
-#include "tools/ChunkUpdateTool.hpp"
-#include "tools/PlanCreateTool.hpp"
-#include "tools/PlanGetTool.hpp"
-#include "tools/PlanListTool.hpp"
-#include "tools/PlanSetActiveTool.hpp"
-#include "tools/PlanUpdateTool.hpp"
 #include "tools/TodoWriteTool.hpp"
+#include "tools/WorkTool.hpp"
 #include "tools/ToolRegistry.hpp"
+#include "../mocks/MockHost.hpp"
 #include "IAgent.hpp"
 #include "harness/Harness.hpp"
 #include "persistence/ThreadManager.hpp"
@@ -36,7 +28,7 @@ class TestAgent : public IAgent {
 public:
   TestAgent() {
     context_.history = std::make_shared<AgentHistory>();
-    environment_ = std::make_shared<firmius::test::MockEnvironment>();
+    environment_ = std::make_shared<firmius::test::MockEnvironment>(std::make_shared<firmius::test::MockHost>());
     permissions_ = std::make_shared<firmius::test::MockPermissions>();
   }
 
@@ -126,8 +118,9 @@ protected:
     threadId_ = threadManager_->createThread(metadata);
 
     agent_.context_.permissions.allowedScopes = {
-        ToolScope::Semantic,  ToolScope::PlanRead, ToolScope::PlanWrite,
-        ToolScope::ChunkRead, ToolScope::ChunkWrite, ToolScope::ChunkReview};
+        ToolScope::Semantic, ToolScope::PlanRead, ToolScope::PlanWrite,
+        ToolScope::ChunkRead, ToolScope::ChunkWrite, ToolScope::ChunkAssign,
+        ToolScope::ChunkReview};
     agent_.context_.history->threadId = threadId_;
     agent_.context_.environment.cwd = "/tmp/work";
     agent_.context_.config.personaName = "lead";
@@ -147,16 +140,7 @@ protected:
   }
 
   void registerTools() {
-    registry_.registerTool(std::make_unique<PlanCreateTool>());
-    registry_.registerTool(std::make_unique<PlanListTool>());
-    registry_.registerTool(std::make_unique<PlanGetTool>());
-    registry_.registerTool(std::make_unique<PlanUpdateTool>());
-    registry_.registerTool(std::make_unique<PlanSetActiveTool>());
-    registry_.registerTool(std::make_unique<ChunkAddTool>());
-    registry_.registerTool(std::make_unique<ChunkListTool>());
-    registry_.registerTool(std::make_unique<ChunkGetTool>());
-    registry_.registerTool(std::make_unique<ChunkUpdateTool>());
-    registry_.registerTool(std::make_unique<ChunkReadyForExecutionTool>());
+    registry_.registerTool(std::make_unique<WorkTool>());
     registry_.registerTool(std::make_unique<TodoWriteTool>());
   }
 

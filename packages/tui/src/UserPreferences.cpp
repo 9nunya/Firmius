@@ -111,6 +111,18 @@ UserPreferences loadUserPreferences() {
     preferences.prefer_todo_panel_on_narrow =
         doc["prefer_todo_panel_on_narrow"].GetBool();
   }
+  if (doc.HasMember("show_agent_strip") && doc["show_agent_strip"].IsBool()) {
+    preferences.show_agent_strip = doc["show_agent_strip"].GetBool();
+  }
+  if (doc.HasMember("show_work_panel") && doc["show_work_panel"].IsBool()) {
+    preferences.show_work_panel = doc["show_work_panel"].GetBool();
+  }
+  if (doc.HasMember("agent_strip_rows") && doc["agent_strip_rows"].IsInt()) {
+    preferences.agent_strip_rows = doc["agent_strip_rows"].GetInt();
+  }
+  if (doc.HasMember("work_panel_height") && doc["work_panel_height"].IsInt()) {
+    preferences.work_panel_height = doc["work_panel_height"].GetInt();
+  }
 
   return preferences;
 }
@@ -147,6 +159,42 @@ void saveUserPreferences(const UserPreferences &preferences) {
     } else {
       doc.AddMember("prefer_todo_panel_on_narrow",
                     preferences.prefer_todo_panel_on_narrow.value(), alloc);
+    }
+  }
+
+  if (preferences.show_agent_strip.has_value()) {
+    if (doc.HasMember("show_agent_strip")) {
+      doc["show_agent_strip"] = preferences.show_agent_strip.value();
+    } else {
+      doc.AddMember("show_agent_strip", preferences.show_agent_strip.value(),
+                    alloc);
+    }
+  }
+
+  if (preferences.show_work_panel.has_value()) {
+    if (doc.HasMember("show_work_panel")) {
+      doc["show_work_panel"] = preferences.show_work_panel.value();
+    } else {
+      doc.AddMember("show_work_panel", preferences.show_work_panel.value(),
+                    alloc);
+    }
+  }
+
+  if (preferences.agent_strip_rows.has_value()) {
+    if (doc.HasMember("agent_strip_rows")) {
+      doc["agent_strip_rows"] = preferences.agent_strip_rows.value();
+    } else {
+      doc.AddMember("agent_strip_rows", preferences.agent_strip_rows.value(),
+                    alloc);
+    }
+  }
+
+  if (preferences.work_panel_height.has_value()) {
+    if (doc.HasMember("work_panel_height")) {
+      doc["work_panel_height"] = preferences.work_panel_height.value();
+    } else {
+      doc.AddMember("work_panel_height", preferences.work_panel_height.value(),
+                    alloc);
     }
   }
 

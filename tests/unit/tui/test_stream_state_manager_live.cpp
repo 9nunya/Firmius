@@ -76,8 +76,8 @@ TEST(StreamStateManagerLiveTest, ProseBeforeAndAfterToolAreDistinctTimelineSegme
 
   state.handleAgentText(AgentText{"agent-1", "Before tool.", ""});
   state.handleAgentToolCall(
-      AgentToolCall{"agent-1", "tool-1", "file_read",
-                    R"({"path":"src/main.cpp"})", ""});
+      AgentToolCall{"agent-1", "tool-1", "Files",
+                    R"({"action":"Read","path":"src/main.cpp"})", ""});
   state.handleAgentText(AgentText{"agent-1", "After tool.", ""});
 
   const auto &timeline = state.getTimeline();
@@ -95,8 +95,8 @@ TEST(StreamStateManagerLiveTest, ProseDeltasAfterToolAppendToNewEpisode) {
 
   state.handleAgentText(AgentText{"agent-1", "Intro.", ""});
   state.handleAgentToolCall(
-      AgentToolCall{"agent-1", "tool-1", "file_read",
-                    R"({"path":"src/main.cpp"})", ""});
+      AgentToolCall{"agent-1", "tool-1", "Files",
+                    R"({"action":"Read","path":"src/main.cpp"})", ""});
   state.handleAgentText(AgentText{"agent-1", "Post ", ""});
   state.handleAgentText(AgentText{"agent-1", "tool prose.", ""});
 
@@ -114,8 +114,8 @@ TEST(StreamStateManagerLiveTest, ThinkingEpisodeResetsAcrossToolBoundary) {
   state.handleAgentThinking(AgentThinking{"agent-1", "Think A ", ""});
   state.handleAgentThinking(AgentThinking{"agent-1", "Think B", ""});
   state.handleAgentToolCall(
-      AgentToolCall{"agent-1", "tool-1", "file_read",
-                    R"({"path":"src/main.cpp"})", ""});
+      AgentToolCall{"agent-1", "tool-1", "Files",
+                    R"({"action":"Read","path":"src/main.cpp"})", ""});
   state.handleAgentThinking(AgentThinking{"agent-1", "Think C", ""});
 
   const auto &timeline = state.getTimeline();
@@ -132,8 +132,8 @@ TEST(StreamStateManagerLiveTest, TurnCompletedClearsTransientProseTimelineRows) 
 
   state.handleAgentText(AgentText{"agent-1", "draft text", ""});
   state.handleAgentToolCall(
-      AgentToolCall{"agent-1", "tool-1", "process_execute",
-                    R"({"command":"echo hi"})", ""});
+      AgentToolCall{"agent-1", "tool-1", "Process",
+                    R"({"action":"Execute","command":"echo hi"})", ""});
 
   AgentTurn turn;
   turn.turnId = "turn-1";
@@ -150,7 +150,7 @@ TEST(StreamStateManagerLiveTest,
   StreamStateManager state;
 
   state.handleAgentToolCall(
-      AgentToolCall{"agent-1", "tool-edit", "file_edit",
+      AgentToolCall{"agent-1", "tool-edit", "Edit",
                     R"({"path":"src/main.cpp","edits":[{"op":"replace_range"}]})",
                     ""});
   state.handleAgentFileEdited(AgentFileEdited{
@@ -185,7 +185,7 @@ TEST(StreamStateManagerLiveTest,
   StreamStateManager state;
 
   state.handleAgentToolCall(
-      AgentToolCall{"agent-1", "tool-edit", "file_edit",
+      AgentToolCall{"agent-1", "tool-edit", "Edit",
                     R"({"path":"src/main.cpp","edits":[{"op":"replace_range"}]})",
                     ""});
   state.handleAgentFileEdited(AgentFileEdited{
@@ -209,7 +209,7 @@ TEST(StreamStateManagerLiveTest,
   StreamStateManager state;
 
   state.handleAgentToolCall(
-      AgentToolCall{"agent-1", "tool-edit", "file_edit",
+      AgentToolCall{"agent-1", "tool-edit", "Edit",
                     R"({"files":[{"path":"src/a.cpp"},{"path":"src/b.cpp"}]})",
                     ""});
   state.handleAgentFileEdited(AgentFileEdited{
@@ -254,7 +254,7 @@ TEST(StreamStateManagerLiveTest,
   StreamStateManager state;
 
   state.handleAgentToolCall(
-      AgentToolCall{"agent-1", "tool-edit", "file_edit",
+      AgentToolCall{"agent-1", "tool-edit", "Edit",
                     R"({"files":[{"path":"src/a.cpp"},{"path":"src/b.cpp"}]})",
                     ""});
   state.handleAgentFileEdited(AgentFileEdited{
@@ -299,7 +299,7 @@ TEST(StreamStateManagerLiveTest,
   StreamStateManager state;
 
   state.handleAgentToolCall(
-      AgentToolCall{"agent-1", "tool-write", "file_write",
+      AgentToolCall{"agent-1", "tool-write", "Edit",
                     R"({"path":"src/write.cpp","content":"hello\n"})", ""});
   state.handleAgentFileEdited(AgentFileEdited{
       "agent-1", "", "src/write.cpp", "tool-write",
@@ -339,11 +339,11 @@ TEST(StreamStateManagerLiveTest, ProseBreaksQuickToolClusters) {
 
   state.handleAgentText(AgentText{"agent-1", "Intro", ""});
   state.handleAgentToolCall(
-      AgentToolCall{"agent-1", "tool-1", "file_read",
-                    R"({"path":"a.cpp"})", ""});
+      AgentToolCall{"agent-1", "tool-1", "Files",
+                    R"({"action":"Read","path":"a.cpp"})", ""});
   state.handleAgentToolCall(
-      AgentToolCall{"agent-1", "tool-2", "file_read",
-                    R"({"path":"b.cpp"})", ""});
+      AgentToolCall{"agent-1", "tool-2", "Files",
+                    R"({"action":"Read","path":"b.cpp"})", ""});
 
   int cluster_one = state.getToolCallClusterId("tool-1");
   int cluster_two = state.getToolCallClusterId("tool-2");
@@ -351,24 +351,62 @@ TEST(StreamStateManagerLiveTest, ProseBreaksQuickToolClusters) {
 
   state.handleAgentText(AgentText{"agent-1", "More prose", ""});
   state.handleAgentToolCall(
-      AgentToolCall{"agent-1", "tool-3", "file_read",
-                    R"({"path":"c.cpp"})", ""});
+      AgentToolCall{"agent-1", "tool-3", "Files",
+                    R"({"action":"Read","path":"c.cpp"})", ""});
 
   int cluster_three = state.getToolCallClusterId("tool-3");
   EXPECT_GT(cluster_three, cluster_one);
+}
+
+TEST(StreamStateManagerLiveTest, RetryingMarksInFlightToolCallsAsCancelled) {
+  StreamStateManager state;
+
+  state.handleAgentToolCall(
+      AgentToolCall{"agent-1", "tool-1", "Files",
+                  R"({"action":"Read","path":"src/main.cpp"})", ""});
+
+  auto view = state.getToolView("tool-1");
+  ASSERT_TRUE(static_cast<bool>(view));
+  EXPECT_EQ(view->phase, ToolPhase::Called);
+
+  state.handleAgentRetrying(
+      AgentRetrying{"agent-1", 1, 5, 429, 1000, "retry", "", "acct", ""});
+
+  view = state.getToolView("tool-1");
+  ASSERT_TRUE(static_cast<bool>(view));
+  EXPECT_EQ(view->phase, ToolPhase::Error);
+  EXPECT_FALSE(view->success);
+  EXPECT_NE(view->result.find("Retrying request"), std::string::npos);
+}
+
+TEST(StreamStateManagerLiveTest, RetryingClearsStuckPreparingToolCalls) {
+  StreamStateManager state;
+
+  state.handleAgentToolCallChunk(
+      AgentToolCallChunk{0, "agent-1", "tool-prep", "Files", "", ""});
+
+  auto view = state.getToolView("tool-prep");
+  ASSERT_TRUE(static_cast<bool>(view));
+  EXPECT_EQ(view->phase, ToolPhase::Preparing);
+
+  state.handleAgentRetrying(
+      AgentRetrying{"agent-1", 1, 5, 429, 1000, "retry", "", "acct", ""});
+
+  // Preparing-only tool calls should be cleared on retry.
+  EXPECT_FALSE(static_cast<bool>(state.getToolView("tool-prep")));
 }
 
 TEST(StreamStateManagerLiveTest, WhitespaceOnlyProseDoesNotBreakQuickToolClusters) {
   StreamStateManager state;
 
   state.handleAgentToolCall(
-      AgentToolCall{"agent-1", "tool-1", "file_read",
-                    R"({"path":"a.cpp"})", ""});
+      AgentToolCall{"agent-1", "tool-1", "Files",
+                    R"({"action":"Read","path":"a.cpp"})", ""});
   state.handleAgentText(AgentText{"agent-1", "\n\n   \t", ""});
   state.handleAgentThinking(AgentThinking{"agent-1", "\n\r\n", ""});
   state.handleAgentToolCall(
-      AgentToolCall{"agent-1", "tool-2", "file_read",
-                    R"({"path":"b.cpp"})", ""});
+      AgentToolCall{"agent-1", "tool-2", "Files",
+                    R"({"action":"Read","path":"b.cpp"})", ""});
 
   EXPECT_EQ(state.getToolCallClusterId("tool-1"),
             state.getToolCallClusterId("tool-2"));
@@ -384,8 +422,8 @@ TEST(StreamStateManagerLiveTest,
   StreamStateManager state;
 
   state.handleAgentToolCall(
-      AgentToolCall{"agent-1", "tool-1", "process_execute",
-                    R"({"command":"sleep 5"})", ""});
+      AgentToolCall{"agent-1", "tool-1", "Process",
+                    R"({"action":"Execute","command":"sleep 5"})", ""});
 
   AgentTurn turn;
   turn.turnId = "turn-1";
@@ -414,19 +452,19 @@ TEST(StreamStateManagerLiveTest, ArgsBeforeNameChunkDoesNotRenderUntilNameArrive
   EXPECT_FALSE(firmius::tui::ShouldRenderToolCallView(*view));
 
   state.handleAgentToolCallChunk(
-      AgentToolCallChunk{0, "agent-1", "tool-1", "file_read", "", ""});
+      AgentToolCallChunk{0, "agent-1", "tool-1", "Files", "", ""});
 
   view = state.getToolView("tool-1");
   ASSERT_TRUE(static_cast<bool>(view));
   EXPECT_EQ(view->phase, ToolPhase::Preparing);
-  EXPECT_EQ(view->name, "file_read");
+  EXPECT_EQ(view->name, "Files");
   EXPECT_EQ(view->args, R"({"path":"src/main.cpp"})");
   EXPECT_TRUE(firmius::shared::ToolCallHasRenderableIdentity(*view));
   EXPECT_TRUE(firmius::tui::ShouldRenderToolCallView(*view));
 
   state.handleAgentToolCall(
-      AgentToolCall{"agent-1", "tool-1", "file_read",
-                    R"({"path":"src/main.cpp"})", ""});
+      AgentToolCall{"agent-1", "tool-1", "Files",
+                    R"({"action":"Read","path":"src/main.cpp"})", ""});
 
   view = state.getToolView("tool-1");
   ASSERT_TRUE(static_cast<bool>(view));
@@ -478,7 +516,7 @@ TEST(StreamStateManagerLiveTest,
   StreamStateManager state;
 
   state.handleAgentToolCallChunk(
-      AgentToolCallChunk{0, "agent-1", "tool-prep", "file_read", "", ""});
+      AgentToolCallChunk{0, "agent-1", "tool-prep", "Files", "", ""});
 
   auto view = state.getToolView("tool-prep");
   ASSERT_TRUE(static_cast<bool>(view));
@@ -495,8 +533,8 @@ TEST(StreamStateManagerLiveTest,
   StreamStateManager state;
 
   state.handleAgentToolCall(
-      AgentToolCall{"agent-1", "tool-1", "file_read",
-                    R"({"path":"src/main.cpp"})", ""});
+      AgentToolCall{"agent-1", "tool-1", "Files",
+                    R"({"action":"Read","path":"src/main.cpp"})", ""});
 
   auto view = state.getToolView("tool-1");
   ASSERT_TRUE(static_cast<bool>(view));
@@ -552,7 +590,7 @@ TEST(StreamStateManagerLiveTest,
 TEST(StreamStateManagerLiveTest, ChildErrorMarksParentSubagentAsFailed) {
   StreamStateManager state;
   state.handleAgentToolCall(
-      AgentToolCall{"parent", "tool-1", "summon_subagent",
+      AgentToolCall{"parent", "tool-1", "Delegate",
                     R"({"name":"child","title":"Child"})", ""});
 
   state.handleAgentSpawned(
@@ -569,7 +607,7 @@ TEST(StreamStateManagerLiveTest, ChildErrorMarksParentSubagentAsFailed) {
 TEST(StreamStateManagerLiveTest, ChildErrorWithEmptyParentLogRecordsFailureActivity) {
   StreamStateManager state;
   state.handleAgentToolCall(
-      AgentToolCall{"parent", "tool-1", "summon_subagent",
+      AgentToolCall{"parent", "tool-1", "Delegate",
                     R"({"name":"child","title":"Child"})", ""});
 
   state.handleAgentSpawned(
@@ -663,7 +701,7 @@ TEST(StreamStateManagerLiveTest,
      RetryingSubagentReactivatesParentSummonBlockAndCanFinishSuccessfully) {
   StreamStateManager state;
   state.handleAgentToolCall(
-      AgentToolCall{"parent", "tool-1", "summon_subagent",
+      AgentToolCall{"parent", "tool-1", "Delegate",
                     R"({"name":"child","title":"Child"})", ""});
   state.handleAgentSpawned(
       AgentSpawned{"child-id", "worker", "parent", "child", "Child", true, "", "", 0},
@@ -706,7 +744,7 @@ TEST(StreamStateManagerLiveTest,
      RetriedSubagentStillEndsInErrorWhenFinalAttemptFails) {
   StreamStateManager state;
   state.handleAgentToolCall(
-      AgentToolCall{"parent", "tool-1", "summon_subagent",
+      AgentToolCall{"parent", "tool-1", "Delegate",
                     R"({"name":"child","title":"Child"})", ""});
   state.handleAgentSpawned(
       AgentSpawned{"child-id", "worker", "parent", "child", "Child", true, "", "", 0},
@@ -731,7 +769,7 @@ TEST(StreamStateManagerLiveTest,
 TEST(StreamStateManagerLiveTest, FinishedSubagentNoSummaryUsesTypedOutcome) {
   StreamStateManager state;
   state.handleAgentToolCall(
-      AgentToolCall{"parent", "tool-1", "summon_subagent",
+      AgentToolCall{"parent", "tool-1", "Delegate",
                     R"({"agent_id":"child-id"})", ""});
   state.handleAgentSpawned(
       AgentSpawned{"child-id", "worker", "parent", "child", "Child", true, "", "", 0},
@@ -752,7 +790,7 @@ TEST(StreamStateManagerLiveTest, FinishedSubagentResponseCancelAndFailureRenderC
   StreamStateManager state;
 
   state.handleAgentToolCall(
-      AgentToolCall{"parent", "tool-1", "summon_subagent",
+      AgentToolCall{"parent", "tool-1", "Delegate",
                     R"({"agent_id":"child-response"})", ""});
   state.handleAgentSpawned(
       AgentSpawned{"child-response", "worker", "parent", "child", "Child", true, "", "", 0},
@@ -766,7 +804,7 @@ TEST(StreamStateManagerLiveTest, FinishedSubagentResponseCancelAndFailureRenderC
   EXPECT_EQ(responseView->subagent_tool_log.back().summary, "Done");
 
   state.handleAgentToolCall(
-      AgentToolCall{"parent", "tool-2", "summon_subagent",
+      AgentToolCall{"parent", "tool-2", "Delegate",
                     R"({"agent_id":"child-cancel"})", ""});
   state.handleAgentSpawned(
       AgentSpawned{"child-cancel", "worker", "parent", "child", "Child", true, "", "", 0},
@@ -781,7 +819,7 @@ TEST(StreamStateManagerLiveTest, FinishedSubagentResponseCancelAndFailureRenderC
   EXPECT_EQ(cancelledView->phase, ToolPhase::Finished);
 
   state.handleAgentToolCall(
-      AgentToolCall{"parent", "tool-3", "summon_subagent",
+      AgentToolCall{"parent", "tool-3", "Delegate",
                     R"({"agent_id":"child-fail"})", ""});
   state.handleAgentSpawned(
       AgentSpawned{"child-fail", "worker", "parent", "child", "Child", true, "", "", 0},
@@ -801,7 +839,7 @@ TEST(StreamStateManagerLiveTest,
   StreamStateManager state;
 
   state.handleAgentToolCall(AgentToolCall{
-      "parent", "summon-1", "summon_subagent",
+      "parent", "summon-1", "Delegate",
       R"({"name":"worker","title":"Worker","task":"Implement API","category":"executor"})",
       ""});
   state.handleAgentSpawned(AgentSpawned{"child-1", "worker", "parent", "worker",

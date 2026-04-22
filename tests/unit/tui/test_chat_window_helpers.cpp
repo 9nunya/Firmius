@@ -66,7 +66,7 @@ TEST(ChatWindowHelpersTest, HidesCalledRowsWithoutUsableNameEvenWhenArgsExist) {
 
   EXPECT_FALSE(firmius::tui::ShouldRenderToolCallView(view));
 
-  view.name = "file_read";
+  view.name = "Files";
   EXPECT_TRUE(firmius::tui::ShouldRenderToolCallView(view));
 }
 
@@ -79,9 +79,9 @@ TEST(ChatWindowHelpersTest, CollectsHistoryToolCallIdsForLiveDedupe) {
   assistant.role = Role::Assistant;
   assistant.content = {
       TextContent{"working"},
-      ToolCallContent{"call-summon", "summon_subagent", R"({"task":"a"})"},
-      ToolCallContent{"call-wait", "subagent_wait", R"({"agent_id":"sub-1"})"},
-      ToolCallContent{"call-summon", "summon_subagent", R"({"task":"a"})"},
+      ToolCallContent{"call-summon", "Delegate", R"({"action":"Spawn","task":"a"})"},
+      ToolCallContent{"call-wait", "Delegate", R"({"action":"Wait","agent_id":"sub-1"})"},
+      ToolCallContent{"call-summon", "Delegate", R"({"action":"Spawn","task":"a"})"},
   };
   turn.messages.push_back(std::move(assistant));
   history.turns.push_back(std::move(turn));
@@ -126,6 +126,31 @@ TEST(ChatWindowHelpersTest, HiddenChatErrorNotificationOnlyFiresForFocusedAgent)
       "agent-1", "agent-1", false));
   EXPECT_FALSE(firmius::tui::detail::shouldNotifyHiddenChatError(
       "", "agent-1", true));
+}
+
+TEST(ChatWindowHelpersTest,
+     CollectsHistoryToolCallIdsFromAssistantEmbeddedToolResultsForLiveDedupe) {
+  AgentHistory history;
+  AgentTurn turn;
+  turn.turnId = "turn-1";
+
+  Message assistant;
+  assistant.role = Role::Assistant;
+  assistant.content = {
+      ToolCallContent{"call-stop", "Delegate",
+                      R"({"action":"Stop","agent_id":"sub-1"})"},
+      ToolResultContent{"call-stop", R"({"status":"terminated"})", true, "",
+                        ""},
+      ToolCallContent{"call-spawn", "Delegate",
+                      R"({"action":"Spawn","task":"route"})"},
+      ToolResultContent{"call-spawn", R"({"agentId":"sub-2"})", true, "", ""},
+  };
+  turn.messages.push_back(std::move(assistant));
+  history.turns.push_back(std::move(turn));
+
+  const auto ids = firmius::tui::CollectToolCallIdsFromHistory(&history);
+  EXPECT_TRUE(ids.count("call-stop") > 0);
+  EXPECT_TRUE(ids.count("call-spawn") > 0);
 }
 
 TEST(ChatWindowHelpersTest, KeepsPersistedCompactionTurnsRenderable) {
@@ -357,7 +382,7 @@ TEST(ChatWindowHelpersTest, FocusedSubagentToolCallIgnoresParentSummons) {
   parent_entry.agentId = "parent-agent";
 
   ToolCallView summon_view;
-  summon_view.name = "summon_subagent";
+  summon_view.name = "Delegate";
   summon_view.subagent_id = "child-agent";
 
   EXPECT_FALSE(firmius::tui::ShouldRenderFocusedSubagentToolCall(
@@ -369,7 +394,7 @@ TEST(ChatWindowHelpersTest, FocusedSubagentToolCallIgnoresParentSummons) {
   child_entry.agentId = "child-agent";
 
   ToolCallView child_view;
-  child_view.name = "file_read";
+  child_view.name = "Files";
 
   EXPECT_TRUE(firmius::tui::ShouldRenderFocusedSubagentToolCall(
       child_entry, child_view, "child-agent"));
@@ -384,7 +409,7 @@ TEST(ChatWindowHelpersTest,
   Message assistant;
   assistant.role = Role::Assistant;
   assistant.content = {
-      ToolCallContent{"exec-1", "process_execute", R"({"command":"sleep 5"})"},
+      ToolCallContent{"exec-1", "Process", R"({"action":"Execute","command":"sleep 5"})"},
   };
   turn.messages.push_back(std::move(assistant));
   history.turns.push_back(std::move(turn));
@@ -421,8 +446,8 @@ TEST(ChatWindowHelpersTest,
   Message assistant;
   assistant.role = Role::Assistant;
   assistant.content = {
-      ToolCallContent{"wait-1", "process_wait",
-                      R"({"process_id":"proc-1","pattern":"READY"})"},
+      ToolCallContent{"wait-1", "Process",
+                      R"({"action":"Wait","process_id":"proc-1","pattern":"READY"})"},
   };
   turn.messages.push_back(std::move(assistant));
   history.turns.push_back(std::move(turn));
@@ -455,8 +480,8 @@ TEST(ChatWindowHelpersTest,
      LiveAndHistoryProcessFactsStayEquivalentOnKeyFields) {
   auto view = std::make_shared<ToolCallView>();
   view->toolCallId = "status-1";
-  view->name = "process_status";
-  view->args = R"({"process_id":"proc-1"})";
+  view->name = "Process";
+  view->args = R"({"action":"Status","process_id":"proc-1"})";
   view->phase = ToolPhase::Finished;
   view->success = true;
   view->result = R"({"isRunning":false,"exitCode":0,"duration_ms":100})";
@@ -482,7 +507,7 @@ TEST(ChatWindowHelpersTest,
   Message assistant;
   assistant.role = Role::Assistant;
   assistant.content = {
-      ToolCallContent{"status-1", "process_status", R"({"process_id":"proc-1"})"},
+      ToolCallContent{"status-1", "Process", R"({"action":"Status","process_id":"proc-1"})"},
   };
   turn.messages.push_back(std::move(assistant));
   history.turns.push_back(std::move(turn));
@@ -607,8 +632,8 @@ TEST(ChatWindowHelpersTest,
   Message assistant;
   assistant.role = Role::Assistant;
   assistant.content = {
-      ToolCallContent{"summon-1", "summon_subagent",
-                      R"({"title":"Worker","task":"Implement login"})"},
+      ToolCallContent{"summon-1", "Delegate",
+                      R"({"action":"Spawn","title":"Worker","task":"Implement login"})"},
   };
   turn.messages.push_back(std::move(assistant));
   history.turns.push_back(std::move(turn));
@@ -640,8 +665,8 @@ TEST(ChatWindowHelpersTest,
      LiveAndHistorySubagentFactsStayEquivalentOnKeyFields) {
   auto view = std::make_shared<ToolCallView>();
   view->toolCallId = "wait-1";
-  view->name = "subagent_wait";
-  view->args = R"({"agent_id":"child-1"})";
+  view->name = "Delegate";
+  view->args = R"({"action":"Wait","agent_id":"child-1"})";
   view->phase = ToolPhase::Finished;
   view->success = true;
 
@@ -665,7 +690,7 @@ TEST(ChatWindowHelpersTest,
   Message assistant;
   assistant.role = Role::Assistant;
   assistant.content = {
-      ToolCallContent{"wait-1", "subagent_wait", R"({"agent_id":"child-1"})"},
+      ToolCallContent{"wait-1", "Delegate", R"({"action":"Wait","agent_id":"child-1"})"},
   };
   turn.messages.push_back(std::move(assistant));
   history.turns.push_back(std::move(turn));
@@ -693,9 +718,9 @@ TEST(ChatWindowHelpersTest,
   Message assistant;
   assistant.role = Role::Assistant;
   assistant.content = {
-      ToolCallContent{"read-1", "file_read",
-                      R"({"path":"src/main.cpp","start_line":1,"end_line":3})"},
-      ToolCallContent{"ls-1", "list_directory", R"({"path":"src"})"},
+      ToolCallContent{"read-1", "Files",
+                      R"({"action":"Read","path":"src/main.cpp","start_line":1,"end_line":3})"},
+      ToolCallContent{"ls-1", "Files", R"({"action":"List","path":"src"})"},
   };
   Message tool_result;
   tool_result.role = Role::ToolResult;

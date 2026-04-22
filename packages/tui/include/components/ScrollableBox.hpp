@@ -33,6 +33,8 @@ public:
     void InvalidateLayout();
     int ContentWidth() const;
 
+    int ScrollOffset() const { return selected_; }
+    int ViewportHeight() const { return viewport_height_; }
     ftxui::Element OnRender() override;
     bool OnEvent(ftxui::Event event) override;
     bool Focusable() const override;
