@@ -116,7 +116,7 @@ protected:
      * @brief Returns the ModelInfo for a given model ID.
      * Default implementation does a linear scan of listModels(). Override for caching.
      */
-    virtual ModelInfo getModelInfo(const std::string& modelId);
+    ModelInfo getModelInfo(const std::string& modelId) override;
 
     /**
      * @brief Whether to include usage in the stream response.

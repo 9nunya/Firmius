@@ -92,7 +92,7 @@ protected:
      * @brief Returns the ModelInfo for a given model ID (for cost calculation).
      * Default implementation does a linear scan of listModels(). Override for caching.
      */
-    virtual ModelInfo getModelInfo(const std::string& modelId);
+    ModelInfo getModelInfo(const std::string& modelId) override;
 
     virtual RateLimitSwitchResult handleRateLimitAndMaybeSwitch(
         APIKeyAccount& currentAccount,

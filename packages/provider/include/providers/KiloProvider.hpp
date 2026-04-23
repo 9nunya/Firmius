@@ -114,9 +114,6 @@ private:
   std::vector<CachedModelInfo> modelCache_;
   std::string baseUrl_;
 
-  // Streaming state tracking
-  APIKeyAccount *activeAccount_ = nullptr;
-
   // Helpers
   bool isFreeModel(const std::string &modelId) const;
   bool isAnonymous(const APIKeyAccount &acc) const;

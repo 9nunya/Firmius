@@ -236,8 +236,7 @@ KiloAPIKeyWizard::pollForToken(const std::string &code, int expiresIn) {
 
 KiloProvider::KiloProvider()
     : BaseOpenAIProvider("kilo", std::string(kKiloBaseUrl) + kOpenrouterPath, ""),
-      baseUrl_(std::string(kKiloBaseUrl) + kOpenrouterPath),
-      activeAccount_(nullptr) {}
+      baseUrl_(std::string(kKiloBaseUrl) + kOpenrouterPath) {}
 
 KiloProvider::~KiloProvider() = default;
 
