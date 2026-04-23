@@ -1,27 +1,86 @@
 #include "lsp/JsonRpcTransport.hpp"
-#include <unistd.h>
-#include <poll.h>
+
+#if !defined(_WIN32)
 #include <cerrno>
 #include <cstring>
-#include <stdexcept>
-#include <rapidjson/writer.h>
-#include <rapidjson/stringbuffer.h>
+#include <poll.h>
+#include <unistd.h>
+#endif
+
 #include <rapidjson/error/en.h>
+#include <rapidjson/stringbuffer.h>
+#include <rapidjson/writer.h>
+#include <stdexcept>
 
 namespace firmius::core {
 
-JsonRpcTransport::JsonRpcTransport(int stdinWriteFd, int stdoutReadFd)
-    : m_writeFd(stdinWriteFd), m_readFd(stdoutReadFd) {
-    if (::pipe(m_shutdownPipe) != 0) {
-        throw std::runtime_error("JsonRpcTransport: failed to create shutdown pipe: " +
-                                 std::string(std::strerror(errno)));
+JsonRpcTransport::JsonRpcTransport(Writer writer, Reader reader, WakeStop wakeStop)
+    : m_writer(std::move(writer)), m_reader(std::move(reader)), m_wakeStop(std::move(wakeStop)) {
+    if (!m_writer || !m_reader) {
+        throw std::runtime_error("JsonRpcTransport: reader and writer are required");
     }
 }
 
 JsonRpcTransport::~JsonRpcTransport() {
     stop();
-    if (m_shutdownPipe[0] >= 0) ::close(m_shutdownPipe[0]);
-    if (m_shutdownPipe[1] >= 0) ::close(m_shutdownPipe[1]);
+}
+
+JsonRpcTransport::Reader JsonRpcTransport::makeFdReader(int fd) {
+#if defined(_WIN32)
+    (void)fd;
+    throw std::runtime_error("JsonRpcTransport::makeFdReader is not supported on Windows");
+#else
+    return [fd](std::chrono::milliseconds timeout) -> std::string {
+        struct pollfd pfd{};
+        pfd.fd = fd;
+        pfd.events = POLLIN | POLLHUP | POLLERR;
+
+        const int ret = ::poll(&pfd, 1, static_cast<int>(timeout.count()));
+        if (ret < 0) {
+            if (errno == EINTR) {
+                return {};
+            }
+            throw std::runtime_error("JsonRpcTransport: poll failed: " + std::string(std::strerror(errno)));
+        }
+        if (ret == 0 || !(pfd.revents & (POLLIN | POLLHUP | POLLERR))) {
+            return {};
+        }
+
+        char chunk[8192];
+        const ssize_t bytesRead = ::read(fd, chunk, sizeof(chunk));
+        if (bytesRead <= 0) {
+            return {};
+        }
+        return std::string(chunk, static_cast<size_t>(bytesRead));
+    };
+#endif
+}
+
+JsonRpcTransport::Writer JsonRpcTransport::makeFdWriter(int fd) {
+    return [fd](const std::string& data) -> bool {
+        const char* ptr = data.data();
+        size_t remaining = data.size();
+        while (remaining > 0) {
+#if defined(_WIN32)
+            (void)fd;
+            return false;
+#else
+            const ssize_t written = ::write(fd, ptr, remaining);
+            if (written < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                return false;
+            }
+            if (written == 0) {
+                return false;
+            }
+            ptr += written;
+            remaining -= static_cast<size_t>(written);
+#endif
+        }
+        return true;
+    };
 }
 
 void JsonRpcTransport::start() {
@@ -34,10 +93,8 @@ void JsonRpcTransport::start() {
 void JsonRpcTransport::stop() {
     if (!m_running.exchange(false)) return;
 
-    // Wake up poll() in the reader loop
-    if (m_shutdownPipe[1] >= 0) {
-        char c = 'x';
-        (void)::write(m_shutdownPipe[1], &c, 1);
+    if (m_wakeStop) {
+        m_wakeStop();
     }
 
     if (m_readerThread.joinable()) {
@@ -45,7 +102,6 @@ void JsonRpcTransport::stop() {
         m_readerThread.join();
     }
 
-    // Reject any remaining pending requests
     rejectAllPending("Transport stopped");
 }
 
@@ -54,8 +110,8 @@ bool JsonRpcTransport::isRunning() const {
 }
 
 rapidjson::Document JsonRpcTransport::sendRequest(const std::string& method,
-                                                   rapidjson::Value& params,
-                                                   int timeoutMs) {
+                                                  rapidjson::Value& params,
+                                                  int timeoutMs) {
     if (!m_running) {
         throw std::runtime_error("JsonRpcTransport: not running, cannot send request: " + method);
     }
@@ -76,30 +132,22 @@ rapidjson::Document JsonRpcTransport::sendRequest(const std::string& method,
 
     {
         std::lock_guard lock(m_pendingMutex);
-        m_pendingRequests[id] = PendingSlot{
-            std::move(promise),
-            std::chrono::steady_clock::now()
-        };
+        m_pendingRequests[id] = PendingSlot{std::move(promise), std::chrono::steady_clock::now()};
     }
 
     if (!writeMessage(doc)) {
-        // Remove the pending slot and throw
         std::lock_guard lock(m_pendingMutex);
         m_pendingRequests.erase(id);
         throw std::runtime_error("JsonRpcTransport: failed to write request: " + method);
     }
 
-    // Wait for response with timeout
-    auto status = future.wait_for(std::chrono::milliseconds(timeoutMs));
+    const auto status = future.wait_for(std::chrono::milliseconds(timeoutMs));
     if (status == std::future_status::timeout) {
-        // Clean up the pending slot
         std::lock_guard lock(m_pendingMutex);
         m_pendingRequests.erase(id);
-        throw std::runtime_error("JSON-RPC request timed out after " +
-                                 std::to_string(timeoutMs) + "ms: " + method);
+        throw std::runtime_error("JSON-RPC request timed out after " + std::to_string(timeoutMs) + "ms: " + method);
     }
 
-    // May throw if the promise was broken (e.g. transport stopped)
     return future.get();
 }
 
@@ -160,108 +208,69 @@ bool JsonRpcTransport::writeMessage(const rapidjson::Document& doc) {
     rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
     doc.Accept(writer);
 
-    std::string content = buffer.GetString();
-    std::string header = "Content-Length: " + std::to_string(content.length()) + "\r\n\r\n";
-    std::string fullMessage = header + content;
+    const std::string content = buffer.GetString();
+    const std::string header = "Content-Length: " + std::to_string(content.length()) + "\r\n\r\n";
 
     std::lock_guard lock(m_writeMutex);
-
-    const char* data = fullMessage.c_str();
-    size_t remaining = fullMessage.length();
-
-    while (remaining > 0) {
-        ssize_t written = ::write(m_writeFd, data, remaining);
-        if (written < 0) {
-            if (errno == EINTR) continue;
-            return false;
-        }
-        if (written == 0) return false;
-        data += written;
-        remaining -= static_cast<size_t>(written);
-    }
-    return true;
+    return m_writer(header + content);
 }
 
 void JsonRpcTransport::readerLoop() {
     std::string buffer;
-    char chunk[8192];
-
-    struct pollfd fds[2];
-    fds[0].fd = m_readFd;
-    fds[0].events = POLLIN;
-    fds[1].fd = m_shutdownPipe[0];
-    fds[1].events = POLLIN;
 
     while (m_running) {
-        int ret = ::poll(fds, 2, 500); // 500ms poll timeout for periodic check
-        if (ret < 0) {
-            if (errno == EINTR) continue;
+        std::string chunk = m_reader(std::chrono::milliseconds(500));
+        if (!m_running) {
+            break;
+        }
+        if (chunk.empty()) {
             break;
         }
 
-        // Shutdown signal
-        if (fds[1].revents & POLLIN) {
-            break;
-        }
+        buffer.append(chunk);
 
-        if (ret == 0) continue; // poll timeout, loop and check m_running
-
-        if (!(fds[0].revents & POLLIN)) continue;
-
-        ssize_t bytesRead = ::read(m_readFd, chunk, sizeof(chunk));
-        if (bytesRead <= 0) {
-            // Pipe closed or error
-            break;
-        }
-
-        buffer.append(chunk, static_cast<size_t>(bytesRead));
-
-        // Process all complete messages in buffer
         while (true) {
-            // Find Content-Length header
             auto headerPos = buffer.find("Content-Length: ");
             if (headerPos == std::string::npos) {
-                // Discard any garbage before a valid header
                 buffer.clear();
                 break;
             }
 
-            // Discard anything before the header
             if (headerPos > 0) {
                 buffer.erase(0, headerPos);
                 headerPos = 0;
             }
 
-            auto endHeader = buffer.find("\r\n\r\n", headerPos);
-            if (endHeader == std::string::npos) break; // incomplete header
+            const auto endHeader = buffer.find("\r\n\r\n", headerPos);
+            if (endHeader == std::string::npos) {
+                break;
+            }
 
-            // Parse content length
             size_t contentLength = 0;
             try {
                 std::string lenStr = buffer.substr(16, endHeader - 16);
-                // Handle potential other headers - find just the number
-                auto firstNewline = lenStr.find("\r\n");
+                const auto firstNewline = lenStr.find("\r\n");
                 if (firstNewline != std::string::npos) {
                     lenStr = lenStr.substr(0, firstNewline);
                 }
                 contentLength = std::stoul(lenStr);
             } catch (...) {
-                // Malformed header, discard and try to recover
                 buffer.erase(0, endHeader + 4);
                 continue;
             }
 
-            size_t messageStart = endHeader + 4;
-            if (buffer.length() < messageStart + contentLength) break; // incomplete body
+            const size_t messageStart = endHeader + 4;
+            if (buffer.length() < messageStart + contentLength) {
+                break;
+            }
 
-            std::string message = buffer.substr(messageStart, contentLength);
+            const std::string message = buffer.substr(messageStart, contentLength);
             buffer.erase(0, messageStart + contentLength);
 
             rapidjson::Document doc;
             doc.Parse(message.c_str(), message.length());
-
             if (doc.HasParseError()) {
-                continue; // Skip malformed JSON
+                continue;
             }
 
             handleMessage(std::move(doc));
@@ -275,13 +284,11 @@ void JsonRpcTransport::readerLoop() {
 void JsonRpcTransport::handleMessage(rapidjson::Document&& doc) {
     if (doc.HasMember("id")) {
         if (doc.HasMember("method")) {
-            // Server-initiated request
             std::lock_guard lock(m_handlerMutex);
             if (m_requestHandler) {
                 m_requestHandler(doc);
             }
         } else {
-            // Response to our request
             int id = -1;
             if (doc["id"].IsInt()) {
                 id = doc["id"].GetInt();
@@ -289,7 +296,7 @@ void JsonRpcTransport::handleMessage(rapidjson::Document&& doc) {
                 try {
                     id = std::stoi(doc["id"].GetString());
                 } catch (...) {
-                    return; // Invalid ID format
+                    return;
                 }
             }
 
@@ -301,13 +308,11 @@ void JsonRpcTransport::handleMessage(rapidjson::Document&& doc) {
                 try {
                     it->second.promise.set_value(std::move(doc));
                 } catch (...) {
-                    // Promise may have already been satisfied or broken
                 }
                 m_pendingRequests.erase(it);
             }
         }
     } else if (doc.HasMember("method")) {
-        // Notification
         std::lock_guard lock(m_handlerMutex);
         if (m_notificationHandler) {
             m_notificationHandler(doc);
@@ -319,10 +324,8 @@ void JsonRpcTransport::rejectAllPending(const std::string& reason) {
     std::lock_guard lock(m_pendingMutex);
     for (auto& [id, slot] : m_pendingRequests) {
         try {
-            slot.promise.set_exception(
-                std::make_exception_ptr(std::runtime_error(reason)));
+            slot.promise.set_exception(std::make_exception_ptr(std::runtime_error(reason)));
         } catch (...) {
-            // Promise may have already been satisfied
         }
     }
     m_pendingRequests.clear();

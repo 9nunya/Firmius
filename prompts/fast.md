@@ -129,6 +129,10 @@ Do not burn time on stale names or wrapper lore from older tool eras.
 - delegating tiny direct work just because delegation exists
 - claiming a quick fix without concrete verification output
 
+
+Python tool note:
+`Python` can run against an optional `venv` path when a project already has the needed packages installed
+if the venv is outside current allowed paths, Firmius should request directory read access instead of failing like a confused goblin
 # Verification
 Always run concrete verification.
 A quick fix still needs evidence.

@@ -2545,11 +2545,17 @@ TEST_F(HarnessTest, writeAllowAlways_persistsPrefixAndSkipsSecondPrompt) {
     std::atomic<int> requestCount{0};
     std::promise<PermissionEscalationRequest> requestPromise;
     auto requestFuture = requestPromise.get_future();
+    std::mutex requestMutex;
+    bool captured = false;
     int subId = Harness::instance().subscribe(
         [&](const AppEvent& event) {
             if (auto request = std::get_if<PermissionEscalationRequest>(&event)) {
                 requestCount.fetch_add(1);
-                requestPromise.set_value(*request);
+                std::lock_guard<std::mutex> lock(requestMutex);
+                if (!captured) {
+                    captured = true;
+                    requestPromise.set_value(*request);
+                }
             }
         });
 
@@ -2575,6 +2581,60 @@ TEST_F(HarnessTest, writeAllowAlways_persistsPrefixAndSkipsSecondPrompt) {
 
     Harness::instance().unsubscribe(subId);
 }
+TEST_F(HarnessTest, readAllowAlways_persistsPrefixAndSkipsSecondPrompt) {
+    std::string threadId = Harness::instance().newThread({}, "/tmp", "test");
+    ASSERT_FALSE(threadId.empty());
+
+    Permissions permissions(threadId, "agent-1");
+    AgentContext context;
+    context.permissions.allowedPaths = {"/tmp/**"};
+    context.permissions.allowOutsideCwd = false;
+    permissions.bindContext(context);
+
+    std::string dirPath = "/opt/project/.venv";
+
+    std::atomic<int> requestCount{0};
+    std::promise<PermissionEscalationRequest> requestPromise;
+    auto requestFuture = requestPromise.get_future();
+    std::mutex requestMutex;
+    bool captured = false;
+    int subId = Harness::instance().subscribe(
+        [&](const AppEvent& event) {
+            if (auto request = std::get_if<PermissionEscalationRequest>(&event)) {
+                requestCount.fetch_add(1);
+                std::lock_guard<std::mutex> lock(requestMutex);
+                if (!captured) {
+                    captured = true;
+                    requestPromise.set_value(*request);
+                }
+            }
+        });
+
+    std::promise<void> validationPromise;
+    auto validationFuture = validationPromise.get_future();
+    std::thread worker([&]() {
+        permissions.validatePathAccess(dirPath, AccessMode::READ);
+        validationPromise.set_value();
+    });
+
+    auto request = requestFuture.get();
+    EXPECT_EQ(request.requestType, PermissionRequestType::Read);
+    EXPECT_EQ(request.targetPath, dirPath);
+    EXPECT_TRUE(Harness::instance().resolvePermissionEscalation(
+        request.requestId, PermissionResponse::AllowAlways));
+    validationFuture.get();
+    worker.join();
+
+    EXPECT_NO_THROW(permissions.validatePathAccess(dirPath, AccessMode::READ));
+    EXPECT_EQ(requestCount.load(), 1);
+
+    auto rules = Harness::instance().threadPermissionRules(threadId);
+    ASSERT_EQ(rules.writeAllowPaths.size(), 1u);
+    EXPECT_EQ(rules.writeAllowPaths[0], "/opt/project/**");
+
+    Harness::instance().unsubscribe(subId);
+}
+
 
 TEST_F(HarnessTest, vulnerableCommandsRemainDeniedInAlwaysAllowMode) {
     std::string threadId = Harness::instance().newThread({}, "/tmp", "test");

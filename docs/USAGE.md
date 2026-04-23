@@ -5,8 +5,8 @@ This is the practical guide for getting Firmius running and using the parts that
 ## Build
 
 ```bash
-cmake -S . -B build
-cmake --build build -j$(nproc)
+cmake -S . -B build -G Ninja
+cmake --build build --parallel
 ```
 
 ## Launch
@@ -14,7 +14,8 @@ cmake --build build -j$(nproc)
 Start the main TUI:
 
 ```bash
-./build/packages/cli/firmius
+./build/packages/cli/firmius     # macOS/Linux
+./build/packages/cli/firmius.exe # Windows
 ```
 
 Useful variants:
@@ -22,9 +23,11 @@ Useful variants:
 ```bash
 # Continue the last session
 ./build/packages/cli/firmius -c
+./build/packages/cli/firmius.exe -c
 
 # Start a fresh thread and immediately send a prompt
 ./build/packages/cli/firmius --prompt "map this repo"
+./build/packages/cli/firmius.exe --prompt "map this repo"
 
 # Read the prompt from a file
 ./build/packages/cli/firmius --prompt-file task.md
@@ -107,7 +110,8 @@ You can add your own `.md` files under:
 Or override the directory entirely:
 
 ```bash
-FIRMIUS_WORKFLOWS_DIR=/some/other/folder ./build/packages/cli/firmius
+FIRMIUS_WORKFLOWS_DIR=/some/other/folder ./build/packages/cli/firmius     # macOS/Linux
+FIRMIUS_WORKFLOWS_DIR=/some/other/folder ./build/packages/cli/firmius.exe # Windows shells that honor this env form
 ```
 
 Minimal example:
@@ -213,7 +217,15 @@ There is also a dedicated audit CLI:
 
 ```bash
 ./build/packages/audits/firmius_audit --list
+./build/packages/audits/firmius_audit.exe --list
 ```
+
+The repository CI workflow `.github/workflows/cross-platform-ci.yml` builds the main binaries and runs the migrated proof slice with:
+
+`test_json_rpc_transport`
+`test_lsp_server_manager`
+`test_engine_shutdown`
+`test_lsp_audit`
 
 That surface covers workflow, provider, MCP, LSP, quota, harness, benchmark, and other validation lanes.
 

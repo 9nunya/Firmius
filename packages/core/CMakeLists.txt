@@ -149,7 +149,6 @@ target_link_libraries(firmius_core PUBLIC
     CURL::libcurl
     Threads::Threads
     SQLite3::SQLite3
-    uuid
 )
 
 target_include_directories(firmius_core PRIVATE

@@ -29,13 +29,34 @@ struct CommandAllowRule {
     std::string normalizedCommand;
     std::string primaryCommand;
     CommandSeverity severity = CommandSeverity::LOW;
+    std::string toolName;
+    bool appliesToEntireTool = false;
+    bool isGlobal = false;
+
+    CommandAllowRule() = default;
+    CommandAllowRule(std::string exact, std::string normalized, std::string primary,
+                     CommandSeverity sev)
+        : exactCommand(std::move(exact)), normalizedCommand(std::move(normalized)), primaryCommand(std::move(primary)), severity(sev) {}
 
     bool operator==(const CommandAllowRule& other) const = default;
 };
 
+struct PathAllowRule {
+    std::string pathPrefix;
+    std::string toolName;
+    bool readOnly = false;
+    bool appliesToAllReads = false;
+    bool isGlobal = false;
+
+    bool operator==(const PathAllowRule& other) const = default;
+};
+
 struct ThreadPermissionRules {
     std::vector<CommandAllowRule> commandAllowRules;
+    std::vector<PathAllowRule> pathAllowRules;
     std::vector<std::string> writeAllowPaths;
+    bool allowAllReadsSession = false;
+    std::vector<std::string> allowAllToolSessions;
 
     bool operator==(const ThreadPermissionRules& other) const = default;
 };
@@ -261,6 +282,7 @@ public:
                               std::map<std::string, AgentManifestEntry>& manifest,
                               std::string* error = nullptr) const;
 
+    void addWriteAllowPath(const std::string& threadId, const std::string& pathPrefix);
     /**
      * @brief Writes the agent manifest for a thread.
      */
@@ -269,7 +291,9 @@ public:
     ThreadPermissionRules readPermissionRules(const std::string& threadId) const;
     void writePermissionRules(const std::string& threadId, const ThreadPermissionRules& rules);
     void addCommandAllowRule(const std::string& threadId, const CommandAllowRule& rule);
-    void addWriteAllowPath(const std::string& threadId, const std::string& pathPrefix);
+    void addPathAllowRule(const std::string& threadId, const PathAllowRule& rule);
+    void setAllowAllReadsSession(const std::string& threadId, bool enabled);
+    void addAllowAllToolSession(const std::string& threadId, const std::string& toolName);
 
     shared::ThreadArtifactMetadata writeArtifact(
         const std::string& threadId, const std::string& ownerAgentId,

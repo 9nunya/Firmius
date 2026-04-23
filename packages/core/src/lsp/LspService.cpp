@@ -472,7 +472,7 @@ rapidjson::Document runLspRequest(const LspRequest &request,
         LspServerRegistry::detectRoot(rootStart, spec->markers));
   }
 
-  const std::vector<std::string> serverCommand = spec->resolveCommand();
+  std::vector<std::string> serverCommand;
 
   try {
     LspClient *client = LspServerManager::instance().getOrCreateServer(
@@ -480,6 +480,7 @@ rapidjson::Document runLspRequest(const LspRequest &request,
 
     if (!absolutePath.empty() && fs::exists(absolutePath)) {
       const std::string languageId = spec->languageIdForPath(absolutePath);
+      serverCommand = spec->resolveCommand();
       const bool waitForFileDiagnostics = !request.project;
       client->touchFile(absolutePath, languageId, waitForFileDiagnostics,
                         request.timeout_ms);

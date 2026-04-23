@@ -26,9 +26,16 @@ public:
     firmius::core::CommandIntentAnalyzer analyzer_;
 
     PermissionResponse requestCommandApproval(const std::string& command,
-                                           const CommandIntent& /*intent*/) override {
+                                           const CommandIntent& /*intent*/,
+                                           const std::string& toolName = "") override {
         requestedCommands_.push_back(command);
+        if (!toolName.empty()) requestedCommands_.push_back("tool:" + toolName);
         return commandApprovalResponse_;
+    }
+
+    PermissionResponse requestReadApproval(const std::string& absolutePath) override {
+        requestedEditPaths_.push_back(absolutePath);
+        return editApprovalResponse_;
     }
 
     PermissionResponse requestEditApproval(const std::string& absolutePath) override {
@@ -57,14 +64,27 @@ public:
 
     void validatePathAccess(const std::string& absolutePath,
                           AccessMode mode) const override {
-        if (!checkPathAccess(absolutePath, AccessMode::READ)) {
-            throw std::runtime_error("Access denied: " + absolutePath);
+        if (checkPathAccess(absolutePath, AccessMode::READ)) {
+            if (mode == AccessMode::WRITE) {
+                requestedEditPaths_.push_back(absolutePath);
+                if (editApprovalResponse_ == PermissionResponse::Deny) {
+                    throw std::runtime_error("Write access denied: " + absolutePath);
+                }
+            }
+            return;
         }
-        if (mode == AccessMode::WRITE) {
+
+        if (mode == AccessMode::READ || mode == AccessMode::EXECUTE) {
             requestedEditPaths_.push_back(absolutePath);
             if (editApprovalResponse_ == PermissionResponse::Deny) {
-                throw std::runtime_error("Write access denied: " + absolutePath);
+                throw std::runtime_error("Read access denied: " + absolutePath);
             }
+            return;
+        }
+
+        requestedEditPaths_.push_back(absolutePath);
+        if (editApprovalResponse_ == PermissionResponse::Deny) {
+            throw std::runtime_error("Write access denied: " + absolutePath);
         }
     }
 

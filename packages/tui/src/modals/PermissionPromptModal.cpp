@@ -17,46 +17,63 @@ PermissionPromptModal::PermissionPromptModal(
 
 std::vector<std::string> PermissionPromptModal::getEditOptions() const {
     std::vector<std::string> options = {
-        "Yes, allow",
+        "Allow once",
+        "Always allow writes in this location for this session",
+        "Always allow writes in this location globally",
         "No, don't allow"
     };
-    if (request_.allowAlways) {
-        options.insert(options.begin() + 1, "Yes, always allow writes in this location");
+    if (request_.requestType == firmius::shared::PermissionRequestType::Read) {
+        options = {
+            "Allow once",
+            "Always allow this location for this session",
+            "Always allow this location globally",
+            "Allow all directory reads this session",
+            "No, don't allow"
+        };
     }
     return options;
 }
 
 std::vector<std::string> PermissionPromptModal::getCommandOptions() const {
-    std::vector<std::string> options = {
-        "Yes, run this once",
+    return {
+        "Run once",
+        "Allow this command for this session",
+        "Allow entire tool for this session",
+        "Allow this command globally",
         "No, don't run it"
     };
-    if (request_.allowAlways) {
-        options.insert(options.begin() + 1, "Yes, always allow this command");
-    }
-    return options;
 }
 
 std::vector<firmius::shared::PermissionResponse>
 PermissionPromptModal::getEditResponses() const {
     using firmius::shared::PermissionResponse;
-    std::vector<PermissionResponse> responses = {PermissionResponse::AllowOnce};
-    if (request_.allowAlways) {
-        responses.push_back(PermissionResponse::AllowAlways);
+    if (request_.requestType == firmius::shared::PermissionRequestType::Read) {
+        return {
+            PermissionResponse::AllowOnce,
+            PermissionResponse::AllowPathSession,
+            PermissionResponse::AllowPathGlobal,
+            PermissionResponse::AllowAllReadsSession,
+            PermissionResponse::Deny
+        };
     }
-    responses.push_back(PermissionResponse::Deny);
-    return responses;
+    return {
+        PermissionResponse::AllowOnce,
+        PermissionResponse::AllowPathSession,
+        PermissionResponse::AllowPathGlobal,
+        PermissionResponse::Deny
+    };
 }
 
 std::vector<firmius::shared::PermissionResponse>
 PermissionPromptModal::getCommandResponses() const {
     using firmius::shared::PermissionResponse;
-    std::vector<PermissionResponse> responses = {PermissionResponse::AllowOnce};
-    if (request_.allowAlways) {
-        responses.push_back(PermissionResponse::AllowAlways);
-    }
-    responses.push_back(PermissionResponse::Deny);
-    return responses;
+    return {
+        PermissionResponse::AllowOnce,
+        PermissionResponse::AllowCommandSession,
+        PermissionResponse::AllowCommandToolSession,
+        PermissionResponse::AllowCommandGlobal,
+        PermissionResponse::Deny
+    };
 }
 
 std::string PermissionPromptModal::severityToString(firmius::shared::CommandSeverity severity) const {
@@ -93,11 +110,11 @@ ftxui::Color PermissionPromptModal::severityToColor(firmius::shared::CommandSeve
 
 ftxui::Component PermissionPromptModal::create(TuiState &state) {
     auto options = std::make_shared<std::vector<std::string>>(
-        request_.requestType == firmius::shared::PermissionRequestType::Edit
+        request_.requestType != firmius::shared::PermissionRequestType::Command
             ? getEditOptions()
             : getCommandOptions());
     auto responses = std::make_shared<std::vector<firmius::shared::PermissionResponse>>(
-        request_.requestType == firmius::shared::PermissionRequestType::Edit
+        request_.requestType != firmius::shared::PermissionRequestType::Command
             ? getEditResponses()
             : getCommandResponses());
     auto selectedOption = std::make_shared<int>(0);

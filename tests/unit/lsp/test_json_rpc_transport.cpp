@@ -6,9 +6,8 @@
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
 
-#include <poll.h>
-#include <unistd.h>
 #include <chrono>
+#include <condition_variable>
 #include <future>
 #include <map>
 #include <memory>
@@ -28,68 +27,75 @@ std::string serializeJson(const rapidjson::Value& value) {
     return std::string(buffer.GetString(), buffer.GetSize());
 }
 
-void writeAll(int fd, const std::string& data) {
-    const char* ptr = data.data();
-    size_t remaining = data.size();
-    while (remaining > 0) {
-        const ssize_t n = ::write(fd, ptr, remaining);
-        if (n <= 0) {
-            throw std::runtime_error("write failed");
+class InMemoryByteChannel {
+public:
+    bool write(const std::string& data) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (closed_) {
+                return false;
+            }
+            buffer_ += data;
         }
-        ptr += n;
-        remaining -= static_cast<size_t>(n);
+        cv_.notify_all();
+        return true;
+    }
+
+    std::string read(std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        cv_.wait_for(lock, timeout, [&]() { return closed_ || !buffer_.empty(); });
+        if (buffer_.empty()) {
+            return {};
+        }
+        std::string out = std::move(buffer_);
+        buffer_.clear();
+        return out;
+    }
+
+    void close() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            closed_ = true;
+        }
+        cv_.notify_all();
+    }
+
+private:
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    std::string buffer_;
+    bool closed_ = false;
+};
+
+void writeFramedJson(InMemoryByteChannel& channel, const std::string& jsonPayload) {
+    const std::string header =
+        "Content-Length: " + std::to_string(jsonPayload.size()) + "\r\n\r\n";
+    if (!channel.write(header + jsonPayload)) {
+        throw std::runtime_error("write failed");
     }
 }
 
-void writeFramedJson(int fd, const std::string& jsonPayload) {
-    const std::string header =
-        "Content-Length: " + std::to_string(jsonPayload.size()) + "\r\n\r\n";
-    writeAll(fd, header + jsonPayload);
-}
-
-std::optional<std::string> tryReadFramedJson(int fd, std::chrono::milliseconds timeout) {
+std::optional<std::string> tryReadFramedJson(InMemoryByteChannel& channel,
+                                             std::chrono::milliseconds timeout) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     std::string buffer;
 
     while (std::chrono::steady_clock::now() < deadline) {
         const auto now = std::chrono::steady_clock::now();
-        const auto remainingMs =
-            std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
-
-        struct pollfd pfd {
-            .fd = fd,
-            .events = POLLIN,
-            .revents = 0,
-        };
-
-        const int pollRc = ::poll(&pfd, 1, static_cast<int>(remainingMs));
-        if (pollRc < 0) {
-            throw std::runtime_error("poll failed");
-        }
-        if (pollRc == 0) {
-            continue;
-        }
-
-        if ((pfd.revents & POLLIN) == 0) {
-            if ((pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
-                return std::nullopt;
-            }
-            continue;
-        }
-
-        char chunk[4096];
-        const ssize_t n = ::read(fd, chunk, sizeof(chunk));
-        if (n <= 0) {
+        const auto remaining =
+            std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
+        const std::string chunk = channel.read(remaining);
+        if (chunk.empty()) {
             return std::nullopt;
         }
-        buffer.append(chunk, static_cast<size_t>(n));
+        buffer += chunk;
 
         const auto headerEnd = buffer.find("\r\n\r\n");
         if (headerEnd == std::string::npos) {
             continue;
         }
 
-        constexpr size_t kHeaderPrefixLen = 16; // "Content-Length: "
+        constexpr size_t kHeaderPrefixLen = 16;
         if (buffer.rfind("Content-Length: ", 0) != 0) {
             throw std::runtime_error("missing Content-Length header");
         }
@@ -119,13 +125,10 @@ rapidjson::Document parseJson(const std::string& text) {
 class JsonRpcTransportFixture : public ::testing::Test {
 protected:
     void SetUp() override {
-        ASSERT_EQ(::pipe(clientToServer_), 0);
-        ASSERT_EQ(::pipe(serverToClient_), 0);
-
         transport_ = std::make_unique<JsonRpcTransport>(
-            clientToServer_[1], // transport write -> server read
-            serverToClient_[0]  // server write -> transport read
-        );
+            [this](const std::string& data) { return clientToServer_.write(data); },
+            [this](std::chrono::milliseconds timeout) { return serverToClient_.read(timeout); },
+            [this]() { serverToClient_.close(); });
         transport_->start();
     }
 
@@ -134,22 +137,12 @@ protected:
             transport_->stop();
             transport_.reset();
         }
-
-        closeIfOpen(clientToServer_[0]);
-        closeIfOpen(clientToServer_[1]);
-        closeIfOpen(serverToClient_[0]);
-        closeIfOpen(serverToClient_[1]);
+        clientToServer_.close();
+        serverToClient_.close();
     }
 
-    static void closeIfOpen(int& fd) {
-        if (fd >= 0) {
-            ::close(fd);
-            fd = -1;
-        }
-    }
-
-    int clientToServer_[2]{-1, -1};
-    int serverToClient_[2]{-1, -1};
+    InMemoryByteChannel clientToServer_;
+    InMemoryByteChannel serverToClient_;
     std::unique_ptr<JsonRpcTransport> transport_;
 };
 
@@ -160,7 +153,7 @@ TEST_F(JsonRpcTransportFixture, FramesContentLengthAndSendsNotificationWithoutId
 
     transport_->sendNotification("notify/test", params);
 
-    const auto payload = tryReadFramedJson(clientToServer_[0], std::chrono::milliseconds(1000));
+    const auto payload = tryReadFramedJson(clientToServer_, std::chrono::milliseconds(1000));
     ASSERT_TRUE(payload.has_value());
 
     const rapidjson::Document outbound = parseJson(*payload);
@@ -175,7 +168,7 @@ TEST_F(JsonRpcTransportFixture, FramesContentLengthAndSendsNotificationWithoutId
 
 TEST_F(JsonRpcTransportFixture, CompletesRequestResponseCycle) {
     std::thread server([&]() {
-        const auto reqPayload = tryReadFramedJson(clientToServer_[0], std::chrono::milliseconds(1000));
+        const auto reqPayload = tryReadFramedJson(clientToServer_, std::chrono::milliseconds(1000));
         ASSERT_TRUE(reqPayload.has_value());
         rapidjson::Document request = parseJson(*reqPayload);
 
@@ -193,7 +186,7 @@ TEST_F(JsonRpcTransportFixture, CompletesRequestResponseCycle) {
         result.AddMember("total", 3, alloc);
         response.AddMember("result", result, alloc);
 
-        writeFramedJson(serverToClient_[1], serializeJson(response));
+        writeFramedJson(serverToClient_, serializeJson(response));
     });
 
     rapidjson::Document params;
@@ -212,7 +205,7 @@ TEST_F(JsonRpcTransportFixture, CompletesRequestResponseCycle) {
 
 TEST_F(JsonRpcTransportFixture, TimesOutWhenNoResponseArrives) {
     std::thread server([&]() {
-        const auto reqPayload = tryReadFramedJson(clientToServer_[0], std::chrono::milliseconds(1000));
+        const auto reqPayload = tryReadFramedJson(clientToServer_, std::chrono::milliseconds(1000));
         ASSERT_TRUE(reqPayload.has_value());
         (void)parseJson(*reqPayload);
     });
@@ -239,51 +232,9 @@ TEST_F(JsonRpcTransportFixture, RoutesConcurrentRequestResponsesById) {
     std::thread server([&]() {
         try {
             std::map<std::string, int> idsByMethod;
-            auto readSingleFrame = [&](std::chrono::milliseconds timeout) -> std::optional<std::string> {
-                std::string header;
-                const auto deadline = std::chrono::steady_clock::now() + timeout;
-                while (header.find("\r\n\r\n") == std::string::npos &&
-                       std::chrono::steady_clock::now() < deadline) {
-                    const auto now = std::chrono::steady_clock::now();
-                    const auto remainingMs =
-                        std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
-                    struct pollfd pfd {
-                        .fd = clientToServer_[0],
-                        .events = POLLIN,
-                        .revents = 0,
-                    };
-                    const int pollRc = ::poll(&pfd, 1, static_cast<int>(remainingMs));
-                    if (pollRc <= 0) {
-                        continue;
-                    }
-                    char ch = 0;
-                    const ssize_t n = ::read(clientToServer_[0], &ch, 1);
-                    if (n <= 0) {
-                        return std::nullopt;
-                    }
-                    header.push_back(ch);
-                }
-                const auto headerEnd = header.find("\r\n\r\n");
-                if (headerEnd == std::string::npos || header.rfind("Content-Length: ", 0) != 0) {
-                    return std::nullopt;
-                }
-                constexpr size_t kHeaderPrefixLen = 16;
-                const std::string lenStr = header.substr(kHeaderPrefixLen, headerEnd - kHeaderPrefixLen);
-                const size_t contentLen = std::stoul(lenStr);
-                std::string body(contentLen, '\0');
-                size_t off = 0;
-                while (off < contentLen) {
-                    const ssize_t n = ::read(clientToServer_[0], body.data() + off, contentLen - off);
-                    if (n <= 0) {
-                        return std::nullopt;
-                    }
-                    off += static_cast<size_t>(n);
-                }
-                return body;
-            };
 
             for (int i = 0; i < 2; ++i) {
-                const auto reqPayload = readSingleFrame(std::chrono::milliseconds(1000));
+                const auto reqPayload = tryReadFramedJson(clientToServer_, std::chrono::milliseconds(1000));
                 if (!reqPayload.has_value()) {
                     serverThreadOk = false;
                     return;
@@ -311,7 +262,7 @@ TEST_F(JsonRpcTransportFixture, RoutesConcurrentRequestResponsesById) {
                 rapidjson::Value result(rapidjson::kObjectType);
                 result.AddMember("servedMethod", rapidjson::Value(method.c_str(), alloc).Move(), alloc);
                 response.AddMember("result", result, alloc);
-                writeFramedJson(serverToClient_[1], serializeJson(response));
+                writeFramedJson(serverToClient_, serializeJson(response));
             };
 
             sendResponseFor("second");
@@ -320,6 +271,7 @@ TEST_F(JsonRpcTransportFixture, RoutesConcurrentRequestResponsesById) {
             serverThreadOk = false;
         }
     });
+
     auto call = [&](const std::string& method) {
         rapidjson::Document params;
         params.SetObject();
@@ -350,6 +302,7 @@ TEST_F(JsonRpcTransportFixture, RoutesConcurrentRequestResponsesById) {
 
     ASSERT_EQ(firstErr, nullptr) << "first request failed";
     ASSERT_EQ(secondErr, nullptr) << "second request failed";
+    ASSERT_TRUE(serverThreadOk);
     ASSERT_TRUE(firstResp.HasMember("result"));
     ASSERT_TRUE(secondResp.HasMember("result"));
     ASSERT_TRUE(firstResp["result"].HasMember("servedMethod"));
@@ -378,7 +331,7 @@ TEST_F(JsonRpcTransportFixture, InvokesServerInitiatedRequestHandlerCallback) {
     params.AddMember("k", "v", alloc);
     serverRequest.AddMember("params", params, alloc);
 
-    writeFramedJson(serverToClient_[1], serializeJson(serverRequest));
+    writeFramedJson(serverToClient_, serializeJson(serverRequest));
 
     ASSERT_EQ(seenFuture.wait_for(std::chrono::milliseconds(1000)), std::future_status::ready);
     rapidjson::Document observed = seenFuture.get();
@@ -388,8 +341,8 @@ TEST_F(JsonRpcTransportFixture, InvokesServerInitiatedRequestHandlerCallback) {
     EXPECT_EQ(observed["id"].GetInt(), 91);
 }
 
-TEST_F(JsonRpcTransportFixture, HandlesPipeCloseGracefully) {
-    closeIfOpen(serverToClient_[1]);
+TEST_F(JsonRpcTransportFixture, HandlesChannelCloseGracefully) {
+    serverToClient_.close();
 
     rapidjson::Document params;
     params.SetObject();

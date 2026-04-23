@@ -30,7 +30,6 @@ target_link_libraries(test_agent_outcome PRIVATE
     firmius::shared
     CURL::libcurl
     GTest::gtest_main
-    uuid
 )
 target_include_directories(test_agent_outcome PRIVATE ${rapidjson_SOURCE_DIR}/include)
 gtest_discover_tests(test_agent_outcome)
@@ -41,7 +40,6 @@ target_link_libraries(test_fleet PRIVATE
     firmius::provider
     firmius::shared
     CURL::libcurl
-    uuid
 )
 
 add_executable(test_process_interactive test_process_interactive.cpp)
@@ -51,7 +49,6 @@ target_link_libraries(test_process_interactive PRIVATE
     firmius::shared
     CURL::libcurl
     GTest::gtest_main
-    uuid
 )
 gtest_discover_tests(test_process_interactive)
 
@@ -62,7 +59,6 @@ target_link_libraries(test_reference_persistence PRIVATE
     firmius::shared
     CURL::libcurl
     GTest::gtest_main
-    uuid
 )
 target_include_directories(test_reference_persistence PRIVATE ${rapidjson_SOURCE_DIR}/include)
 gtest_discover_tests(test_reference_persistence)
@@ -74,7 +70,6 @@ target_link_libraries(test_model_rotation PRIVATE
     firmius::shared
     CURL::libcurl
     GTest::gtest_main
-    uuid
 )
 target_include_directories(test_model_rotation PRIVATE ${rapidjson_SOURCE_DIR}/include)
 gtest_discover_tests(test_model_rotation)

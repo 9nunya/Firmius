@@ -81,6 +81,7 @@ enum class ThreadPermissionMode : std::uint8_t {
  * @brief Types of permission escalation requests.
  */
 enum class PermissionRequestType : std::uint8_t {
+  Read,
   Command,
   Edit
 };
@@ -90,6 +91,13 @@ enum class PermissionRequestType : std::uint8_t {
  */
 enum class PermissionResponse : std::uint8_t {
   AllowOnce,
+  AllowCommandSession,
+  AllowCommandToolSession,
+  AllowCommandGlobal,
+  AllowPathSession,
+  AllowPathGlobal,
+  AllowAllReadsSession,
+  AllowAllToolSession,
   AllowAlways,
   Deny
 };

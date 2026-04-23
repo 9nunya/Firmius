@@ -51,7 +51,7 @@ Out of the box, Firmius agents can work with:
 
 - files, directories, grep, glob, and patch-style edits
 - process execution and interactive subprocess control
-- Python execution
+Python execution, including optional project virtualenv selection
 - MCP servers over `stdio` and `http`
 - LSP hover, definition, references, symbols, and diagnostics
 - web fetch and search tools inside the agent runtime
@@ -60,33 +60,39 @@ Out of the box, Firmius agents can work with:
 ## Quick start
 
 ```bash
-cmake -S . -B build
-cmake --build build -j$(nproc)
+cmake -S . -B build -G Ninja
+cmake --build build --parallel
 ```
 
 Launch the TUI:
 
 ```bash
-./build/packages/cli/firmius
+./build/packages/cli/firmius     # macOS/Linux
+./build/packages/cli/firmius.exe # Windows
 ```
 
 Continue your last session:
 
 ```bash
-./build/packages/cli/firmius -c
+./build/packages/cli/firmius -c     # macOS/Linux
+./build/packages/cli/firmius.exe -c # Windows
 ```
 
 Run a one-shot prompt in a fresh thread:
 
 ```bash
 ./build/packages/cli/firmius --prompt "audit this repo" --quit-when-idle
+./build/packages/cli/firmius.exe --prompt "audit this repo" --quit-when-idle
 ```
 
 See available audit surfaces:
 
 ```bash
 ./build/packages/audits/firmius_audit --list
+./build/packages/audits/firmius_audit.exe --list
 ```
+
+Cross-platform CI in `.github/workflows/cross-platform-ci.yml` builds the shipped binaries and runs the migrated proof targets `test_json_rpc_transport`, `test_lsp_server_manager`, `test_engine_shutdown`, and `test_lsp_audit` on Linux, macOS, and Windows.
 
 ## Core commands
 

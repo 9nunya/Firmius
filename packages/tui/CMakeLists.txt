@@ -101,3 +101,12 @@ target_include_directories(firmius_tui PRIVATE
 target_compile_options(firmius_tui PRIVATE
     -Wall -Wextra -Werror
 )
+
+if(APPLE)
+    set_source_files_properties(src/utils/Clipboard.cpp PROPERTIES
+        LANGUAGE OBJCXX
+    )
+    target_link_libraries(firmius_tui PRIVATE
+        "-framework AppKit"
+    )
+endif()

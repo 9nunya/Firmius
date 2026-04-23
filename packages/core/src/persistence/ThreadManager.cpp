@@ -1823,17 +1823,85 @@ ThreadPermissionRules ThreadManager::readPermissionRules(
                 ruleValue["severity"].IsString()) {
                 rule.severity = severityFromString(ruleValue["severity"].GetString());
             }
+            if (ruleValue.HasMember("tool_name") &&
+                ruleValue["tool_name"].IsString()) {
+                rule.toolName = ruleValue["tool_name"].GetString();
+            }
+            if (ruleValue.HasMember("applies_to_entire_tool") &&
+                ruleValue["applies_to_entire_tool"].IsBool()) {
+                rule.appliesToEntireTool =
+                    ruleValue["applies_to_entire_tool"].GetBool();
+            }
+            if (ruleValue.HasMember("is_global") &&
+                ruleValue["is_global"].IsBool()) {
+                rule.isGlobal = ruleValue["is_global"].GetBool();
+            }
             if (!rule.exactCommand.empty()) {
                 rules.commandAllowRules.push_back(std::move(rule));
             }
         }
     }
 
+    if (d.HasMember("path_allow_rules") && d["path_allow_rules"].IsArray()) {
+        for (const auto& pathValue : d["path_allow_rules"].GetArray()) {
+            if (!pathValue.IsObject()) {
+                continue;
+            }
+
+            PathAllowRule rule;
+            if (pathValue.HasMember("path_prefix") &&
+                pathValue["path_prefix"].IsString()) {
+                rule.pathPrefix = pathValue["path_prefix"].GetString();
+            }
+            if (pathValue.HasMember("tool_name") &&
+                pathValue["tool_name"].IsString()) {
+                rule.toolName = pathValue["tool_name"].GetString();
+            }
+            if (pathValue.HasMember("read_only") &&
+                pathValue["read_only"].IsBool()) {
+                rule.readOnly = pathValue["read_only"].GetBool();
+            }
+            if (pathValue.HasMember("applies_to_all_reads") &&
+                pathValue["applies_to_all_reads"].IsBool()) {
+                rule.appliesToAllReads =
+                    pathValue["applies_to_all_reads"].GetBool();
+            }
+            if (pathValue.HasMember("is_global") &&
+                pathValue["is_global"].IsBool()) {
+                rule.isGlobal = pathValue["is_global"].GetBool();
+            }
+            if (!rule.pathPrefix.empty()) {
+                if (!rule.readOnly) {
+                    rules.writeAllowPaths.push_back(rule.pathPrefix);
+                }
+                rules.pathAllowRules.push_back(std::move(rule));
+            }
+        }
+    }
+
+    if (d.HasMember("allow_all_reads_session") &&
+        d["allow_all_reads_session"].IsBool()) {
+        rules.allowAllReadsSession = d["allow_all_reads_session"].GetBool();
+    }
+
+    if (d.HasMember("allow_all_tool_sessions") &&
+        d["allow_all_tool_sessions"].IsArray()) {
+        for (const auto& toolValue : d["allow_all_tool_sessions"].GetArray()) {
+            if (toolValue.IsString()) {
+                rules.allowAllToolSessions.push_back(toolValue.GetString());
+            }
+        }
+    }
+
     if (d.HasMember("write_allow_paths") && d["write_allow_paths"].IsArray()) {
         for (const auto& pathValue : d["write_allow_paths"].GetArray()) {
-            if (pathValue.IsString()) {
-                rules.writeAllowPaths.push_back(pathValue.GetString());
+            if (!pathValue.IsString()) {
+                continue;
             }
+            PathAllowRule rule;
+            rule.pathPrefix = pathValue.GetString();
+            rules.writeAllowPaths.push_back(rule.pathPrefix);
+            rules.pathAllowRules.push_back(std::move(rule));
         }
     }
 
@@ -1860,15 +1928,47 @@ void ThreadManager::writePermissionRules(const std::string& threadId,
         entry.AddMember("severity",
                         rapidjson::Value(severityToString(rule.severity), a).Move(),
                         a);
+        entry.AddMember("tool_name",
+                        rapidjson::Value(rule.toolName.c_str(), a).Move(), a);
+        entry.AddMember("applies_to_entire_tool", rule.appliesToEntireTool, a);
+        entry.AddMember("is_global", rule.isGlobal, a);
         commandRules.PushBack(entry, a);
     }
     d.AddMember("command_allow_rules", commandRules, a);
 
+    rapidjson::Value pathRules(rapidjson::kArrayType);
+    for (const auto& rule : rules.pathAllowRules) {
+        if (rule.pathPrefix.empty()) {
+            continue;
+        }
+        rapidjson::Value entry(rapidjson::kObjectType);
+        entry.AddMember("path_prefix",
+                        rapidjson::Value(rule.pathPrefix.c_str(), a).Move(), a);
+        entry.AddMember("tool_name",
+                        rapidjson::Value(rule.toolName.c_str(), a).Move(), a);
+        entry.AddMember("read_only", rule.readOnly, a);
+        entry.AddMember("applies_to_all_reads", rule.appliesToAllReads, a);
+        entry.AddMember("is_global", rule.isGlobal, a);
+        pathRules.PushBack(entry, a);
+    }
+    d.AddMember("path_allow_rules", pathRules, a);
+    d.AddMember("allow_all_reads_session", rules.allowAllReadsSession, a);
+
+
     rapidjson::Value writePaths(rapidjson::kArrayType);
     for (const auto& pathPrefix : rules.writeAllowPaths) {
+        if (pathPrefix.empty()) {
+            continue;
+        }
         writePaths.PushBack(rapidjson::Value(pathPrefix.c_str(), a).Move(), a);
     }
     d.AddMember("write_allow_paths", writePaths, a);
+    rapidjson::Value allowAllToolSessions(rapidjson::kArrayType);
+    for (const auto& toolName : rules.allowAllToolSessions) {
+        allowAllToolSessions.PushBack(
+            rapidjson::Value(toolName.c_str(), a).Move(), a);
+    }
+    d.AddMember("allow_all_tool_sessions", allowAllToolSessions, a);
 
     writeThreadStateField(conn->db, threadId, "permission_rules_json",
                           rapidJsonToString(d));
@@ -1881,7 +1981,10 @@ void ThreadManager::addCommandAllowRule(const std::string& threadId,
         rules.commandAllowRules.begin(), rules.commandAllowRules.end(),
         [&rule](const CommandAllowRule& existing) {
             return existing.exactCommand == rule.exactCommand &&
-                   existing.normalizedCommand == rule.normalizedCommand;
+                   existing.normalizedCommand == rule.normalizedCommand &&
+                   existing.toolName == rule.toolName &&
+                   existing.appliesToEntireTool == rule.appliesToEntireTool &&
+                   existing.isGlobal == rule.isGlobal;
         });
     if (!exists) {
         rules.commandAllowRules.push_back(rule);
@@ -1891,14 +1994,49 @@ void ThreadManager::addCommandAllowRule(const std::string& threadId,
 
 void ThreadManager::addWriteAllowPath(const std::string& threadId,
                                       const std::string& pathPrefix) {
+    PathAllowRule rule;
+    rule.pathPrefix = pathPrefix;
+    rule.readOnly = false;
+    rule.appliesToAllReads = false;
+    rule.isGlobal = false;
+    addPathAllowRule(threadId, rule);
+}
+
+void ThreadManager::addPathAllowRule(const std::string& threadId,
+                                     const PathAllowRule& rule) {
     auto rules = readPermissionRules(threadId);
     auto exists =
-        std::any_of(rules.writeAllowPaths.begin(), rules.writeAllowPaths.end(),
-                    [&pathPrefix](const std::string& existing) {
-                        return existing == pathPrefix;
+        std::any_of(rules.pathAllowRules.begin(), rules.pathAllowRules.end(),
+                    [&rule](const PathAllowRule& existing) {
+                        return existing == rule;
                     });
     if (!exists) {
-        rules.writeAllowPaths.push_back(pathPrefix);
+        rules.pathAllowRules.push_back(rule);
+        writePermissionRules(threadId, rules);
+    }
+}
+
+void ThreadManager::setAllowAllReadsSession(const std::string& threadId,
+                                            const bool enabled) {
+    auto rules = readPermissionRules(threadId);
+    if (rules.allowAllReadsSession == enabled) {
+        return;
+    }
+    rules.allowAllReadsSession = enabled;
+    writePermissionRules(threadId, rules);
+}
+
+void ThreadManager::addAllowAllToolSession(const std::string& threadId,
+                                           const std::string& toolName) {
+    if (toolName.empty()) {
+        return;
+    }
+    auto rules = readPermissionRules(threadId);
+    auto exists = std::find(rules.allowAllToolSessions.begin(),
+                            rules.allowAllToolSessions.end(),
+                            toolName) != rules.allowAllToolSessions.end();
+    if (!exists) {
+        rules.allowAllToolSessions.push_back(toolName);
         writePermissionRules(threadId, rules);
     }
 }

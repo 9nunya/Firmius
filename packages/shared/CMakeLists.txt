@@ -71,4 +71,4 @@ target_include_directories(firmius_shared SYSTEM PRIVATE
 )
 
 find_package(CURL REQUIRED)
-target_link_libraries(firmius_shared PRIVATE CURL::libcurl uuid)
+target_link_libraries(firmius_shared PRIVATE CURL::libcurl)

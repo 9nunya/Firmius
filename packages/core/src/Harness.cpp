@@ -1676,7 +1676,8 @@ Harness::threadPermissionRules(const std::string &threadId) {
 }
 
 bool Harness::commandMatchesPersistedAllowRule(const std::string &threadId,
-                                               const std::string &command) {
+                                               const std::string &command,
+                                               const std::string &toolName) {
   if (threadId.empty()) {
     return false;
   }
@@ -1685,25 +1686,64 @@ bool Harness::commandMatchesPersistedAllowRule(const std::string &threadId,
   std::string normalized = normalizeCommandForRuleMatch(command);
   return std::any_of(rules.commandAllowRules.begin(),
                      rules.commandAllowRules.end(),
-                     [&command, &normalized](const CommandAllowRule &rule) {
+                     [&command, &normalized, &toolName](const CommandAllowRule &rule) {
+                       const bool toolMatches =
+                           rule.toolName.empty() || toolName.empty() ||
+                           rule.toolName == toolName;
+                       if (!toolMatches) {
+                         return false;
+                       }
+                       if (rule.appliesToEntireTool) {
+                         return !toolName.empty() && rule.toolName == toolName;
+                       }
                        return rule.exactCommand == command ||
                               (!rule.normalizedCommand.empty() &&
                                rule.normalizedCommand == normalized);
                      });
 }
 
-bool Harness::pathMatchesPersistedWriteAllowRule(
-    const std::string &threadId, const std::string &absolutePath) {
+bool Harness::pathMatchesPersistedAllowRule(const std::string &threadId,
+                                            const std::string &absolutePath,
+                                            const bool readOnly,
+                                            const std::string &toolName) {
   if (threadId.empty()) {
     return false;
   }
 
   auto rules = threadPermissionRules(threadId);
-  return std::any_of(rules.writeAllowPaths.begin(), rules.writeAllowPaths.end(),
-                     [&absolutePath](const std::string &pathPrefix) {
+  return std::any_of(rules.pathAllowRules.begin(), rules.pathAllowRules.end(),
+                     [&absolutePath, readOnly, &toolName](const PathAllowRule &rule) {
+                       if (readOnly && !rule.readOnly && !rule.appliesToAllReads) {
+                         return false;
+                       }
+                       if (!readOnly && rule.readOnly) {
+                         return false;
+                       }
+                       if (!rule.toolName.empty() && !toolName.empty() &&
+                           rule.toolName != toolName) {
+                         return false;
+                       }
                        return shared::FSUtil::isSubpath(absolutePath,
-                                                        pathPrefix);
+                                                        rule.pathPrefix);
                      });
+}
+
+bool Harness::toolHasSessionAllowance(const std::string &threadId,
+                                      const std::string &toolName) {
+  if (threadId.empty() || toolName.empty()) {
+    return false;
+  }
+  auto rules = threadPermissionRules(threadId);
+  return std::find(rules.allowAllToolSessions.begin(),
+                   rules.allowAllToolSessions.end(),
+                   toolName) != rules.allowAllToolSessions.end();
+}
+
+bool Harness::readHasSessionAllowance(const std::string &threadId) {
+  if (threadId.empty()) {
+    return false;
+  }
+  return threadPermissionRules(threadId).allowAllReadsSession;
 }
 
 void Harness::persistCommandAllowRule(const std::string &threadId,
@@ -1715,13 +1755,30 @@ void Harness::persistCommandAllowRule(const std::string &threadId,
   threadManager_.addCommandAllowRule(threadId, rule);
 }
 
-void Harness::persistWriteAllowPath(const std::string &threadId,
-                                    const std::string &pathPrefix) {
+void Harness::persistPathAllowRule(const std::string &threadId,
+                                   const PathAllowRule &rule) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
-  if (threadId.empty() || pathPrefix.empty()) {
+  if (threadId.empty() || rule.pathPrefix.empty()) {
     return;
   }
-  threadManager_.addWriteAllowPath(threadId, pathPrefix);
+  threadManager_.addPathAllowRule(threadId, rule);
+}
+
+void Harness::persistToolSessionAllowance(const std::string &threadId,
+                                          const std::string &toolName) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  if (threadId.empty() || toolName.empty()) {
+    return;
+  }
+  threadManager_.addAllowAllToolSession(threadId, toolName);
+}
+
+void Harness::persistReadSessionAllowance(const std::string &threadId) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  if (threadId.empty()) {
+    return;
+  }
+  threadManager_.setAllowAllReadsSession(threadId, true);
 }
 
 bool Harness::setCurrentThreadPermissionMode(ThreadPermissionMode mode) {

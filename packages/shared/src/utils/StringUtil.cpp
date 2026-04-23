@@ -1,9 +1,12 @@
 #include "utils/StringUtil.hpp"
 #include <algorithm>
 #include <numeric>
+#include <array>
+#include <cstdint>
+#include <iomanip>
+#include <random>
 #include <regex>
 #include <sstream>
-#include <uuid/uuid.h>
 #include <vector>
 
 namespace firmius::shared {
@@ -74,11 +77,26 @@ std::string StringUtil::toLower(const std::string &s) {
 }
 
 std::string StringUtil::generateUuid() {
-  uuid_t binuuid;
-  uuid_generate_random(binuuid);
-  char uuid[37];
-  uuid_unparse_lower(binuuid, uuid);
-  return std::string(uuid);
+  std::array<std::uint8_t, 16> bytes{};
+  std::random_device randomDevice;
+  std::mt19937 generator(randomDevice());
+  std::uniform_int_distribution<int> distribution(0, 255);
+
+  for (auto &byte : bytes) {
+    byte = static_cast<std::uint8_t>(distribution(generator));
+  }
+
+  bytes[6] = static_cast<std::uint8_t>((bytes[6] & 0x0F) | 0x40);
+  bytes[8] = static_cast<std::uint8_t>((bytes[8] & 0x3F) | 0x80);
+
+  std::ostringstream stream;
+  stream << std::hex << std::nouppercase << std::setfill('0');
+  for (size_t i = 0; i < bytes.size(); ++i) {
+    stream << std::setw(2) << static_cast<int>(bytes[i]);
+    if (i == 3 || i == 5 || i == 7 || i == 9)
+      stream << '-';
+  }
+  return stream.str();
 }
 
 std::string StringUtil::shellEscape(std::string_view s) {

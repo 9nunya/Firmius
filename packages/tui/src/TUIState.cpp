@@ -116,9 +116,9 @@ void HashCombine(std::size_t &seed, const T &value) {
 }
 
 std::size_t buildFocusedChatLiveMeasurementSignature(
+    const firmius::tui::StreamStateManager &stream_state,
     const std::string &focused_agent_id, const std::string &thread_id,
     const std::unordered_set<std::string> &persisted_tool_call_ids) {
-    const std::string &focused_agent_id, const std::string &thread_id) {
   std::size_t signature = 0;
   HashCombine(signature, focused_agent_id);
   HashCombine(signature, persisted_tool_call_ids.size());
@@ -1124,6 +1124,20 @@ static std::string permissionResponseToDisplayName(
   switch (response) {
   case shared::PermissionResponse::AllowOnce:
     return "Allow Once";
+  case shared::PermissionResponse::AllowCommandSession:
+    return "Allow Command This Session";
+  case shared::PermissionResponse::AllowCommandToolSession:
+    return "Allow Entire Tool This Session";
+  case shared::PermissionResponse::AllowCommandGlobal:
+    return "Allow Command Globally";
+  case shared::PermissionResponse::AllowPathSession:
+    return "Allow Location This Session";
+  case shared::PermissionResponse::AllowPathGlobal:
+    return "Allow Location Globally";
+  case shared::PermissionResponse::AllowAllReadsSession:
+    return "Allow All Reads This Session";
+  case shared::PermissionResponse::AllowAllToolSession:
+    return "Allow Entire Tool This Session";
   case shared::PermissionResponse::AllowAlways:
     return "Allow Always";
   case shared::PermissionResponse::Deny:
@@ -1134,30 +1148,53 @@ static std::string permissionResponseToDisplayName(
 
 static std::vector<std::string> permissionOptionLabels(
     const shared::PermissionEscalationRequest &request) {
-  std::vector<std::string> labels = {
-      request.requestType == shared::PermissionRequestType::Edit
-          ? "Allow once"
-          : "Run once",
-      "Deny",
-  };
-  if (request.allowAlways) {
-    labels.insert(labels.begin() + 1,
-                  request.requestType == shared::PermissionRequestType::Edit
-                      ? "Always allow location"
-                      : "Always allow command");
+  using Type = shared::PermissionRequestType;
+  if (request.requestType == Type::Command) {
+    return {"Run once",
+            "Allow this command for this session",
+            "Allow entire tool for this session",
+            "Allow this command globally",
+            "Deny"};
   }
-  return labels;
+
+  if (request.requestType == Type::Read) {
+    return {"Allow once",
+            "Always allow this location for this session",
+            "Always allow this location globally",
+            "Allow all directory reads this session",
+            "Deny"};
+  }
+
+  return {"Allow once",
+          "Always allow writes in this location for this session",
+          "Always allow writes in this location globally",
+          "Deny"};
 }
 
 static std::vector<shared::PermissionResponse> permissionOptionResponses(
     const shared::PermissionEscalationRequest &request) {
   using Response = shared::PermissionResponse;
-  std::vector<Response> responses = {Response::AllowOnce};
-  if (request.allowAlways) {
-    responses.push_back(Response::AllowAlways);
+  using Type = shared::PermissionRequestType;
+  if (request.requestType == Type::Command) {
+    return {Response::AllowOnce,
+            Response::AllowCommandSession,
+            Response::AllowCommandToolSession,
+            Response::AllowCommandGlobal,
+            Response::Deny};
   }
-  responses.push_back(Response::Deny);
-  return responses;
+
+  if (request.requestType == Type::Read) {
+    return {Response::AllowOnce,
+            Response::AllowPathSession,
+            Response::AllowPathGlobal,
+            Response::AllowAllReadsSession,
+            Response::Deny};
+  }
+
+  return {Response::AllowOnce,
+          Response::AllowPathSession,
+          Response::AllowPathGlobal,
+          Response::Deny};
 }
 
 static ftxui::Color permissionSeverityColor(
@@ -3339,8 +3376,6 @@ ftxui::Component TuiState::root() {
           result.push_back(std::move(clusters[cluster_id]));
         }
         return result;
-      }, [this]() { return buildFocusedChatLiveMeasurementSignature(
-                      stream_state_, focused_agent_id_, thread_.threadId); },
       }, [this]() {
         const auto persisted_it =
             agent_persisted_tool_call_ids_cache_.find(focused_agent_id_);
@@ -3349,7 +3384,10 @@ ftxui::Component TuiState::root() {
                 ? persisted_it->second
                 : kEmptyToolCallIdSet;
         return buildFocusedChatLiveMeasurementSignature(
-            stream_state_, focused_agent_id_, thread_.threadId, persisted); },
+            stream_state_, focused_agent_id_, thread_.threadId, persisted);
+      },
+      [this]() {
+        if (!harness_) {
           return false;
         }
         return harness_->getConfig().showInternalNudges;

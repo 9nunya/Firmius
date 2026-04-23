@@ -32,7 +32,16 @@ public:
      */
     virtual PermissionResponse requestCommandApproval(
         const std::string& command,
-        const CommandIntent& intent) = 0;
+        const CommandIntent& intent,
+        const std::string& toolName = "") = 0;
+
+    /**
+     * @brief Requests approval for reading a file or directory.
+     * @param absolutePath The file or directory path to read.
+     * @return User's permission response.
+     */
+    virtual PermissionResponse requestReadApproval(
+        const std::string& absolutePath) = 0;
 
     /**
      * @brief Requests approval for editing/writing a file.

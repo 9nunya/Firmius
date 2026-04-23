@@ -19,8 +19,9 @@
 
 namespace firmius::core {
 
-LspClient::LspClient(int stdinFd, int stdoutFd, std::string rootUri, std::string rootPath)
-    : m_transport(stdinFd, stdoutFd)
+LspClient::LspClient(JsonRpcTransport::Writer writer, JsonRpcTransport::Reader reader,
+                     std::string rootUri, std::string rootPath)
+    : m_transport(std::move(writer), std::move(reader))
     , m_rootUri(std::move(rootUri))
     , m_rootPath(std::move(rootPath))
 {

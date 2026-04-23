@@ -106,7 +106,7 @@ shared::ToolResult executeExecute(const rapidjson::Value &input, shared::ToolCon
 
     ctx.agent.getPermissions()->validatePathAccess(effectiveCwd, firmius::shared::AccessMode::READ);
     auto intent = ctx.agent.getPermissions()->getIntentAnalyzer().analyze(command, effectiveCwd);
-    auto approval = ctx.agent.getPermissions()->requestCommandApproval(command, intent);
+    auto approval = ctx.agent.getPermissions()->requestCommandApproval(command, intent, "Process");
     if (approval == PermissionResponse::Deny) {
       return shared::ToolResult::fail("Command execution denied: " + command);
     }
@@ -210,7 +210,7 @@ shared::ToolResult executeSpawn(const rapidjson::Value &input, shared::ToolConte
 
     ctx.agent.getPermissions()->validatePathAccess(effectiveCwd, firmius::shared::AccessMode::READ);
     auto intent = ctx.agent.getPermissions()->getIntentAnalyzer().analyze(command, effectiveCwd);
-    auto approval = ctx.agent.getPermissions()->requestCommandApproval(command, intent);
+    auto approval = ctx.agent.getPermissions()->requestCommandApproval(command, intent, "Process");
     if (approval == PermissionResponse::Deny) {
       return shared::ToolResult::fail("Command execution denied: " + command);
     }

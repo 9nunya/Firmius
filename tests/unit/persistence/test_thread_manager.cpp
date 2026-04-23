@@ -852,6 +852,7 @@ TEST_F(ThreadManagerTest, permissionRules_roundtrip) {
     rules.commandAllowRules.push_back(
         {"git status", "git status", "git", CommandSeverity::LOW});
     rules.writeAllowPaths.push_back("/tmp/work/src/**");
+    rules.writeAllowPaths.push_back("/opt/project/**");
 
     tm->writePermissionRules(threadId, rules);
 
@@ -861,8 +862,12 @@ TEST_F(ThreadManagerTest, permissionRules_roundtrip) {
     EXPECT_EQ(loaded.commandAllowRules[0].normalizedCommand, "git status");
     EXPECT_EQ(loaded.commandAllowRules[0].primaryCommand, "git");
     EXPECT_EQ(loaded.commandAllowRules[0].severity, CommandSeverity::LOW);
-    ASSERT_EQ(loaded.writeAllowPaths.size(), 1u);
+    ASSERT_EQ(loaded.pathAllowRules.size(), 2u);
+    EXPECT_EQ(loaded.pathAllowRules[0].pathPrefix, "/tmp/work/src/**");
+    EXPECT_EQ(loaded.pathAllowRules[1].pathPrefix, "/opt/project/**");
+    ASSERT_EQ(loaded.writeAllowPaths.size(), 2u);
     EXPECT_EQ(loaded.writeAllowPaths[0], "/tmp/work/src/**");
+    EXPECT_EQ(loaded.writeAllowPaths[1], "/opt/project/**");
 }
 
 TEST_F(ThreadManagerTest, addPermissionRules_deduplicatesEntries) {

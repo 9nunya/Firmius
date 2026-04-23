@@ -410,6 +410,7 @@ gtest_discover_tests(test_engine_stream_events)
 add_executable(test_engine_shutdown
     core/test_engine_shutdown.cpp
 )
+add_dependencies(test_engine_shutdown lsp_test_stub_server)
 target_link_libraries(test_engine_shutdown PRIVATE
     firmius::core
     firmius::provider
@@ -421,6 +422,9 @@ target_link_libraries(test_engine_shutdown PRIVATE
 )
 target_include_directories(test_engine_shutdown PRIVATE
     ${rapidjson_SOURCE_DIR}/include
+)
+target_compile_definitions(test_engine_shutdown PRIVATE
+    FIRMIUS_LSP_TEST_STUB_SERVER_PATH="$<TARGET_FILE:lsp_test_stub_server>"
 )
 gtest_discover_tests(test_engine_shutdown)
 
@@ -468,6 +472,11 @@ target_include_directories(test_json_rpc_transport PRIVATE
 )
 gtest_discover_tests(test_json_rpc_transport)
 
+add_executable(lsp_test_stub_server
+    lsp/lsp_test_stub_server.cpp
+)
+target_link_libraries(lsp_test_stub_server PRIVATE firmius::shared)
+
 add_executable(test_lsp_protocol
     lsp/test_lsp_protocol.cpp
 )
@@ -499,6 +508,7 @@ gtest_discover_tests(test_lsp_server_registry)
 add_executable(test_lsp_server_manager
     lsp/test_lsp_server_manager.cpp
 )
+add_dependencies(test_lsp_server_manager lsp_test_stub_server)
 target_link_libraries(test_lsp_server_manager PRIVATE
     firmius::core
     firmius::shared
@@ -508,7 +518,11 @@ target_link_libraries(test_lsp_server_manager PRIVATE
 target_include_directories(test_lsp_server_manager PRIVATE
     ${rapidjson_SOURCE_DIR}/include
 )
+target_compile_definitions(test_lsp_server_manager PRIVATE
+    FIRMIUS_LSP_TEST_STUB_SERVER_PATH="$<TARGET_FILE:lsp_test_stub_server>"
+)
 gtest_discover_tests(test_lsp_server_manager)
+
 
 add_executable(test_benchmark_factory
     core/test_benchmark_factory.cpp
@@ -1120,6 +1134,27 @@ target_include_directories(test_tool_presentation PRIVATE
     ${rapidjson_SOURCE_DIR}/include
 )
 gtest_discover_tests(test_tool_presentation)
+add_executable(test_permission_prompt_modal
+    tui/test_permission_prompt_modal.cpp
+    ../../packages/tui/src/modals/PermissionPromptModal.cpp
+    ../../packages/tui/src/ThemeManager.cpp
+    ../../packages/tui/src/UserPreferences.cpp
+)
+target_link_libraries(test_permission_prompt_modal PRIVATE
+    firmius::shared
+    firmius::core
+    GTest::gtest_main
+    GTest::gmock
+    ftxui::dom
+    ftxui::screen
+    ftxui::component
+)
+target_include_directories(test_permission_prompt_modal PRIVATE
+    ../../packages/tui/include
+    ../../packages/tui/src
+)
+gtest_discover_tests(test_permission_prompt_modal)
+
 
 
 add_executable(test_notification_manager

@@ -182,13 +182,22 @@ public:
   ThreadPermissionMode threadPermissionMode(const std::string &threadId);
   ThreadPermissionRules threadPermissionRules(const std::string &threadId);
   bool commandMatchesPersistedAllowRule(const std::string &threadId,
-                                        const std::string &command);
-  bool pathMatchesPersistedWriteAllowRule(const std::string &threadId,
-                                          const std::string &absolutePath);
+                                        const std::string &command,
+                                        const std::string &toolName = "");
+  bool pathMatchesPersistedAllowRule(const std::string &threadId,
+                                     const std::string &absolutePath,
+                                     bool readOnly,
+                                     const std::string &toolName = "");
+  bool toolHasSessionAllowance(const std::string &threadId,
+                               const std::string &toolName);
+  bool readHasSessionAllowance(const std::string &threadId);
   void persistCommandAllowRule(const std::string &threadId,
                                const CommandAllowRule &rule);
-  void persistWriteAllowPath(const std::string &threadId,
-                             const std::string &pathPrefix);
+  void persistPathAllowRule(const std::string &threadId,
+                            const PathAllowRule &rule);
+  void persistToolSessionAllowance(const std::string &threadId,
+                                   const std::string &toolName);
+  void persistReadSessionAllowance(const std::string &threadId);
   ThreadPermissionMode currentThreadPermissionMode();
   bool setCurrentThreadPermissionMode(ThreadPermissionMode mode);
   std::optional<ThreadPermissionMode> cycleCurrentThreadPermissionMode();

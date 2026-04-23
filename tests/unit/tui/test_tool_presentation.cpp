@@ -451,6 +451,7 @@ TEST(ToolPresentationTest, PythonExecuteUsesProcessFamilyPresentation) {
 }
 
 TEST(ToolPresentationTest, SummonSubagentRunningPresentation) {
+
   ToolCallView view;
   view.name = "Delegate";
   view.args = R"({"action":"Spawn","title":"Worker","task":"Implement login"})";

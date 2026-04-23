@@ -430,13 +430,17 @@ struct PermissionEscalationRequest {
   std::string requestId;
   std::string threadId;
   std::string agentId;
-  PermissionRequestType requestType = PermissionRequestType::Command;
+  PermissionRequestType requestType = PermissionRequestType::Read;
   std::string title;
   std::string message;
   std::string command;
   CommandSeverity severity = CommandSeverity::MEDIUM;
   std::string targetPath;
+  std::string toolName;
+  std::string toolCallId;
+  std::string commandPrimary;
   bool allowAlways = true;
+  bool isDirectory = false;
   bool operator==(const PermissionEscalationRequest &) const = default;
 };
 

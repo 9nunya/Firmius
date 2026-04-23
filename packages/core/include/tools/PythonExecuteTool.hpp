@@ -8,6 +8,7 @@ namespace firmius::core {
 
 struct PythonExecuteInput {
     std::string code;
+    std::string venv;
 };
 
 class PythonExecuteTool : public shared::TypedTool<PythonExecuteInput> {
@@ -17,6 +18,7 @@ public:
 
     START_MAPPING(PythonExecuteInput)
         MAP_STRING(code, "code")
+        MAP_STRING(venv, "venv")
     END_MAPPING
 
     shared::ToolResult execute(const PythonExecuteInput& input, shared::ToolContext& ctx) override;

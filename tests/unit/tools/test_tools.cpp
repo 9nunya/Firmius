@@ -24,6 +24,7 @@
 #include <filesystem>
 #include <fstream>
 #include <gmock/gmock.h>
+#include <cstdlib>
 #include <gtest/gtest.h>
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
@@ -1580,6 +1581,7 @@ TEST_F(ListDirectoryToolTest, allowedPaths_enforced) {
 
 TEST_F(ListDirectoryToolTest, includeHidden_respected) {
   std::vector<FileInfo> entries;
+
   entries.push_back({".hidden", "/work/.hidden", 0, false, false, 0});
   entries.push_back({"visible", "/work/visible", 0, false, false, 0});
 
@@ -1592,6 +1594,111 @@ TEST_F(ListDirectoryToolTest, includeHidden_respected) {
   EXPECT_TRUE(result.success);
   EXPECT_EQ(result.data.find(".hidden"), std::string::npos);
   EXPECT_NE(result.data.find("visible"), std::string::npos);
+}
+
+class PythonExecuteToolTest : public ::testing::Test {
+protected:
+  PythonExecuteTool tool;
+  NiceMock<MockHost> mockHost;
+  NiceMock<MockAgent> mockAgent;
+
+  void SetUp() override {
+    mockAgent.defaultCtx.environment.cwd = "/tmp/work";
+    mockAgent.defaultCtx.permissions.allowOutsideCwd = false;
+    mockAgent.defaultCtx.permissions.allowedPaths = {"/tmp/work", "/tmp"};
+    mockAgent.mockPerms_->allowOutsideCwd_ = false;
+    mockAgent.mockPerms_->allowedPaths_ = {"/tmp/work", "/tmp"};
+    mockAgent.mockPerms_->cwd_ = "/tmp/work";
+
+    ON_CALL(mockAgent, getContext())
+        .WillByDefault(ReturnRef(mockAgent.defaultCtx));
+    ON_CALL(mockAgent, getMutableContext())
+        .WillByDefault(ReturnRef(mockAgent.defaultCtx));
+    ON_CALL(mockAgent.mockEnv_->mockWorkspace(), resolvePath(_))
+        .WillByDefault(Invoke([](const std::string &path) {
+          if (path.starts_with("/")) {
+            return path;
+          }
+          return "/tmp/work/" + path;
+        }));
+  }
+};
+
+TEST_F(PythonExecuteToolTest, schemaIncludesOptionalVenv) {
+  auto schema = tool.getSchema();
+  ASSERT_NE(schema, nullptr);
+  const std::string json = schema->toString();
+  EXPECT_NE(json.find("\"venv\""), std::string::npos);
+}
+
+TEST_F(PythonExecuteToolTest, usesProvidedVenvInterpreterAndRequestsReadAccess) {
+  rapidjson::Document doc;
+  doc.SetObject();
+  auto &alloc = doc.GetAllocator();
+  doc.AddMember("code", rapidjson::Value("print('hi')\n", alloc).Move(), alloc);
+  doc.AddMember("venv", rapidjson::Value("/opt/project/.venv", alloc).Move(), alloc);
+
+  ProcessSnapshot finished;
+  finished.running = false;
+  finished.exitCode = 0;
+  finished.stdoutData = "hi\n";
+  finished.stderrData = "";
+  finished.elapsedMs = 3;
+
+  EXPECT_CALL(mockAgent.mockEnv_->mockProcessManager(),
+              spawnProcess(testing::HasSubstr("/opt/project/.venv/bin/python -c"),
+                           testing::_, "/tmp/work", testing::_, false))
+      .WillOnce(testing::Return("proc-venv"));
+  EXPECT_CALL(mockAgent.mockEnv_->mockProcessManager(),
+              addBlockingProcessId("proc-venv"));
+  EXPECT_CALL(mockAgent.mockEnv_->mockProcessManager(),
+              inspectProcess("proc-venv"))
+      .WillOnce(testing::Return(finished));
+  EXPECT_CALL(mockAgent.mockEnv_->mockProcessManager(),
+              removeBlockingProcessId("proc-venv"));
+
+  ToolContext ctx{mockHost, mockAgent, "test_call"};
+  ITool *itool = &tool;
+  auto result = itool->execute(doc, ctx);
+
+  EXPECT_TRUE(result.success) << result.error;
+  ASSERT_GE(mockAgent.mockPerms_->requestedEditPaths_.size(), 1u);
+  EXPECT_EQ(mockAgent.mockPerms_->requestedEditPaths_.front(),
+            "/opt/project/.venv");
+  ASSERT_GE(mockAgent.mockPerms_->requestedCommands_.size(), 1u);
+  EXPECT_NE(mockAgent.mockPerms_->requestedCommands_.front().find(
+                "/opt/project/.venv/bin/python -c"),
+            std::string::npos);
+  EXPECT_NE(result.data.find("\"venv\":\"/opt/project/.venv\""),
+            std::string::npos);
+}
+
+TEST_F(PythonExecuteToolTest, realExecutionCanUseProvidedVenv) {
+  const char *venvPath = std::getenv("FIRMIUS_TEST_REAL_PYTHON_VENV");
+  if (venvPath == nullptr || std::string(venvPath).empty()) {
+    GTEST_SKIP() << "FIRMIUS_TEST_REAL_PYTHON_VENV not set";
+  }
+
+  LocalHost localHost;
+  localHost.init();
+
+  mockAgent.defaultCtx.permissions.allowedPaths.push_back(std::string(venvPath));
+  mockAgent.mockPerms_->allowedPaths_.push_back(std::string(venvPath));
+
+  rapidjson::Document doc;
+  doc.SetObject();
+  auto &alloc = doc.GetAllocator();
+  doc.AddMember("code", rapidjson::Value("import sys\nprint(sys.executable)\n", alloc).Move(), alloc);
+  doc.AddMember("venv", rapidjson::Value(venvPath, alloc).Move(), alloc);
+
+  ToolContext ctx{localHost, mockAgent, "test_call"};
+  ITool *itool = &tool;
+  auto result = itool->execute(doc, ctx);
+
+  EXPECT_TRUE(result.success) << result.error;
+  EXPECT_NE(result.data.find(std::string(venvPath) + "/bin/python"),
+            std::string::npos);
+  localHost.destroy();
 }
 
 namespace {

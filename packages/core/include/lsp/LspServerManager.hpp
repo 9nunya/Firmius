@@ -1,12 +1,15 @@
 #ifndef FIRMIUS_CORE_LSP_SERVER_MANAGER_HPP
 #define FIRMIUS_CORE_LSP_SERVER_MANAGER_HPP
 
-#include <chrono>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+namespace firmius::shared {
+class IHost;
+}
 
 namespace firmius::core {
 
@@ -34,6 +37,8 @@ public:
                                              const std::string& projectRoot,
                                              size_t maxLines = 20) const;
 
+    void setHostForTesting(std::shared_ptr<firmius::shared::IHost> host);
+
 private:
     struct ServerInstance;
 
@@ -41,6 +46,8 @@ private:
 
     static std::string canonicalizeProjectRoot(const std::string& projectRoot);
     static std::string makePoolKey(const std::string& specId, const std::string& canonicalProjectRoot);
+    static std::string shellCommandForArgs(const std::vector<std::string>& command);
+    static std::string jdtlsDataRoot();
     static std::string projectNameForPath(const std::string& path);
 
     std::unique_ptr<ServerInstance> spawnServer(const LspServerSpec& spec,
@@ -52,6 +59,7 @@ private:
 
     mutable std::mutex m_mutex;
     std::unordered_map<std::string, std::unique_ptr<ServerInstance>> m_pool;
+    std::shared_ptr<firmius::shared::IHost> m_host;
 };
 
 } // namespace firmius::core

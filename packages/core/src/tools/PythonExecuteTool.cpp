@@ -1,12 +1,10 @@
 #include "tools/PythonExecuteTool.hpp"
+
 #include "agents/Agent.hpp"
-#include "agents/AgentPermissionChecks.hpp"
-#include "utils/FSUtil.hpp"
-#include "utils/StringUtil.hpp"
+#include <chrono>
 #include <filesystem>
 #include <map>
 #include <rapidjson/document.h>
-#include <thread>
 
 namespace firmius::core {
 using namespace firmius::shared;
@@ -17,29 +15,48 @@ shared::ToolMetadata PythonExecuteTool::getMetadata() const {
 }
 
 std::shared_ptr<shared::JSONSchema> PythonExecuteTool::getSchema() const {
-  return shared::zObject({{"code", shared::zString()->describe(
-                                       "The Python code to execute.")}})
+  return shared::zObject(
+             {{"code", shared::zString()->describe("The Python code to execute.")},
+              {"venv", shared::zString()
+                           ->describe("Optional path to a Python virtual environment whose interpreter should be used.")
+                           ->setOptional()}})
       ->required({"code"});
 }
 
 shared::ToolResult PythonExecuteTool::execute(const PythonExecuteInput &input,
                                               shared::ToolContext &ctx) {
   static const char *kCodeEnvVar = "FIRMIUS_PYTHON_EXECUTE_CODE";
-  std::string command =
-      "python3 -c \"import os; exec(compile(os.environ['" +
-      std::string(kCodeEnvVar) + "'], '<python_execute>', 'exec'))\"";
+
+  std::string pythonExecutable = "python3";
+  std::string resolvedVenv;
   std::string processId;
 
   try {
+    if (!input.venv.empty()) {
+      resolvedVenv =
+          ctx.agent.getEnvironment()->getWorkspace().resolvePath(input.venv);
+      ctx.agent.getPermissions()->validatePathAccess(
+          resolvedVenv, firmius::shared::AccessMode::READ);
+      pythonExecutable =
+          (std::filesystem::path(resolvedVenv) / "bin" / "python").string();
+    }
+
+    std::string command =
+        pythonExecutable +
+        " -c \"import os; exec(compile(os.environ['" +
+        std::string(kCodeEnvVar) +
+        "'], '<python_execute>', 'exec'))\"";
+
     std::string effectiveCwd = ctx.agent.getContext().environment.cwd;
-    effectiveCwd = ctx.agent.getEnvironment()->getWorkspace().resolvePath(effectiveCwd);
+    effectiveCwd =
+        ctx.agent.getEnvironment()->getWorkspace().resolvePath(effectiveCwd);
 
     ctx.agent.getPermissions()->validatePathAccess(
         effectiveCwd, firmius::shared::AccessMode::READ);
-    auto intent =
-        ctx.agent.getPermissions()->getIntentAnalyzer().analyze(command, effectiveCwd);
+    auto intent = ctx.agent.getPermissions()->getIntentAnalyzer().analyze(
+        command, effectiveCwd);
     auto approval =
-        ctx.agent.getPermissions()->requestCommandApproval(command, intent);
+        ctx.agent.getPermissions()->requestCommandApproval(command, intent, "Python");
     if (approval == PermissionResponse::Deny) {
       return shared::ToolResult::fail("Command execution denied: " + command);
     }
@@ -49,6 +66,9 @@ shared::ToolResult PythonExecuteTool::execute(const PythonExecuteInput &input,
         {"FIRMIUS_PYTHON_EXECUTE_LINES",
          std::to_string(std::count(input.code.begin(), input.code.end(), '\n') +
                         (!input.code.empty() ? 1 : 0))}};
+    if (!resolvedVenv.empty()) {
+      env["VIRTUAL_ENV"] = resolvedVenv;
+    }
 
     processId = ctx.agent.getEnvironment()->getProcessManager().spawnProcess(
         command, ctx.currentToolCallId, effectiveCwd, env);
@@ -59,9 +79,9 @@ shared::ToolResult PythonExecuteTool::execute(const PythonExecuteInput &input,
     const auto maxSleep = std::chrono::milliseconds(20);
 
     while (true) {
-      // Check for interrupt
       if (ctx.cancelRequested()) {
-        ctx.agent.getEnvironment()->getProcessManager().removeBlockingProcessId(processId);
+        ctx.agent.getEnvironment()->getProcessManager().removeBlockingProcessId(
+            processId);
         rapidjson::Document doc;
         doc.SetObject();
         auto &a = doc.GetAllocator();
@@ -76,15 +96,22 @@ shared::ToolResult PythonExecuteTool::execute(const PythonExecuteInput &input,
                       rapidjson::Value(processId.c_str(), a).Move(), a);
         doc.AddMember("command",
                       rapidjson::Value(command.c_str(), a).Move(), a);
+        if (!resolvedVenv.empty()) {
+          doc.AddMember("venv",
+                        rapidjson::Value(resolvedVenv.c_str(), a).Move(), a);
+        }
         return shared::ToolResult::ok(doc, processId);
       }
 
-      snap = ctx.agent.getEnvironment()->getProcessManager().inspectProcess(processId);
-      if (!snap.running)
+      snap =
+          ctx.agent.getEnvironment()->getProcessManager().inspectProcess(processId);
+      if (!snap.running) {
         break;
+      }
 
       if (!ctx.waitFor(sleepDuration)) {
-        ctx.agent.getEnvironment()->getProcessManager().removeBlockingProcessId(processId);
+        ctx.agent.getEnvironment()->getProcessManager().removeBlockingProcessId(
+            processId);
         rapidjson::Document doc;
         doc.SetObject();
         auto &a = doc.GetAllocator();
@@ -99,14 +126,20 @@ shared::ToolResult PythonExecuteTool::execute(const PythonExecuteInput &input,
                       rapidjson::Value(processId.c_str(), a).Move(), a);
         doc.AddMember("command",
                       rapidjson::Value(command.c_str(), a).Move(), a);
+        if (!resolvedVenv.empty()) {
+          doc.AddMember("venv",
+                        rapidjson::Value(resolvedVenv.c_str(), a).Move(), a);
+        }
         return shared::ToolResult::ok(doc, processId);
       }
+
       if (sleepDuration < maxSleep) {
         sleepDuration = std::min(maxSleep, sleepDuration * 2);
       }
     }
 
-    ctx.agent.getEnvironment()->getProcessManager().removeBlockingProcessId(processId);
+    ctx.agent.getEnvironment()->getProcessManager().removeBlockingProcessId(
+        processId);
 
     rapidjson::Document doc;
     doc.SetObject();
@@ -118,15 +151,19 @@ shared::ToolResult PythonExecuteTool::execute(const PythonExecuteInput &input,
                   a);
     doc.AddMember("duration_ms", snap.elapsedMs, a);
     doc.AddMember("finish_reason", "Natural", a);
-    doc.AddMember("process_id",
-                  rapidjson::Value(processId.c_str(), a).Move(), a);
-    doc.AddMember("command",
-                  rapidjson::Value(command.c_str(), a).Move(), a);
+    doc.AddMember("process_id", rapidjson::Value(processId.c_str(), a).Move(),
+                  a);
+    doc.AddMember("command", rapidjson::Value(command.c_str(), a).Move(), a);
+    if (!resolvedVenv.empty()) {
+      doc.AddMember("venv", rapidjson::Value(resolvedVenv.c_str(), a).Move(), a);
+    }
 
     return shared::ToolResult::ok(doc, processId);
   } catch (const std::exception &e) {
-    if (!processId.empty())
-      ctx.agent.getEnvironment()->getProcessManager().removeBlockingProcessId(processId);
+    if (!processId.empty()) {
+      ctx.agent.getEnvironment()->getProcessManager().removeBlockingProcessId(
+          processId);
+    }
     return shared::ToolResult::fail(e.what());
   }
 }

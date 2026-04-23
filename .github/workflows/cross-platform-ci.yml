@@ -1,0 +1,103 @@
+name: Cross-platform CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            configure_cmd: >-
+              cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+            build_cmd: >-
+              cmake --build build --parallel
+            ctest_cmd: >-
+              ctest --test-dir build --output-on-failure
+              -R "test_json_rpc_transport|test_lsp_server_manager|test_engine_shutdown|test_lsp_audit"
+          - os: macos-latest
+            configure_cmd: >-
+              cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+            build_cmd: >-
+              cmake --build build --parallel
+            ctest_cmd: >-
+              ctest --test-dir build --output-on-failure
+              -R "test_json_rpc_transport|test_lsp_server_manager|test_engine_shutdown|test_lsp_audit"
+          - os: windows-latest
+            shell: msys2 {0}
+            configure_cmd: >-
+              cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+            build_cmd: >-
+              cmake --build build --parallel
+            ctest_cmd: >-
+              ctest --test-dir build --output-on-failure
+              -R "test_json_rpc_transport|test_lsp_server_manager|test_engine_shutdown|test_lsp_audit"
+
+    defaults:
+      run:
+        shell: ${{ matrix.shell || 'bash' }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build pkg-config libcurl4-openssl-dev libsqlite3-dev
+
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        run: |
+          brew update
+          brew install ninja pkg-config curl sqlite
+
+      - name: Install MSYS2 toolchain
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-curl
+            mingw-w64-x86_64-sqlite3
+            mingw-w64-x86_64-pkgconf
+
+      - name: Configure
+        if: runner.os != 'Windows'
+        run: ${{ matrix.configure_cmd }}
+
+      - name: Configure (Windows/MSYS2)
+        if: runner.os == 'Windows'
+        env:
+          CC: gcc
+          CXX: g++
+        run: ${{ matrix.configure_cmd }}
+
+      - name: Build migrated surfaces
+        run: >-
+          ${{ matrix.build_cmd }}
+          --target firmius firmius_audit test_json_rpc_transport test_lsp_server_manager test_engine_shutdown test_lsp_audit
+
+      - name: Run focused migrated tests
+        run: ${{ matrix.ctest_cmd }}
+
+      - name: Upload CMake logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ runner.os }}-cmake-logs
+          path: |
+            build/CMakeFiles/CMakeOutput.log
+            build/CMakeFiles/CMakeError.log

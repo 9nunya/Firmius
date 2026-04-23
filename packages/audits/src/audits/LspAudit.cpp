@@ -24,8 +24,25 @@ namespace fs = std::filesystem;
 struct ParsedArgs {
   unsigned int seed = static_cast<unsigned int>(std::random_device{}());
   fs::path cacheDir = [] {
+    const char *firmiusHome = std::getenv("FIRMIUS_HOME");
+    if (firmiusHome != nullptr && *firmiusHome != '\0') {
+      return fs::path(firmiusHome) / "cache/swebench/repos";
+    }
+#if defined(_WIN32)
+    const char *localAppData = std::getenv("LOCALAPPDATA");
+    if (localAppData != nullptr && *localAppData != '\0') {
+      return fs::path(localAppData) / "Firmius/cache/swebench/repos";
+    }
+    const char *userProfile = std::getenv("USERPROFILE");
+    if (userProfile != nullptr && *userProfile != '\0') {
+      return fs::path(userProfile) / ".firmius/cache/swebench/repos";
+    }
+#endif
     const char *home = std::getenv("HOME");
-    return fs::path(home != nullptr ? home : "/tmp") / ".firmius/cache/swebench/repos";
+    if (home != nullptr && *home != '\0') {
+      return fs::path(home) / ".firmius/cache/swebench/repos";
+    }
+    return fs::temp_directory_path() / "firmius/cache/swebench/repos";
   }();
   std::optional<fs::path> explicitRepo;
   size_t sampleCount = 100;

@@ -1,12 +1,12 @@
 #ifndef FIRMIUS_CORE_LSP_SERVER_SPEC_HPP
 #define FIRMIUS_CORE_LSP_SERVER_SPEC_HPP
 
-#include <string>
-#include <vector>
-#include <unordered_map>
-#include <filesystem>
 #include <cstdlib>
-#include <unistd.h>
+#include <filesystem>
+#include <string>
+#include <system_error>
+#include <unordered_map>
+#include <vector>
 
 namespace firmius::core {
 
@@ -19,7 +19,6 @@ struct LspServerSpec {
     std::string defaultLanguageId;                             // fallback language ID
     bool isCustom = false;
 
-    // Get languageId for a file path based on extension
     std::string languageIdForPath(const std::string& path) const {
         auto ext = std::filesystem::path(path).extension().string();
         auto it = languageIds.find(ext);
@@ -29,40 +28,58 @@ struct LspServerSpec {
         return defaultLanguageId;
     }
 
-    // Find first available command from fallback chain by searching PATH
-    std::vector<std::string> resolveCommand() const {
-        const char* pathEnv = std::getenv("PATH");
-        if (!pathEnv) {
-            return {};
+    static bool isExecutablePath(const std::filesystem::path& path) {
+        std::error_code ec;
+        const auto status = std::filesystem::status(path, ec);
+        if (ec || !std::filesystem::exists(status) || std::filesystem::is_directory(status)) {
+            return false;
         }
 
+#if defined(_WIN32)
+        return true;
+#else
+        const auto perms = status.permissions();
+        using perms_t = std::filesystem::perms;
+        return (perms & perms_t::owner_exec) != perms_t::none ||
+               (perms & perms_t::group_exec) != perms_t::none ||
+               (perms & perms_t::others_exec) != perms_t::none;
+#endif
+    }
+
+    std::vector<std::string> resolveCommand() const {
+        const char* pathEnv = std::getenv("PATH");
         std::vector<std::string> pathDirs;
-        std::string pathStr(pathEnv);
-        std::string::size_type start = 0;
-        std::string::size_type pos = 0;
-        while ((pos = pathStr.find(':', start)) != std::string::npos) {
-            pathDirs.push_back(pathStr.substr(start, pos - start));
-            start = pos + 1;
+        if (pathEnv != nullptr) {
+            const char separator =
+#if defined(_WIN32)
+                ';';
+#else
+                ':';
+#endif
+            std::string pathStr(pathEnv);
+            std::string::size_type start = 0;
+            std::string::size_type pos = 0;
+            while ((pos = pathStr.find(separator, start)) != std::string::npos) {
+                pathDirs.push_back(pathStr.substr(start, pos - start));
+                start = pos + 1;
+            }
+            pathDirs.push_back(pathStr.substr(start));
         }
-        pathDirs.push_back(pathStr.substr(start));
 
         for (const auto& cmd : commands) {
             if (cmd.empty()) continue;
-            const auto& executable = cmd[0];
+            const std::filesystem::path executable(cmd[0]);
 
-            // If executable contains a slash, check directly
-            if (executable.find('/') != std::string::npos) {
-                if (access(executable.c_str(), X_OK) == 0) {
+            if (executable.has_parent_path() || executable.is_absolute()) {
+                if (isExecutablePath(executable)) {
                     return cmd;
                 }
                 continue;
             }
 
-            // Search PATH directories
             for (const auto& dir : pathDirs) {
                 if (dir.empty()) continue;
-                std::string candidate = dir + "/" + executable;
-                if (access(candidate.c_str(), X_OK) == 0) {
+                if (isExecutablePath(std::filesystem::path(dir) / executable)) {
                     return cmd;
                 }
             }

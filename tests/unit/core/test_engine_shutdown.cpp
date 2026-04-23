@@ -9,7 +9,6 @@
 
 #include <chrono>
 #include <filesystem>
-#include <fstream>
 #include <string>
 #include <vector>
 
@@ -45,59 +44,15 @@ class ScopedTempDir {
   fs::path path_;
 };
 
-std::string makeStubServerScript(const fs::path& scriptPath) {
-  const std::string script = R"SCRIPT(#!/usr/bin/env bash
-set -euo pipefail
-
-echo "stub-started $$" >&2
-
-while true; do
-  content_length=""
-  while IFS= read -r line; do
-    line="${line%$'\r'}"
-    [[ -z "${line}" ]] && break
-    if [[ "${line}" == Content-Length:* ]]; then
-      content_length="${line#Content-Length: }"
-    fi
-  done || exit 0
-
-  [[ -z "${content_length}" ]] && continue
-
-  IFS= read -r -N "${content_length}" body || exit 0
-
-  method=""
-  req_id="null"
-  if [[ "${body}" =~ \"method\":\"([^\"]+)\" ]]; then
-    method="${BASH_REMATCH[1]}"
-  fi
-  if [[ "${body}" =~ \"id\":([0-9]+) ]]; then
-    req_id="${BASH_REMATCH[1]}"
-  fi
-
-  if [[ "${method}" == "initialize" ]]; then
-    response="{\"jsonrpc\":\"2.0\",\"id\":${req_id},\"result\":{\"capabilities\":{}}}"
-    printf 'Content-Length: %d\r\n\r\n%s' "${#response}" "${response}"
-  elif [[ "${method}" == "shutdown" ]]; then
-    response="{\"jsonrpc\":\"2.0\",\"id\":${req_id},\"result\":null}"
-    printf 'Content-Length: %d\r\n\r\n%s' "${#response}" "${response}"
-  elif [[ "${method}" == "exit" ]]; then
-    exit 0
-  fi
-done
-)SCRIPT";
-
-  std::ofstream out(scriptPath);
-  out << script;
-  out.close();
-
-  fs::permissions(scriptPath,
-                  fs::perms::owner_read | fs::perms::owner_write |
-                      fs::perms::owner_exec | fs::perms::group_read |
-                      fs::perms::group_exec | fs::perms::others_read |
-                      fs::perms::others_exec,
-                  fs::perm_options::replace);
-
-  return scriptPath.string();
+std::string lspStubServerCommand() {
+#ifndef FIRMIUS_LSP_TEST_STUB_SERVER_PATH
+#error "FIRMIUS_LSP_TEST_STUB_SERVER_PATH must be defined for test_engine_shutdown"
+#endif
+  const fs::path exe = fs::path(FIRMIUS_LSP_TEST_STUB_SERVER_PATH);
+  if (!fs::exists(exe)) {
+    throw std::runtime_error("Missing lsp_test_stub_server test helper: " + exe.string());
+  }
+  return exe.string();
 }
 
 }  // namespace
@@ -133,7 +88,6 @@ TEST(EngineShutdownTest, ShutdownDrainsLspServerManagerPool) {
   ASSERT_EQ(manager.activeServerCount(), 0U);
 
   ScopedTempDir temp;
-  const fs::path scriptPath = temp.path() / "stub_lsp_server.sh";
   const fs::path workspaceRoot = temp.path() / "workspace";
   fs::create_directories(workspaceRoot);
 
@@ -143,7 +97,7 @@ TEST(EngineShutdownTest, ShutdownDrainsLspServerManagerPool) {
   spec.id = specId;
   spec.extensions = {".shutdownstub"};
   spec.markers = {".git"};
-  spec.commands = {{makeStubServerScript(scriptPath)}};
+  spec.commands = {{lspStubServerCommand()}};
   spec.defaultLanguageId = "plaintext";
 
   registry.registerCustomSpec(spec);

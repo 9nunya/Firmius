@@ -138,32 +138,24 @@ std::optional<std::string> Clipboard::getImage(std::string& mimeType) {
 
 #elif defined(__APPLE__)
 
+#import <AppKit/AppKit.h>
+
 bool Clipboard::isWayland() { return false; }
 bool Clipboard::isX11() { return false; }
 
 bool Clipboard::setText(const std::string& text) {
-#if defined(__OBJC__)
     @autoreleasepool {
         NSPasteboard *pasteboard = [NSPasteboard generalPasteboard];
         [pasteboard clearContents];
         NSString *string = [NSString stringWithUTF8String:text.c_str()];
         return [pasteboard setString:string forType:NSPasteboardTypeString];
     }
-#else
-    FILE* pipe = popen("pbcopy", "w");
-    if (!pipe) return false;
-    const size_t written = fwrite(text.data(), 1, text.size(), pipe);
-    return pclose(pipe) == 0 && written == text.size();
-#endif
 }
-
-#if defined(__OBJC__)
-#import <AppKit/AppKit.h>
 
 bool Clipboard::hasImage() {
     @autoreleasepool {
         NSPasteboard *pasteboard = [NSPasteboard generalPasteboard];
-        NSArray *classes = @[[NSImage class]];
+        NSArray *classes = @[ [NSImage class] ];
         NSDictionary *options = @{};
         return [pasteboard canReadObjectForClasses:classes options:options];
     }
@@ -172,7 +164,7 @@ bool Clipboard::hasImage() {
 std::optional<std::string> Clipboard::getImage(std::string& mimeType) {
     @autoreleasepool {
         NSPasteboard *pasteboard = [NSPasteboard generalPasteboard];
-        NSArray *classes = @[[NSImage class]];
+        NSArray *classes = @[ [NSImage class] ];
         NSDictionary *options = @{};
         
         if ([pasteboard canReadObjectForClasses:classes options:options]) {
@@ -193,15 +185,6 @@ std::optional<std::string> Clipboard::getImage(std::string& mimeType) {
     }
     return std::nullopt;
 }
-
-#else
-
-#pragma message("macOS clipboard support requires compiling Clipboard.cpp as Objective-C++. Please set the LANGUAGE OBJCXX property in CMake or pass -x objective-c++")
-
-bool Clipboard::hasImage() { return false; }
-std::optional<std::string> Clipboard::getImage(std::string& mimeType) { return std::nullopt; }
-
-#endif
 
 #elif defined(__linux__)
 
@@ -310,6 +293,9 @@ bool Clipboard::setText(const std::string& text) {
     return false;
 }
 bool Clipboard::hasImage() { return false; }
-std::optional<std::string> Clipboard::getImage(std::string& mimeType) { return std::nullopt; }
+std::optional<std::string> Clipboard::getImage(std::string& mimeType) {
+    (void)mimeType;
+    return std::nullopt;
+}
 
 #endif
