@@ -52,18 +52,18 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Ensure FetchContent cache directory exists
-        run: mkdir -p "$FIRMIUS_FETCHCONTENT_BASE"
-
       - name: Ensure FetchContent cache directory exists (POSIX)
         if: runner.os != 'Windows'
-        id: fetchcontent-cache
+        run: mkdir -p "$FIRMIUS_FETCHCONTENT_BASE"
 
       - name: Ensure FetchContent cache directory exists (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path "$env:GITHUB_WORKSPACE/.cache/fetchcontent" | Out-Null
+
+      - name: Restore FetchContent cache
+        id: fetchcontent-cache
         uses: actions/cache/restore@v4
         with:
           path: ${{ env.FIRMIUS_FETCHCONTENT_BASE }}
