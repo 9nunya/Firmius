@@ -34,11 +34,9 @@ using namespace firmius::utils;
 
 namespace {
 
-constexpr char kProviderId[] = "kiro";
 constexpr char kDefaultRegion[] = "us-east-1";
 constexpr std::uint32_t kDefaultContextWindow = 200000;
 constexpr std::uint32_t kDefaultMaxOutput = 64000;
-constexpr int kQuotaRefreshSeconds = 300;
 constexpr char kThinkingStartTag[] = "<thinking>";
 constexpr char kThinkingEndTag[] = "</thinking>";
 

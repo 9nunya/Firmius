@@ -711,8 +711,10 @@ LocalHost::spawn(const std::string &command, const std::string &cwd,
 
     if (!currentUser.empty()) {
       struct passwd *pw = getpwnam(currentUser.c_str());
-      if (pw)
-        setuid(pw->pw_uid);
+      if (pw) {
+        const int setuidResult = setuid(pw->pw_uid);
+        (void)setuidResult;
+      }
     }
 
     if (!cwd.empty()) {

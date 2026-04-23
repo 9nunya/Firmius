@@ -72,3 +72,10 @@ target_include_directories(firmius_shared SYSTEM PRIVATE
 
 find_package(CURL REQUIRED)
 target_link_libraries(firmius_shared PRIVATE CURL::libcurl)
+
+if(WIN32)
+  target_compile_definitions(firmius_shared PRIVATE
+    _WIN32_WINNT=0x0A00
+    WINVER=0x0A00
+  )
+endif()
