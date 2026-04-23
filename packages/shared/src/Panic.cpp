@@ -187,9 +187,15 @@ void Panic::signalHandler(int sig) {
 
     const char* msg1 = "\n[FIRMIUS CRASH] Caught signal: ";
 #if FIRMIUS_PANIC_HAS_UNISTD && FIRMIUS_PANIC_HAS_BACKTRACE
-    (void)write(STDERR_FILENO, msg1, strlen(msg1));
-    (void)write(STDERR_FILENO, signalName, strlen(signalName));
-    (void)write(STDERR_FILENO, "\n", 1);
+    const ssize_t headerWrite = write(STDERR_FILENO, msg1, strlen(msg1));
+    const ssize_t signalWrite = write(STDERR_FILENO, signalName, strlen(signalName));
+    const ssize_t newlineWrite = write(STDERR_FILENO, "\n", 1);
+    (void)headerWrite;
+    (void)signalWrite;
+    (void)newlineWrite;
+    (void)headerWrite;
+    (void)signalWrite;
+    (void)newlineWrite;
 
     void* array[50];
     int size = backtrace(array, 50);

@@ -59,9 +59,8 @@ constexpr std::array<std::string_view, 2> kQuotaWindows = {"primary",
                                                             "secondary"};
 
 struct RetrySettings {
-  static constexpr int BASE_DELAY_MS = 1000;
-  static constexpr int MAX_DELAY_MS = 30000;
   static constexpr int MAX_RETRIES = 5;
+  static constexpr int MAX_DELAY_MS = 30000;
   static constexpr double JITTER_MIN = 0.5;
   static constexpr double JITTER_MAX = 1.0;
 };
