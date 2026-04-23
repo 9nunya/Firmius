@@ -55,8 +55,15 @@ jobs:
       - name: Ensure FetchContent cache directory exists
         run: mkdir -p "$FIRMIUS_FETCHCONTENT_BASE"
 
-      - name: Restore FetchContent cache
+      - name: Ensure FetchContent cache directory exists (POSIX)
+        if: runner.os != 'Windows'
         id: fetchcontent-cache
+
+      - name: Ensure FetchContent cache directory exists (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "$env:GITHUB_WORKSPACE/.cache/fetchcontent" | Out-Null
         uses: actions/cache/restore@v4
         with:
           path: ${{ env.FIRMIUS_FETCHCONTENT_BASE }}
