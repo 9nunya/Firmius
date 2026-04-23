@@ -2,6 +2,12 @@ find_package(CURL REQUIRED)
 find_package(Threads REQUIRED)
 find_package(SQLite3 REQUIRED)
 
+if(TARGET SQLite3::SQLite3)
+  set(FIRMIUS_SQLITE_TARGET SQLite3::SQLite3)
+elseif(TARGET SQLite::SQLite3)
+  set(FIRMIUS_SQLITE_TARGET SQLite::SQLite3)
+endif()
+
 add_library(firmius_core STATIC)
 add_library(firmius::core ALIAS firmius_core)
 
@@ -148,7 +154,7 @@ target_link_libraries(firmius_core PUBLIC
     firmius::provider
     CURL::libcurl
     Threads::Threads
-    SQLite3::SQLite3
+    ${FIRMIUS_SQLITE_TARGET}
 )
 
 target_include_directories(firmius_core PRIVATE
