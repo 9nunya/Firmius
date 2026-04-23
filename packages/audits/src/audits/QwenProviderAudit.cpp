@@ -32,7 +32,8 @@ shared::AuditResult QwenProviderAudit::run(const std::vector<std::string> &) {
   // Clean up any existing container from previous runs
   std::string cleanupCmd =
       "docker rm -f qwen-audit-sandbox 2>/dev/null || true";
-  system(cleanupCmd.c_str());
+  const int cleanupResult = system(cleanupCmd.c_str());
+  (void)cleanupResult;
 
   HostCreationOptions opts;
   opts.type = HostType::Docker;

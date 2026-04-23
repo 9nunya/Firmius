@@ -10,6 +10,8 @@
 #include <condition_variable>
 #include <variant>
 
+struct sqlite3;
+
 namespace firmius::core {
 
 using namespace firmius::shared;
@@ -57,8 +59,9 @@ private:
     using JournalOp = std::variant<AppendOp, RewriteOp>;
 
     void processQueue();
-    void writeTurn(const AgentTurn& turn);
-    void performRewrite(const std::vector<AgentTurn>& turns);
+    sqlite3* openWithRetry();
+    void writeTurn(sqlite3*& db, const AgentTurn& turn);
+    void performRewrite(sqlite3*& db, const std::vector<AgentTurn>& turns);
 
     std::string filePath;
     std::string threadId_;
@@ -68,7 +71,7 @@ private:
     std::queue<JournalOp> queue;
     std::mutex queueMutex;
     std::condition_variable queueCv;
-    std::jthread workerThread;
+    std::thread workerThread;
     bool stopWorker = false;
 };
 

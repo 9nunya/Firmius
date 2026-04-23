@@ -440,7 +440,7 @@ private:
   bool engineListenerRegistered_ = false;
 
   // Tracking for detached background tasks (e.g. title generation)
-  std::vector<std::jthread> backgroundThreads_;
+  std::vector<std::thread> backgroundThreads_;
 };
 
 } // namespace firmius::core

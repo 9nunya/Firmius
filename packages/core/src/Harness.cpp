@@ -581,7 +581,7 @@ void Harness::init() {
 
 void Harness::shutdown() {
   Engine::instance().shutdown();
-  std::vector<std::jthread> toJoin;
+  std::vector<std::thread> toJoin;
   std::vector<std::shared_ptr<PendingPermissionRequest>> pendingRequests;
   {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -605,7 +605,11 @@ void Harness::shutdown() {
     }
     pending->cv.notify_all();
   }
-  toJoin.clear();
+  for (auto &thread : toJoin) {
+    if (thread.joinable()) {
+      thread.join();
+    }
+  }
 }
 
 std::string Harness::newThread(HostCreationOptions hostOptions,
@@ -1063,9 +1067,8 @@ void Harness::abortAndFlushQueuedMessages() {
 
   {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
-    backgroundThreads_.emplace_back([this, focusedAgentId,
-                                     threadId](std::stop_token stopToken) {
-      while (!stopToken.stop_requested()) {
+    backgroundThreads_.emplace_back([this, focusedAgentId, threadId]() {
+      while (true) {
         auto focusedAgent = AgentRegistry::instance().getAgent(focusedAgentId);
         if (!focusedAgent) {
           return;

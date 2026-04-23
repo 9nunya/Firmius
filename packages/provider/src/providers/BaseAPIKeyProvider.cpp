@@ -3,28 +3,53 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
-#include <pwd.h>
-#include <sys/types.h>
-#include <unistd.h>
 #include <rapidjson/document.h>
 #include <rapidjson/error/en.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
+#if defined(_WIN32)
+#include <windows.h>
+#else
+#include <pwd.h>
+#include <sys/types.h>
+#include <unistd.h>
+#endif
 
 namespace firmius::provider {
 
 namespace {
+
 std::string getKeysJsonPath() {
-  const char *homedir;
-  if ((homedir = getenv("HOME")) == NULL) {
-    homedir = getpwuid(getuid())->pw_dir;
+  const char *homedir = getenv("HOME");
+#if defined(_WIN32)
+  if (homedir == nullptr || *homedir == '\0') {
+    homedir = getenv("USERPROFILE");
   }
+  if (homedir == nullptr || *homedir == '\0') {
+    homedir = getenv("APPDATA");
+  }
+  if (homedir == nullptr || *homedir == '\0') {
+    throw std::runtime_error("unable to resolve home directory for keys.json");
+  }
+#else
+  if (homedir == nullptr || *homedir == '\0') {
+    passwd *pw = getpwuid(getuid());
+    if (pw != nullptr && pw->pw_dir != nullptr) {
+      homedir = pw->pw_dir;
+    }
+  }
+  if (homedir == nullptr || *homedir == '\0') {
+    throw std::runtime_error("unable to resolve home directory for keys.json");
+  }
+#endif
+
   std::filesystem::path dir = std::string(homedir) + "/.firmius";
   if (!std::filesystem::exists(dir)) {
     std::filesystem::create_directories(dir);
   }
   return (dir / "keys.json").string();
 }
+
 } // namespace
 
 BaseAPIKeyProvider::BaseAPIKeyProvider(std::string providerId)
