@@ -23,7 +23,6 @@ jobs:
             ctest_cmd: >-
               ctest --test-dir build --output-on-failure
               -R "test_json_rpc_transport|test_lsp_server_manager|test_engine_shutdown|test_lsp_audit"
-            fetchcontent_base: ~/.cache/firmius/fetchcontent
           - os: macos-latest
             configure_cmd: >-
               cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
@@ -32,7 +31,6 @@ jobs:
             ctest_cmd: >-
               ctest --test-dir build --output-on-failure
               -R "test_json_rpc_transport|test_lsp_server_manager|test_engine_shutdown|test_lsp_audit"
-            fetchcontent_base: ~/Library/Caches/firmius/fetchcontent
           - os: windows-latest
             shell: msys2 {0}
             configure_cmd: >-
@@ -42,23 +40,26 @@ jobs:
             ctest_cmd: >-
               ctest --test-dir build --output-on-failure
               -R "test_json_rpc_transport|test_lsp_server_manager|test_engine_shutdown|test_lsp_audit"
-            fetchcontent_base: C:/Users/runneradmin/AppData/Local/firmius/fetchcontent
 
     defaults:
       run:
         shell: ${{ matrix.shell || 'bash' }}
 
     env:
-      FIRMIUS_FETCHCONTENT_BASE: ${{ matrix.fetchcontent_base }}
+      FIRMIUS_FETCHCONTENT_BASE: ${{ github.workspace }}/.cache/fetchcontent
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Ensure FetchContent cache directory exists
+        run: mkdir -p "$FIRMIUS_FETCHCONTENT_BASE"
+
       - name: Restore FetchContent cache
-        uses: actions/cache@v4
+        id: fetchcontent-cache
+        uses: actions/cache/restore@v4
         with:
-          path: ${{ matrix.fetchcontent_base }}
+          path: ${{ env.FIRMIUS_FETCHCONTENT_BASE }}
           key: ${{ runner.os }}-fetchcontent-${{ hashFiles('cmake/Dependencies.cmake', 'cmake/TreeSitter.cmake', 'CMakeLists.txt') }}
           restore-keys: |
             ${{ runner.os }}-fetchcontent-
@@ -108,6 +109,13 @@ jobs:
 
       - name: Run focused migrated tests
         run: ${{ matrix.ctest_cmd }}
+
+      - name: Save FetchContent cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.FIRMIUS_FETCHCONTENT_BASE }}
+          key: ${{ steps.fetchcontent-cache.outputs.cache-primary-key }}
 
       - name: Upload CMake logs on failure
         if: failure()
