@@ -50,6 +50,7 @@ public:
     std::string lastName;
     std::string lastArgs;
     std::uint32_t index = 0;
+    bool finalized = false;
     bool hasIndex = false;
   };
 

@@ -9,6 +9,7 @@
 #include "NotificationManager.hpp"
 #include "WorkPanelLayout.hpp"
 #include "persistence/ThreadManager.hpp"
+#include "SkinConfig.hpp"
 #include "components/ContextLane.hpp"
 #include "components/TodoLane.hpp"
 #include <ftxui/component/component_base.hpp>
@@ -38,8 +39,89 @@ struct PlanLaneModel;
 struct TodoLaneModel;
 struct ContextLaneModel;
 
+
+template <typename T>
+inline void HashCombineForFocusedChatMeasurement(std::size_t &seed,
+                                                const T &value) {
+  seed ^= std::hash<T>{}(value) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+}
+inline std::size_t BuildFocusedChatLiveMeasurementSignature(
+    const firmius::tui::StreamStateManager &stream_state,
+    const std::string &focused_agent_id, const std::string &thread_id,
+    const std::unordered_set<std::string> &persisted_tool_call_ids) {
+  std::size_t signature = 0;
+  HashCombineForFocusedChatMeasurement(signature, focused_agent_id);
+  HashCombineForFocusedChatMeasurement(signature, persisted_tool_call_ids.size());
+  HashCombineForFocusedChatMeasurement(signature, thread_id);
+
+  auto bucket = [](std::size_t size) { return size / 512; };
+
+  if (const auto *s = stream_state.getStream(focused_agent_id)) {
+    HashCombineForFocusedChatMeasurement(signature, bucket(s->thinking.size()));
+    HashCombineForFocusedChatMeasurement(signature, bucket(s->text.size()));
+    HashCombineForFocusedChatMeasurement(signature,
+                                        bucket(s->compaction_thinking.size()));
+    HashCombineForFocusedChatMeasurement(signature,
+                                        bucket(s->compaction_text.size()));
+    HashCombineForFocusedChatMeasurement(signature,
+                                        bucket(s->compaction_completion.size()));
+    HashCombineForFocusedChatMeasurement(signature, s->compaction_active);
+    HashCombineForFocusedChatMeasurement(signature, s->compaction_finished);
+    HashCombineForFocusedChatMeasurement(signature, s->provider_waiting);
+  }
+
+  std::size_t focused_timeline = 0;
+  for (const auto &entry : stream_state.getTimeline()) {
+    if (entry.agentId == focused_agent_id) {
+      focused_timeline++;
+      HashCombineForFocusedChatMeasurement(signature,
+                                          static_cast<int>(entry.kind));
+    }
+  }
+  HashCombineForFocusedChatMeasurement(signature, focused_timeline);
+
+  std::size_t focused_tool_calls = 0;
+  for (const auto &[id, view] : stream_state.getToolCalls()) {
+    (void)id;
+    if (view && view->agentId == focused_agent_id) {
+      focused_tool_calls++;
+      HashCombineForFocusedChatMeasurement(signature,
+                                          static_cast<int>(view->phase));
+      HashCombineForFocusedChatMeasurement(signature, view->success);
+    }
+  }
+  HashCombineForFocusedChatMeasurement(signature, focused_tool_calls);
+
+  const auto bucketQueued = [](std::size_t size) { return size / 128; };
+  std::size_t queued_count = 0;
+  for (const auto &entry : stream_state.getQueuedMessages()) {
+    if ((!entry.agent_id.empty() && entry.agent_id != focused_agent_id) ||
+        (!entry.thread_id.empty() && entry.thread_id != thread_id)) {
+      continue;
+    }
+    queued_count++;
+    HashCombineForFocusedChatMeasurement(signature,
+                                        bucketQueued(entry.text.size()));
+    HashCombineForFocusedChatMeasurement(signature, entry.image_count);
+  }
+  HashCombineForFocusedChatMeasurement(signature, queued_count);
+
+  std::size_t queued_internal_count = 0;
+  for (const auto &entry : stream_state.getQueuedInternalMessages()) {
+    if ((!entry.agent_id.empty() && entry.agent_id != focused_agent_id) ||
+        (!entry.thread_id.empty() && entry.thread_id != thread_id)) {
+      continue;
+    }
+    queued_internal_count++;
+    HashCombineForFocusedChatMeasurement(signature,
+                                        bucketQueued(entry.text.size()));
+  }
+  HashCombineForFocusedChatMeasurement(signature, queued_internal_count);
+  return signature;
+}
+
+
 bool isTuiStartupProfilingEnabled();
-void noteTuiAppEventEnqueued();
 void noteTuiCustomEventPosted();
 void noteTuiCustomEventDrained();
 void noteTuiOnEventDispatch(std::chrono::nanoseconds elapsed);
@@ -246,6 +328,11 @@ public:
   bool needsAnimationTick() const;
   bool focusAgent(const std::string &agent_id);
 
+  SkinKind currentSkinKind() const;
+  void setSkinKind(SkinKind kind);
+  void applySkinConfig(const SkinConfig &config);
+  const SkinConfig &skinConfig() const;
+
 private:
   TuiState();
   ~TuiState() = default;
@@ -276,6 +363,7 @@ private:
   void updatePlanLaneModel();
   void updateTodoLaneModel();
   void updateContextLaneModel();
+  void syncCurrentThreadMetadataFromHarness(bool preserve_live_state);
   void refreshFocusedHistory();
   void rebuildEditableUserMessages();
   bool isEditModeSelection(uint64_t timestamp) const;
@@ -371,9 +459,20 @@ private:
   shared::AgentMetrics session_metrics_;
   std::jthread quit_arm_thread_;
   std::chrono::steady_clock::time_point last_live_raf_request_{};
+  std::string live_row_last_phrase_key_;
+  std::string live_row_current_phrase_;
+  std::string live_row_previous_phrase_;
+  std::string live_row_pending_phrase_key_;
+  std::string live_row_pending_phrase_;
+  std::chrono::steady_clock::time_point live_row_phrase_transition_started_at_{};
+  std::chrono::steady_clock::time_point live_row_phrase_next_switch_at_{};
+  std::chrono::steady_clock::time_point live_row_phrase_min_visible_until_{};
+  uint64_t live_row_phrase_rng_state_ = 0x9e3779b97f4a7c15ULL;
   std::optional<std::string> pending_profile_modal_name_;
+  std::jthread animation_tick_thread_;
   std::unordered_set<std::string> painted_profile_modals_;
 public:
+  SkinConfig skin_config_ = defaultSkinConfig(SkinKind::Firmius);
   void handleAppEvent(const shared::AppEvent &ev);
 };
 

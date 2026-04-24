@@ -1,5 +1,9 @@
 #include "components/ToolBlock.hpp"
 #include "ThemeManager.hpp"
+#include "SkinConfig.hpp"
+#include "SkinConfig.hpp"
+#include "UserPreferences.hpp"
+#include "UserPreferences.hpp"
 #include "components/GlintEffect.hpp"
 #include "components/ToolPresentationBlock.hpp"
 #include "tools/SubagentToolPresentation.hpp"
@@ -372,12 +376,18 @@ public:
     ftxui::Element title_el = title_text;
     if (active) {
       GlintConfig cfg;
+      const auto preferences = loadUserPreferences();
+      const SkinKind skin = preferences.skin_kind.value_or(SkinKind::Firmius);
+      const SkinConfig skin_config =
+          skin == SkinKind::Claudex ? preferences.claudex_skin.value_or(defaultSkinConfig(SkinKind::Claudex)) : preferences.firmius_skin.value_or(defaultSkinConfig(SkinKind::Firmius));
       cfg.gradientColors = theme.tool_blocks.glint.empty()
                                ? std::vector<ftxui::Color>{ftxui::Color::White,
                                                            theme.base.highlight}
                                : theme.tool_blocks.glint;
-      cfg.durationSeconds = 0.9f;
-      cfg.intervalSeconds = 1.2f;
+      cfg.durationSeconds = glintDurationSeconds(skin_config.glint_speed);
+      cfg.intervalSeconds = glintIntervalSeconds(skin_config.glint_speed);
+      cfg.easing = GlintEasing::EaseInOut;
+      cfg.includeWhitespace = true;
       title_el = GlintEffect(title_text, cfg)->Render();
     }
 
@@ -435,13 +445,19 @@ public:
                                      : theme.base.fg);
         ftxui::Element rendered = base;
         if (line.glint) {
+          const auto preferences = loadUserPreferences();
+          const SkinKind skin = preferences.skin_kind.value_or(SkinKind::Firmius);
+          const SkinConfig skin_config =
+              skin == SkinKind::Claudex ? preferences.claudex_skin.value_or(defaultSkinConfig(SkinKind::Claudex)) : preferences.firmius_skin.value_or(defaultSkinConfig(SkinKind::Firmius));
           GlintConfig cfg;
           cfg.gradientColors = theme.tool_blocks.glint.empty()
                                    ? std::vector<ftxui::Color>{ftxui::Color::White,
                                                                theme.base.highlight}
                                    : theme.tool_blocks.glint;
-          cfg.durationSeconds = 0.8f;
-          cfg.intervalSeconds = 1.0f;
+          cfg.durationSeconds = glintDurationSeconds(skin_config.glint_speed);
+          cfg.intervalSeconds = glintIntervalSeconds(skin_config.glint_speed);
+          cfg.easing = GlintEasing::EaseInOut;
+          cfg.includeWhitespace = true;
           rendered = GlintEffect(base, cfg)->Render();
         }
         log_rows.push_back(rendered);
@@ -512,6 +528,10 @@ ftxui::Component ToolBlock(const std::shared_ptr<ToolCallView> &view,
       subagent_state = subagent_state_getter(view->toolCallId);
     }
     return BuildToolPresentation(*view, process_state, subagent_state);
+  }, []() {
+    const auto preferences = loadUserPreferences();
+    return preferences.skin_kind.value_or(SkinKind::Firmius) ==
+           SkinKind::Claudex;
   });
 }
 

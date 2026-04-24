@@ -29,6 +29,7 @@ struct StatusBarModel {
   bool is_active = false;
   int live_processes = 0;
   int background_processes = 0;
+  bool compact_skin_mode = false;
 };
 
 ftxui::Component StatusBar(const std::shared_ptr<StatusBarModel> &model);

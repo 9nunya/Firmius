@@ -27,6 +27,7 @@ using firmius::shared::Role;
 using firmius::shared::StreamEvent;
 using firmius::shared::TextChunk;
 using firmius::shared::ThinkingChunk;
+using firmius::shared::ToolCall;
 using firmius::shared::ToolCallChunk;
 using firmius::shared::ToolCallContent;
 using firmius::shared::ToolResultContent;
@@ -246,7 +247,7 @@ TEST(AntigravityProvider,
           R"(data: {"response":{"candidates":[{"content":{"parts":[{"functionCall":{"id":"call-1","name":"file_read","args":"\"path\":\"src/main.cpp\"}"}}]}}]}})",
       });
 
-  ASSERT_EQ(events.size(), 2u);
+  ASSERT_GE(events.size(), 2u);
 
   const auto *first = std::get_if<ToolCallChunk>(&events[0]);
   ASSERT_NE(first, nullptr);
@@ -255,12 +256,34 @@ TEST(AntigravityProvider,
   EXPECT_EQ(first->nameDelta, "file_read");
   EXPECT_EQ(first->argsDelta, "{");
 
-  const auto *second = std::get_if<ToolCallChunk>(&events[1]);
-  ASSERT_NE(second, nullptr);
-  EXPECT_EQ(second->id, "call-1");
-  EXPECT_EQ(second->index, 0u);
-  EXPECT_TRUE(second->nameDelta.empty());
-  EXPECT_EQ(second->argsDelta, "\"path\":\"src/main.cpp\"}");
+  const auto *finalCall = std::get_if<ToolCall>(&events.back());
+  ASSERT_NE(finalCall, nullptr);
+  EXPECT_EQ(finalCall->id, "call-1");
+  EXPECT_EQ(finalCall->index, 0u);
+  EXPECT_EQ(finalCall->name, "file_read");
+  EXPECT_EQ(finalCall->args, R"({"path":"src/main.cpp"})");
+}
+
+TEST(AntigravityProvider, ValidFunctionCallSnapshotEmitsFinalToolCallOnce) {
+  AntigravityProvider provider;
+  const auto events = collectEvents(
+      provider,
+      {
+          R"(data: {"response":{"candidates":[{"content":{"parts":[{"functionCall":{"id":"call-1","name":"file_read","args":{"path":"src/main.cpp"}}}]}}]}})",
+          R"(data: {"response":{"candidates":[{"content":{"parts":[{"functionCall":{"id":"call-1","name":"file_read","args":{"path":"src/main.cpp"}}}]}}]}})",
+      });
+
+  ASSERT_EQ(events.size(), 2u);
+  const auto *chunk = std::get_if<ToolCallChunk>(&events.front());
+  ASSERT_NE(chunk, nullptr);
+  EXPECT_EQ(chunk->id, "call-1");
+  EXPECT_EQ(chunk->nameDelta, "file_read");
+  EXPECT_EQ(chunk->argsDelta, R"({"path":"src/main.cpp"})");
+
+  const auto *finalCall = std::get_if<ToolCall>(&events.back());
+  ASSERT_NE(finalCall, nullptr);
+  EXPECT_EQ(finalCall->name, "file_read");
+  EXPECT_EQ(finalCall->args, R"({"path":"src/main.cpp"})");
 }
 
 TEST(AntigravityProvider, DuplicateFunctionCallSnapshotsAreSuppressed) {
@@ -272,11 +295,16 @@ TEST(AntigravityProvider, DuplicateFunctionCallSnapshotsAreSuppressed) {
           R"(data: {"response":{"candidates":[{"content":{"parts":[{"functionCall":{"id":"call-1","name":"file_read","args":{"path":"src/main.cpp"}}}]}}]}})",
       });
 
-  ASSERT_EQ(events.size(), 1u);
+  ASSERT_EQ(events.size(), 2u);
   const auto *chunk = std::get_if<ToolCallChunk>(&events[0]);
   ASSERT_NE(chunk, nullptr);
   EXPECT_EQ(chunk->nameDelta, "file_read");
   EXPECT_EQ(chunk->argsDelta, R"({"path":"src/main.cpp"})");
+
+  const auto *finalCall = std::get_if<ToolCall>(&events[1]);
+  ASSERT_NE(finalCall, nullptr);
+  EXPECT_EQ(finalCall->name, "file_read");
+  EXPECT_EQ(finalCall->args, R"({"path":"src/main.cpp"})");
 }
 
 TEST(AntigravityProvider,

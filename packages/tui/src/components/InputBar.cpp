@@ -1,5 +1,6 @@
 #include "components/InputBar.hpp"
 #include "ThemeManager.hpp"
+#include "SkinConfig.hpp"
 #include "commands/CommandManager.hpp"
 #include "providers/BaseAPIKeyProvider.hpp"
 #include "providers/BaseOAuthProvider.hpp"
@@ -301,6 +302,22 @@ buildAtReferenceSuggestions(const std::shared_ptr<InputBarModel> &model,
   return model->complete_file_references(state.query);
 }
 
+std::vector<std::string> buildSkinSuggestions(const std::string &query) {
+  std::vector<std::string> matches;
+  for (const auto &name : firmius::tui::allSkinNames()) {
+    if (query.empty() || fuzzyMatchIgnoreCase(name, query)) {
+      matches.push_back(name);
+    }
+  }
+  return matches;
+}
+
+bool wantsCommandArgSuggestions(ArgType type) {
+  return type == ArgType::Provider || type == ArgType::OAuthProvider ||
+         type == ArgType::QuotaProvider || type == ArgType::ProviderId ||
+         type == ArgType::Skin;
+}
+
 } // namespace
 
 ftxui::Component InputBar(
@@ -582,22 +599,18 @@ ftxui::Component InputBar(
         DetectAtReferenceAutocompleteState(*model->buffer, *model->cursor);
     auto at_suggestions = buildAtReferenceSuggestions(model, at_state);
 
+    size_t match_count = 0;
     if (ac && ((ac->is_typing_command_name && !ac->command_matches.empty()) ||
                (!ac->is_typing_command_name && ac->current_arg &&
-                (ac->current_arg->type == ArgType::Provider ||
-                 ac->current_arg->type == ArgType::OAuthProvider ||
-                 ac->current_arg->type == ArgType::QuotaProvider ||
-                 ac->current_arg->type == ArgType::ProviderId)))) {
-
-      size_t match_count = 0;
+                wantsCommandArgSuggestions(ac->current_arg->type)))) {
       if (ac->is_typing_command_name) {
         match_count = std::min(ac->command_matches.size(), (size_t)5);
       } else {
         auto query = ac->has_current_arg_value ? ac->current_arg_value : "";
-        match_count =
-            buildProviderSuggestions(ac->current_arg->type, query).size();
+        match_count = ac->current_arg->type == ArgType::Skin
+                          ? buildSkinSuggestions(query).size()
+                          : buildProviderSuggestions(ac->current_arg->type, query).size();
       }
-
       if (match_count > 0) {
         if (event == ftxui::Event::ArrowDown) {
           *suggestion_index = (*suggestion_index + 1) % match_count;
@@ -645,32 +658,56 @@ ftxui::Component InputBar(
             return true;
           }
         } else if (!ac->is_typing_command_name && ac->current_arg &&
-                   (ac->current_arg->type == ArgType::Provider ||
-                    ac->current_arg->type == ArgType::OAuthProvider ||
-                    ac->current_arg->type == ArgType::QuotaProvider ||
-                    ac->current_arg->type == ArgType::ProviderId)) {
-          auto query = ac->has_current_arg_value ? ac->current_arg_value : "";
-          auto suggestions =
-              buildProviderSuggestions(ac->current_arg->type, query);
-          if (!suggestions.empty()) {
-            size_t idx = static_cast<size_t>(*suggestion_index);
-            if (idx >= suggestions.size())
-              idx = 0;
+                   wantsCommandArgSuggestions(ac->current_arg->type)) {
+          std::string query =
+              ac->has_current_arg_value ? ac->current_arg_value : "";
+          if (ac->current_arg->type == ArgType::Skin) {
+            auto suggestions = buildSkinSuggestions(query);
+            if (!suggestions.empty()) {
+              size_t idx = static_cast<size_t>(*suggestion_index);
+              if (idx >= suggestions.size())
+                idx = 0;
 
-            std::string text = *model->buffer;
-            size_t last_space = text.find_last_of(' ', *model->cursor - 1);
-            if (last_space == std::string::npos)
-              last_space = 0;
-            else
-              last_space++;
+              std::string text = *model->buffer;
+              size_t last_space = text.find_last_of(' ', *model->cursor - 1);
+              if (last_space == std::string::npos)
+                last_space = 0;
+              else
+                last_space++;
 
-            text.replace(last_space, *model->cursor - last_space,
-                         suggestions[idx].id + " ");
-            *model->buffer = text;
-            *model->cursor =
-                static_cast<int>(last_space + suggestions[idx].id.size() + 1);
-            *suggestion_index = 0;
-            return true;
+              const std::string replacement = suggestions[idx];
+              text.replace(last_space, *model->cursor - last_space,
+                           replacement + " ");
+              *model->buffer = text;
+              *model->cursor =
+                  static_cast<int>(last_space + replacement.size() + 1);
+              *suggestion_index = 0;
+              return true;
+            }
+          } else {
+            auto suggestions =
+                buildProviderSuggestions(ac->current_arg->type, query);
+            if (!suggestions.empty()) {
+              size_t idx = static_cast<size_t>(*suggestion_index);
+              if (idx >= suggestions.size())
+                idx = 0;
+
+              std::string text = *model->buffer;
+              size_t last_space = text.find_last_of(' ', *model->cursor - 1);
+              if (last_space == std::string::npos)
+                last_space = 0;
+              else
+                last_space++;
+
+              const std::string replacement = suggestions[idx].id;
+              text.replace(last_space, *model->cursor - last_space,
+                           replacement + " ");
+              *model->buffer = text;
+              *model->cursor =
+                  static_cast<int>(last_space + replacement.size() + 1);
+              *suggestion_index = 0;
+              return true;
+            }
           }
         }
       } else if (event == ftxui::Event::Tab && at_state.active &&
@@ -745,8 +782,8 @@ ftxui::Component InputBar(
   return ftxui::Renderer(with_keys, [model, scroll_top, suggestion_index] {
     const auto &theme = ThemeManager::instance().getCurrentTheme();
     auto prompt =
-        ftxui::text("> ") | ftxui::bold | ftxui::color(theme.input.prompt);
-
+        ftxui::text(model && model->compact_mode ? ">" : "> ") |
+        ftxui::bold | ftxui::color(theme.input.prompt);
     int total_lines = 1;
     if (model && model->buffer) {
       total_lines = countLines(*model->buffer);
@@ -801,6 +838,9 @@ ftxui::Component InputBar(
       case ArgType::Provider:
         type_str = "Provider";
         break;
+      case ArgType::Skin:
+        type_str = "Skin";
+        break;
       case ArgType::OAuthProvider:
         type_str = "OAuth provider";
         break;
@@ -821,33 +861,65 @@ ftxui::Component InputBar(
 
       const bool wants_provider_suggestions =
           arg.type == ArgType::Provider || arg.type == ArgType::OAuthProvider ||
-          arg.type == ArgType::QuotaProvider ||
-          arg.type == ArgType::ProviderId;
-      if (wants_provider_suggestions) {
+          arg.type == ArgType::QuotaProvider || arg.type == ArgType::ProviderId;
+      const bool wants_skin_suggestions = arg.type == ArgType::Skin;
+      if (wants_provider_suggestions || wants_skin_suggestions) {
         std::string query =
             ac->has_current_arg_value ? ac->current_arg_value : std::string();
-        auto suggestions = buildProviderSuggestions(arg.type, query);
         ftxui::Element suggestion_body;
-        if (!suggestions.empty()) {
-          ftxui::Elements rows;
-          for (size_t i = 0; i < suggestions.size(); ++i) {
-            const auto &match = suggestions[i];
-            bool is_selected = (i == static_cast<size_t>(*suggestion_index));
-            auto label =
-                ftxui::text(" " + match.id) | ftxui::bold |
-                ftxui::color(is_selected ? theme.base.bg : theme.base.fg);
-            if (is_selected)
-              label = label | ftxui::bgcolor(theme.modals.highlight_bg);
-            auto meta = ftxui::text(" [" + match.type_label + "]") | ftxui::dim;
-            rows.push_back(ftxui::hbox({label, ftxui::filler(), meta}));
+
+        if (wants_skin_suggestions) {
+          auto suggestions = buildSkinSuggestions(query);
+          if (!suggestions.empty()) {
+            ftxui::Elements rows;
+            for (size_t i = 0; i < suggestions.size(); ++i) {
+              bool is_selected = (i == static_cast<size_t>(*suggestion_index));
+              auto label =
+                  ftxui::text(" " + suggestions[i]) | ftxui::bold |
+                  ftxui::color(is_selected ? theme.base.bg : theme.base.fg);
+              if (is_selected)
+                label = label | ftxui::bgcolor(theme.modals.highlight_bg);
+              ftxui::Elements row = {label, ftxui::filler(),
+                                     ftxui::text(" [skin]") | ftxui::dim};
+              rows.push_back(ftxui::hbox(std::move(row)));
+            }
+            suggestion_body =
+                ftxui::vbox(rows) | ftxui::yframe | ftxui::color(theme.base.fg);
+          } else {
+            std::string message =
+                query.empty() ? "Available skins: firmius, claudex."
+                              : "No matching skins.";
+            suggestion_body =
+                ftxui::text(message) | ftxui::dim | ftxui::center;
           }
-          suggestion_body =
-              ftxui::vbox(rows) | ftxui::yframe | ftxui::color(theme.base.fg);
         } else {
-          std::string message = query.empty()
-                                    ? "No providers are registered yet."
-                                    : "No providers match '" + query + "'";
-          suggestion_body = ftxui::text(message) | ftxui::dim | ftxui::center;
+          auto suggestions = buildProviderSuggestions(arg.type, query);
+          if (!suggestions.empty()) {
+            ftxui::Elements rows;
+            for (size_t i = 0; i < suggestions.size(); ++i) {
+              bool is_selected = (i == static_cast<size_t>(*suggestion_index));
+              auto label =
+                  ftxui::text(" " + suggestions[i].id) | ftxui::bold |
+                  ftxui::color(is_selected ? theme.base.bg : theme.base.fg);
+              if (is_selected)
+                label = label | ftxui::bgcolor(theme.modals.highlight_bg);
+              ftxui::Elements row = {
+                  label,
+                  ftxui::filler(),
+                  ftxui::text(" [" + suggestions[i].type_label + "]") |
+                      ftxui::dim,
+              };
+              rows.push_back(ftxui::hbox(std::move(row)));
+            }
+            suggestion_body =
+                ftxui::vbox(rows) | ftxui::yframe | ftxui::color(theme.base.fg);
+          } else {
+            std::string message =
+                query.empty() ? "No providers are registered yet."
+                              : "No matching providers.";
+            suggestion_body =
+                ftxui::text(message) | ftxui::dim | ftxui::center;
+          }
         }
 
         autocomplete_layer =
@@ -891,7 +963,7 @@ ftxui::Component InputBar(
     auto with_cursor = [&](ftxui::Element e) {
       if (model && model->is_focused) {
         return e | ftxui::bgcolor(theme.input.fg) |
-               ftxui::color(theme.input.bg) | ftxui::focus;
+               ftxui::color(theme.input.bg) | ftxui::focus | ftxui::blink;
       }
       return e | ftxui::focus;
     };
@@ -1145,8 +1217,8 @@ ftxui::Component InputBar(
       std::vector<ftxui::Element> visible_elements;
       int end = std::min(*scroll_top + MAX_VISIBLE_LINES,
                          static_cast<int>(all_lines.size()));
-
       for (int i = *scroll_top; i < end; ++i) {
+
         ftxui::Element line_el;
         if (i == cursor_line) {
           std::string pre = "";
@@ -1207,7 +1279,11 @@ ftxui::Component InputBar(
       input_display = ftxui::hbox(std::move(input_parts));
     }
 
-    auto input_area = ftxui::hbox({prompt, input_display});
+    auto input_area = ftxui::hbox({input_display}) |
+                      (model && model->compact_mode
+                           ? ftxui::nothing
+                           : ftxui::bgcolor(theme.input.bg));
+
 
     ftxui::Elements root_elements;
     if (autocomplete_layer) {

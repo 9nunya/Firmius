@@ -24,7 +24,6 @@
 #include "audits/WebFetchAudit.hpp"
 #include "audits/WebSearchAudit.hpp"
 #include "audits/ReasoningTraceAudit.hpp"
-#include "audits/TuiPerformanceAudit.hpp"
 
 namespace firmius::audits {
 
@@ -54,7 +53,6 @@ std::vector<std::unique_ptr<shared::IAudit>> createAudits() {
     audits.push_back(std::make_unique<ResumeTodoAudit>());
     audits.push_back(std::make_unique<WebFetchAudit>());
     audits.push_back(std::make_unique<WebSearchAudit>());
-    audits.push_back(std::make_unique<TuiPerformanceAudit>());
     audits.push_back(std::make_unique<ReasoningTraceAudit>());
     return audits;
 

@@ -263,23 +263,20 @@ ToolPresentation BuildProcessToolPresentation(
   if (view.name == "Python") {
     presentation.title.clear();
   } else if (action == "Execute") {
-    presentation.title.clear();
+    presentation.title = command.empty() ? "Process" : ("Bash " + command);
   } else if (action == "Spawn") {
-    presentation.title.clear();
+    presentation.title = command.empty() ? "Process" : ("Bash " + command);
   } else if (action == "Wait") {
-    presentation.title = process_id.empty() ? "wait" : ("wait " + process_id);
+    presentation.title = process_id.empty() ? "ProcessWait" : ("ProcessWait(" + process_id + ")");
   } else if (action == "Input") {
-    presentation.title = process_id.empty() ? "input" : ("input " + process_id);
+    presentation.title = process_id.empty() ? "ProcessInput" : ("ProcessInput(" + process_id + ")");
   } else if (action == "Status") {
-    presentation.title = process_id.empty() ? "status" : ("status " + process_id);
+    presentation.title = process_id.empty() ? "ProcessStatus" : ("ProcessStatus(" + process_id + ")");
   } else {
     presentation.title = SummarizeToolCall(view.name, view.args, view.phase);
   }
   presentation.subtitle.clear();
   presentation.compact_summary.clear();
-  if (!command.empty()) {
-    presentation.body_lines.push_back("$ " + command);
-  }
 
   if (!process_id.empty()) {
     presentation.facts.push_back({"Process", process_id});
@@ -343,6 +340,9 @@ ToolPresentation BuildProcessToolPresentation(
     presentation.notices.push_back(std::move(notice));
   }
 
+  if (!command.empty()) {
+    presentation.body_lines.push_back("$ " + command);
+  }
   auto output_lines = BuildOutputLines(output);
   if (!output_lines.empty()) {
     presentation.body_lines.insert(presentation.body_lines.end(), output_lines.begin(),
@@ -352,6 +352,12 @@ ToolPresentation BuildProcessToolPresentation(
     presentation.facts.push_back({"cwd", cwd});
   }
   const bool is_execute = (action == "Execute" || action == "execute");
+  presentation.custom_icon = "⊘";
+  presentation.toggle_labels.collapsed = "expand";
+  presentation.toggle_labels.expanded = "collapse";
+  if (running && status_parts.empty()) {
+    status_parts.push_back("running");
+  }
   const size_t visible_body_lines = is_execute ? 4 : 1000;
   const size_t prefix_lines = !command.empty() ? 1u : 0u;
   const size_t visible_stream_lines =

@@ -22,6 +22,7 @@ using firmius::shared::Role;
 using firmius::shared::StreamEvent;
 using firmius::shared::TextChunk;
 using firmius::shared::ThinkingChunk;
+using firmius::shared::ToolCall;
 using firmius::shared::ToolCallChunk;
 using firmius::shared::ToolCallContent;
 using firmius::shared::TextContent;
@@ -126,19 +127,24 @@ TEST_F(KiroProviderTest, StreamParserKeepsToolInputOnSameToolCallId) {
   KiroProvider::sseWriteCallbackForTest(const_cast<char *>(secondChunk.data()),
                                         1, secondChunk.size(), &ctx);
 
-  ASSERT_EQ(events.size(), 2u);
+  ASSERT_EQ(events.size(), 3u);
 
   const auto *toolStart = std::get_if<ToolCallChunk>(&events[0]);
   ASSERT_NE(toolStart, nullptr);
+
+  const auto *toolInput = std::get_if<ToolCallChunk>(&events[1]);
+  ASSERT_NE(toolInput, nullptr);
+
+  const auto *finalCall = std::get_if<ToolCall>(&events[2]);
+  ASSERT_NE(finalCall, nullptr);
   EXPECT_EQ(toolStart->id, "tool_1");
   EXPECT_EQ(toolStart->nameDelta, "read_file");
   EXPECT_EQ(toolStart->argsDelta, "{");
 
-  const auto *toolInput = std::get_if<ToolCallChunk>(&events[1]);
-  ASSERT_NE(toolInput, nullptr);
-  EXPECT_EQ(toolInput->id, "tool_1");
-  EXPECT_TRUE(toolInput->nameDelta.empty());
   EXPECT_EQ(toolInput->argsDelta, R"("path":"README.md"})");
+  EXPECT_EQ(finalCall->id, "tool_1");
+  EXPECT_EQ(finalCall->name, "read_file");
+  EXPECT_EQ(finalCall->args, R"({"path":"README.md"})");
 }
 
 TEST_F(KiroProviderTest, StreamParserExtractsThinkingTagsIntoReasoningChunks) {
@@ -161,6 +167,48 @@ TEST_F(KiroProviderTest, StreamParserExtractsThinkingTagsIntoReasoningChunks) {
   const auto *thinking = std::get_if<ThinkingChunk>(&events[0]);
   ASSERT_NE(thinking, nullptr);
   EXPECT_EQ(thinking->delta, "plan");
+}
+
+TEST_F(KiroProviderTest, StreamParserExtractsThinkingTagsIntoReasoningChunks_Uppercase) {
+  KiroProvider provider;
+  std::vector<StreamEvent> events;
+  std::function<void(const StreamEvent &)> handler =
+      [&](const StreamEvent &ev) { events.push_back(ev); };
+
+  KiroProvider::StreamContext ctx;
+  ctx.provider = &provider;
+  ctx.onEvent = &handler;
+
+  const std::string chunk =
+      "{\"content\":\"<THINKING>plan</THINKING>answer\"}";
+
+  KiroProvider::sseWriteCallbackForTest(const_cast<char *>(chunk.data()), 1,
+                                        chunk.size(), &ctx);
+
+  ASSERT_GE(events.size(), 1u);
+  const auto *thinking = std::get_if<ThinkingChunk>(&events[0]);
+  ASSERT_NE(thinking, nullptr);
+  EXPECT_EQ(thinking->delta, "plan");
+}
+
+TEST_F(KiroProviderTest, StreamParserEmitsThinkingDeltaFieldWhenPresent) {
+  KiroProvider provider;
+  std::vector<StreamEvent> events;
+  std::function<void(const StreamEvent &)> handler =
+      [&](const StreamEvent &ev) { events.push_back(ev); };
+
+  KiroProvider::StreamContext ctx;
+  ctx.provider = &provider;
+  ctx.onEvent = &handler;
+
+  const std::string chunk = "{\"thinking\":\"hidden\"}";
+  KiroProvider::sseWriteCallbackForTest(const_cast<char *>(chunk.data()), 1,
+                                        chunk.size(), &ctx);
+
+  ASSERT_EQ(events.size(), 1u);
+  const auto *thinking = std::get_if<ThinkingChunk>(&events[0]);
+  ASSERT_NE(thinking, nullptr);
+  EXPECT_EQ(thinking->delta, "hidden");
 }
 
 TEST_F(KiroProviderTest, LegacyEncodedRefreshTokenIsMigratedWithoutCorruption) {

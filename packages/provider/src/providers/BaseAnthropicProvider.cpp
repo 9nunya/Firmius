@@ -379,6 +379,11 @@ void BaseAnthropicProvider::processSSELine(
         if (blockType == "tool_use") {
           // Tool call starting
           ToolCallChunk chunk;
+          ctx.currentContentBlockType = blockType;
+          ctx.currentToolCallId.clear();
+          ctx.currentToolCallName.clear();
+          ctx.currentToolCallArgs.clear();
+          ctx.currentToolCallFinalized = false;
           chunk.argsDelta = "";
 
           // Index can be at event level or inside content_block
@@ -388,12 +393,19 @@ void BaseAnthropicProvider::processSSELine(
             chunk.index = block["index"].GetUint();
           }
 
+          ctx.currentToolCallIndex = static_cast<int>(chunk.index);
+          ctx.inToolCall = true;
           if (block.HasMember("id") && block["id"].IsString()) {
             chunk.id = block["id"].GetString();
+            ctx.currentToolCallId = chunk.id;
           }
           if (block.HasMember("name") && block["name"].IsString()) {
             chunk.nameDelta = block["name"].GetString();
+            ctx.currentToolCallName = chunk.nameDelta;
             onEvent(chunk);
+          }
+          if (block.HasMember("input") && block["input"].IsObject()) {
+            ctx.currentToolCallArgs = "{}";
           }
         }
       }
@@ -433,13 +445,30 @@ void BaseAnthropicProvider::processSSELine(
               chunk.index = delta["index"].GetUint();
             }
             onEvent(chunk);
+            ctx.currentToolCallIndex = static_cast<int>(chunk.index);
+            ctx.currentToolCallArgs += chunk.argsDelta;
           }
         }
       }
     }
   } else if (eventType == "content_block_stop") {
     // Content block finished
-  } else if (eventType == "message_delta") {
+    int stoppedIndex = ctx.currentContentBlockIndex;
+    if (d.HasMember("index") && d["index"].IsUint()) {
+      stoppedIndex = static_cast<int>(d["index"].GetUint());
+    }
+    if (ctx.inToolCall && ctx.currentContentBlockType == "tool_use" &&
+        stoppedIndex == ctx.currentToolCallIndex &&
+        !ctx.currentToolCallFinalized && !ctx.currentToolCallName.empty() &&
+        !ctx.currentToolCallArgs.empty()) {
+      ctx.currentToolCallFinalized = true;
+      onEvent(ToolCall{ctx.currentToolCallId,
+                       ctx.currentToolCallIndex >= 0
+                           ? static_cast<std::uint32_t>(ctx.currentToolCallIndex)
+                           : std::numeric_limits<std::uint32_t>::max(),
+                       ctx.currentToolCallName, ctx.currentToolCallArgs});
+      ctx.inToolCall = false;
+    }
     // Message delta with stop reason and usage
     StopReason stopReason = StopReason::Stop;
 
@@ -504,6 +533,7 @@ void BaseAnthropicProvider::processSSELine(
   } else if (eventType == "message_stop") {
     // Message completed (already handled by message_delta)
   } else if (eventType == "error") {
+    ctx.inToolCall = false;
     // Error event
     std::string errorMsg = "Unknown error";
     if (d.HasMember("error") && d["error"].IsObject()) {

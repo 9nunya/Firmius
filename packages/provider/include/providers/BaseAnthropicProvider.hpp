@@ -181,6 +181,7 @@ struct AnthropicStreamContext {
     std::string currentToolCallArgs;
     int currentToolCallIndex = -1;
     bool inToolCall = false;
+    bool currentToolCallFinalized = false;
     
     // Usage tracking - capture from message_start, emit at message_delta
     std::uint32_t inputTokens = 0;

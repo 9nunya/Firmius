@@ -101,4 +101,38 @@ TEST(CommandManagerTest, McpCommandDispatchInvokesRegisteredMcpModalCreate) {
   state.clearModals();
 }
 
+class ProbeConfigModal final : public firmius::tui::IModal {
+public:
+  explicit ProbeConfigModal(bool &created) : created_(created) {}
+
+  std::string name() const override { return "config_display"; }
+
+  ftxui::Component create(firmius::tui::TuiState &state) override {
+    (void)state;
+    created_ = true;
+    return ftxui::Renderer([] { return ftxui::text("config-probe"); });
+  }
+
+private:
+  bool &created_;
+};
+
+TEST(CommandManagerTest, ConfigCommandDispatchInvokesRegisteredConfigModal) {
+  auto &manager = CommandManager::instance();
+  manager.registerCommand(std::make_shared<firmius::tui::ConfigCommand>());
+
+  bool modal_created = false;
+  firmius::tui::ModalRegistry::instance().registerModal(
+      std::make_shared<ProbeConfigModal>(modal_created));
+
+  auto &state = TuiState::instance();
+  state.clearModals();
+
+  CommandCtx ctx{&state};
+  EXPECT_TRUE(manager.executeCommand(ctx, "/config"));
+  EXPECT_TRUE(modal_created);
+
+  state.clearModals();
+}
+
 } // namespace

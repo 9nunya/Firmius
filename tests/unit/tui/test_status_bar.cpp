@@ -62,5 +62,22 @@ TEST(StatusBarTest, RendersContextUsageWhenPresent) {
   EXPECT_NE(output.find("40%"), std::string::npos);
 }
 
+TEST(StatusBarTest, RendersQuotaUsageWhenPresent) {
+  auto model = std::make_shared<StatusBarModel>();
+  model->status_text = "idle";
+  model->agent_name = "aster";
+  model->model_name = "anthropic/claude-3";
+  model->quota_usage = "Q 3/10";
+
+  auto component = StatusBar(model);
+  auto element = component->Render();
+
+  ftxui::Screen screen(160, 1);
+  ftxui::Render(screen, element);
+  std::string output = screen.ToString();
+
+  EXPECT_NE(output.find("Q 3/10"), std::string::npos);
+}
+
 } // namespace
 } // namespace firmius::tui

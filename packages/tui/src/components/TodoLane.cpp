@@ -74,9 +74,35 @@ public:
   explicit TodoLaneComponentBase(std::shared_ptr<TodoLaneModel> model)
       : model_(std::move(model)) {
     body_renderer_ = ftxui::Renderer([this] { return RenderBody(); });
-    scrollable_ = ScrollableBox(body_renderer_, {.startAtBottom = false,
-                                                 .overlayScrollbar = true,
-                                                 .showScrollbar = false});
+    scrollable_ = ScrollableBox(body_renderer_,
+                               {.startAtBottom = false,
+                                .overlayScrollbar = true,
+                                .showScrollbar = false,
+                                .measurement_signature_getter = [this]() {
+                                  // Auto-scroll requests depend on wrapped row
+                                  // measurement, so include a stable signature.
+                                  // This ensures ScrollableBox re-measures when
+                                  // the todo model changes.
+                                  if (!model_) {
+                                    return static_cast<std::size_t>(0);
+                                  }
+                                  std::size_t sig = 0;
+                                  std::hash<std::string> hash_str;
+                                  std::hash<int> hash_int;
+                                  sig ^= hash_str(model_->owner_label) + 0x9e3779b9 +
+                                         (sig << 6) + (sig >> 2);
+                                  sig ^= hash_int(static_cast<int>(model_->rows.size())) +
+                                         0x9e3779b9 + (sig << 6) + (sig >> 2);
+                                  for (const auto &row : model_->rows) {
+                                    sig ^= hash_int(row.id) + 0x9e3779b9 + (sig << 6) +
+                                           (sig >> 2);
+                                    sig ^= hash_int(static_cast<int>(row.status)) +
+                                           0x9e3779b9 + (sig << 6) + (sig >> 2);
+                                    sig ^= hash_str(row.text) + 0x9e3779b9 + (sig << 6) +
+                                           (sig >> 2);
+                                  }
+                                  return sig;
+                                }});
     Add(scrollable_);
   }
 
@@ -117,34 +143,42 @@ private:
     }
 
     const auto focus_index = static_cast<int>(focusRowIndex(*model_));
+
+    // RequestEnsureVisible is applied during ScrollableBox::OnRender, which is
+    // downstream of the body renderer. To ensure the scroll request takes effect
+    // in the same frame, issue it *before* RenderBody() is measured/rendered.
+    scrollable_->RequestEnsureVisible(focus_index);
+    scrollable_->InvalidateLayout();
+
     const int content_width = scrollable_->ContentWidth();
+    if (content_width <= 1) {
+      return;
+    }
+
     if (focus_index == last_auto_scroll_focus_index_ &&
         content_width == last_auto_scroll_content_width_) {
       return;
     }
 
-    if (content_width <= 1) {
-      scrollable_->RequestEnsureVisible(focus_index);
-    } else {
-      int line_start = 0;
-      for (int i = 0; i < focus_index; ++i) {
-        auto row_element =
-            buildTodoRowElement(theme, model_->rows[static_cast<size_t>(i)],
-                                static_cast<size_t>(i) ==
-                                    focusRowIndex(*model_)) |
-            ftxui::size(ftxui::WIDTH, ftxui::EQUAL, content_width);
-        const auto measured = ftxui::Dimension::Fit(row_element, true);
-        line_start += std::max(1, measured.dimy);
-      }
-
-      auto focus_element =
-          buildTodoRowElement(
-              theme, model_->rows[static_cast<size_t>(focus_index)], true) |
+    // Refine the request to the exact wrapped line range for the focused row.
+    int line_start = 0;
+    for (int i = 0; i < focus_index; ++i) {
+      auto row_element =
+          buildTodoRowElement(theme, model_->rows[static_cast<size_t>(i)],
+                              static_cast<size_t>(i) == focusRowIndex(*model_)) |
           ftxui::size(ftxui::WIDTH, ftxui::EQUAL, content_width);
-      const auto measured_focus = ftxui::Dimension::Fit(focus_element, true);
-      const int line_end = line_start + std::max(1, measured_focus.dimy) - 1;
-      scrollable_->RequestEnsureVisible(line_start, line_end);
+      const auto measured = ftxui::Dimension::Fit(row_element, true);
+      line_start += std::max(1, measured.dimy);
     }
+
+    auto focus_element =
+        buildTodoRowElement(theme, model_->rows[static_cast<size_t>(focus_index)],
+                            true) |
+        ftxui::size(ftxui::WIDTH, ftxui::EQUAL, content_width);
+    const auto measured_focus = ftxui::Dimension::Fit(focus_element, true);
+    const int line_end = line_start + std::max(1, measured_focus.dimy) - 1;
+    scrollable_->RequestEnsureVisible(line_start, line_end);
+    scrollable_->InvalidateLayout();
 
     last_auto_scroll_focus_index_ = focus_index;
     last_auto_scroll_content_width_ = content_width;

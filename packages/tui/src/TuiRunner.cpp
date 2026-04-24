@@ -37,6 +37,7 @@
 #include "commands/QuitCommand.hpp"
 #include "commands/QuotasCommand.hpp"
 #include "commands/RouterCommand.hpp"
+#include "commands/SkinCommand.hpp"
 #include "commands/ThreadsCommand.hpp"
 #include "commands/UndoCommand.hpp"
 #include "commands/WorkflowsCommand.hpp"
@@ -235,6 +236,8 @@ void runTui(const TuiLaunchOptions &options) {
       std::make_shared<firmius::tui::PurposesCommand>());
   firmius::tui::CommandManager::instance().registerCommand(
       std::make_shared<firmius::tui::BenchmarksCommand>());
+  firmius::tui::CommandManager::instance().registerCommand(
+      std::make_shared<firmius::tui::SkinCommand>());
   // Note: /workflows command removed - workflows are now registered as
   // individual commands below
   startupProfiler.completePhase("command_registration");
@@ -273,6 +276,7 @@ void runTui(const TuiLaunchOptions &options) {
   bool thread_loaded = false;
   std::optional<std::string> startupAgentId;
   std::size_t startupBaselineTurns = 0;
+  firmius::shared::ThreadMetadata current_metadata;
   std::string threadPath = "none";
   if (!options.initialPrompt.empty()) {
     const std::string cwd = options.initialCwd.empty()
@@ -339,7 +343,6 @@ void runTui(const TuiLaunchOptions &options) {
 
   if (thread_loaded) {
     auto current_id = h.currentThreadId();
-    firmius::shared::ThreadMetadata current_metadata;
     for (const auto &m : h.listThreads()) {
       if (m.threadId == current_id) {
         current_metadata = m;
@@ -368,6 +371,9 @@ void runTui(const TuiLaunchOptions &options) {
   std::cout << "\x1b[?2004h" << std::flush;
 
   auto renderer = state.root();
+  // Avoid replaying ThreadChanged here: init() already loaded the focused
+  // transcript, and a synthetic replay would clear any live stream state that
+  // resumed agents emit before the user presses another key.
   std::atomic<bool> sigint_bridge_running{true};
   std::atomic<bool> pending_idle_exit{false};
   std::jthread sigint_bridge([&](std::stop_token st) {

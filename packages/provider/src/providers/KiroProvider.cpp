@@ -28,7 +28,6 @@
 
 namespace firmius::provider {
 
-using firmius::shared::StringUtil;
 using namespace firmius::shared;
 using namespace firmius::utils;
 
@@ -39,6 +38,8 @@ constexpr std::uint32_t kDefaultContextWindow = 200000;
 constexpr std::uint32_t kDefaultMaxOutput = 64000;
 constexpr char kThinkingStartTag[] = "<thinking>";
 constexpr char kThinkingEndTag[] = "</thinking>";
+constexpr char kThinkingStartTagUpper[] = "<THINKING>";
+constexpr char kThinkingEndTagUpper[] = "</THINKING>";
 
 std::uint64_t fnv1a64(const std::string &value) {
   constexpr std::uint64_t kOffsetBasis = 14695981039346656037ull;
@@ -324,17 +325,25 @@ void emitKiroContentDelta(KiroProvider::StreamContext &ctx,
 
   while (!buffer.empty()) {
     if (!ctx.inThinking && !ctx.thinkingExtracted) {
-      const std::size_t startPos = buffer.find(kThinkingStartTag);
+      // Locate earliest <thinking> / <THINKING> tag (handle case variants)
+      std::size_t startPos = buffer.find(kThinkingStartTag);
+      const std::size_t startPosUpper = buffer.find(kThinkingStartTagUpper);
+      if (startPosUpper != std::string::npos &&
+          (startPos == std::string::npos || startPosUpper < startPos)) {
+        startPos = startPosUpper;
+      }
       if (startPos != std::string::npos) {
         const std::string before = buffer.substr(0, startPos);
         if (!before.empty()) {
           (*ctx.onEvent)(TextChunk{before});
         }
-        buffer.erase(0, startPos + std::strlen(kThinkingStartTag));
+        const char *tag = (startPos == startPosUpper) ? kThinkingStartTagUpper
+                                                    : kThinkingStartTag;
+        buffer.erase(0, startPos + std::strlen(tag));
         ctx.inThinking = true;
         continue;
       }
-
+      // Emit safe prefix without risking splitting an upcoming tag
       const std::size_t safeLen =
           buffer.size() > std::strlen(kThinkingStartTag)
               ? buffer.size() - std::strlen(kThinkingStartTag)
@@ -349,15 +358,22 @@ void emitKiroContentDelta(KiroProvider::StreamContext &ctx,
       buffer.erase(0, safeLen);
       break;
     }
-
     if (ctx.inThinking) {
-      const std::size_t endPos = buffer.find(kThinkingEndTag);
+      // Locate earliest </thinking> / </THINKING> end tag (handle case variants)
+      std::size_t endPos = buffer.find(kThinkingEndTag);
+      const std::size_t endPosUpper = buffer.find(kThinkingEndTagUpper);
+      if (endPosUpper != std::string::npos &&
+          (endPos == std::string::npos || endPosUpper < endPos)) {
+        endPos = endPosUpper;
+      }
       if (endPos != std::string::npos) {
         const std::string thinking = buffer.substr(0, endPos);
         if (!thinking.empty()) {
           (*ctx.onEvent)(ThinkingChunk{thinking, ""});
         }
-        buffer.erase(0, endPos + std::strlen(kThinkingEndTag));
+        const char *tag = (endPos == endPosUpper) ? kThinkingEndTagUpper
+                                                  : kThinkingEndTag;
+        buffer.erase(0, endPos + std::strlen(tag));
         ctx.inThinking = false;
         ctx.thinkingExtracted = true;
         if (buffer.rfind("\n\n", 0) == 0) {
@@ -365,11 +381,15 @@ void emitKiroContentDelta(KiroProvider::StreamContext &ctx,
         }
         continue;
       }
-
-      const std::size_t safeLen =
+      const std::size_t safeLenLower =
           buffer.size() > std::strlen(kThinkingEndTag)
               ? buffer.size() - std::strlen(kThinkingEndTag)
               : 0;
+      const std::size_t safeLenUpper =
+          buffer.size() > std::strlen(kThinkingEndTagUpper)
+              ? buffer.size() - std::strlen(kThinkingEndTagUpper)
+              : 0;
+      const std::size_t safeLen = std::max(safeLenLower, safeLenUpper);
       if (safeLen == 0) {
         break;
       }
@@ -380,7 +400,6 @@ void emitKiroContentDelta(KiroProvider::StreamContext &ctx,
       buffer.erase(0, safeLen);
       break;
     }
-
     if (ctx.thinkingExtracted) {
       if (!buffer.empty()) {
         (*ctx.onEvent)(TextChunk{buffer});
@@ -389,6 +408,7 @@ void emitKiroContentDelta(KiroProvider::StreamContext &ctx,
       break;
     }
   }
+
 }
 
 } // namespace
@@ -822,7 +842,11 @@ void KiroProvider::stream(const AgentHistory &history, const ProviderOptions &op
   curl_easy_setopt(curl, CURLOPT_POSTFIELDS, requestBody.c_str());
   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, sseWriteCallback);
   curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ctx);
-  curl_easy_setopt(curl, CURLOPT_TIMEOUT, 120L);
+  curl_easy_setopt(curl, CURLOPT_TIMEOUT, 600L);
+  curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 120L);
+  curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);
+  curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 20L);
+  curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
 
   onEvent(ProviderWaiting{});
 
@@ -848,14 +872,20 @@ void KiroProvider::stream(const AgentHistory &history, const ProviderOptions &op
   }
 
   if (httpStatus >= 400) {
-    onEvent(StreamError{"HTTP error " + std::to_string(httpStatus), static_cast<int>(httpStatus), acc.identifier});
+    std::string msg = "HTTP error " + std::to_string(httpStatus);
+    if (!ctx.buffer.empty()) {
+      std::string snippet = ctx.buffer;
+      if (snippet.size() > 2000) {
+        snippet.resize(2000);
+        snippet += "...";
+      }
+      msg += " body=" + snippet;
+    }
+    onEvent(StreamError{msg, static_cast<int>(httpStatus), acc.identifier});
     onEvent(StreamDone{StopReason::Error});
     return;
   }
-
-  // Parse accumulated buffer for final metrics
   if (!ctx.metricsReceived && !ctx.buffer.empty()) {
-    // Try to extract context usage from response
     size_t pos = ctx.buffer.find("{\"contextUsagePercentage\":");
     if (pos != std::string::npos) {
       rapidjson::Document doc;
@@ -1112,11 +1142,14 @@ size_t KiroProvider::sseWriteCallback(char *ptr, size_t size, size_t nmemb, void
     size_t jsonStart = std::string::npos;
     const char *markers[] = {
         "{\"content\":",
+        "{\"thinking\":",
+        "{\"reasoning\":",
         "{\"name\":",
         "{\"input\":",
         "{\"stop\":",
         "{\"contextUsagePercentage\":",
         "{\"followupPrompt\":",
+        "{",
     };
     
     for (const char *marker : markers) {
@@ -1158,6 +1191,19 @@ size_t KiroProvider::sseWriteCallback(char *ptr, size_t size, size_t nmemb, void
     doc.Parse(jsonStr.c_str());
     if (doc.HasParseError()) continue;
 
+    // Thinking/reasoning delta (sometimes sent out-of-band)
+    if (doc.HasMember("thinking")) {
+      const std::string delta = serializeJsonValue(doc["thinking"]);
+      if (!delta.empty()) {
+        (*ctx->onEvent)(ThinkingChunk{delta, ""});
+      }
+    } else if (doc.HasMember("reasoning")) {
+      const std::string delta = serializeJsonValue(doc["reasoning"]);
+      if (!delta.empty()) {
+        (*ctx->onEvent)(ThinkingChunk{delta, ""});
+      }
+    }
+
     // Content delta
     if (doc.HasMember("content") && !doc.HasMember("followupPrompt")) {
       std::string content = serializeJsonValue(doc["content"]);
@@ -1167,23 +1213,54 @@ size_t KiroProvider::sseWriteCallback(char *ptr, size_t size, size_t nmemb, void
     else if (doc.HasMember("name") && doc.HasMember("toolUseId")) {
       std::string name = serializeJsonValue(doc["name"]);
       std::string toolUseId = serializeJsonValue(doc["toolUseId"]);
-      std::string input = doc.HasMember("input") ? serializeJsonValue(doc["input"]) : "";
+      std::string input =
+          doc.HasMember("input") ? serializeJsonValue(doc["input"]) : "";
       const bool sameTool = (ctx->activeToolUseId == toolUseId);
+      if (!sameTool) {
+        ctx->activeToolName.clear();
+        ctx->activeToolArgs.clear();
+        ctx->activeToolFinalized = false;
+      }
       ctx->activeToolUseId = toolUseId;
+      if (!name.empty()) {
+        ctx->activeToolName = name;
+      }
+      if (!input.empty()) {
+        if (ctx->activeToolArgs.empty()) {
+          ctx->activeToolArgs = input;
+        } else if (input.rfind(ctx->activeToolArgs, 0) == 0) {
+          ctx->activeToolArgs = input;
+        } else {
+          ctx->activeToolArgs += input;
+        }
+      }
 
       (*ctx->onEvent)(ToolCallChunk{
           toolUseId, std::numeric_limits<std::uint32_t>::max(),
           sameTool ? "" : name, input});
-      
+
       if (doc.HasMember("stop") && doc["stop"].IsBool() && doc["stop"].GetBool()) {
+        if (!ctx->activeToolFinalized && !ctx->activeToolName.empty() &&
+            !ctx->activeToolArgs.empty()) {
+          ctx->activeToolFinalized = true;
+          (*ctx->onEvent)(ToolCall{ctx->activeToolUseId,
+                                   std::numeric_limits<std::uint32_t>::max(),
+                                   ctx->activeToolName, ctx->activeToolArgs});
+        }
         ctx->doneReceived = true;
       }
     }
     else if (doc.HasMember("input") && !doc.HasMember("name") &&
              !ctx->activeToolUseId.empty()) {
+      const std::string inputDelta = serializeJsonValue(doc["input"]);
+      if (ctx->activeToolArgs.empty()) {
+        ctx->activeToolArgs = inputDelta;
+      } else {
+        ctx->activeToolArgs += inputDelta;
+      }
       (*ctx->onEvent)(ToolCallChunk{
           ctx->activeToolUseId, std::numeric_limits<std::uint32_t>::max(), "",
-          serializeJsonValue(doc["input"])});
+          inputDelta});
     }
     // Context usage (metrics)
     else if (doc.HasMember("contextUsagePercentage")) {
@@ -1193,6 +1270,13 @@ size_t KiroProvider::sseWriteCallback(char *ptr, size_t size, size_t nmemb, void
     }
     // Stop signal
     else if (doc.HasMember("stop") && !doc.HasMember("name")) {
+      if (!ctx->activeToolUseId.empty() && !ctx->activeToolFinalized &&
+          !ctx->activeToolName.empty() && !ctx->activeToolArgs.empty()) {
+        ctx->activeToolFinalized = true;
+        (*ctx->onEvent)(ToolCall{ctx->activeToolUseId,
+                                 std::numeric_limits<std::uint32_t>::max(),
+                                 ctx->activeToolName, ctx->activeToolArgs});
+      }
       ctx->doneReceived = true;
     }
   }

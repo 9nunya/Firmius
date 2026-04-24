@@ -57,6 +57,9 @@ public:
     std::string contentBuffer;
     bool inThinking = false;
     bool thinkingExtracted = false;
+    std::string activeToolName;
+    std::string activeToolArgs;
+    bool activeToolFinalized = false;
     std::atomic<bool> *abortSignal = nullptr;
     firmius::shared::AgentMetrics metrics;
     bool metricsReceived = false;

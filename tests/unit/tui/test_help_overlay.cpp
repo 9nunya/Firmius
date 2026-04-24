@@ -39,3 +39,28 @@ TEST(HelpOverlayTest, WrappedParagraphMeasurementReachesBottom) {
   EXPECT_NE(output.find("lambda"), std::string::npos);
   EXPECT_NE(output.find("mu"), std::string::npos);
 }
+
+TEST(HelpOverlayTest, ResizingViewportKeepsBottomAnchoredWithoutEndKeyRepair) {
+  auto scrollable = firmius::tui::ScrollableBox(
+      ftxui::Renderer([] {
+        return ftxui::paragraph(
+                   "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau") |
+               ftxui::xflex;
+      }),
+      {.startAtBottom = true, .overlayScrollbar = true});
+
+  auto tall = ftxui::Screen::Create(ftxui::Dimension::Fixed(22),
+                                    ftxui::Dimension::Fixed(7));
+  Render(tall, scrollable->Render());
+  Render(tall, scrollable->Render());
+
+  auto short_screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(22),
+                                            ftxui::Dimension::Fixed(4));
+  Render(short_screen, scrollable->Render());
+  const auto first_pass = short_screen.ToString();
+  Render(short_screen, scrollable->Render());
+  const auto second_pass = short_screen.ToString();
+
+  EXPECT_NE(first_pass.find("sigma"), std::string::npos) << first_pass;
+  EXPECT_NE(second_pass.find("sigma"), std::string::npos) << second_pass;
+}

@@ -617,6 +617,7 @@ public:
       std::function<std::size_t()> live_measurement_signature_getter,
       std::function<bool()> show_internal_nudges_getter,
       std::function<bool()> hide_errors_getter,
+      std::function<bool()> show_turn_footers_getter,
       firmius::tui::EditableModeEnabledGetter editable_mode_enabled_getter,
       firmius::tui::EditableMessageSelectedGetter editable_message_selected_getter,
       firmius::tui::EditableMessageClickHandler editable_message_click_handler)
@@ -634,6 +635,7 @@ public:
         show_internal_nudges_getter_(
             std::move(show_internal_nudges_getter)),
         hide_errors_getter_(std::move(hide_errors_getter)),
+        show_turn_footers_getter_(std::move(show_turn_footers_getter)),
         editable_mode_enabled_getter_(std::move(editable_mode_enabled_getter)),
         editable_message_selected_getter_(std::move(editable_message_selected_getter)),
         editable_message_click_handler_(std::move(editable_message_click_handler)) {
@@ -649,11 +651,17 @@ public:
     history_container_ = ftxui::Renderer(history_inner_, [this] { return RenderHistoryWindow(); });
 
     tail_spacer_ =
-        ftxui::Make<RowComponent>(nullptr, [] {
+        ftxui::Make<RowComponent>(nullptr, [this] {
+          const bool show_turn_footers =
+              show_turn_footers_getter_ ? show_turn_footers_getter_() : true;
+          const int padding_lines = show_turn_footers ? kChatTailPaddingLines : 0;
           ftxui::Elements padding_rows;
-          padding_rows.reserve(kChatTailPaddingLines);
-          for (int i = 0; i < kChatTailPaddingLines; ++i) {
+          padding_rows.reserve(padding_lines > 0 ? padding_lines : 1);
+          for (int i = 0; i < padding_lines; ++i) {
             padding_rows.push_back(ftxui::text(" "));
+          }
+          if (padding_rows.empty()) {
+            padding_rows.push_back(ftxui::text(""));
           }
           return ftxui::vbox(std::move(padding_rows)) | ftxui::xflex;
         });
@@ -701,6 +709,9 @@ public:
     if (event == ftxui::Event::Special("TranscriptChanged")) {
       MarkHistoryDirty(false);
       EnsureHistoryRows();
+      if (scrollable_) {
+        scrollable_->RequestScrollToBottom();
+      }
       return true;
     }
 
@@ -977,8 +988,11 @@ private:
       // Fallback path for startup / low-turn / unstable-height cases:
       // render the full transcript until we have one trustworthy measured window.
       // This prevents the cut-off/flicker bug caused by seeding virtualization
-      // from guessed row heights near the bottom of chat.
+      // from guessed row heights near the bottom of chat. Also avoid
+      // virtualization while the viewport is bottom-following; stale row-height
+      // estimates there produce the blank tail / clipped-last-rows artifact.
       const bool should_virtualize = has_measured_window &&
+                                     (!scrollable_ || !scrollable_->IsAtBottom()) &&
                                      rows_.size() > static_cast<size_t>(viewport_height * 3);
 
       if (should_virtualize) {
@@ -1102,6 +1116,8 @@ private:
         // We buffer them so that consecutive tool-only turns still render as a
         // single quick-tools block.
         std::vector<std::string> footer_texts_to_render;
+        const bool show_turn_footers =
+            show_turn_footers_getter_ ? show_turn_footers_getter_() : true;
         if (rendered_grouped_quick_rows && !pending_turn_footers.empty()) {
           // When multiple tool-only turns collapse into a single grouped quick-tool
           // row, do not spam one footer per consumed turn beneath that group.
@@ -1111,7 +1127,9 @@ private:
           footer_texts_to_render = pending_turn_footers;
         }
 
-        for (const auto &footer_text : footer_texts_to_render) {
+        for (const auto &footer_text :
+             (show_turn_footers ? footer_texts_to_render
+                                : std::vector<std::string>{})) {
           const auto &theme =
               firmius::tui::ThemeManager::instance().getCurrentTheme();
           auto row = ftxui::Make<RowComponent>(
@@ -1580,6 +1598,7 @@ private:
   std::function<std::size_t()> live_measurement_signature_getter_;
   std::function<bool()> show_internal_nudges_getter_;
   std::function<bool()> hide_errors_getter_;
+  std::function<bool()> show_turn_footers_getter_;
   firmius::tui::EditableModeEnabledGetter editable_mode_enabled_getter_;
   firmius::tui::EditableMessageSelectedGetter editable_message_selected_getter_;
   firmius::tui::EditableMessageClickHandler editable_message_click_handler_;
@@ -1623,6 +1642,7 @@ ftxui::Component firmius::tui::ChatWindow(
     std::function<std::size_t()> live_measurement_signature_getter,
     std::function<bool()> show_internal_nudges_getter,
     std::function<bool()> hide_errors_getter,
+    std::function<bool()> show_turn_footers_getter,
     EditableModeEnabledGetter editable_mode_enabled_getter,
     EditableMessageSelectedGetter editable_message_selected_getter,
     EditableMessageClickHandler editable_message_click_handler) {
@@ -1634,6 +1654,7 @@ ftxui::Component firmius::tui::ChatWindow(
       std::move(sub_stream_getter), std::move(live_quick_summary_provider),
       std::move(live_measurement_signature_getter),
       std::move(show_internal_nudges_getter), std::move(hide_errors_getter),
+      std::move(show_turn_footers_getter),
       std::move(editable_mode_enabled_getter),
       std::move(editable_message_selected_getter),
       std::move(editable_message_click_handler));

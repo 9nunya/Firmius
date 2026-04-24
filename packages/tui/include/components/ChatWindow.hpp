@@ -131,6 +131,7 @@ ftxui::Component ChatWindow(
     std::function<bool()> show_internal_nudges_getter = nullptr,
     std::function<bool()> hide_errors_getter = nullptr,
     EditableModeEnabledGetter editable_mode_enabled_getter = nullptr,
+    std::function<bool()> show_turn_footers_getter = nullptr,
     EditableMessageSelectedGetter editable_message_selected_getter = nullptr,
     EditableMessageClickHandler editable_message_click_handler = nullptr);
 

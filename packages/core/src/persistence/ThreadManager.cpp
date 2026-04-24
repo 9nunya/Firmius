@@ -24,6 +24,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -156,100 +157,992 @@ auto withImmediateTransaction(sqlite3* db, Fn&& fn) {
     }
 }
 
-struct SqliteConnection {
-    explicit SqliteConnection(const std::string& dbPath) {
-        if (sqlite3_open_v2(dbPath.c_str(), &db,
-                            SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE |
-                                SQLITE_OPEN_FULLMUTEX,
-                            nullptr) != SQLITE_OK) {
-            const std::string err = db ? sqlite3_errmsg(db) : "unknown sqlite error";
-            if (db) {
-                sqlite3_close(db);
-                db = nullptr;
-            }
-            throw std::runtime_error("Failed to open thread database: " + err);
+constexpr int kConnMaxRetries = 3;
+constexpr int kConnRetryBaseMs = 50;
+constexpr int kCurrentSchemaVersion = 2;
+
+const char* kLegacySchemaSQL =
+    "CREATE TABLE IF NOT EXISTS threads ("
+    " thread_id TEXT PRIMARY KEY,"
+    " metadata_json TEXT NOT NULL,"
+    " created_at INTEGER NOT NULL,"
+    " last_active_at INTEGER NOT NULL"
+    ");"
+    "CREATE TABLE IF NOT EXISTS thread_states ("
+    " thread_id TEXT PRIMARY KEY,"
+    " agent_manifest_json TEXT,"
+    " permission_rules_json TEXT,"
+    " fleet_state_json TEXT"
+    ");"
+    "CREATE TABLE IF NOT EXISTS agent_turns ("
+    " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    " thread_id TEXT NOT NULL,"
+    " agent_id TEXT NOT NULL,"
+    " turn_json TEXT NOT NULL"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_agent_turns_thread_agent"
+    " ON agent_turns(thread_id, agent_id, id);"
+    "CREATE TABLE IF NOT EXISTS plans ("
+    " thread_id TEXT NOT NULL,"
+    " plan_id TEXT NOT NULL,"
+    " plan_json TEXT NOT NULL,"
+    " created_at INTEGER NOT NULL,"
+    " updated_at INTEGER NOT NULL,"
+    " PRIMARY KEY(thread_id, plan_id)"
+    ");"
+    "CREATE TABLE IF NOT EXISTS agent_todos ("
+    " thread_id TEXT NOT NULL,"
+    " agent_id TEXT NOT NULL,"
+    " todo_json TEXT NOT NULL,"
+    " PRIMARY KEY(thread_id, agent_id)"
+    ");"
+    "CREATE TABLE IF NOT EXISTS agent_live_state ("
+    " thread_id TEXT NOT NULL,"
+    " agent_id TEXT NOT NULL,"
+    " state_json TEXT NOT NULL,"
+    " PRIMARY KEY(thread_id, agent_id)"
+    ");"
+    "CREATE TABLE IF NOT EXISTS rolling_memory_state ("
+    " thread_id TEXT NOT NULL,"
+    " agent_id TEXT NOT NULL,"
+    " state_json TEXT NOT NULL,"
+    " PRIMARY KEY(thread_id, agent_id)"
+    ");"
+    "CREATE TABLE IF NOT EXISTS compaction_snapshots ("
+    " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    " thread_id TEXT NOT NULL,"
+    " agent_id TEXT NOT NULL,"
+    " compaction_id TEXT NOT NULL,"
+    " snapshot_json TEXT NOT NULL"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_compaction_thread_agent"
+    " ON compaction_snapshots(thread_id, agent_id, id);"
+    "CREATE TABLE IF NOT EXISTS artifacts ("
+    " thread_id TEXT NOT NULL,"
+    " owner_agent_id TEXT NOT NULL,"
+    " owner_friendly_name TEXT NOT NULL,"
+    " filename TEXT NOT NULL,"
+    " storage_path TEXT NOT NULL,"
+    " content TEXT NOT NULL,"
+    " kind TEXT,"
+    " description TEXT,"
+    " created_at INTEGER NOT NULL,"
+    " updated_at INTEGER NOT NULL,"
+    " PRIMARY KEY(thread_id, owner_agent_id, filename)"
+    ");";
+
+const char* kNormalizedSchemaSQL =
+    "CREATE TABLE IF NOT EXISTS schema_meta ("
+    " key TEXT PRIMARY KEY,"
+    " value TEXT NOT NULL"
+    ");"
+    "CREATE TABLE IF NOT EXISTS thread_metadata_v2 ("
+    " thread_id TEXT PRIMARY KEY,"
+    " title TEXT NOT NULL DEFAULT '',"
+    " host_type TEXT NOT NULL DEFAULT '',"
+    " host_identifier TEXT NOT NULL DEFAULT '',"
+    " cwd TEXT NOT NULL DEFAULT '',"
+    " lead_persona TEXT NOT NULL DEFAULT '',"
+    " is_benchmark_run INTEGER NOT NULL DEFAULT 0,"
+    " benchmark_id TEXT NOT NULL DEFAULT '',"
+    " benchmark_task_id TEXT NOT NULL DEFAULT '',"
+    " active_plan_id TEXT NOT NULL DEFAULT '',"
+    " permission_mode TEXT NOT NULL DEFAULT 'Request',"
+    " created_at INTEGER NOT NULL DEFAULT 0,"
+    " last_active_at INTEGER NOT NULL DEFAULT 0,"
+    " host_options_json TEXT NOT NULL DEFAULT '{}',"
+    " retryable_request_json TEXT"
+    ");"
+    "CREATE TABLE IF NOT EXISTS agent_turns_v2 ("
+    " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    " thread_id TEXT NOT NULL,"
+    " agent_id TEXT NOT NULL,"
+    " turn_id TEXT NOT NULL,"
+    " stop_reason TEXT NOT NULL DEFAULT 'stop',"
+    " prompt_tokens INTEGER NOT NULL DEFAULT 0,"
+    " completion_tokens INTEGER NOT NULL DEFAULT 0,"
+    " reasoning_tokens INTEGER NOT NULL DEFAULT 0,"
+    " total_tokens INTEGER NOT NULL DEFAULT 0,"
+    " estimated_cost_usd REAL NOT NULL DEFAULT 0,"
+    " UNIQUE(thread_id, agent_id, turn_id)"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_agent_turns_v2_thread_agent"
+    " ON agent_turns_v2(thread_id, agent_id, id);"
+    "CREATE TABLE IF NOT EXISTS turn_messages_v2 ("
+    " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    " turn_row_id INTEGER NOT NULL REFERENCES agent_turns_v2(id) ON DELETE CASCADE,"
+    " message_id TEXT NOT NULL DEFAULT '',"
+    " role TEXT NOT NULL DEFAULT '',"
+    " visibility TEXT NOT NULL DEFAULT '',"
+    " timestamp INTEGER NOT NULL DEFAULT 0,"
+    " parent_id TEXT,"
+    " ordinal INTEGER NOT NULL"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_turn_messages_v2_turn"
+    " ON turn_messages_v2(turn_row_id, ordinal);"
+    "CREATE TABLE IF NOT EXISTS message_parts_v2 ("
+    " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    " message_row_id INTEGER NOT NULL REFERENCES turn_messages_v2(id) ON DELETE CASCADE,"
+    " ordinal INTEGER NOT NULL,"
+    " part_type TEXT NOT NULL,"
+    " payload_json TEXT NOT NULL"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_message_parts_v2_message"
+    " ON message_parts_v2(message_row_id, ordinal);"
+    "CREATE TABLE IF NOT EXISTS plans_v2 ("
+    " thread_id TEXT NOT NULL,"
+    " plan_id TEXT NOT NULL,"
+    " title TEXT NOT NULL DEFAULT '',"
+    " objective TEXT NOT NULL DEFAULT '',"
+    " context TEXT NOT NULL DEFAULT '',"
+    " strategy TEXT NOT NULL DEFAULT '',"
+    " status TEXT NOT NULL DEFAULT 'Draft',"
+    " notes TEXT NOT NULL DEFAULT '',"
+    " created_at INTEGER NOT NULL DEFAULT 0,"
+    " updated_at INTEGER NOT NULL DEFAULT 0,"
+    " PRIMARY KEY(thread_id, plan_id)"
+    ");"
+    "CREATE TABLE IF NOT EXISTS work_chunks_v2 ("
+    " thread_id TEXT NOT NULL,"
+    " plan_id TEXT NOT NULL,"
+    " chunk_id TEXT NOT NULL,"
+    " title TEXT NOT NULL DEFAULT '',"
+    " goal TEXT NOT NULL DEFAULT '',"
+    " context TEXT NOT NULL DEFAULT '',"
+    " constraints TEXT NOT NULL DEFAULT '',"
+    " completion TEXT NOT NULL DEFAULT '',"
+    " planning_gate INTEGER NOT NULL DEFAULT 0,"
+    " status TEXT NOT NULL DEFAULT 'Ready',"
+    " assigned_agent_id TEXT NOT NULL DEFAULT '',"
+    " attempt_count INTEGER NOT NULL DEFAULT 0,"
+    " result_summary TEXT NOT NULL DEFAULT '',"
+    " review_summary TEXT NOT NULL DEFAULT '',"
+    " created_at INTEGER NOT NULL DEFAULT 0,"
+    " updated_at INTEGER NOT NULL DEFAULT 0,"
+    " cwd TEXT NOT NULL DEFAULT '',"
+    " verification_condition TEXT NOT NULL DEFAULT '',"
+    " handoff_notes TEXT NOT NULL DEFAULT '',"
+    " ordinal INTEGER NOT NULL DEFAULT 0,"
+    " PRIMARY KEY(thread_id, plan_id, chunk_id),"
+    " FOREIGN KEY(thread_id, plan_id) REFERENCES plans_v2(thread_id, plan_id) ON DELETE CASCADE"
+    ");"
+    "CREATE TABLE IF NOT EXISTS work_chunk_dependencies_v2 ("
+    " thread_id TEXT NOT NULL,"
+    " plan_id TEXT NOT NULL,"
+    " chunk_id TEXT NOT NULL,"
+    " depends_on_chunk_id TEXT NOT NULL,"
+    " PRIMARY KEY(thread_id, plan_id, chunk_id, depends_on_chunk_id),"
+    " FOREIGN KEY(thread_id, plan_id, chunk_id) REFERENCES work_chunks_v2(thread_id, plan_id, chunk_id) ON DELETE CASCADE"
+    ");"
+    "CREATE TABLE IF NOT EXISTS work_chunk_files_v2 ("
+    " thread_id TEXT NOT NULL,"
+    " plan_id TEXT NOT NULL,"
+    " chunk_id TEXT NOT NULL,"
+    " file_kind TEXT NOT NULL,"
+    " path TEXT NOT NULL,"
+    " ordinal INTEGER NOT NULL DEFAULT 0,"
+    " PRIMARY KEY(thread_id, plan_id, chunk_id, file_kind, ordinal),"
+    " FOREIGN KEY(thread_id, plan_id, chunk_id) REFERENCES work_chunks_v2(thread_id, plan_id, chunk_id) ON DELETE CASCADE"
+    ");"
+    "CREATE TABLE IF NOT EXISTS work_tasks_v2 ("
+    " thread_id TEXT NOT NULL,"
+    " plan_id TEXT NOT NULL,"
+    " chunk_id TEXT NOT NULL,"
+    " task_id TEXT NOT NULL,"
+    " title TEXT NOT NULL DEFAULT '',"
+    " goal TEXT NOT NULL DEFAULT '',"
+    " status TEXT NOT NULL DEFAULT 'Ready',"
+    " notes TEXT NOT NULL DEFAULT '',"
+    " verification_condition TEXT NOT NULL DEFAULT '',"
+    " assigned_worker_id TEXT NOT NULL DEFAULT '',"
+    " created_at INTEGER NOT NULL DEFAULT 0,"
+    " updated_at INTEGER NOT NULL DEFAULT 0,"
+    " ordinal INTEGER NOT NULL DEFAULT 0,"
+    " PRIMARY KEY(thread_id, plan_id, chunk_id, task_id),"
+    " FOREIGN KEY(thread_id, plan_id, chunk_id) REFERENCES work_chunks_v2(thread_id, plan_id, chunk_id) ON DELETE CASCADE"
+    ");"
+    "CREATE TABLE IF NOT EXISTS agent_todos_v2 ("
+    " thread_id TEXT NOT NULL,"
+    " agent_id TEXT NOT NULL,"
+    " next_id INTEGER NOT NULL DEFAULT 1,"
+    " PRIMARY KEY(thread_id, agent_id)"
+    ");"
+    "CREATE TABLE IF NOT EXISTS todo_items_v2 ("
+    " thread_id TEXT NOT NULL,"
+    " agent_id TEXT NOT NULL,"
+    " item_id INTEGER NOT NULL,"
+    " text TEXT NOT NULL DEFAULT '',"
+    " status TEXT NOT NULL DEFAULT 'pending',"
+    " chunk_id TEXT NOT NULL DEFAULT '',"
+    " plan_id TEXT NOT NULL DEFAULT '',"
+    " created_at INTEGER NOT NULL DEFAULT 0,"
+    " updated_at INTEGER NOT NULL DEFAULT 0,"
+    " PRIMARY KEY(thread_id, agent_id, item_id),"
+    " FOREIGN KEY(thread_id, agent_id) REFERENCES agent_todos_v2(thread_id, agent_id) ON DELETE CASCADE"
+    ");"
+    "CREATE TABLE IF NOT EXISTS agent_live_state_v2 ("
+    " thread_id TEXT NOT NULL,"
+    " agent_id TEXT NOT NULL,"
+    " PRIMARY KEY(thread_id, agent_id)"
+    ");"
+    "CREATE TABLE IF NOT EXISTS rolling_memory_state_v2 ("
+    " thread_id TEXT NOT NULL,"
+    " agent_id TEXT NOT NULL,"
+    " last_observed_turn_id TEXT NOT NULL DEFAULT '',"
+    " last_reflected_observation_id TEXT NOT NULL DEFAULT '',"
+    " last_context_window INTEGER NOT NULL DEFAULT 0,"
+    " last_buffer_threshold_tokens INTEGER NOT NULL DEFAULT 0,"
+    " last_target_threshold_tokens INTEGER NOT NULL DEFAULT 0,"
+    " last_emergency_threshold_tokens INTEGER NOT NULL DEFAULT 0,"
+    " last_retained_tail_tokens INTEGER NOT NULL DEFAULT 0,"
+    " last_updated_at INTEGER NOT NULL DEFAULT 0,"
+    " observation_in_flight INTEGER NOT NULL DEFAULT 0,"
+    " reflection_in_flight INTEGER NOT NULL DEFAULT 0,"
+    " bridge_in_flight INTEGER NOT NULL DEFAULT 0,"
+    " last_bridge_id TEXT NOT NULL DEFAULT '',"
+    " PRIMARY KEY(thread_id, agent_id)"
+    ");"
+    "CREATE TABLE IF NOT EXISTS rolling_memory_chunks_v2 ("
+    " thread_id TEXT NOT NULL,"
+    " agent_id TEXT NOT NULL,"
+    " chunk_id TEXT NOT NULL,"
+    " bucket TEXT NOT NULL,"
+    " source_start_turn_id TEXT NOT NULL DEFAULT '',"
+    " source_end_turn_id TEXT NOT NULL DEFAULT '',"
+    " chunk_kind TEXT NOT NULL DEFAULT 'episode',"
+    " summary TEXT NOT NULL DEFAULT '',"
+    " current_task TEXT NOT NULL DEFAULT '',"
+    " suggested_response TEXT NOT NULL DEFAULT '',"
+    " active_goal TEXT NOT NULL DEFAULT '',"
+    " source_tokens INTEGER NOT NULL DEFAULT 0,"
+    " summary_tokens INTEGER NOT NULL DEFAULT 0,"
+    " created_at INTEGER NOT NULL DEFAULT 0,"
+    " buffered INTEGER NOT NULL DEFAULT 0,"
+    " active INTEGER NOT NULL DEFAULT 0,"
+    " superseded INTEGER NOT NULL DEFAULT 0,"
+    " ordinal INTEGER NOT NULL DEFAULT 0,"
+    " PRIMARY KEY(thread_id, agent_id, chunk_id),"
+    " FOREIGN KEY(thread_id, agent_id) REFERENCES rolling_memory_state_v2(thread_id, agent_id) ON DELETE CASCADE"
+    ");"
+    "CREATE TABLE IF NOT EXISTS rolling_memory_chunk_lists_v2 ("
+    " thread_id TEXT NOT NULL,"
+    " agent_id TEXT NOT NULL,"
+    " chunk_id TEXT NOT NULL,"
+    " list_kind TEXT NOT NULL,"
+    " value TEXT NOT NULL,"
+    " ordinal INTEGER NOT NULL DEFAULT 0,"
+    " PRIMARY KEY(thread_id, agent_id, chunk_id, list_kind, ordinal),"
+    " FOREIGN KEY(thread_id, agent_id, chunk_id) REFERENCES rolling_memory_chunks_v2(thread_id, agent_id, chunk_id) ON DELETE CASCADE"
+    ");"
+    "CREATE TABLE IF NOT EXISTS rolling_memory_anchors_v2 ("
+    " thread_id TEXT NOT NULL,"
+    " agent_id TEXT NOT NULL,"
+    " anchor_id TEXT NOT NULL,"
+    " anchor_type TEXT NOT NULL DEFAULT '',"
+    " canonical_text TEXT NOT NULL DEFAULT '',"
+    " exact_quote TEXT NOT NULL DEFAULT '',"
+    " importance TEXT NOT NULL DEFAULT '',"
+    " volatility TEXT NOT NULL DEFAULT '',"
+    " ordinal INTEGER NOT NULL DEFAULT 0,"
+    " PRIMARY KEY(thread_id, agent_id, anchor_id),"
+    " FOREIGN KEY(thread_id, agent_id) REFERENCES rolling_memory_state_v2(thread_id, agent_id) ON DELETE CASCADE"
+    ");"
+    "CREATE TABLE IF NOT EXISTS rolling_memory_anchor_lists_v2 ("
+    " thread_id TEXT NOT NULL,"
+    " agent_id TEXT NOT NULL,"
+    " anchor_id TEXT NOT NULL,"
+    " list_kind TEXT NOT NULL,"
+    " value TEXT NOT NULL,"
+    " ordinal INTEGER NOT NULL DEFAULT 0,"
+    " PRIMARY KEY(thread_id, agent_id, anchor_id, list_kind, ordinal),"
+    " FOREIGN KEY(thread_id, agent_id, anchor_id) REFERENCES rolling_memory_anchors_v2(thread_id, agent_id, anchor_id) ON DELETE CASCADE"
+    ");"
+    "CREATE TABLE IF NOT EXISTS rolling_memory_bridges_v2 ("
+    " thread_id TEXT NOT NULL,"
+    " agent_id TEXT NOT NULL,"
+    " bridge_id TEXT NOT NULL,"
+    " target_task_signature TEXT NOT NULL DEFAULT '',"
+    " rationale TEXT NOT NULL DEFAULT '',"
+    " execution_hint TEXT NOT NULL DEFAULT '',"
+    " created_at INTEGER NOT NULL DEFAULT 0,"
+    " ordinal INTEGER NOT NULL DEFAULT 0,"
+    " PRIMARY KEY(thread_id, agent_id, bridge_id),"
+    " FOREIGN KEY(thread_id, agent_id) REFERENCES rolling_memory_state_v2(thread_id, agent_id) ON DELETE CASCADE"
+    ");"
+    "CREATE TABLE IF NOT EXISTS rolling_memory_bridge_lists_v2 ("
+    " thread_id TEXT NOT NULL,"
+    " agent_id TEXT NOT NULL,"
+    " bridge_id TEXT NOT NULL,"
+    " list_kind TEXT NOT NULL,"
+    " value TEXT NOT NULL,"
+    " ordinal INTEGER NOT NULL DEFAULT 0,"
+    " PRIMARY KEY(thread_id, agent_id, bridge_id, list_kind, ordinal),"
+    " FOREIGN KEY(thread_id, agent_id, bridge_id) REFERENCES rolling_memory_bridges_v2(thread_id, agent_id, bridge_id) ON DELETE CASCADE"
+    ");"
+    "CREATE TABLE IF NOT EXISTS fleet_locks_v2 ("
+    " thread_id TEXT NOT NULL,"
+    " lock_id TEXT NOT NULL,"
+    " root_agent_id TEXT NOT NULL DEFAULT '',"
+    " owner_agent_id TEXT NOT NULL DEFAULT '',"
+    " status TEXT NOT NULL DEFAULT '',"
+    " reason TEXT NOT NULL DEFAULT '',"
+    " created_at INTEGER NOT NULL DEFAULT 0,"
+    " updated_at INTEGER NOT NULL DEFAULT 0,"
+    " PRIMARY KEY(thread_id, lock_id)"
+    ");"
+    "CREATE TABLE IF NOT EXISTS fleet_lock_lists_v2 ("
+    " thread_id TEXT NOT NULL,"
+    " lock_id TEXT NOT NULL,"
+    " list_kind TEXT NOT NULL,"
+    " value TEXT NOT NULL,"
+    " ordinal INTEGER NOT NULL DEFAULT 0,"
+    " PRIMARY KEY(thread_id, lock_id, list_kind, ordinal),"
+    " FOREIGN KEY(thread_id, lock_id) REFERENCES fleet_locks_v2(thread_id, lock_id) ON DELETE CASCADE"
+    ");"
+    "CREATE TABLE IF NOT EXISTS compaction_snapshots_v2 ("
+    " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    " thread_id TEXT NOT NULL,"
+    " agent_id TEXT NOT NULL,"
+    " compaction_id TEXT NOT NULL,"
+    " previous_context_size INTEGER NOT NULL DEFAULT 0,"
+    " created_at INTEGER NOT NULL DEFAULT 0"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_compaction_snapshots_v2_thread_agent"
+    " ON compaction_snapshots_v2(thread_id, agent_id, id);"
+    "CREATE TABLE IF NOT EXISTS compaction_snapshot_turns_v2 ("
+    " snapshot_row_id INTEGER NOT NULL REFERENCES compaction_snapshots_v2(id) ON DELETE CASCADE,"
+    " ordinal INTEGER NOT NULL,"
+    " turn_json TEXT NOT NULL,"
+    " PRIMARY KEY(snapshot_row_id, ordinal)"
+    ");"
+    "CREATE TABLE IF NOT EXISTS agent_manifest_v2 ("
+    " thread_id TEXT NOT NULL,"
+    " agent_id TEXT NOT NULL,"
+    " persona TEXT NOT NULL DEFAULT '',"
+    " parent_id TEXT NOT NULL DEFAULT '',"
+    " friendly_name TEXT NOT NULL DEFAULT '',"
+    " title TEXT NOT NULL DEFAULT '',"
+    " persist_history INTEGER NOT NULL DEFAULT 1,"
+    " PRIMARY KEY(thread_id, agent_id)"
+    ");"
+    "CREATE TABLE IF NOT EXISTS permission_command_rules_v2 ("
+    " thread_id TEXT NOT NULL,"
+    " ordinal INTEGER NOT NULL,"
+    " exact_command TEXT NOT NULL DEFAULT '',"
+    " normalized_command TEXT NOT NULL DEFAULT '',"
+    " primary_command TEXT NOT NULL DEFAULT '',"
+    " severity TEXT NOT NULL DEFAULT 'LOW',"
+    " tool_name TEXT NOT NULL DEFAULT '',"
+    " applies_to_entire_tool INTEGER NOT NULL DEFAULT 0,"
+    " is_global INTEGER NOT NULL DEFAULT 0,"
+    " PRIMARY KEY(thread_id, ordinal)"
+    ");"
+    "CREATE TABLE IF NOT EXISTS permission_path_rules_v2 ("
+    " thread_id TEXT NOT NULL,"
+    " ordinal INTEGER NOT NULL,"
+    " path_prefix TEXT NOT NULL DEFAULT '',"
+    " tool_name TEXT NOT NULL DEFAULT '',"
+    " read_only INTEGER NOT NULL DEFAULT 0,"
+    " applies_to_all_reads INTEGER NOT NULL DEFAULT 0,"
+    " is_global INTEGER NOT NULL DEFAULT 0,"
+    " PRIMARY KEY(thread_id, ordinal)"
+    ");"
+    "CREATE TABLE IF NOT EXISTS permission_tool_sessions_v2 ("
+    " thread_id TEXT NOT NULL,"
+    " tool_name TEXT NOT NULL,"
+    " PRIMARY KEY(thread_id, tool_name)"
+    ");"
+    "CREATE TABLE IF NOT EXISTS permission_state_v2 ("
+    " thread_id TEXT PRIMARY KEY,"
+    " allow_all_reads_session INTEGER NOT NULL DEFAULT 0"
+    ");"
+    "CREATE TABLE IF NOT EXISTS artifacts_v2 ("
+    " thread_id TEXT NOT NULL,"
+    " owner_agent_id TEXT NOT NULL,"
+    " filename TEXT NOT NULL,"
+    " owner_friendly_name TEXT NOT NULL DEFAULT '',"
+    " storage_path TEXT NOT NULL DEFAULT '',"
+    " content TEXT NOT NULL DEFAULT '',"
+    " kind TEXT,"
+    " description TEXT,"
+    " created_at INTEGER NOT NULL DEFAULT 0,"
+    " updated_at INTEGER NOT NULL DEFAULT 0,"
+    " PRIMARY KEY(thread_id, owner_agent_id, filename)"
+    ");";
+
+const char* kSchemaSQL =
+    "PRAGMA foreign_keys=ON;"
+    "PRAGMA temp_store=MEMORY;";
+
+std::optional<std::string> readSchemaMeta(sqlite3* db, const std::string& key) {
+    Statement stmt(db,
+                   "SELECT value FROM schema_meta WHERE key=?;",
+                   "Failed to prepare schema meta read");
+    bindText(stmt.get(), 1, key);
+    if (sqlite3_step(stmt.get()) != SQLITE_ROW) {
+        return std::nullopt;
+    }
+    const auto* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 0));
+    return text ? std::optional<std::string>(text) : std::optional<std::string>("");
+}
+
+ThreadPermissionMode threadPermissionModeFromStoredString(
+    const std::string& value) {
+    if (value == "AlwaysAllow") {
+        return ThreadPermissionMode::AlwaysAllow;
+    }
+    return ThreadPermissionMode::Request;
+}
+
+PlanStatus planStatusFromStoredString(const std::string& value) {
+    if (value == "Active") return PlanStatus::Active;
+    if (value == "Paused") return PlanStatus::Paused;
+    if (value == "Done") return PlanStatus::Done;
+    if (value == "Abandoned") return PlanStatus::Abandoned;
+    return PlanStatus::Draft;
+}
+
+WorkChunkStatus workChunkStatusFromStoredString(const std::string& value) {
+    if (value == "InProgress") return WorkChunkStatus::InProgress;
+    if (value == "Implemented") return WorkChunkStatus::Implemented;
+    if (value == "Verifying") return WorkChunkStatus::Verifying;
+    if (value == "Done") return WorkChunkStatus::Done;
+    if (value == "Blocked") return WorkChunkStatus::Blocked;
+    if (value == "Failed") return WorkChunkStatus::Failed;
+    if (value == "Cancelled") return WorkChunkStatus::Cancelled;
+    return WorkChunkStatus::Ready;
+}
+
+void writeSchemaMeta(sqlite3* db, const std::string& key, const std::string& value) {
+    Statement stmt(
+        db,
+        "INSERT INTO schema_meta(key, value) VALUES(?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value;",
+        "Failed to prepare schema meta write");
+    bindText(stmt.get(), 1, key);
+    bindText(stmt.get(), 2, value);
+    if (sqlite3_step(stmt.get()) != SQLITE_DONE) {
+        throwSqliteError(db, "Failed to write schema metadata");
+    }
+}
+
+void ensureSchemaInfrastructure(sqlite3* db) {
+    execSql(db, kLegacySchemaSQL,
+            "Failed to initialize legacy thread database schema");
+    execSql(db, kNormalizedSchemaSQL,
+            "Failed to initialize normalized thread database schema");
+
+    auto version = readSchemaMeta(db, "schema_version");
+    if (!version.has_value()) {
+        writeSchemaMeta(db, "schema_version", "1");
+    }
+    if (!readSchemaMeta(db, "migration_legacy_to_v2").has_value()) {
+        writeSchemaMeta(db, "migration_legacy_to_v2", "pending");
+    }
+}
+
+void execPrepared(sqlite3* db, const std::string& sql,
+                  const std::function<void(sqlite3_stmt*)>& binder,
+                  const std::string& context) {
+    Statement stmt(db, sql, context);
+    binder(stmt.get());
+    if (sqlite3_step(stmt.get()) != SQLITE_DONE) {
+        throwSqliteError(db, context);
+    }
+}
+
+void deletePlanChildrenV2(sqlite3* db, const std::string& threadId,
+                          const std::string& planId) {
+    const std::vector<std::string> deletes = {
+        "DELETE FROM work_tasks_v2 WHERE thread_id=? AND plan_id=?;",
+        "DELETE FROM work_chunk_files_v2 WHERE thread_id=? AND plan_id=?;",
+        "DELETE FROM work_chunk_dependencies_v2 WHERE thread_id=? AND plan_id=?;",
+        "DELETE FROM work_chunks_v2 WHERE thread_id=? AND plan_id=?;"
+    };
+    for (const auto& sql : deletes) {
+        execPrepared(db, sql,
+                     [&](sqlite3_stmt* stmt) {
+                         bindText(stmt, 1, threadId);
+                         bindText(stmt, 2, planId);
+                     },
+                     "Failed to delete normalized plan children");
+    }
+}
+
+void persistPlanChildrenV2(sqlite3* db, const Plan& plan) {
+    int chunkOrdinal = 0;
+    for (const auto& chunk : plan.chunks) {
+        execPrepared(
+            db,
+            "INSERT INTO work_chunks_v2(thread_id, plan_id, chunk_id, title, goal, context, constraints, completion, planning_gate, status, assigned_agent_id, attempt_count, result_summary, review_summary, created_at, updated_at, cwd, verification_condition, handoff_notes, ordinal) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+            [&](sqlite3_stmt* stmt) {
+                const auto chunkJson = toJson(chunk);
+                bindText(stmt, 1, plan.threadId);
+                bindText(stmt, 2, plan.id);
+                bindText(stmt, 3, chunk.id);
+                bindText(stmt, 4, chunk.title);
+                bindText(stmt, 5, chunk.goal);
+                bindText(stmt, 6, chunk.context);
+                bindText(stmt, 7, chunk.constraints);
+                bindText(stmt, 8, chunk.completion);
+                sqlite3_bind_int(stmt, 9, chunk.planningGate ? 1 : 0);
+                const auto status = chunkJson.HasMember("status") && chunkJson["status"].IsString()
+                                        ? std::string(chunkJson["status"].GetString())
+                                        : std::string("Ready");
+                bindText(stmt, 10, status);
+                bindText(stmt, 11, chunk.assignedAgentId);
+                sqlite3_bind_int(stmt, 12, chunk.attemptCount);
+                bindText(stmt, 13, chunk.resultSummary);
+                bindText(stmt, 14, chunk.reviewSummary);
+                sqlite3_bind_int64(stmt, 15, static_cast<sqlite3_int64>(chunk.createdAt));
+                sqlite3_bind_int64(stmt, 16, static_cast<sqlite3_int64>(chunk.updatedAt));
+                bindText(stmt, 17, chunk.cwd);
+                bindText(stmt, 18, chunk.verificationCondition);
+                bindText(stmt, 19, chunk.handoffNotes);
+                sqlite3_bind_int(stmt, 20, chunkOrdinal);
+            },
+            "Failed to write normalized work chunk");
+
+        int dependencyOrdinal = 0;
+        for (const auto& dep : chunk.dependsOn) {
+            execPrepared(
+                db,
+                "INSERT INTO work_chunk_dependencies_v2(thread_id, plan_id, chunk_id, depends_on_chunk_id) VALUES(?, ?, ?, ?);",
+                [&](sqlite3_stmt* stmt) {
+                    (void)dependencyOrdinal;
+                    bindText(stmt, 1, plan.threadId);
+                    bindText(stmt, 2, plan.id);
+                    bindText(stmt, 3, chunk.id);
+                    bindText(stmt, 4, dep);
+                },
+                "Failed to write normalized work chunk dependency");
+            dependencyOrdinal++;
         }
 
-        execSql(db, "PRAGMA busy_timeout=5000;",
-                "Failed to set sqlite busy timeout");
-        sqlite3_exec(db, "PRAGMA journal_mode=WAL;", nullptr, nullptr, nullptr);
-        execSql(db, "PRAGMA synchronous=NORMAL;",
-                "Failed to configure sqlite synchronous mode");
-        execSql(db, "PRAGMA temp_store=MEMORY;",
-                "Failed to configure sqlite temp store");
-        execSql(db, "PRAGMA foreign_keys=ON;",
-                "Failed to enable sqlite foreign keys");
+        int fileOrdinal = 0;
+        for (const auto& path : chunk.filesToRead) {
+            execPrepared(
+                db,
+                "INSERT INTO work_chunk_files_v2(thread_id, plan_id, chunk_id, file_kind, path, ordinal) VALUES(?, ?, ?, ?, ?, ?);",
+                [&](sqlite3_stmt* stmt) {
+                    bindText(stmt, 1, plan.threadId);
+                    bindText(stmt, 2, plan.id);
+                    bindText(stmt, 3, chunk.id);
+                    bindText(stmt, 4, "read");
+                    bindText(stmt, 5, path);
+                    sqlite3_bind_int(stmt, 6, fileOrdinal);
+                },
+                "Failed to write normalized work chunk file");
+            fileOrdinal++;
+        }
+        fileOrdinal = 0;
+        for (const auto& path : chunk.filesToTouch) {
+            execPrepared(
+                db,
+                "INSERT INTO work_chunk_files_v2(thread_id, plan_id, chunk_id, file_kind, path, ordinal) VALUES(?, ?, ?, ?, ?, ?);",
+                [&](sqlite3_stmt* stmt) {
+                    bindText(stmt, 1, plan.threadId);
+                    bindText(stmt, 2, plan.id);
+                    bindText(stmt, 3, chunk.id);
+                    bindText(stmt, 4, "touch");
+                    bindText(stmt, 5, path);
+                    sqlite3_bind_int(stmt, 6, fileOrdinal);
+                },
+                "Failed to write normalized work chunk file");
+            fileOrdinal++;
+        }
 
-        execSql(db,
-                "CREATE TABLE IF NOT EXISTS threads ("
-                " thread_id TEXT PRIMARY KEY,"
-                " metadata_json TEXT NOT NULL,"
-                " created_at INTEGER NOT NULL,"
-                " last_active_at INTEGER NOT NULL"
-                ");"
-                "CREATE TABLE IF NOT EXISTS thread_states ("
-                " thread_id TEXT PRIMARY KEY,"
-                " agent_manifest_json TEXT,"
-                " permission_rules_json TEXT,"
-                " fleet_state_json TEXT"
-                ");"
-                "CREATE TABLE IF NOT EXISTS agent_turns ("
-                " id INTEGER PRIMARY KEY AUTOINCREMENT,"
-                " thread_id TEXT NOT NULL,"
-                " agent_id TEXT NOT NULL,"
-                " turn_json TEXT NOT NULL"
-                ");"
-                "CREATE INDEX IF NOT EXISTS idx_agent_turns_thread_agent"
-                " ON agent_turns(thread_id, agent_id, id);"
-                "CREATE TABLE IF NOT EXISTS plans ("
-                " thread_id TEXT NOT NULL,"
-                " plan_id TEXT NOT NULL,"
-                " plan_json TEXT NOT NULL,"
-                " created_at INTEGER NOT NULL,"
-                " updated_at INTEGER NOT NULL,"
-                " PRIMARY KEY(thread_id, plan_id)"
-                ");"
-                "CREATE TABLE IF NOT EXISTS agent_todos ("
-                " thread_id TEXT NOT NULL,"
-                " agent_id TEXT NOT NULL,"
-                " todo_json TEXT NOT NULL,"
-                " PRIMARY KEY(thread_id, agent_id)"
-                ");"
-                "CREATE TABLE IF NOT EXISTS agent_live_state ("
-                " thread_id TEXT NOT NULL,"
-                " agent_id TEXT NOT NULL,"
-                " state_json TEXT NOT NULL,"
-                " PRIMARY KEY(thread_id, agent_id)"
-                ");"
-                "CREATE TABLE IF NOT EXISTS rolling_memory_state ("
-                " thread_id TEXT NOT NULL,"
-                " agent_id TEXT NOT NULL,"
-                " state_json TEXT NOT NULL,"
-                " PRIMARY KEY(thread_id, agent_id)"
-                ");"
-                "CREATE TABLE IF NOT EXISTS compaction_snapshots ("
-                " id INTEGER PRIMARY KEY AUTOINCREMENT,"
-                " thread_id TEXT NOT NULL,"
-                " agent_id TEXT NOT NULL,"
-                " compaction_id TEXT NOT NULL,"
-                " snapshot_json TEXT NOT NULL"
-                ");"
-                "CREATE INDEX IF NOT EXISTS idx_compaction_thread_agent"
-                " ON compaction_snapshots(thread_id, agent_id, id);"
-                "CREATE TABLE IF NOT EXISTS artifacts ("
-                " thread_id TEXT NOT NULL,"
-                " owner_agent_id TEXT NOT NULL,"
-                " owner_friendly_name TEXT NOT NULL,"
-                " filename TEXT NOT NULL,"
-                " storage_path TEXT NOT NULL,"
-                " content TEXT NOT NULL,"
-                " kind TEXT,"
-                " description TEXT,"
-                " created_at INTEGER NOT NULL,"
-                " updated_at INTEGER NOT NULL,"
-                " PRIMARY KEY(thread_id, owner_agent_id, filename)"
-                ");",
-                "Failed to initialize thread database schema");
+        int taskOrdinal = 0;
+        for (const auto& task : chunk.tasks) {
+            execPrepared(
+                db,
+                "INSERT INTO work_tasks_v2(thread_id, plan_id, chunk_id, task_id, title, goal, status, notes, verification_condition, assigned_worker_id, created_at, updated_at, ordinal) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+                [&](sqlite3_stmt* stmt) {
+                    const auto taskJson = toJson(task);
+                    bindText(stmt, 1, plan.threadId);
+                    bindText(stmt, 2, plan.id);
+                    bindText(stmt, 3, chunk.id);
+                    bindText(stmt, 4, task.id);
+                    bindText(stmt, 5, task.title);
+                    bindText(stmt, 6, task.goal);
+                    const auto status = taskJson.HasMember("status") && taskJson["status"].IsString()
+                                            ? std::string(taskJson["status"].GetString())
+                                            : std::string("Ready");
+                    bindText(stmt, 7, status);
+                    bindText(stmt, 8, task.notes);
+                    bindText(stmt, 9, task.verificationCondition);
+                    bindText(stmt, 10, task.assignedWorkerId);
+                    sqlite3_bind_int64(stmt, 11, static_cast<sqlite3_int64>(task.createdAt));
+                    sqlite3_bind_int64(stmt, 12, static_cast<sqlite3_int64>(task.updatedAt));
+                    sqlite3_bind_int(stmt, 13, taskOrdinal);
+                },
+                "Failed to write normalized work task");
+            taskOrdinal++;
+        }
+
+        chunkOrdinal++;
+    }
+}
+
+void deleteTodoItemsV2(sqlite3* db, const std::string& threadId,
+                       const std::string& agentId) {
+    execPrepared(db,
+                 "DELETE FROM todo_items_v2 WHERE thread_id=? AND agent_id=?;",
+                 [&](sqlite3_stmt* stmt) {
+                     bindText(stmt, 1, threadId);
+                     bindText(stmt, 2, agentId);
+                 },
+                 "Failed to delete normalized todo items");
+}
+
+void persistTodoItemsV2(sqlite3* db, const AgentTodoList& list) {
+    for (const auto& item : list.items) {
+        execPrepared(
+            db,
+            "INSERT INTO todo_items_v2(thread_id, agent_id, item_id, text, status, chunk_id, plan_id, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?);",
+            [&](sqlite3_stmt* stmt) {
+                bindText(stmt, 1, list.threadId);
+                bindText(stmt, 2, list.agentId);
+                sqlite3_bind_int(stmt, 3, item.id);
+                bindText(stmt, 4, item.text);
+                const auto itemJson = toJson(item);
+                const auto status = itemJson.HasMember("status") && itemJson["status"].IsString()
+                                        ? std::string(itemJson["status"].GetString())
+                                        : std::string("Pending");
+                bindText(stmt, 5, status);
+                bindText(stmt, 6, item.chunkId);
+                bindText(stmt, 7, item.planId);
+                sqlite3_bind_int64(stmt, 8, static_cast<sqlite3_int64>(item.createdAt));
+                sqlite3_bind_int64(stmt, 9, static_cast<sqlite3_int64>(item.updatedAt));
+            },
+            "Failed to write normalized todo item");
+    }
+}
+
+sqlite3_int64 insertAgentTurnV2(sqlite3* db, const std::string& threadId,
+                                const std::string& agentId,
+                                const AgentTurn& turn) {
+    const auto turnJson = toJson(turn);
+    sqlite3_int64 rowId = 0;
+    execPrepared(
+        db,
+        "INSERT INTO agent_turns_v2(thread_id, agent_id, turn_id, stop_reason, prompt_tokens, completion_tokens, reasoning_tokens, total_tokens, estimated_cost_usd) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        [&](sqlite3_stmt* stmt) {
+            bindText(stmt, 1, threadId);
+            bindText(stmt, 2, agentId);
+            bindText(stmt, 3, turn.turnId);
+            const auto stopReason = turnJson.HasMember("stopReason") && turnJson["stopReason"].IsString()
+                                        ? std::string(turnJson["stopReason"].GetString())
+                                        : std::string("stop");
+            bindText(stmt, 4, stopReason);
+            sqlite3_bind_int64(stmt, 5, static_cast<sqlite3_int64>(turn.metrics.tokens.prompt));
+            sqlite3_bind_int64(stmt, 6, static_cast<sqlite3_int64>(turn.metrics.tokens.completion));
+            sqlite3_bind_int64(stmt, 7, static_cast<sqlite3_int64>(turn.metrics.tokens.reasoning));
+            sqlite3_bind_int64(stmt, 8, static_cast<sqlite3_int64>(turn.metrics.tokens.total));
+            sqlite3_bind_double(stmt, 9, turn.metrics.estimatedCostUsd);
+        },
+        "Failed to write normalized agent turn");
+    rowId = sqlite3_last_insert_rowid(db);
+    return rowId;
+}
+
+void persistAgentTurnMessagesV2(sqlite3* db, sqlite3_int64 turnRowId,
+                                const AgentTurn& turn) {
+    int messageOrdinal = 0;
+    for (const auto& msg : turn.messages) {
+        execPrepared(
+            db,
+            "INSERT INTO turn_messages_v2(turn_row_id, message_id, role, visibility, timestamp, parent_id, ordinal) VALUES(?, ?, ?, ?, ?, ?, ?);",
+            [&](sqlite3_stmt* stmt) {
+                const auto msgJson = toJson(msg);
+                sqlite3_bind_int64(stmt, 1, turnRowId);
+                bindText(stmt, 2, msg.id);
+                const auto role = msgJson.HasMember("role") && msgJson["role"].IsString()
+                                      ? std::string(msgJson["role"].GetString())
+                                      : std::string();
+                const auto visibility = msgJson.HasMember("visibility") && msgJson["visibility"].IsString()
+                                            ? std::string(msgJson["visibility"].GetString())
+                                            : std::string();
+                bindText(stmt, 3, role);
+                bindText(stmt, 4, visibility);
+                sqlite3_bind_int64(stmt, 5, static_cast<sqlite3_int64>(msg.timestamp));
+                if (msg.parentId.has_value()) bindText(stmt, 6, *msg.parentId);
+                else sqlite3_bind_null(stmt, 6);
+                sqlite3_bind_int(stmt, 7, messageOrdinal);
+            },
+            "Failed to write normalized turn message");
+        const sqlite3_int64 messageRowId = sqlite3_last_insert_rowid(db);
+        int partOrdinal = 0;
+        for (const auto& part : msg.content) {
+            execPrepared(
+                db,
+                "INSERT INTO message_parts_v2(message_row_id, ordinal, part_type, payload_json) VALUES(?, ?, ?, ?);",
+                [&](sqlite3_stmt* stmt) {
+                    const auto partJson = toJson(part);
+                    sqlite3_bind_int64(stmt, 1, messageRowId);
+                    sqlite3_bind_int(stmt, 2, partOrdinal);
+                    const auto type = partJson.HasMember("type") && partJson["type"].IsString()
+                                          ? std::string(partJson["type"].GetString())
+                                          : std::string();
+                    bindText(stmt, 3, type);
+                    bindText(stmt, 4, rapidJsonToString(partJson));
+                },
+                "Failed to write normalized message part");
+            partOrdinal++;
+        }
+        messageOrdinal++;
+    }
+}
+
+void migrateLegacyToV2(sqlite3* db) {
+    const auto state = readSchemaMeta(db, "migration_legacy_to_v2");
+    if (state.has_value() && *state == "complete") {
+        writeSchemaMeta(db, "schema_version", std::to_string(kCurrentSchemaVersion));
+        return;
+    }
+
+    withImmediateTransaction(db, [&]() {
+        writeSchemaMeta(db, "migration_legacy_to_v2", "in_progress");
+
+        Statement threadStmt(
+            db,
+            "SELECT thread_id, metadata_json FROM threads ORDER BY created_at ASC, thread_id ASC;",
+            "Failed to prepare legacy thread metadata migration read");
+        while (sqlite3_step(threadStmt.get()) == SQLITE_ROW) {
+            const auto* threadIdText = reinterpret_cast<const char*>(sqlite3_column_text(threadStmt.get(), 0));
+            const auto* metadataText = reinterpret_cast<const char*>(sqlite3_column_text(threadStmt.get(), 1));
+            if (!threadIdText || !metadataText) continue;
+            try {
+                const auto doc = parseJson(metadataText, "legacy thread metadata");
+                ThreadMetadata metadata = threadMetadataFromJson(doc);
+                if (metadata.threadId.empty()) metadata.threadId = threadIdText;
+                execPrepared(
+                    db,
+                    "INSERT OR IGNORE INTO thread_metadata_v2(thread_id, title, host_type, host_identifier, cwd, lead_persona, is_benchmark_run, benchmark_id, benchmark_task_id, active_plan_id, permission_mode, created_at, last_active_at, host_options_json, retryable_request_json) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+                    [&](sqlite3_stmt* stmt) {
+                        const auto metadataJson = toJson(metadata);
+                        const auto hostOptionsJson = toJson(metadata.hostOptions);
+                        bindText(stmt, 1, metadata.threadId);
+                        bindText(stmt, 2, metadata.title);
+                        const auto hostType = metadataJson.HasMember("hostOptions") && metadataJson["hostOptions"].IsObject() && metadataJson["hostOptions"].HasMember("type") && metadataJson["hostOptions"]["type"].IsString() ? std::string(metadataJson["hostOptions"]["type"].GetString()) : std::string();
+                        bindText(stmt, 3, hostType);
+                        bindText(stmt, 4, metadata.hostIdentifier);
+                        bindText(stmt, 5, metadata.cwd);
+                        bindText(stmt, 6, metadata.leadPersona);
+                        sqlite3_bind_int(stmt, 7, metadata.isBenchmarkRun ? 1 : 0);
+                        bindText(stmt, 8, metadata.benchmarkId);
+                        bindText(stmt, 9, metadata.benchmarkTaskId);
+                        bindText(stmt, 10, metadata.activePlanId);
+                        const auto permissionMode = metadataJson.HasMember("permissionMode") && metadataJson["permissionMode"].IsString() ? std::string(metadataJson["permissionMode"].GetString()) : std::string("Request");
+                        bindText(stmt, 11, permissionMode);
+                        sqlite3_bind_int64(stmt, 12, static_cast<sqlite3_int64>(metadata.createdAt));
+                        sqlite3_bind_int64(stmt, 13, static_cast<sqlite3_int64>(metadata.lastActiveAt));
+                        bindText(stmt, 14, rapidJsonToString(hostOptionsJson));
+                        if (metadataJson.HasMember("lastRetryableRequest") && !metadataJson["lastRetryableRequest"].IsNull()) {
+                            rapidjson::Document retryDoc;
+                            retryDoc.CopyFrom(metadataJson["lastRetryableRequest"], retryDoc.GetAllocator());
+                            bindText(stmt, 15, rapidJsonToString(retryDoc));
+                        } else {
+                            sqlite3_bind_null(stmt, 15);
+                        }
+                    },
+                    "Failed to write migrated thread metadata row");
+            } catch (...) {
+            }
+        }
+
+        Statement planStmt(
+            db,
+            "SELECT thread_id, plan_id, plan_json FROM plans ORDER BY thread_id ASC, plan_id ASC;",
+            "Failed to prepare legacy plan migration read");
+        while (sqlite3_step(planStmt.get()) == SQLITE_ROW) {
+            const auto* threadIdText = reinterpret_cast<const char*>(sqlite3_column_text(planStmt.get(), 0));
+            const auto* planIdText = reinterpret_cast<const char*>(sqlite3_column_text(planStmt.get(), 1));
+            const auto* planJsonText = reinterpret_cast<const char*>(sqlite3_column_text(planStmt.get(), 2));
+            if (!threadIdText || !planIdText || !planJsonText) continue;
+            try {
+                auto d = parseJson(planJsonText, "legacy plan");
+                Plan plan = planFromJson(d);
+                if (plan.id.empty()) plan.id = planIdText;
+                if (plan.threadId.empty()) plan.threadId = threadIdText;
+                execPrepared(
+                    db,
+                    "INSERT OR IGNORE INTO plans_v2(thread_id, plan_id, title, objective, context, strategy, status, notes, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+                    [&](sqlite3_stmt* stmt) {
+                        const auto planJson = toJson(plan);
+                        bindText(stmt, 1, plan.threadId);
+                        bindText(stmt, 2, plan.id);
+                        bindText(stmt, 3, plan.title);
+                        bindText(stmt, 4, plan.objective);
+                        bindText(stmt, 5, plan.context);
+                        bindText(stmt, 6, plan.strategy);
+                        const auto status = planJson.HasMember("status") && planJson["status"].IsString() ? std::string(planJson["status"].GetString()) : std::string("Draft");
+                        bindText(stmt, 7, status);
+                        bindText(stmt, 8, plan.notes);
+                        sqlite3_bind_int64(stmt, 9, static_cast<sqlite3_int64>(plan.createdAt));
+                        sqlite3_bind_int64(stmt, 10, static_cast<sqlite3_int64>(plan.updatedAt));
+                    },
+                    "Failed to write migrated plan row");
+                deletePlanChildrenV2(db, plan.threadId, plan.id);
+                persistPlanChildrenV2(db, plan);
+            } catch (...) {
+            }
+        }
+
+        Statement todoStmt(
+            db,
+            "SELECT thread_id, agent_id, todo_json FROM agent_todos ORDER BY thread_id ASC, agent_id ASC;",
+            "Failed to prepare legacy todo migration read");
+        while (sqlite3_step(todoStmt.get()) == SQLITE_ROW) {
+            const auto* threadIdText = reinterpret_cast<const char*>(sqlite3_column_text(todoStmt.get(), 0));
+            const auto* agentIdText = reinterpret_cast<const char*>(sqlite3_column_text(todoStmt.get(), 1));
+            const auto* todoJsonText = reinterpret_cast<const char*>(sqlite3_column_text(todoStmt.get(), 2));
+            if (!threadIdText || !agentIdText || !todoJsonText) continue;
+            try {
+                auto d = parseJson(todoJsonText, "legacy todo");
+                AgentTodoList list = agentTodoListFromJson(d);
+                if (list.threadId.empty()) list.threadId = threadIdText;
+                if (list.agentId.empty()) list.agentId = agentIdText;
+                execPrepared(
+                    db,
+                    "INSERT OR IGNORE INTO agent_todos_v2(thread_id, agent_id, next_id) VALUES(?, ?, ?);",
+                    [&](sqlite3_stmt* stmt) {
+                        bindText(stmt, 1, list.threadId);
+                        bindText(stmt, 2, list.agentId);
+                        sqlite3_bind_int(stmt, 3, list.nextId);
+                    },
+                    "Failed to write migrated todo header");
+                deleteTodoItemsV2(db, list.threadId, list.agentId);
+                persistTodoItemsV2(db, list);
+            } catch (...) {
+            }
+        }
+
+        Statement turnStmt(
+            db,
+            "SELECT thread_id, agent_id, turn_json FROM agent_turns ORDER BY id ASC;",
+            "Failed to prepare legacy agent turn migration read");
+        while (sqlite3_step(turnStmt.get()) == SQLITE_ROW) {
+            const auto* threadIdText = reinterpret_cast<const char*>(sqlite3_column_text(turnStmt.get(), 0));
+            const auto* agentIdText = reinterpret_cast<const char*>(sqlite3_column_text(turnStmt.get(), 1));
+            const auto* turnJsonText = reinterpret_cast<const char*>(sqlite3_column_text(turnStmt.get(), 2));
+            if (!threadIdText || !agentIdText || !turnJsonText) continue;
+            try {
+                auto d = parseJson(turnJsonText, "legacy turn");
+                AgentTurn turn = agentTurnFromJsonValue(d);
+                const sqlite3_int64 rowId = insertAgentTurnV2(db, threadIdText, agentIdText, turn);
+                persistAgentTurnMessagesV2(db, rowId, turn);
+            } catch (...) {
+            }
+        }
+
+        Statement manifestStmt(
+            db,
+            "SELECT thread_id, agent_manifest_json FROM thread_states WHERE agent_manifest_json IS NOT NULL ORDER BY thread_id ASC;",
+            "Failed to prepare legacy agent manifest migration read");
+        while (sqlite3_step(manifestStmt.get()) == SQLITE_ROW) {
+            const auto* threadIdText = reinterpret_cast<const char*>(sqlite3_column_text(manifestStmt.get(), 0));
+            const auto* manifestJsonText = reinterpret_cast<const char*>(sqlite3_column_text(manifestStmt.get(), 1));
+            if (!threadIdText || !manifestJsonText) continue;
+            try {
+                auto d = parseJson(manifestJsonText, "legacy agent manifest");
+                if (!d.IsObject()) {
+                    continue;
+                }
+
+                int legacyRootAgents = 0;
+                int v2RootAgents = 0;
+                int legacyTurnsCovered = 0;
+                int v2TurnsCovered = 0;
+
+                for (auto it = d.MemberBegin(); it != d.MemberEnd(); ++it) {
+                    if (!it->name.IsString() || !it->value.IsObject()) continue;
+                    std::string parentId;
+                    if (it->value.HasMember("parentId") && it->value["parentId"].IsString()) {
+                        parentId = it->value["parentId"].GetString();
+                    }
+                    if (parentId.empty()) {
+                        legacyRootAgents++;
+                    }
+
+                    Statement turnCountStmt(
+                        db,
+                        "SELECT COUNT(*) FROM agent_turns_v2 WHERE thread_id=? AND agent_id=?;",
+                        "Failed to prepare migrated legacy turn count query");
+                    bindText(turnCountStmt.get(), 1, threadIdText);
+                    bindText(turnCountStmt.get(), 2, it->name.GetString());
+                    if (sqlite3_step(turnCountStmt.get()) == SQLITE_ROW) {
+                        legacyTurnsCovered += sqlite3_column_int(turnCountStmt.get(), 0);
+                    }
+                }
+
+                Statement v2ManifestStmt(
+                    db,
+                    "SELECT agent_id, parent_id FROM agent_manifest_v2 WHERE thread_id=? ORDER BY agent_id ASC;",
+                    "Failed to prepare v2 manifest comparison query");
+                bindText(v2ManifestStmt.get(), 1, threadIdText);
+                while (sqlite3_step(v2ManifestStmt.get()) == SQLITE_ROW) {
+                    const auto* agentId = reinterpret_cast<const char*>(sqlite3_column_text(v2ManifestStmt.get(), 0));
+                    const auto* parentId = reinterpret_cast<const char*>(sqlite3_column_text(v2ManifestStmt.get(), 1));
+                    if (!parentId || *parentId == '\0') {
+                        v2RootAgents++;
+                    }
+                    if (agentId) {
+                        Statement turnCountStmt(
+                            db,
+                            "SELECT COUNT(*) FROM agent_turns_v2 WHERE thread_id=? AND agent_id=?;",
+                            "Failed to prepare migrated v2 turn count query");
+                        bindText(turnCountStmt.get(), 1, threadIdText);
+                        bindText(turnCountStmt.get(), 2, agentId);
+                        if (sqlite3_step(turnCountStmt.get()) == SQLITE_ROW) {
+                            v2TurnsCovered += sqlite3_column_int(turnCountStmt.get(), 0);
+                        }
+                    }
+                }
+
+                if (legacyRootAgents > 0 && (v2RootAgents == 0 || legacyTurnsCovered > v2TurnsCovered)) {
+                    execPrepared(db,
+                                 "DELETE FROM agent_manifest_v2 WHERE thread_id=?;",
+                                 [&](sqlite3_stmt* stmt) { bindText(stmt, 1, threadIdText); },
+                                 "Failed to clear migrated agent manifest");
+                }
+
+                for (auto it = d.MemberBegin(); it != d.MemberEnd(); ++it) {
+                    if (!it->name.IsString() || !it->value.IsObject()) continue;
+                    AgentManifestEntry entry;
+                    if (it->value.HasMember("persona") && it->value["persona"].IsString()) entry.persona = it->value["persona"].GetString();
+                    if (it->value.HasMember("parentId") && it->value["parentId"].IsString()) entry.parentId = it->value["parentId"].GetString();
+                    if (it->value.HasMember("friendlyName") && it->value["friendlyName"].IsString()) entry.friendlyName = it->value["friendlyName"].GetString();
+                    if (it->value.HasMember("title") && it->value["title"].IsString()) entry.title = it->value["title"].GetString();
+                    if (it->value.HasMember("persistHistory") && it->value["persistHistory"].IsBool()) entry.persistHistory = it->value["persistHistory"].GetBool();
+                    execPrepared(
+                        db,
+                        "INSERT OR REPLACE INTO agent_manifest_v2(thread_id, agent_id, persona, parent_id, friendly_name, title, persist_history) VALUES(?, ?, ?, ?, ?, ?, ?);",
+                        [&](sqlite3_stmt* stmt) {
+                            bindText(stmt, 1, threadIdText);
+                            bindText(stmt, 2, it->name.GetString());
+                            bindText(stmt, 3, entry.persona);
+                            bindText(stmt, 4, entry.parentId);
+                            bindText(stmt, 5, entry.friendlyName);
+                            bindText(stmt, 6, entry.title);
+                            sqlite3_bind_int(stmt, 7, entry.persistHistory ? 1 : 0);
+                        },
+                        "Failed to write migrated agent manifest entry");
+                }
+            } catch (...) {
+            }
+        }
+
+        writeSchemaMeta(db, "migration_legacy_to_v2", "complete");
+        writeSchemaMeta(db, "schema_version", std::to_string(kCurrentSchemaVersion));
+    });
+}
+
+
+struct SqliteConnection {
+    explicit SqliteConnection(const std::string& dbPath)
+        : dbPath_(dbPath) {
+        openAndConfigure();
     }
 
     ~SqliteConnection() {
@@ -259,7 +1152,82 @@ struct SqliteConnection {
         }
     }
 
+    SqliteConnection(const SqliteConnection&) = delete;
+    SqliteConnection& operator=(const SqliteConnection&) = delete;
+
+    /// Re-open the connection if the underlying handle went bad.
+    void ensureValid() {
+        if (db) {
+            // Quick health check – a failed PRAGMA is a sign the fd is dead.
+            char* err = nullptr;
+            const int rc = sqlite3_exec(db, "PRAGMA quick_check(1);",
+                                        nullptr, nullptr, &err);
+            if (err) sqlite3_free(err);
+            if (rc == SQLITE_OK) return;
+
+            // Connection is broken – tear it down and reopen.
+            sqlite3_close(db);
+            db = nullptr;
+        }
+        openAndConfigure();
+    }
+
     sqlite3* db = nullptr;
+
+private:
+    std::string dbPath_;
+
+    void openAndConfigure() {
+        std::string lastErr;
+        for (int attempt = 1; attempt <= kConnMaxRetries; ++attempt) {
+            if (sqlite3_open_v2(dbPath_.c_str(), &db,
+                                SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE |
+                                    SQLITE_OPEN_FULLMUTEX,
+                                nullptr) != SQLITE_OK) {
+                lastErr = db ? sqlite3_errmsg(db) : "unknown sqlite error";
+                if (db) {
+                    sqlite3_close(db);
+                    db = nullptr;
+                }
+                if (attempt < kConnMaxRetries) {
+                    std::this_thread::sleep_for(
+                        std::chrono::milliseconds(kConnRetryBaseMs * attempt));
+                    continue;
+                }
+                throw std::runtime_error(
+                    "Failed to open thread database (" +
+                    std::to_string(kConnMaxRetries) + " attempts): " + lastErr);
+            }
+
+            try {
+                execSql(db, "PRAGMA busy_timeout=5000;",
+                        "Failed to set sqlite busy timeout");
+                sqlite3_exec(db, "PRAGMA journal_mode=WAL;",
+                             nullptr, nullptr, nullptr);
+                execSql(db, "PRAGMA synchronous=NORMAL;",
+                        "Failed to configure sqlite synchronous mode");
+                execSql(db, "PRAGMA temp_store=MEMORY;",
+                        "Failed to configure sqlite temp store");
+                execSql(db, "PRAGMA foreign_keys=ON;",
+                        "Failed to enable sqlite foreign keys");
+                execSql(db, kSchemaSQL,
+                        "Failed to initialize thread database pragmas");
+                ensureSchemaInfrastructure(db);
+                migrateLegacyToV2(db);
+                return; // success
+            } catch (const std::exception& ex) {
+                lastErr = ex.what();
+                sqlite3_close(db);
+                db = nullptr;
+                if (attempt < kConnMaxRetries) {
+                    std::this_thread::sleep_for(
+                        std::chrono::milliseconds(kConnRetryBaseMs * attempt));
+                    continue;
+                }
+                throw;
+            }
+        }
+    }
 };
 
 std::shared_ptr<SqliteConnection> acquireConnection(const std::string& basePath) {
@@ -269,7 +1237,7 @@ std::shared_ptr<SqliteConnection> acquireConnection(const std::string& basePath)
 }
 
 void ensureThreadExists(sqlite3* db, const std::string& threadId) {
-    Statement stmt(db, "SELECT 1 FROM threads WHERE thread_id=? LIMIT 1;",
+    Statement stmt(db, "SELECT 1 FROM thread_metadata_v2 WHERE thread_id=? LIMIT 1;",
                    "Failed to prepare thread existence query");
     bindText(stmt.get(), 1, threadId);
     if (sqlite3_step(stmt.get()) == SQLITE_ROW) {
@@ -319,309 +1287,7 @@ AgentLiveState liveStateFromJson(const rapidjson::Value& value) {
     return liveState;
 }
 
-rapidjson::Value stringVectorToJson(const std::vector<std::string>& values,
-                                    rapidjson::Document::AllocatorType& a) {
-    rapidjson::Value arr(rapidjson::kArrayType);
-    for (const auto& value : values) {
-        arr.PushBack(rapidjson::Value(value.c_str(), a), a);
-    }
-    return arr;
-}
 
-std::vector<std::string> stringVectorFromJson(const rapidjson::Value& value) {
-    std::vector<std::string> out;
-    if (!value.IsArray()) {
-        return out;
-    }
-    for (const auto& item : value.GetArray()) {
-        if (item.IsString()) {
-            out.push_back(item.GetString());
-        }
-    }
-    return out;
-}
-
-rapidjson::Value rollingMemoryAnchorToJson(
-    const RollingMemoryAnchorRecord& anchor,
-    rapidjson::Document::AllocatorType& a) {
-    rapidjson::Value v(rapidjson::kObjectType);
-    v.AddMember("anchorId", rapidjson::Value(anchor.anchorId.c_str(), a), a);
-    v.AddMember("anchorType", rapidjson::Value(anchor.anchorType.c_str(), a), a);
-    v.AddMember("canonicalText", rapidjson::Value(anchor.canonicalText.c_str(), a), a);
-    v.AddMember("exactQuote", rapidjson::Value(anchor.exactQuote.c_str(), a), a);
-    v.AddMember("importance", rapidjson::Value(anchor.importance.c_str(), a), a);
-    v.AddMember("volatility", rapidjson::Value(anchor.volatility.c_str(), a), a);
-    v.AddMember("retrievalTags", stringVectorToJson(anchor.retrievalTags, a), a);
-    v.AddMember("sourceTurnIds", stringVectorToJson(anchor.sourceTurnIds, a), a);
-    return v;
-}
-
-RollingMemoryAnchorRecord rollingMemoryAnchorFromJson(const rapidjson::Value& value) {
-    RollingMemoryAnchorRecord anchor;
-    if (!value.IsObject()) {
-        return anchor;
-    }
-    if (value.HasMember("anchorId") && value["anchorId"].IsString()) anchor.anchorId = value["anchorId"].GetString();
-    if (value.HasMember("anchorType") && value["anchorType"].IsString()) anchor.anchorType = value["anchorType"].GetString();
-    if (value.HasMember("canonicalText") && value["canonicalText"].IsString()) anchor.canonicalText = value["canonicalText"].GetString();
-    if (value.HasMember("exactQuote") && value["exactQuote"].IsString()) anchor.exactQuote = value["exactQuote"].GetString();
-    if (value.HasMember("importance") && value["importance"].IsString()) anchor.importance = value["importance"].GetString();
-    if (value.HasMember("volatility") && value["volatility"].IsString()) anchor.volatility = value["volatility"].GetString();
-    if (value.HasMember("retrievalTags")) anchor.retrievalTags = stringVectorFromJson(value["retrievalTags"]);
-    if (value.HasMember("sourceTurnIds")) anchor.sourceTurnIds = stringVectorFromJson(value["sourceTurnIds"]);
-    return anchor;
-}
-
-rapidjson::Value rollingMemoryBridgeToJson(
-    const RollingMemoryBridgeRecord& bridge,
-    rapidjson::Document::AllocatorType& a) {
-    rapidjson::Value v(rapidjson::kObjectType);
-    v.AddMember("bridgeId", rapidjson::Value(bridge.bridgeId.c_str(), a), a);
-    v.AddMember("targetTaskSignature", rapidjson::Value(bridge.targetTaskSignature.c_str(), a), a);
-    v.AddMember("relevantAnchorIds", stringVectorToJson(bridge.relevantAnchorIds, a), a);
-    v.AddMember("relevantEpisodeIds", stringVectorToJson(bridge.relevantEpisodeIds, a), a);
-    v.AddMember("relevantReflectionIds", stringVectorToJson(bridge.relevantReflectionIds, a), a);
-    v.AddMember("rationale", rapidjson::Value(bridge.rationale.c_str(), a), a);
-    v.AddMember("executionHint", rapidjson::Value(bridge.executionHint.c_str(), a), a);
-    v.AddMember("createdAt", bridge.createdAt, a);
-    return v;
-}
-
-RollingMemoryBridgeRecord rollingMemoryBridgeFromJson(const rapidjson::Value& value) {
-    RollingMemoryBridgeRecord bridge;
-    if (!value.IsObject()) {
-        return bridge;
-    }
-    if (value.HasMember("bridgeId") && value["bridgeId"].IsString()) bridge.bridgeId = value["bridgeId"].GetString();
-    if (value.HasMember("targetTaskSignature") && value["targetTaskSignature"].IsString()) bridge.targetTaskSignature = value["targetTaskSignature"].GetString();
-    if (value.HasMember("relevantAnchorIds")) bridge.relevantAnchorIds = stringVectorFromJson(value["relevantAnchorIds"]);
-    if (value.HasMember("relevantEpisodeIds")) bridge.relevantEpisodeIds = stringVectorFromJson(value["relevantEpisodeIds"]);
-    if (value.HasMember("relevantReflectionIds")) bridge.relevantReflectionIds = stringVectorFromJson(value["relevantReflectionIds"]);
-    if (value.HasMember("rationale") && value["rationale"].IsString()) bridge.rationale = value["rationale"].GetString();
-    if (value.HasMember("executionHint") && value["executionHint"].IsString()) bridge.executionHint = value["executionHint"].GetString();
-    if (value.HasMember("createdAt") && value["createdAt"].IsUint64()) bridge.createdAt = value["createdAt"].GetUint64();
-    return bridge;
-}
-
-rapidjson::Value rollingMemoryChunkToJson(const RollingMemoryChunk& chunk,
-                                          rapidjson::Document::AllocatorType& a) {
-    rapidjson::Value v(rapidjson::kObjectType);
-    v.AddMember("chunkId", rapidjson::Value(chunk.chunkId.c_str(), a), a);
-    v.AddMember("sourceStartTurnId",
-                rapidjson::Value(chunk.sourceStartTurnId.c_str(), a), a);
-    v.AddMember("sourceEndTurnId",
-                rapidjson::Value(chunk.sourceEndTurnId.c_str(), a), a);
-    rapidjson::Value ids(rapidjson::kArrayType);
-    for (const auto& id : chunk.sourceTurnIds) {
-        ids.PushBack(rapidjson::Value(id.c_str(), a), a);
-    }
-    v.AddMember("sourceTurnIds", ids, a);
-    v.AddMember("chunkKind", rapidjson::Value(chunk.chunkKind.c_str(), a), a);
-    v.AddMember("summary", rapidjson::Value(chunk.summary.c_str(), a), a);
-    v.AddMember("currentTask", rapidjson::Value(chunk.currentTask.c_str(), a), a);
-    v.AddMember("suggestedResponse",
-                rapidjson::Value(chunk.suggestedResponse.c_str(), a), a);
-    v.AddMember("activeGoal", rapidjson::Value(chunk.activeGoal.c_str(), a), a);
-    v.AddMember("keyActions", stringVectorToJson(chunk.keyActions, a), a);
-    v.AddMember("keyToolResults", stringVectorToJson(chunk.keyToolResults, a), a);
-    v.AddMember("openLoops", stringVectorToJson(chunk.openLoops, a), a);
-    v.AddMember("filesSurfaces", stringVectorToJson(chunk.filesSurfaces, a), a);
-    v.AddMember("retrievalTags", stringVectorToJson(chunk.retrievalTags, a), a);
-    v.AddMember("derivedFromChunkIds", stringVectorToJson(chunk.derivedFromChunkIds, a), a);
-    v.AddMember("anchorIds", stringVectorToJson(chunk.anchorIds, a), a);
-    v.AddMember("sourceTokens", chunk.sourceTokens, a);
-    v.AddMember("summaryTokens", chunk.summaryTokens, a);
-    v.AddMember("createdAt", chunk.createdAt, a);
-    v.AddMember("buffered", chunk.buffered, a);
-    v.AddMember("active", chunk.active, a);
-    v.AddMember("superseded", chunk.superseded, a);
-    return v;
-}
-
-RollingMemoryChunk rollingMemoryChunkFromJson(const rapidjson::Value& value) {
-    RollingMemoryChunk chunk;
-    if (!value.IsObject()) {
-        return chunk;
-    }
-    if (value.HasMember("chunkId") && value["chunkId"].IsString()) {
-        chunk.chunkId = value["chunkId"].GetString();
-    }
-    if (value.HasMember("sourceStartTurnId") &&
-        value["sourceStartTurnId"].IsString()) {
-        chunk.sourceStartTurnId = value["sourceStartTurnId"].GetString();
-    }
-    if (value.HasMember("sourceEndTurnId") && value["sourceEndTurnId"].IsString()) {
-        chunk.sourceEndTurnId = value["sourceEndTurnId"].GetString();
-    }
-    if (value.HasMember("sourceTurnIds") && value["sourceTurnIds"].IsArray()) {
-        for (const auto& id : value["sourceTurnIds"].GetArray()) {
-            if (id.IsString()) {
-                chunk.sourceTurnIds.push_back(id.GetString());
-            }
-        }
-    }
-    if (value.HasMember("summary") && value["summary"].IsString()) {
-        chunk.summary = value["summary"].GetString();
-    }
-    if (value.HasMember("chunkKind") && value["chunkKind"].IsString()) chunk.chunkKind = value["chunkKind"].GetString();
-    if (value.HasMember("currentTask") && value["currentTask"].IsString()) chunk.currentTask = value["currentTask"].GetString();
-    if (value.HasMember("suggestedResponse") && value["suggestedResponse"].IsString()) chunk.suggestedResponse = value["suggestedResponse"].GetString();
-    if (value.HasMember("activeGoal") && value["activeGoal"].IsString()) chunk.activeGoal = value["activeGoal"].GetString();
-    if (value.HasMember("keyActions")) chunk.keyActions = stringVectorFromJson(value["keyActions"]);
-    if (value.HasMember("keyToolResults")) chunk.keyToolResults = stringVectorFromJson(value["keyToolResults"]);
-    if (value.HasMember("openLoops")) chunk.openLoops = stringVectorFromJson(value["openLoops"]);
-    if (value.HasMember("filesSurfaces")) chunk.filesSurfaces = stringVectorFromJson(value["filesSurfaces"]);
-    if (value.HasMember("retrievalTags")) chunk.retrievalTags = stringVectorFromJson(value["retrievalTags"]);
-    if (value.HasMember("derivedFromChunkIds")) chunk.derivedFromChunkIds = stringVectorFromJson(value["derivedFromChunkIds"]);
-    if (value.HasMember("anchorIds")) chunk.anchorIds = stringVectorFromJson(value["anchorIds"]);
-    if (value.HasMember("sourceTokens") && value["sourceTokens"].IsUint()) {
-        chunk.sourceTokens = value["sourceTokens"].GetUint();
-    }
-    if (value.HasMember("summaryTokens") && value["summaryTokens"].IsUint()) {
-        chunk.summaryTokens = value["summaryTokens"].GetUint();
-    }
-    if (value.HasMember("createdAt") && value["createdAt"].IsUint64()) {
-        chunk.createdAt = value["createdAt"].GetUint64();
-    }
-    if (value.HasMember("buffered") && value["buffered"].IsBool()) {
-        chunk.buffered = value["buffered"].GetBool();
-    }
-    if (value.HasMember("active") && value["active"].IsBool()) {
-        chunk.active = value["active"].GetBool();
-    }
-    if (value.HasMember("superseded") && value["superseded"].IsBool()) {
-        chunk.superseded = value["superseded"].GetBool();
-    }
-    return chunk;
-}
-
-rapidjson::Document rollingMemoryStateToJson(const RollingMemoryState& state) {
-    rapidjson::Document d;
-    d.SetObject();
-    auto& a = d.GetAllocator();
-    d.AddMember("threadId", rapidjson::Value(state.threadId.c_str(), a), a);
-    d.AddMember("agentId", rapidjson::Value(state.agentId.c_str(), a), a);
-    d.AddMember("lastObservedTurnId",
-                rapidjson::Value(state.lastObservedTurnId.c_str(), a), a);
-    d.AddMember("lastReflectedObservationId",
-                rapidjson::Value(state.lastReflectedObservationId.c_str(), a), a);
-    d.AddMember("lastContextWindow", state.lastContextWindow, a);
-    d.AddMember("lastBufferThresholdTokens", state.lastBufferThresholdTokens, a);
-    d.AddMember("lastTargetThresholdTokens", state.lastTargetThresholdTokens, a);
-    d.AddMember("lastEmergencyThresholdTokens", state.lastEmergencyThresholdTokens,
-                a);
-    d.AddMember("lastRetainedTailTokens", state.lastRetainedTailTokens, a);
-    d.AddMember("lastUpdatedAt", state.lastUpdatedAt, a);
-    d.AddMember("observationInFlight", state.observationInFlight, a);
-    d.AddMember("reflectionInFlight", state.reflectionInFlight, a);
-
-    d.AddMember("bridgeInFlight", state.bridgeInFlight, a);
-    d.AddMember("lastBridgeId", rapidjson::Value(state.lastBridgeId.c_str(), a), a);
-    rapidjson::Value observations(rapidjson::kArrayType);
-    for (const auto& chunk : state.observationChunks) {
-        observations.PushBack(rollingMemoryChunkToJson(chunk, a), a);
-    }
-    d.AddMember("observationChunks", observations, a);
-
-    rapidjson::Value reflections(rapidjson::kArrayType);
-    for (const auto& chunk : state.reflectionChunks) {
-        reflections.PushBack(rollingMemoryChunkToJson(chunk, a), a);
-    }
-    d.AddMember("reflectionChunks", reflections, a);
-
-    rapidjson::Value anchors(rapidjson::kArrayType);
-    for (const auto& anchor : state.anchors) {
-        anchors.PushBack(rollingMemoryAnchorToJson(anchor, a), a);
-    }
-    d.AddMember("anchors", anchors, a);
-
-    rapidjson::Value bridges(rapidjson::kArrayType);
-    for (const auto& bridge : state.bridges) {
-        bridges.PushBack(rollingMemoryBridgeToJson(bridge, a), a);
-    }
-    d.AddMember("bridges", bridges, a);
-    return d;
-}
-
-RollingMemoryState rollingMemoryStateFromJson(const rapidjson::Value& value) {
-    RollingMemoryState state;
-    if (!value.IsObject()) {
-        return state;
-    }
-    if (value.HasMember("threadId") && value["threadId"].IsString()) {
-        state.threadId = value["threadId"].GetString();
-    }
-    if (value.HasMember("agentId") && value["agentId"].IsString()) {
-        state.agentId = value["agentId"].GetString();
-    }
-    if (value.HasMember("lastObservedTurnId") &&
-        value["lastObservedTurnId"].IsString()) {
-        state.lastObservedTurnId = value["lastObservedTurnId"].GetString();
-    }
-    if (value.HasMember("lastReflectedObservationId") &&
-        value["lastReflectedObservationId"].IsString()) {
-        state.lastReflectedObservationId =
-            value["lastReflectedObservationId"].GetString();
-    }
-    if (value.HasMember("lastContextWindow") && value["lastContextWindow"].IsUint()) {
-        state.lastContextWindow = value["lastContextWindow"].GetUint();
-    }
-    if (value.HasMember("lastBufferThresholdTokens") &&
-        value["lastBufferThresholdTokens"].IsUint()) {
-        state.lastBufferThresholdTokens = value["lastBufferThresholdTokens"].GetUint();
-    }
-    if (value.HasMember("lastTargetThresholdTokens") &&
-        value["lastTargetThresholdTokens"].IsUint()) {
-        state.lastTargetThresholdTokens = value["lastTargetThresholdTokens"].GetUint();
-    }
-    if (value.HasMember("lastEmergencyThresholdTokens") &&
-        value["lastEmergencyThresholdTokens"].IsUint()) {
-        state.lastEmergencyThresholdTokens =
-            value["lastEmergencyThresholdTokens"].GetUint();
-    }
-    if (value.HasMember("lastRetainedTailTokens") &&
-        value["lastRetainedTailTokens"].IsUint()) {
-        state.lastRetainedTailTokens = value["lastRetainedTailTokens"].GetUint();
-    }
-    if (value.HasMember("lastUpdatedAt") && value["lastUpdatedAt"].IsUint64()) {
-        state.lastUpdatedAt = value["lastUpdatedAt"].GetUint64();
-    }
-    if (value.HasMember("observationInFlight") &&
-        value["observationInFlight"].IsBool()) {
-        state.observationInFlight = value["observationInFlight"].GetBool();
-    }
-    if (value.HasMember("reflectionInFlight") &&
-        value["reflectionInFlight"].IsBool()) {
-        state.reflectionInFlight = value["reflectionInFlight"].GetBool();
-    }
-    if (value.HasMember("bridgeInFlight") && value["bridgeInFlight"].IsBool()) {
-        state.bridgeInFlight = value["bridgeInFlight"].GetBool();
-    }
-    if (value.HasMember("lastBridgeId") && value["lastBridgeId"].IsString()) {
-        state.lastBridgeId = value["lastBridgeId"].GetString();
-    }
-    if (value.HasMember("observationChunks") && value["observationChunks"].IsArray()) {
-        for (const auto& chunk : value["observationChunks"].GetArray()) {
-            state.observationChunks.push_back(rollingMemoryChunkFromJson(chunk));
-        }
-    }
-    if (value.HasMember("reflectionChunks") && value["reflectionChunks"].IsArray()) {
-        for (const auto& chunk : value["reflectionChunks"].GetArray()) {
-            state.reflectionChunks.push_back(rollingMemoryChunkFromJson(chunk));
-        }
-    }
-    if (value.HasMember("anchors") && value["anchors"].IsArray()) {
-        for (const auto& anchor : value["anchors"].GetArray()) {
-            state.anchors.push_back(rollingMemoryAnchorFromJson(anchor));
-        }
-    }
-    if (value.HasMember("bridges") && value["bridges"].IsArray()) {
-        for (const auto& bridge : value["bridges"].GetArray()) {
-            state.bridges.push_back(rollingMemoryBridgeFromJson(bridge));
-        }
-    }
-    return state;
-}
 
 rapidjson::Value compactionSnapshotToJson(
     const CompactionSnapshot& snapshot, rapidjson::Document::AllocatorType& a) {
@@ -828,7 +1494,7 @@ ThreadManager::ThreadManager(std::string basePath)
 std::vector<std::string> ThreadManager::listThreads() const {
     auto conn = acquireConnection(basePath_);
     Statement stmt(conn->db,
-                   "SELECT thread_id FROM threads ORDER BY created_at ASC, thread_id ASC;",
+                   "SELECT thread_id FROM thread_metadata_v2 ORDER BY created_at ASC, thread_id ASC;",
                    "Failed to prepare list threads query");
     std::vector<std::string> threads;
     while (sqlite3_step(stmt.get()) == SQLITE_ROW) {
@@ -851,17 +1517,39 @@ std::string ThreadManager::createThread(const ThreadMetadata& metadata) {
     std::filesystem::create_directories(
         std::filesystem::path(basePath_) / persisted.threadId);
 
-    Statement stmt(conn->db,
-                   "INSERT INTO threads(thread_id, metadata_json, created_at, last_active_at)"
-                   " VALUES(?, ?, ?, ?);",
-                   "Failed to prepare create thread statement");
-    bindText(stmt.get(), 1, persisted.threadId);
-    bindText(stmt.get(), 2, rapidJsonToString(toJson(persisted)));
-    sqlite3_bind_int64(stmt.get(), 3, static_cast<sqlite3_int64>(persisted.createdAt));
-    sqlite3_bind_int64(stmt.get(), 4, static_cast<sqlite3_int64>(persisted.lastActiveAt));
-    if (sqlite3_step(stmt.get()) != SQLITE_DONE) {
-        throwSqliteError(conn->db, "Failed to create thread");
-    }
+    const auto metadataJson = toJson(persisted);
+    const auto hostOptionsJson = toJson(persisted.hostOptions);
+    execPrepared(
+        conn->db,
+        "INSERT INTO thread_metadata_v2(thread_id, title, host_type, host_identifier, cwd, lead_persona, is_benchmark_run, benchmark_id, benchmark_task_id, active_plan_id, permission_mode, created_at, last_active_at, host_options_json, retryable_request_json) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        [&](sqlite3_stmt* stmt) {
+            bindText(stmt, 1, persisted.threadId);
+            bindText(stmt, 2, persisted.title);
+            const auto hostType = metadataJson.HasMember("hostOptions") &&
+                                          metadataJson["hostOptions"].IsObject() &&
+                                          metadataJson["hostOptions"].HasMember("type") &&
+                                          metadataJson["hostOptions"]["type"].IsString()
+                                      ? std::string(metadataJson["hostOptions"]["type"].GetString())
+                                      : std::string();
+            bindText(stmt, 3, hostType);
+            bindText(stmt, 4, persisted.hostIdentifier);
+            bindText(stmt, 5, persisted.cwd);
+            bindText(stmt, 6, persisted.leadPersona);
+            sqlite3_bind_int(stmt, 7, persisted.isBenchmarkRun ? 1 : 0);
+            bindText(stmt, 8, persisted.benchmarkId);
+            bindText(stmt, 9, persisted.benchmarkTaskId);
+            bindText(stmt, 10, persisted.activePlanId);
+            const auto permissionMode = metadataJson.HasMember("permissionMode") &&
+                                                metadataJson["permissionMode"].IsString()
+                                            ? std::string(metadataJson["permissionMode"].GetString())
+                                            : std::string("Request");
+            bindText(stmt, 11, permissionMode);
+            sqlite3_bind_int64(stmt, 12, static_cast<sqlite3_int64>(persisted.createdAt));
+            sqlite3_bind_int64(stmt, 13, static_cast<sqlite3_int64>(persisted.lastActiveAt));
+            bindText(stmt, 14, rapidJsonToString(hostOptionsJson));
+            sqlite3_bind_null(stmt, 15);
+        },
+        "Failed to create thread");
 
     return persisted.threadId;
 }
@@ -869,19 +1557,65 @@ std::string ThreadManager::createThread(const ThreadMetadata& metadata) {
 ThreadMetadata ThreadManager::getMetadata(const std::string& threadId) const {
     auto conn = acquireConnection(basePath_);
     Statement stmt(conn->db,
-                   "SELECT metadata_json FROM threads WHERE thread_id=?;",
+                   "SELECT title, host_type, host_identifier, cwd, lead_persona, is_benchmark_run, benchmark_id, benchmark_task_id, active_plan_id, permission_mode, created_at, last_active_at, host_options_json, retryable_request_json FROM thread_metadata_v2 WHERE thread_id=?;",
                    "Failed to prepare thread metadata query");
     bindText(stmt.get(), 1, threadId);
     if (sqlite3_step(stmt.get()) != SQLITE_ROW) {
         throw std::runtime_error("Thread not found: " + threadId);
     }
 
-    const auto* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 0));
-    const std::string json = text ? text : "";
-    auto d = parseJson(json, "thread metadata");
-    auto meta = threadMetadataFromJson(d);
-    if (meta.threadId.empty()) {
-        meta.threadId = threadId;
+    ThreadMetadata meta;
+    meta.threadId = threadId;
+    const auto* title = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 0));
+    const auto* hostIdentifier = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 2));
+    const auto* cwd = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 3));
+    const auto* leadPersona = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 4));
+    const auto* benchmarkId = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 6));
+    const auto* benchmarkTaskId = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 7));
+    const auto* activePlanId = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 8));
+    const auto* permissionMode = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 9));
+    const auto* hostOptionsJson = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 12));
+    const auto* retryableRequestJson = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 13));
+    meta.title = title ? title : "Untitled Thread";
+    meta.hostIdentifier = hostIdentifier ? hostIdentifier : "";
+    meta.cwd = cwd ? cwd : "";
+    meta.leadPersona = leadPersona ? leadPersona : "";
+    meta.isBenchmarkRun = sqlite3_column_int(stmt.get(), 5) != 0;
+    meta.benchmarkId = benchmarkId ? benchmarkId : "";
+    meta.benchmarkTaskId = benchmarkTaskId ? benchmarkTaskId : "";
+    meta.activePlanId = activePlanId ? activePlanId : "";
+    meta.permissionMode = permissionMode ? threadPermissionModeFromStoredString(permissionMode)
+                                         : ThreadPermissionMode::Request;
+    meta.createdAt = static_cast<uint64_t>(sqlite3_column_int64(stmt.get(), 10));
+    meta.lastActiveAt = static_cast<uint64_t>(sqlite3_column_int64(stmt.get(), 11));
+    if (hostOptionsJson && *hostOptionsJson) {
+        auto d = parseJson(hostOptionsJson, "thread host options");
+        meta.hostOptions = hostCreationOptionsFromJsonValue(d);
+    }
+    if (retryableRequestJson && *retryableRequestJson) {
+        auto d = parseJson(retryableRequestJson, "thread retryable request");
+        if (d.IsObject()) {
+            ThreadMetadata::RetryableRequest retry;
+            retry.targetAgentId = d.HasMember("targetAgentId") && d["targetAgentId"].IsString() ? d["targetAgentId"].GetString() : "";
+            retry.turnId = d.HasMember("turnId") && d["turnId"].IsString() ? d["turnId"].GetString() : "";
+            retry.text = d.HasMember("text") && d["text"].IsString() ? d["text"].GetString() : "";
+            retry.recordedAt = d.HasMember("recordedAt") && d["recordedAt"].IsUint64() ? d["recordedAt"].GetUint64() : 0;
+            retry.eligible = d.HasMember("eligible") && d["eligible"].IsBool() ? d["eligible"].GetBool() : false;
+            if (d.HasMember("images") && d["images"].IsArray()) {
+                for (const auto& imageValue : d["images"].GetArray()) {
+                    try {
+                        auto part = messagePartFromJsonValue(imageValue);
+                        if (auto* image = std::get_if<ImageContent>(&part)) {
+                            retry.images.push_back(*image);
+                        }
+                    } catch (...) {
+                    }
+                }
+            }
+            if (!retry.text.empty() || !retry.images.empty()) {
+                meta.lastRetryableRequest = std::move(retry);
+            }
+        }
     }
     return meta;
 }
@@ -911,24 +1645,72 @@ AgentHistory ThreadManager::loadAgentHistory(const std::string& threadId,
     AgentHistory history;
     history.threadId = threadId;
 
-    Statement stmt(conn->db,
-                   "SELECT turn_json FROM agent_turns "
-                   "WHERE thread_id=? AND agent_id=? ORDER BY id ASC;",
-                   "Failed to prepare agent history query");
-    bindText(stmt.get(), 1, threadId);
-    bindText(stmt.get(), 2, agentId);
+    Statement turnStmt(conn->db,
+                       "SELECT id, turn_id, stop_reason, prompt_tokens, completion_tokens, reasoning_tokens, total_tokens, estimated_cost_usd FROM agent_turns_v2 WHERE thread_id=? AND agent_id=? ORDER BY id ASC;",
+                       "Failed to prepare normalized agent history query");
+    bindText(turnStmt.get(), 1, threadId);
+    bindText(turnStmt.get(), 2, agentId);
 
-    while (sqlite3_step(stmt.get()) == SQLITE_ROW) {
-        const auto* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 0));
-        if (!text) {
-            continue;
+    while (sqlite3_step(turnStmt.get()) == SQLITE_ROW) {
+        AgentTurn turn;
+        const sqlite3_int64 turnRowId = sqlite3_column_int64(turnStmt.get(), 0);
+        const auto* turnId = reinterpret_cast<const char*>(sqlite3_column_text(turnStmt.get(), 1));
+        const auto* stopReason = reinterpret_cast<const char*>(sqlite3_column_text(turnStmt.get(), 2));
+        turn.turnId = turnId ? turnId : "";
+        turn.metrics.tokens.prompt = static_cast<uint64_t>(sqlite3_column_int64(turnStmt.get(), 3));
+        turn.metrics.tokens.completion = static_cast<uint64_t>(sqlite3_column_int64(turnStmt.get(), 4));
+        turn.metrics.tokens.reasoning = static_cast<uint64_t>(sqlite3_column_int64(turnStmt.get(), 5));
+        turn.metrics.tokens.total = static_cast<uint64_t>(sqlite3_column_int64(turnStmt.get(), 6));
+        turn.metrics.estimatedCostUsd = sqlite3_column_double(turnStmt.get(), 7);
+        if (stopReason) {
+            auto turnJson = toJson(turn);
+            turnJson.AddMember("stopReason", rapidjson::Value(stopReason, turnJson.GetAllocator()), turnJson.GetAllocator());
+            turn = agentTurnFromJsonValue(turnJson);
         }
-        try {
-            auto d = parseJson(text, "agent history row");
-            history.turns.push_back(agentTurnFromJsonValue(d));
-        } catch (...) {
-            // Skip malformed rows rather than failing thread resume.
+
+        Statement msgStmt(conn->db,
+                          "SELECT id, message_id, role, visibility, timestamp, parent_id FROM turn_messages_v2 WHERE turn_row_id=? ORDER BY ordinal ASC;",
+                          "Failed to prepare normalized turn messages query");
+        sqlite3_bind_int64(msgStmt.get(), 1, turnRowId);
+        while (sqlite3_step(msgStmt.get()) == SQLITE_ROW) {
+            Message msg;
+            const sqlite3_int64 messageRowId = sqlite3_column_int64(msgStmt.get(), 0);
+            const auto* messageId = reinterpret_cast<const char*>(sqlite3_column_text(msgStmt.get(), 1));
+            const auto* role = reinterpret_cast<const char*>(sqlite3_column_text(msgStmt.get(), 2));
+            const auto* visibility = reinterpret_cast<const char*>(sqlite3_column_text(msgStmt.get(), 3));
+            const auto* parentId = reinterpret_cast<const char*>(sqlite3_column_text(msgStmt.get(), 5));
+            msg.id = messageId ? messageId : "";
+            msg.timestamp = static_cast<uint64_t>(sqlite3_column_int64(msgStmt.get(), 4));
+            if (parentId) msg.parentId = std::string(parentId);
+            rapidjson::Document msgJson;
+            msgJson.SetObject();
+            auto& a = msgJson.GetAllocator();
+            msgJson.AddMember("id", rapidjson::Value(msg.id.c_str(), a), a);
+            msgJson.AddMember("role", rapidjson::Value(role ? role : "assistant", a), a);
+            msgJson.AddMember("visibility", rapidjson::Value(visibility ? visibility : "visible", a), a);
+            rapidjson::Value content(rapidjson::kArrayType);
+            msgJson.AddMember("content", content, a);
+            msgJson.AddMember("timestamp", msg.timestamp, a);
+            if (msg.parentId.has_value()) msgJson.AddMember("parentId", rapidjson::Value(msg.parentId->c_str(), a), a);
+            else msgJson.AddMember("parentId", rapidjson::Value(rapidjson::kNullType), a);
+            msg = messageFromJsonValue(msgJson);
+
+            Statement partStmt(conn->db,
+                               "SELECT payload_json FROM message_parts_v2 WHERE message_row_id=? ORDER BY ordinal ASC;",
+                               "Failed to prepare normalized message parts query");
+            sqlite3_bind_int64(partStmt.get(), 1, messageRowId);
+            while (sqlite3_step(partStmt.get()) == SQLITE_ROW) {
+                const auto* payload = reinterpret_cast<const char*>(sqlite3_column_text(partStmt.get(), 0));
+                if (!payload) continue;
+                try {
+                    auto payloadDoc = parseJson(payload, "message part payload");
+                    msg.content.push_back(messagePartFromJsonValue(payloadDoc));
+                } catch (...) {
+                }
+            }
+            turn.messages.push_back(std::move(msg));
         }
+        history.turns.push_back(std::move(turn));
     }
 
     std::unordered_map<std::string, bool> toolCallIds;
@@ -985,8 +1767,7 @@ AgentHistory ThreadManager::loadAgentHistory(const std::string& threadId,
 std::vector<std::string> ThreadManager::listAgents(const std::string& threadId) const {
     auto conn = acquireConnection(basePath_);
     Statement stmt(conn->db,
-                   "SELECT DISTINCT agent_id FROM agent_turns WHERE thread_id=? "
-                   "ORDER BY agent_id ASC;",
+                   "SELECT DISTINCT agent_id FROM agent_turns_v2 WHERE thread_id=? ORDER BY agent_id ASC;",
                    "Failed to prepare list agents query");
     bindText(stmt.get(), 1, threadId);
 
@@ -1043,42 +1824,63 @@ void ThreadManager::updateMetadata(const std::string& threadId,
     if (persisted.threadId.empty()) {
         persisted.threadId = threadId;
     }
-    Statement stmt(conn->db,
-                   "UPDATE threads SET metadata_json=?, created_at=?, last_active_at=? "
-                   "WHERE thread_id=?;",
-                   "Failed to prepare metadata update");
-    bindText(stmt.get(), 1, rapidJsonToString(toJson(persisted)));
-    sqlite3_bind_int64(stmt.get(), 2, static_cast<sqlite3_int64>(persisted.createdAt));
-    sqlite3_bind_int64(stmt.get(), 3,
-                       static_cast<sqlite3_int64>(persisted.lastActiveAt));
-    bindText(stmt.get(), 4, threadId);
-    if (sqlite3_step(stmt.get()) != SQLITE_DONE) {
-        throwSqliteError(conn->db, "Failed to update thread metadata");
-    }
+    const auto metadataJson = toJson(persisted);
+    const auto hostOptionsJson = toJson(persisted.hostOptions);
+    execPrepared(
+        conn->db,
+        "UPDATE thread_metadata_v2 SET title=?, host_type=?, host_identifier=?, cwd=?, lead_persona=?, is_benchmark_run=?, benchmark_id=?, benchmark_task_id=?, active_plan_id=?, permission_mode=?, created_at=?, last_active_at=?, host_options_json=?, retryable_request_json=? WHERE thread_id=?;",
+        [&](sqlite3_stmt* stmt) {
+            bindText(stmt, 1, persisted.title);
+            const auto hostType = metadataJson.HasMember("hostOptions") &&
+                                          metadataJson["hostOptions"].IsObject() &&
+                                          metadataJson["hostOptions"].HasMember("type") &&
+                                          metadataJson["hostOptions"]["type"].IsString()
+                                      ? std::string(metadataJson["hostOptions"]["type"].GetString())
+                                      : std::string();
+            bindText(stmt, 2, hostType);
+            bindText(stmt, 3, persisted.hostIdentifier);
+            bindText(stmt, 4, persisted.cwd);
+            bindText(stmt, 5, persisted.leadPersona);
+            sqlite3_bind_int(stmt, 6, persisted.isBenchmarkRun ? 1 : 0);
+            bindText(stmt, 7, persisted.benchmarkId);
+            bindText(stmt, 8, persisted.benchmarkTaskId);
+            bindText(stmt, 9, persisted.activePlanId);
+            const auto permissionMode = metadataJson.HasMember("permissionMode") &&
+                                                metadataJson["permissionMode"].IsString()
+                                            ? std::string(metadataJson["permissionMode"].GetString())
+                                            : std::string("Request");
+            bindText(stmt, 10, permissionMode);
+            sqlite3_bind_int64(stmt, 11, static_cast<sqlite3_int64>(persisted.createdAt));
+            sqlite3_bind_int64(stmt, 12, static_cast<sqlite3_int64>(persisted.lastActiveAt));
+            bindText(stmt, 13, rapidJsonToString(hostOptionsJson));
+            if (metadataJson.HasMember("lastRetryableRequest") &&
+                !metadataJson["lastRetryableRequest"].IsNull()) {
+                rapidjson::Document retryDoc;
+                retryDoc.CopyFrom(metadataJson["lastRetryableRequest"], retryDoc.GetAllocator());
+                bindText(stmt, 14, rapidJsonToString(retryDoc));
+            } else {
+                sqlite3_bind_null(stmt, 14);
+            }
+            bindText(stmt, 15, threadId);
+        },
+        "Failed to update thread metadata");
 }
 
 std::vector<ThreadMetadata> ThreadManager::listThreadsWithMetadata() const {
     auto conn = acquireConnection(basePath_);
     Statement stmt(conn->db,
-                   "SELECT thread_id, metadata_json FROM threads ORDER BY created_at ASC;",
+                   "SELECT thread_id FROM thread_metadata_v2 ORDER BY created_at ASC;",
                    "Failed to prepare list metadata query");
 
     std::vector<ThreadMetadata> result;
     while (sqlite3_step(stmt.get()) == SQLITE_ROW) {
         const auto* threadIdText =
             reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 0));
-        const auto* metadataText =
-            reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 1));
-        if (!threadIdText || !metadataText) {
+        if (!threadIdText) {
             continue;
         }
         try {
-            auto d = parseJson(metadataText, "thread metadata");
-            auto meta = threadMetadataFromJson(d);
-            if (meta.threadId.empty()) {
-                meta.threadId = threadIdText;
-            }
-            result.push_back(std::move(meta));
+            result.push_back(getMetadata(threadIdText));
         } catch (...) {
             // Skip malformed metadata rows.
         }
@@ -1121,51 +1923,178 @@ void ThreadManager::writePlan(const std::string& threadId, const Plan& plan) {
         persistedPlan.threadId = threadId;
     }
 
-    Statement stmt(conn->db,
-                   "INSERT INTO plans(thread_id, plan_id, plan_json, created_at, updated_at)"
-                   " VALUES(?, ?, ?, ?, ?)"
-                   " ON CONFLICT(thread_id, plan_id) DO UPDATE SET"
-                   " plan_json=excluded.plan_json,"
-                   " created_at=excluded.created_at,"
-                   " updated_at=excluded.updated_at;",
-                   "Failed to prepare write plan statement");
-    bindText(stmt.get(), 1, threadId);
-    bindText(stmt.get(), 2, persistedPlan.id);
-    bindText(stmt.get(), 3, rapidJsonToString(toJson(persistedPlan)));
-    sqlite3_bind_int64(stmt.get(), 4,
-                       static_cast<sqlite3_int64>(persistedPlan.createdAt));
-    sqlite3_bind_int64(stmt.get(), 5,
-                       static_cast<sqlite3_int64>(persistedPlan.updatedAt));
-    if (sqlite3_step(stmt.get()) != SQLITE_DONE) {
-        throwSqliteError(conn->db, "Failed to write plan");
-    }
+    withImmediateTransaction(conn->db, [&]() {
+        execPrepared(
+            conn->db,
+            "INSERT INTO plans_v2(thread_id, plan_id, title, objective, context, strategy, status, notes, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(thread_id, plan_id) DO UPDATE SET title=excluded.title, objective=excluded.objective, context=excluded.context, strategy=excluded.strategy, status=excluded.status, notes=excluded.notes, created_at=excluded.created_at, updated_at=excluded.updated_at;",
+            [&](sqlite3_stmt* stmt) {
+                const auto planJson = toJson(persistedPlan);
+                bindText(stmt, 1, threadId);
+                bindText(stmt, 2, persistedPlan.id);
+                bindText(stmt, 3, persistedPlan.title);
+                bindText(stmt, 4, persistedPlan.objective);
+                bindText(stmt, 5, persistedPlan.context);
+                bindText(stmt, 6, persistedPlan.strategy);
+                const auto status = planJson.HasMember("status") && planJson["status"].IsString()
+                                        ? std::string(planJson["status"].GetString())
+                                        : std::string("Draft");
+                bindText(stmt, 7, status);
+                bindText(stmt, 8, persistedPlan.notes);
+                sqlite3_bind_int64(stmt, 9, static_cast<sqlite3_int64>(persistedPlan.createdAt));
+                sqlite3_bind_int64(stmt, 10, static_cast<sqlite3_int64>(persistedPlan.updatedAt));
+            },
+            "Failed to write plan");
+        deletePlanChildrenV2(conn->db, threadId, persistedPlan.id);
+        persistPlanChildrenV2(conn->db, persistedPlan);
+    });
 }
 
 Plan ThreadManager::getPlan(const std::string& threadId,
                             const std::string& planId) const {
     auto conn = acquireConnection(basePath_);
     Statement stmt(conn->db,
-                   "SELECT plan_json FROM plans WHERE thread_id=? AND plan_id=?;",
+                   "SELECT title, objective, context, strategy, status, notes, created_at, updated_at FROM plans_v2 WHERE thread_id=? AND plan_id=?;",
                    "Failed to prepare get plan query");
     bindText(stmt.get(), 1, threadId);
     bindText(stmt.get(), 2, planId);
     if (sqlite3_step(stmt.get()) != SQLITE_ROW) {
-        throw std::runtime_error("Plan not found: " + planId);
+        Statement legacyStmt(conn->db,
+                             "SELECT plan_json FROM plans WHERE thread_id=? AND plan_id=?;",
+                             "Failed to prepare legacy get plan query");
+        bindText(legacyStmt.get(), 1, threadId);
+        bindText(legacyStmt.get(), 2, planId);
+        if (sqlite3_step(legacyStmt.get()) != SQLITE_ROW) {
+            throw std::runtime_error("Plan not found: " + planId);
+        }
+        const auto* jsonText = reinterpret_cast<const char*>(sqlite3_column_text(legacyStmt.get(), 0));
+        if (!jsonText) {
+            throw std::runtime_error("Plan row is empty: " + planId);
+        }
+        auto d = parseJson(jsonText, "legacy plan");
+        Plan legacyPlan = planFromJson(d);
+        if (legacyPlan.id.empty()) {
+            legacyPlan.id = planId;
+        }
+        if (legacyPlan.threadId.empty()) {
+            legacyPlan.threadId = threadId;
+        }
+        work::reconcileChunkDependencies(legacyPlan);
+        return legacyPlan;
     }
 
-    const auto* jsonText = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 0));
-    if (!jsonText) {
-        throw std::runtime_error("Plan row is empty: " + planId);
+    Plan plan;
+    plan.id = planId;
+    plan.threadId = threadId;
+    const auto* title = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 0));
+    const auto* objective = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 1));
+    const auto* context = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 2));
+    const auto* strategy = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 3));
+    const auto* status = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 4));
+    const auto* notes = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 5));
+    plan.title = title ? title : "";
+    plan.objective = objective ? objective : "";
+    plan.context = context ? context : "";
+    plan.strategy = strategy ? strategy : "";
+    plan.status = status ? planStatusFromStoredString(status) : PlanStatus::Draft;
+    plan.notes = notes ? notes : "";
+    plan.createdAt = static_cast<uint64_t>(sqlite3_column_int64(stmt.get(), 6));
+    plan.updatedAt = static_cast<uint64_t>(sqlite3_column_int64(stmt.get(), 7));
+
+    Statement chunkStmt(conn->db,
+                        "SELECT chunk_id, title, goal, context, constraints, completion, planning_gate, status, assigned_agent_id, attempt_count, result_summary, review_summary, created_at, updated_at, cwd, verification_condition, handoff_notes FROM work_chunks_v2 WHERE thread_id=? AND plan_id=? ORDER BY ordinal ASC;",
+                        "Failed to prepare get plan chunks query");
+    bindText(chunkStmt.get(), 1, threadId);
+    bindText(chunkStmt.get(), 2, planId);
+    while (sqlite3_step(chunkStmt.get()) == SQLITE_ROW) {
+        WorkChunk chunk;
+        const auto* chunkId = reinterpret_cast<const char*>(sqlite3_column_text(chunkStmt.get(), 0));
+        const auto* chunkTitle = reinterpret_cast<const char*>(sqlite3_column_text(chunkStmt.get(), 1));
+        const auto* chunkGoal = reinterpret_cast<const char*>(sqlite3_column_text(chunkStmt.get(), 2));
+        const auto* chunkContext = reinterpret_cast<const char*>(sqlite3_column_text(chunkStmt.get(), 3));
+        const auto* chunkConstraints = reinterpret_cast<const char*>(sqlite3_column_text(chunkStmt.get(), 4));
+        const auto* chunkCompletion = reinterpret_cast<const char*>(sqlite3_column_text(chunkStmt.get(), 5));
+        const auto* chunkStatus = reinterpret_cast<const char*>(sqlite3_column_text(chunkStmt.get(), 7));
+        const auto* assignedAgentId = reinterpret_cast<const char*>(sqlite3_column_text(chunkStmt.get(), 8));
+        const auto* resultSummary = reinterpret_cast<const char*>(sqlite3_column_text(chunkStmt.get(), 10));
+        const auto* reviewSummary = reinterpret_cast<const char*>(sqlite3_column_text(chunkStmt.get(), 11));
+        const auto* cwd = reinterpret_cast<const char*>(sqlite3_column_text(chunkStmt.get(), 14));
+        const auto* verificationCondition = reinterpret_cast<const char*>(sqlite3_column_text(chunkStmt.get(), 15));
+        const auto* handoffNotes = reinterpret_cast<const char*>(sqlite3_column_text(chunkStmt.get(), 16));
+        chunk.id = chunkId ? chunkId : "";
+        chunk.title = chunkTitle ? chunkTitle : "";
+        chunk.goal = chunkGoal ? chunkGoal : "";
+        chunk.context = chunkContext ? chunkContext : "";
+        chunk.constraints = chunkConstraints ? chunkConstraints : "";
+        chunk.completion = chunkCompletion ? chunkCompletion : "";
+        chunk.planningGate = sqlite3_column_int(chunkStmt.get(), 6) != 0;
+        chunk.status = chunkStatus ? workChunkStatusFromStoredString(chunkStatus)
+                                   : WorkChunkStatus::Ready;
+        chunk.assignedAgentId = assignedAgentId ? assignedAgentId : "";
+        chunk.attemptCount = sqlite3_column_int(chunkStmt.get(), 9);
+        chunk.resultSummary = resultSummary ? resultSummary : "";
+        chunk.reviewSummary = reviewSummary ? reviewSummary : "";
+        chunk.createdAt = static_cast<uint64_t>(sqlite3_column_int64(chunkStmt.get(), 12));
+        chunk.updatedAt = static_cast<uint64_t>(sqlite3_column_int64(chunkStmt.get(), 13));
+        chunk.cwd = cwd ? cwd : "";
+        chunk.verificationCondition = verificationCondition ? verificationCondition : "";
+        chunk.handoffNotes = handoffNotes ? handoffNotes : "";
+
+        Statement depStmt(conn->db,
+                          "SELECT depends_on_chunk_id FROM work_chunk_dependencies_v2 WHERE thread_id=? AND plan_id=? AND chunk_id=? ORDER BY depends_on_chunk_id ASC;",
+                          "Failed to prepare get chunk dependencies query");
+        bindText(depStmt.get(), 1, threadId);
+        bindText(depStmt.get(), 2, planId);
+        bindText(depStmt.get(), 3, chunk.id);
+        while (sqlite3_step(depStmt.get()) == SQLITE_ROW) {
+            const auto* dep = reinterpret_cast<const char*>(sqlite3_column_text(depStmt.get(), 0));
+            if (dep) chunk.dependsOn.push_back(dep);
+        }
+
+        Statement fileStmt(conn->db,
+                           "SELECT file_kind, path FROM work_chunk_files_v2 WHERE thread_id=? AND plan_id=? AND chunk_id=? ORDER BY file_kind ASC, ordinal ASC;",
+                           "Failed to prepare get chunk files query");
+        bindText(fileStmt.get(), 1, threadId);
+        bindText(fileStmt.get(), 2, planId);
+        bindText(fileStmt.get(), 3, chunk.id);
+        while (sqlite3_step(fileStmt.get()) == SQLITE_ROW) {
+            const auto* kind = reinterpret_cast<const char*>(sqlite3_column_text(fileStmt.get(), 0));
+            const auto* path = reinterpret_cast<const char*>(sqlite3_column_text(fileStmt.get(), 1));
+            if (!kind || !path) continue;
+            if (std::string(kind) == "read") chunk.filesToRead.push_back(path);
+            else if (std::string(kind) == "touch") chunk.filesToTouch.push_back(path);
+        }
+
+        Statement taskStmt(conn->db,
+                           "SELECT task_id, title, goal, status, notes, verification_condition, assigned_worker_id, created_at, updated_at FROM work_tasks_v2 WHERE thread_id=? AND plan_id=? AND chunk_id=? ORDER BY ordinal ASC;",
+                           "Failed to prepare get work tasks query");
+        bindText(taskStmt.get(), 1, threadId);
+        bindText(taskStmt.get(), 2, planId);
+        bindText(taskStmt.get(), 3, chunk.id);
+        while (sqlite3_step(taskStmt.get()) == SQLITE_ROW) {
+            WorkTask task;
+            const auto* taskId = reinterpret_cast<const char*>(sqlite3_column_text(taskStmt.get(), 0));
+            const auto* taskTitle = reinterpret_cast<const char*>(sqlite3_column_text(taskStmt.get(), 1));
+            const auto* taskGoal = reinterpret_cast<const char*>(sqlite3_column_text(taskStmt.get(), 2));
+            const auto* taskStatus = reinterpret_cast<const char*>(sqlite3_column_text(taskStmt.get(), 3));
+            const auto* taskNotes = reinterpret_cast<const char*>(sqlite3_column_text(taskStmt.get(), 4));
+            const auto* taskVerification = reinterpret_cast<const char*>(sqlite3_column_text(taskStmt.get(), 5));
+            const auto* taskWorker = reinterpret_cast<const char*>(sqlite3_column_text(taskStmt.get(), 6));
+            task.id = taskId ? taskId : "";
+            task.title = taskTitle ? taskTitle : "";
+            task.goal = taskGoal ? taskGoal : "";
+            task.notes = taskNotes ? taskNotes : "";
+            task.verificationCondition = taskVerification ? taskVerification : "";
+            task.assignedWorkerId = taskWorker ? taskWorker : "";
+            task.createdAt = static_cast<uint64_t>(sqlite3_column_int64(taskStmt.get(), 7));
+            task.updatedAt = static_cast<uint64_t>(sqlite3_column_int64(taskStmt.get(), 8));
+            task.status = taskStatus ? workChunkStatusFromStoredString(taskStatus)
+                                     : WorkChunkStatus::Ready;
+            chunk.tasks.push_back(std::move(task));
+        }
+
+        plan.chunks.push_back(std::move(chunk));
     }
 
-    auto d = parseJson(jsonText, "plan");
-    Plan plan = planFromJson(d);
-    if (plan.id.empty()) {
-        plan.id = planId;
-    }
-    if (plan.threadId.empty()) {
-        plan.threadId = threadId;
-    }
     work::reconcileChunkDependencies(plan);
     return plan;
 }
@@ -1173,7 +2102,7 @@ Plan ThreadManager::getPlan(const std::string& threadId,
 std::vector<Plan> ThreadManager::listPlans(const std::string& threadId) const {
     auto conn = acquireConnection(basePath_);
     Statement stmt(conn->db,
-                   "SELECT plan_id FROM plans WHERE thread_id=? ORDER BY plan_id ASC;",
+                   "SELECT plan_id FROM plans_v2 WHERE thread_id=? ORDER BY plan_id ASC;",
                    "Failed to prepare list plans query");
     bindText(stmt.get(), 1, threadId);
 
@@ -1246,7 +2175,7 @@ AgentTodoList ThreadManager::getAgentTodo(const std::string& threadId,
 
     auto conn = acquireConnection(basePath_);
     Statement stmt(conn->db,
-                   "SELECT todo_json FROM agent_todos WHERE thread_id=? AND agent_id=?;",
+                   "SELECT next_id FROM agent_todos_v2 WHERE thread_id=? AND agent_id=?;",
                    "Failed to prepare get todo query");
     bindText(stmt.get(), 1, threadId);
     bindText(stmt.get(), 2, agentId);
@@ -1259,17 +2188,37 @@ AgentTodoList ThreadManager::getAgentTodo(const std::string& threadId,
         return empty;
     }
 
-    const auto* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 0));
-    auto d = parseJson(text ? text : "{}", "agent todo list");
-    AgentTodoList list = agentTodoListFromJson(d);
-    if (list.threadId.empty()) {
-        list.threadId = threadId;
-    }
-    if (list.agentId.empty()) {
-        list.agentId = agentId;
-    }
+    AgentTodoList list;
+    list.threadId = threadId;
+    list.agentId = agentId;
+    list.nextId = sqlite3_column_int(stmt.get(), 0);
     if (list.nextId <= 0) {
         list.nextId = 1;
+    }
+
+    Statement itemStmt(conn->db,
+                       "SELECT item_id, text, status, chunk_id, plan_id, created_at, updated_at FROM todo_items_v2 WHERE thread_id=? AND agent_id=? ORDER BY item_id ASC;",
+                       "Failed to prepare get todo items query");
+    bindText(itemStmt.get(), 1, threadId);
+    bindText(itemStmt.get(), 2, agentId);
+    while (sqlite3_step(itemStmt.get()) == SQLITE_ROW) {
+        TodoItem item;
+        item.id = sqlite3_column_int(itemStmt.get(), 0);
+        const auto* text = reinterpret_cast<const char*>(sqlite3_column_text(itemStmt.get(), 1));
+        const auto* status = reinterpret_cast<const char*>(sqlite3_column_text(itemStmt.get(), 2));
+        const auto* chunkId = reinterpret_cast<const char*>(sqlite3_column_text(itemStmt.get(), 3));
+        const auto* planId = reinterpret_cast<const char*>(sqlite3_column_text(itemStmt.get(), 4));
+        item.text = text ? text : "";
+        item.chunkId = chunkId ? chunkId : "";
+        item.planId = planId ? planId : "";
+        item.createdAt = static_cast<uint64_t>(sqlite3_column_int64(itemStmt.get(), 5));
+        item.updatedAt = static_cast<uint64_t>(sqlite3_column_int64(itemStmt.get(), 6));
+        if (status) {
+            if (std::string(status) == "Done") item.status = TodoStatus::Done;
+            else if (std::string(status) == "InProgress") item.status = TodoStatus::InProgress;
+            else item.status = TodoStatus::Pending;
+        }
+        list.items.push_back(std::move(item));
     }
     return list;
 }
@@ -1298,16 +2247,19 @@ void ThreadManager::writeAgentTodo(const std::string& threadId,
         persisted.nextId = 1;
     }
 
-    Statement stmt(conn->db,
-                   "INSERT INTO agent_todos(thread_id, agent_id, todo_json) VALUES(?, ?, ?) "
-                   "ON CONFLICT(thread_id, agent_id) DO UPDATE SET todo_json=excluded.todo_json;",
-                   "Failed to prepare write todo statement");
-    bindText(stmt.get(), 1, threadId);
-    bindText(stmt.get(), 2, agentId);
-    bindText(stmt.get(), 3, rapidJsonToString(toJson(persisted)));
-    if (sqlite3_step(stmt.get()) != SQLITE_DONE) {
-        throwSqliteError(conn->db, "Failed to write agent todo list");
-    }
+    withImmediateTransaction(conn->db, [&]() {
+        execPrepared(
+            conn->db,
+            "INSERT INTO agent_todos_v2(thread_id, agent_id, next_id) VALUES(?, ?, ?) ON CONFLICT(thread_id, agent_id) DO UPDATE SET next_id=excluded.next_id;",
+            [&](sqlite3_stmt* stmt) {
+                bindText(stmt, 1, threadId);
+                bindText(stmt, 2, agentId);
+                sqlite3_bind_int(stmt, 3, persisted.nextId);
+            },
+            "Failed to write agent todo list");
+        deleteTodoItemsV2(conn->db, threadId, agentId);
+        persistTodoItemsV2(conn->db, persisted);
+    });
 }
 
 AgentTodoList ThreadManager::mutateAgentTodo(
@@ -1427,7 +2379,7 @@ RollingMemoryState ThreadManager::loadRollingMemoryState(
 
     auto conn = acquireConnection(basePath_);
     Statement stmt(conn->db,
-                   "SELECT state_json FROM rolling_memory_state WHERE thread_id=? AND agent_id=?;",
+                   "SELECT last_observed_turn_id, last_reflected_observation_id, last_context_window, last_buffer_threshold_tokens, last_target_threshold_tokens, last_emergency_threshold_tokens, last_retained_tail_tokens, last_updated_at, observation_in_flight, reflection_in_flight, bridge_in_flight, last_bridge_id FROM rolling_memory_state_v2 WHERE thread_id=? AND agent_id=?;",
                    "Failed to prepare get rolling memory query");
     bindText(stmt.get(), 1, threadId);
     bindText(stmt.get(), 2, agentId);
@@ -1439,15 +2391,154 @@ RollingMemoryState ThreadManager::loadRollingMemoryState(
         return empty;
     }
 
-    const auto* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 0));
-    auto d = parseJson(text ? text : "{}", "rolling memory state");
-    RollingMemoryState state = rollingMemoryStateFromJson(d);
-    if (state.threadId.empty()) {
-        state.threadId = threadId;
+    RollingMemoryState state;
+    state.threadId = threadId;
+    state.agentId = agentId;
+    const auto* lastObserved = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 0));
+    const auto* lastReflected = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 1));
+    const auto* lastBridgeId = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 11));
+    state.lastObservedTurnId = lastObserved ? lastObserved : "";
+    state.lastReflectedObservationId = lastReflected ? lastReflected : "";
+    state.lastContextWindow = static_cast<uint32_t>(sqlite3_column_int(stmt.get(), 2));
+    state.lastBufferThresholdTokens = static_cast<uint32_t>(sqlite3_column_int(stmt.get(), 3));
+    state.lastTargetThresholdTokens = static_cast<uint32_t>(sqlite3_column_int(stmt.get(), 4));
+    state.lastEmergencyThresholdTokens = static_cast<uint32_t>(sqlite3_column_int(stmt.get(), 5));
+    state.lastRetainedTailTokens = static_cast<uint32_t>(sqlite3_column_int(stmt.get(), 6));
+    state.lastUpdatedAt = static_cast<uint64_t>(sqlite3_column_int64(stmt.get(), 7));
+    state.observationInFlight = sqlite3_column_int(stmt.get(), 8) != 0;
+    state.reflectionInFlight = sqlite3_column_int(stmt.get(), 9) != 0;
+    state.bridgeInFlight = sqlite3_column_int(stmt.get(), 10) != 0;
+    state.lastBridgeId = lastBridgeId ? lastBridgeId : "";
+
+    Statement chunkStmt(conn->db,
+                       "SELECT chunk_id, bucket, source_start_turn_id, source_end_turn_id, chunk_kind, summary, current_task, suggested_response, active_goal, source_tokens, summary_tokens, created_at, buffered, active, superseded FROM rolling_memory_chunks_v2 WHERE thread_id=? AND agent_id=? ORDER BY ordinal ASC;",
+                       "Failed to prepare rolling memory chunks read");
+    bindText(chunkStmt.get(), 1, threadId);
+    bindText(chunkStmt.get(), 2, agentId);
+    while (sqlite3_step(chunkStmt.get()) == SQLITE_ROW) {
+        RollingMemoryChunk chunk;
+        const auto* chunkId = reinterpret_cast<const char*>(sqlite3_column_text(chunkStmt.get(), 0));
+        const auto* bucket = reinterpret_cast<const char*>(sqlite3_column_text(chunkStmt.get(), 1));
+        const auto* sourceStart = reinterpret_cast<const char*>(sqlite3_column_text(chunkStmt.get(), 2));
+        const auto* sourceEnd = reinterpret_cast<const char*>(sqlite3_column_text(chunkStmt.get(), 3));
+        const auto* chunkKind = reinterpret_cast<const char*>(sqlite3_column_text(chunkStmt.get(), 4));
+        const auto* summary = reinterpret_cast<const char*>(sqlite3_column_text(chunkStmt.get(), 5));
+        const auto* currentTask = reinterpret_cast<const char*>(sqlite3_column_text(chunkStmt.get(), 6));
+        const auto* suggestedResponse = reinterpret_cast<const char*>(sqlite3_column_text(chunkStmt.get(), 7));
+        const auto* activeGoal = reinterpret_cast<const char*>(sqlite3_column_text(chunkStmt.get(), 8));
+        chunk.chunkId = chunkId ? chunkId : "";
+        chunk.sourceStartTurnId = sourceStart ? sourceStart : "";
+        chunk.sourceEndTurnId = sourceEnd ? sourceEnd : "";
+        chunk.chunkKind = chunkKind ? chunkKind : "episode";
+        chunk.summary = summary ? summary : "";
+        chunk.currentTask = currentTask ? currentTask : "";
+        chunk.suggestedResponse = suggestedResponse ? suggestedResponse : "";
+        chunk.activeGoal = activeGoal ? activeGoal : "";
+        chunk.sourceTokens = static_cast<uint32_t>(sqlite3_column_int(chunkStmt.get(), 9));
+        chunk.summaryTokens = static_cast<uint32_t>(sqlite3_column_int(chunkStmt.get(), 10));
+        chunk.createdAt = static_cast<uint64_t>(sqlite3_column_int64(chunkStmt.get(), 11));
+        chunk.buffered = sqlite3_column_int(chunkStmt.get(), 12) != 0;
+        chunk.active = sqlite3_column_int(chunkStmt.get(), 13) != 0;
+        chunk.superseded = sqlite3_column_int(chunkStmt.get(), 14) != 0;
+
+        Statement listStmt(conn->db,
+                           "SELECT list_kind, value FROM rolling_memory_chunk_lists_v2 WHERE thread_id=? AND agent_id=? AND chunk_id=? ORDER BY list_kind ASC, ordinal ASC;",
+                           "Failed to prepare rolling memory chunk lists read");
+        bindText(listStmt.get(), 1, threadId);
+        bindText(listStmt.get(), 2, agentId);
+        bindText(listStmt.get(), 3, chunk.chunkId);
+        while (sqlite3_step(listStmt.get()) == SQLITE_ROW) {
+            const auto* kind = reinterpret_cast<const char*>(sqlite3_column_text(listStmt.get(), 0));
+            const auto* value = reinterpret_cast<const char*>(sqlite3_column_text(listStmt.get(), 1));
+            if (!kind || !value) continue;
+            const std::string kindStr = kind;
+            if (kindStr == "sourceTurnIds") chunk.sourceTurnIds.push_back(value);
+            else if (kindStr == "keyActions") chunk.keyActions.push_back(value);
+            else if (kindStr == "keyToolResults") chunk.keyToolResults.push_back(value);
+            else if (kindStr == "openLoops") chunk.openLoops.push_back(value);
+            else if (kindStr == "filesSurfaces") chunk.filesSurfaces.push_back(value);
+            else if (kindStr == "retrievalTags") chunk.retrievalTags.push_back(value);
+            else if (kindStr == "derivedFromChunkIds") chunk.derivedFromChunkIds.push_back(value);
+            else if (kindStr == "anchorIds") chunk.anchorIds.push_back(value);
+        }
+
+        const std::string bucketStr = bucket ? bucket : "observation";
+        if (bucketStr == "reflection") state.reflectionChunks.push_back(std::move(chunk));
+        else state.observationChunks.push_back(std::move(chunk));
     }
-    if (state.agentId.empty()) {
-        state.agentId = agentId;
+
+    Statement anchorStmt(conn->db,
+                         "SELECT anchor_id, anchor_type, canonical_text, exact_quote, importance, volatility FROM rolling_memory_anchors_v2 WHERE thread_id=? AND agent_id=? ORDER BY ordinal ASC;",
+                         "Failed to prepare rolling memory anchors read");
+    bindText(anchorStmt.get(), 1, threadId);
+    bindText(anchorStmt.get(), 2, agentId);
+    while (sqlite3_step(anchorStmt.get()) == SQLITE_ROW) {
+        RollingMemoryAnchorRecord anchor;
+        const auto* anchorId = reinterpret_cast<const char*>(sqlite3_column_text(anchorStmt.get(), 0));
+        const auto* anchorType = reinterpret_cast<const char*>(sqlite3_column_text(anchorStmt.get(), 1));
+        const auto* canonicalText = reinterpret_cast<const char*>(sqlite3_column_text(anchorStmt.get(), 2));
+        const auto* exactQuote = reinterpret_cast<const char*>(sqlite3_column_text(anchorStmt.get(), 3));
+        const auto* importance = reinterpret_cast<const char*>(sqlite3_column_text(anchorStmt.get(), 4));
+        const auto* volatility = reinterpret_cast<const char*>(sqlite3_column_text(anchorStmt.get(), 5));
+        anchor.anchorId = anchorId ? anchorId : "";
+        anchor.anchorType = anchorType ? anchorType : "";
+        anchor.canonicalText = canonicalText ? canonicalText : "";
+        anchor.exactQuote = exactQuote ? exactQuote : "";
+        anchor.importance = importance ? importance : "";
+        anchor.volatility = volatility ? volatility : "";
+
+        Statement listStmt(conn->db,
+                           "SELECT list_kind, value FROM rolling_memory_anchor_lists_v2 WHERE thread_id=? AND agent_id=? AND anchor_id=? ORDER BY list_kind ASC, ordinal ASC;",
+                           "Failed to prepare rolling memory anchor lists read");
+        bindText(listStmt.get(), 1, threadId);
+        bindText(listStmt.get(), 2, agentId);
+        bindText(listStmt.get(), 3, anchor.anchorId);
+        while (sqlite3_step(listStmt.get()) == SQLITE_ROW) {
+            const auto* kind = reinterpret_cast<const char*>(sqlite3_column_text(listStmt.get(), 0));
+            const auto* value = reinterpret_cast<const char*>(sqlite3_column_text(listStmt.get(), 1));
+            if (!kind || !value) continue;
+            const std::string kindStr = kind;
+            if (kindStr == "retrievalTags") anchor.retrievalTags.push_back(value);
+            else if (kindStr == "sourceTurnIds") anchor.sourceTurnIds.push_back(value);
+        }
+        state.anchors.push_back(std::move(anchor));
     }
+
+    Statement bridgeStmt(conn->db,
+                         "SELECT bridge_id, target_task_signature, rationale, execution_hint, created_at FROM rolling_memory_bridges_v2 WHERE thread_id=? AND agent_id=? ORDER BY ordinal ASC;",
+                         "Failed to prepare rolling memory bridges read");
+    bindText(bridgeStmt.get(), 1, threadId);
+    bindText(bridgeStmt.get(), 2, agentId);
+    while (sqlite3_step(bridgeStmt.get()) == SQLITE_ROW) {
+        RollingMemoryBridgeRecord bridge;
+        const auto* bridgeId = reinterpret_cast<const char*>(sqlite3_column_text(bridgeStmt.get(), 0));
+        const auto* targetTaskSignature = reinterpret_cast<const char*>(sqlite3_column_text(bridgeStmt.get(), 1));
+        const auto* rationale = reinterpret_cast<const char*>(sqlite3_column_text(bridgeStmt.get(), 2));
+        const auto* executionHint = reinterpret_cast<const char*>(sqlite3_column_text(bridgeStmt.get(), 3));
+        bridge.bridgeId = bridgeId ? bridgeId : "";
+        bridge.targetTaskSignature = targetTaskSignature ? targetTaskSignature : "";
+        bridge.rationale = rationale ? rationale : "";
+        bridge.executionHint = executionHint ? executionHint : "";
+        bridge.createdAt = static_cast<uint64_t>(sqlite3_column_int64(bridgeStmt.get(), 4));
+
+        Statement listStmt(conn->db,
+                           "SELECT list_kind, value FROM rolling_memory_bridge_lists_v2 WHERE thread_id=? AND agent_id=? AND bridge_id=? ORDER BY list_kind ASC, ordinal ASC;",
+                           "Failed to prepare rolling memory bridge lists read");
+        bindText(listStmt.get(), 1, threadId);
+        bindText(listStmt.get(), 2, agentId);
+        bindText(listStmt.get(), 3, bridge.bridgeId);
+        while (sqlite3_step(listStmt.get()) == SQLITE_ROW) {
+            const auto* kind = reinterpret_cast<const char*>(sqlite3_column_text(listStmt.get(), 0));
+            const auto* value = reinterpret_cast<const char*>(sqlite3_column_text(listStmt.get(), 1));
+            if (!kind || !value) continue;
+            const std::string kindStr = kind;
+            if (kindStr == "relevantAnchorIds") bridge.relevantAnchorIds.push_back(value);
+            else if (kindStr == "relevantEpisodeIds") bridge.relevantEpisodeIds.push_back(value);
+            else if (kindStr == "relevantReflectionIds") bridge.relevantReflectionIds.push_back(value);
+        }
+        state.bridges.push_back(std::move(bridge));
+    }
+
     return state;
 }
 
@@ -1471,16 +2562,185 @@ void ThreadManager::writeRollingMemoryState(const std::string& threadId,
     }
     persisted.lastUpdatedAt = nowEpochMs();
 
-    Statement stmt(conn->db,
-                   "INSERT INTO rolling_memory_state(thread_id, agent_id, state_json) VALUES(?, ?, ?) "
-                   "ON CONFLICT(thread_id, agent_id) DO UPDATE SET state_json=excluded.state_json;",
-                   "Failed to prepare rolling memory write");
-    bindText(stmt.get(), 1, threadId);
-    bindText(stmt.get(), 2, agentId);
-    bindText(stmt.get(), 3, rapidJsonToString(rollingMemoryStateToJson(persisted)));
-    if (sqlite3_step(stmt.get()) != SQLITE_DONE) {
-        throwSqliteError(conn->db, "Failed to write rolling memory state");
-    }
+    withImmediateTransaction(conn->db, [&]() {
+        execPrepared(conn->db,
+                     "INSERT INTO rolling_memory_state_v2(thread_id, agent_id, last_observed_turn_id, last_reflected_observation_id, last_context_window, last_buffer_threshold_tokens, last_target_threshold_tokens, last_emergency_threshold_tokens, last_retained_tail_tokens, last_updated_at, observation_in_flight, reflection_in_flight, bridge_in_flight, last_bridge_id) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(thread_id, agent_id) DO UPDATE SET last_observed_turn_id=excluded.last_observed_turn_id, last_reflected_observation_id=excluded.last_reflected_observation_id, last_context_window=excluded.last_context_window, last_buffer_threshold_tokens=excluded.last_buffer_threshold_tokens, last_target_threshold_tokens=excluded.last_target_threshold_tokens, last_emergency_threshold_tokens=excluded.last_emergency_threshold_tokens, last_retained_tail_tokens=excluded.last_retained_tail_tokens, last_updated_at=excluded.last_updated_at, observation_in_flight=excluded.observation_in_flight, reflection_in_flight=excluded.reflection_in_flight, bridge_in_flight=excluded.bridge_in_flight, last_bridge_id=excluded.last_bridge_id;",
+                     [&](sqlite3_stmt* stmt) {
+                         bindText(stmt, 1, threadId);
+                         bindText(stmt, 2, agentId);
+                         bindText(stmt, 3, persisted.lastObservedTurnId);
+                         bindText(stmt, 4, persisted.lastReflectedObservationId);
+                         sqlite3_bind_int(stmt, 5, persisted.lastContextWindow);
+                         sqlite3_bind_int(stmt, 6, persisted.lastBufferThresholdTokens);
+                         sqlite3_bind_int(stmt, 7, persisted.lastTargetThresholdTokens);
+                         sqlite3_bind_int(stmt, 8, persisted.lastEmergencyThresholdTokens);
+                         sqlite3_bind_int(stmt, 9, persisted.lastRetainedTailTokens);
+                         sqlite3_bind_int64(stmt, 10, static_cast<sqlite3_int64>(persisted.lastUpdatedAt));
+                         sqlite3_bind_int(stmt, 11, persisted.observationInFlight ? 1 : 0);
+                         sqlite3_bind_int(stmt, 12, persisted.reflectionInFlight ? 1 : 0);
+                         sqlite3_bind_int(stmt, 13, persisted.bridgeInFlight ? 1 : 0);
+                         bindText(stmt, 14, persisted.lastBridgeId);
+                     },
+                     "Failed to write rolling memory state");
+
+        execPrepared(conn->db,
+                     "DELETE FROM rolling_memory_chunk_lists_v2 WHERE thread_id=? AND agent_id=?;",
+                     [&](sqlite3_stmt* stmt) { bindText(stmt, 1, threadId); bindText(stmt, 2, agentId); },
+                     "Failed to clear rolling memory chunk lists");
+        execPrepared(conn->db,
+                     "DELETE FROM rolling_memory_chunks_v2 WHERE thread_id=? AND agent_id=?;",
+                     [&](sqlite3_stmt* stmt) { bindText(stmt, 1, threadId); bindText(stmt, 2, agentId); },
+                     "Failed to clear rolling memory chunks");
+        execPrepared(conn->db,
+                     "DELETE FROM rolling_memory_anchor_lists_v2 WHERE thread_id=? AND agent_id=?;",
+                     [&](sqlite3_stmt* stmt) { bindText(stmt, 1, threadId); bindText(stmt, 2, agentId); },
+                     "Failed to clear rolling memory anchor lists");
+        execPrepared(conn->db,
+                     "DELETE FROM rolling_memory_anchors_v2 WHERE thread_id=? AND agent_id=?;",
+                     [&](sqlite3_stmt* stmt) { bindText(stmt, 1, threadId); bindText(stmt, 2, agentId); },
+                     "Failed to clear rolling memory anchors");
+        execPrepared(conn->db,
+                     "DELETE FROM rolling_memory_bridge_lists_v2 WHERE thread_id=? AND agent_id=?;",
+                     [&](sqlite3_stmt* stmt) { bindText(stmt, 1, threadId); bindText(stmt, 2, agentId); },
+                     "Failed to clear rolling memory bridge lists");
+        execPrepared(conn->db,
+                     "DELETE FROM rolling_memory_bridges_v2 WHERE thread_id=? AND agent_id=?;",
+                     [&](sqlite3_stmt* stmt) { bindText(stmt, 1, threadId); bindText(stmt, 2, agentId); },
+                     "Failed to clear rolling memory bridges");
+
+        auto persistChunkBucket = [&](const std::vector<RollingMemoryChunk>& chunks, const std::string& bucket) {
+            int chunkOrdinal = 0;
+            for (const auto& chunk : chunks) {
+                execPrepared(conn->db,
+                             "INSERT INTO rolling_memory_chunks_v2(thread_id, agent_id, chunk_id, bucket, source_start_turn_id, source_end_turn_id, chunk_kind, summary, current_task, suggested_response, active_goal, source_tokens, summary_tokens, created_at, buffered, active, superseded, ordinal) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+                             [&](sqlite3_stmt* stmt) {
+                                 bindText(stmt, 1, threadId);
+                                 bindText(stmt, 2, agentId);
+                                 bindText(stmt, 3, chunk.chunkId);
+                                 bindText(stmt, 4, bucket);
+                                 bindText(stmt, 5, chunk.sourceStartTurnId);
+                                 bindText(stmt, 6, chunk.sourceEndTurnId);
+                                 bindText(stmt, 7, chunk.chunkKind);
+                                 bindText(stmt, 8, chunk.summary);
+                                 bindText(stmt, 9, chunk.currentTask);
+                                 bindText(stmt, 10, chunk.suggestedResponse);
+                                 bindText(stmt, 11, chunk.activeGoal);
+                                 sqlite3_bind_int(stmt, 12, chunk.sourceTokens);
+                                 sqlite3_bind_int(stmt, 13, chunk.summaryTokens);
+                                 sqlite3_bind_int64(stmt, 14, static_cast<sqlite3_int64>(chunk.createdAt));
+                                 sqlite3_bind_int(stmt, 15, chunk.buffered ? 1 : 0);
+                                 sqlite3_bind_int(stmt, 16, chunk.active ? 1 : 0);
+                                 sqlite3_bind_int(stmt, 17, chunk.superseded ? 1 : 0);
+                                 sqlite3_bind_int(stmt, 18, chunkOrdinal);
+                             },
+                             "Failed to write rolling memory chunk");
+                auto writeList = [&](const std::string& kind, const std::vector<std::string>& values) {
+                    int ordinal = 0;
+                    for (const auto& value : values) {
+                        execPrepared(conn->db,
+                                     "INSERT INTO rolling_memory_chunk_lists_v2(thread_id, agent_id, chunk_id, list_kind, value, ordinal) VALUES(?, ?, ?, ?, ?, ?);",
+                                     [&](sqlite3_stmt* stmt) {
+                                         bindText(stmt, 1, threadId);
+                                         bindText(stmt, 2, agentId);
+                                         bindText(stmt, 3, chunk.chunkId);
+                                         bindText(stmt, 4, kind);
+                                         bindText(stmt, 5, value);
+                                         sqlite3_bind_int(stmt, 6, ordinal);
+                                     },
+                                     "Failed to write rolling memory chunk list");
+                        ordinal++;
+                    }
+                };
+                writeList("sourceTurnIds", chunk.sourceTurnIds);
+                writeList("keyActions", chunk.keyActions);
+                writeList("keyToolResults", chunk.keyToolResults);
+                writeList("openLoops", chunk.openLoops);
+                writeList("filesSurfaces", chunk.filesSurfaces);
+                writeList("retrievalTags", chunk.retrievalTags);
+                writeList("derivedFromChunkIds", chunk.derivedFromChunkIds);
+                writeList("anchorIds", chunk.anchorIds);
+                chunkOrdinal++;
+            }
+        };
+        persistChunkBucket(persisted.observationChunks, "observation");
+        persistChunkBucket(persisted.reflectionChunks, "reflection");
+
+        int anchorOrdinal = 0;
+        for (const auto& anchor : persisted.anchors) {
+            execPrepared(conn->db,
+                         "INSERT INTO rolling_memory_anchors_v2(thread_id, agent_id, anchor_id, anchor_type, canonical_text, exact_quote, importance, volatility, ordinal) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?);",
+                         [&](sqlite3_stmt* stmt) {
+                             bindText(stmt, 1, threadId);
+                             bindText(stmt, 2, agentId);
+                             bindText(stmt, 3, anchor.anchorId);
+                             bindText(stmt, 4, anchor.anchorType);
+                             bindText(stmt, 5, anchor.canonicalText);
+                             bindText(stmt, 6, anchor.exactQuote);
+                             bindText(stmt, 7, anchor.importance);
+                             bindText(stmt, 8, anchor.volatility);
+                             sqlite3_bind_int(stmt, 9, anchorOrdinal);
+                         },
+                         "Failed to write rolling memory anchor");
+            auto writeList = [&](const std::string& kind, const std::vector<std::string>& values) {
+                int ordinal = 0;
+                for (const auto& value : values) {
+                    execPrepared(conn->db,
+                                 "INSERT INTO rolling_memory_anchor_lists_v2(thread_id, agent_id, anchor_id, list_kind, value, ordinal) VALUES(?, ?, ?, ?, ?, ?);",
+                                 [&](sqlite3_stmt* stmt) {
+                                     bindText(stmt, 1, threadId);
+                                     bindText(stmt, 2, agentId);
+                                     bindText(stmt, 3, anchor.anchorId);
+                                     bindText(stmt, 4, kind);
+                                     bindText(stmt, 5, value);
+                                     sqlite3_bind_int(stmt, 6, ordinal);
+                                 },
+                                 "Failed to write rolling memory anchor list");
+                    ordinal++;
+                }
+            };
+            writeList("retrievalTags", anchor.retrievalTags);
+            writeList("sourceTurnIds", anchor.sourceTurnIds);
+            anchorOrdinal++;
+        }
+
+        int bridgeOrdinal = 0;
+        for (const auto& bridge : persisted.bridges) {
+            execPrepared(conn->db,
+                         "INSERT INTO rolling_memory_bridges_v2(thread_id, agent_id, bridge_id, target_task_signature, rationale, execution_hint, created_at, ordinal) VALUES(?, ?, ?, ?, ?, ?, ?, ?);",
+                         [&](sqlite3_stmt* stmt) {
+                             bindText(stmt, 1, threadId);
+                             bindText(stmt, 2, agentId);
+                             bindText(stmt, 3, bridge.bridgeId);
+                             bindText(stmt, 4, bridge.targetTaskSignature);
+                             bindText(stmt, 5, bridge.rationale);
+                             bindText(stmt, 6, bridge.executionHint);
+                             sqlite3_bind_int64(stmt, 7, static_cast<sqlite3_int64>(bridge.createdAt));
+                             sqlite3_bind_int(stmt, 8, bridgeOrdinal);
+                         },
+                         "Failed to write rolling memory bridge");
+            auto writeList = [&](const std::string& kind, const std::vector<std::string>& values) {
+                int ordinal = 0;
+                for (const auto& value : values) {
+                    execPrepared(conn->db,
+                                 "INSERT INTO rolling_memory_bridge_lists_v2(thread_id, agent_id, bridge_id, list_kind, value, ordinal) VALUES(?, ?, ?, ?, ?, ?);",
+                                 [&](sqlite3_stmt* stmt) {
+                                     bindText(stmt, 1, threadId);
+                                     bindText(stmt, 2, agentId);
+                                     bindText(stmt, 3, bridge.bridgeId);
+                                     bindText(stmt, 4, kind);
+                                     bindText(stmt, 5, value);
+                                     sqlite3_bind_int(stmt, 6, ordinal);
+                                 },
+                                 "Failed to write rolling memory bridge list");
+                    ordinal++;
+                }
+            };
+            writeList("relevantAnchorIds", bridge.relevantAnchorIds);
+            writeList("relevantEpisodeIds", bridge.relevantEpisodeIds);
+            writeList("relevantReflectionIds", bridge.relevantReflectionIds);
+            bridgeOrdinal++;
+        }
+    });
 }
 
 FleetState ThreadManager::getFleetState(const std::string& threadId) const {
@@ -1701,42 +2961,25 @@ bool ThreadManager::popCompactionSnapshot(
 std::map<std::string, AgentManifestEntry>
 ThreadManager::readAgentManifest(const std::string& threadId) const {
     auto conn = acquireConnection(basePath_);
-    auto json = readThreadStateField(conn->db, threadId, "agent_manifest_json");
+    Statement stmt(conn->db,
+                   "SELECT agent_id, persona, parent_id, friendly_name, title, persist_history FROM agent_manifest_v2 WHERE thread_id=? ORDER BY agent_id ASC;",
+                   "Failed to prepare agent manifest read");
+    bindText(stmt.get(), 1, threadId);
     std::map<std::string, AgentManifestEntry> manifest;
-    if (!json.has_value()) {
-        return manifest;
-    }
-
-    auto d = parseJson(*json, "agent manifest");
-    if (!d.IsObject()) {
-        return manifest;
-    }
-
-    for (auto& m : d.GetObject()) {
+    while (sqlite3_step(stmt.get()) == SQLITE_ROW) {
         AgentManifestEntry entry;
-        auto& val = m.value;
-
-        if (val.HasMember("persona") && val["persona"].IsString()) {
-            entry.persona = val["persona"].GetString();
-        }
-        if (val.HasMember("parentId") && val["parentId"].IsString()) {
-            entry.parentId = val["parentId"].GetString();
-        }
-        if (val.HasMember("friendlyName") && val["friendlyName"].IsString()) {
-            entry.friendlyName = val["friendlyName"].GetString();
-        }
-        if (val.HasMember("title") && val["title"].IsString()) {
-            entry.title = val["title"].GetString();
-        }
-        if (val.HasMember("persistHistory") && val["persistHistory"].IsBool()) {
-            entry.persistHistory = val["persistHistory"].GetBool();
-        } else {
-            entry.persistHistory = true;
-        }
-
-        manifest[m.name.GetString()] = entry;
+        const auto* agentId = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 0));
+        const auto* persona = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 1));
+        const auto* parentId = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 2));
+        const auto* friendlyName = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 3));
+        const auto* title = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 4));
+        entry.persona = persona ? persona : "";
+        entry.parentId = parentId ? parentId : "";
+        entry.friendlyName = friendlyName ? friendlyName : "";
+        entry.title = title ? title : "";
+        entry.persistHistory = sqlite3_column_int(stmt.get(), 5) != 0;
+        if (agentId) manifest[agentId] = entry;
     }
-
     return manifest;
 }
 
@@ -1765,144 +3008,103 @@ void ThreadManager::writeAgentManifest(
     const std::string& threadId,
     const std::map<std::string, AgentManifestEntry>& manifest) {
     auto conn = acquireConnection(basePath_);
-
-    rapidjson::Document d;
-    d.SetObject();
-    auto& a = d.GetAllocator();
-
-    for (const auto& [agentId, entry] : manifest) {
-        rapidjson::Value obj(rapidjson::kObjectType);
-        obj.AddMember("persona", rapidjson::Value(entry.persona.c_str(), a).Move(), a);
-        obj.AddMember("parentId", rapidjson::Value(entry.parentId.c_str(), a).Move(), a);
-        obj.AddMember("friendlyName", rapidjson::Value(entry.friendlyName.c_str(), a).Move(), a);
-        obj.AddMember("title", rapidjson::Value(entry.title.c_str(), a).Move(), a);
-        obj.AddMember("persistHistory", entry.persistHistory, a);
-        d.AddMember(rapidjson::Value(agentId.c_str(), a).Move(), obj, a);
-    }
-
-    writeThreadStateField(conn->db, threadId, "agent_manifest_json",
-                          rapidJsonToString(d));
+    ensureThreadExists(conn->db, threadId);
+    withImmediateTransaction(conn->db, [&]() {
+        execPrepared(conn->db,
+                     "DELETE FROM agent_manifest_v2 WHERE thread_id=?;",
+                     [&](sqlite3_stmt* stmt) { bindText(stmt, 1, threadId); },
+                     "Failed to clear agent manifest");
+        for (const auto& [agentId, entry] : manifest) {
+            execPrepared(
+                conn->db,
+                "INSERT INTO agent_manifest_v2(thread_id, agent_id, persona, parent_id, friendly_name, title, persist_history) VALUES(?, ?, ?, ?, ?, ?, ?);",
+                [&](sqlite3_stmt* stmt) {
+                    bindText(stmt, 1, threadId);
+                    bindText(stmt, 2, agentId);
+                    bindText(stmt, 3, entry.persona);
+                    bindText(stmt, 4, entry.parentId);
+                    bindText(stmt, 5, entry.friendlyName);
+                    bindText(stmt, 6, entry.title);
+                    sqlite3_bind_int(stmt, 7, entry.persistHistory ? 1 : 0);
+                },
+                "Failed to write agent manifest entry");
+        }
+    });
 }
 
 ThreadPermissionRules ThreadManager::readPermissionRules(
     const std::string& threadId) const {
     auto conn = acquireConnection(basePath_);
-    auto json = readThreadStateField(conn->db, threadId, "permission_rules_json");
-
     ThreadPermissionRules rules;
-    if (!json.has_value()) {
-        return rules;
+
+    Statement stateStmt(conn->db,
+                        "SELECT allow_all_reads_session FROM permission_state_v2 WHERE thread_id=?;",
+                        "Failed to prepare permission state read");
+    bindText(stateStmt.get(), 1, threadId);
+    if (sqlite3_step(stateStmt.get()) == SQLITE_ROW) {
+        rules.allowAllReadsSession = sqlite3_column_int(stateStmt.get(), 0) != 0;
     }
 
-    auto d = parseJson(*json, "permission rules");
-    if (!d.IsObject()) {
-        return rules;
+    Statement cmdStmt(conn->db,
+                      "SELECT exact_command, normalized_command, primary_command, severity, tool_name, applies_to_entire_tool, is_global FROM permission_command_rules_v2 WHERE thread_id=? ORDER BY ordinal ASC;",
+                      "Failed to prepare command permission rules read");
+    bindText(cmdStmt.get(), 1, threadId);
+    while (sqlite3_step(cmdStmt.get()) == SQLITE_ROW) {
+        CommandAllowRule rule;
+        const auto* exact = reinterpret_cast<const char*>(sqlite3_column_text(cmdStmt.get(), 0));
+        const auto* normalized = reinterpret_cast<const char*>(sqlite3_column_text(cmdStmt.get(), 1));
+        const auto* primary = reinterpret_cast<const char*>(sqlite3_column_text(cmdStmt.get(), 2));
+        const auto* severity = reinterpret_cast<const char*>(sqlite3_column_text(cmdStmt.get(), 3));
+        const auto* tool = reinterpret_cast<const char*>(sqlite3_column_text(cmdStmt.get(), 4));
+        rule.exactCommand = exact ? exact : "";
+        rule.normalizedCommand = normalized ? normalized : "";
+        rule.primaryCommand = primary ? primary : "";
+        rule.severity = severity ? severityFromString(severity) : CommandSeverity::LOW;
+        rule.toolName = tool ? tool : "";
+        rule.appliesToEntireTool = sqlite3_column_int(cmdStmt.get(), 5) != 0;
+        rule.isGlobal = sqlite3_column_int(cmdStmt.get(), 6) != 0;
+        rules.commandAllowRules.push_back(std::move(rule));
     }
 
-    if (d.HasMember("command_allow_rules") && d["command_allow_rules"].IsArray()) {
-        for (const auto& ruleValue : d["command_allow_rules"].GetArray()) {
-            if (!ruleValue.IsObject()) {
-                continue;
+    Statement pathStmt(conn->db,
+                       "SELECT path_prefix, tool_name, read_only, applies_to_all_reads, is_global FROM permission_path_rules_v2 WHERE thread_id=? ORDER BY ordinal ASC;",
+                       "Failed to prepare path permission rules read");
+    bindText(pathStmt.get(), 1, threadId);
+    while (sqlite3_step(pathStmt.get()) == SQLITE_ROW) {
+        PathAllowRule rule;
+        const auto* path = reinterpret_cast<const char*>(sqlite3_column_text(pathStmt.get(), 0));
+        const auto* tool = reinterpret_cast<const char*>(sqlite3_column_text(pathStmt.get(), 1));
+        rule.pathPrefix = path ? path : "";
+        rule.toolName = tool ? tool : "";
+        rule.readOnly = sqlite3_column_int(pathStmt.get(), 2) != 0;
+        rule.appliesToAllReads = sqlite3_column_int(pathStmt.get(), 3) != 0;
+        rule.isGlobal = sqlite3_column_int(pathStmt.get(), 4) != 0;
+        if (!rule.pathPrefix.empty()) {
+            if (!rule.readOnly) {
+                rules.writeAllowPaths.push_back(rule.pathPrefix);
             }
-
-            CommandAllowRule rule;
-            if (ruleValue.HasMember("exact_command") &&
-                ruleValue["exact_command"].IsString()) {
-                rule.exactCommand = ruleValue["exact_command"].GetString();
-            }
-            if (ruleValue.HasMember("normalized_command") &&
-                ruleValue["normalized_command"].IsString()) {
-                rule.normalizedCommand =
-                    ruleValue["normalized_command"].GetString();
-            }
-            if (ruleValue.HasMember("primary_command") &&
-                ruleValue["primary_command"].IsString()) {
-                rule.primaryCommand = ruleValue["primary_command"].GetString();
-            }
-            if (ruleValue.HasMember("severity") &&
-                ruleValue["severity"].IsString()) {
-                rule.severity = severityFromString(ruleValue["severity"].GetString());
-            }
-            if (ruleValue.HasMember("tool_name") &&
-                ruleValue["tool_name"].IsString()) {
-                rule.toolName = ruleValue["tool_name"].GetString();
-            }
-            if (ruleValue.HasMember("applies_to_entire_tool") &&
-                ruleValue["applies_to_entire_tool"].IsBool()) {
-                rule.appliesToEntireTool =
-                    ruleValue["applies_to_entire_tool"].GetBool();
-            }
-            if (ruleValue.HasMember("is_global") &&
-                ruleValue["is_global"].IsBool()) {
-                rule.isGlobal = ruleValue["is_global"].GetBool();
-            }
-            if (!rule.exactCommand.empty()) {
-                rules.commandAllowRules.push_back(std::move(rule));
-            }
-        }
-    }
-
-    if (d.HasMember("path_allow_rules") && d["path_allow_rules"].IsArray()) {
-        for (const auto& pathValue : d["path_allow_rules"].GetArray()) {
-            if (!pathValue.IsObject()) {
-                continue;
-            }
-
-            PathAllowRule rule;
-            if (pathValue.HasMember("path_prefix") &&
-                pathValue["path_prefix"].IsString()) {
-                rule.pathPrefix = pathValue["path_prefix"].GetString();
-            }
-            if (pathValue.HasMember("tool_name") &&
-                pathValue["tool_name"].IsString()) {
-                rule.toolName = pathValue["tool_name"].GetString();
-            }
-            if (pathValue.HasMember("read_only") &&
-                pathValue["read_only"].IsBool()) {
-                rule.readOnly = pathValue["read_only"].GetBool();
-            }
-            if (pathValue.HasMember("applies_to_all_reads") &&
-                pathValue["applies_to_all_reads"].IsBool()) {
-                rule.appliesToAllReads =
-                    pathValue["applies_to_all_reads"].GetBool();
-            }
-            if (pathValue.HasMember("is_global") &&
-                pathValue["is_global"].IsBool()) {
-                rule.isGlobal = pathValue["is_global"].GetBool();
-            }
-            if (!rule.pathPrefix.empty()) {
-                if (!rule.readOnly) {
-                    rules.writeAllowPaths.push_back(rule.pathPrefix);
-                }
-                rules.pathAllowRules.push_back(std::move(rule));
-            }
-        }
-    }
-
-    if (d.HasMember("allow_all_reads_session") &&
-        d["allow_all_reads_session"].IsBool()) {
-        rules.allowAllReadsSession = d["allow_all_reads_session"].GetBool();
-    }
-
-    if (d.HasMember("allow_all_tool_sessions") &&
-        d["allow_all_tool_sessions"].IsArray()) {
-        for (const auto& toolValue : d["allow_all_tool_sessions"].GetArray()) {
-            if (toolValue.IsString()) {
-                rules.allowAllToolSessions.push_back(toolValue.GetString());
-            }
-        }
-    }
-
-    if (d.HasMember("write_allow_paths") && d["write_allow_paths"].IsArray()) {
-        for (const auto& pathValue : d["write_allow_paths"].GetArray()) {
-            if (!pathValue.IsString()) {
-                continue;
-            }
-            PathAllowRule rule;
-            rule.pathPrefix = pathValue.GetString();
-            rules.writeAllowPaths.push_back(rule.pathPrefix);
             rules.pathAllowRules.push_back(std::move(rule));
         }
+    }
+
+    if (rules.pathAllowRules.empty() && !rules.writeAllowPaths.empty()) {
+        for (const auto& pathPrefix : rules.writeAllowPaths) {
+            PathAllowRule rule;
+            rule.pathPrefix = pathPrefix;
+            rule.readOnly = false;
+            rule.appliesToAllReads = false;
+            rule.isGlobal = false;
+            rules.pathAllowRules.push_back(std::move(rule));
+        }
+    }
+
+    Statement toolStmt(conn->db,
+                       "SELECT tool_name FROM permission_tool_sessions_v2 WHERE thread_id=? ORDER BY tool_name ASC;",
+                       "Failed to prepare allow-all tool sessions read");
+    bindText(toolStmt.get(), 1, threadId);
+    while (sqlite3_step(toolStmt.get()) == SQLITE_ROW) {
+        const auto* tool = reinterpret_cast<const char*>(sqlite3_column_text(toolStmt.get(), 0));
+        if (tool) rules.allowAllToolSessions.push_back(tool);
     }
 
     return rules;
@@ -1911,67 +3113,95 @@ ThreadPermissionRules ThreadManager::readPermissionRules(
 void ThreadManager::writePermissionRules(const std::string& threadId,
                                          const ThreadPermissionRules& rules) {
     auto conn = acquireConnection(basePath_);
+    ensureThreadExists(conn->db, threadId);
+    withImmediateTransaction(conn->db, [&]() {
+        execPrepared(conn->db,
+                     "DELETE FROM permission_command_rules_v2 WHERE thread_id=?;",
+                     [&](sqlite3_stmt* stmt) { bindText(stmt, 1, threadId); },
+                     "Failed to clear command permission rules");
+        execPrepared(conn->db,
+                     "DELETE FROM permission_path_rules_v2 WHERE thread_id=?;",
+                     [&](sqlite3_stmt* stmt) { bindText(stmt, 1, threadId); },
+                     "Failed to clear path permission rules");
+        execPrepared(conn->db,
+                     "DELETE FROM permission_tool_sessions_v2 WHERE thread_id=?;",
+                     [&](sqlite3_stmt* stmt) { bindText(stmt, 1, threadId); },
+                     "Failed to clear allow-all tool sessions");
+        execPrepared(conn->db,
+                     "INSERT INTO permission_state_v2(thread_id, allow_all_reads_session) VALUES(?, ?) ON CONFLICT(thread_id) DO UPDATE SET allow_all_reads_session=excluded.allow_all_reads_session;",
+                     [&](sqlite3_stmt* stmt) {
+                         bindText(stmt, 1, threadId);
+                         sqlite3_bind_int(stmt, 2, rules.allowAllReadsSession ? 1 : 0);
+                     },
+                     "Failed to write permission state");
 
-    rapidjson::Document d;
-    d.SetObject();
-    auto& a = d.GetAllocator();
-
-    rapidjson::Value commandRules(rapidjson::kArrayType);
-    for (const auto& rule : rules.commandAllowRules) {
-        rapidjson::Value entry(rapidjson::kObjectType);
-        entry.AddMember("exact_command",
-                        rapidjson::Value(rule.exactCommand.c_str(), a).Move(), a);
-        entry.AddMember("normalized_command",
-                        rapidjson::Value(rule.normalizedCommand.c_str(), a).Move(), a);
-        entry.AddMember("primary_command",
-                        rapidjson::Value(rule.primaryCommand.c_str(), a).Move(), a);
-        entry.AddMember("severity",
-                        rapidjson::Value(severityToString(rule.severity), a).Move(),
-                        a);
-        entry.AddMember("tool_name",
-                        rapidjson::Value(rule.toolName.c_str(), a).Move(), a);
-        entry.AddMember("applies_to_entire_tool", rule.appliesToEntireTool, a);
-        entry.AddMember("is_global", rule.isGlobal, a);
-        commandRules.PushBack(entry, a);
-    }
-    d.AddMember("command_allow_rules", commandRules, a);
-
-    rapidjson::Value pathRules(rapidjson::kArrayType);
-    for (const auto& rule : rules.pathAllowRules) {
-        if (rule.pathPrefix.empty()) {
-            continue;
+        int ordinal = 0;
+        for (const auto& rule : rules.commandAllowRules) {
+            execPrepared(conn->db,
+                         "INSERT INTO permission_command_rules_v2(thread_id, ordinal, exact_command, normalized_command, primary_command, severity, tool_name, applies_to_entire_tool, is_global) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?);",
+                         [&](sqlite3_stmt* stmt) {
+                             bindText(stmt, 1, threadId);
+                             sqlite3_bind_int(stmt, 2, ordinal);
+                             bindText(stmt, 3, rule.exactCommand);
+                             bindText(stmt, 4, rule.normalizedCommand);
+                             bindText(stmt, 5, rule.primaryCommand);
+                             bindText(stmt, 6, severityToString(rule.severity));
+                             bindText(stmt, 7, rule.toolName);
+                             sqlite3_bind_int(stmt, 8, rule.appliesToEntireTool ? 1 : 0);
+                             sqlite3_bind_int(stmt, 9, rule.isGlobal ? 1 : 0);
+                         },
+                         "Failed to write command permission rule");
+            ordinal++;
         }
-        rapidjson::Value entry(rapidjson::kObjectType);
-        entry.AddMember("path_prefix",
-                        rapidjson::Value(rule.pathPrefix.c_str(), a).Move(), a);
-        entry.AddMember("tool_name",
-                        rapidjson::Value(rule.toolName.c_str(), a).Move(), a);
-        entry.AddMember("read_only", rule.readOnly, a);
-        entry.AddMember("applies_to_all_reads", rule.appliesToAllReads, a);
-        entry.AddMember("is_global", rule.isGlobal, a);
-        pathRules.PushBack(entry, a);
-    }
-    d.AddMember("path_allow_rules", pathRules, a);
-    d.AddMember("allow_all_reads_session", rules.allowAllReadsSession, a);
 
-
-    rapidjson::Value writePaths(rapidjson::kArrayType);
-    for (const auto& pathPrefix : rules.writeAllowPaths) {
-        if (pathPrefix.empty()) {
-            continue;
+        ordinal = 0;
+        if (!rules.pathAllowRules.empty()) {
+            for (const auto& rule : rules.pathAllowRules) {
+                if (rule.pathPrefix.empty()) continue;
+                execPrepared(conn->db,
+                             "INSERT INTO permission_path_rules_v2(thread_id, ordinal, path_prefix, tool_name, read_only, applies_to_all_reads, is_global) VALUES(?, ?, ?, ?, ?, ?, ?);",
+                             [&](sqlite3_stmt* stmt) {
+                                 bindText(stmt, 1, threadId);
+                                 sqlite3_bind_int(stmt, 2, ordinal);
+                                 bindText(stmt, 3, rule.pathPrefix);
+                                 bindText(stmt, 4, rule.toolName);
+                                 sqlite3_bind_int(stmt, 5, rule.readOnly ? 1 : 0);
+                                 sqlite3_bind_int(stmt, 6, rule.appliesToAllReads ? 1 : 0);
+                                 sqlite3_bind_int(stmt, 7, rule.isGlobal ? 1 : 0);
+                             },
+                             "Failed to write path permission rule");
+                ordinal++;
+            }
+        } else {
+            for (const auto& pathPrefix : rules.writeAllowPaths) {
+                if (pathPrefix.empty()) continue;
+                execPrepared(conn->db,
+                             "INSERT INTO permission_path_rules_v2(thread_id, ordinal, path_prefix, tool_name, read_only, applies_to_all_reads, is_global) VALUES(?, ?, ?, ?, ?, ?, ?);",
+                             [&](sqlite3_stmt* stmt) {
+                                 bindText(stmt, 1, threadId);
+                                 sqlite3_bind_int(stmt, 2, ordinal);
+                                 bindText(stmt, 3, pathPrefix);
+                                 bindText(stmt, 4, "");
+                                 sqlite3_bind_int(stmt, 5, 0);
+                                 sqlite3_bind_int(stmt, 6, 0);
+                                 sqlite3_bind_int(stmt, 7, 0);
+                             },
+                             "Failed to write fallback path permission rule");
+                ordinal++;
+            }
         }
-        writePaths.PushBack(rapidjson::Value(pathPrefix.c_str(), a).Move(), a);
-    }
-    d.AddMember("write_allow_paths", writePaths, a);
-    rapidjson::Value allowAllToolSessions(rapidjson::kArrayType);
-    for (const auto& toolName : rules.allowAllToolSessions) {
-        allowAllToolSessions.PushBack(
-            rapidjson::Value(toolName.c_str(), a).Move(), a);
-    }
-    d.AddMember("allow_all_tool_sessions", allowAllToolSessions, a);
 
-    writeThreadStateField(conn->db, threadId, "permission_rules_json",
-                          rapidJsonToString(d));
+        for (const auto& toolName : rules.allowAllToolSessions) {
+            if (toolName.empty()) continue;
+            execPrepared(conn->db,
+                         "INSERT INTO permission_tool_sessions_v2(thread_id, tool_name) VALUES(?, ?);",
+                         [&](sqlite3_stmt* stmt) {
+                             bindText(stmt, 1, threadId);
+                             bindText(stmt, 2, toolName);
+                         },
+                         "Failed to write allow-all tool session");
+        }
+    });
 }
 
 void ThreadManager::addCommandAllowRule(const std::string& threadId,
@@ -2063,7 +3293,7 @@ shared::ThreadArtifactMetadata ThreadManager::writeArtifact(
 
     Statement existingStmt(
         conn->db,
-        "SELECT created_at FROM artifacts WHERE thread_id=? AND owner_agent_id=? AND filename=?;",
+        "SELECT created_at FROM artifacts_v2 WHERE thread_id=? AND owner_agent_id=? AND filename=?;",
         "Failed to prepare artifact existence query");
     bindText(existingStmt.get(), 1, threadId);
     bindText(existingStmt.get(), 2, ownerAgentId);
@@ -2076,34 +3306,22 @@ shared::ThreadArtifactMetadata ThreadManager::writeArtifact(
         createdAt = static_cast<uint64_t>(sqlite3_column_int64(existingStmt.get(), 0));
     }
 
-    Statement upsert(
+    execPrepared(
         conn->db,
-        "INSERT INTO artifacts(thread_id, owner_agent_id, owner_friendly_name, filename, "
-        "storage_path, content, kind, description, created_at, updated_at) "
-        "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-        "ON CONFLICT(thread_id, owner_agent_id, filename) DO UPDATE SET "
-        "owner_friendly_name=excluded.owner_friendly_name, "
-        "storage_path=excluded.storage_path, "
-        "content=excluded.content, "
-        "kind=COALESCE(excluded.kind, artifacts.kind), "
-        "description=COALESCE(excluded.description, artifacts.description), "
-        "updated_at=excluded.updated_at;",
-        "Failed to prepare artifact upsert");
-
-    bindText(upsert.get(), 1, threadId);
-    bindText(upsert.get(), 2, ownerAgentId);
-    bindText(upsert.get(), 3, ownerFriendlyName);
-    bindText(upsert.get(), 4, filename);
-    bindText(upsert.get(), 5, storagePath);
-    bindText(upsert.get(), 6, content);
-    bindOptionalText(upsert.get(), 7, kind);
-    bindOptionalText(upsert.get(), 8, description);
-    sqlite3_bind_int64(upsert.get(), 9, static_cast<sqlite3_int64>(createdAt));
-    sqlite3_bind_int64(upsert.get(), 10, static_cast<sqlite3_int64>(timestamp));
-
-    if (sqlite3_step(upsert.get()) != SQLITE_DONE) {
-        throwSqliteError(conn->db, "Failed to write artifact");
-    }
+        "INSERT INTO artifacts_v2(thread_id, owner_agent_id, filename, owner_friendly_name, storage_path, content, kind, description, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(thread_id, owner_agent_id, filename) DO UPDATE SET owner_friendly_name=excluded.owner_friendly_name, storage_path=excluded.storage_path, content=excluded.content, kind=COALESCE(excluded.kind, artifacts_v2.kind), description=COALESCE(excluded.description, artifacts_v2.description), updated_at=excluded.updated_at;",
+        [&](sqlite3_stmt* stmt) {
+            bindText(stmt, 1, threadId);
+            bindText(stmt, 2, ownerAgentId);
+            bindText(stmt, 3, filename);
+            bindText(stmt, 4, ownerFriendlyName);
+            bindText(stmt, 5, storagePath);
+            bindText(stmt, 6, content);
+            bindOptionalText(stmt, 7, kind);
+            bindOptionalText(stmt, 8, description);
+            sqlite3_bind_int64(stmt, 9, static_cast<sqlite3_int64>(createdAt));
+            sqlite3_bind_int64(stmt, 10, static_cast<sqlite3_int64>(timestamp));
+        },
+        "Failed to write artifact");
 
     if (created) {
         *created = wasCreated;
@@ -2117,12 +3335,8 @@ shared::ThreadArtifactMetadata ThreadManager::writeArtifact(
     metadata.storagePath = storagePath;
     metadata.createdAt = createdAt;
     metadata.updatedAt = timestamp;
-    if (kind.has_value()) {
-        metadata.kind = kind;
-    }
-    if (description.has_value()) {
-        metadata.description = description;
-    }
+    metadata.kind = kind;
+    metadata.description = description;
 
     if (!wasCreated) {
         auto all = listArtifactsForAgent(threadId, ownerAgentId);
@@ -2148,14 +3362,13 @@ std::string ThreadManager::readArtifact(const std::string& threadId,
 
     auto conn = acquireConnection(basePath_);
     Statement stmt(conn->db,
-                   "SELECT content FROM artifacts WHERE thread_id=? AND owner_agent_id=? AND filename=?;",
+                   "SELECT content FROM artifacts_v2 WHERE thread_id=? AND owner_agent_id=? AND filename=?;",
                    "Failed to prepare artifact read");
     bindText(stmt.get(), 1, threadId);
     bindText(stmt.get(), 2, ownerAgentId);
     bindText(stmt.get(), 3, filename);
     if (sqlite3_step(stmt.get()) != SQLITE_ROW) {
-        throw std::runtime_error("Artifact not found: " + ownerAgentId + "/" +
-                                 filename);
+        throw std::runtime_error("Artifact not found: " + ownerAgentId + "/" + filename);
     }
 
     const auto* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 0));
@@ -2171,8 +3384,7 @@ ThreadManager::listArtifacts(const std::string& threadId) const {
     auto conn = acquireConnection(basePath_);
     Statement stmt(
         conn->db,
-        "SELECT owner_agent_id, owner_friendly_name, filename, storage_path, kind, description, created_at, updated_at "
-        "FROM artifacts WHERE thread_id=? ORDER BY owner_friendly_name ASC, filename ASC;",
+        "SELECT owner_agent_id, owner_friendly_name, filename, storage_path, kind, description, created_at, updated_at FROM artifacts_v2 WHERE thread_id=? ORDER BY owner_friendly_name ASC, filename ASC;",
         "Failed to prepare artifact list");
     bindText(stmt.get(), 1, threadId);
 
@@ -2186,17 +3398,12 @@ ThreadManager::listArtifacts(const std::string& threadId) const {
         const auto* storagePath = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 3));
         const auto* kind = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 4));
         const auto* description = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 5));
-
         m.ownerAgentId = ownerAgent ? ownerAgent : "";
         m.ownerFriendlyName = ownerFriendly ? ownerFriendly : "";
         m.filename = filename ? filename : "";
         m.storagePath = storagePath ? storagePath : "";
-        if (kind) {
-            m.kind = std::string(kind);
-        }
-        if (description) {
-            m.description = std::string(description);
-        }
+        if (kind) m.kind = std::string(kind);
+        if (description) m.description = std::string(description);
         m.createdAt = static_cast<uint64_t>(sqlite3_column_int64(stmt.get(), 6));
         m.updatedAt = static_cast<uint64_t>(sqlite3_column_int64(stmt.get(), 7));
         artifacts.push_back(std::move(m));
@@ -2211,14 +3418,35 @@ ThreadManager::listArtifactsForAgent(const std::string& threadId,
         return {};
     }
 
-    auto all = listArtifacts(threadId);
-    std::vector<shared::ThreadArtifactMetadata> filtered;
-    for (const auto& artifact : all) {
-        if (artifact.ownerAgentId == ownerAgentId) {
-            filtered.push_back(artifact);
-        }
+    auto conn = acquireConnection(basePath_);
+    Statement stmt(
+        conn->db,
+        "SELECT owner_agent_id, owner_friendly_name, filename, storage_path, kind, description, created_at, updated_at FROM artifacts_v2 WHERE thread_id=? AND owner_agent_id=? ORDER BY filename ASC;",
+        "Failed to prepare artifact list for agent");
+    bindText(stmt.get(), 1, threadId);
+    bindText(stmt.get(), 2, ownerAgentId);
+
+    std::vector<shared::ThreadArtifactMetadata> artifacts;
+    while (sqlite3_step(stmt.get()) == SQLITE_ROW) {
+        shared::ThreadArtifactMetadata m;
+        m.threadId = threadId;
+        const auto* ownerAgent = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 0));
+        const auto* ownerFriendly = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 1));
+        const auto* filename = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 2));
+        const auto* storagePath = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 3));
+        const auto* kind = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 4));
+        const auto* description = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 5));
+        m.ownerAgentId = ownerAgent ? ownerAgent : "";
+        m.ownerFriendlyName = ownerFriendly ? ownerFriendly : "";
+        m.filename = filename ? filename : "";
+        m.storagePath = storagePath ? storagePath : "";
+        if (kind) m.kind = std::string(kind);
+        if (description) m.description = std::string(description);
+        m.createdAt = static_cast<uint64_t>(sqlite3_column_int64(stmt.get(), 6));
+        m.updatedAt = static_cast<uint64_t>(sqlite3_column_int64(stmt.get(), 7));
+        artifacts.push_back(std::move(m));
     }
-    return filtered;
+    return artifacts;
 }
 
 std::optional<std::string>

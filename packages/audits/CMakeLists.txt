@@ -27,10 +27,9 @@ target_sources(firmius_audits PRIVATE
     src/audits/ResumeTodoAudit.cpp
     src/audits/WebFetchAudit.cpp
     src/audits/WebSearchAudit.cpp
-    src/audits/TuiPerformanceAudit.cpp
     src/audits/ReasoningTraceAudit.cpp
+    src/MigrationCli.cpp
 )
-
 target_sources(firmius_audits PUBLIC
   FILE_SET HEADERS
   BASE_DIRS include
@@ -60,7 +59,6 @@ target_sources(firmius_audits PUBLIC
     include/audits/ResumeTodoAudit.hpp
     include/audits/WebFetchAudit.hpp
     include/audits/WebSearchAudit.hpp
-    include/audits/TuiPerformanceAudit.hpp
     include/audits/ReasoningTraceAudit.hpp
 )
 
@@ -70,7 +68,6 @@ target_include_directories(firmius_audits PUBLIC
 )
 
 target_link_libraries(firmius_audits PUBLIC
-    firmius::tui
     firmius::core
     firmius::provider
     firmius::shared
@@ -78,7 +75,7 @@ target_link_libraries(firmius_audits PUBLIC
 
 target_include_directories(firmius_audits PRIVATE
   ${rapidjson_SOURCE_DIR}/include
-  ${CMAKE_SOURCE_DIR}/packages/tui/include
+# firmius::tui removed: audits should not depend on TUI to keep firmius_audit buildable
 )
 
 add_executable(firmius_audit)
@@ -88,3 +85,8 @@ target_link_libraries(firmius_audit PRIVATE firmius::audits)
 target_include_directories(firmius_audit PRIVATE
   ${rapidjson_SOURCE_DIR}/include
 )
+
+add_executable(firmius_migrate)
+target_sources(firmius_migrate PRIVATE src/migrate_main.cpp)
+target_link_libraries(firmius_migrate PRIVATE firmius::audits)
+target_include_directories(firmius_migrate PRIVATE ${rapidjson_SOURCE_DIR}/include)

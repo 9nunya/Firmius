@@ -41,6 +41,31 @@ target_include_directories(test_journaler PRIVATE
 )
 gtest_discover_tests(test_journaler)
 
+add_executable(test_persistence_e2e
+    persistence/test_persistence_e2e.cpp
+)
+target_link_libraries(test_persistence_e2e PRIVATE
+    firmius::core
+    firmius::shared
+    GTest::gtest_main
+    GTest::gmock
+)
+target_include_directories(test_persistence_e2e PRIVATE
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_persistence_e2e)
+
+add_executable(persistence_benchmark
+    persistence/persistence_benchmark.cpp
+)
+target_link_libraries(persistence_benchmark PRIVATE
+    firmius::core
+    firmius::shared
+)
+target_include_directories(persistence_benchmark PRIVATE
+    ${rapidjson_SOURCE_DIR}/include
+)
+
 # Host tests
 add_executable(test_localhost
     hosts/test_localhost.cpp
@@ -800,6 +825,24 @@ target_include_directories(test_stream_state_manager_live PRIVATE
 )
 gtest_discover_tests(test_stream_state_manager_live)
 
+add_executable(test_tui_state_thread_sync
+    tui/test_tui_state_thread_sync.cpp
+)
+target_link_libraries(test_tui_state_thread_sync PRIVATE
+    firmius::tui
+    firmius::core
+    firmius::shared
+    GTest::gtest
+    GTest::gmock
+    CURL::libcurl
+)
+target_include_directories(test_tui_state_thread_sync PRIVATE
+    ../../packages/tui/include
+    ../../packages/tui/src
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_tui_state_thread_sync)
+
 add_executable(test_transcript_grouping
     tui/test_transcript_grouping.cpp
     ../../packages/tui/src/components/TranscriptGrouping.cpp
@@ -832,6 +875,7 @@ add_executable(test_chat_window_helpers
     ../../packages/tui/src/ThemeManager.cpp
     ../../packages/tui/src/components/ANSIParser.cpp
     ../../packages/tui/src/UserPreferences.cpp
+    ../../packages/tui/src/StreamStateManager.cpp
     ../../packages/tui/src/NotificationManager.cpp
     ../../packages/tui/src/utils/Clipboard.cpp
     ../../packages/tui/src/tools/ArtifactToolPresentation.cpp
@@ -1074,6 +1118,42 @@ target_include_directories(test_status_bar PRIVATE
 )
 gtest_discover_tests(test_status_bar)
 
+add_executable(test_live_status_row
+    tui/test_live_status_row.cpp
+    ../../packages/tui/src/components/LiveStatusRow.cpp
+    ../../packages/tui/src/components/GlintEffect.cpp
+    ../../packages/tui/src/ThemeManager.cpp
+    ../../packages/tui/src/UserPreferences.cpp
+)
+target_link_libraries(test_live_status_row PRIVATE
+    firmius::shared
+    GTest::gtest_main
+    GTest::gmock
+    ftxui::dom
+    ftxui::screen
+    ftxui::component
+)
+target_include_directories(test_live_status_row PRIVATE
+    ../../packages/tui/include
+    ../../packages/tui/src
+)
+gtest_discover_tests(test_live_status_row)
+
+add_executable(test_quota_presenter
+    tui/test_quota_presenter.cpp
+    ../../packages/tui/src/QuotaPresenter.cpp
+)
+target_link_libraries(test_quota_presenter PRIVATE
+    firmius::shared
+    GTest::gtest_main
+    GTest::gmock
+)
+target_include_directories(test_quota_presenter PRIVATE
+    ../../packages/tui/include
+    ../../packages/tui/src
+)
+gtest_discover_tests(test_quota_presenter)
+
 add_executable(test_agent_strip
     tui/test_agent_strip.cpp
     ../../packages/tui/src/components/AgentStrip.cpp
@@ -1096,6 +1176,21 @@ target_include_directories(test_agent_strip PRIVATE
     ../../packages/tui/src
 )
 gtest_discover_tests(test_agent_strip)
+add_executable(test_user_preferences_skin
+    tui/test_user_preferences_skin.cpp
+    ../../packages/tui/src/UserPreferences.cpp
+)
+target_link_libraries(test_user_preferences_skin PRIVATE
+    firmius::shared
+    GTest::gtest_main
+    GTest::gmock
+)
+target_include_directories(test_user_preferences_skin PRIVATE
+    ../../packages/tui/include
+    ../../packages/tui/src
+)
+gtest_discover_tests(test_user_preferences_skin)
+
 
 add_executable(test_tool_presentation
     tui/test_tool_presentation.cpp
@@ -1393,4 +1488,3 @@ target_include_directories(test_process_input_regression PRIVATE
     ${rapidjson_SOURCE_DIR}/include
 )
 gtest_discover_tests(test_process_input_regression)
-

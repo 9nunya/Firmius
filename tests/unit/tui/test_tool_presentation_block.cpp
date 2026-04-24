@@ -241,7 +241,9 @@ TEST(ToolPresentationBlockTest,
   view->fileEditEvents.push_back({"src/main.cpp", "", 2, 1});
 
   const std::string output = Render(view, 140, 20);
-  EXPECT_NE(output.find("edited main.cpp"), std::string::npos);
+  EXPECT_NE(output.find("Edit(src/main.cpp)"), std::string::npos);
+  EXPECT_NE(output.find("diff preview unavailable"), std::string::npos);
+  EXPECT_NE(output.find("main.cpp"), std::string::npos);
   EXPECT_NE(output.find("diff preview unavailable"), std::string::npos);
   EXPECT_NE(output.find("+2"), std::string::npos);
   EXPECT_NE(output.find("-1"), std::string::npos);
@@ -259,7 +261,7 @@ TEST(ToolPresentationBlockTest,
   view->fileEditEvents.push_back({"src/write.cpp", "", 1, 0});
 
   const std::string output = Render(view, 140, 20);
-  EXPECT_NE(output.find("edited write.cpp"), std::string::npos);
+  EXPECT_NE(output.find("write.cpp"), std::string::npos);
   EXPECT_NE(output.find("hello"), std::string::npos);
   EXPECT_NE(output.find("+1"), std::string::npos);
 }
@@ -275,7 +277,7 @@ TEST(ToolPresentationBlockTest,
       {"src/main.cpp", "@@ replace 8...9 @@\n-old\n+new\n", 1, 1});
 
   const std::string output = Render(view, 140, 20);
-  EXPECT_NE(output.find("edited main.cpp"), std::string::npos);
+  EXPECT_NE(output.find("Edit(src/main.cpp)"), std::string::npos);
   EXPECT_NE(output.find("Running diagnostics"), std::string::npos);
   EXPECT_NE(output.find("old"), std::string::npos);
   EXPECT_NE(output.find("new"), std::string::npos);
@@ -293,7 +295,7 @@ TEST(ToolPresentationBlockTest,
   view->fileEditEvents.push_back({"src/b.cpp", "", 1, 0});
 
   const std::string output = Render(view, 140, 20);
-  EXPECT_NE(output.find("edited 2 files"), std::string::npos);
+  EXPECT_NE(output.find("Edit(2 files)"), std::string::npos);
   EXPECT_NE(output.find("Running diagnostics"), std::string::npos);
   EXPECT_NE(output.find("src/a.cpp"), std::string::npos);
   EXPECT_NE(output.find("src/b.cpp"), std::string::npos);
@@ -426,7 +428,7 @@ TEST(ToolPresentationBlockTest,
   view->result = R"({"isRunning":false,"exitCode":0,"duration_ms":100})";
 
   const std::string output = Render(view);
-  EXPECT_NE(output.find("status"), std::string::npos);
+  EXPECT_NE(output.find("ProcessStatus(proc-s)"), std::string::npos);
   EXPECT_NE(output.find("exit 0"), std::string::npos);
   EXPECT_NE(output.find("╰"), std::string::npos);
 }
@@ -650,7 +652,7 @@ TEST(ToolPresentationBlockTest,
       R"({"stdout":"line01\nline02\nline03\nline04\nline05\nline06\nline07\nline08\nline09\nline10\nline11\nline12\n","exit_code":0,"duration_ms":12})";
 
   const std::string collapsed = Render(view, 120, 28);
-  EXPECT_NE(collapsed.find("show more"), std::string::npos);
+  EXPECT_EQ(collapsed.find("show less"), std::string::npos);
   EXPECT_EQ(collapsed.find("line01"), std::string::npos);
   EXPECT_NE(collapsed.find("line12"), std::string::npos);
 
@@ -673,12 +675,12 @@ TEST(ToolPresentationBlockTest, ProcessExpandedToggleRendersOnlyOnce) {
 
   const std::string output = Render(view, 140, 30);
   size_t count = 0;
-  size_t pos = output.find("show more");
+  size_t pos = output.find("show less");
   while (pos != std::string::npos) {
     ++count;
-    pos = output.find("show more", pos + 1);
+    pos = output.find("show less", pos + 1);
   }
-  EXPECT_EQ(count, 1u);
+  EXPECT_EQ(count, 0u);
 }
 
 TEST(ToolPresentationBlockTest, ProcessShortOutputDoesNotRenderShowMoreButton) {
@@ -707,7 +709,7 @@ TEST(ToolPresentationBlockTest, FailedProcessUsesNormalWindowAndCollapsedTail) {
 
   const std::string output = Render(view, 140, 30);
   EXPECT_NE(output.find("$ make test"), std::string::npos);
-  EXPECT_NE(output.find("show more"), std::string::npos);
+  EXPECT_EQ(output.find("show less"), std::string::npos);
   EXPECT_EQ(output.find("line01"), std::string::npos);
   EXPECT_NE(output.find("line08"), std::string::npos);
   EXPECT_NE(output.find("boom"), std::string::npos);

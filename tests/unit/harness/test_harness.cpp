@@ -2381,6 +2381,48 @@ TEST_F(HarnessTest, resumeLast_restoresSession) {
     EXPECT_EQ(Harness::instance().currentThreadId(), threadId);
 }
 
+TEST_F(HarnessTest, resumeLast_migratesLegacyManifestSoFocusedAgentHistoryRestores) {
+    ThreadManager tm((testHome_ / ".firmius" / "threads").string());
+
+    ThreadMetadata metadata;
+    metadata.title = "Legacy Resume";
+    metadata.cwd = "/tmp";
+    metadata.leadPersona = "lead";
+    const std::string threadId = tm.createThread(metadata);
+
+    AgentTurn turn;
+    turn.turnId = "legacy-turn-1";
+    Message userMsg;
+    userMsg.id = "legacy-msg-1";
+    userMsg.role = Role::User;
+    userMsg.content.push_back(TextContent{"legacy hello"});
+    turn.messages.push_back(userMsg);
+    Journaler(threadId, "legacy-agent").appendTurn(turn);
+
+    execSqlAt(testHome_ / ".firmius" / "threads" / "firmius_threads.db",
+              "INSERT INTO thread_states(thread_id, agent_manifest_json) VALUES('" +
+                  threadId +
+                  "', '{\"legacy-agent\":{\"persona\":\"lead\",\"parentId\":\"\",\"friendlyName\":\"aster\",\"title\":\"Aster\",\"persistHistory\":true}}') "
+                  "ON CONFLICT(thread_id) DO UPDATE SET agent_manifest_json=excluded.agent_manifest_json;");
+
+    {
+        std::ofstream sessionFile(testHome_ / ".firmius" / "last_session.json");
+        sessionFile << "{\"threadId\":\"" << threadId << "\"}";
+    }
+
+    Harness::instance().shutdown();
+    Harness::instance().init();
+
+    EXPECT_TRUE(Harness::instance().resumeLast());
+    EXPECT_EQ(Harness::instance().currentThreadId(), threadId);
+    EXPECT_EQ(Harness::instance().focusedAgentId(), "legacy-agent");
+
+    const auto history = Harness::instance().getAgentHistory("legacy-agent");
+    ASSERT_EQ(history.turns.size(), 1u);
+    ASSERT_EQ(history.turns[0].messages.size(), 1u);
+    EXPECT_EQ(std::get<TextContent>(history.turns[0].messages[0].content[0]).text, "legacy hello");
+}
+
 TEST_F(HarnessTest, currentThreadPermissionMode_defaultsToRequest) {
     std::string threadId = Harness::instance().newThread({}, "/tmp", "test");
     ASSERT_FALSE(threadId.empty());

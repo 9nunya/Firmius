@@ -236,7 +236,88 @@ TEST(ChatWindowHelpersTest,
   EXPECT_EQ(expanded[5].turnId, "compaction-summary-1");
   EXPECT_EQ(expanded[6].turnId, "compaction-end-1");
   EXPECT_EQ(expanded[7].turnId, "user-task-7");
+
 }
+
+TEST(ChatWindowHelpersTest,
+     TranscriptGrowthAtBottomDoesNotLeaveBlankGapUntilEndKey) {
+  AgentHistory history;
+
+  auto make_assistant_turn = [](std::string id, std::string text) {
+    AgentTurn turn;
+    turn.turnId = std::move(id);
+    Message msg;
+    msg.role = Role::Assistant;
+    msg.content = {TextContent{std::move(text)}};
+    turn.messages.push_back(std::move(msg));
+    return turn;
+  };
+
+  for (int i = 0; i < 18; ++i) {
+    history.turns.push_back(make_assistant_turn(
+        "turn-" + std::to_string(i),
+        "assistant row " + std::to_string(i) +
+            " with enough trailing words to wrap across multiple screen lines"));
+  }
+
+  auto chat = firmius::tui::ChatWindow(
+      [&history]() -> const AgentHistory * { return &history; });
+
+  auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(36),
+                                      ftxui::Dimension::Fixed(8));
+  Render(screen, chat->Render());
+  Render(screen, chat->Render());
+
+  history.turns.push_back(make_assistant_turn(
+      "turn-new",
+      "fresh bottom row with enough trailing words to wrap across multiple screen lines and prove the viewport stayed pinned"));
+
+  EXPECT_TRUE(chat->OnEvent(ftxui::Event::Special("TranscriptChanged")));
+
+  Render(screen, chat->Render());
+  const auto first_pass = screen.ToString();
+  Render(screen, chat->Render());
+  const auto second_pass = screen.ToString();
+
+  EXPECT_NE(first_pass.find("fresh"), std::string::npos) << first_pass;
+  EXPECT_NE(second_pass.find("fresh"), std::string::npos) << second_pass;
+  EXPECT_NE(first_pass.find("pinned"), std::string::npos) << first_pass;
+  EXPECT_NE(second_pass.find("pinned"), std::string::npos) << second_pass;
+
+  const std::string blank_band = "                                    \n"
+                                 "                                    \n"
+                                 "                                    \n";
+  EXPECT_EQ(first_pass.find(blank_band), std::string::npos) << first_pass;
+  EXPECT_EQ(second_pass.find(blank_band), std::string::npos) << second_pass;
+}
+
+TEST(TuiStateChatSignatureTest, ChangesWhenQueuedMessagesChange) {
+  using firmius::tui::StreamStateManager;
+
+  StreamStateManager mgr;
+
+  // NOTE: no persisted tool calls for this test.
+  const std::unordered_set<std::string> persisted;
+  const std::string focused_agent_id = "agent-1";
+  const std::string thread_id = "thread-1";
+
+  const auto base = firmius::tui::BuildFocusedChatLiveMeasurementSignature(
+      mgr, focused_agent_id, thread_id, persisted);
+
+  // Inject one queued message by simulating the queue event.
+  firmius::shared::MessageQueued q;
+  q.messageId = "msg-1";
+  q.text = "hello queued";
+  q.threadId = thread_id;
+  q.agentId = focused_agent_id;
+  mgr.handleMessageQueued(q);
+
+  const auto with_queued = firmius::tui::BuildFocusedChatLiveMeasurementSignature(
+      mgr, focused_agent_id, thread_id, persisted);
+
+  EXPECT_NE(base, with_queued);
+}
+
 
 TEST(ChatWindowHelpersTest,
      ExpandCompactionTranscriptSkipsDuplicatedPreservedTailButKeepsLaterTurns) {

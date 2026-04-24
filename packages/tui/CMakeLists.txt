@@ -5,6 +5,7 @@ target_sources(firmius_tui PRIVATE
     src/TUIState.cpp
     src/TUIHotkeys.cpp
     src/ActivePlanState.cpp
+    src/QuotaPresenter.cpp
     src/WorkPanelLayout.cpp
     src/StreamStateManager.cpp
     src/NotificationManager.cpp
@@ -26,6 +27,7 @@ target_sources(firmius_tui PRIVATE
     src/commands/QuitCommand.cpp
     src/commands/RouterCommand.cpp
     src/commands/PurposesCommand.cpp
+    src/commands/SkinCommand.cpp
     src/commands/WorkflowsCommand.cpp
     src/modals/ModalRegistry.cpp
     src/modals/ThreadPickerModal.cpp
@@ -76,8 +78,10 @@ target_sources(firmius_tui PRIVATE
     src/tools/SemanticToolPresentation.cpp
     src/tools/GenericToolPresentation.cpp
     src/utils/ReferenceAutocomplete.cpp
+    src/utils/ClaudexActivity.cpp
     src/utils/Clipboard.cpp
     src/TuiRunner.cpp
+    src/components/LiveStatusRow.cpp
 )
 
 target_include_directories(firmius_tui PUBLIC include)

@@ -190,6 +190,20 @@ std::string extractFunctionCallArgs(const rapidjson::Value &functionCall) {
   return "";
 }
 
+bool isValidJsonObjectPayload(const std::string &payload) {
+  const std::string trimmed = firmius::shared::StringUtil::trim(payload);
+  if (trimmed.empty()) {
+    return false;
+  }
+
+  rapidjson::Document parsed;
+  parsed.Parse(trimmed.c_str());
+  if (parsed.HasParseError()) {
+    return false;
+  }
+  return parsed.IsObject();
+}
+}
 bool endsWithInsensitive(const std::string &value, const std::string &suffix) {
   if (value.size() < suffix.size())
     return false;
@@ -1187,18 +1201,32 @@ void AntigravityProvider::processSSELine(const std::string &line,
           if (!currentArgs.empty()) {
             if (state.lastArgs.empty()) {
               chunk.argsDelta = currentArgs;
+              state.lastArgs = currentArgs;
             } else if (currentArgs != state.lastArgs) {
               if (currentArgs.rfind(state.lastArgs, 0) == 0) {
                 chunk.argsDelta = currentArgs.substr(state.lastArgs.size());
+                state.lastArgs = currentArgs;
+              } else if (isValidJsonObjectPayload(currentArgs)) {
+                chunk.argsDelta = currentArgs;
+                state.lastArgs = currentArgs;
               } else {
                 chunk.argsDelta = currentArgs;
+                state.lastArgs += currentArgs;
               }
             }
-            state.lastArgs = currentArgs;
           }
 
+          const bool hasCompleteToolCall =
+              !state.lastName.empty() &&
+              isValidJsonObjectPayload(state.lastArgs);
           if (!chunk.nameDelta.empty() || !chunk.argsDelta.empty()) {
             (*ctx.onEvent)(chunk);
+          }
+
+          if (hasCompleteToolCall && !state.finalized) {
+            state.finalized = true;
+            (*ctx.onEvent)(ToolCall{state.emittedId, state.index, state.lastName,
+                                    state.lastArgs});
           }
         }
       }

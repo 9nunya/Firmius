@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <functional>
 #include <memory>
 
@@ -35,6 +36,7 @@ public:
 
     int ScrollOffset() const { return selected_; }
     int ViewportHeight() const { return viewport_height_; }
+    bool IsAtBottom() const { return at_bottom_; }
     ftxui::Element OnRender() override;
     bool OnEvent(ftxui::Event event) override;
     bool Focusable() const override;
@@ -68,6 +70,8 @@ private:
     int measured_viewport_width_ = -1;
     std::size_t measured_signature_ = 0;
     ftxui::CapturedMouse captured_mouse_;
+    bool scrollbar_visible_ = false;
+    std::chrono::steady_clock::time_point scrollbar_visible_until_{};
 };
 
 std::shared_ptr<ScrollableBoxComponent> ScrollableBox(

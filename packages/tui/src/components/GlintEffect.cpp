@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 
 #include <ftxui/component/animation.hpp>
 #include <ftxui/dom/node.hpp>
@@ -23,6 +24,35 @@ float EaseOut(float t) { return 1.0f - std::pow(1.0f - t, 3.0f); }
 } // namespace GlintEasing
 
 namespace {
+
+static float clamp01(float v) { return std::max(0.0f, std::min(1.0f, v)); }
+
+static float triangle01(float t) {
+  // 0..1..0
+  t = clamp01(t);
+  return 1.0f - std::abs(2.0f * t - 1.0f);
+}
+
+static uint32_t mix32(uint32_t x) {
+  // Simple avalanching mix for stable pseudo-randomness.
+  x ^= x >> 16;
+  x *= 0x7feb352dU;
+  x ^= x >> 15;
+  x *= 0x846ca68bU;
+  x ^= x >> 16;
+  return x;
+}
+
+static float hash01(int x, int y, int t_bucket) {
+  uint32_t v = 0x9e3779b9U;
+  v ^= static_cast<uint32_t>(x) + 0x85ebca6bU;
+  v = mix32(v);
+  v ^= static_cast<uint32_t>(y) + 0xc2b2ae35U;
+  v = mix32(v);
+  v ^= static_cast<uint32_t>(t_bucket) + 0x27d4eb2fU;
+  v = mix32(v);
+  return static_cast<float>(v & 0x00FFFFFFU) / static_cast<float>(0x01000000U);
+}
 
 class NodeDecorator : public ftxui::Node {
 public:
@@ -53,14 +83,92 @@ public:
     if (width <= 0 || config_.glintSize <= 0)
       return;
 
-    float glint_size = static_cast<float>(std::min(config_.glintSize, width));
-    float start_x = static_cast<float>(box_.x_min) - glint_size;
-    float end_x = static_cast<float>(box_.x_max) + glint_size;
-    float exact_pos = start_x + (end_x - start_x) * progress_;
+    const float glint_size =
+        static_cast<float>(std::min(config_.glintSize, width));
 
-    float half_span = glint_size / 2.0f;
-    float min_center = exact_pos - half_span;
-    float max_center = exact_pos + half_span;
+    if (config_.mode == GlintConfig::Mode::Pulse) {
+      const float intensity = std::pow(triangle01(progress_), 1.25f);
+      if (intensity <= 0.0f)
+        return;
+
+      for (int y = box_.y_min; y <= box_.y_max; ++y) {
+        for (int x = box_.x_min; x <= box_.x_max; ++x) {
+          auto &pixel = screen.PixelAt(x, y);
+          ftxui::Color c =
+              InterpolateGradient(config_.gradientColors, intensity);
+
+          if (config_.target == GlintConfig::Target::Text) {
+            bool is_empty = pixel.character.empty();
+            bool is_space = (!is_empty && pixel.character == " ");
+            if (is_empty)
+              continue;
+            if (is_space && !config_.includeWhitespace)
+              continue;
+
+            if (is_space) {
+              pixel.background_color = c;
+            } else {
+              pixel.foreground_color = c;
+            }
+          } else {
+            pixel.background_color = c;
+          }
+        }
+      }
+      return;
+    }
+
+    if (config_.mode == GlintConfig::Mode::Sparkle) {
+      const float speed = std::max(0.05f, config_.sparkleSpeed);
+      const int t_bucket =
+          static_cast<int>(std::floor(progress_ * 120.0f * speed));
+      const float density = clamp01(config_.sparkleDensity);
+
+      for (int y = box_.y_min; y <= box_.y_max; ++y) {
+        for (int x = box_.x_min; x <= box_.x_max; ++x) {
+          auto &pixel = screen.PixelAt(x, y);
+
+          if (config_.target == GlintConfig::Target::Text) {
+            bool is_empty = pixel.character.empty();
+            bool is_space = (!is_empty && pixel.character == " ");
+            if (is_empty)
+              continue;
+            if (is_space && !config_.includeWhitespace)
+              continue;
+          }
+
+          float r = hash01(x, y, t_bucket);
+          if (r > density)
+            continue;
+
+          float intensity =
+              0.55f + 0.45f * (1.0f - (r / std::max(density, 1e-6f)));
+          intensity = clamp01(intensity);
+          ftxui::Color c =
+              InterpolateGradient(config_.gradientColors, intensity);
+
+          if (config_.target == GlintConfig::Target::Text) {
+            if (!pixel.character.empty() && pixel.character == " ") {
+              pixel.background_color = c;
+            } else {
+              pixel.foreground_color = c;
+            }
+          } else {
+            pixel.background_color = c;
+          }
+        }
+      }
+      return;
+    }
+
+    // Default: Sweep.
+    const float start_x = static_cast<float>(box_.x_min) - glint_size;
+    const float end_x = static_cast<float>(box_.x_max) + glint_size;
+    const float exact_pos = start_x + (end_x - start_x) * progress_;
+
+    const float half_span = glint_size / 2.0f;
+    const float min_center = exact_pos - half_span;
+    const float max_center = exact_pos + half_span;
 
     for (int y = box_.y_min; y <= box_.y_max; ++y) {
       int min_x = static_cast<int>(std::floor(min_center));
@@ -77,13 +185,25 @@ public:
 
         if (color_t <= 0.0f)
           continue;
+
+        // Make the sweep pop a bit more (narrow bright core).
+        color_t = std::pow(clamp01(color_t), 0.75f);
         ftxui::Color c = InterpolateGradient(config_.gradientColors, color_t);
 
         auto &pixel = screen.PixelAt(x, y);
         if (config_.target == GlintConfig::Target::Text) {
-          if (pixel.character.empty() || pixel.character == " ") {
+          if (pixel.character.empty()) {
             continue;
           }
+
+          if (pixel.character == " ") {
+            if (!config_.includeWhitespace)
+              continue;
+            // For spaces, tint background to keep the sweep continuous.
+            pixel.background_color = c;
+            continue;
+          }
+
           if (c == pixel.background_color) {
             pixel.foreground_color = ftxui::Color::White;
           } else {
@@ -107,7 +227,7 @@ private:
     if (colors.size() == 1)
       return colors[0];
 
-    t = std::max(0.0f, std::min(1.0f, t));
+    t = clamp01(t);
     float scaled_t = t * (colors.size() - 1);
     int idx = static_cast<int>(scaled_t);
     if (idx >= static_cast<int>(colors.size()) - 1)
@@ -131,6 +251,10 @@ public:
     auto now = std::chrono::steady_clock::now();
     float elapsed =
         std::chrono::duration<float>(now - global_start_time).count();
+
+    if (config_.phaseOffsetSeconds.has_value())
+      elapsed += *config_.phaseOffsetSeconds;
+
     const float width_scale =
         std::max(1.6f, static_cast<float>(config_.glintSize) / 10.0f);
     const float effective_duration = config_.durationSeconds * width_scale;

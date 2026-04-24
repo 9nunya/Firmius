@@ -3,6 +3,7 @@
 
 #include <chrono>
 #include <functional>
+#include <optional>
 #include <vector>
 
 #include <ftxui/component/component.hpp>
@@ -11,6 +12,16 @@
 namespace firmius::tui {
 
 struct GlintConfig {
+  enum class Mode {
+    // A traveling highlight band sweeping across the element.
+    Sweep,
+    // A global shimmer/pulse over the whole element.
+    Pulse,
+    // Sparse twinkles that flicker across the element.
+    Sparkle,
+  };
+  Mode mode = Mode::Sweep;
+
   enum class Target { Text, Background };
   Target target = Target::Text;
   
@@ -20,12 +31,20 @@ struct GlintConfig {
     ftxui::Color::White,
     ftxui::Color::GrayLight,
   };
+
+  // If true and target==Text, whitespace cells participate in the glint by
+  // tinting their background. This makes sweeps look continuous across spaces.
+  bool includeWhitespace = false;
   
   // Glint width in character cells
   int glintSize = 5;
   
   // Time between glint animations (seconds)
   float intervalSeconds = 2.0f;
+
+  // Optional per-component phase offset (seconds) to de-sync many glints.
+  // If not set, a stable default is derived from global time only.
+  std::optional<float> phaseOffsetSeconds;
   
   // Easing function for the glint travel across the element
   // Signature: float(float) where input/output are 0..1
@@ -33,6 +52,12 @@ struct GlintConfig {
   
   // Total duration of one glint pass (seconds)  
   float durationSeconds = 0.8f;
+
+  // Sparkle mode parameters
+  // - density: 0..1, fraction of cells eligible per frame.
+  // - speed:   higher = faster flicker.
+  float sparkleDensity = 0.06f;
+  float sparkleSpeed = 1.8f;
 };
 
 namespace GlintEasing {

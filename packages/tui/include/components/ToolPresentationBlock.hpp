@@ -11,7 +11,8 @@ namespace firmius::tui {
 
 ftxui::Component ToolPresentationBlock(
     const std::shared_ptr<firmius::shared::ToolCallView> &view,
-    std::function<ToolPresentation()> presentation_getter);
+    std::function<ToolPresentation()> presentation_getter,
+    std::function<bool()> compact_mode_getter = nullptr);
 
 } // namespace firmius::tui
 

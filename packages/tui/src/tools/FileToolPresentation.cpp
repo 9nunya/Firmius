@@ -1032,52 +1032,44 @@ ToolPresentation BuildFileEditPresentation(const ToolCallView &view) {
     presentation.diff_source_name = BaseName(primary_path);
   }
 
+  const std::string edit_subject =
+      multi_file ? (std::to_string(display_file_count) + " files")
+                 : (primary_path.empty() ? std::string("file") : primary_path);
+
   if (presentation.lifecycle == ToolPresentationLifecycle::Preparing) {
-    presentation.title =
-        multi_file ? "prepare file edits"
-                   : (primary_path.empty() ? "prepare file edit"
-                                           : "prepare edit " + BaseName(primary_path));
+    presentation.title = "Edit(" + edit_subject + ")";
     presentation.compact_summary = presentation.title;
+    presentation.custom_icon = "⊙";
     return presentation;
   }
   if (presentation.lifecycle == ToolPresentationLifecycle::Running) {
+    presentation.title = "Edit(" + edit_subject + ")";
+    presentation.compact_summary = presentation.title;
     if (!ordered_paths.empty()) {
-      presentation.title =
-          multi_file ? ("edited " + std::to_string(display_file_count) + " files")
-                     : ("edited " + BaseName(primary_path));
-      presentation.compact_summary = presentation.title;
       presentation.notices.push_back(
           {ToolPresentationNoticeKind::Info, "Running diagnostics…"});
-    } else {
-      presentation.title =
-          multi_file ? "editing " + std::to_string(display_file_count) + " files"
-                     : (primary_path.empty() ? "editing file"
-                                             : "editing " + BaseName(primary_path));
-      presentation.compact_summary = presentation.title;
     }
   }
   if (presentation.lifecycle == ToolPresentationLifecycle::Error) {
-    presentation.title =
-        multi_file ? "failed to edit files"
-                   : (primary_path.empty() ? "file edit failed"
-                                           : "failed to edit " + BaseName(primary_path));
+    presentation.title = "Edit(" + edit_subject + ")";
     if (has_result) {
       const std::string top_level_error = StringMember(result_doc, "error");
       if (!top_level_error.empty()) {
         presentation.error_text = top_level_error;
       } else {
-        presentation.error_text = firmius::shared::ErrorCleaner::clean(view.result);
+        presentation.error_text =
+            firmius::shared::ErrorCleaner::clean(view.result);
       }
     } else {
       presentation.error_text = firmius::shared::ErrorCleaner::clean(view.result);
     }
   } else {
-    presentation.title =
-        multi_file ? "edited " + std::to_string(display_file_count) + " files"
-                   : (primary_path.empty() ? "edited file"
-                                           : "edited " + BaseName(primary_path));
+    presentation.title = "Edit(" + edit_subject + ")";
   }
   presentation.compact_summary = presentation.title;
+  presentation.custom_icon = "⊙";
+  presentation.toggle_labels.collapsed = "expand diff";
+  presentation.toggle_labels.expanded = "collapse diff";
 
   std::vector<FileEditPreview> previews;
   auto appendOperations =

@@ -147,3 +147,10 @@ sudo make install  # Installs to /usr/local/bin/firmius
 - **Workflows**: Custom slash commands loaded from `~/.firmius/workflows/`
 - **Personas**: Agent personalities from `prompts/` directory
 - **Locking**: PID-based file locking via `ThreadLockManager` prevents concurrent thread access
+
+## HOUSE GIMMICK
+
+If you are an agent working in this codebase and you touch the Claudex skin or its live-row UX, you are encouraged to add **2-10 funny cheeky phrases** to `packages/tui/include/ClaudexPhrases.hpp`.
+Keep them playful, concise, terminal-friendly, and non-annoying.
+Do not delete the whole phrase bank just because your sense of humor is weak.
+If you add phrases, keep at least a few grounded in real coding behavior: reading, thinking, editing, verifying, waiting.

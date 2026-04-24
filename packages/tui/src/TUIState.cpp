@@ -3,10 +3,13 @@
 
 #include "ThemeManager.hpp"
 #include "UserPreferences.hpp"
+#include "ClaudexPhrases.hpp"
+#include "utils/ClaudexActivity.hpp"
 #include "components/AgentStrip.hpp"
 #include "components/ChatWindow.hpp"
 #include "components/ContextLane.hpp"
 #include "components/InputBar.hpp"
+#include "components/LiveStatusRow.hpp"
 #include "components/Markdown.hpp"
 #include "components/HelpOverlay.hpp"
 #include "components/PlanLane.hpp"
@@ -113,6 +116,91 @@ double nanosToMillis(int64_t nanos) {
 template <typename T>
 void HashCombine(std::size_t &seed, const T &value) {
   seed ^= std::hash<T>{}(value) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+}
+
+std::string truncateText(const std::string &text, int max_len) {
+  if (max_len <= 0)
+    return "";
+  if (static_cast<int>(text.size()) <= max_len)
+    return text;
+  if (max_len <= 3)
+    return text.substr(0, max_len);
+  return text.substr(0, max_len - 3) + "...";
+}
+
+int workChunkRank(firmius::shared::WorkChunkStatus status) {
+  using firmius::shared::WorkChunkStatus;
+  switch (status) {
+  case WorkChunkStatus::InProgress:
+    return 0;
+  case WorkChunkStatus::Verifying:
+    return 1;
+  case WorkChunkStatus::Ready:
+    return 2;
+  case WorkChunkStatus::Implemented:
+    return 3;
+  case WorkChunkStatus::Done:
+    return 4;
+  case WorkChunkStatus::Blocked:
+    return 5;
+  case WorkChunkStatus::Failed:
+    return 6;
+  case WorkChunkStatus::Cancelled:
+    return 7;
+  }
+  return 99;
+}
+
+uint64_t nextLiveRowRng(uint64_t &state) {
+  state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+  return state;
+}
+
+std::chrono::seconds nextLiveRowPhraseDelay(uint64_t &state) {
+  const uint64_t value = nextLiveRowRng(state);
+  return std::chrono::seconds(15 + static_cast<int>(value % 16));
+}
+
+std::chrono::seconds minimumLiveRowPhraseVisibleDuration() {
+  return std::chrono::seconds(6);
+}
+
+std::chrono::milliseconds liveRowTransitionDurationForPhrases(
+    const std::string &previous_phrase, const std::string &next_phrase) {
+  const auto max_len =
+      std::max(previous_phrase.size(), next_phrase.size());
+  return std::chrono::milliseconds(
+      450 + static_cast<int>(std::min<std::size_t>(max_len, 80) * 22));
+}
+
+std::string pickLiveRowPhrase(const std::vector<std::string> &phrases,
+                              const std::string &current, uint64_t &state) {
+  if (phrases.empty()) {
+    return "Standing by.";
+  }
+  if (phrases.size() == 1) {
+    return phrases.front();
+  }
+  for (int attempt = 0; attempt < 8; ++attempt) {
+    const auto index =
+        static_cast<std::size_t>(nextLiveRowRng(state) % phrases.size());
+    if (phrases[index] != current) {
+      return phrases[index];
+    }
+  }
+  for (const auto &phrase : phrases) {
+    if (phrase != current) {
+      return phrase;
+    }
+  }
+  return phrases.front();
+}
+
+void queueLiveRowTransition(std::string phrase_key, std::string phrase,
+                            std::string &pending_key,
+                            std::string &pending_phrase) {
+  pending_key = std::move(phrase_key);
+  pending_phrase = std::move(phrase);
 }
 
 std::size_t buildFocusedChatLiveMeasurementSignature(
@@ -968,6 +1056,49 @@ focusCycleCandidates(const std::string &focusedAgentId) {
   return candidates;
 }
 
+void TuiState::syncCurrentThreadMetadataFromHarness(bool preserve_live_state) {
+  if (!harness_) {
+    return;
+  }
+
+  const std::string currentThreadId = harness_->currentThreadId();
+  if (currentThreadId.empty()) {
+    return;
+  }
+
+  for (const auto &metadata : harness_->listThreads()) {
+    if (metadata.threadId != currentThreadId) {
+      continue;
+    }
+
+    if (!preserve_live_state) {
+      handleAppEvent(shared::ThreadChanged{currentThreadId, metadata});
+      return;
+    }
+
+    thread_ = metadata;
+    focused_agent_id_ = harness_->focusedAgentId();
+    if (title_model_) {
+      title_model_->title = thread_.title;
+      title_model_->thread_id = thread_.threadId;
+    }
+    active_plan_state_.setExpanded(true);
+    active_plan_state_.hydrateForThread(thread_, loadActivePlanForThread(thread_));
+    setViewMode(ViewMode::Chat);
+    requestRefresh(RefreshFlags::Status);
+    requestRefresh(RefreshFlags::AgentStrip);
+    requestRefresh(RefreshFlags::PlanLane);
+    requestRefresh(RefreshFlags::TodoLane);
+    requestRefresh(RefreshFlags::ContextLane);
+    notifyChatTranscriptChanged();
+    applyPendingRefreshes();
+    if (screen_) {
+      postEvent(ftxui::Event::Custom);
+    }
+    return;
+  }
+}
+
 void TuiState::refreshFocusedHistory() {
   if (!harness_ || focused_agent_id_.empty()) {
     history_.reset();
@@ -1314,6 +1445,16 @@ void TuiState::loadUserPreferences() {
   if (preferences.preferred_permission_mode.has_value()) {
     thread_.permissionMode = *preferences.preferred_permission_mode;
   }
+  skin_config_ = preferences.skin_kind.has_value()
+                     ? defaultSkinConfig(*preferences.skin_kind)
+                     : defaultSkinConfig(SkinKind::Firmius);
+  if (preferences.skin_kind.has_value() && *preferences.skin_kind == SkinKind::Claudex &&
+      preferences.claudex_skin.has_value()) {
+    skin_config_ = *preferences.claudex_skin;
+  } else if (preferences.skin_kind.has_value() && *preferences.skin_kind == SkinKind::Firmius &&
+             preferences.firmius_skin.has_value()) {
+    skin_config_ = *preferences.firmius_skin;
+  }
   show_agent_strip_ = preferences.show_agent_strip.value_or(true);
   show_work_panel_ = preferences.show_work_panel.value_or(true);
   agent_strip_visible_rows_ =
@@ -1325,12 +1466,76 @@ void TuiState::loadUserPreferences() {
 void TuiState::persistUserPreferences() const {
   UserPreferences preferences;
   preferences.preferred_permission_mode = thread_.permissionMode;
+  preferences.skin_kind = skin_config_.kind;
+  if (skin_config_.kind == SkinKind::Claudex) {
+    preferences.claudex_skin = skin_config_;
+  } else {
+    preferences.firmius_skin = skin_config_;
+  }
+  preferences.show_persistent_live_row = skin_config_.show_persistent_live_row;
+  preferences.compact_status_bar = skin_config_.compactStatusBar();
+  preferences.compact_tool_display = skin_config_.compactToolDisplay();
   preferences.show_agent_strip = show_agent_strip_;
   preferences.show_work_panel = show_work_panel_;
   preferences.agent_strip_rows = agent_strip_visible_rows_;
   preferences.work_panel_height = work_panel_height_override_;
   saveUserPreferences(preferences);
 }
+
+SkinKind TuiState::currentSkinKind() const { return skin_config_.kind; }
+
+void TuiState::applySkinConfig(const SkinConfig &config) {
+  skin_config_ = config;
+  show_agent_strip_ = skin_config_.show_agent_strip;
+  show_work_panel_ = skin_config_.show_work_panel;
+  diffs_expanded_ = !skin_config_.diffsCollapsedByDefault();
+  UIState::instance().diffsExpanded = diffs_expanded_;
+  if (input_model_) {
+    input_model_->compact_mode = skin_config_.compact_input;
+  }
+  if (status_model_) {
+    status_model_->compact_skin_mode = skin_config_.compactStatusBar();
+  }
+  skin_config_.kind = config.kind;
+  persistUserPreferences();
+  if (chat_component_) {
+    chat_component_->OnEvent(ftxui::Event::Special("ThemeChanged"));
+  }
+  if (screen_) {
+    postEvent(ftxui::Event::Custom);
+  }
+}
+
+void TuiState::setSkinKind(SkinKind kind) {
+  const auto preferences = firmius::tui::loadUserPreferences();
+  skin_config_ = defaultSkinConfig(kind);
+  if (kind == SkinKind::Claudex && preferences.claudex_skin.has_value()) {
+    skin_config_ = *preferences.claudex_skin;
+  } else if (kind == SkinKind::Firmius &&
+             preferences.firmius_skin.has_value()) {
+    skin_config_ = *preferences.firmius_skin;
+  }
+  skin_config_.kind = kind;
+  show_agent_strip_ = skin_config_.show_agent_strip;
+  show_work_panel_ = skin_config_.show_work_panel;
+  diffs_expanded_ = !skin_config_.diffsCollapsedByDefault();
+  UIState::instance().diffsExpanded = diffs_expanded_;
+  if (input_model_) {
+    input_model_->compact_mode = skin_config_.compact_input;
+  }
+  if (status_model_) {
+    status_model_->compact_skin_mode = skin_config_.compactStatusBar();
+  }
+  persistUserPreferences();
+  if (chat_component_) {
+    chat_component_->OnEvent(ftxui::Event::Special("ThemeChanged"));
+  }
+  if (screen_) {
+    postEvent(ftxui::Event::Custom);
+  }
+}
+
+const SkinConfig &TuiState::skinConfig() const { return skin_config_; }
 
 void TuiState::activatePermissionRequest(
     const shared::PermissionEscalationRequest &request) {
@@ -1466,6 +1671,10 @@ shared::ThreadPermissionMode TuiState::currentThreadPermissionMode() const {
   return thread_.permissionMode;
 }
 
+bool TuiState::needsAnimationTick() const {
+  return screen_ != nullptr;
+}
+
 void TuiState::init(firmius::core::Harness &harness,
                     const shared::ThreadMetadata &thread,
                     const std::string &focused_agent_id) {
@@ -1489,11 +1698,13 @@ void TuiState::init(firmius::core::Harness &harness,
 
   status_model_ = std::make_shared<StatusBarModel>();
   status_model_->status_text = "idle";
+  status_model_->compact_skin_mode = skin_config_.compactStatusBar();
 
   input_model_ = std::make_shared<InputBarModel>();
   input_model_->buffer = &input_;
   input_model_->cursor = &cursor_;
   input_model_->placeholder = "Type a message...";
+  input_model_->compact_mode = skin_config_.compact_input;
 
   // Set up vision capability check
   input_model_->check_vision_capable = [this]() -> bool {
@@ -1691,6 +1902,14 @@ bool TuiState::focusAgent(const std::string &agent_id) {
   }
   focused_agent_id_ = agent_id;
   refreshFocusedHistory();
+  if (const auto *stream = stream_state_.getStream(focused_agent_id_)) {
+    auto agent = firmius::core::AgentRegistry::instance().getAgent(focused_agent_id_);
+    if (agent) {
+      live_row_current_phrase_ = inferClaudexActivity(
+          agent->getContext(), stream, live_row_current_phrase_);
+      live_row_last_phrase_key_ = live_row_current_phrase_;
+    }
+  }
   requestRefresh(RefreshFlags::AgentStrip);
   requestRefresh(RefreshFlags::Status);
   requestRefresh(RefreshFlags::PlanLane);
@@ -1702,10 +1921,34 @@ bool TuiState::focusAgent(const std::string &agent_id) {
 }
 
 void TuiState::attachScreen(ftxui::ScreenInteractive *screen) {
+  if (animation_tick_thread_.joinable()) {
+    animation_tick_thread_.request_stop();
+    animation_tick_thread_.join();
+  }
   screen_ = screen;
+
+  if (!screen_) {
+    return;
+  }
+
+  animation_tick_thread_ = std::jthread([this](std::stop_token stop_token) {
+    while (!stop_token.stop_requested()) {
+      if (!needsAnimationTick()) {
+        break;
+      }
+
+      postEvent(ftxui::Event::Custom);
+      std::this_thread::sleep_for(std::chrono::milliseconds(33));
+    }
+  });
 }
 
 void TuiState::shutdown() {
+  if (animation_tick_thread_.joinable()) {
+    animation_tick_thread_.request_stop();
+    animation_tick_thread_.join();
+  }
+  screen_ = nullptr;
   if (harness_ && subscription_id_ >= 0) {
     harness_->unsubscribe(subscription_id_);
     subscription_id_ = -1;
@@ -1868,10 +2111,12 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
           stream_state_.handleAgentThinking(e);
           requestRefresh(RefreshFlags::AgentStrip);
           requestRefresh(RefreshFlags::Status);
+          notifyChatTranscriptChanged();
         } else if constexpr (std::is_same_v<T, AgentText>) {
           stream_state_.handleAgentText(e);
           requestRefresh(RefreshFlags::AgentStrip);
           requestRefresh(RefreshFlags::Status);
+          notifyChatTranscriptChanged();
         } else if constexpr (std::is_same_v<T, AgentTurnCompleted>) {
           stream_state_.handleAgentTurnCompleted(e);
           session_metrics_ += e.turn.metrics;
@@ -1972,6 +2217,11 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
 
           noteTuiThreadChanged(std::chrono::duration_cast<std::chrono::nanoseconds>(
               std::chrono::steady_clock::now() - thread_changed_begin));
+        } else if constexpr (std::is_same_v<T, ModelSwitched>) {
+          requestRefresh(RefreshFlags::Status);
+          requestRefresh(RefreshFlags::AgentStrip);
+          requestRefresh(RefreshFlags::ContextLane);
+          notifyChatTranscriptChanged();
         } else if constexpr (std::is_same_v<T, ThreadMetadataUpdated>) {
           if (e.threadId == thread_.threadId) {
             const std::string previous_active_plan_id = thread_.activePlanId;
@@ -2016,6 +2266,9 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
           if (screen_) {
             postEvent(ftxui::Event::Custom);
           }
+        } else if constexpr (std::is_same_v<T, ConfigUpdated>) {
+          requestRefresh(RefreshFlags::Status);
+          requestRefresh(RefreshFlags::ContextLane);
         } else if constexpr (std::is_same_v<T, PermissionEscalationResolved>) {
           if (pending_permission_request_ &&
               pending_permission_request_->requestId == e.requestId) {
@@ -2182,7 +2435,22 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
       std::chrono::steady_clock::now() - on_event_begin));
 }
 
-std::string TuiState::statusText() const { return "unknown"; }
+std::string TuiState::statusText() const {
+  if (focused_agent_id_.empty()) {
+    return "idle";
+  }
+  auto agent = firmius::core::AgentRegistry::instance().getAgent(focused_agent_id_);
+  if (!agent) {
+    return "idle";
+  }
+  const auto &ctx = agent->getContext();
+  if (agent->isRunning() && ctx.state.currentStatus == AgentStatus::Idle) {
+    const auto *stream = stream_state_.getStream(focused_agent_id_);
+    return (stream && stream->provider_waiting) ? "provider_waiting"
+                                                : "streaming";
+  }
+  return statusToString(ctx.state.currentStatus);
+}
 
 void TuiState::updateStatusModel() {
   if (!status_model_)
@@ -2908,19 +3176,9 @@ ftxui::Component TuiState::root() {
           if (view_mode_ == ViewMode::Welcome && harness_ &&
               is_workflow_command) {
             std::string cwd = std::filesystem::current_path().string();
-            std::string newThreadId = harness_->newThread(
+            harness_->newThread(
                 {}, cwd, resolveDefaultLeadPersona(harness_));
             harness_->setCurrentThreadPermissionMode(thread_.permissionMode);
-
-            auto agents = harness_->listAgents(newThreadId);
-            if (!agents.empty()) {
-              focused_agent_id_ = agents.front();
-              refreshFocusedHistory();
-              if (chat_component_) {
-                chat_component_->OnEvent(
-                    ftxui::Event::Special("ThreadChanged"));
-              }
-            }
             setViewMode(ViewMode::Chat);
           }
 
@@ -2935,23 +3193,12 @@ ftxui::Component TuiState::root() {
           if (harness_) {
             // Auto-create thread in current directory with default lead persona
             std::string cwd = std::filesystem::current_path().string();
-            std::string newThreadId = harness_->newThread(
+            harness_->newThread(
                 {}, cwd, resolveDefaultLeadPersona(harness_));
             harness_->setCurrentThreadPermissionMode(thread_.permissionMode);
+            setViewMode(ViewMode::Chat);
             harness_->send(text, image_contents);
-
-            // Immediately sync UI with the newly created lead agent
-            auto agents = harness_->listAgents(newThreadId);
-            if (!agents.empty()) {
-              focused_agent_id_ = agents.front();
-              refreshFocusedHistory();
-              if (chat_component_) {
-                chat_component_->OnEvent(
-                    ftxui::Event::Special("ThreadChanged"));
-              }
-            }
           }
-          setViewMode(ViewMode::Chat);
         } else {
           if (harness_) {
             if (!applyPendingRewriteIfNeeded()) {
@@ -3398,11 +3645,246 @@ ftxui::Component TuiState::root() {
         }
         return harness_->getConfig().hideErrors;
       },
+      [this]() { return skin_config_.show_turn_footers; },
       [this]() { return edit_mode_active_; },
       [this](uint64_t timestamp) { return isEditModeSelection(timestamp); },
       [this](uint64_t timestamp) { selectEditableMessageByTimestamp(timestamp); });
   chat_component_ = chat;
+  if (history_ && !history_->turns.empty()) {
+    chat_component_->OnEvent(ftxui::Event::Special("ThreadChanged"));
+  }
   input_component_ = input_bar;
+
+  auto live_status_row = ftxui::Renderer([this] {
+    if (!skin_config_.show_persistent_live_row || focused_agent_id_.empty()) {
+      return ftxui::emptyElement();
+    }
+
+    LiveStatusRowModel model;
+    model.skin = skin_config_;
+    model.focused_agent_id = focused_agent_id_;
+    const int terminal_width = std::max(20, ftxui::Terminal::Size().dimx);
+    auto agent =
+        firmius::core::AgentRegistry::instance().getAgent(focused_agent_id_);
+    const auto *stream = stream_state_.getStream(focused_agent_id_);
+    const bool busy =
+        (agent && (agent->isRunning() || agent->isBooting())) ||
+        (stream && stream->provider_waiting) ||
+        (status_model_ && status_model_->status_text == "streaming");
+    model.busy = busy;
+    if (!busy && skin_config_.live_row_busy_only) {
+      return ftxui::emptyElement();
+    }
+
+    const auto *active_plan = active_plan_state_.hasActivePlan()
+                                  ? active_plan_state_.activePlan().operator->()
+                                  : nullptr;
+
+    const auto now = std::chrono::steady_clock::now();
+
+    const auto nowMs = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count());
+    auto it = agent_work_start_ms_.find(focused_agent_id_);
+    if (it == agent_work_start_ms_.end()) {
+      it = agent_work_start_ms_.emplace(focused_agent_id_, nowMs).first;
+    }
+    model.elapsed = (it != agent_work_start_ms_.end() && nowMs > it->second)
+                        ? formatDurationFromMs(nowMs - it->second)
+                        : std::string("0s");
+    if (busy) {
+      model.phrase_mode = "working";
+      if (status_model_ && status_model_->status_text == "streaming") {
+        model.phrase_mode = "thinking";
+      }
+      if (stream && stream->provider_waiting) {
+        model.phrase_mode = "waiting";
+      }
+    }
+
+    const auto &phrase_bank = claudexLivePhrasesForMode(model.phrase_mode);
+    const std::string phrase_mode_key = model.phrase_mode.empty()
+                                            ? std::string("idle")
+                                            : model.phrase_mode;
+    auto transition_duration = liveRowTransitionDurationForPhrases(
+        live_row_previous_phrase_, live_row_current_phrase_);
+    auto transition_elapsed = now - live_row_phrase_transition_started_at_;
+    bool transition_in_progress =
+        !live_row_previous_phrase_.empty() &&
+        transition_elapsed < transition_duration;
+    const bool mode_changed =
+        live_row_last_phrase_key_.empty() ||
+        live_row_last_phrase_key_.rfind(phrase_mode_key + ":", 0) != 0;
+    auto begin_transition = [&](std::string next_key, std::string next_phrase) {
+      live_row_previous_phrase_ = live_row_current_phrase_;
+      live_row_current_phrase_ = std::move(next_phrase);
+      live_row_last_phrase_key_ = std::move(next_key);
+      live_row_phrase_transition_started_at_ = now;
+      live_row_phrase_next_switch_at_ =
+          now + nextLiveRowPhraseDelay(live_row_phrase_rng_state_);
+      live_row_phrase_min_visible_until_ =
+          now + minimumLiveRowPhraseVisibleDuration();
+    };
+    if (live_row_current_phrase_.empty()) {
+      live_row_current_phrase_ =
+          pickLiveRowPhrase(phrase_bank, "", live_row_phrase_rng_state_);
+      live_row_last_phrase_key_ = phrase_mode_key + ":" + live_row_current_phrase_;
+      live_row_phrase_next_switch_at_ =
+          now + nextLiveRowPhraseDelay(live_row_phrase_rng_state_);
+      live_row_phrase_min_visible_until_ =
+          now + minimumLiveRowPhraseVisibleDuration();
+    } else if (mode_changed) {
+      std::string next_phrase = pickLiveRowPhrase(
+          phrase_bank, live_row_current_phrase_, live_row_phrase_rng_state_);
+      std::string next_key = phrase_mode_key + ":" + next_phrase;
+      if (transition_in_progress) {
+        queueLiveRowTransition(std::move(next_key), std::move(next_phrase),
+                               live_row_pending_phrase_key_,
+                               live_row_pending_phrase_);
+      } else if (now >= live_row_phrase_min_visible_until_) {
+        begin_transition(std::move(next_key), std::move(next_phrase));
+      } else {
+        queueLiveRowTransition(std::move(next_key), std::move(next_phrase),
+                               live_row_pending_phrase_key_,
+                               live_row_pending_phrase_);
+      }
+    } else if (now >= live_row_phrase_next_switch_at_) {
+      std::string next_phrase = pickLiveRowPhrase(
+          phrase_bank, live_row_current_phrase_, live_row_phrase_rng_state_);
+      std::string next_key = phrase_mode_key + ":" + next_phrase;
+      if (transition_in_progress) {
+        queueLiveRowTransition(std::move(next_key), std::move(next_phrase),
+                               live_row_pending_phrase_key_,
+                               live_row_pending_phrase_);
+      } else {
+        begin_transition(std::move(next_key), std::move(next_phrase));
+      }
+    }
+
+    transition_duration = liveRowTransitionDurationForPhrases(
+        live_row_previous_phrase_, live_row_current_phrase_);
+    transition_elapsed = now - live_row_phrase_transition_started_at_;
+    transition_in_progress = !live_row_previous_phrase_.empty() &&
+                             transition_elapsed < transition_duration;
+
+    if (!live_row_previous_phrase_.empty() &&
+        transition_elapsed < transition_duration) {
+      const float t = std::clamp(
+          static_cast<float>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 transition_elapsed)
+                                 .count()) /
+              static_cast<float>(transition_duration.count()),
+          0.0f, 1.0f);
+      model.phrase_transition_active = true;
+      model.phrase_transition_t = t;
+      model.phrase_prev = live_row_previous_phrase_;
+      model.phrase_next = live_row_current_phrase_;
+      model.phrase = "";
+      ftxui::animation::RequestAnimationFrame();
+    } else {
+      live_row_previous_phrase_.clear();
+      model.phrase = live_row_current_phrase_.empty() ? std::string("Standing by.")
+                                                      : live_row_current_phrase_;
+      model.phrase_transition_active = false;
+      model.phrase_transition_t = 1.0f;
+      model.phrase_prev.clear();
+      model.phrase_next.clear();
+      if (!live_row_pending_phrase_.empty() &&
+          !live_row_pending_phrase_key_.empty() &&
+          live_row_pending_phrase_key_ != live_row_last_phrase_key_ &&
+          now >= live_row_phrase_min_visible_until_) {
+        begin_transition(std::move(live_row_pending_phrase_key_),
+                         std::move(live_row_pending_phrase_));
+        model.phrase_transition_active = true;
+        model.phrase_transition_t = 0.0f;
+        model.phrase_prev = live_row_previous_phrase_;
+        model.phrase_next = live_row_current_phrase_;
+        model.phrase.clear();
+      }
+      live_row_pending_phrase_key_.clear();
+      live_row_pending_phrase_.clear();
+    }
+
+    const bool should_animate_live_row =
+        busy || model.phrase_transition_active ||
+        (skin_config_.show_persistent_live_row && !focused_agent_id_.empty());
+    if (should_animate_live_row &&
+        now - last_live_raf_request_ >= std::chrono::milliseconds(33)) {
+      last_live_raf_request_ = now;
+      noteTuiRequestAnimationFrameFromState();
+      ftxui::animation::RequestAnimationFrame();
+    }
+
+    if (agent) {
+      const auto &ctx = agent->getContext();
+      model.activity = inferClaudexActivity(ctx, stream, statusText());
+
+      if (skin_config_.live_row_show_todo_excerpt && !thread_.threadId.empty()) {
+        try {
+          firmius::core::ThreadManager tm(firmiusThreadsPath());
+          auto todo = tm.getAgentTodo(thread_.threadId, focused_agent_id_);
+          auto it = std::find_if(todo.items.begin(), todo.items.end(),
+                                 [](const auto &item) {
+                                   return item.status ==
+                                          shared::TodoStatus::InProgress;
+                                 });
+          if (it == todo.items.end()) {
+            it = std::find_if(todo.items.begin(), todo.items.end(),
+                              [](const auto &item) {
+                                return item.status ==
+                                       shared::TodoStatus::Pending;
+                              });
+          }
+          if (it != todo.items.end()) {
+            model.todo_excerpt =
+                truncateText(it->text, std::max(16, terminal_width - 4));
+            model.has_todo_excerpt = !model.todo_excerpt.empty();
+          }
+        } catch (...) {
+        }
+      }
+    }
+
+    if (model.activity.empty()) {
+      model.activity = busy ? "working" : "idle";
+    }
+
+    if (model.phrase_mode.empty()) {
+      if (model.activity == "thinking")
+        model.phrase_mode = "thinking";
+      else if (model.activity == "verifying")
+        model.phrase_mode = "verifying";
+      else if (model.activity == "waiting")
+        model.phrase_mode = "waiting";
+      else if (busy)
+        model.phrase_mode = "working";
+      else
+        model.phrase_mode = "idle";
+    }
+
+    if (skin_config_.live_row_show_plan_excerpt && active_plan != nullptr) {
+      model.plan_title = active_plan->title;
+      auto chunks = active_plan->chunks;
+      std::stable_sort(chunks.begin(), chunks.end(),
+                       [](const auto &a, const auto &b) {
+                         return workChunkRank(a.status) < workChunkRank(b.status);
+                       });
+      const std::size_t shown = std::min<std::size_t>(3, chunks.size());
+      model.hidden_plan_count =
+          chunks.size() > shown ? (chunks.size() - shown) : 0;
+      for (std::size_t i = 0; i < shown; ++i) {
+        LiveStatusPlanRow row;
+        row.title =
+            truncateText(chunks[i].title, std::max(12, terminal_width - 12));
+        row.status = chunks[i].status;
+        model.plan_rows.push_back(row);
+      }
+      model.has_plan_excerpt = !model.plan_rows.empty();
+    }
+
+    return RenderLiveStatusRow(model);
+  });
 
   auto container = ftxui::Container::Vertical({
       input_bar,
@@ -3425,7 +3907,7 @@ ftxui::Component TuiState::root() {
   auto base_view =
       ftxui::Renderer(container, [this, title_bar, status_bar, plan_lane,
                                   todo_lane, context_lane, agent_strip, input_bar, chat,
-                                  welcome_screen] {
+                                  welcome_screen, live_status_row] {
         // Deferred modal clearing: drain here where it's safe
         if (pending_modal_clear_) {
           modals_.clear();
@@ -3450,7 +3932,6 @@ ftxui::Component TuiState::root() {
         } else {
           chat_area = welcome_screen->Render();
         }
-
         const auto &theme = ThemeManager::instance().getCurrentTheme();
         const auto input_separator_color =
             isQuitArmed() ? theme.status_bar.error.normal.fg
@@ -3547,6 +4028,21 @@ ftxui::Component TuiState::root() {
         if (has_agent_strip) {
           bottom_bar_children.push_back(agent_strip->Render());
         }
+        if (skin_config_.kind == SkinKind::Claudex &&
+            skin_config_.show_persistent_live_row && !focused_agent_id_.empty()) {
+          auto focused_agent =
+              firmius::core::AgentRegistry::instance().getAgent(focused_agent_id_);
+          const auto *stream = stream_state_.getStream(focused_agent_id_);
+          const bool busy =
+              (focused_agent &&
+               (focused_agent->isRunning() || focused_agent->isBooting())) ||
+              (stream && stream->provider_waiting) ||
+              (status_model_ && status_model_->status_text == "streaming");
+          const bool show_live_row = busy || !skin_config_.live_row_busy_only;
+          if (show_live_row) {
+            bottom_bar_children.push_back(live_status_row->Render());
+          }
+        }
         bottom_bar_children.push_back((ftxui::separator() |
                                       ftxui::color(input_separator_color)) |
                                       ftxui::reflect(agent_strip_separator_box_));
@@ -3629,7 +4125,6 @@ ftxui::Component TuiState::root() {
 
         return main_view | ftxui::bgcolor(theme.base.bg);
       });
-
   // Layer modals using dbox
   auto modal_renderer = ftxui::Renderer(base_view, [this, base_view]() {
     const auto render_begin = std::chrono::steady_clock::now();

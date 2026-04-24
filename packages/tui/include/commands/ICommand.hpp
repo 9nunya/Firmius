@@ -15,7 +15,8 @@ enum class ArgType {
   Provider,
   OAuthProvider,
   QuotaProvider,
-  ProviderId
+  ProviderId,
+  Skin
 };
 
 struct CommandArg {

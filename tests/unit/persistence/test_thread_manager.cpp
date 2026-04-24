@@ -270,11 +270,51 @@ TEST_F(ThreadManagerTest, rollingMemoryStateRoundtrip) {
     EXPECT_EQ(restored.reflectionChunks[0].chunkId, "refl-1");
 }
 
+TEST_F(ThreadManagerTest, persistenceStress_concurrentPlanTodoAndHistoryChurn) {
+    ThreadMetadata metadata = createTestMetadata();
+    std::string threadId = tm->createThread(metadata);
+    const std::string agentId = "stress-agent";
+    const std::string planId = tm->createPlan(createTestPlan(threadId));
+    tm->writeAgentTodo(threadId, agentId, createTestTodoList(threadId, agentId));
+
+    constexpr int writers = 6;
+    constexpr int iterations = 25;
+    std::vector<std::future<void>> jobs;
+
+    for (int i = 0; i < writers; ++i) {
+        jobs.push_back(std::async(std::launch::async, [&, i]() {
+            ThreadManager localTm(tempDir + "/.firmius/threads");
+            Journaler journaler(threadId, agentId);
+            for (int n = 0; n < iterations; ++n) {
+                localTm.mutatePlan(threadId, planId, [&](Plan& plan) {
+                    plan.notes = "writer-" + std::to_string(i) + "-" + std::to_string(n);
+                });
+                localTm.mutateAgentTodo(threadId, agentId, [&](AgentTodoList& todo) {
+                    todo.nextId = std::max(todo.nextId, n + 10);
+                });
+                journaler.appendTurn(createTestTurn("stress-" + std::to_string(i) + "-" + std::to_string(n)));
+            }
+        }));
+    }
+
+    for (auto& job : jobs) {
+        job.get();
+    }
+
+    auto plan = tm->getPlan(threadId, planId);
+    auto todo = tm->getAgentTodo(threadId, agentId);
+    auto history = tm->loadAgentHistory(threadId, agentId);
+
+    EXPECT_FALSE(plan.notes.empty());
+    EXPECT_GE(todo.nextId, 10);
+    EXPECT_EQ(history.turns.size(), static_cast<size_t>(writers * iterations));
+}
+
 TEST_F(ThreadManagerTest, getMetadata_corruptJson) {
     ThreadMetadata metadata = createTestMetadata();
     std::string threadId = tm->createThread(metadata);
 
-    execDb("UPDATE threads SET metadata_json='{invalid json content' WHERE thread_id='" +
+    execDb("UPDATE thread_metadata_v2 SET host_options_json='{invalid json content' WHERE thread_id='" +
            threadId + "';");
 
     EXPECT_THROW({
@@ -287,6 +327,8 @@ TEST_F(ThreadManagerTest, listThreads_empty) {
 
     EXPECT_TRUE(threads.empty());
 }
+
+
 
 TEST_F(ThreadManagerTest, listThreads_multiple) {
     ThreadMetadata metadata1 = createTestMetadata();

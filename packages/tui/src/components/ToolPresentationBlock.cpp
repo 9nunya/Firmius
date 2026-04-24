@@ -3,6 +3,9 @@
 #include "components/DiffRenderer.hpp"
 #include "components/ANSIParser.hpp"
 #include "components/GlintEffect.hpp"
+#include "SkinConfig.hpp"
+#include "UserPreferences.hpp"
+#include "UIState.hpp"
 #include "ThemeManager.hpp"
 #include "utils/Icons.hpp"
 #include "components/SyntaxHighlighter.hpp"
@@ -211,8 +214,14 @@ ftxui::Element DecorateTitleWithGlint(const std::string &title,
             ? std::vector<ftxui::Color>{ftxui::Color::White,
                                         theme.base.highlight}
             : theme.tool_blocks.glint;
-    cfg.durationSeconds = 0.9f;
-    cfg.intervalSeconds = 1.2f;
+    const auto preferences = loadUserPreferences();
+    const SkinKind skin = preferences.skin_kind.value_or(SkinKind::Firmius);
+    const SkinConfig skin_config =
+        skin == SkinKind::Claudex ? preferences.claudex_skin.value_or(defaultSkinConfig(SkinKind::Claudex)) : preferences.firmius_skin.value_or(defaultSkinConfig(SkinKind::Firmius));
+    cfg.durationSeconds = glintDurationSeconds(skin_config.glint_speed);
+    cfg.intervalSeconds = glintIntervalSeconds(skin_config.glint_speed);
+    cfg.easing = GlintEasing::EaseInOut;
+    cfg.includeWhitespace = true;
     return GlintEffect(base, cfg)->Render();
   }
   return base;
@@ -223,8 +232,23 @@ ftxui::Element BuildInlineStatusRow(const ToolPresentation &presentation,
                                     const Theme &theme, const std::string &icon,
                                     const ftxui::Color &icon_color,
                                     const ftxui::Color &title_color, bool dim_row) {
+  (void)icon;
+  (void)icon_color;
+  auto status_dot = [&]() -> ftxui::Element {
+    ftxui::Color color = theme.base.dim;
+    if (presentation.lifecycle == ToolPresentationLifecycle::Running) {
+      color = theme.base.highlight;
+    } else if (presentation.lifecycle == ToolPresentationLifecycle::Success) {
+      color = theme.modals.highlight_fg;
+    } else if (presentation.lifecycle == ToolPresentationLifecycle::Error) {
+      color = theme.status_bar.error.normal.fg;
+    }
+    return ftxui::text("● ") | ftxui::color(color);
+  };
+
   ftxui::Elements row;
-  row.push_back(ftxui::text(" " + icon + " ") | ftxui::color(icon_color));
+  row.push_back(ftxui::text(" "));
+  row.push_back(status_dot());
   if (!presentation.title.empty()) {
     row.push_back(DecorateTitleWithGlint(presentation.title, title_color,
                                          presentation.lifecycle, theme));
@@ -246,14 +270,132 @@ ftxui::Element BuildInlineStatusRow(const ToolPresentation &presentation,
   return line | ftxui::bgcolor(theme.tool_blocks.generic_bg);
 }
 
+ftxui::Element BuildClaudexInlineBlock(const ToolPresentation &presentation,
+                                       const Theme &theme,
+                                       const std::string &icon,
+                                       const ftxui::Color &icon_color,
+                                       const ftxui::Color &title_color,
+                                       bool dim_row,
+                                       const ftxui::Component &toggle_button,
+                                       bool show_expand_toggle) {
+  ftxui::Elements rows;
+  rows.push_back(BuildInlineStatusRow(presentation, theme, icon, icon_color,
+                                      title_color, dim_row));
+
+  // Claudex uses a single global Ctrl+G toggle for showing/hiding tool details.
+  const bool expanded =
+      !presentation.expandable ? true : UIState::instance().diffsExpanded;
+
+  const bool uses_diff_layout =
+      presentation.layout == ToolPresentationLayoutKind::DiffPreview;
+  const bool show_body = !presentation.body_lines.empty() ||
+                         !presentation.custom_body_elements.empty() ||
+                         uses_diff_layout;
+
+  ToolPresentation compact_presentation = presentation;
+  compact_presentation.expanded = expanded;
+
+  // BodyFirstStream already supports an inline status footer row (`╰ ...`). In
+  // Claudex we render the footer as a separate compact `└ ...` row, so prevent
+  // double-rendering.
+  if (compact_presentation.layout == ToolPresentationLayoutKind::BodyFirstStream) {
+    compact_presentation.status_footer.reset();
+  }
+
+  // Avoid duplication for process tools: Process presentation includes "$ cmd" as
+  // first body line, but the title already renders "Bash <cmd>".
+  if (!uses_diff_layout &&
+      compact_presentation.layout == ToolPresentationLayoutKind::BodyFirstStream &&
+      !compact_presentation.body_lines.empty()) {
+    const std::string &first_line = compact_presentation.body_lines.front();
+    if (first_line.rfind("$ ", 0) == 0 &&
+        compact_presentation.title.rfind("Bash ", 0) == 0) {
+      const std::string command = first_line.substr(2);
+      const std::string title_command = compact_presentation.title.substr(5);
+      if (command == title_command) {
+        compact_presentation.body_lines.erase(
+            compact_presentation.body_lines.begin());
+      }
+    }
+  }
+
+  if (show_body) {
+    if (uses_diff_layout) {
+      if (expanded) {
+        auto body = RenderToolPresentationDiffs(compact_presentation, theme, true);
+        if (body.get() != nullptr) {
+          rows.push_back(body);
+        }
+      } else {
+        // Collapsed diff: show a compact summary line, but hide the full diff.
+        std::string summary;
+        const std::string badges = JoinBadgesInline(presentation);
+        if (!badges.empty()) {
+          summary = badges;
+        }
+        if (!summary.empty()) {
+          summary += " · ";
+        }
+        summary += "diff hidden";
+        rows.push_back(ftxui::text("    └ " + summary) |
+                       ftxui::color(theme.base.dim));
+      }
+    } else {
+      auto body = BuildBodyWindow(
+          compact_presentation, theme,
+          compact_presentation.expandable ? expanded : true,
+          DefaultVisibleBodyLines(compact_presentation.layout), toggle_button,
+          false);
+      if (body.get() != nullptr) {
+        rows.push_back(body);
+      }
+    }
+  }
+
+  for (const auto &notice : presentation.notices) {
+    rows.push_back(ftxui::hbox({
+        ftxui::text("  " + NoticePrefix(notice.kind)) | ftxui::bold |
+            ftxui::color(NoticeColor(theme, notice.kind)),
+        ftxui::paragraph(notice.text) | ftxui::color(theme.base.fg)
+    }));
+  }
+
+  if (presentation.error_text.has_value() && !presentation.error_text->empty()) {
+    rows.push_back(ftxui::hbox({
+        ftxui::text("  error: ") | ftxui::bold |
+            ftxui::color(theme.status_bar.error.normal.fg),
+        ftxui::paragraph(*presentation.error_text) |
+            ftxui::color(theme.status_bar.error.normal.fg)
+    }));
+  }
+
+  if (presentation.status_footer.has_value() && !presentation.status_footer->empty()) {
+    rows.push_back(ftxui::text("    └ " + *presentation.status_footer) |
+                   ftxui::color(theme.base.dim));
+  }
+
+  if (show_expand_toggle) {
+    rows.push_back(ftxui::hbox({
+        ftxui::text("    ▸ ") | ftxui::color(theme.base.dim),
+        ftxui::text(expanded ? "press ctrl+g to collapse"
+                             : "press ctrl+g to reveal") |
+            ftxui::color(theme.base.dim),
+    }));
+  }
+
+  return ftxui::vbox(std::move(rows));
+}
+
 } // namespace
 
 class ToolPresentationBlockComponent : public ftxui::ComponentBase {
 public:
   ToolPresentationBlockComponent(
       std::shared_ptr<firmius::shared::ToolCallView> view,
-      std::function<ToolPresentation()> presentation_getter)
-      : view_(std::move(view)), presentation_getter_(std::move(presentation_getter)) {
+      std::function<ToolPresentation()> presentation_getter,
+      std::function<bool()> compact_mode_getter)
+      : view_(std::move(view)), presentation_getter_(std::move(presentation_getter)),
+        compact_mode_getter_(std::move(compact_mode_getter)) {
     auto toggle_option = ftxui::ButtonOption::Simple();
     toggle_option.transform = [](const ftxui::EntryState &state) {
       auto element = ftxui::text(state.label) | ftxui::dim;
@@ -300,9 +442,23 @@ public:
     }
     const bool inline_status_row =
         presentation.layout == ToolPresentationLayoutKind::InlineStatusRow;
+    const bool compact_mode = compact_mode_getter_ ? compact_mode_getter_() : false;
     if (inline_status_row) {
       return BuildInlineStatusRow(presentation, theme, icon, icon_color,
                                   title_color, dim_header);
+    }
+    if (compact_mode) {
+      ToolPresentation compact = presentation;
+      // Claudex drives expansion/collapse globally via UIState (Ctrl+G).
+      if (compact.expandable) {
+        compact.expanded = UIState::instance().diffsExpanded;
+      }
+      return BuildClaudexInlineBlock(
+          compact, theme, icon, icon_color, title_color, dim_header,
+          toggle_button_,
+          compact.expandable &&
+              compact.layout != ToolPresentationLayoutKind::InlineStatusRow &&
+              view_);
     }
 
     const int body_visible_lines = DefaultVisibleBodyLines(presentation.layout);
@@ -339,10 +495,11 @@ public:
         !presentation.title.empty() || include_subtitle ||
         (one_line_summary && (!one_line_badges.empty() || has_one_line_error));
     if (has_header_content) {
-      header.push_back(ftxui::text(" " + icon + " ") | ftxui::color(icon_color));
       if (!presentation.title.empty()) {
-        header.push_back(DecorateTitleWithGlint(presentation.title, title_color,
-                                               presentation.lifecycle, theme));
+        header.push_back(ftxui::text(" " + icon + " ") | ftxui::color(icon_color));
+        header.push_back(
+            DecorateTitleWithGlint(presentation.title, title_color,
+                                   presentation.lifecycle, theme));
       }
       if (include_subtitle) {
         header.push_back(ftxui::text(" " + presentation.subtitle) |
@@ -465,14 +622,17 @@ public:
 private:
   std::shared_ptr<firmius::shared::ToolCallView> view_;
   std::function<ToolPresentation()> presentation_getter_;
+  std::function<bool()> compact_mode_getter_;
   ftxui::Component toggle_button_;
 };
 
 ftxui::Component ToolPresentationBlock(
     const std::shared_ptr<firmius::shared::ToolCallView> &view,
-    std::function<ToolPresentation()> presentation_getter) {
+    std::function<ToolPresentation()> presentation_getter,
+    std::function<bool()> compact_mode_getter) {
   return ftxui::Make<ToolPresentationBlockComponent>(view,
-                                                     std::move(presentation_getter));
+                                                     std::move(presentation_getter),
+                                                     std::move(compact_mode_getter));
 }
 
 } // namespace firmius::tui

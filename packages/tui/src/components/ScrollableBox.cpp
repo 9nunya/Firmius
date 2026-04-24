@@ -20,6 +20,18 @@ inline void NoteScrollableRafIfAvailable() {
 }
 
 namespace firmius::tui {
+namespace {
+constexpr auto kScrollbarVisibleDwell = std::chrono::milliseconds(1800);
+
+inline void TouchTransientScrollbar(bool &visible,
+                                    std::chrono::steady_clock::time_point &until) {
+  visible = true;
+  until = std::chrono::steady_clock::now() + kScrollbarVisibleDwell;
+  ftxui::animation::RequestAnimationFrame();
+  NoteScrollableRafIfAvailable();
+}
+}
+
 
 ScrollableBoxComponent::ScrollableBoxComponent(ftxui::Component child,
                                                ScrollableBoxOptions options)
@@ -168,21 +180,25 @@ ftxui::Element ScrollableBoxComponent::OnRender() {
 
     const int max_scroll = maxScroll(viewport_h);
     if (has_pending_ensure_visible_) {
-        at_bottom_ = false;
-        if (pending_visible_start_ < selected_) {
-            selected_ = pending_visible_start_;
-        } else if (pending_visible_end_ >= selected_ + viewport_h) {
-            selected_ = pending_visible_end_ - viewport_h + 1;
+        // Defer applying ensure-visible until we know the viewport height.
+        // During the first render pass (before `reflect(box_)` has populated
+        // geometry), viewport_h may be 0.
+        if (viewport_h > 0) {
+            at_bottom_ = false;
+            if (pending_visible_start_ < selected_) {
+                selected_ = pending_visible_start_;
+            } else if (pending_visible_end_ >= selected_ + viewport_h) {
+                selected_ = pending_visible_end_ - viewport_h + 1;
+            }
+            has_pending_ensure_visible_ = false;
         }
-        has_pending_ensure_visible_ = false;
     } else if (at_bottom_) {
         selected_ = max_scroll;
     }
     selected_ = std::clamp(selected_, 0, max_scroll);
     updateScrollbarGeometry(viewport_h);
 
-    const int external_dimy = std::max(0, viewport_h - 1);
-    const int focus_y = selected_ + external_dimy / 2;
+    const int focus_y = at_bottom_ ? std::max(0, size_ - 1) : selected_;
 
     auto frame =
         background | ftxui::focusPosition(0, focus_y) | ftxui::frame |
@@ -200,11 +216,26 @@ ftxui::Element ScrollableBoxComponent::OnRender() {
     const auto trackColor = scrollbar_hovered_
                                 ? ftxui::Color::RGB(58, 64, 78)
                                 : ftxui::Color::RGB(46, 51, 63);
+    if (options_.overlayScrollbar) {
+        const auto now = std::chrono::steady_clock::now();
+        if (scrollbar_dragging_ || scrollbar_hovered_) {
+            TouchTransientScrollbar(scrollbar_visible_, scrollbar_visible_until_);
+        } else if (scrollbar_visible_ && now > scrollbar_visible_until_) {
+            scrollbar_visible_ = false;
+        } else if (scrollbar_visible_) {
+            ftxui::animation::RequestAnimationFrame();
+        }
+    }
+
     const auto thumbColor =
         (scrollbar_dragging_ || scrollbar_hovered_)
             ? ftxui::Color::RGB(201, 158, 191)
             : ftxui::Color::RGB(112, 119, 138);
     ftxui::Elements scrollbarRows;
+    if (!scrollbar_visible_ && !scrollbar_dragging_ && !scrollbar_hovered_) {
+        return frame;
+    }
+
     scrollbarRows.reserve(std::max(0, viewport_height_));
     for (int row = 0; row < viewport_height_; ++row) {
         const bool inThumb =
@@ -254,9 +285,11 @@ bool ScrollableBoxComponent::OnEvent(ftxui::Event event) {
                 scrollbar_dragging_ = false;
                 scrollbar_drag_offset_ = 0;
                 scrollbar_hovered_ = scrollbarBox_.Contain(mouse.x, mouse.y);
+                TouchTransientScrollbar(scrollbar_visible_, scrollbar_visible_until_);
                 return true;
             }
             scrollFromScrollbarY(mouse.y);
+            TouchTransientScrollbar(scrollbar_visible_, scrollbar_visible_until_);
             return true;
         }
 
@@ -276,6 +309,7 @@ bool ScrollableBoxComponent::OnEvent(ftxui::Event event) {
                 scrollbar_drag_offset_ = scrollbar_thumb_height_ / 2;
             }
             scrollFromScrollbarY(mouse.y);
+            TouchTransientScrollbar(scrollbar_visible_, scrollbar_visible_until_);
             return true;
         }
     }
@@ -285,30 +319,37 @@ bool ScrollableBoxComponent::OnEvent(ftxui::Event event) {
     if (event.is_mouse() && event.mouse().button == ftxui::Mouse::WheelUp) {
         selected_ -= 5;
         at_bottom_ = false;
+        TouchTransientScrollbar(scrollbar_visible_, scrollbar_visible_until_);
     }
     if (event.is_mouse() && event.mouse().button == ftxui::Mouse::WheelDown) {
         selected_ += 5;
         at_bottom_ = false;
+        TouchTransientScrollbar(scrollbar_visible_, scrollbar_visible_until_);
     }
     if (event == ftxui::Event::PageDown) {
         selected_ += std::max(1, viewport_height_ - 2);
         at_bottom_ = false;
+        TouchTransientScrollbar(scrollbar_visible_, scrollbar_visible_until_);
     }
     if (event == ftxui::Event::PageUp) {
         selected_ -= std::max(1, viewport_height_ - 2);
         at_bottom_ = false;
+        TouchTransientScrollbar(scrollbar_visible_, scrollbar_visible_until_);
     }
     if (event == ftxui::Event::ArrowDown) {
         selected_ += 1;
         at_bottom_ = false;
+        TouchTransientScrollbar(scrollbar_visible_, scrollbar_visible_until_);
     }
     if (event == ftxui::Event::ArrowUp) {
         selected_ -= 1;
         at_bottom_ = false;
+        TouchTransientScrollbar(scrollbar_visible_, scrollbar_visible_until_);
     }
     if (event == ftxui::Event::Home) {
         selected_ = 0;
         at_bottom_ = false;
+        TouchTransientScrollbar(scrollbar_visible_, scrollbar_visible_until_);
     }
 
     const bool isKeyboardScroll =
@@ -319,6 +360,7 @@ bool ScrollableBoxComponent::OnEvent(ftxui::Event event) {
     if (event == ftxui::Event::End) {
         selected_ = maxScroll(viewport_height_);
         at_bottom_ = true;
+        TouchTransientScrollbar(scrollbar_visible_, scrollbar_visible_until_);
     }
 
     selected_ = std::clamp(selected_, 0, maxScroll(viewport_height_));

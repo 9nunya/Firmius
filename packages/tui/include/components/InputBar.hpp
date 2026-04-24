@@ -30,6 +30,7 @@ struct InputBarModel {
   
   // Function to check if current model supports vision
   // Returns true if model supports image input, false otherwise
+  bool compact_mode = false;
   std::function<bool()> check_vision_capable = nullptr;
   
   // Function to show notification

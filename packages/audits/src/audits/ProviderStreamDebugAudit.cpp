@@ -1188,17 +1188,21 @@ shared::AuditResult ProviderStreamDebugAudit::run(const std::vector<std::string>
         std::ofstream truncate(rawSseLogPath, std::ios::trunc);
         truncate.close();
         setenv("FIRMIUS_ANTIGRAVITY_RAW_SSE_LOG", rawSseLogPath.c_str(), 1);
+        setenv("FIRMIUS_KIRO_RAW_SSE_LOG", rawSseLogPath.c_str(), 1);
         setenv("FIRMIUS_CODEX_RAW_SSE_LOG", rawSseLogPath.c_str(), 1);
     } else {
         unsetenv("FIRMIUS_ANTIGRAVITY_RAW_SSE_LOG");
         unsetenv("FIRMIUS_CODEX_RAW_SSE_LOG");
+        unsetenv("FIRMIUS_KIRO_RAW_SSE_LOG");
     }
     if (rawSseStdout) {
         setenv("FIRMIUS_ANTIGRAVITY_RAW_SSE_STDOUT", "1", 1);
         setenv("FIRMIUS_CODEX_RAW_SSE_STDOUT", "1", 1);
+        setenv("FIRMIUS_KIRO_RAW_SSE_STDOUT", "1", 1);
     } else {
         unsetenv("FIRMIUS_ANTIGRAVITY_RAW_SSE_STDOUT");
         unsetenv("FIRMIUS_CODEX_RAW_SSE_STDOUT");
+        unsetenv("FIRMIUS_KIRO_RAW_SSE_STDOUT");
     }
 
     auto runLiveAgentScenario = [&]() {

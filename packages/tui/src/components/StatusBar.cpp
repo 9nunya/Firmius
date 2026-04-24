@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
+#include <cmath>
 #include <vector>
 
 namespace firmius::tui {
@@ -131,6 +132,71 @@ std::string formatPromptSummary(const firmius::tui::StatusBarModel &model) {
   return summary;
 }
 
+
+std::string buildCompactMinimalStatusText(const firmius::tui::StatusBarModel &model,
+                                         bool ultra_compact) {
+  // Minimal/Claudex status bar format:
+  //   aster · opus-4 · ↑45.2k ↓3.1k · 34% · ASK
+  // Includes quota usage when present.
+
+  std::string out;
+  if (!model.agent_name.empty()) {
+    out += model.agent_name;
+  }
+
+  const std::string model_text = buildModelText(model, /*compact_mode=*/true);
+  if (!model_text.empty()) {
+    if (!out.empty()) {
+      out += " · ";
+    }
+    out += model_text;
+  }
+
+  const std::string prompt_summary = formatPromptSummary(model);
+  if (!prompt_summary.empty() || model.completion_tokens > 0) {
+    if (!out.empty()) {
+      out += " · ";
+    }
+    if (!prompt_summary.empty()) {
+      out += std::string("↑") + prompt_summary;
+    }
+    if (model.completion_tokens > 0) {
+      if (!prompt_summary.empty()) {
+        out += " ";
+      }
+      out += std::string("↓") + formatCompactCount(model.completion_tokens);
+    }
+  }
+
+  if (!model.quota_usage.empty()) {
+    if (!out.empty()) {
+      out += " · ";
+    }
+    out += model.quota_usage;
+  }
+
+  if (model.context_max > 0) {
+    const float ratio =
+        static_cast<float>(model.context_used) / static_cast<float>(model.context_max);
+    const float display_ratio = std::clamp(ratio, 0.0f, 1.0f);
+    const int pct = static_cast<int>(std::lround(display_ratio * 100.0f));
+    if (!out.empty()) {
+      out += " · ";
+    }
+    out += std::to_string(pct) + "%";
+  }
+
+  if (!out.empty()) {
+    out += " · ";
+  }
+  out += permissionModeToCompactLabel(model.permission_mode);
+
+  if (ultra_compact && out.size() > 70) {
+    out.resize(67);
+    out += "...";
+  }
+  return out;
+}
 class StatusBarComponentBase : public ftxui::ComponentBase {
 public:
   explicit StatusBarComponentBase(std::shared_ptr<StatusBarModel> model)
@@ -150,6 +216,16 @@ public:
     bool compact_mode = term_width <= 110;
     bool ultra_compact = term_width < 70;
 
+
+    // Minimal status bar mode (Claudex default).
+    if (model_->compact_skin_mode) {
+      syncGlint(/*compact_mode=*/true);
+      const std::string minimal_text =
+          buildCompactMinimalStatusText(*model_, ultra_compact);
+      return ftxui::text(minimal_text) | ftxui::bold |
+             ftxui::color(theme.base.fg) | ftxui::bgcolor(theme.base.bg) |
+             ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, 1);
+    }
     syncGlint(compact_mode);
 
     // 1. Status Segment (Icon)
@@ -326,6 +402,19 @@ public:
       current_bg = process_bg;
     }
 
+    ftxui::Element quota_seg = ftxui::text("");
+    if (!model_->quota_usage.empty()) {
+      auto quota_bg = theme.agent_strip.pills.model_bg;
+      auto quota_fg = theme.agent_strip.pills.model_fg;
+      quota_seg = ftxui::hbox({
+          ftxui::text(firmius::shared::PL_RIGHT_SEP) |
+              ftxui::color(quota_bg) | ftxui::bgcolor(current_bg),
+          ftxui::text(" " + model_->quota_usage + " ") | ftxui::bold |
+              ftxui::color(quota_fg) | ftxui::bgcolor(quota_bg),
+      });
+      current_bg = quota_bg;
+    }
+
     ftxui::Element ctx_seg = ftxui::hbox({
         ftxui::text(firmius::shared::PL_RIGHT_SEP) | ftxui::color(ctx_bg) |
             ftxui::bgcolor(current_bg),
@@ -342,6 +431,7 @@ public:
                         sep_model_filler,
                         ftxui::filler() | ftxui::bgcolor(filler_bg),
                         token_seg,
+                        quota_seg,
                         process_seg,
                         ctx_seg}) |
            ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, 1);
