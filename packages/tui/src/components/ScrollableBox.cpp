@@ -161,6 +161,7 @@ ftxui::Element ScrollableBoxComponent::OnRender() {
         options_.measurement_signature_getter
             ? options_.measurement_signature_getter()
             : 0;
+    const int old_size = size_;
     if (layout_dirty_ || measured_viewport_width_ != viewport_w ||
         (options_.measurement_signature_getter &&
          measured_signature_ != measurement_signature)) {
@@ -171,6 +172,15 @@ ftxui::Element ScrollableBoxComponent::OnRender() {
         measured_viewport_width_ = viewport_w;
         measured_signature_ = measurement_signature;
         layout_dirty_ = false;
+    }
+
+    // Preserve scroll position proportionally when content height changes
+    // (e.g. Ctrl+G toggling diff expansion/collapse).
+    if (size_ != old_size && old_size > 0 && !at_bottom_ &&
+        !has_pending_ensure_visible_) {
+        const double ratio =
+            static_cast<double>(selected_) / static_cast<double>(old_size);
+        selected_ = static_cast<int>(ratio * size_);
     }
 
     int viewport_h = 0;

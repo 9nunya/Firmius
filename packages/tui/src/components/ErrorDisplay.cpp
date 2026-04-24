@@ -378,10 +378,10 @@ ftxui::Element renderObservationNoticeCompact(
   if (summarizing) {
     GlintConfig glint_cfg;
     glint_cfg.target = GlintConfig::Target::Text;
-    glint_cfg.gradientColors = {theme.base.fg, theme.base.highlight, theme.base.fg};
+    glint_cfg.gradientColors = {theme.base.fg, theme.base.highlight};
     glint_cfg.glintSize = 8;
-    glint_cfg.intervalSeconds = 0.9f;
-    glint_cfg.durationSeconds = 0.8f;
+    glint_cfg.intervalSeconds = 1.8f;
+    glint_cfg.durationSeconds = 1.5f;
     glint_cfg.easing = GlintEasing::EaseInOut;
     text_element = GlintEffect(text_element, glint_cfg)->Render();
   }
@@ -478,8 +478,8 @@ ftxui::Element renderRollingNotice(const Theme &theme,
                                 theme.base.highlight,
                                 theme.status_bar.compacting.normal.bg};
     glint_cfg.glintSize = 10;
-    glint_cfg.intervalSeconds = 0.9f;
-    glint_cfg.durationSeconds = 0.8f;
+    glint_cfg.intervalSeconds = 1.8f;
+    glint_cfg.durationSeconds = 1.5f;
     glint_cfg.easing = GlintEasing::EaseInOut;
     header = GlintEffect(header, glint_cfg)->Render();
   }

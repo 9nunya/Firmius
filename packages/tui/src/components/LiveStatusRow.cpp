@@ -227,12 +227,12 @@ ftxui::Element RenderLiveStatusRow(const LiveStatusRowModel &model) {
   if (model.skin.live_row_glint && model.busy && !model.phrase_transition_active) {
     GlintConfig cfg;
     cfg.target = GlintConfig::Target::Text;
-    cfg.gradientColors = {theme.base.highlight, theme.base.fg,
-                          theme.base.highlight};
+    // Base → highlight → base reads as an actual sweep.
+    cfg.gradientColors = {theme.base.fg, theme.base.highlight};
     cfg.glintSize = 10;
-    cfg.intervalSeconds = 4.5f;
+    cfg.intervalSeconds = 13.5f;
     cfg.easing = GlintEasing::EaseInOut;
-    cfg.durationSeconds = 1.6f;
+    cfg.durationSeconds = 4.8f;
     left = GlintEffect(left, cfg)->Render();
   }
 

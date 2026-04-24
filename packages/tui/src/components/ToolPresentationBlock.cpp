@@ -71,12 +71,17 @@ ftxui::Element BuildBodyWindow(const ToolPresentation &presentation, const Theme
         presentation.body_lines.front().rfind("$ ", 0) == 0) {
       command_line = presentation.body_lines.front();
       output_start_index = 1;
-      if (presentation.ansi_aware) {
-        if (command_line.rfind("$ ", 0) != 0) {
-          body_rows.push_back(ParseANSI(command_line));
-        } else {
-          body_rows.push_back(ftxui::paragraph(command_line) | ftxui::color(theme.base.fg));
-        }
+      if (command_line.rfind("$ ", 0) == 0) {
+        // Render command with bash syntax highlighting + wrapping
+        const std::string cmd = command_line.substr(2);
+        auto prompt_el = ftxui::text("$ ") | ftxui::bold | ftxui::color(theme.base.dim);
+        auto cmd_el =
+            SyntaxHighlighter::instance().hasGrammar("bash")
+                ? SyntaxHighlighter::instance().highlightRenderWrappedLine(cmd, "bash")
+                : (ftxui::paragraph(cmd) | ftxui::color(theme.base.fg));
+        body_rows.push_back(ftxui::hbox({prompt_el, cmd_el | ftxui::xflex}));
+      } else if (presentation.ansi_aware) {
+        body_rows.push_back(ParseANSI(command_line));
       } else {
         body_rows.push_back(ftxui::paragraph(command_line) | ftxui::color(theme.base.fg));
       }
@@ -211,8 +216,7 @@ ftxui::Element DecorateTitleWithGlint(const std::string &title,
     GlintConfig cfg;
     cfg.gradientColors =
         theme.tool_blocks.glint.empty()
-            ? std::vector<ftxui::Color>{ftxui::Color::White,
-                                        theme.base.highlight}
+            ? std::vector<ftxui::Color>{color, theme.base.highlight}
             : theme.tool_blocks.glint;
     const auto preferences = loadUserPreferences();
     const SkinKind skin = preferences.skin_kind.value_or(SkinKind::Firmius);
@@ -313,8 +317,9 @@ ftxui::Element BuildClaudexInlineBlock(const ToolPresentation &presentation,
       const std::string command = first_line.substr(2);
       const std::string title_command = compact_presentation.title.substr(5);
       if (command == title_command) {
-        compact_presentation.body_lines.erase(
-            compact_presentation.body_lines.begin());
+        // Keep the wrapping body line; shorten the title to avoid
+        // duplication while preserving the visible command in the body.
+        compact_presentation.title = "Bash";
       }
     }
   }
@@ -337,8 +342,11 @@ ftxui::Element BuildClaudexInlineBlock(const ToolPresentation &presentation,
           summary += " · ";
         }
         summary += "diff hidden";
-        rows.push_back(ftxui::text("    └ " + summary) |
-                       ftxui::color(theme.base.dim));
+        rows.push_back(ftxui::hbox({
+          ftxui::text("╰ ") | ftxui::color(theme.base.highlight),
+          ftxui::paragraph(summary) |
+              ftxui::color(theme.base.dim) | ftxui::flex_shrink,
+      }) | ftxui::xflex);
       }
     } else {
       auto body = BuildBodyWindow(
@@ -370,8 +378,11 @@ ftxui::Element BuildClaudexInlineBlock(const ToolPresentation &presentation,
   }
 
   if (presentation.status_footer.has_value() && !presentation.status_footer->empty()) {
-    rows.push_back(ftxui::text("    └ " + *presentation.status_footer) |
-                   ftxui::color(theme.base.dim));
+    rows.push_back(ftxui::hbox({
+        ftxui::text("╰ ") | ftxui::color(theme.base.highlight),
+        ftxui::paragraph(*presentation.status_footer) |
+            ftxui::color(theme.base.dim) | ftxui::flex_shrink,
+    }) | ftxui::xflex);
   }
 
   if (show_expand_toggle) {

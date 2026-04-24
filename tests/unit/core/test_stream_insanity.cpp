@@ -31,6 +31,8 @@ enum class InsanityMode {
   RepetitiveLoop,   // Same phrase repeated over and over
   RandomJunk,       // High-entropy gibberish
   ExcessiveTokens,  // Streams until token limit exceeded
+  ToolCall,
+  ToolCallChunk,
 };
 
 class InsanityProvider : public IProvider {
@@ -120,7 +122,34 @@ public:
       onEvent(StreamDone{StopReason::Stop});
       return;
     }
+
+    case InsanityMode::ToolCallChunk: {
+      // Simulate the model streaming tool-call preparation (often emitted by
+      // providers) but with completely normal text content elsewhere. This
+      // should NOT be considered "insanity".
+      ToolCallChunk tcc;
+      tcc.id = "tool-1";
+      tcc.index = 0;
+      tcc.nameDelta = "Files";
+      tcc.argsDelta = "{\"action\":\"List\",\"path\":\".\"}";
+      onEvent(tcc);
+      onEvent(StreamDone{StopReason::ToolUse});
+      return;
     }
+
+    case InsanityMode::ToolCall: {
+      // Simulate a finalized tool call in one shot.
+      ToolCall tc;
+      tc.id = "tool-1";
+      tc.index = 0;
+      tc.name = "Files";
+      tc.args = "{\"action\":\"List\",\"path\":\".\"}";
+      onEvent(tc);
+      onEvent(StreamDone{StopReason::ToolUse});
+      return;
+    }
+  }
+
   }
 
   std::vector<ModelInfo> listModels() override {
@@ -236,6 +265,7 @@ protected:
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (std::chrono::steady_clock::now() < deadline) {
       const auto active = Engine::instance().listActiveAgents();
+
       if (std::find(active.begin(), active.end(), agentId) != active.end()) {
         return true;
       }
@@ -327,6 +357,37 @@ TEST_F(StreamInsanityTest, RepetitiveContentTriggersDetectionAndRetry) {
       }
     }
   }
+}
+
+// Test: Tool call chunks should not be treated as insanity
+TEST_F(StreamInsanityTest, ToolCallChunkDoesNotTriggerInsanityRetry) {
+  auto provider = registerProvider(InsanityMode::ToolCallChunk);
+  const std::string threadId = createThread();
+
+  const std::string agentId =
+      Engine::instance().summonAgent(threadId, "coder", "use a tool");
+
+  ASSERT_TRUE(waitForAgentStarted(agentId));
+  auto outcome = waitForOutcome(agentId);
+  ASSERT_TRUE(outcome.has_value());
+
+  // Should not have retried (tool call path should not be flagged as insanity)
+  EXPECT_EQ(provider->getCallCount(), 200);
+}
+
+// Test: Final tool call should not be treated as insanity
+TEST_F(StreamInsanityTest, ToolCallDoesNotTriggerInsanityRetry) {
+  auto provider = registerProvider(InsanityMode::ToolCall);
+  const std::string threadId = createThread();
+
+  const std::string agentId =
+      Engine::instance().summonAgent(threadId, "coder", "use a tool");
+
+  ASSERT_TRUE(waitForAgentStarted(agentId));
+  auto outcome = waitForOutcome(agentId);
+  ASSERT_TRUE(outcome.has_value());
+
+  EXPECT_EQ(provider->getCallCount(), 200);
 }
 
 // Test: Excessive token count triggers detection and retry

@@ -1839,7 +1839,13 @@ void Agent::runImpl(const std::optional<std::string> &task,
       // Insanity detection setup
       StreamSanityDetector::Config detectorConfig;
       detectorConfig.enabled = context.config.insanityDetectionEnabled;
-      detectorConfig.minConsecutiveRepeats = context.config.insanityRepetitionThreshold;
+      // NOTE: The default repetition threshold is intentionally conservative.
+      // We only want to intervene on truly degenerate output ("stuck" repetition),
+      // not on normal, legible responses that happen to reuse a phrase.
+      detectorConfig.minPatternLength = 32;
+      detectorConfig.maxPatternLength = 512;
+      detectorConfig.minConsecutiveRepeats =
+          std::max(context.config.insanityRepetitionThreshold, 6);
       detectorConfig.maxTokenThreshold = context.config.insanityMaxTokenThreshold;
       StreamSanityDetector detector(detectorConfig);
       bool insanityDetectedThisTurn = false;
@@ -1875,19 +1881,9 @@ void Agent::runImpl(const std::optional<std::string> &task,
           if (!thk->signature.empty()) {
             lastThinkingSignature = thk->signature;
           }
-          // Insanity detection
-          if (!insanityDetectedThisTurn) {
-            detector.addDelta(thk->delta);
-            auto checkResult = detector.check();
-            if (checkResult.isInsane) {
-              insanityDetectedThisTurn = true;
-              insanityReason = checkResult.reason;
-              insanityAbortTriggered = true;
-              streamError = "Insanity detected: " + checkResult.reason;
-              runAbortController->cancel();
-              return;
-            }
-          }
+          // Intentionally do NOT run insanity detection on ThinkingChunk.
+          // Some providers emit tool-call preparation / scratchpad content as
+          // "thinking" deltas, and false positives here are extremely costly.
         } else if (auto *tcc = std::get_if<ToolCallChunk>(&ev)) {
           sawTool = true;
           // Emit immediately so TUI can show "Preparing" state

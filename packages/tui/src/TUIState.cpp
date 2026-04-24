@@ -1937,7 +1937,9 @@ void TuiState::attachScreen(ftxui::ScreenInteractive *screen) {
         break;
       }
 
-      postEvent(ftxui::Event::Custom);
+      // Keep purely visual animation ticking without consuming the coalesced
+      // Custom-event wakeup used for app-event delivery.
+      ftxui::animation::RequestAnimationFrame();
       std::this_thread::sleep_for(std::chrono::milliseconds(33));
     }
   });
@@ -2052,8 +2054,20 @@ std::string TuiState::exitSummaryText() const {
 void TuiState::drainEvents() {
   custom_event_pending_ = false;
   noteTuiCustomEventDrained();
-  for (const auto &ev : event_queue_.drainAll()) {
-    onEvent(ev);
+
+  // Drain until stable. New app events can arrive while we are processing the
+  // current batch; if we only drain once, Custom-event coalescing can leave
+  // those later events stranded until some unrelated user input posts another
+  // wakeup. That manifests as transcripts/live tool/process output only
+  // appearing after a manual keypress.
+  while (true) {
+    auto drained = event_queue_.drainAll();
+    if (drained.empty()) {
+      break;
+    }
+    for (const auto &ev : drained) {
+      onEvent(ev);
+    }
   }
   applyPendingRefreshes();
 }
@@ -2310,6 +2324,12 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
           stream_state_.handleAgentProcessOutput(e);
         } else if constexpr (std::is_same_v<T, AgentSpawned>) {
           if (e.parentId.empty() && focused_agent_id_.empty()) {
+            focused_agent_id_ = e.agentId;
+            refreshFocusedHistory();
+            notifyChatTranscriptChanged();
+          } else if (!e.parentId.empty() && focused_agent_id_ == e.parentId) {
+            // Auto-focus subagent when its parent is currently focused, so its
+            // streaming output appears in the chat.
             focused_agent_id_ = e.agentId;
             refreshFocusedHistory();
             notifyChatTranscriptChanged();
@@ -3196,6 +3216,11 @@ ftxui::Component TuiState::root() {
             harness_->newThread(
                 {}, cwd, resolveDefaultLeadPersona(harness_));
             harness_->setCurrentThreadPermissionMode(thread_.permissionMode);
+            // Pull the newly created thread/focused-agent state into the TUI
+            // before the first UserMessageSent / Agent* events land. Without
+            // this, the chat can stay visually empty on a brand-new thread
+            // until a later manual reload path rebinds the transcript.
+            syncCurrentThreadMetadataFromHarness(true);
             setViewMode(ViewMode::Chat);
             harness_->send(text, image_contents);
           }

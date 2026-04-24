@@ -388,13 +388,13 @@ private:
         cfg.target = GlintConfig::Target::Text;
         cfg.gradientColors =
             state.glint.empty()
-                ? std::vector<ftxui::Color>{ftxui::Color::RGB(0, 80, 255),
-                                            ftxui::Color::White,
-                                            ftxui::Color::RGB(0, 80, 255)}
+                ? std::vector<ftxui::Color>{theme.agent_strip.pills.slug_fg,
+                                            theme.base.highlight,
+                                            theme.agent_strip.pills.slug_fg}
                 : state.glint;
         cfg.glintSize = 20;
-        cfg.intervalSeconds = 2.0f;
-        cfg.durationSeconds = 1.5f;
+        cfg.intervalSeconds = 6.0f;
+        cfg.durationSeconds = 4.5f;
         cfg.easing = GlintEasing::EaseInOut;
         glint_cache_[item.id] = GlintEffect(
             ftxui::text(item.title) | ftxui::bold |
@@ -412,13 +412,13 @@ private:
         cfg.target = GlintConfig::Target::Text;
         cfg.gradientColors =
             state.glint.empty()
-                ? std::vector<ftxui::Color>{ftxui::Color::RGB(100, 100, 255),
-                                            ftxui::Color::White,
-                                            ftxui::Color::RGB(100, 100, 255)}
+                ? std::vector<ftxui::Color>{theme.agent_strip.pills.slug_fg,
+                                            theme.base.highlight,
+                                            theme.agent_strip.pills.slug_fg}
                 : state.glint;
         cfg.glintSize = 30;
-        cfg.intervalSeconds = 3.0f;
-        cfg.durationSeconds = 2.0f;
+        cfg.intervalSeconds = 9.0f;
+        cfg.durationSeconds = 6.0f;
         cfg.easing = GlintEasing::EaseInOut;
 
         // Colors for wide pill glint

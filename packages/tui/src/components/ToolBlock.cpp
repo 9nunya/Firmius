@@ -381,7 +381,7 @@ public:
       const SkinConfig skin_config =
           skin == SkinKind::Claudex ? preferences.claudex_skin.value_or(defaultSkinConfig(SkinKind::Claudex)) : preferences.firmius_skin.value_or(defaultSkinConfig(SkinKind::Firmius));
       cfg.gradientColors = theme.tool_blocks.glint.empty()
-                               ? std::vector<ftxui::Color>{ftxui::Color::White,
+                               ? std::vector<ftxui::Color>{title_fg,
                                                            theme.base.highlight}
                                : theme.tool_blocks.glint;
       cfg.durationSeconds = glintDurationSeconds(skin_config.glint_speed);
@@ -451,7 +451,9 @@ public:
               skin == SkinKind::Claudex ? preferences.claudex_skin.value_or(defaultSkinConfig(SkinKind::Claudex)) : preferences.firmius_skin.value_or(defaultSkinConfig(SkinKind::Firmius));
           GlintConfig cfg;
           cfg.gradientColors = theme.tool_blocks.glint.empty()
-                                   ? std::vector<ftxui::Color>{ftxui::Color::White,
+                                   ? std::vector<ftxui::Color>{line.text.find("Failed") != std::string::npos
+                                                                 ? theme.status_bar.error.normal.fg
+                                                                 : theme.base.fg,
                                                                theme.base.highlight}
                                    : theme.tool_blocks.glint;
           cfg.durationSeconds = glintDurationSeconds(skin_config.glint_speed);

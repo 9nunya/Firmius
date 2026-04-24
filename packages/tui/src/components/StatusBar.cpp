@@ -457,11 +457,11 @@ private:
     cfg.target = GlintConfig::Target::Text;
     cfg.gradientColors =
         state.glint.empty()
-            ? std::vector<ftxui::Color>{ftxui::Color::Blue, ftxui::Color::White}
+            ? std::vector<ftxui::Color>{theme.status_bar.pill_fg, theme.base.highlight}
             : state.glint;
     cfg.glintSize = 14;
-    cfg.intervalSeconds = 3;
-    cfg.durationSeconds = 1.2f;
+    cfg.intervalSeconds = 5;
+    cfg.durationSeconds = 2.8f;
     cfg.easing = GlintEasing::EaseInOut;
 
     glint_ = GlintEffect(ftxui::text(" " + model_text + " ") |

@@ -880,54 +880,21 @@ void AppendLspDetailsFromObject(const rapidjson::Value &lsp,
 
   const int errors = IntMember(lsp, "errors", 0);
   const int warnings = IntMember(lsp, "warnings", 0);
-  const int newErrors = IntMember(lsp, "new_error_count", 0);
-  const int newWarnings = IntMember(lsp, "new_warning_count", 0);
-
-  std::vector<std::string> summaryLines;
-  if (checked) {
-    std::string line = available ? "checked" : "unavailable";
-    if (!serverId.empty()) {
-      line += " via " + serverId;
+  // Compact icon+count badges for diff preview footer (visible in all skins).
+  if (errors > 0 || warnings > 0) {
+    std::string badge;
+    if (errors > 0) {
+      badge += "\u2716 " + std::to_string(errors); // ✖ N
     }
-    summaryLines.push_back(line);
-  } else if (!serverId.empty()) {
-    summaryLines.push_back("server: " + serverId);
-  }
-
-  std::vector<std::string> totals;
-  if (errors > 0) {
-    totals.push_back(std::to_string(errors) + " error" +
-                     (errors == 1 ? "" : "s"));
-  }
-  if (warnings > 0) {
-    totals.push_back(std::to_string(warnings) + " warning" +
-                     (warnings == 1 ? "" : "s"));
-  }
-  if (!totals.empty()) {
-    summaryLines.push_back("current: " + JoinDisplayParts(totals));
-  }
-
-  std::vector<std::string> deltas;
-  if (newErrors > 0) {
-    deltas.push_back(std::to_string(newErrors) + " new error" +
-                     (newErrors == 1 ? "" : "s"));
-  }
-  if (newWarnings > 0) {
-    deltas.push_back(std::to_string(newWarnings) + " new warning" +
-                     (newWarnings == 1 ? "" : "s"));
-  }
-  if (!deltas.empty()) {
-    summaryLines.push_back("delta: " + JoinDisplayParts(deltas));
-  }
-
-  if (!summaryLines.empty()) {
-    ToolPresentationSection summary;
-    summary.title = "Diagnostics summary · " + pathLabel;
-    summary.kind = newErrors > 0 || newWarnings > 0
-                       ? ToolPresentationNoticeKind::Warning
-                       : ToolPresentationNoticeKind::Info;
-    summary.lines = std::move(summaryLines);
-    presentation.sections.push_back(std::move(summary));
+    if (warnings > 0) {
+      if (!badge.empty()) {
+        badge += "  ";
+      }
+      badge += "\u26A0 " + std::to_string(warnings); // ⚠ N
+    }
+    presentation.footer_badges.push_back(badge);
+  } else if (checked && available) {
+    presentation.footer_badges.push_back("\u2714 0"); // ✔ 0
   }
 
   const std::string error = StringMember(lsp, "error");

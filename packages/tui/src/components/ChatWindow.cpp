@@ -457,10 +457,10 @@ ftxui::Element RenderQuickToolRow(const firmius::tui::QuickToolGroupSummary &sum
   if (live) {
     firmius::tui::GlintConfig cfg;
     cfg.target = firmius::tui::GlintConfig::Target::Background;
-    cfg.gradientColors = {pill_bg, theme.base.highlight, pill_bg};
+    cfg.gradientColors = {pill_bg, theme.base.highlight};
     cfg.glintSize = 8;
-    cfg.intervalSeconds = summary.has_live ? 0.9f : 1.4f;
-    cfg.durationSeconds = summary.has_live ? 0.8f : 1.0f;
+    cfg.intervalSeconds = summary.has_live ? 1.8f : 2.8f;
+    cfg.durationSeconds = summary.has_live ? 1.5f : 1.9f;
     cfg.easing = firmius::tui::GlintEasing::EaseInOut;
     pill = firmius::tui::GlintEffect(pill, cfg)->Render();
   }

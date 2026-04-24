@@ -203,7 +203,7 @@ bool isValidJsonObjectPayload(const std::string &payload) {
   }
   return parsed.IsObject();
 }
-}
+
 bool endsWithInsensitive(const std::string &value, const std::string &suffix) {
   if (value.size() < suffix.size())
     return false;
@@ -1396,7 +1396,10 @@ void AntigravityProvider::stream(
       AgentMetrics capturedMetrics;
 
       auto wrappedOnEvent = [&](const StreamEvent &ev) {
-        if (std::holds_alternative<TextChunk>(ev)) {
+        if (std::holds_alternative<TextChunk>(ev) ||
+            std::holds_alternative<ThinkingChunk>(ev) ||
+            std::holds_alternative<ToolCallChunk>(ev) ||
+            std::holds_alternative<ToolCall>(ev)) {
           if (!firstTokenEmitted) {
             firstTokenMs =
                 std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1405,21 +1408,14 @@ void AntigravityProvider::stream(
             firstTokenEmitted = true;
           }
           onEvent(ev);
-        } else if (std::holds_alternative<ThinkingChunk>(ev)) {
-          if (!firstTokenEmitted) {
-            firstTokenMs =
-                std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::system_clock::now().time_since_epoch())
-                    .count();
-            firstTokenEmitted = true;
-          }
-          onEvent(ev);
-        } else if (auto *met = std::get_if<AgentMetrics>(&ev)) {
+          return;
+        }
+        if (auto *met = std::get_if<AgentMetrics>(&ev)) {
           capturedMetrics = *met;
           metricsReceived = true;
-        } else {
-          onEvent(ev);
+          return;
         }
+        onEvent(ev);
       };
       std::function<void(const StreamEvent &)> wrappedFn = wrappedOnEvent;
       StreamContext ctx{this, &wrappedFn, "", 0, opts.abortSignal, 0, {}};

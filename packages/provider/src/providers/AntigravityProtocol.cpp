@@ -482,19 +482,30 @@ std::string AntigravityProtocol::prepareRequestBody(const AgentHistory &history,
       lastWasToolResult = (msg.role == Role::ToolResult);
     }
     
-    // After processing all messages in a turn, check if we need to insert a model turn
-    // This is required when tool results are at the end of a turn with no following assistant message
+    // After processing all messages in a turn, check if we need to insert a
+    // model turn. This alternation fix is required for some Claude requests.
+    //
+    // NOTE: For Gemini 3 / Antigravity models, inserting a synthetic "model" turn
+    // has empirically caused degraded thinking/trace behavior on subsequent turns.
+    // Gemini does not require the alternation fix in practice, so we skip it.
     if (lastWasToolResult && turnIdx < history.turns.size() - 1) {
+      // For Gemini 3* models, do not insert synthetic model turns. Empirically
+      // this suppresses thinking/trace output on subsequent turns.
+      if (isGemini) {
+        lastWasToolResult = false;
+        continue;
+      }
+
       // Check if next turn starts with assistant message
       bool nextTurnHasAssistant = false;
-      const auto& nextTurn = history.turns[turnIdx + 1];
-      for (const auto& nextMsg : nextTurn.messages) {
+      const auto &nextTurn = history.turns[turnIdx + 1];
+      for (const auto &nextMsg : nextTurn.messages) {
         if (nextMsg.role == Role::Assistant) {
           nextTurnHasAssistant = true;
           break;
         }
       }
-      
+
       if (!nextTurnHasAssistant) {
         // Insert a dummy model turn to maintain proper alternation
         rapidjson::Value modelTurn(rapidjson::kObjectType);
@@ -508,6 +519,7 @@ std::string AntigravityProtocol::prepareRequestBody(const AgentHistory &history,
       }
       lastWasToolResult = false;
     }
+
   }
 
   // Claude models reject requests where contents ends with a "model" role
@@ -516,7 +528,7 @@ std::string AntigravityProtocol::prepareRequestBody(const AgentHistory &history,
   // for tool-result alternation. Append a sentinel user turn to satisfy the
   // constraint.
   if (isClaude && contents.Size() > 0) {
-    const auto& last = contents[contents.Size() - 1];
+    const auto &last = contents[contents.Size() - 1];
     if (last.HasMember("role") && last["role"].IsString() &&
         std::string(last["role"].GetString()) == "model") {
       rapidjson::Value userTurn(rapidjson::kObjectType);
@@ -529,7 +541,6 @@ std::string AntigravityProtocol::prepareRequestBody(const AgentHistory &history,
       contents.PushBack(userTurn, a);
     }
   }
-
   rapidjson::Value sysInst(rapidjson::kObjectType);
   rapidjson::Value sysParts(rapidjson::kArrayType);
   rapidjson::Value sysPart(rapidjson::kObjectType);

@@ -87,7 +87,7 @@ public:
         static_cast<float>(std::min(config_.glintSize, width));
 
     if (config_.mode == GlintConfig::Mode::Pulse) {
-      const float intensity = std::pow(triangle01(progress_), 1.25f);
+      const float intensity = triangle01(progress_);
       if (intensity <= 0.0f)
         return;
 
@@ -98,18 +98,9 @@ public:
               InterpolateGradient(config_.gradientColors, intensity);
 
           if (config_.target == GlintConfig::Target::Text) {
-            bool is_empty = pixel.character.empty();
-            bool is_space = (!is_empty && pixel.character == " ");
-            if (is_empty)
+            if (pixel.character.empty() || pixel.character == " ")
               continue;
-            if (is_space && !config_.includeWhitespace)
-              continue;
-
-            if (is_space) {
-              pixel.background_color = c;
-            } else {
-              pixel.foreground_color = c;
-            }
+            pixel.foreground_color = c;
           } else {
             pixel.background_color = c;
           }
@@ -129,14 +120,10 @@ public:
           auto &pixel = screen.PixelAt(x, y);
 
           if (config_.target == GlintConfig::Target::Text) {
-            bool is_empty = pixel.character.empty();
-            bool is_space = (!is_empty && pixel.character == " ");
-            if (is_empty)
-              continue;
-            if (is_space && !config_.includeWhitespace)
+            // Do not tint whitespace.
+            if (pixel.character.empty() || pixel.character == " ")
               continue;
           }
-
           float r = hash01(x, y, t_bucket);
           if (r > density)
             continue;
@@ -148,11 +135,9 @@ public:
               InterpolateGradient(config_.gradientColors, intensity);
 
           if (config_.target == GlintConfig::Target::Text) {
-            if (!pixel.character.empty() && pixel.character == " ") {
-              pixel.background_color = c;
-            } else {
-              pixel.foreground_color = c;
-            }
+            if (pixel.character.empty() || pixel.character == " ")
+              continue;
+            pixel.foreground_color = c;
           } else {
             pixel.background_color = c;
           }
@@ -186,24 +171,15 @@ public:
         if (color_t <= 0.0f)
           continue;
 
-        // Make the sweep pop a bit more (narrow bright core).
-        color_t = std::pow(clamp01(color_t), 0.75f);
-        ftxui::Color c = InterpolateGradient(config_.gradientColors, color_t);
+        ftxui::Color c =
+            InterpolateGradient(config_.gradientColors, clamp01(color_t));
 
         auto &pixel = screen.PixelAt(x, y);
         if (config_.target == GlintConfig::Target::Text) {
-          if (pixel.character.empty()) {
+          // Do not tint whitespace.
+          if (pixel.character.empty() || pixel.character == " ") {
             continue;
           }
-
-          if (pixel.character == " ") {
-            if (!config_.includeWhitespace)
-              continue;
-            // For spaces, tint background to keep the sweep continuous.
-            pixel.background_color = c;
-            continue;
-          }
-
           if (c == pixel.background_color) {
             pixel.foreground_color = ftxui::Color::White;
           } else {
@@ -229,6 +205,11 @@ private:
 
     t = clamp01(t);
     float scaled_t = t * (colors.size() - 1);
+
+    // NOTE: Keep interpolation monotonic. The glint strength profile is handled
+    // by the sweep's distance->intensity mapping (color_t), not by reflecting
+    // gradients here.
+
     int idx = static_cast<int>(scaled_t);
     if (idx >= static_cast<int>(colors.size()) - 1)
       return colors.back();
@@ -257,8 +238,15 @@ public:
 
     const float width_scale =
         std::max(1.6f, static_cast<float>(config_.glintSize) / 10.0f);
-    const float effective_duration = config_.durationSeconds * width_scale;
-    const float effective_interval = config_.intervalSeconds * 1.4f;
+
+    // TUI-wide: make glints appreciably slower.
+    // "3x longer" means both travel duration and cooldown interval.
+    constexpr float kGlintTimeScale = 3.0f;
+
+    const float effective_duration =
+        config_.durationSeconds * width_scale * kGlintTimeScale;
+    const float effective_interval =
+        config_.intervalSeconds * 1.4f * kGlintTimeScale;
     float cycle_duration = effective_duration + effective_interval;
 
     if (cycle_duration <= 0.0f || effective_duration <= 0.0f) {
@@ -271,9 +259,6 @@ public:
     if (animating) {
       ftxui::animation::RequestAnimationFrame();
       float progress = std::min(1.0f, cycle_time / effective_duration);
-      if (config_.easing) {
-        progress = config_.easing(progress);
-      }
       return std::make_shared<GlintNode>(child_, config_, progress);
     }
 
