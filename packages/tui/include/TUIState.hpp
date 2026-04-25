@@ -369,6 +369,20 @@ private:
   bool isEditModeSelection(uint64_t timestamp) const;
   void selectEditableMessageByTimestamp(uint64_t timestamp);
   bool commitSelectedEditableMessageToInput();
+  void dismissUndoRedoNotices();
+  void syncUndoRedoNoticeHistory();
+  void setTranscriptUndoNotice(const shared::TranscriptUndoAction &action,
+                               int turnsUndone);
+  void setEditUndoNotice(const shared::EditUndoAction &action,
+                         std::vector<std::string> paths);
+  void triggerTranscriptUndoFromHotkey();
+  void triggerTranscriptRedoFromHotkey();
+  void triggerEditUndoFromHotkey();
+  void triggerEditRedoFromHotkey();
+  std::optional<shared::EditBatchSummary> latestFocusedEditBatch() const;
+  std::optional<shared::EditBatchSummary> latestFocusedUndoneEditBatch() const;
+  std::vector<std::string> editPathsForBatch(const std::string &editBatchId) const;
+  void updateFocusedEditFollowUpNotice();
   std::optional<shared::Plan> loadActivePlanForThread(
       const shared::ThreadMetadata &thread) const;
   const shared::WorkChunk *
@@ -424,6 +438,27 @@ private:
   bool suppress_next_history_undone_refresh_ = false;
 
   ftxui::Component root_component_;
+  struct UndoRedoNoticeState {
+    std::string transcriptUndoActionId;
+    int transcriptTurnsUndone = 0;
+    bool transcriptRedoAvailable = false;
+    std::string editUndoActionId;
+    std::vector<std::string> editPaths;
+    bool editRedoAvailable = false;
+    std::uint64_t revision = 0;
+  };
+  UndoRedoNoticeState undo_redo_notice_state_;
+  std::shared_ptr<shared::AgentHistory> notice_history_overlay_;
+  static constexpr const char *kUndoNoticeTurnId = "system-note-undo-redo";
+  static constexpr const char *kEditNoticeTurnId = "system-note-edit-undo-redo";
+  std::optional<shared::TranscriptUndoAction> last_transcript_undo_action_;
+  std::optional<shared::TranscriptRedoAction> last_transcript_redo_action_;
+  std::optional<shared::EditUndoAction> last_edit_undo_action_;
+  std::optional<std::string> pending_edit_redo_batch_id_;
+  std::optional<std::string> pending_edit_redo_notice_text_;
+  std::uint64_t undo_redo_notice_revision_ = 0;
+
+
   ftxui::Component chat_component_;
   ftxui::Component input_component_;
   std::unordered_map<std::string, uint64_t> agent_work_start_ms_;

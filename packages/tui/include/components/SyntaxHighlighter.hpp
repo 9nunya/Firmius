@@ -120,7 +120,8 @@ private:
   SyntaxHighlighter() = default;
 
   // Classify a tree-sitter node into a highlight category
-  HighlightKind classifyNode(TSNode node, const std::string &language) const;
+  HighlightKind classifyNode(TSNode node, const std::string &language,
+                             const char *source = nullptr) const;
 
   // Get FTXUI color for a highlight kind
   ftxui::Color colorFor(HighlightKind kind) const;
@@ -132,7 +133,8 @@ private:
     HighlightKind kind;
   };
   void collectSpans(TSNode node, const std::string &language,
-                    std::vector<HighlightSpan> &spans) const;
+                    std::vector<HighlightSpan> &spans,
+                    const char *source = nullptr) const;
 
   std::unordered_map<std::string, GrammarInfo> grammars_;
   SyntaxColorScheme colorScheme_;

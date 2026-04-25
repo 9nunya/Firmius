@@ -63,6 +63,7 @@ install(DIRECTORY prompts/ DESTINATION ${FIRMIUS_USER_DATA_DIR}/prompts)
 install(DIRECTORY workflows/ DESTINATION ${FIRMIUS_USER_DATA_DIR}/workflows)
 install(DIRECTORY hinting/ DESTINATION ${FIRMIUS_USER_DATA_DIR}/hinting)
 install(DIRECTORY themes/ DESTINATION ${FIRMIUS_USER_DATA_DIR}/themes)
+install(FILES ART.md DESTINATION ${FIRMIUS_USER_DATA_DIR})
 
 # Install bundled themes to a shared data directory.
 install(DIRECTORY themes/ DESTINATION ${CMAKE_INSTALL_DATADIR}/firmius/themes)

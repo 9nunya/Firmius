@@ -1237,6 +1237,198 @@ bool TuiState::commitSelectedEditableMessageToInput() {
   return true;
 }
 
+std::optional<shared::EditBatchSummary> TuiState::latestFocusedEditBatch() const {
+  if (!harness_ || thread_.threadId.empty()) {
+    return std::nullopt;
+  }
+  const auto batches = harness_->listEditBatches(thread_.threadId);
+  for (const auto &batch : batches) {
+    if (batch.status != shared::EditBatchStatus::Undone) {
+      return batch;
+    }
+  }
+  return std::nullopt;
+}
+
+std::optional<shared::EditBatchSummary> TuiState::latestFocusedUndoneEditBatch() const {
+  if (!harness_ || thread_.threadId.empty()) {
+    return std::nullopt;
+  }
+  const auto batches = harness_->listEditBatches(thread_.threadId);
+  for (const auto &batch : batches) {
+    if (batch.status == shared::EditBatchStatus::Undone &&
+        batch.undoActionBatchId.has_value() &&
+        !batch.undoActionBatchId->empty()) {
+      return batch;
+    }
+  }
+  return std::nullopt;
+}
+
+void TuiState::triggerTranscriptUndoFromHotkey() {
+  if (!harness_ || focused_agent_id_.empty()) {
+    NotificationManager::instance().notifyWarning(
+        "Transcript Undo", "No focused agent history to undo.",
+        std::chrono::milliseconds(1800));
+    return;
+  }
+
+  int count = 1;
+  auto history = harness_->getAgentHistoryPtr(focused_agent_id_);
+  if (history && history->turns.size() > 2) {
+    auto is_user_turn = [](const shared::AgentTurn &turn) {
+      for (const auto &msg : turn.messages) {
+        if (msg.role == shared::Role::User) {
+          return true;
+        }
+      }
+      return false;
+    };
+    auto is_compaction_turn = [](const shared::AgentTurn &turn) {
+      return turn.turnId.rfind("compaction-start-", 0) == 0 ||
+             turn.turnId.rfind("compaction-summary-", 0) == 0 ||
+             turn.turnId.rfind("compaction-end-", 0) == 0;
+    };
+    for (std::size_t i = history->turns.size(); i-- > 2;) {
+      if (is_user_turn(history->turns[i])) {
+        count = std::max(1, static_cast<int>(history->turns.size() - i));
+        break;
+      }
+    }
+    if (count == 1) {
+      int compaction_tail = 0;
+      for (std::size_t i = history->turns.size(); i-- > 2;) {
+        if (!is_compaction_turn(history->turns[i])) {
+          break;
+        }
+        ++compaction_tail;
+      }
+      count = std::max(1, compaction_tail);
+    }
+  }
+
+  auto result = harness_->undoTurnsWithRedo(count);
+  if (!result.has_value()) {
+    NotificationManager::instance().notifyWarning(
+        "Transcript Undo", "Undo was not applied.",
+        std::chrono::milliseconds(1800));
+    return;
+  }
+
+  last_transcript_undo_action_ = result;
+  NotificationManager::instance().notifyInfo(
+      "Transcript Undo",
+      "Undid " + std::to_string(std::max(1, count)) + " turn(s).",
+      std::chrono::milliseconds(1800));
+}
+
+void TuiState::triggerTranscriptRedoFromHotkey() {
+  if (!harness_ || !last_transcript_undo_action_.has_value()) {
+    NotificationManager::instance().notifyWarning(
+        "Transcript Redo", "No transcript undo is available to replay.",
+        std::chrono::milliseconds(1800));
+    return;
+  }
+
+  auto eligibility =
+      harness_->evaluateTranscriptRedo(last_transcript_undo_action_->undoActionId);
+  if (!eligibility.redoable) {
+    NotificationManager::instance().notifyWarning(
+        "Transcript Redo", eligibility.reason.empty() ? "Redo is unavailable."
+                                                       : eligibility.reason,
+        std::chrono::milliseconds(1800));
+    return;
+  }
+
+  auto result =
+      harness_->redoTranscriptUndoAction(last_transcript_undo_action_->undoActionId);
+  if (!result.has_value()) {
+    NotificationManager::instance().notifyWarning(
+        "Transcript Redo", "Redo was not applied.",
+        std::chrono::milliseconds(1800));
+    return;
+  }
+
+  last_transcript_redo_action_ = result;
+  NotificationManager::instance().notifyInfo(
+      "Transcript Redo", "Replayed the last transcript undo.",
+      std::chrono::milliseconds(1800));
+  refreshFocusedHistory();
+  notifyChatTranscriptChanged();
+}
+
+void TuiState::triggerEditUndoFromHotkey() {
+  if (!harness_) {
+    return;
+  }
+  auto batch = latestFocusedEditBatch();
+  if (!batch.has_value()) {
+    NotificationManager::instance().notifyWarning(
+        "Edit Undo", "No applied edit batch is available to undo.",
+        std::chrono::milliseconds(1800));
+    return;
+  }
+
+  auto result = harness_->undoEditBatch(batch->editBatchId);
+  if (!result.has_value()) {
+    NotificationManager::instance().notifyWarning(
+        "Edit Undo", "Undo was not applied.",
+        std::chrono::milliseconds(1800));
+    return;
+  }
+
+  last_edit_undo_action_ = result;
+  NotificationManager::instance().notifyInfo(
+      "Edit Undo", "Undid edit batch " + batch->editBatchId + ".",
+      std::chrono::milliseconds(1800));
+  requestRefresh(RefreshFlags::ContextLane);
+}
+
+void TuiState::triggerEditRedoFromHotkey() {
+  if (!harness_) {
+    return;
+  }
+
+  std::optional<std::string> undo_action_id;
+  if (last_edit_undo_action_.has_value()) {
+    undo_action_id = last_edit_undo_action_->undoActionId;
+  } else {
+    auto batch = latestFocusedUndoneEditBatch();
+    if (batch.has_value()) {
+      undo_action_id = batch->undoActionBatchId;
+    }
+  }
+
+  if (!undo_action_id.has_value() || undo_action_id->empty()) {
+    NotificationManager::instance().notifyWarning(
+        "Edit Redo", "No edit undo is available to replay.",
+        std::chrono::milliseconds(1800));
+    return;
+  }
+
+  auto eligibility = harness_->evaluateEditBatchRedo(*undo_action_id);
+  if (!eligibility.redoable) {
+    NotificationManager::instance().notifyWarning(
+        "Edit Redo", eligibility.reason.empty() ? "Redo is unavailable."
+                                                : eligibility.reason,
+        std::chrono::milliseconds(1800));
+    return;
+  }
+
+  auto result = harness_->redoEditUndoAction(*undo_action_id);
+  if (!result.has_value()) {
+    NotificationManager::instance().notifyWarning(
+        "Edit Redo", "Redo was not applied.",
+        std::chrono::milliseconds(1800));
+    return;
+  }
+
+  NotificationManager::instance().notifyInfo(
+      "Edit Redo", "Replayed the last edit undo.",
+      std::chrono::milliseconds(1800));
+  requestRefresh(RefreshFlags::ContextLane);
+}
+
 static std::string permissionModeToDisplayName(
     shared::ThreadPermissionMode mode) {
   switch (mode) {
@@ -3199,7 +3391,7 @@ ftxui::Component TuiState::root() {
             harness_->newThread(
                 {}, cwd, resolveDefaultLeadPersona(harness_));
             harness_->setCurrentThreadPermissionMode(thread_.permissionMode);
-            setViewMode(ViewMode::Chat);
+            syncCurrentThreadMetadataFromHarness(false);
           }
 
           if (cmdManager.executeCommand(ctx, text)) {
@@ -3211,18 +3403,24 @@ ftxui::Component TuiState::root() {
           // If we are on the welcome screen, typing a message automatically
           // starts a thread
           if (harness_) {
+            std::cerr << "[DEBUG] Welcome screen: newThread starting\n" << std::flush;
             // Auto-create thread in current directory with default lead persona
             std::string cwd = std::filesystem::current_path().string();
-            harness_->newThread(
+            std::string threadId = harness_->newThread(
                 {}, cwd, resolveDefaultLeadPersona(harness_));
+            std::cerr << "[DEBUG] Welcome screen: newThread returned " << threadId << "\n" << std::flush;
             harness_->setCurrentThreadPermissionMode(thread_.permissionMode);
-            // Pull the newly created thread/focused-agent state into the TUI
-            // before the first UserMessageSent / Agent* events land. Without
-            // this, the chat can stay visually empty on a brand-new thread
-            // until a later manual reload path rebinds the transcript.
+            std::cerr << "[DEBUG] Welcome screen: setCurrentThreadPermissionMode done\n" << std::flush;
+            // A welcome-screen send is a fresh thread transition, not a
+            // live-stream continuation. Do the full thread rebind before the
+            // first send so chat/history/tool state is initialized the same
+            // way as any other thread switch.
             syncCurrentThreadMetadataFromHarness(true);
-            setViewMode(ViewMode::Chat);
+            std::cerr << "[DEBUG] Welcome screen: syncCurrentThreadMetadataFromHarness done, view_mode=" << (view_mode_ == ViewMode::Chat ? "Chat" : "Welcome") << "\n" << std::flush;
             harness_->send(text, image_contents);
+            std::cerr << "[DEBUG] Welcome screen: send done\n" << std::flush;
+
+            setViewMode(ViewMode::Chat);
           }
         } else {
           if (harness_) {
@@ -4437,6 +4635,22 @@ ftxui::Component TuiState::root() {
         NotificationManager::instance().notifyWarning(
             "Retry Request", statusMessage, std::chrono::milliseconds(1800));
       }
+      return true;
+    }
+    if (IsTranscriptUndoEvent(event)) {
+      triggerTranscriptUndoFromHotkey();
+      return true;
+    }
+    if (IsTranscriptRedoEvent(event)) {
+      triggerTranscriptRedoFromHotkey();
+      return true;
+    }
+    if (IsEditUndoEvent(event)) {
+      triggerEditUndoFromHotkey();
+      return true;
+    }
+    if (IsEditRedoEvent(event)) {
+      triggerEditRedoFromHotkey();
       return true;
     }
     if (event.input() == "\x1b[Z") { // Shift+Tab (cycle lead mode)

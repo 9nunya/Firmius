@@ -315,6 +315,90 @@ NoticeSeverity stringToNoticeSeverity(const std::string &str) {
     return NoticeSeverity::Success;
   throw std::runtime_error("Unknown NoticeSeverity: " + str);
 }
+const char *editBatchStatusToStringImpl(EditBatchStatus status) {
+  switch (status) {
+  case EditBatchStatus::Applied:
+    return "Applied";
+  case EditBatchStatus::Redone:
+    return "Redone";
+  case EditBatchStatus::Undone:
+    return "Undone";
+  }
+  return "Applied";
+}
+EditBatchStatus stringToEditBatchStatusImpl(const std::string &value) {
+  if (value == "Applied")
+    return EditBatchStatus::Applied;
+  if (value == "Redone")
+    return EditBatchStatus::Redone;
+  if (value == "Undone")
+    return EditBatchStatus::Undone;
+  throw std::runtime_error("Unknown EditBatchStatus: " + value);
+}
+
+const char *editFileMutationStatusToStringImpl(EditFileMutationStatus status) {
+  switch (status) {
+  case EditFileMutationStatus::Applied:
+    return "Applied";
+  case EditFileMutationStatus::Redone:
+    return "Redone";
+  case EditFileMutationStatus::BlockedByLaterEdits:
+    return "BlockedByLaterEdits";
+  case EditFileMutationStatus::Diverged:
+    return "Diverged";
+  case EditFileMutationStatus::Undone:
+    return "Undone";
+  }
+  return "Applied";
+}
+EditFileMutationStatus stringToEditFileMutationStatusImpl(const std::string &value) {
+  if (value == "Applied")
+    return EditFileMutationStatus::Applied;
+  if (value == "Redone")
+    return EditFileMutationStatus::Redone;
+  if (value == "BlockedByLaterEdits")
+    return EditFileMutationStatus::BlockedByLaterEdits;
+  if (value == "Diverged")
+    return EditFileMutationStatus::Diverged;
+  if (value == "Undone")
+    return EditFileMutationStatus::Undone;
+  throw std::runtime_error("Unknown EditFileMutationStatus: " + value);
+}
+
+const char *editUndoResultStatusToStringImpl(EditUndoResultStatus status) {
+  switch (status) {
+  case EditUndoResultStatus::Succeeded:
+    return "Succeeded";
+  case EditUndoResultStatus::RejectedAlreadyUndone:
+    return "RejectedAlreadyUndone";
+  case EditUndoResultStatus::RejectedBlocked:
+    return "RejectedBlocked";
+  case EditUndoResultStatus::RejectedDiverged:
+    return "RejectedDiverged";
+  case EditUndoResultStatus::RejectedBatchNotFullyUndoable:
+    return "RejectedBatchNotFullyUndoable";
+  case EditUndoResultStatus::RejectedPartialFailure:
+    return "RejectedPartialFailure";
+  }
+  return "Succeeded";
+}
+
+EditUndoResultStatus stringToEditUndoResultStatusImpl(const std::string &value) {
+  if (value == "Succeeded")
+    return EditUndoResultStatus::Succeeded;
+  if (value == "RejectedAlreadyUndone")
+    return EditUndoResultStatus::RejectedAlreadyUndone;
+  if (value == "RejectedBlocked")
+    return EditUndoResultStatus::RejectedBlocked;
+  if (value == "RejectedDiverged")
+    return EditUndoResultStatus::RejectedDiverged;
+  if (value == "RejectedBatchNotFullyUndoable")
+    return EditUndoResultStatus::RejectedBatchNotFullyUndoable;
+  if (value == "RejectedPartialFailure")
+    return EditUndoResultStatus::RejectedPartialFailure;
+  throw std::runtime_error("Unknown EditUndoResultStatus: " + value);
+}
+
 
 rapidjson::Value rollingNoticeMetadataToJson(
     const RollingNoticeMetadata &metadata, rapidjson::Document::AllocatorType &a) {
@@ -1088,12 +1172,162 @@ threadArtifactMetadataFromJsonValue(const rapidjson::Value &v) {
                  ? v["updatedAt"].GetUint64()
                  : 0);
   if (v.HasMember("kind") && v["kind"].IsString()) {
-    metadata.kind = v["kind"].GetString();
+    metadata.kind = std::string(v["kind"].GetString());
   }
   if (v.HasMember("description") && v["description"].IsString()) {
-    metadata.description = v["description"].GetString();
+    metadata.description = std::string(v["description"].GetString());
   }
   return metadata;
+}
+
+rapidjson::Value editMutationOperationToJsonValue(
+    const EditMutationOperation &operation, rapidjson::Document::AllocatorType &a) {
+  rapidjson::Value v(rapidjson::kObjectType);
+  v.AddMember("description", rapidjson::Value(operation.description.c_str(), a), a);
+  v.AddMember("start_line", operation.startLine, a);
+  v.AddMember("end_line", operation.endLine, a);
+  rapidjson::Value oldLines(rapidjson::kArrayType);
+  for (const auto &line : operation.oldLines) {
+    oldLines.PushBack(rapidjson::Value(line.c_str(), a), a);
+  }
+  rapidjson::Value newLines(rapidjson::kArrayType);
+  for (const auto &line : operation.newLines) {
+    newLines.PushBack(rapidjson::Value(line.c_str(), a), a);
+  }
+  v.AddMember("old_lines", oldLines, a);
+  v.AddMember("new_lines", newLines, a);
+  return v;
+}
+
+EditMutationOperation editMutationOperationFromJsonValue(const rapidjson::Value &v) {
+  EditMutationOperation operation;
+  operation.description =
+      v.HasMember("description") && v["description"].IsString()
+          ? v["description"].GetString()
+          : "";
+  operation.startLine =
+      v.HasMember("start_line") && v["start_line"].IsInt()
+          ? v["start_line"].GetInt()
+          : 1;
+  operation.endLine =
+      v.HasMember("end_line") && v["end_line"].IsInt()
+          ? v["end_line"].GetInt()
+          : 0;
+  if (v.HasMember("old_lines") && v["old_lines"].IsArray()) {
+    for (const auto &line : v["old_lines"].GetArray()) {
+      if (line.IsString()) {
+        operation.oldLines.push_back(line.GetString());
+      }
+    }
+  }
+  if (v.HasMember("new_lines") && v["new_lines"].IsArray()) {
+    for (const auto &line : v["new_lines"].GetArray()) {
+      if (line.IsString()) {
+        operation.newLines.push_back(line.GetString());
+      }
+    }
+  }
+  return operation;
+}
+
+rapidjson::Value editFileMutationToJsonValue(
+    const EditFileMutation &mutation, rapidjson::Document::AllocatorType &a) {
+  rapidjson::Value v(rapidjson::kObjectType);
+  v.AddMember("file_mutation_id", rapidjson::Value(mutation.fileMutationId.c_str(), a), a);
+  v.AddMember("edit_batch_id", rapidjson::Value(mutation.editBatchId.c_str(), a), a);
+  v.AddMember("thread_id", rapidjson::Value(mutation.threadId.c_str(), a), a);
+  v.AddMember("file_path", rapidjson::Value(mutation.filePath.c_str(), a), a);
+  v.AddMember("ordinal_in_batch", mutation.ordinalInBatch, a);
+  v.AddMember("had_file_before", mutation.hadFileBefore, a);
+  v.AddMember("has_file_after", mutation.hasFileAfter, a);
+  v.AddMember("pre_hash", rapidjson::Value(mutation.preHash.c_str(), a), a);
+  v.AddMember("post_hash", rapidjson::Value(mutation.postHash.c_str(), a), a);
+  v.AddMember("pre_size", mutation.preSize, a);
+  v.AddMember("post_size", mutation.postSize, a);
+  v.AddMember("newline_mode_before", rapidjson::Value(mutation.newlineModeBefore.c_str(), a), a);
+  v.AddMember("newline_mode_after", rapidjson::Value(mutation.newlineModeAfter.c_str(), a), a);
+  v.AddMember("status",
+              rapidjson::Value(editFileMutationStatusToStringImpl(mutation.status), a), a);
+  v.AddMember("mode", rapidjson::Value(mutation.mode.c_str(), a), a);
+  rapidjson::Value operations(rapidjson::kArrayType);
+  for (const auto &operation : mutation.operations) {
+    operations.PushBack(editMutationOperationToJsonValue(operation, a), a);
+  }
+  v.AddMember("operations", operations, a);
+  v.AddMember("diff_preview", rapidjson::Value(mutation.diffPreview.c_str(), a), a);
+  return v;
+}
+
+EditFileMutation editFileMutationFromJsonValue(const rapidjson::Value &v) {
+  EditFileMutation mutation;
+  mutation.fileMutationId =
+      v.HasMember("file_mutation_id") && v["file_mutation_id"].IsString()
+          ? v["file_mutation_id"].GetString()
+          : "";
+  mutation.editBatchId =
+      v.HasMember("edit_batch_id") && v["edit_batch_id"].IsString()
+          ? v["edit_batch_id"].GetString()
+          : "";
+  mutation.threadId =
+      v.HasMember("thread_id") && v["thread_id"].IsString()
+          ? v["thread_id"].GetString()
+          : "";
+  mutation.filePath =
+      v.HasMember("file_path") && v["file_path"].IsString()
+          ? v["file_path"].GetString()
+          : "";
+  mutation.ordinalInBatch =
+      v.HasMember("ordinal_in_batch") && v["ordinal_in_batch"].IsInt()
+          ? v["ordinal_in_batch"].GetInt()
+          : 0;
+  mutation.hadFileBefore =
+      v.HasMember("had_file_before") && v["had_file_before"].IsBool()
+          ? v["had_file_before"].GetBool()
+          : false;
+  mutation.hasFileAfter =
+      v.HasMember("has_file_after") && v["has_file_after"].IsBool()
+          ? v["has_file_after"].GetBool()
+          : false;
+  mutation.preHash =
+      v.HasMember("pre_hash") && v["pre_hash"].IsString()
+          ? v["pre_hash"].GetString()
+          : "";
+  mutation.postHash =
+      v.HasMember("post_hash") && v["post_hash"].IsString()
+          ? v["post_hash"].GetString()
+          : "";
+  mutation.preSize = v.HasMember("pre_size") && v["pre_size"].IsUint64()
+                         ? v["pre_size"].GetUint64()
+                         : 0;
+  mutation.postSize = v.HasMember("post_size") && v["post_size"].IsUint64()
+                          ? v["post_size"].GetUint64()
+                          : 0;
+  mutation.newlineModeBefore =
+      v.HasMember("newline_mode_before") && v["newline_mode_before"].IsString()
+          ? v["newline_mode_before"].GetString()
+          : "";
+  mutation.newlineModeAfter =
+      v.HasMember("newline_mode_after") && v["newline_mode_after"].IsString()
+          ? v["newline_mode_after"].GetString()
+          : "";
+  mutation.status =
+      v.HasMember("status") && v["status"].IsString()
+          ? stringToEditFileMutationStatusImpl(v["status"].GetString())
+          : EditFileMutationStatus::Applied;
+  mutation.mode =
+      v.HasMember("mode") && v["mode"].IsString() ? v["mode"].GetString() : "";
+  if (v.HasMember("operations") && v["operations"].IsArray()) {
+    for (const auto &operation : v["operations"].GetArray()) {
+      if (operation.IsObject()) {
+        mutation.operations.push_back(editMutationOperationFromJsonValue(operation));
+      }
+    }
+  }
+  mutation.diffPreview =
+      v.HasMember("diff_preview") && v["diff_preview"].IsString()
+          ? v["diff_preview"].GetString()
+          : "";
+  return mutation;
 }
 
 rapidjson::Value messagePartToJson(const MessagePart &p,
@@ -1308,6 +1542,30 @@ AgentOutcome agentOutcomeFromJson(const rapidjson::Value &v) {
 }
 
 } // namespace
+
+const char* editBatchStatusToString(EditBatchStatus status) {
+  return editBatchStatusToStringImpl(status);
+}
+
+EditBatchStatus stringToEditBatchStatus(const std::string& value) {
+  return stringToEditBatchStatusImpl(value);
+}
+
+const char* editFileMutationStatusToString(EditFileMutationStatus status) {
+  return editFileMutationStatusToStringImpl(status);
+}
+
+EditFileMutationStatus stringToEditFileMutationStatus(const std::string& value) {
+  return stringToEditFileMutationStatusImpl(value);
+}
+
+const char* editUndoResultStatusToString(EditUndoResultStatus status) {
+  return editUndoResultStatusToStringImpl(status);
+}
+
+EditUndoResultStatus stringToEditUndoResultStatus(const std::string& value) {
+  return stringToEditUndoResultStatusImpl(value);
+}
 
 rapidjson::Document toJson(const HostCreationOptions &o) {
   rapidjson::Document d;
@@ -2180,6 +2438,380 @@ rapidjson::Document toJson(const ThreadArtifactMetadata &metadata) {
 ThreadArtifactMetadata
 threadArtifactMetadataFromJson(const rapidjson::Value &value) {
   return threadArtifactMetadataFromJsonValue(value);
+}
+
+rapidjson::Document toJson(const EditMutationOperation &operation) {
+  rapidjson::Document d;
+  d.SetObject();
+  auto &a = d.GetAllocator();
+  d.CopyFrom(editMutationOperationToJsonValue(operation, a), a);
+  return d;
+}
+
+EditMutationOperation editMutationOperationFromJson(const rapidjson::Value &value) {
+  return editMutationOperationFromJsonValue(value);
+}
+
+rapidjson::Document toJson(const EditFileMutation &mutation) {
+  rapidjson::Document d;
+  d.SetObject();
+  auto &a = d.GetAllocator();
+  d.CopyFrom(editFileMutationToJsonValue(mutation, a), a);
+  return d;
+}
+
+EditFileMutation editFileMutationFromJson(const rapidjson::Value &value) {
+  return editFileMutationFromJsonValue(value);
+}
+
+rapidjson::Document toJson(const EditBatchSummary &summary) {
+  rapidjson::Document d;
+  d.SetObject();
+  auto &a = d.GetAllocator();
+  d.AddMember("edit_batch_id", rapidjson::Value(summary.editBatchId.c_str(), a), a);
+  d.AddMember("thread_id", rapidjson::Value(summary.threadId.c_str(), a), a);
+  d.AddMember("agent_id", rapidjson::Value(summary.agentId.c_str(), a), a);
+  d.AddMember("parent_agent_id", rapidjson::Value(summary.parentAgentId.c_str(), a), a);
+  d.AddMember("friendly_name", rapidjson::Value(summary.friendlyName.c_str(), a), a);
+  d.AddMember("turn_id", rapidjson::Value(summary.turnId.c_str(), a), a);
+  d.AddMember("tool_call_id", rapidjson::Value(summary.toolCallId.c_str(), a), a);
+  d.AddMember("tool_name", rapidjson::Value(summary.toolName.c_str(), a), a);
+  d.AddMember("request_mode", rapidjson::Value(summary.requestMode.c_str(), a), a);
+  d.AddMember("created_at", summary.createdAt, a);
+  d.AddMember("status", rapidjson::Value(editBatchStatusToString(summary.status), a), a);
+  rapidjson::Value files(rapidjson::kArrayType);
+  for (const auto &file : summary.files) {
+    files.PushBack(rapidjson::Value(file.c_str(), a), a);
+  }
+  d.AddMember("files", files, a);
+  d.AddMember("added_lines", summary.addedLines, a);
+  d.AddMember("removed_lines", summary.removedLines, a);
+  d.AddMember("summary_text", rapidjson::Value(summary.summaryText.c_str(), a), a);
+  if (summary.undoActionBatchId.has_value()) {
+    d.AddMember("undo_action_batch_id",
+                rapidjson::Value(summary.undoActionBatchId->c_str(), a), a);
+  } else {
+    d.AddMember("undo_action_batch_id", rapidjson::Value(rapidjson::kNullType), a);
+  }
+  return d;
+}
+
+EditBatchSummary editBatchSummaryFromJson(const rapidjson::Value &value) {
+  EditBatchSummary summary;
+  summary.editBatchId = value.HasMember("edit_batch_id") && value["edit_batch_id"].IsString()
+                            ? value["edit_batch_id"].GetString()
+                            : "";
+  summary.threadId = value.HasMember("thread_id") && value["thread_id"].IsString()
+                         ? value["thread_id"].GetString()
+                         : "";
+  summary.agentId = value.HasMember("agent_id") && value["agent_id"].IsString()
+                        ? value["agent_id"].GetString()
+                        : "";
+  summary.parentAgentId = value.HasMember("parent_agent_id") && value["parent_agent_id"].IsString()
+                              ? value["parent_agent_id"].GetString()
+                              : "";
+  summary.friendlyName = value.HasMember("friendly_name") && value["friendly_name"].IsString()
+                             ? value["friendly_name"].GetString()
+                             : "";
+  summary.turnId = value.HasMember("turn_id") && value["turn_id"].IsString()
+                       ? value["turn_id"].GetString()
+                       : "";
+  summary.toolCallId = value.HasMember("tool_call_id") && value["tool_call_id"].IsString()
+                           ? value["tool_call_id"].GetString()
+                           : "";
+  summary.toolName = value.HasMember("tool_name") && value["tool_name"].IsString()
+                         ? value["tool_name"].GetString()
+                         : "";
+  summary.requestMode = value.HasMember("request_mode") && value["request_mode"].IsString()
+                            ? value["request_mode"].GetString()
+                            : "";
+  summary.createdAt = value.HasMember("created_at") && value["created_at"].IsUint64()
+                          ? value["created_at"].GetUint64()
+                          : 0;
+  summary.status = value.HasMember("status") && value["status"].IsString()
+                       ? stringToEditBatchStatus(value["status"].GetString())
+                       : EditBatchStatus::Applied;
+  if (value.HasMember("files") && value["files"].IsArray()) {
+    for (const auto &file : value["files"].GetArray()) {
+      if (file.IsString()) {
+        summary.files.push_back(file.GetString());
+      }
+    }
+  }
+  summary.addedLines = value.HasMember("added_lines") && value["added_lines"].IsInt()
+                           ? value["added_lines"].GetInt()
+                           : 0;
+  summary.removedLines = value.HasMember("removed_lines") && value["removed_lines"].IsInt()
+                             ? value["removed_lines"].GetInt()
+                             : 0;
+  summary.summaryText = value.HasMember("summary_text") && value["summary_text"].IsString()
+                            ? value["summary_text"].GetString()
+                            : "";
+  if (value.HasMember("undo_action_batch_id") && value["undo_action_batch_id"].IsString()) {
+    summary.undoActionBatchId = value["undo_action_batch_id"].GetString();
+  }
+  return summary;
+}
+
+rapidjson::Document toJson(const EditBatchDetail &detail) {
+  rapidjson::Document d = toJson(detail.summary);
+  auto &a = d.GetAllocator();
+  rapidjson::Value files(rapidjson::kArrayType);
+  for (const auto &file : detail.files) {
+    files.PushBack(editFileMutationToJsonValue(file, a), a);
+  }
+  d.AddMember("file_mutations", files, a);
+  return d;
+}
+
+EditBatchDetail editBatchDetailFromJson(const rapidjson::Value &value) {
+  EditBatchDetail detail;
+  detail.summary = editBatchSummaryFromJson(value);
+  if (value.HasMember("file_mutations") && value["file_mutations"].IsArray()) {
+    for (const auto &file : value["file_mutations"].GetArray()) {
+      if (file.IsObject()) {
+        detail.files.push_back(editFileMutationFromJsonValue(file));
+      }
+    }
+  }
+  return detail;
+}
+
+rapidjson::Document toJson(const EditUndoEligibility &eligibility) {
+  rapidjson::Document d;
+  d.SetObject();
+  auto &a = d.GetAllocator();
+  d.AddMember("edit_batch_id", rapidjson::Value(eligibility.editBatchId.c_str(), a), a);
+  d.AddMember("undoable", eligibility.undoable, a);
+  d.AddMember("result_status",
+              rapidjson::Value(editUndoResultStatusToString(eligibility.resultStatus), a), a);
+  rapidjson::Value blocking(rapidjson::kArrayType);
+  for (const auto &id : eligibility.blockingEditBatchIds) {
+    blocking.PushBack(rapidjson::Value(id.c_str(), a), a);
+  }
+  rapidjson::Value diverged(rapidjson::kArrayType);
+  for (const auto &path : eligibility.divergedFiles) {
+    diverged.PushBack(rapidjson::Value(path.c_str(), a), a);
+  }
+  d.AddMember("blocking_edit_batch_ids", blocking, a);
+  d.AddMember("diverged_files", diverged, a);
+  d.AddMember("reason", rapidjson::Value(eligibility.reason.c_str(), a), a);
+  return d;
+}
+
+EditUndoEligibility editUndoEligibilityFromJson(const rapidjson::Value &value) {
+  EditUndoEligibility eligibility;
+  eligibility.editBatchId = value.HasMember("edit_batch_id") && value["edit_batch_id"].IsString()
+                                ? value["edit_batch_id"].GetString()
+                                : "";
+  eligibility.undoable = value.HasMember("undoable") && value["undoable"].IsBool()
+                             ? value["undoable"].GetBool()
+                             : false;
+  eligibility.resultStatus = value.HasMember("result_status") && value["result_status"].IsString()
+                                 ? stringToEditUndoResultStatus(value["result_status"].GetString())
+                                 : EditUndoResultStatus::Succeeded;
+  if (value.HasMember("blocking_edit_batch_ids") && value["blocking_edit_batch_ids"].IsArray()) {
+    for (const auto &id : value["blocking_edit_batch_ids"].GetArray()) {
+      if (id.IsString()) {
+        eligibility.blockingEditBatchIds.push_back(id.GetString());
+      }
+    }
+  }
+  if (value.HasMember("diverged_files") && value["diverged_files"].IsArray()) {
+    for (const auto &path : value["diverged_files"].GetArray()) {
+      if (path.IsString()) {
+        eligibility.divergedFiles.push_back(path.GetString());
+      }
+    }
+  }
+  eligibility.reason = value.HasMember("reason") && value["reason"].IsString()
+                           ? value["reason"].GetString()
+                           : "";
+  return eligibility;
+}
+
+rapidjson::Document toJson(const EditUndoAction &action) {
+  rapidjson::Document d;
+  d.SetObject();
+  auto &a = d.GetAllocator();
+  d.AddMember("undo_action_id", rapidjson::Value(action.undoActionId.c_str(), a), a);
+  d.AddMember("thread_id", rapidjson::Value(action.threadId.c_str(), a), a);
+  d.AddMember("requested_by_agent_id", rapidjson::Value(action.requestedByAgentId.c_str(), a), a);
+  d.AddMember("target_edit_batch_id", rapidjson::Value(action.targetEditBatchId.c_str(), a), a);
+  d.AddMember("created_at", action.createdAt, a);
+  d.AddMember("result_status",
+              rapidjson::Value(editUndoResultStatusToString(action.resultStatus), a), a);
+  d.AddMember("result_json", rapidjson::Value(action.resultJson.c_str(), a), a);
+  return d;
+}
+
+EditUndoAction editUndoActionFromJson(const rapidjson::Value &value) {
+  EditUndoAction action;
+  action.undoActionId = value.HasMember("undo_action_id") && value["undo_action_id"].IsString()
+                            ? value["undo_action_id"].GetString()
+                            : "";
+  action.threadId = value.HasMember("thread_id") && value["thread_id"].IsString()
+                        ? value["thread_id"].GetString()
+                        : "";
+  action.requestedByAgentId =
+      value.HasMember("requested_by_agent_id") && value["requested_by_agent_id"].IsString()
+          ? value["requested_by_agent_id"].GetString()
+          : "";
+  action.targetEditBatchId =
+      value.HasMember("target_edit_batch_id") && value["target_edit_batch_id"].IsString()
+          ? value["target_edit_batch_id"].GetString()
+          : "";
+  action.createdAt = value.HasMember("created_at") && value["created_at"].IsUint64()
+                         ? value["created_at"].GetUint64()
+                         : 0;
+  action.resultStatus = value.HasMember("result_status") && value["result_status"].IsString()
+                            ? stringToEditUndoResultStatus(value["result_status"].GetString())
+                            : EditUndoResultStatus::Succeeded;
+  action.resultJson = value.HasMember("result_json") && value["result_json"].IsString()
+                          ? value["result_json"].GetString()
+                          : "";
+  return action;
+}
+rapidjson::Document toJson(const EditRedoEligibility &eligibility) {
+  rapidjson::Document d;
+  d.SetObject();
+  auto &a = d.GetAllocator();
+  d.AddMember("undo_action_id", rapidjson::Value(eligibility.undoActionId.c_str(), a), a);
+  d.AddMember("redoable", eligibility.redoable, a);
+  rapidjson::Value blocking(rapidjson::kArrayType);
+  for (const auto &id : eligibility.blockingEditBatchIds) blocking.PushBack(rapidjson::Value(id.c_str(), a), a);
+  d.AddMember("blocking_edit_batch_ids", blocking, a);
+  rapidjson::Value diverged(rapidjson::kArrayType);
+  for (const auto &path : eligibility.divergedFiles) diverged.PushBack(rapidjson::Value(path.c_str(), a), a);
+  d.AddMember("diverged_files", diverged, a);
+  d.AddMember("reason", rapidjson::Value(eligibility.reason.c_str(), a), a);
+  return d;
+}
+
+EditRedoEligibility editRedoEligibilityFromJson(const rapidjson::Value &value) {
+  EditRedoEligibility eligibility;
+  eligibility.undoActionId = value.HasMember("undo_action_id") && value["undo_action_id"].IsString() ? value["undo_action_id"].GetString() : "";
+  eligibility.redoable = value.HasMember("redoable") && value["redoable"].IsBool() ? value["redoable"].GetBool() : false;
+  if (value.HasMember("blocking_edit_batch_ids") && value["blocking_edit_batch_ids"].IsArray()) for (const auto &item : value["blocking_edit_batch_ids"].GetArray()) if (item.IsString()) eligibility.blockingEditBatchIds.push_back(item.GetString());
+  if (value.HasMember("diverged_files") && value["diverged_files"].IsArray()) for (const auto &item : value["diverged_files"].GetArray()) if (item.IsString()) eligibility.divergedFiles.push_back(item.GetString());
+  eligibility.reason = value.HasMember("reason") && value["reason"].IsString() ? value["reason"].GetString() : "";
+  return eligibility;
+}
+
+rapidjson::Document toJson(const EditRedoAction &action) {
+  rapidjson::Document d; d.SetObject(); auto &a = d.GetAllocator();
+  d.AddMember("redo_action_id", rapidjson::Value(action.redoActionId.c_str(), a), a); d.AddMember("thread_id", rapidjson::Value(action.threadId.c_str(), a), a); d.AddMember("target_undo_action_id", rapidjson::Value(action.targetUndoActionId.c_str(), a), a); d.AddMember("created_at", action.createdAt, a); d.AddMember("result_json", rapidjson::Value(action.resultJson.c_str(), a), a); return d;
+}
+
+EditRedoAction editRedoActionFromJson(const rapidjson::Value &value) {
+  EditRedoAction action;
+  action.redoActionId = value.HasMember("redo_action_id") && value["redo_action_id"].IsString()
+                            ? value["redo_action_id"].GetString()
+                            : "";
+  action.threadId = value.HasMember("thread_id") && value["thread_id"].IsString()
+                        ? value["thread_id"].GetString()
+                        : "";
+  action.targetUndoActionId = value.HasMember("target_undo_action_id") && value["target_undo_action_id"].IsString()
+                                  ? value["target_undo_action_id"].GetString()
+                                  : "";
+  action.createdAt = value.HasMember("created_at") && value["created_at"].IsUint64() ? value["created_at"].GetUint64() : 0;
+  action.resultJson = value.HasMember("result_json") && value["result_json"].IsString() ? value["result_json"].GetString() : "";
+  return action;
+}
+
+rapidjson::Document toJson(const TranscriptUndoAction &action) {
+  rapidjson::Document d;
+  d.SetObject();
+  auto &a = d.GetAllocator();
+  d.AddMember("undo_action_id", rapidjson::Value(action.undoActionId.c_str(), a), a);
+  d.AddMember("thread_id", rapidjson::Value(action.threadId.c_str(), a), a);
+  d.AddMember("agent_id", rapidjson::Value(action.agentId.c_str(), a), a);
+  d.AddMember("scope_type", rapidjson::Value(action.scopeType.c_str(), a), a);
+  d.AddMember("scope_arg_json", rapidjson::Value(action.scopeArgJson.c_str(), a), a);
+  d.AddMember("created_at", action.createdAt, a);
+  d.AddMember("redo_available", action.redoAvailable, a);
+  d.AddMember("reason", rapidjson::Value(action.reason.c_str(), a), a);
+  return d;
+}
+
+TranscriptUndoAction transcriptUndoActionFromJson(const rapidjson::Value &value) {
+  TranscriptUndoAction action;
+  action.undoActionId = value.HasMember("undo_action_id") && value["undo_action_id"].IsString()
+                            ? value["undo_action_id"].GetString()
+                            : "";
+  action.threadId = value.HasMember("thread_id") && value["thread_id"].IsString()
+                        ? value["thread_id"].GetString()
+                        : "";
+  action.agentId = value.HasMember("agent_id") && value["agent_id"].IsString()
+                       ? value["agent_id"].GetString()
+                       : "";
+  action.scopeType = value.HasMember("scope_type") && value["scope_type"].IsString()
+                         ? value["scope_type"].GetString()
+                         : "";
+  action.scopeArgJson = value.HasMember("scope_arg_json") && value["scope_arg_json"].IsString()
+                            ? value["scope_arg_json"].GetString()
+                            : "";
+  action.createdAt = value.HasMember("created_at") && value["created_at"].IsUint64()
+                         ? value["created_at"].GetUint64()
+                         : 0;
+  action.redoAvailable = value.HasMember("redo_available") && value["redo_available"].IsBool()
+                             ? value["redo_available"].GetBool()
+                             : false;
+  action.reason = value.HasMember("reason") && value["reason"].IsString()
+                      ? value["reason"].GetString()
+                      : "";
+  return action;
+}
+
+rapidjson::Document toJson(const TranscriptRedoPayload &payload) {
+  rapidjson::Document d;
+  d.SetObject();
+  auto &a = d.GetAllocator();
+  d.AddMember("undo_action_id", rapidjson::Value(payload.undoActionId.c_str(), a), a);
+  d.AddMember("thread_id", rapidjson::Value(payload.threadId.c_str(), a), a);
+  d.AddMember("agent_id", rapidjson::Value(payload.agentId.c_str(), a), a);
+  d.AddMember("ordinal", payload.ordinal, a);
+  rapidjson::Value turns(rapidjson::kArrayType);
+  for (const auto &turn : payload.turns) {
+    auto turnDoc = toJson(turn);
+    rapidjson::Value turnValue;
+    turnValue.CopyFrom(turnDoc, a);
+    turns.PushBack(turnValue, a);
+  }
+  d.AddMember("turns", turns, a);
+  return d;
+}
+
+TranscriptRedoPayload transcriptRedoPayloadFromJson(const rapidjson::Value &value) {
+  TranscriptRedoPayload payload;
+  payload.undoActionId = value.HasMember("undo_action_id") && value["undo_action_id"].IsString()
+                             ? value["undo_action_id"].GetString()
+                             : "";
+  payload.threadId = value.HasMember("thread_id") && value["thread_id"].IsString()
+                         ? value["thread_id"].GetString()
+                         : "";
+  payload.agentId = value.HasMember("agent_id") && value["agent_id"].IsString()
+                        ? value["agent_id"].GetString()
+                        : "";
+  payload.ordinal = value.HasMember("ordinal") && value["ordinal"].IsInt()
+                        ? value["ordinal"].GetInt()
+                        : 0;
+  if (value.HasMember("turns") && value["turns"].IsArray()) {
+    for (const auto &turnValue : value["turns"].GetArray()) {
+      payload.turns.push_back(agentTurnFromJsonValue(turnValue));
+    }
+  }
+  return payload;
+}
+
+rapidjson::Document toJson(const TranscriptRedoEligibility &eligibility) {
+  rapidjson::Document d;
+  d.SetObject();
+  auto &a = d.GetAllocator();
+  d.AddMember("undo_action_id", rapidjson::Value(eligibility.undoActionId.c_str(), a), a);
+  d.AddMember("redoable", eligibility.redoable, a);
+  d.AddMember("reason", rapidjson::Value(eligibility.reason.c_str(), a), a);
+  return d;
 }
 
 rapidjson::Document toJson(const EngineEvent &ev) {

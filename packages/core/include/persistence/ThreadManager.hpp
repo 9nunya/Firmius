@@ -272,6 +272,43 @@ public:
     void writeRollingMemoryState(const std::string& threadId,
                                  const std::string& agentId,
                                  const RollingMemoryState& state);
+    void writeEditBatch(const std::string& threadId,
+                        const shared::EditBatchSummary& summary,
+                        const std::vector<shared::EditFileMutation>& files);
+    shared::EditBatchDetail getEditBatch(const std::string& threadId,
+                                         const std::string& editBatchId) const;
+    std::vector<shared::EditBatchSummary>
+    listEditBatches(const std::string& threadId,
+                    const shared::EditHistoryFilters& filters = {}) const;
+    std::vector<shared::EditFileMutation>
+    listEditFileMutationsForFile(const std::string& threadId,
+                                 const std::string& filePath) const;
+    void updateEditBatchStatus(
+        const std::string& threadId, const std::string& editBatchId,
+        shared::EditBatchStatus status,
+        const std::optional<std::string>& undoActionBatchId = std::nullopt);
+    void updateEditFileMutationStatus(
+        const std::string& threadId, const std::string& fileMutationId,
+        shared::EditFileMutationStatus status);
+    void writeEditUndoAction(const std::string& threadId,
+                             const shared::EditUndoAction& action);
+    std::optional<shared::EditUndoAction>
+    findEditUndoAction(const std::string& threadId,
+                       const std::string& undoActionId) const;
+    void writeEditRedoAction(const std::string& threadId,
+                             const shared::EditRedoAction& action);
+    std::optional<shared::EditRedoAction>
+    findEditRedoAction(const std::string& threadId, const std::string& redoActionId) const;
+    void writeTranscriptUndoAction(const std::string& threadId,
+                                   const shared::TranscriptUndoAction& action,
+                                   const std::vector<shared::TranscriptRedoPayload>& payloads);
+    std::optional<shared::TranscriptUndoAction>
+    findTranscriptUndoAction(const std::string& threadId,
+                             const std::string& undoActionId) const;
+    void markTranscriptUndoRedoAvailability(const std::string& threadId,
+                                            const std::string& undoActionId, bool available);
+    std::vector<shared::TranscriptRedoPayload> loadTranscriptRedoPayloads(
+        const std::string& threadId, const std::string& undoActionId) const;
 
     /**
      * @brief Reads the agent manifest for a thread.

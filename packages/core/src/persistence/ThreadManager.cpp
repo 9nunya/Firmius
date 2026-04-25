@@ -568,7 +568,86 @@ const char* kNormalizedSchemaSQL =
     " created_at INTEGER NOT NULL DEFAULT 0,"
     " updated_at INTEGER NOT NULL DEFAULT 0,"
     " PRIMARY KEY(thread_id, owner_agent_id, filename)"
-    ");";
+    ");"
+    "CREATE TABLE IF NOT EXISTS edit_batches_v1 ("
+    " thread_id TEXT NOT NULL,"
+    " edit_batch_id TEXT NOT NULL,"
+    " agent_id TEXT NOT NULL DEFAULT '',"
+    " parent_agent_id TEXT NOT NULL DEFAULT '',"
+    " friendly_name TEXT NOT NULL DEFAULT '',"
+    " turn_id TEXT NOT NULL DEFAULT '',"
+    " tool_call_id TEXT NOT NULL DEFAULT '',"
+    " tool_name TEXT NOT NULL DEFAULT '',"
+    " request_mode TEXT NOT NULL DEFAULT '',"
+    " created_at INTEGER NOT NULL DEFAULT 0,"
+    " status TEXT NOT NULL DEFAULT 'Applied',"
+    " summary_json TEXT NOT NULL DEFAULT '{}',"
+    " undo_action_batch_id TEXT,"
+    " PRIMARY KEY(thread_id, edit_batch_id)"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_edit_batches_v1_thread_created"
+    " ON edit_batches_v1(thread_id, created_at DESC);"
+    "CREATE INDEX IF NOT EXISTS idx_edit_batches_v1_thread_agent_created"
+    " ON edit_batches_v1(thread_id, agent_id, created_at DESC);"
+    "CREATE INDEX IF NOT EXISTS idx_edit_batches_v1_tool_call"
+    " ON edit_batches_v1(tool_call_id);"
+    "CREATE TABLE IF NOT EXISTS edit_file_mutations_v1 ("
+    " thread_id TEXT NOT NULL,"
+    " file_mutation_id TEXT NOT NULL,"
+    " edit_batch_id TEXT NOT NULL,"
+    " file_path TEXT NOT NULL DEFAULT '',"
+    " ordinal_in_batch INTEGER NOT NULL DEFAULT 0,"
+    " status TEXT NOT NULL DEFAULT 'Applied',"
+    " mutation_json TEXT NOT NULL DEFAULT '{}',"
+    " PRIMARY KEY(thread_id, file_mutation_id),"
+    " FOREIGN KEY(thread_id, edit_batch_id) REFERENCES edit_batches_v1(thread_id, edit_batch_id) ON DELETE CASCADE"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_edit_file_mutations_v1_batch"
+    " ON edit_file_mutations_v1(thread_id, edit_batch_id, ordinal_in_batch);"
+    "CREATE INDEX IF NOT EXISTS idx_edit_file_mutations_v1_file"
+    " ON edit_file_mutations_v1(thread_id, file_path);"
+    "CREATE TABLE IF NOT EXISTS edit_undo_actions_v1 ("
+    " thread_id TEXT NOT NULL,"
+    " undo_action_id TEXT NOT NULL,"
+    " requested_by_agent_id TEXT NOT NULL DEFAULT '',"
+    " target_edit_batch_id TEXT NOT NULL DEFAULT '',"
+    " created_at INTEGER NOT NULL DEFAULT 0,"
+    " result_status TEXT NOT NULL DEFAULT 'Succeeded',"
+    " result_json TEXT NOT NULL DEFAULT '{}',"
+    " PRIMARY KEY(thread_id, undo_action_id)"
+    ");"
+    "CREATE TABLE IF NOT EXISTS edit_redo_actions_v1 ("
+    " thread_id TEXT NOT NULL,"
+    " redo_action_id TEXT NOT NULL,"
+    " target_undo_action_id TEXT NOT NULL DEFAULT '',"
+    " created_at INTEGER NOT NULL DEFAULT 0,"
+    " result_json TEXT NOT NULL DEFAULT '{}',"
+    " PRIMARY KEY(thread_id, redo_action_id)"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_edit_redo_actions_v1_target"
+    " ON edit_redo_actions_v1(thread_id, target_undo_action_id);"
+    "CREATE TABLE IF NOT EXISTS transcript_undo_actions_v1 ("
+    " thread_id TEXT NOT NULL,"
+    " undo_action_id TEXT NOT NULL,"
+    " agent_id TEXT NOT NULL DEFAULT '',"
+    " scope_type TEXT NOT NULL DEFAULT '',"
+    " scope_arg_json TEXT NOT NULL DEFAULT '{}',"
+    " created_at INTEGER NOT NULL DEFAULT 0,"
+    " redo_available INTEGER NOT NULL DEFAULT 0,"
+    " reason TEXT NOT NULL DEFAULT '',"
+    " action_json TEXT NOT NULL DEFAULT '{}',"
+    " PRIMARY KEY(thread_id, undo_action_id)"
+    ");"
+    "CREATE TABLE IF NOT EXISTS transcript_redo_payloads_v1 ("
+    " thread_id TEXT NOT NULL,"
+    " undo_action_id TEXT NOT NULL,"
+    " ordinal INTEGER NOT NULL,"
+    " payload_json TEXT NOT NULL DEFAULT '{}',"
+    " PRIMARY KEY(thread_id, undo_action_id, ordinal),"
+    " FOREIGN KEY(thread_id, undo_action_id) REFERENCES transcript_undo_actions_v1(thread_id, undo_action_id) ON DELETE CASCADE"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_transcript_redo_payloads_v1_lookup"
+    " ON transcript_redo_payloads_v1(thread_id, undo_action_id, ordinal);";
 
 const char* kSchemaSQL =
     "PRAGMA foreign_keys=ON;"
@@ -3447,6 +3526,357 @@ ThreadManager::listArtifactsForAgent(const std::string& threadId,
         artifacts.push_back(std::move(m));
     }
     return artifacts;
+}
+
+
+void ThreadManager::writeEditBatch(
+    const std::string& threadId, const shared::EditBatchSummary& summary,
+    const std::vector<shared::EditFileMutation>& files) {
+    if (threadId.empty() || summary.editBatchId.empty()) {
+        throw std::runtime_error("Edit batch persistence requires threadId and editBatchId");
+    }
+    auto conn = acquireConnection(basePath_);
+    ensureThreadExists(conn->db, threadId);
+
+    withImmediateTransaction(conn->db, [&]() {
+        execPrepared(
+            conn->db,
+            "INSERT INTO edit_batches_v1(thread_id, edit_batch_id, agent_id, parent_agent_id, friendly_name, turn_id, tool_call_id, tool_name, request_mode, created_at, status, summary_json, undo_action_batch_id) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(thread_id, edit_batch_id) DO UPDATE SET agent_id=excluded.agent_id, parent_agent_id=excluded.parent_agent_id, friendly_name=excluded.friendly_name, turn_id=excluded.turn_id, tool_call_id=excluded.tool_call_id, tool_name=excluded.tool_name, request_mode=excluded.request_mode, created_at=excluded.created_at, status=excluded.status, summary_json=excluded.summary_json, undo_action_batch_id=excluded.undo_action_batch_id;",
+            [&](sqlite3_stmt* stmt) {
+                bindText(stmt, 1, threadId);
+                bindText(stmt, 2, summary.editBatchId);
+                bindText(stmt, 3, summary.agentId);
+                bindText(stmt, 4, summary.parentAgentId);
+                bindText(stmt, 5, summary.friendlyName);
+                bindText(stmt, 6, summary.turnId);
+                bindText(stmt, 7, summary.toolCallId);
+                bindText(stmt, 8, summary.toolName);
+                bindText(stmt, 9, summary.requestMode);
+                sqlite3_bind_int64(stmt, 10, static_cast<sqlite3_int64>(summary.createdAt));
+                bindText(stmt, 11, shared::editBatchStatusToString(summary.status));
+                bindText(stmt, 12, rapidJsonToString(shared::toJson(summary)));
+                bindOptionalText(stmt, 13, summary.undoActionBatchId);
+            },
+            "Failed to write edit batch");
+
+        execPrepared(conn->db,
+                     "DELETE FROM edit_file_mutations_v1 WHERE thread_id=? AND edit_batch_id=?;",
+                     [&](sqlite3_stmt* stmt) {
+                         bindText(stmt, 1, threadId);
+                         bindText(stmt, 2, summary.editBatchId);
+                     },
+                     "Failed to clear edit file mutations");
+
+        for (const auto& file : files) {
+            execPrepared(
+                conn->db,
+                "INSERT INTO edit_file_mutations_v1(thread_id, file_mutation_id, edit_batch_id, file_path, ordinal_in_batch, status, mutation_json) VALUES(?, ?, ?, ?, ?, ?, ?);",
+                [&](sqlite3_stmt* stmt) {
+                    bindText(stmt, 1, threadId);
+                    bindText(stmt, 2, file.fileMutationId);
+                    bindText(stmt, 3, summary.editBatchId);
+                    bindText(stmt, 4, file.filePath);
+                    sqlite3_bind_int(stmt, 5, file.ordinalInBatch);
+                    bindText(stmt, 6, shared::editFileMutationStatusToString(file.status));
+                    bindText(stmt, 7, rapidJsonToString(shared::toJson(file)));
+                },
+                "Failed to write edit file mutation");
+        }
+    });
+}
+
+shared::EditBatchDetail ThreadManager::getEditBatch(const std::string& threadId,
+                                                    const std::string& editBatchId) const {
+    auto conn = acquireConnection(basePath_);
+    Statement batchStmt(conn->db,
+                        "SELECT summary_json FROM edit_batches_v1 WHERE thread_id=? AND edit_batch_id=?;",
+                        "Failed to prepare edit batch read");
+    bindText(batchStmt.get(), 1, threadId);
+    bindText(batchStmt.get(), 2, editBatchId);
+    if (sqlite3_step(batchStmt.get()) != SQLITE_ROW) {
+        throw std::runtime_error("Edit batch not found: " + editBatchId);
+    }
+    const auto* summaryText = reinterpret_cast<const char*>(sqlite3_column_text(batchStmt.get(), 0));
+    auto summaryDoc = parseJson(summaryText ? summaryText : "{}", "edit batch summary");
+    shared::EditBatchDetail detail;
+    detail.summary = shared::editBatchSummaryFromJson(summaryDoc);
+
+    Statement fileStmt(conn->db,
+                       "SELECT mutation_json FROM edit_file_mutations_v1 WHERE thread_id=? AND edit_batch_id=? ORDER BY ordinal_in_batch ASC;",
+                       "Failed to prepare edit file mutations read");
+    bindText(fileStmt.get(), 1, threadId);
+    bindText(fileStmt.get(), 2, editBatchId);
+    while (sqlite3_step(fileStmt.get()) == SQLITE_ROW) {
+        const auto* mutationText = reinterpret_cast<const char*>(sqlite3_column_text(fileStmt.get(), 0));
+        auto mutationDoc = parseJson(mutationText ? mutationText : "{}", "edit file mutation");
+        detail.files.push_back(shared::editFileMutationFromJson(mutationDoc));
+    }
+    return detail;
+}
+
+std::vector<shared::EditBatchSummary>
+ThreadManager::listEditBatches(const std::string& threadId,
+                               const shared::EditHistoryFilters& filters) const {
+    auto conn = acquireConnection(basePath_);
+    Statement stmt(conn->db,
+                   "SELECT summary_json FROM edit_batches_v1 WHERE thread_id=? ORDER BY created_at DESC, edit_batch_id DESC;",
+                   "Failed to prepare edit batch list");
+    bindText(stmt.get(), 1, threadId);
+    std::vector<shared::EditBatchSummary> summaries;
+    while (sqlite3_step(stmt.get()) == SQLITE_ROW) {
+        const auto* summaryText = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 0));
+        auto doc = parseJson(summaryText ? summaryText : "{}", "edit batch list row");
+        auto summary = shared::editBatchSummaryFromJson(doc);
+        if (!filters.includeUndone && summary.status == shared::EditBatchStatus::Undone) {
+            continue;
+        }
+        if (filters.agentId.has_value() && summary.agentId != *filters.agentId) {
+            continue;
+        }
+        if (filters.parentAgentId.has_value() && summary.parentAgentId != *filters.parentAgentId) {
+            continue;
+        }
+        summaries.push_back(std::move(summary));
+    }
+    return summaries;
+}
+
+std::vector<shared::EditFileMutation>
+ThreadManager::listEditFileMutationsForFile(const std::string& threadId,
+                                            const std::string& filePath) const {
+    auto conn = acquireConnection(basePath_);
+    Statement stmt(conn->db,
+                   "SELECT mutation_json FROM edit_file_mutations_v1 WHERE thread_id=? AND file_path=? ORDER BY rowid DESC;",
+                   "Failed to prepare edit file mutation list for file");
+    bindText(stmt.get(), 1, threadId);
+    bindText(stmt.get(), 2, filePath);
+    std::vector<shared::EditFileMutation> mutations;
+    while (sqlite3_step(stmt.get()) == SQLITE_ROW) {
+        const auto* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 0));
+        auto doc = parseJson(text ? text : "{}", "edit file mutation list row");
+        mutations.push_back(shared::editFileMutationFromJson(doc));
+    }
+    return mutations;
+}
+
+void ThreadManager::updateEditBatchStatus(
+    const std::string& threadId, const std::string& editBatchId,
+    shared::EditBatchStatus status,
+    const std::optional<std::string>& undoActionBatchId) {
+    auto detail = getEditBatch(threadId, editBatchId);
+    detail.summary.status = status;
+    detail.summary.undoActionBatchId = undoActionBatchId;
+    writeEditBatch(threadId, detail.summary, detail.files);
+}
+
+void ThreadManager::updateEditFileMutationStatus(
+    const std::string& threadId, const std::string& fileMutationId,
+    shared::EditFileMutationStatus status) {
+    auto conn = acquireConnection(basePath_);
+    Statement stmt(conn->db,
+                   "SELECT mutation_json FROM edit_file_mutations_v1 WHERE thread_id=? AND file_mutation_id=?;",
+                   "Failed to prepare edit file mutation status read");
+    bindText(stmt.get(), 1, threadId);
+    bindText(stmt.get(), 2, fileMutationId);
+    if (sqlite3_step(stmt.get()) != SQLITE_ROW) {
+        throw std::runtime_error("Edit file mutation not found: " + fileMutationId);
+    }
+    const auto* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 0));
+    auto doc = parseJson(text ? text : "{}", "edit file mutation status");
+    auto mutation = shared::editFileMutationFromJson(doc);
+    mutation.status = status;
+    execPrepared(conn->db,
+                 "UPDATE edit_file_mutations_v1 SET status=?, mutation_json=? WHERE thread_id=? AND file_mutation_id=?;",
+                 [&](sqlite3_stmt* updateStmt) {
+                     bindText(updateStmt, 1, shared::editFileMutationStatusToString(status));
+                     bindText(updateStmt, 2, rapidJsonToString(shared::toJson(mutation)));
+                     bindText(updateStmt, 3, threadId);
+                     bindText(updateStmt, 4, fileMutationId);
+                 },
+                 "Failed to update edit file mutation status");
+}
+
+void ThreadManager::writeEditUndoAction(const std::string& threadId,
+                                        const shared::EditUndoAction& action) {
+    auto conn = acquireConnection(basePath_);
+    ensureThreadExists(conn->db, threadId);
+    execPrepared(conn->db,
+                 "INSERT INTO edit_undo_actions_v1(thread_id, undo_action_id, requested_by_agent_id, target_edit_batch_id, created_at, result_status, result_json) VALUES(?, ?, ?, ?, ?, ?, ?) "
+                 "ON CONFLICT(thread_id, undo_action_id) DO UPDATE SET requested_by_agent_id=excluded.requested_by_agent_id, target_edit_batch_id=excluded.target_edit_batch_id, created_at=excluded.created_at, result_status=excluded.result_status, result_json=excluded.result_json;",
+                 [&](sqlite3_stmt* stmt) {
+                     bindText(stmt, 1, threadId);
+                     bindText(stmt, 2, action.undoActionId);
+                     bindText(stmt, 3, action.requestedByAgentId);
+                     bindText(stmt, 4, action.targetEditBatchId);
+                     sqlite3_bind_int64(stmt, 5, static_cast<sqlite3_int64>(action.createdAt));
+                     bindText(stmt, 6, shared::editUndoResultStatusToString(action.resultStatus));
+                     bindText(stmt, 7, action.resultJson);
+                 },
+                 "Failed to write edit undo action");
+}
+
+std::optional<shared::EditUndoAction>
+ThreadManager::findEditUndoAction(const std::string& threadId,
+                                  const std::string& undoActionId) const {
+    auto conn = acquireConnection(basePath_);
+    Statement stmt(conn->db,
+                   "SELECT requested_by_agent_id, target_edit_batch_id, created_at, result_status, result_json FROM edit_undo_actions_v1 WHERE thread_id=? AND undo_action_id=?;",
+                   "Failed to prepare edit undo action read");
+    bindText(stmt.get(), 1, threadId);
+    bindText(stmt.get(), 2, undoActionId);
+    if (sqlite3_step(stmt.get()) != SQLITE_ROW) {
+        return std::nullopt;
+    }
+    shared::EditUndoAction action;
+    action.threadId = threadId;
+    action.undoActionId = undoActionId;
+    const auto* requestedBy = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 0));
+    const auto* targetBatch = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 1));
+    const auto* resultStatus = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 3));
+    const auto* resultJson = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 4));
+    action.requestedByAgentId = requestedBy ? requestedBy : "";
+    action.targetEditBatchId = targetBatch ? targetBatch : "";
+    action.createdAt = static_cast<uint64_t>(sqlite3_column_int64(stmt.get(), 2));
+    action.resultStatus = shared::stringToEditUndoResultStatus(resultStatus ? resultStatus : "Succeeded");
+    action.resultJson = resultJson ? resultJson : "";
+    return action;
+}
+
+void ThreadManager::writeEditRedoAction(const std::string& threadId,
+                                        const shared::EditRedoAction& action) {
+    auto conn = acquireConnection(basePath_);
+    ensureThreadExists(conn->db, threadId);
+    execPrepared(conn->db,
+                 "INSERT INTO edit_redo_actions_v1(thread_id, redo_action_id, target_undo_action_id, created_at, result_json) VALUES(?, ?, ?, ?, ?) "
+                 "ON CONFLICT(thread_id, redo_action_id) DO UPDATE SET target_undo_action_id=excluded.target_undo_action_id, created_at=excluded.created_at, result_json=excluded.result_json;",
+                 [&](sqlite3_stmt* stmt) {
+                     bindText(stmt, 1, threadId);
+                     bindText(stmt, 2, action.redoActionId);
+                     bindText(stmt, 3, action.targetUndoActionId);
+                     sqlite3_bind_int64(stmt, 4, static_cast<sqlite3_int64>(action.createdAt));
+                     bindText(stmt, 5, action.resultJson);
+                 },
+                 "Failed to write edit redo action");
+}
+
+std::optional<shared::EditRedoAction>
+ThreadManager::findEditRedoAction(const std::string& threadId,
+                                  const std::string& redoActionId) const {
+    auto conn = acquireConnection(basePath_);
+    Statement stmt(conn->db,
+                   "SELECT target_undo_action_id, created_at, result_json FROM edit_redo_actions_v1 WHERE thread_id=? AND redo_action_id=?;",
+                   "Failed to prepare edit redo action read");
+    bindText(stmt.get(), 1, threadId);
+    bindText(stmt.get(), 2, redoActionId);
+    if (sqlite3_step(stmt.get()) != SQLITE_ROW) {
+        return std::nullopt;
+    }
+    shared::EditRedoAction action;
+    action.threadId = threadId;
+    action.redoActionId = redoActionId;
+    const auto* targetUndo = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 0));
+    const auto* resultJson = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 2));
+    action.targetUndoActionId = targetUndo ? targetUndo : "";
+    action.createdAt = static_cast<uint64_t>(sqlite3_column_int64(stmt.get(), 1));
+    action.resultJson = resultJson ? resultJson : "";
+    return action;
+}
+
+void ThreadManager::writeTranscriptUndoAction(
+    const std::string& threadId, const shared::TranscriptUndoAction& action,
+    const std::vector<shared::TranscriptRedoPayload>& payloads) {
+    auto conn = acquireConnection(basePath_);
+    ensureThreadExists(conn->db, threadId);
+    withImmediateTransaction(conn->db, [&]() {
+        execPrepared(conn->db,
+                     "INSERT INTO transcript_undo_actions_v1(thread_id, undo_action_id, agent_id, scope_type, scope_arg_json, created_at, redo_available, reason, action_json) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                     "ON CONFLICT(thread_id, undo_action_id) DO UPDATE SET agent_id=excluded.agent_id, scope_type=excluded.scope_type, scope_arg_json=excluded.scope_arg_json, created_at=excluded.created_at, redo_available=excluded.redo_available, reason=excluded.reason, action_json=excluded.action_json;",
+                     [&](sqlite3_stmt* stmt) {
+                         bindText(stmt, 1, threadId);
+                         bindText(stmt, 2, action.undoActionId);
+                         bindText(stmt, 3, action.agentId);
+                         bindText(stmt, 4, action.scopeType);
+                         bindText(stmt, 5, action.scopeArgJson);
+                         sqlite3_bind_int64(stmt, 6, static_cast<sqlite3_int64>(action.createdAt));
+                         sqlite3_bind_int(stmt, 7, action.redoAvailable ? 1 : 0);
+                         bindText(stmt, 8, action.reason);
+                         bindText(stmt, 9, rapidJsonToString(shared::toJson(action)));
+                     },
+                     "Failed to write transcript undo action");
+        execPrepared(conn->db,
+                     "DELETE FROM transcript_redo_payloads_v1 WHERE thread_id=? AND undo_action_id=?;",
+                     [&](sqlite3_stmt* stmt) {
+                         bindText(stmt, 1, threadId);
+                         bindText(stmt, 2, action.undoActionId);
+                     },
+                     "Failed to clear transcript redo payloads");
+        for (const auto& payload : payloads) {
+            execPrepared(conn->db,
+                         "INSERT INTO transcript_redo_payloads_v1(thread_id, undo_action_id, ordinal, payload_json) VALUES(?, ?, ?, ?);",
+                         [&](sqlite3_stmt* stmt) {
+                             bindText(stmt, 1, threadId);
+                             bindText(stmt, 2, action.undoActionId);
+                             sqlite3_bind_int(stmt, 3, payload.ordinal);
+                             bindText(stmt, 4, rapidJsonToString(shared::toJson(payload)));
+                         },
+                         "Failed to write transcript redo payload");
+        }
+    });
+}
+
+std::optional<shared::TranscriptUndoAction>
+ThreadManager::findTranscriptUndoAction(const std::string& threadId,
+                                        const std::string& undoActionId) const {
+    auto conn = acquireConnection(basePath_);
+    Statement stmt(conn->db,
+                   "SELECT action_json FROM transcript_undo_actions_v1 WHERE thread_id=? AND undo_action_id=?;",
+                   "Failed to prepare transcript undo action read");
+    bindText(stmt.get(), 1, threadId);
+    bindText(stmt.get(), 2, undoActionId);
+    if (sqlite3_step(stmt.get()) != SQLITE_ROW) {
+        return std::nullopt;
+    }
+    const auto* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 0));
+    auto doc = parseJson(text ? text : "{}", "transcript undo action");
+    return shared::transcriptUndoActionFromJson(doc);
+}
+
+std::vector<shared::TranscriptRedoPayload>
+ThreadManager::loadTranscriptRedoPayloads(const std::string& threadId,
+                                          const std::string& undoActionId) const {
+    auto conn = acquireConnection(basePath_);
+    Statement stmt(conn->db,
+                   "SELECT payload_json FROM transcript_redo_payloads_v1 WHERE thread_id=? AND undo_action_id=? ORDER BY ordinal ASC;",
+                   "Failed to prepare transcript redo payload read");
+    bindText(stmt.get(), 1, threadId);
+    bindText(stmt.get(), 2, undoActionId);
+    std::vector<shared::TranscriptRedoPayload> payloads;
+    while (sqlite3_step(stmt.get()) == SQLITE_ROW) {
+        const auto* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 0));
+        auto doc = parseJson(text ? text : "{}", "transcript redo payload");
+        payloads.push_back(shared::transcriptRedoPayloadFromJson(doc));
+    }
+    return payloads;
+}
+
+void ThreadManager::markTranscriptUndoRedoAvailability(
+    const std::string& threadId, const std::string& undoActionId, bool available) {
+    auto existing = findTranscriptUndoAction(threadId, undoActionId);
+    if (!existing.has_value()) {
+        return;
+    }
+    existing->redoAvailable = available;
+    auto conn = acquireConnection(basePath_);
+    execPrepared(conn->db,
+                 "UPDATE transcript_undo_actions_v1 SET redo_available=?, action_json=? WHERE thread_id=? AND undo_action_id=?;",
+                 [&](sqlite3_stmt* stmt) {
+                     sqlite3_bind_int(stmt, 1, available ? 1 : 0);
+                     bindText(stmt, 2, rapidJsonToString(shared::toJson(*existing)));
+                     bindText(stmt, 3, threadId);
+                     bindText(stmt, 4, undoActionId);
+                 },
+                 "Failed to update transcript undo redo availability");
 }
 
 std::optional<std::string>

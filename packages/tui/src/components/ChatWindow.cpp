@@ -16,7 +16,7 @@
 #include <iomanip>
 #include <algorithm>
 #include <cctype>
-#include <ftxui/component/component.hpp>
+#include <iostream>
 #include <ftxui/component/component_base.hpp>
 #include <ftxui/component/mouse.hpp>
 #include <ftxui/component/screen_interactive.hpp>
@@ -710,7 +710,9 @@ public:
       MarkHistoryDirty(false);
       EnsureHistoryRows();
       if (scrollable_) {
+        scrollable_->TakeFocus();
         scrollable_->RequestScrollToBottom();
+        pending_bottom_restore_ = true;
       }
       return true;
     }
@@ -721,8 +723,28 @@ public:
       EnsureHistoryRows();
       if (scrollable_) {
         scrollable_->RequestScrollToBottom();
+        scrollable_->TakeFocus();
+        pending_bottom_restore_ = true;
       }
       return true;
+    }
+
+    if (event == ftxui::Event::Custom) {
+      if (pending_bottom_restore_ && scrollable_) {
+        EnsureHistoryRows();
+        if (scrollable_->ViewportHeight() <= 1 || scrollable_->ContentWidth() <= 1) {
+          // fucking hours
+          //if (auto *screen = ftxui::ScreenInteractive::Active()) {
+            // screen->PostEvent(ftxui::Event::Custom);
+          //}
+          return true;
+        }
+        scrollable_->TakeFocus();
+        scrollable_->RequestScrollToBottom();
+        pending_bottom_restore_ = false;
+        return true;
+      }
+      pending_bottom_restore_ = false;
     }
 
     const bool copy_handler_consumed = HandleCopySelection(event);
@@ -1345,12 +1367,14 @@ private:
             return firmius::tui::IndentAgentRow(e);
           };
 
+          uint64_t msg_timestamp = msg.timestamp;
+
           if (isUser) {
             flush_quick_cluster();
             std::string user_text;
             int image_count = 0;
             for (const auto &part : msg.content) {
-              if (auto *txt = std::get_if<firmius::shared::TextContent>(&part)) {
+              if (const auto *txt = std::get_if<firmius::shared::TextContent>(&part)) {
                 if (!user_text.empty()) {
                   user_text += "\n";
                 }
@@ -1360,9 +1384,14 @@ private:
               }
             }
             std::string copy_text = user_text;
+            const bool is_edit_selection = editable_message_selected_getter_
+                                               ? editable_message_selected_getter_(msg_timestamp)
+                                               : false;
             copyable_rows_.push_back(ftxui::Make<CopyableRowComponent>(
-                [renderUserMessage, user_text, image_count](bool selected) {
-                  return renderUserMessage(user_text, image_count, selected);
+                [renderUserMessage, user_text, image_count,
+                 is_edit_selection](bool selected) {
+                  return renderUserMessage(user_text, image_count,
+                                           selected || is_edit_selection);
                 },
                 std::move(copy_text)));
             rows_.push_back(copyable_rows_.back());
@@ -1617,6 +1646,7 @@ private:
   std::unordered_map<std::string, std::shared_ptr<firmius::tui::ToolCallView>>
       tool_views_;
   bool copy_drag_candidate_ = false;
+  bool pending_bottom_restore_ = false;
   bool copy_drag_started_ = false;
   bool pending_copy_release_ = false;
   int press_x_ = -1;

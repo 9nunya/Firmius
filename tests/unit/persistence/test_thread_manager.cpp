@@ -704,7 +704,6 @@ TEST_F(ThreadManagerTest, updateMetadata_persistsActivePlanId) {
 TEST_F(ThreadManagerTest, updateMetadata_persistsRetryableRequest) {
     ThreadMetadata metadata = createTestMetadata();
     std::string threadId = tm->createThread(metadata);
-
     auto loaded = tm->getMetadata(threadId);
     loaded.lastRetryableRequest = ThreadMetadata::RetryableRequest{
         "agent-7",
@@ -724,6 +723,119 @@ TEST_F(ThreadManagerTest, updateMetadata_persistsRetryableRequest) {
     EXPECT_EQ(updated.lastRetryableRequest->text, "retry me");
     ASSERT_EQ(updated.lastRetryableRequest->images.size(), 1u);
     EXPECT_TRUE(updated.lastRetryableRequest->eligible);
+}
+
+
+
+TEST_F(ThreadManagerTest, editBatchRoundtripPersistsSummaryFilesAndUndoAction) {
+    ThreadMetadata metadata = createTestMetadata();
+    std::string threadId = tm->createThread(metadata);
+
+    EditBatchSummary summary;
+    summary.editBatchId = "edit-batch-1";
+    summary.threadId = threadId;
+    summary.agentId = "agent-a";
+    summary.parentAgentId = "parent-a";
+    summary.friendlyName = "Forge";
+    summary.turnId = "turn-1";
+    summary.toolCallId = "call-1";
+    summary.toolName = "EditWrite";
+    summary.requestMode = "write";
+    summary.createdAt = 123;
+    summary.status = EditBatchStatus::Applied;
+    summary.files = {"a.txt"};
+    summary.addedLines = 3;
+    summary.removedLines = 1;
+    summary.summaryText = "Edited a.txt";
+
+    EditFileMutation mutation;
+    mutation.fileMutationId = "file-mutation-1";
+    mutation.editBatchId = summary.editBatchId;
+    mutation.threadId = threadId;
+    mutation.filePath = "a.txt";
+    mutation.ordinalInBatch = 0;
+    mutation.status = EditFileMutationStatus::Applied;
+    mutation.mode = "write";
+    mutation.operations.push_back(EditMutationOperation{"overwrite file", 1, 1, {"old"}, {"new"}});
+
+    tm->writeEditBatch(threadId, summary, {mutation});
+
+    auto loaded = tm->getEditBatch(threadId, summary.editBatchId);
+    ASSERT_EQ(loaded.summary.editBatchId, summary.editBatchId);
+    EXPECT_EQ(loaded.summary.toolCallId, summary.toolCallId);
+    ASSERT_EQ(loaded.files.size(), 1u);
+    EXPECT_EQ(loaded.files[0].fileMutationId, mutation.fileMutationId);
+    EXPECT_EQ(loaded.files[0].filePath, mutation.filePath);
+
+    tm->updateEditFileMutationStatus(threadId, mutation.fileMutationId,
+                                     EditFileMutationStatus::Undone);
+    auto mutationsForFile = tm->listEditFileMutationsForFile(threadId, "a.txt");
+    ASSERT_EQ(mutationsForFile.size(), 1u);
+    EXPECT_EQ(mutationsForFile[0].status, EditFileMutationStatus::Undone);
+
+    EditUndoAction undoAction;
+    undoAction.undoActionId = "undo-1";
+    undoAction.threadId = threadId;
+    undoAction.requestedByAgentId = "agent-a";
+    undoAction.targetEditBatchId = summary.editBatchId;
+    undoAction.createdAt = 456;
+    undoAction.resultStatus = EditUndoResultStatus::Succeeded;
+    undoAction.resultJson = "{\"status\":\"undone\"}";
+    tm->writeEditUndoAction(threadId, undoAction);
+    tm->updateEditBatchStatus(threadId, summary.editBatchId, EditBatchStatus::Undone,
+                              undoAction.undoActionId);
+
+    auto listed = tm->listEditBatches(threadId);
+    ASSERT_EQ(listed.size(), 1u);
+    EXPECT_EQ(listed[0].status, EditBatchStatus::Undone);
+    ASSERT_TRUE(listed[0].undoActionBatchId.has_value());
+    EXPECT_EQ(*listed[0].undoActionBatchId, undoAction.undoActionId);
+
+    auto loadedUndo = tm->findEditUndoAction(threadId, undoAction.undoActionId);
+    ASSERT_TRUE(loadedUndo.has_value());
+    EXPECT_EQ(loadedUndo->targetEditBatchId, summary.editBatchId);
+    EXPECT_EQ(loadedUndo->resultStatus, EditUndoResultStatus::Succeeded);
+}
+
+TEST_F(ThreadManagerTest, transcriptUndoRoundtripPersistsRedoPayloadsAndAvailability) {
+    ThreadMetadata metadata = createTestMetadata();
+    std::string threadId = tm->createThread(metadata);
+
+    TranscriptUndoAction undoAction;
+    undoAction.undoActionId = "tx-undo-1";
+    undoAction.threadId = threadId;
+    undoAction.agentId = "agent-a";
+    undoAction.scopeType = "turns";
+    undoAction.scopeArgJson = "{\"count\":2}";
+    undoAction.createdAt = 999;
+    undoAction.redoAvailable = true;
+    undoAction.reason = "undone";
+
+    TranscriptRedoPayload payload;
+    payload.undoActionId = undoAction.undoActionId;
+    payload.threadId = threadId;
+    payload.agentId = undoAction.agentId;
+    payload.ordinal = 0;
+    payload.turns = {createTestTurn("redo-turn-1"), createTestTurn("redo-turn-2")};
+
+    tm->writeTranscriptUndoAction(threadId, undoAction, {payload});
+
+    auto loadedUndo = tm->findTranscriptUndoAction(threadId, undoAction.undoActionId);
+    ASSERT_TRUE(loadedUndo.has_value());
+    EXPECT_EQ(loadedUndo->agentId, undoAction.agentId);
+    EXPECT_EQ(loadedUndo->scopeType, undoAction.scopeType);
+    EXPECT_TRUE(loadedUndo->redoAvailable);
+
+    auto loadedPayloads = tm->loadTranscriptRedoPayloads(threadId, undoAction.undoActionId);
+    ASSERT_EQ(loadedPayloads.size(), 1u);
+    const auto &loadedTurns = loadedPayloads.front().turns;
+    ASSERT_EQ(loadedTurns.size(), 2u);
+    std::vector<std::string> loadedIds{loadedTurns[0].turnId, loadedTurns[1].turnId};
+    EXPECT_NE(std::find(loadedIds.begin(), loadedIds.end(), "redo-turn-1"), loadedIds.end());
+    EXPECT_NE(std::find(loadedIds.begin(), loadedIds.end(), "redo-turn-2"), loadedIds.end());
+
+    tm->markTranscriptUndoRedoAvailability(threadId, undoAction.undoActionId, false);
+    EXPECT_FALSE(tm->findTranscriptUndoAction(threadId, undoAction.undoActionId)->redoAvailable);
 }
 
 TEST_F(ThreadManagerTest, createAndGetPlan_roundtrip) {

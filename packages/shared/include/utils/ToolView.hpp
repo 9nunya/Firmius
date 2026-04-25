@@ -2,6 +2,7 @@
 #define FIRMIUS_SHARED_UTILS_TOOL_VIEW_HPP
 
 #include "utils/StringUtil.hpp"
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -33,7 +34,18 @@ struct FileEditSignal {
   int removedLines = 0;
 };
 
+struct ToolFollowUpNotice {
+  std::string text;
+  std::string hotkeyLabel;
+  bool visible = false;
+  bool dismissOnAgentResume = false;
+  bool dismissOnMatchingRedo = false;
+
+  bool operator==(const ToolFollowUpNotice &other) const = default;
+};
+
 struct ToolCallView {
+
   std::string agentId;
   std::string toolCallId;
   std::string name;
@@ -61,7 +73,14 @@ struct ToolCallView {
   std::string subagent_route_category;
   std::vector<std::string> subagent_attempted_categories;
   std::vector<FileEditSignal> fileEditEvents;
+  std::optional<ToolFollowUpNotice> followUpNotice;
 };
+
+inline bool isFileEditLikeToolName(const std::string &name) {
+  return name == "Edit" || name == "file_edit" || name == "file_write" ||
+         name == "Write" || name == "EditWrite" || name == "EditReplace" ||
+         name == "EditRange";
+}
 
 inline bool ToolCallHasRenderableIdentity(const std::string &tool_name) {
   return !StringUtil::trim(tool_name).empty();

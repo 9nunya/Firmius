@@ -66,4 +66,39 @@ bool IsVariantCycleEvent(const ftxui::Event &event) {
          IsVariantCycleInput(event.input());
 }
 
+bool IsTranscriptUndoInput(const std::string &raw) {
+  return isCtrlLetterInput(
+      raw, 'z', 'Z',
+      {"\x1A", "\x1b[26;5u", "\x1b[27;5;122~", "\x1b[90;5u"});
+}
+
+bool IsTranscriptUndoEvent(const ftxui::Event &event) {
+  return event == ftxui::Event::Special("\x1A") ||
+         IsTranscriptUndoInput(event.input());
+}
+
+bool IsTranscriptRedoInput(const std::string &raw) {
+  return raw == "\x1b[26;6u" || raw == "\x1b[90;6u";
+}
+
+bool IsTranscriptRedoEvent(const ftxui::Event &event) {
+  return IsTranscriptRedoInput(event.input());
+}
+
+bool IsEditUndoInput(const std::string &raw) {
+  return raw == "\x1b[26;7u" || raw == "\x1b[90;7u";
+}
+
+bool IsEditUndoEvent(const ftxui::Event &event) {
+  return IsEditUndoInput(event.input());
+}
+
+bool IsEditRedoInput(const std::string &raw) {
+  return raw == "\x1b[26;8u" || raw == "\x1b[90;8u";
+}
+
+bool IsEditRedoEvent(const ftxui::Event &event) {
+  return IsEditRedoInput(event.input());
+}
+
 } // namespace firmius::tui

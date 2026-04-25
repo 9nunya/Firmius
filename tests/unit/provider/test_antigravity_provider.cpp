@@ -307,6 +307,36 @@ TEST(AntigravityProvider, DuplicateFunctionCallSnapshotsAreSuppressed) {
   EXPECT_EQ(finalCall->args, R"({"path":"src/main.cpp"})");
 }
 
+TEST(AntigravityProvider, ToolCallChunkCountsAsMeaningfulOutputForTiming) {
+  AntigravityProvider provider;
+  const auto events = collectEvents(
+      provider,
+      {
+          R"(data: {"response":{"candidates":[{"content":{"parts":[{"functionCall":{"id":"call-1","name":"file_read","args":{"path":"src/main.cpp"}}}]}}]}})",
+          R"(data: {"response":{"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":2,"totalTokenCount":3}}})",
+      });
+
+  bool sawToolCallChunk = false;
+  bool sawMetrics = false;
+  for (const auto &ev : events) {
+    if (std::holds_alternative<ToolCallChunk>(ev)) {
+      sawToolCallChunk = true;
+    }
+    if (std::holds_alternative<AgentMetrics>(ev)) {
+      sawMetrics = true;
+      const auto &m = std::get<AgentMetrics>(ev);
+      EXPECT_GE(m.timing.startMs, 0u);
+      EXPECT_GE(m.timing.endMs, 0u);
+      EXPECT_GE(m.timing.firstTokenMs, 0u);
+      EXPECT_LE(m.timing.startMs, m.timing.firstTokenMs);
+      EXPECT_LE(m.timing.firstTokenMs, m.timing.endMs);
+    }
+  }
+  EXPECT_TRUE(sawToolCallChunk);
+  EXPECT_TRUE(sawMetrics);
+}
+
+
 TEST(AntigravityProvider,
      FunctionResponseNameFallsBackToPriorToolCallHistoryWhenIdIsMissing) {
   AgentHistory history;

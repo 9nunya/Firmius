@@ -1199,6 +1199,7 @@ add_executable(test_tool_presentation
     ../../packages/tui/src/ThemeManager.cpp
     ../../packages/tui/src/UserPreferences.cpp
     ../../packages/tui/src/NotificationManager.cpp
+    ../../packages/tui/src/commands/EditHistoryCommand.cpp
     ../../packages/tui/src/components/GlintEffect.cpp
     ../../packages/tui/src/tools/ArtifactToolPresentation.cpp
     ../../packages/tui/src/tools/FileToolPresentation.cpp
@@ -1401,6 +1402,23 @@ target_include_directories(test_runtime_overlay PRIVATE
     ${rapidjson_SOURCE_DIR}/include
 )
 gtest_discover_tests(test_runtime_overlay)
+add_executable(test_edit_undo
+    core/test_edit_undo.cpp
+)
+target_link_libraries(test_edit_undo PRIVATE
+    firmius::core
+    firmius::provider
+    firmius::shared
+    GTest::gtest_main
+    GTest::gmock
+    CURL::libcurl
+)
+target_include_directories(test_edit_undo PRIVATE
+    ${rapidjson_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/mocks
+)
+gtest_discover_tests(test_edit_undo)
+
 
 add_executable(test_rolling_context_manager
     core/test_rolling_context_manager.cpp

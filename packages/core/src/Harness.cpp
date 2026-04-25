@@ -2231,6 +2231,92 @@ UndoResult Harness::undoAfterTimestamp(uint64_t timestamp) {
   return aggregate;
 }
 
+std::optional<shared::TranscriptUndoAction> Harness::undoTurnsWithRedo(int count) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  if (focusedAgentId_.empty()) return std::nullopt;
+  return Engine::instance().undoAgentTurnsWithRedo(focusedAgentId_, count);
+}
+
+std::optional<shared::TranscriptUndoAction> Harness::undoMessagesWithRedo(int count) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  if (focusedAgentId_.empty()) return std::nullopt;
+  return Engine::instance().undoAgentMessagesWithRedo(focusedAgentId_, count);
+}
+
+std::optional<shared::TranscriptUndoAction>
+Harness::undoAfterTimestampWithRedo(uint64_t timestamp) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  if (focusedAgentId_.empty()) return std::nullopt;
+  return Engine::instance().undoAgentAfterTimestampWithRedo(focusedAgentId_, timestamp);
+}
+
+shared::TranscriptRedoEligibility
+Harness::evaluateTranscriptRedo(const std::string &undoActionId) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  if (currentThreadId_.empty() || undoActionId.empty()) {
+    return {};
+  }
+  return Engine::instance().evaluateTranscriptRedo(currentThreadId_, undoActionId);
+}
+
+std::optional<shared::TranscriptRedoAction>
+Harness::redoTranscriptUndoAction(const std::string &undoActionId) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  if (focusedAgentId_.empty() || undoActionId.empty()) {
+    return std::nullopt;
+  }
+  auto result =
+      Engine::instance().redoTranscriptUndoAction(focusedAgentId_, undoActionId);
+  return result;
+}
+
+std::vector<shared::EditBatchSummary>
+Harness::listEditBatches(const std::string &threadId,
+                         const shared::EditHistoryFilters &filters) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  const std::string effectiveThreadId = threadId.empty() ? currentThreadId_ : threadId;
+  if (effectiveThreadId.empty()) {
+    return {};
+  }
+  return Engine::instance().listAgentEditBatches(effectiveThreadId, filters);
+}
+
+shared::EditUndoEligibility
+Harness::evaluateEditBatchUndo(const std::string &editBatchId) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  if (currentThreadId_.empty() || editBatchId.empty()) {
+    return {};
+  }
+  return Engine::instance().evaluateEditBatchUndo(currentThreadId_, editBatchId);
+}
+
+std::optional<shared::EditUndoAction>
+Harness::undoEditBatch(const std::string &editBatchId) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  if (focusedAgentId_.empty() || editBatchId.empty()) {
+    return std::nullopt;
+  }
+  return Engine::instance().undoEditBatch(focusedAgentId_, editBatchId);
+}
+
+shared::EditRedoEligibility
+Harness::evaluateEditBatchRedo(const std::string &undoActionId) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  if (currentThreadId_.empty() || undoActionId.empty()) {
+    return {};
+  }
+  return Engine::instance().evaluateEditBatchRedo(currentThreadId_, undoActionId);
+}
+
+std::optional<shared::EditRedoAction>
+Harness::redoEditUndoAction(const std::string &undoActionId) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  if (focusedAgentId_.empty() || undoActionId.empty()) {
+    return std::nullopt;
+  }
+  return Engine::instance().redoEditUndoAction(focusedAgentId_, undoActionId);
+}
+
 void Harness::compactFocusedAgent() {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (focusedAgentId_.empty()) {

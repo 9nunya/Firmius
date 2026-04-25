@@ -14,7 +14,9 @@ namespace firmius::tui {
 // The returned value is also used as the mode key for Claudex phrase banks.
 std::string inferClaudexActivity(const firmius::shared::AgentContext &ctx,
                                  const firmius::tui::StreamState *stream,
-                                 const std::string &fallback);
+                                 const std::string &fallback,
+                                 const firmius::shared::AgentTodoList *todo = nullptr,
+                                 const std::string &status_text = "");
 
 } // namespace firmius::tui
 

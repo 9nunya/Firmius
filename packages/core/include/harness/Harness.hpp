@@ -283,6 +283,30 @@ public:
   UndoResult undoAfterTimestamp(uint64_t timestamp);
 
   /**
+   * Persisted transcript undo/redo surfaces with redo payload capture.
+   */
+  std::optional<shared::TranscriptUndoAction> undoTurnsWithRedo(int count);
+  std::optional<shared::TranscriptUndoAction> undoMessagesWithRedo(int count);
+  std::optional<shared::TranscriptUndoAction> undoAfterTimestampWithRedo(uint64_t timestamp);
+  shared::TranscriptRedoEligibility evaluateTranscriptRedo(const std::string &undoActionId);
+  std::optional<shared::TranscriptRedoAction> redoTranscriptUndoAction(const std::string &undoActionId);
+
+  /**
+   * Lists persisted edit batches for the current or specified thread.
+   */
+  std::vector<shared::EditBatchSummary>
+  listEditBatches(const std::string &threadId = "",
+                  const shared::EditHistoryFilters &filters = {});
+  /** Evaluates whether an edit batch can be safely undone right now. */
+  shared::EditUndoEligibility evaluateEditBatchUndo(const std::string &editBatchId);
+  /** Attempts to undo a persisted edit batch for the focused agent. */
+  std::optional<shared::EditUndoAction>
+  undoEditBatch(const std::string &editBatchId);
+  shared::EditRedoEligibility evaluateEditBatchRedo(const std::string &undoActionId);
+  std::optional<shared::EditRedoAction>
+  redoEditUndoAction(const std::string &undoActionId);
+
+  /**
    * Compact the focused agent's context without resuming execution.
    */
   void compactFocusedAgent();

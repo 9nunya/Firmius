@@ -44,6 +44,9 @@ ScrollableBoxComponent::ScrollableBoxComponent(ftxui::Component child,
 
 void ScrollableBoxComponent::RequestScrollToBottom() {
     at_bottom_ = true;
+    has_pending_ensure_visible_ = false;
+    selected_ = size_;
+    layout_dirty_ = true;
 }
 
 void ScrollableBoxComponent::RequestScrollToTop() {
@@ -186,6 +189,11 @@ ftxui::Element ScrollableBoxComponent::OnRender() {
     int viewport_h = 0;
     if (box_.y_max >= box_.y_min) {
         viewport_h = box_.y_max - box_.y_min + 1;
+    }
+
+    if (viewport_w <= 0 || viewport_h <= 0) {
+        ftxui::animation::RequestAnimationFrame();
+        return ftxui::text("") | ftxui::yflex | ftxui::reflect(box_);
     }
 
     const int max_scroll = maxScroll(viewport_h);

@@ -1365,6 +1365,14 @@ ToolPresentation BuildFileEditPresentation(const ToolCallView &view) {
 
   if (has_result && result_doc.HasMember("lsp")) {
     AppendLspDetailsFromObject(result_doc["lsp"], primary_path, presentation);
+  if (view.followUpNotice.has_value() && view.followUpNotice->visible) {
+    ToolPresentationNotice follow_up;
+    follow_up.kind = ToolPresentationNoticeKind::Info;
+    follow_up.text = view.followUpNotice->hotkeyLabel.empty()
+                         ? view.followUpNotice->text
+                         : (view.followUpNotice->text + " Press " + view.followUpNotice->hotkeyLabel + ".");
+    presentation.notices.push_back(std::move(follow_up));
+  }
   }
   if (has_result && result_doc.HasMember("files") && result_doc["files"].IsArray()) {
     for (const auto &file : result_doc["files"].GetArray()) {

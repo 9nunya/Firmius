@@ -143,6 +143,24 @@ public:
      * @return Result of the undo operation.
      */
     UndoResult undoAgentAfterTimestamp(const std::string& agentId, uint64_t timestamp);
+    std::vector<shared::EditBatchSummary>
+    listAgentEditBatches(const std::string& threadId,
+                         const shared::EditHistoryFilters& filters = {}) const;
+    shared::EditUndoEligibility evaluateEditBatchUndo(const std::string& threadId,
+                                                      const std::string& editBatchId) const;
+    shared::EditRedoEligibility evaluateEditBatchRedo(const std::string& threadId,
+                                                      const std::string& undoActionId) const;
+    shared::TranscriptUndoAction undoAgentTurnsWithRedo(const std::string& agentId, int count);
+    shared::TranscriptUndoAction undoAgentMessagesWithRedo(const std::string& agentId, int count);
+    shared::TranscriptUndoAction undoAgentAfterTimestampWithRedo(const std::string& agentId,
+                                                                 uint64_t timestamp);
+    std::optional<shared::EditRedoAction> redoEditUndoAction(const std::string& agentId,
+                                                             const std::string& undoActionId);
+    shared::TranscriptRedoEligibility evaluateTranscriptRedo(const std::string& threadId,
+                                                             const std::string& undoActionId) const;
+    std::optional<shared::TranscriptRedoAction> redoTranscriptUndoAction(
+        const std::string& agentId, const std::string& undoActionId);
+    shared::EditUndoAction undoEditBatch(const std::string& agentId, const std::string& editBatchId);
 
     /**
      * @brief Shuts down the engine and waits for all threads to finish.

@@ -5069,6 +5069,42 @@ TEST_F(HarnessTest, UndoMessagesAndTimestampRestorePreCompactionSnapshot) {
     EXPECT_EQ(agent->getContext().aggregateMetrics.tokens.contextSize, 9999u);
 }
 
+TEST_F(HarnessTest, TranscriptUndoRedoPersistsAndReplaysTurns) {
+    auto& harness = Harness::instance();
+    auto provider = std::make_shared<CompactionProbeProvider>();
+    firmius::provider::ProviderRegistry::instance().registerProvider(provider);
+    auto config = firmius::shared::ConfigLoader::instance().getConfig();
+    config.defaultProviderId = provider->getId();
+    config.defaultModelId = provider->listModels().front().id;
+    harness.updateConfig(config);
+
+    const std::string threadId = harness.newThread({}, "/tmp", "lead");
+    ASSERT_FALSE(threadId.empty());
+    auto agent = createFocusedLeadAgent(threadId);
+    ASSERT_TRUE(agent);
+
+    ASSERT_TRUE(sendAndWaitForIdle(harness, "redo alpha", agent));
+    ASSERT_TRUE(sendAndWaitForIdle(harness, "redo beta", agent));
+
+    const auto baselineIds = turnIds(*agent->getContext().history);
+    auto undoAction = harness.undoTurnsWithRedo(1);
+    ASSERT_TRUE(undoAction.has_value());
+    EXPECT_TRUE(undoAction->redoAvailable);
+    EXPECT_LT(turnIds(*agent->getContext().history).size(), baselineIds.size());
+
+    ThreadManager tm((testHome_ / ".firmius" / "threads").string());
+    auto persistedUndo = tm.findTranscriptUndoAction(threadId, undoAction->undoActionId);
+    ASSERT_TRUE(persistedUndo.has_value());
+    EXPECT_TRUE(persistedUndo->redoAvailable);
+
+    auto redoEligibility = harness.evaluateTranscriptRedo(undoAction->undoActionId);
+    EXPECT_TRUE(redoEligibility.redoable);
+    auto redoAction = harness.redoTranscriptUndoAction(undoAction->undoActionId);
+    ASSERT_TRUE(redoAction.has_value());
+    EXPECT_EQ(turnIds(*agent->getContext().history), baselineIds);
+    EXPECT_FALSE(tm.findTranscriptUndoAction(threadId, undoAction->undoActionId)->redoAvailable);
+}
+
 TEST_F(HarnessTest, IdleAgentModelSwitchAppliesImmediately) {
     auto& harness = Harness::instance();
     auto oldProvider = std::make_shared<ModelSwitchProbeProvider>(

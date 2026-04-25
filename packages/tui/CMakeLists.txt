@@ -28,6 +28,7 @@ target_sources(firmius_tui PRIVATE
     src/commands/RouterCommand.cpp
     src/commands/PurposesCommand.cpp
     src/commands/SkinCommand.cpp
+    src/commands/EditHistoryCommand.cpp
     src/commands/WorkflowsCommand.cpp
     src/modals/ModalRegistry.cpp
     src/modals/ThreadPickerModal.cpp
@@ -63,6 +64,7 @@ target_sources(firmius_tui PRIVATE
     src/components/InputBar.cpp
     src/components/GlintEffect.cpp
     src/components/HelpOverlay.cpp
+    src/components/WelcomeScreen.cpp
     src/components/ANSIParser.cpp
     src/components/SyntaxHighlighter.cpp
     src/tools/ArtifactToolPresentation.cpp

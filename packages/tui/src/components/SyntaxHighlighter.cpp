@@ -232,11 +232,70 @@ static bool isKeywordText(const char *text) {
   return false;
 }
 
+// Helper: extract the source text for a node (caller must supply the full source)
+static std::string nodeText(TSNode node, const char *source) {
+  if (!source) return "";
+  uint32_t s = ts_node_start_byte(node);
+  uint32_t e = ts_node_end_byte(node);
+  return (s < e) ? std::string(source + s, e - s) : std::string{};
+}
+
 HighlightKind
-SyntaxHighlighter::classifyNode(TSNode node,
-                                const std::string & /*language*/) const {
+SyntaxHighlighter::classifyNode(TSNode node, const std::string &language,
+                                const char *source) const {
   const char *type = ts_node_type(node);
   bool named = ts_node_is_named(node);
+
+  // ── Bash-specific classification ──────────────────────────────────────────
+  // tree-sitter-bash uses `word` for commands, flags, and arguments alike.
+  // We disambiguate via parent context and source-text peeking.
+  if (language == "bash") {
+    // command_name > word  →  Function (the executable)
+    if (named && strcmp(type, "word") == 0) {
+      TSNode parent = ts_node_parent(node);
+      if (!ts_node_is_null(parent)) {
+        const char *pt = ts_node_type(parent);
+        if (strcmp(pt, "command_name") == 0) {
+          return HighlightKind::Function;
+        }
+      }
+      // argument words: flags start with '-'
+      if (source) {
+        const std::string txt = nodeText(node, source);
+        if (!txt.empty() && txt[0] == '-') {
+          return HighlightKind::Tag; // flag
+        }
+      }
+      return HighlightKind::Plain; // plain argument
+    }
+    // $VAR expansions
+    if (strcmp(type, "variable_name") == 0 ||
+        strcmp(type, "special_variable_name") == 0) {
+      return HighlightKind::Variable;
+    }
+    if (strcmp(type, "simple_expansion") == 0 ||
+        strcmp(type, "expansion") == 0) {
+      return HighlightKind::Variable;
+    }
+    // $(...) substitution delimiters
+    if (strcmp(type, "command_substitution") == 0) {
+      return HighlightKind::Plain; // children handle inner tokens
+    }
+    // test operators: -f, -d, -z, etc.
+    if (strcmp(type, "test_operator") == 0) {
+      return HighlightKind::Operator;
+    }
+    // file_redirect, heredoc_redirect
+    if (strcmp(type, "file_redirect") == 0 ||
+        strcmp(type, "heredoc_redirect") == 0) {
+      return HighlightKind::Plain;
+    }
+    // file descriptor number
+    if (strcmp(type, "file_descriptor") == 0) {
+      return HighlightKind::Number;
+    }
+    // fall through to generic rules for comments, strings, pipes, etc.
+  }
 
   // ── Comments ──
   if (strcmp(type, "comment") == 0 || strcmp(type, "line_comment") == 0 ||
@@ -437,12 +496,13 @@ ftxui::Color SyntaxHighlighter::colorFor(HighlightKind kind) const {
 // ─── AST span collection ────────────────────────────────────────────────────
 
 void SyntaxHighlighter::collectSpans(TSNode node, const std::string &language,
-                                     std::vector<HighlightSpan> &spans) const {
+                                     std::vector<HighlightSpan> &spans,
+                                     const char *source) const {
   uint32_t childCount = ts_node_child_count(node);
 
   if (childCount == 0) {
     // Leaf node — emit a span
-    HighlightKind kind = classifyNode(node, language);
+    HighlightKind kind = classifyNode(node, language, source);
     uint32_t start = ts_node_start_byte(node);
     uint32_t end = ts_node_end_byte(node);
     if (start < end) {
@@ -452,7 +512,7 @@ void SyntaxHighlighter::collectSpans(TSNode node, const std::string &language,
   }
 
   // For comments and strings, treat the whole subtree as one span
-  HighlightKind nodeKind = classifyNode(node, language);
+  HighlightKind nodeKind = classifyNode(node, language, source);
   if (nodeKind == HighlightKind::Comment || nodeKind == HighlightKind::String) {
     uint32_t start = ts_node_start_byte(node);
     uint32_t end = ts_node_end_byte(node);
@@ -465,7 +525,7 @@ void SyntaxHighlighter::collectSpans(TSNode node, const std::string &language,
   // Recurse into children (including anonymous children)
   for (uint32_t i = 0; i < childCount; ++i) {
     TSNode child = ts_node_child(node, i);
-    collectSpans(child, language, spans);
+    collectSpans(child, language, spans, source);
   }
 }
 
@@ -516,7 +576,7 @@ SyntaxHighlighter::highlightRenderLines(const std::string &code,
   // Collect highlight spans from the AST
   std::vector<HighlightSpan> spans;
   spans.reserve(256);
-  collectSpans(root, language, spans);
+  collectSpans(root, language, spans, code.c_str());
 
   // Sort spans by start byte (should already be mostly sorted from DFS)
   std::sort(spans.begin(), spans.end(),
@@ -617,7 +677,7 @@ SyntaxHighlighter::highlightRenderWrappedLine(const std::string &code,
   TSNode root = ts_tree_root_node(tree);
   std::vector<HighlightSpan> spans;
   spans.reserve(64);
-  collectSpans(root, language, spans);
+  collectSpans(root, language, spans, code.c_str());
   std::sort(spans.begin(), spans.end(),
             [](const HighlightSpan &a, const HighlightSpan &b) {
               return a.startByte < b.startByte;

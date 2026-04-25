@@ -96,6 +96,32 @@ std::string joinLinesForUndo(const std::vector<std::string> &lines) {
   return out.str();
 }
 
+std::vector<std::string> splitStoredLines(const std::string &content) {
+  std::vector<std::string> lines;
+  std::stringstream ss(content);
+  std::string line;
+  while (std::getline(ss, line)) {
+    lines.push_back(line);
+  }
+  return lines;
+}
+
+std::string joinStoredLines(const std::vector<std::string> &lines) {
+  std::ostringstream out;
+  for (std::size_t i = 0; i < lines.size(); ++i) {
+    if (i > 0) out << '\n';
+    out << lines[i];
+  }
+  return out.str();
+}
+
+std::string rapidJsonToString(const rapidjson::Document &d) {
+  rapidjson::StringBuffer buffer;
+  rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+  d.Accept(writer);
+  return buffer.GetString();
+}
+
 std::vector<std::string> parseStringArrayMember(const rapidjson::Value &value,
                                                 const char *key) {
   std::vector<std::string> lines;
@@ -255,6 +281,76 @@ UndoResult applyUndoAndRestoreFiles(const std::shared_ptr<IAgent> &agent,
   }
   applyReverseFileEdits(agent, collectReverseFileEditsFromTurns(removedTurns));
   return result;
+}
+
+template <typename UndoFn>
+std::pair<UndoResult, std::vector<AgentTurn>>
+applyUndoAndCaptureRemovedTurns(const std::shared_ptr<IAgent> &agent,
+                                UndoFn &&undoFn) {
+  UndoResult result;
+  std::vector<AgentTurn> removedTurns;
+  if (!agent || !agent->getContext().history) {
+    return {result, removedTurns};
+  }
+  auto &turns = agent->getMutableContext().history->turns;
+  const auto beforeTurns = turns;
+  result = undoFn(turns);
+  const std::size_t remaining = turns.size();
+  if (beforeTurns.size() > remaining) {
+    removedTurns.assign(beforeTurns.begin() + static_cast<long>(remaining),
+                        beforeTurns.end());
+  }
+  applyReverseFileEdits(agent, collectReverseFileEditsFromTurns(removedTurns));
+  return {result, removedTurns};
+}
+
+shared::TranscriptUndoAction persistTranscriptUndo(
+    const std::shared_ptr<IAgent> &agent, const std::string &agentId,
+    const std::string &scopeType, const std::string &scopeArgJson,
+    const std::string &reason, std::vector<AgentTurn> removedTurns) {
+  if (!agent) {
+    throw std::runtime_error("Cannot persist transcript undo without agent");
+  }
+  const auto &ctx = agent->getContext();
+  if (!ctx.history) {
+    throw std::runtime_error("Cannot persist transcript undo without history");
+  }
+  shared::TranscriptUndoAction action;
+  action.undoActionId = shared::StringUtil::generateUuid();
+  action.threadId = ctx.history->threadId;
+  action.agentId = agentId;
+  action.scopeType = scopeType;
+  action.scopeArgJson = scopeArgJson;
+  action.createdAt = static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::system_clock::now().time_since_epoch())
+          .count());
+  action.redoAvailable = !removedTurns.empty();
+  action.reason = reason;
+
+  std::vector<shared::TranscriptRedoPayload> payloads;
+  if (!removedTurns.empty()) {
+    shared::TranscriptRedoPayload payload;
+    payload.undoActionId = action.undoActionId;
+    payload.threadId = action.threadId;
+    payload.agentId = action.agentId;
+    payload.ordinal = 0;
+    payload.turns = std::move(removedTurns);
+    payloads.push_back(std::move(payload));
+  }
+
+  ThreadManager tm(ThreadManager::defaultBasePath());
+  tm.writeTranscriptUndoAction(action.threadId, action, payloads);
+  return action;
+}
+
+void appendTurnsForTranscriptRedo(const std::shared_ptr<IAgent> &agent,
+                                  const std::vector<AgentTurn> &turns) {
+  if (!agent || !agent->getContext().history || turns.empty()) {
+    return;
+  }
+  auto &historyTurns = agent->getMutableContext().history->turns;
+  historyTurns.insert(historyTurns.end(), turns.begin(), turns.end());
 }
 
 std::string extractFinalSummary(const std::shared_ptr<IAgent> &agent) {
@@ -1518,12 +1614,316 @@ UndoResult Engine::undoAgentTurns(const std::string &agentId, int count) {
   });
 
   agent->saveHistory();
-
   broadcast(HistoryUndone{agentId, ctx.history->threadId, result.turnsRemoved,
                           result.compactionReversed, ctx.identity.parentId});
   return result;
 }
 
+shared::TranscriptUndoAction Engine::undoAgentTurnsWithRedo(
+    const std::string &agentId, int count) {
+  auto agent = AgentRegistry::instance().getAgent(agentId);
+  if (!agent)
+    throw std::runtime_error("Agent not found: " + agentId);
+  if (agent->isRunning())
+    throw std::runtime_error("Cannot undo while agent is running");
+  auto [result, removedTurns] =
+      applyUndoAndCaptureRemovedTurns(agent, [&](std::vector<AgentTurn> &turns) {
+        return HistoryEditor::undoTurns(turns, count);
+      });
+  agent->saveHistory();
+  const auto &ctx = agent->getContext();
+  broadcast(HistoryUndone{agentId, ctx.history->threadId, result.turnsRemoved,
+                          result.compactionReversed, ctx.identity.parentId});
+  return persistTranscriptUndo(agent, agentId, "turns",
+                               std::string("{\"count\":") +
+                                   std::to_string(std::max(1, count)) + "}",
+                               result.turnsRemoved > 0 ? "undone" : "no-op",
+                               std::move(removedTurns));
+}
+
+shared::TranscriptUndoAction Engine::undoAgentMessagesWithRedo(
+    const std::string &agentId, int count) {
+  auto agent = AgentRegistry::instance().getAgent(agentId);
+  if (!agent)
+    throw std::runtime_error("Agent not found: " + agentId);
+  if (agent->isRunning())
+    throw std::runtime_error("Cannot undo while agent is running");
+  auto [result, removedTurns] =
+      applyUndoAndCaptureRemovedTurns(agent, [&](std::vector<AgentTurn> &turns) {
+        return HistoryEditor::undoMessages(turns, count);
+      });
+  agent->saveHistory();
+  const auto &ctx = agent->getContext();
+  broadcast(HistoryUndone{agentId, ctx.history->threadId, result.turnsRemoved,
+                          result.compactionReversed, ctx.identity.parentId});
+  return persistTranscriptUndo(agent, agentId, "messages",
+                               std::string("{\"count\":") +
+                                   std::to_string(std::max(1, count)) + "}",
+                               result.turnsRemoved > 0 ? "undone" : "no-op",
+                               std::move(removedTurns));
+}
+
+shared::TranscriptUndoAction Engine::undoAgentAfterTimestampWithRedo(
+    const std::string &agentId, uint64_t timestamp) {
+  auto agent = AgentRegistry::instance().getAgent(agentId);
+  if (!agent)
+    throw std::runtime_error("Agent not found: " + agentId);
+  if (agent->isRunning())
+    throw std::runtime_error("Cannot undo while agent is running");
+  auto [result, removedTurns] = applyUndoAndCaptureRemovedTurns(
+      agent, [&](std::vector<AgentTurn> &turns) {
+        return HistoryEditor::undoAfterTimestamp(turns, timestamp);
+      });
+  agent->saveHistory();
+  const auto &ctx = agent->getContext();
+  broadcast(HistoryUndone{agentId, ctx.history->threadId, result.turnsRemoved,
+                          result.compactionReversed, ctx.identity.parentId});
+  return persistTranscriptUndo(agent, agentId, "after_timestamp",
+                               std::string("{\"timestamp\":") + std::to_string(timestamp) + "}",
+                               result.turnsRemoved > 0 ? "undone" : "no-op",
+                               std::move(removedTurns));
+}
+
+std::vector<shared::EditBatchSummary>
+Engine::listAgentEditBatches(const std::string &threadId,
+                             const shared::EditHistoryFilters &filters) const {
+  if (threadId.empty()) {
+    return {};
+  }
+  ThreadManager tm(ThreadManager::defaultBasePath());
+  return tm.listEditBatches(threadId, filters);
+}
+
+shared::EditUndoEligibility
+Engine::evaluateEditBatchUndo(const std::string &threadId,
+                              const std::string &editBatchId) const {
+  shared::EditUndoEligibility eligibility;
+  eligibility.editBatchId = editBatchId;
+  if (threadId.empty() || editBatchId.empty()) {
+    eligibility.resultStatus = shared::EditUndoResultStatus::RejectedBatchNotFullyUndoable;
+    eligibility.reason = "Missing thread or edit batch id";
+    return eligibility;
+  }
+  ThreadManager tm(ThreadManager::defaultBasePath());
+  const auto detail = tm.getEditBatch(threadId, editBatchId);
+  if (detail.summary.status == shared::EditBatchStatus::Undone) {
+    eligibility.resultStatus = shared::EditUndoResultStatus::RejectedAlreadyUndone;
+    eligibility.reason = "Edit batch is already undone";
+    return eligibility;
+  }
+  for (const auto &mutation : detail.files) {
+    const auto history = tm.listEditFileMutationsForFile(threadId, mutation.filePath);
+  for (const auto &mutation : detail.files) {
+    if (!mutation.hadFileBefore || !mutation.hasFileAfter) {
+      eligibility.resultStatus =
+          shared::EditUndoResultStatus::RejectedBatchNotFullyUndoable;
+      eligibility.reason =
+          "Create/delete-style file undo is not yet supported safely: " + mutation.filePath;
+      return eligibility;
+    }
+  }
+    for (const auto &candidate : history) {
+      if (candidate.fileMutationId == mutation.fileMutationId) {
+        break;
+      }
+      if (candidate.status == shared::EditFileMutationStatus::Applied) {
+        eligibility.resultStatus = shared::EditUndoResultStatus::RejectedBlocked;
+        eligibility.reason = "Later edits exist on file: " + mutation.filePath;
+        eligibility.blockingEditBatchIds.push_back(candidate.editBatchId);
+        return eligibility;
+      }
+    }
+  }
+  eligibility.undoable = true;
+  eligibility.resultStatus = shared::EditUndoResultStatus::Succeeded;
+  return eligibility;
+}
+
+
+shared::EditRedoEligibility
+Engine::evaluateEditBatchRedo(const std::string &threadId,
+                              const std::string &undoActionId) const {
+  shared::EditRedoEligibility eligibility;
+  eligibility.undoActionId = undoActionId;
+  if (threadId.empty() || undoActionId.empty()) {
+    eligibility.reason = "Missing thread or undo action id";
+    return eligibility;
+  }
+  ThreadManager tm(ThreadManager::defaultBasePath());
+  auto undoAction = tm.findEditUndoAction(threadId, undoActionId);
+  if (!undoAction.has_value()) {
+    eligibility.reason = "Edit undo action not found";
+    return eligibility;
+  }
+  const auto detail = tm.getEditBatch(threadId, undoAction->targetEditBatchId);
+  if (detail.summary.status != shared::EditBatchStatus::Undone) {
+    eligibility.reason = "Target edit batch is not currently undone";
+    return eligibility;
+  }
+  eligibility.redoable = true;
+  eligibility.reason = "redoable";
+  return eligibility;
+}
+shared::EditUndoAction
+Engine::undoEditBatch(const std::string &agentId, const std::string &editBatchId) {
+  auto agent = AgentRegistry::instance().getAgent(agentId);
+  if (!agent) {
+    throw std::runtime_error("Agent not found: " + agentId);
+  }
+  if (agent->isRunning()) {
+    throw std::runtime_error("Cannot undo edit batch while agent is running");
+  }
+  const auto &ctx = agent->getContext();
+  if (!ctx.history) {
+    throw std::runtime_error("Agent has no persisted history");
+  }
+  const std::string threadId = ctx.history->threadId;
+  ThreadManager tm(ThreadManager::defaultBasePath());
+  auto eligibility = evaluateEditBatchUndo(threadId, editBatchId);
+  shared::EditUndoAction action;
+
+  action.undoActionId = shared::StringUtil::generateUuid();
+  action.threadId = threadId;
+  action.requestedByAgentId = agentId;
+  action.targetEditBatchId = editBatchId;
+  action.createdAt = static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::system_clock::now().time_since_epoch())
+          .count());
+  action.resultStatus = eligibility.resultStatus;
+
+  action.resultJson = rapidJsonToString(shared::toJson(eligibility));
+  if (eligibility.undoable) {
+    const auto detail = tm.getEditBatch(threadId, editBatchId);
+    for (auto it = detail.files.rbegin(); it != detail.files.rend(); ++it) {
+      const auto &mutation = *it;
+      const std::string absolutePath =
+          agent->getEnvironment()->getWorkspace().resolvePath(mutation.filePath);
+      std::vector<std::string> currentLines;
+      if (agent->getHost()->exists(absolutePath)) {
+        const auto bytes = agent->getHost()->readFile(absolutePath);
+        currentLines = splitStoredLines(std::string(bytes.begin(), bytes.end()));
+      }
+      for (auto opIt = mutation.operations.rbegin(); opIt != mutation.operations.rend(); ++opIt) {
+        const auto &op = *opIt;
+        const int startIndex = std::max(0, op.startLine - 1);
+        const int newCount = static_cast<int>(op.newLines.size());
+        const int eraseEnd =
+            std::min(static_cast<int>(currentLines.size()), startIndex + newCount);
+        if (startIndex <= static_cast<int>(currentLines.size())) {
+          currentLines.erase(currentLines.begin() + startIndex,
+                             currentLines.begin() + eraseEnd);
+          currentLines.insert(currentLines.begin() + startIndex,
+                              op.oldLines.begin(), op.oldLines.end());
+        }
+      }
+      const std::string restored = joinStoredLines(currentLines);
+      agent->getHost()->writeFile(
+          absolutePath, std::vector<uint8_t>(restored.begin(), restored.end()));
+      agent->getEnvironment()->getWorkspace().recordFileEdit(absolutePath);
+      tm.updateEditFileMutationStatus(threadId, mutation.fileMutationId,
+                                      shared::EditFileMutationStatus::Undone);
+    }
+    tm.updateEditBatchStatus(threadId, editBatchId, shared::EditBatchStatus::Undone,
+                             action.undoActionId);
+    action.resultJson = "{\"status\":\"undone\"}";
+    action.resultStatus = shared::EditUndoResultStatus::Succeeded;
+
+  }
+  tm.writeEditUndoAction(threadId, action);
+  return action;
+}
+
+
+std::optional<shared::EditRedoAction>
+Engine::redoEditUndoAction(const std::string &agentId,
+                           const std::string &undoActionId) {
+  auto agent = AgentRegistry::instance().getAgent(agentId);
+  if (!agent) {
+    throw std::runtime_error("Agent not found: " + agentId);
+  }
+  if (agent->isRunning()) {
+    throw std::runtime_error("Cannot redo edit batch while agent is running");
+  }
+  const auto &ctx = agent->getContext();
+  if (!ctx.history) {
+    throw std::runtime_error("Agent has no persisted history");
+  }
+  const std::string threadId = ctx.history->threadId;
+  ThreadManager tm(ThreadManager::defaultBasePath());
+  auto eligibility = evaluateEditBatchRedo(threadId, undoActionId);
+  if (!eligibility.redoable) {
+    return std::nullopt;
+  }
+  auto undoAction = tm.findEditUndoAction(threadId, undoActionId);
+  if (!undoAction.has_value()) {
+    return std::nullopt;
+  }
+  const auto detail = tm.getEditBatch(threadId, undoAction->targetEditBatchId);
+  for (const auto &mutation : detail.files) {
+    const std::string absolutePath =
+        agent->getEnvironment()->getWorkspace().resolvePath(mutation.filePath);
+    std::vector<std::string> currentLines;
+    if (agent->getHost()->exists(absolutePath)) {
+      const auto bytes = agent->getHost()->readFile(absolutePath);
+      currentLines = splitStoredLines(std::string(bytes.begin(), bytes.end()));
+    }
+    for (const auto &op : mutation.operations) {
+      const int startIndex = std::max(0, op.startLine - 1);
+      const int oldCount = static_cast<int>(op.oldLines.size());
+      const int eraseEnd = std::min(static_cast<int>(currentLines.size()), startIndex + oldCount);
+      if (startIndex <= static_cast<int>(currentLines.size())) {
+        currentLines.erase(currentLines.begin() + startIndex, currentLines.begin() + eraseEnd);
+        currentLines.insert(currentLines.begin() + startIndex, op.newLines.begin(), op.newLines.end());
+      }
+    }
+    const std::string rewritten = joinStoredLines(currentLines);
+    agent->getHost()->writeFile(absolutePath, std::vector<uint8_t>(rewritten.begin(), rewritten.end()));
+    agent->getEnvironment()->getWorkspace().recordFileEdit(absolutePath);
+    tm.updateEditFileMutationStatus(threadId, mutation.fileMutationId, shared::EditFileMutationStatus::Redone);
+  }
+  tm.updateEditBatchStatus(threadId, undoAction->targetEditBatchId, shared::EditBatchStatus::Redone, std::nullopt);
+  shared::EditRedoAction redoAction{shared::StringUtil::generateUuid(), threadId, undoActionId, static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count()), "{\"status\":\"redone\"}"};
+  tm.writeEditRedoAction(threadId, redoAction);
+  return redoAction;
+}
+
+shared::TranscriptRedoEligibility Engine::evaluateTranscriptRedo(
+    const std::string &threadId, const std::string &undoActionId) const {
+  shared::TranscriptRedoEligibility eligibility;
+  eligibility.undoActionId = undoActionId;
+  if (threadId.empty() || undoActionId.empty()) {
+    eligibility.reason = "Missing thread or undo action id";
+    return eligibility;
+  }
+  ThreadManager tm(ThreadManager::defaultBasePath());
+  auto action = tm.findTranscriptUndoAction(threadId, undoActionId);
+  if (!action.has_value()) {
+    eligibility.reason = "Transcript undo action not found";
+    return eligibility;
+  }
+  eligibility.redoable = action->redoAvailable;
+  eligibility.reason = action->redoAvailable ? "redoable" : "redo payload unavailable";
+  return eligibility;
+}
+
+std::optional<shared::TranscriptRedoAction> Engine::redoTranscriptUndoAction(
+    const std::string &agentId, const std::string &undoActionId) {
+  auto agent = AgentRegistry::instance().getAgent(agentId);
+  if (!agent || agent->isRunning() || !agent->getContext().history) {
+    return std::nullopt;
+  }
+  ThreadManager tm(ThreadManager::defaultBasePath());
+  auto action = tm.findTranscriptUndoAction(agent->getContext().history->threadId, undoActionId);
+  if (!action.has_value() || !action->redoAvailable) {
+    return std::nullopt;
+  }
+  const auto payloads = tm.loadTranscriptRedoPayloads(action->threadId, undoActionId);
+  for (const auto &payload : payloads) appendTurnsForTranscriptRedo(agent, payload.turns);
+  agent->saveHistory();
+  tm.markTranscriptUndoRedoAvailability(action->threadId, undoActionId, false);
+  return shared::TranscriptRedoAction{shared::StringUtil::generateUuid(), undoActionId, action->threadId, agentId, static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count()), "{\"status\":\"redone\"}"};
+}
 UndoResult Engine::undoAgentMessages(const std::string &agentId, int count) {
   auto agent = AgentRegistry::instance().getAgent(agentId);
   if (!agent)

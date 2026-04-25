@@ -30,6 +30,7 @@
 #include "commands/ConfigCommand.hpp"
 #include "commands/MemoryCommand.hpp"
 #include "commands/ConnectCommand.hpp"
+#include "commands/EditHistoryCommand.hpp"
 #include "commands/McpCommand.hpp"
 #include "commands/ModelCommand.hpp"
 #include "commands/NewCommand.hpp"
@@ -218,6 +219,16 @@ void runTui(const TuiLaunchOptions &options) {
       std::make_shared<firmius::tui::UndoCommand>());
   firmius::tui::CommandManager::instance().registerCommand(
       std::make_shared<firmius::tui::ConfigCommand>());
+  firmius::tui::CommandManager::instance().registerCommand(
+      std::make_shared<firmius::tui::EditsCommand>());
+  firmius::tui::CommandManager::instance().registerCommand(
+      std::make_shared<firmius::tui::UndoEditCommand>());
+  firmius::tui::CommandManager::instance().registerCommand(
+      std::make_shared<firmius::tui::RedoEditCommand>());
+  firmius::tui::CommandManager::instance().registerCommand(
+      std::make_shared<firmius::tui::UndoTranscriptCommand>());
+  firmius::tui::CommandManager::instance().registerCommand(
+      std::make_shared<firmius::tui::RedoTranscriptCommand>());
   firmius::tui::CommandManager::instance().registerCommand(
       std::make_shared<firmius::tui::MemoryCommand>());
   firmius::tui::CommandManager::instance().registerCommand(
@@ -448,18 +459,31 @@ void runTui(const TuiLaunchOptions &options) {
   });
 
   std::atomic<bool> firstInteractivePaintObserved{false};
-  if (startupProfiler.enabled()) {
+  {
     auto observedRenderer = renderer;
-    renderer = ftxui::Renderer(observedRenderer,
-                               [&startupProfiler, &firstInteractivePaintObserved,
-                                observedRenderer] {
-                                 if (!firstInteractivePaintObserved.exchange(
-                                         true, std::memory_order_relaxed)) {
+    renderer = ftxui::Renderer(
+        observedRenderer,
+        [&startupProfiler, &firstInteractivePaintObserved, &screen,
+         observedRenderer] {
+          if (!firstInteractivePaintObserved.exchange(true,
+                                                      std::memory_order_relaxed)) {
+            // ScrollableBox/chat startup restore can require one render to get
+            // trustworthy reflect(box_) geometry and a second event-loop turn to
+            // consume it. User input such as mouse motion provides that wakeup
+            // today; do it automatically after the first interactive paint.
+            screen.PostEvent(ftxui::Event::Custom);
+            if (startupProfiler.enabled()) {
+              startupProfiler.mark("first_interactive_paint_boundary");
+            }
+          }
+          if (startupProfiler.enabled()) {
+            if (!firstInteractivePaintObserved.load(std::memory_order_relaxed)) {
                                    startupProfiler.mark(
                                        "first_interactive_paint_boundary");
-                                 }
-                                 return observedRenderer->Render();
-                               });
+            }
+          }
+          return observedRenderer->Render();
+        });
   }
 
   startupProfiler.mark("loop_entry");

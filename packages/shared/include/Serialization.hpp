@@ -157,10 +157,52 @@ rapidjson::Document toJson(const ThreadArtifactMetadata& metadata);
  */
 ThreadArtifactMetadata threadArtifactMetadataFromJson(const rapidjson::Value& value);
 
-/**
- * @brief Serializes an EngineEvent to a RapidJSON document.
- */
+rapidjson::Document toJson(const EditMutationOperation& operation);
+EditMutationOperation editMutationOperationFromJson(const rapidjson::Value& value);
+
+rapidjson::Document toJson(const EditFileMutation& mutation);
+EditFileMutation editFileMutationFromJson(const rapidjson::Value& value);
+
+rapidjson::Document toJson(const EditBatchSummary& summary);
+EditBatchSummary editBatchSummaryFromJson(const rapidjson::Value& value);
+
+rapidjson::Document toJson(const EditBatchDetail& detail);
+EditBatchDetail editBatchDetailFromJson(const rapidjson::Value& value);
+
+rapidjson::Document toJson(const EditUndoEligibility& eligibility);
+EditUndoEligibility editUndoEligibilityFromJson(const rapidjson::Value& value);
+
+rapidjson::Document toJson(const EditUndoAction& action);
+EditUndoAction editUndoActionFromJson(const rapidjson::Value& value);
+rapidjson::Document toJson(const EditRedoEligibility& eligibility);
+EditRedoEligibility editRedoEligibilityFromJson(const rapidjson::Value& value);
+
+rapidjson::Document toJson(const EditRedoAction& action);
+EditRedoAction editRedoActionFromJson(const rapidjson::Value& value);
+
+
+const char* editBatchStatusToString(EditBatchStatus status);
+EditBatchStatus stringToEditBatchStatus(const std::string& value);
+
+const char* editFileMutationStatusToString(EditFileMutationStatus status);
+EditFileMutationStatus stringToEditFileMutationStatus(const std::string& value);
+
+const char* editUndoResultStatusToString(EditUndoResultStatus status);
+EditUndoResultStatus stringToEditUndoResultStatus(const std::string& value);
+
 rapidjson::Document toJson(const EngineEvent& event);
+rapidjson::Document toJson(const TranscriptUndoAction& action);
+TranscriptUndoAction transcriptUndoActionFromJson(const rapidjson::Value& value);
+
+rapidjson::Document toJson(const TranscriptRedoPayload& payload);
+TranscriptRedoPayload transcriptRedoPayloadFromJson(const rapidjson::Value& value);
+
+rapidjson::Document toJson(const TranscriptRedoEligibility& eligibility);
+TranscriptRedoEligibility transcriptRedoEligibilityFromJson(const rapidjson::Value& value);
+
+rapidjson::Document toJson(const TranscriptRedoAction& action);
+TranscriptRedoAction transcriptRedoActionFromJson(const rapidjson::Value& value);
+
 
 /**
  * @brief Deserializes an EngineEvent from a RapidJSON value.

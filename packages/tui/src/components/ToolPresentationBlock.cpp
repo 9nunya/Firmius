@@ -282,10 +282,6 @@ ftxui::Element BuildClaudexInlineBlock(const ToolPresentation &presentation,
                                        bool dim_row,
                                        const ftxui::Component &toggle_button,
                                        bool show_expand_toggle) {
-  ftxui::Elements rows;
-  rows.push_back(BuildInlineStatusRow(presentation, theme, icon, icon_color,
-                                      title_color, dim_row));
-
   // Claudex uses a single global Ctrl+G toggle for showing/hiding tool details.
   const bool expanded =
       !presentation.expandable ? true : UIState::instance().diffsExpanded;
@@ -306,23 +302,22 @@ ftxui::Element BuildClaudexInlineBlock(const ToolPresentation &presentation,
     compact_presentation.status_footer.reset();
   }
 
-  // Avoid duplication for process tools: Process presentation includes "$ cmd" as
-  // first body line, but the title already renders "Bash <cmd>".
+  // Avoid duplication for process tools: ProcessToolPresentation always sets
+  // title="Bash <cmd>" AND pushes "$ <cmd>" as the first body line.  In Claudex
+  // the body line is syntax-highlighted and wraps, so we shorten the title to
+  // just "Bash" whenever both markers are present — no exact-match needed
+  // because the duplication is structural.
   if (!uses_diff_layout &&
       compact_presentation.layout == ToolPresentationLayoutKind::BodyFirstStream &&
-      !compact_presentation.body_lines.empty()) {
-    const std::string &first_line = compact_presentation.body_lines.front();
-    if (first_line.rfind("$ ", 0) == 0 &&
-        compact_presentation.title.rfind("Bash ", 0) == 0) {
-      const std::string command = first_line.substr(2);
-      const std::string title_command = compact_presentation.title.substr(5);
-      if (command == title_command) {
-        // Keep the wrapping body line; shorten the title to avoid
-        // duplication while preserving the visible command in the body.
-        compact_presentation.title = "Bash";
-      }
-    }
+      !compact_presentation.body_lines.empty() &&
+      compact_presentation.body_lines.front().rfind("$ ", 0) == 0 &&
+      compact_presentation.title.rfind("Bash ", 0) == 0) {
+    compact_presentation.title = "Bash";
   }
+
+  ftxui::Elements rows;
+  rows.push_back(BuildInlineStatusRow(compact_presentation, theme, icon,
+                                      icon_color, title_color, dim_row));
 
   if (show_body) {
     if (uses_diff_layout) {

@@ -18,6 +18,7 @@
 #include "utils/FSUtil.hpp"
 #include "utils/InterruptibleSleep.hpp"
 #include "utils/StringUtil.hpp"
+#include "utils/Hashline.hpp"
 #include "tools/McpToolUtil.hpp"
 #include <algorithm>
 #include <cctype>
@@ -186,6 +187,161 @@ extractOverwriteContentByPath(const std::string &toolArgs) {
 
   appendFromObject(input);
   return contents;
+}
+
+struct EditLedgerToolExecutionResultView {
+  std::string toolCallId;
+  std::string toolName;
+  std::string resultStr;
+};
+
+std::string computeContentFingerprint(const std::string &content) {
+  return shared::utils::Hashline::computeHash(content) + "-" +
+         std::to_string(content.size());
+}
+
+std::string detectNewlineMode(const std::string &content) {
+  if (content.find("\r\n") != std::string::npos) {
+    return "crlf";
+  }
+  if (content.find('\n') != std::string::npos) {
+    return "lf";
+  }
+  return "none";
+}
+
+std::string buildEditBatchSummaryText(const rapidjson::Value &doc) {
+  const bool hasFiles = doc.IsObject() && doc.HasMember("files") && doc["files"].IsArray();
+  if (hasFiles) {
+    return "Edited " + std::to_string(doc["files"].Size()) + " files";
+  }
+  if (doc.IsObject() && doc.HasMember("path") && doc["path"].IsString()) {
+    return std::string("Edited ") + doc["path"].GetString();
+  }
+  return "Edited file";
+}
+
+std::vector<shared::EditFileMutation>
+extractEditLedgerMutations(const std::string &threadId,
+                           const rapidjson::Value &resultDoc,
+                           const std::string &editBatchId) {
+  std::vector<shared::EditFileMutation> mutations;
+  auto appendFile = [&](const rapidjson::Value &fileDoc, int ordinal) {
+    if (!fileDoc.IsObject() || !fileDoc.HasMember("path") || !fileDoc["path"].IsString()) {
+      return;
+    }
+    shared::EditFileMutation mutation;
+    mutation.fileMutationId = shared::StringUtil::generateUuid();
+    mutation.editBatchId = editBatchId;
+    mutation.threadId = threadId;
+    mutation.filePath = fileDoc["path"].GetString();
+    mutation.ordinalInBatch = ordinal;
+    mutation.mode = fileDoc.HasMember("resolved_mode") && fileDoc["resolved_mode"].IsString()
+                        ? fileDoc["resolved_mode"].GetString()
+                        : "";
+    mutation.diffPreview = fileDoc.HasMember("diff_preview") && fileDoc["diff_preview"].IsString()
+                               ? fileDoc["diff_preview"].GetString()
+                               : "";
+    if (fileDoc.HasMember("operations") && fileDoc["operations"].IsArray()) {
+      for (const auto &op : fileDoc["operations"].GetArray()) {
+        if (!op.IsObject()) {
+          continue;
+        }
+        shared::EditMutationOperation operation;
+        operation.description = op.HasMember("description") && op["description"].IsString()
+                                    ? op["description"].GetString()
+                                    : "";
+        operation.startLine = op.HasMember("start_line") && op["start_line"].IsInt()
+                                  ? op["start_line"].GetInt()
+                                  : 1;
+        operation.endLine = op.HasMember("end_line") && op["end_line"].IsInt()
+                                ? op["end_line"].GetInt()
+                                : 0;
+        operation.oldLines = parseStringArrayMember(op, "old_lines");
+        operation.newLines = parseStringArrayMember(op, "new_lines");
+        mutation.operations.push_back(std::move(operation));
+      }
+    }
+
+    std::string beforeContent;
+    std::string afterContent;
+    bool first = true;
+    for (const auto &op : mutation.operations) {
+      if (!first) {
+        beforeContent += "\n";
+        afterContent += "\n";
+      }
+      first = false;
+      for (size_t i = 0; i < op.oldLines.size(); ++i) {
+        if (i > 0) beforeContent += "\n";
+        beforeContent += op.oldLines[i];
+      }
+      for (size_t i = 0; i < op.newLines.size(); ++i) {
+        if (i > 0) afterContent += "\n";
+        afterContent += op.newLines[i];
+      }
+    }
+    mutation.hadFileBefore = !(mutation.mode == "write" && !mutation.operations.empty() &&
+                               mutation.operations.front().oldLines.empty() &&
+                               mutation.operations.front().description == "create file");
+    mutation.hasFileAfter = true;
+    mutation.preSize = beforeContent.size();
+    mutation.postSize = afterContent.size();
+    mutation.preHash = computeContentFingerprint(beforeContent);
+    mutation.postHash = computeContentFingerprint(afterContent);
+    mutation.newlineModeBefore = detectNewlineMode(beforeContent);
+    mutation.newlineModeAfter = detectNewlineMode(afterContent);
+    mutations.push_back(std::move(mutation));
+  };
+
+  if (resultDoc.IsObject() && resultDoc.HasMember("files") && resultDoc["files"].IsArray()) {
+    int ordinal = 0;
+    for (const auto &file : resultDoc["files"].GetArray()) {
+      appendFile(file, ordinal++);
+    }
+  } else {
+    appendFile(resultDoc, 0);
+  }
+  return mutations;
+}
+
+void persistEditLedgerBatch(const shared::AgentContext &context,
+                            const EditLedgerToolExecutionResultView &result) {
+  if (!context.history || context.history->threadId.empty()) {
+    return;
+  }
+  rapidjson::Document resultDoc;
+  resultDoc.Parse(result.resultStr.c_str());
+  if (resultDoc.HasParseError() || !resultDoc.IsObject()) {
+    return;
+  }
+  const std::string editBatchId = shared::StringUtil::generateUuid();
+  shared::EditBatchSummary summary;
+  summary.editBatchId = editBatchId;
+  summary.threadId = context.history->threadId;
+  summary.agentId = context.identity.id;
+  summary.parentAgentId = context.identity.parentId;
+  summary.friendlyName = context.identity.friendlyName;
+  summary.turnId = context.history->turns.empty() ? "" : context.history->turns.back().turnId;
+  summary.toolCallId = result.toolCallId;
+  summary.toolName = result.toolName;
+  summary.requestMode = resultDoc.HasMember("resolved_mode") && resultDoc["resolved_mode"].IsString()
+                            ? resultDoc["resolved_mode"].GetString()
+                            : "";
+  summary.createdAt = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::chrono::system_clock::now().time_since_epoch()).count());
+  summary.status = shared::EditBatchStatus::Applied;
+  summary.summaryText = buildEditBatchSummaryText(resultDoc);
+  auto mutations = extractEditLedgerMutations(context.history->threadId, resultDoc, editBatchId);
+  for (const auto &mutation : mutations) {
+    summary.files.push_back(mutation.filePath);
+    for (const auto &op : mutation.operations) {
+      summary.addedLines += static_cast<int>(op.newLines.size());
+      summary.removedLines += static_cast<int>(op.oldLines.size());
+    }
+  }
+  ThreadManager tm(ThreadManager::defaultBasePath());
+  tm.writeEditBatch(context.history->threadId, summary, mutations);
 }
 
 std::vector<EditedFileEventPayload>
@@ -2768,6 +2924,16 @@ void Agent::executeTools(
       const bool owns_background_process =
           !result.resultProcessId.empty() &&
           (result.isBackground || result.toolName == "process_spawn");
+
+      if (result.toolName == "Edit" || result.toolName == "EditWrite" ||
+          result.toolName == "EditReplace" || result.toolName == "EditRange" ||
+          result.toolName == "file_edit" || result.toolName == "file_write") {
+        persistEditLedgerBatch(
+            context,
+            EditLedgerToolExecutionResultView{result.toolCallId, result.toolName,
+                                              result.resultStr});
+      }
+
       if (owns_background_process &&
           std::find(context.state.ownedProcesses.begin(),
                     context.state.ownedProcesses.end(),

@@ -257,6 +257,185 @@ struct ThreadArtifactMetadata {
 };
 
 /**
+ * @brief Persisted edit history records for exact file-undo support.
+ */
+
+enum class EditBatchStatus {
+  Applied,
+  Undone,
+  Redone,
+};
+
+enum class EditFileMutationStatus {
+  Applied,
+  Redone,
+  BlockedByLaterEdits,
+  Diverged,
+  Undone,
+};
+
+enum class EditUndoResultStatus {
+  Succeeded,
+  RejectedAlreadyUndone,
+  RejectedBlocked,
+  RejectedDiverged,
+  RejectedBatchNotFullyUndoable,
+  RejectedPartialFailure,
+};
+
+struct EditMutationOperation {
+  std::string description;
+  int startLine = 1;
+  int endLine = 0;
+  std::vector<std::string> oldLines;
+  std::vector<std::string> newLines;
+
+  bool operator==(const EditMutationOperation &other) const = default;
+};
+
+struct EditFileMutation {
+  std::string fileMutationId;
+  std::string editBatchId;
+  std::string threadId;
+  std::string filePath;
+  int ordinalInBatch = 0;
+  bool hadFileBefore = false;
+  bool hasFileAfter = false;
+  std::string preHash;
+  std::string postHash;
+  std::uint64_t preSize = 0;
+  std::uint64_t postSize = 0;
+  std::string newlineModeBefore;
+  std::string newlineModeAfter;
+  EditFileMutationStatus status = EditFileMutationStatus::Applied;
+  std::string mode;
+  std::vector<EditMutationOperation> operations;
+  std::string diffPreview;
+
+  bool operator==(const EditFileMutation &other) const = default;
+};
+
+struct EditBatchSummary {
+  std::string editBatchId;
+  std::string threadId;
+  std::string agentId;
+  std::string parentAgentId;
+  std::string friendlyName;
+  std::string turnId;
+  std::string toolCallId;
+  std::string toolName;
+  std::string requestMode;
+  std::uint64_t createdAt = 0;
+  EditBatchStatus status = EditBatchStatus::Applied;
+  std::vector<std::string> files;
+  int addedLines = 0;
+  int removedLines = 0;
+  std::string summaryText;
+  std::optional<std::string> undoActionBatchId;
+
+  bool operator==(const EditBatchSummary &other) const = default;
+};
+
+struct EditBatchDetail {
+  EditBatchSummary summary;
+  std::vector<EditFileMutation> files;
+
+  bool operator==(const EditBatchDetail &other) const = default;
+};
+
+struct EditUndoEligibility {
+  std::string editBatchId;
+  bool undoable = false;
+  EditUndoResultStatus resultStatus = EditUndoResultStatus::Succeeded;
+  std::vector<std::string> blockingEditBatchIds;
+  std::vector<std::string> divergedFiles;
+  std::string reason;
+
+  bool operator==(const EditUndoEligibility &other) const = default;
+};
+
+struct EditUndoAction {
+  std::string undoActionId;
+  std::string threadId;
+  std::string requestedByAgentId;
+  std::string targetEditBatchId;
+  std::uint64_t createdAt = 0;
+  EditUndoResultStatus resultStatus = EditUndoResultStatus::Succeeded;
+  std::string resultJson;
+
+  bool operator==(const EditUndoAction &other) const = default;
+};
+
+struct EditRedoEligibility {
+  std::string undoActionId;
+  bool redoable = false;
+  std::vector<std::string> blockingEditBatchIds;
+  std::vector<std::string> divergedFiles;
+  std::string reason;
+
+  bool operator==(const EditRedoEligibility &other) const = default;
+};
+
+struct EditRedoAction {
+  std::string redoActionId;
+  std::string threadId;
+  std::string targetUndoActionId;
+  std::uint64_t createdAt = 0;
+  std::string resultJson;
+  bool operator==(const EditRedoAction &other) const = default;
+};
+
+struct EditHistoryFilters {
+  std::optional<std::string> agentId;
+  std::optional<std::string> parentAgentId;
+  bool includeUndone = true;
+
+  bool operator==(const EditHistoryFilters &other) const = default;
+};
+
+struct TranscriptUndoAction {
+  std::string undoActionId;
+  std::string threadId;
+  std::string agentId;
+  std::string scopeType;
+  std::string scopeArgJson;
+  std::uint64_t createdAt = 0;
+  bool redoAvailable = false;
+  std::string reason;
+
+  bool operator==(const TranscriptUndoAction &other) const = default;
+};
+
+struct TranscriptRedoPayload {
+  std::string undoActionId;
+  std::string threadId;
+  std::string agentId;
+  int ordinal = 0;
+  std::vector<AgentTurn> turns;
+  bool operator==(const TranscriptRedoPayload &other) const = default;
+};
+
+struct TranscriptRedoEligibility {
+  std::string undoActionId;
+  bool redoable = false;
+  std::string reason;
+
+  bool operator==(const TranscriptRedoEligibility &other) const = default;
+};
+
+struct TranscriptRedoAction {
+  std::string redoActionId;
+  std::string undoActionId;
+  std::string threadId;
+  std::string agentId;
+  std::uint64_t createdAt = 0;
+  std::string resultJson;
+
+  bool operator==(const TranscriptRedoAction &other) const = default;
+};
+
+
+/**
  * @brief Execution task embedded beneath a chunk (V2 work language).
  * One level of task depth only; no nested subtasks.
  */

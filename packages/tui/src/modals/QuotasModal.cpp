@@ -14,6 +14,7 @@
 #include <ftxui/screen/terminal.hpp>
 #include <chrono>
 #include <iomanip>
+#include <iostream>
 #include <sstream>
 #include <string>
 #include <unordered_map>
