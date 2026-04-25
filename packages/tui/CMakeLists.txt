@@ -84,6 +84,16 @@ target_sources(firmius_tui PRIVATE
     src/utils/Clipboard.cpp
     src/TuiRunner.cpp
     src/components/LiveStatusRow.cpp
+    src/models/TUIStore.cpp
+    src/models/TranscriptModel.cpp
+    src/models/PermissionModel.cpp
+    src/models/WorkspaceModel.cpp
+    src/controllers/AppController.cpp
+    src/controllers/InputController.cpp
+    src/controllers/TranscriptController.cpp
+    src/controllers/PermissionController.cpp
+    src/controllers/BackgroundController.cpp
+    src/views/MainView.cpp
 )
 
 target_include_directories(firmius_tui PUBLIC include)

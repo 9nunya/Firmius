@@ -21,6 +21,7 @@ public:
    * @brief Cycles to the next available theme.
    */
   void cycleTheme();
+  void setTheme(const std::string &name);
 
   /**
    * @brief Returns the currently active theme.

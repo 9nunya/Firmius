@@ -18,6 +18,7 @@ struct ScrollableBoxOptions {
     int overlayScrollbarGutter = 2;
     bool showScrollbar = true;
     std::function<std::size_t()> measurement_signature_getter = nullptr;
+    std::function<int(int width)> custom_size_getter = nullptr;
 };
 
 // Wraps `child` inside a scrollable frame that responds to wheel, page, home, and

@@ -281,6 +281,16 @@ void ThemeManager::cycleTheme() {
   persistSelection();
 }
 
+void ThemeManager::setTheme(const std::string &name) {
+  for (size_t i = 0; i < themes_.size(); ++i) {
+    if (themes_[i].name == name) {
+      current_theme_index_ = i;
+      persistSelection();
+      return;
+    }
+  }
+}
+
 void ThemeManager::loadPersistedSelection() {
   const auto preferences = loadUserPreferences();
   if (!preferences.theme_name.has_value()) {
