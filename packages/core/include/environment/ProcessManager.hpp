@@ -51,6 +51,7 @@ public:
     void addBlockingProcessId(const std::string& id) override;
     void removeBlockingProcessId(const std::string& id) override;
     std::vector<std::string> getBlockingProcessIds() override;
+    std::vector<std::string> getProcessIds() override;
     void killProcess(const std::string& id) override;
 
     /**

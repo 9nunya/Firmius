@@ -50,18 +50,43 @@ std::vector<MarkdownCacheKey>& getMarkdownCacheOrder() {
   static thread_local std::vector<MarkdownCacheKey> order;
   return order;
 }
+std::size_t& getMarkdownCacheBytes() {
+  static thread_local std::size_t bytes = 0;
+  return bytes;
+}
+
+std::size_t markdownCacheKeyBytes(const MarkdownCacheKey& key) {
+  return key.text.size() + sizeof(key.dim) + sizeof(key.width);
+}
+
 
 void rememberMarkdownCacheKey(const MarkdownCacheKey& key) {
   auto& order = getMarkdownCacheOrder();
+  auto& bytes = getMarkdownCacheBytes();
   order.push_back(key);
-  constexpr std::size_t kMaxEntries = 20000;
-  constexpr std::size_t kTrimTo = 16000;
-  if (order.size() > kMaxEntries) {
-    auto& cache = getMarkdownCache();
-    const std::size_t drop_count = order.size() - kTrimTo;
-    for (std::size_t i = 0; i < drop_count; ++i) cache.erase(order[i]);
-    order.erase(order.begin(), order.begin() + static_cast<std::ptrdiff_t>(drop_count));
+  bytes += markdownCacheKeyBytes(key);
+  // Bound by both entries and text bytes. Entry count alone is misleading: a
+  // few long transcript/tool rows can dominate RSS because the key stores the
+  // full text and the value stores a recursively-owned FTXUI node tree.
+  constexpr std::size_t kMaxEntries = 1500;
+  constexpr std::size_t kTrimToEntries = 1000;
+  constexpr std::size_t kMaxBytes = 8 * 1024 * 1024;
+  constexpr std::size_t kTrimToBytes = 6 * 1024 * 1024;
+  if (order.size() <= kMaxEntries && bytes <= kMaxBytes) {
+    return;
   }
+  auto& cache = getMarkdownCache();
+  std::size_t drop_count = 0;
+  while (drop_count < order.size() &&
+         (order.size() - drop_count > kTrimToEntries || bytes > kTrimToBytes)) {
+    const auto& old = order[drop_count];
+    if (cache.erase(old) > 0) {
+      const auto old_bytes = markdownCacheKeyBytes(old);
+      bytes = old_bytes > bytes ? 0 : bytes - old_bytes;
+    }
+    ++drop_count;
+  }
+  order.erase(order.begin(), order.begin() + static_cast<std::ptrdiff_t>(drop_count));
 }
 
 std::string_view trimAsciiWhitespace(std::string_view value) {
@@ -583,6 +608,12 @@ static ftxui::Element renderInline(const std::string &text, bool dim) {
   return ftxui::hflow(std::move(elems));
 }
 
+void ClearMarkdownCache() {
+  getMarkdownCache().clear();
+  getMarkdownCacheOrder().clear();
+  getMarkdownCacheBytes() = 0;
+}
+
 ftxui::Element RenderMarkdown(const std::string &text, bool dim) {
   // Calculate effective width from terminal size if global not set
   int term_width = ftxui::Terminal::Size().dimx;
@@ -590,12 +621,14 @@ ftxui::Element RenderMarkdown(const std::string &text, bool dim) {
                             ? g_markdown_width
                             : (term_width > 0 ? term_width : 80);
 
-  // Check cache
+  const bool cacheable = text.size() <= 64 * 1024;
   MarkdownCacheKey key{text, dim, effective_width};
-  auto& cache = getMarkdownCache();
-  auto it = cache.find(key);
-  if (it != cache.end()) {
-    return it->second;
+  if (cacheable) {
+    auto& cache = getMarkdownCache();
+    auto it = cache.find(key);
+    if (it != cache.end()) {
+      return it->second;
+    }
   }
 
   const std::string displayText = CollapseExpandedReferencesForDisplay(text);
@@ -766,9 +799,10 @@ ftxui::Element RenderMarkdown(const std::string &text, bool dim) {
     result = ftxui::vbox(std::move(out));
   }
 
-  // Add to cache (limited size to avoid memory leak in long-running app)
-  cache[key] = result;
-  rememberMarkdownCacheKey(key);
+  if (cacheable) {
+    getMarkdownCache()[key] = result;
+    rememberMarkdownCacheKey(key);
+  }
   return result;
 }
 

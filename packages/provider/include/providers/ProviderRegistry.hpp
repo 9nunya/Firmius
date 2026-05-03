@@ -2,12 +2,14 @@
 #define FIRMIUS_PROVIDER_PROVIDER_REGISTRY_HPP
 
 #include "IProvider.hpp"
+#include "ConfigLoader.hpp"
 #include <memory>
 #include <map>
 #include <mutex>
 #include <string>
 #include <vector>
 #include <functional>
+#include <set>
 
 namespace firmius::provider {
 
@@ -52,6 +54,7 @@ public:
      */
     std::vector<std::string> listProviderIds() const;
     std::vector<std::shared_ptr<IProvider>> listProviders() const;
+    void reloadConfigProviders(const std::map<std::string, shared::ProviderProfileConfig>& profiles);
 
 private:
     ProviderRegistry() = default;
@@ -62,6 +65,7 @@ private:
     mutable std::mutex mutex;
     std::map<std::string, std::shared_ptr<IProvider>> providers;
     std::map<std::string, ProviderFactory> factories;
+    std::set<std::string> dynamicProviderIds;
 };
 
 }

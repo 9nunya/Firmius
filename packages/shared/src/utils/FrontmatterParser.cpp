@@ -3,6 +3,7 @@
 #include "utils/StringUtil.hpp"
 
 #include <cctype>
+#include <functional>
 #include <sstream>
 #include <stdexcept>
 
@@ -231,94 +232,186 @@ std::map<std::string, FrontmatterValue>
 FrontmatterParser::parse(std::string_view frontmatter, const std::string &source) {
   std::map<std::string, FrontmatterValue> values;
   const auto lines = splitLines(frontmatter);
-  for (std::size_t i = 0; i < lines.size(); ++i) {
-    const std::string line = lines[i];
-    const std::string trimmedLine = StringUtil::trim(line);
-    if (trimmedLine.empty() || trimmedLine.front() == '#') {
-      continue;
-    }
-    const auto colon = trimmedLine.find(':');
-    if (colon == std::string::npos) {
-      continue;
-    }
 
-    const std::string key = StringUtil::trim(trimmedLine.substr(0, colon));
-    const std::string rawValue = trimmedLine.substr(colon + 1);
-    if (key.empty()) {
-      continue;
+  auto countIndent = [](const std::string &line) {
+    std::size_t indent = 0;
+    while (indent < line.size() &&
+           (line[indent] == ' ' || line[indent] == '\t')) {
+      ++indent;
     }
+    return indent;
+  };
 
-    const std::string trimmedValue = StringUtil::trim(rawValue);
-    if (!trimmedValue.empty()) {
-      if (trimmedValue.front() == '[') {
-        values[key] = parseArrayValue(trimmedValue, source, i + 1);
+  auto parseInlineMap = [&](const std::string &text,
+                            std::size_t lineNumber) -> FrontmatterValue::Map {
+    FrontmatterValue::Map out;
+    std::string inner = StringUtil::trim(text);
+    if (inner.size() < 2 || inner.front() != '{' || inner.back() != '}') {
+      throw std::runtime_error(frontmatterError(
+          source, lineNumber, "Expected inline map enclosed in braces"));
+    }
+    inner = inner.substr(1, inner.size() - 2);
+    std::stringstream ss(inner);
+    std::string item;
+    while (std::getline(ss, item, ',')) {
+      const auto colon = item.find(':');
+      if (colon == std::string::npos)
+        continue;
+      const std::string key = StringUtil::trim(item.substr(0, colon));
+      const std::string value = StringUtil::trim(item.substr(colon + 1));
+      if (!key.empty()) {
+        out[key] = parseScalarValue(value);
+      }
+    }
+    return out;
+  };
+
+  std::function<FrontmatterValue(std::string, std::size_t, std::size_t)> parseValue;
+  std::function<FrontmatterValue::Map(std::size_t &, std::size_t)> parseMapBlock;
+  std::function<FrontmatterValue::Array(std::size_t &, std::size_t)> parseArrayBlock;
+
+  parseValue = [&](std::string trimmedValue, std::size_t lineNumber,
+                   std::size_t) -> FrontmatterValue {
+    if (trimmedValue.empty()) {
+      return FrontmatterValue{std::string{}};
+    }
+    if (trimmedValue.front() == '[') {
+      return parseArrayValue(trimmedValue, source, lineNumber);
+    }
+    if (trimmedValue.front() == '{') {
+      return FrontmatterValue{parseInlineMap(trimmedValue, lineNumber)};
+    }
+    return parseScalarValue(trimmedValue);
+  };
+
+  parseArrayBlock = [&](std::size_t &index,
+                        std::size_t baseIndent) -> FrontmatterValue::Array {
+    FrontmatterValue::Array array;
+    while (index < lines.size()) {
+      const std::string &raw = lines[index];
+      const std::string trimmed = StringUtil::trim(raw);
+      if (trimmed.empty()) {
+        ++index;
+        continue;
+      }
+      const std::size_t indent = countIndent(raw);
+      if (indent < baseIndent || trimmed.front() != '-') {
+        break;
+      }
+
+      std::string remainder = StringUtil::trim(trimmed.substr(1));
+      ++index;
+      if (remainder.empty()) {
+        array.emplace_back();
+        array.back().value = parseMapBlock(index, indent + 2);
+        continue;
+      }
+
+      const auto colon = remainder.find(':');
+      if (colon != std::string::npos && remainder.front() != '{') {
+        FrontmatterValue::Map itemMap;
+        const std::string key = StringUtil::trim(remainder.substr(0, colon));
+        const std::string value = StringUtil::trim(remainder.substr(colon + 1));
+        if (!value.empty()) {
+          itemMap[key] = parseValue(value, index, indent + 2);
+        } else {
+          itemMap[key] = FrontmatterValue{parseMapBlock(index, indent + 2)};
+        }
+
+        while (index < lines.size()) {
+          const std::string &childRaw = lines[index];
+          const std::string childTrimmed = StringUtil::trim(childRaw);
+          if (childTrimmed.empty()) {
+            ++index;
+            continue;
+          }
+          const std::size_t childIndent = countIndent(childRaw);
+          if (childIndent <= indent)
+            break;
+          const auto childColon = childTrimmed.find(':');
+          if (childColon == std::string::npos)
+            break;
+          const std::string childKey =
+              StringUtil::trim(childTrimmed.substr(0, childColon));
+          const std::string childValue =
+              StringUtil::trim(childTrimmed.substr(childColon + 1));
+          ++index;
+          if (!childValue.empty()) {
+            itemMap[childKey] = parseValue(childValue, index, childIndent);
+          } else {
+            itemMap[childKey] = FrontmatterValue{parseMapBlock(index, childIndent + 2)};
+          }
+        }
+
+        array.emplace_back();
+        array.back().value = itemMap;
+        continue;
+      }
+
+      array.push_back(parseValue(remainder, index, indent));
+    }
+    return array;
+  };
+
+  parseMapBlock = [&](std::size_t &index,
+                      std::size_t baseIndent) -> FrontmatterValue::Map {
+    FrontmatterValue::Map out;
+    while (index < lines.size()) {
+      const std::string &raw = lines[index];
+      const std::string trimmed = StringUtil::trim(raw);
+      if (trimmed.empty()) {
+        ++index;
+        continue;
+      }
+      const std::size_t indent = countIndent(raw);
+      if (indent < baseIndent)
+        break;
+      if (trimmed.front() == '-' && indent == baseIndent)
+        break;
+
+      const auto colon = trimmed.find(':');
+      if (colon == std::string::npos) {
+        ++index;
+        continue;
+      }
+
+      const std::string key = StringUtil::trim(trimmed.substr(0, colon));
+      std::string value = StringUtil::trim(trimmed.substr(colon + 1));
+      ++index;
+
+      if (!value.empty()) {
+        out[key] = parseValue(value, index, indent);
+        continue;
+      }
+
+      std::size_t probe = index;
+      while (probe < lines.size() && StringUtil::trim(lines[probe]).empty())
+        ++probe;
+      if (probe >= lines.size()) {
+        out[key] = FrontmatterValue{std::string{}};
+        break;
+      }
+
+      const std::size_t childIndent = countIndent(lines[probe]);
+      const std::string childTrimmed = StringUtil::trim(lines[probe]);
+      if (childIndent <= indent) {
+        out[key] = FrontmatterValue{std::string{}};
+        continue;
+      }
+
+      index = probe;
+      if (!childTrimmed.empty() && childTrimmed.front() == '-') {
+        out[key] = FrontmatterValue{parseArrayBlock(index, childIndent)};
       } else {
-        values[key] = parseScalarValue(rawValue);
-      }
-    } else {
-      // Potential block structure (list of maps for WorkflowLoader)
-      if (i + 1 < lines.size()) {
-        std::size_t j = i + 1;
-        while (j < lines.size() && StringUtil::trim(lines[j]).empty()) {
-          j++;
-        }
-        if (j < lines.size()) {
-          const std::string &nextLine = lines[j];
-          // Check indentation: block must be indented
-          bool hasIndent = false;
-          for (char c : nextLine) {
-            if (c == ' ' || c == '\t') {
-              hasIndent = true;
-              break;
-            }
-            if (!std::isspace(static_cast<unsigned char>(c))) break;
-          }
-          
-          if (hasIndent && StringUtil::trim(nextLine)[0] == '-') {
-            FrontmatterValue::Array array;
-            std::optional<FrontmatterValue::Map> currentMap;
-            while (j < lines.size()) {
-              std::string l = lines[j];
-              std::string lt = StringUtil::trim(l);
-              if (lt.empty()) {
-                j++;
-                continue;
-              }
-              
-              bool lineHasIndent = false;
-              for (char c : l) {
-                if (c == ' ' || c == '\t') {
-                  lineHasIndent = true;
-                  break;
-                }
-                if (!std::isspace(static_cast<unsigned char>(c))) break;
-              }
-              if (!lineHasIndent) break;
-
-              if (lt[0] == '-') {
-                if (currentMap) array.push_back(FrontmatterValue{*currentMap});
-                currentMap = FrontmatterValue::Map{};
-                lt = StringUtil::trim(lt.substr(1));
-              }
-              auto cPos = lt.find(':');
-              if (cPos != std::string::npos) {
-                if (!currentMap) currentMap = FrontmatterValue::Map{};
-                std::string k = StringUtil::trim(lt.substr(0, cPos));
-                std::string v = StringUtil::trim(lt.substr(cPos + 1));
-                (*currentMap)[k] = parseScalarValue(v);
-              }
-              j++;
-            }
-            if (currentMap) array.push_back(FrontmatterValue{*currentMap});
-            if (!array.empty()) {
-              values[key] = FrontmatterValue{array};
-              i = j - 1;
-            }
-          }
-        }
+        out[key] = FrontmatterValue{parseMapBlock(index, childIndent)};
       }
     }
-  }
+    return out;
+  };
+
+  std::size_t index = 0;
+  const auto root = parseMapBlock(index, 0);
+  values.insert(root.begin(), root.end());
   return values;
 }
 
@@ -420,7 +513,7 @@ FrontmatterParser::getMap(const FrontmatterDocument &document,
 
 std::optional<FrontmatterValue::Array>
 FrontmatterParser::getArray(const FrontmatterDocument &document,
-                             const std::string &key) {
+                            const std::string &key) {
   const auto *value = find(document, key);
   if (!value) {
     return std::nullopt;

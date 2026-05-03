@@ -42,6 +42,13 @@ public:
     void rewriteJournal(const std::vector<AgentTurn>& turns);
 
     /**
+     * @brief Blocks until all queued journal operations have been flushed to
+     * disk by the worker thread. Used by readers that load history from the
+     * database and need to observe the latest writes.
+     */
+    void flush();
+
+    /**
      * @brief Gets the file path for this journal.
      * @return The file path.
      */
@@ -71,8 +78,10 @@ private:
     std::queue<JournalOp> queue;
     std::mutex queueMutex;
     std::condition_variable queueCv;
+    std::condition_variable drainCv;
     std::thread workerThread;
     bool stopWorker = false;
+    bool processing_ = false;
 };
 
 }

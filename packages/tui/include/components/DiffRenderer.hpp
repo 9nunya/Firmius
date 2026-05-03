@@ -10,6 +10,7 @@ namespace firmius::tui {
 
 ftxui::Element RenderToolPresentationDiffs(const ToolPresentation &presentation,
                                            const Theme &theme, bool expanded);
+void ClearToolPresentationDiffCache();
 
 } // namespace firmius::tui
 

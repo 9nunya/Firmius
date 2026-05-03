@@ -8,13 +8,84 @@ namespace firmius::tui {
 
 namespace {
 
+struct WrappedLineCacheKey {
+  std::string code;
+  std::string language;
+
+  bool operator==(const WrappedLineCacheKey &other) const {
+    return code == other.code && language == other.language;
+  }
+};
+
+struct WrappedLineCacheHasher {
+  std::size_t operator()(const WrappedLineCacheKey &key) const {
+    std::size_t seed = std::hash<std::string>{}(key.code);
+    seed ^= std::hash<std::string>{}(key.language) + 0x9e3779b9 +
+            (seed << 6) + (seed >> 2);
+    return seed;
+  }
+};
+
+using WrappedLineCache =
+    std::unordered_map<WrappedLineCacheKey, ftxui::Element, WrappedLineCacheHasher>;
+
+WrappedLineCache &wrappedLineCache() {
+  static thread_local WrappedLineCache cache;
+  return cache;
+}
+
+std::vector<WrappedLineCacheKey> &wrappedLineCacheOrder() {
+  static thread_local std::vector<WrappedLineCacheKey> order;
+  return order;
+}
+
+std::size_t &wrappedLineCacheBytes() {
+  static thread_local std::size_t bytes = 0;
+  return bytes;
+}
+
+std::size_t wrappedLineCacheKeyBytes(const WrappedLineCacheKey &key) {
+  return key.code.size() + key.language.size();
+}
+
+void rememberWrappedLineCacheKey(const WrappedLineCacheKey &key) {
+  constexpr std::size_t kMaxEntries = 4096;
+  constexpr std::size_t kMaxBytes = 8 * 1024 * 1024;
+  constexpr std::size_t kTrimToEntries = 3072;
+  constexpr std::size_t kTrimToBytes = 6 * 1024 * 1024;
+  auto &order = wrappedLineCacheOrder();
+  auto &bytes = wrappedLineCacheBytes();
+  order.push_back(key);
+  bytes += wrappedLineCacheKeyBytes(key);
+
+  if (order.size() <= kMaxEntries && bytes <= kMaxBytes) {
+    return;
+  }
+
+  auto &cache = wrappedLineCache();
+  std::size_t drop_count = 0;
+  while (drop_count < order.size() &&
+         (order.size() - drop_count > kTrimToEntries || bytes > kTrimToBytes)) {
+    const auto &old = order[drop_count];
+    if (cache.erase(old) > 0) {
+      const auto old_bytes = wrappedLineCacheKeyBytes(old);
+      bytes = old_bytes > bytes ? 0 : bytes - old_bytes;
+    }
+    ++drop_count;
+  }
+  order.erase(order.begin(), order.begin() +
+                            static_cast<std::ptrdiff_t>(drop_count));
+}
+
 void appendStyledTextParts(std::vector<ftxui::Element> &parts,
                            const std::string &text, ftxui::Color color) {
   if (text.empty()) {
     return;
   }
-  for (char ch : text) {
-    parts.push_back(ftxui::text(std::string(1, ch)) | ftxui::color(color));
+  constexpr std::size_t kChunkSize = 32;
+  for (std::size_t i = 0; i < text.size(); i += kChunkSize) {
+    parts.push_back(ftxui::text(text.substr(i, kChunkSize)) |
+                    ftxui::color(color));
   }
 }
 
@@ -647,6 +718,12 @@ SyntaxHighlighter::highlightRenderLines(const std::string &code,
   return renderedLines;
 }
 
+void SyntaxHighlighter::clearRenderCache() const {
+  wrappedLineCache().clear();
+  wrappedLineCacheOrder().clear();
+  wrappedLineCacheBytes() = 0;
+}
+
 ftxui::Element
 SyntaxHighlighter::highlightRenderWrappedLine(const std::string &code,
                                               const std::string &language) const {
@@ -655,6 +732,14 @@ SyntaxHighlighter::highlightRenderWrappedLine(const std::string &code,
   }
 
   const auto &theme = ThemeManager::instance().getCurrentTheme();
+  if (code.size() <= 64 * 1024) {
+    WrappedLineCacheKey key{code, language};
+    auto &cache = wrappedLineCache();
+    auto it = cache.find(key);
+    if (it != cache.end()) {
+      return it->second;
+    }
+  }
   auto it = grammars_.find(language);
   if (it == grammars_.end()) {
     return ftxui::paragraph(code.empty() ? " " : code) |
@@ -718,7 +803,13 @@ SyntaxHighlighter::highlightRenderWrappedLine(const std::string &code,
   ts_tree_delete(tree);
   ts_parser_delete(parser);
 
-  return ftxui::hflow(std::move(parts));
+  auto rendered = ftxui::hflow(std::move(parts));
+  if (code.size() <= 64 * 1024) {
+    WrappedLineCacheKey key{code, language};
+    wrappedLineCache()[key] = rendered;
+    rememberWrappedLineCacheKey(key);
+  }
+  return rendered;
 }
 
 ftxui::Element SyntaxHighlighter::highlightRender(const std::string &code,

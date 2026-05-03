@@ -2185,7 +2185,7 @@ TEST_F(HarnessTest, switchThread_missingMetadataReturnsFalseAndEmitsWarning) {
     brokenMetadata.title = "Broken Thread";
     std::string brokenThread = tm.createThread(brokenMetadata);
     execSqlAt(testHome_ / ".firmius" / "threads" / "firmius_threads.db",
-              "UPDATE threads SET metadata_json='{broken' WHERE thread_id='" +
+              "UPDATE thread_metadata_v2 SET host_options_json='{broken' WHERE thread_id='" +
                   brokenThread + "';");
 
     std::promise<AgentError> warningPromise;
@@ -2241,7 +2241,7 @@ TEST_F(HarnessTest, resumeLast_brokenThreadClearsSessionAndReturnsFalse) {
     brokenMetadata.title = "Broken Startup Thread";
     std::string brokenThread = tm.createThread(brokenMetadata);
     execSqlAt(testHome_ / ".firmius" / "threads" / "firmius_threads.db",
-              "UPDATE threads SET metadata_json='{broken' WHERE thread_id='" +
+              "UPDATE thread_metadata_v2 SET host_options_json='{broken' WHERE thread_id='" +
                   brokenThread + "';");
 
     {
@@ -2400,10 +2400,15 @@ TEST_F(HarnessTest, resumeLast_migratesLegacyManifestSoFocusedAgentHistoryRestor
     Journaler(threadId, "legacy-agent").appendTurn(turn);
 
     execSqlAt(testHome_ / ".firmius" / "threads" / "firmius_threads.db",
-              "INSERT INTO thread_states(thread_id, agent_manifest_json) VALUES('" +
+              "INSERT INTO agent_manifest_v2(thread_id, agent_id, persona, parent_id, friendly_name, title, persist_history) VALUES('" +
                   threadId +
-                  "', '{\"legacy-agent\":{\"persona\":\"lead\",\"parentId\":\"\",\"friendlyName\":\"aster\",\"title\":\"Aster\",\"persistHistory\":true}}') "
-                  "ON CONFLICT(thread_id) DO UPDATE SET agent_manifest_json=excluded.agent_manifest_json;");
+                  "', 'legacy-agent', 'lead', '', 'aster', 'Aster', 1);");
+    execSqlAt(testHome_ / ".firmius" / "threads" / "firmius_threads.db",
+              "UPDATE thread_metadata_v2 SET cwd='/tmp', last_active_at=strftime('%s','now')*1000 WHERE thread_id='" +
+                  threadId + "';");
+
+    // Ensure current CWD matches the thread's cwd so init()/resumeLast() selects it from per-project sessions/MRU.
+    std::filesystem::current_path("/tmp");
 
     {
         std::ofstream sessionFile(testHome_ / ".firmius" / "last_session.json");
@@ -2421,6 +2426,83 @@ TEST_F(HarnessTest, resumeLast_migratesLegacyManifestSoFocusedAgentHistoryRestor
     ASSERT_EQ(history.turns.size(), 1u);
     ASSERT_EQ(history.turns[0].messages.size(), 1u);
     EXPECT_EQ(std::get<TextContent>(history.turns[0].messages[0].content[0]).text, "legacy hello");
+}
+
+TEST_F(HarnessTest, SendAfterDiskRestoreTargetsPersistedFocusedAgent) {
+    auto& harness = Harness::instance();
+    const std::string threadId = harness.newThread({}, "/tmp", "lead");
+    ASSERT_FALSE(threadId.empty());
+    auto agent = createFocusedLeadAgent(threadId);
+    ASSERT_TRUE(agent);
+    const std::string agentId = agent->getContext().identity.id;
+
+    agent->saveHistory();
+    Engine::instance().terminateAgent(agentId);
+    ASSERT_TRUE(waitForCondition([&]() {
+        return AgentRegistry::instance().getAgent(agentId) == nullptr;
+    }));
+    ASSERT_EQ(harness.focusedAgentId(), agentId);
+
+    harness.send("after disk restore");
+
+    ASSERT_TRUE(waitForCondition([&]() {
+        auto restored = AgentRegistry::instance().getAgent(agentId);
+        return restored && !restored->isBooting() && !restored->isRunning() &&
+               restored->getContext().state.currentStatus == AgentStatus::Idle &&
+               historyContainsUserText(*restored->getContext().history,
+                                       "after disk restore");
+    }, std::chrono::milliseconds(5000)));
+    EXPECT_EQ(harness.focusedAgentId(), agentId);
+
+    ThreadManager tm((testHome_ / ".firmius" / "threads").string());
+    const auto manifest = tm.readAgentManifest(threadId);
+    EXPECT_EQ(manifest.size(), 1u);
+    EXPECT_NE(manifest.find(agentId), manifest.end());
+
+    const auto persisted = tm.loadAgentHistory(threadId, agentId);
+    EXPECT_TRUE(historyContainsUserText(persisted, "after disk restore"));
+    EXPECT_TRUE(historyContainsAssistantText(persisted, "resumed"));
+}
+
+TEST_F(HarnessTest, SwitchThreadPrefersRootAgentWithPersistedHistory) {
+    ThreadManager tm((testHome_ / ".firmius" / "threads").string());
+
+    ThreadMetadata metadata;
+    metadata.title = "Duplicate Roots";
+    metadata.cwd = "/tmp";
+    metadata.leadPersona = "lead";
+    const std::string threadId = tm.createThread(metadata);
+
+    auto appendUserTurn = [&](const std::string& agentId,
+                              const std::string& turnId,
+                              const std::string& text) {
+        AgentTurn turn;
+        turn.turnId = turnId;
+        Message message;
+        message.role = Role::User;
+        message.timestamp = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch())
+                .count());
+        message.content.push_back(TextContent{text});
+        turn.messages.push_back(message);
+        Journaler(threadId, agentId).appendTurn(turn);
+    };
+    appendUserTurn("aaa-new-root", "user-task-1", "new duplicate");
+    appendUserTurn("zzz-old-root", "user-task-1", "original prompt");
+    appendUserTurn("zzz-old-root", "assistant-2", "original work");
+
+    execSqlAt(testHome_ / ".firmius" / "threads" / "firmius_threads.db",
+              "INSERT INTO agent_manifest_v2(thread_id, agent_id, persona, parent_id, friendly_name, title, persist_history) VALUES('" +
+                  threadId +
+                  "', 'aaa-new-root', 'lead', '', 'aster', 'Aster', 1);");
+    execSqlAt(testHome_ / ".firmius" / "threads" / "firmius_threads.db",
+              "INSERT INTO agent_manifest_v2(thread_id, agent_id, persona, parent_id, friendly_name, title, persist_history) VALUES('" +
+                  threadId +
+                  "', 'zzz-old-root', 'lead', '', 'aster', 'Aster', 1);");
+
+    ASSERT_TRUE(Harness::instance().switchThread(threadId));
+    EXPECT_EQ(Harness::instance().focusedAgentId(), "zzz-old-root");
 }
 
 TEST_F(HarnessTest, currentThreadPermissionMode_defaultsToRequest) {

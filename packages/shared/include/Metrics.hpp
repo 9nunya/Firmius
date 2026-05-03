@@ -1,8 +1,11 @@
 #ifndef FIRMIUS_SHARED_METRICS_HPP
 #define FIRMIUS_SHARED_METRICS_HPP
 
+#include "Enums.hpp"
+
 #include <algorithm>
 #include <cstdint>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -69,6 +72,88 @@ struct TimingMetrics {
 };
 
 /**
+ * @brief Tracks quota usage for a single provider request.
+ */
+struct QuotaMetrics {
+  std::string providerId;       ///< Provider identifier (e.g., "codex", "antigravity").
+  std::string accountLocator;  ///< Account identifier/email used for this request.
+  std::string modelId;         ///< Model identifier used.
+  
+  std::vector<QuotaBucket> quotaBefore;  ///< Quota snapshot before request.
+  std::vector<QuotaBucket> quotaAfter;   ///< Quota snapshot after request.
+  std::map<std::string, float> quotaDiff; ///< Bucket name -> fraction consumed.
+  
+  // Provider-specific primary bucket tracking
+  std::string primaryBucketName;      ///< Name of the primary bucket for this model (e.g., "5h", "claude-3-5").
+  float primaryBucketDiff = 0.0f;      ///< Fraction consumed from primary bucket.
+  float primaryBucketRemaining = 0.0f; ///< Remaining fraction in primary bucket after request.
+  
+  bool rateLimited = false;     ///< Whether request hit rate limit.
+  int64_t backoffUntil = 0;     ///< Epoch seconds when backoff expires (if rate limited).
+  int retryAttempt = 0;         ///< Which retry attempt this was (0 = first attempt).
+  
+  /**
+   * @brief Calculates quota diffs from before/after snapshots.
+   * @param modelId Optional model ID to determine primary bucket (provider-specific).
+   */
+  void calculateDiffs(const std::string& primaryBucketHint = "") {
+    quotaDiff.clear();
+    for (const auto& after : quotaAfter) {
+      for (const auto& before : quotaBefore) {
+        if (before.name == after.name) {
+          float diff = before.remainingFraction - after.remainingFraction;
+          if (diff > 0.0f) {
+            quotaDiff[after.name] = diff;
+          }
+          // Track primary bucket if hint matches or it's the first bucket
+          if (!primaryBucketHint.empty() && after.name == primaryBucketHint) {
+            primaryBucketName = after.name;
+            primaryBucketDiff = diff;
+            primaryBucketRemaining = after.remainingFraction;
+          }
+          break;
+        }
+      }
+    }
+    // If no primary bucket found but we have a hint, try partial match
+    if (primaryBucketName.empty() && !primaryBucketHint.empty()) {
+      for (const auto& after : quotaAfter) {
+        if (after.name.find(primaryBucketHint) != std::string::npos ||
+            primaryBucketHint.find(after.name) != std::string::npos) {
+          for (const auto& before : quotaBefore) {
+            if (before.name == after.name) {
+              primaryBucketName = after.name;
+              primaryBucketDiff = before.remainingFraction - after.remainingFraction;
+              primaryBucketRemaining = after.remainingFraction;
+              break;
+            }
+          }
+          if (!primaryBucketName.empty()) break;
+        }
+      }
+    }
+    // Fallback: use first bucket with consumption, or just first bucket
+    if (primaryBucketName.empty()) {
+      for (const auto& [name, diff] : quotaDiff) {
+        if (diff > 0.0f) {
+          primaryBucketName = name;
+          primaryBucketDiff = diff;
+          for (const auto& after : quotaAfter) {
+            if (after.name == name) {
+              primaryBucketRemaining = after.remainingFraction;
+              break;
+            }
+          }
+          break;
+        }
+      }
+    }
+  }
+  
+  bool operator==(const QuotaMetrics& other) const = default;
+};
+
+/**
  * @brief Aggregated metrics for an agent turn or task.
  */
 struct AgentMetrics {
@@ -76,6 +161,7 @@ struct AgentMetrics {
   TimingMetrics timing;     ///< Latency details.
   double estimatedCostUsd = 0.0; ///< Calculated cost of the request.
   ContextWindowMetrics context;   ///< Latest context-bucketing snapshot.
+  QuotaMetrics quota;       ///< Quota usage details for this request.
 
   /**
    * @brief Accumulates metrics from another instance.
@@ -105,6 +191,10 @@ struct AgentMetrics {
     estimatedCostUsd += other.estimatedCostUsd;
     if (!other.context.empty()) {
       context = other.context;
+    }
+    // Quota: take the latest quota snapshot (not additive)
+    if (!other.quota.providerId.empty()) {
+      quota = other.quota;
     }
     return *this;
   }

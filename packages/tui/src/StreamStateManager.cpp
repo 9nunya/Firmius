@@ -421,17 +421,64 @@ parseFileEditSignalsFromResult(const std::string &result) {
 }
 
 bool shouldRetainCompletedToolCall(const shared::ToolCallView &view) {
+  // Truly in-flight phases must always survive a turn-completion sweep.
+  if (view.phase == shared::ToolPhase::BackgroundRunning ||
+      view.phase == shared::ToolPhase::Called) {
+    return true;
+  }
+  // Preparing tool calls are NOT retained at turn-completion: the turn ended
+  // without finalizing them, so they are dead state. handleAgentTurnCompleted
+  // and handleAgentError sweep them explicitly so they don't ghost the chat
+  // (the long-standing "● Preparing ..." stuck-row bug).
+  if (view.phase == shared::ToolPhase::Preparing) {
+    return false;
+  }
+  // Finished/Error: keep the rich tool surfaces (Delegate/summon_subagent show
+  // subagent activity; file edits are referenced by diff blocks).
   if (view.name == "Delegate" || view.name == "summon_subagent") {
     return true;
   }
-
-  if (view.phase == shared::ToolPhase::BackgroundRunning ||
-      view.phase == shared::ToolPhase::Called ||
-      view.phase == shared::ToolPhase::Preparing) {
-    return true;
-  }
-
   return isFileEditLikeToolName(view.name) || !view.fileEditEvents.empty();
+}
+
+// Resolve any tool views still in the Preparing phase for the given agent
+// after a turn boundary. Mirrors handleAgentInterrupted's logic so stale
+// chunked tool calls cannot ghost the chat across turn boundaries.
+//
+// Returns the set of tool-call IDs that were erased (caller is responsible
+// for trimming the timeline entries that referenced them).
+std::unordered_set<std::string> sweepStalePreparingViews(
+    std::unordered_map<std::string, std::shared_ptr<shared::ToolCallView>>
+        &tool_calls,
+    const std::string &agentId) {
+  using firmius::shared::ToolPhase;
+  std::unordered_set<std::string> erased;
+  for (auto it = tool_calls.begin(); it != tool_calls.end();) {
+    auto &view = it->second;
+    if (!view || view->agentId != agentId ||
+        view->phase != ToolPhase::Preparing) {
+      ++it;
+      continue;
+    }
+    const bool hasMeaningfulIdentity =
+        !view->toolCallId.empty() && (!view->name.empty() || !view->args.empty());
+    const bool isPreparationOnly =
+        view->args.empty() && view->result.empty();
+    if (!hasMeaningfulIdentity || isPreparationOnly) {
+      erased.insert(it->first);
+      it = tool_calls.erase(it);
+      continue;
+    }
+    // Has identity but no result: promote to Error so the user sees the
+    // failure surface instead of an immortal "Preparing..." pill.
+    view->phase = ToolPhase::Error;
+    view->success = false;
+    if (view->result.empty()) {
+      view->result = "Tool call did not finalize before the turn ended.";
+    }
+    ++it;
+  }
+  return erased;
 }
 
 std::string artifactReadSummary(const std::string &args, const std::string &result) {
@@ -467,6 +514,8 @@ bool shouldAppendErrorToLiveChat(const std::string &message) {
     return false;
   }
 
+  // Live-chat error rows are intentionally narrow: only surface raw provider
+  // the NotificationManager toast instead so they don't pollute the chat.
   const std::string lower = firmius::shared::StringUtil::toLower(message);
   const bool has_raw_body =
       message.find("Raw provider body:") != std::string::npos ||
@@ -497,7 +546,6 @@ void appendErrorToTimelineIfRelevant(std::vector<TimelineEntry> &timeline,
       TimelineEntry::Kind::Error,
       "error-" + std::to_string(++nextSequence), message, agentId});
 }
-
 std::string summarizeHistoricalToolEntry(const std::string &name,
                                          const std::string &args,
                                          const std::string &result,
@@ -545,12 +593,11 @@ synthesizeHistoricalSubagentLog(const shared::AgentHistory &history,
           }
           auto &entry = entries[it_entry->second];
           entry.phase = tr->success ? shared::ToolPhase::Finished
-                                    : shared::ToolPhase::Error;
+                                   : shared::ToolPhase::Error;
           entry.summary = summarizeHistoricalToolEntry(
               entry.name, entry.args, tr->result, tr->success);
           continue;
         }
-
         if (auto *th = std::get_if<shared::ThinkingContent>(&content)) {
           if (th->thinking.empty()) {
             continue;
@@ -793,6 +840,8 @@ void StreamStateManager::clearRetryStatus() {
   account_swaps_.clear();
 }
 
+void StreamStateManager::markLiveStateChanged() { ++live_render_epoch_; }
+
 void StreamStateManager::handleAgentThinking(const shared::AgentThinking &e) {
   auto &s = streams_[e.agentId];
   if (!s.is_thinking) {
@@ -807,11 +856,13 @@ void StreamStateManager::handleAgentThinking(const shared::AgentThinking &e) {
   }
   s.thinking += delta;
   appendLiveTimelineDelta(e.agentId, TimelineEntry::Kind::Thinking, delta);
-  if (!firmius::shared::StringUtil::trim(delta).empty()) {
+  // H4: allocation-free hot-path predicate replaces trim().empty() copy.
+  if (!firmius::shared::StringUtil::isAllWhitespace(delta)) {
     live_quick_clusters_[e.agentId].prose_since_last_tool = true;
   }
   s.provider_waiting = false;
   clearRetryStatus();
+  markLiveStateChanged();
 }
 
 void StreamStateManager::handleAgentText(const shared::AgentText &e) {
@@ -830,13 +881,14 @@ void StreamStateManager::handleAgentText(const shared::AgentText &e) {
   }
   s.text += delta;
   appendLiveTimelineDelta(e.agentId, TimelineEntry::Kind::Text, delta);
-  if (!firmius::shared::StringUtil::trim(delta).empty()) {
+  // H4: allocation-free hot-path predicate replaces trim().empty() copy.
+  if (!firmius::shared::StringUtil::isAllWhitespace(delta)) {
     live_quick_clusters_[e.agentId].prose_since_last_tool = true;
   }
   s.provider_waiting = false;
   clearRetryStatus();
+  markLiveStateChanged();
 }
-
 void StreamStateManager::handleAgentTurnCompleted(
     const shared::AgentTurnCompleted &e) {
   auto &s = streams_[e.agentId];
@@ -849,6 +901,7 @@ void StreamStateManager::handleAgentTurnCompleted(
   s.has_active_live_entry = false;
   s.active_live_entry_id.clear();
   pushTokenUsage(e.agentId, e.aggregateMetrics);
+  markLiveStateChanged();
   {
     auto &summaries = completed_run_summaries_[e.agentId];
     CompletedRunSummary summary;
@@ -937,6 +990,13 @@ void StreamStateManager::handleAgentTurnCompleted(
     }
   }
 
+  // Sweep stale Preparing views before the retention prune. The turn ended
+  // without finalizing them (no AgentToolCall, no ToolResultContent), so
+  // they are dead state. Preparation-only entries are erased; identity-only
+  // entries are promoted to Error so the user sees a real failure surface
+  // instead of an immortal "● Preparing ..." pill (the long-standing bug).
+  const auto staleErased = sweepStalePreparingViews(tool_calls_, e.agentId);
+
   for (auto it = tool_calls_.begin(); it != tool_calls_.end();) {
     if (it->second && it->second->agentId == e.agentId &&
         !shouldRetainCompletedToolCall(*it->second)) {
@@ -957,6 +1017,9 @@ void StreamStateManager::handleAgentTurnCompleted(
             }
             if (entry.kind != TimelineEntry::Kind::ToolCall) {
               return false;
+            }
+            if (staleErased.count(entry.id) > 0) {
+              return true;
             }
             auto it_tool = tool_calls_.find(entry.id);
             if (it_tool != tool_calls_.end() && it_tool->second &&
@@ -999,6 +1062,7 @@ void StreamStateManager::handleAgentProviderWaiting(
       subagent.activity_log.erase(subagent.activity_log.begin());
     }
   }
+  markLiveStateChanged();
 }
 
 void StreamStateManager::handleAgentToolCallChunk(
@@ -1093,6 +1157,7 @@ void StreamStateManager::handleAgentToolCallChunk(
   }
 
   flushBufferedProcessOutputForToolCall(e.toolCallId);
+  markLiveStateChanged();
 }
 
 void StreamStateManager::handleAgentToolCall(const shared::AgentToolCall &e) {
@@ -1239,6 +1304,7 @@ void StreamStateManager::handleAgentToolCall(const shared::AgentToolCall &e) {
   }
 
   flushBufferedProcessOutputForToolCall(e.toolCallId);
+  markLiveStateChanged();
 }
 
 void StreamStateManager::handleAgentFileEdited(
@@ -1270,6 +1336,7 @@ void StreamStateManager::handleAgentFileEdited(
   mergeFileEditSignal(*view, shared::FileEditSignal{
                                  e.path, e.diffPreview, e.addedLines,
                                  e.removedLines});
+  markLiveStateChanged();
 }
 
 void StreamStateManager::handleAgentCompacting(
@@ -1281,6 +1348,7 @@ void StreamStateManager::handleAgentCompacting(
   s.compaction_text.clear();
   s.compaction_completion.clear();
   (void)e;
+  markLiveStateChanged();
 }
 
 void StreamStateManager::handleAgentCompactionThinking(
@@ -1290,6 +1358,7 @@ void StreamStateManager::handleAgentCompactionThinking(
   s.compaction_finished = false;
   s.compaction_completion.clear();
   s.compaction_thinking += e.delta;
+  markLiveStateChanged();
 }
 
 void StreamStateManager::handleAgentCompactionText(
@@ -1299,6 +1368,7 @@ void StreamStateManager::handleAgentCompactionText(
   s.compaction_finished = false;
   s.compaction_completion.clear();
   s.compaction_text += e.delta;
+  markLiveStateChanged();
 }
 
 void StreamStateManager::handleContextCompacted(
@@ -1309,6 +1379,7 @@ void StreamStateManager::handleContextCompacted(
   s.compaction_thinking.clear();
   s.compaction_text.clear();
   s.compaction_completion.clear();
+  markLiveStateChanged();
 }
 
 void StreamStateManager::handleAgentProcessSpawned(
@@ -1352,6 +1423,7 @@ void StreamStateManager::handleAgentProcessSpawned(
   }
 
   flushBufferedProcessOutputForProcess(e.processId);
+  markLiveStateChanged();
 }
 
 void StreamStateManager::handleAgentProcessOutput(
@@ -1377,8 +1449,18 @@ void StreamStateManager::handleAgentProcessOutput(
   }
 
   if (!applyProcessOutputToToolView(e)) {
-    pending_process_output_[e.processId].push_back(e);
+    auto &buf = pending_process_output_[e.processId];
+    buf.push_back(e);
+    // Cap orphan event accumulation when no matching tool call ever
+    // materializes (race or mismatched event). Without this the buffer grows
+    // unboundedly for the lifetime of the thread.
+    constexpr std::size_t kMaxPendingEvents = 200;
+    if (buf.size() > kMaxPendingEvents) {
+      buf.erase(buf.begin(),
+                buf.begin() + (buf.size() - kMaxPendingEvents));
+    }
   }
+  markLiveStateChanged();
 }
 
 void StreamStateManager::handleAgentSpawned(
@@ -1443,6 +1525,7 @@ void StreamStateManager::handleAgentSpawned(
     }
   }
   (void)focused_agent_id;
+  markLiveStateChanged();
 }
 
 void StreamStateManager::pushThinkingDuration(const std::string &agentId,
@@ -1508,6 +1591,7 @@ void StreamStateManager::handleAgentFinished(const shared::AgentFinished &e) {
       if (e.outcome.kind == shared::AgentOutcome::Kind::Failed &&
           parentView->phase == ToolPhase::Error) {
         parentView->subagent_running = false;
+        markLiveStateChanged();
         return;
       }
 
@@ -1598,6 +1682,7 @@ void StreamStateManager::handleAgentFinished(const shared::AgentFinished &e) {
       }
     }
   }
+  markLiveStateChanged();
 }
 
 void StreamStateManager::handleAgentInterrupted(
@@ -1660,6 +1745,7 @@ void StreamStateManager::handleAgentInterrupted(
   }
   live_quick_clusters_[e.agentId] = {};
   clearRetryStatus();
+  markLiveStateChanged();
 }
 
 void StreamStateManager::handleAgentError(const shared::AgentError &e) {
@@ -1671,12 +1757,24 @@ void StreamStateManager::handleAgentError(const shared::AgentError &e) {
   s.provider_waiting = false;
   s.is_thinking = false;
   clearActiveLiveEntry(e.agentId);
+
+  // Sweep stale Preparing views — same rationale as turn-completion. Without
+  // this, an agent error after a chunked-but-not-finalized tool call left the
+  // "● Preparing ..." pill ghosting forever until the user pressed Esc.
+  const auto staleErased = sweepStalePreparingViews(tool_calls_, e.agentId);
+
   timeline_.erase(
       std::remove_if(
           timeline_.begin(), timeline_.end(), [&](const TimelineEntry &entry) {
-            return entry.agentId == e.agentId &&
-                   (entry.kind == TimelineEntry::Kind::Thinking ||
-                    entry.kind == TimelineEntry::Kind::Text);
+            if (entry.agentId != e.agentId) {
+              return false;
+            }
+            if (entry.kind == TimelineEntry::Kind::Thinking ||
+                entry.kind == TimelineEntry::Kind::Text) {
+              return true;
+            }
+            return entry.kind == TimelineEntry::Kind::ToolCall &&
+                   staleErased.count(entry.id) > 0;
           }),
       timeline_.end());
   live_quick_clusters_[e.agentId] = {};
@@ -1688,10 +1786,12 @@ void StreamStateManager::handleAgentError(const shared::AgentError &e) {
 
   auto it_sub = subagent_to_parent_tool_.find(e.agentId);
   if (it_sub == subagent_to_parent_tool_.end()) {
+    markLiveStateChanged();
     return;
   }
   auto it_parent = tool_calls_.find(it_sub->second);
   if (it_parent == tool_calls_.end() || !it_parent->second) {
+    markLiveStateChanged();
     return;
   }
 
@@ -1722,6 +1822,7 @@ void StreamStateManager::handleAgentError(const shared::AgentError &e) {
   while (subagent.activity_log.size() > 16) {
     subagent.activity_log.erase(subagent.activity_log.begin());
   }
+  markLiveStateChanged();
 }
 
 const shared::AgentMetrics *
@@ -1752,6 +1853,10 @@ StreamStateManager::getStream(const std::string &agentId) const {
 
 const std::vector<TimelineEntry> &StreamStateManager::getTimeline() const {
   return timeline_;
+}
+
+uint64_t StreamStateManager::getLiveRenderEpoch() const {
+  return live_render_epoch_;
 }
 
 const std::unordered_map<std::string, std::shared_ptr<ToolCallView>> &
@@ -2012,6 +2117,7 @@ void StreamStateManager::handleAgentRetrying(const shared::AgentRetrying &e) {
       subagent.activity_log.erase(subagent.activity_log.begin());
     }
   }
+  markLiveStateChanged();
 }
 
 void StreamStateManager::handleAgentAccountSwitched(
@@ -2034,6 +2140,7 @@ void StreamStateManager::handleAgentAccountSwitched(
       subagent.activity_log.erase(subagent.activity_log.begin());
     }
   }
+  markLiveStateChanged();
 }
 
 void StreamStateManager::handleAgentRetryFailed(
@@ -2058,6 +2165,7 @@ void StreamStateManager::handleAgentRetryFailed(
     }
   }
   // Transient error rendering is disabled.
+  markLiveStateChanged();
 }
 
 const std::string &StreamStateManager::getRetryStatus() const {
@@ -2072,6 +2180,7 @@ void StreamStateManager::handleMessageQueued(const shared::MessageQueued &e) {
   queued_messages_.push_back(
       {e.messageId, e.text, e.threadId, e.agentId,
        static_cast<int>(e.images.size())});
+  markLiveStateChanged();
 }
 
 void StreamStateManager::handleMessageDequeued(
@@ -2082,12 +2191,14 @@ void StreamStateManager::handleMessageDequeued(
                                           return entry.message_id == e.messageId;
                                         }),
                          queued_messages_.end());
+  markLiveStateChanged();
 }
 
 void StreamStateManager::handleInternalMessageQueued(
     const shared::InternalMessageQueued &e) {
   queued_internal_messages_.push_back(
       {e.messageId, e.text, e.threadId, e.agentId, 0});
+  markLiveStateChanged();
 }
 
 void StreamStateManager::handleInternalMessageDequeued(
@@ -2098,6 +2209,7 @@ void StreamStateManager::handleInternalMessageDequeued(
                                           return entry.message_id == e.messageId;
                                         }),
                          queued_internal_messages_.end());
+  markLiveStateChanged();
 }
 
 void StreamStateManager::handleThreadChanged() {
@@ -2117,6 +2229,7 @@ void StreamStateManager::handleThreadChanged() {
   pending_process_output_.clear();
   live_quick_clusters_.clear();
   tool_call_cluster_ids_.clear();
+  markLiveStateChanged();
 }
 
 void StreamStateManager::rebuildToolCallsFromHistory(
@@ -2598,16 +2711,24 @@ void StreamStateManager::assignToolCallClusterId(
 void StreamStateManager::appendLiveTimelineDelta(const std::string &agentId,
                                                  TimelineEntry::Kind kind,
                                                  const std::string &delta) {
-  if (firmius::shared::StringUtil::trim(delta).empty()) {
+  // H4: allocation-free hot-path predicate replaces trim().empty() copy.
+  if (firmius::shared::StringUtil::isAllWhitespace(delta)) {
     return;
   }
 
   auto &stream = streams_[agentId];
+  // H1: O(1) index lookup replaces the previous O(N) timeline scan that ran
+  // once per streamed token. The index is valid only while
+  // has_active_live_entry == true; every mutation that erases timeline_
+  // entries also clears the flag, and between flips timeline_ only sees
+  // push_back so the index stays stable.
   if (stream.has_active_live_entry &&
       stream.active_live_entry_kind == kind &&
-      !stream.active_live_entry_id.empty()) {
-    if (auto *entry = findTimelineEntry(stream.active_live_entry_id)) {
-      entry->message += delta;
+      stream.active_live_entry_index < timeline_.size()) {
+    auto &existing = timeline_[stream.active_live_entry_index];
+    if (!stream.active_live_entry_id.empty() &&
+        existing.id == stream.active_live_entry_id) {
+      existing.message += delta;
       return;
     }
     stream.has_active_live_entry = false;
@@ -2621,8 +2742,9 @@ void StreamStateManager::appendLiveTimelineDelta(const std::string &agentId,
   entry.id =
       "live:" + agentId + ":" + std::to_string(++next_live_entry_sequence_);
   timeline_.push_back(entry);
-  stream.active_live_entry_id = entry.id;
+  stream.active_live_entry_id = std::move(entry.id);
   stream.active_live_entry_kind = kind;
+  stream.active_live_entry_index = timeline_.size() - 1;
   stream.has_active_live_entry = true;
 }
 
@@ -2948,6 +3070,17 @@ bool StreamStateManager::applyProcessOutputToToolView(
       (view->phase == ToolPhase::Called ||
        view->phase == ToolPhase::BackgroundRunning)) {
     view->live_process_output += e.output;
+    // Cap unbounded growth from long-running processes (build, tail -f, etc.).
+    // Keep the tail since latest output is what users care about; the tool's
+    // final ToolResult is separately truncated by
+    // ToolRegistry::truncateIfNecessary. Without this cap a 1GB log spawn put
+    // 1GB into RAM (the 795MB leak diagnosed in the perf audit).
+    constexpr std::size_t kMaxLiveBytes = 256 * 1024;
+    constexpr std::size_t kKeepTailBytes = 192 * 1024;
+    if (view->live_process_output.size() > kMaxLiveBytes) {
+      view->live_process_output.erase(
+          0, view->live_process_output.size() - kKeepTailBytes);
+    }
   }
   if (view->process_id.empty()) {
     view->process_id = e.processId;
@@ -2964,7 +3097,8 @@ bool StreamStateManager::applyProcessOutputToToolView(
     process.waiting = false;
     process.wait_state = "completed";
     if (view->phase == ToolPhase::BackgroundRunning ||
-        isProcessAction(*view, parsed_args, "Spawn")) {
+        isProcessAction(*view, parsed_args, "Spawn") ||
+        isProcessAction(*view, parsed_args, "Execute")) {
       view->phase = ToolPhase::Finished;
       view->success = (e.exitCode == 0);
     }

@@ -14,9 +14,12 @@ target_sources(firmius_audits PRIVATE
     src/audits/HarnessChaosAudit.cpp
     src/audits/OAuthWizardAudit.cpp
     src/audits/P15Audit.cpp
+    src/audits/PersistenceStressAudit.cpp
     src/audits/ProviderAudit.cpp
     src/audits/ProviderStreamDebugAudit.cpp
     src/audits/QwenProviderAudit.cpp
+    src/audits/WindsurfDiscoveryAudit.cpp
+    src/audits/WindsurfStreamAudit.cpp
     src/audits/LoopCancellationAudit.cpp
     src/audits/LspAudit.cpp
     src/audits/ModelLoadAudit.cpp
@@ -28,6 +31,7 @@ target_sources(firmius_audits PRIVATE
     src/audits/WebFetchAudit.cpp
     src/audits/WebSearchAudit.cpp
     src/audits/ReasoningTraceAudit.cpp
+    src/audits/TuiRuntimeStressAudit.cpp
     src/MigrationCli.cpp
 )
 target_sources(firmius_audits PUBLIC
@@ -46,6 +50,7 @@ target_sources(firmius_audits PUBLIC
     include/audits/HarnessChaosAudit.hpp
     include/audits/OAuthWizardAudit.hpp
     include/audits/P15Audit.hpp
+    include/audits/PersistenceStressAudit.hpp
     include/audits/ProviderAudit.hpp
     include/audits/ProviderStreamDebugAudit.hpp
     include/audits/LoopCancellationAudit.hpp
@@ -60,6 +65,7 @@ target_sources(firmius_audits PUBLIC
     include/audits/WebFetchAudit.hpp
     include/audits/WebSearchAudit.hpp
     include/audits/ReasoningTraceAudit.hpp
+    include/audits/TuiRuntimeStressAudit.hpp
 )
 
 target_include_directories(firmius_audits PUBLIC
@@ -73,10 +79,19 @@ target_link_libraries(firmius_audits PUBLIC
     firmius::shared
 )
 
+target_link_libraries(firmius_audits PRIVATE
+    firmius::tui
+)
+
 target_include_directories(firmius_audits PRIVATE
   ${rapidjson_SOURCE_DIR}/include
 # firmius::tui removed: audits should not depend on TUI to keep firmius_audit buildable
 )
+
+add_executable(firmius_shutdown_hang_repro)
+target_sources(firmius_shutdown_hang_repro PRIVATE src/repros/ShutdownHangRepro.cpp)
+target_link_libraries(firmius_shutdown_hang_repro PRIVATE firmius::core firmius::shared)
+target_include_directories(firmius_shutdown_hang_repro PRIVATE ${rapidjson_SOURCE_DIR}/include)
 
 add_executable(firmius_audit)
 target_sources(firmius_audit PRIVATE src/main.cpp)

@@ -1,3 +1,4 @@
+#include "TUIHotkeys.hpp"
 #include "UserPreferences.hpp"
 #include "utils/PlatformPaths.hpp"
 
@@ -120,3 +121,16 @@ TEST_F(UserPreferencesSkinTest, SkinConfigRoundTripsExpandedSchema) {
 }
 
 } // namespace
+
+TEST_F(UserPreferencesSkinTest, ValidationRejectsImpossiblePanelValues) {
+  firmius::tui::UserPreferences prefs;
+  prefs.agent_strip_rows = 0;
+  prefs.work_panel_height = 2;
+  const auto warnings = firmius::tui::validateUserPreferences(prefs);
+  EXPECT_EQ(warnings.size(), 2u);
+}
+
+TEST_F(UserPreferencesSkinTest, DefaultHotkeyConfigIsSeededUnderFirmiusHome) {
+  const auto bindings = firmius::tui::DefaultHotkeyBindings();
+  EXPECT_FALSE(bindings.empty());
+}

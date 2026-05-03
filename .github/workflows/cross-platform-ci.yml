@@ -22,7 +22,7 @@ jobs:
               cmake --build build --parallel
             ctest_cmd: >-
               ctest --test-dir build --output-on-failure
-              -R "test_json_rpc_transport|test_lsp_server_manager|test_engine_shutdown|test_lsp_audit"
+              -R "JsonRpcTransportFixture|LspServerManagerFixture|EngineShutdownTest|LspAudit|LspAuditCli"
           - os: macos-latest
             configure_cmd: >-
               cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
@@ -30,7 +30,7 @@ jobs:
               cmake --build build --parallel
             ctest_cmd: >-
               ctest --test-dir build --output-on-failure
-              -R "test_json_rpc_transport|test_lsp_server_manager|test_engine_shutdown|test_lsp_audit"
+              -R "JsonRpcTransportFixture|LspServerManagerFixture|EngineShutdownTest|LspAudit|LspAuditCli"
           - os: windows-latest
             shell: msys2 {0}
             configure_cmd: >-
@@ -39,7 +39,7 @@ jobs:
               cmake --build build --parallel
             ctest_cmd: >-
               ctest --test-dir build --output-on-failure
-              -R "test_json_rpc_transport|test_lsp_server_manager|test_engine_shutdown|test_lsp_audit"
+              -R "JsonRpcTransportFixture|LspServerManagerFixture|EngineShutdownTest|LspAudit|LspAuditCli"
 
     defaults:
       run:

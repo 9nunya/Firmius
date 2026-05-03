@@ -4,6 +4,7 @@
 #include "SkinConfig.hpp"
 #include "Context.hpp"
 
+#include <vector>
 #include <optional>
 #include <string>
 
@@ -12,6 +13,7 @@ namespace firmius::tui {
 struct UserPreferences {
   std::optional<std::string> theme_name;
   std::optional<shared::ThreadPermissionMode> preferred_permission_mode;
+  std::optional<std::string> preferred_permission_profile;
   std::optional<SkinKind> skin_kind;
   std::optional<SkinConfig> firmius_skin;
   std::optional<SkinConfig> claudex_skin;
@@ -26,6 +28,7 @@ struct UserPreferences {
 };
 
 UserPreferences loadUserPreferences();
+std::vector<std::string> validateUserPreferences(const UserPreferences &preferences);
 void saveUserPreferences(const UserPreferences &preferences);
 
 } // namespace firmius::tui

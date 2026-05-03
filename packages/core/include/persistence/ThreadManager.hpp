@@ -305,6 +305,8 @@ public:
     std::optional<shared::TranscriptUndoAction>
     findTranscriptUndoAction(const std::string& threadId,
                              const std::string& undoActionId) const;
+    std::vector<shared::TranscriptUndoAction>
+    listTranscriptUndoActions(const std::string& threadId, int limit = 25) const;
     void markTranscriptUndoRedoAvailability(const std::string& threadId,
                                             const std::string& undoActionId, bool available);
     std::vector<shared::TranscriptRedoPayload> loadTranscriptRedoPayloads(

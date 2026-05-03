@@ -253,6 +253,8 @@ struct QuotaBucket {
   float remainingFraction = 0.0f;
   std::string resetTime;
   std::string note;
+
+  bool operator==(const QuotaBucket &other) const = default;
 };
 
 } // namespace firmius::shared

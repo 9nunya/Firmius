@@ -1,6 +1,7 @@
 #include "providers/GoogleSearchProvider.hpp"
 #include "providers/AntigravityProvider.hpp"
 #include "providers/LLMSearchProviderRegistry.hpp"
+#include "providers/RetryPolicyResolver.hpp"
 #include "utils/GCPHttpClient.hpp"
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
@@ -20,10 +21,6 @@ namespace {
 constexpr const char* kSearchModel = "gemini-2.5-flash";
 constexpr const char* kAntigravityEndpoint = "https://daily-cloudcode-pa.sandbox.googleapis.com";
 constexpr int kSearchTimeoutSeconds = 60;
-constexpr int kMaxSearchAttempts = 6;
-constexpr int kRetryBaseDelayMs = 350;
-constexpr int kRetryMaxDelayMs = 3000;
-constexpr int kRetryAccountBackoffSeconds = 25;
 
 // System instruction for search (matches TypeScript SEARCH_SYSTEM_INSTRUCTION)
 constexpr const char* kSearchSystemInstruction =
@@ -102,11 +99,13 @@ bool containsCaseInsensitive(const std::string& haystack,
     return it != haystack.end();
 }
 
-bool isRetryableHttpCode(long code) {
-    return code == 429 || code == 500 || code == 502 || code == 503 || code == 504;
+bool isRetryableHttpCode(const RetryPolicyRuntime& retryPolicy, long code) {
+    return RetryPolicyResolver::isRetriableHttpStatus(
+        retryPolicy, static_cast<int>(code));
 }
 
-bool isRetryableBodyError(const std::string& body) {
+bool isRetryableBodyError(const std::string& body,
+                          const RetryPolicyRuntime& retryPolicy) {
     rapidjson::Document doc;
     doc.Parse(body.c_str());
     if (doc.HasParseError() || !doc.IsObject() || !doc.HasMember("error") ||
@@ -118,7 +117,7 @@ bool isRetryableBodyError(const std::string& body) {
 
     const auto& err = doc["error"];
     if (err.HasMember("code") && err["code"].IsInt() &&
-        isRetryableHttpCode(err["code"].GetInt())) {
+        isRetryableHttpCode(retryPolicy, err["code"].GetInt())) {
         return true;
     }
     if (err.HasMember("status") && err["status"].IsString()) {
@@ -144,12 +143,10 @@ bool isRetryableParsedError(const std::string& error) {
            containsCaseInsensitive(error, "timeout");
 }
 
-int computeRetryDelayMs(int attemptIndex) {
-    const int boundedAttempt = std::max(0, attemptIndex);
-    const int backoff = std::min(kRetryMaxDelayMs, kRetryBaseDelayMs * (1 << std::min(boundedAttempt, 4)));
-    static thread_local std::mt19937 rng(std::random_device{}());
-    std::uniform_int_distribution<int> jitter(0, 175);
-    return backoff + jitter(rng);
+int computeRetryDelayMs(const RetryPolicyRuntime& retryPolicy,
+                        int attemptIndex) {
+    return RetryPolicyResolver::computeDelayMs(retryPolicy,
+                                               std::max(0, attemptIndex), 0);
 }
 
 void markAccountTemporarilyRateLimited(AntigravityProvider* provider,
@@ -334,8 +331,9 @@ bool GoogleSearchProvider::isAvailable() const {
 }
 
 SearchResult GoogleSearchProvider::search(const std::string& query,
-                                           const std::vector<std::string>& urls) {
+                                          const std::vector<std::string>& urls) {
     SearchResult errorResult;
+    const RetryPolicyRuntime retryPolicy = RetryPolicyResolver::resolve(name());
 
     if (!antigravity_) {
         errorResult.error = "AntigravityProvider not available";
@@ -352,9 +350,7 @@ SearchResult GoogleSearchProvider::search(const std::string& query,
     }
 
     const std::string url = std::string(kAntigravityEndpoint) + "/v1internal:generateContent";
-    const auto accounts = antigravity_->getAccounts();
-    const int accountCount = static_cast<int>(accounts.size());
-    const int maxAttempts = std::max(2, std::min(kMaxSearchAttempts, accountCount * 2));
+    const int maxAttempts = std::max(1, retryPolicy.config.maxRetries + 1);
 
     std::string lastRetryableError;
 
@@ -447,14 +443,15 @@ SearchResult GoogleSearchProvider::search(const std::string& query,
             }
 
             if (!isRetryableParsedError(*result.error) &&
-                !isRetryableBodyError(response.body)) {
+                !isRetryableBodyError(response.body, retryPolicy)) {
                 return result;
             }
 
             lastRetryableError = *result.error;
         } else if (response.code == 0) {
             lastRetryableError = "Search request failed: " + response.error;
-        } else if (isRetryableHttpCode(response.code) || isRetryableBodyError(response.body)) {
+        } else if (isRetryableHttpCode(retryPolicy, response.code) ||
+                   isRetryableBodyError(response.body, retryPolicy)) {
             lastRetryableError = "Search API returned HTTP " + std::to_string(response.code) +
                                  ": " + response.body;
         } else {
@@ -463,11 +460,15 @@ SearchResult GoogleSearchProvider::search(const std::string& query,
             return errorResult;
         }
 
+        const int backoffSeconds = std::max(
+            1, computeRetryDelayMs(retryPolicy, attempt) / 1000);
         markAccountTemporarilyRateLimited(antigravity_, account,
-                                          kRetryAccountBackoffSeconds + attempt * 5);
+                                          backoffSeconds);
 
         if (attempt + 1 < maxAttempts) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(computeRetryDelayMs(attempt)));
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(computeRetryDelayMs(retryPolicy,
+                                                              attempt)));
         }
     }
 

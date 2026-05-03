@@ -27,6 +27,14 @@ struct AutocompleteState {
   std::string current_arg_value;
   bool has_current_arg_value = false;
 };
+struct CommandPaletteEntry {
+  std::string name;
+  std::string description;
+  std::string completion;
+  CommandBindingHints binding_hints;
+  bool is_workflow = false;
+};
+
 
 class CommandManager {
 public:
@@ -43,6 +51,8 @@ public:
 
   // Get a command by name (for checking command type before execution)
   std::shared_ptr<ICommand> getCommand(const std::string &name) const;
+
+  std::vector<CommandPaletteEntry> listCommands() const;
 
 private:
   CommandManager() = default;

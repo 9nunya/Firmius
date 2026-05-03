@@ -24,6 +24,8 @@ struct PastedBlock {
 struct InputBarModel {
   std::string *buffer = nullptr;
   int *cursor = nullptr;
+  bool *help_opened_from_empty_query = nullptr;
+  bool *command_palette_requested = nullptr;
   std::string placeholder;
   std::vector<PastedBlock> pasted_blocks; // blocks embedded in buffer
   bool is_focused = true;

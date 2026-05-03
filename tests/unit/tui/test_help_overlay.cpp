@@ -64,3 +64,11 @@ TEST(HelpOverlayTest, ResizingViewportKeepsBottomAnchoredWithoutEndKeyRepair) {
   EXPECT_NE(first_pass.find("sigma"), std::string::npos) << first_pass;
   EXPECT_NE(second_pass.find("sigma"), std::string::npos) << second_pass;
 }
+
+TEST(HelpOverlayTest, InputUiSectionIncludesCommandPaletteHotkey) {
+  const auto items = firmius::tui::BuildHelpItemsForSection("Input + UI");
+  const auto it = std::find_if(items.begin(), items.end(), [](const auto &item) {
+    return item.description == "Open command palette / launcher";
+  });
+  ASSERT_NE(it, items.end());
+}

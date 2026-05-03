@@ -1,13 +1,10 @@
 #include "providers/BaseAnthropicProvider.hpp"
-#include "providers/BackoffConstants.hpp"
 #include "utils/InterruptibleSleep.hpp"
 #include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <curl/curl.h>
-#include <iostream>
-#include <random>
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
@@ -16,13 +13,6 @@
 namespace firmius::provider {
 
 namespace {
-
-// Retry constants for Anthropic provider
-struct AnthropicRetryConstants {
-  static constexpr int MAX_DELAY_MS = 30000;
-  static constexpr double JITTER_MIN = 0.5;
-  static constexpr double JITTER_MAX = 1.0;
-};
 
 struct CurlTransferResult {
   CURLcode code = CURLE_OK;
@@ -249,32 +239,25 @@ size_t BaseAnthropicProvider::headerCallback(char *ptr, size_t size,
   return totalSize;
 }
 
-bool BaseAnthropicProvider::isRetriableStatus(int httpStatus) const {
-  return httpStatus == 408 || httpStatus == 429 ||
-         (httpStatus >= 500 && httpStatus <= 504) || httpStatus == 529;
+bool BaseAnthropicProvider::isRetriableStatus(const RetryPolicyRuntime &policy,
+                                              int httpStatus) const {
+  return RetryPolicyResolver::isRetriableHttpStatus(policy, httpStatus);
 }
 
-bool BaseAnthropicProvider::isNonRetriableStatus(int httpStatus) const {
-  return httpStatus == 401 || httpStatus == 403 || httpStatus == 404 ||
-         httpStatus == 422;
+bool BaseAnthropicProvider::isNonRetriableStatus(
+    const RetryPolicyRuntime &policy, int httpStatus) const {
+  return RetryPolicyResolver::isNonRetriableHttpStatus(policy, httpStatus);
 }
 
-int BaseAnthropicProvider::calculateRetryDelay(int attempt,
+int BaseAnthropicProvider::calculateRetryDelay(const RetryPolicyRuntime &policy,
+                                               int attempt,
                                                int headerDelayMs) const {
-  int backoffSeconds =
-      firmius::shared::BackoffConstants::getBackoffSeconds(attempt);
-  int exponentialDelay = backoffSeconds * 1000;
-  int computedDelay =
-      std::min(exponentialDelay, AnthropicRetryConstants::MAX_DELAY_MS);
-  int baseDelay = std::max(computedDelay, headerDelayMs);
+  return RetryPolicyResolver::computeDelayMs(policy, attempt, headerDelayMs);
+}
 
-  std::random_device rd;
-  std::mt19937 gen(rd());
-  std::uniform_real_distribution<> dis(AnthropicRetryConstants::JITTER_MIN,
-                                       AnthropicRetryConstants::JITTER_MAX);
-  double jitter = dis(gen);
-
-  return static_cast<int>(baseDelay * jitter);
+bool BaseAnthropicProvider::isRetriableCurlError(
+    const RetryPolicyRuntime &policy, CURLcode code) const {
+  return RetryPolicyResolver::isRetriableCurlError(policy, code);
 }
 
 std::string BaseAnthropicProvider::formatErrorMessage(
@@ -549,8 +532,9 @@ void BaseAnthropicProvider::processSSELine(
 void BaseAnthropicProvider::stream(
     const AgentHistory &history, const ProviderOptions &opts,
     std::function<void(const StreamEvent &)> onEvent) {
+  const RetryPolicyRuntime retryPolicy = RetryPolicyResolver::resolve(getId());
 
-  std::string url = getBaseUrl() + "/messages";
+  std::string url = getMessagesUrl();
   std::string body = prepareRequestBody(history, opts);
   auto headerMap = getHeaders();
 
@@ -600,7 +584,7 @@ void BaseAnthropicProvider::stream(
     return;
   }
 
-  while (attempt <= 5) { // MAX_RETRIES = 5
+  while (attempt <= retryPolicy.config.maxRetries) {
     curl_easy_reset(curl);
     std::function<void(const StreamEvent &)> wrappedFn = wrappedOnEvent;
     AnthropicStreamContext ctx;
@@ -616,8 +600,10 @@ void BaseAnthropicProvider::stream(
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ctx);
     curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, headerCallback);
     curl_easy_setopt(curl, CURLOPT_HEADERDATA, &currentHeaderCtx);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 300L);
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT,
+                     static_cast<long>(retryPolicy.config.timeoutSeconds));
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT,
+                     static_cast<long>(retryPolicy.config.connectTimeoutSeconds));
     curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
 
     const CurlTransferResult transfer =
@@ -629,6 +615,24 @@ void BaseAnthropicProvider::stream(
       if (opts.abortSignal && opts.abortSignal->load()) {
         break;
       }
+      if (isRetriableCurlError(retryPolicy, res) &&
+          attempt < retryPolicy.config.maxRetries) {
+        int delayMs = calculateRetryDelay(retryPolicy, attempt, 0);
+        onEvent(StreamRetrying{attempt + 1,
+                               retryPolicy.config.maxRetries,
+                               0,
+                               delayMs,
+                               "transport error",
+                               "",
+                               std::string("CURL error: ") +
+                                   curl_easy_strerror(res)});
+        if (!interruptibleSleep(std::chrono::milliseconds(delayMs),
+                                opts.abortController, opts.abortSignal)) {
+          return;
+        }
+        attempt++;
+        continue;
+      }
       onEvent(StreamError{std::string("CURL error: ") + curl_easy_strerror(res),
                           0, ""});
       break;
@@ -638,7 +642,7 @@ void BaseAnthropicProvider::stream(
       break;
     }
 
-    if (isNonRetriableStatus(static_cast<int>(responseCode))) {
+    if (isNonRetriableStatus(retryPolicy, static_cast<int>(responseCode))) {
       std::string errMsg = formatErrorMessage(getId(), opts.modelId,
                                               static_cast<int>(responseCode),
                                               ctx.buffer, "API error");
@@ -646,8 +650,8 @@ void BaseAnthropicProvider::stream(
       break;
     }
 
-    if (isRetriableStatus(static_cast<int>(responseCode))) {
-      if (attempt >= 5) {
+    if (isRetriableStatus(retryPolicy, static_cast<int>(responseCode))) {
+      if (attempt >= retryPolicy.config.maxRetries) {
         std::string errMsg = formatErrorMessage(
             getId(), opts.modelId, static_cast<int>(responseCode), ctx.buffer,
             "API error after " + std::to_string(attempt + 1) + " attempts");
@@ -659,11 +663,20 @@ void BaseAnthropicProvider::stream(
         break;
       }
 
-      int delayMs = calculateRetryDelay(attempt, currentHeaderCtx.retryAfterMs);
+      const int headerDelayMs = retryPolicy.config.respectRetryAfter
+                                    ? currentHeaderCtx.retryAfterMs
+                                    : 0;
+      int delayMs =
+          calculateRetryDelay(retryPolicy, attempt, headerDelayMs);
       std::string reason =
           responseCode == 429 ? "rate limited" : "server error";
-      onEvent(StreamRetrying{attempt + 1, 5, static_cast<int>(responseCode),
-                             delayMs, reason, "", ""});
+      onEvent(StreamRetrying{attempt + 1,
+                             retryPolicy.config.maxRetries,
+                             static_cast<int>(responseCode),
+                             delayMs,
+                             reason,
+                             "",
+                             ""});
 
       if (!interruptibleSleep(std::chrono::milliseconds(delayMs),
                               opts.abortController, opts.abortSignal)) {

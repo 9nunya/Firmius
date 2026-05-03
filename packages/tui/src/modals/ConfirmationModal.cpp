@@ -18,8 +18,9 @@ ftxui::Component ConfirmationModal::create(TuiState &state) {
   auto message = message_;
   auto onConfirm = onConfirm_;
   auto onCancel = onCancel_;
+  auto focusTarget = ftxui::Button("", [] {});
 
-  auto component = ftxui::Renderer([title, message]() {
+  auto component = ftxui::Renderer(focusTarget, [title, message]() {
     const auto &theme = ThemeManager::instance().getCurrentTheme();
     return FlatModalPanel(
         theme, title,

@@ -14,11 +14,15 @@
 #include "audits/HarnessChaosAudit.hpp"
 #include "audits/OAuthWizardAudit.hpp"
 #include "audits/P15Audit.hpp"
+#include "audits/PersistenceStressAudit.hpp"
 #include "audits/ProviderAudit.hpp"
 #include "audits/ProviderStreamDebugAudit.hpp"
 #include "audits/QwenProviderAudit.hpp"
+#include "audits/WindsurfDiscoveryAudit.hpp"
+#include "audits/WindsurfStreamAudit.hpp"
 #include "audits/QwenQuotaAudit.hpp"
 #include "audits/SubagentStressAudit.hpp"
+#include "audits/TuiRuntimeStressAudit.hpp"
 #include "audits/WorkflowsAudit.hpp"
 #include "audits/ResumeTodoAudit.hpp"
 #include "audits/WebFetchAudit.hpp"
@@ -32,7 +36,9 @@ std::vector<std::unique_ptr<shared::IAudit>> createAudits() {
     audits.push_back(std::make_unique<BenchmarksAudit>());
     audits.push_back(std::make_unique<ProviderAudit>());
     audits.push_back(std::make_unique<P15Audit>());
+    audits.push_back(std::make_unique<PersistenceStressAudit>());
     audits.push_back(std::make_unique<SubagentStressAudit>());
+    audits.push_back(std::make_unique<TuiRuntimeStressAudit>());
     audits.push_back(std::make_unique<AntigravityProviderAudit>());
     audits.push_back(std::make_unique<AntigravityQuotaAudit>());
     audits.push_back(std::make_unique<CodexProviderAudit>());
@@ -54,6 +60,8 @@ std::vector<std::unique_ptr<shared::IAudit>> createAudits() {
     audits.push_back(std::make_unique<WebFetchAudit>());
     audits.push_back(std::make_unique<WebSearchAudit>());
     audits.push_back(std::make_unique<ReasoningTraceAudit>());
+    audits.push_back(std::make_unique<WindsurfDiscoveryAudit>());
+    audits.push_back(std::make_unique<WindsurfStreamAudit>());
     return audits;
 
 }

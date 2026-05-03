@@ -29,6 +29,7 @@ public:
     MOCK_METHOD(void, addBlockingProcessId, (const std::string& id), (override));
     MOCK_METHOD(void, removeBlockingProcessId, (const std::string& id), (override));
     MOCK_METHOD(std::vector<std::string>, getBlockingProcessIds, (), (override));
+    MOCK_METHOD(std::vector<std::string>, getProcessIds, (), (override));
     MOCK_METHOD(void, killProcess, (const std::string& id), (override));
 };
 

@@ -63,6 +63,9 @@ private:
    * @return The loaded workflow, or nullopt if loading failed.
    */
   std::optional<Workflow> loadWorkflow(const std::string &path);
+  std::optional<Workflow> loadYamlWorkflow(const std::string &path);
+  void loadHookPacks();
+  std::vector<std::string> getHookDirs() const;
 
   /**
    * Get the workflows directory path.

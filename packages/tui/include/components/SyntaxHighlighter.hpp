@@ -105,6 +105,9 @@ public:
   ftxui::Element highlightRenderWrappedLine(const std::string &code,
                                            const std::string &language) const;
 
+  // Clears rendered-line caches that capture theme colors.
+  void clearRenderCache() const;
+
   // Highlight and render to a single FTXUI element (framed vbox)
   ftxui::Element highlightRender(const std::string &code,
                                  const std::string &language,

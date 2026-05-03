@@ -9,9 +9,9 @@ std::string inferClaudexActivity(const firmius::shared::AgentContext &ctx,
                                  const std::string &fallback,
                                  const firmius::shared::AgentTodoList *todo,
                                  const std::string &status_text) {
-  // Provider waiting is a distinct UX state; keep it top priority.
-  if (stream && stream->provider_waiting) {
-    return "waiting";
+  // Provider waiting or active thinking/streaming are top priority.
+  if (stream && (stream->provider_waiting || stream->is_thinking || !stream->text.empty() || !stream->thinking.empty())) {
+    return stream->provider_waiting ? "waiting" : "thinking";
   }
 
   // Finishing mode: >20 turns and all todo items done

@@ -1,4 +1,5 @@
 #include "modals/ConfigDisplayModal.hpp"
+#include "NotificationManager.hpp"
 #include "TUIState.hpp"
 #include "ThemeManager.hpp"
 #include "harness/Harness.hpp"
@@ -154,12 +155,17 @@ ftxui::Component ConfigDisplayModal::create(TuiState &state) {
         config.dangerouslySkipPermissions = setting.bool_value;
       }
     }
-    h.updateConfig(config);
-    h.saveConfig();
-    *message = "Configuration saved!";
-    state.deferUiMutation([&state]() {
-      state.popModal();
-    });
+    try {
+      h.updateConfig(config);
+      h.saveConfig();
+      *message = "Configuration saved!";
+      state.deferUiMutation([&state]() {
+        state.popModal();
+      });
+    } catch (const std::exception &ex) {
+      NotificationManager::instance().notifyError("Configuration", ex.what(),
+                                                  false);
+    }
   };
 
   auto listContent = ftxui::Renderer([settings, selected, rowBoxes]() {
@@ -239,13 +245,16 @@ ftxui::Component ConfigDisplayModal::create(TuiState &state) {
             ftxui::text(" [S] ") | ftxui::bold |
                 ftxui::color(theme.modals.highlight_fg),
             ftxui::text(" Save   ") | ftxui::color(theme.modals.fg),
+            ftxui::text(" [K] ") | ftxui::bold |
+                ftxui::color(theme.modals.highlight_fg),
+            ftxui::text(" Keybindings   ") | ftxui::color(theme.modals.fg),
             ftxui::filler(),
             ftxui::text(" [ESC] ") | ftxui::bold |
                 ftxui::color(theme.base.dim),
             ftxui::text(" Close ") | ftxui::color(theme.modals.fg),
         }) | ftxui::center,
         ftxui::separatorLight() | ftxui::color(theme.modals.border),
-        ftxui::text("↑↓ navigate, Enter toggle, wheel scroll") |
+        ftxui::text("↑↓ navigate, Enter toggle, K keybindings, wheel scroll") |
             ftxui::center | ftxui::color(theme.base.dim),
     });
 
@@ -257,6 +266,11 @@ ftxui::Component ConfigDisplayModal::create(TuiState &state) {
   return ftxui::CatchEvent(component, [scrollable, settings, selected, saveConfig, rowBoxes, &state](ftxui::Event event) {
     if (event == ftxui::Event::Escape) {
       state.popModal();
+      return true;
+    }
+
+    if (event == ftxui::Event::Character('K')) {
+      state.openModal("keybinding_editor");
       return true;
     }
 

@@ -1,5 +1,5 @@
 #include "providers/CodexProvider.hpp"
-#include "providers/BackoffConstants.hpp"
+#include "providers/RetryPolicyResolver.hpp"
 #include "utils/GCPHttpClient.hpp"
 #include "utils/InterruptibleSleep.hpp"
 #include "utils/StringUtil.hpp"
@@ -26,7 +26,6 @@
 #include <set>
 #include <sstream>
 #include <string_view>
-#include <thread>
 #include <unordered_map>
 
 namespace firmius::provider {
@@ -57,13 +56,6 @@ constexpr int kAccountRetryLimit = 5;
 constexpr float kQuotaAvailableThreshold = 0.01f;
 constexpr std::array<std::string_view, 2> kQuotaWindows = {"primary",
                                                             "secondary"};
-
-struct RetrySettings {
-  static constexpr int MAX_RETRIES = 5;
-  static constexpr int MAX_DELAY_MS = 30000;
-  static constexpr double JITTER_MIN = 0.5;
-  static constexpr double JITTER_MAX = 1.0;
-};
 
 struct VariantSettings {
   std::string effort;
@@ -635,16 +627,10 @@ bool isUsageLimitError(const std::string &body) {
   return containsUsageLimit(body);
 }
 
-int calculateRetryDelay(int attempt) {
-  // Use unified backoff sequence from shared constants
-  int backoffSeconds = firmius::shared::BackoffConstants::getBackoffSeconds(attempt);
-  int exponentialDelay = backoffSeconds * 1000;
-  int capped = std::min(exponentialDelay, RetrySettings::MAX_DELAY_MS);
-  std::random_device rd;
-  std::mt19937 gen(rd());
-  std::uniform_real_distribution<> dis(RetrySettings::JITTER_MIN,
-                                       RetrySettings::JITTER_MAX);
-  return static_cast<int>(capped * dis(gen));
+int calculateRetryDelay(const RetryPolicyRuntime &retryPolicy, int attempt,
+                        int headerDelayMs = 0) {
+  return RetryPolicyResolver::computeDelayMs(retryPolicy, attempt,
+                                             headerDelayMs);
 }
 
 float normalizeQuotaFraction(double value) {
@@ -2443,10 +2429,10 @@ bool CodexProvider::fetchAndStoreQuotas(OAuthAccount &acc) {
   return storedAnyQuota;
 }
 
-void CodexProvider::stream(const AgentHistory &history,
-                           const ProviderOptions &opts,
+void CodexProvider::stream(const AgentHistory &history, const ProviderOptions &opts,
                            std::function<void(const StreamEvent &)> onEvent) {
-  const std::string quotaBucket = "codex";
+  const RetryPolicyRuntime retryPolicy = RetryPolicyResolver::resolve(getId());
+
   auto selectClosestResetAccountIndex = [&]() -> int {
     std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
     if (accounts_.empty()) {
@@ -2512,8 +2498,7 @@ void CodexProvider::stream(const AgentHistory &history,
     std::ostringstream oss;
     oss << "No usage left for account '"
         << (accountLocator.empty() ? "unknown" : accountLocator)
-        << "' on provider '" << kProviderId << "' (quota '" << quotaBucket
-        << "').";
+        << "' on provider '" << kProviderId << "'.";
     if (waitSeconds >= 0) {
       oss << " Try again in " << formatWaitDuration(waitSeconds) << ".";
     } else {
@@ -2632,10 +2617,10 @@ void CodexProvider::stream(const AgentHistory &history,
 
     int lastRetryStatus = 0;
     std::string lastRetryReason = "retry";
-    for (int attempt = 0; attempt <= RetrySettings::MAX_RETRIES; ++attempt) {
+    for (int attempt = 0; attempt <= retryPolicy.config.maxRetries; ++attempt) {
       if (attempt > 0) {
-        int delayMs = calculateRetryDelay(attempt - 1);
-        onEvent(StreamRetrying{attempt, RetrySettings::MAX_RETRIES,
+        int delayMs = calculateRetryDelay(retryPolicy, attempt - 1);
+        onEvent(StreamRetrying{attempt, retryPolicy.config.maxRetries,
                                lastRetryStatus, delayMs, lastRetryReason,
                                acc.getIdentifier(), ""});
         // Use interruptible sleep to allow immediate cancellation
@@ -2647,8 +2632,9 @@ void CodexProvider::stream(const AgentHistory &history,
       }
 
       if (isTokenExpired(acc) && !refreshAccessToken(acc)) {
-        // Use unified backoff constant from shared
-        markAccountRateLimited(acc, firmius::shared::BackoffConstants::MAX_BACKOFF);
+        const int maxBackoffSeconds =
+            std::max(1, retryPolicy.config.maxDelayMs / 1000);
+        markAccountRateLimited(acc, maxBackoffSeconds);
         updateAccount(acc);
         break;
       }
@@ -2690,6 +2676,9 @@ void CodexProvider::stream(const AgentHistory &history,
       bool metricsReceived = false;
       bool doneReceived = false;
       ToolCallTracker tracker;
+
+      // Capture quota snapshot before request
+      std::vector<QuotaBucket> quotaBefore = captureQuotaSnapshot(acc);
 
       auto wrappedOnEvent = [&](const StreamEvent &ev) {
         if (!firstTokenEmitted) {
@@ -2738,8 +2727,43 @@ void CodexProvider::stream(const AgentHistory &history,
       if (code == 404 && isUsageLimitError(ctx.buffer))
         code = 429;
 
+      // Handle rate limiting with quota-aware backoff
+      if (code == 429) {
+        capturedMetrics.quota.rateLimited = true;
+        capturedMetrics.quota.providerId = kProviderId;
+        capturedMetrics.quota.accountLocator = acc.getIdentifier();
+        capturedMetrics.quota.modelId = effectiveModel;
+        capturedMetrics.quota.quotaBefore = quotaBefore;
+        capturedMetrics.quota.retryAttempt = attempt;
+        capturedMetrics.quota.primaryBucketName = "codex";
+        
+        // Calculate backoff based on quota reset time if available
+        int64_t waitSeconds = getResetWaitForAccount(acc);
+        if (waitSeconds > 0) {
+          capturedMetrics.quota.backoffUntil = nowSeconds() + waitSeconds;
+          markAccountRateLimited(acc, static_cast<int>(waitSeconds));
+          updateAccount(acc);
+        }
+        
+        lastRetryStatus = code;
+        lastRetryReason = "rate limited";
+        continue;
+      }
+
       if (code == 200) {
         auto endMs = nowMs();
+        
+        // Capture quota snapshot after request and calculate diffs
+        std::vector<QuotaBucket> quotaAfter = captureQuotaSnapshot(acc);
+        capturedMetrics.quota.providerId = kProviderId;
+        capturedMetrics.quota.accountLocator = acc.getIdentifier();
+        capturedMetrics.quota.modelId = effectiveModel;
+        capturedMetrics.quota.quotaBefore = quotaBefore;
+        capturedMetrics.quota.quotaAfter = quotaAfter;
+        capturedMetrics.quota.retryAttempt = attempt;
+        // Codex uses "codex" as primary bucket (maps to 5h/weekly internally)
+        capturedMetrics.quota.calculateDiffs("codex");
+        
         if (metricsReceived) {
           capturedMetrics.timing.startMs = startMs;
           capturedMetrics.timing.firstTokenMs =
@@ -2826,8 +2850,10 @@ void CodexProvider::stream(const AgentHistory &history,
         return;
       }
 
-      // Use unified backoff sequence from shared constants
-      int backoff = firmius::shared::BackoffConstants::getBackoffSeconds(accountRetries);
+      int backoff = std::max(
+          1,
+          RetryPolicyResolver::computeDelayMs(retryPolicy, accountRetries, 0) /
+              1000);
       if (code == 401 || code == 403) {
         markAccountRateLimited(acc, backoff);
         updateAccount(acc);
@@ -2848,14 +2874,16 @@ void CodexProvider::stream(const AgentHistory &history,
         break;
       }
 
-      if (code == 408 || (code >= 500 && code <= 599)) {
-        if (attempt >= RetrySettings::MAX_RETRIES) {
+      if (RetryPolicyResolver::isRetriableHttpStatus(retryPolicy, code)) {
+        if (attempt >= retryPolicy.config.maxRetries) {
           onEvent(StreamRetryExhausted{code, attempt + 1,
                                        "Maximum retry attempts exceeded"});
           break;
         }
         lastRetryStatus = code;
-        lastRetryReason = (code == 408) ? "timeout" : "server error";
+        lastRetryReason =
+            (code == 408) ? "timeout"
+                          : (code == 429 ? "rate limited" : "server error");
         continue;
       }
 

@@ -2,27 +2,14 @@
 #define FIRMIUS_PROVIDER_BASE_OPENAI_PROVIDER_HPP
 
 #include "IProvider.hpp"
-#include "providers/BackoffConstants.hpp"
 #include "providers/BaseAPIKeyProvider.hpp"
+#include "providers/RetryPolicyResolver.hpp"
 #include <string>
 #include <map>
 #include <vector>
-#include <chrono>
 #include <functional>
 
 namespace firmius::provider {
-
-/**
- * @brief Constants for retry logic with exponential backoff.
- * @deprecated Use firmius::shared::BackoffConstants instead.
- */
-struct RetryConstants {
-    static constexpr int BASE_DELAY_MS = 1000;      ///< Base delay for exponential backoff (1 second).
-    static constexpr int MAX_DELAY_MS = 30000;      ///< Maximum delay cap (30 seconds).
-    static constexpr int MAX_RETRIES = 5;           ///< Maximum number of retry attempts.
-    static constexpr double JITTER_MIN = 0.5;       ///< Minimum jitter multiplier.
-    static constexpr double JITTER_MAX = 1.0;       ///< Maximum jitter multiplier.
-};
 
 /**
  * @brief Structure to capture response headers during CURL requests.
@@ -76,6 +63,8 @@ protected:
     virtual std::map<std::string, std::string> buildHeadersForApiKey(const std::string& apiKey);
     virtual std::string prepareRequestBody(const AgentHistory& history, const ProviderOptions& opts);
     virtual std::string getReasoningFieldName() const;
+    virtual std::string getChatUrl() const;
+    virtual std::string getModelsUrl() const;
 
     /**
      * @brief Calculates estimated cost based on token usage and model pricing.
@@ -115,17 +104,23 @@ private:
     /**
      * @brief Checks if an HTTP status code represents a retriable error.
      */
-    bool isRetriableStatus(int httpStatus) const;
+    bool isRetriableStatus(const RetryPolicyRuntime& policy,
+                           int httpStatus) const;
 
     /**
      * @brief Checks if an HTTP status code represents a non-retriable error.
      */
-    bool isNonRetriableStatus(int httpStatus) const;
+    bool isNonRetriableStatus(const RetryPolicyRuntime& policy,
+                              int httpStatus) const;
 
     /**
      * @brief Calculates the delay for the next retry attempt with jitter.
      */
-    int calculateRetryDelay(int attempt, int headerDelayMs) const;
+    int calculateRetryDelay(const RetryPolicyRuntime& policy, int attempt,
+                            int headerDelayMs) const;
+
+    bool isRetriableCurlError(const RetryPolicyRuntime& policy,
+                              CURLcode code) const;
 
     /**
      * @brief Parses retry-related headers and returns delay in milliseconds.

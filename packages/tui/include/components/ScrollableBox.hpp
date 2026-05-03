@@ -33,6 +33,7 @@ public:
     void RequestEnsureVisible(int line);
     void RequestEnsureVisible(int first_line, int last_line);
     void InvalidateLayout();
+    ScrollableBoxOptions& options() { return options_; }
     int ContentWidth() const;
 
     int ScrollOffset() const { return selected_; }
@@ -73,6 +74,12 @@ private:
     ftxui::CapturedMouse captured_mouse_;
     bool scrollbar_visible_ = false;
     std::chrono::steady_clock::time_point scrollbar_visible_until_{};
+    // H11: bound the retry storm when the box renders before reflect()
+    // populates geometry. Without a cap, every render at zero size requested
+    // another animation frame, which rendered again at zero size, ad
+    // infinitum until the surrounding layout finally settled — a phantom
+    // CPU spinner on startup and on terminal resize.
+    int zero_size_raf_attempts_ = 0;
 };
 
 std::shared_ptr<ScrollableBoxComponent> ScrollableBox(

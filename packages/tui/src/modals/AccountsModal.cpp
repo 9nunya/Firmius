@@ -246,9 +246,10 @@ ftxui::Component AccountsModal::create(TuiState &state) {
                 state.popModalImmediate();
                 state.openModalDirect(modalObj->create(state));
               });
+              return true;
             }
           }
-          return true;
+          return false;
         }
         case firmius::provider::ProviderType::OAuth: {
           auto oauthProvider = std::dynamic_pointer_cast<
@@ -262,13 +263,14 @@ ftxui::Component AccountsModal::create(TuiState &state) {
                 state.popModalImmediate();
                 state.openModalDirect(modalObj->create(state));
               });
+              return true;
             }
           }
-          return true;
+          return false;
         }
         }
       }
-      return true;
+      return false;
     }
     return false;
   });

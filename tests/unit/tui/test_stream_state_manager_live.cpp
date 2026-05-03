@@ -903,4 +903,36 @@ TEST(StreamStateManagerLiveTest,
             std::string::npos);
 }
 
+TEST(StreamStateManagerLiveTest, LiveRenderEpochChangesForEveryVisibleMutationKind) {
+  StreamStateManager state;
+  auto expect_epoch_bumps = [&](auto mutate) {
+    const auto before = state.getLiveRenderEpoch();
+    mutate();
+    EXPECT_GT(state.getLiveRenderEpoch(), before);
+  };
+
+  expect_epoch_bumps([&] {
+    state.handleAgentProviderWaiting(AgentProviderWaiting{"agent-1", ""});
+  });
+  expect_epoch_bumps([&] {
+    state.handleAgentToolCallChunk(
+        AgentToolCallChunk{0, "agent-1", "tool-1", "Process", "{}", ""});
+  });
+  expect_epoch_bumps([&] {
+    state.handleAgentToolCall(AgentToolCall{"agent-1", "tool-1", "Process",
+                                            R"({"action":"Execute"})", ""});
+  });
+  expect_epoch_bumps([&] {
+    state.handleAgentFileEdited(AgentFileEdited{"agent-1", "", "src/a.cpp",
+                                                "tool-1", "@@\n+a\n", 1, 0});
+  });
+  expect_epoch_bumps([&] {
+    state.handleAgentCompacting(AgentCompacting{"agent-1", ""});
+  });
+  expect_epoch_bumps([&] {
+    state.handleAgentRetrying(AgentRetrying{"agent-1", 1, 2, 429, 1000,
+                                            "rate limited", "", "", ""});
+  });
+}
+
 } // namespace

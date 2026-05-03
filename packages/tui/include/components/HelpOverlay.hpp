@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <ftxui/component/component.hpp>
+#include <string>
 
 namespace firmius::tui {
 class TuiState;
@@ -23,6 +24,12 @@ inline HelpOverlayLayout ComputeHelpOverlayLayout(int term_width,
   return layout;
 }
 
+struct HelpItem {
+  std::string key;
+  std::string description;
+};
+
+std::vector<HelpItem> BuildHelpItemsForSection(const std::string &section_name);
 ftxui::Component HelpOverlay(TuiState &state);
 
 } // namespace firmius::tui

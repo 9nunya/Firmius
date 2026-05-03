@@ -34,6 +34,7 @@ struct ProcessSnapshot {
     std::string stdoutData;    ///< Stdout captured up to this point.
     std::string stderrData;    ///< Stderr captured up to this point.
     double elapsedMs;          ///< Time since spawn.
+    std::string systemId;      ///< Host-specific process identifier (PID, exec ID, etc.).
 };
 
 /**

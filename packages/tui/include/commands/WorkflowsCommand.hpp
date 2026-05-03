@@ -14,12 +14,13 @@ class WorkflowCommand : public ICommand {
 public:
   explicit WorkflowCommand(const firmius::core::Workflow &workflow);
 
-  std::string name() const override { return workflow_.id; }
+  std::string name() const override;
   std::string description() const override { return workflow_.description; }
   std::vector<CommandArg> args() const override;
   void execute(CommandCtx &ctx,
                const std::vector<ParsedArg> &args) override;
   bool isWorkflow() const override { return true; }
+  bool takesRawRemainder() const override { return workflow_.rawRemainder; }
 
 private:
   firmius::core::Workflow workflow_;

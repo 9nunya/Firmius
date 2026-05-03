@@ -2,8 +2,10 @@
 
 #include "harness/Harness.hpp"
 #include "persistence/ThreadManager.hpp"
+#include "Serialization.hpp"
 
 #include <iostream>
+#include <algorithm>
 
 namespace {
 
@@ -51,20 +53,60 @@ int defaultUndoTurnCount(firmius::core::Harness &harness) {
 namespace firmius::tui {
 
 void EditsCommand::execute(CommandCtx &ctx, const std::vector<ParsedArg> &args) {
-  (void)ctx;
+  if (!ctx.state) {
+    std::cout << "No TUI state available\n";
+    return;
+  }
   (void)args;
   auto &harness = firmius::core::Harness::instance();
-  auto edits = firmius::core::Harness::instance().listEditBatches();
   const std::string threadId = harness.currentThreadId();
   std::cout << "# Edit History\n\n";
+  if (!threadId.empty()) {
+    std::cout << "Thread: " << threadId << "\n\n";
+  }
+
+  auto edits = harness.listEditBatches();
   if (edits.empty()) {
     std::cout << "No persisted edits found.\n";
     return;
   }
+
+  // Newest-first for a more useful rollback console.
+  std::sort(edits.begin(), edits.end(),
+            [](const auto &a, const auto &b) { return a.createdAt > b.createdAt; });
+
   for (const auto &edit : edits) {
-    std::cout << "- " << edit.editBatchId << " [" << edit.toolName << "] ";
-    std::cout << edit.summaryText << "\n";
+    std::cout << "- " << edit.editBatchId << "  [" << edit.toolName << "]";
+    if (!edit.turnId.empty()) std::cout << "  turn=" << edit.turnId;
+    if (edit.createdAt > 0) std::cout << "  at=" << edit.createdAt;
+    std::cout << "\n";
+    std::cout << "    status=" << firmius::shared::editBatchStatusToString(edit.status)
+              << "  added=" << edit.addedLines
+              << "  removed=" << edit.removedLines << "\n";
+    if (!edit.summaryText.empty()) {
+      std::cout << "    summary: " << edit.summaryText << "\n";
+    }
+
+    auto eligibility = harness.evaluateEditBatchUndo(edit.editBatchId);
+    std::cout << "    undoable: " << (eligibility.undoable ? "yes" : "no");
+    if (!eligibility.reason.empty()) std::cout << "  reason=" << eligibility.reason;
+    std::cout << "\n";
+    if (!eligibility.blockingEditBatchIds.empty()) {
+      std::cout << "    blocked_by: ";
+      for (size_t i = 0; i < eligibility.blockingEditBatchIds.size(); ++i) {
+        if (i) std::cout << ", ";
+        std::cout << eligibility.blockingEditBatchIds[i];
+      }
+      std::cout << "\n";
+    }
   }
+
+  std::cout << "\nRollback:\n";
+  std::cout << "- /undo_edit <edit_batch_id>\n";
+  std::cout << "- /redo_edit <edit_undo_action_id>\n";
+  std::cout << "\nDetails:\n";
+  std::cout << "- /undo_edit <id> will print an undo_action_id (persisted)\n";
+  std::cout << "- /redo_edit <undo_action_id> replays that undo\n";
 }
 
 void UndoTranscriptCommand::execute(CommandCtx &ctx,

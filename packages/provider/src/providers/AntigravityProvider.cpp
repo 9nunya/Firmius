@@ -1,7 +1,7 @@
 #include "providers/AntigravityProvider.hpp"
 #include "providers/AntigravityProtocol.hpp"
-#include "providers/BackoffConstants.hpp"
 #include "providers/GoogleSearchProvider.hpp"
+#include "providers/RetryPolicyResolver.hpp"
 #include "utils/GCPHttpClient.hpp"
 #include "utils/InterruptibleSleep.hpp"
 #include "utils/TempOAuthServer.hpp"
@@ -23,7 +23,6 @@
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
-#include <thread>
 
 namespace firmius::provider {
 
@@ -559,8 +558,6 @@ int selectClosestRefreshAccountIndex(const std::vector<OAuthAccount> &accounts,
   return bestIdx;
 }
 
-
-
 std::string formatWaitDuration(int64_t waitSeconds) {
   if (waitSeconds <= 0) {
     return "0s";
@@ -617,7 +614,6 @@ float normalizeQuotaFraction(double value) {
     normalized = 1.0;
   return static_cast<float>(normalized);
 }
-
 
 } // namespace
 
@@ -1237,6 +1233,7 @@ void AntigravityProvider::processSSELine(const std::string &line,
 void AntigravityProvider::stream(
     const AgentHistory &history, const ProviderOptions &opts,
     std::function<void(const StreamEvent &)> onEvent) {
+  const RetryPolicyRuntime retryPolicy = RetryPolicyResolver::resolve(getId());
   std::string requestedModel =
       opts.modelId.empty() ? "gemini-3-flash" : opts.modelId;
   std::string resolvedModel =
@@ -1341,16 +1338,18 @@ void AntigravityProvider::stream(
 
     bool shouldTryNextAccount = false;
     std::string retryReason = "Connection error";
-    for (int retryAttempt = 0; retryAttempt < 4; ++retryAttempt) {
+    for (int retryAttempt = 0;
+         retryAttempt <= retryPolicy.config.maxRetries; ++retryAttempt) {
       if (retryAttempt > 0) {
-        // Use unified backoff sequence from shared constants
-        int backoffSeconds =
-            firmius::shared::BackoffConstants::getBackoffSeconds(retryAttempt -
-                                                                 1);
-        onEvent(StreamRetrying{retryAttempt, 4, 0, backoffSeconds * 1000,
+        int delayMs = RetryPolicyResolver::computeDelayMs(
+            retryPolicy, retryAttempt - 1, 0);
+        onEvent(StreamRetrying{retryAttempt,
+                               retryPolicy.config.maxRetries,
+                               0,
+                               delayMs,
                                retryReason, acc.getIdentifier(), ""});
         // Use interruptible sleep to allow immediate cancellation
-        if (!interruptibleSleep(std::chrono::seconds(backoffSeconds),
+        if (!interruptibleSleep(std::chrono::milliseconds(delayMs),
                                 opts.abortController, opts.abortSignal)) {
           // Interrupted during retry delay
           return;
@@ -1394,6 +1393,9 @@ void AntigravityProvider::stream(
       bool firstTokenEmitted = false;
       bool metricsReceived = false;
       AgentMetrics capturedMetrics;
+
+      // Capture quota snapshot before request
+      std::vector<QuotaBucket> quotaBefore = captureQuotaSnapshot(acc);
 
       auto wrappedOnEvent = [&](const StreamEvent &ev) {
         if (std::holds_alternative<TextChunk>(ev) ||
@@ -1447,6 +1449,18 @@ void AntigravityProvider::stream(
           auto endMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                            std::chrono::system_clock::now().time_since_epoch())
                            .count();
+          
+          // Capture quota snapshot after request and calculate diffs
+          std::vector<QuotaBucket> quotaAfter = captureQuotaSnapshot(acc);
+          capturedMetrics.quota.providerId = getId();
+          capturedMetrics.quota.accountLocator = acc.getIdentifier();
+          capturedMetrics.quota.modelId = effectiveModel;
+          capturedMetrics.quota.quotaBefore = quotaBefore;
+          capturedMetrics.quota.quotaAfter = quotaAfter;
+          // Antigravity: claude models use claude buckets, gemini uses gemini buckets
+          std::string primaryBucketHint = isClaudeModel ? "claude" : "gemini";
+          capturedMetrics.quota.calculateDiffs(primaryBucketHint);
+          
           if (metricsReceived) {
             capturedMetrics.timing.startMs = startMs;
             capturedMetrics.timing.firstTokenMs =
@@ -1478,7 +1492,9 @@ void AntigravityProvider::stream(
           break;
         }
         // Classify failure types
-        if (resp.code == 0 || resp.code == 408 || resp.code >= 500) {
+        if (resp.code == 0 ||
+            RetryPolicyResolver::isRetriableHttpStatus(
+                retryPolicy, static_cast<int>(resp.code))) {
           retryableFailure = true;
           if (!resp.error.empty())
             retryReason = "Connection error: " + resp.error;
@@ -1538,8 +1554,10 @@ void AntigravityProvider::stream(
           }
           storeExhaustedModelQuotaFromError(acc, ctx.buffer, effectiveModel);
           lastError = "Rate limited (HTTP " + std::to_string(resp.code) + ")";
-          int backoff = firmius::shared::BackoffConstants::getBackoffSeconds(
-              accountRetries);
+          int backoff = std::max(
+              1, RetryPolicyResolver::computeDelayMs(retryPolicy, accountRetries,
+                                                     0) /
+                     1000);
           markAccountRateLimited(acc, backoff);
           updateAccount(acc);
           shouldTryNextAccount = true;

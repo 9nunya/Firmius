@@ -11,6 +11,17 @@ namespace firmius::tui {
 WorkflowCommand::WorkflowCommand(const firmius::core::Workflow &workflow)
     : workflow_(workflow) {}
 
+std::string WorkflowCommand::name() const {
+  if (workflow_.slashCommand.has_value() && !workflow_.slashCommand->empty()) {
+    std::string cmd = *workflow_.slashCommand;
+    if (!cmd.empty() && cmd.front() == '/') {
+      cmd.erase(cmd.begin());
+    }
+    return cmd.empty() ? workflow_.id : cmd;
+  }
+  return workflow_.id;
+}
+
 std::vector<CommandArg> WorkflowCommand::args() const {
   std::vector<CommandArg> args;
 
@@ -73,8 +84,10 @@ void registerWorkflowCommands() {
 
   auto workflows = loader.getAllWorkflows();
   for (const auto &workflow : workflows) {
-    commandManager.registerCommand(
-        std::make_shared<WorkflowCommand>(workflow));
+    auto command = std::make_shared<WorkflowCommand>(workflow);
+    if (!commandManager.getCommand(command->name())) {
+      commandManager.registerCommand(command);
+    }
   }
 }
 

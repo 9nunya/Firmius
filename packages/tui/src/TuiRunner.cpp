@@ -1,8 +1,11 @@
 #include "TuiRunner.hpp"
 #include "AgentRegistry.hpp"
+#include "FatalSignalHandler.hpp"
+#include "NotificationManager.hpp"
 #include "TUIState.hpp"
 #include "agents/PurposeLoader.hpp"
 #include "harness/Harness.hpp"
+#include "models/TUIStore.hpp"
 #include "workflow/WorkflowLoader.hpp"
 #include <atomic>
 #include <chrono>
@@ -20,6 +23,7 @@
 #include <iomanip>
 #include <iostream>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -28,27 +32,35 @@
 #include "commands/BenchmarksCommand.hpp"
 #include "commands/CommandManager.hpp"
 #include "commands/ConfigCommand.hpp"
-#include "commands/MemoryCommand.hpp"
 #include "commands/ConnectCommand.hpp"
 #include "commands/EditHistoryCommand.hpp"
+#include "commands/HistoryCommand.hpp"
+#include "commands/HooksCommand.hpp"
+#include "commands/UndoRedoCommands.hpp"
 #include "commands/McpCommand.hpp"
+#include "commands/MemoryCommand.hpp"
+#include "commands/ModeCommand.hpp"
 #include "commands/ModelCommand.hpp"
 #include "commands/NewCommand.hpp"
 #include "commands/PurposesCommand.hpp"
 #include "commands/QuitCommand.hpp"
 #include "commands/QuotasCommand.hpp"
 #include "commands/RouterCommand.hpp"
+#include "commands/ProvidersCommand.hpp"
 #include "commands/SkinCommand.hpp"
 #include "commands/ThreadsCommand.hpp"
 #include "commands/UndoCommand.hpp"
 #include "commands/WorkflowsCommand.hpp"
+#include "modals/CommandPaletteModal.hpp"
 #include "modals/ConfigDisplayModal.hpp"
-#include "modals/RollingMemorySettingsModal.hpp"
+#include "modals/KeybindingEditorModal.hpp"
+#include "modals/McpModal.hpp"
 #include "modals/ModalRegistry.hpp"
 #include "modals/ModelPickerModal.hpp"
 #include "modals/PurposesModal.hpp"
+#include "modals/ProvidersModal.hpp"
+#include "modals/RollingMemorySettingsModal.hpp"
 #include "modals/RouterModal.hpp"
-#include "modals/McpModal.hpp"
 #include "modals/ThreadLockedModal.hpp"
 #include "modals/ThreadPickerModal.hpp"
 
@@ -100,36 +112,34 @@ bool parseStartupProfileEnabledFromEnv() {
 }
 
 class StartupTimingProfiler {
- public:
-  explicit StartupTimingProfiler(bool enabled) : enabled_(enabled) {
-    if (!enabled_) {
-      return;
-    }
+public:
+  explicit StartupTimingProfiler(bool printSummary) : print_summary_(printSummary) {
     start_ = Clock::now();
     cursor_ = start_;
     marks_.push_back({"run_tui_begin", 0.0});
   }
 
-  bool enabled() const { return enabled_; }
+  bool enabled() const { return print_summary_; }
+
+  double totalMs() const { return computeTotalMs(); }
+
+  double elapsedMs() const {
+    return std::chrono::duration<double, std::milli>(Clock::now() - start_)
+        .count();
+  }
 
   void completePhase(const std::string &name) {
-    if (!enabled_) {
-      return;
-    }
     const auto now = Clock::now();
     phases_.push_back({name, toMs(cursor_), toMs(now)});
     cursor_ = now;
   }
 
   void mark(const std::string &name) {
-    if (!enabled_) {
-      return;
-    }
     marks_.push_back({name, toMs(Clock::now())});
   }
 
   void printSummary(std::ostream &out) const {
-    if (!enabled_) {
+    if (!print_summary_) {
       return;
     }
 
@@ -137,17 +147,7 @@ class StartupTimingProfiler {
     const auto oldPrecision = out.precision();
     out << std::fixed << std::setprecision(3);
 
-    double totalMs = 0.0;
-    for (const auto &phase : phases_) {
-      if (phase.endMs > totalMs) {
-        totalMs = phase.endMs;
-      }
-    }
-    for (const auto &mark : marks_) {
-      if (mark.second > totalMs) {
-        totalMs = mark.second;
-      }
-    }
+    const double totalMs = computeTotalMs();
 
     out << "[tui_startup_profile] {\n";
     out << "  \"enabled\": true,\n";
@@ -156,8 +156,9 @@ class StartupTimingProfiler {
     out << "  \"phases\": [\n";
     for (std::size_t i = 0; i < phases_.size(); ++i) {
       const auto &phase = phases_[i];
-      out << "    {\"name\": \"" << phase.name << "\", \"start_ms\": "
-          << phase.startMs << ", \"end_ms\": " << phase.endMs
+      out << "    {\"name\": \"" << phase.name
+          << "\", \"start_ms\": " << phase.startMs
+          << ", \"end_ms\": " << phase.endMs
           << ", \"duration_ms\": " << (phase.endMs - phase.startMs) << "}";
       if (i + 1 < phases_.size()) {
         out << ",";
@@ -181,7 +182,7 @@ class StartupTimingProfiler {
     out.precision(oldPrecision);
   }
 
- private:
+private:
   using Clock = std::chrono::steady_clock;
 
   struct PhaseTiming {
@@ -194,12 +195,95 @@ class StartupTimingProfiler {
     return std::chrono::duration<double, std::milli>(tp - start_).count();
   }
 
-  bool enabled_ = false;
+  double computeTotalMs() const {
+    double totalMs = 0.0;
+    for (const auto &phase : phases_) {
+      totalMs = std::max(totalMs, phase.endMs);
+    }
+    for (const auto &mark : marks_) {
+      totalMs = std::max(totalMs, mark.second);
+    }
+    return totalMs;
+  }
+
+  bool print_summary_ = false;
   Clock::time_point start_{};
   Clock::time_point cursor_{};
   std::vector<PhaseTiming> phases_;
   std::vector<std::pair<std::string, double>> marks_;
 };
+
+struct StartupVisualPhase {
+  std::string phase_key;
+  std::string title;
+  std::string detail;
+};
+
+const std::vector<StartupVisualPhase> &startupVisualPhases() {
+  static const std::vector<StartupVisualPhase> phases = {
+      {"command_registration", "Loading command registry",
+       "Registering built-in slash commands: new, threads, model, undo, config, history, memory, mode, providers, and benchmarks."},
+      {"modal_registration", "Loading modal registry",
+       "Registering thread picker, model picker, command palette, config, keybindings, router, providers, purposes, and MCP modals."},
+      {"harness_init", "Loading runtime harness",
+       "Initializing thread locks, persisted session metadata, config, providers, permissions, and runtime event routing."},
+      {"workflow_loader_init", "Loading workflow definitions",
+       "Scanning installed workflow files from the configured Firmius workflow directories."},
+      {"workflow_command_registration", "Loading workflow commands",
+       "Publishing discovered workflows as slash-command entrypoints."},
+      {"thread_path_selection", "Loading startup thread path",
+       "Resolving whether to show Welcome, restore a selected thread, continue the last thread, or launch an initial prompt."},
+      {"tui_state_init", "Loading first-frame TUI state",
+       "Hydrating store models, welcome/chat view state, focused transcript cache, and status bar model."},
+      {"screen_creation_attach", "Loading terminal screen",
+       "Creating the fullscreen FTXUI screen, installing input handlers, and binding the first render tree."},
+  };
+  return phases;
+}
+
+std::string formatStartupSummaryLine(const StartupTimingProfiler &profiler) {
+  std::ostringstream out;
+  const double totalMs = profiler.totalMs();
+  if (totalMs < 1000.0) {
+    out << "Loaded in " << std::fixed << std::setprecision(1) << totalMs
+        << " ms.";
+  } else {
+    out << "Loaded in " << std::fixed << std::setprecision(2)
+        << (totalMs / 1000.0) << " s (" << std::setprecision(0) << totalMs
+        << " ms).";
+  }
+  return out.str();
+}
+
+void applyStartupVisualPhase(firmius::tui::TuiState &state,
+                             const StartupTimingProfiler &profiler,
+                             std::size_t phase_index, bool completed) {
+  const auto &phases = startupVisualPhases();
+  if (phase_index >= phases.size()) {
+    return;
+  }
+
+  const auto &phase = phases[phase_index];
+  const float numerator = static_cast<float>(completed ? (phase_index + 1)
+                                                       : phase_index);
+  const float denominator =
+      static_cast<float>(std::max<std::size_t>(1, phases.size()));
+  state.setLoadingMessage(phase.title);
+  std::ostringstream detail;
+  detail << "Loading " << phase.phase_key << ": " << phase.detail
+         << " Step " << (phase_index + 1) << " of " << phases.size()
+         << (completed ? " complete." : " running.") << " Elapsed "
+         << std::fixed << std::setprecision(1) << profiler.elapsedMs()
+         << " ms.";
+  state.setLoadingDetail(detail.str());
+  state.setLoadingProgress(numerator / denominator);
+
+  if (completed && phase_index + 1 == phases.size()) {
+    state.setLoadingMessage("Startup complete.");
+    state.setLoadingDetail(formatStartupSummaryLine(profiler));
+    state.setLoadingProgress(1.0f);
+  }
+}
 
 } // namespace
 
@@ -207,8 +291,21 @@ namespace firmius::tui {
 
 void runTui(const TuiLaunchOptions &options) {
   StartupTimingProfiler startupProfiler(parseStartupProfileEnabledFromEnv());
+  auto &state = firmius::tui::TuiState::instance();
+
+  state.setLoadingMessage("Starting Firmius…");
+  state.setLoadingDetail(
+      "Loading startup_bootstrap: preparing the first frame, timing collector, command registry, and runtime state. Step 0 of 8 running. Elapsed 0.0 ms.");
+  state.setLoadingProgress(0.0f);
+
+  auto completeStartupPhase = [&](std::size_t phase_index,
+                                  const std::string &phase_name) {
+    startupProfiler.completePhase(phase_name);
+    applyStartupVisualPhase(state, startupProfiler, phase_index, true);
+  };
 
   // Register Commands
+  applyStartupVisualPhase(state, startupProfiler, 0, false);
   firmius::tui::CommandManager::instance().registerCommand(
       std::make_shared<firmius::tui::NewCommand>());
   firmius::tui::CommandManager::instance().registerCommand(
@@ -218,7 +315,13 @@ void runTui(const TuiLaunchOptions &options) {
   firmius::tui::CommandManager::instance().registerCommand(
       std::make_shared<firmius::tui::UndoCommand>());
   firmius::tui::CommandManager::instance().registerCommand(
+      std::make_shared<firmius::tui::UndoTurnCommand>());
+  firmius::tui::CommandManager::instance().registerCommand(
+      std::make_shared<firmius::tui::RedoCommand>());
+  firmius::tui::CommandManager::instance().registerCommand(
       std::make_shared<firmius::tui::ConfigCommand>());
+  firmius::tui::CommandManager::instance().registerCommand(
+      std::make_shared<firmius::tui::HistoryCommand>());
   firmius::tui::CommandManager::instance().registerCommand(
       std::make_shared<firmius::tui::EditsCommand>());
   firmius::tui::CommandManager::instance().registerCommand(
@@ -232,6 +335,8 @@ void runTui(const TuiLaunchOptions &options) {
   firmius::tui::CommandManager::instance().registerCommand(
       std::make_shared<firmius::tui::MemoryCommand>());
   firmius::tui::CommandManager::instance().registerCommand(
+      std::make_shared<firmius::tui::ModeCommand>());
+  firmius::tui::CommandManager::instance().registerCommand(
       std::make_shared<firmius::tui::ConnectCommand>());
   firmius::tui::CommandManager::instance().registerCommand(
       std::make_shared<firmius::tui::QuotasCommand>());
@@ -242,7 +347,11 @@ void runTui(const TuiLaunchOptions &options) {
   firmius::tui::CommandManager::instance().registerCommand(
       std::make_shared<firmius::tui::RouterCommand>());
   firmius::tui::CommandManager::instance().registerCommand(
+      std::make_shared<firmius::tui::ProvidersCommand>());
+  firmius::tui::CommandManager::instance().registerCommand(
       std::make_shared<firmius::tui::McpCommand>());
+  firmius::tui::CommandManager::instance().registerCommand(
+      std::make_shared<firmius::tui::HooksCommand>());
   firmius::tui::CommandManager::instance().registerCommand(
       std::make_shared<firmius::tui::PurposesCommand>());
   firmius::tui::CommandManager::instance().registerCommand(
@@ -251,41 +360,51 @@ void runTui(const TuiLaunchOptions &options) {
       std::make_shared<firmius::tui::SkinCommand>());
   // Note: /workflows command removed - workflows are now registered as
   // individual commands below
-  startupProfiler.completePhase("command_registration");
+  completeStartupPhase(0, "command_registration");
 
   // Register Modals
+  applyStartupVisualPhase(state, startupProfiler, 1, false);
   firmius::tui::ModalRegistry::instance().registerModal(
       std::make_shared<firmius::tui::ThreadPickerModal>());
   firmius::tui::ModalRegistry::instance().registerModal(
       std::make_shared<firmius::tui::ModelPickerModal>());
   firmius::tui::ModalRegistry::instance().registerModal(
+      std::make_shared<firmius::tui::CommandPaletteModal>());
+  firmius::tui::ModalRegistry::instance().registerModal(
       std::make_shared<firmius::tui::ConfigDisplayModal>());
+  firmius::tui::ModalRegistry::instance().registerModal(
+      std::make_shared<firmius::tui::KeybindingEditorModal>());
   firmius::tui::ModalRegistry::instance().registerModal(
       std::make_shared<firmius::tui::RollingMemorySettingsModal>());
   firmius::tui::ModalRegistry::instance().registerModal(
       std::make_shared<firmius::tui::RouterModal>());
   firmius::tui::ModalRegistry::instance().registerModal(
+      std::make_shared<firmius::tui::ProvidersModal>());
+  firmius::tui::ModalRegistry::instance().registerModal(
       std::make_shared<firmius::tui::PurposesModal>());
   firmius::tui::ModalRegistry::instance().registerModal(
       std::make_shared<firmius::tui::McpModal>());
-  startupProfiler.completePhase("modal_registration");
+  completeStartupPhase(1, "modal_registration");
 
   auto &h = firmius::core::Harness::instance();
+  applyStartupVisualPhase(state, startupProfiler, 2, false);
   h.init();
-  startupProfiler.completePhase("harness_init");
+  completeStartupPhase(2, "harness_init");
 
   // Initialize workflow loader after harness (loads from ~/.firmius/workflows/)
+  applyStartupVisualPhase(state, startupProfiler, 3, false);
   firmius::core::WorkflowLoader::instance().init();
-  startupProfiler.completePhase("workflow_loader_init");
+  completeStartupPhase(3, "workflow_loader_init");
 
   // Register each workflow as its own command (e.g., /parallel_exploration)
+  applyStartupVisualPhase(state, startupProfiler, 4, false);
   firmius::tui::registerWorkflowCommands();
-  startupProfiler.completePhase("workflow_command_registration");
-
-  auto &state = firmius::tui::TuiState::instance();
+  completeStartupPhase(4, "workflow_command_registration");
 
   bool thread_loaded = false;
   std::optional<std::string> startupAgentId;
+  std::optional<std::string> deferredThreadSwitchId;
+  bool deferredResumeLast = false;
   std::size_t startupBaselineTurns = 0;
   firmius::shared::ThreadMetadata current_metadata;
   std::string threadPath = "none";
@@ -335,28 +454,22 @@ void runTui(const TuiLaunchOptions &options) {
       threadPath = "new_thread_debugging_mode_failed";
     }
   } else if (!options.threadId.empty()) {
-    if (h.switchThread(options.threadId)) {
-      thread_loaded = true;
-      threadPath = "switch_thread:" + options.threadId;
-    } else {
-      threadPath = "switch_thread_failed:" + options.threadId;
-    }
+    deferredThreadSwitchId = options.threadId;
+    threadPath = "deferred_switch_thread:" + options.threadId;
   } else if (options.continueLast) {
-    if (h.resumeLast()) {
-      thread_loaded = true;
-      threadPath = "resume_last_thread";
-    } else {
-      threadPath = "resume_last_thread_failed";
-    }
+    thread_loaded = true;
+    threadPath = "continue_last_already_restored";
+    deferredResumeLast = true;
   }
-  startupProfiler.completePhase("thread_path_selection");
+  completeStartupPhase(5, "thread_path_selection");
   startupProfiler.mark("thread_path:" + threadPath);
 
   if (thread_loaded) {
-    auto current_id = h.currentThreadId();
+    const std::string current_id = h.currentThreadId();
     for (const auto &m : h.listThreads()) {
       if (m.threadId == current_id) {
         current_metadata = m;
+        h.setFocusedAgent(h.focusedAgentId());
         break;
       }
     }
@@ -367,7 +480,7 @@ void runTui(const TuiLaunchOptions &options) {
     state.init(h, dummy_thread, "");
     state.setViewMode(firmius::tui::TuiState::ViewMode::Welcome);
   }
-  startupProfiler.completePhase("tui_state_init");
+  completeStartupPhase(6, "tui_state_init");
 
   auto screen = ftxui::ScreenInteractive::Fullscreen();
   screen.TrackMouse(true);
@@ -375,13 +488,23 @@ void runTui(const TuiLaunchOptions &options) {
   state.attachScreen(&screen);
   InstallSigintHandler();
   const auto exitLoop = screen.ExitLoopClosure();
-  startupProfiler.completePhase("screen_creation_attach");
+  completeStartupPhase(7, "screen_creation_attach");
+  // Start autonomous animation tick for heartbeats, glints, starfields.
+  // TuiState handles joining this thread in its shutdown() method.
+  state.attachScreen(&screen);
 
   // Enable bracketed paste mode so terminal sends \x1b[200~ and \x1b[201~
   // sequences around pasted content, allowing us to detect multi-line pastes
   std::cout << "\x1b[?2004h" << std::flush;
 
   auto renderer = state.root();
+  if (deferredThreadSwitchId.has_value() || deferredResumeLast) {
+    state.requestThreadOpen(
+        deferredThreadSwitchId, deferredResumeLast,
+        deferredResumeLast ? "Restoring last thread..." : "Opening thread...",
+        deferredResumeLast ? "Loading the last active thread from disk."
+                           : "Loading the selected thread from disk.");
+  }
   // Avoid replaying ThreadChanged here: init() already loaded the focused
   // transcript, and a synthetic replay would clear any live stream state that
   // resumed agents emit before the user presses another key.
@@ -394,7 +517,7 @@ void runTui(const TuiLaunchOptions &options) {
       const int current = g_pending_sigint.load(std::memory_order_relaxed);
       if (current != last_seen) {
         last_seen = current;
-        screen.PostEvent(ftxui::Event::Custom);
+        screen.PostEvent(ftxui::Event::CtrlC);
       }
       std::this_thread::sleep_for(std::chrono::milliseconds(25));
     }
@@ -439,75 +562,34 @@ void runTui(const TuiLaunchOptions &options) {
       std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
   });
-  int handled_sigints = 0;
-  renderer = CatchEvent(renderer, [&](ftxui::Event event) {
+  renderer = CatchEvent(renderer, [&](ftxui::Event) {
     if (pending_idle_exit.exchange(false, std::memory_order_relaxed)) {
       exitLoop();
       return true;
     }
-    const int pending_sigints =
-        g_pending_sigint.load(std::memory_order_relaxed);
-    if (pending_sigints > handled_sigints) {
-      handled_sigints = pending_sigints;
-      return state.handleCtrlC();
-    }
-    if (event == ftxui::Event::CtrlC ||
-        (event.is_character() && event.character() == std::string(1, '\x03'))) {
-      return state.handleCtrlC();
-    }
     return false;
   });
 
-  std::atomic<bool> firstInteractivePaintObserved{false};
-  {
-    auto observedRenderer = renderer;
-    renderer = ftxui::Renderer(
-        observedRenderer,
-        [&startupProfiler, &firstInteractivePaintObserved, &screen,
-         observedRenderer] {
-          if (!firstInteractivePaintObserved.exchange(true,
-                                                      std::memory_order_relaxed)) {
-            // ScrollableBox/chat startup restore can require one render to get
-            // trustworthy reflect(box_) geometry and a second event-loop turn to
-            // consume it. User input such as mouse motion provides that wakeup
-            // today; do it automatically after the first interactive paint.
-            screen.PostEvent(ftxui::Event::Custom);
-            if (startupProfiler.enabled()) {
-              startupProfiler.mark("first_interactive_paint_boundary");
-            }
-          }
-          if (startupProfiler.enabled()) {
-            if (!firstInteractivePaintObserved.load(std::memory_order_relaxed)) {
-                                   startupProfiler.mark(
-                                       "first_interactive_paint_boundary");
-            }
-          }
-          return observedRenderer->Render();
-        });
-  }
+  std::thread([&state]() {
+    std::this_thread::sleep_for(std::chrono::milliseconds(900));
+    if (state.loadingMessage() == "Startup complete.") {
+      state.clearLoadingState();
+    }
+  }).detach();
 
-  startupProfiler.mark("loop_entry");
   screen.Loop(renderer);
-  startupProfiler.mark("loop_exit");
-  startupProfiler.completePhase("event_loop_runtime");
 
-  sigint_bridge_running = false;
-  sigint_bridge.request_stop();
-  idle_exit_bridge.request_stop();
+  // Disable bracketed paste mode on exit to restore terminal state.
   std::cout << "\x1b[?2004l" << std::flush;
-  startupProfiler.completePhase("shutdown_bridges_and_terminal");
 
-  const std::string exit_summary = state.exitSummaryText();
   state.shutdown();
-  startupProfiler.completePhase("shutdown_tui_state");
-  h.shutdown();
-  startupProfiler.completePhase("shutdown_harness");
+  sigint_bridge_running.store(false);
+  startupProfiler.completePhase("shutdown_cleanup");
+  state.clearLoadingState();
 
-  startupProfiler.printSummary(std::cerr);
   if (startupProfiler.enabled()) {
-    std::cerr << exit_summary << std::flush;
+    startupProfiler.printSummary(std::cerr);
   }
-  std::cout << exit_summary << std::flush;
 }
 
 } // namespace firmius::tui

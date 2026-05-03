@@ -86,7 +86,8 @@ public:
    */
   std::string newThread(shared::HostCreationOptions hostOptions,
                         const std::string &cwd,
-                        const std::string &leadPersona = "");
+                        const std::string &leadPersona = "",
+                        const std::string &initialMode = "");
 
   /**
    * Switch focus to a different thread.
@@ -221,6 +222,7 @@ public:
   std::vector<shared::ThreadArtifactMetadata>
   listArtifacts(const std::string &threadId = "");
   std::vector<shared::ModelInfo> listAllModels();
+  std::vector<shared::ModelInfo> cachedModelsSnapshot() const;
   bool isModelsLoaded() const;
   std::vector<std::string> listProvidersFetchingModels() const;
   void invalidateModelCache();
@@ -234,6 +236,8 @@ public:
                      const std::string &identifier);
   std::map<std::string, std::vector<shared::QuotaBucket>>
   getAllQuotas(const std::string &providerId);
+  std::map<std::string, std::vector<shared::QuotaBucket>>
+  getCachedAllQuotas(const std::string &providerId);
 
   /**
    * Switches the model for the focused agent.

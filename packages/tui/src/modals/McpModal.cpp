@@ -1,5 +1,6 @@
 #include "modals/McpModal.hpp"
 
+#include "NotificationManager.hpp"
 #include "TUIState.hpp"
 #include "ThemeManager.hpp"
 #include "harness/Harness.hpp"
@@ -107,9 +108,13 @@ ftxui::Component McpModal::create(TuiState &state) {
   auto save_config = [message](const shared::UserConfig &cfg,
                                const std::string &ok_message) {
     auto &h = firmius::core::Harness::instance();
-    h.updateConfig(cfg);
-    h.saveConfig();
-    *message = ok_message;
+    try {
+      h.updateConfig(cfg);
+      h.saveConfig();
+      *message = ok_message;
+    } catch (const std::exception &ex) {
+      NotificationManager::instance().notifyError("MCP", ex.what(), false);
+    }
   };
 
   auto syncEditStateFromForm =

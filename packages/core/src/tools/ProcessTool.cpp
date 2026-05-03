@@ -7,6 +7,7 @@
 #include "utils/TerminalUtil.hpp"
 #include <chrono>
 #include <cctype>
+#include <algorithm>
 #include <iomanip>
 #include <optional>
 #include <rapidjson/document.h>
@@ -50,6 +51,62 @@ std::string escapeForJson(const std::string& s) {
         }
     }
     return result;
+}
+
+rapidjson::Value makeString(const std::string &value,
+                            rapidjson::Document::AllocatorType &alloc) {
+  rapidjson::Value result;
+  result.SetString(value.c_str(), static_cast<rapidjson::SizeType>(value.size()), alloc);
+  return result;
+}
+
+std::string sliceOutput(const std::string &data, int fromOffset, int maxBytes,
+                        int tailLines) {
+  size_t start = fromOffset > 0
+                     ? std::min(static_cast<size_t>(fromOffset), data.size())
+                     : 0;
+  if (tailLines > 0 && !data.empty()) {
+    size_t pos = data.size();
+    int seen = 0;
+    while (pos > 0 && seen < tailLines) {
+      --pos;
+      if (data[pos] == '\n') {
+        ++seen;
+        if (seen == tailLines) {
+          if (pos + 1 < data.size()) {
+            ++pos;
+          }
+          break;
+        }
+      }
+    }
+    if (seen < tailLines) {
+      pos = 0;
+    }
+    start = std::max(start, pos);
+  }
+  size_t count = data.size() - start;
+  if (maxBytes > 0) {
+    count = std::min(count, static_cast<size_t>(maxBytes));
+  }
+  return data.substr(start, count);
+}
+
+void addSnapshotFields(rapidjson::Document &doc,
+                       const shared::ProcessSnapshot &snapshot,
+                       const std::string &processId) {
+  auto &a = doc.GetAllocator();
+  doc.AddMember("process_id", makeString(processId, a), a);
+  doc.AddMember("system_id", makeString(snapshot.systemId, a), a);
+  doc.AddMember("isRunning", snapshot.running, a);
+  doc.AddMember("running", snapshot.running, a);
+  doc.AddMember("exitCode", snapshot.exitCode, a);
+  doc.AddMember("exit_code", snapshot.exitCode, a);
+  doc.AddMember("stdout", makeString(snapshot.stdoutData, a), a);
+  doc.AddMember("stderr", makeString(snapshot.stderrData, a), a);
+  doc.AddMember("stdout_bytes", static_cast<uint64_t>(snapshot.stdoutData.size()), a);
+  doc.AddMember("stderr_bytes", static_cast<uint64_t>(snapshot.stderrData.size()), a);
+  doc.AddMember("duration_ms", snapshot.elapsedMs, a);
 }
 
 shared::ToolResult executeExecute(const rapidjson::Value &input, shared::ToolContext &ctx) {
@@ -150,6 +207,7 @@ shared::ToolResult executeExecute(const rapidjson::Value &input, shared::ToolCon
         doc.AddMember("finish_reason", "Timeout", a);
         doc.AddMember("command_success", false, a);
         doc.AddMember("process_id", rapidjson::Value(processId.c_str(), a).Move(), a);
+        doc.AddMember("system_id", rapidjson::Value(snap.systemId.c_str(), a).Move(), a);
         doc.AddMember("note", rapidjson::Value("The command is still running in the background. Use Process.status to check its current output or Process.wait to wait for its completion.", a).Move(), a);
         auto result = shared::ToolResult::ok(doc, processId);
         result.is_background = true;
@@ -216,9 +274,11 @@ shared::ToolResult executeSpawn(const rapidjson::Value &input, shared::ToolConte
     }
 
     std::string processId = ctx.agent.getEnvironment()->getProcessManager().spawnProcess(command, ctx.currentToolCallId, effectiveCwd, {});
+    auto snapshot = ctx.agent.getEnvironment()->getProcessManager().inspectProcess(processId);
 
     rapidjson::Document doc; doc.SetObject();
     doc.AddMember("process_id", rapidjson::Value(processId.c_str(), doc.GetAllocator()).Move(), doc.GetAllocator());
+    doc.AddMember("system_id", rapidjson::Value(snapshot.systemId.c_str(), doc.GetAllocator()).Move(), doc.GetAllocator());
     return shared::ToolResult::ok(doc, processId);
   } catch (const std::exception &e) {
     return shared::ToolResult::fail(e.what());
@@ -239,12 +299,8 @@ shared::ToolResult executeStatus(const rapidjson::Value &input, shared::ToolCont
     }
 
     auto snapshot = ctx.agent.getEnvironment()->getProcessManager().inspectProcess(process_id);
-    rapidjson::Document doc; doc.SetObject(); auto& a = doc.GetAllocator();
-    doc.AddMember("isRunning", snapshot.running, a);
-    doc.AddMember("exitCode", snapshot.exitCode, a);
-    doc.AddMember("stdout", rapidjson::Value(snapshot.stdoutData.c_str(), a).Move(), a);
-    doc.AddMember("stderr", rapidjson::Value(snapshot.stderrData.c_str(), a).Move(), a);
-    doc.AddMember("duration_ms", snapshot.elapsedMs, a);
+    rapidjson::Document doc; doc.SetObject();
+    addSnapshotFields(doc, snapshot, process_id);
     return shared::ToolResult::ok(doc);
   } catch (const std::exception& e) {
     return shared::ToolResult::fail(e.what());
@@ -280,10 +336,7 @@ shared::ToolResult executeWait(const rapidjson::Value &input, shared::ToolContex
       }
       if (!snapshot.running || patternFound) {
         rapidjson::Document doc; doc.SetObject(); auto& a = doc.GetAllocator();
-        doc.AddMember("isRunning", snapshot.running, a);
-        doc.AddMember("exitCode", snapshot.exitCode, a);
-        doc.AddMember("stdout", rapidjson::Value(snapshot.stdoutData.c_str(), a).Move(), a);
-        doc.AddMember("stderr", rapidjson::Value(snapshot.stderrData.c_str(), a).Move(), a);
+        addSnapshotFields(doc, snapshot, process_id);
         doc.AddMember("patternFound", patternFound, a);
         return shared::ToolResult::ok(doc);
       }
@@ -343,35 +396,166 @@ shared::ToolResult executeInput(const rapidjson::Value &input, shared::ToolConte
   }
 }
 
+shared::ToolResult executeKill(const rapidjson::Value &input, shared::ToolContext &ctx) {
+  std::string process_id;
+  if (input.HasMember("process_id") && input["process_id"].IsString()) {
+    process_id = input["process_id"].GetString();
+  } else {
+    return shared::ToolResult::fail("Missing required field: process_id");
+  }
+
+  try {
+    auto before = ctx.agent.getEnvironment()->getProcessManager().inspectProcess(process_id);
+    ctx.agent.getEnvironment()->getProcessManager().killProcess(process_id);
+    auto after = ctx.agent.getEnvironment()->getProcessManager().inspectProcess(process_id);
+    auto start = std::chrono::steady_clock::now();
+    while (after.running &&
+           std::chrono::steady_clock::now() - start < std::chrono::milliseconds(1000)) {
+      if (!ctx.waitFor(std::chrono::milliseconds(25))) {
+        break;
+      }
+      after = ctx.agent.getEnvironment()->getProcessManager().inspectProcess(process_id);
+    }
+    rapidjson::Document doc; doc.SetObject(); auto &a = doc.GetAllocator();
+    addSnapshotFields(doc, after, process_id);
+    doc.AddMember("was_running", before.running, a);
+    doc.AddMember("killed", before.running && !after.running, a);
+    return shared::ToolResult::ok(doc);
+  } catch (const std::exception& e) {
+    return shared::ToolResult::fail(e.what());
+  }
+}
+
+shared::ToolResult executeOutput(const rapidjson::Value &input, shared::ToolContext &ctx) {
+  std::string process_id;
+  if (input.HasMember("process_id") && input["process_id"].IsString()) {
+    process_id = input["process_id"].GetString();
+  } else {
+    return shared::ToolResult::fail("Missing required field: process_id");
+  }
+
+  int fromOffset = 0;
+  if (input.HasMember("from_offset") && input["from_offset"].IsInt()) {
+    fromOffset = input["from_offset"].GetInt();
+  }
+  int maxBytes = 0;
+  if (input.HasMember("max_bytes") && input["max_bytes"].IsInt()) {
+    maxBytes = input["max_bytes"].GetInt();
+  }
+  int tailLines = 0;
+  if (input.HasMember("tail_lines") && input["tail_lines"].IsInt()) {
+    tailLines = input["tail_lines"].GetInt();
+  }
+  std::string stream = "combined";
+  if (input.HasMember("stream") && input["stream"].IsString()) {
+    stream = input["stream"].GetString();
+  }
+
+  try {
+    auto snapshot = ctx.agent.getEnvironment()->getProcessManager().inspectProcess(process_id);
+    const std::string combined = snapshot.stdoutData + snapshot.stderrData;
+    const std::string *source = &combined;
+    if (stream == "stdout") {
+      source = &snapshot.stdoutData;
+    } else if (stream == "stderr") {
+      source = &snapshot.stderrData;
+    } else if (stream != "combined") {
+      return shared::ToolResult::fail("Process.Output stream must be stdout, stderr, or combined");
+    }
+
+    std::string output = sliceOutput(*source, fromOffset, maxBytes, tailLines);
+    rapidjson::Document doc; doc.SetObject(); auto &a = doc.GetAllocator();
+    doc.AddMember("process_id", makeString(process_id, a), a);
+    doc.AddMember("system_id", makeString(snapshot.systemId, a), a);
+    doc.AddMember("isRunning", snapshot.running, a);
+    doc.AddMember("running", snapshot.running, a);
+    doc.AddMember("stream", makeString(stream, a), a);
+    doc.AddMember("output", makeString(output, a), a);
+    doc.AddMember("from_offset", fromOffset, a);
+    doc.AddMember("next_offset", static_cast<uint64_t>(source->size()), a);
+    doc.AddMember("stdout_bytes", static_cast<uint64_t>(snapshot.stdoutData.size()), a);
+    doc.AddMember("stderr_bytes", static_cast<uint64_t>(snapshot.stderrData.size()), a);
+    doc.AddMember("truncated", maxBytes > 0 && output.size() == static_cast<size_t>(maxBytes), a);
+    return shared::ToolResult::ok(doc);
+  } catch (const std::exception& e) {
+    return shared::ToolResult::fail(e.what());
+  }
+}
+
+shared::ToolResult executeList(const rapidjson::Value &, shared::ToolContext &ctx) {
+  rapidjson::Document doc; doc.SetObject(); auto &a = doc.GetAllocator();
+  rapidjson::Value processes(rapidjson::kArrayType);
+  for (const auto &processId : ctx.agent.getEnvironment()->getProcessManager().getProcessIds()) {
+    try {
+      auto snapshot = ctx.agent.getEnvironment()->getProcessManager().inspectProcess(processId);
+      rapidjson::Value process(rapidjson::kObjectType);
+      process.AddMember("process_id", makeString(processId, a), a);
+      process.AddMember("system_id", makeString(snapshot.systemId, a), a);
+      process.AddMember("isRunning", snapshot.running, a);
+      process.AddMember("running", snapshot.running, a);
+      process.AddMember("exitCode", snapshot.exitCode, a);
+      process.AddMember("exit_code", snapshot.exitCode, a);
+      process.AddMember("duration_ms", snapshot.elapsedMs, a);
+      process.AddMember("stdout_bytes", static_cast<uint64_t>(snapshot.stdoutData.size()), a);
+      process.AddMember("stderr_bytes", static_cast<uint64_t>(snapshot.stderrData.size()), a);
+      processes.PushBack(process, a);
+    } catch (...) {
+    }
+  }
+  doc.AddMember("processes", processes, a);
+  return shared::ToolResult::ok(doc);
+}
+
 } // namespace
 
 shared::ToolMetadata ProcessTool::getMetadata() const {
-  return {"Process", "Process operations. Use action Execute, Spawn, Status, Wait, or Input.", shared::ToolScope::Process};
+  return {"Process", "Process operations. Use action Execute, Spawn, Status, Wait, Input, Output, List, or Kill.", shared::ToolScope::Process};
 }
 
 std::shared_ptr<shared::JSONSchema> ProcessTool::getSchema() const {
   return shared::zObject({
-      {"action", shared::zEnum({"Execute", "Spawn", "Status", "Wait", "Input"})->describe("Process operation to execute")},
+      {"action", shared::zEnum({"Execute", "Spawn", "Status", "Wait", "Input", "Output", "List", "Kill"})->describe("Process operation to execute")},
       {"command", shared::zString()->setOptional()},
       {"process_id", shared::zString()->setOptional()},
       {"input", shared::zString()->setOptional()},
       {"pattern", shared::zString()->setOptional()},
+      {"stream", shared::zString()->setOptional()},
       {"cwd", shared::zString()->setOptional()},
       {"timeout_ms", shared::zInteger()->setOptional()},
+      {"from_offset", shared::zInteger()->setOptional()},
+      {"max_bytes", shared::zInteger()->setOptional()},
+      {"tail_lines", shared::zInteger()->setOptional()},
   });
 }
 
 shared::ToolResult ProcessTool::execute(const rapidjson::Value &input, shared::ToolContext &ctx) {
-  if (!input.IsObject() || !input.HasMember("action") || !input["action"].IsString()) {
-    return shared::ToolResult::fail("Process.action must be a string (Execute, Spawn, Status, Wait, or Input)");
+  if (!input.IsObject()) {
+    return shared::ToolResult::fail("Process input must be an object");
   }
-  const std::string action = input["action"].GetString();
+  std::string action;
+  if (input.HasMember("action") && input["action"].IsString()) {
+    action = input["action"].GetString();
+  } else if (input.HasMember("command") && input["command"].IsString()) {
+    action = "Spawn";
+  } else if (input.HasMember("input") && input["input"].IsString()) {
+    action = "Input";
+  } else if (input.HasMember("process_id") && input["process_id"].IsString() &&
+             (input.HasMember("pattern") || input.HasMember("timeout_ms"))) {
+    action = "Wait";
+  } else if (input.HasMember("process_id") && input["process_id"].IsString()) {
+    action = "Status";
+  } else {
+    return shared::ToolResult::fail("Process.action must be a string (Execute, Spawn, Status, Wait, Input, Output, List, or Kill)");
+  }
   if (action == "Execute") return executeExecute(input, ctx);
   if (action == "Spawn") return executeSpawn(input, ctx);
   if (action == "Status") return executeStatus(input, ctx);
   if (action == "Wait") return executeWait(input, ctx);
   if (action == "Input") return executeInput(input, ctx);
-  return shared::ToolResult::fail("Process.action must be Execute, Spawn, Status, Wait, or Input");
+  if (action == "Output") return executeOutput(input, ctx);
+  if (action == "List") return executeList(input, ctx);
+  if (action == "Kill") return executeKill(input, ctx);
+  return shared::ToolResult::fail("Process.action must be Execute, Spawn, Status, Wait, Input, Output, List, or Kill");
 }
 
 } // namespace firmius::core

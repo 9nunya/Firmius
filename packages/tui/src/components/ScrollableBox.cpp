@@ -172,6 +172,9 @@ ftxui::Element ScrollableBoxComponent::OnRender() {
         // content reports its true rendered height for the current width.
         const auto fitted = ftxui::Dimension::Fit(background, true);
         size_ = std::max(0, fitted.dimy);
+        if (options_.custom_size_getter) {
+            size_ = std::max(size_, options_.custom_size_getter(contentWidth));
+        }
         measured_viewport_width_ = viewport_w;
         measured_signature_ = measurement_signature;
         layout_dirty_ = false;
@@ -192,9 +195,16 @@ ftxui::Element ScrollableBoxComponent::OnRender() {
     }
 
     if (viewport_w <= 0 || viewport_h <= 0) {
-        ftxui::animation::RequestAnimationFrame();
+        // H11: bound the zero-size RAF storm. We still ask for a re-render so
+        // layout can settle once geometry arrives, but not infinitely.
+        constexpr int kMaxZeroSizeRafAttempts = 3;
+        if (zero_size_raf_attempts_ < kMaxZeroSizeRafAttempts) {
+            ftxui::animation::RequestAnimationFrame();
+            ++zero_size_raf_attempts_;
+        }
         return ftxui::text("") | ftxui::yflex | ftxui::reflect(box_);
     }
+    zero_size_raf_attempts_ = 0;
 
     const int max_scroll = maxScroll(viewport_h);
     if (has_pending_ensure_visible_) {

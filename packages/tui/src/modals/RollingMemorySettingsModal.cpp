@@ -1,5 +1,6 @@
 #include "modals/RollingMemorySettingsModal.hpp"
 
+#include "NotificationManager.hpp"
 #include "ThemeManager.hpp"
 #include "TUIState.hpp"
 #include "harness/Harness.hpp"
@@ -123,19 +124,25 @@ ftxui::Component RollingMemorySettingsModal::create(TuiState &state) {
   auto fetchingProviders = std::make_shared<std::vector<std::string>>();
   auto rowBoxes = std::make_shared<std::vector<ftxui::Box>>();
   auto selectionCommitted = std::make_shared<std::atomic<bool>>(false);
+  auto modalActive = std::make_shared<std::atomic<bool>>(true);
 
   auto saveConfig = [config, message]() {
     auto &h = firmius::core::Harness::instance();
-    h.updateConfig(*config);
-    h.saveConfig();
-    *message = "Rolling memory settings saved.";
+    try {
+      h.updateConfig(*config);
+      h.saveConfig();
+      *message = "Rolling memory settings saved.";
+    } catch (const std::exception &ex) {
+      NotificationManager::instance().notifyError("Rolling Memory", ex.what(),
+                                                  false);
+    }
   };
 
   auto refreshModels =
       [modelEntries, filteredIndices, displayEntries, modelFilter,
        selectedModelIndex, modelsLoading, fetchingProviders]() {
         auto &h = firmius::core::Harness::instance();
-        *modelEntries = BuildModelPickerEntries(h.listAllModels(), true);
+        *modelEntries = BuildModelPickerEntries(h.cachedModelsSnapshot(), true);
         *modelsLoading = !h.isModelsLoaded();
         *fetchingProviders = h.listProvidersFetchingModels();
         *filteredIndices =
@@ -153,18 +160,23 @@ ftxui::Component RollingMemorySettingsModal::create(TuiState &state) {
       };
 
   refreshModels();
+  state.runBackgroundTask([]() { firmius::core::Harness::instance().listAllModels(); });
 
-  auto needsModelRefresh = std::make_shared<std::atomic<bool>>(false);
   int subId = firmius::core::Harness::instance().subscribe(
-      [needsModelRefresh, &state](const firmius::shared::AppEvent &event) {
+      [refreshModels, modalActive, &state](
+          const firmius::shared::AppEvent &event) {
         if (std::holds_alternative<firmius::shared::ModelsRefreshed>(event) ||
             std::holds_alternative<firmius::shared::ProviderModelsFetchStarted>(
                 event) ||
             std::holds_alternative<firmius::shared::ProviderModelsFetchFinished>(
                 event) ||
             std::holds_alternative<firmius::shared::ModelDiscovered>(event)) {
-          *needsModelRefresh = true;
-          state.postEvent(ftxui::Event::Custom);
+          state.deferUiMutation([refreshModels, modalActive]() {
+            if (!modalActive->load(std::memory_order_relaxed)) {
+              return;
+            }
+            refreshModels();
+          });
         }
       });
 
@@ -235,13 +247,9 @@ ftxui::Component RollingMemorySettingsModal::create(TuiState &state) {
                                     activeTarget, modelFilter,
                                     selectedModelIndex,
                                     modelsLoading, fetchingProviders,
-                                    needsModelRefresh, refreshModels,
+                                    refreshModels,
                                     rowBoxes, displayEntries]() {
     const auto &theme = ThemeManager::instance().getCurrentTheme();
-    if (*needsModelRefresh) {
-      *needsModelRefresh = false;
-      refreshModels();
-    }
 
     ftxui::Elements rows;
     rows.push_back(ftxui::text("Rolling Memory Settings") | ftxui::bold |
@@ -362,8 +370,9 @@ ftxui::Component RollingMemorySettingsModal::create(TuiState &state) {
       [config, selected, saveConfig, message, mode, activeTarget, modelFilter,
        selectedModelIndex, refreshModels, filteredIndices, rowBoxes,
        selectionCommitted, modelEntries, cycleMode, cyclePreset, adjustNumeric,
-       subId, &state](ftxui::Event event) {
+       subId, modalActive, &state](ftxui::Event event) {
         const auto closeModal = [&]() {
+          modalActive->store(false, std::memory_order_relaxed);
           firmius::core::Harness::instance().unsubscribe(subId);
           state.popModal();
         };
@@ -409,7 +418,7 @@ ftxui::Component RollingMemorySettingsModal::create(TuiState &state) {
             const auto entry =
                 (*modelEntries)[(*filteredIndices)[*selectedModelIndex]];
             const auto target = *activeTarget;
-            state.deferUiMutation([config, saveConfig, subId, &state, entry,
+            state.deferUiMutation([config, saveConfig, subId, modalActive, &state, entry,
                                    target]() {
               auto assign = [&](shared::AgentConfig::RollingModelConfig &model) {
                 model.enabled = true;
@@ -429,6 +438,7 @@ ftxui::Component RollingMemorySettingsModal::create(TuiState &state) {
                 break;
               }
               saveConfig();
+              modalActive->store(false, std::memory_order_relaxed);
               firmius::core::Harness::instance().unsubscribe(subId);
               state.popModal();
             });
@@ -454,7 +464,7 @@ ftxui::Component RollingMemorySettingsModal::create(TuiState &state) {
                   const auto entry =
                       (*modelEntries)[(*filteredIndices)[*selectedModelIndex]];
                   const auto target = *activeTarget;
-                  state.deferUiMutation([config, saveConfig, subId, &state,
+                  state.deferUiMutation([config, saveConfig, subId, modalActive, &state,
                                          entry, target]() {
                     auto assign =
                         [&](shared::AgentConfig::RollingModelConfig &model) {
@@ -475,6 +485,7 @@ ftxui::Component RollingMemorySettingsModal::create(TuiState &state) {
                       break;
                     }
                     saveConfig();
+                    modalActive->store(false, std::memory_order_relaxed);
                     firmius::core::Harness::instance().unsubscribe(subId);
                     state.popModal();
                   });

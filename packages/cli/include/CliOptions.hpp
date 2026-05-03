@@ -14,6 +14,8 @@ struct CliOptions {
   bool continueLast = false;
   bool debuggingMode = false;
   bool quitWhenIdle = false;
+  bool showHelp = false;
+  bool showVersion = false;
   firmius::shared::ThreadPermissionMode permissionMode =
       firmius::shared::ThreadPermissionMode::Request;
   std::string initialPrompt;
@@ -23,13 +25,13 @@ struct CliOptions {
 
 inline firmius::shared::ThreadPermissionMode parsePermissionMode(
     const std::string &value) {
-  if (value == "request") {
+  if (value == "request" || value == "ask") {
     return firmius::shared::ThreadPermissionMode::Request;
   }
-  if (value == "always-allow" || value == "allow") {
+  if (value == "always-allow" || value == "always_allow" || value == "allow") {
     return firmius::shared::ThreadPermissionMode::AlwaysAllow;
   }
-  if (value == "deny-all" || value == "deny") {
+  if (value == "deny-all" || value == "deny_all" || value == "deny") {
     return firmius::shared::ThreadPermissionMode::DenyAll;
   }
   throw std::runtime_error("Unknown permission mode: " + value);
@@ -79,6 +81,10 @@ inline CliOptions parseCliOptions(int argc, char **argv) {
     } else if (arg == "--permission-mode") {
       options.permissionMode = parsePermissionMode(
           requireOptionValue(argc, argv, i, arg));
+    } else if (arg == "--help" || arg == "-h") {
+      options.showHelp = true;
+    } else if (arg == "--version" || arg == "-V") {
+      options.showVersion = true;
     }
   }
 

@@ -70,6 +70,12 @@ public:
   void saveHistory() override;
   void appendHistoryTurn(const AgentTurn &turn) override;
 
+  /**
+   * @brief Blocks until the agent's journaler has flushed all pending writes.
+   * Safe to call when no journaler is attached (no-op).
+   */
+  void flushJournal();
+
   // Backward compatibility during transition
   std::string
   spawnProcess(const std::string &command, const std::string &toolCallId = "",
@@ -93,7 +99,11 @@ public:
   void markFileAsFullyRead(const std::string &path);
   std::string resolvePath(const std::string &inputPath) const;
 
-  mcp::McpManager &getMcpManager() { return mcpManager_; }
+  // Expose history bootstrapping so it can be called synchronously during spawning
+  void bootstrapHistory(const std::optional<std::string> &task,
+                        const std::vector<firmius::shared::ImageContent> &images);
+
+  mcp::McpManager &getMcpManager() { return mcp::McpManager::shared(); }
   std::shared_ptr<mcp::McpClient> getMcpClient(const std::string &serverName, shared::ToolContext &toolCtx);
 
 private:
@@ -141,8 +151,6 @@ private:
   std::function<void(const shared::StreamEvent &)> eventCallback;
   std::mutex callbackMutex;
   std::mutex blockingProcessMutex;
-
-  mcp::McpManager mcpManager_;
   std::unordered_set<std::string> backgroundProcessIds;
 };
 

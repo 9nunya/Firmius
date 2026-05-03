@@ -1,18 +1,53 @@
 #include "commands/NewCommand.hpp"
+#include "NotificationManager.hpp"
+#include "TUIState.hpp"
 #include "harness/Harness.hpp"
 #include <filesystem>
 
 namespace firmius::tui {
 
 void NewCommand::execute(CommandCtx &ctx, const std::vector<ParsedArg> &args) {
-  (void)ctx;
   (void)args;
   auto &h = firmius::core::Harness::instance();
   std::string cwd = std::filesystem::current_path().string();
   auto cfg = h.getConfig();
   std::string lead =
       cfg.defaultLeadPersona.empty() ? "aster" : cfg.defaultLeadPersona;
-  h.newThread({}, cwd, lead);
+  auto *state = ctx.state;
+  if (!state)
+    return;
+  state->clearLoadingState();
+  state->setLoadingMessage("Starting new thread...");
+  state->setLoadingDetail("Creating a fresh thread and preparing the lead agent.");
+  state->setLoadingProgress(0.1f);
+  state->runBackgroundTask([cwd, lead, state]() {
+    auto &h = firmius::core::Harness::instance();
+    firmius::shared::ThreadMetadata metadata;
+    std::string focusedAgentId;
+    bool created = false;
+    try {
+      const auto threadId = h.newThread({}, cwd, lead);
+      created = !threadId.empty();
+      if (created) {
+        focusedAgentId = h.focusedAgentId();
+        for (const auto &candidate : h.listThreads()) {
+          if (candidate.threadId == threadId) {
+            metadata = candidate;
+            break;
+          }
+        }
+      }
+    } catch (...) {
+      created = false;
+    }
+    if (!created || metadata.threadId.empty()) {
+      state->postAction(firmius::tui::UiThreadOpenFailed{
+          "Thread", "Could not start a new thread.", true});
+      return;
+    }
+    state->postAction(
+        firmius::tui::UiThreadOpened{metadata, focusedAgentId, true});
+  });
 }
 
 } // namespace firmius::tui

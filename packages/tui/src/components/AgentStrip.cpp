@@ -48,7 +48,6 @@ std::string spinnerFrame() {
       last_requested_bucket.exchange(frame_bucket, std::memory_order_relaxed);
   if (expected != frame_bucket) {
     NoteAgentStripSpinnerRafIfAvailable();
-    ftxui::animation::RequestAnimationFrame();
   }
   return frames[idx];
 }

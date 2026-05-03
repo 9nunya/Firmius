@@ -101,11 +101,15 @@ inline bool ShouldHideMessageInTranscript(const shared::Message &msg,
 
 inline ftxui::Element IndentAgentRow(const ftxui::Element &content,
                                      int left_margin = 2) {
+  // Guard against a null Element being piped through `| ftxui::xflex`, which
+  // builds a `Flex` decorator with a null `children_[0]` and segfaults on
+  // SetBox during render.
+  ftxui::Element safe = content ? content : ftxui::text("");
   if (left_margin <= 0) {
-    return content;
+    return safe;
   }
   return ftxui::hbox({ftxui::text(std::string(left_margin, ' ')),
-                      content | ftxui::xflex}) |
+                      safe | ftxui::xflex}) |
          ftxui::xflex;
 }
 

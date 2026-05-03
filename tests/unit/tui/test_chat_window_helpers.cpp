@@ -1,7 +1,10 @@
 #include "components/ChatWindow.hpp"
 #include "components/ToolBlock.hpp"
+#include "persistence/ThreadManager.hpp"
 #include "TUIState.hpp"
+#include "ThemeManager.hpp"
 
+#include <ftxui/component/event.hpp>
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/screen.hpp>
 #include <gtest/gtest.h>

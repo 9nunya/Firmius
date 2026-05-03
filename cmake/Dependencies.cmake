@@ -83,5 +83,95 @@ set(FTXUI_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
 
 FetchContent_MakeAvailable(rapidjson googletest ftxui)
 
+# ─── Luau: sandboxed scripting runtime for hooks ────────────────────────────
+# Luau is Roblox's safe Lua dialect. It removes loadstring/getfenv/setfenv/
+# dofile/loadfile/package/require at the language level, ships luaL_sandbox
+# for sealing globals, and supports deterministic instruction-budget hooks
+# via lua_callbacks. We use it to evaluate `kind: script` hook bodies in a
+# sealed VM with hard wall-clock and memory caps.
+option(FIRMIUS_ENABLE_LUAU_HOOKS
+       "Embed Luau for sandboxed kind: script hook actions" ON)
+
+if(FIRMIUS_ENABLE_LUAU_HOOKS)
+  FetchContent_Declare(
+    luau
+    GIT_REPOSITORY https://github.com/luau-lang/luau.git
+    GIT_TAG 0.640
+    GIT_SHALLOW TRUE
+    GIT_PROGRESS ${_firmius_git_progress}
+  )
+  set(LUAU_BUILD_CLI OFF CACHE BOOL "" FORCE)
+  set(LUAU_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+  set(LUAU_BUILD_WEB OFF CACHE BOOL "" FORCE)
+  set(LUAU_EXTERN_C ON CACHE BOOL "" FORCE)
+  set(LUAU_WERROR OFF CACHE BOOL "" FORCE)
+  FetchContent_MakeAvailable(luau)
+
+  if(TARGET Luau.CodeGen)
+    target_compile_options(Luau.CodeGen PRIVATE
+      -Wno-error=extra
+      -Wno-error=ignored-qualifiers
+      -Wno-error=deprecated-copy
+      -Wno-error=implicit-fallthrough
+      -Wno-error=stringop-overflow
+      -Wno-error=missing-field-initializers
+      -Wno-error=unused-parameter
+      -Wno-error=unused-variable)
+  endif()
+  if(TARGET Luau.Analysis)
+    target_compile_options(Luau.Analysis PRIVATE
+      -Wno-error=extra
+      -Wno-error=ignored-qualifiers
+      -Wno-error=deprecated-copy
+      -Wno-error=redundant-move
+      -Wno-error=maybe-uninitialized
+      -Wno-error=implicit-fallthrough
+      -Wno-error=stringop-overflow
+      -Wno-error=missing-field-initializers
+      -Wno-error=unused-parameter
+      -Wno-error=unused-variable)
+  endif()
+  if(TARGET Luau.VM)
+    target_compile_options(Luau.VM PRIVATE
+      -Wno-error=implicit-fallthrough
+      -Wno-error=stringop-overflow
+      -Wno-error=missing-field-initializers
+      -Wno-error=unused-parameter
+      -Wno-error=unused-variable)
+  endif()
+  if(TARGET Luau.Compiler)
+    target_compile_options(Luau.Compiler PRIVATE
+      -Wno-error=implicit-fallthrough
+      -Wno-error=stringop-overflow
+      -Wno-error=missing-field-initializers
+      -Wno-error=unused-parameter
+      -Wno-error=unused-variable)
+  endif()
+  if(TARGET Luau.Ast)
+    target_compile_options(Luau.Ast PRIVATE
+      -Wno-error=implicit-fallthrough
+      -Wno-error=stringop-overflow
+      -Wno-error=missing-field-initializers
+      -Wno-error=unused-parameter
+      -Wno-error=unused-variable)
+  endif()
+  if(TARGET Luau.Config)
+    target_compile_options(Luau.Config PRIVATE
+      -Wno-error=implicit-fallthrough
+      -Wno-error=stringop-overflow
+      -Wno-error=missing-field-initializers
+      -Wno-error=unused-parameter
+      -Wno-error=unused-variable)
+  endif()
+  if(TARGET Luau.Common)
+    target_compile_options(Luau.Common INTERFACE
+      -Wno-error=implicit-fallthrough
+      -Wno-error=stringop-overflow
+      -Wno-error=missing-field-initializers
+      -Wno-error=unused-parameter
+      -Wno-error=unused-variable)
+  endif()
+endif()
+
 # Tree-sitter core + language parsers (compiled in at build time)
 include(cmake/TreeSitter.cmake)

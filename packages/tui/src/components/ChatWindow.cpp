@@ -9,6 +9,8 @@
 #include "components/TranscriptGrouping.hpp"
 #include "components/ToolBlock.hpp"
 #include "components/GlintEffect.hpp"
+#include "components/DiffRenderer.hpp"
+#include "components/SyntaxHighlighter.hpp"
 #include "NotificationManager.hpp"
 #include "utils/Clipboard.hpp"
 #include "utils/Icons.hpp"
@@ -222,6 +224,39 @@ std::size_t BuildHistoryCheapRenderKey(
   return key;
 }
 
+std::size_t HashTurn(const firmius::shared::AgentTurn &turn) {
+  std::size_t key = 0;
+  HashCombine(key, turn.turnId);
+  HashCombine(key, turn.messages.size());
+  for (const auto &msg : turn.messages) {
+    HashCombine(key, msg.id);
+    HashCombine(key, msg.timestamp);
+    HashCombine(key, static_cast<int>(msg.role));
+    HashCombine(key, msg.content.size());
+    if (!msg.content.empty()) {
+      std::visit(
+          [&](const auto &content) {
+            using T = std::decay_t<decltype(content)>;
+            HashCombine(key, typeid(T).hash_code());
+            if constexpr (requires { content.text; }) {
+              HashCombine(key, content.text.size());
+            } else if constexpr (requires { content.thinking; }) {
+              HashCombine(key, content.thinking.size());
+            } else if constexpr (requires { content.result; }) {
+              HashCombine(key, content.result.size());
+            } else if constexpr (requires { content.message; }) {
+              HashCombine(key, content.message.size());
+            }
+          },
+          msg.content.back());
+    }
+  }
+  HashCombine(key, turn.metrics.timing.endMs);
+  HashCombine(key, turn.metrics.context.sentTokens);
+  HashCombine(key, turn.metrics.tokens.completion);
+  return key;
+}
+
 HistoryRenderSignature BuildHistoryRenderSignature(
     const firmius::shared::AgentHistory *history, bool show_internal_nudges,
     bool hide_errors) {
@@ -315,7 +350,14 @@ public:
   }
 
   ftxui::Element OnRender() override {
-    return ftxui::selectionStyleReset(render_());
+    // Null-Element guard: a null shared_ptr<Node> piped into any decorator
+    // (selectionStyleReset, color, xflex, ...) builds a NodeDecorator with a
+    // null child[0] and segfaults on SetBox during render.
+    ftxui::Element rendered = render_ ? render_() : ftxui::Element{};
+    if (!rendered) {
+      rendered = ftxui::text("");
+    }
+    return ftxui::selectionStyleReset(rendered);
   }
   const ftxui::Box &box() const { return box_; }
 
@@ -335,11 +377,14 @@ private:
 class CopyableRowComponent : public ftxui::ComponentBase {
 public:
   CopyableRowComponent(std::function<ftxui::Element(bool)> render,
-                       std::string copy_text)
+                       std::shared_ptr<const std::string> copy_text)
       : render_(std::move(render)), copy_text_(std::move(copy_text)) {}
 
   ftxui::Element OnRender() override {
     auto element = render_ ? render_(false) : ftxui::text("");
+    if (!element) {
+      element = ftxui::text("");
+    }
     return element | ftxui::selectionBackgroundColor(ftxui::Color::RGB(72, 96, 152)) |
            ftxui::selectionForegroundColor(ftxui::Color::RGB(245, 247, 252)) |
            ftxui::reflect(box_);
@@ -348,11 +393,14 @@ public:
   bool Focusable() const override { return false; }
 
   const ftxui::Box &box() const { return box_; }
-  const std::string &copyText() const { return copy_text_; }
+  const std::string &copyText() const {
+    static const std::string empty;
+    return copy_text_ ? *copy_text_ : empty;
+  }
 
 private:
   std::function<ftxui::Element(bool)> render_;
-  std::string copy_text_;
+  std::shared_ptr<const std::string> copy_text_;
   ftxui::Box box_;
 };
 
@@ -602,6 +650,47 @@ std::vector<ftxui::Component> BuildQuickToolClusterRows(
   return rows;
 }
 
+class LazyToolBlock : public ftxui::ComponentBase {
+public:
+    LazyToolBlock(std::shared_ptr<firmius::tui::ToolCallView> view,
+                  firmius::tui::HistoryGetter sub_history_getter,
+                  firmius::tui::StreamGetter sub_stream_getter,
+                  firmius::tui::ProcessStateGetter process_state_getter,
+                  firmius::tui::SubagentStateGetter subagent_state_getter,
+                  firmius::tui::AgentFocusHandler agent_focus_handler)
+        : view_(std::move(view)), sub_history_getter_(std::move(sub_history_getter)),
+          sub_stream_getter_(std::move(sub_stream_getter)),
+          process_state_getter_(std::move(process_state_getter)),
+          subagent_state_getter_(std::move(subagent_state_getter)),
+          agent_focus_handler_(std::move(agent_focus_handler)) {}
+
+    ftxui::Element OnRender() override {
+        ensure();
+        return block_ ? block_->Render() : ftxui::text("Preparing tool...");
+    }
+    bool OnEvent(ftxui::Event event) override {
+        ensure();
+        return block_ ? block_->OnEvent(event) : false;
+    }
+    bool Focusable() const override { return true; }
+private:
+    void ensure() {
+        if (!block_) {
+            block_ = firmius::tui::ToolBlock(view_, sub_history_getter_, sub_stream_getter_,
+                                             process_state_getter_, subagent_state_getter_,
+                                             agent_focus_handler_);
+            Add(block_);
+        }
+    }
+    std::shared_ptr<firmius::tui::ToolCallView> view_;
+    firmius::tui::HistoryGetter sub_history_getter_;
+    firmius::tui::StreamGetter sub_stream_getter_;
+    firmius::tui::ProcessStateGetter process_state_getter_;
+    firmius::tui::SubagentStateGetter subagent_state_getter_;
+    firmius::tui::AgentFocusHandler agent_focus_handler_;
+    ftxui::Component block_;
+};
+
 class ChatWindowComponent : public ftxui::ComponentBase {
 public:
   explicit ChatWindowComponent(
@@ -641,13 +730,6 @@ public:
         editable_message_click_handler_(std::move(editable_message_click_handler)) {
 
     history_inner_ = ftxui::Container::Vertical({});
-    history_container_ = ftxui::Renderer(history_inner_, [this] {
-      ftxui::Elements elements;
-      for (size_t i = 0; i < history_inner_->ChildCount(); ++i) {
-        elements.push_back(history_inner_->ChildAt(i)->Render());
-      }
-      return ftxui::vbox(std::move(elements));
-    });
     history_container_ = ftxui::Renderer(history_inner_, [this] { return RenderHistoryWindow(); });
 
     tail_spacer_ =
@@ -669,17 +751,41 @@ public:
       if (!live_rows_provider_) {
         return ftxui::vbox(ftxui::Elements{});
       }
-      return ftxui::vbox(live_rows_provider_());
+      // Live rows can be expensive (markdown render / tool row composition).
+      // Avoid recomputing them on unrelated redraws (e.g. animation ticks for
+      // other widgets) by caching against the same signature we use for scroll
+      // measurement invalidation.
+      const std::size_t sig = live_measurement_signature_getter_
+                                  ? live_measurement_signature_getter_()
+                                  : 0u;
+      if (has_cached_live_rows_ && sig == last_live_rows_signature_) {
+        return ftxui::vbox(cached_live_rows_);
+      }
+
+      // Drop any null Elements before they reach VBox::SetBox / Flex::SetBox.
+      // A single bad row otherwise turns the whole frame into a SIGSEGV.
+      auto rows = live_rows_provider_();
+      rows.erase(std::remove_if(rows.begin(), rows.end(),
+                                [](const ftxui::Element &e) { return !e; }),
+                 rows.end());
+      cached_live_rows_ = rows;
+      last_live_rows_signature_ = sig;
+      has_cached_live_rows_ = true;
+      return ftxui::vbox(std::move(rows));
     });
 
     container_ = ftxui::Container::Vertical(
         {history_container_, live_rows_cmp, tail_spacer_});
     container_ = ftxui::Renderer(container_, [this, live_rows_cmp] {
-      return ftxui::vbox({
-          history_container_->Render(),
-          live_rows_cmp->Render(),
-          tail_spacer_->Render(),
-      });
+      ftxui::Elements parts;
+      parts.reserve(3);
+      auto push = [&](ftxui::Element e) {
+        if (e) parts.push_back(std::move(e));
+      };
+      push(history_container_->Render());
+      push(live_rows_cmp->Render());
+      push(tail_spacer_->Render());
+      return ftxui::vbox(std::move(parts));
     });
 
     scrollable_ = firmius::tui::ScrollableBox(
@@ -696,10 +802,23 @@ public:
                return seed;
              }});
     Add(scrollable_);
+
+    if (scrollable_) {
+        scrollable_->options().custom_size_getter = [this](int width) {
+            return GetTotalHistoryHeight(width);
+        };
+    }
   }
 
   ftxui::Element OnRender() override {
     EnsureHistoryRows();
+    if (pending_bottom_restore_ && scrollable_) {
+      if (scrollable_->ViewportHeight() > 1 && scrollable_->ContentWidth() > 1) {
+        scrollable_->TakeFocus();
+        scrollable_->RequestScrollToBottom();
+        pending_bottom_restore_ = false;
+      }
+    }
     return scrollable_ ? scrollable_->Render() : ftxui::text("");
   }
 
@@ -707,18 +826,29 @@ public:
 
   bool OnEvent(ftxui::Event event) override {
     if (event == ftxui::Event::Special("TranscriptChanged")) {
+      const bool should_follow_bottom =
+          !scrollable_ || scrollable_->IsAtBottom() || pending_bottom_restore_;
       MarkHistoryDirty(false);
       EnsureHistoryRows();
       if (scrollable_) {
         scrollable_->TakeFocus();
-        scrollable_->RequestScrollToBottom();
-        pending_bottom_restore_ = true;
+        if (should_follow_bottom) {
+          scrollable_->RequestScrollToBottom();
+          pending_bottom_restore_ = true;
+        } else {
+          scrollable_->InvalidateLayout();
+        }
       }
       return true;
     }
 
     if (event == ftxui::Event::Special("ThreadChanged") ||
         event == ftxui::Event::Special("ThemeChanged")) {
+      if (event == ftxui::Event::Special("ThemeChanged")) {
+        firmius::tui::ClearToolPresentationDiffCache();
+        firmius::tui::ClearMarkdownCache();
+        firmius::tui::SyntaxHighlighter::instance().clearRenderCache();
+      }
       MarkHistoryDirty(true);
       EnsureHistoryRows();
       if (scrollable_) {
@@ -733,10 +863,6 @@ public:
       if (pending_bottom_restore_ && scrollable_) {
         EnsureHistoryRows();
         if (scrollable_->ViewportHeight() <= 1 || scrollable_->ContentWidth() <= 1) {
-          // fucking hours
-          //if (auto *screen = ftxui::ScreenInteractive::Active()) {
-            // screen->PostEvent(ftxui::Event::Custom);
-          //}
           return true;
         }
         scrollable_->TakeFocus();
@@ -749,9 +875,9 @@ public:
 
     const bool copy_handler_consumed = HandleCopySelection(event);
     EnsureHistoryRows();
-    if (scrollable_ && !event.is_mouse()) {
-      scrollable_->InvalidateLayout();
-    }
+    // Do not invalidate transcript layout for ordinary keypresses. The input
+    // bar shares the event loop with chat; forcing a full chat re-measure on
+    // every typed character makes large threads feel seconds behind.
     const bool handled = scrollable_ ? scrollable_->OnEvent(event) : false;
     FinalizePendingCopy();
     if (copy_drag_candidate_ && event.is_mouse() &&
@@ -944,7 +1070,7 @@ private:
   }
 
   void AddCopyableRow(std::function<ftxui::Element(bool)> render,
-                      std::string copy_text) {
+                      std::shared_ptr<const std::string> copy_text) {
     auto row = ftxui::Make<CopyableRowComponent>(std::move(render),
                                                  std::move(copy_text));
     copyable_rows_.push_back(row);
@@ -985,6 +1111,18 @@ private:
   }
 
 
+  int GetTotalHistoryHeight(int width) {
+    (void)width;
+    if (row_height_cache_.empty() && !rows_.empty()) {
+        row_height_cache_.assign(rows_.size(), kDefaultEstimatedRowHeight);
+    }
+    int total = 0;
+    for (int h : row_height_cache_) {
+      total += h;
+    }
+    return total;
+  }
+
   ftxui::Element RenderHistoryWindow() {
     if (rows_.empty()) {
       return ftxui::text("");
@@ -1007,20 +1145,18 @@ private:
           last_visible_end_ > last_visible_start_ &&
           last_visible_end_ <= row_height_cache_.size();
 
-      // Fallback path for startup / low-turn / unstable-height cases:
-      // render the full transcript until we have one trustworthy measured window.
-      // This prevents the cut-off/flicker bug caused by seeding virtualization
-      // from guessed row heights near the bottom of chat. Also avoid
-      // virtualization while the viewport is bottom-following; stale row-height
-      // estimates there produce the blank tail / clipped-last-rows artifact.
-      const bool should_virtualize = has_measured_window &&
-                                     (!scrollable_ || !scrollable_->IsAtBottom()) &&
-                                     rows_.size() > static_cast<size_t>(viewport_height * 3);
+      const bool should_virtualize =
+          has_measured_window &&
+          rows_.size() > static_cast<size_t>(viewport_height * 3);
 
       if (should_virtualize) {
+        const int history_height = GetTotalHistoryHeight(scrollable_->ContentWidth());
+        const int anchor_offset = scrollable_->IsAtBottom()
+                                      ? std::max(0, history_height - viewport_height)
+                                      : scroll_offset;
         const int target_top =
-            std::max(0, scroll_offset - kVirtualizationOverscanLines);
-        const int target_bottom = scroll_offset + viewport_height +
+            std::max(0, anchor_offset - kVirtualizationOverscanLines);
+        const int target_bottom = anchor_offset + viewport_height +
                                   kVirtualizationOverscanLines;
         int cumulative = 0;
         start = rows_.size();
@@ -1068,528 +1204,404 @@ private:
     last_visible_start_ = start;
     last_visible_end_ = end;
 
+    // Sync history_inner_ children with the visible window to keep event processing O(1)
+    if (start != last_attached_start_ || end != last_attached_end_ || history_inner_->ChildCount() == 0) {
+        history_inner_->DetachAllChildren();
+        for (size_t i = start; i < end; ++i) {
+            if (i < rows_.size()) {
+                history_inner_->Add(rows_[i]);
+            }
+        }
+        last_attached_start_ = start;
+        last_attached_end_ = end;
+    }
+
     ftxui::Elements elements;
     if (top_padding > 0) elements.push_back(ftxui::text("") | ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, top_padding));
-    for (size_t i = start; i < end; ++i) elements.push_back(history_inner_->ChildAt(i)->Render());
+    
+    for (size_t i = 0; i < history_inner_->ChildCount(); ++i) {
+        auto e = history_inner_->ChildAt(i)->Render();
+        if (e) {
+          elements.push_back(std::move(e));
+        }
+    }
+
     if (bottom_padding > 0) elements.push_back(ftxui::text("") | ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, bottom_padding));
     return ftxui::vbox(std::move(elements));
   }
 
   void RebuildIfNeeded() {
     const auto signature = currentHistorySignature();
+    auto* history = signature.history;
+    const bool showInternalNudges = signature.show_internal_nudges;
+    const bool hideErrors = signature.hide_errors;
+
+    int current_width = scrollable_ ? scrollable_->ContentWidth() : -1;
+    if (current_width != last_rebuild_width_) {
+      MarkHistoryDirty(true);
+      last_rebuild_width_ = current_width;
+    }
+
     if (!history_dirty_ && signature == last_history_signature_) {
       return;
     }
     history_dirty_ = false;
     last_history_signature_ = signature;
+
     if (scrollable_) {
       scrollable_->InvalidateLayout();
     }
 
-    auto *history = signature.history;
-    const bool showInternalNudges = signature.show_internal_nudges;
-    const bool hideErrors = signature.hide_errors;
-    row_height_cache_.clear();
-    last_visible_start_ = 0;
-    last_visible_end_ = 0;
     const auto rebuild_begin = std::chrono::steady_clock::now();
 
-    rows_.clear();
-    copyable_rows_.clear();
-    history_inner_->DetachAllChildren();
-
+    // Pass 1: Observation suppression & turn hashing
+    std::unordered_map<std::string, ObservationNoticeRenderState> latest_obs;
+    size_t obs_seq = 0;
+    std::vector<std::size_t> new_hashes;
     if (history) {
-      size_t estimated_rows = 0;
-      for (const auto &turn : history->turns) {
-        estimated_rows += std::max<size_t>(1, turn.messages.size() * 2);
+      new_hashes.reserve(history->turns.size());
+      for (size_t i = 0; i < history->turns.size(); ++i) {
+        const auto& t = history->turns[i];
+        for (const auto& msg : t.messages) {
+          if (firmius::tui::ShouldHideMessageInTranscript(msg, showInternalNudges, t.turnId)) continue;
+          for (const auto& part : msg.content) {
+            auto* notice = std::get_if<firmius::shared::NoticeContent>(&part);
+            if (notice && isObservationNotice(*notice)) {
+              const auto& meta = *notice->rollingMetadata;
+              const auto range_key = observationRangeKey(meta);
+              const int lifecycle_rank = observationLifecycleRank(meta.lifecycle);
+              if (range_key && lifecycle_rank >= 0) {
+                const size_t seq = obs_seq++;
+                auto& entry = latest_obs[*range_key];
+                if (lifecycle_rank > entry.lifecycle_rank || (lifecycle_rank == entry.lifecycle_rank && seq >= entry.sequence)) {
+                  entry.lifecycle_rank = lifecycle_rank;
+                  entry.sequence = seq;
+                }
+              }
+            }
+          }
+        }
       }
-      rows_.reserve(estimated_rows);
-      copyable_rows_.reserve(estimated_rows / 2 + 8);
 
+      obs_seq = 0;
+      for (const auto& t : history->turns) {
+        std::size_t h = HashTurn(t);
+        for (const auto& msg : t.messages) {
+          if (firmius::tui::ShouldHideMessageInTranscript(msg, showInternalNudges, t.turnId)) continue;
+          for (const auto& part : msg.content) {
+            auto* notice = std::get_if<firmius::shared::NoticeContent>(&part);
+            if (notice && isObservationNotice(*notice)) {
+              const auto& meta = *notice->rollingMetadata;
+              const auto range_key = observationRangeKey(meta);
+              const int lifecycle_rank = observationLifecycleRank(meta.lifecycle);
+              bool suppressed = false;
+              if (range_key && lifecycle_rank >= 0) {
+                const size_t seq = obs_seq++;
+                auto it = latest_obs.find(*range_key);
+                if (it != latest_obs.end()) {
+                  suppressed = it->second.lifecycle_rank > lifecycle_rank || (it->second.lifecycle_rank == lifecycle_rank && it->second.sequence > seq);
+                }
+              }
+              HashCombine(h, suppressed);
+            }
+          }
+        }
+        new_hashes.push_back(h);
+      }
+    }
+
+    // Pass 2: Truncate cache at first mismatch
+    size_t first_mismatch = 0;
+    while (first_mismatch < new_hashes.size() && first_mismatch < turn_hashes_.size() && new_hashes[first_mismatch] == turn_hashes_[first_mismatch]) {
+      first_mismatch++;
+    }
+
+    if (first_mismatch < turn_hashes_.size() || new_hashes.size() < turn_hashes_.size() || block_cache_.empty()) {
+      size_t block_idx = 0;
+      while (block_idx < block_cache_.size() && block_cache_[block_idx].turn_end < first_mismatch) {
+        block_idx++;
+      }
+      if (block_idx < block_cache_.size()) {
+        const auto& b = block_cache_[block_idx];
+        rows_.erase(rows_.begin() + b.rows_start, rows_.end());
+        copyable_rows_.erase(copyable_rows_.begin() + b.copyable_start, copyable_rows_.end());
+        if (b.rows_start < row_height_cache_.size()) row_height_cache_.erase(row_height_cache_.begin() + b.rows_start, row_height_cache_.end());
+        block_cache_.erase(block_cache_.begin() + block_idx, block_cache_.end());
+        turn_hashes_.resize(b.turn_start);
+      } else if (first_mismatch == 0 || block_cache_.empty()) {
+        rows_.clear(); copyable_rows_.clear(); row_height_cache_.clear(); block_cache_.clear(); turn_hashes_.clear();
+      }
+    }
+
+    // Pass 3: Process remaining turns incrementally
+    if (history && turn_hashes_.size() < history->turns.size()) {
+      size_t turn_index = turn_hashes_.size();
       std::unordered_map<std::string, bool> seen_tool_call;
+      for (size_t i = 0; i < turn_index; ++i) {
+        for (const auto& msg : history->turns[i].messages) {
+          for (const auto& part : msg.content) {
+            if (auto* tc = std::get_if<firmius::shared::ToolCallContent>(&part)) seen_tool_call[tc->id] = true;
+          }
+        }
+      }
+
       QuickToolCluster quick_cluster;
       std::vector<std::string> pending_turn_footers;
-      auto flush_quick_cluster = [&](bool merge_live = false) {
-        std::vector<firmius::tui::LiveQuickSummaryCluster> live_clusters;
-        if (merge_live && live_quick_summary_provider_) {
-          live_clusters = live_quick_summary_provider_();
-        }
+      size_t block_turn_start = turn_index;
+      size_t obs_pass_seq = 0; 
 
+      // Re-calculate obs_pass_seq for the start_turn
+      for (size_t i = 0; i < turn_index; ++i) {
+          const auto& t = history->turns[i];
+          for (const auto& msg : t.messages) {
+              if (firmius::tui::ShouldHideMessageInTranscript(msg, showInternalNudges, t.turnId)) continue;
+              for (const auto& part : msg.content) {
+                  auto* notice = std::get_if<firmius::shared::NoticeContent>(&part);
+                  if (notice && isObservationNotice(*notice)) {
+                      const auto& meta = *notice->rollingMetadata;
+                      if (observationRangeKey(meta) && observationLifecycleRank(meta.lifecycle) >= 0) obs_pass_seq++;
+                  }
+              }
+          }
+      }
+
+      auto flush_block = [&](size_t current_turn, bool final_merge = false) {
+        size_t rows_before = rows_.size();
+        size_t copyable_before = copyable_rows_.size();
+
+        std::vector<firmius::tui::LiveQuickSummaryCluster> live_clusters;
+        if (final_merge && live_quick_summary_provider_) live_clusters = live_quick_summary_provider_();
         const firmius::tui::LiveQuickSummaryCluster *merge_cluster = nullptr;
-        size_t start_index = 0;
+        size_t live_start = 0;
         if (!live_clusters.empty() && live_clusters.front().merge_with_history) {
           merge_cluster = &live_clusters.front();
-          start_index = 1;
+          live_start = 1;
         }
 
-        bool rendered_grouped_quick_rows = false;
-        {
-          auto grouped_rows =
-              BuildQuickToolClusterRows(quick_cluster, merge_cluster);
-          for (auto &row : grouped_rows) {
-            rows_.push_back(row);
-          }
-          quick_cluster.clear();
-          rendered_grouped_quick_rows = !grouped_rows.empty();
-        }
+        auto grouped_rows = BuildQuickToolClusterRows(quick_cluster, merge_cluster);
+        for (auto &row : grouped_rows) rows_.push_back(row);
+        quick_cluster.clear();
 
-        // IMPORTANT: Turn footers ("done · turn N · …") are not meaningful
-        // conversational content, and should not break quick-tool clustering.
-        // We buffer them so that consecutive tool-only turns still render as a
-        // single quick-tools block.
-        std::vector<std::string> footer_texts_to_render;
-        const bool show_turn_footers =
-            show_turn_footers_getter_ ? show_turn_footers_getter_() : true;
-        if (rendered_grouped_quick_rows && !pending_turn_footers.empty()) {
-          // When multiple tool-only turns collapse into a single grouped quick-tool
-          // row, do not spam one footer per consumed turn beneath that group.
-          // Keep only the latest turn footer as the boundary marker.
-          footer_texts_to_render.push_back(pending_turn_footers.back());
-        } else {
-          footer_texts_to_render = pending_turn_footers;
-        }
-
-        for (const auto &footer_text :
-             (show_turn_footers ? footer_texts_to_render
-                                : std::vector<std::string>{})) {
-          const auto &theme =
-              firmius::tui::ThemeManager::instance().getCurrentTheme();
-          auto row = ftxui::Make<RowComponent>(
-              nullptr, [footer_text, theme] {
-                return firmius::tui::IndentAgentRow(
-                    ftxui::text(footer_text) |
-                    ftxui::color(theme.chat.timestamp));
-              });
-          rows_.push_back(row);
-          rows_.push_back(ftxui::Make<RowComponent>(
-              nullptr, [] { return ftxui::text(""); }));
+        const bool show_turn_footers = show_turn_footers_getter_ ? show_turn_footers_getter_() : true;
+        std::vector<std::string> footers_to_render = (grouped_rows.empty() || pending_turn_footers.empty()) ? pending_turn_footers : std::vector<std::string>{pending_turn_footers.back()};
+        for (const auto &footer_text : (show_turn_footers ? footers_to_render : std::vector<std::string>{})) {
+          const auto &theme = firmius::tui::ThemeManager::instance().getCurrentTheme();
+          rows_.push_back(ftxui::Make<RowComponent>(nullptr, [footer_text, theme] {
+            return firmius::tui::IndentAgentRow(ftxui::text(footer_text) | ftxui::color(theme.chat.timestamp));
+          }));
+          rows_.push_back(ftxui::Make<RowComponent>(nullptr, [] { return ftxui::text(""); }));
         }
         pending_turn_footers.clear();
 
-        QuickToolCluster empty_cluster;
-        for (size_t i = start_index; i < live_clusters.size(); ++i) {
-          auto live_rows =
-              BuildQuickToolClusterRows(empty_cluster, &live_clusters[i]);
-          for (auto &row : live_rows) {
-            rows_.push_back(row);
+        if (final_merge) {
+          QuickToolCluster empty;
+          for (size_t i = live_start; i < live_clusters.size(); ++i) {
+            auto lrows = BuildQuickToolClusterRows(empty, &live_clusters[i]);
+            for (auto &row : lrows) rows_.push_back(row);
           }
+        }
+
+        if (rows_.size() > rows_before) {
+          CachedBlock b;
+          b.turn_start = block_turn_start;
+          b.turn_end = current_turn;
+          b.rows_start = rows_before;
+          b.rows_count = rows_.size() - rows_before;
+          b.copyable_start = copyable_before;
+          b.copyable_count = copyable_rows_.size() - copyable_before;
+          block_cache_.push_back(b);
+          block_turn_start = current_turn + 1;
         }
       };
 
-      std::unordered_map<std::string, ObservationNoticeRenderState>
-          latest_observation_notice_by_range;
-      size_t observation_notice_sequence = 0;
-      for (size_t turn_index = 0; turn_index < history->turns.size();
-           ++turn_index) {
+      for (; turn_index < history->turns.size(); ++turn_index) {
         const auto &t = history->turns[turn_index];
-        for (const auto &msg : t.messages) {
-          if (firmius::tui::ShouldHideMessageInTranscript(
-                  msg, showInternalNudges, t.turnId)) {
-            continue;
-          }
-          for (const auto &part : msg.content) {
-            auto *notice = std::get_if<firmius::shared::NoticeContent>(&part);
-            if (!notice || !isObservationNotice(*notice)) {
-              continue;
-            }
-            const auto &meta = *notice->rollingMetadata;
-            const auto range_key = observationRangeKey(meta);
-            if (!range_key.has_value()) {
-              continue;
-            }
-            const int lifecycle_rank = observationLifecycleRank(meta.lifecycle);
-            if (lifecycle_rank < 0) {
-              continue;
-            }
-            const size_t sequence = observation_notice_sequence++;
-            auto &entry = latest_observation_notice_by_range[*range_key];
-            if (lifecycle_rank > entry.lifecycle_rank ||
-                (lifecycle_rank == entry.lifecycle_rank &&
-                 sequence >= entry.sequence)) {
-              entry.lifecycle_rank = lifecycle_rank;
-              entry.sequence = sequence;
-            }
-          }
-        }
-      }
+        turn_hashes_.push_back(new_hashes[turn_index]);
+        if (t.messages.empty()) continue;
+        bool visible = false;
+        for (const auto& m : t.messages) if (!firmius::tui::ShouldHideMessageInTranscript(m, showInternalNudges, t.turnId)) { visible = true; break; }
+        if (!visible) continue;
 
-      observation_notice_sequence = 0;
-      for (size_t turn_index = 0; turn_index < history->turns.size();
-           ++turn_index) {
-        const auto &t = history->turns[turn_index];
-        if (t.messages.empty())
-          continue;
+        const bool isCompactionStart = (t.turnId.rfind("compaction-start-", 0) == 0);
+        const bool isCompactionSummary = (t.turnId.rfind("compaction-summary-", 0) == 0);
+        const bool isCompactionEnd = (t.turnId.rfind("compaction-end-", 0) == 0);
 
-        bool has_visible_message = false;
-        for (const auto &msg : t.messages) {
-          if (!firmius::tui::ShouldHideMessageInTranscript(
-                  msg, showInternalNudges, t.turnId)) {
-            has_visible_message = true;
-            break;
-          }
-        }
-        if (!has_visible_message) {
-          continue;
-        }
-
-        const bool isCompactionStart =
-            (t.turnId.rfind("compaction-start-", 0) == 0);
-        const bool isCompactionSummary =
-            (t.turnId.rfind("compaction-summary-", 0) == 0);
-        const bool isCompactionEnd =
-            (t.turnId.rfind("compaction-end-", 0) == 0);
         if (isCompactionStart || isCompactionSummary || isCompactionEnd) {
-          const bool summaryHasExplicitStart =
-              isCompactionSummary && turn_index > 0 &&
-              history->turns[turn_index - 1].turnId.rfind("compaction-start-", 0) == 0;
-          const bool summaryHasExplicitEnd =
-              isCompactionSummary && (turn_index + 1) < history->turns.size() &&
-              history->turns[turn_index + 1].turnId.rfind("compaction-end-", 0) == 0;
-          flush_quick_cluster();
+          flush_block(turn_index - 1);
+          size_t rb = rows_.size(); size_t cb = copyable_rows_.size();
+          
           auto full_width_separator = [](const std::string &label) {
-            return ftxui::hbox({
-                       ftxui::filler() | ftxui::xflex,
-                       ftxui::text(" " + label + " ") | ftxui::dim,
-                       ftxui::filler() | ftxui::xflex,
-                   }) |
-                   ftxui::xflex;
-          };
-          auto compaction_separator = [full_width_separator]() {
-            return full_width_separator("Compaction");
-          };
-          auto compaction_separator_bottom = [full_width_separator]() {
-            return full_width_separator("Compaction Complete");
+            return ftxui::hbox({ ftxui::filler() | ftxui::xflex, ftxui::text(" " + label + " ") | ftxui::dim, ftxui::filler() | ftxui::xflex }) | ftxui::xflex;
           };
 
-          if (isCompactionStart ||
-              (isCompactionSummary && !summaryHasExplicitStart)) {
-            rows_.push_back(
-                ftxui::Make<RowComponent>(nullptr, [compaction_separator]() {
-                  return compaction_separator();
-                }));
+          if (isCompactionStart || (isCompactionSummary && (turn_index == 0 || history->turns[turn_index-1].turnId.rfind("compaction-start-", 0) != 0))) {
+            rows_.push_back(ftxui::Make<RowComponent>(nullptr, [full_width_separator] { return full_width_separator("Compaction"); }));
           }
 
           for (const auto &msg : t.messages) {
-            if (firmius::tui::ShouldHideMessageInTranscript(
-                    msg, showInternalNudges, t.turnId)) {
-              continue;
-            }
+            if (firmius::tui::ShouldHideMessageInTranscript(msg, showInternalNudges, t.turnId)) continue;
             for (const auto &part : msg.content) {
               if (auto *txt = std::get_if<firmius::shared::TextContent>(&part)) {
-                std::string text = txt->text;
-                std::string copy_text = text;
-                AddCopyableRow([text = std::move(text)](bool selected) {
-                      (void)selected;
-                      return firmius::tui::IndentAgentRow(
-                          firmius::tui::RenderMarkdown(
-                              transcriptPreview(text)));
-                    }, std::move(copy_text));
+                auto text = std::make_shared<const std::string>(txt->text);
+                AddCopyableRow([text](bool selected) { (void)selected; return firmius::tui::IndentAgentRow(firmius::tui::RenderMarkdown(transcriptPreview(*text))); }, text);
               } else if (auto *thk = std::get_if<firmius::shared::ThinkingContent>(&part)) {
-                std::string thinking = thk->thinking;
-                std::string copy_text = thinking;
-                AddCopyableRow([thinking = std::move(thinking)](bool selected) {
-                      (void)selected;
-                      return firmius::tui::IndentAgentRow(
-                          firmius::tui::RenderMarkdown(
-                              transcriptPreview(thinking), true));
-                    }, std::move(copy_text));
+                auto th = std::make_shared<const std::string>(thk->thinking);
+                AddCopyableRow([th](bool selected) { (void)selected; return firmius::tui::IndentAgentRow(firmius::tui::RenderMarkdown(transcriptPreview(*th), true)); }, th);
               }
             }
           }
-
-          if (isCompactionEnd || (isCompactionSummary && !summaryHasExplicitEnd)) {
-            rows_.push_back(ftxui::Make<RowComponent>(
-                nullptr, [compaction_separator_bottom]() {
-                  return compaction_separator_bottom();
-                }));
+          if (isCompactionEnd || (isCompactionSummary && (turn_index + 1 >= history->turns.size() || history->turns[turn_index+1].turnId.rfind("compaction-end-", 0) != 0))) {
+            rows_.push_back(ftxui::Make<RowComponent>(nullptr, [full_width_separator] { return full_width_separator("Compaction Complete"); }));
           }
+
+          CachedBlock b; b.turn_start = turn_index; b.turn_end = turn_index; b.rows_start = rb; b.rows_count = rows_.size() - rb; b.copyable_start = cb; b.copyable_count = copyable_rows_.size() - cb;
+          block_cache_.push_back(b); block_turn_start = turn_index + 1;
           continue;
         }
 
         for (const auto &msg : t.messages) {
-          if (firmius::tui::ShouldHideMessageInTranscript(
-                  msg, showInternalNudges, t.turnId)) {
-            continue;
-          }
-          const auto &theme =
-              firmius::tui::ThemeManager::instance().getCurrentTheme();
+          if (firmius::tui::ShouldHideMessageInTranscript(msg, showInternalNudges, t.turnId)) continue;
+          const auto &theme = firmius::tui::ThemeManager::instance().getCurrentTheme();
           const std::string prefix = rolePrefix(msg.role);
           bool isUser = (msg.role == firmius::shared::Role::User);
-          ftxui::Color prefixColor =
-              isUser ? theme.chat.user_prefix : theme.chat.agent_prefix;
+          ftxui::Color prefixColor = isUser ? theme.chat.user_prefix : theme.chat.agent_prefix;
+
           auto makeTag = [&theme](const std::string &label) {
-            return ftxui::text(" " + label + " ") | ftxui::bold |
-                   ftxui::color(theme.base.bg) |
-                   ftxui::bgcolor(theme.base.highlight);
+            return ftxui::text(" " + label + " ") | ftxui::bold | ftxui::color(theme.base.bg) | ftxui::bgcolor(theme.base.highlight);
           };
-          auto renderUserMessage = [prefixColor, prefix, theme, makeTag](
-                                       const std::string &text,
-                                       int image_count,
-                                       bool selected) {
+          auto renderUserMessage = [prefixColor, prefix, theme, makeTag](const std::string &text, int image_count, bool selected) {
             ftxui::Elements body;
-            body.push_back(
-                ftxui::hbox({
-                    ftxui::text(prefix) | ftxui::bold |
-                        ftxui::color(prefixColor),
-                    firmius::tui::RenderMarkdown(
-                        transcriptPreview(text)) | ftxui::xflex,
-                }) |
-                ftxui::xflex);
+            body.push_back(ftxui::hbox({ ftxui::text(prefix) | ftxui::bold | ftxui::color(prefixColor), firmius::tui::RenderMarkdown(transcriptPreview(text)) | ftxui::xflex }) | ftxui::xflex);
             if (image_count > 0) {
               ftxui::Elements tags;
-              for (int i = 0; i < image_count; ++i) {
-                if (i > 0) {
-                  tags.push_back(ftxui::text(" "));
-                }
-                tags.push_back(makeTag("IMAGE " + std::to_string(i + 1)));
-              }
+              for (int i = 0; i < image_count; ++i) tags.push_back(makeTag("IMAGE " + std::to_string(i + 1)));
               body.push_back(ftxui::hbox(std::move(tags)) | ftxui::xflex);
             }
-            const auto bubble_bg =
-                selected ? ftxui::Color::RGB(72, 96, 152) : theme.input.bg;
-            return ftxui::vbox({
-                       ftxui::text(""),
-                       ftxui::vbox(std::move(body)) | ftxui::xflex,
-                       ftxui::text(""),
-                   }) |
-                   ftxui::bgcolor(bubble_bg) | ftxui::xflex;
+            return ftxui::vbox({ ftxui::text(""), ftxui::vbox(std::move(body)) | ftxui::xflex, ftxui::text("") }) | ftxui::bgcolor(selected ? ftxui::Color::RGB(72, 96, 152) : theme.input.bg) | ftxui::xflex;
           };
-
-          auto decorateMsg = [prefixColor,
-                              prefix, isUser, theme](const ftxui::Element &content) {
-            auto e = ftxui::hbox({
-                ftxui::text(prefix) | ftxui::bold | ftxui::color(prefixColor),
-                content | ftxui::xflex,
-            });
-            if (isUser) {
-              return e | ftxui::xflex;
-            }
-            return firmius::tui::IndentAgentRow(e);
+          auto decorateMsg = [prefixColor, prefix, isUser, theme](const ftxui::Element &content) {
+            auto e = ftxui::hbox({ ftxui::text(prefix) | ftxui::bold | ftxui::color(prefixColor), content | ftxui::xflex });
+            return isUser ? e | ftxui::xflex : firmius::tui::IndentAgentRow(e);
           };
-
-          uint64_t msg_timestamp = msg.timestamp;
 
           if (isUser) {
-            flush_quick_cluster();
-            std::string user_text;
-            int image_count = 0;
+            flush_block(turn_index - 1);
+            size_t rb = rows_.size(); size_t cb = copyable_rows_.size();
+            std::string user_text; int image_count = 0;
             for (const auto &part : msg.content) {
-              if (const auto *txt = std::get_if<firmius::shared::TextContent>(&part)) {
-                if (!user_text.empty()) {
-                  user_text += "\n";
-                }
-                user_text += txt->text;
-              } else if (std::holds_alternative<firmius::shared::ImageContent>(part)) {
-                ++image_count;
-              }
+              if (const auto *txt = std::get_if<firmius::shared::TextContent>(&part)) { if (!user_text.empty()) user_text += "\n"; user_text += txt->text; }
+              else if (std::holds_alternative<firmius::shared::ImageContent>(part)) ++image_count;
             }
-            std::string copy_text = user_text;
-            const bool is_edit_selection = editable_message_selected_getter_
-                                               ? editable_message_selected_getter_(msg_timestamp)
-                                               : false;
-            copyable_rows_.push_back(ftxui::Make<CopyableRowComponent>(
-                [renderUserMessage, user_text, image_count,
-                 is_edit_selection](bool selected) {
-                  return renderUserMessage(user_text, image_count,
-                                           selected || is_edit_selection);
-                },
-                std::move(copy_text)));
-            rows_.push_back(copyable_rows_.back());
-            rows_.push_back(ftxui::Make<RowComponent>(
-                nullptr, [] { return ftxui::text(""); }));
+            uint64_t msg_timestamp = msg.timestamp;
+            auto user_text_ptr = std::make_shared<const std::string>(std::move(user_text));
+            AddCopyableRow([this, renderUserMessage, user_text_ptr, image_count, msg_timestamp](bool selected) {
+              bool is_edit = editable_message_selected_getter_ ? editable_message_selected_getter_(msg_timestamp) : false;
+              return renderUserMessage(*user_text_ptr, image_count, selected || is_edit);
+            }, user_text_ptr);
+            rows_.push_back(ftxui::Make<RowComponent>(nullptr, [] { return ftxui::text(""); }));
+            CachedBlock b; b.turn_start = turn_index; b.turn_end = turn_index; b.rows_start = rb; b.rows_count = rows_.size() - rb; b.copyable_start = cb; b.copyable_count = copyable_rows_.size() - cb;
+            block_cache_.push_back(b); block_turn_start = turn_index + 1;
             continue;
           }
 
           for (const auto &part : msg.content) {
             if (auto *txt = std::get_if<firmius::shared::TextContent>(&part)) {
-              flush_quick_cluster();
-              std::string text = txt->text;
-              std::string copy_text = text;
-              AddCopyableRow([decorateMsg, text = std::move(text)](bool selected) {
-                    (void)selected;
-                    return decorateMsg(firmius::tui::RenderMarkdown(
-                        transcriptPreview(text)));
-                  }, std::move(copy_text));
-              rows_.push_back(ftxui::Make<RowComponent>(
-                  nullptr, [] { return ftxui::text(""); }));
-            } else if (auto *thk =
-                           std::get_if<firmius::shared::ThinkingContent>(
-                               &part)) {
-              flush_quick_cluster();
-              std::string thinking = thk->thinking;
-              std::string copy_text = thinking;
-              AddCopyableRow([decorateMsg, thinking = std::move(thinking)](bool selected) {
-                    (void)selected;
-                    return decorateMsg(
-                        firmius::tui::RenderMarkdown(
-                            transcriptPreview(thinking), true));
-                  }, std::move(copy_text));
-              rows_.push_back(ftxui::Make<RowComponent>(
-                  nullptr, [] { return ftxui::text(""); }));
-            } else if (auto *tc = std::get_if<firmius::shared::ToolCallContent>(
-                           &part)) {
+              flush_block(turn_index - 1);
+              size_t rb = rows_.size(); size_t cb = copyable_rows_.size();
+              auto text = std::make_shared<const std::string>(txt->text);
+              AddCopyableRow([decorateMsg, text](bool selected) { (void)selected; return decorateMsg(firmius::tui::RenderMarkdown(transcriptPreview(*text))); }, text);
+              rows_.push_back(ftxui::Make<RowComponent>(nullptr, [] { return ftxui::text(""); }));
+              CachedBlock b; b.turn_start = turn_index; b.turn_end = turn_index; b.rows_start = rb; b.rows_count = rows_.size() - rb; b.copyable_start = cb; b.copyable_count = copyable_rows_.size() - cb;
+              block_cache_.push_back(b); block_turn_start = turn_index + 1;
+            } else if (auto *thk = std::get_if<firmius::shared::ThinkingContent>(&part)) {
+              flush_block(turn_index - 1);
+              size_t rb = rows_.size(); size_t cb = copyable_rows_.size();
+              auto th = std::make_shared<const std::string>(thk->thinking);
+              AddCopyableRow([decorateMsg, th](bool selected) { (void)selected; return decorateMsg(firmius::tui::RenderMarkdown(transcriptPreview(*th), true)); }, th);
+              rows_.push_back(ftxui::Make<RowComponent>(nullptr, [] { return ftxui::text(""); }));
+              CachedBlock b; b.turn_start = turn_index; b.turn_end = turn_index; b.rows_start = rb; b.rows_count = rows_.size() - rb; b.copyable_start = cb; b.copyable_count = copyable_rows_.size() - cb;
+              block_cache_.push_back(b); block_turn_start = turn_index + 1;
+            } else if (auto *tc = std::get_if<firmius::shared::ToolCallContent>(&part)) {
               auto &view = tool_views_[tc->id];
-              if (!view && tool_view_provider_)
-                view = tool_view_provider_(tc->id);
-              if (!view) {
-                view = std::make_shared<firmius::tui::ToolCallView>();
-                view->phase = firmius::tui::ToolPhase::Finished;
-                view->success = true;
-              }
-              view->toolCallId = tc->id;
-              view->name = tc->name;
-              view->args = tc->args;
-              if (!firmius::tui::ShouldRenderToolCallView(*view)) {
-                continue;
-              }
-              if (view->phase != firmius::tui::ToolPhase::Finished &&
-                  view->phase != firmius::tui::ToolPhase::Error &&
-                  view->phase != firmius::tui::ToolPhase::BackgroundRunning)
-                view->phase = firmius::tui::ToolPhase::Called;
+              if (!view && tool_view_provider_) view = tool_view_provider_(tc->id);
+              if (!view) { view = std::make_shared<firmius::tui::ToolCallView>(); view->phase = firmius::tui::ToolPhase::Finished; view->success = true; }
+              view->toolCallId = tc->id; view->name = tc->name; view->args = tc->args;
+              if (!firmius::tui::ShouldRenderToolCallView(*view)) continue;
+              if (view->phase != firmius::tui::ToolPhase::Finished && view->phase != firmius::tui::ToolPhase::Error && view->phase != firmius::tui::ToolPhase::BackgroundRunning) view->phase = firmius::tui::ToolPhase::Called;
               seen_tool_call[tc->id] = true;
 
-              if (firmius::tui::IsQuickInspectionTool(view->name)) {
-                bool is_success = (view->phase != firmius::tui::ToolPhase::Error);
-                quick_cluster.add(view, is_success);
-                continue;
-              }
-
-              flush_quick_cluster();
-              auto block = firmius::tui::ToolBlock(
-                  view, sub_history_getter_, sub_stream_getter_,
-                  process_state_getter_,
-                  subagent_state_getter_, agent_focus_handler_);
-              auto row = ftxui::Make<RowComponent>(block, [block] {
-                return block->Render() | ftxui::xflex;
-              });
-              rows_.push_back(row);
-              rows_.push_back(ftxui::Make<RowComponent>(
-                  nullptr, [] { return ftxui::text(""); }));
-            } else if (auto *tr =
-                           std::get_if<firmius::shared::ToolResultContent>(
-                               &part)) {
+              if (firmius::tui::IsQuickInspectionTool(view->name)) { quick_cluster.add(view, (view->phase != firmius::tui::ToolPhase::Error)); continue; }
+              flush_block(turn_index - 1);
+              size_t rb = rows_.size();
+              auto block = ftxui::Make<LazyToolBlock>(view, sub_history_getter_, sub_stream_getter_, process_state_getter_, subagent_state_getter_, agent_focus_handler_);
+              rows_.push_back(ftxui::Make<RowComponent>(block, [block] { return block->Render() | ftxui::xflex; }));
+              rows_.push_back(ftxui::Make<RowComponent>(nullptr, [] { return ftxui::text(""); }));
+              CachedBlock b; b.turn_start = turn_index; b.turn_end = turn_index; b.rows_start = rb; b.rows_count = rows_.size() - rb; b.copyable_start = copyable_rows_.size(); b.copyable_count = 0;
+              block_cache_.push_back(b); block_turn_start = turn_index + 1;
+            } else if (auto *tr = std::get_if<firmius::shared::ToolResultContent>(&part)) {
               auto &view = tool_views_[tr->toolCallId];
-              if (!view && tool_view_provider_)
-                view = tool_view_provider_(tr->toolCallId);
-              if (!view) {
-                view = std::make_shared<firmius::tui::ToolCallView>();
-                view->phase = firmius::tui::ToolPhase::Finished;
-              }
-              view->toolCallId = tr->toolCallId;
-              view->result = tr->result;
-              view->success = tr->success;
-              if (!tr->success) {
-                view->phase = firmius::tui::ToolPhase::Error;
-              } else if (view->phase !=
-                         firmius::tui::ToolPhase::BackgroundRunning) {
-                view->phase = firmius::tui::ToolPhase::Finished;
-              }
+              if (!view && tool_view_provider_) view = tool_view_provider_(tr->toolCallId);
+              if (!view) { view = std::make_shared<firmius::tui::ToolCallView>(); view->phase = firmius::tui::ToolPhase::Finished; }
+              view->toolCallId = tr->toolCallId; view->result = tr->result; view->success = tr->success;
+              if (!tr->success) view->phase = firmius::tui::ToolPhase::Error; else if (view->phase != firmius::tui::ToolPhase::BackgroundRunning) view->phase = firmius::tui::ToolPhase::Finished;
 
-              if (!firmius::tui::ShouldRenderToolCallView(*view)) {
-                continue;
-              }
-
-              if (firmius::tui::IsQuickInspectionTool(view->name)) {
-                if (!seen_tool_call[tr->toolCallId]) {
-                  bool is_success = (view->phase != firmius::tui::ToolPhase::Error);
-                  quick_cluster.add(view, is_success);
-                }
-                continue;
-              }
-
+              if (!firmius::tui::ShouldRenderToolCallView(*view)) continue;
+              if (firmius::tui::IsQuickInspectionTool(view->name)) { if (!seen_tool_call[tr->toolCallId]) quick_cluster.add(view, (view->phase != firmius::tui::ToolPhase::Error)); continue; }
               if (!seen_tool_call[tr->toolCallId]) {
-                flush_quick_cluster();
-                auto block = firmius::tui::ToolBlock(
-                    view, sub_history_getter_, sub_stream_getter_,
-                    process_state_getter_,
-                    subagent_state_getter_, agent_focus_handler_);
-                auto row =
-                    ftxui::Make<RowComponent>(block, [block] {
-                      return block->Render() | ftxui::xflex;
-                    });
-                rows_.push_back(row);
-                rows_.push_back(ftxui::Make<RowComponent>(
-                    nullptr, [] { return ftxui::text(""); }));
+                flush_block(turn_index - 1);
+                size_t rb = rows_.size();
+                auto block = ftxui::Make<LazyToolBlock>(view, sub_history_getter_, sub_stream_getter_, process_state_getter_, subagent_state_getter_, agent_focus_handler_);
+                rows_.push_back(ftxui::Make<RowComponent>(block, [block] { return block->Render() | ftxui::xflex; }));
+                rows_.push_back(ftxui::Make<RowComponent>(nullptr, [] { return ftxui::text(""); }));
                 seen_tool_call[tr->toolCallId] = true;
+                CachedBlock b; b.turn_start = turn_index; b.turn_end = turn_index; b.rows_start = rb; b.rows_count = rows_.size() - rb; b.copyable_start = copyable_rows_.size(); b.copyable_count = 0;
+                block_cache_.push_back(b); block_turn_start = turn_index + 1;
               }
-            } else if (auto *err =
-                           std::get_if<firmius::shared::ErrorContent>(&part)) {
+            } else if (auto *err = std::get_if<firmius::shared::ErrorContent>(&part)) {
               if (!hideErrors) {
-                flush_quick_cluster();
-                auto error = *err;
-                auto row = ftxui::Make<RowComponent>(
-                    nullptr, [error, theme] {
-                      return firmius::tui::IndentAgentRow(
-                          RenderErrorDisplay(theme, error));
-                    });
-                rows_.push_back(row);
-                rows_.push_back(ftxui::Make<RowComponent>(
-                    nullptr, [] { return ftxui::text(""); }));
+                flush_block(turn_index - 1);
+                size_t rb = rows_.size(); auto error = *err;
+                rows_.push_back(ftxui::Make<RowComponent>(nullptr, [error, theme] { return firmius::tui::IndentAgentRow(RenderErrorDisplay(theme, error)); }));
+                rows_.push_back(ftxui::Make<RowComponent>(nullptr, [] { return ftxui::text(""); }));
+                CachedBlock b; b.turn_start = turn_index; b.turn_end = turn_index; b.rows_start = rb; b.rows_count = rows_.size() - rb; b.copyable_start = copyable_rows_.size(); b.copyable_count = 0;
+                block_cache_.push_back(b); block_turn_start = turn_index + 1;
               }
-            } else if (auto *notice =
-                           std::get_if<firmius::shared::NoticeContent>(
-                               &part)) {
-              flush_quick_cluster();
-              auto notice_copy = *notice;
-              bool suppress_notice = false;
-              if (isObservationNotice(notice_copy)) {
-                const auto &meta = *notice_copy.rollingMetadata;
+            } else if (auto *notice = std::get_if<firmius::shared::NoticeContent>(&part)) {
+              bool suppressed = false;
+              if (isObservationNotice(*notice)) {
+                const auto& meta = *notice->rollingMetadata;
                 const auto range_key = observationRangeKey(meta);
-                const int lifecycle_rank =
-                    observationLifecycleRank(meta.lifecycle);
-                if (range_key.has_value() && lifecycle_rank >= 0) {
-                  const size_t sequence = observation_notice_sequence++;
-                  auto latest_it =
-                      latest_observation_notice_by_range.find(*range_key);
-                  if (latest_it != latest_observation_notice_by_range.end()) {
-                    const auto &latest = latest_it->second;
-                    suppress_notice = latest.lifecycle_rank > lifecycle_rank ||
-                                      (latest.lifecycle_rank == lifecycle_rank &&
-                                       latest.sequence > sequence);
-                  }
+                const int lifecycle_rank = observationLifecycleRank(meta.lifecycle);
+                if (range_key && lifecycle_rank >= 0) {
+                  const size_t seq = obs_pass_seq++;
+                  auto it = latest_obs.find(*range_key);
+                  if (it != latest_obs.end()) suppressed = it->second.lifecycle_rank > lifecycle_rank || (it->second.lifecycle_rank == lifecycle_rank && it->second.sequence > seq);
                 }
               }
-              if (suppress_notice) {
-                continue;
-              }
-              auto row = ftxui::Make<RowComponent>(
-                  nullptr, [notice_copy, theme] {
-                    return firmius::tui::IndentAgentRow(
-                        RenderNoticeDisplay(theme, notice_copy));
-                  });
-              rows_.push_back(row);
-              rows_.push_back(ftxui::Make<RowComponent>(
-                  nullptr, [] { return ftxui::text(""); }));
-            } else if (std::holds_alternative<firmius::shared::ImageContent>(
-                           part)) {
-              flush_quick_cluster();
-              std::string indicator = "[Image]";
-              auto row = ftxui::Make<RowComponent>(
-                  nullptr, [decorateMsg, indicator] {
-                    return decorateMsg(ftxui::text(indicator));
-                  });
-              rows_.push_back(row);
-              rows_.push_back(ftxui::Make<RowComponent>(
-                  nullptr, [] { return ftxui::text(""); }));
+              if (suppressed) continue;
+              flush_block(turn_index - 1);
+              size_t rb = rows_.size(); auto notice_copy = *notice;
+              rows_.push_back(ftxui::Make<RowComponent>(nullptr, [notice_copy, theme] { return firmius::tui::IndentAgentRow(RenderNoticeDisplay(theme, notice_copy)); }));
+              rows_.push_back(ftxui::Make<RowComponent>(nullptr, [] { return ftxui::text(""); }));
+              CachedBlock b; b.turn_start = turn_index; b.turn_end = turn_index; b.rows_start = rb; b.rows_count = rows_.size() - rb; b.copyable_start = copyable_rows_.size(); b.copyable_count = 0;
+              block_cache_.push_back(b); block_turn_start = turn_index + 1;
+            } else if (std::holds_alternative<firmius::shared::ImageContent>(part)) {
+              flush_block(turn_index - 1);
+              size_t rb = rows_.size();
+              rows_.push_back(ftxui::Make<RowComponent>(nullptr, [decorateMsg] { return decorateMsg(ftxui::text("[Image]")); }));
+              rows_.push_back(ftxui::Make<RowComponent>(nullptr, [] { return ftxui::text(""); }));
+              CachedBlock b; b.turn_start = turn_index; b.turn_end = turn_index; b.rows_start = rb; b.rows_count = rows_.size() - rb; b.copyable_start = copyable_rows_.size(); b.copyable_count = 0;
+              block_cache_.push_back(b); block_turn_start = turn_index + 1;
             }
           }
         }
-
-        if (auto footer = buildTurnFooterSummary(t, turn_index + 1);
-            footer.has_value()) {
-          pending_turn_footers.push_back(*footer);
-        }
+        if (auto footer = buildTurnFooterSummary(t, turn_index + 1)) pending_turn_footers.push_back(*footer);
       }
-      flush_quick_cluster(true);
+      flush_block(history->turns.size() - 1, true);
     }
 
-    for (auto &row : rows_)
-      history_inner_->Add(row);
-
-    if (history_inner_->ChildCount() == 0) {
-      history_inner_->Add(
-          ftxui::Make<RowComponent>(nullptr, [] { return ftxui::text(""); }));
-    }
+    if (rows_.empty()) rows_.push_back(ftxui::Make<RowComponent>(nullptr, [] { return ftxui::text(""); }));
+    if (row_height_cache_.size() < rows_.size()) row_height_cache_.resize(rows_.size(), kDefaultEstimatedRowHeight);
 
     NoteTuiChatWindowRebuildIfAvailable(std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::steady_clock::now() - rebuild_begin));
@@ -1604,10 +1616,17 @@ private:
     return BuildHistoryRenderSignature(history, showInternalNudges, hideErrors);
   }
 
-  void MarkHistoryDirty(bool reset_signature = false) {
+  void MarkHistoryDirty(bool reset_full = false) {
     history_dirty_ = true;
-    if (reset_signature) {
+    if (reset_full) {
       last_history_signature_ = {};
+      block_cache_.clear();
+      turn_hashes_.clear();
+      rows_.clear();
+      copyable_rows_.clear();
+      row_height_cache_.clear();
+      last_attached_start_ = 0;
+      last_attached_end_ = 0;
     }
   }
 
@@ -1633,13 +1652,27 @@ private:
   firmius::tui::EditableMessageClickHandler editable_message_click_handler_;
   HistoryRenderSignature last_history_signature_{};
   bool history_dirty_ = true;
+
+  struct CachedBlock {
+    size_t turn_start = 0;
+    size_t turn_end = 0; // inclusive
+    size_t rows_start = 0;
+    size_t rows_count = 0;
+    size_t copyable_start = 0;
+    size_t copyable_count = 0;
+  };
+  std::vector<CachedBlock> block_cache_;
+  std::vector<std::size_t> turn_hashes_;
   std::vector<ftxui::Component> rows_;
   std::vector<std::shared_ptr<CopyableRowComponent>> copyable_rows_;
   ftxui::Component history_inner_;
   ftxui::Component history_container_;
   std::vector<int> row_height_cache_;
+  size_t last_attached_start_ = 0;
+  size_t last_attached_end_ = 0;
   size_t last_visible_start_ = 0;
   size_t last_visible_end_ = 0;
+  int last_rebuild_width_ = -1;
   ftxui::Component container_;
   ftxui::Component tail_spacer_;
   std::shared_ptr<firmius::tui::ScrollableBoxComponent> scrollable_;
@@ -1654,6 +1687,12 @@ private:
   int last_drag_x_ = -1;
   int last_drag_y_ = -1;
   int pending_release_x_ = -1;
+
+  // Cached live rows for cheap redraws where the live stream state hasn't
+  // changed.
+  bool has_cached_live_rows_ = false;
+  std::size_t last_live_rows_signature_ = 0;
+  ftxui::Elements cached_live_rows_;
   int pending_release_y_ = -1;
 };
 

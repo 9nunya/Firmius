@@ -96,6 +96,11 @@ std::vector<std::string> ProcessManager::getBlockingProcessIds() {
     return blockingProcessIds_;
 }
 
+std::vector<std::string> ProcessManager::getProcessIds() {
+    std::lock_guard<std::mutex> lock(processMutex_);
+    return {processIds_.begin(), processIds_.end()};
+}
+
 void ProcessManager::killProcess(const std::string& id) {
     try {
         host_->killBackgroundProcess(id);

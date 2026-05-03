@@ -2,12 +2,11 @@
 #define FIRMIUS_PROVIDER_BASE_ANTHROPIC_PROVIDER_HPP
 
 #include "IProvider.hpp"
-#include "providers/BackoffConstants.hpp"
 #include "providers/BaseAPIKeyProvider.hpp"
+#include "providers/RetryPolicyResolver.hpp"
 #include <string>
 #include <map>
 #include <vector>
-#include <chrono>
 #include <functional>
 #include <atomic>
 
@@ -90,6 +89,12 @@ protected:
     virtual std::map<std::string, std::string> getHeaders();
 
     /**
+     * @brief Get the full messages endpoint URL.
+     * Subclasses can override to customize endpoint paths.
+     */
+    virtual std::string getMessagesUrl() const { return getBaseUrl() + "/messages"; }
+
+    /**
      * @brief Prepare the request body for the Anthropic API.
      * Subclasses can override to customize the payload.
      */
@@ -142,17 +147,23 @@ private:
     /**
      * @brief Checks if an HTTP status code represents a retriable error.
      */
-    bool isRetriableStatus(int httpStatus) const;
+    bool isRetriableStatus(const RetryPolicyRuntime& policy,
+                           int httpStatus) const;
 
     /**
      * @brief Checks if an HTTP status code represents a non-retriable error.
      */
-    bool isNonRetriableStatus(int httpStatus) const;
+    bool isNonRetriableStatus(const RetryPolicyRuntime& policy,
+                              int httpStatus) const;
 
     /**
      * @brief Calculates the delay for the next retry attempt with jitter.
      */
-    int calculateRetryDelay(int attempt, int headerDelayMs) const;
+    int calculateRetryDelay(const RetryPolicyRuntime& policy, int attempt,
+                            int headerDelayMs) const;
+
+    bool isRetriableCurlError(const RetryPolicyRuntime& policy,
+                              CURLcode code) const;
 
     /**
      * @brief Parses retry-related headers and returns delay in milliseconds.

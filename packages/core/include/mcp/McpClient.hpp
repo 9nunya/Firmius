@@ -8,6 +8,7 @@
 #include <rapidjson/document.h>
 
 #include <memory>
+#include <mutex>
 #include <string>
 
 namespace firmius::core::mcp {
@@ -42,6 +43,7 @@ private:
 
   std::unique_ptr<shared::IHostProcess> process_;
   std::unique_ptr<IMcpSession> session_;
+  mutable std::mutex requestMutex_;
   int nextId_ = 1;
   bool initialized_ = false;
   bool shutdownSent_ = false;

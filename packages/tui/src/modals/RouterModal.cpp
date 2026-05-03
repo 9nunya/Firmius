@@ -1,4 +1,5 @@
 #include "modals/RouterModal.hpp"
+#include "NotificationManager.hpp"
 #include "TUIState.hpp"
 #include "ThemeManager.hpp"
 #include "harness/Harness.hpp"
@@ -114,7 +115,7 @@ ftxui::Component RouterModal::create(TuiState &state) {
   auto refreshModelEntries =
       [model_entries, rebuildModelFilter, models_loading, fetching_providers]() {
     auto &h = firmius::core::Harness::instance();
-    auto models = h.listAllModels();
+    auto models = h.cachedModelsSnapshot();
     *model_entries = BuildModelPickerEntries(models, true);
     *models_loading = !h.isModelsLoaded();
     *fetching_providers = h.listProvidersFetchingModels();
@@ -132,40 +133,45 @@ ftxui::Component RouterModal::create(TuiState &state) {
   auto saveConfig = [message](const firmius::shared::UserConfig &cfg,
                               const std::string &ok_message) {
     auto &h = firmius::core::Harness::instance();
-    h.updateConfig(cfg);
-    h.saveConfig();
-    *message = ok_message;
+    try {
+      h.updateConfig(cfg);
+      h.saveConfig();
+      *message = ok_message;
+    } catch (const std::exception &ex) {
+      NotificationManager::instance().notifyError("Router", ex.what(), false);
+    }
   };
 
   refresh();
   refreshModelEntries();
+  state.runBackgroundTask([]() { firmius::core::Harness::instance().listAllModels(); });
 
-  auto needsModelRefresh = std::make_shared<std::atomic<bool>>(false);
+  auto modalActive = std::make_shared<std::atomic<bool>>(true);
   int subId = firmius::core::Harness::instance().subscribe(
-      [needsModelRefresh, &state](const firmius::shared::AppEvent &event) {
+      [refreshModelEntries, modalActive, &state](
+          const firmius::shared::AppEvent &event) {
         if (std::holds_alternative<firmius::shared::ModelsRefreshed>(event) ||
             std::holds_alternative<firmius::shared::ProviderModelsFetchStarted>(
                 event) ||
             std::holds_alternative<firmius::shared::ProviderModelsFetchFinished>(
                 event) ||
             std::holds_alternative<firmius::shared::ModelDiscovered>(event)) {
-          *needsModelRefresh = true;
-          state.postEvent(ftxui::Event::Custom);
+          state.deferUiMutation([refreshModelEntries, modalActive]() {
+            if (!modalActive->load(std::memory_order_relaxed)) {
+              return;
+            }
+            refreshModelEntries();
+          });
         }
       });
 
   auto component = ftxui::Renderer(
       [categories, selected, mode, message, category_name, model_filter,
        selectedCategory, model_menu, rebuildModelFilter, refreshModelEntries,
-       needsModelRefresh, models_loading, fetching_providers,
+       models_loading, fetching_providers,
        selected_detail_index]() {
         const auto &theme = ThemeManager::instance().getCurrentTheme();
         const auto cfg = firmius::core::Harness::instance().getConfig();
-
-        if (*needsModelRefresh) {
-          *needsModelRefresh = false;
-          refreshModelEntries();
-        }
         rebuildModelFilter();
         const std::string fetchingLabel =
             formatProviderList(*fetching_providers);
@@ -336,8 +342,10 @@ ftxui::Component RouterModal::create(TuiState &state) {
       [categories, selected, mode, message, category_name, model_filter,
        model_entries, filtered_model_indices, selected_model_index, model_menu,
        selectedCategory, refresh, saveConfig, rebuildModelFilter,
-       refreshModelEntries, subId, &state, selected_detail_index](ftxui::Event event) {
+       refreshModelEntries, subId, modalActive, &state,
+       selected_detail_index](ftxui::Event event) {
         const auto closeModal = [&]() {
+          modalActive->store(false, std::memory_order_relaxed);
           firmius::core::Harness::instance().unsubscribe(subId);
           state.popModal();
         };

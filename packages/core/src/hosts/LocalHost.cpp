@@ -198,7 +198,8 @@ shared::ProcessSnapshot LocalHostProcess::inspect() const {
   double elapsed =
       std::chrono::duration<double, std::milli>(now - startTime).count();
 
-  return {!finished.load(), exitCode.load(), stdoutData, stderrData, elapsed};
+  return {!finished.load(), exitCode.load(), stdoutData, stderrData, elapsed,
+          getSystemId()};
 }
 
 void LocalHostProcess::kill() {
@@ -222,6 +223,7 @@ void LocalHostProcess::kill() {
     throw std::runtime_error("kill failed");
   }
 #endif
+  reapIfNeeded(true);
 }
 
 void LocalHostProcess::write(const std::string &data) {
@@ -313,8 +315,6 @@ void LocalHostProcess::captureLoop(bool isError) {
           stdoutBuffer += data;
         }
       }
-      currentCallback = callback;
-    }
       currentCallback = callback;
     }
     if (currentCallback) {

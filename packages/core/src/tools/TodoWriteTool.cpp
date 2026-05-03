@@ -16,11 +16,10 @@ namespace firmius::core {
 
 namespace {
 
-struct TodoMutation {
+struct TodoItemState {
   int id = 0;
   char marker = ' ';
   std::string text;
-  int line = 0;
 };
 
 uint64_t nowEpochMs() {
@@ -67,19 +66,19 @@ shared::TodoStatus markerToStatus(char marker) {
   }
 }
 
-std::vector<TodoMutation> parseMutations(const std::string &patch) {
-  if (shared::StringUtil::trim(patch).empty()) {
+std::vector<TodoItemState> parseTodoList(const std::string &state) {
+  if (shared::StringUtil::trim(state).empty()) {
     throw std::runtime_error(
-        "Todo patch must not be empty. Use numbered lines like "
+        "Todo state must not be empty. Use numbered lines like "
         "'1. [ ] First task'.");
   }
 
   static const std::regex linePattern(
-      R"(^([0-9]+)\.\s+\[([ *x\-\+])\]\s+(.+)$)");
+      R"(^([0-9]+)\.\s+\[([ *x])\]\s+(.+)$)");
 
-  std::vector<TodoMutation> mutations;
+  std::vector<TodoItemState> items;
   std::set<int> seenIds;
-  std::istringstream stream(patch);
+  std::istringstream stream(state);
   std::string rawLine;
   int lineNo = 0;
   while (std::getline(stream, rawLine)) {
@@ -90,7 +89,7 @@ std::vector<TodoMutation> parseMutations(const std::string &patch) {
     }
     std::smatch match;
     if (!std::regex_match(rawLine, match, linePattern)) {
-      throw std::runtime_error("Malformed todo line " + std::to_string(lineNo) +
+      throw std::runtime_error("Malformed todo line " + std::to_string(lineNo) + 
                                ": expected '<id>. [status] text' (example: "
                                "'1. [ ] First task')");
     }
@@ -98,7 +97,7 @@ std::vector<TodoMutation> parseMutations(const std::string &patch) {
     const char marker = match[2].str()[0];
     const std::string text = shared::StringUtil::trim(match[3].str());
     if (seenIds.count(id) > 0) {
-      throw std::runtime_error("Duplicate todo id in patch: " +
+      throw std::runtime_error("Duplicate todo id in state: " +
                                std::to_string(id));
     }
     seenIds.insert(id);
@@ -106,50 +105,30 @@ std::vector<TodoMutation> parseMutations(const std::string &patch) {
       throw std::runtime_error("Todo text must not be empty for id " +
                                std::to_string(id));
     }
-    mutations.push_back(TodoMutation{id, marker, text, lineNo});
+    items.push_back(TodoItemState{id, marker, text});
   }
-  return mutations;
-}
-
-std::string existingIdsSummary(const std::vector<shared::TodoItem> &items) {
-  if (items.empty()) {
-    return "(none)";
-  }
-
-  std::vector<int> ids;
-  ids.reserve(items.size());
-  for (const auto &item : items) {
-    ids.push_back(item.id);
-  }
-  std::sort(ids.begin(), ids.end());
-
-  std::ostringstream out;
-  for (std::size_t i = 0; i < ids.size(); ++i) {
-    if (i > 0) {
-      out << ", ";
-    }
-    out << ids[i];
-  }
-  return out.str();
+  return items;
 }
 
 } // namespace
 
 shared::ToolMetadata TodoWriteTool::getMetadata() const {
   return {"Todo",
-          "Update the calling agent's execution state with strict numbered syntax.",
+          "Update the calling agent's execution state by providing the full todo list.",
           shared::ToolScope::Semantic};
 }
 
 std::shared_ptr<shared::JSONSchema> TodoWriteTool::getSchema() const {
-  return zObject({{"patch", zString()}})->required({"patch"});
+  return zObject({{"patch",
+                   zString()->describe("Full todo list state in numbered format.")}})
+      ->required({"patch"});
 }
 
 shared::ToolResult TodoWriteTool::execute(const rapidjson::Value &input,
                                           shared::ToolContext &ctx) {
   try {
     if (!input.HasMember("patch") || !input["patch"].IsString()) {
-      throw std::runtime_error("todo_write requires string field 'patch'");
+      throw std::runtime_error("Todo requires string field 'patch' containing the full state");
     }
 
     const auto &agentContext = ctx.agent.getContext();
@@ -159,131 +138,59 @@ shared::ToolResult TodoWriteTool::execute(const rapidjson::Value &input,
       throw std::runtime_error("Cannot mutate todo list without agent id");
     }
 
-    const auto mutations = parseMutations(input["patch"].GetString());
+    const auto newState = parseTodoList(input["patch"].GetString());
     ThreadManager tm(ThreadManager::defaultBasePath());
-    auto todoList = tm.getAgentTodo(threadId, agentId);
+    const auto oldTodoList = tm.getAgentTodo(threadId, agentId);
 
-    std::unordered_map<int, size_t> indexById;
-    indexById.reserve(todoList.items.size());
-    for (size_t i = 0; i < todoList.items.size(); ++i) {
-      indexById[todoList.items[i].id] = i;
+    std::unordered_map<int, const shared::TodoItem *> oldItemsById;
+    for (const auto &item : oldTodoList.items) {
+      oldItemsById[item.id] = &item;
     }
 
-    int expectedNextId = std::max(todoList.nextId, 1);
+    shared::AgentTodoList newList;
+    newList.threadId = threadId;
+    newList.agentId = agentId;
+    
     const uint64_t now = nowEpochMs();
-    if (todoList.items.empty()) {
-      bool hasMarkerAdd = false;
-      bool hasMarkerDelete = false;
-      for (const auto &mutation : mutations) {
-        hasMarkerAdd = hasMarkerAdd || mutation.marker == '+';
-        hasMarkerDelete = hasMarkerDelete || mutation.marker == '-';
-      }
+    int maxId = 0;
 
-      if (hasMarkerDelete) {
-        throw std::runtime_error(
-            "Todo list is empty. Create items with '1. [ ] First task' and "
-            "sequential ids.");
-      }
-
-      if (!hasMarkerAdd) {
-        int expectedId = 1;
-        for (const auto &mutation : mutations) {
-          if (mutation.id != expectedId) {
-            throw std::runtime_error(
-                "Todo list is empty. Create items with '1. [ ] First task' "
-                "and sequential ids.");
-          }
-          shared::TodoItem item;
-          item.id = mutation.id;
-          item.text = mutation.text;
-          item.status = markerToStatus(mutation.marker);
-          item.createdAt = now;
-          item.updatedAt = now;
-          todoList.items.push_back(std::move(item));
-          indexById[mutation.id] = todoList.items.size() - 1;
-          expectedId++;
-        }
-        expectedNextId = expectedId;
-      }
-    }
-
-    for (const auto &mutation : mutations) {
-      if (mutation.marker == '+') {
-        if (mutation.id != expectedNextId) {
-          throw std::runtime_error(
-              "Add id " + std::to_string(mutation.id) +
-              " is invalid: expected next id " + std::to_string(expectedNextId));
-        }
-        shared::TodoItem item;
-        item.id = mutation.id;
-        item.text = mutation.text;
-        item.status = shared::TodoStatus::Pending;
+    for (const auto &stateItem : newState) {
+      shared::TodoItem item;
+      item.id = stateItem.id;
+      item.text = stateItem.text;
+      item.status = markerToStatus(stateItem.marker);
+      
+      auto it = oldItemsById.find(stateItem.id);
+      if (it != oldItemsById.end()) {
+        const auto *old = it->second;
+        item.createdAt = old->createdAt;
+        item.updatedAt = (old->text != item.text || old->status != item.status) ? now : old->updatedAt;
+        item.chunkId = old->chunkId;
+        item.planId = old->planId;
+      } else {
         item.createdAt = now;
         item.updatedAt = now;
-        todoList.items.push_back(std::move(item));
-        indexById[mutation.id] = todoList.items.size() - 1;
-        expectedNextId++;
-        continue;
       }
 
-      auto it = indexById.find(mutation.id);
-      if (it == indexById.end()) {
-        const bool inferredAdd = mutation.marker == ' ' &&
-                                 mutation.id == expectedNextId;
-        if (inferredAdd) {
-          shared::TodoItem item;
-          item.id = mutation.id;
-          item.text = mutation.text;
-          item.status = markerToStatus(mutation.marker);
-          item.createdAt = now;
-          item.updatedAt = now;
-          todoList.items.push_back(std::move(item));
-          indexById[mutation.id] = todoList.items.size() - 1;
-          expectedNextId++;
-          continue;
-        }
-        if (todoList.items.empty()) {
-          throw std::runtime_error(
-              "Todo list is empty. Create items with '1. [ ] First task' and "
-              "sequential ids.");
-        }
-        throw std::runtime_error(
-            "Unknown todo id " + std::to_string(mutation.id) +
-            ". Existing ids: " + existingIdsSummary(todoList.items) +
-            ". To add a new item, use '" + std::to_string(expectedNextId) +
-            ". [+] <task>'.");
+      newList.items.push_back(std::move(item));
+      if (stateItem.id > maxId) {
+        maxId = stateItem.id;
       }
-
-      if (mutation.marker == '-') {
-        const size_t removeIndex = it->second;
-        todoList.items.erase(todoList.items.begin() +
-                             static_cast<std::ptrdiff_t>(removeIndex));
-        indexById.clear();
-        for (size_t i = 0; i < todoList.items.size(); ++i) {
-          indexById[todoList.items[i].id] = i;
-        }
-        continue;
-      }
-
-      auto &item = todoList.items[it->second];
-      item.status = markerToStatus(mutation.marker);
-      item.text = mutation.text;
-      item.updatedAt = now;
     }
 
-    todoList.nextId = expectedNextId;
-    tm.writeAgentTodo(threadId, agentId, todoList);
+    newList.nextId = std::max(maxId + 1, 1);
+    tm.writeAgentTodo(threadId, agentId, newList);
 
     rapidjson::Document doc;
     doc.SetObject();
     auto &alloc = doc.GetAllocator();
     doc.AddMember("thread_id", rapidjson::Value(threadId.c_str(), alloc), alloc);
     doc.AddMember("agent_id", rapidjson::Value(agentId.c_str(), alloc), alloc);
-    doc.AddMember("next_id", todoList.nextId, alloc);
+    doc.AddMember("next_id", newList.nextId, alloc);
 
     rapidjson::Value items(rapidjson::kArrayType);
     std::ostringstream summary;
-    for (const auto &item : todoList.items) {
+    for (const auto &item : newList.items) {
       rapidjson::Value row(rapidjson::kObjectType);
       row.AddMember("id", item.id, alloc);
       row.AddMember("text", rapidjson::Value(item.text.c_str(), alloc), alloc);

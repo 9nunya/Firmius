@@ -21,6 +21,13 @@ public:
     static std::string trim(std::string_view s);
 
     /**
+     * @brief Returns true if every byte is ASCII whitespace.
+     * Allocation-free; designed for streaming hot paths where
+     * `trim(x).empty()` would allocate per call.
+     */
+    static bool isAllWhitespace(std::string_view s);
+
+    /**
      * @brief Splits a string by a delimiter.
      * @param s The string to split.
      * @param delimiter The delimiter character.

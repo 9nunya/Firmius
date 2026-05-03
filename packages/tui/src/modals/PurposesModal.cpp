@@ -1,5 +1,6 @@
 #include "modals/PurposesModal.hpp"
 #include "AgentRegistry.hpp"
+#include "NotificationManager.hpp"
 #include "TUIState.hpp"
 #include "ThemeManager.hpp"
 #include "agents/PurposeLoader.hpp"
@@ -151,9 +152,14 @@ ftxui::Component PurposesModal::create(TuiState &state) {
     auto persist = [message](const firmius::shared::UserConfig &updated,
                              const std::string &status) {
       auto &h = firmius::core::Harness::instance();
-      h.updateConfig(updated);
-      h.saveConfig();
-      *message = status;
+      try {
+        h.updateConfig(updated);
+        h.saveConfig();
+        *message = status;
+      } catch (const std::exception &ex) {
+        NotificationManager::instance().notifyError("Purposes", ex.what(),
+                                                    false);
+      }
     };
 
     if (event == ftxui::Event::Character('c') ||

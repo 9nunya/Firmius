@@ -17,7 +17,8 @@ ToolPresentationLifecycle LifecycleFromPhase(const ToolCallView &view) {
   if (view.phase == ToolPhase::Preparing) {
     return ToolPresentationLifecycle::Preparing;
   }
-  if (view.phase == ToolPhase::Called || view.phase == ToolPhase::BackgroundRunning) {
+  if (view.phase == ToolPhase::Called ||
+      view.phase == ToolPhase::BackgroundRunning) {
     return ToolPresentationLifecycle::Running;
   }
   if (view.phase == ToolPhase::Error ||
@@ -49,14 +50,16 @@ std::string ExtractAction(const std::string &args) {
   return "";
 }
 
-bool BoolMember(const rapidjson::Value &value, const char *key, bool fallback = false) {
+bool BoolMember(const rapidjson::Value &value, const char *key,
+                bool fallback = false) {
   if (value.IsObject() && value.HasMember(key) && value[key].IsBool()) {
     return value[key].GetBool();
   }
   return fallback;
 }
 
-std::vector<std::string> SplitLines(const std::string &text, size_t max_lines = 0) {
+std::vector<std::string> SplitLines(const std::string &text,
+                                    size_t max_lines = 0) {
   std::vector<std::string> lines;
   std::istringstream stream(text);
   std::string line;
@@ -129,15 +132,12 @@ ToolPresentation BuildArtifactWritePresentation(const ToolCallView &view) {
   const bool has_args = ParseObject(view.args, args_doc);
   const std::string name = has_args ? StringMember(args_doc, "name") : "";
   const std::string kind = has_args ? StringMember(args_doc, "kind") : "";
-  const std::string description = has_args ? StringMember(args_doc, "description") : "";
+  const std::string description =
+      has_args ? StringMember(args_doc, "description") : "";
   const std::string content = has_args ? StringMember(args_doc, "content") : "";
 
   if (presentation.lifecycle == ToolPresentationLifecycle::Preparing) {
-    presentation.title = "prepare artifact write";
-  } else if (presentation.lifecycle == ToolPresentationLifecycle::Running) {
-    presentation.title = "writing artifact";
-  } else {
-    presentation.title = "artifact write";
+    presentation.title = "Artifact";
   }
   if (!name.empty()) {
     presentation.compact_summary = name;
@@ -149,7 +149,7 @@ ToolPresentation BuildArtifactWritePresentation(const ToolCallView &view) {
   }
 
   if (presentation.lifecycle == ToolPresentationLifecycle::Error) {
-    ApplyError(presentation, view, "artifact write failed");
+    ApplyError(presentation, view, "Artifact");
     if (!content.empty()) {
       ToolPresentationDiffSection section;
       section.title = name.empty() ? "artifact content" : name;
@@ -166,24 +166,23 @@ ToolPresentation BuildArtifactWritePresentation(const ToolCallView &view) {
   const bool has_result = ParseObject(view.result, result_doc);
   const bool created = has_result && BoolMember(result_doc, "created");
   const bool updated = has_result && BoolMember(result_doc, "updated");
-  const std::string reference = has_result ? StringMember(result_doc, "reference") : "";
+  const std::string reference =
+      has_result ? StringMember(result_doc, "reference") : "";
   const rapidjson::Value &artifact =
-      has_result && result_doc.HasMember("artifact") ? result_doc["artifact"] : result_doc;
+      has_result && result_doc.HasMember("artifact") ? result_doc["artifact"]
+                                                     : result_doc;
   const std::string owner = ArtifactOwner(artifact);
   const std::string filename = StringMember(artifact, "filename");
   const std::string resolved_kind = StringMember(artifact, "kind");
-  const std::string resolved_description = StringMember(artifact, "description");
+  const std::string resolved_description =
+      StringMember(artifact, "description");
   const std::string previous_content =
       has_result ? StringMember(result_doc, "previous_content") : "";
 
-  if (created) {
-    presentation.title = "artifact created";
-  } else if (updated) {
-    presentation.title = "artifact updated";
-  } else {
-    presentation.title = "artifact write complete";
-  }
-  presentation.footer_badges.push_back(created ? "created" : (updated ? "updated" : "written"));
+  presentation.title =
+      "Artifact(action: " + StringMember(args_doc, "action") + ")";
+  presentation.footer_badges.push_back(
+      created ? "created" : (updated ? "updated" : "written"));
   if (!filename.empty()) {
     presentation.footer_badges.push_back(filename);
     presentation.diff_source_name = filename;
@@ -227,11 +226,13 @@ ToolPresentation BuildArtifactWritePresentation(const ToolCallView &view) {
     presentation.diff_sections.push_back(std::move(section));
     if (added_lines > 0) {
       presentation.footer_badges.push_back("+" + std::to_string(added_lines));
-      presentation.facts.push_back({"Added lines", std::to_string(added_lines)});
+      presentation.facts.push_back(
+          {"Added lines", std::to_string(added_lines)});
     }
     if (removed_lines > 0) {
       presentation.footer_badges.push_back("-" + std::to_string(removed_lines));
-      presentation.facts.push_back({"Removed lines", std::to_string(removed_lines)});
+      presentation.facts.push_back(
+          {"Removed lines", std::to_string(removed_lines)});
     }
   }
 
@@ -247,7 +248,8 @@ ToolPresentation BuildArtifactReadPresentation(const ToolCallView &view) {
 
   rapidjson::Document args_doc;
   const bool has_args = ParseObject(view.args, args_doc);
-  const std::string reference = has_args ? StringMember(args_doc, "reference") : "";
+  const std::string reference =
+      has_args ? StringMember(args_doc, "reference") : "";
   const std::string name = has_args ? StringMember(args_doc, "name") : "";
 
   if (presentation.lifecycle == ToolPresentationLifecycle::Preparing) {
@@ -275,9 +277,11 @@ ToolPresentation BuildArtifactReadPresentation(const ToolCallView &view) {
 
   rapidjson::Document result_doc;
   const bool has_result = ParseObject(view.result, result_doc);
-  const std::string resolved_reference = has_result ? StringMember(result_doc, "reference") : "";
+  const std::string resolved_reference =
+      has_result ? StringMember(result_doc, "reference") : "";
   const rapidjson::Value &artifact =
-      has_result && result_doc.HasMember("artifact") ? result_doc["artifact"] : result_doc;
+      has_result && result_doc.HasMember("artifact") ? result_doc["artifact"]
+                                                     : result_doc;
   const std::string owner = ArtifactOwner(artifact);
   const std::string filename = StringMember(artifact, "filename");
   const std::string title_label =
@@ -326,20 +330,24 @@ ToolPresentation BuildArtifactListPresentation(const ToolCallView &view) {
   }
 
   rapidjson::Document result_doc;
-  if (!ParseObject(view.result, result_doc) || !result_doc.HasMember("artifacts") ||
+  if (!ParseObject(view.result, result_doc) ||
+      !result_doc.HasMember("artifacts") ||
       !result_doc["artifacts"].IsArray()) {
     return presentation;
   }
 
   const auto &artifacts = result_doc["artifacts"].GetArray();
-  presentation.footer_badges.push_back(std::to_string(artifacts.Size()) + " artifacts");
+  presentation.footer_badges.push_back(std::to_string(artifacts.Size()) +
+                                       " artifacts");
   presentation.facts.push_back({"Count", std::to_string(artifacts.Size())});
-  presentation.title = "listed " + std::to_string(artifacts.Size()) + " artifacts";
+  presentation.title =
+      "listed " + std::to_string(artifacts.Size()) + " artifacts";
 
   ToolPresentationSection section;
   section.title = "Artifacts";
   const rapidjson::SizeType max_rows =
-      view.show_result ? artifacts.Size() : static_cast<rapidjson::SizeType>(18);
+      view.show_result ? artifacts.Size()
+                       : static_cast<rapidjson::SizeType>(18);
   for (rapidjson::SizeType i = 0; i < artifacts.Size() && i < max_rows; ++i) {
     const auto &item = artifacts[i];
     std::string row = StringMember(item, "reference");
@@ -350,7 +358,8 @@ ToolPresentation BuildArtifactListPresentation(const ToolCallView &view) {
     if (row.empty()) {
       continue;
     }
-    if (item.HasMember("ambiguous_filename") && item["ambiguous_filename"].IsBool() &&
+    if (item.HasMember("ambiguous_filename") &&
+        item["ambiguous_filename"].IsBool() &&
         item["ambiguous_filename"].GetBool()) {
       row += " [ambiguous name]";
     }
@@ -376,7 +385,8 @@ ToolPresentation BuildArtifactListPresentation(const ToolCallView &view) {
 } // namespace
 
 bool IsArtifactFamilyTool(const std::string &tool_name) {
-  return tool_name == "Artifacts" || tool_name == "artifact_write" || tool_name == "artifact_read" || tool_name == "artifact_list";
+  return tool_name == "Artifacts" || tool_name == "artifact_write" ||
+         tool_name == "artifact_read" || tool_name == "artifact_list";
 }
 
 ToolPresentation BuildArtifactToolPresentation(const ToolCallView &view) {

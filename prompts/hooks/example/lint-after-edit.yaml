@@ -1,0 +1,43 @@
+id: lint.after-edit
+description: |
+  Run a language-appropriate linter after Files.Edit. Demonstrates the
+  Luau script action: a few lines of host-aware logic that would be
+  awkward in a flat shell template.
+
+trigger:
+  on_event: post_tool_use
+  match:
+    tool: { equals: Files.Edit }
+    tool_success: { equals: true }
+
+action:
+  kind: script
+  language: luau
+  body: |
+    local path = event.payload.tool_args.path or ""
+    if path == "" then return outcome.allow{} end
+
+    -- Tiny extension dispatcher; users can extend at will.
+    local linters = {
+      [".cpp"] = "clang-tidy --quiet ",
+      [".hpp"] = "clang-tidy --quiet ",
+      [".lua"] = "luacheck ",
+      [".py"]  = "ruff check ",
+      [".ts"]  = "biome check ",
+      [".tsx"] = "biome check ",
+    }
+
+    local ext = path:match("^.+(%..+)$") or ""
+    local cmd = linters[ext]
+    if not cmd then return outcome.allow{} end
+
+    local code, stdout, stderr = host.run(cmd .. path, { timeout = 8 })
+    if code == 0 then
+      return outcome.allow{}
+    end
+
+    return outcome.allow{
+      reminder = "<FIRMIUS_HOOK id=\"lint.after-edit\" exit=\"" .. code ..
+                 "\">\n" .. (stderr ~= "" and stderr or stdout) ..
+                 "</FIRMIUS_HOOK>",
+    }

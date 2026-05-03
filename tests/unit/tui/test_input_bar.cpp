@@ -59,3 +59,24 @@ TEST(CommandArgs, QuotasCommandUsesQuotaProviderArgType) {
   ASSERT_EQ(args.size(), 1u);
   EXPECT_EQ(args.front().type, ArgType::QuotaProvider);
 }
+
+TEST(InputBarModel, HelpQueryCanSignalOverlayWhenInputEmpty) {
+  firmius::tui::InputBarModel model;
+  std::string buffer;
+  int cursor = 0;
+  bool help_requested = false;
+  model.buffer = &buffer;
+  model.cursor = &cursor;
+  model.help_opened_from_empty_query = &help_requested;
+  EXPECT_FALSE(help_requested);
+  *model.help_opened_from_empty_query = true;
+  EXPECT_TRUE(help_requested);
+}
+
+TEST(InputBarModel, PaletteRequestFlagCanBeRaised) {
+  bool palette_requested = false;
+  firmius::tui::InputBarModel model;
+  model.command_palette_requested = &palette_requested;
+  *model.command_palette_requested = true;
+  EXPECT_TRUE(palette_requested);
+}

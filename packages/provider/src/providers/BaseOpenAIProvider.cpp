@@ -1,10 +1,8 @@
 #include "providers/BaseOpenAIProvider.hpp"
-#include "providers/BackoffConstants.hpp"
 #include "utils/InterruptibleSleep.hpp"
 #include <cctype>
 #include <chrono>
 #include <curl/curl.h>
-#include <random>
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
@@ -246,31 +244,25 @@ size_t BaseOpenAIProvider::headerCallback(char *ptr, size_t size, size_t nmemb,
   return totalSize;
 }
 
-bool BaseOpenAIProvider::isRetriableStatus(int httpStatus) const {
-  return httpStatus == 408 || httpStatus == 429 ||
-         (httpStatus >= 500 && httpStatus <= 504) || httpStatus == 529;
+bool BaseOpenAIProvider::isRetriableStatus(const RetryPolicyRuntime &policy,
+                                           int httpStatus) const {
+  return RetryPolicyResolver::isRetriableHttpStatus(policy, httpStatus);
 }
 
-bool BaseOpenAIProvider::isNonRetriableStatus(int httpStatus) const {
-  return httpStatus == 401 || httpStatus == 403 || httpStatus == 404 ||
-         httpStatus == 422;
+bool BaseOpenAIProvider::isNonRetriableStatus(const RetryPolicyRuntime &policy,
+                                              int httpStatus) const {
+  return RetryPolicyResolver::isNonRetriableHttpStatus(policy, httpStatus);
 }
 
-int BaseOpenAIProvider::calculateRetryDelay(int attempt,
+int BaseOpenAIProvider::calculateRetryDelay(const RetryPolicyRuntime &policy,
+                                            int attempt,
                                             int headerDelayMs) const {
-  // Use unified backoff sequence from shared constants
-  int backoffSeconds = firmius::shared::BackoffConstants::getBackoffSeconds(attempt);
-  int exponentialDelay = backoffSeconds * 1000;
-  int computedDelay = std::min(exponentialDelay, RetryConstants::MAX_DELAY_MS);
-  int baseDelay = std::max(computedDelay, headerDelayMs);
+  return RetryPolicyResolver::computeDelayMs(policy, attempt, headerDelayMs);
+}
 
-  std::random_device rd;
-  std::mt19937 gen(rd());
-  std::uniform_real_distribution<> dis(RetryConstants::JITTER_MIN,
-                                       RetryConstants::JITTER_MAX);
-  double jitter = dis(gen);
-
-  return static_cast<int>(baseDelay * jitter);
+bool BaseOpenAIProvider::isRetriableCurlError(const RetryPolicyRuntime &policy,
+                                              CURLcode code) const {
+  return RetryPolicyResolver::isRetriableCurlError(policy, code);
 }
 
 std::string BaseOpenAIProvider::formatErrorMessage(
@@ -296,7 +288,8 @@ std::string BaseOpenAIProvider::formatErrorMessage(
 void BaseOpenAIProvider::stream(
     const AgentHistory &history, const ProviderOptions &opts,
     std::function<void(const StreamEvent &)> onEvent) {
-  std::string url = baseUrl + "/chat/completions";
+  const RetryPolicyRuntime retryPolicy = RetryPolicyResolver::resolve(getId());
+  std::string url = getChatUrl();
   std::string body = prepareRequestBody(history, opts);
 
   auto startMs = nowMs();
@@ -341,7 +334,7 @@ void BaseOpenAIProvider::stream(
     return;
   }
 
-  while (attempt <= RetryConstants::MAX_RETRIES) {
+  while (attempt <= retryPolicy.config.maxRetries) {
     struct curl_slist *headers = nullptr;
     auto headerMap = buildHeadersForApiKey(
         currentAccount ? currentAccount->apiKey : std::string{});
@@ -361,8 +354,10 @@ void BaseOpenAIProvider::stream(
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ctx);
     curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, headerCallback);
     curl_easy_setopt(curl, CURLOPT_HEADERDATA, &currentHeaderCtx);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 300L);
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT,
+                     static_cast<long>(retryPolicy.config.timeoutSeconds));
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT,
+                     static_cast<long>(retryPolicy.config.connectTimeoutSeconds));
     curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
 
     const CurlTransferResult transfer =
@@ -378,6 +373,25 @@ void BaseOpenAIProvider::stream(
       if (opts.abortSignal && opts.abortSignal->load()) {
         break; // Interrupted by user
       }
+      if (isRetriableCurlError(retryPolicy, res) &&
+          attempt < retryPolicy.config.maxRetries) {
+        int delayMs = calculateRetryDelay(retryPolicy, attempt, 0);
+        onEvent(StreamRetrying{attempt + 1,
+                               retryPolicy.config.maxRetries,
+                               0,
+                               delayMs,
+                               "transport error",
+                               currentAccount ? currentAccount->getIdentifier()
+                                              : "",
+                               std::string("CURL error: ") +
+                                   curl_easy_strerror(res)});
+        if (!interruptibleSleep(std::chrono::milliseconds(delayMs),
+                                opts.abortController, opts.abortSignal)) {
+          return;
+        }
+        attempt++;
+        continue;
+      }
       onEvent(StreamError{std::string("CURL error: ") + curl_easy_strerror(res),
                           0, ""});
       break;
@@ -387,7 +401,7 @@ void BaseOpenAIProvider::stream(
       break;
     }
 
-    if (isNonRetriableStatus(static_cast<int>(responseCode))) {
+    if (isNonRetriableStatus(retryPolicy, static_cast<int>(responseCode))) {
       std::string errMsg = formatErrorMessage(
           getId(), opts.modelId, static_cast<int>(responseCode), ctx.buffer,
           "API error");
@@ -395,7 +409,7 @@ void BaseOpenAIProvider::stream(
       break;
     }
 
-    if (isRetriableStatus(static_cast<int>(responseCode))) {
+    if (isRetriableStatus(retryPolicy, static_cast<int>(responseCode))) {
       if (responseCode == 429 && currentAccount != nullptr) {
         const std::string retryDetails = formatErrorMessage(
             getId(), opts.modelId, static_cast<int>(responseCode), ctx.buffer,
@@ -406,7 +420,7 @@ void BaseOpenAIProvider::stream(
         rateLimitAttempt++;
         if (switchResult.switched) {
           onEvent(StreamRetrying{attempt + 1,
-                                 RetryConstants::MAX_RETRIES,
+                                 retryPolicy.config.maxRetries,
                                  static_cast<int>(responseCode),
                                  0,
                                  "rate limited, switching account",
@@ -420,7 +434,7 @@ void BaseOpenAIProvider::stream(
         }
       }
 
-      if (attempt >= RetryConstants::MAX_RETRIES) {
+      if (attempt >= retryPolicy.config.maxRetries) {
         std::string errMsg =
             formatErrorMessage(getId(), opts.modelId,
                                static_cast<int>(responseCode), ctx.buffer,
@@ -434,10 +448,14 @@ void BaseOpenAIProvider::stream(
         break;
       }
 
-      int delayMs = calculateRetryDelay(attempt, currentHeaderCtx.retryAfterMs);
+      const int headerDelayMs = retryPolicy.config.respectRetryAfter
+                                    ? currentHeaderCtx.retryAfterMs
+                                    : 0;
+      int delayMs =
+          calculateRetryDelay(retryPolicy, attempt, headerDelayMs);
       std::string reason =
           responseCode == 429 ? "rate limited" : "server error";
-      onEvent(StreamRetrying{attempt + 1, RetryConstants::MAX_RETRIES,
+      onEvent(StreamRetrying{attempt + 1, retryPolicy.config.maxRetries,
                              static_cast<int>(responseCode), delayMs, reason,
                              currentAccount ? currentAccount->getIdentifier()
                                             : "",
@@ -607,7 +625,7 @@ std::vector<ModelInfo> BaseOpenAIProvider::listModels() {
   if (!curl)
     return {};
 
-  std::string url = baseUrl + "/models";
+  std::string url = getModelsUrl();
   std::string response;
 
   auto writer = [](char *ptr, size_t size, size_t nmemb,
@@ -673,11 +691,13 @@ BaseOpenAIProvider::handleRateLimitAndMaybeSwitch(
     APIKeyAccount &currentAccount, const std::optional<std::string> &modelId,
     int headerDelayMs, int rateLimitAttempt,
     int64_t /*rateLimitResetMs*/) {
+  const RetryPolicyRuntime retryPolicy = RetryPolicyResolver::resolve(getId());
   const int headerDelaySeconds = std::max(0, (headerDelayMs + 999) / 1000);
+  const int retryDelayMs =
+      RetryPolicyResolver::computeDelayMs(retryPolicy, rateLimitAttempt,
+                                          headerDelayMs);
   const int backoffSeconds =
-      std::max(firmius::shared::BackoffConstants::getBackoffSeconds(
-                   rateLimitAttempt),
-               headerDelaySeconds);
+      std::max(1, std::max(retryDelayMs / 1000, headerDelaySeconds));
 
   {
     std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
@@ -694,6 +714,14 @@ BaseOpenAIProvider::handleRateLimitAndMaybeSwitch(
 
 std::string BaseOpenAIProvider::getReasoningFieldName() const {
   return "reasoning_content";
+}
+
+std::string BaseOpenAIProvider::getChatUrl() const {
+  return baseUrl + "/chat/completions";
+}
+
+std::string BaseOpenAIProvider::getModelsUrl() const {
+  return baseUrl + "/models";
 }
 
 std::string
@@ -855,13 +883,14 @@ void BaseOpenAIProvider::generateSummary(
     const std::string &compactionPrompt,
     std::function<void(const StreamEvent &)> onEvent,
     std::atomic<bool> *abortSignal) {
+  const RetryPolicyRuntime retryPolicy = RetryPolicyResolver::resolve(getId());
   if (modelId.empty()) {
     onEvent(
         StreamError{"Summary generation failed: No modelId provided.", 0, ""});
     return;
   }
 
-  std::string url = baseUrl + "/chat/completions";
+  std::string url = getChatUrl();
 
   rapidjson::Document d;
   d.SetObject();
@@ -950,7 +979,7 @@ void BaseOpenAIProvider::generateSummary(
   }
 
   int attempt = 0;
-  while (attempt <= RetryConstants::MAX_RETRIES) {
+  while (attempt <= retryPolicy.config.maxRetries) {
     curl_easy_reset(curl);
 
     auto wrappedOnEvent = [&](const StreamEvent &ev) {
@@ -974,8 +1003,10 @@ void BaseOpenAIProvider::generateSummary(
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ctx);
     curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, headerCallback);
     curl_easy_setopt(curl, CURLOPT_HEADERDATA, &currentHeaderCtx);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 60L);
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT,
+                     static_cast<long>(retryPolicy.config.timeoutSeconds));
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT,
+                     static_cast<long>(retryPolicy.config.connectTimeoutSeconds));
     curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
 
     const CurlTransferResult transfer =
@@ -991,8 +1022,8 @@ void BaseOpenAIProvider::generateSummary(
       break;
     }
 
-    if (isNonRetriableStatus(static_cast<int>(responseCode)) ||
-        attempt >= RetryConstants::MAX_RETRIES) {
+    if (isNonRetriableStatus(retryPolicy, static_cast<int>(responseCode)) ||
+        attempt >= retryPolicy.config.maxRetries) {
       std::string errMsg = formatErrorMessage(
           getId(), modelId, static_cast<int>(responseCode), ctx.buffer,
           "Summary generation API error");
@@ -1000,8 +1031,13 @@ void BaseOpenAIProvider::generateSummary(
       break;
     }
 
-    if (isRetriableStatus(static_cast<int>(responseCode)) || res != CURLE_OK) {
-      int delayMs = calculateRetryDelay(attempt, currentHeaderCtx.retryAfterMs);
+    if (isRetriableStatus(retryPolicy, static_cast<int>(responseCode)) ||
+        isRetriableCurlError(retryPolicy, res)) {
+      const int headerDelayMs = retryPolicy.config.respectRetryAfter
+                                    ? currentHeaderCtx.retryAfterMs
+                                    : 0;
+      int delayMs =
+          calculateRetryDelay(retryPolicy, attempt, headerDelayMs);
       if (!interruptibleSleep(std::chrono::milliseconds(delayMs), abortSignal)) {
         break;
       }

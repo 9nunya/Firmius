@@ -26,23 +26,6 @@ struct PlanLaneTaskRow {
   std::string status_label;
 };
 
-struct PlanLaneModel {
-  bool visible = false;
-  bool expanded = false;
-  std::string thread_id;
-  std::string plan_id;
-  std::string plan_title;
-  std::string collapsed_summary;
-  std::vector<PlanLaneChunkRow> chunks;
-  // Executor-focused rendering modes
-  bool executor_task_view = false;
-  std::string executor_chunk_id;
-  std::string executor_chunk_title;
-  std::vector<PlanLaneTaskRow> executor_tasks;
-  std::string highlight_chunk_id;
-  std::string toggle_hint;
-};
-
 // V2: Executor-focused chunk detail model
 struct ChunkDetailModel {
   bool visible = false;
@@ -70,6 +53,24 @@ struct ChunkDetailModel {
     std::string verification_condition;
   };
   std::vector<TaskRow> tasks;
+};
+
+struct PlanLaneModel {
+  bool visible = false;
+  bool expanded = false;
+  std::string thread_id;
+  std::string plan_id;
+  std::string plan_title;
+  std::string collapsed_summary;
+  std::vector<PlanLaneChunkRow> chunks;
+  // Executor-focused rendering modes
+  bool executor_task_view = false;
+  std::string executor_chunk_id;
+  std::string executor_chunk_title;
+  std::vector<PlanLaneTaskRow> executor_tasks;
+  std::string highlight_chunk_id;
+  std::string toggle_hint;
+  std::optional<ChunkDetailModel> focused_chunk;
 };
 
 class ActivePlanState {

@@ -1,0 +1,42 @@
+id: bash.guard
+description: |
+  Demonstrates the Claude Code / opencode shell-hook compatibility shim.
+  This hook reads the JSON envelope on stdin, emits a JSON outcome on
+  stdout, and uses exit code 2 as the block signal — exactly the same
+  contract those tools use.
+
+trigger:
+  on_event: pre_tool_use
+  match:
+    tool: { equals: Process.Execute }
+  block: true
+
+action:
+  kind: shell
+  pass_envelope: true       # JSON envelope on stdin
+  claude_code_compat: true  # exit 2 = block, JSON stdout = structured outcome
+  command: |
+    python3 - <<'PY'
+    import json, re, sys
+    env = json.load(sys.stdin)
+    cmd = env["payload"]["tool_args"].get("command", "")
+    forbidden = [
+        r"\brm\s+-rf\s+/\b",
+        r"\bgit\s+push\b",
+        r"\b:( ){ :|:& };:\b",   # fork bomb
+    ]
+    for pat in forbidden:
+        if re.search(pat, cmd):
+            print(json.dumps({
+                "decision": "block",
+                "reason":   f"command matches forbidden pattern: {pat!r}",
+                "outcome":  "denied",
+            }))
+            sys.exit(2)
+    # Allow with a friendly trace.
+    print(json.dumps({
+        "decision": "allow",
+        "reminder": f"bash.guard: cleared `{cmd[:80]}`",
+    }))
+    PY
+  timeout_sec: 5

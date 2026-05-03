@@ -17,6 +17,7 @@
 #include <sstream>
 #include <algorithm>
 #include <map>
+#include <mutex>
 
 namespace firmius::audits {
 
@@ -53,14 +54,25 @@ constexpr const char* COLOR_CYAN = "\x1b[36m";
 constexpr const char* COLOR_WHITE = "\x1b[37m";
 constexpr const char* COLOR_BG_BLUE = "\x1b[44m";
 
-// Pretty CLI Renderer - streams events in real-time
+// Pretty CLI Renderer - streams events in real-time.
+//
+// `onEvent` is invoked from MULTIPLE threads — the main benchmark loop, the
+// per-agent run loops, and async provider model-discovery threads (e.g.
+// NvidiaProvider::discoverModels emits `ModelDiscovered` from a worker
+// thread spawned during Engine init). Without serialisation those calls
+// race on `std::cout` and the internal toolCalls map, which is a hard
+// SIGSEGV under high event volume. The mutex is recursive because some
+// handlers re-enter onEvent indirectly via ensureTurnHeader → AgentRegistry
+// queries that internally call back through the harness.
 class BenchmarkCLIRenderer {
 public:
   void onEvent(const AppEvent& event) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     std::visit([this](auto&& ev) { handleEvent(ev); }, event);
   }
 
 private:
+  std::recursive_mutex mutex_;
   std::map<std::string, ToolCallView> toolCalls;  // Use ToolCallView from shared
   int turnCount = 0;
   bool turnHeaderPrinted = false;

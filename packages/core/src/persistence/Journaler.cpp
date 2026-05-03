@@ -268,6 +268,7 @@ Journaler::~Journaler() {
         stopWorker = true;
     }
     queueCv.notify_all();
+    drainCv.notify_all();
 
     if (workerThread.joinable()) {
         workerThread.join();
@@ -288,6 +289,12 @@ void Journaler::rewriteJournal(const std::vector<AgentTurn>& turns) {
         queue.push(RewriteOp{turns});
     }
     queueCv.notify_one();
+}
+
+void Journaler::flush() {
+    std::unique_lock<std::mutex> lock(queueMutex);
+    drainCv.wait(lock,
+                 [this]() { return (queue.empty() && !processing_) || stopWorker; });
 }
 
 void Journaler::processQueue() {
@@ -311,11 +318,13 @@ void Journaler::processQueue() {
         queueCv.wait(lock, [this]() { return !queue.empty() || stopWorker; });
 
         if (stopWorker && queue.empty()) {
+            drainCv.notify_all();
             break;
         }
 
         auto op = std::move(queue.front());
         queue.pop();
+        processing_ = true;
         lock.unlock();
 
         try {
@@ -345,6 +354,12 @@ void Journaler::processQueue() {
                 db = nullptr;
             }
         }
+
+        {
+            std::lock_guard<std::mutex> doneLock(queueMutex);
+            processing_ = false;
+        }
+        drainCv.notify_all();
     }
 
     if (db) {

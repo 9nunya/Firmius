@@ -56,7 +56,11 @@ Notes:
 | `/new` | Create a new thread |
 | `/threads` | Switch to another thread |
 | `/models` | Change the focused model |
-| `/undo [count]` | Rewind the last N turns |
+| `/undo [count]` | Rewind transcript turns; when omitted, rewinds to the last user message boundary (same as Alt+Backspace) |
+| `/undo_turn` | Undo the last agent turn (same as Ctrl+Z) |
+| `/redo` | Redo last transcript undo (same as Ctrl+Shift+Z) |
+| `/history` | Show transcript rewind console |
+| `/edits` | Show persisted edit history and rollback tools |
 | `/config` | View current config |
 | `/memory` | Configure rolling-memory behavior |
 | `/connect <provider>` | Add a provider account |

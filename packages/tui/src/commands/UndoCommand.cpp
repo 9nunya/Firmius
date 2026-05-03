@@ -1,5 +1,6 @@
 #include "commands/UndoCommand.hpp"
 #include "harness/Harness.hpp"
+#include <iostream>
 #include "persistence/ThreadManager.hpp"
 
 namespace {
@@ -58,13 +59,13 @@ int defaultUndoTurnCount(firmius::core::Harness& harness) {
   }
   return std::max(1, compactionTail);
 }
-
 } // namespace
+
+
 
 namespace firmius::tui {
 
 void UndoCommand::execute(CommandCtx &ctx, const std::vector<ParsedArg> &args) {
-  (void)ctx;
   auto& harness = firmius::core::Harness::instance();
   int count = args.empty() ? defaultUndoTurnCount(harness) : 1;
   if (!args.empty()) {
@@ -76,7 +77,18 @@ void UndoCommand::execute(CommandCtx &ctx, const std::vector<ParsedArg> &args) {
   }
   if (count < 1)
     count = 1;
-  harness.undoTurns(count);
+  auto result = harness.undoTurnsWithRedo(count);
+  if (result) {
+    if (ctx.state) {
+      ctx.state->last_transcript_undo_action_ = result;
+      ctx.state->last_transcript_redo_action_.reset();
+      ctx.state->refreshFocusedHistory();
+      ctx.state->notifyChatTranscriptChanged();
+    }
+    std::cout << "Transcript undo action: " << result->undoActionId << "\n";
+  } else {
+    std::cout << "Transcript undo was not applied\n";
+  }
 }
 
 } // namespace firmius::tui

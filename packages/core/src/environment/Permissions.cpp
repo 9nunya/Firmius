@@ -289,6 +289,12 @@ void Permissions::persistResponse(const PermissionEscalationRequest& request,
         case PermissionResponse::AllowCommandGlobal:
         case PermissionResponse::AllowAlways: {
             if (request.requestType != PermissionRequestType::Command) {
+                PathAllowRule rule;
+                rule.pathPrefix = deriveAllowPathPrefix(request.targetPath);
+                rule.toolName = request.toolName;
+                rule.readOnly = request.requestType == PermissionRequestType::Read;
+                rule.isGlobal = false;
+                Harness::instance().persistPathAllowRule(threadId_, rule);
                 break;
             }
             const auto intent = intentAnalyzer_->analyze(request.command);

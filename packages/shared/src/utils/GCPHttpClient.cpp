@@ -155,7 +155,13 @@ firmius::utils::GCPHttpClient::Response performInterruptibleTransfer(
     firmius::utils::GCPHttpClient::Response resp;
 
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
+    // CURLOPT_POSTFIELDS uses strlen() to compute length when POSTFIELDSIZE
+    // is unset — that breaks any binary body whose first byte is 0x00 (e.g.
+    // Connect-RPC envelopes which start with a flag byte). Always pin the
+    // size explicitly.
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE_LARGE,
+                     static_cast<curl_off_t>(body.size()));
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.data());
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeCallback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, userdata);
@@ -265,7 +271,9 @@ GCPHttpClient::Response GCPHttpClient::post(const std::string& url, const std::s
     struct curl_slist* headers = prepareHeaders();
 
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE_LARGE,
+                     static_cast<curl_off_t>(body.size()));
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.data());
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, stringWriteCallback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp.body);

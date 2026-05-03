@@ -43,9 +43,17 @@ target_sources(firmius_core PRIVATE
     src/tools/FleetStatusTool.cpp
     src/tools/TodoWriteTool.cpp
     src/tools/MemoryRecallTool.cpp
+    src/tools/ModeSwitchTool.cpp
     src/agents/HintingLoader.cpp
     src/agents/SkillLoader.cpp
     src/agents/PurposeLoader.cpp
+    src/agents/prompts/PromptComposer.cpp
+    src/agents/modes/Mode.cpp
+    src/agents/hooks/HookRegistry.cpp
+    src/agents/hooks/HookEnvelope.cpp
+    src/agents/hooks/HookState.cpp
+    src/agents/hooks/ScriptRuntime.cpp
+    src/agents/hooks/TemplateEngine.cpp
     src/agents/RuntimeOverlay.cpp
     src/agents/RollingContextManager.cpp
     src/agents/ContextBudget.cpp
@@ -109,9 +117,18 @@ target_sources(firmius_core PUBLIC
     include/tools/FleetLockTool.hpp
     include/tools/TodoWriteTool.hpp
     include/tools/MemoryRecallTool.hpp
+    include/tools/ModeSwitchTool.hpp
     include/agents/HintingLoader.hpp
     include/agents/SkillLoader.hpp
     include/agents/PurposeLoader.hpp
+    include/agents/prompts/PromptComposer.hpp
+    include/agents/modes/Mode.hpp
+    include/agents/hooks/HookRegistry.hpp
+    include/agents/hooks/HookOutcome.hpp
+    include/agents/hooks/HookEnvelope.hpp
+    include/agents/hooks/HookState.hpp
+    include/agents/hooks/ScriptRuntime.hpp
+    include/agents/hooks/TemplateEngine.hpp
     include/agents/RuntimeOverlay.hpp
     include/agents/RollingContextManager.hpp
     include/agents/ContextBudget.hpp
@@ -156,6 +173,22 @@ target_link_libraries(firmius_core PUBLIC
     Threads::Threads
     ${FIRMIUS_SQLITE_TARGET}
 )
+
+# ─── Optional Luau (sandboxed scripting for kind: script hook actions) ─────
+if(FIRMIUS_ENABLE_LUAU_HOOKS)
+  target_compile_definitions(firmius_core PRIVATE FIRMIUS_ENABLE_LUAU_HOOKS=1)
+  target_compile_definitions(firmius_core PRIVATE LUA_API=extern\"C\")
+  target_compile_definitions(firmius_core PRIVATE LUACODE_API=extern\"C\")
+  target_link_libraries(firmius_core PRIVATE
+    Luau.VM
+    Luau.Compiler
+    Luau.Ast
+    Luau.Common
+    Luau.Config
+    Luau.CLI.lib
+    isocline
+  )
+endif()
 
 target_include_directories(firmius_core PRIVATE
   ${rapidjson_SOURCE_DIR}/include

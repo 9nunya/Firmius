@@ -1,0 +1,13 @@
+id: promise.command.promise
+name: Promise
+description: Create a durable promise pact and run the task.
+slash_command: /promise
+raw_remainder: true
+args:
+  - name: task
+    type: string
+    description: Task to bind to a promise pact
+action:
+  kind: script
+  language: luau
+  script_file: ../scripts/promise_command.lua

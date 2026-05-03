@@ -1,4 +1,5 @@
 #include "commands/CommandManager.hpp"
+#include "NotificationManager.hpp"
 #include <algorithm>
 #include <cctype>
 #include <sstream>
@@ -128,10 +129,15 @@ bool CommandManager::executeCommand(CommandCtx &ctx, const std::string &input) {
 
   std::vector<std::string> tokens;
   if (space_pos != std::string::npos) {
-    tokens = tokenizeArgs(content.substr(space_pos + 1));
-    // Remove trailing empty token caused by spacing
-    if (!tokens.empty() && tokens.back().empty()) {
-      tokens.pop_back();
+    const std::string argText = content.substr(space_pos + 1);
+    if (it->second->takesRawRemainder()) {
+      tokens.push_back(argText);
+    } else {
+      tokens = tokenizeArgs(argText);
+      // Remove trailing empty token caused by spacing
+      if (!tokens.empty() && tokens.back().empty()) {
+        tokens.pop_back();
+      }
     }
   }
 
@@ -150,7 +156,17 @@ bool CommandManager::executeCommand(CommandCtx &ctx, const std::string &input) {
     }
   }
 
-  it->second->execute(ctx, parsed);
+  try {
+    it->second->execute(ctx, parsed);
+  } catch (const std::exception &ex) {
+    NotificationManager::instance().notifyError(
+        "Command", ex.what(), false);
+    return true;
+  } catch (...) {
+    NotificationManager::instance().notifyError(
+        "Command", "Command failed with an unknown error.", false);
+    return true;
+  }
   return true;
 }
 
@@ -160,6 +176,19 @@ std::shared_ptr<ICommand> CommandManager::getCommand(const std::string &name) co
     return it->second;
   }
   return nullptr;
+}
+
+std::vector<CommandPaletteEntry> CommandManager::listCommands() const {
+  std::vector<CommandPaletteEntry> entries;
+  entries.reserve(commands_.size());
+  for (const auto &[name, cmd] : commands_) {
+    entries.push_back({name,
+                       cmd->description(),
+                       "/" + name + " ",
+                       cmd->bindingHints(),
+                       cmd->isWorkflow()});
+  }
+  return entries;
 }
 
 } // namespace firmius::tui

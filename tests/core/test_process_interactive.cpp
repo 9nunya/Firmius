@@ -200,22 +200,22 @@ TEST_F(ProcessInteractiveTest, PythonInteraction) {
   // Use a stdin-driven Python loop instead of REPL mode to avoid TTY-specific
   // behavior while still verifying interactive process IO.
   std::string spawnData = callTool(
-      "process_spawn",
-      R"({"command": "python3 -u -c 'import sys; exec(\"for line in sys.stdin:\\n    if line.strip() == \\\"__EXIT__\\\":\\n        break\\n    sys.stdout.write(line)\\n    sys.stdout.flush()\")'"})");
+      "Process",
+      R"({"action": "Spawn", "command": "python3 -u -c 'import sys; exec(\"for line in sys.stdin:\\n    if line.strip() == \\\"__EXIT__\\\":\\n        break\\n    sys.stdout.write(line)\\n    sys.stdout.flush()\")'"})");
   rapidjson::Document spawnDoc;
   spawnDoc.Parse(spawnData.c_str());
   std::string pid = spawnDoc["process_id"].GetString();
   EXPECT_FALSE(pid.empty());
 
   // 2. Send input.
-  callTool("process_input",
-           R"({"process_id": ")" + pid +
+  callTool("Process",
+           R"({"action": "Input", "process_id": ")" + pid +
                R"(", "input": "firmius_interactive_test\n"})");
 
   // 3. Wait for the output pattern to appear.
   std::string waitData = callTool(
-      "process_wait",
-      R"({"process_id": ")" + pid +
+      "Process",
+      R"({"action": "Wait", "process_id": ")" + pid +
           R"(", "pattern": "firmius_interactive_test", "timeout_ms": 5000})");
   rapidjson::Document waitDoc;
   waitDoc.Parse(waitData.c_str());
@@ -223,14 +223,14 @@ TEST_F(ProcessInteractiveTest, PythonInteraction) {
   EXPECT_TRUE(waitDoc["isRunning"].GetBool());
 
   // 4. Ask the script to exit.
-  callTool("process_input",
-           R"({"process_id": ")" + pid +
+  callTool("Process",
+           R"({"action": "Input", "process_id": ")" + pid +
                R"(", "input": "__EXIT__\n"})");
 
   // 5. Verify the process exits within a bounded timeout.
   std::string exitWaitData =
-      callTool("process_wait",
-               R"({"process_id": ")" + pid + R"(", "timeout_ms": 5000})");
+      callTool("Process",
+               R"({"action": "Wait", "process_id": ")" + pid + R"(", "timeout_ms": 5000})");
   rapidjson::Document exitWaitDoc;
   exitWaitDoc.Parse(exitWaitData.c_str());
   EXPECT_FALSE(exitWaitDoc["isRunning"].GetBool());
@@ -239,7 +239,7 @@ TEST_F(ProcessInteractiveTest, PythonInteraction) {
 TEST_F(ProcessInteractiveTest, PatternWaitTimeout) {
   // 1. Spawn a long running process
   std::string spawnData =
-      callTool("process_spawn", R"({"command": "sleep 10"})");
+      callTool("Process", R"({"action": "Spawn", "command": "sleep 10"})");
   rapidjson::Document spawnDoc;
   spawnDoc.Parse(spawnData.c_str());
   std::string pid = spawnDoc["process_id"].GetString();
@@ -252,10 +252,64 @@ TEST_F(ProcessInteractiveTest, PatternWaitTimeout) {
   doc["process_id"].SetString(pid.c_str(), doc.GetAllocator());
 
   ToolContext ctx{*hostRaw, *agent, "test_call"};
-  auto res = registry.execute("process_wait", doc, ctx);
+  doc.AddMember("action", rapidjson::Value("Wait", doc.GetAllocator()), doc.GetAllocator());
+  auto res = registry.execute("Process", doc, ctx);
 
   EXPECT_FALSE(res.success);
   EXPECT_TRUE(res.error.find("Timeout") != std::string::npos);
+}
+
+TEST_F(ProcessInteractiveTest, ProcessStatusOutputListAndKillExposeControlSurface) {
+  std::string spawnData =
+      callTool("Process", R"({"action": "Spawn", "command": "printf 'one\n'; printf 'two\n'; sleep 10"})");
+  rapidjson::Document spawnDoc;
+  spawnDoc.Parse(spawnData.c_str());
+  std::string pid = spawnDoc["process_id"].GetString();
+  EXPECT_FALSE(pid.empty());
+  ASSERT_TRUE(spawnDoc.HasMember("system_id"));
+  EXPECT_TRUE(spawnDoc["system_id"].IsString());
+  EXPECT_GT(std::string(spawnDoc["system_id"].GetString()).size(), 0U);
+
+  std::string waitData =
+      callTool("Process", R"({"action": "Wait", "process_id": ")" + pid +
+                              R"(", "pattern": "two", "timeout_ms": 5000})");
+  rapidjson::Document waitDoc;
+  waitDoc.Parse(waitData.c_str());
+  EXPECT_TRUE(waitDoc["patternFound"].GetBool());
+  ASSERT_TRUE(waitDoc.HasMember("system_id"));
+  EXPECT_GT(std::string(waitDoc["system_id"].GetString()).size(), 0U);
+
+  std::string outputData =
+      callTool("Process", R"({"action": "Output", "process_id": ")" + pid +
+                              R"(", "stream": "stdout", "tail_lines": 2})");
+  rapidjson::Document outputDoc;
+  outputDoc.Parse(outputData.c_str());
+  ASSERT_TRUE(outputDoc.HasMember("output"));
+  EXPECT_NE(std::string(outputDoc["output"].GetString()).find("two"),
+            std::string::npos);
+  ASSERT_TRUE(outputDoc.HasMember("next_offset"));
+
+  std::string listData = callTool("Process", R"({"action": "List"})");
+  rapidjson::Document listDoc;
+  listDoc.Parse(listData.c_str());
+  ASSERT_TRUE(listDoc.HasMember("processes"));
+  bool found = false;
+  for (const auto &process : listDoc["processes"].GetArray()) {
+    if (process.HasMember("process_id") &&
+        pid == process["process_id"].GetString()) {
+      found = true;
+      ASSERT_TRUE(process.HasMember("system_id"));
+      break;
+    }
+  }
+  EXPECT_TRUE(found);
+
+  std::string killData =
+      callTool("Process", R"({"action": "Kill", "process_id": ")" + pid + R"("})");
+  rapidjson::Document killDoc;
+  killDoc.Parse(killData.c_str());
+  EXPECT_TRUE(killDoc["was_running"].GetBool());
+  EXPECT_FALSE(killDoc["running"].GetBool());
 }
 
 TEST(ProcessCancellationRegressionTest,

@@ -84,6 +84,17 @@ TEST(CliOptionsTest, ParsesPermissionMode) {
             firmius::shared::ThreadPermissionMode::AlwaysAllow);
 }
 
+TEST(CliOptionsTest, ParsesNamedPermissionProfiles) {
+  std::vector<std::string> args = {"firmius", "--permission-mode", "ask"};
+  auto argv = makeArgv(args);
+
+  const auto options =
+      firmius::cli::parseCliOptions(static_cast<int>(argv.size()), argv.data());
+
+  EXPECT_EQ(options.permissionMode,
+            firmius::shared::ThreadPermissionMode::Request);
+}
+
 
 TEST(CliOptionsTest, MissingPromptFileThrows) {
   std::vector<std::string> args = {"firmius", "--prompt-file",

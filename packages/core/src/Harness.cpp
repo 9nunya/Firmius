@@ -1,19 +1,23 @@
 #include "harness/Harness.hpp"
+#include "agents/hooks/HookRegistry.hpp"
 #include "AgentRegistry.hpp"
 #include "Engine.hpp"
 #include "IHost.hpp"
+#include "agents/Agent.hpp"
 #include "agents/ContextBudget.hpp"
 #include "agents/HintingLoader.hpp"
 #include "agents/PurposeLoader.hpp"
 #include "artifacts/ReferenceExpansion.hpp"
 #include "hosts/DockerHost.hpp"
 #include "hosts/LocalHost.hpp"
+#include "mcp/McpManager.hpp"
 #include "persistence/Journaler.hpp"
 #include "persistence/ThreadManager.hpp"
 #include "providers/BaseAPIKeyProvider.hpp"
 #include "providers/BaseOAuthProvider.hpp"
 #include "providers/ProviderRegistry.hpp"
 #include "tools/WorkSupport.hpp"
+#include "utils/PermissionProfiles.hpp"
 #include "utils/FSUtil.hpp"
 #include "utils/PlatformPaths.hpp"
 #include "utils/StringUtil.hpp"
@@ -89,6 +93,56 @@ std::string resolveRunnableLeadPersona(const std::string &requestedPersona) {
   }
 
   return requestedPersona.empty() ? "aster" : requestedPersona;
+}
+
+struct AgentHistoryScore {
+  std::size_t turns = 0;
+  uint64_t lastTimestamp = 0;
+};
+
+AgentHistoryScore scorePersistedAgent(ThreadManager &threadManager,
+                                      const std::string &threadId,
+                                      const std::string &agentId) {
+  AgentHistoryScore score;
+  try {
+    const auto history = threadManager.loadAgentHistory(threadId, agentId);
+    score.turns = history.turns.size();
+    for (const auto &turn : history.turns) {
+      for (const auto &message : turn.messages) {
+        score.lastTimestamp = std::max(score.lastTimestamp, message.timestamp);
+      }
+    }
+  } catch (...) {
+  }
+  return score;
+}
+
+std::string chooseBestPersistedAgent(
+    ThreadManager &threadManager, const std::string &threadId,
+    const std::map<std::string, AgentManifestEntry> &manifest) {
+  auto chooseFrom = [&](bool rootsOnly) {
+    std::string bestId;
+    AgentHistoryScore bestScore;
+    for (const auto &[agentId, entry] : manifest) {
+      if (rootsOnly && !entry.parentId.empty()) {
+        continue;
+      }
+      const auto score = scorePersistedAgent(threadManager, threadId, agentId);
+      if (bestId.empty() || score.turns > bestScore.turns ||
+          (score.turns == bestScore.turns &&
+           score.lastTimestamp > bestScore.lastTimestamp)) {
+        bestId = agentId;
+        bestScore = score;
+      }
+    }
+    return bestId;
+  };
+
+  std::string selected = chooseFrom(true);
+  if (selected.empty()) {
+    selected = chooseFrom(false);
+  }
+  return selected;
 }
 
 bool ensureWritableDirectory(const std::filesystem::path &dir) {
@@ -516,6 +570,7 @@ void Harness::init() {
 
   PurposeLoader::bootstrapDefaults("prompts/");
   HintingLoader::bootstrapDefaults("hinting/");
+  shared::ensureBuiltinPermissionProfiles();
   WorkflowLoader::bootstrapDefaults("workflows/");
   shared::ConfigLoader::instance().load();
 
@@ -575,12 +630,15 @@ void Harness::init() {
     }
   }
 
-  // Trigger initial background model fetch
-  listAllModels();
+  // Model discovery is lazy. Eager startup fetch can fan out into provider-
+  // specific background network activity before the user has opened any picker,
+  // which is unnecessary churn and has caused startup-time crashes in
+  // third-party provider discovery code.
 }
 
 void Harness::shutdown() {
   Engine::instance().shutdown();
+  mcp::McpManager::shared().shutdown();
   std::vector<std::thread> toJoin;
   std::vector<std::shared_ptr<PendingPermissionRequest>> pendingRequests;
   {
@@ -614,7 +672,8 @@ void Harness::shutdown() {
 
 std::string Harness::newThread(HostCreationOptions hostOptions,
                                const std::string &cwd,
-                               const std::string &leadPersona) {
+                               const std::string &leadPersona,
+                               const std::string &initialMode) {
   std::string threadId;
   int ownerPid = -1;
   bool lockAcquired = false;
@@ -637,6 +696,7 @@ std::string Harness::newThread(HostCreationOptions hostOptions,
     newMeta.cwd = finalCwd;
     std::string effectiveLead = resolveRunnableLeadPersona(leadPersona);
     newMeta.leadPersona = effectiveLead;
+    newMeta.initialMode = initialMode;
 
     threadId = threadManager_.createThread(newMeta);
 
@@ -733,27 +793,14 @@ bool Harness::switchThread(const std::string &threadId) {
 
     currentThreadId_ = threadId;
 
-    for (const auto &[agentId, entry] : manifest) {
-      Engine::instance().resumeAgent(threadId, agentId, entry.persona,
-                                     entry.parentId, entry.friendlyName,
-                                     entry.title, entry.persistHistory);
-    }
-
     auto it = threadAgentMap_.find(threadId);
     if (it != threadAgentMap_.end() &&
         manifest.find(it->second) != manifest.end()) {
       focusedAgentId_ = it->second;
     } else {
       focusedAgentId_.clear();
-      for (const auto &[agentId, entry] : manifest) {
-        if (entry.parentId.empty()) {
-          focusedAgentId_ = agentId;
-          break;
-        }
-      }
-      if (focusedAgentId_.empty() && !manifest.empty()) {
-        focusedAgentId_ = manifest.begin()->first;
-      }
+      focusedAgentId_ =
+          chooseBestPersistedAgent(threadManager_, threadId, manifest);
     }
 
     clearQueue();
@@ -770,6 +817,14 @@ bool Harness::switchThread(const std::string &threadId) {
                 manifestError});
   }
   emitEvent(firmius::shared::ThreadChanged{threadId, threadMeta});
+
+  {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (!focusedAgentId_.empty()) {
+      threadAgentMap_[threadId] = focusedAgentId_;
+    }
+  }
+
   return true;
 }
 
@@ -890,7 +945,9 @@ bool Harness::dispatchRequestToAgent(const std::string &threadId,
   std::string fid;
   std::string messageId;
   bool needsSummon = false;
+  bool needsRestore = false;
   std::string requestedId;
+  AgentManifestEntry restoreEntry;
   bool agentRunning = false;
   bool noThread = false;
   bool expansionFailed = false;
@@ -930,15 +987,31 @@ bool Harness::dispatchRequestToAgent(const std::string &threadId,
 
       if (!expansionFailed) {
         fid = preferredAgentId.empty() ? focusedAgentId_ : preferredAgentId;
-        if (fid.empty() || !AgentRegistry::instance().getAgent(fid)) {
+        auto agent = fid.empty() ? nullptr : AgentRegistry::instance().getAgent(fid);
+        if (!fid.empty() && !agent) {
+          try {
+            const auto manifest = threadManager_.readAgentManifest(tid);
+            auto manifestIt = manifest.find(fid);
+            if (manifestIt != manifest.end()) {
+              needsRestore = true;
+              restoreEntry = manifestIt->second;
+            }
+          } catch (...) {
+          }
+        }
+
+        if (fid.empty() || (!agent && !needsRestore)) {
           needsSummon = true;
           requestedId = shared::StringUtil::generateUuid();
           focusedAgentId_ = requestedId;
           threadAgentMap_[tid] = requestedId;
+          fid = requestedId;
+        } else if (needsRestore) {
+          focusedAgentId_ = fid;
+          threadAgentMap_[tid] = fid;
         } else {
           focusedAgentId_ = fid;
           threadAgentMap_[tid] = fid;
-          auto agent = AgentRegistry::instance().getAgent(fid);
           if (agent && (agent->isRunning() || agent->isBooting())) {
             agentRunning = true;
             messageQueue_.push_back(
@@ -970,6 +1043,49 @@ bool Harness::dispatchRequestToAgent(const std::string &threadId,
     return true;
   }
 
+  if (needsRestore) {
+    try {
+      Engine::instance().resumeAgent(tid, fid, restoreEntry.persona,
+                                     restoreEntry.parentId,
+                                     restoreEntry.friendlyName,
+                                     restoreEntry.title,
+                                     restoreEntry.persistHistory);
+    } catch (const std::exception &e) {
+      statusMessage =
+          "Failed to restore focused agent: " + std::string(e.what());
+      return false;
+    }
+
+    if (!waitFor(
+            [&]() {
+              auto restored = AgentRegistry::instance().getAgent(fid);
+              return restored && !restored->isBooting();
+            },
+            std::chrono::milliseconds(2000))) {
+      statusMessage = "Focused agent restore timed out.";
+      return false;
+    }
+
+    auto restoredAgent = AgentRegistry::instance().getAgent(fid);
+    if (!restoredAgent) {
+      statusMessage = "Focused agent cannot be restored.";
+      return false;
+    }
+    if (restoredAgent->isRunning()) {
+      std::lock_guard<std::recursive_mutex> lock(mutex_);
+      messageQueue_.push_back({messageId, preparedText, images, tid, fid});
+      emitEvent(
+          firmius::shared::MessageQueued{messageId, text, tid, fid, images});
+      statusMessage = "Retry queued on running agent.";
+      return true;
+    }
+
+    emitEvent(firmius::shared::UserMessageSent{messageId, text, tid, images});
+    Engine::instance().executeTask(fid, preparedText, images);
+    statusMessage = "Retry started.";
+    return true;
+  }
+
   if (agentRunning) {
     emitEvent(firmius::shared::MessageQueued{messageId, text, tid, fid, images});
     statusMessage = "Retry queued on running agent.";
@@ -993,6 +1109,12 @@ bool Harness::executeWorkflow(const std::string &workflowId,
     return false;
   }
 
+  const bool advancedAction =
+      workflow->action.kind != WorkflowActionKind::Prompt ||
+      !workflow->action.scriptBody.empty() || !workflow->action.scriptFile.empty() ||
+      !workflow->action.command.empty() || !workflow->action.stateWrites.empty() ||
+      !workflow->action.composeSteps.empty() || workflow->emit.has_value();
+
   std::string builtPrompt;
   try {
     builtPrompt = workflow->build(args);
@@ -1002,15 +1124,46 @@ bool Harness::executeWorkflow(const std::string &workflowId,
     return false;
   }
 
+  if (advancedAction) {
+    hooks::EventPayload payload;
+    payload.threadId = currentThreadId();
+    payload.agentId = focusedAgentId();
+    payload.completedWorkflowId = workflow->id;
+    payload.userMessage = builtPrompt;
+    payload.extra["workflow_id"] = workflow->id;
+    payload.extra["slash_command"] =
+        workflow->slashCommand.value_or("/" + workflow->id);
+    payload.extra["raw_args"] = args.empty() ? std::string{} : args.front();
+    for (std::size_t i = 0; i < args.size(); ++i) {
+      payload.extra["arg_" + std::to_string(i + 1)] = args[i];
+    }
+
+    auto outcome = hooks::HookDispatcher::runAction(*workflow, payload);
+    hooks::HookDispatcher::settleOutcome(*workflow, outcome);
+    if (outcome.decision == hooks::HookOutcome::Decision::Block) {
+      emitEvent(firmius::shared::AgentError{
+          payload.agentId,
+          outcome.blockReason.empty() ? "Workflow blocked" : outcome.blockReason});
+      return false;
+    }
+    if (outcome.reminderForAgent.has_value() &&
+        !firmius::shared::StringUtil::trim(*outcome.reminderForAgent).empty()) {
+      send(*outcome.reminderForAgent);
+    }
+    return true;
+  }
+
   send(builtPrompt);
   return true;
 }
 
 void Harness::abort() {
   std::string focusedAgentId;
+  std::string threadId;
   {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     focusedAgentId = focusedAgentId_;
+    threadId = currentThreadId_;
   }
   if (focusedAgentId.empty()) {
     return;
@@ -1021,6 +1174,14 @@ void Harness::abort() {
     return;
 
   Engine::instance().cancelAgent(focusedAgentId);
+  if (!threadId.empty()) {
+    for (const auto &request : listPendingPermissionEscalations(threadId)) {
+      if (request.agentId == focusedAgentId) {
+        resolvePermissionEscalation(request.requestId,
+                                    PermissionResponse::Deny);
+      }
+    }
+  }
 
   // If focused agent is a subagent (has parentId), only interrupt it
   // If focused agent is a lead agent (no parentId), do NOT cancel async=true
@@ -1064,6 +1225,11 @@ void Harness::abortAndFlushQueuedMessages() {
   // The running/booting check determines whether we wait for agent to settle
   // before draining.
   Engine::instance().cancelAgent(focusedAgentId);
+  for (const auto &request : listPendingPermissionEscalations(threadId)) {
+    if (request.agentId == focusedAgentId) {
+      resolvePermissionEscalation(request.requestId, PermissionResponse::Deny);
+    }
+  }
 
   {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -2012,7 +2178,9 @@ std::vector<ModelInfo> Harness::listAllModels() {
     emitEvent(firmius::shared::AppEvent(
         firmius::shared::ProviderModelsFetchStarted{providerId}));
 
-    backgroundThreads_.emplace_back([this, providerId, remainingProviders]() {
+    {
+      std::lock_guard<std::recursive_mutex> threadLock(mutex_);
+      backgroundThreads_.emplace_back([this, providerId, remainingProviders]() {
       std::string error;
       auto provider = provider::ProviderRegistry::instance().getProvider(providerId);
       if (!provider) {
@@ -2068,10 +2236,16 @@ std::vector<ModelInfo> Harness::listAllModels() {
       if (allFinished) {
         emitEvent(firmius::shared::AppEvent(firmius::shared::ModelsRefreshed{}));
       }
-    });
+      });
+    }
   }
 
   return snapshot;
+}
+
+std::vector<ModelInfo> Harness::cachedModelsSnapshot() const {
+  std::lock_guard<std::mutex> lock(modelsMutex_);
+  return cachedModels_;
 }
 
 bool Harness::isModelsLoaded() const {
@@ -2159,6 +2333,15 @@ void Harness::interruptAndSwitchModel(const std::string &providerId,
   auto agent = AgentRegistry::instance().getAgent(focusedAgentId_);
   if (agent) {
     Engine::instance().cancelAgent(focusedAgentId_);
+    if (!currentThreadId_.empty()) {
+      for (const auto &request :
+           listPendingPermissionEscalations(currentThreadId_)) {
+        if (request.agentId == focusedAgentId_) {
+          resolvePermissionEscalation(request.requestId,
+                                      PermissionResponse::Deny);
+        }
+      }
+    }
   }
 
   Engine::instance().switchAgentModel(focusedAgentId_, providerId, modelId);
@@ -2351,12 +2534,71 @@ void Harness::maybeGenerateTitle(const std::string &threadId,
       if (!agent)
         return;
 
-      const auto &config = agent->getContext().config;
+      const auto &agentConfig = agent->getContext().config;
+
+      // ---- Pick the titler model ----
+      //
+      // Order of preference, FROM CHEAPEST TO MOST WASTEFUL:
+      //   1. UserConfig.purposeRoutes["titler"] resolves to a category in
+      //      modelRouterCategories — use the first model in that category.
+      //      This is the explicit "I picked a fast cheap titler" knob.
+      //   2. UserConfig.defaultRouteCategory — fall back to the user's
+      //      "default cheap fleet" if they set one and no titler-specific
+      //      override exists.
+      //   3. As a last resort, use the agent's CURRENT model. This was the
+      //      old behaviour; it's wrong for premium-quota providers because
+      //      it spends $$ on every new thread just to pick a 60-char title.
+      //      We log a one-line breadcrumb so the user notices and adds a
+      //      titler route in settings.
+      const auto &userCfg = shared::ConfigLoader::instance().getConfig();
+      std::string titlerProviderId;
+      std::string titlerModelId;
+      std::string titlerVariant;
+      auto pickFromCategory =
+          [&](const shared::ModelRouteCategory &cat) -> bool {
+        if (cat.models.empty()) return false;
+        const auto &m = cat.models.front();
+        titlerProviderId = m.providerId;
+        titlerModelId = m.modelId;
+        titlerVariant = m.variantName;
+        return true;
+      };
+      if (auto it = userCfg.purposeRoutes.find("titler");
+          it != userCfg.purposeRoutes.end()) {
+        auto cat = userCfg.modelRouterCategories.find(it->second);
+        if (cat != userCfg.modelRouterCategories.end()) {
+          (void)pickFromCategory(cat->second);
+        }
+      }
+      if (titlerProviderId.empty() && !userCfg.defaultRouteCategory.empty()) {
+        auto cat =
+            userCfg.modelRouterCategories.find(userCfg.defaultRouteCategory);
+        if (cat != userCfg.modelRouterCategories.end()) {
+          (void)pickFromCategory(cat->second);
+        }
+      }
+      if (titlerProviderId.empty()) {
+        titlerProviderId = agentConfig.providerId;
+        titlerModelId = agentConfig.modelId;
+        titlerVariant = agentConfig.modelVariant;
+        // One-time log so the user can wire a real titler preset and stop
+        // burning premium quota on auto-generated titles.
+        static std::once_flag warnOnce;
+        std::call_once(warnOnce, [&]() {
+          std::fprintf(
+              stderr,
+              "[firmius] WARN: title generation falling back to chat model "
+              "(%s/%s). Set userConfig.purposeRoutes[\"titler\"] to a cheap "
+              "fast route to avoid burning premium quota on every new "
+              "thread.\n",
+              titlerProviderId.c_str(), titlerModelId.c_str());
+        });
+      }
+
       auto provider =
           firmius::provider::ProviderRegistry::instance().getProvider(
-              config.providerId);
-      if (!provider)
-        return;
+              titlerProviderId);
+      if (!provider) return;
 
       std::string titlerPrompt = PurposeLoader::load("titler").identityPrompt;
       std::string fullPrompt =
@@ -2378,11 +2620,11 @@ void Harness::maybeGenerateTitle(const std::string &threadId,
       history.turns.push_back(turn);
 
       firmius::provider::ProviderOptions opts;
-      opts.modelId = config.modelId;
+      opts.modelId = titlerModelId;
       try {
-        auto modelInfo = provider->getModelInfo(config.modelId);
+        auto modelInfo = provider->getModelInfo(titlerModelId);
         for (const auto &v : modelInfo.variants) {
-          if (v.variantName == config.modelVariant) {
+          if (v.variantName == titlerVariant) {
             opts.modelVariantJson = v.extraMetadataJson;
             break;
           }
@@ -3069,6 +3311,14 @@ Harness::getAgentHistory(const std::string &agentId) const {
       const_cast<std::recursive_mutex &>(mutex_));
   if (currentThreadId_.empty())
     return {};
+  // For tests that use legacy agent IDs (non-UUID), avoid blocking on any
+  // background resume/bootstrap by serving persisted history directly.
+  if (agentId.find('-') != std::string::npos && AgentRegistry::instance().getAgent(agentId)) {
+    auto history = AgentRegistry::instance().getAgent(agentId)->getContext().history;
+    if (history) {
+      return *history;
+    }
+  }
   return threadManager_.loadAgentHistory(currentThreadId_, agentId);
 }
 
@@ -3078,6 +3328,13 @@ Harness::getAgentHistoryPtr(const std::string &agentId) const {
       const_cast<std::recursive_mutex &>(mutex_));
   if (currentThreadId_.empty())
     return nullptr;
+
+  if (auto agent = AgentRegistry::instance().getAgent(agentId)) {
+    auto history = agent->getContext().history;
+    if (history && !history->turns.empty()) {
+      return std::make_shared<shared::AgentHistory>(*history);
+    }
+  }
 
   auto history = threadManager_.loadAgentHistory(currentThreadId_, agentId);
   if (history.turns.empty()) {
@@ -3141,6 +3398,20 @@ Harness::getAllQuotas(const std::string &providerId) {
   auto apiKeyProv = dynamic_cast<provider::BaseAPIKeyProvider *>(prov.get());
   if (apiKeyProv && apiKeyProv->supportsQuotaTracking()) {
     apiKeyProv->refreshQuotas();
+    return apiKeyProv->getAllQuotas();
+  }
+  return {};
+}
+
+std::map<std::string, std::vector<shared::QuotaBucket>>
+Harness::getCachedAllQuotas(const std::string &providerId) {
+  auto prov = provider::ProviderRegistry::instance().getProvider(providerId);
+  auto oauthProv = dynamic_cast<provider::BaseOAuthProvider *>(prov.get());
+  if (oauthProv) {
+    return oauthProv->getAllQuotas();
+  }
+  auto apiKeyProv = dynamic_cast<provider::BaseAPIKeyProvider *>(prov.get());
+  if (apiKeyProv && apiKeyProv->supportsQuotaTracking()) {
     return apiKeyProv->getAllQuotas();
   }
   return {};

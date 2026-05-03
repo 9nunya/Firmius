@@ -100,6 +100,17 @@ struct AgentState {
       recentToolCallSignatures; ///< Hash of "toolName:args" for recent calls
                                 ///< (insanity loop detection)
 
+  /// Currently active mode (qualified name, e.g. "diagnose" or "forge:apply").
+  /// Empty when no mode is active. Mutated by the mode_switch tool;
+  /// read by the prompt composer (ModeOverlaySection / ModeFrameSection)
+  /// and by the TUI status zone.
+  std::string activeMode;
+
+  /// Initial mode the user picked on the welcome screen, before any tool
+  /// could mutate it. Used so the welcome screen / status band can show
+  /// "started in: forge:prime" alongside the live activeMode.
+  std::string initialMode;
+
   bool operator==(const AgentState &other) const = default;
 };
 
@@ -227,6 +238,11 @@ struct ThreadMetadata {
   std::string hostIdentifier;
   std::string cwd;
   std::string leadPersona;
+  /// Optional initial mode the user picked on the welcome screen. Empty
+  /// means "no mode active at start"; otherwise the lead agent boots into
+  /// this mode (e.g. "diagnose", "forge:prime"). Persisted with the thread
+  /// metadata so resuming reproduces the original stance.
+  std::string initialMode;
   bool isBenchmarkRun = false;
   std::string benchmarkId;
   std::string benchmarkTaskId;
@@ -399,6 +415,8 @@ struct TranscriptUndoAction {
   std::string agentId;
   std::string scopeType;
   std::string scopeArgJson;
+  // Compound undo support: edit undo actions performed as part of this transcript undo.
+  std::vector<std::string> editUndoActionIds;
   std::uint64_t createdAt = 0;
   bool redoAvailable = false;
   std::string reason;

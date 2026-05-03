@@ -882,6 +882,9 @@ std::string Engine::summonAgent(
         agent->setBooting(true);
         AgentRegistry::instance().registerAgent(agentId, agent);
 
+        // Pre-populate the initial history so UI fetches a complete snapshot
+        agent->bootstrapHistory(task, images);
+
         // 2. Initialize host
         std::string actualHostId = agent->getHost()->init();
 

@@ -2,6 +2,7 @@
 #include "AgentRegistry.hpp"
 #include "Engine.hpp"
 #include "NotificationManager.hpp"
+#include "TUIState.hpp"
 #include "benchmarks/BenchmarkFactory.hpp"
 #include "benchmarks/BenchmarkSession.hpp"
 #include "harness/Harness.hpp"
@@ -142,94 +143,108 @@ void BenchmarksCommand::execute(CommandCtx &ctx,
     return;
   }
 
-  auto &harness = firmius::core::Harness::instance();
-  const auto config = harness.getConfig();
+  auto *state = ctx.state;
+  const auto permissionMode = state->currentThreadPermissionMode();
+  const std::string canonicalBenchmark = *canonical;
+  state->clearLoadingState();
+  state->setLoadingMessage("Starting benchmark...");
+  state->setLoadingDetail("Creating a benchmark thread and loading task metadata.");
+  state->setLoadingProgress(0.1f);
+  state->runBackgroundTask([state, canonicalBenchmark, requestedTaskId,
+                            permissionMode]() {
+    auto notifyError = [state](std::string message) {
+      state->deferUiMutation([state, message = std::move(message)]() {
+        state->clearLoadingState();
+        NotificationManager::instance().notifyError("Benchmarks", message,
+                                                    false);
+      });
+    };
 
-  if (!dockerSandboxImageReady()) {
-    NotificationManager::instance().notifyError(
-        "Benchmarks",
-        "Docker is unavailable or image 'firmius-sandbox:latest' is missing. "
-        "Start Docker and build/pull the sandbox image before running /benchmarks.",
-        false);
-    return;
-  }
+    auto &harness = firmius::core::Harness::instance();
+    const auto config = harness.getConfig();
 
-  firmius::shared::HostCreationOptions hostOptions;
-  hostOptions.type = firmius::shared::HostType::Docker;
-  hostOptions.connectToExisting = false;
-  hostOptions.deleteOnExit = true;
-  if (*canonical == "swebench") {
-    std::string home = std::getenv("HOME") ? std::getenv("HOME") : "/root";
-    const std::string cacheDir = home + "/.firmius/cache/swebench/repos";
-    hostOptions.volumeMounts.push_back(cacheDir + ":/host_cache");
-  }
-
-  const std::string threadId = harness.newThread(hostOptions, "/work", "forge");
-  if (threadId.empty()) {
-    NotificationManager::instance().notifyError(
-        "Benchmarks", "Failed to create benchmark thread.", false);
-    return;
-  }
-  harness.setCurrentThreadPermissionMode(ctx.state->currentThreadPermissionMode());
-
-  std::string agentId;
-  try {
-    agentId = firmius::core::Engine::instance().createAgent(
-        threadId, "forge", true, "", "forge", "Benchmark Forge");
-  } catch (const std::exception &ex) {
-    NotificationManager::instance().notifyError(
-        "Benchmarks", "Failed to create worker agent: " + std::string(ex.what()),
-        false);
-    return;
-  }
-
-  if (agentId.empty()) {
-    NotificationManager::instance().notifyError(
-        "Benchmarks", "Failed to create worker agent.", false);
-    return;
-  }
-
-  if (!config.defaultProviderId.empty() && !config.defaultModelId.empty()) {
-    try {
-      if (!config.defaultModelVariant.empty()) {
-        firmius::core::Engine::instance().switchAgentModel(
-            agentId, config.defaultProviderId, config.defaultModelId,
-            config.defaultModelVariant);
-      } else {
-        firmius::core::Engine::instance().switchAgentModel(
-            agentId, config.defaultProviderId, config.defaultModelId);
-      }
-    } catch (...) {
+    if (!dockerSandboxImageReady()) {
+      notifyError(
+          "Docker is unavailable or image 'firmius-sandbox:latest' is missing. "
+          "Start Docker and build/pull the sandbox image before running /benchmarks.");
+      return;
     }
-  }
 
-  std::string bootFailureReason;
-  if (!waitForAgentReady(agentId, bootFailureReason)) {
+    firmius::shared::HostCreationOptions hostOptions;
+    hostOptions.type = firmius::shared::HostType::Docker;
+    hostOptions.connectToExisting = false;
+    hostOptions.deleteOnExit = true;
+    if (canonicalBenchmark == "swebench") {
+      std::string home = std::getenv("HOME") ? std::getenv("HOME") : "/root";
+      const std::string cacheDir = home + "/.firmius/cache/swebench/repos";
+      hostOptions.volumeMounts.push_back(cacheDir + ":/host_cache");
+    }
+
+    const std::string threadId =
+        harness.newThread(hostOptions, "/work", "forge");
+    if (threadId.empty()) {
+      notifyError("Failed to create benchmark thread.");
+      return;
+    }
+    harness.setCurrentThreadPermissionMode(permissionMode);
+
+    std::string agentId;
+    try {
+      agentId = firmius::core::Engine::instance().createAgent(
+          threadId, "forge", true, "", "forge", "Benchmark Forge");
+    } catch (const std::exception &ex) {
+      notifyError("Failed to create worker agent: " + std::string(ex.what()));
+      return;
+    }
+
+    if (agentId.empty()) {
+      notifyError("Failed to create worker agent.");
+      return;
+    }
+
+    if (!config.defaultProviderId.empty() && !config.defaultModelId.empty()) {
+      try {
+        if (!config.defaultModelVariant.empty()) {
+          firmius::core::Engine::instance().switchAgentModel(
+              agentId, config.defaultProviderId, config.defaultModelId,
+              config.defaultModelVariant);
+        } else {
+          firmius::core::Engine::instance().switchAgentModel(
+              agentId, config.defaultProviderId, config.defaultModelId);
+        }
+      } catch (...) {
+      }
+    }
+
+    std::string bootFailureReason;
+    if (!waitForAgentReady(agentId, bootFailureReason)) {
+      harness.appendSystemMessage(
+          agentId, "Benchmark bootstrap aborted: " + bootFailureReason);
+      notifyError("Failed to start benchmark worker: " + bootFailureReason);
+      return;
+    }
+
+    harness.setFocusedAgent(agentId);
+    harness.markThreadAsBenchmark(threadId, canonicalBenchmark, requestedTaskId);
+    harness.appendSystemMessage(agentId,
+                                "Benchmark run started: " + canonicalBenchmark +
+                                    ".");
     harness.appendSystemMessage(
-        agentId, "Benchmark bootstrap aborted: " + bootFailureReason);
-    NotificationManager::instance().notifyError(
-        "Benchmarks", "Failed to start benchmark worker: " + bootFailureReason,
-        false);
-    return;
-  }
+        agentId,
+        "Benchmark host initialized in Docker; setup and clone steps will stream here.");
+    harness.appendSystemMessage(
+        agentId,
+        "Worker model: " + config.defaultProviderId + "/" +
+            config.defaultModelId +
+            (config.defaultModelVariant.empty()
+                 ? ""
+                 : (" (" + config.defaultModelVariant + ")")) +
+            ".");
 
-  harness.setFocusedAgent(agentId);
-  harness.markThreadAsBenchmark(threadId, *canonical, requestedTaskId);
-  harness.appendSystemMessage(
-      agentId, "Benchmark run started: " + *canonical + ".");
-  harness.appendSystemMessage(
-      agentId,
-      "Benchmark host initialized in Docker; setup and clone steps will stream here.");
-  harness.appendSystemMessage(
-      agentId,
-      "Worker model: " + config.defaultProviderId + "/" + config.defaultModelId +
-          (config.defaultModelVariant.empty()
-               ? ""
-               : (" (" + config.defaultModelVariant + ")")) +
-          ".");
+    state->deferUiMutation([state]() { state->clearLoadingState(); });
 
-  std::thread([canonicalBenchmark = *canonical, requestedTaskId, config, threadId,
-               agentId]() {
+    std::thread([canonicalBenchmark, requestedTaskId, config, threadId,
+                 agentId]() {
     auto &harnessRef = firmius::core::Harness::instance();
     auto log = [agentId](const std::string &message) {
       firmius::core::Harness::instance().appendSystemMessage(agentId, message);
@@ -300,7 +315,8 @@ void BenchmarksCommand::execute(CommandCtx &ctx,
     } catch (...) {
       log("Benchmark failed with unknown runtime error.");
     }
-  }).detach();
+    }).detach();
+  });
 }
 
 } // namespace firmius::tui

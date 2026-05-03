@@ -1,11 +1,15 @@
 #include "components/InputBar.hpp"
-#include "ThemeManager.hpp"
+#include "AgentRegistry.hpp"
+#include "NotificationManager.hpp"
 #include "SkinConfig.hpp"
+#include "ThemeManager.hpp"
+#include "agents/modes/Mode.hpp"
+#include "TUIHotkeys.hpp"
 #include "commands/CommandManager.hpp"
+#include "models/TUIStore.hpp"
 #include "providers/BaseAPIKeyProvider.hpp"
 #include "providers/BaseOAuthProvider.hpp"
 #include "providers/ProviderRegistry.hpp"
-#include "NotificationManager.hpp"
 #include "utils/Clipboard.hpp"
 #include <algorithm>
 #include <cctype>
@@ -139,9 +143,9 @@ collectImageBlocks(const std::vector<PastedBlock> &pasted_blocks) {
 }
 
 // Expand buffer content by replacing placeholders with actual pasted content
-static std::string expandPastedContent(
-    const std::string &buffer,
-    const std::vector<PastedBlock> &pasted_blocks) {
+static std::string
+expandPastedContent(const std::string &buffer,
+                    const std::vector<PastedBlock> &pasted_blocks) {
   if (pasted_blocks.empty()) {
     return buffer;
   }
@@ -187,11 +191,10 @@ std::string trimWhitespaceCopy(std::string value) {
   value.erase(value.begin(),
               std::find_if(value.begin(), value.end(),
                            [&](unsigned char ch) { return !is_space(ch); }));
-  value.erase(
-      std::find_if(value.rbegin(), value.rend(),
-                   [&](unsigned char ch) { return !is_space(ch); })
-          .base(),
-      value.end());
+  value.erase(std::find_if(value.rbegin(), value.rend(),
+                           [&](unsigned char ch) { return !is_space(ch); })
+                  .base(),
+              value.end());
   return value;
 }
 
@@ -302,6 +305,78 @@ buildAtReferenceSuggestions(const std::shared_ptr<InputBarModel> &model,
   return model->complete_file_references(state.query);
 }
 
+// Resolve the persona context that should drive `/mode` autocomplete.
+// Mid-thread we use the focused agent's persona; on Welcome we fall back
+// to the lead persona on the pre-thread metadata (defaulting to "aster"
+// when nothing is set yet, mirroring ModeCommand's resolution logic).
+std::string activePersonaForModeSuggestions() {
+  auto &store = TUIStore::instance();
+  auto &state = TuiState::instance();
+  if (state.getViewMode() == TuiState::ViewMode::Welcome) {
+    return state.thread_.leadPersona.empty()
+               ? std::string("aster")
+               : state.thread_.leadPersona;
+  }
+  if (auto agent = firmius::core::AgentRegistry::instance().getAgent(
+          state.focused_agent_id_.empty() ? store.focused_agent_id
+                                          : state.focused_agent_id_)) {
+    return agent->getContext().config.personaName;
+  }
+  return "aster";
+}
+
+struct ModeSuggestion {
+  std::string completion; // what to insert (qualified or bare)
+  std::string display;    // what the dropdown shows (with glyph + short)
+  std::string glyph;
+  std::string short_desc;
+};
+
+// Produce mode autocomplete entries scoped to the persona currently
+// driving `/mode`. We surface persona sub-modes first (operator's most
+// likely target), then any system modes (diagnose, execute) the persona
+// hasn't shadowed, then the special "clear" tokens. Bare names complete
+// to bare so the operator can type `/mode app<Tab>` and land on `apply`.
+std::vector<ModeSuggestion> buildModeSuggestions(const std::string &query) {
+  using firmius::core::modes::ModeRegistry;
+  std::vector<ModeSuggestion> matches;
+  const std::string persona = activePersonaForModeSuggestions();
+  auto &registry = ModeRegistry::instance();
+
+  auto add = [&](const std::string &completion, const std::string &display,
+                 const std::string &glyph, const std::string &short_desc) {
+    if (query.empty() || fuzzyMatchIgnoreCase(completion, query) ||
+        fuzzyMatchIgnoreCase(display, query)) {
+      matches.push_back({completion, display, glyph, short_desc});
+    }
+  };
+
+  // Persona-scoped sub-modes lead. Offer the bare completion (e.g.
+  // `apply`) alongside the qualified form in the display so the
+  // operator sees both.
+  for (const auto &qualified : registry.listForPersona(persona)) {
+    if (const auto *m = registry.find(qualified)) {
+      // bare completion when the sub-mode is unambiguous
+      const std::string bare = m->name;
+      add(bare, qualified, m->glyph, m->shortDescription);
+    }
+  }
+
+  // System modes (no personaScope) — diagnose / execute / etc.
+  for (const auto &name : registry.listNames()) {
+    if (const auto *m = registry.find(name)) {
+      if (!m->personaScope.has_value()) {
+        add(m->name, m->name, m->glyph, m->shortDescription);
+      }
+    }
+  }
+
+  // Clear tokens come last, only when the query is empty or matches.
+  add("none", "none — clear active mode", "·", "Drop the current overlay");
+
+  return matches;
+}
+
 std::vector<std::string> buildSkinSuggestions(const std::string &query) {
   std::vector<std::string> matches;
   for (const auto &name : firmius::tui::allSkinNames()) {
@@ -315,7 +390,7 @@ std::vector<std::string> buildSkinSuggestions(const std::string &query) {
 bool wantsCommandArgSuggestions(ArgType type) {
   return type == ArgType::Provider || type == ArgType::OAuthProvider ||
          type == ArgType::QuotaProvider || type == ArgType::ProviderId ||
-         type == ArgType::Skin;
+         type == ArgType::Skin || type == ArgType::Mode;
 }
 
 } // namespace
@@ -352,8 +427,8 @@ ftxui::Component InputBar(
   auto with_keys = ftxui::CatchEvent(input, [model, on_submit, input,
                                              scroll_top, suggestion_index,
                                              in_paste, paste_buffer,
-                                             just_submitted, on_escape](
-                                                ftxui::Event event) {
+                                             just_submitted,
+                                             on_escape](ftxui::Event event) {
     if (!model || !model->buffer || !model->cursor)
       return false;
 
@@ -451,6 +526,13 @@ ftxui::Component InputBar(
       return true; // Consume the event
     }
 
+    // Unified undo UX: Alt+Z rewinds transcript to last user boundary.
+    // If we see the sequence here, do not consume it as word-delete; allow the
+    // main view hotkey handler to process it.
+    if (firmius::tui::IsTranscriptUndoToUserBoundaryInput(raw)) {
+      return false;
+    }
+
     // Handle Alt+Backspace (delete previous word)
     if (raw == "\x1b\x7f" || raw == "\x1b\b") {
       if (*model->cursor > 0) {
@@ -469,7 +551,8 @@ ftxui::Component InputBar(
     }
 
     // Handle Ctrl+Left Arrow (move to previous word)
-    if (raw == "\x1b[1;5D" || raw == "\x1b\x1b[D" || raw == std::string("\x1b") + "b") {
+    if (raw == "\x1b[1;5D" || raw == "\x1b\x1b[D" ||
+        raw == std::string("\x1b") + "b") {
       if (*model->cursor > 0) {
         // Skip whitespace
         while (*model->cursor > 0 &&
@@ -484,7 +567,8 @@ ftxui::Component InputBar(
     }
 
     // Handle Ctrl+Right Arrow (move to next word)
-    if (raw == "\x1b[1;5C" || raw == "\x1b\x1b[C" || raw == std::string("\x1b") + "f") {
+    if (raw == "\x1b[1;5C" || raw == "\x1b\x1b[C" ||
+        raw == std::string("\x1b") + "f") {
       int len = static_cast<int>(model->buffer->size());
       if (*model->cursor < len) {
         // Skip current word
@@ -523,17 +607,18 @@ ftxui::Component InputBar(
             model->pasted_blocks.begin(), model->pasted_blocks.end(),
             [](const PastedBlock &block) { return block.type == "image"; }));
         std::string placeholder = createImageBlockPlaceholder(image_count + 1);
-        
+
         // Insert placeholder at cursor position
         insertText(*model->buffer, *model->cursor, placeholder);
-        
+
         // Track in pasted_blocks with position
         PastedBlock img_block;
         img_block.type = "image";
         img_block.id = generateBlockId();
         img_block.content = *imageData;
         img_block.mime_type = mimeType;
-        img_block.start_pos = static_cast<size_t>(*model->cursor) - placeholder.size();
+        img_block.start_pos =
+            static_cast<size_t>(*model->cursor) - placeholder.size();
         img_block.end_pos = static_cast<size_t>(*model->cursor);
         model->pasted_blocks.push_back(img_block);
         return true;
@@ -607,9 +692,14 @@ ftxui::Component InputBar(
         match_count = std::min(ac->command_matches.size(), (size_t)5);
       } else {
         auto query = ac->has_current_arg_value ? ac->current_arg_value : "";
-        match_count = ac->current_arg->type == ArgType::Skin
-                          ? buildSkinSuggestions(query).size()
-                          : buildProviderSuggestions(ac->current_arg->type, query).size();
+        if (ac->current_arg->type == ArgType::Skin) {
+          match_count = buildSkinSuggestions(query).size();
+        } else if (ac->current_arg->type == ArgType::Mode) {
+          match_count = buildModeSuggestions(query).size();
+        } else {
+          match_count =
+              buildProviderSuggestions(ac->current_arg->type, query).size();
+        }
       }
       if (match_count > 0) {
         if (event == ftxui::Event::ArrowDown) {
@@ -631,8 +721,7 @@ ftxui::Component InputBar(
         return true;
       }
       if (event == ftxui::Event::ArrowUp) {
-        *suggestion_index =
-            (*suggestion_index + match_count - 1) % match_count;
+        *suggestion_index = (*suggestion_index + match_count - 1) % match_count;
         return true;
       }
     } else {
@@ -640,6 +729,20 @@ ftxui::Component InputBar(
     }
 
     const bool is_shift_enter = IsShiftEnterInput(raw);
+
+    if (event.input() == "?" && model && model->buffer && model->buffer->empty()) {
+      if (model->help_opened_from_empty_query) {
+        *model->help_opened_from_empty_query = true;
+      }
+      return true;
+    }
+
+    if (IsOpenCommandPaletteEvent(event)) {
+      if (model && model->command_palette_requested) {
+        *model->command_palette_requested = true;
+      }
+      return true;
+    }
 
     if (!is_shift_enter &&
         (event == ftxui::Event::Tab || event == ftxui::Event::Return)) {
@@ -660,7 +763,7 @@ ftxui::Component InputBar(
         } else if (!ac->is_typing_command_name && ac->current_arg &&
                    wantsCommandArgSuggestions(ac->current_arg->type)) {
           std::string query =
-              ac->has_current_arg_value ? ac->current_arg_value : "";
+              ac->has_current_arg_value ? ac->current_arg_value : std::string();
           if (ac->current_arg->type == ArgType::Skin) {
             auto suggestions = buildSkinSuggestions(query);
             if (!suggestions.empty()) {
@@ -676,6 +779,29 @@ ftxui::Component InputBar(
                 last_space++;
 
               const std::string replacement = suggestions[idx];
+              text.replace(last_space, *model->cursor - last_space,
+                           replacement + " ");
+              *model->buffer = text;
+              *model->cursor =
+                  static_cast<int>(last_space + replacement.size() + 1);
+              *suggestion_index = 0;
+              return true;
+            }
+          } else if (ac->current_arg->type == ArgType::Mode) {
+            auto suggestions = buildModeSuggestions(query);
+            if (!suggestions.empty()) {
+              size_t idx = static_cast<size_t>(*suggestion_index);
+              if (idx >= suggestions.size())
+                idx = 0;
+
+              std::string text = *model->buffer;
+              size_t last_space = text.find_last_of(' ', *model->cursor - 1);
+              if (last_space == std::string::npos)
+                last_space = 0;
+              else
+                last_space++;
+
+              const std::string replacement = suggestions[idx].completion;
               text.replace(last_space, *model->cursor - last_space,
                            replacement + " ");
               *model->buffer = text;
@@ -725,6 +851,9 @@ ftxui::Component InputBar(
         *model->cursor =
             static_cast<int>(at_state.token_start + replacement.size());
         *suggestion_index = 0;
+        return true;
+      }
+      if (event == ftxui::Event::Tab) {
         return true;
       }
     }
@@ -779,11 +908,11 @@ ftxui::Component InputBar(
     return false;
   });
 
-  return ftxui::Renderer(with_keys, [model, scroll_top, suggestion_index] {
+  return ftxui::Renderer(with_keys, [model, scroll_top, suggestion_index,
+                                     on_submit] {
     const auto &theme = ThemeManager::instance().getCurrentTheme();
-    auto prompt =
-        ftxui::text(model && model->compact_mode ? ">" : "> ") |
-        ftxui::bold | ftxui::color(theme.input.prompt);
+    auto prompt = ftxui::text(model && model->compact_mode ? " " : " ") |
+                  ftxui::bold | ftxui::color(theme.chat.user_prefix);
     int total_lines = 1;
     if (model && model->buffer) {
       total_lines = countLines(*model->buffer);
@@ -791,9 +920,9 @@ ftxui::Component InputBar(
 
     auto ac = CommandManager::instance().getAutocomplete(
         model->buffer ? *model->buffer : "");
-    auto at_state = DetectAtReferenceAutocompleteState(
-        model->buffer ? *model->buffer : "",
-        model->cursor ? *model->cursor : 0);
+    auto at_state =
+        DetectAtReferenceAutocompleteState(model->buffer ? *model->buffer : "",
+                                           model->cursor ? *model->cursor : 0);
     auto at_suggestions = buildAtReferenceSuggestions(model, at_state);
     std::optional<ftxui::Element> autocomplete_layer;
 
@@ -850,6 +979,9 @@ ftxui::Component InputBar(
       case ArgType::ProviderId:
         type_str = "Provider ID";
         break;
+      case ArgType::Mode:
+        type_str = "Mode";
+        break;
       }
 
       auto header = ftxui::hbox(
@@ -863,12 +995,52 @@ ftxui::Component InputBar(
           arg.type == ArgType::Provider || arg.type == ArgType::OAuthProvider ||
           arg.type == ArgType::QuotaProvider || arg.type == ArgType::ProviderId;
       const bool wants_skin_suggestions = arg.type == ArgType::Skin;
-      if (wants_provider_suggestions || wants_skin_suggestions) {
+      const bool wants_mode_suggestions = arg.type == ArgType::Mode;
+      if (wants_provider_suggestions || wants_skin_suggestions ||
+          wants_mode_suggestions) {
         std::string query =
             ac->has_current_arg_value ? ac->current_arg_value : std::string();
         ftxui::Element suggestion_body;
 
-        if (wants_skin_suggestions) {
+        if (wants_mode_suggestions) {
+          auto suggestions = buildModeSuggestions(query);
+          if (!suggestions.empty()) {
+            ftxui::Elements rows;
+            for (size_t i = 0; i < suggestions.size(); ++i) {
+              bool is_selected = (i == static_cast<size_t>(*suggestion_index));
+              const auto &s = suggestions[i];
+              const std::string left =
+                  std::string(" ") + (s.glyph.empty() ? "·" : s.glyph) + " " +
+                  s.display;
+              auto label =
+                  ftxui::text(left) | ftxui::bold |
+                  ftxui::color(is_selected ? theme.base.bg : theme.base.fg);
+              if (is_selected)
+                label = label | ftxui::bgcolor(theme.modals.highlight_bg);
+              ftxui::Elements row = {
+                  label,
+                  ftxui::filler(),
+                  ftxui::text(" " +
+                              (s.short_desc.empty()
+                                   ? std::string{}
+                                   : s.short_desc.substr(
+                                         0, std::min<size_t>(s.short_desc.size(),
+                                                              48))) +
+                              " ") |
+                      ftxui::dim,
+              };
+              rows.push_back(ftxui::hbox(std::move(row)));
+            }
+            suggestion_body =
+                ftxui::vbox(rows) | ftxui::yframe | ftxui::color(theme.base.fg);
+          } else {
+            std::string message =
+                query.empty()
+                    ? "No modes registered for this persona."
+                    : "No modes match. Try `/mode` with no arg to cycle.";
+            suggestion_body = ftxui::text(message) | ftxui::dim | ftxui::center;
+          }
+        } else if (wants_skin_suggestions) {
           auto suggestions = buildSkinSuggestions(query);
           if (!suggestions.empty()) {
             ftxui::Elements rows;
@@ -886,11 +1058,10 @@ ftxui::Component InputBar(
             suggestion_body =
                 ftxui::vbox(rows) | ftxui::yframe | ftxui::color(theme.base.fg);
           } else {
-            std::string message =
-                query.empty() ? "Available skins: firmius, claudex."
-                              : "No matching skins.";
-            suggestion_body =
-                ftxui::text(message) | ftxui::dim | ftxui::center;
+            std::string message = query.empty()
+                                      ? "Available skins: firmius, claudex."
+                                      : "No matching skins.";
+            suggestion_body = ftxui::text(message) | ftxui::dim | ftxui::center;
           }
         } else {
           auto suggestions = buildProviderSuggestions(arg.type, query);
@@ -914,11 +1085,10 @@ ftxui::Component InputBar(
             suggestion_body =
                 ftxui::vbox(rows) | ftxui::yframe | ftxui::color(theme.base.fg);
           } else {
-            std::string message =
-                query.empty() ? "No providers are registered yet."
-                              : "No matching providers.";
-            suggestion_body =
-                ftxui::text(message) | ftxui::dim | ftxui::center;
+            std::string message = query.empty()
+                                      ? "No providers are registered yet."
+                                      : "No matching providers.";
+            suggestion_body = ftxui::text(message) | ftxui::dim | ftxui::center;
           }
         }
 
@@ -932,7 +1102,8 @@ ftxui::Component InputBar(
       ftxui::Elements rows;
       if (!at_suggestions.empty()) {
         for (size_t i = 0; i < at_suggestions.size(); ++i) {
-          const bool is_selected = (i == static_cast<size_t>(*suggestion_index));
+          const bool is_selected =
+              (i == static_cast<size_t>(*suggestion_index));
           const std::string prefix = at_state.is_artifact ? "@artifact:" : "@";
           auto label =
               ftxui::text(" " + prefix + at_suggestions[i]) | ftxui::bold |
@@ -943,9 +1114,8 @@ ftxui::Component InputBar(
           rows.push_back(label);
         }
       } else {
-        const std::string emptyLabel = at_state.is_artifact
-                                           ? "No artifact matches"
-                                           : "No file matches";
+        const std::string emptyLabel =
+            at_state.is_artifact ? "No artifact matches" : "No file matches";
         rows.push_back(ftxui::text(emptyLabel) | ftxui::dim | ftxui::center);
       }
 
@@ -1063,65 +1233,72 @@ ftxui::Component InputBar(
         const std::string &line = lines[line_idx];
         const size_t line_start = buf_pos;
         const size_t line_end = buf_pos + line.size();
-        
+
         size_t current_width = 0;
         ftxui::Elements current_line_parts;
         bool cursor_rendered = false;
 
         auto flush_line = [&]() {
-            if (current_line_parts.empty()) {
-                if (cursor == static_cast<int>(line_start)) {
-                    current_line_parts.push_back(with_cursor(ftxui::text(" ")));
-                    cursor_rendered = true;
-                } else {
-                    current_line_parts.push_back(ftxui::text(""));
-                }
+          if (current_line_parts.empty()) {
+            if (cursor == static_cast<int>(line_start)) {
+              current_line_parts.push_back(with_cursor(ftxui::text(" ")));
+              cursor_rendered = true;
+            } else {
+              current_line_parts.push_back(ftxui::text(""));
             }
-            line_elements.push_back(ftxui::hbox(current_line_parts));
-            current_line_parts.clear();
-            current_width = 0;
+          }
+          line_elements.push_back(ftxui::hbox(current_line_parts));
+          current_line_parts.clear();
+          current_width = 0;
         };
 
         auto append_element = [&](ftxui::Element el, size_t el_width) {
-            if (current_width + el_width > WRAP_WIDTH && current_width > 0) {
-                flush_line();
-            }
-            current_line_parts.push_back(el);
-            current_width += el_width;
+          if (current_width + el_width > WRAP_WIDTH && current_width > 0) {
+            flush_line();
+          }
+          current_line_parts.push_back(el);
+          current_width += el_width;
         };
 
-        auto append_plain_with_cursor = [&](size_t segment_start, size_t segment_end) {
-            if (segment_end <= segment_start || segment_start >= buf.size()) return;
-            segment_end = std::min(segment_end, buf.size());
-            
-            size_t seg_pos = segment_start;
-            while (seg_pos < segment_end) {
-                size_t remaining_in_wrap = WRAP_WIDTH - current_width;
-                if (remaining_in_wrap == 0) {
-                    flush_line();
-                    remaining_in_wrap = WRAP_WIDTH;
-                }
-                
-                size_t chunk_len = std::min(remaining_in_wrap, segment_end - seg_pos);
-                std::string chunk = buf.substr(seg_pos, chunk_len);
-                
-                if (!cursor_rendered && cursor >= static_cast<int>(seg_pos) && cursor < static_cast<int>(seg_pos + chunk_len)) {
-                    int local_cursor = cursor - static_cast<int>(seg_pos);
-                    if (local_cursor > 0) {
-                        current_line_parts.push_back(ftxui::text(chunk.substr(0, local_cursor)));
-                    }
-                    current_line_parts.push_back(with_cursor(ftxui::text(chunk.substr(local_cursor, 1))));
-                    if (static_cast<size_t>(local_cursor + 1) < chunk.size()) {
-                        current_line_parts.push_back(ftxui::text(chunk.substr(local_cursor + 1)));
-                    }
-                    cursor_rendered = true;
-                } else {
-                    current_line_parts.push_back(ftxui::text(chunk));
-                }
-                
-                current_width += chunk_len;
-                seg_pos += chunk_len;
+        auto append_plain_with_cursor = [&](size_t segment_start,
+                                            size_t segment_end) {
+          if (segment_end <= segment_start || segment_start >= buf.size())
+            return;
+          segment_end = std::min(segment_end, buf.size());
+
+          size_t seg_pos = segment_start;
+          while (seg_pos < segment_end) {
+            size_t remaining_in_wrap = WRAP_WIDTH - current_width;
+            if (remaining_in_wrap == 0) {
+              flush_line();
+              remaining_in_wrap = WRAP_WIDTH;
             }
+
+            size_t chunk_len =
+                std::min(remaining_in_wrap, segment_end - seg_pos);
+            std::string chunk = buf.substr(seg_pos, chunk_len);
+
+            if (!cursor_rendered && cursor >= static_cast<int>(seg_pos) &&
+                cursor < static_cast<int>(seg_pos + chunk_len)) {
+              int local_cursor = cursor - static_cast<int>(seg_pos);
+              if (local_cursor > 0) {
+                current_line_parts.push_back(
+                    ftxui::text(chunk.substr(0, local_cursor)));
+              }
+              current_line_parts.push_back(
+                  with_cursor(ftxui::text(chunk.substr(local_cursor, 1))));
+              if (static_cast<size_t>(local_cursor + 1) < chunk.size()) {
+                current_line_parts.push_back(
+                    ftxui::text(chunk.substr(local_cursor + 1)));
+              }
+              cursor_rendered = true;
+            } else {
+              current_line_parts.push_back(ftxui::text(chunk));
+            }
+
+            current_width += chunk_len;
+            seg_pos += chunk_len;
+          }
         };
 
         std::vector<const PastedBlock *> blocks_on_line;
@@ -1140,26 +1317,34 @@ ftxui::Component InputBar(
 
           std::string placeholder;
           if (block.end_pos > block.start_pos && block.end_pos <= buf.size()) {
-            placeholder = buf.substr(block.start_pos, block.end_pos - block.start_pos);
+            placeholder =
+                buf.substr(block.start_pos, block.end_pos - block.start_pos);
           } else if (block.type == "image") {
             placeholder = createImageBlockPlaceholder(1);
           } else {
             placeholder = createTextBlockPlaceholder(block.line_count);
           }
-          
+
           std::string display_text = " " + placeholder + " ";
           size_t block_len = display_text.size();
 
-          const bool cursor_in_block = (cursor >= static_cast<int>(block.start_pos) && cursor <= static_cast<int>(block.end_pos));
-          auto block_bg = block.type == "image" ? theme.agent_strip.pills.tool_bg : theme.agent_strip.pills.purpose_bg;
-          auto block_fg = block.type == "image" ? theme.agent_strip.pills.tool_fg : theme.agent_strip.pills.purpose_fg;
-          
-          auto block_el = ftxui::text(display_text) | ftxui::bgcolor(block_bg) | ftxui::color(block_fg);
+          const bool cursor_in_block =
+              (cursor >= static_cast<int>(block.start_pos) &&
+               cursor <= static_cast<int>(block.end_pos));
+          auto block_bg = block.type == "image"
+                              ? theme.agent_strip.pills.tool_bg
+                              : theme.agent_strip.pills.purpose_bg;
+          auto block_fg = block.type == "image"
+                              ? theme.agent_strip.pills.tool_fg
+                              : theme.agent_strip.pills.purpose_fg;
+
+          auto block_el = ftxui::text(display_text) | ftxui::bgcolor(block_bg) |
+                          ftxui::color(block_fg);
           if (cursor_in_block) {
             block_el = block_el | ftxui::underlined;
             cursor_rendered = true;
           }
-          
+
           append_element(block_el, block_len);
           segment_pos = std::min(line_end, block.end_pos);
         }
@@ -1169,7 +1354,7 @@ ftxui::Component InputBar(
         }
 
         if (!cursor_rendered && cursor == static_cast<int>(line_end)) {
-            append_element(with_cursor(ftxui::text(" ")), 1);
+          append_element(with_cursor(ftxui::text(" ")), 1);
         }
 
         flush_line();
@@ -1270,7 +1455,8 @@ ftxui::Component InputBar(
       }
 
       auto line_hint = ftxui::text(indicator) | ftxui::dim |
-                       ftxui::color(ftxui::Color::RGB(100, 100, 140));
+                       ftxui::color(ftxui::Color::RGB(100, 100, 140)) |
+                       ftxui::align_right;
 
       auto wrapped_content = ftxui::vbox(std::move(visible_elements));
       ftxui::Elements input_parts;
@@ -1279,11 +1465,8 @@ ftxui::Component InputBar(
       input_display = ftxui::hbox(std::move(input_parts));
     }
 
-    auto input_area = ftxui::hbox({input_display}) |
-                      (model && model->compact_mode
-                           ? ftxui::nothing
-                           : ftxui::bgcolor(theme.input.bg));
-
+    auto input_area = ftxui::hbox({prompt, input_display}) |
+                      ftxui::bgcolor(theme.base.bg) | ftxui::xflex;
 
     ftxui::Elements root_elements;
     if (autocomplete_layer) {

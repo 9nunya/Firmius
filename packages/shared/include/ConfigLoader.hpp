@@ -41,6 +41,57 @@ struct McpServerConfig {
     bool enabled = true;
 };
 using McpStdioServerConfig = McpServerConfig;
+
+struct ProviderVariantConfig {
+    std::string label;
+    std::string requestJson = "{}";
+    std::string description;
+};
+
+struct ProviderModelConfig {
+    std::string defaultVariant;
+    std::map<std::string, ProviderVariantConfig> variants;
+};
+
+struct ProviderDefaultsConfig {
+    float temperature = 0.7f;
+    std::optional<uint32_t> maxTokens;
+    bool streamUsage = true;
+};
+
+struct RetryPolicyConfig {
+    int maxRetries = 5;
+    int baseDelayMs = 1000;
+    int maxDelayMs = 30000;
+    double jitterMin = 0.5;
+    double jitterMax = 1.0;
+    bool useSharedBackoffSequence = true;
+    bool respectRetryAfter = true;
+    int timeoutSeconds = 300;
+    int connectTimeoutSeconds = 10;
+    std::vector<int> retryHttpStatuses{408, 429, 500, 501, 502, 503, 504, 529};
+    std::vector<int> nonRetryHttpStatuses{401, 403, 404, 422};
+    std::vector<std::string> retryCurlErrors{"timeout", "connect", "dns", "send", "recv"};
+};
+
+struct ProviderProfileConfig {
+    std::string kind = "openai_compatible";
+    std::string displayName;
+    bool enabled = true;
+    std::string baseUrl;
+    std::string modelsEndpoint = "/models";
+    std::string chatEndpoint = "/chat/completions";
+    std::string messagesEndpoint = "/v1/messages";
+    std::string apiKeyRef;
+    std::map<std::string, std::string> headers;
+    ProviderDefaultsConfig defaults;
+    std::string reasoningFieldName = "reasoning_effort";
+    std::string anthropicVersion = "2023-06-01";
+    std::string betaHeader;
+    RetryPolicyConfig retry;
+    std::map<std::string, ProviderModelConfig> modelVariants;
+};
+
 struct UserConfig {
     using RollingMemoryConfig = firmius::shared::AgentConfig::RollingMemoryConfig;
     std::string defaultProviderId = "nanogpt";
@@ -65,6 +116,9 @@ struct UserConfig {
     std::uint64_t insanityMaxTokenThreshold = 50000;
     int maxInsanityRetries = 2;
     std::map<std::string, McpServerConfig> mcpServers; // serverName -> MCP server config
+    RetryPolicyConfig providerRetryDefaults;
+    std::map<std::string, RetryPolicyConfig> providerRetryPolicies;
+    std::map<std::string, ProviderProfileConfig> providers;
 };
 
 class ConfigLoader {

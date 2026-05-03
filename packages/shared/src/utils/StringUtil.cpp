@@ -27,6 +27,15 @@ std::string StringUtil::trim(std::string_view s) {
   return std::string(s.substr(first, (last - first + 1)));
 }
 
+bool StringUtil::isAllWhitespace(std::string_view s) {
+  for (char c : s) {
+    if (c != ' ' && c != '\t' && c != '\r' && c != '\n') {
+      return false;
+    }
+  }
+  return true;
+}
+
 std::vector<std::string> StringUtil::split(const std::string &s,
                                            char delimiter) {
   std::vector<std::string> tokens;

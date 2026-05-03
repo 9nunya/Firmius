@@ -21,6 +21,16 @@ struct FrontmatterValue {
   using Value = std::variant<std::string, bool, int64_t, Array, Map>;
 
   Value value;
+
+  FrontmatterValue() : value(std::string{}) {}
+  FrontmatterValue(const std::string &v) : value(v) {}
+  FrontmatterValue(std::string &&v) : value(std::move(v)) {}
+  FrontmatterValue(bool v) : value(v) {}
+  FrontmatterValue(int64_t v) : value(v) {}
+  FrontmatterValue(const Array &v) : value(v) {}
+  FrontmatterValue(Array &&v) : value(std::move(v)) {}
+  FrontmatterValue(const Map &v) : value(v) {}
+  FrontmatterValue(Map &&v) : value(std::move(v)) {}
 };
 
 struct FrontmatterDocument {

@@ -74,6 +74,31 @@ public:
    */
   virtual void refreshQuotas() {}
 
+  /**
+   * @brief Captures a quota snapshot for a specific account.
+   * @param account The account to capture quota for.
+   * @return Vector of quota buckets for the account, or empty if not available.
+   */
+  virtual std::vector<QuotaBucket> captureQuotaSnapshot(const OAuthAccount& account) const {
+    std::vector<QuotaBucket> buckets;
+    // Extract quota buckets from account metadata
+    for (const auto& [key, value] : account.metadata) {
+      if (key.find("quota:") == 0) {
+        std::string bucketName = key.substr(6); // Remove "quota:" prefix
+        try {
+          float fraction = std::stof(value);
+          QuotaBucket bucket;
+          bucket.name = bucketName;
+          bucket.remainingFraction = fraction;
+          buckets.push_back(bucket);
+        } catch (...) {
+          // Skip invalid values
+        }
+      }
+    }
+    return buckets;
+  }
+
 protected:
   std::string providerId_;
   std::vector<OAuthAccount> accounts_;

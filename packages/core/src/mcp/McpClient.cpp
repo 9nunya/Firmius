@@ -75,6 +75,11 @@ McpClient::~McpClient() {
 }
 
 void McpClient::initialize(const int timeoutMs, shared::ToolContext *ctx) {
+  std::lock_guard<std::mutex> lock(requestMutex_);
+  if (initialized_) {
+    return;
+  }
+
   rapidjson::Document initParams;
   initParams.SetObject();
   auto &a = initParams.GetAllocator();
@@ -101,6 +106,7 @@ void McpClient::initialize(const int timeoutMs, shared::ToolContext *ctx) {
 }
 
 rapidjson::Document McpClient::listTools(const int timeoutMs, shared::ToolContext *ctx) {
+  std::lock_guard<std::mutex> lock(requestMutex_);
   rapidjson::Document listParams;
   listParams.SetObject();
 
@@ -112,6 +118,7 @@ rapidjson::Document McpClient::listTools(const int timeoutMs, shared::ToolContex
 }
 
 rapidjson::Document McpClient::listResources(const int timeoutMs, shared::ToolContext *ctx) {
+  std::lock_guard<std::mutex> lock(requestMutex_);
   rapidjson::Document params;
   params.SetObject();
 
@@ -123,6 +130,7 @@ rapidjson::Document McpClient::listResources(const int timeoutMs, shared::ToolCo
 }
 
 rapidjson::Document McpClient::listPrompts(const int timeoutMs, shared::ToolContext *ctx) {
+  std::lock_guard<std::mutex> lock(requestMutex_);
   rapidjson::Document params;
   params.SetObject();
 
@@ -135,6 +143,7 @@ rapidjson::Document McpClient::listPrompts(const int timeoutMs, shared::ToolCont
 
 rapidjson::Document McpClient::readResource(const std::string &resourceUri,
                                              const int timeoutMs, shared::ToolContext *ctx) {
+  std::lock_guard<std::mutex> lock(requestMutex_);
   rapidjson::Document params;
   params.SetObject();
   auto &a = params.GetAllocator();
@@ -150,6 +159,7 @@ rapidjson::Document McpClient::readResource(const std::string &resourceUri,
 rapidjson::Document McpClient::getPrompt(const std::string &promptName,
                                           const rapidjson::Document &arguments,
                                           const int timeoutMs, shared::ToolContext *ctx) {
+  std::lock_guard<std::mutex> lock(requestMutex_);
   rapidjson::Document params;
   params.SetObject();
   auto &a = params.GetAllocator();
@@ -168,6 +178,7 @@ rapidjson::Document McpClient::getPrompt(const std::string &promptName,
 rapidjson::Document McpClient::callTool(const std::string &toolName,
                                         const rapidjson::Document &arguments,
                                         const int timeoutMs, shared::ToolContext *ctx) {
+  std::lock_guard<std::mutex> lock(requestMutex_);
   rapidjson::Document callParams;
   callParams.SetObject();
   auto &a = callParams.GetAllocator();
@@ -185,6 +196,7 @@ rapidjson::Document McpClient::callTool(const std::string &toolName,
 
 void McpClient::shutdown(const int timeoutMs) {
   (void)timeoutMs;
+  std::lock_guard<std::mutex> lock(requestMutex_);
   if (shutdownSent_) {
     return;
   }

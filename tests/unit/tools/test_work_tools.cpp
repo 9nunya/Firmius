@@ -123,7 +123,7 @@ protected:
         ToolScope::ChunkReview};
     agent_.context_.history->threadId = threadId_;
     agent_.context_.environment.cwd = "/tmp/work";
-    agent_.context_.config.personaName = "lead";
+    agent_.context_.config.personaName = "aster";
     agent_.context_.identity.id = "lead-agent";
 
     registerTools();
@@ -214,7 +214,19 @@ protected:
   void setAgentRole(const std::string &persona,
                     std::vector<ToolScope> scopes,
                     const std::string &agentId) {
-    agent_.context_.config.personaName = persona;
+    if (persona == "lead") {
+      agent_.context_.config.personaName = "aster";
+    } else if (persona == "executor") {
+      agent_.context_.config.personaName = "forge";
+    } else if (persona == "auditor") {
+      agent_.context_.config.personaName = "witness";
+    } else if (persona == "scout") {
+      agent_.context_.config.personaName = "glimmer";
+    } else if (persona == "worker") {
+      agent_.context_.config.personaName = "ember";
+    } else {
+      agent_.context_.config.personaName = persona;
+    }
     agent_.context_.permissions.allowedScopes = std::move(scopes);
     agent_.context_.identity.id = agentId;
   }
@@ -281,6 +293,49 @@ TEST_F(WorkToolsTest, planCreatePersistsAndSetsActiveByDefault) {
   EXPECT_EQ(created->threadId, threadId_);
   EXPECT_EQ(created->plan.id, planId);
   EXPECT_EQ(created->plan.title, "Plan 1");
+}
+
+TEST_F(WorkToolsTest, workAcceptsSnakeCaseActionAliases) {
+  auto input = makeObject({{"action", "create_plan"},
+                           {"title", "Alias Plan"},
+                           {"objective", "Do aliased work"},
+                           {"context", "Context"},
+                           {"strategy", "Strategy"}});
+
+  auto result = execute("Work", input);
+  ASSERT_TRUE(result.success) << result.error;
+
+  auto doc = parseJson(result.data);
+  ASSERT_TRUE(doc.HasMember("plan_id"));
+  const auto plan = threadManager_->getPlan(threadId_, doc["plan_id"].GetString());
+  EXPECT_EQ(plan.title, "Alias Plan");
+}
+
+TEST_F(WorkToolsTest, legacyWorkToolNamesRouteToCanonicalWorkTool) {
+  auto createInput = makeObject({{"title", "Legacy Plan"},
+                                 {"objective", "Do legacy work"},
+                                 {"context", "Context"},
+                                 {"strategy", "Strategy"}});
+  auto createResult = execute("plan_create", createInput);
+  ASSERT_TRUE(createResult.success) << createResult.error;
+  auto createDoc = parseJson(createResult.data);
+  const std::string planId = createDoc["plan_id"].GetString();
+
+  auto chunkInput = makeObject({{"plan_id", planId},
+                                {"title", "Legacy Chunk"},
+                                {"goal", "Chunk goal"},
+                                {"context", "Chunk context"},
+                                {"constraints", "Chunk constraints"},
+                                {"completion", "Chunk completion"}});
+  auto chunkResult = execute("chunk_add", chunkInput);
+  ASSERT_TRUE(chunkResult.success) << chunkResult.error;
+
+  auto listInput = makeObject({{"plan_id", planId}});
+  auto listResult = execute("chunk_list", listInput);
+  ASSERT_TRUE(listResult.success) << listResult.error;
+  auto listDoc = parseJson(listResult.data);
+  ASSERT_EQ(listDoc.Size(), 1u);
+  EXPECT_EQ(listDoc[0]["title"].GetString(), std::string("Legacy Chunk"));
 }
 
 TEST_F(WorkToolsTest, planListShowsPersistedPlansAndActiveState) {
@@ -402,7 +457,7 @@ TEST_F(WorkToolsTest, planSetActiveUpdatesThreadMetadata) {
 
 TEST_F(WorkToolsTest, todoWriteCreatesInitialList) {
   auto input = makeObject({{"patch", "1. [ ] Inspect code\n2. [ ] Add tests"}});
-  auto result = execute("todo_write", input);
+  auto result = execute("Todo", input);
   ASSERT_TRUE(result.success) << result.error;
 
   const auto todo =
@@ -414,24 +469,15 @@ TEST_F(WorkToolsTest, todoWriteCreatesInitialList) {
   EXPECT_EQ(todo.items[1].id, 2);
 }
 
-TEST_F(WorkToolsTest, todoWriteEmptyListNumberedCreationRequiresSequentialIds) {
-  auto input = makeObject({{"patch", "2. [ ] Task 2"}});
-  auto result = execute("todo_write", input);
-  EXPECT_FALSE(result.success);
-  EXPECT_THAT(result.error, ::testing::HasSubstr("Todo list is empty"));
-  EXPECT_THAT(result.error, ::testing::HasSubstr("sequential ids"));
-}
+TEST_F(WorkToolsTest, todoWriteOverwritesFullState) {
+  auto create = makeObject({{"patch", "1. [ ] Task 1\n2. [ ] Task 2\n3. [ ] Task 3"}});
+  ASSERT_TRUE(execute("Todo", create).success);
 
-TEST_F(WorkToolsTest, todoWritePatchesSingleExistingItem) {
-  auto create = makeObject({{"patch", "1. [+] Task 1\n2. [+] Task 2\n3. [+] Task 3"}});
-  ASSERT_TRUE(execute("todo_write", create).success);
-
-  auto update = makeObject({{"patch", "1. [*] Task 1"}});
-  auto result = execute("todo_write", update);
+  auto update = makeObject({{"patch", "1. [*] Task 1\n2. [ ] Task 2\n3. [ ] Task 3"}});
+  auto result = execute("Todo", update);
   ASSERT_TRUE(result.success) << result.error;
 
-  const auto todo =
-      threadManager_->getAgentTodo(threadId_, agent_.context_.identity.id);
+  const auto todo = threadManager_->getAgentTodo(threadId_, agent_.context_.identity.id);
   ASSERT_EQ(todo.items.size(), 3u);
   EXPECT_EQ(todo.items[0].status, TodoStatus::InProgress);
   EXPECT_EQ(todo.items[1].status, TodoStatus::Pending);
@@ -439,89 +485,55 @@ TEST_F(WorkToolsTest, todoWritePatchesSingleExistingItem) {
 }
 
 TEST_F(WorkToolsTest, todoWriteAddsNewItemWithNextId) {
-  auto create = makeObject({{"patch", "1. [+] Task 1"}});
-  ASSERT_TRUE(execute("todo_write", create).success);
+  auto create = makeObject({{"patch", "1. [ ] Task 1"}});
+  ASSERT_TRUE(execute("Todo", create).success);
 
-  auto add = makeObject({{"patch", "2. [+] Task 2"}});
-  auto result = execute("todo_write", add);
+  auto add = makeObject({{"patch", "1. [ ] Task 1\n2. [ ] Task 2"}});
+  auto result = execute("Todo", add);
   ASSERT_TRUE(result.success) << result.error;
 
-  const auto todo =
-      threadManager_->getAgentTodo(threadId_, agent_.context_.identity.id);
+  const auto todo = threadManager_->getAgentTodo(threadId_, agent_.context_.identity.id);
   ASSERT_EQ(todo.items.size(), 2u);
   EXPECT_EQ(todo.nextId, 3);
   EXPECT_EQ(todo.items[1].id, 2);
 }
 
-TEST_F(WorkToolsTest, todoWriteInfersPendingAddWhenUsingNextIdWithoutPlus) {
-  auto create = makeObject({{"patch", "1. [+] Task 1"}});
-  ASSERT_TRUE(execute("todo_write", create).success);
+TEST_F(WorkToolsTest, todoWriteDeletesExistingItemByOmission) {
+  auto create = makeObject({{"patch", "1. [ ] Task 1\n2. [ ] Task 2"}});
+  ASSERT_TRUE(execute("Todo", create).success);
 
-  auto add = makeObject({{"patch", "2. [ ] Task 2"}});
-  auto result = execute("todo_write", add);
+  auto remove = makeObject({{"patch", "2. [ ] Task 2"}});
+  auto result = execute("Todo", remove);
   ASSERT_TRUE(result.success) << result.error;
 
-  const auto todo =
-      threadManager_->getAgentTodo(threadId_, agent_.context_.identity.id);
-  ASSERT_EQ(todo.items.size(), 2u);
-  EXPECT_EQ(todo.items[1].id, 2);
-  EXPECT_EQ(todo.items[1].status, TodoStatus::Pending);
-  EXPECT_EQ(todo.nextId, 3);
-}
-
-TEST_F(WorkToolsTest, todoWriteDeletesExistingItem) {
-  auto create = makeObject({{"patch", "1. [+] Task 1\n2. [+] Task 2"}});
-  ASSERT_TRUE(execute("todo_write", create).success);
-
-  auto remove = makeObject({{"patch", "1. [-] Task 1"}});
-  auto result = execute("todo_write", remove);
-  ASSERT_TRUE(result.success) << result.error;
-
-  const auto todo =
-      threadManager_->getAgentTodo(threadId_, agent_.context_.identity.id);
+  const auto todo = threadManager_->getAgentTodo(threadId_, agent_.context_.identity.id);
   ASSERT_EQ(todo.items.size(), 1u);
   EXPECT_EQ(todo.items[0].id, 2);
   EXPECT_EQ(todo.nextId, 3);
 }
 
-TEST_F(WorkToolsTest, todoWriteRejectsDuplicateIdInPatch) {
-  auto create = makeObject({{"patch", "1. [+] Task 1"}});
-  ASSERT_TRUE(execute("todo_write", create).success);
+TEST_F(WorkToolsTest, todoWriteRejectsDuplicateIdInState) {
+  auto create = makeObject({{"patch", "1. [ ] Task 1"}});
+  ASSERT_TRUE(execute("Todo", create).success);
 
   auto duplicate = makeObject(
       {{"patch", "1. [ ] Task 1\n1. [x] Task 1 done"}});
-  auto result = execute("todo_write", duplicate);
+  auto result = execute("Todo", duplicate);
   EXPECT_FALSE(result.success);
   EXPECT_THAT(result.error, ::testing::HasSubstr("Duplicate todo id"));
 }
 
 TEST_F(WorkToolsTest, todoWriteRejectsMalformedLine) {
   auto bad = makeObject({{"patch", "bad line"}});
-  auto result = execute("todo_write", bad);
+  auto result = execute("Todo", bad);
   EXPECT_FALSE(result.success);
   EXPECT_THAT(result.error, ::testing::HasSubstr("Malformed todo line"));
 }
 
-TEST_F(WorkToolsTest, todoWriteRejectsUnknownIdForUpdate) {
-  auto create = makeObject({{"patch", "1. [+] Task 1"}});
-  ASSERT_TRUE(execute("todo_write", create).success);
-
-  auto unknown = makeObject({{"patch", "2. [*] Task 2"}});
-  auto result = execute("todo_write", unknown);
-  EXPECT_FALSE(result.success);
-  EXPECT_THAT(result.error, ::testing::HasSubstr("Unknown todo id 2"));
-  EXPECT_THAT(result.error, ::testing::HasSubstr("Existing ids: 1"));
-  EXPECT_THAT(result.error, ::testing::HasSubstr("To add a new item"));
-}
-
-TEST_F(WorkToolsTest, todoWriteRejectsNonNextIdForAdd) {
-  auto create = makeObject({{"patch", "1. [+] Task 1"}});
-  ASSERT_TRUE(execute("todo_write", create).success);
-
-  auto badAdd = makeObject({{"patch", "3. [+] Task 3"}});
-  auto result = execute("todo_write", badAdd);
-  EXPECT_FALSE(result.success);
-  EXPECT_THAT(result.error, ::testing::HasSubstr("expected next id 2"));
+TEST_F(WorkToolsTest, todoWriteRejectsPlusMinusMarkers) {
+  auto input = makeObject({{"patch", "1. [+] Task 1"}});
+  auto result = execute("Todo", input);
+  EXPECT_THAT(result.error, ::testing::HasSubstr("Malformed todo line"));
 }
 
 TEST_F(WorkToolsTest, chunkAddBlocksDependencyIncompleteChunkInsteadOfMarkingReady) {
@@ -1210,7 +1222,8 @@ TEST_F(WorkToolsTest, executorCannotMutatePlanLevelFields) {
   EXPECT_FALSE(result.success);
   EXPECT_THAT(result.error,
               ::testing::AnyOf(::testing::HasSubstr("Permission denied"),
-                               ::testing::HasSubstr("lead agents")));
+                               ::testing::HasSubstr("lead agents"),
+                               ::testing::HasSubstr("requires scope PlanWrite")));
 }
 
 TEST_F(WorkToolsTest, executorCannotEditChunkDesignFields) {

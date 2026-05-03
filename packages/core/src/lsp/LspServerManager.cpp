@@ -80,7 +80,7 @@ struct LspServerManager::ServerInstance {
     std::vector<std::string> command;
     std::chrono::steady_clock::time_point lastUsed;
     bool healthy = false;
-    ProcessSnapshot lastSnapshot{false, -1, {}, {}, 0.0};
+    ProcessSnapshot lastSnapshot{false, -1, {}, {}, 0.0, {}};
     mutable std::mutex stderrMutex;
     std::vector<std::string> stderrLines;
 };

@@ -27,6 +27,8 @@ private:
     std::vector<firmius::shared::PermissionResponse> getCommandResponses() const;
     std::string severityToString(firmius::shared::CommandSeverity severity) const;
     ftxui::Color severityToColor(firmius::shared::CommandSeverity severity) const;
+    std::string detailSummary() const;
+    std::vector<std::string> detailLines() const;
 };
 
 } // namespace firmius::tui

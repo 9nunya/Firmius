@@ -648,6 +648,108 @@ ContextWindowMetrics contextWindowMetricsFromJson(const rapidjson::Value &v) {
   return metrics;
 }
 
+rapidjson::Value quotaBucketToJson(const QuotaBucket &b,
+                                   rapidjson::Document::AllocatorType &a) {
+  rapidjson::Value v(rapidjson::kObjectType);
+  v.AddMember("name", rapidjson::Value(b.name.c_str(), a), a);
+  v.AddMember("remainingFraction", b.remainingFraction, a);
+  v.AddMember("resetTime", rapidjson::Value(b.resetTime.c_str(), a), a);
+  v.AddMember("note", rapidjson::Value(b.note.c_str(), a), a);
+  return v;
+}
+
+QuotaBucket quotaBucketFromJson(const rapidjson::Value &v) {
+  QuotaBucket bucket;
+  bucket.name = v.HasMember("name") && v["name"].IsString()
+                    ? v["name"].GetString()
+                    : "";
+  bucket.remainingFraction =
+      v.HasMember("remainingFraction") && v["remainingFraction"].IsNumber()
+          ? static_cast<float>(v["remainingFraction"].GetDouble())
+          : 0.0f;
+  bucket.resetTime = v.HasMember("resetTime") && v["resetTime"].IsString()
+                         ? v["resetTime"].GetString()
+                         : "";
+  bucket.note = v.HasMember("note") && v["note"].IsString()
+                    ? v["note"].GetString()
+                    : "";
+  return bucket;
+}
+
+rapidjson::Value quotaMetricsToJson(const QuotaMetrics &m,
+                                    rapidjson::Document::AllocatorType &a) {
+  rapidjson::Value v(rapidjson::kObjectType);
+  v.AddMember("providerId", rapidjson::Value(m.providerId.c_str(), a), a);
+  v.AddMember("accountLocator", rapidjson::Value(m.accountLocator.c_str(), a), a);
+  v.AddMember("modelId", rapidjson::Value(m.modelId.c_str(), a), a);
+  
+  rapidjson::Value before(rapidjson::kArrayType);
+  for (const auto &bucket : m.quotaBefore) {
+    before.PushBack(quotaBucketToJson(bucket, a), a);
+  }
+  v.AddMember("quotaBefore", before, a);
+  
+  rapidjson::Value after(rapidjson::kArrayType);
+  for (const auto &bucket : m.quotaAfter) {
+    after.PushBack(quotaBucketToJson(bucket, a), a);
+  }
+  v.AddMember("quotaAfter", after, a);
+  
+  v.AddMember("primaryBucketName", rapidjson::Value(m.primaryBucketName.c_str(), a), a);
+  v.AddMember("primaryBucketDiff", m.primaryBucketDiff, a);
+  v.AddMember("primaryBucketRemaining", m.primaryBucketRemaining, a);
+  v.AddMember("rateLimited", m.rateLimited, a);
+  v.AddMember("backoffUntil", m.backoffUntil, a);
+  v.AddMember("retryAttempt", m.retryAttempt, a);
+  return v;
+}
+
+QuotaMetrics quotaMetricsFromJson(const rapidjson::Value &v) {
+  QuotaMetrics metrics;
+  metrics.providerId = v.HasMember("providerId") && v["providerId"].IsString()
+                           ? v["providerId"].GetString()
+                           : "";
+  metrics.accountLocator = v.HasMember("accountLocator") && v["accountLocator"].IsString()
+                               ? v["accountLocator"].GetString()
+                               : "";
+  metrics.modelId = v.HasMember("modelId") && v["modelId"].IsString()
+                        ? v["modelId"].GetString()
+                        : "";
+  if (v.HasMember("quotaBefore") && v["quotaBefore"].IsArray()) {
+    for (const auto &bucket : v["quotaBefore"].GetArray()) {
+      if (bucket.IsObject()) {
+        metrics.quotaBefore.push_back(quotaBucketFromJson(bucket));
+      }
+    }
+  }
+  if (v.HasMember("quotaAfter") && v["quotaAfter"].IsArray()) {
+    for (const auto &bucket : v["quotaAfter"].GetArray()) {
+      if (bucket.IsObject()) {
+        metrics.quotaAfter.push_back(quotaBucketFromJson(bucket));
+      }
+    }
+  }
+  metrics.primaryBucketName = v.HasMember("primaryBucketName") && v["primaryBucketName"].IsString()
+                                  ? v["primaryBucketName"].GetString()
+                                  : "";
+  metrics.primaryBucketDiff = v.HasMember("primaryBucketDiff") && v["primaryBucketDiff"].IsNumber()
+                                ? static_cast<float>(v["primaryBucketDiff"].GetDouble())
+                                : 0.0f;
+  metrics.primaryBucketRemaining = v.HasMember("primaryBucketRemaining") && v["primaryBucketRemaining"].IsNumber()
+                                       ? static_cast<float>(v["primaryBucketRemaining"].GetDouble())
+                                       : 0.0f;
+  metrics.rateLimited = v.HasMember("rateLimited") && v["rateLimited"].IsBool()
+                            ? v["rateLimited"].GetBool()
+                            : false;
+  metrics.backoffUntil = v.HasMember("backoffUntil") && v["backoffUntil"].IsInt64()
+                             ? v["backoffUntil"].GetInt64()
+                             : 0;
+  metrics.retryAttempt = v.HasMember("retryAttempt") && v["retryAttempt"].IsInt()
+                             ? v["retryAttempt"].GetInt()
+                             : 0;
+  return metrics;
+}
+
 rapidjson::Value agentMetricsToJson(const AgentMetrics &m,
                                     rapidjson::Document::AllocatorType &a) {
   rapidjson::Value v(rapidjson::kObjectType);
@@ -656,6 +758,9 @@ rapidjson::Value agentMetricsToJson(const AgentMetrics &m,
   v.AddMember("estimatedCostUsd", m.estimatedCostUsd, a);
   if (!m.context.empty()) {
     v.AddMember("context", contextWindowMetricsToJson(m.context, a), a);
+  }
+  if (!m.quota.providerId.empty()) {
+    v.AddMember("quota", quotaMetricsToJson(m.quota, a), a);
   }
   return v;
 }
@@ -675,6 +780,9 @@ AgentMetrics agentMetricsFromJson(const rapidjson::Value &v) {
   metrics.context = v.HasMember("context") && v["context"].IsObject()
                         ? contextWindowMetricsFromJson(v["context"])
                         : ContextWindowMetrics{};
+  metrics.quota = v.HasMember("quota") && v["quota"].IsObject()
+                      ? quotaMetricsFromJson(v["quota"])
+                      : QuotaMetrics{};
   return metrics;
 }
 
@@ -2242,6 +2350,7 @@ rapidjson::Document toJson(const ThreadMetadata &m) {
               a);
   d.AddMember("cwd", rapidjson::Value(m.cwd.c_str(), a), a);
   d.AddMember("leadPersona", rapidjson::Value(m.leadPersona.c_str(), a), a);
+  d.AddMember("initialMode", rapidjson::Value(m.initialMode.c_str(), a), a);
   d.AddMember("is_benchmark_run", m.isBenchmarkRun, a);
   d.AddMember("benchmark_id", rapidjson::Value(m.benchmarkId.c_str(), a), a);
   d.AddMember("benchmark_task_id",
@@ -2299,6 +2408,9 @@ ThreadMetadata threadMetadataFromJson(const rapidjson::Value &v) {
   m.cwd = v.HasMember("cwd") && v["cwd"].IsString() ? v["cwd"].GetString() : "";
   m.leadPersona = v.HasMember("leadPersona") && v["leadPersona"].IsString()
                       ? v["leadPersona"].GetString()
+                      : "";
+  m.initialMode = v.HasMember("initialMode") && v["initialMode"].IsString()
+                      ? v["initialMode"].GetString()
                       : "";
   m.isBenchmarkRun =
       v.HasMember("is_benchmark_run") && v["is_benchmark_run"].IsBool()
@@ -2731,6 +2843,11 @@ rapidjson::Document toJson(const TranscriptUndoAction &action) {
   d.AddMember("created_at", action.createdAt, a);
   d.AddMember("redo_available", action.redoAvailable, a);
   d.AddMember("reason", rapidjson::Value(action.reason.c_str(), a), a);
+  rapidjson::Value editUndoIds(rapidjson::kArrayType);
+  for (const auto &id : action.editUndoActionIds) {
+    editUndoIds.PushBack(rapidjson::Value(id.c_str(), a), a);
+  }
+  d.AddMember("edit_undo_action_ids", editUndoIds, a);
   return d;
 }
 
@@ -2760,6 +2877,12 @@ TranscriptUndoAction transcriptUndoActionFromJson(const rapidjson::Value &value)
   action.reason = value.HasMember("reason") && value["reason"].IsString()
                       ? value["reason"].GetString()
                       : "";
+  if (value.HasMember("edit_undo_action_ids") &&
+      value["edit_undo_action_ids"].IsArray()) {
+    for (const auto &v : value["edit_undo_action_ids"].GetArray()) {
+      if (v.IsString()) action.editUndoActionIds.push_back(v.GetString());
+    }
+  }
   return action;
 }
 

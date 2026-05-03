@@ -3,8 +3,9 @@
 
 #include "ITool.hpp"
 #include "IProvider.hpp"
-#include <map>
 #include <memory>
+#include <optional>
+#include <unordered_map>
 #include <vector>
 #include <functional>
 #include <mutex>
@@ -39,6 +40,12 @@ public:
     void registerToolFactory(const std::string& name, ToolFactory factory);
 
     /**
+     * @brief Registers tool factories synthesized from workflows that declare
+     * defines_tool.
+     */
+    void registerWorkflowDefinedTools();
+
+    /**
      * @brief Lists metadata for all registered tools.
      * @return Vector of shared::ToolMetadata.
      */
@@ -67,6 +74,18 @@ public:
      */
     shared::ToolResult execute(const std::string& name, const rapidjson::Value& input, shared::ToolContext& ctx);
 
+    /**
+     * @brief Look up a tool's static metadata by name, lazy-instantiating
+     * via factory when necessary.
+     * @return The tool's ToolMetadata, or std::nullopt if no static tool
+     *         is registered under that name (dynamic MCP tools, etc.).
+     *
+     * Public read-only accessor used by the mode gate and other gating
+     * layers that need to consult `ToolMetadata::scope` *before* execute
+     * runs.
+     */
+    std::optional<shared::ToolMetadata> getMetadataFor(const std::string& name) const;
+
 private:
     /**
      * @brief Gets or creates a tool by name (lazy-loads if factory registered).
@@ -76,8 +95,8 @@ private:
     shared::ITool* getTool(const std::string& name) const;
 
     mutable std::mutex mutex_;
-    mutable std::map<std::string, std::unique_ptr<shared::ITool>> tools;
-    mutable std::map<std::string, ToolFactory> factories;
+    mutable std::unordered_map<std::string, std::unique_ptr<shared::ITool>> tools;
+    mutable std::unordered_map<std::string, ToolFactory> factories;
     /**
      * @brief Truncates tool result if it is too long.
      * @param result The result to truncate.

@@ -179,6 +179,41 @@ TEST(StreamStateManagerHistoryTest,
 }
 
 TEST(StreamStateManagerHistoryTest,
+     ForegroundExecuteFinishesWhenProcessCompletionEventArrives) {
+  StreamStateManager state;
+
+  state.handleAgentToolCall(
+      {"agent-1", "tool-1", "Process",
+       R"({"action":"Execute","command":"cmake --build build -j1"})", ""});
+  state.handleAgentProcessSpawned(
+      AgentProcessSpawned{"agent-1", "proc-1", "tool-1",
+                          "cmake --build build -j1", ""});
+
+  auto view = state.getToolView("tool-1");
+  ASSERT_TRUE(static_cast<bool>(view));
+  EXPECT_EQ(view->phase, ToolPhase::Called);
+
+  state.handleAgentProcessOutput(AgentProcessOutput{
+      "agent-1", "proc-1", "[1/4] Building...\n", false, false, -1, 0.0, ""});
+  EXPECT_EQ(view->phase, ToolPhase::Called);
+  EXPECT_NE(view->live_process_output.find("[1/4] Building..."),
+            std::string::npos);
+
+  state.handleAgentProcessOutput(
+      AgentProcessOutput{"agent-1", "proc-1", "", false, true, 0, 4200.0, ""});
+  EXPECT_EQ(view->phase, ToolPhase::Finished);
+  EXPECT_TRUE(view->success);
+  EXPECT_TRUE(view->process_exit_known);
+  EXPECT_EQ(view->process_exit_code, 0);
+
+  const auto *process = state.getProcessState("proc-1");
+  ASSERT_NE(process, nullptr);
+  EXPECT_TRUE(process->finished);
+  EXPECT_FALSE(process->running);
+  EXPECT_EQ(process->exit_code, 0);
+}
+
+TEST(StreamStateManagerHistoryTest,
      BuffersEarlyOutputUntilSpawnAssociationArrives) {
   StreamStateManager state;
 

@@ -200,7 +200,8 @@ public:
             exitCode,
             stdoutBuffer,
             stderrBuffer,
-            elapsed
+            elapsed,
+            getSystemId()
         };
     }
 
@@ -633,7 +634,10 @@ std::unique_ptr<IHostProcess> DockerHost::spawn(const std::string& command, cons
 
     rapidjson::Document resDoc;
     resDoc.Parse(createRes.c_str());
-    if (!resDoc.HasMember("Id")) throw std::runtime_error("Failed to spawn exec: " + createRes);
+    if (resDoc.HasParseError() || !resDoc.IsObject() ||
+        !resDoc.HasMember("Id") || !resDoc["Id"].IsString()) {
+      throw std::runtime_error("Failed to spawn exec: " + createRes);
+    }
     std::string execId = resDoc["Id"].GetString();
 
     return std::make_unique<DockerHostProcess>(containerId, execId);

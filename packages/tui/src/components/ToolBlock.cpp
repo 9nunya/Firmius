@@ -87,6 +87,13 @@ void FillFromSubagentArgs(SubagentDescriptor& desc,
   if (desc.task.empty() && doc.HasMember("task") && doc["task"].IsString()) {
     desc.task = doc["task"].GetString();
   }
+  if (desc.purpose.empty() && doc.HasMember("persona") &&
+      doc["persona"].IsString()) {
+    desc.purpose = doc["persona"].GetString();
+  }
+  if (desc.model.empty() && doc.HasMember("model") && doc["model"].IsString()) {
+    desc.model = doc["model"].GetString();
+  }
 }
 
 void FillFromSubagentResult(SubagentDescriptor& desc,
@@ -391,6 +398,8 @@ public:
       title_el = GlintEffect(title_text, cfg)->Render();
     }
 
+    // meta line: what the user expects to see (friendly name / purpose / model)
+    // Avoid surfacing internal agent IDs or task fragments here; those belong in detail views.
     std::vector<ftxui::Element> meta_parts;
     if (!desc.friendly_name.empty()) {
       meta_parts.push_back(ftxui::text(desc.friendly_name) |
@@ -403,15 +412,6 @@ public:
     if (!desc.model.empty()) {
       if (!meta_parts.empty()) meta_parts.push_back(ftxui::text("  •  ") | ftxui::color(theme.base.dim));
       meta_parts.push_back(ftxui::text(desc.model) | ftxui::color(theme.base.dim));
-    }
-    if (!desc.agent_id.empty()) {
-      if (!meta_parts.empty()) meta_parts.push_back(ftxui::text("  •  ") | ftxui::color(theme.base.dim));
-      meta_parts.push_back(ftxui::text(desc.agent_id.substr(0, 8)) | ftxui::color(theme.base.dim));
-    }
-    if (!desc.task.empty()) {
-      if (!meta_parts.empty()) meta_parts.push_back(ftxui::text("  •  ") | ftxui::color(theme.base.dim));
-      meta_parts.push_back(
-          ftxui::text(ClampLine(desc.task, 28)) | ftxui::color(theme.base.dim));
     }
     if (state && !state->artifacts_created.empty()) {
       if (!meta_parts.empty()) meta_parts.push_back(ftxui::text("  •  ") | ftxui::color(theme.base.dim));

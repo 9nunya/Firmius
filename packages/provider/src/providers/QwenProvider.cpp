@@ -1,5 +1,5 @@
 #include "providers/QwenProvider.hpp"
-#include "providers/BackoffConstants.hpp"
+#include "providers/RetryPolicyResolver.hpp"
 #include "utils/GCPHttpClient.hpp"
 #include "utils/InterruptibleSleep.hpp"
 #include "utils/Logger.hpp"
@@ -1260,6 +1260,7 @@ void QwenProvider::processSSELine(
 QwenProvider::StreamAttemptResult QwenProvider::classifyStreamFailure(
     int httpStatus, const std::string &responseBody,
     const std::map<std::string, std::string> &headers) {
+  const RetryPolicyRuntime retryPolicy = RetryPolicyResolver::resolve("qwen");
   StreamAttemptResult result;
   result.httpStatus = httpStatus;
   result.errorMessage =
@@ -1315,7 +1316,9 @@ QwenProvider::StreamAttemptResult QwenProvider::classifyStreamFailure(
     result.errorMessage = formatErrorMessage(
         "", httpStatus, responseBody,
         "Quota exhausted or rate limited. Retrying current account...");
-    int backoff = firmius::shared::BackoffConstants::getBackoffSeconds(0);
+    int backoff =
+        std::max(1, RetryPolicyResolver::computeDelayMs(retryPolicy, 0, 0) /
+                         1000);
     auto retryAfterIt = headers.find("retry-after");
     if (retryAfterIt != headers.end()) {
       try {
@@ -1632,7 +1635,12 @@ QwenProvider::StreamAttemptResult QwenProvider::executeStreamRequest(
     result.errorMessage += "\nModel: " + modelId;
   }
   if (result.kind == StreamAttemptKind::AuthError) {
-    markAccountRateLimited(acc, firmius::shared::BackoffConstants::MAX_BACKOFF);
+    const int maxBackoffSeconds =
+        std::max(1, RetryPolicyResolver::computeDelayMs(
+                        RetryPolicyResolver::resolve("qwen"),
+                        1, 0) /
+                         1000);
+    markAccountRateLimited(acc, maxBackoffSeconds);
     updateAccount(acc);
   } else if (result.kind == StreamAttemptKind::QuotaLimited) {
     // Qwen frequently emits temporary 429s even when the account remains

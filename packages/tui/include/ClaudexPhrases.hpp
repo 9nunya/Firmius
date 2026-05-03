@@ -17,6 +17,10 @@ inline const std::vector<ClaudexPhraseBank> &claudexPhraseBanks() {
   static const std::vector<ClaudexPhraseBank> banks = {
       {"thinking",
        {
+           "Flushing the journal before reading from disk..",
+           "Waiting for the worker thread to actually do the thing..",
+           "Refusing to optimistically synthesize your turns..",
+           "Keeping turn 1 visible after turn 2 finishes..",
            "Thinking through the blast radius...",
            "Naming the uncertainty before we touch code.",
            "Reading just enough to avoid doing something stupid.",
@@ -200,6 +204,12 @@ inline const std::vector<ClaudexPhraseBank> &claudexPhraseBanks() {
            "Bringing the logic into the 21st century..",
            "Updating the implementation to match the reality..",
            "Smoothing out the wrinkles in this data flow..",
+           "Cycling stance via Ctrl+Y. Mode pill nodding solemnly..",
+           "Mode pill changed colour. The lead agent has Opinions now..",
+           "Slid into forge:apply quietly so nobody asks questions..",
+           "Status bar gained a pill. The bar is more confident now..",
+           "Switching modes mid-edit. Don't worry, it's mostly safe..",
+           "The active mode is judging this diff in real time..",
        }},
       {"exploring",
        {

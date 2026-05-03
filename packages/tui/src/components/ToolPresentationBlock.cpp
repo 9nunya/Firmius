@@ -12,11 +12,27 @@
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/component_base.hpp>
 #include <ftxui/dom/elements.hpp>
+#include <algorithm>
 
 
 namespace firmius::tui {
 
 namespace {
+
+// A NodeDecorator (color/bgcolor/xflex/dim/bold/...) constructed with a null
+// child Element segfaults inside SetBox during render. Combined with FTXUI's
+// swallow-and-return SIGSEGV handler this becomes an unkillable spin loop.
+// SafeElement substitutes empty text for null so a single bad element can
+// never take down the whole UI.
+ftxui::Element SafeElement(ftxui::Element e) {
+  return e ? e : ftxui::text("");
+}
+
+[[maybe_unused]] void PushIfNonNull(ftxui::Elements &dst, ftxui::Element e) {
+  if (e) {
+    dst.push_back(std::move(e));
+  }
+}
 
 ftxui::Color NoticeColor(const Theme &theme, ToolPresentationNoticeKind kind) {
   if (kind == ToolPresentationNoticeKind::Warning) {
@@ -90,7 +106,7 @@ ftxui::Element BuildBodyWindow(const ToolPresentation &presentation, const Theme
       for (const auto& element : presentation.custom_body_elements) {
         body_rows.push_back(ftxui::hbox({
             ftxui::text("│ ") | ftxui::color(theme.base.highlight),
-            element | ftxui::xflex
+            SafeElement(element) | ftxui::xflex
         }));
       }
       // Add a separator between code and output if there is output
@@ -148,7 +164,7 @@ ftxui::Element BuildBodyWindow(const ToolPresentation &presentation, const Theme
       if (!presentation.custom_body_elements.empty()) {
         body_rows.push_back(ftxui::hbox({
             ftxui::text("│ ") | ftxui::color(theme.base.highlight),
-            presentation.custom_body_elements[i] | ftxui::xflex
+            SafeElement(presentation.custom_body_elements[i]) | ftxui::xflex
         }));
       } else if (presentation.ansi_aware) {
         body_rows.push_back(ftxui::hbox({
@@ -163,6 +179,11 @@ ftxui::Element BuildBodyWindow(const ToolPresentation &presentation, const Theme
       }
     }
   }
+  // Drop any accidental null Elements before they reach a decorator/box.
+  body_rows.erase(
+      std::remove_if(body_rows.begin(), body_rows.end(),
+                     [](const ftxui::Element &e) { return !e; }),
+      body_rows.end());
   if (body_rows.empty()) {
     return ftxui::emptyElement();
   }
@@ -382,7 +403,7 @@ ftxui::Element BuildClaudexInlineBlock(const ToolPresentation &presentation,
 
   if (show_expand_toggle) {
     rows.push_back(ftxui::hbox({
-        ftxui::text("    ▸ ") | ftxui::color(theme.base.dim),
+        ftxui::text(" ▸ ") | ftxui::color(theme.base.dim),
         ftxui::text(expanded ? "press ctrl+g to collapse"
                              : "press ctrl+g to reveal") |
             ftxui::color(theme.base.dim),
@@ -622,6 +643,13 @@ public:
       root_rows.push_back(toggle_button_->Render());
     }
 
+    root_rows.erase(
+        std::remove_if(root_rows.begin(), root_rows.end(),
+                       [](const ftxui::Element &e) { return !e; }),
+        root_rows.end());
+    if (root_rows.empty()) {
+      return ftxui::emptyElement();
+    }
     return ftxui::vbox(root_rows);
   }
 

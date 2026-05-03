@@ -6,6 +6,7 @@ target_sources(firmius_shared PRIVATE
     src/EnvLoader.cpp
     src/Panic.cpp
     src/utils/JSONSchema.cpp
+    src/utils/JSONSchemaFromJson.cpp
     src/utils/StringUtil.cpp
     src/utils/HistoryMetrics.cpp
     src/utils/FSUtil.cpp
@@ -16,6 +17,7 @@ target_sources(firmius_shared PRIVATE
     src/utils/TempOAuthServer.cpp
     src/utils/GCPHttpClient.cpp
     src/utils/ModelUtil.cpp
+    src/utils/PermissionProfiles.cpp
     src/utils/PlatformPaths.cpp
     src/utils/FrontmatterParser.cpp
     src/utils/Hashline.cpp
@@ -31,6 +33,7 @@ target_sources(firmius_shared PUBLIC
     include/Message.hpp
     include/Events.hpp
     include/Context.hpp
+    include/StatusZone.hpp
     include/Serialization.hpp
     include/IProvider.hpp
     include/IAudit.hpp
@@ -42,6 +45,7 @@ target_sources(firmius_shared PUBLIC
     include/IHostProcess.hpp
     include/ITool.hpp
     include/IBenchmark.hpp
+    include/utils/JSONSchemaFromJson.hpp
     include/HarnessEvents.hpp
     include/utils/JSONSchema.hpp
     include/utils/StringUtil.hpp
@@ -58,6 +62,7 @@ target_sources(firmius_shared PUBLIC
     include/utils/FrontmatterParser.hpp
     include/utils/Hashline.hpp
     include/utils/PlatformPaths.hpp
+    include/utils/PermissionProfiles.hpp
     include/ConfigLoader.hpp
 )
 

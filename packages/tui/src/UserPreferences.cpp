@@ -1,9 +1,13 @@
 #include "UserPreferences.hpp"
+#include "TUIHotkeys.hpp"
+#include "utils/PermissionProfiles.hpp"
 #include "utils/PlatformPaths.hpp"
 
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <set>
+#include <unordered_map>
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
@@ -20,26 +24,12 @@ std::filesystem::path preferencesPath() {
 }
 
 std::string permissionModeToString(shared::ThreadPermissionMode mode) {
-  switch (mode) {
-  case shared::ThreadPermissionMode::Request:
-    return "request";
-  case shared::ThreadPermissionMode::AlwaysAllow:
-    return "always_allow";
-  case shared::ThreadPermissionMode::DenyAll:
-    return "deny_all";
-  }
-  return "request";
+  return shared::permissionModeStorageString(mode);
 }
 
 shared::ThreadPermissionMode permissionModeFromString(
     const std::string &value) {
-  if (value == "always_allow") {
-    return shared::ThreadPermissionMode::AlwaysAllow;
-  }
-  if (value == "deny_all") {
-    return shared::ThreadPermissionMode::DenyAll;
-  }
-  return shared::ThreadPermissionMode::Request;
+  return shared::permissionModeFromStorageString(value);
 }
 
 rapidjson::Document loadPreferencesDocument() {
@@ -418,8 +408,31 @@ void WriteSkinConfigObject(rapidjson::Value &object, const SkinConfig &cfg,
 
 } // namespace
 
+
+std::vector<std::string> validateUserPreferences(
+    const UserPreferences &preferences) {
+  std::vector<std::string> warnings;
+  std::unordered_map<std::string, HotkeyAction> label_to_action;
+  for (const auto &binding : LoadHotkeyConfig().bindings) {
+    if (auto canonical = ParseHotkeyLabel(binding.label)) {
+      auto [it, inserted] = label_to_action.emplace(*canonical, binding.action);
+      if (!inserted && it->second != binding.action) {
+        warnings.push_back("Duplicate hotkey binding: " + binding.label + ".");
+      }
+    }
+  }
+  if (preferences.agent_strip_rows.has_value() && *preferences.agent_strip_rows < 1) {
+    warnings.push_back("agent_strip_rows must be >= 1.");
+  }
+  if (preferences.work_panel_height.has_value() &&
+      *preferences.work_panel_height < 4) {
+    warnings.push_back("work_panel_height must be >= 4.");
+  }
+  return warnings;
+}
 UserPreferences loadUserPreferences() {
   UserPreferences preferences;
+  shared::ensureBuiltinPermissionProfiles();
   rapidjson::Document doc = loadPreferencesDocument();
 
   if (doc.HasMember("theme") && doc["theme"].IsString()) {
@@ -444,6 +457,16 @@ UserPreferences loadUserPreferences() {
       doc["preferred_permission_mode"].IsString()) {
     preferences.preferred_permission_mode = permissionModeFromString(
         std::string(doc["preferred_permission_mode"].GetString()));
+  }
+  if (doc.HasMember("preferred_permission_profile") &&
+      doc["preferred_permission_profile"].IsString()) {
+    preferences.preferred_permission_profile =
+        std::string(doc["preferred_permission_profile"].GetString());
+    if (const auto resolved = shared::resolvePermissionProfileMode(
+            *preferences.preferred_permission_profile);
+        resolved.has_value()) {
+      preferences.preferred_permission_mode = *resolved;
+    }
   }
   if (doc.HasMember("prefer_todo_panel_on_narrow") &&
       doc["prefer_todo_panel_on_narrow"].IsBool()) {
@@ -482,6 +505,7 @@ UserPreferences loadUserPreferences() {
 void saveUserPreferences(const UserPreferences &preferences) {
   rapidjson::Document doc = loadPreferencesDocument();
   auto &alloc = doc.GetAllocator();
+  shared::ensureBuiltinPermissionProfiles();
 
   if (preferences.theme_name.has_value()) {
     rapidjson::Value key("theme", alloc);
@@ -531,6 +555,23 @@ void saveUserPreferences(const UserPreferences &preferences) {
       doc["preferred_permission_mode"] = value;
     } else {
       doc.AddMember("preferred_permission_mode", value, alloc);
+    }
+  }
+
+  if (preferences.preferred_permission_profile.has_value() ||
+      preferences.preferred_permission_mode.has_value()) {
+    const auto profile = preferences.preferred_permission_profile.has_value()
+                             ? shared::canonicalPermissionProfileName(
+                                   *preferences.preferred_permission_profile)
+                             : shared::canonicalPermissionProfileName(
+                                   *preferences.preferred_permission_mode);
+    if (profile.has_value()) {
+      rapidjson::Value value(profile->c_str(), alloc);
+      if (doc.HasMember("preferred_permission_profile")) {
+        doc["preferred_permission_profile"] = value;
+      } else {
+        doc.AddMember("preferred_permission_profile", value, alloc);
+      }
     }
   }
 

@@ -22,12 +22,20 @@ target_sources(firmius_provider PRIVATE
     src/providers/ZaiProvider.cpp
     src/providers/ZenProvider.cpp
     src/providers/BaseOpenAIProvider.cpp
+    src/providers/ConfigurableOpenAIProvider.cpp
+    src/providers/ConfigurableAnthropicProvider.cpp
+    src/providers/RetryPolicyResolver.cpp
     src/providers/ProviderRegistry.cpp
     src/providers/AntigravityProvider.cpp
     src/providers/AntigravityProtocol.cpp
     src/providers/BaseOAuthProvider.cpp
     src/providers/QwenProvider.cpp
     src/providers/KiroProvider.cpp
+    src/providers/WindsurfModels.cpp
+    src/providers/WindsurfProvider.cpp
+    src/providers/WindsurfProvider_grpc.cpp
+    src/providers/WindsurfProvider_local.cpp
+    src/providers/WindsurfLspManager.cpp
     src/providers/BaseAPIKeyProvider.cpp
      src/providers/BaseAnthropicProvider.cpp
      src/providers/LLMSearchProviderRegistry.cpp
@@ -50,6 +58,9 @@ target_sources(firmius_provider PUBLIC
     include/providers/ZaiProvider.hpp
     include/providers/ZenProvider.hpp
     include/providers/BaseOpenAIProvider.hpp
+    include/providers/ConfigurableOpenAIProvider.hpp
+    include/providers/ConfigurableAnthropicProvider.hpp
+    include/providers/RetryPolicyResolver.hpp
     include/providers/ProviderRegistry.hpp
     include/providers/AntigravityProvider.hpp
     include/providers/AntigravityProtocol.hpp
@@ -57,6 +68,8 @@ target_sources(firmius_provider PUBLIC
     include/providers/OAuthWizard.hpp
     include/providers/QwenProvider.hpp
     include/providers/KiroProvider.hpp
+    include/providers/WindsurfModels.hpp
+    include/providers/WindsurfProvider.hpp
     include/providers/BaseAPIKeyProvider.hpp
     include/providers/BaseAnthropicProvider.hpp
     include/providers/LLMSearchProvider.hpp

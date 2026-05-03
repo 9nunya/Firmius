@@ -87,6 +87,7 @@ public:
      * @return Vector of blocking process IDs.
      */
     virtual std::vector<std::string> getBlockingProcessIds() = 0;
+    virtual std::vector<std::string> getProcessIds() = 0;
 
     /**
      * @brief Kills a background process.

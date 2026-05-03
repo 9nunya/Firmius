@@ -16,7 +16,12 @@ enum class ArgType {
   OAuthProvider,
   QuotaProvider,
   ProviderId,
-  Skin
+  Skin,
+  /// Mode name for the focused agent's persona (or the welcome
+  /// pre-thread persona). Drives `/mode <Tab>` autocomplete from the
+  /// ModeRegistry — both qualified (`forge:apply`) and bare (`apply`)
+  /// matches are surfaced.
+  Mode
 };
 
 struct CommandArg {
@@ -39,6 +44,13 @@ struct CommandCtx {
   TuiState *state;
 };
 
+struct CommandBindingHint {
+  std::string label;
+  std::string description;
+};
+
+using CommandBindingHints = std::vector<CommandBindingHint>;
+
 class ICommand {
 public:
   virtual ~ICommand() = default;
@@ -56,6 +68,12 @@ public:
   // Returns true if this command creates/uses an agent thread (e.g., workflows)
   // Returns false for utility commands (e.g., /threads, /help, /config)
   virtual bool isWorkflow() const { return false; }
+
+  // Commands like /promise need the full trailing text as one argument instead
+  // of shell-like tokenization.
+  virtual bool takesRawRemainder() const { return false; }
+
+  virtual CommandBindingHints bindingHints() const { return {}; }
 };
 
 } // namespace firmius::tui

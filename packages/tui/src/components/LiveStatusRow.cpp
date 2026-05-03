@@ -54,7 +54,8 @@ std::string statusLabel(firmius::shared::WorkChunkStatus status) {
 
 static ftxui::Color interpolatePhraseColor(const Theme &theme, float emphasis) {
   const float clamped = std::clamp(emphasis, 0.0f, 1.0f);
-  return ftxui::Color::Interpolate(clamped, theme.base.bg, theme.base.highlight);
+  return ftxui::Color::Interpolate(clamped, theme.base.bg,
+                                   theme.base.highlight);
 }
 
 float smoothstep(float x) {
@@ -110,7 +111,8 @@ ftxui::Element renderSpinnerPersistentPhrase(ftxui::Element spinner,
   });
 }
 
-ftxui::Element renderInvisiblePhrase(const Theme &theme, std::string_view text) {
+ftxui::Element renderInvisiblePhrase(const Theme &theme,
+                                     std::string_view text) {
   return ftxui::text(std::string(text)) | ftxui::color(theme.base.bg);
 }
 
@@ -120,7 +122,7 @@ struct PhraseTransitionSlices {
 };
 
 PhraseTransitionSlices phraseTransitionSlices(std::size_t previous_len,
-                                             std::size_t next_len) {
+                                              std::size_t next_len) {
   const float max_len = static_cast<float>(
       std::max<std::size_t>(std::max(previous_len, next_len), 1));
   const float fade_out_portion =
@@ -152,19 +154,19 @@ ftxui::Element RenderLiveStatusRow(const LiveStatusRowModel &model) {
   const auto cycle_ms =
       static_cast<uint64_t>(std::max(1, model.skin.live_row_cycle_seconds)) *
       1000ULL;
-  const auto index = phrases.empty() ? 0u
-                                     : static_cast<size_t>((nowMs / cycle_ms) %
-                                                           phrases.size());
+  const auto index =
+      phrases.empty()
+          ? 0u
+          : static_cast<size_t>((nowMs / cycle_ms) % phrases.size());
   // Only used for the non-transition case. During transitions we render
   // phrase_prev/phrase_next with the wipe effect.
-  const std::string phrase = !model.phrase.empty()
-                                 ? model.phrase
-                                 : (phrases.empty() ? std::string("Standing by.")
-                                                    : phrases[index]);
+  const std::string phrase =
+      !model.phrase.empty()
+          ? model.phrase
+          : (phrases.empty() ? std::string("Standing by.") : phrases[index]);
 
-  const std::string right = model.activity.empty()
-                                ? model.elapsed
-                                : model.activity;
+  const std::string right =
+      model.activity.empty() ? model.elapsed : model.activity;
   const auto &theme = ThemeManager::instance().getCurrentTheme();
 
   const std::string glyph = liveRowSpinnerGlyph(nowMs);
@@ -194,8 +196,7 @@ ftxui::Element RenderLiveStatusRow(const LiveStatusRowModel &model) {
              ftxui::bold;
     } else if (t < kInvisibleEnd) {
       left = renderSpinnerPersistentPhrase(
-                 spinner_visible,
-                 renderInvisiblePhrase(theme, prev_phrase)) |
+                 spinner_visible, renderInvisiblePhrase(theme, prev_phrase)) |
              ftxui::bold;
     } else if (t < 1.0f) {
       left = renderSpinnerPersistentPhrase(
@@ -207,16 +208,15 @@ ftxui::Element RenderLiveStatusRow(const LiveStatusRowModel &model) {
     } else {
       left = renderSpinnerPersistentPhrase(
                  spinner_visible,
-                 ftxui::text(next_phrase) | ftxui::color(interpolatePhraseColor(
-                                              theme, 1.0f))) |
+                 ftxui::text(next_phrase) |
+                     ftxui::color(interpolatePhraseColor(theme, 1.0f))) |
              ftxui::bold;
     }
   } else {
-    const std::string phrase = !model.phrase.empty()
-                                   ? model.phrase
-                                   : (phrases.empty()
-                                          ? std::string("Standing by.")
-                                          : phrases[index]);
+    const std::string phrase =
+        !model.phrase.empty()
+            ? model.phrase
+            : (phrases.empty() ? std::string("Standing by.") : phrases[index]);
     left = renderSpinnerPersistentPhrase(
                spinner_visible,
                ftxui::text(phrase) |
@@ -224,46 +224,49 @@ ftxui::Element RenderLiveStatusRow(const LiveStatusRowModel &model) {
            ftxui::bold;
   }
 
-  if (model.skin.live_row_glint && model.busy && !model.phrase_transition_active) {
+  if (model.skin.live_row_glint && model.busy &&
+      !model.phrase_transition_active) {
     GlintConfig cfg;
     cfg.target = GlintConfig::Target::Text;
     // Base → highlight → base reads as an actual sweep.
-    cfg.gradientColors = {theme.base.fg, theme.base.highlight};
+    cfg.gradientColors = {theme.base.highlight, theme.base.fg};
     cfg.glintSize = 10;
     cfg.intervalSeconds = 13.5f;
-    cfg.easing = GlintEasing::EaseInOut;
+    cfg.easing = GlintEasing::EaseOut;
     cfg.durationSeconds = 4.8f;
     left = GlintEffect(left, cfg)->Render();
   }
 
   ftxui::Elements rows;
-  rows.push_back(ftxui::hbox(ftxui::Elements{
-      left | ftxui::xflex,
-      ftxui::text("  "),
-      ftxui::text(right) | ftxui::color(theme.chat.timestamp),
-  }) | ftxui::xflex);
+  ftxui::Elements first_row;
+  first_row.push_back(left | ftxui::xflex);
+  first_row.push_back(ftxui::text("  "));
+  first_row.push_back(ftxui::text(right) | ftxui::color(theme.chat.timestamp));
+  rows.push_back(ftxui::hbox(std::move(first_row)) | ftxui::xflex);
 
   if (model.has_plan_excerpt) {
     rows.push_back(ftxui::text("Plan: " + model.plan_title) | ftxui::bold |
                    ftxui::color(theme.base.fg));
     for (std::size_t i = 0; i < model.plan_rows.size(); ++i) {
-      std::string line = "> " + model.plan_rows[i].title +
-                         " · " + statusLabel(model.plan_rows[i].status);
+      std::string line = "> " + model.plan_rows[i].title + " · " +
+                         statusLabel(model.plan_rows[i].status);
       if (i + 1 == model.plan_rows.size() && model.hidden_plan_count > 0) {
         line += " ... +" + std::to_string(model.hidden_plan_count) + " more";
       }
       rows.push_back(
           ftxui::text(truncateText(
-                          line, std::max(12, ftxui::Terminal::Size().dimx - 2))) |
+              line, std::max(12, ftxui::Terminal::Size().dimx - 2))) |
           ftxui::color(i == 0 ? theme.base.highlight : theme.base.dim));
     }
   }
 
   if (model.has_todo_excerpt) {
-    rows.push_back(ftxui::text("> " + truncateText(
-                                         model.todo_excerpt,
-                                         std::max(12, ftxui::Terminal::Size().dimx - 2))) |
-                   ftxui::color(theme.base.highlight));
+    rows.push_back(
+        ftxui::text(
+            "> " +
+            truncateText(model.todo_excerpt,
+                         std::max(12, ftxui::Terminal::Size().dimx - 2))) |
+        ftxui::color(theme.base.highlight));
   }
 
   return ftxui::vbox(std::move(rows)) | ftxui::xflex | ftxui::xflex;

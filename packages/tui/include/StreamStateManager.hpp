@@ -40,6 +40,10 @@ struct StreamState {
   std::string active_live_entry_id;
   TimelineEntry::Kind active_live_entry_kind = TimelineEntry::Kind::Text;
   bool has_active_live_entry = false;
+  // Hot-path optimization (H1): direct index into timeline_ for the active
+  // live entry, valid only while has_active_live_entry == true. Eliminates
+  // per-token O(N) scans through the timeline vector.
+  std::size_t active_live_entry_index = 0;
 };
 
 struct ProcessCounts {
@@ -101,6 +105,9 @@ public:
 
   const StreamState *getStream(const std::string &agentId) const;
   const std::vector<TimelineEntry> &getTimeline() const;
+  // Monotonic counter used to memoize expensive live-row rendering.
+  // Incremented whenever live/timeline/tool/queue state changes.
+  uint64_t getLiveRenderEpoch() const;
   const std::unordered_map<std::string, std::shared_ptr<ToolCallView>> &
   getToolCalls() const;
   std::shared_ptr<ToolCallView>
@@ -142,6 +149,7 @@ private:
                        const std::string &result);
   void assignToolCallClusterId(const std::string &agentId,
                                const std::string &toolCallId);
+  void markLiveStateChanged();
   void appendLiveTimelineDelta(const std::string &agentId, TimelineEntry::Kind kind,
                                const std::string &delta);
   void clearActiveLiveEntry(const std::string &agentId);
@@ -154,6 +162,8 @@ private:
   std::unordered_map<std::string, std::shared_ptr<ToolCallView>> tool_calls_;
   std::vector<TimelineEntry> timeline_;
   uint64_t next_live_entry_sequence_ = 0;
+
+  uint64_t live_render_epoch_ = 1;
 
   std::unordered_map<std::string, std::string> process_outputs_;
   std::unordered_map<std::string, std::string> subagent_outputs_;

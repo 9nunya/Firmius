@@ -296,6 +296,321 @@ void mcpServerConfigFromJson(const rapidjson::Value& v,
     }
 }
 
+rapidjson::Value toJsonProviderDefaultsConfig(
+    const ProviderDefaultsConfig& config,
+    rapidjson::Document::AllocatorType& allocator) {
+    rapidjson::Value v(rapidjson::kObjectType);
+    v.AddMember("temperature", config.temperature, allocator);
+    if (config.maxTokens.has_value()) {
+        v.AddMember("maxTokens", config.maxTokens.value(), allocator);
+    } else {
+        v.AddMember("maxTokens", rapidjson::Value(rapidjson::kNullType), allocator);
+    }
+    v.AddMember("streamUsage", config.streamUsage, allocator);
+    return v;
+}
+
+rapidjson::Value toJsonRetryPolicyConfig(
+    const RetryPolicyConfig& config,
+    rapidjson::Document::AllocatorType& allocator) {
+    rapidjson::Value v(rapidjson::kObjectType);
+    v.AddMember("maxRetries", config.maxRetries, allocator);
+    v.AddMember("baseDelayMs", config.baseDelayMs, allocator);
+    v.AddMember("maxDelayMs", config.maxDelayMs, allocator);
+    v.AddMember("jitterMin", config.jitterMin, allocator);
+    v.AddMember("jitterMax", config.jitterMax, allocator);
+    v.AddMember("useSharedBackoffSequence", config.useSharedBackoffSequence,
+                allocator);
+    v.AddMember("respectRetryAfter", config.respectRetryAfter, allocator);
+    v.AddMember("timeoutSeconds", config.timeoutSeconds, allocator);
+    v.AddMember("connectTimeoutSeconds", config.connectTimeoutSeconds,
+                allocator);
+
+    rapidjson::Value retryStatuses(rapidjson::kArrayType);
+    for (int code : config.retryHttpStatuses) {
+        retryStatuses.PushBack(code, allocator);
+    }
+    v.AddMember("retryHttpStatuses", retryStatuses, allocator);
+
+    rapidjson::Value nonRetryStatuses(rapidjson::kArrayType);
+    for (int code : config.nonRetryHttpStatuses) {
+        nonRetryStatuses.PushBack(code, allocator);
+    }
+    v.AddMember("nonRetryHttpStatuses", nonRetryStatuses, allocator);
+
+    rapidjson::Value retryCurlErrors(rapidjson::kArrayType);
+    for (const auto& code : config.retryCurlErrors) {
+        retryCurlErrors.PushBack(rapidjson::Value(code.c_str(), allocator),
+                                 allocator);
+    }
+    v.AddMember("retryCurlErrors", retryCurlErrors, allocator);
+    return v;
+}
+
+rapidjson::Value toJsonProviderVariantConfig(
+    const ProviderVariantConfig& config,
+    rapidjson::Document::AllocatorType& allocator) {
+    rapidjson::Value v(rapidjson::kObjectType);
+    v.AddMember("label", rapidjson::Value(config.label.c_str(), allocator), allocator);
+    v.AddMember("requestJson",
+                rapidjson::Value(config.requestJson.c_str(), allocator),
+                allocator);
+    v.AddMember("description",
+                rapidjson::Value(config.description.c_str(), allocator),
+                allocator);
+    return v;
+}
+
+rapidjson::Value toJsonProviderModelConfig(
+    const ProviderModelConfig& config,
+    rapidjson::Document::AllocatorType& allocator) {
+    rapidjson::Value v(rapidjson::kObjectType);
+    v.AddMember("defaultVariant",
+                rapidjson::Value(config.defaultVariant.c_str(), allocator),
+                allocator);
+    rapidjson::Value variants(rapidjson::kObjectType);
+    for (const auto& [name, variant] : config.variants) {
+        variants.AddMember(rapidjson::Value(name.c_str(), allocator),
+                           toJsonProviderVariantConfig(variant, allocator),
+                           allocator);
+    }
+    v.AddMember("variants", variants, allocator);
+    return v;
+}
+
+rapidjson::Value toJsonProviderProfileConfig(
+    const ProviderProfileConfig& config,
+    rapidjson::Document::AllocatorType& allocator) {
+    rapidjson::Value v(rapidjson::kObjectType);
+    v.AddMember("kind", rapidjson::Value(config.kind.c_str(), allocator), allocator);
+    v.AddMember("displayName",
+                rapidjson::Value(config.displayName.c_str(), allocator),
+                allocator);
+    v.AddMember("enabled", config.enabled, allocator);
+    v.AddMember("baseUrl", rapidjson::Value(config.baseUrl.c_str(), allocator), allocator);
+    v.AddMember("modelsEndpoint",
+                rapidjson::Value(config.modelsEndpoint.c_str(), allocator),
+                allocator);
+    v.AddMember("chatEndpoint",
+                rapidjson::Value(config.chatEndpoint.c_str(), allocator),
+                allocator);
+    v.AddMember("messagesEndpoint",
+                rapidjson::Value(config.messagesEndpoint.c_str(), allocator),
+                allocator);
+    v.AddMember("apiKeyRef",
+                rapidjson::Value(config.apiKeyRef.c_str(), allocator),
+                allocator);
+    rapidjson::Value headers(rapidjson::kObjectType);
+    for (const auto& [key, value] : config.headers) {
+        headers.AddMember(rapidjson::Value(key.c_str(), allocator),
+                          rapidjson::Value(value.c_str(), allocator),
+                          allocator);
+    }
+    v.AddMember("headers", headers, allocator);
+    v.AddMember("defaults", toJsonProviderDefaultsConfig(config.defaults, allocator),
+                allocator);
+    v.AddMember("reasoningFieldName",
+                rapidjson::Value(config.reasoningFieldName.c_str(), allocator),
+                allocator);
+    v.AddMember("anthropicVersion",
+                rapidjson::Value(config.anthropicVersion.c_str(), allocator),
+                allocator);
+    v.AddMember("betaHeader",
+                rapidjson::Value(config.betaHeader.c_str(), allocator),
+                allocator);
+    v.AddMember("retry", toJsonRetryPolicyConfig(config.retry, allocator),
+                allocator);
+    rapidjson::Value models(rapidjson::kObjectType);
+    for (const auto& [modelId, model] : config.modelVariants) {
+        models.AddMember(rapidjson::Value(modelId.c_str(), allocator),
+                         toJsonProviderModelConfig(model, allocator), allocator);
+    }
+    v.AddMember("modelVariants", models, allocator);
+    return v;
+}
+
+void providerDefaultsConfigFromJson(const rapidjson::Value& v,
+                                    ProviderDefaultsConfig& config) {
+    if (!v.IsObject()) {
+        return;
+    }
+    if (v.HasMember("temperature") && v["temperature"].IsNumber()) {
+        config.temperature = v["temperature"].GetFloat();
+    }
+    if (v.HasMember("maxTokens")) {
+        if (v["maxTokens"].IsUint()) {
+            config.maxTokens = v["maxTokens"].GetUint();
+        } else if (v["maxTokens"].IsNull()) {
+            config.maxTokens = std::nullopt;
+        }
+    }
+    if (v.HasMember("streamUsage") && v["streamUsage"].IsBool()) {
+        config.streamUsage = v["streamUsage"].GetBool();
+    }
+}
+
+void retryPolicyConfigFromJson(const rapidjson::Value& v,
+                               RetryPolicyConfig& config) {
+    if (!v.IsObject()) {
+        return;
+    }
+    if (v.HasMember("maxRetries") && v["maxRetries"].IsInt()) {
+        config.maxRetries = v["maxRetries"].GetInt();
+    }
+    if (v.HasMember("baseDelayMs") && v["baseDelayMs"].IsInt()) {
+        config.baseDelayMs = v["baseDelayMs"].GetInt();
+    }
+    if (v.HasMember("maxDelayMs") && v["maxDelayMs"].IsInt()) {
+        config.maxDelayMs = v["maxDelayMs"].GetInt();
+    }
+    if (v.HasMember("jitterMin") && v["jitterMin"].IsNumber()) {
+        config.jitterMin = v["jitterMin"].GetDouble();
+    }
+    if (v.HasMember("jitterMax") && v["jitterMax"].IsNumber()) {
+        config.jitterMax = v["jitterMax"].GetDouble();
+    }
+    if (v.HasMember("useSharedBackoffSequence") &&
+        v["useSharedBackoffSequence"].IsBool()) {
+        config.useSharedBackoffSequence = v["useSharedBackoffSequence"].GetBool();
+    }
+    if (v.HasMember("respectRetryAfter") && v["respectRetryAfter"].IsBool()) {
+        config.respectRetryAfter = v["respectRetryAfter"].GetBool();
+    }
+    if (v.HasMember("timeoutSeconds") && v["timeoutSeconds"].IsInt()) {
+        config.timeoutSeconds = v["timeoutSeconds"].GetInt();
+    }
+    if (v.HasMember("connectTimeoutSeconds") &&
+        v["connectTimeoutSeconds"].IsInt()) {
+        config.connectTimeoutSeconds = v["connectTimeoutSeconds"].GetInt();
+    }
+    if (v.HasMember("retryHttpStatuses") && v["retryHttpStatuses"].IsArray()) {
+        config.retryHttpStatuses.clear();
+        for (const auto& item : v["retryHttpStatuses"].GetArray()) {
+            if (item.IsInt()) {
+                config.retryHttpStatuses.push_back(item.GetInt());
+            }
+        }
+    }
+    if (v.HasMember("nonRetryHttpStatuses") &&
+        v["nonRetryHttpStatuses"].IsArray()) {
+        config.nonRetryHttpStatuses.clear();
+        for (const auto& item : v["nonRetryHttpStatuses"].GetArray()) {
+            if (item.IsInt()) {
+                config.nonRetryHttpStatuses.push_back(item.GetInt());
+            }
+        }
+    }
+    if (v.HasMember("retryCurlErrors") && v["retryCurlErrors"].IsArray()) {
+        config.retryCurlErrors.clear();
+        for (const auto& item : v["retryCurlErrors"].GetArray()) {
+            if (item.IsString()) {
+                config.retryCurlErrors.push_back(item.GetString());
+            }
+        }
+    }
+}
+
+void providerVariantConfigFromJson(const rapidjson::Value& v,
+                                   ProviderVariantConfig& config) {
+    if (!v.IsObject()) {
+        return;
+    }
+    if (v.HasMember("label") && v["label"].IsString()) {
+        config.label = v["label"].GetString();
+    }
+    if (v.HasMember("requestJson") && v["requestJson"].IsString()) {
+        config.requestJson = v["requestJson"].GetString();
+    }
+    if (v.HasMember("description") && v["description"].IsString()) {
+        config.description = v["description"].GetString();
+    }
+}
+
+void providerModelConfigFromJson(const rapidjson::Value& v,
+                                 ProviderModelConfig& config) {
+    if (!v.IsObject()) {
+        return;
+    }
+    if (v.HasMember("defaultVariant") && v["defaultVariant"].IsString()) {
+        config.defaultVariant = v["defaultVariant"].GetString();
+    }
+    if (v.HasMember("variants") && v["variants"].IsObject()) {
+        config.variants.clear();
+        for (auto it = v["variants"].MemberBegin(); it != v["variants"].MemberEnd();
+             ++it) {
+            ProviderVariantConfig variant;
+            providerVariantConfigFromJson(it->value, variant);
+            config.variants[it->name.GetString()] = variant;
+        }
+    }
+}
+
+void providerProfileConfigFromJson(const rapidjson::Value& v,
+                                   ProviderProfileConfig& config) {
+    if (!v.IsObject()) {
+        return;
+    }
+    if (v.HasMember("kind") && v["kind"].IsString()) {
+        config.kind = v["kind"].GetString();
+    }
+    if (v.HasMember("displayName") && v["displayName"].IsString()) {
+        config.displayName = v["displayName"].GetString();
+    }
+    if (v.HasMember("enabled") && v["enabled"].IsBool()) {
+        config.enabled = v["enabled"].GetBool();
+    }
+    if (v.HasMember("baseUrl") && v["baseUrl"].IsString()) {
+        config.baseUrl = v["baseUrl"].GetString();
+    }
+    if (v.HasMember("modelsEndpoint") && v["modelsEndpoint"].IsString()) {
+        config.modelsEndpoint = v["modelsEndpoint"].GetString();
+    }
+    if (v.HasMember("chatEndpoint") && v["chatEndpoint"].IsString()) {
+        config.chatEndpoint = v["chatEndpoint"].GetString();
+    }
+    if (v.HasMember("messagesEndpoint") && v["messagesEndpoint"].IsString()) {
+        config.messagesEndpoint = v["messagesEndpoint"].GetString();
+    }
+    if (v.HasMember("apiKeyRef") && v["apiKeyRef"].IsString()) {
+        config.apiKeyRef = v["apiKeyRef"].GetString();
+    }
+    if (v.HasMember("headers") && v["headers"].IsObject()) {
+        config.headers.clear();
+        for (auto it = v["headers"].MemberBegin(); it != v["headers"].MemberEnd();
+             ++it) {
+            if (it->value.IsString()) {
+                config.headers[it->name.GetString()] = it->value.GetString();
+            }
+        }
+    }
+    if (v.HasMember("defaults")) {
+        providerDefaultsConfigFromJson(v["defaults"], config.defaults);
+    }
+    if (v.HasMember("reasoningFieldName") &&
+        v["reasoningFieldName"].IsString()) {
+        config.reasoningFieldName = v["reasoningFieldName"].GetString();
+    }
+    if (v.HasMember("anthropicVersion") &&
+        v["anthropicVersion"].IsString()) {
+        config.anthropicVersion = v["anthropicVersion"].GetString();
+    }
+    if (v.HasMember("betaHeader") && v["betaHeader"].IsString()) {
+        config.betaHeader = v["betaHeader"].GetString();
+    }
+    if (v.HasMember("retry")) {
+        retryPolicyConfigFromJson(v["retry"], config.retry);
+    }
+    if (v.HasMember("modelVariants") && v["modelVariants"].IsObject()) {
+        config.modelVariants.clear();
+        for (auto it = v["modelVariants"].MemberBegin();
+             it != v["modelVariants"].MemberEnd(); ++it) {
+            ProviderModelConfig model;
+            providerModelConfigFromJson(it->value, model);
+            config.modelVariants[it->name.GetString()] = model;
+        }
+    }
+}
+
 } // namespace
 
 ConfigLoader& ConfigLoader::instance() {
@@ -471,6 +786,32 @@ void ConfigLoader::loadImpl() {
             config_.mcpServers[it->name.GetString()] = server;
         }
     }
+    if (doc.HasMember("providerRetryDefaults")) {
+        retryPolicyConfigFromJson(doc["providerRetryDefaults"],
+                                  config_.providerRetryDefaults);
+    }
+    if (doc.HasMember("providerRetryPolicies") &&
+        doc["providerRetryPolicies"].IsObject()) {
+        config_.providerRetryPolicies.clear();
+        for (auto it = doc["providerRetryPolicies"].MemberBegin();
+             it != doc["providerRetryPolicies"].MemberEnd(); ++it) {
+            RetryPolicyConfig policy;
+            retryPolicyConfigFromJson(it->value, policy);
+            config_.providerRetryPolicies[it->name.GetString()] = policy;
+        }
+    }
+    if (doc.HasMember("providers") && doc["providers"].IsObject()) {
+        config_.providers.clear();
+        for (auto it = doc["providers"].MemberBegin();
+             it != doc["providers"].MemberEnd(); ++it) {
+            if (!it->value.IsObject()) {
+                continue;
+            }
+            ProviderProfileConfig provider;
+            providerProfileConfigFromJson(it->value, provider);
+            config_.providers[it->name.GetString()] = provider;
+        }
+    }
 
     loaded_ = true;
 }
@@ -570,6 +911,27 @@ void ConfigLoader::save() const {
                              allocator);
     }
     doc.AddMember("mcpServers", mcpServers, allocator);
+
+    doc.AddMember("providerRetryDefaults",
+                  toJsonRetryPolicyConfig(config_.providerRetryDefaults,
+                                          allocator),
+                  allocator);
+
+    rapidjson::Value providerRetryPolicies(rapidjson::kObjectType);
+    for (const auto& [providerId, policy] : config_.providerRetryPolicies) {
+        providerRetryPolicies.AddMember(
+            rapidjson::Value(providerId.c_str(), allocator),
+            toJsonRetryPolicyConfig(policy, allocator), allocator);
+    }
+    doc.AddMember("providerRetryPolicies", providerRetryPolicies, allocator);
+
+    rapidjson::Value providers(rapidjson::kObjectType);
+    for (const auto& [id, provider] : config_.providers) {
+        providers.AddMember(rapidjson::Value(id.c_str(), allocator),
+                            toJsonProviderProfileConfig(provider, allocator),
+                            allocator);
+    }
+    doc.AddMember("providers", providers, allocator);
 
     rapidjson::StringBuffer buffer;
     rapidjson::PrettyWriter<rapidjson::StringBuffer> writer(buffer);

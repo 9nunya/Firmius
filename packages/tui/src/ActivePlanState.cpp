@@ -275,6 +275,9 @@ void ActivePlanState::rebuildModel() {
   // Rebuild focused chunk if set
   if (focused_chunk_.has_value()) {
     rebuildFocusedChunk();
+    model_.focused_chunk = focused_chunk_;
+  } else {
+    model_.focused_chunk.reset();
   }
 }
 

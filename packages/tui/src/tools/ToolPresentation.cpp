@@ -6,6 +6,7 @@
 #include "tools/WorkToolPresentation.hpp"
 #include "tools/PythonToolPresentation.hpp"
 #include "tools/McpToolPresentation.hpp"
+#include "tools/ModeSwitchToolPresentation.hpp"
 #include "tools/SearchToolPresentation.hpp"
 #include "tools/SemanticToolPresentation.hpp"
 #include "tools/WebSearchToolPresentation.hpp"
@@ -39,6 +40,12 @@ std::optional<ToolPresentation>
 TryBuildSpecializedPresentation(const ToolCallView &view,
                                 const NormalizedProcessState *process_state,
                                 const NormalizedSubagentState *subagent_state) {
+  // ModeSwitch dispatches first — its result is a small JSON envelope and
+  // the generic fact-card renderer turns it into a wall of text. We want
+  // a single inline status row instead.
+  if (IsModeSwitchTool(view.name)) {
+    return BuildModeSwitchToolPresentation(view);
+  }
   if (view.name == "Python" || IsMatch(view.name, "python_execute")) {
     return BuildPythonToolPresentation(view, process_state);
   }

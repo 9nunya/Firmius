@@ -1,4 +1,6 @@
 #include "providers/ProviderRegistry.hpp"
+#include "providers/ConfigurableAnthropicProvider.hpp"
+#include "providers/ConfigurableOpenAIProvider.hpp"
 
 namespace firmius::provider {
 
@@ -72,6 +74,33 @@ std::vector<std::shared_ptr<IProvider>> ProviderRegistry::listProviders() const 
     }
     
     return list;
+}
+
+void ProviderRegistry::reloadConfigProviders(
+    const std::map<std::string, shared::ProviderProfileConfig>& profiles) {
+    std::lock_guard<std::mutex> lock(mutex);
+
+    for (const auto& id : dynamicProviderIds) {
+        providers.erase(id);
+        factories.erase(id);
+    }
+    dynamicProviderIds.clear();
+
+    for (const auto& [id, profile] : profiles) {
+        if (!profile.enabled) {
+            continue;
+        }
+        dynamicProviderIds.insert(id);
+        if (profile.kind == "anthropic") {
+            factories[id] = [id, profile]() {
+                return std::make_shared<ConfigurableAnthropicProvider>(id, profile);
+            };
+        } else {
+            factories[id] = [id, profile]() {
+                return std::make_shared<ConfigurableOpenAIProvider>(id, profile);
+            };
+        }
+    }
 }
 
 }

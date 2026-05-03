@@ -1,4 +1,8 @@
 #include "agents/Agent.hpp"
+#include "agents/hooks/HookRegistry.hpp"
+#include "agents/hooks/HookState.hpp"
+#include "agents/modes/Mode.hpp"
+
 #include "AgentRegistry.hpp"
 #include "ConfigLoader.hpp"
 #include "EnvLoader.hpp"
@@ -43,6 +47,132 @@ namespace firmius::core {
 namespace {
 constexpr std::uint32_t kMissingToolCallIndex =
     std::numeric_limits<std::uint32_t>::max();
+
+// ── Mode-scoped tool gating ───────────────────────────────────────────
+// A mode's `tool_scope: { allow: [...], deny: [...] }` declares which
+// security scopes the agent may exercise while that mode is active. The
+// prompts already promise this enforcement to the model ("FilesystemWrite
+// is denied in this mode"); without runtime gating the promise is a lie
+// the model is free to ignore. This block makes the lie real.
+//
+// Semantics:
+//   - empty allow + empty deny  → no constraint (legacy modes pass through)
+//   - non-empty allow            → whitelist (tool's required scope must be in it)
+//   - non-empty deny             → blacklist (overrides allow on conflict)
+//   - ModeSwitch is always permitted (escape hatch — the agent must always
+//     be able to leave a stuck mode without playing god-mode tricks)
+struct ModeGateVerdict {
+  bool permitted = true;
+  std::string reason; // populated when permitted == false
+};
+
+// `toolScopeToString` lives in Serialization.cpp without a header
+// declaration, so we keep a parallel mini-stringifier here for the
+// nudge text. Kept in lock-step with `firmius::shared::ToolScope`.
+const char *scopeLabel(shared::ToolScope s) {
+  using shared::ToolScope;
+  switch (s) {
+  case ToolScope::FilesystemRead:
+    return "FilesystemRead";
+  case ToolScope::FilesystemWrite:
+    return "FilesystemWrite";
+  case ToolScope::Process:
+    return "Process";
+  case ToolScope::Semantic:
+    return "Semantic";
+  case ToolScope::Delegation:
+    return "Delegation";
+  case ToolScope::Web:
+    return "Web";
+  case ToolScope::Git:
+    return "Git";
+  case ToolScope::PlanRead:
+    return "PlanRead";
+  case ToolScope::PlanWrite:
+    return "PlanWrite";
+  case ToolScope::ChunkRead:
+    return "ChunkRead";
+  case ToolScope::ChunkWrite:
+    return "ChunkWrite";
+  case ToolScope::ChunkAssign:
+    return "ChunkAssign";
+  case ToolScope::ChunkReview:
+    return "ChunkReview";
+  }
+  return "Unknown";
+}
+
+std::string joinScopes(const std::vector<shared::ToolScope> &scopes) {
+  std::string out;
+  for (std::size_t i = 0; i < scopes.size(); ++i) {
+    if (i > 0)
+      out += ", ";
+    out += scopeLabel(scopes[i]);
+  }
+  return out.empty() ? std::string{"<none>"} : out;
+}
+
+ModeGateVerdict evaluateModeGate(const std::string &activeMode,
+                                 const std::string &personaName,
+                                 shared::ToolScope toolRequires,
+                                 const std::string &toolName) {
+  // No active mode → no gate. Sub-agents and "no overlay" stance both
+  // hit this branch and behave exactly as they did pre-modes.
+  if (activeMode.empty()) {
+    return {true, ""};
+  }
+  // ModeSwitch is the escape hatch. If we gated it the agent could
+  // get stuck in a denied stance with no way out.
+  if (toolName == "ModeSwitch" || toolName == "mode_switch") {
+    return {true, ""};
+  }
+  const auto *mode = modes::ModeRegistry::instance().resolveForPersona(
+      activeMode, personaName);
+  if (mode == nullptr) {
+    // Unknown mode (e.g. someone renamed a sub-mode without restarting)
+    // — fail open rather than brick the agent. The status pill will
+    // still show the dangling name so the operator notices.
+    return {true, ""};
+  }
+
+  // Hard-deny first: deny entries override an allow whitelist.
+  for (auto s : mode->denyScopes) {
+    if (s == toolRequires) {
+      ModeGateVerdict v;
+      v.permitted = false;
+      v.reason = "Mode '" + mode->qualifiedName() + "' denies scope '" +
+                 scopeLabel(toolRequires) + "'. Tool '" +
+                 toolName + "' requires it. Call mode_switch to a stance " +
+                 "that permits this scope, or hand off to a persona that " +
+                 "can.";
+      return v;
+    }
+  }
+  // Allow-list (only enforced when non-empty). Empty allow == "no
+  // explicit whitelist" == permit by default. This matches the YAML
+  // intent: a mode that only declares deny is a soft gate.
+  if (!mode->allowScopes.empty()) {
+    bool found = false;
+    for (auto s : mode->allowScopes) {
+      if (s == toolRequires) {
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      ModeGateVerdict v;
+      v.permitted = false;
+      v.reason = "Mode '" + mode->qualifiedName() + "' does not list scope '" +
+                 scopeLabel(toolRequires) +
+                 "' in its allow set. Tool '" + toolName +
+                 "' requires it. Allowed scopes here: " +
+                 joinScopes(mode->allowScopes) +
+                 ". Call mode_switch to change stance.";
+      return v;
+    }
+  }
+  return {true, ""};
+}
 
 // Maximum accumulated response/thinking buffer size per turn (500KB)
 static constexpr std::size_t kMaxAccumulatedResponseBytes = 500 * 1024;
@@ -992,9 +1122,29 @@ std::string todoStatusLabel(TodoStatus status) {
   return "Unknown";
 }
 
+// Wraps any runtime nudge in a structurally-recognisable signal block. The
+// tag is taught in prompts/base.md so that the model treats these as
+// machine-emitted control instructions rather than user prose. Add new
+// `kind` values here as new nudge categories appear.
+std::string wrapSystemSignal(
+    const std::string &kind,
+    const std::string &body,
+    std::initializer_list<std::pair<std::string, std::string>> attrs = {}) {
+  std::ostringstream out;
+  out << "<FIRMIUS_SYSTEM_SIGNAL kind=\"" << kind << "\"";
+  for (const auto &[key, value] : attrs) {
+    if (!key.empty()) {
+      out << " " << key << "=\"" << value << "\"";
+    }
+  }
+  out << ">\n" << body << "\n</FIRMIUS_SYSTEM_SIGNAL>";
+  return out.str();
+}
+
 std::string buildIncompleteTodoNudge(const TodoStateSnapshot &todoState) {
   std::ostringstream prompt;
-  prompt << "Continue working through the remaining todo items: ";
+  prompt << "You stopped while todo items are still open. Continue working "
+            "through the remaining items: ";
   for (std::size_t i = 0; i < todoState.incompleteItems.size(); ++i) {
     const auto &item = todoState.incompleteItems[i];
     if (i > 0) {
@@ -1007,7 +1157,18 @@ std::string buildIncompleteTodoNudge(const TodoStateSnapshot &todoState) {
       prompt << "(no text)";
     }
   }
-  return prompt.str();
+  return wrapSystemSignal("todo_continuation", prompt.str(),
+                          {{"open_count",
+                            std::to_string(todoState.incompleteItems.size())}});
+}
+
+std::string buildIncompleteTodoEscalationNudge(std::size_t openCount) {
+  return wrapSystemSignal(
+      "todo_enforcement",
+      "This is the second nudge for the same open todos. Make a tool call "
+      "this turn — either advance an item or mark it done/cancelled via the "
+      "Todo tool. Do not narrate. Do not summarise.",
+      {{"open_count", std::to_string(openCount)}, {"escalated", "true"}});
 }
 
 std::string buildEmptyProviderRetryNudge(int attempt) {
@@ -1018,14 +1179,17 @@ std::string buildEmptyProviderRetryNudge(int attempt) {
   if (attempt > 1) {
     prompt << " This is empty response retry " << attempt << ".";
   }
-  return prompt.str();
+  return wrapSystemSignal("empty_response_retry", prompt.str(),
+                          {{"attempt", std::to_string(attempt)}});
 }
 
 std::string buildActiveWorkContinuationNudge() {
-  return "Runtime work is still active (tool lifecycle, blocking process, "
-         "background process, or descendant subagent). Continue coordinating "
-         "until it settles. If there is nothing new to do yet, give a concise "
-         "progress update and keep monitoring.";
+  return wrapSystemSignal(
+      "active_work_continuation",
+      "Runtime work is still active (tool lifecycle, blocking process, "
+      "background process, or descendant subagent). Continue coordinating "
+      "until it settles. If there is nothing new to do yet, give a concise "
+      "progress update and keep monitoring.");
 }
 
 TodoStateSnapshot readTodoState(const AgentContext &context) {
@@ -1116,18 +1280,43 @@ validateStreamedToolCalls(const std::vector<ToolCallChunk> &chunks) {
 std::string buildToolStreamRetryNudge(const std::string &details,
                                       int attempt,
                                       int maxAttempts) {
-  std::string nudge =
+  std::string body =
       "The previous response ended during tool-call generation before every "
       "tool call was fully finalized. Retry the entire pending tool-call "
       "batch from scratch in your next response. Do not continue from the "
       "partial payload. Emit only complete tool calls with full JSON object "
       "arguments before any normal prose.";
   if (!details.empty()) {
-    nudge += "\nObserved failure: " + details;
+    body += "\nObserved failure: " + details;
   }
-  nudge += "\nRetry attempt " + std::to_string(attempt) + " of " +
-           std::to_string(maxAttempts) + ".";
-  return nudge;
+  body += "\nRetry attempt " + std::to_string(attempt) + " of " +
+          std::to_string(maxAttempts) + ".";
+  return wrapSystemSignal("tool_stream_retry", body,
+                          {{"attempt", std::to_string(attempt)},
+                           {"max_attempts", std::to_string(maxAttempts)}});
+}
+
+std::string buildInsanityInterventionNudge(const std::string &reason) {
+  std::string body =
+      "The previous turn exhibited signs of degenerate output "
+      "(repetition/gibberish). Recover and continue constructively with a "
+      "different approach.";
+  if (!reason.empty()) {
+    body += "\nDetected reason: " + reason;
+  }
+  return wrapSystemSignal("insanity_intervention", body);
+}
+
+std::string buildToolRepetitionNudge(const std::string &toolName,
+                                     int repeatCount) {
+  std::string body =
+      "You are calling the same tool with identical arguments repeatedly (" +
+      std::to_string(repeatCount + 1) +
+      " times). This indicates an insanity loop. Stop and try a different "
+      "approach. Do not repeat this tool call.";
+  return wrapSystemSignal("tool_repetition", body,
+                          {{"tool", toolName},
+                           {"repeats", std::to_string(repeatCount + 1)}});
 }
 } // namespace
 
@@ -1199,11 +1388,6 @@ Agent::Agent(AgentContext ctx, std::shared_ptr<shared::IEnvironment> env,
 }
 
 std::shared_ptr<mcp::McpClient> Agent::getMcpClient(const std::string &serverName, shared::ToolContext &toolCtx) {
-  auto client = mcpManager_.getClient(serverName);
-  if (client) {
-    return client;
-  }
-
   const auto &config = shared::ConfigLoader::instance().getConfig();
   const auto it = config.mcpServers.find(serverName);
   if (it == config.mcpServers.end()) {
@@ -1215,37 +1399,38 @@ std::shared_ptr<mcp::McpClient> Agent::getMcpClient(const std::string &serverNam
     return nullptr;
   }
 
-  if (server.transport == "stdio") {
-    if (shared::StringUtil::trim(server.command).empty()) {
-      return nullptr;
+  return mcp::McpManager::shared().getOrCreateClient(serverName, [&]() {
+    if (server.transport == "stdio") {
+      if (shared::StringUtil::trim(server.command).empty()) {
+        return std::shared_ptr<mcp::McpClient>{};
+      }
+
+      const std::string command = mcp_tools::composeCommand(server);
+      auto process = toolCtx.host.spawn(command, server.cwd, server.env);
+      if (!process) {
+        return std::shared_ptr<mcp::McpClient>{};
+      }
+
+      return std::make_shared<mcp::McpClient>(std::move(process));
     }
 
-    const std::string command = mcp_tools::composeCommand(server);
-    auto process = toolCtx.host.spawn(command, server.cwd, server.env);
-    if (!process) {
-      return nullptr;
+    if (server.transport == "http") {
+      if (shared::StringUtil::trim(server.url).empty()) {
+        return std::shared_ptr<mcp::McpClient>{};
+      }
+
+      mcp::McpHttpTransportConfig httpConfig;
+      httpConfig.url = server.url;
+      httpConfig.authHeader = server.authHeader;
+      httpConfig.authBearerToken = server.authBearerToken;
+      httpConfig.allowInsecureTls = server.allowInsecureTls;
+      httpConfig.caCertPath = server.caCertPath;
+
+      return std::make_shared<mcp::McpClient>(httpConfig);
     }
 
-    client = std::make_shared<mcp::McpClient>(std::move(process));
-  } else if (server.transport == "http") {
-    if (shared::StringUtil::trim(server.url).empty()) {
-      return nullptr;
-    }
-
-    mcp::McpHttpTransportConfig httpConfig;
-    httpConfig.url = server.url;
-    httpConfig.authHeader = server.authHeader;
-    httpConfig.authBearerToken = server.authBearerToken;
-    httpConfig.allowInsecureTls = server.allowInsecureTls;
-    httpConfig.caCertPath = server.caCertPath;
-
-    client = std::make_shared<mcp::McpClient>(httpConfig);
-  } else {
-    return nullptr;
-  }
-
-  mcpManager_.registerClient(serverName, client);
-  return client;
+    return std::shared_ptr<mcp::McpClient>{};
+  });
 }
 
 void Agent::initializeMcpServers() {
@@ -1261,7 +1446,17 @@ void Agent::initializeMcpServers() {
     ToolContext toolCtx{*environment_->getHost(), *this, "", &neverCancel,
                         &provider::LLMSearchProviderRegistry::instance()};
 
-    auto client = getMcpClient(name, toolCtx);
+    std::shared_ptr<mcp::McpClient> client;
+    try {
+      client = getMcpClient(name, toolCtx);
+    } catch (const std::exception &e) {
+      // Surface and skip — common causes are docker exec not ready, missing
+      // binary in the sandbox, network, etc. None should be fatal to the
+      // agent itself (the agent can run without this MCP server).
+      std::cerr << "Failed to spawn MCP server '" << name
+                << "': " << e.what() << std::endl;
+      continue;
+    }
     if (!client) {
       continue;
     }
@@ -1312,7 +1507,6 @@ void Agent::initializeMcpServers() {
 }
 
 Agent::~Agent() {
-  mcpManager_.shutdown();
   for (const auto &id : backgroundProcessIds) {
     try {
       environment_->getHost()->killBackgroundProcess(id);
@@ -1325,7 +1519,15 @@ Agent::~Agent() {
 
 void Agent::reset() {
   context.history->turns.clear();
-  context.aggregateMetrics = {};
+  // WORKAROUND: `context.aggregateMetrics = {};` triggers a SIGSEGV in
+  // QuotaMetrics::operator= when running benchmarks (UAF on the embedded
+  // strings/vectors/maps inside aggregateMetrics). Pre-existing bug in
+  // AgentContext lifecycle, hit by SWEBench's reset+reuse path. Zeroing
+  // the POD-only sub-structs is safe; the next provider call overwrites
+  // the rest anyway. Investigate with ASan when there's time.
+  context.aggregateMetrics.tokens = {};
+  context.aggregateMetrics.timing = {};
+  context.aggregateMetrics.estimatedCostUsd = 0.0;
   context.state = {};
   interrupted = false;
   running = false;
@@ -1585,67 +1787,8 @@ void Agent::markFileAsFullyRead(const std::string &path) {
   environment_->getWorkspace().markFileAsFullyRead(path);
 }
 
-void Agent::run(const std::string &task,
-                std::function<void(const shared::StreamEvent &)> onEvent,
-                const std::vector<ImageContent> &images) {
-  runImpl(task, std::move(onEvent), images);
-}
-
-void Agent::resume(std::function<void(const shared::StreamEvent &)> onEvent) {
-  runImpl(std::nullopt, std::move(onEvent), {});
-}
-
-void Agent::runImpl(const std::optional<std::string> &task,
-                    std::function<void(const shared::StreamEvent &)> onEvent,
-                    const std::vector<ImageContent> &images) {
-  {
-    std::lock_guard<std::mutex> lock(callbackMutex);
-    eventCallback = onEvent;
-  }
-
-  // Guard against concurrent runs with mutex
-  std::lock_guard<std::mutex> lock(runMutex_);
-  if (running.load()) {
-    throw std::runtime_error("Agent is already running");
-  }
-  running = true;
-  interrupted = false;
-  const auto runCancelToken = std::make_shared<std::atomic<bool>>(false);
-  const auto runAbortController = std::make_shared<shared::AbortController>();
-  {
-    std::lock_guard<std::mutex> lock(cancelTokenMutex_);
-    activeRunCancelToken_ = runCancelToken;
-    activeRunAbortController_ = runAbortController;
-  }
-  auto markRunStopped = [this, runCancelToken, runAbortController]() {
-    {
-      std::lock_guard<std::mutex> runStateLock(runStateMutex_);
-      running = false;
-    }
-    runStateCv_.notify_all();
-    {
-      std::lock_guard<std::mutex> cancelLock(cancelTokenMutex_);
-      if (activeRunCancelToken_ == runCancelToken) {
-        activeRunCancelToken_.reset();
-      }
-      if (activeRunAbortController_ == runAbortController) {
-        activeRunAbortController_.reset();
-      }
-    }
-  };
-  struct RunFinalizer {
-    std::function<void()> fn;
-    ~RunFinalizer() {
-      if (fn) {
-        fn();
-      }
-    }
-  } runFinalizer{markRunStopped};
-  booting = false;
-  context.state.currentStatus = AgentStatus::ProviderWaiting;
-  context.state.fatalError = std::nullopt;
-  applyPendingModelSwitchIfAny();
-
+void Agent::bootstrapHistory(const std::optional<std::string> &task,
+                             const std::vector<ImageContent> &images) {
   // 1. Bootstrap System Message
   if (context.history->turns.empty()) {
     auto toolDefs = getProviderToolDefinitions(context, toolRegistry);
@@ -1723,6 +1866,78 @@ void Agent::runImpl(const std::optional<std::string> &task,
       journaler->appendTurn(taskTurn);
     }
   }
+}
+
+void Agent::run(const std::string &task,
+                std::function<void(const shared::StreamEvent &)> onEvent,
+                const std::vector<ImageContent> &images) {
+  runImpl(task, std::move(onEvent), images);
+}
+
+void Agent::resume(std::function<void(const shared::StreamEvent &)> onEvent) {
+  runImpl(std::nullopt, std::move(onEvent), {});
+}
+
+void Agent::runImpl(const std::optional<std::string> &task,
+                    std::function<void(const shared::StreamEvent &)> onEvent,
+                    const std::vector<ImageContent> &images) {
+  {
+    std::lock_guard<std::mutex> lock(callbackMutex);
+    eventCallback = onEvent;
+  }
+
+  // Guard against concurrent runs with mutex
+  std::lock_guard<std::mutex> lock(runMutex_);
+  if (running.load()) {
+    throw std::runtime_error("Agent is already running");
+  }
+  running = true;
+  interrupted = false;
+  const auto runCancelToken = std::make_shared<std::atomic<bool>>(false);
+  const auto runAbortController = std::make_shared<shared::AbortController>();
+  {
+    std::lock_guard<std::mutex> lock(cancelTokenMutex_);
+    activeRunCancelToken_ = runCancelToken;
+    activeRunAbortController_ = runAbortController;
+  }
+  auto markRunStopped = [this, runCancelToken, runAbortController]() {
+    {
+      std::lock_guard<std::mutex> runStateLock(runStateMutex_);
+      running = false;
+    }
+    runStateCv_.notify_all();
+    {
+      std::lock_guard<std::mutex> cancelLock(cancelTokenMutex_);
+      if (activeRunCancelToken_ == runCancelToken) {
+        activeRunCancelToken_.reset();
+      }
+      if (activeRunAbortController_ == runAbortController) {
+        activeRunAbortController_.reset();
+      }
+    }
+  };
+  struct RunFinalizer {
+    std::function<void()> fn;
+    ~RunFinalizer() {
+      if (fn) {
+        fn();
+      }
+    }
+  } runFinalizer{markRunStopped};
+  booting = false;
+  context.state.currentStatus = AgentStatus::ProviderWaiting;
+  context.state.fatalError = std::nullopt;
+  applyPendingModelSwitchIfAny();
+
+  // Bind HookState to this thread for hook state reads/writes during dispatch.
+  if (context.history && !context.history->threadId.empty()) {
+    hooks::HookState::instance().bindThread(context.history->threadId);
+  }
+
+  if (context.history->turns.empty() || task.has_value()) {
+    bootstrapHistory(task, images);
+  }
+
   bool taskFinished = false;
   int maxTurns = context.config.maxTurns > 0 ? context.config.maxTurns : 200;
   int turnCount = 0;
@@ -1743,6 +1958,30 @@ void Agent::runImpl(const std::optional<std::string> &task,
     return lastTurn.turnId.rfind("user-task-", 0) == 0 &&
            !lastTurn.messages.empty() &&
            lastTurn.messages.front().role == Role::User;
+  };
+  bool agentStopEventFired = false;
+  auto fireAgentStopGate = [&](const std::string &finalMessage,
+                               const std::string &reason) -> bool {
+    hooks::EventPayload payload;
+    payload.threadId = context.history ? context.history->threadId : "";
+    payload.agentId = context.identity.id;
+    payload.persona = context.config.personaName;
+    payload.activeMode = context.state.activeMode;
+    payload.extra["stop_reason"] = reason;
+    payload.extra["final_message"] = finalMessage;
+    auto fired = hooks::HookDispatcher::fire(WorkflowEventKind::AgentStop, payload);
+    agentStopEventFired = true;
+    if (!fired.injectedReminders.empty()) {
+      std::string combined;
+      for (std::size_t i = 0; i < fired.injectedReminders.size(); ++i) {
+        if (i > 0) {
+          combined += "\n";
+        }
+        combined += fired.injectedReminders[i];
+      }
+      appendTurnToHistory(makeInternalNudgeTurn("hook-agent-stop-", combined));
+    }
+    return fired.blocked;
   };
   auto retryTruncatedToolStream = [&](const std::string &details,
                                       int httpStatus) -> bool {
@@ -2112,8 +2351,7 @@ void Agent::runImpl(const std::optional<std::string> &task,
           // Add an intervention nudge turn to guide recovery.
           AgentTurn interventionTurn = makeInternalNudgeTurn(
               "insanity-intervention-",
-              "The previous turn exhibited signs of degenerate output "
-              "(repetition/gibberish). Please recover and continue constructively.");
+              buildInsanityInterventionNudge(insanityReason));
           appendTurnToHistory(interventionTurn);
           // Emit retry event
           onEvent(StreamRetrying{
@@ -2493,10 +2731,8 @@ void Agent::runImpl(const std::optional<std::string> &task,
 
           std::string nudgeMessage = buildIncompleteTodoNudge(todoState);
           if (repeatedTodoSnapshot) {
-            nudgeMessage = "CRITICAL: You have incomplete items on your todo "
-                           "list but you stopped. You MUST use tools to make "
-                           "progress, or mark them as done/cancelled using the "
-                           "todo_write tool. Do not ignore your todo list.";
+            nudgeMessage = buildIncompleteTodoEscalationNudge(
+                todoState.incompleteItems.size());
           }
 
           appendTurnToHistory(
@@ -2511,6 +2747,11 @@ void Agent::runImpl(const std::optional<std::string> &task,
         if (cleanNoSummary) {
           consecutiveEmptyProviderResponses = 0;
           lastTodoContinuationFingerprint.reset();
+          if (fireAgentStopGate(fullResponse, "stop")) {
+            context.state.currentStatus = AgentStatus::ProviderWaiting;
+            onEvent(ProviderWaiting{});
+            continue;
+          }
           taskFinished = true;
         } else if (emptyAssistantReply) {
           if (consecutiveEmptyProviderResponses <= maxEmptyProviderRetries) {
@@ -2543,6 +2784,11 @@ void Agent::runImpl(const std::optional<std::string> &task,
         }
 
         lastTodoContinuationFingerprint.reset();
+        if (fireAgentStopGate(fullResponse, "stop")) {
+          context.state.currentStatus = AgentStatus::ProviderWaiting;
+          onEvent(ProviderWaiting{});
+          continue;
+        }
         taskFinished = true;
       } else {
         consecutiveEmptyProviderResponses = 0;
@@ -2633,10 +2879,8 @@ void Agent::runImpl(const std::optional<std::string> &task,
 
           std::string nudgeMessage = buildIncompleteTodoNudge(todoState);
           if (repeatedTodoSnapshot) {
-            nudgeMessage = "CRITICAL: You have incomplete items on your todo "
-                           "list but you stopped. You MUST use tools to make "
-                           "progress, or mark them as done/cancelled using the "
-                           "todo_write tool. Do not ignore your todo list.";
+            nudgeMessage = buildIncompleteTodoEscalationNudge(
+                todoState.incompleteItems.size());
           }
 
           appendTurnToHistory(
@@ -2686,6 +2930,25 @@ void Agent::runImpl(const std::optional<std::string> &task,
   } else if (context.state.currentStatus != AgentStatus::Error) {
     context.state.currentStatus = AgentStatus::Idle;
   }
+
+  // Fire AgentStop lifecycle event at agent finalization boundary (end of run).
+  if (!agentStopEventFired) {
+    hooks::EventPayload payload;
+    payload.threadId = context.history ? context.history->threadId : "";
+    payload.agentId = context.identity.id;
+    payload.persona = context.config.personaName;
+    payload.activeMode = context.state.activeMode;
+    payload.extra["stop_reason"] = runCancelToken->load() ? "cancelled" : "stop";
+    auto fired = hooks::HookDispatcher::fire(WorkflowEventKind::AgentStop, payload);
+    if (!fired.injectedReminders.empty()) {
+      std::string combined;
+      for (std::size_t i = 0; i < fired.injectedReminders.size(); ++i) {
+        if (i > 0) combined += "\n";
+        combined += fired.injectedReminders[i];
+      }
+      appendTurnToHistory(makeInternalNudgeTurn("hook-agent-stop-", combined));
+    }
+  }
 }
 
 void Agent::executeTools(
@@ -2712,12 +2975,7 @@ void Agent::executeTools(
       // Inject intervention nudge
       AgentTurn interventionTurn = makeInternalNudgeTurn(
           "insanity-nudge-",
-          "You are calling the same tool with identical arguments repeatedly "
-          "(" +
-              std::to_string(repeatCount + 1) +
-              " times). This indicates an insanity loop. "
-              "Please stop and try a different approach. Do NOT repeat this "
-              "tool call.");
+          buildToolRepetitionNudge(call.name, repeatCount));
       appendTurnToHistory(interventionTurn);
 
       // Clear the recent signatures to allow recovery
@@ -2806,6 +3064,71 @@ void Agent::executeTools(
         ToolContext toolCtx{*environment_->getHost(), *this, runnable.chunk.id,
                             runCancelToken.get(),
                             &provider::LLMSearchProviderRegistry::instance()};
+
+        // ── Mode gate ──────────────────────────────────────────────────
+        // Consult the active mode's allow/deny scope policy before any
+        // tool body runs. Static tools have a known scope via
+        // ITool::getMetadata(); dynamic MCP tools do not (their scope is
+        // negotiated per-server) so we let those through here and rely
+        // on the MCP layer's own gating. ModeSwitch is hard-bypassed
+        // inside evaluateModeGate to preserve the escape hatch.
+        if (auto staticMeta =
+                toolRegistry.getMetadataFor(runnable.chunk.nameDelta)) {
+          const auto verdict = evaluateModeGate(
+              context.state.activeMode, context.config.personaName,
+              staticMeta->scope, runnable.chunk.nameDelta);
+          if (!verdict.permitted) {
+            execResult.success = false;
+            execResult.resultStr = verdict.reason;
+            // Skip both the dynamic MCP path and toolRegistry.execute
+            // — record-only fail-fast so the agent sees the denial in
+            // its tool result and can mode_switch on the next turn.
+            std::lock_guard<std::mutex> lock(sharedState->mutex);
+            sharedState->results[i] = std::move(execResult);
+            sharedState->completed++;
+            sharedState->cv.notify_all();
+            return;
+          }
+        }
+
+        // ── Pre-tool hook gate ───────────────────────────────────────────
+        hooks::EventPayload hookPayload;
+        hookPayload.threadId = context.history ? context.history->threadId : "";
+        hookPayload.agentId = context.identity.id;
+        hookPayload.persona = context.config.personaName;
+        hookPayload.activeMode = context.state.activeMode;
+        hookPayload.toolName = runnable.chunk.nameDelta;
+        hookPayload.toolArgsJson = runnable.chunk.argsDelta;
+        auto preToolHooks =
+            hooks::HookDispatcher::fire(WorkflowEventKind::PreToolUse, hookPayload);
+        for (const auto &reminder : preToolHooks.injectedReminders) {
+          execResult.resultStr += reminder;
+        }
+        if (preToolHooks.blocked) {
+          execResult.success = false;
+          execResult.resultStr = preToolHooks.blockReason.empty()
+                                     ? "blocked by pre_tool_use hook"
+                                     : preToolHooks.blockReason;
+          std::lock_guard<std::mutex> lock(sharedState->mutex);
+          sharedState->results[i] = std::move(execResult);
+          sharedState->completed++;
+          sharedState->cv.notify_all();
+          return;
+        }
+        if (!preToolHooks.replacementToolArgs.empty()) {
+          execResult.toolArgs = preToolHooks.replacementToolArgs;
+          input.Parse(preToolHooks.replacementToolArgs.c_str());
+          if (input.HasParseError()) {
+            execResult.success = false;
+            execResult.resultStr = "Invalid replacementToolArgs JSON from pre_tool_use hook";
+            std::lock_guard<std::mutex> lock(sharedState->mutex);
+            sharedState->results[i] = std::move(execResult);
+            sharedState->completed++;
+            sharedState->cv.notify_all();
+            return;
+          }
+        }
+
         auto dynamicMcpResult = executeDynamicMcpToolCall(
             context, runnable.chunk.nameDelta, input, toolCtx);
         auto result = dynamicMcpResult.has_value()
@@ -2993,6 +3316,40 @@ void Agent::executeTools(
       journaler->appendTurn(toolResultTurn);
   }
 
+  // ── Fire post_tool_use hooks ────────────────────────────────────────────
+  // Each tool result produces an EventPayload; matching hooks get to inject
+  // a system reminder before the next provider request. Hook reminders are
+  // already wrapped in <FIRMIUS_HOOK> tags by the dispatcher (the model
+  // recognises these via prompts/base.md, same channel as system signals).
+  // Only the post_tool_use event fires here; pre_tool_use needs blocking
+  // semantics and lands with the Day-3 dispatcher upgrade.
+  std::vector<std::string> hookReminders;
+  for (const auto &result : collectedResults) {
+    hooks::EventPayload payload;
+    payload.threadId = context.history ? context.history->threadId : "";
+    payload.agentId = context.identity.id;
+    payload.persona = context.config.personaName;
+    payload.toolName = result.toolName;
+    payload.toolArgsJson = result.toolArgs;
+    payload.toolResultJson = result.resultStr;
+    payload.toolSuccess = result.success;
+    auto fired = hooks::HookDispatcher::fire(
+        WorkflowEventKind::PostToolUse, payload);
+    for (auto &reminder : fired.injectedReminders) {
+      hookReminders.push_back(std::move(reminder));
+    }
+  }
+  if (!hookReminders.empty()) {
+    std::string combined;
+    for (std::size_t i = 0; i < hookReminders.size(); ++i) {
+      if (i > 0) {
+        combined += "\n";
+      }
+      combined += hookReminders[i];
+    }
+    appendTurnToHistory(makeInternalNudgeTurn("hook-post-tool-", combined));
+  }
+
   // Broadcast turn completion
   onEvent(AgentTurnCompleted{context.identity.id, toolResultTurn,
                              context.aggregateMetrics,
@@ -3002,6 +3359,12 @@ void Agent::executeTools(
 void Agent::saveHistory() {
   if (context.config.persistHistory && journaler) {
     journaler->rewriteJournal(context.history->turns);
+  }
+}
+
+void Agent::flushJournal() {
+  if (journaler) {
+    journaler->flush();
   }
 }
 

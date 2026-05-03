@@ -353,6 +353,20 @@ target_include_directories(test_kiro_provider PRIVATE
 )
 gtest_discover_tests(test_kiro_provider)
 
+add_executable(test_windsurf_provider
+    provider/test_windsurf_provider.cpp
+)
+target_link_libraries(test_windsurf_provider PRIVATE
+    firmius::provider
+    firmius::shared
+    GTest::gtest_main
+    GTest::gmock
+)
+target_include_directories(test_windsurf_provider PRIVATE
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_windsurf_provider)
+
 add_executable(test_provider_stream_debug_audit
     audits/test_provider_stream_debug_audit.cpp
 )
@@ -369,6 +383,20 @@ target_include_directories(test_provider_stream_debug_audit PRIVATE
     ${rapidjson_SOURCE_DIR}/include
 )
 gtest_discover_tests(test_provider_stream_debug_audit)
+
+add_executable(test_hooks_platform_audit
+    audits/test_hooks_platform_audit.cpp
+)
+target_link_libraries(test_hooks_platform_audit PRIVATE
+    firmius::core
+    firmius::shared
+    GTest::gtest_main
+    GTest::gmock
+)
+target_include_directories(test_hooks_platform_audit PRIVATE
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_hooks_platform_audit)
 
 add_executable(test_lsp_audit
     audits/test_lsp_audit.cpp
@@ -897,6 +925,7 @@ add_executable(test_chat_window_helpers
     ../../packages/tui/src/tools/SubagentToolPresentation.cpp
     ../../packages/tui/src/tools/WebSearchToolPresentation.cpp
     ../../packages/tui/src/tools/McpToolPresentation.cpp
+    ../../packages/tui/src/tools/ModeSwitchToolPresentation.cpp
     ../../packages/tui/src/tools/WorkToolPresentation.cpp
     ../../packages/tui/src/tools/SearchToolPresentation.cpp
     ../../packages/tui/src/tools/SemanticToolPresentation.cpp
@@ -947,6 +976,7 @@ add_executable(test_chat_window_quick_tool_grouping
     ../../packages/tui/src/tools/SubagentToolPresentation.cpp
     ../../packages/tui/src/tools/WebSearchToolPresentation.cpp
     ../../packages/tui/src/tools/McpToolPresentation.cpp
+    ../../packages/tui/src/tools/ModeSwitchToolPresentation.cpp
     ../../packages/tui/src/tools/WorkToolPresentation.cpp
     ../../packages/tui/src/tools/SearchToolPresentation.cpp
     ../../packages/tui/src/tools/SemanticToolPresentation.cpp
@@ -987,12 +1017,18 @@ gtest_discover_tests(test_model_picker_entries)
 
 add_executable(test_help_overlay
     tui/test_help_overlay.cpp
+    ../../packages/tui/src/components/HelpOverlay.cpp
     ../../packages/tui/src/components/Markdown.cpp
     ../../packages/tui/src/components/ScrollableBox.cpp
+    ../../packages/tui/src/TUIHotkeys.cpp
+    ../../packages/tui/src/commands/CommandManager.cpp
+    ../../packages/tui/src/ThemeManager.cpp
+    ../../packages/tui/src/UserPreferences.cpp
 )
 target_link_libraries(test_help_overlay PRIVATE
     GTest::gtest_main
     GTest::gmock
+    firmius::shared
     ftxui::dom
     ftxui::screen
     ftxui::component
@@ -1000,6 +1036,7 @@ target_link_libraries(test_help_overlay PRIVATE
 target_include_directories(test_help_overlay PRIVATE
     ../../packages/tui/include
     ../../packages/tui/src
+    ${rapidjson_SOURCE_DIR}/include
 )
 gtest_discover_tests(test_help_overlay)
 
@@ -1190,6 +1227,7 @@ gtest_discover_tests(test_agent_strip)
 add_executable(test_user_preferences_skin
     tui/test_user_preferences_skin.cpp
     ../../packages/tui/src/UserPreferences.cpp
+    ../../packages/tui/src/TUIHotkeys.cpp
 )
 target_link_libraries(test_user_preferences_skin PRIVATE
     firmius::shared
@@ -1199,6 +1237,7 @@ target_link_libraries(test_user_preferences_skin PRIVATE
 target_include_directories(test_user_preferences_skin PRIVATE
     ../../packages/tui/include
     ../../packages/tui/src
+    ${rapidjson_SOURCE_DIR}/include
 )
 gtest_discover_tests(test_user_preferences_skin)
 
@@ -1220,6 +1259,7 @@ add_executable(test_tool_presentation
     ../../packages/tui/src/tools/PythonToolPresentation.cpp
     ../../packages/tui/src/tools/ToolPresentation.cpp
     ../../packages/tui/src/tools/McpToolPresentation.cpp
+    ../../packages/tui/src/tools/ModeSwitchToolPresentation.cpp
     ../../packages/tui/src/tools/WorkToolPresentation.cpp
     ../../packages/tui/src/tools/SearchToolPresentation.cpp
     ../../packages/tui/src/tools/SemanticToolPresentation.cpp
@@ -1263,6 +1303,29 @@ target_include_directories(test_permission_prompt_modal PRIVATE
 gtest_discover_tests(test_permission_prompt_modal)
 
 
+
+add_executable(test_command_manager
+    tui/test_command_manager.cpp
+    ../../packages/tui/src/commands/CommandManager.cpp
+    ../../packages/tui/src/commands/McpCommand.cpp
+    ../../packages/tui/src/commands/ConfigCommand.cpp
+    ../../packages/tui/src/modals/ModalRegistry.cpp
+    ../../packages/tui/src/TUIHotkeys.cpp
+)
+target_link_libraries(test_command_manager PRIVATE
+    firmius::shared
+    GTest::gtest_main
+    GTest::gmock
+    ftxui::dom
+    ftxui::screen
+    ftxui::component
+)
+target_include_directories(test_command_manager PRIVATE
+    ../../packages/tui/include
+    ../../packages/tui/src
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_command_manager)
 
 add_executable(test_notification_manager
     tui/test_notification_manager.cpp
@@ -1325,6 +1388,7 @@ add_executable(test_tool_presentation_block
     ../../packages/tui/src/tools/PythonToolPresentation.cpp
     ../../packages/tui/src/tools/ToolPresentation.cpp
     ../../packages/tui/src/tools/McpToolPresentation.cpp
+    ../../packages/tui/src/tools/ModeSwitchToolPresentation.cpp
     ../../packages/tui/src/tools/WorkToolPresentation.cpp
     ../../packages/tui/src/tools/SearchToolPresentation.cpp
     ../../packages/tui/src/tools/SemanticToolPresentation.cpp
@@ -1368,6 +1432,64 @@ target_include_directories(test_workflow PRIVATE
     ${rapidjson_SOURCE_DIR}/include
 )
 gtest_discover_tests(test_workflow)
+
+add_executable(test_hooks_platform
+    core/test_hooks_platform.cpp
+)
+target_link_libraries(test_hooks_platform PRIVATE
+    firmius::core
+    firmius::shared
+    GTest::gtest_main
+    GTest::gmock
+)
+target_include_directories(test_hooks_platform PRIVATE
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_hooks_platform)
+
+add_executable(test_hook_agent_action_e2e
+    core/test_hook_agent_action_e2e.cpp
+)
+target_link_libraries(test_hook_agent_action_e2e PRIVATE
+    firmius::core
+    firmius::shared
+    GTest::gtest_main
+    GTest::gmock
+)
+target_include_directories(test_hook_agent_action_e2e PRIVATE
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_hook_agent_action_e2e)
+
+add_executable(test_hook_agent_stop_event
+    core/test_hook_agent_stop_event.cpp
+)
+target_link_libraries(test_hook_agent_stop_event PRIVATE
+    firmius::core
+    firmius::provider
+    firmius::shared
+    GTest::gtest_main
+    GTest::gmock
+    CURL::libcurl
+)
+target_include_directories(test_hook_agent_stop_event PRIVATE
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_hook_agent_stop_event)
+
+add_executable(test_hook_defined_tool_registry
+    tools/test_hook_defined_tool_registry.cpp
+)
+target_link_libraries(test_hook_defined_tool_registry PRIVATE
+    firmius::core
+    firmius::shared
+    GTest::gtest_main
+    GTest::gmock
+)
+target_include_directories(test_hook_defined_tool_registry PRIVATE
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_hook_defined_tool_registry)
 
 # CommandIntentAnalyzer tests
 add_executable(test_command_intent_analyzer
@@ -1413,6 +1535,21 @@ target_include_directories(test_runtime_overlay PRIVATE
     ${rapidjson_SOURCE_DIR}/include
 )
 gtest_discover_tests(test_runtime_overlay)
+
+add_executable(test_mode_registry
+    agents/test_mode_registry.cpp
+)
+target_link_libraries(test_mode_registry PRIVATE
+    firmius::core
+    firmius::shared
+    GTest::gtest_main
+    GTest::gmock
+)
+target_include_directories(test_mode_registry PRIVATE
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_mode_registry)
+
 add_executable(test_edit_undo
     core/test_edit_undo.cpp
 )

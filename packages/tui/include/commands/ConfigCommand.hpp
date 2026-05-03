@@ -11,6 +11,7 @@ public:
     return "Show current configuration";
   }
   std::vector<CommandArg> args() const override { return {}; }
+  CommandBindingHints bindingHints() const override;
   void execute(CommandCtx &ctx, const std::vector<ParsedArg> &args) override;
 };
 

@@ -14,6 +14,7 @@
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/terminal.hpp>
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cerrno>
 #include <cstdlib>
@@ -273,6 +274,7 @@ ThreadSearchData inspectThreadTranscript(firmius::core::ThreadManager &tm,
       if (!flattenedUser.empty()) flattenedUser.push_back(' ');
       flattenedUser += chunk;
     }
+    data.allUserText = flattenedUser;
   }
 
   std::string flattened;
@@ -305,7 +307,7 @@ struct ThreadEntry {
 namespace firmius::tui {
 
 ftxui::Component ThreadPickerModal::create(TuiState &state) {
-  auto &h = firmius::core::Harness::instance();
+  [[maybe_unused]] auto &h = firmius::core::Harness::instance();
   auto all_threads_ptr = std::make_shared<std::vector<ThreadEntry>>();
   auto filtered_indices = std::make_shared<std::vector<int>>();
   auto filter_text = std::make_shared<std::string>("");
@@ -313,6 +315,10 @@ ftxui::Component ThreadPickerModal::create(TuiState &state) {
   auto list_rows = std::make_shared<std::vector<std::string>>();
   auto list_width = std::make_shared<int>(80);
   auto row_boxes = std::make_shared<std::vector<ftxui::Box>>();
+  auto threads_loading = std::make_shared<bool>(true);
+  auto load_generation = std::make_shared<std::atomic<uint64_t>>(0);
+  auto visible_start = std::make_shared<int>(0);
+  auto visible_count = std::make_shared<int>(10);
 
   enum class SortMode { LastActive, Title, CreatedAt };
   auto sort_mode = std::make_shared<SortMode>(SortMode::LastActive);
@@ -360,76 +366,102 @@ ftxui::Component ThreadPickerModal::create(TuiState &state) {
         }
       };
 
-  auto refresh_threads =
-      [all_threads_ptr, filtered_indices, selected, &h, cwd, rebuild_filtered,
-       sort_mode, show_all] {
-    auto all_threads = h.listThreads();
-    all_threads_ptr->clear();
-    firmius::core::ThreadManager tm(
-        firmius::core::ThreadManager::defaultBasePath());
+  auto start_refresh_threads =
+      [all_threads_ptr, filtered_indices, selected, cwd, rebuild_filtered,
+       sort_mode, show_all, threads_loading, load_generation, &state] {
+        *threads_loading = true;
+        const uint64_t generation =
+            load_generation->fetch_add(1, std::memory_order_relaxed) + 1;
+        const bool showAll = *show_all;
+        const SortMode sortMode = *sort_mode;
 
-    for (const auto &t : all_threads) {
-      if (!*show_all) {
-        if (!cwd.empty() && normalizePath(t.cwd) != cwd && !t.isBenchmarkRun) {
-          continue;
-        }
-      }
+        state.runBackgroundTask(
+            [all_threads_ptr, filtered_indices, selected, cwd, rebuild_filtered,
+             threads_loading, load_generation, generation, showAll, sortMode,
+             &state]() mutable {
+              auto &h = firmius::core::Harness::instance();
+              auto all_threads = h.listThreads();
+              std::vector<ThreadEntry> loaded;
+              loaded.reserve(all_threads.size());
+              firmius::core::ThreadManager tm(
+                  firmius::core::ThreadManager::defaultBasePath());
 
-      ThreadEntry entry;
-      entry.meta = t;
-      entry.agent_count = static_cast<int>(h.listAgents(t.threadId).size());
+              for (const auto &t : all_threads) {
+                if (!showAll && !cwd.empty() && normalizePath(t.cwd) != cwd &&
+                    !t.isBenchmarkRun) {
+                  continue;
+                }
 
-      auto transcript = inspectThreadTranscript(tm, t.threadId);
-      if (transcript.lastUser.found) {
-        entry.last_user_text = transcript.lastUser.text;
-        entry.last_user_timestamp = transcript.lastUser.timestamp;
-      }
-      entry.all_user_text = transcript.allUserText;
+                ThreadEntry entry;
+                entry.meta = t;
+                entry.agent_count =
+                    static_cast<int>(h.listAgents(t.threadId).size());
 
-      // Search blob includes thread id/title plus ALL user prompts across all
-      // agents (not just the most recent user message).
-      entry.search_blob = toLower(flattenText(
-          t.threadId + " " + (t.title.empty() ? "" : t.title) + " " +
-          transcript.allUserText));
+                auto transcript = inspectThreadTranscript(tm, t.threadId);
+                if (transcript.lastUser.found) {
+                  entry.last_user_text = transcript.lastUser.text;
+                  entry.last_user_timestamp = transcript.lastUser.timestamp;
+                }
+                entry.all_user_text = transcript.allUserText;
+                entry.search_blob = toLower(flattenText(
+                    t.threadId + " " + (t.title.empty() ? "" : t.title) +
+                    " " + transcript.allUserText));
 
-      auto locked_pid = lockedPidByOther(t.threadId);
-      if (locked_pid.has_value()) {
-        entry.locked_by_other = true;
-        entry.locked_pid = *locked_pid;
-      }
+                auto locked_pid = lockedPidByOther(t.threadId);
+                if (locked_pid.has_value()) {
+                  entry.locked_by_other = true;
+                  entry.locked_pid = *locked_pid;
+                }
 
-      all_threads_ptr->push_back(std::move(entry));
-    }
+                loaded.push_back(std::move(entry));
+              }
 
-    // Sort visible list first, then apply fuzzy scoring.
-    std::stable_sort(all_threads_ptr->begin(), all_threads_ptr->end(),
-                     [&](const ThreadEntry &a, const ThreadEntry &b) {
-                       if (*sort_mode == SortMode::Title) {
-                         return toLower(a.meta.title) < toLower(b.meta.title);
-                       }
-                       if (*sort_mode == SortMode::CreatedAt) {
-                         return a.meta.createdAt > b.meta.createdAt;
-                       }
-                       // Default: last active first
-                       return a.meta.lastActiveAt > b.meta.lastActiveAt;
-                     });
+              std::stable_sort(
+                  loaded.begin(), loaded.end(),
+                  [&](const ThreadEntry &a, const ThreadEntry &b) {
+                    if (sortMode == SortMode::Title) {
+                      return toLower(a.meta.title) < toLower(b.meta.title);
+                    }
+                    if (sortMode == SortMode::CreatedAt) {
+                      return a.meta.createdAt > b.meta.createdAt;
+                    }
+                    return a.meta.lastActiveAt > b.meta.lastActiveAt;
+                  });
 
-    rebuild_filtered();
-    if (*selected >= static_cast<int>(filtered_indices->size())) {
-      *selected = filtered_indices->empty()
-                      ? 0
-                      : static_cast<int>(filtered_indices->size()) - 1;
-    }
-  };
+              state.deferUiMutation(
+                  [all_threads_ptr, filtered_indices, selected,
+                   rebuild_filtered, threads_loading, load_generation,
+                   generation, loaded = std::move(loaded)]() mutable {
+                    if (load_generation->load(std::memory_order_relaxed) !=
+                        generation) {
+                      return;
+                    }
+                    *all_threads_ptr = std::move(loaded);
+                    *threads_loading = false;
+                    rebuild_filtered();
+                    if (*selected >=
+                        static_cast<int>(filtered_indices->size())) {
+                      *selected = filtered_indices->empty()
+                                      ? 0
+                                      : static_cast<int>(
+                                            filtered_indices->size()) -
+                                            1;
+                    }
+                  });
+            });
+      };
 
-  // Initial load
-  refresh_threads();
+  start_refresh_threads();
 
   auto listContent =
       ftxui::Renderer([all_threads_ptr, filtered_indices, selected, list_width,
-                       row_boxes]() {
+                       row_boxes, visible_start, visible_count]() {
         const auto &theme = ThemeManager::instance().getCurrentTheme();
-        row_boxes->assign(filtered_indices->size(), ftxui::Box{});
+        const int total = static_cast<int>(filtered_indices->size());
+        const int start = std::clamp(*visible_start, 0, std::max(0, total - 1));
+        const int count = std::max(1, *visible_count);
+        const int end = std::min(total, start + count);
+        row_boxes->assign(std::max(0, end - start), ftxui::Box{});
 
         if (filtered_indices->empty()) {
           return ftxui::vbox({
@@ -442,9 +474,15 @@ ftxui::Component ThreadPickerModal::create(TuiState &state) {
         }
 
         ftxui::Elements rows;
-        rows.reserve(filtered_indices->size() * 2);
-        for (int rowIndex = 0;
-             rowIndex < static_cast<int>(filtered_indices->size()); ++rowIndex) {
+        rows.reserve(static_cast<std::size_t>(std::max(0, end - start) * 2 + 2));
+        if (start > 0) {
+          rows.push_back(ftxui::text("... " + std::to_string(start) +
+                                     " more above") |
+                         ftxui::color(theme.base.dim));
+          rows.push_back(ftxui::text(""));
+        }
+        for (int rowIndex = start; rowIndex < end; ++rowIndex) {
+          const int visibleIndex = rowIndex - start;
           const auto &entry = (*all_threads_ptr)[(*filtered_indices)[rowIndex]];
           bool isSelected = rowIndex == *selected;
 
@@ -545,13 +583,18 @@ ftxui::Component ThreadPickerModal::create(TuiState &state) {
               ftxui::text("ID: " + entry.meta.threadId) | ftxui::color(sub_fg);
           auto row =
               ftxui::vbox({top_line, msg_line, id_line}) |
-              ftxui::reflect(row_boxes->at(rowIndex));
+              ftxui::reflect(row_boxes->at(visibleIndex));
           if (isSelected) {
             row = row | ftxui::bgcolor(theme.modals.highlight_bg);
           }
 
           rows.push_back(row);
           rows.push_back(ftxui::text(""));
+        }
+        if (end < total) {
+          rows.push_back(ftxui::text("... " + std::to_string(total - end) +
+                                     " more below") |
+                         ftxui::color(theme.base.dim));
         }
 
         return ftxui::vbox(std::move(rows));
@@ -563,7 +606,9 @@ ftxui::Component ThreadPickerModal::create(TuiState &state) {
   auto modal_renderer =
       ftxui::Renderer(scrollable, [scrollable, list_rows, filtered_indices,
                                    filter_text, all_threads_ptr, selected,
-                                   list_width, sort_mode, show_all] {
+                                   list_width, sort_mode, show_all,
+                                   threads_loading, visible_start,
+                                   visible_count] {
         const auto &theme = ThemeManager::instance().getCurrentTheme();
 
         const auto sortLabel = [&]() -> std::string {
@@ -591,6 +636,34 @@ ftxui::Component ThreadPickerModal::create(TuiState &state) {
         *list_width = content_width;
 
         const int list_max_h = std::max(6, modal_height - 10);
+        const int windowRows = std::max(4, list_max_h / 3);
+        *visible_count = windowRows;
+        if (!filtered_indices->empty()) {
+          const int maxStart =
+              std::max(0, static_cast<int>(filtered_indices->size()) -
+                              windowRows);
+          *visible_start = std::clamp(*selected - windowRows / 2, 0, maxStart);
+        } else {
+          *visible_start = 0;
+        }
+
+        if (*threads_loading && all_threads_ptr->empty()) {
+          return FlatModalPanel(
+              theme, "Select Thread",
+              ModalSection(theme,
+                           ftxui::vbox({
+                               ftxui::text("Loading threads...") |
+                                   ftxui::color(theme.modals.fg) |
+                                   ftxui::center,
+                               ftxui::text(""),
+                               ftxui::text("Thread details will appear as soon "
+                                           "as the index is ready.") |
+                                   ftxui::color(theme.base.dim) |
+                                   ftxui::center,
+                           }),
+                           theme.modals.bg),
+              modal_width, 16);
+        }
 
         if (all_threads_ptr->empty()) {
           return FlatModalPanel(
@@ -634,6 +707,10 @@ ftxui::Component ThreadPickerModal::create(TuiState &state) {
                         ftxui::text("  ") | ftxui::color(theme.base.dim),
                         ftxui::text("Scope: " + scopeLabel) |
                             ftxui::color(theme.base.dim),
+                        *threads_loading
+                            ? (ftxui::text("  reloading") |
+                               ftxui::color(theme.base.dim))
+                            : ftxui::text(""),
                     }),
                     ftxui::hbox({
                         ftxui::filler(),
@@ -661,8 +738,8 @@ ftxui::Component ThreadPickerModal::create(TuiState &state) {
   return ftxui::CatchEvent(
       modal_renderer,
       [all_threads_ptr, filtered_indices, filter_text, selected, row_boxes,
-       scrollable, rebuild_filtered, &state, &h, refresh_threads, sort_mode,
-       show_all](ftxui::Event event) {
+       scrollable, rebuild_filtered, &state, start_refresh_threads, sort_mode,
+       show_all, visible_start](ftxui::Event event) {
     const auto copySelectedThreadId = [&]() {
       rebuild_filtered();
       if (filtered_indices->empty() ||
@@ -697,7 +774,7 @@ ftxui::Component ThreadPickerModal::create(TuiState &state) {
         *sort_mode = SortMode::LastActive;
       }
       *selected = 0;
-      refresh_threads();
+      start_refresh_threads();
       scrollable->RequestScrollToTop();
       return true;
     }
@@ -705,7 +782,7 @@ ftxui::Component ThreadPickerModal::create(TuiState &state) {
         event == ftxui::Event::Character('A')) {
       *show_all = !*show_all;
       *selected = 0;
-      refresh_threads();
+      start_refresh_threads();
       scrollable->RequestScrollToTop();
       return true;
     }
@@ -717,9 +794,10 @@ ftxui::Component ThreadPickerModal::create(TuiState &state) {
         if (entry.locked_by_other) {
           return true;
         }
-        if (h.switchThread(entry.meta.threadId)) {
-          state.popModal();
-        }
+        const std::string threadId = entry.meta.threadId;
+        state.popModal();
+        state.requestThreadOpen(threadId, false, "Opening thread...",
+                                "Loading the selected thread from disk.");
         return true;
       }
       state.popModal();
@@ -798,7 +876,7 @@ ftxui::Component ThreadPickerModal::create(TuiState &state) {
         for (int rowIndex = 0; rowIndex < static_cast<int>(row_boxes->size());
              ++rowIndex) {
           if (row_boxes->at(rowIndex).Contain(mouse.x, mouse.y)) {
-            *selected = rowIndex;
+            *selected = *visible_start + rowIndex;
             return true;
           }
         }

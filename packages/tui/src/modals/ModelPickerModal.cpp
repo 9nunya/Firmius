@@ -1,5 +1,6 @@
 #include "modals/ModelPickerModal.hpp"
 
+#include "NotificationManager.hpp"
 #include "TUIState.hpp"
 #include "ThemeManager.hpp"
 #include "components/ScrollableBox.hpp"
@@ -44,6 +45,9 @@ ftxui::Component ModelPickerModal::create(TuiState &state) {
   auto isLoading = std::make_shared<bool>(true);
   auto fetchingProviders = std::make_shared<std::vector<std::string>>();
   auto rowBoxes = std::make_shared<std::vector<ftxui::Box>>();
+  auto visibleStart = std::make_shared<int>(0);
+  auto visibleCount = std::make_shared<int>(24);
+  auto modalActive = std::make_shared<std::atomic<bool>>(true);
 
   auto rebuildFiltered = [entries, filteredIndices, filterText, selected]() {
     *filteredIndices = FilterModelPickerEntries(*entries, *filterText);
@@ -57,31 +61,46 @@ ftxui::Component ModelPickerModal::create(TuiState &state) {
 
   auto refresh = [entries, isLoading, fetchingProviders, rebuildFiltered]() {
     auto &h = firmius::core::Harness::instance();
-    *entries = BuildModelPickerEntries(h.listAllModels(), true);
+    *entries = BuildModelPickerEntries(h.cachedModelsSnapshot(), true);
     *isLoading = !h.isModelsLoaded();
     *fetchingProviders = h.listProvidersFetchingModels();
     rebuildFiltered();
   };
 
   refresh();
+  state.runBackgroundTask([]() { firmius::core::Harness::instance().listAllModels(); });
 
-  auto needsRefresh = std::make_shared<std::atomic<bool>>(false);
   int subId = firmius::core::Harness::instance().subscribe(
-      [needsRefresh, &state](const firmius::shared::AppEvent &event) {
+      [entries, isLoading, fetchingProviders, rebuildFiltered, modalActive,
+       &state](const firmius::shared::AppEvent &event) {
         if (std::holds_alternative<firmius::shared::ModelsRefreshed>(event) ||
             std::holds_alternative<firmius::shared::ProviderModelsFetchStarted>(
                 event) ||
             std::holds_alternative<firmius::shared::ProviderModelsFetchFinished>(
                 event) ||
             std::holds_alternative<firmius::shared::ModelDiscovered>(event)) {
-          *needsRefresh = true;
-          state.postEvent(ftxui::Event::Custom);
+          state.deferUiMutation([entries, isLoading, fetchingProviders,
+                                 rebuildFiltered, modalActive]() {
+            if (!modalActive->load(std::memory_order_relaxed)) {
+              return;
+            }
+            auto &h = firmius::core::Harness::instance();
+            *entries = BuildModelPickerEntries(h.cachedModelsSnapshot(), true);
+            *isLoading = !h.isModelsLoaded();
+            *fetchingProviders = h.listProvidersFetchingModels();
+            rebuildFiltered();
+          });
         }
       });
 
-  auto listContent = ftxui::Renderer([entries, filteredIndices, selected, rowBoxes]() {
+  auto listContent = ftxui::Renderer([entries, filteredIndices, selected,
+                                      rowBoxes, visibleStart, visibleCount]() {
     const auto &theme = ThemeManager::instance().getCurrentTheme();
-    rowBoxes->assign(filteredIndices->size(), ftxui::Box{});
+    const int total = static_cast<int>(filteredIndices->size());
+    const int start = std::clamp(*visibleStart, 0, std::max(0, total - 1));
+    const int count = std::max(1, *visibleCount);
+    const int end = std::min(total, start + count);
+    rowBoxes->assign(std::max(0, end - start), ftxui::Box{});
 
     if (filteredIndices->empty()) {
       return ftxui::vbox({
@@ -94,9 +113,15 @@ ftxui::Component ModelPickerModal::create(TuiState &state) {
     }
 
     ftxui::Elements rows;
-    rows.reserve(filteredIndices->size() * 2);
-    for (int rowIndex = 0; rowIndex < static_cast<int>(filteredIndices->size());
-         ++rowIndex) {
+    rows.reserve(static_cast<std::size_t>(std::max(0, end - start) * 2 + 2));
+    if (start > 0) {
+      rows.push_back(ftxui::text("  ... " + std::to_string(start) +
+                                 " more above") |
+                     ftxui::color(theme.base.dim));
+      rows.push_back(ftxui::text(""));
+    }
+    for (int rowIndex = start; rowIndex < end; ++rowIndex) {
+      const int visibleIndex = rowIndex - start;
       const auto &entry = (*entries)[(*filteredIndices)[rowIndex]];
       auto row = ftxui::vbox({
                      ftxui::hbox({
@@ -109,7 +134,7 @@ ftxui::Component ModelPickerModal::create(TuiState &state) {
                      ftxui::text("  " + entry.meta_label + "  ") |
                          ftxui::color(theme.base.dim),
                  }) |
-                 ftxui::reflect(rowBoxes->at(rowIndex));
+                 ftxui::reflect(rowBoxes->at(visibleIndex));
 
       if (rowIndex == *selected) {
         row = row | ftxui::bgcolor(theme.modals.highlight_bg);
@@ -117,6 +142,11 @@ ftxui::Component ModelPickerModal::create(TuiState &state) {
 
       rows.push_back(row);
       rows.push_back(ftxui::text(""));
+    }
+    if (end < total) {
+      rows.push_back(ftxui::text("  ... " + std::to_string(total - end) +
+                                 " more below") |
+                     ftxui::color(theme.base.dim));
     }
     return ftxui::vbox(std::move(rows));
   });
@@ -129,22 +159,22 @@ ftxui::Component ModelPickerModal::create(TuiState &state) {
                                                 filterText, selected,
                                                 rebuildFiltered, isLoading,
                                                 fetchingProviders, scrollable,
-                                                needsRefresh,
-                                                refresh]() {
+                                                visibleStart, visibleCount]() {
     const auto &theme = ThemeManager::instance().getCurrentTheme();
     const auto terminal = ftxui::Terminal::Size();
     const int panelWidth = std::clamp(std::max(0, terminal.dimx - 8), 60, 96);
     const int panelHeight = std::clamp(std::max(0, terminal.dimy - 6), 18, 28);
     const int listHeight = std::max(8, panelHeight - 11);
-
-    if (*needsRefresh) {
-      const bool hadNoEntries = entries->empty();
-      *needsRefresh = false;
-      refresh();
-      if (hadNoEntries || !filterText->empty() || *selected == 0) {
-        scrollable->RequestScrollToTop();
-      }
+    const int windowRows = std::max(8, listHeight / 2);
+    *visibleCount = windowRows;
+    if (!filteredIndices->empty()) {
+      const int maxStart =
+          std::max(0, static_cast<int>(filteredIndices->size()) - windowRows);
+      *visibleStart = std::clamp(*selected - windowRows / 2, 0, maxStart);
+    } else {
+      *visibleStart = 0;
     }
+
     rebuildFiltered();
 
     const std::string fetchingLabel = formatProviderList(*fetchingProviders);
@@ -212,9 +242,10 @@ ftxui::Component ModelPickerModal::create(TuiState &state) {
 
   return ftxui::CatchEvent(component, [entries, filteredIndices, filterText,
                                        selected, rebuildFiltered, isLoading,
-                                       subId, scrollable, rowBoxes,
-                                       &state](ftxui::Event event) {
+                                       subId, scrollable, rowBoxes, modalActive,
+                                       visibleStart, &state](ftxui::Event event) {
     const auto closeModal = [&]() {
+      modalActive->store(false, std::memory_order_relaxed);
       firmius::core::Harness::instance().unsubscribe(subId);
       state.popModal();
     };
@@ -229,8 +260,13 @@ ftxui::Component ModelPickerModal::create(TuiState &state) {
       if (!filteredIndices->empty() &&
           *selected < static_cast<int>(filteredIndices->size())) {
         const auto &entry = (*entries)[(*filteredIndices)[*selected]];
-        firmius::core::Harness::instance().switchModel(
-            entry.provider_id, entry.model_id, entry.variant_name);
+        try {
+          firmius::core::Harness::instance().switchModel(
+              entry.provider_id, entry.model_id, entry.variant_name);
+        } catch (const std::exception &ex) {
+          NotificationManager::instance().notifyError("Model", ex.what(),
+                                                      false);
+        }
       }
       closeModal();
       return true;
@@ -289,7 +325,7 @@ ftxui::Component ModelPickerModal::create(TuiState &state) {
         for (int rowIndex = 0; rowIndex < static_cast<int>(rowBoxes->size());
              ++rowIndex) {
           if (rowBoxes->at(rowIndex).Contain(mouse.x, mouse.y)) {
-            *selected = rowIndex;
+            *selected = *visibleStart + rowIndex;
             return true;
           }
         }

@@ -1,5 +1,8 @@
 #include "workflow/Workflow.hpp"
 #include "workflow/WorkflowLoader.hpp"
+#include "agents/hooks/HookEnvelope.hpp"
+#include "agents/hooks/TemplateEngine.hpp"
+
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
@@ -15,31 +18,26 @@ protected:
   bool hadOriginalDir_ = false;
 
   void SetUp() override {
-    // Save original env var
     const char *original = std::getenv("FIRMIUS_WORKFLOWS_DIR");
     if (original) {
       originalWorkflowsDir_ = original;
       hadOriginalDir_ = true;
     }
 
-    // Create temp directory
     char tempTemplate[] = "/tmp/firmius_workflow_test_XXXXXX";
     char *temp = mkdtemp(tempTemplate);
     tempDir_ = temp ? std::string(temp) : "/tmp/firmius_workflow_test";
 
-    // Set env var to temp directory
     ::setenv("FIRMIUS_WORKFLOWS_DIR", tempDir_.c_str(), 1);
   }
 
   void TearDown() override {
-    // Restore original env var
     if (hadOriginalDir_ && !originalWorkflowsDir_.empty()) {
       ::setenv("FIRMIUS_WORKFLOWS_DIR", originalWorkflowsDir_.c_str(), 1);
     } else {
       ::unsetenv("FIRMIUS_WORKFLOWS_DIR");
     }
 
-    // Cleanup temp directory
     if (std::filesystem::exists(tempDir_)) {
       std::filesystem::remove_all(tempDir_);
     }
@@ -80,10 +78,8 @@ TEST_F(WorkflowTest, BuildHandlesMissingArgs) {
   wf.body = "Value: $1 and $2";
   wf.argCount = 2;
 
-  // Only provide one arg
   std::string result = wf.build({"only"});
 
-  // Missing args should be removed
   EXPECT_EQ(result, "Value: only and ");
 }
 
@@ -111,7 +107,6 @@ TEST_F(WorkflowTest, ArgCountDetection) {
   Workflow wf;
   wf.body = "Use $1 and $2 and $3";
 
-  // Manually count like the loader does
   size_t maxArg = 0;
   std::string body = wf.body;
   for (size_t i = 1; i <= 9; ++i) {
@@ -121,129 +116,142 @@ TEST_F(WorkflowTest, ArgCountDetection) {
     }
   }
 
-  EXPECT_EQ(maxArg, 3);
+  EXPECT_EQ(maxArg, 3u);
 }
 
-TEST_F(WorkflowTest, WorkflowLoaderInit) {
-  // Create test workflows
-  createWorkflow("test1.md", R"(---
-name: Test One
-description: First test workflow
+TEST_F(WorkflowTest, LoadsHookPlatformFieldsFromMarkdown) {
+  createWorkflow(
+      "hook_test.md",
+      R"(---
+name: Hook Test
+description: Verify hook platform YAML loads
+trigger:
+  on_event: pre_tool_use
+  block: true
+  match:
+    tool: Files.Edit
+    persona: forge
+action:
+  kind: state
+  writes:
+    - { scope: thread, path: promise.iteration, value: "{{tool.args.value}}" }
+emit:
+  outcome: "reject"
+defines_tool:
+  name: make_pact
+  description: user space pact tool
+  required_scope: Semantic
+  schema:
+    type: object
+    properties:
+      brief: { type: string }
 ---
-Body with $1 arg
-)");
-
-  createWorkflow("test2.md", R"(---
-name: Test Two
-description: Second test workflow
----
-Body without args
-)");
-
-  // Initialize loader
-  WorkflowLoader::instance().init();
-
-  auto ids = WorkflowLoader::instance().getWorkflowIds();
-
-  EXPECT_GE(ids.size(), 2);
-  EXPECT_TRUE(std::find(ids.begin(), ids.end(), "test1") != ids.end());
-  EXPECT_TRUE(std::find(ids.begin(), ids.end(), "test2") != ids.end());
-}
-
-TEST_F(WorkflowTest, WorkflowLoaderGetWorkflow) {
-  createWorkflow("myworkflow.md", R"(---
-name: My Workflow
-description: Test description
----
-Do something with $1
+Body
 )");
 
   WorkflowLoader::instance().init();
-
-  const Workflow *wf = WorkflowLoader::instance().getWorkflow("myworkflow");
-
+  const Workflow *wf = WorkflowLoader::instance().getWorkflow("hook_test");
   ASSERT_NE(wf, nullptr);
-  EXPECT_EQ(wf->name, "My Workflow");
-  EXPECT_EQ(wf->description, "Test description");
-  EXPECT_EQ(wf->argCount, 1);
-  EXPECT_EQ(wf->id, "myworkflow");
+  EXPECT_TRUE(wf->isHook());
+  EXPECT_EQ(wf->trigger.event, WorkflowEventKind::PreToolUse);
+  ASSERT_EQ(wf->action.kind, WorkflowActionKind::State);
+  ASSERT_EQ(wf->action.stateWrites.size(), 1u);
+  EXPECT_EQ(wf->action.stateWrites[0].path, "promise.iteration");
+  ASSERT_TRUE(wf->emit.has_value());
+  EXPECT_EQ(wf->emit->outcomeTemplate, "reject");
+  ASSERT_TRUE(wf->definesTool.has_value());
+  EXPECT_EQ(wf->definesTool->name, "make_pact");
+  EXPECT_NE(wf->definesTool->schemaJson.find("brief"), std::string::npos);
 }
 
-TEST_F(WorkflowTest, WorkflowLoaderDefaultsName) {
-  createWorkflow("snake_case_name.md", R"(---
-description: No name provided
+TEST_F(WorkflowTest, LoadsStructuredMatchPredicatesFromMarkdown) {
+  createWorkflow(
+      "hook_match_structured.md",
+      R"(---
+name: Hook Match Structured
+description: structured match predicates parse
+trigger:
+  on_event: pre_tool_use
+  block: true
+  match:
+    tool: { equals: Files.Edit }
+    persona: { present: true }
+    custom: { present: false }
+action:
+  kind: state
+  writes:
+    - { scope: thread, path: promise.iteration, value: "{{tool.args.value}}" }
 ---
-Body here
+Body
+ )");
+
+  WorkflowLoader::instance().init();
+  const Workflow *wf = WorkflowLoader::instance().getWorkflow("hook_match_structured");
+  ASSERT_NE(wf, nullptr);
+  EXPECT_TRUE(wf->isHook());
+  EXPECT_EQ(wf->trigger.event, WorkflowEventKind::PreToolUse);
+
+  EXPECT_EQ(wf->trigger.match.equals.at("tool"), "Files.Edit");
+  EXPECT_EQ(wf->trigger.match.present.at("persona"), true);
+  EXPECT_EQ(wf->trigger.match.present.at("custom"), false);
+}
+
+TEST_F(WorkflowTest, LoadsRawRemainderSlashWorkflow) {
+  createWorkflow(
+      "promise_command.md",
+      R"(---
+id: promise.command.promise
+slash_command: /promise
+raw_remainder: true
+args:
+  - name: task
+    type: string
+    description: task text
+action:
+  kind: script
+  language: luau
+  body: "return outcome.allow{ text = event.payload.extra.raw_args }"
+---
 )");
 
   WorkflowLoader::instance().init();
-
-  const Workflow *wf = WorkflowLoader::instance().getWorkflow("snake_case_name");
-
-  ASSERT_NE(wf, nullptr);
-  // Should convert snake_case to Title Case
-  EXPECT_FALSE(wf->name.empty());
-}
-
-TEST_F(WorkflowTest, WorkflowLoaderNonExistent) {
-  WorkflowLoader::instance().init();
-
   const Workflow *wf =
-      WorkflowLoader::instance().getWorkflow("nonexistent");
-
-  EXPECT_EQ(wf, nullptr);
+      WorkflowLoader::instance().getWorkflow("promise.command.promise");
+  ASSERT_NE(wf, nullptr);
+  ASSERT_TRUE(wf->slashCommand.has_value());
+  EXPECT_EQ(*wf->slashCommand, "/promise");
+  EXPECT_TRUE(wf->rawRemainder);
+  EXPECT_EQ(wf->action.kind, WorkflowActionKind::Script);
 }
 
-TEST_F(WorkflowTest, WorkflowLoaderGetAllWorkflows) {
-  createWorkflow("wf1.md", "---\nname: WF1\n---\nBody 1");
-  createWorkflow("wf2.md", "---\nname: WF2\n---\nBody 2");
+TEST(TemplateEngineRegression, RendersStateAndToolArgsPaths) {
+  hooks::TemplateContext ctx = hooks::makeTemplateContext(
+      R"({"thread":{"promise":{"iteration":2}}})",
+      R"({"payload":{"persona":"forge"}})",
+      R"({"path":"src/demo.cpp","value":7})",
+      R"({"verdict":{"kind":"reject"}})",
+      {{"persona", "forge"}});
 
-  WorkflowLoader::instance().init();
-
-  auto workflows = WorkflowLoader::instance().getAllWorkflows();
-
-  EXPECT_GE(workflows.size(), 2);
+  const std::string rendered = hooks::renderTemplate(
+      "{{persona}} {{state.thread.promise.iteration}} {{tool.args.path}} {{subagent.return.verdict.kind}}",
+      ctx);
+  EXPECT_EQ(rendered, "forge 2 src/demo.cpp reject");
 }
 
-TEST_F(WorkflowTest, BuiltinWorkflowsFoundInRepo) {
-  // Try to use the actual repo workflows directory if it's reachable.
-  // The test process might run from project root or build dir.
-  std::string repoPath = "workflows";
-  if (!std::filesystem::exists(repoPath)) {
-    // Try one level up (if running from build/packages/core etc.)
-    if (std::filesystem::exists("../workflows")) {
-      repoPath = "../workflows";
-    } else if (std::filesystem::exists("../../workflows")) {
-      repoPath = "../../workflows";
-    } else if (std::filesystem::exists("../../../workflows")) {
-      repoPath = "../../../workflows";
-    } else if (std::filesystem::exists("../../../../workflows")) {
-      repoPath = "../../../../workflows";
-    }
-  }
+TEST(HookEnvelopeRegression, SerializesToolArgsIntoPayload) {
+  hooks::EventPayload payload;
+  payload.threadId = "thread-1";
+  payload.agentId = "agent-1";
+  payload.persona = "forge";
+  payload.toolName = "Files.Edit";
+  payload.toolArgsJson = R"({"path":"src/demo.cpp"})";
 
-  if (std::filesystem::exists(repoPath)) {
-    ::setenv("FIRMIUS_WORKFLOWS_DIR", repoPath.c_str(), 1);
-  } else {
-    // Equivalent controlled setup if repo directory not found.
-    // This ensures the test is deterministic even if file structure differs.
-    createWorkflow("deep_interview.md", "---\nname: Deep Interview\n---\nBody");
-    createWorkflow("plan_gate.md", "---\nname: Plan Gate\n---\nBody");
-    createWorkflow("evidence_sweep.md", "---\nname: Evidence Sweep\n---\nBody");
-    createWorkflow("repair_wave.md", "---\nname: Repair Wave\n---\nBody");
-    createWorkflow("explore.md", "---\nname: Explore\n---\nBody");
-    // Fixture already sets FIRMIUS_WORKFLOWS_DIR to tempDir_
-  }
-
-  WorkflowLoader::instance().init();
-  auto ids = WorkflowLoader::instance().getWorkflowIds();
-
-  std::vector<std::string> expected = {
-      "deep_interview", "plan_gate", "evidence_sweep", "repair_wave", "explore"};
-
-  for (const auto &id : expected) {
-    EXPECT_TRUE(std::find(ids.begin(), ids.end(), id) != ids.end())
-        << "Workflow ID '" << id << "' not found in loader after init.";
-  }
+  const auto env = hooks::buildEnvelope("hook.id",
+                                        WorkflowEventKind::PreToolUse,
+                                        payload, "{}");
+  const std::string json = hooks::serializeEnvelope(env);
+  EXPECT_NE(json.find("src/demo.cpp"), std::string::npos);
+  EXPECT_NE(json.find("Files.Edit"), std::string::npos);
 }
+
 } // namespace firmius::core

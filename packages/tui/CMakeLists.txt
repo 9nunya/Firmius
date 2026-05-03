@@ -19,6 +19,7 @@ target_sources(firmius_tui PRIVATE
     src/commands/CompactCommand.cpp
     src/commands/ConfigCommand.cpp
     src/commands/MemoryCommand.cpp
+    src/commands/ModeCommand.cpp
     src/commands/ConnectCommand.cpp
     src/commands/McpCommand.cpp
     src/commands/BenchmarksCommand.cpp
@@ -26,17 +27,24 @@ target_sources(firmius_tui PRIVATE
     src/commands/AccountsCommand.cpp
     src/commands/QuitCommand.cpp
     src/commands/RouterCommand.cpp
+    src/commands/ProvidersCommand.cpp
     src/commands/PurposesCommand.cpp
     src/commands/SkinCommand.cpp
     src/commands/EditHistoryCommand.cpp
+    src/commands/HistoryCommand.cpp
+    src/commands/HooksCommand.cpp
+    src/commands/UndoRedoCommands.cpp
     src/commands/WorkflowsCommand.cpp
     src/modals/ModalRegistry.cpp
+    src/modals/CommandPaletteModal.cpp
+    src/modals/KeybindingEditorModal.cpp
     src/modals/ThreadPickerModal.cpp
     src/modals/ThreadLockedModal.cpp
     src/modals/ModelPickerModal.cpp
     src/modals/ConfigDisplayModal.cpp
     src/modals/RollingMemorySettingsModal.cpp
     src/modals/RouterModal.cpp
+    src/modals/ProvidersModal.cpp
     src/modals/PurposesModal.cpp
     src/modals/McpModal.cpp
     src/modals/PermissionPromptModal.cpp
@@ -74,6 +82,7 @@ target_sources(firmius_tui PRIVATE
     src/tools/PythonToolPresentation.cpp
     src/tools/WebSearchToolPresentation.cpp
     src/tools/McpToolPresentation.cpp
+    src/tools/ModeSwitchToolPresentation.cpp
     src/tools/ToolPresentation.cpp
     src/tools/WorkToolPresentation.cpp
     src/tools/SearchToolPresentation.cpp
@@ -81,8 +90,10 @@ target_sources(firmius_tui PRIVATE
     src/tools/GenericToolPresentation.cpp
     src/utils/ReferenceAutocomplete.cpp
     src/utils/ClaudexActivity.cpp
+    src/utils/ModeCycle.cpp
     src/utils/Clipboard.cpp
     src/TuiRunner.cpp
+    src/FatalSignalHandler.cpp
     src/components/LiveStatusRow.cpp
     src/models/TUIStore.cpp
     src/models/TranscriptModel.cpp

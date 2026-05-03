@@ -16,6 +16,21 @@ struct UndoResult {
     bool willExceedContext = false;
 };
 
+// V1 Historical Redo Contracts (from monolith 08fd932 era)
+struct UndoActionResult {
+    std::string undoActionId;
+    std::string threadId;
+    std::string agentId;
+    int turnsRemoved = 0;
+};
+
+struct RedoActionResult {
+    std::string redoActionId;
+    std::string threadId;
+    std::string agentId;
+    int restoredTurns = 0;
+};
+
 class HistoryEditor {
 public:
     static UndoResult undoTurns(std::vector<AgentTurn>& turns, int count);

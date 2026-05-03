@@ -58,6 +58,7 @@ TEST(PermissionPromptModalTest, ReadPermissionUsesLocationLanguage) {
   request.title = "Read permission required";
   request.message = "Approve this file or directory read request.";
   request.targetPath = "/opt/project/.venv";
+  request.toolName = "Files.Read";
   request.severity = firmius::shared::CommandSeverity::LOW;
   request.allowAlways = true;
 
@@ -70,11 +71,47 @@ TEST(PermissionPromptModalTest, ReadPermissionUsesLocationLanguage) {
 
   const std::string output = RenderModal(modal.create(state));
   EXPECT_NE(output.find("Allow once"), std::string::npos);
-  EXPECT_NE(output.find("Always allow this location for this session"),
+  EXPECT_NE(output.find("Allow this exact location for this session"),
             std::string::npos);
-  EXPECT_NE(output.find("Allow all directory reads this session"), std::string::npos);
-  EXPECT_NE(output.find("/opt/project/.venv"), std::string::npos);
+  EXPECT_NE(output.find("Allow every read this session"), std::string::npos);
+  EXPECT_NE(output.find("Tool: Files.Read"), std::string::npos);
+  EXPECT_NE(output.find("Path: /opt/project/.venv"), std::string::npos);
   EXPECT_EQ(chosen, firmius::shared::PermissionResponse::Deny);
+}
+
+TEST(PermissionPromptModalTest,
+     CommandPermissionNamesExactCommandToolAndSelection) {
+  firmius::tui::TuiState &state = firmius::tui::TuiState::instance();
+  state.clearModals();
+
+  firmius::shared::PermissionEscalationRequest request;
+  request.requestType = firmius::shared::PermissionRequestType::Command;
+  request.title = "Command permission required";
+  request.message = "Approve this command request.";
+  request.command = "git status --short";
+  request.commandPrimary = "git";
+  request.toolName = "Process";
+  request.toolCallId = "call-42";
+  request.severity = firmius::shared::CommandSeverity::LOW;
+
+  firmius::shared::PermissionResponse chosen =
+      firmius::shared::PermissionResponse::Deny;
+  firmius::tui::PermissionPromptModal modal(
+      request, [&](firmius::shared::PermissionResponse response) {
+        chosen = response;
+      });
+
+  auto component = modal.create(state);
+  const std::string output = RenderModal(component);
+  EXPECT_NE(output.find("Tool: Process"), std::string::npos);
+  EXPECT_NE(output.find("Command: git status --short"), std::string::npos);
+  EXPECT_NE(output.find("Primary command: git"), std::string::npos);
+  EXPECT_NE(output.find("Run once: git status --short"), std::string::npos);
+
+  EXPECT_TRUE(component->OnEvent(ftxui::Event::ArrowDown));
+  EXPECT_TRUE(component->OnEvent(ftxui::Event::Return));
+  EXPECT_EQ(chosen,
+            firmius::shared::PermissionResponse::AllowCommandSession);
 }
 
 } // namespace

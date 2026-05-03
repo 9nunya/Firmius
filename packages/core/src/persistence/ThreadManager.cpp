@@ -670,6 +670,9 @@ ThreadPermissionMode threadPermissionModeFromStoredString(
     if (value == "AlwaysAllow") {
         return ThreadPermissionMode::AlwaysAllow;
     }
+    if (value == "DenyAll") {
+        return ThreadPermissionMode::DenyAll;
+    }
     return ThreadPermissionMode::Request;
 }
 
@@ -3159,9 +3162,9 @@ ThreadPermissionRules ThreadManager::readPermissionRules(
         rule.appliesToAllReads = sqlite3_column_int(pathStmt.get(), 3) != 0;
         rule.isGlobal = sqlite3_column_int(pathStmt.get(), 4) != 0;
         if (!rule.pathPrefix.empty()) {
-            if (!rule.readOnly) {
-                rules.writeAllowPaths.push_back(rule.pathPrefix);
-            }
+            // `writeAllowPaths` is a legacy convenience view used by tests/UI.
+            // It includes persisted prefixes regardless of readOnly.
+            rules.writeAllowPaths.push_back(rule.pathPrefix);
             rules.pathAllowRules.push_back(std::move(rule));
         }
     }
@@ -3840,6 +3843,27 @@ ThreadManager::findTranscriptUndoAction(const std::string& threadId,
     const auto* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 0));
     auto doc = parseJson(text ? text : "{}", "transcript undo action");
     return shared::transcriptUndoActionFromJson(doc);
+}
+
+std::vector<shared::TranscriptUndoAction>
+ThreadManager::listTranscriptUndoActions(const std::string& threadId, int limit) const {
+    if (threadId.empty() || limit <= 0) {
+        return {};
+    }
+    auto conn = acquireConnection(basePath_);
+    Statement stmt(conn->db,
+                   "SELECT action_json FROM transcript_undo_actions_v1 WHERE thread_id=? ORDER BY created_at DESC LIMIT ?;",
+                   "Failed to prepare transcript undo action list");
+    bindText(stmt.get(), 1, threadId);
+    sqlite3_bind_int(stmt.get(), 2, limit);
+
+    std::vector<shared::TranscriptUndoAction> actions;
+    while (sqlite3_step(stmt.get()) == SQLITE_ROW) {
+        const auto* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 0));
+        auto doc = parseJson(text ? text : "{}", "transcript undo action");
+        actions.push_back(shared::transcriptUndoActionFromJson(doc));
+    }
+    return actions;
 }
 
 std::vector<shared::TranscriptRedoPayload>

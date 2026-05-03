@@ -1,6 +1,5 @@
 #include "agents/PurposeLoader.hpp"
-#include "ConfigLoader.hpp"
-#include "agents/HintingLoader.hpp"
+#include "agents/prompts/PromptComposer.hpp"
 #include "utils/FrontmatterParser.hpp"
 #include "utils/FSUtil.hpp"
 #include "utils/StringUtil.hpp"
@@ -310,119 +309,37 @@ PurposeWorkRole PurposeLoader::resolveWorkRole(const std::string &purpose) {
 std::string PurposeLoader::composeSystemPrompt(const Persona &persona,
                                                const AgentContext &context,
                                                const std::string &toolsBlock) {
-  const std::string detectedModelFamily = ModelHintResolver::detectFamily(
-      context.config.providerId, context.config.modelId,
-      context.config.modelVariant);
-  std::optional<HintingOverlay> hintingOverlay;
-  try {
-    hintingOverlay = HintingLoader::loadForModel(context.config.providerId,
-                                                 context.config.modelId,
-                                                 context.config.modelVariant);
-  } catch (const std::exception &e) {
-    std::cerr << "[hinting] Failed to load model hinting overlay: " << e.what()
-              << "\n";
-  } catch (...) {
-    std::cerr << "[hinting] Failed to load model hinting overlay.\n";
+  // Layered composition. Stable layers (House Doctrine, Output Style,
+  // Persona Voice, Profile, Hinting) come first so prompt-cache hits stay
+  // warm; per-turn layers (Environment, Active Context) follow; scoped
+  // frames (Mode, Workflow, Branch, Pact) render only when their owning
+  // subsystem reports active state via PromptInputs. Adding a new section
+  // is one registration call in PromptComposer::buildDefault().
+  prompts::PromptInputs inputs;
+  inputs.persona = &persona;
+  inputs.context = &context;
+  inputs.toolsBlock = toolsBlock;
+  // Surface the live activeMode from AgentState so ModeOverlaySection +
+  // ModeFrameSection render the correct sub-mode prompt every turn.
+  if (!context.state.activeMode.empty()) {
+    inputs.activeModeName = context.state.activeMode;
   }
 
-  std::string basePrompt;
-  std::ifstream baseFile(resolvePromptsDir() + "base.md");
-  if (baseFile.is_open()) {
-    std::stringstream buffer;
-    buffer << baseFile.rdbuf();
-    basePrompt = buffer.str();
-  }
-
-  // Dynamic placeholders
-  std::map<std::string, std::string> placeholders;
-  placeholders["{{AGENT_NAME}}"] = persona.name;
-  placeholders["{{AGENT_TITLE}}"] = persona.title;
-  placeholders["{{CWD}}"] = context.environment.cwd;
-  placeholders["{{MODEL_FAMILY}}"] = detectedModelFamily;
-  placeholders["{{ACTIVE_HINTING_FILE}}"] =
-      hintingOverlay.has_value() ? hintingOverlay->name : "none";
-
-  std::string promptsDir = resolvePromptsDir();
-  std::vector<std::string> purposes;
-  if (std::filesystem::exists(promptsDir)) {
-    for (const auto &entry : std::filesystem::directory_iterator(promptsDir)) {
-      if (entry.path().extension() == ".md" && entry.path().stem() != "base" &&
-          entry.path().stem() != "COMPACTION_PROMPT") {
-        purposes.push_back(entry.path().stem().string());
+  // Custom placeholders need to flow through the composer's HouseDoctrine
+  // section. We re-apply them here on top of the composed output for
+  // backward compatibility with anything that has registered keys outside
+  // the standard set.
+  std::string composed = prompts::PromptComposer::buildDefault().compose(inputs);
+  if (!customPlaceholders.empty()) {
+    for (const auto &[key, value] : customPlaceholders) {
+      std::size_t pos = 0;
+      while ((pos = composed.find(key, pos)) != std::string::npos) {
+        composed.replace(pos, key.length(), value);
+        pos += value.length();
       }
     }
   }
-  std::string purposeList;
-  std::sort(purposes.begin(), purposes.end());
-  purposes.erase(std::unique(purposes.begin(), purposes.end()), purposes.end());
-  for (size_t i = 0; i < purposes.size(); ++i) {
-    purposeList += purposes[i];
-    if (i < purposes.size() - 1)
-      purposeList += ", ";
-  }
-  placeholders["{{REGISTERED_PURPOSES}}"] = purposeList;
-
-  // Custom placeholders
-  for (const auto &[key, value] : customPlaceholders) {
-    placeholders[key] = value;
-  }
-
-  for (const auto &[key, value] : placeholders) {
-    size_t pos = 0;
-    while ((pos = basePrompt.find(key, pos)) != std::string::npos) {
-      basePrompt.replace(pos, key.length(), value);
-      pos += value.length();
-    }
-  }
-
-  std::stringstream ss;
-  ss << basePrompt << "\n\n";
-  ss << "# AGENT IDENTITY\n" << persona.identityPrompt << "\n\n";
-
-  if (hintingOverlay.has_value()) {
-    ss << "# MODEL-SPECIFIC HINTING\n";
-    ss << "Detected Family: " << detectedModelFamily << "\n";
-    ss << "Hinting File: " << hintingOverlay->name << "\n\n";
-    ss << hintingOverlay->body << "\n\n";
-  }
-
-  ss << "# ENVIRONMENT\n";
-  ss << "Host: " << context.environment.identifier << "\n";
-  ss << "CWD: " << context.environment.cwd << "\n\n";
-  ss << "MODEL: " << context.config.modelId << "\n\n";
-
-  ss << "Purposes Registered (you use these in summon_subagent): "
-     << purposeList << "\n\n";
-
-  const auto &cfg = shared::ConfigLoader::instance().getConfig();
-  std::vector<std::string> category_names;
-  category_names.reserve(cfg.modelRouterCategories.size());
-  for (const auto &[name, _] : cfg.modelRouterCategories) {
-    category_names.push_back(name);
-  }
-  std::sort(category_names.begin(), category_names.end());
-  std::string categories_summary;
-  for (size_t i = 0; i < category_names.size(); ++i) {
-    if (i > 0) {
-      categories_summary += ", ";
-    }
-    categories_summary += category_names[i];
-  }
-  if (categories_summary.empty()) {
-    categories_summary = "(none)";
-  }
-  ss << "Model Route Categories: " << categories_summary << "\n";
-  if (!cfg.defaultRouteCategory.empty()) {
-    ss << "Default Route Category: " << cfg.defaultRouteCategory << "\n";
-  }
-  ss << "\n";
-
-  if (!toolsBlock.empty()) {
-    // literally not even needed
-    // ss << "# AVAILABLE TOOLS\n" << toolsBlock << "\n";
-  }
-
-  return ss.str();
+  return composed;
 }
 
 // deprecated
@@ -636,17 +553,27 @@ void PurposeLoader::bootstrapDefaults(const std::string &builtinPromptsDir) {
     } catch (const std::filesystem::filesystem_error &) {
     }
   }
-  for (const auto &entry : std::filesystem::directory_iterator(builtinDir)) {
-    if (entry.is_regular_file()) {
-      std::filesystem::path target = userDir / entry.path().filename();
-      try {
-        std::filesystem::copy_file(
-            entry.path(), target,
-            std::filesystem::copy_options::overwrite_existing);
-      } catch (const std::filesystem::filesystem_error &) {
-        // Best-effort cache population only. Startup must continue using
-        // readable built-in prompts when the user prompt cache is unwritable.
-      }
+  // Mirror every prompt file, *including* nested subdirectories like
+  // `modes/<persona>/*.md` for persona-scoped sub-modes. Without recursion,
+  // any persona who carries an internal sub-mode set (forge, aster, fast,
+  // glimmer, harbor, loom, meridian, vellum, witness, …) would have their
+  // sub-modes invisible at runtime once the user cache exists.
+  for (const auto &entry :
+       std::filesystem::recursive_directory_iterator(builtinDir)) {
+    if (!entry.is_regular_file()) {
+      continue;
+    }
+    std::filesystem::path relative =
+        std::filesystem::relative(entry.path(), builtinDir);
+    std::filesystem::path target = userDir / relative;
+    try {
+      std::filesystem::create_directories(target.parent_path());
+      std::filesystem::copy_file(
+          entry.path(), target,
+          std::filesystem::copy_options::overwrite_existing);
+    } catch (const std::filesystem::filesystem_error &) {
+      // Best-effort cache population only. Startup must continue using
+      // readable built-in prompts when the user prompt cache is unwritable.
     }
   }
 }
