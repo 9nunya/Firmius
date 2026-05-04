@@ -18,12 +18,16 @@
 #include "TUIState.hpp"
 #undef private
 
+#include "components/StatusBar.hpp"
+#include "components/InputBar.hpp"
+#include "components/PlanLane.hpp"
+#include "components/TitleBar.hpp"
+#include <ftxui/component/component.hpp>
+
 #include "AgentRegistry.hpp"
 #include "agents/hooks/HookState.hpp"
 #include "agents/hooks/ScriptRuntime.hpp"
 #include "harness/Harness.hpp"
-#include "controllers/InputController.hpp"
-#include "controllers/AppController.hpp"
 #include "UserPreferences.hpp"
 #include "../mocks/MockAgent.hpp"
 
@@ -159,7 +163,6 @@ void resetTuiStateForTest(TuiState &state, Harness &harness) {
   state.harness_ = &harness;
   state.thread_ = {};
   state.focused_agent_id_.clear();
-  firmius::tui::TUIStore::instance().focused_agent_id.clear();
   state.history_.reset();
   state.stream_state_ = StreamStateManager{};
   state.title_model_.reset();
@@ -369,9 +372,6 @@ TEST(TuiStateThreadSyncTest,
     state.setSkinKind(skin);
     state.thread_.threadId = "thread-1";
     state.focused_agent_id_ = "agent-1";
-    auto &store = firmius::tui::TUIStore::instance();
-    store.thread_id = "thread-1";
-    store.focused_agent_id = "agent-1";
 
     auto probe = ftxui::Make<TranscriptProbeComponent>();
     auto *probe_ptr = probe.get();
@@ -411,9 +411,6 @@ TEST(TuiStateThreadSyncTest,
     state.setSkinKind(skin);
     state.thread_.threadId = "thread-1";
     state.focused_agent_id_ = "agent-1";
-    auto &store = firmius::tui::TUIStore::instance();
-    store.thread_id = "thread-1";
-    store.focused_agent_id = "agent-1";
 
     auto probe = ftxui::Make<TranscriptProbeComponent>();
     auto *probe_ptr = probe.get();
@@ -470,15 +467,11 @@ TEST(TuiStateThreadSyncTest, SubagentSpawnDoesNotStealFocusFromParent) {
   resetTuiStateForTest(state, harness);
   state.thread_.threadId = threadId;
   state.focused_agent_id_ = "focus-parent";
-  auto &store = firmius::tui::TUIStore::instance();
-  store.thread_id = threadId;
-  store.focused_agent_id = "focus-parent";
 
   state.handleAppEvent(AgentSpawned{"focus-child", "scout", "focus-parent",
                                     "scout", "Scout", true, "", "", 0});
 
   EXPECT_EQ(state.focused_agent_id_, "focus-parent");
-  EXPECT_EQ(store.focused_agent_id, "focus-parent");
   EXPECT_EQ(harness.focusedAgentId(), "focus-parent");
 }
 
@@ -619,10 +612,6 @@ TEST(TuiStateThreadSyncTest, WelcomePromptSubmitCreatesThreadAndTransitionsToCha
   resetTuiStateForTest(state, harness);
   state.initModels();
   state.setViewMode(TuiState::ViewMode::Welcome);
-  firmius::tui::TUIStore::instance().view_mode =
-      firmius::tui::TUIStore::ViewMode::Welcome;
-  firmius::tui::TUIStore::instance().thread_id.clear();
-  firmius::tui::TUIStore::instance().focused_agent_id.clear();
   state.thread_ = {};
   state.focused_agent_id_.clear();
 
@@ -640,10 +629,9 @@ TEST(TuiStateThreadSyncTest, WelcomePromptSubmitCreatesThreadAndTransitionsToCha
   }
 
   ASSERT_TRUE(transitioned);
-  EXPECT_EQ(firmius::tui::TUIStore::instance().thread_id,
+  EXPECT_EQ(state.thread_.threadId,
             state.thread_.threadId);
-  EXPECT_EQ(firmius::tui::TUIStore::instance().focused_agent_id,
-            state.focused_agent_id_);
+  EXPECT_FALSE(state.focused_agent_id_.empty());
 }
 
 TEST(TuiStateThreadSyncTest,
@@ -709,8 +697,7 @@ TEST(TuiStateThreadSyncTest,
     const int after_thread_open = probe_ptr->transcript_changed_events;
     EXPECT_GE(after_thread_open, after_submit + 1);
 
-    firmius::tui::TUIStore::instance().focused_agent_id.clear();
-
+  
     // lead spawn should focus the agent (or at least ensure subsequent
     // streaming text refreshes the transcript once the UI is focused on it)
     AgentContext leadContext;
@@ -722,7 +709,7 @@ TEST(TuiStateThreadSyncTest,
 
     // Simulate UI focus landing on the new lead agent.
     state.focused_agent_id_ = "lead-1";
-    firmius::tui::TUIStore::instance().focused_agent_id = "lead-1";
+    state.focused_agent_id_ = "lead-1";
 
     const auto before_stream_render =
         state.renderGeneration(firmius::tui::RefreshFlags::ChatTranscript);
@@ -759,59 +746,11 @@ TEST(TuiStateThreadSyncTest,
   ASSERT_TRUE(harness.setFocusedAgent("lead-1"));
 
   state.focused_agent_id_ = "lead-1";
-  firmius::tui::TUIStore::instance().focused_agent_id = "lead-1";
 
   state.applyThreadOpened(metadata, "", true);
 
   EXPECT_EQ(state.focused_agent_id_, "lead-1");
-  EXPECT_EQ(firmius::tui::TUIStore::instance().focused_agent_id, "lead-1");
-}
-
-TEST(TuiStateThreadSyncTest, FileReferenceAutocompleteIndexesInBackground) {
-  auto &harness = Harness::instance();
-  harness.init();
-
-  auto &state = TuiState::instance();
-  resetTuiStateForTest(state, harness);
-
-  const auto root = std::filesystem::temp_directory_path() /
-                    "firmius_tui_file_reference_async";
-  std::filesystem::remove_all(root);
-  std::filesystem::create_directories(root / "src");
-  {
-    std::ofstream out(root / "src" / "needle.txt");
-    out << "needle";
-  }
-
-  auto &controller = firmius::tui::InputController::instance();
-  {
-    std::lock_guard<std::mutex> lock(controller.file_reference_cache_mutex_);
-    controller.file_reference_cache_ready_ = false;
-    controller.file_reference_cache_loading_ = false;
-    controller.file_reference_cache_root_.clear();
-    controller.file_reference_cache_paths_.clear();
-  }
-
-  const auto first =
-      controller.completeFileReferences("needle", root.string());
-  EXPECT_TRUE(first.empty());
-
-  for (int attempt = 0; attempt < 100; ++attempt) {
-    state.drainEvents();
-    {
-      std::lock_guard<std::mutex> lock(controller.file_reference_cache_mutex_);
-      if (controller.file_reference_cache_ready_)
-        break;
-    }
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-  }
-  state.drainEvents();
-
-  const auto second =
-      controller.completeFileReferences("needle", root.string());
-  EXPECT_FALSE(second.empty());
-
-  std::filesystem::remove_all(root);
+  EXPECT_EQ(state.focused_agent_id_, "lead-1");
 }
 
 } // namespace

@@ -3,7 +3,6 @@
 #include "AgentRegistry.hpp"
 #include "NotificationManager.hpp"
 #include "TUIState.hpp"
-#include "models/TUIStore.hpp"
 #include "agents/modes/Mode.hpp"
 #include "utils/ModeCycle.hpp"
 
@@ -58,7 +57,6 @@ void ModeCommand::execute(CommandCtx &ctx, const std::vector<ParsedArg> &args) {
       }
     }
     state.thread_.initialMode = next;
-    TUIStore::instance().thread_metadata.initialMode = next;
     NotificationManager::instance().notifyInfo(
         "Mode",
         next.empty() ? "Initial mode cleared (no overlay)."

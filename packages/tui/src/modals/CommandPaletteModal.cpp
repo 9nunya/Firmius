@@ -1,8 +1,9 @@
 #include "modals/CommandPaletteModal.hpp"
 
 #include "ThemeManager.hpp"
+#include "TUIState.hpp"
 #include "commands/CommandManager.hpp"
-#include "models/TUIStore.hpp"
+#include "components/InputBar.hpp"
 #include "modals/ModalLayout.hpp"
 
 #include <algorithm>
@@ -145,11 +146,10 @@ ftxui::Component CommandPaletteModal::create(TuiState &state) {
       return true;
     }
     if (event == ftxui::Event::Return) {
-      auto &store = TUIStore::instance();
-      if (!rows->empty() && store.input_model && store.input_model->buffer &&
-          store.input_model->cursor) {
-        *store.input_model->buffer = rows->at(*selected).preview;
-        *store.input_model->cursor = static_cast<int>(store.input_model->buffer->size());
+      auto &input = TuiState::instance().getInputBarModel();
+      if (!rows->empty() && input.buffer && input.cursor) {
+        *input.buffer = rows->at(*selected).preview;
+        *input.cursor = static_cast<int>(input.buffer->size());
       }
       state.popModal();
       return true;

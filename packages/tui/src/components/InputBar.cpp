@@ -6,7 +6,6 @@
 #include "agents/modes/Mode.hpp"
 #include "TUIHotkeys.hpp"
 #include "commands/CommandManager.hpp"
-#include "models/TUIStore.hpp"
 #include "providers/BaseAPIKeyProvider.hpp"
 #include "providers/BaseOAuthProvider.hpp"
 #include "providers/ProviderRegistry.hpp"
@@ -310,7 +309,6 @@ buildAtReferenceSuggestions(const std::shared_ptr<InputBarModel> &model,
 // to the lead persona on the pre-thread metadata (defaulting to "aster"
 // when nothing is set yet, mirroring ModeCommand's resolution logic).
 std::string activePersonaForModeSuggestions() {
-  auto &store = TUIStore::instance();
   auto &state = TuiState::instance();
   if (state.getViewMode() == TuiState::ViewMode::Welcome) {
     return state.thread_.leadPersona.empty()
@@ -318,8 +316,7 @@ std::string activePersonaForModeSuggestions() {
                : state.thread_.leadPersona;
   }
   if (auto agent = firmius::core::AgentRegistry::instance().getAgent(
-          state.focused_agent_id_.empty() ? store.focused_agent_id
-                                          : state.focused_agent_id_)) {
+          state.focused_agent_id_)) {
     return agent->getContext().config.personaName;
   }
   return "aster";

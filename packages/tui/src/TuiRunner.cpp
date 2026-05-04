@@ -5,7 +5,6 @@
 #include "TUIState.hpp"
 #include "agents/PurposeLoader.hpp"
 #include "harness/Harness.hpp"
-#include "models/TUIStore.hpp"
 #include "workflow/WorkflowLoader.hpp"
 #include <atomic>
 #include <chrono>

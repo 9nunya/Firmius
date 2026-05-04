@@ -4,25 +4,22 @@
 #include "ActivePlanState.hpp"
 #include "EventQueue.hpp"
 #include "Events.hpp"
-#include "NotificationManager.hpp"
 #include "SkinConfig.hpp"
 #include "StreamStateManager.hpp"
 #include "WorkPanelLayout.hpp"
 #include "components/AgentStrip.hpp"
 #include "components/ContextLane.hpp"
-#include "components/PlanLane.hpp"
 #include "components/TodoLane.hpp"
-#include "controllers/UiActions.hpp"
-#include "models/PermissionModel.hpp"
-#include "models/TUIStore.hpp"
-#include "models/TranscriptModel.hpp"
-#include "views/MainView.hpp"
+#include "utils/BackgroundTaskPool.hpp"
+#include "utils/UiActions.hpp"
+#include "utils/TranscriptExpansion.hpp"
 #include <atomic>
 #include <array>
 #include <chrono>
 #include <filesystem>
 #include <ftxui/component/component_base.hpp>
 #include <ftxui/component/screen_interactive.hpp>
+#include <ftxui/component/captured_mouse.hpp>
 #include <ftxui/screen/box.hpp>
 #include <functional>
 #include <memory>
@@ -40,6 +37,12 @@ struct CompactionSnapshot;
 }
 
 namespace firmius::tui {
+namespace shared = firmius::shared;
+
+struct TitleBarModel;
+struct StatusBarModel;
+struct InputBarModel;
+struct PlanLaneModel;
 
 enum class RefreshFlags : unsigned int {
   None = 0,
@@ -79,6 +82,14 @@ struct TuiProfilingStats {
   std::atomic<int64_t> chat_window_rebuild_ns{0};
   std::atomic<uint64_t> frame_render_count{0};
   std::atomic<int64_t> frame_render_ns{0};
+
+  // Modern RAF monitoring
+  std::atomic<uint64_t> raf_state_count{0};
+  std::atomic<uint64_t> raf_scrollable_width_change_count{0};
+  std::atomic<uint64_t> raf_agent_strip_spinner_count{0};
+  mutable std::mutex modal_profile_mutex;
+  std::unordered_map<std::string, std::chrono::steady_clock::time_point>
+      modal_open_requested_at;
 };
 
 TuiProfilingStats &tuiProfilingStats();
@@ -93,25 +104,12 @@ void noteTuiChatWindowRebuild(std::chrono::nanoseconds elapsed);
 void noteTuiFrameRendered(std::chrono::nanoseconds elapsed);
 std::string tuiProfilingSummaryText();
 
-namespace detail {
-bool shouldNotifyHiddenChatError(const std::string &focused_id,
-                                 const std::string &error_id, bool hide_errors);
-}
-
 std::size_t BuildFocusedChatLiveMeasurementSignature(
     const StreamStateManager &stream_state, const std::string &focused_agent_id,
     const std::string &thread_id,
     const std::unordered_set<std::string> &persisted_tool_call_ids);
 
-std::vector<shared::AgentTurn> expandCompactionTranscriptForDisplay(
-    const std::vector<shared::AgentTurn> &turns,
-    const std::unordered_map<std::string, firmius::core::CompactionSnapshot>
-        &snapshots);
-
 class TuiState {
-  friend class AppController;
-  friend class MainView;
-
 public:
   static TuiState &instance();
 
@@ -181,6 +179,13 @@ public:
   std::string loadingDetail() const;
   void clearLoadingState();
 
+  std::optional<shared::Plan> loadActivePlanForThread(
+      const shared::ThreadMetadata &thread) const;
+
+  std::optional<shared::EditBatchSummary> latestFocusedEditBatch() const;
+  std::optional<shared::EditBatchSummary>
+  latestFocusedUndoneEditBatch() const;
+
   void postEvent(ftxui::Event event);
   bool cycleThreadPermissionMode();
   bool hasActiveThread() const;
@@ -188,11 +193,21 @@ public:
   shared::ThreadPermissionMode currentThreadPermissionMode() const;
   bool needsAnimationTick() const;
   bool focusAgent(const std::string &agent_id);
+  std::string statusText() const;
+  const shared::WorkChunk *
+  findExecutorChunk(const std::optional<shared::Plan> &plan) const;
+  std::string
+  findExecutorChunkTitle(const std::optional<shared::Plan> &plan) const;
 
   SkinKind currentSkinKind() const;
   void setSkinKind(SkinKind kind);
   void applySkinConfig(const SkinConfig &config);
   const SkinConfig &skinConfig() const;
+
+  void activatePermissionRequest(
+      const shared::PermissionEscalationRequest &request);
+  void clearActivePermissionRequest();
+  void promoteNextPermissionRequest();
 
   void loadUserPreferences();
   void persistUserPreferences() const;
@@ -217,6 +232,7 @@ public:
   firmius::core::Harness *harness_ = nullptr;
   shared::ThreadMetadata thread_;
   std::string focused_agent_id_;
+  std::string focused_process_id_;
   std::shared_ptr<shared::AgentHistory> history_;
   StreamStateManager stream_state_;
 
@@ -248,6 +264,13 @@ public:
   void drainEvents();
   std::atomic<bool> custom_event_pending_ = false;
   std::jthread animation_tick_thread_;
+  firmius::shared::EventQueue<shared::AppEvent> event_queue_;
+  bool pending_modal_clear_ = false;
+  int last_terminal_width_ = 0;
+  int last_terminal_height_ = 0;
+  WorkPanelTab selected_work_panel_tab_ = WorkPanelTab::Plan;
+  ftxui::Box agent_strip_separator_box_;
+  ftxui::Box work_panel_separator_box_;
 
   std::mutex animation_tick_mutex_;
   std::chrono::steady_clock::time_point animation_tick_until_{};
@@ -257,8 +280,6 @@ public:
       agent_history_cache_;
   std::unordered_map<std::string, std::unordered_set<std::string>>
       agent_persisted_tool_call_ids_cache_;
-
-  std::shared_ptr<MainView> main_view_;
 
   // Claudex Soul State
   std::string live_row_current_phrase_;
@@ -284,6 +305,7 @@ public:
   std::mutex deferred_ui_mutations_mutex_;
   float loading_progress_ = -1.0f;
   std::vector<std::jthread> background_ui_tasks_;
+  std::unique_ptr<BackgroundTaskPool> background_task_pool_;
   std::string loading_detail_;
   std::mutex background_ui_tasks_mutex_;
   mutable std::mutex loading_progress_mutex_;
@@ -292,6 +314,51 @@ public:
       quota_refresh_last_started_;
   std::unordered_set<std::string> quota_refresh_inflight_;
   std::mutex quota_refresh_mutex_;
+
+  struct EditableUserMessage {
+    uint64_t timestamp;
+    std::string text;
+    std::vector<firmius::shared::ImageContent> images;
+  };
+  std::vector<EditableUserMessage> editable_user_messages_;
+  int selected_editable_message_index_ = -1;
+  bool edit_mode_active_ = false;
+  std::optional<EditableUserMessage> pending_edit_message_;
+  std::vector<shared::PermissionEscalationRequest> pending_permission_queue_;
+  std::optional<std::string> pending_profile_modal_name_;
+  std::unordered_set<std::string> painted_profile_modals_;
+  firmius::shared::AgentMetrics session_metrics_;
+
+  std::string input_;
+  int cursor_ = 0;
+
+  bool file_reference_cache_ready_ = false;
+  std::vector<std::string> file_reference_cache_paths_;
+  std::filesystem::path file_reference_cache_root_;
+
+  enum class DragTarget { None, WorkPanel, AgentStrip };
+  DragTarget active_drag_target_ = DragTarget::None;
+  ftxui::CapturedMouse active_drag_mouse_;
+  int drag_origin_y_ = 0;
+  int drag_origin_work_panel_height_ = 0;
+  int drag_origin_agent_strip_rows_ = 0;
+
+  // UI Layout State
+  bool diffs_expanded_ = false;
+  bool show_agent_strip_ = true;
+  bool show_work_panel_ = true;
+  int agent_strip_visible_rows_ = 0;
+  int work_panel_height_override_ = 0;
+  ftxui::Component input_component_;
+
+  // Permission Request State
+  std::optional<shared::PermissionEscalationRequest>
+      pending_permission_request_;
+  std::vector<std::string> pending_permission_labels_;
+  std::vector<shared::PermissionResponse>
+      pending_permission_responses_;
+  std::vector<ftxui::Box> pending_permission_option_boxes_;
+  int pending_permission_selected_ = 0;
 
 private:
   TuiState();
@@ -321,6 +388,7 @@ public:
 };
 
 void noteTuiModalOpenRequested(const std::string &name);
+void noteTuiModalFirstPaint(const std::string &name);
 std::vector<std::string>
 focusCycleCandidates(const std::string &focusedAgentId);
 

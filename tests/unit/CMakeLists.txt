@@ -890,16 +890,7 @@ gtest_discover_tests(test_transcript_grouping)
 add_executable(test_chat_window_helpers
     tui/test_chat_window_helpers.cpp
     ../../packages/tui/src/TUIState.cpp
-    ../../packages/tui/src/models/TUIStore.cpp
-    ../../packages/tui/src/models/TranscriptModel.cpp
-    ../../packages/tui/src/models/PermissionModel.cpp
-    ../../packages/tui/src/models/WorkspaceModel.cpp
-    ../../packages/tui/src/controllers/AppController.cpp
-    ../../packages/tui/src/controllers/InputController.cpp
-    ../../packages/tui/src/controllers/TranscriptController.cpp
-    ../../packages/tui/src/controllers/PermissionController.cpp
-    ../../packages/tui/src/controllers/BackgroundController.cpp
-    ../../packages/tui/src/views/MainView.cpp
+    ../../packages/tui/src/utils/TranscriptExpansion.cpp
     ../../packages/tui/src/components/ChatWindow.cpp
     ../../packages/tui/src/components/DiffRenderer.cpp
     ../../packages/tui/src/components/FileEditDiff.cpp
