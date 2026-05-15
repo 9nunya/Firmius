@@ -88,6 +88,8 @@ public:
   // ── Streaming ──
   void appendStreamingDelta(const std::string &delta);
   void finalizeStreamingLine();
+  void appendStreamingThinkingDelta(const std::string &delta);
+  void finalizeStreamingThinkingLine();
   std::string currentStreamingText() const;
   bool isStreaming() const;
 
@@ -122,6 +124,7 @@ public:
 
 private:
   void markDirty();
+  void flushThinkingBufferLocked(); // caller must hold mutex_
 
   mutable std::mutex mutex_;
   bool dirty_ = true;
@@ -138,6 +141,7 @@ private:
   std::vector<TranscriptLine> transcriptLines_;
   size_t lastRenderedLineIndex_ = 0;
   std::string streamingText_;
+  std::string streamingThinkingText_;
 
   std::vector<ActiveToolCall> activeToolCalls_;
   int queuedMessageCount_ = 0;

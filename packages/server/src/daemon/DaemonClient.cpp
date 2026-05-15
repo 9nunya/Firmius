@@ -642,13 +642,11 @@ std::string DaemonClient::daemonCommand() const {
   if (!options_.daemonExecutablePath.empty()) {
     return options_.daemonExecutablePath;
   }
-  const auto sibling = std::filesystem::current_path() / "firmiusd";
-  if (std::filesystem::exists(sibling)) {
-    return sibling.string();
-  }
-  const auto candidate = std::filesystem::current_path() / "build" / "packages" /
-                         "server" / "firmiusd";
-  return candidate.string();
+#if defined(_WIN32)
+  return "firmiusd.exe";
+#else
+  return "firmiusd";
+#endif
 }
 
 bool DaemonClient::waitForConnectReady() {
@@ -665,9 +663,6 @@ bool DaemonClient::waitForConnectReady() {
 
 void DaemonClient::spawnDaemon() const {
   const std::string command = daemonCommand();
-  if (!std::filesystem::exists(command)) {
-    throw std::runtime_error("firmiusd executable not found at " + command);
-  }
 #if defined(_WIN32)
   STARTUPINFOA si{};
   si.cb = sizeof(si);
@@ -691,7 +686,10 @@ void DaemonClient::spawnDaemon() const {
   std::string endpoint = options_.connection.endpoint;
   char *argv[] = {const_cast<char *>(command.c_str()), const_cast<char *>("--endpoint"),
                   endpoint.data(), nullptr};
-  if (posix_spawn(&pid, command.c_str(), nullptr, nullptr, argv, environ) != 0) {
+  const int rc = command.find('/') == std::string::npos
+      ? posix_spawnp(&pid, command.c_str(), nullptr, nullptr, argv, environ)
+      : posix_spawn(&pid, command.c_str(), nullptr, nullptr, argv, environ);
+  if (rc != 0) {
     throw std::runtime_error("failed to spawn firmiusd");
   }
   if (!options_.spawnedDaemonPidFile.empty()) {

@@ -581,6 +581,7 @@ struct AgentRuntimeSnapshot {
   std::string providerId;
   std::string modelId;
   std::string variantName;
+  uint32_t maxTokens = 0;
   std::vector<std::string> pendingToolCalls;
   std::vector<std::string> ownedProcesses;
   std::vector<std::string> blockingProcessIds;
@@ -1046,6 +1047,7 @@ struct DaemonEventEnvelope {
   std::string runtimeEventThreadId;
   std::string runtimeEventAgentId;
   std::string runtimeEventJson;
+  std::optional<firmius::shared::AgentStatus> agentStatus;
   std::optional<HookStateSnapshot> hookState;
   std::optional<PactSnapshot> pactState;
 

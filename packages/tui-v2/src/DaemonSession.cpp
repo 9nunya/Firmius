@@ -1,5 +1,6 @@
 #include "DaemonSession.hpp"
 
+#include <cstdlib>
 #include <filesystem>
 
 namespace firmius::tui2 {
@@ -22,6 +23,10 @@ bool DaemonSession::connect() {
 
   options.autoStart = true;
   options.subscribeToEvents = true;
+
+  if (const char* endpoint = std::getenv("FIRMIUS_DAEMON_ENDPOINT")) {
+    options.connection.endpoint = endpoint;
+  }
 
   client_ = std::make_unique<firmius::daemon::DaemonClient>(std::move(options));
   return client_->connect();
@@ -99,22 +104,46 @@ std::vector<firmius::daemon::ToolCallSnapshot> DaemonSession::listToolCalls(
   return client_->listToolCalls(request);
 }
 
-std::optional<firmius::daemon::AgentRuntimeSnapshot> DaemonSession::interruptAgent(
-    const std::string &threadId, const std::string &agentId) {
-  (void)threadId;
-  (void)agentId;
-  // The DaemonClient doesn't expose interruptAgent directly —
-  // this would need to be added to the client or use raw RPC.
-  // For now, return nullopt.
-  return std::nullopt;
+std::optional<firmius::daemon::AgentRuntimeSnapshot> DaemonSession::getAgent(
+    const std::string &threadId, const std::string &agentId) const {
+  if (!client_) return std::nullopt;
+  firmius::daemon::AgentTargetRequest request;
+  request.threadId = threadId;
+  request.agentId = agentId;
+  return client_->getAgent(request);
 }
 
-bool DaemonSession::resolvePermission(const std::string & /*requestId*/,
-                                       firmius::shared::PermissionResponse /*response*/) {
-  // Permission resolve requires the DaemonClient to expose it.
-  // The current client has setPermissionMode but not individual resolve.
-  // Future: add resolvePermission to DaemonClient.
-  return false;
+std::optional<firmius::daemon::AgentRuntimeSnapshot> DaemonSession::interruptAgent(
+    const std::string &threadId, const std::string &agentId) {
+  if (!client_) return std::nullopt;
+  firmius::daemon::AgentTargetRequest request;
+  request.threadId = threadId;
+  request.agentId = agentId;
+  if (!client_->interruptAgent(request)) return std::nullopt;
+  return getAgent(threadId, agentId);
+}
+
+std::optional<firmius::daemon::AgentRuntimeSnapshot> DaemonSession::switchModel(
+    const std::string &agentId,
+    const std::string &providerId,
+    const std::string &modelId,
+    const std::string &variantName) {
+  if (!client_) return std::nullopt;
+  firmius::daemon::ModelSwitchRequest request;
+  request.agentId = agentId;
+  request.providerId = providerId;
+  request.modelId = modelId;
+  request.variantName = variantName;
+  return client_->switchModel(request);
+}
+
+bool DaemonSession::resolvePermission(const std::string &requestId,
+                                       firmius::shared::PermissionResponse response) {
+  if (!client_) return false;
+  firmius::daemon::PermissionResolveRequest request;
+  request.requestId = requestId;
+  request.response = response;
+  return client_->resolvePermission(request);
 }
 
 } // namespace firmius::tui2

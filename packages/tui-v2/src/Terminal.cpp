@@ -124,7 +124,23 @@ void Terminal::setPinnedHeight(int rows) {
   termWidth_ = w;
   termHeight_ = h;
 
+  int oldPinnedHeight = pinnedHeight_;
   pinnedHeight_ = std::max(0, std::min(rows, h - 2));
+
+  // If the pinned height changed, clear the old rows and reset the diff buffer
+  // so all components are re-rendered at their new positions.
+  if (oldPinnedHeight != pinnedHeight_) {
+    if (oldPinnedHeight > pinnedHeight_) {
+      int oldStartRow = h - oldPinnedHeight + 1;
+      int newStartRow = h - pinnedHeight_ + 1;
+      for (int r = oldStartRow; r < newStartRow; ++r) {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "\x1b[%d;1H\x1b[2K", r);
+        rawWrite(buf);
+      }
+    }
+    pinnedBuffer_.clear();
+  }
 
   // Set scroll region: top of screen to just above the pinned zone.
   int scrollBottom = h - pinnedHeight_;

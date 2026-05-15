@@ -155,10 +155,10 @@ private:
   void emitPactStateEvent(const PactSnapshot &snapshot);
   void emitCoreEvent(const firmius::shared::AppEvent &event);
   std::uint64_t nowMs() const;
-  void emitRuntimeEventToFocusedClients(const std::string &eventType,
-                                        const std::string &eventThreadId,
-                                        const std::string &eventAgentId,
-                                        const std::string &eventJson);
+  void emitRuntimeEventToFocusedClients(
+      const std::string &eventType, const std::string &eventThreadId,
+      const std::string &eventAgentId, const std::string &eventJson,
+      std::optional<firmius::shared::AgentStatus> agentStatus = std::nullopt);
   void updateSessionFocusLocked(const std::string &clientId,
                                 const std::string &threadId,
                                 const std::string &agentId);

@@ -54,8 +54,15 @@ public:
       const std::string &threadId, const std::string &agentId) const;
 
   // ── Agent operations ──
+  std::optional<firmius::daemon::AgentRuntimeSnapshot> getAgent(
+      const std::string &threadId, const std::string &agentId) const;
   std::optional<firmius::daemon::AgentRuntimeSnapshot> interruptAgent(
       const std::string &threadId, const std::string &agentId);
+  std::optional<firmius::daemon::AgentRuntimeSnapshot> switchModel(
+      const std::string &agentId,
+      const std::string &providerId,
+      const std::string &modelId,
+      const std::string &variantName = "");
 
   // ── Permissions ──
   bool resolvePermission(const std::string &requestId,

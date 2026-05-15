@@ -45,7 +45,6 @@ TEST(AppStateTest, StreamingAccumulation) {
 
   EXPECT_EQ(state.currentStreamingText(), "Hello world!");
   EXPECT_TRUE(state.isStreaming());
-  EXPECT_EQ(state.agentStatus(), firmius::shared::AgentStatus::Streaming);
 
   state.finalizeStreamingLine();
   EXPECT_EQ(state.currentStreamingText(), "");

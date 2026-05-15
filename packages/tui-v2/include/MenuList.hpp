@@ -30,6 +30,8 @@ public:
   void setItems(std::vector<Item> items) { items_ = std::move(items); selectedIndex_ = 0; }
   void setOnSelect(SelectCallback cb) { onSelect_ = std::move(cb); }
   void setOnDismiss(DismissCallback cb) { onDismiss_ = std::move(cb); }
+  void open() { isOpen_ = true; }
+  void close() { isOpen_ = false; items_.clear(); }
 
   /// Maximum number of visible rows (excluding title + hints).
   void setMaxVisibleItems(int n) { maxVisible_ = n; }
@@ -40,7 +42,7 @@ public:
   void selectCurrent();
   void dismiss();
 
-  bool isActive() const { return !items_.empty(); }
+  bool isActive() const { return isOpen_; }
   int selectedIndex() const { return selectedIndex_; }
 
   int height(int width) const override;
@@ -53,6 +55,7 @@ private:
   int maxVisible_ = 10;
   SelectCallback onSelect_;
   DismissCallback onDismiss_;
+  bool isOpen_ = false;
 };
 
 } // namespace firmius::tui2

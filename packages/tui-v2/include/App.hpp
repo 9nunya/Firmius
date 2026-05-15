@@ -15,6 +15,7 @@
 #include "TranscriptRenderer.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <string>
 
 namespace firmius::tui2 {
@@ -45,8 +46,10 @@ private:
 
   // Main loop phases.
   void handleInput(const std::string& key);
+  void reconcileRuntimeState();
   void renderFrame();
   void onResize();
+  void reflowTranscript();
 
   // Command handlers.
   void openModelsMenu();
@@ -72,6 +75,8 @@ private:
 
   std::atomic<bool> running_{false};
   std::string lastStreamingText_;
+  int lastPinnedHeight_ = 0;
+  std::chrono::steady_clock::time_point lastRuntimeReconcile_{};
 
   // Commands defined in App.cpp need access to private members.
   friend class QuitCmd;

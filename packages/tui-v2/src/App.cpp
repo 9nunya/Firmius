@@ -101,6 +101,9 @@ int App::run() {
       handleInput(key);
     }
 
+    // Reconcile runtime state even if the final daemon event was missed.
+    reconcileRuntimeState();
+
     // Re-render pinned zone if state changed.
     if (state_.isDirty()) {
       renderFrame();
@@ -168,6 +171,10 @@ void App::setupKeybinds() {
                                  return;
                                }
                                // Otherwise send as message.
+                               TranscriptLine line;
+                               line.kind = TranscriptLine::Kind::UserMessage;
+                               line.text = text;
+                               state_.appendTranscriptLine(std::move(line));
                                dispatcher_.sendMessage(text);
                              }});
 
@@ -225,62 +232,82 @@ void App::handleInput(const std::string& key) {
     return;
   }
 
-  // Printable character → append to input.
-  if (key.size() == 1 && key[0] >= 32 && key[0] < 127) {
-    state_.appendToInput(key[0]);
+  // Terminal reads can coalesce typed text and control keys (paste/tmux bursts).
+  for (unsigned char ch : key) {
+    if (ch == '\r' || ch == '\n' || ch == 0x7f || ch == '\b') {
+      keybinds_.handleKey(std::string(1, static_cast<char>(ch)), context);
+    } else if (ch >= 32 && ch < 127) {
+      state_.appendToInput(static_cast<char>(ch));
+    }
   }
 }
 
-void App::renderFrame() {
-  // Push any new transcript lines into the scroll zone.
+void App::reconcileRuntimeState() {
+  if (state_.agentStatus() != firmius::shared::AgentStatus::Streaming) return;
+
+  const auto now = std::chrono::steady_clock::now();
+  if (lastRuntimeReconcile_ != std::chrono::steady_clock::time_point{} &&
+      now - lastRuntimeReconcile_ < std::chrono::milliseconds(500)) {
+    return;
+  }
+  lastRuntimeReconcile_ = now;
+
+  const auto threadId = state_.threadId();
+  const auto agentId = state_.agentId();
+  if (threadId.empty() || agentId.empty()) return;
+
+  try {
+    auto agent = session_.getAgent(threadId, agentId);
+    if (!agent) return;
+
+    state_.setModelLabel(agent->providerId + "/" + agent->modelId);
+    if (!agent->running && !agent->booting &&
+        agent->status != firmius::shared::AgentStatus::Streaming &&
+        agent->status != firmius::shared::AgentStatus::ProviderWaiting &&
+        agent->status != firmius::shared::AgentStatus::ExecutingTool) {
+      state_.finalizeStreamingLine();
+      state_.setAgentStatus(firmius::shared::AgentStatus::Idle);
+    }
+  } catch (const std::exception&) {
+    // Keep the UI responsive if the daemon disconnects mid-stream; sendMessage
+    // and interrupt paths surface explicit errors when the user acts.
+  }
+}
+
+void App::reflowTranscript() {
   auto lines = state_.transcriptLines();
-  size_t lastRendered = state_.lastRenderedLineIndex();
-  if (lastRendered < lines.size()) {
-    std::vector<std::string> newLines;
-    for (size_t i = lastRendered; i < lines.size(); ++i) {
-      newLines.push_back(transcriptRenderer_.formatLine(lines[i], layout_.width()));
-    }
-    layout_.pushTranscriptLines(newLines);
-    state_.setLastRenderedLineIndex(lines.size());
+  std::string streaming = state_.currentStreamingText();
+  int w = layout_.width();
+  int h = layout_.height();
+  int pinnedH = terminal_.pinnedHeight();
+  int scrollHeight = h - pinnedH;
+
+  // Clear only the scroll area rows (not the pinned zone).
+  terminal_.beginBatch();
+  for (int r = 1; r <= scrollHeight; ++r) {
+    terminal_.moveCursor(r, 1);
+    terminal_.clearLine();
+  }
+  terminal_.flushBatch();
+
+  std::vector<std::string> rendered;
+  rendered.reserve(lines.size() + 1);
+  for (const auto& line : lines) {
+    rendered.push_back(transcriptRenderer_.formatLine(line, w));
   }
 
-  // Render streaming text progressively.
-  auto streaming = state_.currentStreamingText();
-  if (!streaming.empty() && streaming != lastStreamingText_) {
-    // Find new content since last render.
-    std::string newContent;
-    if (streaming.size() > lastStreamingText_.size() &&
-        streaming.substr(0, lastStreamingText_.size()) == lastStreamingText_) {
-      newContent = streaming.substr(lastStreamingText_.size());
-    } else {
-      newContent = streaming;
-    }
-
-    // Split on newlines and push each complete line.
-    size_t pos = 0;
-    while ((pos = newContent.find('\n')) != std::string::npos) {
-      std::string chunk = newContent.substr(0, pos);
-      if (!chunk.empty()) {
-        layout_.pushTranscriptLine(
-            ansi::fgRgb(220, 220, 230, chunk));
-      }
-      newContent = newContent.substr(pos + 1);
-    }
-
-    // Render partial line (no newline yet) by overwriting the last
-    // scroll row. For simplicity, just show the latest word.
-    if (!newContent.empty()) {
-      // We'll push the partial when next newline comes or on finalize.
-    }
-
-    lastStreamingText_ = streaming;
+  if (!streaming.empty()) {
+    rendered.push_back(ansi::fgRgb(220, 220, 230, streaming));
   }
 
-  // If streaming was just finalized, clear tracking.
-  if (streaming.empty() && !lastStreamingText_.empty()) {
-    lastStreamingText_.clear();
+  int start = std::max(0, static_cast<int>(rendered.size()) - scrollHeight);
+  for (int i = start; i < static_cast<int>(rendered.size()); ++i) {
+    layout_.pushTranscriptLine(rendered[i]);
   }
+  state_.setLastRenderedLineIndex(lines.size());
+}
 
+void App::renderFrame() {
   // Update pinned components.
   if (menu_.isActive()) {
     layout_.setPinnedComponents({&statusBar_, &menu_, &inputBar_, &bottomBar_});
@@ -288,6 +315,36 @@ void App::renderFrame() {
     layout_.setPinnedComponents({&statusBar_, &inputBar_, &bottomBar_});
   }
   layout_.renderPinned();
+
+  // If the pinned zone height changed (e.g. menu opened/closed), reflow the
+  // entire transcript so the newly exposed scroll rows are filled.
+  int pinnedH = terminal_.pinnedHeight();
+  if (pinnedH != lastPinnedHeight_) {
+    lastPinnedHeight_ = pinnedH;
+    reflowTranscript();
+  } else {
+    // Push only new transcript lines into the scroll zone.
+    auto lines = state_.transcriptLines();
+    size_t lastRendered = state_.lastRenderedLineIndex();
+    if (lastRendered < lines.size()) {
+      std::vector<std::string> newLines;
+      for (size_t i = lastRendered; i < lines.size(); ++i) {
+        if (lines[i].kind == TranscriptLine::Kind::AssistantText &&
+            lines[i].text == lastStreamingText_) {
+          continue;
+        }
+        newLines.push_back(transcriptRenderer_.formatLine(lines[i], layout_.width()));
+      }
+      layout_.pushTranscriptLines(newLines);
+      state_.setLastRenderedLineIndex(lines.size());
+    }
+  }
+
+  // Completed streaming lines are flushed into the transcript by AppState.
+  auto streaming = state_.currentStreamingText();
+  if (streaming.empty() && !lastStreamingText_.empty()) {
+    lastStreamingText_.clear();
+  }
 
   // Position cursor at the end of the input bar for typing.
   int inputRow = terminal_.pinnedTopRow() + 2; // StatusBar is 2 lines, input is next.
@@ -306,16 +363,9 @@ void App::onResize() {
 
   // Re-render the pinned zone at the new positions.
   layout_.renderPinned();
+  lastPinnedHeight_ = terminal_.pinnedHeight();
 
-  // Re-push recent transcript so it's visible again.
-  auto lines = state_.transcriptLines();
-  int w = layout_.width();
-  // Show last N lines that fit in the scroll area.
-  int scrollHeight = layout_.height() - terminal_.pinnedHeight();
-  int start = std::max(0, static_cast<int>(lines.size()) - scrollHeight);
-  for (int i = start; i < static_cast<int>(lines.size()); ++i) {
-    layout_.pushTranscriptLine(transcriptRenderer_.formatLine(lines[i], w));
-  }
+  reflowTranscript();
 }
 
 void App::connectAndSetup() {
@@ -342,9 +392,22 @@ void App::connectAndSetup() {
     } else if (options_.continueSession) {
       // TODO: resume last session.
     } else {
-      // Set the default model for the welcome screen
-      auto uiSnap = session_.client().uiSnapshot(firmius::daemon::UiSnapshotRequest());
-      std::string label = uiSnap.config.config.defaultProviderId + "/" + 
+      firmius::daemon::UiSnapshotRequest request;
+      firmius::daemon::UiSnapshot uiSnap;
+      bool loadedSnapshot = false;
+      for (int attempt = 0; attempt < 5; ++attempt) {
+        try {
+          uiSnap = session_.client().uiSnapshot(request);
+          loadedSnapshot = true;
+          break;
+        } catch (const std::exception&) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        }
+      }
+      if (!loadedSnapshot) {
+        throw std::runtime_error("daemon connected but ui.snapshot.get never became ready");
+      }
+      std::string label = uiSnap.config.config.defaultProviderId + "/" +
                           uiSnap.config.config.defaultModelId;
       state_.setModelLabel(label);
       state_.setAgentPurpose(uiSnap.config.config.defaultLeadPersona);
@@ -373,7 +436,7 @@ void App::connectAndSetup() {
 
 void App::openModelsMenu() {
   try {
-    auto models = session_.client().listModels();
+    auto models = session_.client().listModels(true);
     std::vector<MenuList::Item> items;
     for (const auto& m : models.models) {
       MenuList::Item item;
@@ -382,6 +445,7 @@ void App::openModelsMenu() {
       item.id = m.provider + ":" + m.id;
       items.push_back(std::move(item));
     }
+    menu_.open();
     menu_.setTitle("Select Model");
     menu_.setItems(std::move(items));
     menu_.setOnSelect([this](const MenuList::Item& item) {
@@ -390,10 +454,15 @@ void App::openModelsMenu() {
       if (sep != std::string::npos) {
         auto providerId = item.id.substr(0, sep);
         auto modelId = item.id.substr(sep + 1);
-        firmius::daemon::ModelSwitchRequest req;
-        req.providerId = providerId;
-        req.modelId = modelId;
-        session_.client().switchModel(req);
+        auto agent = session_.switchModel(state_.agentId(), providerId, modelId);
+        if (agent) {
+          state_.setModelLabel(providerId + "/" + modelId);
+        } else {
+          TranscriptLine line;
+          line.kind = TranscriptLine::Kind::Notice;
+          line.text = "Failed to switch model";
+          state_.appendTranscriptLine(std::move(line));
+        }
       }
       dismissMenu();
     });
@@ -418,6 +487,7 @@ void App::openResumeMenu() {
       item.id = t.threadId;
       items.push_back(std::move(item));
     }
+    menu_.open();
     menu_.setTitle("Resume Session");
     menu_.setItems(std::move(items));
     menu_.setOnSelect([this](const MenuList::Item& item) {
@@ -435,8 +505,10 @@ void App::openResumeMenu() {
 }
 
 void App::dismissMenu() {
-  menu_.setItems({});
-  state_.markDirtyPublic();
+  if (menu_.isActive()) {
+    menu_.close();
+    state_.markDirtyPublic();
+  }
 }
 
 } // namespace firmius::tui2

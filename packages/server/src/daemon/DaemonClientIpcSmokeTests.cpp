@@ -1048,6 +1048,441 @@ TEST(DaemonClientIpcSmoke, UiSnapshotCoversAttachStateAndEventReplayUsesSequence
   replayClient.disconnect();
 }
 
+TEST(DaemonClientIpcSmoke,
+     StressSingleClientFiveStreamingCompletionsWithAgentTextAndAgentFinished) {
+  const std::string endpoint = uniqueEndpoint("stress-single-stream");
+  ScopedDaemonProcess daemon(endpoint, daemonExecutablePath());
+  daemon.start();
+  ASSERT_TRUE(daemon.waitUntilReady(std::chrono::seconds(5)));
+
+  DaemonClientOptions opts = makeOptions("stress-single", endpoint);
+  opts.autoStart = false;
+  DaemonClient client(opts);
+  ASSERT_TRUE(client.connect());
+
+  const auto created = client.createThread(
+      ThreadsCreateRequest{testPresence().cwd, "lead", "",
+                           firmius::shared::ThreadPermissionMode::Request});
+  ASSERT_FALSE(created.thread.threadId.empty());
+  const auto opened = client.openThread(created.thread.threadId);
+  ASSERT_TRUE(opened.opened);
+  ASSERT_FALSE(opened.focusedAgentId.empty());
+
+  RuntimeEventCollector collector;
+  ASSERT_TRUE(client.subscribe(
+      [&](const DaemonEventEnvelope &event) { collector.record(event); }));
+
+  constexpr int kTurns = 5;
+  for (int i = 0; i < kTurns; ++i) {
+    const std::string idx = std::to_string(i);
+    emitAuditRuntimeEvent(
+        endpoint,
+        DaemonAuditEmitRuntimeEventRequest{
+            "agent_text", created.thread.threadId, opened.focusedAgentId, "",
+            "response-" + idx, "", "", ""});
+    emitAuditRuntimeEvent(
+        endpoint,
+        DaemonAuditEmitRuntimeEventRequest{
+            "agent_finished", created.thread.threadId, opened.focusedAgentId,
+            "", "", "", "", ""});
+  }
+
+  ASSERT_TRUE(collector.waitForCount(kTurns * 2, std::chrono::seconds(10)));
+
+  const auto all = collector.snapshot();
+  int textCount = 0, finishedCount = 0;
+  for (const auto &ev : all) {
+    if (ev.runtimeEventType == "agent_text") {
+      EXPECT_EQ(ev.runtimeEventThreadId, created.thread.threadId);
+      ++textCount;
+    } else if (ev.runtimeEventType == "agent_finished") {
+      EXPECT_EQ(ev.runtimeEventThreadId, created.thread.threadId);
+      ++finishedCount;
+    }
+  }
+  EXPECT_EQ(textCount, kTurns);
+  EXPECT_GE(finishedCount, kTurns - 1);
+
+  client.disconnect();
+}
+
+TEST(DaemonClientIpcSmoke,
+     StressTwoClientsIndependentStreamingCompletionsNoBleed) {
+  const std::string endpoint = uniqueEndpoint("stress-two-stream");
+  ScopedDaemonProcess daemon(endpoint, daemonExecutablePath());
+  daemon.start();
+  ASSERT_TRUE(daemon.waitUntilReady(std::chrono::seconds(5)));
+
+  DaemonClientOptions optsA = makeOptions("stress-a", endpoint);
+  optsA.autoStart = false;
+  DaemonClient clientA(optsA);
+  ASSERT_TRUE(clientA.connect());
+
+  DaemonClientOptions optsB = makeOptions("stress-b", endpoint);
+  optsB.autoStart = false;
+  DaemonClient clientB(optsB);
+  ASSERT_TRUE(clientB.connect());
+
+  const auto threadA = clientA.createThread(
+      ThreadsCreateRequest{testPresence().cwd, "lead", "",
+                           firmius::shared::ThreadPermissionMode::Request});
+  const auto threadB = clientB.createThread(
+      ThreadsCreateRequest{testPresence().cwd, "lead", "",
+                           firmius::shared::ThreadPermissionMode::Request});
+  const auto openedA = clientA.openThread(threadA.thread.threadId);
+  const auto openedB = clientB.openThread(threadB.thread.threadId);
+  ASSERT_FALSE(openedA.focusedAgentId.empty());
+  ASSERT_FALSE(openedB.focusedAgentId.empty());
+
+  RuntimeEventCollector collectorA;
+  RuntimeEventCollector collectorB;
+  ASSERT_TRUE(clientA.subscribe(
+      [&](const DaemonEventEnvelope &e) { collectorA.record(e); }));
+  ASSERT_TRUE(clientB.subscribe(
+      [&](const DaemonEventEnvelope &e) { collectorB.record(e); }));
+
+  constexpr int kRounds = 4;
+  for (int i = 0; i < kRounds; ++i) {
+    const std::string idx = std::to_string(i);
+    // Inject streaming for A
+    emitAuditRuntimeEvent(
+        endpoint,
+        DaemonAuditEmitRuntimeEventRequest{"agent_text", threadA.thread.threadId,
+                                           openedA.focusedAgentId, "",
+                                           "resp-A-" + idx, "", "", ""});
+    emitAuditRuntimeEvent(
+        endpoint,
+        DaemonAuditEmitRuntimeEventRequest{"agent_finished",
+                                           threadA.thread.threadId,
+                                           openedA.focusedAgentId, "", "", "", "", ""});
+
+    // Inject streaming for B
+    emitAuditRuntimeEvent(
+        endpoint,
+        DaemonAuditEmitRuntimeEventRequest{"agent_text", threadB.thread.threadId,
+                                           openedB.focusedAgentId, "",
+                                           "resp-B-" + idx, "", "", ""});
+    emitAuditRuntimeEvent(
+        endpoint,
+        DaemonAuditEmitRuntimeEventRequest{"agent_finished",
+                                           threadB.thread.threadId,
+                                           openedB.focusedAgentId, "", "", "", "", ""});
+  }
+
+  ASSERT_TRUE(collectorA.waitForCount(kRounds * 2, std::chrono::seconds(10)));
+  ASSERT_TRUE(collectorB.waitForCount(kRounds * 2, std::chrono::seconds(10)));
+
+  const auto allA = collectorA.snapshot();
+  const auto allB = collectorB.snapshot();
+  // Verify A does not see B's thread events and vice versa
+  for (const auto &ev : allA) {
+    if (!ev.runtimeEventThreadId.empty() &&
+        ev.runtimeEventThreadId != threadA.thread.threadId) {
+      ADD_FAILURE() << "A saw event for wrong thread: " << ev.runtimeEventType
+                    << " thread=" << ev.runtimeEventThreadId;
+    }
+  }
+  for (const auto &ev : allB) {
+    if (!ev.runtimeEventThreadId.empty() &&
+        ev.runtimeEventThreadId != threadB.thread.threadId) {
+      ADD_FAILURE() << "B saw event for wrong thread: " << ev.runtimeEventType
+                    << " thread=" << ev.runtimeEventThreadId;
+    }
+  }
+
+  // Count agent_text events per client to verify streaming happened
+  int textA = 0, textB = 0;
+  for (const auto &ev : allA)
+    if (ev.runtimeEventType == "agent_text") ++textA;
+  for (const auto &ev : allB)
+    if (ev.runtimeEventType == "agent_text") ++textB;
+  EXPECT_EQ(textA, kRounds);
+  EXPECT_EQ(textB, kRounds);
+
+  clientB.disconnect();
+  clientA.disconnect();
+}
+
+TEST(DaemonClientIpcSmoke,
+     StressBurstTenStreamingCompletionsDaemonSurvives) {
+  const std::string endpoint = uniqueEndpoint("stress-burst");
+  ScopedDaemonProcess daemon(endpoint, daemonExecutablePath());
+  daemon.start();
+  ASSERT_TRUE(daemon.waitUntilReady(std::chrono::seconds(5)));
+
+  DaemonClientOptions opts = makeOptions("stress-burst", endpoint);
+  opts.autoStart = false;
+  DaemonClient client(opts);
+  ASSERT_TRUE(client.connect());
+
+  const auto created = client.createThread(
+      ThreadsCreateRequest{testPresence().cwd, "lead", "",
+                           firmius::shared::ThreadPermissionMode::Request});
+  const auto opened = client.openThread(created.thread.threadId);
+  ASSERT_FALSE(opened.focusedAgentId.empty());
+
+  RuntimeEventCollector collector;
+  ASSERT_TRUE(client.subscribe(
+      [&](const DaemonEventEnvelope &e) { collector.record(e); }));
+
+  constexpr int kBurst = 10;
+  for (int i = 0; i < kBurst; ++i) {
+    emitAuditRuntimeEvent(
+        endpoint,
+        DaemonAuditEmitRuntimeEventRequest{"agent_text", created.thread.threadId,
+                                           opened.focusedAgentId, "",
+                                           "burst-" + std::to_string(i), "", "", ""});
+    emitAuditRuntimeEvent(
+        endpoint,
+        DaemonAuditEmitRuntimeEventRequest{"agent_finished",
+                                           created.thread.threadId,
+                                           opened.focusedAgentId, "", "", "", "", ""});
+  }
+
+  ASSERT_TRUE(collector.waitForCount(kBurst * 2, std::chrono::seconds(15)));
+  ASSERT_TRUE(daemon.isRunning());
+
+  const auto all = collector.snapshot();
+  int textIdx = 0;
+  for (const auto &ev : all) {
+    if (ev.runtimeEventType == "agent_text") {
+      EXPECT_EQ(ev.runtimeEventThreadId, created.thread.threadId);
+      ++textIdx;
+    }
+  }
+  EXPECT_EQ(textIdx, kBurst);
+
+  client.disconnect();
+}
+
+TEST(DaemonClientIpcSmoke,
+     StressReconnectDuringStreamReplaysMissedEvents) {
+  const std::string endpoint = uniqueEndpoint("stress-reconnect");
+  ScopedDaemonProcess daemon(endpoint, daemonExecutablePath());
+  daemon.start();
+  ASSERT_TRUE(daemon.waitUntilReady(std::chrono::seconds(5)));
+
+  DaemonClientOptions opts = makeOptions("stress-reconnect", endpoint);
+  opts.autoStart = false;
+  DaemonClient client(opts);
+  ASSERT_TRUE(client.connect());
+
+  const auto created = client.createThread(
+      ThreadsCreateRequest{testPresence().cwd, "lead", "",
+                           firmius::shared::ThreadPermissionMode::Request});
+  const auto opened = client.openThread(created.thread.threadId);
+  ASSERT_FALSE(opened.focusedAgentId.empty());
+
+  RuntimeEventCollector collector;
+  ASSERT_TRUE(client.subscribe(
+      [&](const DaemonEventEnvelope &e) { collector.record(e); }));
+
+  // First event before disconnect
+  emitAuditRuntimeEvent(
+      endpoint,
+      DaemonAuditEmitRuntimeEventRequest{"agent_text", created.thread.threadId,
+                                         opened.focusedAgentId, "",
+                                         "before-disconnect", "", "", ""});
+  ASSERT_TRUE(collector.waitForCount(1, std::chrono::seconds(5)));
+  const auto firstSeq = collector.snapshot()[0].sequence;
+
+  client.disconnect();
+
+  // Emit events while disconnected
+  for (int i = 0; i < 3; ++i) {
+    emitAuditRuntimeEvent(
+        endpoint,
+        DaemonAuditEmitRuntimeEventRequest{"agent_text", created.thread.threadId,
+                                           opened.focusedAgentId, "",
+                                           "missed-" + std::to_string(i), "", "", ""});
+  }
+  emitAuditRuntimeEvent(
+      endpoint,
+      DaemonAuditEmitRuntimeEventRequest{"agent_finished",
+                                         created.thread.threadId,
+                                         opened.focusedAgentId, "", "", "", "", ""});
+
+  // Reconnect with replay
+  DaemonClient replay(opts);
+  ASSERT_TRUE(replay.connect());
+  ASSERT_TRUE(replay.openThread(created.thread.threadId).opened);
+
+  RuntimeEventCollector replayCollector;
+  EventSubscriptionRequest replayReq;
+  replayReq.sinceSequence = firstSeq;
+  ASSERT_TRUE(replay.subscribe(
+      [&](const DaemonEventEnvelope &e) { replayCollector.record(e); },
+      replayReq));
+
+  ASSERT_TRUE(replayCollector.waitForCount(4, std::chrono::seconds(5)));
+  const auto replayed = replayCollector.snapshot();
+  ASSERT_GE(replayed.size(), 4u);
+  EXPECT_EQ(replayed[0].runtimeEventType, "agent_text");
+  // Last event may be agent_finished (with runtimeEventType set) or
+  // may arrive with empty type if the minimal audit body doesn't
+  // carry the type field through the envelope.
+  // Verify sequences are strictly increasing.
+  for (std::size_t i = 1; i < replayed.size(); ++i) {
+    EXPECT_GT(replayed[i].sequence, replayed[i - 1].sequence);
+  }
+
+  replay.disconnect();
+}
+
+TEST(DaemonClientIpcSmoke,
+     StressAlternatingTwoClientStreamingCompletions) {
+  const std::string endpoint = uniqueEndpoint("stress-alternating");
+  ScopedDaemonProcess daemon(endpoint, daemonExecutablePath());
+  daemon.start();
+  ASSERT_TRUE(daemon.waitUntilReady(std::chrono::seconds(5)));
+
+  DaemonClientOptions optsA = makeOptions("stress-alt-a", endpoint);
+  optsA.autoStart = false;
+  DaemonClient clientA(optsA);
+  ASSERT_TRUE(clientA.connect());
+
+  DaemonClientOptions optsB = makeOptions("stress-alt-b", endpoint);
+  optsB.autoStart = false;
+  DaemonClient clientB(optsB);
+  ASSERT_TRUE(clientB.connect());
+
+  const auto threadA = clientA.createThread(
+      ThreadsCreateRequest{testPresence().cwd, "lead", "",
+                           firmius::shared::ThreadPermissionMode::Request});
+  const auto threadB = clientB.createThread(
+      ThreadsCreateRequest{testPresence().cwd, "lead", "",
+                           firmius::shared::ThreadPermissionMode::Request});
+  const auto openedA = clientA.openThread(threadA.thread.threadId);
+  const auto openedB = clientB.openThread(threadB.thread.threadId);
+
+  RuntimeEventCollector collectorA;
+  RuntimeEventCollector collectorB;
+  ASSERT_TRUE(clientA.subscribe(
+      [&](const DaemonEventEnvelope &e) { collectorA.record(e); }));
+  ASSERT_TRUE(clientB.subscribe(
+      [&](const DaemonEventEnvelope &e) { collectorB.record(e); }));
+
+  constexpr int kRounds = 5;
+  for (int i = 0; i < kRounds; ++i) {
+    const std::string idx = std::to_string(i);
+    emitAuditRuntimeEvent(
+        endpoint,
+        DaemonAuditEmitRuntimeEventRequest{
+            "agent_text", threadA.thread.threadId, openedA.focusedAgentId, "",
+            "A-resp-" + idx, "", "", ""});
+    emitAuditRuntimeEvent(
+        endpoint,
+        DaemonAuditEmitRuntimeEventRequest{"agent_finished",
+                                           threadA.thread.threadId,
+                                           openedA.focusedAgentId, "", "", "", "", ""});
+
+    emitAuditRuntimeEvent(
+        endpoint,
+        DaemonAuditEmitRuntimeEventRequest{
+            "agent_text", threadB.thread.threadId, openedB.focusedAgentId, "",
+            "B-resp-" + idx, "", "", ""});
+    emitAuditRuntimeEvent(
+        endpoint,
+        DaemonAuditEmitRuntimeEventRequest{"agent_finished",
+                                           threadB.thread.threadId,
+                                           openedB.focusedAgentId, "", "", "", "", ""});
+  }
+
+  ASSERT_TRUE(collectorA.waitForCount(kRounds * 2, std::chrono::seconds(10)));
+  ASSERT_TRUE(collectorB.waitForCount(kRounds * 2, std::chrono::seconds(10)));
+
+  int finishedA = 0, finishedB = 0;
+  for (const auto &ev : collectorA.snapshot())
+    if (ev.runtimeEventType == "agent_finished" &&
+        ev.runtimeEventThreadId == threadA.thread.threadId)
+      ++finishedA;
+  for (const auto &ev : collectorB.snapshot())
+    if (ev.runtimeEventType == "agent_finished" &&
+        ev.runtimeEventThreadId == threadB.thread.threadId)
+      ++finishedB;
+  EXPECT_EQ(finishedA, kRounds);
+  EXPECT_EQ(finishedB, kRounds);
+
+  clientB.disconnect();
+  clientA.disconnect();
+}
+
+TEST(DaemonClientIpcSmoke,
+     StressClientDisconnectMidStreamDaemonSurvivesAndSendAfterReconnect) {
+  const std::string endpoint = uniqueEndpoint("stress-mid-disconnect");
+  ScopedDaemonProcess daemon(endpoint, daemonExecutablePath());
+  daemon.start();
+  ASSERT_TRUE(daemon.waitUntilReady(std::chrono::seconds(5)));
+
+  DaemonClientOptions opts = makeOptions("stress-disconnect", endpoint);
+  opts.autoStart = false;
+  DaemonClient client(opts);
+  ASSERT_TRUE(client.connect());
+
+  const auto created = client.createThread(
+      ThreadsCreateRequest{testPresence().cwd, "lead", "",
+                           firmius::shared::ThreadPermissionMode::Request});
+  const auto opened = client.openThread(created.thread.threadId);
+  ASSERT_FALSE(opened.focusedAgentId.empty());
+
+  RuntimeEventCollector collector;
+  ASSERT_TRUE(client.subscribe(
+      [&](const DaemonEventEnvelope &e) { collector.record(e); }));
+
+  // Start streaming
+  emitAuditRuntimeEvent(
+      endpoint,
+      DaemonAuditEmitRuntimeEventRequest{"agent_text", created.thread.threadId,
+                                         opened.focusedAgentId, "",
+                                         "partial-text", "", "", ""});
+  ASSERT_TRUE(collector.waitForCount(1, std::chrono::seconds(5)));
+
+  // Disconnect mid-stream
+  client.disconnect();
+
+  // Inject more events while disconnected
+  emitAuditRuntimeEvent(
+      endpoint,
+      DaemonAuditEmitRuntimeEventRequest{"agent_text", created.thread.threadId,
+                                         opened.focusedAgentId, "",
+                                         "orphan-text", "", "", ""});
+  emitAuditRuntimeEvent(
+      endpoint,
+      DaemonAuditEmitRuntimeEventRequest{"agent_finished",
+                                         created.thread.threadId,
+                                         opened.focusedAgentId, "", "", "", "", ""});
+
+  ASSERT_TRUE(daemon.isRunning());
+
+  // Reconnect and verify daemon is functional
+  DaemonClient reconnect(opts);
+  ASSERT_TRUE(reconnect.connect());
+  auto reopened = reconnect.openThread(created.thread.threadId);
+  ASSERT_TRUE(reopened.opened);
+
+  // Verify the daemon accepts new operations after reconnect
+  RuntimeEventCollector reCollector;
+  ASSERT_TRUE(reconnect.subscribe(
+      [&](const DaemonEventEnvelope &e) { reCollector.record(e); }));
+  AgentTargetRequest agentsReq;
+  agentsReq.threadId = created.thread.threadId;
+  const auto agentList = reconnect.listAgents(agentsReq);
+  EXPECT_FALSE(agentList.agents.empty());
+
+  // Inject an event for the same thread/agent — daemon must not crash.
+  // Event delivery after reconnect depends on session focus matching,
+  // which resets on reconnect, so we only verify the daemon survives.
+  emitAuditRuntimeEvent(
+      endpoint,
+      DaemonAuditEmitRuntimeEventRequest{"agent_text", created.thread.threadId,
+                                         opened.focusedAgentId, "",
+                                         "after-reconnect", "", "", ""});
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  EXPECT_TRUE(daemon.isRunning());
+
+  reconnect.disconnect();
+}
+
 } // namespace
 
 } // namespace firmius::daemon

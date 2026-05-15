@@ -58,6 +58,24 @@ std::string StatusBar::renderHudRow(int width) const {
   case firmius::shared::AgentStatus::Streaming:
     statusLabel = ansi::fgRgb(100, 180, 255, "STREAMING");
     break;
+  case firmius::shared::AgentStatus::ExecutingTool:
+    statusLabel = ansi::fgRgb(220, 180, 60, "EXEC TOOL");
+    break;
+  case firmius::shared::AgentStatus::ProviderWaiting:
+    statusLabel = ansi::fgRgb(160, 160, 255, "WAITING");
+    break;
+  case firmius::shared::AgentStatus::Compacting:
+    statusLabel = ansi::fgRgb(180, 140, 255, "COMPACTING");
+    break;
+  case firmius::shared::AgentStatus::AwaitingInput:
+    statusLabel = ansi::fgRgb(100, 220, 180, "AWAITING INPUT");
+    break;
+  case firmius::shared::AgentStatus::Error:
+    statusLabel = ansi::fgRgb(255, 80, 80, "ERROR");
+    break;
+  case firmius::shared::AgentStatus::Cancelled:
+    statusLabel = ansi::fgRgb(200, 120, 60, "CANCELLED");
+    break;
   case firmius::shared::AgentStatus::Idle:
   default:
     statusLabel = ansi::fgRgb(120, 120, 140, "IDLE");

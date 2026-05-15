@@ -54,6 +54,34 @@ DaemonEventKind eventKindFromString(const std::string &kind) {
   return DaemonEventKind::RuntimeAppEvent;
 }
 
+std::string agentStatusToWire(firmius::shared::AgentStatus status) {
+  using S = firmius::shared::AgentStatus;
+  switch (status) {
+  case S::Idle: return "Idle";
+  case S::Streaming: return "Streaming";
+  case S::ExecutingTool: return "ExecutingTool";
+  case S::AwaitingInput: return "AwaitingInput";
+  case S::Compacting: return "Compacting";
+  case S::ProviderWaiting: return "ProviderWaiting";
+  case S::Error: return "Error";
+  case S::Cancelled: return "Cancelled";
+  }
+  return "Idle";
+}
+
+std::optional<firmius::shared::AgentStatus> agentStatusFromWire(const std::string &str) {
+  using S = firmius::shared::AgentStatus;
+  if (str == "Idle") return S::Idle;
+  if (str == "Streaming") return S::Streaming;
+  if (str == "ExecutingTool") return S::ExecutingTool;
+  if (str == "AwaitingInput") return S::AwaitingInput;
+  if (str == "Compacting") return S::Compacting;
+  if (str == "ProviderWaiting") return S::ProviderWaiting;
+  if (str == "Error") return S::Error;
+  if (str == "Cancelled") return S::Cancelled;
+  return std::nullopt;
+}
+
 rapidjson::Value messagePartValue(const firmius::shared::ImageContent &image,
                                   rapidjson::Document::AllocatorType &allocator) {
   firmius::shared::MessagePart part = image;
@@ -1479,6 +1507,11 @@ rapidjson::Value toJsonValue(const DaemonEventEnvelope &event,
                 jsonString(event.runtimeEventAgentId, allocator), allocator);
   out.AddMember("runtime_event_json", jsonString(event.runtimeEventJson, allocator),
                 allocator);
+  if (event.agentStatus.has_value()) {
+    out.AddMember("agent_status",
+                  jsonString(agentStatusToWire(*event.agentStatus), allocator),
+                  allocator);
+  }
   if (event.session.has_value()) {
     out.AddMember("session", toJsonValue(*event.session, allocator), allocator);
   }
@@ -1524,6 +1557,9 @@ DaemonEventEnvelope daemonEventEnvelopeFromJson(const rapidjson::Value &value) {
   if (value.HasMember("runtime_event_json") &&
       value["runtime_event_json"].IsString()) {
     event.runtimeEventJson = value["runtime_event_json"].GetString();
+  }
+  if (value.HasMember("agent_status") && value["agent_status"].IsString()) {
+    event.agentStatus = agentStatusFromWire(value["agent_status"].GetString());
   }
   if (value.HasMember("session")) {
     event.session = clientSessionSnapshotFromJson(value["session"]);

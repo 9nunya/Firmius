@@ -45,3 +45,4 @@ python_input.txt
 /output.txt
 /.pre-commit-config.yaml
 /.persist_scratch/firmius_persist_gsCUIC/.firmius/threads
+/.claude/worktrees

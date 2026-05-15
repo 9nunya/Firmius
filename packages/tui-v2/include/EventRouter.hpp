@@ -1,8 +1,10 @@
 #pragma once
 
 #include "AppState.hpp"
+#include "Enums.hpp"
 #include "daemon/Protocol.hpp"
 
+#include <optional>
 #include <string>
 
 namespace firmius::tui2 {
@@ -16,10 +18,9 @@ public:
   void route(const firmius::daemon::DaemonEventEnvelope &envelope);
 
   /// Route a runtime event by type string + JSON payload.
-  void routeRuntimeEvent(const std::string &eventType,
-                         const std::string &eventJson,
-                         const std::string &threadId,
-                         const std::string &agentId);
+  void routeRuntimeEvent(const std::string &eventType, const std::string &eventJson,
+                         const std::string &threadId, const std::string &agentId,
+                         std::optional<firmius::shared::AgentStatus> realStatus = std::nullopt);
 
 private:
   void handleAgentText(const std::string &json, const std::string &agentId);
@@ -35,6 +36,8 @@ private:
   void handlePermissionEscalation(const std::string &json);
   void handlePermissionResolved(const std::string &json);
   void handleAgentProcessOutput(const std::string &json, const std::string &agentId);
+  void handleModelSwitched(const std::string &json);
+  void handleConfigUpdated();
 
   AppState &state_;
 };

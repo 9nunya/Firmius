@@ -25,6 +25,7 @@ void MenuList::dismiss() {
 
 int MenuList::height(int /*width*/) const {
   if (!isActive()) return 0;
+  if (items_.empty()) return 1 + 1 + 1 + 1; // Title + sep + loading + hint
 
   int itemRows = std::min(static_cast<int>(items_.size()), maxVisible_);
   // Title (1) + separator (1) + items + hint (1).
@@ -42,39 +43,43 @@ std::vector<std::string> MenuList::render(int width) const {
   // Separator.
   lines.push_back(ansi::fgRgb(60, 60, 80, std::string(width, '-')));
 
-  // Visible window around the selected index.
-  int totalItems = static_cast<int>(items_.size());
-  int visible = std::min(totalItems, maxVisible_);
-  int scrollOffset = 0;
-  if (selectedIndex_ >= visible) {
-    scrollOffset = selectedIndex_ - visible + 1;
-  }
-  scrollOffset = std::min(scrollOffset, totalItems - visible);
-  if (scrollOffset < 0) scrollOffset = 0;
-
-  for (int i = scrollOffset; i < scrollOffset + visible && i < totalItems; ++i) {
-    const auto& item = items_[i];
-    bool selected = (i == selectedIndex_);
-
-    std::string cursor = selected ? ansi::fgRgb(120, 220, 120, "> ")
-                                   : "  ";
-    std::string label = item.label;
-    if (item.marked) {
-      label += " " + ansi::fgRgb(100, 200, 100, "✔");
+  if (items_.empty()) {
+    lines.push_back(ansi::dim(ansi::fitToWidth("  Loading...", width)));
+  } else {
+    // Visible window around the selected index.
+    int totalItems = static_cast<int>(items_.size());
+    int visible = std::min(totalItems, maxVisible_);
+    int scrollOffset = 0;
+    if (selectedIndex_ >= visible) {
+      scrollOffset = selectedIndex_ - visible + 1;
     }
+    scrollOffset = std::min(scrollOffset, totalItems - visible);
+    if (scrollOffset < 0) scrollOffset = 0;
 
-    std::string row = cursor + label;
-    if (!item.detail.empty()) {
-      row += "  " + ansi::dim(item.detail);
+    for (int i = scrollOffset; i < scrollOffset + visible && i < totalItems; ++i) {
+      const auto& item = items_[i];
+      bool selected = (i == selectedIndex_);
+
+      std::string cursor = selected ? ansi::fgRgb(120, 220, 120, "> ")
+                                     : "  ";
+      std::string label = item.label;
+      if (item.marked) {
+        label += " " + ansi::fgRgb(100, 200, 100, "✔");
+      }
+
+      std::string row = cursor + label;
+      if (!item.detail.empty()) {
+        row += "  " + ansi::dim(item.detail);
+      }
+
+      if (selected) {
+        row = ansi::bgRgb(40, 40, 55, ansi::fitToWidth(row, width));
+      } else {
+        row = ansi::fitToWidth(row, width);
+      }
+
+      lines.push_back(row);
     }
-
-    if (selected) {
-      row = ansi::bgRgb(40, 40, 55, ansi::fitToWidth(row, width));
-    } else {
-      row = ansi::fitToWidth(row, width);
-    }
-
-    lines.push_back(row);
   }
 
   // Hint line.

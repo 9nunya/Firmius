@@ -11,20 +11,27 @@ ActionDispatcher::ActionDispatcher(DaemonSession &session, AppState &state)
 bool ActionDispatcher::sendMessage(const std::string &text) {
   if (text.empty()) return false;
 
-  auto threadId = state_.threadId();
-  auto agentId = state_.agentId();
+  try {
+    auto threadId = state_.threadId();
+    auto agentId = state_.agentId();
 
-  if (threadId.empty()) {
-    // Auto-create a thread if none exists.
-    if (!createThread()) return false;
-    threadId = state_.threadId();
-    agentId = state_.agentId();
+    if (threadId.empty()) {
+      if (!createThread()) return false;
+      threadId = state_.threadId();
+      agentId = state_.agentId();
+    }
+
+    auto response = session_.send(threadId, agentId, text);
+    return response.accepted;
+  } catch (const std::exception& e) {
+    TranscriptLine line;
+    line.kind = TranscriptLine::Kind::Notice;
+    line.text = std::string("Send failed: ") + e.what();
+    state_.appendTranscriptLine(std::move(line));
+    state_.finalizeStreamingLine();
+    state_.setAgentStatus(firmius::shared::AgentStatus::Idle);
+    return false;
   }
-
-
-
-  auto response = session_.send(threadId, agentId, text);
-  return response.accepted;
 }
 
 bool ActionDispatcher::createThread(const std::string &persona,
@@ -38,7 +45,6 @@ bool ActionDispatcher::createThread(const std::string &persona,
   state_.setThreadTitle(response.thread.title);
   state_.setTranscriptLines({});
 
-  // Open the thread to establish focus.
   session_.openThread(response.thread.threadId);
   return true;
 }
@@ -51,13 +57,37 @@ bool ActionDispatcher::openThread(const std::string &threadId) {
   state_.setAgentId(response.focusedAgentId);
   state_.setThreadTitle(response.thread.title);
 
+  if (!response.focusedAgentId.empty()) {
+    auto agent = session_.getAgent(response.thread.threadId, response.focusedAgentId);
+    if (agent) {
+      state_.setAgentPurpose(agent->persona);
+      if (!agent->modelId.empty()) {
+        std::string label = agent->modelId;
+        if (!agent->providerId.empty()) label = agent->providerId + "/" + agent->modelId;
+        state_.setModelLabel(label);
+      }
+      if (agent->maxTokens > 0) {
+        state_.setAgentContextWindow(std::to_string(agent->maxTokens / 1000) + "k ctx");
+      }
+    }
+  }
+
   loadTranscript();
   return true;
 }
 
 bool ActionDispatcher::interruptAgent() {
-  auto result = session_.interruptAgent(state_.threadId(), state_.agentId());
-  return result.has_value();
+  try {
+    session_.interruptAgent(state_.threadId(), state_.agentId());
+  } catch (const std::exception& e) {
+    TranscriptLine line;
+    line.kind = TranscriptLine::Kind::Notice;
+    line.text = std::string("Interrupt failed: ") + e.what();
+    state_.appendTranscriptLine(std::move(line));
+  }
+  state_.finalizeStreamingLine();
+  state_.setAgentStatus(firmius::shared::AgentStatus::Idle);
+  return true;
 }
 
 bool ActionDispatcher::resolvePermission(

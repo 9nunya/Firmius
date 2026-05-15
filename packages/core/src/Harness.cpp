@@ -1030,16 +1030,12 @@ bool Harness::sendToThreadAgent(
     const std::string &text,
     const std::vector<firmius::shared::ImageContent> &images) {
   std::string statusMessage;
-  std::string previousThreadId;
-  std::string previousAgentId;
   {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (threadId.empty()) {
       emitEvent(firmius::shared::AgentError{"", "No target thread active"});
       return false;
     }
-    previousThreadId = currentThreadId_;
-    previousAgentId = focusedAgentId_;
     currentThreadId_ = threadId;
     focusedAgentId_ = agentId;
     if (!agentId.empty()) {
@@ -1049,8 +1045,11 @@ bool Harness::sendToThreadAgent(
   const bool ok = dispatchRequestToAgent(threadId, agentId, text, images, statusMessage);
   {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
-    currentThreadId_ = previousThreadId;
-    focusedAgentId_ = previousAgentId;
+    currentThreadId_ = threadId;
+    focusedAgentId_ = agentId;
+    if (!agentId.empty()) {
+      threadAgentMap_[threadId] = agentId;
+    }
   }
   if (!ok) emitEvent(firmius::shared::AgentError{"", statusMessage});
   return ok;
@@ -1136,8 +1135,6 @@ bool Harness::dispatchRequestToAgent(const std::string &threadId,
           threadAgentMap_[tid] = fid;
           if (agent && (agent->isRunning() || agent->isBooting())) {
             agentRunning = true;
-            messageQueue_.push_back(
-                {messageId, preparedText, images, tid, fid});
           }
         }
       }
@@ -1231,6 +1228,10 @@ bool Harness::dispatchRequestToAgent(const std::string &threadId,
   }
 
   if (agentRunning) {
+    {
+      std::lock_guard<std::recursive_mutex> lock(mutex_);
+      messageQueue_.push_back({messageId, preparedText, images, tid, fid});
+    }
     emitEvent(firmius::shared::MessageQueued{messageId, text, tid, fid, images});
     statusMessage = "Retry queued on running agent.";
     return true;
@@ -1917,6 +1918,11 @@ void Harness::deleteThread(const std::string &threadId) {
   threadAgentMap_.erase(threadId);
   threadManager_.deleteThread(threadId);
   emitEvent(firmius::shared::ThreadDeleted{threadId});
+}
+
+void Harness::releaseThreadLock(const std::string &threadId) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  lockManager_.release(threadId);
 }
 
 std::vector<ThreadMetadata> Harness::listThreads() {

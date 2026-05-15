@@ -223,6 +223,9 @@ public:
 
   void deleteThread(const std::string &threadId);
 
+  /// Release the flock on a thread's lock file if held by this process.
+  void releaseThreadLock(const std::string &threadId);
+
   std::vector<ThreadMetadata> listThreads();
   // Fast-path single-thread metadata lookup. listThreads() loads EVERY
   // thread in the DB (can be thousands) just so callers can find one entry

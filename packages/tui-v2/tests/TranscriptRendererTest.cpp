@@ -11,7 +11,7 @@ TEST(TranscriptRendererTest, FormatUserMessage) {
 
   std::string formatted = TranscriptRenderer::formatLine(line, 80);
   // It should contain the prefix and the text
-  EXPECT_NE(formatted.find("▶ Hello world"), std::string::npos);
+  EXPECT_NE(formatted.find("> Hello world"), std::string::npos);
 }
 
 TEST(TranscriptRendererTest, FormatToolCall) {

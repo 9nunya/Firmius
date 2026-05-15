@@ -1,5 +1,7 @@
 #include "AppState.hpp"
 
+#include <cctype>
+
 namespace firmius::tui2 {
 
 void AppState::markDirty() { dirty_ = true; }
@@ -133,10 +135,83 @@ void AppState::setLastRenderedLineIndex(size_t index) {
 
 // ── Streaming ──
 
+void AppState::flushThinkingBufferLocked() {
+  if (streamingThinkingText_.empty()) return;
+
+  auto flushLine = [this](std::string text) {
+    while (!text.empty() && std::isspace(static_cast<unsigned char>(text.front()))) {
+      text.erase(text.begin());
+    }
+    while (!text.empty() && std::isspace(static_cast<unsigned char>(text.back()))) {
+      text.pop_back();
+    }
+    if (text.empty()) return;
+    TranscriptLine line;
+    line.kind = TranscriptLine::Kind::Thinking;
+    line.text = std::move(text);
+    transcriptLines_.push_back(std::move(line));
+  };
+
+  size_t pos = 0;
+  while ((pos = streamingThinkingText_.find('\n')) != std::string::npos) {
+    flushLine(streamingThinkingText_.substr(0, pos));
+    streamingThinkingText_ = streamingThinkingText_.substr(pos + 1);
+  }
+
+  constexpr size_t kStreamingWrapColumn = 88;
+  while (streamingThinkingText_.size() >= kStreamingWrapColumn) {
+    size_t split = streamingThinkingText_.rfind(' ', kStreamingWrapColumn);
+    if (split == std::string::npos || split == 0) {
+      split = kStreamingWrapColumn;
+    }
+    flushLine(streamingThinkingText_.substr(0, split));
+    streamingThinkingText_ = streamingThinkingText_.substr(split);
+  }
+
+  if (!streamingThinkingText_.empty()) {
+    TranscriptLine line;
+    line.kind = TranscriptLine::Kind::Thinking;
+    line.text = std::move(streamingThinkingText_);
+    transcriptLines_.push_back(std::move(line));
+    streamingThinkingText_.clear();
+  }
+}
+
 void AppState::appendStreamingDelta(const std::string &delta) {
   std::lock_guard<std::mutex> lock(mutex_);
+  flushThinkingBufferLocked();
   streamingText_ += delta;
-  agentStatus_ = firmius::shared::AgentStatus::Streaming;
+
+  auto flushAssistantLine = [this](std::string text) {
+    while (!text.empty() && std::isspace(static_cast<unsigned char>(text.front()))) {
+      text.erase(text.begin());
+    }
+    while (!text.empty() && std::isspace(static_cast<unsigned char>(text.back()))) {
+      text.pop_back();
+    }
+    if (text.empty()) return;
+    TranscriptLine line;
+    line.kind = TranscriptLine::Kind::AssistantText;
+    line.text = std::move(text);
+    transcriptLines_.push_back(std::move(line));
+  };
+
+  size_t pos = 0;
+  while ((pos = streamingText_.find('\n')) != std::string::npos) {
+    flushAssistantLine(streamingText_.substr(0, pos));
+    streamingText_ = streamingText_.substr(pos + 1);
+  }
+
+  constexpr size_t kStreamingWrapColumn = 88;
+  while (streamingText_.size() >= kStreamingWrapColumn) {
+    size_t split = streamingText_.rfind(' ', kStreamingWrapColumn);
+    if (split == std::string::npos || split == 0) {
+      split = kStreamingWrapColumn;
+    }
+    flushAssistantLine(streamingText_.substr(0, split));
+    streamingText_ = streamingText_.substr(split);
+  }
+
   markDirty();
 }
 
@@ -145,11 +220,24 @@ void AppState::finalizeStreamingLine() {
   if (!streamingText_.empty()) {
     TranscriptLine line;
     line.kind = TranscriptLine::Kind::AssistantText;
-    line.text = streamingText_;
+    line.text = std::move(streamingText_);
     transcriptLines_.push_back(std::move(line));
     streamingText_.clear();
-    markDirty();
   }
+  agentStatus_ = firmius::shared::AgentStatus::Idle;
+  markDirty();
+}
+
+void AppState::appendStreamingThinkingDelta(const std::string &delta) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  streamingThinkingText_ += delta;
+  markDirty();
+}
+
+void AppState::finalizeStreamingThinkingLine() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  flushThinkingBufferLocked();
+  markDirty();
 }
 
 std::string AppState::currentStreamingText() const {

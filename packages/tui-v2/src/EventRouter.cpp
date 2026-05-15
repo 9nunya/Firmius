@@ -1,5 +1,6 @@
 #include "EventRouter.hpp"
 
+#include <cstdio>
 #include <rapidjson/document.h>
 
 namespace firmius::tui2 {
@@ -9,29 +10,25 @@ EventRouter::EventRouter(AppState &state) : state_(state) {}
 void EventRouter::route(const firmius::daemon::DaemonEventEnvelope &envelope) {
   switch (envelope.kind) {
   case firmius::daemon::DaemonEventKind::RuntimeAppEvent:
-    routeRuntimeEvent(envelope.runtimeEventType,
-                      envelope.runtimeEventJson,
-                      envelope.runtimeEventThreadId,
-                      envelope.runtimeEventAgentId);
+    routeRuntimeEvent(envelope.runtimeEventType, envelope.runtimeEventJson,
+                      envelope.runtimeEventThreadId, envelope.runtimeEventAgentId,
+                      envelope.agentStatus);
     break;
   case firmius::daemon::DaemonEventKind::ClientSessionRegistered:
   case firmius::daemon::DaemonEventKind::ClientSessionDisconnected:
   case firmius::daemon::DaemonEventKind::ClientSessionUpdated:
-    // Session events — no action needed in tui-v2 for now.
     break;
   case firmius::daemon::DaemonEventKind::HookStateChanged:
-    // Future: update hook status in state.
     break;
   case firmius::daemon::DaemonEventKind::PactStateChanged:
-    // Future: update pact status in state.
     break;
   }
 }
 
-void EventRouter::routeRuntimeEvent(const std::string &eventType,
-                                     const std::string &eventJson,
-                                     const std::string & /*threadId*/,
-                                     const std::string &agentId) {
+void EventRouter::routeRuntimeEvent(
+    const std::string &eventType, const std::string &eventJson,
+    const std::string & /*threadId*/, const std::string &agentId,
+    std::optional<firmius::shared::AgentStatus> realStatus) {
   if (eventType == "agent_text") {
     handleAgentText(eventJson, agentId);
   } else if (eventType == "agent_thinking") {
@@ -58,8 +55,15 @@ void EventRouter::routeRuntimeEvent(const std::string &eventType,
     handlePermissionResolved(eventJson);
   } else if (eventType == "agent_process_output") {
     handleAgentProcessOutput(eventJson, agentId);
+  } else if (eventType == "model_switched") {
+    handleModelSwitched(eventJson);
+  } else if (eventType == "config_updated") {
+    handleConfigUpdated();
   }
-  // Unknown event types are silently ignored — forward compatible.
+
+  if (realStatus.has_value()) {
+    state_.setAgentStatus(*realStatus);
+  }
 }
 
 namespace {
@@ -82,16 +86,11 @@ void EventRouter::handleAgentText(const std::string &json,
 }
 
 void EventRouter::handleAgentThinking(const std::string &json,
-                                       const std::string &agentId) {
+                                       const std::string & /*agentId*/) {
   rapidjson::Document doc;
   doc.Parse(json.c_str());
   if (doc.HasParseError()) return;
-
-  TranscriptLine line;
-  line.kind = TranscriptLine::Kind::Thinking;
-  line.text = jsonString(doc, "delta");
-  line.agentId = agentId;
-  state_.appendTranscriptLine(std::move(line));
+  state_.appendStreamingThinkingDelta(jsonString(doc, "delta"));
 }
 
 void EventRouter::handleAgentToolCall(const std::string &json,
@@ -103,7 +102,6 @@ void EventRouter::handleAgentToolCall(const std::string &json,
   std::string toolCallId = jsonString(doc, "toolCallId");
   std::string toolName = jsonString(doc, "toolName");
 
-  // Add to active tool calls.
   ActiveToolCall call;
   call.toolCallId = toolCallId;
   call.toolName = toolName;
@@ -111,7 +109,6 @@ void EventRouter::handleAgentToolCall(const std::string &json,
   call.status = "running";
   state_.addActiveToolCall(std::move(call));
 
-  // Add to transcript.
   TranscriptLine line;
   line.kind = TranscriptLine::Kind::ToolCall;
   line.toolCallId = toolCallId;
@@ -122,12 +119,13 @@ void EventRouter::handleAgentToolCall(const std::string &json,
 }
 
 void EventRouter::handleAgentTurnCompleted(const std::string & /*agentId*/) {
+  state_.finalizeStreamingThinkingLine();
   state_.finalizeStreamingLine();
 }
 
 void EventRouter::handleAgentFinished(const std::string & /*agentId*/) {
+  state_.finalizeStreamingThinkingLine();
   state_.finalizeStreamingLine();
-  state_.setAgentStatus(firmius::shared::AgentStatus::Idle);
 }
 
 void EventRouter::handleAgentSpawned(const std::string &json,
@@ -137,9 +135,8 @@ void EventRouter::handleAgentSpawned(const std::string &json,
   if (doc.HasParseError()) return;
 
   state_.setAgentId(agentId);
-  state_.setAgentStatus(firmius::shared::AgentStatus::Streaming);
   state_.setAgentPurpose(jsonString(doc, "personaName"));
-  
+
   if (doc.HasMember("maxTokens") && doc["maxTokens"].IsNumber()) {
     state_.setAgentContextWindow(std::to_string(doc["maxTokens"].GetInt() / 1000) + "k");
   }
@@ -161,6 +158,9 @@ void EventRouter::handleAgentError(const std::string &json,
   doc.Parse(json.c_str());
   if (doc.HasParseError()) return;
 
+  state_.finalizeStreamingThinkingLine();
+  state_.finalizeStreamingLine();
+
   TranscriptLine line;
   line.kind = TranscriptLine::Kind::Notice;
   line.text = "⚠ Error: " + jsonString(doc, "message");
@@ -173,9 +173,16 @@ void EventRouter::handleUserMessageSent(const std::string &json) {
   doc.Parse(json.c_str());
   if (doc.HasParseError()) return;
 
+  std::string text = jsonString(doc, "text");
+  auto lines = state_.transcriptLines();
+  if (!lines.empty() && lines.back().kind == TranscriptLine::Kind::UserMessage &&
+      lines.back().text == text) {
+    return;
+  }
+
   TranscriptLine line;
   line.kind = TranscriptLine::Kind::UserMessage;
-  line.text = jsonString(doc, "text");
+  line.text = std::move(text);
   state_.appendTranscriptLine(std::move(line));
 }
 
@@ -222,6 +229,26 @@ void EventRouter::handleAgentProcessOutput(const std::string &json,
     line.agentId = agentId;
     state_.appendTranscriptLine(std::move(line));
   }
+}
+
+void EventRouter::handleModelSwitched(const std::string &json) {
+  rapidjson::Document doc;
+  doc.Parse(json.c_str());
+  if (doc.HasParseError()) return;
+
+  std::string modelId = jsonString(doc, "newModelId");
+  std::string providerId = jsonString(doc, "newProviderId");
+  if (!modelId.empty()) {
+    std::string label = modelId;
+    if (!providerId.empty()) {
+      label = providerId + "/" + modelId;
+    }
+    state_.setModelLabel(label);
+  }
+}
+
+void EventRouter::handleConfigUpdated() {
+  state_.markDirtyPublic();
 }
 
 } // namespace firmius::tui2

@@ -4,6 +4,8 @@
 #include "AgentRegistry.hpp"
 #include "ConfigLoader.hpp"
 #include "Engine.hpp"
+#include "providers/ProviderRegistry.hpp"
+#include "workflow/WorkflowLoader.hpp"
 #include "agents/hooks/HookRegistry.hpp"
 #include "agents/hooks/HookState.hpp"
 #include "harness/Harness.hpp"
@@ -54,6 +56,8 @@ std::string appEventTypeName(const firmius::shared::AppEvent &event) {
           return "thread_changed";
         } else if constexpr (std::is_same_v<T, firmius::shared::UserMessageSent>) {
           return "user_message_sent";
+        } else if constexpr (std::is_same_v<T, firmius::shared::AgentSpawned>) {
+          return "agent_spawned";
         } else if constexpr (std::is_same_v<T, firmius::shared::AgentThinking>) {
           return "agent_thinking";
         } else if constexpr (std::is_same_v<T, firmius::shared::AgentText>) {
@@ -62,12 +66,26 @@ std::string appEventTypeName(const firmius::shared::AppEvent &event) {
           return "agent_tool_call";
         } else if constexpr (std::is_same_v<T, firmius::shared::AgentTurnCompleted>) {
           return "agent_turn_completed";
+        } else if constexpr (std::is_same_v<T, firmius::shared::AgentFinished>) {
+          return "agent_finished";
+        } else if constexpr (std::is_same_v<T, firmius::shared::AgentError>) {
+          return "agent_error";
+        } else if constexpr (std::is_same_v<T, firmius::shared::AgentProcessOutput>) {
+          return "agent_process_output";
+        } else if constexpr (std::is_same_v<T, firmius::shared::MessageQueued>) {
+          return "message_queued";
+        } else if constexpr (std::is_same_v<T, firmius::shared::MessageDequeued>) {
+          return "message_dequeued";
         } else if constexpr (std::is_same_v<T, firmius::shared::PermissionEscalationRequest>) {
-          return "permission_escalation_requested";
+          return "permission_escalation_request";
         } else if constexpr (std::is_same_v<T, firmius::shared::PermissionEscalationResolved>) {
           return "permission_escalation_resolved";
         } else if constexpr (std::is_same_v<T, firmius::shared::ModelsRefreshed>) {
           return "models_refreshed";
+        } else if constexpr (std::is_same_v<T, firmius::shared::ModelSwitched>) {
+          return "model_switched";
+        } else if constexpr (std::is_same_v<T, firmius::shared::ConfigUpdated>) {
+          return "config_updated";
         } else {
           return "runtime_event";
         }
@@ -110,7 +128,6 @@ rapidjson::Document serializeAppEventDocument(const AppEvent &event) {
                       std::is_same_v<T, firmius::shared::AgentToolCall> ||
                       std::is_same_v<T, firmius::shared::AgentToolCallChunk> ||
                       std::is_same_v<T, firmius::shared::AgentFileEdited> ||
-                      std::is_same_v<T, firmius::shared::AgentTurnCompleted> ||
                       std::is_same_v<T, firmius::shared::AgentMetricsStreamed> ||
                       std::is_same_v<T, firmius::shared::AgentInterrupted> ||
                       std::is_same_v<T, firmius::shared::AgentError> ||
@@ -122,10 +139,30 @@ rapidjson::Document serializeAppEventDocument(const AppEvent &event) {
                       std::is_same_v<T, firmius::shared::AgentProcessSpawned> ||
                       std::is_same_v<T, firmius::shared::ModelSwitched> ||
                       std::is_same_v<T, firmius::shared::HistoryUndone> ||
-                      std::is_same_v<T, firmius::shared::AgentAccountSwitched> ||
-                      std::is_same_v<T, firmius::shared::AgentFinished>) {
+                      std::is_same_v<T, firmius::shared::AgentAccountSwitched>) {
           firmius::shared::EngineEvent engineEvent = e;
           return firmius::shared::toJson(engineEvent);
+        } else if constexpr (std::is_same_v<T, firmius::shared::AgentTurnCompleted>) {
+          auto doc = basicEventDocument<T>("AgentTurnCompleted");
+          doc.AddMember("agentId",
+                        rapidjson::Value(e.agentId.c_str(), doc.GetAllocator()).Move(),
+                        doc.GetAllocator());
+          doc.AddMember("parentId",
+                        rapidjson::Value(e.parentId.c_str(), doc.GetAllocator()).Move(),
+                        doc.GetAllocator());
+          doc.AddMember("turnId",
+                        rapidjson::Value(e.turn.turnId.c_str(), doc.GetAllocator()).Move(),
+                        doc.GetAllocator());
+          return doc;
+        } else if constexpr (std::is_same_v<T, firmius::shared::AgentFinished>) {
+          auto doc = basicEventDocument<T>("AgentFinished");
+          doc.AddMember("agentId",
+                        rapidjson::Value(e.agentId.c_str(), doc.GetAllocator()).Move(),
+                        doc.GetAllocator());
+          doc.AddMember("parentId",
+                        rapidjson::Value(e.parentId.c_str(), doc.GetAllocator()).Move(),
+                        doc.GetAllocator());
+          return doc;
         } else if constexpr (std::is_same_v<T, firmius::shared::ThreadChanged>) {
           auto doc = basicEventDocument<T>("ThreadChanged");
           doc.AddMember("threadId",
@@ -246,8 +283,8 @@ std::string serializeAppEvent(const AppEvent &event) {
   return buffer.GetString();
 }
 
-std::string appEventThreadId(const AppEvent &event) {
-  return std::visit(
+std::string eventThreadIdForRouting(const AppEvent &event) {
+  const std::string directThreadId = std::visit(
       [](const auto &e) -> std::string {
         if constexpr (requires { e.threadId; }) {
           return e.threadId;
@@ -255,6 +292,25 @@ std::string appEventThreadId(const AppEvent &event) {
         return "";
       },
       event);
+  if (!directThreadId.empty()) {
+    return directThreadId;
+  }
+  const std::string agentId = std::visit(
+      [](const auto &e) -> std::string {
+        if constexpr (requires { e.agentId; }) {
+          return e.agentId;
+        }
+        return "";
+      },
+      event);
+  if (agentId.empty()) {
+    return "";
+  }
+  auto agent = firmius::core::AgentRegistry::instance().getAgent(agentId);
+  if (!agent || !agent->getContext().history) {
+    return "";
+  }
+  return agent->getContext().history->threadId;
 }
 
 std::string appEventAgentId(const AppEvent &event) {
@@ -648,8 +704,13 @@ void DaemonService::start() {
   }
   std::lock_guard<std::mutex> runtimeLock(runtimeMutex_);
   firmius::shared::ConfigLoader::instance().load();
+  firmius::provider::ProviderRegistry::instance().reloadConfigProviders(
+      firmius::shared::ConfigLoader::instance().getConfig().providers);
+  firmius::provider::ProviderRegistry::instance().hydrateProviders();
   auto &harness = firmius::core::Harness::instance();
   harness.init();
+  firmius::core::WorkflowLoader::instance().init();
+  firmius::core::Harness::instance().listAllModels();
   const int subscriptionId = harness.subscribe(
       [this](const firmius::shared::AppEvent &event) { emitCoreEvent(event); });
   std::lock_guard<std::mutex> stateLock(stateMutex_);
@@ -726,6 +787,15 @@ DaemonService::auditEmitRuntimeEvent(const DaemonAuditEmitRuntimeEventRequest &r
     doc.AddMember("toolArgs",
                   rapidjson::Value(request.toolArgsJson.c_str(), allocator),
                   allocator);
+  } else if (request.eventType == "agent_finished" ||
+             request.eventType == "agent_turn_completed" ||
+             request.eventType == "user_message_sent" ||
+             request.eventType == "message_queued" ||
+             request.eventType == "message_dequeued") {
+    // Minimal body for completion/status events
+    doc.AddMember("type",
+                  rapidjson::Value(request.eventType.c_str(), allocator),
+                  allocator);
   } else {
     throw std::runtime_error("daemon.auditEmitRuntimeEvent unsupported event_type");
   }
@@ -779,6 +849,21 @@ bool DaemonService::unregisterClient(const std::string &clientId) {
     }
     removed = it->second;
     sessions_.erase(it);
+  }
+  if (removed.has_value() && !removed->focusedThreadId.empty()) {
+    bool threadStillNeeded = false;
+    {
+      std::lock_guard<std::mutex> lock(stateMutex_);
+      for (const auto &[_, session] : sessions_) {
+        if (session.focusedThreadId == removed->focusedThreadId) {
+          threadStillNeeded = true;
+          break;
+        }
+      }
+    }
+    if (!threadStillNeeded) {
+      firmius::core::Harness::instance().releaseThreadLock(removed->focusedThreadId);
+    }
   }
   emitSessionEvent(DaemonEventKind::ClientSessionDisconnected, *removed);
   return true;
@@ -1153,6 +1238,22 @@ ModelCatalogSnapshot DaemonService::listModels(bool refresh) {
 std::optional<AgentRuntimeSnapshot>
 DaemonService::switchModel(const ModelSwitchRequest &request) {
   std::lock_guard<std::mutex> runtimeLock(runtimeMutex_);
+  if (request.agentId.empty()) {
+    if (request.variantName.empty()) {
+      firmius::core::Harness::instance().switchModel(request.providerId,
+                                                     request.modelId);
+    } else {
+      firmius::core::Harness::instance().switchModel(request.providerId,
+                                                     request.modelId,
+                                                     request.variantName);
+    }
+    AgentRuntimeSnapshot snapshot;
+    snapshot.status = firmius::shared::AgentStatus::Idle;
+    snapshot.providerId = request.providerId;
+    snapshot.modelId = request.modelId;
+    snapshot.variantName = request.variantName;
+    return snapshot;
+  }
   const auto liveAgent =
       firmius::core::AgentRegistry::instance().getAgent(request.agentId);
   if (!liveAgent) {
@@ -1487,7 +1588,9 @@ QuotaSnapshot DaemonService::getQuotas(const QuotasRequest &request,
 }
 
 UserConfigSnapshot DaemonService::getConfig() const {
-  return UserConfigSnapshot{firmius::core::Harness::instance().getConfig()};
+  firmius::shared::ConfigLoader::instance().load();
+  const auto &cfg = firmius::core::Harness::instance().getConfig();
+  return UserConfigSnapshot{cfg};
 }
 
 UserConfigSnapshot DaemonService::updateConfig(const ConfigUpdateRequest &request) {
@@ -1763,10 +1866,10 @@ UiSnapshot DaemonService::uiSnapshot(const std::string &clientId,
   snapshot.threads = harness.listThreads();
   if (!threadId.empty()) {
     snapshot.focusedThread = getThread(clientId, ThreadsOpenRequest{threadId});
-  }
-  snapshot.agents = listAgents(clientId, AgentTargetRequest{threadId, agentId});
-  if (!agentId.empty()) {
-    snapshot.focusedAgent = getAgent(clientId, AgentTargetRequest{threadId, agentId});
+    snapshot.agents = listAgents(clientId, AgentTargetRequest{threadId, agentId});
+    if (!agentId.empty()) {
+      snapshot.focusedAgent = getAgent(clientId, AgentTargetRequest{threadId, agentId});
+    }
   }
   if (request.includeTranscript && !threadId.empty() && !agentId.empty()) {
     snapshot.transcript = getTranscript(clientId, TranscriptGetRequest{threadId, agentId});
@@ -2000,16 +2103,17 @@ void DaemonService::emitPactStateEvent(const PactSnapshot &snapshot) {
   }
 }
 
-void DaemonService::emitRuntimeEventToFocusedClients(const std::string &eventType,
-                                                     const std::string &eventThreadId,
-                                                     const std::string &eventAgentId,
-                                                     const std::string &eventJson) {
+void DaemonService::emitRuntimeEventToFocusedClients(
+    const std::string &eventType, const std::string &eventThreadId,
+    const std::string &eventAgentId, const std::string &eventJson,
+    std::optional<firmius::shared::AgentStatus> agentStatus) {
   DaemonEventEnvelope baseEnvelope;
   baseEnvelope.kind = DaemonEventKind::RuntimeAppEvent;
   baseEnvelope.runtimeEventType = eventType;
   baseEnvelope.runtimeEventThreadId = eventThreadId;
   baseEnvelope.runtimeEventAgentId = eventAgentId;
   baseEnvelope.runtimeEventJson = eventJson;
+  baseEnvelope.agentStatus = agentStatus;
   baseEnvelope = prepareEventEnvelope(std::move(baseEnvelope));
 
   std::vector<std::pair<std::string, DaemonEventListener>> listeners;
@@ -2023,7 +2127,11 @@ void DaemonService::emitRuntimeEventToFocusedClients(const std::string &eventTyp
       if (sessionIt == sessions_.end()) {
         continue;
       }
-      if (sessionIt->second.focusedThreadId != eventThreadId) {
+      const bool threadMatches = !eventThreadId.empty() &&
+                                 sessionIt->second.focusedThreadId == eventThreadId;
+      const bool agentMatches = !eventAgentId.empty() &&
+                                sessionIt->second.focusedAgentId == eventAgentId;
+      if (!threadMatches && !agentMatches) {
         continue;
       }
       if (subscription.listener &&
@@ -2041,13 +2149,20 @@ void DaemonService::emitRuntimeEventToFocusedClients(const std::string &eventTyp
 
 void DaemonService::emitCoreEvent(const firmius::shared::AppEvent &event) {
   const std::string eventType = appEventTypeName(event);
-  const std::string eventThreadId = appEventThreadId(event);
+  const std::string eventThreadId = eventThreadIdForRouting(event);
   const std::string eventAgentId = appEventAgentId(event);
   if (eventType == "thread_changed") {
     return;
   }
+  std::optional<firmius::shared::AgentStatus> agentStatus;
+  if (!eventAgentId.empty()) {
+    if (auto agent = firmius::core::AgentRegistry::instance().getAgent(eventAgentId)) {
+      agentStatus = agent->getContext().state.currentStatus;
+    }
+  }
   const std::string eventJson = serializeAppEvent(event);
-  emitRuntimeEventToFocusedClients(eventType, eventThreadId, eventAgentId, eventJson);
+  emitRuntimeEventToFocusedClients(eventType, eventThreadId, eventAgentId, eventJson,
+                                   agentStatus);
 
   if (!eventThreadId.empty()) {
     const auto hookSnapshot =
@@ -2236,6 +2351,7 @@ DaemonService::buildAgentSnapshotLocked(const std::string &threadId,
     snapshot.providerId = ctx.config.providerId;
     snapshot.modelId = ctx.config.modelId;
     snapshot.variantName = ctx.config.modelVariant;
+    snapshot.maxTokens = ctx.config.maxTokens.value_or(0);
     snapshot.pendingToolCalls = ctx.state.pendingToolCalls;
     snapshot.ownedProcesses = ctx.state.ownedProcesses;
     snapshot.blockingProcessIds = ctx.state.blockingProcessIds;
