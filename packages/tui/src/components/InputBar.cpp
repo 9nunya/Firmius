@@ -238,7 +238,7 @@ std::vector<ProviderSuggestion>
 buildProviderSuggestions(ArgType argType, const std::string &filter) {
   std::vector<ProviderSuggestion> matches;
   auto providers =
-      firmius::provider::ProviderRegistry::instance().listProviders();
+      firmius::provider::ProviderRegistry::instance().hydrateProviders();
   std::string lower_filter = toLowerAscii(filter);
   for (const auto &provider : providers) {
     if (!provider)
@@ -306,20 +306,20 @@ buildAtReferenceSuggestions(const std::shared_ptr<InputBarModel> &model,
 
 // Resolve the persona context that should drive `/mode` autocomplete.
 // Mid-thread we use the focused agent's persona; on Welcome we fall back
-// to the lead persona on the pre-thread metadata (defaulting to "aster"
+// to the lead persona on the pre-thread metadata (defaulting to "lead"
 // when nothing is set yet, mirroring ModeCommand's resolution logic).
 std::string activePersonaForModeSuggestions() {
   auto &state = TuiState::instance();
   if (state.getViewMode() == TuiState::ViewMode::Welcome) {
     return state.thread_.leadPersona.empty()
-               ? std::string("aster")
+               ? std::string("lead")
                : state.thread_.leadPersona;
   }
   if (auto agent = firmius::core::AgentRegistry::instance().getAgent(
           state.focused_agent_id_)) {
     return agent->getContext().config.personaName;
   }
-  return "aster";
+  return "lead";
 }
 
 struct ModeSuggestion {

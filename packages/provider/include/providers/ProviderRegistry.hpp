@@ -48,6 +48,7 @@ public:
      * @return Shared pointer to the provider, or nullptr if not found.
      */
     std::shared_ptr<IProvider> getProvider(const std::string& id) const;
+    std::vector<std::shared_ptr<IProvider>> hydrateProviders() const;
 
     /**
      * @brief Lists all registered provider IDs.
@@ -64,6 +65,7 @@ private:
 
     mutable std::mutex mutex;
     std::map<std::string, std::shared_ptr<IProvider>> providers;
+    std::map<std::string, ProviderFactory> builtinFactories;
     std::map<std::string, ProviderFactory> factories;
     std::set<std::string> dynamicProviderIds;
 };

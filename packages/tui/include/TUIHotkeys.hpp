@@ -11,6 +11,7 @@ namespace firmius::tui {
 enum class HotkeyAction {
   OpenHelp,
   OpenCommandPalette,
+  ModeCycle,
   PermissionCycle,
   RetryLastRequest,
   VariantCycle,
@@ -46,6 +47,7 @@ struct HotkeyConflict {
 
 constexpr const char *kOpenHelpHotkeyLabel = "F1";
 constexpr const char *kOpenCommandPaletteHotkeyLabel = "Ctrl+Shift+P";
+constexpr const char *kModeCycleHotkeyLabel = "Ctrl+Y";
 constexpr const char *kPermissionCycleHotkeyLabel = "Ctrl+L";
 constexpr const char *kRetryLastRequestHotkeyLabel = "Ctrl+R";
 constexpr const char *kVariantCycleHotkeyLabel = "Ctrl+K";
@@ -79,6 +81,8 @@ bool IsOpenHelpEvent(const ftxui::Event &event);
 bool IsOpenHelpInput(const std::string &raw);
 bool IsOpenCommandPaletteEvent(const ftxui::Event &event);
 bool IsOpenCommandPaletteInput(const std::string &raw);
+bool IsModeCycleEvent(const ftxui::Event &event);
+bool IsModeCycleInput(const std::string &raw);
 bool IsPermissionCycleEvent(const ftxui::Event &event);
 bool IsPermissionCycleInput(const std::string &raw);
 

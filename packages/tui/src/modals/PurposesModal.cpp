@@ -59,7 +59,7 @@ ftxui::Component PurposesModal::create(TuiState &state) {
   }
 
   if (purposes->empty()) {
-    purposes->push_back("aster");
+    purposes->push_back("lead");
   }
   std::sort(purposes->begin(), purposes->end());
   purposes->erase(std::unique(purposes->begin(), purposes->end()),

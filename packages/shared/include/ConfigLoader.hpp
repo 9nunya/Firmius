@@ -51,6 +51,14 @@ struct ProviderVariantConfig {
 struct ProviderModelConfig {
     std::string defaultVariant;
     std::map<std::string, ProviderVariantConfig> variants;
+    bool overrideContextWindow = false;
+    std::uint32_t contextWindow = 0;
+    bool overrideMaxOutputTokens = false;
+    std::uint32_t maxOutputTokens = 0;
+    bool overrideModalities = false;
+    std::vector<std::string> modalities;
+    bool overrideSupportsReasoning = false;
+    bool supportsReasoning = false;
 };
 
 struct ProviderDefaultsConfig {
@@ -75,6 +83,7 @@ struct RetryPolicyConfig {
 };
 
 struct ProviderProfileConfig {
+    std::string authMode = "api_key";
     std::string kind = "openai_compatible";
     std::string displayName;
     bool enabled = true;
@@ -83,6 +92,8 @@ struct ProviderProfileConfig {
     std::string chatEndpoint = "/chat/completions";
     std::string messagesEndpoint = "/v1/messages";
     std::string apiKeyRef;
+    std::string defaultApiKey;
+    bool allowMissingApiKey = false;
     std::map<std::string, std::string> headers;
     ProviderDefaultsConfig defaults;
     std::string reasoningFieldName = "reasoning_effort";
@@ -97,7 +108,7 @@ struct UserConfig {
     std::string defaultProviderId = "nanogpt";
     std::string defaultModelId = "zai-org/glm-4.6:thinking";
     std::string defaultModelVariant;                      // Selected model variant (e.g., "low", "medium", "max")
-    std::string defaultLeadPersona = "aster";
+    std::string defaultLeadPersona = "lead";
     float defaultTemperature = 0.7f;
     std::optional<uint32_t> defaultMaxTokens;
     bool dangerouslySkipPermissions = false;

@@ -2,6 +2,7 @@
 #include "benchmarks/AgentBench.hpp"
 #include "benchmarks/MBPPBenchmark.hpp"
 #include "benchmarks/SWEBench.hpp"
+#include "benchmarks/TuringSWEBenchPP.hpp"
 #include <algorithm>
 #include <cctype>
 
@@ -25,6 +26,10 @@ std::optional<std::string> canonicalBenchmarkId(const std::string &rawName) {
   if (name == "swebench" || name == "swe" || name == "softwareengineering") {
     return "swebench";
   }
+  if (name == "turingswebenchpp" || name == "turingswebench++" ||
+      name == "swebenchpp" || name == "swe++") {
+    return "turingswebenchpp";
+  }
   if (name == "agentbench" || name == "agent" || name == "osinteraction") {
     return "agentbench";
   }
@@ -32,7 +37,7 @@ std::optional<std::string> canonicalBenchmarkId(const std::string &rawName) {
 }
 
 std::vector<std::string> supportedBenchmarkIds() {
-  return {"mbpp", "swebench", "agentbench"};
+  return {"mbpp", "swebench", "turingswebenchpp", "agentbench"};
 }
 
 std::unique_ptr<firmius::shared::IBenchmark>
@@ -42,6 +47,9 @@ makeBenchmark(const std::string &canonicalId, BenchmarkConfig config) {
   }
   if (canonicalId == "swebench") {
     return std::make_unique<SWEBench>(std::move(config));
+  }
+  if (canonicalId == "turingswebenchpp") {
+    return std::make_unique<TuringSWEBenchPP>(std::move(config));
   }
   if (canonicalId == "agentbench") {
     return std::make_unique<AgentBench>(std::move(config));

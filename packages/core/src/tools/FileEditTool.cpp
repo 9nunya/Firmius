@@ -1004,8 +1004,24 @@ rapidjson::Document buildValidationDoc(const char *mode, const char *shape,
 
 std::shared_ptr<shared::JSONSchema> FileEditTool::getSchema() const {
   return zObject({
-      {"patch", zString()->describe("Unified diff text with ---/+++ headers. Supports one or more files.")},
-      {"validate_only", zBoolean()->describe("When true, validate patch shape and targets without writing.")->setOptional()}
+      {"patch",
+       zString()->describe(
+           "Unified diff (unidiff) patch text with ---/+++ headers. Supports one or more files.\n\n"
+           "USAGE:\n"
+           "- Provide a standard unified diff with file headers and one or more hunks.\n"
+           "- Multi-file patches are allowed; they will be applied transactionally (all succeed or none).\n"
+           "- Generate the patch from the latest on-disk content (use Files.Read first) to avoid hunk mismatch.\n\n"
+           "COMMON PITFALLS:\n"
+           "- Missing or malformed ---/+++ headers.\n"
+           "- Context doesn't match because the file changed since you generated the diff.\n"
+           "- Attempting to use this tool for whole-file writes (use EditWrite instead).")},
+      {"validate_only",
+       zBoolean()
+           ->describe(
+               "When true, validate the patch (shape + target extraction + permissions) without writing any files.\n\n"
+               "Use this to preflight risky patches or debug application failures.\n"
+               "Returns a structured preview of what would change.")
+           ->setOptional()}
   })->required({"patch"});
 }
 
@@ -1021,9 +1037,27 @@ FilePatchInput FileEditTool::transform(const rapidjson::Value &json) {
 }
 
 shared::ToolMetadata FileEditTool::getMetadata() const {
-  return {"Edit",
-          "Apply unified diffs transactionally. Patch-first editing only; use EditWrite, EditReplace, or EditRange for other edit styles.",
-          ToolScope::FilesystemWrite};
+  return {
+      "Edit",
+      R"(Apply unified diffs transactionally (patch-first editing).
+
+USAGE GUIDANCE:
+- Use this tool when you have an exact unified diff (---/+++ headers) to apply.
+- Prefer generating the patch from the exact file content you just read (via Files.Read) to avoid mismatched context.
+- For multi-file edits, include multiple file sections in one patch; this tool applies them transactionally.
+- If you only need a whole-file overwrite, use EditWrite.
+- If you need deterministic literal string replacement, use EditReplace.
+- If you need anchored line-range operations (insert/replace around anchors), use EditRange.
+
+VALIDATION MODE:
+- Set validate_only=true to check patch shape/targets without writing.
+- A successful validation returns what WOULD change; it does not modify files.
+
+FAILURE MODES / RECOVERY:
+- If the patch fails to apply, re-read the target file and regenerate the patch against current contents.
+- Keep hunks small and context-rich; large hunks are brittle.
+)",
+      ToolScope::FilesystemWrite};
 }
 
 shared::ToolResult FileEditTool::execute(const FilePatchInput &input,
@@ -1083,9 +1117,21 @@ shared::ToolResult FileEditTool::execute(const FilePatchInput &input,
 
 std::shared_ptr<shared::JSONSchema> FileWriteTool::getSchema() const {
   return zObject({
-      {"path", zString()->describe("Absolute or relative path to the file.")},
-      {"content", zString()->describe("Whole-file content to write.")},
-      {"validate_only", zBoolean()->describe("When true, validate the request without writing.")->setOptional()}
+      {"path",
+       zString()->describe(
+           "Absolute or workspace-relative path of the file to create/overwrite.\n\n"
+           "Usage: Prefer workspace-relative paths. The path is resolved against the workspace root.\n"
+           "Permissions: requires filesystem WRITE access to the resolved path.")},
+      {"content",
+       zString()->describe(
+           "The complete new contents of the file.\n\n"
+           "WARNING: This replaces the entire file. Use Edit or EditRange for small edits.")},
+      {"validate_only",
+       zBoolean()
+           ->describe(
+               "When true, validate the request (path resolution + permissions) without writing the file.\n\n"
+               "Use this to preflight risky overwrites.")
+           ->setOptional()}
   })->required({"path", "content"});
 }
 
@@ -1098,7 +1144,21 @@ FileWriteInput FileWriteTool::transform(const rapidjson::Value &json) {
 }
 
 shared::ToolMetadata FileWriteTool::getMetadata() const {
-  return {"EditWrite", "Write complete file contents to create or overwrite a single file.", ToolScope::FilesystemWrite};
+  return {"EditWrite",
+          R"(Write complete file contents to create or overwrite a single file.
+
+USAGE GUIDANCE:
+- Use this tool to create a new file or replace an entire file's contents.
+- Do NOT use this tool for small targeted edits; prefer Edit (unified diff) or EditRange (anchored) to minimize accidental overwrites.
+- Always read the existing file first (Files.Read) unless you are intentionally creating a brand-new file.
+
+VALIDATION MODE:
+- validate_only=true checks that the path is writable and that the request is well-formed, without writing.
+
+SAFETY NOTES:
+- This overwrites the entire file. If you pass incomplete content you will lose data.
+)",
+          ToolScope::FilesystemWrite};
 }
 
 shared::ToolResult FileWriteTool::execute(const FileWriteInput &input,

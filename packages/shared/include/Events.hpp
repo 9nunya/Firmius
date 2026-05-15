@@ -207,18 +207,21 @@ struct AgentRetryFailed {
   std::string parentId; ///< Parent agent ID.
   bool operator==(const AgentRetryFailed &) const = default;
 };
+
 struct AgentThinking {
   std::string agentId;
   std::string delta;
   std::string parentId = "";
   bool operator==(const AgentThinking &) const = default;
 };
+
 struct AgentText {
   std::string agentId;
   std::string delta;
   std::string parentId = "";
   bool operator==(const AgentText &) const = default;
 };
+
 struct AgentToolCall {
   std::string agentId;
   std::string toolCallId;
@@ -227,6 +230,7 @@ struct AgentToolCall {
   std::string parentId = "";
   bool operator==(const AgentToolCall &) const = default;
 };
+
 struct AgentToolCallChunk {
   std::uint32_t index;
   std::string agentId;
@@ -236,6 +240,7 @@ struct AgentToolCallChunk {
   std::string parentId = "";
   bool operator==(const AgentToolCallChunk &) const = default;
 };
+
 struct AgentFileEdited {
   std::string agentId;
   std::string parentId = "";
@@ -246,6 +251,7 @@ struct AgentFileEdited {
   int removedLines = 0;
   bool operator==(const AgentFileEdited &) const = default;
 };
+
 struct AgentTurnCompleted {
   std::string agentId;
   AgentTurn turn;
@@ -253,6 +259,14 @@ struct AgentTurnCompleted {
   std::string parentId = "";
   bool operator==(const AgentTurnCompleted &) const = default;
 };
+
+struct AgentMetricsStreamed {
+  std::string agentId;
+  AgentMetrics metrics;
+  std::string parentId = "";
+  bool operator==(const AgentMetricsStreamed &) const = default;
+};
+
 struct AgentOutcome {
   enum class Kind {
     Response,
@@ -278,40 +292,47 @@ struct AgentOutcome {
 
   bool operator==(const AgentOutcome &) const = default;
 };
+
 struct AgentInterrupted {
   std::string agentId;
   std::string parentId = "";
   bool operator==(const AgentInterrupted &) const = default;
 };
+
 struct AgentError {
   std::string agentId;
   std::string message;
   std::string parentId = "";
   bool operator==(const AgentError &) const = default;
 };
+
 struct AgentCompacting {
   std::string agentId;
   std::string parentId = "";
   bool operator==(const AgentCompacting &) const = default;
 };
+
 struct AgentCompactionThinking {
   std::string agentId;
   std::string delta;
   std::string parentId = "";
   bool operator==(const AgentCompactionThinking &) const = default;
 };
+
 struct AgentCompactionText {
   std::string agentId;
   std::string delta;
   std::string parentId = "";
   bool operator==(const AgentCompactionText &) const = default;
 };
+
 struct ContextCompacted {
   std::string agentId;
   uint32_t tokensSaved;
   std::string parentId = "";
   bool operator==(const ContextCompacted &) const = default;
 };
+
 struct AgentProcessOutput {
   std::string agentId;
   std::string processId;
@@ -323,6 +344,7 @@ struct AgentProcessOutput {
   std::string parentId = "";
   bool operator==(const AgentProcessOutput &) const = default;
 };
+
 struct AgentProcessSpawned {
   std::string agentId;
   std::string processId;
@@ -331,6 +353,7 @@ struct AgentProcessSpawned {
   std::string parentId = "";
   bool operator==(const AgentProcessSpawned &) const = default;
 };
+
 struct ModelSwitched {
   std::string agentId;
   std::string oldProviderId;
@@ -341,9 +364,6 @@ struct ModelSwitched {
   bool operator==(const ModelSwitched &other) const = default;
 };
 
-/**
- * @brief Emitted when agent history is undone.
- */
 struct HistoryUndone {
   std::string agentId;
   std::string threadId;
@@ -353,74 +373,16 @@ struct HistoryUndone {
   bool operator==(const HistoryUndone &other) const = default;
 };
 
-/**
- * @brief Emitted when the current thread changes.
- */
 struct ThreadChanged {
   std::string threadId;
   ThreadMetadata metadata;
   bool operator==(const ThreadChanged &) const = default;
 };
 
-/**
- * @brief Emitted when thread metadata changes without changing focus.
- */
 struct ThreadMetadataUpdated {
   std::string threadId;
   ThreadMetadata metadata;
   bool operator==(const ThreadMetadataUpdated &) const = default;
-};
-
-struct PlanCreated {
-  std::string threadId;
-  Plan plan;
-  bool operator==(const PlanCreated &) const = default;
-};
-
-struct PlanUpdated {
-  std::string threadId;
-  Plan plan;
-  bool operator==(const PlanUpdated &) const = default;
-};
-
-struct PlanActivated {
-  std::string threadId;
-  std::string planId;
-  Plan plan;
-  bool operator==(const PlanActivated &) const = default;
-};
-
-struct ChunkAdded {
-  std::string threadId;
-  std::string planId;
-  WorkChunk chunk;
-  bool operator==(const ChunkAdded &) const = default;
-};
-
-struct ChunkUpdated {
-  std::string threadId;
-  std::string planId;
-  WorkChunk chunk;
-  bool operator==(const ChunkUpdated &) const = default;
-};
-
-struct ChunkAssigned {
-  std::string threadId;
-  std::string planId;
-  std::string chunkId;
-  std::string assignedAgentId;
-  WorkChunk chunk;
-  bool operator==(const ChunkAssigned &) const = default;
-};
-
-struct ChunkStatusChanged {
-  std::string threadId;
-  std::string planId;
-  std::string chunkId;
-  WorkChunkStatus oldStatus = WorkChunkStatus::Ready;
-  WorkChunkStatus newStatus = WorkChunkStatus::Ready;
-  WorkChunk chunk;
-  bool operator==(const ChunkStatusChanged &) const = default;
 };
 
 /**
@@ -543,7 +505,6 @@ struct MessageDequeued {
   bool operator==(const MessageDequeued &) const = default;
 };
 
-
 /**
  * @brief Emitted when an internal nudge message is queued while agent is running.
  */
@@ -601,6 +562,7 @@ using EngineEvent =
     std::variant<AgentSpawned, AgentProviderWaiting, AgentRetrying,
                  AgentRetryFailed, AgentThinking, AgentText, AgentToolCall,
                  AgentToolCallChunk, AgentFileEdited, AgentTurnCompleted,
+                 AgentMetricsStreamed,
                  AgentInterrupted, AgentError, AgentCompacting,
                  AgentCompactionThinking, AgentCompactionText, ContextCompacted,
                  AgentProcessOutput, AgentProcessSpawned, ModelSwitched,
@@ -612,16 +574,16 @@ using EngineEvent =
 using AppEvent = std::variant<
     AgentSpawned, AgentProviderWaiting, AgentRetrying, AgentRetryFailed,
     AgentThinking, AgentText, AgentToolCall, AgentToolCallChunk, AgentFileEdited,
-    AgentTurnCompleted, AgentInterrupted, AgentError, AgentCompacting,
+    AgentTurnCompleted, AgentMetricsStreamed, AgentInterrupted, AgentError, AgentCompacting,
     AgentCompactionThinking, AgentCompactionText, ContextCompacted,
     AgentProcessOutput, AgentProcessSpawned, ModelSwitched, HistoryUndone,
-    AgentAccountSwitched, ThreadChanged, ThreadMetadataUpdated, PlanCreated,
-    PlanUpdated, PlanActivated, ChunkAdded, ChunkUpdated, ChunkAssigned,
-    ChunkStatusChanged,
+    AgentAccountSwitched, ThreadChanged, ThreadMetadataUpdated,
     PermissionEscalationRequest, PermissionEscalationResolved, ThreadLocked,
     ThreadDeleted, ConfigUpdated, ModelsRefreshed, ProviderModelsFetchStarted,
     ProviderModelsFetchFinished, ModelDiscovered, ThreadTitleUpdated,
-    MessageQueued, MessageDequeued, InternalMessageQueued, InternalMessageDequeued, UserMessageSent, AgentFinished>;
+    MessageQueued, MessageDequeued, InternalMessageQueued,
+    InternalMessageDequeued, UserMessageSent, AgentFinished>;
+
 } // namespace firmius::shared
 
 #endif

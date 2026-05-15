@@ -53,6 +53,7 @@
 #include "modals/CommandPaletteModal.hpp"
 #include "modals/ConfigDisplayModal.hpp"
 #include "modals/KeybindingEditorModal.hpp"
+#include "modals/HooksModal.hpp"
 #include "modals/McpModal.hpp"
 #include "modals/ModalRegistry.hpp"
 #include "modals/ModelPickerModal.hpp"
@@ -87,11 +88,11 @@ std::string defaultLeadPersona(const firmius::core::Harness &harness) {
       firmius::core::PurposeLoader::isValid(cfg.defaultLeadPersona)) {
     return cfg.defaultLeadPersona;
   }
-  if (firmius::core::PurposeLoader::isValid("aster")) {
-    return "aster";
+  if (firmius::core::PurposeLoader::isValid("lead")) {
+    return "lead";
   }
   const auto purposes = firmius::core::PurposeLoader::listPurposes();
-  return purposes.empty() ? "aster" : purposes.front();
+  return purposes.empty() ? "lead" : purposes.front();
 }
 
 bool parseStartupProfileEnabledFromEnv() {
@@ -108,6 +109,22 @@ bool parseStartupProfileEnabledFromEnv() {
     return false;
   }
   return true;
+}
+
+std::chrono::milliseconds parseTuiWatchdogThresholdFromEnv() {
+  const char *raw = std::getenv("FIRMIUS_TUI_WATCHDOG_MS");
+  if (!raw || *raw == '\0') {
+    return std::chrono::milliseconds(0);
+  }
+  try {
+    const long long value = std::stoll(raw);
+    if (value <= 0) {
+      return std::chrono::milliseconds(0);
+    }
+    return std::chrono::milliseconds(value);
+  } catch (...) {
+    return std::chrono::milliseconds(0);
+  }
 }
 
 class StartupTimingProfiler {
@@ -383,6 +400,8 @@ void runTui(const TuiLaunchOptions &options) {
       std::make_shared<firmius::tui::PurposesModal>());
   firmius::tui::ModalRegistry::instance().registerModal(
       std::make_shared<firmius::tui::McpModal>());
+  firmius::tui::ModalRegistry::instance().registerModal(
+      std::make_shared<firmius::tui::HooksModal>());
   completeStartupPhase(1, "modal_registration");
 
   auto &h = firmius::core::Harness::instance();
@@ -445,7 +464,7 @@ void runTui(const TuiLaunchOptions &options) {
     std::string cwd = "/work";
     auto cfg = h.getConfig();
     std::string lead =
-        cfg.defaultLeadPersona.empty() ? "aster" : cfg.defaultLeadPersona;
+        cfg.defaultLeadPersona.empty() ? "lead" : cfg.defaultLeadPersona;
     if (!h.newThread(opts, cwd, lead).empty()) {
       thread_loaded = true;
       threadPath = "new_thread_debugging_mode";
@@ -465,12 +484,12 @@ void runTui(const TuiLaunchOptions &options) {
 
   if (thread_loaded) {
     const std::string current_id = h.currentThreadId();
-    for (const auto &m : h.listThreads()) {
-      if (m.threadId == current_id) {
-        current_metadata = m;
-        h.setFocusedAgent(h.focusedAgentId());
-        break;
-      }
+    // Fast-path single-thread lookup; the prior listThreads() scan cost
+    // O(num_threads) at startup for every resumed session.
+    auto resumed_meta = h.getThreadMetadata(current_id);
+    if (resumed_meta.threadId == current_id) {
+      current_metadata = resumed_meta;
+      h.setFocusedAgent(h.focusedAgentId());
     }
     state.init(h, current_metadata, h.focusedAgentId());
     state.setViewMode(firmius::tui::TuiState::ViewMode::Chat);
@@ -485,6 +504,7 @@ void runTui(const TuiLaunchOptions &options) {
   screen.TrackMouse(true);
   screen.ForceHandleCtrlC(false);
   state.attachScreen(&screen);
+  installFatalSignalHandlers();
   InstallSigintHandler();
   const auto exitLoop = screen.ExitLoopClosure();
   completeStartupPhase(7, "screen_creation_attach");
@@ -561,6 +581,52 @@ void runTui(const TuiLaunchOptions &options) {
       std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
   });
+  std::jthread fatal_signal_refresh([&](std::stop_token st) {
+    // FTXUI installs its own SIGSEGV/SIGBUS handlers during Loop startup.
+    // Re-apply Firmius' fatal handler for a short window so render faults
+    // crash cleanly instead of re-executing the same bad instruction forever.
+    for (int attempt = 0; attempt < 20 && !st.stop_requested(); ++attempt) {
+      installFatalSignalHandlers();
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+  });
+  const auto watchdog_threshold = parseTuiWatchdogThresholdFromEnv();
+  std::jthread ui_watchdog([&](std::stop_token st) {
+    if (watchdog_threshold.count() <= 0) {
+      return;
+    }
+    const auto poll_interval =
+        std::max(std::chrono::milliseconds(50), watchdog_threshold / 4);
+    while (!st.stop_requested()) {
+      std::this_thread::sleep_for(poll_interval);
+      const auto last_frame_ms = firmius::tui::tuiLastFrameRenderedAtMs();
+      if (last_frame_ms == 0) {
+        continue;
+      }
+      const auto now_ms = static_cast<std::uint64_t>(
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+              std::chrono::steady_clock::now().time_since_epoch())
+              .count());
+      if (now_ms <= last_frame_ms) {
+        continue;
+      }
+      const auto age = std::chrono::milliseconds(now_ms - last_frame_ms);
+      if (age <= watchdog_threshold) {
+        continue;
+      }
+
+      const bool should_enforce =
+          !state.loadingMessage().empty() || state.statusText() != "idle";
+      if (!should_enforce) {
+        continue;
+      }
+
+      std::cerr << "\n[FIRMIUS TUI WATCHDOG] frame stalled for "
+                << age.count() << " ms while UI was active.\n";
+      std::raise(SIGABRT);
+      return;
+    }
+  });
   renderer = CatchEvent(renderer, [&](ftxui::Event) {
     if (pending_idle_exit.exchange(false, std::memory_order_relaxed)) {
       exitLoop();
@@ -582,6 +648,13 @@ void runTui(const TuiLaunchOptions &options) {
   std::cout << "\x1b[?2004l" << std::flush;
 
   state.shutdown();
+  // Harness owns a std::vector<std::thread> for background tasks (title
+  // generation, model discovery, subagent reap helpers). If we don't join
+  // them here, ~Harness runs on process exit via static singleton teardown
+  // with those threads still joinable → std::terminate("called without an
+  // active exception") → Aborted core dump right before the exit summary
+  // can print. Harness::shutdown() moves the vector out and joins each.
+  firmius::core::Harness::instance().shutdown();
   sigint_bridge_running.store(false);
   startupProfiler.completePhase("shutdown_cleanup");
   state.clearLoadingState();

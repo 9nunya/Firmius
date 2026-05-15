@@ -15,6 +15,7 @@ using firmius::shared::ToolPhase;
 namespace {
 
 struct ParsedSubagentArgs {
+  std::string action;
   std::string agent_id;
   std::string name;
   std::string title;
@@ -50,6 +51,9 @@ ParsedSubagentArgs ParseArgs(const std::string &args) {
   doc.Parse(args.c_str());
   if (doc.HasParseError() || !doc.IsObject()) {
     return parsed;
+  }
+  if (doc.HasMember("action") && doc["action"].IsString()) {
+    parsed.action = doc["action"].GetString();
   }
   if (doc.HasMember("agent_id") && doc["agent_id"].IsString()) {
     parsed.agent_id = doc["agent_id"].GetString();
@@ -342,6 +346,11 @@ BuildSubagentToolPresentation(const ToolCallView &view,
   ToolPresentation presentation;
   presentation.lifecycle = DeriveLifecycle(view, subagent_state);
   std::string action = ExtractAction(view);
+  const ParsedSubagentArgs args = ParseArgs(view.args);
+  const ParsedSubagentResult parsed_result = ParseResult(view.result);
+  if (action.empty()) {
+    action = args.action;
+  }
   if (action.empty()) {
     if (view.name == "summon_subagent") {
       action = "Spawn";
@@ -351,16 +360,51 @@ BuildSubagentToolPresentation(const ToolCallView &view,
   }
   const bool is_summon = action == "Spawn";
   const bool is_wait = action == "Wait";
-  if (!is_wait && !is_summon) {
+  const bool is_stop = action == "Stop";
+  if (is_stop) {
     return BuildTerminateSubagentToolPresentation(view);
+  }
+  if (!is_wait && !is_summon) {
+    presentation.layout = ToolPresentationLayoutKind::CompactFactCard;
+    presentation.density = ToolPresentationDensity::DetailHeavy;
+    if (presentation.lifecycle == ToolPresentationLifecycle::Preparing) {
+      presentation.title = "preparing subagent call";
+    } else if (presentation.lifecycle == ToolPresentationLifecycle::Running) {
+      presentation.title = "starting subagent";
+    } else if (presentation.lifecycle == ToolPresentationLifecycle::Error) {
+      presentation.title = "subagent call failed";
+    } else {
+      presentation.title = "subagent call";
+    }
+    const std::string summary =
+        firmius::shared::SummarizeToolCall(view.name, view.args, view.phase);
+    if (!summary.empty()) {
+      presentation.compact_summary = summary;
+    }
+    if (!args.title.empty()) {
+      presentation.facts.push_back({"Title", args.title});
+    }
+    if (!args.task.empty()) {
+      presentation.facts.push_back({"Task", args.task});
+    }
+    if (!args.category.empty()) {
+      presentation.facts.push_back({"Category", args.category});
+    }
+    std::string error = subagent_state ? subagent_state->error_text : "";
+    if (error.empty()) {
+      error = !parsed_result.error.empty() ? parsed_result.error : view.result;
+    }
+    error = firmius::shared::ErrorCleaner::clean(error);
+    if (presentation.lifecycle == ToolPresentationLifecycle::Error &&
+        !error.empty()) {
+      presentation.error_text = error;
+    }
+    return presentation;
   }
   presentation.layout = is_wait ? ToolPresentationLayoutKind::InlineStatusRow
                                 : ToolPresentationLayoutKind::BodyFirstPreview;
   presentation.density = is_wait ? ToolPresentationDensity::OneLineSummary
                                  : ToolPresentationDensity::CompactSummaryCard;
-
-  const ParsedSubagentArgs args = ParseArgs(view.args);
-  const ParsedSubagentResult parsed_result = ParseResult(view.result);
 
   const std::string child_id =
       subagent_state && !subagent_state->child_agent_id.empty()

@@ -12,13 +12,22 @@ description: |
 state_surface:
   scopes: [thread]
   paths:
+    - promise
     - promise.id
     - promise.brief
+    - promise.task
     - promise.done_when
     - promise.validator
     - promise.iteration
     - promise.max_iterations
+    - promise.meta_iteration
+    - promise.opened_turn
     - promise.state
+    - promise.agent_id
+    - promise.last_verdict
+    - promise.last_suggestion
+    - promise.sealed_by
+    - promise.history
     - promise.history[]
 
 # Personas this pack expects in the registry.

@@ -23,31 +23,6 @@ using namespace firmius::shared;
  */
 
 namespace {
-const std::array<const char *, 7> kLegacyPromptFiles = {
-    "brainstormer.md", "builder.md", "coordinator.md", "firmius.md",
-    "general.md",      "planner.md", "reviewer.md"};
-
-PurposeWorkRole legacyWorkRoleForPurposeName(const std::string &purpose) {
-  const std::string lowered = StringUtil::toLower(StringUtil::trim(purpose));
-  if (lowered == "aster" || lowered == "meridian" || lowered == "vellum" ||
-      lowered == "harbor" || lowered == "fast") {
-    return PurposeWorkRole::Lead;
-  }
-  if (lowered == "forge") {
-    return PurposeWorkRole::Executor;
-  }
-  if (lowered == "ember") {
-    return PurposeWorkRole::Worker;
-  }
-  if (lowered == "witness" || lowered == "loom") {
-    return PurposeWorkRole::Auditor;
-  }
-  if (lowered == "glimmer") {
-    return PurposeWorkRole::Scout;
-  }
-  return PurposeWorkRole::Unknown;
-}
-
 std::string ensureTrailingSlash(std::string dir) {
   if (!dir.empty() && dir.back() != '/') {
     dir += '/';
@@ -98,43 +73,9 @@ firmius::shared::ToolScope stringToScope(const std::string &s) {
     return ToolScope::Web;
   if (s == "git" || s == "Git")
     return ToolScope::Git;
-  if (s == "plan:read" || s == "PlanRead")
-    return ToolScope::PlanRead;
-  if (s == "plan:write" || s == "PlanWrite")
-    return ToolScope::PlanWrite;
-  if (s == "chunk:read" || s == "ChunkRead")
-    return ToolScope::ChunkRead;
-  if (s == "chunk:write" || s == "ChunkWrite")
-    return ToolScope::ChunkWrite;
-  if (s == "chunk:assign" || s == "ChunkAssign")
-    return ToolScope::ChunkAssign;
-  if (s == "chunk:review" || s == "ChunkReview")
-    return ToolScope::ChunkReview;
   throw std::runtime_error("Unknown scope: " + s);
 }
 
-PurposeWorkRole stringToPurposeWorkRole(const std::string &value,
-                                        const std::string &fieldName) {
-  const std::string lowered = StringUtil::toLower(StringUtil::trim(value));
-  if (lowered == "lead" || lowered == "aster" || lowered == "meridian" ||
-      lowered == "vellum" || lowered == "harbor" || lowered == "fast") {
-    return PurposeWorkRole::Lead;
-  }
-  if (lowered == "executor" || lowered == "forge") {
-    return PurposeWorkRole::Executor;
-  }
-  if (lowered == "worker" || lowered == "ember") {
-    return PurposeWorkRole::Worker;
-  }
-  if (lowered == "auditor" || lowered == "witness" || lowered == "loom") {
-    return PurposeWorkRole::Auditor;
-  }
-  if (lowered == "scout" || lowered == "glimmer") {
-    return PurposeWorkRole::Scout;
-  }
-  throw std::runtime_error(
-      fieldName + " must be one of: aster, meridian, vellum, glimmer, forge, ember, witness, harbor, loom, fast");
-}
 
 std::optional<std::filesystem::path>
 canonicalProjectRoot(const AgentContext &context) {
@@ -182,28 +123,6 @@ void recordLoadedAgentsPath(AgentContext &context,
 } // namespace
 
 std::map<std::string, std::string> PurposeLoader::customPlaceholders;
-
-std::string purposeWorkRoleToString(PurposeWorkRole role) {
-  switch (role) {
-  case PurposeWorkRole::Lead:
-    return "aster";
-  case PurposeWorkRole::Executor:
-    return "forge";
-  case PurposeWorkRole::Worker:
-    return "ember";
-  case PurposeWorkRole::Auditor:
-    return "witness";
-  case PurposeWorkRole::Scout:
-    return "glimmer";
-  case PurposeWorkRole::Unknown:
-    return "unknown";
-  }
-  return "unknown";
-}
-
-PurposeWorkRole purposeWorkRoleFromString(const std::string &role) {
-  return stringToPurposeWorkRole(role, "work_role");
-}
 
 void PurposeLoader::registerPlaceholder(const std::string &key,
                                         const std::string &value) {
@@ -269,14 +188,6 @@ Persona PurposeLoader::load(const std::string &purpose) {
   if (auto canSpawn = FrontmatterParser::getBool(document, "canSpawn")) {
     persona.canSpawn = *canSpawn;
   }
-  if (auto workRole = FrontmatterParser::getString(document, "work_role")) {
-    persona.workRole = stringToPurposeWorkRole(*workRole, "work_role");
-    persona.hasWorkRole = true;
-  } else if (auto workRoleAlias =
-                 FrontmatterParser::getString(document, "workRole")) {
-    persona.workRole = stringToPurposeWorkRole(*workRoleAlias, "workRole");
-    persona.hasWorkRole = true;
-  }
   for (const auto &scopeName :
        FrontmatterParser::getStringArray(document, "scopes")) {
     persona.allowedScopes.push_back(stringToScope(scopeName));
@@ -290,20 +201,6 @@ Persona PurposeLoader::load(const std::string &purpose) {
   }
 
   return persona;
-}
-
-PurposeWorkRole PurposeLoader::resolveWorkRole(const Persona &persona) {
-  if (persona.hasWorkRole) {
-    return persona.workRole;
-  }
-  return legacyWorkRoleForPurposeName(persona.purposeKey);
-}
-
-PurposeWorkRole PurposeLoader::resolveWorkRole(const std::string &purpose) {
-  if (!isValid(purpose)) {
-    return legacyWorkRoleForPurposeName(purpose);
-  }
-  return resolveWorkRole(load(purpose));
 }
 
 std::string PurposeLoader::composeSystemPrompt(const Persona &persona,
@@ -542,16 +439,10 @@ void PurposeLoader::bootstrapDefaults(const std::string &builtinPromptsDir) {
       std::filesystem::path(home) / ".firmius" / "prompts";
 
   try {
+    std::filesystem::remove_all(userDir);
     std::filesystem::create_directories(userDir);
   } catch (const std::filesystem::filesystem_error &) {
     return;
-  }
-
-  for (const auto *legacyFile : kLegacyPromptFiles) {
-    try {
-      std::filesystem::remove(userDir / legacyFile);
-    } catch (const std::filesystem::filesystem_error &) {
-    }
   }
   // Mirror every prompt file, *including* nested subdirectories like
   // `modes/<persona>/*.md` for persona-scoped sub-modes. Without recursion,

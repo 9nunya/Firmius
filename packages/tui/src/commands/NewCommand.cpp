@@ -12,7 +12,7 @@ void NewCommand::execute(CommandCtx &ctx, const std::vector<ParsedArg> &args) {
   std::string cwd = std::filesystem::current_path().string();
   auto cfg = h.getConfig();
   std::string lead =
-      cfg.defaultLeadPersona.empty() ? "aster" : cfg.defaultLeadPersona;
+      cfg.defaultLeadPersona.empty() ? "lead" : cfg.defaultLeadPersona;
   auto *state = ctx.state;
   if (!state)
     return;
@@ -30,11 +30,10 @@ void NewCommand::execute(CommandCtx &ctx, const std::vector<ParsedArg> &args) {
       created = !threadId.empty();
       if (created) {
         focusedAgentId = h.focusedAgentId();
-        for (const auto &candidate : h.listThreads()) {
-          if (candidate.threadId == threadId) {
-            metadata = candidate;
-            break;
-          }
+        // Fast-path single-thread lookup; listThreads() scans the whole DB.
+        metadata = h.getThreadMetadata(threadId);
+        if (metadata.threadId != threadId) {
+          metadata = firmius::shared::ThreadMetadata{};
         }
       }
     } catch (...) {

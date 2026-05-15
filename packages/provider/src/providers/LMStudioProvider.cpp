@@ -27,11 +27,23 @@ LMStudioProvider::LMStudioProvider(const std::string& baseUrl)
     // LM Studio doesn't require API keys, so we don't add any accounts
 }
 
+bool LMStudioProvider::isConfigured() const {
+    return true;
+}
+
+std::unique_ptr<APIKeyWizard> LMStudioProvider::beginConnectionWizard() {
+    return nullptr;
+}
+
 std::map<std::string, std::string>
 LMStudioProvider::buildHeadersForApiKey(const std::string& /*apiKey*/) {
     return {
         {"Content-Type", "application/json"}
     };
+}
+
+std::string LMStudioProvider::getChatUrl() const {
+    return baseUrl + "/v1/chat/completions";
 }
 
 std::vector<firmius::shared::ModelInfo> LMStudioProvider::listModels() {

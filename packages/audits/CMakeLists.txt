@@ -11,10 +11,12 @@ target_sources(firmius_audits PRIVATE
     src/audits/EditToolAudit.cpp
     src/audits/EditHistoryAudit.cpp
     src/audits/CodexQuotaAudit.cpp
+    src/audits/DaemonRuntimeIsolationAudit.cpp
     src/audits/HarnessChaosAudit.cpp
     src/audits/OAuthWizardAudit.cpp
     src/audits/P15Audit.cpp
     src/audits/PersistenceStressAudit.cpp
+    src/audits/PromisesAudit.cpp
     src/audits/ProviderAudit.cpp
     src/audits/ProviderStreamDebugAudit.cpp
     src/audits/QwenProviderAudit.cpp
@@ -32,6 +34,7 @@ target_sources(firmius_audits PRIVATE
     src/audits/WebSearchAudit.cpp
     src/audits/ReasoningTraceAudit.cpp
     src/audits/TuiRuntimeStressAudit.cpp
+    src/audits/WelcomeChatRefreshAudit.cpp
     src/MigrationCli.cpp
 )
 target_sources(firmius_audits PUBLIC
@@ -47,11 +50,13 @@ target_sources(firmius_audits PUBLIC
     include/audits/EditToolAudit.hpp
     include/audits/EditHistoryAudit.hpp
     include/audits/CodexQuotaAudit.hpp
+    include/audits/DaemonRuntimeIsolationAudit.hpp
     include/audits/HarnessChaosAudit.hpp
     include/audits/OAuthWizardAudit.hpp
     include/audits/P15Audit.hpp
     include/audits/PersistenceStressAudit.hpp
     include/audits/ProviderAudit.hpp
+    include/audits/PromisesAudit.hpp
     include/audits/ProviderStreamDebugAudit.hpp
     include/audits/LoopCancellationAudit.hpp
     include/audits/LspAudit.hpp
@@ -66,6 +71,7 @@ target_sources(firmius_audits PUBLIC
     include/audits/WebSearchAudit.hpp
     include/audits/ReasoningTraceAudit.hpp
     include/audits/TuiRuntimeStressAudit.hpp
+    include/audits/WelcomeChatRefreshAudit.hpp
 )
 
 target_include_directories(firmius_audits PUBLIC
@@ -77,6 +83,7 @@ target_link_libraries(firmius_audits PUBLIC
     firmius::core
     firmius::provider
     firmius::shared
+    firmius::server
 )
 
 target_link_libraries(firmius_audits PRIVATE
@@ -85,6 +92,7 @@ target_link_libraries(firmius_audits PRIVATE
 
 target_include_directories(firmius_audits PRIVATE
   ${rapidjson_SOURCE_DIR}/include
+  ${CMAKE_SOURCE_DIR}/packages/server/include
 # firmius::tui removed: audits should not depend on TUI to keep firmius_audit buildable
 )
 

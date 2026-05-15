@@ -1,233 +1,73 @@
 #include "ActivePlanState.hpp"
-#include <algorithm>
-#include <array>
-#include <sstream>
-#include <type_traits>
 
 namespace firmius::tui {
 
-using firmius::shared::AppEvent;
-using firmius::shared::ChunkAdded;
-using firmius::shared::ChunkAssigned;
-using firmius::shared::ChunkStatusChanged;
-using firmius::shared::ChunkUpdated;
-using firmius::shared::Plan;
-using firmius::shared::PlanActivated;
-using firmius::shared::PlanCreated;
-using firmius::shared::PlanUpdated;
-using firmius::shared::ThreadMetadata;
-using firmius::shared::WorkChunk;
-using firmius::shared::WorkChunkStatus;
-
-namespace {
-
-struct SummaryBucket {
-  const char *label;
-  int count = 0;
-};
-
-} // namespace
-
-void ActivePlanState::hydrateForThread(const ThreadMetadata &thread,
-                                       const std::optional<Plan> &plan) {
+void ActivePlanState::hydrateForThread(
+    const firmius::shared::ThreadMetadata &thread,
+    const std::optional<firmius::shared::Plan> & /*plan*/) {
+  clear();
   model_.thread_id = thread.threadId;
-  if (!plan.has_value() || thread.activePlanId.empty() ||
-      plan->id != thread.activePlanId) {
-    clear();
-    model_.thread_id = thread.threadId;
-    return;
-  }
-
-  active_plan_ = plan;
-  rebuildModel();
 }
 
-bool ActivePlanState::handleEvent(const AppEvent &event,
-                                  const std::string &current_thread_id) {
-  return std::visit(
-      [&](auto &&e) -> bool {
-        using T = std::decay_t<decltype(e)>;
-
-        if constexpr (std::is_same_v<T, PlanCreated>) {
-          if (e.threadId != current_thread_id) {
-            return false;
-          }
-          if (active_plan_.has_value() && active_plan_->id == e.plan.id) {
-            return applyPlan(e.plan);
-          }
-          return false;
-        } else if constexpr (std::is_same_v<T, PlanUpdated>) {
-          if (e.threadId != current_thread_id) {
-            return false;
-          }
-          if (active_plan_.has_value() && active_plan_->id == e.plan.id) {
-            return applyPlan(e.plan);
-          }
-          return false;
-        } else if constexpr (std::is_same_v<T, PlanActivated>) {
-          if (e.threadId != current_thread_id) {
-            return false;
-          }
-          return applyPlan(e.plan);
-        } else if constexpr (std::is_same_v<T, ChunkAdded>) {
-          if (e.threadId != current_thread_id) {
-            return false;
-          }
-          return upsertChunk(e.planId, e.chunk);
-        } else if constexpr (std::is_same_v<T, ChunkUpdated>) {
-          if (e.threadId != current_thread_id) {
-            return false;
-          }
-          return upsertChunk(e.planId, e.chunk);
-        } else if constexpr (std::is_same_v<T, ChunkAssigned>) {
-          if (e.threadId != current_thread_id) {
-            return false;
-          }
-          return upsertChunk(e.planId, e.chunk);
-        } else if constexpr (std::is_same_v<T, ChunkStatusChanged>) {
-          if (e.threadId != current_thread_id) {
-            return false;
-          }
-          return upsertChunk(e.planId, e.chunk);
-        }
-
-        return false;
-      },
-      event);
+bool ActivePlanState::handleEvent(const firmius::shared::AppEvent & /*event*/,
+                                  const std::string & /*current_thread_id*/) {
+  return false;
 }
 
-void ActivePlanState::setExpanded(bool expanded) {
-  model_.expanded = expanded;
-}
+void ActivePlanState::setExpanded(bool expanded) { model_.expanded = expanded; }
 
 void ActivePlanState::toggleExpanded() { model_.expanded = !model_.expanded; }
 
 bool ActivePlanState::isExpanded() const { return model_.expanded; }
 
-bool ActivePlanState::hasActivePlan() const {
-  return active_plan_.has_value() && model_.visible;
-}
+bool ActivePlanState::hasActivePlan() const { return false; }
 
-const std::optional<Plan> &ActivePlanState::activePlan() const {
+const std::optional<firmius::shared::Plan> &ActivePlanState::activePlan() const {
   return active_plan_;
 }
 
 const PlanLaneModel &ActivePlanState::model() const { return model_; }
 
-std::string ActivePlanState::statusLabel(WorkChunkStatus status) {
+std::string ActivePlanState::statusLabel(firmius::shared::WorkChunkStatus status) {
   switch (status) {
-  case WorkChunkStatus::Ready:
+  case firmius::shared::WorkChunkStatus::Ready:
     return "Ready";
-  case WorkChunkStatus::InProgress:
+  case firmius::shared::WorkChunkStatus::InProgress:
     return "In Progress";
-  case WorkChunkStatus::Implemented:
+  case firmius::shared::WorkChunkStatus::Implemented:
     return "Implemented";
-  case WorkChunkStatus::Verifying:
+  case firmius::shared::WorkChunkStatus::Verifying:
     return "Verifying";
-  case WorkChunkStatus::Done:
+  case firmius::shared::WorkChunkStatus::Done:
     return "Done";
-  case WorkChunkStatus::Blocked:
+  case firmius::shared::WorkChunkStatus::Blocked:
     return "Blocked";
-  case WorkChunkStatus::Failed:
+  case firmius::shared::WorkChunkStatus::Failed:
     return "Failed";
-  case WorkChunkStatus::Cancelled:
+  case firmius::shared::WorkChunkStatus::Cancelled:
     return "Cancelled";
   }
   return "Unknown";
 }
 
-std::string ActivePlanState::collapsedSummary(const Plan &plan) {
-  SummaryBucket implementing{"implementing"};
-  SummaryBucket implemented{"implemented"};
-  SummaryBucket verifying{"verifying"};
-  SummaryBucket waiting{"waiting"};
-  SummaryBucket done{"done"};
-  SummaryBucket blocked{"blocked"};
-  SummaryBucket failed{"failed"};
-  SummaryBucket cancelled{"cancelled"};
-
-  for (const auto &chunk : plan.chunks) {
-    switch (chunk.status) {
-    case WorkChunkStatus::Ready:
-      ++waiting.count;
-      break;
-    case WorkChunkStatus::InProgress:
-      ++implementing.count;
-      break;
-    case WorkChunkStatus::Implemented:
-      ++implemented.count;
-      break;
-    case WorkChunkStatus::Verifying:
-      ++verifying.count;
-      break;
-    case WorkChunkStatus::Done:
-      ++done.count;
-      break;
-    case WorkChunkStatus::Blocked:
-      ++blocked.count;
-      break;
-    case WorkChunkStatus::Failed:
-      ++failed.count;
-      break;
-    case WorkChunkStatus::Cancelled:
-      ++cancelled.count;
-      break;
-    }
-  }
-
-  std::ostringstream summary;
-  summary << "Plan: " << plan.title;
-
-  const std::array<SummaryBucket, 7> buckets = {
-      implementing, implemented, verifying, waiting, done, blocked, failed};
-
-  int rendered_buckets = 0;
-  for (const auto &bucket : buckets) {
-    if (bucket.count <= 0) {
-      continue;
-    }
-    summary << " | " << bucket.count << " " << bucket.label;
-    ++rendered_buckets;
-  }
-
-  if (rendered_buckets == 0) {
-    summary << " | " << plan.chunks.size() << " chunks";
-  }
-  if (cancelled.count > 0) {
-    summary << " | " << cancelled.count << " cancelled";
-  }
-
-  return summary.str();
+std::string ActivePlanState::collapsedSummary(
+    const firmius::shared::Plan &plan) {
+  return plan.title.empty() ? std::string{"Plan removed"} : plan.title;
 }
 
-bool ActivePlanState::applyPlan(const Plan &plan) {
-  active_plan_ = plan;
-  rebuildModel();
-  return true;
+bool ActivePlanState::applyPlan(const firmius::shared::Plan & /*plan*/) {
+  clear();
+  return false;
 }
 
-bool ActivePlanState::upsertChunk(const std::string &plan_id,
-                                  const WorkChunk &chunk) {
-  if (!active_plan_.has_value() || active_plan_->id != plan_id) {
-    return false;
-  }
-
-  auto it = std::find_if(active_plan_->chunks.begin(), active_plan_->chunks.end(),
-                         [&](const WorkChunk &existing) {
-                           return existing.id == chunk.id;
-                         });
-  if (it == active_plan_->chunks.end()) {
-    active_plan_->chunks.push_back(chunk);
-  } else {
-    *it = chunk;
-  }
-
-  rebuildModel();
-  return true;
+bool ActivePlanState::upsertChunk(const std::string & /*plan_id*/,
+                                  const firmius::shared::WorkChunk & /*chunk*/) {
+  return false;
 }
 
 void ActivePlanState::clear() {
   active_plan_.reset();
+  focused_chunk_.reset();
   model_.visible = false;
   model_.plan_id.clear();
   model_.plan_title.clear();
@@ -238,108 +78,21 @@ void ActivePlanState::clear() {
   model_.executor_chunk_title.clear();
   model_.executor_tasks.clear();
   model_.highlight_chunk_id.clear();
+  model_.toggle_hint = "Todo";
+  model_.focused_chunk.reset();
 }
 
 void ActivePlanState::rebuildModel() {
-  if (!active_plan_.has_value()) {
-    clear();
-    return;
-  }
-
-  model_.visible = true;
-  model_.thread_id = active_plan_->threadId;
-  model_.plan_id = active_plan_->id;
-  model_.plan_title = active_plan_->title;
-  model_.collapsed_summary = collapsedSummary(*active_plan_);
+  model_.visible = false;
   model_.chunks.clear();
-  model_.executor_task_view = false;
-  model_.executor_chunk_id.clear();
-  model_.executor_chunk_title.clear();
-  model_.executor_tasks.clear();
-  model_.highlight_chunk_id.clear();
-  model_.chunks.reserve(active_plan_->chunks.size());
-
-  for (const auto &chunk : active_plan_->chunks) {
-    PlanLaneChunkRow row;
-    row.id = chunk.id;
-    row.title = chunk.title;
-    row.status = chunk.status;
-    row.status_label = statusLabel(chunk.status);
-    // V2: Show task count for task-bearing chunks
-    if (!chunk.tasks.empty()) {
-      row.task_count = chunk.tasks.size();
-    }
-    model_.chunks.push_back(row);
-  }
-  
-  // Rebuild focused chunk if set
-  if (focused_chunk_.has_value()) {
-    rebuildFocusedChunk();
-    model_.focused_chunk = focused_chunk_;
-  } else {
-    model_.focused_chunk.reset();
-  }
+  model_.focused_chunk.reset();
 }
 
-void ActivePlanState::rebuildFocusedChunk() {
-  if (!focused_chunk_.has_value() || !active_plan_.has_value()) {
-    return;
-  }
-  
-  // Find the chunk in the active plan
-  auto it = std::find_if(active_plan_->chunks.begin(), active_plan_->chunks.end(),
-                         [&](const WorkChunk &chunk) {
-                           return chunk.id == focused_chunk_->chunk_id;
-                         });
-  if (it == active_plan_->chunks.end()) {
-    focused_chunk_.reset();
-    return;
-  }
-  
-  const auto &chunk = *it;
-  focused_chunk_->chunk_title = chunk.title;
-  focused_chunk_->chunk_goal = chunk.goal;
-  focused_chunk_->chunk_context = chunk.context;
-  focused_chunk_->chunk_constraints = chunk.constraints;
-  focused_chunk_->chunk_completion = chunk.completion;
-  focused_chunk_->verification_condition = chunk.verificationCondition;
-  focused_chunk_->handoff_notes = chunk.handoffNotes;
-  focused_chunk_->status = chunk.status;
-  focused_chunk_->status_label = statusLabel(chunk.status);
-  
-  // V2: Rebuild task rows
-  focused_chunk_->tasks.clear();
-  for (const auto &task : chunk.tasks) {
-    ChunkDetailModel::TaskRow task_row;
-    task_row.id = task.id;
-    task_row.title = task.title;
-    task_row.goal = task.goal;
-    task_row.status = task.status;
-    task_row.status_label = statusLabel(task.status);
-    task_row.notes = task.notes;
-    task_row.verification_condition = task.verificationCondition;
-    focused_chunk_->tasks.push_back(task_row);
-  }
-}
+void ActivePlanState::rebuildFocusedChunk() { model_.focused_chunk = focused_chunk_; }
 
-void ActivePlanState::setFocusedChunk(const std::string &chunk_id) {
-  if (!active_plan_.has_value()) {
-    return;
-  }
-  
-  // Find the chunk
-  auto it = std::find_if(active_plan_->chunks.begin(), active_plan_->chunks.end(),
-                         [&](const WorkChunk &chunk) {
-                           return chunk.id == chunk_id;
-                         });
-  if (it == active_plan_->chunks.end()) {
-    focused_chunk_.reset();
-    return;
-  }
-  
-  focused_chunk_ = ChunkDetailModel();
-  focused_chunk_->chunk_id = chunk_id;
-  rebuildFocusedChunk();
+void ActivePlanState::setFocusedChunk(const std::string & /*chunk_id*/) {
+  focused_chunk_.reset();
+  model_.focused_chunk.reset();
 }
 
 const std::optional<ChunkDetailModel> &ActivePlanState::focusedChunk() const {

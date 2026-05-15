@@ -259,7 +259,7 @@ TEST(Serialization, ThreadMetadataPermissionModeRoundtrip) {
   metadata.isBenchmarkRun = true;
   metadata.benchmarkId = "swebench";
   metadata.benchmarkTaskId = "django__django-12774";
-  metadata.activePlanId = "plan-123";
+  metadata.initialMode = "forge:prime";
   metadata.lastRetryableRequest = ThreadMetadata::RetryableRequest{
       "agent-123",
       "user-task-9",
@@ -295,7 +295,7 @@ TEST(Serialization, ThreadMetadataPermissionModeDefaultsToRequest) {
 
   auto metadata = threadMetadataFromJson(doc);
   EXPECT_EQ(metadata.permissionMode, ThreadPermissionMode::Request);
-  EXPECT_TRUE(metadata.activePlanId.empty());
+  EXPECT_TRUE(metadata.initialMode.empty());
   EXPECT_FALSE(metadata.isBenchmarkRun);
   EXPECT_TRUE(metadata.benchmarkId.empty());
   EXPECT_TRUE(metadata.benchmarkTaskId.empty());
@@ -313,7 +313,7 @@ TEST(Serialization, ThreadMetadataActivePlanIdBackwardCompatibleDefault) {
 
   auto metadata = threadMetadataFromJson(doc);
   EXPECT_EQ(metadata.threadId, "thread-legacy");
-  EXPECT_TRUE(metadata.activePlanId.empty());
+  EXPECT_TRUE(metadata.initialMode.empty());
   EXPECT_FALSE(metadata.lastRetryableRequest.has_value());
 }
 
@@ -807,7 +807,7 @@ TEST(Serialization, AgentConfigRoundtrip) {
   original.rollingMemory.targetOccupancyRatio = 0.57f;
   original.rollingMemory.bufferOccupancyRatio = 0.47f;
   original.rollingMemory.emergencyOccupancyRatio = 0.66f;
-  original.rollingMemory.observer = {true, "openai", "gpt-5.4-mini", "fast"};
+  original.rollingMemory.observer = {true, "openai", "gpt-5.4-mini", "explorer"};
   original.rollingMemory.reflector = {true, "anthropic", "claude-haiku", ""};
 
   auto doc = toJson(original);

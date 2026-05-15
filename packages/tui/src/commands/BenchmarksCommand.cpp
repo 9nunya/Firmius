@@ -174,9 +174,9 @@ void BenchmarksCommand::execute(CommandCtx &ctx,
     hostOptions.type = firmius::shared::HostType::Docker;
     hostOptions.connectToExisting = false;
     hostOptions.deleteOnExit = true;
-    if (canonicalBenchmark == "swebench") {
+    if (canonicalBenchmark == "swebench" || canonicalBenchmark == "turingswebenchpp") {
       std::string home = std::getenv("HOME") ? std::getenv("HOME") : "/root";
-      const std::string cacheDir = home + "/.firmius/cache/swebench/repos";
+      const std::string cacheDir = home + "/.firmius/cache/" + canonicalBenchmark + "/repos";
       hostOptions.volumeMounts.push_back(cacheDir + ":/host_cache");
     }
 

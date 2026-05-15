@@ -68,7 +68,7 @@ public:
     ctx_.history = std::make_shared<shared::AgentHistory>();
     ctx_.identity.id = "agent-test";
     ctx_.identity.name = "tester";
-    ctx_.config.personaName = "aster";
+    ctx_.config.personaName = "lead";
     ctx_.permissions.allowedScopes = {shared::ToolScope::Semantic,
                                       shared::ToolScope::FilesystemRead,
                                       shared::ToolScope::FilesystemWrite,

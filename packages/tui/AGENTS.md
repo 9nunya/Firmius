@@ -37,7 +37,7 @@ packages/tui/
 - **Key Components**:
   - `ChatWindow`: Message display with markdown
   - `InputBar`: User input with autocomplete
-  - `PlanLane` / `TodoLane`: Task visualization
+  - `TodoLane`: Task visualization
   - `ToolBlock`: Tool execution display
   - `Markdown`: Syntax highlighted rendering
   - `DiffRenderer`: File diff visualization

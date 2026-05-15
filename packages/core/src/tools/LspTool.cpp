@@ -60,10 +60,16 @@ shared::ToolMetadata LspTool::getMetadata() const {
 std::shared_ptr<shared::JSONSchema> LspTool::getSchema() const {
   return shared::zObject({
       {"action", shared::zEnum({"Query", "Diagnostics"})
-                     ->describe("LSP operation to execute")},
-      {"operation", shared::zString()->setOptional()},
-      {"path", shared::zString()->setOptional()},
-      {"project_root", shared::zString()->setOptional()},
+                     ->describe(
+                         "Which language-server operation family to execute.\n\n"
+                         "- Query: semantic point query/navigation operation\n"
+                         "- Diagnostics: retrieve diagnostics for a file/project surface")},
+      {"operation", shared::zString()->setOptional()->describe(
+          "For action=Query, the specific LSP semantic operation (for example hover, definition, references, implementation, document_symbol, workspace_symbol, prepare_call_hierarchy, incoming_calls, outgoing_calls).")},
+      {"path", shared::zString()->setOptional()->describe(
+          "Primary file path for the query/diagnostics operation. Prefer workspace-relative paths.")},
+      {"project_root", shared::zString()->setOptional()->describe(
+          "Optional project root override for LSP resolution when the workspace contains multiple projects.")},
   });
 }
 

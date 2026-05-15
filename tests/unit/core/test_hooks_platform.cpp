@@ -328,5 +328,94 @@ TEST(HookEnvelopeRegression, ParsesStructuredShellOutcome) {
   EXPECT_EQ(out.stateWrites[0].path, "promise.iteration");
   EXPECT_EQ(out.stateWrites[0].valueJson, "4");
 }
+
+TEST(HookRuntimeRegression, ShellHooksReceiveEnvelopeOnStdinWhenRequested) {
+  const std::string tempHome = makeTempDir("firmius-hook-shell-");
+  HookEnvGuard guard(tempHome);
+  const auto workflowsDir = std::filesystem::path(tempHome) / "workflows";
+  std::filesystem::create_directories(workflowsDir);
+  ::setenv("FIRMIUS_WORKFLOWS_DIR", workflowsDir.c_str(), 1);
+
+  std::ofstream hookFile(workflowsDir / "shell_hook.md");
+  hookFile << R"(---
+name: Shell Hook
+trigger:
+  on_event: pre_tool_use
+action:
+  kind: shell
+  command: cat
+  pass_envelope: true
+---
+)";
+  hookFile.close();
+
+  WorkflowLoader::instance().init();
+  HookRegistry::instance().reload();
+
+  std::string capturedCommand;
+  std::string capturedStdin;
+  HookDispatcher::setShellRunner(
+      [&](const std::string &command, const std::string &stdinPayload,
+          int, std::string *stdoutOut, std::string *stderrOut) {
+        capturedCommand = command;
+        capturedStdin = stdinPayload;
+        if (stdoutOut) *stdoutOut = "";
+        if (stderrOut) *stderrOut = "";
+        return 0;
+      });
+
+  EventPayload payload = makePayload();
+  auto result = HookDispatcher::fire(WorkflowEventKind::PreToolUse, payload);
+  HookDispatcher::setShellRunner({});
+
+  ASSERT_FALSE(result.blocked);
+  EXPECT_EQ(capturedCommand, "cat");
+  EXPECT_NE(capturedStdin.find("\"hook_id\":\"shell_hook\""), std::string::npos);
+  EXPECT_NE(capturedStdin.find("\"tool\":\"Files.Edit\""), std::string::npos);
+}
+
+TEST(HookRuntimeRegression, PackStateSurfaceRejectsOutOfBoundsWrites) {
+  const std::string tempHome = makeTempDir("firmius-hook-surface-");
+  HookEnvGuard guard(tempHome);
+  const auto hooksDir = std::filesystem::path(tempHome) / "hooks";
+  const auto workflowsDir = std::filesystem::path(tempHome) / "workflows";
+  std::filesystem::create_directories(hooksDir / "pack" / "flows");
+  std::filesystem::create_directories(workflowsDir);
+  ::setenv("FIRMIUS_HOOKS_DIR", hooksDir.c_str(), 1);
+  ::setenv("FIRMIUS_WORKFLOWS_DIR", workflowsDir.c_str(), 1);
+
+  std::ofstream manifest(hooksDir / "pack" / "pack.yaml");
+  manifest << R"(id: pack
+state_surface:
+  scopes: [thread]
+  paths:
+    - allowed.path
+files:
+  - flows/hook.yaml
+)";
+  manifest.close();
+
+  std::ofstream flow(hooksDir / "pack" / "flows" / "hook.yaml");
+  flow << R"(id: pack.flow
+trigger:
+  on_event: pre_tool_use
+action:
+  kind: state
+  writes:
+    - { scope: thread, path: allowed.path, value: ok }
+)";
+  flow.close();
+
+  WorkflowLoader::instance().init();
+  HookRegistry::instance().reload();
+
+  HookState::instance().bindThread("thread-surface");
+  EXPECT_TRUE(HookState::instance().writeJson(HookState::Scope::Thread,
+                                              "allowed.path", R"("ok")",
+                                              "pack.flow"));
+  EXPECT_FALSE(HookState::instance().writeJson(HookState::Scope::Thread,
+                                               "forbidden.path", R"("bad")",
+                                               "pack.flow"));
+}
 } // namespace
 } // namespace firmius::core::hooks

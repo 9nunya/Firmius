@@ -149,7 +149,7 @@ struct AgentConfig {
   std::string providerId = "nanogpt"; ///< LLM provider identifier.
   std::string modelId;                ///< LLM model identifier.
   std::string modelVariant;         ///< Selected model variant (if applicable).
-  std::string personaName = "aster"; ///< Persona to load from prompts/.
+  std::string personaName = "lead"; ///< Persona to load from prompts/.
   int maxTurns = 200;       ///< Maximum autonomous turns before stopping.
   float temperature = 0.7f; ///< LLM generation temperature.
   std::optional<std::uint32_t> maxTokens; ///< Optional max output tokens.
@@ -243,10 +243,13 @@ struct ThreadMetadata {
   /// this mode (e.g. "diagnose", "forge:prime"). Persisted with the thread
   /// metadata so resuming reproduces the original stance.
   std::string initialMode;
+  // Legacy: previous work system tracked an "active plan" per thread. This is
+  // retained for backward compatibility with older serialized metadata and some
+  // tests/UI surfaces. New code should prefer todo-based tracking.
+  std::string activePlanId;
   bool isBenchmarkRun = false;
   std::string benchmarkId;
   std::string benchmarkTaskId;
-  std::string activePlanId;
   std::optional<RetryableRequest> lastRetryableRequest;
   ThreadPermissionMode permissionMode = ThreadPermissionMode::Request;
   uint64_t createdAt = 0;

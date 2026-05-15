@@ -197,6 +197,8 @@ AgentStatus stringToAgentStatus(const std::string &str) {
     return AgentStatus::AwaitingInput;
   if (str == "Compacting")
     return AgentStatus::Compacting;
+  if (str == "ProviderWaiting")
+    return AgentStatus::ProviderWaiting;
   if (str == "Error")
     return AgentStatus::Error;
   if (str == "Cancelled")
@@ -2351,11 +2353,10 @@ rapidjson::Document toJson(const ThreadMetadata &m) {
   d.AddMember("cwd", rapidjson::Value(m.cwd.c_str(), a), a);
   d.AddMember("leadPersona", rapidjson::Value(m.leadPersona.c_str(), a), a);
   d.AddMember("initialMode", rapidjson::Value(m.initialMode.c_str(), a), a);
+  d.AddMember("activePlanId", rapidjson::Value(m.activePlanId.c_str(), a), a);
   d.AddMember("is_benchmark_run", m.isBenchmarkRun, a);
   d.AddMember("benchmark_id", rapidjson::Value(m.benchmarkId.c_str(), a), a);
-  d.AddMember("benchmark_task_id",
-              rapidjson::Value(m.benchmarkTaskId.c_str(), a), a);
-  d.AddMember("active_plan_id", rapidjson::Value(m.activePlanId.c_str(), a), a);
+  d.AddMember("benchmark_task_id", rapidjson::Value(m.benchmarkTaskId.c_str(), a), a);
   if (m.lastRetryableRequest.has_value()) {
     rapidjson::Value retry(rapidjson::kObjectType);
     retry.AddMember(
@@ -2412,6 +2413,12 @@ ThreadMetadata threadMetadataFromJson(const rapidjson::Value &v) {
   m.initialMode = v.HasMember("initialMode") && v["initialMode"].IsString()
                       ? v["initialMode"].GetString()
                       : "";
+  m.activePlanId =
+      v.HasMember("activePlanId") && v["activePlanId"].IsString()
+          ? v["activePlanId"].GetString()
+          : (v.HasMember("active_plan_id") && v["active_plan_id"].IsString()
+                 ? v["active_plan_id"].GetString()
+                 : "");
   m.isBenchmarkRun =
       v.HasMember("is_benchmark_run") && v["is_benchmark_run"].IsBool()
           ? v["is_benchmark_run"].GetBool()
@@ -2429,12 +2436,6 @@ ThreadMetadata threadMetadataFromJson(const rapidjson::Value &v) {
           ? v["benchmark_task_id"].GetString()
           : (v.HasMember("benchmarkTaskId") && v["benchmarkTaskId"].IsString()
                  ? v["benchmarkTaskId"].GetString()
-                 : "");
-  m.activePlanId =
-      v.HasMember("active_plan_id") && v["active_plan_id"].IsString()
-          ? v["active_plan_id"].GetString()
-          : (v.HasMember("activePlanId") && v["activePlanId"].IsString()
-                 ? v["activePlanId"].GetString()
                  : "");
   if (v.HasMember("lastRetryableRequest") &&
       v["lastRetryableRequest"].IsObject()) {
@@ -2937,6 +2938,23 @@ rapidjson::Document toJson(const TranscriptRedoEligibility &eligibility) {
   return d;
 }
 
+TranscriptRedoEligibility
+transcriptRedoEligibilityFromJson(const rapidjson::Value &value) {
+  TranscriptRedoEligibility eligibility;
+  eligibility.undoActionId =
+      value.HasMember("undo_action_id") && value["undo_action_id"].IsString()
+          ? value["undo_action_id"].GetString()
+          : "";
+  eligibility.redoable =
+      value.HasMember("redoable") && value["redoable"].IsBool()
+          ? value["redoable"].GetBool()
+          : false;
+  eligibility.reason = value.HasMember("reason") && value["reason"].IsString()
+                           ? value["reason"].GetString()
+                           : "";
+  return eligibility;
+}
+
 rapidjson::Document toJson(const EngineEvent &ev) {
   rapidjson::Document d;
   d.SetObject();
@@ -2979,6 +2997,11 @@ rapidjson::Document toJson(const EngineEvent &ev) {
     d.AddMember("turn", toJson(tc->turn).Move(), a);
     d.AddMember("aggregateMetrics", toJson(tc->aggregateMetrics).Move(), a);
     d.AddMember("parentId", rapidjson::Value(tc->parentId.c_str(), a), a);
+  } else if (auto *am = std::get_if<AgentMetricsStreamed>(&ev)) {
+    d.AddMember("type", "AgentMetricsStreamed", a);
+    d.AddMember("agentId", rapidjson::Value(am->agentId.c_str(), a), a);
+    d.AddMember("metrics", agentMetricsToJson(am->metrics, a).Move(), a);
+    d.AddMember("parentId", rapidjson::Value(am->parentId.c_str(), a), a);
   } else if (auto *f = std::get_if<AgentFinished>(&ev)) {
     d.AddMember("type", "AgentFinished", a);
     d.AddMember("agentId", rapidjson::Value(f->agentId.c_str(), a), a);

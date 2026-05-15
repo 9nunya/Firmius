@@ -17,6 +17,7 @@
 #include "components/StatusBar.hpp"
 #include "components/TodoLane.hpp"
 #include "agents/ContextBudget.hpp"
+#include "agents/modes/Mode.hpp"
 #include "agents/PurposeLoader.hpp"
 #include "agents/RollingContextManager.hpp"
 #include "AgentRegistry.hpp"
@@ -27,6 +28,7 @@
 #include "components/ErrorDisplay.hpp"
 #include "harness/Harness.hpp"
 #include "utils/ReferenceAutocomplete.hpp"
+#include "utils/ModeCycle.hpp"
 #include "modals/ModalRegistry.hpp"
 #include "modals/ThreadLockedModal.hpp"
 #include "persistence/ThreadManager.hpp"
@@ -268,6 +270,31 @@ std::shared_ptr<firmius::shared::AgentHistory> EnsureTranscriptHistory(
   return history;
 }
 
+void appendOptimisticUserTurnImpl(
+    std::shared_ptr<firmius::shared::AgentHistory> &history,
+    const std::string &thread_id, const std::string &text,
+    const std::vector<firmius::shared::ImageContent> &images) {
+  auto transcript_history = EnsureTranscriptHistory(history, thread_id);
+  firmius::shared::AgentTurn turn;
+  turn.turnId = "user-optimistic-" +
+                std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                   std::chrono::system_clock::now().time_since_epoch())
+                                   .count());
+
+  firmius::shared::Message message;
+  message.role = firmius::shared::Role::User;
+  message.timestamp = static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::system_clock::now().time_since_epoch())
+          .count());
+  message.content = {firmius::shared::TextContent{text}};
+  for (const auto &img : images) {
+    message.content.push_back(img);
+  }
+  turn.messages.push_back(std::move(message));
+  transcript_history->turns.push_back(std::move(turn));
+}
+
 
 
 bool isTuiStartupProfilingEnabled() {
@@ -337,6 +364,12 @@ void noteTuiChatWindowRebuild(std::chrono::nanoseconds elapsed) {
 }
 
 void noteTuiFrameRendered(std::chrono::nanoseconds elapsed) {
+  const auto now_ms = static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::system_clock::now().time_since_epoch())
+          .count());
+  tuiProfilingStats().last_frame_rendered_at_ms.store(
+      now_ms, std::memory_order_relaxed);
   if (!isTuiStartupProfilingEnabled()) {
     return;
   }
@@ -344,6 +377,11 @@ void noteTuiFrameRendered(std::chrono::nanoseconds elapsed) {
   stats.frame_render_count.fetch_add(1, std::memory_order_relaxed);
   stats.frame_render_ns.fetch_add(static_cast<int64_t>(elapsed.count()),
                                   std::memory_order_relaxed);
+}
+
+std::uint64_t tuiLastFrameRenderedAtMs() {
+  return tuiProfilingStats().last_frame_rendered_at_ms.load(
+      std::memory_order_relaxed);
 }
 void noteTuiModalOpenRequested(const std::string &name) {
   if (!isTuiStartupProfilingEnabled() || name.empty()) {
@@ -965,14 +1003,14 @@ static std::string resolveDefaultLeadPersona(
       return cfg.defaultLeadPersona;
     }
   }
-  if (firmius::core::PurposeLoader::isValid("aster")) {
-    return "aster";
+  if (firmius::core::PurposeLoader::isValid("lead")) {
+    return "lead";
   }
   const auto purposes = firmius::core::PurposeLoader::listPurposes();
   if (!purposes.empty()) {
     return purposes.front();
   }
-  return "aster";
+  return "lead";
 }
 
 static std::string resolvePersonaTitle(const std::string &personaName) {
@@ -983,17 +1021,17 @@ static std::string resolvePersonaTitle(const std::string &personaName) {
   }
 }
 
-static firmius::core::PurposeWorkRole resolvePurposeWorkRole(
-    const std::string &personaName) {
-  try {
-    return firmius::core::PurposeLoader::resolveWorkRole(personaName);
-  } catch (...) {
-    return firmius::core::PurposeWorkRole::Unknown;
+static std::pair<std::string, std::string>
+resolveStatusMode(const std::string &modeName, const std::string &personaName) {
+  if (modeName.empty()) {
+    return {"", ""};
   }
-}
-
-static bool isExecutorLikeRole(firmius::core::PurposeWorkRole role) {
-  return role == firmius::core::PurposeWorkRole::Executor;
+  auto &registry = firmius::core::modes::ModeRegistry::instance();
+  const auto *mode = registry.resolveForPersona(modeName, personaName);
+  if (!mode) {
+    return {modeName, ""};
+  }
+  return {mode->qualifiedName(), mode->glyph};
 }
 
 static std::string firmiusThreadsPath() {
@@ -1005,7 +1043,7 @@ std::vector<std::string>
 getSwitchableLeadPersonas(firmius::core::Harness *) {
   auto purposes = firmius::core::PurposeLoader::listSwitchablePurposes();
   if (purposes.empty()) {
-    purposes.push_back("aster");
+    purposes.push_back("lead");
   }
   return purposes;
 }
@@ -1102,7 +1140,6 @@ void TuiState::syncCurrentThreadMetadataFromHarness(bool preserve_live_state) {
     setViewMode(ViewMode::Chat);
     requestRefresh(RefreshFlags::Status);
     requestRefresh(RefreshFlags::AgentStrip);
-    requestRefresh(RefreshFlags::PlanLane);
     requestRefresh(RefreshFlags::TodoLane);
     requestRefresh(RefreshFlags::ContextLane);
     notifyChatTranscriptChanged();
@@ -1784,6 +1821,12 @@ void TuiState::openModal(const std::string &name) {
 void TuiState::openModalDirect(ftxui::Component modal,
                                const std::string &modal_name) {
   modals_.push_back(modal);
+  if (pending_modal_teardown_) {
+    modal_teardowns_.push_back(std::move(pending_modal_teardown_));
+    pending_modal_teardown_ = nullptr;
+  } else {
+    modal_teardowns_.push_back({});
+  }
   if (!modal_name.empty()) {
     pending_profile_modal_name_ = modal_name;
     painted_profile_modals_.erase(modal_name);
@@ -1797,6 +1840,13 @@ void TuiState::popModal() { postEvent(ftxui::Event::Special("PopModal")); }
 
 void TuiState::popModalImmediate() {
   if (!modals_.empty()) {
+    if (!modal_teardowns_.empty()) {
+      auto teardown = std::move(modal_teardowns_.back());
+      modal_teardowns_.pop_back();
+      if (teardown) {
+        teardown();
+      }
+    }
     modals_.pop_back();
   }
   if (modals_.empty()) {
@@ -1813,15 +1863,39 @@ void TuiState::popModalImmediate() {
 
 void TuiState::replaceModalDirect(ftxui::Component modal) {
   if (!modals_.empty()) {
+    if (!modal_teardowns_.empty()) {
+      auto teardown = std::move(modal_teardowns_.back());
+      modal_teardowns_.pop_back();
+      if (teardown) {
+        teardown();
+      }
+    }
     modals_.pop_back();
   }
   modals_.push_back(modal);
+  if (pending_modal_teardown_) {
+    modal_teardowns_.push_back(std::move(pending_modal_teardown_));
+    pending_modal_teardown_ = nullptr;
+  } else {
+    modal_teardowns_.push_back({});
+  }
   if (modal) {
     modal->TakeFocus();
   }
 }
 
-void TuiState::clearModals() { modals_.clear(); }
+void TuiState::clearModals() {
+  while (!modals_.empty()) {
+    popModalImmediate();
+  }
+}
+
+void TuiState::pushModalTeardown(std::function<void()> teardown) {
+  if (!teardown) {
+    return;
+  }
+  pending_modal_teardown_ = std::move(teardown);
+}
 
 void TuiState::deferUiMutation(std::function<void()> action) {
   if (!action) {
@@ -1897,6 +1971,10 @@ void TuiState::init(firmius::core::Harness &harness,
     }
   }
   focused_agent_id_ = focused_agent_id;
+  if (harness_ && !focused_agent_id_.empty() &&
+      harness_->focusedAgentId() != focused_agent_id_) {
+    harness_->setFocusedAgent(focused_agent_id_);
+  }
   refreshFocusedHistory();
 
   title_model_ = std::make_shared<TitleBarModel>();
@@ -2077,12 +2155,11 @@ void TuiState::init(firmius::core::Harness &harness,
     focusAgent(agent_id);
   };
 
-  plan_lane_model_ = std::make_shared<PlanLaneModel>();
+  plan_lane_model_.reset();
   todo_lane_model_ = std::make_shared<TodoLaneModel>();
   context_lane_model_ = std::make_shared<ContextLaneModel>();
   active_plan_state_.setExpanded(true);
   active_plan_state_.hydrateForThread(thread_, loadActivePlanForThread(thread_));
-  updatePlanLaneModel();
   updateTodoLaneModel();
   updateContextLaneModel();
 
@@ -2097,7 +2174,6 @@ void TuiState::init(firmius::core::Harness &harness,
 
   requestRefresh(RefreshFlags::Status);
   requestRefresh(RefreshFlags::AgentStrip);
-  requestRefresh(RefreshFlags::PlanLane);
   requestRefresh(RefreshFlags::TodoLane);
   requestRefresh(RefreshFlags::ContextLane);
   applyPendingRefreshes();
@@ -2119,7 +2195,6 @@ bool TuiState::focusAgent(const std::string &agent_id) {
   }
   requestRefresh(RefreshFlags::AgentStrip);
   requestRefresh(RefreshFlags::Status);
-  requestRefresh(RefreshFlags::PlanLane);
   requestRefresh(RefreshFlags::TodoLane);
   requestRefresh(RefreshFlags::ContextLane);
   notifyChatTranscriptChanged();
@@ -2311,6 +2386,7 @@ std::string TuiState::exitSummaryText() const {
 }
 
 void TuiState::drainEvents() {
+  drainDeferredUiMutations();
   custom_event_pending_ = false;
   noteTuiCustomEventDrained();
 
@@ -2329,6 +2405,7 @@ void TuiState::drainEvents() {
     }
   }
   applyPendingRefreshes();
+  applyPendingRenders();
 }
 
 void TuiState::requestRefresh(RefreshFlags flags) {
@@ -2337,6 +2414,7 @@ void TuiState::requestRefresh(RefreshFlags flags) {
 
 void TuiState::notifyChatTranscriptChanged() {
   requestRefresh(RefreshFlags::ChatTranscript);
+  requestRender(RefreshFlags::ChatTranscript);
 }
 
 void TuiState::applyPendingRefreshes() {
@@ -2351,12 +2429,6 @@ void TuiState::applyPendingRefreshes() {
   }
   if (flags & static_cast<unsigned int>(RefreshFlags::AgentStrip)) {
     updateAgentStripModel();
-  }
-  if (flags & static_cast<unsigned int>(RefreshFlags::PlanLane)) {
-    updatePlanLaneModel();
-  }
-  if (flags & static_cast<unsigned int>(RefreshFlags::TodoLane)) {
-    updateTodoLaneModel();
   }
   if (flags & static_cast<unsigned int>(RefreshFlags::ContextLane)) {
     updateContextLaneModel();
@@ -2413,21 +2485,38 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
           requestRefresh(RefreshFlags::AgentStrip);
           requestRefresh(RefreshFlags::Status);
           requestRefresh(RefreshFlags::ContextLane);
+          notifyChatTranscriptChanged();
         } else if constexpr (std::is_same_v<T, AgentToolCall>) {
           stream_state_.handleAgentToolCall(e);
           requestRefresh(RefreshFlags::AgentStrip);
           requestRefresh(RefreshFlags::Status);
           requestRefresh(RefreshFlags::ContextLane);
+          notifyChatTranscriptChanged();
         } else if constexpr (std::is_same_v<T, AgentFileEdited>) {
           stream_state_.handleAgentFileEdited(e);
         } else if constexpr (std::is_same_v<T, ThreadChanged>) {
           const auto thread_changed_begin = std::chrono::steady_clock::now();
           thread_ = e.metadata;
-          focused_agent_id_ = harness_ ? harness_->focusedAgentId() : std::string();
-
+          const auto current_focused = harness_ ? harness_->focusedAgentId() : std::string();
           auto all_agents = harness_ ? harness_->listAgents(thread_.threadId)
                                      : std::vector<std::string>{};
-          if (focused_agent_id_.empty()) {
+
+          auto is_valid_focus = [&](const std::string &agent_id) {
+            if (agent_id.empty()) {
+              return false;
+            }
+            if (std::find(all_agents.begin(), all_agents.end(), agent_id) ==
+                all_agents.end()) {
+              return false;
+            }
+            return static_cast<bool>(
+                firmius::core::AgentRegistry::instance().getAgent(agent_id));
+          };
+
+          if (is_valid_focus(current_focused)) {
+            focused_agent_id_ = current_focused;
+          } else {
+            focused_agent_id_.clear();
             for (const auto &candidate : all_agents) {
               auto agent = firmius::core::AgentRegistry::instance().getAgent(candidate);
               if (agent && agent->getContext().identity.parentId.empty()) {
@@ -2437,6 +2526,9 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
             }
             if (focused_agent_id_.empty() && !all_agents.empty()) {
               focused_agent_id_ = all_agents.front();
+            }
+            if (harness_ && !focused_agent_id_.empty()) {
+              harness_->setFocusedAgent(focused_agent_id_);
             }
           }
 
@@ -2482,8 +2574,6 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
           setViewMode(ViewMode::Chat);
 
           requestRefresh(RefreshFlags::Status);
-          requestRefresh(RefreshFlags::AgentStrip);
-          requestRefresh(RefreshFlags::PlanLane);
           requestRefresh(RefreshFlags::TodoLane);
           requestRefresh(RefreshFlags::ContextLane);
           notifyChatTranscriptChanged();
@@ -2497,19 +2587,11 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
           notifyChatTranscriptChanged();
         } else if constexpr (std::is_same_v<T, ThreadMetadataUpdated>) {
           if (e.threadId == thread_.threadId) {
-            const std::string previous_active_plan_id = thread_.activePlanId;
             auto previousMode = thread_.permissionMode;
             thread_ = e.metadata;
             if (title_model_) {
               title_model_->title = thread_.title;
               title_model_->thread_id = thread_.threadId;
-            }
-            if (previous_active_plan_id != thread_.activePlanId) {
-              active_plan_state_.setExpanded(true);
-              active_plan_state_.hydrateForThread(
-                  thread_, loadActivePlanForThread(thread_));
-              requestRefresh(RefreshFlags::PlanLane);
-              requestRefresh(RefreshFlags::TodoLane);
             }
             if (previousMode != thread_.permissionMode) {
               NotificationManager::instance().notifyInfo(
@@ -2567,10 +2649,13 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
           openModalDirect(locked_modal);
         } else if constexpr (std::is_same_v<T, AgentCompacting>) {
           stream_state_.handleAgentCompacting(e);
+          notifyChatTranscriptChanged();
         } else if constexpr (std::is_same_v<T, AgentCompactionThinking>) {
           stream_state_.handleAgentCompactionThinking(e);
+          notifyChatTranscriptChanged();
         } else if constexpr (std::is_same_v<T, AgentCompactionText>) {
           stream_state_.handleAgentCompactionText(e);
+          notifyChatTranscriptChanged();
         } else if constexpr (std::is_same_v<T, ContextCompacted>) {
           stream_state_.handleContextCompacted(e);
           if (e.agentId.empty() || e.agentId == focused_agent_id_) {
@@ -2579,17 +2664,25 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
           }
         } else if constexpr (std::is_same_v<T, AgentProcessSpawned>) {
           stream_state_.handleAgentProcessSpawned(e);
+          notifyChatTranscriptChanged();
         } else if constexpr (std::is_same_v<T, AgentProcessOutput>) {
           stream_state_.handleAgentProcessOutput(e);
+          notifyChatTranscriptChanged();
         } else if constexpr (std::is_same_v<T, AgentSpawned>) {
           if (e.parentId.empty() && focused_agent_id_.empty()) {
             focused_agent_id_ = e.agentId;
+            if (harness_) {
+              harness_->setFocusedAgent(e.agentId);
+            }
             refreshFocusedHistory();
             notifyChatTranscriptChanged();
           } else if (!e.parentId.empty() && focused_agent_id_ == e.parentId) {
             // Auto-focus subagent when its parent is currently focused, so its
             // streaming output appears in the chat.
             focused_agent_id_ = e.agentId;
+            if (harness_) {
+              harness_->setFocusedAgent(e.agentId);
+            }
             refreshFocusedHistory();
             notifyChatTranscriptChanged();
           }
@@ -2598,26 +2691,59 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
         } else if constexpr (std::is_same_v<T, UserMessageSent>) {
           if (focused_agent_id_.empty()) {
             focused_agent_id_ = harness_ ? harness_->focusedAgentId() : std::string();
+            if (focused_agent_id_.empty() && harness_ && !thread_.threadId.empty()) {
+              auto all_agents = harness_->listAgents(thread_.threadId);
+              for (const auto &candidate : all_agents) {
+                auto agent = firmius::core::AgentRegistry::instance().getAgent(candidate);
+                if (agent && agent->getContext().identity.parentId.empty()) {
+                  focused_agent_id_ = candidate;
+                  harness_->setFocusedAgent(candidate);
+                  break;
+                }
+              }
+            }
             refreshFocusedHistory();
           }
           if (e.threadId == thread_.threadId) {
             auto transcript_history =
                 EnsureTranscriptHistory(history_, thread_.threadId);
-            shared::AgentTurn turn;
-            turn.turnId = "user-live-" + e.messageId;
-            shared::Message message;
-            message.id = e.messageId;
-            message.role = shared::Role::User;
-            message.timestamp = static_cast<std::uint64_t>(
-                std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::system_clock::now().time_since_epoch())
-                    .count());
-            message.content = {shared::TextContent{e.text}};
-            for (const auto &img : e.images) {
-              message.content.push_back(img);
+            bool replaced_optimistic = false;
+            if (!transcript_history->turns.empty()) {
+              auto &last_turn = transcript_history->turns.back();
+              if (last_turn.turnId.rfind("user-optimistic-", 0) == 0 &&
+                  last_turn.messages.size() == 1 &&
+                  last_turn.messages.front().role == shared::Role::User) {
+                std::string last_text;
+                for (const auto &part : last_turn.messages.front().content) {
+                  if (const auto *txt =
+                          std::get_if<shared::TextContent>(&part)) {
+                    last_text += txt->text;
+                  }
+                }
+                if (last_text == e.text) {
+                  last_turn.turnId = "user-live-" + e.messageId;
+                  last_turn.messages.front().id = e.messageId;
+                  replaced_optimistic = true;
+                }
+              }
             }
-            turn.messages.push_back(std::move(message));
-            transcript_history->turns.push_back(std::move(turn));
+            if (!replaced_optimistic) {
+              shared::AgentTurn turn;
+              turn.turnId = "user-live-" + e.messageId;
+              shared::Message message;
+              message.id = e.messageId;
+              message.role = shared::Role::User;
+              message.timestamp = static_cast<std::uint64_t>(
+                  std::chrono::duration_cast<std::chrono::milliseconds>(
+                      std::chrono::system_clock::now().time_since_epoch())
+                      .count());
+              message.content = {shared::TextContent{e.text}};
+              for (const auto &img : e.images) {
+                message.content.push_back(img);
+              }
+              turn.messages.push_back(std::move(message));
+              transcript_history->turns.push_back(std::move(turn));
+            }
             if (!focused_agent_id_.empty()) {
               agent_history_cache_[focused_agent_id_] = transcript_history;
             }
@@ -2654,6 +2780,7 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
                                                         e.message, false);
           }
           requestRefresh(RefreshFlags::AgentStrip);
+          notifyChatTranscriptChanged();
         } else if constexpr (std::is_same_v<T, AgentRetrying>) {
           stream_state_.handleAgentRetrying(e);
           std::string retryMsg = "Attempt " + std::to_string(e.attempt) + "/" +
@@ -2666,6 +2793,7 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
               "Retrying", retryMsg,
               std::chrono::milliseconds(std::max(e.delayMs, 3000)));
           requestRefresh(RefreshFlags::AgentStrip);
+          notifyChatTranscriptChanged();
         } else if constexpr (std::is_same_v<T, AgentRetryFailed>) {
           stream_state_.handleAgentRetryFailed(e);
           NotificationManager::instance().notifyError(
@@ -2673,12 +2801,15 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
               e.reason.empty() ? "All retry attempts exhausted" : e.reason,
               false);
           requestRefresh(RefreshFlags::AgentStrip);
+          notifyChatTranscriptChanged();
         } else if constexpr (std::is_same_v<T, AgentFinished>) {
           stream_state_.handleAgentFinished(e);
           requestRefresh(RefreshFlags::AgentStrip);
+          notifyChatTranscriptChanged();
         } else if constexpr (std::is_same_v<T, AgentInterrupted>) {
           stream_state_.handleAgentInterrupted(e);
           requestRefresh(RefreshFlags::AgentStrip);
+          notifyChatTranscriptChanged();
         } else if constexpr (std::is_same_v<T, ThreadTitleUpdated>) {
           if (title_model_) {
             title_model_->title = e.title;
@@ -2686,25 +2817,23 @@ void TuiState::onEvent(const shared::AppEvent &ev) {
           thread_.title = e.title;
         } else if constexpr (std::is_same_v<T, MessageQueued>) {
           stream_state_.handleMessageQueued(e);
+          notifyChatTranscriptChanged();
         } else if constexpr (std::is_same_v<T, MessageDequeued>) {
           stream_state_.handleMessageDequeued(e);
+          notifyChatTranscriptChanged();
         } else if constexpr (std::is_same_v<T, InternalMessageQueued>) {
           stream_state_.handleInternalMessageQueued(e);
+          notifyChatTranscriptChanged();
         } else if constexpr (std::is_same_v<T, InternalMessageDequeued>) {
           stream_state_.handleInternalMessageDequeued(e);
+          notifyChatTranscriptChanged();
         }
       },
       ev);
 
-  if (active_plan_state_.handleEvent(ev, thread_.threadId)) {
-    if (const auto &plan = active_plan_state_.activePlan(); plan.has_value()) {
-      thread_.activePlanId = plan->id;
-    }
-    requestRefresh(RefreshFlags::PlanLane);
-    requestRefresh(RefreshFlags::TodoLane);
-  }
-
+  notifyChatTranscriptChanged();
   applyPendingRefreshes();
+  applyPendingRenders();
 
   if (screen_) {
     postEvent(ftxui::Event::Custom);
@@ -2735,6 +2864,8 @@ void TuiState::updateStatusModel() {
   if (!status_model_)
     return;
   status_model_->permission_mode = thread_.permissionMode;
+  status_model_->active_mode.clear();
+  status_model_->active_mode_glyph.clear();
   status_model_->live_processes = 0;
   status_model_->background_processes = 0;
   if (!focused_agent_id_.empty()) {
@@ -2794,6 +2925,10 @@ void TuiState::updateStatusModel() {
       status_model_->estimated_cost_usd = metrics.estimatedCostUsd;
       status_model_->bucket_summary =
           firmius::core::summarizeContextWindowMetrics(metrics.context, 3);
+      const auto [activeMode, activeModeGlyph] =
+          resolveStatusMode(ctx.state.activeMode, ctx.config.personaName);
+      status_model_->active_mode = activeMode;
+      status_model_->active_mode_glyph = activeModeGlyph;
       auto provider =
           firmius::provider::ProviderRegistry::instance().getProvider(
               ctx.config.providerId);
@@ -2825,6 +2960,10 @@ void TuiState::updateStatusModel() {
   status_model_->purpose = personaTitle;
   status_model_->title = "";
   status_model_->agent_name = personaTitle;
+  const auto [initialMode, initialModeGlyph] =
+      resolveStatusMode(thread_.initialMode, personaName);
+  status_model_->active_mode = initialMode;
+  status_model_->active_mode_glyph = initialModeGlyph;
   status_model_->context_used = 0;
   status_model_->context_max = 0;
   status_model_->sent_prompt = 0;
@@ -3029,73 +3168,21 @@ void TuiState::updatePlanLaneModel() {
   if (!plan_lane_model_) {
     return;
   }
-  *plan_lane_model_ = active_plan_state_.model();
-  plan_lane_model_->expanded = true;
-  plan_lane_model_->toggle_hint.clear();
-
-  auto focusedAgent =
-      focused_agent_id_.empty()
-          ? nullptr
-          : firmius::core::AgentRegistry::instance().getAgent(focused_agent_id_);
-  if (!focusedAgent) {
-    return;
-  }
-
-  const auto role =
-      resolvePurposeWorkRole(focusedAgent->getContext().config.personaName);
-  if (!isExecutorLikeRole(role)) {
-    return;
-  }
-
-  const auto activePlan = loadActivePlanForThread(thread_);
-  const auto *executorChunk = findExecutorChunk(activePlan);
-  if (!executorChunk) {
-    return;
-  }
-
-  if (!executorChunk->tasks.empty()) {
-    plan_lane_model_->executor_task_view = true;
-    plan_lane_model_->expanded = true;
-    plan_lane_model_->executor_chunk_id = executorChunk->id;
-    plan_lane_model_->executor_chunk_title = executorChunk->title;
-    plan_lane_model_->executor_tasks.clear();
-    plan_lane_model_->executor_tasks.reserve(executorChunk->tasks.size());
-    for (const auto &task : executorChunk->tasks) {
-      PlanLaneTaskRow row;
-      row.id = task.id;
-      row.title = task.title;
-      row.status = task.status;
-      row.status_label = ActivePlanState::statusLabel(task.status);
-      plan_lane_model_->executor_tasks.push_back(std::move(row));
-    }
-  } else {
-    plan_lane_model_->expanded = true;
-    plan_lane_model_->highlight_chunk_id = executorChunk->id;
-  }
+  plan_lane_model_->visible = false;
+  plan_lane_model_->plan_id.clear();
+  plan_lane_model_->plan_title.clear();
+  plan_lane_model_->collapsed_summary.clear();
+  plan_lane_model_->chunks.clear();
 }
 
 const shared::WorkChunk *
-TuiState::findExecutorChunk(const std::optional<shared::Plan> &plan) const {
-  if (!plan.has_value() || focused_agent_id_.empty()) {
-    return nullptr;
-  }
-  for (const auto &chunk : plan->chunks) {
-    if (chunk.assignedAgentId != focused_agent_id_) {
-      continue;
-    }
-    if (chunk.status == shared::WorkChunkStatus::Done ||
-        chunk.status == shared::WorkChunkStatus::Cancelled) {
-      continue;
-    }
-    return &chunk;
-  }
+TuiState::findExecutorChunk(const std::optional<shared::Plan> & /*plan*/) const {
   return nullptr;
 }
 
 std::string TuiState::findExecutorChunkTitle(
-    const std::optional<shared::Plan> &plan) const {
-  const auto *chunk = findExecutorChunk(plan);
-  return chunk ? chunk->title : "";
+    const std::optional<shared::Plan> & /*plan*/) const {
+  return "";
 }
 
 void TuiState::updateTodoLaneModel() {
@@ -3130,14 +3217,6 @@ void TuiState::updateTodoLaneModel() {
       if (!ctx.identity.friendlyName.empty()) {
         todo_lane_model_->owner_label = ctx.identity.friendlyName;
       }
-      if (isExecutorLikeRole(resolvePurposeWorkRole(ctx.config.personaName))) {
-        const auto activePlan = loadActivePlanForThread(thread_);
-        const std::string chunkTitle = findExecutorChunkTitle(activePlan);
-        if (!chunkTitle.empty()) {
-          todo_lane_model_->show_chunk_header = true;
-          todo_lane_model_->chunk_title = chunkTitle;
-        }
-      }
     }
 
     todo_lane_model_->rows.reserve(todo.items.size());
@@ -3149,6 +3228,15 @@ void TuiState::updateTodoLaneModel() {
                 return lhs.id < rhs.id;
               });
   } catch (...) {
+  }
+}
+
+void TuiState::appendOptimisticUserTurn(
+    const std::string &text,
+    const std::vector<firmius::shared::ImageContent> &images) {
+  appendOptimisticUserTurnImpl(history_, thread_.threadId, text, images);
+  if (!focused_agent_id_.empty()) {
+    agent_history_cache_[focused_agent_id_] = history_;
   }
 }
 
@@ -3363,17 +3451,8 @@ void TuiState::updateContextLaneModel() {
 }
 
 std::optional<shared::Plan>
-TuiState::loadActivePlanForThread(const shared::ThreadMetadata &thread) const {
-  if (thread.threadId.empty() || thread.activePlanId.empty()) {
-    return std::nullopt;
-  }
-
-  try {
-    firmius::core::ThreadManager tm(firmiusThreadsPath());
-    return tm.getPlan(thread.threadId, thread.activePlanId);
-  } catch (...) {
-    return std::nullopt;
-  }
+TuiState::loadActivePlanForThread(const shared::ThreadMetadata & /*thread*/) const {
+  return std::nullopt;
 }
 
 ftxui::Component TuiState::root() {
@@ -3470,22 +3549,16 @@ ftxui::Component TuiState::root() {
           // If we are on the welcome screen, typing a message automatically
           // starts a thread
           if (harness_) {
-            std::cerr << "[DEBUG] Welcome screen: newThread starting\n" << std::flush;
             // Auto-create thread in current directory with default lead persona
             std::string cwd = std::filesystem::current_path().string();
-            std::string threadId = harness_->newThread(
-                {}, cwd, resolveDefaultLeadPersona(harness_));
-            std::cerr << "[DEBUG] Welcome screen: newThread returned " << threadId << "\n" << std::flush;
+            harness_->newThread({}, cwd, resolveDefaultLeadPersona(harness_));
             harness_->setCurrentThreadPermissionMode(thread_.permissionMode);
-            std::cerr << "[DEBUG] Welcome screen: setCurrentThreadPermissionMode done\n" << std::flush;
             // A welcome-screen send is a fresh thread transition, not a
             // live-stream continuation. Do the full thread rebind before the
             // first send so chat/history/tool state is initialized the same
             // way as any other thread switch.
             syncCurrentThreadMetadataFromHarness(true);
-            std::cerr << "[DEBUG] Welcome screen: syncCurrentThreadMetadataFromHarness done, view_mode=" << (view_mode_ == ViewMode::Chat ? "Chat" : "Welcome") << "\n" << std::flush;
             harness_->send(text, image_contents);
-            std::cerr << "[DEBUG] Welcome screen: send done\n" << std::flush;
 
             setViewMode(ViewMode::Chat);
           }
@@ -4153,7 +4226,7 @@ ftxui::Component TuiState::root() {
         model.phrase_mode = "idle";
     }
 
-    if (skin_config_.live_row_show_plan_excerpt && active_plan != nullptr) {
+    if (false && skin_config_.live_row_show_plan_excerpt && active_plan != nullptr) {
       model.plan_title = active_plan->title;
       auto chunks = active_plan->chunks;
       std::stable_sort(chunks.begin(), chunks.end(),
@@ -4241,7 +4314,7 @@ ftxui::Component TuiState::root() {
             computeWorkPanelMaxHeight(terminal.dimy);
         const int context_panel_height =
             std::max(work_panel_max_height, std::min(terminal.dimy / 3, 14));
-        const bool hasPlan = plan_lane_model_ && plan_lane_model_->visible;
+        const bool hasPlan = false;
         const bool hasTodo = todo_lane_model_ && todo_lane_model_->visible;
         const bool hasContext =
             context_lane_model_ && context_lane_model_->visible;
@@ -4280,9 +4353,7 @@ ftxui::Component TuiState::root() {
                                  ? std::min(work_panel_height_override_,
                                             std::max(4, terminal.dimy - 8))
                                  : work_panel_max_height;
-          if (visibleTab == WorkPanelTab::Plan && hasPlan) {
-            selected_panel = plan_lane->Render();
-          } else if (visibleTab == WorkPanelTab::Todo && hasTodo) {
+          if (visibleTab == WorkPanelTab::Todo && hasTodo) {
             selected_panel = todo_lane->Render();
           } else if (visibleTab == WorkPanelTab::Context && hasContext) {
             selected_panel = context_lane->Render();
@@ -4417,6 +4488,9 @@ ftxui::Component TuiState::root() {
       });
   // Layer modals using dbox
   auto modal_renderer = ftxui::Renderer(base_view, [this, base_view]() {
+    if (!event_queue_.empty()) {
+      drainEvents();
+    }
     const auto render_begin = std::chrono::steady_clock::now();
     ftxui::Element current = base_view->Render();
     for (const auto &modal : modals_) {
@@ -4469,6 +4543,10 @@ ftxui::Component TuiState::root() {
         chat_component_->OnEvent(ftxui::Event::Custom);
       }
       return true;
+    }
+
+    if (event == ftxui::Event::CtrlC) {
+      return handleCtrlC();
     }
 
     if (pending_permission_request_) {
@@ -4635,7 +4713,7 @@ ftxui::Component TuiState::root() {
       auto &m = event.mouse();
       if (m.button == ftxui::Mouse::WheelUp ||
           m.button == ftxui::Mouse::WheelDown) {
-        const bool hasPlan = plan_lane_model_ && plan_lane_model_->visible;
+        const bool hasPlan = false;
         const bool hasTodo = todo_lane_model_ && todo_lane_model_->visible;
         const bool hasContext =
             context_lane_model_ && context_lane_model_->visible;
@@ -4643,10 +4721,6 @@ ftxui::Component TuiState::root() {
             selected_work_panel_tab_, hasPlan, hasTodo, hasContext);
         if (visibleTab == WorkPanelTab::Context && context_lane &&
             context_lane->OnEvent(event)) {
-          return true;
-        }
-        if (visibleTab == WorkPanelTab::Plan && plan_lane &&
-            plan_lane->OnEvent(event)) {
           return true;
         }
         if (visibleTab == WorkPanelTab::Todo && todo_lane &&
@@ -4686,7 +4760,46 @@ ftxui::Component TuiState::root() {
         harness_->abortAndFlushQueuedMessages();
       return true;
     }
-    if (IsPermissionCycleEvent(event)) { // Ctrl+Y (Permission Mode)
+    if (IsModeCycleEvent(event)) {
+      if (view_mode_ == ViewMode::Welcome) {
+        const std::string persona = thread_.leadPersona.empty()
+                                        ? std::string("lead")
+                                        : thread_.leadPersona;
+        thread_.initialMode = cycleMode(thread_.initialMode, persona, +1);
+        NotificationManager::instance().notifyInfo(
+            "Mode",
+            thread_.initialMode.empty() ? "Initial mode cleared."
+                                        : "Initial mode: " + thread_.initialMode,
+            std::chrono::milliseconds(1500));
+        if (screen_) {
+          postEvent(ftxui::Event::Custom);
+        }
+        return true;
+      }
+
+      auto agent = firmius::core::AgentRegistry::instance().getAgent(
+          focused_agent_id_);
+      if (!agent) {
+        NotificationManager::instance().notifyWarning(
+            "Mode", "No focused agent.", std::chrono::milliseconds(1500));
+        return true;
+      }
+      auto &agentCtx = agent->getMutableContext();
+      const std::string next =
+          cycleMode(agentCtx.state.activeMode, agentCtx.config.personaName, +1);
+      agentCtx.state.activeMode = next;
+      NotificationManager::instance().notifyInfo(
+          "Mode",
+          next.empty() ? "Mode cleared on " + agentCtx.identity.friendlyName
+                       : "Mode: " + next + " (" +
+                             agentCtx.identity.friendlyName + ")",
+          std::chrono::milliseconds(1500));
+      if (screen_) {
+        postEvent(ftxui::Event::Custom);
+      }
+      return true;
+    }
+    if (IsPermissionCycleEvent(event)) { // Ctrl+L (Permission Mode)
       cycleThreadPermissionMode();
       return true;
     }
@@ -4720,7 +4833,7 @@ ftxui::Component TuiState::root() {
       triggerEditRedoFromHotkey();
       return true;
     }
-    if (event.input() == "\x1b[Z") { // Shift+Tab (cycle lead mode)
+    if (event.input() == "\x1b[Z") { // Shift+Tab (cycle lead purpose)
       if (!harness_)
         return true;
 
@@ -4731,14 +4844,14 @@ ftxui::Component TuiState::root() {
           const auto &ctx = agent->getContext();
           if (!ctx.identity.parentId.empty()) {
             NotificationManager::instance().notifyWarning(
-                "Lead Mode",
-                "Cannot switch mode while focused on a subagent.",
+                "Lead Purpose",
+                "Cannot switch purpose while focused on a subagent.",
                 std::chrono::milliseconds(1500));
             return true;
           }
           if (agent->isRunning() || agent->isBooting()) {
             NotificationManager::instance().notifyWarning(
-                "Lead Mode",
+                "Lead Purpose",
                 "Lead agent is busy. Cancel or wait before switching.",
                 std::chrono::milliseconds(1500));
             return true;
@@ -4798,7 +4911,7 @@ ftxui::Component TuiState::root() {
       }
 
       NotificationManager::instance().notifyInfo(
-          "Lead Mode", "Lead persona: " + resolvePersonaTitle(next),
+          "Lead Purpose", "Lead persona: " + resolvePersonaTitle(next),
           std::chrono::milliseconds(1500));
       return true;
     }
@@ -5002,7 +5115,7 @@ ftxui::Component TuiState::root() {
 
     // Ctrl+O - Cycle work-lane tabs
     if (event == ftxui::Event::Special("\x0F")) {
-      const bool hasPlan = plan_lane_model_ && plan_lane_model_->visible;
+      const bool hasPlan = false;
       const bool hasTodo = todo_lane_model_ && todo_lane_model_->visible;
       const bool hasContext =
           context_lane_model_ && context_lane_model_->visible;
@@ -5117,14 +5230,6 @@ ftxui::Component TuiState::root() {
   return root_component_;
 }
 
-std::size_t BuildFocusedChatLiveMeasurementSignature(
-    const StreamStateManager &stream_state,
-    const std::string &focused_agent_id, const std::string &thread_id,
-    const std::unordered_set<std::string> &persisted_tool_call_ids) {
-  return buildFocusedChatLiveMeasurementSignature(
-      stream_state, focused_agent_id, thread_id, persisted_tool_call_ids);
-}
-
 // ---------------------------------------------------------------------------
 // Loading-state plumbing (used by startup pane, /new, /benchmark, etc.).
 // All accessors are mutex-guarded so background tasks can poke them safely.
@@ -5229,14 +5334,16 @@ void TuiState::submitPrompt(std::string text,
       lead = thread_.leadPersona;
     } else if (harness_) {
       const auto &cfg = harness_->getConfig();
-      lead = cfg.defaultLeadPersona.empty() ? std::string("aster")
+      lead = cfg.defaultLeadPersona.empty() ? std::string("lead")
                                             : cfg.defaultLeadPersona;
     } else {
-      lead = "aster";
+      lead = "lead";
     }
     harness_->newThread({}, cwd, lead);
     harness_->setCurrentThreadPermissionMode(thread_.permissionMode);
     syncCurrentThreadMetadataFromHarness(true);
+    appendOptimisticUserTurn(text, images);
+    notifyChatTranscriptChanged();
     setViewMode(ViewMode::Chat);
   }
   harness_->send(text, images);
@@ -5248,6 +5355,9 @@ void TuiState::applyThreadOpened(const shared::ThreadMetadata &metadata,
   thread_ = metadata;
   if (!focused_agent_id.empty()) {
     focused_agent_id_ = focused_agent_id;
+    if (harness_ && harness_->focusedAgentId() != focused_agent_id_) {
+      harness_->setFocusedAgent(focused_agent_id_);
+    }
   }
   if (preserve_live_state) {
     syncCurrentThreadMetadataFromHarness(true);
@@ -5337,7 +5447,7 @@ void TuiState::initModels() {
     input_model_->cursor = &cursor_;
   }
   if (!agent_strip_model_) agent_strip_model_ = std::make_shared<AgentStripModel>();
-  if (!plan_lane_model_) plan_lane_model_ = std::make_shared<PlanLaneModel>();
+  plan_lane_model_.reset();
   if (!todo_lane_model_) todo_lane_model_ = std::make_shared<TodoLaneModel>();
   if (!context_lane_model_) context_lane_model_ = std::make_shared<ContextLaneModel>();
 }

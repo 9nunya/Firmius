@@ -59,16 +59,17 @@ ftxui::Component ModelPickerModal::create(TuiState &state) {
     }
   };
 
-  auto refresh = [entries, isLoading, fetchingProviders, rebuildFiltered]() {
-    auto &h = firmius::core::Harness::instance();
-    *entries = BuildModelPickerEntries(h.cachedModelsSnapshot(), true);
-    *isLoading = !h.isModelsLoaded();
-    *fetchingProviders = h.listProvidersFetchingModels();
+  auto refresh = [entries, isLoading, fetchingProviders, rebuildFiltered,
+                  &state]() {
+    const auto snapshot = state.modelSnapshot();
+    *entries = BuildModelPickerEntries(snapshot.models, true);
+    *isLoading = snapshot.loading;
+    *fetchingProviders = snapshot.fetching_providers;
     rebuildFiltered();
   };
 
   refresh();
-  state.runBackgroundTask([]() { firmius::core::Harness::instance().listAllModels(); });
+  state.refreshModelSnapshot([refresh]() { refresh(); });
 
   int subId = firmius::core::Harness::instance().subscribe(
       [entries, isLoading, fetchingProviders, rebuildFiltered, modalActive,
@@ -79,19 +80,26 @@ ftxui::Component ModelPickerModal::create(TuiState &state) {
             std::holds_alternative<firmius::shared::ProviderModelsFetchFinished>(
                 event) ||
             std::holds_alternative<firmius::shared::ModelDiscovered>(event)) {
-          state.deferUiMutation([entries, isLoading, fetchingProviders,
-                                 rebuildFiltered, modalActive]() {
-            if (!modalActive->load(std::memory_order_relaxed)) {
-              return;
-            }
-            auto &h = firmius::core::Harness::instance();
-            *entries = BuildModelPickerEntries(h.cachedModelsSnapshot(), true);
-            *isLoading = !h.isModelsLoaded();
-            *fetchingProviders = h.listProvidersFetchingModels();
-            rebuildFiltered();
-          });
+          state.refreshModelSnapshot(
+              [entries, isLoading, fetchingProviders, rebuildFiltered,
+               modalActive, &state]() {
+                if (!modalActive->load(std::memory_order_relaxed)) {
+                  return;
+                }
+                const auto snapshot = state.modelSnapshot();
+                *entries = BuildModelPickerEntries(snapshot.models, true);
+                *isLoading = snapshot.loading;
+                *fetchingProviders = snapshot.fetching_providers;
+                rebuildFiltered();
+              });
         }
       });
+
+  // Bind unsubscribe to the modal lifecycle (see TuiState::pushModalTeardown).
+  state.pushModalTeardown([subId, modalActive]() {
+    modalActive->store(false, std::memory_order_relaxed);
+    firmius::core::Harness::instance().unsubscribe(subId);
+  });
 
   auto listContent = ftxui::Renderer([entries, filteredIndices, selected,
                                       rowBoxes, visibleStart, visibleCount]() {

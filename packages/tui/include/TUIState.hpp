@@ -8,9 +8,11 @@
 #include "StreamStateManager.hpp"
 #include "WorkPanelLayout.hpp"
 #include "components/AgentStrip.hpp"
+#include "components/ChatMeasurementSignature.hpp"
 #include "components/ContextLane.hpp"
 #include "components/TodoLane.hpp"
 #include "utils/BackgroundTaskPool.hpp"
+#include "utils/UiTaskScheduler.hpp"
 #include "utils/UiActions.hpp"
 #include "utils/TranscriptExpansion.hpp"
 #include <atomic>
@@ -21,6 +23,7 @@
 #include <ftxui/component/screen_interactive.hpp>
 #include <ftxui/component/captured_mouse.hpp>
 #include <ftxui/screen/box.hpp>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -43,6 +46,42 @@ struct TitleBarModel;
 struct StatusBarModel;
 struct InputBarModel;
 struct PlanLaneModel;
+
+struct UiThreadListEntry {
+  shared::ThreadMetadata metadata;
+  int agent_count = 0;
+  bool locked_by_other = false;
+  int locked_pid = -1;
+};
+
+struct UiThreadListSnapshot {
+  std::vector<UiThreadListEntry> entries;
+  bool loading = false;
+  bool show_all = false;
+  std::string scope_cwd;
+  std::uint64_t generation = 0;
+};
+
+struct UiProviderRow {
+  std::string id;
+  bool is_custom = false;
+  std::string kind;
+  bool enabled = true;
+};
+
+struct UiProviderSnapshot {
+  std::vector<UiProviderRow> rows;
+  bool loading = false;
+  std::uint64_t generation = 0;
+};
+
+struct UiModelSnapshot {
+  std::vector<shared::ModelInfo> models;
+  std::vector<std::string> fetching_providers;
+  bool loading = false;
+  bool loaded = false;
+  std::uint64_t generation = 0;
+};
 
 enum class RefreshFlags : unsigned int {
   None = 0,
@@ -82,6 +121,7 @@ struct TuiProfilingStats {
   std::atomic<int64_t> chat_window_rebuild_ns{0};
   std::atomic<uint64_t> frame_render_count{0};
   std::atomic<int64_t> frame_render_ns{0};
+  std::atomic<uint64_t> last_frame_rendered_at_ms{0};
 
   // Modern RAF monitoring
   std::atomic<uint64_t> raf_state_count{0};
@@ -102,12 +142,8 @@ void noteTuiThreadChanged(std::chrono::nanoseconds elapsed);
 void noteTuiRebuildToolCalls(std::chrono::nanoseconds elapsed);
 void noteTuiChatWindowRebuild(std::chrono::nanoseconds elapsed);
 void noteTuiFrameRendered(std::chrono::nanoseconds elapsed);
+std::uint64_t tuiLastFrameRenderedAtMs();
 std::string tuiProfilingSummaryText();
-
-std::size_t BuildFocusedChatLiveMeasurementSignature(
-    const StreamStateManager &stream_state, const std::string &focused_agent_id,
-    const std::string &thread_id,
-    const std::unordered_set<std::string> &persisted_tool_call_ids);
 
 class TuiState {
 public:
@@ -156,11 +192,20 @@ public:
   void popModalImmediate();
   void replaceModalDirect(ftxui::Component modal);
   void clearModals();
+  // Register a teardown callback bound to the modal currently on top of the
+  // stack. Invoked LIFO on popModalImmediate / replaceModalDirect /
+  // clearModals / shutdown — any modal dismissal path. Modals that subscribe
+  // to Harness events or capture `&state` by reference must register here so
+  // the subscription can't outlive the modal's captures and crash when the
+  // harness fires into a freed lambda.
+  void pushModalTeardown(std::function<void()> teardown);
   void deferUiMutation(std::function<void()> action);
   void runBackgroundTask(std::function<void()> action);
   void postAction(UiAction action);
   void submitPrompt(std::string text,
                     std::vector<firmius::shared::ImageContent> images = {});
+  void queuePromptSend(std::string text,
+                       std::vector<firmius::shared::ImageContent> images = {});
   void requestThreadOpen(std::optional<std::string> thread_id,
                          bool resume_last = false,
                          std::string loading_message = "",
@@ -227,6 +272,15 @@ public:
   // next Draw() without forcing expensive sibling surfaces to re-render.
   void requestRender(RefreshFlags flags);
   uint64_t renderGeneration(RefreshFlags flag) const;
+  UiThreadListSnapshot threadListSnapshot() const;
+  UiProviderSnapshot providerSnapshot() const;
+  UiModelSnapshot modelSnapshot() const;
+  void refreshThreadListSnapshot(std::string cwd, bool show_all,
+                                 std::function<void()> on_applied = {});
+  void refreshProviderSnapshot(std::function<void()> on_applied = {});
+  void refreshModelSnapshot(std::function<void()> on_applied = {});
+  std::unordered_map<std::string, UiTaskScheduler::Telemetry>
+  uiTaskTelemetrySnapshot() const;
 
   // Kept public for backwards unit test compatibility (#define private public)
   firmius::core::Harness *harness_ = nullptr;
@@ -255,6 +309,12 @@ public:
   ftxui::Component root_component_;
 
   std::vector<ftxui::Component> modals_;
+  // Parallel stack: modal_teardowns_[i] runs when modals_[i] is dismissed.
+  std::vector<std::function<void()>> modal_teardowns_;
+  // A modal's create() body runs before the component reaches the stack, so a
+  // teardown registered from inside create() is stashed here and consumed by
+  // the next openModalDirect/replaceModalDirect call.
+  std::function<void()> pending_modal_teardown_;
   ftxui::Component modal_container_;
   std::vector<std::function<void()>> deferred_ui_mutations_;
 
@@ -268,7 +328,7 @@ public:
   bool pending_modal_clear_ = false;
   int last_terminal_width_ = 0;
   int last_terminal_height_ = 0;
-  WorkPanelTab selected_work_panel_tab_ = WorkPanelTab::Plan;
+  WorkPanelTab selected_work_panel_tab_ = WorkPanelTab::Todo;
   ftxui::Box agent_strip_separator_box_;
   ftxui::Box work_panel_separator_box_;
 
@@ -306,6 +366,7 @@ public:
   float loading_progress_ = -1.0f;
   std::vector<std::jthread> background_ui_tasks_;
   std::unique_ptr<BackgroundTaskPool> background_task_pool_;
+  std::unique_ptr<UiTaskScheduler> ui_task_scheduler_;
   std::string loading_detail_;
   std::mutex background_ui_tasks_mutex_;
   mutable std::mutex loading_progress_mutex_;
@@ -359,6 +420,10 @@ public:
       pending_permission_responses_;
   std::vector<ftxui::Box> pending_permission_option_boxes_;
   int pending_permission_selected_ = 0;
+  mutable std::mutex ui_snapshot_mutex_;
+  UiThreadListSnapshot thread_list_snapshot_;
+  UiProviderSnapshot provider_snapshot_;
+  UiModelSnapshot model_snapshot_;
 
 private:
   TuiState();
@@ -376,6 +441,9 @@ private:
   void updateContextLaneModel();
   void updateTodoLaneModel();
   void scheduleQuotaRefresh(const std::string &providerId);
+  void appendOptimisticUserTurn(
+      const std::string &text,
+      const std::vector<firmius::shared::ImageContent> &images);
   void rebuildEditableUserMessages();
   void drainDeferredUiMutations();
   bool isEditModeSelection(uint64_t timestamp) const;

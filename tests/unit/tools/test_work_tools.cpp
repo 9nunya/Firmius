@@ -123,7 +123,7 @@ protected:
         ToolScope::ChunkReview};
     agent_.context_.history->threadId = threadId_;
     agent_.context_.environment.cwd = "/tmp/work";
-    agent_.context_.config.personaName = "aster";
+    agent_.context_.config.personaName = "lead";
     agent_.context_.identity.id = "lead-agent";
 
     registerTools();
@@ -215,15 +215,15 @@ protected:
                     std::vector<ToolScope> scopes,
                     const std::string &agentId) {
     if (persona == "lead") {
-      agent_.context_.config.personaName = "aster";
+      agent_.context_.config.personaName = "lead";
     } else if (persona == "executor") {
-      agent_.context_.config.personaName = "forge";
+      agent_.context_.config.personaName = "coder";
     } else if (persona == "auditor") {
-      agent_.context_.config.personaName = "witness";
+      agent_.context_.config.personaName = "reviewer";
     } else if (persona == "scout") {
-      agent_.context_.config.personaName = "glimmer";
+      agent_.context_.config.personaName = "explorer";
     } else if (persona == "worker") {
-      agent_.context_.config.personaName = "ember";
+      agent_.context_.config.personaName = "coder";
     } else {
       agent_.context_.config.personaName = persona;
     }

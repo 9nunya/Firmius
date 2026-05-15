@@ -1,11 +1,14 @@
 #include "commands/HooksCommand.hpp"
 
 #include "AgentRegistry.hpp"
+#include "NotificationManager.hpp"
+#include "TUIState.hpp"
 #include "agents/hooks/HookRegistry.hpp"
 #include "agents/hooks/HookState.hpp"
 #include "harness/Harness.hpp"
 #include "workflow/WorkflowLoader.hpp"
 
+#include <chrono>
 #include <iostream>
 
 namespace firmius::tui {
@@ -62,19 +65,49 @@ void printList() {
   if (!sawSlash) {
     std::cout << "- (none)\n";
   }
+
+  const std::string threadId = firmius::core::Harness::instance().currentThreadId();
+  if (!threadId.empty()) {
+    const auto recent =
+        firmius::core::hooks::HookRegistry::instance().recentActivity(threadId, 8);
+    std::cout << "\n## Recent Activity\n";
+    if (recent.empty()) {
+      std::cout << "- (none)\n";
+    } else {
+      for (const auto &record : recent) {
+        std::cout << "- " << record.statusLine << "\n";
+      }
+    }
+  }
 }
 
 } // namespace
 
-void HooksCommand::execute(CommandCtx &, const std::vector<ParsedArg> &args) {
+void HooksCommand::execute(CommandCtx &ctx, const std::vector<ParsedArg> &args) {
   const std::string action =
       args.empty() || args[0].raw_value.empty() ? "list" : args[0].raw_value;
 
   if (action == "reload") {
     firmius::core::WorkflowLoader::instance().init();
     firmius::core::hooks::HookRegistry::instance().reload();
-    std::cout << "Hooks reloaded. Registered event hooks: "
-              << firmius::core::hooks::HookRegistry::instance().size() << "\n";
+    const auto count = firmius::core::hooks::HookRegistry::instance().size();
+    // stdout is behind the FTXUI alt-screen; surface as a toast so the user
+    // actually sees the result.
+    NotificationManager::instance().notifyInfo(
+        "Hooks Reloaded",
+        "Registered event hooks: " + std::to_string(count),
+        std::chrono::milliseconds(2500));
+    std::cout << "Hooks reloaded. Registered event hooks: " << count << "\n";
+    return;
+  }
+
+  if (action == "list" || action.empty()) {
+    // Open the modal surface instead of writing to the alt-screen-swallowed
+    // stdout. This was the missing wire-up after the modal was authored:
+    // the command stayed on std::cout and the modal was never registered.
+    if (ctx.state) {
+      ctx.state->openModal("hooks");
+    }
     return;
   }
 

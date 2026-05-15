@@ -10,9 +10,17 @@ class ConfigurableOpenAIProvider : public BaseOpenAIProvider {
 public:
   ConfigurableOpenAIProvider(const std::string &id,
                              const shared::ProviderProfileConfig &profile);
+  std::unique_ptr<APIKeyWizard> beginConnectionWizard() override;
+  ModelInfo getModelInfo(const std::string &modelId) override;
+  bool isConfigured() const override;
+  std::optional<APIKeyAccount *>
+  getAvailableAccount(const std::optional<std::string> &modelId = std::nullopt)
+      override;
 
 protected:
   std::map<std::string, std::string> getHeaders() override;
+  std::map<std::string, std::string>
+  buildHeadersForApiKey(const std::string &apiKey) override;
   std::string getReasoningFieldName() const override;
   std::string getChatUrl() const override;
   std::string getModelsUrl() const override;
@@ -22,7 +30,9 @@ protected:
   std::vector<ModelInfo> listModels() override;
 
 private:
+  void applyModelOverrides(ModelInfo &model) const;
   shared::ProviderProfileConfig profile_;
+  mutable APIKeyAccount fallbackAccount_;
 };
 
 } // namespace firmius::provider

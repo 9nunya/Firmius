@@ -3,6 +3,7 @@
 
 #include "IBenchmark.hpp"
 #include "benchmarks/BenchmarkSession.hpp"
+#include "benchmarks/SWEBenchTaskSpec.hpp"
 #include <rapidjson/document.h>
 
 namespace firmius::core {
@@ -16,10 +17,18 @@ using namespace firmius::shared;
 class SWEBench : public shared::IBenchmark {
 public:
     explicit SWEBench(BenchmarkConfig config);
+    explicit SWEBench(BenchmarkConfig config, std::string benchmarkId,
+                      std::string datasetUrl, std::string datasetCacheKey);
     
     std::vector<std::string> listTasks() override;
     bool prepareTask(const std::string& taskId) override;
     BenchmarkResult runTask(const std::string& taskId) override;
+
+protected:
+    const rapidjson::Value* findTaskRow(const std::string& taskId);
+    SWEBenchTaskSpec requireTaskSpec(const std::string& taskId);
+    std::string buildEvaluationCommand(const SWEBenchTaskSpec& spec) const;
+    std::map<std::string, std::string> buildTestEnvironment(const SWEBenchTaskSpec& spec) const;
 
 private:
     /**
@@ -33,6 +42,9 @@ private:
     bool parseTestResults(const std::string& output, int& passed, int& failed, int& errors);
 
     BenchmarkSession session;
+    std::string benchmarkId_;
+    std::string datasetUrl_;
+    std::string datasetCacheKey_;
     rapidjson::Document dataset;
     bool datasetLoaded = false;
 };

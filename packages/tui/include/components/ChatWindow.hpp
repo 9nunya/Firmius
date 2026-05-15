@@ -3,6 +3,7 @@
 
 #include "Context.hpp"
 #include "Message.hpp"
+#include "components/ChatTranscriptPolicy.hpp"
 #include "components/TranscriptGrouping.hpp"
 #include "utils/ToolView.hpp"
 #include "utils/StringUtil.hpp"
@@ -38,89 +39,6 @@ using EditableModeEnabledGetter = std::function<bool()>;
 using EditableMessageSelectedGetter = std::function<bool(uint64_t)>;
 using EditableMessageClickHandler = std::function<void(uint64_t)>;
 
-inline bool ShouldRenderToolCallView(const shared::ToolCallView &view) {
-  return shared::ToolCallHasRenderableIdentity(view);
-}
-
-inline std::unordered_set<std::string>
-CollectToolCallIdsFromHistory(const shared::AgentHistory *history) {
-  std::unordered_set<std::string> ids;
-  if (!history) {
-    return ids;
-  }
-
-  for (const auto &turn : history->turns) {
-    for (const auto &msg : turn.messages) {
-      for (const auto &part : msg.content) {
-        if (auto *tc = std::get_if<shared::ToolCallContent>(&part)) {
-          if (!tc->id.empty()) {
-            ids.insert(tc->id);
-          }
-        } else if (auto *tr = std::get_if<shared::ToolResultContent>(&part)) {
-          if (!tr->toolCallId.empty()) {
-            ids.insert(tr->toolCallId);
-          }
-        }
-      }
-    }
-  }
-
-  return ids;
-}
-
-inline bool ShouldHideMessageInTranscript(const shared::Message &msg,
-                                          bool showInternalNudges,
-                                          const std::string &turnId = "") {
-  if (msg.visibility == shared::MessageVisibility::Internal) {
-    return !showInternalNudges;
-  }
-  if (msg.role != shared::Role::System) {
-    return false;
-  }
-  if (turnId.rfind("compaction-start-", 0) == 0 ||
-      turnId.rfind("compaction-summary-", 0) == 0 ||
-      turnId.rfind("compaction-end-", 0) == 0 ||
-      turnId.rfind("system-note-", 0) == 0) {
-    return false;
-  }
-  for (const auto &part : msg.content) {
-    if (const auto *notice = std::get_if<shared::NoticeContent>(&part)) {
-      if (notice->title == "Agent Cancelled") {
-        return true;
-      }
-      return false;
-    }
-    if (const auto *error = std::get_if<shared::ErrorContent>(&part)) {
-      if (error->errorName == "Agent Cancelled") {
-        return true;
-      }
-    }
-  }
-  return true;
-}
-
-inline ftxui::Element IndentAgentRow(const ftxui::Element &content,
-                                     int left_margin = 2) {
-  // Guard against a null Element being piped through `| ftxui::xflex`, which
-  // builds a `Flex` decorator with a null `children_[0]` and segfaults on
-  // SetBox during render.
-  ftxui::Element safe = content ? content : ftxui::text("");
-  if (left_margin <= 0) {
-    return safe;
-  }
-  return ftxui::hbox({ftxui::text(std::string(left_margin, ' ')),
-                      safe | ftxui::xflex}) |
-         ftxui::xflex;
-}
-
-inline bool ShouldRenderFocusedSubagentToolCall(
-    const TimelineEntry &entry, const shared::ToolCallView &view,
-    const std::string &focused_agent_id) {
-  return !focused_agent_id.empty() && entry.agentId == focused_agent_id &&
-         entry.kind == TimelineEntry::Kind::ToolCall &&
-         ShouldRenderToolCallView(view);
-}
-
 ftxui::Component ChatWindow(
     std::function<const shared::AgentHistory *()> history_getter,
     std::function<std::vector<ftxui::Element>()> live_rows_provider = nullptr,
@@ -134,8 +52,8 @@ ftxui::Component ChatWindow(
     std::function<std::size_t()> live_measurement_signature_getter = nullptr,
     std::function<bool()> show_internal_nudges_getter = nullptr,
     std::function<bool()> hide_errors_getter = nullptr,
-    EditableModeEnabledGetter editable_mode_enabled_getter = nullptr,
     std::function<bool()> show_turn_footers_getter = nullptr,
+    EditableModeEnabledGetter editable_mode_enabled_getter = nullptr,
     EditableMessageSelectedGetter editable_message_selected_getter = nullptr,
     EditableMessageClickHandler editable_message_click_handler = nullptr);
 

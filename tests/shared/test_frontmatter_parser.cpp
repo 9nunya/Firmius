@@ -12,8 +12,8 @@ TEST(FrontmatterParserTest, ParsesQuotedAndUnquotedScalars) {
       R"md(---
 name: lead
 title: "Lead Persona"
-description: 'Primary worker'
-work_role: "executor"
+description: 'Primary coder'
+work_role: "coder"
 ---
 Body text.
 )md",
@@ -22,9 +22,9 @@ Body text.
   EXPECT_EQ(FrontmatterParser::getString(doc, "name").value(), "lead");
   EXPECT_EQ(FrontmatterParser::getString(doc, "title").value(), "Lead Persona");
   EXPECT_EQ(FrontmatterParser::getString(doc, "description").value(),
-            "Primary worker");
+            "Primary coder");
   EXPECT_EQ(FrontmatterParser::getString(doc, "work_role").value(),
-            "executor");
+            "coder");
   EXPECT_EQ(doc.body, "Body text.\n");
 }
 
@@ -52,7 +52,7 @@ scopes: ["FilesystemRead", "Semantic"]
 TEST(FrontmatterParserTest, SupportsSingleQuotedArrayElements) {
   const auto doc = FrontmatterParser::parseMarkdown(
       R"md(---
-scopes: ['lead', 'executor']
+scopes: ['lead', 'coder']
 ---
 Body text.
 )md",
@@ -61,7 +61,7 @@ Body text.
   const auto scopes = FrontmatterParser::getStringArray(doc, "scopes");
   ASSERT_EQ(scopes.size(), 2u);
   EXPECT_EQ(scopes[0], "lead");
-  EXPECT_EQ(scopes[1], "executor");
+  EXPECT_EQ(scopes[1], "coder");
 }
 
 TEST(FrontmatterParserTest, RejectsMalformedArrays) {

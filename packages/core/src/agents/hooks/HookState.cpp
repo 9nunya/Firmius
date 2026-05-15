@@ -1,4 +1,5 @@
 #include "agents/hooks/HookState.hpp"
+#include "agents/hooks/HookRegistry.hpp"
 
 #include <rapidjson/document.h>
 #include <rapidjson/pointer.h>
@@ -371,6 +372,11 @@ bool HookState::writeJson(Scope scope, const std::string &path,
                           const std::string &valueJson,
                           const std::string &hookId) {
   std::lock_guard<std::mutex> lock(mu_);
+  if (!hookId.empty() &&
+      !HookRegistry::instance().isStateAccessAllowed(hookId, scopeName(scope),
+                                                     path)) {
+    return false;
+  }
   return applyBatchUnlocked({{scope, path, valueJson, /*append=*/false}},
                             hookId);
 }
@@ -379,6 +385,11 @@ bool HookState::appendJson(Scope scope, const std::string &path,
                            const std::string &valueJson,
                            const std::string &hookId) {
   std::lock_guard<std::mutex> lock(mu_);
+  if (!hookId.empty() &&
+      !HookRegistry::instance().isStateAccessAllowed(hookId, scopeName(scope),
+                                                     path)) {
+    return false;
+  }
   return applyBatchUnlocked({{scope, path, valueJson, /*append=*/true}},
                             hookId);
 }
@@ -386,6 +397,11 @@ bool HookState::appendJson(Scope scope, const std::string &path,
 bool HookState::deleteJson(Scope scope, const std::string &path,
                            const std::string &hookId) {
   std::lock_guard<std::mutex> lock(mu_);
+  if (!hookId.empty() &&
+      !HookRegistry::instance().isStateAccessAllowed(hookId, scopeName(scope),
+                                                     path)) {
+    return false;
+  }
   bool isAppend = false;
   const std::string ptrStr = toJsonPointer(path, isAppend);
   if (ptrStr.empty() || isAppend) return false;
@@ -452,6 +468,11 @@ bool HookState::applyBatchUnlocked(const std::vector<BatchWrite> &writes,
   std::map<ScopeStore *, bool> touched;
 
   for (const auto &w : writes) {
+    if (!hookId.empty() &&
+        !HookRegistry::instance().isStateAccessAllowed(
+            hookId, scopeName(w.scope), w.path)) {
+      return false;
+    }
     bool isAppend = w.append;
     std::string ptrStr = toJsonPointer(w.path, isAppend);
     if (ptrStr.empty()) return false;

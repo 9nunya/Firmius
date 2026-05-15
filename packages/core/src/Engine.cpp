@@ -13,13 +13,13 @@
 #include "persistence/HistoryEditor.hpp"
 #include "persistence/Journaler.hpp"
 #include "persistence/ThreadManager.hpp"
-#include "tools/WorkSupport.hpp"
 #include "providers/AntigravityProvider.hpp"
 #include "providers/ChutesProvider.hpp"
 #include "providers/CodexProvider.hpp"
 #include "providers/KimiProvider.hpp"
 #include "providers/KiloProvider.hpp"
 #include "providers/KiroProvider.hpp"
+#include "providers/LMStudioProvider.hpp"
 #include "providers/NanoGPTProvider.hpp"
 #include "providers/NvidiaProvider.hpp"
 #include "providers/OpenRouterProvider.hpp"
@@ -41,9 +41,7 @@
 #include "tools/ProcessTool.hpp"
 #include "tools/PythonExecuteTool.hpp"
 #include "tools/SkillLoadTool.hpp"
-#include "tools/TodoWriteTool.hpp"
 #include "tools/WebTool.hpp"
-#include "tools/WorkTool.hpp"
 #include "lsp/LspServerManager.hpp"
 #include "utils/HistoryMetrics.hpp"
 #include "utils/StringUtil.hpp"
@@ -416,6 +414,8 @@ AgentOutcome makeFailedOutcome(const std::string &message) {
   return AgentOutcome{AgentOutcome::Kind::Failed, message};
 }
 
+using ArtifactSnapshot =
+    std::unordered_map<std::string, shared::ThreadArtifactMetadata>;
 void releaseOwnedChunksForTerminalAgent(const std::shared_ptr<IAgent> &agent,
                                         const AgentOutcome &outcome) {
   if (!agent || !agent->getContext().history) {
@@ -428,44 +428,8 @@ void releaseOwnedChunksForTerminalAgent(const std::shared_ptr<IAgent> &agent,
     return;
   }
 
-  ThreadManager tm(ThreadManager::defaultBasePath());
-  for (auto plan : tm.listPlans(threadId)) {
-    bool changed = false;
-    for (auto &chunk : plan.chunks) {
-      if (chunk.assignedAgentId != agentId) {
-        continue;
-      }
-
-      const auto originalChunk = chunk;
-      chunk.assignedAgentId.clear();
-      if ((outcome.kind == AgentOutcome::Kind::Cancelled ||
-           outcome.kind == AgentOutcome::Kind::Failed) &&
-          chunk.status == WorkChunkStatus::InProgress) {
-        chunk.status = WorkChunkStatus::Ready;
-      }
-      chunk.updatedAt = work::nowEpochMs();
-      changed = true;
-
-      work::emitWorkEvent(shared::ChunkUpdated{
-          threadId, plan.id, chunk});
-      work::emitWorkEvent(shared::ChunkAssigned{
-          threadId, plan.id, chunk.id, chunk.assignedAgentId, chunk});
-      if (originalChunk.status != chunk.status) {
-        work::emitWorkEvent(shared::ChunkStatusChanged{
-            threadId, plan.id, chunk.id, originalChunk.status, chunk.status,
-            chunk});
-      }
-    }
-
-    if (changed) {
-      tm.updatePlan(threadId, plan);
-      work::emitWorkEvent(shared::PlanUpdated{threadId, plan});
-    }
-  }
+  (void)outcome;
 }
-
-using ArtifactSnapshot =
-    std::unordered_map<std::string, shared::ThreadArtifactMetadata>;
 
 ArtifactSnapshot collectArtifactSnapshot(const std::string &threadId,
                                          const std::string &agentId) {
@@ -696,12 +660,6 @@ Engine::Engine() {
   toolRegistry.registerToolFactory(
       "Skill", []() { return std::make_unique<SkillLoadTool>(); });
   toolRegistry.registerToolFactory(
-      "Work", []() { return std::make_unique<WorkTool>(); });
-  toolRegistry.registerToolFactory(
-      "Fleet", []() { return std::make_unique<FleetTool>(); });
-  toolRegistry.registerToolFactory(
-      "Todo", []() { return std::make_unique<TodoWriteTool>(); });
-  toolRegistry.registerToolFactory(
       "Artifacts", []() { return std::make_unique<ArtifactsTool>(); });
   toolRegistry.registerToolFactory(
       "Memory", []() { return std::make_unique<MemoryRecallTool>(); });
@@ -746,12 +704,16 @@ void Engine::initProviders() {
    reg.registerProviderFactory("kilo", []() {
      return std::make_shared<firmius::provider::KiloProvider>();
    });
-   reg.registerProviderFactory("kiro", []() {
+  reg.registerProviderFactory("kiro", []() {
      return std::make_shared<firmius::provider::KiroProvider>();
    });
+  reg.registerProviderFactory("lmstudio", []() {
+     return std::make_shared<firmius::provider::LMStudioProvider>();
+   });
+  reg.reloadConfigProviders(shared::ConfigLoader::instance().getConfig().providers);
   }
 
-void Engine::reap() { std::lock_guard<std::mutex> lock(listenerMutex); }
+void Engine::reap() { std::lock_guard<std::mutex> lock(fleetMutex); }
 
 std::string Engine::summonAgent(
     const std::string &threadId, const std::string &personaName,
@@ -777,7 +739,7 @@ std::string Engine::summonAgent(
   }
 
   {
-    std::lock_guard<std::mutex> lock(listenerMutex);
+    std::lock_guard<std::mutex> lock(fleetMutex);
     fleet.emplace_back([this, threadId, agentId, personaName, task, images,
                         prom, persistHistory, parentId, friendlyName, title,
                         providerId, modelId, variantName, overrides]() {
@@ -808,7 +770,8 @@ std::string Engine::summonAgent(
         AgentContext ctx;
         ctx.identity.id = agentId;
         ctx.identity.parentId = parentId;
-        ctx.identity.friendlyName = parentId.empty() ? "aster" : friendlyName;
+        ctx.identity.friendlyName =
+            parentId.empty() ? effectivePersonaName : friendlyName;
 
         const auto &userCfg = shared::ConfigLoader::instance().getConfig();
         ctx.config.providerId =
@@ -882,8 +845,15 @@ std::string Engine::summonAgent(
         agent->setBooting(true);
         AgentRegistry::instance().registerAgent(agentId, agent);
 
-        // Pre-populate the initial history so UI fetches a complete snapshot
-        agent->bootstrapHistory(task, images);
+        // Pre-populate the initial history so UI fetches a complete snapshot.
+        // We only seed the system turn here — the user-task turn is appended
+        // by Agent::runImpl below via its own bootstrapHistory call. Passing
+        // `task` + `images` here too caused runImpl to re-append the same
+        // user-task turn a second time (visible in the transcript as a
+        // phantom duplicate "> hai" row on the first prompt of every new
+        // thread, and written twice to the journal as user-task-N and
+        // user-task-N+1).
+        agent->bootstrapHistory(std::nullopt, {});
 
         // 2. Initialize host
         std::string actualHostId = agent->getHost()->init();
@@ -902,6 +872,14 @@ std::string Engine::summonAgent(
         broadcast(AgentSpawned{agentId, personaName, parentId,
                                agent->getContext().identity.friendlyName,
                                agentTitle, persistHistory});
+
+        const bool idle_materialization = task.empty() && images.empty();
+        if (idle_materialization) {
+          agent->setBooting(false);
+          agent->getMutableContext().state.currentStatus = AgentStatus::Idle;
+          prom->set_value(makeOutcome(agent, ""));
+          return;
+        }
 
         // 3. Execution
         runStartArtifacts = collectArtifactSnapshot(threadId, agentId);
@@ -1005,7 +983,8 @@ std::string Engine::resumeAgent(const std::string &threadId,
   AgentContext ctx;
   ctx.identity.id = agentId;
   ctx.identity.parentId = parentId;
-  ctx.identity.friendlyName = parentId.empty() ? "aster" : friendlyName;
+  ctx.identity.friendlyName =
+      parentId.empty() ? effectivePersonaName : friendlyName;
   ctx.identity.name = persona.name;
   ctx.identity.role = title.empty() ? persona.title : title;
   const auto &userCfg = shared::ConfigLoader::instance().getConfig();
@@ -1068,7 +1047,7 @@ std::string Engine::resumeAgent(const std::string &threadId,
   AgentRegistry::instance().registerAgent(agentId, agent);
 
   {
-    std::lock_guard<std::mutex> lock(listenerMutex);
+    std::lock_guard<std::mutex> lock(fleetMutex);
     fleet.emplace_back([this, threadId, agentId, personaName, parentId, title,
                         persistHistory]() {
       try {
@@ -1282,6 +1261,8 @@ void Engine::handleStreamEvent(
   } else if (auto *tc = std::get_if<ToolCall>(&ev)) {
     broadcast(
         AgentToolCall{agentId, tc->id, tc->name, tc->args, parentId});
+  } else if (auto *am = std::get_if<AgentMetrics>(&ev)) {
+    broadcast(AgentMetricsStreamed{agentId, *am, parentId});
   } else if (auto *tc = std::get_if<AgentTurnCompleted>(&ev)) {
     broadcast(*tc);
   } else if (auto *fe = std::get_if<AgentFileEdited>(&ev)) {
@@ -2007,13 +1988,17 @@ void Engine::shutdown() {
       cancelAgentRuntime(agent);
     }
   }
+
+  std::vector<std::jthread> taskThreads;
   {
     std::lock_guard<std::mutex> lock(taskThreadsMutex_);
-    taskThreads_.clear();
+    taskThreads.swap(taskThreads_);
   }
+
+  std::vector<std::jthread> fleetThreads;
   {
-    std::lock_guard<std::mutex> lock(listenerMutex);
-    fleet.clear();
+    std::lock_guard<std::mutex> lock(fleetMutex);
+    fleetThreads.swap(fleet);
   }
 }
 

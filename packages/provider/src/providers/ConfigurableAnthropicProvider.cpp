@@ -84,10 +84,59 @@ std::string mergeJsonObjectStrings(const std::string &baseJson,
 
 ConfigurableAnthropicProvider::ConfigurableAnthropicProvider(
     const std::string &id, const shared::ProviderProfileConfig &profile)
-    : BaseAnthropicProvider(id, profile.baseUrl, ""), profile_(profile) {}
+    : BaseAnthropicProvider(id, profile.baseUrl, ""), profile_(profile) {
+  fallbackAccount_.identifier = "default";
+  fallbackAccount_.keyPrefix = "cfg";
+  fallbackAccount_.apiKey = profile_.defaultApiKey;
+}
+
+std::unique_ptr<APIKeyWizard>
+ConfigurableAnthropicProvider::beginConnectionWizard() {
+  if (profile_.authMode == "none") {
+    return nullptr;
+  }
+  return BaseAnthropicProvider::beginConnectionWizard();
+}
+
+bool ConfigurableAnthropicProvider::isConfigured() const {
+  if (profile_.authMode == "none") {
+    return true;
+  }
+  if (!profile_.defaultApiKey.empty()) {
+    return true;
+  }
+  if (profile_.allowMissingApiKey) {
+    return true;
+  }
+  return BaseAnthropicProvider::isConfigured();
+}
+
+std::optional<APIKeyAccount *>
+ConfigurableAnthropicProvider::getAvailableAccount(
+    const std::optional<std::string> &modelId) {
+  auto baseAccount = BaseAnthropicProvider::getAvailableAccount(modelId);
+  if (baseAccount.has_value()) {
+    return baseAccount;
+  }
+  if (profile_.authMode == "none" || profile_.allowMissingApiKey) {
+    fallbackAccount_.apiKey.clear();
+    return &fallbackAccount_;
+  }
+  if (!profile_.defaultApiKey.empty()) {
+    fallbackAccount_.apiKey = profile_.defaultApiKey;
+    return &fallbackAccount_;
+  }
+  return std::nullopt;
+}
 
 std::map<std::string, std::string> ConfigurableAnthropicProvider::getHeaders() {
   auto headers = BaseAnthropicProvider::getHeaders();
+  if (profile_.authMode == "none" || profile_.allowMissingApiKey) {
+    headers.erase("x-api-key");
+  } else if (!profile_.defaultApiKey.empty() &&
+             headers["x-api-key"].empty()) {
+    headers["x-api-key"] = profile_.defaultApiKey;
+  }
   headers["anthropic-version"] = profile_.anthropicVersion.empty()
                                       ? "2023-06-01"
                                       : profile_.anthropicVersion;
@@ -160,29 +209,65 @@ std::vector<ModelInfo> ConfigurableAnthropicProvider::listModels() {
       model.id = item["id"].GetString();
       model.provider = getId();
       model.modalities = {"text"};
+      applyModelOverrides(model);
       models.push_back(model);
     }
   }
 
-  for (auto &model : models) {
-    auto it = profile_.modelVariants.find(model.id);
-    if (it == profile_.modelVariants.end()) {
+  for (const auto &[modelId, cfg] : profile_.modelVariants) {
+    auto it = std::find_if(models.begin(), models.end(),
+                           [&](const ModelInfo &model) {
+                             return model.id == modelId;
+                           });
+    if (it != models.end()) {
       continue;
     }
-
-    model.variants.clear();
-    for (const auto &[variantName, variantConfig] : it->second.variants) {
-      if (variantName.empty()) {
-        continue;
-      }
-      ModelVariant variant;
-      variant.variantName = variantName;
-      variant.extraMetadataJson = variantConfig.requestJson;
-      model.variants.push_back(variant);
-    }
+    ModelInfo model;
+    model.id = modelId;
+    model.provider = getId();
+    model.modalities = {"text"};
+    applyModelOverrides(model);
+    models.push_back(std::move(model));
   }
 
   return models;
+}
+
+ModelInfo ConfigurableAnthropicProvider::getModelInfo(
+    const std::string &modelId) {
+  auto model = BaseAnthropicProvider::getModelInfo(modelId);
+  applyModelOverrides(model);
+  return model;
+}
+
+void ConfigurableAnthropicProvider::applyModelOverrides(ModelInfo &model) const {
+  auto it = profile_.modelVariants.find(model.id);
+  if (it == profile_.modelVariants.end()) {
+    return;
+  }
+  if (it->second.overrideContextWindow) {
+    model.contextWindow = it->second.contextWindow;
+  }
+  if (it->second.overrideMaxOutputTokens) {
+    model.maxOutputTokens = it->second.maxOutputTokens;
+  }
+  if (it->second.overrideModalities) {
+    model.modalities = it->second.modalities;
+  }
+  if (it->second.overrideSupportsReasoning) {
+    model.supportsReasoning = it->second.supportsReasoning;
+  }
+
+  model.variants.clear();
+  for (const auto &[variantName, variantConfig] : it->second.variants) {
+    if (variantName.empty()) {
+      continue;
+    }
+    ModelVariant variant;
+    variant.variantName = variantName;
+    variant.extraMetadataJson = variantConfig.requestJson;
+    model.variants.push_back(variant);
+  }
 }
 
 } // namespace firmius::provider

@@ -81,21 +81,44 @@ std::string stringField(const rapidjson::Value &input, const char *key) {
 
 shared::ToolMetadata ArtifactsTool::getMetadata() const {
   return {"Artifacts",
-          "Artifact operations. Use action Write, Read, or List.",
+          R"(Artifact operations for writing, reading, and listing durable thread artifacts.
+
+USAGE GUIDANCE:
+- Use Write to persist generated outputs that should be referenced later (notes, reports, snapshots, generated docs, etc.).
+- Use Read to retrieve a specific artifact by reference or selector.
+- Use List to discover available artifacts for the current thread.
+- Artifact references are stable handles; prefer them over pasting huge blobs repeatedly into chat.
+
+ACTIONS:
+- Write: create/update an artifact.
+- Read: retrieve artifact content and metadata.
+- List: enumerate artifacts in the current thread context.
+)",
           shared::ToolScope::Semantic};
 }
 
 std::shared_ptr<shared::JSONSchema> ArtifactsTool::getSchema() const {
   return shared::zObject({
       {"action", shared::zEnum({"Write", "Read", "List"})
-                     ->describe("Artifact operation to execute")},
-      {"name", shared::zString()->setOptional()},
-      {"reference", shared::zString()->setOptional()},
-      {"content", shared::zString()->setOptional()},
-      {"kind", shared::zString()->setOptional()},
-      {"description", shared::zString()->setOptional()},
-      {"owner_friendly_name", shared::zString()->setOptional()},
-      {"owner_agent_id", shared::zString()->setOptional()},
+                     ->describe(
+                         "Artifact operation to execute.\n\n"
+                         "- Write: create or update an artifact\n"
+                         "- Read: fetch one artifact by selector/reference\n"
+                         "- List: enumerate artifacts")},
+      {"name", shared::zString()->setOptional()->describe(
+          "Artifact filename / logical name. Used by Write, and can also help select an artifact for Read.")},
+      {"reference", shared::zString()->setOptional()->describe(
+          "Artifact reference handle, typically in @artifact:owner/name form. Preferred selector for Read.")},
+      {"content", shared::zString()->setOptional()->describe(
+          "Artifact body for Write. Required for Write.")},
+      {"kind", shared::zString()->setOptional()->describe(
+          "Optional artifact kind/category for Write (for example report, note, transcript, snapshot).")},
+      {"description", shared::zString()->setOptional()->describe(
+          "Optional human-readable description for Write.")},
+      {"owner_friendly_name", shared::zString()->setOptional()->describe(
+          "Optional owner selector for Read when resolving an artifact by friendly name.")},
+      {"owner_agent_id", shared::zString()->setOptional()->describe(
+          "Optional owner selector for Read when resolving an artifact by exact agent id.")},
   });
 }
 

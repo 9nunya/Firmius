@@ -34,7 +34,13 @@ parseSkillSelector(const std::string &rawWhat) {
 
 shared::ToolMetadata SkillLoadTool::getMetadata() const {
   return {"Skill",
-          "Load a skill entrypoint or nested skill file from ~/.agents/skills",
+          R"(Load a skill entrypoint or nested skill file from ~/.agents/skills.
+
+USAGE GUIDANCE:
+- Use this when you need the literal contents of a reusable skill prompt/file.
+- Pass either a bare skill id to load the default entry file, or a nested selector to load a specific file under that skill root.
+- Nested paths must stay within the skill root; traversal outside the root is rejected.
+)",
           shared::ToolScope::Semantic};
 }
 
@@ -42,7 +48,11 @@ std::shared_ptr<shared::JSONSchema> SkillLoadTool::getSchema() const {
   return shared::zObject(
              {{"what",
                shared::zString()->describe(
-                   "Skill selector: '<skill_id>' or '<skill_id>/path/to/file'")}})
+                   "Skill selector.\n\n"
+                   "Accepted forms:\n"
+                   "- '<skill_id>' to load the skill's default entry file\n"
+                   "- '<skill_id>/path/to/file' to load a nested file under that skill root\n\n"
+                   "The nested path must be relative and must stay within the skill root; absolute paths and '..' traversal are rejected.")}})
       ->required({"what"});
 }
 

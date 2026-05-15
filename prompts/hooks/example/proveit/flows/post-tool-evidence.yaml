@@ -1,0 +1,15 @@
+id: proveit.flow.post-tool-evidence
+description: |
+  After each tool call, append a compact evidence entry so stop-time
+  validation can judge whether the final answer is actually supported.
+
+trigger:
+  on_event: post_tool_use
+  match:
+    state.thread.proveit.state: { equals: open }
+    state.thread.proveit.id: { present: true }
+
+action:
+  kind: script
+  language: luau
+  script_file: ../scripts/evidence_collector.lua

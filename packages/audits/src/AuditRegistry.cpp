@@ -11,10 +11,12 @@
 #include "audits/ContextBudgetAudit.hpp"
 #include "audits/EditToolAudit.hpp"
 #include "audits/EditHistoryAudit.hpp"
+#include "audits/DaemonRuntimeIsolationAudit.hpp"
 #include "audits/HarnessChaosAudit.hpp"
 #include "audits/OAuthWizardAudit.hpp"
 #include "audits/P15Audit.hpp"
 #include "audits/PersistenceStressAudit.hpp"
+#include "audits/PromisesAudit.hpp"
 #include "audits/ProviderAudit.hpp"
 #include "audits/ProviderStreamDebugAudit.hpp"
 #include "audits/QwenProviderAudit.hpp"
@@ -23,6 +25,7 @@
 #include "audits/QwenQuotaAudit.hpp"
 #include "audits/SubagentStressAudit.hpp"
 #include "audits/TuiRuntimeStressAudit.hpp"
+#include "audits/WelcomeChatRefreshAudit.hpp"
 #include "audits/WorkflowsAudit.hpp"
 #include "audits/ResumeTodoAudit.hpp"
 #include "audits/WebFetchAudit.hpp"
@@ -39,18 +42,21 @@ std::vector<std::unique_ptr<shared::IAudit>> createAudits() {
     audits.push_back(std::make_unique<PersistenceStressAudit>());
     audits.push_back(std::make_unique<SubagentStressAudit>());
     audits.push_back(std::make_unique<TuiRuntimeStressAudit>());
+    audits.push_back(std::make_unique<WelcomeChatRefreshAudit>());
     audits.push_back(std::make_unique<AntigravityProviderAudit>());
     audits.push_back(std::make_unique<AntigravityQuotaAudit>());
     audits.push_back(std::make_unique<CodexProviderAudit>());
     audits.push_back(std::make_unique<ContextBudgetAudit>());
     audits.push_back(std::make_unique<EditToolAudit>());
     audits.push_back(std::make_unique<EditHistoryAudit>());
+    audits.push_back(std::make_unique<DaemonRuntimeIsolationAudit>());
     audits.push_back(std::make_unique<CodexQuotaAudit>());
     audits.push_back(std::make_unique<OpenRouterQuotaAudit>());
     audits.push_back(std::make_unique<QwenProviderAudit>());
     audits.push_back(std::make_unique<QwenQuotaAudit>());
     audits.push_back(std::make_unique<HarnessChaosAudit>());
     audits.push_back(std::make_unique<OAuthWizardAudit>());
+    audits.push_back(std::make_unique<PromisesAudit>());
     audits.push_back(std::make_unique<WorkflowsAudit>());
     audits.push_back(std::make_unique<ProviderStreamDebugAudit>());
     audits.push_back(std::make_unique<LoopCancellationAudit>());

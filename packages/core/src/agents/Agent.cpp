@@ -44,6 +44,8 @@
 
 namespace firmius::core {
 
+using namespace firmius::shared;
+
 namespace {
 constexpr std::uint32_t kMissingToolCallIndex =
     std::numeric_limits<std::uint32_t>::max();
@@ -934,42 +936,6 @@ std::string buildPlanAndTodoSnapshot(const AgentContext &context) {
   }
 
   std::ostringstream state;
-  auto planStatusLabel = [](PlanStatus status) -> const char * {
-    switch (status) {
-    case PlanStatus::Draft:
-      return "Draft";
-    case PlanStatus::Active:
-      return "Active";
-    case PlanStatus::Paused:
-      return "Paused";
-    case PlanStatus::Done:
-      return "Done";
-    case PlanStatus::Abandoned:
-      return "Abandoned";
-    }
-    return "Unknown";
-  };
-  auto chunkStatusLabel = [](WorkChunkStatus status) -> const char * {
-    switch (status) {
-    case WorkChunkStatus::Ready:
-      return "Ready";
-    case WorkChunkStatus::InProgress:
-      return "InProgress";
-    case WorkChunkStatus::Implemented:
-      return "Implemented";
-    case WorkChunkStatus::Verifying:
-      return "Verifying";
-    case WorkChunkStatus::Done:
-      return "Done";
-    case WorkChunkStatus::Blocked:
-      return "Blocked";
-    case WorkChunkStatus::Failed:
-      return "Failed";
-    case WorkChunkStatus::Cancelled:
-      return "Cancelled";
-    }
-    return "Unknown";
-  };
   auto todoStatusLabel = [](TodoStatus status) -> const char * {
     switch (status) {
     case TodoStatus::Pending:
@@ -988,74 +954,9 @@ std::string buildPlanAndTodoSnapshot(const AgentContext &context) {
     }
     return trimmed.substr(0, maxLen) + "...";
   };
+
   try {
     ThreadManager tm(ThreadManager::defaultBasePath());
-    const ThreadMetadata metadata = tm.getMetadata(context.history->threadId);
-    if (!metadata.activePlanId.empty()) {
-      state << "**Active Plan ID:** " << metadata.activePlanId << "\n";
-      try {
-        const Plan plan =
-            tm.getPlan(context.history->threadId, metadata.activePlanId);
-        state << "**Active Plan Title:** " << plan.title << "\n";
-        state << "**Active Plan Status:** " << planStatusLabel(plan.status)
-              << "\n";
-        if (!shared::StringUtil::trim(plan.objective).empty()) {
-          state << "**Plan Objective:** " << trimForPrompt(plan.objective, 220)
-                << "\n";
-        }
-        if (!shared::StringUtil::trim(plan.strategy).empty()) {
-          state << "**Plan Strategy:** " << trimForPrompt(plan.strategy, 220)
-                << "\n";
-        }
-        int incompleteChunks = 0;
-        for (const auto &chunk : plan.chunks) {
-          if (chunk.status != WorkChunkStatus::Done &&
-              chunk.status != WorkChunkStatus::Cancelled) {
-            incompleteChunks++;
-          }
-        }
-        state << "**Incomplete Chunks:** " << incompleteChunks << "\n";
-        if (!plan.chunks.empty()) {
-          constexpr std::size_t kMaxChunks = 8;
-          constexpr std::size_t kMaxTasksPerChunk = 4;
-          state << "**Chunk Ledger:**\n";
-          for (std::size_t i = 0; i < plan.chunks.size() && i < kMaxChunks;
-               ++i) {
-            const auto &chunk = plan.chunks[i];
-            state << "- [" << chunkStatusLabel(chunk.status) << "] "
-                  << trimForPrompt(chunk.title, 160);
-            if (!chunk.id.empty()) {
-              state << " (id=" << chunk.id << ")";
-            }
-            if (!chunk.assignedAgentId.empty()) {
-              state << " assignee=" << chunk.assignedAgentId;
-            }
-            state << "\n";
-            if (!shared::StringUtil::trim(chunk.goal).empty()) {
-              state << "  goal: " << trimForPrompt(chunk.goal, 220) << "\n";
-            }
-            for (std::size_t taskIndex = 0; taskIndex < chunk.tasks.size() &&
-                                            taskIndex < kMaxTasksPerChunk;
-                 ++taskIndex) {
-              const auto &task = chunk.tasks[taskIndex];
-              state << "  task[" << chunkStatusLabel(task.status)
-                    << "]: " << trimForPrompt(task.title, 160) << "\n";
-            }
-            if (chunk.tasks.size() > kMaxTasksPerChunk) {
-              state << "  ... " << (chunk.tasks.size() - kMaxTasksPerChunk)
-                    << " additional task(s)\n";
-            }
-          }
-          if (plan.chunks.size() > kMaxChunks) {
-            state << "- ... " << (plan.chunks.size() - kMaxChunks)
-                  << " additional chunk(s)\n";
-          }
-        }
-      } catch (...) {
-        state << "**Active Plan:** unavailable\n";
-      }
-    }
-
     const AgentTodoList todo =
         tm.getAgentTodo(context.history->threadId, context.identity.id);
     if (!todo.items.empty()) {
@@ -1069,7 +970,8 @@ std::string buildPlanAndTodoSnapshot(const AgentContext &context) {
       state << "**Todo Incomplete:** " << incompleteTodo << "\n";
       constexpr std::size_t kMaxTodoItems = 12;
       state << "**Todo Ledger:**\n";
-      for (std::size_t i = 0; i < todo.items.size() && i < kMaxTodoItems; ++i) {
+      for (std::size_t i = 0; i < todo.items.size() && i < kMaxTodoItems;
+           ++i) {
         const auto &item = todo.items[i];
         state << "- (#" << item.id << ") [" << todoStatusLabel(item.status)
               << "] " << trimForPrompt(item.text, 220);
@@ -1150,7 +1052,8 @@ std::string buildIncompleteTodoNudge(const TodoStateSnapshot &todoState) {
     if (i > 0) {
       prompt << ", ";
     }
-    prompt << "#" << item.id << " [" << todoStatusLabel(item.status) << "] ";
+    prompt << "#" << item.id << " [" << todoStatusLabel(item.status)
+           << "] ";
     if (!shared::StringUtil::trim(item.text).empty()) {
       prompt << item.text;
     } else {
@@ -1190,6 +1093,21 @@ std::string buildActiveWorkContinuationNudge() {
       "background process, or descendant subagent). Continue coordinating "
       "until it settles. If there is nothing new to do yet, give a concise "
       "progress update and keep monitoring.");
+}
+
+std::string buildBlockedWorkflowReentryNudge(int attempt) {
+  std::string body =
+      "A workflow blocked your previous stop attempt, and you still have not "
+      "resumed the task. Follow the injected workflow instructions already in "
+      "history. Make concrete progress now. If work remains, use the next "
+      "tool instead of repeating the blocked completion claim.";
+  if (attempt > 1) {
+    body += " This is repeated workflow continuation attempt " +
+            std::to_string(attempt) +
+            ". Make a tool call or produce a materially different response.";
+  }
+  return wrapSystemSignal("workflow_continuation", body,
+                          {{"blocked", "true"}, {"attempt", std::to_string(attempt)}});
 }
 
 TodoStateSnapshot readTodoState(const AgentContext &context) {
@@ -1949,6 +1867,21 @@ void Agent::runImpl(const std::optional<std::string> &task,
   const int maxEmptyProviderRetries =
       context.identity.parentId.empty() ? 2 : 0;
   int consecutiveInsanityRetries = 0;
+  struct BlockedStopRecoveryState {
+    bool active = false;
+    bool sawMeaningfulNewTurn = false;
+    int emptyReentryCount = 0;
+    std::string stopReason;
+    std::string finalMessage;
+  } blockedStopRecovery;
+
+  auto resetBlockedStopRecovery = [&]() {
+    blockedStopRecovery.active = false;
+    blockedStopRecovery.sawMeaningfulNewTurn = false;
+    blockedStopRecovery.emptyReentryCount = 0;
+    blockedStopRecovery.stopReason.clear();
+    blockedStopRecovery.finalMessage.clear();
+  };
   std::optional<std::string> lastTodoContinuationFingerprint;
   auto hasQueuedUserTurnPending = [this]() {
     if (!context.history || context.history->turns.empty()) {
@@ -1962,6 +1895,9 @@ void Agent::runImpl(const std::optional<std::string> &task,
   bool agentStopEventFired = false;
   auto fireAgentStopGate = [&](const std::string &finalMessage,
                                const std::string &reason) -> bool {
+    if (blockedStopRecovery.active && !blockedStopRecovery.sawMeaningfulNewTurn) {
+      return true;
+    }
     hooks::EventPayload payload;
     payload.threadId = context.history ? context.history->threadId : "";
     payload.agentId = context.identity.id;
@@ -1970,6 +1906,16 @@ void Agent::runImpl(const std::optional<std::string> &task,
     payload.extra["stop_reason"] = reason;
     payload.extra["final_message"] = finalMessage;
     auto fired = hooks::HookDispatcher::fire(WorkflowEventKind::AgentStop, payload);
+    if (fired.blocked) {
+      blockedStopRecovery.active = true;
+      blockedStopRecovery.sawMeaningfulNewTurn = false;
+      blockedStopRecovery.emptyReentryCount = 0;
+      blockedStopRecovery.stopReason = reason;
+      blockedStopRecovery.finalMessage = finalMessage;
+    } else {
+      resetBlockedStopRecovery();
+    }
+
     agentStopEventFired = true;
     if (!fired.injectedReminders.empty()) {
       std::string combined;
@@ -1979,7 +1925,9 @@ void Agent::runImpl(const std::optional<std::string> &task,
         }
         combined += fired.injectedReminders[i];
       }
-      appendTurnToHistory(makeInternalNudgeTurn("hook-agent-stop-", combined));
+      appendTurnToHistory(makeInternalNudgeTurn(
+          "hook-agent-stop-", combined,
+          fired.blocked ? Role::User : Role::System));
     }
     return fired.blocked;
   };
@@ -2676,8 +2624,21 @@ void Agent::runImpl(const std::optional<std::string> &task,
       if (finalizedToolCalls.empty()) {
         const bool emptyAssistantReply = fullResponse.empty();
         if (emptyAssistantReply) {
+          if (blockedStopRecovery.active &&
+              (!streamError.empty() || sawThinking || persistedAssistantTurn)) {
+            blockedStopRecovery.sawMeaningfulNewTurn = true;
+          }
           consecutiveEmptyProviderResponses++;
         } else {
+          if (blockedStopRecovery.active) {
+            const std::string trimmedResponse =
+                shared::StringUtil::trim(fullResponse);
+            if (!trimmedResponse.empty() &&
+                trimmedResponse !=
+                    shared::StringUtil::trim(blockedStopRecovery.finalMessage)) {
+              blockedStopRecovery.sawMeaningfulNewTurn = true;
+            }
+          }
           consecutiveEmptyProviderResponses = 0;
         }
 
@@ -2744,12 +2705,58 @@ void Agent::runImpl(const std::optional<std::string> &task,
         const bool cleanNoSummary =
             emptyAssistantReply && turnStopReason == StopReason::Stop &&
             streamError.empty() && !hasHarnessOwnedActiveWork;
+
         if (cleanNoSummary) {
           consecutiveEmptyProviderResponses = 0;
+
+          if (blockedStopRecovery.active &&
+              !blockedStopRecovery.sawMeaningfulNewTurn) {
+            blockedStopRecovery.emptyReentryCount++;
+            if (blockedStopRecovery.emptyReentryCount > 2) {
+              throw std::runtime_error(
+                  "Workflow blocked stop, but the provider never resumed with a meaningful turn.");
+            }
+            appendTurnToHistory(makeInternalNudgeTurn(
+                "workflow-continuation-",
+                buildBlockedWorkflowReentryNudge(
+                    blockedStopRecovery.emptyReentryCount),
+                Role::User));
+            context.state.currentStatus = AgentStatus::ProviderWaiting;
+            onEvent(ProviderWaiting{});
+            if (!interruptibleSleep(std::chrono::milliseconds(50),
+                                    runAbortController,
+                                    runCancelToken.get())) {
+              context.state.currentStatus = AgentStatus::Cancelled;
+              return;
+            }
+            continue;
+          } else if (blockedStopRecovery.active) {
+            blockedStopRecovery.emptyReentryCount = 0;
+            resetBlockedStopRecovery();
+          }
+
           lastTodoContinuationFingerprint.reset();
           if (fireAgentStopGate(fullResponse, "stop")) {
             context.state.currentStatus = AgentStatus::ProviderWaiting;
             onEvent(ProviderWaiting{});
+            blockedStopRecovery.emptyReentryCount++;
+            if (blockedStopRecovery.emptyReentryCount > 2) {
+              throw std::runtime_error(
+                  "Workflow blocked stop, but the provider never resumed with a meaningful turn.");
+            }
+            appendTurnToHistory(makeInternalNudgeTurn(
+                "workflow-continuation-",
+                buildBlockedWorkflowReentryNudge(
+                    blockedStopRecovery.emptyReentryCount),
+                Role::User));
+            context.state.currentStatus = AgentStatus::ProviderWaiting;
+            onEvent(ProviderWaiting{});
+            if (!interruptibleSleep(std::chrono::milliseconds(50),
+                                    runAbortController,
+                                    runCancelToken.get())) {
+              context.state.currentStatus = AgentStatus::Cancelled;
+              return;
+            }
             continue;
           }
           taskFinished = true;
@@ -2784,6 +2791,8 @@ void Agent::runImpl(const std::optional<std::string> &task,
         }
 
         lastTodoContinuationFingerprint.reset();
+        resetBlockedStopRecovery();
+
         if (fireAgentStopGate(fullResponse, "stop")) {
           context.state.currentStatus = AgentStatus::ProviderWaiting;
           onEvent(ProviderWaiting{});

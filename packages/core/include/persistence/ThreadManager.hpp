@@ -229,13 +229,6 @@ public:
     void deleteThread(const std::string& threadId);
     void updateMetadata(const std::string& threadId, const ThreadMetadata& metadata);
     std::vector<ThreadMetadata> listThreadsWithMetadata() const;
-    std::string createPlan(const Plan& plan);
-    void writePlan(const std::string& threadId, const Plan& plan);
-    Plan getPlan(const std::string& threadId, const std::string& planId) const;
-    std::vector<Plan> listPlans(const std::string& threadId) const;
-    void updatePlan(const std::string& threadId, const Plan& plan);
-    Plan mutatePlan(const std::string& threadId, const std::string& planId,
-                    const std::function<void(Plan&)>& mutator);
     AgentTodoList getAgentTodo(const std::string& threadId,
                                const std::string& agentId) const;
     void writeAgentTodo(const std::string& threadId, const std::string& agentId,

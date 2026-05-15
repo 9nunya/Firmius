@@ -509,22 +509,75 @@ shared::ToolResult executeList(const rapidjson::Value &, shared::ToolContext &ct
 } // namespace
 
 shared::ToolMetadata ProcessTool::getMetadata() const {
-  return {"Process", "Process operations. Use action Execute, Spawn, Status, Wait, Input, Output, List, or Kill.", shared::ToolScope::Process};
+  return {"Process",
+          R"(Process operations for running commands and interacting with live child processes.
+
+USAGE GUIDANCE:
+- Use Execute for a blocking command when you want a final exit code/result in one step.
+- Use Spawn for long-running commands, then follow with Status/Output/Wait/Input/Kill as needed.
+- If you Spawn a process, you are expected to eventually Wait, Kill, or otherwise settle it; do not leave ghost processes behind.
+- Never use Process as an editing tunnel for writing repository files; use Edit/EditWrite/EditReplace/EditRange for file modifications.
+- Prefer narrow verification commands that produce binary evidence (exit code / exact output).
+
+ACTIONS:
+- Execute: run a command and wait for completion.
+- Spawn: start a background process and get a process_id.
+- Status: inspect running/completed state.
+- Wait: wait for completion or a matching output condition.
+- Input: send stdin to a live process.
+- Output: read stdout/stderr slices from a live process.
+- List: inspect known managed processes.
+- Kill: terminate a managed process.
+)",
+          shared::ToolScope::Process};
 }
 
 std::shared_ptr<shared::JSONSchema> ProcessTool::getSchema() const {
   return shared::zObject({
-      {"action", shared::zEnum({"Execute", "Spawn", "Status", "Wait", "Input", "Output", "List", "Kill"})->describe("Process operation to execute")},
-      {"command", shared::zString()->setOptional()},
-      {"process_id", shared::zString()->setOptional()},
-      {"input", shared::zString()->setOptional()},
-      {"pattern", shared::zString()->setOptional()},
-      {"stream", shared::zString()->setOptional()},
-      {"cwd", shared::zString()->setOptional()},
-      {"timeout_ms", shared::zInteger()->setOptional()},
-      {"from_offset", shared::zInteger()->setOptional()},
-      {"max_bytes", shared::zInteger()->setOptional()},
-      {"tail_lines", shared::zInteger()->setOptional()},
+      {"action",
+       shared::zEnum({"Execute", "Spawn", "Status", "Wait", "Input", "Output", "List", "Kill"})
+           ->describe(
+               "Which process operation to perform.\n\n"
+               "- Execute: run a command to completion\n"
+               "- Spawn: start a background process\n"
+               "- Status: inspect a process\n"
+               "- Wait: wait for completion and/or output conditions\n"
+               "- Input: send stdin to a live process\n"
+               "- Output: read buffered stdout/stderr\n"
+               "- List: list managed processes\n"
+               "- Kill: terminate a managed process")},
+      {"command",
+       shared::zString()->setOptional()->describe(
+           "Shell command to run for Execute or Spawn.\n\n"
+           "Required for Execute/Spawn. Use workspace-safe verification commands when possible.")},
+      {"process_id",
+       shared::zString()->setOptional()->describe(
+           "Managed process identifier returned by Spawn.\n\n"
+           "Required for Status/Wait/Input/Output/Kill.")},
+      {"input",
+       shared::zString()->setOptional()->describe(
+           "Text to send to stdin for Input action.")},
+      {"pattern",
+       shared::zString()->setOptional()->describe(
+           "Optional regex/text pattern used by Wait to stop when matching output appears.")},
+      {"stream",
+       shared::zString()->setOptional()->describe(
+           "Which output stream to inspect for Output action. Typically 'stdout' or 'stderr'.")},
+      {"cwd",
+       shared::zString()->setOptional()->describe(
+           "Working directory for Execute/Spawn. Prefer workspace-relative directories.")},
+      {"timeout_ms",
+       shared::zInteger()->setOptional()->describe(
+           "Timeout in milliseconds for Execute/Wait. Use to bound verification steps.")},
+      {"from_offset",
+       shared::zInteger()->setOptional()->describe(
+           "Byte offset for Output reads so you can continue from a prior cursor.")},
+      {"max_bytes",
+       shared::zInteger()->setOptional()->describe(
+           "Maximum bytes to return for Output. Use to keep large logs bounded.")},
+      {"tail_lines",
+       shared::zInteger()->setOptional()->describe(
+           "Optional number of trailing lines to return for Output/List-style inspection.")},
   });
 }
 

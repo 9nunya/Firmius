@@ -10,15 +10,31 @@ namespace firmius::core {
 using namespace firmius::shared;
 
 shared::ToolMetadata PythonExecuteTool::getMetadata() const {
-  return {"Python", "Executes arbitrary Python code on the host.",
+  return {"Python",
+          R"(Execute Python code on the host as a real process.
+
+USAGE GUIDANCE:
+- Use this only when Python is the correct execution surface, not as a shortcut for editing files.
+- Do NOT use Python to write repository files; use the Edit-family tools for all file modifications.
+- Good uses: structured data inspection, one-off calculations, parsing/transforms for analysis, probing environments that already have the needed interpreter/packages.
+- If a project virtualenv should be used, pass venv so the tool runs that interpreter.
+
+EXECUTION MODEL:
+- The tool runs Python via a managed process and returns stdout/stderr/exit_code.
+- It is subject to normal command approval / process permissions.
+)",
           shared::ToolScope::Process};
 }
 
 std::shared_ptr<shared::JSONSchema> PythonExecuteTool::getSchema() const {
   return shared::zObject(
-             {{"code", shared::zString()->describe("The Python code to execute.")},
+             {{"code", shared::zString()->describe(
+                            "Python source code to execute.\n\n"
+                            "Use for analysis/execution, not file editing. The code is executed as a managed host process and its stdout/stderr are returned.")},
               {"venv", shared::zString()
-                           ->describe("Optional path to a Python virtual environment whose interpreter should be used.")
+                           ->describe(
+                               "Optional path to a Python virtual environment whose interpreter should be used.\n\n"
+                               "Pass the virtualenv root (the tool resolves '<venv>/bin/python'). The path must be readable under current permissions.")
                            ->setOptional()}})
       ->required({"code"});
 }

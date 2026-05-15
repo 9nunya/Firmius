@@ -130,7 +130,7 @@ trigger:
   block: true
   match:
     tool: Files.Edit
-    persona: forge
+    persona: coder
 action:
   kind: state
   writes:

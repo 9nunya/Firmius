@@ -171,6 +171,8 @@ public:
     getAvailableToolDefinitionsForPermissions(
         const firmius::shared::AgentPermissions &permissions) const;
 
+    const ToolRegistry& getToolRegistry() const { return toolRegistry; }
+
 private:
     Engine();
     void initProviders();
@@ -183,6 +185,7 @@ private:
     std::vector<std::function<void(const AppEvent&)>> listeners;
     std::mutex listenerMutex;
     std::vector<std::jthread> fleet;
+    std::mutex fleetMutex;
     
     std::vector<std::jthread> taskThreads_;
     std::mutex taskThreadsMutex_;

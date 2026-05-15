@@ -1,7 +1,10 @@
 #include "providers/AntigravityProvider.hpp"
 #include "providers/AntigravityProtocol.hpp"
+#include "providers/ConfigurableOpenAIProvider.hpp"
 #include "providers/LLMSearchProvider.hpp"
 #include "providers/LLMSearchProviderRegistry.hpp"
+#include "providers/LMStudioProvider.hpp"
+#include "providers/ProviderRegistry.hpp"
 
 #include <gtest/gtest.h>
 
@@ -217,6 +220,40 @@ TEST(GoogleSearchProvider, AvailabilityCheckDoesNotProbeAccounts) {
   EXPECT_EQ(provider.availableAccountCalls.load(), 0);
 
   registry.unregisterProvider("google-search");
+}
+
+TEST(SearchProviderRegistry, BootstrapsAntigravitySearchProviderOnFirstLookup) {
+  const auto tempHome =
+      std::filesystem::temp_directory_path() /
+      "firmius_google_search_bootstrap_home";
+  std::filesystem::remove_all(tempHome);
+  std::filesystem::create_directories(tempHome / ".firmius");
+  ScopedHomeOverride scopedHome(tempHome);
+
+  const auto futureSeconds =
+      std::chrono::system_clock::to_time_t(std::chrono::system_clock::now()) +
+      86400;
+  const std::filesystem::path oauthPath = tempHome / ".firmius" / "oauth.json";
+  std::ofstream out(oauthPath);
+  out << R"({"antigravity":[)"
+      << R"({"identifier":"search@example.com","refreshToken":"r1","accessToken":"a1","tokenExpiration":)"
+      << futureSeconds
+      << R"(,"metadata":{"quota:gemini-2.5-flash":"0.7"}}]})";
+  out.close();
+
+  auto &searchRegistry = LLMSearchProviderRegistry::instance();
+  searchRegistry.unregisterProvider("google-search");
+
+  firmius::provider::ProviderRegistry::instance().registerProviderFactory(
+      "antigravity", []() {
+        return std::make_shared<AntigravityProvider>();
+      });
+
+  auto first = searchRegistry.getFirstAvailable();
+  ASSERT_TRUE(first.has_value());
+  EXPECT_EQ(first->get().name(), "google-search");
+
+  searchRegistry.unregisterProvider("google-search");
 }
 
 TEST(AntigravityProvider,
@@ -622,4 +659,69 @@ TEST(AntigravityProvider, QuotasDoNotRequireResetMetadataToRender) {
   EXPECT_EQ(it->second.front().name, "claude-sonnet-4-6");
   EXPECT_FLOAT_EQ(it->second.front().remainingFraction, 0.4f);
   EXPECT_TRUE(it->second.front().resetTime.empty());
+}
+
+TEST(ProviderRegistry, ReloadConfigProvidersCanOverrideAndRestoreBuiltins) {
+  auto &registry = firmius::provider::ProviderRegistry::instance();
+  registry.registerProviderFactory("registry-lmstudio-test", []() {
+    return std::make_shared<firmius::provider::LMStudioProvider>(
+        "http://localhost:1234");
+  });
+
+  registry.reloadConfigProviders({});
+  auto builtin = registry.getProvider("registry-lmstudio-test");
+  ASSERT_NE(builtin, nullptr);
+  EXPECT_NE(dynamic_cast<firmius::provider::LMStudioProvider *>(builtin.get()),
+            nullptr);
+
+  firmius::shared::ProviderProfileConfig overrideProfile;
+  overrideProfile.kind = "openai_compatible";
+  overrideProfile.authMode = "none";
+  overrideProfile.allowMissingApiKey = true;
+  overrideProfile.displayName = "Registry Test";
+  overrideProfile.baseUrl = "http://localhost:1234/v1";
+  registry.reloadConfigProviders({{"registry-lmstudio-test", overrideProfile}});
+
+  auto overridden = registry.getProvider("registry-lmstudio-test");
+  ASSERT_NE(overridden, nullptr);
+  EXPECT_NE(dynamic_cast<firmius::provider::ConfigurableOpenAIProvider *>(
+                overridden.get()),
+            nullptr);
+
+  registry.reloadConfigProviders({});
+  auto restored = registry.getProvider("registry-lmstudio-test");
+  ASSERT_NE(restored, nullptr);
+  EXPECT_NE(dynamic_cast<firmius::provider::LMStudioProvider *>(restored.get()),
+            nullptr);
+}
+
+TEST(ConfigurableOpenAIProvider, SupportsNoAuthAndModelOverrides) {
+  firmius::shared::ProviderProfileConfig profile;
+  profile.authMode = "none";
+  profile.allowMissingApiKey = true;
+  profile.baseUrl = "http://localhost:1234/v1";
+  firmius::shared::ProviderModelConfig modelConfig;
+  modelConfig.overrideContextWindow = true;
+  modelConfig.contextWindow = 424242;
+  modelConfig.overrideModalities = true;
+  modelConfig.modalities = {"text", "image"};
+  modelConfig.overrideSupportsReasoning = true;
+  modelConfig.supportsReasoning = true;
+  modelConfig.defaultVariant = "thinking";
+  modelConfig.variants["thinking"] = {"thinking",
+                                      "{\"reasoning_effort\":\"high\"}",
+                                      "test"};
+  profile.modelVariants["custom-model"] = modelConfig;
+
+  firmius::provider::ConfigurableOpenAIProvider provider("custom-noauth",
+                                                         profile);
+  EXPECT_TRUE(provider.isConfigured());
+
+  auto info = provider.getModelInfo("custom-model");
+  EXPECT_EQ(info.contextWindow, 424242u);
+  EXPECT_EQ(info.modalities,
+            (std::vector<std::string>{"text", "image"}));
+  EXPECT_TRUE(info.supportsReasoning);
+  ASSERT_EQ(info.variants.size(), 1u);
+  EXPECT_EQ(info.variants.front().variantName, "thinking");
 }

@@ -2,6 +2,7 @@
 #define FIRMIUS_TUI_UTILS_BACKGROUND_TASK_POOL_HPP
 
 #include <condition_variable>
+#include <array>
 #include <deque>
 #include <functional>
 #include <mutex>
@@ -15,6 +16,13 @@ namespace firmius::tui {
 /// be marshaled back via TuiState::deferUiMutation().
 class BackgroundTaskPool {
 public:
+  enum class Priority : std::size_t {
+    Interactive = 0,
+    VisiblePrefetch = 1,
+    Background = 2,
+    Count = 3,
+  };
+
   explicit BackgroundTaskPool(std::size_t threads = 4) {
     workers_.reserve(threads);
     for (std::size_t i = 0; i < threads; ++i) {
@@ -27,7 +35,8 @@ public:
   BackgroundTaskPool(const BackgroundTaskPool &) = delete;
   BackgroundTaskPool &operator=(const BackgroundTaskPool &) = delete;
 
-  void post(std::function<void()> task) {
+  void post(std::function<void()> task,
+            Priority priority = Priority::Background) {
     if (!task) {
       return;
     }
@@ -36,7 +45,7 @@ public:
       if (stopped_) {
         return;
       }
-      queue_.push_back(std::move(task));
+      queues_[static_cast<std::size_t>(priority)].push_back(std::move(task));
     }
     cv_.notify_one();
   }
@@ -61,13 +70,19 @@ private:
       {
         std::unique_lock<std::mutex> lk(mtx_);
         cv_.wait(lk, [&] {
-          return stopped_ || st.stop_requested() || !queue_.empty();
+          return stopped_ || st.stop_requested() || hasQueuedTasks();
         });
-        if ((stopped_ || st.stop_requested()) && queue_.empty()) {
+        if ((stopped_ || st.stop_requested()) && !hasQueuedTasks()) {
           return;
         }
-        task = std::move(queue_.front());
-        queue_.pop_front();
+        for (auto &queue : queues_) {
+          if (queue.empty()) {
+            continue;
+          }
+          task = std::move(queue.front());
+          queue.pop_front();
+          break;
+        }
       }
       if (task) {
         try {
@@ -82,8 +97,17 @@ private:
   std::vector<std::jthread> workers_;
   std::mutex mtx_;
   std::condition_variable cv_;
-  std::deque<std::function<void()>> queue_;
+  std::array<std::deque<std::function<void()>>, 3> queues_;
   bool stopped_ = false;
+
+  bool hasQueuedTasks() const {
+    for (const auto &queue : queues_) {
+      if (!queue.empty()) {
+        return true;
+      }
+    }
+    return false;
+  }
 };
 
 } // namespace firmius::tui

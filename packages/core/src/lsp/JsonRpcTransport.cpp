@@ -42,14 +42,20 @@ JsonRpcTransport::Reader JsonRpcTransport::makeFdReader(int fd) {
             }
             throw std::runtime_error("JsonRpcTransport: poll failed: " + std::string(std::strerror(errno)));
         }
-        if (ret == 0 || !(pfd.revents & (POLLIN | POLLHUP | POLLERR))) {
+        if (ret == 0) {
+            return {};
+        }
+        if (pfd.revents & (POLLERR | POLLNVAL)) {
+            throw std::runtime_error("JsonRpcTransport: poll signaled socket error");
+        }
+        if (!(pfd.revents & (POLLIN | POLLHUP))) {
             return {};
         }
 
         char chunk[8192];
         const ssize_t bytesRead = ::read(fd, chunk, sizeof(chunk));
         if (bytesRead <= 0) {
-            return {};
+            throw std::runtime_error("JsonRpcTransport: channel closed");
         }
         return std::string(chunk, static_cast<size_t>(bytesRead));
     };
@@ -99,7 +105,9 @@ void JsonRpcTransport::stop() {
 
     if (m_readerThread.joinable()) {
         m_readerThread.request_stop();
-        m_readerThread.join();
+        if (m_readerThread.get_id() != std::this_thread::get_id()) {
+            m_readerThread.join();
+        }
     }
 
     rejectAllPending("Transport stopped");
@@ -218,63 +226,66 @@ bool JsonRpcTransport::writeMessage(const rapidjson::Document& doc) {
 void JsonRpcTransport::readerLoop() {
     std::string buffer;
 
-    while (m_running) {
-        std::string chunk = m_reader(std::chrono::milliseconds(500));
-        if (!m_running) {
-            break;
-        }
-        if (chunk.empty()) {
-            break;
-        }
-
-        buffer.append(chunk);
-
-        while (true) {
-            auto headerPos = buffer.find("Content-Length: ");
-            if (headerPos == std::string::npos) {
-                buffer.clear();
+    try {
+        while (m_running) {
+            std::string chunk = m_reader(std::chrono::milliseconds(500));
+            if (!m_running) {
                 break;
             }
-
-            if (headerPos > 0) {
-                buffer.erase(0, headerPos);
-                headerPos = 0;
+            if (chunk.empty()) {
+                continue;
             }
 
-            const auto endHeader = buffer.find("\r\n\r\n", headerPos);
-            if (endHeader == std::string::npos) {
-                break;
-            }
+            buffer.append(chunk);
 
-            size_t contentLength = 0;
-            try {
-                std::string lenStr = buffer.substr(16, endHeader - 16);
-                const auto firstNewline = lenStr.find("\r\n");
-                if (firstNewline != std::string::npos) {
-                    lenStr = lenStr.substr(0, firstNewline);
+            while (true) {
+                auto headerPos = buffer.find("Content-Length: ");
+                if (headerPos == std::string::npos) {
+                    buffer.clear();
+                    break;
                 }
-                contentLength = std::stoul(lenStr);
-            } catch (...) {
-                buffer.erase(0, endHeader + 4);
-                continue;
+
+                if (headerPos > 0) {
+                    buffer.erase(0, headerPos);
+                    headerPos = 0;
+                }
+
+                const auto endHeader = buffer.find("\r\n\r\n", headerPos);
+                if (endHeader == std::string::npos) {
+                    break;
+                }
+
+                size_t contentLength = 0;
+                try {
+                    std::string lenStr = buffer.substr(16, endHeader - 16);
+                    const auto firstNewline = lenStr.find("\r\n");
+                    if (firstNewline != std::string::npos) {
+                        lenStr = lenStr.substr(0, firstNewline);
+                    }
+                    contentLength = std::stoul(lenStr);
+                } catch (...) {
+                    buffer.erase(0, endHeader + 4);
+                    continue;
+                }
+
+                const size_t messageStart = endHeader + 4;
+                if (buffer.length() < messageStart + contentLength) {
+                    break;
+                }
+
+                const std::string message = buffer.substr(messageStart, contentLength);
+                buffer.erase(0, messageStart + contentLength);
+
+                rapidjson::Document doc;
+                doc.Parse(message.c_str(), message.length());
+                if (doc.HasParseError()) {
+                    continue;
+                }
+
+                handleMessage(std::move(doc));
             }
-
-            const size_t messageStart = endHeader + 4;
-            if (buffer.length() < messageStart + contentLength) {
-                break;
-            }
-
-            const std::string message = buffer.substr(messageStart, contentLength);
-            buffer.erase(0, messageStart + contentLength);
-
-            rapidjson::Document doc;
-            doc.Parse(message.c_str(), message.length());
-            if (doc.HasParseError()) {
-                continue;
-            }
-
-            handleMessage(std::move(doc));
         }
+    } catch (...) {
     }
 
     m_running = false;

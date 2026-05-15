@@ -180,6 +180,12 @@ ftxui::Component RollingMemorySettingsModal::create(TuiState &state) {
         }
       });
 
+  // Bind unsubscribe to the modal lifecycle (see TuiState::pushModalTeardown).
+  state.pushModalTeardown([subId, modalActive]() {
+    modalActive->store(false, std::memory_order_relaxed);
+    firmius::core::Harness::instance().unsubscribe(subId);
+  });
+
   auto cycleMode = [config]() {
     static const std::vector<std::string> modes = {"rolling_forever",
                                                    "legacy_compaction",

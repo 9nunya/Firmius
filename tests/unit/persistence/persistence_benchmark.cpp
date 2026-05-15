@@ -24,7 +24,7 @@ ThreadMetadata makeMetadata() {
     metadata.hostOptions.type = HostType::Local;
     metadata.hostIdentifier = "bench-host";
     metadata.cwd = "/tmp/bench";
-    metadata.leadPersona = "aster";
+    metadata.leadPersona = "lead";
     return metadata;
 }
 

@@ -50,49 +50,6 @@ struct ProviderRow {
   bool enabled = true;
 };
 
-std::vector<ProviderRow> buildRows() {
-  const auto cfg = firmius::core::Harness::instance().getConfig();
-  std::map<std::string, ProviderRow> merged;
-
-  // Built-in providers (registry).
-  for (const auto &id :
-       firmius::provider::ProviderRegistry::instance().listProviderIds()) {
-    auto provider =
-        firmius::provider::ProviderRegistry::instance().getProvider(id);
-    ProviderRow row;
-    row.id = id;
-    row.isCustom = false;
-    if (provider) {
-      row.kind = provider->getProviderType() ==
-                         firmius::provider::ProviderType::OAuth
-                     ? "oauth"
-                     : "apikey";
-      row.enabled = provider->isConfigured();
-    } else {
-      row.kind = "?";
-      row.enabled = false;
-    }
-    merged[id] = row;
-  }
-
-  // Custom providers from config override / add to merged set.
-  for (const auto &[id, profile] : cfg.providers) {
-    ProviderRow row;
-    row.id = id;
-    row.isCustom = true;
-    row.kind = profile.kind;
-    row.enabled = profile.enabled;
-    merged[id] = row;
-  }
-
-  std::vector<ProviderRow> out;
-  out.reserve(merged.size());
-  for (auto &[_, r] : merged) {
-    out.push_back(r);
-  }
-  return out;
-}
-
 // ---------------------------------------------------------------------------
 // Provider templates for the add wizard
 // ---------------------------------------------------------------------------
@@ -138,6 +95,9 @@ const std::vector<ProviderTemplate> &templates() {
       {"Mistral", "mistral", "Mistral", "openai_compatible",
        "https://api.mistral.ai/v1", "/models", "/chat/completions", "",
        "", "mistral", "", ""},
+      {"LM Studio", "lmstudio", "LM Studio", "openai_compatible",
+       "http://localhost:1234", "/api/v1/models", "/v1/chat/completions", "",
+       "", "", "", ""},
       {"Custom OpenAI-compatible", "my-openai", "My OpenAI",
        "openai_compatible", "", "/models", "/chat/completions", "", "",
        "", "", "reasoning_effort"},
@@ -254,6 +214,9 @@ ftxui::Component ProvidersModal::create(TuiState &state) {
   auto editKindLabels = std::make_shared<std::vector<std::string>>(
       std::vector<std::string>{"openai_compatible", "anthropic"});
   auto editKindIndex = std::make_shared<int>(0);
+  auto editAuthModeLabels = std::make_shared<std::vector<std::string>>(
+      std::vector<std::string>{"api_key", "none"});
+  auto editAuthModeIndex = std::make_shared<int>(0);
   auto editEnabledLabels = std::make_shared<std::vector<std::string>>(
       std::vector<std::string>{"enabled", "disabled"});
   auto editEnabledIndex = std::make_shared<int>(0);
@@ -265,6 +228,7 @@ ftxui::Component ProvidersModal::create(TuiState &state) {
   auto editChatEndpoint = std::make_shared<std::string>();
   auto editMessagesEndpoint = std::make_shared<std::string>();
   auto editApiKeyRef = std::make_shared<std::string>();
+  auto editDefaultApiKey = std::make_shared<std::string>();
   auto editReasoningField = std::make_shared<std::string>();
   auto editAnthropicVersion = std::make_shared<std::string>();
   auto editBetaHeader = std::make_shared<std::string>();
@@ -293,6 +257,13 @@ ftxui::Component ProvidersModal::create(TuiState &state) {
   auto variantNameInputText = std::make_shared<std::string>("thinking");
   auto variantJsonInputText = std::make_shared<std::string>("{}");
   auto variantDescriptionInputText = std::make_shared<std::string>();
+  auto variantContextWindowText = std::make_shared<std::string>("");
+  auto variantMaxOutputTokensText = std::make_shared<std::string>("");
+  auto variantModalitiesText = std::make_shared<std::string>("text");
+  auto variantSupportsReasoningLabels =
+      std::make_shared<std::vector<std::string>>(
+          std::vector<std::string>{"inherit", "enabled", "disabled"});
+  auto variantSupportsReasoningIndex = std::make_shared<int>(0);
 
   // Live-pull progress
   auto pulling = std::make_shared<bool>(false);
@@ -300,8 +271,13 @@ ftxui::Component ProvidersModal::create(TuiState &state) {
   auto pullStatus = std::make_shared<std::string>();
 
   // ------------------------- helpers -----------------------------------
-  auto refresh = [rows, selected]() {
-    *rows = buildRows();
+  auto refresh = [rows, selected, &state]() {
+    const auto snapshot = state.providerSnapshot();
+    rows->clear();
+    rows->reserve(snapshot.rows.size());
+    for (const auto &row : snapshot.rows) {
+      rows->push_back(ProviderRow{row.id, row.is_custom, row.kind, row.enabled});
+    }
     int total = static_cast<int>(rows->size());
     if (*selected >= total) {
       *selected = total <= 0 ? 0 : total - 1;
@@ -322,31 +298,42 @@ ftxui::Component ProvidersModal::create(TuiState &state) {
     return &(*rows)[i];
   };
 
-  auto saveConfigAndReload = [message](const shared::UserConfig &cfg,
-                                       const std::string &okMessage) {
-    auto &h = firmius::core::Harness::instance();
-    try {
-      h.updateConfig(cfg);
-      h.saveConfig();
-      firmius::provider::ProviderRegistry::instance().reloadConfigProviders(
-          cfg.providers);
-      h.invalidateModelCache();
-      *message = okMessage;
-    } catch (const std::exception &ex) {
-      NotificationManager::instance().notifyError("Providers", ex.what(),
-                                                  false);
-    }
+  auto saveConfigAndReload = [message, refresh, &state](
+                                 const shared::UserConfig &cfg,
+                                 const std::string &okMessage) {
+    state.runBackgroundTask([cfg, okMessage, message, refresh, &state]() {
+      auto &h = firmius::core::Harness::instance();
+      try {
+        h.updateConfig(cfg);
+        h.saveConfig();
+        firmius::provider::ProviderRegistry::instance().reloadConfigProviders(
+            cfg.providers);
+        h.invalidateModelCache();
+        state.deferUiMutation([message, okMessage, refresh, &state]() {
+          *message = okMessage;
+          state.refreshProviderSnapshot([refresh]() { refresh(); });
+        });
+      } catch (const std::exception &ex) {
+        const std::string what = ex.what();
+        state.deferUiMutation([what]() {
+          NotificationManager::instance().notifyError("Providers", what,
+                                                      false);
+        });
+      }
+    });
   };
 
   auto applyFormFromProfile = [=](const shared::ProviderProfileConfig &p) {
     *editDisplayName = p.displayName;
     *editKindIndex = p.kind == "anthropic" ? 1 : 0;
+    *editAuthModeIndex = p.authMode == "none" ? 1 : 0;
     *editEnabledIndex = p.enabled ? 0 : 1;
     *editBaseUrl = p.baseUrl;
     *editModelsEndpoint = p.modelsEndpoint;
     *editChatEndpoint = p.chatEndpoint;
     *editMessagesEndpoint = p.messagesEndpoint;
     *editApiKeyRef = p.apiKeyRef;
+    *editDefaultApiKey = p.defaultApiKey;
     *editReasoningField = p.reasoningFieldName;
     *editAnthropicVersion = p.anthropicVersion;
     *editBetaHeader = p.betaHeader;
@@ -362,6 +349,7 @@ ftxui::Component ProvidersModal::create(TuiState &state) {
   auto buildProfileFromForm = [=]() -> shared::ProviderProfileConfig {
     shared::ProviderProfileConfig p;
     p.kind = (*editKindIndex == 1) ? "anthropic" : "openai_compatible";
+    p.authMode = (*editAuthModeIndex == 1) ? "none" : "api_key";
     p.displayName = *editDisplayName;
     p.enabled = (*editEnabledIndex == 0);
     p.baseUrl = *editBaseUrl;
@@ -371,6 +359,8 @@ ftxui::Component ProvidersModal::create(TuiState &state) {
     p.messagesEndpoint =
         normalizeEndpoint(*editMessagesEndpoint, "/v1/messages");
     p.apiKeyRef = *editApiKeyRef;
+    p.defaultApiKey = *editDefaultApiKey;
+    p.allowMissingApiKey = (p.authMode == "none");
     p.reasoningFieldName = *editReasoningField;
     p.anthropicVersion =
         editAnthropicVersion->empty() ? "2023-06-01" : *editAnthropicVersion;
@@ -397,12 +387,14 @@ ftxui::Component ProvidersModal::create(TuiState &state) {
     *editId = t.defaultId;
     *editDisplayName = t.displayName;
     *editKindIndex = t.kind == "anthropic" ? 1 : 0;
+    *editAuthModeIndex = t.apiKeyRef.empty() ? 1 : 0;
     *editEnabledIndex = 0;
     *editBaseUrl = t.baseUrl;
     *editModelsEndpoint = t.modelsEndpoint.empty() ? "/models" : t.modelsEndpoint;
     *editChatEndpoint = t.chatEndpoint;
     *editMessagesEndpoint = t.messagesEndpoint;
     *editApiKeyRef = t.apiKeyRef.empty() ? t.defaultId : t.apiKeyRef;
+    *editDefaultApiKey = "";
     *editReasoningField = t.reasoningField;
     *editAnthropicVersion = t.anthropicVersion;
     *editBetaHeader = t.betaHeader;
@@ -503,6 +495,137 @@ ftxui::Component ProvidersModal::create(TuiState &state) {
     return (*variantModelIds)[*selectedVariantModel];
   };
 
+  auto loadVariantMetadataFields = [=]() {
+    const std::string modelId = currentVariantModelId();
+    *variantContextWindowText = "";
+    *variantMaxOutputTokensText = "";
+    *variantModalitiesText = "text";
+    *variantSupportsReasoningIndex = 0;
+    if (modelId.empty()) {
+      return;
+    }
+
+    for (const auto &model :
+         firmius::core::Harness::instance().cachedModelsSnapshot()) {
+      if (model.provider != *variantProviderId || model.id != modelId) {
+        continue;
+      }
+      if (model.contextWindow > 0) {
+        *variantContextWindowText = std::to_string(model.contextWindow);
+      }
+      if (model.maxOutputTokens > 0) {
+        *variantMaxOutputTokensText = std::to_string(model.maxOutputTokens);
+      }
+      if (!model.modalities.empty()) {
+        std::string joined;
+        for (size_t i = 0; i < model.modalities.size(); ++i) {
+          if (i) {
+            joined += ",";
+          }
+          joined += model.modalities[i];
+        }
+        *variantModalitiesText = joined;
+      }
+      if (model.supportsReasoning) {
+        *variantSupportsReasoningIndex = 1;
+      }
+      break;
+    }
+
+    const auto cfg = firmius::core::Harness::instance().getConfig();
+    auto pit = cfg.providers.find(*variantProviderId);
+    if (pit == cfg.providers.end()) {
+      return;
+    }
+    auto mit = pit->second.modelVariants.find(modelId);
+    if (mit == pit->second.modelVariants.end()) {
+      return;
+    }
+    if (mit->second.overrideContextWindow) {
+      *variantContextWindowText = std::to_string(mit->second.contextWindow);
+    }
+    if (mit->second.overrideMaxOutputTokens) {
+      *variantMaxOutputTokensText =
+          std::to_string(mit->second.maxOutputTokens);
+    }
+    if (mit->second.overrideModalities) {
+      std::string joined;
+      for (size_t i = 0; i < mit->second.modalities.size(); ++i) {
+        if (i) {
+          joined += ",";
+        }
+        joined += mit->second.modalities[i];
+      }
+      *variantModalitiesText = joined;
+    }
+    if (mit->second.overrideSupportsReasoning) {
+      *variantSupportsReasoningIndex = mit->second.supportsReasoning ? 1 : 2;
+    }
+  };
+
+  auto saveModelMetadata = [=]() {
+    if (variantProviderId->empty()) {
+      return;
+    }
+    const std::string modelId = currentVariantModelId();
+    if (modelId.empty()) {
+      *message = "No model selected.";
+      return;
+    }
+    auto parseUint = [](const std::string &text) -> std::optional<std::uint32_t> {
+      if (text.empty()) {
+        return std::nullopt;
+      }
+      try {
+        return static_cast<std::uint32_t>(std::stoul(text));
+      } catch (...) {
+        return std::nullopt;
+      }
+    };
+    auto cfg = firmius::core::Harness::instance().getConfig();
+    auto pit = cfg.providers.find(*variantProviderId);
+    if (pit == cfg.providers.end()) {
+      shared::ProviderProfileConfig stub;
+      stub.kind = "openai_compatible";
+      stub.displayName = *variantProviderId;
+      stub.enabled = true;
+      cfg.providers[*variantProviderId] = stub;
+      pit = cfg.providers.find(*variantProviderId);
+    }
+    auto &modelCfg = pit->second.modelVariants[modelId];
+    const auto parsedContextWindow = parseUint(*variantContextWindowText);
+    modelCfg.overrideContextWindow = parsedContextWindow.has_value();
+    modelCfg.contextWindow = parsedContextWindow.value_or(0);
+    const auto parsedMaxOutputTokens = parseUint(*variantMaxOutputTokensText);
+    modelCfg.overrideMaxOutputTokens = parsedMaxOutputTokens.has_value();
+    modelCfg.maxOutputTokens = parsedMaxOutputTokens.value_or(0);
+
+    std::vector<std::string> modalities;
+    std::string token;
+    for (char ch : *variantModalitiesText) {
+      if (ch == ',') {
+        if (!token.empty()) {
+          modalities.push_back(token);
+          token.clear();
+        }
+        continue;
+      }
+      if (!std::isspace(static_cast<unsigned char>(ch))) {
+        token.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
+      }
+    }
+    if (!token.empty()) {
+      modalities.push_back(token);
+    }
+    modelCfg.overrideModalities = !modalities.empty();
+    modelCfg.modalities = std::move(modalities);
+    modelCfg.overrideSupportsReasoning = *variantSupportsReasoningIndex != 0;
+    modelCfg.supportsReasoning = *variantSupportsReasoningIndex == 1;
+
+    saveConfigAndReload(cfg, "Saved model settings for '" + modelId + "'.");
+    refreshVariantModels();
+  };
+
   auto openVariants = [=](const std::string &id) {
     if (id.empty()) {
       return;
@@ -513,6 +636,7 @@ ftxui::Component ProvidersModal::create(TuiState &state) {
     *variantNameInputText = "thinking";
     *variantJsonInputText = "{}";
     *variantDescriptionInputText = "";
+    loadVariantMetadataFields();
     *mode = Mode::Variants;
     *message = "Variant editor for '" + id + "'.";
   };
@@ -552,6 +676,43 @@ ftxui::Component ProvidersModal::create(TuiState &state) {
         variantJsonInputText->empty() ? "{}" : *variantJsonInputText;
     vcfg.description = *variantDescriptionInputText;
     modelCfg.variants[*variantNameInputText] = vcfg;
+    const auto parseUint = [](const std::string &text) -> std::optional<std::uint32_t> {
+      if (text.empty()) {
+        return std::nullopt;
+      }
+      try {
+        return static_cast<std::uint32_t>(std::stoul(text));
+      } catch (...) {
+        return std::nullopt;
+      }
+    };
+    const auto parsedContextWindow = parseUint(*variantContextWindowText);
+    modelCfg.overrideContextWindow = parsedContextWindow.has_value();
+    modelCfg.contextWindow = parsedContextWindow.value_or(0);
+    const auto parsedMaxOutputTokens = parseUint(*variantMaxOutputTokensText);
+    modelCfg.overrideMaxOutputTokens = parsedMaxOutputTokens.has_value();
+    modelCfg.maxOutputTokens = parsedMaxOutputTokens.value_or(0);
+    std::vector<std::string> modalities;
+    std::string token;
+    for (char ch : *variantModalitiesText) {
+      if (ch == ',') {
+        if (!token.empty()) {
+          modalities.push_back(token);
+          token.clear();
+        }
+        continue;
+      }
+      if (!std::isspace(static_cast<unsigned char>(ch))) {
+        token.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
+      }
+    }
+    if (!token.empty()) {
+      modalities.push_back(token);
+    }
+    modelCfg.overrideModalities = !modalities.empty();
+    modelCfg.modalities = std::move(modalities);
+    modelCfg.overrideSupportsReasoning = *variantSupportsReasoningIndex != 0;
+    modelCfg.supportsReasoning = *variantSupportsReasoningIndex == 1;
     saveConfigAndReload(cfg, "Saved variant '" + *variantNameInputText +
                                  "' for '" + modelId + "'.");
     refreshVariantModels();
@@ -661,11 +822,13 @@ ftxui::Component ProvidersModal::create(TuiState &state) {
   };
 
   refresh();
+  state.refreshProviderSnapshot([refresh]() { refresh(); });
 
   // ------------------------- input components ---------------------------
   auto idInput = ftxui::Input(editId.get(), "provider id");
   auto displayInput = ftxui::Input(editDisplayName.get(), "display name");
   auto kindCycle = MakeCycleField(editKindLabels, editKindIndex);
+  auto authModeCycle = MakeCycleField(editAuthModeLabels, editAuthModeIndex);
   auto enabledCycle = MakeCycleField(editEnabledLabels, editEnabledIndex);
   auto streamUsageCycle =
       MakeCycleField(editStreamUsageLabels, editStreamUsageIndex);
@@ -677,6 +840,8 @@ ftxui::Component ProvidersModal::create(TuiState &state) {
   auto messagesEndpointInput =
       ftxui::Input(editMessagesEndpoint.get(), "/v1/messages");
   auto apiKeyRefInput = ftxui::Input(editApiKeyRef.get(), "api key ref");
+  auto defaultApiKeyInput =
+      ftxui::Input(editDefaultApiKey.get(), "optional default api key");
   auto reasoningFieldInput =
       ftxui::Input(editReasoningField.get(), "reasoning_effort");
   auto anthropicVersionInput =
@@ -710,17 +875,28 @@ ftxui::Component ProvidersModal::create(TuiState &state) {
       variantJsonInputText.get(), "json patch (e.g. {\"reasoning\":{}})");
   auto variantDescriptionInput =
       ftxui::Input(variantDescriptionInputText.get(), "optional description");
+  auto variantContextWindowInput =
+      ftxui::Input(variantContextWindowText.get(), "e.g. 128000");
+  auto variantMaxOutputTokensInput =
+      ftxui::Input(variantMaxOutputTokensText.get(), "optional");
+  auto variantModalitiesInput =
+      ftxui::Input(variantModalitiesText.get(), "text,image");
+  auto variantReasoningCycle =
+      MakeCycleField(variantSupportsReasoningLabels,
+                     variantSupportsReasoningIndex);
 
   auto editFormContainer = ftxui::Container::Vertical({
       idInput,
       displayInput,
       kindCycle,
+      authModeCycle,
       enabledCycle,
       baseUrlInput,
       modelsEndpointInput,
       chatEndpointInput,
       messagesEndpointInput,
       apiKeyRefInput,
+      defaultApiKeyInput,
       reasoningFieldInput,
       anthropicVersionInput,
       betaHeaderInput,
@@ -746,6 +922,10 @@ ftxui::Component ProvidersModal::create(TuiState &state) {
       variantNameInput,
       variantJsonInput,
       variantDescriptionInput,
+      variantContextWindowInput,
+      variantMaxOutputTokensInput,
+      variantModalitiesInput,
+      variantReasoningCycle,
   });
 
   auto eventContainer = ftxui::Container::Vertical({
@@ -847,6 +1027,8 @@ ftxui::Component ProvidersModal::create(TuiState &state) {
           fieldRow("Display", displayInput->Render(), theme));
       elements.push_back(fieldRow("Kind", kindCycle->Render(), theme));
       elements.push_back(
+          fieldRow("Auth mode", authModeCycle->Render(), theme));
+      elements.push_back(
           fieldRow("Enabled", enabledCycle->Render(), theme));
       elements.push_back(
           fieldRow("Base URL", baseUrlInput->Render(), theme));
@@ -867,6 +1049,10 @@ ftxui::Component ProvidersModal::create(TuiState &state) {
       }
       elements.push_back(
           fieldRow("API key ref", apiKeyRefInput->Render(), theme));
+      if (*editAuthModeIndex == 0) {
+        elements.push_back(fieldRow("Default API key",
+                                    defaultApiKeyInput->Render(), theme));
+      }
       elements.push_back(
           fieldRow("Stream usage", streamUsageCycle->Render(), theme));
       elements.push_back(
@@ -1001,11 +1187,19 @@ ftxui::Component ProvidersModal::create(TuiState &state) {
           fieldRow("Variant JSON", variantJsonInput->Render(), theme));
       elements.push_back(
           fieldRow("Description", variantDescriptionInput->Render(), theme));
+      elements.push_back(
+          fieldRow("Context window", variantContextWindowInput->Render(), theme));
+      elements.push_back(fieldRow("Max output",
+                                  variantMaxOutputTokensInput->Render(), theme));
+      elements.push_back(
+          fieldRow("Modalities", variantModalitiesInput->Render(), theme));
+      elements.push_back(fieldRow("Reasoning",
+                                  variantReasoningCycle->Render(), theme));
       elements.push_back(ftxui::separatorLight() |
                          ftxui::color(theme.modals.border));
       elements.push_back(
-          ftxui::text("A add/update  X delete  S set default  P pull models  "
-                      "↑↓ pick model  Esc back") |
+          ftxui::text("Ctrl+S save model  A add/update variant  X delete  "
+                      "S set default  P pull models  ↑↓ pick model  Esc back") |
           ftxui::color(theme.base.dim));
     }
 
@@ -1304,15 +1498,23 @@ ftxui::Component ProvidersModal::create(TuiState &state) {
 
     // Variants branch.
     if (*mode == Mode::Variants) {
+      if (event == ftxui::Event::CtrlS ||
+          (event.is_character() &&
+           event.character() == std::string(1, '\x13'))) {
+        saveModelMetadata();
+        return true;
+      }
       if (!variantFormContainer->Focused()) {
         if (event == ftxui::Event::ArrowUp && *selectedVariantModel > 0) {
           --(*selectedVariantModel);
+          loadVariantMetadataFields();
           return true;
         }
         if (event == ftxui::Event::ArrowDown &&
             *selectedVariantModel + 1 <
                 static_cast<int>(variantModelIds->size())) {
           ++(*selectedVariantModel);
+          loadVariantMetadataFields();
           return true;
         }
         if (event == ftxui::Event::Character('a') ||

@@ -13,3 +13,4 @@ Rules:
 - No quotes, no prefixes, no explanations
 - Capture the core intent or topic
 - Use title case
+- Prefer concrete nouns and verbs over vague labels

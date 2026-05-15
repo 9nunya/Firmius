@@ -805,13 +805,32 @@ BaseOpenAIProvider::prepareRequestBody(const AgentHistory &history,
 
       std::string textContent;
       std::string reasoningContent;
+      rapidjson::Value richContent(rapidjson::kArrayType);
+      bool hasRichContent = false;
       rapidjson::Value toolCalls(rapidjson::kArrayType);
 
       for (const auto &part : msg.content) {
         if (auto *txt = std::get_if<TextContent>(&part)) {
           textContent += txt->text;
+          rapidjson::Value textPart(rapidjson::kObjectType);
+          textPart.AddMember("type", "text", a);
+          textPart.AddMember("text", rapidjson::Value(txt->text.c_str(), a), a);
+          richContent.PushBack(textPart, a);
+          hasRichContent = true;
         } else if (auto *thk = std::get_if<ThinkingContent>(&part)) {
           reasoningContent += thk->thinking;
+        } else if (auto *img = std::get_if<ImageContent>(&part)) {
+          rapidjson::Value imagePart(rapidjson::kObjectType);
+          imagePart.AddMember("type", "image_url", a);
+          rapidjson::Value imageUrl(rapidjson::kObjectType);
+          imageUrl.AddMember("url", rapidjson::Value(img->url.c_str(), a), a);
+          if (!img->detail.empty()) {
+            imageUrl.AddMember("detail",
+                               rapidjson::Value(img->detail.c_str(), a), a);
+          }
+          imagePart.AddMember("image_url", imageUrl, a);
+          richContent.PushBack(imagePart, a);
+          hasRichContent = true;
         } else if (auto *tcc = std::get_if<ToolCallContent>(&part)) {
           rapidjson::Value tc(rapidjson::kObjectType);
           tc.AddMember("id", rapidjson::Value(tcc->id.c_str(), a), a);
@@ -825,7 +844,12 @@ BaseOpenAIProvider::prepareRequestBody(const AgentHistory &history,
         }
       }
 
-      m.AddMember("content", rapidjson::Value(textContent.c_str(), a), a);
+      if (hasRichContent &&
+          (msg.role == Role::User || msg.role == Role::System)) {
+        m.AddMember("content", richContent, a);
+      } else {
+        m.AddMember("content", rapidjson::Value(textContent.c_str(), a), a);
+      }
       if (!reasoningContent.empty()) {
         m.AddMember(rapidjson::Value(getReasoningFieldName().c_str(), a),
                     rapidjson::Value(reasoningContent.c_str(), a), a);

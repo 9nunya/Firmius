@@ -55,7 +55,7 @@ protected:
         metadata.hostOptions.type = HostType::Local;
         metadata.hostIdentifier = "host-e2e";
         metadata.cwd = "/tmp/e2e";
-        metadata.leadPersona = "aster";
+        metadata.leadPersona = "lead";
         return metadata;
     }
 
@@ -108,7 +108,7 @@ protected:
         task.status = WorkChunkStatus::Ready;
         task.notes = "careful";
         task.verificationCondition = "data readable";
-        task.assignedWorkerId = "forge";
+        task.assignedWorkerId = "coder";
         chunk.tasks.push_back(task);
 
         plan.chunks.push_back(chunk);

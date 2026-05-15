@@ -145,11 +145,17 @@ ftxui::Component KeybindingEditorModal::create(TuiState &state) {
                                               : theme.base.dim),
                   });
       if (active) {
-        line = line | ftxui::bgcolor(theme.modals.highlight_bg);
+        // Anchor the surrounding yframe scroll on the active row so ArrowDown
+        // past the visible window pulls the list down instead of running off.
+        line = line | ftxui::bgcolor(theme.modals.highlight_bg) | ftxui::focus;
       }
       items.push_back(line);
-      items.push_back(ftxui::text("      " + row.description) |
-                      ftxui::color(theme.base.dim));
+      auto desc = ftxui::text("      " + row.description) |
+                  ftxui::color(theme.base.dim);
+      if (active) {
+        desc = desc | ftxui::focus;
+      }
+      items.push_back(desc);
     }
 
     std::string warning_text;

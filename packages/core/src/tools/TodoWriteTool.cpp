@@ -120,7 +120,15 @@ shared::ToolMetadata TodoWriteTool::getMetadata() const {
 
 std::shared_ptr<shared::JSONSchema> TodoWriteTool::getSchema() const {
   return zObject({{"patch",
-                   zString()->describe("Full todo list state in numbered format.")}})
+                   zString()->describe(
+                       "Full todo list state in numbered text format.\n\n"
+                       "USAGE:\n"
+                       "- Pass the ENTIRE desired todo list, not a partial delta.\n"
+                       "- Each item should preserve numbering/id semantics expected by the parser.\n"
+                       "- Use this tool to rewrite current todo state atomically after progress, decomposition, or completion changes.\n\n"
+                       "IMPORTANT:\n"
+                       "- This is the source of truth for the runtime todo contract.\n"
+                       "- Omitting an existing item removes it from the todo list.")}})
       ->required({"patch"});
 }
 

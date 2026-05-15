@@ -28,6 +28,8 @@ public:
     Agent& getAgent();
     shared::IHost& getHost();
     const BenchmarkConfig& config() const;
+    const std::string& threadId() const { return threadId_; }
+    const std::string& agentId() const { return agentId_; }
     void emitLog(const std::string& message) const;
     shared::AgentOutcome runAgentTask(
         const std::string &task,

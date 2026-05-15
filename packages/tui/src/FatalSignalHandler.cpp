@@ -1,6 +1,5 @@
 #include "FatalSignalHandler.hpp"
 
-#include <atomic>
 #include <csignal>
 #include <initializer_list>
 
@@ -53,8 +52,6 @@ extern "C" void firmius_fatal_signal_handler(int sig) {
   ::_exit(128 + sig);
 }
 
-std::atomic<bool> g_installed{false};
-
 #endif // !_WIN32
 
 } // namespace
@@ -66,10 +63,6 @@ void installFatalSignalHandlers() {
   // returning SIGSEGV handler. Windows uses SEH for access violations.
   return;
 #else
-  if (g_installed.exchange(true, std::memory_order_acq_rel)) {
-    return;
-  }
-
   struct sigaction sa{};
   sa.sa_handler = firmius_fatal_signal_handler;
   sigemptyset(&sa.sa_mask);

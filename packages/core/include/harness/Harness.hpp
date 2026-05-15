@@ -109,6 +109,10 @@ public:
    */
   void send(const std::string &text,
             const std::vector<firmius::shared::ImageContent> &images = {});
+  bool sendToThreadAgent(
+      const std::string &threadId, const std::string &agentId,
+      const std::string &text,
+      const std::vector<firmius::shared::ImageContent> &images = {});
   bool retryLastRequest(std::string &statusMessage);
 
   /**
@@ -201,6 +205,8 @@ public:
   void persistReadSessionAllowance(const std::string &threadId);
   ThreadPermissionMode currentThreadPermissionMode();
   bool setCurrentThreadPermissionMode(ThreadPermissionMode mode);
+  bool setThreadPermissionMode(const std::string &threadId,
+                               ThreadPermissionMode mode);
   std::optional<ThreadPermissionMode> cycleCurrentThreadPermissionMode();
   PermissionResponse
   requestPermissionEscalation(PermissionEscalationRequest request);
@@ -218,6 +224,12 @@ public:
   void deleteThread(const std::string &threadId);
 
   std::vector<ThreadMetadata> listThreads();
+  // Fast-path single-thread metadata lookup. listThreads() loads EVERY
+  // thread in the DB (can be thousands) just so callers can find one entry
+  // by id — that full-list read was the source of the observable freeze
+  // on the welcome→chat transition, where submitPrompt iterated the whole
+  // list to rebind metadata for the just-created thread.
+  ThreadMetadata getThreadMetadata(const std::string &threadId);
   std::vector<std::string> listAgents(const std::string &threadId = "");
   std::vector<shared::ThreadArtifactMetadata>
   listArtifacts(const std::string &threadId = "");
@@ -335,9 +347,14 @@ public:
   std::shared_ptr<shared::AgentHistory>
   getAgentHistoryPtr(const std::string &agentId) const;
 
+  bool materializeThreadLeadAgent(const std::string &threadId,
+                                  std::string &agentIdOut);
+
 private:
   Harness();
-  ~Harness() = default;
+  ~Harness();
+
+  void joinBackgroundThreads();
 
   // Allow Agent, Engine, and lock tools to use internal messaging
   friend class Agent;
@@ -367,32 +384,6 @@ private:
    */
   void routeEngineEvent(const firmius::shared::AppEvent &event);
 
-  std::string currentThreadId_;
-  std::string focusedAgentId_;
-  ThreadManager threadManager_;
-  ThreadLockManager lockManager_;
-  std::recursive_mutex mutex_;
-
-  // Subscribers
-  firmius::shared::utils::FastHash<int, std::function<void(const firmius::shared::AppEvent &)>> subscribers_;
-  int nextSubscriptionId_ = 0;
-
-  // Agent state tracking for event routing
-  firmius::shared::utils::FastHash<std::string, std::string> threadAgentMap_; // threadId -> focusedAgentId
-
-  // Track which threads have had titles generated
-  std::unordered_set<std::string> titleGeneratedThreads_;
-
-  struct PendingPermissionRequest {
-    std::mutex mutex;
-    std::condition_variable cv;
-    bool resolved = false;
-    PermissionResponse response = PermissionResponse::Deny;
-    PermissionEscalationRequest request;
-  };
-  firmius::shared::utils::FastHash<std::string, std::shared_ptr<PendingPermissionRequest>> pendingPermissionRequests_;
-  uint64_t nextPermissionRequestId_ = 0;
-
   void maybeGenerateTitle(const std::string &threadId,
                           const std::string &firstMessage);
   bool dispatchRequestToAgent(
@@ -410,6 +401,8 @@ private:
   std::optional<std::string> resolveRetryTargetAgentId(
       const std::string &threadId,
       const std::string &preferredAgentId = "");
+  std::optional<std::string>
+  materializeLeadAgentIdentity(const std::string &threadId);
 
   /**
    * Drains queued messages targeting the specified agent when that agent is
@@ -466,6 +459,32 @@ private:
   bool isRefreshingModels_ = false;
   bool modelsLoaded_ = false;
   bool engineListenerRegistered_ = false;
+
+  std::string currentThreadId_;
+  std::string focusedAgentId_;
+  ThreadManager threadManager_;
+  ThreadLockManager lockManager_;
+  std::recursive_mutex mutex_;
+
+  // Subscribers
+  firmius::shared::utils::FastHash<int, std::function<void(const firmius::shared::AppEvent &)>> subscribers_;
+  int nextSubscriptionId_ = 0;
+
+  // Agent state tracking for event routing
+  firmius::shared::utils::FastHash<std::string, std::string> threadAgentMap_; // threadId -> focusedAgentId
+
+  // Track which threads have had titles generated
+  std::unordered_set<std::string> titleGeneratedThreads_;
+
+  struct PendingPermissionRequest {
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool resolved = false;
+    PermissionResponse response = PermissionResponse::Deny;
+    PermissionEscalationRequest request;
+  };
+  firmius::shared::utils::FastHash<std::string, std::shared_ptr<PendingPermissionRequest>> pendingPermissionRequests_;
+  uint64_t nextPermissionRequestId_ = 0;
 
   // Tracking for detached background tasks (e.g. title generation)
   std::vector<std::thread> backgroundThreads_;

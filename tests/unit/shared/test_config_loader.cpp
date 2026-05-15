@@ -47,7 +47,7 @@ TEST_F(ConfigLoaderRouterTest, SavesAndLoadsRouterCategoriesAndPurposeRoutes) {
   cfg.defaultModelVariant = "thinking";
   cfg.modelRouterCategories["code"].models = {{"openai", "gpt-5-codex", "thinking"}};
   cfg.modelRouterCategories["research"].models = {{"openrouter", "qwen-omni", ""}};
-  cfg.purposeRoutes["executor"] = "code";
+  cfg.purposeRoutes["coder"] = "code";
   cfg.defaultRouteCategory = "research";
   cfg.enableSubagentRouteFallback = true;
   cfg.subagentRouteFallbackOrder = {"research", "code"};
@@ -57,7 +57,7 @@ TEST_F(ConfigLoaderRouterTest, SavesAndLoadsRouterCategoriesAndPurposeRoutes) {
   cfg.rollingMemory.targetOccupancyRatio = 0.57f;
   cfg.rollingMemory.bufferOccupancyRatio = 0.47f;
   cfg.rollingMemory.emergencyOccupancyRatio = 0.66f;
-  cfg.rollingMemory.observer = {true, "openai", "gpt-5.4-mini", "fast"};
+  cfg.rollingMemory.observer = {true, "openai", "gpt-5.4-mini", "explorer"};
   cfg.rollingMemory.reflector = {true, "openrouter", "qwen3", ""};
 
   loader.updateConfig(cfg);
@@ -73,7 +73,7 @@ TEST_F(ConfigLoaderRouterTest, SavesAndLoadsRouterCategoriesAndPurposeRoutes) {
   EXPECT_EQ(loaded.modelRouterCategories.at("code").models[0].providerId, "openai");
   EXPECT_EQ(loaded.modelRouterCategories.at("code").models[0].modelId, "gpt-5-codex");
   EXPECT_EQ(loaded.modelRouterCategories.at("code").models[0].variantName, "thinking");
-  EXPECT_EQ(loaded.purposeRoutes.at("executor"), "code");
+  EXPECT_EQ(loaded.purposeRoutes.at("coder"), "code");
   EXPECT_EQ(loaded.defaultRouteCategory, "research");
   EXPECT_TRUE(loaded.enableSubagentRouteFallback);
   ASSERT_EQ(loaded.subagentRouteFallbackOrder.size(), 2u);

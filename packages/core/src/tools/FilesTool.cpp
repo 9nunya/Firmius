@@ -619,20 +619,105 @@ shared::ToolResult executeGlob(const rapidjson::Value &input, shared::ToolContex
 } // namespace
 
 shared::ToolMetadata FilesTool::getMetadata() const {
-  return {"Files", "Filesystem operations. Use action Read, List, Grep, or Glob.", shared::ToolScope::FilesystemRead};
+  return {
+      "Files",
+      R"(Filesystem operations: read files, list directories, grep text, and expand globs.
+
+USAGE GUIDANCE (read this):
+- Prefer this tool over guessing repository state.
+- Always pass paths relative to the workspace root when possible.
+- Use Read before making edits so you anchor your changes to exact file contents.
+- Use List/Glob to discover files; use Grep to locate symbols/strings across the repo.
+- Treat returned output as authoritative: if it says budget_hit=true or truncated=true, refine the query (narrow path/glob, tighten pattern, use start_line/end_line).
+
+ACTIONS:
+- Read: Read a text file (optionally line-ranged). Returns numbered lines.
+- List: List directory entries.
+- Grep: Regex search through files under a directory tree.
+- Glob: Expand a glob pattern (e.g. "src/**/*.cpp").
+
+SECURITY / PERMISSIONS:
+- All actions require filesystem READ access to the resolved paths.
+- Binary/huge files may be truncated for safety.
+)",
+      shared::ToolScope::FilesystemRead};
 }
 
 std::shared_ptr<shared::JSONSchema> FilesTool::getSchema() const {
   return shared::zObject({
-      {"action", shared::zEnum({"Read", "List", "Grep", "Glob"})->describe("Filesystem operation to execute")},
-      {"path", shared::zString()->setOptional()},
-      {"pattern", shared::zString()->setOptional()},
-      {"glob", shared::zString()->setOptional()},
-      {"include_hidden", shared::zBoolean()->setOptional()},
-      {"start_line", shared::zInteger()->setOptional()},
-      {"end_line", shared::zInteger()->setOptional()},
-      {"context_before", shared::zInteger()->setOptional()},
-      {"context_after", shared::zInteger()->setOptional()},
+      {"action",
+       shared::zEnum({"Read", "List", "Grep", "Glob"})
+           ->describe(
+               "Which filesystem operation to execute.\n\n"
+               "Allowed values:\n"
+               "- Read: read a file (optionally line-ranged)\n"
+               "- List: list directory entries\n"
+               "- Grep: search file contents for a regex pattern\n"
+               "- Glob: expand a glob pattern into matching paths\n\n"
+               "Usage notes: Choose the narrowest action that answers the question. "
+               "If you need exact file contents, use Read; if you need discovery, use List/Glob; "
+               "if you need to locate a string/symbol, use Grep.")},
+
+      {"path",
+       shared::zString()
+           ->setOptional()
+           ->describe(
+               "Path meaning depends on action. Provide a workspace-relative path when possible.\n\n"
+               "- Read: the file to read\n"
+               "- List: the directory to list\n"
+               "- Grep: the directory root to search under (use '.' for repo root)\n"
+               "- Glob: optional base directory for resolving the glob; if omitted, the glob is evaluated from workspace root\n\n"
+               "Security: must be readable under current permissions. Relative paths are resolved against the workspace root.")},
+
+      {"pattern",
+       shared::zString()
+           ->setOptional()
+           ->describe(
+               "Regex pattern for Grep action.\n\n"
+               "Required when action=Grep. Interpreted as a regular expression. "
+               "If you want a literal match, escape regex metacharacters (e.g. '\\.' for '.').")},
+
+      {"glob",
+       shared::zString()
+           ->setOptional()
+           ->describe(
+               "Glob pattern for Glob action (e.g. 'src/**/*.cpp').\n\n"
+               "Required when action=Glob. Use this to discover matching paths without reading file contents.")},
+
+      {"include_hidden",
+       shared::zBoolean()
+           ->setOptional()
+           ->describe(
+               "Whether to include dotfiles/directories (names starting with '.').\n\n"
+               "Default: false. Applies primarily to List/Grep/Glob traversal.")},
+
+      {"start_line",
+       shared::zInteger()
+           ->setOptional()
+           ->describe(
+               "For Read action: 1-based starting line to include.\n\n"
+               "Default: 1. If provided with end_line, returns only that line range.")},
+
+      {"end_line",
+       shared::zInteger()
+           ->setOptional()
+           ->describe(
+               "For Read action: 1-based ending line to include (inclusive).\n\n"
+               "Default: -1 (read to end of file).")},
+
+      {"context_before",
+       shared::zInteger()
+           ->setOptional()
+           ->describe(
+               "For Grep action: number of context lines to include before each match.\n\n"
+               "Default: 0. Increase for better local reasoning around a match.")},
+
+      {"context_after",
+       shared::zInteger()
+           ->setOptional()
+           ->describe(
+               "For Grep action: number of context lines to include after each match.\n\n"
+               "Default: 0.")},
   });
 }
 

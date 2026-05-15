@@ -375,6 +375,21 @@ rapidjson::Value toJsonProviderModelConfig(
                            allocator);
     }
     v.AddMember("variants", variants, allocator);
+    v.AddMember("overrideContextWindow", config.overrideContextWindow, allocator);
+    v.AddMember("contextWindow", config.contextWindow, allocator);
+    v.AddMember("overrideMaxOutputTokens", config.overrideMaxOutputTokens,
+                allocator);
+    v.AddMember("maxOutputTokens", config.maxOutputTokens, allocator);
+    v.AddMember("overrideModalities", config.overrideModalities, allocator);
+    rapidjson::Value modalities(rapidjson::kArrayType);
+    for (const auto &modality : config.modalities) {
+        modalities.PushBack(rapidjson::Value(modality.c_str(), allocator),
+                            allocator);
+    }
+    v.AddMember("modalities", modalities, allocator);
+    v.AddMember("overrideSupportsReasoning",
+                config.overrideSupportsReasoning, allocator);
+    v.AddMember("supportsReasoning", config.supportsReasoning, allocator);
     return v;
 }
 
@@ -382,6 +397,8 @@ rapidjson::Value toJsonProviderProfileConfig(
     const ProviderProfileConfig& config,
     rapidjson::Document::AllocatorType& allocator) {
     rapidjson::Value v(rapidjson::kObjectType);
+    v.AddMember("authMode", rapidjson::Value(config.authMode.c_str(), allocator),
+                allocator);
     v.AddMember("kind", rapidjson::Value(config.kind.c_str(), allocator), allocator);
     v.AddMember("displayName",
                 rapidjson::Value(config.displayName.c_str(), allocator),
@@ -400,6 +417,10 @@ rapidjson::Value toJsonProviderProfileConfig(
     v.AddMember("apiKeyRef",
                 rapidjson::Value(config.apiKeyRef.c_str(), allocator),
                 allocator);
+    v.AddMember("defaultApiKey",
+                rapidjson::Value(config.defaultApiKey.c_str(), allocator),
+                allocator);
+    v.AddMember("allowMissingApiKey", config.allowMissingApiKey, allocator);
     rapidjson::Value headers(rapidjson::kObjectType);
     for (const auto& [key, value] : config.headers) {
         headers.AddMember(rapidjson::Value(key.c_str(), allocator),
@@ -543,12 +564,50 @@ void providerModelConfigFromJson(const rapidjson::Value& v,
             config.variants[it->name.GetString()] = variant;
         }
     }
+    if (v.HasMember("overrideContextWindow") &&
+        v["overrideContextWindow"].IsBool()) {
+        config.overrideContextWindow = v["overrideContextWindow"].GetBool();
+    }
+    if (v.HasMember("contextWindow") && v["contextWindow"].IsUint()) {
+        config.contextWindow = v["contextWindow"].GetUint();
+    }
+    if (v.HasMember("overrideMaxOutputTokens") &&
+        v["overrideMaxOutputTokens"].IsBool()) {
+        config.overrideMaxOutputTokens =
+            v["overrideMaxOutputTokens"].GetBool();
+    }
+    if (v.HasMember("maxOutputTokens") && v["maxOutputTokens"].IsUint()) {
+        config.maxOutputTokens = v["maxOutputTokens"].GetUint();
+    }
+    if (v.HasMember("overrideModalities") &&
+        v["overrideModalities"].IsBool()) {
+        config.overrideModalities = v["overrideModalities"].GetBool();
+    }
+    if (v.HasMember("modalities") && v["modalities"].IsArray()) {
+        config.modalities.clear();
+        for (const auto &item : v["modalities"].GetArray()) {
+            if (item.IsString()) {
+                config.modalities.push_back(item.GetString());
+            }
+        }
+    }
+    if (v.HasMember("overrideSupportsReasoning") &&
+        v["overrideSupportsReasoning"].IsBool()) {
+        config.overrideSupportsReasoning =
+            v["overrideSupportsReasoning"].GetBool();
+    }
+    if (v.HasMember("supportsReasoning") && v["supportsReasoning"].IsBool()) {
+        config.supportsReasoning = v["supportsReasoning"].GetBool();
+    }
 }
 
 void providerProfileConfigFromJson(const rapidjson::Value& v,
                                    ProviderProfileConfig& config) {
     if (!v.IsObject()) {
         return;
+    }
+    if (v.HasMember("authMode") && v["authMode"].IsString()) {
+        config.authMode = v["authMode"].GetString();
     }
     if (v.HasMember("kind") && v["kind"].IsString()) {
         config.kind = v["kind"].GetString();
@@ -573,6 +632,13 @@ void providerProfileConfigFromJson(const rapidjson::Value& v,
     }
     if (v.HasMember("apiKeyRef") && v["apiKeyRef"].IsString()) {
         config.apiKeyRef = v["apiKeyRef"].GetString();
+    }
+    if (v.HasMember("defaultApiKey") && v["defaultApiKey"].IsString()) {
+        config.defaultApiKey = v["defaultApiKey"].GetString();
+    }
+    if (v.HasMember("allowMissingApiKey") &&
+        v["allowMissingApiKey"].IsBool()) {
+        config.allowMissingApiKey = v["allowMissingApiKey"].GetBool();
     }
     if (v.HasMember("headers") && v["headers"].IsObject()) {
         config.headers.clear();
@@ -609,6 +675,9 @@ void providerProfileConfigFromJson(const rapidjson::Value& v,
             config.modelVariants[it->name.GetString()] = model;
         }
     }
+    if (config.authMode.empty()) {
+        config.authMode = config.allowMissingApiKey ? "none" : "api_key";
+    }
 }
 
 } // namespace
@@ -638,6 +707,16 @@ void ConfigLoader::loadImpl() {
                          std::istreambuf_iterator<char>());
     file.close();
 
+    // Treat an empty or whitespace-only config file as "no overrides" rather
+    // than a fatal parse error. This matches the 08fd932 behavior and avoids
+    // crashing first-run sessions where the file exists but is zero bytes.
+    const bool onlyWhitespace = std::all_of(content.begin(), content.end(),
+        [](unsigned char c) { return std::isspace(c); });
+    if (content.empty() || onlyWhitespace) {
+        loaded_ = true;
+        return;
+    }
+
     rapidjson::Document doc;
     doc.Parse(content.c_str());
     if (doc.HasParseError()) {
@@ -653,7 +732,7 @@ void ConfigLoader::loadImpl() {
     if (doc.HasMember("defaultModelVariant") && doc["defaultModelVariant"].IsString()) {
         config_.defaultModelVariant = doc["defaultModelVariant"].GetString();
     }
-    config_.defaultLeadPersona = "aster";
+    config_.defaultLeadPersona = "lead";
     if (doc.HasMember("defaultLeadPersona") && doc["defaultLeadPersona"].IsString()) {
         config_.defaultLeadPersona = doc["defaultLeadPersona"].GetString();
     }
@@ -937,12 +1016,34 @@ void ConfigLoader::save() const {
     rapidjson::PrettyWriter<rapidjson::StringBuffer> writer(buffer);
     doc.Accept(writer);
 
-    std::ofstream file(configPath);
-    if (!file.is_open()) {
-        throw std::runtime_error("Failed to open config file for writing: " + configPath);
+    // Atomic write: serialize to a sibling temp file, then rename into place.
+    // Prevents zero-byte config.json when the process dies after ofstream()
+    // has truncated the target but before the write completes.
+    const std::string tempPath = configPath + ".tmp";
+    {
+        std::ofstream file(tempPath, std::ios::binary | std::ios::trunc);
+        if (!file.is_open()) {
+            throw std::runtime_error("Failed to open config file for writing: " + tempPath);
+        }
+        file << buffer.GetString();
+        file.flush();
+        if (!file.good()) {
+            throw std::runtime_error("Failed to write config file: " + tempPath);
+        }
     }
-    file << buffer.GetString();
-    file.close();
+    std::error_code ec;
+    std::filesystem::rename(tempPath, configPath, ec);
+    if (ec) {
+        // Fallback for cross-device renames etc.
+        std::filesystem::copy_file(
+            tempPath, configPath,
+            std::filesystem::copy_options::overwrite_existing, ec);
+        std::filesystem::remove(tempPath);
+        if (ec) {
+            throw std::runtime_error("Failed to commit config file: " +
+                                     configPath + " (" + ec.message() + ")");
+        }
+    }
 }
 
 const UserConfig& ConfigLoader::getConfig() const {

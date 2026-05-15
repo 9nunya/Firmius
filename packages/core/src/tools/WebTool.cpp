@@ -53,17 +53,34 @@ shared::ToolResult forwardTool(Tool &tool, const rapidjson::Value &input,
 
 shared::ToolMetadata WebTool::getMetadata() const {
   return {"Web",
-          "Web operations. Use action Fetch or Search.",
+          R"(Web operations for fetching pages and performing search.
+
+USAGE GUIDANCE:
+- Use Search when you need discovery across the public web.
+- Use Fetch when you already know the target URL(s) and want page content.
+- Prefer repository evidence over web evidence when the answer exists locally.
+- Keep requests focused; large fetches/searches increase noise.
+
+ACTIONS:
+- Search: search the web for a query.
+- Fetch: fetch one or more URLs.
+)",
           shared::ToolScope::Web};
 }
 
 std::shared_ptr<shared::JSONSchema> WebTool::getSchema() const {
   return shared::zObject({
       {"action", shared::zEnum({"Fetch", "Search"})
-                     ->describe("Web operation to execute")},
-      {"url", shared::zString()->setOptional()},
-      {"query", shared::zString()->setOptional()},
-      {"urls", shared::zArray(shared::zString())->setOptional()},
+                     ->describe(
+                         "Which web operation to execute.\n\n"
+                         "- Fetch: retrieve content from one or more known URLs\n"
+                         "- Search: perform a web search for a query")},
+      {"url", shared::zString()->setOptional()->describe(
+          "Single URL to fetch when action=Fetch and you only need one page.")},
+      {"query", shared::zString()->setOptional()->describe(
+          "Search query when action=Search. Keep it specific to reduce noisy results.")},
+      {"urls", shared::zArray(shared::zString())->setOptional()->describe(
+          "Multiple URLs to fetch in one call when action=Fetch.")},
   });
 }
 

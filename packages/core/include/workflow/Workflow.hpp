@@ -195,6 +195,12 @@ struct WorkflowHookState {
   std::vector<std::string> writes;
 };
 
+/// Pack-level state capability declaration loaded from pack.yaml.
+struct WorkflowPackStateSurface {
+  std::vector<std::string> scopes;
+  std::vector<std::string> paths;
+};
+
 /// Post-action emission channels. Once the action has produced its
 /// trophy, the dispatcher applies `stateWrites` and evaluates
 /// `blockDecision` to decide whether the originating tool/event proceeds.
@@ -252,6 +258,8 @@ struct Workflow {
 
   // Day-3+ hook platform fields. All optional.
   std::optional<WorkflowHookState> hookState;
+  std::string packId;
+  std::optional<WorkflowPackStateSurface> packStateSurface;
 
   // Tool result payload templates (for `defines_tool` workflows).
   // Parsed from frontmatter:

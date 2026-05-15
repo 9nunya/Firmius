@@ -5,6 +5,7 @@
 #include "workflow/Workflow.hpp"
 
 #include <functional>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -73,6 +74,19 @@ struct EventResult {
   std::vector<std::string> firedHookIds;  ///< for observability / TUI bands
 };
 
+struct HookActivityRecord {
+  std::string hookId;
+  std::string threadId;
+  std::string agentId;
+  std::string eventName;
+  std::string decision;
+  std::string outcomeLabel;
+  std::string blockReason;
+  std::string statusLine;
+  std::uint64_t timestampMs = 0;
+  int stateWriteCount = 0;
+};
+
 /**
  * @brief Registry of event-triggered hooks.
  *
@@ -94,10 +108,24 @@ public:
   /// Total registered hook count.
   std::size_t size() const;
 
+  /// Pack capability gate used by HookState/script helpers.
+  bool isStateAccessAllowed(const std::string &hookId, const std::string &scope,
+                            const std::string &path) const;
+
+  /// Recent hook firings for a thread, newest last.
+  std::vector<HookActivityRecord>
+  recentActivity(const std::string &threadId,
+                 std::size_t maxCount = 24) const;
+
+  /// Append a record to the thread activity log.
+  void recordActivity(HookActivityRecord record);
+
 private:
   HookRegistry() = default;
   mutable std::mutex mu_;
   std::map<WorkflowEventKind, std::vector<const Workflow *>> byEvent_;
+  std::map<std::string, const Workflow *> byId_;
+  std::map<std::string, std::vector<HookActivityRecord>> activityByThread_;
 };
 
 // ─── Dispatcher ─────────────────────────────────────────────────────────────
@@ -112,6 +140,7 @@ public:
 
   /// Test seam — override the runner used to execute Shell actions.
   using ShellRunner = std::function<int(const std::string &command,
+                                        const std::string &stdinPayload,
                                         int timeoutSec, std::string *stdoutOut,
                                         std::string *stderrOut)>;
   static void setShellRunner(ShellRunner runner);

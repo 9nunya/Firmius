@@ -10,6 +10,12 @@ class ConfigurableAnthropicProvider : public BaseAnthropicProvider {
 public:
   ConfigurableAnthropicProvider(const std::string &id,
                                 const shared::ProviderProfileConfig &profile);
+  std::unique_ptr<APIKeyWizard> beginConnectionWizard() override;
+  ModelInfo getModelInfo(const std::string &modelId) override;
+  bool isConfigured() const override;
+  std::optional<APIKeyAccount *>
+  getAvailableAccount(const std::optional<std::string> &modelId = std::nullopt)
+      override;
 
 protected:
   std::map<std::string, std::string> getHeaders() override;
@@ -21,9 +27,11 @@ protected:
 
 private:
   std::string getModelsUrl() const;
+  void applyModelOverrides(ModelInfo &model) const;
 
 private:
   shared::ProviderProfileConfig profile_;
+  mutable APIKeyAccount fallbackAccount_;
 };
 
 } // namespace firmius::provider

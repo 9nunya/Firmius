@@ -143,6 +143,31 @@ TEST(ToolPresentationTest, CompactDelegateAndWebNamesDispatchThroughFamilyPresen
             std::string::npos);
 }
 
+TEST(ToolPresentationTest, MalformedDelegateDoesNotPretendToBeTermination) {
+  ToolCallView delegate;
+  delegate.name = "Delegate";
+  delegate.args = R"({"task":"inspect repo"})";
+  delegate.phase = ToolPhase::Preparing;
+
+  ToolPresentation presentation = BuildToolPresentation(delegate);
+  EXPECT_EQ(presentation.title.find("termination"), std::string::npos)
+      << presentation.title;
+}
+
+TEST(ToolPresentationTest, FailedMalformedDelegateSurfacesErrorText) {
+  ToolCallView delegate;
+  delegate.name = "Delegate";
+  delegate.args = R"({"task":"inspect repo"})";
+  delegate.phase = ToolPhase::Error;
+  delegate.success = false;
+  delegate.result = "Missing required field: action";
+
+  ToolPresentation presentation = BuildToolPresentation(delegate);
+  EXPECT_EQ(presentation.title, "subagent call failed");
+  ASSERT_TRUE(presentation.error_text.has_value());
+  EXPECT_NE(presentation.error_text->find("Missing required field"), std::string::npos);
+}
+
 TEST(ToolPresentationTest, CompactReadAndSearchNamesUseSpecializedPresenters) {
   ToolCallView read;
   read.name = "Read";

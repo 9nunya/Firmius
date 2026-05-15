@@ -7,8 +7,6 @@
 #include "Serialization.hpp"
 #include "agents/PurposeLoader.hpp"
 #include "artifacts/ReferenceExpansion.hpp"
-#include "persistence/ThreadManager.hpp"
-#include "tools/WorkSupport.hpp"
 #include "utils/StringUtil.hpp"
 #include <chrono>
 #include <filesystem>
@@ -24,28 +22,34 @@ using namespace firmius::shared;
 
 namespace {
 
-PurposeWorkRole purposeRoleForPersona(const std::string &persona) {
-  PurposeWorkRole role = PurposeLoader::resolveWorkRole(persona);
-  if (role != PurposeWorkRole::Unknown) return role;
+enum class DelegationPersonaKind { General, Coder, Reviewer, Explorer };
+
+DelegationPersonaKind personaKindForName(const std::string &persona) {
   const std::string lowered = shared::StringUtil::toLower(shared::StringUtil::trim(persona));
-  if (lowered == "executor") return PurposeWorkRole::Executor;
-  if (lowered == "auditor") return PurposeWorkRole::Auditor;
-  if (lowered == "worker") return PurposeWorkRole::Worker;
-  if (lowered == "scout") return PurposeWorkRole::Scout;
-  if (lowered == "dreamer" || lowered == "loom") return PurposeWorkRole::Auditor;
-  return role;
+  if (lowered == "coder") {
+    return DelegationPersonaKind::Coder;
+  }
+  if (lowered == "reviewer" || lowered == "shrike") {
+    return DelegationPersonaKind::Reviewer;
+  }
+  if (lowered == "explorer") {
+    return DelegationPersonaKind::Explorer;
+  }
+  return DelegationPersonaKind::General;
 }
 
 std::optional<std::string> legacyPersonaSuggestion(const std::string &persona) {
   const std::string lowered = shared::StringUtil::toLower(shared::StringUtil::trim(persona));
-  if (lowered == "implementer") return "legacy role 'implementer'; use 'executor'";
-  if (lowered == "researcher") return "legacy role 'researcher'; use 'scout'";
+  if (lowered == "implementer") return "legacy role 'implementer'; use 'coder'";
+  if (lowered == "researcher") return "legacy role 'researcher'; use 'explorer'";
+  if (lowered == "executor") return "legacy role 'executor'; use 'coder'";
+  if (lowered == "worker") return "legacy role 'worker'; use 'coder'";
+  if (lowered == "auditor") return "legacy role 'auditor'; use 'reviewer'";
+  if (lowered == "scout") return "legacy role 'scout'; use 'explorer'";
   return std::nullopt;
 }
 
-bool isExecutorRole(PurposeWorkRole role) { return role == PurposeWorkRole::Executor; }
-bool isAuditorRole(PurposeWorkRole role) { return role == PurposeWorkRole::Auditor; }
-bool isWorkerLikeRole(PurposeWorkRole role) { return role == PurposeWorkRole::Worker || role == PurposeWorkRole::Scout; }
+bool isExplorerLikeKind(DelegationPersonaKind kind) { return kind == DelegationPersonaKind::Explorer; }
 
 std::optional<std::string> normalizeOptionalString(const std::optional<std::string> &value) {
   if (!value.has_value()) return std::nullopt;
@@ -84,168 +88,28 @@ bool userExplicitlyRequestedCategory(const shared::ToolContext& ctx, const std::
   return false;
 }
 
-const shared::WorkChunk &findChunk(const shared::Plan &plan, const std::string &chunkId) { return work::requireChunk(plan, chunkId); }
-shared::Plan loadPlan(const std::string &threadId, const std::string &planId) {
-  ThreadManager tm(ThreadManager::defaultBasePath());
-  return tm.getPlan(threadId, planId);
-}
-
-std::optional<shared::Plan> loadRequestedOrActivePlan(const std::string &threadId, const std::optional<std::string> &requestedPlanId) {
-  ThreadManager tm(ThreadManager::defaultBasePath());
-  if (requestedPlanId.has_value() && !requestedPlanId->empty()) return tm.getPlan(threadId, *requestedPlanId);
-  const auto metadata = tm.getMetadata(threadId);
-  if (!metadata.activePlanId.empty()) return tm.getPlan(threadId, metadata.activePlanId);
-  return std::nullopt;
-}
-
-std::string buildExecutorTask(const shared::Plan &plan, const shared::WorkChunk &chunk, const std::string &task) {
-  std::ostringstream prompt;
-  prompt << "You are the executor responsible for exactly one assigned work chunk.\n\nChunk Ownership Contract\n- You own exactly this chunk: " << chunk.id << "\n- You do not own the whole plan.\n- Do not take ownership of any other chunk.\n- Stay inside this chunk's scope. Do not silently repair sibling chunks or broader architecture.\n- If you discover an upstream, downstream, or cross-cutting problem outside this chunk, report it explicitly instead of claiming you fixed the plan.\n- You may delegate only bounded subtasks to worker/scout helpers one level deep.\n\nPlan Context\nPlan Title: " << plan.title << "\nPlan Objective: " << plan.objective << "\nPlan Strategy Summary: " << plan.strategy << "\n\nAssigned Chunk\nChunk ID: " << chunk.id << "\nChunk Title: " << chunk.title << "\nChunk Goal: " << chunk.goal << "\nChunk Context: " << chunk.context << "\nChunk Constraints: " << chunk.constraints << "\nChunk Completion: " << chunk.completion << "\n";
-  if (!chunk.filesToRead.empty()) { prompt << "Files To Read: "; for (size_t i = 0; i < chunk.filesToRead.size(); ++i) { if (i > 0) prompt << ", "; prompt << chunk.filesToRead[i]; } prompt << "\n"; }
-  if (!chunk.filesToTouch.empty()) { prompt << "Files To Touch: "; for (size_t i = 0; i < chunk.filesToTouch.size(); ++i) { if (i > 0) prompt << ", "; prompt << chunk.filesToTouch[i]; } prompt << "\n"; }
-  if (!chunk.cwd.empty()) prompt << "Working Directory: " << chunk.cwd << "\n";
-  if (!chunk.verificationCondition.empty()) prompt << "Verification Condition: " << chunk.verificationCondition << "\n";
-  if (!chunk.handoffNotes.empty()) prompt << "Handoff Notes: " << chunk.handoffNotes << "\n";
-  if (!chunk.tasks.empty()) {
-    prompt << "\nChunk Tasks\nThis chunk contains " << chunk.tasks.size() << " internal tasks. Use these to structure your execution or delegate to workers:\n";
-    for (const auto &t : chunk.tasks) {
-      std::string statusLabel;
-      switch (t.status) {
-        case shared::WorkChunkStatus::Ready: statusLabel = "Ready"; break;
-        case shared::WorkChunkStatus::InProgress: statusLabel = "InProgress"; break;
-        case shared::WorkChunkStatus::Implemented: statusLabel = "Implemented"; break;
-        case shared::WorkChunkStatus::Verifying: statusLabel = "Verifying"; break;
-        case shared::WorkChunkStatus::Done: statusLabel = "Done"; break;
-        case shared::WorkChunkStatus::Blocked: statusLabel = "Blocked"; break;
-        case shared::WorkChunkStatus::Failed: statusLabel = "Failed"; break;
-        case shared::WorkChunkStatus::Cancelled: statusLabel = "Cancelled"; break;
-      }
-      prompt << "- [" << statusLabel << "] " << t.title;
-      if (!t.goal.empty()) prompt << ": " << t.goal;
-      if (!t.notes.empty()) prompt << " (Note: " << t.notes << ")";
-      if (!t.verificationCondition.empty()) prompt << " (Verify: " << t.verificationCondition << ")";
-      prompt << "\n";
-    }
-  }
-  prompt << "\nExecution Discipline\n- Reread the exact files and anchors you touch before editing.\n- If the target directory or files do not exist yet, that is not a blocker for greenfield chunk work; create the first scoped files directly with Edit content.\n- If an anchor or local context is stale, reread and repair it before editing; do not guess.\n- Do not broaden the task because a nearby cleanup looks tempting.\n- Do not claim completion, verification, or review without evidence.\n- Only the lead accepts work and marks a chunk Done after review; your terminal success state is normally Implemented.\n\nVerification Expectations\n- Run the concrete verification needed for this chunk. Prefer the narrowest checks that still produce real evidence.\n- Your report must name the verification commands or tests you ran and the outcome.\n- If verification is blocked or incomplete, say exactly why. Do not write 'looks correct' or equivalent guesswork.\n\nExecution State Reporting\n- If you report chunk progress with Work.updateChunk, use plan_id=\"" << plan.id << "\" and chunk_id=\"" << chunk.id << "\".\n- The only chunk fields you may write are: status, attempt_count, result_summary.\n- Valid chunk_update payload pattern: {\\\"plan_id\\\":\\\"" << plan.id << "\\\",\\\"chunk_id\\\":\\\"" << chunk.id << "\\\",\\\"status\\\":\\\"Implemented\\\",\\\"attempt_count\\\":1,\\\"result_summary\\\":\\\"implemented scoped changes; verified with focused evidence\\\"}.\n- Do not send title, goal, context, constraints, completion, depends_on, assigned_agent_id, or review_summary through updateChunk.\n- Do not send title, goal, context, constraints, completion, depends_on, assigned_agent_id, or review_summary through chunk_update.\n- Any design, review, dependency, or assignment fields in chunk_update will be rejected by runtime authority checks.\n- Use Implemented when the chunk changes are complete as far as you can take them with evidence.\n- Use Blocked or Failed when you hit a real blocker; say what blocked you.\n- Do not mark the chunk Done yourself.\n- Report back in a compact structure the lead can review quickly:\n  Changed: <files/behavior>\n  Verified: <command/test and result>\n  Blockers/Risks: <none or concrete issue>\n\n" << work::buildExecutorLockDoctrine() << "\n";
-  if (!task.empty()) prompt << "\nLead Notes\n" << task << "\n";
-  return prompt.str();
-}
-
 std::string buildWorkerTask(const std::string &task, const std::optional<shared::WorkTask> &workTask) {
   std::ostringstream prompt;
-  prompt << "You are a worker helper supporting your parent executor on a bounded subtask.\n\nBoundaries\n- You do not own a plan chunk.\n- You are not responsible for the whole plan.\n- Complete only the bounded subtask below and return useful results to the executor.\n\n";
+  prompt << "You are a helper supporting your parent coder on a bounded subtask.\n\nBoundaries\n- You do not own the full route.\n- You are not responsible for the whole task.\n- Complete only the bounded subtask below and return useful results to the coder.\n\n";
   if (workTask.has_value()) {
     prompt << "Assigned Task\nTask ID: " << workTask->id << "\nTask Title: " << workTask->title << "\nTask Goal: " << workTask->goal << "\n";
     if (!workTask->notes.empty()) prompt << "Task Notes: " << workTask->notes << "\n";
     if (!workTask->verificationCondition.empty()) prompt << "Verification: " << workTask->verificationCondition << "\n";
     prompt << "\n";
   }
-  prompt << "Subtask\n" << task << "\n\n" << work::buildWorkerLockDoctrine() << "\n";
+  prompt << "Subtask\n" << task << "\n";
   return prompt.str();
 }
 
-std::string buildAuditorTask(const shared::Plan &plan, const shared::WorkChunk &chunk, const std::string &task) {
-  std::ostringstream prompt;
-  prompt << "You are the auditor responsible for evidence-backed review of a single work chunk.\n\nAuditor Contract\n- You do NOT own execution of this chunk.\n- Verify implementation and review evidence; do not implement.\n- Report a clear verdict with concrete evidence or identified gaps.\n- If evidence is missing or incomplete, say exactly what is missing.\n\nPlan Context\nPlan Title: " << plan.title << "\nPlan Objective: " << plan.objective << "\nPlan Strategy Summary: " << plan.strategy << "\n\nAssigned Chunk\nChunk ID: " << chunk.id << "\nChunk Title: " << chunk.title << "\nChunk Goal: " << chunk.goal << "\nChunk Context: " << chunk.context << "\nChunk Constraints: " << chunk.constraints << "\nChunk Completion: " << chunk.completion << "\nChunk Status: " << work::chunkStatusToString(chunk.status) << "\n";
-  if (!chunk.assignedAgentId.empty()) prompt << "Assigned Executor: " << chunk.assignedAgentId << "\n";
-  if (!chunk.resultSummary.empty()) prompt << "Result Summary: " << chunk.resultSummary << "\n";
-  if (!chunk.reviewSummary.empty()) prompt << "Review Summary: " << chunk.reviewSummary << "\n";
-  if (!chunk.filesToRead.empty()) { prompt << "Files To Read: "; for (size_t i = 0; i < chunk.filesToRead.size(); ++i) { if (i > 0) prompt << ", "; prompt << chunk.filesToRead[i]; } prompt << "\n"; }
-  if (!chunk.filesToTouch.empty()) { prompt << "Files To Touch: "; for (size_t i = 0; i < chunk.filesToTouch.size(); ++i) { if (i > 0) prompt << ", "; prompt << chunk.filesToTouch[i]; } prompt << "\n"; }
-  if (!chunk.cwd.empty()) prompt << "Working Directory: " << chunk.cwd << "\n";
-  if (!chunk.verificationCondition.empty()) prompt << "Verification Condition: " << chunk.verificationCondition << "\n";
-  if (!chunk.handoffNotes.empty()) prompt << "Handoff Notes: " << chunk.handoffNotes << "\n";
-  if (!chunk.tasks.empty()) {
-    prompt << "\nChunk Tasks\nThis chunk contains " << chunk.tasks.size() << " internal tasks. Use these to anchor review evidence:\n";
-    for (const auto &t : chunk.tasks) {
-      std::string statusLabel;
-      switch (t.status) {
-        case shared::WorkChunkStatus::Ready: statusLabel = "Ready"; break;
-        case shared::WorkChunkStatus::InProgress: statusLabel = "InProgress"; break;
-        case shared::WorkChunkStatus::Implemented: statusLabel = "Implemented"; break;
-        case shared::WorkChunkStatus::Verifying: statusLabel = "Verifying"; break;
-        case shared::WorkChunkStatus::Done: statusLabel = "Done"; break;
-        case shared::WorkChunkStatus::Blocked: statusLabel = "Blocked"; break;
-        case shared::WorkChunkStatus::Failed: statusLabel = "Failed"; break;
-        case shared::WorkChunkStatus::Cancelled: statusLabel = "Cancelled"; break;
-      }
-      prompt << "- [" << statusLabel << "] " << t.title;
-      if (!t.goal.empty()) prompt << ": " << t.goal;
-      if (!t.notes.empty()) prompt << " (Note: " << t.notes << ")";
-      if (!t.verificationCondition.empty()) prompt << " (Verify: " << t.verificationCondition << ")";
-      prompt << "\n";
-    }
-  }
-  prompt << "\nReview Discipline\n- Prefer direct evidence: tests, logs, file diffs, or runtime checks.\n- Do not accept claims without evidence.\n- Provide an explicit verdict: accept, reject, or needs more evidence.\n- Report in a compact structure the lead can act on:\n  Verdict: <accept/reject/needs-evidence>\n  Evidence: <commands/tests/files>\n  Gaps/Risks: <none or concrete issue>\n";
-  if (!task.empty()) prompt << "\nLead Notes\n" << task << "\n";
-  return prompt.str();
-}
 
-void ensureExecutorAssignmentAvailable(const std::string &threadId, const std::string &planId, const std::string &chunkId, const std::optional<std::string> &agentId) {
-  ThreadManager tm(ThreadManager::defaultBasePath());
-  const shared::Plan plan = tm.getPlan(threadId, planId);
-  const shared::WorkChunk &chunk = findChunk(plan, chunkId);
-  if (!chunk.assignedAgentId.empty() && (!agentId.has_value() || chunk.assignedAgentId != *agentId)) {
-    throw std::runtime_error("Chunk '" + chunkId + "' is already owned by executor agent '" + chunk.assignedAgentId + "'");
-  }
-  if (!agentId.has_value() || agentId->empty()) return;
-  for (const auto &candidatePlan : tm.listPlans(threadId)) {
-    for (const auto &candidateChunk : candidatePlan.chunks) {
-      if (candidateChunk.assignedAgentId != *agentId) continue;
-      if (candidatePlan.id == planId && candidateChunk.id == chunkId) continue;
-      throw std::runtime_error("Executor agent '" + *agentId + "' already owns chunk '" + candidateChunk.id + "'");
-    }
-  }
-}
 
-void ensureExecutorChunkReadyForDispatch(const std::string &threadId, const std::string &planId, const std::string &chunkId) {
-  ThreadManager tm(ThreadManager::defaultBasePath());
-  shared::Plan plan = tm.getPlan(threadId, planId);
-  auto &chunk = work::requireChunk(plan, chunkId);
-  const shared::WorkChunk originalChunk = chunk;
-  if (work::blockChunkIfDependenciesIncomplete(plan, chunk)) {
-    chunk.updatedAt = work::nowEpochMs();
-    tm.updatePlan(threadId, plan);
-    work::emitWorkEvent(shared::ChunkUpdated{threadId, plan.id, chunk});
-    work::emitWorkEvent(shared::ChunkStatusChanged{threadId, plan.id, chunk.id, originalChunk.status, chunk.status, chunk});
-  }
-  work::requireChunkReadyForExecution(plan, chunk, "dispatch");
-}
 
-void persistExecutorDispatch(const std::string &threadId, const std::string &planId, const std::string &chunkId, const std::string &agentId) {
-  ThreadManager tm(ThreadManager::defaultBasePath());
-  shared::Plan plan = tm.getPlan(threadId, planId);
-  auto &chunk = work::requireChunk(plan, chunkId);
-  const shared::WorkChunk originalChunk = chunk;
-  work::validateExecutorAssignmentInvariant(tm, threadId, plan.id, chunk.id, agentId);
-  chunk.assignedAgentId = agentId;
-  if (chunk.status == shared::WorkChunkStatus::Ready) chunk.status = shared::WorkChunkStatus::InProgress;
-  chunk.updatedAt = work::nowEpochMs();
-  tm.updatePlan(threadId, plan);
-  work::emitWorkEvent(shared::ChunkUpdated{threadId, plan.id, chunk});
-  if (originalChunk.assignedAgentId != chunk.assignedAgentId) work::emitWorkEvent(shared::ChunkAssigned{threadId, plan.id, chunk.id, chunk.assignedAgentId, chunk});
-  if (originalChunk.status != chunk.status) work::emitWorkEvent(shared::ChunkStatusChanged{threadId, plan.id, chunk.id, originalChunk.status, chunk.status, chunk});
-}
-
-std::string buildDelegationTask(const std::string &/*persona*/, const std::string &task, const std::optional<std::string> &plan_id, const std::optional<std::string> &chunk_id, const std::optional<std::string> &task_id, const std::string &threadId, PurposeWorkRole role) {
-  if (isExecutorRole(role) && plan_id.has_value() && chunk_id.has_value()) {
-    const shared::Plan plan = loadPlan(threadId, *plan_id);
-    const shared::WorkChunk &chunk = findChunk(plan, *chunk_id);
-    return buildExecutorTask(plan, chunk, task);
-  }
-  if (isAuditorRole(role) && plan_id.has_value() && chunk_id.has_value()) {
-    const shared::Plan plan = loadPlan(threadId, *plan_id);
-    const shared::WorkChunk &chunk = findChunk(plan, *chunk_id);
-    return buildAuditorTask(plan, chunk, task);
-  }
-  if (isWorkerLikeRole(role) && task_id.has_value() && !task_id->empty() && plan_id.has_value() && chunk_id.has_value()) {
-    const shared::Plan plan = loadPlan(threadId, *plan_id);
-    const shared::WorkChunk &chunk = findChunk(plan, *chunk_id);
-    auto taskIt = std::find_if(chunk.tasks.begin(), chunk.tasks.end(), [&](const shared::WorkTask &t) { return t.id == *task_id; });
-    if (taskIt != chunk.tasks.end()) return buildWorkerTask(task, *taskIt);
-  }
-  if (isWorkerLikeRole(role)) return buildWorkerTask(task, std::nullopt);
+std::string buildDelegationTask(const std::string &/*persona*/, const std::string &task, const std::optional<std::string> &plan_id, const std::optional<std::string> &chunk_id, const std::optional<std::string> &task_id, const std::string &threadId, DelegationPersonaKind kind) {
+  (void)plan_id;
+  (void)chunk_id;
+  (void)task_id;
+  (void)threadId;
+  if (isExplorerLikeKind(kind)) return buildWorkerTask(task, std::nullopt);
   return task;
 }
 
@@ -254,11 +118,7 @@ std::string buildDreamerTask(const std::string &task, const std::optional<std::s
   prompt << "You are being summoned in restricted dream mode by a lead agent.\n\nDream Sandbox\n- Working directory: " << memoryRoot << "\n- Read/write only under that directory.\n- Do not modify the project repository itself.\n- Prefer USER.md, BEHAVIOR.md, and project-specific notes under projects/.\n\n";
   const auto &parentCtx = ctx.agent.getContext();
   prompt << "Lead Context\n- Parent persona: " << parentCtx.config.personaName << "\n- Source workspace: " << parentCtx.environment.cwd << "\n- Thread ID: " << threadId << "\n\n";
-  if (auto plan = loadRequestedOrActivePlan(threadId, plan_id); plan.has_value()) {
-    prompt << "Plan Context\n- Title: " << plan->title << "\n- Objective: " << plan->objective << "\n- Strategy: " << plan->strategy << "\n- Chunks:\n";
-    for (const auto &chunk : plan->chunks) prompt << "  - " << chunk.title << " (" << chunk.id << ")\n";
-    prompt << "\n";
-  }
+  (void)plan_id;
   prompt << "Lead Dream Request\n" << task << "\n";
   return prompt.str();
 }
@@ -373,34 +233,13 @@ shared::ToolResult failWithStructuredData(const rapidjson::Document &d, const st
   return result;
 }
 
-std::size_t releaseOwnedChunksForAgent(const std::string &threadId, const std::string &agentId) {
-  ThreadManager tm(ThreadManager::defaultBasePath());
-  std::size_t released = 0;
-  for (auto plan : tm.listPlans(threadId)) {
-    bool changed = false;
-    for (auto &chunk : plan.chunks) {
-      if (chunk.assignedAgentId != agentId) continue;
-      const auto originalChunk = chunk;
-      chunk.assignedAgentId.clear();
-      if (chunk.status == shared::WorkChunkStatus::InProgress) chunk.status = shared::WorkChunkStatus::Ready;
-      chunk.updatedAt = work::nowEpochMs();
-      changed = true; ++released;
-      work::emitWorkEvent(shared::ChunkUpdated{threadId, plan.id, chunk});
-      work::emitWorkEvent(shared::ChunkAssigned{threadId, plan.id, chunk.id, chunk.assignedAgentId, chunk});
-      if (originalChunk.status != chunk.status) work::emitWorkEvent(shared::ChunkStatusChanged{threadId, plan.id, chunk.id, originalChunk.status, chunk.status, chunk});
-    }
-    if (changed) tm.updatePlan(threadId, plan);
-  }
-  return released;
-}
-
 shared::ToolResult executeSpawn(const rapidjson::Value &input, shared::ToolContext &ctx) {
   bool dream = false;
   if (input.HasMember("dream") && input["dream"].IsBool()) dream = input["dream"].GetBool();
 
   std::string persona;
   if (dream) {
-    if (!callerMayUseDreamMode(ctx)) return shared::ToolResult::fail("dream summon mode is restricted to aster, fast, harbor, or lead agents");
+    if (!callerMayUseDreamMode(ctx)) return shared::ToolResult::fail("dream summon mode is restricted to lead, fast, or harbor agents");
     persona = "dreamer";
   } else if (input.HasMember("persona") && input["persona"].IsString()) {
     persona = shared::StringUtil::trim(std::string(input["persona"].GetString()));
@@ -428,50 +267,14 @@ shared::ToolResult executeSpawn(const rapidjson::Value &input, shared::ToolConte
   std::optional<std::string> agent_id;
   if (input.HasMember("agent_id") && input["agent_id"].IsString()) agent_id = normalizeOptionalString(input["agent_id"].GetString());
 
-  std::optional<std::string> plan_id;
-  if (input.HasMember("plan_id") && input["plan_id"].IsString()) plan_id = normalizeOptionalString(input["plan_id"].GetString());
-
-  std::optional<std::string> chunk_id;
-  if (input.HasMember("chunk_id") && input["chunk_id"].IsString()) chunk_id = normalizeOptionalString(input["chunk_id"].GetString());
-
-  std::optional<std::string> task_id;
-  if (input.HasMember("task_id") && input["task_id"].IsString()) task_id = normalizeOptionalString(input["task_id"].GetString());
-
   std::optional<std::string> category;
   if (input.HasMember("category") && input["category"].IsString()) category = normalizeOptionalString(input["category"].GetString());
 
   bool isAsync = false;
   if (input.HasMember("async") && input["async"].IsBool()) isAsync = input["async"].GetBool();
 
-  PurposeWorkRole workRole = purposeRoleForPersona(persona);
+  DelegationPersonaKind personaKind = personaKindForName(persona);
   std::string threadId = ctx.agent.getContext().history->threadId;
-
-  if (plan_id.has_value() != chunk_id.has_value()) return shared::ToolResult::fail("plan_id and chunk_id must either both be provided or both be omitted");
-  if (task_id.has_value() && !task_id->empty() && (!plan_id.has_value() || !chunk_id.has_value())) return shared::ToolResult::fail("task_id requires both plan_id and chunk_id to be provided");
-
-  if (isExecutorRole(workRole) && plan_id.has_value() && chunk_id.has_value()) {
-    try {
-      ensureExecutorChunkReadyForDispatch(threadId, *plan_id, *chunk_id);
-      ensureExecutorAssignmentAvailable(threadId, *plan_id, *chunk_id, agent_id);
-    } catch (const std::exception &e) { return shared::ToolResult::fail(e.what()); }
-  }
-
-  if (isWorkerLikeRole(workRole) && task_id.has_value() && !task_id->empty() && plan_id.has_value() && chunk_id.has_value()) {
-    try {
-      ThreadManager tm(ThreadManager::defaultBasePath());
-      shared::Plan plan = tm.getPlan(threadId, *plan_id);
-      auto &chunk = work::requireChunk(plan, *chunk_id);
-      auto taskIt = std::find_if(chunk.tasks.begin(), chunk.tasks.end(), [&](const shared::WorkTask &t) { return t.id == *task_id; });
-      if (taskIt == chunk.tasks.end()) return shared::ToolResult::fail("Task '" + *task_id + "' not found in chunk '" + *chunk_id + "'");
-      if (!taskIt->assignedWorkerId.empty() && (!agent_id.has_value() || taskIt->assignedWorkerId != *agent_id)) return shared::ToolResult::fail("Task '" + *task_id + "' is already assigned to worker '" + taskIt->assignedWorkerId + "'");
-      if (agent_id.has_value() && !agent_id->empty()) {
-        taskIt->assignedWorkerId = *agent_id;
-        taskIt->updatedAt = work::nowEpochMs();
-        chunk.updatedAt = taskIt->updatedAt;
-        tm.updatePlan(threadId, plan);
-      }
-    } catch (const std::exception &e) { return shared::ToolResult::fail(e.what()); }
-  }
 
   std::string delegatedTask;
   std::optional<SummonAgentOverrides> summonOverrides;
@@ -481,10 +284,10 @@ shared::ToolResult executeSpawn(const rapidjson::Value &input, shared::ToolConte
       const std::string home = std::getenv("HOME") ? std::getenv("HOME") : "/root";
       const std::string memoryRoot = home + "/.firmius/user";
       std::filesystem::create_directories(memoryRoot);
-      builtTask = buildDreamerTask(task, plan_id, threadId, ctx, memoryRoot);
+      builtTask = buildDreamerTask(task, std::nullopt, threadId, ctx, memoryRoot);
       summonOverrides = SummonAgentOverrides{.cwdOverride = memoryRoot, .allowedPathsOverride = std::vector<std::string>{memoryRoot, memoryRoot + "/**"}};
     } else {
-      builtTask = buildDelegationTask(persona, task, plan_id, chunk_id, task_id, threadId, workRole);
+      builtTask = buildDelegationTask(persona, task, std::nullopt, std::nullopt, std::nullopt, threadId, personaKind);
     }
     const std::string cwd = ctx.agent.getContext().environment.cwd;
     delegatedTask = firmius::core::artifacts::expandInboundReferences(threadId, cwd, builtTask);
@@ -563,7 +366,6 @@ shared::ToolResult executeSpawn(const rapidjson::Value &input, shared::ToolConte
         Engine::instance().switchAgentModel(reusableAgentId, route.providerId, route.modelId, route.variantName);
         Engine::instance().executeTask(reusableAgentId, delegatedTask);
       } catch (const std::exception &) { if (i + 1 < routes.size()) continue; return shared::ToolResult::fail("Failed to launch subagent run on all configured routes."); }
-      if (isExecutorRole(workRole) && plan_id.has_value() && chunk_id.has_value()) persistExecutorDispatch(threadId, *plan_id, *chunk_id, reusableAgentId);
       if (isAsync) {
         auto immediate = waitForOutcomeWithTimeout(reusableAgentId, std::chrono::milliseconds(250));
         if (immediate.has_value()) {
@@ -585,7 +387,6 @@ shared::ToolResult executeSpawn(const rapidjson::Value &input, shared::ToolConte
       reusableAgentId = Engine::instance().summonAgent(threadId, persona, delegatedTask, true, ctx.agent.getContext().identity.id, name, title, reusableAgentId, route.providerId, route.modelId, route.variantName, {}, summonOverrides);
       agentExists = true;
     } catch (const std::exception &) { if (i + 1 < routes.size()) continue; return shared::ToolResult::fail("Failed to summon subagent on all configured routes."); }
-    if (isExecutorRole(workRole) && plan_id.has_value() && chunk_id.has_value()) persistExecutorDispatch(threadId, *plan_id, *chunk_id, reusableAgentId);
     if (isAsync) {
       auto immediate = waitForOutcomeWithTimeout(reusableAgentId, std::chrono::milliseconds(250));
       if (immediate.has_value()) {
@@ -646,36 +447,58 @@ shared::ToolResult executeStop(const rapidjson::Value &input, shared::ToolContex
   if (input.HasMember("agent_id") && input["agent_id"].IsString()) agent_id = input["agent_id"].GetString();
   else return shared::ToolResult::fail("Missing required field: agent_id");
 
-  const std::string threadId = work::requireCurrentThreadId(ctx);
+  (void)ctx;
   Engine::instance().terminateAgent(agent_id);
-  const std::size_t releasedChunks = releaseOwnedChunksForAgent(threadId, agent_id);
   rapidjson::Document d; d.SetObject(); auto& a = d.GetAllocator();
   d.AddMember("agent_id", rapidjson::Value(agent_id.c_str(), a).Move(), a);
   d.AddMember("status", "terminated", a);
-  d.AddMember("released_chunk_count", static_cast<uint64_t>(releasedChunks), a);
   return shared::ToolResult::ok(d);
 }
 
 } // namespace
 
 shared::ToolMetadata DelegateTool::getMetadata() const {
-  return {"Delegate", "Subagent operations. Use action Spawn, Wait, or Stop.", shared::ToolScope::Delegation};
+  return {"Delegate",
+          R"(Subagent operations for spawning, waiting on, and stopping child agents.
+
+USAGE GUIDANCE:
+- Use Spawn to start a bounded subtask in another agent/persona.
+- Use Wait to collect the result of a previously spawned child.
+- Use Stop to terminate a child that is stale, blocked, or no longer needed.
+- Delegate only when parallelization or specialization materially helps; do not use it for tiny direct edits.
+- A good spawn request should include concrete bearing, scope bounds, anchors, success criteria, and expected return shape in the task text.
+
+ACTIONS:
+- Spawn: launch a subagent.
+- Wait: wait for a child result.
+- Stop: terminate a child agent.
+)",
+          shared::ToolScope::Delegation};
 }
 
 std::shared_ptr<shared::JSONSchema> DelegateTool::getSchema() const {
   return shared::zObject({
-      {"action", shared::zEnum({"Spawn", "Wait", "Stop"})->describe("Delegation operation to execute")},
-      {"agent_id", shared::zString()->setOptional()},
-      {"persona", shared::zString()->setOptional()},
-      {"task", shared::zString()->setOptional()},
-      {"title", shared::zString()->setOptional()},
-      {"name", shared::zString()->setOptional()},
-      {"plan_id", shared::zString()->setOptional()},
-      {"chunk_id", shared::zString()->setOptional()},
-      {"task_id", shared::zString()->setOptional()},
-      {"category", shared::zString()->setOptional()},
-      {"async", shared::zBoolean()->setOptional()},
-      {"dream", shared::zBoolean()->setOptional()},
+      {"action", shared::zEnum({"Spawn", "Wait", "Stop"})->describe(
+          "Delegation action.\n\n"
+          "- Spawn: create a child agent for a bounded task\n"
+          "- Wait: wait for a child to finish and return its result\n"
+          "- Stop: terminate a child agent")},
+      {"agent_id", shared::zString()->setOptional()->describe(
+          "Child agent id for Wait or Stop. Usually returned by Spawn.")},
+      {"persona", shared::zString()->setOptional()->describe(
+          "Persona/purpose to use for Spawn (for example: lead, coder, explorer, reviewer, shrike, titler).")},
+      {"task", shared::zString()->setOptional()->describe(
+          "Task text for Spawn. This should carry the real handoff: bearing, charge, bounds, anchors, unknowns, success test, return shape, recovery guidance.")},
+      {"title", shared::zString()->setOptional()->describe(
+          "Short human-readable title for the delegated cut.")},
+      {"name", shared::zString()->setOptional()->describe(
+          "Friendly agent label or purpose name for Spawn.")},
+      {"category", shared::zString()->setOptional()->describe(
+          "Optional route category / model routing hint for Spawn.")},
+      {"async", shared::zBoolean()->setOptional()->describe(
+          "When true, return immediately after Spawn instead of waiting inline.")},
+      {"dream", shared::zBoolean()->setOptional()->describe(
+          "When true, request a memory/dream-oriented run rather than a normal execution lane.")},
   });
 }
 

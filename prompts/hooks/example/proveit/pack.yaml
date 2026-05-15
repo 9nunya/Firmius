@@ -1,0 +1,41 @@
+id: proveit
+title: Prove It
+version: 0.1.0
+description: |
+  Opens an evidence contract for a task. Hooks continuously collect an
+  evidence ledger from tool activity, then a validator checks the final
+  answer against the ledger before the agent is allowed to stop.
+
+state_surface:
+  scopes: [thread]
+  paths:
+    - proveit
+    - proveit.id
+    - proveit.brief
+    - proveit.task
+    - proveit.validator
+    - proveit.state
+    - proveit.iteration
+    - proveit.max_iterations
+    - proveit.agent_id
+    - proveit.last_verdict
+    - proveit.last_suggestion
+    - proveit.summary
+    - proveit.summary.commands
+    - proveit.summary.reads
+    - proveit.summary.edits
+    - proveit.summary.tests
+    - proveit.summary.failures
+    - proveit.summary.validations
+    - proveit.evidence
+    - proveit.evidence[]
+    - proveit.history
+    - proveit.history[]
+
+requires_personas:
+  - reviewer
+
+files:
+  - commands/proveit.yaml
+  - flows/post-tool-evidence.yaml
+  - flows/agent-stop-with-open-proveit.yaml

@@ -83,10 +83,71 @@ std::string mergeJsonObjectStrings(const std::string &baseJson,
 
 ConfigurableOpenAIProvider::ConfigurableOpenAIProvider(
     const std::string &id, const shared::ProviderProfileConfig &profile)
-    : BaseOpenAIProvider(id, profile.baseUrl, ""), profile_(profile) {}
+    : BaseOpenAIProvider(id, profile.baseUrl, ""), profile_(profile) {
+  fallbackAccount_.identifier = "default";
+  fallbackAccount_.keyPrefix = "cfg";
+  fallbackAccount_.apiKey = profile_.defaultApiKey;
+}
+
+std::unique_ptr<APIKeyWizard> ConfigurableOpenAIProvider::beginConnectionWizard() {
+  if (profile_.authMode == "none") {
+    return nullptr;
+  }
+  return BaseOpenAIProvider::beginConnectionWizard();
+}
+
+bool ConfigurableOpenAIProvider::isConfigured() const {
+  if (profile_.authMode == "none") {
+    return true;
+  }
+  if (!profile_.defaultApiKey.empty()) {
+    return true;
+  }
+  if (profile_.allowMissingApiKey) {
+    return true;
+  }
+  return BaseOpenAIProvider::isConfigured();
+}
+
+std::optional<APIKeyAccount *>
+ConfigurableOpenAIProvider::getAvailableAccount(
+    const std::optional<std::string> &modelId) {
+  auto baseAccount = BaseOpenAIProvider::getAvailableAccount(modelId);
+  if (baseAccount.has_value()) {
+    return baseAccount;
+  }
+  if (profile_.authMode == "none" || profile_.allowMissingApiKey) {
+    fallbackAccount_.apiKey.clear();
+    return &fallbackAccount_;
+  }
+  if (!profile_.defaultApiKey.empty()) {
+    fallbackAccount_.apiKey = profile_.defaultApiKey;
+    return &fallbackAccount_;
+  }
+  return std::nullopt;
+}
 
 std::map<std::string, std::string> ConfigurableOpenAIProvider::getHeaders() {
   auto headers = BaseOpenAIProvider::getHeaders();
+  for (const auto &[key, value] : profile_.headers) {
+    headers[key] = value;
+  }
+  return headers;
+}
+
+std::map<std::string, std::string>
+ConfigurableOpenAIProvider::buildHeadersForApiKey(const std::string &apiKey) {
+  if (profile_.authMode == "none" || profile_.allowMissingApiKey) {
+    std::map<std::string, std::string> headers{{"Content-Type",
+                                                "application/json"}};
+    for (const auto &[key, value] : profile_.headers) {
+      headers[key] = value;
+    }
+    return headers;
+  }
+  const std::string effectiveKey =
+      !apiKey.empty() ? apiKey : profile_.defaultApiKey;
+  auto headers = BaseOpenAIProvider::buildHeadersForApiKey(effectiveKey);
   for (const auto &[key, value] : profile_.headers) {
     headers[key] = value;
   }
@@ -122,23 +183,59 @@ ConfigurableOpenAIProvider::prepareRequestBody(const AgentHistory &history,
 std::vector<ModelInfo> ConfigurableOpenAIProvider::listModels() {
   auto models = BaseOpenAIProvider::listModels();
   for (auto &model : models) {
-    auto it = profile_.modelVariants.find(model.id);
-    if (it == profile_.modelVariants.end()) {
+    applyModelOverrides(model);
+  }
+  for (const auto &[modelId, cfg] : profile_.modelVariants) {
+    auto it = std::find_if(models.begin(), models.end(),
+                           [&](const ModelInfo &model) {
+                             return model.id == modelId;
+                           });
+    if (it != models.end()) {
       continue;
     }
-
-    model.variants.clear();
-    for (const auto &[variantName, variantConfig] : it->second.variants) {
-      if (variantName.empty()) {
-        continue;
-      }
-      ModelVariant variant;
-      variant.variantName = variantName;
-      variant.extraMetadataJson = variantConfig.requestJson;
-      model.variants.push_back(variant);
-    }
+    ModelInfo model;
+    model.id = modelId;
+    model.provider = getId();
+    applyModelOverrides(model);
+    models.push_back(std::move(model));
   }
   return models;
+}
+
+ModelInfo ConfigurableOpenAIProvider::getModelInfo(const std::string &modelId) {
+  auto model = BaseOpenAIProvider::getModelInfo(modelId);
+  applyModelOverrides(model);
+  return model;
+}
+
+void ConfigurableOpenAIProvider::applyModelOverrides(ModelInfo &model) const {
+  auto it = profile_.modelVariants.find(model.id);
+  if (it == profile_.modelVariants.end()) {
+    return;
+  }
+  if (it->second.overrideContextWindow) {
+    model.contextWindow = it->second.contextWindow;
+  }
+  if (it->second.overrideMaxOutputTokens) {
+    model.maxOutputTokens = it->second.maxOutputTokens;
+  }
+  if (it->second.overrideModalities) {
+    model.modalities = it->second.modalities;
+  }
+  if (it->second.overrideSupportsReasoning) {
+    model.supportsReasoning = it->second.supportsReasoning;
+  }
+
+  model.variants.clear();
+  for (const auto &[variantName, variantConfig] : it->second.variants) {
+    if (variantName.empty()) {
+      continue;
+    }
+    ModelVariant variant;
+    variant.variantName = variantName;
+    variant.extraMetadataJson = variantConfig.requestJson;
+    model.variants.push_back(variant);
+  }
 }
 
 } // namespace firmius::provider

@@ -294,6 +294,55 @@ TEST(ChatWindowHelpersTest,
   EXPECT_EQ(second_pass.find(blank_band), std::string::npos) << second_pass;
 }
 
+
+TEST(ChatWindowHelpersTest,
+     TranscriptGrowthWhileScrolledUpKeepsManualOffsetStable) {
+  AgentHistory history;
+
+  auto make_assistant_turn = [](std::string id, std::string text) {
+    AgentTurn turn;
+    turn.turnId = std::move(id);
+    Message msg;
+    msg.role = Role::Assistant;
+    msg.content = {TextContent{std::move(text)}};
+    turn.messages.push_back(std::move(msg));
+    return turn;
+  };
+
+  for (int i = 0; i < 24; ++i) {
+    history.turns.push_back(make_assistant_turn(
+        "turn-" + std::to_string(i),
+        "assistant row " + std::to_string(i) +
+            " with enough trailing words to wrap across multiple screen lines"));
+  }
+
+  auto chat = firmius::tui::ChatWindow(
+      [&history]() -> const AgentHistory * { return &history; });
+
+  auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(36),
+                                      ftxui::Dimension::Fixed(8));
+  Render(screen, chat->Render());
+  Render(screen, chat->Render());
+
+  EXPECT_TRUE(chat->OnEvent(ftxui::Event::PageUp));
+  EXPECT_TRUE(chat->OnEvent(ftxui::Event::PageUp));
+  const auto before_growth = renderComponentToString(chat, 36, 8);
+
+  history.turns.push_back(make_assistant_turn(
+      "turn-new",
+      "fresh bottom row with enough trailing words to wrap across multiple screen lines and prove manual scroll stays put"));
+
+  EXPECT_TRUE(chat->OnEvent(ftxui::Event::Special("TranscriptChanged")));
+
+  const auto after_growth = renderComponentToString(chat, 36, 8);
+
+  EXPECT_NE(before_growth.find("assistant row 15"), std::string::npos)
+      << before_growth;
+  EXPECT_EQ(after_growth.find("fresh"), std::string::npos) << after_growth;
+  EXPECT_EQ(before_growth, after_growth);
+  EXPECT_EQ(after_growth.find("assistant row 21"), std::string::npos)
+      << after_growth;
+}
 TEST(TuiStateChatSignatureTest, ChangesWhenQueuedMessagesChange) {
   using firmius::tui::StreamStateManager;
 

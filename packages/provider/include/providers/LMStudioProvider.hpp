@@ -20,6 +20,8 @@ public:
      * @param baseUrl Optional custom base URL. If empty, uses LMSTUDIO_BASE_URL env var or defaults to http://localhost:1234.
      */
     explicit LMStudioProvider(const std::string& baseUrl = "");
+    bool isConfigured() const override;
+    std::unique_ptr<APIKeyWizard> beginConnectionWizard() override;
 
     /**
      * @brief Fetches available models from LM Studio's native /api/v1/models endpoint.
@@ -33,6 +35,7 @@ protected:
      * @brief Returns minimal headers (no auth required for local inference).
      */
     std::map<std::string, std::string> buildHeadersForApiKey(const std::string& apiKey) override;
+    std::string getChatUrl() const override;
 };
 
 }

@@ -22,6 +22,8 @@ add_subdirectory(packages/shared)
 add_subdirectory(packages/provider)
 add_subdirectory(packages/tui)
 add_subdirectory(packages/audits)
+add_subdirectory(packages/server)
+add_subdirectory(packages/tui-v2)
 add_subdirectory(packages/cli)
 add_subdirectory(tests/shared)
 add_subdirectory(tests/core)
@@ -29,6 +31,7 @@ add_subdirectory(tests/unit)
 
 # Install the firmius binary to the platform-specific bindir.
 install(TARGETS firmius DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(TARGETS firmiusd DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 # Install the debug symbols file alongside the binary when generated.
 # Debuggers (gdb, lldb) will automatically find this file when debugging.

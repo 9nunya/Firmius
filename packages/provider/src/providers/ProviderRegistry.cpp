@@ -18,6 +18,7 @@ void ProviderRegistry::registerProvider(std::shared_ptr<IProvider> provider) {
 void ProviderRegistry::registerProviderFactory(const std::string& id, ProviderFactory factory) {
     if (!factory) return;
     std::lock_guard<std::mutex> lock(mutex);
+    builtinFactories[id] = factory;
     factories[id] = std::move(factory);
 }
 
@@ -43,6 +44,45 @@ std::shared_ptr<IProvider> ProviderRegistry::getProvider(const std::string& id) 
     }
     
     return nullptr;
+}
+
+std::vector<std::shared_ptr<IProvider>> ProviderRegistry::hydrateProviders() const {
+    std::vector<std::pair<std::string, ProviderFactory>> pending_factories;
+    std::vector<std::shared_ptr<IProvider>> loaded;
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        loaded.reserve(providers.size() + factories.size());
+        for (const auto &[_, provider] : providers) {
+            if (provider) {
+                loaded.push_back(provider);
+            }
+        }
+        for (const auto &[id, factory] : factories) {
+            if (!factory || providers.find(id) != providers.end()) {
+                continue;
+            }
+            pending_factories.emplace_back(id, factory);
+        }
+    }
+
+    for (const auto &[id, factory] : pending_factories) {
+        auto provider = factory();
+        if (!provider) {
+            continue;
+        }
+        std::lock_guard<std::mutex> lock(mutex);
+        auto& nonConstProviders =
+            const_cast<std::map<std::string, std::shared_ptr<IProvider>>&>(providers);
+        auto it = providers.find(id);
+        if (it == providers.end()) {
+            nonConstProviders[id] = provider;
+            loaded.push_back(provider);
+        } else if (it->second) {
+            loaded.push_back(it->second);
+        }
+    }
+
+    return loaded;
 }
 
 std::vector<std::string> ProviderRegistry::listProviderIds() const {
@@ -82,12 +122,22 @@ void ProviderRegistry::reloadConfigProviders(
 
     for (const auto& id : dynamicProviderIds) {
         providers.erase(id);
-        factories.erase(id);
+        auto builtinIt = builtinFactories.find(id);
+        if (builtinIt != builtinFactories.end()) {
+            factories[id] = builtinIt->second;
+        } else {
+            factories.erase(id);
+        }
     }
     dynamicProviderIds.clear();
 
     for (const auto& [id, profile] : profiles) {
+        providers.erase(id);
         if (!profile.enabled) {
+            auto builtinIt = builtinFactories.find(id);
+            if (builtinIt != builtinFactories.end()) {
+                factories[id] = builtinIt->second;
+            }
             continue;
         }
         dynamicProviderIds.insert(id);

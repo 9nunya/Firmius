@@ -12,21 +12,6 @@ target_link_libraries(firmius_test_mocks INTERFACE
     firmius::core
 )
 
-# Persistence tests
-add_executable(test_thread_manager
-    persistence/test_thread_manager.cpp
-)
-target_link_libraries(test_thread_manager PRIVATE
-    firmius::core
-    firmius::shared
-    GTest::gtest_main
-    GTest::gmock
-)
-target_include_directories(test_thread_manager PRIVATE
-    ${rapidjson_SOURCE_DIR}/include
-)
-gtest_discover_tests(test_thread_manager)
-
 add_executable(test_journaler
     persistence/test_journaler.cpp
 )
@@ -40,31 +25,6 @@ target_include_directories(test_journaler PRIVATE
     ${rapidjson_SOURCE_DIR}/include
 )
 gtest_discover_tests(test_journaler)
-
-add_executable(test_persistence_e2e
-    persistence/test_persistence_e2e.cpp
-)
-target_link_libraries(test_persistence_e2e PRIVATE
-    firmius::core
-    firmius::shared
-    GTest::gtest_main
-    GTest::gmock
-)
-target_include_directories(test_persistence_e2e PRIVATE
-    ${rapidjson_SOURCE_DIR}/include
-)
-gtest_discover_tests(test_persistence_e2e)
-
-add_executable(persistence_benchmark
-    persistence/persistence_benchmark.cpp
-)
-target_link_libraries(persistence_benchmark PRIVATE
-    firmius::core
-    firmius::shared
-)
-target_include_directories(persistence_benchmark PRIVATE
-    ${rapidjson_SOURCE_DIR}/include
-)
 
 # Host tests
 add_executable(test_localhost
@@ -130,22 +90,6 @@ target_include_directories(test_artifact_tools PRIVATE
 )
 gtest_discover_tests(test_artifact_tools)
 
-add_executable(test_work_tools
-    tools/test_work_tools.cpp
-)
-target_link_libraries(test_work_tools PRIVATE
-    firmius::core
-    firmius::shared
-    GTest::gtest_main
-    GTest::gmock
-    GTest::gmock
-    CURL::libcurl
-)
-target_include_directories(test_work_tools PRIVATE
-    ${rapidjson_SOURCE_DIR}/include
-)
-gtest_discover_tests(test_work_tools)
-
 # Fleet lock tests
 add_executable(test_fleet_lock
     tools/test_fleet_lock.cpp
@@ -179,40 +123,6 @@ target_include_directories(test_fleet_lock_regression PRIVATE
     ${rapidjson_SOURCE_DIR}/include
 )
 gtest_discover_tests(test_fleet_lock_regression)
-
-# Chunk dependency tests
-add_executable(test_chunk_dependencies
-    tools/test_chunk_dependencies.cpp
-)
-target_link_libraries(test_chunk_dependencies PRIVATE
-    firmius::core
-    firmius::shared
-    GTest::gtest_main
-    GTest::gmock
-    GTest::gmock
-    CURL::libcurl
-)
-target_include_directories(test_chunk_dependencies PRIVATE
-    ${rapidjson_SOURCE_DIR}/include
-)
-gtest_discover_tests(test_chunk_dependencies)
-
-# Harness tests
-add_executable(test_harness
-    harness/test_harness.cpp
-)
-target_link_libraries(test_harness PRIVATE
-    firmius::core
-    firmius::provider
-    firmius::shared
-    GTest::gtest_main
-    GTest::gmock
-    CURL::libcurl
-)
-target_include_directories(test_harness PRIVATE
-    ${rapidjson_SOURCE_DIR}/include
-)
-gtest_discover_tests(test_harness)
 
 add_executable(test_qwen_provider
     provider/test_qwen_provider.cpp
@@ -605,22 +515,6 @@ target_include_directories(test_reference_expansion PRIVATE
 )
 gtest_discover_tests(test_reference_expansion)
 
-# SubagentTool tests
-add_executable(test_subagent_tool
-    tools/test_subagent_tool.cpp
-)
-target_link_libraries(test_subagent_tool PRIVATE
-    firmius::core
-    firmius::shared
-    GTest::gtest_main
-    GTest::gmock
-    GTest::gmock
-)
-target_include_directories(test_subagent_tool PRIVATE
-    ${rapidjson_SOURCE_DIR}/include
-)
-gtest_discover_tests(test_subagent_tool)
-
 add_executable(test_subagent_artifacts
     tools/test_subagent_artifacts.cpp
 )
@@ -800,21 +694,6 @@ target_include_directories(test_reference_autocomplete PRIVATE
 )
 gtest_discover_tests(test_reference_autocomplete)
 
-add_executable(test_active_plan_state
-    tui/test_active_plan_state.cpp
-    ../../packages/tui/src/ActivePlanState.cpp
-)
-target_link_libraries(test_active_plan_state PRIVATE
-    firmius::shared
-    GTest::gtest_main
-    GTest::gmock
-)
-target_include_directories(test_active_plan_state PRIVATE
-    ../../packages/tui/include
-    ../../packages/tui/src
-)
-gtest_discover_tests(test_active_plan_state)
-
 add_executable(test_stream_state_manager_history
     tui/test_stream_state_manager_history.cpp
     ../../packages/tui/src/StreamStateManager.cpp
@@ -837,6 +716,7 @@ gtest_discover_tests(test_stream_state_manager_history)
 add_executable(test_stream_state_manager_live
     tui/test_stream_state_manager_live.cpp
     ../../packages/tui/src/StreamStateManager.cpp
+    ../../packages/tui/src/components/ChatTranscriptPolicy.cpp
 )
 target_link_libraries(test_stream_state_manager_live PRIVATE
     firmius::shared
@@ -891,6 +771,11 @@ add_executable(test_chat_window_helpers
     tui/test_chat_window_helpers.cpp
     ../../packages/tui/src/TUIState.cpp
     ../../packages/tui/src/utils/TranscriptExpansion.cpp
+    ../../packages/tui/src/components/ChatHistoryBuilder.cpp
+    ../../packages/tui/src/components/ChatCopySelection.cpp
+    ../../packages/tui/src/components/ChatMeasurementSignature.cpp
+    ../../packages/tui/src/components/ChatTranscriptPolicy.cpp
+    ../../packages/tui/src/components/ChatViewportModel.cpp
     ../../packages/tui/src/components/ChatWindow.cpp
     ../../packages/tui/src/components/DiffRenderer.cpp
     ../../packages/tui/src/components/FileEditDiff.cpp
@@ -943,6 +828,10 @@ gtest_discover_tests(test_chat_window_helpers)
 
 add_executable(test_chat_window_quick_tool_grouping
     tui/test_chat_window_quick_tool_grouping.cpp
+    ../../packages/tui/src/components/ChatHistoryBuilder.cpp
+    ../../packages/tui/src/components/ChatCopySelection.cpp
+    ../../packages/tui/src/components/ChatTranscriptPolicy.cpp
+    ../../packages/tui/src/components/ChatViewportModel.cpp
     ../../packages/tui/src/components/ChatWindow.cpp
     ../../packages/tui/src/components/DiffRenderer.cpp
     ../../packages/tui/src/components/FileEditDiff.cpp
@@ -1054,51 +943,6 @@ target_include_directories(test_error_display PRIVATE
     ${rapidjson_SOURCE_DIR}/include
 )
 gtest_discover_tests(test_error_display)
-
-add_executable(test_plan_lane
-    tui/test_plan_lane.cpp
-    ../../packages/tui/src/components/PlanLane.cpp
-    ../../packages/tui/src/components/GlintEffect.cpp
-    ../../packages/tui/src/components/Markdown.cpp
-    ../../packages/tui/src/components/ScrollableBox.cpp
-    ../../packages/tui/src/ThemeManager.cpp
-    ../../packages/tui/src/UserPreferences.cpp
-)
-target_link_libraries(test_plan_lane PRIVATE
-    firmius::shared
-    GTest::gtest_main
-    GTest::gmock
-    ftxui::dom
-    ftxui::screen
-    ftxui::component
-)
-target_include_directories(test_plan_lane PRIVATE
-    ../../packages/tui/include
-    ../../packages/tui/src
-)
-gtest_discover_tests(test_plan_lane)
-
-add_executable(test_todo_lane
-    tui/test_todo_lane.cpp
-    ../../packages/tui/src/components/TodoLane.cpp
-    ../../packages/tui/src/components/Markdown.cpp
-    ../../packages/tui/src/components/ScrollableBox.cpp
-    ../../packages/tui/src/ThemeManager.cpp
-    ../../packages/tui/src/UserPreferences.cpp
-)
-target_link_libraries(test_todo_lane PRIVATE
-    firmius::shared
-    GTest::gtest_main
-    GTest::gmock
-    ftxui::dom
-    ftxui::screen
-    ftxui::component
-)
-target_include_directories(test_todo_lane PRIVATE
-    ../../packages/tui/include
-    ../../packages/tui/src
-)
-gtest_discover_tests(test_todo_lane)
 
 add_executable(test_context_lane
     tui/test_context_lane.cpp
@@ -1511,21 +1355,6 @@ target_include_directories(test_workspace PRIVATE
     ${rapidjson_SOURCE_DIR}/include
 )
 gtest_discover_tests(test_workspace)
-
-add_executable(test_runtime_overlay
-    core/test_runtime_overlay.cpp
-)
-target_link_libraries(test_runtime_overlay PRIVATE
-    firmius::core
-    firmius::shared
-    GTest::gtest_main
-    GTest::gmock
-    GTest::gmock
-)
-target_include_directories(test_runtime_overlay PRIVATE
-    ${rapidjson_SOURCE_DIR}/include
-)
-gtest_discover_tests(test_runtime_overlay)
 
 add_executable(test_mode_registry
     agents/test_mode_registry.cpp

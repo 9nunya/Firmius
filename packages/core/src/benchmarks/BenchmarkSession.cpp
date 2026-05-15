@@ -120,7 +120,7 @@ void BenchmarkSession::ensureReady() {
     config_.cwd = "/work";
   }
   if (config_.personaName.empty()) {
-    config_.personaName = "aster";
+    config_.personaName = "lead";
   }
 
   if (!config_.existingThreadId.empty()) {
@@ -134,11 +134,9 @@ void BenchmarkSession::ensureReady() {
   }
 
   try {
-    const auto metadata = harness.listThreads();
-    auto it = std::find_if(
-        metadata.begin(), metadata.end(),
-        [&](const auto &thread) { return thread.threadId == threadId_; });
-    if (it == metadata.end() || !it->isBenchmarkRun) {
+    // Fast-path single-thread lookup; listThreads() pulls the entire DB.
+    const auto meta = harness.getThreadMetadata(threadId_);
+    if (meta.threadId != threadId_ || !meta.isBenchmarkRun) {
       harness.markThreadAsBenchmark(threadId_, "benchmark");
     }
   } catch (...) {

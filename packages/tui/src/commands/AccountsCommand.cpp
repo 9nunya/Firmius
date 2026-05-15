@@ -1,6 +1,7 @@
 #include "commands/AccountsCommand.hpp"
 #include "TUIState.hpp"
 #include "modals/AccountsModal.hpp"
+#include "providers/ProviderRegistry.hpp"
 #include <memory>
 
 namespace firmius::tui {
@@ -11,6 +12,7 @@ void AccountsCommand::execute(CommandCtx &ctx,
     return;
   }
 
+  firmius::provider::ProviderRegistry::instance().hydrateProviders();
   std::string providerId = args[0].asString();
   auto modalObj = std::make_shared<AccountsModal>(providerId);
   ctx.state->openModalDirect(modalObj->create(*ctx.state));

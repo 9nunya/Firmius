@@ -13,18 +13,6 @@ namespace firmius::core {
 
 using namespace firmius::shared;
 
-enum class PurposeWorkRole {
-  Lead,
-  Executor,
-  Worker,
-  Auditor,
-  Scout,
-  Unknown
-};
-
-std::string purposeWorkRoleToString(PurposeWorkRole role);
-PurposeWorkRole purposeWorkRoleFromString(const std::string &role);
-
 /**
  * @brief Representation of an agent persona loaded from Markdown/YAML.
  */
@@ -37,8 +25,6 @@ struct Persona {
       allowedScopes; ///< Tools the persona is allowed to use.
   bool canSpawn = false;      ///< Whether this persona can spawn sub-agents.
   bool switchable = false;    ///< Whether this persona is selectable as lead.
-  bool hasWorkRole = false;   ///< Whether the persona declares explicit semantics.
-  PurposeWorkRole workRole = PurposeWorkRole::Unknown;
   std::string identityPrompt; ///< The core instructions for the persona.
 };
 
@@ -58,17 +44,6 @@ public:
    * @return The loaded Persona struct.
    */
   static Persona load(const std::string &purpose);
-
-  /**
-   * @brief Resolves the runtime work role for a loaded persona, using explicit
-   * metadata when present and compatibility fallbacks otherwise.
-   */
-  static PurposeWorkRole resolveWorkRole(const Persona &persona);
-
-  /**
-   * @brief Resolves the runtime work role for a purpose name.
-   */
-  static PurposeWorkRole resolveWorkRole(const std::string &purpose);
 
   /**
    * @brief Composes the final system prompt for an agent.

@@ -182,14 +182,6 @@ const char* kLegacySchemaSQL =
     ");"
     "CREATE INDEX IF NOT EXISTS idx_agent_turns_thread_agent"
     " ON agent_turns(thread_id, agent_id, id);"
-    "CREATE TABLE IF NOT EXISTS plans ("
-    " thread_id TEXT NOT NULL,"
-    " plan_id TEXT NOT NULL,"
-    " plan_json TEXT NOT NULL,"
-    " created_at INTEGER NOT NULL,"
-    " updated_at INTEGER NOT NULL,"
-    " PRIMARY KEY(thread_id, plan_id)"
-    ");"
     "CREATE TABLE IF NOT EXISTS agent_todos ("
     " thread_id TEXT NOT NULL,"
     " agent_id TEXT NOT NULL,"
@@ -289,78 +281,6 @@ const char* kNormalizedSchemaSQL =
     ");"
     "CREATE INDEX IF NOT EXISTS idx_message_parts_v2_message"
     " ON message_parts_v2(message_row_id, ordinal);"
-    "CREATE TABLE IF NOT EXISTS plans_v2 ("
-    " thread_id TEXT NOT NULL,"
-    " plan_id TEXT NOT NULL,"
-    " title TEXT NOT NULL DEFAULT '',"
-    " objective TEXT NOT NULL DEFAULT '',"
-    " context TEXT NOT NULL DEFAULT '',"
-    " strategy TEXT NOT NULL DEFAULT '',"
-    " status TEXT NOT NULL DEFAULT 'Draft',"
-    " notes TEXT NOT NULL DEFAULT '',"
-    " created_at INTEGER NOT NULL DEFAULT 0,"
-    " updated_at INTEGER NOT NULL DEFAULT 0,"
-    " PRIMARY KEY(thread_id, plan_id)"
-    ");"
-    "CREATE TABLE IF NOT EXISTS work_chunks_v2 ("
-    " thread_id TEXT NOT NULL,"
-    " plan_id TEXT NOT NULL,"
-    " chunk_id TEXT NOT NULL,"
-    " title TEXT NOT NULL DEFAULT '',"
-    " goal TEXT NOT NULL DEFAULT '',"
-    " context TEXT NOT NULL DEFAULT '',"
-    " constraints TEXT NOT NULL DEFAULT '',"
-    " completion TEXT NOT NULL DEFAULT '',"
-    " planning_gate INTEGER NOT NULL DEFAULT 0,"
-    " status TEXT NOT NULL DEFAULT 'Ready',"
-    " assigned_agent_id TEXT NOT NULL DEFAULT '',"
-    " attempt_count INTEGER NOT NULL DEFAULT 0,"
-    " result_summary TEXT NOT NULL DEFAULT '',"
-    " review_summary TEXT NOT NULL DEFAULT '',"
-    " created_at INTEGER NOT NULL DEFAULT 0,"
-    " updated_at INTEGER NOT NULL DEFAULT 0,"
-    " cwd TEXT NOT NULL DEFAULT '',"
-    " verification_condition TEXT NOT NULL DEFAULT '',"
-    " handoff_notes TEXT NOT NULL DEFAULT '',"
-    " ordinal INTEGER NOT NULL DEFAULT 0,"
-    " PRIMARY KEY(thread_id, plan_id, chunk_id),"
-    " FOREIGN KEY(thread_id, plan_id) REFERENCES plans_v2(thread_id, plan_id) ON DELETE CASCADE"
-    ");"
-    "CREATE TABLE IF NOT EXISTS work_chunk_dependencies_v2 ("
-    " thread_id TEXT NOT NULL,"
-    " plan_id TEXT NOT NULL,"
-    " chunk_id TEXT NOT NULL,"
-    " depends_on_chunk_id TEXT NOT NULL,"
-    " PRIMARY KEY(thread_id, plan_id, chunk_id, depends_on_chunk_id),"
-    " FOREIGN KEY(thread_id, plan_id, chunk_id) REFERENCES work_chunks_v2(thread_id, plan_id, chunk_id) ON DELETE CASCADE"
-    ");"
-    "CREATE TABLE IF NOT EXISTS work_chunk_files_v2 ("
-    " thread_id TEXT NOT NULL,"
-    " plan_id TEXT NOT NULL,"
-    " chunk_id TEXT NOT NULL,"
-    " file_kind TEXT NOT NULL,"
-    " path TEXT NOT NULL,"
-    " ordinal INTEGER NOT NULL DEFAULT 0,"
-    " PRIMARY KEY(thread_id, plan_id, chunk_id, file_kind, ordinal),"
-    " FOREIGN KEY(thread_id, plan_id, chunk_id) REFERENCES work_chunks_v2(thread_id, plan_id, chunk_id) ON DELETE CASCADE"
-    ");"
-    "CREATE TABLE IF NOT EXISTS work_tasks_v2 ("
-    " thread_id TEXT NOT NULL,"
-    " plan_id TEXT NOT NULL,"
-    " chunk_id TEXT NOT NULL,"
-    " task_id TEXT NOT NULL,"
-    " title TEXT NOT NULL DEFAULT '',"
-    " goal TEXT NOT NULL DEFAULT '',"
-    " status TEXT NOT NULL DEFAULT 'Ready',"
-    " notes TEXT NOT NULL DEFAULT '',"
-    " verification_condition TEXT NOT NULL DEFAULT '',"
-    " assigned_worker_id TEXT NOT NULL DEFAULT '',"
-    " created_at INTEGER NOT NULL DEFAULT 0,"
-    " updated_at INTEGER NOT NULL DEFAULT 0,"
-    " ordinal INTEGER NOT NULL DEFAULT 0,"
-    " PRIMARY KEY(thread_id, plan_id, chunk_id, task_id),"
-    " FOREIGN KEY(thread_id, plan_id, chunk_id) REFERENCES work_chunks_v2(thread_id, plan_id, chunk_id) ON DELETE CASCADE"
-    ");"
     "CREATE TABLE IF NOT EXISTS agent_todos_v2 ("
     " thread_id TEXT NOT NULL,"
     " agent_id TEXT NOT NULL,"
@@ -676,25 +596,6 @@ ThreadPermissionMode threadPermissionModeFromStoredString(
     return ThreadPermissionMode::Request;
 }
 
-PlanStatus planStatusFromStoredString(const std::string& value) {
-    if (value == "Active") return PlanStatus::Active;
-    if (value == "Paused") return PlanStatus::Paused;
-    if (value == "Done") return PlanStatus::Done;
-    if (value == "Abandoned") return PlanStatus::Abandoned;
-    return PlanStatus::Draft;
-}
-
-WorkChunkStatus workChunkStatusFromStoredString(const std::string& value) {
-    if (value == "InProgress") return WorkChunkStatus::InProgress;
-    if (value == "Implemented") return WorkChunkStatus::Implemented;
-    if (value == "Verifying") return WorkChunkStatus::Verifying;
-    if (value == "Done") return WorkChunkStatus::Done;
-    if (value == "Blocked") return WorkChunkStatus::Blocked;
-    if (value == "Failed") return WorkChunkStatus::Failed;
-    if (value == "Cancelled") return WorkChunkStatus::Cancelled;
-    return WorkChunkStatus::Ready;
-}
-
 void writeSchemaMeta(sqlite3* db, const std::string& key, const std::string& value) {
     Statement stmt(
         db,
@@ -733,138 +634,8 @@ void execPrepared(sqlite3* db, const std::string& sql,
     }
 }
 
-void deletePlanChildrenV2(sqlite3* db, const std::string& threadId,
-                          const std::string& planId) {
-    const std::vector<std::string> deletes = {
-        "DELETE FROM work_tasks_v2 WHERE thread_id=? AND plan_id=?;",
-        "DELETE FROM work_chunk_files_v2 WHERE thread_id=? AND plan_id=?;",
-        "DELETE FROM work_chunk_dependencies_v2 WHERE thread_id=? AND plan_id=?;",
-        "DELETE FROM work_chunks_v2 WHERE thread_id=? AND plan_id=?;"
-    };
-    for (const auto& sql : deletes) {
-        execPrepared(db, sql,
-                     [&](sqlite3_stmt* stmt) {
-                         bindText(stmt, 1, threadId);
-                         bindText(stmt, 2, planId);
-                     },
-                     "Failed to delete normalized plan children");
-    }
 }
 
-void persistPlanChildrenV2(sqlite3* db, const Plan& plan) {
-    int chunkOrdinal = 0;
-    for (const auto& chunk : plan.chunks) {
-        execPrepared(
-            db,
-            "INSERT INTO work_chunks_v2(thread_id, plan_id, chunk_id, title, goal, context, constraints, completion, planning_gate, status, assigned_agent_id, attempt_count, result_summary, review_summary, created_at, updated_at, cwd, verification_condition, handoff_notes, ordinal) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
-            [&](sqlite3_stmt* stmt) {
-                const auto chunkJson = toJson(chunk);
-                bindText(stmt, 1, plan.threadId);
-                bindText(stmt, 2, plan.id);
-                bindText(stmt, 3, chunk.id);
-                bindText(stmt, 4, chunk.title);
-                bindText(stmt, 5, chunk.goal);
-                bindText(stmt, 6, chunk.context);
-                bindText(stmt, 7, chunk.constraints);
-                bindText(stmt, 8, chunk.completion);
-                sqlite3_bind_int(stmt, 9, chunk.planningGate ? 1 : 0);
-                const auto status = chunkJson.HasMember("status") && chunkJson["status"].IsString()
-                                        ? std::string(chunkJson["status"].GetString())
-                                        : std::string("Ready");
-                bindText(stmt, 10, status);
-                bindText(stmt, 11, chunk.assignedAgentId);
-                sqlite3_bind_int(stmt, 12, chunk.attemptCount);
-                bindText(stmt, 13, chunk.resultSummary);
-                bindText(stmt, 14, chunk.reviewSummary);
-                sqlite3_bind_int64(stmt, 15, static_cast<sqlite3_int64>(chunk.createdAt));
-                sqlite3_bind_int64(stmt, 16, static_cast<sqlite3_int64>(chunk.updatedAt));
-                bindText(stmt, 17, chunk.cwd);
-                bindText(stmt, 18, chunk.verificationCondition);
-                bindText(stmt, 19, chunk.handoffNotes);
-                sqlite3_bind_int(stmt, 20, chunkOrdinal);
-            },
-            "Failed to write normalized work chunk");
-
-        int dependencyOrdinal = 0;
-        for (const auto& dep : chunk.dependsOn) {
-            execPrepared(
-                db,
-                "INSERT INTO work_chunk_dependencies_v2(thread_id, plan_id, chunk_id, depends_on_chunk_id) VALUES(?, ?, ?, ?);",
-                [&](sqlite3_stmt* stmt) {
-                    (void)dependencyOrdinal;
-                    bindText(stmt, 1, plan.threadId);
-                    bindText(stmt, 2, plan.id);
-                    bindText(stmt, 3, chunk.id);
-                    bindText(stmt, 4, dep);
-                },
-                "Failed to write normalized work chunk dependency");
-            dependencyOrdinal++;
-        }
-
-        int fileOrdinal = 0;
-        for (const auto& path : chunk.filesToRead) {
-            execPrepared(
-                db,
-                "INSERT INTO work_chunk_files_v2(thread_id, plan_id, chunk_id, file_kind, path, ordinal) VALUES(?, ?, ?, ?, ?, ?);",
-                [&](sqlite3_stmt* stmt) {
-                    bindText(stmt, 1, plan.threadId);
-                    bindText(stmt, 2, plan.id);
-                    bindText(stmt, 3, chunk.id);
-                    bindText(stmt, 4, "read");
-                    bindText(stmt, 5, path);
-                    sqlite3_bind_int(stmt, 6, fileOrdinal);
-                },
-                "Failed to write normalized work chunk file");
-            fileOrdinal++;
-        }
-        fileOrdinal = 0;
-        for (const auto& path : chunk.filesToTouch) {
-            execPrepared(
-                db,
-                "INSERT INTO work_chunk_files_v2(thread_id, plan_id, chunk_id, file_kind, path, ordinal) VALUES(?, ?, ?, ?, ?, ?);",
-                [&](sqlite3_stmt* stmt) {
-                    bindText(stmt, 1, plan.threadId);
-                    bindText(stmt, 2, plan.id);
-                    bindText(stmt, 3, chunk.id);
-                    bindText(stmt, 4, "touch");
-                    bindText(stmt, 5, path);
-                    sqlite3_bind_int(stmt, 6, fileOrdinal);
-                },
-                "Failed to write normalized work chunk file");
-            fileOrdinal++;
-        }
-
-        int taskOrdinal = 0;
-        for (const auto& task : chunk.tasks) {
-            execPrepared(
-                db,
-                "INSERT INTO work_tasks_v2(thread_id, plan_id, chunk_id, task_id, title, goal, status, notes, verification_condition, assigned_worker_id, created_at, updated_at, ordinal) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
-                [&](sqlite3_stmt* stmt) {
-                    const auto taskJson = toJson(task);
-                    bindText(stmt, 1, plan.threadId);
-                    bindText(stmt, 2, plan.id);
-                    bindText(stmt, 3, chunk.id);
-                    bindText(stmt, 4, task.id);
-                    bindText(stmt, 5, task.title);
-                    bindText(stmt, 6, task.goal);
-                    const auto status = taskJson.HasMember("status") && taskJson["status"].IsString()
-                                            ? std::string(taskJson["status"].GetString())
-                                            : std::string("Ready");
-                    bindText(stmt, 7, status);
-                    bindText(stmt, 8, task.notes);
-                    bindText(stmt, 9, task.verificationCondition);
-                    bindText(stmt, 10, task.assignedWorkerId);
-                    sqlite3_bind_int64(stmt, 11, static_cast<sqlite3_int64>(task.createdAt));
-                    sqlite3_bind_int64(stmt, 12, static_cast<sqlite3_int64>(task.updatedAt));
-                    sqlite3_bind_int(stmt, 13, taskOrdinal);
-                },
-                "Failed to write normalized work task");
-            taskOrdinal++;
-        }
-
-        chunkOrdinal++;
-    }
-}
 
 void deleteTodoItemsV2(sqlite3* db, const std::string& threadId,
                        const std::string& agentId) {
@@ -1014,7 +785,7 @@ void migrateLegacyToV2(sqlite3* db) {
                         sqlite3_bind_int(stmt, 7, metadata.isBenchmarkRun ? 1 : 0);
                         bindText(stmt, 8, metadata.benchmarkId);
                         bindText(stmt, 9, metadata.benchmarkTaskId);
-                        bindText(stmt, 10, metadata.activePlanId);
+                        bindText(stmt, 10, "");
                         const auto permissionMode = metadataJson.HasMember("permissionMode") && metadataJson["permissionMode"].IsString() ? std::string(metadataJson["permissionMode"].GetString()) : std::string("Request");
                         bindText(stmt, 11, permissionMode);
                         sqlite3_bind_int64(stmt, 12, static_cast<sqlite3_int64>(metadata.createdAt));
@@ -1033,43 +804,6 @@ void migrateLegacyToV2(sqlite3* db) {
             }
         }
 
-        Statement planStmt(
-            db,
-            "SELECT thread_id, plan_id, plan_json FROM plans ORDER BY thread_id ASC, plan_id ASC;",
-            "Failed to prepare legacy plan migration read");
-        while (sqlite3_step(planStmt.get()) == SQLITE_ROW) {
-            const auto* threadIdText = reinterpret_cast<const char*>(sqlite3_column_text(planStmt.get(), 0));
-            const auto* planIdText = reinterpret_cast<const char*>(sqlite3_column_text(planStmt.get(), 1));
-            const auto* planJsonText = reinterpret_cast<const char*>(sqlite3_column_text(planStmt.get(), 2));
-            if (!threadIdText || !planIdText || !planJsonText) continue;
-            try {
-                auto d = parseJson(planJsonText, "legacy plan");
-                Plan plan = planFromJson(d);
-                if (plan.id.empty()) plan.id = planIdText;
-                if (plan.threadId.empty()) plan.threadId = threadIdText;
-                execPrepared(
-                    db,
-                    "INSERT OR IGNORE INTO plans_v2(thread_id, plan_id, title, objective, context, strategy, status, notes, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
-                    [&](sqlite3_stmt* stmt) {
-                        const auto planJson = toJson(plan);
-                        bindText(stmt, 1, plan.threadId);
-                        bindText(stmt, 2, plan.id);
-                        bindText(stmt, 3, plan.title);
-                        bindText(stmt, 4, plan.objective);
-                        bindText(stmt, 5, plan.context);
-                        bindText(stmt, 6, plan.strategy);
-                        const auto status = planJson.HasMember("status") && planJson["status"].IsString() ? std::string(planJson["status"].GetString()) : std::string("Draft");
-                        bindText(stmt, 7, status);
-                        bindText(stmt, 8, plan.notes);
-                        sqlite3_bind_int64(stmt, 9, static_cast<sqlite3_int64>(plan.createdAt));
-                        sqlite3_bind_int64(stmt, 10, static_cast<sqlite3_int64>(plan.updatedAt));
-                    },
-                    "Failed to write migrated plan row");
-                deletePlanChildrenV2(db, plan.threadId, plan.id);
-                persistPlanChildrenV2(db, plan);
-            } catch (...) {
-            }
-        }
 
         Statement todoStmt(
             db,
@@ -1506,20 +1240,6 @@ void validateArtifactFilename(const std::string& filename) {
     }
 }
 
-std::shared_ptr<std::mutex> acquirePlanMutex(const std::string& threadId,
-                                             const std::string& planId) {
-    static std::mutex registryMutex;
-    static std::unordered_map<std::string, std::weak_ptr<std::mutex>> registry;
-    const std::string key = threadId + ":" + planId;
-    std::lock_guard<std::mutex> guard(registryMutex);
-    if (auto existing = registry[key].lock()) {
-        return existing;
-    }
-    auto created = std::make_shared<std::mutex>();
-    registry[key] = created;
-    return created;
-}
-
 std::shared_ptr<std::mutex> acquireTodoMutex(const std::string& threadId,
                                              const std::string& agentId) {
     static std::mutex registryMutex;
@@ -1535,6 +1255,8 @@ std::shared_ptr<std::mutex> acquireTodoMutex(const std::string& threadId,
 }
 
 } // namespace
+
+namespace firmius::core {
 
 std::string ThreadManager::defaultBasePath() {
     const std::filesystem::path sharedHomePath =
@@ -1620,7 +1342,7 @@ std::string ThreadManager::createThread(const ThreadMetadata& metadata) {
             sqlite3_bind_int(stmt, 7, persisted.isBenchmarkRun ? 1 : 0);
             bindText(stmt, 8, persisted.benchmarkId);
             bindText(stmt, 9, persisted.benchmarkTaskId);
-            bindText(stmt, 10, persisted.activePlanId);
+            bindText(stmt, 10, "");
             const auto permissionMode = metadataJson.HasMember("permissionMode") &&
                                                 metadataJson["permissionMode"].IsString()
                                             ? std::string(metadataJson["permissionMode"].GetString())
@@ -1629,7 +1351,14 @@ std::string ThreadManager::createThread(const ThreadMetadata& metadata) {
             sqlite3_bind_int64(stmt, 12, static_cast<sqlite3_int64>(persisted.createdAt));
             sqlite3_bind_int64(stmt, 13, static_cast<sqlite3_int64>(persisted.lastActiveAt));
             bindText(stmt, 14, rapidJsonToString(hostOptionsJson));
-            sqlite3_bind_null(stmt, 15);
+            if (metadataJson.HasMember("lastRetryableRequest") &&
+                !metadataJson["lastRetryableRequest"].IsNull()) {
+                rapidjson::Document retryDoc;
+                retryDoc.CopyFrom(metadataJson["lastRetryableRequest"], retryDoc.GetAllocator());
+                bindText(stmt, 15, rapidJsonToString(retryDoc));
+            } else {
+                sqlite3_bind_null(stmt, 15);
+            }
         },
         "Failed to create thread");
 
@@ -1654,7 +1383,6 @@ ThreadMetadata ThreadManager::getMetadata(const std::string& threadId) const {
     const auto* leadPersona = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 4));
     const auto* benchmarkId = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 6));
     const auto* benchmarkTaskId = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 7));
-    const auto* activePlanId = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 8));
     const auto* permissionMode = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 9));
     const auto* hostOptionsJson = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 12));
     const auto* retryableRequestJson = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 13));
@@ -1665,7 +1393,6 @@ ThreadMetadata ThreadManager::getMetadata(const std::string& threadId) const {
     meta.isBenchmarkRun = sqlite3_column_int(stmt.get(), 5) != 0;
     meta.benchmarkId = benchmarkId ? benchmarkId : "";
     meta.benchmarkTaskId = benchmarkTaskId ? benchmarkTaskId : "";
-    meta.activePlanId = activePlanId ? activePlanId : "";
     meta.permissionMode = permissionMode ? threadPermissionModeFromStoredString(permissionMode)
                                          : ThreadPermissionMode::Request;
     meta.createdAt = static_cast<uint64_t>(sqlite3_column_int64(stmt.get(), 10));
@@ -1877,7 +1604,6 @@ void ThreadManager::deleteThread(const std::string& threadId) {
             "DELETE FROM threads WHERE thread_id=?;",
             "DELETE FROM thread_states WHERE thread_id=?;",
             "DELETE FROM agent_turns WHERE thread_id=?;",
-            "DELETE FROM plans WHERE thread_id=?;",
             "DELETE FROM agent_todos WHERE thread_id=?;",
             "DELETE FROM agent_live_state WHERE thread_id=?;",
             "DELETE FROM rolling_memory_state WHERE thread_id=?;",
@@ -1926,7 +1652,7 @@ void ThreadManager::updateMetadata(const std::string& threadId,
             sqlite3_bind_int(stmt, 6, persisted.isBenchmarkRun ? 1 : 0);
             bindText(stmt, 7, persisted.benchmarkId);
             bindText(stmt, 8, persisted.benchmarkTaskId);
-            bindText(stmt, 9, persisted.activePlanId);
+            bindText(stmt, 9, "");
             const auto permissionMode = metadataJson.HasMember("permissionMode") &&
                                                 metadataJson["permissionMode"].IsString()
                                             ? std::string(metadataJson["permissionMode"].GetString())
@@ -1968,285 +1694,6 @@ std::vector<ThreadMetadata> ThreadManager::listThreadsWithMetadata() const {
         }
     }
     return result;
-}
-
-std::string ThreadManager::createPlan(const Plan& plan) {
-    Plan persistedPlan = plan;
-    if (persistedPlan.threadId.empty()) {
-        throw std::runtime_error("Cannot create plan with empty threadId");
-    }
-
-    auto conn = acquireConnection(basePath_);
-    ensureThreadExists(conn->db, persistedPlan.threadId);
-
-    if (persistedPlan.id.empty()) {
-        persistedPlan.id = StringUtil::generateUuid();
-    }
-    const uint64_t timestamp = nowEpochMs();
-    if (persistedPlan.createdAt == 0) {
-        persistedPlan.createdAt = timestamp;
-    }
-    persistedPlan.updatedAt = timestamp;
-
-    writePlan(persistedPlan.threadId, persistedPlan);
-    return persistedPlan.id;
-}
-
-void ThreadManager::writePlan(const std::string& threadId, const Plan& plan) {
-    if (plan.id.empty()) {
-        throw std::runtime_error("Cannot write plan with empty id");
-    }
-
-    auto conn = acquireConnection(basePath_);
-    ensureThreadExists(conn->db, threadId);
-
-    Plan persistedPlan = plan;
-    if (persistedPlan.threadId.empty()) {
-        persistedPlan.threadId = threadId;
-    }
-
-    withImmediateTransaction(conn->db, [&]() {
-        execPrepared(
-            conn->db,
-            "INSERT INTO plans_v2(thread_id, plan_id, title, objective, context, strategy, status, notes, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(thread_id, plan_id) DO UPDATE SET title=excluded.title, objective=excluded.objective, context=excluded.context, strategy=excluded.strategy, status=excluded.status, notes=excluded.notes, created_at=excluded.created_at, updated_at=excluded.updated_at;",
-            [&](sqlite3_stmt* stmt) {
-                const auto planJson = toJson(persistedPlan);
-                bindText(stmt, 1, threadId);
-                bindText(stmt, 2, persistedPlan.id);
-                bindText(stmt, 3, persistedPlan.title);
-                bindText(stmt, 4, persistedPlan.objective);
-                bindText(stmt, 5, persistedPlan.context);
-                bindText(stmt, 6, persistedPlan.strategy);
-                const auto status = planJson.HasMember("status") && planJson["status"].IsString()
-                                        ? std::string(planJson["status"].GetString())
-                                        : std::string("Draft");
-                bindText(stmt, 7, status);
-                bindText(stmt, 8, persistedPlan.notes);
-                sqlite3_bind_int64(stmt, 9, static_cast<sqlite3_int64>(persistedPlan.createdAt));
-                sqlite3_bind_int64(stmt, 10, static_cast<sqlite3_int64>(persistedPlan.updatedAt));
-            },
-            "Failed to write plan");
-        deletePlanChildrenV2(conn->db, threadId, persistedPlan.id);
-        persistPlanChildrenV2(conn->db, persistedPlan);
-    });
-}
-
-Plan ThreadManager::getPlan(const std::string& threadId,
-                            const std::string& planId) const {
-    auto conn = acquireConnection(basePath_);
-    Statement stmt(conn->db,
-                   "SELECT title, objective, context, strategy, status, notes, created_at, updated_at FROM plans_v2 WHERE thread_id=? AND plan_id=?;",
-                   "Failed to prepare get plan query");
-    bindText(stmt.get(), 1, threadId);
-    bindText(stmt.get(), 2, planId);
-    if (sqlite3_step(stmt.get()) != SQLITE_ROW) {
-        Statement legacyStmt(conn->db,
-                             "SELECT plan_json FROM plans WHERE thread_id=? AND plan_id=?;",
-                             "Failed to prepare legacy get plan query");
-        bindText(legacyStmt.get(), 1, threadId);
-        bindText(legacyStmt.get(), 2, planId);
-        if (sqlite3_step(legacyStmt.get()) != SQLITE_ROW) {
-            throw std::runtime_error("Plan not found: " + planId);
-        }
-        const auto* jsonText = reinterpret_cast<const char*>(sqlite3_column_text(legacyStmt.get(), 0));
-        if (!jsonText) {
-            throw std::runtime_error("Plan row is empty: " + planId);
-        }
-        auto d = parseJson(jsonText, "legacy plan");
-        Plan legacyPlan = planFromJson(d);
-        if (legacyPlan.id.empty()) {
-            legacyPlan.id = planId;
-        }
-        if (legacyPlan.threadId.empty()) {
-            legacyPlan.threadId = threadId;
-        }
-        work::reconcileChunkDependencies(legacyPlan);
-        return legacyPlan;
-    }
-
-    Plan plan;
-    plan.id = planId;
-    plan.threadId = threadId;
-    const auto* title = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 0));
-    const auto* objective = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 1));
-    const auto* context = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 2));
-    const auto* strategy = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 3));
-    const auto* status = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 4));
-    const auto* notes = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 5));
-    plan.title = title ? title : "";
-    plan.objective = objective ? objective : "";
-    plan.context = context ? context : "";
-    plan.strategy = strategy ? strategy : "";
-    plan.status = status ? planStatusFromStoredString(status) : PlanStatus::Draft;
-    plan.notes = notes ? notes : "";
-    plan.createdAt = static_cast<uint64_t>(sqlite3_column_int64(stmt.get(), 6));
-    plan.updatedAt = static_cast<uint64_t>(sqlite3_column_int64(stmt.get(), 7));
-
-    Statement chunkStmt(conn->db,
-                        "SELECT chunk_id, title, goal, context, constraints, completion, planning_gate, status, assigned_agent_id, attempt_count, result_summary, review_summary, created_at, updated_at, cwd, verification_condition, handoff_notes FROM work_chunks_v2 WHERE thread_id=? AND plan_id=? ORDER BY ordinal ASC;",
-                        "Failed to prepare get plan chunks query");
-    bindText(chunkStmt.get(), 1, threadId);
-    bindText(chunkStmt.get(), 2, planId);
-    while (sqlite3_step(chunkStmt.get()) == SQLITE_ROW) {
-        WorkChunk chunk;
-        const auto* chunkId = reinterpret_cast<const char*>(sqlite3_column_text(chunkStmt.get(), 0));
-        const auto* chunkTitle = reinterpret_cast<const char*>(sqlite3_column_text(chunkStmt.get(), 1));
-        const auto* chunkGoal = reinterpret_cast<const char*>(sqlite3_column_text(chunkStmt.get(), 2));
-        const auto* chunkContext = reinterpret_cast<const char*>(sqlite3_column_text(chunkStmt.get(), 3));
-        const auto* chunkConstraints = reinterpret_cast<const char*>(sqlite3_column_text(chunkStmt.get(), 4));
-        const auto* chunkCompletion = reinterpret_cast<const char*>(sqlite3_column_text(chunkStmt.get(), 5));
-        const auto* chunkStatus = reinterpret_cast<const char*>(sqlite3_column_text(chunkStmt.get(), 7));
-        const auto* assignedAgentId = reinterpret_cast<const char*>(sqlite3_column_text(chunkStmt.get(), 8));
-        const auto* resultSummary = reinterpret_cast<const char*>(sqlite3_column_text(chunkStmt.get(), 10));
-        const auto* reviewSummary = reinterpret_cast<const char*>(sqlite3_column_text(chunkStmt.get(), 11));
-        const auto* cwd = reinterpret_cast<const char*>(sqlite3_column_text(chunkStmt.get(), 14));
-        const auto* verificationCondition = reinterpret_cast<const char*>(sqlite3_column_text(chunkStmt.get(), 15));
-        const auto* handoffNotes = reinterpret_cast<const char*>(sqlite3_column_text(chunkStmt.get(), 16));
-        chunk.id = chunkId ? chunkId : "";
-        chunk.title = chunkTitle ? chunkTitle : "";
-        chunk.goal = chunkGoal ? chunkGoal : "";
-        chunk.context = chunkContext ? chunkContext : "";
-        chunk.constraints = chunkConstraints ? chunkConstraints : "";
-        chunk.completion = chunkCompletion ? chunkCompletion : "";
-        chunk.planningGate = sqlite3_column_int(chunkStmt.get(), 6) != 0;
-        chunk.status = chunkStatus ? workChunkStatusFromStoredString(chunkStatus)
-                                   : WorkChunkStatus::Ready;
-        chunk.assignedAgentId = assignedAgentId ? assignedAgentId : "";
-        chunk.attemptCount = sqlite3_column_int(chunkStmt.get(), 9);
-        chunk.resultSummary = resultSummary ? resultSummary : "";
-        chunk.reviewSummary = reviewSummary ? reviewSummary : "";
-        chunk.createdAt = static_cast<uint64_t>(sqlite3_column_int64(chunkStmt.get(), 12));
-        chunk.updatedAt = static_cast<uint64_t>(sqlite3_column_int64(chunkStmt.get(), 13));
-        chunk.cwd = cwd ? cwd : "";
-        chunk.verificationCondition = verificationCondition ? verificationCondition : "";
-        chunk.handoffNotes = handoffNotes ? handoffNotes : "";
-
-        Statement depStmt(conn->db,
-                          "SELECT depends_on_chunk_id FROM work_chunk_dependencies_v2 WHERE thread_id=? AND plan_id=? AND chunk_id=? ORDER BY depends_on_chunk_id ASC;",
-                          "Failed to prepare get chunk dependencies query");
-        bindText(depStmt.get(), 1, threadId);
-        bindText(depStmt.get(), 2, planId);
-        bindText(depStmt.get(), 3, chunk.id);
-        while (sqlite3_step(depStmt.get()) == SQLITE_ROW) {
-            const auto* dep = reinterpret_cast<const char*>(sqlite3_column_text(depStmt.get(), 0));
-            if (dep) chunk.dependsOn.push_back(dep);
-        }
-
-        Statement fileStmt(conn->db,
-                           "SELECT file_kind, path FROM work_chunk_files_v2 WHERE thread_id=? AND plan_id=? AND chunk_id=? ORDER BY file_kind ASC, ordinal ASC;",
-                           "Failed to prepare get chunk files query");
-        bindText(fileStmt.get(), 1, threadId);
-        bindText(fileStmt.get(), 2, planId);
-        bindText(fileStmt.get(), 3, chunk.id);
-        while (sqlite3_step(fileStmt.get()) == SQLITE_ROW) {
-            const auto* kind = reinterpret_cast<const char*>(sqlite3_column_text(fileStmt.get(), 0));
-            const auto* path = reinterpret_cast<const char*>(sqlite3_column_text(fileStmt.get(), 1));
-            if (!kind || !path) continue;
-            if (std::string(kind) == "read") chunk.filesToRead.push_back(path);
-            else if (std::string(kind) == "touch") chunk.filesToTouch.push_back(path);
-        }
-
-        Statement taskStmt(conn->db,
-                           "SELECT task_id, title, goal, status, notes, verification_condition, assigned_worker_id, created_at, updated_at FROM work_tasks_v2 WHERE thread_id=? AND plan_id=? AND chunk_id=? ORDER BY ordinal ASC;",
-                           "Failed to prepare get work tasks query");
-        bindText(taskStmt.get(), 1, threadId);
-        bindText(taskStmt.get(), 2, planId);
-        bindText(taskStmt.get(), 3, chunk.id);
-        while (sqlite3_step(taskStmt.get()) == SQLITE_ROW) {
-            WorkTask task;
-            const auto* taskId = reinterpret_cast<const char*>(sqlite3_column_text(taskStmt.get(), 0));
-            const auto* taskTitle = reinterpret_cast<const char*>(sqlite3_column_text(taskStmt.get(), 1));
-            const auto* taskGoal = reinterpret_cast<const char*>(sqlite3_column_text(taskStmt.get(), 2));
-            const auto* taskStatus = reinterpret_cast<const char*>(sqlite3_column_text(taskStmt.get(), 3));
-            const auto* taskNotes = reinterpret_cast<const char*>(sqlite3_column_text(taskStmt.get(), 4));
-            const auto* taskVerification = reinterpret_cast<const char*>(sqlite3_column_text(taskStmt.get(), 5));
-            const auto* taskWorker = reinterpret_cast<const char*>(sqlite3_column_text(taskStmt.get(), 6));
-            task.id = taskId ? taskId : "";
-            task.title = taskTitle ? taskTitle : "";
-            task.goal = taskGoal ? taskGoal : "";
-            task.notes = taskNotes ? taskNotes : "";
-            task.verificationCondition = taskVerification ? taskVerification : "";
-            task.assignedWorkerId = taskWorker ? taskWorker : "";
-            task.createdAt = static_cast<uint64_t>(sqlite3_column_int64(taskStmt.get(), 7));
-            task.updatedAt = static_cast<uint64_t>(sqlite3_column_int64(taskStmt.get(), 8));
-            task.status = taskStatus ? workChunkStatusFromStoredString(taskStatus)
-                                     : WorkChunkStatus::Ready;
-            chunk.tasks.push_back(std::move(task));
-        }
-
-        plan.chunks.push_back(std::move(chunk));
-    }
-
-    work::reconcileChunkDependencies(plan);
-    return plan;
-}
-
-std::vector<Plan> ThreadManager::listPlans(const std::string& threadId) const {
-    auto conn = acquireConnection(basePath_);
-    Statement stmt(conn->db,
-                   "SELECT plan_id FROM plans_v2 WHERE thread_id=? ORDER BY plan_id ASC;",
-                   "Failed to prepare list plans query");
-    bindText(stmt.get(), 1, threadId);
-
-    std::vector<Plan> plans;
-    while (sqlite3_step(stmt.get()) == SQLITE_ROW) {
-        const auto* planIdText =
-            reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 0));
-        if (!planIdText) {
-            continue;
-        }
-        plans.push_back(getPlan(threadId, planIdText));
-    }
-    return plans;
-}
-
-void ThreadManager::updatePlan(const std::string& threadId, const Plan& plan) {
-    if (plan.id.empty()) {
-        throw std::runtime_error("Cannot update plan with empty id");
-    }
-
-    auto planMutex = acquirePlanMutex(threadId, plan.id);
-    std::lock_guard<std::mutex> lock(*planMutex);
-
-    Plan persistedPlan = plan;
-    if (persistedPlan.threadId.empty()) {
-        persistedPlan.threadId = threadId;
-    }
-    if (persistedPlan.threadId != threadId) {
-        throw std::runtime_error("Plan threadId does not match target thread");
-    }
-
-    const Plan existing = getPlan(threadId, plan.id);
-    if (persistedPlan.createdAt == 0) {
-        persistedPlan.createdAt = existing.createdAt;
-    }
-    persistedPlan.updatedAt = nowEpochMs();
-    writePlan(threadId, persistedPlan);
-}
-
-Plan ThreadManager::mutatePlan(const std::string& threadId,
-                               const std::string& planId,
-                               const std::function<void(Plan&)>& mutator) {
-    if (planId.empty()) {
-        throw std::runtime_error("Cannot mutate plan with empty id");
-    }
-
-    auto planMutex = acquirePlanMutex(threadId, planId);
-    std::lock_guard<std::mutex> lock(*planMutex);
-    Plan plan = getPlan(threadId, planId);
-    mutator(plan);
-    if (plan.threadId.empty()) {
-        plan.threadId = threadId;
-    }
-    if (plan.threadId != threadId) {
-        throw std::runtime_error("Plan threadId does not match target thread");
-    }
-    if (plan.createdAt == 0) {
-        plan.createdAt = nowEpochMs();
-    }
-    plan.updatedAt = nowEpochMs();
-    writePlan(threadId, plan);
-    return plan;
 }
 
 AgentTodoList ThreadManager::getAgentTodo(const std::string& threadId,

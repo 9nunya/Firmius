@@ -15,6 +15,7 @@ void QuotasCommand::execute(CommandCtx &ctx,
     return;
   }
 
+  firmius::provider::ProviderRegistry::instance().hydrateProviders();
   std::string providerId = args[0].asString();
   auto provider =
       firmius::provider::ProviderRegistry::instance().getProvider(providerId);

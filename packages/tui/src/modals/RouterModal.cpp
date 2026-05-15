@@ -165,6 +165,15 @@ ftxui::Component RouterModal::create(TuiState &state) {
         }
       });
 
+  // Bind unsubscribe to the modal's lifecycle so any dismissal path — Esc,
+  // popModal, replaceModalDirect, clearModals, shutdown — unsubscribes in
+  // lockstep. Otherwise the harness event thread fires into &state / lambda
+  // captures after the modal is gone → segfault.
+  state.pushModalTeardown([subId, modalActive]() {
+    modalActive->store(false, std::memory_order_relaxed);
+    firmius::core::Harness::instance().unsubscribe(subId);
+  });
+
   auto component = ftxui::Renderer(
       [categories, selected, mode, message, category_name, model_filter,
        selectedCategory, model_menu, rebuildModelFilter, refreshModelEntries,

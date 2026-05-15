@@ -23,17 +23,6 @@ target_link_libraries(test_utils PRIVATE
 )
 gtest_discover_tests(test_utils)
 
-add_executable(test_agent_outcome test_agent_outcome.cpp)
-target_link_libraries(test_agent_outcome PRIVATE
-    firmius::core
-    firmius::provider
-    firmius::shared
-    CURL::libcurl
-    GTest::gtest_main
-)
-target_include_directories(test_agent_outcome PRIVATE ${rapidjson_SOURCE_DIR}/include)
-gtest_discover_tests(test_agent_outcome)
-
 add_executable(test_fleet test_fleet.cpp)
 target_link_libraries(test_fleet PRIVATE
     firmius::core

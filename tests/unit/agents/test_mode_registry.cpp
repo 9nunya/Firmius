@@ -6,8 +6,8 @@
 // The test points the loader at the workspace's `prompts/` directory via
 // `FIRMIUS_PROMPTS_DIR` and then asserts:
 //   - every expected persona has *all* of its sub-modes loaded,
-//   - bare-name resolution works ("apply" + persona "forge" → "forge:apply"),
-//   - qualified-name resolution works ("aster:route" → "aster:route").
+//   - bare-name resolution works against the new plain personas,
+//   - qualified-name resolution works ("lead:plan" → "lead:plan").
 
 #include <gtest/gtest.h>
 
@@ -86,82 +86,53 @@ TEST_F(ModeRegistryTest, SystemModesLoaded) {
   EXPECT_NE(nullptr, ModeRegistry::instance().find("execute"));
 }
 
-TEST_F(ModeRegistryTest, ForgeSubmodesLoaded) {
-  expectPersonaHasSubmodes(
-      "forge",
-      {"prime", "diagnose", "orchestrate", "apply", "verify", "return"});
+TEST_F(ModeRegistryTest, LeadSubmodesLoaded) {
+  expectPersonaHasSubmodes("lead", {"code", "plan"});
 }
 
-TEST_F(ModeRegistryTest, AsterSubmodesLoaded) {
-  expectPersonaHasSubmodes("aster", {"route", "synthesize", "intervene"});
+TEST_F(ModeRegistryTest, CoderSubmodesLoaded) {
+  expectPersonaHasSubmodes("coder", {"code", "verify"});
 }
 
-TEST_F(ModeRegistryTest, FastSubmodesLoaded) {
-  expectPersonaHasSubmodes("fast", {"probe", "apply", "verify", "escalate"});
+TEST_F(ModeRegistryTest, ExplorerSubmodesLoaded) {
+  expectPersonaHasSubmodes("explorer", {"scan"});
 }
 
-TEST_F(ModeRegistryTest, GlimmerSubmodesLoaded) {
-  expectPersonaHasSubmodes("glimmer", {"isolate", "penetrate", "label"});
-}
-
-TEST_F(ModeRegistryTest, HarborSubmodesLoaded) {
-  expectPersonaHasSubmodes("harbor",
-                           {"diagnose", "excise", "reanchor", "verify"});
-}
-
-TEST_F(ModeRegistryTest, LoomSubmodesLoaded) {
-  expectPersonaHasSubmodes("loom", {"scan", "sift", "weave"});
-}
-
-TEST_F(ModeRegistryTest, MeridianSubmodesLoaded) {
-  expectPersonaHasSubmodes("meridian", {"recon", "gates", "cuts"});
-}
-
-TEST_F(ModeRegistryTest, VellumSubmodesLoaded) {
-  expectPersonaHasSubmodes("vellum", {"pathology", "joint", "load"});
-}
-
-TEST_F(ModeRegistryTest, WitnessSubmodesLoaded) {
-  expectPersonaHasSubmodes("witness", {"charge", "forensics", "verdict"});
+TEST_F(ModeRegistryTest, ReviewerSubmodesLoaded) {
+  expectPersonaHasSubmodes("reviewer", {"review"});
 }
 
 TEST_F(ModeRegistryTest, BareNameResolvesPersonaScopedFirst) {
-  // "apply" without persona scope is ambiguous — but with persona "forge"
-  // it must resolve to "forge:apply", not the system "execute" or any
-  // other persona's "apply".
+  // "code" without persona scope should resolve to the active persona's
+  // sub-mode first.
   const Mode *m =
-      ModeRegistry::instance().resolveForPersona("apply", "forge");
+      ModeRegistry::instance().resolveForPersona("code", "lead");
   ASSERT_NE(nullptr, m);
-  EXPECT_EQ("forge:apply", m->qualifiedName());
+  EXPECT_EQ("lead:code", m->qualifiedName());
 }
 
 TEST_F(ModeRegistryTest, ExploreAliasResolvesToPersonaReconMode) {
-  const Mode *aster =
-      ModeRegistry::instance().resolveForPersona("explore", "aster");
-  ASSERT_NE(nullptr, aster);
-  EXPECT_EQ("aster:route", aster->qualifiedName());
-
-  const Mode *loom =
-      ModeRegistry::instance().resolveForPersona("explore", "loom");
-  ASSERT_NE(nullptr, loom);
-  EXPECT_EQ("loom:scan", loom->qualifiedName());
+  const Mode *explorer =
+      ModeRegistry::instance().resolveForPersona("explore", "explorer");
+  ASSERT_NE(nullptr, explorer);
+  EXPECT_EQ("explorer:scan", explorer->qualifiedName());
 }
 
 TEST_F(ModeRegistryTest, QualifiedNameResolvesVerbatim) {
   const Mode *m =
-      ModeRegistry::instance().resolveForPersona("aster:route", "forge");
+      ModeRegistry::instance().resolveForPersona("lead:plan", "coder");
   ASSERT_NE(nullptr, m);
-  EXPECT_EQ("aster:route", m->qualifiedName());
+  EXPECT_EQ("lead:plan", m->qualifiedName());
   // The persona scope on the file must match its directory.
   ASSERT_TRUE(m->personaScope.has_value());
-  EXPECT_EQ("aster", *m->personaScope);
+  EXPECT_EQ("lead", *m->personaScope);
 }
 
 TEST_F(ModeRegistryTest, SystemModeFallsBackWhenNoPersonaSubmode) {
-  // Persona "loom" has no "execute" sub-mode; resolution must fall back
+  // Persona "reviewer" has no "execute" sub-mode; resolution must fall back
   // to the system-level "execute" mode.
   const Mode *m =
-      ModeRegistry::instance().resolveForPersona("execute", "loom");
+      ModeRegistry::instance().resolveForPersona("execute", "reviewer");
   ASSERT_NE(nullptr, m);
   EXPECT_EQ("execute", m->qualifiedName());
   EXPECT_FALSE(m->personaScope.has_value())

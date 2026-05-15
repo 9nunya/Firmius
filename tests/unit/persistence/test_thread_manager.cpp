@@ -687,20 +687,19 @@ TEST_F(ThreadManagerTest, updateMetadata_persistsPermissionMode) {
     EXPECT_EQ(updated.permissionMode, ThreadPermissionMode::AlwaysAllow);
 }
 
-TEST_F(ThreadManagerTest, updateMetadata_persistsActivePlanId) {
+TEST_F(ThreadManagerTest, updateMetadata_persistsInitialMode) {
     ThreadMetadata metadata = createTestMetadata();
     std::string threadId = tm->createThread(metadata);
 
     auto loaded = tm->getMetadata(threadId);
-    EXPECT_TRUE(loaded.activePlanId.empty());
+    EXPECT_TRUE(loaded.initialMode.empty());
 
-    loaded.activePlanId = "plan-active";
+    loaded.initialMode = "forge:prime";
     tm->updateMetadata(threadId, loaded);
 
-  auto updated = tm->getMetadata(threadId);
-  EXPECT_EQ(updated.activePlanId, "plan-active");
+    auto updated = tm->getMetadata(threadId);
+    EXPECT_EQ(updated.initialMode, "forge:prime");
 }
-
 TEST_F(ThreadManagerTest, updateMetadata_persistsRetryableRequest) {
     ThreadMetadata metadata = createTestMetadata();
     std::string threadId = tm->createThread(metadata);

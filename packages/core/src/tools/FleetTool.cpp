@@ -61,10 +61,17 @@ shared::ToolMetadata FleetTool::getMetadata() const {
 std::shared_ptr<shared::JSONSchema> FleetTool::getSchema() const {
   return shared::zObject({
       {"action", shared::zEnum({"Lock", "Respond", "Status"})
-                     ->describe("Fleet operation to execute")},
-      {"mode", shared::zString()->setOptional()},
-      {"request_id", shared::zString()->setOptional()},
-      {"lock_id", shared::zString()->setOptional()},
+                     ->describe(
+                         "Fleet coordination action to execute.\n\n"
+                         "- Lock: acquire/release/check a fleet lock flow\n"
+                         "- Respond: answer a pending lock request\n"
+                         "- Status: inspect lock/fleet state")},
+      {"mode", shared::zString()->setOptional()->describe(
+          "Lock mode / operation detail, mainly for action=Lock (for example acquire, release, request, wait, check depending on downstream lock handler).")},
+      {"request_id", shared::zString()->setOptional()->describe(
+          "Pending fleet lock request id for action=Respond.")},
+      {"lock_id", shared::zString()->setOptional()->describe(
+          "Lock id or lock handle for lock-oriented operations.")},
   });
 }
 

@@ -3,9 +3,11 @@
 #include "modals/ConfirmationModal.hpp"
 #include "modals/OAuthWizardModal.hpp"
 #include "modals/APIKeyWizardModal.hpp"
+#include "NotificationManager.hpp"
 #include "providers/ProviderRegistry.hpp"
 #include "providers/BaseOAuthProvider.hpp"
 #include "providers/BaseAPIKeyProvider.hpp"
+#include <chrono>
 #include <ftxui/component/component.hpp>
 #include <memory>
 
@@ -15,6 +17,7 @@ void ConnectCommand::execute(CommandCtx &ctx,
                              const std::vector<ParsedArg> &args) {
   if (args.empty())
     return;
+  firmius::provider::ProviderRegistry::instance().hydrateProviders();
   std::string providerName = args[0].asString();
 
   auto provider =
@@ -33,8 +36,12 @@ void ConnectCommand::execute(CommandCtx &ctx,
 
     auto startWizard = [oauthProvider, providerName, state = ctx.state]() {
       auto wizard = oauthProvider->beginConnectionWizard();
-      if (!wizard)
+      if (!wizard) {
+        NotificationManager::instance().notifyInfo(
+            "Connect", providerName + " does not require interactive authentication.",
+            std::chrono::milliseconds(2500));
         return;
+      }
 
       auto modalObj =
           std::make_shared<OAuthWizardModal>(std::move(wizard), providerName);
@@ -62,8 +69,12 @@ void ConnectCommand::execute(CommandCtx &ctx,
 
     auto startWizard = [apiKeyProvider, providerName, state = ctx.state]() {
       auto wizard = apiKeyProvider->beginConnectionWizard();
-      if (!wizard)
+      if (!wizard) {
+        NotificationManager::instance().notifyInfo(
+            "Connect", providerName + " does not require an API key.",
+            std::chrono::milliseconds(2500));
         return;
+      }
 
       auto modalObj =
           std::make_shared<APIKeyWizardModal>(std::move(wizard), providerName);

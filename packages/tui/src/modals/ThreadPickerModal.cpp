@@ -5,19 +5,14 @@
 #include "TUIHotkeys.hpp"
 #include "components/ScrollableBox.hpp"
 #include "harness/Harness.hpp"
-#include "harness/ThreadLockManager.hpp"
 #include "modals/ModalLayout.hpp"
-#include "persistence/ThreadManager.hpp"
 #include "utils/Clipboard.hpp"
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/mouse.hpp>
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/terminal.hpp>
 #include <algorithm>
-#include <atomic>
 #include <cctype>
-#include <cerrno>
-#include <cstdlib>
 #include <ctime>
 #include <filesystem>
 #include <optional>
@@ -29,24 +24,6 @@
 #endif
 namespace {
 
-std::optional<int> lockedPidByOther(const std::string &thread_id) {
-  firmius::core::ThreadLockManager lockManager;
-  const int acquireResult = lockManager.acquire(thread_id);
-  if (acquireResult >= 0) {
-    lockManager.release(thread_id);
-    return std::nullopt;
-  }
-
-  if (acquireResult != -2) {
-    return std::nullopt;
-  }
-
-  const int pid = lockManager.getOwnerPid(thread_id);
-  if (pid <= 0) {
-    return std::nullopt;
-  }
-  return pid;
-}
 std::string normalizePath(const std::string &path) {
   if (path.empty())
     return path;
@@ -199,104 +176,9 @@ std::string formatTime(uint64_t timestamp_ms) {
   return out;
 }
 
-struct LastUserMessage {
-  std::string text;
-  uint64_t timestamp = 0;
-  bool found = false;
-};
-
-std::string extractMessageText(const firmius::shared::Message &msg,
-                               bool includeThinking = true) {
-  std::string out;
-  for (const auto &part : msg.content) {
-    if (auto *txt = std::get_if<firmius::shared::TextContent>(&part)) {
-      if (!out.empty())
-        out.push_back(' ');
-      out += txt->text;
-    } else if (includeThinking) {
-      if (auto *thinking =
-              std::get_if<firmius::shared::ThinkingContent>(&part)) {
-        if (!out.empty())
-          out.push_back(' ');
-        out += thinking->thinking;
-      }
-    } else if (std::holds_alternative<firmius::shared::ImageContent>(part)) {
-      if (!out.empty())
-        out.push_back(' ');
-      out += "[image]";
-    }
-  }
-  return out;
-}
-
-struct ThreadSearchData {
-  LastUserMessage lastUser;
-  std::string allUserText;  // all user prompts across all agents
-  std::string searchBlob;   // combined search blob used for fuzzy match
-};
-ThreadSearchData inspectThreadTranscript(firmius::core::ThreadManager &tm,
-                                         const std::string &thread_id) {
-  ThreadSearchData data;
-  std::vector<std::string> searchChunks;
-  std::vector<std::string> userChunks;
-  searchChunks.push_back(thread_id);
-
-  for (const auto &agentId : tm.listAgents(thread_id)) {
-    try {
-      auto history = tm.loadAgentHistory(thread_id, agentId);
-      for (const auto &turn : history.turns) {
-        for (const auto &msg : turn.messages) {
-          const std::string text = extractMessageText(msg);
-          if (!text.empty()) {
-            searchChunks.push_back(text);
-          }
-          if (msg.role == firmius::shared::Role::User) {
-            if (!text.empty()) {
-              userChunks.push_back(text);
-            }
-            if (msg.timestamp >= data.lastUser.timestamp) {
-              data.lastUser.timestamp = msg.timestamp;
-              data.lastUser.text = text;
-              data.lastUser.found = true;
-            }
-          }
-        }
-      }
-    } catch (...) {
-    }
-  }
-
-  // Flatten all user prompts (across all agents) for UI display and search.
-  {
-    std::string flattenedUser;
-    for (const auto &chunk : userChunks) {
-      if (chunk.empty()) continue;
-      if (!flattenedUser.empty()) flattenedUser.push_back(' ');
-      flattenedUser += chunk;
-    }
-    data.allUserText = flattenedUser;
-  }
-
-  std::string flattened;
-  for (const auto &chunk : searchChunks) {
-    if (chunk.empty()) {
-      continue;
-    }
-    if (!flattened.empty()) {
-      flattened.push_back(' ');
-    }
-    flattened += chunk;
-  }
-  data.searchBlob = toLower(flattenText(flattened));
-  return data;
-}
-
 struct ThreadEntry {
   firmius::shared::ThreadMetadata meta;
   int agent_count = 0;
-  std::string last_user_text;
-  uint64_t last_user_timestamp = 0;
-  std::string all_user_text;
   std::string search_blob;
   bool locked_by_other = false;
   int locked_pid = -1;
@@ -315,8 +197,7 @@ ftxui::Component ThreadPickerModal::create(TuiState &state) {
   auto list_rows = std::make_shared<std::vector<std::string>>();
   auto list_width = std::make_shared<int>(80);
   auto row_boxes = std::make_shared<std::vector<ftxui::Box>>();
-  auto threads_loading = std::make_shared<bool>(true);
-  auto load_generation = std::make_shared<std::atomic<uint64_t>>(0);
+  auto threads_loading = std::make_shared<bool>(false);
   auto visible_start = std::make_shared<int>(0);
   auto visible_count = std::make_shared<int>(10);
 
@@ -366,89 +247,40 @@ ftxui::Component ThreadPickerModal::create(TuiState &state) {
         }
       };
 
-  auto start_refresh_threads =
-      [all_threads_ptr, filtered_indices, selected, cwd, rebuild_filtered,
-       sort_mode, show_all, threads_loading, load_generation, &state] {
-        *threads_loading = true;
-        const uint64_t generation =
-            load_generation->fetch_add(1, std::memory_order_relaxed) + 1;
-        const bool showAll = *show_all;
-        const SortMode sortMode = *sort_mode;
+  auto sync_from_snapshot =
+      [all_threads_ptr, filtered_indices, selected, rebuild_filtered,
+       threads_loading, &state]() {
+        const auto snapshot = state.threadListSnapshot();
+        std::vector<ThreadEntry> loaded;
+        loaded.reserve(snapshot.entries.size());
+        for (const auto &row : snapshot.entries) {
+          ThreadEntry entry;
+          entry.meta = row.metadata;
+          entry.agent_count = row.agent_count;
+          entry.locked_by_other = row.locked_by_other;
+          entry.locked_pid = row.locked_pid;
+          entry.search_blob = toLower(flattenText(
+              row.metadata.threadId + " " +
+              (row.metadata.title.empty() ? "" : row.metadata.title) + " " +
+              row.metadata.cwd + " " + row.metadata.leadPersona));
+          loaded.push_back(std::move(entry));
+        }
+        *all_threads_ptr = std::move(loaded);
+        *threads_loading = snapshot.loading;
+        rebuild_filtered();
+        if (*selected >= static_cast<int>(filtered_indices->size())) {
+          *selected = filtered_indices->empty()
+                          ? 0
+                          : static_cast<int>(filtered_indices->size()) - 1;
+        }
+      };
 
-        state.runBackgroundTask(
-            [all_threads_ptr, filtered_indices, selected, cwd, rebuild_filtered,
-             threads_loading, load_generation, generation, showAll, sortMode,
-             &state]() mutable {
-              auto &h = firmius::core::Harness::instance();
-              auto all_threads = h.listThreads();
-              std::vector<ThreadEntry> loaded;
-              loaded.reserve(all_threads.size());
-              firmius::core::ThreadManager tm(
-                  firmius::core::ThreadManager::defaultBasePath());
+  sync_from_snapshot();
 
-              for (const auto &t : all_threads) {
-                if (!showAll && !cwd.empty() && normalizePath(t.cwd) != cwd &&
-                    !t.isBenchmarkRun) {
-                  continue;
-                }
-
-                ThreadEntry entry;
-                entry.meta = t;
-                entry.agent_count =
-                    static_cast<int>(h.listAgents(t.threadId).size());
-
-                auto transcript = inspectThreadTranscript(tm, t.threadId);
-                if (transcript.lastUser.found) {
-                  entry.last_user_text = transcript.lastUser.text;
-                  entry.last_user_timestamp = transcript.lastUser.timestamp;
-                }
-                entry.all_user_text = transcript.allUserText;
-                entry.search_blob = toLower(flattenText(
-                    t.threadId + " " + (t.title.empty() ? "" : t.title) +
-                    " " + transcript.allUserText));
-
-                auto locked_pid = lockedPidByOther(t.threadId);
-                if (locked_pid.has_value()) {
-                  entry.locked_by_other = true;
-                  entry.locked_pid = *locked_pid;
-                }
-
-                loaded.push_back(std::move(entry));
-              }
-
-              std::stable_sort(
-                  loaded.begin(), loaded.end(),
-                  [&](const ThreadEntry &a, const ThreadEntry &b) {
-                    if (sortMode == SortMode::Title) {
-                      return toLower(a.meta.title) < toLower(b.meta.title);
-                    }
-                    if (sortMode == SortMode::CreatedAt) {
-                      return a.meta.createdAt > b.meta.createdAt;
-                    }
-                    return a.meta.lastActiveAt > b.meta.lastActiveAt;
-                  });
-
-              state.deferUiMutation(
-                  [all_threads_ptr, filtered_indices, selected,
-                   rebuild_filtered, threads_loading, load_generation,
-                   generation, loaded = std::move(loaded)]() mutable {
-                    if (load_generation->load(std::memory_order_relaxed) !=
-                        generation) {
-                      return;
-                    }
-                    *all_threads_ptr = std::move(loaded);
-                    *threads_loading = false;
-                    rebuild_filtered();
-                    if (*selected >=
-                        static_cast<int>(filtered_indices->size())) {
-                      *selected = filtered_indices->empty()
-                                      ? 0
-                                      : static_cast<int>(
-                                            filtered_indices->size()) -
-                                            1;
-                    }
-                  });
-            });
+  auto start_refresh_threads = [cwd, show_all, sync_from_snapshot, &state]() {
+        state.refreshThreadListSnapshot(
+            cwd, *show_all,
+            [sync_from_snapshot]() mutable { sync_from_snapshot(); });
       };
 
   start_refresh_threads();
@@ -468,7 +300,7 @@ ftxui::Component ThreadPickerModal::create(TuiState &state) {
               ftxui::text("No matching threads") | ftxui::center |
                   ftxui::color(theme.base.dim),
               ftxui::text(""),
-              ftxui::text("Search title, thread ID, user text, or agent output") |
+              ftxui::text("Search title, thread ID, cwd, or lead persona") |
                   ftxui::center | ftxui::color(theme.base.dim),
           });
         }
@@ -545,10 +377,12 @@ ftxui::Component ThreadPickerModal::create(TuiState &state) {
                              ftxui::text(lock_label) | ftxui::color(sub_fg)});
           }
 
-          std::string time_label = formatTime(entry.last_user_timestamp);
-          std::string user_text =
-              entry.last_user_text.empty() ? "No user messages yet"
-                                           : flattenText(entry.last_user_text);
+          std::string time_label = formatTime(entry.meta.lastActiveAt);
+          std::string user_text = !entry.meta.cwd.empty()
+                                      ? flattenText(entry.meta.cwd)
+                                      : (!entry.meta.leadPersona.empty()
+                                             ? ("lead: " + entry.meta.leadPersona)
+                                             : entry.meta.threadId);
 
           // Ensure the right-side time label always has space, even on narrow
           // terminals. Constrain the left preview element width explicitly.

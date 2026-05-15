@@ -58,7 +58,7 @@ packages/core/
   - File: `FileReadTool`, `FileEditTool`, `GlobTool`, `GrepTool`
   - Process: `ProcessExecuteTool`, `ProcessSpawnTool`, `ProcessWaitTool`
   - Subagent: `SubagentTool`, `SubagentWaitTool`, `SubagentTerminateTool`
-  - Plan/Chunk: `Work`
+  - Todo/Fleet: `Todo`, `Fleet`
   - Web: `WebFetchTool`
   - Python: `PythonExecuteTool`
   - Artifact: `ArtifactWriteTool`, `ArtifactReadTool`, `ArtifactListTool`
@@ -76,7 +76,7 @@ packages/core/
 |---------|---------------|-------------|
 | Raw pointers for agents/tools | Memory safety | `std::shared_ptr<IAgent>` |
 | Direct host access from tools | Security | Go through `ToolContext::host` |
-| Modifying `chunk_*` authority fields | Runtime security | Authority checks in `SubagentTool` |
+| Modifying legacy work-orchestration authority fields | Runtime security | Keep execution state in `Todo`; Work runtime is removed |
 | Allowing vulnerable commands | Safety | `CommandIntentAnalyzer` blocks `rm -rf /`, `format` |
 
 ---

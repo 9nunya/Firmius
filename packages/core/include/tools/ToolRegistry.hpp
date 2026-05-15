@@ -39,12 +39,12 @@ public:
      */
     void registerToolFactory(const std::string& name, ToolFactory factory);
 
+
     /**
      * @brief Registers tool factories synthesized from workflows that declare
      * defines_tool.
      */
     void registerWorkflowDefinedTools();
-
     /**
      * @brief Lists metadata for all registered tools.
      * @return Vector of shared::ToolMetadata.

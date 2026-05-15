@@ -39,7 +39,7 @@ void ModeCommand::execute(CommandCtx &ctx, const std::vector<ParsedArg> &args) {
   // Welcome path: mutate pre-thread initial mode.
   if (state.getViewMode() == TuiState::ViewMode::Welcome) {
     const std::string persona = state.thread_.leadPersona.empty()
-                                    ? std::string("aster")
+                                    ? std::string("lead")
                                     : state.thread_.leadPersona;
     std::string next;
     if (token.empty()) {

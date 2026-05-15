@@ -21,7 +21,7 @@ namespace firmius::core::hooks {
  */
 struct ScriptLimits {
   std::uint64_t maxInstructions = 1'000'000;
-  std::chrono::milliseconds wallClockTimeout{250};
+  std::chrono::milliseconds wallClockTimeout{0};
   std::size_t memoryBudgetBytes = 8 * 1024 * 1024;
 };
 
@@ -56,8 +56,10 @@ struct ScriptLimits {
  * Memory + time budgets:
  *   - Hard cap on instructions executed per evaluation (debug hook fires
  *     after N opcodes, raises a Luau error). Default 1,000,000.
- *   - Soft wall-clock timeout: the runtime polls a deadline_t from the
- *     same debug hook. Default 250ms.
+ *   - Optional wall-clock timeout: `0ms` disables it. The default is disabled
+ *     because hook scripts may legitimately wait on runtime bridges such as
+ *     `agent.spawn(...)`; runaway in-VM execution is constrained by the
+ *     instruction budget instead.
  *   - Memory cap via `lua_callbacks(L)->onallocate`. Default 8MB.
  */
 class ScriptRuntime {

@@ -380,6 +380,8 @@ const std::vector<HotkeyBindingSpec> &HotkeyBindingSpecs() {
       {HotkeyAction::OpenCommandPalette, "open_command_palette",
        kOpenCommandPaletteHotkeyLabel, "Input + UI",
        "Open command palette / launcher"},
+      {HotkeyAction::ModeCycle, "mode_cycle", kModeCycleHotkeyLabel,
+       "Agent Control", "Cycle active mode on the lead/focused agent"},
       {HotkeyAction::PermissionCycle, "permission_cycle",
        kPermissionCycleHotkeyLabel, "Agent Control",
        "Cycle thread permissions"},
@@ -621,6 +623,14 @@ bool IsOpenCommandPaletteInput(const std::string &raw) {
 
 bool IsOpenCommandPaletteEvent(const ftxui::Event &event) {
   return IsHotkeyActionEvent(HotkeyAction::OpenCommandPalette, event);
+}
+
+bool IsModeCycleInput(const std::string &raw) {
+  return IsHotkeyActionInput(HotkeyAction::ModeCycle, raw);
+}
+
+bool IsModeCycleEvent(const ftxui::Event &event) {
+  return IsHotkeyActionEvent(HotkeyAction::ModeCycle, event);
 }
 
 bool IsPermissionCycleInput(const std::string &raw) {

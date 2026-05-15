@@ -1,5 +1,6 @@
 #include "harness/Harness.hpp"
 #include "agents/hooks/HookRegistry.hpp"
+#include "agents/hooks/HookState.hpp"
 #include "AgentRegistry.hpp"
 #include "Engine.hpp"
 #include "IHost.hpp"
@@ -83,8 +84,8 @@ std::string resolveRunnableLeadPersona(const std::string &requestedPersona) {
     return cfg.defaultLeadPersona;
   }
 
-  if (PurposeLoader::isValid("aster")) {
-    return "aster";
+  if (PurposeLoader::isValid("lead")) {
+    return "lead";
   }
 
   const auto available = PurposeLoader::listPurposes();
@@ -92,7 +93,7 @@ std::string resolveRunnableLeadPersona(const std::string &requestedPersona) {
     return available.front();
   }
 
-  return requestedPersona.empty() ? "aster" : requestedPersona;
+  return requestedPersona.empty() ? "lead" : requestedPersona;
 }
 
 struct AgentHistoryScore {
@@ -532,6 +533,26 @@ Harness &Harness::instance() {
 Harness::Harness()
     : threadManager_(getFirmiusHome() + "/threads"), nextSubscriptionId_(0) {}
 
+Harness::~Harness() {
+  try {
+    joinBackgroundThreads();
+  } catch (...) {
+  }
+}
+
+void Harness::joinBackgroundThreads() {
+  std::vector<std::thread> toJoin;
+  {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    toJoin = std::move(backgroundThreads_);
+  }
+  for (auto &thread : toJoin) {
+    if (thread.joinable()) {
+      thread.join();
+    }
+  }
+}
+
 void Harness::init() {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
 
@@ -639,11 +660,9 @@ void Harness::init() {
 void Harness::shutdown() {
   Engine::instance().shutdown();
   mcp::McpManager::shared().shutdown();
-  std::vector<std::thread> toJoin;
   std::vector<std::shared_ptr<PendingPermissionRequest>> pendingRequests;
   {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
-    toJoin = std::move(backgroundThreads_);
     for (const auto &entry : pendingPermissionRequests_) {
       pendingRequests.push_back(entry.second);
     }
@@ -663,11 +682,7 @@ void Harness::shutdown() {
     }
     pending->cv.notify_all();
   }
-  for (auto &thread : toJoin) {
-    if (thread.joinable()) {
-      thread.join();
-    }
-  }
+  joinBackgroundThreads();
 }
 
 std::string Harness::newThread(HostCreationOptions hostOptions,
@@ -677,6 +692,7 @@ std::string Harness::newThread(HostCreationOptions hostOptions,
   std::string threadId;
   int ownerPid = -1;
   bool lockAcquired = false;
+  std::string leadAgentId;
   ThreadMetadata metadata;
 
   {
@@ -731,8 +747,63 @@ std::string Harness::newThread(HostCreationOptions hostOptions,
     return "";
   }
 
+  if (materializeThreadLeadAgent(threadId, leadAgentId)) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (currentThreadId_ == threadId) {
+      focusedAgentId_ = leadAgentId;
+    }
+    threadAgentMap_[threadId] = leadAgentId;
+    persistSessionState(currentThreadId_, focusedAgentId_);
+  }
+
   emitEvent(firmius::shared::ThreadChanged{threadId, metadata});
+  hooks::EventPayload payload;
+  payload.threadId = threadId;
+  payload.agentId = leadAgentId;
+  payload.extra["cwd"] = metadata.cwd;
+  payload.extra["lead_persona"] = metadata.leadPersona;
+  auto fired = hooks::HookDispatcher::fire(WorkflowEventKind::ThreadStart, payload);
+  if (fired.blocked) {
+    emitEvent(firmius::shared::AgentError{
+        "", fired.blockReason.empty() ? "thread_start blocked" : fired.blockReason});
+  }
   return threadId;
+}
+
+std::optional<std::string>
+Harness::materializeLeadAgentIdentity(const std::string &threadId) {
+  if (threadId.empty()) {
+    return std::nullopt;
+  }
+
+  ThreadMetadata metadata = threadManager_.getMetadata(threadId);
+  const std::string requestedId = shared::StringUtil::generateUuid();
+  const std::string leadPersona =
+      resolveRunnableLeadPersona(metadata.leadPersona.empty() ? "lead"
+                                                              : metadata.leadPersona);
+
+  Engine::instance().summonAgent(threadId, leadPersona, "", true, "", "lead",
+                                 "Lead", requestedId, "", "", "", {});
+
+  if (!waitFor(
+          [&]() {
+            return AgentRegistry::instance().getAgent(requestedId) != nullptr;
+          },
+          std::chrono::milliseconds(2000))) {
+    return std::nullopt;
+  }
+
+  return requestedId;
+}
+
+bool Harness::materializeThreadLeadAgent(const std::string &threadId,
+                                         std::string &agentIdOut) {
+  auto leadAgentId = materializeLeadAgentIdentity(threadId);
+  if (!leadAgentId.has_value()) {
+    return false;
+  }
+  agentIdOut = *leadAgentId;
+  return true;
 }
 
 bool Harness::switchThread(const std::string &threadId) {
@@ -817,6 +888,26 @@ bool Harness::switchThread(const std::string &threadId) {
                 manifestError});
   }
   emitEvent(firmius::shared::ThreadChanged{threadId, threadMeta});
+  hooks::EventPayload payload;
+  payload.threadId = threadId;
+  payload.agentId = focusedAgentId_;
+  payload.extra["cwd"] = threadMeta.cwd;
+  payload.extra["lead_persona"] = threadMeta.leadPersona;
+  auto fired = hooks::HookDispatcher::fire(WorkflowEventKind::ThreadResume, payload);
+  if (fired.blocked) {
+    emitEvent(firmius::shared::AgentError{
+        "", fired.blockReason.empty() ? "thread_resume blocked" : fired.blockReason});
+  }
+
+  if (focusedAgentId_.empty() && !threadMeta.leadPersona.empty()) {
+    std::string materializedAgentId;
+    if (materializeThreadLeadAgent(threadId, materializedAgentId)) {
+      std::lock_guard<std::recursive_mutex> lock(mutex_);
+      focusedAgentId_ = materializedAgentId;
+      threadAgentMap_[threadId] = materializedAgentId;
+      persistSessionState(currentThreadId_, focusedAgentId_);
+    }
+  }
 
   {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -934,6 +1025,37 @@ void Harness::send(const std::string &text,
     emitEvent(firmius::shared::AgentError{"", statusMessage});
   }
 }
+bool Harness::sendToThreadAgent(
+    const std::string &threadId, const std::string &agentId,
+    const std::string &text,
+    const std::vector<firmius::shared::ImageContent> &images) {
+  std::string statusMessage;
+  std::string previousThreadId;
+  std::string previousAgentId;
+  {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (threadId.empty()) {
+      emitEvent(firmius::shared::AgentError{"", "No target thread active"});
+      return false;
+    }
+    previousThreadId = currentThreadId_;
+    previousAgentId = focusedAgentId_;
+    currentThreadId_ = threadId;
+    focusedAgentId_ = agentId;
+    if (!agentId.empty()) {
+      threadAgentMap_[threadId] = agentId;
+    }
+  }
+  const bool ok = dispatchRequestToAgent(threadId, agentId, text, images, statusMessage);
+  {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    currentThreadId_ = previousThreadId;
+    focusedAgentId_ = previousAgentId;
+  }
+  if (!ok) emitEvent(firmius::shared::AgentError{"", statusMessage});
+  return ok;
+}
+
 
 bool Harness::dispatchRequestToAgent(const std::string &threadId,
                                      const std::string &preferredAgentId,
@@ -1032,7 +1154,27 @@ bool Harness::dispatchRequestToAgent(const std::string &threadId,
     return false;
   }
 
+  auto fireUserMessageHook = [&]() -> bool {
+    hooks::EventPayload payload;
+    payload.threadId = tid;
+    payload.agentId = fid;
+    payload.userMessage = preparedText;
+    payload.extra["raw_user_message"] = text;
+    payload.extra["message_id"] = messageId;
+    auto fired = hooks::HookDispatcher::fire(WorkflowEventKind::UserMessage, payload);
+    if (fired.blocked) {
+      statusMessage =
+          fired.blockReason.empty() ? "blocked by user_message hook"
+                                    : fired.blockReason;
+      return false;
+    }
+    return true;
+  };
+
   if (needsSummon) {
+    if (!fireUserMessageHook()) {
+      return false;
+    }
     emitEvent(firmius::shared::UserMessageSent{messageId, text, tid, images});
     // Note: summonAgent will use the default model from ConfigLoader
     // which is what we want for a brand new lead agent in a thread.
@@ -1055,7 +1197,6 @@ bool Harness::dispatchRequestToAgent(const std::string &threadId,
           "Failed to restore focused agent: " + std::string(e.what());
       return false;
     }
-
     if (!waitFor(
             [&]() {
               auto restored = AgentRegistry::instance().getAgent(fid);
@@ -1080,6 +1221,9 @@ bool Harness::dispatchRequestToAgent(const std::string &threadId,
       return true;
     }
 
+    if (!fireUserMessageHook()) {
+      return false;
+    }
     emitEvent(firmius::shared::UserMessageSent{messageId, text, tid, images});
     Engine::instance().executeTask(fid, preparedText, images);
     statusMessage = "Retry started.";
@@ -1092,6 +1236,9 @@ bool Harness::dispatchRequestToAgent(const std::string &threadId,
     return true;
   }
 
+  if (!fireUserMessageHook()) {
+    return false;
+  }
   emitEvent(firmius::shared::UserMessageSent{messageId, text, tid, images});
   Engine::instance().executeTask(fid, preparedText, images);
   statusMessage = "Retry started.";
@@ -1125,9 +1272,66 @@ bool Harness::executeWorkflow(const std::string &workflowId,
   }
 
   if (advancedAction) {
+    // Ensure the workflow has a concrete target agent id before running any
+    // script action that may call agent.ask/agent.reset/agent.execute.
+    std::string fid;
+    {
+      const std::string tid = currentThreadId();
+      fid = focusedAgentId();
+
+      std::map<std::string, AgentManifestEntry> manifest;
+      try {
+        manifest = threadManager_.readAgentManifest(tid);
+      } catch (const std::exception &) {
+      }
+
+      if (fid.empty()) {
+        fid = chooseBestPersistedAgent(threadManager_, tid, manifest);
+      }
+      if (fid.empty()) {
+        std::string materializedAgentId;
+        if (materializeThreadLeadAgent(tid, materializedAgentId)) {
+          fid = materializedAgentId;
+        }
+      }
+      if (!fid.empty()) {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        if (currentThreadId_ == tid) {
+          focusedAgentId_ = fid;
+          threadAgentMap_[tid] = fid;
+          persistSessionState(currentThreadId_, focusedAgentId_);
+        }
+      }
+
+      if (!fid.empty() &&
+          firmius::core::AgentRegistry::instance().getAgent(fid) == nullptr) {
+        try {
+          auto it = manifest.find(fid);
+          if (it != manifest.end()) {
+            const AgentManifestEntry &entry = it->second;
+            Engine::instance().resumeAgent(tid, fid, entry.persona,
+                                           entry.parentId,
+                                           entry.friendlyName, entry.title,
+                                           entry.persistHistory);
+            waitFor(
+                [&]() {
+                  auto restored =
+                      firmius::core::AgentRegistry::instance().getAgent(fid);
+                  return restored && !restored->isBooting();
+                },
+                std::chrono::milliseconds(2000));
+          }
+        } catch (const std::exception &) {
+          // If restore fails, the script action may still run, but any attempt
+          // to target the focused agent will fail with Agent not found.
+        }
+      }
+    }
+
+    hooks::HookState::instance().bindThread(currentThreadId());
     hooks::EventPayload payload;
     payload.threadId = currentThreadId();
-    payload.agentId = focusedAgentId();
+    payload.agentId = fid;
     payload.completedWorkflowId = workflow->id;
     payload.userMessage = builtPrompt;
     payload.extra["workflow_id"] = workflow->id;
@@ -1140,15 +1344,40 @@ bool Harness::executeWorkflow(const std::string &workflowId,
 
     auto outcome = hooks::HookDispatcher::runAction(*workflow, payload);
     hooks::HookDispatcher::settleOutcome(*workflow, outcome);
+    if (workflow->id == "promise.command.promise") {
+      std::cout << "[Harness::executeWorkflow] promise.command.promise"
+                << " thread_id=" << payload.threadId
+                << " agent_id=" << payload.agentId
+                << " decision=" << static_cast<int>(outcome.decision)
+                << " has_reminder="
+                << ((outcome.reminderForAgent.has_value() && !outcome.reminderForAgent->empty()) ? "true" : "false")
+                << " reminder_size="
+                << (outcome.reminderForAgent.has_value() ? outcome.reminderForAgent->size() : 0)
+                << std::endl;
+    }
+    auto completed =
+        hooks::HookDispatcher::fire(WorkflowEventKind::WorkflowComplete, payload);
     if (outcome.decision == hooks::HookOutcome::Decision::Block) {
       emitEvent(firmius::shared::AgentError{
           payload.agentId,
           outcome.blockReason.empty() ? "Workflow blocked" : outcome.blockReason});
       return false;
     }
+    for (const auto &reminder : completed.injectedReminders) {
+      if (reminder.empty()) {
+        continue;
+      }
+      if (outcome.reminderForAgent.has_value() && !outcome.reminderForAgent->empty()) {
+        *outcome.reminderForAgent += "\n" + reminder;
+      } else {
+        outcome.reminderForAgent = reminder;
+      }
+    }
     if (outcome.reminderForAgent.has_value() &&
         !firmius::shared::StringUtil::trim(*outcome.reminderForAgent).empty()) {
-      send(*outcome.reminderForAgent);
+      std::string statusMessage;
+      return dispatchRequestToAgent(currentThreadId(), focusedAgentId(),
+                                    *outcome.reminderForAgent, {}, statusMessage);
     }
     return true;
   }
@@ -1695,6 +1924,11 @@ std::vector<ThreadMetadata> Harness::listThreads() {
   return threadManager_.listThreadsWithMetadata();
 }
 
+ThreadMetadata Harness::getThreadMetadata(const std::string &threadId) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  return threadManager_.getMetadata(threadId);
+}
+
 std::vector<std::string> Harness::listAgents(const std::string &threadId) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   std::string tid = threadId.empty() ? currentThreadId_ : threadId;
@@ -1734,6 +1968,7 @@ bool Harness::setFocusedAgent(const std::string &agentId) {
   }
   focusedAgentId_ = agentId;
   threadAgentMap_[currentThreadId_] = agentId;
+  persistSessionState(currentThreadId_, focusedAgentId_);
   return true;
 }
 
@@ -1971,6 +2206,28 @@ bool Harness::setCurrentThreadPermissionMode(ThreadPermissionMode mode) {
       firmius::shared::ThreadMetadataUpdated{metadata.threadId, metadata});
   return true;
 }
+bool Harness::setThreadPermissionMode(const std::string &threadId,
+                                      ThreadPermissionMode mode) {
+  ThreadMetadata metadata;
+  {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (threadId.empty()) {
+      return false;
+    }
+    metadata = threadManager_.getMetadata(threadId);
+    if (metadata.threadId.empty()) {
+      return false;
+    }
+    if (metadata.permissionMode == mode) {
+      return true;
+    }
+    metadata.permissionMode = mode;
+    threadManager_.updateMetadata(threadId, metadata);
+  }
+  emitEvent(firmius::shared::ThreadMetadataUpdated{metadata.threadId, metadata});
+  return true;
+}
+
 
 std::optional<ThreadPermissionMode>
 Harness::cycleCurrentThreadPermissionMode() {

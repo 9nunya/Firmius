@@ -413,6 +413,10 @@ public:
       if (!meta_parts.empty()) meta_parts.push_back(ftxui::text("  •  ") | ftxui::color(theme.base.dim));
       meta_parts.push_back(ftxui::text(desc.model) | ftxui::color(theme.base.dim));
     }
+    if (!desc.agent_id.empty()) {
+      if (!meta_parts.empty()) meta_parts.push_back(ftxui::text("  •  ") | ftxui::color(theme.base.dim));
+      meta_parts.push_back(ftxui::text(desc.agent_id) | ftxui::color(theme.base.dim));
+    }
     if (state && !state->artifacts_created.empty()) {
       if (!meta_parts.empty()) meta_parts.push_back(ftxui::text("  •  ") | ftxui::color(theme.base.dim));
       meta_parts.push_back(ftxui::text(

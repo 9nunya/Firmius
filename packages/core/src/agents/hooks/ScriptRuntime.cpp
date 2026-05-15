@@ -111,7 +111,7 @@ void *budgetAlloc(void *ud, void *ptr, std::size_t osize, std::size_t nsize) {
   return p;
 }
 
-// ─── Instruction + wall-clock interrupt ────────────────────────────────────
+// ─── Instruction interrupt ────────────────────────────────────────────────
 
 EvalCtx *ctxFor(lua_State *L) {
   // userdata is set on the main thread's callbacks block.
@@ -130,11 +130,6 @@ void budgetInterrupt(lua_State *L, int gc) {
   if (count > ctx->limits.maxInstructions) {
     luaL_error(L, "hook script: instruction budget (%llu) exceeded",
                static_cast<unsigned long long>(ctx->limits.maxInstructions));
-  }
-  if (std::chrono::steady_clock::now() >= ctx->deadline) {
-    luaL_error(
-        L, "hook script: wall-clock timeout (%lldms) reached",
-        static_cast<long long>(ctx->limits.wallClockTimeout.count()));
   }
 }
 
@@ -362,6 +357,23 @@ int stateAppend(lua_State *L) {
                   HookState::instance().appendJson(
                       s, path, std::string(sb.GetString(), sb.GetSize()),
                       hookId));
+  return 1;
+}
+
+int stateDelete(lua_State *L) {
+  const char *scope = luaL_checkstring(L, 1);
+  const char *path = luaL_checkstring(L, 2);
+  auto *ctx = ctxFor(L);
+  const std::string hookId = ctx ? ctx->hookId : "";
+
+  HookState::Scope s;
+  try {
+    s = parseScope(scope);
+  } catch (const std::exception &) {
+    luaL_error(L, "state.delete: unknown scope %s", scope);
+  }
+
+  lua_pushboolean(L, HookState::instance().deleteJson(s, path, hookId));
   return 1;
 }
 
@@ -877,7 +889,7 @@ int agentSpawn(lua_State *L) {
 
   const std::string childId = firmius::core::Engine::instance().summonAgent(
       ctx->env.threadId, persona, task, true, ctx->env.agentId, persona,
-      "Hook Validator");
+      persona);
   auto outcome = firmius::core::Engine::instance().waitForAgentOutcome(
       childId, std::chrono::seconds(timeoutSec));
 
@@ -916,6 +928,144 @@ int agentSpawn(lua_State *L) {
     }
   }
   pushJsonValue(L, ret);
+  return 1;
+}
+
+int agentAsk(lua_State *L) {
+  auto *ctx = ctxFor(L);
+  if (ctx == nullptr) {
+    luaL_error(L, "agent.ask: runtime context missing");
+  }
+
+  std::string agentId = ctx->env.agentId;
+  const char *task = nullptr;
+  int timeoutSec = 180;
+
+  // Signatures:
+  //   agent.ask(task, {timeout_sec=?})
+  //   agent.ask(agent_id, task, {timeout_sec=?})
+  if (lua_gettop(L) >= 2 && lua_type(L, 1) == LUA_TSTRING &&
+      lua_type(L, 2) == LUA_TSTRING) {
+    agentId = lua_tostring(L, 1);
+    task = luaL_checkstring(L, 2);
+    if (lua_gettop(L) >= 3 && lua_type(L, 3) == LUA_TTABLE) {
+      lua_getfield(L, 3, "timeout_sec");
+      if (lua_type(L, -1) == LUA_TNUMBER) {
+        timeoutSec = static_cast<int>(lua_tonumber(L, -1));
+      }
+      lua_pop(L, 1);
+    }
+  } else {
+    task = luaL_checkstring(L, 1);
+    if (lua_gettop(L) >= 2 && lua_type(L, 2) == LUA_TTABLE) {
+      lua_getfield(L, 2, "timeout_sec");
+      if (lua_type(L, -1) == LUA_TNUMBER) {
+        timeoutSec = static_cast<int>(lua_tonumber(L, -1));
+      }
+      lua_pop(L, 1);
+    }
+  }
+
+  firmius::core::Engine::instance().executeTask(agentId, task);
+  auto outcome = firmius::core::Engine::instance().waitForAgentOutcome(
+      agentId, std::chrono::seconds(timeoutSec));
+
+  rapidjson::Document ret;
+  ret.SetObject();
+  auto &alloc = ret.GetAllocator();
+  addString(ret, "agent_id", agentId, alloc);
+  if (!outcome.has_value()) {
+    addString(ret, "kind", "timeout", alloc);
+    addString(ret, "text", "", alloc);
+  } else {
+    std::string kind = "response";
+    switch (outcome->kind) {
+    case firmius::shared::AgentOutcome::Kind::Response:
+      kind = "response";
+      break;
+    case firmius::shared::AgentOutcome::Kind::NoSummary:
+      kind = "no_summary";
+      break;
+    case firmius::shared::AgentOutcome::Kind::Cancelled:
+      kind = "cancelled";
+      break;
+    case firmius::shared::AgentOutcome::Kind::Failed:
+      kind = "failed";
+      break;
+    }
+    addString(ret, "kind", kind, alloc);
+    addString(ret, "text", outcome->text, alloc);
+    rapidjson::Document parsed;
+    if (!outcome->text.empty() &&
+        !parsed.Parse(outcome->text.c_str()).HasParseError() &&
+        parsed.IsObject()) {
+      rapidjson::Value parsedCopy(rapidjson::kObjectType);
+      parsedCopy.CopyFrom(parsed, alloc);
+      ret.AddMember("json", parsedCopy, alloc);
+    }
+  }
+  pushJsonValue(L, ret);
+  return 1;
+}
+
+
+int agentReset(lua_State *L) {
+  auto *ctx = ctxFor(L);
+  if (ctx == nullptr) {
+    luaL_error(L, "agent.reset: runtime context missing");
+  }
+
+  std::string agentId = ctx->env.agentId;
+  if (lua_gettop(L) >= 1 && lua_type(L, 1) == LUA_TSTRING) {
+    agentId = lua_tostring(L, 1);
+  }
+  auto agent = firmius::core::AgentRegistry::instance().getAgent(agentId);
+  if (!agent) {
+    lua_pushboolean(L, 0);
+    return 1;
+  }
+
+  agent->reset();
+  agent->saveHistory();
+  lua_pushboolean(L, 1);
+  return 1;
+}
+
+int agentCancel(lua_State *L) {
+  auto *ctx = ctxFor(L);
+  if (ctx == nullptr) {
+    luaL_error(L, "agent.cancel: runtime context missing");
+  }
+
+  std::string agentId = ctx->env.agentId;
+  if (lua_gettop(L) >= 1 && lua_type(L, 1) == LUA_TSTRING) {
+    agentId = lua_tostring(L, 1);
+  }
+  if (agentId.empty()) {
+    lua_pushboolean(L, 0);
+    return 1;
+  }
+
+  firmius::core::Engine::instance().cancelAgent(agentId);
+  lua_pushboolean(L, 1);
+  return 1;
+}
+
+int agentExecute(lua_State *L) {
+  auto *ctx = ctxFor(L);
+  if (ctx == nullptr) {
+    luaL_error(L, "agent.execute: runtime context missing");
+  }
+
+  std::string agentId = ctx->env.agentId;
+  const char *task = luaL_checkstring(L, 1);
+  if (lua_gettop(L) >= 2 && lua_type(L, 2) == LUA_TSTRING) {
+    agentId = lua_tostring(L, 1);
+    task = luaL_checkstring(L, 2);
+  }
+
+  firmius::core::Engine::instance().executeTask(agentId, task);
+  lua_pushboolean(L, 1);
   return 1;
 }
 
@@ -1023,8 +1173,10 @@ public:
     ctx.hookId = hookId;
     ctx.env = env;
     ctx.limits = limits_;
-    ctx.deadline =
-        std::chrono::steady_clock::now() + limits_.wallClockTimeout;
+    if (limits_.wallClockTimeout.count() > 0) {
+      ctx.deadline =
+          std::chrono::steady_clock::now() + limits_.wallClockTimeout;
+    }
 
     lua_State *L = lua_newstate(&budgetAlloc, &ctx);
     if (L == nullptr) return scriptError(hookId, "lua_newstate failed");
@@ -1066,13 +1218,15 @@ public:
     // Inject state and runtime inspection APIs. These are intentionally
     // small, synchronous, and deterministic at the C++ boundary so hook
     // behavior lives in Lua without growing the YAML surface.
-    lua_createtable(L, 0, 3);
+    lua_createtable(L, 0, 4);
     lua_pushcfunction(L, &stateRead, "read");
     lua_setfield(L, -2, "read");
     lua_pushcfunction(L, &stateWrite, "write");
     lua_setfield(L, -2, "write");
     lua_pushcfunction(L, &stateAppend, "append");
     lua_setfield(L, -2, "append");
+    lua_pushcfunction(L, &stateDelete, "delete");
+    lua_setfield(L, -2, "delete");
     lua_setglobal(L, "state");
 
     lua_createtable(L, 0, 5);
@@ -1088,9 +1242,17 @@ public:
     lua_setfield(L, -2, "tool_results");
     lua_setglobal(L, "thread");
 
-    lua_createtable(L, 0, 1);
+    lua_createtable(L, 0, 5);
     lua_pushcfunction(L, &agentSpawn, "spawn");
     lua_setfield(L, -2, "spawn");
+    lua_pushcfunction(L, &agentAsk, "ask");
+    lua_setfield(L, -2, "ask");
+    lua_pushcfunction(L, &agentReset, "reset");
+    lua_setfield(L, -2, "reset");
+    lua_pushcfunction(L, &agentCancel, "cancel");
+    lua_setfield(L, -2, "cancel");
+    lua_pushcfunction(L, &agentExecute, "execute");
+    lua_setfield(L, -2, "execute");
     lua_setglobal(L, "agent");
 
     lua_setreadonly(L, LUA_GLOBALSINDEX, 1);

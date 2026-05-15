@@ -24,7 +24,6 @@ target_sources(firmius_core PRIVATE
     src/tools/WebTool.cpp
     src/tools/ProcessTool.cpp
     src/tools/DelegateTool.cpp
-    src/tools/WorkTool.cpp
     src/tools/FleetTool.cpp
     src/tools/ArtifactsTool.cpp
     src/tools/LspTool.cpp
@@ -43,9 +42,8 @@ target_sources(firmius_core PRIVATE
     src/tools/FleetStatusTool.cpp
     src/tools/TodoWriteTool.cpp
     src/tools/MemoryRecallTool.cpp
-    src/tools/ModeSwitchTool.cpp
-    src/agents/HintingLoader.cpp
     src/agents/SkillLoader.cpp
+    src/agents/HintingLoader.cpp
     src/agents/PurposeLoader.cpp
     src/agents/prompts/PromptComposer.cpp
     src/agents/modes/Mode.cpp
@@ -70,6 +68,8 @@ target_sources(firmius_core PRIVATE
     src/benchmarks/MBPPBenchmark.cpp
     src/benchmarks/AgentBench.cpp
     src/benchmarks/SWEBench.cpp
+    src/benchmarks/SWEBenchTaskSpec.cpp
+    src/benchmarks/TuringSWEBenchPP.cpp
     src/benchmarks/BenchmarkFactory.cpp
     src/benchmarks/BenchmarkSession.cpp
     src/workflow/Workflow.cpp
@@ -98,7 +98,6 @@ target_sources(firmius_core PUBLIC
     include/tools/WebTool.hpp
     include/tools/ProcessTool.hpp
     include/tools/DelegateTool.hpp
-    include/tools/WorkTool.hpp
     include/tools/FleetTool.hpp
     include/tools/ArtifactsTool.hpp
     include/tools/LspTool.hpp
@@ -114,13 +113,12 @@ target_sources(firmius_core PUBLIC
     include/tools/WebFetchTool.hpp
     include/tools/WebSearchTool.hpp
     include/tools/SkillLoadTool.hpp
-    include/tools/FleetLockTool.hpp
     include/tools/TodoWriteTool.hpp
     include/tools/MemoryRecallTool.hpp
-    include/tools/ModeSwitchTool.hpp
     include/agents/HintingLoader.hpp
-    include/agents/SkillLoader.hpp
+    include/tools/ModeSwitchTool.hpp
     include/agents/PurposeLoader.hpp
+    include/agents/SkillLoader.hpp
     include/agents/prompts/PromptComposer.hpp
     include/agents/modes/Mode.hpp
     include/agents/hooks/HookRegistry.hpp
@@ -146,16 +144,16 @@ target_sources(firmius_core PUBLIC
     include/benchmarks/MBPPBenchmark.hpp
     include/benchmarks/AgentBench.hpp
     include/benchmarks/SWEBench.hpp
+    include/benchmarks/SWEBenchTaskSpec.hpp
+    include/benchmarks/TuringSWEBenchPP.hpp
     include/benchmarks/BenchmarkFactory.hpp
     include/benchmarks/BenchmarkSession.hpp
     include/workflow/Workflow.hpp
     include/workflow/WorkflowLoader.hpp
-    include/artifacts/ReferenceExpansion.hpp
-    include/lsp/LspProtocol.hpp
-    include/lsp/JsonRpcTransport.hpp
     include/lsp/LspClient.hpp
     include/lsp/LspServerSpec.hpp
     include/lsp/LspServerRegistry.hpp
+    include/lsp/JsonRpcTransport.hpp
     include/lsp/LspServerManager.hpp
     include/lsp/LspService.hpp
 )

@@ -3,6 +3,8 @@ add_library(firmius::tui ALIAS firmius_tui)
 
 target_sources(firmius_tui PRIVATE
     src/TUIState.cpp
+    src/TuiAsync.cpp
+    src/TuiSnapshots.cpp
     src/TUIHotkeys.cpp
     src/ActivePlanState.cpp
     src/QuotaPresenter.cpp
@@ -46,6 +48,7 @@ target_sources(firmius_tui PRIVATE
     src/modals/RouterModal.cpp
     src/modals/ProvidersModal.cpp
     src/modals/PurposesModal.cpp
+    src/modals/HooksModal.cpp
     src/modals/McpModal.cpp
     src/modals/PermissionPromptModal.cpp
     src/modals/OAuthWizardModal.cpp
@@ -54,6 +57,11 @@ target_sources(firmius_tui PRIVATE
     src/modals/QuotasModal.cpp
     src/modals/AccountsModal.cpp
     src/components/ChatWindow.cpp
+    src/components/ChatHistoryBuilder.cpp
+    src/components/ChatMeasurementSignature.cpp
+    src/components/ChatTranscriptPolicy.cpp
+    src/components/ChatViewportModel.cpp
+    src/components/ChatCopySelection.cpp
     src/components/TranscriptGrouping.cpp
     src/components/ErrorDisplay.cpp
     src/components/DiffRenderer.cpp

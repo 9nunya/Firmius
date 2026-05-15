@@ -450,12 +450,12 @@ shared::AuditResult BenchmarksAudit::run(const std::vector<std::string> &args) {
   config.modelId = modelId;
   config.modelVariant = modelVariant;
 
-  // For SWE-bench, use Docker with volume mount for the repo cache
-  if (*canonicalId == "swebench") {
+  // For SWE-family benchmarks, use Docker with volume mount for the repo cache
+  if (*canonicalId == "swebench" || *canonicalId == "turingswebenchpp") {
     config.hostOptions.type = HostType::Docker;
     config.hostOptions.deleteOnExit = true;
     std::string home = getenv("HOME") ? getenv("HOME") : "/root";
-    std::string cacheDir = home + "/.firmius/cache/swebench/repos";
+    std::string cacheDir = home + "/.firmius/cache/" + *canonicalId + "/repos";
     config.hostOptions.volumeMounts.push_back(cacheDir + ":/host_cache");
   }
 

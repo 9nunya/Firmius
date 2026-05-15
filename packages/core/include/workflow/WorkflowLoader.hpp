@@ -45,6 +45,9 @@ public:
    */
   std::vector<std::string> getWorkflowIds() const;
 
+  /// Hook-pack roots searched by the loader, in precedence order.
+  std::vector<std::string> getHookDirs() const;
+
   /**
    * Bootstrap default workflows from the builtin directory.
    * Copies workflows from the builtin directory to ~/.firmius/workflows/
@@ -65,7 +68,6 @@ private:
   std::optional<Workflow> loadWorkflow(const std::string &path);
   std::optional<Workflow> loadYamlWorkflow(const std::string &path);
   void loadHookPacks();
-  std::vector<std::string> getHookDirs() const;
 
   /**
    * Get the workflows directory path.

@@ -281,6 +281,9 @@ ToolPresentation BuildProcessToolPresentation(
   if (!process_id.empty()) {
     presentation.facts.push_back({"Process", process_id});
   }
+  if (!command.empty()) {
+    presentation.footer_badges.push_back("cmd " + command);
+  }
 
   std::vector<std::string> status_parts;
   if (presentation.lifecycle == ToolPresentationLifecycle::Error) {
@@ -341,6 +344,7 @@ ToolPresentation BuildProcessToolPresentation(
   }
 
   if (!command.empty()) {
+    presentation.facts.push_back({"Command", command});
     presentation.body_lines.push_back("$ " + command);
   }
   auto output_lines = BuildOutputLines(output);

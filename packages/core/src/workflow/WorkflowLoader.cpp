@@ -179,6 +179,110 @@ std::string parsePackManifestId(const std::filesystem::path &packManifest) {
   return {};
 }
 
+struct ParsedPackManifest {
+  std::string id;
+  std::vector<std::filesystem::path> files;
+  WorkflowPackStateSurface stateSurface;
+};
+
+ParsedPackManifest parsePackManifest(const std::filesystem::path &packManifest) {
+  ParsedPackManifest parsed;
+  parsed.id = parsePackManifestId(packManifest);
+  parsed.files = parsePackManifestFiles(packManifest);
+
+  std::ifstream in(packManifest);
+  if (!in.is_open()) {
+    return parsed;
+  }
+
+  enum class Section { None, StateSurface, Scopes, Paths };
+  Section section = Section::None;
+  std::string line;
+  while (std::getline(in, line)) {
+    const auto hash = line.find('#');
+    if (hash != std::string::npos) {
+      line = line.substr(0, hash);
+    }
+    if (trimCopy(line).empty()) {
+      continue;
+    }
+
+    const bool rootLevel =
+        !line.empty() && !std::isspace(static_cast<unsigned char>(line[0]));
+    const std::string trimmed = trimCopy(line);
+    if (rootLevel) {
+      if (trimmed == "state_surface:") {
+        section = Section::StateSurface;
+        continue;
+      }
+      if (section != Section::None) {
+        section = Section::None;
+      }
+    }
+
+    if (section == Section::None) {
+      continue;
+    }
+
+    if (section == Section::StateSurface) {
+      if (trimmed == "scopes:") {
+        section = Section::Scopes;
+        continue;
+      }
+      if (trimmed == "paths:") {
+        section = Section::Paths;
+        continue;
+      }
+      if (trimmed.rfind("scopes:", 0) == 0) {
+        auto value = trimCopy(trimmed.substr(7));
+        if (value.size() >= 2 && value.front() == '[' && value.back() == ']') {
+          value = value.substr(1, value.size() - 2);
+          std::stringstream ss(value);
+          std::string item;
+          while (std::getline(ss, item, ',')) {
+            item = trimCopy(item);
+            if (!item.empty()) {
+              parsed.stateSurface.scopes.push_back(item);
+            }
+          }
+        }
+        continue;
+      }
+    }
+
+    if (trimmed.rfind("- ", 0) != 0) {
+      if (section == Section::Scopes || section == Section::Paths) {
+        section = Section::StateSurface;
+      }
+      continue;
+    }
+
+    std::string value = trimCopy(trimmed.substr(2));
+    if ((value.size() >= 2 && value.front() == '"' && value.back() == '"') ||
+        (value.size() >= 2 && value.front() == '\'' && value.back() == '\'')) {
+      value = value.substr(1, value.size() - 2);
+    }
+    if (value.empty()) {
+      continue;
+    }
+    if (section == Section::Scopes) {
+      parsed.stateSurface.scopes.push_back(value);
+    } else if (section == Section::Paths) {
+      parsed.stateSurface.paths.push_back(value);
+    }
+  }
+
+  return parsed;
+}
+
+void applyPackMetadata(Workflow &workflow, const ParsedPackManifest &manifest) {
+  workflow.packId = manifest.id;
+  if (!manifest.stateSurface.scopes.empty() ||
+      !manifest.stateSurface.paths.empty()) {
+    workflow.packStateSurface = manifest.stateSurface;
+  }
+}
+
 } // namespace
 
 
@@ -206,7 +310,8 @@ void WorkflowLoader::init() {
 }
 
 void WorkflowLoader::loadHookPacks() {
-  auto loadHookFile = [this](const std::filesystem::path &path) {
+  auto loadHookFile = [this](const std::filesystem::path &path,
+                             const ParsedPackManifest *manifest = nullptr) {
     if (!std::filesystem::exists(path) || !std::filesystem::is_regular_file(path)) {
       return;
     }
@@ -214,11 +319,17 @@ void WorkflowLoader::loadHookPacks() {
     if (ext == ".md") {
       auto workflow = loadWorkflow(path.string());
       if (workflow) {
+        if (manifest != nullptr) {
+          applyPackMetadata(*workflow, *manifest);
+        }
         workflows_[workflow->id] = *workflow;
       }
     } else if (ext == ".yaml" || ext == ".yml") {
       auto workflow = loadYamlWorkflow(path.string());
       if (workflow) {
+        if (manifest != nullptr) {
+          applyPackMetadata(*workflow, *manifest);
+        }
         workflows_[workflow->id] = *workflow;
       }
     }
@@ -243,14 +354,14 @@ void WorkflowLoader::loadHookPacks() {
         continue;
       }
       const auto packRoot = entry.path().parent_path();
-      const auto packId = parsePackManifestId(entry.path());
+      const auto parsedManifest = parsePackManifest(entry.path());
+      const auto &packId = parsedManifest.id;
       if (!packId.empty() && claimedPackIds.count(packId) > 0) {
         manifestRoots.insert(std::filesystem::weakly_canonical(packRoot));
         continue;
       }
 
-      const auto activeFiles = parsePackManifestFiles(entry.path());
-      if (activeFiles.empty()) {
+      if (parsedManifest.files.empty()) {
         continue;
       }
 
@@ -258,8 +369,8 @@ void WorkflowLoader::loadHookPacks() {
         claimedPackIds.insert(packId);
       }
       manifestRoots.insert(std::filesystem::weakly_canonical(packRoot));
-      for (const auto &relative : activeFiles) {
-        loadHookFile(packRoot / relative);
+      for (const auto &relative : parsedManifest.files) {
+        loadHookFile(packRoot / relative, &parsedManifest);
       }
     }
 

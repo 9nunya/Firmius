@@ -4,6 +4,25 @@
 #include <ftxui/screen/screen.hpp>
 #include <gtest/gtest.h>
 
+namespace {
+
+void StabilizeScrollable(
+    const std::shared_ptr<firmius::tui::ScrollableBoxComponent>& scrollable,
+    int width, int height) {
+  auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(width),
+                                      ftxui::Dimension::Fixed(height));
+  Render(screen, scrollable->Render());
+  Render(screen, scrollable->Render());
+}
+
+ftxui::Event WheelEvent(ftxui::Mouse::Button button, int x = 0, int y = 0) {
+  ftxui::Mouse mouse;
+  mouse.x = x; mouse.y = y; mouse.button = button; mouse.motion = ftxui::Mouse::Pressed;
+  return ftxui::Event::Mouse("", mouse);
+}
+
+}  // namespace
+
 TEST(HelpOverlayTest, AcceptsKeyboardScrollEvents) {
   auto scrollable = firmius::tui::ScrollableBox(
       ftxui::Renderer([] { return ftxui::text("line 1\nline 2\nline 3\nline 4"); }));
@@ -71,4 +90,42 @@ TEST(HelpOverlayTest, InputUiSectionIncludesCommandPaletteHotkey) {
     return item.description == "Open command palette / launcher";
   });
   ASSERT_NE(it, items.end());
+}
+
+TEST(ScrollableBoxRegressionTest, WheelMovesOneLinePerTick) {
+  auto scrollable = firmius::tui::ScrollableBox(
+      ftxui::Renderer([] {
+        return ftxui::vbox({
+            ftxui::text("line 1"), ftxui::text("line 2"), ftxui::text("line 3"),
+            ftxui::text("line 4"), ftxui::text("line 5"), ftxui::text("line 6"),
+            ftxui::text("line 7"), ftxui::text("line 8"),
+        });
+      }));
+
+  StabilizeScrollable(scrollable, 20, 3);
+  ASSERT_EQ(scrollable->ScrollOffset(), 0);
+
+  EXPECT_TRUE(scrollable->OnEvent(WheelEvent(ftxui::Mouse::WheelDown, 1, 1)));
+  EXPECT_EQ(scrollable->ScrollOffset(), 1);
+
+  EXPECT_TRUE(scrollable->OnEvent(WheelEvent(ftxui::Mouse::WheelUp, 1, 1)));
+  EXPECT_EQ(scrollable->ScrollOffset(), 0);
+}
+
+TEST(ScrollableBoxRegressionTest, HeightChangesPreserveManualScrollOffset) {
+  int synthetic_height = 40;
+  std::size_t measurement_signature = 1;
+
+  auto scrollable = firmius::tui::ScrollableBox(
+      ftxui::Renderer([] { return ftxui::text("stable body"); }),
+      {.measurement_signature_getter = [&] { return measurement_signature; },
+       .custom_size_getter = [&](int) { return synthetic_height; }});
+
+  StabilizeScrollable(scrollable, 20, 5);
+  EXPECT_TRUE(scrollable->OnEvent(ftxui::Event::PageDown));
+  ASSERT_EQ(scrollable->ScrollOffset(), 3);
+
+  synthetic_height = 80;
+  StabilizeScrollable(scrollable, 20, 5);
+  EXPECT_EQ(scrollable->ScrollOffset(), 3);
 }

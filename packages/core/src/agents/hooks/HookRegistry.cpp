@@ -27,7 +27,8 @@ namespace firmius::core::hooks {
 
 namespace {
 
-int defaultShellRunner(const std::string &command, int timeoutSec,
+int defaultShellRunner(const std::string &command,
+                       const std::string &stdinPayload, int timeoutSec,
                        std::string *stdoutOut, std::string *stderrOut) {
   if (stdoutOut) {
     stdoutOut->clear();
@@ -37,6 +38,22 @@ int defaultShellRunner(const std::string &command, int timeoutSec,
   }
 
   std::string fullCommand = command;
+  std::filesystem::path stdinPath;
+  if (!stdinPayload.empty()) {
+    stdinPath = std::filesystem::temp_directory_path() /
+                ("firmius-hook-stdin-" +
+                 firmius::shared::StringUtil::generateUuid() + ".json");
+    std::ofstream stdinFile(stdinPath, std::ios::binary | std::ios::trunc);
+    if (!stdinFile.is_open()) {
+      if (stderrOut) {
+        *stderrOut = "failed to create hook stdin envelope file";
+      }
+      return -1;
+    }
+    stdinFile << stdinPayload;
+    stdinFile.close();
+    fullCommand += " < '" + stdinPath.string() + "'";
+  }
   if (fullCommand.find("2>") == std::string::npos) {
     fullCommand += " 2>&1";
   }
@@ -75,6 +92,10 @@ int defaultShellRunner(const std::string &command, int timeoutSec,
     if (stderrOut) {
       *stderrOut = "hook timed out after " + std::to_string(timeoutSec) + "s";
     }
+    if (!stdinPath.empty()) {
+      std::error_code ec;
+      std::filesystem::remove(stdinPath, ec);
+    }
     return 124;
   }
 
@@ -90,6 +111,10 @@ int defaultShellRunner(const std::string &command, int timeoutSec,
 
   if (stdoutOut) {
     *stdoutOut = captured;
+  }
+  if (!stdinPath.empty()) {
+    std::error_code ec;
+    std::filesystem::remove(stdinPath, ec);
   }
   return exitCode;
 }
@@ -225,6 +250,67 @@ TemplateContext makeContext(const Workflow &hook, WorkflowEventKind eventKind,
                              effectiveSubagentReturnJson, makeExtras(p));
 }
 
+TemplateContext makeContextWithExtras(
+    const Workflow &hook, WorkflowEventKind eventKind, const EventPayload &p,
+    const std::map<std::string, std::string> &extras,
+    const std::string &subagentReturnJson = "{}") {
+  auto merged = makeExtras(p);
+  for (const auto &[key, value] : extras) {
+    merged[key] = value;
+  }
+  const std::string effectiveSubagentReturnJson =
+      !subagentReturnJson.empty() && subagentReturnJson != "{}"
+          ? subagentReturnJson
+          : (!p.returnPayloadJson.empty() ? p.returnPayloadJson
+                                          : std::string{"{}"});
+  const std::string stateJson = HookState::instance().snapshotJson(hook.id);
+  HookEnvelope env = buildEnvelope(hook.id, eventKind, p, stateJson);
+  return makeTemplateContext(stateJson, serializeEnvelope(env), p.toolArgsJson,
+                             effectiveSubagentReturnJson, std::move(merged));
+}
+
+std::string decisionName(HookOutcome::Decision decision) {
+  switch (decision) {
+  case HookOutcome::Decision::Allow:
+    return "allow";
+  case HookOutcome::Decision::Block:
+    return "block";
+  case HookOutcome::Decision::Replace:
+    return "replace";
+  }
+  return "allow";
+}
+
+void applyToolReturnPayload(const Workflow &hook, const TemplateContext &ctx,
+                            HookOutcome &out) {
+  if (hook.resultReturn.empty()) {
+    return;
+  }
+  rapidjson::Document doc;
+  doc.SetObject();
+  auto &alloc = doc.GetAllocator();
+  for (const auto &[key, valueTemplate] : hook.resultReturn) {
+    const std::string rendered = renderTemplate(valueTemplate, ctx);
+    rapidjson::Document valueDoc;
+    rapidjson::Value value;
+    if (!rendered.empty() && !valueDoc.Parse(rendered.c_str()).HasParseError()) {
+      value.CopyFrom(valueDoc, alloc);
+    } else {
+      value.SetString(rendered.c_str(),
+                      static_cast<rapidjson::SizeType>(rendered.size()),
+                      alloc);
+    }
+    rapidjson::Value keyValue(key.c_str(),
+                              static_cast<rapidjson::SizeType>(key.size()),
+                              alloc);
+    doc.AddMember(keyValue.Move(), value.Move(), alloc);
+  }
+  rapidjson::StringBuffer sb;
+  rapidjson::Writer<rapidjson::StringBuffer> writer(sb);
+  doc.Accept(writer);
+  out.toolReturnPayloadJson = std::string(sb.GetString(), sb.GetSize());
+}
+
 bool truthy(std::string value) {
   for (char &c : value)
     c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -235,6 +321,7 @@ bool truthy(std::string value) {
 void applyOutcomeEffects(const Workflow &hook, const TemplateContext &ctx,
                          const std::optional<WorkflowEmit> &emit,
                          HookOutcome &out) {
+  applyToolReturnPayload(hook, ctx, out);
   if (!emit.has_value())
     return;
 
@@ -277,13 +364,20 @@ HookOutcome runShellAction(const Workflow &hook, WorkflowEventKind eventKind,
   const TemplateContext ctx = makeContext(hook, eventKind, p);
 
   std::string command = renderTemplate(hook.action.command, ctx);
+  std::string stdinPayload;
+  if (hook.action.passEnvelope) {
+    stdinPayload = serializeEnvelope(
+        buildEnvelope(hook.id, eventKind, p,
+                      HookState::instance().snapshotJson(hook.id)));
+  }
   std::string stdoutStr;
   std::string stderrStr;
 
   int rc = 0;
   {
     std::lock_guard<std::mutex> lock(runnerMutex());
-    rc = runnerSlot()(command, hook.action.timeoutSec, &stdoutStr, &stderrStr);
+    rc = runnerSlot()(command, stdinPayload, hook.action.timeoutSec, &stdoutStr,
+                      &stderrStr);
   }
 
   out = parseHookOutcome(hook.id, eventKind, rc, stdoutStr, stderrStr,
@@ -358,27 +452,106 @@ HookOutcome runScriptAction(const Workflow &hook, WorkflowEventKind eventKind,
 HookOutcome runComposeAction(const Workflow &hook, WorkflowEventKind eventKind,
                             const EventPayload &p) {
   HookOutcome out;
-  const TemplateContext ctx = makeContext(hook, eventKind, p);
-
   out.outcomeLabel = "compose";
-  // Minimal implementation: thread outcomes sequentially; last step wins.
+  HookOutcome accumulated;
+  std::map<std::string, std::string> composeExtras;
+
   for (const auto &step : hook.action.composeSteps) {
     Workflow sub = hook;
-    sub.id = hook.id + "::step";
+    sub.id = hook.id + "::step:" + step.kind;
     sub.action = WorkflowAction{};
     sub.action.kind = workflowActionKindFromString(step.kind);
+
+    EventPayload stepPayload = p;
+    stepPayload.returnPayloadJson = accumulated.spawnedAgentReturnJson;
+    stepPayload.extra["compose.outcome"] = accumulated.outcomeLabel;
+    stepPayload.extra["compose.decision"] = decisionName(accumulated.decision);
+    stepPayload.extra["compose.block_reason"] = accumulated.blockReason;
+    if (accumulated.reminderForAgent.has_value()) {
+      stepPayload.extra["compose.reminder"] = *accumulated.reminderForAgent;
+    }
+    if (!accumulated.spawnedAgentId.empty()) {
+      stepPayload.extra["compose.spawned_agent_id"] = accumulated.spawnedAgentId;
+    }
+
+    const TemplateContext stepCtx = makeContextWithExtras(
+        hook, eventKind, stepPayload, composeExtras,
+        accumulated.spawnedAgentReturnJson);
+
     if (sub.action.kind == WorkflowActionKind::Shell) {
       auto it = step.params.find("command");
-      sub.action.command = it != step.params.end() ? it->second : step.body;
+      sub.action.command =
+          renderTemplate(it != step.params.end() ? it->second : step.body, stepCtx);
+      auto pe = step.params.find("pass_envelope");
+      if (pe != step.params.end()) {
+        sub.action.passEnvelope = truthy(pe->second);
+      }
     } else if (sub.action.kind == WorkflowActionKind::Prompt ||
                sub.action.kind == WorkflowActionKind::Tool) {
-      sub.body = step.body;
+      sub.body = renderTemplate(step.body, stepCtx);
     } else if (sub.action.kind == WorkflowActionKind::State) {
       sub.action.stateWrites = step.stateWrites;
+      for (auto &write : sub.action.stateWrites) {
+        write.valueTemplate = renderTemplate(write.valueTemplate, stepCtx);
+      }
+    } else if (sub.action.kind == WorkflowActionKind::Agent) {
+      if (auto persona = step.params.find("target_persona");
+          persona != step.params.end()) {
+        sub.action.targetPersona = renderTemplate(persona->second, stepCtx);
+      }
+      if (auto task = step.params.find("agent_task"); task != step.params.end()) {
+        sub.action.agentTask = renderTemplate(task->second, stepCtx);
+      } else {
+        sub.action.agentTask = renderTemplate(step.body, stepCtx);
+      }
+      if (auto mode = step.params.find("initial_mode"); mode != step.params.end()) {
+        sub.action.initialMode = renderTemplate(mode->second, stepCtx);
+      }
+      if (auto timeout = step.params.find("timeout_s");
+          timeout != step.params.end()) {
+        try {
+          sub.action.timeoutSec = std::stoi(timeout->second);
+        } catch (...) {
+        }
+      }
+    } else if (sub.action.kind == WorkflowActionKind::Workflow) {
+      if (auto target = step.params.find("target_workflow");
+          target != step.params.end()) {
+        sub.action.targetWorkflow = renderTemplate(target->second, stepCtx);
+      }
+      if (auto args = step.params.find("target_args"); args != step.params.end()) {
+        sub.action.targetArgs = {renderTemplate(args->second, stepCtx)};
+      }
+    } else if (sub.action.kind == WorkflowActionKind::ToolIntercept) {
+      if (auto args = step.params.find("replacement_args");
+          args != step.params.end()) {
+        sub.action.scriptBody = renderTemplate(args->second, stepCtx);
+      }
     }
-    HookOutcome stepOut = HookDispatcher::runAction(sub, p);
-    out = stepOut;
+
+    HookOutcome stepOut = HookDispatcher::runAction(sub, stepPayload);
+    HookDispatcher::settleOutcome(sub, stepOut);
+    accumulated = stepOut;
+
+    composeExtras["compose.outcome"] = accumulated.outcomeLabel;
+    composeExtras["compose.decision"] = decisionName(accumulated.decision);
+    composeExtras["compose.block_reason"] = accumulated.blockReason;
+    if (accumulated.reminderForAgent.has_value()) {
+      composeExtras["compose.reminder"] = *accumulated.reminderForAgent;
+    }
+    if (!accumulated.spawnedAgentId.empty()) {
+      composeExtras["compose.spawned_agent_id"] = accumulated.spawnedAgentId;
+    }
+
+    if (accumulated.decision == HookOutcome::Decision::Block) {
+      break;
+    }
   }
+
+  out = accumulated;
+  const TemplateContext ctx =
+      makeContextWithExtras(hook, eventKind, p, composeExtras,
+                            accumulated.spawnedAgentReturnJson);
   applyOutcomeEffects(hook, ctx, hook.emit, out);
   return out;
 }
@@ -387,21 +560,69 @@ HookOutcome runWorkflowAction(const Workflow &hook, WorkflowEventKind eventKind,
                              const EventPayload &p) {
   HookOutcome out;
   const TemplateContext ctx = makeContext(hook, eventKind, p);
-
-  // Workflows are executed synchronously by pushing the built prompt into the
-  // focused agent.
   try {
-    auto workflowId = renderTemplate(hook.action.targetWorkflow, ctx);
-    out.outcomeLabel = "workflow";
-    out.reminderForAgent = "<FIRMIUS_HOOK id=\"" + hook.id +
-                           "\" exit=\"0\">workflow action: " + workflowId +
-                           "</FIRMIUS_HOOK>";
+    const std::string workflowId =
+        renderTemplate(hook.action.targetWorkflow, ctx);
+    const Workflow *target = WorkflowLoader::instance().getWorkflow(workflowId);
+    if (target == nullptr) {
+      throw std::runtime_error("unknown workflow " + workflowId);
+    }
 
-    // We execute via engine/harness on the focused agent. This matches previous
-    // behavior (HookDispatcher is used by Agent runtime, which owns the context).
-    // Any errors are captured as reminders.
-    (void)workflowId;
+    std::vector<std::string> targetArgs;
+    targetArgs.reserve(hook.action.targetArgs.size());
+    for (const auto &arg : hook.action.targetArgs) {
+      targetArgs.push_back(renderTemplate(arg, ctx));
+    }
 
+    std::string builtPrompt;
+    try {
+      builtPrompt = target->build(targetArgs);
+    } catch (const std::exception &e) {
+      throw std::runtime_error("workflow build failed for " + workflowId +
+                               ": " + e.what());
+    }
+
+    EventPayload targetPayload = p;
+    targetPayload.completedWorkflowId = target->id;
+    targetPayload.userMessage = builtPrompt;
+    targetPayload.extra["workflow_id"] = target->id;
+    targetPayload.extra["slash_command"] =
+        target->slashCommand.value_or("/" + target->id);
+    if (!targetArgs.empty()) {
+      targetPayload.extra["raw_args"] = targetArgs.front();
+    }
+    for (std::size_t i = 0; i < targetArgs.size(); ++i) {
+      targetPayload.extra["arg_" + std::to_string(i + 1)] = targetArgs[i];
+    }
+
+    if (target->action.kind == WorkflowActionKind::Prompt &&
+        target->action.scriptBody.empty() && target->action.scriptFile.empty() &&
+        target->action.command.empty() && target->action.stateWrites.empty() &&
+        target->action.composeSteps.empty() && !target->emit.has_value()) {
+      out.outcomeLabel = "workflow";
+      out.reminderForAgent = builtPrompt;
+      applyOutcomeEffects(hook, ctx, hook.emit, out);
+      return out;
+    }
+
+    out = HookDispatcher::runAction(*target, targetPayload);
+    HookDispatcher::settleOutcome(*target, out);
+    EventResult completed = HookDispatcher::fire(WorkflowEventKind::WorkflowComplete,
+                                                 targetPayload);
+    if (completed.firstOutcome.has_value() &&
+        out.outcomeLabel.empty()) {
+      out.outcomeLabel = completed.firstOutcome->outcomeLabel;
+    }
+    for (const auto &reminder : completed.injectedReminders) {
+      if (reminder.empty()) {
+        continue;
+      }
+      if (out.reminderForAgent.has_value() && !out.reminderForAgent->empty()) {
+        *out.reminderForAgent += "\n" + reminder;
+      } else {
+        out.reminderForAgent = reminder;
+      }
+    }
     applyOutcomeEffects(hook, ctx, hook.emit, out);
   } catch (const std::exception &e) {
     out.outcomeLabel = "workflow_failed";
@@ -418,6 +639,15 @@ HookOutcome runToolInterceptAction(const Workflow &hook, WorkflowEventKind event
   HookOutcome out;
   const TemplateContext ctx = makeContext(hook, eventKind, p);
   out.outcomeLabel = "tool_intercept";
+  std::string replacementArgs = renderTemplate(
+      hook.action.scriptBody.empty() ? hook.body : hook.action.scriptBody, ctx);
+  if (replacementArgs.empty()) {
+    replacementArgs = renderTemplate(hook.action.command, ctx);
+  }
+  if (!replacementArgs.empty()) {
+    out.decision = HookOutcome::Decision::Replace;
+    out.replacementToolArgs = replacementArgs;
+  }
   applyOutcomeEffects(hook, ctx, hook.emit, out);
   return out;
 }
@@ -439,7 +669,7 @@ HookOutcome runAgentAction(const Workflow &hook, WorkflowEventKind eventKind,
       task = "Start in mode `" + mode + "`.\n\n" + task;
     }
     const std::string childId = Engine::instance().summonAgent(
-        p.threadId, persona, task, true, p.agentId, persona, "Hook Validator");
+        p.threadId, persona, task, true, p.agentId, persona, persona);
     out.spawnedAgentId = childId;
     const auto timeout =
         std::chrono::seconds(hook.action.timeoutSec > 0 ? hook.action.timeoutSec
@@ -485,6 +715,21 @@ HookOutcome runAgentAction(const Workflow &hook, WorkflowEventKind eventKind,
     rapidjson::Writer<rapidjson::StringBuffer> writer(sb);
     ret.Accept(writer);
     out.spawnedAgentReturnJson = std::string(sb.GetString(), sb.GetSize());
+    EventPayload subagentPayload = p;
+    subagentPayload.subagentBranchId = childId;
+    subagentPayload.returnPayloadJson = out.spawnedAgentReturnJson;
+    auto subagentHooks =
+        HookDispatcher::fire(WorkflowEventKind::SubagentReturn, subagentPayload);
+    if (!subagentHooks.injectedReminders.empty()) {
+      std::string combined;
+      for (std::size_t i = 0; i < subagentHooks.injectedReminders.size(); ++i) {
+        if (i > 0) {
+          combined += "\n";
+        }
+        combined += subagentHooks.injectedReminders[i];
+      }
+      out.reminderForAgent = combined;
+    }
     out.outcomeLabel = "agent";
     const TemplateContext returnCtx =
         makeContext(hook, eventKind, p, out.spawnedAgentReturnJson);
@@ -506,6 +751,16 @@ void settleOutcomeImpl(const Workflow &hook, HookOutcome &out) {
     std::vector<HookState::BatchWrite> writes;
     writes.reserve(out.stateWrites.size());
     for (const auto &w : out.stateWrites) {
+      if (!HookRegistry::instance().isStateAccessAllowed(hook.id, w.scope,
+                                                         w.path)) {
+        if (out.blockReason.empty()) {
+          out.blockReason =
+              "hook attempted to write outside declared state surface: " +
+              w.scope + ":" + w.path;
+        }
+        out.decision = HookOutcome::Decision::Block;
+        continue;
+      }
       HookState::BatchWrite bw;
       bw.scope = parseScope(w.scope);
       bw.path = w.path;
@@ -529,11 +784,16 @@ HookRegistry &HookRegistry::instance() {
 void HookRegistry::reload() {
   std::lock_guard<std::mutex> lock(mu_);
   byEvent_.clear();
+  byId_.clear();
 
   const auto &loader = WorkflowLoader::instance();
   for (const auto &id : loader.getWorkflowIds()) {
     const Workflow *wf = loader.getWorkflow(id);
-    if (!wf || !wf->isHook()) {
+    if (!wf) {
+      continue;
+    }
+    byId_[wf->id] = wf;
+    if (!wf->isHook()) {
       continue;
     }
     if (wf->trigger.event == WorkflowEventKind::Unknown) {
@@ -542,6 +802,93 @@ void HookRegistry::reload() {
       continue;
     }
     byEvent_[wf->trigger.event].push_back(wf);
+  }
+}
+
+bool HookRegistry::isStateAccessAllowed(const std::string &hookId,
+                                        const std::string &scope,
+                                        const std::string &path) const {
+  std::lock_guard<std::mutex> lock(mu_);
+  auto it = byId_.find(hookId);
+  if (it == byId_.end() || it->second == nullptr) {
+    return true;
+  }
+  const Workflow &workflow = *it->second;
+
+  auto matchesPath = [&](const std::vector<std::string> &allowedPaths) {
+    if (allowedPaths.empty()) {
+      return true;
+    }
+    for (const auto &allowed : allowedPaths) {
+      if (allowed == path) {
+        return true;
+      }
+      if (path.rfind(allowed, 0) == 0 &&
+          (path.size() == allowed.size() || path[allowed.size()] == '.' ||
+           path[allowed.size()] == '[')) {
+        return true;
+      }
+      if (allowed.size() >= 2 &&
+          allowed.substr(allowed.size() - 2) == "[]" &&
+          path == allowed.substr(0, allowed.size() - 2)) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  if (workflow.packStateSurface.has_value()) {
+    const auto &surface = *workflow.packStateSurface;
+    if (!surface.scopes.empty() &&
+        std::find(surface.scopes.begin(), surface.scopes.end(), scope) ==
+            surface.scopes.end()) {
+      return false;
+    }
+    if (!matchesPath(surface.paths)) {
+      return false;
+    }
+  }
+
+  if (workflow.hookState.has_value()) {
+    const auto &hookState = *workflow.hookState;
+    if (!hookState.scope.empty() && hookState.scope != scope) {
+      return false;
+    }
+    if (!hookState.writes.empty() && !matchesPath(hookState.writes)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+std::vector<HookActivityRecord>
+HookRegistry::recentActivity(const std::string &threadId,
+                             std::size_t maxCount) const {
+  std::lock_guard<std::mutex> lock(mu_);
+  auto it = activityByThread_.find(threadId);
+  if (it == activityByThread_.end()) {
+    return {};
+  }
+  const auto &entries = it->second;
+  if (entries.size() <= maxCount) {
+    return entries;
+  }
+  return std::vector<HookActivityRecord>(entries.end() - maxCount,
+                                         entries.end());
+}
+
+void HookRegistry::recordActivity(HookActivityRecord record) {
+  if (record.threadId.empty()) {
+    return;
+  }
+  std::lock_guard<std::mutex> lock(mu_);
+  auto &entries = activityByThread_[record.threadId];
+  entries.push_back(std::move(record));
+  constexpr std::size_t kMaxRecordsPerThread = 48;
+  if (entries.size() > kMaxRecordsPerThread) {
+    entries.erase(entries.begin(),
+                  entries.begin() + (entries.size() - kMaxRecordsPerThread));
   }
 }
 
@@ -561,6 +908,11 @@ std::size_t HookRegistry::size() const {
     total += v.size();
   }
   return total;
+}
+
+void HookDispatcher::setShellRunner(ShellRunner runner) {
+  std::lock_guard<std::mutex> lock(runnerMutex());
+  runnerSlot() = runner ? std::move(runner) : defaultShellRunner;
 }
 
 bool HookDispatcher::matches(const Workflow &hook, const EventPayload &p) {
@@ -650,6 +1002,29 @@ EventResult HookDispatcher::fire(WorkflowEventKind kind,
     if (!outcome.replacementToolArgs.empty()) {
       result.replacementToolArgs = outcome.replacementToolArgs;
     }
+
+    HookActivityRecord record;
+    record.hookId = hook->id;
+    record.threadId = payload.threadId;
+    record.agentId = payload.agentId;
+    record.eventName = workflowEventKindToString(kind);
+    record.decision = decisionName(outcome.decision);
+    record.outcomeLabel = outcome.outcomeLabel;
+    record.blockReason = outcome.blockReason;
+    record.stateWriteCount = static_cast<int>(outcome.stateWrites.size());
+    record.timestampMs = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count());
+    std::string line = "hook " + hook->id + ": " + record.decision;
+    if (!record.outcomeLabel.empty()) {
+      line += " (" + record.outcomeLabel + ")";
+    }
+    if (!record.blockReason.empty()) {
+      line += " " + record.blockReason;
+    }
+    record.statusLine = std::move(line);
+    HookRegistry::instance().recordActivity(std::move(record));
 
     if (isBlockable && hook->trigger.block &&
         outcome.decision == HookOutcome::Decision::Block) {

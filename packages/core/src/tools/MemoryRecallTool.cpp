@@ -81,17 +81,22 @@ shared::ToolMetadata MemoryRecallTool::getMetadata() const {
 std::shared_ptr<shared::JSONSchema> MemoryRecallTool::getSchema() const {
   return zObject({
       {"start_turn_id", zString()->setOptional()->describe(
-                            "Inclusive start turn id for an exact range.")},
+                            "Inclusive start turn id for an exact range recall.\n\n"
+                            "Use together with end_turn_id when you already know the exact bounds you want.")},
       {"end_turn_id", zString()->setOptional()->describe(
-                          "Inclusive end turn id for an exact range.")},
+                          "Inclusive end turn id for an exact range recall.\n\n"
+                          "Use together with start_turn_id for precise replay.")},
       {"cursor_turn_id", zString()->setOptional()->describe(
-                             "Turn id to page around when recalling history.")},
+                             "Turn id to page around when doing relative recall.\n\n"
+                             "Use this when you know an anchor turn and want nearby history rather than an exact range.")},
       {"page", zNumber()->setOptional()->describe(
-                   "Relative page offset when using cursor_turn_id.")},
+                   "Relative page offset when using cursor_turn_id.\n\n"
+                   "0 = page containing/starting near the cursor, positive = later pages, negative = earlier pages.")},
       {"page_size", zNumber()->setOptional()->describe(
-                        "Number of turns to return (default 8).")},
+                        "Number of turns to return. Default 8; clamped internally to a safe range.")},
       {"include_system", zBoolean()->setOptional()->describe(
-                             "Include persisted system turns in the output.")},
+                             "Whether to include persisted system turns in the rendered output.\n\n"
+                             "Default false. Enable only when system-turn context is materially relevant.")},
   });
 }
 
