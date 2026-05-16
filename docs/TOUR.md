@@ -72,7 +72,6 @@ Firmius agents can use:
 - Python execution
 - dynamic MCP tools from configured servers
 - LSP semantic queries and diagnostics
-- memory recall
 - planning, todos, and artifacts
 - web fetch and web search inside the runtime
 

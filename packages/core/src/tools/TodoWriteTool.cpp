@@ -1,5 +1,4 @@
 #include "tools/TodoWriteTool.hpp"
-#include "tools/WorkSupport.hpp"
 #include "persistence/ThreadManager.hpp"
 #include "IAgent.hpp"
 #include "utils/StringUtil.hpp"
@@ -15,6 +14,14 @@
 namespace firmius::core {
 
 namespace {
+
+std::string requireCurrentThreadId(shared::ToolContext &ctx) {
+  const auto &context = ctx.agent.getContext();
+  if (!context.history || context.history->threadId.empty()) {
+    throw std::runtime_error("No current thread exists");
+  }
+  return context.history->threadId;
+}
 
 struct TodoItemState {
   int id = 0;
@@ -140,7 +147,7 @@ shared::ToolResult TodoWriteTool::execute(const rapidjson::Value &input,
     }
 
     const auto &agentContext = ctx.agent.getContext();
-    const std::string threadId = work::requireCurrentThreadId(ctx);
+    const std::string threadId = requireCurrentThreadId(ctx);
     const std::string agentId = agentContext.identity.id;
     if (agentId.empty()) {
       throw std::runtime_error("Cannot mutate todo list without agent id");

@@ -6,7 +6,6 @@
 #include "Events.hpp"
 #include "SkinConfig.hpp"
 #include "StreamStateManager.hpp"
-#include "WorkPanelLayout.hpp"
 #include "components/AgentStrip.hpp"
 #include "components/ChatMeasurementSignature.hpp"
 #include "components/ContextLane.hpp"
@@ -94,7 +93,6 @@ enum class RefreshFlags : unsigned int {
   InputBar = 1u << 6,
   Welcome = 1u << 7,
   LiveStatusRow = 1u << 8,
-  WorkPanel = 1u << 9,
   ChatTranscript = 1u << 5,
 };
 
@@ -328,9 +326,7 @@ public:
   bool pending_modal_clear_ = false;
   int last_terminal_width_ = 0;
   int last_terminal_height_ = 0;
-  WorkPanelTab selected_work_panel_tab_ = WorkPanelTab::Todo;
   ftxui::Box agent_strip_separator_box_;
-  ftxui::Box work_panel_separator_box_;
 
   std::mutex animation_tick_mutex_;
   std::chrono::steady_clock::time_point animation_tick_until_{};
@@ -397,19 +393,16 @@ public:
   std::vector<std::string> file_reference_cache_paths_;
   std::filesystem::path file_reference_cache_root_;
 
-  enum class DragTarget { None, WorkPanel, AgentStrip };
+  enum class DragTarget { None, AgentStrip };
   DragTarget active_drag_target_ = DragTarget::None;
   ftxui::CapturedMouse active_drag_mouse_;
   int drag_origin_y_ = 0;
-  int drag_origin_work_panel_height_ = 0;
   int drag_origin_agent_strip_rows_ = 0;
 
   // UI Layout State
   bool diffs_expanded_ = false;
   bool show_agent_strip_ = true;
-  bool show_work_panel_ = true;
   int agent_strip_visible_rows_ = 0;
-  int work_panel_height_override_ = 0;
   ftxui::Component input_component_;
 
   // Permission Request State

@@ -110,12 +110,10 @@ std::string SummarizeToolCall(const std::string &name, const std::string &args, 
       return "Preparing process operation...";
     if (name == "Delegate")
       return "Preparing delegation...";
-    if (name == "Work" || name == "Todo" || name == "Fleet")
+    if (name == "Todo" || name == "Fleet")
       return "Preparing work update...";
     if (name == "Artifacts")
       return "Preparing artifact operation...";
-    if (name == "Memory")
-      return "Preparing memory recall...";
     if (name == "Lsp")
       return "Preparing language-server query...";
     if (name == "Web")
@@ -136,22 +134,6 @@ std::string SummarizeToolCall(const std::string &name, const std::string &args, 
     }
     return value;
   };
-
-  if (name == "Work") {
-    std::string title = bestStringArg("title");
-    std::string planId = bestStringArg("plan_id");
-    std::string chunkId = bestStringArg("chunk_id");
-    if (!chunkId.empty()) {
-      return "Work chunk" + quotedLabel(!title.empty() ? title : chunkId);
-    }
-    if (!planId.empty()) {
-      return "Work plan" + quotedLabel(!title.empty() ? title : planId);
-    }
-    if (!title.empty()) {
-      return "Work" + quotedLabel(title);
-    }
-    return "Work operation";
-  }
 
   if (name == "Todo") {
     return "Update todo list";

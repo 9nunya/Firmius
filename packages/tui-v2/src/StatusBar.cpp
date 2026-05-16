@@ -1,4 +1,5 @@
 #include "StatusBar.hpp"
+#include "items/ToolCallItem.hpp"
 #include "Terminal.hpp"
 
 namespace firmius::tui2 {
@@ -15,16 +16,26 @@ std::string StatusBar::renderLiveRow(int width) const {
   std::string content;
 
   auto status = state_.agentStatus();
-  auto tools = state_.activeToolCalls();
+
+  // Find the last active tool call item
+  const ToolCallItem* lastTool = nullptr;
+  for (const auto& item : state_.items()) {
+    if (item->type() == "ToolCall") {
+      auto* tc = static_cast<const ToolCallItem*>(item.get());
+      if (tc->phase() == ToolPhase::Called || tc->phase() == ToolPhase::Preparing) {
+        lastTool = tc;
+      }
+    }
+  }
 
   if (status == firmius::shared::AgentStatus::Streaming) {
-    if (!tools.empty()) {
-      content = " ⚙ " + tools.back().toolName + "...";
+    if (lastTool) {
+      content = " \xe2\x9a\x99 " + lastTool->toolName() + "...";
     } else {
-      content = " ✦ Generating...";
+      content = " \xe2\x9c\xa6 Generating...";
     }
-  } else if (!tools.empty()) {
-    content = " ⚙ " + tools.back().toolName;
+  } else if (lastTool) {
+    content = " \xe2\x9a\x99 " + lastTool->toolName();
   } else {
     content = "";
   }
@@ -38,21 +49,19 @@ std::string StatusBar::renderLiveRow(int width) const {
 }
 
 std::string StatusBar::renderHudRow(int width) const {
-  // Connection indicator.
   std::string conn;
   switch (state_.connectionStatus()) {
   case ConnectionStatus::Connected:
-    conn = ansi::fgRgb(100, 220, 100, "●");
+    conn = ansi::fgRgb(100, 220, 100, "\xe2\x97\x8f");
     break;
   case ConnectionStatus::Connecting:
-    conn = ansi::fgRgb(220, 180, 60, "○");
+    conn = ansi::fgRgb(220, 180, 60, "\xe2\x97\x8b");
     break;
   case ConnectionStatus::Disconnected:
-    conn = ansi::fgRgb(220, 60, 60, "○");
+    conn = ansi::fgRgb(220, 60, 60, "\xe2\x97\x8b");
     break;
   }
 
-  // Agent status.
   std::string statusLabel;
   switch (state_.agentStatus()) {
   case firmius::shared::AgentStatus::Streaming:
@@ -82,36 +91,30 @@ std::string StatusBar::renderHudRow(int width) const {
     break;
   }
 
-  // Model.
   auto model = state_.modelLabel();
   std::string modelSeg =
       model.empty() ? ansi::dim("no model") : ansi::fgRgb(180, 160, 220, model);
 
-  // Thread title.
   auto title = state_.threadTitle();
   std::string threadSeg = title.empty() ? ansi::dim("no thread")
                                         : ansi::fgRgb(200, 200, 210, title);
 
-  // Agent purpose.
   auto purpose = state_.agentPurpose();
   std::string purposeSeg =
       purpose.empty() ? ""
-                      : ansi::fgRgb(150, 180, 200, purpose) + ansi::dim(" │ ");
+                      : ansi::fgRgb(150, 180, 200, purpose) + ansi::dim(" \xe2\x94\x82 ");
 
-  // Context window.
   auto ctx = state_.agentContextWindow();
   std::string ctxSeg =
-      ctx.empty() ? "" : ansi::fgRgb(120, 150, 120, ctx) + ansi::dim(" │ ");
+      ctx.empty() ? "" : ansi::fgRgb(120, 150, 120, ctx) + ansi::dim(" \xe2\x94\x82 ");
 
-  // NVIM-style: inverted segments separated by arrows.
-  std::string bar = " " + conn + " " + statusLabel + ansi::dim(" │ ") +
-                    threadSeg + ansi::dim(" │ ") + purposeSeg + ctxSeg +
+  std::string bar = " " + conn + " " + statusLabel + ansi::dim(" \xe2\x94\x82 ") +
+                    threadSeg + ansi::dim(" \xe2\x94\x82 ") + purposeSeg + ctxSeg +
                     modelSeg;
 
-  // Queued messages indicator.
   int queued = state_.queuedMessageCount();
   if (queued > 0) {
-    bar += ansi::dim(" │ ") +
+    bar += ansi::dim(" \xe2\x94\x82 ") +
            ansi::fgRgb(220, 180, 60, "[" + std::to_string(queued) + " queued]");
   }
 

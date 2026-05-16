@@ -12,6 +12,7 @@ add_library(firmius::provider ALIAS firmius_provider)
 target_sources(firmius_provider PRIVATE
     src/providers/CodexProvider.cpp
     src/providers/ChutesProvider.cpp
+    src/providers/GitlawbProvider.cpp
     src/providers/KimiProvider.cpp
     src/providers/KiloProvider.cpp
     src/providers/LMStudioProvider.cpp
@@ -48,6 +49,7 @@ target_sources(firmius_provider PUBLIC
   FILES
     include/providers/CodexProvider.hpp
     include/providers/ChutesProvider.hpp
+    include/providers/GitlawbProvider.hpp
     include/providers/KimiProvider.hpp
     include/providers/KiloProvider.hpp
     include/providers/LMStudioProvider.hpp

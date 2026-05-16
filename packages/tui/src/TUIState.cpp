@@ -1700,11 +1700,8 @@ void TuiState::loadUserPreferences() {
     skin_config_ = *preferences.firmius_skin;
   }
   show_agent_strip_ = preferences.show_agent_strip.value_or(true);
-  show_work_panel_ = preferences.show_work_panel.value_or(true);
   agent_strip_visible_rows_ =
       std::max(1, preferences.agent_strip_rows.value_or(4));
-  work_panel_height_override_ =
-      std::max(0, preferences.work_panel_height.value_or(0));
 }
 
 void TuiState::persistUserPreferences() const {
@@ -1720,9 +1717,7 @@ void TuiState::persistUserPreferences() const {
   preferences.compact_status_bar = skin_config_.compactStatusBar();
   preferences.compact_tool_display = skin_config_.compactToolDisplay();
   preferences.show_agent_strip = show_agent_strip_;
-  preferences.show_work_panel = show_work_panel_;
   preferences.agent_strip_rows = agent_strip_visible_rows_;
-  preferences.work_panel_height = work_panel_height_override_;
   saveUserPreferences(preferences);
 }
 
@@ -1731,7 +1726,6 @@ SkinKind TuiState::currentSkinKind() const { return skin_config_.kind; }
 void TuiState::applySkinConfig(const SkinConfig &config) {
   skin_config_ = config;
   show_agent_strip_ = skin_config_.show_agent_strip;
-  show_work_panel_ = skin_config_.show_work_panel;
   diffs_expanded_ = !skin_config_.diffsCollapsedByDefault();
   UIState::instance().diffsExpanded = diffs_expanded_;
   if (input_model_) {
@@ -1761,7 +1755,6 @@ void TuiState::setSkinKind(SkinKind kind) {
   }
   skin_config_.kind = kind;
   show_agent_strip_ = skin_config_.show_agent_strip;
-  show_work_panel_ = skin_config_.show_work_panel;
   diffs_expanded_ = !skin_config_.diffsCollapsedByDefault();
   UIState::instance().diffsExpanded = diffs_expanded_;
   if (input_model_) {
@@ -4310,77 +4303,6 @@ ftxui::Component TuiState::root() {
             postEvent(ftxui::Event::Custom);
           }
         }
-        const int work_panel_max_height =
-            computeWorkPanelMaxHeight(terminal.dimy);
-        const int context_panel_height =
-            std::max(work_panel_max_height, std::min(terminal.dimy / 3, 14));
-        const bool hasPlan = false;
-        const bool hasTodo = todo_lane_model_ && todo_lane_model_->visible;
-        const bool hasContext =
-            context_lane_model_ && context_lane_model_->visible;
-        const auto visibleTab =
-            normalizeWorkPanelTab(selected_work_panel_tab_, hasPlan, hasTodo,
-                                  hasContext);
-        selected_work_panel_tab_ = visibleTab;
-
-        ftxui::Element work_panel = ftxui::text("");
-        bool show_work_panel = false;
-        const auto tabs = availableWorkPanelTabs(hasPlan, hasTodo, hasContext);
-        if (show_work_panel_ && !tabs.empty()) {
-          auto renderTab = [&](WorkPanelTab tab) {
-            const bool selected = tab == visibleTab;
-            const std::string icon =
-                tab == WorkPanelTab::Plan
-                    ? shared::ICON_BOOK
-                    : (tab == WorkPanelTab::Todo ? shared::ICON_TODO
-                                                 : shared::ICON_CONTEXT);
-            std::string label =
-                tab == WorkPanelTab::Plan
-                    ? "PLAN"
-                    : (tab == WorkPanelTab::Todo ? "TODO" : "CONTEXT");
-            std::string text_str = selected ? (" " + icon + " " + label + " ") : (" " + icon + " ");
-            return ftxui::text(text_str) | ftxui::bold |
-                   ftxui::color(selected ? theme.base.bg : theme.base.dim) |
-                   ftxui::bgcolor(selected ? theme.base.highlight
-                                           : theme.agent_strip.bg);
-          };
-
-          ftxui::Element kb_hint =
-              ftxui::text(" Ctrl+O to cycle ") | ftxui::color(theme.base.dim);
-
-          ftxui::Element selected_panel = ftxui::text("");
-          int panel_height = work_panel_height_override_ > 0
-                                 ? std::min(work_panel_height_override_,
-                                            std::max(4, terminal.dimy - 8))
-                                 : work_panel_max_height;
-          if (visibleTab == WorkPanelTab::Todo && hasTodo) {
-            selected_panel = todo_lane->Render();
-          } else if (visibleTab == WorkPanelTab::Context && hasContext) {
-            selected_panel = context_lane->Render();
-            panel_height = work_panel_height_override_ > 0
-                               ? std::min(work_panel_height_override_,
-                                          std::max(4, terminal.dimy - 8))
-                               : context_panel_height;
-          }
-
-          ftxui::Elements tab_elements;
-          for (std::size_t i = 0; i < tabs.size(); ++i) {
-            if (i > 0) {
-              tab_elements.push_back(ftxui::text(" "));
-            }
-            tab_elements.push_back(renderTab(tabs[i]));
-          }
-          work_panel =
-              ftxui::vbox({
-                  ftxui::hbox({ftxui::hbox(std::move(tab_elements)), ftxui::filler(), kb_hint}) |
-                      ftxui::bgcolor(theme.agent_strip.bg) | ftxui::xflex,
-                  selected_panel |
-                      ftxui::size(ftxui::HEIGHT, ftxui::LESS_THAN,
-                                  panel_height),
-              }) |
-              ftxui::xflex;
-          show_work_panel = true;
-        }
         // Ultra-compact bottom bar layout
         ftxui::Elements bottom_bar_children;
         const bool has_agent_strip =
@@ -4464,24 +4386,12 @@ ftxui::Component TuiState::root() {
         if (view_mode_ == ViewMode::Welcome) {
           main_view = ftxui::vbox({chat_area, bottom_bar}) | ftxui::flex;
         } else {
-          if (show_work_panel) {
-            main_view = ftxui::vbox({
-                            title_bar->Render(),
-                            chat_area | ftxui::flex,
-                            (ftxui::separator() | ftxui::color(theme.base.border)) |
-                                ftxui::reflect(work_panel_separator_box_),
-                            work_panel,
-                            bottom_bar,
-                        }) |
-                        ftxui::flex;
-          } else {
             main_view = ftxui::vbox({
                             title_bar->Render(),
                             chat_area | ftxui::flex,
                             bottom_bar,
                         }) |
                         ftxui::flex;
-          }
         }
 
         return main_view | ftxui::bgcolor(theme.base.bg);
@@ -4661,17 +4571,6 @@ ftxui::Component TuiState::root() {
       const auto mouse = event.mouse();
       if (mouse.button == ftxui::Mouse::Left &&
           mouse.motion == ftxui::Mouse::Pressed) {
-        if (show_work_panel_ &&
-            work_panel_separator_box_.Contain(mouse.x, mouse.y)) {
-          if (screen_) {
-            active_drag_mouse_ = screen_->CaptureMouse();
-          }
-          active_drag_target_ = DragTarget::WorkPanel;
-          drag_origin_y_ = mouse.y;
-          drag_origin_work_panel_height_ =
-              work_panel_height_override_ > 0 ? work_panel_height_override_ : 10;
-          return true;
-        }
         if (show_agent_strip_ &&
             agent_strip_separator_box_.Contain(mouse.x, mouse.y)) {
           if (screen_) {
@@ -4686,11 +4585,7 @@ ftxui::Component TuiState::root() {
       if (active_drag_target_ != DragTarget::None &&
           mouse.motion == ftxui::Mouse::Moved) {
         const int delta = drag_origin_y_ - mouse.y;
-        if (active_drag_target_ == DragTarget::WorkPanel) {
-          work_panel_height_override_ =
-              std::clamp(drag_origin_work_panel_height_ + delta, 4,
-                         std::max(6, last_terminal_height_ - 8));
-        } else if (active_drag_target_ == DragTarget::AgentStrip) {
+        if (active_drag_target_ == DragTarget::AgentStrip) {
           agent_strip_visible_rows_ =
               std::clamp(drag_origin_agent_strip_rows_ + delta, 1, 12);
           updateAgentStripModel();
@@ -4713,20 +4608,6 @@ ftxui::Component TuiState::root() {
       auto &m = event.mouse();
       if (m.button == ftxui::Mouse::WheelUp ||
           m.button == ftxui::Mouse::WheelDown) {
-        const bool hasPlan = false;
-        const bool hasTodo = todo_lane_model_ && todo_lane_model_->visible;
-        const bool hasContext =
-            context_lane_model_ && context_lane_model_->visible;
-        const auto visibleTab = normalizeWorkPanelTab(
-            selected_work_panel_tab_, hasPlan, hasTodo, hasContext);
-        if (visibleTab == WorkPanelTab::Context && context_lane &&
-            context_lane->OnEvent(event)) {
-          return true;
-        }
-        if (visibleTab == WorkPanelTab::Todo && todo_lane &&
-            todo_lane->OnEvent(event)) {
-          return true;
-        }
         if (chat_component_ && chat_component_->OnEvent(event)) {
           return true;
         }
@@ -5100,32 +4981,6 @@ ftxui::Component TuiState::root() {
       if (screen_) {
         postEvent(ftxui::Event::Custom);
       }
-      return true;
-    }
-
-    // F7 - toggle work panel
-    if (event == ftxui::Event::F7) {
-      show_work_panel_ = !show_work_panel_;
-      persistUserPreferences();
-      if (screen_) {
-        postEvent(ftxui::Event::Custom);
-      }
-      return true;
-    }
-
-    // Ctrl+O - Cycle work-lane tabs
-    if (event == ftxui::Event::Special("\x0F")) {
-      const bool hasPlan = false;
-      const bool hasTodo = todo_lane_model_ && todo_lane_model_->visible;
-      const bool hasContext =
-          context_lane_model_ && context_lane_model_->visible;
-      selected_work_panel_tab_ =
-          nextWorkPanelTab(selected_work_panel_tab_, hasPlan, hasTodo,
-                           hasContext);
-      if (screen_) {
-        postEvent(ftxui::Event::Custom);
-      }
-      persistUserPreferences();
       return true;
     }
 

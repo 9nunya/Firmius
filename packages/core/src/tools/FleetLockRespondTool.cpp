@@ -1,5 +1,4 @@
 #include "tools/FleetLockRespondTool.hpp"
-#include "tools/WorkSupport.hpp"
 #include "AgentRegistry.hpp"
 #include "persistence/ThreadManager.hpp"
 #include "utils/StringUtil.hpp"
@@ -8,6 +7,25 @@
 #include <rapidjson/writer.h>
 
 namespace firmius::core {
+
+namespace {
+
+std::string requireCurrentThreadId(shared::ToolContext &ctx) {
+  const auto &context = ctx.agent.getContext();
+  if (!context.history || context.history->threadId.empty()) {
+    throw std::runtime_error("No current thread exists");
+  }
+  return context.history->threadId;
+}
+
+uint64_t nowEpochMs() {
+  return static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::system_clock::now().time_since_epoch())
+          .count());
+}
+
+} // namespace
 
 shared::ToolMetadata FleetLockRespondTool::getMetadata() const {
   return {"fleet_lock_respond",
@@ -28,7 +46,7 @@ std::shared_ptr<shared::JSONSchema> FleetLockRespondTool::getSchema() const {
 
 shared::ToolResult FleetLockRespondTool::execute(const FleetLockRespondInput &input,
                                                  shared::ToolContext &ctx) {
-  const std::string threadId = work::requireCurrentThreadId(ctx);
+  const std::string threadId = requireCurrentThreadId(ctx);
   const auto &identity = ctx.agent.getContext().identity;
   const std::string ownerId = identity.id;
   
@@ -43,7 +61,7 @@ shared::ToolResult FleetLockRespondTool::execute(const FleetLockRespondInput &in
     lock.rootAgentId = ownerId;
     lock.reason = "Lock request " + input.request_id + " accepted";
     lock.status = "open";
-    lock.createdAt = work::nowEpochMs();
+    lock.createdAt = nowEpochMs();
     lock.updatedAt = lock.createdAt;
     
     // Extract paths from the request message if available

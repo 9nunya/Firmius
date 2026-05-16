@@ -11,7 +11,6 @@
 #include "tools/SemanticToolPresentation.hpp"
 #include "tools/SubagentToolPresentation.hpp"
 #include "tools/WebSearchToolPresentation.hpp"
-#include "tools/WorkToolPresentation.hpp"
 #include <type_traits>
 #include <gtest/gtest.h>
 
@@ -72,8 +71,6 @@ TEST(ToolPresentationTest, FamilyBuildersAndMatchersAreExplicitlyEnumerated) {
                      ToolPresentation (*)(const ToolCallView &)>);
   static_assert(std::is_same_v<decltype(&firmius::tui::BuildWebFetchToolPresentation),
                                ToolPresentation (*)(const ToolCallView &)>);
-  static_assert(std::is_same_v<decltype(&firmius::tui::BuildWorkToolPresentation),
-                               ToolPresentation (*)(const ToolCallView &)>);
 
   EXPECT_TRUE(firmius::tui::IsFileFamilyTool("file_read"));
   EXPECT_TRUE(firmius::tui::IsFileFamilyTool("Read"));
@@ -107,18 +104,6 @@ TEST(ToolPresentationTest, FamilyBuildersAndMatchersAreExplicitlyEnumerated) {
   EXPECT_FALSE(firmius::tui::IsMcpFamilyTool("Mcp"));
   EXPECT_FALSE(firmius::tui::IsMcpFamilyTool("mcp_list"));
   EXPECT_TRUE(firmius::tui::IsMcpFamilyTool("mcp__server__tool"));
-}
-
-TEST(ToolPresentationTest, CompactWorkPresentationUsesStructuredWorkPresenter) {
-  ToolCallView view;
-  view.name = "Work";
-  view.args = R"({"action":"CreatePlan","title":"Ship compact tool suite"})";
-  view.phase = ToolPhase::Finished;
-  view.success = true;
-  view.result = R"({"plan":{"id":"plan-1","title":"Ship compact tool suite","status":"Draft"}})";
-
-  ToolPresentation presentation = BuildToolPresentation(view);
-  EXPECT_NE(presentation.title.find("Ship compact tool suite"), std::string::npos);
 }
 
 TEST(ToolPresentationTest, CompactDelegateAndWebNamesDispatchThroughFamilyPresenters) {
@@ -746,140 +731,6 @@ TEST(ToolPresentationTest, ArtifactListShowsRowsAndCount) {
   ASSERT_FALSE(presentation.sections.empty());
   EXPECT_NE(presentation.sections.front().lines.front().find("ambiguous"),
             std::string::npos);
-}
-
-TEST(ToolPresentationTest, PlanCreateAndPlanUpdateUseRichChangedFields) {
-  ToolCallView create;
-  create.name = "Work";
-  create.args = R"({"action":"CreatePlan","title":"Refactor","objective":"cleanup"})";
-  create.phase = ToolPhase::Finished;
-  create.success = true;
-  create.result = R"({"plan_id":"plan-1","status":"Active","active":true})";
-  ToolPresentation c = BuildToolPresentation(create);
-  EXPECT_EQ(c.density, firmius::tui::ToolPresentationDensity::OneLineSummary);
-  EXPECT_EQ(c.title, "󰒓 Refactor");
-  EXPECT_NE(std::find(c.footer_badges.begin(), c.footer_badges.end(), "plan-1"),
-            c.footer_badges.end());
-
-  ToolCallView update;
-  update.name = "Work";
-  update.args = R"({"action":"UpdatePlan","plan_id":"plan-1","title":"Refactor v2","objective":"cleaner","status":"Paused"})";
-  update.phase = ToolPhase::Finished;
-  update.success = true;
-  update.result = R"({"plan_id":"plan-1","status":"Paused"})";
-  ToolPresentation u = BuildToolPresentation(update);
-  EXPECT_EQ(u.density, firmius::tui::ToolPresentationDensity::OneLineSummary);
-  EXPECT_EQ(u.title, "󰒓 Refactor v2");
-  EXPECT_TRUE(u.sections.empty());
-  EXPECT_NE(std::find(u.footer_badges.begin(), u.footer_badges.end(), "3"),
-            u.footer_badges.end());
-}
-
-TEST(ToolPresentationTest, PlanGetAndPlanListShowStructuredRows) {
-  ToolCallView get;
-  get.name = "Work";
-  get.args = R"({"action":"GetPlan","plan_id":"plan-1"})";
-  get.phase = ToolPhase::Finished;
-  get.success = true;
-  get.result = R"({"id":"plan-1","title":"Ship","status":"Active","objective":"release","context":"ctx","strategy":"strat","chunks":[{"planning_gate":true},{"planning_gate":false}]})";
-  ToolPresentation g = BuildToolPresentation(get);
-  const std::string *chunks = FindFactValue(g, "Chunk count");
-  ASSERT_NE(chunks, nullptr);
-  EXPECT_EQ(*chunks, "2");
-  ASSERT_FALSE(g.sections.empty());
-  EXPECT_EQ(g.sections.front().title, "Plan summary");
-
-  ToolCallView list;
-  list.name = "Work";
-  list.args = R"({"action":"ListPlans"})";
-  list.phase = ToolPhase::Finished;
-  list.success = true;
-  list.result = R"([
-    {"plan_id":"plan-1","title":"Ship","status":"Active","is_active":true},
-    {"plan_id":"plan-2","title":"Polish","status":"Draft","is_active":false}
-  ])";
-  ToolPresentation l = BuildToolPresentation(list);
-  EXPECT_EQ(l.layout, ToolPresentationLayoutKind::CompactFactCard);
-  EXPECT_NE(l.compact_summary.find("Ship"), std::string::npos);
-}
-
-TEST(ToolPresentationTest, ChunkAddGetListReadyUpdateHaveExplicitShapes) {
-  ToolCallView add;
-  add.name = "Work";
-  add.args = R"({"action":"AddChunk","plan_id":"plan-1","title":"Chunk A","goal":"goal","depends_on":["c-0"],"planning_gate":true,"tasks":[{"id":"task-1","title":"Task 1","goal":"Goal 1"}]})";
-  add.phase = ToolPhase::Finished;
-  add.success = true;
-  add.result = R"({"chunk_id":"c-1","status":"Blocked"})";
-  ToolPresentation a = BuildToolPresentation(add);
-  EXPECT_EQ(a.density, firmius::tui::ToolPresentationDensity::OneLineSummary);
-  EXPECT_EQ(a.title, "󰐃 Chunk A");
-  EXPECT_NE(std::find(a.footer_badges.begin(), a.footer_badges.end(), "1"),
-            a.footer_badges.end());
-  EXPECT_NE(std::find(a.footer_badges.begin(), a.footer_badges.end(), "c-1"),
-            a.footer_badges.end());
-
-  ToolCallView get;
-  get.name = "Work";
-  get.args = R"({"action":"GetChunk","plan_id":"plan-1","chunk_id":"c-1"})";
-  get.phase = ToolPhase::Finished;
-  get.success = true;
-  get.result = R"({"id":"c-1","title":"Chunk A","status":"Ready","goal":"g","depends_on":["c-0"],"files_to_read":["a.cpp"],"files_to_touch":["b.cpp"],"cwd":"/repo","verification_condition":"tests pass","handoff_notes":"handoff"})";
-  ToolPresentation g = BuildToolPresentation(get);
-  ASSERT_FALSE(g.sections.empty());
-  EXPECT_EQ(g.sections.front().title, "Execution details");
-
-  ToolCallView list;
-  list.name = "Work";
-  list.args = R"({"action":"ListChunks","plan_id":"plan-1"})";
-  list.phase = ToolPhase::Finished;
-  list.success = true;
-  list.result = R"([
-    {"chunk_id":"c-1","title":"A","status":"Ready","depends_on":[],"task_count":2},
-    {"chunk_id":"c-2","title":"B","status":"Blocked","depends_on":["c-1"]}
-  ])";
-  ToolPresentation cl = BuildToolPresentation(list);
-  EXPECT_GE(cl.sections.size(), 1u);
-  bool saw_task_count = false;
-  for (const auto &section : cl.sections) {
-    for (const auto &line : section.lines) {
-      if (line.find("2 tasks") != std::string::npos) {
-        saw_task_count = true;
-      }
-    }
-  }
-  EXPECT_TRUE(saw_task_count);
-
-  ToolCallView ready;
-  ready.name = "Work";
-  ready.args = R"({"action":"ReadyChunk","plan_id":"plan-1"})";
-  ready.phase = ToolPhase::Finished;
-  ready.success = true;
-  ready.result = R"([])";
-  ToolPresentation r = BuildToolPresentation(ready);
-  EXPECT_EQ(r.layout, ToolPresentationLayoutKind::ResultsList);
-
-  ToolCallView update;
-  update.name = "Work";
-  update.args = R"({"action":"UpdateChunk","plan_id":"plan-1","chunk_id":"c-1","status":"InProgress","files_to_touch":["x.cpp"],"verification_condition":"ok"})";
-  update.phase = ToolPhase::Finished;
-  update.success = true;
-  update.result = R"({"chunk_id":"c-1","status":"InProgress"})";
-  ToolPresentation u = BuildToolPresentation(update);
-  EXPECT_EQ(u.density, firmius::tui::ToolPresentationDensity::OneLineSummary);
-  EXPECT_NE(std::find(u.footer_badges.begin(), u.footer_badges.end(), "InProgress"),
-            u.footer_badges.end());
-  EXPECT_NE(std::find(u.footer_badges.begin(), u.footer_badges.end(), "c-1"),
-            u.footer_badges.end());
-  ToolCallView task_update;
-  task_update.name = "Work";
-  task_update.args = R"({"action":"UpdateChunk","plan_id":"plan-1","chunk_id":"c-1","tasks":[{"id":"task-1","title":"Task 1","goal":"Goal 1"}]})";
-  task_update.phase = ToolPhase::Finished;
-  task_update.success = true;
-  task_update.result = R"({"chunk_id":"c-1","status":"Ready"})";
-  ToolPresentation task_presentation = BuildToolPresentation(task_update);
-  EXPECT_NE(std::find(task_presentation.footer_badges.begin(),
-                      task_presentation.footer_badges.end(), "1"),
-            task_presentation.footer_badges.end());
 }
 
 TEST(ToolPresentationTest, TodoWriteShowsPatchCountsAndItems) {

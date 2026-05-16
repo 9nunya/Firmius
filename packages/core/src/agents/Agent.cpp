@@ -3274,7 +3274,9 @@ void Agent::executeTools(
         context.state.ownedProcesses.push_back(result.resultProcessId);
       }
 
-      if (result.toolName == "file_edit" || result.toolName == "file_write") {
+      if (result.toolName == "Edit" || result.toolName == "EditWrite" ||
+          result.toolName == "EditReplace" || result.toolName == "EditRange" ||
+          result.toolName == "file_edit" || result.toolName == "file_write") {
         for (const auto &file :
              extractFileEditEventPayloads(result.toolArgs, result.resultStr)) {
           if (file.path.empty()) {
@@ -3293,7 +3295,9 @@ void Agent::executeTools(
                                   file.addedLines, file.removedLines});
         }
       }
-    } else if (result.toolName == "file_edit") {
+    } else if (result.toolName == "Edit" || result.toolName == "EditWrite" ||
+               result.toolName == "EditReplace" || result.toolName == "EditRange" ||
+               result.toolName == "file_edit") {
       rapidjson::Document resultDoc;
       resultDoc.Parse(result.resultStr.c_str());
       if (!resultDoc.HasParseError() && resultDoc.IsObject() &&

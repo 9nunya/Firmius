@@ -1,5 +1,4 @@
 #include "tools/FleetStatusTool.hpp"
-#include "tools/WorkSupport.hpp"
 #include "AgentRegistry.hpp"
 #include "persistence/ThreadManager.hpp"
 #include <rapidjson/document.h>
@@ -7,6 +6,14 @@
 namespace firmius::core {
 
 namespace {
+
+std::string requireCurrentThreadId(shared::ToolContext &ctx) {
+  const auto &context = ctx.agent.getContext();
+  if (!context.history || context.history->threadId.empty()) {
+    throw std::runtime_error("No current thread exists");
+  }
+  return context.history->threadId;
+}
 
 std::string resolveFleetRootId(const std::string &agentId) {
   if (agentId.empty()) {
@@ -72,7 +79,7 @@ std::shared_ptr<shared::JSONSchema> FleetStatusTool::getSchema() const {
 
 shared::ToolResult FleetStatusTool::execute(const FleetStatusInput &input,
                                             shared::ToolContext &ctx) {
-  const std::string threadId = work::requireCurrentThreadId(ctx);
+  const std::string threadId = requireCurrentThreadId(ctx);
   ThreadManager tm(ThreadManager::defaultBasePath());
   FleetState state = tm.getFleetState(threadId);
 

@@ -41,6 +41,6 @@ cmake --build build --target firmius_audit
 
 ## Current blocker
 
-At the time of writing, `firmius_audit` may fail to build due to **unrelated** warnings-as-errors in `packages/core/src/tools/WorkTool.cpp`.
+At the time of writing, `firmius_audit` may fail to build due to **unrelated** warnings-as-errors in core tools.
 
 Once that core build is green again, the audit above can be used to confirm the regression stays fixed.

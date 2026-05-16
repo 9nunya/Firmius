@@ -8,7 +8,6 @@ target_sources(firmius_tui PRIVATE
     src/TUIHotkeys.cpp
     src/ActivePlanState.cpp
     src/QuotaPresenter.cpp
-    src/WorkPanelLayout.cpp
     src/StreamStateManager.cpp
     src/NotificationManager.cpp
     src/ThemeManager.cpp
@@ -92,7 +91,6 @@ target_sources(firmius_tui PRIVATE
     src/tools/McpToolPresentation.cpp
     src/tools/ModeSwitchToolPresentation.cpp
     src/tools/ToolPresentation.cpp
-    src/tools/WorkToolPresentation.cpp
     src/tools/SearchToolPresentation.cpp
     src/tools/SemanticToolPresentation.cpp
     src/tools/GenericToolPresentation.cpp

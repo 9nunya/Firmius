@@ -1,41 +1,30 @@
 #pragma once
 
+#include "TranscriptItem.hpp"
+#include "ToolCallState.hpp"
 #include "Context.hpp"
 #include "Events.hpp"
 #include "daemon/Protocol.hpp"
 
+#include <deque>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace firmius::tui2 {
 
-/// A single rendered line in the transcript display.
-struct TranscriptLine {
-  enum class Kind { UserMessage, AssistantText, Thinking, ToolCall, ToolResult, Notice, System };
-
-  Kind kind = Kind::System;
-  std::string text;           ///< Pre-formatted display text (no ANSI).
-  std::string agentId;        ///< Which agent produced this line.
-  std::string toolCallId;     ///< For tool-related lines.
-  std::string toolName;       ///< For tool-related lines.
-  bool success = true;        ///< For tool results.
-};
-
-/// Active tool call being tracked.
-struct ActiveToolCall {
-  std::string toolCallId;
-  std::string toolName;
-  std::string agentId;
-  std::string status;         ///< "running", "completed", "failed"
-};
+class AgentTextItem;
+class AgentThinkingItem;
+class ToolCallItem;
 
 /// Connection states.
 enum class ConnectionStatus { Disconnected, Connecting, Connected };
 
 /// Agent activity context for keybind decisions.
-enum class ActivityContext { Idle, Streaming, PermissionPending };
+enum class ActivityContext { Idle, Active, PermissionPending };
 
 /// Permission request awaiting user resolution.
 struct PendingPermission {
@@ -44,6 +33,13 @@ struct PendingPermission {
   std::string message;
   std::string toolName;
   bool allowAlways = true;
+};
+
+/// Track where an item is rendered in the terminal.
+struct ItemSpan {
+  size_t itemIndex;
+  int terminalRow;
+  int rowCount;
 };
 
 /// Centralized state store — thread-safe, dirty-tracked.
@@ -77,35 +73,57 @@ public:
   void setModelLabel(const std::string &label);
   std::string modelLabel() const;
 
-  // ── Transcript ──
-  void appendTranscriptLine(TranscriptLine line);
-  void setTranscriptLines(std::vector<TranscriptLine> lines);
-  std::vector<TranscriptLine> transcriptLines() const;
-  size_t transcriptLineCount() const;
-  size_t lastRenderedLineIndex() const;
-  void setLastRenderedLineIndex(size_t index);
+  // ── Items (transcript) ──
+  void addItem(std::unique_ptr<TranscriptItem> item);
+  void clearItems();
+  const std::vector<std::unique_ptr<TranscriptItem>>& items() const;
+  size_t itemCount() const;
 
-  // ── Streaming ──
-  void appendStreamingDelta(const std::string &delta);
-  void finalizeStreamingLine();
-  void appendStreamingThinkingDelta(const std::string &delta);
-  void finalizeStreamingThinkingLine();
-  std::string currentStreamingText() const;
-  bool isStreaming() const;
+  // ── Tool call management ──
+  ToolCallItem* findToolCallById(const std::string& toolCallId);
+  /// Find the last ToolCallItem in the transcript (most recent).
+  ToolCallItem* findLastFocusedToolCall();
 
-  // ── Tool Calls ──
-  void addActiveToolCall(ActiveToolCall call);
-  void completeToolCall(const std::string &toolCallId, bool success);
-  std::vector<ActiveToolCall> activeToolCalls() const;
+  // ── Structured tool call state ──
+  ToolCallState& getOrCreateToolCall(const std::string& toolCallId);
+  ToolCallState* findToolCallState(const std::string& toolCallId);
+  const std::unordered_map<std::string, ToolCallState>& toolCalls() const;
+  std::unordered_map<std::string, ToolCallState>& toolCallsMut();
+
+  // ── Process → Tool mapping ──
+  void mapProcessToTool(const std::string& processId, const std::string& toolCallId);
+  std::string findToolCallByProcessId(const std::string& processId) const;
+
+  // ── Agent state ──
+  AgentState& getOrCreateAgent(const std::string& agentId);
+  AgentState* findAgentState(const std::string& agentId);
+
+  // ── Streaming management ──
+  AgentTextItem* activeTextItem() const;
+  void setActiveTextItem(AgentTextItem* item);
+
+  AgentThinkingItem* activeThinkingItem() const;
+  void setActiveThinkingItem(AgentThinkingItem* item);
+
+  // ── Item span tracking for in-place re-render ──
+  const std::vector<ItemSpan>& itemSpans() const;
+  void setItemSpans(std::vector<ItemSpan> spans);
+  void clearItemSpans();
+
+  // ── Live ticking ──
+  bool hasLiveItems() const;
+  void markLiveItemsDirty();
 
   // ── Queued Messages ──
   void setQueuedMessageCount(int count);
   int queuedMessageCount() const;
 
-  // ── Permissions ──
-  void setPendingPermission(PendingPermission perm);
-  void clearPendingPermission();
+  // ── Permissions (queue to support concurrent requests) ──
+  void pushPendingPermission(PendingPermission perm);
+  void popPendingPermission(const std::string &requestId);
+  void clearPendingPermissions();
   std::optional<PendingPermission> pendingPermission() const;
+  bool hasPendingPermissions() const;
 
   // ── Input ──
   void setInputBuffer(const std::string &text);
@@ -117,6 +135,23 @@ public:
   // ── Activity Context ──
   ActivityContext activityContext() const;
 
+  // ── Scrollback ──
+  void appendScrollback(const std::vector<std::string>& lines);
+  void removeTrailingScrollback(int count);
+  void clearScrollback();
+  const std::vector<std::string>& scrollback() const;
+  int scrollbackSize() const;
+
+  void scrollUp(int amount);
+  void scrollDown(int amount);
+  void scrollToTop();
+  void scrollToBottom();
+  int scrollOffset() const;
+  bool isAtBottom() const;
+  /// Whether the user has scrolled away from the bottom (disables auto-follow).
+  bool userScrolledUp() const { return userScrolledUp_; }
+  void setAutoScroll(bool enabled);
+
   // ── Dirty tracking ──
   bool isDirty() const;
   void clearDirty();
@@ -124,7 +159,6 @@ public:
 
 private:
   void markDirty();
-  void flushThinkingBufferLocked(); // caller must hold mutex_
 
   mutable std::mutex mutex_;
   bool dirty_ = true;
@@ -138,15 +172,29 @@ private:
   firmius::shared::AgentStatus agentStatus_ = firmius::shared::AgentStatus::Idle;
   std::string modelLabel_;
 
-  std::vector<TranscriptLine> transcriptLines_;
-  size_t lastRenderedLineIndex_ = 0;
-  std::string streamingText_;
-  std::string streamingThinkingText_;
+  // ── Item-based transcript ──
+  std::vector<std::unique_ptr<TranscriptItem>> items_;
+  std::vector<ItemSpan> itemSpans_;
 
-  std::vector<ActiveToolCall> activeToolCalls_;
+  // ── Streaming pointers (not owned) ──
+  AgentTextItem* activeTextItem_ = nullptr;
+  AgentThinkingItem* activeThinkingItem_ = nullptr;
+
   int queuedMessageCount_ = 0;
-  std::optional<PendingPermission> pendingPermission_;
+  std::deque<PendingPermission> pendingPermissions_;
   std::string inputBuffer_;
+
+  // ── Scrollback ──
+  std::vector<std::string> scrollback_;
+  int scrollOffset_ = 0;       // 0 = at bottom (latest content)
+  bool userScrolledUp_ = false; // true when user manually scrolled away from bottom
+  bool autoScroll_ = true;
+  static constexpr int kMaxScrollbackLines = 10000;
+
+  // ── Structured state ──
+  std::unordered_map<std::string, ToolCallState> toolCalls_;
+  std::unordered_map<std::string, std::string> processToTool_;  // processId → toolCallId
+  std::unordered_map<std::string, AgentState> agents_;
 };
 
 } // namespace firmius::tui2

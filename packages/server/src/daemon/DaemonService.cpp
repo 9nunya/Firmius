@@ -70,8 +70,14 @@ std::string appEventTypeName(const firmius::shared::AppEvent &event) {
           return "agent_finished";
         } else if constexpr (std::is_same_v<T, firmius::shared::AgentError>) {
           return "agent_error";
+        } else if constexpr (std::is_same_v<T, firmius::shared::AgentInterrupted>) {
+          return "agent_interrupted";
         } else if constexpr (std::is_same_v<T, firmius::shared::AgentProcessOutput>) {
           return "agent_process_output";
+        } else if constexpr (std::is_same_v<T, firmius::shared::AgentProcessSpawned>) {
+          return "agent_process_spawned";
+        } else if constexpr (std::is_same_v<T, firmius::shared::AgentFileEdited>) {
+          return "agent_file_edited";
         } else if constexpr (std::is_same_v<T, firmius::shared::MessageQueued>) {
           return "message_queued";
         } else if constexpr (std::is_same_v<T, firmius::shared::MessageDequeued>) {
@@ -153,6 +159,12 @@ rapidjson::Document serializeAppEventDocument(const AppEvent &event) {
           doc.AddMember("turnId",
                         rapidjson::Value(e.turn.turnId.c_str(), doc.GetAllocator()).Move(),
                         doc.GetAllocator());
+          // Serialize the full turn data (including messages with tool results)
+          // so tui-v2 can finalize tool call presentations.
+          auto turnJson = firmius::shared::toJson(e.turn);
+          rapidjson::Value turnValue(rapidjson::kObjectType);
+          turnValue.CopyFrom(turnJson, doc.GetAllocator());
+          doc.AddMember("turn", turnValue, doc.GetAllocator());
           return doc;
         } else if constexpr (std::is_same_v<T, firmius::shared::AgentFinished>) {
           auto doc = basicEventDocument<T>("AgentFinished");

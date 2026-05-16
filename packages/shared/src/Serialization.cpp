@@ -3041,6 +3041,13 @@ rapidjson::Document toJson(const EngineEvent &ev) {
     d.AddMember("exitCode", apo->exitCode, a);
     d.AddMember("durationMs", apo->durationMs, a);
     d.AddMember("parentId", rapidjson::Value(apo->parentId.c_str(), a), a);
+  } else if (auto *aps = std::get_if<AgentProcessSpawned>(&ev)) {
+    d.AddMember("type", "AgentProcessSpawned", a);
+    d.AddMember("agentId", rapidjson::Value(aps->agentId.c_str(), a), a);
+    d.AddMember("processId", rapidjson::Value(aps->processId.c_str(), a), a);
+    d.AddMember("toolCallId", rapidjson::Value(aps->toolCallId.c_str(), a), a);
+    d.AddMember("command", rapidjson::Value(aps->command.c_str(), a), a);
+    d.AddMember("parentId", rapidjson::Value(aps->parentId.c_str(), a), a);
   }
 
   return d;
@@ -3124,6 +3131,13 @@ EngineEvent engineEventFromJson(const rapidjson::Value &v) {
         v["finished"].GetBool(),
         v.HasMember("exitCode") ? v["exitCode"].GetInt() : -1,
         v.HasMember("durationMs") ? v["durationMs"].GetDouble() : 0.0,
+        v.HasMember("parentId") ? v["parentId"].GetString() : ""};
+  if (type == "AgentProcessSpawned")
+    return AgentProcessSpawned{
+        v["agentId"].GetString(),
+        v["processId"].GetString(),
+        v["toolCallId"].GetString(),
+        v["command"].GetString(),
         v.HasMember("parentId") ? v["parentId"].GetString() : ""};
   throw std::runtime_error("Unknown EngineEvent type: " + type);
 }

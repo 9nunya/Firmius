@@ -1,4 +1,6 @@
 #include "AppState.hpp"
+#include "items/ToolCallItem.hpp"
+#include "items/StreamingItems.hpp"
 
 #include <cctype>
 
@@ -98,189 +100,164 @@ std::string AppState::modelLabel() const {
   return modelLabel_;
 }
 
-// ── Transcript ──
+// ── Items (transcript) ──
 
-void AppState::appendTranscriptLine(TranscriptLine line) {
+void AppState::addItem(std::unique_ptr<TranscriptItem> item) {
   std::lock_guard<std::mutex> lock(mutex_);
-  transcriptLines_.push_back(std::move(line));
+  items_.push_back(std::move(item));
   markDirty();
 }
 
-void AppState::setTranscriptLines(std::vector<TranscriptLine> lines) {
+void AppState::clearItems() {
   std::lock_guard<std::mutex> lock(mutex_);
-  transcriptLines_ = std::move(lines);
-  lastRenderedLineIndex_ = 0;
+  items_.clear();
+  toolCalls_.clear();
+  processToTool_.clear();
+  agents_.clear();
+  activeTextItem_ = nullptr;
+  activeThinkingItem_ = nullptr;
+  scrollback_.clear();
+  scrollOffset_ = 0;
   markDirty();
 }
 
-std::vector<TranscriptLine> AppState::transcriptLines() const {
-  std::lock_guard<std::mutex> lock(mutex_);
-  return transcriptLines_;
+const std::vector<std::unique_ptr<TranscriptItem>>& AppState::items() const {
+  // NOTE: caller must not hold lock — this returns a reference.
+  // The mutex_ is NOT locked here for performance; callers should
+  // use this during render which is single-threaded.
+  return items_;
 }
 
-size_t AppState::transcriptLineCount() const {
+size_t AppState::itemCount() const {
   std::lock_guard<std::mutex> lock(mutex_);
-  return transcriptLines_.size();
+  return items_.size();
 }
 
-size_t AppState::lastRenderedLineIndex() const {
-  std::lock_guard<std::mutex> lock(mutex_);
-  return lastRenderedLineIndex_;
-}
+// ── Tool call management ──
 
-void AppState::setLastRenderedLineIndex(size_t index) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  lastRenderedLineIndex_ = index;
-}
-
-// ── Streaming ──
-
-void AppState::flushThinkingBufferLocked() {
-  if (streamingThinkingText_.empty()) return;
-
-  auto flushLine = [this](std::string text) {
-    while (!text.empty() && std::isspace(static_cast<unsigned char>(text.front()))) {
-      text.erase(text.begin());
-    }
-    while (!text.empty() && std::isspace(static_cast<unsigned char>(text.back()))) {
-      text.pop_back();
-    }
-    if (text.empty()) return;
-    TranscriptLine line;
-    line.kind = TranscriptLine::Kind::Thinking;
-    line.text = std::move(text);
-    transcriptLines_.push_back(std::move(line));
-  };
-
-  size_t pos = 0;
-  while ((pos = streamingThinkingText_.find('\n')) != std::string::npos) {
-    flushLine(streamingThinkingText_.substr(0, pos));
-    streamingThinkingText_ = streamingThinkingText_.substr(pos + 1);
-  }
-
-  constexpr size_t kStreamingWrapColumn = 88;
-  while (streamingThinkingText_.size() >= kStreamingWrapColumn) {
-    size_t split = streamingThinkingText_.rfind(' ', kStreamingWrapColumn);
-    if (split == std::string::npos || split == 0) {
-      split = kStreamingWrapColumn;
-    }
-    flushLine(streamingThinkingText_.substr(0, split));
-    streamingThinkingText_ = streamingThinkingText_.substr(split);
-  }
-
-  if (!streamingThinkingText_.empty()) {
-    TranscriptLine line;
-    line.kind = TranscriptLine::Kind::Thinking;
-    line.text = std::move(streamingThinkingText_);
-    transcriptLines_.push_back(std::move(line));
-    streamingThinkingText_.clear();
-  }
-}
-
-void AppState::appendStreamingDelta(const std::string &delta) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  flushThinkingBufferLocked();
-  streamingText_ += delta;
-
-  auto flushAssistantLine = [this](std::string text) {
-    while (!text.empty() && std::isspace(static_cast<unsigned char>(text.front()))) {
-      text.erase(text.begin());
-    }
-    while (!text.empty() && std::isspace(static_cast<unsigned char>(text.back()))) {
-      text.pop_back();
-    }
-    if (text.empty()) return;
-    TranscriptLine line;
-    line.kind = TranscriptLine::Kind::AssistantText;
-    line.text = std::move(text);
-    transcriptLines_.push_back(std::move(line));
-  };
-
-  size_t pos = 0;
-  while ((pos = streamingText_.find('\n')) != std::string::npos) {
-    flushAssistantLine(streamingText_.substr(0, pos));
-    streamingText_ = streamingText_.substr(pos + 1);
-  }
-
-  constexpr size_t kStreamingWrapColumn = 88;
-  while (streamingText_.size() >= kStreamingWrapColumn) {
-    size_t split = streamingText_.rfind(' ', kStreamingWrapColumn);
-    if (split == std::string::npos || split == 0) {
-      split = kStreamingWrapColumn;
-    }
-    flushAssistantLine(streamingText_.substr(0, split));
-    streamingText_ = streamingText_.substr(split);
-  }
-
-  markDirty();
-}
-
-void AppState::finalizeStreamingLine() {
-  std::lock_guard<std::mutex> lock(mutex_);
-  if (!streamingText_.empty()) {
-    TranscriptLine line;
-    line.kind = TranscriptLine::Kind::AssistantText;
-    line.text = std::move(streamingText_);
-    transcriptLines_.push_back(std::move(line));
-    streamingText_.clear();
-  }
-  agentStatus_ = firmius::shared::AgentStatus::Idle;
-  markDirty();
-}
-
-void AppState::appendStreamingThinkingDelta(const std::string &delta) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  streamingThinkingText_ += delta;
-  markDirty();
-}
-
-void AppState::finalizeStreamingThinkingLine() {
-  std::lock_guard<std::mutex> lock(mutex_);
-  flushThinkingBufferLocked();
-  markDirty();
-}
-
-std::string AppState::currentStreamingText() const {
-  std::lock_guard<std::mutex> lock(mutex_);
-  return streamingText_;
-}
-
-bool AppState::isStreaming() const {
-  std::lock_guard<std::mutex> lock(mutex_);
-  return !streamingText_.empty() ||
-         agentStatus_ == firmius::shared::AgentStatus::Streaming;
-}
-
-// ── Tool Calls ──
-
-void AppState::addActiveToolCall(ActiveToolCall call) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  activeToolCalls_.push_back(std::move(call));
-  markDirty();
-}
-
-void AppState::completeToolCall(const std::string &toolCallId, bool success) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  for (auto it = activeToolCalls_.begin(); it != activeToolCalls_.end(); ++it) {
-    if (it->toolCallId == toolCallId) {
-      // Record in transcript as completed.
-      TranscriptLine line;
-      line.kind = TranscriptLine::Kind::ToolResult;
-      line.toolCallId = toolCallId;
-      line.toolName = it->toolName;
-      line.success = success;
-      line.text = (success ? "✓ " : "✗ ") + it->toolName;
-      transcriptLines_.push_back(std::move(line));
-      activeToolCalls_.erase(it);
-      markDirty();
-      return;
+ToolCallItem* AppState::findToolCallById(const std::string& toolCallId) {
+  for (auto& item : items_) {
+    if (item->type() == "ToolCall") {
+      auto* tc = static_cast<ToolCallItem*>(item.get());
+      if (tc->toolCallId() == toolCallId) {
+        return tc;
+      }
     }
   }
+  return nullptr;
 }
 
-std::vector<ActiveToolCall> AppState::activeToolCalls() const {
+ToolCallItem* AppState::findLastFocusedToolCall() {
+  for (auto it = items_.rbegin(); it != items_.rend(); ++it) {
+    if ((*it)->type() == "ToolCall") {
+      return static_cast<ToolCallItem*>(it->get());
+    }
+  }
+  return nullptr;
+}
+
+// ── Structured tool call state ──
+
+ToolCallState& AppState::getOrCreateToolCall(const std::string& toolCallId) {
+  return toolCalls_[toolCallId];
+}
+
+ToolCallState* AppState::findToolCallState(const std::string& toolCallId) {
+  auto it = toolCalls_.find(toolCallId);
+  return (it != toolCalls_.end()) ? &it->second : nullptr;
+}
+
+const std::unordered_map<std::string, ToolCallState>& AppState::toolCalls() const {
+  return toolCalls_;
+}
+
+std::unordered_map<std::string, ToolCallState>& AppState::toolCallsMut() {
+  return toolCalls_;
+}
+
+// ── Process → Tool mapping ──
+
+void AppState::mapProcessToTool(const std::string& processId, const std::string& toolCallId) {
+  processToTool_[processId] = toolCallId;
+}
+
+std::string AppState::findToolCallByProcessId(const std::string& processId) const {
+  auto it = processToTool_.find(processId);
+  return (it != processToTool_.end()) ? it->second : std::string();
+}
+
+// ── Agent state ──
+
+AgentState& AppState::getOrCreateAgent(const std::string& agentId) {
+  return agents_[agentId];
+}
+
+AgentState* AppState::findAgentState(const std::string& agentId) {
+  auto it = agents_.find(agentId);
+  return (it != agents_.end()) ? &it->second : nullptr;
+}
+
+// ── Streaming management ──
+
+AgentTextItem* AppState::activeTextItem() const {
   std::lock_guard<std::mutex> lock(mutex_);
-  return activeToolCalls_;
+  return activeTextItem_;
+}
+
+void AppState::setActiveTextItem(AgentTextItem* item) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  activeTextItem_ = item;
+}
+
+AgentThinkingItem* AppState::activeThinkingItem() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return activeThinkingItem_;
+}
+
+void AppState::setActiveThinkingItem(AgentThinkingItem* item) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  activeThinkingItem_ = item;
+}
+
+// ── Item span tracking ──
+
+const std::vector<ItemSpan>& AppState::itemSpans() const {
+  return itemSpans_;
+}
+
+void AppState::setItemSpans(std::vector<ItemSpan> spans) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  itemSpans_ = std::move(spans);
+}
+
+void AppState::clearItemSpans() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  itemSpans_.clear();
+}
+
+// ── Live ticking ──
+
+bool AppState::hasLiveItems() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  for (const auto& item : items_) {
+    if (item->type() == "ToolCall") {
+      auto* tc = static_cast<const ToolCallItem*>(item.get());
+      if (tc->isLive()) return true;
+    }
+  }
+  return false;
+}
+
+void AppState::markLiveItemsDirty() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  for (auto& item : items_) {
+    if (item->type() == "ToolCall") {
+      auto* tc = static_cast<ToolCallItem*>(item.get());
+      if (tc->isLive()) {
+        tc->markDirty();
+      }
+    }
+  }
 }
 
 // ── Queued Messages ──
@@ -296,23 +273,40 @@ int AppState::queuedMessageCount() const {
   return queuedMessageCount_;
 }
 
-// ── Permissions ──
+// ── Permissions (queue) ──
 
-void AppState::setPendingPermission(PendingPermission perm) {
+void AppState::pushPendingPermission(PendingPermission perm) {
   std::lock_guard<std::mutex> lock(mutex_);
-  pendingPermission_ = std::move(perm);
+  pendingPermissions_.push_back(std::move(perm));
   markDirty();
 }
 
-void AppState::clearPendingPermission() {
+void AppState::popPendingPermission(const std::string &requestId) {
   std::lock_guard<std::mutex> lock(mutex_);
-  pendingPermission_.reset();
+  for (auto it = pendingPermissions_.begin(); it != pendingPermissions_.end(); ++it) {
+    if (it->requestId == requestId) {
+      pendingPermissions_.erase(it);
+      markDirty();
+      return;
+    }
+  }
+}
+
+void AppState::clearPendingPermissions() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  pendingPermissions_.clear();
   markDirty();
 }
 
 std::optional<PendingPermission> AppState::pendingPermission() const {
   std::lock_guard<std::mutex> lock(mutex_);
-  return pendingPermission_;
+  if (pendingPermissions_.empty()) return std::nullopt;
+  return pendingPermissions_.front();
+}
+
+bool AppState::hasPendingPermissions() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return !pendingPermissions_.empty();
 }
 
 // ── Input ──
@@ -352,12 +346,14 @@ void AppState::clearInput() {
 
 ActivityContext AppState::activityContext() const {
   std::lock_guard<std::mutex> lock(mutex_);
-  if (pendingPermission_.has_value()) {
+  if (!pendingPermissions_.empty()) {
     return ActivityContext::PermissionPending;
   }
-  if (agentStatus_ == firmius::shared::AgentStatus::Streaming ||
-      !streamingText_.empty()) {
-    return ActivityContext::Streaming;
+  // Agent is "active" (interruptible) unless it's in an inert state.
+  if (agentStatus_ != firmius::shared::AgentStatus::Idle &&
+      agentStatus_ != firmius::shared::AgentStatus::Cancelled &&
+      agentStatus_ != firmius::shared::AgentStatus::Error) {
+    return ActivityContext::Active;
   }
   return ActivityContext::Idle;
 }
@@ -372,6 +368,109 @@ bool AppState::isDirty() const {
 void AppState::clearDirty() {
   std::lock_guard<std::mutex> lock(mutex_);
   dirty_ = false;
+}
+
+// ── Scrollback ──
+
+void AppState::appendScrollback(const std::vector<std::string>& lines) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  for (const auto& line : lines) {
+    scrollback_.push_back(line);
+  }
+  // Trim from front if over limit.
+  if (static_cast<int>(scrollback_.size()) > kMaxScrollbackLines) {
+    int excess = static_cast<int>(scrollback_.size()) - kMaxScrollbackLines;
+    scrollback_.erase(scrollback_.begin(), scrollback_.begin() + excess);
+    // Adjust offset so the viewport stays stable.
+    scrollOffset_ = std::max(0, scrollOffset_ - excess);
+  }
+  markDirty();
+}
+
+void AppState::removeTrailingScrollback(int count) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (count <= 0) return;
+  int removeCount = std::min(count, static_cast<int>(scrollback_.size()));
+  scrollback_.erase(scrollback_.end() - removeCount, scrollback_.end());
+  // Adjust offset so viewport stays stable.
+  scrollOffset_ = std::max(0, scrollOffset_ - removeCount);
+  markDirty();
+}
+
+void AppState::clearScrollback() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  scrollback_.clear();
+  scrollOffset_ = 0;
+  autoScroll_ = true;
+  markDirty();
+}
+
+const std::vector<std::string>& AppState::scrollback() const {
+  // Note: caller must not hold mutex (this returns a reference).
+  // In practice, only called from the render thread which already holds the lock
+  // via the main loop. For safety, we don't lock here since the render path
+  // is single-threaded.
+  return scrollback_;
+}
+
+int AppState::scrollbackSize() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return static_cast<int>(scrollback_.size());
+}
+
+void AppState::scrollUp(int amount) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  scrollOffset_ += amount;
+  if (scrollOffset_ > static_cast<int>(scrollback_.size())) {
+    scrollOffset_ = static_cast<int>(scrollback_.size());
+  }
+  autoScroll_ = false;
+  userScrolledUp_ = true;
+  markDirty();
+}
+
+void AppState::scrollDown(int amount) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  scrollOffset_ -= amount;
+  if (scrollOffset_ <= 0) {
+    scrollOffset_ = 0;
+    autoScroll_ = true;
+    userScrolledUp_ = false;  // Re-enable auto-follow when back at bottom
+  }
+  markDirty();
+}
+
+void AppState::scrollToTop() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  scrollOffset_ = static_cast<int>(scrollback_.size());
+  autoScroll_ = false;
+  userScrolledUp_ = true;
+  markDirty();
+}
+
+void AppState::scrollToBottom() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  scrollOffset_ = 0;
+  autoScroll_ = true;
+  userScrolledUp_ = false;  // Re-enable auto-follow
+  markDirty();
+}
+
+int AppState::scrollOffset() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return scrollOffset_;
+}
+
+bool AppState::isAtBottom() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return scrollOffset_ == 0;
+}
+
+void AppState::setAutoScroll(bool enabled) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  autoScroll_ = enabled;
+  if (autoScroll_) scrollOffset_ = 0;
+  markDirty();
 }
 
 } // namespace firmius::tui2

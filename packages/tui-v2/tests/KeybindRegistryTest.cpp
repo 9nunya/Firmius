@@ -15,7 +15,7 @@ TEST(KeybindRegistryTest, RegisterAndHandle) {
   EXPECT_FALSE(invoked);
 
   // Doesn't match wrong context
-  EXPECT_FALSE(registry.handleKey("a", ActivityContext::Streaming));
+  EXPECT_FALSE(registry.handleKey("a", ActivityContext::Active));
   EXPECT_FALSE(invoked);
 
   // Matches correct key and context
@@ -30,8 +30,8 @@ TEST(KeybindRegistryTest, AlwaysActive) {
   registry.registerKeybind({"ctrl+c", "Quit", ActivityContext::Idle, true,
                             [&invoked]() { invoked = true; }});
 
-  // Even though it's registered for Idle, alwaysActive makes it match Streaming
-  EXPECT_TRUE(registry.handleKey("ctrl+c", ActivityContext::Streaming));
+  // Even though it's registered for Idle, alwaysActive makes it match Active
+  EXPECT_TRUE(registry.handleKey("ctrl+c", ActivityContext::Active));
   EXPECT_TRUE(invoked);
 }
 
@@ -39,12 +39,12 @@ TEST(KeybindRegistryTest, ListKeybinds) {
   KeybindRegistry registry;
 
   registry.registerKeybind({"n", "New", ActivityContext::Idle, false, nullptr});
-  registry.registerKeybind({"esc", "Stop", ActivityContext::Streaming, false, nullptr});
+  registry.registerKeybind({"esc", "Stop", ActivityContext::Active, false, nullptr});
   registry.registerKeybind({"q", "Quit", ActivityContext::Idle, true, nullptr});
 
   auto idleBinds = registry.listKeybinds(ActivityContext::Idle);
   EXPECT_EQ(idleBinds.size(), 2u); // n and q
 
-  auto streamingBinds = registry.listKeybinds(ActivityContext::Streaming);
-  EXPECT_EQ(streamingBinds.size(), 2u); // esc and q
+  auto activeBinds = registry.listKeybinds(ActivityContext::Active);
+  EXPECT_EQ(activeBinds.size(), 2u); // esc and q
 }

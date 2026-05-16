@@ -802,7 +802,6 @@ add_executable(test_chat_window_helpers
     ../../packages/tui/src/tools/WebSearchToolPresentation.cpp
     ../../packages/tui/src/tools/McpToolPresentation.cpp
     ../../packages/tui/src/tools/ModeSwitchToolPresentation.cpp
-    ../../packages/tui/src/tools/WorkToolPresentation.cpp
     ../../packages/tui/src/tools/SearchToolPresentation.cpp
     ../../packages/tui/src/tools/SemanticToolPresentation.cpp
     ../../packages/tui/src/tools/GenericToolPresentation.cpp
@@ -857,7 +856,6 @@ add_executable(test_chat_window_quick_tool_grouping
     ../../packages/tui/src/tools/WebSearchToolPresentation.cpp
     ../../packages/tui/src/tools/McpToolPresentation.cpp
     ../../packages/tui/src/tools/ModeSwitchToolPresentation.cpp
-    ../../packages/tui/src/tools/WorkToolPresentation.cpp
     ../../packages/tui/src/tools/SearchToolPresentation.cpp
     ../../packages/tui/src/tools/SemanticToolPresentation.cpp
     ../../packages/tui/src/tools/GenericToolPresentation.cpp
@@ -965,20 +963,6 @@ target_include_directories(test_context_lane PRIVATE
     ../../packages/tui/src
 )
 gtest_discover_tests(test_context_lane)
-
-add_executable(test_work_panel_layout
-    tui/test_work_panel_layout.cpp
-    ../../packages/tui/src/WorkPanelLayout.cpp
-)
-target_link_libraries(test_work_panel_layout PRIVATE
-    GTest::gtest_main
-    GTest::gmock
-)
-target_include_directories(test_work_panel_layout PRIVATE
-    ../../packages/tui/include
-    ../../packages/tui/src
-)
-gtest_discover_tests(test_work_panel_layout)
 
 add_executable(test_status_bar
     tui/test_status_bar.cpp
@@ -1095,7 +1079,6 @@ add_executable(test_tool_presentation
     ../../packages/tui/src/tools/ToolPresentation.cpp
     ../../packages/tui/src/tools/McpToolPresentation.cpp
     ../../packages/tui/src/tools/ModeSwitchToolPresentation.cpp
-    ../../packages/tui/src/tools/WorkToolPresentation.cpp
     ../../packages/tui/src/tools/SearchToolPresentation.cpp
     ../../packages/tui/src/tools/SemanticToolPresentation.cpp
     ../../packages/tui/src/tools/GenericToolPresentation.cpp
@@ -1224,7 +1207,6 @@ add_executable(test_tool_presentation_block
     ../../packages/tui/src/tools/ToolPresentation.cpp
     ../../packages/tui/src/tools/McpToolPresentation.cpp
     ../../packages/tui/src/tools/ModeSwitchToolPresentation.cpp
-    ../../packages/tui/src/tools/WorkToolPresentation.cpp
     ../../packages/tui/src/tools/SearchToolPresentation.cpp
     ../../packages/tui/src/tools/SemanticToolPresentation.cpp
     ../../packages/tui/src/tools/GenericToolPresentation.cpp
@@ -1414,20 +1396,6 @@ target_include_directories(test_stream_insanity PRIVATE
     ${rapidjson_SOURCE_DIR}/include
 )
 gtest_discover_tests(test_stream_insanity)
-
-add_executable(test_memory_recall_tool
-    tools/test_memory_recall_tool.cpp
-)
-target_link_libraries(test_memory_recall_tool PRIVATE
-    firmius::core
-    firmius::shared
-    GTest::gtest_main
-    GTest::gmock
-)
-target_include_directories(test_memory_recall_tool PRIVATE
-    ${rapidjson_SOURCE_DIR}/include
-)
-gtest_discover_tests(test_memory_recall_tool)
 
 add_executable(test_runtime_overlay_security
     core/test_runtime_overlay_security.cpp

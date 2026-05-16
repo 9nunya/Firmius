@@ -1,68 +1,35 @@
 #pragma once
 
-#include <functional>
+#include <chrono>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
 namespace firmius::tui2 {
 
-/// Progressive terminal renderer.
+/// Full-screen terminal renderer using alternate screen buffer.
 ///
-/// Does NOT use alternate screen. Renders inline into the user's existing
-/// terminal scrollback. Maintains a line buffer of what's currently on
-/// screen and only rewrites lines that changed (diff-based).
+/// Renders into an alternate screen buffer (like vim/htop). The entire
+/// W×H grid is managed by the application — no native terminal scrolling.
+/// Custom scrollback is handled at the application layer.
 ///
-/// The screen is divided into two zones:
-///   1. Scroll zone (top) — content pushed upward via native terminal scroll.
-///   2. Pinned zone (bottom) — fixed rows for status/input/menus, rendered
-///      via DECSTBM scroll region exclusion.
+/// Supports SGR mouse mode for scroll wheel and click events.
 class Terminal {
 public:
   Terminal();
   ~Terminal();
 
-  /// Enter raw mode. Does NOT switch to alternate screen.
+  /// Enter alternate screen buffer + raw mode + mouse tracking.
   bool enter();
 
-  /// Restore original terminal state.
+  /// Leave alternate screen + disable mouse + restore terminal state.
   void leave();
 
   /// Get terminal dimensions.
   std::pair<int, int> size() const; ///< {width, height}
 
   bool isActive() const { return active_; }
-
-  // ── Pinned Zone Management ──
-
-  /// Reserve N rows at the bottom of the terminal for pinned content
-  /// (status bar, input, menus). Adjusts the DECSTBM scroll region so
-  /// the top zone scrolls independently. Can be called repeatedly as
-  /// the pinned area grows/shrinks (e.g. opening a menu).
-  void setPinnedHeight(int rows);
-
-  /// Current pinned height.
-  int pinnedHeight() const { return pinnedHeight_; }
-
-  /// Row where the pinned zone starts (1-indexed).
-  int pinnedTopRow() const;
-
-  // ── Scroll Zone (Transcript) ──
-
-  /// Push a line into the scroll zone. The line appears at the bottom of
-  /// the scroll region and everything above shifts up (native terminal
-  /// scroll). The line enters the terminal's scrollback buffer.
-  void pushLine(const std::string& content);
-
-  /// Push multiple lines at once into the scroll zone.
-  void pushLines(const std::vector<std::string>& lines);
-
-  // ── Pinned Zone Rendering ──
-
-  /// Render lines into the pinned zone. The vector maps 1:1 to pinned
-  /// rows (index 0 = topmost pinned row). Only rows whose content
-  /// differs from the last render are actually written.
-  void renderPinned(const std::vector<std::string>& lines);
 
   // ── Output Buffering ──
 
@@ -82,27 +49,36 @@ public:
 
   void clearLine();
   void clearToEndOfLine();
+  void clearToEndOfScreen();
   void clearScreen();
   void flush();
 
-  /// Read a single key press from stdin (non-blocking with timeout in ms).
+  // ── Input ──
+
+  /// Read input from stdin (non-blocking with timeout in ms).
+  /// Returns the raw key string. May contain multi-byte escape sequences.
   std::string readKey(int timeoutMs = 50);
+
+  /// Read input with mouse event parsing.
+  /// Returns {rawKey, mouseEvent}. If the input was a mouse sequence,
+  /// mouseEvent is populated and rawKey is empty.
+  std::pair<std::string, std::optional<struct MouseEvent>>
+  readInput(int timeoutMs = 50);
 
   /// Check if terminal was resized since last check.
   bool wasResized();
 
-private:
+  /// Write raw ANSI to the batch buffer (or stdout if not batching).
   void rawWrite(const std::string& s);
-  void setScrollRegion(int top, int bottom);
-  void resetScrollRegion();
+
+private:
+  std::optional<struct MouseEvent> parseMouseSequence(const std::string& raw);
 
   bool active_ = false;
-  int pinnedHeight_ = 0;
   int termWidth_ = 80;
   int termHeight_ = 24;
-
-  /// What we last rendered into each pinned row. Used for diffing.
-  std::vector<std::string> pinnedBuffer_;
+  std::string inputBuf_;  ///< Buffered partial escape sequences between reads.
+  std::chrono::steady_clock::time_point escBufferedAt_{};  ///< When a lone ESC was first buffered.
 
   /// Output batch buffer. When batching, writes go here instead of stdout.
   std::string batchBuffer_;
@@ -110,6 +86,17 @@ private:
 
   struct TermState;
   TermState* savedState_ = nullptr;
+};
+
+/// Mouse event parsed from SGR 1006 escape sequences.
+struct MouseEvent {
+  enum class Type { Press, Release, Scroll, Move };
+  enum class Button { Left, Middle, Right, ScrollUp, ScrollDown, None };
+
+  Type type = Type::Press;
+  Button button = Button::Left;
+  int col = 0;    ///< 1-indexed column
+  int row = 0;    ///< 1-indexed row
 };
 
 // ── ANSI helpers ──
@@ -138,7 +125,6 @@ std::string bgRgb(int r, int g, int b, const std::string& text);
 std::string invert(const std::string& text);
 
 /// Strip all ANSI escape sequences from a string.
-/// Useful for measuring visible width.
 std::string strip(const std::string& text);
 
 /// Visible character width of a string (strips ANSI codes).

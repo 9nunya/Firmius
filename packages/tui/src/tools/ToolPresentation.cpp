@@ -3,7 +3,6 @@
 #include "tools/ProcessToolPresentation.hpp"
 #include "tools/SubagentToolPresentation.hpp"
 #include "tools/ToolPresentation.hpp"
-#include "tools/WorkToolPresentation.hpp"
 #include "tools/PythonToolPresentation.hpp"
 #include "tools/McpToolPresentation.hpp"
 #include "tools/ModeSwitchToolPresentation.hpp"
@@ -61,9 +60,6 @@ TryBuildSpecializedPresentation(const ToolCallView &view,
   }
   if (IsArtifactFamilyTool(view.name)) {
     return BuildArtifactToolPresentation(view);
-  }
-  if (IsWorkFamilyTool(view.name)) {
-    return BuildWorkToolPresentation(view);
   }
   if (IsWebSearchFamilyTool(view.name)) {
     return (IsMatch(view.name, "web_fetch") || action == "Fetch" || action == "Web")

@@ -41,7 +41,6 @@ target_sources(firmius_core PRIVATE
     src/tools/FleetLockRespondTool.cpp
     src/tools/FleetStatusTool.cpp
     src/tools/TodoWriteTool.cpp
-    src/tools/MemoryRecallTool.cpp
     src/agents/SkillLoader.cpp
     src/agents/HintingLoader.cpp
     src/agents/PurposeLoader.cpp
@@ -114,7 +113,6 @@ target_sources(firmius_core PUBLIC
     include/tools/WebSearchTool.hpp
     include/tools/SkillLoadTool.hpp
     include/tools/TodoWriteTool.hpp
-    include/tools/MemoryRecallTool.hpp
     include/agents/HintingLoader.hpp
     include/tools/ModeSwitchTool.hpp
     include/agents/PurposeLoader.hpp

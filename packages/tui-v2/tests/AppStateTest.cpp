@@ -1,11 +1,14 @@
 #include "AppState.hpp"
+#include "items/SimpleItems.hpp"
+#include "items/StreamingItems.hpp"
+#include "items/ToolCallItem.hpp"
 #include <gtest/gtest.h>
 
 using namespace firmius::tui2;
 
 TEST(AppStateTest, SetThreadAndDirtyFlag) {
   AppState state;
-  EXPECT_TRUE(state.isDirty()); // Initially dirty
+  EXPECT_TRUE(state.isDirty());
   state.clearDirty();
   EXPECT_FALSE(state.isDirty());
 
@@ -21,36 +24,69 @@ TEST(AppStateTest, ConnectionStatus) {
   EXPECT_EQ(state.connectionStatus(), ConnectionStatus::Connected);
 }
 
-TEST(AppStateTest, TranscriptLines) {
+TEST(AppStateTest, ItemLifecycle) {
   AppState state;
-  TranscriptLine line;
-  line.text = "Hello";
-  state.appendTranscriptLine(std::move(line));
+  state.clearDirty();
 
-  EXPECT_EQ(state.transcriptLineCount(), 1u);
-  EXPECT_EQ(state.transcriptLines()[0].text, "Hello");
-
-  std::vector<TranscriptLine> lines;
-  lines.push_back({TranscriptLine::Kind::System, "Reset", "", "", "", true});
-  state.setTranscriptLines(std::move(lines));
-  EXPECT_EQ(state.transcriptLineCount(), 1u);
-  EXPECT_EQ(state.transcriptLines()[0].text, "Reset");
-  EXPECT_EQ(state.lastRenderedLineIndex(), 0u);
+  state.addItem(std::make_unique<UserMessageItem>("Hello"));
+  EXPECT_EQ(state.itemCount(), 1u);
+  EXPECT_TRUE(state.isDirty());
 }
 
-TEST(AppStateTest, StreamingAccumulation) {
+TEST(AppStateTest, StreamingItems) {
   AppState state;
-  state.appendStreamingDelta("Hello ");
-  state.appendStreamingDelta("world!");
+  auto item = std::make_unique<AgentTextItem>();
+  auto* ptr = item.get();
+  state.addItem(std::move(item));
+  state.setActiveTextItem(ptr);
 
-  EXPECT_EQ(state.currentStreamingText(), "Hello world!");
-  EXPECT_TRUE(state.isStreaming());
+  EXPECT_EQ(state.activeTextItem(), ptr);
+  EXPECT_FALSE(ptr->isFinalized());
 
-  state.finalizeStreamingLine();
-  EXPECT_EQ(state.currentStreamingText(), "");
-  EXPECT_EQ(state.transcriptLineCount(), 1u);
-  EXPECT_EQ(state.transcriptLines()[0].text, "Hello world!");
-  EXPECT_EQ(state.transcriptLines()[0].kind, TranscriptLine::Kind::AssistantText);
+  ptr->appendDelta("Hello ");
+  ptr->appendDelta("world!");
+  EXPECT_EQ(ptr->accumulated(), "Hello world!");
+
+  ptr->finalize();
+  EXPECT_TRUE(ptr->isFinalized());
+  state.setActiveTextItem(nullptr);
+  EXPECT_EQ(state.activeTextItem(), nullptr);
+}
+
+TEST(AppStateTest, ToolCallLifecycle) {
+  AppState state;
+  auto item = std::make_unique<ToolCallItem>("call-1", "Process", "agent-1");
+  state.addItem(std::move(item));
+
+  auto* tc = state.findToolCallById("call-1");
+  ASSERT_NE(tc, nullptr);
+  EXPECT_EQ(tc->phase(), ToolPhase::Preparing);
+
+  tc->setArgs(R"({"action":"Execute","command":"ls"})");
+  tc->setPhase(ToolPhase::Called);
+  EXPECT_EQ(tc->phase(), ToolPhase::Called);
+
+  tc->setResult(true, R"({"exit_code":0})");
+  EXPECT_EQ(tc->phase(), ToolPhase::FinishedSuccess);
+  EXPECT_TRUE(tc->success());
+
+  // Not found
+  EXPECT_EQ(state.findToolCallById("nonexistent"), nullptr);
+}
+
+TEST(AppStateTest, LiveItemTracking) {
+  AppState state;
+  auto item = std::make_unique<ToolCallItem>("call-1", "Process", "agent-1");
+  item->setArgs(R"({"action":"Execute","command":"sleep 10"})");
+  item->setLive(true);
+  state.addItem(std::move(item));
+
+  EXPECT_TRUE(state.hasLiveItems());
+
+  state.markLiveItemsDirty();
+  auto* tc = state.findToolCallById("call-1");
+  ASSERT_NE(tc, nullptr);
+  EXPECT_TRUE(tc->needsRender());
 }
 
 TEST(AppStateTest, InputBuffer) {
@@ -72,15 +108,43 @@ TEST(AppStateTest, ActivityContext) {
   AppState state;
   EXPECT_EQ(state.activityContext(), ActivityContext::Idle);
 
-  state.appendStreamingDelta("streaming");
-  EXPECT_EQ(state.activityContext(), ActivityContext::Streaming);
+  // Any non-inert agent status makes the context Active.
+  state.setAgentStatus(firmius::shared::AgentStatus::Streaming);
+  EXPECT_EQ(state.activityContext(), ActivityContext::Active);
 
-  state.finalizeStreamingLine();
+  state.setAgentStatus(firmius::shared::AgentStatus::ExecutingTool);
+  EXPECT_EQ(state.activityContext(), ActivityContext::Active);
+
+  state.setAgentStatus(firmius::shared::AgentStatus::ProviderWaiting);
+  EXPECT_EQ(state.activityContext(), ActivityContext::Active);
+
+  // Idle/Cancelled/Error are inert.
   state.setAgentStatus(firmius::shared::AgentStatus::Idle);
+  EXPECT_EQ(state.activityContext(), ActivityContext::Idle);
+
+  state.setAgentStatus(firmius::shared::AgentStatus::Cancelled);
+  EXPECT_EQ(state.activityContext(), ActivityContext::Idle);
+
+  state.setAgentStatus(firmius::shared::AgentStatus::Error);
   EXPECT_EQ(state.activityContext(), ActivityContext::Idle);
 
   PendingPermission perm;
   perm.title = "test";
-  state.setPendingPermission(perm);
+  state.pushPendingPermission(perm);
   EXPECT_EQ(state.activityContext(), ActivityContext::PermissionPending);
+}
+
+TEST(AppStateTest, ItemSpans) {
+  AppState state;
+  EXPECT_TRUE(state.itemSpans().empty());
+
+  std::vector<ItemSpan> spans = {{0, 1, 3}, {1, 4, 2}};
+  state.setItemSpans(spans);
+  EXPECT_EQ(state.itemSpans().size(), 2u);
+  EXPECT_EQ(state.itemSpans()[0].itemIndex, 0u);
+  EXPECT_EQ(state.itemSpans()[0].terminalRow, 1);
+  EXPECT_EQ(state.itemSpans()[0].rowCount, 3);
+
+  state.clearItemSpans();
+  EXPECT_TRUE(state.itemSpans().empty());
 }

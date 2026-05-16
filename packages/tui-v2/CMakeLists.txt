@@ -8,7 +8,7 @@ target_sources(firmius_tui_v2 PRIVATE
     src/EventRouter.cpp
     src/ActionDispatcher.cpp
     src/Terminal.cpp
-    src/TranscriptRenderer.cpp
+    src/AnsiParser.cpp
     src/StatusBar.cpp
     src/InputBar.cpp
     src/BottomBar.cpp
@@ -16,6 +16,28 @@ target_sources(firmius_tui_v2 PRIVATE
     src/Layout.cpp
     src/CommandManager.cpp
     src/MenuList.cpp
+    # Items
+    src/items/SimpleItems.cpp
+    src/items/StreamingItems.cpp
+    src/items/ToolCallItem.cpp
+    # Utilities
+    src/DiffRenderer.cpp
+    src/AnsiOutputParser.cpp
+    # Presenter system
+    src/tools/ToolPresenterRegistry.cpp
+    src/tools/ProcessPresenter.cpp
+    src/tools/DelegatePresenter.cpp
+    src/tools/EditPresenter.cpp
+    src/tools/FilesPresenter.cpp
+    src/tools/ArtifactsPresenter.cpp
+    src/tools/WebPresenter.cpp
+    src/tools/LspPresenter.cpp
+    src/tools/FleetPresenter.cpp
+    src/tools/TodoPresenter.cpp
+    src/tools/ModeSwitchPresenter.cpp
+    src/tools/SkillPresenter.cpp
+    src/tools/McpPresenter.cpp
+    src/tools/GenericPresenter.cpp
 )
 
 target_include_directories(firmius_tui_v2 PRIVATE
@@ -42,11 +64,25 @@ target_sources(firmius_tui_v2_tests PRIVATE
     tests/EventRouterTest.cpp
     tests/KeybindRegistryTest.cpp
     tests/TranscriptRendererTest.cpp
+    tests/AnsiParserTest.cpp
+    tests/TranscriptItemTest.cpp
+    tests/ToolPresenterRegistryTest.cpp
+    tests/DiffRendererTest.cpp
+    tests/AnsiOutputParserTest.cpp
+    tests/ProcessPresenterTest.cpp
+    tests/DelegatePresenterTest.cpp
+    tests/EditPresenterTest.cpp
+    tests/FilesPresenterTest.cpp
+    tests/ArtifactsPresenterTest.cpp
+    tests/WebPresenterTest.cpp
+    tests/LspPresenterTest.cpp
+    tests/FleetPresenterTest.cpp
+    tests/MiscPresenterTest.cpp
     # Link the library sources (not main.cpp) so tests can access them
     src/AppState.cpp
     src/EventRouter.cpp
     src/KeybindRegistry.cpp
-    src/TranscriptRenderer.cpp
+    src/AnsiParser.cpp
     src/Terminal.cpp
     src/ActionDispatcher.cpp
     src/DaemonSession.cpp
@@ -57,6 +93,28 @@ target_sources(firmius_tui_v2_tests PRIVATE
     src/Layout.cpp
     src/CommandManager.cpp
     src/MenuList.cpp
+    # Items
+    src/items/SimpleItems.cpp
+    src/items/StreamingItems.cpp
+    src/items/ToolCallItem.cpp
+    # Utilities
+    src/DiffRenderer.cpp
+    src/AnsiOutputParser.cpp
+    # Presenter system
+    src/tools/ToolPresenterRegistry.cpp
+    src/tools/ProcessPresenter.cpp
+    src/tools/DelegatePresenter.cpp
+    src/tools/EditPresenter.cpp
+    src/tools/FilesPresenter.cpp
+    src/tools/ArtifactsPresenter.cpp
+    src/tools/WebPresenter.cpp
+    src/tools/LspPresenter.cpp
+    src/tools/FleetPresenter.cpp
+    src/tools/TodoPresenter.cpp
+    src/tools/ModeSwitchPresenter.cpp
+    src/tools/SkillPresenter.cpp
+    src/tools/McpPresenter.cpp
+    src/tools/GenericPresenter.cpp
 )
 
 target_include_directories(firmius_tui_v2_tests PRIVATE

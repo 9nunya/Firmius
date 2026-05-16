@@ -67,9 +67,17 @@ bool Terminal::enter() {
   termWidth_ = w;
   termHeight_ = h;
 
-  // NO alternate screen. We render inline.
+  // Enter alternate screen buffer.
+  rawWrite("\x1b[?1049h");
+  // Clear screen and home cursor.
+  rawWrite("\x1b[2J\x1b[H");
   // Hide cursor during rendering.
   rawWrite("\x1b[?25l");
+  // Enable mouse tracking (SGR 1006 mode).
+  rawWrite("\x1b[?1000h"); // Basic mouse tracking
+  rawWrite("\x1b[?1002h"); // Button-event tracking
+  rawWrite("\x1b[?1003h"); // Any-event tracking (motion)
+  rawWrite("\x1b[?1006h"); // SGR mouse mode
 
   active_ = true;
   return true;
@@ -78,25 +86,15 @@ bool Terminal::enter() {
 void Terminal::leave() {
   if (!active_) return;
 
-  // Clear the pinned zone so nothing is left behind.
-  auto [w, h] = size();
-  int startRow = h - pinnedHeight_ + 1;
-  for (int i = 0; i < pinnedHeight_; ++i) {
-    char buf[32];
-    std::snprintf(buf, sizeof(buf), "\x1b[%d;1H", startRow + i);
-    rawWrite(buf);
-    rawWrite("\x1b[2K");
-  }
-
-  // Reset scroll region, show cursor.
-  resetScrollRegion();
+  // Disable mouse tracking.
+  rawWrite("\x1b[?1006l");
+  rawWrite("\x1b[?1003l");
+  rawWrite("\x1b[?1002l");
+  rawWrite("\x1b[?1000l");
+  // Show cursor.
   rawWrite("\x1b[?25h");
-
-  // Move cursor to the bottom so the shell prompt appears clean.
-  char buf[32];
-  std::snprintf(buf, sizeof(buf), "\x1b[%d;1H", h);
-  rawWrite(buf);
-  rawWrite("\n");
+  // Leave alternate screen buffer (restores previous screen content).
+  rawWrite("\x1b[?1049l");
 
   flush();
 
@@ -115,101 +113,6 @@ std::pair<int, int> Terminal::size() const {
   }
 #endif
   return {80, 24};
-}
-
-// ── Pinned Zone Management ──
-
-void Terminal::setPinnedHeight(int rows) {
-  auto [w, h] = size();
-  termWidth_ = w;
-  termHeight_ = h;
-
-  int oldPinnedHeight = pinnedHeight_;
-  pinnedHeight_ = std::max(0, std::min(rows, h - 2));
-
-  // If the pinned height changed, clear the old rows and reset the diff buffer
-  // so all components are re-rendered at their new positions.
-  if (oldPinnedHeight != pinnedHeight_) {
-    if (oldPinnedHeight > pinnedHeight_) {
-      int oldStartRow = h - oldPinnedHeight + 1;
-      int newStartRow = h - pinnedHeight_ + 1;
-      for (int r = oldStartRow; r < newStartRow; ++r) {
-        char buf[32];
-        std::snprintf(buf, sizeof(buf), "\x1b[%d;1H\x1b[2K", r);
-        rawWrite(buf);
-      }
-    }
-    pinnedBuffer_.clear();
-  }
-
-  // Set scroll region: top of screen to just above the pinned zone.
-  int scrollBottom = h - pinnedHeight_;
-  if (scrollBottom < 1) scrollBottom = 1;
-  setScrollRegion(1, scrollBottom);
-
-  // Resize the pinned buffer.
-  pinnedBuffer_.resize(pinnedHeight_);
-}
-
-int Terminal::pinnedTopRow() const {
-  return termHeight_ - pinnedHeight_ + 1;
-}
-
-// ── Scroll Zone ──
-
-void Terminal::pushLine(const std::string& content) {
-  // Position cursor at the bottom of the scroll region.
-  int scrollBottom = termHeight_ - pinnedHeight_;
-  if (scrollBottom < 1) scrollBottom = 1;
-
-  // Move to last row of scroll region and write a newline to scroll up,
-  // then write the content on the new line.
-  char buf[32];
-  std::snprintf(buf, sizeof(buf), "\x1b[%d;1H", scrollBottom);
-  rawWrite(buf);
-  rawWrite("\n");
-  rawWrite("\x1b[2K"); // Clear the line.
-  rawWrite(content);
-}
-
-void Terminal::pushLines(const std::vector<std::string>& lines) {
-  for (const auto& line : lines) {
-    pushLine(line);
-  }
-}
-
-// ── Pinned Zone Rendering ──
-
-void Terminal::renderPinned(const std::vector<std::string>& lines) {
-  int startRow = pinnedTopRow();
-
-  for (int i = 0; i < static_cast<int>(lines.size()) && i < pinnedHeight_; ++i) {
-    // Only rewrite if content changed (diff).
-    if (i < static_cast<int>(pinnedBuffer_.size()) && pinnedBuffer_[i] == lines[i]) {
-      continue;
-    }
-
-    char buf[32];
-    std::snprintf(buf, sizeof(buf), "\x1b[%d;1H", startRow + i);
-    rawWrite(buf);
-    rawWrite("\x1b[2K"); // Clear line.
-    rawWrite(lines[i]);
-  }
-
-  // Clear any remaining pinned rows that have no content.
-  for (int i = static_cast<int>(lines.size()); i < pinnedHeight_; ++i) {
-    if (i < static_cast<int>(pinnedBuffer_.size()) && pinnedBuffer_[i].empty()) {
-      continue;
-    }
-    char buf[32];
-    std::snprintf(buf, sizeof(buf), "\x1b[%d;1H", startRow + i);
-    rawWrite(buf);
-    rawWrite("\x1b[2K");
-  }
-
-  // Update the buffer.
-  pinnedBuffer_ = lines;
-  pinnedBuffer_.resize(pinnedHeight_);
 }
 
 // ── Output Buffering ──
@@ -240,8 +143,11 @@ void Terminal::moveCursor(int row, int col) {
 
 void Terminal::clearLine() { rawWrite("\x1b[2K"); }
 void Terminal::clearToEndOfLine() { rawWrite("\x1b[K"); }
+void Terminal::clearToEndOfScreen() { rawWrite("\x1b[J"); }
 void Terminal::clearScreen() { rawWrite("\x1b[2J\x1b[H"); }
 void Terminal::flush() { ::fflush(stdout); }
+
+// ── Input ──
 
 std::string Terminal::readKey(int timeoutMs) {
 #if !defined(_WIN32)
@@ -261,6 +167,166 @@ std::string Terminal::readKey(int timeoutMs) {
 #endif
 }
 
+std::pair<std::string, std::optional<MouseEvent>>
+Terminal::readInput(int timeoutMs) {
+  // Prepend any buffered bytes from a previous partial read.
+  std::string raw;
+  if (!inputBuf_.empty()) {
+    raw = std::move(inputBuf_);
+    inputBuf_.clear();
+  }
+
+  // Read fresh bytes (short timeout if we already have buffered data).
+  std::string fresh = readKey(raw.empty() ? timeoutMs : 5);
+  raw += fresh;
+
+  if (raw.empty()) return {"", std::nullopt};
+
+  // Try to parse as SGR mouse sequence: ESC [ < button ; col ; row M/m
+  if (raw.size() >= 6 && raw[0] == '\x1b' && raw[1] == '[' && raw[2] == '<') {
+    // Check if we have the final M/m terminator.
+    size_t termPos = std::string::npos;
+    for (size_t i = 3; i < raw.size(); ++i) {
+      if (raw[i] == 'M' || raw[i] == 'm') {
+        termPos = i;
+        break;
+      }
+    }
+    if (termPos != std::string::npos) {
+      // We have a terminator — try to parse.
+      std::string seq = raw.substr(0, termPos + 1);
+      auto mouse = parseMouseSequence(seq);
+      if (mouse.has_value()) {
+        // Buffer any remaining bytes after the mouse sequence.
+        if (termPos + 1 < raw.size()) {
+          inputBuf_ = raw.substr(termPos + 1);
+        }
+        escBufferedAt_ = {};
+        return {"", mouse};
+      }
+    }
+    // Starts like a mouse sequence but no terminator yet — buffer and wait.
+    inputBuf_ = raw;
+    return {"", std::nullopt};
+  }
+
+  // Starts with ESC but not a recognized sequence prefix — could be a
+  // partial arrow/function key. Buffer if it looks incomplete.
+  if (raw[0] == '\x1b' && raw.size() == 1) {
+    // If we already had a buffered ESC and this is the same one (no new bytes
+    // arrived within the timeout), return it as a standalone Escape key.
+    auto now = std::chrono::steady_clock::now();
+    if (escBufferedAt_ != std::chrono::steady_clock::time_point{} &&
+        now - escBufferedAt_ > std::chrono::milliseconds(50)) {
+      // Timed out — treat as standalone Escape.
+      escBufferedAt_ = {};
+      inputBuf_.clear();
+      return {raw, std::nullopt};
+    }
+    // Just ESC — buffer it, more bytes may follow.
+    if (escBufferedAt_ == std::chrono::steady_clock::time_point{}) {
+      escBufferedAt_ = now;
+    }
+    inputBuf_ = raw;
+    return {"", std::nullopt};
+  }
+
+  // Check for partial CSI (ESC [ without a final byte).
+  if (raw.size() >= 2 && raw[0] == '\x1b' && raw[1] == '[') {
+    // CSI sequences end with a byte in 0x40-0x7E range.
+    bool hasFinal = false;
+    for (size_t i = 2; i < raw.size(); ++i) {
+      uint8_t ch = static_cast<uint8_t>(raw[i]);
+      if (ch >= 0x40 && ch <= 0x7E) {
+        hasFinal = true;
+        break;
+      }
+    }
+    if (!hasFinal) {
+      // Incomplete CSI — buffer and wait for more bytes.
+      inputBuf_ = raw;
+      return {"", std::nullopt};
+    }
+  }
+
+  // Regular key or complete escape sequence — return as-is.
+  escBufferedAt_ = {};
+  return {raw, std::nullopt};
+}
+
+std::optional<MouseEvent> Terminal::parseMouseSequence(const std::string& raw) {
+  // SGR 1006 format: ESC [ < button ; col ; row M (press) or m (release)
+  // Minimum: "\x1b[<0;1;1M" = 9 bytes
+  if (raw.size() < 6) return std::nullopt;
+  if (raw[0] != '\x1b' || raw[1] != '[' || raw[2] != '<') return std::nullopt;
+
+  // Find the final 'M' or 'm'.
+  char final = raw.back();
+  if (final != 'M' && final != 'm') return std::nullopt;
+
+  // Parse the numbers between '<' and 'M'/'m'.
+  std::string params = raw.substr(3, raw.size() - 4);
+  int vals[3] = {0, 0, 0};
+  int valIdx = 0;
+  int current = 0;
+  bool hasDigit = false;
+
+  for (char c : params) {
+    if (c == ';') {
+      if (valIdx < 3) {
+        vals[valIdx++] = current;
+        current = 0;
+        hasDigit = false;
+      }
+    } else if (c >= '0' && c <= '9') {
+      current = current * 10 + (c - '0');
+      hasDigit = true;
+    } else {
+      return std::nullopt; // unexpected character
+    }
+  }
+  if (hasDigit && valIdx < 3) {
+    vals[valIdx] = current;
+  }
+
+  if (valIdx < 2) return std::nullopt; // need at least button, col, row
+
+  MouseEvent event;
+  event.col = vals[1];
+  event.row = vals[2];
+
+  int button = vals[0];
+
+  // Decode button bits:
+  // bits 0-2: button (0=left, 1=middle, 2=right)
+  // bit 5: motion (mouse move while button held, or hover with button 35/43)
+  // bit 6: scroll (if set, bits 0-1: 0=up, 1=down)
+  if (button & 64) {
+    // Scroll event
+    event.type = MouseEvent::Type::Scroll;
+    event.button = (button & 1) ? MouseEvent::Button::ScrollDown
+                                : MouseEvent::Button::ScrollUp;
+  } else if ((button & 32) && final == 'M') {
+    // Motion event (mouse move).
+    event.type = MouseEvent::Type::Move;
+    int btn = button & 3;
+    if (btn == 0) event.button = MouseEvent::Button::Left;
+    else if (btn == 1) event.button = MouseEvent::Button::Middle;
+    else if (btn == 2) event.button = MouseEvent::Button::Right;
+    else event.button = MouseEvent::Button::None;
+  } else {
+    event.type = (final == 'M') ? MouseEvent::Type::Press
+                                : MouseEvent::Type::Release;
+    int btn = button & 3;
+    if (btn == 0) event.button = MouseEvent::Button::Left;
+    else if (btn == 1) event.button = MouseEvent::Button::Middle;
+    else if (btn == 2) event.button = MouseEvent::Button::Right;
+    else event.button = MouseEvent::Button::None;
+  }
+
+  return event;
+}
+
 bool Terminal::wasResized() {
   bool resized = g_resized.exchange(false);
   if (resized) {
@@ -278,14 +344,6 @@ void Terminal::rawWrite(const std::string& s) {
     (void)::write(STDOUT_FILENO, s.data(), s.size());
   }
 }
-
-void Terminal::setScrollRegion(int top, int bottom) {
-  char buf[32];
-  std::snprintf(buf, sizeof(buf), "\x1b[%d;%dr", top, bottom);
-  rawWrite(buf);
-}
-
-void Terminal::resetScrollRegion() { rawWrite("\x1b[r"); }
 
 // ── ANSI helpers ──
 
@@ -348,8 +406,6 @@ int visibleWidth(const std::string& text) {
 std::string fitToWidth(const std::string& text, int width, char pad) {
   int visible = visibleWidth(text);
   if (visible >= width) {
-    // Truncate — this is approximate since we can't easily truncate
-    // mid-ANSI-sequence. For now return as-is; the terminal will wrap.
     return text;
   }
   return text + std::string(width - visible, pad);

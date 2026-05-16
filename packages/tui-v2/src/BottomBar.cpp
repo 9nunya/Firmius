@@ -24,7 +24,7 @@ std::vector<std::string> BottomBar::render(int width) const {
     }
     break;
   }
-  case ActivityContext::Streaming:
+  case ActivityContext::Active:
     hints = ansi::dim(" Esc") + ansi::dim(" Interrupt") +
             ansi::dim(" │ ") +
             ansi::dim(" Ctrl+Q") + ansi::dim(" Quit");

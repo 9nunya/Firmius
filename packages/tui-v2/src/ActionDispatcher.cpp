@@ -1,5 +1,7 @@
 #include "ActionDispatcher.hpp"
-#include "TranscriptRenderer.hpp"
+#include "items/SimpleItems.hpp"
+#include "items/StreamingItems.hpp"
+#include "items/ToolCallItem.hpp"
 
 #include <filesystem>
 
@@ -24,12 +26,9 @@ bool ActionDispatcher::sendMessage(const std::string &text) {
     auto response = session_.send(threadId, agentId, text);
     return response.accepted;
   } catch (const std::exception& e) {
-    TranscriptLine line;
-    line.kind = TranscriptLine::Kind::Notice;
-    line.text = std::string("Send failed: ") + e.what();
-    state_.appendTranscriptLine(std::move(line));
-    state_.finalizeStreamingLine();
-    state_.setAgentStatus(firmius::shared::AgentStatus::Idle);
+    state_.addItem(std::make_unique<SystemNoticeItem>(
+        std::string("Send failed: ") + e.what()));
+    state_.markDirtyPublic();
     return false;
   }
 }
@@ -43,7 +42,7 @@ bool ActionDispatcher::createThread(const std::string &persona,
   state_.setThreadId(response.thread.threadId);
   state_.setAgentId(response.focusedAgentId);
   state_.setThreadTitle(response.thread.title);
-  state_.setTranscriptLines({});
+  // Items are managed by AppState — no setTranscriptLines needed
 
   session_.openThread(response.thread.threadId);
   return true;
@@ -80,13 +79,10 @@ bool ActionDispatcher::interruptAgent() {
   try {
     session_.interruptAgent(state_.threadId(), state_.agentId());
   } catch (const std::exception& e) {
-    TranscriptLine line;
-    line.kind = TranscriptLine::Kind::Notice;
-    line.text = std::string("Interrupt failed: ") + e.what();
-    state_.appendTranscriptLine(std::move(line));
+    state_.addItem(std::make_unique<SystemNoticeItem>(
+        std::string("Interrupt failed: ") + e.what()));
   }
-  state_.finalizeStreamingLine();
-  state_.setAgentStatus(firmius::shared::AgentStatus::Idle);
+  state_.markDirtyPublic();
   return true;
 }
 
@@ -95,7 +91,7 @@ bool ActionDispatcher::resolvePermission(
     firmius::shared::PermissionResponse response) {
   bool ok = session_.resolvePermission(requestId, response);
   if (ok) {
-    state_.clearPendingPermission();
+    state_.popPendingPermission(requestId);
   }
   return ok;
 }
@@ -108,8 +104,48 @@ void ActionDispatcher::loadTranscript() {
   auto snapshot = session_.getTranscript(threadId, agentId);
   if (!snapshot.has_value()) return;
 
-  auto lines = TranscriptRenderer::turnsToLines(snapshot->expandedTurns, 80);
-  state_.setTranscriptLines(std::move(lines));
+  // Convert AgentTurn messages into items
+  for (const auto& turn : snapshot->expandedTurns) {
+    for (const auto& msg : turn.messages) {
+      if (msg.role == firmius::shared::Role::System) continue;
+
+      for (const auto& part : msg.content) {
+        if (const auto* text = std::get_if<firmius::shared::TextContent>(&part)) {
+          if (msg.role == firmius::shared::Role::User) {
+            state_.addItem(std::make_unique<UserMessageItem>(text->text));
+          } else {
+            auto item = std::make_unique<AgentTextItem>();
+            item->appendDelta(text->text);
+            item->finalize();
+            state_.addItem(std::move(item));
+          }
+        } else if (const auto* thinking = std::get_if<firmius::shared::ThinkingContent>(&part)) {
+          auto item = std::make_unique<AgentThinkingItem>();
+          item->appendDelta(thinking->thinking);
+          item->finalize();
+          state_.addItem(std::move(item));
+        } else if (const auto* toolCall = std::get_if<firmius::shared::ToolCallContent>(&part)) {
+          auto item = std::make_unique<ToolCallItem>(toolCall->id, toolCall->name, agentId);
+          if (!toolCall->args.empty()) {
+            item->setArgs(toolCall->args);
+          }
+          state_.addItem(std::move(item));
+        } else if (const auto* toolResult = std::get_if<firmius::shared::ToolResultContent>(&part)) {
+          auto* tc = state_.findToolCallById(toolResult->toolCallId);
+          if (tc) {
+            tc->setResult(toolResult->success, toolResult->result);
+          }
+        } else if (const auto* error = std::get_if<firmius::shared::ErrorContent>(&part)) {
+          state_.addItem(std::make_unique<ErrorMessageItem>(
+              error->errorName + ": " + error->description));
+        } else if (const auto* notice = std::get_if<firmius::shared::NoticeContent>(&part)) {
+          state_.addItem(std::make_unique<SystemNoticeItem>(
+              notice->title + ": " + notice->message));
+        }
+      }
+    }
+  }
+  state_.markDirtyPublic();
 }
 
 } // namespace firmius::tui2

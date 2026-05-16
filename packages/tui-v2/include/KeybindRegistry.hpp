@@ -47,11 +47,16 @@ inline constexpr const char *kEscape = "\x1b";
 inline constexpr const char *kCtrlC = "\x03";
 inline constexpr const char *kCtrlQ = "\x11";
 inline constexpr const char *kCtrlN = "\x0e";
+inline constexpr const char *kCtrlE = "\x05";
 inline constexpr const char *kCtrlT = "\x14";
 inline constexpr const char *kBackspace = "\x7f";
 inline constexpr const char *kBackspaceDel = "\b";
 inline constexpr const char *kUp = "\x1b[A";
 inline constexpr const char *kDown = "\x1b[B";
+inline constexpr const char *kPageUp = "\x1b[5~";
+inline constexpr const char *kPageDown = "\x1b[6~";
+inline constexpr const char *kHome = "\x1b[H";
+inline constexpr const char *kEnd = "\x1b[F";
 
 } // namespace keys
 

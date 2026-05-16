@@ -3,6 +3,7 @@
 #include "ActionDispatcher.hpp"
 #include "AppState.hpp"
 #include "BottomBar.hpp"
+#include "Cell.hpp"
 #include "CommandManager.hpp"
 #include "DaemonSession.hpp"
 #include "EventRouter.hpp"
@@ -12,8 +13,6 @@
 #include "MenuList.hpp"
 #include "StatusBar.hpp"
 #include "Terminal.hpp"
-#include "TranscriptRenderer.hpp"
-
 #include <atomic>
 #include <chrono>
 #include <string>
@@ -46,10 +45,19 @@ private:
 
   // Main loop phases.
   void handleInput(const std::string& key);
+  void handleMouse(const MouseEvent& event);
   void reconcileRuntimeState();
   void renderFrame();
   void onResize();
-  void reflowTranscript();
+
+  // Full-screen rendering pipeline.
+  void composeFrame(CellGrid& target, int w, int h);
+  void renderTranscriptZone(CellGrid& target, int w, int transcriptH);
+  void renderPinnedZone(CellGrid& target, int w, int h, int pinnedH);
+  void diffAndEmit(const CellGrid& target, int w, int h);
+
+  // Scrollback management.
+  void syncScrollback();
 
   // Command handlers.
   void openModelsMenu();
@@ -67,16 +75,36 @@ private:
   KeybindRegistry keybinds_;
 
   // Components.
-  TranscriptRenderer transcriptRenderer_;
   StatusBar statusBar_;
   InputBar inputBar_;
   BottomBar bottomBar_;
   MenuList menu_;
 
+  // Full-screen rendering state.
   std::atomic<bool> running_{false};
-  std::string lastStreamingText_;
-  int lastPinnedHeight_ = 0;
+  CellGrid prevFrame_;         ///< Previous frame's cells for diffing.
+  int prevW_ = 0, prevH_ = 0; ///< Dimensions of prevFrame_.
+
+  // Scrollback sync tracking.
+  size_t lastSyncedItemCount_ = 0;  ///< How many items have been synced to scrollback.
+  std::vector<int> lastSyncedRowCounts_; ///< Row count per item at last sync.
+
   std::chrono::steady_clock::time_point lastRuntimeReconcile_{};
+
+  // Autocomplete state.
+  struct AutocompleteState {
+    bool active = false;
+    std::vector<AutocompleteMatch> matches;
+    int selectedIndex = 0;
+    std::string prefix;  // The "/" prefix being typed.
+  };
+  AutocompleteState autocomplete_;
+
+  void updateAutocomplete();
+  void dismissAutocomplete();
+  void autocompleteMoveUp();
+  void autocompleteMoveDown();
+  void autocompleteAccept();
 
   // Commands defined in App.cpp need access to private members.
   friend class QuitCmd;

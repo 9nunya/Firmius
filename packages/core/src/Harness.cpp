@@ -17,7 +17,6 @@
 #include "providers/BaseAPIKeyProvider.hpp"
 #include "providers/BaseOAuthProvider.hpp"
 #include "providers/ProviderRegistry.hpp"
-#include "tools/WorkSupport.hpp"
 #include "utils/PermissionProfiles.hpp"
 #include "utils/FSUtil.hpp"
 #include "utils/PlatformPaths.hpp"
@@ -60,8 +59,17 @@
 #include <iostream>
 
 namespace {
+
 const std::string PANIC_INFO_HARNESS_STATE = "harness_state";
+
+uint64_t nowEpochMs() {
+  return static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::system_clock::now().time_since_epoch())
+          .count());
 }
+
+} // namespace
 
 namespace firmius::core {
 
@@ -3204,7 +3212,7 @@ std::size_t Harness::failOwnedLocks(const std::string &agentId,
   std::size_t failed = 0;
   std::vector<std::string> lockIds;
   tm.mutateFleetState(threadId, [&](FleetState &state) {
-    const uint64_t now = work::nowEpochMs();
+    const uint64_t now = nowEpochMs();
     for (auto &lock : state.locks) {
       if (lock.ownerAgentId != agentId) {
         continue;

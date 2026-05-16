@@ -2,7 +2,6 @@
 
 #include "AgentRegistry.hpp"
 #include "Serialization.hpp"
-#include "tools/WorkSupport.hpp"
 #include "utils/PlatformPaths.hpp"
 #include "utils/StringUtil.hpp"
 

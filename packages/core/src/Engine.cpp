@@ -15,6 +15,7 @@
 #include "persistence/ThreadManager.hpp"
 #include "providers/AntigravityProvider.hpp"
 #include "providers/ChutesProvider.hpp"
+#include "providers/GitlawbProvider.hpp"
 #include "providers/CodexProvider.hpp"
 #include "providers/KimiProvider.hpp"
 #include "providers/KiloProvider.hpp"
@@ -30,7 +31,6 @@
 #include "tools/ArtifactsTool.hpp"
 #include "tools/LspTool.hpp"
 #include "tools/DelegateTool.hpp"
-#include "tools/MemoryRecallTool.hpp"
 #include "tools/FileEditTool.hpp"
 #include "tools/FilesTool.hpp"
 #include "tools/FleetTool.hpp"
@@ -662,8 +662,6 @@ Engine::Engine() {
   toolRegistry.registerToolFactory(
       "Artifacts", []() { return std::make_unique<ArtifactsTool>(); });
   toolRegistry.registerToolFactory(
-      "Memory", []() { return std::make_unique<MemoryRecallTool>(); });
-  toolRegistry.registerToolFactory(
       "Lsp", []() { return std::make_unique<LspTool>(); });
 }
 
@@ -688,6 +686,9 @@ void Engine::initProviders() {
   });
   reg.registerProviderFactory("chutes", []() {
     return std::make_shared<firmius::provider::ChutesProvider>("");
+  });
+  reg.registerProviderFactory("gitlawb", []() {
+    return std::make_shared<firmius::provider::GitlawbProvider>();
   });
   reg.registerProviderFactory("codex", []() {
     return std::make_shared<firmius::provider::CodexProvider>();
