@@ -10,7 +10,7 @@ bool SkillPresenter::matches(const std::string& toolName) const {
   return toolName == "Skill";
 }
 
-std::vector<std::string> SkillPresenter::render(const ToolCallItem& item, int /*width*/) const {
+std::vector<std::string> SkillPresenter::render(const ToolCallItem& item, const ToolRenderContext& /*ctx*/, int /*width*/) const {
   if (item.phase() == ToolPhase::Preparing) {
     return {ansi::fgRgb(220, 180, 80, "  \xe2\x9a\x99 Skill")};
   }

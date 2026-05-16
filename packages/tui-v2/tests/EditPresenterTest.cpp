@@ -17,7 +17,7 @@ TEST(EditPresenterTest, MatchesAllEditTools) {
 TEST(EditPresenterTest, PreparingPhase) {
   EditPresenter p;
   ToolCallItem item("call-1", "Edit", "agent-1");
-  auto lines = p.render(item, 80);
+  auto lines = p.render(item, {}, 80);
   ASSERT_GE(lines.size(), 1u);
 }
 
@@ -26,7 +26,7 @@ TEST(EditPresenterTest, CalledShowsLoadingDiff) {
   ToolCallItem item("call-1", "Edit", "agent-1");
   item.setArgs(R"({"patch":"--- a/foo.cpp\n+++ b/foo.cpp\n"})");
   item.setPhase(ToolPhase::Called);
-  auto lines = p.render(item, 80);
+  auto lines = p.render(item, {}, 80);
   ASSERT_GE(lines.size(), 2u);
   bool foundLoading = false;
   for (const auto& line : lines) {
@@ -48,7 +48,7 @@ TEST(EditPresenterTest, CalledWithDiffAlreadyPresent) {
   signal.removedLines = 0;
   item.addDiffEdit(signal);
 
-  auto lines = p.render(item, 80);
+  auto lines = p.render(item, {}, 80);
   ASSERT_GE(lines.size(), 2u);
   bool foundDiff = false;
   for (const auto& line : lines) {
@@ -70,7 +70,7 @@ TEST(EditPresenterTest, FinishedSuccess) {
   item.addDiffEdit(signal);
 
   item.setResult(true, R"({"files_changed":1,"total_added":1,"total_removed":0})");
-  auto lines = p.render(item, 80);
+  auto lines = p.render(item, {}, 80);
   ASSERT_GE(lines.size(), 1u);
   bool foundSuccess = false;
   for (const auto& line : lines) {
@@ -84,7 +84,7 @@ TEST(EditPresenterTest, FinishedError) {
   ToolCallItem item("call-1", "Edit", "agent-1");
   item.setArgs(R"({"patch":"..."})");
   item.setResult(false, R"({"error":"Hunk mismatch"})");
-  auto lines = p.render(item, 80);
+  auto lines = p.render(item, {}, 80);
   ASSERT_GE(lines.size(), 1u);
   bool foundError = false;
   for (const auto& line : lines) {
@@ -113,7 +113,7 @@ TEST(EditPresenterTest, MultiFileDiff) {
   item.addDiffEdit(s2);
 
   item.setResult(true, R"({"files_changed":2})");
-  auto lines = p.render(item, 80);
+  auto lines = p.render(item, {}, 80);
   ASSERT_GE(lines.size(), 1u);
   // Should mention 2 files
   bool foundMultiFile = false;

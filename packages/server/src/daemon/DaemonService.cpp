@@ -715,19 +715,49 @@ void DaemonService::start() {
     }
   }
   std::lock_guard<std::mutex> runtimeLock(runtimeMutex_);
+
+  broadcastInitProgress("Loading configuration...");
   firmius::shared::ConfigLoader::instance().load();
+
+  broadcastInitProgress("Reading provider definitions...");
   firmius::provider::ProviderRegistry::instance().reloadConfigProviders(
       firmius::shared::ConfigLoader::instance().getConfig().providers);
+
+  broadcastInitProgress("Hydrating provider instances...");
   firmius::provider::ProviderRegistry::instance().hydrateProviders();
+
+  broadcastInitProgress("Initializing harness...");
   auto &harness = firmius::core::Harness::instance();
   harness.init();
+
+  broadcastInitProgress("Loading workflow definitions...");
   firmius::core::WorkflowLoader::instance().init();
+
+  broadcastInitProgress("Enumerating available models...");
   firmius::core::Harness::instance().listAllModels();
+
+  broadcastInitProgress("Subscribing to core events...");
   const int subscriptionId = harness.subscribe(
       [this](const firmius::shared::AppEvent &event) { emitCoreEvent(event); });
+
+  broadcastInitProgress("Restoring persisted threads...");
+  // Harness::init() already loads threads, but we broadcast after so
+  // clients know the restore step happened.
+
+  broadcastInitProgress("Daemon ready.");
   std::lock_guard<std::mutex> stateLock(stateMutex_);
   harnessSubscriptionId_ = subscriptionId;
   running_ = true;
+  {
+    std::lock_guard<std::mutex> readyLock(readyMutex_);
+    ready_ = true;
+  }
+  readyCv_.notify_all();
+}
+
+bool DaemonService::waitForReady(std::chrono::milliseconds timeout) {
+  std::unique_lock<std::mutex> lock(readyMutex_);
+  return readyCv_.wait_for(lock, timeout, [this] { return ready_; });
 }
 
 void DaemonService::shutdown() {
@@ -1861,6 +1891,9 @@ std::optional<ClientSessionSnapshot> DaemonService::session(
 
 UiSnapshot DaemonService::uiSnapshot(const std::string &clientId,
                                      const UiSnapshotRequest &request) {
+  // Wait for daemon to finish initialization before serving snapshot.
+  waitForReady(std::chrono::milliseconds(30000));
+
   UiSnapshot snapshot;
   auto sessionSnapshot = session(clientId);
   if (sessionSnapshot.has_value()) {
@@ -2112,6 +2145,28 @@ void DaemonService::emitPactStateEvent(const PactSnapshot &snapshot) {
     envelope.pactState = snapshot;
     envelope = prepareEventEnvelope(std::move(envelope));
     listener(envelope);
+  }
+}
+
+void DaemonService::broadcastInitProgress(const std::string &message) {
+  DaemonEventEnvelope envelope;
+  envelope.kind = DaemonEventKind::InitProgress;
+  envelope.serverTimestampMs = nowMs();
+  envelope.initMessage = message;
+
+  std::vector<DaemonEventListener> listeners;
+  {
+    std::lock_guard<std::mutex> lock(stateMutex_);
+    for (const auto &[clientId, subscription] : subscriptions_) {
+      listeners.push_back(subscription.listener);
+    }
+  }
+  for (const auto &listener : listeners) {
+    try {
+      listener(envelope);
+    } catch (...) {
+      // Swallow listener errors during init.
+    }
   }
 }
 

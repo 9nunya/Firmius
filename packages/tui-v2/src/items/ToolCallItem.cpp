@@ -1,4 +1,5 @@
 #include "items/ToolCallItem.hpp"
+#include "tools/IToolPresenter.hpp"
 #include "tools/ToolPresenterRegistry.hpp"
 #include "Terminal.hpp"
 
@@ -84,7 +85,9 @@ void ToolCallItem::setExpanded(bool expanded) {
 std::vector<std::string> ToolCallItem::render(int width) const {
   auto* presenter = ToolPresenterRegistry::instance().find(toolName_);
   if (presenter) {
-    return presenter->render(*this, width);
+    ToolRenderContext ctx;
+    ctx.state = appState_;
+    return presenter->render(*this, ctx, width);
   }
   // Fallback: simple one-liner
   std::string prefix;

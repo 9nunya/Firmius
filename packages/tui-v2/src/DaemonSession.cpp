@@ -113,6 +113,23 @@ std::optional<firmius::daemon::AgentRuntimeSnapshot> DaemonSession::getAgent(
   return client_->getAgent(request);
 }
 
+firmius::daemon::AgentTreeSnapshot DaemonSession::listAgents(
+    const std::string &threadId) const {
+  if (!client_) return {};
+  firmius::daemon::AgentTargetRequest request;
+  request.threadId = threadId;
+  return client_->listAgents(request);
+}
+
+std::optional<firmius::daemon::AgentRuntimeSnapshot> DaemonSession::focusAgent(
+    const std::string &threadId, const std::string &agentId) const {
+  if (!client_) return std::nullopt;
+  firmius::daemon::AgentTargetRequest request;
+  request.threadId = threadId;
+  request.agentId = agentId;
+  return client_->focusAgent(request);
+}
+
 std::optional<firmius::daemon::AgentRuntimeSnapshot> DaemonSession::interruptAgent(
     const std::string &threadId, const std::string &agentId) {
   if (!client_) return std::nullopt;
@@ -144,6 +161,15 @@ bool DaemonSession::resolvePermission(const std::string &requestId,
   request.requestId = requestId;
   request.response = response;
   return client_->resolvePermission(request);
+}
+
+bool DaemonSession::executeWorkflow(const std::string &workflowId,
+                                     const std::vector<std::string> &args) {
+  if (!client_) return false;
+  firmius::daemon::WorkflowExecuteRequest request;
+  request.workflowId = workflowId;
+  request.args = args;
+  return client_->executeWorkflow(request);
 }
 
 } // namespace firmius::tui2

@@ -97,6 +97,17 @@ public:
   // ── Agent state ──
   AgentState& getOrCreateAgent(const std::string& agentId);
   AgentState* findAgentState(const std::string& agentId);
+  const AgentState* findAgentState(const std::string& agentId) const;
+
+  // ── Agent focus ──
+  void focusAgent(const std::string& agentId);
+  std::string focusedAgentId() const;
+  void setPrimaryAgentId(const std::string& id);
+  std::string primaryAgentId() const;
+  std::vector<AgentState*> agentList() const;
+  std::vector<std::string> siblingsOf(const std::string& agentId) const;
+  std::string parentIdOf(const std::string& agentId) const;
+  bool hasMultipleAgents() const;
 
   // ── Streaming management ──
   AgentTextItem* activeTextItem() const;
@@ -166,7 +177,9 @@ private:
   ConnectionStatus connectionStatus_ = ConnectionStatus::Disconnected;
   std::string threadId_;
   std::string threadTitle_;
-  std::string agentId_;
+  std::string agentId_;         // Primary (root) agent
+  std::string focusedAgentId_;  // Currently focused agent for transcript view
+  std::string primaryAgentId_;  // Root agent ID (set once)
   std::string agentPurpose_;
   std::string agentContextWindow_;
   firmius::shared::AgentStatus agentStatus_ = firmius::shared::AgentStatus::Idle;
@@ -188,6 +201,7 @@ private:
   std::vector<std::string> scrollback_;
   int scrollOffset_ = 0;       // 0 = at bottom (latest content)
   bool userScrolledUp_ = false; // true when user manually scrolled away from bottom
+  int pinnedTopLine_ = -1;    // absolute scrollback index when user scrolled up (-1 = not pinned)
   bool autoScroll_ = true;
   static constexpr int kMaxScrollbackLines = 10000;
 

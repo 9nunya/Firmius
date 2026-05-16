@@ -27,6 +27,11 @@ void EventRouter::route(const firmius::daemon::DaemonEventEnvelope &envelope) {
     break;
   case firmius::daemon::DaemonEventKind::PactStateChanged:
     break;
+  case firmius::daemon::DaemonEventKind::InitProgress:
+    if (!envelope.initMessage.empty()) {
+      state_.addItem(std::make_unique<SystemNoticeItem>(envelope.initMessage));
+    }
+    break;
   }
 }
 
@@ -77,7 +82,13 @@ void EventRouter::routeRuntimeEvent(
   }
 
   if (realStatus.has_value()) {
-    state_.setAgentStatus(*realStatus);
+    // Update per-agent status
+    auto* agent = state_.findAgentState(agentId);
+    if (agent) agent->status = *realStatus;
+    // Only update global status if this is the focused agent
+    if (agentId == state_.focusedAgentId()) {
+      state_.setAgentStatus(*realStatus);
+    }
   }
 }
 
@@ -117,7 +128,7 @@ std::string escapeJson(const std::string& s) {
 // ── Streaming text/thinking (unchanged) ──
 
 void EventRouter::handleAgentText(const std::string &json,
-                                   const std::string & /*agentId*/) {
+                                   const std::string &agentId) {
   rapidjson::Document doc;
   doc.Parse(json.c_str());
   if (doc.HasParseError()) return;
@@ -125,25 +136,35 @@ void EventRouter::handleAgentText(const std::string &json,
   std::string delta = jsonString(doc, "delta");
   if (delta.empty()) return;
 
-  auto* thinkItem = state_.activeThinkingItem();
-  if (thinkItem && !thinkItem->isFinalized()) {
-    thinkItem->finalize();
-    state_.setActiveThinkingItem(nullptr);
+  bool isFocused = (agentId == state_.focusedAgentId());
+
+  if (isFocused) {
+    auto* thinkItem = state_.activeThinkingItem();
+    if (thinkItem && !thinkItem->isFinalized()) {
+      thinkItem->finalize();
+      state_.setActiveThinkingItem(nullptr);
+    }
   }
 
   auto* item = state_.activeTextItem();
-  if (!item) {
+  if (!item || item->agentId() != agentId) {
+    // Need a new text item for this agent
     auto newItem = std::make_unique<AgentTextItem>();
+    newItem->setAgentId(agentId);
     item = newItem.get();
     state_.addItem(std::move(newItem));
-    state_.setActiveTextItem(item);
+    if (isFocused) {
+      state_.setActiveTextItem(item);
+    }
   }
   item->appendDelta(delta);
-  state_.markDirtyPublic();
+  if (isFocused) {
+    state_.markDirtyPublic();
+  }
 }
 
 void EventRouter::handleAgentThinking(const std::string &json,
-                                       const std::string & /*agentId*/) {
+                                       const std::string &agentId) {
   rapidjson::Document doc;
   doc.Parse(json.c_str());
   if (doc.HasParseError()) return;
@@ -151,20 +172,29 @@ void EventRouter::handleAgentThinking(const std::string &json,
   std::string delta = jsonString(doc, "delta");
   if (delta.empty()) return;
 
+  bool isFocused = (agentId == state_.focusedAgentId());
+
   auto* item = state_.activeThinkingItem();
-  if (!item) {
-    auto* textItem = state_.activeTextItem();
-    if (textItem && !textItem->isFinalized()) {
-      textItem->finalize();
+  if (!item || item->agentId() != agentId) {
+    if (isFocused) {
+      auto* textItem = state_.activeTextItem();
+      if (textItem && !textItem->isFinalized()) {
+        textItem->finalize();
+      }
     }
 
     auto newItem = std::make_unique<AgentThinkingItem>();
+    newItem->setAgentId(agentId);
     item = newItem.get();
     state_.addItem(std::move(newItem));
-    state_.setActiveThinkingItem(item);
+    if (isFocused) {
+      state_.setActiveThinkingItem(item);
+    }
   }
   item->appendDelta(delta);
-  state_.markDirtyPublic();
+  if (isFocused) {
+    state_.markDirtyPublic();
+  }
 }
 
 // ── Tool Call Lifecycle ──
@@ -200,6 +230,7 @@ void EventRouter::handleAgentToolCallChunk(const std::string &json,
   auto* item = state_.findToolCallById(toolCallId);
   if (!item) {
     auto newItem = std::make_unique<ToolCallItem>(toolCallId, tc.toolName, agentId);
+    newItem->setAppState(&state_);
     newItem->setLive(true);
     item = newItem.get();
     state_.addItem(std::move(newItem));
@@ -270,6 +301,7 @@ void EventRouter::handleAgentToolCall(const std::string &json,
     existingItem->setLive(true);
   } else {
     auto item = std::make_unique<ToolCallItem>(toolCallId, toolName, agentId);
+    item->setAppState(&state_);
     item->setArgs(toolArgs);
     if (!isProcessTool) {
       item->setPhase(ToolPhase::Called);
@@ -410,18 +442,20 @@ void EventRouter::handleAgentProcessOutput(const std::string &json,
 
 void EventRouter::handleAgentTurnCompleted(const std::string &json,
                                             const std::string &agentId) {
-  // Finalize active streaming items
+  bool isFocused = (agentId == state_.focusedAgentId());
+
+  // Finalize active streaming items if they belong to this agent
   auto* thinkItem = state_.activeThinkingItem();
-  if (thinkItem && !thinkItem->isFinalized()) {
+  if (thinkItem && !thinkItem->isFinalized() && thinkItem->agentId() == agentId) {
     thinkItem->finalize();
+    if (isFocused) state_.setActiveThinkingItem(nullptr);
   }
-  state_.setActiveThinkingItem(nullptr);
 
   auto* textItem = state_.activeTextItem();
-  if (textItem && !textItem->isFinalized()) {
+  if (textItem && !textItem->isFinalized() && textItem->agentId() == agentId) {
     textItem->finalize();
+    if (isFocused) state_.setActiveTextItem(nullptr);
   }
-  state_.setActiveTextItem(nullptr);
 
   // Extract tool results from the turn's messages.
   // The turn data contains ToolResultContent entries with the actual results.
@@ -488,30 +522,27 @@ void EventRouter::handleAgentTurnCompleted(const std::string &json,
 }
 
 void EventRouter::handleAgentFinished(const std::string &agentId) {
-  // Finalize streaming items
+  bool isFocused = (agentId == state_.focusedAgentId());
+
+  // Finalize streaming items only if they belong to this agent
   auto* thinkItem = state_.activeThinkingItem();
-  if (thinkItem && !thinkItem->isFinalized()) {
+  if (thinkItem && !thinkItem->isFinalized() && thinkItem->agentId() == agentId) {
     thinkItem->finalize();
+    if (isFocused) state_.setActiveThinkingItem(nullptr);
   }
-  state_.setActiveThinkingItem(nullptr);
 
   auto* textItem = state_.activeTextItem();
-  if (textItem && !textItem->isFinalized()) {
+  if (textItem && !textItem->isFinalized() && textItem->agentId() == agentId) {
     textItem->finalize();
+    if (isFocused) state_.setActiveTextItem(nullptr);
   }
-  state_.setActiveTextItem(nullptr);
 
   // Last-resort: force-finish any tool calls still stuck inflight.
-  // By this point handleAgentTurnCompleted should have finalized most tools.
-  // This handles edge cases where the turn event was lost or didn't contain
-  // a result for a tool.
   for (auto& [id, tc] : state_.toolCallsMut()) {
     if (!tc.isFinished()) {
-      // Use the actual result if we have one (from process output, etc.)
       std::string result = tc.result;
       bool success = tc.success;
       if (result.empty()) {
-        // Build from whatever state we accumulated
         auto* item = state_.findToolCallById(id);
         if (item && !item->processStdout().empty()) {
           result = "{\"stdout\":" + escapeJson(item->processStdout()) +
@@ -539,10 +570,25 @@ void EventRouter::handleAgentFinished(const std::string &agentId) {
     }
   }
 
-  // Mark agent turn as completed
+  // Mark agent turn as completed and not running
   auto* agent = state_.findAgentState(agentId);
   if (agent) {
     agent->currentTurn.reset();
+    agent->running = false;
+    agent->booting = false;
+  }
+
+  // If the finished agent was focused, auto-focus its parent (or primary)
+  if (isFocused) {
+    std::string parentId = agent ? agent->parentId : std::string();
+    if (!parentId.empty()) {
+      state_.focusAgent(parentId);
+    } else {
+      std::string primary = state_.primaryAgentId();
+      if (!primary.empty() && primary != agentId) {
+        state_.focusAgent(primary);
+      }
+    }
   }
 
   state_.markDirtyPublic();
@@ -554,53 +600,71 @@ void EventRouter::handleAgentSpawned(const std::string &json,
   doc.Parse(json.c_str());
   if (doc.HasParseError()) return;
 
-  state_.setAgentId(agentId);
-  state_.setAgentPurpose(jsonString(doc, "personaName"));
-
-  if (doc.HasMember("maxTokens") && doc["maxTokens"].IsNumber()) {
-    state_.setAgentContextWindow(std::to_string(doc["maxTokens"].GetInt() / 1000) + "k");
-  }
-
+  std::string parentId = jsonString(doc, "parentId");
+  std::string personaName = jsonString(doc, "personaName");
+  std::string friendlyName = jsonString(doc, "friendlyName");
+  std::string title = jsonString(doc, "title");
   std::string modelId = jsonString(doc, "modelId");
   std::string providerId = jsonString(doc, "providerId");
-  if (!modelId.empty()) {
-    std::string label = modelId;
-    if (!providerId.empty()) {
-      label = providerId + "/" + modelId;
-    }
-    state_.setModelLabel(label);
-  }
 
-  // Create AgentState
+  // Create AgentState with all fields
   auto& agent = state_.getOrCreateAgent(agentId);
   agent.agentId = agentId;
-  agent.parentId = jsonString(doc, "parentId");
-  agent.personaName = jsonString(doc, "personaName");
+  agent.parentId = parentId;
+  agent.personaName = personaName;
+  agent.friendlyName = friendlyName;
+  agent.title = title;
   agent.providerId = providerId;
   agent.modelId = modelId;
+  agent.running = true;
+  agent.booting = true;
 
   // Start a new turn
   agent.currentTurn = AgentTurnState{};
   agent.currentTurn->agentId = agentId;
+
+  // Auto-focus logic:
+  // - If this is a root agent (no parent) and no primary set, set as primary and focus
+  // - If this is a child of the currently focused agent, auto-focus it
+  // - Otherwise, don't change focus
+  if (parentId.empty() && state_.primaryAgentId().empty()) {
+    state_.setPrimaryAgentId(agentId);
+    state_.setAgentId(agentId);
+    state_.setAgentPurpose(personaName);
+    if (!modelId.empty()) {
+      std::string label = providerId.empty() ? modelId : providerId + "/" + modelId;
+      state_.setModelLabel(label);
+    }
+    if (doc.HasMember("maxTokens") && doc["maxTokens"].IsNumber()) {
+      state_.setAgentContextWindow(std::to_string(doc["maxTokens"].GetInt() / 1000) + "k");
+    }
+    state_.focusAgent(agentId);
+  } else if (!parentId.empty() && parentId == state_.focusedAgentId()) {
+    // Auto-focus child of focused agent
+    state_.focusAgent(agentId);
+  }
 }
 
 void EventRouter::handleAgentError(const std::string &json,
-                                    const std::string & /*agentId*/) {
+                                    const std::string &agentId) {
   rapidjson::Document doc;
   doc.Parse(json.c_str());
   if (doc.HasParseError()) return;
 
+  bool isFocused = (agentId == state_.focusedAgentId());
+
+  // Finalize streaming items if they belong to this agent
   auto* thinkItem = state_.activeThinkingItem();
-  if (thinkItem && !thinkItem->isFinalized()) {
+  if (thinkItem && !thinkItem->isFinalized() && thinkItem->agentId() == agentId) {
     thinkItem->finalize();
+    if (isFocused) state_.setActiveThinkingItem(nullptr);
   }
-  state_.setActiveThinkingItem(nullptr);
 
   auto* textItem = state_.activeTextItem();
-  if (textItem && !textItem->isFinalized()) {
+  if (textItem && !textItem->isFinalized() && textItem->agentId() == agentId) {
     textItem->finalize();
+    if (isFocused) state_.setActiveTextItem(nullptr);
   }
-  state_.setActiveTextItem(nullptr);
 
   auto item = std::make_unique<ErrorMessageItem>(
       "\xe2\x9a\xa0 Error: " + jsonString(doc, "message"));
@@ -609,18 +673,20 @@ void EventRouter::handleAgentError(const std::string &json,
 }
 
 void EventRouter::handleAgentInterrupted(const std::string &agentId) {
-  // Finalize streaming items
+  bool isFocused = (agentId == state_.focusedAgentId());
+
+  // Finalize streaming items if they belong to this agent
   auto* thinkItem = state_.activeThinkingItem();
-  if (thinkItem && !thinkItem->isFinalized()) {
+  if (thinkItem && !thinkItem->isFinalized() && thinkItem->agentId() == agentId) {
     thinkItem->finalize();
+    if (isFocused) state_.setActiveThinkingItem(nullptr);
   }
-  state_.setActiveThinkingItem(nullptr);
 
   auto* textItem = state_.activeTextItem();
-  if (textItem && !textItem->isFinalized()) {
+  if (textItem && !textItem->isFinalized() && textItem->agentId() == agentId) {
     textItem->finalize();
+    if (isFocused) state_.setActiveTextItem(nullptr);
   }
-  state_.setActiveTextItem(nullptr);
 
   // Force-finish inflight tool calls
   for (auto& [id, tc] : state_.toolCallsMut()) {

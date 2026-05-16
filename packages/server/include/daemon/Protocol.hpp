@@ -108,6 +108,7 @@ enum class DaemonEventKind {
   ClientSessionUpdated,
   HookStateChanged,
   PactStateChanged,
+  InitProgress,
 };
 
 struct WorkspacePresence {
@@ -1050,6 +1051,7 @@ struct DaemonEventEnvelope {
   std::optional<firmius::shared::AgentStatus> agentStatus;
   std::optional<HookStateSnapshot> hookState;
   std::optional<PactSnapshot> pactState;
+  std::string initMessage;  // For InitProgress events: human-readable status
 
   bool operator==(const DaemonEventEnvelope &) const = default;
 };

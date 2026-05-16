@@ -31,6 +31,8 @@ std::string eventKindToString(DaemonEventKind kind) {
     return "hook_state_changed";
   case DaemonEventKind::PactStateChanged:
     return "pact_state_changed";
+  case DaemonEventKind::InitProgress:
+    return "init_progress";
   }
   return "runtime_app_event";
 }
@@ -50,6 +52,9 @@ DaemonEventKind eventKindFromString(const std::string &kind) {
   }
   if (kind == "pact_state_changed") {
     return DaemonEventKind::PactStateChanged;
+  }
+  if (kind == "init_progress") {
+    return DaemonEventKind::InitProgress;
   }
   return DaemonEventKind::RuntimeAppEvent;
 }
@@ -1523,6 +1528,10 @@ rapidjson::Value toJsonValue(const DaemonEventEnvelope &event,
     out.AddMember("pact_state", toJsonValue(*event.pactState, allocator),
                   allocator);
   }
+  if (!event.initMessage.empty()) {
+    out.AddMember("init_message", jsonString(event.initMessage, allocator),
+                  allocator);
+  }
   return out;
 }
 
@@ -1569,6 +1578,9 @@ DaemonEventEnvelope daemonEventEnvelopeFromJson(const rapidjson::Value &value) {
   }
   if (value.HasMember("pact_state") && value["pact_state"].IsObject()) {
     event.pactState = pactSnapshotFromJson(value["pact_state"]);
+  }
+  if (value.HasMember("init_message") && value["init_message"].IsString()) {
+    event.initMessage = value["init_message"].GetString();
   }
   return event;
 }

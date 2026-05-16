@@ -1,5 +1,6 @@
 #include "tools/DelegatePresenter.hpp"
 #include "tools/ToolArgsParser.hpp"
+#include "AppState.hpp"
 #include "items/ToolCallItem.hpp"
 #include "Terminal.hpp"
 
@@ -84,7 +85,7 @@ DelegateResult parseResult(const std::string& json) {
 
 } // namespace
 
-std::vector<std::string> DelegatePresenter::render(const ToolCallItem& item, int /*width*/) const {
+std::vector<std::string> DelegatePresenter::render(const ToolCallItem& item, const ToolRenderContext& ctx, int /*width*/) const {
   if (item.phase() == ToolPhase::Preparing) {
     return {ansi::fgRgb(220, 180, 80, "  \xe2\x9a\x99 Delegate")};
   }
@@ -142,9 +143,36 @@ std::vector<std::string> DelegatePresenter::render(const ToolCallItem& item, int
       }
     }
 
-    // Live footer
+    // Live footer with agent state
+    std::string stateLabel = "working";
+    if (ctx.state) {
+      const auto* agent = ctx.state->findAgentState(args.agentId);
+      if (agent) {
+        switch (agent->status) {
+        case firmius::shared::AgentStatus::Streaming:
+          stateLabel = "thinking";
+          break;
+        case firmius::shared::AgentStatus::ExecutingTool:
+          stateLabel = "exec tool";
+          break;
+        case firmius::shared::AgentStatus::ProviderWaiting:
+          stateLabel = "waiting";
+          break;
+        case firmius::shared::AgentStatus::Compacting:
+          stateLabel = "compacting";
+          break;
+        case firmius::shared::AgentStatus::Error:
+          stateLabel = "error";
+          break;
+        default:
+          if (agent->running) stateLabel = "working";
+          else if (agent->booting) stateLabel = "booting";
+          break;
+        }
+      }
+    }
     result.push_back(ansi::dim(ansi::fgRgb(120, 120, 140,
-        "  working \xe2\x80\xa2 " + formatDuration(item.elapsed()))));
+        "  " + stateLabel + " \xe2\x80\xa2 " + formatDuration(item.elapsed()))));
     return result;
   }
 

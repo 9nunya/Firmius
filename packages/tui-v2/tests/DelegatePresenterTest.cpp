@@ -13,7 +13,7 @@ TEST(DelegatePresenterTest, MatchesDelegate) {
 TEST(DelegatePresenterTest, PreparingPhase) {
   DelegatePresenter p;
   ToolCallItem item("call-1", "Delegate", "agent-1");
-  auto lines = p.render(item, 80);
+  auto lines = p.render(item, {}, 80);
   ASSERT_GE(lines.size(), 1u);
 }
 
@@ -22,7 +22,7 @@ TEST(DelegatePresenterTest, SpawnCalled) {
   ToolCallItem item("call-1", "Delegate", "agent-1");
   item.setArgs(R"({"action":"Spawn","title":"Research Agent","persona":"researcher","task":"Find info"})");
   item.setPhase(ToolPhase::Called);
-  auto lines = p.render(item, 80);
+  auto lines = p.render(item, {}, 80);
   ASSERT_GE(lines.size(), 2u);
   EXPECT_NE(lines[0].find("Summoning"), std::string::npos);
   EXPECT_NE(lines[0].find("Research Agent"), std::string::npos);
@@ -33,7 +33,7 @@ TEST(DelegatePresenterTest, SpawnFinishedSuccess) {
   ToolCallItem item("call-1", "Delegate", "agent-1");
   item.setArgs(R"({"action":"Spawn","title":"Research Agent"})");
   item.setResult(true, R"({"status":"completed","result":"Found the answer"})");
-  auto lines = p.render(item, 80);
+  auto lines = p.render(item, {}, 80);
   ASSERT_GE(lines.size(), 1u);
   bool foundSuccess = false;
   for (const auto& line : lines) {
@@ -47,7 +47,7 @@ TEST(DelegatePresenterTest, SpawnFinishedError) {
   ToolCallItem item("call-1", "Delegate", "agent-1");
   item.setArgs(R"({"action":"Spawn","title":"Research Agent"})");
   item.setResult(false, R"({"status":"failed","result":"Timeout"})");
-  auto lines = p.render(item, 80);
+  auto lines = p.render(item, {}, 80);
   ASSERT_GE(lines.size(), 1u);
   bool foundError = false;
   for (const auto& line : lines) {
@@ -61,7 +61,7 @@ TEST(DelegatePresenterTest, WaitCalled) {
   ToolCallItem item("call-1", "Delegate", "agent-1");
   item.setArgs(R"({"action":"Wait","agent_id":"sub-1"})");
   item.setPhase(ToolPhase::Called);
-  auto lines = p.render(item, 80);
+  auto lines = p.render(item, {}, 80);
   ASSERT_GE(lines.size(), 1u);
   EXPECT_NE(lines[0].find("Waiting"), std::string::npos);
 }
@@ -70,7 +70,7 @@ TEST(DelegatePresenterTest, StopCalled) {
   DelegatePresenter p;
   ToolCallItem item("call-1", "Delegate", "agent-1");
   item.setArgs(R"({"action":"Stop","agent_id":"sub-1"})");
-  auto lines = p.render(item, 80);
+  auto lines = p.render(item, {}, 80);
   ASSERT_GE(lines.size(), 1u);
 }
 
@@ -79,7 +79,7 @@ TEST(DelegatePresenterTest, StopFinished) {
   ToolCallItem item("call-1", "Delegate", "agent-1");
   item.setArgs(R"({"action":"Stop","agent_id":"sub-1"})");
   item.setResult(true, R"({"status":"terminated"})");
-  auto lines = p.render(item, 80);
+  auto lines = p.render(item, {}, 80);
   ASSERT_GE(lines.size(), 1u);
   EXPECT_NE(lines[0].find("Stopped"), std::string::npos);
 }

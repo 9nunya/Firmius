@@ -99,10 +99,14 @@ struct AgentState {
   std::string agentId;
   std::string parentId;
   std::string personaName;
+  std::string friendlyName;
+  std::string title;
   std::string providerId;
   std::string modelId;
 
   firmius::shared::AgentStatus status = firmius::shared::AgentStatus::Idle;
+  bool running = false;
+  bool booting = false;
 
   // Current turn
   std::optional<AgentTurnState> currentTurn;

@@ -56,6 +56,10 @@ public:
   // ── Agent operations ──
   std::optional<firmius::daemon::AgentRuntimeSnapshot> getAgent(
       const std::string &threadId, const std::string &agentId) const;
+  firmius::daemon::AgentTreeSnapshot listAgents(
+      const std::string &threadId) const;
+  std::optional<firmius::daemon::AgentRuntimeSnapshot> focusAgent(
+      const std::string &threadId, const std::string &agentId) const;
   std::optional<firmius::daemon::AgentRuntimeSnapshot> interruptAgent(
       const std::string &threadId, const std::string &agentId);
   std::optional<firmius::daemon::AgentRuntimeSnapshot> switchModel(
@@ -67,6 +71,10 @@ public:
   // ── Permissions ──
   bool resolvePermission(const std::string &requestId,
                          firmius::shared::PermissionResponse response);
+
+  // ── Workflows ──
+  bool executeWorkflow(const std::string &workflowId,
+                       const std::vector<std::string> &args = {});
 
   /// Direct access to the underlying DaemonClient for RPC calls not
   /// wrapped by convenience methods above.

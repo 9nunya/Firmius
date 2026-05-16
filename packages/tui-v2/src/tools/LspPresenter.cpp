@@ -25,7 +25,7 @@ std::string formatDuration(std::chrono::milliseconds ms) {
 
 } // namespace
 
-std::vector<std::string> LspPresenter::render(const ToolCallItem& item, int /*width*/) const {
+std::vector<std::string> LspPresenter::render(const ToolCallItem& item, const ToolRenderContext& /*ctx*/, int /*width*/) const {
   if (item.phase() == ToolPhase::Preparing) {
     return {ansi::fgRgb(220, 180, 80, "  \xe2\x9a\x99 Lsp")};
   }

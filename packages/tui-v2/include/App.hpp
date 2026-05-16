@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ActionDispatcher.hpp"
+#include "AgentTabBar.hpp"
 #include "AppState.hpp"
 #include "BottomBar.hpp"
 #include "Cell.hpp"
@@ -64,6 +65,9 @@ private:
   void openResumeMenu();
   void dismissMenu();
 
+  // Agent focus management.
+  void switchToAgentTranscript(const std::string& agentId);
+
   AppOptions options_;
   Terminal terminal_;
   Layout layout_;
@@ -76,9 +80,13 @@ private:
 
   // Components.
   StatusBar statusBar_;
+  AgentTabBar agentTabBar_;
   InputBar inputBar_;
   BottomBar bottomBar_;
   MenuList menu_;
+
+  // Focus tracking.
+  std::string lastFocusedAgentId_;
 
   // Full-screen rendering state.
   std::atomic<bool> running_{false};

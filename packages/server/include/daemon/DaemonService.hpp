@@ -4,6 +4,7 @@
 
 #include <functional>
 #include <map>
+#include <condition_variable>
 #include <mutex>
 #include <optional>
 #include <unordered_set>
@@ -159,6 +160,13 @@ private:
       const std::string &eventType, const std::string &eventThreadId,
       const std::string &eventAgentId, const std::string &eventJson,
       std::optional<firmius::shared::AgentStatus> agentStatus = std::nullopt);
+
+  /// Broadcast an initialization progress message to all connected clients.
+  void broadcastInitProgress(const std::string &message);
+
+  /// Block until the daemon has finished initialization (or timeout).
+  /// Returns true if ready, false on timeout.
+  bool waitForReady(std::chrono::milliseconds timeout = std::chrono::milliseconds(30000));
   void updateSessionFocusLocked(const std::string &clientId,
                                 const std::string &threadId,
                                 const std::string &agentId);
@@ -208,6 +216,9 @@ private:
   mutable std::mutex stateMutex_;
   mutable std::mutex runtimeMutex_;
   bool running_ = false;
+  std::mutex readyMutex_;
+  std::condition_variable readyCv_;
+  bool ready_ = false;
   int harnessSubscriptionId_ = -1;
   std::unordered_map<std::string, ClientSessionSnapshot> sessions_;
   std::unordered_map<std::string, EventSubscription> subscriptions_;

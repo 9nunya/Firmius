@@ -487,7 +487,7 @@ std::vector<std::string> renderPythonFinished(const ParsedArgs& args, const Pars
 
 } // namespace
 
-std::vector<std::string> ProcessPresenter::render(const ToolCallItem& item, int width) const {
+std::vector<std::string> ProcessPresenter::render(const ToolCallItem& item, const ToolRenderContext& /*ctx*/, int width) const {
   // Preparing phase
   if (item.phase() == ToolPhase::Preparing) {
     return renderPreparing(item.toolName(), item.args());

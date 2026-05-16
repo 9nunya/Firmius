@@ -9,6 +9,8 @@
 
 namespace firmius::tui2 {
 
+class AppState;
+
 /// A tool call item that owns its full lifecycle from Preparing to Finished.
 /// Delegates rendering to ToolPresenterRegistry.
 class ToolCallItem : public TranscriptItem {
@@ -58,6 +60,10 @@ public:
   bool isExpanded() const { return expanded_; }
   void setExpanded(bool expanded);
 
+  // AppState for presenter context
+  void setAppState(const AppState* state) { appState_ = state; }
+  const AppState* appState() const { return appState_; }
+
 private:
   std::string toolCallId_;
   std::string toolName_;
@@ -76,6 +82,7 @@ private:
   bool live_ = false;
   bool expanded_ = false;
   std::chrono::steady_clock::time_point calledAt_;
+  const AppState* appState_ = nullptr;
 };
 
 } // namespace firmius::tui2

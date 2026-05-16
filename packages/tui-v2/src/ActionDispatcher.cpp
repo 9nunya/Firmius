@@ -148,4 +148,23 @@ void ActionDispatcher::loadTranscript() {
   state_.markDirtyPublic();
 }
 
+bool ActionDispatcher::executeWorkflow(const std::string &workflowId,
+                                        const std::vector<std::string> &args) {
+  if (workflowId.empty()) return false;
+
+  // Ensure a thread exists and is focused (workflows need an active context).
+  if (state_.threadId().empty()) {
+    if (!createThread()) return false;
+  }
+
+  try {
+    return session_.executeWorkflow(workflowId, args);
+  } catch (const std::exception &e) {
+    state_.addItem(std::make_unique<ErrorMessageItem>(
+        std::string("Workflow failed: ") + e.what()));
+    state_.markDirtyPublic();
+    return false;
+  }
+}
+
 } // namespace firmius::tui2

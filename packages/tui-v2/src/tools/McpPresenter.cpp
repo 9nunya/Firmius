@@ -10,7 +10,7 @@ bool McpPresenter::matches(const std::string& toolName) const {
   return toolName.rfind("mcp__", 0) == 0;  // starts with "mcp__"
 }
 
-std::vector<std::string> McpPresenter::render(const ToolCallItem& item, int /*width*/) const {
+std::vector<std::string> McpPresenter::render(const ToolCallItem& item, const ToolRenderContext& /*ctx*/, int /*width*/) const {
   // Parse server and tool name from mcp__<server>__<tool>
   std::string server;
   std::string tool;

@@ -24,8 +24,12 @@ public:
   bool isFinalized() const override { return finalized_; }
   const std::string& accumulated() const { return accumulated_; }
 
+  void setAgentId(const std::string& id) { agentId_ = id; }
+  const std::string& agentId() const { return agentId_; }
+
 private:
   std::string accumulated_;
+  std::string agentId_;
   bool finalized_ = false;
 };
 
@@ -46,8 +50,12 @@ public:
   bool isFinalized() const override { return finalized_; }
   const std::string& accumulated() const { return accumulated_; }
 
+  void setAgentId(const std::string& id) { agentId_ = id; }
+  const std::string& agentId() const { return agentId_; }
+
 private:
   std::string accumulated_;
+  std::string agentId_;
   bool finalized_ = false;
 };
 

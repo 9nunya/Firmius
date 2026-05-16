@@ -10,11 +10,13 @@ target_sources(firmius_tui_v2 PRIVATE
     src/Terminal.cpp
     src/AnsiParser.cpp
     src/StatusBar.cpp
+    src/AgentTabBar.cpp
     src/InputBar.cpp
     src/BottomBar.cpp
     src/KeybindRegistry.cpp
     src/Layout.cpp
     src/CommandManager.cpp
+    src/WorkflowCommand.cpp
     src/MenuList.cpp
     # Items
     src/items/SimpleItems.cpp
@@ -87,11 +89,13 @@ target_sources(firmius_tui_v2_tests PRIVATE
     src/ActionDispatcher.cpp
     src/DaemonSession.cpp
     src/StatusBar.cpp
+    src/AgentTabBar.cpp
     src/InputBar.cpp
     src/BottomBar.cpp
     src/App.cpp
     src/Layout.cpp
     src/CommandManager.cpp
+    src/WorkflowCommand.cpp
     src/MenuList.cpp
     # Items
     src/items/SimpleItems.cpp

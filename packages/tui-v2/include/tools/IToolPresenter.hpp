@@ -6,6 +6,12 @@
 namespace firmius::tui2 {
 
 class ToolCallItem;
+class AppState;
+
+/// Context passed to tool presenters during rendering.
+struct ToolRenderContext {
+  const AppState* state = nullptr;
+};
 
 /// Interface for tool presenters. Each presenter handles rendering for a tool family.
 class IToolPresenter {
@@ -19,7 +25,9 @@ public:
   virtual bool matches(const std::string& toolName) const = 0;
 
   /// Render the tool call item into ANSI-formatted lines.
-  virtual std::vector<std::string> render(const ToolCallItem& item, int width) const = 0;
+  virtual std::vector<std::string> render(const ToolCallItem& item,
+                                          const ToolRenderContext& ctx,
+                                          int width) const = 0;
 };
 
 } // namespace firmius::tui2

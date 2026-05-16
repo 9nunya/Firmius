@@ -42,7 +42,7 @@ std::string displayToolName(const std::string& name) {
 
 } // namespace
 
-std::vector<std::string> EditPresenter::render(const ToolCallItem& item, int width) const {
+std::vector<std::string> EditPresenter::render(const ToolCallItem& item, const ToolRenderContext& /*ctx*/, int width) const {
   std::string dname = displayToolName(item.toolName());
 
   if (item.phase() == ToolPhase::Preparing) {

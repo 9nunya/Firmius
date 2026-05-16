@@ -1,10 +1,12 @@
 #include "App.hpp"
 #include "AnsiParser.hpp"
 #include "Terminal.hpp"
+#include "WorkflowCommand.hpp"
 #include "items/SimpleItems.hpp"
 #include "items/StreamingItems.hpp"
 #include "items/ToolCallItem.hpp"
 #include "tools/PresenterInit.hpp"
+#include "workflow/WorkflowLoader.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -32,7 +34,6 @@ public:
   std::string description() const override { return "Create a new thread."; }
   void execute(const std::vector<ParsedArg>&) override {
     app_.state_.clearItems();
-    app_.state_.syncScrollback();
     app_.dispatcher_.createThread(app_.options_.persona, app_.options_.mode);
   }
 private:
@@ -64,6 +65,7 @@ App::App(AppOptions options)
       eventRouter_(state_),
       dispatcher_(session_, state_),
       statusBar_(state_),
+      agentTabBar_(state_),
       inputBar_(state_),
       bottomBar_(state_) {}
 
@@ -87,12 +89,21 @@ int App::run() {
   registerCommands();
   setupKeybinds();
 
-  // Set up pinned zone: statusBar (2) + inputBar (1) + bottomBar (1) = 4 lines.
-  layout_.setPinnedComponents({&statusBar_, &inputBar_, &bottomBar_});
+  // Set up pinned zone: statusBar (2) + inputBar (1) = 3 lines.
+  // bottomBar is rendered manually (after autocomplete rows when active).
+  layout_.setPinnedComponents({&statusBar_, &inputBar_});
 
-  // Connect to daemon.
+  // Paint the first frame immediately so the user sees the TUI while connecting.
   state_.setConnectionStatus(ConnectionStatus::Connecting);
-  connectAndSetup();
+  renderFrame();
+
+  // Connect to daemon in the background so the main loop can paint frames
+  // (init progress events arrive as SystemNoticeItems via the event loop).
+  std::thread connectThread([this]() {
+    connectAndSetup();
+    state_.markDirtyPublic();
+  });
+  connectThread.detach();
 
   // Main loop.
   running_ = true;
@@ -146,6 +157,10 @@ void App::registerCommands() {
   commands_.registerCommand(std::make_shared<NewCmd>(*this));
   commands_.registerCommand(std::make_shared<ModelsCmd>(*this));
   commands_.registerCommand(std::make_shared<ResumeCmd>(*this));
+
+  // Load workflow definitions from disk and register as slash commands.
+  firmius::core::WorkflowLoader::instance().init();
+  registerWorkflowCommands(commands_, dispatcher_);
 }
 
 void App::setupKeybinds() {
@@ -165,11 +180,62 @@ void App::setupKeybinds() {
                                dismissAutocomplete();
                              }});
 
-  keybinds_.registerKeybind({keys::kCtrlN, "New Thread", ActivityContext::Idle,
-                             false, [this]() {
-                               state_.clearItems();
-                               state_.syncScrollback();
-                               dispatcher_.createThread(options_.persona, options_.mode);
+  // Agent focus navigation (active in both Idle and Active contexts)
+  keybinds_.registerKeybind({keys::kCtrlN, "Next Agent", ActivityContext::Idle,
+                             true, [this]() {
+                               auto candidates = state_.siblingsOf(state_.focusedAgentId());
+                               if (candidates.empty()) return;
+                               auto it = std::find(candidates.begin(), candidates.end(),
+                                                   state_.focusedAgentId());
+                               size_t idx = (it == candidates.end()) ? 0 :
+                                   (std::distance(candidates.begin(), it) + 1) % candidates.size();
+                               switchToAgentTranscript(candidates[idx]);
+                             }});
+  keybinds_.registerKeybind({keys::kCtrlN, "Next Agent", ActivityContext::Active,
+                             true, [this]() {
+                               auto candidates = state_.siblingsOf(state_.focusedAgentId());
+                               if (candidates.empty()) return;
+                               auto it = std::find(candidates.begin(), candidates.end(),
+                                                   state_.focusedAgentId());
+                               size_t idx = (it == candidates.end()) ? 0 :
+                                   (std::distance(candidates.begin(), it) + 1) % candidates.size();
+                               switchToAgentTranscript(candidates[idx]);
+                             }});
+  keybinds_.registerKeybind({keys::kCtrlB, "Prev Agent", ActivityContext::Idle,
+                             true, [this]() {
+                               auto candidates = state_.siblingsOf(state_.focusedAgentId());
+                               if (candidates.empty()) return;
+                               auto it = std::find(candidates.begin(), candidates.end(),
+                                                   state_.focusedAgentId());
+                               size_t idx = (it == candidates.end()) ? 0 :
+                                   (std::distance(candidates.begin(), it) + candidates.size() - 1)
+                                   % candidates.size();
+                               switchToAgentTranscript(candidates[idx]);
+                             }});
+  keybinds_.registerKeybind({keys::kCtrlB, "Prev Agent", ActivityContext::Active,
+                             true, [this]() {
+                               auto candidates = state_.siblingsOf(state_.focusedAgentId());
+                               if (candidates.empty()) return;
+                               auto it = std::find(candidates.begin(), candidates.end(),
+                                                   state_.focusedAgentId());
+                               size_t idx = (it == candidates.end()) ? 0 :
+                                   (std::distance(candidates.begin(), it) + candidates.size() - 1)
+                                   % candidates.size();
+                               switchToAgentTranscript(candidates[idx]);
+                             }});
+  keybinds_.registerKeybind({keys::kCtrlP, "Parent Agent", ActivityContext::Idle,
+                             true, [this]() {
+                               auto parentId = state_.parentIdOf(state_.focusedAgentId());
+                               if (!parentId.empty()) {
+                                 switchToAgentTranscript(parentId);
+                               }
+                             }});
+  keybinds_.registerKeybind({keys::kCtrlP, "Parent Agent", ActivityContext::Active,
+                             true, [this]() {
+                               auto parentId = state_.parentIdOf(state_.focusedAgentId());
+                               if (!parentId.empty()) {
+                                 switchToAgentTranscript(parentId);
+                               }
                              }});
 
   keybinds_.registerKeybind({keys::kEnter, "Send", ActivityContext::Idle, false,
@@ -268,7 +334,7 @@ void App::setupKeybinds() {
                                auto* tc = state_.findLastFocusedToolCall();
                                if (tc) {
                                  tc->setExpanded(!tc->isExpanded());
-                                 state_.syncScrollback();
+                                 syncScrollback();
                                  state_.markDirtyPublic();
                                }
                              }});
@@ -502,26 +568,58 @@ void App::reconcileRuntimeState() {
 
 // ── Scrollback Management ──
 
+namespace {
+
+bool shouldShowItem(const TranscriptItem& item, const std::string& focusedAgentId) {
+  // Global items (no agentId) are always shown
+  auto type = item.type();
+  if (type == "UserMessage" || type == "SystemNotice" || type == "ErrorMessage") {
+    return true;
+  }
+  // Agent-scoped items: check agentId
+  if (type == "AgentText") {
+    const auto& textItem = static_cast<const AgentTextItem&>(item);
+    return textItem.agentId().empty() || textItem.agentId() == focusedAgentId;
+  }
+  if (type == "AgentThinking") {
+    const auto& thinkItem = static_cast<const AgentThinkingItem&>(item);
+    return thinkItem.agentId().empty() || thinkItem.agentId() == focusedAgentId;
+  }
+  if (type == "ToolCall") {
+    const auto& tcItem = static_cast<const ToolCallItem&>(item);
+    return tcItem.agentId().empty() || tcItem.agentId() == focusedAgentId;
+  }
+  return true; // Unknown types: show by default
+}
+
+} // namespace
+
 void App::syncScrollback() {
   const auto& items = state_.items();
   int w = terminal_.size().first;
+  std::string focusedId = state_.focusedAgentId();
+
+  // If focus changed, rebuild everything from scratch
+  if (focusedId != lastFocusedAgentId_) {
+    lastFocusedAgentId_ = focusedId;
+    state_.clearScrollback();
+    lastSyncedItemCount_ = 0;
+    lastSyncedRowCounts_.clear();
+    // Fall through to re-sync everything
+  }
 
   // Find the first dirty item (or any item beyond what we've synced).
-  // Items are ordered sequentially in scrollback, so we rebuild from
-  // the first changed item onward.
   size_t rebuildFrom = items.size();
 
-  // Check for new items beyond lastSyncedItemCount_.
   if (lastSyncedItemCount_ < items.size()) {
     rebuildFrom = lastSyncedItemCount_;
   }
 
-  // Check for dirty items that were already synced (streaming text grew,
-  // tool call finished, etc.). We need to rebuild from the first such item.
+  // Check for dirty items that were already synced.
   for (size_t i = 0; i < lastSyncedItemCount_ && i < items.size(); ++i) {
     if (items[i]->needsRender()) {
       rebuildFrom = std::min(rebuildFrom, i);
-      break; // items are ordered — first dirty is enough
+      break;
     }
   }
 
@@ -536,9 +634,22 @@ void App::syncScrollback() {
     state_.removeTrailingScrollback(linesToRemove);
   }
 
-  // Re-render from the first dirty item and append to scrollback.
+  // Re-render from the first dirty item, filtering by focused agent.
   std::vector<std::string> newLines;
   for (size_t i = rebuildFrom; i < items.size(); ++i) {
+    // Filter: skip items that don't belong to the focused agent
+    if (!shouldShowItem(*items[i], focusedId)) {
+      // Record 0 rows for filtered items so index tracking stays valid
+      if (i >= lastSyncedRowCounts_.size()) {
+        lastSyncedRowCounts_.resize(i + 1, 0);
+      }
+      lastSyncedRowCounts_[i] = 0;
+      if (items[i]->isFinalized()) {
+        items[i]->markClean();
+      }
+      continue;
+    }
+
     auto lines = items[i]->render(w);
     for (auto& line : lines) {
       newLines.push_back(std::move(line));
@@ -547,9 +658,6 @@ void App::syncScrollback() {
       lastSyncedRowCounts_.resize(i + 1, 0);
     }
     lastSyncedRowCounts_[i] = static_cast<int>(lines.size());
-    // Only mark clean if the item is finalized (no more deltas coming).
-    // For streaming items, we must NOT mark clean — new deltas would
-    // see needsRender()==false and fail to trigger re-sync.
     if (items[i]->isFinalized()) {
       items[i]->markClean();
     }
@@ -558,6 +666,39 @@ void App::syncScrollback() {
 
   if (!newLines.empty()) {
     state_.appendScrollback(newLines);
+  }
+}
+
+void App::switchToAgentTranscript(const std::string& agentId) {
+  state_.focusAgent(agentId);
+  // Force scrollback rebuild
+  lastFocusedAgentId_ = agentId;
+  state_.clearScrollback();
+  lastSyncedItemCount_ = 0;
+  lastSyncedRowCounts_.clear();
+  state_.scrollToBottom();
+
+  // Re-point active streaming items to the new agent's last unfinalized items
+  state_.setActiveTextItem(nullptr);
+  state_.setActiveThinkingItem(nullptr);
+  const auto& items = state_.items();
+  for (auto it = items.rbegin(); it != items.rend(); ++it) {
+    if ((*it)->type() == "AgentText" && !(*it)->isFinalized()) {
+      auto* text = static_cast<AgentTextItem*>(it->get());
+      if (text->agentId() == agentId) {
+        state_.setActiveTextItem(text);
+        break;
+      }
+    }
+  }
+  for (auto it = items.rbegin(); it != items.rend(); ++it) {
+    if ((*it)->type() == "AgentThinking" && !(*it)->isFinalized()) {
+      auto* think = static_cast<AgentThinkingItem*>(it->get());
+      if (think->agentId() == agentId) {
+        state_.setActiveThinkingItem(think);
+        break;
+      }
+    }
   }
 }
 
@@ -572,14 +713,18 @@ void App::renderFrame() {
                           : 0;
 
   // Update pinned component composition.
+  // bottomBar is always rendered manually (after autocomplete rows when active).
   if (menu_.isActive()) {
-    layout_.setPinnedComponents({&statusBar_, &menu_, &inputBar_, &bottomBar_});
+    layout_.setPinnedComponents({&statusBar_, &agentTabBar_, &menu_, &inputBar_});
+  } else if (state_.hasMultipleAgents()) {
+    layout_.setPinnedComponents({&statusBar_, &agentTabBar_, &inputBar_});
   } else {
-    layout_.setPinnedComponents({&statusBar_, &inputBar_, &bottomBar_});
+    layout_.setPinnedComponents({&statusBar_, &inputBar_});
   }
 
   int basePinnedH = layout_.pinnedHeight(w);
-  int pinnedH = basePinnedH + autocompleteH;
+  // Total pinned height = statusBar + menu + inputBar + autocomplete + bottomBar.
+  int pinnedH = basePinnedH + autocompleteH + 1; // +1 for bottomBar
 
   // Render transcript shorter to leave room for autocomplete + pinned zone.
   int transcriptH = h - pinnedH;
@@ -588,30 +733,37 @@ void App::renderFrame() {
   CellGrid target(h, std::vector<Cell>(w));
   renderTranscriptZone(target, w, transcriptH);
 
-  // Render pinned zone at full screen height (bottom-aligned).
+  // Layout (bottom-up):
+  //   statusBar(2) + menu(mH) + inputBar(1)  ← pinned zone, at bottom
+  //   autocomplete rows (0 or more)           ← between transcript and pinned
+  //   bottomBar(1)                            ← between transcript and autocomplete
+  //   transcript                              ← fills remaining space
+
+  // Render pinned zone (statusBar + menu + inputBar) at the very bottom.
+  int sbH = 2;
+  int mH = menu_.isActive() ? menu_.height(w) : 0;
   renderPinnedZone(target, w, h, basePinnedH);
 
-  // If autocomplete is active, overwrite the bottomBar row with autocomplete
-  // rows and redraw bottomBar below them.
-  if (autocompleteH > 0) {
-    int sbH = 2;
-    int mH = menu_.isActive() ? menu_.height(w) : 0;
-    // In the normal pinned layout: statusBar(sbH) + menu(mH) + inputBar(1) + bottomBar(1).
-    // bottomBar row (0-indexed) = h - basePinnedH + sbH + mH + 1.
-    int bbRow = h - basePinnedH + sbH + mH + 1;
+  // bottomBar and autocomplete render between transcript and pinned zone.
+  // They start right after the transcript ends (row transcriptH).
+  int gapStart = transcriptH; // first row after transcript
 
-    // Clear the bottomBar row and autocompleteH rows below it.
-    for (int r = 0; r <= autocompleteH; ++r) {
-      int row = bbRow + r;
-      if (row < 0 || row >= h) continue;
-      Cell blank;
-      blank.ch = U' ';
-      for (int c = 0; c < w; ++c) target[row][c] = blank;
+  // Draw bottomBar at gapStart.
+  {
+    auto bbLines = bottomBar_.render(w);
+    if (!bbLines.empty() && gapStart >= 0 && gapStart < h) {
+      auto cells = AnsiParser::parse(bbLines[0], w);
+      for (int c = 0; c < std::min(static_cast<int>(cells.size()), w); ++c) {
+        target[gapStart][c] = cells[c];
+      }
     }
+  }
 
-    // Draw autocomplete rows at bbRow.
+  // Draw autocomplete rows below bottomBar.
+  if (autocompleteH > 0) {
+    int acStart = gapStart + 1; // autocomplete starts after bottomBar
     for (int i = 0; i < autocompleteH; ++i) {
-      int row = bbRow + i;
+      int row = acStart + i;
       if (row < 0 || row >= h) continue;
       const auto& match = autocomplete_.matches[i];
       bool selected = (i == autocomplete_.selectedIndex);
@@ -629,23 +781,10 @@ void App::renderFrame() {
         target[row][c] = cells[c];
       }
     }
-
-    // Draw bottomBar below autocomplete.
-    int newBBRow = bbRow + autocompleteH;
-    if (newBBRow >= 0 && newBBRow < h) {
-      auto bbLines = bottomBar_.render(w);
-      if (!bbLines.empty()) {
-        auto cells = AnsiParser::parse(bbLines[0], w);
-        for (int c = 0; c < std::min(static_cast<int>(cells.size()), w); ++c) {
-          target[newBBRow][c] = cells[c];
-        }
-      }
-    }
   }
 
   // Set menu screen row for mouse hit testing.
   {
-    int sbH = 2;
     int menuStartRow = h - basePinnedH + sbH;
     menu_.setScreenRow(menuStartRow);
   }
@@ -656,10 +795,10 @@ void App::renderFrame() {
   diffAndEmit(target, w, h);
 
   // Position cursor at the end of the input bar for typing.
+  // basePinnedH = statusBar(2) + menu(mH) + inputBar(1).
+  // inputBar row (1-indexed) = h - basePinnedH + sbH + mH + 1.
   {
-    int sbH = 2;
-    int mH = menu_.isActive() ? menu_.height(w) : 0;
-    int cursorRow = h - basePinnedH + sbH + mH + 1; // 1-indexed
+    int cursorRow = h - basePinnedH + sbH + mH + 1;
     auto input = state_.inputBuffer();
     terminal_.moveCursor(cursorRow, 4 + static_cast<int>(input.size()));
   }
@@ -874,15 +1013,38 @@ void App::onResize() {
 
 void App::connectAndSetup() {
   try {
-    if (!session_.connect()) {
+    // Show immediate feedback — the user sees this on the first frame.
+    state_.addItem(std::make_unique<SystemNoticeItem>("Connecting to daemon..."));
+
+    // Connect with retries and exponential backoff (500ms → 1s → 2s → 4s → 8s → 16s).
+    bool connected = false;
+    int delayMs = 500;
+    constexpr int maxDelayMs = 16000;
+    constexpr int maxTotalAttempts = 20;
+    for (int attempt = 0; attempt < maxTotalAttempts; ++attempt) {
+      if (session_.connect()) {
+        connected = true;
+        break;
+      }
+      state_.addItem(std::make_unique<SystemNoticeItem>(
+          "Daemon not ready, retrying in " + std::to_string(delayMs / 1000.0) + "s... (attempt " +
+          std::to_string(attempt + 1) + "/" + std::to_string(maxTotalAttempts) + ")"));
+      std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
+      delayMs = std::min(delayMs * 2, maxDelayMs);
+    }
+
+    if (!connected) {
       state_.setConnectionStatus(ConnectionStatus::Disconnected);
       state_.addItem(std::make_unique<ErrorMessageItem>(
-          "Failed to connect to daemon. Is firmiusd running?"));
+          "Failed to connect to daemon after " + std::to_string(maxTotalAttempts) +
+          " attempts. Is firmiusd running?"));
       return;
     }
 
+    state_.addItem(std::make_unique<SystemNoticeItem>("Connected. Subscribing to events..."));
     state_.setConnectionStatus(ConnectionStatus::Connected);
 
+    // Subscribe to events — init progress messages will arrive as SystemNoticeItems.
     session_.subscribe([this](const firmius::daemon::DaemonEventEnvelope& envelope) {
       eventRouter_.route(envelope);
     });
@@ -892,21 +1054,10 @@ void App::connectAndSetup() {
     } else if (options_.continueSession) {
       // TODO: resume last session.
     } else {
+      state_.addItem(std::make_unique<SystemNoticeItem>("Loading UI snapshot..."));
       firmius::daemon::UiSnapshotRequest request;
-      firmius::daemon::UiSnapshot uiSnap;
-      bool loadedSnapshot = false;
-      for (int attempt = 0; attempt < 5; ++attempt) {
-        try {
-          uiSnap = session_.client().uiSnapshot(request);
-          loadedSnapshot = true;
-          break;
-        } catch (const std::exception&) {
-          std::this_thread::sleep_for(std::chrono::milliseconds(250));
-        }
-      }
-      if (!loadedSnapshot) {
-        throw std::runtime_error("daemon connected but ui.snapshot.get never became ready");
-      }
+      // uiSnapshot now blocks until daemon init is complete (up to 30s).
+      firmius::daemon::UiSnapshot uiSnap = session_.client().uiSnapshot(request);
       std::string label = uiSnap.config.config.defaultProviderId + "/" +
                           uiSnap.config.config.defaultModelId;
       state_.setModelLabel(label);
@@ -915,13 +1066,14 @@ void App::connectAndSetup() {
         state_.setAgentContextWindow(
             std::to_string(uiSnap.config.config.defaultMaxTokens.value() / 1000) + "k ctx");
       }
+      state_.addItem(std::make_unique<SystemNoticeItem>("UI snapshot loaded."));
     }
 
     // Welcome message.
     auto threadId = state_.threadId();
     std::string welcomeText = threadId.empty()
-        ? "Connected to firmiusd. Type a message or use /new to start."
-        : "Connected. Thread: " + threadId;
+        ? "Ready. Type a message or use /new to start."
+        : "Ready. Thread: " + threadId;
     state_.addItem(std::make_unique<SystemNoticeItem>(welcomeText));
 
   } catch (const std::exception& e) {

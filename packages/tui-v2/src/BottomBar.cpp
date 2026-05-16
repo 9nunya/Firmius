@@ -30,13 +30,21 @@ std::vector<std::string> BottomBar::render(int width) const {
             ansi::dim(" Ctrl+Q") + ansi::dim(" Quit");
     break;
   case ActivityContext::Idle:
-    hints = ansi::dim(" Ctrl+N") + ansi::dim(" New") +
-            ansi::dim(" │ ") +
-            ansi::dim(" /resume") + ansi::dim(" Threads") +
-            ansi::dim(" │ ") +
-            ansi::dim(" /models") + ansi::dim(" Switch") +
-            ansi::dim(" │ ") +
-            ansi::dim(" Ctrl+Q") + ansi::dim(" Quit");
+    if (state_.hasMultipleAgents()) {
+      hints = ansi::dim(" Ctrl+N/B") + ansi::dim(" Agents") +
+              ansi::dim(" \xe2\x94\x82 ") +
+              ansi::dim(" Ctrl+P") + ansi::dim(" Parent") +
+              ansi::dim(" \xe2\x94\x82 ") +
+              ansi::dim(" /resume") + ansi::dim(" Threads") +
+              ansi::dim(" \xe2\x94\x82 ") +
+              ansi::dim(" Ctrl+Q") + ansi::dim(" Quit");
+    } else {
+      hints = ansi::dim(" /resume") + ansi::dim(" Threads") +
+              ansi::dim(" \xe2\x94\x82 ") +
+              ansi::dim(" /models") + ansi::dim(" Switch") +
+              ansi::dim(" \xe2\x94\x82 ") +
+              ansi::dim(" Ctrl+Q") + ansi::dim(" Quit");
+    }
     break;
   }
 

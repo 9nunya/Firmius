@@ -118,6 +118,8 @@ void AppState::clearItems() {
   activeThinkingItem_ = nullptr;
   scrollback_.clear();
   scrollOffset_ = 0;
+  userScrolledUp_ = false;
+  pinnedTopLine_ = -1;
   markDirty();
 }
 
@@ -195,6 +197,92 @@ AgentState& AppState::getOrCreateAgent(const std::string& agentId) {
 AgentState* AppState::findAgentState(const std::string& agentId) {
   auto it = agents_.find(agentId);
   return (it != agents_.end()) ? &it->second : nullptr;
+}
+
+const AgentState* AppState::findAgentState(const std::string& agentId) const {
+  auto it = agents_.find(agentId);
+  return (it != agents_.end()) ? &it->second : nullptr;
+}
+
+// ── Agent focus ──
+
+void AppState::focusAgent(const std::string& agentId) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  focusedAgentId_ = agentId;
+  // Update StatusBar fields from the focused agent's state
+  auto it = agents_.find(agentId);
+  if (it != agents_.end()) {
+    agentPurpose_ = it->second.personaName;
+    if (!it->second.modelId.empty()) {
+      modelLabel_ = it->second.providerId + "/" + it->second.modelId;
+    }
+    agentStatus_ = it->second.status;
+  }
+  markDirty();
+}
+
+std::string AppState::focusedAgentId() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!focusedAgentId_.empty()) return focusedAgentId_;
+  return agentId_;  // Fallback to primary agent
+}
+
+void AppState::setPrimaryAgentId(const std::string& id) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  primaryAgentId_ = id;
+}
+
+std::string AppState::primaryAgentId() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return primaryAgentId_;
+}
+
+std::vector<AgentState*> AppState::agentList() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  std::vector<AgentState*> result;
+  result.reserve(agents_.size());
+  for (auto& [id, agent] : agents_) {
+    result.push_back(const_cast<AgentState*>(&agent));
+  }
+  return result;
+}
+
+std::vector<std::string> AppState::siblingsOf(const std::string& agentId) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = agents_.find(agentId);
+  if (it == agents_.end()) return {};
+
+  const auto& agent = it->second;
+
+  // Check if this agent has children
+  std::vector<std::string> children;
+  for (const auto& [id, a] : agents_) {
+    if (a.parentId == agentId) children.push_back(id);
+  }
+
+  if (!children.empty()) {
+    // Cycle among children
+    return children;
+  }
+
+  // Cycle among siblings (same parentId), including self
+  std::vector<std::string> siblings;
+  for (const auto& [id, a] : agents_) {
+    if (a.parentId == agent.parentId) siblings.push_back(id);
+  }
+  return siblings;
+}
+
+std::string AppState::parentIdOf(const std::string& agentId) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = agents_.find(agentId);
+  if (it == agents_.end()) return {};
+  return it->second.parentId;
+}
+
+bool AppState::hasMultipleAgents() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return agents_.size() > 1;
 }
 
 // ── Streaming management ──
@@ -381,8 +469,17 @@ void AppState::appendScrollback(const std::vector<std::string>& lines) {
   if (static_cast<int>(scrollback_.size()) > kMaxScrollbackLines) {
     int excess = static_cast<int>(scrollback_.size()) - kMaxScrollbackLines;
     scrollback_.erase(scrollback_.begin(), scrollback_.begin() + excess);
-    // Adjust offset so the viewport stays stable.
     scrollOffset_ = std::max(0, scrollOffset_ - excess);
+    if (pinnedTopLine_ >= 0) {
+      pinnedTopLine_ = std::max(0, pinnedTopLine_ - excess);
+    }
+  }
+  // If user scrolled up and viewport is pinned, adjust offset to keep
+  // the viewport at the same absolute content position.
+  if (userScrolledUp_ && pinnedTopLine_ >= 0) {
+    int totalLines = static_cast<int>(scrollback_.size());
+    scrollOffset_ = totalLines - pinnedTopLine_;
+    if (scrollOffset_ < 0) scrollOffset_ = 0;
   }
   markDirty();
 }
@@ -426,6 +523,9 @@ void AppState::scrollUp(int amount) {
   }
   autoScroll_ = false;
   userScrolledUp_ = true;
+  // Pin the viewport so new content doesn't push the user down.
+  int totalLines = static_cast<int>(scrollback_.size());
+  pinnedTopLine_ = totalLines - scrollOffset_;
   markDirty();
 }
 
@@ -433,9 +533,15 @@ void AppState::scrollDown(int amount) {
   std::lock_guard<std::mutex> lock(mutex_);
   scrollOffset_ -= amount;
   if (scrollOffset_ <= 0) {
+    // Reached the bottom — release pin and re-enable auto-follow.
     scrollOffset_ = 0;
     autoScroll_ = true;
-    userScrolledUp_ = false;  // Re-enable auto-follow when back at bottom
+    userScrolledUp_ = false;
+    pinnedTopLine_ = -1;
+  } else if (userScrolledUp_ && pinnedTopLine_ >= 0) {
+    // Update pinned position to match new offset.
+    int totalLines = static_cast<int>(scrollback_.size());
+    pinnedTopLine_ = totalLines - scrollOffset_;
   }
   markDirty();
 }
@@ -445,6 +551,7 @@ void AppState::scrollToTop() {
   scrollOffset_ = static_cast<int>(scrollback_.size());
   autoScroll_ = false;
   userScrolledUp_ = true;
+  pinnedTopLine_ = 0;  // Pin to the very top
   markDirty();
 }
 
@@ -452,7 +559,8 @@ void AppState::scrollToBottom() {
   std::lock_guard<std::mutex> lock(mutex_);
   scrollOffset_ = 0;
   autoScroll_ = true;
-  userScrolledUp_ = false;  // Re-enable auto-follow
+  userScrolledUp_ = false;
+  pinnedTopLine_ = -1;  // Release pin, re-enable auto-follow
   markDirty();
 }
 

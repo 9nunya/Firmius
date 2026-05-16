@@ -4,6 +4,7 @@
 #include "DaemonSession.hpp"
 
 #include <string>
+#include <vector>
 
 namespace firmius::tui2 {
 
@@ -31,6 +32,10 @@ public:
 
   /// Load transcript snapshot for the current thread into state.
   void loadTranscript();
+
+  /// Execute a workflow by ID. Creates a thread if none exists.
+  bool executeWorkflow(const std::string &workflowId,
+                       const std::vector<std::string> &args = {});
 
 private:
   DaemonSession &session_;

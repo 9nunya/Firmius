@@ -20,7 +20,7 @@ TEST(TodoPresenterTest, CalledPhase) {
   TodoPresenter p;
   ToolCallItem item("call-1", "Todo", "agent-1");
   item.setArgs(R"({"patch":"[ ] task 1\n[*] task 2\n[x] task 3"})");
-  auto lines = p.render(item, 80);
+  auto lines = p.render(item, {}, 80);
   ASSERT_GE(lines.size(), 1u);
 }
 
@@ -29,7 +29,7 @@ TEST(TodoPresenterTest, FinishedSuccess) {
   ToolCallItem item("call-1", "Todo", "agent-1");
   item.setArgs(R"({"patch":"..."})");
   item.setResult(true, R"({"items":[{"status":"done","text":"task 1"},{"status":"pending","text":"task 2"}]})");
-  auto lines = p.render(item, 80);
+  auto lines = p.render(item, {}, 80);
   ASSERT_GE(lines.size(), 2u);
 }
 
@@ -46,7 +46,7 @@ TEST(ModeSwitchPresenterTest, CalledWithName) {
   ToolCallItem item("call-1", "ModeSwitch", "agent-1");
   item.setArgs(R"({"name":"forge"})");
   item.setPhase(ToolPhase::Called);
-  auto lines = p.render(item, 80);
+  auto lines = p.render(item, {}, 80);
   ASSERT_GE(lines.size(), 1u);
   EXPECT_NE(lines[0].find("forge"), std::string::npos);
 }
@@ -56,7 +56,7 @@ TEST(ModeSwitchPresenterTest, CalledClearMode) {
   ToolCallItem item("call-1", "ModeSwitch", "agent-1");
   item.setArgs(R"({"name":""})");
   item.setPhase(ToolPhase::Called);
-  auto lines = p.render(item, 80);
+  auto lines = p.render(item, {}, 80);
   ASSERT_GE(lines.size(), 1u);
   EXPECT_NE(lines[0].find("Clearing"), std::string::npos);
 }
@@ -66,7 +66,7 @@ TEST(ModeSwitchPresenterTest, Finished) {
   ToolCallItem item("call-1", "ModeSwitch", "agent-1");
   item.setArgs(R"({"name":"forge"})");
   item.setResult(true, R"({"to_mode":"forge"})");
-  auto lines = p.render(item, 80);
+  auto lines = p.render(item, {}, 80);
   ASSERT_GE(lines.size(), 1u);
   EXPECT_NE(lines[0].find("forge"), std::string::npos);
 }
@@ -84,7 +84,7 @@ TEST(SkillPresenterTest, FinishedSuccess) {
   ToolCallItem item("call-1", "Skill", "agent-1");
   item.setArgs(R"({"what":"pdf"})");
   item.setResult(true, R"({"name":"pdf","description":"PDF reader"})");
-  auto lines = p.render(item, 80);
+  auto lines = p.render(item, {}, 80);
   ASSERT_GE(lines.size(), 1u);
   EXPECT_NE(lines[0].find("pdf"), std::string::npos);
 }
@@ -103,7 +103,7 @@ TEST(McpPresenterTest, CalledPhase) {
   ToolCallItem item("call-1", "mcp__github__search", "agent-1");
   item.setArgs(R"({"query":"test","limit":10})");
   item.setPhase(ToolPhase::Called);
-  auto lines = p.render(item, 80);
+  auto lines = p.render(item, {}, 80);
   ASSERT_GE(lines.size(), 2u);
   EXPECT_NE(lines[0].find("github"), std::string::npos);
   EXPECT_NE(lines[0].find("search"), std::string::npos);
@@ -114,7 +114,7 @@ TEST(McpPresenterTest, FinishedSuccess) {
   ToolCallItem item("call-1", "mcp__github__search", "agent-1");
   item.setArgs(R"({"query":"test"})");
   item.setResult(true, R"({"results":[]})");
-  auto lines = p.render(item, 80);
+  auto lines = p.render(item, {}, 80);
   ASSERT_GE(lines.size(), 1u);
   EXPECT_NE(lines[0].find("done"), std::string::npos);
 }
@@ -131,7 +131,7 @@ TEST(GenericPresenterTest, MatchesEverything) {
 TEST(GenericPresenterTest, CalledPhase) {
   GenericPresenter p;
   ToolCallItem item("call-1", "SomeTool", "agent-1");
-  auto lines = p.render(item, 80);
+  auto lines = p.render(item, {}, 80);
   ASSERT_GE(lines.size(), 1u);
   EXPECT_NE(lines[0].find("SomeTool"), std::string::npos);
 }
@@ -140,7 +140,7 @@ TEST(GenericPresenterTest, FinishedSuccess) {
   GenericPresenter p;
   ToolCallItem item("call-1", "SomeTool", "agent-1");
   item.setResult(true, R"({"result":"ok"})");
-  auto lines = p.render(item, 80);
+  auto lines = p.render(item, {}, 80);
   ASSERT_GE(lines.size(), 1u);
   EXPECT_NE(lines[0].find("done"), std::string::npos);
 }
@@ -149,7 +149,7 @@ TEST(GenericPresenterTest, FinishedError) {
   GenericPresenter p;
   ToolCallItem item("call-1", "SomeTool", "agent-1");
   item.setResult(false, R"({"error":"failed"})");
-  auto lines = p.render(item, 80);
+  auto lines = p.render(item, {}, 80);
   ASSERT_GE(lines.size(), 1u);
   EXPECT_NE(lines[0].find("failed"), std::string::npos);
 }

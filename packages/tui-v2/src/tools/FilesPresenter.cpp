@@ -70,7 +70,7 @@ FilesResult parseResult(const std::string& json, const std::string& action) {
 
 } // namespace
 
-std::vector<std::string> FilesPresenter::render(const ToolCallItem& item, int /*width*/) const {
+std::vector<std::string> FilesPresenter::render(const ToolCallItem& item, const ToolRenderContext& /*ctx*/, int /*width*/) const {
   if (item.phase() == ToolPhase::Preparing) {
     return {ansi::fgRgb(220, 180, 80, "  \xe2\x9a\x99 Files")};
   }
