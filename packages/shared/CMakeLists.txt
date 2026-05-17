@@ -22,6 +22,7 @@ target_sources(firmius_shared PRIVATE
     src/utils/FrontmatterParser.cpp
     src/utils/Hashline.cpp
     src/ConfigLoader.cpp
+    src/HeuristicTokenizer.cpp
 )
 
 target_sources(firmius_shared PUBLIC
@@ -44,6 +45,8 @@ target_sources(firmius_shared PUBLIC
     include/IHost.hpp
     include/IHostProcess.hpp
     include/ITool.hpp
+    include/ITokenizer.hpp
+    include/HeuristicTokenizer.hpp
     include/IBenchmark.hpp
     include/utils/JSONSchemaFromJson.hpp
     include/HarnessEvents.hpp

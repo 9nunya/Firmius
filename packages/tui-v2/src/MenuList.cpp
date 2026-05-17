@@ -1,5 +1,6 @@
 #include "MenuList.hpp"
 #include "Terminal.hpp"
+#include "ThemeAnsi.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -205,24 +206,24 @@ std::vector<std::string> MenuList::render(int width) const {
   rebuildFiltered();
 
   // Title line.
-  lines.push_back(ansi::fgRgb(120, 180, 255,
-                  ansi::bold(ansi::fitToWidth(" " + title_, width))));
+  lines.push_back(theme_ansi::accent(
+      ansi::bold(ansi::fitToWidth(" " + title_, width))));
 
   // Separator.
-  lines.push_back(ansi::fgRgb(60, 60, 80, std::string(width, '-')));
+  lines.push_back(theme_ansi::divider(width));
 
   // Search line.
-  std::string searchLine = ansi::fgRgb(180, 180, 200, " /") + searchQuery_;
+  std::string searchLine = theme_ansi::foreground(" /") + searchQuery_;
   if (searchQuery_.empty()) {
-    searchLine += ansi::dim("type to filter...");
+    searchLine += theme_ansi::dim("type to filter...");
   }
-  searchLine += ansi::dim("  (" +
+  searchLine += theme_ansi::dim("  (" +
       std::to_string(filteredIndices_.size()) + "/" +
       std::to_string(items_.size()) + ")");
   lines.push_back(ansi::fitToWidth(searchLine, width));
 
   if (filteredIndices_.empty()) {
-    lines.push_back(ansi::dim(ansi::fitToWidth("  No matches", width)));
+    lines.push_back(theme_ansi::dim(ansi::fitToWidth("  No matches", width)));
   } else {
     // Visible window around the selected index.
     int totalItems = static_cast<int>(filteredIndices_.size());
@@ -235,22 +236,22 @@ std::vector<std::string> MenuList::render(int width) const {
       bool selected = (i == selectedIndex_);
       bool hovered = (i == hoveredIndex_);
 
-      std::string cursor = selected ? ansi::fgRgb(120, 220, 120, "> ")
+      std::string cursor = selected ? theme_ansi::success("> ")
                                      : "  ";
       std::string label = item.label;
       if (item.marked) {
-        label += " " + ansi::fgRgb(100, 200, 100, "\xe2\x9c\x94");
+        label += " " + theme_ansi::success("\xe2\x9c\x94");
       }
 
       std::string row = cursor + label;
       if (!item.detail.empty()) {
-        row += "  " + ansi::dim(item.detail);
+        row += "  " + theme_ansi::dim(item.detail);
       }
 
       if (selected) {
-        row = ansi::bgRgb(40, 40, 55, ansi::fitToWidth(row, width));
+        row = theme_ansi::selection(ansi::fitToWidth(row, width));
       } else if (hovered) {
-        row = ansi::bgRgb(30, 30, 42, ansi::fitToWidth(row, width));
+        row = theme_ansi::altPanel(ansi::fitToWidth(row, width));
       } else {
         row = ansi::fitToWidth(row, width);
       }
@@ -260,14 +261,68 @@ std::vector<std::string> MenuList::render(int width) const {
   }
 
   // Hint line.
-  std::string hints = ansi::dim(" \xe2\x86\x91\xe2\x86\x93 navigate") +
-                      ansi::dim(" \xe2\x94\x82 ") +
-                      ansi::dim("Enter select") +
-                      ansi::dim(" \xe2\x94\x82 ") +
-                      ansi::dim("Esc cancel");
+  std::string hints = theme_ansi::dim(" \xe2\x86\x91\xe2\x86\x93 navigate") +
+                      theme_ansi::dim(" \xe2\x94\x82 ") +
+                      theme_ansi::dim("Enter select") +
+                      theme_ansi::dim(" \xe2\x94\x82 ") +
+                      theme_ansi::dim("Esc cancel");
   lines.push_back(ansi::fitToWidth(hints, width));
 
   return lines;
+}
+
+bool MenuList::handleInput(const std::string& key) {
+  if (!isActive()) return false;
+
+  if (key == "\x1b") {
+    dismiss();
+    return true;
+  }
+  if (key == "\r" || key == "\n") {
+    selectCurrent();
+    dismiss();
+    return true;
+  }
+  if (key == "\x7f" || key == "\b") {
+    backspaceSearch();
+    return true;
+  }
+  if (key == "\x1b[A") {
+    moveUp();
+    return true;
+  }
+  if (key == "\x1b[B") {
+    moveDown();
+    return true;
+  }
+
+  for (unsigned char ch : key) {
+    if (ch >= 32 && ch < 127) {
+      appendToSearch(static_cast<char>(ch));
+    }
+  }
+  return true;
+}
+
+bool MenuList::handleMouse(const MouseEvent& event,
+                           int /*screenRow*/,
+                           int /*screenCol*/) {
+  if (!isActive()) return false;
+
+  if (event.type == MouseEvent::Type::Move) {
+    return false;
+  }
+
+  if (event.type == MouseEvent::Type::Scroll) {
+    if (event.button == MouseEvent::Button::ScrollUp) {
+      moveDown();
+    } else if (event.button == MouseEvent::Button::ScrollDown) {
+      moveUp();
+    }
+    return true;
+  }
+
+  return false;
 }
 
 } // namespace firmius::tui2

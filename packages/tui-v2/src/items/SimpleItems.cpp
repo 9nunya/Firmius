@@ -1,5 +1,6 @@
 #include "items/SimpleItems.hpp"
 #include "Terminal.hpp"
+#include "ThemeAnsi.hpp"
 
 #include <algorithm>
 #include <sstream>
@@ -57,13 +58,13 @@ int countWrappedLines(const std::string& text, int width, int prefixLen) {
 
 // ── UserMessageItem ──
 
-UserMessageItem::UserMessageItem(std::string text)
-    : text_(std::move(text)) {
+UserMessageItem::UserMessageItem(std::string text, std::string agentId)
+    : text_(std::move(text)), agentId_(std::move(agentId)) {
   // Immutable — mark clean after first render
 }
 
 std::vector<std::string> UserMessageItem::render(int width) const {
-  return wrapText(text_, width, ansi::bold(ansi::fgRgb(100, 140, 220, "> ")));
+  return wrapText(text_, width, ansi::bold(theme_ansi::accent("> ")));
 }
 
 int UserMessageItem::rowCount(int width) const {
@@ -76,7 +77,7 @@ ErrorMessageItem::ErrorMessageItem(std::string text)
     : text_(std::move(text)) {}
 
 std::vector<std::string> ErrorMessageItem::render(int width) const {
-  return wrapText(text_, width, ansi::fgRgb(220, 80, 80, "  ! "));
+  return wrapText(text_, width, theme_ansi::error("  ! "));
 }
 
 int ErrorMessageItem::rowCount(int width) const {
@@ -89,7 +90,7 @@ SystemNoticeItem::SystemNoticeItem(std::string text)
     : text_(std::move(text)) {}
 
 std::vector<std::string> SystemNoticeItem::render(int width) const {
-  return wrapText(text_, width, ansi::dim(ansi::fgRgb(120, 120, 140, "  ")));
+  return wrapText(text_, width, theme_ansi::dim("  "));
 }
 
 int SystemNoticeItem::rowCount(int width) const {

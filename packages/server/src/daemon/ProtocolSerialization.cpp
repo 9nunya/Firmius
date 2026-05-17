@@ -1388,6 +1388,10 @@ rapidjson::Value toJsonValue(const UiSnapshot &snapshot,
   if (snapshot.focusedAgent) {
     out.AddMember("focused_agent", toJsonValue(*snapshot.focusedAgent, allocator), allocator);
   }
+  if (snapshot.focusedAgentTodo) {
+    out.AddMember("focused_agent_todo",
+                  toJsonValue(*snapshot.focusedAgentTodo, allocator), allocator);
+  }
   if (snapshot.transcript) {
     out.AddMember("transcript", toJsonValue(*snapshot.transcript, allocator), allocator);
   }
@@ -1422,6 +1426,10 @@ UiSnapshot uiSnapshotFromJson(const rapidjson::Value &value) {
   if (value.HasMember("focused_thread")) snapshot.focusedThread = threadSnapshotFromJson(value["focused_thread"]);
   if (value.HasMember("agents")) snapshot.agents = agentTreeSnapshotFromJson(value["agents"]);
   if (value.HasMember("focused_agent")) snapshot.focusedAgent = agentRuntimeSnapshotFromJson(value["focused_agent"]);
+  if (value.HasMember("focused_agent_todo")) {
+    snapshot.focusedAgentTodo =
+        agentTodoSnapshotFromJson(value["focused_agent_todo"]);
+  }
   if (value.HasMember("transcript")) snapshot.transcript = transcriptSnapshotFromJson(value["transcript"]);
   if (value.HasMember("tool_calls")) snapshot.toolCalls = toolCallSnapshotListFromJson(value["tool_calls"]);
   if (value.HasMember("subagents")) snapshot.subagents = subagentActivitySnapshotFromJson(value["subagents"]);
@@ -1730,6 +1738,10 @@ rapidjson::Value toJsonValue(const AgentRuntimeSnapshot &snapshot,
   out.AddMember("model_id", jsonString(snapshot.modelId, allocator), allocator);
   out.AddMember("variant_name", jsonString(snapshot.variantName, allocator),
                 allocator);
+  out.AddMember("max_tokens", snapshot.maxTokens, allocator);
+  out.AddMember("context_window_tokens", snapshot.contextWindowTokens, allocator);
+  out.AddMember("context_used_tokens", snapshot.contextUsedTokens, allocator);
+  out.AddMember("context_sent_tokens", snapshot.contextSentTokens, allocator);
   rapidjson::Value pending(rapidjson::kArrayType);
   for (const auto &toolCallId : snapshot.pendingToolCalls) {
     pending.PushBack(jsonString(toolCallId, allocator), allocator);
@@ -1805,6 +1817,21 @@ AgentRuntimeSnapshot agentRuntimeSnapshotFromJson(const rapidjson::Value &value)
   if (value.HasMember("variant_name") && value["variant_name"].IsString()) {
     snapshot.variantName = value["variant_name"].GetString();
   }
+  if (value.HasMember("max_tokens") && value["max_tokens"].IsUint()) {
+    snapshot.maxTokens = value["max_tokens"].GetUint();
+  }
+  if (value.HasMember("context_window_tokens") &&
+      value["context_window_tokens"].IsUint()) {
+    snapshot.contextWindowTokens = value["context_window_tokens"].GetUint();
+  }
+  if (value.HasMember("context_used_tokens") &&
+      value["context_used_tokens"].IsUint()) {
+    snapshot.contextUsedTokens = value["context_used_tokens"].GetUint();
+  }
+  if (value.HasMember("context_sent_tokens") &&
+      value["context_sent_tokens"].IsUint()) {
+    snapshot.contextSentTokens = value["context_sent_tokens"].GetUint();
+  }
   if (value.HasMember("pending_tool_calls") &&
       value["pending_tool_calls"].IsArray()) {
     for (const auto &toolCallId : value["pending_tool_calls"].GetArray()) {
@@ -1842,6 +1869,45 @@ AgentRuntimeSnapshot agentRuntimeSnapshotFromJson(const rapidjson::Value &value)
   }
   if (value.HasMember("live") && value["live"].IsBool()) {
     snapshot.live = value["live"].GetBool();
+  }
+  return snapshot;
+}
+
+rapidjson::Value toJsonValue(const AgentTodoSnapshot &snapshot,
+                             rapidjson::Document::AllocatorType &allocator) {
+  rapidjson::Value out(rapidjson::kObjectType);
+  out.AddMember("thread_id", jsonString(snapshot.threadId, allocator), allocator);
+  out.AddMember("agent_id", jsonString(snapshot.agentId, allocator), allocator);
+  out.AddMember("next_id", snapshot.nextId, allocator);
+  rapidjson::Value items(rapidjson::kArrayType);
+  for (const auto &item : snapshot.items) {
+    auto itemJson = firmius::shared::toJson(item);
+    rapidjson::Value row(rapidjson::kObjectType);
+    row.CopyFrom(itemJson, allocator);
+    items.PushBack(row, allocator);
+  }
+  out.AddMember("items", items, allocator);
+  return out;
+}
+
+AgentTodoSnapshot agentTodoSnapshotFromJson(const rapidjson::Value &value) {
+  AgentTodoSnapshot snapshot;
+  if (!value.IsObject()) {
+    return snapshot;
+  }
+  if (value.HasMember("thread_id") && value["thread_id"].IsString()) {
+    snapshot.threadId = value["thread_id"].GetString();
+  }
+  if (value.HasMember("agent_id") && value["agent_id"].IsString()) {
+    snapshot.agentId = value["agent_id"].GetString();
+  }
+  if (value.HasMember("next_id") && value["next_id"].IsInt()) {
+    snapshot.nextId = value["next_id"].GetInt();
+  }
+  if (value.HasMember("items") && value["items"].IsArray()) {
+    for (const auto &item : value["items"].GetArray()) {
+      snapshot.items.push_back(firmius::shared::todoItemFromJson(item));
+    }
   }
   return snapshot;
 }
@@ -2146,6 +2212,28 @@ permissionQueueSnapshotFromJson(const rapidjson::Value &value) {
       value["permission_mode"].IsString()) {
     snapshot.permissionMode = firmius::shared::permissionModeFromStorageString(
         value["permission_mode"].GetString());
+  }
+  if (value.HasMember("pending") && value["pending"].IsArray()) {
+    for (const auto &item : value["pending"].GetArray()) {
+      if (!item.IsObject()) continue;
+      firmius::shared::PermissionEscalationRequest req;
+      if (item.HasMember("request_id") && item["request_id"].IsString()) {
+        req.requestId = item["request_id"].GetString();
+      }
+      if (item.HasMember("thread_id") && item["thread_id"].IsString()) {
+        req.threadId = item["thread_id"].GetString();
+      }
+      if (item.HasMember("agent_id") && item["agent_id"].IsString()) {
+        req.agentId = item["agent_id"].GetString();
+      }
+      if (item.HasMember("message") && item["message"].IsString()) {
+        req.message = item["message"].GetString();
+      }
+      if (item.HasMember("tool_name") && item["tool_name"].IsString()) {
+        req.toolName = item["tool_name"].GetString();
+      }
+      snapshot.pending.push_back(std::move(req));
+    }
   }
   return snapshot;
 }
@@ -2880,6 +2968,26 @@ AccountSnapshot accountSnapshotFromJson(const rapidjson::Value &value) {
   if (!value.IsObject()) {
     return snapshot;
   }
+  if (value.HasMember("provider_id") && value["provider_id"].IsString()) {
+    snapshot.providerId = value["provider_id"].GetString();
+  }
+  if (value.HasMember("identifier") && value["identifier"].IsString()) {
+    snapshot.identifier = value["identifier"].GetString();
+  }
+  if (value.HasMember("rate_limited") && value["rate_limited"].IsBool()) {
+    snapshot.rateLimited = value["rate_limited"].GetBool();
+  }
+  if (value.HasMember("backoff_until") && value["backoff_until"].IsInt64()) {
+    snapshot.backoffUntil = value["backoff_until"].GetInt64();
+  }
+  if (value.HasMember("metadata") && value["metadata"].IsObject()) {
+    for (auto it = value["metadata"].MemberBegin();
+         it != value["metadata"].MemberEnd(); ++it) {
+      if (it->name.IsString() && it->value.IsString()) {
+        snapshot.metadata[it->name.GetString()] = it->value.GetString();
+      }
+    }
+  }
   return snapshot;
 }
 
@@ -2921,6 +3029,35 @@ QuotaSnapshot quotaSnapshotFromJson(const rapidjson::Value &value) {
   QuotaSnapshot snapshot;
   if (!value.IsObject()) {
     return snapshot;
+  }
+  if (value.HasMember("provider_id") && value["provider_id"].IsString()) {
+    snapshot.providerId = value["provider_id"].GetString();
+  }
+  if (value.HasMember("buckets") && value["buckets"].IsObject()) {
+    for (auto it = value["buckets"].MemberBegin();
+         it != value["buckets"].MemberEnd(); ++it) {
+      if (!it->value.IsArray()) continue;
+      std::vector<firmius::shared::QuotaBucket> bucketList;
+      for (const auto &item : it->value.GetArray()) {
+        if (!item.IsObject()) continue;
+        firmius::shared::QuotaBucket bucket;
+        if (item.HasMember("name") && item["name"].IsString()) {
+          bucket.name = item["name"].GetString();
+        }
+        if (item.HasMember("remaining_fraction") &&
+            item["remaining_fraction"].IsFloat()) {
+          bucket.remainingFraction = item["remaining_fraction"].GetFloat();
+        }
+        if (item.HasMember("reset_time") && item["reset_time"].IsString()) {
+          bucket.resetTime = item["reset_time"].GetString();
+        }
+        if (item.HasMember("note") && item["note"].IsString()) {
+          bucket.note = item["note"].GetString();
+        }
+        bucketList.push_back(std::move(bucket));
+      }
+      snapshot.buckets[it->name.GetString()] = std::move(bucketList);
+    }
   }
   return snapshot;
 }
@@ -2977,6 +3114,19 @@ HookStatusSnapshot hookStatusSnapshotFromJson(const rapidjson::Value &value) {
   HookStatusSnapshot snapshot;
   if (!value.IsObject()) {
     return snapshot;
+  }
+  if (value.HasMember("hook_ids") && value["hook_ids"].IsArray()) {
+    for (const auto &id : value["hook_ids"].GetArray()) {
+      if (id.IsString()) snapshot.hookIds.push_back(id.GetString());
+    }
+  }
+  if (value.HasMember("hook_dirs") && value["hook_dirs"].IsArray()) {
+    for (const auto &dir : value["hook_dirs"].GetArray()) {
+      if (dir.IsString()) snapshot.hookDirs.push_back(dir.GetString());
+    }
+  }
+  if (value.HasMember("hook_count") && value["hook_count"].IsUint64()) {
+    snapshot.hookCount = value["hook_count"].GetUint64();
   }
   return snapshot;
 }
@@ -3475,6 +3625,21 @@ workflowExecutionSnapshotFromJson(const rapidjson::Value &value) {
   if (!value.IsObject()) {
     return snapshot;
   }
+  if (value.HasMember("workflow_id") && value["workflow_id"].IsString()) {
+    snapshot.workflowId = value["workflow_id"].GetString();
+  }
+  if (value.HasMember("name") && value["name"].IsString()) {
+    snapshot.name = value["name"].GetString();
+  }
+  if (value.HasMember("description") && value["description"].IsString()) {
+    snapshot.description = value["description"].GetString();
+  }
+  if (value.HasMember("slash_command") && value["slash_command"].IsString()) {
+    snapshot.slashCommand = value["slash_command"].GetString();
+  }
+  if (value.HasMember("hook") && value["hook"].IsBool()) {
+    snapshot.hook = value["hook"].GetBool();
+  }
   return snapshot;
 }
 
@@ -3498,6 +3663,15 @@ artifactCatalogSnapshotFromJson(const rapidjson::Value &value) {
   ArtifactCatalogSnapshot snapshot;
   if (!value.IsObject()) {
     return snapshot;
+  }
+  if (value.HasMember("thread_id") && value["thread_id"].IsString()) {
+    snapshot.threadId = value["thread_id"].GetString();
+  }
+  if (value.HasMember("artifacts") && value["artifacts"].IsArray()) {
+    for (const auto &entry : value["artifacts"].GetArray()) {
+      snapshot.artifacts.push_back(
+          firmius::shared::threadArtifactMetadataFromJson(entry));
+    }
   }
   return snapshot;
 }

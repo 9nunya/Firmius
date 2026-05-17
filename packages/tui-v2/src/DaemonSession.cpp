@@ -113,6 +113,15 @@ std::optional<firmius::daemon::AgentRuntimeSnapshot> DaemonSession::getAgent(
   return client_->getAgent(request);
 }
 
+std::optional<firmius::daemon::AgentTodoSnapshot> DaemonSession::getAgentTodo(
+    const std::string &threadId, const std::string &agentId) const {
+  if (!client_) return std::nullopt;
+  firmius::daemon::AgentTargetRequest request;
+  request.threadId = threadId;
+  request.agentId = agentId;
+  return client_->getAgentTodo(request);
+}
+
 firmius::daemon::AgentTreeSnapshot DaemonSession::listAgents(
     const std::string &threadId) const {
   if (!client_) return {};

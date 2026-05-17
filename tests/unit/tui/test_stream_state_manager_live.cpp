@@ -76,8 +76,8 @@ TEST(StreamStateManagerLiveTest, ProseBeforeAndAfterToolAreDistinctTimelineSegme
 
   state.handleAgentText(AgentText{"agent-1", "Before tool.", ""});
   state.handleAgentToolCall(
-      AgentToolCall{"agent-1", "tool-1", "Files",
-                    R"({"action":"Read","path":"src/main.cpp"})", ""});
+      AgentToolCall{"agent-1", "tool-1", "Read",
+                    R"({"path":"src/main.cpp"})", ""});
   state.handleAgentText(AgentText{"agent-1", "After tool.", ""});
 
   const auto &timeline = state.getTimeline();
@@ -95,8 +95,8 @@ TEST(StreamStateManagerLiveTest, ProseDeltasAfterToolAppendToNewEpisode) {
 
   state.handleAgentText(AgentText{"agent-1", "Intro.", ""});
   state.handleAgentToolCall(
-      AgentToolCall{"agent-1", "tool-1", "Files",
-                    R"({"action":"Read","path":"src/main.cpp"})", ""});
+      AgentToolCall{"agent-1", "tool-1", "Read",
+                    R"({"path":"src/main.cpp"})", ""});
   state.handleAgentText(AgentText{"agent-1", "Post ", ""});
   state.handleAgentText(AgentText{"agent-1", "tool prose.", ""});
 
@@ -114,8 +114,8 @@ TEST(StreamStateManagerLiveTest, ThinkingEpisodeResetsAcrossToolBoundary) {
   state.handleAgentThinking(AgentThinking{"agent-1", "Think A ", ""});
   state.handleAgentThinking(AgentThinking{"agent-1", "Think B", ""});
   state.handleAgentToolCall(
-      AgentToolCall{"agent-1", "tool-1", "Files",
-                    R"({"action":"Read","path":"src/main.cpp"})", ""});
+      AgentToolCall{"agent-1", "tool-1", "Read",
+                    R"({"path":"src/main.cpp"})", ""});
   state.handleAgentThinking(AgentThinking{"agent-1", "Think C", ""});
 
   const auto &timeline = state.getTimeline();
@@ -339,11 +339,11 @@ TEST(StreamStateManagerLiveTest, ProseBreaksQuickToolClusters) {
 
   state.handleAgentText(AgentText{"agent-1", "Intro", ""});
   state.handleAgentToolCall(
-      AgentToolCall{"agent-1", "tool-1", "Files",
-                    R"({"action":"Read","path":"a.cpp"})", ""});
+      AgentToolCall{"agent-1", "tool-1", "Read",
+                    R"({"path":"a.cpp"})", ""});
   state.handleAgentToolCall(
-      AgentToolCall{"agent-1", "tool-2", "Files",
-                    R"({"action":"Read","path":"b.cpp"})", ""});
+      AgentToolCall{"agent-1", "tool-2", "Read",
+                    R"({"path":"b.cpp"})", ""});
 
   int cluster_one = state.getToolCallClusterId("tool-1");
   int cluster_two = state.getToolCallClusterId("tool-2");
@@ -351,8 +351,8 @@ TEST(StreamStateManagerLiveTest, ProseBreaksQuickToolClusters) {
 
   state.handleAgentText(AgentText{"agent-1", "More prose", ""});
   state.handleAgentToolCall(
-      AgentToolCall{"agent-1", "tool-3", "Files",
-                    R"({"action":"Read","path":"c.cpp"})", ""});
+      AgentToolCall{"agent-1", "tool-3", "Read",
+                    R"({"path":"c.cpp"})", ""});
 
   int cluster_three = state.getToolCallClusterId("tool-3");
   EXPECT_GT(cluster_three, cluster_one);
@@ -362,8 +362,8 @@ TEST(StreamStateManagerLiveTest, RetryingMarksInFlightToolCallsAsCancelled) {
   StreamStateManager state;
 
   state.handleAgentToolCall(
-      AgentToolCall{"agent-1", "tool-1", "Files",
-                  R"({"action":"Read","path":"src/main.cpp"})", ""});
+      AgentToolCall{"agent-1", "tool-1", "Read",
+                  R"({"path":"src/main.cpp"})", ""});
 
   auto view = state.getToolView("tool-1");
   ASSERT_TRUE(static_cast<bool>(view));
@@ -383,7 +383,7 @@ TEST(StreamStateManagerLiveTest, RetryingClearsStuckPreparingToolCalls) {
   StreamStateManager state;
 
   state.handleAgentToolCallChunk(
-      AgentToolCallChunk{0, "agent-1", "tool-prep", "Files", "", ""});
+      AgentToolCallChunk{0, "agent-1", "tool-prep", "Read", "", ""});
 
   auto view = state.getToolView("tool-prep");
   ASSERT_TRUE(static_cast<bool>(view));
@@ -400,13 +400,13 @@ TEST(StreamStateManagerLiveTest, WhitespaceOnlyProseDoesNotBreakQuickToolCluster
   StreamStateManager state;
 
   state.handleAgentToolCall(
-      AgentToolCall{"agent-1", "tool-1", "Files",
-                    R"({"action":"Read","path":"a.cpp"})", ""});
+      AgentToolCall{"agent-1", "tool-1", "Read",
+                    R"({"path":"a.cpp"})", ""});
   state.handleAgentText(AgentText{"agent-1", "\n\n   \t", ""});
   state.handleAgentThinking(AgentThinking{"agent-1", "\n\r\n", ""});
   state.handleAgentToolCall(
-      AgentToolCall{"agent-1", "tool-2", "Files",
-                    R"({"action":"Read","path":"b.cpp"})", ""});
+      AgentToolCall{"agent-1", "tool-2", "Read",
+                    R"({"path":"b.cpp"})", ""});
 
   EXPECT_EQ(state.getToolCallClusterId("tool-1"),
             state.getToolCallClusterId("tool-2"));
@@ -452,19 +452,19 @@ TEST(StreamStateManagerLiveTest, ArgsBeforeNameChunkDoesNotRenderUntilNameArrive
   EXPECT_FALSE(firmius::tui::ShouldRenderToolCallView(*view));
 
   state.handleAgentToolCallChunk(
-      AgentToolCallChunk{0, "agent-1", "tool-1", "Files", "", ""});
+      AgentToolCallChunk{0, "agent-1", "tool-1", "Read", "", ""});
 
   view = state.getToolView("tool-1");
   ASSERT_TRUE(static_cast<bool>(view));
   EXPECT_EQ(view->phase, ToolPhase::Preparing);
-  EXPECT_EQ(view->name, "Files");
+  EXPECT_EQ(view->name, "Read");
   EXPECT_EQ(view->args, R"({"path":"src/main.cpp"})");
   EXPECT_TRUE(firmius::shared::ToolCallHasRenderableIdentity(*view));
   EXPECT_TRUE(firmius::tui::ShouldRenderToolCallView(*view));
 
   state.handleAgentToolCall(
-      AgentToolCall{"agent-1", "tool-1", "Files",
-                    R"({"action":"Read","path":"src/main.cpp"})", ""});
+      AgentToolCall{"agent-1", "tool-1", "Read",
+                    R"({"path":"src/main.cpp"})", ""});
 
   view = state.getToolView("tool-1");
   ASSERT_TRUE(static_cast<bool>(view));
@@ -516,7 +516,7 @@ TEST(StreamStateManagerLiveTest,
   StreamStateManager state;
 
   state.handleAgentToolCallChunk(
-      AgentToolCallChunk{0, "agent-1", "tool-prep", "Files", "", ""});
+      AgentToolCallChunk{0, "agent-1", "tool-prep", "Read", "", ""});
 
   auto view = state.getToolView("tool-prep");
   ASSERT_TRUE(static_cast<bool>(view));
@@ -533,8 +533,8 @@ TEST(StreamStateManagerLiveTest,
   StreamStateManager state;
 
   state.handleAgentToolCall(
-      AgentToolCall{"agent-1", "tool-1", "Files",
-                    R"({"action":"Read","path":"src/main.cpp"})", ""});
+      AgentToolCall{"agent-1", "tool-1", "Read",
+                    R"({"path":"src/main.cpp"})", ""});
 
   auto view = state.getToolView("tool-1");
   ASSERT_TRUE(static_cast<bool>(view));

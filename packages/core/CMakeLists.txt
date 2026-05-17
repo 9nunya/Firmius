@@ -20,7 +20,10 @@ target_sources(firmius_core PRIVATE
     src/environment/Environment.cpp
     src/environment/Permissions.cpp
     src/tools/FileEditTool.cpp
-    src/tools/FilesTool.cpp
+    src/tools/ReadTool.cpp
+    src/tools/ListTool.cpp
+    src/tools/GrepTool.cpp
+    src/tools/GlobTool.cpp
     src/tools/WebTool.cpp
     src/tools/ProcessTool.cpp
     src/tools/DelegateTool.cpp
@@ -58,6 +61,7 @@ target_sources(firmius_core PRIVATE
     src/agents/StreamSanityDetector.cpp
     src/agents/Agent.cpp
     src/agents/AgentPermissionChecks.cpp
+    src/memory/RecallIndex.cpp
     src/persistence/Journaler.cpp
     src/persistence/ThreadManager.cpp
     src/persistence/HistoryEditor.cpp
@@ -79,6 +83,8 @@ target_sources(firmius_core PRIVATE
     src/lsp/LspServerRegistry.cpp
     src/lsp/LspServerManager.cpp
     src/lsp/LspService.cpp
+    src/memory/EmbeddingStore.cpp
+    src/memory/EmbeddingWorker.cpp
 )
 
 target_sources(firmius_core PUBLIC
@@ -93,7 +99,10 @@ target_sources(firmius_core PUBLIC
     include/environment/Environment.hpp
     include/environment/Permissions.hpp
     include/tools/FileEditTool.hpp
-    include/tools/FilesTool.hpp
+    include/tools/ReadTool.hpp
+    include/tools/ListTool.hpp
+    include/tools/GrepTool.hpp
+    include/tools/GlobTool.hpp
     include/tools/WebTool.hpp
     include/tools/ProcessTool.hpp
     include/tools/DelegateTool.hpp
@@ -154,6 +163,8 @@ target_sources(firmius_core PUBLIC
     include/lsp/JsonRpcTransport.hpp
     include/lsp/LspServerManager.hpp
     include/lsp/LspService.hpp
+    include/memory/EmbeddingStore.hpp
+    include/memory/EmbeddingWorker.hpp
 )
 
 target_include_directories(firmius_core PUBLIC

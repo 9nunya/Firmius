@@ -80,10 +80,13 @@ std::string joinTargets(const std::vector<std::string> &targets) {
 } // namespace
 
 QuickToolCategory QuickToolCategoryForName(const std::string &name) {
-  if (name == "Files") {
+  if (name == "List") {
     return QuickToolCategory::List;
   }
-  if (name == "Search") {
+  if (name == "Read") {
+    return QuickToolCategory::Read;
+  }
+  if (name == "Grep" || name == "Glob" || name == "Search") {
     return QuickToolCategory::Search;
   }
   return QuickToolCategory::None;
@@ -107,12 +110,6 @@ QuickToolDescriptor DescribeQuickToolCall(const shared::ToolCallView &view) {
   const std::string action = stringArg(doc, "action");
 
   descriptor.category = QuickToolCategoryForName(view.name);
-  if (view.name == "Files" && action == "Read") {
-    descriptor.category = QuickToolCategory::Read;
-  } else if (view.name == "Files" &&
-             (action == "Grep" || action == "Glob")) {
-    descriptor.category = QuickToolCategory::Search;
-  }
   if (!IsQuickToolCategory(descriptor.category)) {
     return descriptor;
   }

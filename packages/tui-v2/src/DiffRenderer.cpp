@@ -1,5 +1,7 @@
 #include "DiffRenderer.hpp"
 #include "Terminal.hpp"
+#include "ThemeManager.hpp"
+#include "ThemeAnsi.hpp"
 
 #include <algorithm>
 #include <sstream>
@@ -17,6 +19,7 @@ struct DiffLine {
 };
 
 std::vector<std::string> renderDiffLines(const std::vector<DiffLine>& lines, int /*width*/) {
+  const auto& theme = ThemeManager::instance().currentTheme();
   std::vector<std::string> result;
   result.reserve(lines.size());
 
@@ -46,8 +49,8 @@ std::vector<std::string> renderDiffLines(const std::vector<DiffLine>& lines, int
     } else {
       // Flush any pending gap
       if (pendingOmitted > 0) {
-        std::string gap = ansi::dim(ansi::fgRgb(120, 120, 140,
-            "  ... (" + std::to_string(pendingOmitted) + " lines omitted) ..."));
+        std::string gap = theme_ansi::dim(
+            "  ... (" + std::to_string(pendingOmitted) + " lines omitted) ...");
         result.push_back(gap);
         pendingOmitted = 0;
       }
@@ -63,28 +66,37 @@ std::vector<std::string> renderDiffLines(const std::vector<DiffLine>& lines, int
     std::string lineNum;
     if (dl.type == '+') {
       newLine++;
-      lineNum = ansi::dim(ansi::fgRgb(80, 160, 80,
-          "   " + padNum(newLine, 4) + "  "));
+      lineNum = theme_ansi::dim("   " + padNum(newLine, 4) + "  ");
     } else if (dl.type == '-') {
       oldLine++;
-      lineNum = ansi::dim(ansi::fgRgb(160, 80, 80,
-          padNum(oldLine, 4) + "      "));
+      lineNum = theme_ansi::dim(padNum(oldLine, 4) + "      ");
     } else {
-      lineNum = ansi::dim(ansi::fgRgb(120, 120, 140,
-          padNum(oldLine, 4) + " " + padNum(newLine, 4) + " "));
+      lineNum = theme_ansi::dim(padNum(oldLine, 4) + " " + padNum(newLine, 4) + " ");
     }
 
     std::string prefix;
     std::string styled;
     if (dl.type == '+') {
-      prefix = ansi::fgRgb(100, 200, 120, "+");
-      styled = ansi::bgRgb(18, 72, 40, ansi::fgRgb(200, 255, 200, dl.content));
+      prefix = theme_ansi::success("+");
+      styled = ansi::bgRgb(theme.statusBar.streaming.normal.bg.r,
+                           theme.statusBar.streaming.normal.bg.g,
+                           theme.statusBar.streaming.normal.bg.b,
+                           ansi::fgRgb(theme.statusBar.streaming.normal.fg.r,
+                                       theme.statusBar.streaming.normal.fg.g,
+                                       theme.statusBar.streaming.normal.fg.b,
+                                       dl.content));
     } else if (dl.type == '-') {
-      prefix = ansi::fgRgb(220, 80, 80, "-");
-      styled = ansi::bgRgb(72, 18, 18, ansi::fgRgb(255, 200, 200, dl.content));
+      prefix = theme_ansi::error("-");
+      styled = ansi::bgRgb(theme.statusBar.error.normal.bg.r,
+                           theme.statusBar.error.normal.bg.g,
+                           theme.statusBar.error.normal.bg.b,
+                           ansi::fgRgb(theme.statusBar.error.normal.fg.r,
+                                       theme.statusBar.error.normal.fg.g,
+                                       theme.statusBar.error.normal.fg.b,
+                                       dl.content));
     } else {
-      prefix = ansi::dim(ansi::fgRgb(120, 120, 140, " "));
-      styled = ansi::dim(ansi::fgRgb(160, 160, 170, dl.content));
+      prefix = theme_ansi::dim(" ");
+      styled = theme_ansi::dim(dl.content);
     }
 
     result.push_back("  " + lineNum + prefix + styled);
@@ -92,8 +104,8 @@ std::vector<std::string> renderDiffLines(const std::vector<DiffLine>& lines, int
 
   // Flush trailing gap
   if (pendingOmitted > 0) {
-    std::string gap = ansi::dim(ansi::fgRgb(120, 120, 140,
-        "  ... (" + std::to_string(pendingOmitted) + " lines omitted) ..."));
+    std::string gap = theme_ansi::dim(
+        "  ... (" + std::to_string(pendingOmitted) + " lines omitted) ...");
     result.push_back(gap);
   }
 
@@ -106,7 +118,7 @@ std::vector<std::string> DiffRenderer::render(const std::string& diffPreview, in
   std::vector<std::string> result;
 
   if (diffPreview.empty()) {
-    result.push_back(ansi::dim(ansi::fgRgb(120, 120, 140, "  (no diff)")));
+    result.push_back(theme_ansi::dim("  (no diff)"));
     return result;
   }
 
@@ -121,7 +133,7 @@ std::vector<std::string> DiffRenderer::render(const std::string& diffPreview, in
   auto flushFile = [&]() {
     if (!currentLines.empty()) {
       if (!currentFile.empty()) {
-        result.push_back(ansi::bold(ansi::fgRgb(160, 200, 255, "  " + currentFile)));
+        result.push_back(ansi::bold(theme_ansi::accent("  " + currentFile)));
       }
       auto rendered = renderDiffLines(currentLines, width);
       result.insert(result.end(), rendered.begin(), rendered.end());
@@ -142,7 +154,7 @@ std::vector<std::string> DiffRenderer::render(const std::string& diffPreview, in
     if (line.rfind("@@ ", 0) == 0) {
       // Hunk header — flush previous lines, render header
       flushFile();
-      result.push_back(ansi::dim(ansi::fgRgb(120, 140, 180, "  " + line)));
+      result.push_back(theme_ansi::dim("  " + line));
       continue;
     }
     if (!line.empty()) {
@@ -166,13 +178,13 @@ std::vector<std::string> DiffRenderer::render(const std::string& diffPreview, in
   if (totalAdded > 0 || totalRemoved > 0) {
     std::string footer = "  ";
     if (totalAdded > 0) {
-      footer += ansi::fgRgb(100, 200, 120, "+" + std::to_string(totalAdded));
+      footer += theme_ansi::success("+" + std::to_string(totalAdded));
     }
     if (totalAdded > 0 && totalRemoved > 0) {
       footer += " ";
     }
     if (totalRemoved > 0) {
-      footer += ansi::fgRgb(220, 80, 80, "-" + std::to_string(totalRemoved));
+      footer += theme_ansi::error("-" + std::to_string(totalRemoved));
     }
     result.push_back(ansi::dim(footer));
   }

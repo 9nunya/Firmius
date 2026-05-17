@@ -2,6 +2,7 @@
 #include "tools/ToolArgsParser.hpp"
 #include "items/ToolCallItem.hpp"
 #include "Terminal.hpp"
+#include "ThemeAnsi.hpp"
 
 #include <rapidjson/document.h>
 #include <chrono>
@@ -27,7 +28,7 @@ std::string formatDuration(std::chrono::milliseconds ms) {
 
 std::vector<std::string> WebPresenter::render(const ToolCallItem& item, const ToolRenderContext& /*ctx*/, int /*width*/) const {
   if (item.phase() == ToolPhase::Preparing) {
-    return {ansi::fgRgb(220, 180, 80, "  \xe2\x9a\x99 Web")};
+    return {theme_ansi::warning("  \xe2\x9a\x99 Web")};
   }
 
   std::string action;
@@ -45,20 +46,20 @@ std::vector<std::string> WebPresenter::render(const ToolCallItem& item, const To
 
   if (item.phase() == ToolPhase::Called) {
     if (action == "Search" || action.empty()) {
-      return {ansi::fgRgb(220, 180, 80, "  \xe2\x9a\x99 Searching: \"" + query + "\"..."),
-              ansi::dim(ansi::fgRgb(120, 120, 140, "  " + formatDuration(item.elapsed())))};
+      return {theme_ansi::warning("  \xe2\x9a\x99 Searching: \"" + query + "\"..."),
+              theme_ansi::dim("  " + formatDuration(item.elapsed()))};
     }
     if (action == "Fetch") {
-      return {ansi::fgRgb(220, 180, 80, "  \xe2\x9a\x99 Fetching " + url + "..."),
-              ansi::dim(ansi::fgRgb(120, 120, 140, "  " + formatDuration(item.elapsed())))};
+      return {theme_ansi::warning("  \xe2\x9a\x99 Fetching " + url + "..."),
+              theme_ansi::dim("  " + formatDuration(item.elapsed()))};
     }
-    return {ansi::fgRgb(220, 180, 80, "  \xe2\x9a\x99 Web." + action)};
+    return {theme_ansi::warning("  \xe2\x9a\x99 Web." + action)};
   }
 
   // Finished
   bool success = item.success();
   auto color = [&](const std::string& s) {
-    return success ? ansi::fgRgb(100, 200, 120, s) : ansi::fgRgb(220, 80, 80, s);
+    return success ? theme_ansi::success(s) : theme_ansi::error(s);
   };
   std::string icon = success ? "\xe2\x9c\x93" : "\xe2\x9c\x97";
 

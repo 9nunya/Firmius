@@ -78,6 +78,17 @@ std::string AppState::agentContextWindow() const {
   return agentContextWindow_;
 }
 
+void AppState::setAgentContextUsage(ContextUsage usage) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  agentContextUsage_ = usage;
+  markDirty();
+}
+
+ContextUsage AppState::agentContextUsage() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return agentContextUsage_;
+}
+
 void AppState::setAgentStatus(firmius::shared::AgentStatus status) {
   std::lock_guard<std::mutex> lock(mutex_);
   agentStatus_ = status;
@@ -100,6 +111,17 @@ std::string AppState::modelLabel() const {
   return modelLabel_;
 }
 
+void AppState::setLiveMessage(const std::string &message) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  liveMessage_ = message;
+  markDirty();
+}
+
+std::string AppState::liveMessage() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return liveMessage_;
+}
+
 // ── Items (transcript) ──
 
 void AppState::addItem(std::unique_ptr<TranscriptItem> item) {
@@ -114,6 +136,7 @@ void AppState::clearItems() {
   toolCalls_.clear();
   processToTool_.clear();
   agents_.clear();
+  agentTodos_.clear();
   activeTextItem_ = nullptr;
   activeThinkingItem_ = nullptr;
   scrollback_.clear();
@@ -204,6 +227,22 @@ const AgentState* AppState::findAgentState(const std::string& agentId) const {
   return (it != agents_.end()) ? &it->second : nullptr;
 }
 
+std::unordered_map<std::string, AgentState>& AppState::agentsMut() {
+  return agents_;
+}
+
+void AppState::renameAgent(const std::string& oldId, const std::string& newId) {
+  auto it = agents_.find(oldId);
+  if (it == agents_.end()) return;
+  auto node = agents_.extract(oldId);
+  node.key() = newId;
+  agents_.insert(std::move(node));
+  // Update parentId references for children
+  for (auto& [id, agent] : agents_) {
+    if (agent.parentId == oldId) agent.parentId = newId;
+  }
+}
+
 // ── Agent focus ──
 
 void AppState::focusAgent(const std::string& agentId) {
@@ -215,6 +254,21 @@ void AppState::focusAgent(const std::string& agentId) {
     agentPurpose_ = it->second.personaName;
     if (!it->second.modelId.empty()) {
       modelLabel_ = it->second.providerId + "/" + it->second.modelId;
+    }
+    agentContextUsage_ = ContextUsage{
+        it->second.contextWindowTokens,
+        it->second.contextUsedTokens,
+        it->second.contextSentTokens,
+    };
+    if (it->second.contextWindowTokens > 0) {
+      const uint32_t displayTokens = it->second.contextUsedTokens > 0
+                                         ? it->second.contextUsedTokens
+                                         : it->second.contextSentTokens;
+      agentContextWindow_ = std::to_string(displayTokens / 1000) + "k/" +
+                            std::to_string(it->second.contextWindowTokens / 1000) +
+                            "k";
+    } else {
+      agentContextWindow_.clear();
     }
     agentStatus_ = it->second.status;
   }
@@ -285,6 +339,48 @@ bool AppState::hasMultipleAgents() const {
   return agents_.size() > 1;
 }
 
+std::string AppState::agentToolSummary(const std::string& agentId) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  std::vector<std::string> toolNames;
+  for (const auto& item : items_) {
+    if (item->type() == "ToolCall") {
+      const auto* tc = static_cast<const ToolCallItem*>(item.get());
+      if (tc->agentId() == agentId) {
+        toolNames.push_back(tc->toolName());
+      }
+    }
+  }
+  if (toolNames.empty()) return {};
+  // Show last 3 tool names
+  std::string summary;
+  size_t start = toolNames.size() > 3 ? toolNames.size() - 3 : 0;
+  for (size_t i = start; i < toolNames.size(); ++i) {
+    if (i > start) summary += ", ";
+    summary += toolNames[i];
+  }
+  if (toolNames.size() > 3) summary = "..." + summary;
+  return std::to_string(toolNames.size()) + " tools: " + summary;
+}
+
+void AppState::appendAgentActivity(const std::string& agentId, const std::string& line) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto& log = agentActivityLogs_[agentId];
+  log.push_back(line);
+  // Keep last 20 lines
+  if (log.size() > 20) {
+    log.erase(log.begin(), log.begin() + (log.size() - 20));
+  }
+}
+
+std::vector<std::string> AppState::agentActivityLog(const std::string& agentId, int maxLines) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = agentActivityLogs_.find(agentId);
+  if (it == agentActivityLogs_.end()) return {};
+  const auto& log = it->second;
+  int start = std::max(0, static_cast<int>(log.size()) - maxLines);
+  return std::vector<std::string>(log.begin() + start, log.end());
+}
+
 // ── Streaming management ──
 
 AgentTextItem* AppState::activeTextItem() const {
@@ -305,6 +401,28 @@ AgentThinkingItem* AppState::activeThinkingItem() const {
 void AppState::setActiveThinkingItem(AgentThinkingItem* item) {
   std::lock_guard<std::mutex> lock(mutex_);
   activeThinkingItem_ = item;
+}
+
+AgentTextItem* AppState::agentTextItem(const std::string& agentId) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = agentTextItems_.find(agentId);
+  return (it != agentTextItems_.end()) ? it->second : nullptr;
+}
+
+void AppState::setAgentTextItem(const std::string& agentId, AgentTextItem* item) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  agentTextItems_[agentId] = item;
+}
+
+AgentThinkingItem* AppState::agentThinkingItem(const std::string& agentId) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = agentThinkingItems_.find(agentId);
+  return (it != agentThinkingItems_.end()) ? it->second : nullptr;
+}
+
+void AppState::setAgentThinkingItem(const std::string& agentId, AgentThinkingItem* item) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  agentThinkingItems_[agentId] = item;
 }
 
 // ── Item span tracking ──
@@ -395,6 +513,56 @@ std::optional<PendingPermission> AppState::pendingPermission() const {
 bool AppState::hasPendingPermissions() const {
   std::lock_guard<std::mutex> lock(mutex_);
   return !pendingPermissions_.empty();
+}
+
+// ── Todos ──
+
+void AppState::setAgentTodos(
+    const std::string& agentId,
+    const std::vector<firmius::shared::TodoItem>& items) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (agentId.empty()) {
+    return;
+  }
+  agentTodos_[agentId] = items;
+  markDirty();
+}
+
+std::vector<firmius::shared::TodoItem>
+AppState::agentTodos(const std::string& agentId) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = agentTodos_.find(agentId);
+  if (it == agentTodos_.end()) {
+    return {};
+  }
+  return it->second;
+}
+
+std::vector<firmius::shared::TodoItem> AppState::focusedAgentTodos() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  const std::string agentId = !focusedAgentId_.empty() ? focusedAgentId_ : agentId_;
+  auto it = agentTodos_.find(agentId);
+  if (it == agentTodos_.end()) {
+    return {};
+  }
+  return it->second;
+}
+
+void AppState::clearTodos() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  agentTodos_.clear();
+  markDirty();
+}
+
+void AppState::toggleTodoVisibility() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  todoVisible_ = !todoVisible_;
+  markDirty();
+}
+
+bool AppState::todoVisible() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return todoVisible_;
 }
 
 // ── Input ──

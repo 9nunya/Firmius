@@ -538,6 +538,16 @@ struct UserMessageSent {
 };
 
 /**
+ * @brief Emitted when an agent's persisted todo list changes.
+ */
+struct AgentTodoUpdated {
+  std::string threadId;
+  std::string agentId;
+  AgentTodoList todo;
+  bool operator==(const AgentTodoUpdated &) const = default;
+};
+
+/**
  * @brief Emitted when an agent execution session finishes.
  */
 struct AgentFinished {
@@ -582,7 +592,7 @@ using AppEvent = std::variant<
     ThreadDeleted, ConfigUpdated, ModelsRefreshed, ProviderModelsFetchStarted,
     ProviderModelsFetchFinished, ModelDiscovered, ThreadTitleUpdated,
     MessageQueued, MessageDequeued, InternalMessageQueued,
-    InternalMessageDequeued, UserMessageSent, AgentFinished>;
+    InternalMessageDequeued, UserMessageSent, AgentTodoUpdated, AgentFinished>;
 
 } // namespace firmius::shared
 

@@ -1,6 +1,7 @@
 #include "agents/RollingContextManager.hpp"
 
 #include "ConfigLoader.hpp"
+#include "HeuristicTokenizer.hpp"
 #include "Message.hpp"
 #include "agents/ContextBudget.hpp"
 #include "persistence/ThreadManager.hpp"
@@ -8,17 +9,75 @@
 #include "utils/StringUtil.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
+#include <functional>
+#include <mutex>
 #include <optional>
+#include <queue>
 #include <sstream>
+#include <thread>
 #include <unordered_set>
 
 namespace firmius::core {
 
 namespace {
 
-constexpr double kApproxBytesPerToken = 4.0;
+const shared::HeuristicTokenizer kTokenizer;
+
+/// Background worker for async rolling memory maintenance.
+/// Processes maintain() calls off the hot path so LLM calls
+/// never block the agent loop.
+class RollingMemoryWorker {
+public:
+  using WorkFn = std::function<void()>;
+
+  static RollingMemoryWorker &instance() {
+    static RollingMemoryWorker w;
+    return w;
+  }
+
+  void enqueue(WorkFn fn) {
+    {
+      std::lock_guard lk(mu_);
+      queue_.push(std::move(fn));
+    }
+    cv_.notify_one();
+  }
+
+private:
+  RollingMemoryWorker() : worker_([this] { run(); }) {}
+
+  ~RollingMemoryWorker() {
+    {
+      std::lock_guard lk(mu_);
+      shutdown_ = true;
+    }
+    cv_.notify_one();
+    if (worker_.joinable()) worker_.join();
+  }
+
+  void run() {
+    for (;;) {
+      WorkFn fn;
+      {
+        std::unique_lock lk(mu_);
+        cv_.wait(lk, [this] { return shutdown_ || !queue_.empty(); });
+        if (shutdown_ && queue_.empty()) return;
+        fn = std::move(queue_.front());
+        queue_.pop();
+      }
+      if (fn) fn();
+    }
+  }
+
+  std::mutex mu_;
+  std::condition_variable cv_;
+  std::queue<WorkFn> queue_;
+  bool shutdown_ = false;
+  std::jthread worker_;
+};
 
 std::uint64_t nowEpochMs() {
   return static_cast<std::uint64_t>(
@@ -27,40 +86,37 @@ std::uint64_t nowEpochMs() {
           .count());
 }
 
-std::uint32_t estimateTokensForText(const std::string &text) {
-  if (text.empty()) {
-    return 0;
-  }
-  return static_cast<std::uint32_t>(
-      std::max(1.0, std::ceil(static_cast<double>(text.size()) /
-                              kApproxBytesPerToken)));
+std::uint32_t estimateTokensForText(const shared::ITokenizer &tok,
+                                    const std::string &text) {
+  return tok.count(text);
 }
 
-std::uint32_t estimateTurnTokens(const shared::AgentTurn &turn) {
+std::uint32_t estimateTurnTokens(const shared::ITokenizer &tok,
+                                 const shared::AgentTurn &turn) {
   std::uint32_t total = 0;
   for (const auto &msg : turn.messages) {
     for (const auto &part : msg.content) {
       if (const auto *txt = std::get_if<shared::TextContent>(&part)) {
-        total += estimateTokensForText(txt->text);
+        total += estimateTokensForText(tok, txt->text);
       } else if (const auto *thinking =
                      std::get_if<shared::ThinkingContent>(&part)) {
-        total += estimateTokensForText(thinking->thinking);
+        total += estimateTokensForText(tok, thinking->thinking);
       } else if (const auto *toolCall =
                      std::get_if<shared::ToolCallContent>(&part)) {
-        total += estimateTokensForText(toolCall->name);
-        total += estimateTokensForText(toolCall->args);
+        total += estimateTokensForText(tok, toolCall->name);
+        total += estimateTokensForText(tok, toolCall->args);
       } else if (const auto *toolResult =
                      std::get_if<shared::ToolResultContent>(&part)) {
-        total += estimateTokensForText(toolResult->result);
+        total += estimateTokensForText(tok, toolResult->result);
       } else if (const auto *notice =
                      std::get_if<shared::NoticeContent>(&part)) {
-        total += estimateTokensForText(notice->title);
-        total += estimateTokensForText(notice->message);
-        total += estimateTokensForText(notice->details);
+        total += estimateTokensForText(tok, notice->title);
+        total += estimateTokensForText(tok, notice->message);
+        total += estimateTokensForText(tok, notice->details);
       } else if (const auto *error = std::get_if<shared::ErrorContent>(&part)) {
-        total += estimateTokensForText(error->errorName);
-        total += estimateTokensForText(error->description);
-        total += estimateTokensForText(error->details);
+        total += estimateTokensForText(tok, error->errorName);
+        total += estimateTokensForText(tok, error->description);
+        total += estimateTokensForText(tok, error->details);
       }
     }
   }
@@ -291,38 +347,6 @@ std::string renderTurnForPrompt(const shared::AgentTurn &turn) {
   return out.str();
 }
 
-std::string buildWorkingMemoryPrompt(
-    const std::vector<const RollingMemoryChunk *> &activeReflections,
-    const std::vector<const RollingMemoryChunk *> &activeObservations,
-    const std::vector<RollingMemoryAnchorRecord> &anchors) {
-  std::ostringstream out;
-  out << "You are Firmius working-memory bridge composer.\n"
-         "Assemble a task-scoped memory packet from canonical anchors, active reflections, and active observations.\n"
-         "Return XML exactly in this shape:\n"
-         "<summary>...</summary>\n"
-         "<active_goal>...</active_goal>\n"
-         "<current_task>...</current_task>\n"
-         "<suggested_response>...</suggested_response>\n"
-         "<retrieval_tags><item>...</item></retrieval_tags>\n"
-         "<open_loops><item>...</item></open_loops>\n"
-         "<files_surfaces><item>...</item></files_surfaces>\n"
-         "Prefer canonical anchors first, then reflections, then live episodes.\n"
-         "Do not hallucinate missing facts; only compose from the supplied memory surfaces.\n\n";
-  out << "Canonical anchors:\n";
-  for (const auto &anchor : anchors) {
-    out << "- [" << anchor.anchorType << "] " << anchor.canonicalText << "\n";
-  }
-  out << "\nActive reflections:\n";
-  for (const auto *chunk : activeReflections) {
-    out << "- " << chunk->summary << "\n";
-  }
-  out << "\nActive observations:\n";
-  for (const auto *chunk : activeObservations) {
-    out << "- " << chunk->summary << "\n";
-  }
-  return out.str();
-}
-
 std::string buildObservationPrompt(const std::vector<shared::AgentTurn> &turns) {
   std::ostringstream out;
   out << "You are Firmius rolling memory observer.\n"
@@ -471,7 +495,7 @@ tailTurnIds(const shared::AgentHistory &history, std::uint32_t retainTailTokens)
   std::uint32_t total = 0;
   for (auto it = history.turns.rbegin(); it != history.turns.rend(); ++it) {
     keep.insert(it->turnId);
-    total += estimateTurnTokens(*it);
+    total += estimateTurnTokens(kTokenizer, *it);
     if (total >= retainTailTokens && keep.size() >= 2) {
       break;
     }
@@ -613,7 +637,7 @@ selectObservationTurns(const shared::AgentHistory &history,
       continue;
     }
     selected.push_back(turn);
-    total += estimateTurnTokens(turn);
+    total += estimateTurnTokens(kTokenizer, turn);
     if (total >= desiredTokens) {
       break;
     }
@@ -760,7 +784,7 @@ void RollingContextManager::maintain(shared::AgentContext &context,
 
     std::uint32_t sourceTokens = 0;
     for (const auto &turn : selectedTurns) {
-      sourceTokens += estimateTurnTokens(turn);
+      sourceTokens += estimateTurnTokens(kTokenizer, turn);
     }
     if (sourceTokens < thresholds.minimumChunkTokens &&
         currentContext < thresholds.emergencyThresholdTokens) {
@@ -815,7 +839,7 @@ void RollingContextManager::maintain(shared::AgentContext &context,
     chunk.openLoops = payload.openLoops;
     chunk.filesSurfaces = payload.filesSurfaces;
     chunk.retrievalTags = payload.retrievalTags;
-    chunk.summaryTokens = estimateTokensForText(chunk.summary);
+    chunk.summaryTokens = estimateTokensForText(kTokenizer, chunk.summary);
     chunk.createdAt = nowEpochMs();
     chunk.buffered = !activateImmediately;
     chunk.active = activateImmediately;
@@ -985,7 +1009,7 @@ void RollingContextManager::maintain(shared::AgentContext &context,
         reflection.filesSurfaces = payload.filesSurfaces;
         reflection.retrievalTags = payload.retrievalTags;
         reflection.sourceTokens = total;
-        reflection.summaryTokens = estimateTokensForText(reflection.summary);
+        reflection.summaryTokens = estimateTokensForText(kTokenizer, reflection.summary);
         reflection.createdAt = nowEpochMs();
         reflection.active = true;
         for (const auto &chunk : toReflect) {
@@ -1043,24 +1067,8 @@ void RollingContextManager::maintain(shared::AgentContext &context,
     for (const auto &chunk : state.observationChunks) {
       if (chunk.active && !chunk.superseded) activeObservationViewPtrs.push_back(&chunk);
     }
-    const auto updaterChoice = resolveMaintenanceModel(
-        context.config, context.config.rollingMemory.workingMemoryUpdater);
-    SummaryPayload bridgePayload = generateSummaryForPrompt(
-        updaterChoice,
-        buildWorkingMemoryPrompt(activeReflectionPtrs, activeObservationViewPtrs,
-                                 state.anchors),
-        abortSignal);
     RollingMemoryBridgeRecord bridge = buildBridgeRecord(
         state, activeReflectionPtrs, activeObservationViewPtrs);
-    if (!bridgePayload.activeGoal.empty()) {
-      bridge.targetTaskSignature = bridgePayload.activeGoal;
-    }
-    if (!bridgePayload.suggestedResponse.empty()) {
-      bridge.executionHint = bridgePayload.suggestedResponse;
-    }
-    if (!bridgePayload.currentTask.empty() && bridge.rationale.empty()) {
-      bridge.rationale = bridgePayload.currentTask;
-    }
     state.bridgeInFlight = true;
     if (!state.lastBridgeId.empty() && !state.bridges.empty() &&
         state.bridges.back().bridgeId == state.lastBridgeId) {

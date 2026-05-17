@@ -29,7 +29,8 @@ TEST(ToolPresenterRegistryTest, ProcessMatchesCorrectTools) {
   EXPECT_TRUE(p.matches("Process"));
   EXPECT_TRUE(p.matches("Python"));
   EXPECT_FALSE(p.matches("Edit"));
-  EXPECT_FALSE(p.matches("Files"));
+  EXPECT_FALSE(p.matches("Read"));
+  EXPECT_FALSE(p.matches("Grep"));
 }
 
 TEST(ToolPresenterRegistryTest, GenericMatchesEverything) {

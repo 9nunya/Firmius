@@ -1,6 +1,7 @@
 #include "tools/SkillPresenter.hpp"
 #include "items/ToolCallItem.hpp"
 #include "Terminal.hpp"
+#include "ThemeAnsi.hpp"
 
 #include <rapidjson/document.h>
 
@@ -12,7 +13,7 @@ bool SkillPresenter::matches(const std::string& toolName) const {
 
 std::vector<std::string> SkillPresenter::render(const ToolCallItem& item, const ToolRenderContext& /*ctx*/, int /*width*/) const {
   if (item.phase() == ToolPhase::Preparing) {
-    return {ansi::fgRgb(220, 180, 80, "  \xe2\x9a\x99 Skill")};
+    return {theme_ansi::warning("  \xe2\x9a\x99 Skill")};
   }
 
   if (item.phase() == ToolPhase::Called) {
@@ -24,7 +25,7 @@ std::vector<std::string> SkillPresenter::render(const ToolCallItem& item, const 
         what = doc["what"].GetString();
       }
     }
-    return {ansi::fgRgb(220, 180, 80, "  \xe2\x9a\x99 Loading skill " + what + "...")};
+    return {theme_ansi::warning("  \xe2\x9a\x99 Loading skill " + what + "...")};
   }
 
   // Finished
@@ -39,9 +40,9 @@ std::vector<std::string> SkillPresenter::render(const ToolCallItem& item, const 
   if (name.empty()) name = "skill";
 
   if (item.success()) {
-    return {ansi::fgRgb(100, 200, 120, "  \xe2\x9c\x93 Skill " + name + " loaded")};
+    return {theme_ansi::success("  \xe2\x9c\x93 Skill " + name + " loaded")};
   }
-  return {ansi::fgRgb(220, 80, 80, "  \xe2\x9c\x97 Skill load failed")};
+  return {theme_ansi::error("  \xe2\x9c\x97 Skill load failed")};
 }
 
 } // namespace firmius::tui2

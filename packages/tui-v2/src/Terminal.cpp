@@ -399,13 +399,58 @@ std::string strip(const std::string& text) {
   return std::regex_replace(text, ansiRegex, "");
 }
 
+namespace {
+
+char32_t decodeUtf8Width(const std::string& text, size_t& pos) {
+  if (pos >= text.size()) return U'\xFFFD';
+  auto b = static_cast<uint8_t>(text[pos]);
+  char32_t cp;
+  int extra;
+  if (b < 0x80) {
+    cp = b;
+    extra = 0;
+  } else if ((b & 0xE0) == 0xC0 && pos + 1 < text.size()) {
+    cp = b & 0x1F;
+    extra = 1;
+  } else if ((b & 0xF0) == 0xE0 && pos + 2 < text.size()) {
+    cp = b & 0x0F;
+    extra = 2;
+  } else if ((b & 0xF8) == 0xF0 && pos + 3 < text.size()) {
+    cp = b & 0x07;
+    extra = 3;
+  } else {
+    ++pos;
+    return U'\xFFFD';
+  }
+  for (int i = 0; i < extra; ++i) {
+    ++pos;
+    auto cb = static_cast<uint8_t>(text[pos]);
+    cp = (cp << 6) | (cb & 0x3F);
+  }
+  ++pos;
+  return cp;
+}
+
+int codepointWidth(char32_t cp) {
+  if (cp == 0 || cp < 32 || (cp >= 0x7F && cp < 0xA0)) return 0;
+  if (cp >= 0x1100) return 2;
+  return 1;
+}
+
+} // namespace
+
 int visibleWidth(const std::string& text) {
-  return static_cast<int>(strip(text).size());
+  const auto plain = strip(text);
+  int width = 0;
+  for (size_t pos = 0; pos < plain.size();) {
+    width += codepointWidth(decodeUtf8Width(plain, pos));
+  }
+  return width;
 }
 
 std::string fitToWidth(const std::string& text, int width, char pad) {
   int visible = visibleWidth(text);
-  if (visible >= width) {
+  if (visible >= width || width <= 0) {
     return text;
   }
   return text + std::string(width - visible, pad);

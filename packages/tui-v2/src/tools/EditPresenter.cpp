@@ -2,6 +2,7 @@
 #include "items/ToolCallItem.hpp"
 #include "DiffRenderer.hpp"
 #include "Terminal.hpp"
+#include "ThemeAnsi.hpp"
 
 #include "utils/ToolView.hpp"
 
@@ -46,7 +47,7 @@ std::vector<std::string> EditPresenter::render(const ToolCallItem& item, const T
   std::string dname = displayToolName(item.toolName());
 
   if (item.phase() == ToolPhase::Preparing) {
-    return {ansi::fgRgb(220, 180, 80, "  \xe2\x9a\x99 " + dname)};
+    return {theme_ansi::warning("  \xe2\x9a\x99 " + dname)};
   }
 
   auto args = parseArgs(item.args());
@@ -56,11 +57,11 @@ std::vector<std::string> EditPresenter::render(const ToolCallItem& item, const T
     std::vector<std::string> result;
     std::string header = "  \xe2\x9a\x99 " + dname;
     if (!args.path.empty()) header += " " + args.path;
-    result.push_back(ansi::fgRgb(220, 180, 80, header));
+    result.push_back(theme_ansi::warning(header));
 
     // Check if diffs already arrived
     if (item.diffEdits().empty()) {
-      result.push_back(ansi::dim(ansi::fgRgb(120, 120, 140, "  Loading diff...")));
+      result.push_back(theme_ansi::dim("  Loading diff..."));
     } else {
       // Render diffs
       for (const auto& edit : item.diffEdits()) {
@@ -94,7 +95,7 @@ std::vector<std::string> EditPresenter::render(const ToolCallItem& item, const T
       if (totalAdded > 0 && totalRemoved > 0) header += " ";
       if (totalRemoved > 0) header += "-" + std::to_string(totalRemoved);
     }
-    result.push_back(ansi::fgRgb(100, 200, 120, header));
+    result.push_back(theme_ansi::success(header));
   } else {
     // On error: show tool name + path (from args or from first diff edit)
     std::string filePath = args.path;
@@ -104,12 +105,12 @@ std::vector<std::string> EditPresenter::render(const ToolCallItem& item, const T
     std::string header = "  \xe2\x9c\x97 " + dname;
     if (!filePath.empty()) header += " " + filePath;
     header += " failed";
-    result.push_back(ansi::fgRgb(220, 80, 80, header));
+    result.push_back(theme_ansi::error(header));
   }
 
   // Render diffs
   if (item.diffEdits().empty()) {
-    result.push_back(ansi::dim(ansi::fgRgb(120, 120, 140, "  (no diff available)")));
+    result.push_back(theme_ansi::dim("  (no diff available)"));
   } else {
     for (size_t i = 0; i < item.diffEdits().size(); ++i) {
       if (i > 0) result.push_back("");  // blank line between files
@@ -123,7 +124,7 @@ std::vector<std::string> EditPresenter::render(const ToolCallItem& item, const T
     rapidjson::Document doc;
     doc.Parse(item.result().c_str());
     if (!doc.HasParseError() && doc.IsObject() && doc.HasMember("error") && doc["error"].IsString()) {
-      result.push_back(ansi::fgRgb(220, 80, 80, "  " + std::string(doc["error"].GetString())));
+      result.push_back(theme_ansi::error("  " + std::string(doc["error"].GetString())));
     }
   }
 

@@ -51,15 +51,17 @@ bool DaemonServer::start() {
   if (running_.exchange(true)) {
     return true;
   }
+  // Create the service before listening so early client RPCs can safely route
+  // to waitForReady(), then open IPC before heavy init so clients can receive
+  // InitProgress events during auto-start.
   service_ = std::make_unique<DaemonService>();
-  service_->start();
   if (!transport_.listen()) {
-    service_->shutdown();
     service_.reset();
     running_ = false;
     return false;
   }
   acceptThread_ = std::jthread([this](std::stop_token) { acceptLoop(); });
+  service_->start();
   return true;
 }
 
@@ -237,6 +239,18 @@ void DaemonServer::acceptLoop() {
                     auto result = service_->getAgent(registeredClientId, target);
                     if (!result.has_value()) {
                       rpc->sendError(id, -32000, "agent not found");
+                      return;
+                    }
+                    auto resultValue = toJsonValue(*result, respAlloc);
+                    rpc->sendResponse(id, resultValue);
+                    return;
+                  }
+                  if (method == kRpcAgentTodoGet) {
+                    auto target = params ? agentTargetRequestFromJson(*params)
+                                         : AgentTargetRequest{};
+                    auto result = service_->getAgentTodo(registeredClientId, target);
+                    if (!result.has_value()) {
+                      rpc->sendError(id, -32000, "agent todo not found");
                       return;
                     }
                     auto resultValue = toJsonValue(*result, respAlloc);

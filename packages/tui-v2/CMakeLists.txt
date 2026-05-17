@@ -9,6 +9,8 @@ target_sources(firmius_tui_v2 PRIVATE
     src/ActionDispatcher.cpp
     src/Terminal.cpp
     src/AnsiParser.cpp
+    src/GlintRenderer.cpp
+    src/ThemeManager.cpp
     src/StatusBar.cpp
     src/AgentTabBar.cpp
     src/InputBar.cpp
@@ -18,6 +20,8 @@ target_sources(firmius_tui_v2 PRIVATE
     src/CommandManager.cpp
     src/WorkflowCommand.cpp
     src/MenuList.cpp
+    src/InfoOverlay.cpp
+    src/AccountsOverlay.cpp
     # Items
     src/items/SimpleItems.cpp
     src/items/StreamingItems.cpp
@@ -30,7 +34,10 @@ target_sources(firmius_tui_v2 PRIVATE
     src/tools/ProcessPresenter.cpp
     src/tools/DelegatePresenter.cpp
     src/tools/EditPresenter.cpp
-    src/tools/FilesPresenter.cpp
+    src/tools/ReadPresenter.cpp
+    src/tools/ListPresenter.cpp
+    src/tools/GrepPresenter.cpp
+    src/tools/GlobPresenter.cpp
     src/tools/ArtifactsPresenter.cpp
     src/tools/WebPresenter.cpp
     src/tools/LspPresenter.cpp
@@ -74,7 +81,10 @@ target_sources(firmius_tui_v2_tests PRIVATE
     tests/ProcessPresenterTest.cpp
     tests/DelegatePresenterTest.cpp
     tests/EditPresenterTest.cpp
-    tests/FilesPresenterTest.cpp
+    tests/ReadPresenterTest.cpp
+    tests/ListPresenterTest.cpp
+    tests/GrepPresenterTest.cpp
+    tests/GlobPresenterTest.cpp
     tests/ArtifactsPresenterTest.cpp
     tests/WebPresenterTest.cpp
     tests/LspPresenterTest.cpp
@@ -86,6 +96,8 @@ target_sources(firmius_tui_v2_tests PRIVATE
     src/KeybindRegistry.cpp
     src/AnsiParser.cpp
     src/Terminal.cpp
+    src/GlintRenderer.cpp
+    src/ThemeManager.cpp
     src/ActionDispatcher.cpp
     src/DaemonSession.cpp
     src/StatusBar.cpp
@@ -97,6 +109,8 @@ target_sources(firmius_tui_v2_tests PRIVATE
     src/CommandManager.cpp
     src/WorkflowCommand.cpp
     src/MenuList.cpp
+    src/InfoOverlay.cpp
+    src/AccountsOverlay.cpp
     # Items
     src/items/SimpleItems.cpp
     src/items/StreamingItems.cpp
@@ -109,7 +123,10 @@ target_sources(firmius_tui_v2_tests PRIVATE
     src/tools/ProcessPresenter.cpp
     src/tools/DelegatePresenter.cpp
     src/tools/EditPresenter.cpp
-    src/tools/FilesPresenter.cpp
+    src/tools/ReadPresenter.cpp
+    src/tools/ListPresenter.cpp
+    src/tools/GrepPresenter.cpp
+    src/tools/GlobPresenter.cpp
     src/tools/ArtifactsPresenter.cpp
     src/tools/WebPresenter.cpp
     src/tools/LspPresenter.cpp

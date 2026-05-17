@@ -3,6 +3,7 @@
 
 #include "Context.hpp"
 #include "IProvider.hpp"
+#include "ITokenizer.hpp"
 #include "Metrics.hpp"
 
 #include <cstddef>
@@ -12,6 +13,7 @@
 namespace firmius::core {
 
 shared::ContextWindowMetrics estimateContextWindowMetrics(
+    const shared::ITokenizer &tok,
     const shared::AgentHistory &requestHistory,
     const std::vector<firmius::provider::ToolDefinition> &tools);
 

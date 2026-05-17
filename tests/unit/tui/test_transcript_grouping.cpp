@@ -13,9 +13,9 @@ using firmius::tui::QuickToolGroupSummary;
 
 TEST(TranscriptGroupingTest, DescribesFileReadsCompactly) {
   ToolCallView view;
-  view.name = "Files";
+  view.name = "Read";
   view.args =
-      R"({"action":"Read","path":"/mnt/SHIT/Projects/Firmius/src/main.cpp","start_line":12,"end_line":28})";
+      R"({"path":"/mnt/SHIT/Projects/Firmius/src/main.cpp","start_line":12,"end_line":28})";
 
   auto descriptor = DescribeQuickToolCall(view);
   EXPECT_EQ(descriptor.category, QuickToolCategory::Read);
@@ -34,8 +34,8 @@ TEST(TranscriptGroupingTest, DescribesSearchesWithPatternAndPath) {
 
 TEST(TranscriptGroupingTest, DescribesDirectoryListingsCompactly) {
   ToolCallView view;
-  view.name = "Files";
-  view.args = R"({"action":"List","path":"/mnt/SHIT/Projects/Firmius/src/tools"})";
+  view.name = "List";
+  view.args = R"({"path":"/mnt/SHIT/Projects/Firmius/src/tools"})";
 
   auto descriptor = DescribeQuickToolCall(view);
   EXPECT_EQ(descriptor.category, QuickToolCategory::List);
@@ -51,10 +51,10 @@ TEST(TranscriptGroupingTest, UnnamedQuickToolRowsDoNotProduceDescriptors) {
   EXPECT_EQ(descriptor.category, QuickToolCategory::None);
   EXPECT_TRUE(descriptor.target.empty());
 
-  view.name = "Files";
-  view.args = R"({"action":"Read","path":"src/main.cpp","start_line":1,"end_line":5})";
+  view.name = "Read";
+  view.args = R"({"path":"src/main.cpp","start_line":1,"end_line":5})";
   descriptor = DescribeQuickToolCall(view);
-  EXPECT_EQ(descriptor.category, QuickToolCategory::List);
+  EXPECT_EQ(descriptor.category, QuickToolCategory::Read);
 }
 
 TEST(TranscriptGroupingTest, GroupLabelDeduplicatesTargets) {

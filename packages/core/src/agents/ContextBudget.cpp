@@ -1,5 +1,6 @@
 #include "agents/ContextBudget.hpp"
 
+#include "ITokenizer.hpp"
 #include "Message.hpp"
 
 #include <algorithm>
@@ -12,15 +13,9 @@ namespace firmius::core {
 
 namespace {
 
-constexpr double kApproxBytesPerToken = 4.0;
-
-std::uint32_t estimateTokensForText(const std::string &text) {
-  if (text.empty()) {
-    return 0;
-  }
-  return static_cast<std::uint32_t>(
-      std::max(1.0, std::ceil(static_cast<double>(text.size()) /
-                              kApproxBytesPerToken)));
+uint32_t estimateTokensForText(const shared::ITokenizer &tok,
+                               const std::string &text) {
+  return tok.count(text);
 }
 
 std::string bucketLabelForTurn(const shared::AgentTurn &turn) {
@@ -56,7 +51,8 @@ void addBucket(std::unordered_map<std::string, std::uint32_t> &buckets,
   buckets[label] += tokens;
 }
 
-void accountMessageContent(std::unordered_map<std::string, std::uint32_t> &buckets,
+void accountMessageContent(const shared::ITokenizer &tok,
+                           std::unordered_map<std::string, std::uint32_t> &buckets,
                            const shared::AgentTurn &turn,
                            const shared::Message &msg) {
   const bool isSystem = msg.role == shared::Role::System;
@@ -64,37 +60,37 @@ void accountMessageContent(std::unordered_map<std::string, std::uint32_t> &bucke
     if (const auto *txt = std::get_if<shared::TextContent>(&part)) {
       addBucket(buckets,
                 isSystem ? bucketLabelForTurn(turn) : "conversation_history",
-                estimateTokensForText(txt->text));
+                estimateTokensForText(tok, txt->text));
     } else if (const auto *thinking =
                    std::get_if<shared::ThinkingContent>(&part)) {
       addBucket(buckets, "conversation_history",
-                estimateTokensForText(thinking->thinking));
+                estimateTokensForText(tok, thinking->thinking));
     } else if (const auto *toolCall =
                    std::get_if<shared::ToolCallContent>(&part)) {
       addBucket(buckets, "tool_history",
-                estimateTokensForText(toolCall->name) +
-                    estimateTokensForText(toolCall->args));
+                estimateTokensForText(tok, toolCall->name) +
+                    estimateTokensForText(tok, toolCall->args));
     } else if (const auto *toolResult =
                    std::get_if<shared::ToolResultContent>(&part)) {
       addBucket(buckets, "tool_history",
-                estimateTokensForText(toolResult->result));
+                estimateTokensForText(tok, toolResult->result));
     } else if (const auto *image = std::get_if<shared::ImageContent>(&part)) {
       addBucket(buckets, "images",
-                estimateTokensForText(image->mediaType) +
-                    estimateTokensForText(image->url) +
-                    estimateTokensForText(image->detail));
+                estimateTokensForText(tok, image->mediaType) +
+                    estimateTokensForText(tok, image->url) +
+                    estimateTokensForText(tok, image->detail));
     } else if (const auto *notice = std::get_if<shared::NoticeContent>(&part)) {
       addBucket(buckets, isSystem ? bucketLabelForTurn(turn)
                                   : "conversation_history",
-                estimateTokensForText(notice->title) +
-                    estimateTokensForText(notice->message) +
-                    estimateTokensForText(notice->details));
+                estimateTokensForText(tok, notice->title) +
+                    estimateTokensForText(tok, notice->message) +
+                    estimateTokensForText(tok, notice->details));
     } else if (const auto *error = std::get_if<shared::ErrorContent>(&part)) {
       addBucket(buckets, isSystem ? bucketLabelForTurn(turn)
                                   : "conversation_history",
-                estimateTokensForText(error->errorName) +
-                    estimateTokensForText(error->description) +
-                    estimateTokensForText(error->details));
+                estimateTokensForText(tok, error->errorName) +
+                    estimateTokensForText(tok, error->description) +
+                    estimateTokensForText(tok, error->details));
     }
   }
 }
@@ -112,21 +108,22 @@ std::string humanizeBucketLabel(const std::string &label) {
 } // namespace
 
 shared::ContextWindowMetrics estimateContextWindowMetrics(
+    const shared::ITokenizer &tok,
     const shared::AgentHistory &requestHistory,
     const std::vector<firmius::provider::ToolDefinition> &tools) {
   std::unordered_map<std::string, std::uint32_t> bucketTotals;
 
   for (const auto &turn : requestHistory.turns) {
     for (const auto &msg : turn.messages) {
-      accountMessageContent(bucketTotals, turn, msg);
+      accountMessageContent(tok, bucketTotals, turn, msg);
     }
   }
 
   for (const auto &tool : tools) {
     addBucket(bucketTotals, "tool_schemas",
-              estimateTokensForText(tool.name) +
-                  estimateTokensForText(tool.description) +
-                  estimateTokensForText(tool.inputSchema));
+              estimateTokensForText(tok, tool.name) +
+                  estimateTokensForText(tok, tool.description) +
+                  estimateTokensForText(tok, tool.inputSchema));
   }
 
   shared::ContextWindowMetrics metrics;

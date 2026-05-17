@@ -32,7 +32,10 @@
 #include "tools/LspTool.hpp"
 #include "tools/DelegateTool.hpp"
 #include "tools/FileEditTool.hpp"
-#include "tools/FilesTool.hpp"
+#include "tools/ReadTool.hpp"
+#include "tools/ListTool.hpp"
+#include "tools/GrepTool.hpp"
+#include "tools/GlobTool.hpp"
 #include "tools/FleetTool.hpp"
 #include "tools/FleetLockRespondTool.hpp"
 #include "tools/FleetLockTool.hpp"
@@ -41,6 +44,7 @@
 #include "tools/ProcessTool.hpp"
 #include "tools/PythonExecuteTool.hpp"
 #include "tools/SkillLoadTool.hpp"
+#include "tools/TodoWriteTool.hpp"
 #include "tools/WebTool.hpp"
 #include "lsp/LspServerManager.hpp"
 #include "utils/HistoryMetrics.hpp"
@@ -640,7 +644,13 @@ Engine::Engine() {
   });
 
   toolRegistry.registerToolFactory(
-      "Files", []() { return std::make_unique<FilesTool>(); });
+      "Read", []() { return std::make_unique<ReadTool>(); });
+  toolRegistry.registerToolFactory(
+      "List", []() { return std::make_unique<ListTool>(); });
+  toolRegistry.registerToolFactory(
+      "Grep", []() { return std::make_unique<GrepTool>(); });
+  toolRegistry.registerToolFactory(
+      "Glob", []() { return std::make_unique<GlobTool>(); });
   toolRegistry.registerToolFactory(
       "Edit", []() { return std::make_unique<FileEditTool>(); });
   toolRegistry.registerToolFactory(
@@ -659,6 +669,8 @@ Engine::Engine() {
       "Python", []() { return std::make_unique<PythonExecuteTool>(); });
   toolRegistry.registerToolFactory(
       "Skill", []() { return std::make_unique<SkillLoadTool>(); });
+  toolRegistry.registerToolFactory(
+      "Todo", []() { return std::make_unique<TodoWriteTool>(); });
   toolRegistry.registerToolFactory(
       "Artifacts", []() { return std::make_unique<ArtifactsTool>(); });
   toolRegistry.registerToolFactory(

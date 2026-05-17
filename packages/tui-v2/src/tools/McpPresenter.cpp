@@ -1,6 +1,7 @@
 #include "tools/McpPresenter.hpp"
 #include "items/ToolCallItem.hpp"
 #include "Terminal.hpp"
+#include "ThemeAnsi.hpp"
 
 #include <rapidjson/document.h>
 
@@ -30,12 +31,12 @@ std::vector<std::string> McpPresenter::render(const ToolCallItem& item, const To
   if (!tool.empty()) displayName += ": " + tool;
 
   if (item.phase() == ToolPhase::Preparing) {
-    return {ansi::fgRgb(220, 180, 80, "  \xe2\x9a\x99 " + displayName)};
+    return {theme_ansi::warning("  \xe2\x9a\x99 " + displayName)};
   }
 
   if (item.phase() == ToolPhase::Called) {
     std::vector<std::string> result;
-    result.push_back(ansi::fgRgb(220, 180, 80, "  \xe2\x9a\x99 " + displayName));
+    result.push_back(theme_ansi::warning("  \xe2\x9a\x99 " + displayName));
 
     // Show truncated input overview — top-level keys, 4 chars per value
     if (!item.args().empty()) {
@@ -60,7 +61,7 @@ std::vector<std::string> McpPresenter::render(const ToolCallItem& item, const To
           overview += key + ": " + val;
         }
         if (!overview.empty()) {
-          result.push_back(ansi::dim(ansi::fgRgb(140, 140, 160, "  " + overview)));
+          result.push_back(theme_ansi::dim("  " + overview));
         }
       }
     }
@@ -69,9 +70,9 @@ std::vector<std::string> McpPresenter::render(const ToolCallItem& item, const To
 
   // Finished
   if (item.success()) {
-    return {ansi::fgRgb(100, 200, 120, "  \xe2\x9c\x93 " + displayName + " \xe2\x80\x94 done")};
+    return {theme_ansi::success("  \xe2\x9c\x93 " + displayName + " \xe2\x80\x94 done")};
   }
-  return {ansi::fgRgb(220, 80, 80, "  \xe2\x9c\x97 " + displayName + " \xe2\x80\x94 failed")};
+  return {theme_ansi::error("  \xe2\x9c\x97 " + displayName + " \xe2\x80\x94 failed")};
 }
 
 } // namespace firmius::tui2

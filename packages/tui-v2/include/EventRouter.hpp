@@ -42,6 +42,7 @@ private:
   void handleMessageDequeued();
   void handlePermissionEscalation(const std::string &json);
   void handlePermissionResolved(const std::string &json);
+  void handleAgentTodoUpdated(const std::string &json);
   void handleModelSwitched(const std::string &json);
   void handleThreadTitleUpdated(const std::string &json);
   void handleConfigUpdated();

@@ -35,6 +35,12 @@ struct PendingPermission {
   bool allowAlways = true;
 };
 
+struct ContextUsage {
+  uint32_t windowTokens = 0;
+  uint32_t usedTokens = 0;
+  uint32_t sentTokens = 0;
+};
+
 /// Track where an item is rendered in the terminal.
 struct ItemSpan {
   size_t itemIndex;
@@ -66,12 +72,16 @@ public:
 
   void setAgentContextWindow(const std::string &ctx);
   std::string agentContextWindow() const;
+  void setAgentContextUsage(ContextUsage usage);
+  ContextUsage agentContextUsage() const;
 
   void setAgentStatus(firmius::shared::AgentStatus status);
   firmius::shared::AgentStatus agentStatus() const;
 
   void setModelLabel(const std::string &label);
   std::string modelLabel() const;
+  void setLiveMessage(const std::string &message);
+  std::string liveMessage() const;
 
   // ── Items (transcript) ──
   void addItem(std::unique_ptr<TranscriptItem> item);
@@ -98,6 +108,8 @@ public:
   AgentState& getOrCreateAgent(const std::string& agentId);
   AgentState* findAgentState(const std::string& agentId);
   const AgentState* findAgentState(const std::string& agentId) const;
+  std::unordered_map<std::string, AgentState>& agentsMut();
+  void renameAgent(const std::string& oldId, const std::string& newId);
 
   // ── Agent focus ──
   void focusAgent(const std::string& agentId);
@@ -109,12 +121,25 @@ public:
   std::string parentIdOf(const std::string& agentId) const;
   bool hasMultipleAgents() const;
 
+  /// One-line summary of tool calls for an agent (e.g. "Edit, Bash, Read").
+  std::string agentToolSummary(const std::string& agentId) const;
+
+  /// Activity log for an agent (last N human-readable lines).
+  void appendAgentActivity(const std::string& agentId, const std::string& line);
+  std::vector<std::string> agentActivityLog(const std::string& agentId, int maxLines = 3) const;
+
   // ── Streaming management ──
   AgentTextItem* activeTextItem() const;
   void setActiveTextItem(AgentTextItem* item);
 
   AgentThinkingItem* activeThinkingItem() const;
   void setActiveThinkingItem(AgentThinkingItem* item);
+
+  // Per-agent streaming pointers
+  AgentTextItem* agentTextItem(const std::string& agentId) const;
+  void setAgentTextItem(const std::string& agentId, AgentTextItem* item);
+  AgentThinkingItem* agentThinkingItem(const std::string& agentId) const;
+  void setAgentThinkingItem(const std::string& agentId, AgentThinkingItem* item);
 
   // ── Item span tracking for in-place re-render ──
   const std::vector<ItemSpan>& itemSpans() const;
@@ -135,6 +160,15 @@ public:
   void clearPendingPermissions();
   std::optional<PendingPermission> pendingPermission() const;
   bool hasPendingPermissions() const;
+
+  // ── Todos ──
+  void setAgentTodos(const std::string& agentId,
+                     const std::vector<firmius::shared::TodoItem>& items);
+  std::vector<firmius::shared::TodoItem> agentTodos(const std::string& agentId) const;
+  std::vector<firmius::shared::TodoItem> focusedAgentTodos() const;
+  void clearTodos();
+  void toggleTodoVisibility();
+  bool todoVisible() const;
 
   // ── Input ──
   void setInputBuffer(const std::string &text);
@@ -182,19 +216,29 @@ private:
   std::string primaryAgentId_;  // Root agent ID (set once)
   std::string agentPurpose_;
   std::string agentContextWindow_;
+  ContextUsage agentContextUsage_;
   firmius::shared::AgentStatus agentStatus_ = firmius::shared::AgentStatus::Idle;
   std::string modelLabel_;
+  std::string liveMessage_;
 
   // ── Item-based transcript ──
   std::vector<std::unique_ptr<TranscriptItem>> items_;
   std::vector<ItemSpan> itemSpans_;
 
   // ── Streaming pointers (not owned) ──
+  // Global pointers for the focused agent (kept for backward compat)
   AgentTextItem* activeTextItem_ = nullptr;
   AgentThinkingItem* activeThinkingItem_ = nullptr;
+  // Per-agent streaming pointers
+  std::unordered_map<std::string, AgentTextItem*> agentTextItems_;
+  std::unordered_map<std::string, AgentThinkingItem*> agentThinkingItems_;
+  // Per-agent activity log (human-readable lines)
+  std::unordered_map<std::string, std::vector<std::string>> agentActivityLogs_;
 
   int queuedMessageCount_ = 0;
   std::deque<PendingPermission> pendingPermissions_;
+  std::unordered_map<std::string, std::vector<firmius::shared::TodoItem>> agentTodos_;
+  bool todoVisible_ = true;
   std::string inputBuffer_;
 
   // ── Scrollback ──

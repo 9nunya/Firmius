@@ -69,7 +69,7 @@ TEST(ChatWindowHelpersTest, HidesCalledRowsWithoutUsableNameEvenWhenArgsExist) {
 
   EXPECT_FALSE(firmius::tui::ShouldRenderToolCallView(view));
 
-  view.name = "Files";
+  view.name = "Read";
   EXPECT_TRUE(firmius::tui::ShouldRenderToolCallView(view));
 }
 
@@ -527,7 +527,7 @@ TEST(ChatWindowHelpersTest, FocusedSubagentToolCallIgnoresParentSummons) {
   child_entry.agentId = "child-agent";
 
   ToolCallView child_view;
-  child_view.name = "Files";
+  child_view.name = "Read";
 
   EXPECT_TRUE(firmius::tui::ShouldRenderFocusedSubagentToolCall(
       child_entry, child_view, "child-agent"));
@@ -851,9 +851,9 @@ TEST(ChatWindowHelpersTest,
   Message assistant;
   assistant.role = Role::Assistant;
   assistant.content = {
-      ToolCallContent{"read-1", "Files",
-                      R"({"action":"Read","path":"src/main.cpp","start_line":1,"end_line":3})"},
-      ToolCallContent{"ls-1", "Files", R"({"action":"List","path":"src"})"},
+      ToolCallContent{"read-1", "Read",
+                      R"({"path":"src/main.cpp","start_line":1,"end_line":3})"},
+      ToolCallContent{"ls-1", "List", R"({"path":"src"})"},
   };
   Message tool_result;
   tool_result.role = Role::ToolResult;

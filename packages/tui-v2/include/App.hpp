@@ -8,10 +8,13 @@
 #include "CommandManager.hpp"
 #include "DaemonSession.hpp"
 #include "EventRouter.hpp"
+#include "AccountsOverlay.hpp"
+#include "InfoOverlay.hpp"
 #include "InputBar.hpp"
 #include "KeybindRegistry.hpp"
 #include "Layout.hpp"
 #include "MenuList.hpp"
+#include "Overlay.hpp"
 #include "StatusBar.hpp"
 #include "Terminal.hpp"
 #include <atomic>
@@ -63,7 +66,10 @@ private:
   // Command handlers.
   void openModelsMenu();
   void openResumeMenu();
+  void openAccountsOverlay(const std::string& providerId);
+  void applyTheme(const std::string& name);
   void dismissMenu();
+  void dismissOverlay();
 
   // Agent focus management.
   void switchToAgentTranscript(const std::string& agentId);
@@ -83,7 +89,10 @@ private:
   AgentTabBar agentTabBar_;
   InputBar inputBar_;
   BottomBar bottomBar_;
-  MenuList menu_;
+  MenuList menuList_;
+  InfoOverlay infoOverlay_;
+  AccountsOverlay accountsOverlay_;
+  Overlay* activeOverlay_ = nullptr;
 
   // Focus tracking.
   std::string lastFocusedAgentId_;
@@ -119,6 +128,9 @@ private:
   friend class NewCmd;
   friend class ModelsCmd;
   friend class ResumeCmd;
+  friend class AccountsCmd;
+  friend class ThemeCmd;
+  friend class AccountsOverlay;
 };
 
 } // namespace firmius::tui2

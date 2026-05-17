@@ -10,6 +10,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 /**
@@ -99,6 +100,12 @@ struct AgentState {
   std::vector<std::string>
       recentToolCallSignatures; ///< Hash of "toolName:args" for recent calls
                                 ///< (insanity loop detection)
+
+  /// Content-hash dedup map for tool outputs. Maps hash(toolName+result)
+  /// to a reference string ("↪ identical to event #N"). Populated at
+  /// append time to collapse duplicate tool results (e.g. 50 read_file
+  /// calls on the same file → 1 full + 49 references).
+  std::unordered_map<uint64_t, std::string> toolOutputDedup;
 
   /// Currently active mode (qualified name, e.g. "diagnose" or "forge:apply").
   /// Empty when no mode is active. Mutated by the mode_switch tool;

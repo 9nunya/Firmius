@@ -92,6 +92,8 @@ std::string appEventTypeName(const firmius::shared::AppEvent &event) {
           return "model_switched";
         } else if constexpr (std::is_same_v<T, firmius::shared::ConfigUpdated>) {
           return "config_updated";
+        } else if constexpr (std::is_same_v<T, firmius::shared::AgentTodoUpdated>) {
+          return "agent_todo_updated";
         } else {
           return "runtime_event";
         }
@@ -165,6 +167,10 @@ rapidjson::Document serializeAppEventDocument(const AppEvent &event) {
           rapidjson::Value turnValue(rapidjson::kObjectType);
           turnValue.CopyFrom(turnJson, doc.GetAllocator());
           doc.AddMember("turn", turnValue, doc.GetAllocator());
+          auto metricsJson = firmius::shared::toJson(e.aggregateMetrics);
+          rapidjson::Value metricsValue(rapidjson::kObjectType);
+          metricsValue.CopyFrom(metricsJson, doc.GetAllocator());
+          doc.AddMember("aggregateMetrics", metricsValue, doc.GetAllocator());
           return doc;
         } else if constexpr (std::is_same_v<T, firmius::shared::AgentFinished>) {
           auto doc = basicEventDocument<T>("AgentFinished");
@@ -198,6 +204,19 @@ rapidjson::Document serializeAppEventDocument(const AppEvent &event) {
                         doc.GetAllocator());
           doc.AddMember("images", imagesToJson(e.images, doc.GetAllocator()),
                         doc.GetAllocator());
+          return doc;
+        } else if constexpr (std::is_same_v<T, firmius::shared::AgentTodoUpdated>) {
+          auto doc = basicEventDocument<T>("AgentTodoUpdated");
+          doc.AddMember("threadId",
+                        rapidjson::Value(e.threadId.c_str(), doc.GetAllocator()).Move(),
+                        doc.GetAllocator());
+          doc.AddMember("agentId",
+                        rapidjson::Value(e.agentId.c_str(), doc.GetAllocator()).Move(),
+                        doc.GetAllocator());
+          auto todo = firmius::shared::toJson(e.todo);
+          rapidjson::Value todoValue(rapidjson::kObjectType);
+          todoValue.CopyFrom(todo, doc.GetAllocator());
+          doc.AddMember("todo", todoValue, doc.GetAllocator());
           return doc;
         } else if constexpr (std::is_same_v<T, firmius::shared::MessageQueued>) {
           auto doc = basicEventDocument<T>("MessageQueued");
@@ -1095,6 +1114,19 @@ DaemonService::getAgent(const std::string &clientId,
   return buildAgentSnapshotLocked(threadId, agentId, focusedAgentId);
 }
 
+std::optional<AgentTodoSnapshot>
+DaemonService::getAgentTodo(const std::string &clientId,
+                            const AgentTargetRequest &request) const {
+  const std::string threadId = resolveThreadIdForRequest(clientId, request.threadId);
+  const std::string agentId =
+      resolveAgentIdForRequest(clientId, threadId, request.agentId);
+  if (threadId.empty() || agentId.empty()) {
+    return std::nullopt;
+  }
+  std::lock_guard<std::mutex> runtimeLock(runtimeMutex_);
+  return buildAgentTodoSnapshotLocked(threadId, agentId);
+}
+
 std::optional<AgentRuntimeSnapshot>
 DaemonService::focusAgent(const std::string &clientId,
                           const AgentTargetRequest &request) {
@@ -1914,6 +1946,7 @@ UiSnapshot DaemonService::uiSnapshot(const std::string &clientId,
     snapshot.agents = listAgents(clientId, AgentTargetRequest{threadId, agentId});
     if (!agentId.empty()) {
       snapshot.focusedAgent = getAgent(clientId, AgentTargetRequest{threadId, agentId});
+      snapshot.focusedAgentTodo = getAgentTodo(clientId, AgentTargetRequest{threadId, agentId});
     }
   }
   if (request.includeTranscript && !threadId.empty() && !agentId.empty()) {
@@ -2419,6 +2452,23 @@ DaemonService::buildAgentSnapshotLocked(const std::string &threadId,
     snapshot.modelId = ctx.config.modelId;
     snapshot.variantName = ctx.config.modelVariant;
     snapshot.maxTokens = ctx.config.maxTokens.value_or(0);
+    snapshot.contextUsedTokens = ctx.aggregateMetrics.tokens.contextSize;
+    snapshot.contextSentTokens = ctx.aggregateMetrics.context.sentTokens;
+    if (auto provider =
+            firmius::provider::ProviderRegistry::instance().getProvider(
+                ctx.config.providerId)) {
+      snapshot.contextWindowTokens =
+          provider->getModelInfo(ctx.config.modelId).contextWindow;
+    }
+    if (snapshot.contextWindowTokens == 0) {
+      try {
+        firmius::core::ThreadManager tm(
+            firmius::core::ThreadManager::defaultBasePath());
+        snapshot.contextWindowTokens =
+            tm.loadRollingMemoryState(threadId, agentId).lastContextWindow;
+      } catch (...) {
+      }
+    }
     snapshot.pendingToolCalls = ctx.state.pendingToolCalls;
     snapshot.ownedProcesses = ctx.state.ownedProcesses;
     snapshot.blockingProcessIds = ctx.state.blockingProcessIds;
@@ -2426,6 +2476,22 @@ DaemonService::buildAgentSnapshotLocked(const std::string &threadId,
     snapshot.running = liveAgent->isRunning();
     snapshot.booting = liveAgent->isBooting();
   }
+  return snapshot;
+}
+
+std::optional<AgentTodoSnapshot>
+DaemonService::buildAgentTodoSnapshotLocked(const std::string &threadId,
+                                            const std::string &agentId) const {
+  if (threadId.empty() || agentId.empty()) {
+    return std::nullopt;
+  }
+  firmius::core::ThreadManager tm(firmius::core::ThreadManager::defaultBasePath());
+  const auto todo = tm.getAgentTodo(threadId, agentId);
+  AgentTodoSnapshot snapshot;
+  snapshot.threadId = threadId;
+  snapshot.agentId = agentId;
+  snapshot.nextId = todo.nextId;
+  snapshot.items = todo.items;
   return snapshot;
 }
 

@@ -4,7 +4,10 @@
 #include "tools/ProcessPresenter.hpp"
 #include "tools/DelegatePresenter.hpp"
 #include "tools/EditPresenter.hpp"
-#include "tools/FilesPresenter.hpp"
+#include "tools/ReadPresenter.hpp"
+#include "tools/ListPresenter.hpp"
+#include "tools/GrepPresenter.hpp"
+#include "tools/GlobPresenter.hpp"
 #include "tools/ArtifactsPresenter.hpp"
 #include "tools/WebPresenter.hpp"
 #include "tools/LspPresenter.hpp"
@@ -25,7 +28,10 @@ inline void registerAllPresenters() {
   registry.registerPresenter(std::make_unique<ProcessPresenter>());
   registry.registerPresenter(std::make_unique<DelegatePresenter>());
   registry.registerPresenter(std::make_unique<EditPresenter>());
-  registry.registerPresenter(std::make_unique<FilesPresenter>());
+  registry.registerPresenter(std::make_unique<ReadPresenter>());
+  registry.registerPresenter(std::make_unique<ListPresenter>());
+  registry.registerPresenter(std::make_unique<GrepPresenter>());
+  registry.registerPresenter(std::make_unique<GlobPresenter>());
   registry.registerPresenter(std::make_unique<ArtifactsPresenter>());
   registry.registerPresenter(std::make_unique<WebPresenter>());
   registry.registerPresenter(std::make_unique<LspPresenter>());

@@ -1,4 +1,5 @@
 #include "tools/TodoWriteTool.hpp"
+#include "harness/Harness.hpp"
 #include "persistence/ThreadManager.hpp"
 #include "IAgent.hpp"
 #include "utils/StringUtil.hpp"
@@ -195,6 +196,8 @@ shared::ToolResult TodoWriteTool::execute(const rapidjson::Value &input,
 
     newList.nextId = std::max(maxId + 1, 1);
     tm.writeAgentTodo(threadId, agentId, newList);
+    firmius::core::Harness::instance().publishEvent(
+        shared::AgentTodoUpdated{threadId, agentId, newList});
 
     rapidjson::Document doc;
     doc.SetObject();

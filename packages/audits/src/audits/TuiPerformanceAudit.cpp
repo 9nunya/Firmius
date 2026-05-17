@@ -125,8 +125,8 @@ void emitSubagentChurn(TuiState &tuiState, int frame) {
     childTool.agentId = childId;
     childTool.parentId = "agent-1";
     childTool.toolCallId = "child-read-" + std::to_string(frame % 16);
-    childTool.toolName = "Files";
-    childTool.toolArgs = "{\"action\":\"Read\",\"path\":\"src/main.cpp\"}";
+    childTool.toolName = "Read";
+    childTool.toolArgs = "{\"path\":\"src/main.cpp\"}";
     tuiState.handleAppEvent(AppEvent(childTool));
 }
 

@@ -106,7 +106,9 @@ bool DaemonClient::connected() const { return connected_; }
 
 UiSnapshot DaemonClient::uiSnapshot(const UiSnapshotRequest &request) const {
   auto params = makeParams(request);
-  auto response = transport().sendRequest(kRpcUiSnapshotGet, params, 3000);
+  // 30s timeout — server-side waitForReady() also uses 30s, and fresh daemon
+  // init can take several seconds (provider hydration, model enumeration, etc.)
+  auto response = transport().sendRequest(kRpcUiSnapshotGet, params, 30000);
   return uiSnapshotFromJson(response["result"]);
 }
 
@@ -315,6 +317,16 @@ DaemonClient::getAgent(const AgentTargetRequest &request) const {
     return std::nullopt;
   }
   return agentRuntimeSnapshotFromJson(response["result"]);
+}
+
+std::optional<AgentTodoSnapshot>
+DaemonClient::getAgentTodo(const AgentTargetRequest &request) const {
+  auto params = makeParams(request);
+  auto response = transport().sendRequest(kRpcAgentTodoGet, params, 3000);
+  if (!response.HasMember("result")) {
+    return std::nullopt;
+  }
+  return agentTodoSnapshotFromJson(response["result"]);
 }
 
 std::optional<AgentRuntimeSnapshot>

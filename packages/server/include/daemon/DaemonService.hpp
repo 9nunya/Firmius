@@ -46,6 +46,8 @@ public:
                                const AgentTargetRequest &request) const;
   std::optional<AgentRuntimeSnapshot>
   getAgent(const std::string &clientId, const AgentTargetRequest &request) const;
+  std::optional<AgentTodoSnapshot>
+  getAgentTodo(const std::string &clientId, const AgentTargetRequest &request) const;
   std::optional<AgentRuntimeSnapshot>
   focusAgent(const std::string &clientId, const AgentTargetRequest &request);
   std::optional<AgentRuntimeSnapshot>
@@ -185,6 +187,9 @@ private:
   buildAgentSnapshotLocked(const std::string &threadId,
                            const std::string &agentId,
                            const std::string &focusedAgentId) const;
+  std::optional<AgentTodoSnapshot>
+  buildAgentTodoSnapshotLocked(const std::string &threadId,
+                               const std::string &agentId) const;
   std::vector<ProcessSnapshot>
   buildProcessSnapshotsLocked(const std::string &threadId,
                               const std::string &agentId) const;

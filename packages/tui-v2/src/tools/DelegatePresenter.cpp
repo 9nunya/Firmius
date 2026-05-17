@@ -3,6 +3,7 @@
 #include "AppState.hpp"
 #include "items/ToolCallItem.hpp"
 #include "Terminal.hpp"
+#include "ThemeAnsi.hpp"
 
 #include <rapidjson/document.h>
 #include <chrono>
@@ -86,61 +87,90 @@ DelegateResult parseResult(const std::string& json) {
 } // namespace
 
 std::vector<std::string> DelegatePresenter::render(const ToolCallItem& item, const ToolRenderContext& ctx, int /*width*/) const {
-  if (item.phase() == ToolPhase::Preparing) {
-    return {ansi::fgRgb(220, 180, 80, "  \xe2\x9a\x99 Delegate")};
-  }
-
   auto args = parseArgs(item.args());
 
-  // Stop action — quick inline
+  // Helper to resolve agent label
+  auto resolveAgentLabel = [&](const std::string& agentId) -> std::string {
+    if (ctx.state && !agentId.empty()) {
+      const auto* agent = ctx.state->findAgentState(agentId);
+      if (agent) {
+        if (!agent->title.empty()) return agent->title;
+        if (!agent->friendlyName.empty()) return agent->friendlyName;
+      }
+      // Try to find by iterating all agents (in case ID was renamed)
+      for (const auto* a : ctx.state->agentList()) {
+        if (a && (a->friendlyName == agentId || a->title == agentId)) {
+          if (!a->title.empty()) return a->title;
+          if (!a->friendlyName.empty()) return a->friendlyName;
+        }
+      }
+    }
+    // Truncate UUID to first 8 chars
+    if (agentId.size() > 8 && agentId.find('-') != std::string::npos) {
+      return agentId.substr(0, 8);
+    }
+    return agentId;
+  };
+
+  // Helper to get agent state label
+  auto agentStateLabel = [&](const std::string& agentId) -> std::string {
+    if (!ctx.state || agentId.empty()) return {};
+    const auto* agent = ctx.state->findAgentState(agentId);
+    if (!agent) return {};
+    switch (agent->status) {
+    case firmius::shared::AgentStatus::Streaming: return " thinking";
+    case firmius::shared::AgentStatus::ExecutingTool: return " exec tool";
+    case firmius::shared::AgentStatus::ProviderWaiting: return " waiting";
+    case firmius::shared::AgentStatus::Compacting: return " compacting";
+    default:
+      if (agent->running) return " working";
+      if (agent->booting) return " booting";
+      return {};
+    }
+  };
+
+  // Stop action
   if (args.action == "Stop") {
-    if (item.phase() == ToolPhase::Called) {
-      return {ansi::fgRgb(220, 180, 80, "  \xe2\x9a\x99 Stopping " + args.agentId)};
+    if (item.phase() == ToolPhase::Preparing) {
+      return {theme_ansi::warning("  \xe2\x9a\x99 Stopping " + args.agentId)};
     }
-    return {ansi::fgRgb(100, 200, 120, "  \xe2\x9c\x93 Stopped " + args.agentId)};
+    if (item.phase() == ToolPhase::Called) {
+      return {theme_ansi::warning("  \xe2\x9a\x99 Stopping " + args.agentId)};
+    }
+    return {theme_ansi::success("  \xe2\x9c\x93 Stopped " + args.agentId)};
   }
 
-  // Wait action
+  // Wait action — show during both Preparing and Called phases
   if (args.action == "Wait") {
-    if (item.phase() == ToolPhase::Called) {
-      std::string text = "  \xe2\x9f\xb3 Waiting on " + args.agentId + "...";
-      return {ansi::fgRgb(220, 180, 80, text),
-              ansi::dim(ansi::fgRgb(120, 120, 140, "  " + formatDuration(item.elapsed())))};
+    std::string agentLabel = resolveAgentLabel(args.agentId);
+    if (item.phase() == ToolPhase::Preparing || item.phase() == ToolPhase::Called) {
+      std::string stateStr = agentStateLabel(args.agentId);
+      std::string text = "  \xe2\x9f\xb3 Waiting on " + agentLabel + stateStr;
+      return {theme_ansi::warning(text),
+              theme_ansi::dim("  " + formatDuration(item.elapsed()))};
     }
+    // Finished
     auto res = parseResult(item.result());
-    std::string name = res.friendlyName.empty() ? args.agentId : res.friendlyName;
+    std::string name = res.friendlyName.empty() ? agentLabel : res.friendlyName;
     if (item.success()) {
-      return {ansi::fgRgb(100, 200, 120, "  \xe2\x9c\x93 " + name + " \xe2\x80\x94 completed")};
+      return {theme_ansi::success("  \xe2\x9c\x93 " + name + " \xe2\x80\x94 completed")};
     }
-    return {ansi::fgRgb(220, 80, 80, "  \xe2\x9c\x97 " + name + " \xe2\x80\x94 failed")};
+    return {theme_ansi::error("  \xe2\x9c\x97 " + name + " \xe2\x80\x94 failed")};
   }
 
-  // Spawn action — complex presenter
-  if (item.phase() == ToolPhase::Called) {
+  // Spawn action — show during both Preparing and Called phases
+  if (item.phase() == ToolPhase::Called || item.phase() == ToolPhase::Preparing) {
     std::vector<std::string> result;
     std::string title = args.title.empty() ? args.name : args.title;
     if (title.empty()) title = args.persona;
     if (title.empty()) title = "agent";
 
-    result.push_back(ansi::fgRgb(220, 180, 80, "  \xe2\x9f\xb3 Summoning ") +
-                     ansi::bold(ansi::fgRgb(220, 220, 230, title)));
+    result.push_back(theme_ansi::warning("  \xe2\x9f\xb3 Summoning ") +
+                     ansi::bold(theme_ansi::foreground(title)));
 
-    // Body: persona, model/category, task preview
+    // Body: persona/model info (no task preview — too verbose)
     if (!args.persona.empty()) {
-      result.push_back(ansi::dim(ansi::fgRgb(140, 140, 160, "  persona: " + args.persona)));
-    }
-    if (!args.category.empty()) {
-      result.push_back(ansi::dim(ansi::fgRgb(140, 140, 160, "  category: " + args.category)));
-    }
-    if (!args.task.empty()) {
-      // Show first 2 lines of task
-      std::istringstream stream(args.task);
-      std::string line;
-      int lineCount = 0;
-      while (std::getline(stream, line) && lineCount < 2) {
-        result.push_back(ansi::dim(ansi::fgRgb(160, 160, 180, "  " + line)));
-        lineCount++;
-      }
+      result.push_back(theme_ansi::dim("  " + args.persona));
     }
 
     // Live footer with agent state
@@ -171,8 +201,16 @@ std::vector<std::string> DelegatePresenter::render(const ToolCallItem& item, con
         }
       }
     }
-    result.push_back(ansi::dim(ansi::fgRgb(120, 120, 140,
-        "  " + stateLabel + " \xe2\x80\xa2 " + formatDuration(item.elapsed()))));
+    // State + elapsed footer
+    result.push_back(theme_ansi::dim(
+        "  " + stateLabel + " \xe2\x80\xa2 " + formatDuration(item.elapsed())));
+    // Activity log: last 3 lines
+    if (ctx.state) {
+      auto activity = ctx.state->agentActivityLog(args.agentId, 3);
+      for (const auto& line : activity) {
+        result.push_back(theme_ansi::dim("  " + line));
+      }
+    }
     return result;
   }
 
@@ -182,11 +220,44 @@ std::vector<std::string> DelegatePresenter::render(const ToolCallItem& item, con
   if (title.empty()) title = args.persona;
   if (title.empty()) title = "agent";
 
+  // For async spawns, the tool finishes immediately but the subagent keeps running.
+  // Show live state instead of "completed" if the subagent is still active.
+  std::string childId = res.agentId.empty() ? args.agentId : res.agentId;
+  if (item.success() && ctx.state && !childId.empty()) {
+    const auto* childAgent = ctx.state->findAgentState(childId);
+    if (childAgent && childAgent->running) {
+      // Subagent still running — show live state
+      std::vector<std::string> result;
+      result.push_back(theme_ansi::success("  \xe2\x9c\x93 ") +
+                       ansi::bold(theme_ansi::foreground(title)) +
+                       theme_ansi::success(" \xe2\x80\x94 running"));
+
+      // Live state
+      std::string stateStr;
+      switch (childAgent->status) {
+      case firmius::shared::AgentStatus::Streaming: stateStr = "thinking"; break;
+      case firmius::shared::AgentStatus::ExecutingTool: stateStr = "exec tool"; break;
+      case firmius::shared::AgentStatus::ProviderWaiting: stateStr = "waiting"; break;
+      case firmius::shared::AgentStatus::Compacting: stateStr = "compacting"; break;
+      case firmius::shared::AgentStatus::Error: stateStr = "error"; break;
+      default: stateStr = childAgent->running ? "working" : "idle"; break;
+      }
+
+      // Tool summary
+      std::string toolSummary = ctx.state->agentToolSummary(childId);
+      std::string footer = "  " + stateStr + " \xe2\x80\xa2 " + formatDuration(item.elapsed());
+      if (!toolSummary.empty()) footer += " \xe2\x80\xa2 " + toolSummary;
+
+      result.push_back(theme_ansi::dim(footer));
+      return result;
+    }
+  }
+
   if (item.success()) {
     std::vector<std::string> result;
-    result.push_back(ansi::fgRgb(100, 200, 120, "  \xe2\x9c\x93 ") +
-                     ansi::bold(ansi::fgRgb(220, 220, 230, title)) +
-                     ansi::fgRgb(100, 200, 120, " \xe2\x80\x94 completed"));
+    result.push_back(theme_ansi::success("  \xe2\x9c\x93 ") +
+                     ansi::bold(theme_ansi::foreground(title)) +
+                     theme_ansi::success(" \xe2\x80\x94 completed"));
 
     if (!res.result.empty()) {
       // Show first 2 lines of result
@@ -194,24 +265,23 @@ std::vector<std::string> DelegatePresenter::render(const ToolCallItem& item, con
       std::string line;
       int lineCount = 0;
       while (std::getline(stream, line) && lineCount < 2) {
-        result.push_back(ansi::dim(ansi::fgRgb(160, 160, 180, "  " + line)));
+        result.push_back(theme_ansi::dim("  " + line));
         lineCount++;
       }
     }
 
     // Footer with duration
-    result.push_back(ansi::dim(ansi::fgRgb(120, 120, 140,
-        "  " + formatDuration(item.elapsed()))));
+    result.push_back(theme_ansi::dim("  " + formatDuration(item.elapsed())));
     return result;
   }
 
   // Failed Spawn
   std::vector<std::string> result;
-  result.push_back(ansi::fgRgb(220, 80, 80, "  \xe2\x9c\x97 ") +
-                   ansi::bold(ansi::fgRgb(220, 220, 230, title)) +
-                   ansi::fgRgb(220, 80, 80, " \xe2\x80\x94 failed"));
+  result.push_back(theme_ansi::error("  \xe2\x9c\x97 ") +
+                   ansi::bold(theme_ansi::foreground(title)) +
+                   theme_ansi::error(" \xe2\x80\x94 failed"));
   if (!res.result.empty()) {
-    result.push_back(ansi::fgRgb(220, 80, 80, "  " + res.result));
+    result.push_back(theme_ansi::error("  " + res.result));
   }
   return result;
 }

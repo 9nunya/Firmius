@@ -3,6 +3,8 @@
 #include "items/ToolCallItem.hpp"
 #include "AnsiOutputParser.hpp"
 #include "Terminal.hpp"
+#include "ThemeManager.hpp"
+#include "ThemeAnsi.hpp"
 
 #include <rapidjson/document.h>
 #include <chrono>
@@ -143,13 +145,13 @@ std::vector<std::string> renderWaitPreparing(const ParsedArgs& args) {
   if (args.timeoutMs > 0) text += " \xe2\x80\x94 timeout: " + std::to_string(args.timeoutMs / 1000) + "s";
   if (args.tailLines > 0) text += " \xe2\x80\x94 tail: " + std::to_string(args.tailLines) + " lines";
   text += "...";
-  return {ansi::fgRgb(220, 180, 80, text)};
+  return {theme_ansi::warning(text)};
 }
 
 std::vector<std::string> renderPreparing(const std::string& toolName,
                                           const std::string& args) {
   if (toolName == "Python") {
-    return {ansi::fgRgb(220, 180, 80, "  \xe2\x9a\x99 Python")};
+    return {theme_ansi::warning("  \xe2\x9a\x99 Python")};
   }
   // If args are already available (e.g. Wait action), show details immediately
   if (!args.empty()) {
@@ -158,15 +160,15 @@ std::vector<std::string> renderPreparing(const std::string& toolName,
       return renderWaitPreparing(parsed);
     }
     if (parsed.action == "Execute" && !parsed.command.empty()) {
-      return {ansi::fgRgb(220, 180, 80, "  \xe2\x98\x98 Bash ") +
-              ansi::bold(ansi::fgRgb(220, 220, 230, parsed.command))};
+      return {theme_ansi::warning("  \xe2\x98\x98 Bash ") +
+              ansi::bold(theme_ansi::foreground(parsed.command))};
     }
     if (parsed.action == "Spawn" && !parsed.command.empty()) {
-      return {ansi::fgRgb(220, 180, 80, "  \xe2\x98\x98 Bash ") +
-              ansi::bold(ansi::fgRgb(220, 220, 230, parsed.command))};
+      return {theme_ansi::warning("  \xe2\x98\x98 Bash ") +
+              ansi::bold(theme_ansi::foreground(parsed.command))};
     }
   }
-  return {ansi::fgRgb(220, 180, 80, "  \xe2\x9a\x99 Process")};
+  return {theme_ansi::warning("  \xe2\x9a\x99 Process")};
 }
 
 std::vector<std::string> renderExecuteCalled(const ParsedArgs& args, const ToolCallItem& item,
@@ -174,15 +176,15 @@ std::vector<std::string> renderExecuteCalled(const ParsedArgs& args, const ToolC
   std::vector<std::string> result;
   // Header
   std::string cmd = args.command.empty() ? "..." : args.command;
-  result.push_back(ansi::fgRgb(220, 180, 80, "  \xe2\x98\x98 Bash ") +
-                   ansi::bold(ansi::fgRgb(220, 220, 230, cmd)));
+  result.push_back(theme_ansi::warning("  \xe2\x98\x98 Bash ") +
+                   ansi::bold(theme_ansi::foreground(cmd)));
 
   // Show live output if available
   const auto& stdout = item.processStdout();
   const auto& stderr = item.processStderr();
 
   if (stdout.empty() && stderr.empty()) {
-    result.push_back(ansi::dim(ansi::fgRgb(120, 120, 140, "  \xe2\x94\x82 (waiting for output...)")));
+    result.push_back(theme_ansi::dim("  \xe2\x94\x82 (waiting for output...)"));
   } else {
     // Show last N lines of output as live preview
     std::string combined = stdout;
@@ -199,14 +201,12 @@ std::vector<std::string> renderExecuteCalled(const ParsedArgs& args, const ToolC
       if (static_cast<int>(line.size()) > width - 4) {
         line = line.substr(0, width - 7) + "...";
       }
-      result.push_back(ansi::dim(ansi::fgRgb(140, 140, 160, "  \xe2\x94\x82 ")) +
-                       ansi::dim(ansi::fgRgb(180, 180, 200, line)));
+      result.push_back(theme_ansi::dim("  \xe2\x94\x82 ") + theme_ansi::dim(line));
     }
   }
 
   // Footer with live timer
-  result.push_back(ansi::dim(ansi::fgRgb(120, 120, 140,
-      "  running \xe2\x80\xa2 " + elapsedStr(item))));
+  result.push_back(theme_ansi::dim("  running \xe2\x80\xa2 " + elapsedStr(item)));
   return result;
 }
 
@@ -215,11 +215,11 @@ std::vector<std::string> renderExecuteFinished(const ParsedArgs& args, const Par
   std::vector<std::string> result;
   bool success = item.success();
   std::string icon = success ? "\xe2\x9c\x93" : "\xe2\x9c\x97";
-  auto iconColor = success ? ansi::fgRgb(100, 200, 120, "  " + icon + " ")
-                           : ansi::fgRgb(220, 80, 80, "  " + icon + " ");
+  auto iconColor = success ? theme_ansi::success("  " + icon + " ")
+                           : theme_ansi::error("  " + icon + " ");
 
   std::string cmd = args.command.empty() ? "Bash" : args.command;
-  result.push_back(iconColor + ansi::bold(ansi::fgRgb(220, 220, 230, cmd)));
+  result.push_back(iconColor + ansi::bold(theme_ansi::foreground(cmd)));
 
   // Output body
   std::string output = res.stdoutData;
@@ -234,8 +234,7 @@ std::vector<std::string> renderExecuteFinished(const ParsedArgs& args, const Par
     auto lines = AnsiOutputParser::toLines(output, width, item.isExpanded() ? -1 : 4);
     result.insert(result.end(), lines.begin(), lines.end());
     if (!item.isExpanded() && lines.size() > 4) {
-      result.push_back(ansi::dim(ansi::fgRgb(150, 150, 170,
-          "  expand (Ctrl+E) to see more")));
+      result.push_back(theme_ansi::dim("  expand (Ctrl+E) to see more"));
     }
   }
 
@@ -255,13 +254,13 @@ std::vector<std::string> renderExecuteFinished(const ParsedArgs& args, const Par
     if (i > 0) footer += " \xe2\x80\xa2 ";
     footer += footerParts[i];
   }
-  auto footerColor = success ? ansi::fgRgb(100, 200, 120, footer)
-                             : ansi::fgRgb(220, 80, 80, footer);
+  auto footerColor = success ? theme_ansi::success(footer)
+                             : theme_ansi::error(footer);
   result.push_back(ansi::dim("  " + footerColor));
 
   // Timeout notice
   if (res.finishReason == "Timeout") {
-    result.push_back(ansi::fgRgb(220, 160, 60, "  ! Still running in background"));
+    result.push_back(theme_ansi::warning("  ! Still running in background"));
   }
   return result;
 }
@@ -270,15 +269,15 @@ std::vector<std::string> renderSpawnCalled(const ParsedArgs& args, const ToolCal
                                             int width) {
   std::vector<std::string> result;
   std::string cmd = args.command.empty() ? "..." : args.command;
-  result.push_back(ansi::fgRgb(220, 180, 80, "  \xe2\x98\x98 Bash ") +
-                   ansi::bold(ansi::fgRgb(220, 220, 230, cmd)));
+  result.push_back(theme_ansi::warning("  \xe2\x98\x98 Bash ") +
+                   ansi::bold(theme_ansi::foreground(cmd)));
 
   // Show live output if available (same as Execute)
   const auto& stdout = item.processStdout();
   const auto& stderr = item.processStderr();
 
   if (stdout.empty() && stderr.empty()) {
-    result.push_back(ansi::dim(ansi::fgRgb(120, 120, 140, "  \xe2\x94\x82 (waiting for output...)")));
+    result.push_back(theme_ansi::dim("  \xe2\x94\x82 (waiting for output...)"));
   } else {
     std::string combined = stdout;
     if (!stderr.empty()) {
@@ -293,13 +292,11 @@ std::vector<std::string> renderSpawnCalled(const ParsedArgs& args, const ToolCal
       if (static_cast<int>(line.size()) > width - 4) {
         line = line.substr(0, width - 7) + "...";
       }
-      result.push_back(ansi::dim(ansi::fgRgb(140, 140, 160, "  \xe2\x94\x82 ")) +
-                       ansi::dim(ansi::fgRgb(180, 180, 200, line)));
+      result.push_back(theme_ansi::dim("  \xe2\x94\x82 ") + theme_ansi::dim(line));
     }
   }
 
-  result.push_back(ansi::dim(ansi::fgRgb(120, 120, 140,
-      "  background \xe2\x80\xa2 " + elapsedStr(item))));
+  result.push_back(theme_ansi::dim("  background \xe2\x80\xa2 " + elapsedStr(item)));
   return result;
 }
 
@@ -308,10 +305,10 @@ std::vector<std::string> renderSpawnFinished(const ParsedArgs& args, const Parse
   std::vector<std::string> result;
   bool success = item.success();
   std::string icon = success ? "\xe2\x9c\x93" : "\xe2\x9c\x97";
-  auto iconColor = success ? ansi::fgRgb(100, 200, 120, "  " + icon + " ")
-                           : ansi::fgRgb(220, 80, 80, "  " + icon + " ");
+  auto iconColor = success ? theme_ansi::success("  " + icon + " ")
+                           : theme_ansi::error("  " + icon + " ");
   std::string cmd = args.command.empty() ? "Bash" : args.command;
-  result.push_back(iconColor + ansi::bold(ansi::fgRgb(220, 220, 230, cmd)));
+  result.push_back(iconColor + ansi::bold(theme_ansi::foreground(cmd)));
 
   // Output body
   std::string output = res.stdoutData;
@@ -326,8 +323,7 @@ std::vector<std::string> renderSpawnFinished(const ParsedArgs& args, const Parse
     auto lines = AnsiOutputParser::toLines(output, width, item.isExpanded() ? -1 : 4);
     result.insert(result.end(), lines.begin(), lines.end());
     if (!item.isExpanded() && lines.size() > 4) {
-      result.push_back(ansi::dim(ansi::fgRgb(150, 150, 170,
-          "  expand (Ctrl+E) to see more")));
+      result.push_back(theme_ansi::dim("  expand (Ctrl+E) to see more"));
     }
   }
 
@@ -338,8 +334,8 @@ std::vector<std::string> renderSpawnFinished(const ParsedArgs& args, const Parse
     oss << std::fixed << std::setprecision(1) << (res.durationMs / 1000.0) << "s";
     footer += " \xe2\x80\xa2 " + oss.str();
   }
-  auto footerColor = success ? ansi::fgRgb(100, 200, 120, footer)
-                             : ansi::fgRgb(220, 80, 80, footer);
+  auto footerColor = success ? theme_ansi::success(footer)
+                             : theme_ansi::error(footer);
   result.push_back(ansi::dim("  " + footerColor));
   return result;
 }
@@ -356,7 +352,7 @@ std::vector<std::string> renderStatusFinished(const ParsedResult& res) {
       statusText += " \xe2\x80\xa2 " + oss.str();
     }
   }
-  return {ansi::fgRgb(100, 200, 120, "  \xe2\x9c\x93 Process \xe2\x80\x94 " + statusText)};
+  return {theme_ansi::success("  \xe2\x9c\x93 Process \xe2\x80\x94 " + statusText)};
 }
 
 std::vector<std::string> renderWaitCalled(const ParsedArgs& args, const ToolCallItem& item) {
@@ -365,8 +361,8 @@ std::vector<std::string> renderWaitCalled(const ParsedArgs& args, const ToolCall
   if (args.timeoutMs > 0) text += " \xe2\x80\x94 timeout: " + std::to_string(args.timeoutMs / 1000) + "s";
   if (args.tailLines > 0) text += " \xe2\x80\x94 tail: " + std::to_string(args.tailLines) + " lines";
   text += "...";
-  return {ansi::fgRgb(220, 180, 80, text),
-          ansi::dim(ansi::fgRgb(120, 120, 140, "  " + elapsedStr(item)))};
+  return {theme_ansi::warning(text),
+          theme_ansi::dim("  " + elapsedStr(item))};
 }
 
 std::vector<std::string> renderWaitFinished(const ParsedArgs& args, const ParsedResult& res) {
@@ -381,83 +377,90 @@ std::vector<std::string> renderWaitFinished(const ParsedArgs& args, const Parsed
       text += " \xe2\x80\xa2 " + oss.str();
     }
   }
-  return {ansi::fgRgb(100, 200, 120, text)};
+  return {theme_ansi::success(text)};
 }
 
 std::vector<std::string> renderInputCalled(const ParsedArgs& args) {
-  return {ansi::fgRgb(220, 180, 80, "  \xe2\x9a\x99 Process.input \xe2\x86\x92 " + args.processId)};
+  return {theme_ansi::warning("  \xe2\x9a\x99 Process.input \xe2\x86\x92 " + args.processId)};
 }
 
 std::vector<std::string> renderInputFinished(const ParsedArgs& args, const ParsedResult& /*res*/) {
   int chars = static_cast<int>(args.input.size());
-  return {ansi::fgRgb(100, 200, 120,
+  return {theme_ansi::success(
       "  \xe2\x9c\x93 Sent " + std::to_string(chars) + " chars to process")};
 }
 
 std::vector<std::string> renderOutputCalled(const ParsedArgs& args) {
-  return {ansi::fgRgb(220, 180, 80, "  \xe2\x9a\x99 Process.output " + args.processId)};
+  return {theme_ansi::warning("  \xe2\x9a\x99 Process.output " + args.processId)};
 }
 
 std::vector<std::string> renderOutputFinished(const ParsedResult& res) {
   int bytes = static_cast<int>(res.output.size());
-  return {ansi::fgRgb(100, 200, 120,
+  return {theme_ansi::success(
       "  \xe2\x9c\x93 Output read \xe2\x80\x94 " + std::to_string(bytes) + " bytes")};
 }
 
 std::vector<std::string> renderKillCalled(const ParsedArgs& args) {
-  return {ansi::fgRgb(220, 180, 80, "  \xe2\x9a\x99 Process.kill " + args.processId)};
+  return {theme_ansi::warning("  \xe2\x9a\x99 Process.kill " + args.processId)};
 }
 
 std::vector<std::string> renderKillFinished(const ParsedArgs& args, const ParsedResult& res) {
   if (res.isRunning) {
-    return {ansi::fgRgb(100, 200, 120, "  \xe2\x9c\x93 Killed process " + args.processId)};
+    return {theme_ansi::success("  \xe2\x9c\x93 Killed process " + args.processId)};
   }
-  return {ansi::fgRgb(100, 200, 120, "  \xe2\x9c\x93 Process " + args.processId + " already dead")};
+  return {theme_ansi::success("  \xe2\x9c\x93 Process " + args.processId + " already dead")};
 }
 
 std::vector<std::string> renderListFinished(const ParsedResult& res) {
-  return {ansi::fgRgb(100, 200, 120,
+  return {theme_ansi::success(
       "  \xe2\x9c\x93 " + std::to_string(res.entryCount) + " processes")};
 }
 
 std::vector<std::string> renderPythonCalled(const ParsedArgs& args, const ToolCallItem& item,
                                              int /*width*/) {
+  const auto& theme = ThemeManager::instance().currentTheme();
   std::vector<std::string> result;
-  result.push_back(ansi::fgRgb(220, 180, 80, "  \xe2\x98\x98 Python"));
+  result.push_back(theme_ansi::warning("  \xe2\x98\x98 Python"));
 
   // Show code block
   if (!args.code.empty()) {
-    result.push_back(ansi::dim(ansi::fgRgb(120, 120, 140, "  \xe2\x94\x80\xe2\x94\x80\xe2\x94\x80 code \xe2\x94\x80\xe2\x94\x80\xe2\x94\x80")));
+    result.push_back(theme_ansi::dim("  \xe2\x94\x80\xe2\x94\x80\xe2\x94\x80 code \xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"));
     std::istringstream stream(args.code);
     std::string line;
     while (std::getline(stream, line)) {
-      result.push_back(ansi::bgRgb(25, 25, 32, ansi::fgRgb(210, 210, 220, "  " + line)));
+      result.push_back(ansi::bgRgb(theme.base.separator.r, theme.base.separator.g,
+                                   theme.base.separator.b,
+                                   ansi::fgRgb(theme.base.fg.r, theme.base.fg.g,
+                                               theme.base.fg.b, "  " + line)));
     }
-    result.push_back(ansi::dim(ansi::fgRgb(120, 120, 140, "  \xe2\x94\x80\xe2\x94\x80\xe2\x94\x80 output \xe2\x94\x80\xe2\x94\x80\xe2\x94\x80")));
+    result.push_back(theme_ansi::dim("  \xe2\x94\x80\xe2\x94\x80\xe2\x94\x80 output \xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"));
   }
 
-  result.push_back(ansi::dim(ansi::fgRgb(120, 120, 140, "  \xe2\x94\x82 (waiting for output...)")));
-  result.push_back(ansi::dim(ansi::fgRgb(120, 120, 140,
-      "  running \xe2\x80\xa2 " + elapsedStr(item))));
+  result.push_back(theme_ansi::dim("  \xe2\x94\x82 (waiting for output...)"));
+  result.push_back(theme_ansi::dim("  running \xe2\x80\xa2 " + elapsedStr(item)));
   return result;
 }
 
 std::vector<std::string> renderPythonFinished(const ParsedArgs& args, const ParsedResult& res,
                                                const ToolCallItem& item, int width) {
+  const auto& theme = ThemeManager::instance().currentTheme();
   std::vector<std::string> result;
   bool success = item.success();
   std::string icon = success ? "\xe2\x9c\x93" : "\xe2\x9c\x97";
-  auto iconColor = success ? ansi::fgRgb(100, 200, 120, "  " + icon + " ")
-                           : ansi::fgRgb(220, 80, 80, "  " + icon + " ");
-  result.push_back(iconColor + ansi::bold(ansi::fgRgb(220, 220, 230, "Python")));
+  auto iconColor = success ? theme_ansi::success("  " + icon + " ")
+                           : theme_ansi::error("  " + icon + " ");
+  result.push_back(iconColor + ansi::bold(theme_ansi::foreground("Python")));
 
   // Code block
   if (!args.code.empty()) {
-    result.push_back(ansi::dim(ansi::fgRgb(120, 120, 140, "  \xe2\x94\x80\xe2\x94\x80\xe2\x94\x80 code \xe2\x94\x80\xe2\x94\x80\xe2\x94\x80")));
+    result.push_back(theme_ansi::dim("  \xe2\x94\x80\xe2\x94\x80\xe2\x94\x80 code \xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"));
     std::istringstream stream(args.code);
     std::string line;
     while (std::getline(stream, line)) {
-      result.push_back(ansi::bgRgb(25, 25, 32, ansi::fgRgb(210, 210, 220, "  " + line)));
+      result.push_back(ansi::bgRgb(theme.base.separator.r, theme.base.separator.g,
+                                   theme.base.separator.b,
+                                   ansi::fgRgb(theme.base.fg.r, theme.base.fg.g,
+                                               theme.base.fg.b, "  " + line)));
     }
   }
 
@@ -468,7 +471,7 @@ std::vector<std::string> renderPythonFinished(const ParsedArgs& args, const Pars
     output += res.stderrData;
   }
   if (!output.empty()) {
-    result.push_back(ansi::dim(ansi::fgRgb(120, 120, 140, "  \xe2\x94\x80\xe2\x94\x80\xe2\x94\x80 output \xe2\x94\x80\xe2\x94\x80\xe2\x94\x80")));
+    result.push_back(theme_ansi::dim("  \xe2\x94\x80\xe2\x94\x80\xe2\x94\x80 output \xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"));
     auto lines = AnsiOutputParser::toLines(output, width, item.isExpanded() ? -1 : 10);
     result.insert(result.end(), lines.begin(), lines.end());
   }
@@ -479,8 +482,8 @@ std::vector<std::string> renderPythonFinished(const ParsedArgs& args, const Pars
   if (res.durationMs > 0) {
     oss << " \xe2\x80\xa2 " << std::fixed << std::setprecision(1) << (res.durationMs / 1000.0) << "s";
   }
-  auto footerColor = success ? ansi::fgRgb(100, 200, 120, oss.str())
-                             : ansi::fgRgb(220, 80, 80, oss.str());
+  auto footerColor = success ? theme_ansi::success(oss.str())
+                             : theme_ansi::error(oss.str());
   result.push_back(ansi::dim("  " + footerColor));
   return result;
 }
@@ -518,7 +521,7 @@ std::vector<std::string> ProcessPresenter::render(const ToolCallItem& item, cons
   }
 
   if (args.action == "Status") {
-    if (item.phase() == ToolPhase::Called) return {ansi::fgRgb(220, 180, 80, "  \xe2\x9a\x99 Process.status " + args.processId)};
+    if (item.phase() == ToolPhase::Called) return {theme_ansi::warning("  \xe2\x9a\x99 Process.status " + args.processId)};
     auto res = parseResult(item.result());
     return renderStatusFinished(res);
   }
@@ -545,17 +548,17 @@ std::vector<std::string> ProcessPresenter::render(const ToolCallItem& item, cons
   }
 
   if (args.action == "List") {
-    if (item.phase() == ToolPhase::Called) return {ansi::fgRgb(220, 180, 80, "  \xe2\x9a\x99 Process.list")};
+    if (item.phase() == ToolPhase::Called) return {theme_ansi::warning("  \xe2\x9a\x99 Process.list")};
     return renderListFinished(parseResult(item.result()));
   }
 
   // Unknown action fallback
   if (item.phase() == ToolPhase::Called) {
-    return {ansi::fgRgb(220, 180, 80, "  \xe2\x9a\x99 " + item.toolName())};
+    return {theme_ansi::warning("  \xe2\x9a\x99 " + item.toolName())};
   }
   bool success = item.success();
-  auto color = success ? ansi::fgRgb(100, 200, 120, "  \xe2\x9c\x93 " + item.toolName())
-                       : ansi::fgRgb(220, 80, 80, "  \xe2\x9c\x97 " + item.toolName());
+  auto color = success ? theme_ansi::success("  \xe2\x9c\x93 " + item.toolName())
+                       : theme_ansi::error("  \xe2\x9c\x97 " + item.toolName());
   return {color};
 }
 

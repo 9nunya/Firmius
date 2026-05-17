@@ -2,6 +2,7 @@
 #include "tools/IToolPresenter.hpp"
 #include "tools/ToolPresenterRegistry.hpp"
 #include "Terminal.hpp"
+#include "ThemeAnsi.hpp"
 
 #include "utils/ToolView.hpp"
 
@@ -10,7 +11,8 @@ namespace firmius::tui2 {
 ToolCallItem::ToolCallItem(std::string toolCallId, std::string toolName, std::string agentId)
     : toolCallId_(std::move(toolCallId)),
       toolName_(std::move(toolName)),
-      agentId_(std::move(agentId)) {}
+      agentId_(std::move(agentId)),
+      calledAt_(std::chrono::steady_clock::now()) {}
 
 void ToolCallItem::setPhase(ToolPhase phase) {
   if (phase_ != phase) {
@@ -93,16 +95,16 @@ std::vector<std::string> ToolCallItem::render(int width) const {
   std::string prefix;
   switch (phase_) {
   case ToolPhase::Preparing:
-    prefix = ansi::fgRgb(220, 180, 80, "  \xe2\x9a\x99 " + toolName_);
+    prefix = theme_ansi::warning("  \xe2\x9a\x99 " + toolName_);
     break;
   case ToolPhase::Called:
-    prefix = ansi::fgRgb(220, 180, 80, "  \xe2\x9a\x99 " + toolName_);
+    prefix = theme_ansi::warning("  \xe2\x9a\x99 " + toolName_);
     break;
   case ToolPhase::FinishedSuccess:
-    prefix = ansi::fgRgb(100, 200, 120, "  \xe2\x9c\x93 " + toolName_);
+    prefix = theme_ansi::success("  \xe2\x9c\x93 " + toolName_);
     break;
   case ToolPhase::FinishedError:
-    prefix = ansi::fgRgb(220, 80, 80, "  \xe2\x9c\x97 " + toolName_);
+    prefix = theme_ansi::error("  \xe2\x9c\x97 " + toolName_);
     break;
   }
   return {prefix};

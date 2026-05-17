@@ -37,6 +37,8 @@ public:
   AgentTreeSnapshot listAgents(const AgentTargetRequest &request) const;
   std::optional<AgentRuntimeSnapshot>
   getAgent(const AgentTargetRequest &request) const;
+  std::optional<AgentTodoSnapshot>
+  getAgentTodo(const AgentTargetRequest &request) const;
   std::optional<AgentRuntimeSnapshot>
   focusAgent(const AgentTargetRequest &request) const;
   bool compactAgent(const AgentTargetRequest &request) const;

@@ -130,8 +130,8 @@ public:
       ToolCallChunk tcc;
       tcc.id = "tool-1";
       tcc.index = 0;
-      tcc.nameDelta = "Files";
-      tcc.argsDelta = "{\"action\":\"List\",\"path\":\".\"}";
+      tcc.nameDelta = "List";
+      tcc.argsDelta = "{\"path\":\".\"}";
       onEvent(tcc);
       onEvent(StreamDone{StopReason::ToolUse});
       return;
@@ -142,8 +142,8 @@ public:
       ToolCall tc;
       tc.id = "tool-1";
       tc.index = 0;
-      tc.name = "Files";
-      tc.args = "{\"action\":\"List\",\"path\":\".\"}";
+      tc.name = "List";
+      tc.args = "{\"path\":\".\"}";
       onEvent(tc);
       onEvent(StreamDone{StopReason::ToolUse});
       return;

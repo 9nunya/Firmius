@@ -105,7 +105,10 @@ static std::string firstNonEmptyLine(const std::string &text) {
 std::string SummarizeToolCall(const std::string &name, const std::string &args, ToolPhase phase) {
   if (phase == ToolPhase::Preparing) {
     if (name == "Edit") return "Preparing edit...";
-    if (name == "Files") return "Preparing filesystem query...";
+    if (name == "Read") return "Preparing file read...";
+    if (name == "List") return "Preparing directory list...";
+    if (name == "Grep") return "Preparing grep search...";
+    if (name == "Glob") return "Preparing glob search...";
     if (name == "Process")
       return "Preparing process operation...";
     if (name == "Delegate")
@@ -153,31 +156,30 @@ std::string SummarizeToolCall(const std::string &name, const std::string &args, 
     return "Write artifact";
   }
 
-  if (name == "Files") {
-    const std::string action = bestStringArg("action");
-    if (action == "Read") {
-      std::string path = bestStringArg("path");
-      int start = -1, end = -1;
-      if (valid) {
-        if (doc.HasMember("start_line") && doc["start_line"].IsInt())
-          start = doc["start_line"].GetInt();
-        if (doc.HasMember("end_line") && doc["end_line"].IsInt())
-          end = doc["end_line"].GetInt();
-      }
-      std::string s = "Read " + path;
-      if (start >= 0 && end >= 0)
-        s += "[" + std::to_string(start) + ":" + std::to_string(end) + "]";
-      return s;
+  if (name == "Read") {
+    std::string path = bestStringArg("path");
+    int start = -1, end = -1;
+    if (valid) {
+      if (doc.HasMember("start_line") && doc["start_line"].IsInt())
+        start = doc["start_line"].GetInt();
+      if (doc.HasMember("end_line") && doc["end_line"].IsInt())
+        end = doc["end_line"].GetInt();
     }
-    if (action == "Grep") {
-      std::string pattern = bestStringArg("pattern");
-      return "Search \"" + pattern + "\"";
-    }
-    if (action == "Glob") {
-      std::string pattern = bestStringArg("pattern");
-      if (pattern.empty()) pattern = bestStringArg("glob");
-      return pattern.empty() ? "Find files" : "Find \"" + pattern + "\"";
-    }
+    std::string s = "Read " + path;
+    if (start >= 0 && end >= 0)
+      s += "[" + std::to_string(start) + ":" + std::to_string(end) + "]";
+    return s;
+  }
+  if (name == "Grep") {
+    std::string pattern = bestStringArg("pattern");
+    return "Search \"" + pattern + "\"";
+  }
+  if (name == "Glob") {
+    std::string pattern = bestStringArg("pattern");
+    if (pattern.empty()) pattern = bestStringArg("glob");
+    return pattern.empty() ? "Find files" : "Find \"" + pattern + "\"";
+  }
+  if (name == "List") {
     std::string path = bestStringArg("path");
     if (path.empty()) path = ".";
     return "List " + path;

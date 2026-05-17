@@ -6,6 +6,7 @@
 #include "AgentRegistry.hpp"
 #include "ConfigLoader.hpp"
 #include "EnvLoader.hpp"
+#include "HeuristicTokenizer.hpp"
 #include "Events.hpp"
 #include "Message.hpp"
 #include "Panic.hpp"
@@ -2176,8 +2177,9 @@ void Agent::runImpl(const std::optional<std::string> &task,
         requestHistory = runtime_overlay::buildRequestHistoryWithRuntimeOverlays(
             context, *environment_->getHost(), environment_->getWorkspace());
       }
+      const shared::HeuristicTokenizer tokenizer;
       const auto requestContextEstimate =
-          estimateContextWindowMetrics(requestHistory, opts.tools);
+          estimateContextWindowMetrics(tokenizer, requestHistory, opts.tools);
       turnMetrics.context = requestContextEstimate;
       // Insanity detection setup
       StreamSanityDetector::Config detectorConfig;
@@ -3235,12 +3237,33 @@ void Agent::executeTools(
               return a.index < b.index;
             });
 
+  // Content-hash dedup: collapse identical tool outputs into references.
+  uint64_t dedupEventCounter = context.history->turns.size();
   for (const auto &result : collectedResults) {
+    // Compute content hash from tool name + result string
+    std::string dedupKey = result.toolName + "|" + result.resultStr;
+    uint64_t contentHash = std::hash<std::string>{}(dedupKey);
+
+    std::string effectiveResult = result.resultStr;
+    if (result.success) {
+      auto [it, inserted] = context.state.toolOutputDedup.try_emplace(
+          contentHash, "");
+      if (!inserted) {
+        // Already seen this exact output — use reference
+        effectiveResult = it->second;
+      } else {
+        // First occurrence — store reference string for future duplicates
+        it->second = "↪ identical to event #" +
+                     std::to_string(dedupEventCounter);
+      }
+    }
+
     Message msg;
     msg.role = Role::ToolResult;
     msg.content.push_back(
-        ToolResultContent{result.toolCallId, result.resultStr, result.success,
+        ToolResultContent{result.toolCallId, effectiveResult, result.success,
                           result.resultProcessId, result.resultSubagentId});
+    ++dedupEventCounter;
     auto now = std::chrono::system_clock::now();
     msg.timestamp = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(

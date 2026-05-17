@@ -3,17 +3,37 @@
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <thread>
 
 namespace {
 std::atomic<bool> g_running{true};
-extern "C" void handleSignal(int) { g_running.store(false); }
+std::atomic<int> g_signalCount{0};
+std::atomic<bool> g_shutdownComplete{false};
+
+extern "C" void handleSignal(int signo) {
+  g_running.store(false);
+  const int count = g_signalCount.fetch_add(1) + 1;
+  if (count >= 2) {
+    std::_Exit(128 + signo);
+  }
+}
+
+void installSignalHandlers() {
+  struct sigaction action;
+  std::memset(&action, 0, sizeof(action));
+  action.sa_handler = handleSignal;
+  sigemptyset(&action.sa_mask);
+  action.sa_flags = 0;
+  sigaction(SIGINT, &action, nullptr);
+  sigaction(SIGTERM, &action, nullptr);
+}
 }
 
 int main(int argc, char **argv) {
-  std::signal(SIGINT, handleSignal);
-  std::signal(SIGTERM, handleSignal);
+  installSignalHandlers();
 
   firmius::daemon::DaemonConnectionInfo connection;
   for (int i = 1; i < argc; ++i) {
@@ -48,6 +68,18 @@ int main(int argc, char **argv) {
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
   }
 
+  // Shutdown is normally graceful, but stuck provider/agent threads can block
+  // joins indefinitely. A watchdog keeps SIGINT/SIGTERM reliable without
+  // detaching live threads into object teardown.
+  std::thread shutdownWatchdog([] {
+    std::this_thread::sleep_for(std::chrono::seconds(5));
+    if (!g_shutdownComplete.load()) {
+      std::_Exit(128 + SIGTERM);
+    }
+  });
+  shutdownWatchdog.detach();
+
   server.stop();
+  g_shutdownComplete.store(true);
   return 0;
 }

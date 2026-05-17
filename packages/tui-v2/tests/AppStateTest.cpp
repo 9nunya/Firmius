@@ -148,3 +148,22 @@ TEST(AppStateTest, ItemSpans) {
   state.clearItemSpans();
   EXPECT_TRUE(state.itemSpans().empty());
 }
+
+TEST(AppStateTest, TodoVisibilityAndStorage) {
+  AppState state;
+  state.setAgentId("agent-1");
+  state.focusAgent("agent-1");
+
+  firmius::shared::TodoItem item;
+  item.id = 1;
+  item.text = "Ship the bottom bar";
+  item.status = firmius::shared::TodoStatus::InProgress;
+
+  state.setAgentTodos("agent-1", {item});
+  ASSERT_EQ(state.focusedAgentTodos().size(), 1u);
+  EXPECT_EQ(state.focusedAgentTodos()[0].text, "Ship the bottom bar");
+
+  EXPECT_TRUE(state.todoVisible());
+  state.toggleTodoVisibility();
+  EXPECT_FALSE(state.todoVisible());
+}

@@ -15,6 +15,7 @@ public:
 
   int height(int width) const override;
   std::vector<std::string> render(int width) const override;
+  int cursorRowOffset() const;
 
 private:
   const AppState& state_;

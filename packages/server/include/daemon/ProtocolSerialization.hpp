@@ -70,6 +70,9 @@ AgentTargetRequest agentTargetRequestFromJson(const rapidjson::Value &value);
 rapidjson::Value toJsonValue(const AgentRuntimeSnapshot &snapshot,
                              rapidjson::Document::AllocatorType &allocator);
 AgentRuntimeSnapshot agentRuntimeSnapshotFromJson(const rapidjson::Value &value);
+rapidjson::Value toJsonValue(const AgentTodoSnapshot &snapshot,
+                             rapidjson::Document::AllocatorType &allocator);
+AgentTodoSnapshot agentTodoSnapshotFromJson(const rapidjson::Value &value);
 rapidjson::Value toJsonValue(const AgentTreeSnapshot &snapshot,
                              rapidjson::Document::AllocatorType &allocator);
 AgentTreeSnapshot agentTreeSnapshotFromJson(const rapidjson::Value &value);

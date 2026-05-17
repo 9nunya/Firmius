@@ -103,6 +103,9 @@ struct AgentState {
   std::string title;
   std::string providerId;
   std::string modelId;
+  uint32_t contextWindowTokens = 0;
+  uint32_t contextUsedTokens = 0;
+  uint32_t contextSentTokens = 0;
 
   firmius::shared::AgentStatus status = firmius::shared::AgentStatus::Idle;
   bool running = false;

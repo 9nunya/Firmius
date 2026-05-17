@@ -1,6 +1,8 @@
 #include "App.hpp"
 #include "AnsiParser.hpp"
 #include "Terminal.hpp"
+#include "ThemeAnsi.hpp"
+#include "ThemeManager.hpp"
 #include "WorkflowCommand.hpp"
 #include "items/SimpleItems.hpp"
 #include "items/StreamingItems.hpp"
@@ -14,6 +16,42 @@
 #include <thread>
 
 namespace firmius::tui2 {
+
+namespace {
+
+bool hasVisibleOverlay(const Cell& cell) {
+  return cell.ch != ' ' || cell.fg.type != CellColor::Type::Default ||
+         cell.bg.type != CellColor::Type::Default || cell.style.bold ||
+         cell.style.dim || cell.style.italic || cell.style.underline ||
+         cell.style.strikethrough || cell.style.invert;
+}
+
+void applyFallbackBackground(Cell& cell, const ThemeSpec& theme) {
+  if (cell.ch != ' ' && cell.bg.type == CellColor::Type::Default) {
+    cell.bg.type = CellColor::Type::RGB;
+    cell.bg.r = static_cast<uint8_t>(theme.chat.bg.r);
+    cell.bg.g = static_cast<uint8_t>(theme.chat.bg.g);
+    cell.bg.b = static_cast<uint8_t>(theme.chat.bg.b);
+  }
+}
+
+void blendCell(Cell& base, const Cell& overlay) {
+  if (!hasVisibleOverlay(overlay)) {
+    return;
+  }
+  if (overlay.ch != ' ') {
+    base.ch = overlay.ch;
+  }
+  if (overlay.fg.type != CellColor::Type::Default) {
+    base.fg = overlay.fg;
+  }
+  if (overlay.bg.type != CellColor::Type::Default) {
+    base.bg = overlay.bg;
+  }
+  base.style = overlay.style;
+}
+
+}
 
 // ── Inline command classes (defined before registerCommands) ──
 
@@ -60,6 +98,51 @@ private:
   App& app_;
 };
 
+class AccountsCmd : public ICommand {
+public:
+  explicit AccountsCmd(App& app) : app_(app) {}
+  std::string name() const override { return "accounts"; }
+  std::string description() const override {
+    return "Show accounts and quotas for a provider (usage: /accounts <provider>)";
+  }
+  std::vector<CommandArg> args() const override {
+    return {{"provider", ArgType::ProviderId,
+             "The provider to show accounts for", false}};
+  }
+  void execute(const std::vector<ParsedArg>& args) override {
+    if (args.empty() || args[0].rawValue.empty()) return;
+    app_.openAccountsOverlay(args[0].asString());
+  }
+private:
+  App& app_;
+};
+
+class ThemeCmd : public ICommand {
+public:
+  explicit ThemeCmd(App& app) : app_(app) {}
+  std::string name() const override { return "theme"; }
+  std::string description() const override { return "List or switch TUI theme."; }
+  std::vector<CommandArg> args() const override {
+    return {{"name", ArgType::String, "Theme name", true}};
+  }
+  bool takesRawRemainder() const override { return true; }
+  void execute(const std::vector<ParsedArg>& args) override {
+    if (args.empty() || args[0].rawValue.empty()) {
+      const auto& current = ThemeManager::instance().currentTheme();
+      const auto names = ThemeManager::instance().themeNames();
+      app_.state_.addItem(std::make_unique<SystemNoticeItem>(
+          "Theme: " + current.name));
+      std::string joined = "Available themes:";
+      for (const auto& name : names) joined += " " + name;
+      app_.state_.addItem(std::make_unique<SystemNoticeItem>(joined));
+      return;
+    }
+    app_.applyTheme(args[0].rawValue);
+  }
+private:
+  App& app_;
+};
+
 App::App(AppOptions options)
     : options_(std::move(options)),
       eventRouter_(state_),
@@ -89,7 +172,7 @@ int App::run() {
   registerCommands();
   setupKeybinds();
 
-  // Set up pinned zone: statusBar (2) + inputBar (1) = 3 lines.
+  // Set up pinned zone: statusBar + inputBar. Heights are dynamic.
   // bottomBar is rendered manually (after autocomplete rows when active).
   layout_.setPinnedComponents({&statusBar_, &inputBar_});
 
@@ -116,7 +199,11 @@ int App::run() {
     }
 
     // Read input with mouse support (non-blocking).
-    auto [key, mouseEvent] = terminal_.readInput(30);
+    const bool highRefreshInput =
+        state_.hasLiveItems() || !state_.liveMessage().empty() ||
+        state_.activityContext() == ActivityContext::Active;
+    const int inputTimeoutMs = highRefreshInput ? 80 : 120;
+    auto [key, mouseEvent] = terminal_.readInput(inputTimeoutMs);
     if (mouseEvent.has_value()) {
       handleMouse(mouseEvent.value());
     } else if (!key.empty()) {
@@ -126,12 +213,19 @@ int App::run() {
     // Reconcile runtime state even if the final daemon event was missed.
     reconcileRuntimeState();
 
-    // Live tick — mark live items dirty every 500ms.
-    if (state_.hasLiveItems()) {
+    // Live tick — keep tool presenters and status animations responsive.
+    const bool animatePinnedUi =
+        state_.hasLiveItems() || !state_.liveMessage().empty() ||
+        state_.activityContext() == ActivityContext::Active;
+    if (animatePinnedUi) {
       auto now = std::chrono::steady_clock::now();
-      if (now - lastLiveTick > std::chrono::milliseconds(500)) {
+      if (now - lastLiveTick > std::chrono::milliseconds(90)) {
         lastLiveTick = now;
-        state_.markLiveItemsDirty();
+        if (state_.hasLiveItems()) {
+          state_.markLiveItemsDirty();
+        } else {
+          state_.markDirtyPublic();
+        }
       }
     }
 
@@ -157,6 +251,8 @@ void App::registerCommands() {
   commands_.registerCommand(std::make_shared<NewCmd>(*this));
   commands_.registerCommand(std::make_shared<ModelsCmd>(*this));
   commands_.registerCommand(std::make_shared<ResumeCmd>(*this));
+  commands_.registerCommand(std::make_shared<AccountsCmd>(*this));
+  commands_.registerCommand(std::make_shared<ThemeCmd>(*this));
 
   // Load workflow definitions from disk and register as slash commands.
   firmius::core::WorkflowLoader::instance().init();
@@ -176,7 +272,7 @@ void App::setupKeybinds() {
                              false, [this]() { dispatcher_.interruptAgent(); }});
   keybinds_.registerKeybind({keys::kEscape, "Dismiss", ActivityContext::Idle,
                              true, [this]() {
-                               if (menu_.isActive()) { dismissMenu(); return; }
+                               if (activeOverlay_) { dismissOverlay(); return; }
                                dismissAutocomplete();
                              }});
 
@@ -240,8 +336,8 @@ void App::setupKeybinds() {
 
   keybinds_.registerKeybind({keys::kEnter, "Send", ActivityContext::Idle, false,
                              [this]() {
-                               if (menu_.isActive()) {
-                                 menu_.selectCurrent();
+                               if (menuList_.isActive()) {
+                                 menuList_.selectCurrent();
                                  return;
                                }
                                if (autocomplete_.active) {
@@ -255,7 +351,7 @@ void App::setupKeybinds() {
                                if (text[0] == '/' && commands_.execute(text)) {
                                  return;
                                }
-                               state_.addItem(std::make_unique<UserMessageItem>(text));
+                               state_.addItem(std::make_unique<UserMessageItem>(text, state_.focusedAgentId()));
                                dispatcher_.sendMessage(text);
                              }});
 
@@ -265,20 +361,12 @@ void App::setupKeybinds() {
                                  autocompleteMoveUp();
                                  return;
                                }
-                               if (menu_.isActive()) {
-                                 menu_.moveUp();
-                                 state_.markDirtyPublic();
-                               }
                              }});
   keybinds_.registerKeybind({keys::kDown, "Down", ActivityContext::Idle, true,
                              [this]() {
                                if (autocomplete_.active) {
                                  autocompleteMoveDown();
                                  return;
-                               }
-                               if (menu_.isActive()) {
-                                 menu_.moveDown();
-                                 state_.markDirtyPublic();
                                }
                              }});
 
@@ -338,6 +426,10 @@ void App::setupKeybinds() {
                                  state_.markDirtyPublic();
                                }
                              }});
+  keybinds_.registerKeybind({keys::kCtrlT, "Todos", ActivityContext::Idle,
+                             true, [this]() { state_.toggleTodoVisibility(); }});
+  keybinds_.registerKeybind({keys::kCtrlT, "Todos", ActivityContext::Active,
+                             true, [this]() { state_.toggleTodoVisibility(); }});
 }
 
 void App::handleInput(const std::string& key) {
@@ -365,33 +457,10 @@ void App::handleInput(const std::string& key) {
     return;
   }
 
-  // When menu is active, route input to menu.
-  if (menu_.isActive()) {
-    // Bare Escape (not an arrow key sequence) — dismiss menu.
-    if (key == "\x1b") {
-      dismissMenu();
-      return;
-    }
-    if (key == "\r" || key == "\n") {
-      menu_.selectCurrent();
-      dismissMenu();
-      return;
-    }
-    if (key == "\x7f" || key == "\b") {
-      menu_.backspaceSearch();
+  // When overlay is active, delegate input to it.
+  if (activeOverlay_) {
+    if (activeOverlay_->handleInput(key)) {
       state_.markDirtyPublic();
-      return;
-    }
-    // Arrow keys — let keybinds handle menu navigation.
-    if (keybinds_.handleKey(key, context)) {
-      return;
-    }
-    // Printable characters — append to search.
-    for (unsigned char ch : key) {
-      if (ch >= 32 && ch < 127) {
-        menu_.appendToSearch(static_cast<char>(ch));
-        state_.markDirtyPublic();
-      }
     }
     return;
   }
@@ -448,48 +517,25 @@ void App::handleInput(const std::string& key) {
 
 void App::handleMouse(const MouseEvent& event) {
   auto [w, h] = terminal_.size();
-  int statusBarH = 2;
-  int pinnedH = layout_.pinnedHeight(w);
-  // MouseEvent::row is 1-indexed. menuStartRow in 1-indexed coordinates.
-  int menuStartRow1 = h - pinnedH + statusBarH + 1;
-  int menuH = menu_.isActive() ? menu_.height(w) : 0;
+  const int liveH = statusBar_.liveHeight(w);
+  const int overlayH = activeOverlay_ ? activeOverlay_->height(w) : 0;
+  const int inputH = inputBar_.height(w);
+  const int agentH = state_.hasMultipleAgents() ? agentTabBar_.height(w) : 0;
+  const int hudH = statusBar_.hudHeight(w);
+  const int bottomH = bottomBar_.height(w);
+  const int pinnedH = liveH + overlayH + inputH + agentH + hudH + bottomH;
 
-  // Check if mouse is inside the menu list (1-indexed coords).
-  bool insideMenu = menu_.isActive() &&
-                    event.row >= menuStartRow1 &&
-                    event.row < menuStartRow1 + menuH;
-
-  // Mouse move — update hover state.
-  if (event.type == MouseEvent::Type::Move) {
-    if (insideMenu) {
-      int itemRow = (event.row - menuStartRow1) - 3;
-      if (itemRow >= 0 && itemRow < menu_.itemsAreaHeight()) {
-        menu_.setHoveredIndex(menu_.firstVisibleIndex() + itemRow);
-      } else {
-        menu_.setHoveredIndex(-1);
-      }
-      state_.markDirtyPublic();
-    } else {
-      if (menu_.hoveredIndex() != -1) {
-        menu_.setHoveredIndex(-1);
+  if (activeOverlay_) {
+    int overlayStartRow1 = h - pinnedH + liveH + 1;
+    bool inside = event.row >= overlayStartRow1 &&
+                  event.row < overlayStartRow1 + overlayH;
+    if (inside) {
+      if (activeOverlay_->handleMouse(event, event.row, event.col)) {
         state_.markDirtyPublic();
       }
+      return;
     }
-    return;
-  }
-
-  if (event.type == MouseEvent::Type::Scroll) {
-    if (insideMenu) {
-      // Scroll inside menu — scroll up moves cursor down, scroll down moves up
-      // (natural scroll: scrolling up reveals items below).
-      if (event.button == MouseEvent::Button::ScrollUp) {
-        menu_.moveDown();
-      } else if (event.button == MouseEvent::Button::ScrollDown) {
-        menu_.moveUp();
-      }
-      state_.markDirtyPublic();
-    } else {
-      // Scroll outside menu — scroll transcript.
+    if (event.type == MouseEvent::Type::Scroll) {
       if (event.button == MouseEvent::Button::ScrollUp) {
         state_.scrollUp(3);
       } else if (event.button == MouseEvent::Button::ScrollDown) {
@@ -499,26 +545,12 @@ void App::handleMouse(const MouseEvent& event) {
     return;
   }
 
-  if (event.type == MouseEvent::Type::Press &&
-      event.button == MouseEvent::Button::Left) {
-    if (insideMenu) {
-      // Click inside menu — first click highlights, second click on same item enters.
-      // Menu layout: title(1) + separator(1) + search(1) + items...
-      int itemRow = (event.row - menuStartRow1) - 3;
-      if (itemRow >= 0 && itemRow < menu_.itemsAreaHeight()) {
-        int targetIndex = menu_.firstVisibleIndex() + itemRow;
-        int prevIndex = menu_.selectedIndex();
-        // Navigate to the target index.
-        while (menu_.selectedIndex() < targetIndex) menu_.moveDown();
-        while (menu_.selectedIndex() > targetIndex) menu_.moveUp();
-        // If clicking on the already-focused item, enter it.
-        if (prevIndex == targetIndex) {
-          menu_.selectCurrent();
-          dismissMenu();
-        }
-        state_.markDirtyPublic();
-      }
-      return;
+  // No overlay active — scroll transcript.
+  if (event.type == MouseEvent::Type::Scroll) {
+    if (event.button == MouseEvent::Button::ScrollUp) {
+      state_.scrollUp(3);
+    } else if (event.button == MouseEvent::Button::ScrollDown) {
+      state_.scrollDown(3);
     }
   }
 }
@@ -571,9 +603,14 @@ void App::reconcileRuntimeState() {
 namespace {
 
 bool shouldShowItem(const TranscriptItem& item, const std::string& focusedAgentId) {
-  // Global items (no agentId) are always shown
   auto type = item.type();
-  if (type == "UserMessage" || type == "SystemNotice" || type == "ErrorMessage") {
+  // User messages: per-agent. Show if agentId matches focused, or if no agentId (legacy)
+  if (type == "UserMessage") {
+    const auto& um = static_cast<const UserMessageItem&>(item);
+    return um.agentId().empty() || um.agentId() == focusedAgentId;
+  }
+  // System/error notices show for all agents
+  if (type == "SystemNotice" || type == "ErrorMessage") {
     return true;
   }
   // Agent-scoped items: check agentId
@@ -678,28 +715,13 @@ void App::switchToAgentTranscript(const std::string& agentId) {
   lastSyncedRowCounts_.clear();
   state_.scrollToBottom();
 
-  // Re-point active streaming items to the new agent's last unfinalized items
-  state_.setActiveTextItem(nullptr);
-  state_.setActiveThinkingItem(nullptr);
-  const auto& items = state_.items();
-  for (auto it = items.rbegin(); it != items.rend(); ++it) {
-    if ((*it)->type() == "AgentText" && !(*it)->isFinalized()) {
-      auto* text = static_cast<AgentTextItem*>(it->get());
-      if (text->agentId() == agentId) {
-        state_.setActiveTextItem(text);
-        break;
-      }
-    }
-  }
-  for (auto it = items.rbegin(); it != items.rend(); ++it) {
-    if ((*it)->type() == "AgentThinking" && !(*it)->isFinalized()) {
-      auto* think = static_cast<AgentThinkingItem*>(it->get());
-      if (think->agentId() == agentId) {
-        state_.setActiveThinkingItem(think);
-        break;
-      }
-    }
-  }
+  // Re-point global active streaming items to the new agent's items
+  // (per-agent pointers are maintained by EventRouter automatically)
+  auto* textItem = state_.agentTextItem(agentId);
+  state_.setActiveTextItem(textItem && !textItem->isFinalized() ? textItem : nullptr);
+
+  auto* thinkItem = state_.agentThinkingItem(agentId);
+  state_.setActiveThinkingItem(thinkItem && !thinkItem->isFinalized() ? thinkItem : nullptr);
 }
 
 // ── Full-Screen Rendering Pipeline ──
@@ -712,56 +734,47 @@ void App::renderFrame() {
                           ? std::min(5, static_cast<int>(autocomplete_.matches.size()))
                           : 0;
 
-  // Update pinned component composition.
-  // bottomBar is always rendered manually (after autocomplete rows when active).
-  if (menu_.isActive()) {
-    layout_.setPinnedComponents({&statusBar_, &agentTabBar_, &menu_, &inputBar_});
-  } else if (state_.hasMultipleAgents()) {
-    layout_.setPinnedComponents({&statusBar_, &agentTabBar_, &inputBar_});
-  } else {
-    layout_.setPinnedComponents({&statusBar_, &inputBar_});
-  }
+  const auto liveLines = statusBar_.renderLiveSection(w);
+  const auto overlayLines =
+      activeOverlay_ ? activeOverlay_->render(w) : std::vector<std::string>{};
+  const auto inputLines = inputBar_.render(w);
+  const auto agentLines = state_.hasMultipleAgents() ? agentTabBar_.render(w)
+                                                     : std::vector<std::string>{};
+  const auto hudLines = statusBar_.renderHudSection(w);
+  const auto bottomLines = bottomBar_.render(w);
 
-  int basePinnedH = layout_.pinnedHeight(w);
-  // Total pinned height = statusBar + menu + inputBar + autocomplete + bottomBar.
-  int pinnedH = basePinnedH + autocompleteH + 1; // +1 for bottomBar
+  std::vector<std::string> pinnedLines;
+  pinnedLines.reserve(liveLines.size() + overlayLines.size() + inputLines.size() +
+                      agentLines.size() + hudLines.size() + bottomLines.size());
+  pinnedLines.insert(pinnedLines.end(), liveLines.begin(), liveLines.end());
+  pinnedLines.insert(pinnedLines.end(), overlayLines.begin(), overlayLines.end());
+  pinnedLines.insert(pinnedLines.end(), inputLines.begin(), inputLines.end());
+  pinnedLines.insert(pinnedLines.end(), agentLines.begin(), agentLines.end());
+  pinnedLines.insert(pinnedLines.end(), hudLines.begin(), hudLines.end());
+  pinnedLines.insert(pinnedLines.end(), bottomLines.begin(), bottomLines.end());
+
+  int basePinnedH = static_cast<int>(pinnedLines.size());
+  int pinnedH = basePinnedH + autocompleteH;
 
   // Render transcript shorter to leave room for autocomplete + pinned zone.
   int transcriptH = h - pinnedH;
   if (transcriptH < 1) transcriptH = 1;
 
   CellGrid target(h, std::vector<Cell>(w));
-  renderTranscriptZone(target, w, transcriptH);
-
-  // Layout (bottom-up):
-  //   statusBar(2) + menu(mH) + inputBar(1)  ← pinned zone, at bottom
-  //   autocomplete rows (0 or more)           ← between transcript and pinned
-  //   bottomBar(1)                            ← between transcript and autocomplete
-  //   transcript                              ← fills remaining space
-
-  // Render pinned zone (statusBar + menu + inputBar) at the very bottom.
-  int sbH = 2;
-  int mH = menu_.isActive() ? menu_.height(w) : 0;
-  renderPinnedZone(target, w, h, basePinnedH);
-
-  // bottomBar and autocomplete render between transcript and pinned zone.
-  // They start right after the transcript ends (row transcriptH).
-  int gapStart = transcriptH; // first row after transcript
-
-  // Draw bottomBar at gapStart.
-  {
-    auto bbLines = bottomBar_.render(w);
-    if (!bbLines.empty() && gapStart >= 0 && gapStart < h) {
-      auto cells = AnsiParser::parse(bbLines[0], w);
-      for (int c = 0; c < std::min(static_cast<int>(cells.size()), w); ++c) {
-        target[gapStart][c] = cells[c];
-      }
+  const auto& theme = ThemeManager::instance().currentTheme();
+  for (int row = 0; row < h; ++row) {
+    for (int col = 0; col < w; ++col) {
+      target[row][col].bg.type = CellColor::Type::RGB;
+      target[row][col].bg.r = static_cast<uint8_t>(theme.chat.bg.r);
+      target[row][col].bg.g = static_cast<uint8_t>(theme.chat.bg.g);
+      target[row][col].bg.b = static_cast<uint8_t>(theme.chat.bg.b);
     }
   }
+  renderTranscriptZone(target, w, transcriptH);
 
-  // Draw autocomplete rows below bottomBar.
+  // Draw autocomplete rows directly under the transcript.
   if (autocompleteH > 0) {
-    int acStart = gapStart + 1; // autocomplete starts after bottomBar
+    int acStart = transcriptH;
     for (int i = 0; i < autocompleteH; ++i) {
       int row = acStart + i;
       if (row < 0 || row >= h) continue;
@@ -772,21 +785,28 @@ void App::renderFrame() {
         line += "  " + ansi::dim(match.description);
       }
       if (selected) {
-        line = ansi::bgRgb(40, 40, 55, ansi::fitToWidth(line, w));
+        line = theme_ansi::selection(ansi::fitToWidth(line, w));
       } else {
         line = ansi::fitToWidth(line, w);
       }
       auto cells = AnsiParser::parse(line, w);
       for (int c = 0; c < std::min(static_cast<int>(cells.size()), w); ++c) {
-        target[row][c] = cells[c];
+        applyFallbackBackground(cells[c], theme);
+        blendCell(target[row][c], cells[c]);
       }
     }
   }
 
-  // Set menu screen row for mouse hit testing.
-  {
-    int menuStartRow = h - basePinnedH + sbH;
-    menu_.setScreenRow(menuStartRow);
+  // Draw pinned lines under autocomplete.
+  int pinnedStart = transcriptH + autocompleteH;
+  for (int i = 0; i < std::min(basePinnedH, h - pinnedStart); ++i) {
+    int row = pinnedStart + i;
+    if (row < 0 || row >= h) continue;
+    auto cells = AnsiParser::parse(pinnedLines[static_cast<std::size_t>(i)], w);
+    for (int c = 0; c < std::min(static_cast<int>(cells.size()), w); ++c) {
+      applyFallbackBackground(cells[c], theme);
+      blendCell(target[row][c], cells[c]);
+    }
   }
 
   // Diff against previous frame and emit only changed cells.
@@ -794,13 +814,13 @@ void App::renderFrame() {
   terminal_.hideCursor();
   diffAndEmit(target, w, h);
 
-  // Position cursor at the end of the input bar for typing.
-  // basePinnedH = statusBar(2) + menu(mH) + inputBar(1).
-  // inputBar row (1-indexed) = h - basePinnedH + sbH + mH + 1.
+  // Position cursor on the input line, not the separator.
   {
-    int cursorRow = h - basePinnedH + sbH + mH + 1;
+    int cursorRow = pinnedStart + static_cast<int>(liveLines.size()) +
+                    static_cast<int>(overlayLines.size()) +
+                    inputBar_.cursorRowOffset();
     auto input = state_.inputBuffer();
-    terminal_.moveCursor(cursorRow, 4 + static_cast<int>(input.size()));
+    terminal_.moveCursor(cursorRow, 5 + static_cast<int>(input.size()));
   }
   terminal_.showCursor();
   terminal_.flushBatch();
@@ -812,6 +832,7 @@ void App::renderFrame() {
 }
 
 void App::renderTranscriptZone(CellGrid& target, int w, int transcriptH) {
+  const auto& theme = ThemeManager::instance().currentTheme();
   const auto& scrollback = state_.scrollback();
   int totalLines = static_cast<int>(scrollback.size());
   int offset = state_.scrollOffset();
@@ -826,7 +847,8 @@ void App::renderTranscriptZone(CellGrid& target, int w, int transcriptH) {
     if (row >= transcriptH) break;
     auto cells = AnsiParser::parse(scrollback[i], w);
     for (int c = 0; c < std::min(static_cast<int>(cells.size()), w); ++c) {
-      target[row][c] = cells[c];
+      applyFallbackBackground(cells[c], theme);
+      blendCell(target[row][c], cells[c]);
     }
   }
 
@@ -838,7 +860,8 @@ void App::renderTranscriptZone(CellGrid& target, int w, int transcriptH) {
     auto indCells = AnsiParser::parse(
         "\x1b[2m" + indicator + "\x1b[22m", indLen);
     for (int c = 0; c < std::min(static_cast<int>(indCells.size()), w - startCol); ++c) {
-      target[0][startCol + c] = indCells[c];
+      applyFallbackBackground(indCells[c], theme);
+      blendCell(target[0][startCol + c], indCells[c]);
     }
   }
 }
@@ -891,6 +914,10 @@ void App::diffAndEmit(const CellGrid& target, int w, int h) {
         if (cell.style.underline) sgr += "\x1b[4m";
         if (cell.style.strikethrough) sgr += "\x1b[9m";
         if (cell.style.invert) sgr += "\x1b[7m";
+        // \x1b[0m resets ALL attributes including fg/bg to terminal default.
+        // Invalidate cached colors so the checks below always re-apply them.
+        curFg = {};
+        curBg = {};
       } else {
         // Only emit changed style attributes.
         if (!styleValid || curStyle.bold != cell.style.bold) {
@@ -1014,7 +1041,7 @@ void App::onResize() {
 void App::connectAndSetup() {
   try {
     // Show immediate feedback — the user sees this on the first frame.
-    state_.addItem(std::make_unique<SystemNoticeItem>("Connecting to daemon..."));
+    state_.setLiveMessage("Connecting to daemon...");
 
     // Connect with retries and exponential backoff (500ms → 1s → 2s → 4s → 8s → 16s).
     bool connected = false;
@@ -1026,9 +1053,10 @@ void App::connectAndSetup() {
         connected = true;
         break;
       }
-      state_.addItem(std::make_unique<SystemNoticeItem>(
-          "Daemon not ready, retrying in " + std::to_string(delayMs / 1000.0) + "s... (attempt " +
-          std::to_string(attempt + 1) + "/" + std::to_string(maxTotalAttempts) + ")"));
+      state_.setLiveMessage(
+          "Daemon not ready, retrying in " + std::to_string(delayMs / 1000.0) +
+          "s... (attempt " + std::to_string(attempt + 1) + "/" +
+          std::to_string(maxTotalAttempts) + ")");
       std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
       delayMs = std::min(delayMs * 2, maxDelayMs);
     }
@@ -1041,7 +1069,7 @@ void App::connectAndSetup() {
       return;
     }
 
-    state_.addItem(std::make_unique<SystemNoticeItem>("Connected. Subscribing to events..."));
+    state_.setLiveMessage("Connected. Subscribing to events...");
     state_.setConnectionStatus(ConnectionStatus::Connected);
 
     // Subscribe to events — init progress messages will arrive as SystemNoticeItems.
@@ -1054,7 +1082,7 @@ void App::connectAndSetup() {
     } else if (options_.continueSession) {
       // TODO: resume last session.
     } else {
-      state_.addItem(std::make_unique<SystemNoticeItem>("Loading UI snapshot..."));
+      state_.setLiveMessage("Loading UI snapshot...");
       firmius::daemon::UiSnapshotRequest request;
       // uiSnapshot now blocks until daemon init is complete (up to 30s).
       firmius::daemon::UiSnapshot uiSnap = session_.client().uiSnapshot(request);
@@ -1062,11 +1090,37 @@ void App::connectAndSetup() {
                           uiSnap.config.config.defaultModelId;
       state_.setModelLabel(label);
       state_.setAgentPurpose(uiSnap.config.config.defaultLeadPersona);
-      if (uiSnap.config.config.defaultMaxTokens.has_value()) {
-        state_.setAgentContextWindow(
-            std::to_string(uiSnap.config.config.defaultMaxTokens.value() / 1000) + "k ctx");
+      if (uiSnap.focusedAgent.has_value()) {
+        state_.setAgentContextUsage(ContextUsage{
+            uiSnap.focusedAgent->contextWindowTokens,
+            uiSnap.focusedAgent->contextUsedTokens,
+            uiSnap.focusedAgent->contextSentTokens,
+        });
+        if (uiSnap.focusedAgent->contextWindowTokens > 0) {
+          const uint32_t displayTokens = uiSnap.focusedAgent->contextUsedTokens > 0
+                                             ? uiSnap.focusedAgent->contextUsedTokens
+                                             : uiSnap.focusedAgent->contextSentTokens;
+          state_.setAgentContextWindow(
+              std::to_string(displayTokens / 1000) + "k/" +
+              std::to_string(uiSnap.focusedAgent->contextWindowTokens / 1000) +
+              "k");
+        }
+      } else {
+        for (const auto& info : uiSnap.models.models) {
+          if (info.provider == uiSnap.config.config.defaultProviderId &&
+              info.id == uiSnap.config.config.defaultModelId) {
+            state_.setAgentContextUsage(ContextUsage{info.contextWindow, 0, 0});
+            state_.setAgentContextWindow("0/" +
+                                         std::to_string(info.contextWindow / 1000) +
+                                         "k");
+            break;
+          }
+        }
       }
-      state_.addItem(std::make_unique<SystemNoticeItem>("UI snapshot loaded."));
+      if (uiSnap.focusedAgentTodo.has_value() && uiSnap.focusedAgent.has_value()) {
+        state_.setAgentTodos(uiSnap.focusedAgent->agentId,
+                             uiSnap.focusedAgentTodo->items);
+      }
     }
 
     // Welcome message.
@@ -1074,6 +1128,7 @@ void App::connectAndSetup() {
     std::string welcomeText = threadId.empty()
         ? "Ready. Type a message or use /new to start."
         : "Ready. Thread: " + threadId;
+    state_.setLiveMessage("");
     state_.addItem(std::make_unique<SystemNoticeItem>(welcomeText));
 
   } catch (const std::exception& e) {
@@ -1093,10 +1148,10 @@ void App::openModelsMenu() {
       item.id = m.provider + ":" + m.id;
       items.push_back(std::move(item));
     }
-    menu_.open();
-    menu_.setTitle("Select Model");
-    menu_.setItems(std::move(items));
-    menu_.setOnSelect([this](const MenuList::Item& item) {
+    menuList_.open();
+    menuList_.setTitle("Select Model");
+    menuList_.setItems(std::move(items));
+    menuList_.setOnSelect([this](const MenuList::Item& item) {
       auto sep = item.id.find(':');
       if (sep != std::string::npos) {
         auto providerId = item.id.substr(0, sep);
@@ -1108,9 +1163,10 @@ void App::openModelsMenu() {
           state_.addItem(std::make_unique<SystemNoticeItem>("Failed to switch model"));
         }
       }
-      dismissMenu();
+      dismissOverlay();
     });
-    menu_.setOnDismiss([this]() { dismissMenu(); });
+    menuList_.setOnDismiss([this]() { dismissOverlay(); });
+    activeOverlay_ = &menuList_;
     state_.markDirtyPublic();
   } catch (const std::exception& e) {
     state_.addItem(std::make_unique<SystemNoticeItem>(
@@ -1129,14 +1185,15 @@ void App::openResumeMenu() {
       item.id = t.threadId;
       items.push_back(std::move(item));
     }
-    menu_.open();
-    menu_.setTitle("Resume Session");
-    menu_.setItems(std::move(items));
-    menu_.setOnSelect([this](const MenuList::Item& item) {
+    menuList_.open();
+    menuList_.setTitle("Resume Session");
+    menuList_.setItems(std::move(items));
+    menuList_.setOnSelect([this](const MenuList::Item& item) {
       dispatcher_.openThread(item.id);
-      dismissMenu();
+      dismissOverlay();
     });
-    menu_.setOnDismiss([this]() { dismissMenu(); });
+    menuList_.setOnDismiss([this]() { dismissOverlay(); });
+    activeOverlay_ = &menuList_;
     state_.markDirtyPublic();
   } catch (const std::exception& e) {
     state_.addItem(std::make_unique<SystemNoticeItem>(
@@ -1144,10 +1201,61 @@ void App::openResumeMenu() {
   }
 }
 
+void App::openAccountsOverlay(const std::string& providerId) {
+  try {
+    firmius::daemon::AccountsRequest req;
+    req.providerId = providerId;
+    auto accounts = session_.client().listAccounts(req);
+
+    firmius::daemon::QuotaSnapshot quotas;
+    try {
+      firmius::daemon::QuotasRequest qreq;
+      qreq.providerId = providerId;
+      quotas = session_.client().getCachedQuotas(qreq);
+      if (quotas.buckets.empty()) {
+        quotas = session_.client().getQuotas(qreq);
+      }
+    } catch (...) {}
+
+    auto [termW, termH] = terminal_.size();
+    (void)termH;
+
+    accountsOverlay_.load(providerId, std::move(accounts),
+                          std::move(quotas), termW);
+    accountsOverlay_.setOnDismiss([this]() { dismissOverlay(); });
+    accountsOverlay_.open();
+    activeOverlay_ = &accountsOverlay_;
+    state_.markDirtyPublic();
+  } catch (const std::exception& e) {
+    state_.addItem(std::make_unique<SystemNoticeItem>(
+        std::string("Failed to fetch accounts: ") + e.what()));
+  }
+}
+
+void App::applyTheme(const std::string& name) {
+  if (!ThemeManager::instance().setTheme(name)) {
+    state_.addItem(std::make_unique<SystemNoticeItem>(
+        "Unknown theme: " + name));
+    return;
+  }
+  prevFrame_.clear();
+  prevW_ = 0;
+  prevH_ = 0;
+  state_.clearScrollback();
+  lastSyncedItemCount_ = 0;
+  lastSyncedRowCounts_.clear();
+  state_.markDirtyPublic();
+  state_.addItem(std::make_unique<SystemNoticeItem>("Theme changed to " + name));
+}
+
 void App::dismissMenu() {
-  if (menu_.isActive()) {
-    menu_.setHoveredIndex(-1);
-    menu_.close();
+  dismissOverlay();
+}
+
+void App::dismissOverlay() {
+  if (activeOverlay_) {
+    activeOverlay_->close();
+    activeOverlay_ = nullptr;
     state_.markDirtyPublic();
   }
   dismissAutocomplete();

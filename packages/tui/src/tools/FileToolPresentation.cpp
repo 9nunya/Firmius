@@ -1393,6 +1393,18 @@ bool IsFileReadFamilyTool(const std::string &tool_name) {
   return IsMatch(tool_name, "file_read") || tool_name == "Read";
 }
 
+bool IsListFamilyTool(const std::string &tool_name) {
+  return IsMatch(tool_name, "list_directory") || tool_name == "List";
+}
+
+bool IsGrepFamilyTool(const std::string &tool_name) {
+  return tool_name == "Grep";
+}
+
+bool IsGlobFamilyTool(const std::string &tool_name) {
+  return tool_name == "Glob";
+}
+
 bool IsFileWriteFamilyTool(const std::string &tool_name) {
   return IsMatch(tool_name, "file_edit") || IsMatch(tool_name, "file_write") ||
          tool_name == "Edit" || tool_name == "EditWrite" ||
@@ -1400,28 +1412,24 @@ bool IsFileWriteFamilyTool(const std::string &tool_name) {
 }
 
 bool IsDirectoryFamilyTool(const std::string &tool_name) {
-  return IsMatch(tool_name, "list_directory") || tool_name == "Files";
+  return IsMatch(tool_name, "list_directory") || IsListFamilyTool(tool_name);
 }
 
 bool IsFileFamilyTool(const std::string &tool_name) {
   return IsFileReadFamilyTool(tool_name) || IsFileWriteFamilyTool(tool_name) ||
-         IsDirectoryFamilyTool(tool_name);
+         IsDirectoryFamilyTool(tool_name) || IsGrepFamilyTool(tool_name) ||
+         IsGlobFamilyTool(tool_name);
 }
 
 ToolPresentation BuildFileToolPresentation(const ToolCallView &view) {
-  rapidjson::Document args_doc;
-  const bool has_args = !view.args.empty() && !args_doc.Parse(view.args.c_str()).HasParseError() && args_doc.IsObject();
-  const std::string action = (has_args && args_doc.HasMember("action") && args_doc["action"].IsString())
-                                 ? args_doc["action"].GetString()
-                                 : "";
-  if (view.name == "Files" && action == "Read") {
+  if (view.name == "Read" || IsFileReadFamilyTool(view.name)) {
     return BuildFileReadPresentation(view);
   }
-  if (view.name == "Files") {
+  if (view.name == "List" || IsDirectoryFamilyTool(view.name)) {
     return BuildListDirectoryPresentation(view);
   }
-  if (IsFileReadFamilyTool(view.name)) {
-    return BuildFileReadPresentation(view);
+  if (view.name == "Grep" || view.name == "Glob") {
+    return BuildListDirectoryPresentation(view);
   }
   if (IsFileWriteFamilyTool(view.name)) {
     return BuildFileEditPresentation(view);

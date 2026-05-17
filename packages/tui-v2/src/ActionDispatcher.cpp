@@ -42,9 +42,26 @@ bool ActionDispatcher::createThread(const std::string &persona,
   state_.setThreadId(response.thread.threadId);
   state_.setAgentId(response.focusedAgentId);
   state_.setThreadTitle(response.thread.title);
+  state_.setLiveMessage("");
   // Items are managed by AppState — no setTranscriptLines needed
 
   session_.openThread(response.thread.threadId);
+  if (!response.focusedAgentId.empty()) {
+    auto agent = session_.getAgent(response.thread.threadId, response.focusedAgentId);
+    if (agent) {
+      state_.setAgentPurpose(agent->persona);
+      if (!agent->modelId.empty()) {
+        std::string label = agent->providerId.empty() ? agent->modelId
+                                                      : agent->providerId + "/" + agent->modelId;
+        state_.setModelLabel(label);
+      }
+      state_.setAgentContextUsage(ContextUsage{
+          agent->contextWindowTokens,
+          agent->contextUsedTokens,
+          agent->contextSentTokens,
+      });
+    }
+  }
   return true;
 }
 
@@ -55,6 +72,7 @@ bool ActionDispatcher::openThread(const std::string &threadId) {
   state_.setThreadId(response.thread.threadId);
   state_.setAgentId(response.focusedAgentId);
   state_.setThreadTitle(response.thread.title);
+  state_.setLiveMessage("");
 
   if (!response.focusedAgentId.empty()) {
     auto agent = session_.getAgent(response.thread.threadId, response.focusedAgentId);
@@ -65,9 +83,23 @@ bool ActionDispatcher::openThread(const std::string &threadId) {
         if (!agent->providerId.empty()) label = agent->providerId + "/" + agent->modelId;
         state_.setModelLabel(label);
       }
-      if (agent->maxTokens > 0) {
-        state_.setAgentContextWindow(std::to_string(agent->maxTokens / 1000) + "k ctx");
+      state_.setAgentContextUsage(ContextUsage{
+          agent->contextWindowTokens,
+          agent->contextUsedTokens,
+          agent->contextSentTokens,
+      });
+      if (agent->contextWindowTokens > 0) {
+        const uint32_t displayTokens = agent->contextUsedTokens > 0
+                                           ? agent->contextUsedTokens
+                                           : agent->contextSentTokens;
+        state_.setAgentContextWindow(
+            std::to_string(displayTokens / 1000) + "k/" +
+            std::to_string(agent->contextWindowTokens / 1000) + "k");
       }
+    }
+    auto todo = session_.getAgentTodo(response.thread.threadId, response.focusedAgentId);
+    if (todo) {
+      state_.setAgentTodos(response.focusedAgentId, todo->items);
     }
   }
 
@@ -112,15 +144,17 @@ void ActionDispatcher::loadTranscript() {
       for (const auto& part : msg.content) {
         if (const auto* text = std::get_if<firmius::shared::TextContent>(&part)) {
           if (msg.role == firmius::shared::Role::User) {
-            state_.addItem(std::make_unique<UserMessageItem>(text->text));
+            state_.addItem(std::make_unique<UserMessageItem>(text->text, agentId));
           } else {
             auto item = std::make_unique<AgentTextItem>();
+            item->setAgentId(agentId);
             item->appendDelta(text->text);
             item->finalize();
             state_.addItem(std::move(item));
           }
         } else if (const auto* thinking = std::get_if<firmius::shared::ThinkingContent>(&part)) {
           auto item = std::make_unique<AgentThinkingItem>();
+          item->setAgentId(agentId);
           item->appendDelta(thinking->thinking);
           item->finalize();
           state_.addItem(std::move(item));

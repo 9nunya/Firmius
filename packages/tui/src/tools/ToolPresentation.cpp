@@ -55,7 +55,7 @@ TryBuildSpecializedPresentation(const ToolCallView &view,
     return BuildSubagentToolPresentation(view, subagent_state);
   }
   const std::string action = ExtractAction(view);
-  if (view.name == "Files" && (action == "Grep" || action == "Glob" || action == "Search")) {
+  if (view.name == "Grep" || view.name == "Glob") {
     return BuildSearchToolPresentation(view);
   }
   if (IsArtifactFamilyTool(view.name)) {

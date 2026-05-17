@@ -34,8 +34,8 @@ TEST(ChatWindowQuickToolGroupingTest, GroupsConsecutiveToolOnlyTurnsAcrossFooter
     Message assistant;
     assistant.role = Role::Assistant;
     assistant.content = {
-        ToolCallContent{"read-1", "Files",
-                        R"({"action":"Read","path":"a.txt"})"},
+        ToolCallContent{"read-1", "Read",
+                        R"({"path":"a.txt"})"},
     };
     turn.messages.push_back(std::move(assistant));
 
@@ -61,8 +61,8 @@ TEST(ChatWindowQuickToolGroupingTest, GroupsConsecutiveToolOnlyTurnsAcrossFooter
     Message assistant;
     assistant.role = Role::Assistant;
     assistant.content = {
-        ToolCallContent{"read-2", "Files",
-                        R"({"action":"Read","path":"b.txt"})"},
+        ToolCallContent{"read-2", "Read",
+                        R"({"path":"b.txt"})"},
     };
     turn.messages.push_back(std::move(assistant));
 
@@ -87,8 +87,8 @@ TEST(ChatWindowQuickToolGroupingTest, GroupsConsecutiveToolOnlyTurnsAcrossFooter
     Message assistant;
     assistant.role = Role::Assistant;
     assistant.content = {
-        ToolCallContent{"read-3", "Files",
-                        R"({"action":"Read","path":"c.txt"})"},
+        ToolCallContent{"read-3", "Read",
+                        R"({"path":"c.txt"})"},
     };
     turn.messages.push_back(std::move(assistant));
 

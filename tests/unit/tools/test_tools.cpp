@@ -4,7 +4,10 @@
 #include "agents/AgentPermissionChecks.hpp"
 #include "agents/PurposeLoader.hpp"
 #include "hosts/LocalHost.hpp"
-#include "tools/FilesTool.hpp"
+#include "tools/ReadTool.hpp"
+#include "tools/ListTool.hpp"
+#include "tools/GrepTool.hpp"
+#include "tools/GlobTool.hpp"
 #include "tools/FileEditTool.hpp"
 #include "tools/LspDiagnosticsTool.hpp"
 #include "tools/LspTool.hpp"
@@ -485,7 +488,7 @@ TEST(ToolContextCancellationContractTest, WaitForReturnsFalseWhenCancelled) {
 
 class FileReadToolTest : public ::testing::Test {
 protected:
-  FilesTool tool;
+  ReadTool tool;
   NiceMock<MockHost> mockHost;
   NiceMock<MockAgent> mockAgent;
   AgentContext agentContext;
@@ -522,7 +525,6 @@ protected:
   ToolResult executeRead(const rapidjson::Value &json, ToolContext &ctx) {
     rapidjson::Document doc;
     doc.CopyFrom(json, doc.GetAllocator());
-    doc.AddMember("action", "Read", doc.GetAllocator());
     return tool.execute(doc, ctx);
   }
 };
@@ -556,6 +558,9 @@ TEST_F(FileReadToolTest, allowedPaths_permitsInside) {
 TEST_F(FileReadToolTest, allowedPaths_blocksOutside) {
   mockAgent.defaultCtx.permissions.allowedPaths = {};
   mockAgent.defaultCtx.permissions.allowOutsideCwd = false;
+
+  mockAgent.mockPerms_->allowOutsideCwd_ = false;
+  mockAgent.mockPerms_->allowedPaths_ = {};
 
   auto json = createJsonInput({{"path", "/etc/passwd"}});
   ToolContext ctx{mockHost, mockAgent, "test_call"};
@@ -877,7 +882,7 @@ TEST_F(SkillLoadToolTest, allowsSymlinkWithinSkillRoot) {
 
 class GlobToolTest : public ::testing::Test {
 protected:
-  FilesTool tool;
+  GlobTool tool;
   NiceMock<MockHost> mockHost;
   NiceMock<MockAgent> mockAgent;
   std::map<std::string, FileInfo> fileInfos;
@@ -926,7 +931,6 @@ protected:
   ToolResult executeGlob(const rapidjson::Value &json, ToolContext &ctx) {
     rapidjson::Document doc;
     doc.CopyFrom(json, doc.GetAllocator());
-    doc.AddMember("action", "Glob", doc.GetAllocator());
     return tool.execute(doc, ctx);
   }
 };
@@ -1003,7 +1007,7 @@ TEST_F(GlobToolTest, patternMatchingSupportsCharacterClassesAndPathSegments) {
 
 class GrepToolTest : public ::testing::Test {
 protected:
-  FilesTool tool;
+  GrepTool tool;
   NiceMock<MockHost> mockHost;
   NiceMock<MockAgent> mockAgent;
 
@@ -1018,7 +1022,6 @@ protected:
   ToolResult executeGrep(const rapidjson::Value &json, ToolContext &ctx) {
     rapidjson::Document doc;
     doc.CopyFrom(json, doc.GetAllocator());
-    doc.AddMember("action", "Grep", doc.GetAllocator());
     return tool.execute(doc, ctx);
   }
 };
@@ -1539,7 +1542,7 @@ TEST_F(ProcessStatusToolTest, rejectsAgentIdWithActionableHint) {
 
 class ListDirectoryToolTest : public ::testing::Test {
 protected:
-  FilesTool tool;
+  ListTool tool;
   NiceMock<MockHost> mockHost;
   NiceMock<MockAgent> mockAgent;
 
@@ -1567,7 +1570,6 @@ protected:
   ToolResult executeList(const rapidjson::Value &json, ToolContext &ctx) {
     rapidjson::Document doc;
     doc.CopyFrom(json, doc.GetAllocator());
-    doc.AddMember("action", "List", doc.GetAllocator());
     return tool.execute(doc, ctx);
   }
 };

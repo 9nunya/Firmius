@@ -27,7 +27,7 @@ TEST(StreamStateManagerHistoryTest, RebuildFindsToolResultsRegardlessOfMessageRo
   assistant.role = Role::Assistant;
   assistant.content = {
       TextContent{"working"},
-      ToolCallContent{"tool-1", "Files", R"({"action":"Read","path":"src/main.rs"})"},
+      ToolCallContent{"tool-1", "Read", R"({"path":"src/main.rs"})"},
       ToolResultContent{"tool-1", R"({"content":"fn main() {}"})", true, "", ""},
   };
   turn.messages.push_back(assistant);
@@ -720,7 +720,7 @@ TEST(StreamStateManagerHistoryTest,
   Message child_assistant;
   child_assistant.role = Role::Assistant;
   child_assistant.content = {
-      ToolCallContent{"child-list", "Files", R"({"action":"List","path":"."})"},
+      ToolCallContent{"child-list", "List", R"({"path":"."})"},
       ToolCallContent{"child-read", "Artifacts",
                       R"({"action":"Read","reference":"@artifact:dir-researcher/WORKER_REPORT.md"})"},
   };

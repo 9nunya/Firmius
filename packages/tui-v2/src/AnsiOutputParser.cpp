@@ -1,5 +1,6 @@
 #include "AnsiOutputParser.hpp"
 #include "Terminal.hpp"
+#include "ThemeAnsi.hpp"
 
 #include <algorithm>
 #include <sstream>
@@ -84,11 +85,11 @@ std::vector<std::string> AnsiOutputParser::toLines(const std::string& raw, int w
   std::vector<std::string> result;
 
   if (raw.empty()) {
-    result.push_back(ansi::dim(ansi::fgRgb(120, 120, 140, "  \xe2\x94\x82 (no output)")));
+    result.push_back(theme_ansi::dim("  \xe2\x94\x82 (no output)"));
     return result;
   }
 
-  std::string barPrefix = ansi::dim(ansi::fgRgb(100, 100, 120, "  \xe2\x94\x82 "));
+  std::string barPrefix = theme_ansi::dim("  \xe2\x94\x82 ");
   int prefixVisibleLen = 3; // "  │ "
   int contentWidth = width - prefixVisibleLen;
   if (contentWidth < 10) contentWidth = 10;
@@ -110,15 +111,15 @@ std::vector<std::string> AnsiOutputParser::toLines(const std::string& raw, int w
   }
 
   if (allLines.empty()) {
-    result.push_back(ansi::dim(ansi::fgRgb(120, 120, 140, "  \xe2\x94\x82 (no output)")));
+    result.push_back(theme_ansi::dim("  \xe2\x94\x82 (no output)"));
     return result;
   }
 
   // If maxLines > 0 and we exceed it, take the LAST maxLines lines
   if (maxLines > 0 && static_cast<int>(allLines.size()) > maxLines) {
     int omitted = static_cast<int>(allLines.size()) - maxLines;
-    result.push_back(ansi::dim(ansi::fgRgb(120, 120, 140,
-        "  ... " + std::to_string(omitted) + " earlier lines ...")));
+    result.push_back(theme_ansi::dim(
+        "  ... " + std::to_string(omitted) + " earlier lines ..."));
     result.insert(result.end(),
                   allLines.end() - maxLines,
                   allLines.end());

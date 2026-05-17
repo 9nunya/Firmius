@@ -108,3 +108,18 @@ TEST(EventRouterTest, PermissionEscalation) {
       R"({"requestId":"req_1"})", "t1", "a1");
   EXPECT_FALSE(state.pendingPermission().has_value());
 }
+
+TEST(EventRouterTest, AgentTodoUpdatedHydratesState) {
+  AppState state;
+  EventRouter router(state);
+  state.setAgentId("a1");
+  state.focusAgent("a1");
+
+  router.routeRuntimeEvent(
+      "agent_todo_updated",
+      R"({"agentId":"a1","todo":{"thread_id":"t1","agent_id":"a1","next_id":2,"items":[{"id":1,"text":"Polish status bar","status":"InProgress","chunk_id":"","plan_id":"","created_at":0,"updated_at":0}]}})",
+      "t1", "a1");
+
+  ASSERT_EQ(state.focusedAgentTodos().size(), 1u);
+  EXPECT_EQ(state.focusedAgentTodos()[0].text, "Polish status bar");
+}

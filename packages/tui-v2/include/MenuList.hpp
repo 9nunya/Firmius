@@ -1,6 +1,6 @@
 #pragma once
 
-#include "Component.hpp"
+#include "Overlay.hpp"
 
 #include <functional>
 #include <string>
@@ -12,7 +12,7 @@ namespace firmius::tui2 {
 ///
 /// Displays a title, items with a selection cursor, and a hint line.
 /// Supports fuzzy search with space-separated tag matching.
-class MenuList : public Component {
+class MenuList : public Overlay {
 public:
   struct Item {
     std::string label;
@@ -69,6 +69,11 @@ public:
 
   int height(int width) const override;
   std::vector<std::string> render(int width) const override;
+
+  bool handleInput(const std::string& key) override;
+  bool handleMouse(const MouseEvent& event,
+                   int screenRow,
+                   int screenCol) override;
 
 private:
   void rebuildFiltered() const;

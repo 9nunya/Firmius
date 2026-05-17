@@ -78,7 +78,10 @@ TEST(ToolPresentationTest, FamilyBuildersAndMatchersAreExplicitlyEnumerated) {
   EXPECT_TRUE(firmius::tui::IsFileFamilyTool("Edit"));
   EXPECT_TRUE(firmius::tui::IsFileFamilyTool("file_write"));
   EXPECT_TRUE(firmius::tui::IsFileFamilyTool("list_directory"));
-  EXPECT_TRUE(firmius::tui::IsFileFamilyTool("Files"));
+  EXPECT_TRUE(firmius::tui::IsFileFamilyTool("Read"));
+  EXPECT_TRUE(firmius::tui::IsFileFamilyTool("List"));
+  EXPECT_TRUE(firmius::tui::IsFileFamilyTool("Grep"));
+  EXPECT_TRUE(firmius::tui::IsFileFamilyTool("Glob"));
   EXPECT_FALSE(firmius::tui::IsFileFamilyTool("web_fetch"));
   EXPECT_FALSE(firmius::tui::IsFileFamilyTool("terminate_subagent"));
 

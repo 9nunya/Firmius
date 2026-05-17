@@ -2,6 +2,7 @@
 #include "tools/ToolArgsParser.hpp"
 #include "items/ToolCallItem.hpp"
 #include "Terminal.hpp"
+#include "ThemeAnsi.hpp"
 
 #include <rapidjson/document.h>
 
@@ -55,29 +56,29 @@ ArtifactsResult parseResult(const std::string& json) {
 
 std::vector<std::string> ArtifactsPresenter::render(const ToolCallItem& item, const ToolRenderContext& /*ctx*/, int /*width*/) const {
   if (item.phase() == ToolPhase::Preparing) {
-    return {ansi::fgRgb(220, 180, 80, "  \xe2\x9a\x99 Artifacts")};
+    return {theme_ansi::warning("  \xe2\x9a\x99 Artifacts")};
   }
 
   auto args = parseArgs(item.args());
 
   if (item.phase() == ToolPhase::Called) {
     if (args.action == "Write") {
-      return {ansi::fgRgb(220, 180, 80, "  \xe2\x9a\x99 Writing artifact " + args.name + "...")};
+      return {theme_ansi::warning("  \xe2\x9a\x99 Writing artifact " + args.name + "...")};
     }
     if (args.action == "Read") {
-      return {ansi::fgRgb(220, 180, 80, "  \xe2\x9a\x99 Reading artifact " + args.name + "...")};
+      return {theme_ansi::warning("  \xe2\x9a\x99 Reading artifact " + args.name + "...")};
     }
     if (args.action == "List") {
-      return {ansi::fgRgb(220, 180, 80, "  \xe2\x9a\x99 Listing artifacts...")};
+      return {theme_ansi::warning("  \xe2\x9a\x99 Listing artifacts...")};
     }
-    return {ansi::fgRgb(220, 180, 80, "  \xe2\x9a\x99 Artifacts." + args.action)};
+    return {theme_ansi::warning("  \xe2\x9a\x99 Artifacts." + args.action)};
   }
 
   // Finished
   auto res = parseResult(item.result());
   bool success = item.success();
   auto color = [&](const std::string& s) {
-    return success ? ansi::fgRgb(100, 200, 120, s) : ansi::fgRgb(220, 80, 80, s);
+    return success ? theme_ansi::success(s) : theme_ansi::error(s);
   };
   std::string icon = success ? "\xe2\x9c\x93" : "\xe2\x9c\x97";
 
@@ -94,7 +95,7 @@ std::vector<std::string> ArtifactsPresenter::render(const ToolCallItem& item, co
       std::string line;
       int lineCount = 0;
       while (std::getline(stream, line) && lineCount < 20) {
-        result.push_back(ansi::dim(ansi::fgRgb(160, 160, 180, "  " + line)));
+        result.push_back(theme_ansi::dim("  " + line));
         lineCount++;
       }
     }

@@ -29,6 +29,7 @@ inline constexpr const char *kRpcThreadsSend = "threads.send";
 inline constexpr const char *kRpcAgentsList = "agents.list";
 inline constexpr const char *kRpcAgentsGet = "agents.get";
 inline constexpr const char *kRpcAgentsFocus = "agents.focus";
+inline constexpr const char *kRpcAgentTodoGet = "agentTodo.get";
 inline constexpr const char *kRpcAgentsCompact = "agents.compact";
 inline constexpr const char *kRpcAgentsInterrupt = "agents.interrupt";
 inline constexpr const char *kRpcProcessesList = "processes.list";
@@ -583,6 +584,9 @@ struct AgentRuntimeSnapshot {
   std::string modelId;
   std::string variantName;
   uint32_t maxTokens = 0;
+  uint32_t contextWindowTokens = 0;
+  uint32_t contextUsedTokens = 0;
+  uint32_t contextSentTokens = 0;
   std::vector<std::string> pendingToolCalls;
   std::vector<std::string> ownedProcesses;
   std::vector<std::string> blockingProcessIds;
@@ -593,6 +597,15 @@ struct AgentRuntimeSnapshot {
   bool live = false;
 
   bool operator==(const AgentRuntimeSnapshot &) const = default;
+};
+
+struct AgentTodoSnapshot {
+  std::string threadId;
+  std::string agentId;
+  int nextId = 1;
+  std::vector<firmius::shared::TodoItem> items;
+
+  bool operator==(const AgentTodoSnapshot &) const = default;
 };
 
 struct AgentTreeSnapshot {
@@ -1002,6 +1015,7 @@ struct UiSnapshot {
   std::optional<ThreadSnapshot> focusedThread;
   AgentTreeSnapshot agents;
   std::optional<AgentRuntimeSnapshot> focusedAgent;
+  std::optional<AgentTodoSnapshot> focusedAgentTodo;
   std::optional<TranscriptSnapshot> transcript;
   std::vector<ToolCallSnapshot> toolCalls;
   SubagentActivitySnapshot subagents;

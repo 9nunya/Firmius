@@ -2,6 +2,7 @@
 #include "tools/ToolArgsParser.hpp"
 #include "items/ToolCallItem.hpp"
 #include "Terminal.hpp"
+#include "ThemeAnsi.hpp"
 
 #include <rapidjson/document.h>
 #include <chrono>
@@ -27,7 +28,7 @@ std::string formatDuration(std::chrono::milliseconds ms) {
 
 std::vector<std::string> FleetPresenter::render(const ToolCallItem& item, const ToolRenderContext& /*ctx*/, int /*width*/) const {
   if (item.phase() == ToolPhase::Preparing) {
-    return {ansi::fgRgb(220, 180, 80, "  \xe2\x9a\x99 Fleet")};
+    return {theme_ansi::warning("  \xe2\x9a\x99 Fleet")};
   }
 
   std::string action;
@@ -64,57 +65,57 @@ std::vector<std::string> FleetPresenter::render(const ToolCallItem& item, const 
   // Respond action
   if (action == "Respond") {
     if (item.phase() == ToolPhase::Called) {
-      return {ansi::fgRgb(220, 180, 80, "  \xe2\x9a\x99 Responding to lock request...")};
+      return {theme_ansi::warning("  \xe2\x9a\x99 Responding to lock request...")};
     }
     if (item.success()) {
-      if (accept) return {ansi::fgRgb(100, 200, 120, "  \xe2\x9c\x93 Accepted lock request")};
-      return {ansi::fgRgb(100, 200, 120, "  \xe2\x9c\x93 Denied lock request: " + denyReason)};
+      if (accept) return {theme_ansi::success("  \xe2\x9c\x93 Accepted lock request")};
+      return {theme_ansi::success("  \xe2\x9c\x93 Denied lock request: " + denyReason)};
     }
-    return {ansi::fgRgb(220, 80, 80, "  \xe2\x9c\x97 Fleet respond failed")};
+    return {theme_ansi::error("  \xe2\x9c\x97 Fleet respond failed")};
   }
 
   // Status action
   if (action == "Status") {
     if (item.phase() == ToolPhase::Called) {
-      return {ansi::fgRgb(220, 180, 80, "  \xe2\x9a\x99 Fleet status...")};
+      return {theme_ansi::warning("  \xe2\x9a\x99 Fleet status...")};
     }
     if (!item.result().empty()) {
       rapidjson::Document doc;
       doc.Parse(item.result().c_str());
       if (!doc.HasParseError() && doc.IsObject() && doc.HasMember("locks") && doc["locks"].IsArray()) {
         int count = doc["locks"].Size();
-        return {ansi::fgRgb(100, 200, 120, "  \xe2\x9c\x93 " + std::to_string(count) + " active locks")};
+        return {theme_ansi::success("  \xe2\x9c\x93 " + std::to_string(count) + " active locks")};
       }
     }
-    return {ansi::fgRgb(100, 200, 120, "  \xe2\x9c\x93 Fleet status")};
+    return {theme_ansi::success("  \xe2\x9c\x93 Fleet status")};
   }
 
   // Lock action — mode-dependent
   if (item.phase() == ToolPhase::Called) {
     if (mode == "acquire") {
-      return {ansi::fgRgb(220, 180, 80, "  \xe2\x9a\x99 Acquiring lock on " + paths + "...")};
+      return {theme_ansi::warning("  \xe2\x9a\x99 Acquiring lock on " + paths + "...")};
     }
     if (mode == "release") {
-      return {ansi::fgRgb(220, 180, 80, "  \xe2\x9a\x99 Releasing lock " + lockId)};
+      return {theme_ansi::warning("  \xe2\x9a\x99 Releasing lock " + lockId)};
     }
     if (mode == "request") {
-      return {ansi::fgRgb(220, 180, 80, "  \xe2\x9f\xb3 Requesting lock from " + targetAgent + "..."),
-              ansi::dim(ansi::fgRgb(120, 120, 140, "  " + formatDuration(item.elapsed())))};
+      return {theme_ansi::warning("  \xe2\x9f\xb3 Requesting lock from " + targetAgent + "..."),
+              theme_ansi::dim("  " + formatDuration(item.elapsed()))};
     }
     if (mode == "wait") {
-      return {ansi::fgRgb(220, 180, 80, "  \xe2\x9f\xb3 Waiting for lock " + lockId + "..."),
-              ansi::dim(ansi::fgRgb(120, 120, 140, "  " + formatDuration(item.elapsed())))};
+      return {theme_ansi::warning("  \xe2\x9f\xb3 Waiting for lock " + lockId + "..."),
+              theme_ansi::dim("  " + formatDuration(item.elapsed()))};
     }
     if (mode == "check") {
-      return {ansi::fgRgb(220, 180, 80, "  \xe2\x9a\x99 Checking locks...")};
+      return {theme_ansi::warning("  \xe2\x9a\x99 Checking locks...")};
     }
-    return {ansi::fgRgb(220, 180, 80, "  \xe2\x9a\x99 Fleet.Lock " + mode)};
+    return {theme_ansi::warning("  \xe2\x9a\x99 Fleet.Lock " + mode)};
   }
 
   // Finished Lock
   bool success = item.success();
   auto color = [&](const std::string& s) {
-    return success ? ansi::fgRgb(100, 200, 120, s) : ansi::fgRgb(220, 80, 80, s);
+    return success ? theme_ansi::success(s) : theme_ansi::error(s);
   };
   std::string icon = success ? "\xe2\x9c\x93" : "\xe2\x9c\x97";
 

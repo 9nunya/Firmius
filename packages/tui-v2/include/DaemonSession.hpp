@@ -56,6 +56,8 @@ public:
   // ── Agent operations ──
   std::optional<firmius::daemon::AgentRuntimeSnapshot> getAgent(
       const std::string &threadId, const std::string &agentId) const;
+  std::optional<firmius::daemon::AgentTodoSnapshot> getAgentTodo(
+      const std::string &threadId, const std::string &agentId) const;
   firmius::daemon::AgentTreeSnapshot listAgents(
       const std::string &threadId) const;
   std::optional<firmius::daemon::AgentRuntimeSnapshot> focusAgent(

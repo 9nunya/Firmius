@@ -1,6 +1,7 @@
 #include "tools/ModeSwitchPresenter.hpp"
 #include "items/ToolCallItem.hpp"
 #include "Terminal.hpp"
+#include "ThemeAnsi.hpp"
 
 #include <rapidjson/document.h>
 
@@ -12,7 +13,7 @@ bool ModeSwitchPresenter::matches(const std::string& toolName) const {
 
 std::vector<std::string> ModeSwitchPresenter::render(const ToolCallItem& item, const ToolRenderContext& /*ctx*/, int /*width*/) const {
   if (item.phase() == ToolPhase::Preparing) {
-    return {ansi::fgRgb(220, 180, 80, "  \xe2\x9a\x99 ModeSwitch")};
+    return {theme_ansi::warning("  \xe2\x9a\x99 ModeSwitch")};
   }
 
   if (item.phase() == ToolPhase::Called) {
@@ -26,9 +27,9 @@ std::vector<std::string> ModeSwitchPresenter::render(const ToolCallItem& item, c
       }
     }
     if (name.empty()) {
-      return {ansi::fgRgb(220, 180, 80, "  \xe2\x86\x92 Clearing mode...")};
+      return {theme_ansi::warning("  \xe2\x86\x92 Clearing mode...")};
     }
-    return {ansi::fgRgb(220, 180, 80, "  \xe2\x86\x92 Switching to " + name + "...")};
+    return {theme_ansi::warning("  \xe2\x86\x92 Switching to " + name + "...")};
   }
 
   // Finished
@@ -51,12 +52,12 @@ std::vector<std::string> ModeSwitchPresenter::render(const ToolCallItem& item, c
 
   std::vector<std::string> result;
   if (toMode.empty()) {
-    result.push_back(ansi::fgRgb(100, 200, 120, "  \xe2\x86\x92 Cleared mode"));
+    result.push_back(theme_ansi::success("  \xe2\x86\x92 Cleared mode"));
   } else {
-    result.push_back(ansi::fgRgb(100, 200, 120, "  \xe2\x86\x92 " + toMode));
+    result.push_back(theme_ansi::success("  \xe2\x86\x92 " + toMode));
   }
   if (!reason.empty()) {
-    result.push_back(ansi::dim(ansi::fgRgb(140, 140, 160, "  " + reason)));
+    result.push_back(theme_ansi::dim("  " + reason));
   }
   return result;
 }

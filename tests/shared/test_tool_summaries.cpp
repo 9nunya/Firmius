@@ -5,7 +5,7 @@
 using namespace firmius::shared;
 
 TEST(ToolSummaries, SummarizesToolCalls) {
-  EXPECT_EQ(SummarizeToolCall("Files", R"({"action":"Read","path":"src/foo.rs"})",
+  EXPECT_EQ(SummarizeToolCall("Read", R"({"path":"src/foo.rs"})",
                               ToolPhase::Called),
             "Read src/foo.rs");
   EXPECT_EQ(SummarizeToolCall("Edit",
