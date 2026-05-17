@@ -48,6 +48,24 @@ namespace {
 
 using firmius::shared::AppEvent;
 
+std::string normalizePathForComparison(const std::string &path) {
+  if (path.empty()) {
+    return path;
+  }
+  std::error_code ec;
+  std::filesystem::path p(path);
+  if (!p.is_absolute()) {
+    p = std::filesystem::absolute(p, ec);
+  }
+  if (!ec) {
+    const auto canon = std::filesystem::weakly_canonical(p, ec);
+    if (!ec) {
+      return canon.string();
+    }
+  }
+  return p.string();
+}
+
 std::string appEventTypeName(const firmius::shared::AppEvent &event) {
   return std::visit(
       [](const auto &e) -> std::string {
@@ -94,6 +112,8 @@ std::string appEventTypeName(const firmius::shared::AppEvent &event) {
           return "config_updated";
         } else if constexpr (std::is_same_v<T, firmius::shared::AgentTodoUpdated>) {
           return "agent_todo_updated";
+        } else if constexpr (std::is_same_v<T, firmius::shared::EmbeddingModelProgress>) {
+          return "embedding_model_progress";
         } else {
           return "runtime_event";
         }
@@ -202,6 +222,9 @@ rapidjson::Document serializeAppEventDocument(const AppEvent &event) {
           doc.AddMember("threadId",
                         rapidjson::Value(e.threadId.c_str(), doc.GetAllocator()).Move(),
                         doc.GetAllocator());
+          doc.AddMember("agentId",
+                        rapidjson::Value(e.agentId.c_str(), doc.GetAllocator()).Move(),
+                        doc.GetAllocator());
           doc.AddMember("images", imagesToJson(e.images, doc.GetAllocator()),
                         doc.GetAllocator());
           return doc;
@@ -299,6 +322,16 @@ rapidjson::Document serializeAppEventDocument(const AppEvent &event) {
           return doc;
         } else if constexpr (std::is_same_v<T, firmius::shared::ModelsRefreshed>) {
           return basicEventDocument<T>("ModelsRefreshed");
+        } else if constexpr (std::is_same_v<T, firmius::shared::EmbeddingModelProgress>) {
+          auto doc = basicEventDocument<T>("EmbeddingModelProgress");
+          auto &alloc = doc.GetAllocator();
+          doc.AddMember("agentId", rapidjson::Value(e.agentId.c_str(), alloc), alloc);
+          doc.AddMember("parentId", rapidjson::Value(e.parentId.c_str(), alloc), alloc);
+          doc.AddMember("modelId", rapidjson::Value(e.modelId.c_str(), alloc), alloc);
+          doc.AddMember("bytesDownloaded", e.bytesDownloaded, alloc);
+          doc.AddMember("totalBytes", e.totalBytes, alloc);
+          doc.AddMember("status", rapidjson::Value(e.status.c_str(), alloc), alloc);
+          return doc;
         } else {
           return basicEventDocument<T>(typeid(T).name());
         }
@@ -945,6 +978,60 @@ std::vector<firmius::shared::ThreadMetadata> DaemonService::listThreads() const 
   return firmius::core::Harness::instance().listThreads();
 }
 
+std::vector<ThreadOverview>
+DaemonService::listThreadOverviews(const std::string &clientId,
+                                   const ThreadOverviewRequest &request) const {
+  std::vector<ClientSessionSnapshot> sessions;
+  {
+    std::lock_guard<std::mutex> lock(stateMutex_);
+    sessions.reserve(sessions_.size());
+    for (const auto &[_, session] : sessions_) {
+      sessions.push_back(session);
+    }
+  }
+
+  const std::string requestedCwd = normalizePathForComparison(request.cwd);
+
+  std::lock_guard<std::mutex> runtimeLock(runtimeMutex_);
+  auto &harness = firmius::core::Harness::instance();
+  auto threads = harness.listThreads();
+  std::vector<ThreadOverview> out;
+  out.reserve(threads.size());
+
+  for (const auto &thread : threads) {
+    if (!requestedCwd.empty() &&
+        normalizePathForComparison(thread.cwd) != requestedCwd) {
+      continue;
+    }
+
+    ThreadOverview overview;
+    overview.thread = thread;
+    overview.agentCount = harness.listAgents(thread.threadId).size();
+    overview.artifactCount = harness.listArtifacts(thread.threadId).size();
+    overview.lockOwnerPid = harness.getThreadLockOwnerPid(thread.threadId);
+
+    if (overview.lockOwnerPid > 0) {
+      for (const auto &session : sessions) {
+        if (session.identity.pid != overview.lockOwnerPid) {
+          continue;
+        }
+        overview.lockOwnerClientId = session.identity.clientId;
+        overview.lockOwnerUiKind = session.identity.uiKind;
+        overview.lockedByOtherClient = session.identity.clientId != clientId;
+        break;
+      }
+    }
+
+    out.push_back(std::move(overview));
+  }
+
+  std::sort(out.begin(), out.end(),
+            [](const auto &lhs, const auto &rhs) {
+              return lhs.thread.lastActiveAt > rhs.thread.lastActiveAt;
+            });
+  return out;
+}
+
 ThreadSnapshot DaemonService::getThread(const std::string &clientId,
                                         const ThreadsOpenRequest &request) const {
   const std::string threadId = resolveThreadIdForRequest(clientId, request.threadId);
@@ -1163,17 +1250,51 @@ DaemonService::compactAgent(const AgentTargetRequest &request) {
 }
 
 std::optional<AgentRuntimeSnapshot>
-DaemonService::interruptAgent(const AgentTargetRequest &request) {
-  std::lock_guard<std::mutex> runtimeLock(runtimeMutex_);
-  const auto liveAgent =
-      firmius::core::AgentRegistry::instance().getAgent(request.agentId);
-  if (!liveAgent) {
+DaemonService::interruptAgent(const std::string &clientId,
+                              const AgentTargetRequest &request) {
+  const std::string threadId =
+      resolveThreadIdForRequest(clientId, request.threadId);
+  const std::string agentId =
+      resolveAgentIdForRequest(clientId, threadId, request.agentId);
+  if (threadId.empty() || agentId.empty()) {
     return std::nullopt;
   }
-  firmius::core::Engine::instance().cancelAgent(request.agentId);
-  const auto threadId =
-      liveAgent->getContext().history ? liveAgent->getContext().history->threadId : "";
-  return buildAgentSnapshotLocked(threadId, request.agentId, request.agentId);
+
+  std::lock_guard<std::mutex> runtimeLock(runtimeMutex_);
+  auto &harness = firmius::core::Harness::instance();
+  if (!harness.switchThread(threadId) || !harness.setFocusedAgent(agentId)) {
+    return std::nullopt;
+  }
+  harness.abort();
+  {
+    std::lock_guard<std::mutex> lock(stateMutex_);
+    updateSessionFocusLocked(clientId, threadId, agentId);
+  }
+  return buildAgentSnapshotLocked(threadId, agentId, agentId);
+}
+
+std::optional<AgentRuntimeSnapshot>
+DaemonService::abortAndFlushQueuedMessages(const std::string &clientId,
+                                           const AgentTargetRequest &request) {
+  const std::string threadId =
+      resolveThreadIdForRequest(clientId, request.threadId);
+  const std::string agentId =
+      resolveAgentIdForRequest(clientId, threadId, request.agentId);
+  if (threadId.empty() || agentId.empty()) {
+    return std::nullopt;
+  }
+
+  std::lock_guard<std::mutex> runtimeLock(runtimeMutex_);
+  auto &harness = firmius::core::Harness::instance();
+  if (!harness.switchThread(threadId) || !harness.setFocusedAgent(agentId)) {
+    return std::nullopt;
+  }
+  harness.abortAndFlushQueuedMessages();
+  {
+    std::lock_guard<std::mutex> lock(stateMutex_);
+    updateSessionFocusLocked(clientId, threadId, agentId);
+  }
+  return buildAgentSnapshotLocked(threadId, agentId, agentId);
 }
 
 std::vector<ProcessSnapshot>
@@ -1712,22 +1833,6 @@ DaemonService::updatePurposesConfig(const PurposesConfigUpdateRequest &request) 
   return getPurposesConfig();
 }
 
-RollingMemoryConfigSnapshot DaemonService::getRollingMemoryConfig() const {
-  return RollingMemoryConfigSnapshot{
-      firmius::core::Harness::instance().getConfig().rollingMemory};
-}
-
-RollingMemoryConfigSnapshot DaemonService::updateRollingMemoryConfig(
-    const RollingMemoryConfigUpdateRequest &request) {
-  std::lock_guard<std::mutex> runtimeLock(runtimeMutex_);
-  auto &harness = firmius::core::Harness::instance();
-  auto cfg = harness.getConfig();
-  cfg.rollingMemory = request.rollingMemory;
-  harness.updateConfig(cfg);
-  harness.saveConfig();
-  return getRollingMemoryConfig();
-}
-
 McpConfigSnapshot DaemonService::getMcpConfig() const {
   return McpConfigSnapshot{firmius::core::Harness::instance().getConfig().mcpServers};
 }
@@ -1971,7 +2076,6 @@ UiSnapshot DaemonService::uiSnapshot(const std::string &clientId,
     snapshot.config = getConfig();
     snapshot.router = getRouterConfig();
     snapshot.purposes = getPurposesConfig();
-    snapshot.rollingMemory = getRollingMemoryConfig();
     snapshot.mcp = getMcpConfig();
   }
   snapshot.hooks = hookState(HooksStateRequest{threadId, agentId, "", 24});
@@ -2459,15 +2563,6 @@ DaemonService::buildAgentSnapshotLocked(const std::string &threadId,
                 ctx.config.providerId)) {
       snapshot.contextWindowTokens =
           provider->getModelInfo(ctx.config.modelId).contextWindow;
-    }
-    if (snapshot.contextWindowTokens == 0) {
-      try {
-        firmius::core::ThreadManager tm(
-            firmius::core::ThreadManager::defaultBasePath());
-        snapshot.contextWindowTokens =
-            tm.loadRollingMemoryState(threadId, agentId).lastContextWindow;
-      } catch (...) {
-      }
     }
     snapshot.pendingToolCalls = ctx.state.pendingToolCalls;
     snapshot.ownedProcesses = ctx.state.ownedProcesses;

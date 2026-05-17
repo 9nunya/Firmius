@@ -12,12 +12,96 @@
 
 #include <algorithm>
 #include <chrono>
+#include <ctime>
 #include <filesystem>
+#include <sstream>
 #include <thread>
+#include <unordered_map>
 
 namespace firmius::tui2 {
 
 namespace {
+
+std::string humanizeTokenWindow(uint32_t value) {
+  if (value >= 1000000) return std::to_string(value / 1000000) + "M";
+  if (value >= 1000) return std::to_string(value / 1000) + "k";
+  return std::to_string(value);
+}
+
+std::string formatClockTime(std::time_t when) {
+  std::tm local{};
+  localtime_r(&when, &local);
+  char buffer[32];
+  std::strftime(buffer, sizeof(buffer), "%I:%M %p", &local);
+  std::string out = buffer;
+  if (!out.empty() && out[0] == '0') {
+    out.erase(out.begin());
+  }
+  return out;
+}
+
+std::string formatRelativeThreadTime(uint64_t epochMs) {
+  if (epochMs == 0) {
+    return "unknown activity";
+  }
+
+  const auto then = std::chrono::system_clock::time_point{std::chrono::milliseconds(epochMs)};
+  const auto now = std::chrono::system_clock::now();
+  const auto thenTime = std::chrono::system_clock::to_time_t(then);
+  const auto nowTime = std::chrono::system_clock::to_time_t(now);
+
+  std::tm thenLocal{};
+  std::tm nowLocal{};
+  localtime_r(&thenTime, &thenLocal);
+  localtime_r(&nowTime, &nowLocal);
+
+  auto startOfDay = [](std::tm tm) {
+    tm.tm_hour = 0;
+    tm.tm_min = 0;
+    tm.tm_sec = 0;
+    return std::mktime(&tm);
+  };
+
+  const auto dayDiffSeconds = std::difftime(startOfDay(nowLocal), startOfDay(thenLocal));
+  const int dayDiff = static_cast<int>(dayDiffSeconds / (60 * 60 * 24));
+  const std::string clock = formatClockTime(thenTime);
+
+  if (dayDiff == 0) {
+    return "today at " + clock;
+  }
+  if (dayDiff == 1) {
+    return "yesterday at " + clock;
+  }
+
+  char dateBuffer[40];
+  std::strftime(dateBuffer, sizeof(dateBuffer), "%b %e", &thenLocal);
+  std::string date = dateBuffer;
+  while (!date.empty() && date[date.size() - 1] == ' ') {
+    date.pop_back();
+  }
+  return date + " at " + clock;
+}
+
+std::string threadCountsDetail(std::size_t agentCount, std::size_t artifactCount) {
+  std::ostringstream detail;
+  detail << agentCount << " agent" << (agentCount == 1 ? "" : "s");
+  if (artifactCount > 0) {
+    detail << " · " << artifactCount << " artifact"
+           << (artifactCount == 1 ? "" : "s");
+  }
+  return detail.str();
+}
+
+std::string lockDetail(const firmius::daemon::ThreadOverview& overview) {
+  if (overview.lockOwnerPid <= 0) {
+    return "";
+  }
+  std::string detail = "locked by pid " + std::to_string(overview.lockOwnerPid);
+  if (!overview.lockOwnerUiKind.empty()) {
+    detail += " (" + overview.lockOwnerUiKind + ")";
+  }
+  return detail;
+}
 
 bool hasVisibleOverlay(const Cell& cell) {
   return cell.ch != ' ' || cell.fg.type != CellColor::Type::Default ||
@@ -265,11 +349,13 @@ void App::setupKeybinds() {
 
   keybinds_.registerKeybind({keys::kCtrlC, "Quit", ActivityContext::Idle, true,
                              [this]() { running_ = false; }});
-  keybinds_.registerKeybind({keys::kCtrlC, "Interrupt", ActivityContext::Active,
-                             false, [this]() { dispatcher_.interruptAgent(); }});
+  keybinds_.registerKeybind(
+      {keys::kCtrlC, "Interrupt", ActivityContext::Active, false,
+       [this]() { dispatcher_.interruptAgent(); }});
 
-  keybinds_.registerKeybind({keys::kEscape, "Interrupt", ActivityContext::Active,
-                             false, [this]() { dispatcher_.interruptAgent(); }});
+  keybinds_.registerKeybind(
+      {keys::kEscape, "Interrupt", ActivityContext::Active, false,
+       [this]() { dispatcher_.interruptAgent(true); }});
   keybinds_.registerKeybind({keys::kEscape, "Dismiss", ActivityContext::Idle,
                              true, [this]() {
                                if (activeOverlay_) { dismissOverlay(); return; }
@@ -344,15 +430,19 @@ void App::setupKeybinds() {
                                  autocompleteAccept();
                                  return;
                                }
-                               auto text = state_.inputBuffer();
-                               if (text.empty()) return;
-                               state_.clearInput();
-                               dismissAutocomplete();
-                               if (text[0] == '/' && commands_.execute(text)) {
+                               submitInputBuffer();
+                             }});
+  keybinds_.registerKeybind({keys::kEnter, "Send", ActivityContext::Active, false,
+                             [this]() {
+                               if (menuList_.isActive()) {
+                                 menuList_.selectCurrent();
                                  return;
                                }
-                               state_.addItem(std::make_unique<UserMessageItem>(text, state_.focusedAgentId()));
-                               dispatcher_.sendMessage(text);
+                               if (autocomplete_.active) {
+                                 autocompleteAccept();
+                                 return;
+                               }
+                               submitInputBuffer();
                              }});
 
   keybinds_.registerKeybind({keys::kUp, "Up", ActivityContext::Idle, true,
@@ -435,6 +525,13 @@ void App::setupKeybinds() {
 void App::handleInput(const std::string& key) {
   auto context = state_.activityContext();
 
+  if (context == ActivityContext::Active && !key.empty() &&
+      static_cast<unsigned char>(key[0]) == 0x1b) {
+    state_.addItem(std::make_unique<SystemNoticeItem>("debug esc seen"));
+    dispatcher_.interruptAgent(true);
+    return;
+  }
+
   if (context == ActivityContext::PermissionPending) {
     if (key == "y" || key == "Y") {
       auto perm = state_.pendingPermission();
@@ -454,6 +551,11 @@ void App::handleInput(const std::string& key) {
                                                firmius::shared::PermissionResponse::AllowAlways);
       return;
     }
+    return;
+  }
+
+  if (!state_.daemonReady()) {
+    keybinds_.handleKey(key, context);
     return;
   }
 
@@ -530,6 +632,9 @@ void App::handleMouse(const MouseEvent& event) {
     bool inside = event.row >= overlayStartRow1 &&
                   event.row < overlayStartRow1 + overlayH;
     if (inside) {
+      if (activeOverlay_ == &menuList_) {
+        menuList_.setScreenRow(overlayStartRow1);
+      }
       if (activeOverlay_->handleMouse(event, event.row, event.col)) {
         state_.markDirtyPublic();
       }
@@ -636,6 +741,12 @@ void App::syncScrollback() {
   int w = terminal_.size().first;
   std::string focusedId = state_.focusedAgentId();
 
+  if (state_.consumeFullResyncRequested()) {
+    state_.clearScrollback();
+    lastSyncedItemCount_ = 0;
+    lastSyncedRowCounts_.clear();
+  }
+
   // If focus changed, rebuild everything from scratch
   if (focusedId != lastFocusedAgentId_) {
     lastFocusedAgentId_ = focusedId;
@@ -708,6 +819,7 @@ void App::syncScrollback() {
 
 void App::switchToAgentTranscript(const std::string& agentId) {
   state_.focusAgent(agentId);
+  dispatcher_.loadTranscriptForAgent(agentId, true);
   // Force scrollback rebuild
   lastFocusedAgentId_ = agentId;
   state_.clearScrollback();
@@ -1040,6 +1152,7 @@ void App::onResize() {
 
 void App::connectAndSetup() {
   try {
+    state_.setDaemonReady(false);
     // Show immediate feedback — the user sees this on the first frame.
     state_.setLiveMessage("Connecting to daemon...");
 
@@ -1121,6 +1234,8 @@ void App::connectAndSetup() {
         state_.setAgentTodos(uiSnap.focusedAgent->agentId,
                              uiSnap.focusedAgentTodo->items);
       }
+      state_.resetWelcomeState();
+      state_.setHookState(uiSnap.hooks);
     }
 
     // Welcome message.
@@ -1129,9 +1244,11 @@ void App::connectAndSetup() {
         ? "Ready. Type a message or use /new to start."
         : "Ready. Thread: " + threadId;
     state_.setLiveMessage("");
+    state_.setDaemonReady(true);
     state_.addItem(std::make_unique<SystemNoticeItem>(welcomeText));
 
   } catch (const std::exception& e) {
+    state_.setDaemonReady(false);
     state_.setConnectionStatus(ConnectionStatus::Disconnected);
     state_.addItem(std::make_unique<ErrorMessageItem>(e.what()));
   }
@@ -1141,27 +1258,34 @@ void App::openModelsMenu() {
   try {
     auto models = session_.client().listModels(true);
     std::vector<MenuList::Item> items;
+    std::unordered_map<std::string, uint32_t> contextWindows;
+    const std::string currentModel = state_.modelLabel();
     for (const auto& m : models.models) {
       MenuList::Item item;
       item.label = m.id;
       item.detail = m.provider;
+      if (m.contextWindow > 0) {
+        item.detail += " · " + humanizeTokenWindow(m.contextWindow) + " ctx";
+      }
       item.id = m.provider + ":" + m.id;
+      item.marked = (currentModel == m.provider + "/" + m.id);
+      contextWindows[item.id] = m.contextWindow;
       items.push_back(std::move(item));
     }
     menuList_.open();
     menuList_.setTitle("Select Model");
     menuList_.setItems(std::move(items));
-    menuList_.setOnSelect([this](const MenuList::Item& item) {
+    menuList_.setOnSelect([this, contextWindows = std::move(contextWindows)](const MenuList::Item& item) {
       auto sep = item.id.find(':');
       if (sep != std::string::npos) {
         auto providerId = item.id.substr(0, sep);
         auto modelId = item.id.substr(sep + 1);
-        auto agent = session_.switchModel(state_.agentId(), providerId, modelId);
-        if (agent) {
-          state_.setModelLabel(providerId + "/" + modelId);
-        } else {
-          state_.addItem(std::make_unique<SystemNoticeItem>("Failed to switch model"));
+        uint32_t contextWindowTokens = 0;
+        auto it = contextWindows.find(item.id);
+        if (it != contextWindows.end()) {
+          contextWindowTokens = it->second;
         }
+        applyModelSelection(providerId, modelId, contextWindowTokens);
       }
       dismissOverlay();
     });
@@ -1176,19 +1300,32 @@ void App::openModelsMenu() {
 
 void App::openResumeMenu() {
   try {
-    auto threads = session_.listThreads();
+    const std::string currentCwd =
+        std::filesystem::current_path().string();
+    auto threads = session_.listThreadOverviews(currentCwd);
     std::vector<MenuList::Item> items;
     for (const auto& t : threads) {
       MenuList::Item item;
-      item.label = t.title.empty() ? t.threadId : t.title;
-      item.detail = t.threadId.substr(0, 8) + "...";
-      item.id = t.threadId;
+      item.label = t.thread.title.empty() ? t.thread.threadId : t.thread.title;
+      item.detail = formatRelativeThreadTime(t.thread.lastActiveAt) + " · " +
+                    threadCountsDetail(t.agentCount, t.artifactCount);
+      if (t.lockedByOtherClient) {
+        item.detail += " · " + lockDetail(t);
+      }
+      item.detail += " · " +
+                     t.thread.threadId.substr(
+                         0, std::min<std::size_t>(8, t.thread.threadId.size())) +
+                     "...";
+      item.id = t.thread.threadId;
       items.push_back(std::move(item));
     }
     menuList_.open();
     menuList_.setTitle("Resume Session");
     menuList_.setItems(std::move(items));
     menuList_.setOnSelect([this](const MenuList::Item& item) {
+      state_.setLiveMessage("Loading thread...");
+      state_.markDirtyPublic();
+      renderFrame();
       dispatcher_.openThread(item.id);
       dismissOverlay();
     });
@@ -1259,6 +1396,43 @@ void App::dismissOverlay() {
     state_.markDirtyPublic();
   }
   dismissAutocomplete();
+}
+
+void App::submitInputBuffer() {
+  if (!state_.daemonReady()) {
+    return;
+  }
+  auto text = state_.inputBuffer();
+  if (text.empty()) {
+    return;
+  }
+
+  state_.clearInput();
+  dismissAutocomplete();
+
+  if (text[0] == '/' && commands_.execute(text)) {
+    return;
+  }
+
+  dispatcher_.sendMessage(text);
+}
+
+void App::applyModelSelection(const std::string& providerId,
+                              const std::string& modelId,
+                              uint32_t contextWindowTokens) {
+  const std::string targetAgentId =
+      state_.threadId().empty() ? std::string{} : state_.agentId();
+  auto agent = session_.switchModel(targetAgentId, providerId, modelId);
+  if (!agent) {
+    state_.addItem(
+        std::make_unique<SystemNoticeItem>("Failed to switch model"));
+    return;
+  }
+
+  const uint32_t effectiveWindow =
+      agent->contextWindowTokens > 0 ? agent->contextWindowTokens
+                                     : contextWindowTokens;
+  state_.updateAgentModel(state_.agentId(), providerId, modelId, effectiveWindow);
 }
 
 // ── Autocomplete ──

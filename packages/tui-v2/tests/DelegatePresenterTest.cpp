@@ -1,4 +1,5 @@
 #include "tools/DelegatePresenter.hpp"
+#include "AppState.hpp"
 #include "items/ToolCallItem.hpp"
 #include <gtest/gtest.h>
 
@@ -26,6 +27,37 @@ TEST(DelegatePresenterTest, SpawnCalled) {
   ASSERT_GE(lines.size(), 2u);
   EXPECT_NE(lines[0].find("Summoning"), std::string::npos);
   EXPECT_NE(lines[0].find("Research Agent"), std::string::npos);
+}
+
+TEST(DelegatePresenterTest, SpawnCalledTracksBoundSubagentLiveState) {
+  DelegatePresenter p;
+  AppState state;
+  auto& child = state.getOrCreateAgent("child-1");
+  child.agentId = "child-1";
+  child.friendlyName = "explorer";
+  child.running = true;
+  child.status = firmius::shared::AgentStatus::Streaming;
+  state.upsertAgentActivity("child-1", "thinking", "Thinking...");
+  state.upsertAgentActivity("child-1", "tool:1", "Read foo.cpp");
+
+  ToolCallItem item("call-1", "Delegate", "agent-1");
+  item.setAppState(&state);
+  item.setArgs(R"({"action":"Spawn","title":"Research Agent","persona":"researcher","task":"Find info"})");
+  item.setSubagentId("child-1");
+  item.setPhase(ToolPhase::Called);
+
+  ToolRenderContext ctx;
+  ctx.state = &state;
+  auto lines = p.render(item, ctx, 80);
+  ASSERT_GE(lines.size(), 5u);
+  bool foundThinking = false;
+  bool foundRunning = false;
+  for (const auto& line : lines) {
+    if (line.find("Thinking") != std::string::npos) foundThinking = true;
+    if (line.find("running") != std::string::npos) foundRunning = true;
+  }
+  EXPECT_TRUE(foundThinking);
+  EXPECT_TRUE(foundRunning);
 }
 
 TEST(DelegatePresenterTest, SpawnFinishedSuccess) {

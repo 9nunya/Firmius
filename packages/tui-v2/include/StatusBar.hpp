@@ -23,6 +23,7 @@ public:
 
 private:
   std::string renderLiveRow(int width) const;
+  std::string renderHookRow(int width) const;
   std::string renderHudRow(int width) const;
 
   const AppState& state_;

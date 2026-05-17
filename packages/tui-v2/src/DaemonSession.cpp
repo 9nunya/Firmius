@@ -58,6 +58,22 @@ std::vector<firmius::shared::ThreadMetadata> DaemonSession::listThreads() const 
   return client_->listThreads();
 }
 
+std::vector<firmius::daemon::ThreadOverview>
+DaemonSession::listThreadOverviews(const std::string &cwd) const {
+  if (!client_) return {};
+  firmius::daemon::ThreadOverviewRequest request;
+  request.cwd = cwd;
+  return client_->listThreadOverviews(request);
+}
+
+std::optional<firmius::daemon::ThreadSnapshot> DaemonSession::getThread(
+    const std::string &threadId) const {
+  if (!client_ || threadId.empty()) return std::nullopt;
+  firmius::daemon::ThreadsOpenRequest request;
+  request.threadId = threadId;
+  return client_->getThread(request);
+}
+
 firmius::daemon::ThreadsCreateResponse DaemonSession::createThread(
     const std::string &cwd, const std::string &persona, const std::string &mode) {
   if (!client_) return {};
@@ -146,6 +162,17 @@ std::optional<firmius::daemon::AgentRuntimeSnapshot> DaemonSession::interruptAge
   request.threadId = threadId;
   request.agentId = agentId;
   if (!client_->interruptAgent(request)) return std::nullopt;
+  return getAgent(threadId, agentId);
+}
+
+std::optional<firmius::daemon::AgentRuntimeSnapshot>
+DaemonSession::abortAndFlushQueuedMessages(const std::string &threadId,
+                                           const std::string &agentId) {
+  if (!client_) return std::nullopt;
+  firmius::daemon::AgentTargetRequest request;
+  request.threadId = threadId;
+  request.agentId = agentId;
+  if (!client_->abortAndFlushQueuedMessages(request)) return std::nullopt;
   return getAgent(threadId, agentId);
 }
 

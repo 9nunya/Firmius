@@ -1,7 +1,6 @@
 #include "agents/RuntimeOverlay.hpp"
 
 #include "agents/UserMemoryWorkspace.hpp"
-#include "agents/RollingContextManager.hpp"
 #include "agents/PurposeLoader.hpp"
 #include "agents/SkillLoader.hpp"
 #include "persistence/ThreadManager.hpp"
@@ -237,8 +236,7 @@ shared::AgentHistory buildRequestHistoryWithRuntimeOverlays(
     const shared::AgentContext& context, shared::IHost& host,
     shared::IWorkspace&) {
   shared::AgentHistory requestHistory =
-      context.history ? RollingContextManager::filterHistoryForRequest(
-                            context, *context.history)
+      context.history ? *context.history
                       : shared::AgentHistory{};
   requestHistory.turns.push_back(
       makeOverlayTurn("runtime-overlay-work-state", buildWorkOverlay(context)));
@@ -258,19 +256,6 @@ shared::AgentHistory buildRequestHistoryWithRuntimeOverlays(
         makeOverlayTurn("runtime-overlay-loaded-mcp", loadedMcpOverlay));
   }
 
-  const std::string rollingStatusOverlay =
-      RollingContextManager::buildStatusOverlay(context);
-  if (!rollingStatusOverlay.empty()) {
-    requestHistory.turns.push_back(
-        makeOverlayTurn("runtime-overlay-rolling-status", rollingStatusOverlay));
-  }
-
-  const std::string rollingMemoryOverlay =
-      RollingContextManager::buildMemoryOverlay(context);
-  if (!rollingMemoryOverlay.empty()) {
-    requestHistory.turns.push_back(
-        makeOverlayTurn("runtime-overlay-rolling-memory", rollingMemoryOverlay));
-  }
 
   bool benchmarkThread = false;
   if (context.history && !context.history->threadId.empty()) {

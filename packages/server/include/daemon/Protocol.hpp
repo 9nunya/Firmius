@@ -21,6 +21,7 @@ inline constexpr const char *kRpcDaemonAuditEmitRuntimeEvent =
 inline constexpr const char *kRpcClientHello = "client.hello";
 inline constexpr const char *kRpcClientGoodbye = "client.goodbye";
 inline constexpr const char *kRpcThreadsList = "threads.list";
+inline constexpr const char *kRpcThreadsOverview = "threads.overview";
 inline constexpr const char *kRpcThreadsGet = "threads.get";
 inline constexpr const char *kRpcThreadsOpen = "threads.open";
 inline constexpr const char *kRpcThreadsFocus = "threads.focus";
@@ -32,6 +33,8 @@ inline constexpr const char *kRpcAgentsFocus = "agents.focus";
 inline constexpr const char *kRpcAgentTodoGet = "agentTodo.get";
 inline constexpr const char *kRpcAgentsCompact = "agents.compact";
 inline constexpr const char *kRpcAgentsInterrupt = "agents.interrupt";
+inline constexpr const char *kRpcAgentsAbortAndFlushQueuedMessages =
+    "agents.abortAndFlushQueuedMessages";
 inline constexpr const char *kRpcProcessesList = "processes.list";
 inline constexpr const char *kRpcProcessesGet = "processes.get";
 inline constexpr const char *kRpcProcessesFocusState = "processes.focusState";
@@ -66,8 +69,6 @@ inline constexpr const char *kRpcRouterGet = "router.get";
 inline constexpr const char *kRpcRouterUpdate = "router.update";
 inline constexpr const char *kRpcPurposesGet = "purposes.get";
 inline constexpr const char *kRpcPurposesUpdate = "purposes.update";
-inline constexpr const char *kRpcRollingMemoryGet = "rollingMemory.get";
-inline constexpr const char *kRpcRollingMemoryUpdate = "rollingMemory.update";
 inline constexpr const char *kRpcMcpGet = "mcp.get";
 inline constexpr const char *kRpcMcpUpdate = "mcp.update";
 inline constexpr const char *kRpcHooksList = "hooks.list";
@@ -318,12 +319,6 @@ struct PurposesConfigUpdateRequest {
   bool operator==(const PurposesConfigUpdateRequest &) const = default;
 };
 
-struct RollingMemoryConfigUpdateRequest {
-  firmius::shared::UserConfig::RollingMemoryConfig rollingMemory;
-
-  bool operator==(const RollingMemoryConfigUpdateRequest &) const = default;
-};
-
 struct McpConfigUpdateRequest {
   std::map<std::string, firmius::shared::McpServerConfig> servers;
 
@@ -558,6 +553,24 @@ struct ThreadsSendResponse {
   bool operator==(const ThreadsSendResponse &) const = default;
 };
 
+struct ThreadOverviewRequest {
+  std::string cwd;
+
+  bool operator==(const ThreadOverviewRequest &) const = default;
+};
+
+struct ThreadOverview {
+  firmius::shared::ThreadMetadata thread;
+  std::size_t agentCount = 0;
+  std::size_t artifactCount = 0;
+  int lockOwnerPid = 0;
+  std::string lockOwnerClientId;
+  std::string lockOwnerUiKind;
+  bool lockedByOtherClient = false;
+
+  bool operator==(const ThreadOverview &) const = default;
+};
+
 struct ThreadSnapshot {
   firmius::shared::ThreadMetadata thread;
   std::string focusedAgentId;
@@ -759,12 +772,6 @@ struct PurposesConfigSnapshot {
   std::map<std::string, std::string> purposeRoutes;
 
   bool operator==(const PurposesConfigSnapshot &) const = default;
-};
-
-struct RollingMemoryConfigSnapshot {
-  firmius::shared::UserConfig::RollingMemoryConfig rollingMemory;
-
-  bool operator==(const RollingMemoryConfigSnapshot &) const = default;
 };
 
 struct McpConfigSnapshot {
@@ -1027,7 +1034,6 @@ struct UiSnapshot {
   UserConfigSnapshot config;
   RouterConfigSnapshot router;
   PurposesConfigSnapshot purposes;
-  RollingMemoryConfigSnapshot rollingMemory;
   McpConfigSnapshot mcp;
   HookStateSnapshot hooks;
   std::vector<PactSnapshot> pacts;

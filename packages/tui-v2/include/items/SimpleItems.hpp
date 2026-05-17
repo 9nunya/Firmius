@@ -9,15 +9,21 @@ namespace firmius::tui2 {
 /// A message sent by the user. Immutable after construction.
 class UserMessageItem : public TranscriptItem {
 public:
-  explicit UserMessageItem(std::string text, std::string agentId = {});
+  explicit UserMessageItem(std::string text, std::string agentId = {},
+                           std::string messageId = {}, bool queued = false);
   std::string_view type() const override { return "UserMessage"; }
   std::vector<std::string> render(int width) const override;
   int rowCount(int width) const override;
   const std::string& text() const { return text_; }
   const std::string& agentId() const { return agentId_; }
+  const std::string& messageId() const { return messageId_; }
+  bool queued() const { return queued_; }
+  void setQueued(bool queued);
 private:
   std::string text_;
   std::string agentId_;
+  std::string messageId_;
+  bool queued_ = false;
 };
 
 /// An error message. Immutable after construction.

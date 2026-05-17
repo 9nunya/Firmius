@@ -25,6 +25,7 @@ using firmius::shared::ICON_ERROR;
 using firmius::shared::ICON_GEAR;
 using firmius::shared::ICON_TODO;
 using firmius::shared::ICON_WAIT;
+using firmius::shared::ICON_DOWNLOAD;
 using firmius::shared::PL_LEFT_SEP;
 using firmius::shared::TodoStatus;
 
@@ -301,6 +302,10 @@ int StatusBar::height(int width) const {
 int StatusBar::liveHeight(int width) const {
   (void)width;
   int rows = 1;
+  const auto hook = state_.hookState();
+  if (!hook.latestStatusLine.empty() || !hook.currentStatusLines.empty()) {
+    rows += 1;
+  }
   if (state_.todoVisible()) {
     auto todos = state_.focusedAgentTodos();
     if (!todos.empty()) {
@@ -317,7 +322,49 @@ int StatusBar::hudHeight(int width) const {
 
 std::vector<std::string> StatusBar::renderLiveSection(int width) const {
   const auto& theme = ThemeManager::instance().currentTheme();
-  std::vector<std::string> lines = {renderLiveRow(width)};
+  std::vector<std::string> lines;
+
+  // Embedding model download progress line (above live row, auto-disappears)
+  // Uses Nerd Font block characters for smooth progress bar
+  const auto ed = state_.embeddingDownload();
+  if (ed.downloading && ed.totalBytes > 0) {
+    int pct = static_cast<int>((ed.bytesDownloaded * 100) / ed.totalBytes);
+    int barWidth = std::max(1, width - 30);
+    // Unicode block elements for 1/8 resolution per character
+    // ▏▎▍▌▋▊▉█ (U+258F down to U+2588)
+    static const char* blocks[9] = {
+      " ",          // 0/8 - empty (space)
+      "\xe2\x96\x8f", // 1/8 - ▏
+      "\xe2\x96\x8e", // 2/8 - ▎
+      "\xe2\x96\x8d", // 3/8 - ▍
+      "\xe2\x96\x8c", // 4/8 - ▌
+      "\xe2\x96\x8b", // 5/8 - ▋
+      "\xe2\x96\x8a", // 6/8 - ▊
+      "\xe2\x96\x89", // 7/8 - ▉
+      "\xe2\x96\x88", // 8/8 - █
+    };
+    // Calculate filled and partial character
+    int totalEighths = barWidth * 8;
+    int filledEighths = (pct * totalEighths) / 100;
+    int fullChars = filledEighths / 8;
+    int partialLevel = filledEighths % 8;
+    std::string bar;
+    for (int i = 0; i < fullChars; ++i) bar += blocks[8];
+    if (partialLevel > 0 && fullChars < barWidth) bar += blocks[partialLevel];
+    int remaining = barWidth - fullChars - (partialLevel > 0 ? 1 : 0);
+    for (int i = 0; i < remaining; ++i) bar += blocks[0];
+    std::string line = ICON_DOWNLOAD + " " + ed.modelId + " [" + bar + "] " +
+                       std::to_string(pct) + "% " +
+                       humanize(ed.bytesDownloaded) + "/" +
+                       humanize(ed.totalBytes);
+    lines.push_back(line);
+  }
+
+  lines.push_back(renderLiveRow(width));
+  const auto hook = state_.hookState();
+  if (!hook.latestStatusLine.empty() || !hook.currentStatusLines.empty()) {
+    lines.push_back(renderHookRow(width));
+  }
   if (state_.todoVisible()) {
     auto todos = state_.focusedAgentTodos();
     if (!todos.empty()) {
@@ -396,6 +443,28 @@ std::string StatusBar::renderLiveRow(int width) const {
                      ansi::fitToWidth(line, width));
 }
 
+std::string StatusBar::renderHookRow(int width) const {
+  const auto& theme = ThemeManager::instance().currentTheme();
+  const auto hook = state_.hookState();
+  std::string text = hook.latestStatusLine;
+  if (text.empty() && !hook.currentStatusLines.empty()) {
+    text = hook.currentStatusLines.front();
+  }
+  if (text.empty() && !hook.blockingReasons.empty()) {
+    text = hook.blockingReasons.front();
+  }
+  if (text.empty()) {
+    return ansi::bgRgb(theme.base.bg.r, theme.base.bg.g, theme.base.bg.b,
+                       std::string(std::max(0, width), ' '));
+  }
+
+  std::string line =
+      "  " + ansi::fgRgb(theme.base.highlight.r, theme.base.highlight.g,
+                         theme.base.highlight.b, text);
+  return ansi::bgRgb(theme.base.bg.r, theme.base.bg.g, theme.base.bg.b,
+                     ansi::fitToWidth(line, width));
+}
+
 std::string StatusBar::renderHudRow(int width) const {
   const auto& theme = ThemeManager::instance().currentTheme();
   const auto statusGroup =
@@ -416,9 +485,6 @@ std::string StatusBar::renderHudRow(int width) const {
       ctx.windowTokens = 1048000;
     }
   }
-  const uint32_t window = std::max<uint32_t>(ctx.windowTokens, 1);
-  const uint32_t used = ctx.usedTokens > 0 ? ctx.usedTokens : ctx.sentTokens;
-  const std::string ctxLabel = humanize(used) + "/" + humanize(window);
 
   std::vector<SegmentSpec> left = {
       {rgb(statusGroup.fg), rgb(statusGroup.bg), stateIcon},
@@ -429,8 +495,6 @@ std::string StatusBar::renderHudRow(int width) const {
   };
 
   std::vector<SegmentSpec> right = {
-      {rgb(theme.statusBar.context.icon), rgb(theme.statusBar.context.bg),
-       ICON_CONTEXT + std::string(" ") + ctxLabel},
       {rgb(theme.base.fg), rgb(theme.agentStrip.pills.stateBg),
        ICON_CHIP + std::string(" ") +
            std::to_string(state_.queuedMessageCount())},
@@ -438,6 +502,16 @@ std::string StatusBar::renderHudRow(int width) const {
        state_.todoVisible() ? ICON_TODO + std::string(" on")
                             : ICON_TODO + std::string(" off")},
   };
+
+  if (ctx.windowTokens > 0) {
+    const uint32_t used = ctx.usedTokens > 0 ? ctx.usedTokens : ctx.sentTokens;
+    const std::string ctxLabel =
+        humanize(used) + "/" + humanize(ctx.windowTokens);
+    right.insert(right.begin(),
+                 {rgb(theme.statusBar.context.icon),
+                  rgb(theme.statusBar.context.bg),
+                  ICON_CONTEXT + std::string(" ") + ctxLabel});
+  }
 
   // Build left and right bars independently. Do NOT wrap the whole row in an
   // outer bgRgb() — every inner segment closes with \x1b[49m which would

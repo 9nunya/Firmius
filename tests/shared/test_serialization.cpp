@@ -662,8 +662,7 @@ TEST(Serialization, NoticeContentRoundtrip) {
       "Agent Cancelled",
       "The agent execution was interrupted.",
       "Execution stopped before completion and can be resumed.",
-      NoticeSeverity::Warning,
-      std::nullopt};
+      NoticeSeverity::Warning};
 
   auto doc = toJson(original);
   auto restored = messagePartFromJsonValue(doc);
@@ -673,80 +672,6 @@ TEST(Serialization, NoticeContentRoundtrip) {
   ASSERT_NE(notice, nullptr);
   EXPECT_EQ(notice->title, "Agent Cancelled");
   EXPECT_EQ(notice->severity, NoticeSeverity::Warning);
-  EXPECT_FALSE(notice->rollingMetadata.has_value());
-}
-
-TEST(Serialization, NoticeContentRollingSparseStartRoundtrip) {
-  RollingNoticeMetadata rolling;
-  rolling.eventKind = "roll";
-  rolling.lifecycle = "start";
-  rolling.sourceStartTurnId = "turn-100";
-  rolling.sourceEndTurnId = "turn-104";
-  rolling.sourceTurnCount = 5;
-  rolling.sourceChunkCount = 2;
-
-  MessagePart original = NoticeContent{
-      "Rolling Started",
-      "Preparing rolling summary.",
-      "Gathering source turns before summarization.",
-      NoticeSeverity::Info,
-      rolling};
-
-  auto doc = toJson(original);
-  auto restored = messagePartFromJsonValue(doc);
-
-  EXPECT_EQ(original, restored);
-  auto *notice = std::get_if<NoticeContent>(&restored);
-  ASSERT_NE(notice, nullptr);
-  ASSERT_TRUE(notice->rollingMetadata.has_value());
-  EXPECT_EQ(notice->rollingMetadata->eventKind, "roll");
-  EXPECT_EQ(notice->rollingMetadata->lifecycle, "start");
-  EXPECT_EQ(notice->rollingMetadata->sourceStartTurnId,
-            std::optional<std::string>("turn-100"));
-  EXPECT_EQ(notice->rollingMetadata->sourceEndTurnId,
-            std::optional<std::string>("turn-104"));
-  EXPECT_EQ(notice->rollingMetadata->sourceTurnCount,
-            std::optional<std::uint32_t>(5));
-  EXPECT_EQ(notice->rollingMetadata->sourceChunkCount,
-            std::optional<std::uint32_t>(2));
-  EXPECT_FALSE(notice->rollingMetadata->sourceTokens.has_value());
-  EXPECT_FALSE(notice->rollingMetadata->summaryTokens.has_value());
-  EXPECT_FALSE(notice->rollingMetadata->savedTokens.has_value());
-}
-
-TEST(Serialization, NoticeContentRollingCompletionRoundtrip) {
-  RollingNoticeMetadata rolling;
-  rolling.eventKind = "roll";
-  rolling.lifecycle = "complete";
-  rolling.modelLabel = "gpt-5.4-mini";
-  rolling.sourceTokens = 3240;
-  rolling.summaryTokens = 912;
-  rolling.savedTokens = 2328;
-
-  MessagePart original = NoticeContent{
-      "Rolling Complete",
-      "Inserted compact summary.",
-      "Context reduced after summary insertion.",
-      NoticeSeverity::Success,
-      rolling};
-
-  auto doc = toJson(original);
-  auto restored = messagePartFromJsonValue(doc);
-
-  EXPECT_EQ(original, restored);
-  auto *notice = std::get_if<NoticeContent>(&restored);
-  ASSERT_NE(notice, nullptr);
-  ASSERT_TRUE(notice->rollingMetadata.has_value());
-  EXPECT_EQ(notice->rollingMetadata->eventKind, "roll");
-  EXPECT_EQ(notice->rollingMetadata->lifecycle, "complete");
-  EXPECT_EQ(notice->rollingMetadata->modelLabel,
-            std::optional<std::string>("gpt-5.4-mini"));
-  EXPECT_EQ(notice->rollingMetadata->sourceTokens,
-            std::optional<std::uint32_t>(3240));
-  EXPECT_EQ(notice->rollingMetadata->summaryTokens,
-            std::optional<std::uint32_t>(912));
-  EXPECT_EQ(notice->rollingMetadata->savedTokens,
-            std::optional<std::uint32_t>(2328));
 }
 
 TEST(Serialization, StreamDoneRoundtrip) {
@@ -801,14 +726,6 @@ TEST(Serialization, AgentConfigRoundtrip) {
   original.maxTokens = 4096;
   original.stop = {"<stop />", "###"};
   original.persistHistory = false;
-  original.rollingMemory.enabled = true;
-  original.rollingMemory.mode = "rolling_forever";
-  original.rollingMemory.preset = "balanced";
-  original.rollingMemory.targetOccupancyRatio = 0.57f;
-  original.rollingMemory.bufferOccupancyRatio = 0.47f;
-  original.rollingMemory.emergencyOccupancyRatio = 0.66f;
-  original.rollingMemory.observer = {true, "openai", "gpt-5.4-mini", "explorer"};
-  original.rollingMemory.reflector = {true, "anthropic", "claude-haiku", ""};
 
   auto doc = toJson(original);
   auto restored = agentConfigFromJsonValue(doc);
@@ -817,9 +734,6 @@ TEST(Serialization, AgentConfigRoundtrip) {
   EXPECT_EQ(restored.modelId, "gpt-4o");
   EXPECT_EQ(restored.maxTurns, 50);
   EXPECT_EQ(restored.persistHistory, false);
-  EXPECT_EQ(restored.rollingMemory.mode, "rolling_forever");
-  EXPECT_EQ(restored.rollingMemory.preset, "balanced");
-  EXPECT_EQ(restored.rollingMemory.observer.modelId, "gpt-5.4-mini");
   ASSERT_EQ(restored.stop.size(), 2u);
   EXPECT_EQ(restored.stop[0], "<stop />");
 }
@@ -842,9 +756,6 @@ TEST(Serialization, AgentConfigInContext) {
   original.config.maxTokens = 8192;
   original.config.stop = {"STOP"};
   original.config.persistHistory = false;
-  original.config.rollingMemory.enabled = true;
-  original.config.rollingMemory.mode = "rolling_forever";
-  original.config.rollingMemory.observer = {true, "openai", "gpt-5.4-mini", ""};
 
   std::string json = serializeToString(original);
   auto restored = deserializeFromString(json);
@@ -856,8 +767,6 @@ TEST(Serialization, AgentConfigInContext) {
   ASSERT_TRUE(restored.config.maxTokens.has_value());
   EXPECT_EQ(restored.config.maxTokens.value(), 8192u);
   EXPECT_EQ(restored.config.persistHistory, false);
-  EXPECT_EQ(restored.config.rollingMemory.mode, "rolling_forever");
-  EXPECT_EQ(restored.config.rollingMemory.observer.providerId, "openai");
 }
 
 TEST(Serialization, ModelInfoRoundtrip) {

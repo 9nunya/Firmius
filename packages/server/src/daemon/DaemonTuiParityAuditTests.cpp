@@ -97,8 +97,6 @@ TEST(DaemonTuiParityAudit, ClientFacadeCoversInProcessTuiBackendActions) {
   static_assert(has_method<DaemonClient>(&Client::updateRouterConfig));
   static_assert(has_method<DaemonClient>(&Client::getPurposesConfig));
   static_assert(has_method<DaemonClient>(&Client::updatePurposesConfig));
-  static_assert(has_method<DaemonClient>(&Client::getRollingMemoryConfig));
-  static_assert(has_method<DaemonClient>(&Client::updateRollingMemoryConfig));
   static_assert(has_method<DaemonClient>(&Client::getMcpConfig));
   static_assert(has_method<DaemonClient>(&Client::updateMcpConfig));
 
@@ -151,7 +149,6 @@ TEST(DaemonTuiParityAudit, UiSnapshotContainsAttachStateNeededByDetachedTui) {
   static_assert(member_has_type<UserConfigSnapshot>(&UiSnapshot::config));
   static_assert(member_has_type<RouterConfigSnapshot>(&UiSnapshot::router));
   static_assert(member_has_type<PurposesConfigSnapshot>(&UiSnapshot::purposes));
-  static_assert(member_has_type<RollingMemoryConfigSnapshot>(&UiSnapshot::rollingMemory));
   static_assert(member_has_type<McpConfigSnapshot>(&UiSnapshot::mcp));
   static_assert(member_has_type<HookStateSnapshot>(&UiSnapshot::hooks));
   static_assert(member_has_type<std::vector<PactSnapshot>>(&UiSnapshot::pacts));
@@ -187,7 +184,6 @@ TEST(DaemonTuiParityAudit, CriticalWireTypesAreSerializableForDetachedClient) {
   static_assert(serializable_snapshot_v<UserConfigSnapshot>);
   static_assert(serializable_snapshot_v<RouterConfigSnapshot>);
   static_assert(serializable_snapshot_v<PurposesConfigSnapshot>);
-  static_assert(serializable_snapshot_v<RollingMemoryConfigSnapshot>);
   static_assert(serializable_snapshot_v<McpConfigSnapshot>);
   static_assert(serializable_snapshot_v<HookStateSnapshot>);
   static_assert(serializable_snapshot_v<HooksRecentActivitySnapshot>);

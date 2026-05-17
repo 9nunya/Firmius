@@ -72,10 +72,18 @@ target_include_directories(test_fleet PRIVATE ${rapidjson_SOURCE_DIR}/include)
 target_include_directories(test_process_interactive PRIVATE ${rapidjson_SOURCE_DIR}/include)
 target_include_directories(test_reference_persistence PRIVATE ${rapidjson_SOURCE_DIR}/include)
 
-add_executable(test_recall_index test_recall_index.cpp)
-target_link_libraries(test_recall_index PRIVATE
+add_executable(test_embedding_store test_embedding_store.cpp)
+target_link_libraries(test_embedding_store PRIVATE
     firmius::core
     firmius::shared
     GTest::gtest_main
 )
-gtest_discover_tests(test_recall_index)
+gtest_discover_tests(test_embedding_store)
+
+add_executable(test_model_downloader test_model_downloader.cpp)
+target_link_libraries(test_model_downloader PRIVATE
+    firmius::core
+    firmius::shared
+    GTest::gtest_main
+)
+gtest_discover_tests(test_model_downloader)

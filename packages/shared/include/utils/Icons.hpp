@@ -31,6 +31,10 @@ inline const std::string ICON_PERSONA = "󰧱";
 inline const std::string ICON_CHIP = "󰘚";
 inline const std::string ICON_TODO = "";
 inline const std::string ICON_BOOK = "";
+inline const std::string ICON_MEMORY = "󰍛";
+inline const std::string ICON_ANCHOR = "󰯲";
+inline const std::string ICON_DOWNLOAD = "󰇚";
+inline const std::string ICON_MODEL = "⚙";
 
 } // namespace firmius::shared
 

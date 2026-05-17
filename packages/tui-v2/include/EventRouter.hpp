@@ -38,14 +38,18 @@ private:
   void handleAgentError(const std::string &json, const std::string &agentId);
   void handleAgentInterrupted(const std::string &agentId);
   void handleUserMessageSent(const std::string &json);
-  void handleMessageQueued();
-  void handleMessageDequeued();
+  void handleMessageQueued(const std::string &json);
+  void handleMessageDequeued(const std::string &json);
   void handlePermissionEscalation(const std::string &json);
   void handlePermissionResolved(const std::string &json);
   void handleAgentTodoUpdated(const std::string &json);
   void handleModelSwitched(const std::string &json);
   void handleThreadTitleUpdated(const std::string &json);
   void handleConfigUpdated();
+  void handleHookStateChanged(const firmius::daemon::HookStateSnapshot &snapshot);
+  void handleEmbeddingModelProgress(const std::string &json);
+  void handleAgentCompacting(const std::string &agentId);
+  void handleContextCompacted(const std::string &json, const std::string &agentId);
 
   AppState &state_;
 

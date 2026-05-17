@@ -175,3 +175,6 @@ endif()
 
 # Tree-sitter core + language parsers (compiled in at build time)
 include(cmake/TreeSitter.cmake)
+
+# ONNX Runtime for embedding inference
+include(cmake/OnnxRuntime.cmake)

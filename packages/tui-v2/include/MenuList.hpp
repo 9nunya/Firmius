@@ -94,6 +94,7 @@ private:
   // Mouse state.
   int screenRow_ = 0;
   int hoveredIndex_ = -1;  ///< Index of item under mouse cursor, -1 if none.
+  int mouseArmedIndex_ = -1;
 };
 
 } // namespace firmius::tui2

@@ -15,7 +15,6 @@ Because orchestration is the product here — not a checkbox.
 - **Terminal-first by design** with no split focus on a web package or browser wrapper.
 - **MCP that actually works** across discovery, loading, dynamic tool exposure, prompts, resources, and tool calls.
 - **LSP-backed code intelligence** so agents can navigate code semantically instead of doing grep cosplay.
-- **Rolling memory with structure** instead of blunt truncation and wishful thinking.
 - **Thread-scoped artifacts and exact recall** so long-running work stays inspectable and recoverable.
 - **Workflow markdown that becomes slash commands** because extensibility should not require a recompile.
 - **Provider and routing control** so different roles can use different models for different jobs.
@@ -38,7 +37,6 @@ Firmius ships with the primitives that matter when agents stop being a novelty:
 
 Firmius keeps more than a shrinking transcript:
 
-- rolling memory modes and occupancy presets
 - observer and reflector passes
 - a dedicated working-memory updater lane
 - watched-file overlays for read / fully-read / edited state
@@ -103,7 +101,6 @@ Cross-platform CI in `.github/workflows/cross-platform-ci.yml` builds the shippe
 | `/models` | Change the focused model |
 | `/connect` | Attach a provider account |
 | `/accounts` / `/quotas` | Inspect provider state |
-| `/memory` | Tune rolling-memory behavior |
 | `/router` | Define routing categories |
 | `/purposes` | Map roles to routes |
 | `/mcp` | Manage MCP servers and connections |

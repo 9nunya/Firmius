@@ -51,14 +51,6 @@ TEST_F(ConfigLoaderRouterTest, SavesAndLoadsRouterCategoriesAndPurposeRoutes) {
   cfg.defaultRouteCategory = "research";
   cfg.enableSubagentRouteFallback = true;
   cfg.subagentRouteFallbackOrder = {"research", "code"};
-  cfg.rollingMemory.enabled = true;
-  cfg.rollingMemory.mode = "rolling_forever";
-  cfg.rollingMemory.preset = "balanced";
-  cfg.rollingMemory.targetOccupancyRatio = 0.57f;
-  cfg.rollingMemory.bufferOccupancyRatio = 0.47f;
-  cfg.rollingMemory.emergencyOccupancyRatio = 0.66f;
-  cfg.rollingMemory.observer = {true, "openai", "gpt-5.4-mini", "explorer"};
-  cfg.rollingMemory.reflector = {true, "openrouter", "qwen3", ""};
 
   loader.updateConfig(cfg);
   loader.save();
@@ -79,13 +71,6 @@ TEST_F(ConfigLoaderRouterTest, SavesAndLoadsRouterCategoriesAndPurposeRoutes) {
   ASSERT_EQ(loaded.subagentRouteFallbackOrder.size(), 2u);
   EXPECT_EQ(loaded.subagentRouteFallbackOrder[0], "research");
   EXPECT_EQ(loaded.subagentRouteFallbackOrder[1], "code");
-  EXPECT_TRUE(loaded.rollingMemory.enabled);
-  EXPECT_EQ(loaded.rollingMemory.mode, "rolling_forever");
-  EXPECT_EQ(loaded.rollingMemory.preset, "balanced");
-  EXPECT_FLOAT_EQ(loaded.rollingMemory.targetOccupancyRatio, 0.57f);
-  EXPECT_EQ(loaded.rollingMemory.observer.providerId, "openai");
-  EXPECT_EQ(loaded.rollingMemory.observer.modelId, "gpt-5.4-mini");
-  EXPECT_EQ(loaded.rollingMemory.reflector.providerId, "openrouter");
 }
 
 TEST_F(ConfigLoaderRouterTest, MissingRouterFieldsRemainBackwardCompatible) {

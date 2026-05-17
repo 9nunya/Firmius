@@ -104,7 +104,6 @@ struct ProviderProfileConfig {
 };
 
 struct UserConfig {
-    using RollingMemoryConfig = firmius::shared::AgentConfig::RollingMemoryConfig;
     std::string defaultProviderId = "nanogpt";
     std::string defaultModelId = "zai-org/glm-4.6:thinking";
     std::string defaultModelVariant;                      // Selected model variant (e.g., "low", "medium", "max")
@@ -121,7 +120,6 @@ struct UserConfig {
     std::vector<std::string> subagentRouteFallbackOrder;
     bool showInternalNudges = false;
     bool hideErrors = false;                              // Hide errors in chat display
-    RollingMemoryConfig rollingMemory;
     bool insanityDetectionEnabled = true;
     int insanityRepetitionThreshold = 3;
     std::uint64_t insanityMaxTokenThreshold = 50000;

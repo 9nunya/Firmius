@@ -35,6 +35,11 @@ void ToolCallItem::setProcessId(std::string processId) {
   touch();
 }
 
+void ToolCallItem::setSubagentId(std::string subagentId) {
+  subagentId_ = std::move(subagentId);
+  touch();
+}
+
 void ToolCallItem::appendProcessOutput(const std::string& output, bool isStderr) {
   if (isStderr) {
     processStderr_ += output;

@@ -1,7 +1,9 @@
 #include "AppState.hpp"
+#include "items/SimpleItems.hpp"
 #include "items/ToolCallItem.hpp"
 #include "items/StreamingItems.hpp"
 
+#include <algorithm>
 #include <cctype>
 
 namespace firmius::tui2 {
@@ -122,11 +124,111 @@ std::string AppState::liveMessage() const {
   return liveMessage_;
 }
 
+void AppState::setHookState(const firmius::daemon::HookStateSnapshot &hookState) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  hookState_ = hookState;
+  markDirty();
+}
+
+firmius::daemon::HookStateSnapshot AppState::hookState() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return hookState_;
+}
+
+void AppState::setDaemonReady(bool ready) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  daemonReady_ = ready;
+  markDirty();
+}
+
+bool AppState::daemonReady() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return daemonReady_;
+}
+
+void AppState::resetWelcomeState() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  threadId_.clear();
+  threadTitle_.clear();
+  agentId_.clear();
+  focusedAgentId_.clear();
+  primaryAgentId_.clear();
+  hookState_ = {};
+  agents_.clear();
+  agentTodos_.clear();
+  activeTextItem_ = nullptr;
+  activeThinkingItem_ = nullptr;
+  agentTextItems_.clear();
+  agentThinkingItems_.clear();
+  queuedMessageCount_ = 0;
+  queuedMessageIds_.clear();
+  queuedUserMessages_.clear();
+  agentStatus_ = firmius::shared::AgentStatus::Idle;
+  markDirty();
+}
+
+void AppState::prepareForThreadLoad() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  items_.clear();
+  itemSpans_.clear();
+  toolCalls_.clear();
+  processToTool_.clear();
+  agents_.clear();
+  agentTodos_.clear();
+  activeTextItem_ = nullptr;
+  activeThinkingItem_ = nullptr;
+  agentTextItems_.clear();
+  agentThinkingItems_.clear();
+  agentActivityLogs_.clear();
+  focusedAgentId_.clear();
+  primaryAgentId_.clear();
+  hookState_ = {};
+  scrollback_.clear();
+  scrollOffset_ = 0;
+  userScrolledUp_ = false;
+  pinnedTopLine_ = -1;
+  fullResyncRequested_ = true;
+  queuedMessageCount_ = 0;
+  queuedMessageIds_.clear();
+  queuedUserMessages_.clear();
+  agentStatus_ = firmius::shared::AgentStatus::Idle;
+  markDirty();
+}
+
 // ── Items (transcript) ──
 
 void AppState::addItem(std::unique_ptr<TranscriptItem> item) {
   std::lock_guard<std::mutex> lock(mutex_);
   items_.push_back(std::move(item));
+  markDirty();
+}
+
+void AppState::insertItem(size_t index, std::unique_ptr<TranscriptItem> item) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (index >= items_.size()) {
+    items_.push_back(std::move(item));
+  } else {
+    items_.insert(items_.begin() + static_cast<std::ptrdiff_t>(index),
+                  std::move(item));
+  }
+  fullResyncRequested_ = true;
+  markDirty();
+}
+
+void AppState::clearTranscriptItems() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  items_.clear();
+  toolCalls_.clear();
+  processToTool_.clear();
+  activeTextItem_ = nullptr;
+  activeThinkingItem_ = nullptr;
+  agentTextItems_.clear();
+  agentThinkingItems_.clear();
+  scrollback_.clear();
+  scrollOffset_ = 0;
+  userScrolledUp_ = false;
+  pinnedTopLine_ = -1;
+  fullResyncRequested_ = true;
   markDirty();
 }
 
@@ -139,6 +241,9 @@ void AppState::clearItems() {
   agentTodos_.clear();
   activeTextItem_ = nullptr;
   activeThinkingItem_ = nullptr;
+  queuedMessageCount_ = 0;
+  queuedMessageIds_.clear();
+  queuedUserMessages_.clear();
   scrollback_.clear();
   scrollOffset_ = 0;
   userScrolledUp_ = false;
@@ -166,6 +271,21 @@ ToolCallItem* AppState::findToolCallById(const std::string& toolCallId) {
       auto* tc = static_cast<ToolCallItem*>(item.get());
       if (tc->toolCallId() == toolCallId) {
         return tc;
+      }
+    }
+  }
+  return nullptr;
+}
+
+UserMessageItem* AppState::findUserMessageById(const std::string& messageId) {
+  if (messageId.empty()) {
+    return nullptr;
+  }
+  for (auto& item : items_) {
+    if (item->type() == "UserMessage") {
+      auto* user = static_cast<UserMessageItem*>(item.get());
+      if (user->messageId() == messageId) {
+        return user;
       }
     }
   }
@@ -243,6 +363,52 @@ void AppState::renameAgent(const std::string& oldId, const std::string& newId) {
   }
 }
 
+void AppState::updateAgentModel(const std::string& agentId,
+                                const std::string& providerId,
+                                const std::string& modelId,
+                                uint32_t contextWindowTokens) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto& agent = agents_[agentId];
+  agent.agentId = agentId;
+  agent.providerId = providerId;
+  agent.modelId = modelId;
+  if (contextWindowTokens > 0) {
+    agent.contextWindowTokens = contextWindowTokens;
+  }
+  agent.contextUsedTokens = 0;
+  agent.contextSentTokens = 0;
+  if (focusedAgentId_ == agentId || (focusedAgentId_.empty() && agentId_ == agentId)) {
+    modelLabel_ = providerId.empty() ? modelId : providerId + "/" + modelId;
+    agentContextUsage_ = ContextUsage{agent.contextWindowTokens, 0, 0};
+    if (agent.contextWindowTokens > 0) {
+      agentContextWindow_ = "0/" + std::to_string(agent.contextWindowTokens / 1000) + "k";
+    } else {
+      agentContextWindow_.clear();
+    }
+  }
+  markDirty();
+}
+
+void AppState::clearAgentContextUsage(const std::string& agentId) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = agents_.find(agentId);
+  if (it != agents_.end()) {
+    it->second.contextUsedTokens = 0;
+    it->second.contextSentTokens = 0;
+  }
+  if (focusedAgentId_ == agentId || (focusedAgentId_.empty() && agentId_ == agentId)) {
+    agentContextUsage_.usedTokens = 0;
+    agentContextUsage_.sentTokens = 0;
+    if (agentContextUsage_.windowTokens == 0) {
+      agentContextWindow_.clear();
+    } else {
+      agentContextWindow_ =
+          "0/" + std::to_string(agentContextUsage_.windowTokens / 1000) + "k";
+    }
+  }
+  markDirty();
+}
+
 // ── Agent focus ──
 
 void AppState::focusAgent(const std::string& agentId) {
@@ -291,12 +457,12 @@ std::string AppState::primaryAgentId() const {
   return primaryAgentId_;
 }
 
-std::vector<AgentState*> AppState::agentList() const {
+std::vector<AgentState> AppState::agentList() const {
   std::lock_guard<std::mutex> lock(mutex_);
-  std::vector<AgentState*> result;
+  std::vector<AgentState> result;
   result.reserve(agents_.size());
   for (auto& [id, agent] : agents_) {
-    result.push_back(const_cast<AgentState*>(&agent));
+    result.push_back(agent);
   }
   return result;
 }
@@ -336,6 +502,9 @@ std::string AppState::parentIdOf(const std::string& agentId) const {
 
 bool AppState::hasMultipleAgents() const {
   std::lock_guard<std::mutex> lock(mutex_);
+  if (threadId_.empty()) {
+    return false;
+  }
   return agents_.size() > 1;
 }
 
@@ -365,8 +534,29 @@ std::string AppState::agentToolSummary(const std::string& agentId) const {
 void AppState::appendAgentActivity(const std::string& agentId, const std::string& line) {
   std::lock_guard<std::mutex> lock(mutex_);
   auto& log = agentActivityLogs_[agentId];
-  log.push_back(line);
-  // Keep last 20 lines
+  log.push_back({"line:" + std::to_string(log.size()), line, {}});
+  if (log.size() > 20) {
+    log.erase(log.begin(), log.begin() + (log.size() - 20));
+  }
+}
+
+void AppState::upsertAgentActivity(const std::string& agentId,
+                                   const std::string& key,
+                                   const std::string& line,
+                                   std::chrono::milliseconds ttl) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto& log = agentActivityLogs_[agentId];
+  const auto expiry = ttl.count() > 0
+                          ? std::chrono::steady_clock::now() + ttl
+                          : std::chrono::steady_clock::time_point{};
+  for (auto& entry : log) {
+    if (entry.key == key) {
+      entry.text = line;
+      entry.expiresAt = expiry;
+      return;
+    }
+  }
+  log.push_back({key, line, expiry});
   if (log.size() > 20) {
     log.erase(log.begin(), log.begin() + (log.size() - 20));
   }
@@ -376,9 +566,18 @@ std::vector<std::string> AppState::agentActivityLog(const std::string& agentId, 
   std::lock_guard<std::mutex> lock(mutex_);
   auto it = agentActivityLogs_.find(agentId);
   if (it == agentActivityLogs_.end()) return {};
-  const auto& log = it->second;
-  int start = std::max(0, static_cast<int>(log.size()) - maxLines);
-  return std::vector<std::string>(log.begin() + start, log.end());
+  const auto now = std::chrono::steady_clock::now();
+  std::vector<std::string> live;
+  for (const auto& entry : it->second) {
+    if (entry.text.empty()) continue;
+    if (entry.expiresAt != std::chrono::steady_clock::time_point{} &&
+        now > entry.expiresAt) {
+      continue;
+    }
+    live.push_back(entry.text);
+  }
+  int start = std::max(0, static_cast<int>(live.size()) - maxLines);
+  return std::vector<std::string>(live.begin() + start, live.end());
 }
 
 // ── Streaming management ──
@@ -471,12 +670,86 @@ void AppState::markLiveItemsDirty() {
 void AppState::setQueuedMessageCount(int count) {
   std::lock_guard<std::mutex> lock(mutex_);
   queuedMessageCount_ = count;
+  if (count <= 0) {
+    queuedMessageIds_.clear();
+    queuedUserMessages_.clear();
+  }
   markDirty();
 }
 
 int AppState::queuedMessageCount() const {
   std::lock_guard<std::mutex> lock(mutex_);
   return queuedMessageCount_;
+}
+
+void AppState::queueMessageId(const std::string& messageId) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!messageId.empty()) {
+    queuedMessageIds_.insert(messageId);
+    queuedMessageCount_ = static_cast<int>(queuedMessageIds_.size());
+  } else {
+    ++queuedMessageCount_;
+  }
+  markDirty();
+}
+
+void AppState::dequeueMessageId(const std::string& messageId) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!messageId.empty()) {
+    queuedMessageIds_.erase(messageId);
+    queuedMessageCount_ = static_cast<int>(queuedMessageIds_.size());
+  } else {
+    queuedMessageCount_ = std::max(0, queuedMessageCount_ - 1);
+  }
+  markDirty();
+}
+
+bool AppState::isMessageQueued(const std::string& messageId) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return !messageId.empty() && queuedMessageIds_.count(messageId) > 0;
+}
+
+void AppState::upsertQueuedUserMessage(QueuedUserMessage message) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (message.messageId.empty()) {
+    return;
+  }
+  auto it = std::find_if(queuedUserMessages_.begin(), queuedUserMessages_.end(),
+                         [&](const QueuedUserMessage& existing) {
+                           return existing.messageId == message.messageId;
+                         });
+  if (it != queuedUserMessages_.end()) {
+    *it = std::move(message);
+  } else {
+    queuedUserMessages_.push_back(std::move(message));
+  }
+  markDirty();
+}
+
+void AppState::removeQueuedUserMessage(const std::string& messageId) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (messageId.empty()) {
+    return;
+  }
+  queuedUserMessages_.erase(
+      std::remove_if(queuedUserMessages_.begin(), queuedUserMessages_.end(),
+                     [&](const QueuedUserMessage& message) {
+                       return message.messageId == messageId;
+                     }),
+      queuedUserMessages_.end());
+  markDirty();
+}
+
+std::vector<QueuedUserMessage>
+AppState::queuedUserMessagesForAgent(const std::string& agentId) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  std::vector<QueuedUserMessage> result;
+  for (const auto& message : queuedUserMessages_) {
+    if (message.agentId == agentId) {
+      result.push_back(message);
+    }
+  }
+  return result;
 }
 
 // ── Permissions (queue) ──
@@ -513,6 +786,19 @@ std::optional<PendingPermission> AppState::pendingPermission() const {
 bool AppState::hasPendingPermissions() const {
   std::lock_guard<std::mutex> lock(mutex_);
   return !pendingPermissions_.empty();
+}
+
+// ── Embedding ──
+
+void AppState::setEmbeddingDownload(EmbeddingDownloadState state) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  embeddingDownload_ = std::move(state);
+  markDirty();
+}
+
+EmbeddingDownloadState AppState::embeddingDownload() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return embeddingDownload_;
 }
 
 // ── Todos ──
@@ -624,6 +910,13 @@ bool AppState::isDirty() const {
 void AppState::clearDirty() {
   std::lock_guard<std::mutex> lock(mutex_);
   dirty_ = false;
+}
+
+bool AppState::consumeFullResyncRequested() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  const bool requested = fullResyncRequested_;
+  fullResyncRequested_ = false;
+  return requested;
 }
 
 // ── Scrollback ──

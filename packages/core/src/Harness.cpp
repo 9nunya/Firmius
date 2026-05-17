@@ -1180,7 +1180,8 @@ bool Harness::dispatchRequestToAgent(const std::string &threadId,
     if (!fireUserMessageHook()) {
       return false;
     }
-    emitEvent(firmius::shared::UserMessageSent{messageId, text, tid, images});
+    emitEvent(
+        firmius::shared::UserMessageSent{messageId, text, tid, fid, images});
     // Note: summonAgent will use the default model from ConfigLoader
     // which is what we want for a brand new lead agent in a thread.
     Engine::instance().summonAgent(tid, metadata.leadPersona, preparedText,
@@ -1229,7 +1230,8 @@ bool Harness::dispatchRequestToAgent(const std::string &threadId,
     if (!fireUserMessageHook()) {
       return false;
     }
-    emitEvent(firmius::shared::UserMessageSent{messageId, text, tid, images});
+    emitEvent(
+        firmius::shared::UserMessageSent{messageId, text, tid, fid, images});
     Engine::instance().executeTask(fid, preparedText, images);
     statusMessage = "Retry started.";
     return true;
@@ -1248,7 +1250,8 @@ bool Harness::dispatchRequestToAgent(const std::string &threadId,
   if (!fireUserMessageHook()) {
     return false;
   }
-  emitEvent(firmius::shared::UserMessageSent{messageId, text, tid, images});
+  emitEvent(
+      firmius::shared::UserMessageSent{messageId, text, tid, fid, images});
   Engine::instance().executeTask(fid, preparedText, images);
   statusMessage = "Retry started.";
   return true;
@@ -1941,6 +1944,14 @@ std::vector<ThreadMetadata> Harness::listThreads() {
 ThreadMetadata Harness::getThreadMetadata(const std::string &threadId) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   return threadManager_.getMetadata(threadId);
+}
+
+int Harness::getThreadLockOwnerPid(const std::string &threadId) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  if (threadId.empty()) {
+    return -1;
+  }
+  return lockManager_.getOwnerPid(threadId);
 }
 
 std::vector<std::string> Harness::listAgents(const std::string &threadId) {
@@ -2971,9 +2982,8 @@ void Harness::drainQueueForAgent(const std::string &agentId,
   for (const auto &item : batch) {
     emitEvent(
         firmius::shared::MessageDequeued{item.id, item.threadId, item.agentId});
-    emitEvent(
-        firmius::shared::UserMessageSent{item.id, item.text, item.threadId,
-                                         item.images});
+    emitEvent(firmius::shared::UserMessageSent{item.id, item.text, item.threadId,
+                                               item.agentId, item.images});
   }
 
   auto appendQueuedUserTurn = [&](const QueuedMessage &item) {

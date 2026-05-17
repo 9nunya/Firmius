@@ -402,80 +402,7 @@ EditUndoResultStatus stringToEditUndoResultStatusImpl(const std::string &value) 
 }
 
 
-rapidjson::Value rollingNoticeMetadataToJson(
-    const RollingNoticeMetadata &metadata, rapidjson::Document::AllocatorType &a) {
-  rapidjson::Value v(rapidjson::kObjectType);
-  v.AddMember("eventKind", rapidjson::Value(metadata.eventKind.c_str(), a), a);
-  v.AddMember("lifecycle", rapidjson::Value(metadata.lifecycle.c_str(), a), a);
-  if (metadata.modelLabel.has_value()) {
-    v.AddMember("modelLabel", rapidjson::Value(metadata.modelLabel->c_str(), a), a);
-  }
-  if (metadata.sourceStartTurnId.has_value()) {
-    v.AddMember("sourceStartTurnId",
-                rapidjson::Value(metadata.sourceStartTurnId->c_str(), a), a);
-  }
-  if (metadata.sourceEndTurnId.has_value()) {
-    v.AddMember("sourceEndTurnId",
-                rapidjson::Value(metadata.sourceEndTurnId->c_str(), a), a);
-  }
-  if (metadata.sourceTurnCount.has_value()) {
-    v.AddMember("sourceTurnCount", metadata.sourceTurnCount.value(), a);
-  }
-  if (metadata.sourceChunkCount.has_value()) {
-    v.AddMember("sourceChunkCount", metadata.sourceChunkCount.value(), a);
-  }
-  if (metadata.sourceTokens.has_value()) {
-    v.AddMember("sourceTokens", metadata.sourceTokens.value(), a);
-  }
-  if (metadata.summaryTokens.has_value()) {
-    v.AddMember("summaryTokens", metadata.summaryTokens.value(), a);
-  }
-  if (metadata.savedTokens.has_value()) {
-    v.AddMember("savedTokens", metadata.savedTokens.value(), a);
-  }
-  return v;
-}
 
-std::optional<RollingNoticeMetadata>
-rollingNoticeMetadataFromJson(const rapidjson::Value &v) {
-  if (!v.IsObject()) {
-    return std::nullopt;
-  }
-  if (!v.HasMember("eventKind") || !v["eventKind"].IsString() ||
-      !v.HasMember("lifecycle") || !v["lifecycle"].IsString()) {
-    return std::nullopt;
-  }
-
-  RollingNoticeMetadata metadata;
-  metadata.eventKind = v["eventKind"].GetString();
-  metadata.lifecycle = v["lifecycle"].GetString();
-  if (v.HasMember("modelLabel") && v["modelLabel"].IsString()) {
-    metadata.modelLabel = v["modelLabel"].GetString();
-  }
-  if (v.HasMember("sourceStartTurnId") &&
-      v["sourceStartTurnId"].IsString()) {
-    metadata.sourceStartTurnId = v["sourceStartTurnId"].GetString();
-  }
-  if (v.HasMember("sourceEndTurnId") && v["sourceEndTurnId"].IsString()) {
-    metadata.sourceEndTurnId = v["sourceEndTurnId"].GetString();
-  }
-  if (v.HasMember("sourceTurnCount") && v["sourceTurnCount"].IsUint()) {
-    metadata.sourceTurnCount = v["sourceTurnCount"].GetUint();
-  }
-  if (v.HasMember("sourceChunkCount") && v["sourceChunkCount"].IsUint()) {
-    metadata.sourceChunkCount = v["sourceChunkCount"].GetUint();
-  }
-  if (v.HasMember("sourceTokens") && v["sourceTokens"].IsUint()) {
-    metadata.sourceTokens = v["sourceTokens"].GetUint();
-  }
-  if (v.HasMember("summaryTokens") && v["summaryTokens"].IsUint()) {
-    metadata.summaryTokens = v["summaryTokens"].GetUint();
-  }
-  if (v.HasMember("savedTokens") && v["savedTokens"].IsUint()) {
-    metadata.savedTokens = v["savedTokens"].GetUint();
-  }
-  return metadata;
-}
 
 TodoStatus stringToTodoStatus(const std::string &str) {
   if (str == "Pending")
@@ -1482,11 +1409,6 @@ rapidjson::Value messagePartToJson(const MessagePart &p,
                 rapidjson::Value(noticeSeverityToString(notice->severity).c_str(),
                                  a),
                 a);
-    if (notice->rollingMetadata.has_value()) {
-      v.AddMember("rolling",
-                  rollingNoticeMetadataToJson(notice->rollingMetadata.value(), a),
-                  a);
-    }
   }
   return v;
 }
@@ -1521,11 +1443,7 @@ MessagePart messagePartFromJson(const rapidjson::Value &v) {
         v["details"].GetString(),
         v.HasMember("severity") && v["severity"].IsString()
             ? stringToNoticeSeverity(v["severity"].GetString())
-            : NoticeSeverity::Info,
-        std::nullopt};
-    if (v.HasMember("rolling")) {
-      notice.rollingMetadata = rollingNoticeMetadataFromJson(v["rolling"]);
-    }
+            : NoticeSeverity::Info};
     return notice;
   }
   // Unknown or missing type: return a safe default instead of throwing
@@ -1851,48 +1769,6 @@ rapidjson::Document toJson(const AgentContext &ctx) {
     stopSeqs.PushBack(rapidjson::Value(s.c_str(), a), a);
   config.AddMember("stop", stopSeqs, a);
   config.AddMember("persistHistory", ctx.config.persistHistory, a);
-  rapidjson::Value rolling(rapidjson::kObjectType);
-  rolling.AddMember("enabled", ctx.config.rollingMemory.enabled, a);
-  rolling.AddMember("mode",
-                    rapidjson::Value(ctx.config.rollingMemory.mode.c_str(), a),
-                    a);
-  rolling.AddMember(
-      "preset",
-      rapidjson::Value(ctx.config.rollingMemory.preset.c_str(), a), a);
-  rolling.AddMember("targetOccupancyRatio",
-                    ctx.config.rollingMemory.targetOccupancyRatio, a);
-  rolling.AddMember("bufferOccupancyRatio",
-                    ctx.config.rollingMemory.bufferOccupancyRatio, a);
-  rolling.AddMember("emergencyOccupancyRatio",
-                    ctx.config.rollingMemory.emergencyOccupancyRatio, a);
-  rolling.AddMember("reflectionOccupancyRatio",
-                    ctx.config.rollingMemory.reflectionOccupancyRatio, a);
-  rolling.AddMember("retainTailRatio", ctx.config.rollingMemory.retainTailRatio,
-                    a);
-  rolling.AddMember("minimumRetainedTailTokens",
-                    ctx.config.rollingMemory.minimumRetainedTailTokens, a);
-  rolling.AddMember("minimumChunkTokens",
-                    ctx.config.rollingMemory.minimumChunkTokens, a);
-  rolling.AddMember("emitEventTurns", ctx.config.rollingMemory.emitEventTurns,
-                    a);
-  auto rollingModelToJson = [&a](const AgentConfig::RollingModelConfig &model) {
-    rapidjson::Value v(rapidjson::kObjectType);
-    v.AddMember("enabled", model.enabled, a);
-    v.AddMember("providerId", rapidjson::Value(model.providerId.c_str(), a), a);
-    v.AddMember("modelId", rapidjson::Value(model.modelId.c_str(), a), a);
-    v.AddMember("variantName", rapidjson::Value(model.variantName.c_str(), a),
-                a);
-    return v;
-  };
-  rolling.AddMember("observer",
-                    rollingModelToJson(ctx.config.rollingMemory.observer), a);
-  rolling.AddMember("reflector",
-                    rollingModelToJson(ctx.config.rollingMemory.reflector), a);
-  rolling.AddMember("workingMemoryUpdater",
-                    rollingModelToJson(
-                        ctx.config.rollingMemory.workingMemoryUpdater),
-                    a);
-  config.AddMember("rollingMemory", rolling, a);
   d.AddMember("config", config, a);
 
   d.AddMember("aggregateMetrics", agentMetricsToJson(ctx.aggregateMetrics, a),
@@ -2086,70 +1962,6 @@ AgentContext fromJson(const rapidjson::Value &v) {
     }
     if (cfg.HasMember("persistHistory"))
       ctx.config.persistHistory = cfg["persistHistory"].GetBool();
-    if (cfg.HasMember("rollingMemory") && cfg["rollingMemory"].IsObject()) {
-      const auto &rolling = cfg["rollingMemory"];
-      auto parseRollingModel = [](const rapidjson::Value &value,
-                                  AgentConfig::RollingModelConfig &model) {
-        if (!value.IsObject()) {
-          return;
-        }
-        if (value.HasMember("enabled") && value["enabled"].IsBool())
-          model.enabled = value["enabled"].GetBool();
-        if (value.HasMember("providerId") && value["providerId"].IsString())
-          model.providerId = value["providerId"].GetString();
-        if (value.HasMember("modelId") && value["modelId"].IsString())
-          model.modelId = value["modelId"].GetString();
-        if (value.HasMember("variantName") && value["variantName"].IsString())
-          model.variantName = value["variantName"].GetString();
-      };
-      if (rolling.HasMember("enabled") && rolling["enabled"].IsBool())
-        ctx.config.rollingMemory.enabled = rolling["enabled"].GetBool();
-      if (rolling.HasMember("mode") && rolling["mode"].IsString())
-        ctx.config.rollingMemory.mode = rolling["mode"].GetString();
-      if (rolling.HasMember("preset") && rolling["preset"].IsString())
-        ctx.config.rollingMemory.preset = rolling["preset"].GetString();
-      if (rolling.HasMember("targetOccupancyRatio") &&
-          rolling["targetOccupancyRatio"].IsNumber())
-        ctx.config.rollingMemory.targetOccupancyRatio =
-            rolling["targetOccupancyRatio"].GetFloat();
-      if (rolling.HasMember("bufferOccupancyRatio") &&
-          rolling["bufferOccupancyRatio"].IsNumber())
-        ctx.config.rollingMemory.bufferOccupancyRatio =
-            rolling["bufferOccupancyRatio"].GetFloat();
-      if (rolling.HasMember("emergencyOccupancyRatio") &&
-          rolling["emergencyOccupancyRatio"].IsNumber())
-        ctx.config.rollingMemory.emergencyOccupancyRatio =
-            rolling["emergencyOccupancyRatio"].GetFloat();
-      if (rolling.HasMember("reflectionOccupancyRatio") &&
-          rolling["reflectionOccupancyRatio"].IsNumber())
-        ctx.config.rollingMemory.reflectionOccupancyRatio =
-            rolling["reflectionOccupancyRatio"].GetFloat();
-      if (rolling.HasMember("retainTailRatio") &&
-          rolling["retainTailRatio"].IsNumber())
-        ctx.config.rollingMemory.retainTailRatio =
-            rolling["retainTailRatio"].GetFloat();
-      if (rolling.HasMember("minimumRetainedTailTokens") &&
-          rolling["minimumRetainedTailTokens"].IsUint())
-        ctx.config.rollingMemory.minimumRetainedTailTokens =
-            rolling["minimumRetainedTailTokens"].GetUint();
-      if (rolling.HasMember("minimumChunkTokens") &&
-          rolling["minimumChunkTokens"].IsUint())
-        ctx.config.rollingMemory.minimumChunkTokens =
-            rolling["minimumChunkTokens"].GetUint();
-      if (rolling.HasMember("emitEventTurns") &&
-          rolling["emitEventTurns"].IsBool())
-        ctx.config.rollingMemory.emitEventTurns =
-            rolling["emitEventTurns"].GetBool();
-      if (rolling.HasMember("observer"))
-        parseRollingModel(rolling["observer"],
-                          ctx.config.rollingMemory.observer);
-      if (rolling.HasMember("reflector"))
-        parseRollingModel(rolling["reflector"],
-                          ctx.config.rollingMemory.reflector);
-      if (rolling.HasMember("workingMemoryUpdater"))
-        parseRollingModel(rolling["workingMemoryUpdater"],
-                          ctx.config.rollingMemory.workingMemoryUpdater);
-    }
   }
 
   if (v.HasMember("aggregateMetrics") && v["aggregateMetrics"].IsObject())
@@ -3209,15 +3021,6 @@ rapidjson::Document toJson(const AgentConfig &config) {
   rapidjson::Document d;
   d.SetObject();
   auto &a = d.GetAllocator();
-  auto rollingModelToJson = [&a](const AgentConfig::RollingModelConfig &model) {
-    rapidjson::Value v(rapidjson::kObjectType);
-    v.AddMember("enabled", model.enabled, a);
-    v.AddMember("providerId", rapidjson::Value(model.providerId.c_str(), a), a);
-    v.AddMember("modelId", rapidjson::Value(model.modelId.c_str(), a), a);
-    v.AddMember("variantName", rapidjson::Value(model.variantName.c_str(), a), a);
-    return v;
-  };
-
   d.AddMember("providerId", rapidjson::Value(config.providerId.c_str(), a), a);
   d.AddMember("modelId", rapidjson::Value(config.modelId.c_str(), a), a);
   d.AddMember("modelVariant", rapidjson::Value(config.modelVariant.c_str(), a),
@@ -3236,43 +3039,11 @@ rapidjson::Document toJson(const AgentConfig &config) {
     stopSeqs.PushBack(rapidjson::Value(s.c_str(), a), a);
   d.AddMember("stop", stopSeqs, a);
   d.AddMember("persistHistory", config.persistHistory, a);
-  rapidjson::Value rolling(rapidjson::kObjectType);
-  rolling.AddMember("enabled", config.rollingMemory.enabled, a);
-  rolling.AddMember("mode", rapidjson::Value(config.rollingMemory.mode.c_str(), a), a);
-  rolling.AddMember("preset", rapidjson::Value(config.rollingMemory.preset.c_str(), a), a);
-  rolling.AddMember("targetOccupancyRatio", config.rollingMemory.targetOccupancyRatio, a);
-  rolling.AddMember("bufferOccupancyRatio", config.rollingMemory.bufferOccupancyRatio, a);
-  rolling.AddMember("emergencyOccupancyRatio", config.rollingMemory.emergencyOccupancyRatio, a);
-  rolling.AddMember("reflectionOccupancyRatio", config.rollingMemory.reflectionOccupancyRatio, a);
-  rolling.AddMember("retainTailRatio", config.rollingMemory.retainTailRatio, a);
-  rolling.AddMember("minimumRetainedTailTokens", config.rollingMemory.minimumRetainedTailTokens, a);
-  rolling.AddMember("minimumChunkTokens", config.rollingMemory.minimumChunkTokens, a);
-  rolling.AddMember("emitEventTurns", config.rollingMemory.emitEventTurns, a);
-  rolling.AddMember("observer", rollingModelToJson(config.rollingMemory.observer), a);
-  rolling.AddMember("reflector", rollingModelToJson(config.rollingMemory.reflector), a);
-  rolling.AddMember("workingMemoryUpdater", rollingModelToJson(config.rollingMemory.workingMemoryUpdater), a);
-  d.AddMember("rollingMemory", rolling, a);
   return d;
 }
 
 AgentConfig agentConfigFromJsonValue(const rapidjson::Value &v) {
   AgentConfig cfg;
-  auto parseRollingModel = [](const rapidjson::Value &value,
-                              AgentConfig::RollingModelConfig &model) {
-    if (!value.IsObject()) {
-      return;
-    }
-    if (value.HasMember("enabled") && value["enabled"].IsBool())
-      model.enabled = value["enabled"].GetBool();
-    if (value.HasMember("providerId") && value["providerId"].IsString())
-      model.providerId = value["providerId"].GetString();
-    if (value.HasMember("modelId") && value["modelId"].IsString())
-      model.modelId = value["modelId"].GetString();
-    if (value.HasMember("variantName") && value["variantName"].IsString())
-      model.variantName = value["variantName"].GetString();
-  };
-
-  if (v.HasMember("providerId"))
     cfg.providerId = v["providerId"].GetString();
   if (v.HasMember("modelId"))
     cfg.modelId = v["modelId"].GetString();
@@ -3292,54 +3063,6 @@ AgentConfig agentConfigFromJsonValue(const rapidjson::Value &v) {
   }
   if (v.HasMember("persistHistory"))
     cfg.persistHistory = v["persistHistory"].GetBool();
-  if (v.HasMember("rollingMemory") && v["rollingMemory"].IsObject()) {
-    const auto &rolling = v["rollingMemory"];
-    if (rolling.HasMember("enabled") && rolling["enabled"].IsBool())
-      cfg.rollingMemory.enabled = rolling["enabled"].GetBool();
-    if (rolling.HasMember("mode") && rolling["mode"].IsString())
-      cfg.rollingMemory.mode = rolling["mode"].GetString();
-    if (rolling.HasMember("preset") && rolling["preset"].IsString())
-      cfg.rollingMemory.preset = rolling["preset"].GetString();
-    if (rolling.HasMember("targetOccupancyRatio") &&
-        rolling["targetOccupancyRatio"].IsNumber())
-      cfg.rollingMemory.targetOccupancyRatio =
-          rolling["targetOccupancyRatio"].GetFloat();
-    if (rolling.HasMember("bufferOccupancyRatio") &&
-        rolling["bufferOccupancyRatio"].IsNumber())
-      cfg.rollingMemory.bufferOccupancyRatio =
-          rolling["bufferOccupancyRatio"].GetFloat();
-    if (rolling.HasMember("emergencyOccupancyRatio") &&
-        rolling["emergencyOccupancyRatio"].IsNumber())
-      cfg.rollingMemory.emergencyOccupancyRatio =
-          rolling["emergencyOccupancyRatio"].GetFloat();
-    if (rolling.HasMember("reflectionOccupancyRatio") &&
-        rolling["reflectionOccupancyRatio"].IsNumber())
-      cfg.rollingMemory.reflectionOccupancyRatio =
-          rolling["reflectionOccupancyRatio"].GetFloat();
-    if (rolling.HasMember("retainTailRatio") &&
-        rolling["retainTailRatio"].IsNumber())
-      cfg.rollingMemory.retainTailRatio =
-          rolling["retainTailRatio"].GetFloat();
-    if (rolling.HasMember("minimumRetainedTailTokens") &&
-        rolling["minimumRetainedTailTokens"].IsUint())
-      cfg.rollingMemory.minimumRetainedTailTokens =
-          rolling["minimumRetainedTailTokens"].GetUint();
-    if (rolling.HasMember("minimumChunkTokens") &&
-        rolling["minimumChunkTokens"].IsUint())
-      cfg.rollingMemory.minimumChunkTokens =
-          rolling["minimumChunkTokens"].GetUint();
-    if (rolling.HasMember("emitEventTurns") &&
-        rolling["emitEventTurns"].IsBool())
-      cfg.rollingMemory.emitEventTurns =
-          rolling["emitEventTurns"].GetBool();
-    if (rolling.HasMember("observer"))
-      parseRollingModel(rolling["observer"], cfg.rollingMemory.observer);
-    if (rolling.HasMember("reflector"))
-      parseRollingModel(rolling["reflector"], cfg.rollingMemory.reflector);
-    if (rolling.HasMember("workingMemoryUpdater"))
-      parseRollingModel(rolling["workingMemoryUpdater"],
-                        cfg.rollingMemory.workingMemoryUpdater);
-  }
   return cfg;
 }
 

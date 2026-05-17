@@ -62,52 +62,6 @@ std::string transcriptPreview(const std::string &text) {
   return firmius::tui::ClampTranscriptTextForDisplay(text);
 }
 
-std::string normalizeRollingFieldValue(const std::string &value) {
-  std::string normalized = value;
-  std::transform(normalized.begin(), normalized.end(), normalized.begin(),
-                 [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-  return normalized;
-}
-
-bool isObservationNotice(const firmius::shared::NoticeContent &notice) {
-  if (!notice.rollingMetadata) {
-    return false;
-  }
-  return normalizeRollingFieldValue(notice.rollingMetadata->eventKind) ==
-         "observation";
-}
-
-int observationLifecycleRank(const std::string &lifecycle) {
-  const auto normalized = normalizeRollingFieldValue(lifecycle);
-  if (normalized == "start" || normalized == "buffering" ||
-      normalized == "inprogress" || normalized == "in_progress") {
-    return 0;
-  }
-  if (normalized == "complete" || normalized == "completed" ||
-      normalized == "done" || normalized == "finished" ||
-      normalized == "success") {
-    return 1;
-  }
-  if (normalized == "activate" || normalized == "activated" ||
-      normalized == "activation") {
-    return 2;
-  }
-  return -1;
-}
-
-std::optional<std::string> observationRangeKey(
-    const firmius::shared::RollingNoticeMetadata &meta) {
-  if (!meta.sourceStartTurnId || !meta.sourceEndTurnId) {
-    return std::nullopt;
-  }
-  return *meta.sourceStartTurnId + "\x1F" + *meta.sourceEndTurnId;
-}
-
-struct ObservationNoticeRenderState {
-  int lifecycle_rank = -1;
-  size_t sequence = 0;
-};
-
 template <typename T>
 void HashCombine(std::size_t &seed, const T &value) {
   seed ^= std::hash<T>{}(value) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
@@ -156,31 +110,6 @@ std::size_t BuildHistoryCheapRenderKey(
                 HashCombine(key, content.title);
                 HashCombine(key, content.message.size());
                 HashCombine(key, static_cast<int>(content.severity));
-                if (content.rollingMetadata) {
-                  HashCombine(key, content.rollingMetadata->eventKind);
-                  HashCombine(key, content.rollingMetadata->lifecycle);
-                  if (content.rollingMetadata->sourceStartTurnId) {
-                    HashCombine(key, *content.rollingMetadata->sourceStartTurnId);
-                  }
-                  if (content.rollingMetadata->sourceEndTurnId) {
-                    HashCombine(key, *content.rollingMetadata->sourceEndTurnId);
-                  }
-                  if (content.rollingMetadata->sourceTurnCount) {
-                    HashCombine(key, *content.rollingMetadata->sourceTurnCount);
-                  }
-                  if (content.rollingMetadata->sourceChunkCount) {
-                    HashCombine(key, *content.rollingMetadata->sourceChunkCount);
-                  }
-                  if (content.rollingMetadata->sourceTokens) {
-                    HashCombine(key, *content.rollingMetadata->sourceTokens);
-                  }
-                  if (content.rollingMetadata->summaryTokens) {
-                    HashCombine(key, *content.rollingMetadata->summaryTokens);
-                  }
-                  if (content.rollingMetadata->savedTokens) {
-                    HashCombine(key, *content.rollingMetadata->savedTokens);
-                  }
-                }
               }
             },
             message.content.back());
@@ -709,67 +638,11 @@ void RebuildChatHistoryIfNeeded(ChatHistoryState &state, bool &history_dirty,
 
   const auto rebuild_begin = std::chrono::steady_clock::now();
 
-  std::unordered_map<std::string, ObservationNoticeRenderState> latest_obs;
-  size_t obs_seq = 0;
   std::vector<std::size_t> new_hashes;
   if (history) {
     new_hashes.reserve(history->turns.size());
-    for (size_t i = 0; i < history->turns.size(); ++i) {
-      const auto &t = history->turns[i];
-      for (const auto &msg : t.messages) {
-        if (firmius::tui::ShouldHideMessageInTranscript(msg, showInternalNudges,
-                                                        t.turnId)) {
-          continue;
-        }
-        for (const auto &part : msg.content) {
-          auto *notice = std::get_if<firmius::shared::NoticeContent>(&part);
-          if (notice && isObservationNotice(*notice)) {
-            const auto &meta = *notice->rollingMetadata;
-            const auto range_key = observationRangeKey(meta);
-            const int lifecycle_rank = observationLifecycleRank(meta.lifecycle);
-            if (range_key && lifecycle_rank >= 0) {
-              const size_t seq = obs_seq++;
-              auto &entry = latest_obs[*range_key];
-              if (lifecycle_rank > entry.lifecycle_rank ||
-                  (lifecycle_rank == entry.lifecycle_rank &&
-                   seq >= entry.sequence)) {
-                entry.lifecycle_rank = lifecycle_rank;
-                entry.sequence = seq;
-              }
-            }
-          }
-        }
-      }
-    }
-
-    obs_seq = 0;
     for (const auto &t : history->turns) {
       std::size_t h = HashTurn(t);
-      for (const auto &msg : t.messages) {
-        if (firmius::tui::ShouldHideMessageInTranscript(msg, showInternalNudges,
-                                                        t.turnId)) {
-          continue;
-        }
-        for (const auto &part : msg.content) {
-          auto *notice = std::get_if<firmius::shared::NoticeContent>(&part);
-          if (notice && isObservationNotice(*notice)) {
-            const auto &meta = *notice->rollingMetadata;
-            const auto range_key = observationRangeKey(meta);
-            const int lifecycle_rank = observationLifecycleRank(meta.lifecycle);
-            bool suppressed = false;
-            if (range_key && lifecycle_rank >= 0) {
-              const size_t seq = obs_seq++;
-              auto it = latest_obs.find(*range_key);
-              if (it != latest_obs.end()) {
-                suppressed = it->second.lifecycle_rank > lifecycle_rank ||
-                             (it->second.lifecycle_rank == lifecycle_rank &&
-                              it->second.sequence > seq);
-              }
-            }
-            HashCombine(h, suppressed);
-          }
-        }
-      }
       new_hashes.push_back(h);
     }
   }
@@ -821,27 +694,6 @@ void RebuildChatHistoryIfNeeded(ChatHistoryState &state, bool &history_dirty,
     QuickToolCluster quick_cluster;
     std::vector<std::string> pending_turn_footers;
     size_t block_turn_start = turn_index;
-    size_t obs_pass_seq = 0;
-
-    for (size_t i = 0; i < turn_index; ++i) {
-      const auto &t = history->turns[i];
-      for (const auto &msg : t.messages) {
-        if (firmius::tui::ShouldHideMessageInTranscript(msg, showInternalNudges,
-                                                        t.turnId)) {
-          continue;
-        }
-        for (const auto &part : msg.content) {
-          auto *notice = std::get_if<firmius::shared::NoticeContent>(&part);
-          if (notice && isObservationNotice(*notice)) {
-            const auto &meta = *notice->rollingMetadata;
-            if (observationRangeKey(meta) &&
-                observationLifecycleRank(meta.lifecycle) >= 0) {
-              obs_pass_seq++;
-            }
-          }
-        }
-      }
-    }
 
     auto flush_block = [&](size_t current_turn, bool final_merge = false) {
       size_t rows_before = state.rows.size();
@@ -1278,24 +1130,6 @@ void RebuildChatHistoryIfNeeded(ChatHistoryState &state, bool &history_dirty,
             }
           } else if (auto *notice =
                          std::get_if<firmius::shared::NoticeContent>(&part)) {
-            bool suppressed = false;
-            if (isObservationNotice(*notice)) {
-              const auto &meta = *notice->rollingMetadata;
-              const auto range_key = observationRangeKey(meta);
-              const int lifecycle_rank = observationLifecycleRank(meta.lifecycle);
-              if (range_key && lifecycle_rank >= 0) {
-                const size_t seq = obs_pass_seq++;
-                auto it = latest_obs.find(*range_key);
-                if (it != latest_obs.end()) {
-                  suppressed = it->second.lifecycle_rank > lifecycle_rank ||
-                               (it->second.lifecycle_rank == lifecycle_rank &&
-                                it->second.sequence > seq);
-                }
-              }
-            }
-            if (suppressed) {
-              continue;
-            }
             flush_block(turn_index - 1);
             size_t rb = state.rows.size();
             auto notice_copy = *notice;

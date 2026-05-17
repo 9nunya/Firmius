@@ -70,8 +70,10 @@ endif()
 add_executable(firmius_tui_v2_tests)
 target_sources(firmius_tui_v2_tests PRIVATE
     tests/AppStateTest.cpp
+    tests/AccountsOverlayTest.cpp
     tests/EventRouterTest.cpp
     tests/KeybindRegistryTest.cpp
+    tests/MenuListTest.cpp
     tests/TranscriptRendererTest.cpp
     tests/AnsiParserTest.cpp
     tests/TranscriptItemTest.cpp

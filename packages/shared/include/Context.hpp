@@ -125,34 +125,6 @@ struct AgentState {
  * @brief Generation and lifecycle configuration for an agent.
  */
 struct AgentConfig {
-  struct RollingModelConfig {
-    bool enabled = false;
-    std::string providerId;
-    std::string modelId;
-    std::string variantName;
-
-    bool operator==(const RollingModelConfig &other) const = default;
-  };
-
-  struct RollingMemoryConfig {
-    bool enabled = true;
-    std::string mode = "rolling_forever";
-    std::string preset = "balanced";
-    float targetOccupancyRatio = 0.57f;
-    float bufferOccupancyRatio = 0.47f;
-    float emergencyOccupancyRatio = 0.66f;
-    float reflectionOccupancyRatio = 0.32f;
-    float retainTailRatio = 0.18f;
-    std::uint32_t minimumRetainedTailTokens = 4096;
-    std::uint32_t minimumChunkTokens = 8192;
-    bool emitEventTurns = true;
-    RollingModelConfig observer;
-    RollingModelConfig reflector;
-    RollingModelConfig workingMemoryUpdater;
-
-    bool operator==(const RollingMemoryConfig &other) const = default;
-  };
-
   std::string providerId = "nanogpt"; ///< LLM provider identifier.
   std::string modelId;                ///< LLM model identifier.
   std::string modelVariant;         ///< Selected model variant (if applicable).
@@ -169,7 +141,6 @@ struct AgentConfig {
   bool insanityDetectionEnabled = true;
   int insanityRepetitionThreshold = 3; ///< Min consecutive repeats to flag
   std::uint64_t insanityMaxTokenThreshold = 50000; ///< Max tokens before flagging
-  RollingMemoryConfig rollingMemory;
 
   bool operator==(const AgentConfig &other) const = default;
 };

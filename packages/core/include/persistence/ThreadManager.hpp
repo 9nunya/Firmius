@@ -102,81 +102,7 @@ struct CompactionSnapshot {
     bool operator==(const CompactionSnapshot& other) const = default;
 };
 
-struct RollingMemoryAnchorRecord {
-    std::string anchorId;
-    std::string anchorType;
-    std::string canonicalText;
-    std::string exactQuote;
-    std::string importance;
-    std::string volatility;
-    std::vector<std::string> retrievalTags;
-    std::vector<std::string> sourceTurnIds;
 
-    bool operator==(const RollingMemoryAnchorRecord& other) const = default;
-};
-
-struct RollingMemoryBridgeRecord {
-    std::string bridgeId;
-    std::string targetTaskSignature;
-    std::vector<std::string> relevantAnchorIds;
-    std::vector<std::string> relevantEpisodeIds;
-    std::vector<std::string> relevantReflectionIds;
-    std::string rationale;
-    std::string executionHint;
-    std::uint64_t createdAt = 0;
-
-    bool operator==(const RollingMemoryBridgeRecord& other) const = default;
-};
-
-struct RollingMemoryChunk {
-    std::string chunkId;
-    std::string sourceStartTurnId;
-    std::string sourceEndTurnId;
-    std::vector<std::string> sourceTurnIds;
-    std::string chunkKind = "episode";
-    std::string summary;
-    std::string currentTask;
-    std::string suggestedResponse;
-    std::string activeGoal;
-    std::vector<std::string> keyActions;
-    std::vector<std::string> keyToolResults;
-    std::vector<std::string> openLoops;
-    std::vector<std::string> filesSurfaces;
-    std::vector<std::string> retrievalTags;
-    std::vector<std::string> derivedFromChunkIds;
-    std::vector<std::string> anchorIds;
-    std::uint32_t sourceTokens = 0;
-    std::uint32_t summaryTokens = 0;
-    std::uint64_t createdAt = 0;
-    bool buffered = false;
-    bool active = false;
-    bool superseded = false;
-
-    bool operator==(const RollingMemoryChunk& other) const = default;
-};
-
-struct RollingMemoryState {
-    std::string threadId;
-    std::string agentId;
-    std::string lastObservedTurnId;
-    std::string lastReflectedObservationId;
-    std::uint32_t lastContextWindow = 0;
-    std::uint32_t lastBufferThresholdTokens = 0;
-    std::uint32_t lastTargetThresholdTokens = 0;
-    std::uint32_t lastEmergencyThresholdTokens = 0;
-    std::uint32_t lastRetainedTailTokens = 0;
-    std::uint64_t lastUpdatedAt = 0;
-    bool observationInFlight = false;
-    bool reflectionInFlight = false;
-    std::vector<RollingMemoryChunk> observationChunks;
-    bool bridgeInFlight = false;
-    std::vector<RollingMemoryChunk> reflectionChunks;
-
-    std::vector<RollingMemoryAnchorRecord> anchors;
-    std::vector<RollingMemoryBridgeRecord> bridges;
-    std::string lastBridgeId;
-    bool operator==(const RollingMemoryState& other) const = default;
-};
 
 /**
  * @brief Manages thread directory structure and metadata.
@@ -260,11 +186,6 @@ public:
                                const std::optional<std::string>& compactionId =
                                    std::nullopt,
                                CompactionSnapshot* removed = nullptr);
-    RollingMemoryState loadRollingMemoryState(const std::string& threadId,
-                                              const std::string& agentId) const;
-    void writeRollingMemoryState(const std::string& threadId,
-                                 const std::string& agentId,
-                                 const RollingMemoryState& state);
     void writeEditBatch(const std::string& threadId,
                         const shared::EditBatchSummary& summary,
                         const std::vector<shared::EditFileMutation>& files);

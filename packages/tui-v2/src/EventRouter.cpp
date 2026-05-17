@@ -3,67 +3,107 @@
 #include "items/SimpleItems.hpp"
 #include "items/StreamingItems.hpp"
 #include "items/ToolCallItem.hpp"
+#include "utils/ToolSummaries.hpp"
 
 #include <rapidjson/document.h>
 #include <algorithm>
+#include <chrono>
 
 namespace {
 
 using firmius::tui2::ToolPhase;
+using SharedToolPhase = firmius::shared::ToolPhase;
 
-/// Convert tool name + args + phase into a human-readable activity line.
-[[maybe_unused]] std::string toolActivityLine(const std::string& toolName, const std::string& args,
-                             ToolPhase phase) {
+void markThinkingDone(firmius::tui2::AppState& state, const std::string& agentId) {
+  state.upsertAgentActivity(agentId, "thinking", "Thought",
+                            std::chrono::milliseconds(2300));
+}
 
-  // Parse args for common fields
+bool isDelegateWaitForAgent(const firmius::tui2::ToolCallState& tc,
+                            const std::string& watchedAgentId) {
+  if (tc.toolName != "Delegate" || tc.args.empty() || watchedAgentId.empty()) {
+    return false;
+  }
   rapidjson::Document doc;
-  if (!args.empty()) doc.Parse(args.c_str());
-  auto getStr = [&](const char* key) -> std::string {
-    if (!doc.HasParseError() && doc.HasMember(key) && doc[key].IsString())
-      return doc[key].GetString();
-    return {};
+  doc.Parse(tc.args.c_str());
+  if (doc.HasParseError() || !doc.IsObject()) {
+    return false;
+  }
+  if (!doc.HasMember("action") || !doc["action"].IsString() ||
+      std::string(doc["action"].GetString()) != "Wait") {
+    return false;
+  }
+  if (!doc.HasMember("agent_id") || !doc["agent_id"].IsString()) {
+    return false;
+  }
+  return std::string(doc["agent_id"].GetString()) == watchedAgentId;
+}
+
+std::string waitResultJson(const std::string& agentId, bool success,
+                           const std::string& message) {
+  auto quote = [](const std::string& s) {
+    std::string out = "\"";
+    for (char c : s) {
+      switch (c) {
+      case '"': out += "\\\""; break;
+      case '\\': out += "\\\\"; break;
+      case '\n': out += "\\n"; break;
+      case '\r': out += "\\r"; break;
+      case '\t': out += "\\t"; break;
+      default: out += c; break;
+      }
+    }
+    out += "\"";
+    return out;
   };
+  return std::string("{\"agentId\":") + quote(agentId) +
+         ",\"status\":" + quote(success ? "completed" : "failed") +
+         ",\"result\":" + quote(message) + "}";
+}
 
-  std::string cmd = getStr("command");
-  std::string path = getStr("path");
-  std::string pattern = getStr("pattern");
-  std::string desc = getStr("description");
-  std::string title = getStr("title");
-  std::string name = getStr("name");
-
-  if (phase == ToolPhase::Preparing) {
-    if (toolName == "Bash") return "Preparing: " + (desc.empty() ? cmd : desc);
-    if (toolName == "Read" || toolName == "Glob") return "Preparing files...";
-    if (toolName == "Edit" || toolName == "Write") return "Preparing edits...";
-    if (toolName == "Grep") return "Searching...";
-    if (toolName == "Delegate" || toolName == "summon_subagent") return "Summoning " + (title.empty() ? name : title);
-    return "Preparing " + toolName + "...";
+void finalizeDelegateWaitsForAgent(firmius::tui2::AppState& state,
+                                   const std::string& watchedAgentId,
+                                   bool success,
+                                   const std::string& message) {
+  for (auto& [id, tc] : state.toolCallsMut()) {
+    if (tc.isFinished() || !isDelegateWaitForAgent(tc, watchedAgentId)) {
+      continue;
+    }
+    tc.phase = success ? firmius::tui2::ToolCallPhase::FinishedOk
+                       : firmius::tui2::ToolCallPhase::FinishedErr;
+    tc.success = success;
+    tc.result = waitResultJson(watchedAgentId, success, message);
+    tc.finishedAt = std::chrono::steady_clock::now();
+    if (auto* item = state.findToolCallById(id)) {
+      item->setResult(success, tc.result);
+      item->setLive(false);
+    }
   }
+}
 
-  if (phase == ToolPhase::Called) {
-    if (toolName == "Bash") return "Run: " + (cmd.size() > 40 ? cmd.substr(0, 38) + ".." : cmd);
-    if (toolName == "Read") return "Read " + (path.size() > 35 ? ".." + path.substr(path.size() - 33) : path);
-    if (toolName == "Glob") return "Find: " + pattern;
-    if (toolName == "Grep") return "Search: " + pattern;
-    if (toolName == "Edit") return "Edit " + (path.size() > 35 ? ".." + path.substr(path.size() - 33) : path);
-    if (toolName == "Write") return "Write " + (path.size() > 35 ? ".." + path.substr(path.size() - 33) : path);
-    if (toolName == "WebFetch") return "Fetch URL...";
-    if (toolName == "LSP") return "LSP query...";
-    return toolName;
+void bindSpawnedChildToDelegate(firmius::tui2::AppState& state,
+                                const std::string& parentAgentId,
+                                const std::string& childAgentId) {
+  for (auto& [id, tc] : state.toolCallsMut()) {
+    if (tc.isFinished() || tc.agentId != parentAgentId ||
+        tc.toolName != "Delegate" || !tc.subagentId.empty()) {
+      continue;
+    }
+    rapidjson::Document doc;
+    doc.Parse(tc.args.c_str());
+    if (doc.HasParseError() || !doc.IsObject()) {
+      continue;
+    }
+    if (!doc.HasMember("action") || !doc["action"].IsString() ||
+        std::string(doc["action"].GetString()) != "Spawn") {
+      continue;
+    }
+    tc.subagentId = childAgentId;
+    if (auto* item = state.findToolCallById(id)) {
+      item->setSubagentId(childAgentId);
+      item->setLive(true);
+    }
   }
-
-  if (phase == ToolPhase::FinishedSuccess || phase == ToolPhase::FinishedError) {
-    std::string prefix = (phase == ToolPhase::FinishedSuccess) ? "Done: " : "Failed: ";
-    if (toolName == "Bash") return prefix + "Bash";
-    if (toolName == "Read") return prefix + "Read " + path;
-    if (toolName == "Edit") return prefix + "Edit " + path;
-    if (toolName == "Write") return prefix + "Write " + path;
-    if (toolName == "Grep") return prefix + "Search";
-    if (toolName == "Glob") return prefix + "Find";
-    return prefix + toolName;
-  }
-
-  return toolName;
 }
 
 } // namespace
@@ -89,6 +129,9 @@ void EventRouter::route(const firmius::daemon::DaemonEventEnvelope &envelope) {
   case firmius::daemon::DaemonEventKind::ClientSessionUpdated:
     break;
   case firmius::daemon::DaemonEventKind::HookStateChanged:
+    if (envelope.hookState.has_value()) {
+      handleHookStateChanged(*envelope.hookState);
+    }
     break;
   case firmius::daemon::DaemonEventKind::PactStateChanged:
     break;
@@ -131,9 +174,9 @@ void EventRouter::routeRuntimeEvent(
   } else if (eventType == "user_message_sent") {
     handleUserMessageSent(eventJson);
   } else if (eventType == "message_queued") {
-    handleMessageQueued();
+    handleMessageQueued(eventJson);
   } else if (eventType == "message_dequeued") {
-    handleMessageDequeued();
+    handleMessageDequeued(eventJson);
   } else if (eventType == "permission_escalation_request") {
     handlePermissionEscalation(eventJson);
   } else if (eventType == "permission_escalation_resolved") {
@@ -146,6 +189,12 @@ void EventRouter::routeRuntimeEvent(
     handleThreadTitleUpdated(eventJson);
   } else if (eventType == "config_updated") {
     handleConfigUpdated();
+  } else if (eventType == "embedding_model_progress") {
+    handleEmbeddingModelProgress(eventJson);
+  } else if (eventType == "agent_compacting") {
+    handleAgentCompacting(agentId);
+  } else if (eventType == "context_compacted") {
+    handleContextCompacted(eventJson, agentId);
   }
 
   if (realStatus.has_value()) {
@@ -190,6 +239,31 @@ std::string escapeJson(const std::string& s) {
   return out;
 }
 
+std::optional<size_t> firstCurrentTurnToolIndex(const AppState& state,
+                                                const std::string& agentId) {
+  const auto* agent = state.findAgentState(agentId);
+  if (!agent || !agent->currentTurn.has_value()) {
+    return std::nullopt;
+  }
+
+  std::optional<size_t> firstIndex;
+  const auto& items = state.items();
+  for (const auto& toolCallId : agent->currentTurn->toolCallIds) {
+    for (size_t i = 0; i < items.size(); ++i) {
+      if (items[i]->type() != "ToolCall") {
+        continue;
+      }
+      const auto* tool =
+          static_cast<const ToolCallItem*>(items[i].get());
+      if (tool->agentId() == agentId && tool->toolCallId() == toolCallId) {
+        firstIndex = firstIndex.has_value() ? std::min(*firstIndex, i) : i;
+        break;
+      }
+    }
+  }
+  return firstIndex;
+}
+
 } // namespace
 
 // ── Streaming text/thinking (unchanged) ──
@@ -213,6 +287,9 @@ void EventRouter::handleAgentText(const std::string &json,
     state_.setAgentThinkingItem(agentId, nullptr);
     if (isFocused) state_.setActiveThinkingItem(nullptr);
   }
+  markThinkingDone(state_, agentId);
+  markThinkingDone(state_, agentId);
+  markThinkingDone(state_, agentId);
 
   // Find or create a text item for THIS agent
   auto* item = state_.agentTextItem(agentId);
@@ -220,11 +297,17 @@ void EventRouter::handleAgentText(const std::string &json,
     auto newItem = std::make_unique<AgentTextItem>();
     newItem->setAgentId(agentId);
     item = newItem.get();
-    state_.addItem(std::move(newItem));
+    if (auto insertIndex = firstCurrentTurnToolIndex(state_, agentId);
+        insertIndex.has_value()) {
+      state_.insertItem(*insertIndex, std::move(newItem));
+    } else {
+      state_.addItem(std::move(newItem));
+    }
     state_.setAgentTextItem(agentId, item);
     if (isFocused) state_.setActiveTextItem(item);
   }
   item->appendDelta(delta);
+  state_.upsertAgentActivity(agentId, "thinking", "Thinking...");
   if (isFocused) {
     state_.markDirtyPublic();
   }
@@ -286,6 +369,12 @@ void EventRouter::handleAgentToolCallChunk(const std::string &json,
 
   // Update tool name from accumulated chunks
   if (!tc.nameAccum.empty()) tc.toolName = tc.nameAccum;
+  if (!tc.toolName.empty()) {
+    state_.upsertAgentActivity(
+        agentId, "tool:" + toolCallId,
+        firmius::shared::SummarizeToolCall(tc.toolName, tc.argsAccum,
+                                           SharedToolPhase::Preparing));
+  }
 
   // Find or create the ToolCallItem in the transcript
   auto* item = state_.findToolCallById(toolCallId);
@@ -329,6 +418,7 @@ void EventRouter::handleAgentToolCall(const std::string &json,
     thinkItem->finalize();
     state_.setActiveThinkingItem(nullptr);
   }
+  markThinkingDone(state_, agentId);
 
   // Update ToolCallState
   auto& tc = state_.getOrCreateToolCall(toolCallId);
@@ -345,31 +435,24 @@ void EventRouter::handleAgentToolCall(const std::string &json,
     agent.currentTurn->toolCallIds.push_back(toolCallId);
   }
 
-  // Process tools stay at Preparing until AgentProcessSpawned arrives
-  // (which means permission was resolved and the process actually started).
-  // Non-process tools (blocking) go directly to Called.
-  bool isProcessTool = (toolName == "Process" || toolName == "Python" ||
-                        toolName == "Delegate");
-
-  // Find or create ToolCallItem in transcript
   auto* existingItem = state_.findToolCallById(toolCallId);
   if (existingItem) {
     existingItem->setArgs(toolArgs);
-    if (!isProcessTool) {
-      existingItem->setPhase(ToolPhase::Called);
-      state_.appendAgentActivity(agentId, toolActivityLine(toolName, toolArgs, ToolPhase::Called));
-    }
-    // else: stay at Preparing — AgentProcessSpawned will advance to Called
+    existingItem->setPhase(ToolPhase::Called);
+    state_.upsertAgentActivity(
+        agentId, "tool:" + toolCallId,
+        firmius::shared::SummarizeToolCall(toolName, toolArgs,
+                                           SharedToolPhase::Called));
     existingItem->setLive(true);
   } else {
     auto item = std::make_unique<ToolCallItem>(toolCallId, toolName, agentId);
     item->setAppState(&state_);
     item->setArgs(toolArgs);
-    if (!isProcessTool) {
-      item->setPhase(ToolPhase::Called);
-      state_.appendAgentActivity(agentId, toolActivityLine(toolName, toolArgs, ToolPhase::Called));
-    }
-    // else: default phase is Preparing, which is correct
+    item->setPhase(ToolPhase::Called);
+    state_.upsertAgentActivity(
+        agentId, "tool:" + toolCallId,
+        firmius::shared::SummarizeToolCall(toolName, toolArgs,
+                                           SharedToolPhase::Called));
     item->setLive(true);
     state_.addItem(std::move(item));
   }
@@ -427,7 +510,10 @@ void EventRouter::handleAgentProcessSpawned(const std::string &json,
     item->setProcessId(processId);
     item->setPhase(ToolPhase::Called);
     item->setLive(true);
-    state_.appendAgentActivity(agentId, toolActivityLine(item->toolName(), item->args(), ToolPhase::Called));
+    state_.upsertAgentActivity(
+        agentId, "tool:" + toolCallId,
+        firmius::shared::SummarizeToolCall(item->toolName(), item->args(),
+                                           SharedToolPhase::Called));
   }
 
   // Flush any process output that arrived before this mapping existed
@@ -516,6 +602,7 @@ void EventRouter::handleAgentTurnCompleted(const std::string &json,
     state_.setAgentThinkingItem(agentId, nullptr);
     if (isFocused) state_.setActiveThinkingItem(nullptr);
   }
+  markThinkingDone(state_, agentId);
 
   auto* textItem = state_.agentTextItem(agentId);
   if (textItem && !textItem->isFinalized()) {
@@ -581,7 +668,9 @@ void EventRouter::handleAgentTurnCompleted(const std::string &json,
                 }
               }
             }
-            if (!keepLive) {
+            if (keepLive) {
+              item->setLive(true);
+            } else {
               item->setLive(false);
             }
           }
@@ -690,6 +779,7 @@ void EventRouter::handleAgentFinished(const std::string &agentId) {
     agent->running = false;
     agent->booting = false;
   }
+  finalizeDelegateWaitsForAgent(state_, agentId, true, "Subagent completed");
 
   // If the finished agent was focused, auto-focus its parent (or primary)
   if (isFocused) {
@@ -769,6 +859,9 @@ void EventRouter::handleAgentSpawned(const std::string &json,
   }
   agent.running = true;
   agent.booting = true;
+  if (!parentId.empty()) {
+    bindSpawnedChildToDelegate(state_, parentId, agentId);
+  }
 
   // Start a new turn
   agent.currentTurn = AgentTurnState{};
@@ -821,6 +914,7 @@ void EventRouter::handleAgentError(const std::string &json,
   auto item = std::make_unique<ErrorMessageItem>(
       "\xe2\x9a\xa0 Error: " + jsonString(doc, "message"));
   state_.addItem(std::move(item));
+  finalizeDelegateWaitsForAgent(state_, agentId, false, jsonString(doc, "message"));
   state_.markDirtyPublic();
 }
 
@@ -835,6 +929,7 @@ void EventRouter::handleAgentInterrupted(const std::string &agentId) {
     state_.setAgentThinkingItem(agentId, nullptr);
     if (isFocused) state_.setActiveThinkingItem(nullptr);
   }
+  markThinkingDone(state_, agentId);
 
   auto* textItem = state_.agentTextItem(agentId);
   if (textItem && !textItem->isFinalized()) {
@@ -860,6 +955,7 @@ void EventRouter::handleAgentInterrupted(const std::string &agentId) {
 
   auto* agent = state_.findAgentState(agentId);
   if (agent) agent->currentTurn.reset();
+  finalizeDelegateWaitsForAgent(state_, agentId, false, "Subagent interrupted");
 
   state_.markDirtyPublic();
 }
@@ -871,31 +967,60 @@ void EventRouter::handleUserMessageSent(const std::string &json) {
   doc.Parse(json.c_str());
   if (doc.HasParseError()) return;
 
+  std::string messageId = jsonString(doc, "messageId");
   std::string text = jsonString(doc, "text");
+  std::string agentId = jsonString(doc, "agentId");
   if (text.empty()) return;
 
-  const auto& items = state_.items();
-  if (!items.empty()) {
-    auto* last = items.back().get();
-    if (last->type() == "UserMessage") {
-      auto* um = static_cast<UserMessageItem*>(last);
-      if (um->text() == text) return;
-    }
+  if (auto* existing = state_.findUserMessageById(messageId)) {
+    existing->setQueued(false);
+    state_.markDirtyPublic();
+    return;
   }
 
-  // Tag with focused agent — user messages are sent in the context of the focused agent
-  auto item = std::make_unique<UserMessageItem>(std::move(text), state_.focusedAgentId());
+  auto item = std::make_unique<UserMessageItem>(std::move(text), std::move(agentId),
+                                                std::move(messageId), false);
   state_.addItem(std::move(item));
   state_.markDirtyPublic();
 }
 
-void EventRouter::handleMessageQueued() {
-  state_.setQueuedMessageCount(state_.queuedMessageCount() + 1);
+void EventRouter::handleMessageQueued(const std::string &json) {
+  rapidjson::Document doc;
+  doc.Parse(json.c_str());
+  if (doc.HasParseError()) {
+    state_.queueMessageId("");
+    return;
+  }
+  const std::string messageId = jsonString(doc, "messageId");
+  const std::string text = jsonString(doc, "text");
+  const std::string agentId = jsonString(doc, "agentId");
+
+  state_.queueMessageId(messageId);
+  state_.upsertQueuedUserMessage({messageId, text, agentId});
+
+  if (auto* existing = state_.findUserMessageById(messageId)) {
+    existing->setQueued(true);
+  } else if (!text.empty()) {
+    state_.addItem(
+        std::make_unique<UserMessageItem>(text, agentId, messageId, true));
+  }
+  state_.markDirtyPublic();
 }
 
-void EventRouter::handleMessageDequeued() {
-  int count = state_.queuedMessageCount();
-  state_.setQueuedMessageCount(count > 0 ? count - 1 : 0);
+void EventRouter::handleMessageDequeued(const std::string &json) {
+  rapidjson::Document doc;
+  doc.Parse(json.c_str());
+  if (doc.HasParseError()) {
+    state_.dequeueMessageId("");
+    return;
+  }
+  const std::string messageId = jsonString(doc, "messageId");
+  state_.dequeueMessageId(messageId);
+  state_.removeQueuedUserMessage(messageId);
+  if (auto* existing = state_.findUserMessageById(messageId)) {
+    existing->setQueued(false);
+  }
+  state_.markDirtyPublic();
 }
 
 // ── Permissions ──
@@ -994,12 +1119,16 @@ void EventRouter::handleModelSwitched(const std::string &json) {
 
   std::string modelId = jsonString(doc, "newModelId");
   std::string providerId = jsonString(doc, "newProviderId");
+  std::string agentId = jsonString(doc, "agentId");
   if (!modelId.empty()) {
     std::string label = modelId;
     if (!providerId.empty()) {
       label = providerId + "/" + modelId;
     }
     state_.setModelLabel(label);
+  }
+  if (!agentId.empty()) {
+    state_.updateAgentModel(agentId, providerId, modelId);
   }
 }
 
@@ -1016,6 +1145,11 @@ void EventRouter::handleThreadTitleUpdated(const std::string &json) {
 
 void EventRouter::handleConfigUpdated() {
   state_.markDirtyPublic();
+}
+
+void EventRouter::handleHookStateChanged(
+    const firmius::daemon::HookStateSnapshot &snapshot) {
+  state_.setHookState(snapshot);
 }
 
 void EventRouter::flushPendingProcessOutput(const std::string &processId) {
@@ -1051,6 +1185,32 @@ void EventRouter::flushPendingProcessOutput(const std::string &processId) {
   }
 
   pendingProcessOutput_.erase(it);
+}
+
+void EventRouter::handleEmbeddingModelProgress(const std::string &json) {
+  rapidjson::Document doc;
+  doc.Parse(json.c_str());
+  if (doc.HasParseError()) return;
+
+  firmius::tui2::EmbeddingDownloadState ds;
+  ds.downloading = true;
+  if (doc.HasMember("modelId")) ds.modelId = doc["modelId"].GetString();
+  if (doc.HasMember("bytesDownloaded")) ds.bytesDownloaded = doc["bytesDownloaded"].GetUint64();
+  if (doc.HasMember("totalBytes")) ds.totalBytes = doc["totalBytes"].GetUint64();
+  if (doc.HasMember("status")) {
+    ds.status = doc["status"].GetString();
+    if (ds.status == "ready" || ds.status == "error") {
+      ds.downloading = false;
+    }
+  }
+  state_.setEmbeddingDownload(ds);
+}
+
+void EventRouter::handleAgentCompacting(const std::string & /*agentId*/) {
+}
+
+void EventRouter::handleContextCompacted(const std::string & /*json*/,
+                                          const std::string & /*agentId*/) {
 }
 
 } // namespace firmius::tui2

@@ -233,6 +233,7 @@ public:
   // on the welcome→chat transition, where submitPrompt iterated the whole
   // list to rebind metadata for the just-created thread.
   ThreadMetadata getThreadMetadata(const std::string &threadId);
+  int getThreadLockOwnerPid(const std::string &threadId);
   std::vector<std::string> listAgents(const std::string &threadId = "");
   std::vector<shared::ThreadArtifactMetadata>
   listArtifacts(const std::string &threadId = "");

@@ -43,6 +43,15 @@ bool boolResult(const rapidjson::Value &value, const char *field) {
          value[field].GetBool();
 }
 
+bool acceptedOrSnapshotResult(const rapidjson::Value &value,
+                              const char *field = "accepted") {
+  if (boolResult(value, field)) {
+    return true;
+  }
+  return value.IsObject() && value.HasMember("agent_id") &&
+         value["agent_id"].IsString();
+}
+
 rapidjson::Document makeThreadParams(const std::string &threadId) {
   rapidjson::Document params;
   params.SetObject();
@@ -124,6 +133,13 @@ std::vector<firmius::shared::ThreadMetadata> DaemonClient::listThreads() const {
   auto params = makeParams();
   auto response = transport().sendRequest(kRpcThreadsList, params, 3000);
   return threadMetadataListFromJson(response["result"]);
+}
+
+std::vector<ThreadOverview>
+DaemonClient::listThreadOverviews(const ThreadOverviewRequest &request) const {
+  auto params = makeParams(request);
+  auto response = transport().sendRequest(kRpcThreadsOverview, params, 3000);
+  return threadOverviewListFromJson(response["result"]);
 }
 
 ThreadSnapshot DaemonClient::getThread(const ThreadsOpenRequest &request) const {
@@ -342,13 +358,30 @@ DaemonClient::focusAgent(const AgentTargetRequest &request) const {
 bool DaemonClient::compactAgent(const AgentTargetRequest &request) const {
   auto params = makeParams(request);
   auto response = transport().sendRequest(kRpcAgentsCompact, params, 3000);
-  return boolResult(response["result"], "accepted");
+  if (!response.HasMember("result")) {
+    return false;
+  }
+  return acceptedOrSnapshotResult(response["result"]);
 }
 
 bool DaemonClient::interruptAgent(const AgentTargetRequest &request) const {
   auto params = makeParams(request);
   auto response = transport().sendRequest(kRpcAgentsInterrupt, params, 3000);
-  return boolResult(response["result"], "accepted");
+  if (!response.HasMember("result")) {
+    return false;
+  }
+  return acceptedOrSnapshotResult(response["result"]);
+}
+
+bool DaemonClient::abortAndFlushQueuedMessages(
+    const AgentTargetRequest &request) const {
+  auto params = makeParams(request);
+  auto response = transport().sendRequest(
+      kRpcAgentsAbortAndFlushQueuedMessages, params, 3000);
+  if (!response.HasMember("result")) {
+    return false;
+  }
+  return acceptedOrSnapshotResult(response["result"]);
 }
 
 std::optional<AgentRuntimeSnapshot>
@@ -465,19 +498,6 @@ PurposesConfigSnapshot DaemonClient::updatePurposesConfig(
   auto params = makeParams(request);
   auto response = transport().sendRequest(kRpcPurposesUpdate, params, 3000);
   return purposesConfigSnapshotFromJson(response["result"]);
-}
-
-RollingMemoryConfigSnapshot DaemonClient::getRollingMemoryConfig() const {
-  auto params = makeParams();
-  auto response = transport().sendRequest(kRpcRollingMemoryGet, params, 3000);
-  return rollingMemoryConfigSnapshotFromJson(response["result"]);
-}
-
-RollingMemoryConfigSnapshot DaemonClient::updateRollingMemoryConfig(
-    const RollingMemoryConfigUpdateRequest &request) const {
-  auto params = makeParams(request);
-  auto response = transport().sendRequest(kRpcRollingMemoryUpdate, params, 3000);
-  return rollingMemoryConfigSnapshotFromJson(response["result"]);
 }
 
 McpConfigSnapshot DaemonClient::getMcpConfig() const {

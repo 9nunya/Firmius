@@ -85,6 +85,7 @@ int itemScore(const MenuList::Item& item, const std::vector<std::string>& tags) 
 void MenuList::setItems(std::vector<Item> items) {
   items_ = std::move(items);
   selectedIndex_ = 0;
+  mouseArmedIndex_ = -1;
   filteredDirty_ = true;
 }
 
@@ -305,24 +306,65 @@ bool MenuList::handleInput(const std::string& key) {
 }
 
 bool MenuList::handleMouse(const MouseEvent& event,
-                           int /*screenRow*/,
+                           int screenRow,
                            int /*screenCol*/) {
   if (!isActive()) return false;
 
-  if (event.type == MouseEvent::Type::Move) {
-    return false;
-  }
+  rebuildFiltered();
 
-  if (event.type == MouseEvent::Type::Scroll) {
-    if (event.button == MouseEvent::Button::ScrollUp) {
-      moveDown();
-    } else if (event.button == MouseEvent::Button::ScrollDown) {
-      moveUp();
+  if (event.type == MouseEvent::Type::Move) {
+    const int firstRow = screenRow + 2; // title + separator
+    const int itemsStart = firstRow + 1; // search
+    const int visible = std::min(static_cast<int>(filteredIndices_.size()), maxVisible_);
+    const int relative = event.row - itemsStart;
+    if (relative >= 0 && relative < visible) {
+      hoveredIndex_ = firstVisibleIndex() + relative;
+    } else {
+      hoveredIndex_ = -1;
     }
     return true;
   }
 
-  return false;
+  if (event.type == MouseEvent::Type::Scroll) {
+    if (event.button == MouseEvent::Button::ScrollUp) {
+      moveUp();
+    } else if (event.button == MouseEvent::Button::ScrollDown) {
+      moveDown();
+    }
+    return true;
+  }
+
+  if (event.type != MouseEvent::Type::Press ||
+      event.button != MouseEvent::Button::Left) {
+    return false;
+  }
+
+  const int itemsStart = screenRow + 4; // title + separator + search + first item
+  const int relative = event.row - itemsStart;
+  const int visible = std::min(static_cast<int>(filteredIndices_.size()), maxVisible_);
+  if (relative < 0 || relative >= visible) {
+    return false;
+  }
+
+  const int filteredIndex = firstVisibleIndex() + relative;
+  if (filteredIndex < 0 || filteredIndex >= static_cast<int>(filteredIndices_.size())) {
+    return false;
+  }
+
+  hoveredIndex_ = filteredIndex;
+  if (selectedIndex_ == filteredIndex) {
+    if (mouseArmedIndex_ == filteredIndex) {
+      selectCurrent();
+      dismiss();
+    } else {
+      mouseArmedIndex_ = filteredIndex;
+    }
+  } else {
+    selectedIndex_ = filteredIndex;
+    mouseArmedIndex_ = filteredIndex;
+  }
+
+  return true;
 }
 
 } // namespace firmius::tui2

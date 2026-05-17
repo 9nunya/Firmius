@@ -30,6 +30,7 @@ public:
 
   // Process tracking
   void setProcessId(std::string processId);
+  void setSubagentId(std::string subagentId);
   void appendProcessOutput(const std::string& output, bool isStderr);
   void setProcessExitInfo(int exitCode, double durationMs);
 
@@ -46,6 +47,7 @@ public:
   const std::string& args() const { return args_; }
   const std::string& result() const { return result_; }
   const std::string& processId() const { return processId_; }
+  const std::string& subagentId() const { return subagentId_; }
   const std::string& processStdout() const { return processStdout_; }
   const std::string& processStderr() const { return processStderr_; }
   const std::vector<firmius::shared::FileEditSignal>& diffEdits() const { return diffEdits_; }
@@ -74,6 +76,7 @@ private:
   bool success_ = false;
   std::vector<firmius::shared::FileEditSignal> diffEdits_;
   std::string processId_;
+  std::string subagentId_;
   std::string processStdout_;
   std::string processStderr_;
   int processExitCode_ = 0;

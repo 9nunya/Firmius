@@ -158,3 +158,4 @@ private:
 } // namespace firmius::core
 
 #endif
+

@@ -27,6 +27,8 @@ public:
   std::vector<ClientSessionSnapshot> listClients() const;
 
   std::vector<firmius::shared::ThreadMetadata> listThreads() const;
+  std::vector<ThreadOverview>
+  listThreadOverviews(const ThreadOverviewRequest &request) const;
   ThreadSnapshot getThread(const ThreadsOpenRequest &request) const;
   ThreadsOpenResponse openThread(const std::string &threadId) const;
   ThreadsOpenResponse openThread(const ThreadsOpenRequest &request) const;
@@ -43,6 +45,7 @@ public:
   focusAgent(const AgentTargetRequest &request) const;
   bool compactAgent(const AgentTargetRequest &request) const;
   bool interruptAgent(const AgentTargetRequest &request) const;
+  bool abortAndFlushQueuedMessages(const AgentTargetRequest &request) const;
   std::optional<AgentRuntimeSnapshot>
   setAgentMode(const AgentsSetModeRequest &request) const;
 
@@ -85,9 +88,6 @@ public:
   PurposesConfigSnapshot getPurposesConfig() const;
   PurposesConfigSnapshot
   updatePurposesConfig(const PurposesConfigUpdateRequest &request) const;
-  RollingMemoryConfigSnapshot getRollingMemoryConfig() const;
-  RollingMemoryConfigSnapshot
-  updateRollingMemoryConfig(const RollingMemoryConfigUpdateRequest &request) const;
   McpConfigSnapshot getMcpConfig() const;
   McpConfigSnapshot updateMcpConfig(const McpConfigUpdateRequest &request) const;
 

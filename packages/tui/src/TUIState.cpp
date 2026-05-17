@@ -19,7 +19,6 @@
 #include "agents/ContextBudget.hpp"
 #include "agents/modes/Mode.hpp"
 #include "agents/PurposeLoader.hpp"
-#include "agents/RollingContextManager.hpp"
 #include "AgentRegistry.hpp"
 #include "components/StatusBar.hpp"
 #include "components/TitleBar.hpp"
@@ -3262,7 +3261,6 @@ void TuiState::updateContextLaneModel() {
   context_lane_model_->cost_label.clear();
   context_lane_model_->bucket_labels.clear();
   context_lane_model_->memory_labels.clear();
-  context_lane_model_->rolling_memory = {};
   if (focused_agent_id_.empty()) {
     return;
   }
@@ -3351,95 +3349,6 @@ void TuiState::updateContextLaneModel() {
     context_lane_model_->bucket_labels.push_back(
         context_lane_model_->context_buckets[i].label + " " + 
         formatCompactCount(context_lane_model_->context_buckets[i].tokens));
-  }
-
-  const auto rolling =
-      firmius::core::RollingContextManager::resolveThresholds(ctx);
-  if (rolling.enabled) {
-    auto &rollingModel = context_lane_model_->rolling_memory;
-    rollingModel.enabled = true;
-    rollingModel.mode_label = ctx.config.rollingMemory.mode.empty()
-                                  ? std::string("rolling_forever")
-                                  : ctx.config.rollingMemory.mode;
-    rollingModel.preset_label = rolling.preset;
-    if (ctx.config.rollingMemory.observer.enabled &&
-        !ctx.config.rollingMemory.observer.providerId.empty() &&
-        !ctx.config.rollingMemory.observer.modelId.empty()) {
-      rollingModel.model_label = ctx.config.rollingMemory.observer.providerId +
-                                 "/" + ctx.config.rollingMemory.observer.modelId;
-    } else {
-      rollingModel.model_label =
-          ctx.config.providerId + "/" + ctx.config.modelId;
-    }
-    rollingModel.context_window_tokens = rolling.contextWindow;
-    if (rolling.contextWindow > 0) {
-      rollingModel.context_occupancy_ratio =
-          static_cast<float>(metrics.tokens.contextSize) /
-          static_cast<float>(rolling.contextWindow);
-    } else {
-      rollingModel.context_occupancy_ratio = context_lane_model_->context_ratio;
-    }
-    rollingModel.buffer_threshold_ratio = rolling.bufferOccupancyRatio;
-    rollingModel.target_threshold_ratio = rolling.targetOccupancyRatio;
-    rollingModel.emergency_threshold_ratio = rolling.emergencyOccupancyRatio;
-    rollingModel.buffer_threshold_tokens = rolling.bufferThresholdTokens;
-    rollingModel.target_threshold_tokens = rolling.targetThresholdTokens;
-    rollingModel.emergency_threshold_tokens = rolling.emergencyThresholdTokens;
-    rollingModel.retained_tail_tokens = rolling.retainedTailTokens;
-
-    if (ctx.history && !ctx.history->threadId.empty() && !ctx.identity.id.empty()) {
-      try {
-        firmius::core::ThreadManager tm(
-            firmius::core::ThreadManager::defaultBasePath());
-        const auto rollingState =
-            tm.loadRollingMemoryState(ctx.history->threadId, ctx.identity.id);
-        rollingModel.observation_in_flight = rollingState.observationInFlight;
-        rollingModel.reflection_in_flight = rollingState.reflectionInFlight;
-        rollingModel.bridge_packet_count = rollingState.bridges.size();
-        rollingModel.canonical_anchor_count = rollingState.anchors.size();
-        rollingModel.latest_bridge_id = rollingState.lastBridgeId;
-        for (const auto &chunk : rollingState.observationChunks) {
-          if (chunk.superseded) {
-            continue;
-          }
-          if (chunk.active) {
-            ++rollingModel.active_observations;
-          } else if (chunk.buffered) {
-            ++rollingModel.buffered_observations;
-          }
-          rollingModel.source_tokens += chunk.sourceTokens;
-          rollingModel.summary_tokens += chunk.summaryTokens;
-          if (chunk.sourceTokens > chunk.summaryTokens) {
-            rollingModel.saved_tokens +=
-                (chunk.sourceTokens - chunk.summaryTokens);
-          }
-        }
-        for (const auto &chunk : rollingState.reflectionChunks) {
-          if (chunk.superseded) {
-            continue;
-          }
-          if (chunk.active) {
-            ++rollingModel.active_reflections;
-          }
-          rollingModel.source_tokens += chunk.sourceTokens;
-          rollingModel.summary_tokens += chunk.summaryTokens;
-          if (chunk.sourceTokens > chunk.summaryTokens) {
-            rollingModel.saved_tokens +=
-                (chunk.sourceTokens - chunk.summaryTokens);
-          }
-        }
-        if (!rollingState.bridges.empty()) {
-          const auto &bridge = rollingState.bridges.back();
-          rollingModel.bridge_target = bridge.targetTaskSignature;
-          rollingModel.bridge_hint = bridge.executionHint;
-        }
-        if (rollingState.bridgeInFlight) {
-          rollingModel.observation_in_flight =
-              rollingModel.observation_in_flight || rollingState.bridgeInFlight;
-        }
-      } catch (...) {
-      }
-    }
   }
 }
 

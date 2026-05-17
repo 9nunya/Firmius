@@ -796,7 +796,6 @@ std::string Engine::summonAgent(
         if (userCfg.defaultMaxTokens.has_value()) {
           ctx.config.maxTokens = userCfg.defaultMaxTokens.value();
         }
-        ctx.config.rollingMemory = userCfg.rollingMemory;
         ctx.config.insanityDetectionEnabled = userCfg.insanityDetectionEnabled;
         ctx.config.insanityRepetitionThreshold = userCfg.insanityRepetitionThreshold;
         ctx.config.insanityMaxTokenThreshold = userCfg.insanityMaxTokenThreshold;
@@ -1007,7 +1006,6 @@ std::string Engine::resumeAgent(const std::string &threadId,
   if (userCfg.defaultMaxTokens.has_value()) {
     ctx.config.maxTokens = userCfg.defaultMaxTokens.value();
   }
-  ctx.config.rollingMemory = userCfg.rollingMemory;
   ctx.config.insanityDetectionEnabled = userCfg.insanityDetectionEnabled;
   ctx.config.insanityRepetitionThreshold = userCfg.insanityRepetitionThreshold;
   ctx.config.insanityMaxTokenThreshold = userCfg.insanityMaxTokenThreshold;

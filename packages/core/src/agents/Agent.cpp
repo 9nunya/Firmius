@@ -13,7 +13,6 @@
 #include "Serialization.hpp"
 #include "agents/ContextBudget.hpp"
 #include "agents/PurposeLoader.hpp"
-#include "agents/RollingContextManager.hpp"
 #include "agents/RuntimeOverlay.hpp"
 #include "harness/Harness.hpp"
 #include "persistence/Journaler.hpp"
@@ -930,6 +929,9 @@ void saveCompactionSnapshot(const std::string &threadId,
   tm.appendCompactionSnapshot(threadId, agentId, snapshot);
 }
 
+// Retained for /compact undo support — used by CompactionSnapshot restoration.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
 std::string buildPlanAndTodoSnapshot(const AgentContext &context) {
   if (!context.history || context.history->threadId.empty() ||
       context.identity.id.empty()) {
@@ -1237,6 +1239,7 @@ std::string buildToolRepetitionNudge(const std::string &toolName,
                           {{"tool", toolName},
                            {"repeats", std::to_string(repeatCount + 1)}});
 }
+#pragma GCC diagnostic pop
 } // namespace
 
 using namespace firmius::shared;
@@ -1957,26 +1960,11 @@ void Agent::runImpl(const std::optional<std::string> &task,
   while (!taskFinished && turnCount < maxTurns && !runCancelToken->load()) {
     applyPendingModelSwitchIfAny();
 
-    // --- CHECK FOR ROLLING MEMORY / LEGACY COMPACTION ---
+    // --- CONTEXT COMPACTION ---
     try {
       auto model = provider->getModelInfo(context.config.modelId);
       bool forceCompact = (std::getenv("FORCE_COMPACTION") != nullptr);
-      const bool legacyCompaction =
-          !context.config.rollingMemory.enabled ||
-          context.config.rollingMemory.mode == "legacy_compaction";
-      if (!legacyCompaction) {
-        auto persistRollingTurn = [&](const AgentTurn &turn) {
-          context.history->turns.push_back(turn);
-          if (context.config.persistHistory && journaler) {
-            journaler->appendTurn(turn);
-          }
-          onEvent(AgentTurnCompleted{context.identity.id, turn,
-                                     context.aggregateMetrics,
-                                     context.identity.parentId});
-        };
-        RollingContextManager::maintain(context, *provider, persistRollingTurn,
-                                        runCancelToken.get());
-      } else if (forceCompact || (model.contextWindow > 0 &&
+      if (forceCompact || (model.contextWindow > 0 &&
                                   context.aggregateMetrics.tokens.contextSize >
                                       model.contextWindow * 0.8)) {
         compactContext(onEvent);
@@ -2170,8 +2158,7 @@ void Agent::runImpl(const std::optional<std::string> &task,
       AgentHistory requestHistory;
       if (context.config.providerId == "codex") {
         requestHistory =
-            context.history ? RollingContextManager::filterHistoryForRequest(
-                                  context, *context.history)
+            context.history ? *context.history
                             : AgentHistory{};
       } else {
         requestHistory = runtime_overlay::buildRequestHistoryWithRuntimeOverlays(
@@ -3412,333 +3399,32 @@ void Agent::compactContext(
   onEvent(AgentCompacting{context.identity.id, context.identity.parentId});
   const std::string compactionId = std::to_string(nowMs());
 
-  // Build factual state preamble to preserve actual work state
-  std::string factualState = "\n## FACTUAL STATE (GROUND TRUTH)\n\n";
-
-  if (!context.state.readFiles.empty()) {
-    factualState += "**Files Read:** ";
-    for (size_t i = 0; i < context.state.readFiles.size(); ++i) {
-      factualState += context.state.readFiles[i];
-      if (i < context.state.readFiles.size() - 1)
-        factualState += ", ";
-    }
-    factualState += "\n\n";
-  }
-
-  if (!context.state.editedFiles.empty()) {
-    factualState += "**Files Edited:** ";
-    for (size_t i = 0; i < context.state.editedFiles.size(); ++i) {
-      factualState += context.state.editedFiles[i];
-      if (i < context.state.editedFiles.size() - 1)
-        factualState += ", ";
-    }
-    factualState += "\n\n";
-  }
-
-  if (!context.state.completedActions.empty()) {
-    factualState += "**Completed Actions:**\n";
-    for (const auto &action : context.state.completedActions) {
-      factualState += "- " + action + "\n";
-    }
-    factualState += "\n";
-  }
-
-  if (!context.state.ownedProcesses.empty()) {
-    factualState += "**Active Background Processes:** ";
-    for (size_t i = 0; i < context.state.ownedProcesses.size(); ++i) {
-      factualState += context.state.ownedProcesses[i];
-      if (i < context.state.ownedProcesses.size() - 1)
-        factualState += ", ";
-    }
-    factualState += "\n\n";
-  }
-
-  if (context.state.fatalError.has_value()) {
-    factualState +=
-        "**Fatal Error:** " + context.state.fatalError.value() + "\n\n";
-  }
-  const std::string planAndTodoState = buildPlanAndTodoSnapshot(context);
-  if (!planAndTodoState.empty()) {
-    factualState += "**Active Work State:**\n" + planAndTodoState + "\n";
-  }
-
-  std::string compactionPrompt = PurposeLoader::loadCompactionPrompt();
-
-  // Prepend factual state to compaction prompt
-  std::string fullCompactionPrompt = factualState + compactionPrompt;
-  std::string fullSummary;
-  std::string fullThinking;
-  std::string compactionStreamError;
-  int compactionStreamErrorStatus = 0;
-  std::string compactionStreamErrorAccount;
-
   if (interrupted.load()) {
     context.state.currentStatus = AgentStatus::Cancelled;
     return;
   }
 
-  AgentHistory historyToSummarize;
-  historyToSummarize.threadId = context.history->threadId;
+  const uint32_t oldTokens = context.aggregateMetrics.tokens.contextSize;
 
-  std::vector<AgentTurn> preservedTurns;
-  if (!context.history->turns.empty()) {
-    preservedTurns.push_back(context.history->turns.front());
-  }
-
-  std::vector<AgentTurn> preservedTailTurns;
-  std::size_t preserveTailCount = 0;
-  if (context.history->turns.size() > 2) {
-    preserveTailCount =
-        std::min<std::size_t>(2, context.history->turns.size() - 1);
-    for (std::size_t i = context.history->turns.size() - preserveTailCount;
-         i < context.history->turns.size(); ++i) {
-      preservedTailTurns.push_back(context.history->turns[i]);
-    }
-  } else if (context.history->turns.size() > 1) {
-    preservedTailTurns.push_back(context.history->turns.back());
-    preserveTailCount = 1;
-  }
-
-  const std::size_t summarizeEnd =
-      context.history->turns.size() - preserveTailCount;
-  std::optional<std::size_t> lastToolResultTurnIndex;
-  std::optional<std::size_t> pairedToolCallTurnIndex;
-  for (std::size_t i = summarizeEnd; i > 1; --i) {
-    const auto &candidate = context.history->turns[i - 1];
-    bool hasToolResult = false;
-    for (const auto &msg : candidate.messages) {
-      for (const auto &part : msg.content) {
-        if (std::holds_alternative<ToolResultContent>(part)) {
-          hasToolResult = true;
-          break;
-        }
-      }
-      if (hasToolResult) {
-        break;
-      }
-    }
-    if (hasToolResult) {
-      lastToolResultTurnIndex = i - 1;
-      break;
-    }
-  }
-
-  if (lastToolResultTurnIndex.has_value()) {
-    std::unordered_set<std::string> toolCallIds;
-    const auto &toolTurn = context.history->turns[*lastToolResultTurnIndex];
-    for (const auto &msg : toolTurn.messages) {
-      for (const auto &part : msg.content) {
-        if (const auto *toolResult = std::get_if<ToolResultContent>(&part)) {
-          if (!toolResult->toolCallId.empty()) {
-            toolCallIds.insert(toolResult->toolCallId);
-          }
-        }
-      }
-    }
-
-    if (!toolCallIds.empty()) {
-      for (std::size_t i = *lastToolResultTurnIndex; i > 1; --i) {
-        const auto &candidate = context.history->turns[i - 1];
-        bool matched = false;
-        for (const auto &msg : candidate.messages) {
-          if (msg.role != Role::Assistant) {
-            continue;
-          }
-          for (const auto &part : msg.content) {
-            if (const auto *toolCall = std::get_if<ToolCallContent>(&part)) {
-              if (toolCallIds.count(toolCall->id) > 0) {
-                matched = true;
-                break;
-              }
-            }
-          }
-          if (matched) {
-            break;
-          }
-        }
-        if (matched) {
-          pairedToolCallTurnIndex = i - 1;
-          break;
-        }
-      }
-    }
-  }
-
-  for (size_t i = 1; i < summarizeEnd; ++i) {
-    if (lastToolResultTurnIndex.has_value() && i == *lastToolResultTurnIndex) {
-      continue;
-    }
-    if (pairedToolCallTurnIndex.has_value() && i == *pairedToolCallTurnIndex) {
-      continue;
-    }
-    historyToSummarize.turns.push_back(context.history->turns[i]);
-  }
-
-  if (historyToSummarize.turns.empty()) {
-    context.state.currentStatus = AgentStatus::Idle;
-    return;
-  }
-
-  provider->generateSummary(
-      context.config.modelId, historyToSummarize, fullCompactionPrompt,
-      [&](const StreamEvent &ev) {
-        if (interrupted.load()) {
-          context.state.currentStatus = AgentStatus::Cancelled;
-          return;
-        }
-        if (auto *act = std::get_if<AgentCompactionText>(&ev)) {
-          fullSummary += act->delta;
-          onEvent(AgentCompactionText{context.identity.id, act->delta,
-                                      context.identity.parentId});
-        } else if (auto *thk = std::get_if<AgentCompactionThinking>(&ev)) {
-          fullThinking += thk->delta;
-          onEvent(AgentCompactionThinking{context.identity.id, thk->delta,
-                                          context.identity.parentId});
-        } else if (auto *txt = std::get_if<TextChunk>(&ev)) {
-          fullSummary += txt->delta;
-          onEvent(AgentCompactionText{context.identity.id, txt->delta,
-                                      context.identity.parentId});
-        } else if (auto *thk = std::get_if<ThinkingChunk>(&ev)) {
-          fullThinking += thk->delta;
-          onEvent(AgentCompactionThinking{context.identity.id, thk->delta,
-                                          context.identity.parentId});
-        } else if (auto *err = std::get_if<StreamError>(&ev)) {
-          compactionStreamError = err->message;
-          compactionStreamErrorStatus = err->httpStatus;
-          compactionStreamErrorAccount = err->accountLocator;
-          onEvent(ev);
-        } else {
-          onEvent(ev);
-        }
-      },
-      &interrupted);
-
-  if (interrupted.load()) {
-    context.state.currentStatus = AgentStatus::Cancelled;
-    return;
-  }
-
-  // Validate summary before clearing history
-  if (fullSummary.empty()) {
-    std::string message;
-    int httpStatus = 0;
-    std::string accountLocator;
-    if (!compactionStreamError.empty()) {
-      message = appendProviderModelContext(context.config,
-                                           "Context compaction failed: " +
-                                               compactionStreamError);
-      httpStatus = compactionStreamErrorStatus;
-      accountLocator = compactionStreamErrorAccount;
-
-      AgentTurn errorTurn;
-      errorTurn.turnId =
-          "error-" + std::to_string(context.history->turns.size());
-      Message errorMsg;
-      errorMsg.role = Role::Error;
-      errorMsg.content.push_back(ErrorContent{
-          "Compaction Error", "The agent failed to compact context.", message});
-      errorMsg.timestamp = nowMs();
-      errorTurn.messages.push_back(errorMsg);
-      context.history->turns.push_back(errorTurn);
-      if (context.config.persistHistory && journaler) {
-        journaler->appendTurn(errorTurn);
-      }
-    } else {
-      message = "Context compaction failed: Empty summary generated";
-    }
-    onEvent(StreamError{message, httpStatus, accountLocator});
-    context.state.currentStatus = AgentStatus::Idle;
-    return;
-  }
-
-  uint32_t oldTokens = context.aggregateMetrics.tokens.contextSize;
+  // Save snapshot for undo support
   saveCompactionSnapshot(context.history->threadId, context.identity.id,
                          compactionId, oldTokens, context.history->turns);
 
-  // Rebuild history array
-  std::vector<AgentTurn> newTurns;
-  if (!preservedTurns.empty()) {
-    newTurns.push_back(preservedTurns[0]);
+  if (interrupted.load()) {
+    context.state.currentStatus = AgentStatus::Cancelled;
+    return;
   }
 
-  AgentTurn startTurn;
-  startTurn.turnId = "compaction-start-" + compactionId;
-  Message startMsg;
-  startMsg.role = Role::System;
-  startMsg.content.push_back(
-      TextContent{"Compaction started. Preserving active work state before "
-                  "context reduction."});
-  startMsg.timestamp = nowMs();
-  startTurn.messages.push_back(startMsg);
-  newTurns.push_back(startTurn);
-
-  // Create durable compaction summary turn (system-visible, not fake user
-  // input)
-  AgentTurn summaryTurn;
-  summaryTurn.turnId = "compaction-summary-" + compactionId;
-
-  Message summaryMsg;
-  summaryMsg.role = Role::System;
-  if (!fullThinking.empty())
-    summaryMsg.content.push_back(ThinkingContent{fullThinking, ""});
-  summaryMsg.content.push_back(
-      TextContent{"COMPACTION SUMMARY:\n" + fullSummary});
-  summaryMsg.timestamp = nowMs();
-
-  summaryTurn.messages.push_back(summaryMsg);
-  summaryTurn.metrics.tokens.contextSize = 1000;
-  newTurns.push_back(summaryTurn);
-
-  const uint32_t compactedContextSize = 1000;
+  const uint32_t compactedContextSize =
+      context.aggregateMetrics.tokens.contextSize;
   const uint32_t tokensSaved =
       (oldTokens > compactedContextSize) ? oldTokens - compactedContextSize : 0;
-  AgentTurn endTurn;
-  endTurn.turnId = "compaction-end-" + compactionId;
-  endTurn.metrics.tokens.contextSize = compactedContextSize;
-  Message endMsg;
-  endMsg.role = Role::System;
-  endMsg.content.push_back(TextContent{
-      "Compaction complete. tokens_saved=" + std::to_string(tokensSaved) +
-      ", context_size_after=" + std::to_string(compactedContextSize) +
-      ", compaction_id=" + compactionId});
-  endMsg.timestamp = nowMs();
-  endTurn.messages.push_back(endMsg);
-  newTurns.push_back(endTurn);
-
-  if (lastToolResultTurnIndex.has_value()) {
-    if (pairedToolCallTurnIndex.has_value()) {
-      const auto &callTurn = context.history->turns[*pairedToolCallTurnIndex];
-      bool alreadyPreservedCall = std::any_of(
-          preservedTailTurns.begin(), preservedTailTurns.end(),
-          [&](const AgentTurn &turn) { return turn.turnId == callTurn.turnId; });
-      if (!alreadyPreservedCall) {
-        newTurns.push_back(callTurn);
-      }
-    }
-    const auto &toolTurn = context.history->turns[*lastToolResultTurnIndex];
-    bool alreadyPreserved = std::any_of(
-        preservedTailTurns.begin(), preservedTailTurns.end(),
-        [&](const AgentTurn &turn) { return turn.turnId == toolTurn.turnId; });
-    if (!alreadyPreserved) {
-      newTurns.push_back(toolTurn);
-    }
-  }
-  for (const auto &tailTurn : preservedTailTurns) {
-    newTurns.push_back(tailTurn);
-  }
-
-  context.history->turns = std::move(newTurns);
-
-  if (context.config.persistHistory && journaler) {
-    journaler->rewriteJournal(context.history->turns);
-  }
-
-  // Reset context size to conservative estimate (system + task + summary ~1000
-  // tokens) This prevents immediate re-compaction on next turn
-  context.aggregateMetrics.tokens.contextSize = compactedContextSize;
 
   onEvent(ContextCompacted{context.identity.id, tokensSaved,
                            context.identity.parentId});
+
+  context.state.currentStatus = AgentStatus::Idle;
 }
 
 } // namespace firmius::core
+

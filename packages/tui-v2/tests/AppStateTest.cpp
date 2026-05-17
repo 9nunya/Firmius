@@ -134,6 +134,40 @@ TEST(AppStateTest, ActivityContext) {
   EXPECT_EQ(state.activityContext(), ActivityContext::PermissionPending);
 }
 
+TEST(AppStateTest, QueueMessageIdsTrackCounts) {
+  AppState state;
+  state.setQueuedMessageCount(0);
+
+  state.queueMessageId("m1");
+  state.queueMessageId("m2");
+  EXPECT_EQ(state.queuedMessageCount(), 2);
+  EXPECT_TRUE(state.isMessageQueued("m1"));
+  EXPECT_TRUE(state.isMessageQueued("m2"));
+
+  state.dequeueMessageId("m1");
+  EXPECT_EQ(state.queuedMessageCount(), 1);
+  EXPECT_FALSE(state.isMessageQueued("m1"));
+  EXPECT_TRUE(state.isMessageQueued("m2"));
+}
+
+TEST(AppStateTest, QueuedUserMessagesTrackByAgent) {
+  AppState state;
+
+  state.upsertQueuedUserMessage({"m1", "first", "lead"});
+  state.upsertQueuedUserMessage({"m2", "second", "lead"});
+  state.upsertQueuedUserMessage({"m3", "other", "sub"});
+
+  auto lead = state.queuedUserMessagesForAgent("lead");
+  ASSERT_EQ(lead.size(), 2u);
+  EXPECT_EQ(lead[0].messageId, "m1");
+  EXPECT_EQ(lead[1].messageId, "m2");
+
+  state.removeQueuedUserMessage("m1");
+  lead = state.queuedUserMessagesForAgent("lead");
+  ASSERT_EQ(lead.size(), 1u);
+  EXPECT_EQ(lead[0].messageId, "m2");
+}
+
 TEST(AppStateTest, ItemSpans) {
   AppState state;
   EXPECT_TRUE(state.itemSpans().empty());
@@ -166,4 +200,32 @@ TEST(AppStateTest, TodoVisibilityAndStorage) {
   EXPECT_TRUE(state.todoVisible());
   state.toggleTodoVisibility();
   EXPECT_FALSE(state.todoVisible());
+}
+
+TEST(AppStateTest, WelcomeStateClearsAgentTabsWithoutDroppingDefaults) {
+  AppState state;
+  state.setModelLabel("gitlawb/mimo-v2.5-pro");
+  state.setAgentPurpose("lead");
+  state.setThreadId("thread-1");
+  auto& agent = state.getOrCreateAgent("agent-1");
+  agent.agentId = "agent-1";
+  auto& agent2 = state.getOrCreateAgent("agent-2");
+  agent2.agentId = "agent-2";
+
+  EXPECT_TRUE(state.hasMultipleAgents());
+
+  state.resetWelcomeState();
+
+  EXPECT_FALSE(state.hasMultipleAgents());
+  EXPECT_TRUE(state.threadId().empty());
+  EXPECT_TRUE(state.agentId().empty());
+  EXPECT_EQ(state.modelLabel(), "gitlawb/mimo-v2.5-pro");
+  EXPECT_EQ(state.agentPurpose(), "lead");
+}
+
+TEST(AppStateTest, DaemonReadyFlag) {
+  AppState state;
+  EXPECT_FALSE(state.daemonReady());
+  state.setDaemonReady(true);
+  EXPECT_TRUE(state.daemonReady());
 }

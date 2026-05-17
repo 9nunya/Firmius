@@ -182,6 +182,12 @@ Terminal::readInput(int timeoutMs) {
 
   if (raw.empty()) return {"", std::nullopt};
 
+  // Distinguish standalone Escape from multi-byte escape sequences by waiting
+  // briefly for a continuation byte before parsing.
+  if (raw.size() == 1 && raw[0] == '\x1b') {
+    raw += readKey(25);
+  }
+
   // Try to parse as SGR mouse sequence: ESC [ < button ; col ; row M/m
   if (raw.size() >= 6 && raw[0] == '\x1b' && raw[1] == '[' && raw[2] == '<') {
     // Check if we have the final M/m terminator.
@@ -210,25 +216,11 @@ Terminal::readInput(int timeoutMs) {
     return {"", std::nullopt};
   }
 
-  // Starts with ESC but not a recognized sequence prefix — could be a
-  // partial arrow/function key. Buffer if it looks incomplete.
+  // Standalone Escape after a short continuation wait.
   if (raw[0] == '\x1b' && raw.size() == 1) {
-    // If we already had a buffered ESC and this is the same one (no new bytes
-    // arrived within the timeout), return it as a standalone Escape key.
-    auto now = std::chrono::steady_clock::now();
-    if (escBufferedAt_ != std::chrono::steady_clock::time_point{} &&
-        now - escBufferedAt_ > std::chrono::milliseconds(50)) {
-      // Timed out — treat as standalone Escape.
-      escBufferedAt_ = {};
-      inputBuf_.clear();
-      return {raw, std::nullopt};
-    }
-    // Just ESC — buffer it, more bytes may follow.
-    if (escBufferedAt_ == std::chrono::steady_clock::time_point{}) {
-      escBufferedAt_ = now;
-    }
-    inputBuf_ = raw;
-    return {"", std::nullopt};
+    escBufferedAt_ = {};
+    inputBuf_.clear();
+    return {raw, std::nullopt};
   }
 
   // Check for partial CSI (ESC [ without a final byte).

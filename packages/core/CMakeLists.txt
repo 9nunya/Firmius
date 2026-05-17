@@ -55,13 +55,11 @@ target_sources(firmius_core PRIVATE
     src/agents/hooks/ScriptRuntime.cpp
     src/agents/hooks/TemplateEngine.cpp
     src/agents/RuntimeOverlay.cpp
-    src/agents/RollingContextManager.cpp
     src/agents/ContextBudget.cpp
     src/agents/UserMemoryWorkspace.cpp
     src/agents/StreamSanityDetector.cpp
     src/agents/Agent.cpp
     src/agents/AgentPermissionChecks.cpp
-    src/memory/RecallIndex.cpp
     src/persistence/Journaler.cpp
     src/persistence/ThreadManager.cpp
     src/persistence/HistoryEditor.cpp
@@ -83,8 +81,10 @@ target_sources(firmius_core PRIVATE
     src/lsp/LspServerRegistry.cpp
     src/lsp/LspServerManager.cpp
     src/lsp/LspService.cpp
-    src/memory/EmbeddingStore.cpp
-    src/memory/EmbeddingWorker.cpp
+    src/embedding/EmbeddingStore.cpp
+    src/embedding/EmbeddingWorker.cpp
+    src/embedding/ModelDownloader.cpp
+    src/embedding/OnnxEmbedder.cpp
 )
 
 target_sources(firmius_core PUBLIC
@@ -135,7 +135,6 @@ target_sources(firmius_core PUBLIC
     include/agents/hooks/ScriptRuntime.hpp
     include/agents/hooks/TemplateEngine.hpp
     include/agents/RuntimeOverlay.hpp
-    include/agents/RollingContextManager.hpp
     include/agents/ContextBudget.hpp
     include/agents/UserMemoryWorkspace.hpp
     include/agents/StreamSanityDetector.hpp
@@ -163,8 +162,10 @@ target_sources(firmius_core PUBLIC
     include/lsp/JsonRpcTransport.hpp
     include/lsp/LspServerManager.hpp
     include/lsp/LspService.hpp
-    include/memory/EmbeddingStore.hpp
-    include/memory/EmbeddingWorker.hpp
+    include/embedding/EmbeddingStore.hpp
+    include/embedding/EmbeddingWorker.hpp
+    include/embedding/ModelDownloader.hpp
+    include/embedding/OnnxEmbedder.hpp
 )
 
 target_include_directories(firmius_core PUBLIC
@@ -195,6 +196,12 @@ if(FIRMIUS_ENABLE_LUAU_HOOKS)
     Luau.CLI.lib
     isocline
   )
+endif()
+
+# ─── Optional ONNX Runtime (embedding inference) ─────────────────────────
+if(ONNXRUNTIME_FOUND)
+  target_compile_definitions(firmius_core PRIVATE FIRMIUS_HAS_ONNX=1)
+  target_link_libraries(firmius_core PRIVATE onnxruntime)
 endif()
 
 target_include_directories(firmius_core PRIVATE

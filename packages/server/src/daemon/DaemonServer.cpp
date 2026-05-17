@@ -172,6 +172,16 @@ void DaemonServer::acceptLoop() {
                     rpc->sendResponse(id, result);
                     return;
                   }
+                  if (method == kRpcThreadsOverview) {
+                    auto overviewRequest =
+                        params ? threadOverviewRequestFromJson(*params)
+                               : ThreadOverviewRequest{};
+                    auto result = toJsonValue(
+                        service_->listThreadOverviews(registeredClientId, overviewRequest),
+                        respAlloc);
+                    rpc->sendResponse(id, result);
+                    return;
+                  }
                   if (method == kRpcThreadsGet) {
                     ThreadsOpenRequest get{
                         params && params->HasMember("thread_id")
@@ -293,9 +303,28 @@ void DaemonServer::acceptLoop() {
                       return;
                     }
                     auto target = agentTargetRequestFromJson(*params);
-                    auto result = service_->interruptAgent(target);
+                    auto result =
+                        service_->interruptAgent(registeredClientId, target);
                     if (!result.has_value()) {
                       rpc->sendError(id, -32000, "failed to interrupt agent");
+                      return;
+                    }
+                    auto resultValue = toJsonValue(*result, respAlloc);
+                    rpc->sendResponse(id, resultValue);
+                    return;
+                  }
+                  if (method == kRpcAgentsAbortAndFlushQueuedMessages) {
+                    params = requireObjectParams(
+                        request, kRpcAgentsAbortAndFlushQueuedMessages, id, *rpc);
+                    if (!params) {
+                      return;
+                    }
+                    auto target = agentTargetRequestFromJson(*params);
+                    auto result = service_->abortAndFlushQueuedMessages(
+                        registeredClientId, target);
+                    if (!result.has_value()) {
+                      rpc->sendError(id, -32000,
+                                     "failed to flush queued agent messages");
                       return;
                     }
                     auto resultValue = toJsonValue(*result, respAlloc);
@@ -578,25 +607,6 @@ void DaemonServer::acceptLoop() {
                     auto result = toJsonValue(
                         service_->updatePurposesConfig(
                             purposesConfigUpdateRequestFromJson(*params)),
-                        respAlloc);
-                    rpc->sendResponse(id, result);
-                    return;
-                  }
-                  if (method == kRpcRollingMemoryGet) {
-                    auto result =
-                        toJsonValue(service_->getRollingMemoryConfig(), respAlloc);
-                    rpc->sendResponse(id, result);
-                    return;
-                  }
-                  if (method == kRpcRollingMemoryUpdate) {
-                    params =
-                        requireObjectParams(request, kRpcRollingMemoryUpdate, id, *rpc);
-                    if (!params) {
-                      return;
-                    }
-                    auto result = toJsonValue(
-                        service_->updateRollingMemoryConfig(
-                            rollingMemoryConfigUpdateRequestFromJson(*params)),
                         respAlloc);
                     rpc->sendResponse(id, result);
                     return;

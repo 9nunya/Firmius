@@ -58,17 +58,44 @@ int countWrappedLines(const std::string& text, int width, int prefixLen) {
 
 // ── UserMessageItem ──
 
-UserMessageItem::UserMessageItem(std::string text, std::string agentId)
-    : text_(std::move(text)), agentId_(std::move(agentId)) {
+UserMessageItem::UserMessageItem(std::string text, std::string agentId,
+                                 std::string messageId, bool queued)
+    : text_(std::move(text)),
+      agentId_(std::move(agentId)),
+      messageId_(std::move(messageId)),
+      queued_(queued) {
   // Immutable — mark clean after first render
 }
 
 std::vector<std::string> UserMessageItem::render(int width) const {
-  return wrapText(text_, width, ansi::bold(theme_ansi::accent("> ")));
+  const std::string rawPrefix = queued_ ? "» " : "> ";
+  const std::string styledPrefix =
+      queued_ ? ansi::bold(theme_ansi::warning(rawPrefix))
+              : ansi::bold(theme_ansi::accent(rawPrefix));
+  auto lines = wrapText(text_, width, rawPrefix);
+  for (auto& line : lines) {
+    std::string content =
+        line.size() >= rawPrefix.size() ? line.substr(rawPrefix.size())
+                                        : std::string{};
+    if (queued_) {
+      line = styledPrefix + ansi::italic(theme_ansi::dim(content));
+    } else {
+      line = styledPrefix + content;
+    }
+  }
+  return lines;
 }
 
 int UserMessageItem::rowCount(int width) const {
   return countWrappedLines(text_, width, 2);
+}
+
+void UserMessageItem::setQueued(bool queued) {
+  if (queued_ == queued) {
+    return;
+  }
+  queued_ = queued;
+  touch();
 }
 
 // ── ErrorMessageItem ──

@@ -37,7 +37,6 @@
 #include "commands/HooksCommand.hpp"
 #include "commands/UndoRedoCommands.hpp"
 #include "commands/McpCommand.hpp"
-#include "commands/MemoryCommand.hpp"
 #include "commands/ModeCommand.hpp"
 #include "commands/ModelCommand.hpp"
 #include "commands/NewCommand.hpp"
@@ -59,7 +58,6 @@
 #include "modals/ModelPickerModal.hpp"
 #include "modals/PurposesModal.hpp"
 #include "modals/ProvidersModal.hpp"
-#include "modals/RollingMemorySettingsModal.hpp"
 #include "modals/RouterModal.hpp"
 #include "modals/ThreadLockedModal.hpp"
 #include "modals/ThreadPickerModal.hpp"
@@ -349,8 +347,6 @@ void runTui(const TuiLaunchOptions &options) {
   firmius::tui::CommandManager::instance().registerCommand(
       std::make_shared<firmius::tui::RedoTranscriptCommand>());
   firmius::tui::CommandManager::instance().registerCommand(
-      std::make_shared<firmius::tui::MemoryCommand>());
-  firmius::tui::CommandManager::instance().registerCommand(
       std::make_shared<firmius::tui::ModeCommand>());
   firmius::tui::CommandManager::instance().registerCommand(
       std::make_shared<firmius::tui::ConnectCommand>());
@@ -390,8 +386,6 @@ void runTui(const TuiLaunchOptions &options) {
       std::make_shared<firmius::tui::ConfigDisplayModal>());
   firmius::tui::ModalRegistry::instance().registerModal(
       std::make_shared<firmius::tui::KeybindingEditorModal>());
-  firmius::tui::ModalRegistry::instance().registerModal(
-      std::make_shared<firmius::tui::RollingMemorySettingsModal>());
   firmius::tui::ModalRegistry::instance().registerModal(
       std::make_shared<firmius::tui::RouterModal>());
   firmius::tui::ModalRegistry::instance().registerModal(

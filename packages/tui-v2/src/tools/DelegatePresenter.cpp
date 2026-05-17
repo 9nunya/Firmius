@@ -9,6 +9,7 @@
 #include <chrono>
 #include <iomanip>
 #include <sstream>
+#include <array>
 
 namespace firmius::tui2 {
 
@@ -23,6 +24,27 @@ std::string formatDuration(std::chrono::milliseconds ms) {
   std::ostringstream oss;
   oss << std::fixed << std::setprecision(1) << secs << "s";
   return oss.str();
+}
+
+std::string activityStateLabel(const firmius::shared::AgentStatus status,
+                               bool running,
+                               bool booting) {
+  switch (status) {
+  case firmius::shared::AgentStatus::Streaming:
+    return "Thinking...";
+  case firmius::shared::AgentStatus::ExecutingTool:
+    return "Running tool...";
+  case firmius::shared::AgentStatus::ProviderWaiting:
+    return "Waiting...";
+  case firmius::shared::AgentStatus::Compacting:
+    return "Compacting...";
+  case firmius::shared::AgentStatus::Error:
+    return "Failed";
+  default:
+    if (booting) return "Booting...";
+    if (running) return "Working...";
+    return "Completed";
+  }
 }
 
 struct DelegateArgs {
@@ -88,20 +110,22 @@ DelegateResult parseResult(const std::string& json) {
 
 std::vector<std::string> DelegatePresenter::render(const ToolCallItem& item, const ToolRenderContext& ctx, int /*width*/) const {
   auto args = parseArgs(item.args());
+  const std::string liveAgentId =
+      !item.subagentId().empty() ? item.subagentId() : args.agentId;
 
   // Helper to resolve agent label
   auto resolveAgentLabel = [&](const std::string& agentId) -> std::string {
     if (ctx.state && !agentId.empty()) {
       const auto* agent = ctx.state->findAgentState(agentId);
       if (agent) {
-        if (!agent->title.empty()) return agent->title;
         if (!agent->friendlyName.empty()) return agent->friendlyName;
+        if (!agent->title.empty()) return agent->title;
       }
       // Try to find by iterating all agents (in case ID was renamed)
-      for (const auto* a : ctx.state->agentList()) {
-        if (a && (a->friendlyName == agentId || a->title == agentId)) {
-          if (!a->title.empty()) return a->title;
-          if (!a->friendlyName.empty()) return a->friendlyName;
+      for (const auto& a : ctx.state->agentList()) {
+        if (a.friendlyName == agentId || a.title == agentId) {
+          if (!a.friendlyName.empty()) return a.friendlyName;
+          if (!a.title.empty()) return a.title;
         }
       }
     }
@@ -142,9 +166,15 @@ std::vector<std::string> DelegatePresenter::render(const ToolCallItem& item, con
 
   // Wait action — show during both Preparing and Called phases
   if (args.action == "Wait") {
-    std::string agentLabel = resolveAgentLabel(args.agentId);
+    std::string agentLabel = resolveAgentLabel(liveAgentId);
+    if (ctx.state && (item.phase() == ToolPhase::Preparing || item.phase() == ToolPhase::Called)) {
+      const auto* agent = ctx.state->findAgentState(liveAgentId);
+      if (agent && !agent->running && !agent->booting) {
+        return {theme_ansi::success("  \xe2\x9c\x93 " + agentLabel + " \xe2\x80\x94 completed")};
+      }
+    }
     if (item.phase() == ToolPhase::Preparing || item.phase() == ToolPhase::Called) {
-      std::string stateStr = agentStateLabel(args.agentId);
+      std::string stateStr = agentStateLabel(liveAgentId);
       std::string text = "  \xe2\x9f\xb3 Waiting on " + agentLabel + stateStr;
       return {theme_ansi::warning(text),
               theme_ansi::dim("  " + formatDuration(item.elapsed()))};
@@ -172,45 +202,27 @@ std::vector<std::string> DelegatePresenter::render(const ToolCallItem& item, con
     if (!args.persona.empty()) {
       result.push_back(theme_ansi::dim("  " + args.persona));
     }
-
-    // Live footer with agent state
-    std::string stateLabel = "working";
+    std::array<std::string, 3> logLines = {
+        "  \xe2\x94\x82 Waiting for subagent...",
+        "  \xe2\x94\x82",
+        "  \xe2\x94\x82",
+    };
     if (ctx.state) {
-      const auto* agent = ctx.state->findAgentState(args.agentId);
+      const auto* agent = ctx.state->findAgentState(liveAgentId);
       if (agent) {
-        switch (agent->status) {
-        case firmius::shared::AgentStatus::Streaming:
-          stateLabel = "thinking";
-          break;
-        case firmius::shared::AgentStatus::ExecutingTool:
-          stateLabel = "exec tool";
-          break;
-        case firmius::shared::AgentStatus::ProviderWaiting:
-          stateLabel = "waiting";
-          break;
-        case firmius::shared::AgentStatus::Compacting:
-          stateLabel = "compacting";
-          break;
-        case firmius::shared::AgentStatus::Error:
-          stateLabel = "error";
-          break;
-        default:
-          if (agent->running) stateLabel = "working";
-          else if (agent->booting) stateLabel = "booting";
-          break;
-        }
+        logLines[0] = "  \xe2\x94\x82 " +
+                      activityStateLabel(agent->status, agent->running, agent->booting);
+      }
+      auto activity = ctx.state->agentActivityLog(liveAgentId, 2);
+      for (size_t i = 0; i < activity.size() && i < 2; ++i) {
+        logLines[i + 1] = "  \xe2\x94\x82 " + activity[i];
       }
     }
-    // State + elapsed footer
-    result.push_back(theme_ansi::dim(
-        "  " + stateLabel + " \xe2\x80\xa2 " + formatDuration(item.elapsed())));
-    // Activity log: last 3 lines
-    if (ctx.state) {
-      auto activity = ctx.state->agentActivityLog(args.agentId, 3);
-      for (const auto& line : activity) {
-        result.push_back(theme_ansi::dim("  " + line));
-      }
-    }
+    result.push_back(theme_ansi::dim(logLines[0]));
+    result.push_back(theme_ansi::dim(logLines[1]));
+    result.push_back(theme_ansi::dim(logLines[2]));
+    result.push_back(theme_ansi::dim("  running \xe2\x80\xa2 " +
+                                     formatDuration(item.elapsed())));
     return result;
   }
 
@@ -222,7 +234,7 @@ std::vector<std::string> DelegatePresenter::render(const ToolCallItem& item, con
 
   // For async spawns, the tool finishes immediately but the subagent keeps running.
   // Show live state instead of "completed" if the subagent is still active.
-  std::string childId = res.agentId.empty() ? args.agentId : res.agentId;
+  std::string childId = res.agentId.empty() ? liveAgentId : res.agentId;
   if (item.success() && ctx.state && !childId.empty()) {
     const auto* childAgent = ctx.state->findAgentState(childId);
     if (childAgent && childAgent->running) {
@@ -232,23 +244,22 @@ std::vector<std::string> DelegatePresenter::render(const ToolCallItem& item, con
                        ansi::bold(theme_ansi::foreground(title)) +
                        theme_ansi::success(" \xe2\x80\x94 running"));
 
-      // Live state
-      std::string stateStr;
-      switch (childAgent->status) {
-      case firmius::shared::AgentStatus::Streaming: stateStr = "thinking"; break;
-      case firmius::shared::AgentStatus::ExecutingTool: stateStr = "exec tool"; break;
-      case firmius::shared::AgentStatus::ProviderWaiting: stateStr = "waiting"; break;
-      case firmius::shared::AgentStatus::Compacting: stateStr = "compacting"; break;
-      case firmius::shared::AgentStatus::Error: stateStr = "error"; break;
-      default: stateStr = childAgent->running ? "working" : "idle"; break;
+      std::array<std::string, 3> logLines = {
+          "  \xe2\x94\x82 " + activityStateLabel(childAgent->status, childAgent->running,
+                                                childAgent->booting),
+          "  \xe2\x94\x82",
+          "  \xe2\x94\x82",
+      };
+      auto activity = ctx.state->agentActivityLog(childId, 2);
+      for (size_t i = 0; i < activity.size() && i < 2; ++i) {
+        logLines[i + 1] = "  \xe2\x94\x82 " + activity[i];
       }
 
-      // Tool summary
-      std::string toolSummary = ctx.state->agentToolSummary(childId);
-      std::string footer = "  " + stateStr + " \xe2\x80\xa2 " + formatDuration(item.elapsed());
-      if (!toolSummary.empty()) footer += " \xe2\x80\xa2 " + toolSummary;
-
-      result.push_back(theme_ansi::dim(footer));
+      result.push_back(theme_ansi::dim(logLines[0]));
+      result.push_back(theme_ansi::dim(logLines[1]));
+      result.push_back(theme_ansi::dim(logLines[2]));
+      result.push_back(theme_ansi::dim("  running \xe2\x80\xa2 " +
+                                       formatDuration(item.elapsed())));
       return result;
     }
   }

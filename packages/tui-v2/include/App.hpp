@@ -70,6 +70,10 @@ private:
   void applyTheme(const std::string& name);
   void dismissMenu();
   void dismissOverlay();
+  void submitInputBuffer();
+  void applyModelSelection(const std::string& providerId,
+                           const std::string& modelId,
+                           uint32_t contextWindowTokens);
 
   // Agent focus management.
   void switchToAgentTranscript(const std::string& agentId);

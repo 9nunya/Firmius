@@ -1,12 +1,14 @@
-#include "memory/EmbeddingStore.hpp"
+#include "embedding/EmbeddingStore.hpp"
 
 #include <gtest/gtest.h>
 
+#include <filesystem>
 #include <random>
 #include <vector>
 
-using firmius::core::memory::EmbeddingRef;
-using firmius::core::memory::EmbeddingStore;
+using firmius::core::embedding::EmbeddingRef;
+using firmius::core::embedding::EmbeddingStore;
+namespace fs = std::filesystem;
 
 namespace {
 
@@ -17,9 +19,16 @@ std::vector<float> randomVector(size_t dim, std::mt19937 &rng) {
   return v;
 }
 
+void cleanStore(const std::string &path) {
+  std::error_code ec;
+  fs::remove_all(path, ec);
+  fs::remove(path + ".vec", ec);
+}
+
 } // namespace
 
 TEST(EmbeddingStore, AddAndRetrieve) {
+  cleanStore("/tmp/test_emb_store_1");
   EmbeddingStore store("/tmp/test_emb_store_1", 64);
 
   std::mt19937 rng(42);
@@ -32,6 +41,7 @@ TEST(EmbeddingStore, AddAndRetrieve) {
 }
 
 TEST(EmbeddingStore, SearchReturnsNearestNeighbors) {
+  cleanStore("/tmp/test_emb_store_2");
   EmbeddingStore store("/tmp/test_emb_store_2", 64);
 
   std::mt19937 rng(123);
@@ -50,11 +60,13 @@ TEST(EmbeddingStore, SearchReturnsNearestNeighbors) {
 }
 
 TEST(EmbeddingStore, HasReturnsFalseForMissing) {
+  cleanStore("/tmp/test_emb_store_3");
   EmbeddingStore store("/tmp/test_emb_store_3", 64);
   EXPECT_FALSE(store.has({999, 64}));
 }
 
 TEST(EmbeddingStore, SizeTracksAdditions) {
+  cleanStore("/tmp/test_emb_store_4");
   EmbeddingStore store("/tmp/test_emb_store_4", 64);
 
   std::mt19937 rng(456);

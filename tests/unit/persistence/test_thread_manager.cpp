@@ -221,55 +221,6 @@ TEST_F(ThreadManagerTest, mutateAgentTodoAppliesAtomicUpdate) {
   EXPECT_EQ(reloaded, mutated);
 }
 
-TEST_F(ThreadManagerTest, rollingMemoryStateRoundtrip) {
-    ThreadMetadata metadata = createTestMetadata();
-    std::string threadId = tm->createThread(metadata);
-    const std::string agentId = "agent-rolling";
-
-    RollingMemoryState original;
-    original.threadId = threadId;
-    original.agentId = agentId;
-    original.lastObservedTurnId = "assistant-4";
-    original.lastTargetThresholdTokens = 64000;
-    original.lastRetainedTailTokens = 16000;
-    original.observationInFlight = true;
-
-    RollingMemoryChunk observation;
-    observation.chunkId = "obs-1";
-    observation.sourceStartTurnId = "user-task-1";
-    observation.sourceEndTurnId = "tools-3";
-    observation.sourceTurnIds = {"user-task-1", "assistant-2", "tools-3"};
-    observation.summary = "User asked for a parser fix and the agent edited Parser.cpp.";
-    observation.sourceTokens = 12000;
-    observation.summaryTokens = 800;
-    observation.buffered = false;
-    observation.active = true;
-    original.observationChunks.push_back(observation);
-
-    RollingMemoryChunk reflection;
-    reflection.chunkId = "refl-1";
-    reflection.sourceStartTurnId = "user-task-1";
-    reflection.sourceEndTurnId = "assistant-8";
-    reflection.summary = "Earlier parser work resolved the crash path.";
-    reflection.active = true;
-    original.reflectionChunks.push_back(reflection);
-
-    tm->writeRollingMemoryState(threadId, agentId, original);
-    const auto restored = tm->loadRollingMemoryState(threadId, agentId);
-
-    EXPECT_EQ(restored.threadId, threadId);
-    EXPECT_EQ(restored.agentId, agentId);
-    EXPECT_EQ(restored.lastObservedTurnId, "assistant-4");
-    EXPECT_EQ(restored.lastTargetThresholdTokens, 64000u);
-    EXPECT_EQ(restored.lastRetainedTailTokens, 16000u);
-    EXPECT_TRUE(restored.observationInFlight);
-    ASSERT_EQ(restored.observationChunks.size(), 1u);
-    EXPECT_EQ(restored.observationChunks[0].chunkId, "obs-1");
-    EXPECT_EQ(restored.observationChunks[0].sourceTurnIds.size(), 3u);
-    ASSERT_EQ(restored.reflectionChunks.size(), 1u);
-    EXPECT_EQ(restored.reflectionChunks[0].chunkId, "refl-1");
-}
-
 TEST_F(ThreadManagerTest, persistenceStress_concurrentPlanTodoAndHistoryChurn) {
     ThreadMetadata metadata = createTestMetadata();
     std::string threadId = tm->createThread(metadata);

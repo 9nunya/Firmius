@@ -63,6 +63,12 @@ ThreadsSendRequest threadsSendRequestFromJson(const rapidjson::Value &value);
 rapidjson::Value toJsonValue(const ThreadsSendResponse &response,
                              rapidjson::Document::AllocatorType &allocator);
 ThreadsSendResponse threadsSendResponseFromJson(const rapidjson::Value &value);
+rapidjson::Value toJsonValue(const ThreadOverviewRequest &request,
+                             rapidjson::Document::AllocatorType &allocator);
+ThreadOverviewRequest threadOverviewRequestFromJson(const rapidjson::Value &value);
+rapidjson::Value toJsonValue(const ThreadOverview &snapshot,
+                             rapidjson::Document::AllocatorType &allocator);
+ThreadOverview threadOverviewFromJson(const rapidjson::Value &value);
 
 rapidjson::Value toJsonValue(const AgentTargetRequest &request,
                              rapidjson::Document::AllocatorType &allocator);
@@ -149,12 +155,6 @@ PurposesConfigSnapshot purposesConfigSnapshotFromJson(const rapidjson::Value &va
 rapidjson::Value toJsonValue(const PurposesConfigUpdateRequest &request,
                              rapidjson::Document::AllocatorType &allocator);
 PurposesConfigUpdateRequest purposesConfigUpdateRequestFromJson(const rapidjson::Value &value);
-rapidjson::Value toJsonValue(const RollingMemoryConfigSnapshot &snapshot,
-                             rapidjson::Document::AllocatorType &allocator);
-RollingMemoryConfigSnapshot rollingMemoryConfigSnapshotFromJson(const rapidjson::Value &value);
-rapidjson::Value toJsonValue(const RollingMemoryConfigUpdateRequest &request,
-                             rapidjson::Document::AllocatorType &allocator);
-RollingMemoryConfigUpdateRequest rollingMemoryConfigUpdateRequestFromJson(const rapidjson::Value &value);
 rapidjson::Value toJsonValue(const McpConfigSnapshot &snapshot,
                              rapidjson::Document::AllocatorType &allocator);
 McpConfigSnapshot mcpConfigSnapshotFromJson(const rapidjson::Value &value);
@@ -301,6 +301,9 @@ std::vector<ClientSessionSnapshot> clientSessionSnapshotListFromJson(const rapid
 rapidjson::Value toJsonValue(const std::vector<firmius::shared::ThreadMetadata> &threads,
                              rapidjson::Document::AllocatorType &allocator);
 std::vector<firmius::shared::ThreadMetadata> threadMetadataListFromJson(const rapidjson::Value &value);
+rapidjson::Value toJsonValue(const std::vector<ThreadOverview> &threads,
+                             rapidjson::Document::AllocatorType &allocator);
+std::vector<ThreadOverview> threadOverviewListFromJson(const rapidjson::Value &value);
 rapidjson::Value toJsonValue(const std::vector<AgentRuntimeSnapshot> &snapshots,
                              rapidjson::Document::AllocatorType &allocator);
 std::vector<AgentRuntimeSnapshot> agentRuntimeSnapshotListFromJson(const rapidjson::Value &value);

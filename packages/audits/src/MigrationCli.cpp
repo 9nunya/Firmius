@@ -70,13 +70,7 @@ void dropThreadV2Data(sqlite3 *db, const std::string &threadId) {
       "DELETE FROM todo_items_v2 WHERE thread_id='" + threadId + "';",
       "DELETE FROM agent_todos_v2 WHERE thread_id='" + threadId + "';",
       "DELETE FROM agent_live_state_v2 WHERE thread_id='" + threadId + "';",
-      "DELETE FROM rolling_memory_chunk_lists_v2 WHERE thread_id='" + threadId + "';",
-      "DELETE FROM rolling_memory_chunks_v2 WHERE thread_id='" + threadId + "';",
-      "DELETE FROM rolling_memory_anchor_lists_v2 WHERE thread_id='" + threadId + "';",
-      "DELETE FROM rolling_memory_anchors_v2 WHERE thread_id='" + threadId + "';",
-      "DELETE FROM rolling_memory_bridge_lists_v2 WHERE thread_id='" + threadId + "';",
-      "DELETE FROM rolling_memory_bridges_v2 WHERE thread_id='" + threadId + "';",
-      "DELETE FROM rolling_memory_state_v2 WHERE thread_id='" + threadId + "';",
+
       "DELETE FROM fleet_lock_lists_v2 WHERE thread_id='" + threadId + "';",
       "DELETE FROM fleet_locks_v2 WHERE thread_id='" + threadId + "';",
       "DELETE FROM compaction_snapshot_turns_v2 WHERE snapshot_row_id IN (SELECT id FROM compaction_snapshots_v2 WHERE thread_id='" +
@@ -104,7 +98,6 @@ void dropLegacyTables(sqlite3 *db) {
   execSql(db,
           "DROP TABLE IF EXISTS artifacts;"
           "DROP TABLE IF EXISTS compaction_snapshots;"
-          "DROP TABLE IF EXISTS rolling_memory_state;"
           "DROP TABLE IF EXISTS agent_live_state;"
           "DROP TABLE IF EXISTS agent_todos;"
           "DROP TABLE IF EXISTS plans;"

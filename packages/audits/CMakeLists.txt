@@ -34,6 +34,7 @@ target_sources(firmius_audits PRIVATE
     src/audits/WebSearchAudit.cpp
     src/audits/ReasoningTraceAudit.cpp
     src/audits/TokenWasteAudit.cpp
+    src/audits/EmbeddingAudit.cpp
     src/audits/TuiRuntimeStressAudit.cpp
     src/audits/WelcomeChatRefreshAudit.cpp
     src/MigrationCli.cpp
@@ -72,6 +73,7 @@ target_sources(firmius_audits PUBLIC
     include/audits/WebSearchAudit.hpp
     include/audits/ReasoningTraceAudit.hpp
     include/audits/TokenWasteAudit.hpp
+    include/audits/EmbeddingAudit.hpp
     include/audits/TuiRuntimeStressAudit.hpp
     include/audits/WelcomeChatRefreshAudit.hpp
 )

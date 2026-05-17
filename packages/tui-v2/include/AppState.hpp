@@ -7,9 +7,11 @@
 #include "daemon/Protocol.hpp"
 
 #include <deque>
+#include <chrono>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <unordered_set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -19,6 +21,7 @@ namespace firmius::tui2 {
 class AgentTextItem;
 class AgentThinkingItem;
 class ToolCallItem;
+class UserMessageItem;
 
 /// Connection states.
 enum class ConnectionStatus { Disconnected, Connecting, Connected };
@@ -41,11 +44,32 @@ struct ContextUsage {
   uint32_t sentTokens = 0;
 };
 
+/// Embedding model download progress.
+struct EmbeddingDownloadState {
+  bool downloading = false;
+  std::string modelId;
+  uint64_t bytesDownloaded = 0;
+  uint64_t totalBytes = 0;
+  std::string status;
+};
+
+struct AgentActivityEntry {
+  std::string key;
+  std::string text;
+  std::chrono::steady_clock::time_point expiresAt{};
+};
+
 /// Track where an item is rendered in the terminal.
 struct ItemSpan {
   size_t itemIndex;
   int terminalRow;
   int rowCount;
+};
+
+struct QueuedUserMessage {
+  std::string messageId;
+  std::string text;
+  std::string agentId;
 };
 
 /// Centralized state store — thread-safe, dirty-tracked.
@@ -82,15 +106,24 @@ public:
   std::string modelLabel() const;
   void setLiveMessage(const std::string &message);
   std::string liveMessage() const;
+  void setDaemonReady(bool ready);
+  bool daemonReady() const;
+  void resetWelcomeState();
+  void prepareForThreadLoad();
+  void setHookState(const firmius::daemon::HookStateSnapshot &hookState);
+  firmius::daemon::HookStateSnapshot hookState() const;
 
   // ── Items (transcript) ──
   void addItem(std::unique_ptr<TranscriptItem> item);
+  void insertItem(size_t index, std::unique_ptr<TranscriptItem> item);
+  void clearTranscriptItems();
   void clearItems();
   const std::vector<std::unique_ptr<TranscriptItem>>& items() const;
   size_t itemCount() const;
 
   // ── Tool call management ──
   ToolCallItem* findToolCallById(const std::string& toolCallId);
+  UserMessageItem* findUserMessageById(const std::string& messageId);
   /// Find the last ToolCallItem in the transcript (most recent).
   ToolCallItem* findLastFocusedToolCall();
 
@@ -110,13 +143,18 @@ public:
   const AgentState* findAgentState(const std::string& agentId) const;
   std::unordered_map<std::string, AgentState>& agentsMut();
   void renameAgent(const std::string& oldId, const std::string& newId);
+  void updateAgentModel(const std::string& agentId,
+                        const std::string& providerId,
+                        const std::string& modelId,
+                        uint32_t contextWindowTokens = 0);
+  void clearAgentContextUsage(const std::string& agentId);
 
   // ── Agent focus ──
   void focusAgent(const std::string& agentId);
   std::string focusedAgentId() const;
   void setPrimaryAgentId(const std::string& id);
   std::string primaryAgentId() const;
-  std::vector<AgentState*> agentList() const;
+  std::vector<AgentState> agentList() const;
   std::vector<std::string> siblingsOf(const std::string& agentId) const;
   std::string parentIdOf(const std::string& agentId) const;
   bool hasMultipleAgents() const;
@@ -126,6 +164,10 @@ public:
 
   /// Activity log for an agent (last N human-readable lines).
   void appendAgentActivity(const std::string& agentId, const std::string& line);
+  void upsertAgentActivity(const std::string& agentId,
+                           const std::string& key,
+                           const std::string& line,
+                           std::chrono::milliseconds ttl = std::chrono::milliseconds{0});
   std::vector<std::string> agentActivityLog(const std::string& agentId, int maxLines = 3) const;
 
   // ── Streaming management ──
@@ -153,6 +195,13 @@ public:
   // ── Queued Messages ──
   void setQueuedMessageCount(int count);
   int queuedMessageCount() const;
+  void queueMessageId(const std::string& messageId);
+  void dequeueMessageId(const std::string& messageId);
+  bool isMessageQueued(const std::string& messageId) const;
+  void upsertQueuedUserMessage(QueuedUserMessage message);
+  void removeQueuedUserMessage(const std::string& messageId);
+  std::vector<QueuedUserMessage>
+  queuedUserMessagesForAgent(const std::string& agentId) const;
 
   // ── Permissions (queue to support concurrent requests) ──
   void pushPendingPermission(PendingPermission perm);
@@ -160,6 +209,10 @@ public:
   void clearPendingPermissions();
   std::optional<PendingPermission> pendingPermission() const;
   bool hasPendingPermissions() const;
+
+  // ── Embedding ──
+  void setEmbeddingDownload(EmbeddingDownloadState state);
+  EmbeddingDownloadState embeddingDownload() const;
 
   // ── Todos ──
   void setAgentTodos(const std::string& agentId,
@@ -200,6 +253,7 @@ public:
   // ── Dirty tracking ──
   bool isDirty() const;
   void clearDirty();
+  bool consumeFullResyncRequested();
   void markDirtyPublic() { markDirty(); }
 
 private:
@@ -207,6 +261,7 @@ private:
 
   mutable std::mutex mutex_;
   bool dirty_ = true;
+  bool fullResyncRequested_ = false;
 
   ConnectionStatus connectionStatus_ = ConnectionStatus::Disconnected;
   std::string threadId_;
@@ -220,6 +275,8 @@ private:
   firmius::shared::AgentStatus agentStatus_ = firmius::shared::AgentStatus::Idle;
   std::string modelLabel_;
   std::string liveMessage_;
+  bool daemonReady_ = false;
+  firmius::daemon::HookStateSnapshot hookState_;
 
   // ── Item-based transcript ──
   std::vector<std::unique_ptr<TranscriptItem>> items_;
@@ -233,9 +290,11 @@ private:
   std::unordered_map<std::string, AgentTextItem*> agentTextItems_;
   std::unordered_map<std::string, AgentThinkingItem*> agentThinkingItems_;
   // Per-agent activity log (human-readable lines)
-  std::unordered_map<std::string, std::vector<std::string>> agentActivityLogs_;
+  std::unordered_map<std::string, std::vector<AgentActivityEntry>> agentActivityLogs_;
 
   int queuedMessageCount_ = 0;
+  std::unordered_set<std::string> queuedMessageIds_;
+  std::vector<QueuedUserMessage> queuedUserMessages_;
   std::deque<PendingPermission> pendingPermissions_;
   std::unordered_map<std::string, std::vector<firmius::shared::TodoItem>> agentTodos_;
   bool todoVisible_ = true;
@@ -253,6 +312,7 @@ private:
   std::unordered_map<std::string, ToolCallState> toolCalls_;
   std::unordered_map<std::string, std::string> processToTool_;  // processId → toolCallId
   std::unordered_map<std::string, AgentState> agents_;
+  EmbeddingDownloadState embeddingDownload_;
 };
 
 } // namespace firmius::tui2

@@ -19,25 +19,22 @@ std::vector<std::string> AgentTabBar::render(int width) const {
   // Color palette for agent pills
   std::string line;
 
-  for (const auto* agent : agents) {
-    if (!agent) continue;
+  for (const auto& agent : agents) {
 
-    bool focused = (agent->agentId == focusedId);
-    bool active = agent->running &&
-                  (agent->status == firmius::shared::AgentStatus::Streaming ||
-                   agent->status == firmius::shared::AgentStatus::ExecutingTool ||
-                   agent->status == firmius::shared::AgentStatus::ProviderWaiting);
+    bool focused = (agent.agentId == focusedId);
+    bool active = agent.running &&
+                  (agent.status == firmius::shared::AgentStatus::Streaming ||
+                   agent.status == firmius::shared::AgentStatus::ExecutingTool ||
+                   agent.status == firmius::shared::AgentStatus::ProviderWaiting);
 
-    // Build pill label — prefer title (more descriptive) over friendlyName
+    // Build pill label — prefer the operator-facing friendly name.
     std::string label;
-    if (!agent->title.empty()) {
-      label = agent->title;
-    } else if (!agent->friendlyName.empty()) {
-      label = agent->friendlyName;
-    } else if (!agent->personaName.empty()) {
-      label = agent->personaName;
+    if (!agent.friendlyName.empty()) {
+      label = agent.friendlyName;
+    } else if (!agent.title.empty()) {
+      label = agent.title;
     } else {
-      label = agent->agentId.substr(0, 8);
+      label = agent.agentId.substr(0, 8);
     }
 
     // Truncate label
@@ -46,7 +43,7 @@ std::vector<std::string> AgentTabBar::render(int width) const {
     // State indicator
     std::string stateStr;
     if (active) {
-      switch (agent->status) {
+      switch (agent.status) {
       case firmius::shared::AgentStatus::Streaming:
         stateStr = " *";
         break;
@@ -60,9 +57,9 @@ std::vector<std::string> AgentTabBar::render(int width) const {
         stateStr = " +";
         break;
       }
-    } else if (agent->status == firmius::shared::AgentStatus::Error) {
+    } else if (agent.status == firmius::shared::AgentStatus::Error) {
       stateStr = " !";
-    } else if (!agent->running && agent->booting) {
+    } else if (!agent.running && agent.booting) {
       stateStr = " ..";
     }
 
@@ -80,7 +77,7 @@ std::vector<std::string> AgentTabBar::render(int width) const {
       line += ansi::fgRgb(theme.agentStrip.item.busy.fg.r,
                           theme.agentStrip.item.busy.fg.g,
                           theme.agentStrip.item.busy.fg.b, pill);
-    } else if (agent->status == firmius::shared::AgentStatus::Error) {
+    } else if (agent.status == firmius::shared::AgentStatus::Error) {
       line += ansi::fgRgb(theme.agentStrip.item.error.fg.r,
                           theme.agentStrip.item.error.fg.g,
                           theme.agentStrip.item.error.fg.b, pill);
@@ -89,7 +86,7 @@ std::vector<std::string> AgentTabBar::render(int width) const {
     }
 
     // Separator between pills
-    if (agent != agents.back()) {
+    if (&agent != &agents.back()) {
       line += ansi::dim("|");
     }
   }

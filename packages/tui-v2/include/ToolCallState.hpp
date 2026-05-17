@@ -27,6 +27,7 @@ struct ToolCallState {
   std::string toolCallId;
   std::string toolName;
   std::string agentId;
+  std::string subagentId;
   std::string args;               // Final args (set from AgentToolCall)
 
   ToolCallPhase phase = ToolCallPhase::Streaming;

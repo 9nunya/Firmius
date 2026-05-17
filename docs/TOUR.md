@@ -36,23 +36,7 @@ Firmius supports MCP over `stdio` and `http`, including:
 
 That means MCP is integrated into the workflow, not stapled on top of it.
 
-## 4. Rolling memory is engineered, not improvised
-
-Firmius does not rely on “summarize harder” as its memory strategy.
-
-You get:
-
-- occupancy targets and thresholds
-- balanced, aggressive, extended, and custom presets
-- observer and reflector passes
-- a dedicated working-memory updater lane
-- watched-file overlays
-- durable user and project memory
-- exact turn recall when compressed context is not enough
-
-This is the difference between an agent staying coherent and an agent slowly becoming fiction.
-
-## 5. Watched files are first-class context
+## 4. Watched files are first-class context
 
 Firmius tracks what the runtime has:
 
@@ -62,7 +46,7 @@ Firmius tracks what the runtime has:
 
 That sounds small until you use it in a large repo. The agent stops wasting turns rediscovering its own work and gets much better at staying grounded in what actually changed.
 
-## 6. The tool surface is built for real work
+## 5. The tool surface is built for real work
 
 Firmius agents can use:
 
@@ -77,7 +61,7 @@ Firmius agents can use:
 
 This is not “LLM plus two accessories.” It is a working toolbelt.
 
-## 7. LSP support keeps agents out of the guesswork lane
+## 6. LSP support keeps agents out of the guesswork lane
 
 Firmius includes real semantic code intelligence:
 
@@ -92,7 +76,7 @@ Firmius includes real semantic code intelligence:
 
 That means agents can navigate code like a coding tool should, instead of pretending keyword search is good enough.
 
-## 8. Provider routing is part of the architecture
+## 7. Provider routing is part of the architecture
 
 Firmius supports multiple providers and lets you route different purposes to different model lanes.
 
@@ -112,7 +96,7 @@ Current provider set includes:
 
 That matters because planning, execution, review, and memory maintenance do not all need the same model profile.
 
-## 9. Workflows are editable markdown, not hardcoded ceremony
+## 8. Workflows are editable markdown, not hardcoded ceremony
 
 Built-in workflows live in `workflows/`.
 Firmius bootstraps them into `~/.firmius/workflows/` and turns each markdown file into a slash command.
@@ -126,7 +110,7 @@ That gives you a workflow system that is:
 
 The result is more open than a hidden prompt system and more practical than rebuilding the app for every workflow tweak.
 
-## 10. Persistence is doing real product work
+## 9. Persistence is doing real product work
 
 Firmius thread storage keeps:
 
@@ -135,13 +119,12 @@ Firmius thread storage keeps:
 - plans
 - todos
 - live state
-- rolling-memory state
 - compaction snapshots
 - artifacts
 
 That is why undo, resume, recall, artifacts, and planning feel like one product instead of disconnected features.
 
-## 11. Audits and benchmarks are built in
+## 10. Audits and benchmarks are built in
 
 Firmius is opinionated about verification.
 

@@ -34,12 +34,6 @@ std::string bucketLabelForTurn(const shared::AgentTurn &turn) {
   if (turn.turnId == "runtime-overlay-user-memory") {
     return "user_memory";
   }
-  if (turn.turnId == "runtime-overlay-rolling-status") {
-    return "rolling_status";
-  }
-  if (turn.turnId == "runtime-overlay-rolling-memory") {
-    return "rolling_observations";
-  }
   return "system_overlay";
 }
 

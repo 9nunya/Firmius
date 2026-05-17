@@ -533,6 +533,7 @@ struct UserMessageSent {
   std::string messageId;
   std::string text;
   std::string threadId;
+  std::string agentId;
   std::vector<firmius::shared::ImageContent> images;
   bool operator==(const UserMessageSent &) const = default;
 };
@@ -555,6 +556,19 @@ struct AgentFinished {
   AgentOutcome outcome;
   std::string parentId = "";
   bool operator==(const AgentFinished &) const = default;
+};
+
+/**
+ * @brief Emitted when an embedding model download progresses.
+ */
+struct EmbeddingModelProgress {
+  std::string agentId;
+  std::string parentId = "";
+  std::string modelId;
+  uint64_t bytesDownloaded = 0;
+  uint64_t totalBytes = 0;
+  std::string status; // "downloading", "extracting", "ready", "error"
+  bool operator==(const EmbeddingModelProgress &) const = default;
 };
 
 /**
@@ -592,7 +606,8 @@ using AppEvent = std::variant<
     ThreadDeleted, ConfigUpdated, ModelsRefreshed, ProviderModelsFetchStarted,
     ProviderModelsFetchFinished, ModelDiscovered, ThreadTitleUpdated,
     MessageQueued, MessageDequeued, InternalMessageQueued,
-    InternalMessageDequeued, UserMessageSent, AgentTodoUpdated, AgentFinished>;
+    InternalMessageDequeued, UserMessageSent, AgentTodoUpdated, AgentFinished,
+    EmbeddingModelProgress>;
 
 } // namespace firmius::shared
 

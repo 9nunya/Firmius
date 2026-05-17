@@ -37,6 +37,10 @@ public:
 
   // ── Thread operations ──
   std::vector<firmius::shared::ThreadMetadata> listThreads() const;
+  std::vector<firmius::daemon::ThreadOverview>
+  listThreadOverviews(const std::string &cwd) const;
+  std::optional<firmius::daemon::ThreadSnapshot> getThread(
+      const std::string &threadId) const;
   firmius::daemon::ThreadsCreateResponse createThread(const std::string &cwd,
                                                        const std::string &persona,
                                                        const std::string &mode);
@@ -64,6 +68,9 @@ public:
       const std::string &threadId, const std::string &agentId) const;
   std::optional<firmius::daemon::AgentRuntimeSnapshot> interruptAgent(
       const std::string &threadId, const std::string &agentId);
+  std::optional<firmius::daemon::AgentRuntimeSnapshot>
+  abortAndFlushQueuedMessages(const std::string &threadId,
+                              const std::string &agentId);
   std::optional<firmius::daemon::AgentRuntimeSnapshot> switchModel(
       const std::string &agentId,
       const std::string &providerId,

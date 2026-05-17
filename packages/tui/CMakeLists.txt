@@ -19,7 +19,6 @@ target_sources(firmius_tui PRIVATE
     src/commands/UndoCommand.cpp
     src/commands/CompactCommand.cpp
     src/commands/ConfigCommand.cpp
-    src/commands/MemoryCommand.cpp
     src/commands/ModeCommand.cpp
     src/commands/ConnectCommand.cpp
     src/commands/McpCommand.cpp
@@ -43,7 +42,6 @@ target_sources(firmius_tui PRIVATE
     src/modals/ThreadLockedModal.cpp
     src/modals/ModelPickerModal.cpp
     src/modals/ConfigDisplayModal.cpp
-    src/modals/RollingMemorySettingsModal.cpp
     src/modals/RouterModal.cpp
     src/modals/ProvidersModal.cpp
     src/modals/PurposesModal.cpp

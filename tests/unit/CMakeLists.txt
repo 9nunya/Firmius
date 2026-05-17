@@ -1370,19 +1370,6 @@ target_include_directories(test_edit_undo PRIVATE
 gtest_discover_tests(test_edit_undo)
 
 
-add_executable(test_rolling_context_manager
-    core/test_rolling_context_manager.cpp
-)
-target_link_libraries(test_rolling_context_manager PRIVATE
-    firmius::core
-    firmius::shared
-    GTest::gtest_main
-    GTest::gmock
-)
-target_include_directories(test_rolling_context_manager PRIVATE
-    ${rapidjson_SOURCE_DIR}/include
-)
-gtest_discover_tests(test_rolling_context_manager)
 add_executable(test_stream_insanity
     core/test_stream_insanity.cpp
 )

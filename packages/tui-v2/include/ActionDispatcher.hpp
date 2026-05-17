@@ -24,7 +24,7 @@ public:
   bool openThread(const std::string &threadId);
 
   /// Interrupt the currently active agent.
-  bool interruptAgent();
+  bool interruptAgent(bool flushQueuedMessages = false);
 
   /// Resolve a pending permission request.
   bool resolvePermission(const std::string &requestId,
@@ -32,6 +32,7 @@ public:
 
   /// Load transcript snapshot for the current thread into state.
   void loadTranscript();
+  void loadTranscriptForAgent(const std::string &agentId, bool replace = false);
 
   /// Execute a workflow by ID. Creates a thread if none exists.
   bool executeWorkflow(const std::string &workflowId,

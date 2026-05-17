@@ -32,6 +32,7 @@
 #include "audits/WebSearchAudit.hpp"
 #include "audits/ReasoningTraceAudit.hpp"
 #include "audits/TokenWasteAudit.hpp"
+#include "audits/EmbeddingAudit.hpp"
 
 namespace firmius::audits {
 
@@ -70,6 +71,7 @@ std::vector<std::unique_ptr<shared::IAudit>> createAudits() {
     audits.push_back(std::make_unique<WindsurfDiscoveryAudit>());
     audits.push_back(std::make_unique<WindsurfStreamAudit>());
     audits.push_back(std::make_unique<TokenWasteAudit>());
+    audits.push_back(std::make_unique<EmbeddingAudit>());
     return audits;
 
 }

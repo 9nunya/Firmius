@@ -32,6 +32,9 @@ public:
   bool unregisterClient(const std::string &clientId);
   std::vector<ClientSessionSnapshot> listClients() const;
   std::vector<firmius::shared::ThreadMetadata> listThreads() const;
+  std::vector<ThreadOverview>
+  listThreadOverviews(const std::string &clientId,
+                      const ThreadOverviewRequest &request) const;
   ThreadSnapshot getThread(const std::string &clientId,
                            const ThreadsOpenRequest &request) const;
   ThreadsOpenResponse openThread(const std::string &clientId,
@@ -53,7 +56,11 @@ public:
   std::optional<AgentRuntimeSnapshot>
   compactAgent(const AgentTargetRequest &request);
   std::optional<AgentRuntimeSnapshot>
-  interruptAgent(const AgentTargetRequest &request);
+  interruptAgent(const std::string &clientId,
+                 const AgentTargetRequest &request);
+  std::optional<AgentRuntimeSnapshot>
+  abortAndFlushQueuedMessages(const std::string &clientId,
+                              const AgentTargetRequest &request);
   std::vector<ProcessSnapshot> listProcesses(const ProcessesListRequest &request) const;
   std::optional<ProcessSnapshot> getProcess(const ProcessesGetRequest &request) const;
   ProcessRuntimeSummary focusProcessState(const std::string &clientId,
@@ -104,9 +111,6 @@ public:
   PurposesConfigSnapshot getPurposesConfig() const;
   PurposesConfigSnapshot
   updatePurposesConfig(const PurposesConfigUpdateRequest &request);
-  RollingMemoryConfigSnapshot getRollingMemoryConfig() const;
-  RollingMemoryConfigSnapshot
-  updateRollingMemoryConfig(const RollingMemoryConfigUpdateRequest &request);
   McpConfigSnapshot getMcpConfig() const;
   McpConfigSnapshot updateMcpConfig(const McpConfigUpdateRequest &request);
   HookStatusSnapshot listHooks() const;

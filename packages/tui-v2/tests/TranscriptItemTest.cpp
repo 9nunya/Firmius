@@ -14,6 +14,15 @@ TEST(TranscriptItemTest, UserMessageRendersWithPrefix) {
   EXPECT_NE(lines[0].find("Hello world"), std::string::npos);
 }
 
+TEST(TranscriptItemTest, QueuedUserMessageRendersDimItalicWithDistinctPrefix) {
+  UserMessageItem item("Hello world", "lead", "m1", true);
+  auto lines = item.render(80);
+  ASSERT_GE(lines.size(), 1u);
+  EXPECT_NE(lines[0].find("»"), std::string::npos);
+  EXPECT_NE(lines[0].find("\x1b[2m"), std::string::npos);
+  EXPECT_NE(lines[0].find("\x1b[3m"), std::string::npos);
+}
+
 TEST(TranscriptItemTest, ErrorMessageRendersWithExclamation) {
   ErrorMessageItem item("Something went wrong");
   auto lines = item.render(80);

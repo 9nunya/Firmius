@@ -62,7 +62,6 @@ Notes:
 | `/history` | Show transcript rewind console |
 | `/edits` | Show persisted edit history and rollback tools |
 | `/config` | View current config |
-| `/memory` | Configure rolling-memory behavior |
 | `/connect <provider>` | Add a provider account |
 | `/accounts <provider>` | Inspect stored accounts or keys |
 | `/quotas <provider>` | View provider quota state when supported |
@@ -162,28 +161,12 @@ Typical flow:
 
 ## Memory and recall
 
-Open `/memory` to configure the rolling-memory system.
-
-Current controls include:
-
-- mode: `rolling_forever`, `legacy_compaction`, or `disabled`
-- preset: `aggressive`, `balanced`, `extended`, or `custom`
-- target, buffer, and emergency occupancy thresholds
-- retained tail ratio
-- minimum retained tail tokens
-- minimum chunk tokens
-- dedicated model picks for:
-  - observer
-  - reflector
-  - working-memory updater
-
-Firmius also maintains runtime overlays for:
+Firmius maintains runtime overlays for:
 
 - active work state
 - watched files
 - loaded skills
 - loaded MCP state
-- rolling-memory status
 - durable user and project memory
 
 Durable memory lives under `~/.firmius/user/` and includes `USER.md`, `BEHAVIOR.md`, and project-specific logs.
@@ -242,7 +225,6 @@ Firmius persists more than messages. Threads keep:
 - plans
 - todos
 - live state
-- rolling-memory state
 - compaction snapshots
 - artifacts
 

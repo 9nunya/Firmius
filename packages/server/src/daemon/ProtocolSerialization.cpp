@@ -104,126 +104,6 @@ firmius::shared::ImageContent imageContentFromValue(const rapidjson::Value &valu
   throw std::runtime_error("JSON value is not ImageContent");
 }
 
-rapidjson::Value toJsonValue(
-    const firmius::shared::AgentConfig::RollingModelConfig &model,
-    rapidjson::Document::AllocatorType &allocator) {
-  rapidjson::Value out(rapidjson::kObjectType);
-  out.AddMember("enabled", model.enabled, allocator);
-  out.AddMember("provider_id", jsonString(model.providerId, allocator), allocator);
-  out.AddMember("model_id", jsonString(model.modelId, allocator), allocator);
-  out.AddMember("variant_name", jsonString(model.variantName, allocator), allocator);
-  return out;
-}
-
-firmius::shared::AgentConfig::RollingModelConfig
-rollingModelConfigFromJson(const rapidjson::Value &value) {
-  firmius::shared::AgentConfig::RollingModelConfig model;
-  if (!value.IsObject()) {
-    return model;
-  }
-  if (value.HasMember("enabled") && value["enabled"].IsBool()) {
-    model.enabled = value["enabled"].GetBool();
-  }
-  if (value.HasMember("provider_id") && value["provider_id"].IsString()) {
-    model.providerId = value["provider_id"].GetString();
-  }
-  if (value.HasMember("model_id") && value["model_id"].IsString()) {
-    model.modelId = value["model_id"].GetString();
-  }
-  if (value.HasMember("variant_name") && value["variant_name"].IsString()) {
-    model.variantName = value["variant_name"].GetString();
-  }
-  return model;
-}
-
-rapidjson::Value toJsonValue(
-    const firmius::shared::UserConfig::RollingMemoryConfig &config,
-    rapidjson::Document::AllocatorType &allocator) {
-  rapidjson::Value out(rapidjson::kObjectType);
-  out.AddMember("enabled", config.enabled, allocator);
-  out.AddMember("mode", jsonString(config.mode, allocator), allocator);
-  out.AddMember("preset", jsonString(config.preset, allocator), allocator);
-  out.AddMember("target_occupancy_ratio", config.targetOccupancyRatio, allocator);
-  out.AddMember("buffer_occupancy_ratio", config.bufferOccupancyRatio, allocator);
-  out.AddMember("emergency_occupancy_ratio", config.emergencyOccupancyRatio,
-                allocator);
-  out.AddMember("reflection_occupancy_ratio", config.reflectionOccupancyRatio,
-                allocator);
-  out.AddMember("retain_tail_ratio", config.retainTailRatio, allocator);
-  out.AddMember("minimum_retained_tail_tokens",
-                config.minimumRetainedTailTokens, allocator);
-  out.AddMember("minimum_chunk_tokens", config.minimumChunkTokens, allocator);
-  out.AddMember("emit_event_turns", config.emitEventTurns, allocator);
-  out.AddMember("observer", toJsonValue(config.observer, allocator), allocator);
-  out.AddMember("reflector", toJsonValue(config.reflector, allocator), allocator);
-  out.AddMember("working_memory_updater",
-                toJsonValue(config.workingMemoryUpdater, allocator), allocator);
-  return out;
-}
-
-firmius::shared::UserConfig::RollingMemoryConfig
-rollingMemoryConfigFromJson(const rapidjson::Value &value) {
-  firmius::shared::UserConfig::RollingMemoryConfig config;
-  if (!value.IsObject()) {
-    return config;
-  }
-  if (value.HasMember("enabled") && value["enabled"].IsBool()) {
-    config.enabled = value["enabled"].GetBool();
-  }
-  if (value.HasMember("mode") && value["mode"].IsString()) {
-    config.mode = value["mode"].GetString();
-  }
-  if (value.HasMember("preset") && value["preset"].IsString()) {
-    config.preset = value["preset"].GetString();
-  }
-  if (value.HasMember("target_occupancy_ratio") &&
-      value["target_occupancy_ratio"].IsNumber()) {
-    config.targetOccupancyRatio = value["target_occupancy_ratio"].GetFloat();
-  }
-  if (value.HasMember("buffer_occupancy_ratio") &&
-      value["buffer_occupancy_ratio"].IsNumber()) {
-    config.bufferOccupancyRatio = value["buffer_occupancy_ratio"].GetFloat();
-  }
-  if (value.HasMember("emergency_occupancy_ratio") &&
-      value["emergency_occupancy_ratio"].IsNumber()) {
-    config.emergencyOccupancyRatio =
-        value["emergency_occupancy_ratio"].GetFloat();
-  }
-  if (value.HasMember("reflection_occupancy_ratio") &&
-      value["reflection_occupancy_ratio"].IsNumber()) {
-    config.reflectionOccupancyRatio =
-        value["reflection_occupancy_ratio"].GetFloat();
-  }
-  if (value.HasMember("retain_tail_ratio") &&
-      value["retain_tail_ratio"].IsNumber()) {
-    config.retainTailRatio = value["retain_tail_ratio"].GetFloat();
-  }
-  if (value.HasMember("minimum_retained_tail_tokens") &&
-      value["minimum_retained_tail_tokens"].IsUint()) {
-    config.minimumRetainedTailTokens =
-        value["minimum_retained_tail_tokens"].GetUint();
-  }
-  if (value.HasMember("minimum_chunk_tokens") &&
-      value["minimum_chunk_tokens"].IsUint()) {
-    config.minimumChunkTokens = value["minimum_chunk_tokens"].GetUint();
-  }
-  if (value.HasMember("emit_event_turns") &&
-      value["emit_event_turns"].IsBool()) {
-    config.emitEventTurns = value["emit_event_turns"].GetBool();
-  }
-  if (value.HasMember("observer")) {
-    config.observer = rollingModelConfigFromJson(value["observer"]);
-  }
-  if (value.HasMember("reflector")) {
-    config.reflector = rollingModelConfigFromJson(value["reflector"]);
-  }
-  if (value.HasMember("working_memory_updater")) {
-    config.workingMemoryUpdater =
-        rollingModelConfigFromJson(value["working_memory_updater"]);
-  }
-  return config;
-}
-
 rapidjson::Value toJsonValue(const firmius::shared::ModelRouteCategory &category,
                              rapidjson::Document::AllocatorType &allocator) {
   rapidjson::Value out(rapidjson::kObjectType);
@@ -757,8 +637,6 @@ rapidjson::Value toJsonValue(const firmius::shared::UserConfig &config,
   }
   out.AddMember("show_internal_nudges", config.showInternalNudges, allocator);
   out.AddMember("hide_errors", config.hideErrors, allocator);
-  out.AddMember("rolling_memory",
-                toJsonValue(config.rollingMemory, allocator), allocator);
   rapidjson::Value routerCategories(rapidjson::kObjectType);
   for (const auto &[name, route] : config.modelRouterCategories) {
     routerCategories.AddMember(jsonString(name, allocator),
@@ -838,9 +716,6 @@ firmius::shared::UserConfig userConfigFromJson(const rapidjson::Value &value) {
   }
   if (value.HasMember("hide_errors") && value["hide_errors"].IsBool()) {
     config.hideErrors = value["hide_errors"].GetBool();
-  }
-  if (value.HasMember("rolling_memory")) {
-    config.rollingMemory = rollingMemoryConfigFromJson(value["rolling_memory"]);
   }
   if (value.HasMember("model_router_categories") &&
       value["model_router_categories"].IsObject()) {
@@ -1334,6 +1209,78 @@ ThreadsSendResponse threadsSendResponseFromJson(const rapidjson::Value &value) {
   return response;
 }
 
+rapidjson::Value toJsonValue(const ThreadOverviewRequest &request,
+                             rapidjson::Document::AllocatorType &allocator) {
+  rapidjson::Value out(rapidjson::kObjectType);
+  out.AddMember("cwd", jsonString(request.cwd, allocator), allocator);
+  return out;
+}
+
+ThreadOverviewRequest threadOverviewRequestFromJson(const rapidjson::Value &value) {
+  ThreadOverviewRequest request;
+  if (!value.IsObject()) {
+    return request;
+  }
+  if (value.HasMember("cwd") && value["cwd"].IsString()) {
+    request.cwd = value["cwd"].GetString();
+  }
+  return request;
+}
+
+rapidjson::Value toJsonValue(const ThreadOverview &snapshot,
+                             rapidjson::Document::AllocatorType &allocator) {
+  rapidjson::Value out(rapidjson::kObjectType);
+  auto threadDoc = firmius::shared::toJson(snapshot.thread);
+  rapidjson::Value threadValue(rapidjson::kObjectType);
+  threadValue.CopyFrom(threadDoc, allocator);
+  out.AddMember("thread", threadValue, allocator);
+  out.AddMember("agent_count", static_cast<std::uint64_t>(snapshot.agentCount),
+                allocator);
+  out.AddMember("artifact_count",
+                static_cast<std::uint64_t>(snapshot.artifactCount), allocator);
+  out.AddMember("lock_owner_pid", snapshot.lockOwnerPid, allocator);
+  out.AddMember("lock_owner_client_id",
+                jsonString(snapshot.lockOwnerClientId, allocator), allocator);
+  out.AddMember("lock_owner_ui_kind",
+                jsonString(snapshot.lockOwnerUiKind, allocator), allocator);
+  out.AddMember("locked_by_other_client", snapshot.lockedByOtherClient,
+                allocator);
+  return out;
+}
+
+ThreadOverview threadOverviewFromJson(const rapidjson::Value &value) {
+  ThreadOverview snapshot;
+  if (!value.IsObject()) {
+    return snapshot;
+  }
+  if (value.HasMember("thread") && value["thread"].IsObject()) {
+    snapshot.thread = firmius::shared::threadMetadataFromJson(value["thread"]);
+  }
+  if (value.HasMember("agent_count") && value["agent_count"].IsUint64()) {
+    snapshot.agentCount = static_cast<std::size_t>(value["agent_count"].GetUint64());
+  }
+  if (value.HasMember("artifact_count") && value["artifact_count"].IsUint64()) {
+    snapshot.artifactCount =
+        static_cast<std::size_t>(value["artifact_count"].GetUint64());
+  }
+  if (value.HasMember("lock_owner_pid") && value["lock_owner_pid"].IsInt()) {
+    snapshot.lockOwnerPid = value["lock_owner_pid"].GetInt();
+  }
+  if (value.HasMember("lock_owner_client_id") &&
+      value["lock_owner_client_id"].IsString()) {
+    snapshot.lockOwnerClientId = value["lock_owner_client_id"].GetString();
+  }
+  if (value.HasMember("lock_owner_ui_kind") &&
+      value["lock_owner_ui_kind"].IsString()) {
+    snapshot.lockOwnerUiKind = value["lock_owner_ui_kind"].GetString();
+  }
+  if (value.HasMember("locked_by_other_client") &&
+      value["locked_by_other_client"].IsBool()) {
+    snapshot.lockedByOtherClient = value["locked_by_other_client"].GetBool();
+  }
+  return snapshot;
+}
+
 rapidjson::Value toJsonValue(const UiSnapshotRequest &request,
                              rapidjson::Document::AllocatorType &allocator) {
   rapidjson::Value out(rapidjson::kObjectType);
@@ -1405,7 +1352,6 @@ rapidjson::Value toJsonValue(const UiSnapshot &snapshot,
   out.AddMember("config", toJsonValue(snapshot.config, allocator), allocator);
   out.AddMember("router", toJsonValue(snapshot.router, allocator), allocator);
   out.AddMember("purposes", toJsonValue(snapshot.purposes, allocator), allocator);
-  out.AddMember("rolling_memory", toJsonValue(snapshot.rollingMemory, allocator), allocator);
   out.AddMember("mcp", toJsonValue(snapshot.mcp, allocator), allocator);
   out.AddMember("hooks", toJsonValue(snapshot.hooks, allocator), allocator);
   out.AddMember("pacts", toJsonValue(snapshot.pacts, allocator), allocator);
@@ -1441,7 +1387,6 @@ UiSnapshot uiSnapshotFromJson(const rapidjson::Value &value) {
   if (value.HasMember("config")) snapshot.config = userConfigSnapshotFromJson(value["config"]);
   if (value.HasMember("router")) snapshot.router = routerConfigSnapshotFromJson(value["router"]);
   if (value.HasMember("purposes")) snapshot.purposes = purposesConfigSnapshotFromJson(value["purposes"]);
-  if (value.HasMember("rolling_memory")) snapshot.rollingMemory = rollingMemoryConfigSnapshotFromJson(value["rolling_memory"]);
   if (value.HasMember("mcp")) snapshot.mcp = mcpConfigSnapshotFromJson(value["mcp"]);
   if (value.HasMember("hooks")) snapshot.hooks = hookStateSnapshotFromJson(value["hooks"]);
   if (value.HasMember("pacts") && value["pacts"].IsArray()) {
@@ -1634,6 +1579,27 @@ std::vector<firmius::shared::ThreadMetadata> threadMetadataListFromJson(
   }
   for (const auto &entry : value.GetArray()) {
     threads.push_back(firmius::shared::threadMetadataFromJson(entry));
+  }
+  return threads;
+}
+
+rapidjson::Value toJsonValue(const std::vector<ThreadOverview> &threads,
+                             rapidjson::Document::AllocatorType &allocator) {
+  rapidjson::Value out(rapidjson::kArrayType);
+  for (const auto &thread : threads) {
+    out.PushBack(toJsonValue(thread, allocator), allocator);
+  }
+  return out;
+}
+
+std::vector<ThreadOverview> threadOverviewListFromJson(
+    const rapidjson::Value &value) {
+  std::vector<ThreadOverview> threads;
+  if (!value.IsArray()) {
+    return threads;
+  }
+  for (const auto &entry : value.GetArray()) {
+    threads.push_back(threadOverviewFromJson(entry));
   }
   return threads;
 }
@@ -2835,39 +2801,6 @@ PurposesConfigUpdateRequest
 purposesConfigUpdateRequestFromJson(const rapidjson::Value &value) {
   PurposesConfigUpdateRequest request;
   request.purposeRoutes = purposesConfigSnapshotFromJson(value).purposeRoutes;
-  return request;
-}
-
-rapidjson::Value toJsonValue(const RollingMemoryConfigSnapshot &snapshot,
-                             rapidjson::Document::AllocatorType &allocator) {
-  rapidjson::Value out(rapidjson::kObjectType);
-  out.AddMember("rolling_memory",
-                toJsonValue(snapshot.rollingMemory, allocator), allocator);
-  return out;
-}
-
-RollingMemoryConfigSnapshot
-rollingMemoryConfigSnapshotFromJson(const rapidjson::Value &value) {
-  RollingMemoryConfigSnapshot snapshot;
-  if (!value.IsObject() || !value.HasMember("rolling_memory")) {
-    return snapshot;
-  }
-  snapshot.rollingMemory = rollingMemoryConfigFromJson(value["rolling_memory"]);
-  return snapshot;
-}
-
-rapidjson::Value toJsonValue(
-    const RollingMemoryConfigUpdateRequest &request,
-    rapidjson::Document::AllocatorType &allocator) {
-  return toJsonValue(RollingMemoryConfigSnapshot{request.rollingMemory},
-                     allocator);
-}
-
-RollingMemoryConfigUpdateRequest
-rollingMemoryConfigUpdateRequestFromJson(const rapidjson::Value &value) {
-  RollingMemoryConfigUpdateRequest request;
-  request.rollingMemory =
-      rollingMemoryConfigSnapshotFromJson(value).rollingMemory;
   return request;
 }
 

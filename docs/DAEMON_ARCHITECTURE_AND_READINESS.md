@@ -88,7 +88,7 @@ As of this checkpoint, the daemon has real progress in these areas:
 - transcript snapshots exist
 - tool-call snapshots exist
 - subagent activity snapshots exist
-- model/provider/account/quota/config/router/purposes/rolling-memory/MCP surfaces exist
+- model/provider/account/quota/config/router/purposes/MCP surfaces exist
 - history/edit-history surfaces exist
 - hook and pact surfaces exist
 
@@ -160,7 +160,7 @@ Legend:
 
 ### 4. Catalog And Config
 
-- `PARTIAL` Models/providers/accounts/quotas/config/router/purposes/rolling-memory/MCP surfaces exist.
+- `PARTIAL` Models/providers/accounts/quotas/config/router/purposes/MCP surfaces exist.
   - current status: broad RPC coverage exists
   - risk: provider onboarding and some MCP runtime-health semantics are not yet fully daemon-first
   - done when: `/connect`, `/providers`, `/accounts`, `/quotas`, and MCP runtime status are entirely daemon-backed
@@ -419,7 +419,7 @@ Manual verification is still required even if CI is green.
 
 ### Config/catalog truth
 
-- Change provider/config/router/purpose/rolling-memory/MCP state through daemon RPCs
+- Change provider/config/router/purpose/MCP state through daemon RPCs
 - Restart daemon
 - Confirm readback is correct and persisted
 
