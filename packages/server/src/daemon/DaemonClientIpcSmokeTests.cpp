@@ -411,8 +411,7 @@ TEST(DaemonClientIpcSmoke, ConnectsToExistingDaemonAndCreatesAndOpensThreads) {
   ASSERT_TRUE(client.connect());
 
   const auto created = client.createThread(
-      ThreadsCreateRequest{testPresence().cwd, "lead", "",
-                           firmius::shared::ThreadPermissionMode::Request});
+      ThreadsCreateRequest{testPresence().cwd, "lead", ""});
   ASSERT_FALSE(created.thread.threadId.empty());
 
   const auto opened = client.openThread(created.thread.threadId);
@@ -464,11 +463,9 @@ TEST(DaemonClientIpcSmoke, SendsAcrossProcessBoundaryAndSupportsTwoClients) {
   }));
 
   const auto threadA = clientA.createThread(
-      ThreadsCreateRequest{testPresence().cwd, "lead", "",
-                           firmius::shared::ThreadPermissionMode::Request});
+      ThreadsCreateRequest{testPresence().cwd, "lead", ""});
   const auto threadB = clientB.createThread(
-      ThreadsCreateRequest{testPresence().cwd, "lead", "",
-                           firmius::shared::ThreadPermissionMode::Request});
+      ThreadsCreateRequest{testPresence().cwd, "lead", ""});
   ASSERT_FALSE(threadA.thread.threadId.empty());
   ASSERT_FALSE(threadB.thread.threadId.empty());
   ASSERT_NE(threadA.thread.threadId, threadB.thread.threadId);
@@ -507,11 +504,9 @@ TEST(DaemonClientIpcSmoke,
   ASSERT_TRUE(clientB.connect());
 
   const auto threadA = clientA.createThread(
-      ThreadsCreateRequest{testPresence().cwd, "lead", "",
-                           firmius::shared::ThreadPermissionMode::Request});
+      ThreadsCreateRequest{testPresence().cwd, "lead", ""});
   const auto threadB = clientB.createThread(
-      ThreadsCreateRequest{testPresence().cwd, "lead", "",
-                           firmius::shared::ThreadPermissionMode::Request});
+      ThreadsCreateRequest{testPresence().cwd, "lead", ""});
   ASSERT_FALSE(threadA.thread.threadId.empty());
   ASSERT_FALSE(threadB.thread.threadId.empty());
   ASSERT_NE(threadA.thread.threadId, threadB.thread.threadId);
@@ -627,11 +622,9 @@ TEST(DaemonClientIpcSmoke,
   ASSERT_TRUE(clientB.connect());
 
   const auto threadA = clientA.createThread(
-      ThreadsCreateRequest{testPresence().cwd, "lead", "",
-                           firmius::shared::ThreadPermissionMode::Request});
+      ThreadsCreateRequest{testPresence().cwd, "lead", ""});
   const auto threadB = clientB.createThread(
-      ThreadsCreateRequest{testPresence().cwd, "lead", "",
-                           firmius::shared::ThreadPermissionMode::Request});
+      ThreadsCreateRequest{testPresence().cwd, "lead", ""});
   ASSERT_FALSE(threadA.thread.threadId.empty());
   ASSERT_FALSE(threadB.thread.threadId.empty());
   ASSERT_NE(threadA.thread.threadId, threadB.thread.threadId);
@@ -725,12 +718,10 @@ TEST(DaemonClientIpcSmoke, MultiClientSendDoesNotUseOtherClientsFocusWhenThreadI
   ASSERT_TRUE(clientB.connect());
 
   const auto threadA = clientA.createThread(
-      ThreadsCreateRequest{testPresence().cwd, "lead", "",
-                           firmius::shared::ThreadPermissionMode::Request});
+      ThreadsCreateRequest{testPresence().cwd, "lead", ""});
   ASSERT_FALSE(threadA.thread.threadId.empty());
   const auto threadB = clientB.createThread(
-      ThreadsCreateRequest{testPresence().cwd, "lead", "",
-                           firmius::shared::ThreadPermissionMode::Request});
+      ThreadsCreateRequest{testPresence().cwd, "lead", ""});
   ASSERT_FALSE(threadB.thread.threadId.empty());
   ASSERT_NE(threadA.thread.threadId, threadB.thread.threadId);
 
@@ -807,11 +798,9 @@ TEST(DaemonClientIpcSmoke, FocusSwitchDoesNotRetargetAnotherClientsSend) {
   ASSERT_TRUE(clientB.connect());
 
   const auto threadA = clientA.createThread(
-      ThreadsCreateRequest{testPresence().cwd, "lead", "",
-                           firmius::shared::ThreadPermissionMode::Request});
+      ThreadsCreateRequest{testPresence().cwd, "lead", ""});
   const auto threadB = clientB.createThread(
-      ThreadsCreateRequest{testPresence().cwd, "lead", "",
-                           firmius::shared::ThreadPermissionMode::Request});
+      ThreadsCreateRequest{testPresence().cwd, "lead", ""});
   ASSERT_FALSE(threadA.thread.threadId.empty());
   ASSERT_FALSE(threadB.thread.threadId.empty());
   ASSERT_NE(threadA.thread.threadId, threadB.thread.threadId);
@@ -874,8 +863,7 @@ TEST(DaemonClientIpcSmoke, ExposesTranscriptAndToolSnapshotsAcrossDaemonBoundary
   ASSERT_TRUE(client.connect());
 
   const auto created = client.createThread(
-      ThreadsCreateRequest{testPresence().cwd, "lead", "",
-                           firmius::shared::ThreadPermissionMode::Request});
+      ThreadsCreateRequest{testPresence().cwd, "lead", ""});
   ASSERT_FALSE(created.thread.threadId.empty());
 
   const auto opened = client.openThread(created.thread.threadId);
@@ -934,8 +922,7 @@ TEST(DaemonClientIpcSmoke, ExposesHistoryAndEditSnapshotsAcrossDaemonBoundary) {
   ASSERT_TRUE(client.connect());
 
   const auto created = client.createThread(
-      ThreadsCreateRequest{testPresence().cwd, "lead", "",
-                           firmius::shared::ThreadPermissionMode::Request});
+      ThreadsCreateRequest{testPresence().cwd, "lead", ""});
   ASSERT_FALSE(created.thread.threadId.empty());
 
   const auto opened = client.openThread(created.thread.threadId);
@@ -973,8 +960,7 @@ TEST(DaemonClientIpcSmoke, UiSnapshotCoversAttachStateAndEventReplayUsesSequence
   ASSERT_TRUE(client.connect());
 
   const auto created = client.createThread(
-      ThreadsCreateRequest{testPresence().cwd, "lead", "",
-                           firmius::shared::ThreadPermissionMode::Request});
+      ThreadsCreateRequest{testPresence().cwd, "lead", ""});
   ASSERT_FALSE(created.thread.threadId.empty());
   const auto opened = client.openThread(created.thread.threadId);
   ASSERT_TRUE(opened.opened);
@@ -1061,8 +1047,7 @@ TEST(DaemonClientIpcSmoke,
   ASSERT_TRUE(client.connect());
 
   const auto created = client.createThread(
-      ThreadsCreateRequest{testPresence().cwd, "lead", "",
-                           firmius::shared::ThreadPermissionMode::Request});
+      ThreadsCreateRequest{testPresence().cwd, "lead", ""});
   ASSERT_FALSE(created.thread.threadId.empty());
   const auto opened = client.openThread(created.thread.threadId);
   ASSERT_TRUE(opened.opened);
@@ -1124,11 +1109,9 @@ TEST(DaemonClientIpcSmoke,
   ASSERT_TRUE(clientB.connect());
 
   const auto threadA = clientA.createThread(
-      ThreadsCreateRequest{testPresence().cwd, "lead", "",
-                           firmius::shared::ThreadPermissionMode::Request});
+      ThreadsCreateRequest{testPresence().cwd, "lead", ""});
   const auto threadB = clientB.createThread(
-      ThreadsCreateRequest{testPresence().cwd, "lead", "",
-                           firmius::shared::ThreadPermissionMode::Request});
+      ThreadsCreateRequest{testPresence().cwd, "lead", ""});
   const auto openedA = clientA.openThread(threadA.thread.threadId);
   const auto openedB = clientB.openThread(threadB.thread.threadId);
   ASSERT_FALSE(openedA.focusedAgentId.empty());
@@ -1216,8 +1199,7 @@ TEST(DaemonClientIpcSmoke,
   ASSERT_TRUE(client.connect());
 
   const auto created = client.createThread(
-      ThreadsCreateRequest{testPresence().cwd, "lead", "",
-                           firmius::shared::ThreadPermissionMode::Request});
+      ThreadsCreateRequest{testPresence().cwd, "lead", ""});
   const auto opened = client.openThread(created.thread.threadId);
   ASSERT_FALSE(opened.focusedAgentId.empty());
 
@@ -1268,8 +1250,7 @@ TEST(DaemonClientIpcSmoke,
   ASSERT_TRUE(client.connect());
 
   const auto created = client.createThread(
-      ThreadsCreateRequest{testPresence().cwd, "lead", "",
-                           firmius::shared::ThreadPermissionMode::Request});
+      ThreadsCreateRequest{testPresence().cwd, "lead", ""});
   const auto opened = client.openThread(created.thread.threadId);
   ASSERT_FALSE(opened.focusedAgentId.empty());
 
@@ -1347,11 +1328,9 @@ TEST(DaemonClientIpcSmoke,
   ASSERT_TRUE(clientB.connect());
 
   const auto threadA = clientA.createThread(
-      ThreadsCreateRequest{testPresence().cwd, "lead", "",
-                           firmius::shared::ThreadPermissionMode::Request});
+      ThreadsCreateRequest{testPresence().cwd, "lead", ""});
   const auto threadB = clientB.createThread(
-      ThreadsCreateRequest{testPresence().cwd, "lead", "",
-                           firmius::shared::ThreadPermissionMode::Request});
+      ThreadsCreateRequest{testPresence().cwd, "lead", ""});
   const auto openedA = clientA.openThread(threadA.thread.threadId);
   const auto openedB = clientB.openThread(threadB.thread.threadId);
 
@@ -1420,8 +1399,7 @@ TEST(DaemonClientIpcSmoke,
   ASSERT_TRUE(client.connect());
 
   const auto created = client.createThread(
-      ThreadsCreateRequest{testPresence().cwd, "lead", "",
-                           firmius::shared::ThreadPermissionMode::Request});
+      ThreadsCreateRequest{testPresence().cwd, "lead", ""});
   const auto opened = client.openThread(created.thread.threadId);
   ASSERT_FALSE(opened.focusedAgentId.empty());
 
@@ -1481,6 +1459,86 @@ TEST(DaemonClientIpcSmoke,
   EXPECT_TRUE(daemon.isRunning());
 
   reconnect.disconnect();
+}
+
+// ── Rewind RPC smoke tests ────────────────────────────────────────────
+//
+// These exercise the wire format and request/response routing only. The
+// "does the rewind actually do the right thing" coverage lives in
+// test_harness_compound_undo where we can inspect persistence directly.
+// Here we just want to know:
+//   * rewind.preview parses params, returns a serialisable response,
+//     and reports a clean validation error for unknown turns.
+//   * rewind.execute parses params, surfaces the harness errorMessage,
+//     and doesn't crash the daemon when called against a fresh thread.
+
+TEST(DaemonClientIpcSmoke, RewindPreviewSurfacesValidationErrors) {
+  const std::string endpoint = uniqueEndpoint("rewind-preview");
+  ScopedDaemonProcess daemon(endpoint, daemonExecutablePath());
+  daemon.start();
+  ASSERT_TRUE(daemon.waitUntilReady(std::chrono::seconds(5)));
+
+  DaemonClientOptions clientOptions = makeOptions("client-rewind-preview", endpoint);
+  clientOptions.autoStart = false;
+  DaemonClient client(clientOptions);
+  ASSERT_TRUE(client.connect());
+
+  const auto created = client.createThread(
+      ThreadsCreateRequest{testPresence().cwd, "lead", ""});
+  ASSERT_FALSE(created.thread.threadId.empty());
+
+  // Unknown turn id → clean validation error, no crash.
+  RewindPreviewRequest req;
+  req.threadId = created.thread.threadId;
+  req.agentId = created.focusedAgentId;
+  req.targetTurnId = "this-turn-does-not-exist";
+  const auto response = client.previewRewind(req);
+  EXPECT_FALSE(response.errorMessage.empty())
+      << "Unknown turn must surface an error, got: turnsToUndo="
+      << response.turnsToUndo;
+  EXPECT_EQ(response.turnsToUndo, 0);
+  EXPECT_TRUE(response.codeRestoreSafe);  // default true; no batches → safe.
+  EXPECT_EQ(response.threadId, req.threadId);
+  EXPECT_EQ(response.agentId, req.agentId);
+
+  // Missing target turn id is also an error path.
+  RewindPreviewRequest empty;
+  empty.threadId = created.thread.threadId;
+  empty.agentId = created.focusedAgentId;
+  const auto emptyResponse = client.previewRewind(empty);
+  EXPECT_FALSE(emptyResponse.errorMessage.empty());
+
+  client.disconnect();
+}
+
+TEST(DaemonClientIpcSmoke, RewindExecuteReturnsErrorForUnknownTurn) {
+  const std::string endpoint = uniqueEndpoint("rewind-execute");
+  ScopedDaemonProcess daemon(endpoint, daemonExecutablePath());
+  daemon.start();
+  ASSERT_TRUE(daemon.waitUntilReady(std::chrono::seconds(5)));
+
+  DaemonClientOptions clientOptions = makeOptions("client-rewind-execute", endpoint);
+  clientOptions.autoStart = false;
+  DaemonClient client(clientOptions);
+  ASSERT_TRUE(client.connect());
+
+  const auto created = client.createThread(
+      ThreadsCreateRequest{testPresence().cwd, "lead", ""});
+  ASSERT_FALSE(created.thread.threadId.empty());
+
+  RewindExecuteRequest req;
+  req.threadId = created.thread.threadId;
+  req.agentId = created.focusedAgentId;
+  req.targetTurnId = "this-turn-does-not-exist";
+  req.mode = RewindMode::RestoreCodeAndConversation;
+
+  const auto response = client.executeRewind(req);
+  EXPECT_FALSE(response.applied);
+  EXPECT_FALSE(response.errorMessage.empty());
+  EXPECT_TRUE(response.undoActionId.empty());
+  EXPECT_TRUE(response.editUndoActionIds.empty());
+
+  client.disconnect();
 }
 
 } // namespace

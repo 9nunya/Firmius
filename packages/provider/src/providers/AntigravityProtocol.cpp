@@ -248,6 +248,11 @@ std::string AntigravityProtocol::prepareRequestBody(const AgentHistory &history,
   std::string modelForRequest = baseModel;
   if (isGemini3Pro) {
     std::string level = thinkingLevel.empty() ? "low" : thinkingLevel;
+    // Per opencode-antigravity-auth/src/plugin/transform/model-resolver.ts
+    // Gemini 3 Pro and 3.1 Pro both accept low/medium/high tiers as
+    // model-name suffixes. "max" is a Firmius alias for "high".
+    if (level == "max")
+      level = "high";
     modelForRequest = baseModel + "-" + level;
   } else if (isGemini3Flash) {
     modelForRequest = baseModel;

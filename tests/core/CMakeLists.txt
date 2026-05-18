@@ -87,3 +87,12 @@ target_link_libraries(test_model_downloader PRIVATE
     GTest::gtest_main
 )
 gtest_discover_tests(test_model_downloader)
+
+add_executable(test_working_memory test_working_memory.cpp)
+target_link_libraries(test_working_memory PRIVATE
+    firmius::core
+    firmius::shared
+    GTest::gtest_main
+)
+target_include_directories(test_working_memory PRIVATE ${rapidjson_SOURCE_DIR}/include)
+gtest_discover_tests(test_working_memory)

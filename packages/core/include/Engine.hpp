@@ -18,6 +18,7 @@
 #include <map>
 #include <optional>
 #include <chrono>
+#include <unordered_set>
 #include "utils/FastHash.hpp"
 
 namespace firmius::core {
@@ -148,6 +149,15 @@ public:
                          const shared::EditHistoryFilters& filters = {}) const;
     shared::EditUndoEligibility evaluateEditBatchUndo(const std::string& threadId,
                                                       const std::string& editBatchId) const;
+    /// Eligibility check that knows about a co-undo set: any blocker
+    /// whose batch id is in `coUndoBatchIds` is treated as if it were
+    /// already undone, because the caller is undoing it in the same
+    /// compound. Without this, chains of edits on the same file in one
+    /// turn would always block their predecessors.
+    shared::EditUndoEligibility evaluateEditBatchUndo(
+        const std::string& threadId,
+        const std::string& editBatchId,
+        const std::unordered_set<std::string>& coUndoBatchIds) const;
     shared::EditRedoEligibility evaluateEditBatchRedo(const std::string& threadId,
                                                       const std::string& undoActionId) const;
     shared::TranscriptUndoAction undoAgentTurnsWithRedo(const std::string& agentId, int count);

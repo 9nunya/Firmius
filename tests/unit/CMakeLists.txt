@@ -107,6 +107,22 @@ target_include_directories(test_fleet_lock PRIVATE
 )
 gtest_discover_tests(test_fleet_lock)
 
+# Todo tool tests
+add_executable(test_todo_write_tool
+    tools/test_todo_write_tool.cpp
+)
+target_link_libraries(test_todo_write_tool PRIVATE
+    firmius::core
+    firmius::shared
+    GTest::gtest_main
+    GTest::gmock
+    CURL::libcurl
+)
+target_include_directories(test_todo_write_tool PRIVATE
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_todo_write_tool)
+
 # Fleet lock regression tests (documented test scenarios)
 add_executable(test_fleet_lock_regression
     tools/test_fleet_lock_regression.cpp
@@ -1324,6 +1340,20 @@ target_include_directories(test_command_intent_analyzer PRIVATE
 )
 gtest_discover_tests(test_command_intent_analyzer)
 
+add_executable(test_policy_engine
+    core/test_policy_engine.cpp
+)
+target_link_libraries(test_policy_engine PRIVATE
+    firmius::core
+    firmius::shared
+    GTest::gtest_main
+    GTest::gmock
+)
+target_include_directories(test_policy_engine PRIVATE
+    ${rapidjson_SOURCE_DIR}/include
+)
+gtest_discover_tests(test_policy_engine)
+
 add_executable(test_workspace
     core/test_workspace.cpp
 )
@@ -1368,6 +1398,23 @@ target_include_directories(test_edit_undo PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/mocks
 )
 gtest_discover_tests(test_edit_undo)
+
+add_executable(test_harness_compound_undo
+    harness/test_harness_compound_undo.cpp
+)
+target_link_libraries(test_harness_compound_undo PRIVATE
+    firmius::core
+    firmius::provider
+    firmius::shared
+    GTest::gtest_main
+    GTest::gmock
+    CURL::libcurl
+)
+target_include_directories(test_harness_compound_undo PRIVATE
+    ${rapidjson_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/mocks
+)
+gtest_discover_tests(test_harness_compound_undo)
 
 
 add_executable(test_stream_insanity

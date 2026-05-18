@@ -12,6 +12,7 @@
 #if defined(_WIN32)
 #include <windows.h>
 #else
+#include <fcntl.h>
 #include <signal.h>
 #include <spawn.h>
 #include <sys/types.h>
@@ -306,11 +307,88 @@ PermissionQueueSnapshot DaemonClient::listPendingPermissions(
   return permissionQueueSnapshotFromJson(response["result"]);
 }
 
+PermissionCreateModeResponse DaemonClient::createPermissionMode(
+    const PermissionCreateModeRequest &request) const {
+  auto params = makeParams(request);
+  auto response = transport().sendRequest(kRpcPermissionsCreateMode, params, 3000);
+  if (!response.HasMember("result")) return {};
+  return permissionCreateModeResponseFromJson(response["result"]);
+}
+
+PermissionRenameModeResponse DaemonClient::renamePermissionMode(
+    const PermissionRenameModeRequest &request) const {
+  auto params = makeParams(request);
+  auto response = transport().sendRequest(kRpcPermissionsRenameMode, params, 3000);
+  if (!response.HasMember("result")) return {};
+  return permissionRenameModeResponseFromJson(response["result"]);
+}
+
+PermissionDeleteModeResponse DaemonClient::deletePermissionMode(
+    const PermissionDeleteModeRequest &request) const {
+  auto params = makeParams(request);
+  auto response = transport().sendRequest(kRpcPermissionsDeleteMode, params, 3000);
+  if (!response.HasMember("result")) return {};
+  return permissionDeleteModeResponseFromJson(response["result"]);
+}
+
 bool DaemonClient::resolvePermission(
     const PermissionResolveRequest &request) const {
   auto params = makeParams(request);
   auto response = transport().sendRequest(kRpcPermissionsResolve, params, 3000);
-  return boolResult(response["result"], "resolved");
+  // Server returns a bare bool. Old `boolResult(...,"resolved")` is wrong.
+  const auto &result = response["result"];
+  return result.IsBool() && result.GetBool();
+}
+
+bool DaemonClient::resolvePermissionWithRules(
+    const PermissionResolveWithRulesRequest &request) const {
+  auto params = makeParams(request);
+  auto response =
+      transport().sendRequest(kRpcPermissionsResolveWithRules, params, 3000);
+  if (!response.HasMember("result")) return false;
+  const auto &result = response["result"];
+  return result.IsBool() && result.GetBool();
+}
+
+PermissionListRulesResponse DaemonClient::listPolicyRules() const {
+  auto params = makeParams();
+  auto response = transport().sendRequest(kRpcPermissionsListRules, params, 3000);
+  if (!response.HasMember("result")) return {};
+  return permissionListRulesResponseFromJson(response["result"]);
+}
+
+PermissionUpsertRuleResponse DaemonClient::upsertPolicyRule(
+    const PermissionUpsertRuleRequest &request) const {
+  auto params = makeParams(request);
+  auto response =
+      transport().sendRequest(kRpcPermissionsUpsertRule, params, 3000);
+  if (!response.HasMember("result")) {
+    PermissionUpsertRuleResponse r;
+    if (response.HasMember("error") && response["error"].IsObject() &&
+        response["error"].HasMember("message") &&
+        response["error"]["message"].IsString()) {
+      r.errorMessage = response["error"]["message"].GetString();
+    }
+    return r;
+  }
+  return permissionUpsertRuleResponseFromJson(response["result"]);
+}
+
+PermissionDeleteRuleResponse DaemonClient::deletePolicyRule(
+    const PermissionDeleteRuleRequest &request) const {
+  auto params = makeParams(request);
+  auto response =
+      transport().sendRequest(kRpcPermissionsDeleteRule, params, 3000);
+  if (!response.HasMember("result")) return {};
+  return permissionDeleteRuleResponseFromJson(response["result"]);
+}
+
+PermissionReloadPolicyResponse DaemonClient::reloadPolicy() const {
+  auto params = makeParams();
+  auto response =
+      transport().sendRequest(kRpcPermissionsReloadPolicy, params, 3000);
+  if (!response.HasMember("result")) return {};
+  return permissionReloadPolicyResponseFromJson(response["result"]);
 }
 
 std::vector<ClientSessionSnapshot> DaemonClient::listClients() const {
@@ -714,13 +792,34 @@ void DaemonClient::spawnDaemon() const {
   CloseHandle(pi.hThread);
   CloseHandle(pi.hProcess);
 #else
+  // Detach daemon's stdio from the parent. The TUI puts the terminal in raw
+  // alt-screen mode; if the daemon writes to inherited stdout/stderr it
+  // scrambles the UI and is essentially invisible to the user. Redirect to
+  // either the requested log file or /dev/null. The daemon also honors
+  // FIRMIUS_DAEMON_LOG which lets it write structured PHASE messages into a
+  // file even when stdout/stderr are silenced.
+  posix_spawn_file_actions_t actions;
+  posix_spawn_file_actions_init(&actions);
+  // stdin <- /dev/null (always)
+  posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null",
+                                   O_RDONLY, 0);
+  const std::string stdoutTarget = options_.spawnedDaemonLogFile.empty()
+                                       ? std::string("/dev/null")
+                                       : options_.spawnedDaemonLogFile;
+  posix_spawn_file_actions_addopen(
+      &actions, STDOUT_FILENO, stdoutTarget.c_str(),
+      O_WRONLY | O_CREAT | O_APPEND, 0644);
+  // stderr -> dup of stdout target (single sink simplifies cleanup).
+  posix_spawn_file_actions_adddup2(&actions, STDOUT_FILENO, STDERR_FILENO);
+
   pid_t pid = -1;
   std::string endpoint = options_.connection.endpoint;
   char *argv[] = {const_cast<char *>(command.c_str()), const_cast<char *>("--endpoint"),
                   endpoint.data(), nullptr};
   const int rc = command.find('/') == std::string::npos
-      ? posix_spawnp(&pid, command.c_str(), nullptr, nullptr, argv, environ)
-      : posix_spawn(&pid, command.c_str(), nullptr, nullptr, argv, environ);
+      ? posix_spawnp(&pid, command.c_str(), &actions, nullptr, argv, environ)
+      : posix_spawn(&pid, command.c_str(), &actions, nullptr, argv, environ);
+  posix_spawn_file_actions_destroy(&actions);
   if (rc != 0) {
     throw std::runtime_error("failed to spawn firmiusd");
   }
@@ -740,6 +839,119 @@ firmius::core::JsonRpcTransport &DaemonClient::transport() const {
     transport_->start();
   }
   return *transport_;
+}
+
+// ── /connect wizard ─────────────────────────────────────────────────────
+//
+// Begin/submit/cancel are quick and use the standard 3000ms timeout. Finalize
+// is async on the server side (it kicks off a worker and returns immediately),
+// so the timeout here is also short — the actual outcome arrives via a
+// ConnectProgress event on the subscription stream.
+
+ConnectBeginResponse
+DaemonClient::beginConnect(const ConnectBeginRequest &request) const {
+  auto params = makeParams(request);
+  auto response = transport().sendRequest(kRpcConnectBegin, params, 5000);
+  return connectBeginResponseFromJson(response["result"]);
+}
+
+ConnectSubmitResponse
+DaemonClient::submitConnect(const ConnectSubmitRequest &request) const {
+  auto params = makeParams(request);
+  auto response = transport().sendRequest(kRpcConnectSubmit, params, 3000);
+  return connectSubmitResponseFromJson(response["result"]);
+}
+
+ConnectFinalizeResponse
+DaemonClient::finalizeConnect(const ConnectFinalizeRequest &request) const {
+  auto params = makeParams(request);
+  auto response = transport().sendRequest(kRpcConnectFinalize, params, 3000);
+  return connectFinalizeResponseFromJson(response["result"]);
+}
+
+ConnectCancelResponse
+DaemonClient::cancelConnect(const ConnectCancelRequest &request) const {
+  auto params = makeParams(request);
+  auto response = transport().sendRequest(kRpcConnectCancel, params, 3000);
+  return connectCancelResponseFromJson(response["result"]);
+}
+
+RewindPreviewResponse
+DaemonClient::previewRewind(const RewindPreviewRequest &request) const {
+  auto params = makeParams(request);
+  auto response = transport().sendRequest(kRpcRewindPreview, params, 5000);
+  if (!response.HasMember("result")) {
+    RewindPreviewResponse fallback;
+    fallback.targetTurnId = request.targetTurnId;
+    if (response.HasMember("error") && response["error"].IsObject() &&
+        response["error"].HasMember("message") &&
+        response["error"]["message"].IsString()) {
+      fallback.errorMessage = response["error"]["message"].GetString();
+    } else {
+      fallback.errorMessage = "rewind.preview returned no result";
+    }
+    return fallback;
+  }
+  return rewindPreviewResponseFromJson(response["result"]);
+}
+
+RewindExecuteResponse
+DaemonClient::executeRewind(const RewindExecuteRequest &request) const {
+  auto params = makeParams(request);
+  // Rewind can take a while if many edit batches need undoing on disk.
+  auto response = transport().sendRequest(kRpcRewindExecute, params, 30000);
+  if (!response.HasMember("result")) {
+    // Daemon-side throw → JSON-RPC "error" envelope. Surface the message
+    // so the overlay can show it instead of segfaulting on a missing key.
+    RewindExecuteResponse fallback;
+    fallback.applied = false;
+    if (response.HasMember("error") && response["error"].IsObject() &&
+        response["error"].HasMember("message") &&
+        response["error"]["message"].IsString()) {
+      fallback.errorMessage = response["error"]["message"].GetString();
+    } else {
+      fallback.errorMessage = "rewind.execute returned no result";
+    }
+    return fallback;
+  }
+  return rewindExecuteResponseFromJson(response["result"]);
+}
+
+RedoPreviewResponse
+DaemonClient::previewRedo(const RedoPreviewRequest &request) const {
+  auto params = makeParams(request);
+  auto response = transport().sendRequest(kRpcRedoPreview, params, 5000);
+  if (!response.HasMember("result")) {
+    RedoPreviewResponse fallback;
+    if (response.HasMember("error") && response["error"].IsObject() &&
+        response["error"].HasMember("message") &&
+        response["error"]["message"].IsString()) {
+      fallback.errorMessage = response["error"]["message"].GetString();
+    } else {
+      fallback.errorMessage = "redo.preview returned no result";
+    }
+    return fallback;
+  }
+  return redoPreviewResponseFromJson(response["result"]);
+}
+
+RedoExecuteResponse
+DaemonClient::executeRedo(const RedoExecuteRequest &request) const {
+  auto params = makeParams(request);
+  auto response = transport().sendRequest(kRpcRedoExecute, params, 30000);
+  if (!response.HasMember("result")) {
+    RedoExecuteResponse fallback;
+    fallback.applied = false;
+    if (response.HasMember("error") && response["error"].IsObject() &&
+        response["error"].HasMember("message") &&
+        response["error"]["message"].IsString()) {
+      fallback.errorMessage = response["error"]["message"].GetString();
+    } else {
+      fallback.errorMessage = "redo.execute returned no result";
+    }
+    return fallback;
+  }
+  return redoExecuteResponseFromJson(response["result"]);
 }
 
 } // namespace firmius::daemon

@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <limits>
+#include <map>
 #include <string>
 #include <utility>
 #include <variant>
@@ -387,7 +388,27 @@ struct ThreadMetadataUpdated {
 
 /**
  * @brief Emitted when core needs the UI to resolve a permission escalation.
+ *
+ * v2: carries policy-engine context — `category` is a kCat* constant, and
+ * structured request fields (cwd, url, host, persona, …) plus a vector of
+ * suggested rules the user can opt into. Legacy fields (command,
+ * targetPath, toolName, severity) stay for back-compat.
  */
+struct PermissionSuggestionWire {
+  std::string label;
+  std::string explanation;
+  std::string ruleId;          ///< Stable id within this escalation.
+  std::string category;
+  std::string decision;        ///< "allow" | "deny"
+  std::string scope;           ///< "global" | "project" | "session"
+  std::string comment;
+  /// Match keys → patterns. Same shape as PolicyRule::match.
+  std::map<std::string, std::string> match;
+  bool defaultSelected = false;
+
+  bool operator==(const PermissionSuggestionWire &) const = default;
+};
+
 struct PermissionEscalationRequest {
   std::string requestId;
   std::string threadId;
@@ -403,6 +424,20 @@ struct PermissionEscalationRequest {
   std::string commandPrimary;
   bool allowAlways = true;
   bool isDirectory = false;
+
+  // ── v2 fields ──
+  std::string category;        ///< "process.exec" | "file.read" | …
+  std::string cwd;
+  std::vector<std::string> subcommands;
+  std::string url;
+  std::string host;
+  std::string scheme;
+  std::string query;
+  std::string persona;
+  std::string parentPersona;
+  std::vector<std::string> toolScopes;
+  std::vector<PermissionSuggestionWire> suggestions;
+
   bool operator==(const PermissionEscalationRequest &) const = default;
 };
 

@@ -73,6 +73,17 @@ public:
     virtual void writeFile(const std::string& path, const std::vector<uint8_t>& data) = 0;
 
     /**
+     * @brief Removes a file from the host filesystem.
+     * Used by the edit-undo path to reverse "create file" mutations.
+     * Implementations must succeed silently if the file is already gone
+     * (e.g. the user deleted it manually) — the goal is "ensure not on
+     * disk", not "had to do work".
+     * @param path Absolute path to the file.
+     * @throws std::runtime_error if the path exists but cannot be removed.
+     */
+    virtual void deleteFile(const std::string& path) = 0;
+
+    /**
      * @brief Checks if a path exists on the host.
      * @param path The path to check.
      * @return True if it exists.

@@ -76,8 +76,10 @@ void hydrateThreadAgents(DaemonSession &session, AppState &state,
 ActionDispatcher::ActionDispatcher(DaemonSession &session, AppState &state)
     : session_(session), state_(state) {}
 
-bool ActionDispatcher::sendMessage(const std::string &text) {
-  if (text.empty()) return false;
+bool ActionDispatcher::sendMessage(
+    const std::string &text,
+    std::vector<firmius::shared::ImageContent> images) {
+  if (text.empty() && images.empty()) return false;
 
   try {
     auto threadId = state_.threadId();
@@ -89,7 +91,7 @@ bool ActionDispatcher::sendMessage(const std::string &text) {
       agentId = state_.focusedAgentId();
     }
 
-    auto response = session_.send(threadId, agentId, text);
+    auto response = session_.send(threadId, agentId, text, std::move(images));
     return response.accepted;
   } catch (const std::exception& e) {
     state_.addItem(std::make_unique<SystemNoticeItem>(
@@ -113,6 +115,16 @@ bool ActionDispatcher::createThread(const std::string &persona,
   // Items are managed by AppState — no setTranscriptLines needed
 
   session_.openThread(response.thread.threadId);
+  {
+    auto permSnap = session_.client().getPermissionMode(
+        firmius::daemon::PermissionModeRequest{});
+    state_.setActiveModeId(permSnap.activeModeId);
+    std::vector<AppState::ModeSummary> modes;
+    for (const auto &m : permSnap.modes) {
+      modes.push_back({m.id, m.name, m.description, m.builtIn});
+    }
+    state_.setModes(std::move(modes));
+  }
   hydrateThreadAgents(session_, state_, response.thread.threadId,
                       response.focusedAgentId);
   state_.setHookState(session_.client().hookState(
@@ -146,6 +158,16 @@ bool ActionDispatcher::openThread(const std::string &threadId) {
   state_.setAgentId(response.focusedAgentId);
   state_.setThreadTitle(response.thread.title);
   state_.setLiveMessage("");
+  {
+    auto permSnap = session_.client().getPermissionMode(
+        firmius::daemon::PermissionModeRequest{});
+    state_.setActiveModeId(permSnap.activeModeId);
+    std::vector<AppState::ModeSummary> modes;
+    for (const auto &m : permSnap.modes) {
+      modes.push_back({m.id, m.name, m.description, m.builtIn});
+    }
+    state_.setModes(std::move(modes));
+  }
   hydrateThreadAgents(session_, state_, response.thread.threadId,
                       response.focusedAgentId);
   state_.setHookState(session_.client().hookState(
@@ -208,6 +230,17 @@ bool ActionDispatcher::resolvePermission(
     const std::string &requestId,
     firmius::shared::PermissionResponse response) {
   bool ok = session_.resolvePermission(requestId, response);
+  if (ok) {
+    state_.popPendingPermission(requestId);
+  }
+  return ok;
+}
+
+bool ActionDispatcher::resolvePermissionWithRules(
+    const std::string &requestId,
+    const std::vector<std::string> &selectedSuggestionIds) {
+  bool ok = session_.resolvePermissionWithRules(requestId,
+                                                 selectedSuggestionIds);
   if (ok) {
     state_.popPendingPermission(requestId);
   }

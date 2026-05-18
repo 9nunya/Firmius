@@ -1,3 +1,4 @@
+#include "daemon/DaemonLog.hpp"
 #include "daemon/DaemonServer.hpp"
 
 #include <atomic>
@@ -34,6 +35,7 @@ void installSignalHandlers() {
 
 int main(int argc, char **argv) {
   installSignalHandlers();
+  FIRMIUS_DLOG_PHASE("firmiusd starting");
 
   firmius::daemon::DaemonConnectionInfo connection;
   for (int i = 1; i < argc; ++i) {
@@ -47,12 +49,21 @@ int main(int argc, char **argv) {
       continue;
     }
     if (arg == "--help") {
-      std::cout << "usage: firmiusd [--endpoint PATH]\n";
+      std::cout << "usage: firmiusd [--endpoint PATH]\n"
+                << "  --endpoint PATH    Unix-socket path (or named pipe on Windows).\n\n"
+                << "Environment:\n"
+                << "  FIRMIUS_DAEMON_VERBOSE   0 (default), 1, or trace\n"
+                << "  FIRMIUS_DAEMON_LOG       Path to redirect daemon logs into\n";
       return 0;
     }
     std::cerr << "firmiusd unknown argument: " << arg << "\n";
     return 2;
   }
+
+  FIRMIUS_DLOG_PHASEF("endpoint=%s",
+                      connection.endpoint.empty()
+                          ? "<default>"
+                          : connection.endpoint.c_str());
 
   firmius::daemon::DaemonServer server(connection);
   if (!server.start()) {
@@ -61,12 +72,18 @@ int main(int argc, char **argv) {
       std::cerr << ": " << server.lastError();
     }
     std::cerr << "\n";
+    FIRMIUS_DLOG_WARNF("failed to bind IPC endpoint: %s",
+                       server.lastError().c_str());
     return 1;
   }
+
+  FIRMIUS_DLOG_PHASE("daemon started, entering main loop");
 
   while (g_running.load()) {
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
   }
+
+  FIRMIUS_DLOG_PHASE("shutdown requested");
 
   // Shutdown is normally graceful, but stuck provider/agent threads can block
   // joins indefinitely. A watchdog keeps SIGINT/SIGTERM reliable without
@@ -81,5 +98,6 @@ int main(int argc, char **argv) {
 
   server.stop();
   g_shutdownComplete.store(true);
+  FIRMIUS_DLOG_PHASE("daemon stopped cleanly");
   return 0;
 }

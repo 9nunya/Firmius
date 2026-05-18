@@ -79,7 +79,21 @@ public:
   PermissionQueueSnapshot getPermissionMode(const PermissionModeRequest &request) const;
   PermissionQueueSnapshot setPermissionMode(const PermissionModeUpdateRequest &request) const;
   PermissionQueueSnapshot listPendingPermissions(const PermissionModeRequest &request) const;
+  PermissionCreateModeResponse createPermissionMode(
+      const PermissionCreateModeRequest &request) const;
+  PermissionRenameModeResponse renamePermissionMode(
+      const PermissionRenameModeRequest &request) const;
+  PermissionDeleteModeResponse deletePermissionMode(
+      const PermissionDeleteModeRequest &request) const;
   bool resolvePermission(const PermissionResolveRequest &request) const;
+  bool resolvePermissionWithRules(
+      const PermissionResolveWithRulesRequest &request) const;
+  PermissionListRulesResponse listPolicyRules() const;
+  PermissionUpsertRuleResponse upsertPolicyRule(
+      const PermissionUpsertRuleRequest &request) const;
+  PermissionDeleteRuleResponse deletePolicyRule(
+      const PermissionDeleteRuleRequest &request) const;
+  PermissionReloadPolicyResponse reloadPolicy() const;
 
   UserConfigSnapshot getConfig() const;
   UserConfigSnapshot updateConfig(const ConfigUpdateRequest &request) const;
@@ -122,6 +136,18 @@ public:
   bool subscribe(DaemonEventListener listener,
                  const EventSubscriptionRequest &request = {});
   bool unsubscribe();
+
+  // ── /connect wizard ──
+  ConnectBeginResponse beginConnect(const ConnectBeginRequest &request) const;
+  ConnectSubmitResponse submitConnect(const ConnectSubmitRequest &request) const;
+  ConnectFinalizeResponse finalizeConnect(const ConnectFinalizeRequest &request) const;
+  ConnectCancelResponse cancelConnect(const ConnectCancelRequest &request) const;
+
+  // ── /undo Rewind ──
+  RewindPreviewResponse previewRewind(const RewindPreviewRequest &request) const;
+  RewindExecuteResponse executeRewind(const RewindExecuteRequest &request) const;
+  RedoPreviewResponse previewRedo(const RedoPreviewRequest &request) const;
+  RedoExecuteResponse executeRedo(const RedoExecuteRequest &request) const;
 
 private:
   std::string daemonCommand() const;

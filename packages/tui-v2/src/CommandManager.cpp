@@ -100,4 +100,89 @@ CommandManager::tokenize(const std::string& input) const {
   return tokens;
 }
 
+CommandInputPosition
+CommandManager::parsePosition(const std::string& input) const {
+  CommandInputPosition pos;
+  if (input.empty() || input[0] != '/') {
+    return pos;
+  }
+  pos.isSlashInput = true;
+  // Strip leading '/'.
+  std::string content = input.substr(1);
+
+  // Find the first space — anything before it is the command name. If there
+  // is no space at all, the user is still typing the command name and we
+  // leave commandName empty so the caller treats this as command-name
+  // autocomplete.
+  const auto firstSpace = content.find(' ');
+  if (firstSpace == std::string::npos) {
+    return pos;
+  }
+
+  pos.commandName = content.substr(0, firstSpace);
+  // Everything after the first space is the arg region.
+  std::string argRegion = content.substr(firstSpace + 1);
+
+  // Look up the command to know how many args it has.
+  auto cmd = getCommand(pos.commandName);
+  if (!cmd) {
+    // Unknown command — treat as no arg suggestions available, but still
+    // return commandName so the caller can fall back to command-name mode.
+    pos.currentArgIndex = -1;
+    return pos;
+  }
+
+  const auto& argDefs = cmd->args();
+  if (argDefs.empty()) {
+    // Command takes no args at all — nothing to suggest.
+    pos.currentArgIndex = -1;
+    return pos;
+  }
+
+  if (cmd->takesRawRemainder()) {
+    // Whole rest-of-input is one arg. The "filter" for suggestions is the
+    // whole arg region.
+    pos.currentArgIndex = 0;
+    pos.currentArgFilter = argRegion;
+    return pos;
+  }
+
+  // Walk the arg region word-by-word. Trailing space means the user is
+  // starting the NEXT arg (filter = "").
+  std::vector<std::string> tokens;
+  bool endedWithSpace = !argRegion.empty() && argRegion.back() == ' ';
+  {
+    std::istringstream stream(argRegion);
+    std::string tok;
+    while (stream >> tok) {
+      tokens.push_back(std::move(tok));
+    }
+  }
+
+  int argIndex;
+  std::string filter;
+  if (tokens.empty()) {
+    // Just typed the space after the command name.
+    argIndex = 0;
+    filter = "";
+  } else if (endedWithSpace) {
+    argIndex = static_cast<int>(tokens.size());
+    filter = "";
+  } else {
+    // Currently typing the last token.
+    argIndex = static_cast<int>(tokens.size()) - 1;
+    filter = tokens.back();
+  }
+
+  // If we're past the end of the declared args, no suggestions.
+  if (argIndex >= static_cast<int>(argDefs.size())) {
+    pos.currentArgIndex = -1;
+    return pos;
+  }
+
+  pos.currentArgIndex = argIndex;
+  pos.currentArgFilter = filter;
+  return pos;
+}
+
 } // namespace firmius::tui2

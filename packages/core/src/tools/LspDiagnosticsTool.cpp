@@ -2,6 +2,8 @@
 #include "agents/Agent.hpp"
 #include "lsp/LspService.hpp"
 #include <rapidjson/document.h>
+#include <sstream>
+#include <string>
 
 namespace firmius::core {
 using namespace firmius::shared;
@@ -57,13 +59,105 @@ shared::ToolResult LspDiagnosticsTool::execute(const LspDiagnosticsInput &input,
     }
 
     std::string error;
-    auto doc = runLspRequest(request, request.project_root, &error);
-    if (doc.HasMember("path") && !doc["path"].IsString() && !request.path.empty()) {
-      doc.RemoveMember("path");
-      doc.AddMember("path",
-                    rapidjson::Value(request.path.c_str(), doc.GetAllocator()).Move(),
-                    doc.GetAllocator());
+    auto bridgeDoc = runLspRequest(request, request.project_root, &error);
+
+    // Token-waste pass 3: prose-first diagnostics. The bridge returns a
+    // verbose `diagnostics: {path: [{severity,severity_name,source,code,
+    // message,pretty,range:{...}}, ...]}` shape with up to 7 fields per
+    // diagnostic. The model only needs the one-line `pretty` form to act
+    // on each issue; everything else is rederivable. We pass through the
+    // top-level `summary` counters but flatten the diagnostics into one
+    // string per issue ("ERROR src/foo.cpp:12:5 message").
+    rapidjson::Document doc;
+    doc.SetObject();
+    auto &alloc = doc.GetAllocator();
+
+    int errors = 0, warnings = 0, infos = 0, hints = 0, files = 0;
+    if (bridgeDoc.HasMember("summary") && bridgeDoc["summary"].IsObject()) {
+      const auto &s = bridgeDoc["summary"];
+      if (s.HasMember("errors") && s["errors"].IsInt()) errors = s["errors"].GetInt();
+      if (s.HasMember("warnings") && s["warnings"].IsInt()) warnings = s["warnings"].GetInt();
+      if (s.HasMember("infos") && s["infos"].IsInt()) infos = s["infos"].GetInt();
+      if (s.HasMember("hints") && s["hints"].IsInt()) hints = s["hints"].GetInt();
+      if (s.HasMember("files") && s["files"].IsInt()) files = s["files"].GetInt();
     }
+
+    std::ostringstream prose;
+    if (bridgeDoc.HasMember("ok") && bridgeDoc["ok"].IsBool() &&
+        !bridgeDoc["ok"].GetBool()) {
+      const std::string err =
+          (bridgeDoc.HasMember("error") && bridgeDoc["error"].IsString())
+              ? bridgeDoc["error"].GetString()
+              : "LSP bridge returned an error";
+      prose << "LSP diagnostics unavailable: " << err << ".";
+      doc.AddMember(
+          "result",
+          rapidjson::Value(prose.str().c_str(),
+                           static_cast<rapidjson::SizeType>(prose.str().size()),
+                           alloc).Move(),
+          alloc);
+      doc.AddMember("ok", false, alloc);
+      return shared::ToolResult::ok(doc);
+    }
+
+    if (errors == 0 && warnings == 0 && infos == 0 && hints == 0) {
+      prose << "No diagnostics across " << files << " file"
+            << (files == 1 ? "" : "s") << ".";
+    } else {
+      prose << errors << " error" << (errors == 1 ? "" : "s") << ", "
+            << warnings << " warning" << (warnings == 1 ? "" : "s");
+      if (infos > 0) prose << ", " << infos << " info"
+                           << (infos == 1 ? "" : "s");
+      if (hints > 0) prose << ", " << hints << " hint"
+                           << (hints == 1 ? "" : "s");
+      prose << " across " << files << " file"
+            << (files == 1 ? "" : "s") << ":\n";
+
+      // Inline each diagnostic as one prose line. We use the bridge's
+      // pre-built `pretty` field when present (form: "SEVERITY [L:C]
+      // message") and prefix with the file path for cross-file scans.
+      if (bridgeDoc.HasMember("diagnostics") &&
+          bridgeDoc["diagnostics"].IsObject()) {
+        for (auto it = bridgeDoc["diagnostics"].MemberBegin();
+             it != bridgeDoc["diagnostics"].MemberEnd(); ++it) {
+          if (!it->value.IsArray()) continue;
+          const std::string filePath = it->name.GetString();
+          for (const auto &diag : it->value.GetArray()) {
+            if (!diag.IsObject()) continue;
+            std::string pretty;
+            if (diag.HasMember("pretty") && diag["pretty"].IsString()) {
+              pretty = diag["pretty"].GetString();
+            } else {
+              // Fallback: synthesize a pretty line from severity+message.
+              std::string severityName = "ERROR";
+              if (diag.HasMember("severity_name") &&
+                  diag["severity_name"].IsString()) {
+                severityName = diag["severity_name"].GetString();
+              }
+              std::string message;
+              if (diag.HasMember("message") && diag["message"].IsString()) {
+                message = diag["message"].GetString();
+              }
+              pretty = severityName + " " + message;
+            }
+            prose << "  " << filePath << ": " << pretty << "\n";
+          }
+        }
+      }
+    }
+
+    const std::string proseStr = prose.str();
+    doc.AddMember(
+        "result",
+        rapidjson::Value(proseStr.c_str(),
+                         static_cast<rapidjson::SizeType>(proseStr.size()),
+                         alloc).Move(),
+        alloc);
+    doc.AddMember("errors", errors, alloc);
+    doc.AddMember("warnings", warnings, alloc);
+    if (infos > 0) doc.AddMember("infos", infos, alloc);
+    if (hints > 0) doc.AddMember("hints", hints, alloc);
+    doc.AddMember("files", files, alloc);
     return shared::ToolResult::ok(doc);
   } catch (const std::exception &e) {
     return shared::ToolResult::fail(e.what());

@@ -19,6 +19,8 @@
 #include "Events.hpp"
 #include "IAgent.hpp"
 #include "IHost.hpp"
+#include "environment/PolicyEngine.hpp"
+#include "environment/PermissionSuggestionEngine.hpp"
 #include "harness/ThreadLockManager.hpp"
 #include "persistence/HistoryEditor.hpp"
 #include "persistence/ThreadManager.hpp"
@@ -132,6 +134,7 @@ public:
    * - Calls agent->interrupt()
    */
   void abort();
+  void abortAgent(const std::string &threadId, const std::string &agentId);
 
   /**
    * Interrupts the focused agent and preserves queued messages targeting it.
@@ -140,6 +143,8 @@ public:
    * immediately.
    */
   void abortAndFlushQueuedMessages();
+  void abortAgentAndFlushQueuedMessages(const std::string &threadId,
+                                        const std::string &agentId);
 
   /**
    * Subscribe to Harness events.
@@ -184,36 +189,27 @@ public:
    * @return true if the switch succeeded, false otherwise.
    */
   bool switchLeadPersona(const std::string &personaName);
-  ThreadPermissionMode threadPermissionMode(const std::string &threadId);
-  ThreadPermissionRules threadPermissionRules(const std::string &threadId);
-  bool commandMatchesPersistedAllowRule(const std::string &threadId,
-                                        const std::string &command,
-                                        const std::string &toolName = "");
-  bool pathMatchesPersistedAllowRule(const std::string &threadId,
-                                     const std::string &absolutePath,
-                                     bool readOnly,
-                                     const std::string &toolName = "");
-  bool toolHasSessionAllowance(const std::string &threadId,
-                               const std::string &toolName);
-  bool readHasSessionAllowance(const std::string &threadId);
-  void persistCommandAllowRule(const std::string &threadId,
-                               const CommandAllowRule &rule);
-  void persistPathAllowRule(const std::string &threadId,
-                            const PathAllowRule &rule);
-  void persistToolSessionAllowance(const std::string &threadId,
-                                   const std::string &toolName);
-  void persistReadSessionAllowance(const std::string &threadId);
-  ThreadPermissionMode currentThreadPermissionMode();
-  bool setCurrentThreadPermissionMode(ThreadPermissionMode mode);
-  bool setThreadPermissionMode(const std::string &threadId,
-                               ThreadPermissionMode mode);
-  std::optional<ThreadPermissionMode> cycleCurrentThreadPermissionMode();
   PermissionResponse
   requestPermissionEscalation(PermissionEscalationRequest request);
+  /// Variant that includes pre-generated suggestions and remembers them
+  /// on the pending request, so the resolver can apply selected ones.
+  PermissionResponse
+  requestPermissionEscalationWithSuggestions(
+      PermissionEscalationRequest request,
+      std::vector<PermissionSuggestion> suggestions);
   bool resolvePermissionEscalation(const std::string &requestId,
                                    PermissionResponse response);
+  /// Resolve a request and additionally apply the named suggestion rules
+  /// to the policy engine. Treats the resolution as Allow.
+  /// `suggestionIds` come from the wire payload's `ruleId` fields.
+  bool resolvePermissionEscalationWithRules(
+      const std::string &requestId,
+      const std::vector<std::string> &suggestionIds);
   std::vector<PermissionEscalationRequest>
   listPendingPermissionEscalations(const std::string &threadId = "");
+
+  /// Access the centralised policy engine. Lazy-creates on first call.
+  PolicyEngine &policyEngine();
   bool markThreadAsBenchmark(const std::string &threadId,
                              const std::string &benchmarkId,
                              const std::string &benchmarkTaskId = "");
@@ -325,6 +321,70 @@ public:
   shared::EditRedoEligibility evaluateEditBatchRedo(const std::string &undoActionId);
   std::optional<shared::EditRedoAction>
   redoEditUndoAction(const std::string &undoActionId);
+
+  /// ── Compound rewind ────────────────────────────────────────────────────
+  ///
+  /// Atomically rewinds an agent's transcript and (optionally) the edit
+  /// batches authored after a target user-message turn.
+  ///
+  /// Behaviour:
+  ///   * `mode = RestoreCodeAndConversation`: undo every edit batch authored
+  ///     after `targetTurnId` in reverse chronological order, then undo the
+  ///     transcript turns. The resulting TranscriptUndoAction's
+  ///     `editUndoActionIds` carries the undone edit batches so a future
+  ///     redo replays them in order.
+  ///   * `mode = RestoreConversation`: only undo transcript turns. Files
+  ///     untouched.
+  ///   * `mode = RestoreCode`: only undo the edit batches. Transcript stays
+  ///     intact. Returns an empty undoActionId in that case.
+  ///
+  /// Atomicity:
+  ///   We pre-flight every required edit batch via evaluateEditBatchUndo.
+  ///   If ANY batch is blocked, we abort BEFORE making any change and
+  ///   return an error so the caller doesn't end up with a half-applied
+  ///   rewind. (Half-applied state would be very hard to roll back since
+  ///   edit undos commit immediately.)
+  ///
+  /// Thread-safety: takes the harness mutex like the rest of the rewind
+  /// API. The caller does not need to set focusedAgentId — agentId is
+  /// passed explicitly.
+  struct CompoundRewindResult {
+    bool applied = false;
+    std::string undoActionId;
+    std::vector<std::string> editUndoActionIds;
+    int turnsUndone = 0;
+    std::string errorMessage;
+  };
+  enum class CompoundRewindMode {
+    RestoreCodeAndConversation,
+    RestoreConversation,
+    RestoreCode,
+  };
+  CompoundRewindResult compoundRewind(const std::string &threadId,
+                                       const std::string &agentId,
+                                       const std::string &targetTurnId,
+                                       CompoundRewindMode mode);
+
+  /// Forward of compoundRewind: re-applies a previously persisted
+  /// TranscriptUndoAction. Mode mirrors CompoundRewindMode — code-only
+  /// re-applies the linked edit-undo actions (which redo the file
+  /// edits), conversation-only re-appends the captured turns, and
+  /// the combined mode does both.
+  struct CompoundRedoResult {
+    bool applied = false;
+    int turnsRedone = 0;
+    std::vector<std::string> editRedoActionIds;
+    std::string errorMessage;
+  };
+  enum class CompoundRedoMode {
+    RestoreCodeAndConversation,
+    RestoreConversation,
+    RestoreCode,
+  };
+  CompoundRedoResult compoundRedo(const std::string &threadId,
+                                  const std::string &agentId,
+                                  const std::string &undoActionId,
+                                  CompoundRedoMode mode);
 
   /**
    * Compact the focused agent's context without resuming execution.
@@ -486,9 +546,19 @@ private:
     bool resolved = false;
     PermissionResponse response = PermissionResponse::Deny;
     PermissionEscalationRequest request;
+    /// Suggestions offered by the policy engine. The TUI may pick a
+    /// subset to apply when the user chooses "Allow Always".
+    std::vector<PermissionSuggestion> suggestions;
+    /// Selected suggestion ids — applied after resolution.
+    std::vector<std::string> selectedSuggestionIds;
   };
   firmius::shared::utils::FastHash<std::string, std::shared_ptr<PendingPermissionRequest>> pendingPermissionRequests_;
   uint64_t nextPermissionRequestId_ = 0;
+
+  /// Centralised policy engine. Owned by the harness so all
+  /// `Permissions` instances share one in-memory session-rule layer
+  /// and one mtime-watch on the user JSON file.
+  std::unique_ptr<PolicyEngine> policyEngine_;
 
   // Tracking for detached background tasks (e.g. title generation)
   std::vector<std::thread> backgroundThreads_;

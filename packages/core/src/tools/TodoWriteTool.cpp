@@ -6,15 +6,32 @@
 
 #include <algorithm>
 #include <chrono>
-#include <regex>
 #include <set>
 #include <sstream>
+#include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace firmius::core {
 
 namespace {
+
+// ---------------------------------------------------------------------------
+// Action-based TodoWriteTool
+//
+// Old shape required the model to send the entire todo list as a numbered
+// text blob every call ("1. [ ] task\n2. [x] task\n"). Models routinely
+// dropped lines, mis-numbered, or simply forgot to call the tool after
+// finishing work because rewriting the whole thing felt expensive.
+//
+// New shape: pick an action — set / add / update / complete / remove /
+// clear / list — and supply only the fields you need. Inputs are lenient
+// (singular `id` or plural `ids`, a string `items` shorthand for a single
+// add). Every call reads the current state from disk, applies the requested
+// mutation, persists the result, and returns the canonical numbered listing
+// so the agent never has to guess what the list looks like now.
+// ---------------------------------------------------------------------------
 
 std::string requireCurrentThreadId(shared::ToolContext &ctx) {
   const auto &context = ctx.agent.getContext();
@@ -23,12 +40,6 @@ std::string requireCurrentThreadId(shared::ToolContext &ctx) {
   }
   return context.history->threadId;
 }
-
-struct TodoItemState {
-  int id = 0;
-  char marker = ' ';
-  std::string text;
-};
 
 uint64_t nowEpochMs() {
   return static_cast<uint64_t>(
@@ -49,6 +60,146 @@ char statusMarker(shared::TodoStatus status) {
   return ' ';
 }
 
+shared::TodoStatus parseStatusName(const std::string &raw) {
+  std::string s;
+  s.reserve(raw.size());
+  for (char c : raw) {
+    if (c == '-' || c == '_' || c == ' ')
+      continue;
+    s.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+  }
+  if (s == "pending" || s == "todo" || s == "open" || s == "p" || s == " ")
+    return shared::TodoStatus::Pending;
+  if (s == "inprogress" || s == "active" || s == "doing" || s == "wip" ||
+      s == "*")
+    return shared::TodoStatus::InProgress;
+  if (s == "done" || s == "complete" || s == "completed" || s == "finished" ||
+      s == "x")
+    return shared::TodoStatus::Done;
+  throw std::runtime_error(
+      "Unknown todo status '" + raw +
+      "'. Use one of: pending, in_progress, done.");
+}
+
+// Accept `id` (int or string), `ids` (array or single int/string), and
+// return the de-duplicated list of integer ids in input order. Empty
+// input is allowed; the action handler decides whether that's an error.
+std::vector<int> readIds(const rapidjson::Value &input) {
+  std::vector<int> ids;
+  std::unordered_set<int> seen;
+
+  auto pushParsed = [&](const rapidjson::Value &v, const char *whichKey) {
+    int parsed = 0;
+    if (v.IsInt()) {
+      parsed = v.GetInt();
+    } else if (v.IsUint()) {
+      parsed = static_cast<int>(v.GetUint());
+    } else if (v.IsInt64()) {
+      parsed = static_cast<int>(v.GetInt64());
+    } else if (v.IsString()) {
+      const std::string raw = shared::StringUtil::trim(std::string(v.GetString()));
+      if (raw.empty())
+        return;
+      try {
+        parsed = std::stoi(raw);
+      } catch (const std::exception &) {
+        throw std::runtime_error(std::string("Invalid id '") + v.GetString() +
+                                 "' in '" + whichKey +
+                                 "'. Expected an integer.");
+      }
+    } else {
+      throw std::runtime_error(std::string("Field '") + whichKey +
+                               "' must be an integer or list of integers.");
+    }
+    if (seen.insert(parsed).second) {
+      ids.push_back(parsed);
+    }
+  };
+
+  if (input.HasMember("ids")) {
+    const auto &v = input["ids"];
+    if (v.IsArray()) {
+      for (const auto &el : v.GetArray()) {
+        pushParsed(el, "ids");
+      }
+    } else if (!v.IsNull()) {
+      pushParsed(v, "ids");
+    }
+  }
+  if (input.HasMember("id")) {
+    pushParsed(input["id"], "id");
+  }
+  return ids;
+}
+
+struct ItemSpec {
+  std::string text;
+  // unset => caller didn't specify; defaults differ per action
+  bool hasStatus = false;
+  shared::TodoStatus status = shared::TodoStatus::Pending;
+  // optional explicit id — only honored by `set`
+  bool hasId = false;
+  int id = 0;
+};
+
+ItemSpec readItemSpec(const rapidjson::Value &v, const char *path) {
+  ItemSpec out;
+  if (v.IsString()) {
+    out.text = shared::StringUtil::trim(std::string(v.GetString()));
+    return out;
+  }
+  if (!v.IsObject()) {
+    throw std::runtime_error(std::string("Item at '") + path +
+                             "' must be a string or {text, status?} object.");
+  }
+  if (v.HasMember("text") && v["text"].IsString()) {
+    out.text = shared::StringUtil::trim(std::string(v["text"].GetString()));
+  } else if (v.HasMember("task") && v["task"].IsString()) {
+    out.text = shared::StringUtil::trim(std::string(v["task"].GetString()));
+  } else if (v.HasMember("title") && v["title"].IsString()) {
+    out.text = shared::StringUtil::trim(std::string(v["title"].GetString()));
+  }
+  if (v.HasMember("status") && v["status"].IsString()) {
+    out.hasStatus = true;
+    out.status = parseStatusName(v["status"].GetString());
+  }
+  if (v.HasMember("id")) {
+    const auto &idv = v["id"];
+    if (idv.IsInt()) {
+      out.hasId = true;
+      out.id = idv.GetInt();
+    } else if (idv.IsString()) {
+      try {
+        out.hasId = true;
+        out.id = std::stoi(idv.GetString());
+      } catch (const std::exception &) {
+        out.hasId = false;
+      }
+    }
+  }
+  return out;
+}
+
+// Accept `items` as: array of strings, array of objects, single string,
+// or single object. Returns the parsed specs in order.
+std::vector<ItemSpec> readItems(const rapidjson::Value &input) {
+  std::vector<ItemSpec> out;
+  if (!input.HasMember("items")) {
+    return out;
+  }
+  const auto &v = input["items"];
+  if (v.IsArray()) {
+    int i = 0;
+    for (const auto &el : v.GetArray()) {
+      out.push_back(readItemSpec(el, ("items[" + std::to_string(i) + "]").c_str()));
+      ++i;
+    }
+  } else if (!v.IsNull()) {
+    out.push_back(readItemSpec(v, "items"));
+  }
+  return out;
+}
+
 std::string statusName(shared::TodoStatus status) {
   switch (status) {
   case shared::TodoStatus::Pending:
@@ -61,90 +212,256 @@ std::string statusName(shared::TodoStatus status) {
   return "pending";
 }
 
-shared::TodoStatus markerToStatus(char marker) {
-  switch (marker) {
-  case ' ':
-    return shared::TodoStatus::Pending;
-  case '*':
-    return shared::TodoStatus::InProgress;
-  case 'x':
-    return shared::TodoStatus::Done;
-  default:
-    throw std::runtime_error("Invalid todo status marker");
+std::string renderListing(const shared::AgentTodoList &list) {
+  std::ostringstream out;
+  for (const auto &item : list.items) {
+    out << item.id << ". [" << statusMarker(item.status) << "] " << item.text
+        << "\n";
   }
+  return out.str();
 }
 
-std::vector<TodoItemState> parseTodoList(const std::string &state) {
-  if (shared::StringUtil::trim(state).empty()) {
-    throw std::runtime_error(
-        "Todo state must not be empty. Use numbered lines like "
-        "'1. [ ] First task'.");
+std::string renderProse(const shared::AgentTodoList &list,
+                        const std::string &headline,
+                        const std::vector<std::string> &warnings) {
+  std::ostringstream out;
+  out << headline;
+  if (list.items.empty()) {
+    out << "\nList is now empty.";
+  } else {
+    int done = 0, inProgress = 0, pending = 0;
+    for (const auto &item : list.items) {
+      switch (item.status) {
+      case shared::TodoStatus::Done:
+        ++done;
+        break;
+      case shared::TodoStatus::InProgress:
+        ++inProgress;
+        break;
+      case shared::TodoStatus::Pending:
+        ++pending;
+        break;
+      }
+    }
+    out << " (" << done << " done, " << inProgress << " in-progress, "
+        << pending << " pending)\n"
+        << renderListing(list);
   }
-
-  static const std::regex linePattern(
-      R"(^([0-9]+)\.\s+\[([ *x])\]\s+(.+)$)");
-
-  std::vector<TodoItemState> items;
-  std::set<int> seenIds;
-  std::istringstream stream(state);
-  std::string rawLine;
-  int lineNo = 0;
-  while (std::getline(stream, rawLine)) {
-    lineNo++;
-    if (rawLine.empty()) {
-      throw std::runtime_error("Malformed todo line " + std::to_string(lineNo) +
-                               ": line must not be empty");
-    }
-    std::smatch match;
-    if (!std::regex_match(rawLine, match, linePattern)) {
-      throw std::runtime_error("Malformed todo line " + std::to_string(lineNo) + 
-                               ": expected '<id>. [status] text' (example: "
-                               "'1. [ ] First task')");
-    }
-    const int id = std::stoi(match[1].str());
-    const char marker = match[2].str()[0];
-    const std::string text = shared::StringUtil::trim(match[3].str());
-    if (seenIds.count(id) > 0) {
-      throw std::runtime_error("Duplicate todo id in state: " +
-                               std::to_string(id));
-    }
-    seenIds.insert(id);
-    if (text.empty()) {
-      throw std::runtime_error("Todo text must not be empty for id " +
-                               std::to_string(id));
-    }
-    items.push_back(TodoItemState{id, marker, text});
+  for (const auto &w : warnings) {
+    out << "Note: " << w << "\n";
   }
-  return items;
+  return out.str();
+}
+
+shared::ToolResult buildResult(const shared::AgentTodoList &list,
+                               const std::string &headline,
+                               const std::vector<std::string> &warnings) {
+  rapidjson::Document doc;
+  doc.SetObject();
+  auto &alloc = doc.GetAllocator();
+  const std::string proseStr = renderProse(list, headline, warnings);
+  doc.AddMember(
+      "result",
+      rapidjson::Value(proseStr.c_str(),
+                       static_cast<rapidjson::SizeType>(proseStr.size()),
+                       alloc)
+          .Move(),
+      alloc);
+  doc.AddMember("next_id", list.nextId, alloc);
+  // Item array stays available for the UI presenter / fleet snapshots.
+  rapidjson::Value items(rapidjson::kArrayType);
+  for (const auto &item : list.items) {
+    rapidjson::Value obj(rapidjson::kObjectType);
+    obj.AddMember("id", item.id, alloc);
+    const std::string sname = statusName(item.status);
+    obj.AddMember(
+        "status",
+        rapidjson::Value(sname.c_str(),
+                         static_cast<rapidjson::SizeType>(sname.size()), alloc)
+            .Move(),
+        alloc);
+    obj.AddMember(
+        "text",
+        rapidjson::Value(item.text.c_str(),
+                         static_cast<rapidjson::SizeType>(item.text.size()),
+                         alloc)
+            .Move(),
+        alloc);
+    items.PushBack(obj, alloc);
+  }
+  doc.AddMember("items", items, alloc);
+  return shared::ToolResult::ok(doc);
+}
+
+// Maintain ordering and recompute nextId based on the highest id observed.
+void recomputeNextId(shared::AgentTodoList &list) {
+  int maxId = 0;
+  for (const auto &item : list.items) {
+    if (item.id > maxId) {
+      maxId = item.id;
+    }
+  }
+  list.nextId = std::max(maxId + 1, 1);
+}
+
+std::string readAction(const rapidjson::Value &input) {
+  if (!input.HasMember("action")) {
+    return "";
+  }
+  if (!input["action"].IsString()) {
+    return "";
+  }
+  std::string raw = input["action"].GetString();
+  std::string s;
+  s.reserve(raw.size());
+  for (char c : raw) {
+    if (c == '-' || c == '_' || c == ' ')
+      continue;
+    s.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+  }
+  // Normalize a few common synonyms.
+  if (s == "replace" || s == "rewrite" || s == "overwrite")
+    return "set";
+  if (s == "append" || s == "create" || s == "new")
+    return "add";
+  if (s == "edit" || s == "modify")
+    return "update";
+  if (s == "done" || s == "finish" || s == "completed")
+    return "complete";
+  if (s == "delete" || s == "drop" || s == "del")
+    return "remove";
+  if (s == "reset" || s == "empty" || s == "wipe")
+    return "clear";
+  if (s == "show" || s == "get" || s == "read")
+    return "list";
+  return s;
 }
 
 } // namespace
 
 shared::ToolMetadata TodoWriteTool::getMetadata() const {
-  return {"Todo",
-          "Update the calling agent's execution state by providing the full todo list.",
-          shared::ToolScope::Semantic};
+  return {
+      "Todo",
+      "Maintain a numbered checklist of the steps you are working through "
+      "for the current task. Use it to plan multi-step work, mark progress "
+      "as you go, and signal completion. The persisted list is the source "
+      "of truth — the result of every call returns the canonical numbered "
+      "listing, so you never need to resend items you didn't change.\n"
+      "\n"
+      "When to use:\n"
+      "- The user gives a task with 2+ distinct steps. Add them up front.\n"
+      "- You finish a step. Mark it done in the same turn — don't batch.\n"
+      "- You start a step. Mark it in_progress so the run is observable.\n"
+      "- You discover a new sub-step. Add it; don't rebuild the list.\n"
+      "\n"
+      "When NOT to use:\n"
+      "- Single-step requests. Just do the thing.\n"
+      "- Trivial reads / lookups. Skip the ceremony.\n"
+      "\n"
+      "Cheat sheet (each row is one tool call):\n"
+      "  add a step       {action:'add',      items:'run the tests'}\n"
+      "  add several      {action:'add',      items:['plan','code','verify']}\n"
+      "  start a step     {action:'update',   id:2, status:'in_progress'}\n"
+      "  finish a step    {action:'complete', id:2}\n"
+      "  finish several   {action:'complete', ids:[1,2,3]}\n"
+      "  rename / retext  {action:'update',   id:2, text:'run unit tests'}\n"
+      "  drop a step      {action:'remove',   id:2}\n"
+      "  start over       {action:'set',      items:[...]}\n"
+      "  wipe the list    {action:'clear'}\n"
+      "  inspect          {action:'list'}",
+      shared::ToolScope::Semantic};
 }
 
 std::shared_ptr<shared::JSONSchema> TodoWriteTool::getSchema() const {
-  return zObject({{"patch",
-                   zString()->describe(
-                       "Full todo list state in numbered text format.\n\n"
-                       "USAGE:\n"
-                       "- Pass the ENTIRE desired todo list, not a partial delta.\n"
-                       "- Each item should preserve numbering/id semantics expected by the parser.\n"
-                       "- Use this tool to rewrite current todo state atomically after progress, decomposition, or completion changes.\n\n"
-                       "IMPORTANT:\n"
-                       "- This is the source of truth for the runtime todo contract.\n"
-                       "- Omitting an existing item removes it from the todo list.")}})
-      ->required({"patch"});
+  // Kept intentionally small. Only `action` is required. The rest are
+  // optional and the executor decides which fields apply per action.
+  return zObject(
+             {{"action",
+               zEnum({"set", "add", "update", "complete", "remove", "clear",
+                      "list"})
+                   ->describe(
+                       "Which mutation to perform.\n"
+                       "- 'add'      append new task(s); see `items`. "
+                       "DEFAULT for putting work on the list.\n"
+                       "- 'complete' mark task(s) done; see `id` / `ids`. "
+                       "DEFAULT for closing finished work.\n"
+                       "- 'update'   change status and/or text of task(s); "
+                       "see `updates`, or shorthand `id`+`status`+`text`.\n"
+                       "- 'remove'   delete task(s); see `id` / `ids`.\n"
+                       "- 'set'      replace the entire list with `items`. "
+                       "Use sparingly — prefer add/update/complete.\n"
+                       "- 'clear'    drop every task. No other fields "
+                       "needed.\n"
+                       "- 'list'     read-only; return the current list "
+                       "without mutating.")},
+              {"items",
+               zString()
+                   ->setOptional()
+                   ->describe(
+                       "Tasks for 'add' or 'set'. Several shapes accepted:\n"
+                       "  \"finish the refactor\"                 (single "
+                       "string shortcut)\n"
+                       "  [\"plan\",\"code\",\"verify\"]               (array "
+                       "of strings, all pending)\n"
+                       "  [{\"text\":\"plan\"},{\"text\":\"code\","
+                       "\"status\":\"in_progress\"}]\n"
+                       "Status defaults to 'pending' when omitted. Schema "
+                       "declares string for tolerance; objects and arrays "
+                       "are accepted at runtime.")},
+              {"updates",
+               zString()
+                   ->setOptional()
+                   ->describe(
+                       "Batch edits for 'update'. Array of "
+                       "{id, status?, text?} where each item needs `id` plus "
+                       "at least one of `status`/`text`. Example:\n"
+                       "  [{\"id\":1,\"status\":\"done\"},"
+                       "{\"id\":2,\"text\":\"new wording\"}]\n"
+                       "For a single edit, prefer the shorthand: "
+                       "{action:'update', id:N, status:'in_progress'}.\n"
+                       "Schema declares string for tolerance; arrays are "
+                       "accepted at runtime.")},
+              {"id",
+               zInteger()
+                   ->setOptional()
+                   ->describe(
+                       "Single task id. Use with 'complete', 'remove', or as "
+                       "the shorthand for 'update' (then also pass `status` "
+                       "and/or `text`). Equivalent to `ids:[N]`.")},
+              {"ids",
+               zString()
+                   ->setOptional()
+                   ->describe(
+                       "Multiple task ids for 'complete' or 'remove'. "
+                       "Examples: [1,2,3] or a single integer. Unknown ids "
+                       "are reported as warnings in the result, not errors. "
+                       "Schema declares string for tolerance; arrays of "
+                       "integers are accepted at runtime.")},
+              {"status",
+               zString()
+                   ->setOptional()
+                   ->describe(
+                       "Status for the 'update' shorthand. One of "
+                       "'pending', 'in_progress', 'done'. Aliases such as "
+                       "'wip' or 'completed' are also accepted.")},
+              {"text",
+               zString()
+                   ->setOptional()
+                   ->describe(
+                       "New text for the 'update' shorthand. Pair with `id` "
+                       "to rename a single task without touching its "
+                       "status.")}})
+      ->required({"action"});
 }
 
 shared::ToolResult TodoWriteTool::execute(const rapidjson::Value &input,
                                           shared::ToolContext &ctx) {
   try {
-    if (!input.HasMember("patch") || !input["patch"].IsString()) {
-      throw std::runtime_error("Todo requires string field 'patch' containing the full state");
+    const std::string action = readAction(input);
+    if (action.empty()) {
+      throw std::runtime_error(
+          "Todo requires field 'action' (one of set/add/update/complete/"
+          "remove/clear/list).");
     }
 
     const auto &agentContext = ctx.agent.getContext();
@@ -154,80 +471,270 @@ shared::ToolResult TodoWriteTool::execute(const rapidjson::Value &input,
       throw std::runtime_error("Cannot mutate todo list without agent id");
     }
 
-    const auto newState = parseTodoList(input["patch"].GetString());
     ThreadManager tm(ThreadManager::defaultBasePath());
-    const auto oldTodoList = tm.getAgentTodo(threadId, agentId);
+    shared::AgentTodoList list = tm.getAgentTodo(threadId, agentId);
+    list.threadId = threadId;
+    list.agentId = agentId;
+    recomputeNextId(list);
 
-    std::unordered_map<int, const shared::TodoItem *> oldItemsById;
-    for (const auto &item : oldTodoList.items) {
-      oldItemsById[item.id] = &item;
-    }
-
-    shared::AgentTodoList newList;
-    newList.threadId = threadId;
-    newList.agentId = agentId;
-    
     const uint64_t now = nowEpochMs();
-    int maxId = 0;
+    std::vector<std::string> warnings;
+    std::string headline;
+    bool mutated = false;
 
-    for (const auto &stateItem : newState) {
-      shared::TodoItem item;
-      item.id = stateItem.id;
-      item.text = stateItem.text;
-      item.status = markerToStatus(stateItem.marker);
-      
-      auto it = oldItemsById.find(stateItem.id);
-      if (it != oldItemsById.end()) {
-        const auto *old = it->second;
-        item.createdAt = old->createdAt;
-        item.updatedAt = (old->text != item.text || old->status != item.status) ? now : old->updatedAt;
-        item.chunkId = old->chunkId;
-        item.planId = old->planId;
+    if (action == "list") {
+      headline = list.items.empty() ? "Todo list is empty."
+                                    : "Current todo list";
+    } else if (action == "clear") {
+      if (list.items.empty()) {
+        headline = "Todo list was already empty.";
       } else {
+        list.items.clear();
+        list.nextId = 1;
+        headline = "Cleared todo list.";
+        mutated = true;
+      }
+    } else if (action == "set") {
+      const auto specs = readItems(input);
+      // Empty `items` for 'set' is a deliberate clear-via-set; honor it.
+      std::unordered_set<int> assignedIds;
+      shared::AgentTodoList rebuilt;
+      rebuilt.threadId = threadId;
+      rebuilt.agentId = agentId;
+      // Preserve createdAt/chunkId/planId for items whose id matches.
+      std::unordered_map<int, const shared::TodoItem *> oldById;
+      for (const auto &item : list.items) {
+        oldById[item.id] = &item;
+      }
+      int autoId = 1;
+      for (size_t i = 0; i < specs.size(); ++i) {
+        const auto &s = specs[i];
+        if (s.text.empty()) {
+          throw std::runtime_error(
+              "items[" + std::to_string(i) +
+              "] has empty text. Each item needs a non-empty text/task/title.");
+        }
+        shared::TodoItem item;
+        if (s.hasId && s.id > 0 && !assignedIds.count(s.id)) {
+          item.id = s.id;
+        } else {
+          while (assignedIds.count(autoId))
+            ++autoId;
+          item.id = autoId++;
+        }
+        assignedIds.insert(item.id);
+        item.text = s.text;
+        item.status = s.hasStatus ? s.status : shared::TodoStatus::Pending;
+        auto it = oldById.find(item.id);
+        if (it != oldById.end()) {
+          item.createdAt = it->second->createdAt;
+          item.chunkId = it->second->chunkId;
+          item.planId = it->second->planId;
+          item.updatedAt = (it->second->text != item.text ||
+                            it->second->status != item.status)
+                               ? now
+                               : it->second->updatedAt;
+        } else {
+          item.createdAt = now;
+          item.updatedAt = now;
+        }
+        rebuilt.items.push_back(std::move(item));
+      }
+      list = std::move(rebuilt);
+      recomputeNextId(list);
+      headline = "Replaced todo list.";
+      mutated = true;
+    } else if (action == "add") {
+      const auto specs = readItems(input);
+      if (specs.empty()) {
+        throw std::runtime_error(
+            "'add' requires 'items' with at least one task. Pass a string, an "
+            "object {text, status?}, or an array of either.");
+      }
+      int added = 0;
+      for (size_t i = 0; i < specs.size(); ++i) {
+        const auto &s = specs[i];
+        if (s.text.empty()) {
+          throw std::runtime_error(
+              "items[" + std::to_string(i) +
+              "] has empty text. Each new task needs a non-empty text.");
+        }
+        shared::TodoItem item;
+        item.id = list.nextId++;
+        item.text = s.text;
+        item.status = s.hasStatus ? s.status : shared::TodoStatus::Pending;
         item.createdAt = now;
         item.updatedAt = now;
+        list.items.push_back(std::move(item));
+        ++added;
       }
-
-      newList.items.push_back(std::move(item));
-      if (stateItem.id > maxId) {
-        maxId = stateItem.id;
+      headline = "Added " + std::to_string(added) +
+                 (added == 1 ? " task." : " tasks.");
+      mutated = true;
+    } else if (action == "update") {
+      // Build updates from explicit `updates` array, or fall back to a
+      // single-shot {id, status?, text?} on the input itself.
+      std::vector<ItemSpec> updates;
+      if (input.HasMember("updates")) {
+        const auto &uv = input["updates"];
+        if (uv.IsArray()) {
+          int i = 0;
+          for (const auto &el : uv.GetArray()) {
+            updates.push_back(readItemSpec(
+                el, ("updates[" + std::to_string(i) + "]").c_str()));
+            ++i;
+          }
+        } else if (uv.IsObject()) {
+          updates.push_back(readItemSpec(uv, "updates"));
+        }
       }
+      if (updates.empty()) {
+        // Allow {action:"update", id:N, status:"done", text:"..."} shorthand.
+        ItemSpec single;
+        if (input.HasMember("id")) {
+          const auto &idv = input["id"];
+          if (idv.IsInt()) {
+            single.hasId = true;
+            single.id = idv.GetInt();
+          } else if (idv.IsString()) {
+            try {
+              single.hasId = true;
+              single.id = std::stoi(idv.GetString());
+            } catch (const std::exception &) {
+              single.hasId = false;
+            }
+          }
+        }
+        if (input.HasMember("status") && input["status"].IsString()) {
+          single.hasStatus = true;
+          single.status = parseStatusName(input["status"].GetString());
+        }
+        if (input.HasMember("text") && input["text"].IsString()) {
+          single.text = shared::StringUtil::trim(std::string(input["text"].GetString()));
+        }
+        if (single.hasId) {
+          updates.push_back(single);
+        }
+      }
+      if (updates.empty()) {
+        throw std::runtime_error(
+            "'update' requires 'updates' (array of {id, status?, text?}) or "
+            "the shorthand {action:'update', id, status?, text?}.");
+      }
+      int touched = 0;
+      for (size_t i = 0; i < updates.size(); ++i) {
+        const auto &u = updates[i];
+        if (!u.hasId) {
+          throw std::runtime_error(
+              "updates[" + std::to_string(i) +
+              "] missing required 'id'. Each update needs the item id.");
+        }
+        if (!u.hasStatus && u.text.empty()) {
+          throw std::runtime_error(
+              "updates[" + std::to_string(i) +
+              "] needs at least one of 'status' or 'text'.");
+        }
+        auto it = std::find_if(list.items.begin(), list.items.end(),
+                               [&](const shared::TodoItem &item) {
+                                 return item.id == u.id;
+                               });
+        if (it == list.items.end()) {
+          warnings.push_back("id " + std::to_string(u.id) +
+                             " not found; skipped.");
+          continue;
+        }
+        bool changed = false;
+        if (u.hasStatus && it->status != u.status) {
+          it->status = u.status;
+          changed = true;
+        }
+        if (!u.text.empty() && it->text != u.text) {
+          it->text = u.text;
+          changed = true;
+        }
+        if (changed) {
+          it->updatedAt = now;
+          ++touched;
+        }
+      }
+      headline = "Updated " + std::to_string(touched) +
+                 (touched == 1 ? " task." : " tasks.");
+      if (touched > 0) {
+        mutated = true;
+      }
+    } else if (action == "complete") {
+      const auto ids = readIds(input);
+      if (ids.empty()) {
+        throw std::runtime_error(
+            "'complete' requires 'id' (single integer) or 'ids' (array of "
+            "integers).");
+      }
+      int touched = 0;
+      for (int id : ids) {
+        auto it = std::find_if(list.items.begin(), list.items.end(),
+                               [&](const shared::TodoItem &item) {
+                                 return item.id == id;
+                               });
+        if (it == list.items.end()) {
+          warnings.push_back("id " + std::to_string(id) +
+                             " not found; skipped.");
+          continue;
+        }
+        if (it->status != shared::TodoStatus::Done) {
+          it->status = shared::TodoStatus::Done;
+          it->updatedAt = now;
+          ++touched;
+        }
+      }
+      headline = "Marked " + std::to_string(touched) +
+                 (touched == 1 ? " task done." : " tasks done.");
+      if (touched > 0) {
+        mutated = true;
+      }
+    } else if (action == "remove") {
+      const auto ids = readIds(input);
+      if (ids.empty()) {
+        throw std::runtime_error(
+            "'remove' requires 'id' (single integer) or 'ids' (array of "
+            "integers).");
+      }
+      std::unordered_set<int> existingIds;
+      for (const auto &item : list.items) {
+        existingIds.insert(item.id);
+      }
+      std::unordered_set<int> drop(ids.begin(), ids.end());
+      list.items.erase(
+          std::remove_if(list.items.begin(), list.items.end(),
+                         [&](const shared::TodoItem &item) {
+                           return drop.count(item.id) > 0;
+                         }),
+          list.items.end());
+      int removed = 0;
+      for (int id : ids) {
+        if (existingIds.count(id) > 0) {
+          ++removed;
+        } else {
+          warnings.push_back("id " + std::to_string(id) +
+                             " not found; skipped.");
+        }
+      }
+      headline = "Removed " + std::to_string(removed) +
+                 (removed == 1 ? " task." : " tasks.");
+      if (removed > 0) {
+        mutated = true;
+      }
+    } else {
+      throw std::runtime_error(
+          "Unknown action '" + action +
+          "'. Use one of: set, add, update, complete, remove, clear, list.");
     }
 
-    newList.nextId = std::max(maxId + 1, 1);
-    tm.writeAgentTodo(threadId, agentId, newList);
-    firmius::core::Harness::instance().publishEvent(
-        shared::AgentTodoUpdated{threadId, agentId, newList});
-
-    rapidjson::Document doc;
-    doc.SetObject();
-    auto &alloc = doc.GetAllocator();
-    doc.AddMember("thread_id", rapidjson::Value(threadId.c_str(), alloc), alloc);
-    doc.AddMember("agent_id", rapidjson::Value(agentId.c_str(), alloc), alloc);
-    doc.AddMember("next_id", newList.nextId, alloc);
-
-    rapidjson::Value items(rapidjson::kArrayType);
-    std::ostringstream summary;
-    for (const auto &item : newList.items) {
-      rapidjson::Value row(rapidjson::kObjectType);
-      row.AddMember("id", item.id, alloc);
-      row.AddMember("text", rapidjson::Value(item.text.c_str(), alloc), alloc);
-      const std::string status = statusName(item.status);
-      row.AddMember("status", rapidjson::Value(status.c_str(), alloc), alloc);
-      row.AddMember("chunk_id", rapidjson::Value(item.chunkId.c_str(), alloc),
-                    alloc);
-      row.AddMember("plan_id", rapidjson::Value(item.planId.c_str(), alloc), alloc);
-      row.AddMember("created_at", item.createdAt, alloc);
-      row.AddMember("updated_at", item.updatedAt, alloc);
-      items.PushBack(row, alloc);
-
-      summary << item.id << ". [" << statusMarker(item.status) << "] "
-              << item.text << "\n";
+    if (mutated) {
+      tm.writeAgentTodo(threadId, agentId, list);
+      firmius::core::Harness::instance().publishEvent(
+          shared::AgentTodoUpdated{threadId, agentId, list});
     }
-    doc.AddMember("items", items, alloc);
-    doc.AddMember("summary", rapidjson::Value(summary.str().c_str(), alloc),
-                  alloc);
-    return shared::ToolResult::ok(doc);
+    return buildResult(list, headline, warnings);
   } catch (const std::exception &e) {
     return shared::ToolResult::fail(e.what());
   }

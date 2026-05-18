@@ -1,4 +1,6 @@
 #include "tools/WebSearchTool.hpp"
+#include "environment/PermissionSuggestionEngine.hpp"
+#include "harness/Harness.hpp"
 #include "providers/LLMSearchProvider.hpp"
 #include "providers/LLMSearchProviderRegistry.hpp"
 #include <rapidjson/document.h>
@@ -37,6 +39,41 @@ WebSearchInput WebSearchTool::transform(const rapidjson::Value &json) {
 
 shared::ToolResult WebSearchTool::execute(const WebSearchInput &input,
                                           shared::ToolContext &ctx) {
+    // Network search gate.
+    {
+        PolicyRequest req;
+        req.category = kCatNetworkSearch;
+        req.query = input.query;
+        req.toolName = "WebSearch";
+        auto eval = Harness::instance().policyEngine().evaluate(req);
+        if (eval.decision == PolicyDecision::Deny) {
+            return shared::ToolResult::fail("Web search denied by policy.");
+        }
+        if (eval.decision == PolicyDecision::Ask) {
+            shared::PermissionEscalationRequest esc;
+            const auto &actx = ctx.agent.getContext();
+            esc.threadId = actx.history ? actx.history->threadId : "";
+            esc.agentId = actx.identity.id;
+            esc.toolName = "WebSearch";
+            esc.requestType = shared::PermissionRequestType::Read;
+            esc.title = "Allow web search?";
+            esc.message = "Approve search query: " + input.query;
+            esc.severity = shared::CommandSeverity::LOW;
+            esc.allowAlways = true;
+            esc.category = req.category;
+            esc.query = req.query;
+            shared::CommandIntent dummy;
+            auto suggestions =
+                PermissionSuggestionEngine::generate(req, dummy);
+            auto response =
+                Harness::instance().requestPermissionEscalationWithSuggestions(
+                    std::move(esc), std::move(suggestions));
+            if (response == shared::PermissionResponse::Deny) {
+                return shared::ToolResult::fail("Web search denied.");
+            }
+        }
+    }
+
     if (!ctx.searchRegistry) {
         return shared::ToolResult::fail("No search providers configured");
     }
@@ -57,29 +94,32 @@ shared::ToolResult WebSearchTool::execute(const WebSearchInput &input,
     doc.SetObject();
     auto &a = doc.GetAllocator();
 
-    doc.AddMember("query", rapidjson::Value(input.query.c_str(), a).Move(), a);
-    doc.AddMember("provider", rapidjson::Value(provider.name().c_str(), a).Move(), a);
+    // Token-waste pass 5: dropped `query` (echo of input) and `results[]`
+    // (the formatted_text body already includes URLs+titles inline).
+    // Keep `content` (the payload), `provider` (which provider answered),
+    // and `queries_used` only when it differs from the input query.
+    doc.AddMember("provider",
+                  rapidjson::Value(provider.name().c_str(), a).Move(), a);
 
     if (!result.formatted_text.empty()) {
-        doc.AddMember("content", rapidjson::Value(result.formatted_text.c_str(), a).Move(), a);
+        doc.AddMember("content",
+                      rapidjson::Value(result.formatted_text.c_str(), a).Move(),
+                      a);
     } else {
         doc.AddMember("content", "", a);
     }
 
-    rapidjson::Value resultsArr(rapidjson::kArrayType);
-    for (const auto &src : result.sources) {
-        rapidjson::Value srcObj(rapidjson::kObjectType);
-        srcObj.AddMember("url", rapidjson::Value(src.first.c_str(), a).Move(), a);
-        srcObj.AddMember("title", rapidjson::Value(src.second.c_str(), a).Move(), a);
-        resultsArr.PushBack(srcObj, a);
-    }
-    doc.AddMember("results", resultsArr, a);
-
-    rapidjson::Value queriesArr(rapidjson::kArrayType);
+    bool emitQueriesUsed = false;
     for (const auto &q : result.queries_used) {
-        queriesArr.PushBack(rapidjson::Value(q.c_str(), a).Move(), a);
+        if (q != input.query) { emitQueriesUsed = true; break; }
     }
-    doc.AddMember("queries_used", queriesArr, a);
+    if (emitQueriesUsed) {
+        rapidjson::Value queriesArr(rapidjson::kArrayType);
+        for (const auto &q : result.queries_used) {
+            queriesArr.PushBack(rapidjson::Value(q.c_str(), a).Move(), a);
+        }
+        doc.AddMember("queries_used", queriesArr, a);
+    }
 
     return shared::ToolResult::ok(doc);
 }

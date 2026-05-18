@@ -2,15 +2,26 @@
 
 #include "daemon/Protocol.hpp"
 
+#include <atomic>
 #include <functional>
 #include <map>
 #include <condition_variable>
+#include <memory>
 #include <mutex>
 #include <optional>
+#include <thread>
 #include <unordered_set>
 #include <string>
 #include <unordered_map>
+#include <variant>
 #include <vector>
+
+namespace firmius {
+class OAuthWizard;
+}
+namespace firmius::provider {
+class APIKeyWizard;
+}
 
 namespace firmius::daemon {
 
@@ -80,7 +91,18 @@ public:
   PermissionQueueSnapshot
   setPermissionMode(const std::string &clientId,
                     const PermissionModeUpdateRequest &request);
+  PermissionCreateModeResponse createPermissionMode(
+      const PermissionCreateModeRequest &request);
+  PermissionRenameModeResponse renamePermissionMode(
+      const PermissionRenameModeRequest &request);
+  PermissionDeleteModeResponse deletePermissionMode(
+      const PermissionDeleteModeRequest &request);
   bool resolvePermission(const PermissionResolveRequest &request);
+  bool resolvePermissionWithRules(const PermissionResolveWithRulesRequest &request);
+  PermissionListRulesResponse listPolicyRules(const PermissionListRulesRequest &request);
+  PermissionUpsertRuleResponse upsertPolicyRule(const PermissionUpsertRuleRequest &request);
+  PermissionDeleteRuleResponse deletePolicyRule(const PermissionDeleteRuleRequest &request);
+  PermissionReloadPolicyResponse reloadPolicy(const PermissionReloadPolicyRequest &request);
   ModelCatalogSnapshot listModels(bool refresh);
   std::optional<AgentRuntimeSnapshot> switchModel(const ModelSwitchRequest &request);
   ProviderCatalogSnapshot listProviders() const;
@@ -146,6 +168,28 @@ public:
                                              const BenchmarksStatusRequest &request) const;
   BenchmarkLogsSnapshot getBenchmarkLogs(const std::string &clientId,
                                          const BenchmarksLogsRequest &request) const;
+
+  // ── /connect wizard RPCs ────────────────────────────────────────────────
+  ConnectBeginResponse beginConnect(const std::string &clientId,
+                                     const ConnectBeginRequest &request);
+  ConnectSubmitResponse submitConnect(const std::string &clientId,
+                                       const ConnectSubmitRequest &request);
+  ConnectFinalizeResponse finalizeConnect(const std::string &clientId,
+                                           const ConnectFinalizeRequest &request);
+  ConnectCancelResponse cancelConnect(const std::string &clientId,
+                                       const ConnectCancelRequest &request);
+
+  // ── /undo Rewind RPCs ─────────────────────────────────────────────────
+  RewindPreviewResponse previewRewind(const std::string &clientId,
+                                       const RewindPreviewRequest &request) const;
+  RewindExecuteResponse executeRewind(const std::string &clientId,
+                                       const RewindExecuteRequest &request);
+
+  // ── /redo RPCs ────────────────────────────────────────────────────────
+  RedoPreviewResponse previewRedo(const std::string &clientId,
+                                  const RedoPreviewRequest &request) const;
+  RedoExecuteResponse executeRedo(const std::string &clientId,
+                                  const RedoExecuteRequest &request);
 
 private:
   struct EventSubscription {
@@ -237,6 +281,44 @@ private:
 
   std::unordered_map<std::string, std::string> hookStateChangeKeys_;
   std::unordered_map<std::string, std::string> pactStateChangeKeys_;
+
+  // ── /connect wizard sessions ────────────────────────────────────────────
+  // One active wizard per client. Keyed by clientId so a second `begin` call
+  // from the same client implicitly cancels the previous session.
+  struct ConnectSession {
+    std::string sessionId;
+    std::string clientId;
+    std::string providerId;
+    std::string providerKind;  // "oauth" | "apikey"
+    // Either an OAuth or API-key wizard, exactly one populated.
+    std::unique_ptr<firmius::OAuthWizard> oauthWizard;
+    std::unique_ptr<firmius::provider::APIKeyWizard> apiKeyWizard;
+    // Background worker that polls isComplete() then runs finalizeExchange().
+    // Joined on cancel/destroy via the cancelled flag.
+    std::thread finalizeWorker;
+    std::shared_ptr<std::atomic<bool>> cancelled;
+    bool finalizeStarted = false;
+  };
+
+  /// Build a WizardPromptSnapshot from a wizard's current state. Returns:
+  ///   - the wizard's next prompt if one exists,
+  ///   - a synthetic "Waiting..." prompt if the wizard has no next prompt but
+  ///     hasn't yet reported isComplete() (long-running flows like OAuth),
+  ///   - std::nullopt when the wizard is complete and ready to finalize.
+  std::optional<WizardPromptSnapshot>
+  pollNextPromptLocked(ConnectSession &session) const;
+
+  /// Cancel + erase any wizard owned by this client. Safe to call when none
+  /// exists. Joins the finalize worker if it's running.
+  void cancelConnectSessionForClientLocked(const std::string &clientId);
+
+  /// Emit a ConnectProgress event to a single client.
+  void emitConnectProgressEvent(const std::string &clientId,
+                                 const ConnectProgressSnapshot &snapshot);
+
+  mutable std::mutex connectSessionsMutex_;
+  std::unordered_map<std::string, ConnectSession> connectSessionsByClient_;
+  std::uint64_t nextConnectSessionId_ = 1;
 };
 
 } // namespace firmius::daemon

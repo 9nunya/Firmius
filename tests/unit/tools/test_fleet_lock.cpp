@@ -377,8 +377,10 @@ TEST_F(FleetLockToolTest, FleetStatusToolReturnsAllLocks) {
   EXPECT_TRUE(statusResult.success);
 
   rapidjson::Document resultDoc = parseJson(statusResult.data);
-  EXPECT_TRUE(resultDoc.HasMember("locks"));
-  EXPECT_EQ(resultDoc["locks"].GetArray().Size(), 3);
+  // Token-waste pass 3: FleetStatus emits prose-first {result, count}
+  // instead of a structured `locks[]` array.
+  EXPECT_TRUE(resultDoc.HasMember("count"));
+  EXPECT_EQ(resultDoc["count"].GetUint(), 3u);
 }
 
 TEST_F(FleetLockToolTest, FleetStatusToolFiltersByRootAgent) {
@@ -400,7 +402,7 @@ TEST_F(FleetLockToolTest, FleetStatusToolFiltersByRootAgent) {
   EXPECT_TRUE(statusResult.success);
 
   rapidjson::Document resultDoc = parseJson(statusResult.data);
-  EXPECT_EQ(resultDoc["locks"].GetArray().Size(), 0);
+  EXPECT_EQ(resultDoc["count"].GetUint(), 0u);
 }
 
 TEST_F(FleetLockToolTest, FleetStatusToolIncludesClosedWhenRequested) {
@@ -428,14 +430,14 @@ TEST_F(FleetLockToolTest, FleetStatusToolIncludesClosedWhenRequested) {
   statusInput1.include_closed = false;
   auto statusResult1 = statusTool.execute(statusInput1, ctx);
   rapidjson::Document resultDoc1 = parseJson(statusResult1.data);
-  EXPECT_EQ(resultDoc1["locks"].GetArray().Size(), 0);
+  EXPECT_EQ(resultDoc1["count"].GetUint(), 0u);
 
   // Get status with include_closed
   FleetStatusInput statusInput2;
   statusInput2.include_closed = true;
   auto statusResult2 = statusTool.execute(statusInput2, ctx);
   rapidjson::Document resultDoc2 = parseJson(statusResult2.data);
-  EXPECT_EQ(resultDoc2["locks"].GetArray().Size(), 1);
+  EXPECT_EQ(resultDoc2["count"].GetUint(), 1u);
 }
 
 // FleetLockRespondTool tests

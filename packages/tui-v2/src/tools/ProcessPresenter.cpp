@@ -2,6 +2,7 @@
 #include "tools/ToolArgsParser.hpp"
 #include "items/ToolCallItem.hpp"
 #include "AnsiOutputParser.hpp"
+#include "SyntaxHighlighter.hpp"
 #include "Terminal.hpp"
 #include "ThemeManager.hpp"
 #include "ThemeAnsi.hpp"
@@ -39,6 +40,152 @@ std::string formatDuration(std::chrono::milliseconds ms) {
   std::ostringstream oss;
   oss << std::fixed << std::setprecision(1) << secs << "s";
   return oss.str();
+}
+
+// Word-wrap an ANSI-colored string into a vector of strings each bounded by
+// `maxWidth` visible columns. Preserves color/attribute escape sequences
+// across wraps (any open SGR state on the input stays applied to the
+// continuation line).
+//
+// `indent` is plain text added to the start of every continuation line.
+// Returns at least one line (possibly empty) so callers don't need to guard.
+std::vector<std::string> wrapAnsi(const std::string& text, int maxWidth,
+                                  const std::string& indent = "") {
+  std::vector<std::string> result;
+  if (maxWidth <= 0) {
+    result.push_back(text);
+    return result;
+  }
+
+  std::string current;
+  int currentVis = 0;
+  bool inEscape = false;
+  std::string escAccum;
+
+  auto flush = [&](bool addIndent) {
+    result.push_back(current);
+    current.clear();
+    currentVis = 0;
+    if (addIndent && !indent.empty()) {
+      current = indent;
+      currentVis = ansi::visibleWidth(indent);
+    }
+  };
+
+  for (size_t i = 0; i < text.size(); ++i) {
+    const char ch = text[i];
+    if (ch == '\x1b') {
+      inEscape = true;
+      escAccum.clear();
+      escAccum += ch;
+      continue;
+    }
+    if (inEscape) {
+      escAccum += ch;
+      if ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z')) {
+        inEscape = false;
+        current += escAccum;
+        escAccum.clear();
+      }
+      continue;
+    }
+    // UTF-8 continuation byte: append without bumping width.
+    if ((static_cast<unsigned char>(ch) & 0xC0) == 0x80) {
+      current += ch;
+      continue;
+    }
+    if (ch == '\n') {
+      flush(true);
+      continue;
+    }
+    if (currentVis >= maxWidth) {
+      flush(true);
+    }
+    current += ch;
+    ++currentVis;
+  }
+  if (!current.empty() || result.empty()) {
+    result.push_back(current);
+  }
+  return result;
+}
+
+// Pad `text` to exactly `targetWidth` visible columns with spaces; no-op
+// when already wide enough. ANSI sequences and UTF-8 multi-bytes don't
+// count toward the visible width.
+inline std::string padToWidth_(const std::string& text, int targetWidth) {
+  const int visible = ansi::visibleWidth(text);
+  if (visible >= targetWidth) return text;
+  return text + std::string(targetWidth - visible, ' ');
+}
+
+// Render a Python code block: per-line syntax highlighting on top of a
+// constant separator background, padded to full width so the bg extends to
+// the right edge. A leading "  " indent keeps it visually aligned with the
+// rest of the tool block. Long lines are wrapped with the same indent so
+// the code block stays bounded.
+std::vector<std::string> renderPythonCodeBlock(const std::string& code,
+                                              int width) {
+  const auto& theme = ThemeManager::instance().currentTheme();
+  std::vector<std::string> result;
+  if (code.empty()) return result;
+
+  // Highlight the entire code block in one parser pass — keeps multi-line
+  // strings and triple-quoted blocks coherent across lines.
+  auto highlighted = SyntaxHighlighter::instance().highlightLines(
+      code, "python", theme.base.fg);
+
+  const std::string indent = "  ";
+  const int indentVis = ansi::visibleWidth(indent);
+  const int contentWidth = std::max(8, width - indentVis);
+
+  for (const auto& hline : highlighted) {
+    auto wrapped = wrapAnsi(hline, contentWidth, "");
+    for (auto& wl : wrapped) {
+      std::string row = indent + wl;
+      // Pad to full width, then apply bg color to the whole row.
+      row = padToWidth_(row, width);
+      row = ansi::bgRgb(theme.base.separator.r, theme.base.separator.g,
+                        theme.base.separator.b, row);
+      result.push_back(std::move(row));
+    }
+  }
+  return result;
+}
+
+// Render a Bash command with syntax highlighting and wrap it so long or
+// multi-line commands flow onto continuation rows at `width`. The first
+// line gets `prefix`; subsequent lines indent to align under the command
+// body. Embedded newlines in the command (e.g. `python -c "a\nb\nc"`) are
+// honored so each source line becomes its own row before width-wrapping
+// kicks in — previously highlightLine() returned only the first line and
+// the rest of the command was silently dropped.
+std::vector<std::string> renderBashCommandLines(const std::string& prefix,
+                                                const std::string& command,
+                                                int width) {
+  const auto& theme = ThemeManager::instance().currentTheme();
+  std::string highlighted;
+  if (SyntaxHighlighter::instance().hasGrammar("bash")) {
+    auto highlightedLines = SyntaxHighlighter::instance().highlightLines(
+        command, "bash", theme.base.fg);
+    for (size_t i = 0; i < highlightedLines.size(); ++i) {
+      if (i > 0) highlighted += '\n';
+      highlighted += highlightedLines[i];
+    }
+  } else {
+    highlighted = ansi::fgRgb(theme.base.fg.r, theme.base.fg.g, theme.base.fg.b,
+                              command);
+  }
+  highlighted = ansi::bold(highlighted);
+
+  const int prefixVis = ansi::visibleWidth(prefix);
+  const int contentWidth = std::max(8, width - prefixVis);
+  const std::string indent(prefixVis, ' ');
+
+  auto wrapped = wrapAnsi(highlighted, contentWidth, indent);
+  if (wrapped.empty()) wrapped.push_back("");
+  wrapped[0] = prefix + wrapped[0];
+  return wrapped;
 }
 
 struct ParsedArgs {
@@ -149,7 +296,7 @@ std::vector<std::string> renderWaitPreparing(const ParsedArgs& args) {
 }
 
 std::vector<std::string> renderPreparing(const std::string& toolName,
-                                          const std::string& args) {
+                                          const std::string& args, int width) {
   if (toolName == "Python") {
     return {theme_ansi::warning("  \xe2\x9a\x99 Python")};
   }
@@ -160,12 +307,12 @@ std::vector<std::string> renderPreparing(const std::string& toolName,
       return renderWaitPreparing(parsed);
     }
     if (parsed.action == "Execute" && !parsed.command.empty()) {
-      return {theme_ansi::warning("  \xe2\x98\x98 Bash ") +
-              ansi::bold(theme_ansi::foreground(parsed.command))};
+      return renderBashCommandLines(theme_ansi::warning("  \xe2\x98\x98 Bash "),
+                                    parsed.command, width);
     }
     if (parsed.action == "Spawn" && !parsed.command.empty()) {
-      return {theme_ansi::warning("  \xe2\x98\x98 Bash ") +
-              ansi::bold(theme_ansi::foreground(parsed.command))};
+      return renderBashCommandLines(theme_ansi::warning("  \xe2\x98\x98 Bash "),
+                                    parsed.command, width);
     }
   }
   return {theme_ansi::warning("  \xe2\x9a\x99 Process")};
@@ -174,10 +321,11 @@ std::vector<std::string> renderPreparing(const std::string& toolName,
 std::vector<std::string> renderExecuteCalled(const ParsedArgs& args, const ToolCallItem& item,
                                               int width) {
   std::vector<std::string> result;
-  // Header
+  // Header — bash-highlighted command, auto-wrapped to width.
   std::string cmd = args.command.empty() ? "..." : args.command;
-  result.push_back(theme_ansi::warning("  \xe2\x98\x98 Bash ") +
-                   ansi::bold(theme_ansi::foreground(cmd)));
+  auto headerLines = renderBashCommandLines(
+      theme_ansi::warning("  \xe2\x98\x98 Bash "), cmd, width);
+  result.insert(result.end(), headerLines.begin(), headerLines.end());
 
   // Show live output if available
   const auto& stdout = item.processStdout();
@@ -215,11 +363,13 @@ std::vector<std::string> renderExecuteFinished(const ParsedArgs& args, const Par
   std::vector<std::string> result;
   bool success = item.success();
   std::string icon = success ? "\xe2\x9c\x93" : "\xe2\x9c\x97";
-  auto iconColor = success ? theme_ansi::success("  " + icon + " ")
-                           : theme_ansi::error("  " + icon + " ");
+  auto iconStr = "  " + icon + " ";
+  std::string iconColored =
+      success ? theme_ansi::success(iconStr) : theme_ansi::error(iconStr);
 
   std::string cmd = args.command.empty() ? "Bash" : args.command;
-  result.push_back(iconColor + ansi::bold(theme_ansi::foreground(cmd)));
+  auto headerLines = renderBashCommandLines(iconColored, cmd, width);
+  result.insert(result.end(), headerLines.begin(), headerLines.end());
 
   // Output body
   std::string output = res.stdoutData;
@@ -269,8 +419,9 @@ std::vector<std::string> renderSpawnCalled(const ParsedArgs& args, const ToolCal
                                             int width) {
   std::vector<std::string> result;
   std::string cmd = args.command.empty() ? "..." : args.command;
-  result.push_back(theme_ansi::warning("  \xe2\x98\x98 Bash ") +
-                   ansi::bold(theme_ansi::foreground(cmd)));
+  auto headerLines = renderBashCommandLines(
+      theme_ansi::warning("  \xe2\x98\x98 Bash "), cmd, width);
+  result.insert(result.end(), headerLines.begin(), headerLines.end());
 
   // Show live output if available (same as Execute)
   const auto& stdout = item.processStdout();
@@ -305,10 +456,12 @@ std::vector<std::string> renderSpawnFinished(const ParsedArgs& args, const Parse
   std::vector<std::string> result;
   bool success = item.success();
   std::string icon = success ? "\xe2\x9c\x93" : "\xe2\x9c\x97";
-  auto iconColor = success ? theme_ansi::success("  " + icon + " ")
-                           : theme_ansi::error("  " + icon + " ");
+  auto iconStr = "  " + icon + " ";
+  std::string iconColored =
+      success ? theme_ansi::success(iconStr) : theme_ansi::error(iconStr);
   std::string cmd = args.command.empty() ? "Bash" : args.command;
-  result.push_back(iconColor + ansi::bold(theme_ansi::foreground(cmd)));
+  auto headerLines = renderBashCommandLines(iconColored, cmd, width);
+  result.insert(result.end(), headerLines.begin(), headerLines.end());
 
   // Output body
   std::string output = res.stdoutData;
@@ -417,22 +570,15 @@ std::vector<std::string> renderListFinished(const ParsedResult& res) {
 }
 
 std::vector<std::string> renderPythonCalled(const ParsedArgs& args, const ToolCallItem& item,
-                                             int /*width*/) {
-  const auto& theme = ThemeManager::instance().currentTheme();
+                                             int width) {
   std::vector<std::string> result;
   result.push_back(theme_ansi::warning("  \xe2\x98\x98 Python"));
 
-  // Show code block
+  // Show code block — bg-tinted, syntax-highlighted, full-width rows.
   if (!args.code.empty()) {
     result.push_back(theme_ansi::dim("  \xe2\x94\x80\xe2\x94\x80\xe2\x94\x80 code \xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"));
-    std::istringstream stream(args.code);
-    std::string line;
-    while (std::getline(stream, line)) {
-      result.push_back(ansi::bgRgb(theme.base.separator.r, theme.base.separator.g,
-                                   theme.base.separator.b,
-                                   ansi::fgRgb(theme.base.fg.r, theme.base.fg.g,
-                                               theme.base.fg.b, "  " + line)));
-    }
+    auto codeRows = renderPythonCodeBlock(args.code, width);
+    result.insert(result.end(), codeRows.begin(), codeRows.end());
     result.push_back(theme_ansi::dim("  \xe2\x94\x80\xe2\x94\x80\xe2\x94\x80 output \xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"));
   }
 
@@ -443,7 +589,6 @@ std::vector<std::string> renderPythonCalled(const ParsedArgs& args, const ToolCa
 
 std::vector<std::string> renderPythonFinished(const ParsedArgs& args, const ParsedResult& res,
                                                const ToolCallItem& item, int width) {
-  const auto& theme = ThemeManager::instance().currentTheme();
   std::vector<std::string> result;
   bool success = item.success();
   std::string icon = success ? "\xe2\x9c\x93" : "\xe2\x9c\x97";
@@ -451,17 +596,11 @@ std::vector<std::string> renderPythonFinished(const ParsedArgs& args, const Pars
                            : theme_ansi::error("  " + icon + " ");
   result.push_back(iconColor + ansi::bold(theme_ansi::foreground("Python")));
 
-  // Code block
+  // Code block (highlighted)
   if (!args.code.empty()) {
     result.push_back(theme_ansi::dim("  \xe2\x94\x80\xe2\x94\x80\xe2\x94\x80 code \xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"));
-    std::istringstream stream(args.code);
-    std::string line;
-    while (std::getline(stream, line)) {
-      result.push_back(ansi::bgRgb(theme.base.separator.r, theme.base.separator.g,
-                                   theme.base.separator.b,
-                                   ansi::fgRgb(theme.base.fg.r, theme.base.fg.g,
-                                               theme.base.fg.b, "  " + line)));
-    }
+    auto codeRows = renderPythonCodeBlock(args.code, width);
+    result.insert(result.end(), codeRows.begin(), codeRows.end());
   }
 
   // Output
@@ -493,7 +632,7 @@ std::vector<std::string> renderPythonFinished(const ParsedArgs& args, const Pars
 std::vector<std::string> ProcessPresenter::render(const ToolCallItem& item, const ToolRenderContext& /*ctx*/, int width) const {
   // Preparing phase
   if (item.phase() == ToolPhase::Preparing) {
-    return renderPreparing(item.toolName(), item.args());
+    return renderPreparing(item.toolName(), item.args(), width);
   }
 
   auto args = parseArgs(item.args());

@@ -42,6 +42,15 @@ protected:
      */
     std::string getReasoningFieldName() const override;
 
+    /**
+     * @brief Override to inject cache_control markers when routing to
+     *        Anthropic models. OpenRouter passes Anthropic-style
+     *        cache_control through to upstream Claude models for explicit
+     *        prompt caching (90% discount on hits).
+     */
+    std::string prepareRequestBody(const firmius::shared::AgentHistory &history,
+                                   const firmius::provider::ProviderOptions &opts) override;
+
     bool supportsQuotaTracking() const override { return true; }
     void refreshQuotas() override;
     std::map<std::string, std::vector<firmius::shared::QuotaBucket>>

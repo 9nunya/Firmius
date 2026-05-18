@@ -106,6 +106,18 @@ public:
   mcp::McpManager &getMcpManager() { return mcp::McpManager::shared(); }
   std::shared_ptr<mcp::McpClient> getMcpClient(const std::string &serverName, shared::ToolContext &toolCtx);
 
+  /// Mutex guarding mutations to `context.history->turns`. Held by the
+  /// agent thread during appendTurnToHistory and by background workers
+  /// (e.g. the working-memory deflation upgrader) when they need to
+  /// rewrite a part body in place. Exposed so background workers can
+  /// take the lock from outside the Agent class.
+  std::mutex &getHistoryMutex() { return historyMutex_; }
+
+  /// Accessor for the per-agent journaler so background workers can
+  /// trigger journal rewrites under the history mutex. Returns nullptr
+  /// when persistence is disabled.
+  std::shared_ptr<Journaler> getJournaler() { return journaler; }
+
 private:
   struct PendingModelSwitch {
     std::string providerId;
@@ -152,6 +164,11 @@ private:
   std::mutex callbackMutex;
   std::mutex blockingProcessMutex;
   std::unordered_set<std::string> backgroundProcessIds;
+  // Guards mutations to context.history->turns. Held by the agent thread
+  // during appendTurnToHistory and by background workers (e.g. the
+  // working-memory deflation upgrader) when rewriting a part body in
+  // place.
+  std::mutex historyMutex_;
 };
 
 

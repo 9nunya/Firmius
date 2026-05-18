@@ -61,6 +61,7 @@ public:
   MOCK_METHOD(void, writeFile,
               (const std::string &, (const std::vector<uint8_t> &)),
               (override));
+  MOCK_METHOD(void, deleteFile, (const std::string &), (override));
   MOCK_METHOD(bool, exists, (const std::string &), (override));
   MOCK_METHOD(std::vector<FileInfo>, listDir, (const std::string &),
               (override));
@@ -549,10 +550,11 @@ TEST_F(FileReadToolTest, allowedPaths_permitsInside) {
   ASSERT_TRUE(resultDoc.HasMember("content"));
   ASSERT_TRUE(resultDoc["content"].IsString());
   EXPECT_EQ(std::string(resultDoc["content"].GetString()), expectedContent);
-  EXPECT_NE(result.data.find("\"line_start\":1"), std::string::npos);
-  EXPECT_NE(result.data.find("\"line_end\":3"), std::string::npos);
-  EXPECT_NE(result.data.find("\"watch_state\":\"updated\""), std::string::npos);
-  EXPECT_NE(result.data.find("\"watch_scope\":\"full\""), std::string::npos);
+  // Token-waste pass 5: line_start/line_end/lines_read/read_full/
+  // reached_end/watch_scope/watch_state collapsed into one `range:
+  // "<start>-<end>/<total>"` field.
+  ASSERT_TRUE(resultDoc.HasMember("range"));
+  EXPECT_EQ(std::string(resultDoc["range"].GetString()), "1-3/3");
 }
 
 TEST_F(FileReadToolTest, allowedPaths_blocksOutside) {
@@ -592,11 +594,10 @@ TEST_F(FileReadToolTest, lineSlicing) {
   ASSERT_TRUE(resultDoc.HasMember("content"));
   ASSERT_TRUE(resultDoc["content"].IsString());
   EXPECT_EQ(std::string(resultDoc["content"].GetString()), expectedContent);
-  EXPECT_NE(result.data.find("\"line_start\":2"), std::string::npos);
-  EXPECT_NE(result.data.find("\"line_end\":4"), std::string::npos);
-  EXPECT_NE(result.data.find("\"lines_read\":3"), std::string::npos);
-  EXPECT_NE(result.data.find("\"watch_scope\":\"range\""), std::string::npos);
-  EXPECT_NE(result.data.find("\"reached_end\":false"), std::string::npos);
+  // Token-waste pass 5: range collapses line_start/line_end/lines_read/
+  // reached_end/watch_scope into a "<start>-<end>/<total>" string.
+  ASSERT_TRUE(resultDoc.HasMember("range"));
+  EXPECT_EQ(std::string(resultDoc["range"].GetString()), "2-4/5");
 }
 
 TEST_F(FileReadToolTest, fileReadLoadsNearestAgentsWithoutReloadingRoot) {
@@ -945,7 +946,10 @@ TEST_F(GlobToolTest, noMatchesReturnsEmptyArray) {
   auto toolResult = executeGlob(json, ctx);
 
   EXPECT_TRUE(toolResult.success);
-  EXPECT_NE(toolResult.data.find("[]"), std::string::npos);
+  // Token-waste pass 3: prose-first; no-matches result is the prose
+  // "no matches under <path>".
+  EXPECT_NE(toolResult.data.find("no matches"), std::string::npos);
+  EXPECT_NE(toolResult.data.find("\"count\":0"), std::string::npos);
 }
 
 TEST_F(GlobToolTest, listDirFailureReturnsError) {
@@ -1055,7 +1059,10 @@ TEST_F(GrepToolTest, exitCode1_noMatches) {
   auto toolResult = executeGrep(json, ctx);
 
   EXPECT_TRUE(toolResult.success);
-  EXPECT_NE(toolResult.data.find("[]"), std::string::npos);
+  // Token-waste pass 3: prose-first; no-matches result is the prose
+  // "no matches" with hits/files counters at 0.
+  EXPECT_NE(toolResult.data.find("no matches"), std::string::npos);
+  EXPECT_NE(toolResult.data.find("\"hits\":0"), std::string::npos);
 }
 
 TEST_F(GrepToolTest, parsesRipgrepJsonAndSupportsAdvancedRegexEngine) {
@@ -1071,16 +1078,19 @@ TEST_F(GrepToolTest, parsesRipgrepJsonAndSupportsAdvancedRegexEngine) {
       .WillOnce(Return(result));
 
   auto json = createJsonInput({{"pattern", R"((?<=value\s=\s)\d+)"},
-                               {"path", "/tmp"}});
+                               {"path", "/tmp"}},
+                              {{"context_before", 1}});
   ToolContext ctx{mockHost, mockAgent, "test_call"};
 
   auto toolResult = executeGrep(json, ctx);
 
   EXPECT_TRUE(toolResult.success);
+  // Token-waste pass 3: prose-first. With context lines requested, each
+  // hit appears as `<path>:<line>:<content>` (match) or `-` (context).
   EXPECT_NE(toolResult.data.find("/tmp/dir:with:colon/file.cpp"),
             std::string::npos);
-  EXPECT_NE(toolResult.data.find("\"line\":6"), std::string::npos);
-  EXPECT_NE(toolResult.data.find("\"line\":5"), std::string::npos);
+  EXPECT_NE(toolResult.data.find(":6:int value = 42;"), std::string::npos);
+  EXPECT_NE(toolResult.data.find("-5-// before"), std::string::npos);
 }
 
 TEST_F(GrepToolTest, fallsBackToPerlGrepWhenRipgrepIsUnavailable) {
@@ -1104,7 +1114,10 @@ TEST_F(GrepToolTest, fallsBackToPerlGrepWhenRipgrepIsUnavailable) {
   auto toolResult = executeGrep(json, ctx);
 
   EXPECT_TRUE(toolResult.success);
-  EXPECT_NE(toolResult.data.find("\"line\":7"), std::string::npos);
+  // Token-waste pass 3: with no context_before/after the prose lists
+  // file (count): line, line, ... — line number 7 should appear.
+  EXPECT_NE(toolResult.data.find("7"), std::string::npos);
+  EXPECT_NE(toolResult.data.find("/tmp/file.txt"), std::string::npos);
 }
 
 class CommandPermissionToolTest : public ::testing::Test {
@@ -1231,8 +1244,9 @@ TEST_F(FileToolFamilyTest, editAppliesSingleFilePatchWithHeaders) {
   EXPECT_TRUE(result.success) << result.error;
   EXPECT_EQ(capturedWrite, "alpha\nbeta2\ngamma2\ngamma\n");
   auto doc = parseResult(result);
-  EXPECT_STREQ(doc["resolved_mode"].GetString(), "patch");
-  EXPECT_TRUE(doc["transactional"].GetBool());
+  // Token-waste pass 1: result is prose-first; verb confirms patch path.
+  EXPECT_THAT(std::string(doc["result"].GetString()), HasSubstr("Patched"));
+  EXPECT_THAT(std::string(doc["result"].GetString()), HasSubstr("file.txt"));
 }
 
 TEST_F(FileToolFamilyTest, editRejectsPatchWithoutUnifiedHeaders) {
@@ -1265,7 +1279,7 @@ TEST_F(FileToolFamilyTest, editValidateOnlyDoesNotWrite) {
   EXPECT_TRUE(result.success) << result.error;
   auto doc = parseResult(result);
   EXPECT_TRUE(doc["validate_only"].GetBool());
-  EXPECT_TRUE(doc["transactional"].GetBool());
+  EXPECT_THAT(std::string(doc["result"].GetString()), HasSubstr("Validated"));
 }
 
 TEST_F(FileToolFamilyTest, editTransactionalFailurePreventsPartialWrites) {
@@ -1319,7 +1333,8 @@ TEST_F(FileToolFamilyTest, editWriteOverwritesFile) {
   EXPECT_TRUE(result.success) << result.error;
   EXPECT_EQ(capturedWrite, "new\nbody\n");
   auto doc = parseResult(result);
-  EXPECT_STREQ(doc["resolved_mode"].GetString(), "write");
+  // Token-waste pass 1: prose verb identifies the EditWrite path.
+  EXPECT_THAT(std::string(doc["result"].GetString()), HasSubstr("Wrote"));
 }
 
 TEST_F(FileToolFamilyTest, editReplaceAppliesReplaceAll) {
@@ -1343,7 +1358,9 @@ TEST_F(FileToolFamilyTest, editReplaceAppliesReplaceAll) {
   EXPECT_TRUE(result.success) << result.error;
   EXPECT_EQ(capturedWrite, "omega beta\nbeta omega\n");
   auto doc = parseResult(result);
-  EXPECT_EQ(doc["replacements"].GetInt(), 2);
+  // Token-waste pass 1: replacement count is reported in the prose `result`.
+  EXPECT_THAT(std::string(doc["result"].GetString()),
+              HasSubstr("2 replacements"));
 }
 
 TEST_F(FileToolFamilyTest, editRangeReplacesAnchoredLinesAndReportsSanitation) {
@@ -1373,8 +1390,12 @@ TEST_F(FileToolFamilyTest, editRangeReplacesAnchoredLinesAndReportsSanitation) {
   EXPECT_TRUE(result.success) << result.error;
   EXPECT_EQ(capturedWrite, "keep-a\nbeta2\ngamma2\nkeep-b\n");
   auto doc = parseResult(result);
-  EXPECT_STREQ(doc["resolved_mode"].GetString(), "range");
-  EXPECT_TRUE(doc.HasMember("sanitation"));
+  // Token-waste pass 1: range verb confirms the EditRange path; sanitation
+  // notes are reported inline in the prose `result` (the input contained
+  // line-range / hashline prefixes that the trimmer removed).
+  EXPECT_THAT(std::string(doc["result"].GetString()),
+              HasSubstr("Edited (range)"));
+  EXPECT_THAT(std::string(doc["result"].GetString()), HasSubstr("stripped"));
 }
 
 TEST_F(FileToolFamilyTest, editRangeRejectsMissingEndAnchor) {
@@ -1500,8 +1521,11 @@ TEST_F(ProcessExecuteToolTest, nonZeroExitReturnsFailureWithStructuredResult) {
 
   EXPECT_FALSE(result.success);
   EXPECT_THAT(result.error, HasSubstr("non-zero exit code: 17"));
+  // Token-waste pass 2: result is prose-first; exit_code stays as a
+  // structured field but command_success was dropped (derivable from
+  // exit_code).
   EXPECT_THAT(result.data, HasSubstr("\"exit_code\":17"));
-  EXPECT_THAT(result.data, HasSubstr("\"command_success\":false"));
+  EXPECT_THAT(result.data, HasSubstr("Exited 17"));
 }
 
 class ProcessStatusToolTest : public ::testing::Test {
@@ -1679,8 +1703,10 @@ TEST_F(PythonExecuteToolTest, usesProvidedVenvInterpreterAndRequestsReadAccess) 
   EXPECT_NE(mockAgent.mockPerms_->requestedCommands_.front().find(
                 "/opt/project/.venv/bin/python -c"),
             std::string::npos);
-  EXPECT_NE(result.data.find("\"venv\":\"/opt/project/.venv\""),
-            std::string::npos);
+  // Token-waste pass 2: PythonExecuteTool result no longer echoes the
+  // venv path back (the model just sent it). The above checks on
+  // requestedEditPaths_ / requestedCommands_ already prove the venv
+  // was honoured.
 }
 
 TEST_F(PythonExecuteToolTest, realExecutionCanUseProvidedVenv) {

@@ -38,6 +38,7 @@ public:
   void setUser(const std::string &) override {}
   std::vector<uint8_t> readFile(const std::string &) override { return {}; }
   void writeFile(const std::string &, const std::vector<uint8_t> &) override {}
+  void deleteFile(const std::string &) override {}
   bool exists(const std::string &) override { return false; }
   std::vector<shared::FileInfo> listDir(const std::string &) override { return {}; }
   shared::FileInfo stat(const std::string &) override { return {}; }

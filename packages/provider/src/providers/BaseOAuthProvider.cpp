@@ -79,11 +79,11 @@ BaseOAuthProvider::~BaseOAuthProvider() { stopBackgroundQuotaRefresh(); }
 void BaseOAuthProvider::startBackgroundQuotaRefresh() {
   stopQuotaRefresh_ = false;
   quotaRefreshThread_ = std::thread([this]() {
-    try {
-      refreshQuotas();
-    } catch (...) {
-    }
-
+    // The first refresh is intentionally deferred by one interval so that
+    // foreground threads observing accountsMutex_ (e.g. listProviders /
+    // isConfigured) are never blocked by a synchronous quota refresh kicked
+    // off as a side-effect of provider construction. Quotas are re-fetched
+    // on the regular cadence after that.
     while (!stopQuotaRefresh_) {
       std::unique_lock<std::mutex> lock(quotaRefreshMutex_);
       if (quotaRefreshCv_.wait_for(lock, kBackgroundQuotaRefreshInterval, [this] {

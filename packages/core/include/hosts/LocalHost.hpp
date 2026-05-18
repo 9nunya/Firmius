@@ -68,6 +68,7 @@ public:
   std::vector<uint8_t> readFile(const std::string &path) override;
   void writeFile(const std::string &path,
                  const std::vector<uint8_t> &data) override;
+  void deleteFile(const std::string &path) override;
   bool exists(const std::string &path) override;
   std::vector<shared::FileInfo> listDir(const std::string &path) override;
   shared::FileInfo stat(const std::string &path) override;

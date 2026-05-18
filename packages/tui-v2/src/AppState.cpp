@@ -5,8 +5,97 @@
 
 #include <algorithm>
 #include <cctype>
+#include <optional>
 
 namespace firmius::tui2 {
+
+namespace {
+
+// ── Placeholder span helpers ────────────────────────────────────────────
+//
+// Pasted blocks live in the input buffer as literal placeholder strings
+// like "[Pasted #3: 14 lines]". They must behave as ATOMIC sequences:
+//   * The cursor never lands inside one — caller asks for offset N, we
+//     snap to either the start or the end of the surrounding span.
+//   * Backspace at the trailing edge removes the whole span in one go.
+//
+// We don't store spans explicitly because the buffer is re-edited freely
+// by the user — keeping a parallel index would invite drift. Instead we
+// scan the buffer for "[Pasted #" markers on demand. The buffer is short
+// (a chat input), so the linear scan is cheap.
+
+struct PlaceholderSpan {
+  size_t start = 0;   ///< Inclusive byte offset of the leading '['.
+  size_t end = 0;     ///< Exclusive byte offset just past the trailing ']'.
+  int id = 0;
+};
+
+// Scan the buffer and return all placeholder spans, in order of appearance.
+std::vector<PlaceholderSpan> scanPlaceholders(const std::string& buf) {
+  std::vector<PlaceholderSpan> spans;
+  static constexpr const char* kMarker = "[Pasted #";
+  size_t i = 0;
+  while (i < buf.size()) {
+    auto pos = buf.find(kMarker, i);
+    if (pos == std::string::npos) break;
+    size_t j = pos + 9;  // strlen("[Pasted #") == 9
+    int id = 0;
+    bool any = false;
+    while (j < buf.size() &&
+           std::isdigit(static_cast<unsigned char>(buf[j]))) {
+      id = id * 10 + (buf[j] - '0');
+      ++j;
+      any = true;
+    }
+    if (!any || j >= buf.size() || buf[j] != ':') {
+      i = pos + 1;
+      continue;
+    }
+    auto closeBracket = buf.find(']', j);
+    if (closeBracket == std::string::npos) break;
+    PlaceholderSpan s;
+    s.start = pos;
+    s.end = closeBracket + 1;
+    s.id = id;
+    spans.push_back(s);
+    i = s.end;
+  }
+  return spans;
+}
+
+// If `offset` lands inside any placeholder, return that span. Otherwise
+// nullopt. Boundary positions (== start or == end) are NOT inside.
+std::optional<PlaceholderSpan>
+spanContaining(const std::string& buf, size_t offset) {
+  for (const auto& s : scanPlaceholders(buf)) {
+    if (offset > s.start && offset < s.end) return s;
+  }
+  return std::nullopt;
+}
+
+// Snap a desired offset to the nearest placeholder boundary if the
+// movement direction implies one. `prefer` controls tie-breaking when
+// the cursor is inside: PreferStart hops to the leading edge (used for
+// leftward movement), PreferEnd hops to the trailing edge (rightward).
+enum class SnapDir { PreferStart, PreferEnd };
+size_t snapOutOfPlaceholder(const std::string& buf, size_t offset,
+                             SnapDir prefer) {
+  auto inside = spanContaining(buf, offset);
+  if (!inside.has_value()) return offset;
+  return prefer == SnapDir::PreferStart ? inside->start : inside->end;
+}
+
+// Find a placeholder whose end is at exactly `endExclusive`. Used by
+// backspace to detect "cursor sits just past a placeholder".
+std::optional<PlaceholderSpan>
+spanEndingAt(const std::string& buf, size_t endExclusive) {
+  for (const auto& s : scanPlaceholders(buf)) {
+    if (s.end == endExclusive) return s;
+  }
+  return std::nullopt;
+}
+
+}  // namespace
 
 void AppState::markDirty() { dirty_ = true; }
 
@@ -34,6 +123,47 @@ void AppState::setThreadId(const std::string &id) {
 std::string AppState::threadId() const {
   std::lock_guard<std::mutex> lock(mutex_);
   return threadId_;
+}
+
+void AppState::setPermissionMode(firmius::shared::ThreadPermissionMode mode) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  permissionMode_ = mode;
+  markDirty();
+}
+
+firmius::shared::ThreadPermissionMode AppState::permissionMode() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return permissionMode_;
+}
+
+void AppState::setActiveModeId(std::string id) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  activeModeId_ = std::move(id);
+  markDirty();
+}
+
+std::string AppState::activeModeId() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return activeModeId_;
+}
+
+void AppState::setModes(std::vector<ModeSummary> modes) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  modes_ = std::move(modes);
+  markDirty();
+}
+
+std::vector<AppState::ModeSummary> AppState::modes() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return modes_;
+}
+
+std::string AppState::activeModeName() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  for (const auto &m : modes_) {
+    if (m.id == activeModeId_) return m.name;
+  }
+  return activeModeId_.empty() ? "ask" : activeModeId_;
 }
 
 void AppState::setThreadTitle(const std::string &title) {
@@ -89,6 +219,17 @@ void AppState::setAgentContextUsage(ContextUsage usage) {
 ContextUsage AppState::agentContextUsage() const {
   std::lock_guard<std::mutex> lock(mutex_);
   return agentContextUsage_;
+}
+
+void AppState::setMemoryStatus(MemoryStatus status) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  memoryStatus_ = status;
+  markDirty();
+}
+
+MemoryStatus AppState::memoryStatus() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return memoryStatus_;
 }
 
 void AppState::setAgentStatus(firmius::shared::AgentStatus status) {
@@ -783,6 +924,12 @@ std::optional<PendingPermission> AppState::pendingPermission() const {
   return pendingPermissions_.front();
 }
 
+std::vector<PendingPermission> AppState::pendingPermissions() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return std::vector<PendingPermission>(pendingPermissions_.begin(),
+                                         pendingPermissions_.end());
+}
+
 bool AppState::hasPendingPermissions() const {
   std::lock_guard<std::mutex> lock(mutex_);
   return !pendingPermissions_.empty();
@@ -856,6 +1003,12 @@ bool AppState::todoVisible() const {
 void AppState::setInputBuffer(const std::string &text) {
   std::lock_guard<std::mutex> lock(mutex_);
   inputBuffer_ = text;
+  // Move cursor to the end of the new buffer. That's the natural "I just
+  // wrote text here" semantic (matches most editors on programmatic sets,
+  // and matches the previous append-only behaviour these methods had
+  // before we introduced explicit cursor tracking).
+  inputCursor_ = inputBuffer_.size();
+  inputDesiredColumn_ = -1;
   markDirty();
 }
 
@@ -866,21 +1019,297 @@ std::string AppState::inputBuffer() const {
 
 void AppState::appendToInput(char ch) {
   std::lock_guard<std::mutex> lock(mutex_);
-  inputBuffer_ += ch;
+  inputBuffer_.insert(inputCursor_, 1, ch);
+  ++inputCursor_;
+  inputDesiredColumn_ = -1;
+  markDirty();
+}
+
+void AppState::insertAtCursor(const std::string &text) {
+  if (text.empty()) return;
+  std::lock_guard<std::mutex> lock(mutex_);
+  inputBuffer_.insert(inputCursor_, text);
+  inputCursor_ += text.size();
+  inputDesiredColumn_ = -1;
   markDirty();
 }
 
 void AppState::backspaceInput() {
   std::lock_guard<std::mutex> lock(mutex_);
-  if (!inputBuffer_.empty()) {
-    inputBuffer_.pop_back();
+  if (inputCursor_ == 0 || inputBuffer_.empty()) return;
+  // If the cursor sits immediately after a placeholder, eat the WHOLE
+  // span in one keystroke — placeholders are atomic. We also drop the
+  // matching block from pastedBlocks_ so submit doesn't try to inline
+  // a deleted attachment.
+  if (auto span = spanEndingAt(inputBuffer_, inputCursor_)) {
+    inputBuffer_.erase(span->start, span->end - span->start);
+    inputCursor_ = span->start;
+    inputDesiredColumn_ = -1;
+    for (auto it = pastedBlocks_.begin(); it != pastedBlocks_.end(); ++it) {
+      if (it->id == span->id) {
+        pastedBlocks_.erase(it);
+        break;
+      }
+    }
     markDirty();
+    return;
   }
+  // Erase the byte BEFORE the cursor (not the byte at the cursor — that's
+  // what "Delete" would do, which we don't bind here).
+  inputBuffer_.erase(inputCursor_ - 1, 1);
+  --inputCursor_;
+  inputDesiredColumn_ = -1;
+  markDirty();
+}
+
+namespace {
+
+// Word-class helpers for word-wise navigation. We treat an alpha+digit run
+// (including '_') as a word, and any other run of non-whitespace as its
+// own word boundary. This is roughly emacs M-b/M-f and matches most input
+// fields.
+bool isWordChar(unsigned char c) {
+  return std::isalnum(c) || c == '_';
+}
+
+}  // namespace
+
+size_t AppState::deleteWordBeforeCursor() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (inputCursor_ == 0) return 0;
+  size_t end = inputCursor_;
+  // Skip trailing whitespace before the cursor.
+  while (end > 0 && std::isspace(static_cast<unsigned char>(
+                       inputBuffer_[end - 1]))) {
+    --end;
+  }
+  // Now skip the word characters.
+  while (end > 0 && isWordChar(static_cast<unsigned char>(
+                       inputBuffer_[end - 1]))) {
+    --end;
+  }
+  // If we didn't move at all (cursor was at a punctuation byte), eat a
+  // single byte so the user makes some progress.
+  if (end == inputCursor_) {
+    end = inputCursor_ - 1;
+  }
+  size_t removed = inputCursor_ - end;
+  inputBuffer_.erase(end, removed);
+  inputCursor_ = end;
+  inputDesiredColumn_ = -1;
+  markDirty();
+  return removed;
 }
 
 void AppState::clearInput() {
   std::lock_guard<std::mutex> lock(mutex_);
   inputBuffer_.clear();
+  inputCursor_ = 0;
+  inputDesiredColumn_ = -1;
+  // Block storage is keyed to placeholders that no longer exist; drop it
+  // so a stale image doesn't ride along on the next /command.
+  pastedBlocks_.clear();
+  markDirty();
+}
+
+size_t AppState::cursorOffset() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return inputCursor_;
+}
+
+void AppState::setCursorOffset(size_t offset) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (offset > inputBuffer_.size()) offset = inputBuffer_.size();
+  // Programmatic seeks (mouse clicks etc.) snap to the trailing edge of
+  // any placeholder they land inside — that matches "click here" intuition.
+  inputCursor_ = snapOutOfPlaceholder(inputBuffer_, offset, SnapDir::PreferEnd);
+  inputDesiredColumn_ = -1;
+  markDirty();
+}
+
+void AppState::moveCursorLeft() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (inputCursor_ == 0) return;
+  size_t target = inputCursor_ - 1;
+  // If walking left lands inside a placeholder, jump past its leading
+  // edge — one keystroke = one atom.
+  if (auto inside = spanContaining(inputBuffer_, target)) {
+    target = inside->start;
+  }
+  inputCursor_ = target;
+  inputDesiredColumn_ = -1;
+  markDirty();
+}
+
+void AppState::moveCursorRight() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (inputCursor_ >= inputBuffer_.size()) return;
+  size_t target = inputCursor_ + 1;
+  if (auto inside = spanContaining(inputBuffer_, target)) {
+    target = inside->end;
+  }
+  inputCursor_ = target;
+  inputDesiredColumn_ = -1;
+  markDirty();
+}
+
+namespace {
+
+// Find (line index, column offset) for a byte offset.
+struct LinePos { int line; int column; };
+LinePos lineColForOffset(const std::string& buf, size_t offset) {
+  int line = 0;
+  size_t lineStart = 0;
+  for (size_t i = 0; i < offset && i < buf.size(); ++i) {
+    if (buf[i] == '\n') {
+      ++line;
+      lineStart = i + 1;
+    }
+  }
+  return {line, static_cast<int>(offset - lineStart)};
+}
+
+// Find byte offset for (line index, column).
+size_t offsetForLineCol(const std::string& buf, int line, int col) {
+  int curLine = 0;
+  size_t i = 0;
+  // Walk to the start of the requested line.
+  while (i < buf.size() && curLine < line) {
+    if (buf[i] == '\n') ++curLine;
+    ++i;
+  }
+  if (curLine < line) return buf.size();  // line out of range
+  // Now walk up to `col` chars (or end-of-line).
+  size_t offset = i;
+  while (offset < buf.size() && buf[offset] != '\n' &&
+         static_cast<int>(offset - i) < col) {
+    ++offset;
+  }
+  return offset;
+}
+
+}  // namespace
+
+int AppState::cursorLineIndex() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return lineColForOffset(inputBuffer_, inputCursor_).line;
+}
+
+int AppState::cursorColumnOnLine() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return lineColForOffset(inputBuffer_, inputCursor_).column;
+}
+
+int AppState::inputLineCount() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (inputBuffer_.empty()) return 1;
+  int n = 1;
+  for (char c : inputBuffer_) if (c == '\n') ++n;
+  return n;
+}
+
+std::string AppState::inputLineAt(int index) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  int line = 0;
+  size_t lineStart = 0;
+  for (size_t i = 0; i <= inputBuffer_.size(); ++i) {
+    if (i == inputBuffer_.size() || inputBuffer_[i] == '\n') {
+      if (line == index) {
+        return inputBuffer_.substr(lineStart, i - lineStart);
+      }
+      ++line;
+      lineStart = i + 1;
+    }
+  }
+  return {};
+}
+
+void AppState::moveCursorUp() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto pos = lineColForOffset(inputBuffer_, inputCursor_);
+  if (pos.line == 0) return;  // at the top — caller can decide what to do
+  // Remember the column we were on so consecutive Up/Down doesn't drift.
+  if (inputDesiredColumn_ < 0) inputDesiredColumn_ = pos.column;
+  size_t target =
+      offsetForLineCol(inputBuffer_, pos.line - 1, inputDesiredColumn_);
+  // Up/Down can land inside a placeholder; snap to the leading edge so
+  // the cursor visibly stays on the line above the placeholder.
+  inputCursor_ = snapOutOfPlaceholder(inputBuffer_, target, SnapDir::PreferStart);
+  markDirty();
+}
+
+void AppState::moveCursorDown() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto pos = lineColForOffset(inputBuffer_, inputCursor_);
+  // Count total lines.
+  int total = 1;
+  for (char c : inputBuffer_) if (c == '\n') ++total;
+  if (pos.line >= total - 1) return;
+  if (inputDesiredColumn_ < 0) inputDesiredColumn_ = pos.column;
+  size_t target =
+      offsetForLineCol(inputBuffer_, pos.line + 1, inputDesiredColumn_);
+  inputCursor_ = snapOutOfPlaceholder(inputBuffer_, target, SnapDir::PreferEnd);
+  markDirty();
+}
+
+void AppState::moveCursorWordLeft() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (inputCursor_ == 0) return;
+  size_t i = inputCursor_;
+  // Skip whitespace.
+  while (i > 0 && std::isspace(static_cast<unsigned char>(inputBuffer_[i - 1]))) {
+    --i;
+  }
+  // Skip a run (word chars, or a single non-word punctuation byte).
+  if (i > 0 && isWordChar(static_cast<unsigned char>(inputBuffer_[i - 1]))) {
+    while (i > 0 && isWordChar(static_cast<unsigned char>(inputBuffer_[i - 1]))) {
+      --i;
+    }
+  } else if (i > 0) {
+    --i;
+  }
+  inputCursor_ = snapOutOfPlaceholder(inputBuffer_, i, SnapDir::PreferStart);
+  inputDesiredColumn_ = -1;
+  markDirty();
+}
+
+void AppState::moveCursorWordRight() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  size_t i = inputCursor_;
+  size_t n = inputBuffer_.size();
+  // Skip whitespace.
+  while (i < n && std::isspace(static_cast<unsigned char>(inputBuffer_[i]))) {
+    ++i;
+  }
+  // Skip a word run (or one non-word byte).
+  if (i < n && isWordChar(static_cast<unsigned char>(inputBuffer_[i]))) {
+    while (i < n && isWordChar(static_cast<unsigned char>(inputBuffer_[i]))) {
+      ++i;
+    }
+  } else if (i < n) {
+    ++i;
+  }
+  inputCursor_ = snapOutOfPlaceholder(inputBuffer_, i, SnapDir::PreferEnd);
+  inputDesiredColumn_ = -1;
+  markDirty();
+}
+
+void AppState::moveCursorLineStart() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  size_t i = inputCursor_;
+  while (i > 0 && inputBuffer_[i - 1] != '\n') --i;
+  inputCursor_ = snapOutOfPlaceholder(inputBuffer_, i, SnapDir::PreferStart);
+  inputDesiredColumn_ = -1;
+  markDirty();
+}
+
+void AppState::moveCursorLineEnd() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  size_t i = inputCursor_;
+  size_t n = inputBuffer_.size();
+  while (i < n && inputBuffer_[i] != '\n') ++i;
+  inputCursor_ = snapOutOfPlaceholder(inputBuffer_, i, SnapDir::PreferEnd);
+  inputDesiredColumn_ = -1;
   markDirty();
 }
 
@@ -1042,4 +1471,257 @@ void AppState::setAutoScroll(bool enabled) {
   markDirty();
 }
 
-} // namespace firmius::tui2
+// ── Selection ────────────────────────────────────────────────────────────
+
+namespace {
+
+// Strip ANSI CSI sequences from a single line. We have a more general
+// version in Terminal::ansi but keeping a tight local one means selection
+// extraction doesn't have to drag in that header.
+std::string stripAnsiLine(const std::string &line) {
+  std::string out;
+  out.reserve(line.size());
+  for (size_t i = 0; i < line.size(); ++i) {
+    if (line[i] == '\x1b' && i + 1 < line.size() && line[i + 1] == '[') {
+      // Skip until final byte (0x40-0x7E).
+      size_t j = i + 2;
+      while (j < line.size()) {
+        unsigned char c = static_cast<unsigned char>(line[j]);
+        if (c >= 0x40 && c <= 0x7E) {
+          ++j;
+          break;
+        }
+        ++j;
+      }
+      i = j - 1;
+      continue;
+    }
+    out += line[i];
+  }
+  return out;
+}
+
+}  // namespace
+
+void AppState::beginSelection(int absLine, int col) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  selectionAnchor_ = {absLine, col};
+  selectionCursor_ = {absLine, col};
+  selectionActive_ = true;
+  markDirty();
+}
+
+void AppState::updateSelection(int absLine, int col) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (selectionAnchor_.line < 0) return;
+  selectionCursor_ = {absLine, col};
+  markDirty();
+}
+
+void AppState::endSelection() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  selectionActive_ = false;
+  // Keep the highlighted range visible until the user clears or copies.
+  // If the anchor and cursor land on the exact same point, treat as no
+  // selection so a stray click doesn't leave a flicker.
+  if (selectionAnchor_ == selectionCursor_) {
+    selectionAnchor_ = {};
+    selectionCursor_ = {};
+  }
+  markDirty();
+}
+
+void AppState::clearSelection() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  selectionAnchor_ = {};
+  selectionCursor_ = {};
+  selectionActive_ = false;
+  markDirty();
+}
+
+bool AppState::hasSelection() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return selectionAnchor_.line >= 0 && selectionCursor_.line >= 0 &&
+         !(selectionAnchor_ == selectionCursor_);
+}
+
+bool AppState::isSelecting() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return selectionActive_;
+}
+
+std::pair<AppState::SelectionPoint, AppState::SelectionPoint>
+AppState::selectionRange() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  SelectionPoint a = selectionAnchor_;
+  SelectionPoint b = selectionCursor_;
+  if (a.line < 0 || b.line < 0) return {{}, {}};
+  // Order so that `a` <= `b` in reading order.
+  if (a.line > b.line || (a.line == b.line && a.col > b.col)) {
+    std::swap(a, b);
+  }
+  return {a, b};
+}
+
+std::string AppState::copySelectedText() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (selectionAnchor_.line < 0 || selectionCursor_.line < 0 ||
+      selectionAnchor_ == selectionCursor_) {
+    return "";
+  }
+  SelectionPoint a = selectionAnchor_;
+  SelectionPoint b = selectionCursor_;
+  if (a.line > b.line || (a.line == b.line && a.col > b.col)) {
+    std::swap(a, b);
+  }
+  std::string out;
+  for (int line = a.line; line <= b.line; ++line) {
+    if (line < 0 || line >= static_cast<int>(scrollback_.size())) continue;
+    std::string clean = stripAnsiLine(scrollback_[static_cast<size_t>(line)]);
+    int from = (line == a.line) ? a.col : 0;
+    int to = (line == b.line) ? b.col : static_cast<int>(clean.size());
+    if (from < 0) from = 0;
+    if (to > static_cast<int>(clean.size())) to = static_cast<int>(clean.size());
+    if (from < to) {
+      out += clean.substr(static_cast<size_t>(from), static_cast<size_t>(to - from));
+    }
+    if (line < b.line) out += '\n';
+  }
+  return out;
+}
+
+// ── Pasted blocks ────────────────────────────────────────────────────────
+
+namespace {
+
+// Buffer-side placeholder format. The "#N" makes it unique so backspace can
+// pinpoint exactly which block it sits next to, even if the user retyped
+// the same friendly text by hand. The whole atom is one logical sequence
+// of bytes — backspace removes the WHOLE thing in a single keystroke.
+std::string makeTextPlaceholder(int id, int lineCount) {
+  return "[Pasted #" + std::to_string(id) + ": " +
+         std::to_string(lineCount) +
+         (lineCount == 1 ? " line]" : " lines]");
+}
+std::string makeImagePlaceholder(int id) {
+  return "[Pasted #" + std::to_string(id) + ": image]";
+}
+
+int countLines(const std::string& s) {
+  if (s.empty()) return 0;
+  int n = 1;
+  for (char c : s) {
+    if (c == '\n') ++n;
+  }
+  return n;
+}
+
+// Scan for a placeholder ending at the given offset. If one is found,
+// return its start offset and parse the id; otherwise return nullopt.
+struct PlaceholderAt {
+  size_t start = 0;
+  size_t end = 0;
+  int id = 0;
+};
+std::optional<PlaceholderAt>
+findPlaceholderEndingAt(const std::string& buf, size_t endExclusive) {
+  if (endExclusive == 0 || endExclusive > buf.size()) return std::nullopt;
+  if (buf[endExclusive - 1] != ']') return std::nullopt;
+  // Walk backward looking for "[Pasted #".
+  // Bound the scan — the placeholder is short, no point looking 1KB back.
+  const size_t maxScan = std::min<size_t>(endExclusive, 64);
+  for (size_t back = 1; back <= maxScan; ++back) {
+    const size_t i = endExclusive - back;
+    if (i + 9 > buf.size()) continue;
+    if (buf.compare(i, 9, "[Pasted #") != 0) continue;
+    // Parse digits after "[Pasted #".
+    size_t j = i + 9;
+    int id = 0;
+    bool any = false;
+    while (j < endExclusive - 1 && std::isdigit(static_cast<unsigned char>(buf[j]))) {
+      id = id * 10 + (buf[j] - '0');
+      ++j;
+      any = true;
+    }
+    if (!any) continue;
+    if (j >= endExclusive - 1 || buf[j] != ':') continue;
+    PlaceholderAt p;
+    p.start = i;
+    p.end = endExclusive;
+    p.id = id;
+    return p;
+  }
+  return std::nullopt;
+}
+
+}  // namespace
+
+std::string AppState::insertPastedText(std::string content) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  PastedBlock block;
+  block.id = nextPastedBlockId_++;
+  block.kind = PastedBlockKind::Text;
+  block.lineCount = countLines(content);
+  block.content = std::move(content);
+  const std::string placeholder =
+      makeTextPlaceholder(block.id, block.lineCount);
+  pastedBlocks_.push_back(std::move(block));
+  inputBuffer_.insert(inputCursor_, placeholder);
+  inputCursor_ += placeholder.size();
+  inputDesiredColumn_ = -1;
+  markDirty();
+  return placeholder;
+}
+
+std::string AppState::insertPastedImage(std::string base64,
+                                         std::string mediaType) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  PastedBlock block;
+  block.id = nextPastedBlockId_++;
+  block.kind = PastedBlockKind::Image;
+  block.content = std::move(base64);
+  block.mediaType = std::move(mediaType);
+  const std::string placeholder = makeImagePlaceholder(block.id);
+  pastedBlocks_.push_back(std::move(block));
+  inputBuffer_.insert(inputCursor_, placeholder);
+  inputCursor_ += placeholder.size();
+  inputDesiredColumn_ = -1;
+  markDirty();
+  return placeholder;
+}
+
+std::vector<AppState::PastedBlock> AppState::pastedBlocks() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return pastedBlocks_;
+}
+
+std::vector<AppState::PastedBlock> AppState::takePastedBlocks() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto out = std::move(pastedBlocks_);
+  pastedBlocks_.clear();
+  return out;
+}
+
+bool AppState::maybeBackspacePastedBlock() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto found = findPlaceholderEndingAt(inputBuffer_, inputCursor_);
+  if (!found.has_value()) return false;
+  // Erase the placeholder atomically.
+  inputBuffer_.erase(found->start, found->end - found->start);
+  inputCursor_ = found->start;
+  inputDesiredColumn_ = -1;
+  // Drop the matching block. Multiple blocks might share an id only if
+  // the user did something weird; we drop the first match in registration
+  // order, which matches the buffer's leftmost occurrence as we just
+  // erased its slot.
+  for (auto it = pastedBlocks_.begin(); it != pastedBlocks_.end(); ++it) {
+    if (it->id == found->id) {
+      pastedBlocks_.erase(it);
+      break;
+    }
+  }
+  markDirty();
+  return true;
+}
+
+}  // namespace firmius::tui2

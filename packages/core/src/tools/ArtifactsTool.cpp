@@ -3,6 +3,7 @@
 #include "IAgent.hpp"
 #include "Serialization.hpp"
 #include "persistence/ThreadManager.hpp"
+#include "utils/SpillIfLarge.hpp"
 #include "utils/StringUtil.hpp"
 
 #include <algorithm>
@@ -21,13 +22,10 @@ constexpr const char *kArtifactPrefixBare = "artifact:";
 
 std::string threadStorageRootPath() { return ThreadManager::defaultBasePath(); }
 
-rapidjson::Value jsonFromArtifactMetadata(const ThreadArtifactMetadata &metadata,
-                                          rapidjson::Document::AllocatorType &a) {
-  rapidjson::Document doc = toJson(metadata);
-  rapidjson::Value value;
-  value.CopyFrom(doc, a);
-  return value;
-}
+// Token-waste pass 5: jsonFromArtifactMetadata removed. The full
+// ThreadArtifactMetadata struct is no longer emitted in any Artifacts
+// result — Read/Write/List all rely on the @artifact:<owner>/<name>
+// reference string instead.
 
 std::string displayOwnerName(const ThreadArtifactMetadata &metadata) {
   if (!metadata.ownerFriendlyName.empty()) {
@@ -152,19 +150,10 @@ shared::ToolResult ArtifactsTool::execute(const rapidjson::Value &input,
         return ToolResult::fail("Artifacts.Write requires content");
       }
 
-      std::string previous_content;
-      bool had_previous_content = false;
-      const auto existing_artifacts =
-          tm.listArtifactsForAgent(threadId, agentCtx.identity.id);
-      const auto existing_it = std::find_if(
-          existing_artifacts.begin(), existing_artifacts.end(),
-          [&](const ThreadArtifactMetadata &artifact) {
-            return artifact.filename == name;
-          });
-      if (existing_it != existing_artifacts.end()) {
-        previous_content = tm.readArtifact(threadId, agentCtx.identity.id, name);
-        had_previous_content = true;
-      }
+      // Token-waste pass 5: dropped the previous-content read and echo.
+      // The agent that just overwrote the artifact does not need a free
+      // copy of the old content sent back; if it actually wanted the
+      // prior version it would have called Read first.
 
       std::optional<std::string> kind;
       std::optional<std::string> description;
@@ -180,20 +169,27 @@ shared::ToolResult ArtifactsTool::execute(const rapidjson::Value &input,
           threadId, agentCtx.identity.id, agentCtx.identity.friendlyName, name,
           content, &created, kind, description);
 
+      // Token-waste pass 5: prose-first {result, reference}. Dropped
+      // status/created/updated/artifact (status string was just verb form
+      // of the boolean pair, and the artifact metadata block was the
+      // entire ThreadArtifactMetadata struct re-emitted).
       rapidjson::Document doc;
       doc.SetObject();
       auto &a = doc.GetAllocator();
-      doc.AddMember("status", created ? "created" : "updated", a);
-      doc.AddMember("created", created, a);
-      doc.AddMember("updated", !created, a);
-      doc.AddMember("artifact", jsonFromArtifactMetadata(metadata, a), a);
       const std::string owner = displayOwnerName(metadata);
-      const std::string reference = "@artifact:" + owner + "/" + metadata.filename;
+      const std::string reference =
+          "@artifact:" + owner + "/" + metadata.filename;
+      std::ostringstream prose;
+      prose << (created ? "Created " : "Updated ") << reference << " ("
+            << content.size() << " B).";
+      const std::string proseStr = prose.str();
+      doc.AddMember(
+          "result",
+          rapidjson::Value(proseStr.c_str(),
+                           static_cast<rapidjson::SizeType>(proseStr.size()),
+                           a).Move(),
+          a);
       doc.AddMember("reference", rapidjson::Value(reference.c_str(), a), a);
-      if (had_previous_content) {
-        doc.AddMember("previous_content",
-                      rapidjson::Value(previous_content.c_str(), a).Move(), a);
-      }
       return ToolResult::ok(doc);
     }
 
@@ -274,12 +270,46 @@ shared::ToolResult ArtifactsTool::execute(const rapidjson::Value &input,
         metadata.storagePath = "artifacts/" + *ownerAgentId + "/" + filename;
       }
 
+      // Token-waste pass 4: large artifacts spill to /tmp instead of being
+      // returned in full. The model can grep/read the spill file when it
+      // actually needs the body. Threshold 64 KB matches Process/Python.
+      constexpr std::size_t kArtifactSpillThreshold = 64 * 1024;
+      constexpr std::size_t kArtifactTailBytes = 4 * 1024;
+      auto spill = shared::utils::spillIfLarge(
+          content, kArtifactSpillThreshold,
+          "firmius_artifact_" + metadata.filename, kArtifactTailBytes);
+
       rapidjson::Document doc;
       doc.SetObject();
       auto &a = doc.GetAllocator();
-      doc.AddMember("content", rapidjson::Value(content.c_str(), a), a);
-      doc.AddMember("artifact", jsonFromArtifactMetadata(metadata, a), a);
-      const std::string resolved = "@artifact:" + displayOwnerName(metadata) + "/" + metadata.filename;
+      const std::string resolved =
+          "@artifact:" + displayOwnerName(metadata) + "/" + metadata.filename;
+      if (spill.spilled) {
+        std::ostringstream prose;
+        prose << "Read " << resolved << " (" << spill.totalBytes << " bytes / "
+              << spill.totalLines << " lines); content spilled to "
+              << spill.refPath << " (showing last "
+              << spill.tail.size() << " B).";
+        const std::string proseStr = prose.str();
+        doc.AddMember(
+            "result",
+            rapidjson::Value(proseStr.c_str(),
+                             static_cast<rapidjson::SizeType>(proseStr.size()),
+                             a).Move(),
+            a);
+        doc.AddMember(
+            "tail",
+            rapidjson::Value(spill.tail.c_str(),
+                             static_cast<rapidjson::SizeType>(spill.tail.size()),
+                             a).Move(),
+            a);
+        doc.AddMember("ref",
+                      rapidjson::Value(spill.refPath.c_str(), a).Move(), a);
+        doc.AddMember("size",
+                      static_cast<uint64_t>(spill.totalBytes), a);
+      } else {
+        doc.AddMember("content", rapidjson::Value(content.c_str(), a), a);
+      }
       doc.AddMember("reference", rapidjson::Value(resolved.c_str(), a), a);
       return ToolResult::ok(doc);
     }
@@ -290,23 +320,42 @@ shared::ToolResult ArtifactsTool::execute(const rapidjson::Value &input,
       for (const auto &artifact : artifacts) {
         filenameCounts[artifact.filename]++;
       }
+      // Token-waste pass 3: prose-first artifacts list. Each entry was
+      // previously the full ThreadArtifactMetadata struct + display +
+      // reference + ambiguous flag — six-plus fields per artifact. The
+      // model effectively only needs the reference string to fetch the
+      // artifact later; the prose enumerates them and the parenthetical
+      // shows the kind when set.
       rapidjson::Document doc;
       doc.SetObject();
       auto &a = doc.GetAllocator();
-      rapidjson::Value items(rapidjson::kArrayType);
-      for (const auto &artifact : artifacts) {
-        rapidjson::Value entry(rapidjson::kObjectType);
-        entry.AddMember("artifact", jsonFromArtifactMetadata(artifact, a), a);
-        const std::string qualifiedDisplay = displayOwnerName(artifact) + "/" + artifact.filename;
-        const bool ambiguous = filenameCounts[artifact.filename] > 1;
-        const std::string display = ambiguous ? qualifiedDisplay : artifact.filename;
-        const std::string reference = "@artifact:" + display;
-        entry.AddMember("display", rapidjson::Value(display.c_str(), a), a);
-        entry.AddMember("reference", rapidjson::Value(reference.c_str(), a), a);
-        entry.AddMember("ambiguous_filename", ambiguous, a);
-        items.PushBack(entry, a);
+      std::ostringstream prose;
+      if (artifacts.empty()) {
+        prose << "No artifacts in this thread.";
+      } else {
+        prose << artifacts.size() << " artifact"
+              << (artifacts.size() == 1 ? "" : "s") << " in this thread:\n";
+        for (const auto &artifact : artifacts) {
+          const std::string qualifiedDisplay =
+              displayOwnerName(artifact) + "/" + artifact.filename;
+          const bool ambiguous = filenameCounts[artifact.filename] > 1;
+          const std::string display =
+              ambiguous ? qualifiedDisplay : artifact.filename;
+          prose << "  @artifact:" << display;
+          if (artifact.kind.has_value() && !artifact.kind->empty()) {
+            prose << " (" << *artifact.kind << ")";
+          }
+          prose << "\n";
+        }
       }
-      doc.AddMember("artifacts", items, a);
+      const std::string proseStr = prose.str();
+      doc.AddMember(
+          "result",
+          rapidjson::Value(proseStr.c_str(),
+                           static_cast<rapidjson::SizeType>(proseStr.size()),
+                           a).Move(),
+          a);
+      doc.AddMember("count", static_cast<uint32_t>(artifacts.size()), a);
       return ToolResult::ok(doc);
     }
 

@@ -1,5 +1,6 @@
 #include "daemon/DaemonServer.hpp"
 
+#include "daemon/DaemonLog.hpp"
 #include "daemon/DaemonService.hpp"
 #include "daemon/ProtocolSerialization.hpp"
 #include "daemon/SocketTransport.hpp"
@@ -51,15 +52,22 @@ bool DaemonServer::start() {
   if (running_.exchange(true)) {
     return true;
   }
+  FIRMIUS_DLOG_PHASE_SCOPE("DaemonServer::start");
   // Create the service before listening so early client RPCs can safely route
   // to waitForReady(), then open IPC before heavy init so clients can receive
   // InitProgress events during auto-start.
   service_ = std::make_unique<DaemonService>();
-  if (!transport_.listen()) {
-    service_.reset();
-    running_ = false;
-    return false;
+  {
+    FIRMIUS_DLOG_PHASE_SCOPE("transport.listen");
+    if (!transport_.listen()) {
+      FIRMIUS_DLOG_WARNF("transport.listen failed: %s",
+                         transport_.lastError().c_str());
+      service_.reset();
+      running_ = false;
+      return false;
+    }
   }
+  FIRMIUS_DLOG_PHASEF("listening on %s", info_.endpoint.c_str());
   acceptThread_ = std::jthread([this](std::stop_token) { acceptLoop(); });
   service_->start();
   return true;
@@ -422,6 +430,36 @@ void DaemonServer::acceptLoop() {
                     rpc->sendResponse(id, result);
                     return;
                   }
+                  if (method == kRpcPermissionsCreateMode) {
+                    params = requireObjectParams(request, kRpcPermissionsCreateMode, id, *rpc);
+                    if (!params) return;
+                    auto result = toJsonValue(
+                        service_->createPermissionMode(
+                            permissionCreateModeRequestFromJson(*params)),
+                        respAlloc);
+                    rpc->sendResponse(id, result);
+                    return;
+                  }
+                  if (method == kRpcPermissionsRenameMode) {
+                    params = requireObjectParams(request, kRpcPermissionsRenameMode, id, *rpc);
+                    if (!params) return;
+                    auto result = toJsonValue(
+                        service_->renamePermissionMode(
+                            permissionRenameModeRequestFromJson(*params)),
+                        respAlloc);
+                    rpc->sendResponse(id, result);
+                    return;
+                  }
+                  if (method == kRpcPermissionsDeleteMode) {
+                    params = requireObjectParams(request, kRpcPermissionsDeleteMode, id, *rpc);
+                    if (!params) return;
+                    auto result = toJsonValue(
+                        service_->deletePermissionMode(
+                            permissionDeleteModeRequestFromJson(*params)),
+                        respAlloc);
+                    rpc->sendResponse(id, result);
+                    return;
+                  }
                   if (method == kRpcPermissionsResolve) {
                     params = requireObjectParams(request, kRpcPermissionsResolve, id, *rpc);
                     if (!params) {
@@ -429,6 +467,46 @@ void DaemonServer::acceptLoop() {
                     }
                     rapidjson::Value result(service_->resolvePermission(
                         permissionResolveRequestFromJson(*params)));
+                    rpc->sendResponse(id, result);
+                    return;
+                  }
+                  if (method == kRpcPermissionsResolveWithRules) {
+                    params = requireObjectParams(request, kRpcPermissionsResolveWithRules, id, *rpc);
+                    if (!params) return;
+                    rapidjson::Value result(service_->resolvePermissionWithRules(
+                        permissionResolveWithRulesRequestFromJson(*params)));
+                    rpc->sendResponse(id, result);
+                    return;
+                  }
+                  if (method == kRpcPermissionsListRules) {
+                    auto result = toJsonValue(
+                        service_->listPolicyRules({}), respAlloc);
+                    rpc->sendResponse(id, result);
+                    return;
+                  }
+                  if (method == kRpcPermissionsUpsertRule) {
+                    params = requireObjectParams(request, kRpcPermissionsUpsertRule, id, *rpc);
+                    if (!params) return;
+                    auto result = toJsonValue(
+                        service_->upsertPolicyRule(
+                            permissionUpsertRuleRequestFromJson(*params)),
+                        respAlloc);
+                    rpc->sendResponse(id, result);
+                    return;
+                  }
+                  if (method == kRpcPermissionsDeleteRule) {
+                    params = requireObjectParams(request, kRpcPermissionsDeleteRule, id, *rpc);
+                    if (!params) return;
+                    auto result = toJsonValue(
+                        service_->deletePolicyRule(
+                            permissionDeleteRuleRequestFromJson(*params)),
+                        respAlloc);
+                    rpc->sendResponse(id, result);
+                    return;
+                  }
+                  if (method == kRpcPermissionsReloadPolicy) {
+                    auto result = toJsonValue(
+                        service_->reloadPolicy({}), respAlloc);
                     rpc->sendResponse(id, result);
                     return;
                   }
@@ -832,6 +910,102 @@ void DaemonServer::acceptLoop() {
                     auto result =
                         toJsonValue(service_->getBenchmarkLogs(registeredClientId, logsRequest),
                                     respAlloc);
+                    rpc->sendResponse(id, result);
+                    return;
+                  }
+                  if (method == kRpcConnectBegin) {
+                    params = requireObjectParams(request, kRpcConnectBegin, id, *rpc);
+                    if (!params) {
+                      return;
+                    }
+                    auto begin = connectBeginRequestFromJson(*params);
+                    auto result = toJsonValue(
+                        service_->beginConnect(registeredClientId, begin),
+                        respAlloc);
+                    rpc->sendResponse(id, result);
+                    return;
+                  }
+                  if (method == kRpcConnectSubmit) {
+                    params = requireObjectParams(request, kRpcConnectSubmit, id, *rpc);
+                    if (!params) {
+                      return;
+                    }
+                    auto submit = connectSubmitRequestFromJson(*params);
+                    auto result = toJsonValue(
+                        service_->submitConnect(registeredClientId, submit),
+                        respAlloc);
+                    rpc->sendResponse(id, result);
+                    return;
+                  }
+                  if (method == kRpcConnectFinalize) {
+                    params = requireObjectParams(request, kRpcConnectFinalize, id, *rpc);
+                    if (!params) {
+                      return;
+                    }
+                    auto fin = connectFinalizeRequestFromJson(*params);
+                    auto result = toJsonValue(
+                        service_->finalizeConnect(registeredClientId, fin),
+                        respAlloc);
+                    rpc->sendResponse(id, result);
+                    return;
+                  }
+                  if (method == kRpcConnectCancel) {
+                    params = requireObjectParams(request, kRpcConnectCancel, id, *rpc);
+                    if (!params) {
+                      return;
+                    }
+                    auto cancel = connectCancelRequestFromJson(*params);
+                    auto result = toJsonValue(
+                        service_->cancelConnect(registeredClientId, cancel),
+                        respAlloc);
+                    rpc->sendResponse(id, result);
+                    return;
+                  }
+                  if (method == kRpcRewindPreview) {
+                    params = requireObjectParams(request, kRpcRewindPreview, id, *rpc);
+                    if (!params) {
+                      return;
+                    }
+                    auto preview = rewindPreviewRequestFromJson(*params);
+                    auto result = toJsonValue(
+                        service_->previewRewind(registeredClientId, preview),
+                        respAlloc);
+                    rpc->sendResponse(id, result);
+                    return;
+                  }
+                  if (method == kRpcRewindExecute) {
+                    params = requireObjectParams(request, kRpcRewindExecute, id, *rpc);
+                    if (!params) {
+                      return;
+                    }
+                    auto exec = rewindExecuteRequestFromJson(*params);
+                    auto result = toJsonValue(
+                        service_->executeRewind(registeredClientId, exec),
+                        respAlloc);
+                    rpc->sendResponse(id, result);
+                    return;
+                  }
+                  if (method == kRpcRedoPreview) {
+                    params = requireObjectParams(request, kRpcRedoPreview, id, *rpc);
+                    if (!params) {
+                      return;
+                    }
+                    auto preview = redoPreviewRequestFromJson(*params);
+                    auto result = toJsonValue(
+                        service_->previewRedo(registeredClientId, preview),
+                        respAlloc);
+                    rpc->sendResponse(id, result);
+                    return;
+                  }
+                  if (method == kRpcRedoExecute) {
+                    params = requireObjectParams(request, kRpcRedoExecute, id, *rpc);
+                    if (!params) {
+                      return;
+                    }
+                    auto exec = redoExecuteRequestFromJson(*params);
+                    auto result = toJsonValue(
+                        service_->executeRedo(registeredClientId, exec),
+                        respAlloc);
                     rpc->sendResponse(id, result);
                     return;
                   }

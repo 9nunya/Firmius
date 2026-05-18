@@ -1,6 +1,8 @@
 #include "providers/NanoGPTProvider.hpp"
 #include "EnvLoader.hpp"
 #include <rapidjson/document.h>
+#include <rapidjson/stringbuffer.h>
+#include <rapidjson/writer.h>
 #include <curl/curl.h>
 #include <sstream>
 #include <iostream>
@@ -76,6 +78,36 @@ NanoGPTProvider::buildHeadersForApiKey(const std::string& apiKey) {
 
 std::string NanoGPTProvider::getReasoningFieldName() const {
     return "reasoning_content";
+}
+
+// Token-caching pass: NanoGPT-specific request augmentation.
+// - `caching: true` activates cache-capable provider routing across NanoGPT's
+//   upstream network (sticky routing, max hit rate).
+// - `promptCaching: {enabled: true, ttl: "5m"}` is honoured by Claude-routed
+//   models (Anthropic-style explicit caching). Non-Claude routes ignore it.
+// We always send both — they are no-ops on routes that do not honour them.
+std::string NanoGPTProvider::prepareRequestBody(
+    const firmius::shared::AgentHistory &history,
+    const firmius::provider::ProviderOptions &opts) {
+    std::string base = BaseOpenAIProvider::prepareRequestBody(history, opts);
+    rapidjson::Document doc;
+    if (doc.Parse(base.c_str()).HasParseError() || !doc.IsObject()) {
+        return base;
+    }
+    auto &a = doc.GetAllocator();
+    if (!doc.HasMember("caching")) {
+        doc.AddMember("caching", true, a);
+    }
+    if (!doc.HasMember("promptCaching")) {
+        rapidjson::Value pc(rapidjson::kObjectType);
+        pc.AddMember("enabled", true, a);
+        pc.AddMember("ttl", "5m", a);
+        doc.AddMember("promptCaching", pc, a);
+    }
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w(buf);
+    doc.Accept(w);
+    return std::string(buf.GetString(), buf.GetSize());
 }
 
 std::vector<firmius::shared::ModelInfo> NanoGPTProvider::listModels() {

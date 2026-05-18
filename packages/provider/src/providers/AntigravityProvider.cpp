@@ -1117,6 +1117,21 @@ void AntigravityProvider::processSSELine(const std::string &line,
       metrics.tokens.total = usage["totalTokenCount"].GetUint();
     if (usage.HasMember("cachedContentTokenCount"))
       metrics.tokens.cacheRead = usage["cachedContentTokenCount"].GetUint();
+    // Token-caching pass: newer Gemini responses include
+    // `cacheTokensDetails` (per-modality breakdown of cached tokens).
+    // We don't have per-modality fields in TokenMetrics, but if the
+    // total field is missing and the breakdown is present, sum it.
+    if (metrics.tokens.cacheRead == 0 && usage.HasMember("cacheTokensDetails") &&
+        usage["cacheTokensDetails"].IsArray()) {
+      std::uint32_t sum = 0;
+      for (const auto &entry : usage["cacheTokensDetails"].GetArray()) {
+        if (entry.IsObject() && entry.HasMember("tokenCount") &&
+            entry["tokenCount"].IsUint()) {
+          sum += entry["tokenCount"].GetUint();
+        }
+      }
+      if (sum > 0) metrics.tokens.cacheRead = sum;
+    }
     if (usage.HasMember("thoughtsTokenCount"))
       metrics.tokens.reasoning = usage["thoughtsTokenCount"].GetUint();
     (*ctx.onEvent)(metrics);
@@ -1287,6 +1302,50 @@ void AntigravityProvider::stream(
   while (accountRetries < maxAccountAttempts) {
     auto optAcc = getAvailableAccount(resolvedModel);
     if (!optAcc) {
+      // Before giving up: if all accounts are short-term rate-limited
+      // (capacity-exhausted, not genuinely quota-exhausted), wait for
+      // the soonest one to become available and retry. This handles
+      // global model capacity issues (Antigravity proxy backend at
+      // capacity for Claude / Gemini 3.1 Pro) where every account
+      // gets the same RESOURCE_EXHAUSTED 429 simultaneously.
+      int64_t soonestReset = -1;
+      {
+        std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
+        const int64_t nowSec =
+            std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::system_clock::now().time_since_epoch())
+                .count();
+        for (const auto &acc : accounts_) {
+          if (!acc.rateLimited)
+            continue;
+          if (acc.backoffUntil <= nowSec)
+            continue;
+          if (soonestReset < 0 || acc.backoffUntil < soonestReset) {
+            soonestReset = acc.backoffUntil;
+          }
+        }
+        // Bound the wait. Anything > 60s is probably real quota exhaustion;
+        // don't block the user that long.
+        if (soonestReset > 0) {
+          int waitSec = static_cast<int>(soonestReset - nowSec);
+          if (waitSec > 60) soonestReset = -1;
+        }
+      }
+
+      if (soonestReset > 0 && !attemptedQuotaRecovery) {
+        const int64_t nowSec =
+            std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::system_clock::now().time_since_epoch())
+                .count();
+        int waitSec = static_cast<int>(soonestReset - nowSec) + 1;
+        if (waitSec < 1) waitSec = 1;
+        // Wait it out, then try again.
+        if (interruptibleSleep(std::chrono::seconds(waitSec),
+                               opts.abortController, opts.abortSignal)) {
+          continue;
+        }
+      }
+
       bool refreshAttempted = false;
       bool refreshSucceeded = false;
       int64_t waitSeconds = -1;
@@ -1424,12 +1483,19 @@ void AntigravityProvider::stream(
       bool isClaudeModel =
           effectiveModel.find("claude") != std::string::npos ||
           effectiveModel.find("Claude") != std::string::npos;
-      // Try endpoint order:
-      // - Claude: prod first (sandbox often disabled)
-      // - Gemini: daily first (CLIProxy behavior), then autopush, then prod
-      const std::vector<std::string> endpoints = isClaudeModel
-          ? std::vector<std::string>{
-                "https://cloudcode-pa.googleapis.com"}
+      // Endpoint order matches Antigravity Manager / CLIProxy / opencode
+      // antigravity-auth which all default to **daily sandbox first**.
+      // The Code Assist proxy routes most models through the sandbox
+      // endpoints (daily → autopush) and only falls back to prod when
+      // sandbox is unavailable for that model.
+      //
+      // Exception: gemini-3.1-pro is only deployed on prod. Sandbox
+      // returns 400 INVALID_ARGUMENT for it. Note 3.1 != 3 (3 stable
+      // line is on sandbox; 3.1 is the newer refresh, prod-only).
+      bool isGemini31 =
+          effectiveModel.find("gemini-3.1") != std::string::npos;
+      const std::vector<std::string> endpoints = isGemini31
+          ? std::vector<std::string>{"https://cloudcode-pa.googleapis.com"}
           : std::vector<std::string>{
                 "https://daily-cloudcode-pa.sandbox.googleapis.com",
                 "https://autopush-cloudcode-pa.sandbox.googleapis.com",
@@ -1492,12 +1558,105 @@ void AntigravityProvider::stream(
           break;
         }
         // Classify failure types
+        //
+        // 429 needs special-cased classification BEFORE the generic
+        // "retryable" path so we can distinguish:
+        //   • MODEL_CAPACITY_EXHAUSTED (proxy/backend at capacity for
+        //     this model — not the account's quota): mark this acct
+        //     unavailable for ~45s, switch to next account.
+        //   • QUOTA_EXHAUSTED (this account is genuinely out for this
+        //     model): mark longer (~5min+), switch to next account.
+        //
+        // Per opencode-antigravity-auth/src/plugin/accounts.ts, the
+        // sentinel string "Resource has been exhausted" / "capacity"
+        // / "overloaded" indicates capacity, not quota. Real per-acct
+        // quota errors come with details[].metadata.quotaResetTimeStamp.
+        if (resp.code == 402 || resp.code == 429) {
+          bool isSandbox = endpoint.find("sandbox") != std::string::npos;
+          if (isSandbox) {
+            lastError = "Rate limited on sandbox endpoint";
+            ctx.buffer.clear();
+            ctx.readOffset = 0;
+            continue;
+          }
+
+          std::string lowerBody429;
+          lowerBody429.reserve(ctx.buffer.size());
+          for (char c : ctx.buffer)
+            lowerBody429.push_back(
+                static_cast<char>(::tolower(static_cast<unsigned char>(c))));
+
+          bool hasQuotaDetails = false;
+          {
+            rapidjson::Document errDoc;
+            errDoc.Parse(ctx.buffer.c_str());
+            if (!errDoc.HasParseError() && errDoc.IsObject() &&
+                errDoc.HasMember("error") && errDoc["error"].IsObject()) {
+              const auto &err = errDoc["error"];
+              if (err.HasMember("details") && err["details"].IsArray()) {
+                for (const auto &detail : err["details"].GetArray()) {
+                  if (detail.IsObject() && detail.HasMember("metadata") &&
+                      detail["metadata"].IsObject() &&
+                      detail["metadata"].HasMember(
+                          "quotaResetTimeStamp")) {
+                    hasQuotaDetails = true;
+                    break;
+                  }
+                }
+              }
+            }
+          }
+
+          bool isCapacityExhausted =
+              !hasQuotaDetails &&
+              (lowerBody429.find("resource has been exhausted") !=
+                   std::string::npos ||
+               lowerBody429.find("capacity") != std::string::npos ||
+               lowerBody429.find("overloaded") != std::string::npos);
+
+          if (isCapacityExhausted) {
+            // Global model capacity issue. Briefly mark THIS account
+            // for the requested model so we don't immediately re-pick
+            // it, then rotate. Don't touch quota:* (account isn't
+            // actually quota-exhausted).
+            lastError = "Model capacity exhausted (HTTP " +
+                        std::to_string(resp.code) + ")";
+            markAccountRateLimited(acc, 45);
+            updateAccount(acc);
+            shouldTryNextAccount = true;
+            break;
+          }
+
+          // True per-account quota exhaustion or unclassifiable 429.
+          // Mark account quota-exhausted for this model and rotate.
+          storeExhaustedModelQuotaFromError(acc, ctx.buffer, effectiveModel);
+          lastError = "Rate limited (HTTP " + std::to_string(resp.code) + ")";
+          int backoff = std::max(
+              1, RetryPolicyResolver::computeDelayMs(retryPolicy,
+                                                     accountRetries, 0) /
+                     1000);
+          markAccountRateLimited(acc, backoff);
+          updateAccount(acc);
+          shouldTryNextAccount = true;
+          break;
+        }
+
         if (resp.code == 0 ||
             RetryPolicyResolver::isRetriableHttpStatus(
                 retryPolicy, static_cast<int>(resp.code))) {
           retryableFailure = true;
           if (!resp.error.empty())
             retryReason = "Connection error: " + resp.error;
+          // Capture the actual error so the "exhausted" branch later
+          // can surface a useful message instead of an empty one.
+          std::string detail = std::to_string(resp.code);
+          if (!ctx.buffer.empty()) {
+            detail += ": " + ctx.buffer;
+          } else if (!resp.error.empty()) {
+            detail += ": " + resp.error;
+          }
+          lastError = "Retryable error " + detail +
+                      " (endpoint=" + endpoint + ")";
           continue;
         }
 
@@ -1512,7 +1671,14 @@ void AntigravityProvider::stream(
           bool serviceDisabled =
               lowerBody.find("service_disabled") != std::string::npos ||
               lowerBody.find("staging-cloudaicompanion.sandbox.googleapis.com") != std::string::npos ||
-              lowerBody.find("sandbox") != std::string::npos;
+              // Only treat the response as "sandbox-only" when WE are
+              // currently on a sandbox endpoint. Prod responses sometimes
+              // mention "sandbox" in their error body (e.g. "use the
+              // sandbox endpoint for this model") and we don't want to
+              // treat that as a reason to skip prod — prod IS the last
+              // resort.
+              (endpoint.find("sandbox") != std::string::npos &&
+               lowerBody.find("sandbox") != std::string::npos);
 
           if (consumerInvalid && !projectRefreshed) {
             // Attempt to refresh project context once, then retry immediately.
@@ -1539,26 +1705,6 @@ void AntigravityProvider::stream(
           }
           lastError = "API error 403: " + ctx.buffer;
           markAccountRateLimited(acc, 60);
-          updateAccount(acc);
-          shouldTryNextAccount = true;
-          break;
-        }
-
-        if (resp.code == 402 || resp.code == 429) {
-          bool isSandbox = endpoint.find("sandbox") != std::string::npos;
-          if (isSandbox) {
-            lastError = "Rate limited on sandbox endpoint";
-            ctx.buffer.clear();
-            ctx.readOffset = 0;
-            continue;
-          }
-          storeExhaustedModelQuotaFromError(acc, ctx.buffer, effectiveModel);
-          lastError = "Rate limited (HTTP " + std::to_string(resp.code) + ")";
-          int backoff = std::max(
-              1, RetryPolicyResolver::computeDelayMs(retryPolicy, accountRetries,
-                                                     0) /
-                     1000);
-          markAccountRateLimited(acc, backoff);
           updateAccount(acc);
           shouldTryNextAccount = true;
           break;

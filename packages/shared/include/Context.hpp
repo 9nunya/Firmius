@@ -107,6 +107,15 @@ struct AgentState {
   /// calls on the same file → 1 full + 49 references).
   std::unordered_map<uint64_t, std::string> toolOutputDedup;
 
+  /// Token-waste pass 2: per-process byte cursors for Process.status /
+  /// Process.wait. Each successful poll records the byte offset already
+  /// returned to the model so the next poll only emits NEW bytes.
+  /// Keyed by process_id. Transient; not serialized (resets on
+  /// thread reload, which is fine — first poll after reload returns full
+  /// accumulated buffer once, then incremental again).
+  std::map<std::string, size_t> processStdoutCursor;
+  std::map<std::string, size_t> processStderrCursor;
+
   /// Currently active mode (qualified name, e.g. "diagnose" or "forge:apply").
   /// Empty when no mode is active. Mutated by the mode_switch tool;
   /// read by the prompt composer (ModeOverlaySection / ModeFrameSection)
@@ -118,7 +127,74 @@ struct AgentState {
   /// "started in: forge:prime" alongside the live activeMode.
   std::string initialMode;
 
+  /// Agent-driven pins for the working-memory layer. When the agent calls
+  /// the `pin` tool, the rendered pin text accumulates here and the pin
+  /// policy hard-pins these strings into every request as system overlays.
+  /// Cleared by the `unpin` tool.
+  std::vector<std::string> agentMemoryPins;
+
+  /// Turn IDs that the working-memory layer must hard-pin for this agent.
+  /// Distinct from agentMemoryPins (which carries free-text anchors). The
+  /// turn-id pin set is populated by the pin tool when invoked with a
+  /// turn_id argument and read by the PinPolicy classifier.
+  std::vector<std::string> pinnedTurnIds;
+
   bool operator==(const AgentState &other) const = default;
+};
+
+/**
+ * @brief Working-memory (rolling memory v2) configuration.
+ *
+ * Threshold-driven, deterministic. The agent does no memory work below
+ * bufferOccupancyRatio. Between buffer and target, only the deterministic
+ * pin policy runs. Above target, embedding-based relevance fill and
+ * background deflation engage. Above emergency, synchronous deflation
+ * fires on the agent thread.
+ *
+ * All ratios are fractions of the actor model's contextWindow.
+ */
+struct WorkingMemoryConfig {
+  bool enabled = true;                    ///< Master toggle.
+
+  /// Below this ratio, the layer is pure pass-through. Default 47%.
+  float bufferOccupancyRatio = 0.47f;
+  /// Embeddings + deflation engage above this ratio. Default 57%.
+  float targetOccupancyRatio = 0.57f;
+  /// Synchronous fallback above this ratio. Default 66%.
+  float emergencyOccupancyRatio = 0.66f;
+  /// Recency tail held verbatim regardless of relevance. Fraction of contextWindow. Default 18%.
+  float recencyTailRatio = 0.18f;
+
+  /// Lower bound on the recency tail token budget. Default 8 KiB tokens.
+  std::uint32_t minimumRecencyTailTokens = 8192;
+  /// Tool result parts smaller than this are not deflated. Default 200 tokens.
+  std::uint32_t deflationMinPartTokens = 200;
+  /// Default turn-age horizon before a tool result becomes deflation-eligible.
+  std::uint32_t defaultDeflationTurnHorizon = 8;
+  /// Per-tool deflation horizons (turns of age before eligibility). Empty
+  /// entries fall back to defaultDeflationTurnHorizon.
+  std::map<std::string, std::uint32_t> deflationHorizonsByTool;
+
+  /// Whether to engage the embedding worker for relevance fill.
+  bool embeddingsEnabled = true;
+  /// How many evicted turns to re-pin via embedding query at most. Default 5.
+  std::uint32_t embeddingTopK = 5;
+  /// Optional summarizer model to use when deflating large parts. If empty,
+  /// deflation falls back to deterministic stubs (no LLM call).
+  std::string summarizerProviderId;
+  std::string summarizerModelId;
+  std::string summarizerVariantName;
+
+  /// Override the actor model's reported context window (in tokens). 0 means
+  /// "use provider->getModelInfo(modelId).contextWindow". Non-zero forces
+  /// the working-memory layer to compute thresholds against this value
+  /// instead. Useful for (a) running aggressive memory mode on huge-window
+  /// models for cost reasons, and (b) live-stressing the threshold ladder
+  /// without burning real model context. Does NOT cap actual provider
+  /// requests — only changes when the layer engages.
+  std::uint32_t actorContextWindowOverride = 0;
+
+  bool operator==(const WorkingMemoryConfig& other) const = default;
 };
 
 /**
@@ -141,6 +217,7 @@ struct AgentConfig {
   bool insanityDetectionEnabled = true;
   int insanityRepetitionThreshold = 3; ///< Min consecutive repeats to flag
   std::uint64_t insanityMaxTokenThreshold = 50000; ///< Max tokens before flagging
+  WorkingMemoryConfig workingMemory; ///< Rolling memory v2 configuration.
 
   bool operator==(const AgentConfig &other) const = default;
 };

@@ -33,6 +33,10 @@ std::string eventKindToString(DaemonEventKind kind) {
     return "pact_state_changed";
   case DaemonEventKind::InitProgress:
     return "init_progress";
+  case DaemonEventKind::ConnectProgress:
+    return "connect_progress";
+  case DaemonEventKind::RewindApplied:
+    return "rewind_applied";
   }
   return "runtime_app_event";
 }
@@ -55,6 +59,12 @@ DaemonEventKind eventKindFromString(const std::string &kind) {
   }
   if (kind == "init_progress") {
     return DaemonEventKind::InitProgress;
+  }
+  if (kind == "connect_progress") {
+    return DaemonEventKind::ConnectProgress;
+  }
+  if (kind == "rewind_applied") {
+    return DaemonEventKind::RewindApplied;
   }
   return DaemonEventKind::RuntimeAppEvent;
 }
@@ -1091,11 +1101,6 @@ rapidjson::Value toJsonValue(const ThreadsCreateRequest &request,
   out.AddMember("cwd", jsonString(request.cwd, allocator), allocator);
   out.AddMember("lead_persona", jsonString(request.leadPersona, allocator), allocator);
   out.AddMember("initial_mode", jsonString(request.initialMode, allocator), allocator);
-  out.AddMember(
-      "permission_mode",
-      jsonString(firmius::shared::permissionModeStorageString(request.permissionMode),
-                 allocator),
-      allocator);
   return out;
 }
 
@@ -1112,10 +1117,6 @@ ThreadsCreateRequest threadsCreateRequestFromJson(const rapidjson::Value &value)
   }
   if (value.HasMember("initial_mode") && value["initial_mode"].IsString()) {
     request.initialMode = value["initial_mode"].GetString();
-  }
-  if (value.HasMember("permission_mode") && value["permission_mode"].IsString()) {
-    request.permissionMode = firmius::shared::permissionModeFromStorageString(
-        value["permission_mode"].GetString());
   }
   return request;
 }
@@ -1485,6 +1486,14 @@ rapidjson::Value toJsonValue(const DaemonEventEnvelope &event,
     out.AddMember("init_message", jsonString(event.initMessage, allocator),
                   allocator);
   }
+  if (event.connectProgress.has_value()) {
+    out.AddMember("connect_progress",
+                  toJsonValue(*event.connectProgress, allocator), allocator);
+  }
+  if (event.rewindApplied.has_value()) {
+    out.AddMember("rewind_applied",
+                  toJsonValue(*event.rewindApplied, allocator), allocator);
+  }
   return out;
 }
 
@@ -1534,6 +1543,12 @@ DaemonEventEnvelope daemonEventEnvelopeFromJson(const rapidjson::Value &value) {
   }
   if (value.HasMember("init_message") && value["init_message"].IsString()) {
     event.initMessage = value["init_message"].GetString();
+  }
+  if (value.HasMember("connect_progress") && value["connect_progress"].IsObject()) {
+    event.connectProgress = connectProgressSnapshotFromJson(value["connect_progress"]);
+  }
+  if (value.HasMember("rewind_applied") && value["rewind_applied"].IsObject()) {
+    event.rewindApplied = rewindAppliedSnapshotFromJson(value["rewind_applied"]);
   }
   return event;
 }
@@ -2072,49 +2087,167 @@ ProcessRuntimeSummary processRuntimeSummaryFromJson(const rapidjson::Value &valu
   return summary;
 }
 
-rapidjson::Value toJsonValue(const PermissionModeRequest &request,
-                             rapidjson::Document::AllocatorType &allocator) {
+rapidjson::Value toJsonValue(const PermissionModeWire &mode,
+                             rapidjson::Document::AllocatorType &alloc) {
   rapidjson::Value out(rapidjson::kObjectType);
-  out.AddMember("thread_id", jsonString(request.threadId, allocator), allocator);
+  out.AddMember("id", jsonString(mode.id, alloc), alloc);
+  out.AddMember("name", jsonString(mode.name, alloc), alloc);
+  out.AddMember("description", jsonString(mode.description, alloc), alloc);
+  out.AddMember("built_in", mode.builtIn, alloc);
   return out;
 }
 
-PermissionModeRequest permissionModeRequestFromJson(const rapidjson::Value &value) {
-  PermissionModeRequest request;
-  if (!value.IsObject()) {
-    return request;
-  }
-  if (value.HasMember("thread_id") && value["thread_id"].IsString()) {
-    request.threadId = value["thread_id"].GetString();
-  }
-  return request;
+PermissionModeWire permissionModeWireFromJson(const rapidjson::Value &v) {
+  PermissionModeWire m;
+  if (!v.IsObject()) return m;
+  if (v.HasMember("id") && v["id"].IsString()) m.id = v["id"].GetString();
+  if (v.HasMember("name") && v["name"].IsString()) m.name = v["name"].GetString();
+  if (v.HasMember("description") && v["description"].IsString())
+    m.description = v["description"].GetString();
+  if (v.HasMember("built_in") && v["built_in"].IsBool())
+    m.builtIn = v["built_in"].GetBool();
+  return m;
+}
+
+rapidjson::Value toJsonValue(const PermissionModeRequest &,
+                              rapidjson::Document::AllocatorType &) {
+  return rapidjson::Value(rapidjson::kObjectType);
+}
+
+PermissionModeRequest permissionModeRequestFromJson(const rapidjson::Value &) {
+  return {};
 }
 
 rapidjson::Value toJsonValue(const PermissionModeUpdateRequest &request,
                              rapidjson::Document::AllocatorType &allocator) {
-  rapidjson::Value out =
-      toJsonValue(PermissionModeRequest{request.threadId}, allocator);
-  out.AddMember(
-      "permission_mode",
-      jsonString(firmius::shared::permissionModeStorageString(request.permissionMode),
-                 allocator),
-      allocator);
+  rapidjson::Value out(rapidjson::kObjectType);
+  out.AddMember("mode_id", jsonString(request.modeId, allocator), allocator);
   return out;
 }
 
 PermissionModeUpdateRequest
 permissionModeUpdateRequestFromJson(const rapidjson::Value &value) {
   PermissionModeUpdateRequest request;
-  if (!value.IsObject()) {
-    return request;
-  }
-  request.threadId = permissionModeRequestFromJson(value).threadId;
-  if (value.HasMember("permission_mode") &&
-      value["permission_mode"].IsString()) {
-    request.permissionMode = firmius::shared::permissionModeFromStorageString(
-        value["permission_mode"].GetString());
-  }
+  if (!value.IsObject()) return request;
+  if (value.HasMember("mode_id") && value["mode_id"].IsString())
+    request.modeId = value["mode_id"].GetString();
   return request;
+}
+
+// ── Create / Rename / Delete mode ──
+
+rapidjson::Value toJsonValue(const PermissionCreateModeRequest &r,
+                             rapidjson::Document::AllocatorType &a) {
+  rapidjson::Value out(rapidjson::kObjectType);
+  out.AddMember("id", jsonString(r.id, a), a);
+  out.AddMember("name", jsonString(r.name, a), a);
+  out.AddMember("description", jsonString(r.description, a), a);
+  out.AddMember("seed_from_active", r.seedFromActive, a);
+  return out;
+}
+
+PermissionCreateModeRequest
+permissionCreateModeRequestFromJson(const rapidjson::Value &v) {
+  PermissionCreateModeRequest r;
+  if (!v.IsObject()) return r;
+  if (v.HasMember("id") && v["id"].IsString()) r.id = v["id"].GetString();
+  if (v.HasMember("name") && v["name"].IsString()) r.name = v["name"].GetString();
+  if (v.HasMember("description") && v["description"].IsString())
+    r.description = v["description"].GetString();
+  if (v.HasMember("seed_from_active") && v["seed_from_active"].IsBool())
+    r.seedFromActive = v["seed_from_active"].GetBool();
+  return r;
+}
+
+rapidjson::Value toJsonValue(const PermissionCreateModeResponse &r,
+                             rapidjson::Document::AllocatorType &a) {
+  rapidjson::Value out(rapidjson::kObjectType);
+  out.AddMember("mode_id", jsonString(r.modeId, a), a);
+  out.AddMember("error_message", jsonString(r.errorMessage, a), a);
+  return out;
+}
+
+PermissionCreateModeResponse
+permissionCreateModeResponseFromJson(const rapidjson::Value &v) {
+  PermissionCreateModeResponse r;
+  if (!v.IsObject()) return r;
+  if (v.HasMember("mode_id") && v["mode_id"].IsString())
+    r.modeId = v["mode_id"].GetString();
+  if (v.HasMember("error_message") && v["error_message"].IsString())
+    r.errorMessage = v["error_message"].GetString();
+  return r;
+}
+
+rapidjson::Value toJsonValue(const PermissionRenameModeRequest &r,
+                             rapidjson::Document::AllocatorType &a) {
+  rapidjson::Value out(rapidjson::kObjectType);
+  out.AddMember("mode_id", jsonString(r.modeId, a), a);
+  out.AddMember("new_name", jsonString(r.newName, a), a);
+  return out;
+}
+
+PermissionRenameModeRequest
+permissionRenameModeRequestFromJson(const rapidjson::Value &v) {
+  PermissionRenameModeRequest r;
+  if (!v.IsObject()) return r;
+  if (v.HasMember("mode_id") && v["mode_id"].IsString())
+    r.modeId = v["mode_id"].GetString();
+  if (v.HasMember("new_name") && v["new_name"].IsString())
+    r.newName = v["new_name"].GetString();
+  return r;
+}
+
+rapidjson::Value toJsonValue(const PermissionRenameModeResponse &r,
+                             rapidjson::Document::AllocatorType &a) {
+  rapidjson::Value out(rapidjson::kObjectType);
+  out.AddMember("ok", r.ok, a);
+  out.AddMember("error_message", jsonString(r.errorMessage, a), a);
+  return out;
+}
+
+PermissionRenameModeResponse
+permissionRenameModeResponseFromJson(const rapidjson::Value &v) {
+  PermissionRenameModeResponse r;
+  if (!v.IsObject()) return r;
+  if (v.HasMember("ok") && v["ok"].IsBool()) r.ok = v["ok"].GetBool();
+  if (v.HasMember("error_message") && v["error_message"].IsString())
+    r.errorMessage = v["error_message"].GetString();
+  return r;
+}
+
+rapidjson::Value toJsonValue(const PermissionDeleteModeRequest &r,
+                             rapidjson::Document::AllocatorType &a) {
+  rapidjson::Value out(rapidjson::kObjectType);
+  out.AddMember("mode_id", jsonString(r.modeId, a), a);
+  return out;
+}
+
+PermissionDeleteModeRequest
+permissionDeleteModeRequestFromJson(const rapidjson::Value &v) {
+  PermissionDeleteModeRequest r;
+  if (!v.IsObject()) return r;
+  if (v.HasMember("mode_id") && v["mode_id"].IsString())
+    r.modeId = v["mode_id"].GetString();
+  return r;
+}
+
+rapidjson::Value toJsonValue(const PermissionDeleteModeResponse &r,
+                             rapidjson::Document::AllocatorType &a) {
+  rapidjson::Value out(rapidjson::kObjectType);
+  out.AddMember("removed", r.removed, a);
+  out.AddMember("error_message", jsonString(r.errorMessage, a), a);
+  return out;
+}
+
+PermissionDeleteModeResponse
+permissionDeleteModeResponseFromJson(const rapidjson::Value &v) {
+  PermissionDeleteModeResponse r;
+  if (!v.IsObject()) return r;
+  if (v.HasMember("removed") && v["removed"].IsBool())
+    r.removed = v["removed"].GetBool();
+  if (v.HasMember("error_message") && v["error_message"].IsString())
+    r.errorMessage = v["error_message"].GetString();
+  return r;
 }
 
 rapidjson::Value toJsonValue(const PermissionResolveRequest &request,
@@ -2141,15 +2274,251 @@ permissionResolveRequestFromJson(const rapidjson::Value &value) {
   return request;
 }
 
+// ── PermissionResolveWithRulesRequest ──
+
+rapidjson::Value toJsonValue(const PermissionResolveWithRulesRequest &request,
+                              rapidjson::Document::AllocatorType &alloc) {
+  rapidjson::Value out(rapidjson::kObjectType);
+  out.AddMember("request_id", jsonString(request.requestId, alloc), alloc);
+  rapidjson::Value ids(rapidjson::kArrayType);
+  for (const auto &id : request.selectedSuggestionIds) {
+    ids.PushBack(jsonString(id, alloc), alloc);
+  }
+  out.AddMember("selected_suggestion_ids", ids, alloc);
+  return out;
+}
+
+PermissionResolveWithRulesRequest
+permissionResolveWithRulesRequestFromJson(const rapidjson::Value &v) {
+  PermissionResolveWithRulesRequest r;
+  if (!v.IsObject()) return r;
+  if (v.HasMember("request_id") && v["request_id"].IsString()) {
+    r.requestId = v["request_id"].GetString();
+  }
+  if (v.HasMember("selected_suggestion_ids") &&
+      v["selected_suggestion_ids"].IsArray()) {
+    for (const auto &e : v["selected_suggestion_ids"].GetArray()) {
+      if (e.IsString()) r.selectedSuggestionIds.emplace_back(e.GetString());
+    }
+  }
+  return r;
+}
+
+// ── PolicyRuleWire ──
+
+rapidjson::Value toJsonValue(const PolicyRuleWire &rule,
+                              rapidjson::Document::AllocatorType &alloc) {
+  rapidjson::Value out(rapidjson::kObjectType);
+  out.AddMember("id", jsonString(rule.id, alloc), alloc);
+  out.AddMember("category", jsonString(rule.category, alloc), alloc);
+  out.AddMember("decision", jsonString(rule.decision, alloc), alloc);
+  out.AddMember("scope", jsonString(rule.scope, alloc), alloc);
+  out.AddMember("comment", jsonString(rule.comment, alloc), alloc);
+  out.AddMember("created_at", rule.createdAt, alloc);
+  out.AddMember("expires_at", rule.expiresAt, alloc);
+  rapidjson::Value match(rapidjson::kObjectType);
+  for (const auto &[k, v] : rule.match) {
+    match.AddMember(jsonString(k, alloc), jsonString(v, alloc), alloc);
+  }
+  out.AddMember("match", match, alloc);
+  return out;
+}
+
+PolicyRuleWire policyRuleWireFromJson(const rapidjson::Value &v) {
+  PolicyRuleWire r;
+  if (!v.IsObject()) return r;
+  if (v.HasMember("id") && v["id"].IsString()) r.id = v["id"].GetString();
+  if (v.HasMember("category") && v["category"].IsString())
+    r.category = v["category"].GetString();
+  if (v.HasMember("decision") && v["decision"].IsString())
+    r.decision = v["decision"].GetString();
+  if (v.HasMember("scope") && v["scope"].IsString())
+    r.scope = v["scope"].GetString();
+  if (v.HasMember("comment") && v["comment"].IsString())
+    r.comment = v["comment"].GetString();
+  if (v.HasMember("created_at") && v["created_at"].IsUint64())
+    r.createdAt = v["created_at"].GetUint64();
+  if (v.HasMember("expires_at") && v["expires_at"].IsUint64())
+    r.expiresAt = v["expires_at"].GetUint64();
+  if (v.HasMember("match") && v["match"].IsObject()) {
+    for (auto it = v["match"].MemberBegin(); it != v["match"].MemberEnd(); ++it) {
+      if (it->value.IsString()) {
+        r.match[it->name.GetString()] = it->value.GetString();
+      }
+    }
+  }
+  return r;
+}
+
+// ── PermissionListRules ──
+
+rapidjson::Value toJsonValue(const PermissionListRulesRequest &,
+                              rapidjson::Document::AllocatorType &) {
+  return rapidjson::Value(rapidjson::kObjectType);
+}
+
+PermissionListRulesRequest
+permissionListRulesRequestFromJson(const rapidjson::Value &) {
+  return {};
+}
+
+rapidjson::Value toJsonValue(const PermissionListRulesResponse &response,
+                              rapidjson::Document::AllocatorType &alloc) {
+  rapidjson::Value out(rapidjson::kObjectType);
+  rapidjson::Value rules(rapidjson::kArrayType);
+  for (const auto &r : response.rules) {
+    rules.PushBack(toJsonValue(r, alloc), alloc);
+  }
+  out.AddMember("rules", rules, alloc);
+  rapidjson::Value defaults(rapidjson::kObjectType);
+  for (const auto &[k, v] : response.categoryDefaults) {
+    defaults.AddMember(jsonString(k, alloc), jsonString(v, alloc), alloc);
+  }
+  out.AddMember("category_defaults", defaults, alloc);
+  out.AddMember("default_decision",
+                jsonString(response.defaultDecision, alloc), alloc);
+  return out;
+}
+
+PermissionListRulesResponse
+permissionListRulesResponseFromJson(const rapidjson::Value &v) {
+  PermissionListRulesResponse r;
+  if (!v.IsObject()) return r;
+  if (v.HasMember("rules") && v["rules"].IsArray()) {
+    for (const auto &e : v["rules"].GetArray()) {
+      r.rules.push_back(policyRuleWireFromJson(e));
+    }
+  }
+  if (v.HasMember("category_defaults") && v["category_defaults"].IsObject()) {
+    for (auto it = v["category_defaults"].MemberBegin();
+         it != v["category_defaults"].MemberEnd(); ++it) {
+      if (it->value.IsString()) {
+        r.categoryDefaults[it->name.GetString()] = it->value.GetString();
+      }
+    }
+  }
+  if (v.HasMember("default_decision") && v["default_decision"].IsString())
+    r.defaultDecision = v["default_decision"].GetString();
+  return r;
+}
+
+// ── PermissionUpsertRule ──
+
+rapidjson::Value toJsonValue(const PermissionUpsertRuleRequest &request,
+                              rapidjson::Document::AllocatorType &alloc) {
+  rapidjson::Value out(rapidjson::kObjectType);
+  out.AddMember("rule", toJsonValue(request.rule, alloc), alloc);
+  return out;
+}
+
+PermissionUpsertRuleRequest
+permissionUpsertRuleRequestFromJson(const rapidjson::Value &v) {
+  PermissionUpsertRuleRequest r;
+  if (v.IsObject() && v.HasMember("rule")) {
+    r.rule = policyRuleWireFromJson(v["rule"]);
+  }
+  return r;
+}
+
+rapidjson::Value toJsonValue(const PermissionUpsertRuleResponse &response,
+                              rapidjson::Document::AllocatorType &alloc) {
+  rapidjson::Value out(rapidjson::kObjectType);
+  out.AddMember("rule_id", jsonString(response.ruleId, alloc), alloc);
+  out.AddMember("error_message",
+                jsonString(response.errorMessage, alloc), alloc);
+  return out;
+}
+
+PermissionUpsertRuleResponse
+permissionUpsertRuleResponseFromJson(const rapidjson::Value &v) {
+  PermissionUpsertRuleResponse r;
+  if (!v.IsObject()) return r;
+  if (v.HasMember("rule_id") && v["rule_id"].IsString())
+    r.ruleId = v["rule_id"].GetString();
+  if (v.HasMember("error_message") && v["error_message"].IsString())
+    r.errorMessage = v["error_message"].GetString();
+  return r;
+}
+
+// ── PermissionDeleteRule ──
+
+rapidjson::Value toJsonValue(const PermissionDeleteRuleRequest &request,
+                              rapidjson::Document::AllocatorType &alloc) {
+  rapidjson::Value out(rapidjson::kObjectType);
+  out.AddMember("rule_id", jsonString(request.ruleId, alloc), alloc);
+  return out;
+}
+
+PermissionDeleteRuleRequest
+permissionDeleteRuleRequestFromJson(const rapidjson::Value &v) {
+  PermissionDeleteRuleRequest r;
+  if (v.IsObject() && v.HasMember("rule_id") && v["rule_id"].IsString())
+    r.ruleId = v["rule_id"].GetString();
+  return r;
+}
+
+rapidjson::Value toJsonValue(const PermissionDeleteRuleResponse &response,
+                              rapidjson::Document::AllocatorType &alloc) {
+  rapidjson::Value out(rapidjson::kObjectType);
+  out.AddMember("removed", response.removed, alloc);
+  out.AddMember("error_message",
+                jsonString(response.errorMessage, alloc), alloc);
+  return out;
+}
+
+PermissionDeleteRuleResponse
+permissionDeleteRuleResponseFromJson(const rapidjson::Value &v) {
+  PermissionDeleteRuleResponse r;
+  if (!v.IsObject()) return r;
+  if (v.HasMember("removed") && v["removed"].IsBool())
+    r.removed = v["removed"].GetBool();
+  if (v.HasMember("error_message") && v["error_message"].IsString())
+    r.errorMessage = v["error_message"].GetString();
+  return r;
+}
+
+// ── PermissionReloadPolicy ──
+
+rapidjson::Value toJsonValue(const PermissionReloadPolicyRequest &,
+                              rapidjson::Document::AllocatorType &) {
+  return rapidjson::Value(rapidjson::kObjectType);
+}
+
+PermissionReloadPolicyRequest
+permissionReloadPolicyRequestFromJson(const rapidjson::Value &) {
+  return {};
+}
+
+rapidjson::Value toJsonValue(const PermissionReloadPolicyResponse &response,
+                              rapidjson::Document::AllocatorType &alloc) {
+  rapidjson::Value out(rapidjson::kObjectType);
+  out.AddMember("ok", response.ok, alloc);
+  out.AddMember("error_message",
+                jsonString(response.errorMessage, alloc), alloc);
+  return out;
+}
+
+PermissionReloadPolicyResponse
+permissionReloadPolicyResponseFromJson(const rapidjson::Value &v) {
+  PermissionReloadPolicyResponse r;
+  if (!v.IsObject()) return r;
+  if (v.HasMember("ok") && v["ok"].IsBool()) r.ok = v["ok"].GetBool();
+  if (v.HasMember("error_message") && v["error_message"].IsString())
+    r.errorMessage = v["error_message"].GetString();
+  return r;
+}
+
 rapidjson::Value toJsonValue(const PermissionQueueSnapshot &snapshot,
                              rapidjson::Document::AllocatorType &allocator) {
   rapidjson::Value out(rapidjson::kObjectType);
   out.AddMember("thread_id", jsonString(snapshot.threadId, allocator), allocator);
-  out.AddMember(
-      "permission_mode",
-      jsonString(firmius::shared::permissionModeStorageString(snapshot.permissionMode),
-                 allocator),
-      allocator);
+  out.AddMember("active_mode_id",
+                jsonString(snapshot.activeModeId, allocator), allocator);
+  rapidjson::Value modes(rapidjson::kArrayType);
+  for (const auto &m : snapshot.modes) {
+    modes.PushBack(toJsonValue(m, allocator), allocator);
+  }
+  out.AddMember("modes", modes, allocator);
   rapidjson::Value pending(rapidjson::kArrayType);
   for (const auto &request : snapshot.pending) {
     rapidjson::Value item(rapidjson::kObjectType);
@@ -2174,10 +2543,13 @@ permissionQueueSnapshotFromJson(const rapidjson::Value &value) {
   if (value.HasMember("thread_id") && value["thread_id"].IsString()) {
     snapshot.threadId = value["thread_id"].GetString();
   }
-  if (value.HasMember("permission_mode") &&
-      value["permission_mode"].IsString()) {
-    snapshot.permissionMode = firmius::shared::permissionModeFromStorageString(
-        value["permission_mode"].GetString());
+  if (value.HasMember("active_mode_id") && value["active_mode_id"].IsString()) {
+    snapshot.activeModeId = value["active_mode_id"].GetString();
+  }
+  if (value.HasMember("modes") && value["modes"].IsArray()) {
+    for (const auto &m : value["modes"].GetArray()) {
+      snapshot.modes.push_back(permissionModeWireFromJson(m));
+    }
   }
   if (value.HasMember("pending") && value["pending"].IsArray()) {
     for (const auto &item : value["pending"].GetArray()) {
@@ -4741,6 +5113,636 @@ BenchmarkCatalogSnapshot benchmarkCatalogSnapshotFromJson(const rapidjson::Value
   if (v.IsObject() && v.HasMember("available_benchmarks") && v["available_benchmarks"].IsArray()) {
     for (const auto& item : v["available_benchmarks"].GetArray()) { r.availableBenchmarks.push_back(item.GetString()); }
   }
+  return r;
+}
+
+// ── /connect wizard ──────────────────────────────────────────────────────
+
+std::string connectProgressPhaseToWire(ConnectProgressPhase phase) {
+  switch (phase) {
+  case ConnectProgressPhase::Polling:    return "polling";
+  case ConnectProgressPhase::Finalizing: return "finalizing";
+  case ConnectProgressPhase::Succeeded:  return "succeeded";
+  case ConnectProgressPhase::Failed:     return "failed";
+  case ConnectProgressPhase::Cancelled:  return "cancelled";
+  }
+  return "polling";
+}
+
+ConnectProgressPhase connectProgressPhaseFromWire(const std::string &str) {
+  if (str == "finalizing") return ConnectProgressPhase::Finalizing;
+  if (str == "succeeded")  return ConnectProgressPhase::Succeeded;
+  if (str == "failed")     return ConnectProgressPhase::Failed;
+  if (str == "cancelled")  return ConnectProgressPhase::Cancelled;
+  return ConnectProgressPhase::Polling;
+}
+
+rapidjson::Value toJsonValue(const WizardChoiceSnapshot &c,
+                             rapidjson::Document::AllocatorType &a) {
+  rapidjson::Value out(rapidjson::kObjectType);
+  out.AddMember("label", jsonString(c.label, a), a);
+  out.AddMember("value", jsonString(c.value, a), a);
+  return out;
+}
+
+WizardChoiceSnapshot wizardChoiceSnapshotFromJson(const rapidjson::Value &v) {
+  WizardChoiceSnapshot c;
+  if (!v.IsObject()) return c;
+  if (v.HasMember("label") && v["label"].IsString()) c.label = v["label"].GetString();
+  if (v.HasMember("value") && v["value"].IsString()) c.value = v["value"].GetString();
+  return c;
+}
+
+rapidjson::Value toJsonValue(const WizardPromptSnapshot &p,
+                             rapidjson::Document::AllocatorType &a) {
+  rapidjson::Value out(rapidjson::kObjectType);
+  out.AddMember("message", jsonString(p.message, a), a);
+  out.AddMember("is_secret", p.isSecret, a);
+  rapidjson::Value choices(rapidjson::kArrayType);
+  for (const auto &c : p.choices) {
+    choices.PushBack(toJsonValue(c, a), a);
+  }
+  out.AddMember("choices", choices, a);
+  out.AddMember("allow_freeform_input", p.allowFreeformInput, a);
+  out.AddMember("allow_empty_input", p.allowEmptyInput, a);
+  out.AddMember("placeholder", jsonString(p.placeholder, a), a);
+  out.AddMember("submit_label", jsonString(p.submitLabel, a), a);
+  out.AddMember("detected_url", jsonString(p.detectedUrl, a), a);
+  out.AddMember("is_waiting", p.isWaiting, a);
+  return out;
+}
+
+WizardPromptSnapshot wizardPromptSnapshotFromJson(const rapidjson::Value &v) {
+  WizardPromptSnapshot p;
+  if (!v.IsObject()) return p;
+  if (v.HasMember("message") && v["message"].IsString())
+    p.message = v["message"].GetString();
+  if (v.HasMember("is_secret") && v["is_secret"].IsBool())
+    p.isSecret = v["is_secret"].GetBool();
+  if (v.HasMember("choices") && v["choices"].IsArray()) {
+    for (const auto &c : v["choices"].GetArray()) {
+      p.choices.push_back(wizardChoiceSnapshotFromJson(c));
+    }
+  }
+  if (v.HasMember("allow_freeform_input") && v["allow_freeform_input"].IsBool())
+    p.allowFreeformInput = v["allow_freeform_input"].GetBool();
+  if (v.HasMember("allow_empty_input") && v["allow_empty_input"].IsBool())
+    p.allowEmptyInput = v["allow_empty_input"].GetBool();
+  if (v.HasMember("placeholder") && v["placeholder"].IsString())
+    p.placeholder = v["placeholder"].GetString();
+  if (v.HasMember("submit_label") && v["submit_label"].IsString())
+    p.submitLabel = v["submit_label"].GetString();
+  if (v.HasMember("detected_url") && v["detected_url"].IsString())
+    p.detectedUrl = v["detected_url"].GetString();
+  if (v.HasMember("is_waiting") && v["is_waiting"].IsBool())
+    p.isWaiting = v["is_waiting"].GetBool();
+  return p;
+}
+
+rapidjson::Value toJsonValue(const ConnectBeginRequest &r,
+                             rapidjson::Document::AllocatorType &a) {
+  rapidjson::Value out(rapidjson::kObjectType);
+  out.AddMember("provider_id", jsonString(r.providerId, a), a);
+  out.AddMember("add_additional", r.addAdditional, a);
+  return out;
+}
+
+ConnectBeginRequest connectBeginRequestFromJson(const rapidjson::Value &v) {
+  ConnectBeginRequest r;
+  if (!v.IsObject()) return r;
+  if (v.HasMember("provider_id") && v["provider_id"].IsString())
+    r.providerId = v["provider_id"].GetString();
+  if (v.HasMember("add_additional") && v["add_additional"].IsBool())
+    r.addAdditional = v["add_additional"].GetBool();
+  return r;
+}
+
+rapidjson::Value toJsonValue(const ConnectBeginResponse &r,
+                             rapidjson::Document::AllocatorType &a) {
+  rapidjson::Value out(rapidjson::kObjectType);
+  out.AddMember("session_id", jsonString(r.sessionId, a), a);
+  out.AddMember("provider_id", jsonString(r.providerId, a), a);
+  out.AddMember("provider_kind", jsonString(r.providerKind, a), a);
+  out.AddMember("existing_accounts", r.existingAccounts, a);
+  if (r.prompt.has_value()) {
+    out.AddMember("prompt", toJsonValue(*r.prompt, a), a);
+  }
+  out.AddMember("ready_to_finalize", r.readyToFinalize, a);
+  out.AddMember("error_message", jsonString(r.errorMessage, a), a);
+  return out;
+}
+
+ConnectBeginResponse connectBeginResponseFromJson(const rapidjson::Value &v) {
+  ConnectBeginResponse r;
+  if (!v.IsObject()) return r;
+  if (v.HasMember("session_id") && v["session_id"].IsString())
+    r.sessionId = v["session_id"].GetString();
+  if (v.HasMember("provider_id") && v["provider_id"].IsString())
+    r.providerId = v["provider_id"].GetString();
+  if (v.HasMember("provider_kind") && v["provider_kind"].IsString())
+    r.providerKind = v["provider_kind"].GetString();
+  if (v.HasMember("existing_accounts") && v["existing_accounts"].IsBool())
+    r.existingAccounts = v["existing_accounts"].GetBool();
+  if (v.HasMember("prompt") && v["prompt"].IsObject())
+    r.prompt = wizardPromptSnapshotFromJson(v["prompt"]);
+  if (v.HasMember("ready_to_finalize") && v["ready_to_finalize"].IsBool())
+    r.readyToFinalize = v["ready_to_finalize"].GetBool();
+  if (v.HasMember("error_message") && v["error_message"].IsString())
+    r.errorMessage = v["error_message"].GetString();
+  return r;
+}
+
+rapidjson::Value toJsonValue(const ConnectSubmitRequest &r,
+                             rapidjson::Document::AllocatorType &a) {
+  rapidjson::Value out(rapidjson::kObjectType);
+  out.AddMember("session_id", jsonString(r.sessionId, a), a);
+  out.AddMember("answer", jsonString(r.answer, a), a);
+  return out;
+}
+
+ConnectSubmitRequest connectSubmitRequestFromJson(const rapidjson::Value &v) {
+  ConnectSubmitRequest r;
+  if (!v.IsObject()) return r;
+  if (v.HasMember("session_id") && v["session_id"].IsString())
+    r.sessionId = v["session_id"].GetString();
+  if (v.HasMember("answer") && v["answer"].IsString())
+    r.answer = v["answer"].GetString();
+  return r;
+}
+
+rapidjson::Value toJsonValue(const ConnectSubmitResponse &r,
+                             rapidjson::Document::AllocatorType &a) {
+  rapidjson::Value out(rapidjson::kObjectType);
+  out.AddMember("ok", r.ok, a);
+  if (r.prompt.has_value()) {
+    out.AddMember("prompt", toJsonValue(*r.prompt, a), a);
+  }
+  out.AddMember("ready_to_finalize", r.readyToFinalize, a);
+  out.AddMember("error_message", jsonString(r.errorMessage, a), a);
+  return out;
+}
+
+ConnectSubmitResponse connectSubmitResponseFromJson(const rapidjson::Value &v) {
+  ConnectSubmitResponse r;
+  if (!v.IsObject()) return r;
+  if (v.HasMember("ok") && v["ok"].IsBool()) r.ok = v["ok"].GetBool();
+  if (v.HasMember("prompt") && v["prompt"].IsObject())
+    r.prompt = wizardPromptSnapshotFromJson(v["prompt"]);
+  if (v.HasMember("ready_to_finalize") && v["ready_to_finalize"].IsBool())
+    r.readyToFinalize = v["ready_to_finalize"].GetBool();
+  if (v.HasMember("error_message") && v["error_message"].IsString())
+    r.errorMessage = v["error_message"].GetString();
+  return r;
+}
+
+rapidjson::Value toJsonValue(const ConnectFinalizeRequest &r,
+                             rapidjson::Document::AllocatorType &a) {
+  rapidjson::Value out(rapidjson::kObjectType);
+  out.AddMember("session_id", jsonString(r.sessionId, a), a);
+  return out;
+}
+
+ConnectFinalizeRequest connectFinalizeRequestFromJson(const rapidjson::Value &v) {
+  ConnectFinalizeRequest r;
+  if (v.IsObject() && v.HasMember("session_id") && v["session_id"].IsString())
+    r.sessionId = v["session_id"].GetString();
+  return r;
+}
+
+rapidjson::Value toJsonValue(const ConnectFinalizeResponse &r,
+                             rapidjson::Document::AllocatorType &a) {
+  rapidjson::Value out(rapidjson::kObjectType);
+  out.AddMember("accepted", r.accepted, a);
+  out.AddMember("error_message", jsonString(r.errorMessage, a), a);
+  return out;
+}
+
+ConnectFinalizeResponse connectFinalizeResponseFromJson(const rapidjson::Value &v) {
+  ConnectFinalizeResponse r;
+  if (!v.IsObject()) return r;
+  if (v.HasMember("accepted") && v["accepted"].IsBool())
+    r.accepted = v["accepted"].GetBool();
+  if (v.HasMember("error_message") && v["error_message"].IsString())
+    r.errorMessage = v["error_message"].GetString();
+  return r;
+}
+
+rapidjson::Value toJsonValue(const ConnectCancelRequest &r,
+                             rapidjson::Document::AllocatorType &a) {
+  rapidjson::Value out(rapidjson::kObjectType);
+  out.AddMember("session_id", jsonString(r.sessionId, a), a);
+  return out;
+}
+
+ConnectCancelRequest connectCancelRequestFromJson(const rapidjson::Value &v) {
+  ConnectCancelRequest r;
+  if (v.IsObject() && v.HasMember("session_id") && v["session_id"].IsString())
+    r.sessionId = v["session_id"].GetString();
+  return r;
+}
+
+rapidjson::Value toJsonValue(const ConnectCancelResponse &r,
+                             rapidjson::Document::AllocatorType &a) {
+  rapidjson::Value out(rapidjson::kObjectType);
+  out.AddMember("cancelled", r.cancelled, a);
+  return out;
+}
+
+ConnectCancelResponse connectCancelResponseFromJson(const rapidjson::Value &v) {
+  ConnectCancelResponse r;
+  if (v.IsObject() && v.HasMember("cancelled") && v["cancelled"].IsBool())
+    r.cancelled = v["cancelled"].GetBool();
+  return r;
+}
+
+rapidjson::Value toJsonValue(const ConnectProgressSnapshot &s,
+                             rapidjson::Document::AllocatorType &a) {
+  rapidjson::Value out(rapidjson::kObjectType);
+  out.AddMember("session_id", jsonString(s.sessionId, a), a);
+  out.AddMember("provider_id", jsonString(s.providerId, a), a);
+  out.AddMember("phase", jsonString(connectProgressPhaseToWire(s.phase), a), a);
+  out.AddMember("message", jsonString(s.message, a), a);
+  return out;
+}
+
+ConnectProgressSnapshot connectProgressSnapshotFromJson(const rapidjson::Value &v) {
+  ConnectProgressSnapshot s;
+  if (!v.IsObject()) return s;
+  if (v.HasMember("session_id") && v["session_id"].IsString())
+    s.sessionId = v["session_id"].GetString();
+  if (v.HasMember("provider_id") && v["provider_id"].IsString())
+    s.providerId = v["provider_id"].GetString();
+  if (v.HasMember("phase") && v["phase"].IsString())
+    s.phase = connectProgressPhaseFromWire(v["phase"].GetString());
+  if (v.HasMember("message") && v["message"].IsString())
+    s.message = v["message"].GetString();
+  return s;
+}
+
+// ── /undo Rewind ──────────────────────────────────────────────────────────
+
+std::string rewindModeToWire(RewindMode mode) {
+  switch (mode) {
+  case RewindMode::RestoreCodeAndConversation: return "restore_code_and_conversation";
+  case RewindMode::RestoreConversation:        return "restore_conversation";
+  case RewindMode::RestoreCode:                return "restore_code";
+  }
+  return "restore_code_and_conversation";
+}
+
+RewindMode rewindModeFromWire(const std::string &str) {
+  if (str == "restore_conversation") return RewindMode::RestoreConversation;
+  if (str == "restore_code")         return RewindMode::RestoreCode;
+  return RewindMode::RestoreCodeAndConversation;
+}
+
+rapidjson::Value toJsonValue(const RewindPreviewRequest &r,
+                             rapidjson::Document::AllocatorType &a) {
+  rapidjson::Value out(rapidjson::kObjectType);
+  out.AddMember("thread_id", jsonString(r.threadId, a), a);
+  out.AddMember("agent_id", jsonString(r.agentId, a), a);
+  out.AddMember("target_turn_id", jsonString(r.targetTurnId, a), a);
+  return out;
+}
+
+RewindPreviewRequest rewindPreviewRequestFromJson(const rapidjson::Value &v) {
+  RewindPreviewRequest r;
+  if (!v.IsObject()) return r;
+  if (v.HasMember("thread_id") && v["thread_id"].IsString())
+    r.threadId = v["thread_id"].GetString();
+  if (v.HasMember("agent_id") && v["agent_id"].IsString())
+    r.agentId = v["agent_id"].GetString();
+  if (v.HasMember("target_turn_id") && v["target_turn_id"].IsString())
+    r.targetTurnId = v["target_turn_id"].GetString();
+  return r;
+}
+
+rapidjson::Value toJsonValue(const RewindPreviewResponse &r,
+                             rapidjson::Document::AllocatorType &a) {
+  rapidjson::Value out(rapidjson::kObjectType);
+  out.AddMember("thread_id", jsonString(r.threadId, a), a);
+  out.AddMember("agent_id", jsonString(r.agentId, a), a);
+  out.AddMember("target_turn_id", jsonString(r.targetTurnId, a), a);
+  out.AddMember("turns_to_undo", r.turnsToUndo, a);
+  out.AddMember("target_message_preview", jsonString(r.targetMessagePreview, a), a);
+  out.AddMember("target_message_created_at", r.targetMessageCreatedAt, a);
+
+  // EditBatchSummary[] and EditUndoEligibility[] use the shared serializers.
+  rapidjson::Value batches(rapidjson::kArrayType);
+  for (const auto &b : r.affectedEditBatches) {
+    auto doc = firmius::shared::toJson(b);
+    rapidjson::Value v(rapidjson::kObjectType);
+    v.CopyFrom(doc, a);
+    batches.PushBack(v, a);
+  }
+  out.AddMember("affected_edit_batches", batches, a);
+
+  rapidjson::Value eligibilities(rapidjson::kArrayType);
+  for (const auto &e : r.editEligibilities) {
+    auto doc = firmius::shared::toJson(e);
+    rapidjson::Value v(rapidjson::kObjectType);
+    v.CopyFrom(doc, a);
+    eligibilities.PushBack(v, a);
+  }
+  out.AddMember("edit_eligibilities", eligibilities, a);
+
+  out.AddMember("total_added_lines", r.totalAddedLines, a);
+  out.AddMember("total_removed_lines", r.totalRemovedLines, a);
+
+  rapidjson::Value files(rapidjson::kArrayType);
+  for (const auto &f : r.filesAffected) {
+    files.PushBack(jsonString(f, a), a);
+  }
+  out.AddMember("files_affected", files, a);
+
+  out.AddMember("code_restore_safe", r.codeRestoreSafe, a);
+  out.AddMember("code_restore_block_reason", jsonString(r.codeRestoreBlockReason, a), a);
+  out.AddMember("error_message", jsonString(r.errorMessage, a), a);
+  return out;
+}
+
+RewindPreviewResponse rewindPreviewResponseFromJson(const rapidjson::Value &v) {
+  RewindPreviewResponse r;
+  if (!v.IsObject()) return r;
+  if (v.HasMember("thread_id") && v["thread_id"].IsString())
+    r.threadId = v["thread_id"].GetString();
+  if (v.HasMember("agent_id") && v["agent_id"].IsString())
+    r.agentId = v["agent_id"].GetString();
+  if (v.HasMember("target_turn_id") && v["target_turn_id"].IsString())
+    r.targetTurnId = v["target_turn_id"].GetString();
+  if (v.HasMember("turns_to_undo") && v["turns_to_undo"].IsInt())
+    r.turnsToUndo = v["turns_to_undo"].GetInt();
+  if (v.HasMember("target_message_preview") && v["target_message_preview"].IsString())
+    r.targetMessagePreview = v["target_message_preview"].GetString();
+  if (v.HasMember("target_message_created_at") && v["target_message_created_at"].IsUint64())
+    r.targetMessageCreatedAt = v["target_message_created_at"].GetUint64();
+  if (v.HasMember("affected_edit_batches") && v["affected_edit_batches"].IsArray()) {
+    for (const auto &entry : v["affected_edit_batches"].GetArray()) {
+      r.affectedEditBatches.push_back(firmius::shared::editBatchSummaryFromJson(entry));
+    }
+  }
+  if (v.HasMember("edit_eligibilities") && v["edit_eligibilities"].IsArray()) {
+    for (const auto &entry : v["edit_eligibilities"].GetArray()) {
+      r.editEligibilities.push_back(firmius::shared::editUndoEligibilityFromJson(entry));
+    }
+  }
+  if (v.HasMember("total_added_lines") && v["total_added_lines"].IsInt())
+    r.totalAddedLines = v["total_added_lines"].GetInt();
+  if (v.HasMember("total_removed_lines") && v["total_removed_lines"].IsInt())
+    r.totalRemovedLines = v["total_removed_lines"].GetInt();
+  if (v.HasMember("files_affected") && v["files_affected"].IsArray()) {
+    for (const auto &entry : v["files_affected"].GetArray()) {
+      if (entry.IsString()) r.filesAffected.emplace_back(entry.GetString());
+    }
+  }
+  if (v.HasMember("code_restore_safe") && v["code_restore_safe"].IsBool())
+    r.codeRestoreSafe = v["code_restore_safe"].GetBool();
+  if (v.HasMember("code_restore_block_reason") && v["code_restore_block_reason"].IsString())
+    r.codeRestoreBlockReason = v["code_restore_block_reason"].GetString();
+  if (v.HasMember("error_message") && v["error_message"].IsString())
+    r.errorMessage = v["error_message"].GetString();
+  return r;
+}
+
+rapidjson::Value toJsonValue(const RewindExecuteRequest &r,
+                             rapidjson::Document::AllocatorType &a) {
+  rapidjson::Value out(rapidjson::kObjectType);
+  out.AddMember("thread_id", jsonString(r.threadId, a), a);
+  out.AddMember("agent_id", jsonString(r.agentId, a), a);
+  out.AddMember("target_turn_id", jsonString(r.targetTurnId, a), a);
+  out.AddMember("mode", jsonString(rewindModeToWire(r.mode), a), a);
+  return out;
+}
+
+RewindExecuteRequest rewindExecuteRequestFromJson(const rapidjson::Value &v) {
+  RewindExecuteRequest r;
+  if (!v.IsObject()) return r;
+  if (v.HasMember("thread_id") && v["thread_id"].IsString())
+    r.threadId = v["thread_id"].GetString();
+  if (v.HasMember("agent_id") && v["agent_id"].IsString())
+    r.agentId = v["agent_id"].GetString();
+  if (v.HasMember("target_turn_id") && v["target_turn_id"].IsString())
+    r.targetTurnId = v["target_turn_id"].GetString();
+  if (v.HasMember("mode") && v["mode"].IsString())
+    r.mode = rewindModeFromWire(v["mode"].GetString());
+  return r;
+}
+
+rapidjson::Value toJsonValue(const RewindExecuteResponse &r,
+                             rapidjson::Document::AllocatorType &a) {
+  rapidjson::Value out(rapidjson::kObjectType);
+  out.AddMember("applied", r.applied, a);
+  out.AddMember("undo_action_id", jsonString(r.undoActionId, a), a);
+  rapidjson::Value editIds(rapidjson::kArrayType);
+  for (const auto &id : r.editUndoActionIds) {
+    editIds.PushBack(jsonString(id, a), a);
+  }
+  out.AddMember("edit_undo_action_ids", editIds, a);
+  out.AddMember("error_message", jsonString(r.errorMessage, a), a);
+  return out;
+}
+
+RewindExecuteResponse rewindExecuteResponseFromJson(const rapidjson::Value &v) {
+  RewindExecuteResponse r;
+  if (!v.IsObject()) return r;
+  if (v.HasMember("applied") && v["applied"].IsBool())
+    r.applied = v["applied"].GetBool();
+  if (v.HasMember("undo_action_id") && v["undo_action_id"].IsString())
+    r.undoActionId = v["undo_action_id"].GetString();
+  if (v.HasMember("edit_undo_action_ids") && v["edit_undo_action_ids"].IsArray()) {
+    for (const auto &entry : v["edit_undo_action_ids"].GetArray()) {
+      if (entry.IsString()) r.editUndoActionIds.emplace_back(entry.GetString());
+    }
+  }
+  if (v.HasMember("error_message") && v["error_message"].IsString())
+    r.errorMessage = v["error_message"].GetString();
+  return r;
+}
+
+rapidjson::Value toJsonValue(const RewindAppliedSnapshot &s,
+                             rapidjson::Document::AllocatorType &a) {
+  rapidjson::Value out(rapidjson::kObjectType);
+  out.AddMember("thread_id", jsonString(s.threadId, a), a);
+  out.AddMember("agent_id", jsonString(s.agentId, a), a);
+  out.AddMember("target_turn_id", jsonString(s.targetTurnId, a), a);
+  out.AddMember("mode", jsonString(rewindModeToWire(s.mode), a), a);
+  out.AddMember("turns_undone", s.turnsUndone, a);
+  out.AddMember("edit_batches_undone", s.editBatchesUndone, a);
+  out.AddMember("undo_action_id", jsonString(s.undoActionId, a), a);
+  return out;
+}
+
+RewindAppliedSnapshot rewindAppliedSnapshotFromJson(const rapidjson::Value &v) {
+  RewindAppliedSnapshot s;
+  if (!v.IsObject()) return s;
+  if (v.HasMember("thread_id") && v["thread_id"].IsString())
+    s.threadId = v["thread_id"].GetString();
+  if (v.HasMember("agent_id") && v["agent_id"].IsString())
+    s.agentId = v["agent_id"].GetString();
+  if (v.HasMember("target_turn_id") && v["target_turn_id"].IsString())
+    s.targetTurnId = v["target_turn_id"].GetString();
+  if (v.HasMember("mode") && v["mode"].IsString())
+    s.mode = rewindModeFromWire(v["mode"].GetString());
+  if (v.HasMember("turns_undone") && v["turns_undone"].IsInt())
+    s.turnsUndone = v["turns_undone"].GetInt();
+  if (v.HasMember("edit_batches_undone") && v["edit_batches_undone"].IsInt())
+    s.editBatchesUndone = v["edit_batches_undone"].GetInt();
+  if (v.HasMember("undo_action_id") && v["undo_action_id"].IsString())
+    s.undoActionId = v["undo_action_id"].GetString();
+  return s;
+}
+
+// ── /redo serializers ────────────────────────────────────────────────────
+
+std::string redoModeToWire(RedoMode mode) {
+  switch (mode) {
+  case RedoMode::RestoreCodeAndConversation: return "restore_code_and_conversation";
+  case RedoMode::RestoreConversation:        return "restore_conversation";
+  case RedoMode::RestoreCode:                return "restore_code";
+  }
+  return "restore_code_and_conversation";
+}
+
+RedoMode redoModeFromWire(const std::string &str) {
+  if (str == "restore_conversation") return RedoMode::RestoreConversation;
+  if (str == "restore_code")         return RedoMode::RestoreCode;
+  return RedoMode::RestoreCodeAndConversation;
+}
+
+rapidjson::Value toJsonValue(const RedoUndoActionSummary &s,
+                             rapidjson::Document::AllocatorType &a) {
+  rapidjson::Value out(rapidjson::kObjectType);
+  out.AddMember("undo_action_id", jsonString(s.undoActionId, a), a);
+  out.AddMember("created_at", s.createdAt, a);
+  out.AddMember("turns_to_redo", s.turnsToRedo, a);
+  out.AddMember("first_turn_preview", jsonString(s.firstTurnPreview, a), a);
+  out.AddMember("edit_batches_to_redo", s.editBatchesToRedo, a);
+  out.AddMember("redo_available", s.redoAvailable, a);
+  return out;
+}
+
+RedoUndoActionSummary redoUndoActionSummaryFromJson(const rapidjson::Value &v) {
+  RedoUndoActionSummary s;
+  if (!v.IsObject()) return s;
+  if (v.HasMember("undo_action_id") && v["undo_action_id"].IsString())
+    s.undoActionId = v["undo_action_id"].GetString();
+  if (v.HasMember("created_at") && v["created_at"].IsUint64())
+    s.createdAt = v["created_at"].GetUint64();
+  if (v.HasMember("turns_to_redo") && v["turns_to_redo"].IsInt())
+    s.turnsToRedo = v["turns_to_redo"].GetInt();
+  if (v.HasMember("first_turn_preview") && v["first_turn_preview"].IsString())
+    s.firstTurnPreview = v["first_turn_preview"].GetString();
+  if (v.HasMember("edit_batches_to_redo") && v["edit_batches_to_redo"].IsInt())
+    s.editBatchesToRedo = v["edit_batches_to_redo"].GetInt();
+  if (v.HasMember("redo_available") && v["redo_available"].IsBool())
+    s.redoAvailable = v["redo_available"].GetBool();
+  return s;
+}
+
+rapidjson::Value toJsonValue(const RedoPreviewRequest &r,
+                             rapidjson::Document::AllocatorType &a) {
+  rapidjson::Value out(rapidjson::kObjectType);
+  out.AddMember("thread_id", jsonString(r.threadId, a), a);
+  out.AddMember("agent_id", jsonString(r.agentId, a), a);
+  out.AddMember("limit", r.limit, a);
+  return out;
+}
+
+RedoPreviewRequest redoPreviewRequestFromJson(const rapidjson::Value &v) {
+  RedoPreviewRequest r;
+  if (!v.IsObject()) return r;
+  if (v.HasMember("thread_id") && v["thread_id"].IsString())
+    r.threadId = v["thread_id"].GetString();
+  if (v.HasMember("agent_id") && v["agent_id"].IsString())
+    r.agentId = v["agent_id"].GetString();
+  if (v.HasMember("limit") && v["limit"].IsInt())
+    r.limit = v["limit"].GetInt();
+  return r;
+}
+
+rapidjson::Value toJsonValue(const RedoPreviewResponse &r,
+                             rapidjson::Document::AllocatorType &a) {
+  rapidjson::Value out(rapidjson::kObjectType);
+  out.AddMember("thread_id", jsonString(r.threadId, a), a);
+  out.AddMember("agent_id", jsonString(r.agentId, a), a);
+  rapidjson::Value actions(rapidjson::kArrayType);
+  for (const auto &s : r.actions) {
+    actions.PushBack(toJsonValue(s, a), a);
+  }
+  out.AddMember("actions", actions, a);
+  out.AddMember("error_message", jsonString(r.errorMessage, a), a);
+  return out;
+}
+
+RedoPreviewResponse redoPreviewResponseFromJson(const rapidjson::Value &v) {
+  RedoPreviewResponse r;
+  if (!v.IsObject()) return r;
+  if (v.HasMember("thread_id") && v["thread_id"].IsString())
+    r.threadId = v["thread_id"].GetString();
+  if (v.HasMember("agent_id") && v["agent_id"].IsString())
+    r.agentId = v["agent_id"].GetString();
+  if (v.HasMember("actions") && v["actions"].IsArray()) {
+    for (const auto &entry : v["actions"].GetArray()) {
+      r.actions.push_back(redoUndoActionSummaryFromJson(entry));
+    }
+  }
+  if (v.HasMember("error_message") && v["error_message"].IsString())
+    r.errorMessage = v["error_message"].GetString();
+  return r;
+}
+
+rapidjson::Value toJsonValue(const RedoExecuteRequest &r,
+                             rapidjson::Document::AllocatorType &a) {
+  rapidjson::Value out(rapidjson::kObjectType);
+  out.AddMember("thread_id", jsonString(r.threadId, a), a);
+  out.AddMember("agent_id", jsonString(r.agentId, a), a);
+  out.AddMember("undo_action_id", jsonString(r.undoActionId, a), a);
+  out.AddMember("mode", jsonString(redoModeToWire(r.mode), a), a);
+  return out;
+}
+
+RedoExecuteRequest redoExecuteRequestFromJson(const rapidjson::Value &v) {
+  RedoExecuteRequest r;
+  if (!v.IsObject()) return r;
+  if (v.HasMember("thread_id") && v["thread_id"].IsString())
+    r.threadId = v["thread_id"].GetString();
+  if (v.HasMember("agent_id") && v["agent_id"].IsString())
+    r.agentId = v["agent_id"].GetString();
+  if (v.HasMember("undo_action_id") && v["undo_action_id"].IsString())
+    r.undoActionId = v["undo_action_id"].GetString();
+  if (v.HasMember("mode") && v["mode"].IsString())
+    r.mode = redoModeFromWire(v["mode"].GetString());
+  return r;
+}
+
+rapidjson::Value toJsonValue(const RedoExecuteResponse &r,
+                             rapidjson::Document::AllocatorType &a) {
+  rapidjson::Value out(rapidjson::kObjectType);
+  out.AddMember("applied", r.applied, a);
+  out.AddMember("turns_redone", r.turnsRedone, a);
+  rapidjson::Value editIds(rapidjson::kArrayType);
+  for (const auto &id : r.editRedoActionIds) {
+    editIds.PushBack(jsonString(id, a), a);
+  }
+  out.AddMember("edit_redo_action_ids", editIds, a);
+  out.AddMember("error_message", jsonString(r.errorMessage, a), a);
+  return out;
+}
+
+RedoExecuteResponse redoExecuteResponseFromJson(const rapidjson::Value &v) {
+  RedoExecuteResponse r;
+  if (!v.IsObject()) return r;
+  if (v.HasMember("applied") && v["applied"].IsBool())
+    r.applied = v["applied"].GetBool();
+  if (v.HasMember("turns_redone") && v["turns_redone"].IsInt())
+    r.turnsRedone = v["turns_redone"].GetInt();
+  if (v.HasMember("edit_redo_action_ids") && v["edit_redo_action_ids"].IsArray()) {
+    for (const auto &entry : v["edit_redo_action_ids"].GetArray()) {
+      if (entry.IsString()) r.editRedoActionIds.emplace_back(entry.GetString());
+    }
+  }
+  if (v.HasMember("error_message") && v["error_message"].IsString())
+    r.errorMessage = v["error_message"].GetString();
   return r;
 }
 

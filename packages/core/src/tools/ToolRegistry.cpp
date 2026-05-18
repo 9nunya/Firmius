@@ -2,6 +2,7 @@
 #include "IAgent.hpp"
 #include "agents/hooks/HookRegistry.hpp"
 #include "agents/hooks/HookState.hpp"
+#include "utils/SpillIfLarge.hpp"
 #include "utils/StringUtil.hpp"
 #include "utils/JSONSchemaFromJson.hpp"
 #include "workflow/WorkflowLoader.hpp"
@@ -310,6 +311,17 @@ ToolRegistry::getAvailableToolDefinitions(const AgentPermissions &perms) const {
     }
   }
 
+  // Token-caching pass: sort tool definitions by name so the serialized
+  // tool list is deterministic across requests. Anthropic's cache key is
+  // a byte-exact prefix match — non-deterministic tool order (from the
+  // underlying unordered_map) would silently invalidate the cache on
+  // every request.
+  std::sort(defs.begin(), defs.end(),
+            [](const firmius::provider::ToolDefinition &a,
+               const firmius::provider::ToolDefinition &b) {
+              return a.name < b.name;
+            });
+
   return defs;
 }
 
@@ -367,77 +379,55 @@ shared::ToolResult ToolRegistry::execute(const std::string &name,
 
 shared::ToolResult ToolRegistry::truncateIfNecessary(shared::ToolResult result,
                                                      shared::ToolContext &ctx) {
-  const size_t threshold = 1024 * 512;
-  if (!result.success || result.data.size() <= threshold) {
+  // Token-waste pass 4: lowered from 512 KB to 256 KB. This is a
+  // last-resort safety net — most tools (Process, Python, Artifacts.Read,
+  // WebFetch) already spill via shared::utils::spillIfLarge before
+  // returning. Anything that gets here either skipped its own spill or
+  // is a tool we haven't migrated yet (e.g. Read with very large
+  // line-prefixed content). Match the spill-shape used by other tools
+  // so the model sees a consistent contract.
+  constexpr std::size_t kRegistrySpillThreshold = 256 * 1024;
+  constexpr std::size_t kRegistryTailBytes = 4 * 1024;
+  if (!result.success || result.data.size() <= kRegistrySpillThreshold) {
     return result;
   }
+  (void)ctx;
 
-  size_t originalSize = result.data.size();
-  int lineCount = 0;
-  for (char ch : result.data) {
-    if (ch == '\n')
-      lineCount++;
-  }
-  if (!result.data.empty() && result.data.back() != '\n') {
-    lineCount++;
-  }
+  auto spill = shared::utils::spillIfLarge(
+      result.data, kRegistrySpillThreshold,
+      "firmius_tool_overflow", kRegistryTailBytes);
 
-  auto now = std::chrono::system_clock::now();
-  auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
-                       now.time_since_epoch())
-                       .count();
-  std::string filename = "tool_output_" + ctx.agent.getContext().identity.id +
-                         "_" + std::to_string(timestamp) + ".json";
-  std::string uploadsDir = "/mnt/SHIT/Projects/Firmius/uploads";
-  std::filesystem::path fullPath = std::filesystem::path(uploadsDir) / filename;
+  rapidjson::Document doc;
+  doc.SetObject();
+  auto &a = doc.GetAllocator();
+  std::ostringstream prose;
+  prose << "Tool result truncated by ToolRegistry safety cap: "
+        << spill.totalBytes << " bytes / " << spill.totalLines
+        << " lines exceeded the 256 KB threshold; full output spilled to "
+        << spill.refPath << " (showing last " << spill.tail.size() << " B). "
+        << "If you need this content, grep or read the spill file directly.";
+  const std::string proseStr = prose.str();
+  doc.AddMember(
+      "result",
+      rapidjson::Value(proseStr.c_str(),
+                       static_cast<rapidjson::SizeType>(proseStr.size()),
+                       a).Move(),
+      a);
+  doc.AddMember(
+      "tail",
+      rapidjson::Value(spill.tail.c_str(),
+                       static_cast<rapidjson::SizeType>(spill.tail.size()),
+                       a).Move(),
+      a);
+  doc.AddMember("ref",
+                rapidjson::Value(spill.refPath.c_str(), a).Move(), a);
+  doc.AddMember("size", static_cast<uint64_t>(spill.totalBytes), a);
+  doc.AddMember("truncated_by_registry", true, a);
 
-  try {
-    std::filesystem::create_directories(uploadsDir);
-    std::ofstream ofs(fullPath);
-    if (!ofs.is_open()) {
-      throw std::runtime_error("Could not open file for writing: " +
-                               fullPath.string());
-    }
-    ofs << result.data;
-    ofs.close();
-
-    std::string peek;
-    const size_t peekSize = 1024;
-    if (result.data.size() > peekSize) {
-      peek = result.data.substr(0, peekSize) + "\n... [TRUNCATED]";
-    } else {
-      peek = result.data;
-    }
-
-    rapidjson::Document summaryDoc;
-    summaryDoc.SetObject();
-    auto &alloc = summaryDoc.GetAllocator();
-
-    summaryDoc.AddMember(
-        "info",
-        rapidjson::Value("Tool result was too large and has been truncated.",
-                         alloc)
-            .Move(),
-        alloc);
-    summaryDoc.AddMember("original_byte_size", (uint64_t)originalSize, alloc);
-    summaryDoc.AddMember("line_count", lineCount, alloc);
-    summaryDoc.AddMember("full_output_path",
-                         rapidjson::Value(fullPath.c_str(), alloc).Move(),
-                         alloc);
-    summaryDoc.AddMember("peek", rapidjson::Value(peek.c_str(), alloc).Move(),
-                         alloc);
-
-    rapidjson::StringBuffer sb;
-    rapidjson::Writer<rapidjson::StringBuffer> writer(sb);
-    summaryDoc.Accept(writer);
-
-    result.data = sb.GetString();
-  } catch (const std::exception &e) {
-    result.error =
-        "Output truncation failed to save full file: " + std::string(e.what());
-    result.data = "{\"error\": \"Truncation failed to save full output.\"}";
-  }
-
+  rapidjson::StringBuffer sb;
+  rapidjson::Writer<rapidjson::StringBuffer> writer(sb);
+  doc.Accept(writer);
+  result.data = sb.GetString();
   return result;
 }
 

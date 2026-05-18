@@ -1,10 +1,15 @@
 #include "tools/WebFetchTool.hpp"
 #include "IAgent.hpp"
 #include "ITool.hpp"
+#include "environment/PermissionSuggestionEngine.hpp"
+#include "harness/Harness.hpp"
+#include "utils/SpillIfLarge.hpp"
 #include "utils/StringUtil.hpp"
 #include <curl/curl.h>
+#include <sstream>
 #include <curl/easy.h>
 #include <rapidjson/document.h>
+#include <regex>
 #include <vector>
 
 namespace firmius::core {
@@ -16,10 +21,62 @@ size_t writeCallback(char *ptr, size_t size, size_t nmemb, void *userdata) {
   s->append(ptr, size * nmemb);
   return size * nmemb;
 }
+
+/// Pull out scheme + host from a URL. Cheap regex; doesn't need full
+/// RFC 3986. Sets host="" / scheme="" on parse failure — caller
+/// handles fallback gracefully.
+void parseUrl(const std::string &url, std::string &scheme, std::string &host) {
+  static const std::regex pattern(R"(^([a-zA-Z][a-zA-Z0-9+.-]*)://([^/:?#]+))");
+  std::smatch m;
+  if (std::regex_search(url, m, pattern)) {
+    scheme = m[1];
+    host = m[2];
+  }
+}
+
+/// Throw if policy says no. Triggers the escalation flow on Ask.
+void gateNetworkFetch(shared::ToolContext &ctx, const std::string &url) {
+  PolicyRequest req;
+  req.category = kCatNetworkFetch;
+  req.url = url;
+  parseUrl(url, req.scheme, req.host);
+  req.toolName = "WebFetch";
+
+  auto eval = Harness::instance().policyEngine().evaluate(req);
+  if (eval.decision == PolicyDecision::Allow) return;
+  if (eval.decision == PolicyDecision::Deny) {
+    throw std::runtime_error("Network fetch denied by policy: " + url);
+  }
+  // Ask: build escalation + suggestions.
+  shared::PermissionEscalationRequest esc;
+  const auto &actx = ctx.agent.getContext();
+  esc.threadId = actx.history ? actx.history->threadId : "";
+  esc.agentId = actx.identity.id;
+  esc.toolName = req.toolName;
+  esc.requestType = shared::PermissionRequestType::Read;
+  esc.title = "Allow network fetch?";
+  esc.message = "Approve fetching " + url;
+  esc.severity = shared::CommandSeverity::LOW;
+  esc.allowAlways = true;
+  esc.category = req.category;
+  esc.url = req.url;
+  esc.host = req.host;
+  esc.scheme = req.scheme;
+
+  shared::CommandIntent dummy;
+  auto suggestions = PermissionSuggestionEngine::generate(req, dummy);
+  auto response = Harness::instance().requestPermissionEscalationWithSuggestions(
+      std::move(esc), std::move(suggestions));
+  if (response == shared::PermissionResponse::Deny) {
+    throw std::runtime_error("Network fetch denied: " + url);
+  }
+}
 } // namespace
 
 shared::ToolResult WebFetchTool::execute(const WebFetchInput &input,
                                          shared::ToolContext &ctx) {
+  gateNetworkFetch(ctx, input.url);
+
   CURL *curl = curl_easy_init();
   if (!curl)
     return shared::ToolResult::fail("CURL init failed");
@@ -86,37 +143,44 @@ shared::ToolResult WebFetchTool::execute(const WebFetchInput &input,
   } else {
     markdown = shared::StringUtil::htmlToMarkdown(response);
   }
-  size_t size = markdown.size();
+
+  // Token-waste pass 4: route via the unified spillIfLarge helper.
+  // Threshold lowered from 100 KB to 32 KB — 100 KB of markdown is
+  // ~25k tokens, which dominates context for content the model rarely
+  // needs in full (it usually wants to grep/skim the doc).
+  constexpr std::size_t kFetchSpillThreshold = 32 * 1024;
+  constexpr std::size_t kFetchTailBytes = 4 * 1024;
+  auto spill = shared::utils::spillIfLarge(markdown, kFetchSpillThreshold,
+                                           "firmius_fetch", kFetchTailBytes);
 
   rapidjson::Document doc;
   doc.SetObject();
   auto &a = doc.GetAllocator();
-  doc.AddMember("size", static_cast<uint64_t>(size), a);
 
-  if (size > 100000) {
-    std::string fileName =
-        "/tmp/firmius_fetch_" + shared::StringUtil::generateUuid() + ".md";
-    std::vector<uint8_t> data(markdown.begin(), markdown.end());
-    // Skip permission escalation for /tmp writes — /tmp is inherently safe
-    // and /tmp/** is always in the allowed paths. The validatePathAccess
-    // WRITE path triggers requestEditApproval which blocks for UI approval,
-    // causing hangs in non-interactive contexts (e.g. audits, CI).
-    if (fileName.rfind("/tmp/", 0) != 0) {
-      ctx.agent.getPermissions()->validatePathAccess(fileName,
-                                                     shared::AccessMode::WRITE);
-    }
-    ctx.host.writeFile(fileName, data);
-    doc.AddMember("redirected_to", rapidjson::Value(fileName.c_str(), a).Move(),
-                  a);
-    doc.AddMember("content", "Content too large, saved to file.", a);
+  if (spill.spilled) {
+    std::ostringstream prose;
+    prose << "Fetched " << spill.totalBytes << " bytes from " << input.url
+          << "; full content saved to " << spill.refPath
+          << " (showing last " << spill.tail.size() << " B).";
+    const std::string proseStr = prose.str();
     doc.AddMember(
-        "instruction",
-        "The content was too large for a single turn. Please use 'file_read' "
-        "with 'start_line' and 'end_line' to inspect specific sections of the "
-        "file, or 'grep' to search for keywords within it.",
+        "result",
+        rapidjson::Value(proseStr.c_str(),
+                         static_cast<rapidjson::SizeType>(proseStr.size()),
+                         a).Move(),
         a);
+    doc.AddMember(
+        "tail",
+        rapidjson::Value(spill.tail.c_str(),
+                         static_cast<rapidjson::SizeType>(spill.tail.size()),
+                         a).Move(),
+        a);
+    doc.AddMember("ref",
+                  rapidjson::Value(spill.refPath.c_str(), a).Move(), a);
+    doc.AddMember("size", static_cast<uint64_t>(spill.totalBytes), a);
   } else {
     doc.AddMember("content", rapidjson::Value(markdown.c_str(), a).Move(), a);
+    doc.AddMember("size", static_cast<uint64_t>(markdown.size()), a);
   }
   return shared::ToolResult::ok(doc);
 }

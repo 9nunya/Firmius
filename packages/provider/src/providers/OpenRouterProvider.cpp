@@ -2,6 +2,8 @@
 #include "EnvLoader.hpp"
 #include <curl/curl.h>
 #include <rapidjson/document.h>
+#include <rapidjson/stringbuffer.h>
+#include <rapidjson/writer.h>
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -132,6 +134,92 @@ OpenRouterProvider::buildHeadersForApiKey(const std::string& apiKey) {
 
 std::string OpenRouterProvider::getReasoningFieldName() const {
     return "reasoning";
+}
+
+// Token-caching pass: when the model id matches an Anthropic-routed
+// model on OpenRouter (e.g. "anthropic/claude-3.5-sonnet"), inject
+// Anthropic-style cache_control markers on the system message and the
+// last tool definition. OpenRouter passes these through to the upstream
+// Claude model for explicit prompt caching (90% discount on hits, 1.25x
+// on first write). Non-Anthropic routes get no markers (cheap no-op).
+std::string OpenRouterProvider::prepareRequestBody(
+    const firmius::shared::AgentHistory &history,
+    const firmius::provider::ProviderOptions &opts) {
+    std::string base = BaseOpenAIProvider::prepareRequestBody(history, opts);
+    // Only post-process for Anthropic-routed models. Per OpenRouter
+    // convention, model ids carrying "anthropic/" or any "claude" name
+    // are routed to Anthropic upstream. Conservative match: "anthropic/"
+    // prefix only — the model id is the canonical OpenRouter form.
+    if (opts.modelId.rfind("anthropic/", 0) != 0) {
+        return base;
+    }
+    rapidjson::Document doc;
+    if (doc.Parse(base.c_str()).HasParseError() || !doc.IsObject()) {
+        return base;
+    }
+    auto &a = doc.GetAllocator();
+
+    // Tools: attach to last tool's function block (OpenRouter expects
+    // the OpenAI-style tools shape; cache_control is honoured at the
+    // tool object level when proxied to Anthropic).
+    if (doc.HasMember("tools") && doc["tools"].IsArray() &&
+        doc["tools"].Size() > 0) {
+        auto &lastTool = doc["tools"][doc["tools"].Size() - 1];
+        if (lastTool.IsObject()) {
+            rapidjson::Value cacheCtrl(rapidjson::kObjectType);
+            cacheCtrl.AddMember("type", "ephemeral", a);
+            lastTool.AddMember("cache_control", cacheCtrl, a);
+        }
+    }
+
+    // System message: find the last role=system message, convert its
+    // content to array form if it's still a string, and attach
+    // cache_control to the last block.
+    if (doc.HasMember("messages") && doc["messages"].IsArray()) {
+        auto &msgs = doc["messages"];
+        int lastSystemIdx = -1;
+        for (rapidjson::SizeType i = 0; i < msgs.Size(); ++i) {
+            if (msgs[i].IsObject() && msgs[i].HasMember("role") &&
+                msgs[i]["role"].IsString() &&
+                std::string(msgs[i]["role"].GetString()) == "system") {
+                lastSystemIdx = static_cast<int>(i);
+            }
+        }
+        if (lastSystemIdx >= 0) {
+            auto &sysMsg = msgs[lastSystemIdx];
+            if (sysMsg.HasMember("content")) {
+                auto &content = sysMsg["content"];
+                if (content.IsString()) {
+                    // Convert string content to array form so we can
+                    // attach cache_control to the (single) block.
+                    std::string text = content.GetString();
+                    rapidjson::Value contentArr(rapidjson::kArrayType);
+                    rapidjson::Value block(rapidjson::kObjectType);
+                    block.AddMember("type", "text", a);
+                    block.AddMember("text",
+                                    rapidjson::Value(text.c_str(), a), a);
+                    rapidjson::Value cacheCtrl(rapidjson::kObjectType);
+                    cacheCtrl.AddMember("type", "ephemeral", a);
+                    block.AddMember("cache_control", cacheCtrl, a);
+                    contentArr.PushBack(block, a);
+                    sysMsg.RemoveMember("content");
+                    sysMsg.AddMember("content", contentArr, a);
+                } else if (content.IsArray() && content.Size() > 0) {
+                    auto &lastBlock = content[content.Size() - 1];
+                    if (lastBlock.IsObject()) {
+                        rapidjson::Value cacheCtrl(rapidjson::kObjectType);
+                        cacheCtrl.AddMember("type", "ephemeral", a);
+                        lastBlock.AddMember("cache_control", cacheCtrl, a);
+                    }
+                }
+            }
+        }
+    }
+
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w(buf);
+    doc.Accept(w);
+    return std::string(buf.GetString(), buf.GetSize());
 }
 
 void OpenRouterProvider::refreshQuotas() {

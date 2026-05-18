@@ -47,7 +47,8 @@ public:
   firmius::daemon::ThreadsOpenResponse openThread(const std::string &threadId);
   firmius::daemon::ThreadsSendResponse send(const std::string &threadId,
                                              const std::string &agentId,
-                                             const std::string &text);
+                                             const std::string &text,
+                                             std::vector<firmius::shared::ImageContent> images = {});
 
   // ── Transcript ──
   std::optional<firmius::daemon::TranscriptSnapshot> getTranscript(
@@ -80,10 +81,45 @@ public:
   // ── Permissions ──
   bool resolvePermission(const std::string &requestId,
                          firmius::shared::PermissionResponse response);
+  bool resolvePermissionWithRules(
+      const std::string &requestId,
+      const std::vector<std::string> &selectedSuggestionIds);
+  firmius::daemon::PermissionListRulesResponse listPolicyRules();
+  firmius::daemon::PermissionUpsertRuleResponse upsertPolicyRule(
+      const firmius::daemon::PolicyRuleWire &rule);
+  firmius::daemon::PermissionDeleteRuleResponse deletePolicyRule(
+      const std::string &ruleId);
+  firmius::daemon::PermissionReloadPolicyResponse reloadPolicy();
 
   // ── Workflows ──
   bool executeWorkflow(const std::string &workflowId,
                        const std::vector<std::string> &args = {});
+
+  // ── /connect wizard ──
+  firmius::daemon::ConnectBeginResponse beginConnect(const std::string &providerId,
+                                                       bool addAdditional);
+  firmius::daemon::ConnectSubmitResponse submitConnect(const std::string &sessionId,
+                                                         const std::string &answer);
+  firmius::daemon::ConnectFinalizeResponse finalizeConnect(const std::string &sessionId);
+  firmius::daemon::ConnectCancelResponse cancelConnect(const std::string &sessionId);
+
+  // ── /undo Rewind ──
+  firmius::daemon::RewindPreviewResponse
+  previewRewind(const std::string &threadId, const std::string &agentId,
+                const std::string &targetTurnId);
+  firmius::daemon::RewindExecuteResponse
+  executeRewind(const std::string &threadId, const std::string &agentId,
+                const std::string &targetTurnId,
+                firmius::daemon::RewindMode mode);
+
+  // ── /redo ──
+  firmius::daemon::RedoPreviewResponse
+  previewRedo(const std::string &threadId, const std::string &agentId,
+              int limit);
+  firmius::daemon::RedoExecuteResponse
+  executeRedo(const std::string &threadId, const std::string &agentId,
+              const std::string &undoActionId,
+              firmius::daemon::RedoMode mode);
 
   /// Direct access to the underlying DaemonClient for RPC calls not
   /// wrapped by convenience methods above.

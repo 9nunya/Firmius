@@ -14,7 +14,8 @@ public:
   ActionDispatcher(DaemonSession &session, AppState &state);
 
   /// Send a chat message to the current thread/agent.
-  bool sendMessage(const std::string &text);
+  bool sendMessage(const std::string &text,
+                   std::vector<firmius::shared::ImageContent> images = {});
 
   /// Create a new thread and open it.
   bool createThread(const std::string &persona = "lead",
@@ -29,6 +30,10 @@ public:
   /// Resolve a pending permission request.
   bool resolvePermission(const std::string &requestId,
                          firmius::shared::PermissionResponse response);
+  /// Resolve and additionally apply tailored allow rules.
+  bool resolvePermissionWithRules(
+      const std::string &requestId,
+      const std::vector<std::string> &selectedSuggestionIds);
 
   /// Load transcript snapshot for the current thread into state.
   void loadTranscript();

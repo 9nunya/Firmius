@@ -1832,7 +1832,45 @@ QwenProvider::buildRequestPayload(const AgentHistory &history,
       toolObj.AddMember("function", function, a);
       tools.PushBack(toolObj, a);
     }
+    // Token-caching pass: Qwen supports Anthropic-style cache_control
+    // markers for explicit caching (10% of input price on hits, 1.25x on
+    // first write — vs 20% with implicit caching). Max 4 markers per
+    // request. Attach to the last tool definition.
+    if (tools.Size() > 0) {
+      rapidjson::Value cacheCtrl(rapidjson::kObjectType);
+      cacheCtrl.AddMember("type", "ephemeral", a);
+      tools[tools.Size() - 1].AddMember("cache_control", cacheCtrl, a);
+    }
     d.AddMember("tools", tools, a);
+  }
+
+  // Token-caching pass: attach cache_control to the LAST text content
+  // block of the LAST system message in the conversation. Caches the
+  // system prompt for explicit-caching discount (10% of input on hits).
+  // Ephemeral marker has 5 min TTL by default; resets on hit.
+  if (d.HasMember("messages") && d["messages"].IsArray()) {
+    auto &msgs = d["messages"];
+    int lastSystemIdx = -1;
+    for (rapidjson::SizeType i = 0; i < msgs.Size(); ++i) {
+      if (msgs[i].IsObject() && msgs[i].HasMember("role") &&
+          msgs[i]["role"].IsString() &&
+          std::string(msgs[i]["role"].GetString()) == "system") {
+        lastSystemIdx = static_cast<int>(i);
+      }
+    }
+    if (lastSystemIdx >= 0) {
+      auto &sysMsg = msgs[lastSystemIdx];
+      if (sysMsg.HasMember("content") && sysMsg["content"].IsArray() &&
+          sysMsg["content"].Size() > 0) {
+        auto &lastBlock =
+            sysMsg["content"][sysMsg["content"].Size() - 1];
+        if (lastBlock.IsObject()) {
+          rapidjson::Value cacheCtrl(rapidjson::kObjectType);
+          cacheCtrl.AddMember("type", "ephemeral", a);
+          lastBlock.AddMember("cache_control", cacheCtrl, a);
+        }
+      }
+    }
   }
 
   rapidjson::StringBuffer buffer;

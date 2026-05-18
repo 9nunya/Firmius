@@ -129,16 +129,28 @@ shared::ToolResult SkillLoadTool::execute(const SkillLoadInput &input,
     doc.SetObject();
     auto &a = doc.GetAllocator();
 
-    doc.AddMember("skill_id", rapidjson::Value(skillId.c_str(), a).Move(), a);
-    doc.AddMember("name", rapidjson::Value(skill.name.c_str(), a).Move(), a);
-    doc.AddMember("description",
-                  rapidjson::Value(skill.description.c_str(), a).Move(), a);
-    doc.AddMember("skill_root", rapidjson::Value(skill.skillRoot.c_str(), a).Move(),
-                  a);
-    const std::string absolutePath = targetPath.string();
-    doc.AddMember("path", rapidjson::Value(absolutePath.c_str(), a).Move(), a);
-    doc.AddMember("relative_path", rapidjson::Value(relativePath.c_str(), a).Move(),
-                  a);
+    // Token-waste pass 5: collapse skill_id/name/description/skill_root/
+    // path/relative_path into one prose `result` header. The model just
+    // needs to know which skill was loaded; the content is the payload.
+    std::ostringstream prose;
+    prose << "Loaded skill " << skillId;
+    if (!skill.name.empty() && skill.name != skillId) {
+      prose << " (" << skill.name << ")";
+    }
+    if (!relativePath.empty() && relativePath != "SKILL.md") {
+      prose << " — file " << relativePath;
+    }
+    prose << ".";
+    if (!skill.description.empty()) {
+      prose << " " << skill.description;
+    }
+    const std::string proseStr = prose.str();
+    doc.AddMember(
+        "result",
+        rapidjson::Value(proseStr.c_str(),
+                         static_cast<rapidjson::SizeType>(proseStr.size()),
+                         a).Move(),
+        a);
     doc.AddMember("content", rapidjson::Value(content.c_str(), a).Move(), a);
 
     return shared::ToolResult::ok(doc);

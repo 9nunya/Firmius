@@ -75,7 +75,12 @@ inline std::string altPanel(const std::string& text) {
 }
 
 inline std::string selection(const std::string& text) {
-  return bg(theme().agentStrip.pills.contextBg, text);
+  // Use reverse video instead of a custom bg. Some themes (jelly, etc.)
+  // happen to set agentStrip.pills.contextBg to the same value as the chat
+  // bg, which makes a "selection-tinted" row visually identical to an
+  // unselected one — bad UX. Reverse video flips fg/bg of whatever the
+  // text already had, which guarantees a visible contrast on every theme.
+  return ansi::invert(text);
 }
 
 inline std::string code(const std::string& text) {

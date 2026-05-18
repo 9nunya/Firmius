@@ -35,6 +35,16 @@ protected:
      * @brief Returns "reasoning_content" as used by StepFun models.
      */
     std::string getReasoningFieldName() const override;
+
+    /**
+     * @brief Override to inject NanoGPT-specific token-caching hints
+     *        (top-level `caching: true` for cache-capable provider
+     *        routing; `promptCaching: {enabled: true, ttl: "5m"}` for
+     *        Claude-routed models that honour Anthropic-style explicit
+     *        cache control).
+     */
+    std::string prepareRequestBody(const firmius::shared::AgentHistory &history,
+                                   const firmius::provider::ProviderOptions &opts) override;
 };
 
 }

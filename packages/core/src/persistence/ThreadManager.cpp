@@ -344,37 +344,6 @@ const char* kNormalizedSchemaSQL =
     " persist_history INTEGER NOT NULL DEFAULT 1,"
     " PRIMARY KEY(thread_id, agent_id)"
     ");"
-    "CREATE TABLE IF NOT EXISTS permission_command_rules_v2 ("
-    " thread_id TEXT NOT NULL,"
-    " ordinal INTEGER NOT NULL,"
-    " exact_command TEXT NOT NULL DEFAULT '',"
-    " normalized_command TEXT NOT NULL DEFAULT '',"
-    " primary_command TEXT NOT NULL DEFAULT '',"
-    " severity TEXT NOT NULL DEFAULT 'LOW',"
-    " tool_name TEXT NOT NULL DEFAULT '',"
-    " applies_to_entire_tool INTEGER NOT NULL DEFAULT 0,"
-    " is_global INTEGER NOT NULL DEFAULT 0,"
-    " PRIMARY KEY(thread_id, ordinal)"
-    ");"
-    "CREATE TABLE IF NOT EXISTS permission_path_rules_v2 ("
-    " thread_id TEXT NOT NULL,"
-    " ordinal INTEGER NOT NULL,"
-    " path_prefix TEXT NOT NULL DEFAULT '',"
-    " tool_name TEXT NOT NULL DEFAULT '',"
-    " read_only INTEGER NOT NULL DEFAULT 0,"
-    " applies_to_all_reads INTEGER NOT NULL DEFAULT 0,"
-    " is_global INTEGER NOT NULL DEFAULT 0,"
-    " PRIMARY KEY(thread_id, ordinal)"
-    ");"
-    "CREATE TABLE IF NOT EXISTS permission_tool_sessions_v2 ("
-    " thread_id TEXT NOT NULL,"
-    " tool_name TEXT NOT NULL,"
-    " PRIMARY KEY(thread_id, tool_name)"
-    ");"
-    "CREATE TABLE IF NOT EXISTS permission_state_v2 ("
-    " thread_id TEXT PRIMARY KEY,"
-    " allow_all_reads_session INTEGER NOT NULL DEFAULT 0"
-    ");"
     "CREATE TABLE IF NOT EXISTS artifacts_v2 ("
     " thread_id TEXT NOT NULL,"
     " owner_agent_id TEXT NOT NULL,"
@@ -1573,20 +1542,82 @@ void ThreadManager::updateMetadata(const std::string& threadId,
 }
 
 std::vector<ThreadMetadata> ThreadManager::listThreadsWithMetadata() const {
+    // Single-query path. Earlier this code SELECTed thread_ids and then ran
+    // a separate getMetadata() (= fresh sqlite_open + 5 PRAGMAs + schema +
+    // migration check + per-row SELECT) for every thread. With a few hundred
+    // threads that turns ui.snapshot.get into a multi-100ms operation. We now
+    // pull everything in one query on a single connection.
     auto conn = acquireConnection(basePath_);
-    Statement stmt(conn->db,
-                   "SELECT thread_id FROM thread_metadata_v2 ORDER BY created_at ASC;",
-                   "Failed to prepare list metadata query");
+    Statement stmt(
+        conn->db,
+        "SELECT thread_id, title, host_type, host_identifier, cwd, lead_persona, "
+        "       is_benchmark_run, benchmark_id, benchmark_task_id, active_plan_id, "
+        "       permission_mode, created_at, last_active_at, host_options_json, "
+        "       retryable_request_json "
+        "FROM thread_metadata_v2 ORDER BY created_at ASC;",
+        "Failed to prepare list metadata query");
 
     std::vector<ThreadMetadata> result;
     while (sqlite3_step(stmt.get()) == SQLITE_ROW) {
-        const auto* threadIdText =
-            reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 0));
-        if (!threadIdText) {
-            continue;
-        }
         try {
-            result.push_back(getMetadata(threadIdText));
+            ThreadMetadata meta;
+            const auto* threadIdText =
+                reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 0));
+            if (!threadIdText) {
+                continue;
+            }
+            meta.threadId = threadIdText;
+            const auto* title = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 1));
+            const auto* hostIdentifier = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 3));
+            const auto* cwd = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 4));
+            const auto* leadPersona = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 5));
+            const auto* benchmarkId = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 7));
+            const auto* benchmarkTaskId = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 8));
+            const auto* permissionMode = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 10));
+            const auto* hostOptionsJson = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 13));
+            const auto* retryableRequestJson = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 14));
+            meta.title = title ? title : "Untitled Thread";
+            meta.hostIdentifier = hostIdentifier ? hostIdentifier : "";
+            meta.cwd = cwd ? cwd : "";
+            meta.leadPersona = leadPersona ? leadPersona : "";
+            meta.isBenchmarkRun = sqlite3_column_int(stmt.get(), 6) != 0;
+            meta.benchmarkId = benchmarkId ? benchmarkId : "";
+            meta.benchmarkTaskId = benchmarkTaskId ? benchmarkTaskId : "";
+            meta.permissionMode = permissionMode
+                                       ? threadPermissionModeFromStoredString(permissionMode)
+                                       : ThreadPermissionMode::Request;
+            meta.createdAt = static_cast<uint64_t>(sqlite3_column_int64(stmt.get(), 11));
+            meta.lastActiveAt = static_cast<uint64_t>(sqlite3_column_int64(stmt.get(), 12));
+            if (hostOptionsJson && *hostOptionsJson) {
+                auto d = parseJson(hostOptionsJson, "thread host options");
+                meta.hostOptions = hostCreationOptionsFromJsonValue(d);
+            }
+            if (retryableRequestJson && *retryableRequestJson) {
+                auto d = parseJson(retryableRequestJson, "thread retryable request");
+                if (d.IsObject()) {
+                    ThreadMetadata::RetryableRequest retry;
+                    retry.targetAgentId = d.HasMember("targetAgentId") && d["targetAgentId"].IsString() ? d["targetAgentId"].GetString() : "";
+                    retry.turnId = d.HasMember("turnId") && d["turnId"].IsString() ? d["turnId"].GetString() : "";
+                    retry.text = d.HasMember("text") && d["text"].IsString() ? d["text"].GetString() : "";
+                    retry.recordedAt = d.HasMember("recordedAt") && d["recordedAt"].IsUint64() ? d["recordedAt"].GetUint64() : 0;
+                    retry.eligible = d.HasMember("eligible") && d["eligible"].IsBool() ? d["eligible"].GetBool() : false;
+                    if (d.HasMember("images") && d["images"].IsArray()) {
+                        for (const auto& imageValue : d["images"].GetArray()) {
+                            try {
+                                auto part = messagePartFromJsonValue(imageValue);
+                                if (auto* image = std::get_if<ImageContent>(&part)) {
+                                    retry.images.push_back(*image);
+                                }
+                            } catch (...) {
+                            }
+                        }
+                    }
+                    if (!retry.text.empty() || !retry.images.empty()) {
+                        meta.lastRetryableRequest = std::move(retry);
+                    }
+                }
+            }
+            result.push_back(std::move(meta));
         } catch (...) {
             // Skip malformed metadata rows.
         }
@@ -2086,245 +2117,6 @@ void ThreadManager::writeAgentManifest(
                 "Failed to write agent manifest entry");
         }
     });
-}
-
-ThreadPermissionRules ThreadManager::readPermissionRules(
-    const std::string& threadId) const {
-    auto conn = acquireConnection(basePath_);
-    ThreadPermissionRules rules;
-
-    Statement stateStmt(conn->db,
-                        "SELECT allow_all_reads_session FROM permission_state_v2 WHERE thread_id=?;",
-                        "Failed to prepare permission state read");
-    bindText(stateStmt.get(), 1, threadId);
-    if (sqlite3_step(stateStmt.get()) == SQLITE_ROW) {
-        rules.allowAllReadsSession = sqlite3_column_int(stateStmt.get(), 0) != 0;
-    }
-
-    Statement cmdStmt(conn->db,
-                      "SELECT exact_command, normalized_command, primary_command, severity, tool_name, applies_to_entire_tool, is_global FROM permission_command_rules_v2 WHERE thread_id=? ORDER BY ordinal ASC;",
-                      "Failed to prepare command permission rules read");
-    bindText(cmdStmt.get(), 1, threadId);
-    while (sqlite3_step(cmdStmt.get()) == SQLITE_ROW) {
-        CommandAllowRule rule;
-        const auto* exact = reinterpret_cast<const char*>(sqlite3_column_text(cmdStmt.get(), 0));
-        const auto* normalized = reinterpret_cast<const char*>(sqlite3_column_text(cmdStmt.get(), 1));
-        const auto* primary = reinterpret_cast<const char*>(sqlite3_column_text(cmdStmt.get(), 2));
-        const auto* severity = reinterpret_cast<const char*>(sqlite3_column_text(cmdStmt.get(), 3));
-        const auto* tool = reinterpret_cast<const char*>(sqlite3_column_text(cmdStmt.get(), 4));
-        rule.exactCommand = exact ? exact : "";
-        rule.normalizedCommand = normalized ? normalized : "";
-        rule.primaryCommand = primary ? primary : "";
-        rule.severity = severity ? severityFromString(severity) : CommandSeverity::LOW;
-        rule.toolName = tool ? tool : "";
-        rule.appliesToEntireTool = sqlite3_column_int(cmdStmt.get(), 5) != 0;
-        rule.isGlobal = sqlite3_column_int(cmdStmt.get(), 6) != 0;
-        rules.commandAllowRules.push_back(std::move(rule));
-    }
-
-    Statement pathStmt(conn->db,
-                       "SELECT path_prefix, tool_name, read_only, applies_to_all_reads, is_global FROM permission_path_rules_v2 WHERE thread_id=? ORDER BY ordinal ASC;",
-                       "Failed to prepare path permission rules read");
-    bindText(pathStmt.get(), 1, threadId);
-    while (sqlite3_step(pathStmt.get()) == SQLITE_ROW) {
-        PathAllowRule rule;
-        const auto* path = reinterpret_cast<const char*>(sqlite3_column_text(pathStmt.get(), 0));
-        const auto* tool = reinterpret_cast<const char*>(sqlite3_column_text(pathStmt.get(), 1));
-        rule.pathPrefix = path ? path : "";
-        rule.toolName = tool ? tool : "";
-        rule.readOnly = sqlite3_column_int(pathStmt.get(), 2) != 0;
-        rule.appliesToAllReads = sqlite3_column_int(pathStmt.get(), 3) != 0;
-        rule.isGlobal = sqlite3_column_int(pathStmt.get(), 4) != 0;
-        if (!rule.pathPrefix.empty()) {
-            // `writeAllowPaths` is a legacy convenience view used by tests/UI.
-            // It includes persisted prefixes regardless of readOnly.
-            rules.writeAllowPaths.push_back(rule.pathPrefix);
-            rules.pathAllowRules.push_back(std::move(rule));
-        }
-    }
-
-    if (rules.pathAllowRules.empty() && !rules.writeAllowPaths.empty()) {
-        for (const auto& pathPrefix : rules.writeAllowPaths) {
-            PathAllowRule rule;
-            rule.pathPrefix = pathPrefix;
-            rule.readOnly = false;
-            rule.appliesToAllReads = false;
-            rule.isGlobal = false;
-            rules.pathAllowRules.push_back(std::move(rule));
-        }
-    }
-
-    Statement toolStmt(conn->db,
-                       "SELECT tool_name FROM permission_tool_sessions_v2 WHERE thread_id=? ORDER BY tool_name ASC;",
-                       "Failed to prepare allow-all tool sessions read");
-    bindText(toolStmt.get(), 1, threadId);
-    while (sqlite3_step(toolStmt.get()) == SQLITE_ROW) {
-        const auto* tool = reinterpret_cast<const char*>(sqlite3_column_text(toolStmt.get(), 0));
-        if (tool) rules.allowAllToolSessions.push_back(tool);
-    }
-
-    return rules;
-}
-
-void ThreadManager::writePermissionRules(const std::string& threadId,
-                                         const ThreadPermissionRules& rules) {
-    auto conn = acquireConnection(basePath_);
-    ensureThreadExists(conn->db, threadId);
-    withImmediateTransaction(conn->db, [&]() {
-        execPrepared(conn->db,
-                     "DELETE FROM permission_command_rules_v2 WHERE thread_id=?;",
-                     [&](sqlite3_stmt* stmt) { bindText(stmt, 1, threadId); },
-                     "Failed to clear command permission rules");
-        execPrepared(conn->db,
-                     "DELETE FROM permission_path_rules_v2 WHERE thread_id=?;",
-                     [&](sqlite3_stmt* stmt) { bindText(stmt, 1, threadId); },
-                     "Failed to clear path permission rules");
-        execPrepared(conn->db,
-                     "DELETE FROM permission_tool_sessions_v2 WHERE thread_id=?;",
-                     [&](sqlite3_stmt* stmt) { bindText(stmt, 1, threadId); },
-                     "Failed to clear allow-all tool sessions");
-        execPrepared(conn->db,
-                     "INSERT INTO permission_state_v2(thread_id, allow_all_reads_session) VALUES(?, ?) ON CONFLICT(thread_id) DO UPDATE SET allow_all_reads_session=excluded.allow_all_reads_session;",
-                     [&](sqlite3_stmt* stmt) {
-                         bindText(stmt, 1, threadId);
-                         sqlite3_bind_int(stmt, 2, rules.allowAllReadsSession ? 1 : 0);
-                     },
-                     "Failed to write permission state");
-
-        int ordinal = 0;
-        for (const auto& rule : rules.commandAllowRules) {
-            execPrepared(conn->db,
-                         "INSERT INTO permission_command_rules_v2(thread_id, ordinal, exact_command, normalized_command, primary_command, severity, tool_name, applies_to_entire_tool, is_global) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?);",
-                         [&](sqlite3_stmt* stmt) {
-                             bindText(stmt, 1, threadId);
-                             sqlite3_bind_int(stmt, 2, ordinal);
-                             bindText(stmt, 3, rule.exactCommand);
-                             bindText(stmt, 4, rule.normalizedCommand);
-                             bindText(stmt, 5, rule.primaryCommand);
-                             bindText(stmt, 6, severityToString(rule.severity));
-                             bindText(stmt, 7, rule.toolName);
-                             sqlite3_bind_int(stmt, 8, rule.appliesToEntireTool ? 1 : 0);
-                             sqlite3_bind_int(stmt, 9, rule.isGlobal ? 1 : 0);
-                         },
-                         "Failed to write command permission rule");
-            ordinal++;
-        }
-
-        ordinal = 0;
-        if (!rules.pathAllowRules.empty()) {
-            for (const auto& rule : rules.pathAllowRules) {
-                if (rule.pathPrefix.empty()) continue;
-                execPrepared(conn->db,
-                             "INSERT INTO permission_path_rules_v2(thread_id, ordinal, path_prefix, tool_name, read_only, applies_to_all_reads, is_global) VALUES(?, ?, ?, ?, ?, ?, ?);",
-                             [&](sqlite3_stmt* stmt) {
-                                 bindText(stmt, 1, threadId);
-                                 sqlite3_bind_int(stmt, 2, ordinal);
-                                 bindText(stmt, 3, rule.pathPrefix);
-                                 bindText(stmt, 4, rule.toolName);
-                                 sqlite3_bind_int(stmt, 5, rule.readOnly ? 1 : 0);
-                                 sqlite3_bind_int(stmt, 6, rule.appliesToAllReads ? 1 : 0);
-                                 sqlite3_bind_int(stmt, 7, rule.isGlobal ? 1 : 0);
-                             },
-                             "Failed to write path permission rule");
-                ordinal++;
-            }
-        } else {
-            for (const auto& pathPrefix : rules.writeAllowPaths) {
-                if (pathPrefix.empty()) continue;
-                execPrepared(conn->db,
-                             "INSERT INTO permission_path_rules_v2(thread_id, ordinal, path_prefix, tool_name, read_only, applies_to_all_reads, is_global) VALUES(?, ?, ?, ?, ?, ?, ?);",
-                             [&](sqlite3_stmt* stmt) {
-                                 bindText(stmt, 1, threadId);
-                                 sqlite3_bind_int(stmt, 2, ordinal);
-                                 bindText(stmt, 3, pathPrefix);
-                                 bindText(stmt, 4, "");
-                                 sqlite3_bind_int(stmt, 5, 0);
-                                 sqlite3_bind_int(stmt, 6, 0);
-                                 sqlite3_bind_int(stmt, 7, 0);
-                             },
-                             "Failed to write fallback path permission rule");
-                ordinal++;
-            }
-        }
-
-        for (const auto& toolName : rules.allowAllToolSessions) {
-            if (toolName.empty()) continue;
-            execPrepared(conn->db,
-                         "INSERT INTO permission_tool_sessions_v2(thread_id, tool_name) VALUES(?, ?);",
-                         [&](sqlite3_stmt* stmt) {
-                             bindText(stmt, 1, threadId);
-                             bindText(stmt, 2, toolName);
-                         },
-                         "Failed to write allow-all tool session");
-        }
-    });
-}
-
-void ThreadManager::addCommandAllowRule(const std::string& threadId,
-                                        const CommandAllowRule& rule) {
-    auto rules = readPermissionRules(threadId);
-    auto exists = std::any_of(
-        rules.commandAllowRules.begin(), rules.commandAllowRules.end(),
-        [&rule](const CommandAllowRule& existing) {
-            return existing.exactCommand == rule.exactCommand &&
-                   existing.normalizedCommand == rule.normalizedCommand &&
-                   existing.toolName == rule.toolName &&
-                   existing.appliesToEntireTool == rule.appliesToEntireTool &&
-                   existing.isGlobal == rule.isGlobal;
-        });
-    if (!exists) {
-        rules.commandAllowRules.push_back(rule);
-        writePermissionRules(threadId, rules);
-    }
-}
-
-void ThreadManager::addWriteAllowPath(const std::string& threadId,
-                                      const std::string& pathPrefix) {
-    PathAllowRule rule;
-    rule.pathPrefix = pathPrefix;
-    rule.readOnly = false;
-    rule.appliesToAllReads = false;
-    rule.isGlobal = false;
-    addPathAllowRule(threadId, rule);
-}
-
-void ThreadManager::addPathAllowRule(const std::string& threadId,
-                                     const PathAllowRule& rule) {
-    auto rules = readPermissionRules(threadId);
-    auto exists =
-        std::any_of(rules.pathAllowRules.begin(), rules.pathAllowRules.end(),
-                    [&rule](const PathAllowRule& existing) {
-                        return existing == rule;
-                    });
-    if (!exists) {
-        rules.pathAllowRules.push_back(rule);
-        writePermissionRules(threadId, rules);
-    }
-}
-
-void ThreadManager::setAllowAllReadsSession(const std::string& threadId,
-                                            const bool enabled) {
-    auto rules = readPermissionRules(threadId);
-    if (rules.allowAllReadsSession == enabled) {
-        return;
-    }
-    rules.allowAllReadsSession = enabled;
-    writePermissionRules(threadId, rules);
-}
-
-void ThreadManager::addAllowAllToolSession(const std::string& threadId,
-                                           const std::string& toolName) {
-    if (toolName.empty()) {
-        return;
-    }
-    auto rules = readPermissionRules(threadId);
-    auto exists = std::find(rules.allowAllToolSessions.begin(),
-                            rules.allowAllToolSessions.end(),
-                            toolName) != rules.allowAllToolSessions.end();
-    if (!exists) {
-        rules.allowAllToolSessions.push_back(toolName);
-        writePermissionRules(threadId, rules);
-    }
 }
 
 shared::ThreadArtifactMetadata ThreadManager::writeArtifact(

@@ -92,14 +92,9 @@ public:
         return true;
     }
 
-    void allowCommandAlways(const std::string& /*pattern*/) override {}
-    void denyCommandAlways(const std::string& /*pattern*/) override {}
-
     const ICommandIntentAnalyzer& getIntentAnalyzer() const override {
         return analyzer_;
     }
-
-    void setApprovalMode(ThreadPermissionMode /*mode*/) override {}
 };
 
 } // namespace firmius::test

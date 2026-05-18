@@ -55,9 +55,22 @@ inline constexpr const char *kRpcQuotasGet = "quotas.get";
 inline constexpr const char *kRpcQuotasGetCached = "quotas.getCached";
 inline constexpr const char *kRpcPermissionsGetMode = "permissions.getMode";
 inline constexpr const char *kRpcPermissionsSetMode = "permissions.setMode";
+inline constexpr const char *kRpcPermissionsCreateMode = "permissions.createMode";
+inline constexpr const char *kRpcPermissionsRenameMode = "permissions.renameMode";
+inline constexpr const char *kRpcPermissionsDeleteMode = "permissions.deleteMode";
 inline constexpr const char *kRpcPermissionsListPending =
     "permissions.listPending";
 inline constexpr const char *kRpcPermissionsResolve = "permissions.resolve";
+inline constexpr const char *kRpcPermissionsResolveWithRules =
+    "permissions.resolveWithRules";
+inline constexpr const char *kRpcPermissionsListRules =
+    "permissions.listRules";
+inline constexpr const char *kRpcPermissionsUpsertRule =
+    "permissions.upsertRule";
+inline constexpr const char *kRpcPermissionsDeleteRule =
+    "permissions.deleteRule";
+inline constexpr const char *kRpcPermissionsReloadPolicy =
+    "permissions.reloadPolicy";
 inline constexpr const char *kRpcConfigGet = "config.get";
 inline constexpr const char *kRpcConfigUpdate = "config.update";
 inline constexpr const char *kRpcHistoryGet = "history.get";
@@ -95,6 +108,14 @@ inline constexpr const char *kRpcPersonasList = "personas.list";
 inline constexpr const char *kRpcToolsCatalog = "tools.catalog";
 inline constexpr const char *kRpcBenchmarksListSupported = "benchmarks.listSupported";
 inline constexpr const char *kRpcHooksRecentActivity = "hooks.recentActivity";
+inline constexpr const char *kRpcConnectBegin = "connect.begin";
+inline constexpr const char *kRpcConnectSubmit = "connect.submit";
+inline constexpr const char *kRpcConnectFinalize = "connect.finalize";
+inline constexpr const char *kRpcConnectCancel = "connect.cancel";
+inline constexpr const char *kRpcRewindPreview = "rewind.preview";
+inline constexpr const char *kRpcRewindExecute = "rewind.execute";
+inline constexpr const char *kRpcRedoPreview = "redo.preview";
+inline constexpr const char *kRpcRedoExecute = "redo.execute";
 inline constexpr const char *kNotificationDaemonEvent = "daemon.event";
 
 #if defined(_WIN32)
@@ -111,6 +132,8 @@ enum class DaemonEventKind {
   HookStateChanged,
   PactStateChanged,
   InitProgress,
+  ConnectProgress,
+  RewindApplied,
 };
 
 struct WorkspacePresence {
@@ -154,6 +177,12 @@ struct DaemonClientOptions {
   DaemonConnectionInfo connection;
   std::string daemonExecutablePath;
   std::string spawnedDaemonPidFile;
+  // When set, the spawned daemon's stdout+stderr are redirected here. When
+  // empty (the default), they are redirected to /dev/null on POSIX so the
+  // daemon cannot scribble into the parent TUI's alt-screen. Stdin is always
+  // redirected to /dev/null. Set FIRMIUS_DAEMON_LOG in the spawned env to
+  // capture daemon log lines into a separate file regardless.
+  std::string spawnedDaemonLogFile;
   bool autoStart = true;
   bool subscribeToEvents = true;
 
@@ -261,18 +290,70 @@ struct QuotasRequest {
   bool operator==(const QuotasRequest &) const = default;
 };
 
-struct PermissionModeRequest {
-  std::string threadId;
+struct PermissionModeWire {
+  std::string id;
+  std::string name;
+  std::string description;
+  bool builtIn = false;
 
+  bool operator==(const PermissionModeWire &) const = default;
+};
+
+struct PermissionModeRequest {
   bool operator==(const PermissionModeRequest &) const = default;
 };
 
 struct PermissionModeUpdateRequest {
-  std::string threadId;
-  firmius::shared::ThreadPermissionMode permissionMode =
-      firmius::shared::ThreadPermissionMode::Request;
+  /// Mode id to switch to (e.g. "ask", "yolo", or a user-defined id).
+  std::string modeId;
 
   bool operator==(const PermissionModeUpdateRequest &) const = default;
+};
+
+struct PermissionCreateModeRequest {
+  /// Optional id; if empty, the engine generates one.
+  std::string id;
+  std::string name;
+  std::string description;
+  /// If true, copies the active mode's rules + category defaults as a
+  /// starting point. Useful as "fork ask into custom-strict" UX.
+  bool seedFromActive = false;
+
+  bool operator==(const PermissionCreateModeRequest &) const = default;
+};
+
+struct PermissionCreateModeResponse {
+  std::string modeId;          ///< Empty on collision/error.
+  std::string errorMessage;
+
+  bool operator==(const PermissionCreateModeResponse &) const = default;
+};
+
+struct PermissionRenameModeRequest {
+  std::string modeId;
+  std::string newName;
+
+  bool operator==(const PermissionRenameModeRequest &) const = default;
+};
+
+struct PermissionRenameModeResponse {
+  bool ok = false;
+  std::string errorMessage;
+
+  bool operator==(const PermissionRenameModeResponse &) const = default;
+};
+
+struct PermissionDeleteModeRequest {
+  std::string modeId;
+
+  bool operator==(const PermissionDeleteModeRequest &) const = default;
+};
+
+struct PermissionDeleteModeResponse {
+  bool removed = false;
+  std::string errorMessage;
+
+  bool operator==(const PermissionDeleteModeResponse &) const = default;
 };
 
 struct PermissionResolveRequest {
@@ -281,6 +362,78 @@ struct PermissionResolveRequest {
       firmius::shared::PermissionResponse::Deny;
 
   bool operator==(const PermissionResolveRequest &) const = default;
+};
+
+struct PermissionResolveWithRulesRequest {
+  std::string requestId;
+  /// `ruleId` values from the suggestion list the TUI received.
+  std::vector<std::string> selectedSuggestionIds;
+
+  bool operator==(const PermissionResolveWithRulesRequest &) const = default;
+};
+
+/// Wire shape of a PolicyRule. Mirrors firmius::core::PolicyRule.
+struct PolicyRuleWire {
+  std::string id;
+  std::string category;
+  std::string decision;        ///< "allow" | "deny" | "ask"
+  std::string scope;           ///< "global" | "project" | "session"
+  std::string comment;
+  std::map<std::string, std::string> match;
+  std::uint64_t createdAt = 0;
+  std::uint64_t expiresAt = 0;
+
+  bool operator==(const PolicyRuleWire &) const = default;
+};
+
+struct PermissionListRulesRequest {
+  bool operator==(const PermissionListRulesRequest &) const = default;
+};
+
+struct PermissionListRulesResponse {
+  std::vector<PolicyRuleWire> rules;
+  /// Per-category default decisions ("allow" | "deny" | "ask").
+  std::map<std::string, std::string> categoryDefaults;
+  std::string defaultDecision = "ask";
+
+  bool operator==(const PermissionListRulesResponse &) const = default;
+};
+
+struct PermissionUpsertRuleRequest {
+  PolicyRuleWire rule;
+
+  bool operator==(const PermissionUpsertRuleRequest &) const = default;
+};
+
+struct PermissionUpsertRuleResponse {
+  std::string ruleId;          ///< Persisted id (may differ from input).
+  std::string errorMessage;    ///< Empty on success.
+
+  bool operator==(const PermissionUpsertRuleResponse &) const = default;
+};
+
+struct PermissionDeleteRuleRequest {
+  std::string ruleId;
+
+  bool operator==(const PermissionDeleteRuleRequest &) const = default;
+};
+
+struct PermissionDeleteRuleResponse {
+  bool removed = false;
+  std::string errorMessage;
+
+  bool operator==(const PermissionDeleteRuleResponse &) const = default;
+};
+
+struct PermissionReloadPolicyRequest {
+  bool operator==(const PermissionReloadPolicyRequest &) const = default;
+};
+
+struct PermissionReloadPolicyResponse {
+  bool ok = true;
+  std::string errorMessage;
+
+  bool operator==(const PermissionReloadPolicyResponse &) const = default;
 };
 
 struct ModelSwitchRequest {
@@ -523,8 +676,6 @@ struct ThreadsCreateRequest {
   std::string cwd;
   std::string leadPersona;
   std::string initialMode;
-  firmius::shared::ThreadPermissionMode permissionMode =
-      firmius::shared::ThreadPermissionMode::Request;
 
   bool operator==(const ThreadsCreateRequest &) const = default;
 };
@@ -674,8 +825,11 @@ struct BenchmarkCatalogSnapshot {
 
 struct PermissionQueueSnapshot {
   std::string threadId;
-  firmius::shared::ThreadPermissionMode permissionMode =
-      firmius::shared::ThreadPermissionMode::Request;
+  /// Currently-active mode id (e.g. "ask", "yolo", or user-defined).
+  std::string activeModeId;
+  /// Snapshot of every available mode (for the picker). Includes
+  /// built-ins and user-created ones.
+  std::vector<PermissionModeWire> modes;
   std::vector<firmius::shared::PermissionEscalationRequest> pending;
 
   bool operator==(const PermissionQueueSnapshot &) const = default;
@@ -1058,6 +1212,322 @@ struct EventSubscriptionResponse {
   bool operator==(const EventSubscriptionResponse &) const = default;
 };
 
+// ── /connect wizard protocol ───────────────────────────────────────────────
+//
+// /connect runs an interactive provider authentication flow. The wizard lives
+// in the daemon (since the daemon owns ProviderRegistry); the TUI is a thin
+// client that renders prompts and forwards answers.
+//
+// Lifecycle:
+//   1. client → connect.begin {provider_id}
+//        - if accounts already exist and add_additional=false, the daemon
+//          replies with existing_accounts=true and NO session_id; the TUI
+//          shows a confirm prompt then re-calls with add_additional=true
+//        - otherwise the daemon spins up a wizard and returns the first prompt
+//   2. client → connect.submit {session_id, answer}  (repeat per prompt)
+//   3. when next_prompt is empty AND ready_to_finalize=true:
+//        client → connect.finalize {session_id}
+//        - returns immediately; daemon spawns a worker that polls
+//          isComplete() then runs finalizeExchange()
+//        - daemon emits DaemonEventKind::ConnectProgress events as the worker
+//          progresses (Polling → Finalizing → Succeeded/Failed)
+//   4. on cancel (ESC) or client disconnect: connect.cancel {session_id}
+//
+// Constraints:
+//   - One active wizard per client. Calling connect.begin a second time
+//     auto-cancels the prior session.
+//   - ConnectProgress events are delivered ONLY to the owning client.
+
+struct WizardChoiceSnapshot {
+  std::string label;
+  std::string value;
+
+  bool operator==(const WizardChoiceSnapshot &) const = default;
+};
+
+struct WizardPromptSnapshot {
+  std::string message;
+  bool isSecret = false;
+  std::vector<WizardChoiceSnapshot> choices;
+  bool allowFreeformInput = true;
+  bool allowEmptyInput = false;
+  std::string placeholder;
+  std::string submitLabel;
+  /// First https?:// URL detected in `message`. Server-side parity with v1's
+  /// modal so the TUI can offer a one-shot "open in browser" affordance.
+  std::string detectedUrl;
+  /// Synthetic "waiting" prompt shown while a long-running OAuth flow is
+  /// pending in the wizard. The TUI renders it like any other prompt; no
+  /// special branch needed.
+  bool isWaiting = false;
+
+  bool operator==(const WizardPromptSnapshot &) const = default;
+};
+
+struct ConnectBeginRequest {
+  std::string providerId;
+  /// Set true after the user confirms "an account already exists, add another?"
+  bool addAdditional = false;
+
+  bool operator==(const ConnectBeginRequest &) const = default;
+};
+
+struct ConnectBeginResponse {
+  std::string sessionId;
+  std::string providerId;
+  std::string providerKind;     // "oauth" | "apikey"
+  /// True when the provider already has accounts AND addAdditional was false.
+  /// In this case sessionId is empty and the TUI must confirm + retry.
+  bool existingAccounts = false;
+  std::optional<WizardPromptSnapshot> prompt;
+  /// True when the wizard finished synchronously (no prompts at all).
+  bool readyToFinalize = false;
+  /// Populated on error (e.g. unknown provider id).
+  std::string errorMessage;
+
+  bool operator==(const ConnectBeginResponse &) const = default;
+};
+
+struct ConnectSubmitRequest {
+  std::string sessionId;
+  std::string answer;
+
+  bool operator==(const ConnectSubmitRequest &) const = default;
+};
+
+struct ConnectSubmitResponse {
+  bool ok = false;
+  std::optional<WizardPromptSnapshot> prompt;
+  bool readyToFinalize = false;
+  std::string errorMessage;
+
+  bool operator==(const ConnectSubmitResponse &) const = default;
+};
+
+struct ConnectFinalizeRequest {
+  std::string sessionId;
+
+  bool operator==(const ConnectFinalizeRequest &) const = default;
+};
+
+struct ConnectFinalizeResponse {
+  /// `accepted=true` means the daemon kicked off the finalize worker.
+  /// The actual success/failure arrives via a ConnectProgress event with
+  /// phase=Succeeded or phase=Failed.
+  bool accepted = false;
+  std::string errorMessage;
+
+  bool operator==(const ConnectFinalizeResponse &) const = default;
+};
+
+struct ConnectCancelRequest {
+  std::string sessionId;
+
+  bool operator==(const ConnectCancelRequest &) const = default;
+};
+
+struct ConnectCancelResponse {
+  bool cancelled = false;
+
+  bool operator==(const ConnectCancelResponse &) const = default;
+};
+
+enum class ConnectProgressPhase {
+  Polling,     ///< wizard not yet complete (waiting on browser flow, etc.)
+  Finalizing,  ///< isComplete() true, running finalizeExchange()
+  Succeeded,
+  Failed,
+  Cancelled,
+};
+
+struct ConnectProgressSnapshot {
+  std::string sessionId;
+  std::string providerId;
+  ConnectProgressPhase phase = ConnectProgressPhase::Polling;
+  /// On Succeeded: wizard->getFinalMessage().
+  /// On Failed:    error from finalizeExchange().
+  /// On Polling:   optional human-readable hint.
+  std::string message;
+
+  bool operator==(const ConnectProgressSnapshot &) const = default;
+};
+
+// ── /undo Rewind protocol ────────────────────────────────────────────────
+//
+// Claude-Code-style rewind:
+//   1. /undo opens an overlay listing all user-message turns of the focused
+//      agent's transcript.
+//   2. As the user highlights a row, the TUI calls rewind.preview(turnId)
+//      to learn (a) how many turns would be discarded, (b) which edit
+//      batches would be rolled back, (c) per-batch undo eligibility.
+//   3. User picks a mode: restore code+conversation, conversation only,
+//      code only, or never-mind. TUI calls rewind.execute(turnId, mode).
+//   4. Daemon performs a compound undo (edit batches in reverse order,
+//      then transcript turns), persists a single TranscriptUndoAction
+//      whose editUndoActionIds list is populated, then emits
+//      DaemonEventKind::RewindApplied so all subscribed clients can
+//      refresh their transcript.
+
+enum class RewindMode {
+  /// Undo edits authored after target turn AND undo all turns after it.
+  /// This is the default; matches "rewind everything".
+  RestoreCodeAndConversation,
+  /// Undo only the transcript turns. Files left as-is.
+  RestoreConversation,
+  /// Undo only the edit batches. Transcript stays.
+  RestoreCode,
+};
+
+struct RewindPreviewRequest {
+  std::string threadId;
+  std::string agentId;
+  /// User-message turn ID the user wants to roll back to. The chosen turn
+  /// itself is preserved; everything strictly after it gets discarded.
+  std::string targetTurnId;
+
+  bool operator==(const RewindPreviewRequest &) const = default;
+};
+
+struct RewindPreviewResponse {
+  std::string threadId;
+  std::string agentId;
+  std::string targetTurnId;
+  /// Number of turns that would be discarded. ≥ 1 when valid.
+  int turnsToUndo = 0;
+  /// 1-line preview of the user message at targetTurnId.
+  std::string targetMessagePreview;
+  std::uint64_t targetMessageCreatedAt = 0;
+
+  /// Edit batches authored AFTER the target turn (those that would be
+  /// rolled back if the user picks RestoreCode/RestoreCodeAndConversation).
+  /// Aligned 1:1 with editEligibilities.
+  std::vector<firmius::shared::EditBatchSummary> affectedEditBatches;
+  std::vector<firmius::shared::EditUndoEligibility> editEligibilities;
+
+  /// Convenience aggregates for the overlay header line ("+X/-Y across N").
+  int totalAddedLines = 0;
+  int totalRemovedLines = 0;
+  std::vector<std::string> filesAffected;
+
+  /// True iff every batch in affectedEditBatches is undoable right now.
+  /// When false, the overlay should grey out the code-restore modes and
+  /// surface codeRestoreBlockReason.
+  bool codeRestoreSafe = true;
+  std::string codeRestoreBlockReason;
+
+  /// Populated on validation failure (unknown turn id, etc.). When set,
+  /// turnsToUndo is 0 and the overlay should show this instead of the
+  /// preview pane.
+  std::string errorMessage;
+
+  bool operator==(const RewindPreviewResponse &) const = default;
+};
+
+struct RewindExecuteRequest {
+  std::string threadId;
+  std::string agentId;
+  std::string targetTurnId;
+  RewindMode mode = RewindMode::RestoreCodeAndConversation;
+
+  bool operator==(const RewindExecuteRequest &) const = default;
+};
+
+struct RewindExecuteResponse {
+  bool applied = false;
+  std::string undoActionId;
+  std::vector<std::string> editUndoActionIds;
+  std::string errorMessage;
+
+  bool operator==(const RewindExecuteResponse &) const = default;
+};
+
+/// Broadcast event when a rewind completes so all clients viewing the
+/// thread can refresh. Carries enough detail for a future "show what was
+/// rolled back" toast.
+struct RewindAppliedSnapshot {
+  std::string threadId;
+  std::string agentId;
+  std::string targetTurnId;
+  RewindMode mode = RewindMode::RestoreCodeAndConversation;
+  int turnsUndone = 0;
+  int editBatchesUndone = 0;
+  std::string undoActionId;
+
+  bool operator==(const RewindAppliedSnapshot &) const = default;
+};
+
+// ── /redo flow ───────────────────────────────────────────────────────
+//
+// Forward of the rewind flow. After /undo, the daemon persists a
+// TranscriptUndoAction with a captured payload of discarded turns +
+// linked editUndoActionIds. /redo replays them.
+//
+// The same three modes apply: code-only, conversation-only, both. The
+// availability of each is gated by the undo action's redoAvailable
+// flag and whether editUndoActionIds is non-empty.
+
+enum class RedoMode {
+  RestoreCodeAndConversation,
+  RestoreConversation,
+  RestoreCode,
+};
+
+struct RedoUndoActionSummary {
+  std::string undoActionId;
+  std::uint64_t createdAt = 0;
+  /// Number of turns that would be re-appended.
+  int turnsToRedo = 0;
+  /// One-line preview of the first restored turn (user-message text or
+  /// a short tool-call summary).
+  std::string firstTurnPreview;
+  /// Number of edit batches that would be re-applied.
+  int editBatchesToRedo = 0;
+  /// Whether redo is still available (false if the user already
+  /// triggered redo previously, or if the daemon decided to expire it).
+  bool redoAvailable = false;
+
+  bool operator==(const RedoUndoActionSummary &) const = default;
+};
+
+struct RedoPreviewRequest {
+  std::string threadId;
+  std::string agentId;
+  /// Maximum number of recent undo actions to return. Defaults to 10
+  /// because the picker shows newest-first and most users only need
+  /// the last few.
+  int limit = 10;
+
+  bool operator==(const RedoPreviewRequest &) const = default;
+};
+
+struct RedoPreviewResponse {
+  std::string threadId;
+  std::string agentId;
+  /// Newest-first list of recent undo actions the user can pick from.
+  std::vector<RedoUndoActionSummary> actions;
+  std::string errorMessage;
+
+  bool operator==(const RedoPreviewResponse &) const = default;
+};
+
+struct RedoExecuteRequest {
+  std::string threadId;
+  std::string agentId;
+  std::string undoActionId;
+  RedoMode mode = RedoMode::RestoreCodeAndConversation;
+
+  bool operator==(const RedoExecuteRequest &) const = default;
+};
+
+struct RedoExecuteResponse {
+  bool applied = false;
+  int turnsRedone = 0;
+  std::vector<std::string> editRedoActionIds;
+  std::string errorMessage;
+
+  bool operator==(const RedoExecuteResponse &) const = default;
+};
+
 struct DaemonEventEnvelope {
   DaemonEventKind kind = DaemonEventKind::RuntimeAppEvent;
   std::string subscriptionTarget;
@@ -1072,6 +1542,8 @@ struct DaemonEventEnvelope {
   std::optional<HookStateSnapshot> hookState;
   std::optional<PactSnapshot> pactState;
   std::string initMessage;  // For InitProgress events: human-readable status
+  std::optional<ConnectProgressSnapshot> connectProgress;
+  std::optional<RewindAppliedSnapshot> rewindApplied;
 
   bool operator==(const DaemonEventEnvelope &) const = default;
 };

@@ -26,6 +26,7 @@ public:
   MOCK_METHOD(std::vector<uint8_t>, readFile, (const std::string &), (override));
   MOCK_METHOD(void, writeFile,
               (const std::string &, (const std::vector<uint8_t> &)), (override));
+  MOCK_METHOD(void, deleteFile, (const std::string &), (override));
   MOCK_METHOD(bool, exists, (const std::string &), (override));
   MOCK_METHOD(std::vector<FileInfo>, listDir, (const std::string &), (override));
   MOCK_METHOD(FileInfo, stat, (const std::string &), (override));
@@ -169,10 +170,12 @@ TEST_F(ArtifactToolsTest, WriteCreateUpdateAndReadRoundTrip) {
   rapidjson::Document createdJson;
   createdJson.Parse(created.data.c_str());
   ASSERT_FALSE(createdJson.HasParseError());
-  EXPECT_TRUE(createdJson["created"].GetBool());
-  EXPECT_EQ(std::string(createdJson["status"].GetString()), "created");
+  // Token-waste pass 5: prose-first {result, reference}. Dropped status/
+  // created/updated/previous_content/artifact metadata fields.
   EXPECT_EQ(std::string(createdJson["reference"].GetString()),
             "@artifact:planner/REPORT.md");
+  EXPECT_THAT(std::string(createdJson["result"].GetString()),
+              ::testing::HasSubstr("Created"));
 
   rapidjson::Document updateDoc;
   updateDoc.SetObject();
@@ -185,11 +188,11 @@ TEST_F(ArtifactToolsTest, WriteCreateUpdateAndReadRoundTrip) {
   rapidjson::Document updatedJson;
   updatedJson.Parse(updated.data.c_str());
   ASSERT_FALSE(updatedJson.HasParseError());
-  EXPECT_TRUE(updatedJson["updated"].GetBool());
-  EXPECT_EQ(std::string(updatedJson["status"].GetString()), "updated");
-  ASSERT_TRUE(updatedJson.HasMember("previous_content"));
-  EXPECT_EQ(std::string(updatedJson["previous_content"].GetString()),
-            "first body");
+  EXPECT_THAT(std::string(updatedJson["result"].GetString()),
+              ::testing::HasSubstr("Updated"));
+  // previous_content was dropped on purpose: the agent that just sent
+  // new content does not need a free copy of the old content.
+  EXPECT_FALSE(updatedJson.HasMember("previous_content"));
 
   rapidjson::Document readDoc;
   readDoc.SetObject();
@@ -219,18 +222,15 @@ TEST_F(ArtifactToolsTest, ListIncludesDisambiguatedDisplaysForDuplicateFilenames
   rapidjson::Document listedJson;
   listedJson.Parse(listed.data.c_str());
   ASSERT_FALSE(listedJson.HasParseError());
-  ASSERT_TRUE(listedJson.HasMember("artifacts"));
-  ASSERT_TRUE(listedJson["artifacts"].IsArray());
-  ASSERT_EQ(listedJson["artifacts"].Size(), 2u);
-
-  const auto &first = listedJson["artifacts"][0];
-  const auto &second = listedJson["artifacts"][1];
-  EXPECT_TRUE(first["ambiguous_filename"].GetBool());
-  EXPECT_TRUE(second["ambiguous_filename"].GetBool());
-  EXPECT_NE(std::string(first["display"].GetString()),
-            std::string(second["display"].GetString()));
-  EXPECT_NE(std::string(first["reference"].GetString()).find("@artifact:"),
-            std::string::npos);
+  // Token-waste pass 3: Artifacts.List emits prose-first {result, count}.
+  // Ambiguous-filename disambiguation is now expressed in the prose by
+  // qualifying each entry as @artifact:<owner>/<filename>.
+  ASSERT_TRUE(listedJson.HasMember("count"));
+  EXPECT_EQ(listedJson["count"].GetUint(), 2u);
+  ASSERT_TRUE(listedJson.HasMember("result"));
+  const std::string prose = listedJson["result"].GetString();
+  EXPECT_NE(prose.find("@artifact:planner/REPORT.md"), std::string::npos);
+  EXPECT_NE(prose.find("@artifact:auditor/REPORT.md"), std::string::npos);
 }
 
 TEST_F(ArtifactToolsTest, ReadFailsForAmbiguousFilenameWithoutOwnerSelector) {

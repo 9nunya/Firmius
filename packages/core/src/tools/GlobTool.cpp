@@ -4,7 +4,9 @@
 #include "agents/AgentPermissionChecks.hpp"
 #include <algorithm>
 #include <filesystem>
+#include <map>
 #include <regex>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -242,15 +244,57 @@ shared::ToolResult GlobTool::execute(const rapidjson::Value &input, shared::Tool
 
     bool budgetHit = visitedNodes >= kMaxGlobVisitedNodes || matches.size() >= kMaxGlobMatches;
 
+    // Token-waste pass 3: prose-first glob result.
+    //
+    // For small result sets (<= 50 paths) we inline the path list in the
+    // prose — the model wants to see exactly what matched. For large sets
+    // we group by parent directory so the prose stays readable; the agent
+    // can refine the glob to see specific paths.
     rapidjson::Document doc;
     doc.SetObject();
     auto &a = doc.GetAllocator();
-    rapidjson::Value results(rapidjson::kArrayType);
-    for (const auto &match : matches) {
-      results.PushBack(rapidjson::Value(match.c_str(), a).Move(), a);
+
+    constexpr std::size_t kInlineThreshold = 50;
+    std::ostringstream prose;
+    if (matches.empty()) {
+      prose << "Glob '" << pattern << "' — no matches under " << path << ".";
+    } else if (matches.size() <= kInlineThreshold) {
+      prose << "Glob '" << pattern << "' — " << matches.size()
+            << " match" << (matches.size() == 1 ? "" : "es") << ":\n";
+      for (const auto &m : matches) {
+        prose << "  " << m << "\n";
+      }
+    } else {
+      // Group by parent directory for readability.
+      std::map<std::string, int> byDir;
+      for (const auto &m : matches) {
+        const auto pos = m.find_last_of('/');
+        const std::string dir = pos == std::string::npos ? "." : m.substr(0, pos);
+        byDir[dir]++;
+      }
+      prose << "Glob '" << pattern << "' — " << matches.size()
+            << " matches across " << byDir.size() << " director"
+            << (byDir.size() == 1 ? "y" : "ies") << " (refine the glob to "
+            << "see specific paths):\n";
+      for (const auto &[dir, count] : byDir) {
+        prose << "  " << dir << "/ (" << count << ")\n";
+      }
     }
-    doc.AddMember("results", results, a);
-    doc.AddMember("budget_hit", budgetHit, a);
+    if (budgetHit) {
+      prose << "[budget_hit: refine the glob to see more]";
+    }
+
+    std::string proseStr = prose.str();
+    doc.AddMember(
+        "result",
+        rapidjson::Value(proseStr.c_str(),
+                         static_cast<rapidjson::SizeType>(proseStr.size()),
+                         a).Move(),
+        a);
+    doc.AddMember("count", static_cast<uint32_t>(matches.size()), a);
+    if (budgetHit) {
+      doc.AddMember("budget_hit", true, a);
+    }
     return shared::ToolResult::ok(doc);
   } catch (const std::exception &e) {
     return shared::ToolResult::fail(e.what());

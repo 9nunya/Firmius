@@ -792,6 +792,65 @@ void ConfigLoader::loadImpl() {
             config_.providers[it->name.GetString()] = provider;
         }
     }
+    if (doc.HasMember("workingMemory") && doc["workingMemory"].IsObject()) {
+        const auto& wm = doc["workingMemory"];
+        if (wm.HasMember("enabled") && wm["enabled"].IsBool()) {
+            config_.workingMemory.enabled = wm["enabled"].GetBool();
+        }
+        if (wm.HasMember("bufferOccupancyRatio") && wm["bufferOccupancyRatio"].IsNumber()) {
+            config_.workingMemory.bufferOccupancyRatio =
+                static_cast<float>(wm["bufferOccupancyRatio"].GetDouble());
+        }
+        if (wm.HasMember("targetOccupancyRatio") && wm["targetOccupancyRatio"].IsNumber()) {
+            config_.workingMemory.targetOccupancyRatio =
+                static_cast<float>(wm["targetOccupancyRatio"].GetDouble());
+        }
+        if (wm.HasMember("emergencyOccupancyRatio") && wm["emergencyOccupancyRatio"].IsNumber()) {
+            config_.workingMemory.emergencyOccupancyRatio =
+                static_cast<float>(wm["emergencyOccupancyRatio"].GetDouble());
+        }
+        if (wm.HasMember("recencyTailRatio") && wm["recencyTailRatio"].IsNumber()) {
+            config_.workingMemory.recencyTailRatio =
+                static_cast<float>(wm["recencyTailRatio"].GetDouble());
+        }
+        if (wm.HasMember("minimumRecencyTailTokens") && wm["minimumRecencyTailTokens"].IsUint()) {
+            config_.workingMemory.minimumRecencyTailTokens =
+                wm["minimumRecencyTailTokens"].GetUint();
+        }
+        if (wm.HasMember("deflationMinPartTokens") && wm["deflationMinPartTokens"].IsUint()) {
+            config_.workingMemory.deflationMinPartTokens =
+                wm["deflationMinPartTokens"].GetUint();
+        }
+        if (wm.HasMember("defaultDeflationTurnHorizon") && wm["defaultDeflationTurnHorizon"].IsUint()) {
+            config_.workingMemory.defaultDeflationTurnHorizon =
+                wm["defaultDeflationTurnHorizon"].GetUint();
+        }
+        if (wm.HasMember("deflationHorizonsByTool") && wm["deflationHorizonsByTool"].IsObject()) {
+            config_.workingMemory.deflationHorizonsByTool.clear();
+            for (auto it2 = wm["deflationHorizonsByTool"].MemberBegin();
+                 it2 != wm["deflationHorizonsByTool"].MemberEnd(); ++it2) {
+                if (it2->value.IsUint()) {
+                    config_.workingMemory.deflationHorizonsByTool[it2->name.GetString()] =
+                        it2->value.GetUint();
+                }
+            }
+        }
+        if (wm.HasMember("embeddingsEnabled") && wm["embeddingsEnabled"].IsBool()) {
+            config_.workingMemory.embeddingsEnabled = wm["embeddingsEnabled"].GetBool();
+        }
+        if (wm.HasMember("embeddingTopK") && wm["embeddingTopK"].IsUint()) {
+            config_.workingMemory.embeddingTopK = wm["embeddingTopK"].GetUint();
+        }
+        if (wm.HasMember("summarizerProviderId") && wm["summarizerProviderId"].IsString()) {
+            config_.workingMemory.summarizerProviderId = wm["summarizerProviderId"].GetString();
+        }
+        if (wm.HasMember("summarizerModelId") && wm["summarizerModelId"].IsString()) {
+            config_.workingMemory.summarizerModelId = wm["summarizerModelId"].GetString();
+        }
+        if (wm.HasMember("summarizerVariantName") && wm["summarizerVariantName"].IsString()) {
+            config_.workingMemory.summarizerVariantName = wm["summarizerVariantName"].GetString();
+        }
+    }
 
     loaded_ = true;
 }
@@ -910,6 +969,50 @@ void ConfigLoader::save() const {
                             allocator);
     }
     doc.AddMember("providers", providers, allocator);
+
+    {
+        rapidjson::Value wm(rapidjson::kObjectType);
+        wm.AddMember("enabled", config_.workingMemory.enabled, allocator);
+        wm.AddMember("bufferOccupancyRatio",
+                     config_.workingMemory.bufferOccupancyRatio, allocator);
+        wm.AddMember("targetOccupancyRatio",
+                     config_.workingMemory.targetOccupancyRatio, allocator);
+        wm.AddMember("emergencyOccupancyRatio",
+                     config_.workingMemory.emergencyOccupancyRatio, allocator);
+        wm.AddMember("recencyTailRatio",
+                     config_.workingMemory.recencyTailRatio, allocator);
+        wm.AddMember("minimumRecencyTailTokens",
+                     config_.workingMemory.minimumRecencyTailTokens, allocator);
+        wm.AddMember("deflationMinPartTokens",
+                     config_.workingMemory.deflationMinPartTokens, allocator);
+        wm.AddMember("defaultDeflationTurnHorizon",
+                     config_.workingMemory.defaultDeflationTurnHorizon, allocator);
+        rapidjson::Value horizons(rapidjson::kObjectType);
+        for (const auto& [k, v] : config_.workingMemory.deflationHorizonsByTool) {
+            horizons.AddMember(rapidjson::Value(k.c_str(), allocator),
+                               rapidjson::Value(v), allocator);
+        }
+        wm.AddMember("deflationHorizonsByTool", horizons, allocator);
+        wm.AddMember("embeddingsEnabled", config_.workingMemory.embeddingsEnabled,
+                     allocator);
+        wm.AddMember("embeddingTopK", config_.workingMemory.embeddingTopK, allocator);
+        wm.AddMember("summarizerProviderId",
+                     rapidjson::Value(
+                         config_.workingMemory.summarizerProviderId.c_str(),
+                         allocator),
+                     allocator);
+        wm.AddMember("summarizerModelId",
+                     rapidjson::Value(
+                         config_.workingMemory.summarizerModelId.c_str(),
+                         allocator),
+                     allocator);
+        wm.AddMember("summarizerVariantName",
+                     rapidjson::Value(
+                         config_.workingMemory.summarizerVariantName.c_str(),
+                         allocator),
+                     allocator);
+        doc.AddMember("workingMemory", wm, allocator);
+    }
 
     rapidjson::StringBuffer buffer;
     rapidjson::PrettyWriter<rapidjson::StringBuffer> writer(buffer);

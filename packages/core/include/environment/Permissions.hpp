@@ -5,7 +5,6 @@
 #include "Events.hpp"
 #include "agents/AgentPermissionChecks.hpp"
 #include "environment/CommandIntentAnalyzer.hpp"
-#include "persistence/ThreadManager.hpp"
 #include "Context.hpp"
 
 #include <memory>
@@ -41,12 +40,7 @@ public:
 
     bool isCommandAllowed(const CommandIntent& intent) const override;
 
-    void allowCommandAlways(const std::string& pattern) override;
-    void denyCommandAlways(const std::string& pattern) override;
-
     const ICommandIntentAnalyzer& getIntentAnalyzer() const override;
-
-    void setApprovalMode(ThreadPermissionMode mode) override;
 
 private:
     const AgentContext* context_ = nullptr;
@@ -55,19 +49,11 @@ private:
     std::string threadId_;
     std::string agentId_;
 
-    static std::string normalizeCommand(const std::string& command);
-    static CommandAllowRule makeCommandAllowRule(const std::string& command,
-                                                 const CommandIntent& intent);
-    static std::string deriveAllowPathPrefix(const std::string& absolutePath);
-    static bool isDirectoryPath(const std::string& absolutePath);
-
     PermissionEscalationRequest buildCommandRequest(const std::string& command,
                                                     const CommandIntent& intent,
                                                     const std::string& toolName) const;
     PermissionEscalationRequest buildPathRequest(PermissionRequestType type,
                                                  const std::string& absolutePath) const;
-    void persistResponse(const PermissionEscalationRequest& request,
-                         PermissionResponse response) const;
 };
 
 } // namespace firmius::core

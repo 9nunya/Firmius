@@ -128,6 +128,7 @@ struct UserConfig {
     RetryPolicyConfig providerRetryDefaults;
     std::map<std::string, RetryPolicyConfig> providerRetryPolicies;
     std::map<std::string, ProviderProfileConfig> providers;
+    WorkingMemoryConfig workingMemory; ///< Rolling memory v2 user-level defaults.
 };
 
 class ConfigLoader {

@@ -1,5 +1,7 @@
 #include "tools/ProcessPresenter.hpp"
+#include "tools/ProcessPresenter.hpp"
 #include "items/ToolCallItem.hpp"
+#include "Terminal.hpp"
 #include <gtest/gtest.h>
 
 using namespace firmius::tui2;
@@ -25,7 +27,7 @@ TEST(ProcessPresenterTest, ExecuteCalled) {
   item.setPhase(ToolPhase::Called);
   auto lines = p.render(item, {}, 80);
   ASSERT_GE(lines.size(), 2u);
-  EXPECT_NE(lines[0].find("ls -la"), std::string::npos);
+  EXPECT_NE(ansi::strip(lines[0]).find("ls -la"), std::string::npos);
 }
 
 TEST(ProcessPresenterTest, ExecuteFinishedSuccess) {
@@ -111,5 +113,51 @@ TEST(ProcessPresenterTest, SpawnFinished) {
   item.setResult(true, R"({"process_id":"pid-123","stdout":"output"})");
   auto lines = p.render(item, {}, 80);
   ASSERT_GE(lines.size(), 1u);
-  EXPECT_NE(lines[0].find("sleep 10"), std::string::npos);
+  EXPECT_NE(ansi::strip(lines[0]).find("sleep 10"), std::string::npos);
+}
+
+
+// Multi-line bash commands (e.g. python -c "...\n...\n...") used to be
+// truncated to the first line because highlightLine() only returned the
+// first highlighted line. Every source line of the command must now show
+// up across the rendered rows.
+TEST(ProcessPresenterTest, ExecuteMultilineCommandPreservesAllLines) {
+  ProcessPresenter p;
+  ToolCallItem item("call-1", "Process", "agent-1");
+  item.setArgs(R"json({"action":"Execute","command":"python -c \"\nimport sys\nprint('hello')\nprint('world')\n\""})json");
+  item.setResult(true, R"({"exit_code":0,"duration_ms":12.0,"stdout":"hello\nworld"})");
+  auto lines = p.render(item, {}, 120);
+  std::string joined;
+  for (const auto& l : lines) {
+    joined += ansi::strip(l);
+    joined += '\n';
+  }
+  EXPECT_NE(joined.find("python -c"), std::string::npos);
+  EXPECT_NE(joined.find("import sys"), std::string::npos);
+  EXPECT_NE(joined.find("print('hello')"), std::string::npos);
+  EXPECT_NE(joined.find("print('world')"), std::string::npos);
+}
+
+// A single very long command must wrap onto continuation rows instead of
+// being truncated horizontally — the previous renderer wrapped fine here,
+// this guards against the multi-line fix regressing single-line wrapping.
+TEST(ProcessPresenterTest, ExecuteLongCommandWrapsToMultipleRows) {
+  ProcessPresenter p;
+  ToolCallItem item("call-1", "Process", "agent-1");
+  std::string longCmd = "echo ";
+  for (int i = 0; i < 30; ++i) longCmd += "verylongargument" + std::to_string(i) + " ";
+  std::string args =
+      std::string(R"({"action":"Execute","command":")") + longCmd + R"("})";
+  item.setArgs(args);
+  item.setResult(true, R"({"exit_code":0,"duration_ms":1.0,"stdout":""})");
+  // Narrow width forces wrapping.
+  auto lines = p.render(item, {}, 60);
+  // We need at least 2 rendered rows for the wrapped header alone.
+  int rowsContainingCommand = 0;
+  for (const auto& l : lines) {
+    if (ansi::strip(l).find("verylongargument") != std::string::npos) {
+      ++rowsContainingCommand;
+    }
+  }
+  EXPECT_GE(rowsContainingCommand, 2);
 }

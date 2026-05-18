@@ -8,6 +8,7 @@
 
 #include <deque>
 #include <chrono>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -30,18 +31,69 @@ enum class ConnectionStatus { Disconnected, Connecting, Connected };
 enum class ActivityContext { Idle, Active, PermissionPending };
 
 /// Permission request awaiting user resolution.
+struct PendingPermissionSuggestion {
+  std::string ruleId;
+  std::string label;
+  std::string explanation;
+  std::string category;
+  std::string decision;
+  std::string scope;
+  std::map<std::string, std::string> match;
+  bool defaultSelected = false;
+};
+
 struct PendingPermission {
   std::string requestId;
   std::string title;
   std::string message;
   std::string toolName;
   bool allowAlways = true;
+  // ── v2 fields ──
+  std::string category;       ///< process.exec, file.read, …
+  std::string command;
+  std::string commandPrimary;
+  std::string targetPath;
+  std::string cwd;
+  std::string url;
+  std::string host;
+  std::string scheme;
+  std::string query;
+  std::string persona;
+  std::string parentPersona;
+  std::string toolCallId;
+  int severity = 0;           ///< CommandSeverity int.
+  bool isDirectory = false;
+  std::vector<std::string> subcommands;
+  std::vector<PendingPermissionSuggestion> suggestions;
 };
 
 struct ContextUsage {
   uint32_t windowTokens = 0;
   uint32_t usedTokens = 0;
   uint32_t sentTokens = 0;
+};
+
+/// Snapshot of the focused agent's working-memory v2 state.
+///
+/// Mirrors the fields the status bar and notice-renderer want from
+/// shared::MemoryMetrics. Stored separately on AppState so the status
+/// bar can render synchronously without locking the agent.
+struct MemoryStatus {
+  uint32_t rawHistoryTokens = 0;
+  uint32_t workingSetTokens = 0;
+  uint32_t pinnedTurnCount = 0;
+  uint32_t evictedTurnCount = 0;
+  uint32_t recalledTurnCount = 0;
+  uint32_t deflatedPartCount = 0;
+  uint32_t tokensSavedByDeflation = 0;
+  uint32_t tokensSavedByEviction = 0;
+  uint32_t tokensSpentOnSummaries = 0;
+  uint32_t tokensSpentOnEmbeddings = 0;
+  uint32_t hotPathLatencyMicros = 0;
+  bool aboveBufferThreshold = false;
+  bool aboveTargetThreshold = false;
+  bool aboveEmergencyThreshold = false;
+  bool valid = false; ///< False until the first metrics arrive.
 };
 
 /// Embedding model download progress.
@@ -85,6 +137,24 @@ public:
   void setThreadId(const std::string &id);
   std::string threadId() const;
 
+  void setPermissionMode(firmius::shared::ThreadPermissionMode mode);
+  firmius::shared::ThreadPermissionMode permissionMode() const;
+  /// Set the active mode by id (e.g. "ask", "yolo", or user-defined).
+  void setActiveModeId(std::string id);
+  std::string activeModeId() const;
+  /// Set the list of all known modes (id, name, builtIn).
+  struct ModeSummary {
+    std::string id;
+    std::string name;
+    std::string description;
+    bool builtIn = false;
+  };
+  void setModes(std::vector<ModeSummary> modes);
+  std::vector<ModeSummary> modes() const;
+  /// Resolve the active mode's display name. Returns "ask" if no
+  /// match. Cheap snapshot — for status-bar rendering.
+  std::string activeModeName() const;
+
   void setThreadTitle(const std::string &title);
   std::string threadTitle() const;
 
@@ -98,6 +168,9 @@ public:
   std::string agentContextWindow() const;
   void setAgentContextUsage(ContextUsage usage);
   ContextUsage agentContextUsage() const;
+
+  void setMemoryStatus(MemoryStatus status);
+  MemoryStatus memoryStatus() const;
 
   void setAgentStatus(firmius::shared::AgentStatus status);
   firmius::shared::AgentStatus agentStatus() const;
@@ -208,6 +281,9 @@ public:
   void popPendingPermission(const std::string &requestId);
   void clearPendingPermissions();
   std::optional<PendingPermission> pendingPermission() const;
+  /// Snapshot of the entire queue (front first). Used by the prompt
+  /// overlay to draw the [i/N] badge + next-up hint.
+  std::vector<PendingPermission> pendingPermissions() const;
   bool hasPendingPermissions() const;
 
   // ── Embedding ──
@@ -223,12 +299,90 @@ public:
   void toggleTodoVisibility();
   bool todoVisible() const;
 
-  // ── Input ──
+  // ── Input ──────────────────────────────────────────────────────────────
+  //
+  // The input buffer is a single std::string with embedded '\n' characters
+  // for multiline input. `cursor_` is a byte offset into that string and
+  // marks the insertion point. Helpers below convert that offset to/from
+  // (line, column) coordinates so renderers and key handlers don't have to
+  // re-scan the buffer themselves.
+  //
+  // Selection-related queries (cursorLineIndex / cursorColumnOnLine) are
+  // intentionally byte-based, not visible-width based — that's a separate
+  // concern handled at render time. Inputs are typically short enough that
+  // recomputing on each keystroke is fine.
   void setInputBuffer(const std::string &text);
   std::string inputBuffer() const;
+  /// Append a single byte at the cursor and advance the cursor.
   void appendToInput(char ch);
+  /// Insert arbitrary bytes (including newlines) at the cursor and advance.
+  void insertAtCursor(const std::string &text);
+  /// Delete one byte before the cursor, like a typical Backspace.
   void backspaceInput();
+  /// Delete the previous word (alpha+digit run plus any trailing whitespace).
+  /// Returns the number of bytes removed. No-op when cursor is at start.
+  size_t deleteWordBeforeCursor();
   void clearInput();
+
+  // ── Cursor ──
+  /// Cursor as a byte offset into the input buffer.
+  size_t cursorOffset() const;
+  void setCursorOffset(size_t offset);
+  void moveCursorLeft();
+  void moveCursorRight();
+  /// Move cursor up/down one logical line. Tries to preserve column.
+  void moveCursorUp();
+  void moveCursorDown();
+  /// Move cursor to the previous/next word boundary.
+  void moveCursorWordLeft();
+  void moveCursorWordRight();
+  void moveCursorLineStart();
+  void moveCursorLineEnd();
+  /// Which logical line of the buffer the cursor is on (0-indexed).
+  int cursorLineIndex() const;
+  /// Column within that logical line (byte-indexed, 0-based).
+  int cursorColumnOnLine() const;
+  /// Number of logical lines in the buffer (>= 1).
+  int inputLineCount() const;
+  /// Get a specific logical line of the buffer.
+  std::string inputLineAt(int index) const;
+
+  // ── Pasted blocks ─────────────────────────────────────────────────────
+  //
+  // When the user pastes a long text block or an image, we don't want to
+  // dump the raw bytes into the visible input buffer — the user can't
+  // see anything else, and base64 image data would be unusable. Instead
+  // we insert a SHORT placeholder string at the cursor (e.g.
+  // "[Pasted: 14 lines]") and store the real content here, keyed by a
+  // small auto-incrementing id encoded into the placeholder.
+  //
+  // On submit, the App walks the placeholders in the buffer in
+  // appearance order, replaces text-block placeholders with their real
+  // content, and drains image blocks into a separate ImageContent[]
+  // vector. Empty placeholders left by backspace are simply dropped.
+  enum class PastedBlockKind { Text, Image };
+  struct PastedBlock {
+    int id = 0;
+    PastedBlockKind kind = PastedBlockKind::Text;
+    std::string content;     ///< For Text: raw pasted text. For Image: base64 (no data:URI prefix).
+    std::string mediaType;   ///< For Image: MIME type. Unused for Text.
+    int lineCount = 0;       ///< For Text: number of lines in `content`.
+  };
+
+  /// Insert a multi-line text paste at the cursor. Returns the placeholder
+  /// string that was inserted (e.g. "[Pasted: 14 lines]") so the caller
+  /// can show it elsewhere if needed.
+  std::string insertPastedText(std::string content);
+  /// Insert an image paste at the cursor.
+  std::string insertPastedImage(std::string base64, std::string mediaType);
+  /// All current blocks (in registration order, not buffer order).
+  std::vector<PastedBlock> pastedBlocks() const;
+  /// Drain all blocks (used on submit). Caller is responsible for replacing
+  /// the placeholders in the outgoing message text.
+  std::vector<PastedBlock> takePastedBlocks();
+  /// If the cursor sits immediately after a placeholder, remove the whole
+  /// placeholder + its block. Returns true if a block was removed.
+  bool maybeBackspacePastedBlock();
 
   // ── Activity Context ──
   ActivityContext activityContext() const;
@@ -250,6 +404,33 @@ public:
   bool userScrolledUp() const { return userScrolledUp_; }
   void setAutoScroll(bool enabled);
 
+  // ── Mouse-drag selection on the transcript ────────────────────────────
+  //
+  // Selection coordinates are (absolute scrollback line index, byte column
+  // offset on that line). Using ABSOLUTE line indices means scrolling
+  // doesn't move the selection — it stays anchored to the actual content.
+  //
+  // The renderer reads this and inverts the cells inside the range.
+  // CopySelected() walks the scrollback inside the range and produces a
+  // plain-text string ready for the clipboard.
+  struct SelectionPoint {
+    int line = -1;   ///< Absolute index into scrollback_, or -1 = no selection.
+    int col = 0;     ///< Byte column on that line.
+    bool operator==(const SelectionPoint &) const = default;
+  };
+  void beginSelection(int absLine, int col);
+  void updateSelection(int absLine, int col);
+  void endSelection();
+  void clearSelection();
+  bool hasSelection() const;
+  bool isSelecting() const;  ///< True while the mouse button is still held.
+  /// Returns the selection range with start/end ordered (start <= end in
+  /// reading order). Both points are inclusive at the start, exclusive at
+  /// the end (like a half-open range).
+  std::pair<SelectionPoint, SelectionPoint> selectionRange() const;
+  /// Extract the visible selected text from the scrollback, ANSI-stripped.
+  std::string copySelectedText() const;
+
   // ── Dirty tracking ──
   bool isDirty() const;
   void clearDirty();
@@ -265,6 +446,10 @@ private:
 
   ConnectionStatus connectionStatus_ = ConnectionStatus::Disconnected;
   std::string threadId_;
+  firmius::shared::ThreadPermissionMode permissionMode_ =
+      firmius::shared::ThreadPermissionMode::Request;
+  std::string activeModeId_ = "ask";
+  std::vector<ModeSummary> modes_;
   std::string threadTitle_;
   std::string agentId_;         // Primary (root) agent
   std::string focusedAgentId_;  // Currently focused agent for transcript view
@@ -272,6 +457,7 @@ private:
   std::string agentPurpose_;
   std::string agentContextWindow_;
   ContextUsage agentContextUsage_;
+  MemoryStatus memoryStatus_;
   firmius::shared::AgentStatus agentStatus_ = firmius::shared::AgentStatus::Idle;
   std::string modelLabel_;
   std::string liveMessage_;
@@ -299,6 +485,12 @@ private:
   std::unordered_map<std::string, std::vector<firmius::shared::TodoItem>> agentTodos_;
   bool todoVisible_ = true;
   std::string inputBuffer_;
+  size_t inputCursor_ = 0;
+  /// Preferred column when moving up/down through lines. Mirrors the way
+  /// most editors remember the column on visual line moves.
+  int inputDesiredColumn_ = -1;
+  std::vector<PastedBlock> pastedBlocks_;
+  int nextPastedBlockId_ = 1;
 
   // ── Scrollback ──
   std::vector<std::string> scrollback_;
@@ -307,6 +499,13 @@ private:
   int pinnedTopLine_ = -1;    // absolute scrollback index when user scrolled up (-1 = not pinned)
   bool autoScroll_ = true;
   static constexpr int kMaxScrollbackLines = 10000;
+
+  // Selection state. selectionAnchor_/selectionCursor_ both -1 = no
+  // selection. While the mouse is held, selectionActive_ stays true so
+  // mouse-move events are interpreted as drag-extension.
+  SelectionPoint selectionAnchor_{};
+  SelectionPoint selectionCursor_{};
+  bool selectionActive_ = false;
 
   // ── Structured state ──
   std::unordered_map<std::string, ToolCallState> toolCalls_;

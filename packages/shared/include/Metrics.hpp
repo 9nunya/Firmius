@@ -154,6 +154,52 @@ struct QuotaMetrics {
 };
 
 /**
+ * @brief Working-memory (rolling memory v2) telemetry for an agent turn or
+ * thread.
+ *
+ * All numbers are reported in tokens unless noted. Counters are cumulative
+ * across the thread's lifetime when aggregated; per-turn snapshots are
+ * additive into the cumulative aggregate via operator+= below.
+ */
+struct MemoryMetrics {
+  // Working set vs raw history accounting (the v1-killer story).
+  std::uint32_t rawHistoryTokens = 0;   ///< Tokens in the full journal-loaded history.
+  std::uint32_t workingSetTokens = 0;   ///< Tokens that ended up in the request after assembly.
+  std::uint32_t pinnedTurnCount = 0;    ///< Turns hard-pinned by policy this turn.
+  std::uint32_t evictedTurnCount = 0;   ///< Turns dropped from working set this turn.
+  std::uint32_t recalledTurnCount = 0;  ///< Turns re-pinned by relevance fill this turn.
+  std::uint32_t deflatedPartCount = 0;  ///< MessageParts replaced by deflation stub this turn.
+
+  // Token spend / save accounting (per-turn, additive).
+  std::uint32_t tokensSavedByDeflation = 0;
+  std::uint32_t tokensSavedByEviction = 0;
+  std::uint32_t tokensSpentOnSummaries = 0;     ///< Summary stub tokens injected.
+  std::uint32_t tokensSpentOnEmbeddings = 0;    ///< Query-embedding text token cost.
+  std::uint32_t tokensSpentOnOverlays = 0;      ///< Overlay system-message tokens injected.
+
+  // Focus metrics — the v1 failure detectors.
+  std::uint32_t userPromptsRetained = 0;        ///< User turns present in working set this request.
+  std::uint32_t userPromptsTotal = 0;           ///< User turns ever appended.
+  std::uint32_t imagePartsRetained = 0;         ///< Image parts present in working set this request.
+  std::uint32_t imagePartsTotal = 0;            ///< Image parts ever appended.
+  std::uint32_t redundantReadCount = 0;         ///< read_file calls on already-read paths.
+  std::uint32_t redundantToolSignatureCount = 0; ///< Repeats of (toolName,args) signatures.
+
+  // Hot-path latency contribution (per turn, additive when aggregated).
+  std::uint64_t hotPathLatencyMicros = 0;       ///< Time the working-memory layer spent on the agent thread.
+
+  /// True if the working-memory layer crossed the buffer threshold during this
+  /// turn (i.e. did anything beyond pass-through).
+  bool aboveBufferThreshold = false;
+  /// True if it crossed the target threshold (relevance fill + deflation enabled).
+  bool aboveTargetThreshold = false;
+  /// True if it crossed the emergency threshold (synchronous deflation forced).
+  bool aboveEmergencyThreshold = false;
+
+  bool operator==(const MemoryMetrics& other) const = default;
+};
+
+/**
  * @brief Aggregated metrics for an agent turn or task.
  */
 struct AgentMetrics {
@@ -162,6 +208,7 @@ struct AgentMetrics {
   double estimatedCostUsd = 0.0; ///< Calculated cost of the request.
   ContextWindowMetrics context;   ///< Latest context-bucketing snapshot.
   QuotaMetrics quota;       ///< Quota usage details for this request.
+  MemoryMetrics memory;     ///< Working-memory telemetry.
 
   /**
    * @brief Accumulates metrics from another instance.
@@ -196,6 +243,29 @@ struct AgentMetrics {
     if (!other.quota.providerId.empty()) {
       quota = other.quota;
     }
+    // Memory: per-request snapshot fields are latched (latest value wins);
+    // counters are additive across turns.
+    memory.rawHistoryTokens = other.memory.rawHistoryTokens;
+    memory.workingSetTokens = other.memory.workingSetTokens;
+    memory.pinnedTurnCount = other.memory.pinnedTurnCount;
+    memory.evictedTurnCount = other.memory.evictedTurnCount;
+    memory.recalledTurnCount = other.memory.recalledTurnCount;
+    memory.deflatedPartCount += other.memory.deflatedPartCount;
+    memory.tokensSavedByDeflation += other.memory.tokensSavedByDeflation;
+    memory.tokensSavedByEviction += other.memory.tokensSavedByEviction;
+    memory.tokensSpentOnSummaries += other.memory.tokensSpentOnSummaries;
+    memory.tokensSpentOnEmbeddings += other.memory.tokensSpentOnEmbeddings;
+    memory.tokensSpentOnOverlays += other.memory.tokensSpentOnOverlays;
+    memory.userPromptsRetained = other.memory.userPromptsRetained;
+    memory.userPromptsTotal = std::max(memory.userPromptsTotal, other.memory.userPromptsTotal);
+    memory.imagePartsRetained = other.memory.imagePartsRetained;
+    memory.imagePartsTotal = std::max(memory.imagePartsTotal, other.memory.imagePartsTotal);
+    memory.redundantReadCount += other.memory.redundantReadCount;
+    memory.redundantToolSignatureCount += other.memory.redundantToolSignatureCount;
+    memory.hotPathLatencyMicros += other.memory.hotPathLatencyMicros;
+    memory.aboveBufferThreshold = other.memory.aboveBufferThreshold;
+    memory.aboveTargetThreshold = other.memory.aboveTargetThreshold;
+    memory.aboveEmergencyThreshold = other.memory.aboveEmergencyThreshold;
     return *this;
   }
 

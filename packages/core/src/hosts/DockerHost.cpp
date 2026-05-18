@@ -501,6 +501,17 @@ void DockerHost::writeFile(const std::string& path, const std::vector<uint8_t>& 
     }
 }
 
+void DockerHost::deleteFile(const std::string& path) {
+    // `rm -f` is idempotent — succeeds whether or not the path exists,
+    // which matches the IHost::deleteFile contract. We still propagate
+    // a non-zero exit (e.g. permission denied) as an exception.
+    auto res = exec("rm -f " + StringUtil::shellEscape(path));
+    if (res.exitCode != 0) {
+        throw std::runtime_error("Failed to delete file in Docker: " +
+                                 res.stderrData);
+    }
+}
+
 bool DockerHost::exists(const std::string& path) {
     auto res = exec("test -e " + StringUtil::shellEscape(path));
     return res.exitCode == 0;

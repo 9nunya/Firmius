@@ -3,6 +3,8 @@
 #include "AgentRegistry.hpp"
 #include "ConfigLoader.hpp"
 #include "Engine.hpp"
+#include "environment/PermissionSuggestionEngine.hpp"
+#include "harness/Harness.hpp"
 #include "Events.hpp"
 #include "Serialization.hpp"
 #include "agents/PurposeLoader.hpp"
@@ -196,27 +198,38 @@ std::vector<ResolvedRoute> buildRouteCandidates(const std::string &persona, cons
   return routes;
 }
 
+// Token-waste pass 5: routing metadata is debug breadcrumbs in the
+// success path; only surface it when something interesting happened
+// (a warning was set, or fallback was used). attempted_categories was
+// always emitted as an array; now we collapse to a single
+// `routing_fallback` flag when relevant.
 void appendRoutingMetadata(rapidjson::Document &d, const ResolvedRoute &route, const std::vector<std::string> &attemptedCategories, bool fallbackUsed) {
   auto &a = d.GetAllocator();
   if (!route.categoryName.empty()) d.AddMember("category", rapidjson::Value(route.categoryName.c_str(), a).Move(), a);
-  rapidjson::Value attempted(rapidjson::kArrayType);
-  for (const auto &category : attemptedCategories) attempted.PushBack(rapidjson::Value(category.c_str(), a).Move(), a);
-  d.AddMember("attempted_categories", attempted, a);
-  d.AddMember("fallback_used", fallbackUsed, a);
+  if (fallbackUsed) {
+    d.AddMember("routing_fallback", true, a);
+    // Include attempted_categories ONLY when fallback was used — this is
+    // when the model needs to know the chain of categories tried.
+    rapidjson::Value attempted(rapidjson::kArrayType);
+    for (const auto &category : attemptedCategories) attempted.PushBack(rapidjson::Value(category.c_str(), a).Move(), a);
+    d.AddMember("attempted_categories", attempted, a);
+  }
   if (!route.warning.empty()) d.AddMember("routing_warning", rapidjson::Value(route.warning.c_str(), a).Move(), a);
 }
 
+// Token-waste pass 5: outcome artifacts are emitted as bare reference
+// strings instead of full ThreadArtifactMetadata blocks. The model uses
+// these references to fetch the artifact later; the metadata struct is
+// rebuilt from disk if/when needed.
 void appendOutcomeArtifacts(rapidjson::Document &d, const shared::AgentOutcome &outcome) {
   auto &a = d.GetAllocator();
   auto appendArray = [&](const char *key, const std::vector<shared::ThreadArtifactMetadata> &items) {
+    if (items.empty()) return;  // omit empty arrays entirely
     rapidjson::Value array(rapidjson::kArrayType);
     for (const auto &artifact : items) {
-      rapidjson::Document artifactDoc = shared::toJson(artifact);
-      rapidjson::Value artifactValue; artifactValue.CopyFrom(artifactDoc, a);
       const std::string owner = artifact.ownerFriendlyName.empty() ? artifact.ownerAgentId : artifact.ownerFriendlyName;
       const std::string reference = "@artifact:" + owner + "/" + artifact.filename;
-      artifactValue.AddMember("reference", rapidjson::Value(reference.c_str(), a).Move(), a);
-      array.PushBack(artifactValue, a);
+      array.PushBack(rapidjson::Value(reference.c_str(), a).Move(), a);
     }
     d.AddMember(rapidjson::Value(key, a).Move(), array, a);
   };
@@ -275,6 +288,50 @@ shared::ToolResult executeSpawn(const rapidjson::Value &input, shared::ToolConte
 
   DelegationPersonaKind personaKind = personaKindForName(persona);
   std::string threadId = ctx.agent.getContext().history->threadId;
+
+  // ── agent.spawn policy gate ───────────────────────────────────────
+  // Subagent spawns can fan out work the user didn't intend. The gate
+  // lets users pin "executor only from lead" or block paranoid configs
+  // entirely. Defaults to allow (built-in category default) so existing
+  // workflows aren't broken until the user opts into stricter rules.
+  {
+    PolicyRequest sreq;
+    sreq.category = kCatAgentSpawn;
+    sreq.persona = persona;
+    sreq.parentPersona = ctx.agent.getContext().identity.role;
+    sreq.toolName = "Delegate";
+    auto eval = Harness::instance().policyEngine().evaluate(sreq);
+    if (eval.decision == PolicyDecision::Deny) {
+      return shared::ToolResult::fail(
+          "Subagent spawn denied by policy: persona=" + persona);
+    }
+    if (eval.decision == PolicyDecision::Ask) {
+      shared::PermissionEscalationRequest esc;
+      esc.threadId = threadId;
+      esc.agentId = ctx.agent.getContext().identity.id;
+      esc.toolName = "Delegate";
+      esc.requestType = shared::PermissionRequestType::Read;
+      esc.title = "Spawn subagent " + persona + "?";
+      esc.message = "Approve spawning persona '" + persona +
+                    "' from agent '" + sreq.parentPersona + "'.";
+      esc.severity = shared::CommandSeverity::LOW;
+      esc.allowAlways = true;
+      esc.category = sreq.category;
+      esc.persona = persona;
+      esc.parentPersona = sreq.parentPersona;
+      shared::CommandIntent dummy;
+      auto suggestions =
+          PermissionSuggestionEngine::generate(sreq, dummy);
+      auto response =
+          Harness::instance()
+              .requestPermissionEscalationWithSuggestions(
+                  std::move(esc), std::move(suggestions));
+      if (response == shared::PermissionResponse::Deny) {
+        return shared::ToolResult::fail(
+            "Subagent spawn denied: persona=" + persona);
+      }
+    }
+  }
 
   std::string delegatedTask;
   std::optional<SummonAgentOverrides> summonOverrides;

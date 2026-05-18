@@ -13,6 +13,7 @@
 #include "hosts/LocalHost.hpp"
 #include "mcp/McpManager.hpp"
 #include "persistence/Journaler.hpp"
+#include "persistence/HistoryEditor.hpp"
 #include "persistence/ThreadManager.hpp"
 #include "providers/BaseAPIKeyProvider.hpp"
 #include "providers/BaseOAuthProvider.hpp"
@@ -196,18 +197,6 @@ std::string resolveWritableFirmiusHome() {
   }
 
   return tempHome.string();
-}
-
-ThreadPermissionMode nextThreadPermissionMode(ThreadPermissionMode mode) {
-  switch (mode) {
-  case ThreadPermissionMode::Request:
-    return ThreadPermissionMode::AlwaysAllow;
-  case ThreadPermissionMode::AlwaysAllow:
-    return ThreadPermissionMode::DenyAll;
-  case ThreadPermissionMode::DenyAll:
-    return ThreadPermissionMode::Request;
-  }
-  return ThreadPermissionMode::Request;
 }
 
 std::string getFirmiusHome() { return resolveWritableFirmiusHome(); }
@@ -466,23 +455,6 @@ bool waitFor(Fn &&fn, std::chrono::milliseconds timeout,
     std::this_thread::sleep_for(step);
   }
   return fn();
-}
-
-std::string normalizeCommandForRuleMatch(const std::string &command) {
-  std::stringstream normalized;
-  bool previousWasSpace = false;
-  for (char ch : command) {
-    if (std::isspace(static_cast<unsigned char>(ch))) {
-      if (!previousWasSpace) {
-        normalized << ' ';
-        previousWasSpace = true;
-      }
-    } else {
-      normalized << ch;
-      previousWasSpace = false;
-    }
-  }
-  return shared::StringUtil::trim(normalized.str());
 }
 
 std::string trimFleetDiffPreview(const std::string &diffPreview,
@@ -1410,6 +1382,15 @@ void Harness::abort() {
     return;
   }
 
+  abortAgent(threadId, focusedAgentId);
+}
+
+void Harness::abortAgent(const std::string &threadId,
+                         const std::string &focusedAgentId) {
+  if (focusedAgentId.empty()) {
+    return;
+  }
+
   auto agent = AgentRegistry::instance().getAgent(focusedAgentId);
   if (!agent)
     return;
@@ -1433,12 +1414,25 @@ void Harness::abort() {
 void Harness::abortAndFlushQueuedMessages() {
   std::string focusedAgentId;
   std::string threadId;
-  bool hasQueuedMessages = false;
   {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     focusedAgentId = focusedAgentId_;
     threadId = currentThreadId_;
-    if (!focusedAgentId.empty() && !threadId.empty()) {
+  }
+
+  abortAgentAndFlushQueuedMessages(threadId, focusedAgentId);
+}
+
+void Harness::abortAgentAndFlushQueuedMessages(const std::string &threadId,
+                                               const std::string &focusedAgentId) {
+  if (focusedAgentId.empty()) {
+    return;
+  }
+
+  bool hasQueuedMessages = false;
+  {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (!threadId.empty()) {
       hasQueuedMessages = std::any_of(
           messageQueue_.begin(), messageQueue_.end(),
           [&](const QueuedMessage &item) {
@@ -1448,12 +1442,16 @@ void Harness::abortAndFlushQueuedMessages() {
   }
 
   if (!hasQueuedMessages) {
-    abort();
+    abortAgent(threadId, focusedAgentId);
     return;
   }
 
   auto agent = AgentRegistry::instance().getAgent(focusedAgentId);
   if (!agent) {
+    if (!threadId.empty()) {
+      std::lock_guard<std::recursive_mutex> lock(mutex_);
+      drainQueueForAgent(focusedAgentId, threadId);
+    }
     return;
   }
   if (!(agent->isRunning() || agent->isBooting())) {
@@ -2069,219 +2067,51 @@ bool Harness::switchLeadPersona(const std::string &personaName) {
   return true;
 }
 
-ThreadPermissionMode Harness::currentThreadPermissionMode() {
-  std::lock_guard<std::recursive_mutex> lock(mutex_);
-  if (currentThreadId_.empty()) {
-    return ThreadPermissionMode::Request;
-  }
-
-  return threadManager_.getMetadata(currentThreadId_).permissionMode;
-}
-
-ThreadPermissionMode
-Harness::threadPermissionMode(const std::string &threadId) {
-  std::lock_guard<std::recursive_mutex> lock(mutex_);
-  if (threadId.empty()) {
-    return ThreadPermissionMode::Request;
-  }
-  try {
-    return threadManager_.getMetadata(threadId).permissionMode;
-  } catch (...) {
-    return ThreadPermissionMode::Request;
-  }
-}
-
-ThreadPermissionRules
-Harness::threadPermissionRules(const std::string &threadId) {
-  std::lock_guard<std::recursive_mutex> lock(mutex_);
-  if (threadId.empty()) {
-    return {};
-  }
-  try {
-    return threadManager_.readPermissionRules(threadId);
-  } catch (...) {
-    return {};
-  }
-}
-
-bool Harness::commandMatchesPersistedAllowRule(const std::string &threadId,
-                                               const std::string &command,
-                                               const std::string &toolName) {
-  if (threadId.empty()) {
-    return false;
-  }
-
-  auto rules = threadPermissionRules(threadId);
-  std::string normalized = normalizeCommandForRuleMatch(command);
-  return std::any_of(rules.commandAllowRules.begin(),
-                     rules.commandAllowRules.end(),
-                     [&command, &normalized, &toolName](const CommandAllowRule &rule) {
-                       const bool toolMatches =
-                           rule.toolName.empty() || toolName.empty() ||
-                           rule.toolName == toolName;
-                       if (!toolMatches) {
-                         return false;
-                       }
-                       if (rule.appliesToEntireTool) {
-                         return !toolName.empty() && rule.toolName == toolName;
-                       }
-                       return rule.exactCommand == command ||
-                              (!rule.normalizedCommand.empty() &&
-                               rule.normalizedCommand == normalized);
-                     });
-}
-
-bool Harness::pathMatchesPersistedAllowRule(const std::string &threadId,
-                                            const std::string &absolutePath,
-                                            const bool readOnly,
-                                            const std::string &toolName) {
-  if (threadId.empty()) {
-    return false;
-  }
-
-  auto rules = threadPermissionRules(threadId);
-  return std::any_of(rules.pathAllowRules.begin(), rules.pathAllowRules.end(),
-                     [&absolutePath, readOnly, &toolName](const PathAllowRule &rule) {
-                       if (readOnly && !rule.readOnly && !rule.appliesToAllReads) {
-                         return false;
-                       }
-                       if (!readOnly && rule.readOnly) {
-                         return false;
-                       }
-                       if (!rule.toolName.empty() && !toolName.empty() &&
-                           rule.toolName != toolName) {
-                         return false;
-                       }
-                       return shared::FSUtil::isSubpath(absolutePath,
-                                                        rule.pathPrefix);
-                     });
-}
-
-bool Harness::toolHasSessionAllowance(const std::string &threadId,
-                                      const std::string &toolName) {
-  if (threadId.empty() || toolName.empty()) {
-    return false;
-  }
-  auto rules = threadPermissionRules(threadId);
-  return std::find(rules.allowAllToolSessions.begin(),
-                   rules.allowAllToolSessions.end(),
-                   toolName) != rules.allowAllToolSessions.end();
-}
-
-bool Harness::readHasSessionAllowance(const std::string &threadId) {
-  if (threadId.empty()) {
-    return false;
-  }
-  return threadPermissionRules(threadId).allowAllReadsSession;
-}
-
-void Harness::persistCommandAllowRule(const std::string &threadId,
-                                      const CommandAllowRule &rule) {
-  std::lock_guard<std::recursive_mutex> lock(mutex_);
-  if (threadId.empty()) {
-    return;
-  }
-  threadManager_.addCommandAllowRule(threadId, rule);
-}
-
-void Harness::persistPathAllowRule(const std::string &threadId,
-                                   const PathAllowRule &rule) {
-  std::lock_guard<std::recursive_mutex> lock(mutex_);
-  if (threadId.empty() || rule.pathPrefix.empty()) {
-    return;
-  }
-  threadManager_.addPathAllowRule(threadId, rule);
-}
-
-void Harness::persistToolSessionAllowance(const std::string &threadId,
-                                          const std::string &toolName) {
-  std::lock_guard<std::recursive_mutex> lock(mutex_);
-  if (threadId.empty() || toolName.empty()) {
-    return;
-  }
-  threadManager_.addAllowAllToolSession(threadId, toolName);
-}
-
-void Harness::persistReadSessionAllowance(const std::string &threadId) {
-  std::lock_guard<std::recursive_mutex> lock(mutex_);
-  if (threadId.empty()) {
-    return;
-  }
-  threadManager_.setAllowAllReadsSession(threadId, true);
-}
-
-bool Harness::setCurrentThreadPermissionMode(ThreadPermissionMode mode) {
-  ThreadMetadata metadata;
-  {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    if (currentThreadId_.empty()) {
-      return false;
-    }
-
-    metadata = threadManager_.getMetadata(currentThreadId_);
-    if (metadata.permissionMode == mode) {
-      return true;
-    }
-
-    metadata.permissionMode = mode;
-    threadManager_.updateMetadata(currentThreadId_, metadata);
-  }
-
-  emitEvent(
-      firmius::shared::ThreadMetadataUpdated{metadata.threadId, metadata});
-  return true;
-}
-bool Harness::setThreadPermissionMode(const std::string &threadId,
-                                      ThreadPermissionMode mode) {
-  ThreadMetadata metadata;
-  {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    if (threadId.empty()) {
-      return false;
-    }
-    metadata = threadManager_.getMetadata(threadId);
-    if (metadata.threadId.empty()) {
-      return false;
-    }
-    if (metadata.permissionMode == mode) {
-      return true;
-    }
-    metadata.permissionMode = mode;
-    threadManager_.updateMetadata(threadId, metadata);
-  }
-  emitEvent(firmius::shared::ThreadMetadataUpdated{metadata.threadId, metadata});
-  return true;
-}
-
-
-std::optional<ThreadPermissionMode>
-Harness::cycleCurrentThreadPermissionMode() {
-  ThreadMetadata metadata;
-  {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    if (currentThreadId_.empty()) {
-      return std::nullopt;
-    }
-
-    metadata = threadManager_.getMetadata(currentThreadId_);
-    metadata.permissionMode = nextThreadPermissionMode(metadata.permissionMode);
-    threadManager_.updateMetadata(currentThreadId_, metadata);
-  }
-
-  emitEvent(
-      firmius::shared::ThreadMetadataUpdated{metadata.threadId, metadata});
-  return metadata.permissionMode;
+PermissionResponse
+Harness::requestPermissionEscalation(PermissionEscalationRequest request) {
+  return requestPermissionEscalationWithSuggestions(std::move(request), {});
 }
 
 PermissionResponse
-Harness::requestPermissionEscalation(PermissionEscalationRequest request) {
+Harness::requestPermissionEscalationWithSuggestions(
+    PermissionEscalationRequest request,
+    std::vector<PermissionSuggestion> suggestions) {
   auto pending = std::make_shared<PendingPermissionRequest>();
   {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (request.requestId.empty()) {
       request.requestId = "perm-" + std::to_string(++nextPermissionRequestId_);
     }
+
+    // Pack suggestions into the request's wire payload so the TUI sees
+    // the same `ruleId` list that the resolve path expects. Also keep
+    // the structured suggestions on the pending record for application.
+    request.suggestions.clear();
+    request.suggestions.reserve(suggestions.size());
+    for (const auto &s : suggestions) {
+      shared::PermissionSuggestionWire wire;
+      wire.label = s.label;
+      wire.explanation = s.explanation;
+      wire.ruleId = s.rule.id.empty()
+                        ? "sugg_" + std::to_string(request.suggestions.size())
+                        : s.rule.id;
+      wire.category = s.rule.category;
+      wire.decision = decisionToWire(s.rule.decision);
+      wire.scope = scopeToWire(s.rule.scope);
+      wire.comment = s.rule.comment;
+      wire.match = s.rule.match;
+      wire.defaultSelected = s.defaultSelected;
+      request.suggestions.push_back(std::move(wire));
+    }
+
     pending->request = request;
+    pending->suggestions = std::move(suggestions);
+    // Mirror wire ids back so resolve-with-rules can find them.
+    for (size_t i = 0;
+         i < pending->suggestions.size() && i < request.suggestions.size();
+         ++i) {
+      pending->suggestions[i].rule.id = request.suggestions[i].ruleId;
+    }
     pendingPermissionRequests_[request.requestId] = pending;
   }
 
@@ -2290,7 +2120,35 @@ Harness::requestPermissionEscalation(PermissionEscalationRequest request) {
   std::unique_lock<std::mutex> pendingLock(pending->mutex);
   pending->cv.wait(pendingLock, [&pending] { return pending->resolved; });
   PermissionResponse response = pending->response;
+  std::vector<std::string> selected = pending->selectedSuggestionIds;
+  std::vector<PermissionSuggestion> suggestionsCopy = pending->suggestions;
   pendingLock.unlock();
+
+  // Apply selected suggestions to the policy engine. Done outside the
+  // pending mutex so we don't hold it across writeUser() I/O.
+  if (!selected.empty()) {
+    // Tag picks with the active mode's id by default — that way
+    // switching modes wipes the user's choices, and "ask" mode
+    // accumulates a personal allowlist over time without polluting
+    // every other mode.
+    const auto activeModeId = policyEngine().activeMode().id;
+    for (const auto &id : selected) {
+      for (const auto &s : suggestionsCopy) {
+        if (s.rule.id != id) continue;
+        // Generate a stable persistent id; the wire id was synthetic.
+        PolicyRule persisted = s.rule;
+        persisted.id.clear();
+        // Session-scoped picks stay session-scoped (they don't survive
+        // restart). Global-scoped picks get tagged with the active
+        // mode so they only apply while that mode is selected.
+        if (persisted.scope == RuleScope::Global &&
+            persisted.modeId.empty()) {
+          persisted.modeId = activeModeId;
+        }
+        policyEngine().upsertRule(std::move(persisted));
+      }
+    }
+  }
 
   {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -2298,6 +2156,19 @@ Harness::requestPermissionEscalation(PermissionEscalationRequest request) {
   }
 
   return response;
+}
+
+PolicyEngine &Harness::policyEngine() {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  if (!policyEngine_) {
+    std::filesystem::path projectPath;
+    try {
+      projectPath = std::filesystem::current_path();
+    } catch (...) {}
+    policyEngine_ = std::make_unique<PolicyEngine>(
+        std::filesystem::path{}, projectPath);
+  }
+  return *policyEngine_;
 }
 
 bool Harness::resolvePermissionEscalation(const std::string &requestId,
@@ -2325,6 +2196,36 @@ bool Harness::resolvePermissionEscalation(const std::string &requestId,
   emitEvent(firmius::shared::PermissionEscalationResolved{
       pending->request.requestId, pending->request.threadId,
       pending->request.agentId, response});
+  return true;
+}
+
+bool Harness::resolvePermissionEscalationWithRules(
+    const std::string &requestId,
+    const std::vector<std::string> &suggestionIds) {
+  std::shared_ptr<PendingPermissionRequest> pending;
+  {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    auto it = pendingPermissionRequests_.find(requestId);
+    if (it == pendingPermissionRequests_.end()) {
+      return false;
+    }
+    pending = it->second;
+  }
+
+  {
+    std::lock_guard<std::mutex> pendingLock(pending->mutex);
+    if (pending->resolved) {
+      return false;
+    }
+    pending->resolved = true;
+    pending->response = PermissionResponse::AllowAlways;
+    pending->selectedSuggestionIds = suggestionIds;
+  }
+
+  pending->cv.notify_all();
+  emitEvent(firmius::shared::PermissionEscalationResolved{
+      pending->request.requestId, pending->request.threadId,
+      pending->request.agentId, PermissionResponse::AllowAlways});
   return true;
 }
 
@@ -2780,6 +2681,448 @@ Harness::redoEditUndoAction(const std::string &undoActionId) {
     return std::nullopt;
   }
   return Engine::instance().redoEditUndoAction(focusedAgentId_, undoActionId);
+}
+
+// ── Compound rewind ─────────────────────────────────────────────────────
+//
+// Atomically (well, best-effort atomically — see comment below) rolls back
+// transcript turns and any edit batches authored after `targetTurnId`.
+//
+// "Atomic" here is conditional on the pre-flight passing for every batch
+// we plan to undo. Once we start applying edit undos, each one commits to
+// disk individually; if a later step fails (eligibility flipped to blocked
+// because of a concurrent edit somewhere) we currently cannot re-apply
+// the earlier batches. We document this caveat in the result message and
+// arrange for the pre-flight to catch the common cases.
+//
+// Why not also pre-flight transcript undo? Because the transcript-undo
+// path doesn't expose an "evaluate" — it just succeeds or returns nullopt.
+// In practice it only fails when the agent is running or there's nothing
+// to undo, both of which we check separately.
+Harness::CompoundRewindResult
+Harness::compoundRewind(const std::string &threadId,
+                         const std::string &agentId,
+                         const std::string &targetTurnId,
+                         CompoundRewindMode mode) {
+  CompoundRewindResult result;
+
+  if (threadId.empty() || agentId.empty() || targetTurnId.empty()) {
+    result.errorMessage = "thread_id, agent_id, and target_turn_id are required";
+    return result;
+  }
+
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+
+  // ── Resolve the target turn and how many turns sit after it ──
+  //
+  // We deliberately don't call getAgentHistoryPtr() — that helper insists
+  // currentThreadId_ matches even when the caller already passed a
+  // threadId. compoundRewind is meant to be addressable for any thread
+  // (the daemon may invoke it for a thread that isn't the focused one),
+  // so we go straight through the in-memory agent first, then fall back
+  // to the thread manager keyed on the caller-supplied threadId.
+  std::shared_ptr<shared::AgentHistory> history;
+  if (auto agent = AgentRegistry::instance().getAgent(agentId)) {
+    auto inMemory = agent->getContext().history;
+    if (inMemory && !inMemory->turns.empty()) {
+      history = std::make_shared<shared::AgentHistory>(*inMemory);
+    }
+  }
+  if (!history) {
+    auto loaded = threadManager_.loadAgentHistory(threadId, agentId);
+    if (!loaded.turns.empty()) {
+      history = std::make_shared<shared::AgentHistory>(std::move(loaded));
+    }
+  }
+  if (!history || history->turns.empty()) {
+    result.errorMessage = "agent has no history";
+    return result;
+  }
+  int targetIdx = -1;
+  for (int i = 0; i < static_cast<int>(history->turns.size()); ++i) {
+    if (history->turns[i].turnId == targetTurnId) {
+      targetIdx = i;
+      break;
+    }
+  }
+  if (targetIdx < 0) {
+    result.errorMessage = "target turn not found in agent history";
+    return result;
+  }
+  // We rewind to BEFORE the target turn — that is, we discard the target
+  // turn itself plus everything after. (Claude Code-style: clicking "rewind
+  // to this message" rewinds the user message AND everything that came
+  // after, leaving the transcript ready for a fresh prompt.)
+  const int turnsAfter = static_cast<int>(history->turns.size()) - targetIdx;
+  if (turnsAfter <= 0) {
+    result.errorMessage = "nothing to rewind past target turn";
+    return result;
+  }
+
+  // ── Find the edit batches authored after the target turn ──
+  // The "after target turn" set is: any batch whose turnId is the target
+  // turn or any later turn. We use the turn index to gate, since batch
+  // turn IDs are stable strings keyed by the turn that authored them.
+  std::unordered_set<std::string> discardedTurnIds;
+  for (int i = targetIdx; i < static_cast<int>(history->turns.size()); ++i) {
+    discardedTurnIds.insert(history->turns[i].turnId);
+  }
+
+  shared::EditHistoryFilters filters;
+  filters.agentId = agentId;
+  filters.includeUndone = false;  // already-undone batches are not relevant
+  auto allBatches = Engine::instance().listAgentEditBatches(threadId, filters);
+
+  std::vector<shared::EditBatchSummary> targets;
+  for (const auto &batch : allBatches) {
+    if (discardedTurnIds.count(batch.turnId)) {
+      targets.push_back(batch);
+    }
+  }
+  // Newest first — we undo in reverse order so dependencies unwind cleanly.
+  std::sort(targets.begin(), targets.end(),
+            [](const auto &a, const auto &b) { return a.createdAt > b.createdAt; });
+
+  // ── Mode dispatch ──
+  const bool wantsCode = (mode == CompoundRewindMode::RestoreCode ||
+                          mode == CompoundRewindMode::RestoreCodeAndConversation);
+  const bool wantsTranscript = (mode == CompoundRewindMode::RestoreConversation ||
+                                mode == CompoundRewindMode::RestoreCodeAndConversation);
+
+  // ── Pre-flight: check every edit batch we plan to undo ──
+  // Build the set of batch ids we're collectively undoing so the
+  // eligibility blocker check doesn't reject an earlier batch on the
+  // grounds that a later same-turn batch is still applied — that
+  // later batch is also being undone in the same compound, so it's
+  // not a real blocker.
+  std::unordered_set<std::string> coUndoBatchIds;
+  for (const auto &batch : targets) {
+    coUndoBatchIds.insert(batch.editBatchId);
+  }
+  if (wantsCode) {
+    for (const auto &batch : targets) {
+      auto elig = Engine::instance().evaluateEditBatchUndo(
+          threadId, batch.editBatchId, coUndoBatchIds);
+      if (!elig.undoable) {
+        result.errorMessage = "edit batch " + batch.editBatchId + " is not undoable";
+        if (!elig.reason.empty()) {
+          result.errorMessage += ": " + elig.reason;
+        }
+        return result;
+      }
+    }
+  }
+
+  // ── Apply edit undos (newest first) ──
+  if (wantsCode) {
+    for (const auto &batch : targets) {
+      try {
+        auto undoAction = Engine::instance().undoEditBatch(agentId, batch.editBatchId);
+        if (undoAction.resultStatus !=
+            shared::EditUndoResultStatus::Succeeded) {
+          // The undo refused (most likely RejectedDiverged because the
+          // user tampered with a file post-creation). The action was
+          // still persisted with the rejection status, so a future
+          // redo / inspection has the audit trail. We treat this as a
+          // partial rewind: stop here, surface the reason.
+          result.applied = false;
+          result.errorMessage =
+              std::string("partial rewind: edit batch ") +
+              batch.editBatchId + " was not undoable (" +
+              undoAction.resultJson + ")";
+          return result;
+        }
+        result.editUndoActionIds.push_back(undoAction.undoActionId);
+      } catch (const std::exception &e) {
+        // Half-applied state: we already undid earlier batches. Surface the
+        // partial state rather than try to redo, which would compound the
+        // failure if any redo step also fails.
+        result.applied = false;
+        result.errorMessage =
+            std::string("partial rewind: failed undoing edit batch ") +
+            batch.editBatchId + ": " + e.what();
+        return result;
+      }
+    }
+  }
+
+  // ── Apply transcript undo ──
+  // We track whether transcript truncation actually happened. When it
+  // does, removedTurns / removedCount drive the redo payload. When the
+  // user picked code-only mode we still want to persist a
+  // TranscriptUndoAction so /redo can find the linked editUndoActionIds
+  // — without that record, the user's code-only undo is invisible to
+  // the redo picker. The action just has redoAvailable gated on
+  // whether we have anything to redo (turns OR edits).
+  std::vector<shared::AgentTurn> removedTurns;
+  int removedCount = 0;
+  if (wantsTranscript) {
+    // We deliberately DON'T route through Engine::undoAgentTurnsWithRedo
+    // here for two reasons:
+    //   1. It requires the agent to be registered in AgentRegistry. Lazy
+    //      thread loading means a freshly-resumed thread has the persisted
+    //      agent on disk but no live registration until the first send.
+    //   2. It calls applyReverseFileEdits() on the discarded turns, which
+    //      means "Restore conversation only" would also reverse files —
+    //      the opposite of what the user asked for. (Code restore is
+    //      explicit via the wantsCode branch above.)
+    //
+    // Instead we do an offline transcript-only undo:
+    //   * load the persisted history,
+    //   * snip the last `turnsAfter` turns,
+    //   * persist the resulting history via Journaler::rewriteJournal,
+    //   * write a TranscriptUndoAction so a future redo can replay it.
+    //
+    // The redo payload captures the discarded turns verbatim; we don't
+    // try to capture the engine-side aggregateMetrics deltas, which is
+    // the same trade-off Engine::undoAgentTurnsWithRedo has historically
+    // accepted.
+    std::vector<shared::AgentTurn> turns;
+    if (auto agent = AgentRegistry::instance().getAgent(agentId)) {
+      // Mirror the engine's writer-of-record. If the agent IS live we go
+      // through it so its in-memory history stays in sync.
+      auto loaded = agent->getMutableContext().history;
+      if (loaded) {
+        turns = loaded->turns;
+      }
+    }
+    if (turns.empty()) {
+      ThreadManager tm(ThreadManager::defaultBasePath());
+      auto loaded = tm.loadAgentHistory(threadId, agentId);
+      turns = std::move(loaded.turns);
+    }
+    if (turns.empty()) {
+      result.errorMessage = "transcript undo: no history to undo";
+      return result;
+    }
+
+    // We don't use HistoryEditor::undoTurns here — that helper has a
+    // safety floor that refuses to drop below 2 turns (it's designed
+    // for "undo last N" with a system+persona prelude assumption). The
+    // rewind UX explicitly chose a specific user-message turn to rewind
+    // TO, so we trust the targetIdx we computed earlier and just chop
+    // everything from targetIdx onward. The user's choice wins over
+    // the heuristic floor.
+    if (targetIdx < 0 ||
+        targetIdx >= static_cast<int>(turns.size())) {
+      result.errorMessage = "transcript undo: target turn index out of range";
+      return result;
+    }
+    removedTurns.assign(turns.begin() + targetIdx, turns.end());
+    turns.erase(turns.begin() + targetIdx, turns.end());
+    removedCount = static_cast<int>(removedTurns.size());
+
+    // Persist the new (truncated) history. Journaler::rewriteJournal
+    // performs a full rewrite of the agent's journal table.
+    try {
+      Journaler jnl(threadId, agentId);
+      jnl.rewriteJournal(turns);
+      jnl.flush();
+    } catch (const std::exception &e) {
+      result.errorMessage =
+          std::string("transcript undo: failed to persist new history: ") +
+          e.what();
+      return result;
+    }
+
+    // Sync the live agent's in-memory history if it exists, so the next
+    // /send doesn't replay the truncated tail.
+    if (auto agent = AgentRegistry::instance().getAgent(agentId)) {
+      if (agent->getMutableContext().history) {
+        agent->getMutableContext().history->turns = turns;
+      }
+    }
+  }
+
+  // ── Persist the TranscriptUndoAction ──
+  // We always write this when ANY work happened (transcript OR code).
+  // For code-only undos, the action has empty TranscriptRedoPayloads but
+  // a populated editUndoActionIds list — that's enough for /redo to find
+  // it and replay the edit redos. Without this record, code-only undos
+  // were invisible to the redo picker.
+  const bool didAnyWork = removedCount > 0 || !result.editUndoActionIds.empty();
+  if (didAnyWork) {
+    ThreadManager tm(ThreadManager::defaultBasePath());
+    shared::TranscriptUndoAction action;
+    action.undoActionId = shared::StringUtil::generateUuid();
+    action.threadId = threadId;
+    action.agentId = agentId;
+    action.scopeType = wantsTranscript ? "turns" : "edits_only";
+    action.scopeArgJson =
+        std::string("{\"count\":") + std::to_string(removedCount) + "}";
+    action.createdAt = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count());
+    // Redo is available if there's anything to redo: turns we captured
+    // OR edit batches we undid. A code-only undo has redoAvailable=true
+    // because /redo's edit-replay path can put the files back even
+    // though there are no turns to re-append.
+    action.redoAvailable = didAnyWork;
+    action.reason = "undone";
+    action.editUndoActionIds = result.editUndoActionIds;
+
+    std::vector<shared::TranscriptRedoPayload> payloads;
+    if (!removedTurns.empty()) {
+      shared::TranscriptRedoPayload payload;
+      payload.undoActionId = action.undoActionId;
+      payload.threadId = threadId;
+      payload.agentId = agentId;
+      payload.ordinal = 0;
+      payload.turns = std::move(removedTurns);
+      payloads.push_back(std::move(payload));
+    }
+    try {
+      tm.writeTranscriptUndoAction(threadId, action, payloads);
+    } catch (const std::exception &e) {
+      // Best-effort — the history is already truncated. Surface the error
+      // but don't pretend the rewind failed; the visible effect already
+      // happened.
+      result.errorMessage =
+          std::string("transcript undo: persisted history but failed to write "
+                      "redo action: ") +
+          e.what();
+    }
+
+    result.undoActionId = action.undoActionId;
+    result.turnsUndone = removedCount;
+  }
+
+  result.applied = true;
+  return result;
+}
+
+Harness::CompoundRedoResult
+Harness::compoundRedo(const std::string &threadId,
+                      const std::string &agentId,
+                      const std::string &undoActionId,
+                      CompoundRedoMode mode) {
+  CompoundRedoResult result;
+
+  if (threadId.empty() || agentId.empty() || undoActionId.empty()) {
+    result.errorMessage =
+        "thread_id, agent_id, and undo_action_id are required";
+    return result;
+  }
+
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  ThreadManager tm(ThreadManager::defaultBasePath());
+
+  // ── Resolve the undo action and its captured payload ──
+  auto undoAction = tm.findTranscriptUndoAction(threadId, undoActionId);
+  if (!undoAction.has_value()) {
+    result.errorMessage = "transcript undo action not found";
+    return result;
+  }
+  if (!undoAction->redoAvailable) {
+    result.errorMessage = "redo is no longer available for this undo action";
+    return result;
+  }
+  auto payloads = tm.loadTranscriptRedoPayloads(threadId, undoActionId);
+
+  const bool wantsCode = (mode == CompoundRedoMode::RestoreCode ||
+                          mode == CompoundRedoMode::RestoreCodeAndConversation);
+  const bool wantsTranscript =
+      (mode == CompoundRedoMode::RestoreConversation ||
+       mode == CompoundRedoMode::RestoreCodeAndConversation);
+
+  // ── Apply edit redos in original (forward) order ──
+  // The undo actions were recorded newest-first during compoundRewind, so
+  // to redo them we walk in reverse — the oldest edit batch redoes first,
+  // matching how the agent originally applied them. This matters when a
+  // chain edits the same file: the create must come back before the
+  // overwrite tries to land.
+  if (wantsCode) {
+    for (auto it = undoAction->editUndoActionIds.rbegin();
+         it != undoAction->editUndoActionIds.rend(); ++it) {
+      try {
+        auto redoAction = Engine::instance().redoEditUndoAction(agentId, *it);
+        if (!redoAction.has_value()) {
+          result.applied = false;
+          result.errorMessage =
+              std::string("partial redo: edit undo action ") + *it +
+              " was not redoable";
+          return result;
+        }
+        result.editRedoActionIds.push_back(redoAction->redoActionId);
+      } catch (const std::exception &e) {
+        result.applied = false;
+        result.errorMessage =
+            std::string("partial redo: failed redoing edit undo ") + *it +
+            ": " + e.what();
+        return result;
+      }
+    }
+  }
+
+  // ── Re-append captured turns ──
+  // Mirror compoundRewind's offline pattern: load history, append
+  // payload turns, persist via Journaler::rewriteJournal, sync the live
+  // agent's in-memory history if it exists. We deliberately avoid
+  // Engine paths that require AgentRegistry registration, for the same
+  // lazy-thread-loading reason as compoundRewind.
+  if (wantsTranscript && !payloads.empty()) {
+    std::vector<shared::AgentTurn> turns;
+    if (auto agent = AgentRegistry::instance().getAgent(agentId)) {
+      auto loaded = agent->getMutableContext().history;
+      if (loaded) {
+        turns = loaded->turns;
+      }
+    }
+    if (turns.empty()) {
+      auto loaded = tm.loadAgentHistory(threadId, agentId);
+      turns = std::move(loaded.turns);
+    }
+    int redone = 0;
+    // Sort payloads by ordinal so multi-payload actions reapply in the
+    // same order they were captured.
+    std::sort(payloads.begin(), payloads.end(),
+              [](const auto &a, const auto &b) {
+                return a.ordinal < b.ordinal;
+              });
+    for (const auto &payload : payloads) {
+      for (const auto &turn : payload.turns) {
+        turns.push_back(turn);
+        ++redone;
+      }
+    }
+
+    try {
+      Journaler jnl(threadId, agentId);
+      jnl.rewriteJournal(turns);
+      jnl.flush();
+    } catch (const std::exception &e) {
+      result.errorMessage =
+          std::string("transcript redo: failed to persist new history: ") +
+          e.what();
+      return result;
+    }
+
+    if (auto agent = AgentRegistry::instance().getAgent(agentId)) {
+      if (agent->getMutableContext().history) {
+        agent->getMutableContext().history->turns = turns;
+      }
+    }
+    result.turnsRedone = redone;
+  }
+
+  // ── Mark the undo action as no longer redoable ──
+  // Once the user redoes, the captured payload has been re-applied; we
+  // don't support double-redo so we flip the flag. The TranscriptRedoPayload
+  // rows are kept for audit but findTranscriptUndoAction will report
+  // redoAvailable=false next time.
+  try {
+    tm.markTranscriptUndoRedoAvailability(threadId, undoActionId, false);
+  } catch (const std::exception &e) {
+    // Non-fatal — the redo already happened on disk. Log via errorMessage
+    // so callers who care can surface it, but result.applied = true.
+    result.errorMessage =
+        std::string("redo applied but failed to mark availability: ") +
+        e.what();
+  }
+
+  result.applied = true;
+  return result;
 }
 
 void Harness::compactFocusedAgent() {

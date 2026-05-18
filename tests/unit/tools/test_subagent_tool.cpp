@@ -96,6 +96,7 @@ public:
   MOCK_METHOD(void, writeFile,
               (const std::string &, (const std::vector<uint8_t> &)),
               (override));
+  MOCK_METHOD(void, deleteFile, (const std::string &), (override));
   MOCK_METHOD(bool, exists, (const std::string &), (override));
   MOCK_METHOD(std::vector<FileInfo>, listDir, (const std::string &),
               (override));

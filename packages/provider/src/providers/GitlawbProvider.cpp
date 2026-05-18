@@ -1,5 +1,7 @@
 #include "providers/GitlawbProvider.hpp"
+#include <algorithm>
 #include <curl/curl.h>
+#include <map>
 #include <rapidjson/document.h>
 #include <string>
 
@@ -113,6 +115,41 @@ std::vector<shared::ModelInfo> GitlawbProvider::listModels() {
             }
 
             models.push_back(mi);
+        }
+    }
+
+    // Known-model metadata overrides. The Gitlawb /models endpoint returns
+    // model IDs but does not populate context windows, output limits, or
+    // capability flags reliably. We enrich each known id with the canonical
+    // metadata from xiaomi-mimo's published model definitions; unknown ids
+    // pass through as the API gave them.
+    struct MimoSpec {
+        std::uint32_t contextWindow;
+        std::uint32_t maxOutputTokens;
+        bool supportsReasoning;
+        bool supportsVision;
+    };
+    static const std::map<std::string, MimoSpec> kMimoSpecs = {
+        {"mimo-v2.5-pro", {1'000'000, 128'000, true, false}},
+        {"mimo-v2-pro",   {1'000'000, 128'000, true, false}},
+        {"mimo-v2.5",     {1'000'000, 128'000, true, true}},
+        {"mimo-v2-omni",  {  256'000, 128'000, true, true}},
+        {"mimo-v2-flash", {  256'000,  64'000, true, false}},
+    };
+    for (auto& mi : models) {
+        auto it = kMimoSpecs.find(mi.id);
+        if (it == kMimoSpecs.end()) continue;
+        const auto& spec = it->second;
+        if (mi.contextWindow == 0) mi.contextWindow = spec.contextWindow;
+        if (mi.maxOutputTokens == 0) mi.maxOutputTokens = spec.maxOutputTokens;
+        if (!mi.supportsReasoning && spec.supportsReasoning) {
+            mi.supportsReasoning = true;
+        }
+        if (spec.supportsVision) {
+            const bool hasImage = std::any_of(
+                mi.modalities.begin(), mi.modalities.end(),
+                [](const std::string& m) { return m == "image"; });
+            if (!hasImage) mi.modalities.push_back("image");
         }
     }
 

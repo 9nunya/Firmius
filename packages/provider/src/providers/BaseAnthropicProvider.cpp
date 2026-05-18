@@ -863,7 +863,12 @@ BaseAnthropicProvider::prepareRequestBody(const AgentHistory &history,
     }
   }
 
-  // Add system message if present
+  // Add system message if present.
+  // Token-caching pass: emit `system` as an array of content blocks (not
+  // a bare string) so we can attach `cache_control: {"type":"ephemeral"}`
+  // to the last block. This caches the system prompt across turns at no
+  // cost on hits (90% discount, 1.25x base on the first write). Per
+  // Anthropic docs, breakpoint goes on the LAST cacheable block.
   if (!systemMessages.empty()) {
     std::string systemContent;
     for (const auto &[role, text] : systemMessages) {
@@ -871,13 +876,30 @@ BaseAnthropicProvider::prepareRequestBody(const AgentHistory &history,
         systemContent += "\n\n";
       systemContent += text;
     }
-    d.AddMember("system", rapidjson::Value(systemContent.c_str(), a), a);
+    rapidjson::Value systemArr(rapidjson::kArrayType);
+    rapidjson::Value sysBlock(rapidjson::kObjectType);
+    sysBlock.AddMember("type", "text", a);
+    sysBlock.AddMember("text", rapidjson::Value(systemContent.c_str(), a), a);
+    rapidjson::Value cacheCtrl(rapidjson::kObjectType);
+    cacheCtrl.AddMember("type", "ephemeral", a);
+    sysBlock.AddMember("cache_control", cacheCtrl, a);
+    systemArr.PushBack(sysBlock, a);
+    d.AddMember("system", systemArr, a);
   }
 
-  // Add tools if present
+  // Add tools if present.
+  // Token-caching pass: tools are the most stable part of an agent
+  // session — they almost never change mid-conversation. Attach
+  // cache_control to the LAST tool definition so the entire tool block
+  // is cached across all turns. Anthropic's cache key matches by exact
+  // prefix through the marked block, so order stability matters: the
+  // tool list is iterated in opts.tools order which is whatever the
+  // ProviderOptions gave us. (Tool-list serialization stability is
+  // tracked separately under Tier 2 #8.)
   if (!opts.tools.empty()) {
     rapidjson::Value tools(rapidjson::kArrayType);
-    for (const auto &t : opts.tools) {
+    for (size_t i = 0; i < opts.tools.size(); ++i) {
+      const auto &t = opts.tools[i];
       rapidjson::Value tool(rapidjson::kObjectType);
       tool.AddMember("name", rapidjson::Value(t.name.c_str(), a), a);
       tool.AddMember("description", rapidjson::Value(t.description.c_str(), a),
@@ -889,6 +911,16 @@ BaseAnthropicProvider::prepareRequestBody(const AgentHistory &history,
         rapidjson::Value inputSchema;
         inputSchema.CopyFrom(schemaDoc, a);
         tool.AddMember("input_schema", inputSchema, a);
+      }
+
+      // Attach cache_control to the last tool only — Anthropic limits us
+      // to 4 cache breakpoints total per request and the per-block
+      // marker caches everything from the start of the request through
+      // that block.
+      if (i + 1 == opts.tools.size()) {
+        rapidjson::Value cacheCtrl(rapidjson::kObjectType);
+        cacheCtrl.AddMember("type", "ephemeral", a);
+        tool.AddMember("cache_control", cacheCtrl, a);
       }
 
       tools.PushBack(tool, a);

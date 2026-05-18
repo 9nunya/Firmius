@@ -63,6 +63,23 @@ struct AutocompleteMatch {
   bool isExact = false;
 };
 
+/// Result of parsing a partial slash-command input. Used by App to drive
+/// autocomplete: when `commandName` is non-empty AND there's a trailing
+/// space (or partial arg text) we're in arg-autocomplete mode for
+/// `currentArgIndex`. Otherwise we're still typing the command name.
+struct CommandInputPosition {
+  /// True iff the input starts with '/'.
+  bool isSlashInput = false;
+  /// The fully-typed command name if we've passed the first space, else "".
+  std::string commandName;
+  /// 0-based index of the arg currently being typed. -1 if still on the
+  /// command name or past the last declared arg.
+  int currentArgIndex = -1;
+  /// The text the user has typed so far for the current arg (everything
+  /// after the last space). May be empty (just typed the space).
+  std::string currentArgFilter;
+};
+
 // ── Command Manager ──
 
 class CommandManager {
@@ -77,6 +94,10 @@ public:
 
   /// Get autocomplete matches for a partial input (after the "/").
   std::vector<AutocompleteMatch> autocomplete(const std::string& partial) const;
+
+  /// Parse a raw input string (with leading '/') into a CommandInputPosition
+  /// describing whether the user is typing the command name or an arg value.
+  CommandInputPosition parsePosition(const std::string& input) const;
 
   /// Get a command by name.
   std::shared_ptr<ICommand> getCommand(const std::string& name) const;

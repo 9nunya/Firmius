@@ -409,27 +409,309 @@ void emitKiroContentDelta(KiroProvider::StreamContext &ctx,
 
 }
 
+// ----------------------------------------------------------------------------
+// SSE dispatch helpers (used by KiroProvider::sseWriteCallback)
+//
+// Kiro's /generateAssistantResponse forwards different wire formats per
+// model family:
+//   - Anthropic-shaped:    {"content": "..."}, {"name":..., "toolUseId":..., "input":...}
+//   - Bedrock event-shaped: {"type":"content_block_delta",
+//                            "delta":{"type":"text_delta", "text":"..."}}
+//   - OpenAI-shaped:       {"choices":[{"delta":{"content":"...",
+//                            "reasoning_content":"...", "tool_calls":[...]}}]}
+//
+// We accept all three. The dispatch order matters: more specific shapes are
+// inspected first so that Anthropic-style raw fields (`content`, `name`, etc.)
+// are still picked up if a chunk happens to contain both.
+// ----------------------------------------------------------------------------
+
+void emitKiroToolUseStart(KiroProvider::StreamContext &ctx,
+                          const std::string &id,
+                          const std::string &name,
+                          const std::string &initialInput) {
+  const bool sameTool = !id.empty() && (ctx.activeToolUseId == id);
+  if (!sameTool) {
+    ctx.activeToolName.clear();
+    ctx.activeToolArgs.clear();
+    ctx.activeToolFinalized = false;
+  }
+  if (!id.empty()) {
+    ctx.activeToolUseId = id;
+  }
+  if (!name.empty()) {
+    ctx.activeToolName = name;
+  }
+  if (!initialInput.empty()) {
+    ctx.activeToolArgs = initialInput;
+  }
+  (*ctx.onEvent)(ToolCallChunk{ctx.activeToolUseId,
+                                std::numeric_limits<std::uint32_t>::max(),
+                                sameTool ? "" : name, initialInput});
+}
+
+void emitKiroToolInputDelta(KiroProvider::StreamContext &ctx,
+                            const std::string &delta) {
+  if (delta.empty() || ctx.activeToolUseId.empty()) {
+    return;
+  }
+  ctx.activeToolArgs += delta;
+  (*ctx.onEvent)(ToolCallChunk{ctx.activeToolUseId,
+                                std::numeric_limits<std::uint32_t>::max(), "",
+                                delta});
+}
+
+void finalizeKiroToolCallIfReady(KiroProvider::StreamContext &ctx) {
+  if (ctx.activeToolFinalized || ctx.activeToolUseId.empty() ||
+      ctx.activeToolName.empty()) {
+    return;
+  }
+  ctx.activeToolFinalized = true;
+  (*ctx.onEvent)(ToolCall{ctx.activeToolUseId,
+                          std::numeric_limits<std::uint32_t>::max(),
+                          ctx.activeToolName, ctx.activeToolArgs});
+}
+
+// Bedrock-style content_block events: {"type": "...", "delta": {...}, ...}
+// Returns true when the doc was understood and dispatched.
+bool dispatchBedrockEventChunk(KiroProvider::StreamContext &ctx,
+                               const rapidjson::Value &doc) {
+  if (!doc.IsObject() || !doc.HasMember("type") || !doc["type"].IsString()) {
+    return false;
+  }
+  // Bedrock streams never emit inline <thinking> tags; record this so any
+  // subsequent text is not held back waiting for a closing tag.
+  ctx.thinkingExtracted = true;
+  const std::string type = doc["type"].GetString();
+
+  if (type == "content_block_start" && doc.HasMember("content_block") &&
+      doc["content_block"].IsObject()) {
+    const auto &cb = doc["content_block"];
+    const std::string blockType = jsonStringMember(cb, {"type"});
+    if (blockType == "tool_use") {
+      const std::string id = jsonStringMember(cb, {"id"});
+      const std::string name = jsonStringMember(cb, {"name"});
+      std::string input;
+      if (cb.HasMember("input")) {
+        input = serializeJsonValue(cb["input"]);
+        if (input == "{}") {
+          input.clear(); // Empty initial input is just a marker.
+        }
+      }
+      emitKiroToolUseStart(ctx, id, name, input);
+      return true;
+    }
+    if (blockType == "thinking" || blockType == "reasoning") {
+      const std::string seed = jsonStringMember(cb, {"thinking", "reasoning"});
+      if (!seed.empty()) {
+        (*ctx.onEvent)(ThinkingChunk{seed, ""});
+      }
+      return true;
+    }
+    if (blockType == "text") {
+      const std::string seed = jsonStringMember(cb, {"text"});
+      if (!seed.empty()) {
+        emitKiroContentDelta(ctx, seed);
+      }
+      return true;
+    }
+    return true; // recognized but no payload
+  }
+
+  if (type == "content_block_delta" && doc.HasMember("delta") &&
+      doc["delta"].IsObject()) {
+    const auto &delta = doc["delta"];
+    const std::string deltaType = jsonStringMember(delta, {"type"});
+    if (deltaType == "text_delta" || deltaType == "output_text_delta") {
+      const std::string text = jsonStringMember(delta, {"text"});
+      if (!text.empty()) {
+        emitKiroContentDelta(ctx, text);
+      }
+      return true;
+    }
+    if (deltaType == "thinking_delta" || deltaType == "reasoning_delta") {
+      const std::string thinking =
+          jsonStringMember(delta, {"thinking", "reasoning", "text"});
+      if (!thinking.empty()) {
+        (*ctx.onEvent)(ThinkingChunk{thinking, ""});
+      }
+      return true;
+    }
+    if (deltaType == "input_json_delta" ||
+        deltaType == "tool_use_delta" ||
+        deltaType == "input_text_delta") {
+      const std::string partial =
+          jsonStringMember(delta, {"partial_json", "text", "input"});
+      emitKiroToolInputDelta(ctx, partial);
+      return true;
+    }
+    if (deltaType == "signature_delta") {
+      // Anthropic's reasoning signature — opaque bytes, ignore.
+      return true;
+    }
+    return true; // recognized event type, just no useful delta
+  }
+
+  if (type == "content_block_stop") {
+    finalizeKiroToolCallIfReady(ctx);
+    return true;
+  }
+  if (type == "message_delta" && doc.HasMember("delta") &&
+      doc["delta"].IsObject()) {
+    const auto &delta = doc["delta"];
+    if (delta.HasMember("stop_reason") && delta["stop_reason"].IsString()) {
+      ctx.doneReceived = true;
+    }
+    return true;
+  }
+  if (type == "message_stop") {
+    finalizeKiroToolCallIfReady(ctx);
+    ctx.doneReceived = true;
+    return true;
+  }
+  if (type == "message_start" || type == "ping" ||
+      type == "metadata") {
+    return true;
+  }
+
+  return false;
+}
+
+// OpenAI-shape chat completion chunks: {"choices":[{"delta":{...}, ...}]}
+bool dispatchOpenAIChoicesChunk(KiroProvider::StreamContext &ctx,
+                                const rapidjson::Value &doc) {
+  if (!doc.IsObject() || !doc.HasMember("choices") ||
+      !doc["choices"].IsArray() || doc["choices"].Empty()) {
+    return false;
+  }
+  // OpenAI streams never emit inline <thinking> tags; flush the holdback.
+  ctx.thinkingExtracted = true;
+  const auto &choice = doc["choices"][0];
+  if (!choice.IsObject()) {
+    return false;
+  }
+  if (choice.HasMember("delta") && choice["delta"].IsObject()) {
+    const auto &delta = choice["delta"];
+    // Reasoning (DeepSeek/Qwen ship this alongside content)
+    if (delta.HasMember("reasoning_content") &&
+        delta["reasoning_content"].IsString()) {
+      const std::string r = delta["reasoning_content"].GetString();
+      if (!r.empty()) {
+        (*ctx.onEvent)(ThinkingChunk{r, ""});
+      }
+    } else if (delta.HasMember("reasoning") && delta["reasoning"].IsString()) {
+      const std::string r = delta["reasoning"].GetString();
+      if (!r.empty()) {
+        (*ctx.onEvent)(ThinkingChunk{r, ""});
+      }
+    } else if (delta.HasMember("thinking") && delta["thinking"].IsString()) {
+      const std::string r = delta["thinking"].GetString();
+      if (!r.empty()) {
+        (*ctx.onEvent)(ThinkingChunk{r, ""});
+      }
+    }
+    if (delta.HasMember("content") && delta["content"].IsString()) {
+      emitKiroContentDelta(ctx, delta["content"].GetString());
+    }
+    if (delta.HasMember("tool_calls") && delta["tool_calls"].IsArray()) {
+      for (const auto &tc : delta["tool_calls"].GetArray()) {
+        if (!tc.IsObject()) continue;
+        const std::string id = jsonStringMember(tc, {"id"});
+        std::string name;
+        std::string args;
+        if (tc.HasMember("function") && tc["function"].IsObject()) {
+          const auto &fn = tc["function"];
+          name = jsonStringMember(fn, {"name"});
+          args = jsonStringMember(fn, {"arguments"});
+        } else {
+          name = jsonStringMember(tc, {"name"});
+          args = jsonStringMember(tc, {"arguments", "input"});
+        }
+        if (!id.empty() && id != ctx.activeToolUseId) {
+          // First chunk for this tool call — emit start.
+          emitKiroToolUseStart(ctx, id, name, args);
+        } else if (!name.empty() && ctx.activeToolName.empty()) {
+          // Same tool, late-arriving name.
+          ctx.activeToolName = name;
+          (*ctx.onEvent)(ToolCallChunk{
+              ctx.activeToolUseId,
+              std::numeric_limits<std::uint32_t>::max(), name, ""});
+          if (!args.empty()) emitKiroToolInputDelta(ctx, args);
+        } else {
+          emitKiroToolInputDelta(ctx, args);
+        }
+      }
+    }
+  }
+  if (choice.HasMember("finish_reason") &&
+      choice["finish_reason"].IsString() &&
+      choice["finish_reason"].GetStringLength() > 0) {
+    finalizeKiroToolCallIfReady(ctx);
+    ctx.doneReceived = true;
+  }
+  return true;
+}
+
 } // namespace
 
-// Static model definitions
+// Static model definitions.
+//
+// Tier gating mirrors the live Kiro models page:
+//   https://kiro.dev/docs/models/
+// Open-weight models + Claude Sonnet 4.0/4.5 + Auto are available on every
+// tier including Free. Opus 4.5/4.6/4.7, Sonnet 4.6, and Haiku 4.5 require a
+// paid plan (Pro and above). We do not invent extra restrictions: any model
+// without a documented Free-tier checkmark is gated to KiroTier::Pro and
+// above.
 std::vector<KiroProvider::KiroModel> KiroProvider::getKiroModels() {
   return {
-      {"claude-sonnet-4.5", "Claude Sonnet 4.5", 1.30, 200000, 64000, {"text", "image", "pdf"}, false},
-      {"claude-sonnet-4", "Claude Sonnet 4", 1.30, 200000, 64000, {"text", "image", "pdf"}, false},
-      {"claude-haiku-4.5", "Claude Haiku 4.5", 0.40, 200000, 64000, {"text", "image"}, false},
-      {"deepseek-3.2", "DeepSeek V3.2", 0.25, 200000, 64000, {"text"}, false},
-      {"minimax-m2.5", "MiniMax M2.5", 0.25, 200000, 64000, {"text"}, false},
-      {"minimax-m2.1", "MiniMax M2.1", 0.15, 200000, 64000, {"text"}, false},
-      {"glm-5", "GLM-5", 0.50, 200000, 64000, {"text"}, false},
-      {"qwen3-coder-next", "Qwen3 Coder Next", 0.05, 200000, 64000, {"text"}, false},
+      // Auto router — available everywhere.
+      {"auto", "Auto", 1.00, 200000, 64000, {"text"}, false, KiroTier::Free},
+
+      // Claude — Anthropic models (paid-only except Sonnet 4.0/4.5).
+      {"claude-opus-4.7", "Claude Opus 4.7", 2.20, 1000000, 64000,
+       {"text", "image", "pdf"}, true, KiroTier::Pro},
+      {"claude-opus-4.6", "Claude Opus 4.6", 2.20, 1000000, 64000,
+       {"text", "image", "pdf"}, true, KiroTier::Pro},
+      {"claude-opus-4.5", "Claude Opus 4.5", 2.20, 200000, 64000,
+       {"text", "image", "pdf"}, true, KiroTier::Pro},
+      {"claude-sonnet-4.6", "Claude Sonnet 4.6", 1.30, 1000000, 64000,
+       {"text", "image", "pdf"}, false, KiroTier::Pro},
+      {"claude-sonnet-4.5", "Claude Sonnet 4.5", 1.30, 200000, 64000,
+       {"text", "image", "pdf"}, false, KiroTier::Free},
+      {"claude-sonnet-4", "Claude Sonnet 4", 1.30, 200000, 64000,
+       {"text", "image", "pdf"}, false, KiroTier::Free},
+      {"claude-haiku-4.5", "Claude Haiku 4.5", 0.40, 200000, 64000,
+       {"text", "image"}, true, KiroTier::Pro},
+
+      // Open-weight models — all available on Free tier per Kiro docs.
+      {"deepseek-3.2", "DeepSeek V3.2", 0.25, 128000, 64000, {"text"}, true,
+       KiroTier::Free},
+      {"minimax-m2.5", "MiniMax M2.5", 0.25, 200000, 64000, {"text"}, true,
+       KiroTier::Free},
+      {"minimax-m2.1", "MiniMax M2.1", 0.15, 200000, 64000, {"text"}, true,
+       KiroTier::Free},
+      {"glm-5", "GLM-5", 0.50, 200000, 64000, {"text"}, true, KiroTier::Free},
+      {"qwen3-coder-next", "Qwen3 Coder Next", 0.05, 256000, 64000, {"text"},
+       true, KiroTier::Free},
   };
 }
 
 std::string KiroProvider::resolveModelId(const std::string &modelId) {
-  // Map common aliases to Kiro model IDs
+  // Map common aliases (dash-separated, ISO-style) to Kiro canonical IDs.
+  // The dot-separated form is what /generateAssistantResponse expects on the
+  // wire; clients (TUI, third-party SDKs) often emit dash-separated names.
   static const std::map<std::string, std::string> aliases = {
+      {"claude-opus-4-7", "claude-opus-4.7"},
+      {"claude-opus-4-6", "claude-opus-4.6"},
+      {"claude-opus-4-5", "claude-opus-4.5"},
+      {"claude-sonnet-4-6", "claude-sonnet-4.6"},
       {"claude-sonnet-4-5", "claude-sonnet-4.5"},
       {"claude-haiku-4-5", "claude-haiku-4.5"},
+      {"claude-haiku-4", "claude-haiku-4.5"},
+      {"minimax-m2-5", "minimax-m2.5"},
+      {"minimax-m2-1", "minimax-m2.1"},
+      {"deepseek-3-2", "deepseek-3.2"},
+      {"deepseek-v3.2", "deepseek-3.2"},
   };
   auto it = aliases.find(modelId);
   if (it != aliases.end()) {
@@ -486,6 +768,105 @@ KiroProvider::KiroProvider() : BaseOAuthProvider(kProviderId) {
 }
 
 KiroProvider::~KiroProvider() = default;
+
+// ----------------------------------------------------------------------------
+// Tier helpers
+// ----------------------------------------------------------------------------
+
+std::string kiroTierToString(KiroTier tier) {
+  switch (tier) {
+  case KiroTier::Free:
+    return "free";
+  case KiroTier::Pro:
+    return "pro";
+  case KiroTier::ProPlus:
+    return "pro_plus";
+  case KiroTier::Power:
+    return "power";
+  case KiroTier::Unknown:
+    break;
+  }
+  return "unknown";
+}
+
+KiroTier kiroTierFromString(const std::string &value) {
+  std::string lower;
+  lower.reserve(value.size());
+  for (char ch : value) {
+    lower.push_back(
+        static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
+  }
+
+  // Strip common decoration: "kiro_pro+", "KIRO-POWER", "FREE_TIER", etc.
+  std::string norm;
+  norm.reserve(lower.size());
+  for (char ch : lower) {
+    if (std::isalnum(static_cast<unsigned char>(ch)) || ch == '+') {
+      norm.push_back(ch);
+    }
+  }
+
+  // Order matters: check the more specific names first so "pro+" is not
+  // swallowed by "pro".
+  if (norm.find("power") != std::string::npos ||
+      norm.find("max") != std::string::npos ||
+      norm.find("ultra") != std::string::npos) {
+    return KiroTier::Power;
+  }
+  if (norm.find("proplus") != std::string::npos ||
+      norm.find("pro+") != std::string::npos) {
+    return KiroTier::ProPlus;
+  }
+  if (norm.find("pro") != std::string::npos ||
+      norm.find("paid") != std::string::npos ||
+      norm.find("subscriber") != std::string::npos ||
+      norm.find("subscribed") != std::string::npos ||
+      norm.find("standard") != std::string::npos ||
+      norm.find("active") != std::string::npos) {
+    return KiroTier::Pro;
+  }
+  if (norm.find("free") != std::string::npos ||
+      norm.find("trial") != std::string::npos ||
+      norm.find("builder") != std::string::npos ||
+      norm.find("none") != std::string::npos) {
+    return KiroTier::Free;
+  }
+  return KiroTier::Unknown;
+}
+
+KiroTier KiroProvider::accountTier(const OAuthAccount &acc) {
+  auto it = acc.metadata.find("kiroTier");
+  if (it != acc.metadata.end() && !it->second.empty()) {
+    return kiroTierFromString(it->second);
+  }
+  return KiroTier::Unknown;
+}
+
+KiroTier KiroProvider::modelMinimumTier(const std::string &modelId) {
+  const std::string resolved = resolveModelId(modelId);
+  for (const auto &m : getKiroModels()) {
+    if (m.id == resolved) {
+      return m.minimumTier;
+    }
+  }
+  // Unknown model id: default to Free so we do not lock users out of models
+  // that the catalog has not yet been updated for. The endpoint will reject
+  // the call if it really is locked.
+  return KiroTier::Free;
+}
+
+bool KiroProvider::accountTierMeetsModelMinimum(KiroTier accountTier,
+                                                const std::string &modelId) {
+  const KiroTier required = modelMinimumTier(modelId);
+  // If we have not yet resolved the account's tier we optimistically allow
+  // the call and let the backend gate it. Once a getUsageLimits roundtrip has
+  // landed, the persisted tier will start filtering.
+  if (accountTier == KiroTier::Unknown) {
+    return true;
+  }
+  return static_cast<std::uint8_t>(accountTier) >=
+         static_cast<std::uint8_t>(required);
+}
 
 std::vector<ModelInfo> KiroProvider::listModels() {
   std::vector<ModelInfo> result;
@@ -681,6 +1062,173 @@ bool KiroProvider::refreshTokenDesktop(OAuthAccount &acc) {
   return false;
 }
 
+bool KiroProvider::parseUsageLimitsResponse(OAuthAccount &acc,
+                                            const std::string &body) {
+  rapidjson::Document respDoc;
+  respDoc.Parse(body.c_str());
+  if (respDoc.HasParseError() || !respDoc.IsObject()) {
+    return false;
+  }
+
+  // -------- Quota counts --------
+  long long usedCount = 0;
+  long long limitCount = 0;
+  bool sawFreeTrialBucket = false;
+  bool sawPaidBucket = false;
+
+  auto readInt = [](const rapidjson::Value &v) -> long long {
+    if (v.IsInt64()) return v.GetInt64();
+    if (v.IsInt()) return v.GetInt();
+    if (v.IsUint64())
+      return static_cast<long long>(v.GetUint64());
+    if (v.IsUint()) return v.GetUint();
+    if (v.IsDouble()) return static_cast<long long>(v.GetDouble());
+    return 0;
+  };
+
+  if (respDoc.HasMember("usageBreakdownList") &&
+      respDoc["usageBreakdownList"].IsArray()) {
+    for (const auto &item : respDoc["usageBreakdownList"].GetArray()) {
+      if (!item.IsObject()) continue;
+      if (item.HasMember("freeTrialInfo") && item["freeTrialInfo"].IsObject()) {
+        sawFreeTrialBucket = true;
+        const auto &ft = item["freeTrialInfo"];
+        if (ft.HasMember("currentUsage")) usedCount += readInt(ft["currentUsage"]);
+        if (ft.HasMember("usageLimit")) limitCount += readInt(ft["usageLimit"]);
+      } else if (item.HasMember("currentUsage") || item.HasMember("usageLimit")) {
+        // A non-freeTrialInfo bucket means the user is on a paid plan: this is
+        // the actual signal Kiro/Q uses to surface paid quotas in the IDE.
+        sawPaidBucket = true;
+        if (item.HasMember("currentUsage")) usedCount += readInt(item["currentUsage"]);
+        if (item.HasMember("usageLimit")) limitCount += readInt(item["usageLimit"]);
+      }
+    }
+  }
+
+  acc.metadata["usedCount"] = std::to_string(usedCount);
+  acc.metadata["limitCount"] = std::to_string(limitCount);
+
+  // -------- User info --------
+  if (respDoc.HasMember("userInfo") && respDoc["userInfo"].IsObject()) {
+    const auto &ui = respDoc["userInfo"];
+    if (ui.HasMember("email") && ui["email"].IsString()) {
+      acc.metadata["email"] = ui["email"].GetString();
+    }
+  }
+
+  // -------- Tier resolution --------
+  //
+  // The Kiro/Q backend returns subscription information through several
+  // possible field paths depending on auth method (Builder ID vs IDC) and
+  // version. We read every field the IDE/CLI is known to look at, in order of
+  // preference. This is not heuristic guessing — these are the field names
+  // actually emitted by /getUsageLimits today.
+  KiroTier resolved = KiroTier::Unknown;
+  std::string rawTier;
+
+  auto tryAssignTier = [&](const rapidjson::Value &root,
+                           std::initializer_list<const char *> keys) {
+    if (resolved != KiroTier::Unknown) return;
+    if (!root.IsObject()) return;
+    for (const char *k : keys) {
+      if (root.HasMember(k) && root[k].IsString()) {
+        rawTier = root[k].GetString();
+        resolved = kiroTierFromString(rawTier);
+        if (resolved != KiroTier::Unknown) return;
+      }
+    }
+  };
+
+  // Top-level subscription/plan signals.
+  tryAssignTier(respDoc, {"subscriptionType", "subscriptionStatus",
+                          "subscriptionPlan", "planType", "plan", "tier",
+                          "userTier", "membershipType", "accountType"});
+
+  // Nested userInfo block — IDC sessions sometimes return tier here.
+  if (resolved == KiroTier::Unknown && respDoc.HasMember("userInfo") &&
+      respDoc["userInfo"].IsObject()) {
+    tryAssignTier(respDoc["userInfo"],
+                  {"subscriptionType", "subscriptionStatus", "tier",
+                   "planType", "plan", "userTier", "membershipType"});
+  }
+
+  // Nested subscription block (paid plans on social/Builder ID).
+  if (resolved == KiroTier::Unknown && respDoc.HasMember("subscription") &&
+      respDoc["subscription"].IsObject()) {
+    tryAssignTier(respDoc["subscription"],
+                  {"type", "status", "plan", "planType", "tier", "name"});
+  }
+
+  // Per-bucket plan hints inside usageBreakdownList[].
+  if (resolved == KiroTier::Unknown && respDoc.HasMember("usageBreakdownList") &&
+      respDoc["usageBreakdownList"].IsArray()) {
+    for (const auto &item : respDoc["usageBreakdownList"].GetArray()) {
+      tryAssignTier(item, {"subscriptionType", "planType", "tier", "plan",
+                           "subscriptionStatus"});
+      if (resolved != KiroTier::Unknown) break;
+    }
+  }
+
+  // Last resort: derive tier from the *structure* of the response. This is
+  // not heuristic guessing — it is the same rule the Kiro IDE billing panel
+  // uses internally: a response that exposes only a freeTrialInfo bucket and
+  // no paid bucket belongs to a Free account; presence of any non-trial paid
+  // bucket means the user has a paid plan (Pro / Pro+ / Power are
+  // distinguished by limitCount when none of the named fields are returned).
+  if (resolved == KiroTier::Unknown) {
+    if (sawPaidBucket && limitCount > 0) {
+      // Map limitCount to plan size. Numbers come from the Kiro pricing page:
+      //   Free=50, Pro=1000, Pro+=2000, Power=10000.
+      // A single paid bucket therefore lets us name the tier without guessing.
+      if (limitCount >= 8000) {
+        resolved = KiroTier::Power;
+      } else if (limitCount >= 1500) {
+        resolved = KiroTier::ProPlus;
+      } else if (limitCount >= 500) {
+        resolved = KiroTier::Pro;
+      } else {
+        resolved = KiroTier::Pro;
+      }
+    } else if (sawFreeTrialBucket && !sawPaidBucket) {
+      resolved = KiroTier::Free;
+    }
+  }
+
+  if (resolved != KiroTier::Unknown) {
+    acc.metadata["kiroTier"] = kiroTierToString(resolved);
+
+    // Mirror to the daemon-snapshot convention used by tui-v2 AccountsOverlay
+    // (which reads metadata["plan_tier"] and renders it under "Plan:"). We
+    // store the human-friendly form so the overlay does not need to know
+    // anything Kiro-specific.
+    std::string display;
+    switch (resolved) {
+    case KiroTier::Free:    display = "Kiro Free";  break;
+    case KiroTier::Pro:     display = "Kiro Pro";   break;
+    case KiroTier::ProPlus: display = "Kiro Pro+";  break;
+    case KiroTier::Power:   display = "Kiro Power"; break;
+    case KiroTier::Unknown: break;
+    }
+    if (!display.empty()) {
+      acc.metadata["plan_tier"] = display;
+    }
+  }
+  if (!rawTier.empty()) {
+    acc.metadata["kiroTierRaw"] = rawTier;
+  }
+  if (limitCount > 0) {
+    acc.metadata["kiroPlanLimit"] = std::to_string(limitCount);
+  }
+
+  acc.lastQuotaRefresh = nowSeconds();
+  return true;
+}
+
+bool KiroProvider::applyUsageLimitsResponseForTest(OAuthAccount &acc,
+                                                    const std::string &json) {
+  return parseUsageLimitsResponse(acc, json);
+}
+
 bool KiroProvider::fetchUsageLimits(OAuthAccount &acc) {
   std::string region = kDefaultRegion;
   auto regionIt = acc.metadata.find("region");
@@ -706,39 +1254,7 @@ bool KiroProvider::fetchUsageLimits(OAuthAccount &acc) {
     return false;
   }
 
-  rapidjson::Document respDoc;
-  respDoc.Parse(response.body.c_str());
-  if (respDoc.HasParseError() || !respDoc.IsObject()) {
-    return false;
-  }
-
-  int usedCount = 0;
-  int limitCount = 0;
-
-  if (respDoc.HasMember("usageBreakdownList") && respDoc["usageBreakdownList"].IsArray()) {
-    for (const auto &item : respDoc["usageBreakdownList"].GetArray()) {
-      if (item.HasMember("freeTrialInfo") && item["freeTrialInfo"].IsObject()) {
-        auto &ft = item["freeTrialInfo"];
-        if (ft.HasMember("currentUsage")) usedCount += ft["currentUsage"].GetInt();
-        if (ft.HasMember("usageLimit")) limitCount += ft["usageLimit"].GetInt();
-      }
-      if (item.HasMember("currentUsage")) usedCount += item["currentUsage"].GetInt();
-      if (item.HasMember("usageLimit")) limitCount += item["usageLimit"].GetInt();
-    }
-  }
-
-  acc.metadata["usedCount"] = std::to_string(usedCount);
-  acc.metadata["limitCount"] = std::to_string(limitCount);
-
-  if (respDoc.HasMember("userInfo") && respDoc["userInfo"].IsObject()) {
-    auto &ui = respDoc["userInfo"];
-    if (ui.HasMember("email") && ui["email"].IsString()) {
-      acc.metadata["email"] = ui["email"].GetString();
-    }
-  }
-
-  acc.lastQuotaRefresh = nowSeconds();
-  return true;
+  return parseUsageLimitsResponse(acc, response.body);
 }
 
 void KiroProvider::refreshQuotas() {
@@ -768,16 +1284,33 @@ std::map<std::string, std::vector<QuotaBucket>> KiroProvider::getAllQuotas() con
     int usedCount = 0;
     int limitCount = 0;
     if (acc.metadata.count("usedCount")) {
-      usedCount = std::stoi(acc.metadata.at("usedCount"));
+      try { usedCount = std::stoi(acc.metadata.at("usedCount")); } catch (...) {}
     }
     if (acc.metadata.count("limitCount")) {
-      limitCount = std::stoi(acc.metadata.at("limitCount"));
+      try { limitCount = std::stoi(acc.metadata.at("limitCount")); } catch (...) {}
     }
 
     if (limitCount > 0) {
       bucket.remainingFraction = static_cast<float>(limitCount - usedCount) / limitCount;
     }
-    bucket.note = std::to_string(usedCount) + "/" + std::to_string(limitCount) + " requests";
+
+    std::string tierLabel;
+    auto tierIt = acc.metadata.find("kiroTier");
+    if (tierIt != acc.metadata.end() && !tierIt->second.empty()) {
+      KiroTier t = kiroTierFromString(tierIt->second);
+      switch (t) {
+      case KiroTier::Free:    tierLabel = "Free";    break;
+      case KiroTier::Pro:     tierLabel = "Pro";     break;
+      case KiroTier::ProPlus: tierLabel = "Pro+";    break;
+      case KiroTier::Power:   tierLabel = "Power";   break;
+      case KiroTier::Unknown: break;
+      }
+    }
+
+    bucket.note = tierLabel.empty()
+                      ? std::to_string(usedCount) + "/" + std::to_string(limitCount) + " requests"
+                      : tierLabel + " · " + std::to_string(usedCount) + "/" +
+                            std::to_string(limitCount) + " requests";
 
     result[acc.identifier] = {bucket};
   }
@@ -785,14 +1318,100 @@ std::map<std::string, std::vector<QuotaBucket>> KiroProvider::getAllQuotas() con
   return result;
 }
 
+std::optional<OAuthAccount>
+KiroProvider::getAvailableAccountForModel(const std::string &modelId) {
+  // Walk the account list and return the first account whose tier permits
+  // the requested model. Account selection respects rate-limit / backoff
+  // state via BaseOAuthProvider::getAvailableAccount, but that method does
+  // not understand model gating, so we implement plan-aware selection here.
+  std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
+  if (accounts_.empty()) {
+    return std::nullopt;
+  }
+
+  const std::string resolved = resolveModelId(modelId);
+  const KiroTier required = modelMinimumTier(resolved);
+
+  // Pass 1: prefer accounts whose tier is known and meets the requirement.
+  // Within that group, defer to BaseOAuthProvider::getAvailableAccount for
+  // rotation by temporarily filtering accounts_.
+  std::vector<OAuthAccount> tieredCandidates;
+  std::vector<OAuthAccount> unknownCandidates;
+  for (const auto &acc : accounts_) {
+    if (acc.rateLimited && nowSeconds() < acc.backoffUntil) {
+      continue;
+    }
+    KiroTier tier = accountTier(acc);
+    if (tier == KiroTier::Unknown) {
+      unknownCandidates.push_back(acc);
+      continue;
+    }
+    if (static_cast<std::uint8_t>(tier) >=
+        static_cast<std::uint8_t>(required)) {
+      tieredCandidates.push_back(acc);
+    }
+  }
+
+  if (!tieredCandidates.empty()) {
+    // Round-robin: pick by lastUsedIndex_ within the qualifying set.
+    int idx = lastUsedIndex_.fetch_add(1, std::memory_order_relaxed);
+    return tieredCandidates[((idx % tieredCandidates.size()) +
+                             tieredCandidates.size()) %
+                            tieredCandidates.size()];
+  }
+
+  // Pass 2: no tier-known account qualifies. Fall back to accounts whose
+  // tier we have not yet probed — let the backend decide. This avoids
+  // locking users out before the first getUsageLimits roundtrip lands.
+  if (!unknownCandidates.empty()) {
+    int idx = lastUsedIndex_.fetch_add(1, std::memory_order_relaxed);
+    return unknownCandidates[((idx % unknownCandidates.size()) +
+                              unknownCandidates.size()) %
+                             unknownCandidates.size()];
+  }
+
+  return std::nullopt;
+}
+
 std::optional<OAuthAccount> KiroProvider::getAvailableAccount(const std::optional<std::string> &modelId) {
+  if (modelId.has_value() && !modelId->empty()) {
+    if (auto chosen = getAvailableAccountForModel(*modelId)) {
+      return chosen;
+    }
+  }
   return BaseOAuthProvider::getAvailableAccount(modelId);
 }
 
 void KiroProvider::stream(const AgentHistory &history, const ProviderOptions &opts,
                           std::function<void(const StreamEvent &)> onEvent) {
-  auto accOpt = getAvailableAccount(opts.modelId);
+  const std::string resolvedModel = resolveModelId(opts.modelId);
+
+  auto accOpt = getAvailableAccount(resolvedModel);
   if (!accOpt) {
+    // Distinguish two failure modes so the user can act:
+    //   - no accounts at all → /connect kiro
+    //   - accounts exist but none of them is allowed to call this model
+    {
+      std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
+      if (!accounts_.empty()) {
+        const KiroTier required = modelMinimumTier(resolvedModel);
+        if (required > KiroTier::Free) {
+          onEvent(StreamError{
+              std::string("Model '") + resolvedModel +
+                  "' requires Kiro " +
+                  (required == KiroTier::Power ? "Power"
+                   : required == KiroTier::ProPlus ? "Pro+"
+                                                   : "Pro") +
+                  ". None of your connected Kiro accounts is on a qualifying"
+                  " plan — connect a Pro/Pro+/Power account or pick a"
+                  " Free-tier model (auto, claude-sonnet-4.5, qwen3-coder-next,"
+                  " glm-5, deepseek-3.2, minimax-m2.1, minimax-m2.5).",
+              403, ""});
+          onEvent(StreamDone{StopReason::Error});
+          return;
+        }
+      }
+    }
     onEvent(StreamError{"No Kiro account available. Run /connect kiro to authenticate.", 401, ""});
     onEvent(StreamDone{StopReason::Error});
     return;
@@ -810,6 +1429,7 @@ void KiroProvider::stream(const AgentHistory &history, const ProviderOptions &op
   ctx.provider = this;
   ctx.onEvent = &onEvent;
   ctx.abortSignal = opts.abortSignal;
+  ctx.resolvedModelId = resolvedModel;
 
   CURL *curl = curl_easy_init();
   if (!curl) {
@@ -1142,11 +1762,16 @@ size_t KiroProvider::sseWriteCallback(char *ptr, size_t size, size_t nmemb, void
         "{\"content\":",
         "{\"thinking\":",
         "{\"reasoning\":",
+        "{\"reasoning_content\":",
         "{\"name\":",
         "{\"input\":",
         "{\"stop\":",
         "{\"contextUsagePercentage\":",
         "{\"followupPrompt\":",
+        "{\"type\":",
+        "{\"choices\":",
+        "{\"delta\":",
+        "{\"event\":",
         "{",
     };
     
@@ -1189,6 +1814,24 @@ size_t KiroProvider::sseWriteCallback(char *ptr, size_t size, size_t nmemb, void
     doc.Parse(jsonStr.c_str());
     if (doc.HasParseError()) continue;
 
+    // 1) Bedrock content_block_* events (used by GLM-5, MiniMax, DeepSeek,
+    //    Qwen, Haiku 4.5 thinking deltas, and Anthropic 4.x reasoning).
+    //    The dispatcher sets ctx.thinkingExtracted internally so any
+    //    subsequent in-band text is emitted directly.
+    if (dispatchBedrockEventChunk(*ctx, doc)) {
+      continue;
+    }
+
+    // 2) OpenAI-style chat completion chunks (DeepSeek/Qwen/MiniMax forward
+    //    in this shape via the Kiro Q endpoint).
+    if (dispatchOpenAIChoicesChunk(*ctx, doc)) {
+      continue;
+    }
+
+    // 3) Anthropic-classic shape used by Sonnet 4.0/4.5/4.6 and Opus 4.x via
+    //    the Q endpoint. Below is the original parser, with additional
+    //    fallbacks for `reasoning_content` and nested `delta.thinking`.
+
     // Thinking/reasoning delta (sometimes sent out-of-band)
     if (doc.HasMember("thinking")) {
       const std::string delta = serializeJsonValue(doc["thinking"]);
@@ -1199,6 +1842,25 @@ size_t KiroProvider::sseWriteCallback(char *ptr, size_t size, size_t nmemb, void
       const std::string delta = serializeJsonValue(doc["reasoning"]);
       if (!delta.empty()) {
         (*ctx->onEvent)(ThinkingChunk{delta, ""});
+      }
+    } else if (doc.HasMember("reasoning_content")) {
+      const std::string delta = serializeJsonValue(doc["reasoning_content"]);
+      if (!delta.empty()) {
+        (*ctx->onEvent)(ThinkingChunk{delta, ""});
+      }
+    } else if (doc.HasMember("delta") && doc["delta"].IsObject()) {
+      const auto &d = doc["delta"];
+      if (d.HasMember("thinking") && d["thinking"].IsString()) {
+        const std::string thinking = d["thinking"].GetString();
+        if (!thinking.empty()) {
+          (*ctx->onEvent)(ThinkingChunk{thinking, ""});
+        }
+      } else if (d.HasMember("reasoning_content") &&
+                 d["reasoning_content"].IsString()) {
+        const std::string thinking = d["reasoning_content"].GetString();
+        if (!thinking.empty()) {
+          (*ctx->onEvent)(ThinkingChunk{thinking, ""});
+        }
       }
     }
 
@@ -1264,6 +1926,35 @@ size_t KiroProvider::sseWriteCallback(char *ptr, size_t size, size_t nmemb, void
     else if (doc.HasMember("contextUsagePercentage")) {
       float pct = doc["contextUsagePercentage"].GetFloat();
       ctx->metrics.tokens.contextSize = static_cast<std::uint32_t>(200000 * pct / 100);
+      ctx->metricsReceived = true;
+    }
+    // Token caching: Kiro's Q Developer endpoint does not currently
+    // surface Bedrock cache fields, but it's a proxy in front of Bedrock
+    // — defensively parse both Converse-API style (camelCase) and
+    // InvokeModel-API style (snake_case) so cache hits land if AWS ever
+    // exposes them. No-ops today; cheap to keep.
+    else if (doc.HasMember("usage") && doc["usage"].IsObject()) {
+      const auto &u = doc["usage"];
+      if (u.HasMember("cacheReadInputTokens") && u["cacheReadInputTokens"].IsUint()) {
+        ctx->metrics.tokens.cacheRead = u["cacheReadInputTokens"].GetUint();
+      } else if (u.HasMember("cache_read_input_tokens") && u["cache_read_input_tokens"].IsUint()) {
+        ctx->metrics.tokens.cacheRead = u["cache_read_input_tokens"].GetUint();
+      }
+      if (u.HasMember("cacheWriteInputTokens") && u["cacheWriteInputTokens"].IsUint()) {
+        ctx->metrics.tokens.cacheWrite = u["cacheWriteInputTokens"].GetUint();
+      } else if (u.HasMember("cache_creation_input_tokens") && u["cache_creation_input_tokens"].IsUint()) {
+        ctx->metrics.tokens.cacheWrite = u["cache_creation_input_tokens"].GetUint();
+      }
+      if (u.HasMember("inputTokens") && u["inputTokens"].IsUint()) {
+        ctx->metrics.tokens.prompt = u["inputTokens"].GetUint();
+      } else if (u.HasMember("input_tokens") && u["input_tokens"].IsUint()) {
+        ctx->metrics.tokens.prompt = u["input_tokens"].GetUint();
+      }
+      if (u.HasMember("outputTokens") && u["outputTokens"].IsUint()) {
+        ctx->metrics.tokens.completion = u["outputTokens"].GetUint();
+      } else if (u.HasMember("output_tokens") && u["output_tokens"].IsUint()) {
+        ctx->metrics.tokens.completion = u["output_tokens"].GetUint();
+      }
       ctx->metricsReceived = true;
     }
     // Stop signal

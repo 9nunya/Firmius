@@ -65,7 +65,7 @@ std::vector<std::string> EditPresenter::render(const ToolCallItem& item, const T
     } else {
       // Render diffs
       for (const auto& edit : item.diffEdits()) {
-        auto diffLines = DiffRenderer::render(edit.diffPreview, width);
+        auto diffLines = DiffRenderer::render(edit.diffPreview, width, edit.path);
         result.insert(result.end(), diffLines.begin(), diffLines.end());
       }
     }
@@ -114,7 +114,8 @@ std::vector<std::string> EditPresenter::render(const ToolCallItem& item, const T
   } else {
     for (size_t i = 0; i < item.diffEdits().size(); ++i) {
       if (i > 0) result.push_back("");  // blank line between files
-      auto diffLines = DiffRenderer::render(item.diffEdits()[i].diffPreview, width);
+      auto diffLines = DiffRenderer::render(item.diffEdits()[i].diffPreview,
+                                            width, item.diffEdits()[i].path);
       result.insert(result.end(), diffLines.begin(), diffLines.end());
     }
   }

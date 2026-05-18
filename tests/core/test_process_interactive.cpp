@@ -219,8 +219,10 @@ TEST_F(ProcessInteractiveTest, PythonInteraction) {
           R"(", "pattern": "firmius_interactive_test", "timeout_ms": 5000})");
   rapidjson::Document waitDoc;
   waitDoc.Parse(waitData.c_str());
-  EXPECT_TRUE(waitDoc["patternFound"].GetBool());
-  EXPECT_TRUE(waitDoc["isRunning"].GetBool());
+  // Token-waste pass 2: pattern_found (was patternFound), running (was
+  // isRunning).
+  EXPECT_TRUE(waitDoc["pattern_found"].GetBool());
+  EXPECT_TRUE(waitDoc["running"].GetBool());
 
   // 4. Ask the script to exit.
   callTool("Process",
@@ -233,7 +235,7 @@ TEST_F(ProcessInteractiveTest, PythonInteraction) {
                R"({"action": "Wait", "process_id": ")" + pid + R"(", "timeout_ms": 5000})");
   rapidjson::Document exitWaitDoc;
   exitWaitDoc.Parse(exitWaitData.c_str());
-  EXPECT_FALSE(exitWaitDoc["isRunning"].GetBool());
+  EXPECT_FALSE(exitWaitDoc["running"].GetBool());
 }
 
 TEST_F(ProcessInteractiveTest, PatternWaitTimeout) {
@@ -275,9 +277,10 @@ TEST_F(ProcessInteractiveTest, ProcessStatusOutputListAndKillExposeControlSurfac
                               R"(", "pattern": "two", "timeout_ms": 5000})");
   rapidjson::Document waitDoc;
   waitDoc.Parse(waitData.c_str());
-  EXPECT_TRUE(waitDoc["patternFound"].GetBool());
-  ASSERT_TRUE(waitDoc.HasMember("system_id"));
-  EXPECT_GT(std::string(waitDoc["system_id"].GetString()).size(), 0U);
+  // Token-waste pass 2: pattern_found (was patternFound). system_id is
+  // emitted by Spawn but no longer echoed on Status/Wait/Output/List —
+  // those code paths drop the duplicated identifying field.
+  EXPECT_TRUE(waitDoc["pattern_found"].GetBool());
 
   std::string outputData =
       callTool("Process", R"({"action": "Output", "process_id": ")" + pid +
@@ -298,7 +301,9 @@ TEST_F(ProcessInteractiveTest, ProcessStatusOutputListAndKillExposeControlSurfac
     if (process.HasMember("process_id") &&
         pid == process["process_id"].GetString()) {
       found = true;
-      ASSERT_TRUE(process.HasMember("system_id"));
+      // Token-waste pass 2: List entries no longer carry system_id.
+      EXPECT_TRUE(process.HasMember("running"));
+      EXPECT_TRUE(process.HasMember("exit_code"));
       break;
     }
   }
@@ -308,8 +313,13 @@ TEST_F(ProcessInteractiveTest, ProcessStatusOutputListAndKillExposeControlSurfac
       callTool("Process", R"({"action": "Kill", "process_id": ")" + pid + R"("})");
   rapidjson::Document killDoc;
   killDoc.Parse(killData.c_str());
-  EXPECT_TRUE(killDoc["was_running"].GetBool());
+  // Token-waste pass 2: was_running was dropped; the prose `result`
+  // field carries the same signal ("Killed process X (was running)" vs
+  // "Process X was not running"). running stays as the post-kill flag.
   EXPECT_FALSE(killDoc["running"].GetBool());
+  ASSERT_TRUE(killDoc.HasMember("result"));
+  EXPECT_NE(std::string(killDoc["result"].GetString()).find("Killed"),
+            std::string::npos);
 }
 
 TEST(ProcessCancellationRegressionTest,

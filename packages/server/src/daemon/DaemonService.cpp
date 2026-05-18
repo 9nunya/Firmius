@@ -1,4 +1,5 @@
 #include "daemon/DaemonService.hpp"
+#include "daemon/DaemonLog.hpp"
 #include "daemon/ProtocolSerialization.hpp"
 
 #include "AgentRegistry.hpp"
@@ -104,6 +105,8 @@ std::string appEventTypeName(const firmius::shared::AppEvent &event) {
           return "permission_escalation_request";
         } else if constexpr (std::is_same_v<T, firmius::shared::PermissionEscalationResolved>) {
           return "permission_escalation_resolved";
+        } else if constexpr (std::is_same_v<T, firmius::shared::ThreadMetadataUpdated>) {
+          return "thread_metadata_updated";
         } else if constexpr (std::is_same_v<T, firmius::shared::ModelsRefreshed>) {
           return "models_refreshed";
         } else if constexpr (std::is_same_v<T, firmius::shared::ModelSwitched>) {
@@ -211,6 +214,16 @@ rapidjson::Document serializeAppEventDocument(const AppEvent &event) {
           metadataValue.CopyFrom(metadata, doc.GetAllocator());
           doc.AddMember("metadata", metadataValue, doc.GetAllocator());
           return doc;
+        } else if constexpr (std::is_same_v<T, firmius::shared::ThreadMetadataUpdated>) {
+          auto doc = basicEventDocument<T>("ThreadMetadataUpdated");
+          doc.AddMember("threadId",
+                        rapidjson::Value(e.threadId.c_str(), doc.GetAllocator()).Move(),
+                        doc.GetAllocator());
+          auto metadata = firmius::shared::toJson(e.metadata);
+          rapidjson::Value metadataValue(rapidjson::kObjectType);
+          metadataValue.CopyFrom(metadata, doc.GetAllocator());
+          doc.AddMember("metadata", metadataValue, doc.GetAllocator());
+          return doc;
         } else if constexpr (std::is_same_v<T, firmius::shared::UserMessageSent>) {
           auto doc = basicEventDocument<T>("UserMessageSent");
           doc.AddMember("messageId",
@@ -291,21 +304,107 @@ rapidjson::Document serializeAppEventDocument(const AppEvent &event) {
           return doc;
         } else if constexpr (std::is_same_v<T, firmius::shared::PermissionEscalationRequest>) {
           auto doc = basicEventDocument<T>("PermissionEscalationRequest");
+          auto &alloc = doc.GetAllocator();
           doc.AddMember("requestId",
-                        rapidjson::Value(e.requestId.c_str(), doc.GetAllocator()).Move(),
-                        doc.GetAllocator());
+                        rapidjson::Value(e.requestId.c_str(), alloc).Move(),
+                        alloc);
           doc.AddMember("threadId",
-                        rapidjson::Value(e.threadId.c_str(), doc.GetAllocator()).Move(),
-                        doc.GetAllocator());
+                        rapidjson::Value(e.threadId.c_str(), alloc).Move(),
+                        alloc);
           doc.AddMember("agentId",
-                        rapidjson::Value(e.agentId.c_str(), doc.GetAllocator()).Move(),
-                        doc.GetAllocator());
+                        rapidjson::Value(e.agentId.c_str(), alloc).Move(),
+                        alloc);
+          doc.AddMember("title",
+                        rapidjson::Value(e.title.c_str(), alloc).Move(),
+                        alloc);
           doc.AddMember("message",
-                        rapidjson::Value(e.message.c_str(), doc.GetAllocator()).Move(),
-                        doc.GetAllocator());
+                        rapidjson::Value(e.message.c_str(), alloc).Move(),
+                        alloc);
           doc.AddMember("toolName",
-                        rapidjson::Value(e.toolName.c_str(), doc.GetAllocator()).Move(),
-                        doc.GetAllocator());
+                        rapidjson::Value(e.toolName.c_str(), alloc).Move(),
+                        alloc);
+          doc.AddMember("toolCallId",
+                        rapidjson::Value(e.toolCallId.c_str(), alloc).Move(),
+                        alloc);
+          doc.AddMember("command",
+                        rapidjson::Value(e.command.c_str(), alloc).Move(),
+                        alloc);
+          doc.AddMember("commandPrimary",
+                        rapidjson::Value(e.commandPrimary.c_str(), alloc).Move(),
+                        alloc);
+          doc.AddMember("targetPath",
+                        rapidjson::Value(e.targetPath.c_str(), alloc).Move(),
+                        alloc);
+          doc.AddMember("severity",
+                        static_cast<int>(e.severity), alloc);
+          doc.AddMember("requestType",
+                        static_cast<int>(e.requestType), alloc);
+          doc.AddMember("allowAlways", e.allowAlways, alloc);
+          doc.AddMember("isDirectory", e.isDirectory, alloc);
+          // ── v2 fields ──
+          doc.AddMember("category",
+                        rapidjson::Value(e.category.c_str(), alloc).Move(),
+                        alloc);
+          doc.AddMember("cwd",
+                        rapidjson::Value(e.cwd.c_str(), alloc).Move(), alloc);
+          doc.AddMember("url",
+                        rapidjson::Value(e.url.c_str(), alloc).Move(), alloc);
+          doc.AddMember("host",
+                        rapidjson::Value(e.host.c_str(), alloc).Move(), alloc);
+          doc.AddMember("scheme",
+                        rapidjson::Value(e.scheme.c_str(), alloc).Move(), alloc);
+          doc.AddMember("query",
+                        rapidjson::Value(e.query.c_str(), alloc).Move(), alloc);
+          doc.AddMember("persona",
+                        rapidjson::Value(e.persona.c_str(), alloc).Move(), alloc);
+          doc.AddMember("parentPersona",
+                        rapidjson::Value(e.parentPersona.c_str(), alloc).Move(),
+                        alloc);
+
+          rapidjson::Value subs(rapidjson::kArrayType);
+          for (const auto &s : e.subcommands) {
+            subs.PushBack(rapidjson::Value(s.c_str(), alloc).Move(), alloc);
+          }
+          doc.AddMember("subcommands", subs, alloc);
+
+          rapidjson::Value scopes(rapidjson::kArrayType);
+          for (const auto &s : e.toolScopes) {
+            scopes.PushBack(rapidjson::Value(s.c_str(), alloc).Move(), alloc);
+          }
+          doc.AddMember("toolScopes", scopes, alloc);
+
+          rapidjson::Value sugg(rapidjson::kArrayType);
+          for (const auto &s : e.suggestions) {
+            rapidjson::Value v(rapidjson::kObjectType);
+            v.AddMember("label",
+                        rapidjson::Value(s.label.c_str(), alloc).Move(), alloc);
+            v.AddMember("explanation",
+                        rapidjson::Value(s.explanation.c_str(), alloc).Move(),
+                        alloc);
+            v.AddMember("ruleId",
+                        rapidjson::Value(s.ruleId.c_str(), alloc).Move(), alloc);
+            v.AddMember("category",
+                        rapidjson::Value(s.category.c_str(), alloc).Move(),
+                        alloc);
+            v.AddMember("decision",
+                        rapidjson::Value(s.decision.c_str(), alloc).Move(),
+                        alloc);
+            v.AddMember("scope",
+                        rapidjson::Value(s.scope.c_str(), alloc).Move(), alloc);
+            v.AddMember("comment",
+                        rapidjson::Value(s.comment.c_str(), alloc).Move(),
+                        alloc);
+            v.AddMember("defaultSelected", s.defaultSelected, alloc);
+            rapidjson::Value match(rapidjson::kObjectType);
+            for (const auto &[k, val] : s.match) {
+              match.AddMember(rapidjson::Value(k.c_str(), alloc).Move(),
+                              rapidjson::Value(val.c_str(), alloc).Move(),
+                              alloc);
+            }
+            v.AddMember("match", match, alloc);
+            sugg.PushBack(v, alloc);
+          }
+          doc.AddMember("suggestions", sugg, alloc);
           return doc;
         } else if constexpr (std::is_same_v<T, firmius::shared::PermissionEscalationResolved>) {
           auto doc = basicEventDocument<T>("PermissionEscalationResolved");
@@ -766,31 +865,54 @@ void DaemonService::start() {
       return;
     }
   }
+  FIRMIUS_DLOG_PHASE_SCOPE("DaemonService::start");
   std::lock_guard<std::mutex> runtimeLock(runtimeMutex_);
 
   broadcastInitProgress("Loading configuration...");
-  firmius::shared::ConfigLoader::instance().load();
+  {
+    FIRMIUS_DLOG_PHASE_SCOPE("init.config_load");
+    firmius::shared::ConfigLoader::instance().load();
+  }
 
   broadcastInitProgress("Reading provider definitions...");
-  firmius::provider::ProviderRegistry::instance().reloadConfigProviders(
-      firmius::shared::ConfigLoader::instance().getConfig().providers);
+  {
+    FIRMIUS_DLOG_PHASE_SCOPE("init.provider_definitions");
+    firmius::provider::ProviderRegistry::instance().reloadConfigProviders(
+        firmius::shared::ConfigLoader::instance().getConfig().providers);
+  }
 
   broadcastInitProgress("Hydrating provider instances...");
-  firmius::provider::ProviderRegistry::instance().hydrateProviders();
+  {
+    FIRMIUS_DLOG_PHASE_SCOPE("init.provider_hydrate");
+    firmius::provider::ProviderRegistry::instance().hydrateProviders();
+  }
 
   broadcastInitProgress("Initializing harness...");
   auto &harness = firmius::core::Harness::instance();
-  harness.init();
+  {
+    FIRMIUS_DLOG_PHASE_SCOPE("init.harness");
+    harness.init();
+  }
 
   broadcastInitProgress("Loading workflow definitions...");
-  firmius::core::WorkflowLoader::instance().init();
+  {
+    FIRMIUS_DLOG_PHASE_SCOPE("init.workflows");
+    firmius::core::WorkflowLoader::instance().init();
+  }
 
   broadcastInitProgress("Enumerating available models...");
-  firmius::core::Harness::instance().listAllModels();
+  int subscriptionId = -1;
+  {
+    FIRMIUS_DLOG_PHASE_SCOPE("init.list_models");
+    firmius::core::Harness::instance().listAllModels();
+  }
 
   broadcastInitProgress("Subscribing to core events...");
-  const int subscriptionId = harness.subscribe(
-      [this](const firmius::shared::AppEvent &event) { emitCoreEvent(event); });
+  {
+    FIRMIUS_DLOG_PHASE_SCOPE("init.subscribe_core_events");
+    subscriptionId = harness.subscribe(
+        [this](const firmius::shared::AppEvent &event) { emitCoreEvent(event); });
+  }
 
   broadcastInitProgress("Restoring persisted threads...");
   // Harness::init() already loads threads, but we broadcast after so
@@ -805,6 +927,7 @@ void DaemonService::start() {
     ready_ = true;
   }
   readyCv_.notify_all();
+  FIRMIUS_DLOG_PHASE("daemon ready");
 }
 
 bool DaemonService::waitForReady(std::chrono::milliseconds timeout) {
@@ -829,6 +952,25 @@ void DaemonService::shutdown() {
     harness.unsubscribe(harnessSubscriptionId);
   }
   harness.shutdown();
+
+  // Cancel + join any in-flight /connect wizard finalize workers before we
+  // wipe sessions, so they don't fire into freed listeners on the way out.
+  {
+    std::vector<ConnectSession> toJoin;
+    {
+      std::lock_guard<std::mutex> lk(connectSessionsMutex_);
+      for (auto &[_, sess] : connectSessionsByClient_) {
+        if (sess.cancelled) sess.cancelled->store(true);
+        toJoin.push_back(std::move(sess));
+      }
+      connectSessionsByClient_.clear();
+    }
+    for (auto &sess : toJoin) {
+      if (sess.finalizeWorker.joinable()) {
+        sess.finalizeWorker.join();
+      }
+    }
+  }
 
   std::lock_guard<std::mutex> stateLock(stateMutex_);
   subscriptions_.clear();
@@ -933,6 +1075,11 @@ ClientHelloResponse DaemonService::registerClient(const ClientHelloRequest &requ
 }
 
 bool DaemonService::unregisterClient(const std::string &clientId) {
+  // If this client had a /connect wizard in flight, cancel + join its worker
+  // BEFORE we tear down sessions/subscriptions. Otherwise the finalize worker
+  // could try to emit a ConnectProgress event into a freed listener.
+  cancelConnectSessionForClientLocked(clientId);
+
   std::optional<ClientSessionSnapshot> removed;
   {
     std::lock_guard<std::mutex> lock(stateMutex_);
@@ -1100,9 +1247,6 @@ ThreadsCreateResponse DaemonService::createThread(const std::string &clientId,
   auto &harness = firmius::core::Harness::instance();
   const std::string threadId =
       harness.newThread({}, request.cwd, request.leadPersona, request.initialMode);
-  if (!threadId.empty()) {
-    harness.setCurrentThreadPermissionMode(request.permissionMode);
-  }
   ThreadsCreateResponse response;
   response.thread = harness.getThreadMetadata(threadId);
   response.focusedAgentId = harness.focusedAgentId();
@@ -1262,10 +1406,7 @@ DaemonService::interruptAgent(const std::string &clientId,
 
   std::lock_guard<std::mutex> runtimeLock(runtimeMutex_);
   auto &harness = firmius::core::Harness::instance();
-  if (!harness.switchThread(threadId) || !harness.setFocusedAgent(agentId)) {
-    return std::nullopt;
-  }
-  harness.abort();
+  harness.abortAgent(threadId, agentId);
   {
     std::lock_guard<std::mutex> lock(stateMutex_);
     updateSessionFocusLocked(clientId, threadId, agentId);
@@ -1286,10 +1427,7 @@ DaemonService::abortAndFlushQueuedMessages(const std::string &clientId,
 
   std::lock_guard<std::mutex> runtimeLock(runtimeMutex_);
   auto &harness = firmius::core::Harness::instance();
-  if (!harness.switchThread(threadId) || !harness.setFocusedAgent(agentId)) {
-    return std::nullopt;
-  }
-  harness.abortAndFlushQueuedMessages();
+  harness.abortAgentAndFlushQueuedMessages(threadId, agentId);
   {
     std::lock_guard<std::mutex> lock(stateMutex_);
     updateSessionFocusLocked(clientId, threadId, agentId);
@@ -1376,15 +1514,22 @@ DaemonService::subagentActivity(const std::string &clientId,
 PermissionQueueSnapshot
 DaemonService::getPermissionQueue(const std::string &clientId,
                                   const PermissionModeRequest &request) const {
-  const std::string threadId = resolveThreadIdForRequest(clientId, request.threadId);
+  const std::string threadId = resolveThreadIdForRequest(clientId, "");
   std::lock_guard<std::mutex> runtimeLock(runtimeMutex_);
   auto &harness = firmius::core::Harness::instance();
   PermissionQueueSnapshot snapshot;
   snapshot.threadId = threadId;
-  snapshot.permissionMode =
-      threadId.empty() ? harness.currentThreadPermissionMode()
-                       : harness.threadPermissionMode(threadId);
+  snapshot.activeModeId = harness.policyEngine().activeMode().id;
+  for (const auto &m : harness.policyEngine().listModes()) {
+    PermissionModeWire w;
+    w.id = m.id;
+    w.name = m.name;
+    w.description = m.description;
+    w.builtIn = m.builtIn;
+    snapshot.modes.push_back(std::move(w));
+  }
   snapshot.pending = harness.listPendingPermissionEscalations(threadId);
+  (void)request;
   return snapshot;
 }
 
@@ -1392,27 +1537,175 @@ PermissionQueueSnapshot
 DaemonService::setPermissionMode(const std::string &clientId,
                                  const PermissionModeUpdateRequest &request) {
   std::lock_guard<std::mutex> runtimeLock(runtimeMutex_);
-  const std::string targetThreadId =
-      resolveThreadIdForRequest(clientId, request.threadId);
-  if (targetThreadId.empty()) {
-    throw std::runtime_error("permissions.setMode requires a target thread");
-  }
   auto &harness = firmius::core::Harness::instance();
-  if (!harness.setThreadPermissionMode(targetThreadId, request.permissionMode)) {
-    throw std::runtime_error(
-        "failed to update permission mode for target thread");
+  if (!harness.policyEngine().setActiveMode(request.modeId)) {
+    throw std::runtime_error("permissions.setMode: unknown mode_id '" +
+                              request.modeId + "'");
   }
+  // Build snapshot mirroring getPermissionQueue.
+  const std::string threadId = resolveThreadIdForRequest(clientId, "");
   PermissionQueueSnapshot snapshot;
-  snapshot.threadId = targetThreadId;
-  snapshot.permissionMode = harness.threadPermissionMode(targetThreadId);
-  snapshot.pending = harness.listPendingPermissionEscalations(targetThreadId);
+  snapshot.threadId = threadId;
+  snapshot.activeModeId = harness.policyEngine().activeMode().id;
+  for (const auto &m : harness.policyEngine().listModes()) {
+    PermissionModeWire w{m.id, m.name, m.description, m.builtIn};
+    snapshot.modes.push_back(std::move(w));
+  }
+  snapshot.pending = harness.listPendingPermissionEscalations(threadId);
   return snapshot;
+}
+
+PermissionCreateModeResponse DaemonService::createPermissionMode(
+    const PermissionCreateModeRequest &request) {
+  std::lock_guard<std::mutex> runtimeLock(runtimeMutex_);
+  PermissionCreateModeResponse response;
+  if (request.name.empty()) {
+    response.errorMessage = "name is required";
+    return response;
+  }
+  firmius::core::PermissionMode mode;
+  mode.id = request.id;
+  mode.name = request.name;
+  mode.description = request.description;
+  auto id = firmius::core::Harness::instance().policyEngine().createMode(
+      std::move(mode), request.seedFromActive);
+  if (id.empty()) {
+    response.errorMessage = "mode id or name already exists";
+    return response;
+  }
+  response.modeId = id;
+  return response;
+}
+
+PermissionRenameModeResponse DaemonService::renamePermissionMode(
+    const PermissionRenameModeRequest &request) {
+  std::lock_guard<std::mutex> runtimeLock(runtimeMutex_);
+  PermissionRenameModeResponse response;
+  if (request.newName.empty()) {
+    response.errorMessage = "new_name is required";
+    return response;
+  }
+  response.ok = firmius::core::Harness::instance().policyEngine().renameMode(
+      request.modeId, request.newName);
+  if (!response.ok) {
+    response.errorMessage = "rename failed (built-in or duplicate name)";
+  }
+  return response;
+}
+
+PermissionDeleteModeResponse DaemonService::deletePermissionMode(
+    const PermissionDeleteModeRequest &request) {
+  std::lock_guard<std::mutex> runtimeLock(runtimeMutex_);
+  PermissionDeleteModeResponse response;
+  response.removed = firmius::core::Harness::instance().policyEngine()
+                          .deleteMode(request.modeId);
+  if (!response.removed) {
+    response.errorMessage = "delete failed (built-in, active, or unknown)";
+  }
+  return response;
 }
 
 bool DaemonService::resolvePermission(const PermissionResolveRequest &request) {
   std::lock_guard<std::mutex> runtimeLock(runtimeMutex_);
   return firmius::core::Harness::instance().resolvePermissionEscalation(
       request.requestId, request.response);
+}
+
+bool DaemonService::resolvePermissionWithRules(
+    const PermissionResolveWithRulesRequest &request) {
+  std::lock_guard<std::mutex> runtimeLock(runtimeMutex_);
+  return firmius::core::Harness::instance()
+      .resolvePermissionEscalationWithRules(request.requestId,
+                                             request.selectedSuggestionIds);
+}
+
+namespace {
+PolicyRuleWire toWire(const firmius::core::PolicyRule &r) {
+  PolicyRuleWire w;
+  w.id = r.id;
+  w.category = r.category;
+  w.decision = firmius::core::decisionToWire(r.decision);
+  w.scope = firmius::core::scopeToWire(r.scope);
+  w.comment = r.comment;
+  w.match = r.match;
+  w.createdAt = r.createdAt;
+  w.expiresAt = r.expiresAt;
+  return w;
+}
+firmius::core::PolicyRule fromWire(const PolicyRuleWire &w) {
+  firmius::core::PolicyRule r;
+  r.id = w.id;
+  r.category = w.category;
+  r.decision = firmius::core::decisionFromWire(w.decision);
+  r.scope = firmius::core::scopeFromWire(w.scope);
+  r.comment = w.comment;
+  r.match = w.match;
+  r.createdAt = w.createdAt;
+  r.expiresAt = w.expiresAt;
+  return r;
+}
+} // namespace
+
+PermissionListRulesResponse DaemonService::listPolicyRules(
+    const PermissionListRulesRequest &) {
+  std::lock_guard<std::mutex> runtimeLock(runtimeMutex_);
+  auto &engine = firmius::core::Harness::instance().policyEngine();
+  PermissionListRulesResponse response;
+  for (const auto &r : engine.listRules()) {
+    response.rules.push_back(toWire(r));
+  }
+  // Merge user + project category defaults; project trumps user.
+  auto user = engine.userDocument();
+  auto project = engine.projectDocument();
+  for (const auto &[k, v] : user.categoryDefaults.byCategory) {
+    response.categoryDefaults[k] = firmius::core::decisionToWire(v);
+  }
+  for (const auto &[k, v] : project.categoryDefaults.byCategory) {
+    response.categoryDefaults[k] = firmius::core::decisionToWire(v);
+  }
+  response.defaultDecision =
+      firmius::core::decisionToWire(user.defaultDecision);
+  return response;
+}
+
+PermissionUpsertRuleResponse DaemonService::upsertPolicyRule(
+    const PermissionUpsertRuleRequest &request) {
+  std::lock_guard<std::mutex> runtimeLock(runtimeMutex_);
+  PermissionUpsertRuleResponse response;
+  try {
+    auto rule = fromWire(request.rule);
+    response.ruleId = firmius::core::Harness::instance()
+                          .policyEngine().upsertRule(std::move(rule));
+  } catch (const std::exception &e) {
+    response.errorMessage = e.what();
+  }
+  return response;
+}
+
+PermissionDeleteRuleResponse DaemonService::deletePolicyRule(
+    const PermissionDeleteRuleRequest &request) {
+  std::lock_guard<std::mutex> runtimeLock(runtimeMutex_);
+  PermissionDeleteRuleResponse response;
+  try {
+    response.removed = firmius::core::Harness::instance()
+                           .policyEngine().removeRule(request.ruleId);
+  } catch (const std::exception &e) {
+    response.errorMessage = e.what();
+  }
+  return response;
+}
+
+PermissionReloadPolicyResponse DaemonService::reloadPolicy(
+    const PermissionReloadPolicyRequest &) {
+  std::lock_guard<std::mutex> runtimeLock(runtimeMutex_);
+  PermissionReloadPolicyResponse response;
+  try {
+    firmius::core::Harness::instance().policyEngine().forceReload();
+  } catch (const std::exception &e) {
+    response.ok = false;
+    response.errorMessage = e.what();
+  }
+  return response;
 }
 
 ModelCatalogSnapshot DaemonService::listModels(bool refresh) {
@@ -1947,13 +2240,25 @@ EventSubscriptionResponse DaemonService::subscribe(
       snapshot = it->second;
     }
   }
-  if (subscriptionCopy.has_value() && subscriptionCopy->listener &&
-      request.sinceSequence > 0) {
+  // Replay buffered events for new subscribers.
+  //
+  // Two replay paths:
+  //   * Reconnect (sinceSequence > 0): give the client every event newer
+  //     than the last one it acked.
+  //   * Fresh subscribe (sinceSequence == 0): only replay InitProgress
+  //     messages, so a TUI that connects after the daemon has begun init
+  //     can still see the full phase log instead of silently missing the
+  //     early "Loading configuration..." / "Initializing harness..." steps.
+  if (subscriptionCopy.has_value() && subscriptionCopy->listener) {
     std::vector<DaemonEventEnvelope> replay;
     {
       std::lock_guard<std::mutex> lock(stateMutex_);
       for (const auto &event : eventReplayBuffer_) {
-        if (event.sequence <= request.sinceSequence) {
+        if (request.sinceSequence > 0) {
+          if (event.sequence <= request.sinceSequence) {
+            continue;
+          }
+        } else if (event.kind != DaemonEventKind::InitProgress) {
           continue;
         }
         const std::string eventName = event.runtimeEventType.empty()
@@ -2028,8 +2333,12 @@ std::optional<ClientSessionSnapshot> DaemonService::session(
 
 UiSnapshot DaemonService::uiSnapshot(const std::string &clientId,
                                      const UiSnapshotRequest &request) {
+  FIRMIUS_DLOG_SCOPE("rpc.ui.snapshot.get");
   // Wait for daemon to finish initialization before serving snapshot.
-  waitForReady(std::chrono::milliseconds(30000));
+  {
+    FIRMIUS_DLOG_SCOPE("ui.snapshot.waitForReady");
+    waitForReady(std::chrono::milliseconds(30000));
+  }
 
   UiSnapshot snapshot;
   auto sessionSnapshot = session(clientId);
@@ -2045,45 +2354,74 @@ UiSnapshot DaemonService::uiSnapshot(const std::string &clientId,
                                   ? request.agentId
                                   : snapshot.session.focusedAgentId;
 
-  snapshot.threads = harness.listThreads();
+  {
+    FIRMIUS_DLOG_SCOPE("ui.snapshot.list_threads");
+    snapshot.threads = harness.listThreads();
+  }
   if (!threadId.empty()) {
-    snapshot.focusedThread = getThread(clientId, ThreadsOpenRequest{threadId});
-    snapshot.agents = listAgents(clientId, AgentTargetRequest{threadId, agentId});
+    {
+      FIRMIUS_DLOG_SCOPE("ui.snapshot.focused_thread");
+      snapshot.focusedThread = getThread(clientId, ThreadsOpenRequest{threadId});
+    }
+    {
+      FIRMIUS_DLOG_SCOPE("ui.snapshot.list_agents");
+      snapshot.agents = listAgents(clientId, AgentTargetRequest{threadId, agentId});
+    }
     if (!agentId.empty()) {
+      FIRMIUS_DLOG_SCOPE("ui.snapshot.focused_agent");
       snapshot.focusedAgent = getAgent(clientId, AgentTargetRequest{threadId, agentId});
       snapshot.focusedAgentTodo = getAgentTodo(clientId, AgentTargetRequest{threadId, agentId});
     }
   }
   if (request.includeTranscript && !threadId.empty() && !agentId.empty()) {
+    FIRMIUS_DLOG_SCOPE("ui.snapshot.transcript");
     snapshot.transcript = getTranscript(clientId, TranscriptGetRequest{threadId, agentId});
   }
   if (request.includeToolCalls && !threadId.empty() && !agentId.empty()) {
+    FIRMIUS_DLOG_SCOPE("ui.snapshot.tool_calls+subagents");
     snapshot.toolCalls = listToolCalls(clientId, ToolCallsListRequest{threadId, agentId});
     snapshot.subagents = subagentActivity(clientId, SubagentsActivityRequest{threadId, agentId});
   }
   if (request.includeProcesses && !threadId.empty() && !agentId.empty()) {
+    FIRMIUS_DLOG_SCOPE("ui.snapshot.processes");
     snapshot.processSummary = focusProcessState(clientId, ProcessesListRequest{threadId, agentId});
     snapshot.processes = listProcesses(ProcessesListRequest{threadId, agentId});
   }
   if (!threadId.empty()) {
-    snapshot.permissions = getPermissionQueue(clientId, PermissionModeRequest{threadId});
+    FIRMIUS_DLOG_SCOPE("ui.snapshot.permissions");
+    snapshot.permissions = getPermissionQueue(clientId, PermissionModeRequest{});
   }
   if (request.includeCatalogs) {
-    snapshot.models = listModels(false);
-    snapshot.providers = listProviders();
+    {
+      FIRMIUS_DLOG_SCOPE("ui.snapshot.list_models");
+      snapshot.models = listModels(false);
+    }
+    {
+      FIRMIUS_DLOG_SCOPE("ui.snapshot.list_providers");
+      snapshot.providers = listProviders();
+    }
   }
   if (request.includeConfig) {
+    FIRMIUS_DLOG_SCOPE("ui.snapshot.config_bundle");
     snapshot.config = getConfig();
     snapshot.router = getRouterConfig();
     snapshot.purposes = getPurposesConfig();
     snapshot.mcp = getMcpConfig();
   }
-  snapshot.hooks = hookState(HooksStateRequest{threadId, agentId, "", 24});
-  snapshot.pacts = listPacts(clientId, PactsListRequest{threadId, agentId});
+  {
+    FIRMIUS_DLOG_SCOPE("ui.snapshot.hooks");
+    snapshot.hooks = hookState(HooksStateRequest{threadId, agentId, "", 24});
+  }
+  {
+    FIRMIUS_DLOG_SCOPE("ui.snapshot.pacts");
+    snapshot.pacts = listPacts(clientId, PactsListRequest{threadId, agentId});
+  }
   if (!threadId.empty()) {
+    FIRMIUS_DLOG_SCOPE("ui.snapshot.artifacts");
     snapshot.artifacts = listArtifacts(clientId, ThreadsOpenRequest{threadId});
   }
   if (!threadId.empty() && !agentId.empty()) {
+    FIRMIUS_DLOG_SCOPE("ui.snapshot.history+edits");
     snapshot.history = getHistory(clientId, HistoryGetRequest{threadId, agentId, 20});
     snapshot.edits = listEdits(clientId, EditsListRequest{threadId, agentId, true});
   }
@@ -2286,10 +2624,17 @@ void DaemonService::emitPactStateEvent(const PactSnapshot &snapshot) {
 }
 
 void DaemonService::broadcastInitProgress(const std::string &message) {
+  // Always go through prepareEventEnvelope so init events get assigned a
+  // sequence number and end up in the replay buffer. Otherwise clients that
+  // subscribe AFTER an init phase has already fired (which is the normal
+  // case for the implicit-spawn TUI v2 path) silently miss those messages.
   DaemonEventEnvelope envelope;
   envelope.kind = DaemonEventKind::InitProgress;
-  envelope.serverTimestampMs = nowMs();
+  envelope.runtimeEventType = "init_progress";
   envelope.initMessage = message;
+  envelope = prepareEventEnvelope(std::move(envelope));
+
+  FIRMIUS_DLOG_INFOF("init_progress: %s", message.c_str());
 
   std::vector<DaemonEventListener> listeners;
   {
@@ -3357,6 +3702,819 @@ HooksRecentActivitySnapshot DaemonService::recentHookActivity(const HooksRecentA
     snapshot.activities.push_back(activity);
   }
   return snapshot;
+}
+
+// ── /connect wizard ────────────────────────────────────────────────────────
+//
+// One active wizard per client, keyed by clientId. The wizard runs entirely
+// inside the daemon. The TUI receives prompt snapshots, forwards user
+// answers, then triggers an async finalize. Progress and the final
+// success/failure outcome arrive over the event stream as
+// DaemonEventKind::ConnectProgress.
+//
+// Locking discipline: connectSessionsMutex_ guards connectSessionsByClient_
+// and nextConnectSessionId_. Wizard methods (nextPrompt/submitAnswer/etc.)
+// are NOT thread-safe in general; we hold the mutex across calls but rely
+// on the fact that any single client's RPCs are serialized by the JSON-RPC
+// transport. The finalize worker drops the mutex while polling and only
+// reacquires it briefly at the end to erase the session.
+
+namespace {
+
+std::string detectFirstUrlInPrompt(const std::string &text) {
+  // Cheap manual scan to avoid pulling <regex> compile cost for one prompt.
+  // Matches "https://..." or "http://..." up to the next whitespace.
+  static constexpr std::string_view kPrefixes[] = {"https://", "http://"};
+  for (auto prefix : kPrefixes) {
+    auto pos = text.find(prefix);
+    if (pos == std::string::npos) continue;
+    auto end = pos;
+    while (end < text.size() && !std::isspace(static_cast<unsigned char>(text[end]))) {
+      ++end;
+    }
+    return text.substr(pos, end - pos);
+  }
+  return {};
+}
+
+WizardPromptSnapshot toPromptSnapshot(const firmius::WizardPrompt &p) {
+  WizardPromptSnapshot snap;
+  snap.message = p.message;
+  snap.isSecret = p.isSecret;
+  for (const auto &c : p.choices) {
+    snap.choices.push_back(WizardChoiceSnapshot{c.label, c.value});
+  }
+  snap.allowFreeformInput = p.allowFreeformInput;
+  snap.allowEmptyInput = p.allowEmptyInput;
+  snap.placeholder = p.placeholder;
+  snap.submitLabel = p.submitLabel;
+  snap.detectedUrl = detectFirstUrlInPrompt(p.message);
+  snap.isWaiting = false;
+  return snap;
+}
+
+WizardPromptSnapshot makeWaitingPrompt() {
+  WizardPromptSnapshot snap;
+  snap.message = "Waiting for the provider to finish the authentication flow...";
+  snap.isSecret = false;
+  snap.allowFreeformInput = false;
+  snap.allowEmptyInput = true;
+  snap.placeholder = "";
+  snap.submitLabel = "Waiting...";
+  snap.isWaiting = true;
+  return snap;
+}
+
+} // namespace
+
+std::optional<WizardPromptSnapshot>
+DaemonService::pollNextPromptLocked(ConnectSession &session) const {
+  std::optional<firmius::WizardPrompt> next;
+  bool isComplete = false;
+  if (session.oauthWizard) {
+    next = session.oauthWizard->nextPrompt();
+    isComplete = session.oauthWizard->isComplete();
+  } else if (session.apiKeyWizard) {
+    next = session.apiKeyWizard->nextPrompt();
+    isComplete = session.apiKeyWizard->isComplete();
+  } else {
+    return std::nullopt;
+  }
+
+  if (next.has_value()) {
+    return toPromptSnapshot(*next);
+  }
+  // No next prompt and not yet complete → synthetic "Waiting..." prompt for
+  // long-running flows like Antigravity (localhost callback) or Kiro
+  // (device flow polling).
+  if (!isComplete) {
+    return makeWaitingPrompt();
+  }
+  // No prompt and complete → caller should call finalize.
+  return std::nullopt;
+}
+
+void DaemonService::cancelConnectSessionForClientLocked(
+    const std::string &clientId) {
+  ConnectSession session;
+  bool had = false;
+  {
+    std::lock_guard<std::mutex> lk(connectSessionsMutex_);
+    auto it = connectSessionsByClient_.find(clientId);
+    if (it == connectSessionsByClient_.end()) {
+      return;
+    }
+    if (it->second.cancelled) it->second.cancelled->store(true);
+    session = std::move(it->second);
+    connectSessionsByClient_.erase(it);
+    had = true;
+  }
+  if (!had) return;
+  if (session.finalizeWorker.joinable()) {
+    session.finalizeWorker.join();
+  }
+  // Wizard destructors stop their own polling threads / localhost servers.
+}
+
+void DaemonService::emitConnectProgressEvent(
+    const std::string &clientId, const ConnectProgressSnapshot &snapshot) {
+  DaemonEventListener listener;
+  {
+    std::lock_guard<std::mutex> lock(stateMutex_);
+    auto it = subscriptions_.find(clientId);
+    if (it == subscriptions_.end() || !it->second.listener) {
+      return;
+    }
+    listener = it->second.listener;
+  }
+  DaemonEventEnvelope envelope;
+  envelope.kind = DaemonEventKind::ConnectProgress;
+  envelope.connectProgress = snapshot;
+  envelope = prepareEventEnvelope(std::move(envelope));
+  listener(envelope);
+}
+
+ConnectBeginResponse
+DaemonService::beginConnect(const std::string &clientId,
+                             const ConnectBeginRequest &request) {
+  ConnectBeginResponse response;
+  response.providerId = request.providerId;
+
+  if (clientId.empty()) {
+    response.errorMessage = "client must register (client.hello) before /connect";
+    return response;
+  }
+
+  auto &registry = firmius::provider::ProviderRegistry::instance();
+  registry.hydrateProviders();
+  auto provider = registry.getProvider(request.providerId);
+  if (!provider) {
+    response.errorMessage = "Unknown provider: " + request.providerId;
+    return response;
+  }
+
+  // If the client already had a wizard mid-flow, drop it before starting a new
+  // one. This both enforces "one active wizard per client" and gives the user
+  // a way to recover from a stuck flow by re-running /connect.
+  cancelConnectSessionForClientLocked(clientId);
+
+  ConnectSession session;
+  session.clientId = clientId;
+  session.providerId = request.providerId;
+  session.cancelled = std::make_shared<std::atomic<bool>>(false);
+
+  switch (provider->getProviderType()) {
+  case firmius::provider::ProviderType::OAuth: {
+    auto oauthProvider =
+        std::dynamic_pointer_cast<firmius::provider::BaseOAuthProvider>(provider);
+    if (!oauthProvider) {
+      response.errorMessage =
+          "Provider " + request.providerId + " is OAuth but cast failed";
+      return response;
+    }
+    session.providerKind = "oauth";
+    response.providerKind = "oauth";
+
+    auto accounts = oauthProvider->getAccounts();
+    if (!accounts.empty() && !request.addAdditional) {
+      response.existingAccounts = true;
+      return response;  // TUI confirms then re-calls with addAdditional=true.
+    }
+
+    auto wizard = oauthProvider->beginConnectionWizard();
+    if (!wizard) {
+      response.errorMessage = request.providerId +
+          " does not require interactive authentication.";
+      return response;
+    }
+    session.oauthWizard = std::move(wizard);
+    break;
+  }
+  case firmius::provider::ProviderType::APIKey: {
+    auto apiKeyProvider =
+        std::dynamic_pointer_cast<firmius::provider::BaseAPIKeyProvider>(provider);
+    if (!apiKeyProvider) {
+      response.errorMessage =
+          "Provider " + request.providerId + " is APIKey but cast failed";
+      return response;
+    }
+    session.providerKind = "apikey";
+    response.providerKind = "apikey";
+
+    auto accounts = apiKeyProvider->getAccounts();
+    if (!accounts.empty() && !request.addAdditional) {
+      response.existingAccounts = true;
+      return response;
+    }
+
+    auto wizard = apiKeyProvider->beginConnectionWizard();
+    if (!wizard) {
+      response.errorMessage = request.providerId +
+          " does not require an API key.";
+      return response;
+    }
+    session.apiKeyWizard = std::move(wizard);
+    break;
+  }
+  }
+
+  // Generate session id and pull the first prompt.
+  std::string sessionId;
+  {
+    std::lock_guard<std::mutex> lk(connectSessionsMutex_);
+    sessionId =
+        "connect-" + clientId + "-" + std::to_string(nextConnectSessionId_++);
+  }
+  session.sessionId = sessionId;
+  response.sessionId = sessionId;
+
+  auto promptSnap = pollNextPromptLocked(session);
+  if (promptSnap.has_value()) {
+    response.prompt = std::move(promptSnap);
+  } else {
+    // Wizard had nothing to ask AND is already complete — go straight to
+    // finalize (rare, but theoretically possible).
+    response.readyToFinalize = true;
+  }
+
+  {
+    std::lock_guard<std::mutex> lk(connectSessionsMutex_);
+    connectSessionsByClient_[clientId] = std::move(session);
+  }
+  return response;
+}
+
+ConnectSubmitResponse
+DaemonService::submitConnect(const std::string &clientId,
+                              const ConnectSubmitRequest &request) {
+  ConnectSubmitResponse response;
+  std::lock_guard<std::mutex> lk(connectSessionsMutex_);
+  auto it = connectSessionsByClient_.find(clientId);
+  if (it == connectSessionsByClient_.end() ||
+      it->second.sessionId != request.sessionId) {
+    response.errorMessage = "No active /connect session for this client.";
+    return response;
+  }
+  auto &session = it->second;
+
+  // Don't accept submits while we're already in the synthetic-waiting state
+  // OR while finalize has been kicked off — the client should have stopped
+  // calling submit at that point.
+  if (session.finalizeStarted) {
+    response.errorMessage = "Wizard is finalizing; cannot submit answers.";
+    return response;
+  }
+
+  try {
+    if (session.oauthWizard) {
+      session.oauthWizard->submitAnswer(request.answer);
+    } else if (session.apiKeyWizard) {
+      session.apiKeyWizard->submitAnswer(request.answer);
+    }
+  } catch (const std::exception &e) {
+    response.errorMessage = std::string("Wizard rejected answer: ") + e.what();
+    return response;
+  }
+
+  response.ok = true;
+  auto promptSnap = pollNextPromptLocked(session);
+  if (promptSnap.has_value()) {
+    response.prompt = std::move(promptSnap);
+  } else {
+    response.readyToFinalize = true;
+  }
+  return response;
+}
+
+ConnectFinalizeResponse
+DaemonService::finalizeConnect(const std::string &clientId,
+                                const ConnectFinalizeRequest &request) {
+  ConnectFinalizeResponse response;
+
+  std::shared_ptr<std::atomic<bool>> cancelled;
+  std::string sessionId;
+  std::string providerId;
+  {
+    std::lock_guard<std::mutex> lk(connectSessionsMutex_);
+    auto it = connectSessionsByClient_.find(clientId);
+    if (it == connectSessionsByClient_.end() ||
+        it->second.sessionId != request.sessionId) {
+      response.errorMessage = "No active /connect session for this client.";
+      return response;
+    }
+    auto &session = it->second;
+    if (session.finalizeStarted) {
+      // Already running. Treat as accepted so the TUI just keeps waiting for
+      // the ConnectProgress event.
+      response.accepted = true;
+      return response;
+    }
+    session.finalizeStarted = true;
+    cancelled = session.cancelled;
+    sessionId = session.sessionId;
+    providerId = session.providerId;
+
+    // Spawn the worker. We pass `clientId` by value so it survives even if
+    // the client disconnects mid-flow (the unregister path will set
+    // cancelled=true and join us; we just no-op on emit).
+    session.finalizeWorker = std::thread(
+        [this, clientId, sessionId, providerId, cancelled]() {
+          // Tell the TUI we're polling. Useful for OAuth flows that may take
+          // a minute waiting for the user to click through the browser.
+          {
+            ConnectProgressSnapshot prog;
+            prog.sessionId = sessionId;
+            prog.providerId = providerId;
+            prog.phase = ConnectProgressPhase::Polling;
+            emitConnectProgressEvent(clientId, prog);
+          }
+
+          // Poll isComplete() without holding the connectSessionsMutex_ — the
+          // wizard may take a long time and we don't want to block other
+          // RPCs on this client.
+          auto checkComplete = [&]() -> bool {
+            std::lock_guard<std::mutex> lk(connectSessionsMutex_);
+            auto it = connectSessionsByClient_.find(clientId);
+            if (it == connectSessionsByClient_.end()) return true;
+            auto &s = it->second;
+            if (s.oauthWizard)  return s.oauthWizard->isComplete();
+            if (s.apiKeyWizard) return s.apiKeyWizard->isComplete();
+            return true;
+          };
+          while (!cancelled->load() && !checkComplete()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+          }
+
+          if (cancelled->load()) {
+            ConnectProgressSnapshot prog;
+            prog.sessionId = sessionId;
+            prog.providerId = providerId;
+            prog.phase = ConnectProgressPhase::Cancelled;
+            emitConnectProgressEvent(clientId, prog);
+            return;
+          }
+
+          {
+            ConnectProgressSnapshot prog;
+            prog.sessionId = sessionId;
+            prog.providerId = providerId;
+            prog.phase = ConnectProgressPhase::Finalizing;
+            emitConnectProgressEvent(clientId, prog);
+          }
+
+          // Take the wizard out of the session under the lock, then exchange
+          // outside the lock to avoid blocking other RPCs from this client
+          // (e.g. cancel) on the network call.
+          std::unique_ptr<firmius::OAuthWizard> oauthWizard;
+          std::unique_ptr<firmius::provider::APIKeyWizard> apiKeyWizard;
+          std::string providerKind;
+          {
+            std::lock_guard<std::mutex> lk(connectSessionsMutex_);
+            auto it = connectSessionsByClient_.find(clientId);
+            if (it == connectSessionsByClient_.end()) return;
+            oauthWizard = std::move(it->second.oauthWizard);
+            apiKeyWizard = std::move(it->second.apiKeyWizard);
+            providerKind = it->second.providerKind;
+          }
+
+          ConnectProgressSnapshot result;
+          result.sessionId = sessionId;
+          result.providerId = providerId;
+
+          if (oauthWizard) {
+            std::string err;
+            if (oauthWizard->finalizeExchange(err)) {
+              result.phase = ConnectProgressPhase::Succeeded;
+              result.message = oauthWizard->getFinalMessage();
+              firmius::core::Harness::instance().invalidateModelCache();
+            } else {
+              result.phase = ConnectProgressPhase::Failed;
+              result.message = err.empty() ? "OAuth exchange failed." : err;
+            }
+          } else if (apiKeyWizard) {
+            std::string apiKey, err;
+            if (apiKeyWizard->finalizeExchange(apiKey, err)) {
+              auto provider =
+                  firmius::provider::ProviderRegistry::instance().getProvider(
+                      providerId);
+              auto apiKeyProvider = std::dynamic_pointer_cast<
+                  firmius::provider::BaseAPIKeyProvider>(provider);
+              if (apiKeyProvider && !apiKey.empty()) {
+                apiKeyProvider->addApiKey(apiKey);
+                firmius::core::Harness::instance().invalidateModelCache();
+              }
+              result.phase = ConnectProgressPhase::Succeeded;
+              result.message = apiKeyWizard->getFinalMessage();
+            } else {
+              result.phase = ConnectProgressPhase::Failed;
+              result.message = err.empty() ? "API key save failed." : err;
+            }
+          } else {
+            result.phase = ConnectProgressPhase::Failed;
+            result.message = "Wizard had already been consumed.";
+          }
+
+          emitConnectProgressEvent(clientId, result);
+
+          // Erase the session so a new /connect can start cleanly. Detach
+          // first so the std::thread destructor doesn't try to join itself.
+          {
+            std::lock_guard<std::mutex> lk(connectSessionsMutex_);
+            auto it = connectSessionsByClient_.find(clientId);
+            if (it != connectSessionsByClient_.end() &&
+                it->second.sessionId == sessionId) {
+              it->second.finalizeWorker.detach();
+              connectSessionsByClient_.erase(it);
+            }
+          }
+        });
+  }
+
+  response.accepted = true;
+  return response;
+}
+
+ConnectCancelResponse
+DaemonService::cancelConnect(const std::string &clientId,
+                              const ConnectCancelRequest &request) {
+  ConnectCancelResponse response;
+  // Verify it's the right session before cancelling — don't let an old/stale
+  // sessionId yank a brand-new wizard out from under the user.
+  {
+    std::lock_guard<std::mutex> lk(connectSessionsMutex_);
+    auto it = connectSessionsByClient_.find(clientId);
+    if (it == connectSessionsByClient_.end() ||
+        it->second.sessionId != request.sessionId) {
+      return response;
+    }
+  }
+  cancelConnectSessionForClientLocked(clientId);
+  response.cancelled = true;
+  return response;
+}
+
+// ── /undo Rewind ────────────────────────────────────────────────────────
+//
+// previewRewind: walks the agent history from head until targetTurnId,
+// counts turns that would be discarded, then queries listAgentEditBatches
+// for batches whose turnId falls in that discarded set. Per-batch
+// EditUndoEligibility is included. No state is mutated.
+//
+// executeRewind: delegates to Harness::compoundRewind which atomically
+// pre-flights eligibilities, undoes edits in reverse, then transcript
+// turns. On success, emits a DaemonEventKind::RewindApplied event to all
+// subscribed clients (not just the requester) so other UIs viewing the
+// thread refresh.
+
+namespace {
+
+std::string firstTextLine(const firmius::shared::Message &msg) {
+  for (const auto &part : msg.content) {
+    if (std::holds_alternative<firmius::shared::TextContent>(part)) {
+      const auto &text = std::get<firmius::shared::TextContent>(part).text;
+      // Take the first non-empty line, trimmed.
+      auto eol = text.find('\n');
+      std::string head = eol == std::string::npos ? text : text.substr(0, eol);
+      while (!head.empty() &&
+             std::isspace(static_cast<unsigned char>(head.front()))) {
+        head.erase(head.begin());
+      }
+      while (!head.empty() &&
+             std::isspace(static_cast<unsigned char>(head.back()))) {
+        head.pop_back();
+      }
+      if (!head.empty()) return head;
+    }
+  }
+  return {};
+}
+
+}  // namespace
+
+RewindPreviewResponse
+DaemonService::previewRewind(const std::string &clientId,
+                              const RewindPreviewRequest &request) const {
+  RewindPreviewResponse response;
+  response.threadId = resolveThreadIdForRequest(clientId, request.threadId);
+  response.agentId = resolveAgentIdForRequest(clientId, response.threadId,
+                                              request.agentId);
+  response.targetTurnId = request.targetTurnId;
+
+  if (response.threadId.empty() || response.agentId.empty() ||
+      request.targetTurnId.empty()) {
+    response.errorMessage = "thread_id, agent_id, and target_turn_id are required";
+    return response;
+  }
+
+  // Walk history to find the target turn and count what's after it.
+  // We can't use Harness::getAgentHistoryPtr here — that helper insists
+  // currentThreadId_ matches even when the caller passed a threadId
+  // explicitly. previewRewind is addressable for any thread the caller
+  // names (multi-client daemon), so we go through the in-memory agent
+  // first and fall back to the thread manager keyed on response.threadId.
+  std::shared_ptr<firmius::shared::AgentHistory> history;
+  if (auto agent = firmius::core::AgentRegistry::instance().getAgent(response.agentId)) {
+    auto inMemory = agent->getContext().history;
+    if (inMemory && !inMemory->turns.empty()) {
+      history = std::make_shared<firmius::shared::AgentHistory>(*inMemory);
+    }
+  }
+  if (!history) {
+    firmius::core::ThreadManager tm(
+        firmius::core::ThreadManager::defaultBasePath());
+    auto loaded = tm.loadAgentHistory(response.threadId, response.agentId);
+    if (!loaded.turns.empty()) {
+      history = std::make_shared<firmius::shared::AgentHistory>(std::move(loaded));
+    }
+  }
+  if (!history || history->turns.empty()) {
+    response.errorMessage = "agent has no history";
+    return response;
+  }
+  int targetIdx = -1;
+  for (int i = 0; i < static_cast<int>(history->turns.size()); ++i) {
+    if (history->turns[i].turnId == request.targetTurnId) {
+      targetIdx = i;
+      break;
+    }
+  }
+  if (targetIdx < 0) {
+    response.errorMessage = "target turn not found";
+    return response;
+  }
+  response.turnsToUndo =
+      static_cast<int>(history->turns.size()) - targetIdx;
+  if (!history->turns[targetIdx].messages.empty()) {
+    response.targetMessagePreview = firstTextLine(history->turns[targetIdx].messages.front());
+    response.targetMessageCreatedAt =
+        history->turns[targetIdx].messages.front().timestamp;
+  }
+
+  // Find edit batches whose turnId falls in the discarded set. We use
+  // includeUndone=false because already-undone batches don't need to be
+  // surfaced (and would confuse the +A/-B aggregate).
+  std::unordered_set<std::string> discardedTurnIds;
+  for (int i = targetIdx; i < static_cast<int>(history->turns.size()); ++i) {
+    discardedTurnIds.insert(history->turns[i].turnId);
+  }
+
+  firmius::shared::EditHistoryFilters filters;
+  filters.agentId = response.agentId;
+  filters.includeUndone = false;
+  auto batches = firmius::core::Engine::instance().listAgentEditBatches(
+      response.threadId, filters);
+
+  std::unordered_set<std::string> seenFiles;
+  for (const auto &batch : batches) {
+    if (!discardedTurnIds.count(batch.turnId)) continue;
+    response.affectedEditBatches.push_back(batch);
+    response.editEligibilities.push_back(
+        firmius::core::Engine::instance().evaluateEditBatchUndo(
+            response.threadId, batch.editBatchId));
+    response.totalAddedLines += batch.addedLines;
+    response.totalRemovedLines += batch.removedLines;
+    for (const auto &f : batch.files) {
+      if (seenFiles.insert(f).second) {
+        response.filesAffected.push_back(f);
+      }
+    }
+  }
+
+  // Sort newest-first so the overlay shows the most recent change at the top.
+  // We sort both arrays in lockstep by re-pairing.
+  std::vector<std::pair<firmius::shared::EditBatchSummary,
+                        firmius::shared::EditUndoEligibility>>
+      paired;
+  paired.reserve(response.affectedEditBatches.size());
+  for (size_t i = 0; i < response.affectedEditBatches.size(); ++i) {
+    paired.emplace_back(response.affectedEditBatches[i],
+                        response.editEligibilities[i]);
+  }
+  std::sort(paired.begin(), paired.end(),
+            [](const auto &a, const auto &b) {
+              return a.first.createdAt > b.first.createdAt;
+            });
+  response.affectedEditBatches.clear();
+  response.editEligibilities.clear();
+  for (auto &[b, e] : paired) {
+    response.affectedEditBatches.push_back(std::move(b));
+    response.editEligibilities.push_back(std::move(e));
+  }
+
+  // Aggregate "is the whole code restore safe right now?".
+  for (const auto &elig : response.editEligibilities) {
+    if (!elig.undoable) {
+      response.codeRestoreSafe = false;
+      response.codeRestoreBlockReason = elig.reason.empty()
+                                             ? std::string("at least one edit is blocked")
+                                             : elig.reason;
+      break;
+    }
+  }
+
+  return response;
+}
+
+RewindExecuteResponse
+DaemonService::executeRewind(const std::string &clientId,
+                              const RewindExecuteRequest &request) {
+  RewindExecuteResponse response;
+  std::string threadId = resolveThreadIdForRequest(clientId, request.threadId);
+  std::string agentId = resolveAgentIdForRequest(clientId, threadId, request.agentId);
+  if (threadId.empty() || agentId.empty() || request.targetTurnId.empty()) {
+    response.errorMessage = "thread_id, agent_id, and target_turn_id are required";
+    return response;
+  }
+
+  using HarnessMode = firmius::core::Harness::CompoundRewindMode;
+  HarnessMode mode = HarnessMode::RestoreCodeAndConversation;
+  switch (request.mode) {
+  case RewindMode::RestoreCodeAndConversation:
+    mode = HarnessMode::RestoreCodeAndConversation;
+    break;
+  case RewindMode::RestoreConversation:
+    mode = HarnessMode::RestoreConversation;
+    break;
+  case RewindMode::RestoreCode:
+    mode = HarnessMode::RestoreCode;
+    break;
+  }
+
+  // Hold the runtime mutex so concurrent edits/turns don't race the rewind.
+  std::lock_guard<std::mutex> runtimeLock(runtimeMutex_);
+  auto result = firmius::core::Harness::instance().compoundRewind(
+      threadId, agentId, request.targetTurnId, mode);
+
+  response.applied = result.applied;
+  response.undoActionId = result.undoActionId;
+  response.editUndoActionIds = result.editUndoActionIds;
+  response.errorMessage = result.errorMessage;
+
+  if (response.applied) {
+    // Broadcast to every client viewing this thread. We use the same
+    // listener-iteration pattern as emitSessionEvent — guards against
+    // listener invalidation during iteration.
+    std::vector<std::pair<std::string, DaemonEventListener>> listeners;
+    {
+      std::lock_guard<std::mutex> lock(stateMutex_);
+      for (const auto &[cid, subscription] : subscriptions_) {
+        if (subscription.listener) {
+          listeners.push_back({cid, subscription.listener});
+        }
+      }
+    }
+    RewindAppliedSnapshot snap;
+    snap.threadId = threadId;
+    snap.agentId = agentId;
+    snap.targetTurnId = request.targetTurnId;
+    snap.mode = request.mode;
+    snap.turnsUndone = result.turnsUndone;
+    snap.editBatchesUndone = static_cast<int>(result.editUndoActionIds.size());
+    snap.undoActionId = result.undoActionId;
+    DaemonEventEnvelope envelope;
+    envelope.kind = DaemonEventKind::RewindApplied;
+    envelope.rewindApplied = snap;
+    envelope = prepareEventEnvelope(std::move(envelope));
+    for (auto &[cid, listener] : listeners) {
+      (void)cid;
+      listener(envelope);
+    }
+  }
+
+  return response;
+}
+
+RedoPreviewResponse
+DaemonService::previewRedo(const std::string &clientId,
+                           const RedoPreviewRequest &request) const {
+  RedoPreviewResponse response;
+  response.threadId = resolveThreadIdForRequest(clientId, request.threadId);
+  response.agentId = resolveAgentIdForRequest(clientId, response.threadId,
+                                              request.agentId);
+  if (response.threadId.empty() || response.agentId.empty()) {
+    response.errorMessage = "thread_id and agent_id are required";
+    return response;
+  }
+
+  firmius::core::ThreadManager tm(
+      firmius::core::ThreadManager::defaultBasePath());
+  const int limit = request.limit > 0 ? request.limit : 10;
+  auto undoActions = tm.listTranscriptUndoActions(response.threadId, limit);
+  // ThreadManager returns newest-first already, but be defensive — the
+  // redo picker only makes sense if the order is right.
+  std::sort(undoActions.begin(), undoActions.end(),
+            [](const auto &a, const auto &b) {
+              return a.createdAt > b.createdAt;
+            });
+
+  for (const auto &action : undoActions) {
+    if (response.actions.size() >= static_cast<size_t>(limit)) break;
+    RedoUndoActionSummary summary;
+    summary.undoActionId = action.undoActionId;
+    summary.createdAt = action.createdAt;
+    summary.editBatchesToRedo =
+        static_cast<int>(action.editUndoActionIds.size());
+    summary.redoAvailable = action.redoAvailable;
+
+    // Load the captured payload so we can show a 1-line preview of what
+    // would come back. We deliberately ignore load errors here — the
+    // overlay can still pick the action by id, the preview is just nice-to-have.
+    try {
+      auto payloads = tm.loadTranscriptRedoPayloads(response.threadId,
+                                                    action.undoActionId);
+      int totalTurns = 0;
+      for (const auto &payload : payloads) {
+        totalTurns += static_cast<int>(payload.turns.size());
+      }
+      summary.turnsToRedo = totalTurns;
+      // First captured turn = first message text. If there is none we
+      // leave the preview blank rather than emit a fake one.
+      for (const auto &payload : payloads) {
+        if (!payload.turns.empty() &&
+            !payload.turns.front().messages.empty()) {
+          summary.firstTurnPreview =
+              firstTextLine(payload.turns.front().messages.front());
+          break;
+        }
+      }
+    } catch (...) {
+      // Best-effort preview only.
+    }
+    response.actions.push_back(std::move(summary));
+  }
+
+  return response;
+}
+
+RedoExecuteResponse
+DaemonService::executeRedo(const std::string &clientId,
+                           const RedoExecuteRequest &request) {
+  RedoExecuteResponse response;
+  std::string threadId = resolveThreadIdForRequest(clientId, request.threadId);
+  std::string agentId = resolveAgentIdForRequest(clientId, threadId, request.agentId);
+  if (threadId.empty() || agentId.empty() || request.undoActionId.empty()) {
+    response.errorMessage =
+        "thread_id, agent_id, and undo_action_id are required";
+    return response;
+  }
+
+  using HarnessMode = firmius::core::Harness::CompoundRedoMode;
+  HarnessMode mode = HarnessMode::RestoreCodeAndConversation;
+  switch (request.mode) {
+  case RedoMode::RestoreCodeAndConversation:
+    mode = HarnessMode::RestoreCodeAndConversation;
+    break;
+  case RedoMode::RestoreConversation:
+    mode = HarnessMode::RestoreConversation;
+    break;
+  case RedoMode::RestoreCode:
+    mode = HarnessMode::RestoreCode;
+    break;
+  }
+
+  std::lock_guard<std::mutex> runtimeLock(runtimeMutex_);
+  auto result = firmius::core::Harness::instance().compoundRedo(
+      threadId, agentId, request.undoActionId, mode);
+
+  response.applied = result.applied;
+  response.turnsRedone = result.turnsRedone;
+  response.editRedoActionIds = result.editRedoActionIds;
+  response.errorMessage = result.errorMessage;
+
+  if (response.applied) {
+    // Reuse RewindApplied for the broadcast — clients refresh on the
+    // same hook. The mode field doesn't have a "redo" variant, so we
+    // pass the request's redo mode coerced into the rewind enum
+    // (matching wire format), and the snapshot's targetTurnId is empty
+    // since this is a redo, not a rewind. The TUI distinguishes
+    // refresh-only from picker-replay using turnsUndone < 0; here
+    // turnsUndone=0 is a forward-only signal.
+    std::vector<std::pair<std::string, DaemonEventListener>> listeners;
+    {
+      std::lock_guard<std::mutex> lock(stateMutex_);
+      for (const auto &[cid, subscription] : subscriptions_) {
+        if (subscription.listener) {
+          listeners.push_back({cid, subscription.listener});
+        }
+      }
+    }
+    RewindAppliedSnapshot snap;
+    snap.threadId = threadId;
+    snap.agentId = agentId;
+    snap.undoActionId = request.undoActionId;
+    snap.turnsUndone = -result.turnsRedone;  // negative = redo
+    snap.editBatchesUndone = -static_cast<int>(result.editRedoActionIds.size());
+    DaemonEventEnvelope envelope;
+    envelope.kind = DaemonEventKind::RewindApplied;
+    envelope.rewindApplied = snap;
+    envelope = prepareEventEnvelope(std::move(envelope));
+    for (auto &[cid, listener] : listeners) {
+      (void)cid;
+      listener(envelope);
+    }
+  }
+
+  return response;
 }
 
 } // namespace firmius::daemon

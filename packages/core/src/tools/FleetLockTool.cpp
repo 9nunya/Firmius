@@ -6,8 +6,11 @@
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
+#include <algorithm>
 #include <chrono>
+#include <sstream>
 #include <thread>
+#include <vector>
 
 namespace firmius::core {
 
@@ -178,15 +181,22 @@ shared::ToolResult FleetLockTool::execute(const FleetLockInput &input,
     rapidjson::Document doc;
     doc.SetObject();
     auto &alloc = doc.GetAllocator();
+    // Token-waste pass 5: prose-first acquire result. Dropped `mode` echo.
+    std::ostringstream prose;
+    prose << "Acquired lock " << lock.lockId << " over [";
+    for (size_t i = 0; i < input.paths.size(); ++i) {
+      if (i) prose << ", ";
+      prose << input.paths[i];
+    }
+    prose << "].";
+    const std::string proseStr = prose.str();
+    doc.AddMember(
+        "result",
+        rapidjson::Value(proseStr.c_str(),
+                         static_cast<rapidjson::SizeType>(proseStr.size()),
+                         alloc).Move(),
+        alloc);
     doc.AddMember("lock_id", rapidjson::Value(lock.lockId.c_str(), alloc), alloc);
-    doc.AddMember("mode", rapidjson::Value("acquire", alloc), alloc);
-    doc.AddMember("paths", [&]() {
-      rapidjson::Value arr(rapidjson::kArrayType);
-      for (const auto &p : input.paths) {
-        arr.PushBack(rapidjson::Value(p.c_str(), alloc), alloc);
-      }
-      return arr;
-    }(), alloc);
     return shared::ToolResult::ok(doc);
     
   } else if (input.mode == "release") {
@@ -222,9 +232,15 @@ shared::ToolResult FleetLockTool::execute(const FleetLockInput &input,
     rapidjson::Document doc;
     doc.SetObject();
     auto &alloc = doc.GetAllocator();
+    // Token-waste pass 5: prose-first release result.
+    std::string releaseProse = "Released lock " + input.lock_id + ".";
+    doc.AddMember(
+        "result",
+        rapidjson::Value(releaseProse.c_str(),
+                         static_cast<rapidjson::SizeType>(releaseProse.size()),
+                         alloc).Move(),
+        alloc);
     doc.AddMember("lock_id", rapidjson::Value(input.lock_id.c_str(), alloc), alloc);
-    doc.AddMember("mode", rapidjson::Value("release", alloc), alloc);
-    doc.AddMember("status", rapidjson::Value("released", alloc), alloc);
     return shared::ToolResult::ok(doc);
     
   } else if (input.mode == "request") {
@@ -306,8 +322,18 @@ shared::ToolResult FleetLockTool::execute(const FleetLockInput &input,
         rapidjson::Document doc;
         doc.SetObject();
         auto &alloc = doc.GetAllocator();
-        doc.AddMember("request_id", rapidjson::Value(requestId.c_str(), alloc), alloc);
-        doc.AddMember("mode", rapidjson::Value("request", alloc), alloc);
+        // Token-waste pass 5: prose-first lock-request resolution.
+        std::string releasedProse =
+            "Lock request " + requestId +
+            " resolved: target released the surface.";
+        doc.AddMember(
+            "result",
+            rapidjson::Value(releasedProse.c_str(),
+                             static_cast<rapidjson::SizeType>(releasedProse.size()),
+                             alloc).Move(),
+            alloc);
+        doc.AddMember("request_id",
+                      rapidjson::Value(requestId.c_str(), alloc), alloc);
         doc.AddMember("status", rapidjson::Value("released", alloc), alloc);
         return shared::ToolResult::ok(doc);
       }
@@ -316,11 +342,26 @@ shared::ToolResult FleetLockTool::execute(const FleetLockInput &input,
         rapidjson::Document doc;
         doc.SetObject();
         auto &alloc = doc.GetAllocator();
-        doc.AddMember("request_id", rapidjson::Value(requestId.c_str(), alloc), alloc);
-        doc.AddMember("mode", rapidjson::Value("request", alloc), alloc);
+        std::string unavailProse =
+            "Lock request " + requestId +
+            " — target agent is unavailable.";
+        if (conflictingOpenLock) {
+          unavailProse +=
+              " Conflicting open locks remain on the requested paths.";
+        }
+        doc.AddMember(
+            "result",
+            rapidjson::Value(unavailProse.c_str(),
+                             static_cast<rapidjson::SizeType>(unavailProse.size()),
+                             alloc).Move(),
+            alloc);
+        doc.AddMember("request_id",
+                      rapidjson::Value(requestId.c_str(), alloc), alloc);
         doc.AddMember("status",
                       rapidjson::Value("target_unavailable", alloc), alloc);
-        doc.AddMember("conflicts_remaining", conflictingOpenLock, alloc);
+        if (conflictingOpenLock) {
+          doc.AddMember("conflicts_remaining", true, alloc);
+        }
         return shared::ToolResult::ok(doc);
       }
 
@@ -358,8 +399,16 @@ shared::ToolResult FleetLockTool::execute(const FleetLockInput &input,
         rapidjson::Document doc;
         doc.SetObject();
         auto &alloc = doc.GetAllocator();
-        doc.AddMember("lock_id", rapidjson::Value(input.lock_id.c_str(), alloc), alloc);
-        doc.AddMember("mode", rapidjson::Value("wait", alloc), alloc);
+        // Token-waste pass 5: prose-first wait result.
+        std::string waitProse = "Lock " + input.lock_id + " released.";
+        doc.AddMember(
+            "result",
+            rapidjson::Value(waitProse.c_str(),
+                             static_cast<rapidjson::SizeType>(waitProse.size()),
+                             alloc).Move(),
+            alloc);
+        doc.AddMember("lock_id",
+                      rapidjson::Value(input.lock_id.c_str(), alloc), alloc);
         doc.AddMember("status", rapidjson::Value("released", alloc), alloc);
         return shared::ToolResult::ok(doc);
       }
@@ -377,71 +426,101 @@ shared::ToolResult FleetLockTool::execute(const FleetLockInput &input,
   } else if (input.mode == "check") {
     ThreadManager tm(ThreadManager::defaultBasePath());
     FleetState state = tm.getFleetState(threadId);
-    
-    rapidjson::Document doc;
-    doc.SetObject();
-    auto &alloc = doc.GetAllocator();
-    
-    rapidjson::Value locks(rapidjson::kArrayType);
-    rapidjson::Value conflictingPaths(rapidjson::kArrayType);
-    
+
+    // Token-waste pass 5: prose-first check result. Each conflicting/open
+    // lock becomes one prose line (id, owner, paths, reason); the
+    // structured fields shrink to has_conflicts + conflicting_paths.
+    struct CheckRow {
+      std::string lockId;
+      std::string ownerAgentId;
+      std::string reason;
+      std::vector<std::string> paths;
+      bool conflicts = false;
+    };
+    std::vector<CheckRow> rows;
+    std::vector<std::string> conflictingPaths;
+
     for (const auto &lock : state.locks) {
       const std::string status = lockStatusOrDefault(lock);
       if (status != "open") continue;
-      
+
       bool hasConflict = false;
       if (lock.paths.empty()) {
         hasConflict = !input.paths.empty();
       } else {
         for (const auto &requestedPath : input.paths) {
           for (const auto &lockPath : lock.paths) {
-            if (requestedPath == lockPath) {
-              hasConflict = true;
-              break;
-            }
+            if (requestedPath == lockPath) { hasConflict = true; break; }
           }
           if (hasConflict) break;
         }
       }
-      
+
       if (hasConflict || input.paths.empty()) {
-        rapidjson::Value lockObj(rapidjson::kObjectType);
-        lockObj.AddMember("lock_id", rapidjson::Value(lock.lockId.c_str(), alloc), alloc);
-        lockObj.AddMember("owner_agent_id", rapidjson::Value(lock.ownerAgentId.c_str(), alloc), alloc);
-        lockObj.AddMember("reason", rapidjson::Value(lock.reason.c_str(), alloc), alloc);
-        lockObj.AddMember("status", rapidjson::Value(status.c_str(), alloc), alloc);
-        
-        rapidjson::Value pathsArr(rapidjson::kArrayType);
-        for (const auto &p : lock.paths) {
-          pathsArr.PushBack(rapidjson::Value(p.c_str(), alloc), alloc);
-        }
-        lockObj.AddMember("paths", pathsArr, alloc);
-        lockObj.AddMember("conflicts", hasConflict, alloc);
-        locks.PushBack(lockObj, alloc);
-        
+        CheckRow row;
+        row.lockId = lock.lockId;
+        row.ownerAgentId = lock.ownerAgentId;
+        row.reason = lock.reason;
+        row.paths = lock.paths;
+        row.conflicts = hasConflict;
+        rows.push_back(std::move(row));
+
         if (hasConflict) {
           for (const auto &lockPath : lock.paths) {
-            bool alreadyAdded = false;
-            for (const auto &added : conflictingPaths.GetArray()) {
-              if (added.GetString() == lockPath) {
-                alreadyAdded = true;
-                break;
-              }
-            }
-            if (!alreadyAdded) {
-              conflictingPaths.PushBack(rapidjson::Value(lockPath.c_str(), alloc), alloc);
+            if (std::find(conflictingPaths.begin(), conflictingPaths.end(),
+                          lockPath) == conflictingPaths.end()) {
+              conflictingPaths.push_back(lockPath);
             }
           }
         }
       }
     }
-    
-    doc.AddMember("locks", locks, alloc);
-    doc.AddMember("conflicting_paths", conflictingPaths, alloc);
-    doc.AddMember("has_conflicts", !conflictingPaths.Empty(), alloc);
-    
+
+    rapidjson::Document doc;
+    doc.SetObject();
+    auto &alloc = doc.GetAllocator();
+    std::ostringstream prose;
+    if (rows.empty()) {
+      prose << "No matching locks.";
+    } else {
+      prose << rows.size() << " open lock"
+            << (rows.size() == 1 ? "" : "s") << " match";
+      if (!conflictingPaths.empty()) {
+        prose << "; " << conflictingPaths.size()
+              << " conflict path" << (conflictingPaths.size() == 1 ? "" : "s");
+      }
+      prose << ":\n";
+      for (const auto &row : rows) {
+        prose << "  " << row.lockId << " — owner=" << row.ownerAgentId;
+        if (!row.reason.empty()) prose << ", reason=" << row.reason;
+        if (!row.paths.empty()) {
+          prose << ", paths=[";
+          for (size_t i = 0; i < row.paths.size(); ++i) {
+            if (i) prose << ", ";
+            prose << row.paths[i];
+          }
+          prose << "]";
+        }
+        if (row.conflicts) prose << ", CONFLICTS";
+        prose << "\n";
+      }
+    }
+    const std::string proseStr = prose.str();
+    doc.AddMember(
+        "result",
+        rapidjson::Value(proseStr.c_str(),
+                         static_cast<rapidjson::SizeType>(proseStr.size()),
+                         alloc).Move(),
+        alloc);
+    rapidjson::Value cpArr(rapidjson::kArrayType);
+    for (const auto &p : conflictingPaths) {
+      cpArr.PushBack(rapidjson::Value(p.c_str(), alloc), alloc);
+    }
+    doc.AddMember("conflicting_paths", cpArr, alloc);
+    doc.AddMember("has_conflicts", !conflictingPaths.empty(), alloc);
+
     return shared::ToolResult::ok(doc);
-    
+
   } else {
     return shared::ToolResult::fail("Unknown mode: " + input.mode);
   }

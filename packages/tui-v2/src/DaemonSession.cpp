@@ -28,6 +28,20 @@ bool DaemonSession::connect() {
     options.connection.endpoint = endpoint;
   }
 
+  // Make sure the implicitly-spawned daemon's stdio doesn't shred our raw
+  // alt-screen TUI. Default to ~/.firmius/daemon.log so users have somewhere
+  // to look at startup phase messages and warnings; fall back to /dev/null.
+  if (options.spawnedDaemonLogFile.empty()) {
+    if (const char* home = std::getenv("HOME")) {
+      const auto firmiusHome = std::filesystem::path(home) / ".firmius";
+      std::error_code ec;
+      std::filesystem::create_directories(firmiusHome, ec);
+      if (!ec) {
+        options.spawnedDaemonLogFile = (firmiusHome / "daemon.log").string();
+      }
+    }
+  }
+
   client_ = std::make_unique<firmius::daemon::DaemonClient>(std::move(options));
   return client_->connect();
 }
@@ -81,7 +95,6 @@ firmius::daemon::ThreadsCreateResponse DaemonSession::createThread(
   request.cwd = cwd.empty() ? std::filesystem::current_path().string() : cwd;
   request.leadPersona = persona;
   request.initialMode = mode;
-  request.permissionMode = firmius::shared::ThreadPermissionMode::Request;
   return client_->createThread(request);
 }
 
@@ -93,12 +106,14 @@ firmius::daemon::ThreadsOpenResponse DaemonSession::openThread(
 
 firmius::daemon::ThreadsSendResponse DaemonSession::send(
     const std::string &threadId, const std::string &agentId,
-    const std::string &text) {
+    const std::string &text,
+    std::vector<firmius::shared::ImageContent> images) {
   if (!client_) return {};
   firmius::daemon::ThreadsSendRequest request;
   request.threadId = threadId;
   request.agentId = agentId;
   request.text = text;
+  request.images = std::move(images);
   return client_->send(request);
 }
 
@@ -199,6 +214,42 @@ bool DaemonSession::resolvePermission(const std::string &requestId,
   return client_->resolvePermission(request);
 }
 
+bool DaemonSession::resolvePermissionWithRules(
+    const std::string &requestId,
+    const std::vector<std::string> &selectedSuggestionIds) {
+  if (!client_) return false;
+  firmius::daemon::PermissionResolveWithRulesRequest req;
+  req.requestId = requestId;
+  req.selectedSuggestionIds = selectedSuggestionIds;
+  return client_->resolvePermissionWithRules(req);
+}
+
+firmius::daemon::PermissionListRulesResponse DaemonSession::listPolicyRules() {
+  if (!client_) return {};
+  return client_->listPolicyRules();
+}
+
+firmius::daemon::PermissionUpsertRuleResponse
+DaemonSession::upsertPolicyRule(const firmius::daemon::PolicyRuleWire &rule) {
+  if (!client_) return {};
+  firmius::daemon::PermissionUpsertRuleRequest req;
+  req.rule = rule;
+  return client_->upsertPolicyRule(req);
+}
+
+firmius::daemon::PermissionDeleteRuleResponse
+DaemonSession::deletePolicyRule(const std::string &ruleId) {
+  if (!client_) return {};
+  firmius::daemon::PermissionDeleteRuleRequest req;
+  req.ruleId = ruleId;
+  return client_->deletePolicyRule(req);
+}
+
+firmius::daemon::PermissionReloadPolicyResponse DaemonSession::reloadPolicy() {
+  if (!client_) return {};
+  return client_->reloadPolicy();
+}
+
 bool DaemonSession::executeWorkflow(const std::string &workflowId,
                                      const std::vector<std::string> &args) {
   if (!client_) return false;
@@ -206,6 +257,122 @@ bool DaemonSession::executeWorkflow(const std::string &workflowId,
   request.workflowId = workflowId;
   request.args = args;
   return client_->executeWorkflow(request);
+}
+
+firmius::daemon::ConnectBeginResponse
+DaemonSession::beginConnect(const std::string &providerId, bool addAdditional) {
+  firmius::daemon::ConnectBeginResponse empty;
+  if (!client_) {
+    empty.errorMessage = "daemon not connected";
+    return empty;
+  }
+  firmius::daemon::ConnectBeginRequest request;
+  request.providerId = providerId;
+  request.addAdditional = addAdditional;
+  return client_->beginConnect(request);
+}
+
+firmius::daemon::ConnectSubmitResponse
+DaemonSession::submitConnect(const std::string &sessionId,
+                              const std::string &answer) {
+  firmius::daemon::ConnectSubmitResponse empty;
+  if (!client_) {
+    empty.errorMessage = "daemon not connected";
+    return empty;
+  }
+  firmius::daemon::ConnectSubmitRequest request;
+  request.sessionId = sessionId;
+  request.answer = answer;
+  return client_->submitConnect(request);
+}
+
+firmius::daemon::ConnectFinalizeResponse
+DaemonSession::finalizeConnect(const std::string &sessionId) {
+  firmius::daemon::ConnectFinalizeResponse empty;
+  if (!client_) {
+    empty.errorMessage = "daemon not connected";
+    return empty;
+  }
+  firmius::daemon::ConnectFinalizeRequest request;
+  request.sessionId = sessionId;
+  return client_->finalizeConnect(request);
+}
+
+firmius::daemon::ConnectCancelResponse
+DaemonSession::cancelConnect(const std::string &sessionId) {
+  firmius::daemon::ConnectCancelResponse empty;
+  if (!client_) return empty;
+  firmius::daemon::ConnectCancelRequest request;
+  request.sessionId = sessionId;
+  return client_->cancelConnect(request);
+}
+
+firmius::daemon::RewindPreviewResponse
+DaemonSession::previewRewind(const std::string &threadId,
+                              const std::string &agentId,
+                              const std::string &targetTurnId) {
+  firmius::daemon::RewindPreviewResponse empty;
+  if (!client_) {
+    empty.errorMessage = "daemon not connected";
+    return empty;
+  }
+  firmius::daemon::RewindPreviewRequest request;
+  request.threadId = threadId;
+  request.agentId = agentId;
+  request.targetTurnId = targetTurnId;
+  return client_->previewRewind(request);
+}
+
+firmius::daemon::RewindExecuteResponse
+DaemonSession::executeRewind(const std::string &threadId,
+                              const std::string &agentId,
+                              const std::string &targetTurnId,
+                              firmius::daemon::RewindMode mode) {
+  firmius::daemon::RewindExecuteResponse empty;
+  if (!client_) {
+    empty.errorMessage = "daemon not connected";
+    return empty;
+  }
+  firmius::daemon::RewindExecuteRequest request;
+  request.threadId = threadId;
+  request.agentId = agentId;
+  request.targetTurnId = targetTurnId;
+  request.mode = mode;
+  return client_->executeRewind(request);
+}
+
+firmius::daemon::RedoPreviewResponse
+DaemonSession::previewRedo(const std::string &threadId,
+                            const std::string &agentId,
+                            int limit) {
+  firmius::daemon::RedoPreviewResponse empty;
+  if (!client_) {
+    empty.errorMessage = "daemon not connected";
+    return empty;
+  }
+  firmius::daemon::RedoPreviewRequest request;
+  request.threadId = threadId;
+  request.agentId = agentId;
+  request.limit = limit;
+  return client_->previewRedo(request);
+}
+
+firmius::daemon::RedoExecuteResponse
+DaemonSession::executeRedo(const std::string &threadId,
+                            const std::string &agentId,
+                            const std::string &undoActionId,
+                            firmius::daemon::RedoMode mode) {
+  firmius::daemon::RedoExecuteResponse empty;
+  if (!client_) {
+    empty.errorMessage = "daemon not connected";
+    return empty;
+  }
+  firmius::daemon::RedoExecuteRequest request;
+  request.threadId = threadId;
+  request.agentId = agentId;
+  request.undoActionId = undoActionId;
+  request.mode = mode;
+  return client_->executeRedo(request);
 }
 
 } // namespace firmius::tui2

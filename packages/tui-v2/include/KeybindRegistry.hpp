@@ -51,6 +51,7 @@ inline constexpr const char *kCtrlB = "\x02";
 inline constexpr const char *kCtrlP = "\x10";
 inline constexpr const char *kCtrlE = "\x05";
 inline constexpr const char *kCtrlT = "\x14";
+inline constexpr const char *kCtrlY = "\x19";
 inline constexpr const char *kBackspace = "\x7f";
 inline constexpr const char *kBackspaceDel = "\b";
 inline constexpr const char *kUp = "\x1b[A";

@@ -3,16 +3,124 @@
 #include "items/SimpleItems.hpp"
 #include "items/StreamingItems.hpp"
 #include "items/ToolCallItem.hpp"
+#include "utils/Icons.hpp"
 #include "utils/ToolSummaries.hpp"
 
 #include <rapidjson/document.h>
 #include <algorithm>
 #include <chrono>
+#include <sstream>
 
 namespace {
 
 using firmius::tui2::ToolPhase;
 using SharedToolPhase = firmius::shared::ToolPhase;
+
+std::string humanizeTokens(uint32_t value) {
+  if (value >= 1'000'000) {
+    return std::to_string(value / 1'000'000) + "M";
+  }
+  if (value >= 1'000) {
+    return std::to_string(value / 1'000) + "k";
+  }
+  return std::to_string(value);
+}
+
+/// Compute deltas vs `prev` and, if any working-memory activity actually
+/// happened on this turn (deflations fired, eviction/recall changed, or
+/// threshold crossed up), return a single-line notice string. Otherwise
+/// return empty.
+std::string formatMemoryActivityNotice(
+    const firmius::tui2::MemoryStatus& prev,
+    const firmius::tui2::MemoryStatus& cur) {
+  if (!cur.aboveBufferThreshold) {
+    return ""; // pure pass-through: nothing to report
+  }
+  const auto deltaDeflated =
+      cur.deflatedPartCount > prev.deflatedPartCount
+          ? cur.deflatedPartCount - prev.deflatedPartCount
+          : 0u;
+  const auto deltaSavedDefl =
+      cur.tokensSavedByDeflation > prev.tokensSavedByDeflation
+          ? cur.tokensSavedByDeflation - prev.tokensSavedByDeflation
+          : 0u;
+  const auto deltaSavedEvict =
+      cur.tokensSavedByEviction > prev.tokensSavedByEviction
+          ? cur.tokensSavedByEviction - prev.tokensSavedByEviction
+          : 0u;
+  const auto deltaRecalled =
+      cur.recalledTurnCount > prev.recalledTurnCount
+          ? cur.recalledTurnCount - prev.recalledTurnCount
+          : 0u;
+  const auto deltaEvicted =
+      cur.evictedTurnCount > prev.evictedTurnCount
+          ? cur.evictedTurnCount - prev.evictedTurnCount
+          : 0u;
+  const bool crossedTarget =
+      cur.aboveTargetThreshold && !prev.aboveTargetThreshold;
+  const bool crossedEmerg =
+      cur.aboveEmergencyThreshold && !prev.aboveEmergencyThreshold;
+  const bool crossedBuffer =
+      cur.aboveBufferThreshold && !prev.aboveBufferThreshold;
+  const bool anyChange = deltaDeflated || deltaSavedDefl || deltaSavedEvict ||
+                         deltaRecalled || deltaEvicted || crossedTarget ||
+                         crossedEmerg || crossedBuffer;
+  if (!anyChange) {
+    return "";
+  }
+
+  using firmius::shared::ICON_DEFLATE;
+  using firmius::shared::ICON_EVICT;
+  using firmius::shared::ICON_MEMORY;
+  using firmius::shared::ICON_RECALL;
+  using firmius::shared::ICON_SAVINGS;
+  using firmius::shared::ICON_THRESHOLD_BUF;
+  using firmius::shared::ICON_THRESHOLD_EMERG;
+  using firmius::shared::ICON_THRESHOLD_TGT;
+
+  std::ostringstream out;
+  out << ICON_MEMORY << "  ";
+
+  if (crossedEmerg) {
+    out << ICON_THRESHOLD_EMERG << " emergency  ";
+  } else if (crossedTarget) {
+    out << ICON_THRESHOLD_TGT << " target  ";
+  } else if (crossedBuffer) {
+    out << ICON_THRESHOLD_BUF << " buffer  ";
+  }
+
+  bool first = true;
+  auto sep = [&]() {
+    if (first) {
+      first = false;
+    } else {
+      out << "  · ";
+    }
+  };
+
+  if (deltaDeflated > 0) {
+    sep();
+    out << ICON_DEFLATE << " " << deltaDeflated;
+  }
+  if (deltaEvicted > 0) {
+    sep();
+    out << ICON_EVICT << " " << deltaEvicted;
+  }
+  if (deltaRecalled > 0) {
+    sep();
+    out << ICON_RECALL << " " << deltaRecalled;
+  }
+  const uint32_t savedThisTurn = deltaSavedDefl + deltaSavedEvict;
+  if (savedThisTurn > 0) {
+    sep();
+    out << ICON_SAVINGS << " " << humanizeTokens(savedThisTurn);
+  }
+  if (first) {
+    // Nothing concrete to report beyond the threshold crossing alone.
+    return out.str();
+  }
+  return out.str();
+}
 
 void markThinkingDone(firmius::tui2::AppState& state, const std::string& agentId) {
   state.upsertAgentActivity(agentId, "thinking", "Thought",
@@ -140,6 +248,16 @@ void EventRouter::route(const firmius::daemon::DaemonEventEnvelope &envelope) {
       state_.setLiveMessage(envelope.initMessage);
     }
     break;
+  case firmius::daemon::DaemonEventKind::ConnectProgress:
+    if (envelope.connectProgress.has_value() && onConnectProgress_) {
+      onConnectProgress_(*envelope.connectProgress);
+    }
+    break;
+  case firmius::daemon::DaemonEventKind::RewindApplied:
+    if (envelope.rewindApplied.has_value() && onRewindApplied_) {
+      onRewindApplied_(*envelope.rewindApplied);
+    }
+    break;
   }
 }
 
@@ -187,6 +305,8 @@ void EventRouter::routeRuntimeEvent(
     handleModelSwitched(eventJson);
   } else if (eventType == "thread_title_updated") {
     handleThreadTitleUpdated(eventJson);
+  } else if (eventType == "thread_metadata_updated") {
+    handleThreadMetadataUpdated(eventJson);
   } else if (eventType == "config_updated") {
     handleConfigUpdated();
   } else if (eventType == "embedding_model_progress") {
@@ -702,6 +822,32 @@ void EventRouter::handleAgentTurnCompleted(const std::string &json,
         return std::to_string(value);
       };
       state_.setAgentContextWindow(humanize(used) + "/" + humanize(window));
+
+      // Working-memory v2 telemetry latch.
+      const auto prevMemory = state_.memoryStatus();
+      MemoryStatus curMemory;
+      curMemory.rawHistoryTokens = metrics.memory.rawHistoryTokens;
+      curMemory.workingSetTokens = metrics.memory.workingSetTokens;
+      curMemory.pinnedTurnCount = metrics.memory.pinnedTurnCount;
+      curMemory.evictedTurnCount = metrics.memory.evictedTurnCount;
+      curMemory.recalledTurnCount = metrics.memory.recalledTurnCount;
+      curMemory.deflatedPartCount = metrics.memory.deflatedPartCount;
+      curMemory.tokensSavedByDeflation = metrics.memory.tokensSavedByDeflation;
+      curMemory.tokensSavedByEviction = metrics.memory.tokensSavedByEviction;
+      curMemory.tokensSpentOnSummaries = metrics.memory.tokensSpentOnSummaries;
+      curMemory.tokensSpentOnEmbeddings = metrics.memory.tokensSpentOnEmbeddings;
+      curMemory.hotPathLatencyMicros = metrics.memory.hotPathLatencyMicros;
+      curMemory.aboveBufferThreshold = metrics.memory.aboveBufferThreshold;
+      curMemory.aboveTargetThreshold = metrics.memory.aboveTargetThreshold;
+      curMemory.aboveEmergencyThreshold = metrics.memory.aboveEmergencyThreshold;
+      curMemory.valid = true;
+      state_.setMemoryStatus(curMemory);
+
+      const std::string notice =
+          formatMemoryActivityNotice(prevMemory, curMemory);
+      if (!notice.empty()) {
+        state_.addItem(std::make_unique<SystemNoticeItem>(notice));
+      }
     }
   }
 
@@ -1037,8 +1183,61 @@ void EventRouter::handlePermissionEscalation(const std::string &json) {
   perm.title = jsonString(doc, "title");
   perm.message = jsonString(doc, "message");
   perm.toolName = jsonString(doc, "toolName");
+  perm.toolCallId = toolCallId;
   if (doc.HasMember("allowAlways") && doc["allowAlways"].IsBool()) {
     perm.allowAlways = doc["allowAlways"].GetBool();
+  }
+  // ── v2 fields ──
+  perm.category = jsonString(doc, "category");
+  perm.command = jsonString(doc, "command");
+  perm.commandPrimary = jsonString(doc, "commandPrimary");
+  perm.targetPath = jsonString(doc, "targetPath");
+  perm.cwd = jsonString(doc, "cwd");
+  perm.url = jsonString(doc, "url");
+  perm.host = jsonString(doc, "host");
+  perm.scheme = jsonString(doc, "scheme");
+  perm.query = jsonString(doc, "query");
+  perm.persona = jsonString(doc, "persona");
+  perm.parentPersona = jsonString(doc, "parentPersona");
+  if (doc.HasMember("severity") && doc["severity"].IsInt()) {
+    perm.severity = doc["severity"].GetInt();
+  }
+  if (doc.HasMember("isDirectory") && doc["isDirectory"].IsBool()) {
+    perm.isDirectory = doc["isDirectory"].GetBool();
+  }
+  if (doc.HasMember("subcommands") && doc["subcommands"].IsArray()) {
+    for (const auto &s : doc["subcommands"].GetArray()) {
+      if (s.IsString()) perm.subcommands.emplace_back(s.GetString());
+    }
+  }
+  if (doc.HasMember("suggestions") && doc["suggestions"].IsArray()) {
+    for (const auto &s : doc["suggestions"].GetArray()) {
+      if (!s.IsObject()) continue;
+      PendingPermissionSuggestion sug;
+      if (s.HasMember("ruleId") && s["ruleId"].IsString())
+        sug.ruleId = s["ruleId"].GetString();
+      if (s.HasMember("label") && s["label"].IsString())
+        sug.label = s["label"].GetString();
+      if (s.HasMember("explanation") && s["explanation"].IsString())
+        sug.explanation = s["explanation"].GetString();
+      if (s.HasMember("category") && s["category"].IsString())
+        sug.category = s["category"].GetString();
+      if (s.HasMember("decision") && s["decision"].IsString())
+        sug.decision = s["decision"].GetString();
+      if (s.HasMember("scope") && s["scope"].IsString())
+        sug.scope = s["scope"].GetString();
+      if (s.HasMember("defaultSelected") && s["defaultSelected"].IsBool())
+        sug.defaultSelected = s["defaultSelected"].GetBool();
+      if (s.HasMember("match") && s["match"].IsObject()) {
+        for (auto it = s["match"].MemberBegin();
+             it != s["match"].MemberEnd(); ++it) {
+          if (it->value.IsString()) {
+            sug.match[it->name.GetString()] = it->value.GetString();
+          }
+        }
+      }
+      perm.suggestions.push_back(std::move(sug));
+    }
   }
   std::string reqId = perm.requestId;  // Save before move
   state_.pushPendingPermission(std::move(perm));
@@ -1141,6 +1340,22 @@ void EventRouter::handleThreadTitleUpdated(const std::string &json) {
   if (!title.empty()) {
     state_.setThreadTitle(title);
   }
+}
+
+void EventRouter::handleThreadMetadataUpdated(const std::string &json) {
+  rapidjson::Document doc;
+  doc.Parse(json.c_str());
+  if (doc.HasParseError()) return;
+  // Pick up incidental metadata changes (title, etc.). Active mode no
+  // longer rides on ThreadMetadata — modes live in the policy engine
+  // and are pulled in via getPermissionMode RPCs after thread load.
+  if (doc.HasMember("metadata") && doc["metadata"].IsObject()) {
+    const auto &m = doc["metadata"];
+    if (m.HasMember("title") && m["title"].IsString()) {
+      state_.setThreadTitle(m["title"].GetString());
+    }
+  }
+  state_.markDirtyPublic();
 }
 
 void EventRouter::handleConfigUpdated() {

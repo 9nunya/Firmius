@@ -36,6 +36,17 @@ inline const std::string ICON_ANCHOR = "󰯲";
 inline const std::string ICON_DOWNLOAD = "󰇚";
 inline const std::string ICON_MODEL = "⚙";
 
+// Working-memory v2 surface
+inline const std::string ICON_PIN = "󰐃";       // nf-md-pin
+inline const std::string ICON_DEFLATE = "󰗈";   // nf-md-arrow-collapse-vertical
+inline const std::string ICON_SAVINGS = "󰁆";   // nf-md-arrow-down-bold
+inline const std::string ICON_RECALL = "󰑓";    // nf-md-restore (relevance fill)
+inline const std::string ICON_EVICT = "󰩺";     // nf-md-broom (eviction)
+inline const std::string ICON_THRESHOLD_OK = "󰗠"; // nf-md-check-circle
+inline const std::string ICON_THRESHOLD_BUF = "󰂃";    // nf-md-battery-50
+inline const std::string ICON_THRESHOLD_TGT = "󰂁";    // nf-md-battery-30
+inline const std::string ICON_THRESHOLD_EMERG = "󰈸"; // nf-md-fire
+
 } // namespace firmius::shared
 
 #endif

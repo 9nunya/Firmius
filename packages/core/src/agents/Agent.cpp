@@ -14,6 +14,8 @@
 #include "agents/ContextBudget.hpp"
 #include "agents/PurposeLoader.hpp"
 #include "agents/RuntimeOverlay.hpp"
+#include "agents/working_memory/WorkingMemory.hpp"
+#include "agents/working_memory/WorkingMemoryWorker.hpp"
 #include "harness/Harness.hpp"
 #include "persistence/Journaler.hpp"
 #include "persistence/ThreadManager.hpp"
@@ -40,6 +42,7 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 #include <unordered_map>
+#include <map>
 #include <unordered_set>
 
 namespace firmius::core {
@@ -416,6 +419,16 @@ extractEditLedgerMutations(const std::string &threadId,
     mutation.hadFileBefore = !(mutation.mode == "write" && !mutation.operations.empty() &&
                                mutation.operations.front().oldLines.empty() &&
                                mutation.operations.front().description == "create file");
+    // The honest signal: if the tool emitted "had_file_before" we trust
+    // it directly. The prior heuristic (string-match on description)
+    // silently broke whenever a different code path emitted a different
+    // verb, leaving create-style undos as no-op writes. The fallback
+    // above is kept for backwards compat with tool results that haven't
+    // been migrated yet.
+    if (fileDoc.HasMember("had_file_before") &&
+        fileDoc["had_file_before"].IsBool()) {
+      mutation.hadFileBefore = fileDoc["had_file_before"].GetBool();
+    }
     mutation.hasFileAfter = true;
     mutation.preSize = beforeContent.size();
     mutation.postSize = afterContent.size();
@@ -476,6 +489,46 @@ void persistEditLedgerBatch(const shared::AgentContext &context,
   tm.writeEditBatch(context.history->threadId, summary, mutations);
 }
 
+// Token-waste pass 1: split a combined unified diff (the kind FileEditTool
+// emits for multi-file patches, with `--- a/path` / `+++ b/path` headers
+// per file) into one diff slice per path. Returns a map keyed by path.
+//
+// The slicing tolerates both real unified-diff hunk bodies and the
+// `@@ description @@` style buildDiffPreview produces; whatever lies
+// between two consecutive `--- a/...` headers is attributed to the
+// preceding file.
+std::map<std::string, std::string> splitCombinedDiffByPath(
+    const std::string &combinedDiff) {
+  std::map<std::string, std::string> out;
+  if (combinedDiff.empty()) return out;
+
+  std::istringstream stream(combinedDiff);
+  std::string line;
+  std::string currentPath;
+  std::ostringstream currentSlice;
+
+  auto flush = [&]() {
+    if (!currentPath.empty()) {
+      out[currentPath] += currentSlice.str();
+    }
+    currentSlice.str("");
+    currentSlice.clear();
+  };
+
+  while (std::getline(stream, line)) {
+    if (line.rfind("--- a/", 0) == 0) {
+      flush();
+      currentPath = line.substr(6);
+    } else if (line.rfind("+++ b/", 0) == 0) {
+      // header line — skip, it carries no diff body
+    } else {
+      currentSlice << line << "\n";
+    }
+  }
+  flush();
+  return out;
+}
+
 std::vector<EditedFileEventPayload>
 extractFileEditEventPayloads(const std::string &toolArgs,
                              const std::string &resultStr) {
@@ -492,7 +545,12 @@ extractFileEditEventPayloads(const std::string &toolArgs,
       }
       EditedFileEventPayload payload;
       payload.path = value["path"].GetString();
-      if (value.HasMember("diff_preview") && value["diff_preview"].IsString()) {
+      // Token-waste pass 1: prefer the new `diff` field; fall back to the
+      // legacy `diff_preview` for older test inputs.
+      if (value.HasMember("diff") && value["diff"].IsString()) {
+        payload.diffPreview = value["diff"].GetString();
+      } else if (value.HasMember("diff_preview") &&
+                 value["diff_preview"].IsString()) {
         payload.diffPreview = value["diff_preview"].GetString();
       }
       if (payload.diffPreview.empty()) {
@@ -526,8 +584,37 @@ extractFileEditEventPayloads(const std::string &toolArgs,
     };
 
     if (resultDoc.HasMember("files") && resultDoc["files"].IsArray()) {
-      for (const auto &entry : resultDoc["files"].GetArray()) {
-        appendFromObject(entry);
+      const auto &filesArr = resultDoc["files"];
+      // Token-waste pass 1: multi-file aggregate emits `files: [paths]` as
+      // a string array plus a single combined `diff`. Detect that shape and
+      // synthesize per-path payloads from the split combined diff.
+      bool allStrings = filesArr.Size() > 0;
+      for (const auto &entry : filesArr.GetArray()) {
+        if (!entry.IsString()) {
+          allStrings = false;
+          break;
+        }
+      }
+
+      if (allStrings) {
+        std::string combinedDiff;
+        if (resultDoc.HasMember("diff") && resultDoc["diff"].IsString()) {
+          combinedDiff = resultDoc["diff"].GetString();
+        }
+        const auto perPath = splitCombinedDiffByPath(combinedDiff);
+        for (const auto &entry : filesArr.GetArray()) {
+          EditedFileEventPayload payload;
+          payload.path = entry.GetString();
+          auto it = perPath.find(payload.path);
+          if (it != perPath.end()) {
+            payload.diffPreview = it->second;
+          }
+          payloads.push_back(std::move(payload));
+        }
+      } else {
+        for (const auto &entry : filesArr.GetArray()) {
+          appendFromObject(entry);
+        }
       }
     } else {
       appendFromObject(resultDoc);
@@ -1240,6 +1327,85 @@ std::string buildToolRepetitionNudge(const std::string &toolName,
                            {"repeats", std::to_string(repeatCount + 1)}});
 }
 #pragma GCC diagnostic pop
+
+// Build a synchronous SummarizerFn for the deflation path. Returns an
+// empty function (no-op caller falls back to deterministic stubs) when
+// no summarizer model is configured. When configured, returns a lambda
+// that calls IProvider::generateSummary, accumulates the streamed text,
+// and returns it. Errors and empty responses produce empty strings; the
+// Deflator handles that by falling back to the deterministic stub.
+working_memory::SummarizerFn
+buildDeflationSummarizer(const shared::WorkingMemoryConfig &cfg) {
+  if (cfg.summarizerProviderId.empty() || cfg.summarizerModelId.empty()) {
+    return nullptr;
+  }
+  const std::string providerId = cfg.summarizerProviderId;
+  const std::string modelId = cfg.summarizerModelId;
+  return [providerId, modelId](const std::string &toolName,
+                               const std::string &toolArgs,
+                               const std::string &body,
+                               std::uint32_t budgetTokens,
+                               std::atomic<bool> *abort) -> std::string {
+    auto provider =
+        firmius::provider::ProviderRegistry::instance().getProvider(providerId);
+    if (!provider) {
+      return "";
+    }
+    std::ostringstream prompt;
+    prompt
+        << "You are summarizing a tool result body so it can be replaced "
+           "in the agent's context window with a compact stub. Goals: "
+           "preserve concrete facts, file paths, names, counts, and any "
+           "explicit values the agent might want later. Discard prose, "
+           "ASCII art, padding, and obvious filler. Aim for under "
+        << budgetTokens
+        << " tokens. Return ONLY the summary, no preface, no JSON.\n\n";
+    if (!toolName.empty()) {
+      prompt << "Tool: " << toolName << "\n";
+    }
+    if (!toolArgs.empty()) {
+      prompt << "Args: " << toolArgs << "\n";
+    }
+    prompt << "Body:\n" << body;
+
+    shared::AgentHistory emptyHistory;
+    std::string accumulated;
+    accumulated.reserve(static_cast<std::size_t>(budgetTokens) * 4);
+    try {
+      provider->generateSummary(
+          modelId, emptyHistory, prompt.str(),
+          [&](const shared::StreamEvent &ev) {
+            if (const auto *txt = std::get_if<shared::TextChunk>(&ev)) {
+              accumulated += txt->delta;
+            } else if (const auto *th =
+                           std::get_if<shared::ThinkingChunk>(&ev)) {
+              // Thinking content is not part of the summary text, but some
+              // providers may emit usable text only via the compaction
+              // event types below. Ignore.
+              (void)th;
+            } else if (const auto *ct =
+                           std::get_if<shared::AgentCompactionText>(&ev)) {
+              accumulated += ct->delta;
+            } else if (const auto *cth =
+                           std::get_if<shared::AgentCompactionThinking>(&ev)) {
+              (void)cth;
+            }
+          },
+          abort);
+    } catch (...) {
+      return "";
+    }
+    // Trim leading whitespace; many models emit a leading newline.
+    std::size_t start = 0;
+    while (start < accumulated.size() &&
+           std::isspace(static_cast<unsigned char>(accumulated[start]))) {
+      ++start;
+    }
+    if (start > 0) accumulated.erase(0, start);
+    return accumulated;
+  };
+}
+
 } // namespace
 
 using namespace firmius::shared;
@@ -1273,9 +1439,59 @@ AgentTurn Agent::makeInternalNudgeTurn(const std::string &turnIdPrefix,
 }
 
 void Agent::appendTurnToHistory(const AgentTurn &turn) {
-  context.history->turns.push_back(turn);
+  {
+    std::lock_guard<std::mutex> lk(historyMutex_);
+    context.history->turns.push_back(turn);
+  }
   if (context.config.persistHistory && journaler) {
     journaler->appendTurn(turn);
+  }
+  // Working-memory layer: enqueue a compact queryable representation of
+  // this turn for asynchronous embedding. The worker is per-thread and
+  // is created lazily by the request-shaping path; here we look it up
+  // best-effort and skip if it isn't ready yet.
+  if (context.config.workingMemory.enabled && context.history &&
+      !context.history->threadId.empty()) {
+    std::string queryText;
+    queryText.reserve(512);
+    for (const auto &msg : turn.messages) {
+      for (const auto &part : msg.content) {
+        if (const auto *txt = std::get_if<TextContent>(&part)) {
+          if (queryText.size() + txt->text.size() < 4096) {
+            queryText += txt->text;
+            queryText += '\n';
+          }
+        } else if (const auto *tc = std::get_if<ToolCallContent>(&part)) {
+          queryText += tc->name;
+          queryText += ' ';
+          if (queryText.size() + tc->args.size() < 4096) {
+            queryText += tc->args;
+            queryText += '\n';
+          }
+        } else if (const auto *tr = std::get_if<ToolResultContent>(&part)) {
+          // Use only the first 1KB of the tool result body for embedding —
+          // good enough for retrieval, keeps embedding cost bounded.
+          const std::size_t take = std::min<std::size_t>(1024, tr->result.size());
+          queryText.append(tr->result, 0, take);
+          queryText += '\n';
+        }
+      }
+    }
+    if (!queryText.empty()) {
+      try {
+        const std::string threadDir = ThreadManager::threadDirectoryPath(
+            ThreadManager::defaultBasePath(), context.history->threadId);
+        auto wmWorker =
+            working_memory::WorkingMemoryWorker::instance().forThread(
+                context.history->threadId, threadDir,
+                working_memory::deterministicEmbedFn());
+        if (wmWorker) {
+          wmWorker->enqueueEmbedding(turn.turnId, std::move(queryText));
+        }
+      } catch (...) {
+        // Best-effort; embedding is non-critical to correctness.
+      }
+    }
   }
 }
 
@@ -1698,6 +1914,9 @@ bool Agent::hasReadFile(const std::string &path) const {
 }
 
 void Agent::markFileAsRead(const std::string &path) {
+  if (environment_->getWorkspace().hasReadFile(path)) {
+    context.aggregateMetrics.memory.redundantReadCount += 1;
+  }
   environment_->getWorkspace().markFileAsRead(path);
 }
 
@@ -2156,15 +2375,155 @@ void Agent::runImpl(const std::optional<std::string> &task,
       opts.abortController = runAbortController;
 
       AgentHistory requestHistory;
+      const shared::HeuristicTokenizer tokenizer;
+
+      // First, the working-memory layer assembles the request from the
+      // canonical journal-backed history. Below the buffer threshold it's
+      // pure pass-through; above buffer it pins/evicts/deflates per the
+      // configured policy. The WorkingMemoryWorker for this thread is
+      // lazy-created on first use.
+      working_memory::WorkingMemoryReport memoryReport;
+      AgentHistory shapedHistory;
+      {
+        working_memory::WorkingMemoryInputs wmInputs;
+        wmInputs.tokenizer = &tokenizer;
+        std::uint32_t actorContextWindow = 0;
+        if (context.config.workingMemory.actorContextWindowOverride > 0) {
+          actorContextWindow =
+              context.config.workingMemory.actorContextWindowOverride;
+        } else {
+          try {
+            actorContextWindow =
+                provider->getModelInfo(context.config.modelId).contextWindow;
+          } catch (...) {
+          }
+        }
+        wmInputs.actorContextWindow = actorContextWindow;
+
+        std::shared_ptr<working_memory::ThreadWorkingMemoryWorker> wmWorker;
+        if (context.history && !context.history->threadId.empty() &&
+            context.config.workingMemory.enabled) {
+          const std::string threadDir =
+              ThreadManager::threadDirectoryPath(
+                  ThreadManager::defaultBasePath(),
+                  context.history->threadId);
+          wmWorker = working_memory::WorkingMemoryWorker::instance().forThread(
+              context.history->threadId, threadDir,
+              working_memory::deterministicEmbedFn());
+          if (wmWorker) {
+            wmInputs.archive = &wmWorker->archive();
+            wmInputs.relevanceQuery = [wmWorker](const std::string& q,
+                                                 std::size_t k) {
+              return wmWorker->queryRelevant(q, k);
+            };
+          }
+        }
+        // Optional LLM-backed deflation summarizer. When the user has
+        // configured WorkingMemoryConfig.summarizerProviderId+modelId,
+        // pass a SummarizerFn into the assembler so deflated tool result
+        // bodies are replaced with model-generated summaries instead of
+        // deterministic byte-count stubs. Otherwise the Deflator falls
+        // back to deterministic stubs (no LLM call).
+        wmInputs.synchronousSummarizer =
+            buildDeflationSummarizer(context.config.workingMemory);
+
+        // Async upgrade hook: when both a summarizer is configured and a
+        // working-memory worker exists, fire jobs onto the worker's
+        // background deflation thread so the LLM call doesn't block the
+        // agent's hot path. The deterministic stub stays in place until
+        // the worker completes; the next request shaping picks up the
+        // upgraded body. When unconfigured, the assembler falls back to
+        // the synchronous path (still bounded latency for low-occupancy
+        // sessions because deflation only runs above target).
+        if (wmWorker && wmInputs.synchronousSummarizer) {
+          auto summarizerCopy = wmInputs.synchronousSummarizer;
+          auto historyShared = context.history;
+          std::mutex* historyMu = &historyMutex_;
+          auto journalerShared = journaler;
+          std::weak_ptr<working_memory::ThreadWorkingMemoryWorker>
+              workerWeak = wmWorker;
+          wmInputs.asyncUpgrade =
+              [summarizerCopy, historyShared, historyMu, journalerShared,
+               workerWeak](const std::string& turnId, std::size_t mi,
+                           std::size_t pi, const std::string& toolName,
+                           const std::string& toolArgs,
+                           const std::string& body,
+                           const std::string& archiveId) {
+                auto worker = workerWeak.lock();
+                if (!worker) return;
+                working_memory::ThreadWorkingMemoryWorker::DeflationJob job;
+                job.turnId = turnId;
+                job.messageIndex = mi;
+                job.partIndex = pi;
+                job.toolName = toolName;
+                job.toolArgs = toolArgs;
+                job.body = body;
+                job.archiveId = archiveId;
+                job.budgetTokens = 256;
+                job.summarizer = summarizerCopy;
+                job.history = historyShared;
+                job.historyMutex = historyMu;
+                job.journaler = journalerShared;
+                worker->enqueueDeflation(std::move(job));
+              };
+        }
+
+        AgentHistory baseHistory;
+        {
+          // Snapshot under the history mutex so a background deflation
+          // upgrader can't race us on a tr->result string.
+          std::lock_guard<std::mutex> hlk(historyMutex_);
+          baseHistory = context.history ? *context.history : AgentHistory{};
+        }
+        shapedHistory = working_memory::assembleWorkingSet(
+            context, baseHistory, wmInputs, memoryReport);
+      }
+
+      // Codex still gets the shaped history without overlay stickers.
+      // Other providers receive shaped history + RuntimeOverlay stickers.
       if (context.config.providerId == "codex") {
-        requestHistory =
-            context.history ? *context.history
-                            : AgentHistory{};
+        requestHistory = shapedHistory;
       } else {
+        // Temporarily swap the context history so RuntimeOverlay layers
+        // its stickers on top of the shaped history rather than the raw
+        // journal. Restore immediately after.
+        auto originalHistory = context.history;
+        auto shapedShared = std::make_shared<AgentHistory>(std::move(shapedHistory));
+        const_cast<AgentContext&>(context).history = shapedShared;
         requestHistory = runtime_overlay::buildRequestHistoryWithRuntimeOverlays(
             context, *environment_->getHost(), environment_->getWorkspace());
+        const_cast<AgentContext&>(context).history = originalHistory;
       }
-      const shared::HeuristicTokenizer tokenizer;
+      // Latch memory metrics into this turn's metrics so they ride along
+      // with the AgentTurnCompleted event and feed the aggregate.
+      turnMetrics.memory.rawHistoryTokens = memoryReport.rawHistoryTokens;
+      turnMetrics.memory.workingSetTokens = memoryReport.workingSetTokens;
+      turnMetrics.memory.pinnedTurnCount = memoryReport.pinnedTurnCount;
+      turnMetrics.memory.evictedTurnCount = memoryReport.evictedTurnCount;
+      turnMetrics.memory.recalledTurnCount = memoryReport.recalledTurnCount;
+      turnMetrics.memory.deflatedPartCount = memoryReport.deflatedPartCount;
+      turnMetrics.memory.tokensSavedByDeflation =
+          memoryReport.tokensSavedByDeflation;
+      turnMetrics.memory.tokensSavedByEviction =
+          memoryReport.tokensSavedByEviction;
+      turnMetrics.memory.tokensSpentOnSummaries =
+          memoryReport.tokensSpentOnSummaries;
+      turnMetrics.memory.tokensSpentOnEmbeddings =
+          memoryReport.tokensSpentOnEmbeddings;
+      turnMetrics.memory.tokensSpentOnOverlays =
+          memoryReport.tokensSpentOnOverlays;
+      turnMetrics.memory.userPromptsRetained = memoryReport.userPromptsRetained;
+      turnMetrics.memory.userPromptsTotal = memoryReport.userPromptsTotal;
+      turnMetrics.memory.imagePartsRetained = memoryReport.imagePartsRetained;
+      turnMetrics.memory.imagePartsTotal = memoryReport.imagePartsTotal;
+      turnMetrics.memory.hotPathLatencyMicros =
+          memoryReport.hotPathLatencyMicros;
+      turnMetrics.memory.aboveBufferThreshold =
+          memoryReport.aboveBufferThreshold;
+      turnMetrics.memory.aboveTargetThreshold =
+          memoryReport.aboveTargetThreshold;
+      turnMetrics.memory.aboveEmergencyThreshold =
+          memoryReport.aboveEmergencyThreshold;
       const auto requestContextEstimate =
           estimateContextWindowMetrics(tokenizer, requestHistory, opts.tools);
       turnMetrics.context = requestContextEstimate;
@@ -2227,7 +2586,12 @@ void Agent::runImpl(const std::optional<std::string> &task,
           onEvent(ev);
           mergeFinalToolCall(finalizedToolCalls, *tc);
         } else if (auto *met = std::get_if<AgentMetrics>(&ev)) {
+          // Preserve our pre-stream-set memory snapshot across the
+          // provider-supplied metrics overwrite. The provider only emits
+          // tokens/timing/quota; memory belongs to the working-memory layer.
+          auto memorySnapshot = turnMetrics.memory;
           turnMetrics = *met;
+          turnMetrics.memory = memorySnapshot;
           if (turnMetrics.context.buckets.empty()) {
             turnMetrics.context = requestContextEstimate;
           }
@@ -3322,6 +3686,11 @@ void Agent::executeTools(
     }
 
     std::string signature = result.toolName + ":" + result.toolArgs;
+    if (std::find(context.state.recentToolCallSignatures.begin(),
+                  context.state.recentToolCallSignatures.end(),
+                  signature) != context.state.recentToolCallSignatures.end()) {
+      context.aggregateMetrics.memory.redundantToolSignatureCount += 1;
+    }
     context.state.recentToolCallSignatures.push_back(signature);
   }
 

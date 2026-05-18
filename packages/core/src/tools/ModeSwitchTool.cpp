@@ -96,10 +96,26 @@ ToolResult ModeSwitchTool::execute(const ModeSwitchInput &input,
       rapidjson::Document doc;
       doc.SetObject();
       auto &alloc = doc.GetAllocator();
-      doc.AddMember("from_mode",
-                    rapidjson::Value(previousMode.c_str(), alloc), alloc);
-      doc.AddMember("to_mode", rapidjson::Value("", alloc), alloc);
-      doc.AddMember("cleared", true, alloc);
+      // Token-waste pass 5: prose-first mode-cleared response. Dropped
+      // to_mode (always empty here) and cleared (derivable). from_mode
+      // is only useful when non-empty.
+      std::ostringstream prose;
+      if (previousMode.empty()) {
+        prose << "Active mode cleared (no mode was set).";
+      } else {
+        prose << "Cleared active mode (was " << previousMode << ").";
+      }
+      const std::string proseStr = prose.str();
+      doc.AddMember(
+          "result",
+          rapidjson::Value(proseStr.c_str(),
+                           static_cast<rapidjson::SizeType>(proseStr.size()),
+                           alloc).Move(),
+          alloc);
+      if (!previousMode.empty()) {
+        doc.AddMember("from_mode",
+                      rapidjson::Value(previousMode.c_str(), alloc), alloc);
+      }
       if (!reminders.empty()) {
         rapidjson::Value remArr(rapidjson::kArrayType);
         for (const auto &r : reminders) {
@@ -180,18 +196,36 @@ ToolResult ModeSwitchTool::execute(const ModeSwitchInput &input,
     rapidjson::Document doc;
     doc.SetObject();
     auto &alloc = doc.GetAllocator();
-    doc.AddMember("from_mode",
-                  rapidjson::Value(previousMode.c_str(), alloc), alloc);
-    doc.AddMember("to_mode",
-                  rapidjson::Value(targetQualified.c_str(), alloc), alloc);
+    // Token-waste pass 5: prose-first mode-switch result. The mode title
+    // and stance are folded into the prose; expected_return_shape (a
+    // schema string the model needs to read literally) and
+    // allowed_next_modes (a constraint list the model needs to obey)
+    // stay structured. from_mode is dropped when empty.
+    std::ostringstream prose;
+    prose << "Switched to " << targetQualified;
     if (!target->title.empty()) {
-      doc.AddMember("title", rapidjson::Value(target->title.c_str(), alloc),
-                    alloc);
+      prose << " (" << target->title << ")";
     }
     if (!target->shortDescription.empty()) {
-      doc.AddMember("stance",
-                    rapidjson::Value(target->shortDescription.c_str(), alloc),
-                    alloc);
+      prose << ". " << target->shortDescription;
+    } else {
+      prose << ".";
+    }
+    if (input.reason.has_value() && !input.reason->empty()) {
+      prose << " Reason: " << *input.reason << ".";
+    }
+    const std::string proseStr = prose.str();
+    doc.AddMember(
+        "result",
+        rapidjson::Value(proseStr.c_str(),
+                         static_cast<rapidjson::SizeType>(proseStr.size()),
+                         alloc).Move(),
+        alloc);
+    doc.AddMember("to_mode",
+                  rapidjson::Value(targetQualified.c_str(), alloc), alloc);
+    if (!previousMode.empty()) {
+      doc.AddMember("from_mode",
+                    rapidjson::Value(previousMode.c_str(), alloc), alloc);
     }
     if (target->outputSchema.has_value() && !target->outputSchema->empty()) {
       doc.AddMember("expected_return_shape",
@@ -204,10 +238,6 @@ ToolResult ModeSwitchTool::execute(const ModeSwitchInput &input,
         arr.PushBack(rapidjson::Value(t.c_str(), alloc), alloc);
       }
       doc.AddMember("allowed_next_modes", arr, alloc);
-    }
-    if (input.reason.has_value() && !input.reason->empty()) {
-      doc.AddMember("reason",
-                    rapidjson::Value(input.reason->c_str(), alloc), alloc);
     }
     if (!reminders.empty()) {
       rapidjson::Value remArr(rapidjson::kArrayType);

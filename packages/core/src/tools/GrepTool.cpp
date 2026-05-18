@@ -4,9 +4,11 @@
 #include "agents/AgentPermissionChecks.hpp"
 #include "utils/StringUtil.hpp"
 #include <chrono>
+#include <map>
 #include <regex>
 #include <sstream>
 #include <string>
+#include <vector>
 
 namespace firmius::core {
 using namespace firmius::shared;
@@ -40,7 +42,17 @@ std::string buildGrepCommand(const std::string &pattern, int before, int after, 
   return command;
 }
 
-bool appendRipgrepJsonLine(const std::string &line, rapidjson::Value &results, rapidjson::Document::AllocatorType &alloc) {
+// Token-waste pass 3: a single grep hit. We collect into this lightweight
+// struct and format prose at the end; we never construct a per-hit JSON
+// object on the wire.
+struct GrepHit {
+  std::string file;
+  int line = 0;
+  std::string content;
+  bool is_match = false;  // true = matched line, false = context line
+};
+
+bool appendRipgrepJsonLine(const std::string &line, std::vector<GrepHit> &hits) {
   if (line.empty()) return true;
   rapidjson::Document event;
   event.Parse(line.c_str());
@@ -60,37 +72,42 @@ bool appendRipgrepJsonLine(const std::string &line, rapidjson::Value &results, r
   if (!path.HasMember("text") || !path["text"].IsString() || !lines.HasMember("text") || !lines["text"].IsString()) {
     return false;
   }
-  rapidjson::Value value(rapidjson::kObjectType);
-  value.AddMember("file", rapidjson::Value(path["text"].GetString(), alloc).Move(), alloc);
-  value.AddMember("line", data["line_number"].GetInt(), alloc);
-  std::string content = lines["text"].GetString();
-  if (!content.empty() && content.back() == '\n') content.pop_back();
-  value.AddMember("content", rapidjson::Value(content.c_str(), alloc).Move(), alloc);
-  value.AddMember("is_match", type == "match", alloc);
-  results.PushBack(value, alloc);
+  GrepHit hit;
+  hit.file = path["text"].GetString();
+  hit.line = data["line_number"].GetInt();
+  hit.content = lines["text"].GetString();
+  if (!hit.content.empty() && hit.content.back() == '\n') hit.content.pop_back();
+  hit.is_match = (type == "match");
+  hits.push_back(std::move(hit));
   return true;
 }
 
-bool parseRipgrepOutput(const std::string &stdoutData, rapidjson::Value &results, rapidjson::Document::AllocatorType &alloc, bool &budgetHit) {
+// Token-waste pass 3: cap raised from 2000 to 5000. The prose-first form
+// is roughly 4x more compact per hit than the old structured array.
+constexpr std::size_t kGrepHitBudget = 5000;
+
+bool parseRipgrepOutput(const std::string &stdoutData,
+                        std::vector<GrepHit> &hits, bool &budgetHit) {
   std::istringstream stream(stdoutData);
   std::string line;
   while (std::getline(stream, line)) {
-    if (results.Size() >= 2000) {
+    if (hits.size() >= kGrepHitBudget) {
       budgetHit = true;
       return true;
     }
-    if (!appendRipgrepJsonLine(line, results, alloc)) return false;
+    if (!appendRipgrepJsonLine(line, hits)) return false;
   }
   return true;
 }
 
-bool parseGrepOutput(const std::string &stdoutData, rapidjson::Value &results, rapidjson::Document::AllocatorType &alloc, bool &budgetHit) {
+bool parseGrepOutput(const std::string &stdoutData,
+                     std::vector<GrepHit> &hits, bool &budgetHit) {
   std::istringstream stream(stdoutData);
   std::string line;
   static const std::regex matchRegex(R"(:([0-9]+):)");
   static const std::regex contextRegex(R"(-([0-9]+)-)");
   while (std::getline(stream, line)) {
-    if (results.Size() >= 2000) {
+    if (hits.size() >= kGrepHitBudget) {
       budgetHit = true;
       return true;
     }
@@ -113,14 +130,12 @@ bool parseGrepOutput(const std::string &stdoutData, rapidjson::Value &results, r
     if (separatorPosition == std::string::npos) continue;
     int lineNumber = 0;
     try { lineNumber = std::stoi(lineNumberText); } catch (...) { continue; }
-    const std::string file = line.substr(0, separatorPosition);
-    const std::string content = line.substr(separatorPosition + separatorLength);
-    rapidjson::Value value(rapidjson::kObjectType);
-    value.AddMember("file", rapidjson::Value(file.c_str(), alloc).Move(), alloc);
-    value.AddMember("line", lineNumber, alloc);
-    value.AddMember("content", rapidjson::Value(content.c_str(), alloc).Move(), alloc);
-    value.AddMember("is_match", isMatch, alloc);
-    results.PushBack(value, alloc);
+    GrepHit hit;
+    hit.file = line.substr(0, separatorPosition);
+    hit.line = lineNumber;
+    hit.content = line.substr(separatorPosition + separatorLength);
+    hit.is_match = isMatch;
+    hits.push_back(std::move(hit));
   }
   return true;
 }
@@ -191,15 +206,13 @@ shared::ToolResult GrepTool::execute(const rapidjson::Value &input, shared::Tool
   if (input.HasMember("context_after") && input["context_after"].IsInt()) {
     after = input["context_after"].GetInt();
   }
+  const bool wantsContent = (before > 0 || after > 0);
 
   try {
     std::string absPath = ctx.agent.getEnvironment()->getWorkspace().resolvePath(path);
     ctx.agent.getPermissions()->validatePathAccess(absPath, firmius::shared::AccessMode::READ);
 
-    rapidjson::Document doc;
-    doc.SetObject();
-    auto &alloc = doc.GetAllocator();
-    rapidjson::Value results(rapidjson::kArrayType);
+    std::vector<GrepHit> hits;
     bool budgetHit = false;
 
     auto ripgrepResult = ctx.host.exec(buildRipgrepCommand(pattern, before, after, absPath), "", {}, std::chrono::milliseconds(10000));
@@ -207,48 +220,122 @@ shared::ToolResult GrepTool::execute(const rapidjson::Value &input, shared::Tool
       return shared::ToolResult::fail("Grep failed: command timed out after 10 seconds");
     }
 
-    if (ripgrepResult.exitCode == 0) {
-      if (!parseRipgrepOutput(ripgrepResult.stdoutData, results, alloc, budgetHit)) {
-        return shared::ToolResult::fail("Grep failed: malformed ripgrep JSON output");
-      }
-      doc.AddMember("results", results, alloc);
-      doc.AddMember("budget_hit", budgetHit, alloc);
-      return shared::ToolResult::ok(doc);
-    }
-
-    if (ripgrepResult.exitCode == 1) {
-      doc.AddMember("results", results, alloc);
-      doc.AddMember("budget_hit", false, alloc);
-      return shared::ToolResult::ok(doc);
-    }
-
-    ProcessResult fallbackResult;
-    if (commandLooksUnavailable(ripgrepResult)) {
-      fallbackResult = ctx.host.exec(buildGrepCommand(pattern, before, after, absPath, true), "", {}, std::chrono::milliseconds(10000));
-      if (fallbackResult.finishReason == shared::ProcessFinishReason::Timeout) {
-        return shared::ToolResult::fail("Grep failed: command timed out after 10 seconds");
-      }
-      if (fallbackResult.exitCode != 0 && fallbackResult.exitCode != 1 &&
-          fallbackResult.stderrData.find("support for the -P option") != std::string::npos) {
-        fallbackResult = ctx.host.exec(buildGrepCommand(pattern, before, after, absPath, false), "", {}, std::chrono::milliseconds(10000));
+    auto runFallback = [&]() -> shared::ToolResult {
+      ProcessResult fallbackResult;
+      if (commandLooksUnavailable(ripgrepResult)) {
+        fallbackResult = ctx.host.exec(buildGrepCommand(pattern, before, after, absPath, true), "", {}, std::chrono::milliseconds(10000));
         if (fallbackResult.finishReason == shared::ProcessFinishReason::Timeout) {
           return shared::ToolResult::fail("Grep failed: command timed out after 10 seconds");
         }
+        if (fallbackResult.exitCode != 0 && fallbackResult.exitCode != 1 &&
+            fallbackResult.stderrData.find("support for the -P option") != std::string::npos) {
+          fallbackResult = ctx.host.exec(buildGrepCommand(pattern, before, after, absPath, false), "", {}, std::chrono::milliseconds(10000));
+          if (fallbackResult.finishReason == shared::ProcessFinishReason::Timeout) {
+            return shared::ToolResult::fail("Grep failed: command timed out after 10 seconds");
+          }
+        }
+      } else {
+        fallbackResult = ripgrepResult;
+      }
+      if (fallbackResult.exitCode != 0 && fallbackResult.exitCode != 1) {
+        return shared::ToolResult::fail("Grep failed: " + fallbackResult.stderrData);
+      }
+      if (fallbackResult.exitCode == 0) {
+        parseGrepOutput(fallbackResult.stdoutData, hits, budgetHit);
+      }
+      return shared::ToolResult::ok();  // sentinel: success, hits filled
+    };
+
+    if (ripgrepResult.exitCode == 0) {
+      if (!parseRipgrepOutput(ripgrepResult.stdoutData, hits, budgetHit)) {
+        return shared::ToolResult::fail("Grep failed: malformed ripgrep JSON output");
+      }
+    } else if (ripgrepResult.exitCode == 1) {
+      // ripgrep exit 1 = "no matches"; leave hits empty.
+    } else {
+      auto fbResult = runFallback();
+      if (!fbResult.success) return fbResult;
+    }
+
+    // Token-waste pass 3: build prose-first output. Group hits by file in
+    // first-appearance order, list line numbers comma-separated. When the
+    // agent asked for context (context_before/after > 0) we interleave
+    // each hit on its own line with content; otherwise just file + line
+    // numbers, which is dramatically more compact for the common
+    // "where does this symbol appear?" query.
+    //
+    // Match-vs-context: in the no-content form we count `is_match`-only
+    // entries per file ("(2 matches)"). Context lines are still counted
+    // in the total but not enumerated since the model already knows they
+    // exist around each match line.
+    std::vector<std::string> fileOrder;
+    std::map<std::string, std::vector<const GrepHit *>> byFile;
+    int matchCount = 0;
+    for (const auto &h : hits) {
+      auto it = byFile.find(h.file);
+      if (it == byFile.end()) {
+        fileOrder.push_back(h.file);
+        byFile[h.file] = {};
+      }
+      byFile[h.file].push_back(&h);
+      if (h.is_match) ++matchCount;
+    }
+
+    std::ostringstream prose;
+    if (hits.empty()) {
+      prose << "Pattern '" << pattern << "' — no matches.";
+    } else if (wantsContent) {
+      prose << "Pattern '" << pattern << "' — " << matchCount << " match"
+            << (matchCount == 1 ? "" : "es") << " across " << fileOrder.size()
+            << " file" << (fileOrder.size() == 1 ? "" : "s") << ":\n";
+      for (const auto &file : fileOrder) {
+        for (const auto *h : byFile[file]) {
+          // Use ':' to mark match line, '-' to mark context line — same
+          // convention ripgrep / grep -A use in their plaintext output.
+          prose << "  " << h->file << (h->is_match ? ":" : "-") << h->line
+                << (h->is_match ? ":" : "-") << h->content << "\n";
+        }
       }
     } else {
-      fallbackResult = ripgrepResult;
+      prose << "Pattern '" << pattern << "' — " << matchCount << " match"
+            << (matchCount == 1 ? "" : "es") << " across " << fileOrder.size()
+            << " file" << (fileOrder.size() == 1 ? "" : "s") << ":\n";
+      for (const auto &file : fileOrder) {
+        const auto &fileHits = byFile[file];
+        // Count match-only entries per file for the parenthetical.
+        int fileMatchCount = 0;
+        for (const auto *h : fileHits) if (h->is_match) ++fileMatchCount;
+        prose << "  " << file << " (" << fileMatchCount << " match"
+              << (fileMatchCount == 1 ? "" : "es") << "):";
+        bool first = true;
+        for (const auto *h : fileHits) {
+          if (!h->is_match) continue;
+          prose << (first ? " " : ", ") << h->line;
+          first = false;
+        }
+        prose << "\n";
+      }
+    }
+    if (budgetHit) {
+      prose << "[budget_hit: result cap of " << kGrepHitBudget
+            << " reached; refine the query to see more]";
     }
 
-    if (fallbackResult.exitCode != 0 && fallbackResult.exitCode != 1) {
-      return shared::ToolResult::fail("Grep failed: " + fallbackResult.stderrData);
+    rapidjson::Document doc;
+    doc.SetObject();
+    auto &alloc = doc.GetAllocator();
+    std::string proseStr = prose.str();
+    doc.AddMember(
+        "result",
+        rapidjson::Value(proseStr.c_str(),
+                         static_cast<rapidjson::SizeType>(proseStr.size()),
+                         alloc).Move(),
+        alloc);
+    doc.AddMember("hits", matchCount, alloc);
+    doc.AddMember("files", static_cast<uint32_t>(fileOrder.size()), alloc);
+    if (budgetHit) {
+      doc.AddMember("budget_hit", true, alloc);
     }
-
-    if (fallbackResult.exitCode == 0) {
-      parseGrepOutput(fallbackResult.stdoutData, results, alloc, budgetHit);
-    }
-
-    doc.AddMember("results", results, alloc);
-    doc.AddMember("budget_hit", budgetHit, alloc);
     return shared::ToolResult::ok(doc);
   } catch (const std::exception &e) {
     return shared::ToolResult::fail(e.what());

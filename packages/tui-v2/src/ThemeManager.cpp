@@ -230,6 +230,33 @@ ThemeSpec loadThemeFile(const std::filesystem::path& path) {
     theme.chat.timestamp =
         getColor(chat, "timestamp", theme.chat.timestamp);
   }
+  // ─── Syntax palette ──────────────────────────────────────────────────────
+  // Same JSON layout as v1's `syntax` block in themes/*.theme.json.
+  if (doc.HasMember("syntax") && doc["syntax"].IsObject()) {
+    const auto& s = doc["syntax"];
+    theme.syntax.keyword = getColor(s, "keyword", theme.syntax.keyword);
+    theme.syntax.string = getColor(s, "string", theme.syntax.string);
+    theme.syntax.comment = getColor(s, "comment", theme.syntax.comment);
+    theme.syntax.number = getColor(s, "number", theme.syntax.number);
+    theme.syntax.function = getColor(s, "function", theme.syntax.function);
+    theme.syntax.type = getColor(s, "type", theme.syntax.type);
+    theme.syntax.op = getColor(s, "op", theme.syntax.op);
+    theme.syntax.attr = getColor(s, "attr", theme.syntax.attr);
+    theme.syntax.constant = getColor(s, "constant", theme.syntax.constant);
+    theme.syntax.variable = getColor(s, "variable", theme.syntax.variable);
+    theme.syntax.tag = getColor(s, "tag", theme.syntax.tag);
+  }
+  // ─── Diff palette (optional) ─────────────────────────────────────────────
+  // No v1 theme defines this yet; we keep parsing optional and fall back to
+  // the defaults baked into ThemeSpec::Diff.
+  if (doc.HasMember("diff") && doc["diff"].IsObject()) {
+    const auto& d = doc["diff"];
+    theme.diff.addBg = getColor(d, "add_bg", theme.diff.addBg);
+    theme.diff.removeBg = getColor(d, "remove_bg", theme.diff.removeBg);
+    theme.diff.contextBg = getColor(d, "context_bg", theme.diff.contextBg);
+    theme.diff.headerBg = getColor(d, "header_bg", theme.diff.headerBg);
+    theme.diff.gutterFg = getColor(d, "gutter_fg", theme.diff.gutterFg);
+  }
   return theme;
 }
 

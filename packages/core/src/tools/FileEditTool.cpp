@@ -10,6 +10,7 @@
 #include <optional>
 #include <rapidjson/document.h>
 #include <regex>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 
@@ -56,14 +57,18 @@ struct PreparedFileMutation {
   int removedLines = 0;
   int relocatedAnchors = 0;
   int replacements = 0;
+  /// Whether the target file existed before this mutation. Set by
+  /// each prepare* function based on a real ctx.host.exists() check —
+  /// NOT inferred from operation descriptions. Threaded through to the
+  /// result JSON so the agent's mutation recorder doesn't have to
+  /// guess.
+  bool hadFileBefore = true;
 };
 
-rapidjson::Value cloneJsonValue(const rapidjson::Value &value,
-                                rapidjson::Document::AllocatorType &alloc) {
-  rapidjson::Value clone;
-  clone.CopyFrom(value, alloc);
-  return clone;
-}
+// Token-waste pass 1: cloneJsonValue removed. Was used by the old
+// multi-file aggregate to embed each per-file mutation doc verbatim under
+// `files[]`; the prose-first aggregate now emits `files` as a plain
+// string array of paths.
 
 std::vector<std::string> readStringArray(const rapidjson::Value &json,
                                          const char *key) {
@@ -325,28 +330,10 @@ void addSanitationMember(rapidjson::Document &doc,
   doc.AddMember("sanitation", value, alloc);
 }
 
-rapidjson::Value buildOperationResult(const NormalizedEdit &edit,
-                                      rapidjson::Document::AllocatorType &alloc) {
-  rapidjson::Value value(rapidjson::kObjectType);
-  value.AddMember("op", rapidjson::Value(edit.op.c_str(), alloc).Move(), alloc);
-  value.AddMember("description", rapidjson::Value(edit.description.c_str(), alloc).Move(), alloc);
-  value.AddMember("start_line", edit.startIndex + 1, alloc);
-  value.AddMember("end_line", edit.endIndex, alloc);
-  value.AddMember("new_line_count", static_cast<uint32_t>(edit.newLines.size()), alloc);
-  value.AddMember("old_line_count", static_cast<uint32_t>(edit.oldLines.size()), alloc);
-  value.AddMember("relocated", edit.relocated, alloc);
-  rapidjson::Value oldLines(rapidjson::kArrayType);
-  for (const auto &line : edit.oldLines) {
-    oldLines.PushBack(rapidjson::Value(line.c_str(), alloc).Move(), alloc);
-  }
-  rapidjson::Value newLines(rapidjson::kArrayType);
-  for (const auto &line : edit.newLines) {
-    newLines.PushBack(rapidjson::Value(line.c_str(), alloc).Move(), alloc);
-  }
-  value.AddMember("old_lines", oldLines, alloc);
-  value.AddMember("new_lines", newLines, alloc);
-  return value;
-}
+// Token-waste pass 1: buildOperationResult removed. The rich
+// per-operation arrays (`old_lines[]`, `new_lines[]`) are no longer emitted;
+// the unified `diff` field on the result doc carries the same information
+// once, and the prose `result` summarises the totals.
 
 std::string buildDiffPreview(const std::vector<NormalizedEdit> &normalized) {
   std::ostringstream out;
@@ -857,6 +844,7 @@ PreparedFileMutation prepareWriteMutation(const FileWriteInput &input,
   prepared.mode = "write";
   ctx.agent.getPermissions()->validatePathAccess(prepared.absolutePath, AccessMode::WRITE);
   const bool exists = ctx.host.exists(prepared.absolutePath);
+  prepared.hadFileBefore = exists;
   if (exists) {
     prepared.beforeLsp = std::make_unique<rapidjson::Document>(collectFileLspDiagnostics(prepared.absolutePath, ctx));
     auto data = ctx.host.readFile(prepared.absolutePath);
@@ -945,37 +933,225 @@ void applyPreparedMutation(const PreparedFileMutation &prepared,
   ctx.agent.getEnvironment()->getWorkspace().recordFileEdit(prepared.absolutePath);
 }
 
+// Token-waste pass 1: prose-first edit result.
+//
+// Single-file edits emit one short `result` prose line as the primary
+// payload (which is what the LLM reads), the unified `diff`, and the
+// `path`. Everything else that used to live in this doc — `resolved_mode`,
+// `shape`, `transactional`, `applied_edits`, `watch_state`, the per-op
+// `old_lines[]` / `new_lines[]` arrays, the always-on `sanitation` block,
+// the verbose `lsp` summary — is either reconstructable, constant, or
+// silent in the common case. The TUI v2 path consumes
+// AgentFileEdited.diffPreview (built from `diff` here via
+// extractFileEditEventPayloads), so dropping the per-op arrays does not
+// regress edit rendering.
+//
+// On the failure path, callers throw with a structured doc; that path is
+// untouched here to preserve diagnostic richness when something goes wrong.
+namespace {
+
+std::string formatModeVerb(const std::string &mode) {
+  if (mode == "write") return "Wrote";
+  if (mode == "patch") return "Patched";
+  if (mode == "replace") return "Edited (search/replace)";
+  if (mode == "range") return "Edited (range)";
+  return "Edited";
+}
+
+// Build a one-line LSP delta string and return new-issue prettied lines.
+// Returns empty string when LSP was unavailable / unchecked.
+struct LspDelta {
+  std::string summary;                 // e.g. "no new diagnostics"
+  std::vector<std::string> newErrors;  // pretty lines, only the deltas
+  std::vector<std::string> newWarnings;
+};
+
+LspDelta computeLspDelta(const std::string &absolutePath,
+                         const rapidjson::Document *before,
+                         const rapidjson::Document *after) {
+  LspDelta out;
+  const bool checked = after != nullptr && after->IsObject() &&
+                       after->HasMember("ok") && (*after)["ok"].IsBool();
+  const bool available = checked && after->HasMember("available") &&
+                         (*after)["available"].IsBool() &&
+                         (*after)["available"].GetBool();
+  if (!checked || !available) {
+    return out;  // empty summary => caller should omit lsp from prose
+  }
+  const auto beforeErrors =
+      collectDiagnosticPrettyLines(before, absolutePath, 1);
+  const auto beforeWarnings =
+      collectDiagnosticPrettyLines(before, absolutePath, 2);
+  const auto afterErrors =
+      collectDiagnosticPrettyLines(after, absolutePath, 1);
+  const auto afterWarnings =
+      collectDiagnosticPrettyLines(after, absolutePath, 2);
+
+  std::set<std::string> seenErrors(beforeErrors.begin(), beforeErrors.end());
+  for (const auto &line : afterErrors) {
+    if (!seenErrors.count(line)) out.newErrors.push_back(line);
+  }
+  std::set<std::string> seenWarnings(beforeWarnings.begin(),
+                                     beforeWarnings.end());
+  for (const auto &line : afterWarnings) {
+    if (!seenWarnings.count(line)) out.newWarnings.push_back(line);
+  }
+
+  if (out.newErrors.empty() && out.newWarnings.empty()) {
+    out.summary = "no new diagnostics";
+  } else {
+    std::ostringstream s;
+    if (!out.newErrors.empty()) {
+      s << out.newErrors.size() << " new error"
+        << (out.newErrors.size() == 1 ? "" : "s");
+    }
+    if (!out.newWarnings.empty()) {
+      if (!out.newErrors.empty()) s << ", ";
+      s << out.newWarnings.size() << " new warning"
+        << (out.newWarnings.size() == 1 ? "" : "s");
+    }
+    out.summary = s.str();
+  }
+  return out;
+}
+
+std::string formatSanitationNotes(
+    const utils::LineRangeTrimmer::SanitationResult &s) {
+  std::vector<std::string> notes;
+  if (s.lineRangePrefixesStripped > 0) {
+    notes.push_back(std::to_string(s.lineRangePrefixesStripped) +
+                    " line-range prefix" +
+                    (s.lineRangePrefixesStripped == 1 ? "" : "es") + " stripped");
+  }
+  if (s.hashlinePrefixesStripped > 0) {
+    notes.push_back(std::to_string(s.hashlinePrefixesStripped) +
+                    " hashline prefix" +
+                    (s.hashlinePrefixesStripped == 1 ? "" : "es") + " stripped");
+  }
+  if (s.malformedHashFragmentsStripped > 0) {
+    notes.push_back(std::to_string(s.malformedHashFragmentsStripped) +
+                    " malformed hash fragment" +
+                    (s.malformedHashFragmentsStripped == 1 ? "" : "s") +
+                    " stripped");
+  }
+  if (s.diffMarkersStripped > 0) {
+    notes.push_back(std::to_string(s.diffMarkersStripped) +
+                    " diff marker" +
+                    (s.diffMarkersStripped == 1 ? "" : "s") + " stripped");
+  }
+  if (s.boundaryEchoesRemoved > 0) {
+    notes.push_back(std::to_string(s.boundaryEchoesRemoved) +
+                    " boundary echo" +
+                    (s.boundaryEchoesRemoved == 1 ? "" : "es") + " removed");
+  }
+  if (s.suspiciousContentFound) notes.push_back("suspicious content found");
+  if (s.suspiciousContentRejected) notes.push_back("suspicious content rejected");
+  if (notes.empty()) return "";
+  std::string out = " (";
+  for (size_t i = 0; i < notes.size(); ++i) {
+    if (i) out += ", ";
+    out += notes[i];
+  }
+  out += ")";
+  return out;
+}
+
+}  // namespace
+
 rapidjson::Document buildPreparedMutationDoc(const PreparedFileMutation &prepared,
                                              shared::ToolContext &ctx,
-                                             const char *shape,
-                                             bool transactional) {
+                                             const char * /*shape*/,
+                                             bool /*transactional*/) {
   rapidjson::Document doc;
   doc.SetObject();
   auto &alloc = doc.GetAllocator();
-  doc.AddMember("path", rapidjson::Value(prepared.requestPath.c_str(), alloc).Move(), alloc);
-  doc.AddMember("resolved_mode", rapidjson::Value(prepared.mode.c_str(), alloc).Move(), alloc);
-  doc.AddMember("shape", rapidjson::Value(shape, alloc).Move(), alloc);
-  doc.AddMember("transactional", transactional, alloc);
-  doc.AddMember("applied_edits", static_cast<uint32_t>(prepared.normalizedEdits.size()), alloc);
-  doc.AddMember("added_lines", prepared.addedLines, alloc);
-  doc.AddMember("removed_lines", prepared.removedLines, alloc);
-  if (prepared.mode == "replace") {
-    doc.AddMember("replacements", prepared.replacements, alloc);
-  }
-  if (prepared.mode == "range" || prepared.mode == "patch") {
-    doc.AddMember("relocated_anchors", prepared.relocatedAnchors, alloc);
-    addSanitationMember(doc, prepared.sanitation, alloc);
-  }
-  const std::string diffPreview = buildDiffPreview(prepared.normalizedEdits);
-  doc.AddMember("diff_preview", rapidjson::Value(diffPreview.c_str(), alloc).Move(), alloc);
-  rapidjson::Value operations(rapidjson::kArrayType);
-  for (const auto &edit : prepared.normalizedEdits) {
-    operations.PushBack(buildOperationResult(edit, alloc), alloc);
-  }
-  doc.AddMember("operations", operations, alloc);
-  doc.AddMember("watch_state", rapidjson::Value("refreshed", alloc).Move(), alloc);
+
+  // Compute LSP delta once (does the actual after-edit diagnostic call).
   auto afterLsp = collectFileLspDiagnostics(prepared.absolutePath, ctx);
-  attachFileEditLspSummary(doc, prepared.absolutePath, prepared.beforeLsp.get(), &afterLsp);
+  const LspDelta lspDelta =
+      computeLspDelta(prepared.absolutePath, prepared.beforeLsp.get(), &afterLsp);
+
+  // Build prose summary.
+  std::ostringstream prose;
+  prose << formatModeVerb(prepared.mode) << " " << prepared.requestPath
+        << ": -" << prepared.removedLines << " +" << prepared.addedLines
+        << " lines";
+  if (prepared.normalizedEdits.size() > 1) {
+    prose << " across " << prepared.normalizedEdits.size() << " hunks";
+  }
+  if (prepared.mode == "replace" && prepared.replacements > 0) {
+    prose << " (" << prepared.replacements << " replacement"
+          << (prepared.replacements == 1 ? "" : "s") << ")";
+  }
+  if ((prepared.mode == "range" || prepared.mode == "patch") &&
+      prepared.relocatedAnchors > 0) {
+    prose << ", " << prepared.relocatedAnchors << " anchor"
+          << (prepared.relocatedAnchors == 1 ? "" : "s") << " relocated";
+  }
+  prose << formatSanitationNotes(prepared.sanitation);
+  if (!lspDelta.summary.empty()) {
+    prose << ". LSP: " << lspDelta.summary;
+  }
+  prose << ".";
+
+  doc.AddMember("result",
+                rapidjson::Value(prose.str().c_str(), alloc).Move(), alloc);
+  doc.AddMember("path",
+                rapidjson::Value(prepared.requestPath.c_str(), alloc).Move(),
+                alloc);
+  // Honest signal — the prepare* function knows whether the file existed
+  // pre-write because it checked. Without this, the mutation recorder
+  // downstream had to guess from the description string ("create file")
+  // which broke the moment a different code path emitted a different
+  // string. Now hadFileBefore is set straight from ctx.host.exists().
+  doc.AddMember("had_file_before", prepared.hadFileBefore, alloc);
+
+  // Emit a structured operations array so the mutation recorder
+  // (Agent::extractEditLedgerMutations) can persist exact pre/post-image
+  // line content. Without this the recorder saw an empty operations
+  // vector and undo was a no-op write of empty content. The schema must
+  // match what the agent reads: description, start_line, end_line,
+  // old_lines, new_lines.
+  rapidjson::Value opsArr(rapidjson::kArrayType);
+  for (const auto &edit : prepared.normalizedEdits) {
+    rapidjson::Value op(rapidjson::kObjectType);
+    op.AddMember("description",
+                 rapidjson::Value(edit.description.c_str(), alloc).Move(), alloc);
+    op.AddMember("start_line", edit.startIndex + 1, alloc);
+    op.AddMember("end_line", edit.endIndex, alloc);
+    rapidjson::Value oldLn(rapidjson::kArrayType);
+    for (const auto &line : edit.oldLines) {
+      oldLn.PushBack(rapidjson::Value(line.c_str(), alloc).Move(), alloc);
+    }
+    op.AddMember("old_lines", oldLn, alloc);
+    rapidjson::Value newLn(rapidjson::kArrayType);
+    for (const auto &line : edit.newLines) {
+      newLn.PushBack(rapidjson::Value(line.c_str(), alloc).Move(), alloc);
+    }
+    op.AddMember("new_lines", newLn, alloc);
+    opsArr.PushBack(op, alloc);
+  }
+  doc.AddMember("operations", opsArr, alloc);
+  doc.AddMember("resolved_mode",
+                rapidjson::Value(prepared.mode.c_str(), alloc).Move(), alloc);
+
+  const std::string diff = buildDiffPreview(prepared.normalizedEdits);
+  doc.AddMember("diff",
+                rapidjson::Value(diff.c_str(), alloc).Move(), alloc);
+
+  // Only emit lsp_issues array when there ARE new issues — the prose
+  // already conveys the count, but the model needs the actual error text
+  // to act on regressions.
+  if (!lspDelta.newErrors.empty() || !lspDelta.newWarnings.empty()) {
+    rapidjson::Value issues(rapidjson::kArrayType);
+    for (const auto &line : lspDelta.newErrors) {
+      issues.PushBack(rapidjson::Value(line.c_str(), alloc).Move(), alloc);
+    }
+    for (const auto &line : lspDelta.newWarnings) {
+      issues.PushBack(rapidjson::Value(line.c_str(), alloc).Move(), alloc);
+    }
+    doc.AddMember("lsp_issues", issues, alloc);
+  }
   return doc;
 }
 
@@ -985,18 +1161,25 @@ rapidjson::Document buildValidationDoc(const char *mode, const char *shape,
   rapidjson::Document doc;
   doc.SetObject();
   auto &alloc = doc.GetAllocator();
-  doc.AddMember("resolved_mode", rapidjson::Value(mode, alloc).Move(), alloc);
-  doc.AddMember("shape", rapidjson::Value(shape, alloc).Move(), alloc);
+  // Token-waste pass 1: prose-first validate-only response. The model just
+  // sent the patch; it does not need shape/transactional/would_change echoed
+  // back. `result` says what would happen; `files` lists the paths.
+  std::ostringstream prose;
+  prose << "Validated " << mode << " for " << fileCount << " file"
+        << (fileCount == 1 ? "" : "s") << ". Would change:";
+  for (size_t i = 0; i < paths.size(); ++i) {
+    prose << (i ? "," : "") << " " << paths[i];
+  }
+  prose << ".";
+  doc.AddMember("result",
+                rapidjson::Value(prose.str().c_str(), alloc).Move(), alloc);
   doc.AddMember("validate_only", true, alloc);
-  doc.AddMember("valid", true, alloc);
-  doc.AddMember("transactional", std::string_view(mode) == "patch", alloc);
-  doc.AddMember("file_count", static_cast<uint32_t>(fileCount), alloc);
   rapidjson::Value files(rapidjson::kArrayType);
   for (const auto &path : paths) {
     files.PushBack(rapidjson::Value(path.c_str(), alloc).Move(), alloc);
   }
   doc.AddMember("files", files, alloc);
-  doc.AddMember("would_change", cloneJsonValue(files, alloc), alloc);
+  (void)shape;
   return doc;
 }
 
@@ -1083,32 +1266,57 @@ shared::ToolResult FileEditTool::execute(const FilePatchInput &input,
     if (prepared.size() == 1) {
       return shared::ToolResult::ok(buildPreparedMutationDoc(prepared.front(), ctx, "single_file", true));
     }
+    // Token-waste pass 1: prose-first multi-file aggregate.
+    //
+    // Wire shape:
+    //   {
+    //     "result": "Patched 3 files: a.cpp (-4 +8), b.cpp (-12 +12). Total: -16 +20 lines.",
+    //     "files":  ["a.cpp", "b.cpp"],
+    //     "diff":   "<combined unified diff across all files, with --- a/path / +++ b/path headers>"
+    //   }
+    //
+    // Per-file diff slices live inside the combined `diff` (delimited by
+    // standard `--- a/path` / `+++ b/path` headers). extractFileEditEventPayloads
+    // splits this back into per-file events when emitting AgentFileEdited.
     rapidjson::Document aggregate;
     aggregate.SetObject();
     auto &alloc = aggregate.GetAllocator();
-    aggregate.AddMember("resolved_mode", rapidjson::Value("patch", alloc).Move(), alloc);
-    aggregate.AddMember("shape", rapidjson::Value("multi_file", alloc).Move(), alloc);
-    aggregate.AddMember("transactional", true, alloc);
-    aggregate.AddMember("file_count", static_cast<uint32_t>(prepared.size()), alloc);
-    rapidjson::Value files(rapidjson::kArrayType);
-    rapidjson::Value editedPaths(rapidjson::kArrayType);
+
+    rapidjson::Value pathsArr(rapidjson::kArrayType);
     int added = 0;
     int removed = 0;
-    uint32_t applied = 0;
-    for (const auto &mutation : prepared) {
-      auto doc = buildPreparedMutationDoc(mutation, ctx, "single_file", true);
-      files.PushBack(cloneJsonValue(doc, alloc), alloc);
-      editedPaths.PushBack(rapidjson::Value(mutation.requestPath.c_str(), alloc).Move(), alloc);
+    std::ostringstream proseLine;
+    proseLine << "Patched " << prepared.size() << " files:";
+    std::ostringstream combinedDiff;
+
+    for (size_t i = 0; i < prepared.size(); ++i) {
+      const auto &mutation = prepared[i];
+      const std::string fileDiff = buildDiffPreview(mutation.normalizedEdits);
+
+      pathsArr.PushBack(
+          rapidjson::Value(mutation.requestPath.c_str(), alloc).Move(), alloc);
+
       added += mutation.addedLines;
       removed += mutation.removedLines;
-      applied += static_cast<uint32_t>(mutation.normalizedEdits.size());
+
+      if (i) proseLine << ",";
+      proseLine << " " << mutation.requestPath << " (-"
+                << mutation.removedLines << " +" << mutation.addedLines << ")";
+
+      combinedDiff << "--- a/" << mutation.requestPath << "\n";
+      combinedDiff << "+++ b/" << mutation.requestPath << "\n";
+      combinedDiff << fileDiff;
+      if (!fileDiff.empty() && fileDiff.back() != '\n') combinedDiff << "\n";
     }
-    aggregate.AddMember("files", files, alloc);
-    aggregate.AddMember("edited_files", editedPaths, alloc);
-    aggregate.AddMember("applied_edits", applied, alloc);
-    aggregate.AddMember("added_lines", added, alloc);
-    aggregate.AddMember("removed_lines", removed, alloc);
-    aggregate.AddMember("watch_state", rapidjson::Value("refreshed", alloc).Move(), alloc);
+    proseLine << ". Total: -" << removed << " +" << added << " lines.";
+
+    aggregate.AddMember(
+        "result",
+        rapidjson::Value(proseLine.str().c_str(), alloc).Move(), alloc);
+    aggregate.AddMember("files", pathsArr, alloc);
+    aggregate.AddMember(
+        "diff",
+        rapidjson::Value(combinedDiff.str().c_str(), alloc).Move(), alloc);
     return shared::ToolResult::ok(aggregate);
   } catch (const std::exception &e) {
     return shared::ToolResult::fail(e.what());

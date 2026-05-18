@@ -96,15 +96,67 @@ rapidjson::Value toJsonValue(const ProcessRuntimeSummary &summary,
                              rapidjson::Document::AllocatorType &allocator);
 ProcessRuntimeSummary processRuntimeSummaryFromJson(const rapidjson::Value &value);
 
+rapidjson::Value toJsonValue(const PermissionModeWire &mode,
+                             rapidjson::Document::AllocatorType &allocator);
+PermissionModeWire permissionModeWireFromJson(const rapidjson::Value &value);
 rapidjson::Value toJsonValue(const PermissionModeRequest &request,
                              rapidjson::Document::AllocatorType &allocator);
 PermissionModeRequest permissionModeRequestFromJson(const rapidjson::Value &value);
 rapidjson::Value toJsonValue(const PermissionModeUpdateRequest &request,
                              rapidjson::Document::AllocatorType &allocator);
 PermissionModeUpdateRequest permissionModeUpdateRequestFromJson(const rapidjson::Value &value);
+rapidjson::Value toJsonValue(const PermissionCreateModeRequest &request,
+                             rapidjson::Document::AllocatorType &allocator);
+PermissionCreateModeRequest permissionCreateModeRequestFromJson(const rapidjson::Value &value);
+rapidjson::Value toJsonValue(const PermissionCreateModeResponse &response,
+                             rapidjson::Document::AllocatorType &allocator);
+PermissionCreateModeResponse permissionCreateModeResponseFromJson(const rapidjson::Value &value);
+rapidjson::Value toJsonValue(const PermissionRenameModeRequest &request,
+                             rapidjson::Document::AllocatorType &allocator);
+PermissionRenameModeRequest permissionRenameModeRequestFromJson(const rapidjson::Value &value);
+rapidjson::Value toJsonValue(const PermissionRenameModeResponse &response,
+                             rapidjson::Document::AllocatorType &allocator);
+PermissionRenameModeResponse permissionRenameModeResponseFromJson(const rapidjson::Value &value);
+rapidjson::Value toJsonValue(const PermissionDeleteModeRequest &request,
+                             rapidjson::Document::AllocatorType &allocator);
+PermissionDeleteModeRequest permissionDeleteModeRequestFromJson(const rapidjson::Value &value);
+rapidjson::Value toJsonValue(const PermissionDeleteModeResponse &response,
+                             rapidjson::Document::AllocatorType &allocator);
+PermissionDeleteModeResponse permissionDeleteModeResponseFromJson(const rapidjson::Value &value);
 rapidjson::Value toJsonValue(const PermissionResolveRequest &request,
                              rapidjson::Document::AllocatorType &allocator);
 PermissionResolveRequest permissionResolveRequestFromJson(const rapidjson::Value &value);
+rapidjson::Value toJsonValue(const PermissionResolveWithRulesRequest &request,
+                             rapidjson::Document::AllocatorType &allocator);
+PermissionResolveWithRulesRequest
+permissionResolveWithRulesRequestFromJson(const rapidjson::Value &value);
+rapidjson::Value toJsonValue(const PolicyRuleWire &rule,
+                             rapidjson::Document::AllocatorType &allocator);
+PolicyRuleWire policyRuleWireFromJson(const rapidjson::Value &value);
+rapidjson::Value toJsonValue(const PermissionListRulesRequest &request,
+                             rapidjson::Document::AllocatorType &allocator);
+PermissionListRulesRequest permissionListRulesRequestFromJson(const rapidjson::Value &value);
+rapidjson::Value toJsonValue(const PermissionListRulesResponse &response,
+                             rapidjson::Document::AllocatorType &allocator);
+PermissionListRulesResponse permissionListRulesResponseFromJson(const rapidjson::Value &value);
+rapidjson::Value toJsonValue(const PermissionUpsertRuleRequest &request,
+                             rapidjson::Document::AllocatorType &allocator);
+PermissionUpsertRuleRequest permissionUpsertRuleRequestFromJson(const rapidjson::Value &value);
+rapidjson::Value toJsonValue(const PermissionUpsertRuleResponse &response,
+                             rapidjson::Document::AllocatorType &allocator);
+PermissionUpsertRuleResponse permissionUpsertRuleResponseFromJson(const rapidjson::Value &value);
+rapidjson::Value toJsonValue(const PermissionDeleteRuleRequest &request,
+                             rapidjson::Document::AllocatorType &allocator);
+PermissionDeleteRuleRequest permissionDeleteRuleRequestFromJson(const rapidjson::Value &value);
+rapidjson::Value toJsonValue(const PermissionDeleteRuleResponse &response,
+                             rapidjson::Document::AllocatorType &allocator);
+PermissionDeleteRuleResponse permissionDeleteRuleResponseFromJson(const rapidjson::Value &value);
+rapidjson::Value toJsonValue(const PermissionReloadPolicyRequest &request,
+                             rapidjson::Document::AllocatorType &allocator);
+PermissionReloadPolicyRequest permissionReloadPolicyRequestFromJson(const rapidjson::Value &value);
+rapidjson::Value toJsonValue(const PermissionReloadPolicyResponse &response,
+                             rapidjson::Document::AllocatorType &allocator);
+PermissionReloadPolicyResponse permissionReloadPolicyResponseFromJson(const rapidjson::Value &value);
 rapidjson::Value toJsonValue(const PermissionQueueSnapshot &snapshot,
                              rapidjson::Document::AllocatorType &allocator);
 PermissionQueueSnapshot permissionQueueSnapshotFromJson(const rapidjson::Value &value);
@@ -369,5 +421,80 @@ ToolCatalogSnapshot toolCatalogSnapshotFromJson(const rapidjson::Value &v);
 
 rapidjson::Value toJsonValue(const BenchmarkCatalogSnapshot &r, rapidjson::Document::AllocatorType &a);
 BenchmarkCatalogSnapshot benchmarkCatalogSnapshotFromJson(const rapidjson::Value &v);
+
+// ── /connect wizard ──────────────────────────────────────────────────────
+rapidjson::Value toJsonValue(const WizardChoiceSnapshot &c, rapidjson::Document::AllocatorType &a);
+WizardChoiceSnapshot wizardChoiceSnapshotFromJson(const rapidjson::Value &v);
+
+rapidjson::Value toJsonValue(const WizardPromptSnapshot &p, rapidjson::Document::AllocatorType &a);
+WizardPromptSnapshot wizardPromptSnapshotFromJson(const rapidjson::Value &v);
+
+rapidjson::Value toJsonValue(const ConnectBeginRequest &r, rapidjson::Document::AllocatorType &a);
+ConnectBeginRequest connectBeginRequestFromJson(const rapidjson::Value &v);
+
+rapidjson::Value toJsonValue(const ConnectBeginResponse &r, rapidjson::Document::AllocatorType &a);
+ConnectBeginResponse connectBeginResponseFromJson(const rapidjson::Value &v);
+
+rapidjson::Value toJsonValue(const ConnectSubmitRequest &r, rapidjson::Document::AllocatorType &a);
+ConnectSubmitRequest connectSubmitRequestFromJson(const rapidjson::Value &v);
+
+rapidjson::Value toJsonValue(const ConnectSubmitResponse &r, rapidjson::Document::AllocatorType &a);
+ConnectSubmitResponse connectSubmitResponseFromJson(const rapidjson::Value &v);
+
+rapidjson::Value toJsonValue(const ConnectFinalizeRequest &r, rapidjson::Document::AllocatorType &a);
+ConnectFinalizeRequest connectFinalizeRequestFromJson(const rapidjson::Value &v);
+
+rapidjson::Value toJsonValue(const ConnectFinalizeResponse &r, rapidjson::Document::AllocatorType &a);
+ConnectFinalizeResponse connectFinalizeResponseFromJson(const rapidjson::Value &v);
+
+rapidjson::Value toJsonValue(const ConnectCancelRequest &r, rapidjson::Document::AllocatorType &a);
+ConnectCancelRequest connectCancelRequestFromJson(const rapidjson::Value &v);
+
+rapidjson::Value toJsonValue(const ConnectCancelResponse &r, rapidjson::Document::AllocatorType &a);
+ConnectCancelResponse connectCancelResponseFromJson(const rapidjson::Value &v);
+
+rapidjson::Value toJsonValue(const ConnectProgressSnapshot &s, rapidjson::Document::AllocatorType &a);
+ConnectProgressSnapshot connectProgressSnapshotFromJson(const rapidjson::Value &v);
+
+std::string connectProgressPhaseToWire(ConnectProgressPhase phase);
+ConnectProgressPhase connectProgressPhaseFromWire(const std::string &str);
+
+// ── /undo Rewind ──────────────────────────────────────────────────────────
+std::string rewindModeToWire(RewindMode mode);
+RewindMode rewindModeFromWire(const std::string &str);
+
+rapidjson::Value toJsonValue(const RewindPreviewRequest &r, rapidjson::Document::AllocatorType &a);
+RewindPreviewRequest rewindPreviewRequestFromJson(const rapidjson::Value &v);
+
+rapidjson::Value toJsonValue(const RewindPreviewResponse &r, rapidjson::Document::AllocatorType &a);
+RewindPreviewResponse rewindPreviewResponseFromJson(const rapidjson::Value &v);
+
+rapidjson::Value toJsonValue(const RewindExecuteRequest &r, rapidjson::Document::AllocatorType &a);
+RewindExecuteRequest rewindExecuteRequestFromJson(const rapidjson::Value &v);
+
+rapidjson::Value toJsonValue(const RewindExecuteResponse &r, rapidjson::Document::AllocatorType &a);
+RewindExecuteResponse rewindExecuteResponseFromJson(const rapidjson::Value &v);
+
+rapidjson::Value toJsonValue(const RewindAppliedSnapshot &s, rapidjson::Document::AllocatorType &a);
+RewindAppliedSnapshot rewindAppliedSnapshotFromJson(const rapidjson::Value &v);
+
+// ── /redo ─────────────────────────────────────────────────────────────────
+std::string redoModeToWire(RedoMode mode);
+RedoMode redoModeFromWire(const std::string &str);
+
+rapidjson::Value toJsonValue(const RedoUndoActionSummary &s, rapidjson::Document::AllocatorType &a);
+RedoUndoActionSummary redoUndoActionSummaryFromJson(const rapidjson::Value &v);
+
+rapidjson::Value toJsonValue(const RedoPreviewRequest &r, rapidjson::Document::AllocatorType &a);
+RedoPreviewRequest redoPreviewRequestFromJson(const rapidjson::Value &v);
+
+rapidjson::Value toJsonValue(const RedoPreviewResponse &r, rapidjson::Document::AllocatorType &a);
+RedoPreviewResponse redoPreviewResponseFromJson(const rapidjson::Value &v);
+
+rapidjson::Value toJsonValue(const RedoExecuteRequest &r, rapidjson::Document::AllocatorType &a);
+RedoExecuteRequest redoExecuteRequestFromJson(const rapidjson::Value &v);
+
+rapidjson::Value toJsonValue(const RedoExecuteResponse &r, rapidjson::Document::AllocatorType &a);
+RedoExecuteResponse redoExecuteResponseFromJson(const rapidjson::Value &v);
 
 } // namespace firmius::daemon

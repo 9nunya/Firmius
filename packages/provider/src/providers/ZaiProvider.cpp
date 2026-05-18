@@ -23,6 +23,16 @@ std::vector<firmius::shared::ModelInfo> ZaiProvider::listModels() {
     for (auto& m : models) {
         m.provider = "zai";
         if (m.contextWindow == 0) m.contextWindow = 202000;
+        // Token-caching pass: Z.ai's /v1/models endpoint does not publish
+        // pricing, so BaseOpenAIProvider gives us 0 for both input and
+        // cache. Per docs (https://docs.z.ai/guides/capabilities/cache)
+        // cached tokens are billed at 50% of input price across all GLM
+        // models. If a downstream catalog has populated input/output
+        // pricing, derive the cache-read price as half of input. Cache
+        // writes have no extra cost on Z.ai.
+        if (m.pricePer1MCacheRead == 0.0 && m.pricePer1MInput > 0.0) {
+            m.pricePer1MCacheRead = m.pricePer1MInput * 0.5;
+        }
     }
     return models;
 }

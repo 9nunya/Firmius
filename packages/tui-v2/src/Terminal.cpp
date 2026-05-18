@@ -78,6 +78,16 @@ bool Terminal::enter() {
   rawWrite("\x1b[?1002h"); // Button-event tracking
   rawWrite("\x1b[?1003h"); // Any-event tracking (motion)
   rawWrite("\x1b[?1006h"); // SGR mouse mode
+  // Bracketed paste — terminal wraps pasted text in \x1b[200~ ... \x1b[201~
+  // so we can distinguish "user pasted a chunk" from "user typed Enter".
+  // Without this, multi-line pastes look like a sequence of Enters and
+  // each line gets sent as a separate message.
+  rawWrite("\x1b[?2004h");
+  // Kitty keyboard protocol disambiguation flag (CSI > 1 u). Lets us see
+  // Shift+Enter as `\x1b[13;2u` instead of plain `\r`. Terminals that
+  // don't support this just ignore the sequence — we still fall back to
+  // Alt+Enter (`\x1b\r`) for newline insertion.
+  rawWrite("\x1b[>1u");
 
   active_ = true;
   return true;
@@ -86,6 +96,10 @@ bool Terminal::enter() {
 void Terminal::leave() {
   if (!active_) return;
 
+  // Pop kitty keyboard flags.
+  rawWrite("\x1b[<u");
+  // Disable bracketed paste.
+  rawWrite("\x1b[?2004l");
   // Disable mouse tracking.
   rawWrite("\x1b[?1006l");
   rawWrite("\x1b[?1003l");

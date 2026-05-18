@@ -511,6 +511,18 @@ void LocalHost::writeFile(const std::string &path,
   file.write(reinterpret_cast<const char *>(data.data()), data.size());
 }
 
+void LocalHost::deleteFile(const std::string &path) {
+  std::error_code ec;
+  // remove() returns false if the file didn't exist — treat that as
+  // success (idempotent), only throw on a real I/O error. Using the
+  // ec-overload prevents an exception from std::filesystem on missing
+  // path so we control the failure message.
+  if (!std::filesystem::remove(path, ec) && ec) {
+    throw std::runtime_error("Could not delete file: " + path + ": " +
+                              ec.message());
+  }
+}
+
 bool LocalHost::exists(const std::string &path) {
   return std::filesystem::exists(path);
 }

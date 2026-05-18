@@ -21,6 +21,8 @@ target_sources(firmius_shared PRIVATE
     src/utils/PlatformPaths.cpp
     src/utils/FrontmatterParser.cpp
     src/utils/Hashline.cpp
+    src/utils/GlobMatch.cpp
+    src/utils/SpillIfLarge.cpp
     src/ConfigLoader.cpp
     src/HeuristicTokenizer.cpp
 )
@@ -64,6 +66,8 @@ target_sources(firmius_shared PUBLIC
     include/utils/ModelUtil.hpp
     include/utils/FrontmatterParser.hpp
     include/utils/Hashline.hpp
+    include/utils/GlobMatch.hpp
+    include/utils/SpillIfLarge.hpp
     include/utils/PlatformPaths.hpp
     include/utils/PermissionProfiles.hpp
     include/ConfigLoader.hpp

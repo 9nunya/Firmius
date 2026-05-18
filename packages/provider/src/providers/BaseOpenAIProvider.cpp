@@ -593,13 +593,26 @@ void BaseOpenAIProvider::processSSELine(
                                : 0;
 
     // Extract cached tokens from prompt_tokens_details
-    // OpenAI includes cached_tokens INSIDE prompt_tokens, so subtract
+    // OpenAI includes cached_tokens INSIDE prompt_tokens, so subtract.
+    // Token-caching pass: also pick up the OpenRouter-specific
+    // `cache_write_tokens` (cache creation count for Anthropic-routed
+    // models) and the top-level `cache_discount` field. Both are no-ops
+    // for upstream providers that do not emit them.
     if (usage.HasMember("prompt_tokens_details") &&
         usage["prompt_tokens_details"].IsObject()) {
       const auto &pdetails = usage["prompt_tokens_details"];
       if (pdetails.HasMember("cached_tokens") &&
           pdetails["cached_tokens"].IsUint()) {
         am.tokens.cacheRead = pdetails["cached_tokens"].GetUint();
+      }
+      if (pdetails.HasMember("cache_write_tokens") &&
+          pdetails["cache_write_tokens"].IsUint()) {
+        am.tokens.cacheWrite = pdetails["cache_write_tokens"].GetUint();
+      } else if (pdetails.HasMember("cache_creation_input_tokens") &&
+                 pdetails["cache_creation_input_tokens"].IsUint()) {
+        // Qwen-explicit / Anthropic-routed-via-passthrough variant.
+        am.tokens.cacheWrite =
+            pdetails["cache_creation_input_tokens"].GetUint();
       }
     }
     am.tokens.prompt = am.tokens.contextSize - am.tokens.cacheRead;
@@ -734,6 +747,32 @@ BaseOpenAIProvider::prepareRequestBody(const AgentHistory &history,
   d.AddMember("model", rapidjson::Value(opts.modelId.c_str(), a), a);
   d.AddMember("temperature", opts.temperature, a);
   d.AddMember("stream", true, a);
+
+  // Token-caching pass: prompt_cache_key is a routing hint that biases
+  // OpenAI's load balancer to send same-prefix requests to the same
+  // backend instance, raising cache hit rates. Free to send. We derive a
+  // deterministic key from the conversation's threadId so all turns of
+  // the same conversation, plus all subagents that share a prompt under
+  // that thread, route consistently. (Per docs the key is opaque to
+  // OpenAI — only consistency matters.)
+  if (history.threadId.empty()) {
+    // No thread context (e.g. one-shot benchmark) — fall back to a
+    // model-stable key so identical-prefix requests still cluster.
+    std::string fallbackKey = "firmius-" + opts.modelId;
+    d.AddMember("prompt_cache_key",
+                rapidjson::Value(fallbackKey.c_str(), a), a);
+  } else {
+    std::string key = "firmius-" + history.threadId;
+    d.AddMember("prompt_cache_key",
+                rapidjson::Value(key.c_str(), a), a);
+  }
+
+  // Token-caching pass: prompt_cache_retention="24h" extends the cache
+  // TTL from the default 5–10 min to 24h on GPT-5.x models. For any
+  // model that supports it the field is honoured; for older models OpenAI
+  // ignores it gracefully. Critical for sessions that pause between
+  // human turns.
+  d.AddMember("prompt_cache_retention", "24h", a);
 
   if (opts.maxTokens) {
     d.AddMember("max_tokens", opts.maxTokens.value(), a);

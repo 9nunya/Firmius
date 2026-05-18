@@ -19,6 +19,8 @@ target_sources(firmius_core PRIVATE
     src/environment/Workspace.cpp
     src/environment/Environment.cpp
     src/environment/Permissions.cpp
+    src/environment/PolicyEngine.cpp
+    src/environment/PermissionSuggestionEngine.cpp
     src/tools/FileEditTool.cpp
     src/tools/ReadTool.cpp
     src/tools/ListTool.cpp
@@ -44,6 +46,7 @@ target_sources(firmius_core PRIVATE
     src/tools/FleetLockRespondTool.cpp
     src/tools/FleetStatusTool.cpp
     src/tools/TodoWriteTool.cpp
+    src/tools/PinTool.cpp
     src/agents/SkillLoader.cpp
     src/agents/HintingLoader.cpp
     src/agents/PurposeLoader.cpp
@@ -60,6 +63,11 @@ target_sources(firmius_core PRIVATE
     src/agents/StreamSanityDetector.cpp
     src/agents/Agent.cpp
     src/agents/AgentPermissionChecks.cpp
+    src/agents/working_memory/DeflationArchive.cpp
+    src/agents/working_memory/Deflator.cpp
+    src/agents/working_memory/PinPolicy.cpp
+    src/agents/working_memory/WorkingMemory.cpp
+    src/agents/working_memory/WorkingMemoryWorker.cpp
     src/persistence/Journaler.cpp
     src/persistence/ThreadManager.cpp
     src/persistence/HistoryEditor.cpp
@@ -98,6 +106,9 @@ target_sources(firmius_core PUBLIC
     include/environment/Workspace.hpp
     include/environment/Environment.hpp
     include/environment/Permissions.hpp
+    include/environment/PermissionPolicy.hpp
+    include/environment/PolicyEngine.hpp
+    include/environment/PermissionSuggestionEngine.hpp
     include/tools/FileEditTool.hpp
     include/tools/ReadTool.hpp
     include/tools/ListTool.hpp
@@ -122,6 +133,7 @@ target_sources(firmius_core PUBLIC
     include/tools/WebSearchTool.hpp
     include/tools/SkillLoadTool.hpp
     include/tools/TodoWriteTool.hpp
+    include/tools/PinTool.hpp
     include/agents/HintingLoader.hpp
     include/tools/ModeSwitchTool.hpp
     include/agents/PurposeLoader.hpp
@@ -140,6 +152,11 @@ target_sources(firmius_core PUBLIC
     include/agents/StreamSanityDetector.hpp
     include/agents/Agent.hpp
     include/agents/AgentPermissionChecks.hpp
+    include/agents/working_memory/DeflationArchive.hpp
+    include/agents/working_memory/Deflator.hpp
+    include/agents/working_memory/PinPolicy.hpp
+    include/agents/working_memory/WorkingMemory.hpp
+    include/agents/working_memory/WorkingMemoryWorker.hpp
     include/persistence/Journaler.hpp
     include/persistence/ThreadManager.hpp
     include/persistence/HistoryEditor.hpp

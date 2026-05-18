@@ -150,6 +150,20 @@ public:
     }
 
     /**
+     * @brief Removes a file. Idempotent — succeeds whether or not the
+     * path was tracked.
+     */
+    void deleteFile(const std::string& path) override {
+        recordCall("deleteFile", {{"path", path}});
+        config_.fileContents.erase(path);
+        config_.fileInfos.erase(path);
+        config_.existingPaths.erase(
+            std::remove(config_.existingPaths.begin(),
+                        config_.existingPaths.end(), path),
+            config_.existingPaths.end());
+    }
+
+    /**
      * @brief Checks if a path exists on the host.
      * @param path The path to check.
      * @return True if it exists.

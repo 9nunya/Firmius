@@ -3,6 +3,7 @@
 #include "agents/Agent.hpp"
 #include "agents/AgentPermissionChecks.hpp"
 #include "agents/PurposeLoader.hpp"
+#include "utils/SpillIfLarge.hpp"
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -146,6 +147,15 @@ shared::ToolResult ReadTool::execute(const rapidjson::Value &input, shared::Tool
           absolutePath, normalized_start, normalized_end, reachedEnd);
     }
 
+    // Token-waste pass 5: count total lines once so we can emit a single
+    // `range: "<start>-<end>/<total>"` field instead of six derivable
+    // counters. For partially-read (truncated) files, total reflects what
+    // we actually loaded into memory; the truncated flag still flags the
+    // overall file-too-big case.
+    int totalLines = 0;
+    for (char c : content) if (c == '\n') ++totalLines;
+    if (!content.empty() && content.back() != '\n') ++totalLines;
+
     std::string enhancedContent;
     if (!selectedLines.empty()) {
       for (std::size_t i = 0; i < selectedLines.size(); ++i) {
@@ -158,20 +168,59 @@ shared::ToolResult ReadTool::execute(const rapidjson::Value &input, shared::Tool
       }
     }
 
-    res.AddMember("content",
-                  rapidjson::Value(enhancedContent.c_str(), alloc).Move(),
-                  alloc);
-    res.AddMember("line_start", normalized_start, alloc);
-    res.AddMember("line_end", normalized_end, alloc);
-    res.AddMember("lines_read", lines_taken, alloc);
-    res.AddMember("read_full", read_full, alloc);
-    res.AddMember("reached_end", reachedEnd, alloc);
-    res.AddMember("watch_scope",
-                  rapidjson::Value(read_full ? "full" : "range", alloc).Move(),
-                  alloc);
-    res.AddMember("watch_state", rapidjson::Value("updated", alloc).Move(),
+    // Token-waste pass 5: prose-first read result. `range` collapses
+    // line_start/line_end/lines_read/reached_end/read_full into one
+    // string; watch_scope/watch_state are bookkeeping the model rarely
+    // reads — dropped. Spill the line-prefixed content when very large.
+    constexpr std::size_t kReadSpillThreshold = 1ull * 1024 * 1024;  // 1 MB
+    constexpr std::size_t kReadTailBytes = 4 * 1024;
+    std::string rangeStr;
+    if (lines_taken == 0) {
+      rangeStr = "0-0/" + std::to_string(totalLines);
+    } else {
+      rangeStr = std::to_string(normalized_start) + "-" +
+                 std::to_string(normalized_end) + "/" +
+                 std::to_string(totalLines);
+    }
+
+    if (enhancedContent.size() > kReadSpillThreshold) {
+      auto spill = shared::utils::spillIfLarge(
+          enhancedContent, kReadSpillThreshold,
+          "firmius_read", kReadTailBytes);
+      std::ostringstream prose;
+      prose << "Read " << path << " (" << rangeStr
+            << " lines, " << spill.totalBytes
+            << " B); content spilled to " << spill.refPath
+            << " (showing last " << spill.tail.size() << " B).";
+      const std::string proseStr = prose.str();
+      res.AddMember(
+          "result",
+          rapidjson::Value(proseStr.c_str(),
+                           static_cast<rapidjson::SizeType>(proseStr.size()),
+                           alloc).Move(),
+          alloc);
+      res.AddMember(
+          "tail",
+          rapidjson::Value(spill.tail.c_str(),
+                           static_cast<rapidjson::SizeType>(spill.tail.size()),
+                           alloc).Move(),
+          alloc);
+      res.AddMember("ref",
+                    rapidjson::Value(spill.refPath.c_str(), alloc).Move(),
+                    alloc);
+    } else {
+      res.AddMember("content",
+                    rapidjson::Value(enhancedContent.c_str(), alloc).Move(),
+                    alloc);
+    }
+    res.AddMember("range",
+                  rapidjson::Value(rangeStr.c_str(),
+                                   static_cast<rapidjson::SizeType>(rangeStr.size()),
+                                   alloc).Move(),
                   alloc);
     if (truncated) {
+      // Hard-cap notice for files exceeding MAX_FILE_SIZE_BYTES (2 MB).
+      // Distinct from the normal-spill case above.
       res.AddMember("truncated", true, alloc);
       std::string warning = "File content truncated: file size (" +
                             std::to_string(fileSize) + " bytes) exceeds limit of " +

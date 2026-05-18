@@ -91,6 +91,36 @@ struct ThemeSpec {
     ThemeRgb agentPrefix{170, 214, 255};
     ThemeRgb timestamp{120, 124, 138};
   } chat;
+
+  // Syntax highlighting palette — read from the same `syntax` block that v1
+  // theme JSON files already define. Defaults pick reasonable values so a
+  // theme that omits the section still produces visible highlighting.
+  struct Syntax {
+    ThemeRgb keyword{200, 120, 255};
+    ThemeRgb string{230, 150, 120};
+    ThemeRgb comment{100, 120, 140};
+    ThemeRgb number{255, 180, 100};
+    ThemeRgb function{100, 200, 150};
+    ThemeRgb type{80, 180, 220};
+    ThemeRgb op{180, 180, 200};
+    ThemeRgb attr{180, 150, 200};
+    ThemeRgb constant{100, 200, 200};
+    ThemeRgb variable{220, 180, 120};
+    ThemeRgb tag{220, 100, 150};
+  } syntax;
+
+  // Diff rendering palette. Most themes don't define a dedicated `diff`
+  // section yet, so we mix from existing semantic colors. Renderers that
+  // need a "true" green/red bg can fall back here.
+  struct Diff {
+    // Filled at theme-load time from base.bg + a tint; producers can also
+    // override via JSON if a future theme adds a `diff` block.
+    ThemeRgb addBg{18, 60, 36};
+    ThemeRgb removeBg{72, 28, 32};
+    ThemeRgb contextBg{20, 22, 32};
+    ThemeRgb headerBg{30, 32, 44};
+    ThemeRgb gutterFg{120, 124, 138};
+  } diff;
 };
 
 class ThemeManager {

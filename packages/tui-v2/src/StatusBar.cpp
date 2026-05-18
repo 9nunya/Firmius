@@ -26,6 +26,13 @@ using firmius::shared::ICON_GEAR;
 using firmius::shared::ICON_TODO;
 using firmius::shared::ICON_WAIT;
 using firmius::shared::ICON_DOWNLOAD;
+using firmius::shared::ICON_PIN;
+using firmius::shared::ICON_DEFLATE;
+using firmius::shared::ICON_SAVINGS;
+using firmius::shared::ICON_THRESHOLD_OK;
+using firmius::shared::ICON_THRESHOLD_BUF;
+using firmius::shared::ICON_THRESHOLD_TGT;
+using firmius::shared::ICON_THRESHOLD_EMERG;
 using firmius::shared::PL_LEFT_SEP;
 using firmius::shared::TodoStatus;
 
@@ -476,6 +483,9 @@ std::string StatusBar::renderHudRow(int width) const {
   std::string title = state_.threadTitle().empty() ? "New Thread" : state_.threadTitle();
   std::string model = state_.modelLabel().empty() ? "no model" : state_.modelLabel();
 
+  // Permission mode label
+  std::string permLabel = state_.activeModeName();
+
   auto ctx = state_.agentContextUsage();
   if (ctx.windowTokens == 0) {
     auto label = state_.modelLabel();
@@ -492,6 +502,7 @@ std::string StatusBar::renderHudRow(int width) const {
       {rgb(theme.statusBar.pillFg), rgb(theme.statusBar.pillBg),
        truncateLabel(title, 24)},
       {rgb(theme.base.bg), rgb(theme.base.highlight), truncateLabel(model, 22)},
+      {rgb(theme.base.dim), rgb(theme.base.bg), permLabel},
   };
 
   std::vector<SegmentSpec> right = {
@@ -503,14 +514,60 @@ std::string StatusBar::renderHudRow(int width) const {
                             : ICON_TODO + std::string(" off")},
   };
 
+  // Working-memory v2 right-side composite. We build it in this order so
+  // it reads left-to-right as: [ctx (with threshold icon)] [savings?]
+  // [pin?] [defl?] [queued] [todo]. Pins and deflations only appear when
+  // they have non-zero counts to keep the bar uncluttered when the layer
+  // hasn't engaged.
+  const auto memStatus = state_.memoryStatus();
+  if (memStatus.valid) {
+    if (memStatus.deflatedPartCount > 0) {
+      right.insert(right.begin(),
+                   {rgb(theme.statusBar.context.icon),
+                    rgb(theme.statusBar.context.bg),
+                    ICON_DEFLATE + std::string(" ") +
+                        std::to_string(memStatus.deflatedPartCount)});
+    }
+    if (memStatus.pinnedTurnCount > 0) {
+      right.insert(right.begin(),
+                   {rgb(theme.statusBar.context.icon),
+                    rgb(theme.statusBar.context.bg),
+                    ICON_PIN + std::string(" ") +
+                        std::to_string(memStatus.pinnedTurnCount)});
+    }
+    const uint32_t savedTotal =
+        memStatus.tokensSavedByDeflation + memStatus.tokensSavedByEviction;
+    if (savedTotal > 0) {
+      right.insert(right.begin(),
+                   {rgb(theme.statusBar.context.icon),
+                    rgb(theme.statusBar.context.bg),
+                    ICON_SAVINGS + std::string(" ") + humanize(savedTotal)});
+    }
+  }
+
   if (ctx.windowTokens > 0) {
     const uint32_t used = ctx.usedTokens > 0 ? ctx.usedTokens : ctx.sentTokens;
     const std::string ctxLabel =
         humanize(used) + "/" + humanize(ctx.windowTokens);
+    // Threshold icon prefix mirrors the working-memory layer's view of
+    // current pressure. Falls back to ICON_CONTEXT when the layer hasn't
+    // reported metrics yet (initial turns / disabled).
+    std::string threshIcon = ICON_CONTEXT;
+    if (memStatus.valid) {
+      if (memStatus.aboveEmergencyThreshold) {
+        threshIcon = ICON_THRESHOLD_EMERG;
+      } else if (memStatus.aboveTargetThreshold) {
+        threshIcon = ICON_THRESHOLD_TGT;
+      } else if (memStatus.aboveBufferThreshold) {
+        threshIcon = ICON_THRESHOLD_BUF;
+      } else {
+        threshIcon = ICON_THRESHOLD_OK;
+      }
+    }
     right.insert(right.begin(),
                  {rgb(theme.statusBar.context.icon),
                   rgb(theme.statusBar.context.bg),
-                  ICON_CONTEXT + std::string(" ") + ctxLabel});
+                  threshIcon + std::string(" ") + ctxLabel});
   }
 
   // Build left and right bars independently. Do NOT wrap the whole row in an

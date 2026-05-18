@@ -4,6 +4,7 @@
 #include "Enums.hpp"
 #include "daemon/Protocol.hpp"
 
+#include <functional>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -14,6 +15,11 @@ namespace firmius::tui2 {
 /// Parses DaemonEventEnvelopes and dispatches state mutations to AppState.
 class EventRouter {
 public:
+  using ConnectProgressCallback =
+      std::function<void(const firmius::daemon::ConnectProgressSnapshot &)>;
+  using RewindAppliedCallback =
+      std::function<void(const firmius::daemon::RewindAppliedSnapshot &)>;
+
   explicit EventRouter(AppState &state);
 
   /// Route a daemon event envelope to appropriate state mutations.
@@ -23,6 +29,19 @@ public:
   void routeRuntimeEvent(const std::string &eventType, const std::string &eventJson,
                          const std::string &threadId, const std::string &agentId,
                          std::optional<firmius::shared::AgentStatus> realStatus = std::nullopt);
+
+  /// Subscribe to ConnectProgress events. Used by App to forward into the
+  /// active ConnectOverlay. EventRouter doesn't own the overlay, so it just
+  /// hands the snapshot off to whoever wants it.
+  void setOnConnectProgress(ConnectProgressCallback cb) {
+    onConnectProgress_ = std::move(cb);
+  }
+
+  /// Subscribe to RewindApplied events. Used by App to refresh transcript
+  /// + close the rewind overlay after a compound rewind succeeds.
+  void setOnRewindApplied(RewindAppliedCallback cb) {
+    onRewindApplied_ = std::move(cb);
+  }
 
 private:
   void handleAgentText(const std::string &json, const std::string &agentId);
@@ -45,6 +64,7 @@ private:
   void handleAgentTodoUpdated(const std::string &json);
   void handleModelSwitched(const std::string &json);
   void handleThreadTitleUpdated(const std::string &json);
+  void handleThreadMetadataUpdated(const std::string &json);
   void handleConfigUpdated();
   void handleHookStateChanged(const firmius::daemon::HookStateSnapshot &snapshot);
   void handleEmbeddingModelProgress(const std::string &json);
@@ -52,6 +72,8 @@ private:
   void handleContextCompacted(const std::string &json, const std::string &agentId);
 
   AppState &state_;
+  ConnectProgressCallback onConnectProgress_;
+  RewindAppliedCallback onRewindApplied_;
 
   // Buffered process output for race condition: AgentProcessOutput may arrive
   // before AgentProcessSpawned creates the processId→toolCallId mapping.

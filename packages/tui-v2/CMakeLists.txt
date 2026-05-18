@@ -22,6 +22,16 @@ target_sources(firmius_tui_v2 PRIVATE
     src/MenuList.cpp
     src/InfoOverlay.cpp
     src/AccountsOverlay.cpp
+    src/ConnectOverlay.cpp
+    src/RewindOverlay.cpp
+    src/RedoOverlay.cpp
+    src/RouterOverlay.cpp
+    src/PurposesOverlay.cpp
+    src/PermissionPromptOverlay.cpp
+    src/PermissionsOverlay.cpp
+    src/Clipboard.cpp
+    src/NotificationCenter.cpp
+    src/NotificationStrip.cpp
     # Items
     src/items/SimpleItems.cpp
     src/items/StreamingItems.cpp
@@ -29,6 +39,7 @@ target_sources(firmius_tui_v2 PRIVATE
     # Utilities
     src/DiffRenderer.cpp
     src/AnsiOutputParser.cpp
+    src/SyntaxHighlighter.cpp
     # Presenter system
     src/tools/ToolPresenterRegistry.cpp
     src/tools/ProcessPresenter.cpp
@@ -56,6 +67,7 @@ target_include_directories(firmius_tui_v2 PRIVATE
 target_link_libraries(firmius_tui_v2 PRIVATE
     firmius::server
     firmius::shared
+    tree_sitter_all
 )
 
 target_compile_features(firmius_tui_v2 PRIVATE cxx_std_20)
@@ -113,6 +125,16 @@ target_sources(firmius_tui_v2_tests PRIVATE
     src/MenuList.cpp
     src/InfoOverlay.cpp
     src/AccountsOverlay.cpp
+    src/ConnectOverlay.cpp
+    src/RewindOverlay.cpp
+    src/RedoOverlay.cpp
+    src/RouterOverlay.cpp
+    src/PurposesOverlay.cpp
+    src/PermissionPromptOverlay.cpp
+    src/PermissionsOverlay.cpp
+    src/Clipboard.cpp
+    src/NotificationCenter.cpp
+    src/NotificationStrip.cpp
     # Items
     src/items/SimpleItems.cpp
     src/items/StreamingItems.cpp
@@ -120,6 +142,7 @@ target_sources(firmius_tui_v2_tests PRIVATE
     # Utilities
     src/DiffRenderer.cpp
     src/AnsiOutputParser.cpp
+    src/SyntaxHighlighter.cpp
     # Presenter system
     src/tools/ToolPresenterRegistry.cpp
     src/tools/ProcessPresenter.cpp
@@ -147,6 +170,7 @@ target_include_directories(firmius_tui_v2_tests PRIVATE
 target_link_libraries(firmius_tui_v2_tests PRIVATE
     firmius::server
     firmius::shared
+    tree_sitter_all
     GTest::gtest_main
 )
 

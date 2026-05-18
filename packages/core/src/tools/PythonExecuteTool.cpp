@@ -1,13 +1,144 @@
 #include "tools/PythonExecuteTool.hpp"
 
 #include "agents/Agent.hpp"
+#include "utils/SpillIfLarge.hpp"
 #include <chrono>
 #include <filesystem>
 #include <map>
 #include <rapidjson/document.h>
+#include <sstream>
 
 namespace firmius::core {
 using namespace firmius::shared;
+
+namespace {
+
+// Token-waste pass 2: tail/spill thresholds match Process tool defaults.
+constexpr std::size_t kPyTailBytes = 4 * 1024;
+constexpr std::size_t kPySpillThresholdBytes = 64 * 1024;
+
+rapidjson::Value pyMakeString(const std::string &value,
+                              rapidjson::Document::AllocatorType &alloc) {
+  rapidjson::Value v;
+  v.SetString(value.c_str(), static_cast<rapidjson::SizeType>(value.size()),
+              alloc);
+  return v;
+}
+
+std::string pyFmtBytes(std::size_t n) {
+  std::ostringstream o;
+  if (n < 1024) {
+    o << n << " B";
+  } else if (n < 1024ull * 1024) {
+    o.precision(1);
+    o << std::fixed << (static_cast<double>(n) / 1024.0) << " KB";
+  } else {
+    o.precision(2);
+    o << std::fixed << (static_cast<double>(n) / (1024.0 * 1024.0)) << " MB";
+  }
+  return o.str();
+}
+
+// Build the prose-first Python result doc with tail+spill applied to
+// stdout/stderr. Drops the `command` echo (model didn't send it; we
+// synthesised the wrapper) and the `venv` echo (was in input). Drops
+// duplicate `process_id` for the synchronous one-shot case; keeping
+// only the exit code, duration, and tailed streams.
+//
+// Result shape:
+//   {
+//     "result":      "Exited 0 in 38 ms. stdout: 142 B. stderr: empty.",
+//     "exit_code":   int,
+//     "duration_ms": int,
+//     "stdout":      "<tail or full>",   // omitted when empty
+//     "stderr":      "<tail or full>",   // omitted when empty
+//     "stdout_bytes": uint,              // total accumulated
+//     "stderr_bytes": uint,
+//     "stdout_ref":   "/tmp/...",        // only when spilled
+//     "stderr_ref":   "/tmp/..."
+//   }
+void buildPyResultDoc(rapidjson::Document &doc,
+                      const shared::ProcessSnapshot &snap,
+                      const std::string &finishReason,
+                      const std::string &processId) {
+  auto &a = doc.GetAllocator();
+
+  shared::utils::SpillResult outSpill;
+  shared::utils::SpillResult errSpill;
+  if (snap.stdoutData.size() > kPySpillThresholdBytes) {
+    outSpill = shared::utils::spillIfLarge(
+        snap.stdoutData, kPySpillThresholdBytes,
+        "firmius_py_stdout_" + processId, kPyTailBytes);
+  }
+  if (snap.stderrData.size() > kPySpillThresholdBytes) {
+    errSpill = shared::utils::spillIfLarge(
+        snap.stderrData, kPySpillThresholdBytes,
+        "firmius_py_stderr_" + processId, kPyTailBytes);
+  }
+
+  // Compute the inline tail texts (independent of spill — even non-spilled
+  // streams get tailed if they are bigger than kPyTailBytes).
+  auto tailText = [](const std::string &full) {
+    if (full.size() <= kPyTailBytes) return full;
+    std::size_t start = full.size() - kPyTailBytes;
+    while (start < full.size() && full[start] != '\n') ++start;
+    if (start < full.size()) ++start;
+    if (start >= full.size()) start = full.size() - kPyTailBytes;
+    return full.substr(start);
+  };
+  const std::string outTail = tailText(snap.stdoutData);
+  const std::string errTail = tailText(snap.stderrData);
+
+  // Prose summary.
+  std::ostringstream prose;
+  if (!finishReason.empty() && finishReason != "Natural") {
+    prose << finishReason << " after " << snap.elapsedMs << " ms (exit "
+          << snap.exitCode << ")";
+  } else {
+    prose << "Exited " << snap.exitCode << " in " << snap.elapsedMs << " ms";
+  }
+  auto streamBit = [&](const char *label, const std::string &full,
+                       const std::string &tail,
+                       const shared::utils::SpillResult &spill) {
+    prose << ". " << label << ": ";
+    if (full.empty()) {
+      prose << "empty";
+      return;
+    }
+    prose << pyFmtBytes(full.size());
+    if (!spill.refPath.empty()) {
+      prose << " total spilled to " << spill.refPath
+            << " (showing last " << pyFmtBytes(tail.size()) << ")";
+    } else if (tail.size() < full.size()) {
+      prose << " (showing last " << pyFmtBytes(tail.size()) << ")";
+    }
+  };
+  streamBit("stdout", snap.stdoutData, outTail, outSpill);
+  streamBit("stderr", snap.stderrData, errTail, errSpill);
+  prose << ".";
+
+  doc.AddMember("result", pyMakeString(prose.str(), a), a);
+  doc.AddMember("exit_code", snap.exitCode, a);
+  doc.AddMember("duration_ms", snap.elapsedMs, a);
+  if (!outTail.empty()) {
+    doc.AddMember("stdout", pyMakeString(outTail, a), a);
+  }
+  if (!errTail.empty()) {
+    doc.AddMember("stderr", pyMakeString(errTail, a), a);
+  }
+  doc.AddMember("stdout_bytes",
+                static_cast<uint64_t>(snap.stdoutData.size()), a);
+  doc.AddMember("stderr_bytes",
+                static_cast<uint64_t>(snap.stderrData.size()), a);
+  if (!outSpill.refPath.empty()) {
+    doc.AddMember("stdout_ref", pyMakeString(outSpill.refPath, a), a);
+  }
+  if (!errSpill.refPath.empty()) {
+    doc.AddMember("stderr_ref", pyMakeString(errSpill.refPath, a), a);
+  }
+}
+
+}  // namespace
 
 shared::ToolMetadata PythonExecuteTool::getMetadata() const {
   return {"Python",
@@ -100,22 +231,8 @@ shared::ToolResult PythonExecuteTool::execute(const PythonExecuteInput &input,
             processId);
         rapidjson::Document doc;
         doc.SetObject();
-        auto &a = doc.GetAllocator();
-        doc.AddMember("exit_code", -2, a);
-        doc.AddMember("stdout",
-                      rapidjson::Value(snap.stdoutData.c_str(), a).Move(), a);
-        doc.AddMember("stderr",
-                      rapidjson::Value(snap.stderrData.c_str(), a).Move(), a);
-        doc.AddMember("duration_ms", snap.elapsedMs, a);
-        doc.AddMember("finish_reason", "Interrupted", a);
-        doc.AddMember("process_id",
-                      rapidjson::Value(processId.c_str(), a).Move(), a);
-        doc.AddMember("command",
-                      rapidjson::Value(command.c_str(), a).Move(), a);
-        if (!resolvedVenv.empty()) {
-          doc.AddMember("venv",
-                        rapidjson::Value(resolvedVenv.c_str(), a).Move(), a);
-        }
+        snap.exitCode = -2;
+        buildPyResultDoc(doc, snap, "Interrupted", processId);
         return shared::ToolResult::ok(doc, processId);
       }
 
@@ -130,22 +247,8 @@ shared::ToolResult PythonExecuteTool::execute(const PythonExecuteInput &input,
             processId);
         rapidjson::Document doc;
         doc.SetObject();
-        auto &a = doc.GetAllocator();
-        doc.AddMember("exit_code", -2, a);
-        doc.AddMember("stdout",
-                      rapidjson::Value(snap.stdoutData.c_str(), a).Move(), a);
-        doc.AddMember("stderr",
-                      rapidjson::Value(snap.stderrData.c_str(), a).Move(), a);
-        doc.AddMember("duration_ms", snap.elapsedMs, a);
-        doc.AddMember("finish_reason", "Interrupted", a);
-        doc.AddMember("process_id",
-                      rapidjson::Value(processId.c_str(), a).Move(), a);
-        doc.AddMember("command",
-                      rapidjson::Value(command.c_str(), a).Move(), a);
-        if (!resolvedVenv.empty()) {
-          doc.AddMember("venv",
-                        rapidjson::Value(resolvedVenv.c_str(), a).Move(), a);
-        }
+        snap.exitCode = -2;
+        buildPyResultDoc(doc, snap, "Interrupted", processId);
         return shared::ToolResult::ok(doc, processId);
       }
 
@@ -159,21 +262,7 @@ shared::ToolResult PythonExecuteTool::execute(const PythonExecuteInput &input,
 
     rapidjson::Document doc;
     doc.SetObject();
-    auto &a = doc.GetAllocator();
-    doc.AddMember("exit_code", snap.exitCode, a);
-    doc.AddMember("stdout", rapidjson::Value(snap.stdoutData.c_str(), a).Move(),
-                  a);
-    doc.AddMember("stderr", rapidjson::Value(snap.stderrData.c_str(), a).Move(),
-                  a);
-    doc.AddMember("duration_ms", snap.elapsedMs, a);
-    doc.AddMember("finish_reason", "Natural", a);
-    doc.AddMember("process_id", rapidjson::Value(processId.c_str(), a).Move(),
-                  a);
-    doc.AddMember("command", rapidjson::Value(command.c_str(), a).Move(), a);
-    if (!resolvedVenv.empty()) {
-      doc.AddMember("venv", rapidjson::Value(resolvedVenv.c_str(), a).Move(), a);
-    }
-
+    buildPyResultDoc(doc, snap, "Natural", processId);
     return shared::ToolResult::ok(doc, processId);
   } catch (const std::exception &e) {
     if (!processId.empty()) {

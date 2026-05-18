@@ -79,28 +79,10 @@ public:
     virtual bool isCommandAllowed(const CommandIntent& intent) const = 0;
 
     /**
-     * @brief Adds a command pattern to always allow.
-     * @param pattern The command pattern.
-     */
-    virtual void allowCommandAlways(const std::string& pattern) = 0;
-
-    /**
-     * @brief Adds a command pattern to always deny.
-     * @param pattern The command pattern.
-     */
-    virtual void denyCommandAlways(const std::string& pattern) = 0;
-
-    /**
      * @brief Gets the intent analyzer for this permissions instance.
      * @return Reference to the intent analyzer.
      */
     virtual const ICommandIntentAnalyzer& getIntentAnalyzer() const = 0;
-
-    /**
-     * @brief Sets the thread permission mode for this permissions context.
-     * @param mode The permission mode.
-     */
-    virtual void setApprovalMode(ThreadPermissionMode mode) = 0;
 };
 
 } // namespace firmius::shared

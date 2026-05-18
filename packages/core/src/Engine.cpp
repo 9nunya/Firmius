@@ -3,6 +3,7 @@
 #include "ConfigLoader.hpp"
 #include "Serialization.hpp"
 #include "agents/Agent.hpp"
+#include "agents/working_memory/WorkingMemoryWorker.hpp"
 #include "agents/PurposeLoader.hpp"
 #include "agents/RuntimeOverlay.hpp"
 #include "environment/Environment.hpp"
@@ -45,10 +46,12 @@
 #include "tools/PythonExecuteTool.hpp"
 #include "tools/SkillLoadTool.hpp"
 #include "tools/TodoWriteTool.hpp"
+#include "tools/PinTool.hpp"
 #include "tools/WebTool.hpp"
 #include "lsp/LspServerManager.hpp"
 #include "utils/HistoryMetrics.hpp"
 #include "utils/StringUtil.hpp"
+#include "utils/Hashline.hpp"
 #include <Panic.hpp>
 #include <algorithm>
 #include <filesystem>
@@ -672,6 +675,8 @@ Engine::Engine() {
   toolRegistry.registerToolFactory(
       "Todo", []() { return std::make_unique<TodoWriteTool>(); });
   toolRegistry.registerToolFactory(
+      "pin", []() { return std::make_unique<PinTool>(); });
+  toolRegistry.registerToolFactory(
       "Artifacts", []() { return std::make_unique<ArtifactsTool>(); });
   toolRegistry.registerToolFactory(
       "Lsp", []() { return std::make_unique<LspTool>(); });
@@ -800,6 +805,7 @@ std::string Engine::summonAgent(
         ctx.config.insanityRepetitionThreshold = userCfg.insanityRepetitionThreshold;
         ctx.config.insanityMaxTokenThreshold = userCfg.insanityMaxTokenThreshold;
         ctx.config.maxInsanityRetries = userCfg.maxInsanityRetries;
+        ctx.config.workingMemory = userCfg.workingMemory;
         ctx.config.persistHistory = persistHistory;
         ctx.config.personaName = effectivePersonaName;
         ctx.identity.name = persona.name;
@@ -1692,6 +1698,14 @@ Engine::listAgentEditBatches(const std::string &threadId,
 shared::EditUndoEligibility
 Engine::evaluateEditBatchUndo(const std::string &threadId,
                               const std::string &editBatchId) const {
+  static const std::unordered_set<std::string> kEmpty;
+  return evaluateEditBatchUndo(threadId, editBatchId, kEmpty);
+}
+
+shared::EditUndoEligibility
+Engine::evaluateEditBatchUndo(const std::string &threadId,
+                              const std::string &editBatchId,
+                              const std::unordered_set<std::string> &coUndoBatchIds) const {
   shared::EditUndoEligibility eligibility;
   eligibility.editBatchId = editBatchId;
   if (threadId.empty() || editBatchId.empty()) {
@@ -1706,27 +1720,62 @@ Engine::evaluateEditBatchUndo(const std::string &threadId,
     eligibility.reason = "Edit batch is already undone";
     return eligibility;
   }
+  // First pass: per-mutation undoability.
+  // - Line-edit-style (had+has): always undoable; the reverse-line walk
+  //   handles it.
+  // - Create-style (!had+has): undoable IFF the file on disk still
+  //   matches the post-write fingerprint. If the user touched it after
+  //   creation, deleting blindly would be data loss.
+  // - Delete-style (had+!has) and weird (!had+!has): not yet supported.
+  //   Left as future work — would need to write back the recorded
+  //   pre-image, which we don't always store fully.
   for (const auto &mutation : detail.files) {
-    const auto history = tm.listEditFileMutationsForFile(threadId, mutation.filePath);
-  for (const auto &mutation : detail.files) {
-    if (!mutation.hadFileBefore || !mutation.hasFileAfter) {
+    const bool createStyle = !mutation.hadFileBefore && mutation.hasFileAfter;
+    const bool lineStyle   =  mutation.hadFileBefore && mutation.hasFileAfter;
+    if (!createStyle && !lineStyle) {
       eligibility.resultStatus =
           shared::EditUndoResultStatus::RejectedBatchNotFullyUndoable;
       eligibility.reason =
-          "Create/delete-style file undo is not yet supported safely: " + mutation.filePath;
+          "Delete-style file undo is not yet supported safely: " + mutation.filePath;
       return eligibility;
     }
+    if (createStyle) {
+      // Verify the file on disk still matches what we created. We can't
+      // call host->readFile from a const helper without knowing the host,
+      // so the actual disk-tamper check is deferred to undoEditBatch
+      // itself (which has the agent + host). Here we just gate on
+      // the post-image fingerprint being known so undo has something to
+      // verify against. If postHash is missing the mutation predates
+      // this code path and we conservatively reject.
+      if (mutation.postHash.empty()) {
+        eligibility.resultStatus =
+            shared::EditUndoResultStatus::RejectedBatchNotFullyUndoable;
+        eligibility.reason =
+            "Cannot safely undo create without a recorded post-image: " + mutation.filePath;
+        return eligibility;
+      }
+    }
   }
+  // Second pass: blocker check. Any later applied mutation on the same
+  // file blocks this undo, UNLESS that mutation's batch is in the
+  // co-undo set (caller is undoing both in the same compound).
+  for (const auto &mutation : detail.files) {
+    const auto history = tm.listEditFileMutationsForFile(threadId, mutation.filePath);
     for (const auto &candidate : history) {
       if (candidate.fileMutationId == mutation.fileMutationId) {
         break;
       }
-      if (candidate.status == shared::EditFileMutationStatus::Applied) {
-        eligibility.resultStatus = shared::EditUndoResultStatus::RejectedBlocked;
-        eligibility.reason = "Later edits exist on file: " + mutation.filePath;
-        eligibility.blockingEditBatchIds.push_back(candidate.editBatchId);
-        return eligibility;
+      if (candidate.status != shared::EditFileMutationStatus::Applied) {
+        continue;
       }
+      if (coUndoBatchIds.count(candidate.editBatchId) > 0) {
+        // Will unwind in the same compound — not a blocker.
+        continue;
+      }
+      eligibility.resultStatus = shared::EditUndoResultStatus::RejectedBlocked;
+      eligibility.reason = "Later edits exist on file: " + mutation.filePath;
+      eligibility.blockingEditBatchIds.push_back(candidate.editBatchId);
+      return eligibility;
     }
   }
   eligibility.undoable = true;
@@ -1794,6 +1843,46 @@ Engine::undoEditBatch(const std::string &agentId, const std::string &editBatchId
       const auto &mutation = *it;
       const std::string absolutePath =
           agent->getEnvironment()->getWorkspace().resolvePath(mutation.filePath);
+      const bool createStyle = !mutation.hadFileBefore && mutation.hasFileAfter;
+
+      if (createStyle) {
+        // Verify the file on disk is exactly what we created. If the
+        // user has touched it after creation we refuse — deleting their
+        // changes would be data loss.
+        if (agent->getHost()->exists(absolutePath)) {
+          const auto bytes = agent->getHost()->readFile(absolutePath);
+          const std::string current(bytes.begin(), bytes.end());
+          // Normalize via the same split/join the recorder used so a
+          // trailing-newline difference doesn't trip the check.
+          const std::string normalized =
+              joinStoredLines(splitStoredLines(current));
+          // computeContentFingerprint = hash + "-" + size, but we don't
+          // have the helper here. Using a size+hash equivalence: the
+          // recorder stored postSize and postHash, both must match.
+          const std::string currentFp =
+              shared::utils::Hashline::computeHash(normalized) + "-" +
+              std::to_string(normalized.size());
+          if (currentFp != mutation.postHash) {
+            // Tampered — abort the whole batch undo; the per-batch
+            // status stays Applied so caller can surface the diverged
+            // result to the user.
+            action.resultStatus = shared::EditUndoResultStatus::RejectedDiverged;
+            action.resultJson =
+                std::string("{\"status\":\"diverged\",\"file\":\"") +
+                mutation.filePath + "\"}";
+            tm.writeEditUndoAction(threadId, action);
+            return action;
+          }
+        }
+        // Delete is idempotent on missing — host implementations all
+        // tolerate the file being already gone.
+        agent->getHost()->deleteFile(absolutePath);
+        agent->getEnvironment()->getWorkspace().recordFileEdit(absolutePath);
+        tm.updateEditFileMutationStatus(threadId, mutation.fileMutationId,
+                                        shared::EditFileMutationStatus::Undone);
+        continue;
+      }
+
       std::vector<std::string> currentLines;
       if (agent->getHost()->exists(absolutePath)) {
         const auto bytes = agent->getHost()->readFile(absolutePath);
@@ -1858,6 +1947,29 @@ Engine::redoEditUndoAction(const std::string &agentId,
   for (const auto &mutation : detail.files) {
     const std::string absolutePath =
         agent->getEnvironment()->getWorkspace().resolvePath(mutation.filePath);
+    const bool createStyle = !mutation.hadFileBefore && mutation.hasFileAfter;
+
+    if (createStyle) {
+      // The file should be absent right now (we deleted it during
+      // undo). Re-create from the recorded post-image: the operations
+      // array's first op carries newLines spanning the full file.
+      // Even for multi-op create batches (rare but possible) we just
+      // join all newLines in order — the recorder built them that way.
+      std::vector<std::string> lines;
+      for (const auto &op : mutation.operations) {
+        for (const auto &ln : op.newLines) {
+          lines.push_back(ln);
+        }
+      }
+      const std::string content = joinStoredLines(lines);
+      agent->getHost()->writeFile(
+          absolutePath, std::vector<uint8_t>(content.begin(), content.end()));
+      agent->getEnvironment()->getWorkspace().recordFileEdit(absolutePath);
+      tm.updateEditFileMutationStatus(threadId, mutation.fileMutationId,
+                                      shared::EditFileMutationStatus::Redone);
+      continue;
+    }
+
     std::vector<std::string> currentLines;
     if (agent->getHost()->exists(absolutePath)) {
       const auto bytes = agent->getHost()->readFile(absolutePath);
@@ -2011,6 +2123,10 @@ void Engine::shutdown() {
     std::lock_guard<std::mutex> lock(fleetMutex);
     fleetThreads.swap(fleet);
   }
+
+  // Shut down all per-thread working-memory workers (background embedding
+  // threads). Idempotent and safe even if no workers were ever created.
+  working_memory::WorkingMemoryWorker::instance().shutdownAll();
 }
 
 std::vector<firmius::provider::ToolDefinition>

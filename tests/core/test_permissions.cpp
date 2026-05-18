@@ -22,8 +22,29 @@ int main() {
   // Enable pretty printing for better visibility of tool calls/results
   setenv("FIRMIUS_PRETTY_PRINT", "1", 1);
 
+  // Smoke-skip when Docker is missing — the audit is a live run that
+  // requires both Docker and a real LLM API key. CI shouldn't hang.
+  if (std::system("docker info >/dev/null 2>&1") != 0) {
+    std::cout << "Docker not available — skipping audit." << std::endl;
+    return 0;
+  }
+
   auto &harness = Harness::instance();
   harness.init();
+
+  // Auto-allow every permission escalation that arrives during the audit
+  // — the audit's purpose is to exercise the agent loop, not to test
+  // interactive permission UX. Without this the harness blocks
+  // forever on the escalation CV.
+  int permSubId = harness.subscribe([&](const AppEvent &ev) {
+    if (auto *req = std::get_if<PermissionEscalationRequest>(&ev)) {
+      std::cout << "[Audit] Auto-allowing permission: " << req->category
+                << " " << (req->command.empty() ? req->targetPath
+                                                 : req->command) << std::endl;
+      harness.resolvePermissionEscalation(req->requestId,
+                                          PermissionResponse::AllowOnce);
+    }
+  });
 
   HostCreationOptions opts;
   opts.type = HostType::Docker;
@@ -108,6 +129,7 @@ int main() {
 
   std::cout << "\nAudit complete." << std::endl;
 
+  harness.unsubscribe(permSubId);
   harness.shutdown();
   return 0;
 }

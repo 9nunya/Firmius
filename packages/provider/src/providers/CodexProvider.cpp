@@ -1431,6 +1431,13 @@ std::string buildRequestBody(const firmius::shared::AgentHistory &history,
   d.AddMember("store", false, a);
   d.AddMember("instructions", rapidjson::Value(kDefaultInstructions, a), a);
 
+  // Token-caching pass: the ChatGPT subscription endpoint (Codex) is
+  // strict about unknown parameters — both prompt_cache_key and
+  // prompt_cache_retention return 400. Caching on this endpoint is
+  // fully automatic with no client-side opt-in needed; the server
+  // handles prefix matching internally. We just read the cache metrics
+  // from the response (already wired in CodexProvider's usage parser).
+
   rapidjson::Value input(rapidjson::kArrayType);
   for (const auto &turn : history.turns) {
     for (const auto &msg : turn.messages) {
