@@ -1,4 +1,36 @@
 #include "audits/HarnessChaosAudit.hpp"
+
+#if defined(_WIN32)
+
+// HarnessChaosAudit fundamentally requires POSIX process control (kill,
+// SIGSTOP, SIGCONT) and POSIX env mutation (setenv, unsetenv) plus Docker.
+// Stub the entire audit on Windows; the full POSIX implementation lives
+// in the #else branch below.
+#include <iostream>
+
+namespace firmius::audits {
+
+std::string HarnessChaosAudit::getId() const { return "harness_chaos"; }
+
+std::string HarnessChaosAudit::getDescription() const {
+  return "Harness chaos audit (Linux/macOS only)";
+}
+
+shared::AuditResult
+HarnessChaosAudit::run(const std::vector<std::string> &) {
+  shared::AuditResult result;
+  result.auditId = getId();
+  std::cerr << "Harness chaos audit is not supported on Windows yet "
+               "(requires POSIX process control + Docker)." << std::endl;
+  result.exitCode = 1;
+  result.passed = false;
+  return result;
+}
+
+} // namespace firmius::audits
+
+#else  // !_WIN32
+
 #include "AgentRegistry.hpp"
 #include "EnvLoader.hpp"
 #include "Panic.hpp"
@@ -546,12 +578,6 @@ bool checkSandboxImage() {
 }
 
 int runAudit(const std::vector<std::string> &args) {
-#if defined(_WIN32)
-  (void)args;
-  std::cerr << "Harness chaos audit is not supported on Windows yet "
-               "(requires POSIX process control + Docker)." << std::endl;
-  return EXIT_GENERAL_FAILURE;
-#else
   std::string providerId;
   std::string modelId;
   for (size_t i = 0; i < args.size(); ++i) {
@@ -681,7 +707,6 @@ int runAudit(const std::vector<std::string> &args) {
                "session saved"
             << std::endl;
   return EXIT_SUCCESS_ALL;
-#endif
 }
 } // namespace
 
@@ -695,3 +720,5 @@ HarnessChaosAudit::run(const std::vector<std::string> &args) {
 }
 
 } // namespace firmius::audits
+
+#endif // _WIN32

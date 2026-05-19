@@ -36,6 +36,7 @@ target_sources(firmius_tui PRIVATE
     src/items/SimpleItems.cpp
     src/items/StreamingItems.cpp
     src/items/ToolCallItem.cpp
+    src/items/QuickToolClusterItem.cpp
     # Utilities
     src/DiffRenderer.cpp
     src/AnsiOutputParser.cpp
@@ -81,8 +82,10 @@ target_link_libraries(firmius_tui PRIVATE
 target_compile_features(firmius_tui PUBLIC cxx_std_20)
 
 if((CMAKE_CXX_COMPILER_ID STREQUAL "GNU") OR (CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND NOT MSVC))
-    target_compile_options(firmius_tui PRIVATE -Wall -Wextra -Werror -Wno-error=maybe-uninitialized)
+    target_compile_options(firmius_tui PRIVATE
+        -Wall -Wextra -Werror
+        # -Wmaybe-uninitialized is GCC-only; Clang doesn't have it.
+        $<$<CXX_COMPILER_ID:GNU>:-Wno-error=maybe-uninitialized>)
 elseif(MSVC)
     target_compile_options(firmius_tui PRIVATE /W4 /WX)
 endif()
-
