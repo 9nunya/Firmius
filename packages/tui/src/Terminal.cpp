@@ -138,7 +138,7 @@ void Terminal::beginBatch() {
 
 void Terminal::flushBatch() {
   if (!batchBuffer_.empty()) {
-    (void)::write(STDOUT_FILENO, batchBuffer_.data(), batchBuffer_.size());
+    [[maybe_unused]] auto _ = ::write(STDOUT_FILENO, batchBuffer_.data(), batchBuffer_.size());
   }
   batchBuffer_.clear();
   batching_ = false;
@@ -347,7 +347,7 @@ void Terminal::rawWrite(const std::string& s) {
   if (batching_) {
     batchBuffer_ += s;
   } else {
-    (void)::write(STDOUT_FILENO, s.data(), s.size());
+    [[maybe_unused]] auto _ = ::write(STDOUT_FILENO, s.data(), s.size());
   }
 }
 
