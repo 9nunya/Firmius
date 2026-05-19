@@ -9,6 +9,7 @@ target_sources(firmius_shared PRIVATE
     src/utils/JSONSchema.cpp
     src/utils/JSONSchemaFromJson.cpp
     src/utils/JsonUtil.cpp
+    src/utils/MathUtil.cpp
     src/utils/StringUtil.cpp
     src/utils/HistoryMetrics.cpp
     src/utils/FSUtil.cpp
@@ -71,6 +72,7 @@ target_sources(firmius_shared PUBLIC
     include/utils/JSONSchemaFromJson.hpp
     include/utils/LineRange.hpp
     include/utils/Logger.hpp
+    include/utils/MathUtil.hpp
     include/utils/ModelUtil.hpp
     include/utils/PermissionProfiles.hpp
     include/utils/PlatformPaths.hpp

@@ -3,6 +3,7 @@
 #include "embedding/EmbeddingWorker.hpp"
 #include "embedding/ModelDownloader.hpp"
 #include "embedding/OnnxEmbedder.hpp"
+#include "utils/MathUtil.hpp"
 
 #include <cmath>
 #include <filesystem>
@@ -23,19 +24,6 @@ std::string EmbeddingAudit::getId() const { return "embedding"; }
 
 std::string EmbeddingAudit::getDescription() const {
   return "Tests embedding model download, ONNX inference, and progress reporting";
-}
-
-double EmbeddingAudit::cosineSimilarity(const std::vector<float> &a,
-                                        const std::vector<float> &b) {
-  if (a.size() != b.size() || a.empty()) return 0.0;
-  float dot = 0, na = 0, nb = 0;
-  for (size_t i = 0; i < a.size(); ++i) {
-    dot += a[i] * b[i];
-    na += a[i] * a[i];
-    nb += b[i] * b[i];
-  }
-  float denom = std::sqrt(na) * std::sqrt(nb);
-  return denom > 0 ? dot / denom : 0.0;
 }
 
 shared::AuditResult EmbeddingAudit::run(const std::vector<std::string> &) {
@@ -159,8 +147,8 @@ shared::AuditResult EmbeddingAudit::run(const std::vector<std::string> &) {
     auto embDog = embedder.embed("The dog lay on the rug");
     auto embCar = embedder.embed("Quantum physics is fascinating");
 
-    double simCatDog = cosineSimilarity(embCat, embDog);
-    double simCatCar = cosineSimilarity(embCat, embCar);
+    double simCatDog = firmius::shared::cosineSimilarity(embCat, embDog);
+    double simCatCar = firmius::shared::cosineSimilarity(embCat, embCar);
 
     if (simCatDog <= simCatCar) {
       fail("Semantic similarity wrong: cat-dog=" + std::to_string(simCatDog) +

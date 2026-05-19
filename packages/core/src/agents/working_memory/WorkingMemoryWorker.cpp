@@ -2,6 +2,7 @@
 
 #include "agents/working_memory/Deflator.hpp"
 #include "persistence/Journaler.hpp"
+#include "utils/MathUtil.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -11,21 +12,6 @@
 namespace firmius::core::working_memory {
 
 namespace {
-
-float cosineSimilarity(const std::vector<float>& a,
-                       const std::vector<float>& b) {
-  if (a.size() != b.size() || a.empty()) {
-    return 0.0f;
-  }
-  float dot = 0.0f, normA = 0.0f, normB = 0.0f;
-  for (std::size_t i = 0; i < a.size(); ++i) {
-    dot += a[i] * b[i];
-    normA += a[i] * a[i];
-    normB += b[i] * b[i];
-  }
-  const float denom = std::sqrt(normA) * std::sqrt(normB);
-  return denom > 0.0f ? dot / denom : 0.0f;
-}
 
 // xorshift64-based deterministic byte hash.
 inline std::uint64_t splitMix64(std::uint64_t z) {
@@ -147,7 +133,7 @@ std::vector<std::string> ThreadWorkingMemoryWorker::queryRelevant(
     std::lock_guard lk(embedMu_);
     scored.reserve(turnIdToEmbedding_.size());
     for (const auto& [turnId, vec] : turnIdToEmbedding_) {
-      const float s = cosineSimilarity(q, vec);
+      const float s = firmius::shared::cosineSimilarity(q, vec);
       scored.emplace_back(s, turnId);
     }
   }

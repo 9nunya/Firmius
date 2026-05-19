@@ -1,5 +1,7 @@
 #include "embedding/EmbeddingStore.hpp"
 
+#include "utils/MathUtil.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <fstream>
@@ -10,20 +12,6 @@
 namespace firmius::core::embedding {
 
 namespace {
-
-float cosineSimilarity(const std::vector<float> &a, const std::vector<float> &b) {
-  if (a.size() != b.size() || a.empty()) return 0.0f;
-
-  float dot = 0.0f, normA = 0.0f, normB = 0.0f;
-  for (size_t i = 0; i < a.size(); ++i) {
-    dot += a[i] * b[i];
-    normA += a[i] * a[i];
-    normB += b[i] * b[i];
-  }
-
-  float denom = std::sqrt(normA) * std::sqrt(normB);
-  return denom > 0.0f ? dot / denom : 0.0f;
-}
 
 struct HNSWNode {
   EmbeddingRef ref;
@@ -87,7 +75,7 @@ private:
     // Greedy beam search from random entry point
     uint32_t entry = rng_() % nodes_.size();
     std::vector<std::pair<uint32_t, float>> candidates;
-    candidates.emplace_back(entry, cosineSimilarity(query, nodes_[entry].embedding));
+    candidates.emplace_back(entry, firmius::shared::cosineSimilarity(query, nodes_[entry].embedding));
 
     constexpr size_t beamWidth = 64;
     std::vector<bool> visited(nodes_.size(), false);
@@ -103,7 +91,7 @@ private:
           if (visited[nbr]) continue;
           visited[nbr] = true;
 
-          float score = cosineSimilarity(query, nodes_[nbr].embedding);
+          float score = firmius::shared::cosineSimilarity(query, nodes_[nbr].embedding);
           candidates.emplace_back(nbr, score);
 
           if (score > bestScore) {
