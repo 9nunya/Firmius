@@ -763,14 +763,7 @@ struct AgentRuntimeSnapshot {
   bool operator==(const AgentRuntimeSnapshot &) const = default;
 };
 
-struct AgentTodoSnapshot {
-  std::string threadId;
-  std::string agentId;
-  int nextId = 1;
-  std::vector<firmius::shared::TodoItem> items;
-
-  bool operator==(const AgentTodoSnapshot &) const = default;
-};
+using AgentTodoSnapshot = firmius::shared::AgentTodoList;
 
 struct AgentTreeSnapshot {
   std::string threadId;

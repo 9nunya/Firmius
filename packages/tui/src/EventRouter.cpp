@@ -1213,7 +1213,7 @@ void EventRouter::handlePermissionEscalation(const std::string &json) {
   if (doc.HasMember("suggestions") && doc["suggestions"].IsArray()) {
     for (const auto &s : doc["suggestions"].GetArray()) {
       if (!s.IsObject()) continue;
-      PendingPermissionSuggestion sug;
+      PendingPermissionSuggestion sug;  // .comment intentionally left default — not surfaced to TUI
       if (s.HasMember("ruleId") && s["ruleId"].IsString())
         sug.ruleId = s["ruleId"].GetString();
       if (s.HasMember("label") && s["label"].IsString())

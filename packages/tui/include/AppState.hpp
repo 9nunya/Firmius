@@ -31,16 +31,7 @@ enum class ConnectionStatus { Disconnected, Connecting, Connected };
 enum class ActivityContext { Idle, Active, PermissionPending };
 
 /// Permission request awaiting user resolution.
-struct PendingPermissionSuggestion {
-  std::string ruleId;
-  std::string label;
-  std::string explanation;
-  std::string category;
-  std::string decision;
-  std::string scope;
-  std::map<std::string, std::string> match;
-  bool defaultSelected = false;
-};
+using PendingPermissionSuggestion = firmius::shared::PermissionSuggestionWire;
 
 struct PendingPermission {
   std::string requestId;
@@ -143,12 +134,7 @@ public:
   void setActiveModeId(std::string id);
   std::string activeModeId() const;
   /// Set the list of all known modes (id, name, builtIn).
-  struct ModeSummary {
-    std::string id;
-    std::string name;
-    std::string description;
-    bool builtIn = false;
-  };
+  using ModeSummary = firmius::daemon::PermissionModeWire;
   void setModes(std::vector<ModeSummary> modes);
   std::vector<ModeSummary> modes() const;
   /// Resolve the active mode's display name. Returns "ask" if no
