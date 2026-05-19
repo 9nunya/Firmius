@@ -39,6 +39,11 @@ if((CMAKE_CXX_COMPILER_ID STREQUAL "GNU") OR (CMAKE_CXX_COMPILER_ID MATCHES "Cla
   if(CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
     add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-fexperimental-library>)
     add_link_options(-fexperimental-library)
+    # Apple Clang flags '= default' equality operators as deleted when any
+    # contained type lacks operator==. Project Protocol.hpp has many such
+    # operators; suppressing the warning rather than adding ~50 manual
+    # operator== implementations.
+    add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-Wno-error=defaulted-function-deleted>)
   endif()
 elseif(MSVC)
   add_compile_options(/O2 /GL /Gy /GS-)

@@ -13,7 +13,11 @@
 #include <set>
 #include <sstream>
 #include <cctype>
+#if defined(_WIN32)
+#include <windows.h>
+#else
 #include <unistd.h>
+#endif
 
 namespace firmius::core {
 
@@ -74,7 +78,13 @@ std::filesystem::path resolveWritableFirmiusHome() {
 
   const std::filesystem::path tempHome =
       std::filesystem::temp_directory_path() /
-      ("firmius-" + std::to_string(static_cast<long long>(getuid())));
+      ("firmius-" + std::to_string(static_cast<long long>(
+#if defined(_WIN32)
+          GetCurrentProcessId()
+#else
+          getuid()
+#endif
+      )));
   if (ensureWritableDirectory(tempHome)) {
     return tempHome;
   }
@@ -382,7 +392,7 @@ void WorkflowLoader::loadHookPacks() {
       bool insideManifestPack = false;
       for (const auto &root : manifestRoots) {
         auto rel = canonicalPath.lexically_relative(root);
-        if (!rel.empty() && rel.native().find("..") != 0) {
+        if (!rel.empty() && rel.string().find("..") != 0) {
           insideManifestPack = true;
           break;
         }
