@@ -11,7 +11,8 @@
 
 namespace firmius::core {
 
-using namespace firmius::shared;
+using firmius::shared::AgentContext;
+using firmius::shared::ToolScope;
 
 /**
  * @brief Representation of an agent persona loaded from Markdown/YAML.

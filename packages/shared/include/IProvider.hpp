@@ -20,7 +20,12 @@
  */
 namespace firmius::provider {
 
-using namespace firmius::shared;
+using firmius::shared::AbortController;
+using firmius::shared::AgentHistory;
+using firmius::shared::AgentMetrics;
+using firmius::shared::ModelInfo;
+using firmius::shared::Role;
+using firmius::shared::StreamEvent;
 
 enum class ProviderType : std::uint8_t { OAuth, APIKey };
 

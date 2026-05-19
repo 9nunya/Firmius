@@ -6,6 +6,8 @@
 
 namespace firmius::core {
 
+using namespace firmius::shared;
+
 ProcessManager::ProcessManager(std::shared_ptr<IHost> host,
                                std::function<void(const StreamEvent&)> eventCallback)
     : host_(std::move(host))

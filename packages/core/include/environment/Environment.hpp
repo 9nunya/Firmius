@@ -9,7 +9,11 @@
 
 namespace firmius::core {
 
-using namespace firmius::shared;
+using firmius::shared::IEnvironment;
+using firmius::shared::IHost;
+using firmius::shared::IProcessManager;
+using firmius::shared::IWorkspace;
+using firmius::shared::StreamEvent;
 
 /**
  * @brief Implementation of IEnvironment that composes ProcessManager and Workspace.

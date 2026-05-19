@@ -12,7 +12,7 @@
 
 namespace firmius::core {
 
-using namespace firmius::shared;
+using firmius::shared::IWorkspace;
 
 /**
  * @brief Manages workspace operations and file tracking.

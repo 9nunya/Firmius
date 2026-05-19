@@ -13,6 +13,8 @@
 
 namespace firmius::provider {
 
+using namespace firmius::shared;
+
 using namespace shared;
 
 namespace {

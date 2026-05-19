@@ -18,6 +18,8 @@
 
 namespace firmius::provider {
 
+using namespace firmius::shared;
+
 namespace {
 constexpr auto kBackgroundQuotaRefreshInterval = std::chrono::minutes(5);
 std::mutex g_oauth_json_mutex;

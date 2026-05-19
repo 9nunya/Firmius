@@ -9,7 +9,7 @@
 
 namespace firmius::core {
 
-using namespace firmius::shared;
+using firmius::shared::IAgent;
 
 /**
  * @brief Global registry for active agents.
@@ -21,7 +21,7 @@ public:
         return i;
     }
 
-    void registerAgent(const std::string& id, std::shared_ptr<IAgent> agent) {
+    void registerAgent(const std::string& id, std::shared_ptr<shared::IAgent> agent) {
         std::lock_guard<std::mutex> lock(mutex);
         agents[id] = agent;
     }
@@ -31,7 +31,7 @@ public:
         agents.erase(id);
     }
 
-    std::shared_ptr<IAgent> getAgent(const std::string& id) {
+    std::shared_ptr<shared::IAgent> getAgent(const std::string& id) {
         std::lock_guard<std::mutex> lock(mutex);
         auto it = agents.find(id);
         return (it != agents.end()) ? it->second : nullptr;

@@ -8,7 +8,7 @@
 
 namespace firmius::core {
 
-using namespace firmius::shared;
+using firmius::shared::AgentTurn;
 
 struct UndoResult {
     int turnsRemoved = 0;

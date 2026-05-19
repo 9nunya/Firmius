@@ -35,6 +35,8 @@
 
 namespace firmius::audits {
 
+using namespace firmius::shared;
+
 std::vector<std::unique_ptr<shared::IAudit>> createAudits() {
     std::vector<std::unique_ptr<shared::IAudit>> audits;
     audits.push_back(std::make_unique<BenchmarksAudit>());

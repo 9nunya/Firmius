@@ -11,6 +11,8 @@
 
 namespace firmius::audits {
 
+using namespace firmius::shared;
+
 using namespace firmius::core;
 using namespace firmius::provider;
 

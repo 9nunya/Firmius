@@ -7,6 +7,8 @@
 
 namespace firmius::provider {
 
+using namespace firmius::shared;
+
 namespace {
 
 std::string joinUrl(const std::string &baseUrl, const std::string &endpoint,

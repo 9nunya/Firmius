@@ -3,6 +3,8 @@
 
 namespace firmius::provider {
 
+using namespace firmius::shared;
+
 ZenProvider::ZenProvider(const std::string& apiKey)
     : BaseOpenAIProvider("zen", "https://opencode.ai/zen/v1", apiKey) {
     // If no API key was provided and no accounts exist, try environment variable

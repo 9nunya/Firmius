@@ -18,6 +18,7 @@
 #include "providers/BaseAPIKeyProvider.hpp"
 #include "providers/BaseOAuthProvider.hpp"
 #include "providers/ProviderRegistry.hpp"
+#include "utils/Logger.hpp"
 #include "utils/PermissionProfiles.hpp"
 #include "utils/FSUtil.hpp"
 #include "utils/PlatformPaths.hpp"
@@ -60,6 +61,8 @@
 #include <iostream>
 
 namespace {
+
+static constexpr int kAgentReadyTimeoutMs = 2000;
 
 const std::string PANIC_INFO_HARNESS_STATE = "harness_state";
 
@@ -123,6 +126,7 @@ AgentHistoryScore scorePersistedAgent(ThreadManager &threadManager,
       }
     }
   } catch (...) {
+    Logger::instance().logDebug("Harness: best-effort agent scoring failed for thread/agent lookup");
   }
   return score;
 }
@@ -517,6 +521,7 @@ Harness::~Harness() {
   try {
     joinBackgroundThreads();
   } catch (...) {
+    Logger::instance().logDebug("Harness: exception during destructor cleanup");
   }
 }
 
@@ -585,6 +590,7 @@ void Harness::init() {
           killDockerContainer(container.id);
         }
       } catch (...) {
+        Logger::instance().logDebug("Harness: failed to check/kill orphaned Docker container");
       }
     }
   }
@@ -769,7 +775,7 @@ Harness::materializeLeadAgentIdentity(const std::string &threadId) {
           [&]() {
             return AgentRegistry::instance().getAgent(requestedId) != nullptr;
           },
-          std::chrono::milliseconds(2000))) {
+          std::chrono::milliseconds(kAgentReadyTimeoutMs))) {
     return std::nullopt;
   }
 
@@ -992,8 +998,7 @@ bool Harness::resumeLast() {
     persistSessionState("", "");
   }
 
-  std::cerr << "Warning: skipped broken last session thread '" << threadId
-            << "' during startup." << std::endl;
+  Logger::instance().logWarning("Harness: skipped broken last session thread '" + threadId + "' during startup");
   return false;
 }
 
@@ -1098,6 +1103,7 @@ bool Harness::dispatchRequestToAgent(const std::string &threadId,
               restoreEntry = manifestIt->second;
             }
           } catch (...) {
+            Logger::instance().logDebug("Harness: failed to read agent manifest during switch");
           }
         }
 
@@ -1180,7 +1186,7 @@ bool Harness::dispatchRequestToAgent(const std::string &threadId,
               auto restored = AgentRegistry::instance().getAgent(fid);
               return restored && !restored->isBooting();
             },
-            std::chrono::milliseconds(2000))) {
+            std::chrono::milliseconds(kAgentReadyTimeoutMs))) {
       statusMessage = "Focused agent restore timed out.";
       return false;
     }
@@ -1267,6 +1273,7 @@ bool Harness::executeWorkflow(const std::string &workflowId,
       try {
         manifest = threadManager_.readAgentManifest(tid);
       } catch (const std::exception &) {
+        Logger::instance().logDebug("Harness: failed to read agent manifest for thread focus resolution");
       }
 
       if (fid.empty()) {
@@ -1303,7 +1310,7 @@ bool Harness::executeWorkflow(const std::string &workflowId,
                       firmius::core::AgentRegistry::instance().getAgent(fid);
                   return restored && !restored->isBooting();
                 },
-                std::chrono::milliseconds(2000));
+                std::chrono::milliseconds(kAgentReadyTimeoutMs));
           }
         } catch (const std::exception &) {
           // If restore fails, the script action may still run, but any attempt
@@ -1329,15 +1336,14 @@ bool Harness::executeWorkflow(const std::string &workflowId,
     auto outcome = hooks::HookDispatcher::runAction(*workflow, payload);
     hooks::HookDispatcher::settleOutcome(*workflow, outcome);
     if (workflow->id == "promise.command.promise") {
-      std::cout << "[Harness::executeWorkflow] promise.command.promise"
-                << " thread_id=" << payload.threadId
-                << " agent_id=" << payload.agentId
-                << " decision=" << static_cast<int>(outcome.decision)
-                << " has_reminder="
-                << ((outcome.reminderForAgent.has_value() && !outcome.reminderForAgent->empty()) ? "true" : "false")
-                << " reminder_size="
-                << (outcome.reminderForAgent.has_value() ? outcome.reminderForAgent->size() : 0)
-                << std::endl;
+      Logger::instance().logDebug("Harness: executeWorkflow promise.command.promise"
+                " thread_id=" + payload.threadId +
+                " agent_id=" + payload.agentId +
+                " decision=" + std::to_string(static_cast<int>(outcome.decision)) +
+                " has_reminder=" +
+                ((outcome.reminderForAgent.has_value() && !outcome.reminderForAgent->empty()) ? "true" : "false") +
+                " reminder_size=" +
+                std::to_string(outcome.reminderForAgent.has_value() ? outcome.reminderForAgent->size() : 0));
     }
     auto completed =
         hooks::HookDispatcher::fire(WorkflowEventKind::WorkflowComplete, payload);
@@ -1796,6 +1802,7 @@ void Harness::routeEngineEvent(const firmius::shared::AppEvent &event) {
                 manifest[ev.agentId] = entry;
                 threadManager_.writeAgentManifest(currentThreadId_, manifest);
               } catch (...) {
+                Logger::instance().logWarning("Harness: failed to write agent manifest on spawn event");
               }
             }
           } else if constexpr (std::is_same_v<T, AgentTurnCompleted>) {
@@ -1965,6 +1972,7 @@ std::vector<std::string> Harness::listAgents(const std::string &threadId) {
       agents.push_back(agentId);
     }
   } catch (...) {
+    Logger::instance().logDebug("Harness: failed to read agent manifest for listAgents");
   }
   return agents;
 }
@@ -1979,6 +1987,7 @@ Harness::listArtifacts(const std::string &threadId) {
   try {
     return threadManager_.listArtifacts(tid);
   } catch (...) {
+    Logger::instance().logDebug("Harness: failed to list artifacts for thread");
   }
   return {};
 }
@@ -2062,6 +2071,7 @@ bool Harness::switchLeadPersona(const std::string &personaName) {
       threadManager_.writeAgentManifest(currentThreadId_, manifest);
     }
   } catch (...) {
+    Logger::instance().logWarning("Harness: failed to update manifest during persona switch");
   }
 
   return true;
@@ -2164,7 +2174,9 @@ PolicyEngine &Harness::policyEngine() {
     std::filesystem::path projectPath;
     try {
       projectPath = std::filesystem::current_path();
-    } catch (...) {}
+    } catch (...) {
+      Logger::instance().logDebug("Harness: could not determine current_path for policy engine");
+    }
     policyEngine_ = std::make_unique<PolicyEngine>(
         std::filesystem::path{}, projectPath);
   }
@@ -2262,6 +2274,7 @@ bool Harness::markThreadAsBenchmark(const std::string &threadId,
     try {
       metadata = threadManager_.getMetadata(threadId);
     } catch (...) {
+      Logger::instance().logWarning("Harness: failed to read thread metadata for benchmark marking");
       return false;
     }
     metadata.isBenchmarkRun = true;
@@ -3210,13 +3223,11 @@ void Harness::maybeGenerateTitle(const std::string &threadId,
         // burning premium quota on auto-generated titles.
         static std::once_flag warnOnce;
         std::call_once(warnOnce, [&]() {
-          std::fprintf(
-              stderr,
-              "[firmius] WARN: title generation falling back to chat model "
-              "(%s/%s). Set userConfig.purposeRoutes[\"titler\"] to a cheap "
-              "fast route to avoid burning premium quota on every new "
-              "thread.\n",
-              titlerProviderId.c_str(), titlerModelId.c_str());
+          Logger::instance().logWarning(
+              "Harness: title generation falling back to chat model ("
+              + titlerProviderId + "/" + titlerModelId + "). Set "
+              "userConfig.purposeRoutes[\"titler\"] to a cheap fast route to "
+              "avoid burning premium quota on every new thread.");
         });
       }
 
@@ -3255,6 +3266,7 @@ void Harness::maybeGenerateTitle(const std::string &threadId,
           }
         }
       } catch (...) {
+        Logger::instance().logDebug("Harness: failed to resolve model variant for title generation");
       }
       provider->stream(history, opts, [&](const shared::StreamEvent &ev) {
         if (auto *txt = std::get_if<shared::TextChunk>(&ev)) {
@@ -3274,6 +3286,7 @@ void Harness::maybeGenerateTitle(const std::string &threadId,
             firmius::shared::ThreadTitleUpdated{threadId, generatedTitle});
       }
     } catch (...) {
+      Logger::instance().logWarning("Harness: title generation failed for thread");
     }
   });
 }
@@ -3646,7 +3659,7 @@ bool Harness::retryLastRequest(std::string &statusMessage) {
               auto restored = AgentRegistry::instance().getAgent(agentId);
               return restored && !restored->isBooting();
             },
-            std::chrono::milliseconds(2000))) {
+            std::chrono::milliseconds(kAgentReadyTimeoutMs))) {
       statusMessage = "Focused agent restore timed out.";
       return false;
     }
@@ -3701,6 +3714,7 @@ Harness::snapshotResumableTurnForAgent(const std::string &threadId,
       persistedHistory = threadManager_.loadAgentHistory(threadId, agentId);
       history = std::make_shared<AgentHistory>(persistedHistory);
     } catch (...) {
+      Logger::instance().logDebug("Harness: failed to load agent history for retry resolution");
       return std::nullopt;
     }
   }
@@ -3804,6 +3818,7 @@ Harness::recoverLastResumableTurnForThread(
         }
       }
     } catch (...) {
+      Logger::instance().logDebug("Harness: failed to read manifest for retry target resolution");
     }
   }
 
@@ -3856,6 +3871,7 @@ Harness::resolveRetryTargetAgentId(const std::string &threadId,
         return manifest.begin()->first;
       }
     } catch (...) {
+      Logger::instance().logDebug("Harness: failed to read manifest for lead agent identity");
     }
   }
 
@@ -3875,6 +3891,7 @@ void Harness::writeInterruptionRecord() {
   try {
     metadata = threadManager_.getMetadata(currentThreadId_);
   } catch (...) {
+    Logger::instance().logDebug("Harness: failed to read metadata for interruption record");
     return;
   }
 

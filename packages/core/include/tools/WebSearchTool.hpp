@@ -9,7 +9,10 @@
 
 namespace firmius::core {
 
-using namespace firmius::shared;
+using firmius::shared::JSONSchema;
+using firmius::shared::ToolContext;
+using firmius::shared::ToolMetadata;
+using firmius::shared::ToolResult;
 
 /**
  * @brief Input parameters for the web_search tool.

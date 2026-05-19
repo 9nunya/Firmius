@@ -9,6 +9,8 @@
 
 namespace firmius::core {
 
+using namespace firmius::shared;
+
 shared::ToolMetadata WebSearchTool::getMetadata() const {
     return {"web_search", "Web operations: perform a web search and return results.", ToolScope::Web};
 }

@@ -11,7 +11,21 @@
 
 namespace firmius::core {
 
-using namespace firmius::shared;
+using firmius::shared::AgentHistory;
+using firmius::shared::AgentTodoList;
+using firmius::shared::AgentTurn;
+using firmius::shared::EditBatchDetail;
+using firmius::shared::EditBatchStatus;
+using firmius::shared::EditBatchSummary;
+using firmius::shared::EditFileMutation;
+using firmius::shared::EditFileMutationStatus;
+using firmius::shared::EditHistoryFilters;
+using firmius::shared::EditRedoAction;
+using firmius::shared::EditUndoAction;
+using firmius::shared::ThreadArtifactMetadata;
+using firmius::shared::ThreadMetadata;
+using firmius::shared::TranscriptRedoPayload;
+using firmius::shared::TranscriptUndoAction;
 
 /**
  * @brief Entry in the agent manifest for a thread.

@@ -25,7 +25,20 @@
 #include "agents/StreamSanityDetector.hpp"
 namespace firmius::core {
 
-using namespace firmius::shared;
+using firmius::shared::AbortController;
+using firmius::shared::AgentContext;
+using firmius::shared::AgentTurn;
+using firmius::shared::IAgent;
+using firmius::shared::IEnvironment;
+using firmius::shared::IHost;
+using firmius::shared::IPermissions;
+using firmius::shared::ImageContent;
+using firmius::shared::ModelChoice;
+using firmius::shared::ProcessSnapshot;
+using firmius::shared::Role;
+using firmius::shared::StreamEvent;
+using firmius::shared::ToolCall;
+using firmius::shared::ToolContext;
 
 /**
  * @brief The primary Agent Engine implementation.

@@ -20,6 +20,8 @@
 
 namespace firmius::provider {
 
+using namespace firmius::shared;
+
 // Initialize static constants
 const std::string QwenProvider::QWEN_OAUTH_CLIENT_ID =
     "f0304373b74a44d2b584a3fb70ca9e56";

@@ -9,6 +9,8 @@
 
 namespace firmius::provider {
 
+using namespace firmius::shared;
+
 KimiProvider::KimiProvider(const std::vector<std::string>& initialKeys)
     : BaseAnthropicProvider("kimi", "https://api.kimi.com/coding/v1", "") {
 

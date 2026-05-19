@@ -16,6 +16,8 @@
 
 namespace firmius::provider {
 
+using namespace firmius::shared;
+
 namespace {
 constexpr int kQuotaRefreshSeconds = 300;
 

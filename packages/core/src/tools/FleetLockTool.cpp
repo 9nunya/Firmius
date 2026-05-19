@@ -16,6 +16,9 @@ namespace firmius::core {
 
 namespace {
 
+static constexpr int kFleetLockPollIntervalMs = 50;
+static constexpr int kFleetLockRespondPollIntervalMs = 100;
+
 std::string requireCurrentThreadId(shared::ToolContext &ctx) {
   const auto &context = ctx.agent.getContext();
   if (!context.history || context.history->threadId.empty()) {
@@ -155,7 +158,7 @@ shared::ToolResult FleetLockTool::execute(const FleetLockInput &input,
             return shared::ToolResult::fail("Lock acquire timed out");
           }
           
-          std::this_thread::sleep_for(std::chrono::milliseconds(50));
+          std::this_thread::sleep_for(std::chrono::milliseconds(kFleetLockPollIntervalMs));
         }
       } else if (existingLock) {
         return shared::ToolResult::fail("Files locked by agent " + existingLock->ownerAgentId);
@@ -370,7 +373,7 @@ shared::ToolResult FleetLockTool::execute(const FleetLockInput &input,
         return shared::ToolResult::fail("Lock request timed out");
       }
       
-      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      std::this_thread::sleep_for(std::chrono::milliseconds(kFleetLockRespondPollIntervalMs));
     }
     
   } else if (input.mode == "wait") {
@@ -420,7 +423,7 @@ shared::ToolResult FleetLockTool::execute(const FleetLockInput &input,
         }
       }
       
-      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      std::this_thread::sleep_for(std::chrono::milliseconds(kFleetLockPollIntervalMs));
     }
     
   } else if (input.mode == "check") {

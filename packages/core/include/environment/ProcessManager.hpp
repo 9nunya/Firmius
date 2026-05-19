@@ -15,7 +15,10 @@
 
 namespace firmius::core {
 
-using namespace firmius::shared;
+using firmius::shared::IHost;
+using firmius::shared::IProcessManager;
+using firmius::shared::ProcessSnapshot;
+using firmius::shared::StreamEvent;
 
 /**
  * @brief Manages background processes for an environment.

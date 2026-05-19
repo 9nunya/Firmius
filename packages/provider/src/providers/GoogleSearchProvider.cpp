@@ -15,6 +15,8 @@
 
 namespace firmius::provider {
 
+using namespace firmius::shared;
+
 namespace {
 
 // Constants ported from the TypeScript reference implementation

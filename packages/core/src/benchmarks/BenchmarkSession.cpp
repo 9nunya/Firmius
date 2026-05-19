@@ -11,6 +11,8 @@
 
 namespace firmius::core {
 
+using namespace firmius::shared;
+
 BenchmarkSession::BenchmarkSession(BenchmarkConfig config)
     : config_(std::move(config)) {}
 

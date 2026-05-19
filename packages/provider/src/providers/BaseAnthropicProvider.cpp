@@ -12,6 +12,8 @@
 
 namespace firmius::provider {
 
+using namespace firmius::shared;
+
 namespace {
 
 struct CurlTransferResult {

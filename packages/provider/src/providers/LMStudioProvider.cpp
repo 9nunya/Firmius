@@ -6,6 +6,8 @@
 
 namespace firmius::provider {
 
+using namespace firmius::shared;
+
 namespace {
 
 size_t writeCallback(char* ptr, size_t size, size_t nmemb, void* userdata) {

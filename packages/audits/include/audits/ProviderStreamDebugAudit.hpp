@@ -8,7 +8,9 @@
 
 namespace firmius::audits {
 
-using namespace firmius::shared;
+using firmius::shared::AgentHistory;
+using firmius::shared::AuditResult;
+using firmius::shared::IAudit;
 
 /**
  * @brief Debug audit exposed as provider_full_range that logs EVERY chunk from a provider stream to STDOUT.

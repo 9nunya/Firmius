@@ -15,6 +15,8 @@
 
 namespace firmius::core {
 
+using namespace firmius::shared;
+
 namespace {
 
 // ---------------------------------------------------------------------------

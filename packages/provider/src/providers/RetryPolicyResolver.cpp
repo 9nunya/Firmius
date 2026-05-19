@@ -6,6 +6,8 @@
 
 namespace firmius::provider {
 
+using namespace firmius::shared;
+
 namespace {
 
 bool hasRetryCurlTag(const std::unordered_set<std::string> &tags,

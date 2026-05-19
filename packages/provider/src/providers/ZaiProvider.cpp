@@ -3,6 +3,8 @@
 
 namespace firmius::provider {
 
+using namespace firmius::shared;
+
 ZaiProvider::ZaiProvider(const std::string& apiKey)
     : BaseOpenAIProvider("zai", "https://api.z.ai/api/coding/paas/v4", apiKey) {
     // If no API key was provided and no accounts exist, try environment variable

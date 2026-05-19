@@ -13,7 +13,8 @@
 
 namespace firmius::provider {
 
-using namespace firmius::shared;
+using firmius::shared::APIKeyAccount;
+using firmius::shared::QuotaBucket;
 
 /**
  * @brief Abstract wizard interface for API key connection flows.

@@ -7,7 +7,10 @@
 
 namespace firmius::core {
 
-using namespace firmius::shared;
+using firmius::shared::JSONSchema;
+using firmius::shared::ToolContext;
+using firmius::shared::ToolMetadata;
+using firmius::shared::ToolResult;
 
 struct FileEditOperationInput {
     std::string op;

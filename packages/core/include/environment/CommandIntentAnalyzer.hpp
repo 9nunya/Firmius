@@ -7,7 +7,9 @@
 
 namespace firmius::core {
 
-using namespace firmius::shared;
+using firmius::shared::CommandIntent;
+using firmius::shared::CommandSeverity;
+using firmius::shared::ICommandIntentAnalyzer;
 
 /**
  * @brief Analyzes bash commands to extract intent and assess security severity.

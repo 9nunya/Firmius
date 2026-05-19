@@ -30,7 +30,11 @@
 
 namespace firmius::core {
 
+using namespace firmius::shared;
+
 namespace {
+
+static constexpr int kSqliteBusyTimeoutMs = 5000;
 
 using shared::StringUtil;
 
@@ -878,7 +882,7 @@ private:
             }
 
             try {
-                execSql(db, "PRAGMA busy_timeout=5000;",
+                execSql(db, "PRAGMA busy_timeout=" + std::to_string(kSqliteBusyTimeoutMs) + ";",
                         "Failed to set sqlite busy timeout");
                 sqlite3_exec(db, "PRAGMA journal_mode=WAL;",
                              nullptr, nullptr, nullptr);
@@ -1119,6 +1123,8 @@ std::shared_ptr<std::mutex> acquireTodoMutex(const std::string& threadId,
 } // namespace
 
 namespace firmius::core {
+
+using namespace firmius::shared;
 
 std::string ThreadManager::defaultBasePath() {
     const std::filesystem::path sharedHomePath =

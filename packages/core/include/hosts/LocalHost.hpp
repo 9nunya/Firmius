@@ -12,7 +12,10 @@
 
 namespace firmius::core {
 
-using namespace firmius::shared;
+using firmius::shared::FileInfo;
+using firmius::shared::IHostProcess;
+using firmius::shared::ProcessResult;
+using firmius::shared::ProcessSnapshot;
 
 /**
  * @brief Handle for a process running on the local machine.

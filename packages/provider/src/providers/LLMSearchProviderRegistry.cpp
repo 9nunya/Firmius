@@ -4,6 +4,8 @@
 
 namespace firmius::provider {
 
+using namespace firmius::shared;
+
 namespace {
 
 bool hasProviderNamed(

@@ -2,6 +2,8 @@
 
 namespace firmius::provider {
 
+using namespace firmius::shared;
+
 const std::vector<firmius::shared::ModelInfo> NVIDIA_STATIC_MODELS = {
     {
         "openai/gpt-oss-120b",

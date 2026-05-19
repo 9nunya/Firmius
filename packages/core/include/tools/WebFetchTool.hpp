@@ -5,7 +5,14 @@
 #include <string>
 
 namespace firmius::core {
-using namespace firmius::shared;
+
+using firmius::shared::JSONSchema;
+using firmius::shared::ToolContext;
+using firmius::shared::ToolMetadata;
+using firmius::shared::ToolResult;
+using firmius::shared::ToolScope;
+using firmius::shared::zObject;
+using firmius::shared::zString;
 
 struct WebFetchInput {
     std::string url;

@@ -12,7 +12,11 @@ typedef void CURL;
 
 namespace firmius::core {
 
-using namespace firmius::shared;
+using firmius::shared::FileInfo;
+using firmius::shared::HostCreationOptions;
+using firmius::shared::IHostProcess;
+using firmius::shared::ProcessResult;
+using firmius::shared::ProcessSnapshot;
 
 /**
  * @brief Information about a Docker container.

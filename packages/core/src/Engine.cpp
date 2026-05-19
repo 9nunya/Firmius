@@ -3,6 +3,7 @@
 #include "ConfigLoader.hpp"
 #include "Serialization.hpp"
 #include "agents/Agent.hpp"
+#include "utils/Logger.hpp"
 #include "agents/working_memory/WorkingMemoryWorker.hpp"
 #include "agents/PurposeLoader.hpp"
 #include "agents/RuntimeOverlay.hpp"
@@ -67,6 +68,8 @@
 #include <unordered_map>
 
 namespace firmius::core {
+
+using namespace firmius::shared;
 
 namespace {
 struct ReverseFileEditOperation {
@@ -773,9 +776,9 @@ std::string Engine::summonAgent(
             throw;
           }
           effectivePersonaName = available.front();
-          std::cerr << "[purpose] Failed to load persona '" << personaName
-                    << "' (" << e.what() << "); falling back to '"
-                    << effectivePersonaName << "'.\n";
+          Logger::instance().logWarning("Engine: failed to load persona '" + personaName
+                    + "' (" + e.what() + "); falling back to '"
+                    + effectivePersonaName + "'");
           persona = PurposeLoader::load(effectivePersonaName);
         }
 
@@ -983,9 +986,8 @@ std::string Engine::resumeAgent(const std::string &threadId,
       throw;
     }
     effectivePersonaName = available.front();
-    std::cerr << "[purpose] Failed to load persona '" << personaName << "' ("
-              << e.what() << "); falling back to '" << effectivePersonaName
-              << "'.\n";
+    Logger::instance().logWarning("Engine: failed to load persona '" + personaName + "' ("
+              + e.what() + "); falling back to '" + effectivePersonaName + "'");
     persona = PurposeLoader::load(effectivePersonaName);
   }
   auto history =
@@ -1092,9 +1094,9 @@ std::string Engine::resumeAgent(const std::string &threadId,
             throw;
           }
           effectivePersonaName = available.front();
-          std::cerr << "[purpose] Failed to load persona '" << personaName
-                    << "' (" << e.what() << "); falling back to '"
-                    << effectivePersonaName << "'.\n";
+          Logger::instance().logWarning("Engine: failed to load persona '" + personaName
+                    + "' (" + e.what() + "); falling back to '"
+                    + effectivePersonaName + "'");
           persona = PurposeLoader::load(effectivePersonaName);
         }
 

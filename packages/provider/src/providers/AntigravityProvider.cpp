@@ -26,6 +26,8 @@
 
 namespace firmius::provider {
 
+using namespace firmius::shared;
+
 using namespace firmius::utils;
 
 namespace {

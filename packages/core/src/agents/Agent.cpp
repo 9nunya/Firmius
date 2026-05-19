@@ -2,6 +2,7 @@
 #include "agents/hooks/HookRegistry.hpp"
 #include "agents/hooks/HookState.hpp"
 #include "agents/modes/Mode.hpp"
+#include "utils/Logger.hpp"
 
 #include "AgentRegistry.hpp"
 #include "ConfigLoader.hpp"
@@ -1079,6 +1080,7 @@ std::string buildPlanAndTodoSnapshot(const AgentContext &context) {
       }
     }
   } catch (...) {
+    Logger::instance().logDebug("Agent: failed to build todo state for context");
   }
 
   return state.str();
@@ -1222,6 +1224,7 @@ TodoStateSnapshot readTodoState(const AgentContext &context) {
     }
     return snapshot;
   } catch (...) {
+    Logger::instance().logDebug("Agent: failed to build todo snapshot");
     return snapshot;
   }
 }
@@ -1393,6 +1396,7 @@ buildDeflationSummarizer(const shared::WorkingMemoryConfig &cfg) {
           },
           abort);
     } catch (...) {
+      Logger::instance().logDebug("Agent: title generation stream failed");
       return "";
     }
     // Trim leading whitespace; many models emit a leading newline.
@@ -1591,8 +1595,8 @@ void Agent::initializeMcpServers() {
       // Surface and skip — common causes are docker exec not ready, missing
       // binary in the sandbox, network, etc. None should be fatal to the
       // agent itself (the agent can run without this MCP server).
-      std::cerr << "Failed to spawn MCP server '" << name
-                << "': " << e.what() << std::endl;
+      Logger::instance().logWarning("Agent: failed to spawn MCP server '" + name
+                + "': " + e.what());
       continue;
     }
     if (!client) {
@@ -1638,8 +1642,8 @@ void Agent::initializeMcpServers() {
         context.state.loadedMcpToolDefinitions[name] = std::move(toolDefs);
       }
     } catch (const std::exception &e) {
-      std::cerr << "Failed to initialize MCP server '" << name
-                << "': " << e.what() << std::endl;
+      Logger::instance().logWarning("Agent: failed to initialize MCP server '" + name
+                + "': " + e.what());
     }
   }
 }
@@ -1649,6 +1653,7 @@ Agent::~Agent() {
     try {
       environment_->getHost()->killBackgroundProcess(id);
     } catch (...) {
+      Logger::instance().logDebug("Agent: failed to kill background process during destruction");
     }
   }
   if (environment_->getHost())
@@ -1679,6 +1684,7 @@ void Agent::reset() {
     try {
       environment_->getHost()->killBackgroundProcess(id);
     } catch (...) {
+      Logger::instance().logDebug("Agent: failed to kill background process during reset");
     }
   }
   backgroundProcessIds.clear();
@@ -1946,9 +1952,8 @@ void Agent::bootstrapHistory(const std::optional<std::string> &task,
         throw;
       }
       effectivePersonaName = available.front();
-      std::cerr << "[purpose] Failed to load persona '" << personaName << "' ("
-                << e.what() << "); falling back to '" << effectivePersonaName
-                << "'.\n";
+      Logger::instance().logWarning("Agent: failed to load persona '" + personaName + "' ("
+                + e.what() + "); falling back to '" + effectivePersonaName + "'");
       persona = PurposeLoader::load(effectivePersonaName);
     }
     if (effectivePersonaName != personaName) {
@@ -2240,9 +2245,9 @@ void Agent::runImpl(const std::optional<std::string> &task,
           fullResponse.append(delta, 0, remaining);
         }
         responseTruncated = true;
-        std::cerr << "[FIRMIUS] Response buffer capped at "
-                  << kMaxAccumulatedResponseBytes << " bytes for turn "
-                  << turnCount << std::endl;
+        Logger::instance().logWarning("Agent: response buffer capped at "
+                  + std::to_string(kMaxAccumulatedResponseBytes) + " bytes for turn "
+                  + std::to_string(turnCount));
       } else if (!responseTruncated) {
         fullResponse += delta;
       }
@@ -2261,9 +2266,9 @@ void Agent::runImpl(const std::optional<std::string> &task,
           fullThinking.append(delta, 0, remaining);
         }
         thinkingTruncated = true;
-        std::cerr << "[FIRMIUS] Thinking buffer capped at "
-                  << kMaxAccumulatedThinkingBytes << " bytes for turn "
-                  << turnCount << std::endl;
+        Logger::instance().logWarning("Agent: thinking buffer capped at "
+                  + std::to_string(kMaxAccumulatedThinkingBytes) + " bytes for turn "
+                  + std::to_string(turnCount));
       } else if (!thinkingTruncated) {
         fullThinking += delta;
       }
@@ -2364,6 +2369,7 @@ void Agent::runImpl(const std::optional<std::string> &task,
           }
         }
       } catch (...) {
+        Logger::instance().logDebug("Agent: failed to resolve model variant");
       }
       opts.temperature = context.config.temperature;
       if (context.config.maxTokens.has_value()) {
@@ -2396,6 +2402,7 @@ void Agent::runImpl(const std::optional<std::string> &task,
             actorContextWindow =
                 provider->getModelInfo(context.config.modelId).contextWindow;
           } catch (...) {
+            Logger::instance().logDebug("Agent: failed to get model context window for working memory");
           }
         }
         wmInputs.actorContextWindow = actorContextWindow;
@@ -3016,6 +3023,7 @@ void Agent::runImpl(const std::optional<std::string> &task,
                           try {
                             return inspectProcess(processId).running;
                           } catch (...) {
+                            Logger::instance().logDebug("Agent: failed to inspect process state");
                             return false;
                           }
                         });
@@ -3205,6 +3213,7 @@ void Agent::runImpl(const std::optional<std::string> &task,
                           try {
                             return inspectProcess(processId).running;
                           } catch (...) {
+                            Logger::instance().logDebug("Agent: failed to inspect process state");
                             return false;
                           }
                         });

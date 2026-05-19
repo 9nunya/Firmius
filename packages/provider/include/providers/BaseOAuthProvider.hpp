@@ -15,7 +15,8 @@
 
 namespace firmius::provider {
 
-using namespace firmius::shared;
+using firmius::shared::OAuthAccount;
+using firmius::shared::QuotaBucket;
 
 class BaseOAuthProvider : public IProvider {
 public:

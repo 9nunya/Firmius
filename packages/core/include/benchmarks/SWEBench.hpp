@@ -8,7 +8,7 @@
 
 namespace firmius::core {
 
-using namespace firmius::shared;
+using firmius::shared::BenchmarkResult;
 
 /**
  * @brief Benchmark runner for SWE-bench (Software Engineering tasks).

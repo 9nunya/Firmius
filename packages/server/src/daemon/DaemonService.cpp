@@ -6,6 +6,7 @@
 #include "ConfigLoader.hpp"
 #include "Engine.hpp"
 #include "providers/ProviderRegistry.hpp"
+#include "utils/Logger.hpp"
 #include "workflow/WorkflowLoader.hpp"
 #include "agents/hooks/HookRegistry.hpp"
 #include "agents/hooks/HookState.hpp"
@@ -2845,6 +2846,7 @@ DaemonService::buildAgentSnapshotsLocked(const std::string &threadId,
   try {
     manifest = threadManager.readAgentManifest(threadId);
   } catch (...) {
+    firmius::shared::Logger::instance().logDebug("DaemonService: failed to read agent manifest for thread snapshots");
   }
   for (const auto &[agentId, _] : manifest) {
     auto snapshot = buildAgentSnapshotLocked(threadId, agentId, focusedAgentId);
@@ -2874,6 +2876,7 @@ DaemonService::buildAgentSnapshotLocked(const std::string &threadId,
       haveManifest = true;
     }
   } catch (...) {
+    firmius::shared::Logger::instance().logDebug("DaemonService: failed to read manifest entry for agent snapshot");
   }
 
   AgentRuntimeSnapshot snapshot;
@@ -2989,6 +2992,7 @@ DaemonService::buildProcessSnapshotLocked(const std::string &threadId,
                     id) != ctx.state.blockingProcessIds.end();
       return snapshot;
     } catch (...) {
+      firmius::shared::Logger::instance().logDebug("DaemonService: failed to build process snapshot");
       return std::nullopt;
     }
   };
@@ -3011,6 +3015,7 @@ DaemonService::buildTranscriptSnapshotLocked(const std::string &threadId,
   try {
     history = threadManager.loadAgentHistory(threadId, agentId);
   } catch (...) {
+    firmius::shared::Logger::instance().logDebug("DaemonService: failed to load agent history for transcript snapshot");
     return std::nullopt;
   }
 
@@ -3021,6 +3026,7 @@ DaemonService::buildTranscriptSnapshotLocked(const std::string &threadId,
       snapshotsById[snapshot.compactionId] = snapshot;
     }
   } catch (...) {
+    firmius::shared::Logger::instance().logDebug("DaemonService: failed to load compaction snapshots");
   }
 
   TranscriptSnapshot snapshot;
@@ -3042,6 +3048,7 @@ DaemonService::buildTranscriptSnapshotLocked(const std::string &threadId,
         snapshot.agentFriendlyName = it->second.friendlyName;
       }
     } catch (...) {
+      firmius::shared::Logger::instance().logDebug("DaemonService: failed to read manifest for agent title");
     }
   }
   return snapshot;
@@ -3064,6 +3071,7 @@ DaemonService::buildToolCallSnapshotsLocked(const std::string &threadId,
     try {
       agentIds = threadManager.listAgents(threadId);
     } catch (...) {
+      firmius::shared::Logger::instance().logDebug("DaemonService: failed to list agents for transcript snapshots");
       return snapshots;
     }
   }
@@ -3073,6 +3081,7 @@ DaemonService::buildToolCallSnapshotsLocked(const std::string &threadId,
     try {
       history = threadManager.loadAgentHistory(threadId, currentAgentId);
     } catch (...) {
+      firmius::shared::Logger::instance().logDebug("DaemonService: failed to load history for agent in transcript loop");
       continue;
     }
 
@@ -3194,6 +3203,7 @@ DaemonService::buildSubagentActivitySnapshotLocked(const std::string &threadId,
     try {
       agentIds = threadManager.listAgents(threadId);
     } catch (...) {
+      firmius::shared::Logger::instance().logDebug("DaemonService: failed to list agents for subagent activity");
       return snapshot;
     }
   }
@@ -3204,6 +3214,7 @@ DaemonService::buildSubagentActivitySnapshotLocked(const std::string &threadId,
   try {
     manifest = threadManager.readAgentManifest(threadId);
   } catch (...) {
+    firmius::shared::Logger::instance().logDebug("DaemonService: failed to read manifest for subagent activity");
   }
 
   for (const auto &parentAgentId : agentIds) {
@@ -3211,6 +3222,7 @@ DaemonService::buildSubagentActivitySnapshotLocked(const std::string &threadId,
     try {
       history = threadManager.loadAgentHistory(threadId, parentAgentId);
     } catch (...) {
+      firmius::shared::Logger::instance().logDebug("DaemonService: failed to load history for subagent activity parent");
       continue;
     }
 
@@ -3320,6 +3332,7 @@ DaemonService::buildSubagentActivitySnapshotLocked(const std::string &threadId,
         childHistory = threadManager.loadAgentHistory(threadId, entry.childAgentId);
         hasChildHistory = !childHistory.turns.empty();
       } catch (...) {
+        firmius::shared::Logger::instance().logDebug("DaemonService: failed to load child agent history for subagent activity");
       }
       if (hasChildHistory) {
         entry.activityLog = synthesizeHistoricalSubagentLogForDaemon(

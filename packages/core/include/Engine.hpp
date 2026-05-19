@@ -23,7 +23,20 @@
 
 namespace firmius::core {
 
-using namespace firmius::shared;
+using firmius::shared::AgentOutcome;
+using firmius::shared::AgentPermissions;
+using firmius::shared::AppEvent;
+using firmius::shared::EditBatchSummary;
+using firmius::shared::EditHistoryFilters;
+using firmius::shared::EditRedoAction;
+using firmius::shared::EditRedoEligibility;
+using firmius::shared::EditUndoAction;
+using firmius::shared::EditUndoEligibility;
+using firmius::shared::ImageContent;
+using firmius::shared::StreamEvent;
+using firmius::shared::TranscriptRedoAction;
+using firmius::shared::TranscriptRedoEligibility;
+using firmius::shared::TranscriptUndoAction;
 
 struct SummonAgentOverrides {
     std::optional<std::string> cwdOverride;

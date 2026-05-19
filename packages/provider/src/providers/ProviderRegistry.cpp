@@ -4,6 +4,8 @@
 
 namespace firmius::provider {
 
+using namespace firmius::shared;
+
 ProviderRegistry& ProviderRegistry::instance() {
     static ProviderRegistry reg;
     return reg;

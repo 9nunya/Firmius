@@ -24,6 +24,8 @@ using namespace firmius::shared;
 
 namespace {
 
+static constexpr int kDelegatePollIntervalMs = 50;
+
 enum class DelegationPersonaKind { General, Coder, Reviewer, Explorer };
 
 DelegationPersonaKind personaKindForName(const std::string &persona) {
@@ -416,7 +418,7 @@ shared::ToolResult executeSpawn(const rapidjson::Value &input, shared::ToolConte
       if (!ag) return shared::ToolResult::fail("Agent not found: " + reusableAgentId);
       if (ag->getContext().state.currentStatus != AgentStatus::Idle) {
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-        while (ag->getContext().state.currentStatus != AgentStatus::Idle && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        while (ag->getContext().state.currentStatus != AgentStatus::Idle && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(std::chrono::milliseconds(kDelegatePollIntervalMs));
         if (ag->getContext().state.currentStatus != AgentStatus::Idle) return shared::ToolResult::fail("Agent is busy (status: " + std::to_string(static_cast<int>(ag->getContext().state.currentStatus)) + ")");
       }
       try {

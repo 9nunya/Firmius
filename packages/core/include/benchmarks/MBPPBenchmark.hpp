@@ -7,7 +7,7 @@
 
 namespace firmius::core {
 
-using namespace firmius::shared;
+using firmius::shared::BenchmarkResult;
 
 /**
  * @brief Benchmark runner for the MBPP (Mostly Basic Python Problems) dataset.

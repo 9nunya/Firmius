@@ -14,7 +14,7 @@ struct sqlite3;
 
 namespace firmius::core {
 
-using namespace firmius::shared;
+using firmius::shared::AgentTurn;
 
 /**
  * @brief Thread-safe, append-only logger for agent turns.

@@ -8,7 +8,8 @@
 
 namespace firmius::core {
 
-using namespace firmius::shared;
+using firmius::shared::BenchmarkResult;
+using firmius::shared::ProcessResult;
 
 /**
  * @brief Benchmark runner for AgentBench (OS interaction tasks).

@@ -12,7 +12,10 @@
 
 namespace firmius::core {
 
-using namespace firmius::shared;
+using firmius::shared::AgentPermissions;
+using firmius::shared::ToolContext;
+using firmius::shared::ToolMetadata;
+using firmius::shared::ToolResult;
 
 /**
  * @brief Registry and orchestrator for agentic tools.

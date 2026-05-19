@@ -28,7 +28,31 @@
 
 namespace firmius::core {
 
-using namespace firmius::shared;
+using firmius::shared::AgentHistory;
+using firmius::shared::AgentTodoList;
+using firmius::shared::AppEvent;
+using firmius::shared::EditBatchSummary;
+using firmius::shared::EditHistoryFilters;
+using firmius::shared::EditRedoAction;
+using firmius::shared::EditRedoEligibility;
+using firmius::shared::EditUndoAction;
+using firmius::shared::EditUndoEligibility;
+using firmius::shared::HostCreationOptions;
+using firmius::shared::IAgent;
+using firmius::shared::ImageContent;
+using firmius::shared::MessageVisibility;
+using firmius::shared::ModelInfo;
+using firmius::shared::OAuthAccount;
+using firmius::shared::PermissionEscalationRequest;
+using firmius::shared::PermissionResponse;
+using firmius::shared::QuotaBucket;
+using firmius::shared::StreamEvent;
+using firmius::shared::ThreadArtifactMetadata;
+using firmius::shared::ThreadMetadata;
+using firmius::shared::TranscriptRedoAction;
+using firmius::shared::TranscriptRedoEligibility;
+using firmius::shared::TranscriptUndoAction;
+using firmius::shared::UserConfig;
 
 /**
  * Harness is a singleton layer that orchestrates thread management, PID-based

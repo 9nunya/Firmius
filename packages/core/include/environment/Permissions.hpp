@@ -12,7 +12,14 @@
 
 namespace firmius::core {
 
-using namespace firmius::shared;
+using firmius::shared::AccessMode;
+using firmius::shared::AgentContext;
+using firmius::shared::CommandIntent;
+using firmius::shared::ICommandIntentAnalyzer;
+using firmius::shared::IPermissions;
+using firmius::shared::PermissionEscalationRequest;
+using firmius::shared::PermissionRequestType;
+using firmius::shared::PermissionResponse;
 
 class Permissions : public IPermissions {
 public:

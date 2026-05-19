@@ -4,6 +4,8 @@
 
 namespace firmius::core {
 
+using namespace firmius::shared;
+
 Workspace::Workspace(std::string cwd)
     : cwd_(std::move(cwd))
 {

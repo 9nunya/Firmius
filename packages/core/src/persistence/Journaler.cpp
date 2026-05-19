@@ -22,6 +22,7 @@ namespace {
 
 constexpr int kMaxOpenRetries = 3;
 constexpr int kOpenRetryBaseMs = 50;
+constexpr int kSqliteBusyTimeoutMs = 5000;
 
 std::string dbPath() {
     return (std::filesystem::path(ThreadManager::defaultBasePath()) /
@@ -206,7 +207,7 @@ sqlite3* Journaler::openWithRetry() {
                          nullptr, nullptr, nullptr);
             execOrThrow(db, "PRAGMA synchronous=NORMAL;",
                         "journal pragma synchronous failed");
-            execOrThrow(db, "PRAGMA busy_timeout=5000;",
+            execOrThrow(db, "PRAGMA busy_timeout=" + std::to_string(kSqliteBusyTimeoutMs) + ";",
                         "journal pragma busy_timeout failed");
             execOrThrow(db,
                         "CREATE TABLE IF NOT EXISTS agent_turns_v2 ("
