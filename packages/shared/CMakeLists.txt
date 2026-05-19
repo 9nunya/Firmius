@@ -95,8 +95,11 @@ target_include_directories(firmius_shared PUBLIC
   $<INSTALL_INTERFACE:include>
 )
 
+target_include_directories(firmius_shared SYSTEM PUBLIC
+  $<BUILD_INTERFACE:${rapidjson_SOURCE_DIR}/include>
+)
+
 target_include_directories(firmius_shared SYSTEM PRIVATE
-  ${rapidjson_SOURCE_DIR}/include
   ${CMAKE_CURRENT_SOURCE_DIR}/src/third_party
 )
 
