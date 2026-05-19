@@ -1,53 +1,70 @@
-# dependencies (bun install)
-node_modules
+# ── Build artifacts ──────────────────────────────────────────────────────
+/build
+/CMakeFiles
+/CMakeCache.txt
+/CMakeUserPresets.json
+/CTestTestfile.cmake
+/cmake_install.cmake
+/install_manifest.txt
+/Testing
+/_deps
+/compile_commands.json
+.cmake/
 
-# output
-out
-dist
-*.tgz
+# stray per-package build directories
+**/build/
+**/CMakeFiles/
+**/_deps/
 
-# code coverage
-coverage
+# stray compiler outputs
+/a.out
+/a.exe
+/parallel
+/output.txt
+/python_input.txt
+
+# ── User runtime / per-machine state ─────────────────────────────────────
+/.firmius
+/.persist_scratch
+/.cache
+
+# ── Editor / IDE / OS ────────────────────────────────────────────────────
+.idea/
+.vscode/
+.vs/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+ehthumbs.db
+desktop.ini
+
+# ── clangd / clang-tidy ──────────────────────────────────────────────────
+.clangd/
+.cache/clangd/
+.ccls-cache/
+
+# ── Coding-agent scratch directories ─────────────────────────────────────
+/.claude
+/.kiro
+/.omc
+/.omx
+/.openclaude
+/.ultragoal
+
+# ── Logs / coverage ──────────────────────────────────────────────────────
+*.log
+logs/
+coverage/
+*.gcov
+*.gcda
+*.gcno
 *.lcov
 
-# logs
-logs
-_.log
-report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
-
-# dotenv environment variable files
+# ── Dotenv ───────────────────────────────────────────────────────────────
 .env
-.env.development.local
-.env.test.local
-.env.production.local
 .env.local
+.env.*.local
 
-# caches
-.eslintcache
-.cache
-*.tsbuildinfo
-
-# IntelliJ based IDEs
-.idea
-
-# Finder (MacOS) folder config
-.DS_Store
-package-lock.json
-bun.lock
-.next
-.turbo/cache
-packages/core/.turbo
-packages/shared/.turbo
-packages/tui/.turbo
-packages/web/.turbo
-build
-python_input.txt
-/output.txt
+# ── Pre-commit (currently dead, keep ignored so dev hooks don't get committed) ──
 /.pre-commit-config.yaml
-/.persist_scratch/firmius_persist_gsCUIC/.firmius/threads
-/.claude/worktrees
-/.claude
-/.omc
-/.ultragoal
-/CMakeFiles
-/_deps
