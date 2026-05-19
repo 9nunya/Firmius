@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_PROVIDER_ANTIGRAVITYPROTOCOL_HPP
+#define FIRMIUS_PROVIDER_ANTIGRAVITYPROTOCOL_HPP
 
 #include "IProvider.hpp"
 #include <string>
@@ -38,3 +39,5 @@ public:
 };
 
 } // namespace firmius::provider
+
+#endif // FIRMIUS_PROVIDER_ANTIGRAVITYPROTOCOL_HPP

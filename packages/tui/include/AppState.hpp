@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_TUI_APPSTATE_HPP
+#define FIRMIUS_TUI_APPSTATE_HPP
 
 #include "TranscriptItem.hpp"
 #include "ToolCallState.hpp"
@@ -501,3 +502,5 @@ private:
 };
 
 } // namespace firmius::tui
+
+#endif // FIRMIUS_TUI_APPSTATE_HPP

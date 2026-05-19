@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_CORE_HARNESS_HPP
+#define FIRMIUS_CORE_HARNESS_HPP
 
 #include "Enums.hpp"
 #include <functional>
@@ -565,3 +566,5 @@ private:
 };
 
 } // namespace firmius::core
+
+#endif // FIRMIUS_CORE_HARNESS_HPP

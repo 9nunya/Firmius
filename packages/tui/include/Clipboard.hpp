@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_TUI_CLIPBOARD_HPP
+#define FIRMIUS_TUI_CLIPBOARD_HPP
 
 #include <optional>
 #include <string>
@@ -33,3 +34,5 @@ public:
 };
 
 } // namespace firmius::tui
+
+#endif // FIRMIUS_TUI_CLIPBOARD_HPP

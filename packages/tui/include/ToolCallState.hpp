@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_TUI_TOOLCALLSTATE_HPP
+#define FIRMIUS_TUI_TOOLCALLSTATE_HPP
 
 #include "Enums.hpp"
 
@@ -117,3 +118,5 @@ struct AgentState {
 };
 
 } // namespace firmius::tui
+
+#endif // FIRMIUS_TUI_TOOLCALLSTATE_HPP

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_CORE_HISTORYEDITOR_HPP
+#define FIRMIUS_CORE_HISTORYEDITOR_HPP
 
 #include "Context.hpp"
 #include <string>
@@ -39,3 +40,5 @@ public:
 };
 
 } // namespace firmius::core
+
+#endif // FIRMIUS_CORE_HISTORYEDITOR_HPP

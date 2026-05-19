@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_SHARED_INTERRUPTIBLESLEEP_HPP
+#define FIRMIUS_SHARED_INTERRUPTIBLESLEEP_HPP
 
 #include "utils/AbortController.hpp"
 
@@ -84,3 +85,5 @@ inline bool interruptibleSleep(
 }
 
 } // namespace firmius::shared
+
+#endif // FIRMIUS_SHARED_INTERRUPTIBLESLEEP_HPP

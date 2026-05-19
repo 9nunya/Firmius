@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_SERVER_DAEMONSERVICE_HPP
+#define FIRMIUS_SERVER_DAEMONSERVICE_HPP
 
 #include "daemon/Protocol.hpp"
 
@@ -322,3 +323,5 @@ private:
 };
 
 } // namespace firmius::daemon
+
+#endif // FIRMIUS_SERVER_DAEMONSERVICE_HPP

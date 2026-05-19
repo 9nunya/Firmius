@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_TUI_WORKFLOWCOMMAND_HPP
+#define FIRMIUS_TUI_WORKFLOWCOMMAND_HPP
 
 #include "CommandManager.hpp"
 #include "workflow/Workflow.hpp"
@@ -32,3 +33,5 @@ void registerWorkflowCommands(CommandManager &manager,
                               ActionDispatcher &dispatcher);
 
 } // namespace firmius::tui
+
+#endif // FIRMIUS_TUI_WORKFLOWCOMMAND_HPP

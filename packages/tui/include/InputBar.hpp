@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_TUI_INPUTBAR_HPP
+#define FIRMIUS_TUI_INPUTBAR_HPP
 
 #include "AppState.hpp"
 #include "Component.hpp"
@@ -46,3 +47,5 @@ private:
 };
 
 } // namespace firmius::tui
+
+#endif // FIRMIUS_TUI_INPUTBAR_HPP

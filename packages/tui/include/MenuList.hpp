@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_TUI_MENULIST_HPP
+#define FIRMIUS_TUI_MENULIST_HPP
 
 #include "Overlay.hpp"
 
@@ -98,3 +99,5 @@ private:
 };
 
 } // namespace firmius::tui
+
+#endif // FIRMIUS_TUI_MENULIST_HPP

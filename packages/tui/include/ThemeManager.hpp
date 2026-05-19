@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_TUI_THEMEMANAGER_HPP
+#define FIRMIUS_TUI_THEMEMANAGER_HPP
 
 #include <optional>
 #include <string>
@@ -143,3 +144,5 @@ private:
 };
 
 } // namespace firmius::tui
+
+#endif // FIRMIUS_TUI_THEMEMANAGER_HPP

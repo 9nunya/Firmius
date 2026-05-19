@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_PROVIDER_CODEXPROVIDER_HPP
+#define FIRMIUS_PROVIDER_CODEXPROVIDER_HPP
 
 #include "providers/BaseOAuthProvider.hpp"
 #include <map>
@@ -70,3 +71,5 @@ private:
 };
 
 } // namespace firmius::provider
+
+#endif // FIRMIUS_PROVIDER_CODEXPROVIDER_HPP

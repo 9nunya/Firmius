@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_TUI_CONNECTOVERLAY_HPP
+#define FIRMIUS_TUI_CONNECTOVERLAY_HPP
 
 #include "Overlay.hpp"
 #include "daemon/Protocol.hpp"
@@ -113,3 +114,5 @@ private:
 };
 
 } // namespace firmius::tui
+
+#endif // FIRMIUS_TUI_CONNECTOVERLAY_HPP

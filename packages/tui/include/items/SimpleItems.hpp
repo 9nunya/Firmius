@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_TUI_SIMPLEITEMS_HPP
+#define FIRMIUS_TUI_SIMPLEITEMS_HPP
 
 #include "TranscriptItem.hpp"
 
@@ -51,3 +52,5 @@ private:
 };
 
 } // namespace firmius::tui
+
+#endif // FIRMIUS_TUI_SIMPLEITEMS_HPP

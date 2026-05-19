@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_PROVIDER_KIMIPROVIDER_HPP
+#define FIRMIUS_PROVIDER_KIMIPROVIDER_HPP
 
 #include "providers/BaseAnthropicProvider.hpp"
 #include <string>
@@ -52,3 +53,5 @@ public:
 };
 
 } // namespace firmius::provider
+
+#endif // FIRMIUS_PROVIDER_KIMIPROVIDER_HPP

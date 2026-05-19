@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_SERVER_DAEMONLOG_HPP
+#define FIRMIUS_SERVER_DAEMONLOG_HPP
 
 // Lightweight stderr logger for the firmius daemon and its hot paths.
 //
@@ -190,3 +191,5 @@ private:
 
 // Always BEGIN/END at PHASE level (visible at v0 too).
 #define FIRMIUS_DLOG_PHASE_SCOPE(label) FIRMIUS_DLOG_SCOPE_AT("PHASE", label, 0)
+
+#endif // FIRMIUS_SERVER_DAEMONLOG_HPP

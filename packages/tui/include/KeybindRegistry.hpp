@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_TUI_KEYBINDREGISTRY_HPP
+#define FIRMIUS_TUI_KEYBINDREGISTRY_HPP
 
 #include "AppState.hpp"
 
@@ -64,3 +65,5 @@ inline constexpr const char *kEnd = "\x1b[F";
 } // namespace keys
 
 } // namespace firmius::tui
+
+#endif // FIRMIUS_TUI_KEYBINDREGISTRY_HPP

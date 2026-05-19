@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_SHARED_TEMPOAUTHSERVER_HPP
+#define FIRMIUS_SHARED_TEMPOAUTHSERVER_HPP
 
 #include <atomic>
 #include <functional>
@@ -43,3 +44,5 @@ private:
 };
 
 } // namespace firmius::shared
+
+#endif // FIRMIUS_SHARED_TEMPOAUTHSERVER_HPP

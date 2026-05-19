@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_TUI_TRANSCRIPTITEM_HPP
+#define FIRMIUS_TUI_TRANSCRIPTITEM_HPP
 
 #include <chrono>
 #include <string>
@@ -50,3 +51,5 @@ private:
 };
 
 } // namespace firmius::tui
+
+#endif // FIRMIUS_TUI_TRANSCRIPTITEM_HPP

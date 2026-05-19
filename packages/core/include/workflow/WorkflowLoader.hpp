@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_CORE_WORKFLOWLOADER_HPP
+#define FIRMIUS_CORE_WORKFLOWLOADER_HPP
 
 #include "workflow/Workflow.hpp"
 #include <map>
@@ -81,3 +82,5 @@ private:
 };
 
 } // namespace firmius::core
+
+#endif // FIRMIUS_CORE_WORKFLOWLOADER_HPP

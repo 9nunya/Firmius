@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_SERVER_PROTOCOLSERIALIZATION_HPP
+#define FIRMIUS_SERVER_PROTOCOLSERIALIZATION_HPP
 
 #include "daemon/Protocol.hpp"
 #include "Serialization.hpp"
@@ -498,3 +499,5 @@ rapidjson::Value toJsonValue(const RedoExecuteResponse &r, rapidjson::Document::
 RedoExecuteResponse redoExecuteResponseFromJson(const rapidjson::Value &v);
 
 } // namespace firmius::daemon
+
+#endif // FIRMIUS_SERVER_PROTOCOLSERIALIZATION_HPP

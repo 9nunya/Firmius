@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_AUDITS_LOOPCANCELLATIONAUDIT_HPP
+#define FIRMIUS_AUDITS_LOOPCANCELLATIONAUDIT_HPP
 #include "IAudit.hpp"
 #include <string>
 #include <vector>
@@ -13,3 +14,5 @@ public:
 };
 
 } // namespace firmius::audits
+
+#endif // FIRMIUS_AUDITS_LOOPCANCELLATIONAUDIT_HPP

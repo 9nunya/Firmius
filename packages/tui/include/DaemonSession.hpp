@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_TUI_DAEMONSESSION_HPP
+#define FIRMIUS_TUI_DAEMONSESSION_HPP
 
 #include "daemon/DaemonClient.hpp"
 #include "daemon/Protocol.hpp"
@@ -131,3 +132,5 @@ private:
 };
 
 } // namespace firmius::tui
+
+#endif // FIRMIUS_TUI_DAEMONSESSION_HPP

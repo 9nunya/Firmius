@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_TUI_PRESENTERINIT_HPP
+#define FIRMIUS_TUI_PRESENTERINIT_HPP
 
 #include "tools/ToolPresenterRegistry.hpp"
 #include "tools/ProcessPresenter.hpp"
@@ -46,3 +47,5 @@ inline void registerAllPresenters() {
 }
 
 } // namespace firmius::tui
+
+#endif // FIRMIUS_TUI_PRESENTERINIT_HPP

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_TUI_PERMISSIONPROMPTOVERLAY_HPP
+#define FIRMIUS_TUI_PERMISSIONPROMPTOVERLAY_HPP
 
 #include "AppState.hpp"
 #include "Overlay.hpp"
@@ -87,3 +88,5 @@ private:
 };
 
 } // namespace firmius::tui
+
+#endif // FIRMIUS_TUI_PERMISSIONPROMPTOVERLAY_HPP

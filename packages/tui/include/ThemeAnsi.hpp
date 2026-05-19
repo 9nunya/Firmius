@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_TUI_THEMEANSI_HPP
+#define FIRMIUS_TUI_THEMEANSI_HPP
 
 #include "Terminal.hpp"
 #include "ThemeManager.hpp"
@@ -92,3 +93,5 @@ inline std::string divider(int width, char ch = '-') {
 }
 
 } // namespace firmius::tui::theme_ansi
+
+#endif // FIRMIUS_TUI_THEMEANSI_HPP

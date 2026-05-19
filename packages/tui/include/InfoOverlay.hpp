@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_TUI_INFOOVERLAY_HPP
+#define FIRMIUS_TUI_INFOOVERLAY_HPP
 
 #include "Overlay.hpp"
 
@@ -45,3 +46,5 @@ private:
 };
 
 } // namespace firmius::tui
+
+#endif // FIRMIUS_TUI_INFOOVERLAY_HPP

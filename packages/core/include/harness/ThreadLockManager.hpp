@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_CORE_THREADLOCKMANAGER_HPP
+#define FIRMIUS_CORE_THREADLOCKMANAGER_HPP
 
 #include <map>
 #include <mutex>
@@ -62,3 +63,5 @@ private:
 };
 
 } // namespace firmius::core
+
+#endif // FIRMIUS_CORE_THREADLOCKMANAGER_HPP

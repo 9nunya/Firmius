@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_CLI_CLIOPTIONS_HPP
+#define FIRMIUS_CLI_CLIOPTIONS_HPP
 
 #include "Enums.hpp"
 #include <fstream>
@@ -92,3 +93,5 @@ inline CliOptions parseCliOptions(int argc, char **argv) {
 }
 
 } // namespace firmius::cli
+
+#endif // FIRMIUS_CLI_CLIOPTIONS_HPP

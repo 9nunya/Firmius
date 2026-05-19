@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_TUI_NOTIFICATIONCENTER_HPP
+#define FIRMIUS_TUI_NOTIFICATIONCENTER_HPP
 
 #include <chrono>
 #include <cstdint>
@@ -112,3 +113,5 @@ private:
 };
 
 } // namespace firmius::tui
+
+#endif // FIRMIUS_TUI_NOTIFICATIONCENTER_HPP

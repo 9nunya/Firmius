@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_TUI_DELEGATEPRESENTER_HPP
+#define FIRMIUS_TUI_DELEGATEPRESENTER_HPP
 
 #include "IToolPresenter.hpp"
 
@@ -13,3 +14,5 @@ public:
 };
 
 } // namespace firmius::tui
+
+#endif // FIRMIUS_TUI_DELEGATEPRESENTER_HPP

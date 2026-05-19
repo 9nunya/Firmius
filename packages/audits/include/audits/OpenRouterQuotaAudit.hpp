@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_AUDITS_OPENROUTERQUOTAAUDIT_HPP
+#define FIRMIUS_AUDITS_OPENROUTERQUOTAAUDIT_HPP
 
 #include "IAudit.hpp"
 
@@ -12,3 +13,5 @@ public:
 };
 
 } // namespace firmius::audits
+
+#endif // FIRMIUS_AUDITS_OPENROUTERQUOTAAUDIT_HPP

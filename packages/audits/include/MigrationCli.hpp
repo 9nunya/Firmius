@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_AUDITS_MIGRATIONCLI_HPP
+#define FIRMIUS_AUDITS_MIGRATIONCLI_HPP
 
 #include <string>
 #include <vector>
@@ -17,3 +18,5 @@ MigrationCliOptions parseMigrationCliOptions(int argc, char **argv);
 void runMigrationCli(const MigrationCliOptions &options);
 
 } // namespace firmius::audits
+
+#endif // FIRMIUS_AUDITS_MIGRATIONCLI_HPP

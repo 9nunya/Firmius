@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_CORE_WORKFLOW_HPP
+#define FIRMIUS_CORE_WORKFLOW_HPP
 
 #include <map>
 #include <optional>
@@ -279,3 +280,5 @@ struct Workflow {
 };
 
 } // namespace firmius::core
+
+#endif // FIRMIUS_CORE_WORKFLOW_HPP

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_AUDITS_PROMISESAUDIT_HPP
+#define FIRMIUS_AUDITS_PROMISESAUDIT_HPP
 
 #include "IAudit.hpp"
 #include <string>
@@ -14,3 +15,5 @@ public:
 };
 
 } // namespace firmius::audits
+
+#endif // FIRMIUS_AUDITS_PROMISESAUDIT_HPP

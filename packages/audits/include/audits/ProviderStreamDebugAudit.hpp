@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_AUDITS_PROVIDERSTREAMDEBUGAUDIT_HPP
+#define FIRMIUS_AUDITS_PROVIDERSTREAMDEBUGAUDIT_HPP
 
 #include "IAudit.hpp"
 #include "Context.hpp"
@@ -46,3 +47,5 @@ private:
 };
 
 } // namespace firmius::audits
+
+#endif // FIRMIUS_AUDITS_PROVIDERSTREAMDEBUGAUDIT_HPP

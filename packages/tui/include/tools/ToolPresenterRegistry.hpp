@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_TUI_TOOLPRESENTERREGISTRY_HPP
+#define FIRMIUS_TUI_TOOLPRESENTERREGISTRY_HPP
 
 #include "IToolPresenter.hpp"
 
@@ -26,3 +27,5 @@ private:
 };
 
 } // namespace firmius::tui
+
+#endif // FIRMIUS_TUI_TOOLPRESENTERREGISTRY_HPP

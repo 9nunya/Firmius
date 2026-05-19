@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_PROVIDER_OAUTHWIZARD_HPP
+#define FIRMIUS_PROVIDER_OAUTHWIZARD_HPP
 
 #include <memory>
 #include <optional>
@@ -45,3 +46,5 @@ public:
 };
 
 } // namespace firmius
+
+#endif // FIRMIUS_PROVIDER_OAUTHWIZARD_HPP

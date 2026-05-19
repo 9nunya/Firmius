@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_SHARED_LOGGER_HPP
+#define FIRMIUS_SHARED_LOGGER_HPP
 
 #include <fstream>
 #include <memory>
@@ -45,3 +46,5 @@ private:
 };
 
 }
+
+#endif // FIRMIUS_SHARED_LOGGER_HPP

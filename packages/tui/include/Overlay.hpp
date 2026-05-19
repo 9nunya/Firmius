@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_TUI_OVERLAY_HPP
+#define FIRMIUS_TUI_OVERLAY_HPP
 
 #include "Component.hpp"
 #include "Terminal.hpp"
@@ -25,3 +26,5 @@ public:
 };
 
 } // namespace firmius::tui
+
+#endif // FIRMIUS_TUI_OVERLAY_HPP

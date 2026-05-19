@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_SHARED_CONFIGLOADER_HPP
+#define FIRMIUS_SHARED_CONFIGLOADER_HPP
 
 #include "Context.hpp"
 
@@ -161,3 +162,5 @@ private:
 };
 
 } // namespace firmius::shared
+
+#endif // FIRMIUS_SHARED_CONFIGLOADER_HPP

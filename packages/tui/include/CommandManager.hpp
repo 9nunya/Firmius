@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_TUI_COMMANDMANAGER_HPP
+#define FIRMIUS_TUI_COMMANDMANAGER_HPP
 
 #include <functional>
 #include <map>
@@ -117,3 +118,5 @@ private:
 };
 
 } // namespace firmius::tui
+
+#endif // FIRMIUS_TUI_COMMANDMANAGER_HPP

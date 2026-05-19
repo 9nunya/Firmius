@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_TUI_COMPONENT_HPP
+#define FIRMIUS_TUI_COMPONENT_HPP
 
 #include <string>
 #include <vector>
@@ -23,3 +24,5 @@ public:
 };
 
 } // namespace firmius::tui
+
+#endif // FIRMIUS_TUI_COMPONENT_HPP

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_TUI_PHRASES_HPP
+#define FIRMIUS_TUI_PHRASES_HPP
 
 #include <map>
 #include <string>
@@ -64,3 +65,5 @@ inline std::vector<std::string> livePhrasesForMode(const std::string& mode) {
 }
 
 } // namespace firmius::tui
+
+#endif // FIRMIUS_TUI_PHRASES_HPP

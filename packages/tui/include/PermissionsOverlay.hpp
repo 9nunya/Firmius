@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_TUI_PERMISSIONSOVERLAY_HPP
+#define FIRMIUS_TUI_PERMISSIONSOVERLAY_HPP
 
 #include "Overlay.hpp"
 #include "daemon/Protocol.hpp"
@@ -106,3 +107,5 @@ private:
 };
 
 } // namespace firmius::tui
+
+#endif // FIRMIUS_TUI_PERMISSIONSOVERLAY_HPP

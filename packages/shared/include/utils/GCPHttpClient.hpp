@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_SHARED_GCPHTTPCLIENT_HPP
+#define FIRMIUS_SHARED_GCPHTTPCLIENT_HPP
 
 #include <string>
 #include <map>
@@ -64,3 +65,5 @@ private:
 };
 
 } // namespace firmius::utils
+
+#endif // FIRMIUS_SHARED_GCPHTTPCLIENT_HPP

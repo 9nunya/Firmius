@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_TUI_ANSIOUTPUTPARSER_HPP
+#define FIRMIUS_TUI_ANSIOUTPUTPARSER_HPP
 
 #include <string>
 #include <vector>
@@ -15,3 +16,5 @@ public:
 };
 
 } // namespace firmius::tui
+
+#endif // FIRMIUS_TUI_ANSIOUTPUTPARSER_HPP

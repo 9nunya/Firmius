@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_TUI_APP_HPP
+#define FIRMIUS_TUI_APP_HPP
 
 #include "ActionDispatcher.hpp"
 #include "AgentTabBar.hpp"
@@ -258,3 +259,5 @@ private:
 };
 
 } // namespace firmius::tui
+
+#endif // FIRMIUS_TUI_APP_HPP

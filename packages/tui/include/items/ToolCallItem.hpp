@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_TUI_TOOLCALLITEM_HPP
+#define FIRMIUS_TUI_TOOLCALLITEM_HPP
 
 #include "TranscriptItem.hpp"
 #include "utils/ToolView.hpp"
@@ -89,3 +90,5 @@ private:
 };
 
 } // namespace firmius::tui
+
+#endif // FIRMIUS_TUI_TOOLCALLITEM_HPP

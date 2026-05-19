@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_TUI_GLINTRENDERER_HPP
+#define FIRMIUS_TUI_GLINTRENDERER_HPP
 
 #include <cstdint>
 #include <string>
@@ -32,3 +33,5 @@ public:
 };
 
 } // namespace firmius::tui
+
+#endif // FIRMIUS_TUI_GLINTRENDERER_HPP

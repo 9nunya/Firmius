@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_TUI_AGENTTABBAR_HPP
+#define FIRMIUS_TUI_AGENTTABBAR_HPP
 
 #include "AppState.hpp"
 #include "Component.hpp"
@@ -19,3 +20,5 @@ private:
 };
 
 } // namespace firmius::tui
+
+#endif // FIRMIUS_TUI_AGENTTABBAR_HPP

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_TUI_STREAMINGITEMS_HPP
+#define FIRMIUS_TUI_STREAMINGITEMS_HPP
 
 #include "TranscriptItem.hpp"
 
@@ -60,3 +61,5 @@ private:
 };
 
 } // namespace firmius::tui
+
+#endif // FIRMIUS_TUI_STREAMINGITEMS_HPP

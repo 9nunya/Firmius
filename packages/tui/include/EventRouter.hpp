@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_TUI_EVENTROUTER_HPP
+#define FIRMIUS_TUI_EVENTROUTER_HPP
 
 #include "AppState.hpp"
 #include "Enums.hpp"
@@ -90,3 +91,5 @@ private:
 };
 
 } // namespace firmius::tui
+
+#endif // FIRMIUS_TUI_EVENTROUTER_HPP

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_SHARED_ABORTCONTROLLER_HPP
+#define FIRMIUS_SHARED_ABORTCONTROLLER_HPP
 
 #include <atomic>
 #include <chrono>
@@ -81,3 +82,5 @@ private:
 };
 
 } // namespace firmius::shared
+
+#endif // FIRMIUS_SHARED_ABORTCONTROLLER_HPP

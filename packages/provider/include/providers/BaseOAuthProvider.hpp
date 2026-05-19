@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_PROVIDER_BASEOAUTHPROVIDER_HPP
+#define FIRMIUS_PROVIDER_BASEOAUTHPROVIDER_HPP
 
 #include "IProvider.hpp"
 #include "providers/OAuthWizard.hpp"
@@ -118,3 +119,5 @@ protected:
 };
 
 } // namespace firmius::provider
+
+#endif // FIRMIUS_PROVIDER_BASEOAUTHPROVIDER_HPP

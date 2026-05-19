@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_SHARED_LINERANGE_HPP
+#define FIRMIUS_SHARED_LINERANGE_HPP
 
 #include <string>
 #include <string_view>
@@ -112,3 +113,5 @@ public:
 };
 
 } // namespace firmius::shared::utils
+
+#endif // FIRMIUS_SHARED_LINERANGE_HPP

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_PROVIDER_ANTIGRAVITYPROVIDER_HPP
+#define FIRMIUS_PROVIDER_ANTIGRAVITYPROVIDER_HPP
 
 #include "providers/BaseOAuthProvider.hpp"
 #include <atomic>
@@ -85,3 +86,5 @@ private:
 };
 
 } // namespace firmius::provider
+
+#endif // FIRMIUS_PROVIDER_ANTIGRAVITYPROVIDER_HPP

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_TUI_TERMINAL_HPP
+#define FIRMIUS_TUI_TERMINAL_HPP
 
 #include <chrono>
 #include <optional>
@@ -136,3 +137,5 @@ std::string fitToWidth(const std::string& text, int width, char pad = ' ');
 } // namespace ansi
 
 } // namespace firmius::tui
+
+#endif // FIRMIUS_TUI_TERMINAL_HPP

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_TUI_ANSIPARSER_HPP
+#define FIRMIUS_TUI_ANSIPARSER_HPP
 
 #include "Cell.hpp"
 
@@ -21,3 +22,5 @@ public:
 };
 
 } // namespace firmius::tui
+
+#endif // FIRMIUS_TUI_ANSIPARSER_HPP

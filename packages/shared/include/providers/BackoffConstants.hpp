@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_SHARED_BACKOFFCONSTANTS_HPP
+#define FIRMIUS_SHARED_BACKOFFCONSTANTS_HPP
 
 #include <array>
 #include <cstddef>
@@ -49,3 +50,5 @@ struct BackoffConstants {
 };
 
 } // namespace firmius::shared
+
+#endif // FIRMIUS_SHARED_BACKOFFCONSTANTS_HPP

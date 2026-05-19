@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_TUI_STATUSBAR_HPP
+#define FIRMIUS_TUI_STATUSBAR_HPP
 
 #include "AppState.hpp"
 #include "Component.hpp"
@@ -30,3 +31,5 @@ private:
 };
 
 } // namespace firmius::tui
+
+#endif // FIRMIUS_TUI_STATUSBAR_HPP

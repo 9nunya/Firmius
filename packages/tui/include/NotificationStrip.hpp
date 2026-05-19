@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_TUI_NOTIFICATIONSTRIP_HPP
+#define FIRMIUS_TUI_NOTIFICATIONSTRIP_HPP
 
 #include "Component.hpp"
 #include "NotificationCenter.hpp"
@@ -35,3 +36,5 @@ private:
 };
 
 } // namespace firmius::tui
+
+#endif // FIRMIUS_TUI_NOTIFICATIONSTRIP_HPP

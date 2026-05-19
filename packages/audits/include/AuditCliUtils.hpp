@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_AUDITS_AUDITCLIUTILS_HPP
+#define FIRMIUS_AUDITS_AUDITCLIUTILS_HPP
 
 #include <algorithm>
 #include <string>
@@ -32,3 +33,5 @@ normalizeAuditArgs(std::string_view requestedAuditId,
 }
 
 } // namespace firmius::audits::cli
+
+#endif // FIRMIUS_AUDITS_AUDITCLIUTILS_HPP

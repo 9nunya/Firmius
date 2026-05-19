@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_TUI_LAYOUT_HPP
+#define FIRMIUS_TUI_LAYOUT_HPP
 
 #include "Component.hpp"
 
@@ -32,3 +33,5 @@ private:
 };
 
 } // namespace firmius::tui
+
+#endif // FIRMIUS_TUI_LAYOUT_HPP

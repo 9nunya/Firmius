@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_SERVER_DAEMONCLIENT_HPP
+#define FIRMIUS_SERVER_DAEMONCLIENT_HPP
 
 #include "daemon/Protocol.hpp"
 #include "lsp/JsonRpcTransport.hpp"
@@ -164,3 +165,5 @@ private:
 };
 
 } // namespace firmius::daemon
+
+#endif // FIRMIUS_SERVER_DAEMONCLIENT_HPP

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_SERVER_PROTOCOL_HPP
+#define FIRMIUS_SERVER_PROTOCOL_HPP
 
 #include "Context.hpp"
 #include "ConfigLoader.hpp"
@@ -1542,3 +1543,5 @@ struct DaemonEventEnvelope {
 };
 
 } // namespace firmius::daemon
+
+#endif // FIRMIUS_SERVER_PROTOCOL_HPP

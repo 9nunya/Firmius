@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_PROVIDER_GITLAWBPROVIDER_HPP
+#define FIRMIUS_PROVIDER_GITLAWBPROVIDER_HPP
 
 #include "providers/BaseOpenAIProvider.hpp"
 
@@ -19,3 +20,5 @@ protected:
 };
 
 } // namespace firmius::provider
+
+#endif // FIRMIUS_PROVIDER_GITLAWBPROVIDER_HPP

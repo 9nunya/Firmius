@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_SHARED_PERMISSIONPROFILES_HPP
+#define FIRMIUS_SHARED_PERMISSIONPROFILES_HPP
 
 #include "Enums.hpp"
 
@@ -29,3 +30,5 @@ std::string permissionModeStorageString(ThreadPermissionMode mode);
 ThreadPermissionMode permissionModeFromStorageString(const std::string &value);
 
 } // namespace firmius::shared
+
+#endif // FIRMIUS_SHARED_PERMISSIONPROFILES_HPP

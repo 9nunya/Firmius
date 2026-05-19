@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_TUI_TOOLARGSPARSER_HPP
+#define FIRMIUS_TUI_TOOLARGSPARSER_HPP
 
 #include <rapidjson/document.h>
 #include <string>
@@ -19,3 +20,5 @@ inline std::string extractAction(const std::string& argsJson) {
 }
 
 } // namespace firmius::tui::toolArgsParser
+
+#endif // FIRMIUS_TUI_TOOLARGSPARSER_HPP

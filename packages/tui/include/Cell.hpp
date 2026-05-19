@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FIRMIUS_TUI_CELL_HPP
+#define FIRMIUS_TUI_CELL_HPP
 
 #include <compare>
 #include <cstdint>
@@ -49,3 +50,5 @@ struct Cell {
 using CellGrid = std::vector<std::vector<Cell>>;
 
 } // namespace firmius::tui
+
+#endif // FIRMIUS_TUI_CELL_HPP
