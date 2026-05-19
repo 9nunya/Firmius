@@ -546,6 +546,12 @@ bool checkSandboxImage() {
 }
 
 int runAudit(const std::vector<std::string> &args) {
+#if defined(_WIN32)
+  (void)args;
+  std::cerr << "Harness chaos audit is not supported on Windows yet "
+               "(requires POSIX process control + Docker)." << std::endl;
+  return EXIT_GENERAL_FAILURE;
+#else
   std::string providerId;
   std::string modelId;
   for (size_t i = 0; i < args.size(); ++i) {
@@ -675,6 +681,7 @@ int runAudit(const std::vector<std::string> &args) {
                "session saved"
             << std::endl;
   return EXIT_SUCCESS_ALL;
+#endif
 }
 } // namespace
 

@@ -44,6 +44,10 @@ if((CMAKE_CXX_COMPILER_ID STREQUAL "GNU") OR (CMAKE_CXX_COMPILER_ID MATCHES "Cla
     # operators; suppressing the warning rather than adding ~50 manual
     # operator== implementations.
     add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-Wno-error=defaulted-function-deleted>)
+    # Apple Clang's -Wunused-but-set-variable trips on a few audit / scratch
+    # variables that are set for diagnostics but not yet read. Downgrade to
+    # warning rather than rewriting for one warning category.
+    add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-Wno-error=unused-but-set-variable>)
   endif()
 elseif(MSVC)
   add_compile_options(/O2 /GL /Gy /GS-)
