@@ -95,6 +95,7 @@ jobs:
             mingw-w64-x86_64-curl
             mingw-w64-x86_64-sqlite3
             mingw-w64-x86_64-pkgconf
+            mingw-w64-x86_64-tools-git
 
       - name: Configure
         if: runner.os != 'Windows'

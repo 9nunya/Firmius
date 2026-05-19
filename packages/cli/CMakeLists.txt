@@ -37,3 +37,17 @@ if(CMAKE_OBJCOPY AND CMAKE_STRIP)
 else()
   message(STATUS "Skipping split debug symbols for firmius (objcopy/strip unavailable)")
 endif()
+
+# ─── Windows: copy onnxruntime.dll next to firmius.exe ──────────────────────
+# On POSIX the .so is found via RPATH; on Windows the loader only searches the
+# directory of the executable + PATH. Copy the DLL into the binary output dir
+# at build time so `firmius.exe` finds it without further setup.
+if(WIN32 AND ONNXRUNTIME_RUNTIME_DLL AND EXISTS "${ONNXRUNTIME_RUNTIME_DLL}")
+  add_custom_command(TARGET firmius POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${ONNXRUNTIME_RUNTIME_DLL}"
+            "$<TARGET_FILE_DIR:firmius>/"
+    COMMENT "Copying onnxruntime.dll next to firmius.exe..."
+    VERBATIM
+  )
+endif()

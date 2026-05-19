@@ -58,3 +58,14 @@ endif()
 if(WIN32)
   target_link_libraries(firmius_server PRIVATE ws2_32)
 endif()
+
+# ─── Windows: copy onnxruntime.dll next to firmiusd.exe ─────────────────────
+if(WIN32 AND ONNXRUNTIME_RUNTIME_DLL AND EXISTS "${ONNXRUNTIME_RUNTIME_DLL}")
+  add_custom_command(TARGET firmiusd POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${ONNXRUNTIME_RUNTIME_DLL}"
+            "$<TARGET_FILE_DIR:firmiusd>/"
+    COMMENT "Copying onnxruntime.dll next to firmiusd.exe..."
+    VERBATIM
+  )
+endif()
