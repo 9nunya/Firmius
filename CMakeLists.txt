@@ -26,6 +26,8 @@ add_subdirectory(packages/tui)
 add_subdirectory(packages/cli)
 add_subdirectory(tests/shared)
 add_subdirectory(tests/core)
+add_subdirectory(tests/server)
+add_subdirectory(tests/tui)
 add_subdirectory(tests/unit)
 
 # Install the firmius binary to the platform-specific bindir.

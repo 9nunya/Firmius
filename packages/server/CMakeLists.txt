@@ -42,26 +42,6 @@ add_executable(firmiusd)
 target_sources(firmiusd PRIVATE src/main.cpp)
 target_link_libraries(firmiusd PRIVATE firmius::server)
 
-add_executable(firmius_server_daemon_ipc_smoke_tests)
-target_sources(firmius_server_daemon_ipc_smoke_tests PRIVATE
-  src/daemon/DaemonClientIpcSmokeTests.cpp
-)
-target_link_libraries(firmius_server_daemon_ipc_smoke_tests PRIVATE
-  firmius::server
-  GTest::gtest_main
-)
-add_test(NAME firmius_server_daemon_ipc_smoke_tests COMMAND firmius_server_daemon_ipc_smoke_tests)
-
-add_executable(firmius_server_tui_parity_audit_tests)
-target_sources(firmius_server_tui_parity_audit_tests PRIVATE
-  src/daemon/DaemonTuiParityAuditTests.cpp
-)
-target_link_libraries(firmius_server_tui_parity_audit_tests PRIVATE
-  firmius::server
-  GTest::gtest_main
-)
-add_test(NAME firmius_server_tui_parity_audit_tests COMMAND firmius_server_tui_parity_audit_tests)
-
 target_include_directories(firmiusd PRIVATE
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/packages/shared/include>
