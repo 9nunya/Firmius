@@ -1,4 +1,12 @@
 cmake_minimum_required(VERSION 3.16)
+
+# macOS deployment target — std::jthread + std::stop_token require libc++
+# from Xcode 16's libc++, which only links against macOS 13.4+. Set this
+# BEFORE project() so compiler detection picks it up.
+if(APPLE AND NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET)
+  set(CMAKE_OSX_DEPLOYMENT_TARGET "13.4" CACHE STRING "Minimum macOS deployment target")
+endif()
+
 project(firmius VERSION 1.0.0 LANGUAGES C CXX)
 
 if(APPLE)

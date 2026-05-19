@@ -20,7 +20,9 @@
 #include <rapidjson/pointer.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
+#if !defined(_WIN32)
 #include <sys/wait.h>
+#endif
 #include <thread>
 
 namespace firmius::core::hooks {
@@ -104,9 +106,13 @@ int defaultShellRunner(const std::string &command,
   }
   exitCode = ::pclose(pipe);
   if (exitCode != -1) {
+#if defined(_WIN32)
+    // Windows _pclose() returns the child's exit code directly.
+#else
     if (WIFEXITED(exitCode)) {
       exitCode = WEXITSTATUS(exitCode);
     }
+#endif
   }
 
   if (stdoutOut) {
