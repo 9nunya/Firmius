@@ -215,6 +215,12 @@ function(add_ts_parser TARGET_NAME SOURCE_DIR)
   )
   # Generated parser code produces many warnings — suppress them all
   target_compile_options(${TARGET_NAME} PRIVATE -w)
+  # Some tree-sitter parsers (notably yaml) use int8_t/int32_t without
+  # including <stdint.h>. Force-include it on every parser TU; harmless
+  # on platforms where it's already pulled in transitively.
+  if(NOT MSVC)
+    target_compile_options(${TARGET_NAME} PRIVATE -include stdint.h)
+  endif()
   set_target_properties(${TARGET_NAME} PROPERTIES C_STANDARD 11)
 endfunction()
 

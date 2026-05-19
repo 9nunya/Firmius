@@ -129,8 +129,8 @@ void printHistory(const AgentHistory& history) {
 }
 
 // Global flag to enable raw SSE logging for codex provider
-std::atomic<bool> gLogRawSse{false};
-std::ofstream gSseLogFile;
+[[maybe_unused]] std::atomic<bool> gLogRawSse{false};
+[[maybe_unused]] std::ofstream gSseLogFile;
 
 struct ScenarioExpectations {
     bool requireThinking = false;
