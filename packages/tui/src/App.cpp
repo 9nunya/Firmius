@@ -636,12 +636,6 @@ void App::setupKeybinds() {
   // Expand/collapse tool output (Ctrl+E).
   keybinds_.registerKeybind({keys::kCtrlE, "Expand", ActivityContext::Idle,
                              true, [this]() {
-                               if (auto* think = state_.activeThinkingItem()) {
-                                 think->setExpanded(!think->isExpanded());
-                                 syncScrollback();
-                                 state_.markDirtyPublic();
-                                 return;
-                               }
                                auto* tc = state_.findLastFocusedToolCall();
                                if (tc) {
                                  tc->setExpanded(!tc->isExpanded());
