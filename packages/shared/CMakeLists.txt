@@ -22,6 +22,7 @@ target_sources(firmius_shared PRIVATE
     src/utils/ModelUtil.cpp
     src/utils/PermissionProfiles.cpp
     src/utils/PlatformPaths.cpp
+    src/utils/ShellUtil.cpp
     src/utils/FrontmatterParser.cpp
     src/utils/Hashline.cpp
     src/utils/GlobMatch.cpp
@@ -77,6 +78,7 @@ target_sources(firmius_shared PUBLIC
     include/utils/ModelUtil.hpp
     include/utils/PermissionProfiles.hpp
     include/utils/PlatformPaths.hpp
+    include/utils/ShellUtil.hpp
     include/utils/SpillIfLarge.hpp
     include/utils/StringUtil.hpp
     include/utils/TempOAuthServer.hpp

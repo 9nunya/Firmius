@@ -1,4 +1,5 @@
 #include "hosts/LocalHost.hpp"
+#include "utils/ShellUtil.hpp"
 #include "utils/StringUtil.hpp"
 
 #include <chrono>
@@ -25,20 +26,8 @@ using namespace firmius::shared;
 
 namespace {
 #if defined(_WIN32)
-std::string escapeForCmd(const std::string &command) {
-  std::string escaped;
-  escaped.reserve(command.size() + 8);
-  for (char ch : command) {
-    if (ch == '"') {
-      escaped += '\\';
-    }
-    escaped += ch;
-  }
-  return escaped;
-}
-
 std::string buildWindowsShellCommand(const std::string &command) {
-  return "cmd.exe /S /C \"" + escapeForCmd(command) + "\"";
+  return "cmd.exe /S /C \"" + firmius::shared::escapeForCmd(command) + "\"";
 }
 
 std::vector<char>

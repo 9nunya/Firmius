@@ -6,6 +6,7 @@
 #include "lsp/LspProtocol.hpp"
 #include "lsp/LspServerManager.hpp"
 #include "lsp/LspServerRegistry.hpp"
+#include "utils/ShellUtil.hpp"
 
 #include <algorithm>
 #include <array>
@@ -57,21 +58,6 @@ std::string trim(std::string value) {
   return value;
 }
 
-std::string shellQuoteSingle(const std::string &value) {
-  std::string quoted;
-  quoted.reserve(value.size() + 2);
-  quoted.push_back('\'');
-  for (char ch : value) {
-    if (ch == '\'') {
-      quoted += "'\\''";
-    } else {
-      quoted.push_back(ch);
-    }
-  }
-  quoted.push_back('\'');
-  return quoted;
-}
-
 std::vector<std::string> runGitLsFiles(const std::string &root) {
   std::vector<std::string> lines;
   if (root.empty()) {
@@ -79,7 +65,7 @@ std::vector<std::string> runGitLsFiles(const std::string &root) {
   }
 
   const std::string command =
-      "git -C " + shellQuoteSingle(root) + " ls-files 2>/dev/null";
+      "git -C " + firmius::shared::shellQuoteSingle(root) + " ls-files 2>/dev/null";
   FILE *pipe = ::popen(command.c_str(), "r");
   if (pipe == nullptr) {
     return lines;
