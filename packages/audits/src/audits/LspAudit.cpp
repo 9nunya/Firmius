@@ -1,6 +1,7 @@
 #include "audits/LspAudit.hpp"
 #include "lsp/LspServerManager.hpp"
 #include "lsp/LspService.hpp"
+#include "utils/PlatformPaths.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -28,21 +29,7 @@ struct ParsedArgs {
     if (firmiusHome != nullptr && *firmiusHome != '\0') {
       return fs::path(firmiusHome) / "cache/swebench/repos";
     }
-#if defined(_WIN32)
-    const char *localAppData = std::getenv("LOCALAPPDATA");
-    if (localAppData != nullptr && *localAppData != '\0') {
-      return fs::path(localAppData) / "Firmius/cache/swebench/repos";
-    }
-    const char *userProfile = std::getenv("USERPROFILE");
-    if (userProfile != nullptr && *userProfile != '\0') {
-      return fs::path(userProfile) / ".firmius/cache/swebench/repos";
-    }
-#endif
-    const char *home = std::getenv("HOME");
-    if (home != nullptr && *home != '\0') {
-      return fs::path(home) / ".firmius/cache/swebench/repos";
-    }
-    return fs::temp_directory_path() / "firmius/cache/swebench/repos";
+    return firmius::shared::PlatformPaths::firmiusHomeDir() / "cache/swebench/repos";
   }();
   std::optional<fs::path> explicitRepo;
   size_t sampleCount = 100;

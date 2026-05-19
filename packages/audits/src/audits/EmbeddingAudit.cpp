@@ -31,7 +31,7 @@ shared::AuditResult EmbeddingAudit::run(const std::vector<std::string> &) {
   result.auditId = getId();
   result.passed = true;
 
-  std::string modelDir = "/tmp/firmius_audit_embedding";
+  std::string modelDir = (std::filesystem::temp_directory_path() / "firmius_audit_embedding").string();
   std::string storePath = modelDir + "/store";
   int downloadProgressUpdates = 0;
   uint64_t lastBytes = 0;

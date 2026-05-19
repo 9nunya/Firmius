@@ -6,6 +6,7 @@
 #include "persistence/ThreadManager.hpp"
 #include "providers/ProviderRegistry.hpp"
 #include "providers/CodexProvider.hpp"
+#include "utils/PlatformPaths.hpp"
 #include "Enums.hpp"
 #include <algorithm>
 #include <chrono>
@@ -47,9 +48,7 @@ std::string getTimestamp() {
 }
 
 std::string getFirmiusThreadsDir() {
-    const char* home = std::getenv("HOME");
-    std::string base = home ? home : "/tmp";
-    return base + "/.firmius/threads";
+    return (firmius::shared::PlatformPaths::firmiusHomeDir() / "threads").string();
 }
 
 std::string escapeString(const std::string& s) {
@@ -916,7 +915,7 @@ shared::AuditResult ProviderStreamDebugAudit::run(const std::vector<std::string>
         } else if (arg == "--raw-sse-stdout") {
             rawSseStdout = true;
         } else if (arg == "--raw-sse") {
-            rawSseLogPath = "/tmp/firmius_provider_raw_sse.log";
+            rawSseLogPath = (std::filesystem::temp_directory_path() / "firmius_provider_raw_sse.log").string();
         } else if (arg == "--show-history") {
             showHistory = true;
         } else if (!arg.empty() && arg[0] != '-') {

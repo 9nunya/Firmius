@@ -9,6 +9,7 @@
 #include "benchmarks/BenchmarkFactory.hpp"
 #include "benchmarks/BenchmarkSession.hpp"
 #include "utils/Logger.hpp"
+#include "utils/PlatformPaths.hpp"
 #include "utils/StringUtil.hpp"
 #include "utils/ToolSummaries.hpp"
 #include "utils/ToolView.hpp"
@@ -448,8 +449,7 @@ shared::AuditResult BenchmarksAudit::run(const std::vector<std::string> &args) {
   if (*canonicalId == "swebench" || *canonicalId == "turingswebenchpp") {
     config.hostOptions.type = HostType::Docker;
     config.hostOptions.deleteOnExit = true;
-    std::string home = getenv("HOME") ? getenv("HOME") : "/root";
-    std::string cacheDir = home + "/.firmius/cache/" + *canonicalId + "/repos";
+    std::string cacheDir = (PlatformPaths::firmiusHomeDir() / "cache" / *canonicalId / "repos").string();
     config.hostOptions.volumeMounts.push_back(cacheDir + ":/host_cache");
   }
 

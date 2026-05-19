@@ -1,5 +1,6 @@
 #include "benchmarks/MBPPBenchmark.hpp"
 #include "agents/ContextBudget.hpp"
+#include "utils/PlatformPaths.hpp"
 #include <curl/curl.h>
 #include <fstream>
 #include <iostream>
@@ -138,8 +139,7 @@ BenchmarkResult MBPPBenchmark::runTask(const std::string& taskId) {
 void MBPPBenchmark::ensureDatasetLoaded() {
     if (datasetLoaded) return;
 
-    std::string home = getenv("HOME") ? getenv("HOME") : "/root";
-    std::string cacheDir = home + "/.firmius/cache/mbpp";
+    std::string cacheDir = (firmius::shared::PlatformPaths::firmiusHomeDir() / "cache/mbpp").string();
     std::string cacheFile = cacheDir + "/sanitized-mbpp.json";
     
     if (!std::filesystem::exists(cacheFile)) {

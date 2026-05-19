@@ -2,6 +2,8 @@
 
 #include "persistence/Journaler.hpp"
 #include "persistence/ThreadManager.hpp"
+#include "utils/PlatformPaths.hpp"
+#include "utils/StringUtil.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -181,22 +183,17 @@ void summarizeLatencies(const std::string &label, std::vector<double> &lat_ms) {
             << "  max=" << lat_ms.back() << "ms" << std::endl;
 }
 
-// Stand up a scratch FIRMIUS_HOME under parent (or /tmp) and return its path.
+// Stand up a scratch FIRMIUS_HOME under parent (or temp) and return its path.
 std::string mintScratchHome(const std::string &parent) {
-  std::filesystem::path parentPath = parent.empty() ? "/tmp" : parent;
+  std::filesystem::path parentPath = parent.empty()
+      ? std::filesystem::temp_directory_path()
+      : std::filesystem::path(parent);
   std::filesystem::create_directories(parentPath);
-  std::string tmpl =
-      (parentPath / "firmius_persist_XXXXXX").string();
-  std::vector<char> buf(tmpl.begin(), tmpl.end());
-  buf.push_back('\0');
-  if (::mkdtemp(buf.data()) == nullptr) {
-    throw std::runtime_error("mkdtemp failed in " + parent);
-  }
-  std::string home(buf.data());
-  std::filesystem::create_directories(std::filesystem::path(home) /
-                                      ".firmius/threads");
-  ::setenv("HOME", home.c_str(), 1);
-  return home;
+  auto home = parentPath / ("firmius_persist_" + firmius::shared::StringUtil::generateUuid().substr(0, 12));
+  std::filesystem::create_directories(home);
+  std::filesystem::create_directories(home / ".firmius/threads");
+  ::setenv("HOME", home.string().c_str(), 1);
+  return home.string();
 }
 
 long long fileSize(const std::filesystem::path &p) {
@@ -254,7 +251,7 @@ PersistenceStressAudit::run(const std::vector<std::string> &args) {
       scratch_parent = args[++i];
   }
 
-  const std::string saved_home = std::getenv("HOME") ? std::getenv("HOME") : "";
+  const std::string saved_home = PlatformPaths::userHomeDir().string();
   std::string scratchHome;
   try {
     scratchHome = mintScratchHome(scratch_parent);

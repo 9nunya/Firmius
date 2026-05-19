@@ -1,6 +1,7 @@
 #include "benchmarks/AgentBench.hpp"
 #include "agents/ContextBudget.hpp"
 #include "utils/Logger.hpp"
+#include "utils/PlatformPaths.hpp"
 #include <curl/curl.h>
 #include <fstream>
 #include <filesystem>
@@ -122,15 +123,7 @@ BenchmarkResult AgentBench::runTask(const std::string& taskId) {
 void AgentBench::ensureDatasetLoaded() {
     if (datasetLoaded) return;
 
-    std::string home;
-    if (const char* h = std::getenv("HOME")) home = h;
-    if (const char* su = std::getenv("SUDO_USER")) {
-        std::string sudoHome = "/home/" + std::string(su);
-        if (std::filesystem::exists(sudoHome)) home = sudoHome;
-    }
-    if (home.empty()) home = "/root";
-
-    std::string cacheDir = home + "/.firmius/cache/agentbench";
+    std::string cacheDir = (firmius::shared::PlatformPaths::firmiusHomeDir() / "cache/agentbench").string();
     std::string cacheFile = cacheDir + "/os_interaction_dev.json";
 
     if (!std::filesystem::exists(cacheFile)) {
@@ -184,14 +177,7 @@ void AgentBench::ensureScriptsFetched() {
         }
     }
 
-    std::string home;
-    if (const char* h = std::getenv("HOME")) home = h;
-    if (const char* su = std::getenv("SUDO_USER")) {
-        std::string sudoHome = "/home/" + std::string(su);
-        if (std::filesystem::exists(sudoHome)) home = sudoHome;
-    }
-    if (home.empty()) home = "/root";
-    std::string scriptCacheDir = home + "/.firmius/cache/agentbench/scripts/";
+    std::string scriptCacheDir = (firmius::shared::PlatformPaths::firmiusHomeDir() / "cache/agentbench/scripts/").string();
 
     for (const auto& scriptPath : neededScripts) {
         std::string localPath = scriptCacheDir + scriptPath;
@@ -243,14 +229,7 @@ std::string AgentBench::fetchScriptFromGitHub(const std::string& scriptPath, con
 }
 
 std::tuple<std::string, std::string> AgentBench::loadScriptObj(const rapidjson::Value& scriptObj, const std::string& scriptDir) {
-    std::string home;
-    if (const char* h = std::getenv("HOME")) home = h;
-    if (const char* su = std::getenv("SUDO_USER")) {
-        std::string sudoHome = "/home/" + std::string(su);
-        if (std::filesystem::exists(sudoHome)) home = sudoHome;
-    }
-    if (home.empty()) home = "/root";
-    std::string scriptCacheDir = home + "/.firmius/cache/agentbench/scripts/";
+    std::string scriptCacheDir = (firmius::shared::PlatformPaths::firmiusHomeDir() / "cache/agentbench/scripts/").string();
     std::string language = "bash";
 
     if (scriptObj.IsString()) {

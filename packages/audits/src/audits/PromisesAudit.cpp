@@ -10,6 +10,7 @@
 #include "agents/hooks/ScriptRuntime.hpp"
 #include "harness/Harness.hpp"
 #include "providers/ProviderRegistry.hpp"
+#include "utils/PlatformPaths.hpp"
 #include "utils/StringUtil.hpp"
 #include "workflow/WorkflowLoader.hpp"
 
@@ -167,7 +168,7 @@ struct ParsedArgs {
   std::string modelId;
   std::string modelVariant;
   std::string persona = "aster";
-  std::string cwd = "/tmp/firmius_promises_audit";
+  std::string cwd = (std::filesystem::temp_directory_path() / "firmius_promises_audit").string();
   std::string taskFile = "PROMISE_AUDIT_DONE.txt";
   std::string promptsDir;
   std::string hooksDir;
@@ -262,7 +263,7 @@ AuditResult PromisesAudit::run(const std::vector<std::string> &args) {
   Panic::init();
   EnvLoader::load(".env.local");
 
-  const std::string originalHome = std::getenv("HOME") ? std::getenv("HOME") : "";
+  const std::string originalHome = PlatformPaths::userHomeDir().string();
   const std::string originalPromptsDir =
       std::getenv("FIRMIUS_PROMPTS_DIR") ? std::getenv("FIRMIUS_PROMPTS_DIR") : "";
   const std::string originalHooksDir =

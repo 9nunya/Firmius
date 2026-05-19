@@ -3,6 +3,7 @@
 #include "benchmarks/SWEBenchTaskSpec.hpp"
 #include "hosts/LocalHost.hpp"
 #include "utils/Logger.hpp"
+#include "utils/PlatformPaths.hpp"
 
 #include <cstdlib>
 #include <curl/curl.h>
@@ -223,15 +224,7 @@ bool SWEBench::prepareTask(const std::string& taskId) {
     logInfo("\033[1;32m[SWEBench] PREPARING ENVIRONMENT for ", taskId, "\033[0m");
     session.emitLog(benchmarkId_ + ": preparing environment for " + taskId + ".");
 
-    std::string home;
-    if (const char* h = std::getenv("HOME")) home = h;
-    if (const char* su = std::getenv("SUDO_USER")) {
-        std::string sudoHome = "/home/" + std::string(su);
-        if (std::filesystem::exists(sudoHome)) home = sudoHome;
-    }
-    if (home.empty()) home = "/root";
-
-    std::string hostCacheBase = home + "/.firmius/cache/" + benchmarkId_ + "/repos/";
+    std::string hostCacheBase = (firmius::shared::PlatformPaths::firmiusHomeDir() / "cache" / benchmarkId_ / "repos/").string();
     std::string repoCacheDir = hostCacheBase + spec.repo;
 
     if (!std::filesystem::exists(repoCacheDir)) {
@@ -456,8 +449,8 @@ void SWEBench::ensureDatasetLoaded() {
     if (datasetLoaded) {
         return;
     }
-    std::string home = getenv("HOME") ? getenv("HOME") : "/root";
-    std::string cacheFile = home + "/.firmius/cache/" + datasetCacheKey_ + ".json";
+    std::string home = firmius::shared::PlatformPaths::firmiusHomeDir().string();
+    std::string cacheFile = home + "/cache/" + datasetCacheKey_ + ".json";
 
     if (!std::filesystem::exists(cacheFile)) {
         session.emitLog(benchmarkId_ + ": downloading dataset cache.");

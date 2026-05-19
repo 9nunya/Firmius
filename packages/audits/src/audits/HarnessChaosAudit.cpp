@@ -3,6 +3,8 @@
 #include "EnvLoader.hpp"
 #include "Panic.hpp"
 #include "harness/Harness.hpp"
+#include "utils/PlatformPaths.hpp"
+#include "utils/StringUtil.hpp"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -40,14 +42,20 @@ constexpr int EXIT_PHASE5_FAILED = 50;
 constexpr int EXIT_PHASE6_FAILED = 60;
 constexpr int EXIT_GENERAL_FAILURE = 1;
 
+#if defined(_WIN32)
+constexpr const char* kDockerInfoCmd = "docker info > NUL 2>&1";
+constexpr const char* kDockerInspectCmd = "docker image inspect firmius-sandbox:latest > NUL 2>&1";
+#else
+constexpr const char* kDockerInfoCmd = "docker info > /dev/null 2>&1";
+constexpr const char* kDockerInspectCmd = "docker image inspect firmius-sandbox:latest > /dev/null 2>&1";
+#endif
+
 class TempDirGuard {
 public:
-  explicit TempDirGuard(const std::string &baseTemplate) {
-    char *path = ::strdup(baseTemplate.c_str());
-    if (::mkdtemp(path) != nullptr) {
-      path_ = path;
-    }
-    ::free(path);
+  explicit TempDirGuard(const std::string &prefix) {
+    path_ = (std::filesystem::temp_directory_path() /
+             (prefix + firmius::shared::StringUtil::generateUuid().substr(0, 12))).string();
+    std::filesystem::create_directories(path_);
   }
   ~TempDirGuard() {
     if (!path_.empty() && std::filesystem::exists(path_)) {
@@ -206,9 +214,7 @@ int phase2_thread_switch(Harness &harnessInst, TestState &state,
   std::cout << "[Phase 2] Thread-B created: " << state.threadB << std::endl;
   std::cout << "[Phase 2] Current thread after creation: "
             << harnessInst.currentThreadId() << std::endl;
-  const char *home = std::getenv("HOME");
-  std::string lockPathA = std::string(home ? home : "/tmp") +
-                          "/.firmius/threads/" + state.threadA + "/.lock";
+  std::string lockPathA = (PlatformPaths::firmiusHomeDir() / "threads" / state.threadA / ".lock").string();
   if (!std::filesystem::exists(lockPathA)) {
     std::cerr << "Phase 2 FAILED: Thread-A lock file missing at " << lockPathA
               << std::endl;
@@ -492,8 +498,7 @@ int phase5_forced_compaction(Harness &harnessInst, TestState &state) {
 
 int phase6_cleanup_integrity(Harness &harnessInst, TestState &state) {
   std::cout << "\n=== PHASE 6: Cleanup Integrity ===" << std::endl;
-  const char *home = std::getenv("HOME");
-  std::string firmiusDir = std::string(home ? home : "/tmp") + "/.firmius";
+  std::string firmiusDir = PlatformPaths::firmiusHomeDir().string();
   std::string sessionFile = firmiusDir + "/last_session.json";
   std::string lockPathA = firmiusDir + "/threads/" + state.threadA + "/.lock";
   bool lockExistedBefore = std::filesystem::exists(lockPathA);
@@ -531,13 +536,12 @@ int phase6_cleanup_integrity(Harness &harnessInst, TestState &state) {
 }
 
 bool checkDockerAvailable() {
-  int result = std::system("docker info > /dev/null 2>&1");
+  int result = std::system(kDockerInfoCmd);
   return result == 0;
 }
 
 bool checkSandboxImage() {
-  int result = std::system(
-      "docker image inspect firmius-sandbox:latest > /dev/null 2>&1");
+  int result = std::system(kDockerInspectCmd);
   return result == 0;
 }
 
@@ -571,7 +575,7 @@ int runAudit(const std::vector<std::string> &args) {
     return EXIT_GENERAL_FAILURE;
   }
   std::cout << "✓ Sandbox image found" << std::endl;
-  TempDirGuard tempDir("/tmp/firmius_chaos_XXXXXX");
+  TempDirGuard tempDir("firmius_chaos_");
   if (!tempDir.valid()) {
     std::cerr << "FAILED: Could not create temp directory" << std::endl;
     return EXIT_GENERAL_FAILURE;
@@ -579,11 +583,7 @@ int runAudit(const std::vector<std::string> &args) {
   std::cout << "Temp directory: " << tempDir.path() << std::endl;
   Panic::init();
   EnvLoader::load(".env.local");
-  std::string originalHome;
-  const char *homeEnv = std::getenv("HOME");
-  if (homeEnv) {
-    originalHome = homeEnv;
-  }
+  std::string originalHome = PlatformPaths::userHomeDir().string();
   ::setenv("HOME", tempDir.path().c_str(), 1);
   TestState state;
   auto &harnessInst = Harness::instance();

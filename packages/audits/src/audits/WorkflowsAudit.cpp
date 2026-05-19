@@ -3,6 +3,8 @@
 #include "EnvLoader.hpp"
 #include "Panic.hpp"
 #include "harness/Harness.hpp"
+#include "utils/PlatformPaths.hpp"
+#include "utils/StringUtil.hpp"
 #include "workflow/Workflow.hpp"
 #include "workflow/WorkflowLoader.hpp"
 #include <chrono>
@@ -34,14 +36,21 @@ struct TestState {
   std::string capturedMessage;
 };
 
+#if defined(_WIN32)
+constexpr const char* kDockerInfoCmd = "docker info > NUL 2>&1";
+constexpr const char* kDockerInspectCmd = "docker image inspect firmius-sandbox:latest > NUL 2>&1";
+#else
+constexpr const char* kDockerInfoCmd = "docker info > /dev/null 2>&1";
+constexpr const char* kDockerInspectCmd = "docker image inspect firmius-sandbox:latest > /dev/null 2>&1";
+#endif
+
 bool checkDockerAvailable() {
-  int result = std::system("docker info > /dev/null 2>&1");
+  int result = std::system(kDockerInfoCmd);
   return result == 0;
 }
 
 bool checkSandboxImage() {
-  int result = std::system(
-      "docker image inspect firmius-sandbox:latest > /dev/null 2>&1");
+  int result = std::system(kDockerInspectCmd);
   return result == 0;
 }
 } // namespace
@@ -80,16 +89,10 @@ shared::AuditResult WorkflowsAudit::run(const std::vector<std::string> &args) {
   std::cout << "✓ Sandbox image found" << std::endl;
 
   // Create temp directory for test workflows
-  char tempDirTemplate[] = "/tmp/firmius_workflows_XXXXXX";
-  char *tempDir = mkdtemp(tempDirTemplate);
-  if (!tempDir) {
-    std::cerr << "FAILED: Could not create temp directory" << std::endl;
-    result.exitCode = AUDIT_EXIT_GENERAL_FAILURE;
-    result.passed = false;
-    result.output = "Could not create temp directory";
-    return result;
-  }
-  std::string tempDirStr(tempDir);
+  auto tempDirPath = std::filesystem::temp_directory_path() /
+                     ("firmius_workflows_" + firmius::shared::StringUtil::generateUuid().substr(0, 12));
+  std::filesystem::create_directories(tempDirPath);
+  std::string tempDirStr = tempDirPath.string();
   std::cout << "Temp directory: " << tempDirStr << std::endl;
 
   // Create test workflow files
@@ -229,22 +232,12 @@ shared::AuditResult WorkflowsAudit::run(const std::vector<std::string> &args) {
   Panic::init();
   EnvLoader::load(".env.local");
 
-  std::string originalHome;
-  const char *homeEnv = std::getenv("HOME");
-  if (homeEnv) {
-    originalHome = homeEnv;
-  }
+  std::string originalHome = PlatformPaths::userHomeDir().string();
 
-  char *tempHome = mkdtemp(strdup("/tmp/firmius_home_XXXXXX"));
-  if (!tempHome) {
-    std::cerr << "FAILED: Could not create temp home directory" << std::endl;
-    result.exitCode = AUDIT_EXIT_GENERAL_FAILURE;
-    result.passed = false;
-    result.output = "Could not create temp home";
-    cleanupEnv();
-    return result;
-  }
-  std::string tempHomeStr(tempHome);
+  auto tempHomePath = std::filesystem::temp_directory_path() /
+                      ("firmius_home_" + firmius::shared::StringUtil::generateUuid().substr(0, 12));
+  std::filesystem::create_directories(tempHomePath);
+  std::string tempHomeStr = tempHomePath.string();
   ::setenv("HOME", tempHomeStr.c_str(), 1);
 
   auto cleanupHarness = [&]() {
