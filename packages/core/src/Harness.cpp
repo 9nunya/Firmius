@@ -484,11 +484,13 @@ std::string trimFleetDiffPreview(const std::string &diffPreview,
   return out;
 }
 
+#if !defined(_WIN32)
 size_t curlWriteCallback(char *ptr, size_t size, size_t nmemb, void *userdata) {
   auto *s = static_cast<std::string *>(userdata);
   s->append(ptr, size * nmemb);
   return size * nmemb;
 }
+#endif
 
 void killDockerContainer(const std::string &containerId) {
 #if defined(_WIN32)

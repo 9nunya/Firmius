@@ -32,6 +32,14 @@ if((CMAKE_CXX_COMPILER_ID STREQUAL "GNU") OR (CMAKE_CXX_COMPILER_ID MATCHES "Cla
   endif()
 
   add_compile_options(-Wall -Wextra -Werror)
+
+  # Apple's libc++ ships std::jthread + std::stop_token but flags them as
+  # experimental. Pass -fexperimental-library on AppleClang to enable them.
+  # This also propagates to link flags.
+  if(CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
+    add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-fexperimental-library>)
+    add_link_options(-fexperimental-library)
+  endif()
 elseif(MSVC)
   add_compile_options(/O2 /GL /Gy /GS-)
 endif()
