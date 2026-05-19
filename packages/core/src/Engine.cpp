@@ -52,6 +52,7 @@
 #include "lsp/LspServerManager.hpp"
 #include "utils/HistoryMetrics.hpp"
 #include "utils/JsonUtil.hpp"
+#include "utils/PlatformPaths.hpp"
 #include "utils/StringUtil.hpp"
 #include "utils/Hashline.hpp"
 #include <Panic.hpp>
@@ -808,7 +809,8 @@ std::string Engine::summonAgent(
         ctx.identity.role = persona.title;
         ctx.permissions.allowedScopes = persona.allowedScopes;
 
-        std::string home = getenv("HOME") ? getenv("HOME") : "/root";
+        std::string home = firmius::shared::PlatformPaths::userHomeDir().string();
+        if (home.empty()) home = "/root";
         if (userCfg.dangerouslySkipPermissions) {
           ctx.permissions.allowedPaths = {"/**"};
         } else {
@@ -1015,7 +1017,8 @@ std::string Engine::resumeAgent(const std::string &threadId,
   ctx.config.personaName = effectivePersonaName;
   ctx.permissions.allowedScopes = persona.allowedScopes;
 
-  std::string home = getenv("HOME") ? getenv("HOME") : "/root";
+  std::string home = firmius::shared::PlatformPaths::userHomeDir().string();
+  if (home.empty()) home = "/root";
   ctx.permissions.allowedPaths = {metadata.cwd + "/**", "/tmp/**", "/work/**",
                                   home + "/.agents/skills/**",
                                   home + "/.gemini/**", home + "/.firmius/**"};

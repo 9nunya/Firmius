@@ -1,4 +1,5 @@
 #include "utils/GCPHttpClient.hpp"
+#include "utils/PlatformPaths.hpp"
 #include <curl/curl.h>
 #include <iostream>
 #include <atomic>
@@ -174,7 +175,7 @@ firmius::utils::GCPHttpClient::Response performInterruptibleTransfer(
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(curl, CURLOPT_VERBOSE, 0L);
 
-    FILE* devnull = fopen("/dev/null", "w");
+    FILE* devnull = fopen(firmius::shared::PlatformPaths::nullDevicePath(), "w");
     if (devnull) {
         curl_easy_setopt(curl, CURLOPT_STDERR, devnull);
     }

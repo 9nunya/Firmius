@@ -1,5 +1,6 @@
 #include "agents/hooks/HookState.hpp"
 #include "agents/hooks/HookRegistry.hpp"
+#include "utils/PlatformPaths.hpp"
 
 #include <rapidjson/document.h>
 #include <rapidjson/pointer.h>
@@ -172,8 +173,7 @@ bool atomicWriteJson(const fs::path &target, const rapidjson::Document &doc) {
 
 fs::path firmiusHomeDir() {
   if (const char *e = std::getenv("FIRMIUS_HOME"); e && *e) return fs::path(e);
-  if (const char *h = std::getenv("HOME"); h && *h) return fs::path(h) / ".firmius";
-  return fs::current_path() / ".firmius";
+  return firmius::shared::PlatformPaths::firmiusHomeDir();
 }
 
 fs::path scopeFilePath(HookState::Scope scope, const std::string &threadId,

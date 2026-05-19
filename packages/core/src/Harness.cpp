@@ -18,6 +18,7 @@
 #include "providers/BaseAPIKeyProvider.hpp"
 #include "providers/BaseOAuthProvider.hpp"
 #include "providers/ProviderRegistry.hpp"
+#include "utils/PlatformPaths.hpp"
 #include "utils/Logger.hpp"
 #include "utils/PermissionProfiles.hpp"
 #include "utils/FSUtil.hpp"
@@ -180,12 +181,10 @@ bool ensureWritableDirectory(const std::filesystem::path &dir) {
 }
 
 std::string resolveWritableFirmiusHome() {
-  if (const char *home = std::getenv("HOME")) {
-    const std::filesystem::path userHome =
-        std::filesystem::path(home) / FIRMIUS_DIR;
-    if (ensureWritableDirectory(userHome)) {
-      return userHome.string();
-    }
+  const std::filesystem::path userHome =
+      firmius::shared::PlatformPaths::firmiusHomeDir();
+  if (ensureWritableDirectory(userHome)) {
+    return userHome.string();
   }
 
   const std::filesystem::path localHome =
@@ -492,6 +491,9 @@ size_t curlWriteCallback(char *ptr, size_t size, size_t nmemb, void *userdata) {
 }
 
 void killDockerContainer(const std::string &containerId) {
+#if defined(_WIN32)
+  (void)containerId;
+#else
   CURL *curl = curl_easy_init();
   if (curl) {
     std::string response;
@@ -506,6 +508,7 @@ void killDockerContainer(const std::string &containerId) {
     curl_easy_perform(curl);
     curl_easy_cleanup(curl);
   }
+#endif
 }
 } // namespace
 

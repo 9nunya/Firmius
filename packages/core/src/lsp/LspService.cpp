@@ -58,8 +58,13 @@ std::vector<std::string> runGitLsFiles(const std::string &root) {
     return lines;
   }
 
+#if defined(_WIN32)
+  constexpr const char* kStderrToNull = "2>NUL";
+#else
+  constexpr const char* kStderrToNull = "2>/dev/null";
+#endif
   const std::string command =
-      "git -C " + firmius::shared::shellQuoteSingle(root) + " ls-files 2>/dev/null";
+      "git -C " + firmius::shared::shellQuoteSingle(root) + " ls-files " + kStderrToNull;
   FILE *pipe = ::popen(command.c_str(), "r");
   if (pipe == nullptr) {
     return lines;

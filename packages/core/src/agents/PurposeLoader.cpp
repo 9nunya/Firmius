@@ -2,6 +2,7 @@
 #include "agents/prompts/PromptComposer.hpp"
 #include "utils/FrontmatterParser.hpp"
 #include "utils/FSUtil.hpp"
+#include "utils/PlatformPaths.hpp"
 #include "utils/StringUtil.hpp"
 #include <algorithm>
 #include <array>
@@ -378,10 +379,9 @@ std::string PurposeLoader::resolvePromptsDir() {
     }
   }
 
-  const char *home = std::getenv("HOME");
-  if (home) {
+  {
     const std::filesystem::path userDir =
-        std::filesystem::path(home) / ".firmius" / "prompts";
+        firmius::shared::PlatformPaths::firmiusHomeDir() / "prompts";
     if (isUsablePromptsDir(userDir)) {
       return ensureTrailingSlash(userDir.string());
     }
@@ -427,16 +427,15 @@ std::vector<std::string> PurposeLoader::listPurposes() {
 }
 
 void PurposeLoader::bootstrapDefaults(const std::string &builtinPromptsDir) {
-  const char *home = std::getenv("HOME");
-  if (!home)
+  const std::filesystem::path firmiusHome = firmius::shared::PlatformPaths::firmiusHomeDir();
+  if (firmiusHome.empty())
     return;
 
   const std::filesystem::path builtinDir(builtinPromptsDir);
   if (!std::filesystem::exists(builtinDir))
     return;
 
-  const std::filesystem::path userDir =
-      std::filesystem::path(home) / ".firmius" / "prompts";
+  const std::filesystem::path userDir = firmiusHome / "prompts";
 
   try {
     std::filesystem::remove_all(userDir);

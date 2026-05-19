@@ -51,4 +51,25 @@ std::filesystem::path PlatformPaths::firmiusTempDir() {
     return std::filesystem::temp_directory_path() / "firmius";
 }
 
+std::filesystem::path PlatformPaths::userHomeDir() {
+#if defined(_WIN32)
+    if (const char* userProfile = std::getenv("USERPROFILE")) {
+        return std::filesystem::path(userProfile);
+    }
+#else
+    if (const char* home = std::getenv("HOME")) {
+        return std::filesystem::path(home);
+    }
+#endif
+    return std::filesystem::path{};
+}
+
+const char* PlatformPaths::nullDevicePath() {
+#if defined(_WIN32)
+    return "NUL";
+#else
+    return "/dev/null";
+#endif
+}
+
 } // namespace firmius::shared

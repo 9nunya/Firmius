@@ -1,4 +1,5 @@
 #include "environment/CommandIntentAnalyzer.hpp"
+#include "utils/PlatformPaths.hpp"
 #include "utils/StringUtil.hpp"
 #include <algorithm>
 #include <cctype>
@@ -24,9 +25,9 @@ std::string resolveWorkingDirectory(const std::string& path, const std::string& 
     std::string resolved = path;
 
     if (!resolved.empty() && resolved[0] == '~') {
-        const char* home = std::getenv("HOME");
-        if (home) {
-            resolved = std::string(home) + resolved.substr(1);
+        auto home = firmius::shared::PlatformPaths::userHomeDir().string();
+        if (!home.empty()) {
+            resolved = home + resolved.substr(1);
         }
     }
 

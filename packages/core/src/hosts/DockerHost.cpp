@@ -460,6 +460,10 @@ void DockerHost::setUser(const std::string& user) {
 }
 
 std::string DockerHost::request(const std::string& method, const std::string& url, const std::string& body) {
+#if defined(_WIN32)
+    (void)method; (void)url; (void)body;
+    throw std::runtime_error("Docker integration is not supported on Windows yet.");
+#else
     std::lock_guard<std::mutex> lock(requestMutex);
     std::string response;
     curl_easy_reset(curl);
@@ -481,6 +485,7 @@ std::string DockerHost::request(const std::string& method, const std::string& ur
 
     if (res != CURLE_OK) throw std::runtime_error(std::string("Docker request failed: ") + curl_easy_strerror(res));
     return response;
+#endif
 }
 
 std::vector<uint8_t> DockerHost::readFile(const std::string& path) {
@@ -732,6 +737,10 @@ void DockerHost::killBackgroundProcess(const std::string& id) {
 
 std::vector<ContainerInfo> DockerHost::listContainersWithLabel(const std::string& label) {
     std::vector<ContainerInfo> result;
+#if defined(_WIN32)
+    (void)label;
+    return result;
+#else
 
     // Initialize libcurl for this static method
     CURL* curl = curl_easy_init();
@@ -785,6 +794,7 @@ std::vector<ContainerInfo> DockerHost::listContainersWithLabel(const std::string
     }
 
     return result;
+#endif
 }
 
 } // namespace firmius::core

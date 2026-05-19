@@ -1,5 +1,6 @@
 #include "agents/SkillLoader.hpp"
 #include "utils/FrontmatterParser.hpp"
+#include "utils/PlatformPaths.hpp"
 #include "utils/StringUtil.hpp"
 
 #include <cstdlib>
@@ -74,10 +75,10 @@ std::vector<std::string> SkillLoader::resolveSkillsDirs() {
     }
   }
 
-  const char *home = std::getenv("HOME");
-  if (home != nullptr && *home != '\0') {
+  const auto userHome = firmius::shared::PlatformPaths::userHomeDir();
+  if (!userHome.empty()) {
     const auto homeSkills =
-        (std::filesystem::path(home) / ".agents" / "skills").lexically_normal();
+        (userHome / ".agents" / "skills").lexically_normal();
     if (std::filesystem::exists(homeSkills) &&
         std::filesystem::is_directory(homeSkills)) {
       const std::string normalized = ensureTrailingSlash(homeSkills.string());

@@ -1,5 +1,6 @@
 #include "workflow/WorkflowLoader.hpp"
 #include "utils/FrontmatterParser.hpp"
+#include "utils/PlatformPaths.hpp"
 #include "utils/StringUtil.hpp"
 #include <algorithm>
 #include <cstdlib>
@@ -60,11 +61,9 @@ bool isUsableWorkflowDir(const std::filesystem::path &dir) {
 }
 
 std::filesystem::path resolveWritableFirmiusHome() {
-  if (const char *home = std::getenv("HOME")) {
-    const std::filesystem::path userHome = std::filesystem::path(home) / ".firmius";
-    if (ensureWritableDirectory(userHome)) {
-      return userHome;
-    }
+  const std::filesystem::path userHome = firmius::shared::PlatformPaths::firmiusHomeDir();
+  if (ensureWritableDirectory(userHome)) {
+    return userHome;
   }
 
   const std::filesystem::path localHome =
@@ -1068,9 +1067,9 @@ std::vector<std::string> WorkflowLoader::getHookDirs() const {
 
   addIfUsable(std::filesystem::current_path() / "prompts" / "hooks");
 
-  if (const char *home = std::getenv("HOME")) {
+  {
     const std::filesystem::path firmiusHome =
-        std::filesystem::path(home) / ".firmius";
+        firmius::shared::PlatformPaths::firmiusHomeDir();
     addIfUsable(firmiusHome / "prompts" / "hooks");
     addIfUsable(firmiusHome / "hooks");
   }

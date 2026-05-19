@@ -1,6 +1,7 @@
 #include "providers/KiroProvider.hpp"
 #include "utils/GCPHttpClient.hpp"
 #include "utils/HashUtil.hpp"
+#include "utils/PlatformPaths.hpp"
 #include "utils/StringUtil.hpp"
 #include <algorithm>
 #include <atomic>
@@ -164,10 +165,7 @@ std::string jsonString(const rapidjson::Document &doc) {
 }
 
 std::string userHomeDirectory() {
-  if (const char *home = std::getenv("HOME"); home && *home) {
-    return home;
-  }
-  return {};
+  return firmius::shared::PlatformPaths::userHomeDir().string();
 }
 
 std::string kiroCliDbPath() {

@@ -1,5 +1,6 @@
 #include "DaemonSession.hpp"
 
+#include "utils/PlatformPaths.hpp"
 #include <cstdlib>
 #include <filesystem>
 
@@ -40,8 +41,8 @@ bool DaemonSession::connect() {
   // alt-screen TUI. Default to ~/.firmius/daemon.log so users have somewhere
   // to look at startup phase messages and warnings; fall back to /dev/null.
   if (options.spawnedDaemonLogFile.empty()) {
-    if (const char* home = std::getenv("HOME")) {
-      const auto firmiusHome = std::filesystem::path(home) / ".firmius";
+    const auto firmiusHome = firmius::shared::PlatformPaths::firmiusHomeDir();
+    if (!firmiusHome.empty()) {
       std::error_code ec;
       std::filesystem::create_directories(firmiusHome, ec);
       if (!ec) {

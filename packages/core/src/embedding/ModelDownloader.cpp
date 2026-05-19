@@ -1,5 +1,6 @@
 #include "embedding/ModelDownloader.hpp"
 
+#include "utils/PlatformPaths.hpp"
 #include <curl/curl.h>
 #include <filesystem>
 #include <fstream>
@@ -16,9 +17,7 @@ const std::string kDownloadUrl =
     "resolve/main/onnx/model.onnx";
 
 fs::path homeDir() {
-  const char *home = std::getenv("HOME");
-  if (home && home[0] != '\0') return fs::path(home);
-  return fs::path(".");
+  return firmius::shared::PlatformPaths::firmiusHomeDir();
 }
 
 struct ProgressContext {
@@ -51,7 +50,7 @@ int progressCallback(void *clientp, curl_off_t dltotal, curl_off_t dlnow,
 } // namespace
 
 std::string ModelDownloader::defaultModelDir() {
-  return (homeDir() / ".firmius" / "models").string();
+  return (homeDir() / "models").string();
 }
 
 bool ModelDownloader::isModelAvailable(const std::string &modelId) {

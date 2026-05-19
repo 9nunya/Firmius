@@ -9,6 +9,7 @@
 #include "Serialization.hpp"
 #include "agents/PurposeLoader.hpp"
 #include "artifacts/ReferenceExpansion.hpp"
+#include "utils/PlatformPaths.hpp"
 #include "utils/StringUtil.hpp"
 #include <chrono>
 #include <filesystem>
@@ -340,8 +341,7 @@ shared::ToolResult executeSpawn(const rapidjson::Value &input, shared::ToolConte
   try {
     std::string builtTask;
     if (dream) {
-      const std::string home = std::getenv("HOME") ? std::getenv("HOME") : "/root";
-      const std::string memoryRoot = home + "/.firmius/user";
+      const std::string memoryRoot = (firmius::shared::PlatformPaths::firmiusHomeDir() / "user").string();
       std::filesystem::create_directories(memoryRoot);
       builtTask = buildDreamerTask(task, std::nullopt, threadId, ctx, memoryRoot);
       summonOverrides = SummonAgentOverrides{.cwdOverride = memoryRoot, .allowedPathsOverride = std::vector<std::string>{memoryRoot, memoryRoot + "/**"}};

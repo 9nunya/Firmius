@@ -1,5 +1,6 @@
 #include "providers/BaseOpenAIProvider.hpp"
 #include "utils/InterruptibleSleep.hpp"
+#include "utils/PlatformPaths.hpp"
 #include <cctype>
 #include <chrono>
 #include <curl/curl.h>
@@ -39,7 +40,7 @@ CurlTransferResult performInterruptibleTransfer(CURL *curl,
     return result;
   }
 
-  FILE *devnull = fopen("/dev/null", "w");
+  FILE *devnull = fopen(firmius::shared::PlatformPaths::nullDevicePath(), "w");
   curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
   curl_easy_setopt(curl, CURLOPT_VERBOSE, 0L);
   if (devnull) {
