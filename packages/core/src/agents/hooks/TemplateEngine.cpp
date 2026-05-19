@@ -1,5 +1,7 @@
 #include "agents/hooks/TemplateEngine.hpp"
 
+#include "utils/StringUtil.hpp"
+
 #include <rapidjson/document.h>
 #include <rapidjson/pointer.h>
 #include <rapidjson/stringbuffer.h>
@@ -84,22 +86,6 @@ std::string makeUlid() {
     hi >>= 5;
   }
   return out;
-}
-
-std::string makeUuid() {
-  static thread_local std::mt19937_64 rng{
-      std::random_device{}() ^
-      static_cast<std::uint64_t>(
-          std::chrono::system_clock::now().time_since_epoch().count())};
-  const std::uint64_t a = rng();
-  const std::uint64_t b = rng();
-  std::ostringstream ss;
-  ss << std::hex << std::setfill('0') << std::setw(8) << (a >> 32) << "-"
-     << std::setw(4) << ((a >> 16) & 0xFFFF) << "-"
-     << std::setw(4) << (0x4000 | (a & 0x0FFF)) << "-"
-     << std::setw(4) << (0x8000 | ((b >> 48) & 0x3FFF)) << "-"
-     << std::setw(12) << (b & 0xFFFFFFFFFFFFULL);
-  return ss.str();
 }
 
 std::string makeNowIso() {
@@ -199,7 +185,7 @@ std::string resolveVariable(const std::string &expr,
                             std::string *yamlOverride) {
   // Builtins.
   if (expr == "ulid()") return makeUlid();
-  if (expr == "uuid()") return makeUuid();
+  if (expr == "uuid()") return firmius::shared::StringUtil::generateUuid();
   if (expr == "now")    return makeNowIso();
 
   // Flat extras (persona, thread_id, tool, etc.).

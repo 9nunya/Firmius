@@ -9,6 +9,7 @@
 #include "benchmarks/BenchmarkFactory.hpp"
 #include "benchmarks/BenchmarkSession.hpp"
 #include "utils/Logger.hpp"
+#include "utils/StringUtil.hpp"
 #include "utils/ToolSummaries.hpp"
 #include "utils/ToolView.hpp"
 #include <chrono>
@@ -26,13 +27,6 @@ using namespace firmius::shared;
 using namespace firmius::core;
 
 namespace {
-
-std::string trim(const std::string &s) {
-  size_t start = s.find_first_not_of(" \t\n\r");
-  if (start == std::string::npos) return "";
-  size_t end = s.find_last_not_of(" \t\n\r");
-  return s.substr(start, end - start + 1);
-}
 
 void printUsage() {
   std::cout << "Usage: firmius_audit --audit benchmarks --bench <name> [--provider <id>] [--model <id>] [--variant <v>]\n"
@@ -274,7 +268,7 @@ private:
     }
     std::cout << COLOR_BOLD << "\n  ══ Agent finished: " << outcomeStr;
     if (!ev.outcome.text.empty()) {
-      std::string preview = trim(ev.outcome.text);
+      std::string preview = firmius::shared::StringUtil::trim(ev.outcome.text);
       if (preview.size() > 60) preview = preview.substr(0, 57) + "...";
       std::cout << " - " << preview;
     }
@@ -302,7 +296,7 @@ private:
   }
 
   std::string trimPreview(const std::string& s, size_t maxLen) {
-    std::string t = trim(s);
+    std::string t = firmius::shared::StringUtil::trim(s);
     return t.size() > maxLen ? t.substr(0, maxLen - 3) + "..." : t;
   }
 
@@ -380,13 +374,13 @@ shared::AuditResult BenchmarksAudit::run(const std::vector<std::string> &args) {
   for (size_t i = 0; i < args.size(); ++i) {
     std::string arg = args[i];
     if (arg == "--bench" && i + 1 < args.size()) {
-      benchmarkName = trim(args[++i]);
+      benchmarkName = firmius::shared::StringUtil::trim(args[++i]);
     } else if (arg == "--provider" && i + 1 < args.size()) {
-      providerName = trim(args[++i]);
+      providerName = firmius::shared::StringUtil::trim(args[++i]);
     } else if (arg == "--model" && i + 1 < args.size()) {
-      modelId = trim(args[++i]);
+      modelId = firmius::shared::StringUtil::trim(args[++i]);
     } else if (arg == "--variant" && i + 1 < args.size()) {
-      modelVariant = trim(args[++i]);
+      modelVariant = firmius::shared::StringUtil::trim(args[++i]);
     } else if (arg == "--help" || arg == "-h") {
       printUsage();
       result.exitCode = 0;

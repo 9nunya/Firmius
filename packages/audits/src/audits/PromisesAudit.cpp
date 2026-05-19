@@ -10,6 +10,7 @@
 #include "agents/hooks/ScriptRuntime.hpp"
 #include "harness/Harness.hpp"
 #include "providers/ProviderRegistry.hpp"
+#include "utils/StringUtil.hpp"
 #include "workflow/WorkflowLoader.hpp"
 
 #include <atomic>
@@ -29,15 +30,6 @@ using namespace firmius::provider;
 using namespace firmius::shared;
 
 namespace {
-
-std::string trim(const std::string &value) {
-  const auto start = value.find_first_not_of(" \t\r\n");
-  if (start == std::string::npos) {
-    return {};
-  }
-  const auto end = value.find_last_not_of(" \t\r\n");
-  return value.substr(start, end - start + 1);
-}
 
 std::string summarizeHookActivity(const std::vector<hooks::HookActivityRecord> &activity) {
   if (activity.empty()) {
@@ -136,7 +128,7 @@ std::string flattenMessageText(const Message &msg) {
       first = false;
     }
   }
-  return trim(out.str());
+  return firmius::shared::StringUtil::trim(out.str());
 }
 
 int countOccurrences(const AgentHistory &history, const std::string &needle) {
@@ -576,7 +568,7 @@ AuditResult PromisesAudit::run(const std::vector<std::string> &args) {
       std::ifstream input(taskPath);
       std::ostringstream buffer;
       buffer << input.rdbuf();
-      taskFileContents = trim(buffer.str());
+      taskFileContents = firmius::shared::StringUtil::trim(buffer.str());
     }
 
     const auto &history = *current->getContext().history;

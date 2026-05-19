@@ -7,6 +7,7 @@
 #include "lsp/LspServerManager.hpp"
 #include "lsp/LspServerRegistry.hpp"
 #include "utils/ShellUtil.hpp"
+#include "utils/StringUtil.hpp"
 
 #include <algorithm>
 #include <array>
@@ -49,15 +50,6 @@ std::string canonicalizePath(const std::string &path) {
   return p.lexically_normal().string();
 }
 
-std::string trim(std::string value) {
-  const auto notSpace = [](unsigned char ch) { return !std::isspace(ch); };
-  value.erase(value.begin(),
-              std::find_if(value.begin(), value.end(), notSpace));
-  value.erase(std::find_if(value.rbegin(), value.rend(), notSpace).base(),
-              value.end());
-  return value;
-}
-
 std::vector<std::string> runGitLsFiles(const std::string &root) {
   std::vector<std::string> lines;
   if (root.empty()) {
@@ -73,7 +65,7 @@ std::vector<std::string> runGitLsFiles(const std::string &root) {
 
   std::array<char, 4096> buffer{};
   while (fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) != nullptr) {
-    std::string line = trim(buffer.data());
+    std::string line = firmius::shared::StringUtil::trim(std::string_view(buffer.data()));
     if (!line.empty()) {
       lines.push_back(line);
     }

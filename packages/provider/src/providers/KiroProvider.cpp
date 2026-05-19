@@ -148,23 +148,6 @@ int64_t nowSeconds() {
       .count();
 }
 
-std::string generateUuid() {
-  std::random_device rd;
-  std::uniform_int_distribution<int> dist(0, 15);
-  std::stringstream ss;
-  ss << std::hex;
-  for (int i = 0; i < 8; ++i) ss << dist(rd);
-  ss << "-";
-  for (int i = 0; i < 4; ++i) ss << dist(rd);
-  ss << "-4";
-  for (int i = 0; i < 3; ++i) ss << dist(rd);
-  ss << "-";
-  ss << (dist(rd) % 4 + 8);
-  for (int i = 0; i < 3; ++i) ss << dist(rd);
-  ss << "-";
-  for (int i = 0; i < 12; ++i) ss << dist(rd);
-  return ss.str();
-}
 
 
 std::uint64_t nowMs() {
@@ -1592,7 +1575,7 @@ KiroProvider::AttemptOutcome KiroProvider::streamOnceForAccount(
   chunk = curl_slist_append(chunk, "Content-Type: application/json");
   chunk = curl_slist_append(chunk, "Accept: application/json");
   chunk = curl_slist_append(chunk, ("Authorization: Bearer " + acc.accessToken).c_str());
-  chunk = curl_slist_append(chunk, ("amz-sdk-invocation-id: " + generateUuid()).c_str());
+  chunk = curl_slist_append(chunk, ("amz-sdk-invocation-id: " + firmius::shared::StringUtil::generateUuid()).c_str());
   chunk = curl_slist_append(chunk, "amz-sdk-request: attempt=1; max=1");
   chunk = curl_slist_append(chunk, "x-amzn-kiro-agent-mode: vibe");
   chunk = curl_slist_append(chunk, "x-amz-user-agent: aws-sdk-js/3.738.0 KiroIDE");
@@ -1873,7 +1856,7 @@ std::string KiroProvider::buildCodeWhispererRequest(
   doc.SetObject();
   auto &alloc = doc.GetAllocator();
 
-  std::string conversationId = generateUuid();
+  std::string conversationId = firmius::shared::StringUtil::generateUuid();
   std::string resolvedModel = resolveModelId(modelId);
 
   // Build conversation state
