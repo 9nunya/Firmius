@@ -1,5 +1,7 @@
 #include "Clipboard.hpp"
 
+#include "utils/Base64.hpp"
+
 #include <array>
 #include <cstdio>
 #include <cstdlib>
@@ -14,40 +16,6 @@
 namespace firmius::tui {
 
 namespace {
-
-// Standard base64 alphabet. Inlined so we don't depend on any codec
-// library — clipboards are trivial encode-only.
-constexpr const char kBase64Chars[] =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-std::string base64Encode(const unsigned char* data, std::size_t size) {
-  std::string out;
-  out.reserve(((size + 2) / 3) * 4);
-  std::size_t i = 0;
-  while (i + 3 <= size) {
-    out += kBase64Chars[(data[i] >> 2) & 0x3F];
-    out += kBase64Chars[((data[i] << 4) | (data[i + 1] >> 4)) & 0x3F];
-    out += kBase64Chars[((data[i + 1] << 2) | (data[i + 2] >> 6)) & 0x3F];
-    out += kBase64Chars[data[i + 2] & 0x3F];
-    i += 3;
-  }
-  if (i < size) {
-    out += kBase64Chars[(data[i] >> 2) & 0x3F];
-    if (i + 1 < size) {
-      out += kBase64Chars[((data[i] << 4) | (data[i + 1] >> 4)) & 0x3F];
-      out += kBase64Chars[(data[i + 1] << 2) & 0x3F];
-      out += '=';
-    } else {
-      out += kBase64Chars[(data[i] << 4) & 0x3F];
-      out += "==";
-    }
-  }
-  return out;
-}
-
-std::string base64Encode(const std::string& s) {
-  return base64Encode(reinterpret_cast<const unsigned char*>(s.data()), s.size());
-}
 
 #if !defined(_WIN32)
 
@@ -90,7 +58,7 @@ bool isX11() {
 bool Clipboard::setText(const std::string& text) {
   if (text.empty()) return false;
   // OSC 52: ESC ] 52 ; c ; <base64> BEL
-  const std::string encoded = base64Encode(text);
+  const std::string encoded = firmius::shared::base64Encode(text);
   std::string seq = "\x1b]52;c;";
   seq += encoded;
   seq += "\x07";
@@ -148,7 +116,7 @@ std::optional<std::string> Clipboard::getImage(std::string& mimeTypeOut) {
     return std::nullopt;
   }
   if (data.empty()) return std::nullopt;
-  return base64Encode(data.data(), data.size());
+  return firmius::shared::base64Encode(data.data(), data.size());
 
 #elif defined(__APPLE__)
   // macOS: pbpaste with -Prefer image returns the image bytes directly.
@@ -167,7 +135,7 @@ std::optional<std::string> Clipboard::getImage(std::string& mimeTypeOut) {
     // Not a recognizable image — pbpaste fell back to text bytes.
     return std::nullopt;
   }
-  return base64Encode(data.data(), data.size());
+  return firmius::shared::base64Encode(data.data(), data.size());
 
 #elif defined(_WIN32)
   // Windows: PowerShell can emit clipboard image as a base64 string,

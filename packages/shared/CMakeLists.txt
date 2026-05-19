@@ -5,6 +5,7 @@ target_sources(firmius_shared PRIVATE
     src/Serialization.cpp
     src/EnvLoader.cpp
     src/Panic.cpp
+    src/utils/Base64.cpp
     src/utils/JSONSchema.cpp
     src/utils/JSONSchemaFromJson.cpp
     src/utils/JsonUtil.cpp
@@ -56,6 +57,7 @@ target_sources(firmius_shared PUBLIC
     include/Skill.hpp
     include/providers/BackoffConstants.hpp
     include/utils/AbortController.hpp
+    include/utils/Base64.hpp
     include/utils/FSUtil.hpp
     include/utils/FastHash.hpp
     include/utils/FrontmatterParser.hpp

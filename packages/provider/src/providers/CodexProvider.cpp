@@ -1,5 +1,6 @@
 #include "providers/CodexProvider.hpp"
 #include "providers/RetryPolicyResolver.hpp"
+#include "utils/Base64.hpp"
 #include "utils/GCPHttpClient.hpp"
 #include "utils/InterruptibleSleep.hpp"
 #include "utils/StringUtil.hpp"
@@ -245,87 +246,6 @@ std::string urlEncode(const std::string &value) {
     }
   }
   return escaped.str();
-}
-
-std::string base64Encode(const std::vector<uint8_t> &data) {
-  static const char *chars =
-      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  std::string out;
-  int val = 0;
-  int valb = -6;
-  for (uint8_t c : data) {
-    val = (val << 8) + c;
-    valb += 8;
-    while (valb >= 0) {
-      out.push_back(chars[(val >> valb) & 0x3F]);
-      valb -= 6;
-    }
-  }
-  if (valb > -6)
-    out.push_back(chars[((val << 8) >> (valb + 8)) & 0x3F]);
-  while (out.size() % 4)
-    out.push_back('=');
-  return out;
-}
-
-int decodeBase64Char(unsigned char c) {
-  if (c >= 'A' && c <= 'Z')
-    return c - 'A';
-  if (c >= 'a' && c <= 'z')
-    return c - 'a' + 26;
-  if (c >= '0' && c <= '9')
-    return c - '0' + 52;
-  if (c == '+')
-    return 62;
-  if (c == '/')
-    return 63;
-  return -1;
-}
-
-std::vector<uint8_t> base64Decode(const std::string &input) {
-  std::vector<uint8_t> out;
-  int val = 0;
-  int valb = -8;
-  for (unsigned char c : input) {
-    if (c == '=')
-      break;
-    int d = decodeBase64Char(c);
-    if (d == -1)
-      continue;
-    val = (val << 6) + d;
-    valb += 6;
-    if (valb >= 0) {
-      out.push_back(static_cast<uint8_t>((val >> valb) & 0xFF));
-      valb -= 8;
-    }
-  }
-  return out;
-}
-
-std::string base64UrlEncode(const std::vector<uint8_t> &data) {
-  std::string b64 = base64Encode(data);
-  for (char &c : b64) {
-    if (c == '+')
-      c = '-';
-    else if (c == '/')
-      c = '_';
-  }
-  while (!b64.empty() && b64.back() == '=')
-    b64.pop_back();
-  return b64;
-}
-
-std::vector<uint8_t> base64UrlDecode(const std::string &input) {
-  std::string b64 = input;
-  for (char &c : b64) {
-    if (c == '-')
-      c = '+';
-    else if (c == '_')
-      c = '/';
-  }
-  while (b64.size() % 4 != 0)
-    b64.push_back('=');
-  return base64Decode(b64);
 }
 
 constexpr std::array<uint32_t, 64> kSha256K = {

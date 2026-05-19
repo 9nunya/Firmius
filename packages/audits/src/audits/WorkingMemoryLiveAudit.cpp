@@ -6,6 +6,7 @@
 #include "agents/Agent.hpp"
 #include "harness/Harness.hpp"
 #include "providers/ProviderRegistry.hpp"
+#include "utils/Base64.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -106,29 +107,6 @@ bool waitForCondition(Fn &&fn, std::chrono::milliseconds timeout,
   return fn();
 }
 
-std::string base64Encode(const std::vector<unsigned char> &data) {
-  static const char *table =
-      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  std::string out;
-  out.reserve((data.size() + 2) / 3 * 4);
-  std::size_t i = 0;
-  for (; i + 3 <= data.size(); i += 3) {
-    std::uint32_t triple = (data[i] << 16) | (data[i + 1] << 8) | data[i + 2];
-    out.push_back(table[(triple >> 18) & 0x3f]);
-    out.push_back(table[(triple >> 12) & 0x3f]);
-    out.push_back(table[(triple >> 6) & 0x3f]);
-    out.push_back(table[triple & 0x3f]);
-  }
-  if (i < data.size()) {
-    std::uint32_t triple = data[i] << 16;
-    if (i + 1 < data.size()) triple |= data[i + 1] << 8;
-    out.push_back(table[(triple >> 18) & 0x3f]);
-    out.push_back(table[(triple >> 12) & 0x3f]);
-    out.push_back((i + 1 < data.size()) ? table[(triple >> 6) & 0x3f] : '=');
-    out.push_back('=');
-  }
-  return out;
-}
 
 std::optional<ImageContent> loadImageContent(const std::string &path) {
   std::ifstream in(path, std::ios::binary);
