@@ -3,20 +3,27 @@ include(FetchContent)
 # ─── FetchContent cache & robustness ─────────────────────────────────────────
 # Allow callers to override cache location (e.g., -DFETCHCONTENT_BASE_DIR=...)
 # or provide FIRMIUS_FETCHCONTENT_BASE in the environment.
-if(NOT DEFINED FETCHCONTENT_BASE_DIR)
-  if(DEFINED ENV{FIRMIUS_FETCHCONTENT_BASE})
-    set(_firmius_fetch_base "$ENV{FIRMIUS_FETCHCONTENT_BASE}")
-  elseif(DEFINED ENV{XDG_CACHE_HOME})
-    set(_firmius_fetch_base "$ENV{XDG_CACHE_HOME}/firmius/fetchcontent")
-  elseif(DEFINED ENV{HOME})
-    set(_firmius_fetch_base "$ENV{HOME}/.cache/firmius/fetchcontent")
-  else()
-    set(_firmius_fetch_base "${CMAKE_SOURCE_DIR}/.cache/fetchcontent")
-  endif()
-  set(FETCHCONTENT_BASE_DIR "${_firmius_fetch_base}" CACHE PATH
-      "Base directory for FetchContent downloads" FORCE)
-  unset(_firmius_fetch_base)
+#
+# IMPORTANT: cmake's include(FetchContent) initializes FETCHCONTENT_BASE_DIR
+# to ${CMAKE_BINARY_DIR}/_deps BEFORE we get a chance to override it. So we
+# can't just check 'if(NOT DEFINED FETCHCONTENT_BASE_DIR)' — we need to
+# explicitly prefer the env var or -D override over cmake's auto-default.
+if(DEFINED ENV{FIRMIUS_FETCHCONTENT_BASE} AND NOT "$ENV{FIRMIUS_FETCHCONTENT_BASE}" STREQUAL "")
+  set(_firmius_fetch_base "$ENV{FIRMIUS_FETCHCONTENT_BASE}")
+elseif(DEFINED ENV{XDG_CACHE_HOME} AND NOT "$ENV{XDG_CACHE_HOME}" STREQUAL "")
+  set(_firmius_fetch_base "$ENV{XDG_CACHE_HOME}/firmius/fetchcontent")
+elseif(DEFINED ENV{HOME} AND NOT "$ENV{HOME}" STREQUAL "")
+  set(_firmius_fetch_base "$ENV{HOME}/.cache/firmius/fetchcontent")
+else()
+  set(_firmius_fetch_base "${CMAKE_SOURCE_DIR}/.cache/fetchcontent")
 endif()
+
+# Force-set the cache variable so cmake's internal default doesn't win.
+set(FETCHCONTENT_BASE_DIR "${_firmius_fetch_base}" CACHE PATH
+    "Base directory for FetchContent downloads" FORCE)
+unset(_firmius_fetch_base)
+
+message(STATUS "FetchContent cache base: ${FETCHCONTENT_BASE_DIR}")
 
 option(FIRMIUS_FETCHCONTENT_OFFLINE "Disable FetchContent downloads/updates" OFF)
 option(FIRMIUS_FETCHCONTENT_QUIET "Silence FetchContent progress" ON)
