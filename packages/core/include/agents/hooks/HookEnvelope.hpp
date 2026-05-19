@@ -50,9 +50,6 @@ struct HookEnvelope {
   std::string fromMode;
   std::string toMode;
 
-  std::string pactId;
-  std::string pactVerdict;
-
   std::string completedWorkflowId;
   std::string subagentBranchId;
   std::string returnPayloadJson;

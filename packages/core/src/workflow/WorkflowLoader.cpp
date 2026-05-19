@@ -898,9 +898,6 @@ std::optional<Workflow> WorkflowLoader::loadWorkflow(const std::string &path) {
   }
 
   if (auto guard = firmius::shared::FrontmatterParser::getMap(doc, "guard")) {
-    if (auto pp = extractBoolField(*guard, "post_pact")) {
-      workflow.guard.postPact = *pp;
-    }
     if (auto rm = extractStringField(*guard, "requires_mode")) {
       if (!rm->empty()) {
         workflow.guard.requiresMode = *rm;

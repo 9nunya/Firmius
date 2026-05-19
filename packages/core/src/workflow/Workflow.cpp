@@ -27,10 +27,6 @@ const std::unordered_map<std::string, WorkflowEventKind> &eventKindMap() {
       {"ModeEntered", WorkflowEventKind::ModeEntered},
       {"mode_exited", WorkflowEventKind::ModeExited},
       {"ModeExited", WorkflowEventKind::ModeExited},
-      {"pact_promised", WorkflowEventKind::PactPromised},
-      {"PactPromised", WorkflowEventKind::PactPromised},
-      {"pact_resolved", WorkflowEventKind::PactResolved},
-      {"PactResolved", WorkflowEventKind::PactResolved},
       {"subagent_return", WorkflowEventKind::SubagentReturn},
       {"SubagentReturn", WorkflowEventKind::SubagentReturn},
       {"workflow_complete", WorkflowEventKind::WorkflowComplete},
@@ -64,10 +60,6 @@ std::string workflowEventKindToString(WorkflowEventKind kind) {
     return "mode_entered";
   case WorkflowEventKind::ModeExited:
     return "mode_exited";
-  case WorkflowEventKind::PactPromised:
-    return "pact_promised";
-  case WorkflowEventKind::PactResolved:
-    return "pact_resolved";
   case WorkflowEventKind::SubagentReturn:
     return "subagent_return";
   case WorkflowEventKind::WorkflowComplete:

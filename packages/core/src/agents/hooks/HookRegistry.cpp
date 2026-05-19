@@ -140,10 +140,6 @@ resolveMatchValue(const std::string &key, const EventPayload &p) {
     return p.fromMode;
   if (key == "to_mode")
     return p.toMode;
-  if (key == "pact_verdict")
-    return p.pactVerdict;
-  if (key == "pact_id")
-    return p.pactId;
   if (key == "thread_id")
     return p.threadId;
   if (key == "agent_id")
@@ -229,8 +225,6 @@ std::map<std::string, std::string> makeExtras(const EventPayload &p) {
   extras["active_mode"] = p.activeMode;
   extras["from_mode"] = p.fromMode;
   extras["to_mode"] = p.toMode;
-  extras["pact_id"] = p.pactId;
-  extras["pact_verdict"] = p.pactVerdict;
   extras["completed_workflow"] = p.completedWorkflowId;
   extras["subagent_branch_id"] = p.subagentBranchId;
   return extras;

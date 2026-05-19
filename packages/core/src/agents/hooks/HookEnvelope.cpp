@@ -60,8 +60,6 @@ std::string serializeEnvelope(const HookEnvelope &env) {
   addStr(payload, "user_message", env.userMessage, alloc);
   addStr(payload, "from_mode", env.fromMode, alloc);
   addStr(payload, "to_mode", env.toMode, alloc);
-  addStr(payload, "pact_id", env.pactId, alloc);
-  addStr(payload, "pact_verdict", env.pactVerdict, alloc);
   addStr(payload, "completed_workflow", env.completedWorkflowId, alloc);
   addStr(payload, "subagent_branch", env.subagentBranchId, alloc);
   addRawJson(payload, "return_payload", env.returnPayloadJson, alloc);
@@ -104,8 +102,6 @@ HookEnvelope buildEnvelope(const std::string &hookId, WorkflowEventKind kind,
   env.userMessage = payload.userMessage;
   env.fromMode = payload.fromMode;
   env.toMode = payload.toMode;
-  env.pactId = payload.pactId;
-  env.pactVerdict = payload.pactVerdict;
   env.completedWorkflowId = payload.completedWorkflowId;
   env.subagentBranchId = payload.subagentBranchId;
   env.returnPayloadJson = payload.returnPayloadJson;

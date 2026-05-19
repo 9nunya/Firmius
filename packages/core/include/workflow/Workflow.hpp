@@ -51,8 +51,6 @@ enum class WorkflowEventKind {
   ThreadResume,      // when a thread resumes. Blockable.
   ModeEntered,       // mode_switch produced a new active mode.
   ModeExited,        // previous mode lost activation.
-  PactPromised,      // a pact/promise was opened.
-  PactResolved,      // a pact/promise was resolved.
   SubagentReturn,    // a delegated branch returned to its parent.
   WorkflowComplete,  // a workflow emitted its return trophy.
 };
@@ -180,7 +178,6 @@ struct WorkflowPrecondition {
 
 struct WorkflowGuard {
   std::vector<WorkflowPrecondition> preconditions;
-  bool postPact = false;        // auto-Pact on completion
   std::optional<std::string> requiresMode;  // refuse to start outside mode
   bool lockMode = false;        // forbid mode_switch while running
 };

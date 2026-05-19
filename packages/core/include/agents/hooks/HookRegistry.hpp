@@ -45,10 +45,6 @@ struct EventPayload {
   std::string fromMode;
   std::string toMode;
 
-  // pact events
-  std::string pactId;
-  std::string pactVerdict;  // pass | fail | lie
-
   // workflow_complete / subagent_return
   std::string completedWorkflowId;
   std::string subagentBranchId;
