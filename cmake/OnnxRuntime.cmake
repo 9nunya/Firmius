@@ -3,6 +3,13 @@
 
 option(FIRMIUS_ENABLE_ONNX "Enable ONNX Runtime for embedding inference" ON)
 
+# MinGW cannot link against MSVC-built .lib files shipped in the official package.
+if(WIN32 AND NOT MSVC)
+  message(STATUS "ONNX Runtime: disabled on MinGW (MSVC-built .lib not compatible with MinGW gcc)")
+  set(ONNXRUNTIME_FOUND FALSE)
+  return()
+endif()
+
 if(FIRMIUS_ENABLE_ONNX)
   set(ORT_VERSION "1.20.1")
   set(ORT_PLATFORM "linux-x64")

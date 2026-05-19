@@ -40,7 +40,6 @@
 #include <rapidjson/writer.h>
 #include <sstream>
 #include <string_view>
-#include <sys/syscall.h>
 #include <unistd.h>
 #include <unordered_map>
 #include <map>

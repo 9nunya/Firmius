@@ -63,7 +63,6 @@
 #include <rapidjson/document.h>
 #include <sstream>
 #include <string>
-#include <sys/syscall.h>
 #include <unistd.h>
 #include <unordered_map>
 

@@ -3,6 +3,14 @@
 #include <cstdlib>
 #include <filesystem>
 
+#if defined(_WIN32)
+#include <process.h>
+#define GET_PID() _getpid()
+#else
+#include <unistd.h>
+#define GET_PID() getpid()
+#endif
+
 namespace firmius::tui {
 
 DaemonSession::DaemonSession() = default;
@@ -13,7 +21,7 @@ bool DaemonSession::connect() {
   options.identity.clientId = "tui-" +
       std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
   options.identity.uiKind = "tui";
-  options.identity.pid = static_cast<int>(getpid());
+  options.identity.pid = static_cast<int>(GET_PID());
   options.identity.capabilityFlags = {"rpc", "events"};
 
   auto cwd = std::filesystem::current_path();

@@ -9,6 +9,10 @@
 #include <iostream>
 #include <thread>
 
+#if defined(_WIN32)
+#include <windows.h>
+#endif
+
 namespace {
 std::atomic<bool> g_running{true};
 std::atomic<int> g_signalCount{0};
@@ -22,7 +26,24 @@ extern "C" void handleSignal(int signo) {
   }
 }
 
+#if defined(_WIN32)
+static BOOL WINAPI consoleCtrlHandler(DWORD dwCtrlType) {
+  switch (dwCtrlType) {
+    case CTRL_C_EVENT:
+    case CTRL_BREAK_EVENT:
+    case CTRL_CLOSE_EVENT:
+      handleSignal(SIGINT);
+      return TRUE;
+    default:
+      return FALSE;
+  }
+}
+#endif
+
 void installSignalHandlers() {
+#if defined(_WIN32)
+  SetConsoleCtrlHandler(consoleCtrlHandler, TRUE);
+#else
   struct sigaction action;
   std::memset(&action, 0, sizeof(action));
   action.sa_handler = handleSignal;
@@ -30,6 +51,7 @@ void installSignalHandlers() {
   action.sa_flags = 0;
   sigaction(SIGINT, &action, nullptr);
   sigaction(SIGTERM, &action, nullptr);
+#endif
 }
 }
 

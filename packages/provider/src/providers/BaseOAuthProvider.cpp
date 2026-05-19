@@ -27,7 +27,12 @@ std::mutex g_oauth_json_mutex;
 std::filesystem::path makeOAuthTempPath(const std::filesystem::path &path) {
   const auto nonce =
       std::chrono::steady_clock::now().time_since_epoch().count();
-  return path.string() + ".tmp." + std::to_string(::getpid()) + "." +
+#if defined(_WIN32)
+  const auto pid = static_cast<long long>(GetCurrentProcessId());
+#else
+  const auto pid = static_cast<long long>(::getpid());
+#endif
+  return path.string() + ".tmp." + std::to_string(pid) + "." +
          std::to_string(nonce);
 }
 

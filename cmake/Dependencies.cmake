@@ -109,67 +109,67 @@ if(FIRMIUS_ENABLE_LUAU_HOOKS)
 
   if(TARGET Luau.CodeGen)
     target_compile_options(Luau.CodeGen PRIVATE
-      -Wno-error=extra
-      -Wno-error=ignored-qualifiers
-      -Wno-error=deprecated-copy
-      -Wno-error=implicit-fallthrough
-      -Wno-error=stringop-overflow
-      -Wno-error=missing-field-initializers
-      -Wno-error=unused-parameter
-      -Wno-error=unused-variable)
+      $<$<CXX_COMPILER_ID:GNU>:-Wno-error=extra>
+      $<$<CXX_COMPILER_ID:GNU>:-Wno-error=ignored-qualifiers>
+      $<$<CXX_COMPILER_ID:GNU>:-Wno-error=deprecated-copy>
+      $<$<CXX_COMPILER_ID:GNU>:-Wno-error=implicit-fallthrough>
+      $<$<CXX_COMPILER_ID:GNU>:-Wno-error=stringop-overflow>
+      $<$<CXX_COMPILER_ID:GNU>:-Wno-error=missing-field-initializers>
+      $<$<CXX_COMPILER_ID:GNU>:-Wno-error=unused-parameter>
+      $<$<CXX_COMPILER_ID:GNU>:-Wno-error=unused-variable>)
   endif()
   if(TARGET Luau.Analysis)
     target_compile_options(Luau.Analysis PRIVATE
-      -Wno-error=extra
-      -Wno-error=ignored-qualifiers
-      -Wno-error=deprecated-copy
-      -Wno-error=redundant-move
-      -Wno-error=maybe-uninitialized
-      -Wno-error=implicit-fallthrough
-      -Wno-error=stringop-overflow
-      -Wno-error=missing-field-initializers
-      -Wno-error=unused-parameter
-      -Wno-error=unused-variable)
+      $<$<CXX_COMPILER_ID:GNU>:-Wno-error=extra>
+      $<$<CXX_COMPILER_ID:GNU>:-Wno-error=ignored-qualifiers>
+      $<$<CXX_COMPILER_ID:GNU>:-Wno-error=deprecated-copy>
+      $<$<CXX_COMPILER_ID:GNU>:-Wno-error=redundant-move>
+      $<$<CXX_COMPILER_ID:GNU>:-Wno-error=maybe-uninitialized>
+      $<$<CXX_COMPILER_ID:GNU>:-Wno-error=implicit-fallthrough>
+      $<$<CXX_COMPILER_ID:GNU>:-Wno-error=stringop-overflow>
+      $<$<CXX_COMPILER_ID:GNU>:-Wno-error=missing-field-initializers>
+      $<$<CXX_COMPILER_ID:GNU>:-Wno-error=unused-parameter>
+      $<$<CXX_COMPILER_ID:GNU>:-Wno-error=unused-variable>)
   endif()
   if(TARGET Luau.VM)
     target_compile_options(Luau.VM PRIVATE
-      -Wno-error=implicit-fallthrough
-      -Wno-error=stringop-overflow
-      -Wno-error=missing-field-initializers
-      -Wno-error=unused-parameter
-      -Wno-error=unused-variable)
+      $<$<CXX_COMPILER_ID:GNU>:-Wno-error=implicit-fallthrough>
+      $<$<CXX_COMPILER_ID:GNU>:-Wno-error=stringop-overflow>
+      $<$<CXX_COMPILER_ID:GNU>:-Wno-error=missing-field-initializers>
+      $<$<CXX_COMPILER_ID:GNU>:-Wno-error=unused-parameter>
+      $<$<CXX_COMPILER_ID:GNU>:-Wno-error=unused-variable>)
   endif()
   if(TARGET Luau.Compiler)
     target_compile_options(Luau.Compiler PRIVATE
-      -Wno-error=implicit-fallthrough
-      -Wno-error=stringop-overflow
-      -Wno-error=missing-field-initializers
-      -Wno-error=unused-parameter
-      -Wno-error=unused-variable)
+      $<$<CXX_COMPILER_ID:GNU>:-Wno-error=implicit-fallthrough>
+      $<$<CXX_COMPILER_ID:GNU>:-Wno-error=stringop-overflow>
+      $<$<CXX_COMPILER_ID:GNU>:-Wno-error=missing-field-initializers>
+      $<$<CXX_COMPILER_ID:GNU>:-Wno-error=unused-parameter>
+      $<$<CXX_COMPILER_ID:GNU>:-Wno-error=unused-variable>)
   endif()
   if(TARGET Luau.Ast)
     target_compile_options(Luau.Ast PRIVATE
-      -Wno-error=implicit-fallthrough
-      -Wno-error=stringop-overflow
-      -Wno-error=missing-field-initializers
-      -Wno-error=unused-parameter
-      -Wno-error=unused-variable)
+      $<$<CXX_COMPILER_ID:GNU>:-Wno-error=implicit-fallthrough>
+      $<$<CXX_COMPILER_ID:GNU>:-Wno-error=stringop-overflow>
+      $<$<CXX_COMPILER_ID:GNU>:-Wno-error=missing-field-initializers>
+      $<$<CXX_COMPILER_ID:GNU>:-Wno-error=unused-parameter>
+      $<$<CXX_COMPILER_ID:GNU>:-Wno-error=unused-variable>)
   endif()
   if(TARGET Luau.Config)
     target_compile_options(Luau.Config PRIVATE
-      -Wno-error=implicit-fallthrough
-      -Wno-error=stringop-overflow
-      -Wno-error=missing-field-initializers
-      -Wno-error=unused-parameter
-      -Wno-error=unused-variable)
+      $<$<CXX_COMPILER_ID:GNU>:-Wno-error=implicit-fallthrough>
+      $<$<CXX_COMPILER_ID:GNU>:-Wno-error=stringop-overflow>
+      $<$<CXX_COMPILER_ID:GNU>:-Wno-error=missing-field-initializers>
+      $<$<CXX_COMPILER_ID:GNU>:-Wno-error=unused-parameter>
+      $<$<CXX_COMPILER_ID:GNU>:-Wno-error=unused-variable>)
   endif()
   if(TARGET Luau.Common)
     target_compile_options(Luau.Common INTERFACE
-      -Wno-error=implicit-fallthrough
-      -Wno-error=stringop-overflow
-      -Wno-error=missing-field-initializers
-      -Wno-error=unused-parameter
-      -Wno-error=unused-variable)
+      $<$<CXX_COMPILER_ID:GNU>:-Wno-error=implicit-fallthrough>
+      $<$<CXX_COMPILER_ID:GNU>:-Wno-error=stringop-overflow>
+      $<$<CXX_COMPILER_ID:GNU>:-Wno-error=missing-field-initializers>
+      $<$<CXX_COMPILER_ID:GNU>:-Wno-error=unused-parameter>
+      $<$<CXX_COMPILER_ID:GNU>:-Wno-error=unused-variable>)
   endif()
 endif()
 
