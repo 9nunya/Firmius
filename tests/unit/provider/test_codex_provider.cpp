@@ -461,3 +461,186 @@ TEST(CodexProvider, ProcessSseLineFinalizesLongInterleavedToolCalls) {
   EXPECT_EQ(artifactFinal->args,
             R"({"path":"plans/repair.md","content":"draft body"})");
 }
+
+
+// ---------------------------------------------------------------------------
+// Plan tracking tests
+//
+// The /wham/usage backend response (mirrored in stored metadata) is the
+// authoritative source for the user's current plan_type. The JWT
+// `chatgpt_plan_type` claim is set at OAuth time and lags reality: a user who
+// first signed in on Free and later upgraded to Plus/Pro keeps the original
+// "free" claim until a forced re-auth.
+//
+// These tests pin the policy: when both sources disagree, the metadata value
+// wins. When metadata is missing (typical right after first sign-in, before
+// the first quota refresh), the JWT is used as a best-effort fallback.
+// ---------------------------------------------------------------------------
+
+TEST(CodexProvider,
+     MetadataPlanTypeOverridesStaleJwtPlanTypeAfterUpgrade) {
+  const auto tempHome = std::filesystem::temp_directory_path() /
+                        "firmius_codex_metadata_overrides_jwt";
+  std::filesystem::remove_all(tempHome);
+  std::filesystem::create_directories(tempHome / ".firmius");
+  ScopedHomeOverride scopedHome(tempHome);
+
+  const auto futureSeconds =
+      std::chrono::system_clock::to_time_t(std::chrono::system_clock::now()) +
+      86400;
+  // The JWT claims the user is on "free" — this matches the real-world bug
+  // where ChatGPT does not refresh the JWT plan claim when a user upgrades to
+  // Plus or Pro mid-session.
+  const std::string staleJwt = makeJwt(
+      R"({"https://api.openai.com/profile":{"email":"upgrader@example.com"},"https://api.openai.com/auth":{"chatgpt_account_id":"id-upgrader","chatgpt_plan_type":"free"}})");
+
+  const std::filesystem::path oauthPath = tempHome / ".firmius" / "oauth.json";
+  std::ofstream out(oauthPath);
+  // Stored metadata records the up-to-date plan ("pro") — this is what
+  // fetchAndStoreQuotas would have written from a successful /wham/usage call.
+  out << R"({"codex":[{"identifier":"upgrader@example.com","refreshToken":"r1","accessToken":")"
+      << staleJwt << R"(","tokenExpiration":)" << futureSeconds
+      << R"(,"metadata":{"chatgpt_account_id":"id-upgrader","chatgpt_plan_type":"pro"}}]})";
+  out.close();
+
+  CodexProvider provider;
+  const auto &accounts = provider.getAccounts();
+  ASSERT_EQ(accounts.size(), 1u);
+  ASSERT_TRUE(accounts.front().metadata.count("chatgpt_plan_type"));
+  // Without the fix, normalizeCodexAccount() would resolve the plan via the
+  // JWT first and overwrite the metadata back to "free".
+  EXPECT_EQ(accounts.front().metadata.at("chatgpt_plan_type"), "pro");
+}
+
+TEST(CodexProvider, JwtPlanTypeIsUsedWhenMetadataMissing) {
+  const auto tempHome = std::filesystem::temp_directory_path() /
+                        "firmius_codex_jwt_fallback";
+  std::filesystem::remove_all(tempHome);
+  std::filesystem::create_directories(tempHome / ".firmius");
+  ScopedHomeOverride scopedHome(tempHome);
+
+  const auto futureSeconds =
+      std::chrono::system_clock::to_time_t(std::chrono::system_clock::now()) +
+      86400;
+  const std::string jwt = makeJwt(
+      R"({"https://api.openai.com/profile":{"email":"fresh@example.com"},"https://api.openai.com/auth":{"chatgpt_account_id":"id-fresh","chatgpt_plan_type":"plus"}})");
+
+  const std::filesystem::path oauthPath = tempHome / ".firmius" / "oauth.json";
+  std::ofstream out(oauthPath);
+  // No chatgpt_plan_type in metadata; mirrors a brand-new sign-in before the
+  // first /wham/usage refresh has populated the cached value.
+  out << R"({"codex":[{"identifier":"fresh@example.com","refreshToken":"r1","accessToken":")"
+      << jwt << R"(","tokenExpiration":)" << futureSeconds
+      << R"(,"metadata":{"chatgpt_account_id":"id-fresh"}}]})";
+  out.close();
+
+  CodexProvider provider;
+  const auto &accounts = provider.getAccounts();
+  ASSERT_EQ(accounts.size(), 1u);
+  ASSERT_TRUE(accounts.front().metadata.count("chatgpt_plan_type"));
+  EXPECT_EQ(accounts.front().metadata.at("chatgpt_plan_type"), "plus");
+}
+
+TEST(CodexProvider, EmptyMetadataPlanTypeFallsBackToJwt) {
+  const auto tempHome = std::filesystem::temp_directory_path() /
+                        "firmius_codex_empty_metadata_fallback";
+  std::filesystem::remove_all(tempHome);
+  std::filesystem::create_directories(tempHome / ".firmius");
+  ScopedHomeOverride scopedHome(tempHome);
+
+  const auto futureSeconds =
+      std::chrono::system_clock::to_time_t(std::chrono::system_clock::now()) +
+      86400;
+  const std::string jwt = makeJwt(
+      R"({"https://api.openai.com/profile":{"email":"blank@example.com"},"https://api.openai.com/auth":{"chatgpt_account_id":"id-blank","chatgpt_plan_type":"pro"}})");
+
+  const std::filesystem::path oauthPath = tempHome / ".firmius" / "oauth.json";
+  std::ofstream out(oauthPath);
+  // Metadata key is present but empty/whitespace — should fall through to JWT.
+  out << R"({"codex":[{"identifier":"blank@example.com","refreshToken":"r1","accessToken":")"
+      << jwt << R"(","tokenExpiration":)" << futureSeconds
+      << R"(,"metadata":{"chatgpt_account_id":"id-blank","chatgpt_plan_type":"   "}}]})";
+  out.close();
+
+  CodexProvider provider;
+  const auto &accounts = provider.getAccounts();
+  ASSERT_EQ(accounts.size(), 1u);
+  ASSERT_TRUE(accounts.front().metadata.count("chatgpt_plan_type"));
+  EXPECT_EQ(accounts.front().metadata.at("chatgpt_plan_type"), "pro");
+}
+
+TEST(CodexProvider, ProLitePlanTypeShownWithCorrectDisplayName) {
+  const auto tempHome = std::filesystem::temp_directory_path() /
+                        "firmius_codex_prolite_display";
+  std::filesystem::remove_all(tempHome);
+  std::filesystem::create_directories(tempHome / ".firmius");
+  ScopedHomeOverride scopedHome(tempHome);
+
+  const auto futureSeconds =
+      std::chrono::system_clock::to_time_t(std::chrono::system_clock::now()) +
+      86400;
+  const std::filesystem::path oauthPath = tempHome / ".firmius" / "oauth.json";
+  std::ofstream out(oauthPath);
+  out << R"({"codex":[{"identifier":"lite@example.com","refreshToken":"r1","accessToken":"a1","tokenExpiration":)"
+      << futureSeconds
+      << R"(,"metadata":{"chatgpt_account_id":"id-lite","chatgpt_plan_type":"prolite","quota:codex":"1","quota:codex:primary":"0.8","quota_window_minutes:codex:primary":"300"}}]})";
+  out.close();
+
+  CodexProvider provider;
+  const auto quotas = provider.getAllQuotas();
+  auto quotaIt = quotas.find("lite@example.com");
+  ASSERT_NE(quotaIt, quotas.end());
+  ASSERT_FALSE(quotaIt->second.empty());
+  // Display name should be "Pro Lite" (matching upstream KnownPlan).
+  EXPECT_EQ(quotaIt->second.front().note, "Plan: Pro Lite");
+}
+
+TEST(CodexProvider, GuestPlanTypeShownAsGuest) {
+  const auto tempHome = std::filesystem::temp_directory_path() /
+                        "firmius_codex_guest_display";
+  std::filesystem::remove_all(tempHome);
+  std::filesystem::create_directories(tempHome / ".firmius");
+  ScopedHomeOverride scopedHome(tempHome);
+
+  const auto futureSeconds =
+      std::chrono::system_clock::to_time_t(std::chrono::system_clock::now()) +
+      86400;
+  const std::filesystem::path oauthPath = tempHome / ".firmius" / "oauth.json";
+  std::ofstream out(oauthPath);
+  out << R"({"codex":[{"identifier":"guest@example.com","refreshToken":"r1","accessToken":"a1","tokenExpiration":)"
+      << futureSeconds
+      << R"(,"metadata":{"chatgpt_account_id":"id-guest","chatgpt_plan_type":"guest","quota:codex":"1","quota:codex:primary":"0.5","quota_window_minutes:codex:primary":"300"}}]})";
+  out.close();
+
+  CodexProvider provider;
+  const auto quotas = provider.getAllQuotas();
+  auto quotaIt = quotas.find("guest@example.com");
+  ASSERT_NE(quotaIt, quotas.end());
+  ASSERT_FALSE(quotaIt->second.empty());
+  EXPECT_EQ(quotaIt->second.front().note, "Plan: Guest");
+}
+
+TEST(CodexProvider, FreeWorkspacePlanTypeShownAsFreeWorkspace) {
+  const auto tempHome = std::filesystem::temp_directory_path() /
+                        "firmius_codex_free_workspace_display";
+  std::filesystem::remove_all(tempHome);
+  std::filesystem::create_directories(tempHome / ".firmius");
+  ScopedHomeOverride scopedHome(tempHome);
+
+  const auto futureSeconds =
+      std::chrono::system_clock::to_time_t(std::chrono::system_clock::now()) +
+      86400;
+  const std::filesystem::path oauthPath = tempHome / ".firmius" / "oauth.json";
+  std::ofstream out(oauthPath);
+  out << R"({"codex":[{"identifier":"workspace@example.com","refreshToken":"r1","accessToken":"a1","tokenExpiration":)"
+      << futureSeconds
+      << R"(,"metadata":{"chatgpt_account_id":"id-ws","chatgpt_plan_type":"free_workspace","quota:codex":"1","quota:codex:primary":"0.5","quota_window_minutes:codex:primary":"300"}}]})";
+  out.close();
+
+  CodexProvider provider;
+  const auto quotas = provider.getAllQuotas();
+  auto quotaIt = quotas.find("workspace@example.com");
+  ASSERT_NE(quotaIt, quotas.end());
+  ASSERT_FALSE(quotaIt->second.empty());
+  EXPECT_EQ(quotaIt->second.front().note, "Plan: Free Workspace");
+}

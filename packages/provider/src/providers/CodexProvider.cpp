@@ -963,7 +963,66 @@ std::optional<std::string> extractPlanTypeFromJwt(const std::string &token) {
   return std::nullopt;
 }
 
+// Extracts the chatgpt_account_is_fedramp boolean from a Codex OAuth JWT,
+// matching the upstream openai/codex behavior. FedRAMP workspaces must route
+// through chatgpt-fedramp.com instead of chatgpt.com.
+std::optional<bool> extractFedrampFlagFromJwt(const std::string &token) {
+  auto firstDot = token.find('.');
+  if (firstDot == std::string::npos)
+    return std::nullopt;
+  auto secondDot = token.find('.', firstDot + 1);
+  if (secondDot == std::string::npos)
+    return std::nullopt;
+  std::string payload = token.substr(firstDot + 1, secondDot - firstDot - 1);
+  auto bytes = base64UrlDecode(payload);
+  if (bytes.empty())
+    return std::nullopt;
+  std::string json(bytes.begin(), bytes.end());
+  rapidjson::Document doc;
+  doc.Parse(json.c_str());
+  if (doc.HasParseError() || !doc.IsObject())
+    return std::nullopt;
+  if (doc.HasMember("https://api.openai.com/auth") &&
+      doc["https://api.openai.com/auth"].IsObject()) {
+    const auto &auth = doc["https://api.openai.com/auth"];
+    if (auth.HasMember("chatgpt_account_is_fedramp") &&
+        auth["chatgpt_account_is_fedramp"].IsBool()) {
+      return auth["chatgpt_account_is_fedramp"].GetBool();
+    }
+  }
+  return std::nullopt;
+}
+
+bool isCodexAccountFedramp(const OAuthAccount &acc) {
+  auto idToken = acc.metadata.find("id_token");
+  if (idToken != acc.metadata.end()) {
+    if (auto flag = extractFedrampFlagFromJwt(idToken->second);
+        flag.has_value()) {
+      return *flag;
+    }
+  }
+  if (auto flag = extractFedrampFlagFromJwt(acc.accessToken); flag.has_value()) {
+    return *flag;
+  }
+  return false;
+}
+
+// The /wham/usage backend response returns the authoritative current plan
+// (e.g. "plus", "pro"). The JWT id_token / access_token claims contain a
+// chatgpt_plan_type that is set when the OAuth session was created, and the
+// upstream openai/codex CLI also reports that this value frequently lags
+// reality: a user who signs up on Free and later upgrades to Plus/Pro can keep
+// the original "free" claim in the JWT until the next forced re-auth.
+//
+// Therefore we prefer the metadata-stored value (populated by
+// fetchAndStoreQuotas from the live API response) over the JWT, and only fall
+// back to JWT inspection when no API-sourced plan type is available yet
+// (typical right after first sign-in, before quotas have been refreshed).
 std::optional<std::string> resolveCodexPlanType(const OAuthAccount &acc) {
+  auto it = acc.metadata.find("chatgpt_plan_type");
+  if (it != acc.metadata.end() && !StringUtil::trim(it->second).empty()) {
+    return normalizeCodexLimitId(it->second);
+  }
   auto idToken = acc.metadata.find("id_token");
   if (idToken != acc.metadata.end()) {
     auto plan = extractPlanTypeFromJwt(idToken->second);
@@ -975,10 +1034,6 @@ std::optional<std::string> resolveCodexPlanType(const OAuthAccount &acc) {
   if (plan.has_value() && !plan->empty()) {
     return plan;
   }
-  auto it = acc.metadata.find("chatgpt_plan_type");
-  if (it != acc.metadata.end() && !StringUtil::trim(it->second).empty()) {
-    return normalizeCodexLimitId(it->second);
-  }
   return std::nullopt;
 }
 
@@ -986,12 +1041,18 @@ std::string planTypeDisplayName(std::string_view rawPlanType) {
   const std::string normalized = normalizeCodexLimitId(rawPlanType);
   if (normalized == "free")
     return "Free";
+  if (normalized == "guest")
+    return "Guest";
+  if (normalized == "free_workspace")
+    return "Free Workspace";
   if (normalized == "go")
     return "Go";
   if (normalized == "plus")
     return "Plus";
   if (normalized == "pro")
     return "Pro";
+  if (normalized == "prolite" || normalized == "pro_lite")
+    return "Pro Lite";
   if (normalized == "team")
     return "Team";
   if (normalized == "self_serve_business_usage_based")
@@ -1004,6 +1065,12 @@ std::string planTypeDisplayName(std::string_view rawPlanType) {
     return "Enterprise";
   if (normalized == "education" || normalized == "edu")
     return "Edu";
+  if (normalized == "quorum")
+    return "Quorum";
+  if (normalized == "k12")
+    return "K12";
+  if (normalized == "unknown" || normalized.empty())
+    return "Unknown";
 
   std::string display = normalized;
   bool capitalizeNext = true;
@@ -1113,24 +1180,70 @@ parseQuotaWindowObject(const rapidjson::Value &window) {
   }
 
   ParsedQuotaWindow parsed;
-  const float used = static_cast<float>(window["used_percent"].GetDouble());
+  const double used = window["used_percent"].GetDouble();
   parsed.remainingFraction = normalizeQuotaFraction(1.0 - (used / 100.0));
 
+  // Resolve reset_at first (absolute epoch seconds), then fall back to
+  // reset_after_seconds (relative offset) if the absolute timestamp is
+  // missing. Upstream RateLimitWindowSnapshot exposes both as i32.
+  bool resetResolved = false;
   if (window.HasMember("reset_at")) {
-    if (window["reset_at"].IsInt64()) {
-      parsed.resetTime = epochSecondsToIso8601(window["reset_at"].GetInt64());
-    } else if (window["reset_at"].IsString()) {
-      parsed.resetTime = normalizeResetTimestamp(window["reset_at"].GetString());
+    const auto &resetAt = window["reset_at"];
+    if (resetAt.IsInt64()) {
+      const int64_t value = resetAt.GetInt64();
+      if (value > 0) {
+        parsed.resetTime = epochSecondsToIso8601(value);
+        resetResolved = true;
+      }
+    } else if (resetAt.IsInt()) {
+      const int value = resetAt.GetInt();
+      if (value > 0) {
+        parsed.resetTime = epochSecondsToIso8601(value);
+        resetResolved = true;
+      }
+    } else if (resetAt.IsString()) {
+      const std::string normalized =
+          normalizeResetTimestamp(resetAt.GetString());
+      if (!normalized.empty()) {
+        parsed.resetTime = normalized;
+        resetResolved = true;
+      }
+    }
+  }
+  if (!resetResolved && window.HasMember("reset_after_seconds")) {
+    const auto &resetAfter = window["reset_after_seconds"];
+    int64_t offsetSeconds = -1;
+    if (resetAfter.IsInt64()) {
+      offsetSeconds = resetAfter.GetInt64();
+    } else if (resetAfter.IsInt()) {
+      offsetSeconds = resetAfter.GetInt();
+    }
+    if (offsetSeconds > 0) {
+      parsed.resetTime = epochSecondsToIso8601(nowSeconds() + offsetSeconds);
     }
   }
 
-  if (window.HasMember("window_duration_mins") &&
-      window["window_duration_mins"].IsInt64()) {
-    parsed.windowMinutes = window["window_duration_mins"].GetInt64();
-  } else if (window.HasMember("limit_window_seconds") &&
-             window["limit_window_seconds"].IsInt64()) {
-    const int64_t seconds = window["limit_window_seconds"].GetInt64();
-    parsed.windowMinutes = std::max<int64_t>(1, (seconds + 59) / 60);
+  // Window duration: the upstream backend payload exposes
+  // `limit_window_seconds`. Older / alternate shapes used
+  // `window_duration_mins`. Honor either.
+  if (window.HasMember("limit_window_seconds")) {
+    const auto &limitWindow = window["limit_window_seconds"];
+    int64_t seconds = -1;
+    if (limitWindow.IsInt64()) {
+      seconds = limitWindow.GetInt64();
+    } else if (limitWindow.IsInt()) {
+      seconds = limitWindow.GetInt();
+    }
+    if (seconds > 0) {
+      parsed.windowMinutes = std::max<int64_t>(1, (seconds + 59) / 60);
+    }
+  } else if (window.HasMember("window_duration_mins")) {
+    const auto &windowMins = window["window_duration_mins"];
+    if (windowMins.IsInt64()) {
+      parsed.windowMinutes = windowMins.GetInt64();
+    } else if (windowMins.IsInt()) {
+      parsed.windowMinutes = windowMins.GetInt();
+    }
   }
 
   return parsed;
@@ -2349,11 +2462,20 @@ bool CodexProvider::fetchAndStoreQuotas(OAuthAccount &acc) {
     return false;
   }
 
+  // Mirror the upstream openai/codex `Client::get_rate_limits_many` path.
+  // The /wham/usage endpoint only requires the bearer token, the
+  // ChatGPT-Account-Id header, and (for FedRAMP-routed workspaces) the
+  // X-OpenAI-Fedramp marker. The OpenAI-Beta and originator headers used by
+  // the /codex/responses streaming endpoint must NOT be sent here: the usage
+  // endpoint is part of the chatgpt.com backend-api surface and the extra
+  // headers can either be silently ignored or cause the request to be routed
+  // through the wrong handler, returning stale or wrong plan_type data.
   GCPHttpClient client("firmius-codex/1.0");
   client.setBearerToken(acc.accessToken);
-  client.addHeader("OpenAI-Beta", kBetaHeaderValue);
-  client.addHeader("originator", kOriginator);
-  client.addHeader("chatgpt-account-id", accountId);
+  client.addHeader("ChatGPT-Account-Id", accountId);
+  if (isCodexAccountFedramp(acc)) {
+    client.addHeader("X-OpenAI-Fedramp", "true");
+  }
 
   auto resp = client.get(std::string(kBaseUrl) + "/wham/usage", 10);
   if (resp.code != 200) {
@@ -2371,6 +2493,21 @@ bool CodexProvider::fetchAndStoreQuotas(OAuthAccount &acc) {
   if (doc.HasMember("plan_type") && doc["plan_type"].IsString()) {
     acc.metadata["chatgpt_plan_type"] =
         normalizeCodexLimitId(doc["plan_type"].GetString());
+  }
+
+  // The upstream payload includes an optional rate_limit_reached_type object
+  // describing why a limit was hit (rate_limit_reached,
+  // workspace_owner_credits_depleted, etc). We persist the kind so the UI can
+  // display the appropriate prompt without re-querying the backend.
+  if (doc.HasMember("rate_limit_reached_type") &&
+      doc["rate_limit_reached_type"].IsObject()) {
+    const auto &reached = doc["rate_limit_reached_type"];
+    if (reached.HasMember("type") && reached["type"].IsString()) {
+      acc.metadata["rate_limit_reached_type"] =
+          normalizeCodexLimitId(reached["type"].GetString());
+    }
+  } else {
+    acc.metadata.erase("rate_limit_reached_type");
   }
 
   bool storedAnyQuota = false;
@@ -2411,11 +2548,19 @@ bool CodexProvider::fetchAndStoreQuotas(OAuthAccount &acc) {
         continue;
       }
 
-      std::string limitId = "codex_other";
+      // Upstream's AdditionalRateLimitDetails uses metered_feature as the
+      // stable identifier and limit_name as the human-friendly display name.
+      // Fall back to limit_name when metered_feature is absent.
+      std::string limitId;
       if (item.HasMember("metered_feature") && item["metered_feature"].IsString()) {
         limitId = item["metered_feature"].GetString();
-      } else if (item.HasMember("limit_name") && item["limit_name"].IsString()) {
+      }
+      if (limitId.empty() && item.HasMember("limit_name") &&
+          item["limit_name"].IsString()) {
         limitId = item["limit_name"].GetString();
+      }
+      if (limitId.empty()) {
+        limitId = "codex_other";
       }
 
       std::string limitName;

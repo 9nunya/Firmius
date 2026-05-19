@@ -89,6 +89,19 @@ public:
     std::string activeToolName;
     std::string activeToolArgs;
     bool activeToolFinalized = false;
+    // Synthetic-thinking-tool state. The Kiro Q endpoint has no wire-protocol
+    // opt-in for reasoning across all models; instead, Kiro registers a
+    // synthetic `thinking` tool, every model calls it for hard prompts, and
+    // the client converts those calls into reasoning events. We do the same
+    // here: when a tool call's name == "thinking" we suppress the
+    // ToolCall/ToolCallChunk events and emit ThinkingChunks as the `thought`
+    // string streams in. After the original stream ends we synthesize a
+    // tool_result and make a continuation request so the model can produce
+    // its actual answer.
+    bool activeIsThinking = false;
+    std::string thinkingEmittedSoFar; ///< Substring of `thought` already emitted as deltas.
+    std::vector<std::pair<std::string, std::string>>
+        completedThinkingCalls; ///< (toolUseId, full input JSON) for follow-up.
     std::atomic<bool> *abortSignal = nullptr;
     firmius::shared::AgentMetrics metrics;
     bool metricsReceived = false;
@@ -107,6 +120,14 @@ private:
   static constexpr const char *kUsageLimitsEndpoint = "https://q.{{region}}.amazonaws.com/getUsageLimits";
   static constexpr const char *kDesktopRefreshEndpoint = "https://prod.{{region}}.auth.desktop.kiro.dev/refreshToken";
   static constexpr const char *kBuilderIdStartUrl = "https://view.awsapps.com/start";
+
+  // Single-attempt outcome used by the rotation loop in stream().
+  enum class AttemptOutcome {
+    Success,      ///< Stream completed cleanly.
+    AuthFailed,   ///< 401/403 from the backend (token rejected).
+    RateLimited,  ///< 429 from the backend.
+    OtherFailure, ///< Network error, 5xx, or curl init failure.
+  };
 
   // Model data
   struct KiroModel {
@@ -127,6 +148,10 @@ private:
   // Token management
   bool refreshTokenIDC(firmius::shared::OAuthAccount &acc);
   bool refreshTokenDesktop(firmius::shared::OAuthAccount &acc);
+  // Refreshes the account's access token if it is within the expiry window
+  // and persists the new credentials. Returns false only on a real refresh
+  // failure (i.e. the refresh token itself is no longer valid).
+  bool ensureFreshToken(firmius::shared::OAuthAccount &acc);
 
   // Quota / plan
   bool fetchUsageLimits(firmius::shared::OAuthAccount &acc);
@@ -136,6 +161,27 @@ private:
   // Account selection that respects tier gating for the requested model.
   std::optional<firmius::shared::OAuthAccount> getAvailableAccountForModel(
       const std::string &modelId);
+  // Ordered list of indices into accounts_ for round-robin traversal during
+  // stream(). Caller must hold accountsMutex_. Tier-known qualifying accounts
+  // come first, unknown-tier accounts (which we let the backend gate) come
+  // after.
+  std::vector<int> collectCandidateAccountIndices(const std::string &modelId);
+
+  // One streaming attempt against a single account. Emits chunks/metrics on
+  // success; returns an AttemptOutcome so the caller can rotate to another
+  // account on failure. The real error from this attempt (HTTP body, curl
+  // message, etc.) is always written to *outError when non-null, so the
+  // rotation loop can surface the actual cause from the last attempted
+  // account rather than fabricate a generic message. When emitTransientErrors
+  // is false the StreamError is captured but not emitted.
+  AttemptOutcome streamOnceForAccount(
+      const firmius::shared::AgentHistory &history,
+      const ProviderOptions &opts,
+      firmius::shared::OAuthAccount &acc,
+      const std::string &resolvedModel,
+      bool emitTransientErrors,
+      std::function<void(const firmius::shared::StreamEvent &)> onEvent,
+      std::optional<firmius::shared::StreamError> *outError = nullptr);
 
   // Request building
   std::string buildCodeWhispererRequest(

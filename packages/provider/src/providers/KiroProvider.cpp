@@ -302,7 +302,10 @@ void maybeLogRawKiroChunk(const char *data, size_t size) {
   if (const char *path = std::getenv("FIRMIUS_KIRO_RAW_SSE_LOG");
       path && *path) {
     std::ofstream out(path, std::ios::app | std::ios::binary);
-    out.write(data, static_cast<std::streamsize>(size));
+    if (out.is_open()) {
+      out.write(data, static_cast<std::streamsize>(size));
+      out.flush();
+    }
   }
   if (const char *flag = std::getenv("FIRMIUS_KIRO_RAW_SSE_STDOUT");
       flag && *flag && std::string(flag) != "0" &&
@@ -425,6 +428,134 @@ void emitKiroContentDelta(KiroProvider::StreamContext &ctx,
 // are still picked up if a chunk happens to contain both.
 // ----------------------------------------------------------------------------
 
+// Synthetic thinking-tool helpers.
+//
+// The Kiro Q endpoint has no model-agnostic wire-protocol way to enable
+// reasoning. Kiro's own CLI works around this by registering a synthetic
+// `thinking` tool and translating its calls into reasoning events; we do the
+// same here. These helpers extract the streaming `thought` string from the
+// (partial, JSON-encoded) tool-call input and emit ThinkingChunks as it
+// accumulates.
+
+// Decode a JSON string body (everything between the opening and closing `"`
+// of the value) into its UTF-8 text form. Returns the decoded text up to the
+// last fully-decoded code point. Stops cleanly if the input ends mid-escape
+// or mid-string (i.e. partial input is fine — the caller will get more of
+// the same string later and will re-call this).
+std::string decodeJsonStringBodyPartial(const std::string &body) {
+  std::string out;
+  out.reserve(body.size());
+  for (std::size_t i = 0; i < body.size(); ++i) {
+    char c = body[i];
+    if (c == '\\') {
+      if (i + 1 >= body.size()) break; // mid-escape — stop here.
+      char next = body[i + 1];
+      switch (next) {
+      case '"':  out.push_back('"');  i += 1; break;
+      case '\\': out.push_back('\\'); i += 1; break;
+      case '/':  out.push_back('/');  i += 1; break;
+      case 'b':  out.push_back('\b'); i += 1; break;
+      case 'f':  out.push_back('\f'); i += 1; break;
+      case 'n':  out.push_back('\n'); i += 1; break;
+      case 'r':  out.push_back('\r'); i += 1; break;
+      case 't':  out.push_back('\t'); i += 1; break;
+      case 'u': {
+        if (i + 5 >= body.size()) return out; // incomplete \uXXXX
+        unsigned codepoint = 0;
+        for (int k = 0; k < 4; ++k) {
+          char hex = body[i + 2 + k];
+          codepoint <<= 4;
+          if (hex >= '0' && hex <= '9') codepoint |= hex - '0';
+          else if (hex >= 'a' && hex <= 'f') codepoint |= 10 + hex - 'a';
+          else if (hex >= 'A' && hex <= 'F') codepoint |= 10 + hex - 'A';
+          else return out; // malformed
+        }
+        if (codepoint < 0x80) {
+          out.push_back(static_cast<char>(codepoint));
+        } else if (codepoint < 0x800) {
+          out.push_back(static_cast<char>(0xC0 | (codepoint >> 6)));
+          out.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+        } else {
+          out.push_back(static_cast<char>(0xE0 | (codepoint >> 12)));
+          out.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
+          out.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+        }
+        i += 5;
+        break;
+      }
+      default:
+        // Unknown escape — keep verbatim.
+        out.push_back(c);
+        out.push_back(next);
+        i += 1;
+        break;
+      }
+    } else {
+      out.push_back(c);
+    }
+  }
+  return out;
+}
+
+// Given the accumulated JSON-encoded tool input so far (e.g.
+// `{"thought":"first chunk\nsecond"`), return the decoded text of the
+// `thought` field that we have visibility into. May return less than the full
+// text if the JSON value isn't fully streamed yet, but never more.
+std::string extractPartialThoughtField(const std::string &accumulatedJson) {
+  // Find `"thought":` (allow surrounding whitespace).
+  std::size_t key = accumulatedJson.find("\"thought\"");
+  if (key == std::string::npos) {
+    return {};
+  }
+  std::size_t cursor = key + std::strlen("\"thought\"");
+  // Skip whitespace and the colon.
+  while (cursor < accumulatedJson.size() &&
+         (accumulatedJson[cursor] == ' ' || accumulatedJson[cursor] == ':')) {
+    ++cursor;
+  }
+  if (cursor >= accumulatedJson.size() || accumulatedJson[cursor] != '"') {
+    return {};
+  }
+  ++cursor; // skip opening quote
+  // Find the closing unescaped `"` if it exists.
+  std::size_t end = std::string::npos;
+  for (std::size_t i = cursor; i < accumulatedJson.size(); ++i) {
+    if (accumulatedJson[i] == '\\') {
+      ++i; // skip escaped char
+      continue;
+    }
+    if (accumulatedJson[i] == '"') {
+      end = i;
+      break;
+    }
+  }
+  std::string body = (end == std::string::npos)
+                         ? accumulatedJson.substr(cursor)
+                         : accumulatedJson.substr(cursor, end - cursor);
+  return decodeJsonStringBodyPartial(body);
+}
+
+// Emit any newly-revealed prefix of the `thought` field as a ThinkingChunk.
+// Updates ctx.thinkingEmittedSoFar so successive calls only emit deltas.
+void emitKiroThinkingDeltasFromArgs(KiroProvider::StreamContext &ctx) {
+  const std::string fullSoFar = extractPartialThoughtField(ctx.activeToolArgs);
+  if (fullSoFar.size() <= ctx.thinkingEmittedSoFar.size()) {
+    return;
+  }
+  // Only emit when the new prefix is a strict extension of what we already
+  // emitted (it should be — partial JSON decoding may briefly produce a
+  // shorter result on a mid-escape boundary, in which case we wait).
+  if (fullSoFar.substr(0, ctx.thinkingEmittedSoFar.size()) ==
+      ctx.thinkingEmittedSoFar) {
+    const std::string delta =
+        fullSoFar.substr(ctx.thinkingEmittedSoFar.size());
+    if (!delta.empty()) {
+      (*ctx.onEvent)(ThinkingChunk{delta, ""});
+      ctx.thinkingEmittedSoFar = fullSoFar;
+    }
+  }
+}
+
 void emitKiroToolUseStart(KiroProvider::StreamContext &ctx,
                           const std::string &id,
                           const std::string &name,
@@ -434,15 +565,27 @@ void emitKiroToolUseStart(KiroProvider::StreamContext &ctx,
     ctx.activeToolName.clear();
     ctx.activeToolArgs.clear();
     ctx.activeToolFinalized = false;
+    ctx.activeIsThinking = false;
+    ctx.thinkingEmittedSoFar.clear();
   }
   if (!id.empty()) {
     ctx.activeToolUseId = id;
   }
   if (!name.empty()) {
     ctx.activeToolName = name;
+    if (name == "thinking") {
+      ctx.activeIsThinking = true;
+      ctx.thinkingEmittedSoFar.clear();
+    }
   }
   if (!initialInput.empty()) {
     ctx.activeToolArgs = initialInput;
+  }
+  if (ctx.activeIsThinking) {
+    // Suppress tool-call event emission for thinking; consumers see only
+    // ThinkingChunks. Emit any thought text already revealed by the seed.
+    emitKiroThinkingDeltasFromArgs(ctx);
+    return;
   }
   (*ctx.onEvent)(ToolCallChunk{ctx.activeToolUseId,
                                 std::numeric_limits<std::uint32_t>::max(),
@@ -1320,109 +1463,127 @@ std::map<std::string, std::vector<QuotaBucket>> KiroProvider::getAllQuotas() con
 
 std::optional<OAuthAccount>
 KiroProvider::getAvailableAccountForModel(const std::string &modelId) {
-  // Walk the account list and return the first account whose tier permits
-  // the requested model. Account selection respects rate-limit / backoff
-  // state via BaseOAuthProvider::getAvailableAccount, but that method does
-  // not understand model gating, so we implement plan-aware selection here.
+  // Returns the first qualifying candidate (round-robin starting at
+  // lastUsedIndex_). For full ordered traversal during retry, stream()
+  // calls collectCandidateAccountIndices() instead.
   std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
   if (accounts_.empty()) {
     return std::nullopt;
   }
+  auto indices = collectCandidateAccountIndices(modelId);
+  if (indices.empty()) {
+    return std::nullopt;
+  }
+  return accounts_[indices.front()];
+}
+
+std::vector<int>
+KiroProvider::collectCandidateAccountIndices(const std::string &modelId) {
+  // Caller holds accountsMutex_.
+  std::vector<int> tiered;
+  std::vector<int> unknown;
+  if (accounts_.empty()) {
+    return {};
+  }
 
   const std::string resolved = resolveModelId(modelId);
   const KiroTier required = modelMinimumTier(resolved);
+  const int64_t now = nowSeconds();
 
-  // Pass 1: prefer accounts whose tier is known and meets the requirement.
-  // Within that group, defer to BaseOAuthProvider::getAvailableAccount for
-  // rotation by temporarily filtering accounts_.
-  std::vector<OAuthAccount> tieredCandidates;
-  std::vector<OAuthAccount> unknownCandidates;
-  for (const auto &acc : accounts_) {
-    if (acc.rateLimited && nowSeconds() < acc.backoffUntil) {
+  for (int i = 0; i < static_cast<int>(accounts_.size()); ++i) {
+    const auto &acc = accounts_[i];
+    if (acc.rateLimited && now < acc.backoffUntil) {
       continue;
     }
     KiroTier tier = accountTier(acc);
     if (tier == KiroTier::Unknown) {
-      unknownCandidates.push_back(acc);
-      continue;
-    }
-    if (static_cast<std::uint8_t>(tier) >=
-        static_cast<std::uint8_t>(required)) {
-      tieredCandidates.push_back(acc);
+      unknown.push_back(i);
+    } else if (static_cast<std::uint8_t>(tier) >=
+               static_cast<std::uint8_t>(required)) {
+      tiered.push_back(i);
     }
   }
 
-  if (!tieredCandidates.empty()) {
-    // Round-robin: pick by lastUsedIndex_ within the qualifying set.
-    int idx = lastUsedIndex_.fetch_add(1, std::memory_order_relaxed);
-    return tieredCandidates[((idx % tieredCandidates.size()) +
-                             tieredCandidates.size()) %
-                            tieredCandidates.size()];
-  }
-
-  // Pass 2: no tier-known account qualifies. Fall back to accounts whose
-  // tier we have not yet probed — let the backend decide. This avoids
-  // locking users out before the first getUsageLimits roundtrip lands.
-  if (!unknownCandidates.empty()) {
-    int idx = lastUsedIndex_.fetch_add(1, std::memory_order_relaxed);
-    return unknownCandidates[((idx % unknownCandidates.size()) +
-                              unknownCandidates.size()) %
-                             unknownCandidates.size()];
-  }
-
-  return std::nullopt;
-}
-
-std::optional<OAuthAccount> KiroProvider::getAvailableAccount(const std::optional<std::string> &modelId) {
-  if (modelId.has_value() && !modelId->empty()) {
-    if (auto chosen = getAvailableAccountForModel(*modelId)) {
-      return chosen;
-    }
-  }
-  return BaseOAuthProvider::getAvailableAccount(modelId);
-}
-
-void KiroProvider::stream(const AgentHistory &history, const ProviderOptions &opts,
-                          std::function<void(const StreamEvent &)> onEvent) {
-  const std::string resolvedModel = resolveModelId(opts.modelId);
-
-  auto accOpt = getAvailableAccount(resolvedModel);
-  if (!accOpt) {
-    // Distinguish two failure modes so the user can act:
-    //   - no accounts at all → /connect kiro
-    //   - accounts exist but none of them is allowed to call this model
-    {
-      std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
-      if (!accounts_.empty()) {
-        const KiroTier required = modelMinimumTier(resolvedModel);
-        if (required > KiroTier::Free) {
-          onEvent(StreamError{
-              std::string("Model '") + resolvedModel +
-                  "' requires Kiro " +
-                  (required == KiroTier::Power ? "Power"
-                   : required == KiroTier::ProPlus ? "Pro+"
-                                                   : "Pro") +
-                  ". None of your connected Kiro accounts is on a qualifying"
-                  " plan — connect a Pro/Pro+/Power account or pick a"
-                  " Free-tier model (auto, claude-sonnet-4.5, qwen3-coder-next,"
-                  " glm-5, deepseek-3.2, minimax-m2.1, minimax-m2.5).",
-              403, ""});
-          onEvent(StreamDone{StopReason::Error});
-          return;
-        }
+  // Round-robin start: rotate the list so we begin at the index after
+  // lastUsedIndex_. Tiered candidates first; unknown-tier accounts as a
+  // fallback (we let the backend gate them).
+  auto rotateBy = [&](std::vector<int> &v) {
+    if (v.size() <= 1) return;
+    int last = lastUsedIndex_.load(std::memory_order_relaxed);
+    int startIdx = 0;
+    for (std::size_t k = 0; k < v.size(); ++k) {
+      if (v[k] > last) {
+        startIdx = static_cast<int>(k);
+        break;
       }
     }
-    onEvent(StreamError{"No Kiro account available. Run /connect kiro to authenticate.", 401, ""});
-    onEvent(StreamDone{StopReason::Error});
-    return;
-  }
+    std::rotate(v.begin(), v.begin() + startIdx, v.end());
+  };
+  rotateBy(tiered);
+  rotateBy(unknown);
 
-  OAuthAccount acc = *accOpt;
+  std::vector<int> result;
+  result.reserve(tiered.size() + unknown.size());
+  for (int i : tiered) result.push_back(i);
+  for (int i : unknown) result.push_back(i);
+  return result;
+}
+
+bool KiroProvider::ensureFreshToken(OAuthAccount &acc) {
+  // Refresh if expired (within 5 minutes of expiry) and persist on success.
+  // Returns false only when refresh genuinely failed.
+  if (!isTokenExpired(acc)) {
+    return true;
+  }
+  if (!refreshAccessToken(acc)) {
+    return false;
+  }
+  // Mirror the refreshed token + expiration back into accounts_ so other
+  // callers see the new credentials, then persist to disk so subsequent
+  // process starts don't re-discover the same expired token.
+  std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
+  for (auto &existing : accounts_) {
+    if (existing.identifier == acc.identifier) {
+      existing.accessToken = acc.accessToken;
+      existing.refreshToken = acc.refreshToken;
+      existing.tokenExpiration = acc.tokenExpiration;
+      break;
+    }
+  }
+  saveAccounts();
+  return true;
+}
+
+KiroProvider::AttemptOutcome KiroProvider::streamOnceForAccount(
+    const AgentHistory &history, const ProviderOptions &opts,
+    OAuthAccount &acc, const std::string &resolvedModel,
+    bool emitTransientErrors,
+    std::function<void(const StreamEvent &)> onEvent,
+    std::optional<StreamError> *outError) {
+
+  auto record = [&](StreamError err) {
+    if (outError) {
+      *outError = err;
+    }
+    if (emitTransientErrors) {
+      onEvent(err);
+    }
+  };
+
   std::string requestBody = buildCodeWhispererRequest(history, opts.modelId, acc, opts);
+
+  // Optional request-body dump (debug aid): writes the JSON body to a file
+  // when FIRMIUS_KIRO_REQUEST_LOG is set.
+  if (const char *reqLog = std::getenv("FIRMIUS_KIRO_REQUEST_LOG");
+      reqLog && *reqLog) {
+    std::ofstream out(reqLog, std::ios::app | std::ios::binary);
+    out << "==== request to model=" << opts.modelId
+        << " account=" << acc.identifier << " ====\n"
+        << requestBody << "\n";
+  }
 
   std::string region = acc.metadata.count("region") ? acc.metadata["region"] : kDefaultRegion;
   std::string apiUrl = buildUrl("https://q.{{region}}.amazonaws.com/generateAssistantResponse", region);
-
   std::string profileArn = acc.metadata.count("profileArn") ? acc.metadata["profileArn"] : "";
 
   StreamContext ctx;
@@ -1433,9 +1594,8 @@ void KiroProvider::stream(const AgentHistory &history, const ProviderOptions &op
 
   CURL *curl = curl_easy_init();
   if (!curl) {
-    onEvent(StreamError{"Failed to initialize CURL", 500, acc.identifier});
-    onEvent(StreamDone{StopReason::Error});
-    return;
+    record(StreamError{"Failed to initialize CURL", 500, acc.identifier});
+    return AttemptOutcome::OtherFailure;
   }
 
   struct curl_slist *chunk = nullptr;
@@ -1477,20 +1637,15 @@ void KiroProvider::stream(const AgentHistory &history, const ProviderOptions &op
   curl_easy_cleanup(curl);
 
   if (res != CURLE_OK) {
-    onEvent(StreamError{curl_easy_strerror(res), 0, acc.identifier});
-    onEvent(StreamDone{StopReason::Error});
-    return;
+    record(StreamError{std::string("curl: ") + curl_easy_strerror(res), 0,
+                       acc.identifier});
+    return AttemptOutcome::OtherFailure;
   }
 
-  if (httpStatus == 429) {
-    markAccountRateLimited(acc, 60);
-    onEvent(StreamError{"Rate limited", 429, acc.identifier});
-    onEvent(StreamDone{StopReason::Error});
-    return;
-  }
-
-  if (httpStatus >= 400) {
-    std::string msg = "HTTP error " + std::to_string(httpStatus);
+  // Helper: produce a StreamError that includes the raw response body so the
+  // user sees what AWS actually said instead of a placeholder.
+  auto buildHttpError = [&](long status) {
+    std::string msg = "HTTP " + std::to_string(status);
     if (!ctx.buffer.empty()) {
       std::string snippet = ctx.buffer;
       if (snippet.size() > 2000) {
@@ -1499,10 +1654,39 @@ void KiroProvider::stream(const AgentHistory &history, const ProviderOptions &op
       }
       msg += " body=" + snippet;
     }
-    onEvent(StreamError{msg, static_cast<int>(httpStatus), acc.identifier});
-    onEvent(StreamDone{StopReason::Error});
-    return;
+    return StreamError{msg, static_cast<int>(status), acc.identifier};
+  };
+
+  // 401/403: token rejected by AWS even though our local clock said it was
+  // valid. The Q endpoint sometimes invalidates tokens before the stored
+  // expiration; treat this as auth failure so the caller can refresh + retry.
+  if (httpStatus == 401 || httpStatus == 403) {
+    record(buildHttpError(httpStatus));
+    return AttemptOutcome::AuthFailed;
   }
+
+  if (httpStatus == 429) {
+    {
+      std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
+      for (auto &existing : accounts_) {
+        if (existing.identifier == acc.identifier) {
+          markAccountRateLimited(existing, 60);
+          break;
+        }
+      }
+    }
+    record(buildHttpError(httpStatus));
+    return AttemptOutcome::RateLimited;
+  }
+
+  if (httpStatus >= 400) {
+    // 4xx other than auth/rate-limit, or 5xx: surface the real body and let
+    // the rotation loop decide whether to retry on another account.
+    record(buildHttpError(httpStatus));
+    return AttemptOutcome::OtherFailure;
+  }
+
+  // Success path — flush trailing buffers, emit metrics, finalize.
   if (!ctx.metricsReceived && !ctx.buffer.empty()) {
     size_t pos = ctx.buffer.find("{\"contextUsagePercentage\":");
     if (pos != std::string::npos) {
@@ -1531,6 +1715,162 @@ void KiroProvider::stream(const AgentHistory &history, const ProviderOptions &op
 
   onEvent(ctx.metrics);
   onEvent(StreamDone{ctx.doneReceived ? StopReason::ToolUse : StopReason::Stop});
+  return AttemptOutcome::Success;
+}
+
+std::optional<OAuthAccount> KiroProvider::getAvailableAccount(const std::optional<std::string> &modelId) {
+  if (modelId.has_value() && !modelId->empty()) {
+    if (auto chosen = getAvailableAccountForModel(*modelId)) {
+      return chosen;
+    }
+  }
+  return BaseOAuthProvider::getAvailableAccount(modelId);
+}
+
+void KiroProvider::stream(const AgentHistory &history, const ProviderOptions &opts,
+                          std::function<void(const StreamEvent &)> onEvent) {
+  const std::string resolvedModel = resolveModelId(opts.modelId);
+
+  // Build the ordered candidate list once, up front. We rotate through it on
+  // failures (auth / rate limit / transient HTTP errors) until we either
+  // succeed or exhaust every account.
+  std::vector<int> candidateIndices;
+  std::vector<OAuthAccount> candidates;
+  {
+    std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
+    candidateIndices = collectCandidateAccountIndices(resolvedModel);
+    candidates.reserve(candidateIndices.size());
+    for (int i : candidateIndices) {
+      candidates.push_back(accounts_[i]);
+    }
+  }
+
+  if (candidates.empty()) {
+    std::lock_guard<std::recursive_mutex> lock(accountsMutex_);
+    if (!accounts_.empty()) {
+      const KiroTier required = modelMinimumTier(resolvedModel);
+      if (required > KiroTier::Free) {
+        onEvent(StreamError{
+            std::string("Model '") + resolvedModel +
+                "' requires Kiro " +
+                (required == KiroTier::Power ? "Power"
+                 : required == KiroTier::ProPlus ? "Pro+"
+                                                 : "Pro") +
+                ". None of your connected Kiro accounts is on a qualifying"
+                " plan — connect a Pro/Pro+/Power account or pick a"
+                " Free-tier model (auto, claude-sonnet-4.5, qwen3-coder-next,"
+                " glm-5, deepseek-3.2, minimax-m2.1, minimax-m2.5).",
+            403, ""});
+        onEvent(StreamDone{StopReason::Error});
+        return;
+      }
+    }
+    onEvent(StreamError{"No Kiro account available. Run /connect kiro to authenticate.", 401, ""});
+    onEvent(StreamDone{StopReason::Error});
+    return;
+  }
+
+  // Rotation loop. For each candidate:
+  //   1) Refresh its access token if expired.
+  //   2) Make the streaming request.
+  //   3) On success → done.
+  //   4) On AuthFailed → if we haven't tried refreshing yet, refresh once and
+  //      retry the same account; otherwise rotate to the next.
+  //   5) On RateLimited → mark the account, rotate.
+  //   6) On OtherFailure → rotate.
+  //
+  // We only emit the final StreamError + StreamDone on the *last* candidate
+  // failure; intermediate errors are suppressed so the caller doesn't see
+  // them as terminal.
+
+  std::optional<StreamError> lastError;
+  bool succeeded = false;
+
+  for (std::size_t idx = 0; idx < candidates.size(); ++idx) {
+    OAuthAccount acc = candidates[idx];
+
+    // Step 1: proactive refresh.
+    if (!ensureFreshToken(acc)) {
+      lastError = StreamError{"refresh failed for " + acc.identifier, 401,
+                              acc.identifier};
+      continue;
+    }
+
+    bool retriedAfterAuthFailure = false;
+    while (true) {
+      // Forwarding shim: passes through chunks/metrics, captures any
+      // StreamError into `attemptError` (we surface it later as `lastError`),
+      // and suppresses StreamDone — we re-emit a single canonical Done at
+      // the very end so the caller sees exactly one terminal event.
+      std::optional<StreamError> attemptError;
+      AttemptOutcome outcome;
+      auto forward = [&](const StreamEvent &ev) {
+        if (std::holds_alternative<StreamError>(ev)) {
+          // streamOnceForAccount also writes the same error into outError;
+          // capturing here is a defensive backup in case of future code
+          // paths that emit StreamError without going through `record`.
+          if (!attemptError) {
+            attemptError = std::get<StreamError>(ev);
+          }
+          return;
+        }
+        if (std::holds_alternative<StreamDone>(ev)) {
+          return;
+        }
+        onEvent(ev);
+      };
+
+      outcome = streamOnceForAccount(history, opts, acc, resolvedModel,
+                                     /*emitTransientErrors=*/false, forward,
+                                     &attemptError);
+
+      if (outcome == AttemptOutcome::Success) {
+        // streamOnceForAccount already emitted metrics + (suppressed) Done
+        // via `forward`. Re-emit a canonical Done now and advance the
+        // round-robin pointer.
+        lastUsedIndex_.store(candidateIndices[idx], std::memory_order_relaxed);
+        onEvent(StreamDone{StopReason::Stop});
+        succeeded = true;
+        break;
+      }
+
+      if (outcome == AttemptOutcome::AuthFailed && !retriedAfterAuthFailure) {
+        // Force a refresh and retry once on this account. AWS sometimes
+        // invalidates tokens early; a single refresh usually clears it.
+        retriedAfterAuthFailure = true;
+        acc.tokenExpiration = 0;
+        if (!ensureFreshToken(acc)) {
+          if (attemptError) {
+            lastError = attemptError;
+          } else {
+            lastError = StreamError{"refresh failed after 401/403 for " +
+                                        acc.identifier,
+                                    401, acc.identifier};
+          }
+          break;
+        }
+        continue;
+      }
+
+      // Non-recoverable on this account — preserve the real error and rotate.
+      if (attemptError) {
+        lastError = attemptError;
+      }
+      break;
+    }
+
+    if (succeeded) break;
+  }
+
+  if (!succeeded) {
+    if (lastError) {
+      onEvent(*lastError);
+    } else {
+      onEvent(StreamError{"All Kiro accounts failed without a captured error",
+                          0, ""});
+    }
+    onEvent(StreamDone{StopReason::Error});
+  }
 }
 
 std::string KiroProvider::buildCodeWhispererRequest(
@@ -1687,17 +2027,26 @@ std::string KiroProvider::buildCodeWhispererRequest(
   userInputMessage.AddMember("modelId", rapidjson::Value(resolvedModel.c_str(), alloc), alloc);
   userInputMessage.AddMember("origin", "AI_EDITOR", alloc);
 
-  // Add tools if provided
-  if (!opts.tools.empty()) {
+  // Add tools (always, since we inject a synthetic `thinking` tool regardless
+  // of what the caller asked for — this is how Kiro's own CLI gets every
+  // model to emit reasoning, including ones that don't have a wire-protocol
+  // thinking opt-in).
+  {
     rapidjson::Value ctx(rapidjson::kObjectType);
     rapidjson::Value toolsArr(rapidjson::kArrayType);
-    
+
     for (const auto &tool : opts.tools) {
+      // Defensive: don't double-inject if the caller is already passing a
+      // tool literally named "thinking".
+      if (tool.name == "thinking") {
+        continue;
+      }
       rapidjson::Value toolSpec(rapidjson::kObjectType);
       rapidjson::Value ts(rapidjson::kObjectType);
       ts.AddMember("name", rapidjson::Value(tool.name.c_str(), alloc), alloc);
-      ts.AddMember("description", rapidjson::Value(tool.description.c_str(), alloc), alloc);
-      
+      ts.AddMember("description",
+                   rapidjson::Value(tool.description.c_str(), alloc), alloc);
+
       rapidjson::Document schemaDoc;
       schemaDoc.Parse(tool.inputSchema.c_str());
       if (!schemaDoc.HasParseError()) {
@@ -1705,11 +2054,42 @@ std::string KiroProvider::buildCodeWhispererRequest(
         schema.AddMember("json", rapidjson::Value(schemaDoc, alloc), alloc);
         ts.AddMember("inputSchema", schema, alloc);
       }
-      
+
       toolSpec.AddMember("toolSpecification", ts, alloc);
       toolsArr.PushBack(toolSpec, alloc);
     }
-    
+
+    // Synthetic `thinking` tool — every Kiro model (including Sonnet 4.5,
+    // Haiku 4.5, GLM-5, MiniMax, DeepSeek, Qwen) will call this tool when
+    // it's offered. The provider intercepts these calls and translates them
+    // into ThinkingChunk events; the harness never sees them as tool calls.
+    {
+      rapidjson::Value thinkSpec(rapidjson::kObjectType);
+      rapidjson::Value ts(rapidjson::kObjectType);
+      ts.AddMember("name", "thinking", alloc);
+      ts.AddMember(
+          "description",
+          "Thinking is an internal reasoning mechanism improving the quality "
+          "of complex tasks by breaking their atomic actions down; use it "
+          "specifically for multi-step problems requiring step-by-step "
+          "dependencies, reasoning through multiple constraints, synthesizing "
+          "results from previous tool calls, planning intricate sequences of "
+          "actions, troubleshooting complex errors, or making decisions "
+          "involving multiple trade-offs. Avoid using it for straightforward "
+          "tasks, basic information retrieval, summaries; always clearly "
+          "define the reasoning challenge, structure thoughts explicitly, "
+          "consider multiple perspectives, and summarize key insights before "
+          "important decisions or complex tool interactions.",
+          alloc);
+      rapidjson::Value schema(rapidjson::kObjectType);
+      rapidjson::Document inner;
+      inner.Parse(R"({"type":"object","properties":{"thought":{"type":"string","description":"A reflective note or intermediate reasoning step. This is shown to the user as your reasoning trace."}},"required":["thought"]})");
+      schema.AddMember("json", rapidjson::Value(inner, alloc), alloc);
+      ts.AddMember("inputSchema", schema, alloc);
+      thinkSpec.AddMember("toolSpecification", ts, alloc);
+      toolsArr.PushBack(thinkSpec, alloc);
+    }
+
     ctx.AddMember("tools", toolsArr, alloc);
     userInputMessage.AddMember("userInputMessageContext", ctx, alloc);
   }
@@ -1760,6 +2140,7 @@ size_t KiroProvider::sseWriteCallback(char *ptr, size_t size, size_t nmemb, void
     size_t jsonStart = std::string::npos;
     const char *markers[] = {
         "{\"content\":",
+        "{\"text\":",
         "{\"thinking\":",
         "{\"reasoning\":",
         "{\"reasoning_content\":",
@@ -1772,7 +2153,14 @@ size_t KiroProvider::sseWriteCallback(char *ptr, size_t size, size_t nmemb, void
         "{\"choices\":",
         "{\"delta\":",
         "{\"event\":",
-        "{",
+        "{\"usage\":",
+        "{\"toolUseId\":",
+        "{\"unit\":",
+        // No bare-brace fallback: AWS event-stream framing CRC bytes
+        // routinely contain `{` bytes that aren't real JSON. Letting the
+        // brace-matcher follow them swallowed real subsequent JSON
+        // payloads. Every shape we actually want is already covered by an
+        // explicit key prefix above.
     };
     
     for (const char *marker : markers) {
@@ -1847,6 +2235,20 @@ size_t KiroProvider::sseWriteCallback(char *ptr, size_t size, size_t nmemb, void
       const std::string delta = serializeJsonValue(doc["reasoning_content"]);
       if (!delta.empty()) {
         (*ctx->onEvent)(ThinkingChunk{delta, ""});
+      }
+    } else if (doc.HasMember("text") && doc["text"].IsString() &&
+               !doc.HasMember("content") && !doc.HasMember("modelId")) {
+      // The Q endpoint surfaces internal reasoning for Opus 4.7 and the
+      // MiniMax models as bare {"text":"..."} chunks (no modelId, no
+      // content). User-visible answer chunks carry both "content" and
+      // "modelId", so we use the absence of those siblings to disambiguate.
+      const std::string delta = doc["text"].GetString();
+      if (!delta.empty()) {
+        (*ctx->onEvent)(ThinkingChunk{delta, ""});
+        // Like the Bedrock/OpenAI dispatchers, this dialect never wraps
+        // text in inline <thinking> tags — clear the holdback so any
+        // subsequent {"content":...} chunks emit their TextChunk directly.
+        ctx->thinkingExtracted = true;
       }
     } else if (doc.HasMember("delta") && doc["delta"].IsObject()) {
       const auto &d = doc["delta"];
