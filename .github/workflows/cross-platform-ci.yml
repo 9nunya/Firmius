@@ -110,6 +110,17 @@ jobs:
           CXX: g++
         run: ${{ matrix.configure_cmd }}
 
+      # Save the FetchContent cache RIGHT AFTER configure so the deps
+      # downloaded during configure are cached even if the subsequent
+      # build step fails. The save action is a no-op if the cache key
+      # already matches an existing cache.
+      - name: Save FetchContent cache (post-configure)
+        if: always() && steps.fetchcontent-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.FIRMIUS_FETCHCONTENT_BASE }}
+          key: ${{ steps.fetchcontent-cache.outputs.cache-primary-key }}
+
       - name: Build migrated surfaces
         run: >-
           ${{ matrix.build_cmd }}
@@ -117,13 +128,6 @@ jobs:
 
       - name: Run focused migrated tests
         run: ${{ matrix.ctest_cmd }}
-
-      - name: Save FetchContent cache
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: ${{ env.FIRMIUS_FETCHCONTENT_BASE }}
-          key: ${{ steps.fetchcontent-cache.outputs.cache-primary-key }}
 
       - name: Upload CMake logs on failure
         if: failure()

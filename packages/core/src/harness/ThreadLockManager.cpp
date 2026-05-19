@@ -10,6 +10,7 @@
 #include <fcntl.h>
 #include <io.h>
 #include <process.h>
+#include <sys/stat.h>
 #include <windows.h>
 #else
 #include <cerrno>
@@ -86,6 +87,14 @@ std::string getLockFilePath(const std::string &threadId) {
 
 int openLockFile(const std::string &path) {
 #if defined(_WIN32)
+  // _S_IREAD/_S_IWRITE are MSVC-style flags; fall back to numeric values
+  // for MinGW which doesn't always define them.
+  #ifndef _S_IREAD
+  #define _S_IREAD 0x0100
+  #endif
+  #ifndef _S_IWRITE
+  #define _S_IWRITE 0x0080
+  #endif
   return _open(path.c_str(), _O_RDWR | _O_CREAT, _S_IREAD | _S_IWRITE);
 #else
   return open(path.c_str(), O_RDWR | O_CREAT, 0644);
