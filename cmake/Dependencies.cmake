@@ -126,8 +126,10 @@ if(FIRMIUS_ENABLE_LUAU_HOOKS)
     $<${_luau_gcc_like}:-Wno-error=missing-field-initializers>
     $<${_luau_gcc_like}:-Wno-error=unused-parameter>
     $<${_luau_gcc_like}:-Wno-error=unused-variable>
+    $<${_luau_gcc_like}:-Wno-error=unused-but-set-variable>
     $<${_luau_gcc_like}:-Wno-error=format>
     $<${_luau_gcc_like}:-Wno-error=format-extra-args>
+    $<${_luau_gcc_like}:-Wno-error=attributes>
   )
   set(LUAU_SUPPRESS_FLAGS_GCC_ONLY
     $<$<CXX_COMPILER_ID:GNU>:-Wno-error=stringop-overflow>
