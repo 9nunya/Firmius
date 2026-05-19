@@ -214,6 +214,118 @@ void bindSpawnedChildToDelegate(firmius::tui::AppState& state,
   }
 }
 
+firmius::tui::MemoryStatus memoryStatusFromMetrics(
+    const firmius::shared::MemoryMetrics& m) {
+  firmius::tui::MemoryStatus s;
+  s.rawHistoryTokens = m.rawHistoryTokens;
+  s.workingSetTokens = m.workingSetTokens;
+  s.pinnedTurnCount = m.pinnedTurnCount;
+  s.evictedTurnCount = m.evictedTurnCount;
+  s.recalledTurnCount = m.recalledTurnCount;
+  s.deflatedPartCount = m.deflatedPartCount;
+  s.tokensSavedByDeflation = m.tokensSavedByDeflation;
+  s.tokensSavedByEviction = m.tokensSavedByEviction;
+  s.tokensSpentOnSummaries = m.tokensSpentOnSummaries;
+  s.tokensSpentOnEmbeddings = m.tokensSpentOnEmbeddings;
+  s.hotPathLatencyMicros = m.hotPathLatencyMicros;
+  s.aboveBufferThreshold = m.aboveBufferThreshold;
+  s.aboveTargetThreshold = m.aboveTargetThreshold;
+  s.aboveEmergencyThreshold = m.aboveEmergencyThreshold;
+  s.valid = true;
+  return s;
+}
+
+firmius::tui::EmbeddingDownloadState embeddingDownloadStateFromProgress(
+    const rapidjson::Document& doc) {
+  firmius::tui::EmbeddingDownloadState ds;
+  ds.downloading = true;
+  if (doc.HasMember("modelId")) ds.modelId = doc["modelId"].GetString();
+  if (doc.HasMember("bytesDownloaded")) ds.bytesDownloaded = doc["bytesDownloaded"].GetUint64();
+  if (doc.HasMember("totalBytes")) ds.totalBytes = doc["totalBytes"].GetUint64();
+  if (doc.HasMember("status")) {
+    ds.status = doc["status"].GetString();
+    if (ds.status == "ready" || ds.status == "error") {
+      ds.downloading = false;
+    }
+  }
+  return ds;
+}
+
+firmius::tui::PendingPermissionSuggestion pendingPermissionSuggestionFromJson(
+    const rapidjson::Value& s) {
+  firmius::tui::PendingPermissionSuggestion sug;
+  if (s.HasMember("ruleId") && s["ruleId"].IsString())
+    sug.ruleId = s["ruleId"].GetString();
+  if (s.HasMember("label") && s["label"].IsString())
+    sug.label = s["label"].GetString();
+  if (s.HasMember("explanation") && s["explanation"].IsString())
+    sug.explanation = s["explanation"].GetString();
+  if (s.HasMember("category") && s["category"].IsString())
+    sug.category = s["category"].GetString();
+  if (s.HasMember("decision") && s["decision"].IsString())
+    sug.decision = s["decision"].GetString();
+  if (s.HasMember("scope") && s["scope"].IsString())
+    sug.scope = s["scope"].GetString();
+  if (s.HasMember("defaultSelected") && s["defaultSelected"].IsBool())
+    sug.defaultSelected = s["defaultSelected"].GetBool();
+  if (s.HasMember("match") && s["match"].IsObject()) {
+    for (auto it = s["match"].MemberBegin();
+         it != s["match"].MemberEnd(); ++it) {
+      if (it->value.IsString()) {
+        sug.match[it->name.GetString()] = it->value.GetString();
+      }
+    }
+  }
+  return sug;
+}
+
+std::string jStr(const rapidjson::Document& doc, const char* field) {
+  if (doc.HasMember(field) && doc[field].IsString()) return doc[field].GetString();
+  return "";
+}
+
+firmius::tui::PendingPermission pendingPermissionFromJson(
+    const rapidjson::Document& doc) {
+  firmius::tui::PendingPermission perm;
+  perm.requestId = jStr(doc, "requestId");
+  perm.title = jStr(doc, "title");
+  perm.message = jStr(doc, "message");
+  perm.toolName = jStr(doc, "toolName");
+  perm.toolCallId = jStr(doc, "toolCallId");
+  if (doc.HasMember("allowAlways") && doc["allowAlways"].IsBool()) {
+    perm.allowAlways = doc["allowAlways"].GetBool();
+  }
+  perm.category = jStr(doc, "category");
+  perm.command = jStr(doc, "command");
+  perm.commandPrimary = jStr(doc, "commandPrimary");
+  perm.targetPath = jStr(doc, "targetPath");
+  perm.cwd = jStr(doc, "cwd");
+  perm.url = jStr(doc, "url");
+  perm.host = jStr(doc, "host");
+  perm.scheme = jStr(doc, "scheme");
+  perm.query = jStr(doc, "query");
+  perm.persona = jStr(doc, "persona");
+  perm.parentPersona = jStr(doc, "parentPersona");
+  if (doc.HasMember("severity") && doc["severity"].IsInt()) {
+    perm.severity = doc["severity"].GetInt();
+  }
+  if (doc.HasMember("isDirectory") && doc["isDirectory"].IsBool()) {
+    perm.isDirectory = doc["isDirectory"].GetBool();
+  }
+  if (doc.HasMember("subcommands") && doc["subcommands"].IsArray()) {
+    for (const auto &s : doc["subcommands"].GetArray()) {
+      if (s.IsString()) perm.subcommands.emplace_back(s.GetString());
+    }
+  }
+  if (doc.HasMember("suggestions") && doc["suggestions"].IsArray()) {
+    for (const auto &s : doc["suggestions"].GetArray()) {
+      if (!s.IsObject()) continue;
+      perm.suggestions.push_back(pendingPermissionSuggestionFromJson(s));
+    }
+  }
+  return perm;
+}
+
 } // namespace
 
 #include "utils/ToolView.hpp"
@@ -825,22 +937,7 @@ void EventRouter::handleAgentTurnCompleted(const std::string &json,
 
       // Working-memory v2 telemetry latch.
       const auto prevMemory = state_.memoryStatus();
-      MemoryStatus curMemory;
-      curMemory.rawHistoryTokens = metrics.memory.rawHistoryTokens;
-      curMemory.workingSetTokens = metrics.memory.workingSetTokens;
-      curMemory.pinnedTurnCount = metrics.memory.pinnedTurnCount;
-      curMemory.evictedTurnCount = metrics.memory.evictedTurnCount;
-      curMemory.recalledTurnCount = metrics.memory.recalledTurnCount;
-      curMemory.deflatedPartCount = metrics.memory.deflatedPartCount;
-      curMemory.tokensSavedByDeflation = metrics.memory.tokensSavedByDeflation;
-      curMemory.tokensSavedByEviction = metrics.memory.tokensSavedByEviction;
-      curMemory.tokensSpentOnSummaries = metrics.memory.tokensSpentOnSummaries;
-      curMemory.tokensSpentOnEmbeddings = metrics.memory.tokensSpentOnEmbeddings;
-      curMemory.hotPathLatencyMicros = metrics.memory.hotPathLatencyMicros;
-      curMemory.aboveBufferThreshold = metrics.memory.aboveBufferThreshold;
-      curMemory.aboveTargetThreshold = metrics.memory.aboveTargetThreshold;
-      curMemory.aboveEmergencyThreshold = metrics.memory.aboveEmergencyThreshold;
-      curMemory.valid = true;
+      const auto curMemory = memoryStatusFromMetrics(metrics.memory);
       state_.setMemoryStatus(curMemory);
 
       const std::string notice =
@@ -1178,67 +1275,7 @@ void EventRouter::handlePermissionEscalation(const std::string &json) {
 
   std::string toolCallId = jsonString(doc, "toolCallId");
 
-  PendingPermission perm;
-  perm.requestId = jsonString(doc, "requestId");
-  perm.title = jsonString(doc, "title");
-  perm.message = jsonString(doc, "message");
-  perm.toolName = jsonString(doc, "toolName");
-  perm.toolCallId = toolCallId;
-  if (doc.HasMember("allowAlways") && doc["allowAlways"].IsBool()) {
-    perm.allowAlways = doc["allowAlways"].GetBool();
-  }
-  // ── v2 fields ──
-  perm.category = jsonString(doc, "category");
-  perm.command = jsonString(doc, "command");
-  perm.commandPrimary = jsonString(doc, "commandPrimary");
-  perm.targetPath = jsonString(doc, "targetPath");
-  perm.cwd = jsonString(doc, "cwd");
-  perm.url = jsonString(doc, "url");
-  perm.host = jsonString(doc, "host");
-  perm.scheme = jsonString(doc, "scheme");
-  perm.query = jsonString(doc, "query");
-  perm.persona = jsonString(doc, "persona");
-  perm.parentPersona = jsonString(doc, "parentPersona");
-  if (doc.HasMember("severity") && doc["severity"].IsInt()) {
-    perm.severity = doc["severity"].GetInt();
-  }
-  if (doc.HasMember("isDirectory") && doc["isDirectory"].IsBool()) {
-    perm.isDirectory = doc["isDirectory"].GetBool();
-  }
-  if (doc.HasMember("subcommands") && doc["subcommands"].IsArray()) {
-    for (const auto &s : doc["subcommands"].GetArray()) {
-      if (s.IsString()) perm.subcommands.emplace_back(s.GetString());
-    }
-  }
-  if (doc.HasMember("suggestions") && doc["suggestions"].IsArray()) {
-    for (const auto &s : doc["suggestions"].GetArray()) {
-      if (!s.IsObject()) continue;
-      PendingPermissionSuggestion sug;  // .comment intentionally left default — not surfaced to TUI
-      if (s.HasMember("ruleId") && s["ruleId"].IsString())
-        sug.ruleId = s["ruleId"].GetString();
-      if (s.HasMember("label") && s["label"].IsString())
-        sug.label = s["label"].GetString();
-      if (s.HasMember("explanation") && s["explanation"].IsString())
-        sug.explanation = s["explanation"].GetString();
-      if (s.HasMember("category") && s["category"].IsString())
-        sug.category = s["category"].GetString();
-      if (s.HasMember("decision") && s["decision"].IsString())
-        sug.decision = s["decision"].GetString();
-      if (s.HasMember("scope") && s["scope"].IsString())
-        sug.scope = s["scope"].GetString();
-      if (s.HasMember("defaultSelected") && s["defaultSelected"].IsBool())
-        sug.defaultSelected = s["defaultSelected"].GetBool();
-      if (s.HasMember("match") && s["match"].IsObject()) {
-        for (auto it = s["match"].MemberBegin();
-             it != s["match"].MemberEnd(); ++it) {
-          if (it->value.IsString()) {
-            sug.match[it->name.GetString()] = it->value.GetString();
-          }
-        }
-      }
-      perm.suggestions.push_back(std::move(sug));
-    }
-  }
+  auto perm = pendingPermissionFromJson(doc);
   std::string reqId = perm.requestId;  // Save before move
   state_.pushPendingPermission(std::move(perm));
 
@@ -1407,18 +1444,7 @@ void EventRouter::handleEmbeddingModelProgress(const std::string &json) {
   doc.Parse(json.c_str());
   if (doc.HasParseError()) return;
 
-  firmius::tui::EmbeddingDownloadState ds;
-  ds.downloading = true;
-  if (doc.HasMember("modelId")) ds.modelId = doc["modelId"].GetString();
-  if (doc.HasMember("bytesDownloaded")) ds.bytesDownloaded = doc["bytesDownloaded"].GetUint64();
-  if (doc.HasMember("totalBytes")) ds.totalBytes = doc["totalBytes"].GetUint64();
-  if (doc.HasMember("status")) {
-    ds.status = doc["status"].GetString();
-    if (ds.status == "ready" || ds.status == "error") {
-      ds.downloading = false;
-    }
-  }
-  state_.setEmbeddingDownload(ds);
+  state_.setEmbeddingDownload(embeddingDownloadStateFromProgress(doc));
 }
 
 void EventRouter::handleAgentCompacting(const std::string & /*agentId*/) {
