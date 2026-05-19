@@ -80,6 +80,7 @@ target_include_directories(firmius_shared PUBLIC
 
 target_include_directories(firmius_shared SYSTEM PRIVATE
   ${rapidjson_SOURCE_DIR}/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/third_party
 )
 
 find_package(CURL REQUIRED)
