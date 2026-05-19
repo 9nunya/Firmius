@@ -439,6 +439,14 @@ char32_t decodeUtf8Width(const std::string& text, size_t& pos) {
 
 int codepointWidth(char32_t cp) {
   if (cp == 0 || cp < 32 || (cp >= 0x7F && cp < 0xA0)) return 0;
+  // Powerline separators and Nerd Font glyphs live in private-use ranges.
+  // They render as single columns in the terminals/themes we target, so
+  // treating them as wide leaves fake gaps at the right edge.
+  if ((cp >= 0xE000 && cp <= 0xF8FF) ||
+      (cp >= 0xF0000 && cp <= 0xFFFFD) ||
+      (cp >= 0x100000 && cp <= 0x10FFFD)) {
+    return 1;
+  }
   if (cp >= 0x1100) return 2;
   return 1;
 }

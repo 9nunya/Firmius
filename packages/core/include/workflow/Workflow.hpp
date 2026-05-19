@@ -91,7 +91,7 @@ struct WorkflowTrigger {
 // `Shell` (lint-after-edit, run tests, notify); workflows lean on `Prompt`
 // (the legacy macro body sent to the agent); composability uses `Workflow`
 // (call another workflow); critic loops use `Agent` (spawn a persona, e.g.
-// Shrike on `pact_resolved`).
+// a validator on agent_stop).
 
 enum class WorkflowActionKind {
   Prompt,    // body string sent to the agent (legacy default)

@@ -91,6 +91,9 @@ struct ThemeSpec {
     ThemeRgb userPrefix{96, 170, 255};
     ThemeRgb agentPrefix{170, 214, 255};
     ThemeRgb timestamp{120, 124, 138};
+    // Background for user message "cards" in the transcript.
+    ThemeRgb userBg{24, 28, 40};
+    ThemeRgb userFg{222, 228, 236};
   } chat;
 
   // Syntax highlighting palette — read from the same `syntax` block that v1

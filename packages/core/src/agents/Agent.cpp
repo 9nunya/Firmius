@@ -91,18 +91,14 @@ const char *scopeLabel(shared::ToolScope s) {
     return "Web";
   case ToolScope::Git:
     return "Git";
-  case ToolScope::PlanRead:
-    return "PlanRead";
-  case ToolScope::PlanWrite:
-    return "PlanWrite";
-  case ToolScope::ChunkRead:
-    return "ChunkRead";
-  case ToolScope::ChunkWrite:
-    return "ChunkWrite";
-  case ToolScope::ChunkAssign:
-    return "ChunkAssign";
-  case ToolScope::ChunkReview:
-    return "ChunkReview";
+  case ToolScope::CrewRead:
+    return "CrewRead";
+  case ToolScope::CrewWrite:
+    return "CrewWrite";
+  case ToolScope::CrewAssign:
+    return "CrewAssign";
+  case ToolScope::CrewReview:
+    return "CrewReview";
   }
   return "Unknown";
 }

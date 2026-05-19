@@ -76,12 +76,10 @@ public:
                                       shared::ToolScope::Process,
                                       shared::ToolScope::Delegation,
                                       shared::ToolScope::Web,
-                                      shared::ToolScope::PlanRead,
-                                      shared::ToolScope::PlanWrite,
-                                      shared::ToolScope::ChunkRead,
-                                      shared::ToolScope::ChunkWrite,
-                                      shared::ToolScope::ChunkAssign,
-                                      shared::ToolScope::ChunkReview};
+                                      shared::ToolScope::CrewRead,
+                                      shared::ToolScope::CrewWrite,
+                                      shared::ToolScope::CrewAssign,
+                                      shared::ToolScope::CrewReview};
   }
 
   void reset() override {}

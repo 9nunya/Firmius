@@ -8,6 +8,7 @@
 #include "items/SimpleItems.hpp"
 #include "items/StreamingItems.hpp"
 #include "items/ToolCallItem.hpp"
+#include "items/QuickToolClusterItem.hpp"
 #include "tools/PresenterInit.hpp"
 #include "workflow/WorkflowLoader.hpp"
 
@@ -22,6 +23,8 @@
 namespace firmius::tui {
 
 namespace {
+
+constexpr int kTranscriptPinnedGap = 1;
 
 std::string humanizeTokenWindow(uint32_t value) {
   if (value >= 1000000) return std::to_string(value / 1000000) + "M";
@@ -1010,7 +1013,8 @@ void App::handleMouse(const MouseEvent& event) {
   const int agentH = state_.hasMultipleAgents() ? agentTabBar_.height(w) : 0;
   const int hudH = statusBar_.hudHeight(w);
   const int bottomH = bottomBar_.height(w);
-  const int pinnedH = liveH + overlayH + inputH + agentH + hudH + bottomH;
+  const int pinnedH = liveH + overlayH + inputH + agentH + hudH + bottomH +
+                      kTranscriptPinnedGap;
 
   if (activeOverlay_) {
     int overlayStartRow1 = h - pinnedH + liveH + 1;
@@ -1084,6 +1088,25 @@ void App::handleMouse(const MouseEvent& event) {
     if (inTranscript && event.button == MouseEvent::Button::Left) {
       const int absLine = absLineForVisRow(mouseVisRow);
       const int col = std::max(0, event.col - 1);
+
+      // Click-to-expand ThinkingStream header line.
+      for (const auto& span : state_.itemSpans()) {
+        if (absLine < span.terminalRow ||
+            absLine >= span.terminalRow + span.rowCount) {
+          continue;
+        }
+        if (span.itemIndex >= state_.items().size()) break;
+        auto& item = *state_.items()[span.itemIndex];
+        if (item.type() == "AgentThinking" && absLine == span.terminalRow) {
+          auto& think = static_cast<AgentThinkingItem&>(item);
+          think.setExpanded(!think.isExpanded());
+          syncScrollback();
+          state_.markDirtyPublic();
+          return;
+        }
+        break;
+      }
+
       state_.beginSelection(absLine, col);
     } else if (state_.hasSelection()) {
       state_.clearSelection();
@@ -1218,6 +1241,10 @@ bool shouldShowItem(const TranscriptItem& item, const std::string& focusedAgentI
     const auto& tcItem = static_cast<const ToolCallItem&>(item);
     return tcItem.agentId().empty() || tcItem.agentId() == focusedAgentId;
   }
+  if (type == "QuickToolCluster") {
+    const auto& qt = static_cast<const QuickToolClusterItem&>(item);
+    return qt.agentId().empty() || qt.agentId() == focusedAgentId;
+  }
   return true; // Unknown types: show by default
 }
 
@@ -1285,7 +1312,9 @@ void App::syncScrollback() {
       continue;
     }
 
-    auto lines = items[i]->render(w);
+    // Leave a small right margin so transcript content doesn't slam into the edge.
+    const int renderWidth = std::max(1, w - 4);
+    auto lines = items[i]->render(renderWidth);
     for (auto& line : lines) {
       newLines.push_back(std::move(line));
     }
@@ -1302,6 +1331,20 @@ void App::syncScrollback() {
   if (!newLines.empty()) {
     state_.appendScrollback(newLines);
   }
+
+  // Recompute item→scrollback row spans for click/selection helpers.
+  // terminalRow is an absolute index into the scrollback buffer.
+  std::vector<ItemSpan> spans;
+  spans.reserve(items.size());
+  int row = 0;
+  for (size_t i = 0; i < items.size() && i < lastSyncedRowCounts_.size(); ++i) {
+    const int rc = lastSyncedRowCounts_[i];
+    if (rc > 0) {
+      spans.push_back(ItemSpan{i, row, rc});
+      row += rc;
+    }
+  }
+  state_.setItemSpans(std::move(spans));
 }
 
 void App::switchToAgentTranscript(const std::string& agentId) {
@@ -1364,7 +1407,7 @@ void App::renderFrame() {
   pinnedLines.insert(pinnedLines.end(), bottomLines.begin(), bottomLines.end());
 
   int basePinnedH = static_cast<int>(pinnedLines.size());
-  int pinnedH = basePinnedH + autocompleteH;
+  int pinnedH = basePinnedH + autocompleteH + kTranscriptPinnedGap;
 
   // Render transcript shorter to leave room for autocomplete + pinned zone.
   int transcriptH = h - pinnedH;
@@ -1387,7 +1430,7 @@ void App::renderFrame() {
   // window (clamping is done in updateAutocomplete / autocompleteMoveDown).
   if (autocompleteH > 0) {
     const int total = static_cast<int>(autocomplete_.matches.size());
-    int acStart = transcriptH;
+    int acStart = transcriptH + kTranscriptPinnedGap;
     for (int i = 0; i < autocompleteH; ++i) {
       int matchIdx = autocomplete_.scrollOffset + i;
       if (matchIdx < 0 || matchIdx >= total) break;
@@ -1428,7 +1471,7 @@ void App::renderFrame() {
   }
 
   // Draw pinned lines under autocomplete.
-  int pinnedStart = transcriptH + autocompleteH;
+  int pinnedStart = transcriptH + kTranscriptPinnedGap + autocompleteH;
   for (int i = 0; i < std::min(basePinnedH, h - pinnedStart); ++i) {
     int row = pinnedStart + i;
     if (row < 0 || row >= h) continue;

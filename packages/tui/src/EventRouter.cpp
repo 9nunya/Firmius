@@ -2,6 +2,7 @@
 #include "Serialization.hpp"
 #include "items/SimpleItems.hpp"
 #include "items/StreamingItems.hpp"
+#include "items/QuickToolClusterItem.hpp"
 #include "items/ToolCallItem.hpp"
 #include "Icons.hpp"
 #include "utils/ToolSummaries.hpp"
@@ -125,6 +126,11 @@ std::string formatMemoryActivityNotice(
 void markThinkingDone(firmius::tui::AppState& state, const std::string& agentId) {
   state.upsertAgentActivity(agentId, "thinking", "Thought",
                             std::chrono::milliseconds(2300));
+}
+
+bool isQuickToolName(const std::string& toolName) {
+  return toolName == "Read" || toolName == "Glob" || toolName == "Grep" ||
+         toolName == "List";
 }
 
 bool isDelegateWaitForAgent(const firmius::tui::ToolCallState& tc,
@@ -353,8 +359,6 @@ void EventRouter::route(const firmius::daemon::DaemonEventEnvelope &envelope) {
       handleHookStateChanged(*envelope.hookState);
     }
     break;
-  case firmius::daemon::DaemonEventKind::PactStateChanged:
-    break;
   case firmius::daemon::DaemonEventKind::InitProgress:
     if (!envelope.initMessage.empty()) {
       state_.setLiveMessage(envelope.initMessage);
@@ -523,6 +527,15 @@ void EventRouter::handleAgentText(const std::string &json,
   markThinkingDone(state_, agentId);
   markThinkingDone(state_, agentId);
 
+  // Quick-tool clusters should span exploratory turns and collapse only once
+  // the agent starts producing the actual answer text.
+  if (auto* cluster = state_.agentQuickToolClusterItem(agentId)) {
+    if (!cluster->isFinalized()) {
+      cluster->finalize();
+    }
+    state_.setAgentQuickToolClusterItem(agentId, nullptr);
+  }
+
   // Find or create a text item for THIS agent
   auto* item = state_.agentTextItem(agentId);
   if (!item || item->isFinalized()) {
@@ -556,6 +569,16 @@ void EventRouter::handleAgentThinking(const std::string &json,
 
   const std::string focusedId = state_.focusedAgentId();
   bool isFocused = focusedId.empty() || agentId == focusedId;
+
+  // A fresh thinking block starts a new exploration/answer phase, so any
+  // previous quick-tools cluster should stay attached to the transcript
+  // section before this thinking item.
+  if (auto* cluster = state_.agentQuickToolClusterItem(agentId)) {
+    if (!cluster->isFinalized()) {
+      cluster->finalize();
+    }
+    state_.setAgentQuickToolClusterItem(agentId, nullptr);
+  }
 
   // Find or create a thinking item for THIS agent
   auto* item = state_.agentThinkingItem(agentId);
@@ -608,6 +631,20 @@ void EventRouter::handleAgentToolCallChunk(const std::string &json,
                                            SharedToolPhase::Preparing));
   }
 
+  if (isQuickToolName(tc.toolName)) {
+    auto* cluster = state_.agentQuickToolClusterItem(agentId);
+    if (!cluster || cluster->isFinalized()) {
+      auto newItem = std::make_unique<QuickToolClusterItem>();
+      newItem->setAgentId(agentId);
+      cluster = newItem.get();
+      state_.addItem(std::move(newItem));
+      state_.setAgentQuickToolClusterItem(agentId, cluster);
+    }
+    cluster->addOrUpdateCall(toolCallId, tc.toolName, tc.argsAccum, true);
+    state_.markDirtyPublic();
+    return;
+  }
+
   // Find or create the ToolCallItem in the transcript
   auto* item = state_.findToolCallById(toolCallId);
   if (!item) {
@@ -639,16 +676,22 @@ void EventRouter::handleAgentToolCall(const std::string &json,
 
   if (toolCallId.empty() || toolName.empty()) return;
 
-  // Finalize active streaming items
-  auto* textItem = state_.activeTextItem();
+  // Finalize this agent's streaming items.
+  auto* textItem = state_.agentTextItem(agentId);
   if (textItem && !textItem->isFinalized()) {
     textItem->finalize();
-    state_.setActiveTextItem(nullptr);
+    state_.setAgentTextItem(agentId, nullptr);
+    if (state_.focusedAgentId().empty() || state_.focusedAgentId() == agentId) {
+      state_.setActiveTextItem(nullptr);
+    }
   }
-  auto* thinkItem = state_.activeThinkingItem();
+  auto* thinkItem = state_.agentThinkingItem(agentId);
   if (thinkItem && !thinkItem->isFinalized()) {
     thinkItem->finalize();
-    state_.setActiveThinkingItem(nullptr);
+    state_.setAgentThinkingItem(agentId, nullptr);
+    if (state_.focusedAgentId().empty() || state_.focusedAgentId() == agentId) {
+      state_.setActiveThinkingItem(nullptr);
+    }
   }
   markThinkingDone(state_, agentId);
 
@@ -665,6 +708,28 @@ void EventRouter::handleAgentToolCall(const std::string &json,
   auto& agent = state_.getOrCreateAgent(agentId);
   if (agent.currentTurn.has_value()) {
     agent.currentTurn->toolCallIds.push_back(toolCallId);
+  }
+
+  if (isQuickToolName(toolName)) {
+    auto* cluster = state_.agentQuickToolClusterItem(agentId);
+    if (!cluster || cluster->isFinalized()) {
+      auto newItem = std::make_unique<QuickToolClusterItem>();
+      newItem->setAgentId(agentId);
+      cluster = newItem.get();
+      state_.addItem(std::move(newItem));
+      state_.setAgentQuickToolClusterItem(agentId, cluster);
+    }
+    cluster->addOrUpdateCall(toolCallId, toolName, toolArgs, true);
+    state_.markDirtyPublic();
+    return;
+  }
+
+  // A non-quick tool breaks the quick-tools exploration cluster.
+  if (auto* cluster = state_.agentQuickToolClusterItem(agentId)) {
+    if (!cluster->isFinalized()) {
+      cluster->finalize();
+    }
+    state_.setAgentQuickToolClusterItem(agentId, nullptr);
   }
 
   auto* existingItem = state_.findToolCallById(toolCallId);
@@ -904,6 +969,14 @@ void EventRouter::handleAgentTurnCompleted(const std::string &json,
               item->setLive(true);
             } else {
               item->setLive(false);
+            }
+          } else {
+            // Quick-tool clusters don't create ToolCallItems. Update the
+            // active cluster (if any) so it stops showing these entries
+            // as inflight.
+            auto* cluster = state_.agentQuickToolClusterItem(agentId);
+            if (cluster && !cluster->isFinalized()) {
+              cluster->setResult(toolCallId, success, result);
             }
           }
         }
@@ -1157,6 +1230,10 @@ void EventRouter::handleAgentError(const std::string &json,
   auto item = std::make_unique<ErrorMessageItem>(
       "\xe2\x9a\xa0 Error: " + jsonString(doc, "message"));
   state_.addItem(std::move(item));
+  if (auto* cluster = state_.agentQuickToolClusterItem(agentId)) {
+    if (!cluster->isFinalized()) cluster->finalize();
+    state_.setAgentQuickToolClusterItem(agentId, nullptr);
+  }
   finalizeDelegateWaitsForAgent(state_, agentId, false, jsonString(doc, "message"));
   state_.markDirtyPublic();
 }
@@ -1198,6 +1275,10 @@ void EventRouter::handleAgentInterrupted(const std::string &agentId) {
 
   auto* agent = state_.findAgentState(agentId);
   if (agent) agent->currentTurn.reset();
+  if (auto* cluster = state_.agentQuickToolClusterItem(agentId)) {
+    if (!cluster->isFinalized()) cluster->finalize();
+    state_.setAgentQuickToolClusterItem(agentId, nullptr);
+  }
   finalizeDelegateWaitsForAgent(state_, agentId, false, "Subagent interrupted");
 
   state_.markDirtyPublic();

@@ -20,10 +20,8 @@ tool_scope:
     - Web
     - Delegation
     - Git
-    - PlanRead
-    - PlanWrite
-    - ChunkRead
-    - ChunkWrite
+    - CrewRead
+    - CrewWrite
   deny: []
 ---
 

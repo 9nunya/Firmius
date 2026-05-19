@@ -5,6 +5,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
+#include <iomanip>
 #include <sstream>
 
 namespace firmius::tui {
@@ -559,7 +561,10 @@ std::vector<std::string> renderStreamingBlock(const std::string& text, int width
   // reapplied to each continuation line after wrapping.
   std::string stylePrefix;
   if (dimmed) {
-    stylePrefix = "\x1b[2m\x1b[38;2;160;160;180m";
+    const auto& theme = ThemeManager::instance().currentTheme();
+    stylePrefix = "\x1b[2m\x1b[38;2;" + std::to_string(theme.base.dim.r) + ";" +
+                  std::to_string(theme.base.dim.g) + ";" +
+                  std::to_string(theme.base.dim.b) + "m";
   }
 
   while (std::getline(stream, line)) {
@@ -576,20 +581,11 @@ std::vector<std::string> renderStreamingBlock(const std::string& text, int width
   return lines;
 }
 
-int countBlockLines(const std::string& text, int width, int prefixLen) {
-  std::vector<std::string> lines;
-  std::istringstream stream(text);
-  std::string line;
-  int count = 0;
-  while (std::getline(stream, line)) {
-    int effectiveWidth = width - prefixLen;
-    if (effectiveWidth <= 0) effectiveWidth = 1;
-    count += std::max(1, (static_cast<int>(line.size()) + effectiveWidth - 1) / effectiveWidth);
-  }
-  return std::max(1, count);
-}
-
 } // namespace
+
+std::vector<std::string> renderMarkdownLines(const std::string& text, int width, bool dimmed) {
+  return renderStreamingBlock(text, width, "", dimmed);
+}
 
 // ── AgentTextItem ──
 
@@ -604,31 +600,277 @@ void AgentTextItem::finalize() {
 }
 
 std::vector<std::string> AgentTextItem::render(int width) const {
-  return renderStreamingBlock(accumulated_, width, "", false);
+  constexpr int kLeftMargin = 2;
+  constexpr int kRightMargin = 4;
+  const int contentWidth = std::max(1, width - kLeftMargin - kRightMargin);
+
+  auto lines = renderMarkdownLines(accumulated_, contentWidth, false);
+  const std::string dot = theme_ansi::dim("\xe2\x80\xa2 "); // •
+  const std::string firstPrefix = std::string(kLeftMargin, ' ') + dot;
+  const std::string contPrefix = std::string(kLeftMargin, ' ') + std::string(ansi::visibleWidth(dot), ' ');
+
+  for (size_t i = 0; i < lines.size(); ++i) {
+    lines[i] = (i == 0 ? firstPrefix : contPrefix) + lines[i];
+  }
+  return lines;
 }
 
 int AgentTextItem::rowCount(int width) const {
-  return countBlockLines(accumulated_, width, 0);
+  return static_cast<int>(render(width).size());
 }
 
 // ── AgentThinkingItem ──
 
 void AgentThinkingItem::appendDelta(const std::string& delta) {
+  if (startedAt_ == std::chrono::steady_clock::time_point{}) {
+    startedAt_ = std::chrono::steady_clock::now();
+  }
+  // Used to briefly "fade in" the newest words.
+  lastDeltaAt_ = std::chrono::steady_clock::now();
+  lastDeltaText_ = delta;
   accumulated_ += delta;
   touch();
 }
 
 void AgentThinkingItem::finalize() {
+  if (startedAt_ == std::chrono::steady_clock::time_point{}) {
+    startedAt_ = std::chrono::steady_clock::now();
+  }
+  finishedAt_ = std::chrono::steady_clock::now();
+  collapseStartedAt_ = finishedAt_;
   finalized_ = true;
   touch();
 }
 
+void AgentThinkingItem::setExpanded(bool expanded) {
+  if (expanded_ == expanded) return;
+  expanded_ = expanded;
+  touch();
+}
+
+bool AgentThinkingItem::needsAnimationTick() const {
+  if (!finalized_) return true; // pulsing dot + fade-in
+  if (expanded_) return false;
+  if (collapseStartedAt_ == std::chrono::steady_clock::time_point{}) return false;
+  const auto now = std::chrono::steady_clock::now();
+  if (now - collapseStartedAt_ < std::chrono::milliseconds(kCollapseMs)) return true;
+  if (lastDeltaAt_ != std::chrono::steady_clock::time_point{} &&
+      now - lastDeltaAt_ < std::chrono::milliseconds(500)) return true;
+  return false;
+}
+
+namespace {
+
+std::string formatSeconds(std::chrono::milliseconds ms) {
+  const double seconds = static_cast<double>(ms.count()) / 1000.0;
+  std::ostringstream out;
+  out.setf(std::ios::fixed);
+  out << std::setprecision(1) << seconds;
+  return out.str();
+}
+
+std::string pulsingDot(std::uint64_t nowMs, bool active) {
+  if (!active) {
+    return theme_ansi::dim("\xe2\x80\xa2 "); // •
+  }
+  const bool bright = ((nowMs / 420ULL) % 2ULL) == 0ULL;
+  if (bright) return ansi::bold(theme_ansi::accent("\xe2\x80\xa2 ")); // •
+  return theme_ansi::dim("\xe2\x80\xa2 "); // •
+}
+
+std::uint64_t nowMsSteady() {
+  return static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count());
+}
+
+struct FadeRgb {
+  int r;
+  int g;
+  int b;
+};
+
+FadeRgb mix(FadeRgb from, FadeRgb to, double t) {
+  const double clamped = std::clamp(t, 0.0, 1.0);
+  return {
+      static_cast<int>(std::lround(from.r + (to.r - from.r) * clamped)),
+      static_cast<int>(std::lround(from.g + (to.g - from.g) * clamped)),
+      static_cast<int>(std::lround(from.b + (to.b - from.b) * clamped)),
+  };
+}
+
+std::string replaceAll(std::string text, const std::string& from,
+                       const std::string& to) {
+  if (from.empty()) return text;
+  size_t pos = 0;
+  while ((pos = text.find(from, pos)) != std::string::npos) {
+    text.replace(pos, from.size(), to);
+    pos += to.size();
+  }
+  return text;
+}
+
+std::string retintDimAnsi(std::string text, const FadeRgb& color) {
+  const auto& theme = ThemeManager::instance().currentTheme();
+  const std::string target =
+      "\x1b[38;2;" + std::to_string(color.r) + ";" + std::to_string(color.g) +
+      ";" + std::to_string(color.b) + "m";
+  const std::string themedDim =
+      "\x1b[38;2;" + std::to_string(theme.base.dim.r) + ";" +
+      std::to_string(theme.base.dim.g) + ";" +
+      std::to_string(theme.base.dim.b) + "m";
+  text = replaceAll(std::move(text), themedDim, target);
+  text = replaceAll(std::move(text), "\x1b[38;2;160;160;180m", target);
+  return text;
+}
+
+size_t commonPrefixBytes(const std::string& a, const std::string& b) {
+  const size_t limit = std::min(a.size(), b.size());
+  size_t i = 0;
+  while (i < limit && a[i] == b[i]) ++i;
+  return i;
+}
+
+size_t visibleByteOffset(const std::string& text, size_t visibleChars) {
+  if (visibleChars == 0) return 0;
+  size_t i = 0;
+  size_t visible = 0;
+  while (i < text.size()) {
+    if (text[i] == '\033' && i + 1 < text.size() && text[i + 1] == '[') {
+      i += 2;
+      while (i < text.size() && text[i] != 'm') ++i;
+      if (i < text.size()) ++i;
+      continue;
+    }
+
+    unsigned char c = static_cast<unsigned char>(text[i]);
+    size_t charLen = 1;
+    if ((c & 0x80U) == 0U) {
+      charLen = 1;
+    } else if ((c & 0xE0U) == 0xC0U) {
+      charLen = 2;
+    } else if ((c & 0xF0U) == 0xE0U) {
+      charLen = 3;
+    } else if ((c & 0xF8U) == 0xF0U) {
+      charLen = 4;
+    }
+    i += charLen;
+    ++visible;
+    if (visible >= visibleChars) return i;
+  }
+  return text.size();
+}
+
+} // namespace
+
 std::vector<std::string> AgentThinkingItem::render(int width) const {
-  return renderStreamingBlock(accumulated_, width, "", true);
+  const auto now = std::chrono::steady_clock::now();
+  const auto started = (startedAt_ == std::chrono::steady_clock::time_point{}) ? now : startedAt_;
+  const auto ended = finalized_ ? (finishedAt_ == std::chrono::steady_clock::time_point{} ? now : finishedAt_) : now;
+  const auto dur = std::chrono::duration_cast<std::chrono::milliseconds>(ended - started);
+  const std::string seconds = formatSeconds(dur);
+
+  const bool active = !finalized_;
+  const std::string header =
+      pulsingDot(nowMsSteady(), active) +
+      (finalized_ ? "Thought for " : "Thinking for ") + seconds + "s";
+
+  // Render thinking markdown as dimmed text; then draw a tree-like prefix.
+  constexpr int kIndent = 2;
+  constexpr int kRightMargin = 4;
+  constexpr int kPreviewLines = 4;
+  const int innerWidth = std::max(1, width - kIndent - kRightMargin);
+  auto rendered = renderMarkdownLines(accumulated_, innerWidth - 3, true); // 3 = "│  " / "└─ "
+
+  int previewCount = static_cast<int>(rendered.size());
+  if (!expanded_) previewCount = std::min(previewCount, kPreviewLines);
+  int visibleCount = previewCount;
+
+  if (finalized_ && !expanded_) {
+    const auto collapseStart = (collapseStartedAt_ == std::chrono::steady_clock::time_point{}) ? ended : collapseStartedAt_;
+    const auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(now - collapseStart).count();
+    if (dt >= 0) {
+      const double t = std::clamp(static_cast<double>(dt) / static_cast<double>(kCollapseMs), 0.0, 1.0);
+      const int target = 0;
+      const int startCount = std::min(static_cast<int>(rendered.size()), kPreviewLines);
+      visibleCount = static_cast<int>(std::round((1.0 - t) * startCount + t * target));
+      visibleCount = std::max(0, std::min(visibleCount, startCount));
+    }
+  }
+
+  const int startIndex = std::max(0, static_cast<int>(rendered.size()) - visibleCount);
+
+  std::vector<std::string> out;
+  out.push_back(std::string(kIndent, ' ') + header);
+
+  const auto& theme = ThemeManager::instance().currentTheme();
+  const FadeRgb bg{theme.base.bg.r, theme.base.bg.g, theme.base.bg.b};
+  const FadeRgb dim{theme.base.dim.r, theme.base.dim.g, theme.base.dim.b};
+  const auto fadeMs = lastDeltaAt_ == std::chrono::steady_clock::time_point{}
+                          ? 1000LL
+                          : std::chrono::duration_cast<std::chrono::milliseconds>(
+                                now - lastDeltaAt_)
+                                .count();
+  const bool fadingIn = !finalized_ && fadeMs >= 0 && fadeMs < 500;
+  const double fadeT =
+      std::clamp(static_cast<double>(fadeMs) / 500.0, 0.0, 1.0);
+  const FadeRgb fadeColor = mix(bg, dim, fadeT);
+
+  std::vector<std::string> beforeRendered;
+  if (fadingIn && !lastDeltaText_.empty() &&
+      accumulated_.size() >= lastDeltaText_.size()) {
+    beforeRendered = renderMarkdownLines(
+        accumulated_.substr(0, accumulated_.size() - lastDeltaText_.size()),
+        innerWidth - 3, true);
+  }
+
+  for (int i = 0; i < visibleCount; ++i) {
+    const bool last = (i == visibleCount - 1);
+    const std::string prefix = last ? "\xe2\x94\x94\xe2\x94\x80 "  // └─
+                                    : "\xe2\x94\x82  ";          // │··
+    std::string line = rendered[static_cast<std::size_t>(startIndex + i)];
+
+    // When collapsed (default), make the earlier lines dimmer than the bottom.
+    if (!expanded_ && visibleCount > 1) {
+      const int distanceFromBottom = visibleCount - 1 - i;
+      if (distanceFromBottom >= 2) {
+        line = ansi::dim(line);
+      } else if (distanceFromBottom == 1) {
+        line = retintDimAnsi(std::move(line), mix(dim, bg, 0.20));
+      }
+    }
+
+    if (fadingIn) {
+      const int absIndex = startIndex + i;
+      const int beforeCount = static_cast<int>(beforeRendered.size());
+      if (beforeCount == 0) {
+        line = retintDimAnsi(std::move(line), fadeColor);
+      } else if (absIndex >= beforeCount - 1) {
+        if (absIndex == beforeCount - 1) {
+          const std::string& beforeLine =
+              beforeRendered[static_cast<std::size_t>(beforeCount - 1)];
+          const std::string beforePlain = ansi::strip(beforeLine);
+          const std::string currentPlain = ansi::strip(line);
+          const size_t keepVisible = commonPrefixBytes(beforePlain, currentPlain);
+          const size_t keepBytes = visibleByteOffset(line, keepVisible);
+          if (keepBytes < line.size()) {
+            line = line.substr(0, keepBytes) +
+                   retintDimAnsi(line.substr(keepBytes), fadeColor);
+          }
+        } else {
+          line = retintDimAnsi(std::move(line), fadeColor);
+        }
+      }
+    }
+
+    out.push_back(std::string(kIndent, ' ') + theme_ansi::dim(prefix) + line);
+  }
+  return out;
 }
 
 int AgentThinkingItem::rowCount(int width) const {
-  return countBlockLines(accumulated_, width, 0);
+  return static_cast<int>(render(width).size());
 }
 
 } // namespace firmius::tui

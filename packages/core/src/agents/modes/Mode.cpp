@@ -35,18 +35,16 @@ ToolScope scopeFromString(const std::string &s) {
     return ToolScope::Web;
   if (s == "git" || s == "Git")
     return ToolScope::Git;
-  if (s == "plan:read" || s == "PlanRead")
-    return ToolScope::PlanRead;
-  if (s == "plan:write" || s == "PlanWrite")
-    return ToolScope::PlanWrite;
-  if (s == "chunk:read" || s == "ChunkRead")
-    return ToolScope::ChunkRead;
-  if (s == "chunk:write" || s == "ChunkWrite")
-    return ToolScope::ChunkWrite;
-  if (s == "chunk:assign" || s == "ChunkAssign")
-    return ToolScope::ChunkAssign;
-  if (s == "chunk:review" || s == "ChunkReview")
-    return ToolScope::ChunkReview;
+  if (s == "crew:read" || s == "CrewRead" || s == "plan:read" || s == "PlanRead" ||
+      s == "chunk:read" || s == "ChunkRead")
+    return ToolScope::CrewRead;
+  if (s == "crew:write" || s == "CrewWrite" || s == "plan:write" || s == "PlanWrite" ||
+      s == "chunk:write" || s == "ChunkWrite")
+    return ToolScope::CrewWrite;
+  if (s == "crew:assign" || s == "CrewAssign" || s == "chunk:assign" || s == "ChunkAssign")
+    return ToolScope::CrewAssign;
+  if (s == "crew:review" || s == "CrewReview" || s == "chunk:review" || s == "ChunkReview")
+    return ToolScope::CrewReview;
   throw std::runtime_error("Unknown tool scope in mode file: " + s);
 }
 
@@ -152,10 +150,6 @@ Mode loadModeFromFile(const std::string &path) {
   for (const auto &p :
        FrontmatterParser::getStringArray(doc, "allowed_transitions_to")) {
     mode.allowedTransitionsTo.push_back(p);
-  }
-  for (const auto &p :
-       FrontmatterParser::getStringArray(doc, "pact_done_when_defaults")) {
-    mode.pactDoneWhenDefaults.push_back(p);
   }
 
   // tool_scope is a map: { allow: [...], deny: [...] }

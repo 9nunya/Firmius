@@ -617,31 +617,6 @@ HooksRecentActivitySnapshot DaemonClient::recentHookActivity(
   return hooksRecentActivitySnapshotFromJson(response["result"]);
 }
 
-std::vector<PactSnapshot>
-DaemonClient::listPacts(const PactsListRequest &request) const {
-  auto params = makeParams(request);
-  auto response = transport().sendRequest(kRpcPactsList, params, 3000);
-  std::vector<PactSnapshot> pacts;
-  const auto &result = response["result"];
-  if (result.IsArray()) {
-    pacts.reserve(result.Size());
-    for (const auto &entry : result.GetArray()) {
-      pacts.push_back(pactSnapshotFromJson(entry));
-    }
-  }
-  return pacts;
-}
-
-std::optional<PactSnapshot> DaemonClient::getPact(
-    const PactsGetRequest &request) const {
-  auto params = makeParams(request);
-  auto response = transport().sendRequest(kRpcPactsGet, params, 3000);
-  if (!response.HasMember("result")) {
-    return std::nullopt;
-  }
-  return pactSnapshotFromJson(response["result"]);
-}
-
 std::vector<WorkflowExecutionSnapshot> DaemonClient::listWorkflows() const {
   auto params = makeParams();
   auto response = transport().sendRequest(kRpcWorkflowsList, params, 3000);

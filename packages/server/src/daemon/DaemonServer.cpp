@@ -758,31 +758,6 @@ void DaemonServer::acceptLoop() {
                     rpc->sendResponse(id, result);
                     return;
                   }
-                  if (method == kRpcPactsList) {
-                    auto pactsRequest =
-                        params ? pactsListRequestFromJson(*params)
-                               : PactsListRequest{};
-                    auto result = toJsonValue(
-                        service_->listPacts(registeredClientId, pactsRequest),
-                        respAlloc);
-                    rpc->sendResponse(id, result);
-                    return;
-                  }
-                  if (method == kRpcPactsGet) {
-                    params = requireObjectParams(request, kRpcPactsGet, id, *rpc);
-                    if (!params) {
-                      return;
-                    }
-                    auto pact = service_->getPact(registeredClientId,
-                                                  pactsGetRequestFromJson(*params));
-                    if (!pact.has_value()) {
-                      rpc->sendError(id, -32000, "pact not found");
-                      return;
-                    }
-                    auto resultValue = toJsonValue(*pact, respAlloc);
-                    rpc->sendResponse(id, resultValue);
-                    return;
-                  }
                   if (method == kRpcWorkflowsList) {
                     auto result = toJsonValue(service_->listWorkflows(), respAlloc);
                     rpc->sendResponse(id, result);

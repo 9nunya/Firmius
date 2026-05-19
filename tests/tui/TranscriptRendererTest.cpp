@@ -2,6 +2,7 @@
 #include "items/SimpleItems.hpp"
 #include "items/StreamingItems.hpp"
 #include "items/ToolCallItem.hpp"
+#include "Terminal.hpp"
 #include <gtest/gtest.h>
 #include <memory>
 
@@ -11,7 +12,14 @@ TEST(TranscriptRendererTest, RenderUserMessageItem) {
   UserMessageItem item("Hello world");
   auto lines = item.render(80);
   ASSERT_GE(lines.size(), 1u);
-  EXPECT_NE(lines[0].find("Hello world"), std::string::npos);
+  bool foundText = false;
+  for (const auto& line : lines) {
+    if (ansi::strip(line).find("Hello world") != std::string::npos) {
+      foundText = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(foundText);
 }
 
 TEST(TranscriptRendererTest, RenderToolCallItem) {

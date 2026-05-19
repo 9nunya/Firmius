@@ -22,6 +22,7 @@ namespace firmius::tui {
 
 class AgentTextItem;
 class AgentThinkingItem;
+class QuickToolClusterItem;
 class ToolCallItem;
 class UserMessageItem;
 
@@ -243,6 +244,9 @@ public:
   AgentThinkingItem* agentThinkingItem(const std::string& agentId) const;
   void setAgentThinkingItem(const std::string& agentId, AgentThinkingItem* item);
 
+  QuickToolClusterItem* agentQuickToolClusterItem(const std::string& agentId) const;
+  void setAgentQuickToolClusterItem(const std::string& agentId, QuickToolClusterItem* item);
+
   // ── Item span tracking for in-place re-render ──
   const std::vector<ItemSpan>& itemSpans() const;
   void setItemSpans(std::vector<ItemSpan> spans);
@@ -282,6 +286,7 @@ public:
                      const std::vector<firmius::shared::TodoItem>& items);
   std::vector<firmius::shared::TodoItem> agentTodos(const std::string& agentId) const;
   std::vector<firmius::shared::TodoItem> focusedAgentTodos() const;
+  std::string focusedAgentTodoSummary() const;
   void clearTodos();
   void toggleTodoVisibility();
   bool todoVisible() const;
@@ -462,6 +467,7 @@ private:
   // Per-agent streaming pointers
   std::unordered_map<std::string, AgentTextItem*> agentTextItems_;
   std::unordered_map<std::string, AgentThinkingItem*> agentThinkingItems_;
+  std::unordered_map<std::string, QuickToolClusterItem*> agentQuickToolClusterItems_;
   // Per-agent activity log (human-readable lines)
   std::unordered_map<std::string, std::vector<AgentActivityEntry>> agentActivityLogs_;
 
@@ -470,6 +476,7 @@ private:
   std::vector<QueuedUserMessage> queuedUserMessages_;
   std::deque<PendingPermission> pendingPermissions_;
   std::unordered_map<std::string, std::vector<firmius::shared::TodoItem>> agentTodos_;
+  std::unordered_map<std::string, std::string> agentTodoSummaries_;
   bool todoVisible_ = true;
   std::string inputBuffer_;
   size_t inputCursor_ = 0;

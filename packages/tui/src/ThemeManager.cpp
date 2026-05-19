@@ -2,6 +2,7 @@
 
 #include "utils/PlatformPaths.hpp"
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <rapidjson/document.h>
@@ -32,6 +33,20 @@ ThemeRgb getColor(const rapidjson::Value& v, const char* key, ThemeRgb fallback 
     return parseHex(v[key].GetString(), fallback);
   }
   return fallback;
+}
+
+ThemeRgb mix(ThemeRgb a, ThemeRgb b, double t) {
+  const double clamped = std::clamp(t, 0.0, 1.0);
+  return {
+      static_cast<int>(a.r + (b.r - a.r) * clamped),
+      static_cast<int>(a.g + (b.g - a.g) * clamped),
+      static_cast<int>(a.b + (b.b - a.b) * clamped),
+  };
+}
+
+ThemeRgb deriveUserMessageBg(const ThemeSpec& theme) {
+  const auto accentTint = mix(theme.chat.bg, theme.base.highlight, 0.10);
+  return mix(accentTint, theme.base.separator, 0.20);
 }
 
 ThemeColorGroup getColorGroup(const rapidjson::Value& v,
@@ -229,6 +244,14 @@ ThemeSpec loadThemeFile(const std::filesystem::path& path) {
         getColor(chat, "agent_prefix", theme.chat.agentPrefix);
     theme.chat.timestamp =
         getColor(chat, "timestamp", theme.chat.timestamp);
+    theme.chat.userFg = getColor(chat, "user_fg", theme.chat.userFg);
+  }
+  theme.chat.userBg = deriveUserMessageBg(theme);
+  if (doc.HasMember("chat")) {
+    const auto& chat = doc["chat"];
+    if (chat.IsObject() && chat.HasMember("user_bg") && chat["user_bg"].IsString()) {
+      theme.chat.userBg = parseHex(chat["user_bg"].GetString(), theme.chat.userBg);
+    }
   }
   // ─── Syntax palette ──────────────────────────────────────────────────────
   // Same JSON layout as v1's `syntax` block in themes/*.theme.json.

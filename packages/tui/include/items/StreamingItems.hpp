@@ -3,10 +3,15 @@
 
 #include "TranscriptItem.hpp"
 
+#include <chrono>
 #include <string>
 #include <vector>
 
 namespace firmius::tui {
+
+// Shared markdown renderer used by transcript items. Produces ANSI-formatted,
+// wrapped lines.
+std::vector<std::string> renderMarkdownLines(const std::string& text, int width, bool dimmed);
 
 /// Accumulates streaming assistant text. Updated in-place as deltas arrive.
 class AgentTextItem : public TranscriptItem {
@@ -50,14 +55,24 @@ public:
 
   bool isFinalized() const override { return finalized_; }
   const std::string& accumulated() const { return accumulated_; }
+  bool isExpanded() const { return expanded_; }
+  void setExpanded(bool expanded);
+  bool needsAnimationTick() const;
 
   void setAgentId(const std::string& id) { agentId_ = id; }
   const std::string& agentId() const { return agentId_; }
 
 private:
+  static constexpr int kCollapseMs = 420;
   std::string accumulated_;
   std::string agentId_;
   bool finalized_ = false;
+  bool expanded_ = false;
+  std::chrono::steady_clock::time_point startedAt_{};
+  std::chrono::steady_clock::time_point finishedAt_{};
+  std::chrono::steady_clock::time_point collapseStartedAt_{};
+  std::chrono::steady_clock::time_point lastDeltaAt_{};
+  std::string lastDeltaText_;
 };
 
 } // namespace firmius::tui

@@ -34,7 +34,6 @@ using firmius::shared::ICON_THRESHOLD_BUF;
 using firmius::shared::ICON_THRESHOLD_TGT;
 using firmius::shared::ICON_THRESHOLD_EMERG;
 using firmius::shared::PL_LEFT_SEP;
-using firmius::shared::TodoStatus;
 
 struct Rgb {
   int r;
@@ -218,13 +217,13 @@ std::string activitySuffix(const AppState& state) {
          theme_ansi::foreground(truncateLabel(lastTool->toolName(), 24));
 }
 
-std::string todoMarker(TodoStatus status) {
+std::string todoMarker(firmius::shared::TodoStatus status) {
   switch (status) {
-  case TodoStatus::InProgress:
+  case firmius::shared::TodoStatus::InProgress:
     return theme_ansi::warning("■");
-  case TodoStatus::Done:
+  case firmius::shared::TodoStatus::Done:
     return theme_ansi::success("✓");
-  case TodoStatus::Pending:
+  case firmius::shared::TodoStatus::Pending:
   default:
     return theme_ansi::dim("□");
   }
@@ -245,6 +244,22 @@ std::string todoLine(const firmius::shared::TodoItem& item,
                      truncateLabel(item.text, width - 10);
   return ansi::bgRgb(theme.base.bg.r, theme.base.bg.g, theme.base.bg.b,
                      ansi::fitToWidth(line, width));
+}
+
+std::vector<std::string> hookStatusLines(
+    const firmius::daemon::HookStateSnapshot& hook) {
+  std::vector<std::string> lines;
+  auto pushUnique = [&](const std::string& text) {
+    if (text.empty()) return;
+    if (std::find(lines.begin(), lines.end(), text) == lines.end()) {
+      lines.push_back(text);
+    }
+  };
+
+  for (const auto& text : hook.currentStatusLines) pushUnique(text);
+  pushUnique(hook.latestStatusLine);
+  for (const auto& text : hook.blockingReasons) pushUnique(text);
+  return lines;
 }
 
 ThemeColorGroup statusGroupFor(const ThemeSpec& theme,
@@ -310,9 +325,7 @@ int StatusBar::liveHeight(int width) const {
   (void)width;
   int rows = 1;
   const auto hook = state_.hookState();
-  if (!hook.latestStatusLine.empty() || !hook.currentStatusLines.empty()) {
-    rows += 1;
-  }
+  rows += static_cast<int>(hookStatusLines(hook).size());
   if (state_.todoVisible()) {
     auto todos = state_.focusedAgentTodos();
     if (!todos.empty()) {
@@ -369,8 +382,12 @@ std::vector<std::string> StatusBar::renderLiveSection(int width) const {
 
   lines.push_back(renderLiveRow(width));
   const auto hook = state_.hookState();
-  if (!hook.latestStatusLine.empty() || !hook.currentStatusLines.empty()) {
-    lines.push_back(renderHookRow(width));
+  for (const auto& hookLine : hookStatusLines(hook)) {
+    const std::string line =
+        "  " + ansi::fgRgb(theme.base.fg.r, theme.base.fg.g, theme.base.fg.b,
+                           hookLine);
+    lines.push_back(ansi::bgRgb(theme.base.bg.r, theme.base.bg.g,
+                                theme.base.bg.b, ansi::fitToWidth(line, width)));
   }
   if (state_.todoVisible()) {
     auto todos = state_.focusedAgentTodos();

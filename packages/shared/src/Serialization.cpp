@@ -96,18 +96,14 @@ std::string toolScopeToString(ToolScope value) {
     return "Web";
   case ToolScope::Git:
     return "Git";
-  case ToolScope::PlanRead:
-    return "PlanRead";
-  case ToolScope::PlanWrite:
-    return "PlanWrite";
-  case ToolScope::ChunkRead:
-    return "ChunkRead";
-  case ToolScope::ChunkWrite:
-    return "ChunkWrite";
-  case ToolScope::ChunkAssign:
-    return "ChunkAssign";
-  case ToolScope::ChunkReview:
-    return "ChunkReview";
+  case ToolScope::CrewRead:
+    return "CrewRead";
+  case ToolScope::CrewWrite:
+    return "CrewWrite";
+  case ToolScope::CrewAssign:
+    return "CrewAssign";
+  case ToolScope::CrewReview:
+    return "CrewReview";
   }
   return "Unknown";
 }
@@ -127,18 +123,14 @@ ToolScope stringToToolScope(const std::string &str) {
     return ToolScope::Web;
   if (str == "Git")
     return ToolScope::Git;
-  if (str == "PlanRead")
-    return ToolScope::PlanRead;
-  if (str == "PlanWrite")
-    return ToolScope::PlanWrite;
-  if (str == "ChunkRead")
-    return ToolScope::ChunkRead;
-  if (str == "ChunkWrite")
-    return ToolScope::ChunkWrite;
-  if (str == "ChunkAssign")
-    return ToolScope::ChunkAssign;
-  if (str == "ChunkReview")
-    return ToolScope::ChunkReview;
+  if (str == "CrewRead" || str == "PlanRead" || str == "ChunkRead")
+    return ToolScope::CrewRead;
+  if (str == "CrewWrite" || str == "PlanWrite" || str == "ChunkWrite")
+    return ToolScope::CrewWrite;
+  if (str == "CrewAssign" || str == "ChunkAssign")
+    return ToolScope::CrewAssign;
+  if (str == "CrewReview" || str == "ChunkReview")
+    return ToolScope::CrewReview;
   throw std::runtime_error("Unknown ToolScope: " + str);
 }
 

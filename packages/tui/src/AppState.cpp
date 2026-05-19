@@ -2,10 +2,12 @@
 #include "items/SimpleItems.hpp"
 #include "items/ToolCallItem.hpp"
 #include "items/StreamingItems.hpp"
+#include "items/QuickToolClusterItem.hpp"
 
 #include <algorithm>
 #include <cctype>
 #include <optional>
+#include <unordered_map>
 
 namespace firmius::tui {
 
@@ -29,6 +31,89 @@ struct PlaceholderSpan {
   size_t end = 0;     ///< Exclusive byte offset just past the trailing ']'.
   int id = 0;
 };
+
+std::string pluralize(const std::string& noun, int count) {
+  return std::to_string(count) + " " + noun + (count == 1 ? "" : "s");
+}
+
+std::string joinPhrases(const std::vector<std::string>& parts) {
+  std::string out;
+  for (size_t i = 0; i < parts.size(); ++i) {
+    if (i > 0) out += ", ";
+    out += parts[i];
+  }
+  return out;
+}
+
+std::string buildTodoSummary(
+    const std::vector<firmius::shared::TodoItem>& before,
+    const std::vector<firmius::shared::TodoItem>& after) {
+  using firmius::shared::TodoStatus;
+
+  std::unordered_map<int, firmius::shared::TodoItem> beforeById;
+  for (const auto& item : before) beforeById[item.id] = item;
+
+  int added = 0;
+  int removed = 0;
+  int started = 0;
+  int completed = 0;
+  int reset = 0;
+
+  for (const auto& item : after) {
+    auto it = beforeById.find(item.id);
+    if (it == beforeById.end()) {
+      ++added;
+      if (item.status == TodoStatus::InProgress) ++started;
+      if (item.status == TodoStatus::Done) ++completed;
+      continue;
+    }
+
+    if (it->second.status != item.status) {
+      if (item.status == TodoStatus::InProgress) {
+        ++started;
+      } else if (item.status == TodoStatus::Done) {
+        ++completed;
+      } else if (item.status == TodoStatus::Pending) {
+        ++reset;
+      }
+    }
+    beforeById.erase(it);
+  }
+
+  removed = static_cast<int>(beforeById.size());
+
+  std::vector<std::string> changes;
+  if (added > 0) changes.push_back("added " + pluralize("item", added));
+  if (completed > 0) changes.push_back("completed " + pluralize("item", completed));
+  if (started > 0) changes.push_back("started " + pluralize("item", started));
+  if (removed > 0) changes.push_back("removed " + pluralize("item", removed));
+  if (reset > 0) changes.push_back("reset " + pluralize("item", reset));
+  if (!changes.empty()) return joinPhrases(changes);
+
+  int pending = 0;
+  int inProgress = 0;
+  int done = 0;
+  for (const auto& item : after) {
+    switch (item.status) {
+    case TodoStatus::Pending:
+      ++pending;
+      break;
+    case TodoStatus::InProgress:
+      ++inProgress;
+      break;
+    case TodoStatus::Done:
+      ++done;
+      break;
+    }
+  }
+
+  std::vector<std::string> counts;
+  if (pending > 0) counts.push_back(pluralize("pending item", pending));
+  if (inProgress > 0) counts.push_back(pluralize("active item", inProgress));
+  if (done > 0) counts.push_back(pluralize("done item", done));
+  if (!counts.empty()) return joinPhrases(counts);
+  return "no active items";
+}
 
 // Scan the buffer and return all placeholder spans, in order of appearance.
 std::vector<PlaceholderSpan> scanPlaceholders(const std::string& buf) {
@@ -297,10 +382,12 @@ void AppState::resetWelcomeState() {
   hookState_ = {};
   agents_.clear();
   agentTodos_.clear();
+  agentTodoSummaries_.clear();
   activeTextItem_ = nullptr;
   activeThinkingItem_ = nullptr;
   agentTextItems_.clear();
   agentThinkingItems_.clear();
+  agentQuickToolClusterItems_.clear();
   queuedMessageCount_ = 0;
   queuedMessageIds_.clear();
   queuedUserMessages_.clear();
@@ -316,10 +403,12 @@ void AppState::prepareForThreadLoad() {
   processToTool_.clear();
   agents_.clear();
   agentTodos_.clear();
+  agentTodoSummaries_.clear();
   activeTextItem_ = nullptr;
   activeThinkingItem_ = nullptr;
   agentTextItems_.clear();
   agentThinkingItems_.clear();
+  agentQuickToolClusterItems_.clear();
   agentActivityLogs_.clear();
   focusedAgentId_.clear();
   primaryAgentId_.clear();
@@ -380,6 +469,7 @@ void AppState::clearItems() {
   processToTool_.clear();
   agents_.clear();
   agentTodos_.clear();
+  agentTodoSummaries_.clear();
   activeTextItem_ = nullptr;
   activeThinkingItem_ = nullptr;
   queuedMessageCount_ = 0;
@@ -765,6 +855,17 @@ void AppState::setAgentThinkingItem(const std::string& agentId, AgentThinkingIte
   agentThinkingItems_[agentId] = item;
 }
 
+QuickToolClusterItem* AppState::agentQuickToolClusterItem(const std::string& agentId) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = agentQuickToolClusterItems_.find(agentId);
+  return (it != agentQuickToolClusterItems_.end()) ? it->second : nullptr;
+}
+
+void AppState::setAgentQuickToolClusterItem(const std::string& agentId, QuickToolClusterItem* item) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  agentQuickToolClusterItems_[agentId] = item;
+}
+
 // ── Item span tracking ──
 
 const std::vector<ItemSpan>& AppState::itemSpans() const {
@@ -789,6 +890,9 @@ bool AppState::hasLiveItems() const {
     if (item->type() == "ToolCall") {
       auto* tc = static_cast<const ToolCallItem*>(item.get());
       if (tc->isLive()) return true;
+    } else if (item->type() == "AgentThinking") {
+      auto* think = static_cast<const AgentThinkingItem*>(item.get());
+      if (think->needsAnimationTick()) return true;
     }
   }
   return false;
@@ -801,6 +905,11 @@ void AppState::markLiveItemsDirty() {
       auto* tc = static_cast<ToolCallItem*>(item.get());
       if (tc->isLive()) {
         tc->markDirty();
+      }
+    } else if (item->type() == "AgentThinking") {
+      auto* think = static_cast<AgentThinkingItem*>(item.get());
+      if (think->needsAnimationTick()) {
+        think->markDirty();
       }
     }
   }
@@ -957,6 +1066,8 @@ void AppState::setAgentTodos(
   if (agentId.empty()) {
     return;
   }
+  const auto previous = agentTodos_[agentId];
+  agentTodoSummaries_[agentId] = buildTodoSummary(previous, items);
   agentTodos_[agentId] = items;
   markDirty();
 }
@@ -981,9 +1092,20 @@ std::vector<firmius::shared::TodoItem> AppState::focusedAgentTodos() const {
   return it->second;
 }
 
+std::string AppState::focusedAgentTodoSummary() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  const std::string agentId = !focusedAgentId_.empty() ? focusedAgentId_ : agentId_;
+  auto it = agentTodoSummaries_.find(agentId);
+  if (it == agentTodoSummaries_.end()) {
+    return "";
+  }
+  return it->second;
+}
+
 void AppState::clearTodos() {
   std::lock_guard<std::mutex> lock(mutex_);
   agentTodos_.clear();
+  agentTodoSummaries_.clear();
   markDirty();
 }
 

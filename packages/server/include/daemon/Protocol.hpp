@@ -88,8 +88,6 @@ inline constexpr const char *kRpcMcpUpdate = "mcp.update";
 inline constexpr const char *kRpcHooksList = "hooks.list";
 inline constexpr const char *kRpcHooksReload = "hooks.reload";
 inline constexpr const char *kRpcHooksState = "hooks.state";
-inline constexpr const char *kRpcPactsList = "pacts.list";
-inline constexpr const char *kRpcPactsGet = "pacts.get";
 inline constexpr const char *kRpcWorkflowsList = "workflows.list";
 inline constexpr const char *kRpcWorkflowsExecute = "workflows.execute";
 inline constexpr const char *kRpcEditsList = "edits.list";
@@ -131,7 +129,6 @@ enum class DaemonEventKind {
   ClientSessionDisconnected,
   ClientSessionUpdated,
   HookStateChanged,
-  PactStateChanged,
   InitProgress,
   ConnectProgress,
   RewindApplied,
@@ -519,20 +516,6 @@ struct HooksStateRequest {
   int limit = 24;
 
   bool operator==(const HooksStateRequest &) const = default;
-};
-
-struct PactsListRequest {
-  std::string threadId;
-  std::string agentId;
-
-  bool operator==(const PactsListRequest &) const = default;
-};
-
-struct PactsGetRequest {
-  std::string threadId;
-  std::string pactId;
-
-  bool operator==(const PactsGetRequest &) const = default;
 };
 
 struct WorkflowExecuteRequest {
@@ -973,46 +956,6 @@ struct HookStateSnapshot {
   bool operator==(const HookStateSnapshot &) const = default;
 };
 
-struct PactHistoryEntrySnapshot {
-  int iteration = 0;
-  std::string validator;
-  std::string validatorAgentId;
-  std::string verdict;
-  std::string suggestion;
-  std::string evidenceJson;
-
-  bool operator==(const PactHistoryEntrySnapshot &) const = default;
-};
-
-struct PactSnapshot {
-  std::string threadId;
-  std::string agentId;
-  std::string pactId;
-  std::string status;
-  std::string title;
-  std::string summary;
-  std::string description;
-  std::string validator;
-  std::string lastVerdict;
-  std::string lastSuggestion;
-  std::string sealedBy;
-  std::string statusLine;
-  std::string blockingReason;
-  std::string statePayloadJson;
-  std::uint64_t createdAtMs = 0;
-  std::uint64_t updatedAtMs = 0;
-  int iteration = 0;
-  int maxIterations = 0;
-  bool active = false;
-  bool resolved = false;
-  bool failed = false;
-  bool stale = false;
-  std::vector<std::string> doneWhen;
-  std::vector<PactHistoryEntrySnapshot> history;
-
-  bool operator==(const PactSnapshot &) const = default;
-};
-
 struct WorkflowExecutionSnapshot {
   std::string workflowId;
   std::string name;
@@ -1184,7 +1127,6 @@ struct UiSnapshot {
   PurposesConfigSnapshot purposes;
   McpConfigSnapshot mcp;
   HookStateSnapshot hooks;
-  std::vector<PactSnapshot> pacts;
   ArtifactCatalogSnapshot artifacts;
   HistorySnapshot history;
   EditHistorySnapshot edits;
@@ -1534,7 +1476,6 @@ struct DaemonEventEnvelope {
   std::string runtimeEventJson;
   std::optional<firmius::shared::AgentStatus> agentStatus;
   std::optional<HookStateSnapshot> hookState;
-  std::optional<PactSnapshot> pactState;
   std::string initMessage;  // For InitProgress events: human-readable status
   std::optional<ConnectProgressSnapshot> connectProgress;
   std::optional<RewindAppliedSnapshot> rewindApplied;

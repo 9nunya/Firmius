@@ -32,10 +32,9 @@ std::vector<firmius::shared::ToolScope> allToolScopes() {
     return {ToolScope::FilesystemRead, ToolScope::FilesystemWrite,
             ToolScope::Process,        ToolScope::Semantic,
             ToolScope::Delegation,     ToolScope::Web,
-            ToolScope::Git,            ToolScope::PlanRead,
-            ToolScope::PlanWrite,      ToolScope::ChunkRead,
-            ToolScope::ChunkWrite,     ToolScope::ChunkAssign,
-            ToolScope::ChunkReview};
+            ToolScope::Git,            ToolScope::CrewRead,
+            ToolScope::CrewWrite,      ToolScope::CrewAssign,
+            ToolScope::CrewReview};
 }
 
 std::string getTimestamp() {

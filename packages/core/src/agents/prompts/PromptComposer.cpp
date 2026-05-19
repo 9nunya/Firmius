@@ -238,7 +238,6 @@ PromptComposer PromptComposer::buildDefault() {
   composer.addSection(100, std::make_shared<ModeFrameSection>());
   composer.addSection(110, std::make_shared<WorkflowFrameSection>());
   composer.addSection(120, std::make_shared<BranchFrameSection>());
-  composer.addSection(130, std::make_shared<PactFrameSection>());
 
   return composer;
 }
@@ -492,19 +491,6 @@ std::string WorkflowFrameSection::render(const PromptInputs &inputs) const {
   std::ostringstream ss;
   ss << "# WORKFLOW FRAME\n";
   ss << "Active workflow: " << *inputs.activeWorkflowName << "\n";
-  return ss.str();
-}
-
-std::string PactFrameSection::render(const PromptInputs &inputs) const {
-  if (!inputs.activePactId.has_value() || inputs.activePactId->empty()) {
-    return {};
-  }
-  std::ostringstream ss;
-  ss << "# PACT FRAME\n";
-  ss << "Active pact: " << *inputs.activePactId << "\n";
-  ss << "You have promised structured outcomes for this work. The pact's "
-        "done_when items may be re-verified by external hooks at stop time. "
-        "Do not claim completion you cannot prove.\n";
   return ss.str();
 }
 

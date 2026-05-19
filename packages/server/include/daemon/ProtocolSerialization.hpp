@@ -245,18 +245,6 @@ rapidjson::Value toJsonValue(const HooksRecentActivitySnapshot &snapshot,
                              rapidjson::Document::AllocatorType &allocator);
 HooksRecentActivitySnapshot
 hooksRecentActivitySnapshotFromJson(const rapidjson::Value &value);
-rapidjson::Value toJsonValue(const PactsListRequest &request,
-                             rapidjson::Document::AllocatorType &allocator);
-PactsListRequest pactsListRequestFromJson(const rapidjson::Value &value);
-rapidjson::Value toJsonValue(const PactsGetRequest &request,
-                             rapidjson::Document::AllocatorType &allocator);
-PactsGetRequest pactsGetRequestFromJson(const rapidjson::Value &value);
-rapidjson::Value toJsonValue(const PactHistoryEntrySnapshot &snapshot,
-                             rapidjson::Document::AllocatorType &allocator);
-PactHistoryEntrySnapshot pactHistoryEntrySnapshotFromJson(const rapidjson::Value &value);
-rapidjson::Value toJsonValue(const PactSnapshot &snapshot,
-                             rapidjson::Document::AllocatorType &allocator);
-PactSnapshot pactSnapshotFromJson(const rapidjson::Value &value);
 
 rapidjson::Value toJsonValue(const WorkflowExecuteRequest &request,
                              rapidjson::Document::AllocatorType &allocator);
@@ -369,9 +357,6 @@ std::vector<AccountSnapshot> accountSnapshotListFromJson(const rapidjson::Value 
 rapidjson::Value toJsonValue(const std::vector<WorkflowExecutionSnapshot> &snapshots,
                              rapidjson::Document::AllocatorType &allocator);
 std::vector<WorkflowExecutionSnapshot> workflowExecutionSnapshotListFromJson(const rapidjson::Value &value);
-rapidjson::Value toJsonValue(const std::vector<PactSnapshot> &snapshots,
-                             rapidjson::Document::AllocatorType &allocator);
-std::vector<PactSnapshot> pactSnapshotListFromJson(const rapidjson::Value &value);
 rapidjson::Value toJsonValue(const std::vector<ToolCallSnapshot> &snapshots,
                              rapidjson::Document::AllocatorType &allocator);
 std::vector<ToolCallSnapshot> toolCallSnapshotListFromJson(const rapidjson::Value &value);

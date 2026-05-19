@@ -320,8 +320,8 @@ TEST(Serialization, ThreadMetadataActivePlanIdBackwardCompatibleDefault) {
 TEST(Serialization, WorkLanguageToolScopesRoundtrip) {
   AgentContext original;
   original.permissions.allowedScopes = {
-      ToolScope::PlanRead, ToolScope::PlanWrite, ToolScope::ChunkRead,
-      ToolScope::ChunkWrite, ToolScope::ChunkAssign, ToolScope::ChunkReview};
+      ToolScope::CrewRead, ToolScope::CrewWrite, ToolScope::CrewAssign,
+      ToolScope::CrewReview};
   original.environment.type = HostType::Local;
   original.environment.identifier = "local";
   original.environment.cwd = "/work";

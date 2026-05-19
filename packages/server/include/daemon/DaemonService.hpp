@@ -139,10 +139,6 @@ public:
   HookStatusSnapshot listHooks() const;
   HookStatusSnapshot reloadHooks();
   HookStateSnapshot hookState(const HooksStateRequest &request) const;
-  std::vector<PactSnapshot> listPacts(const std::string &clientId,
-                                      const PactsListRequest &request) const;
-  std::optional<PactSnapshot> getPact(const std::string &clientId,
-                                      const PactsGetRequest &request) const;
   std::vector<WorkflowExecutionSnapshot> listWorkflows() const;
   bool executeWorkflow(const WorkflowExecuteRequest &request);
   ArtifactCatalogSnapshot
@@ -204,7 +200,6 @@ private:
 
   void emitSessionEvent(DaemonEventKind kind, const ClientSessionSnapshot &session);
   void emitHookStateEvent(const HookStateSnapshot &snapshot);
-  void emitPactStateEvent(const PactSnapshot &snapshot);
   void emitCoreEvent(const firmius::shared::AppEvent &event);
   std::uint64_t nowMs() const;
   void emitRuntimeEventToFocusedClients(
@@ -262,10 +257,7 @@ private:
       const std::string &threadId, const std::string &agentId,
       bool includeUndone) const;
   HookStateSnapshot buildHookStateSnapshotLocked(const HooksStateRequest &request) const;
-  std::vector<PactSnapshot> buildPactSnapshotsLocked(const std::string &threadId,
-                                                     const std::string &agentId) const;
   std::string hookStateChangeKey(const HookStateSnapshot &snapshot) const;
-  std::string pactStateChangeKey(const PactSnapshot &snapshot) const;
 
   mutable std::mutex stateMutex_;
   mutable std::mutex runtimeMutex_;
@@ -281,7 +273,6 @@ private:
   static constexpr std::size_t kMaxReplayEvents = 2048;
 
   std::unordered_map<std::string, std::string> hookStateChangeKeys_;
-  std::unordered_map<std::string, std::string> pactStateChangeKeys_;
 
   // ── /connect wizard sessions ────────────────────────────────────────────
   // One active wizard per client. Keyed by clientId so a second `begin` call

@@ -74,6 +74,7 @@ target_sources(firmius_core PRIVATE
     src/Engine.cpp
     src/harness/ThreadLockManager.cpp
     src/Harness.cpp
+    src/crew/CrewStore.cpp
     src/benchmarks/MBPPBenchmark.cpp
     src/benchmarks/AgentBench.cpp
     src/benchmarks/SWEBench.cpp

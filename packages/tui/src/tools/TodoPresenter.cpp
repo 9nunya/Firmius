@@ -1,4 +1,5 @@
 #include "tools/TodoPresenter.hpp"
+#include "AppState.hpp"
 #include "items/ToolCallItem.hpp"
 #include "Terminal.hpp"
 #include "ThemeAnsi.hpp"
@@ -7,6 +8,50 @@
 #include <sstream>
 
 namespace firmius::tui {
+
+namespace {
+
+std::string pluralize(const std::string& noun, int count) {
+  return std::to_string(count) + " " + noun + (count == 1 ? "" : "s");
+}
+
+std::string joinParts(const std::vector<std::string>& parts) {
+  std::string out;
+  for (size_t i = 0; i < parts.size(); ++i) {
+    if (i > 0) out += ", ";
+    out += parts[i];
+  }
+  return out;
+}
+
+std::string summarizeTodoItems(const rapidjson::Value& items) {
+  int pending = 0;
+  int inProgress = 0;
+  int done = 0;
+  for (const auto& todoItem : items.GetArray()) {
+    if (!todoItem.IsObject() || !todoItem.HasMember("status") ||
+        !todoItem["status"].IsString()) {
+      continue;
+    }
+    const std::string status = todoItem["status"].GetString();
+    if (status == "done") {
+      ++done;
+    } else if (status == "in_progress") {
+      ++inProgress;
+    } else {
+      ++pending;
+    }
+  }
+
+  std::vector<std::string> parts;
+  if (pending > 0) parts.push_back(pluralize("pending item", pending));
+  if (inProgress > 0) parts.push_back(pluralize("active item", inProgress));
+  if (done > 0) parts.push_back(pluralize("done item", done));
+  if (parts.empty()) return "No todo items";
+  return joinParts(parts);
+}
+
+} // namespace
 
 bool TodoPresenter::matches(const std::string& toolName) const {
   return toolName == "Todo";
@@ -34,32 +79,9 @@ std::vector<std::string> TodoPresenter::render(const ToolCallItem& item, const T
     rapidjson::Document doc;
     doc.Parse(item.result().c_str());
     if (!doc.HasParseError() && doc.IsObject()) {
-      // Try to get items array
       if (doc.HasMember("items") && doc["items"].IsArray()) {
-        for (const auto& todoItem : doc["items"].GetArray()) {
-          if (!todoItem.IsObject()) continue;
-          std::string status;
-          std::string text;
-          if (todoItem.HasMember("status") && todoItem["status"].IsString()) status = todoItem["status"].GetString();
-          if (todoItem.HasMember("text") && todoItem["text"].IsString()) text = todoItem["text"].GetString();
-          if (text.empty()) continue;
-
-          std::string marker;
-          std::string styled;
-          if (status == "done") {
-            marker = "[x]";
-            styled = theme_ansi::success(marker);
-          } else if (status == "in_progress") {
-            marker = "[*]";
-            styled = theme_ansi::warning(marker);
-          } else {
-            marker = "[ ]";
-            styled = ansi::dim(marker);
-          }
-          result.push_back("  " + styled + " " + text);
-        }
+        result.push_back(theme_ansi::dim("  " + summarizeTodoItems(doc["items"])));
       } else if (doc.HasMember("summary") && doc["summary"].IsString()) {
-        // Fallback: show summary text
         std::string summary = doc["summary"].GetString();
         std::istringstream stream(summary);
         std::string line;

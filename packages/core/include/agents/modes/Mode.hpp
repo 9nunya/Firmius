@@ -17,13 +17,12 @@ using firmius::shared::ToolScope;
  *
  * Modes are operational stances inside personas. Each mode supplies a
  * sub-prompt overlay, a tool scope override, a structured-output schema
- * hint, default Pact contract requirements, and the set of transitions
+ * hint, and the set of transitions
  * the agent may request. Personas inherit the active mode when delegated.
  *
  * Day-1 ship: data model + registry + loader. Day-3 ships:
  *   - mode_switch tool wiring
  *   - tool dispatcher enforcement of allow/deny
- *   - Pact template wiring
  *   - mode-aware welcome screen + status band
  */
 struct Mode {
@@ -38,9 +37,6 @@ struct Mode {
   std::optional<std::string> outputSchema;     ///< name of expected return shape
   std::vector<std::string> autoWorkflowsOnEnter; ///< workflows to trigger
   std::vector<std::string> allowedTransitionsTo; ///< names of mode targets (qualified)
-  /// done_when items the Pact subsystem may default to. Strings are the
-  /// raw spec (e.g. "exit_code:0:cmake --build build"). Day-3 parses them.
-  std::vector<std::string> pactDoneWhenDefaults;
   std::string sourcePath;                      ///< filesystem path
 
   /// Persona-scoped sub-modes (loaded from prompts/modes/<persona>/<name>.md)

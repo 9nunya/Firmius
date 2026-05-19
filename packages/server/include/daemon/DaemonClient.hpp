@@ -120,8 +120,6 @@ public:
   HookStateSnapshot hookState(const HooksStateRequest &request) const;
   HooksRecentActivitySnapshot
   recentHookActivity(const HooksRecentActivityRequest &request) const;
-  std::vector<PactSnapshot> listPacts(const PactsListRequest &request) const;
-  std::optional<PactSnapshot> getPact(const PactsGetRequest &request) const;
   std::vector<WorkflowExecutionSnapshot> listWorkflows() const;
   bool executeWorkflow(const WorkflowExecuteRequest &request) const;
 

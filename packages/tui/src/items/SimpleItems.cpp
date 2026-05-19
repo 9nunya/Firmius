@@ -1,6 +1,8 @@
 #include "items/SimpleItems.hpp"
+#include "items/StreamingItems.hpp"
 #include "Terminal.hpp"
 #include "ThemeAnsi.hpp"
+#include "ThemeManager.hpp"
 
 #include <algorithm>
 #include <sstream>
@@ -8,6 +10,14 @@
 namespace firmius::tui {
 
 namespace {
+
+std::string cardFillLine(int totalWidth, const ThemeRgb& bg, const ThemeRgb& fg,
+                         const std::string& inner) {
+  const int innerWidth = std::max(0, totalWidth);
+  std::string content = ansi::fitToWidth(inner, innerWidth);
+  return ansi::bgRgb(bg.r, bg.g, bg.b,
+                     ansi::fgRgb(fg.r, fg.g, fg.b, content));
+}
 
 std::vector<std::string> wrapText(const std::string& text, int width, const std::string& prefix) {
   std::vector<std::string> lines;
@@ -17,7 +27,6 @@ std::vector<std::string> wrapText(const std::string& text, int width, const std:
     if (static_cast<int>(prefix.size() + line.size()) <= width) {
       lines.push_back(prefix + line);
     } else {
-      // Simple word wrap
       std::string current = prefix;
       std::istringstream words(line);
       std::string word;
@@ -68,26 +77,55 @@ UserMessageItem::UserMessageItem(std::string text, std::string agentId,
 }
 
 std::vector<std::string> UserMessageItem::render(int width) const {
-  const std::string rawPrefix = queued_ ? "» " : "> ";
-  const std::string styledPrefix =
-      queued_ ? ansi::bold(theme_ansi::warning(rawPrefix))
-              : ansi::bold(theme_ansi::accent(rawPrefix));
-  auto lines = wrapText(text_, width, rawPrefix);
-  for (auto& line : lines) {
-    std::string content =
-        line.size() >= rawPrefix.size() ? line.substr(rawPrefix.size())
-                                        : std::string{};
+  const auto& theme = ThemeManager::instance().currentTheme();
+  constexpr int kOuterMargin = 2;
+  constexpr int kInnerPad = 2;
+
+  const int cardWidth = std::max(0, width);
+  if (cardWidth <= kInnerPad * 2 + 4) {
+    auto lines = renderMarkdownLines(text_, std::max(1, width - kOuterMargin * 2), false);
     if (queued_) {
-      line = styledPrefix + ansi::italic(theme_ansi::dim(content));
-    } else {
-      line = styledPrefix + content;
+      for (auto& line : lines) line = ansi::italic(theme_ansi::dim(line));
     }
+    std::vector<std::string> out;
+    out.push_back(cardFillLine(cardWidth, theme.chat.userBg, theme.chat.userFg,
+                               std::string(static_cast<size_t>(cardWidth), ' ')));
+    for (const auto& rawLine : lines) {
+      const std::string padded =
+          ansi::fitToWidth(rawLine, std::max(1, width - kOuterMargin * 2));
+      const std::string inner = std::string(kOuterMargin, ' ') + padded +
+                                std::string(kOuterMargin, ' ');
+      out.push_back(cardFillLine(cardWidth, theme.chat.userBg, theme.chat.userFg, inner));
+    }
+    out.push_back(cardFillLine(cardWidth, theme.chat.userBg, theme.chat.userFg,
+                               std::string(static_cast<size_t>(cardWidth), ' ')));
+    return out;
   }
-  return lines;
+
+  const int contentWidth = std::max(1, cardWidth - kOuterMargin * 2 - kInnerPad * 2);
+  auto contentLines = renderMarkdownLines(text_, contentWidth, false);
+  if (queued_) {
+    for (auto& line : contentLines) line = ansi::italic(theme_ansi::dim(line));
+  }
+
+  std::vector<std::string> out;
+  out.push_back(cardFillLine(cardWidth, theme.chat.userBg, theme.chat.userFg,
+                             std::string(static_cast<size_t>(cardWidth), ' ')));
+  for (const auto& rawLine : contentLines) {
+    const std::string padded = ansi::fitToWidth(rawLine, contentWidth);
+    const std::string inner = std::string(kOuterMargin, ' ') +
+                              std::string(kInnerPad, ' ') + padded +
+                              std::string(kInnerPad, ' ') +
+                              std::string(kOuterMargin, ' ');
+    out.push_back(cardFillLine(cardWidth, theme.chat.userBg, theme.chat.userFg, inner));
+  }
+  out.push_back(cardFillLine(cardWidth, theme.chat.userBg, theme.chat.userFg,
+                             std::string(static_cast<size_t>(cardWidth), ' ')));
+  return out;
 }
 
 int UserMessageItem::rowCount(int width) const {
-  return countWrappedLines(text_, width, 2);
+  return static_cast<int>(render(width).size());
 }
 
 void UserMessageItem::setQueued(bool queued) {

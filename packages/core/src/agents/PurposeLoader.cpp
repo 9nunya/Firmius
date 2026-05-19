@@ -210,7 +210,7 @@ std::string PurposeLoader::composeSystemPrompt(const Persona &persona,
   // Layered composition. Stable layers (House Doctrine, Output Style,
   // Persona Voice, Profile, Hinting) come first so prompt-cache hits stay
   // warm; per-turn layers (Environment, Active Context) follow; scoped
-  // frames (Mode, Workflow, Branch, Pact) render only when their owning
+  // frames (Mode, Workflow, Branch) render only when their owning
   // subsystem reports active state via PromptInputs. Adding a new section
   // is one registration call in PromptComposer::buildDefault().
   prompts::PromptInputs inputs;

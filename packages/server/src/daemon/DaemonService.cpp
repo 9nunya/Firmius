@@ -1204,7 +1204,6 @@ ThreadsOpenResponse DaemonService::openThread(const std::string &clientId,
                                               const ThreadsOpenRequest &request) {
   ThreadsOpenResponse response;
   std::optional<HookStateSnapshot> hookSnapshot;
-  std::vector<PactSnapshot> pactSnapshots;
   std::lock_guard<std::mutex> runtimeLock(runtimeMutex_);
   auto &harness = firmius::core::Harness::instance();
   response.opened = harness.switchThread(request.threadId);
@@ -1219,16 +1218,12 @@ ThreadsOpenResponse DaemonService::openThread(const std::string &clientId,
     }
     hookSnapshot = buildHookStateSnapshotLocked(
         HooksStateRequest{request.threadId, "", "", 24});
-    pactSnapshots = buildPactSnapshotsLocked(request.threadId, "");
     std::lock_guard<std::mutex> lock(stateMutex_);
     updateSessionFocusLocked(clientId, response.thread.threadId,
                              response.focusedAgentId);
   }
   if (hookSnapshot.has_value()) {
     emitHookStateEvent(*hookSnapshot);
-  }
-  for (const auto &pact : pactSnapshots) {
-    emitPactStateEvent(pact);
   }
   return response;
 }
@@ -2168,27 +2163,6 @@ HookStateSnapshot DaemonService::hookState(const HooksStateRequest &request) con
   return buildHookStateSnapshotLocked(request);
 }
 
-std::vector<PactSnapshot>
-DaemonService::listPacts(const std::string &clientId,
-                         const PactsListRequest &request) const {
-  const std::string threadId = resolveThreadIdForRequest(clientId, request.threadId);
-  std::lock_guard<std::mutex> runtimeLock(runtimeMutex_);
-  return buildPactSnapshotsLocked(threadId, request.agentId);
-}
-
-std::optional<PactSnapshot>
-DaemonService::getPact(const std::string &clientId,
-                       const PactsGetRequest &request) const {
-  const std::string threadId = resolveThreadIdForRequest(clientId, request.threadId);
-  std::lock_guard<std::mutex> runtimeLock(runtimeMutex_);
-  for (const auto &pact : buildPactSnapshotsLocked(threadId, "")) {
-    if (pact.pactId == request.pactId) {
-      return pact;
-    }
-  }
-  return std::nullopt;
-}
-
 std::vector<WorkflowExecutionSnapshot> DaemonService::listWorkflows() const {
   std::vector<WorkflowExecutionSnapshot> workflows;
   for (const auto &workflow :
@@ -2288,16 +2262,6 @@ EventSubscriptionResponse DaemonService::subscribe(
         envelope.serverTimestampMs = nowMs();
         envelope.hookState = buildHookStateSnapshotLocked(HooksStateRequest{snapshot->focusedThreadId, snapshot->focusedAgentId, "", 24});
         subscriptionCopy->listener(envelope);
-      }
-      if (subscriptionWantsEvent(subscriptionCopy->eventKinds, "pact_state_changed")) {
-        for (const auto &pact : buildPactSnapshotsLocked(snapshot->focusedThreadId, snapshot->focusedAgentId)) {
-          DaemonEventEnvelope envelope;
-          envelope.kind = DaemonEventKind::PactStateChanged;
-          envelope.subscriptionTarget = clientId;
-          envelope.serverTimestampMs = nowMs();
-          envelope.pactState = pact;
-          subscriptionCopy->listener(envelope);
-        }
       }
     }
   }
@@ -2412,10 +2376,6 @@ UiSnapshot DaemonService::uiSnapshot(const std::string &clientId,
   {
     FIRMIUS_DLOG_SCOPE("ui.snapshot.hooks");
     snapshot.hooks = hookState(HooksStateRequest{threadId, agentId, "", 24});
-  }
-  {
-    FIRMIUS_DLOG_SCOPE("ui.snapshot.pacts");
-    snapshot.pacts = listPacts(clientId, PactsListRequest{threadId, agentId});
   }
   if (!threadId.empty()) {
     FIRMIUS_DLOG_SCOPE("ui.snapshot.artifacts");
@@ -2604,26 +2564,6 @@ void DaemonService::emitHookStateEvent(const HookStateSnapshot &snapshot) {
   }
 }
 
-void DaemonService::emitPactStateEvent(const PactSnapshot &snapshot) {
-  std::vector<std::pair<std::string, DaemonEventListener>> listeners;
-  {
-    std::lock_guard<std::mutex> lock(stateMutex_);
-    for (const auto &[clientId, subscription] : subscriptions_) {
-      if (subscription.listener &&
-          subscriptionWantsEvent(subscription.eventKinds,
-                                 "pact_state_changed")) {
-        listeners.push_back({clientId, subscription.listener});
-      }
-    }
-  }
-  for (auto &[clientId, listener] : listeners) {
-    DaemonEventEnvelope envelope;
-    envelope.pactState = snapshot;
-    envelope = prepareEventEnvelope(std::move(envelope));
-    listener(envelope);
-  }
-}
-
 void DaemonService::broadcastInitProgress(const std::string &message) {
   // Always go through prepareEventEnvelope so init events get assigned a
   // sequence number and end up in the replay buffer. Otherwise clients that
@@ -2729,22 +2669,6 @@ void DaemonService::emitCoreEvent(const firmius::shared::AppEvent &event) {
     }
     if (emitHook) {
       emitHookStateEvent(hookSnapshot);
-    }
-
-    for (const auto &pact : buildPactSnapshotsLocked(eventThreadId, "")) {
-      const auto pactKey = pactStateChangeKey(pact);
-      bool emitPact = false;
-      {
-        std::lock_guard<std::mutex> lock(stateMutex_);
-        auto &last = pactStateChangeKeys_[pact.threadId + ":" + pact.pactId];
-        if (last != pactKey) {
-          last = pactKey;
-          emitPact = true;
-        }
-      }
-      if (emitPact) {
-        emitPactStateEvent(pact);
-      }
     }
   }
 }
@@ -3461,155 +3385,7 @@ DaemonService::buildHookStateSnapshotLocked(const HooksStateRequest &request) co
   return snapshot;
 }
 
-std::vector<PactSnapshot>
-DaemonService::buildPactSnapshotsLocked(const std::string &threadId,
-                                        const std::string &agentId) const {
-  std::vector<PactSnapshot> snapshots;
-  if (threadId.empty()) {
-    return snapshots;
-  }
-
-  firmius::core::hooks::HookState::instance().bindThread(threadId);
-  const std::string stateJson =
-      firmius::core::hooks::HookState::instance().snapshotJson("");
-  rapidjson::Document doc;
-  if (stateJson.empty() || doc.Parse(stateJson.c_str()).HasParseError() ||
-      !doc.IsObject() || !doc.HasMember("thread") || !doc["thread"].IsObject() ||
-      !doc["thread"].HasMember("promise") || !doc["thread"]["promise"].IsObject()) {
-    return snapshots;
-  }
-
-  const auto &promise = doc["thread"]["promise"];
-  PactSnapshot snapshot;
-  snapshot.threadId = threadId;
-  snapshot.agentId =
-      promise.HasMember("agent_id") && promise["agent_id"].IsString()
-          ? promise["agent_id"].GetString()
-          : "";
-  if (!agentId.empty() && !snapshot.agentId.empty() && snapshot.agentId != agentId) {
-    return snapshots;
-  }
-  snapshot.pactId = promise.HasMember("id") && promise["id"].IsString()
-                        ? promise["id"].GetString()
-                        : "";
-  if (snapshot.pactId.empty()) {
-    return snapshots;
-  }
-  snapshot.status = promise.HasMember("state") && promise["state"].IsString()
-                        ? promise["state"].GetString()
-                        : "open";
-  snapshot.title = promise.HasMember("brief") && promise["brief"].IsString()
-                       ? promise["brief"].GetString()
-                       : snapshot.pactId;
-  snapshot.summary = promise.HasMember("brief") && promise["brief"].IsString()
-                         ? promise["brief"].GetString()
-                         : (promise.HasMember("task") && promise["task"].IsString()
-                                ? promise["task"].GetString()
-                                : "");
-  snapshot.description = promise.HasMember("task") && promise["task"].IsString()
-                             ? promise["task"].GetString()
-                             : snapshot.summary;
-  snapshot.validator =
-      promise.HasMember("validator") && promise["validator"].IsString()
-          ? promise["validator"].GetString()
-          : "shrike";
-  snapshot.lastVerdict =
-      promise.HasMember("last_verdict") && promise["last_verdict"].IsString()
-          ? promise["last_verdict"].GetString()
-          : "";
-  snapshot.lastSuggestion =
-      promise.HasMember("last_suggestion") &&
-              promise["last_suggestion"].IsString()
-          ? promise["last_suggestion"].GetString()
-          : "";
-  snapshot.sealedBy = promise.HasMember("sealed_by") &&
-                              promise["sealed_by"].IsString()
-                          ? promise["sealed_by"].GetString()
-                          : "";
-  snapshot.statusLine =
-      promise.HasMember("status_line") && promise["status_line"].IsString()
-          ? promise["status_line"].GetString()
-          : "";
-  snapshot.blockingReason =
-      promise.HasMember("blocking_reason") &&
-              promise["blocking_reason"].IsString()
-          ? promise["blocking_reason"].GetString()
-          : "";
-  snapshot.statePayloadJson = stringifyRapidJsonValue(promise);
-  snapshot.iteration =
-      promise.HasMember("iteration") && promise["iteration"].IsInt()
-          ? promise["iteration"].GetInt()
-          : (promise.HasMember("iteration") && promise["iteration"].IsUint()
-                 ? static_cast<int>(promise["iteration"].GetUint())
-                 : 0);
-  snapshot.maxIterations =
-      promise.HasMember("max_iterations") &&
-              promise["max_iterations"].IsInt()
-          ? promise["max_iterations"].GetInt()
-          : (promise.HasMember("max_iterations") && promise["max_iterations"].IsUint()
-                 ? static_cast<int>(promise["max_iterations"].GetUint())
-                 : 0);
-  snapshot.createdAtMs =
-      promise.HasMember("created_at_ms") && promise["created_at_ms"].IsUint64()
-          ? promise["created_at_ms"].GetUint64()
-          : 0;
-  snapshot.updatedAtMs =
-      promise.HasMember("updated_at_ms") && promise["updated_at_ms"].IsUint64()
-          ? promise["updated_at_ms"].GetUint64()
-          : 0;
-  snapshot.active = snapshot.status == "open" || snapshot.status == "validating";
-  snapshot.resolved = snapshot.status == "sealed" || snapshot.status == "resolved";
-  snapshot.failed = snapshot.status == "failed" || snapshot.status == "blocked";
-  snapshot.stale = snapshot.status == "stale";
-  if (promise.HasMember("done_when") && promise["done_when"].IsArray()) {
-    for (const auto &item : promise["done_when"].GetArray()) {
-      if (item.IsString()) {
-        snapshot.doneWhen.push_back(item.GetString());
-      }
-    }
-  }
-  if (promise.HasMember("history") && promise["history"].IsArray()) {
-    for (const auto &entry : promise["history"].GetArray()) {
-      if (!entry.IsObject()) {
-        continue;
-      }
-      PactHistoryEntrySnapshot historyEntry;
-      if (entry.HasMember("iteration") && entry["iteration"].IsInt()) {
-        historyEntry.iteration = entry["iteration"].GetInt();
-      }
-      if (entry.HasMember("validator") && entry["validator"].IsString()) {
-        historyEntry.validator = entry["validator"].GetString();
-      }
-      if (entry.HasMember("validator_agent_id") &&
-          entry["validator_agent_id"].IsString()) {
-        historyEntry.validatorAgentId = entry["validator_agent_id"].GetString();
-      }
-      if (entry.HasMember("verdict") && entry["verdict"].IsString()) {
-        historyEntry.verdict = entry["verdict"].GetString();
-      }
-      if (entry.HasMember("suggestion") && entry["suggestion"].IsString()) {
-        historyEntry.suggestion = entry["suggestion"].GetString();
-      }
-      if (entry.HasMember("evidence")) {
-        historyEntry.evidenceJson = stringifyRapidJsonValue(entry["evidence"]);
-      }
-      snapshot.history.push_back(std::move(historyEntry));
-    }
-  }
-  snapshots.push_back(std::move(snapshot));
-  return snapshots;
-}
-
 std::string DaemonService::hookStateChangeKey(const HookStateSnapshot &snapshot) const {
-  rapidjson::Document doc;
-  doc.SetObject();
-  auto &allocator = doc.GetAllocator();
-  auto value = toJsonValue(snapshot, allocator);
-  doc.CopyFrom(value, allocator);
-  return stringifyRapidJsonValue(doc);
-}
-
-std::string DaemonService::pactStateChangeKey(const PactSnapshot &snapshot) const {
   rapidjson::Document doc;
   doc.SetObject();
   auto &allocator = doc.GetAllocator();

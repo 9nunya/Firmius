@@ -29,8 +29,6 @@ std::string eventKindToString(DaemonEventKind kind) {
     return "client_session_updated";
   case DaemonEventKind::HookStateChanged:
     return "hook_state_changed";
-  case DaemonEventKind::PactStateChanged:
-    return "pact_state_changed";
   case DaemonEventKind::InitProgress:
     return "init_progress";
   case DaemonEventKind::ConnectProgress:
@@ -53,9 +51,6 @@ DaemonEventKind eventKindFromString(const std::string &kind) {
   }
   if (kind == "hook_state_changed") {
     return DaemonEventKind::HookStateChanged;
-  }
-  if (kind == "pact_state_changed") {
-    return DaemonEventKind::PactStateChanged;
   }
   if (kind == "init_progress") {
     return DaemonEventKind::InitProgress;
@@ -1355,7 +1350,6 @@ rapidjson::Value toJsonValue(const UiSnapshot &snapshot,
   out.AddMember("purposes", toJsonValue(snapshot.purposes, allocator), allocator);
   out.AddMember("mcp", toJsonValue(snapshot.mcp, allocator), allocator);
   out.AddMember("hooks", toJsonValue(snapshot.hooks, allocator), allocator);
-  out.AddMember("pacts", toJsonValue(snapshot.pacts, allocator), allocator);
   out.AddMember("artifacts", toJsonValue(snapshot.artifacts, allocator), allocator);
   out.AddMember("history", toJsonValue(snapshot.history, allocator), allocator);
   out.AddMember("edits", toJsonValue(snapshot.edits, allocator), allocator);
@@ -1390,9 +1384,6 @@ UiSnapshot uiSnapshotFromJson(const rapidjson::Value &value) {
   if (value.HasMember("purposes")) snapshot.purposes = purposesConfigSnapshotFromJson(value["purposes"]);
   if (value.HasMember("mcp")) snapshot.mcp = mcpConfigSnapshotFromJson(value["mcp"]);
   if (value.HasMember("hooks")) snapshot.hooks = hookStateSnapshotFromJson(value["hooks"]);
-  if (value.HasMember("pacts") && value["pacts"].IsArray()) {
-    for (const auto &entry : value["pacts"].GetArray()) snapshot.pacts.push_back(pactSnapshotFromJson(entry));
-  }
   if (value.HasMember("artifacts")) snapshot.artifacts = artifactCatalogSnapshotFromJson(value["artifacts"]);
   if (value.HasMember("history")) snapshot.history = historySnapshotFromJson(value["history"]);
   if (value.HasMember("edits")) snapshot.edits = editHistorySnapshotFromJson(value["edits"]);
@@ -1478,10 +1469,6 @@ rapidjson::Value toJsonValue(const DaemonEventEnvelope &event,
     out.AddMember("hook_state", toJsonValue(*event.hookState, allocator),
                   allocator);
   }
-  if (event.pactState.has_value()) {
-    out.AddMember("pact_state", toJsonValue(*event.pactState, allocator),
-                  allocator);
-  }
   if (!event.initMessage.empty()) {
     out.AddMember("init_message", jsonString(event.initMessage, allocator),
                   allocator);
@@ -1537,9 +1524,6 @@ DaemonEventEnvelope daemonEventEnvelopeFromJson(const rapidjson::Value &value) {
   }
   if (value.HasMember("hook_state") && value["hook_state"].IsObject()) {
     event.hookState = hookStateSnapshotFromJson(value["hook_state"]);
-  }
-  if (value.HasMember("pact_state") && value["pact_state"].IsObject()) {
-    event.pactState = pactSnapshotFromJson(value["pact_state"]);
   }
   if (value.HasMember("init_message") && value["init_message"].IsString()) {
     event.initMessage = value["init_message"].GetString();
@@ -3659,226 +3643,6 @@ HookStateSnapshot hookStateSnapshotFromJson(const rapidjson::Value &value) {
   return snapshot;
 }
 
-rapidjson::Value toJsonValue(const PactsListRequest &request,
-                             rapidjson::Document::AllocatorType &allocator) {
-  rapidjson::Value out(rapidjson::kObjectType);
-  out.AddMember("thread_id", jsonString(request.threadId, allocator), allocator);
-  out.AddMember("agent_id", jsonString(request.agentId, allocator), allocator);
-  return out;
-}
-
-PactsListRequest pactsListRequestFromJson(const rapidjson::Value &value) {
-  PactsListRequest request;
-  if (!value.IsObject()) {
-    return request;
-  }
-  if (value.HasMember("thread_id") && value["thread_id"].IsString()) {
-    request.threadId = value["thread_id"].GetString();
-  }
-  if (value.HasMember("agent_id") && value["agent_id"].IsString()) {
-    request.agentId = value["agent_id"].GetString();
-  }
-  return request;
-}
-
-rapidjson::Value toJsonValue(const PactsGetRequest &request,
-                             rapidjson::Document::AllocatorType &allocator) {
-  rapidjson::Value out(rapidjson::kObjectType);
-  out.AddMember("thread_id", jsonString(request.threadId, allocator), allocator);
-  out.AddMember("pact_id", jsonString(request.pactId, allocator), allocator);
-  return out;
-}
-
-PactsGetRequest pactsGetRequestFromJson(const rapidjson::Value &value) {
-  PactsGetRequest request;
-  if (!value.IsObject()) {
-    return request;
-  }
-  if (value.HasMember("thread_id") && value["thread_id"].IsString()) {
-    request.threadId = value["thread_id"].GetString();
-  }
-  if (value.HasMember("pact_id") && value["pact_id"].IsString()) {
-    request.pactId = value["pact_id"].GetString();
-  }
-  return request;
-}
-
-rapidjson::Value toJsonValue(const PactHistoryEntrySnapshot &snapshot,
-                             rapidjson::Document::AllocatorType &allocator) {
-  rapidjson::Value out(rapidjson::kObjectType);
-  out.AddMember("iteration", snapshot.iteration, allocator);
-  out.AddMember("validator", jsonString(snapshot.validator, allocator), allocator);
-  out.AddMember("validator_agent_id",
-                jsonString(snapshot.validatorAgentId, allocator), allocator);
-  out.AddMember("verdict", jsonString(snapshot.verdict, allocator), allocator);
-  out.AddMember("suggestion", jsonString(snapshot.suggestion, allocator), allocator);
-  out.AddMember("evidence_json", jsonString(snapshot.evidenceJson, allocator),
-                allocator);
-  return out;
-}
-
-PactHistoryEntrySnapshot
-pactHistoryEntrySnapshotFromJson(const rapidjson::Value &value) {
-  PactHistoryEntrySnapshot snapshot;
-  if (!value.IsObject()) {
-    return snapshot;
-  }
-  if (value.HasMember("iteration") && value["iteration"].IsInt()) {
-    snapshot.iteration = value["iteration"].GetInt();
-  }
-  if (value.HasMember("validator") && value["validator"].IsString()) {
-    snapshot.validator = value["validator"].GetString();
-  }
-  if (value.HasMember("validator_agent_id") &&
-      value["validator_agent_id"].IsString()) {
-    snapshot.validatorAgentId = value["validator_agent_id"].GetString();
-  }
-  if (value.HasMember("verdict") && value["verdict"].IsString()) {
-    snapshot.verdict = value["verdict"].GetString();
-  }
-  if (value.HasMember("suggestion") && value["suggestion"].IsString()) {
-    snapshot.suggestion = value["suggestion"].GetString();
-  }
-  if (value.HasMember("evidence_json") && value["evidence_json"].IsString()) {
-    snapshot.evidenceJson = value["evidence_json"].GetString();
-  }
-  return snapshot;
-}
-
-rapidjson::Value toJsonValue(const PactSnapshot &snapshot,
-                             rapidjson::Document::AllocatorType &allocator) {
-  rapidjson::Value out(rapidjson::kObjectType);
-  out.AddMember("thread_id", jsonString(snapshot.threadId, allocator), allocator);
-  out.AddMember("agent_id", jsonString(snapshot.agentId, allocator), allocator);
-  out.AddMember("pact_id", jsonString(snapshot.pactId, allocator), allocator);
-  out.AddMember("status", jsonString(snapshot.status, allocator), allocator);
-  out.AddMember("title", jsonString(snapshot.title, allocator), allocator);
-  out.AddMember("summary", jsonString(snapshot.summary, allocator), allocator);
-  out.AddMember("description", jsonString(snapshot.description, allocator),
-                allocator);
-  out.AddMember("validator", jsonString(snapshot.validator, allocator), allocator);
-  out.AddMember("last_verdict", jsonString(snapshot.lastVerdict, allocator),
-                allocator);
-  out.AddMember("last_suggestion",
-                jsonString(snapshot.lastSuggestion, allocator), allocator);
-  out.AddMember("sealed_by", jsonString(snapshot.sealedBy, allocator), allocator);
-  out.AddMember("status_line", jsonString(snapshot.statusLine, allocator),
-                allocator);
-  out.AddMember("blocking_reason",
-                jsonString(snapshot.blockingReason, allocator), allocator);
-  out.AddMember("state_payload_json",
-                jsonString(snapshot.statePayloadJson, allocator), allocator);
-  out.AddMember("created_at_ms", snapshot.createdAtMs, allocator);
-  out.AddMember("updated_at_ms", snapshot.updatedAtMs, allocator);
-  out.AddMember("iteration", snapshot.iteration, allocator);
-  out.AddMember("max_iterations", snapshot.maxIterations, allocator);
-  out.AddMember("active", snapshot.active, allocator);
-  out.AddMember("resolved", snapshot.resolved, allocator);
-  out.AddMember("failed", snapshot.failed, allocator);
-  out.AddMember("stale", snapshot.stale, allocator);
-  rapidjson::Value doneWhen(rapidjson::kArrayType);
-  for (const auto &line : snapshot.doneWhen) {
-    doneWhen.PushBack(jsonString(line, allocator), allocator);
-  }
-  out.AddMember("done_when", doneWhen, allocator);
-  rapidjson::Value history(rapidjson::kArrayType);
-  for (const auto &entry : snapshot.history) {
-    history.PushBack(toJsonValue(entry, allocator), allocator);
-  }
-  out.AddMember("history", history, allocator);
-  return out;
-}
-
-PactSnapshot pactSnapshotFromJson(const rapidjson::Value &value) {
-  PactSnapshot snapshot;
-  if (!value.IsObject()) {
-    return snapshot;
-  }
-  if (value.HasMember("thread_id") && value["thread_id"].IsString()) {
-    snapshot.threadId = value["thread_id"].GetString();
-  }
-  if (value.HasMember("agent_id") && value["agent_id"].IsString()) {
-    snapshot.agentId = value["agent_id"].GetString();
-  }
-  if (value.HasMember("pact_id") && value["pact_id"].IsString()) {
-    snapshot.pactId = value["pact_id"].GetString();
-  }
-  if (value.HasMember("status") && value["status"].IsString()) {
-    snapshot.status = value["status"].GetString();
-  }
-  if (value.HasMember("title") && value["title"].IsString()) {
-    snapshot.title = value["title"].GetString();
-  }
-  if (value.HasMember("summary") && value["summary"].IsString()) {
-    snapshot.summary = value["summary"].GetString();
-  }
-  if (value.HasMember("description") && value["description"].IsString()) {
-    snapshot.description = value["description"].GetString();
-  }
-  if (value.HasMember("validator") && value["validator"].IsString()) {
-    snapshot.validator = value["validator"].GetString();
-  }
-  if (value.HasMember("last_verdict") && value["last_verdict"].IsString()) {
-    snapshot.lastVerdict = value["last_verdict"].GetString();
-  }
-  if (value.HasMember("last_suggestion") &&
-      value["last_suggestion"].IsString()) {
-    snapshot.lastSuggestion = value["last_suggestion"].GetString();
-  }
-  if (value.HasMember("sealed_by") && value["sealed_by"].IsString()) {
-    snapshot.sealedBy = value["sealed_by"].GetString();
-  }
-  if (value.HasMember("status_line") && value["status_line"].IsString()) {
-    snapshot.statusLine = value["status_line"].GetString();
-  }
-  if (value.HasMember("blocking_reason") &&
-      value["blocking_reason"].IsString()) {
-    snapshot.blockingReason = value["blocking_reason"].GetString();
-  }
-  if (value.HasMember("state_payload_json") &&
-      value["state_payload_json"].IsString()) {
-    snapshot.statePayloadJson = value["state_payload_json"].GetString();
-  }
-  if (value.HasMember("created_at_ms") && value["created_at_ms"].IsUint64()) {
-    snapshot.createdAtMs = value["created_at_ms"].GetUint64();
-  }
-  if (value.HasMember("updated_at_ms") && value["updated_at_ms"].IsUint64()) {
-    snapshot.updatedAtMs = value["updated_at_ms"].GetUint64();
-  }
-  if (value.HasMember("iteration") && value["iteration"].IsInt()) {
-    snapshot.iteration = value["iteration"].GetInt();
-  }
-  if (value.HasMember("max_iterations") &&
-      value["max_iterations"].IsInt()) {
-    snapshot.maxIterations = value["max_iterations"].GetInt();
-  }
-  if (value.HasMember("active") && value["active"].IsBool()) {
-    snapshot.active = value["active"].GetBool();
-  }
-  if (value.HasMember("resolved") && value["resolved"].IsBool()) {
-    snapshot.resolved = value["resolved"].GetBool();
-  }
-  if (value.HasMember("failed") && value["failed"].IsBool()) {
-    snapshot.failed = value["failed"].GetBool();
-  }
-  if (value.HasMember("stale") && value["stale"].IsBool()) {
-    snapshot.stale = value["stale"].GetBool();
-  }
-  if (value.HasMember("done_when") && value["done_when"].IsArray()) {
-    for (const auto &line : value["done_when"].GetArray()) {
-      if (line.IsString()) {
-        snapshot.doneWhen.push_back(line.GetString());
-      }
-    }
-  }
-  if (value.HasMember("history") && value["history"].IsArray()) {
-    for (const auto &entry : value["history"].GetArray()) {
-      snapshot.history.push_back(pactHistoryEntrySnapshotFromJson(entry));
-    }
-  }
-  return snapshot;
-}
-
 rapidjson::Value toJsonValue(const WorkflowExecuteRequest &request,
                              rapidjson::Document::AllocatorType &allocator) {
   rapidjson::Value out(rapidjson::kObjectType);
@@ -4887,26 +4651,6 @@ workflowExecutionSnapshotListFromJson(const rapidjson::Value &value) {
   }
   for (const auto &snapshot : value.GetArray()) {
     snapshots.push_back(workflowExecutionSnapshotFromJson(snapshot));
-  }
-  return snapshots;
-}
-
-rapidjson::Value toJsonValue(const std::vector<PactSnapshot> &snapshots,
-                             rapidjson::Document::AllocatorType &allocator) {
-  rapidjson::Value out(rapidjson::kArrayType);
-  for (const auto &snapshot : snapshots) {
-    out.PushBack(toJsonValue(snapshot, allocator), allocator);
-  }
-  return out;
-}
-
-std::vector<PactSnapshot> pactSnapshotListFromJson(const rapidjson::Value &value) {
-  std::vector<PactSnapshot> snapshots;
-  if (!value.IsArray()) {
-    return snapshots;
-  }
-  for (const auto &snapshot : value.GetArray()) {
-    snapshots.push_back(pactSnapshotFromJson(snapshot));
   }
   return snapshots;
 }

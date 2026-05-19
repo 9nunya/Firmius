@@ -60,12 +60,10 @@ enum class ToolScope : std::uint8_t {
   Delegation,      ///< Spawning sub-agents.
   Web,             ///< Performing web searches or fetching URLs.
   Git,             ///< Git repository operations.
-  PlanRead,        ///< Reading persisted plan state.
-  PlanWrite,       ///< Creating or mutating persisted plan state.
-  ChunkRead,       ///< Reading persisted work chunk state.
-  ChunkWrite,      ///< Creating or mutating work chunk state.
-  ChunkAssign,     ///< Assigning chunk ownership or execution.
-  ChunkReview,     ///< Reviewing or deciding chunk implementation attempts.
+  CrewRead,        ///< Reading persisted crew state (manifest, members, tasks, mail).
+  CrewWrite,       ///< Creating or mutating crew membership, tasks, channels, mail.
+  CrewAssign,      ///< Assigning, reassigning, or salvaging crew tasks.
+  CrewReview,      ///< Reviewing crew task outcomes and deciding accept / reject.
 };
 
 /**

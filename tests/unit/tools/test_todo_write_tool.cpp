@@ -163,6 +163,23 @@ TEST_F(TodoWriteToolTest, SchemaOnlyRequiresAction) {
   EXPECT_THAT(v.error, HasSubstr("action"));
 }
 
+TEST_F(TodoWriteToolTest, SchemaAcceptsPreferredArrayShapes) {
+  auto schema = tool_.getSchema();
+  ASSERT_NE(schema, nullptr);
+
+  rapidjson::Document addDoc;
+  addDoc.Parse(R"({"action":"add","items":["one",{"text":"two","status":"done"}]})");
+  ASSERT_FALSE(addDoc.HasParseError());
+  auto v1 = schema->validate(addDoc, "root");
+  EXPECT_TRUE(v1.success) << v1.violationToPretty();
+
+  rapidjson::Document completeDoc;
+  completeDoc.Parse(R"({"action":"complete","ids":[1,2,3]})");
+  ASSERT_FALSE(completeDoc.HasParseError());
+  auto v2 = schema->validate(completeDoc, "root");
+  EXPECT_TRUE(v2.success) << v2.violationToPretty();
+}
+
 TEST_F(TodoWriteToolTest, MissingActionFails) {
   auto result = run(R"({})");
   EXPECT_FALSE(result.success);
@@ -225,6 +242,18 @@ TEST_F(TodoWriteToolTest, AddArrayOfStrings) {
   EXPECT_EQ(persisted.items[2].id, 3);
 }
 
+TEST_F(TodoWriteToolTest, AddJsonEncodedArrayStringIsNormalized) {
+  auto result = run(
+      R"({"action":"add","items":"[{\"text\":\"one\"},{\"text\":\"two\",\"status\":\"in_progress\"}]"})");
+  EXPECT_TRUE(result.success) << result.error;
+  auto persisted = readPersisted();
+  ASSERT_EQ(persisted.items.size(), 2u);
+  EXPECT_EQ(persisted.items[0].text, "one");
+  EXPECT_EQ(persisted.items[0].status, TodoStatus::Pending);
+  EXPECT_EQ(persisted.items[1].text, "two");
+  EXPECT_EQ(persisted.items[1].status, TodoStatus::InProgress);
+}
+
 TEST_F(TodoWriteToolTest, AddObjectsWithStatus) {
   auto result = run(
       R"({"action":"add","items":[{"text":"running","status":"in_progress"},{"text":"queued"}]})");
@@ -281,6 +310,16 @@ TEST_F(TodoWriteToolTest, CompletePluralIdsMarksMultiple) {
   EXPECT_EQ(persisted.items[2].status, TodoStatus::Done);
 }
 
+TEST_F(TodoWriteToolTest, CompleteJsonEncodedIdsStringIsNormalized) {
+  ASSERT_TRUE(run(R"({"action":"add","items":["a","b","c"]})").success);
+  auto result = run(R"({"action":"complete","ids":"[1,3]"})");
+  EXPECT_TRUE(result.success) << result.error;
+  auto persisted = readPersisted();
+  EXPECT_EQ(persisted.items[0].status, TodoStatus::Done);
+  EXPECT_EQ(persisted.items[1].status, TodoStatus::Pending);
+  EXPECT_EQ(persisted.items[2].status, TodoStatus::Done);
+}
+
 TEST_F(TodoWriteToolTest, CompleteMissingIdEmitsWarningButDoesNotFail) {
   ASSERT_TRUE(run(R"({"action":"add","items":["a"]})").success);
   auto result = run(R"({"action":"complete","ids":[1,99]})");
@@ -314,6 +353,16 @@ TEST_F(TodoWriteToolTest, UpdateChangesTextAndStatusViaArray) {
   ASSERT_TRUE(run(R"({"action":"add","items":["original"]})").success);
   auto result = run(
       R"({"action":"update","updates":[{"id":1,"text":"renamed","status":"done"}]})");
+  EXPECT_TRUE(result.success) << result.error;
+  auto persisted = readPersisted();
+  EXPECT_EQ(persisted.items[0].text, "renamed");
+  EXPECT_EQ(persisted.items[0].status, TodoStatus::Done);
+}
+
+TEST_F(TodoWriteToolTest, UpdateJsonEncodedUpdatesStringIsNormalized) {
+  ASSERT_TRUE(run(R"({"action":"add","items":["original"]})").success);
+  auto result = run(
+      R"({"action":"update","updates":"[{\"id\":1,\"text\":\"renamed\",\"status\":\"done\"}]"})");
   EXPECT_TRUE(result.success) << result.error;
   auto persisted = readPersisted();
   EXPECT_EQ(persisted.items[0].text, "renamed");
