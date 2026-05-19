@@ -65,6 +65,10 @@ target_include_directories(firmius_tui PUBLIC
     $<INSTALL_INTERFACE:include>
 )
 
+target_include_directories(firmius_tui PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
 target_link_libraries(firmius_tui PUBLIC
     firmius::server
     firmius::shared

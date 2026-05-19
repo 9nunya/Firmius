@@ -99,90 +99,94 @@ target_sources(firmius_core PUBLIC
   FILE_SET HEADERS
   BASE_DIRS include
   FILES
-    include/hosts/LocalHost.hpp
-    include/hosts/DockerHost.hpp
-    include/environment/CommandIntentAnalyzer.hpp
-    include/environment/ProcessManager.hpp
-    include/environment/Workspace.hpp
-    include/environment/Environment.hpp
-    include/environment/Permissions.hpp
-    include/environment/PermissionPolicy.hpp
-    include/environment/PolicyEngine.hpp
-    include/environment/PermissionSuggestionEngine.hpp
-    include/tools/FileEditTool.hpp
-    include/tools/ReadTool.hpp
-    include/tools/ListTool.hpp
-    include/tools/GrepTool.hpp
-    include/tools/GlobTool.hpp
-    include/tools/WebTool.hpp
-    include/tools/ProcessTool.hpp
-    include/tools/DelegateTool.hpp
-    include/tools/FleetTool.hpp
-    include/tools/ArtifactsTool.hpp
-    include/tools/LspTool.hpp
-    include/tools/LspDiagnosticsTool.hpp
-    include/tools/LspQueryTool.hpp
-    include/tools/McpToolUtil.hpp
-    include/mcp/IMcpSession.hpp
-    include/mcp/McpStdioSession.hpp
-    include/mcp/McpHttpSession.hpp
-    include/mcp/McpClient.hpp
-    include/tools/ToolRegistry.hpp
-    include/tools/PythonExecuteTool.hpp
-    include/tools/WebFetchTool.hpp
-    include/tools/WebSearchTool.hpp
-    include/tools/SkillLoadTool.hpp
-    include/tools/TodoWriteTool.hpp
-    include/tools/PinTool.hpp
+    include/AgentRegistry.hpp
+    include/Engine.hpp
+    include/agents/Agent.hpp
+    include/agents/AgentPermissionChecks.hpp
+    include/agents/ContextBudget.hpp
     include/agents/HintingLoader.hpp
-    include/tools/ModeSwitchTool.hpp
     include/agents/PurposeLoader.hpp
+    include/agents/RuntimeOverlay.hpp
     include/agents/SkillLoader.hpp
-    include/agents/prompts/PromptComposer.hpp
-    include/agents/modes/Mode.hpp
-    include/agents/hooks/HookRegistry.hpp
-    include/agents/hooks/HookOutcome.hpp
+    include/agents/StreamSanityDetector.hpp
+    include/agents/UserMemoryWorkspace.hpp
     include/agents/hooks/HookEnvelope.hpp
+    include/agents/hooks/HookOutcome.hpp
+    include/agents/hooks/HookRegistry.hpp
     include/agents/hooks/HookState.hpp
     include/agents/hooks/ScriptRuntime.hpp
     include/agents/hooks/TemplateEngine.hpp
-    include/agents/RuntimeOverlay.hpp
-    include/agents/ContextBudget.hpp
-    include/agents/UserMemoryWorkspace.hpp
-    include/agents/StreamSanityDetector.hpp
-    include/agents/Agent.hpp
-    include/agents/AgentPermissionChecks.hpp
+    include/agents/modes/Mode.hpp
+    include/agents/prompts/PromptComposer.hpp
     include/agents/working_memory/DeflationArchive.hpp
     include/agents/working_memory/Deflator.hpp
     include/agents/working_memory/PinPolicy.hpp
     include/agents/working_memory/WorkingMemory.hpp
     include/agents/working_memory/WorkingMemoryWorker.hpp
-    include/persistence/Journaler.hpp
-    include/persistence/ThreadManager.hpp
-    include/persistence/HistoryEditor.hpp
-    include/AgentRegistry.hpp
-    include/Engine.hpp
-    include/harness/Harness.hpp
-    include/harness/ThreadLockManager.hpp
-    include/benchmarks/MBPPBenchmark.hpp
+    include/artifacts/ReferenceExpansion.hpp
     include/benchmarks/AgentBench.hpp
+    include/benchmarks/BenchmarkFactory.hpp
+    include/benchmarks/BenchmarkSession.hpp
+    include/benchmarks/MBPPBenchmark.hpp
     include/benchmarks/SWEBench.hpp
     include/benchmarks/SWEBenchTaskSpec.hpp
     include/benchmarks/TuringSWEBenchPP.hpp
-    include/benchmarks/BenchmarkFactory.hpp
-    include/benchmarks/BenchmarkSession.hpp
-    include/workflow/Workflow.hpp
-    include/workflow/WorkflowLoader.hpp
-    include/lsp/LspClient.hpp
-    include/lsp/LspServerSpec.hpp
-    include/lsp/LspServerRegistry.hpp
-    include/lsp/JsonRpcTransport.hpp
-    include/lsp/LspServerManager.hpp
-    include/lsp/LspService.hpp
     include/embedding/EmbeddingStore.hpp
     include/embedding/EmbeddingWorker.hpp
     include/embedding/ModelDownloader.hpp
     include/embedding/OnnxEmbedder.hpp
+    include/environment/CommandIntentAnalyzer.hpp
+    include/environment/Environment.hpp
+    include/environment/PermissionPolicy.hpp
+    include/environment/PermissionSuggestionEngine.hpp
+    include/environment/Permissions.hpp
+    include/environment/PolicyEngine.hpp
+    include/environment/ProcessManager.hpp
+    include/environment/Workspace.hpp
+    include/harness/Harness.hpp
+    include/harness/ThreadLockManager.hpp
+    include/hosts/DockerHost.hpp
+    include/hosts/LocalHost.hpp
+    include/lsp/JsonRpcTransport.hpp
+    include/lsp/LspClient.hpp
+    include/lsp/LspProtocol.hpp
+    include/lsp/LspServerManager.hpp
+    include/lsp/LspServerRegistry.hpp
+    include/lsp/LspServerSpec.hpp
+    include/lsp/LspService.hpp
+    include/mcp/IMcpSession.hpp
+    include/mcp/McpClient.hpp
+    include/mcp/McpHttpSession.hpp
+    include/mcp/McpManager.hpp
+    include/mcp/McpStdioSession.hpp
+    include/persistence/HistoryEditor.hpp
+    include/persistence/Journaler.hpp
+    include/persistence/ThreadManager.hpp
+    include/tools/ArtifactsTool.hpp
+    include/tools/DelegateTool.hpp
+    include/tools/FileEditTool.hpp
+    include/tools/FleetLockRespondTool.hpp
+    include/tools/FleetLockTool.hpp
+    include/tools/FleetStatusTool.hpp
+    include/tools/FleetTool.hpp
+    include/tools/GlobTool.hpp
+    include/tools/GrepTool.hpp
+    include/tools/ListTool.hpp
+    include/tools/LspDiagnosticsTool.hpp
+    include/tools/LspQueryTool.hpp
+    include/tools/LspTool.hpp
+    include/tools/PinTool.hpp
+    include/tools/ProcessTool.hpp
+    include/tools/PythonExecuteTool.hpp
+    include/tools/ReadTool.hpp
+    include/tools/SkillLoadTool.hpp
+    include/tools/TodoWriteTool.hpp
+    include/tools/ToolRegistry.hpp
+    include/tools/WebFetchTool.hpp
+    include/tools/WebSearchTool.hpp
+    include/tools/WebTool.hpp
+    include/workflow/Workflow.hpp
+    include/workflow/WorkflowLoader.hpp
 )
 
 target_include_directories(firmius_core PUBLIC
@@ -223,4 +227,5 @@ endif()
 
 target_include_directories(firmius_core PRIVATE
   ${rapidjson_SOURCE_DIR}/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/src
 )

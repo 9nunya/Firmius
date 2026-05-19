@@ -232,17 +232,6 @@ void Panic::init() {
     std::signal(SIGABRT, Panic::signalHandler);
 }
 
-void Panic::trigger(const std::string& message, const char* file, int line) {
-    if (g_prePanicCallback) {
-        g_prePanicCallback();
-    }
-    std::cerr << "\n[FIRMIUS PANIC] at " << file << ":" << line << "\n";
-    std::cerr << "Message: " << message << "\n";
-    printBacktrace();
-    printExtraInfo();
-    std::abort();
-}
-
 void Panic::setPrePanicCallback(std::function<void()> callback) {
     g_prePanicCallback = std::move(callback);
 }

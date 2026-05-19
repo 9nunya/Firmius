@@ -13,12 +13,13 @@ target_sources(firmius_server PUBLIC
   FILE_SET HEADERS
   BASE_DIRS include
   FILES
+    include/daemon/DaemonClient.hpp
+    include/daemon/DaemonLog.hpp
+    include/daemon/DaemonServer.hpp
+    include/daemon/DaemonService.hpp
     include/daemon/Protocol.hpp
     include/daemon/ProtocolSerialization.hpp
     include/daemon/SocketTransport.hpp
-    include/daemon/DaemonService.hpp
-    include/daemon/DaemonServer.hpp
-    include/daemon/DaemonClient.hpp
 )
 
 target_include_directories(firmius_server PUBLIC

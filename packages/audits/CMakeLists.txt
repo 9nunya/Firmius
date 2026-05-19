@@ -42,38 +42,40 @@ target_sources(firmius_audits PUBLIC
   FILE_SET HEADERS
   BASE_DIRS include
   FILES
+    include/AuditCliUtils.hpp
     include/AuditRegistry.hpp
+    include/MigrationCli.hpp
     include/audits/AntigravityProviderAudit.hpp
     include/audits/AntigravityQuotaAudit.hpp
     include/audits/BenchmarksAudit.hpp
+    include/audits/CacheAudit.hpp
     include/audits/CodexProviderAudit.hpp
-    include/audits/ContextBudgetAudit.hpp
-    include/audits/EditToolAudit.hpp
-    include/audits/EditHistoryAudit.hpp
     include/audits/CodexQuotaAudit.hpp
+    include/audits/ContextBudgetAudit.hpp
     include/audits/DaemonRuntimeIsolationAudit.hpp
+    include/audits/EditHistoryAudit.hpp
+    include/audits/EditToolAudit.hpp
+    include/audits/EmbeddingAudit.hpp
     include/audits/HarnessChaosAudit.hpp
-    include/audits/OAuthWizardAudit.hpp
-    include/audits/P15Audit.hpp
-    include/audits/PersistenceStressAudit.hpp
-    include/audits/ProviderAudit.hpp
-    include/audits/PromisesAudit.hpp
-    include/audits/ProviderStreamDebugAudit.hpp
     include/audits/LoopCancellationAudit.hpp
     include/audits/LspAudit.hpp
     include/audits/ModelLoadAudit.hpp
+    include/audits/OAuthWizardAudit.hpp
     include/audits/OpenRouterQuotaAudit.hpp
+    include/audits/P15Audit.hpp
+    include/audits/PersistenceStressAudit.hpp
+    include/audits/PromisesAudit.hpp
+    include/audits/ProviderAudit.hpp
+    include/audits/ProviderStreamDebugAudit.hpp
     include/audits/QwenProviderAudit.hpp
     include/audits/QwenQuotaAudit.hpp
-    include/audits/SubagentStressAudit.hpp
-    include/audits/WorkflowsAudit.hpp
+    include/audits/ReasoningTraceAudit.hpp
     include/audits/ResumeTodoAudit.hpp
+    include/audits/SubagentStressAudit.hpp
+    include/audits/TokenWasteAudit.hpp
     include/audits/WebFetchAudit.hpp
     include/audits/WebSearchAudit.hpp
-    include/audits/ReasoningTraceAudit.hpp
-    include/audits/TokenWasteAudit.hpp
-    include/audits/CacheAudit.hpp
-    include/audits/EmbeddingAudit.hpp
+    include/audits/WorkflowsAudit.hpp
     include/audits/WorkingMemoryAudit.hpp
     include/audits/WorkingMemoryLiveAudit.hpp
 )
@@ -93,6 +95,7 @@ target_link_libraries(firmius_audits PUBLIC
 target_include_directories(firmius_audits PRIVATE
   ${rapidjson_SOURCE_DIR}/include
   ${CMAKE_SOURCE_DIR}/packages/server/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
 add_executable(firmius_shutdown_hang_repro)

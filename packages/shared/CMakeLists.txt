@@ -31,46 +31,52 @@ target_sources(firmius_shared PUBLIC
   FILE_SET HEADERS
   BASE_DIRS include
   FILES
-    include/Enums.hpp
-    include/Metrics.hpp
-    include/Message.hpp
-    include/Events.hpp
+    include/ConfigLoader.hpp
     include/Context.hpp
-    include/StatusZone.hpp
-    include/Serialization.hpp
-    include/IProvider.hpp
-    include/IAudit.hpp
     include/EnvLoader.hpp
-    include/HarnessEvents.hpp
-    include/Panic.hpp
+    include/Enums.hpp
+    include/Events.hpp
+    include/HeuristicTokenizer.hpp
     include/IAgent.hpp
+    include/IAudit.hpp
+    include/IBenchmark.hpp
+    include/ICommandIntent.hpp
+    include/IEnvironment.hpp
     include/IHost.hpp
     include/IHostProcess.hpp
-    include/ITool.hpp
+    include/IPermissions.hpp
+    include/IProvider.hpp
     include/ITokenizer.hpp
-    include/HeuristicTokenizer.hpp
-    include/IBenchmark.hpp
-    include/utils/JSONSchemaFromJson.hpp
-    include/HarnessEvents.hpp
-    include/utils/JSONSchema.hpp
-    include/utils/StringUtil.hpp
-    include/utils/HistoryMetrics.hpp
+    include/ITool.hpp
+    include/Message.hpp
+    include/Metrics.hpp
+    include/Panic.hpp
+    include/Serialization.hpp
+    include/Skill.hpp
+    include/providers/BackoffConstants.hpp
+    include/utils/AbortController.hpp
     include/utils/FSUtil.hpp
+    include/utils/FastHash.hpp
+    include/utils/FrontmatterParser.hpp
+    include/utils/GCPHttpClient.hpp
+    include/utils/GlobMatch.hpp
+    include/utils/Hashline.hpp
+    include/utils/HistoryMetrics.hpp
+    include/utils/Icons.hpp
+    include/utils/InterruptibleSleep.hpp
+    include/utils/JSONSchema.hpp
+    include/utils/JSONSchemaFromJson.hpp
     include/utils/LineRange.hpp
     include/utils/Logger.hpp
-    include/utils/ErrorCleaner.hpp
+    include/utils/ModelUtil.hpp
+    include/utils/PermissionProfiles.hpp
+    include/utils/PlatformPaths.hpp
+    include/utils/SpillIfLarge.hpp
+    include/utils/StringUtil.hpp
+    include/utils/TempOAuthServer.hpp
+    include/utils/TerminalUtil.hpp
     include/utils/ToolSummaries.hpp
     include/utils/ToolView.hpp
-    include/utils/TempOAuthServer.hpp
-    include/utils/GCPHttpClient.hpp
-    include/utils/ModelUtil.hpp
-    include/utils/FrontmatterParser.hpp
-    include/utils/Hashline.hpp
-    include/utils/GlobMatch.hpp
-    include/utils/SpillIfLarge.hpp
-    include/utils/PlatformPaths.hpp
-    include/utils/PermissionProfiles.hpp
-    include/ConfigLoader.hpp
 )
 
 target_include_directories(firmius_shared PUBLIC
@@ -81,6 +87,13 @@ target_include_directories(firmius_shared PUBLIC
 target_include_directories(firmius_shared SYSTEM PRIVATE
   ${rapidjson_SOURCE_DIR}/include
   ${CMAKE_CURRENT_SOURCE_DIR}/src/third_party
+)
+
+# Internal headers (not part of the public API) live alongside their .cpp
+# counterparts under src/. Adding src/ to the PRIVATE include path lets
+# implementation files include them without any "../" path gymnastics.
+target_include_directories(firmius_shared PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
 find_package(CURL REQUIRED)

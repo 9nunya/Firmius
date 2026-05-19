@@ -18,6 +18,8 @@ inline const std::map<std::string, std::vector<std::string>>& livePhraseBanks() 
            "Asking myself if I actually understand the failure mode..",
            "Squinting at this SSE chunk like it owes me money..",
            "Deciding which dialect of `thinking` this provider is feeling today..",
+           "Tracing the call before I touch the call..",
+           "Drawing the dependency graph in my head and trying not to lie about it..",
        }},
       {"editing",
        {
@@ -37,6 +39,8 @@ inline const std::map<std::string, std::vector<std::string>>& livePhraseBanks() 
            "Keeping the event loop warm..",
            "Letting tree-sitter finish parsing before we paint..",
            "Waiting on /getUsageLimits to admit which plan you're on..",
+           "Letting the daemon finish what it started..",
+           "Politely waiting on a 30-second curl that lied about its timeout..",
        }},
       {"working",
        {
@@ -45,6 +49,8 @@ inline const std::map<std::string, std::vector<std::string>>& livePhraseBanks() 
            "Scanning for the code that was written in a hurry..",
            "Wrapping that one-liner that grew into a 400-character monster..",
            "Picking an account whose tier is allowed to talk to this model..",
+           "Doing the work the comment promised would be done last sprint..",
+           "Refactoring the helper that everyone forgot was already a helper..",
        }},
       {"idle", {"Standing by."}},
   };
