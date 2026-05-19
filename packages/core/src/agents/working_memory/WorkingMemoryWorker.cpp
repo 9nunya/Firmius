@@ -2,6 +2,7 @@
 
 #include "agents/working_memory/Deflator.hpp"
 #include "persistence/Journaler.hpp"
+#include "utils/HashUtil.hpp"
 #include "utils/MathUtil.hpp"
 
 #include <algorithm>
@@ -12,13 +13,6 @@
 namespace firmius::core::working_memory {
 
 namespace {
-
-// xorshift64-based deterministic byte hash.
-inline std::uint64_t splitMix64(std::uint64_t z) {
-  z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
-  z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
-  return z ^ (z >> 31);
-}
 
 } // namespace
 
@@ -36,15 +30,11 @@ ThreadWorkingMemoryWorker::EmbedFn deterministicEmbedFn(std::uint32_t dimension)
     std::string current;
     auto flush = [&]() {
       if (current.empty()) return;
-      std::uint64_t h = 1469598103934665603ULL; // FNV-like seed
-      for (unsigned char c : current) {
-        h ^= c;
-        h *= 1099511628211ULL;
-      }
-      h = splitMix64(h);
+      const std::uint64_t h = firmius::shared::splitMix64(
+          firmius::shared::fnv1a64(current));
       const std::size_t idx =
           static_cast<std::size_t>(h % static_cast<std::uint64_t>(dimension));
-      const float sign = (splitMix64(h) & 1ULL) ? 1.0f : -1.0f;
+      const float sign = (firmius::shared::splitMix64(h) & 1ULL) ? 1.0f : -1.0f;
       v[idx] += sign;
       current.clear();
     };

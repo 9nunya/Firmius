@@ -65,6 +65,7 @@ target_sources(firmius_shared PUBLIC
     include/utils/GCPHttpClient.hpp
     include/utils/GlobMatch.hpp
     include/utils/Hashline.hpp
+    include/utils/HashUtil.hpp
     include/utils/HistoryMetrics.hpp
     include/utils/Icons.hpp
     include/utils/InterruptibleSleep.hpp

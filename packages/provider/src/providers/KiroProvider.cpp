@@ -1,5 +1,6 @@
 #include "providers/KiroProvider.hpp"
 #include "utils/GCPHttpClient.hpp"
+#include "utils/HashUtil.hpp"
 #include "utils/StringUtil.hpp"
 #include <algorithm>
 #include <atomic>
@@ -39,24 +40,13 @@ constexpr char kThinkingEndTag[] = "</thinking>";
 constexpr char kThinkingStartTagUpper[] = "<THINKING>";
 constexpr char kThinkingEndTagUpper[] = "</THINKING>";
 
-std::uint64_t fnv1a64(const std::string &value) {
-  constexpr std::uint64_t kOffsetBasis = 14695981039346656037ull;
-  constexpr std::uint64_t kPrime = 1099511628211ull;
-  std::uint64_t hash = kOffsetBasis;
-  for (unsigned char ch : value) {
-    hash ^= static_cast<std::uint64_t>(ch);
-    hash *= kPrime;
-  }
-  return hash;
-}
-
 std::string stableKiroAccountIdentifier(const std::string &authMethod,
                                         const std::string &email,
                                         const std::string &clientId,
                                         const std::string &profileArn) {
   std::ostringstream ss;
   ss << "kiro-" << std::hex
-     << fnv1a64(email + "|" + authMethod + "|" + clientId + "|" + profileArn);
+     << firmius::shared::fnv1a64(email + "|" + authMethod + "|" + clientId + "|" + profileArn);
   return ss.str();
 }
 

@@ -1,4 +1,6 @@
 #include "utils/Hashline.hpp"
+#include "utils/HashUtil.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
@@ -9,28 +11,6 @@
 namespace firmius::shared::utils {
 
 namespace {
-/**
- * @brief FNV-1a hash implementation for 32-bit results.
- */
-constexpr uint32_t fnv1a_32(std::string_view data) noexcept {
-    uint32_t hash = 0x811c9dc5;
-    for (char c : data) {
-        hash ^= static_cast<uint8_t>(c);
-        hash *= 0x01000193;
-    }
-
-    return hash;
-}
-
-constexpr uint64_t fnv1a_64(std::string_view data) noexcept {
-    uint64_t hash = 0xcbf29ce484222325ULL;
-    for (char c : data) {
-        hash ^= static_cast<uint8_t>(c);
-        hash *= 0x100000001b3ULL;
-    }
-
-    return hash;
-}
 
 std::string hex64(uint64_t value, int width = 12) {
     std::stringstream ss;
@@ -100,7 +80,7 @@ bool parseBareHashFragment(std::string_view line, size_t& prefixLength) noexcept
 } // namespace
 
 std::string Hashline::computeHash(std::string_view content) noexcept {
-    uint32_t hash = fnv1a_32(content);
+    uint32_t hash = firmius::shared::fnv1a32(content);
     // Incorporate length for extra entropy on similar short strings
     hash ^= static_cast<uint32_t>(content.length());
     hash *= 0x01000193;
@@ -131,7 +111,7 @@ std::vector<std::string> Hashline::computeLineHashes(
         for (std::size_t index : unresolved) {
             const std::string fingerprint =
                 buildContextFingerprint(lines, index, radius);
-            groups[hex64(fnv1a_64(fingerprint))].push_back(index);
+            groups[hex64(firmius::shared::fnv1a64(fingerprint))].push_back(index);
         }
 
         std::vector<std::size_t> nextUnresolved;
@@ -150,7 +130,7 @@ std::vector<std::string> Hashline::computeLineHashes(
         std::string fingerprint = buildContextFingerprint(lines, index, lines.size());
         fingerprint += "\x1eline:";
         fingerprint += std::to_string(index + 1);
-        hashes[index] = hex64(fnv1a_64(fingerprint));
+        hashes[index] = hex64(firmius::shared::fnv1a64(fingerprint));
     }
 
     return hashes;
