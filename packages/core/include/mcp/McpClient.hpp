@@ -5,7 +5,7 @@
 #include "mcp/IMcpSession.hpp"
 #include "mcp/McpHttpSession.hpp"
 
-#include <rapidjson/document.h>
+#include <rapidjson/fwd.h>
 
 #include <memory>
 #include <mutex>

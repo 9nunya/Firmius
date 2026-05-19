@@ -1,5 +1,7 @@
 #include "mcp/McpStdioSession.hpp"
 
+#include <rapidjson/document.h>
+
 #include "utils/JsonUtil.hpp"
 #include "utils/StringUtil.hpp"
 

@@ -4,7 +4,7 @@
 #include "ITool.hpp"
 #include "mcp/IMcpSession.hpp"
 
-#include <rapidjson/document.h>
+#include <rapidjson/fwd.h>
 
 #include <functional>
 #include <map>

@@ -9,6 +9,8 @@
 #include <filesystem>
 #include <optional>
 #include <rapidjson/document.h>
+#include <rapidjson/stringbuffer.h>
+#include <rapidjson/writer.h>
 #include <regex>
 #include <set>
 #include <sstream>

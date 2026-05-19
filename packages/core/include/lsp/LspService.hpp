@@ -1,7 +1,7 @@
 #ifndef FIRMIUS_CORE_LSP_SERVICE_HPP
 #define FIRMIUS_CORE_LSP_SERVICE_HPP
 
-#include <rapidjson/document.h>
+#include <rapidjson/fwd.h>
 
 #include <string>
 #include <vector>

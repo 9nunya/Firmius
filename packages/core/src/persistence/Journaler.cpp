@@ -3,6 +3,7 @@
 #include "Serialization.hpp"
 #include "persistence/ThreadManager.hpp"
 
+#include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
 #include <sqlite3.h>

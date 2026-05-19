@@ -1,5 +1,7 @@
 #include "mcp/McpHttpSession.hpp"
 
+#include <rapidjson/document.h>
+
 #include "utils/GCPHttpClient.hpp"
 #include "utils/JsonUtil.hpp"
 

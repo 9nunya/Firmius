@@ -1,5 +1,7 @@
 #include "lsp/LspService.hpp"
 
+#include <rapidjson/document.h>
+
 #include "IAgent.hpp"
 #include "ITool.hpp"
 #include "lsp/LspClient.hpp"

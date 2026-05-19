@@ -1,4 +1,5 @@
 #include "utils/GCPHttpClient.hpp"
+#include <curl/curl.h>
 #include <iostream>
 #include <atomic>
 #include <thread>

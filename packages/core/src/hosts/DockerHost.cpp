@@ -1,6 +1,6 @@
 #include "hosts/DockerHost.hpp"
 #include "utils/StringUtil.hpp"
-#include <curl/easy.h>
+#include <curl/curl.h>
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>

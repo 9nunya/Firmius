@@ -6,7 +6,6 @@
 #include <functional>
 #include <map>
 #include <unordered_map>
-#include <rapidjson/document.h>
 #include <memory>
 
 namespace firmius::provider {

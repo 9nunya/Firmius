@@ -2,7 +2,7 @@
 #define FIRMIUS_CORE_MCP_IMCP_SESSION_HPP
 
 #include "ITool.hpp"
-#include <rapidjson/document.h>
+#include <rapidjson/fwd.h>
 
 #include <string>
 

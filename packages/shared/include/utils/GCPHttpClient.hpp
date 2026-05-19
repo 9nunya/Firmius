@@ -7,7 +7,7 @@
 #include <functional>
 #include <optional>
 #include <atomic>
-#include <curl/curl.h>
+extern "C" { struct curl_slist; }
 
 namespace firmius::utils {
 

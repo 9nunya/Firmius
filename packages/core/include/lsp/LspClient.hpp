@@ -4,7 +4,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <mutex>
-#include <rapidjson/document.h>
+#include <rapidjson/fwd.h>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>

@@ -1,5 +1,7 @@
 #include "benchmarks/SWEBenchTaskSpec.hpp"
 
+#include <rapidjson/document.h>
+
 namespace firmius::core {
 namespace {
 

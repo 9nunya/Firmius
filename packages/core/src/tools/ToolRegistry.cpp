@@ -11,6 +11,8 @@
 #include <filesystem>
 #include <fstream>
 #include <mutex>
+#include <rapidjson/stringbuffer.h>
+#include <rapidjson/writer.h>
 #include <sstream>
 #include <string>
 #include <vector>

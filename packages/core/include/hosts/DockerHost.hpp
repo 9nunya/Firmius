@@ -2,7 +2,7 @@
 #define FIRMIUS_CORE_DOCKER_HOST_HPP
 
 #include "IHost.hpp"
-#include <curl/curl.h>
+typedef void CURL;
 #include <mutex>
 #include <map>
 #include <memory>

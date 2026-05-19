@@ -2,6 +2,7 @@ add_library(firmius_shared STATIC)
 add_library(firmius::shared ALIAS firmius_shared)
 
 target_sources(firmius_shared PRIVATE
+    src/ITool.cpp
     src/Serialization.cpp
     src/EnvLoader.cpp
     src/Panic.cpp

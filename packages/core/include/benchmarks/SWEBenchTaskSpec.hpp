@@ -2,7 +2,7 @@
 #define FIRMIUS_CORE_SWE_BENCH_TASK_SPEC_HPP
 
 #include <map>
-#include <rapidjson/document.h>
+#include <rapidjson/fwd.h>
 #include <string>
 #include <vector>
 

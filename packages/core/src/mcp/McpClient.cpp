@@ -1,5 +1,7 @@
 #include "mcp/McpClient.hpp"
 
+#include <rapidjson/document.h>
+
 #include "mcp/McpStdioSession.hpp"
 
 #include <chrono>

@@ -1,5 +1,7 @@
 #include "lsp/JsonRpcTransport.hpp"
 
+#include <rapidjson/document.h>
+
 #if !defined(_WIN32)
 #include <cerrno>
 #include <cstring>

@@ -7,7 +7,7 @@
 #include "Metrics.hpp"
 #include "Events.hpp"
 
-#include <rapidjson/document.h>
+#include <rapidjson/fwd.h>
 #include <string>
 
 /**
