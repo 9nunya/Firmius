@@ -1,5 +1,5 @@
-#ifndef FIRMIUS_CORE_MCP_IMCP_SESSION_HPP
-#define FIRMIUS_CORE_MCP_IMCP_SESSION_HPP
+#ifndef FIRMIUS_CORE_IMCPSESSION_HPP
+#define FIRMIUS_CORE_IMCPSESSION_HPP
 
 #include "ITool.hpp"
 #include <rapidjson/fwd.h>

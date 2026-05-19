@@ -1,5 +1,5 @@
-#ifndef FIRMIUS_CORE_IHOST_HPP
-#define FIRMIUS_CORE_IHOST_HPP
+#ifndef FIRMIUS_SHARED_IHOST_HPP
+#define FIRMIUS_SHARED_IHOST_HPP
 
 #include "IHostProcess.hpp"
 #include <string>

@@ -1,5 +1,5 @@
-#ifndef FIRMIUS_CORE_WEB_SEARCH_TOOL_HPP
-#define FIRMIUS_CORE_WEB_SEARCH_TOOL_HPP
+#ifndef FIRMIUS_CORE_WEBSEARCHTOOL_HPP
+#define FIRMIUS_CORE_WEBSEARCHTOOL_HPP
 
 #include "ITool.hpp"
 #include "providers/LLMSearchProvider.hpp"

@@ -1,5 +1,5 @@
-#ifndef FIRMIUS_SHARED_GLOB_MATCH_HPP
-#define FIRMIUS_SHARED_GLOB_MATCH_HPP
+#ifndef FIRMIUS_SHARED_GLOBMATCH_HPP
+#define FIRMIUS_SHARED_GLOBMATCH_HPP
 
 #include <regex>
 #include <string>
@@ -17,4 +17,4 @@ bool globMatches(const std::string &pattern, const std::string &value);
 
 } // namespace firmius::shared::utils
 
-#endif // FIRMIUS_SHARED_GLOB_MATCH_HPP
+#endif // FIRMIUS_SHARED_GLOBMATCH_HPP

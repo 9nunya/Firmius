@@ -27,6 +27,14 @@ std::shared_ptr<JSONSchema> jsonSchemaFromJson(const rapidjson::Value &schema) {
     return zObject();
   }
 
+  if (schema.HasMember("anyOf") && schema["anyOf"].IsArray()) {
+    std::vector<std::shared_ptr<JSONSchema>> options;
+    for (const auto &opt : schema["anyOf"].GetArray()) {
+      options.push_back(jsonSchemaFromJson(opt));
+    }
+    if (!options.empty()) return zAnyOf(std::move(options));
+  }
+
   // enum short-circuit
   if (schema.HasMember("enum") && schema["enum"].IsArray()) {
     std::vector<std::string> values;

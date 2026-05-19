@@ -1,5 +1,5 @@
-#ifndef FIRMIUS_SHARED_UTILS_FAST_HASH_HPP
-#define FIRMIUS_SHARED_UTILS_FAST_HASH_HPP
+#ifndef FIRMIUS_SHARED_FASTHASH_HPP
+#define FIRMIUS_SHARED_FASTHASH_HPP
 
 #include <string>
 #include <string_view>

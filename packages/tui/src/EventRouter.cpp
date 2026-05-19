@@ -3,7 +3,7 @@
 #include "items/SimpleItems.hpp"
 #include "items/StreamingItems.hpp"
 #include "items/ToolCallItem.hpp"
-#include "utils/Icons.hpp"
+#include "Icons.hpp"
 #include "utils/ToolSummaries.hpp"
 
 #include <rapidjson/document.h>

@@ -1,5 +1,5 @@
-#ifndef FIRMIUS_SHARED_UTILS_SPILL_IF_LARGE_HPP
-#define FIRMIUS_SHARED_UTILS_SPILL_IF_LARGE_HPP
+#ifndef FIRMIUS_SHARED_SPILLIFLARGE_HPP
+#define FIRMIUS_SHARED_SPILLIFLARGE_HPP
 
 #include <cstdint>
 #include <optional>
@@ -69,4 +69,4 @@ std::string formatSpillNote(const SpillResult &spill);
 
 }  // namespace firmius::shared::utils
 
-#endif  // FIRMIUS_SHARED_UTILS_SPILL_IF_LARGE_HPP
+#endif  // FIRMIUS_SHARED_SPILLIFLARGE_HPP

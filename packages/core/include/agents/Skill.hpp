@@ -1,5 +1,5 @@
-#ifndef FIRMIUS_SHARED_SKILL_HPP
-#define FIRMIUS_SHARED_SKILL_HPP
+#ifndef FIRMIUS_CORE_SKILL_HPP
+#define FIRMIUS_CORE_SKILL_HPP
 
 #include <string>
 

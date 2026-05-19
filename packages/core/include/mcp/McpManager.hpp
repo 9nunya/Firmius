@@ -1,5 +1,5 @@
-#ifndef FIRMIUS_CORE_MCP_MANAGER_HPP
-#define FIRMIUS_CORE_MCP_MANAGER_HPP
+#ifndef FIRMIUS_CORE_MCPMANAGER_HPP
+#define FIRMIUS_CORE_MCPMANAGER_HPP
 
 #include "mcp/McpClient.hpp"
 #include <functional>

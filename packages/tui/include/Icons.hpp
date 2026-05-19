@@ -1,5 +1,5 @@
-#ifndef FIRMIUS_SHARED_ICONS_HPP
-#define FIRMIUS_SHARED_ICONS_HPP
+#ifndef FIRMIUS_TUI_ICONS_HPP
+#define FIRMIUS_TUI_ICONS_HPP
 
 #include <string>
 

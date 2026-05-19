@@ -1,5 +1,5 @@
-#ifndef FIRMIUS_CORE_LSP_SERVICE_HPP
-#define FIRMIUS_CORE_LSP_SERVICE_HPP
+#ifndef FIRMIUS_CORE_LSPSERVICE_HPP
+#define FIRMIUS_CORE_LSPSERVICE_HPP
 
 #include <rapidjson/fwd.h>
 
@@ -49,4 +49,4 @@ std::vector<std::string> collectDiagnosticPrettyLines(
 
 } // namespace firmius::core
 
-#endif // FIRMIUS_CORE_LSP_SERVICE_HPP
+#endif // FIRMIUS_CORE_LSPSERVICE_HPP

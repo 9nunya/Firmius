@@ -1,5 +1,5 @@
-#ifndef FIRMIUS_CORE_MCP_TOOL_UTIL_HPP
-#define FIRMIUS_CORE_MCP_TOOL_UTIL_HPP
+#ifndef FIRMIUS_CORE_MCPTOOLUTIL_HPP
+#define FIRMIUS_CORE_MCPTOOLUTIL_HPP
 
 #include "ConfigLoader.hpp"
 #include "ITool.hpp"

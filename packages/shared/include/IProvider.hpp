@@ -1,5 +1,5 @@
-#ifndef FIRMIUS_PROVIDER_IPROVIDER_HPP
-#define FIRMIUS_PROVIDER_IPROVIDER_HPP
+#ifndef FIRMIUS_SHARED_IPROVIDER_HPP
+#define FIRMIUS_SHARED_IPROVIDER_HPP
 
 #include "Context.hpp"
 #include "Enums.hpp"

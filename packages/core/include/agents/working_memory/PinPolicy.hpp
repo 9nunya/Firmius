@@ -1,5 +1,5 @@
-#ifndef FIRMIUS_CORE_PIN_POLICY_HPP
-#define FIRMIUS_CORE_PIN_POLICY_HPP
+#ifndef FIRMIUS_CORE_PINPOLICY_HPP
+#define FIRMIUS_CORE_PINPOLICY_HPP
 
 #include "Context.hpp"
 #include "ITokenizer.hpp"

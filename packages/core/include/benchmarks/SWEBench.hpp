@@ -1,5 +1,5 @@
-#ifndef FIRMIUS_CORE_SWE_BENCH_HPP
-#define FIRMIUS_CORE_SWE_BENCH_HPP
+#ifndef FIRMIUS_CORE_SWEBENCH_HPP
+#define FIRMIUS_CORE_SWEBENCH_HPP
 
 #include "IBenchmark.hpp"
 #include "benchmarks/BenchmarkSession.hpp"

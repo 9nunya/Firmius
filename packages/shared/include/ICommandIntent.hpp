@@ -1,5 +1,5 @@
-#ifndef FIRMIUS_SHARED_ICOMMAND_INTENT_HPP
-#define FIRMIUS_SHARED_ICOMMAND_INTENT_HPP
+#ifndef FIRMIUS_SHARED_ICOMMANDINTENT_HPP
+#define FIRMIUS_SHARED_ICOMMANDINTENT_HPP
 
 #include <string>
 #include <vector>
@@ -118,4 +118,4 @@ public:
 
 } // namespace firmius::shared
 
-#endif // FIRMIUS_SHARED_ICOMMAND_INTENT_HPP
+#endif // FIRMIUS_SHARED_ICOMMANDINTENT_HPP

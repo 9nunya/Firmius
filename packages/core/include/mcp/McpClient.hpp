@@ -1,5 +1,5 @@
-#ifndef FIRMIUS_CORE_MCP_CLIENT_HPP
-#define FIRMIUS_CORE_MCP_CLIENT_HPP
+#ifndef FIRMIUS_CORE_MCPCLIENT_HPP
+#define FIRMIUS_CORE_MCPCLIENT_HPP
 
 #include "ITool.hpp"
 #include "mcp/IMcpSession.hpp"

@@ -1,5 +1,5 @@
-#ifndef FIRMIUS_CORE_SKILL_LOADER_HPP
-#define FIRMIUS_CORE_SKILL_LOADER_HPP
+#ifndef FIRMIUS_CORE_SKILLLOADER_HPP
+#define FIRMIUS_CORE_SKILLLOADER_HPP
 
 #include "Skill.hpp"
 #include <optional>

@@ -1,5 +1,5 @@
-#ifndef FIRMIUS_SHARED_UTILS_TOOL_VIEW_HPP
-#define FIRMIUS_SHARED_UTILS_TOOL_VIEW_HPP
+#ifndef FIRMIUS_SHARED_TOOLVIEW_HPP
+#define FIRMIUS_SHARED_TOOLVIEW_HPP
 
 #include "utils/StringUtil.hpp"
 #include <optional>

@@ -1,5 +1,5 @@
-#ifndef FIRMIUS_CORE_HOOKS_SCRIPT_RUNTIME_HPP
-#define FIRMIUS_CORE_HOOKS_SCRIPT_RUNTIME_HPP
+#ifndef FIRMIUS_CORE_SCRIPTRUNTIME_HPP
+#define FIRMIUS_CORE_SCRIPTRUNTIME_HPP
 
 #include "agents/hooks/HookEnvelope.hpp"
 #include "agents/hooks/HookOutcome.hpp"

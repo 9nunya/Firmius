@@ -1,5 +1,5 @@
-#ifndef FIRMIUS_CORE_LSP_PROTOCOL_HPP
-#define FIRMIUS_CORE_LSP_PROTOCOL_HPP
+#ifndef FIRMIUS_CORE_LSPPROTOCOL_HPP
+#define FIRMIUS_CORE_LSPPROTOCOL_HPP
 
 #include <string>
 #include <vector>
@@ -315,4 +315,4 @@ inline std::pair<int, int> toOneBased(const Position& pos) {
 
 } // namespace firmius::core
 
-#endif // FIRMIUS_CORE_LSP_PROTOCOL_HPP
+#endif // FIRMIUS_CORE_LSPPROTOCOL_HPP

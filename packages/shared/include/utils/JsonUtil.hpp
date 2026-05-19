@@ -1,5 +1,5 @@
-#ifndef FIRMIUS_SHARED_UTILS_JSONUTIL_HPP
-#define FIRMIUS_SHARED_UTILS_JSONUTIL_HPP
+#ifndef FIRMIUS_SHARED_JSONUTIL_HPP
+#define FIRMIUS_SHARED_JSONUTIL_HPP
 
 #include <rapidjson/fwd.h>
 #include <string>

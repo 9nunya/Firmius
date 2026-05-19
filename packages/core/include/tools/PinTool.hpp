@@ -1,5 +1,5 @@
-#ifndef FIRMIUS_CORE_PIN_TOOL_HPP
-#define FIRMIUS_CORE_PIN_TOOL_HPP
+#ifndef FIRMIUS_CORE_PINTOOL_HPP
+#define FIRMIUS_CORE_PINTOOL_HPP
 
 #include "ITool.hpp"
 

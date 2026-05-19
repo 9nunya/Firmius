@@ -1,5 +1,5 @@
-#ifndef FIRMIUS_CORE_MODES_MODE_HPP
-#define FIRMIUS_CORE_MODES_MODE_HPP
+#ifndef FIRMIUS_CORE_MODE_HPP
+#define FIRMIUS_CORE_MODE_HPP
 
 #include "Context.hpp" // for ToolScope
 

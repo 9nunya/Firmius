@@ -1,5 +1,5 @@
-#ifndef FIRMIUS_CORE_HOOKS_HOOK_STATE_HPP
-#define FIRMIUS_CORE_HOOKS_HOOK_STATE_HPP
+#ifndef FIRMIUS_CORE_HOOKSTATE_HPP
+#define FIRMIUS_CORE_HOOKSTATE_HPP
 
 #include <mutex>
 #include <optional>

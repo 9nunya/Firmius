@@ -83,12 +83,19 @@ shared::TodoStatus parseStatusName(const std::string &raw) {
       "'. Use one of: pending, in_progress, done.");
 }
 
+bool tryParseJsonDocFromString(const std::string &raw,
+                               rapidjson::Document &out);
+
 // Accept `id` (int or string), `ids` (array or single int/string), and
 // return the de-duplicated list of integer ids in input order. Empty
 // input is allowed; the action handler decides whether that's an error.
 std::vector<int> readIds(const rapidjson::Value &input) {
   std::vector<int> ids;
   std::unordered_set<int> seen;
+
+  auto pushInt = [&](int parsed) {
+    if (seen.insert(parsed).second) ids.push_back(parsed);
+  };
 
   auto pushParsed = [&](const rapidjson::Value &v, const char *whichKey) {
     int parsed = 0;
@@ -113,9 +120,7 @@ std::vector<int> readIds(const rapidjson::Value &input) {
       throw std::runtime_error(std::string("Field '") + whichKey +
                                "' must be an integer or list of integers.");
     }
-    if (seen.insert(parsed).second) {
-      ids.push_back(parsed);
-    }
+    pushInt(parsed);
   };
 
   if (input.HasMember("ids")) {
@@ -123,6 +128,38 @@ std::vector<int> readIds(const rapidjson::Value &input) {
     if (v.IsArray()) {
       for (const auto &el : v.GetArray()) {
         pushParsed(el, "ids");
+      }
+    } else if (v.IsString()) {
+      // Some callers send JSON-encoded arrays: "ids":"[1,2,3]".
+      rapidjson::Document d;
+      if (tryParseJsonDocFromString(v.GetString(), d)) {
+        if (d.IsArray()) {
+          for (const auto &el : d.GetArray()) {
+            pushParsed(el, "ids");
+          }
+        } else {
+          pushParsed(d, "ids");
+        }
+      } else {
+        // Also accept simple "1,2,3" strings.
+        std::string raw = shared::StringUtil::trim(std::string(v.GetString()));
+        if (raw.find(',') != std::string::npos) {
+          std::stringstream ss(raw);
+          std::string token;
+          while (std::getline(ss, token, ',')) {
+            const std::string t = shared::StringUtil::trim(token);
+            if (t.empty()) continue;
+            try {
+              pushInt(std::stoi(t));
+            } catch (const std::exception &) {
+              throw std::runtime_error(
+                  std::string("Invalid id '") + t +
+                  "' in 'ids'. Expected integers separated by commas.");
+            }
+          }
+        } else {
+          pushParsed(v, "ids");
+        }
       }
     } else if (!v.IsNull()) {
       pushParsed(v, "ids");
@@ -182,6 +219,23 @@ ItemSpec readItemSpec(const rapidjson::Value &v, const char *path) {
   return out;
 }
 
+bool tryParseJsonDocFromString(const std::string &raw,
+                               rapidjson::Document &out) {
+  const std::string trimmed = shared::StringUtil::trim(raw);
+  if (trimmed.empty()) return false;
+  const char first = trimmed.front();
+  if (first != '[' && first != '{') return false;
+  out.Parse(trimmed.c_str());
+  return !out.HasParseError();
+}
+
+const rapidjson::Value *unwrapEmbeddedItemsContainer(const rapidjson::Value &v) {
+  if (v.IsObject() && v.HasMember("items")) {
+    return &v["items"];
+  }
+  return &v;
+}
+
 // Accept `items` as: array of strings, array of objects, single string,
 // or single object. Returns the parsed specs in order.
 std::vector<ItemSpec> readItems(const rapidjson::Value &input) {
@@ -196,6 +250,26 @@ std::vector<ItemSpec> readItems(const rapidjson::Value &input) {
       out.push_back(readItemSpec(el, ("items[" + std::to_string(i) + "]").c_str()));
       ++i;
     }
+  } else if (v.IsString()) {
+    rapidjson::Document d;
+    if (tryParseJsonDocFromString(v.GetString(), d)) {
+      const rapidjson::Value *inner = unwrapEmbeddedItemsContainer(d);
+      if (inner->IsArray()) {
+        int i = 0;
+        for (const auto &el : inner->GetArray()) {
+          out.push_back(readItemSpec(
+              el, ("items[" + std::to_string(i) + "]").c_str()));
+          ++i;
+        }
+        return out;
+      }
+      if (inner->IsObject()) {
+        out.push_back(readItemSpec(*inner, "items"));
+        return out;
+      }
+    }
+    // Fall back to the original shorthand: treat the string as task text.
+    out.push_back(readItemSpec(v, "items"));
   } else if (!v.IsNull()) {
     out.push_back(readItemSpec(v, "items"));
   }
@@ -377,6 +451,23 @@ shared::ToolMetadata TodoWriteTool::getMetadata() const {
 std::shared_ptr<shared::JSONSchema> TodoWriteTool::getSchema() const {
   // Kept intentionally small. Only `action` is required. The rest are
   // optional and the executor decides which fields apply per action.
+  auto todoItemObj = zObject(
+      {{"text", zString()->setOptional()},
+       {"task", zString()->setOptional()},
+       {"title", zString()->setOptional()},
+       {"status", zString()->setOptional()},
+       {"id", zInteger()->setOptional()}});
+  auto todoItemUnion = zAnyOf({zString(), todoItemObj});
+  auto itemsUnion = zAnyOf({zString(), todoItemObj, zArray(todoItemUnion)});
+
+  auto updateObj = zObject({{"id", zInteger()->describe("Task id to edit.")},
+                            {"status", zString()->setOptional()},
+                            {"text", zString()->setOptional()}})
+                       ->required({"id"});
+  auto updatesUnion = zAnyOf({updateObj, zArray(updateObj), zString()});
+
+  auto idsUnion = zAnyOf({zInteger(), zArray(zInteger()), zString()});
+
   return zObject(
              {{"action",
                zEnum({"set", "add", "update", "complete", "remove", "clear",
@@ -394,10 +485,10 @@ std::shared_ptr<shared::JSONSchema> TodoWriteTool::getSchema() const {
                        "Use sparingly — prefer add/update/complete.\n"
                        "- 'clear'    drop every task. No other fields "
                        "needed.\n"
-                       "- 'list'     read-only; return the current list "
-                       "without mutating.")},
+                      "- 'list'     read-only; return the current list "
+                      "without mutating.")},
               {"items",
-               zString()
+               itemsUnion
                    ->setOptional()
                    ->describe(
                        "Tasks for 'add' or 'set'. Several shapes accepted:\n"
@@ -408,10 +499,9 @@ std::shared_ptr<shared::JSONSchema> TodoWriteTool::getSchema() const {
                        "  [{\"text\":\"plan\"},{\"text\":\"code\","
                        "\"status\":\"in_progress\"}]\n"
                        "Status defaults to 'pending' when omitted. Schema "
-                       "declares string for tolerance; objects and arrays "
-                       "are accepted at runtime.")},
+                       "also accepts objects and arrays (preferred).")},
               {"updates",
-               zString()
+               updatesUnion
                    ->setOptional()
                    ->describe(
                        "Batch edits for 'update'. Array of "
@@ -421,8 +511,7 @@ std::shared_ptr<shared::JSONSchema> TodoWriteTool::getSchema() const {
                        "{\"id\":2,\"text\":\"new wording\"}]\n"
                        "For a single edit, prefer the shorthand: "
                        "{action:'update', id:N, status:'in_progress'}.\n"
-                       "Schema declares string for tolerance; arrays are "
-                       "accepted at runtime.")},
+                       "Schema also accepts object/array (preferred).")},
               {"id",
                zInteger()
                    ->setOptional()
@@ -431,14 +520,13 @@ std::shared_ptr<shared::JSONSchema> TodoWriteTool::getSchema() const {
                        "the shorthand for 'update' (then also pass `status` "
                        "and/or `text`). Equivalent to `ids:[N]`.")},
               {"ids",
-               zString()
+               idsUnion
                    ->setOptional()
                    ->describe(
                        "Multiple task ids for 'complete' or 'remove'. "
-                       "Examples: [1,2,3] or a single integer. Unknown ids "
+                       "Examples: [1,2,3], a single integer, or \"1,2,3\". Unknown ids "
                        "are reported as warnings in the result, not errors. "
-                       "Schema declares string for tolerance; arrays of "
-                       "integers are accepted at runtime.")},
+                       "Schema also accepts arrays/integers (preferred).")},
               {"status",
                zString()
                    ->setOptional()
@@ -588,6 +676,20 @@ shared::ToolResult TodoWriteTool::execute(const rapidjson::Value &input,
           }
         } else if (uv.IsObject()) {
           updates.push_back(readItemSpec(uv, "updates"));
+        } else if (uv.IsString()) {
+          rapidjson::Document d;
+          if (tryParseJsonDocFromString(uv.GetString(), d)) {
+            if (d.IsArray()) {
+              int i = 0;
+              for (const auto &el : d.GetArray()) {
+                updates.push_back(readItemSpec(
+                    el, ("updates[" + std::to_string(i) + "]").c_str()));
+                ++i;
+              }
+            } else if (d.IsObject()) {
+              updates.push_back(readItemSpec(d, "updates"));
+            }
+          }
         }
       }
       if (updates.empty()) {

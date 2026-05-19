@@ -1,5 +1,5 @@
-#ifndef FIRMIUS_CORE_TOOL_REGISTRY_HPP
-#define FIRMIUS_CORE_TOOL_REGISTRY_HPP
+#ifndef FIRMIUS_CORE_TOOLREGISTRY_HPP
+#define FIRMIUS_CORE_TOOLREGISTRY_HPP
 
 #include "ITool.hpp"
 #include "IProvider.hpp"

@@ -1,5 +1,5 @@
-#ifndef FIRMIUS_CORE_LSP_SERVER_MANAGER_HPP
-#define FIRMIUS_CORE_LSP_SERVER_MANAGER_HPP
+#ifndef FIRMIUS_CORE_LSPSERVERMANAGER_HPP
+#define FIRMIUS_CORE_LSPSERVERMANAGER_HPP
 
 #include <memory>
 #include <mutex>
@@ -64,4 +64,4 @@ private:
 
 } // namespace firmius::core
 
-#endif // FIRMIUS_CORE_LSP_SERVER_MANAGER_HPP
+#endif // FIRMIUS_CORE_LSPSERVERMANAGER_HPP

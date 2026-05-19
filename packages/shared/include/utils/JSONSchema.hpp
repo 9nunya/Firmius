@@ -1,5 +1,5 @@
-#ifndef FIRMIUS_CORE_JSON_SCHEMA_HPP
-#define FIRMIUS_CORE_JSON_SCHEMA_HPP
+#ifndef FIRMIUS_SHARED_JSONSCHEMA_HPP
+#define FIRMIUS_SHARED_JSONSCHEMA_HPP
 
 #include <rapidjson/document.h>
 #include <string>
@@ -166,6 +166,20 @@ private:
     std::vector<std::string> allowedValues;
 };
 
+/**
+ * @brief Schema that accepts any value matching at least one option.
+ */
+class AnyOfSchema : public JSONSchema {
+public:
+    explicit AnyOfSchema(std::vector<std::shared_ptr<JSONSchema>> options);
+
+    ValidationResult validate(const rapidjson::Value& value, const std::string& path = "root") const override;
+    void toJson(rapidjson::Value& output, rapidjson::Document::AllocatorType& allocator) const override;
+
+private:
+    std::vector<std::shared_ptr<JSONSchema>> options;
+};
+
 // Factory methods
 std::shared_ptr<StringSchema> zString();
 std::shared_ptr<NumberSchema> zNumber();
@@ -174,6 +188,7 @@ std::shared_ptr<BooleanSchema> zBoolean();
 std::shared_ptr<EnumSchema> zEnum(const std::vector<std::string>& values);
 std::shared_ptr<ObjectSchema> zObject(const std::map<std::string, std::shared_ptr<JSONSchema>>& props = {});
 std::shared_ptr<ArraySchema> zArray(std::shared_ptr<JSONSchema> items);
+std::shared_ptr<AnyOfSchema> zAnyOf(std::vector<std::shared_ptr<JSONSchema>> options);
 
 }
 

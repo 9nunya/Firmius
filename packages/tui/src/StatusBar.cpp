@@ -6,7 +6,7 @@
 #include "ThemeAnsi.hpp"
 #include "ThemeManager.hpp"
 #include "items/ToolCallItem.hpp"
-#include "utils/Icons.hpp"
+#include "Icons.hpp"
 
 #include <algorithm>
 #include <array>

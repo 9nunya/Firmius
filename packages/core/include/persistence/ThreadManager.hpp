@@ -1,5 +1,5 @@
-#ifndef FIRMIUS_CORE_THREAD_MANAGER_HPP
-#define FIRMIUS_CORE_THREAD_MANAGER_HPP
+#ifndef FIRMIUS_CORE_THREADMANAGER_HPP
+#define FIRMIUS_CORE_THREADMANAGER_HPP
 
 #include "Context.hpp"
 #include "ICommandIntent.hpp"

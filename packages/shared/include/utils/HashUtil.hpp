@@ -1,5 +1,5 @@
-#ifndef FIRMIUS_SHARED_UTILS_HASHUTIL_HPP
-#define FIRMIUS_SHARED_UTILS_HASHUTIL_HPP
+#ifndef FIRMIUS_SHARED_HASHUTIL_HPP
+#define FIRMIUS_SHARED_HASHUTIL_HPP
 
 #include <cstdint>
 #include <string_view>

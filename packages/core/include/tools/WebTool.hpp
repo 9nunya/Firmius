@@ -1,5 +1,5 @@
-#ifndef FIRMIUS_CORE_WEB_TOOL_HPP
-#define FIRMIUS_CORE_WEB_TOOL_HPP
+#ifndef FIRMIUS_CORE_WEBTOOL_HPP
+#define FIRMIUS_CORE_WEBTOOL_HPP
 
 #include "ITool.hpp"
 

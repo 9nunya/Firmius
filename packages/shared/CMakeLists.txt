@@ -7,6 +7,7 @@ target_sources(firmius_shared PRIVATE
     src/EnvLoader.cpp
     src/Panic.cpp
     src/utils/Base64.cpp
+    src/utils/CryptoUtil.cpp
     src/utils/JSONSchema.cpp
     src/utils/JSONSchemaFromJson.cpp
     src/utils/JsonUtil.cpp
@@ -19,6 +20,7 @@ target_sources(firmius_shared PRIVATE
     src/utils/ErrorCleaner.cpp
     src/utils/ToolSummaries.cpp
     src/utils/TempOAuthServer.cpp
+    src/utils/UrlUtil.cpp
     src/utils/GCPHttpClient.cpp
     src/utils/ModelUtil.cpp
     src/utils/PermissionProfiles.cpp
@@ -57,10 +59,9 @@ target_sources(firmius_shared PUBLIC
     include/Metrics.hpp
     include/Panic.hpp
     include/Serialization.hpp
-    include/Skill.hpp
-    include/providers/BackoffConstants.hpp
     include/utils/AbortController.hpp
     include/utils/Base64.hpp
+    include/utils/CryptoUtil.hpp
     include/utils/FSUtil.hpp
     include/utils/FastHash.hpp
     include/utils/FrontmatterParser.hpp
@@ -69,8 +70,8 @@ target_sources(firmius_shared PUBLIC
     include/utils/Hashline.hpp
     include/utils/HashUtil.hpp
     include/utils/HistoryMetrics.hpp
-    include/utils/Icons.hpp
     include/utils/InterruptibleSleep.hpp
+    include/utils/JsonUtil.hpp
     include/utils/JSONSchema.hpp
     include/utils/JSONSchemaFromJson.hpp
     include/utils/LineRange.hpp
@@ -86,6 +87,7 @@ target_sources(firmius_shared PUBLIC
     include/utils/TerminalUtil.hpp
     include/utils/ToolSummaries.hpp
     include/utils/ToolView.hpp
+    include/utils/UrlUtil.hpp
 )
 
 target_include_directories(firmius_shared PUBLIC

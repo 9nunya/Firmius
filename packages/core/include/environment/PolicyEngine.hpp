@@ -1,5 +1,5 @@
-#ifndef FIRMIUS_CORE_POLICY_ENGINE_HPP
-#define FIRMIUS_CORE_POLICY_ENGINE_HPP
+#ifndef FIRMIUS_CORE_POLICYENGINE_HPP
+#define FIRMIUS_CORE_POLICYENGINE_HPP
 
 #include "environment/PermissionPolicy.hpp"
 
@@ -177,4 +177,4 @@ private:
 
 } // namespace firmius::core
 
-#endif // FIRMIUS_CORE_POLICY_ENGINE_HPP
+#endif // FIRMIUS_CORE_POLICYENGINE_HPP

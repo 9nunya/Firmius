@@ -1,5 +1,5 @@
-#ifndef FIRMIUS_CORE_CONTEXT_BUDGET_HPP
-#define FIRMIUS_CORE_CONTEXT_BUDGET_HPP
+#ifndef FIRMIUS_CORE_CONTEXTBUDGET_HPP
+#define FIRMIUS_CORE_CONTEXTBUDGET_HPP
 
 #include "Context.hpp"
 #include "IProvider.hpp"

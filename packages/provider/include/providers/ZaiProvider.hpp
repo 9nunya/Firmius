@@ -1,5 +1,5 @@
-#ifndef FIRMIUS_PROVIDER_ZAI_PROVIDER_HPP
-#define FIRMIUS_PROVIDER_ZAI_PROVIDER_HPP
+#ifndef FIRMIUS_PROVIDER_ZAIPROVIDER_HPP
+#define FIRMIUS_PROVIDER_ZAIPROVIDER_HPP
 
 #include "providers/BaseOpenAIProvider.hpp"
 #include <string>

@@ -1,5 +1,5 @@
-#ifndef FIRMIUS_CORE_LSP_CLIENT_HPP
-#define FIRMIUS_CORE_LSP_CLIENT_HPP
+#ifndef FIRMIUS_CORE_LSPCLIENT_HPP
+#define FIRMIUS_CORE_LSPCLIENT_HPP
 
 #include <atomic>
 #include <condition_variable>
@@ -72,4 +72,4 @@ private:
 
 } // namespace firmius::core
 
-#endif // FIRMIUS_CORE_LSP_CLIENT_HPP
+#endif // FIRMIUS_CORE_LSPCLIENT_HPP

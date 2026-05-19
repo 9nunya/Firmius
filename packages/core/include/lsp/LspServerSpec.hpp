@@ -1,5 +1,5 @@
-#ifndef FIRMIUS_CORE_LSP_SERVER_SPEC_HPP
-#define FIRMIUS_CORE_LSP_SERVER_SPEC_HPP
+#ifndef FIRMIUS_CORE_LSPSERVERSPEC_HPP
+#define FIRMIUS_CORE_LSPSERVERSPEC_HPP
 
 #include <cstdlib>
 #include <filesystem>
@@ -91,4 +91,4 @@ struct LspServerSpec {
 
 } // namespace firmius::core
 
-#endif // FIRMIUS_CORE_LSP_SERVER_SPEC_HPP
+#endif // FIRMIUS_CORE_LSPSERVERSPEC_HPP

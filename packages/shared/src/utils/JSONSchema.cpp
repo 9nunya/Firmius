@@ -230,6 +230,47 @@ void EnumSchema::toJson(rapidjson::Value& output, rapidjson::Document::Allocator
     output.AddMember("enum", enumArr, allocator);
 }
 
+// AnyOfSchema
+AnyOfSchema::AnyOfSchema(std::vector<std::shared_ptr<JSONSchema>> opts)
+    : options(std::move(opts)) {}
+
+ValidationResult AnyOfSchema::validate(const rapidjson::Value& value, const std::string& path) const {
+    if (options.empty()) {
+        return ValidationResult::fail("anyOf schema has no options", path);
+    }
+
+    ValidationResult firstFailure = ValidationResult::fail("No anyOf options matched", path);
+    bool haveFailure = false;
+    for (const auto& opt : options) {
+        if (!opt) continue;
+        auto res = opt->validate(value, path);
+        if (res.success) return ValidationResult::ok();
+        if (!haveFailure) {
+            firstFailure = res;
+            haveFailure = true;
+        }
+    }
+
+    // Prefer returning the first concrete violation to aid debugging.
+    return haveFailure ? firstFailure : ValidationResult::fail("No anyOf options matched", path);
+}
+
+void AnyOfSchema::toJson(rapidjson::Value& output, rapidjson::Document::AllocatorType& allocator) const {
+    output.SetObject();
+    if (!description.empty()) {
+        output.AddMember("description", rapidjson::Value(description.c_str(), allocator).Move(), allocator);
+    }
+
+    rapidjson::Value arr(rapidjson::kArrayType);
+    for (const auto& opt : options) {
+        if (!opt) continue;
+        rapidjson::Value v(rapidjson::kObjectType);
+        opt->toJson(v, allocator);
+        arr.PushBack(v, allocator);
+    }
+    output.AddMember("anyOf", arr, allocator);
+}
+
 // Factory methods
 std::shared_ptr<StringSchema> zString() { return std::make_shared<StringSchema>(); }
 std::shared_ptr<NumberSchema> zNumber() { return std::make_shared<NumberSchema>(NumberSchema::Mode::Float); }
@@ -244,5 +285,8 @@ std::shared_ptr<ObjectSchema> zObject(const std::map<std::string, std::shared_pt
     return obj;
 }
 std::shared_ptr<ArraySchema> zArray(std::shared_ptr<JSONSchema> items) { return std::make_shared<ArraySchema>(items); }
+std::shared_ptr<AnyOfSchema> zAnyOf(std::vector<std::shared_ptr<JSONSchema>> options) {
+    return std::make_shared<AnyOfSchema>(std::move(options));
+}
 
 }

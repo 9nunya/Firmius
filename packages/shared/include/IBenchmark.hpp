@@ -1,5 +1,5 @@
-#ifndef FIRMIUS_CORE_IBENCHMARK_HPP
-#define FIRMIUS_CORE_IBENCHMARK_HPP
+#ifndef FIRMIUS_SHARED_IBENCHMARK_HPP
+#define FIRMIUS_SHARED_IBENCHMARK_HPP
 
 #include "Metrics.hpp"
 #include <string>

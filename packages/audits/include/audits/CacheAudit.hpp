@@ -1,5 +1,5 @@
-#ifndef FIRMIUS_AUDITS_CACHE_AUDIT_HPP
-#define FIRMIUS_AUDITS_CACHE_AUDIT_HPP
+#ifndef FIRMIUS_AUDITS_CACHEAUDIT_HPP
+#define FIRMIUS_AUDITS_CACHEAUDIT_HPP
 
 #include "IAudit.hpp"
 #include <string>
@@ -24,4 +24,4 @@ public:
 
 }  // namespace firmius::audits
 
-#endif  // FIRMIUS_AUDITS_CACHE_AUDIT_HPP
+#endif  // FIRMIUS_AUDITS_CACHEAUDIT_HPP

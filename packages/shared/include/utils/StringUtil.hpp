@@ -1,5 +1,5 @@
-#ifndef FIRMIUS_SHARED_STRING_UTIL_HPP
-#define FIRMIUS_SHARED_STRING_UTIL_HPP
+#ifndef FIRMIUS_SHARED_STRINGUTIL_HPP
+#define FIRMIUS_SHARED_STRINGUTIL_HPP
 
 #include <string>
 #include <string_view>

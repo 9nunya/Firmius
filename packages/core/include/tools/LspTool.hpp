@@ -1,5 +1,5 @@
-#ifndef FIRMIUS_CORE_LSP_TOOL_HPP
-#define FIRMIUS_CORE_LSP_TOOL_HPP
+#ifndef FIRMIUS_CORE_LSPTOOL_HPP
+#define FIRMIUS_CORE_LSPTOOL_HPP
 
 #include "ITool.hpp"
 

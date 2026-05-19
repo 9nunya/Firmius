@@ -1,5 +1,5 @@
-#ifndef FIRMIUS_PROVIDER_KILO_PROVIDER_HPP
-#define FIRMIUS_PROVIDER_KILO_PROVIDER_HPP
+#ifndef FIRMIUS_PROVIDER_KILOPROVIDER_HPP
+#define FIRMIUS_PROVIDER_KILOPROVIDER_HPP
 
 #include "providers/BaseOpenAIProvider.hpp"
 #include <atomic>
@@ -142,4 +142,4 @@ private:
 
 } // namespace firmius::provider
 
-#endif // FIRMIUS_PROVIDER_KILO_PROVIDER_HPP
+#endif // FIRMIUS_PROVIDER_KILOPROVIDER_HPP

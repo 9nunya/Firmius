@@ -1,5 +1,5 @@
-#ifndef FIRMIUS_CORE_WORKING_MEMORY_HPP
-#define FIRMIUS_CORE_WORKING_MEMORY_HPP
+#ifndef FIRMIUS_CORE_WORKINGMEMORY_HPP
+#define FIRMIUS_CORE_WORKINGMEMORY_HPP
 
 #include "Context.hpp"
 #include "ITokenizer.hpp"

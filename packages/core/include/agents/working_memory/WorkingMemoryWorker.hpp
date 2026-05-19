@@ -1,5 +1,5 @@
-#ifndef FIRMIUS_CORE_WORKING_MEMORY_WORKER_HPP
-#define FIRMIUS_CORE_WORKING_MEMORY_WORKER_HPP
+#ifndef FIRMIUS_CORE_WORKINGMEMORYWORKER_HPP
+#define FIRMIUS_CORE_WORKINGMEMORYWORKER_HPP
 
 #include "Context.hpp"
 #include "agents/working_memory/DeflationArchive.hpp"

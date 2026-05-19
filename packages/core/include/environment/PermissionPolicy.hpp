@@ -1,5 +1,5 @@
-#ifndef FIRMIUS_CORE_PERMISSION_POLICY_HPP
-#define FIRMIUS_CORE_PERMISSION_POLICY_HPP
+#ifndef FIRMIUS_CORE_PERMISSIONPOLICY_HPP
+#define FIRMIUS_CORE_PERMISSIONPOLICY_HPP
 
 #include <chrono>
 #include <filesystem>
@@ -141,4 +141,4 @@ inline constexpr const char *kModeYolo = "yolo";
 
 } // namespace firmius::core
 
-#endif // FIRMIUS_CORE_PERMISSION_POLICY_HPP
+#endif // FIRMIUS_CORE_PERMISSIONPOLICY_HPP

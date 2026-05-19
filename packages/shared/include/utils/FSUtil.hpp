@@ -1,5 +1,5 @@
-#ifndef FIRMIUS_SHARED_FS_UTIL_HPP
-#define FIRMIUS_SHARED_FS_UTIL_HPP
+#ifndef FIRMIUS_SHARED_FSUTIL_HPP
+#define FIRMIUS_SHARED_FSUTIL_HPP
 
 #include <string>
 #include <filesystem>

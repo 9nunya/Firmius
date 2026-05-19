@@ -1,5 +1,5 @@
-#ifndef FIRMIUS_CORE_PROCESS_MANAGER_HPP
-#define FIRMIUS_CORE_PROCESS_MANAGER_HPP
+#ifndef FIRMIUS_CORE_PROCESSMANAGER_HPP
+#define FIRMIUS_CORE_PROCESSMANAGER_HPP
 
 #include "IEnvironment.hpp"
 #include "IHost.hpp"
@@ -106,4 +106,4 @@ private:
 
 } // namespace firmius::core
 
-#endif // FIRMIUS_CORE_PROCESS_MANAGER_HPP
+#endif // FIRMIUS_CORE_PROCESSMANAGER_HPP
