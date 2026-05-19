@@ -32,11 +32,6 @@ target_sources(firmius_provider PRIVATE
     src/providers/BaseOAuthProvider.cpp
     src/providers/QwenProvider.cpp
     src/providers/KiroProvider.cpp
-    src/providers/WindsurfModels.cpp
-    src/providers/WindsurfProvider.cpp
-    src/providers/WindsurfProvider_grpc.cpp
-    src/providers/WindsurfProvider_local.cpp
-    src/providers/WindsurfLspManager.cpp
     src/providers/BaseAPIKeyProvider.cpp
      src/providers/BaseAnthropicProvider.cpp
      src/providers/LLMSearchProviderRegistry.cpp
@@ -70,8 +65,6 @@ target_sources(firmius_provider PUBLIC
     include/providers/OAuthWizard.hpp
     include/providers/QwenProvider.hpp
     include/providers/KiroProvider.hpp
-    include/providers/WindsurfModels.hpp
-    include/providers/WindsurfProvider.hpp
     include/providers/BaseAPIKeyProvider.hpp
     include/providers/BaseAnthropicProvider.hpp
     include/providers/LLMSearchProvider.hpp

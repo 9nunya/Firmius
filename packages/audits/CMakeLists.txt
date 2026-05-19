@@ -20,8 +20,6 @@ target_sources(firmius_audits PRIVATE
     src/audits/ProviderAudit.cpp
     src/audits/ProviderStreamDebugAudit.cpp
     src/audits/QwenProviderAudit.cpp
-    src/audits/WindsurfDiscoveryAudit.cpp
-    src/audits/WindsurfStreamAudit.cpp
     src/audits/LoopCancellationAudit.cpp
     src/audits/LspAudit.cpp
     src/audits/ModelLoadAudit.cpp

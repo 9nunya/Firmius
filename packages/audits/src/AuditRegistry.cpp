@@ -20,8 +20,6 @@
 #include "audits/ProviderAudit.hpp"
 #include "audits/ProviderStreamDebugAudit.hpp"
 #include "audits/QwenProviderAudit.hpp"
-#include "audits/WindsurfDiscoveryAudit.hpp"
-#include "audits/WindsurfStreamAudit.hpp"
 #include "audits/QwenQuotaAudit.hpp"
 #include "audits/SubagentStressAudit.hpp"
 #include "audits/WorkflowsAudit.hpp"
@@ -67,8 +65,6 @@ std::vector<std::unique_ptr<shared::IAudit>> createAudits() {
     audits.push_back(std::make_unique<WebFetchAudit>());
     audits.push_back(std::make_unique<WebSearchAudit>());
     audits.push_back(std::make_unique<ReasoningTraceAudit>());
-    audits.push_back(std::make_unique<WindsurfDiscoveryAudit>());
-    audits.push_back(std::make_unique<WindsurfStreamAudit>());
     audits.push_back(std::make_unique<TokenWasteAudit>());
     audits.push_back(std::make_unique<CacheAudit>());
     audits.push_back(std::make_unique<EmbeddingAudit>());

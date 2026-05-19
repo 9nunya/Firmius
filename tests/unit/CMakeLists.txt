@@ -279,20 +279,6 @@ target_include_directories(test_kiro_provider PRIVATE
 )
 gtest_discover_tests(test_kiro_provider)
 
-add_executable(test_windsurf_provider
-    provider/test_windsurf_provider.cpp
-)
-target_link_libraries(test_windsurf_provider PRIVATE
-    firmius::provider
-    firmius::shared
-    GTest::gtest_main
-    GTest::gmock
-)
-target_include_directories(test_windsurf_provider PRIVATE
-    ${rapidjson_SOURCE_DIR}/include
-)
-gtest_discover_tests(test_windsurf_provider)
-
 add_executable(test_provider_stream_debug_audit
     audits/test_provider_stream_debug_audit.cpp
 )
