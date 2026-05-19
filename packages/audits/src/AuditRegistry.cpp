@@ -24,8 +24,6 @@
 #include "audits/WindsurfStreamAudit.hpp"
 #include "audits/QwenQuotaAudit.hpp"
 #include "audits/SubagentStressAudit.hpp"
-#include "audits/TuiRuntimeStressAudit.hpp"
-#include "audits/WelcomeChatRefreshAudit.hpp"
 #include "audits/WorkflowsAudit.hpp"
 #include "audits/ResumeTodoAudit.hpp"
 #include "audits/WebFetchAudit.hpp"
@@ -46,8 +44,6 @@ std::vector<std::unique_ptr<shared::IAudit>> createAudits() {
     audits.push_back(std::make_unique<P15Audit>());
     audits.push_back(std::make_unique<PersistenceStressAudit>());
     audits.push_back(std::make_unique<SubagentStressAudit>());
-    audits.push_back(std::make_unique<TuiRuntimeStressAudit>());
-    audits.push_back(std::make_unique<WelcomeChatRefreshAudit>());
     audits.push_back(std::make_unique<AntigravityProviderAudit>());
     audits.push_back(std::make_unique<AntigravityQuotaAudit>());
     audits.push_back(std::make_unique<CodexProviderAudit>());

@@ -269,11 +269,9 @@ DaemonRuntimeIsolationAudit::run(const std::vector<std::string> & /*args*/) {
   }
 
   const auto createdA = clientA.createThread(
-      firmius::daemon::ThreadsCreateRequest{fs::current_path().string(), "aster", "",
-                                            firmius::shared::ThreadPermissionMode::Request});
+      firmius::daemon::ThreadsCreateRequest{fs::current_path().string(), "aster", ""});
   const auto createdB = clientB.createThread(
-      firmius::daemon::ThreadsCreateRequest{fs::current_path().string(), "aster", "",
-                                            firmius::shared::ThreadPermissionMode::Request});
+      firmius::daemon::ThreadsCreateRequest{fs::current_path().string(), "aster", ""});
   out << "thread_a=" << createdA.thread.threadId << "\n";
   out << "thread_b=" << createdB.thread.threadId << "\n";
 

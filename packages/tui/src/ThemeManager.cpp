@@ -1,329 +1,325 @@
 #include "ThemeManager.hpp"
-#include "UserPreferences.hpp"
+
 #include "utils/PlatformPaths.hpp"
-#include <cstdlib>
+
 #include <filesystem>
 #include <fstream>
 #include <rapidjson/document.h>
+#include <rapidjson/prettywriter.h>
 #include <rapidjson/stringbuffer.h>
-#include <rapidjson/writer.h>
 
 namespace firmius::tui {
 
 namespace {
-ftxui::Color ParseHex(const std::string &hex) {
-  if (hex.empty() || hex[0] != '#')
-    return ftxui::Color::Default;
+
+using firmius::shared::PlatformPaths;
+
+ThemeRgb parseHex(const std::string& hex, ThemeRgb fallback = {}) {
+  if (hex.size() != 7 || hex[0] != '#') return fallback;
   try {
-    if (hex.size() == 7) {
-      int r = std::stoi(hex.substr(1, 2), nullptr, 16);
-      int g = std::stoi(hex.substr(3, 2), nullptr, 16);
-      int b = std::stoi(hex.substr(5, 2), nullptr, 16);
-      return ftxui::Color::RGB(r, g, b);
-    }
+    return {
+        std::stoi(hex.substr(1, 2), nullptr, 16),
+        std::stoi(hex.substr(3, 2), nullptr, 16),
+        std::stoi(hex.substr(5, 2), nullptr, 16),
+    };
   } catch (...) {
+    return fallback;
   }
-  return ftxui::Color::Default;
 }
 
-ftxui::Color GetColor(const rapidjson::Value &v, const char *key) {
-  if (v.HasMember(key) && v[key].IsString()) {
-    return ParseHex(v[key].GetString());
+ThemeRgb getColor(const rapidjson::Value& v, const char* key, ThemeRgb fallback = {}) {
+  if (v.IsObject() && v.HasMember(key) && v[key].IsString()) {
+    return parseHex(v[key].GetString(), fallback);
   }
-  return ftxui::Color::Default;
+  return fallback;
 }
 
-ColorGroup GetColorGroup(const rapidjson::Value &v) {
-  ColorGroup cg;
-  cg.bg = GetColor(v, "bg");
-  cg.fg = GetColor(v, "fg");
+ThemeColorGroup getColorGroup(const rapidjson::Value& v,
+                              ThemeColorGroup fallback = {}) {
+  ThemeColorGroup cg = fallback;
+  if (v.IsObject()) {
+    cg.bg = getColor(v, "bg", cg.bg);
+    cg.fg = getColor(v, "fg", cg.fg);
+  }
   return cg;
 }
 
-StateColors GetStateColors(const rapidjson::Value &v) {
-  StateColors sc;
-  if (v.IsObject()) {
-    if (v.HasMember("normal"))
-      sc.normal = GetColorGroup(v["normal"]);
-    if (v.HasMember("focused"))
-      sc.focused = GetColorGroup(v["focused"]);
-    if (v.HasMember("busy"))
-      sc.busy = GetColorGroup(v["busy"]);
-    if (v.HasMember("error"))
-      sc.error = GetColorGroup(v["error"]);
-    if (v.HasMember("glint") && v["glint"].IsArray()) {
-      for (auto &c : v["glint"].GetArray()) {
-        if (c.IsString())
-          sc.glint.push_back(ParseHex(c.GetString()));
-      }
+ThemeStateColors getStateColors(const rapidjson::Value& v,
+                                ThemeStateColors fallback = {}) {
+  ThemeStateColors sc = fallback;
+  if (!v.IsObject()) return sc;
+  if (v.HasMember("normal")) sc.normal = getColorGroup(v["normal"], sc.normal);
+  if (v.HasMember("focused")) sc.focused = getColorGroup(v["focused"], sc.focused);
+  if (v.HasMember("busy")) sc.busy = getColorGroup(v["busy"], sc.busy);
+  if (v.HasMember("error")) sc.error = getColorGroup(v["error"], sc.error);
+  if (v.HasMember("glint") && v["glint"].IsArray()) {
+    sc.glint.clear();
+    for (const auto& entry : v["glint"].GetArray()) {
+      if (entry.IsString()) sc.glint.push_back(parseHex(entry.GetString()));
     }
   }
   return sc;
 }
+
+std::filesystem::path preferencesPath() {
+  return PlatformPaths::firmiusHomeDir() / "preferences.json";
+}
+
+ThemeSpec defaultTheme() {
+  ThemeSpec theme;
+  theme.statusBar.idle.normal = {{36, 88, 58}, {18, 20, 28}};
+  theme.statusBar.streaming.normal = {{75, 143, 84}, {18, 20, 28}};
+  theme.statusBar.executingTool.normal = {{201, 136, 52}, {19, 20, 24}};
+  theme.statusBar.providerWaiting.normal = {{117, 164, 255}, {18, 20, 28}};
+  theme.statusBar.compacting.normal = {{176, 124, 255}, {18, 20, 28}};
+  theme.statusBar.error.normal = {{170, 60, 60}, {245, 245, 245}};
+  theme.agentStrip.item.focused = {{117, 164, 255}, {18, 20, 28}};
+  theme.agentStrip.item.busy = {{245, 194, 103}, {19, 20, 24}};
+  theme.agentStrip.item.error = {{170, 60, 60}, {245, 245, 245}};
+  theme.agentStrip.item.normal = {{18, 18, 28}, {136, 145, 166}};
+  return theme;
+}
+
+std::optional<std::string> loadSelectedThemeName() {
+  for (const auto& path : {preferencesPath(), PlatformPaths::firmiusHomeDir() / "config.json"}) {
+    std::ifstream file(path);
+    if (!file.is_open()) continue;
+    std::string content((std::istreambuf_iterator<char>(file)),
+                        std::istreambuf_iterator<char>());
+    rapidjson::Document doc;
+    doc.Parse(content.c_str());
+    if (doc.IsObject() && doc.HasMember("theme") && doc["theme"].IsString()) {
+      return std::string(doc["theme"].GetString());
+    }
+  }
+  return std::nullopt;
+}
+
+void persistSelectedThemeName(const std::string& name) {
+  std::filesystem::create_directories(preferencesPath().parent_path());
+  rapidjson::Document doc;
+  {
+    std::ifstream in(preferencesPath());
+    if (in.is_open()) {
+      std::string content((std::istreambuf_iterator<char>(in)),
+                          std::istreambuf_iterator<char>());
+      doc.Parse(content.c_str());
+    }
+  }
+  if (!doc.IsObject()) {
+    doc.SetObject();
+  }
+  auto& alloc = doc.GetAllocator();
+  rapidjson::Value value(name.c_str(), alloc);
+  if (doc.HasMember("theme")) {
+    doc["theme"] = value;
+  } else {
+    doc.AddMember("theme", value, alloc);
+  }
+
+  rapidjson::StringBuffer buffer;
+  rapidjson::PrettyWriter<rapidjson::StringBuffer> writer(buffer);
+  doc.Accept(writer);
+  std::ofstream out(preferencesPath(), std::ios::trunc);
+  out << buffer.GetString();
+}
+
+ThemeSpec loadThemeFile(const std::filesystem::path& path) {
+  ThemeSpec theme = defaultTheme();
+  std::ifstream file(path);
+  if (!file.is_open()) return theme;
+  std::string content((std::istreambuf_iterator<char>(file)),
+                      std::istreambuf_iterator<char>());
+  rapidjson::Document doc;
+  doc.Parse(content.c_str());
+  if (!doc.IsObject()) return theme;
+
+  if (doc.HasMember("name") && doc["name"].IsString()) {
+    theme.name = doc["name"].GetString();
+  }
+  if (doc.HasMember("base")) {
+    const auto& base = doc["base"];
+    theme.base.bg = getColor(base, "bg", theme.base.bg);
+    theme.base.fg = getColor(base, "fg", theme.base.fg);
+    theme.base.border = getColor(base, "border", theme.base.border);
+    theme.base.separator = getColor(base, "separator", theme.base.separator);
+    theme.base.highlight = getColor(base, "highlight", theme.base.highlight);
+    theme.base.dim = getColor(base, "dim", theme.base.dim);
+  }
+  if (doc.HasMember("status_bar")) {
+    const auto& sb = doc["status_bar"];
+    theme.statusBar.idle = getStateColors(sb["idle"], theme.statusBar.idle);
+    theme.statusBar.streaming =
+        getStateColors(sb["streaming"], theme.statusBar.streaming);
+    theme.statusBar.executingTool =
+        getStateColors(sb["executing_tool"], theme.statusBar.executingTool);
+    theme.statusBar.providerWaiting =
+        getStateColors(sb["provider_waiting"], theme.statusBar.providerWaiting);
+    theme.statusBar.compacting =
+        getStateColors(sb["compacting"], theme.statusBar.compacting);
+    theme.statusBar.error = getStateColors(sb["error"], theme.statusBar.error);
+    theme.statusBar.agentBg = getColor(sb, "agent_bg", theme.statusBar.agentBg);
+    theme.statusBar.agentFg = getColor(sb, "agent_fg", theme.statusBar.agentFg);
+    theme.statusBar.pillBg = getColor(sb, "pill_bg", theme.statusBar.pillBg);
+    theme.statusBar.pillFg = getColor(sb, "pill_fg", theme.statusBar.pillFg);
+    theme.statusBar.fillerBg =
+        getColor(sb, "filler_bg", theme.statusBar.fillerBg);
+    if (sb.HasMember("context")) {
+      const auto& ctx = sb["context"];
+      theme.statusBar.context.bg =
+          getColor(ctx, "bg", theme.statusBar.context.bg);
+      theme.statusBar.context.icon =
+          getColor(ctx, "icon", theme.statusBar.context.icon);
+      theme.statusBar.context.low =
+          getColor(ctx, "low", theme.statusBar.context.low);
+      theme.statusBar.context.medium =
+          getColor(ctx, "medium", theme.statusBar.context.medium);
+      theme.statusBar.context.high =
+          getColor(ctx, "high", theme.statusBar.context.high);
+    }
+  }
+  if (doc.HasMember("agent_strip")) {
+    const auto& strip = doc["agent_strip"];
+    theme.agentStrip.bg = getColor(strip, "bg", theme.agentStrip.bg);
+    if (strip.HasMember("item")) {
+      theme.agentStrip.item =
+          getStateColors(strip["item"], theme.agentStrip.item);
+    }
+    if (strip.HasMember("pills")) {
+      const auto& pills = strip["pills"];
+      theme.agentStrip.pills.slugBg =
+          getColor(pills, "slug_bg", theme.agentStrip.pills.slugBg);
+      theme.agentStrip.pills.slugFg =
+          getColor(pills, "slug_fg", theme.agentStrip.pills.slugFg);
+      theme.agentStrip.pills.purposeBg =
+          getColor(pills, "purpose_bg", theme.agentStrip.pills.purposeBg);
+      theme.agentStrip.pills.purposeFg =
+          getColor(pills, "purpose_fg", theme.agentStrip.pills.purposeFg);
+      theme.agentStrip.pills.modelBg =
+          getColor(pills, "model_bg", theme.agentStrip.pills.modelBg);
+      theme.agentStrip.pills.modelFg =
+          getColor(pills, "model_fg", theme.agentStrip.pills.modelFg);
+      theme.agentStrip.pills.stateBg =
+          getColor(pills, "state_bg", theme.agentStrip.pills.stateBg);
+      theme.agentStrip.pills.stateFg =
+          getColor(pills, "state_fg", theme.agentStrip.pills.stateFg);
+      theme.agentStrip.pills.toolBg =
+          getColor(pills, "tool_bg", theme.agentStrip.pills.toolBg);
+      theme.agentStrip.pills.toolFg =
+          getColor(pills, "tool_fg", theme.agentStrip.pills.toolFg);
+      theme.agentStrip.pills.contextBg =
+          getColor(pills, "context_bg", theme.agentStrip.pills.contextBg);
+    }
+  }
+  if (doc.HasMember("input")) {
+    const auto& input = doc["input"];
+    theme.input.bg = getColor(input, "bg", theme.input.bg);
+    theme.input.fg = getColor(input, "fg", theme.input.fg);
+    theme.input.prompt = getColor(input, "prompt", theme.input.prompt);
+    theme.input.cursor = getColor(input, "cursor", theme.input.cursor);
+    theme.input.placeholder =
+        getColor(input, "placeholder", theme.input.placeholder);
+  }
+  if (doc.HasMember("chat")) {
+    const auto& chat = doc["chat"];
+    theme.chat.bg = getColor(chat, "bg", theme.chat.bg);
+    theme.chat.userPrefix =
+        getColor(chat, "user_prefix", theme.chat.userPrefix);
+    theme.chat.agentPrefix =
+        getColor(chat, "agent_prefix", theme.chat.agentPrefix);
+    theme.chat.timestamp =
+        getColor(chat, "timestamp", theme.chat.timestamp);
+  }
+  // ─── Syntax palette ──────────────────────────────────────────────────────
+  // Same JSON layout as v1's `syntax` block in themes/*.theme.json.
+  if (doc.HasMember("syntax") && doc["syntax"].IsObject()) {
+    const auto& s = doc["syntax"];
+    theme.syntax.keyword = getColor(s, "keyword", theme.syntax.keyword);
+    theme.syntax.string = getColor(s, "string", theme.syntax.string);
+    theme.syntax.comment = getColor(s, "comment", theme.syntax.comment);
+    theme.syntax.number = getColor(s, "number", theme.syntax.number);
+    theme.syntax.function = getColor(s, "function", theme.syntax.function);
+    theme.syntax.type = getColor(s, "type", theme.syntax.type);
+    theme.syntax.op = getColor(s, "op", theme.syntax.op);
+    theme.syntax.attr = getColor(s, "attr", theme.syntax.attr);
+    theme.syntax.constant = getColor(s, "constant", theme.syntax.constant);
+    theme.syntax.variable = getColor(s, "variable", theme.syntax.variable);
+    theme.syntax.tag = getColor(s, "tag", theme.syntax.tag);
+  }
+  // ─── Diff palette (optional) ─────────────────────────────────────────────
+  // No v1 theme defines this yet; we keep parsing optional and fall back to
+  // the defaults baked into ThemeSpec::Diff.
+  if (doc.HasMember("diff") && doc["diff"].IsObject()) {
+    const auto& d = doc["diff"];
+    theme.diff.addBg = getColor(d, "add_bg", theme.diff.addBg);
+    theme.diff.removeBg = getColor(d, "remove_bg", theme.diff.removeBg);
+    theme.diff.contextBg = getColor(d, "context_bg", theme.diff.contextBg);
+    theme.diff.headerBg = getColor(d, "header_bg", theme.diff.headerBg);
+    theme.diff.gutterFg = getColor(d, "gutter_fg", theme.diff.gutterFg);
+  }
+  return theme;
+}
+
 } // namespace
 
-ThemeManager &ThemeManager::instance() {
-  static ThemeManager inst;
-  return inst;
+ThemeManager& ThemeManager::instance() {
+  static ThemeManager manager;
+  return manager;
 }
 
 ThemeManager::ThemeManager() { loadThemes(); }
 
 void ThemeManager::loadThemes() {
   themes_.clear();
-
-  loadSystemThemes();
-  loadUserThemes();
-
-  if (themes_.empty()) {
-    // Should not happen if installation is correct, but let's be safe
-    // and provide at least one empty-ish theme if everything fails
-    Theme fallback;
-    fallback.name = "Fallback";
-    themes_.push_back(fallback);
+  const auto dir = PlatformPaths::firmiusHomeDir() / "themes";
+  if (std::filesystem::exists(dir) && std::filesystem::is_directory(dir)) {
+    for (const auto& entry : std::filesystem::directory_iterator(dir)) {
+      if (entry.path().extension() == ".json") {
+        themes_.push_back(loadThemeFile(entry.path()));
+      }
+    }
   }
-
+  if (themes_.empty()) {
+    themes_.push_back(defaultTheme());
+  }
   loadPersistedSelection();
 }
 
-void ThemeManager::loadSystemThemes() {
-  // All themes including built-in ones are installed to ~/.firmius/themes
-  // by the installation process.
+const ThemeSpec& ThemeManager::currentTheme() const {
+  return themes_[currentThemeIndex_];
 }
 
-void ThemeManager::loadUserThemes() {
-  const std::filesystem::path userDir =
-      firmius::shared::PlatformPaths::firmiusHomeDir() / "themes";
-
-  if (std::filesystem::exists(userDir) &&
-      std::filesystem::is_directory(userDir)) {
-    for (const auto &entry : std::filesystem::directory_iterator(userDir)) {
-      if (entry.path().extension() == ".json") {
-        try {
-          themes_.push_back(loadThemeFromFile(entry.path().string()));
-        } catch (...) {
-        }
-      }
-    }
-  }
+std::vector<std::string> ThemeManager::themeNames() const {
+  std::vector<std::string> names;
+  names.reserve(themes_.size());
+  for (const auto& theme : themes_) names.push_back(theme.name);
+  return names;
 }
 
-Theme ThemeManager::loadThemeFromFile(const std::string &path) {
-  std::ifstream file(path);
-  if (!file.is_open())
-    throw std::runtime_error("Failed to open theme file");
-
-  std::string content((std::istreambuf_iterator<char>(file)),
-                      std::istreambuf_iterator<char>());
-  file.close();
-
-  rapidjson::Document doc;
-  doc.Parse(content.c_str());
-  if (doc.HasParseError())
-    throw std::runtime_error("JSON Parse Error");
-
-  Theme t;
-  t.name = doc.HasMember("name") ? doc["name"].GetString() : "Unnamed";
-
-  // Base
-  if (doc.HasMember("base")) {
-    const auto &b = doc["base"];
-    t.base.bg = GetColor(b, "bg");
-    t.base.fg = GetColor(b, "fg");
-    t.base.border = GetColor(b, "border");
-    t.base.separator = GetColor(b, "separator");
-    t.base.highlight = GetColor(b, "highlight");
-    t.base.dim = GetColor(b, "dim");
-  }
-
-  // Status Bar
-  if (doc.HasMember("status_bar")) {
-    const auto &sb = doc["status_bar"];
-    t.status_bar.idle = GetStateColors(sb["idle"]);
-    t.status_bar.streaming = GetStateColors(sb["streaming"]);
-    t.status_bar.executing_tool = GetStateColors(sb["executing_tool"]);
-    t.status_bar.provider_waiting = GetStateColors(sb["provider_waiting"]);
-    t.status_bar.compacting = GetStateColors(sb["compacting"]);
-    t.status_bar.error = GetStateColors(sb["error"]);
-
-    t.status_bar.agent_bg = GetColor(sb, "agent_bg");
-    t.status_bar.agent_fg = GetColor(sb, "agent_fg");
-    t.status_bar.pill_bg = GetColor(sb, "pill_bg");
-    t.status_bar.pill_fg = GetColor(sb, "pill_fg");
-    t.status_bar.filler_bg = GetColor(sb, "filler_bg");
-
-    if (sb.HasMember("context")) {
-      const auto &ctx = sb["context"];
-      t.status_bar.context.bg = GetColor(ctx, "bg");
-      t.status_bar.context.icon = GetColor(ctx, "icon");
-      t.status_bar.context.low = GetColor(ctx, "low");
-      t.status_bar.context.medium = GetColor(ctx, "medium");
-      t.status_bar.context.high = GetColor(ctx, "high");
-    }
-  }
-
-  // Agent Strip
-  if (doc.HasMember("agent_strip")) {
-    const auto &as = doc["agent_strip"];
-    t.agent_strip.bg = GetColor(as, "bg");
-    t.agent_strip.item = GetStateColors(as["item"]);
-
-    if (as.HasMember("pills")) {
-      const auto &p = as["pills"];
-      t.agent_strip.pills.slug_bg = GetColor(p, "slug_bg");
-      t.agent_strip.pills.slug_fg = GetColor(p, "slug_fg");
-      t.agent_strip.pills.purpose_bg = GetColor(p, "purpose_bg");
-      t.agent_strip.pills.purpose_fg = GetColor(p, "purpose_fg");
-      t.agent_strip.pills.model_bg = GetColor(p, "model_bg");
-      t.agent_strip.pills.model_fg = GetColor(p, "model_fg");
-      t.agent_strip.pills.state_bg = GetColor(p, "state_bg");
-      t.agent_strip.pills.state_fg = GetColor(p, "state_fg");
-      t.agent_strip.pills.tool_bg = GetColor(p, "tool_bg");
-      t.agent_strip.pills.tool_fg = GetColor(p, "tool_fg");
-      t.agent_strip.pills.context_bg = GetColor(p, "context_bg");
-    }
-  }
-
-  // Chat
-  if (doc.HasMember("chat")) {
-    const auto &c = doc["chat"];
-    t.chat.bg = GetColor(c, "bg");
-    t.chat.user_prefix = GetColor(c, "user_prefix");
-    t.chat.agent_prefix = GetColor(c, "agent_prefix");
-    t.chat.timestamp = GetColor(c, "timestamp");
-
-    if (c.HasMember("markdown")) {
-      const auto &md = c["markdown"];
-      t.chat.markdown.text = GetColor(md, "text");
-      t.chat.markdown.header = GetColor(md, "header");
-      t.chat.markdown.code_bg = GetColor(md, "code_bg");
-      t.chat.markdown.code_fg = GetColor(md, "code_fg");
-      t.chat.markdown.link = GetColor(md, "link");
-      t.chat.markdown.quote_bar = GetColor(md, "quote_bar");
-      t.chat.markdown.quote_text = GetColor(md, "quote_text");
-    }
-  }
-
-  // Syntax
-  if (doc.HasMember("syntax")) {
-    const auto &s = doc["syntax"];
-    t.syntax.keyword = GetColor(s, "keyword");
-    t.syntax.string = GetColor(s, "string");
-    t.syntax.comment = GetColor(s, "comment");
-    t.syntax.number = GetColor(s, "number");
-    t.syntax.function = GetColor(s, "function");
-    t.syntax.type = GetColor(s, "type");
-    t.syntax.op = GetColor(s, "op");
-    t.syntax.attr = GetColor(s, "attr");
-    t.syntax.constant = GetColor(s, "constant");
-    t.syntax.variable = GetColor(s, "variable");
-    t.syntax.tag = GetColor(s, "tag");
-  }
-
-  // Tool Blocks
-  if (doc.HasMember("tool_blocks")) {
-    const auto &tb = doc["tool_blocks"];
-    t.tool_blocks.generic_bg = GetColor(tb, "generic_bg");
-    t.tool_blocks.generic_border = GetColor(tb, "generic_border");
-    t.tool_blocks.generic_header_bg = GetColor(tb, "generic_header_bg");
-    t.tool_blocks.generic_title = GetColor(tb, "generic_title");
-    t.tool_blocks.generic_icon = GetColor(tb, "generic_icon");
-
-    if (tb.HasMember("specific")) {
-      const auto &spec = tb["specific"];
-      t.tool_blocks.specific.file_read = GetColorGroup(spec["file_read"]);
-      t.tool_blocks.specific.file_edit = GetColorGroup(spec["file_edit"]);
-      t.tool_blocks.specific.terminal = GetColorGroup(spec["terminal"]);
-      t.tool_blocks.specific.subagent = GetColorGroup(spec["subagent"]);
-      t.tool_blocks.specific.ls = GetColorGroup(spec["ls"]);
-      t.tool_blocks.specific.wait = GetColorGroup(spec["wait"]);
-    }
-
-    if (tb.HasMember("glint") && tb["glint"].IsArray()) {
-      for (auto &c : tb["glint"].GetArray()) {
-        if (c.IsString())
-          t.tool_blocks.glint.push_back(ParseHex(c.GetString()));
-      }
-    }
-  }
-
-  // Input
-  if (doc.HasMember("input")) {
-    const auto &i = doc["input"];
-    t.input.bg = GetColor(i, "bg");
-    t.input.fg = GetColor(i, "fg");
-    t.input.prompt = GetColor(i, "prompt");
-    t.input.cursor = GetColor(i, "cursor");
-    t.input.placeholder = GetColor(i, "placeholder");
-  }
-
-  // Modals
-  if (doc.HasMember("modals")) {
-    const auto &m = doc["modals"];
-    t.modals.overlay = GetColor(m, "overlay");
-    t.modals.bg = GetColor(m, "bg");
-    t.modals.fg = GetColor(m, "fg");
-    t.modals.border = GetColor(m, "border");
-    t.modals.title = GetColor(m, "title");
-    t.modals.highlight_bg = GetColor(m, "highlight_bg");
-    t.modals.highlight_fg = GetColor(m, "highlight_fg");
-    t.modals.button_bg = GetColor(m, "button_bg");
-    t.modals.button_fg = GetColor(m, "button_fg");
-  }
-
-  return t;
-}
-
-void ThemeManager::cycleTheme() {
-  if (themes_.empty())
-    return;
-  current_theme_index_ = (current_theme_index_ + 1) % themes_.size();
-  persistSelection();
-}
-
-void ThemeManager::setTheme(const std::string &name) {
-  for (size_t i = 0; i < themes_.size(); ++i) {
+bool ThemeManager::setTheme(const std::string& name) {
+  for (std::size_t i = 0; i < themes_.size(); ++i) {
     if (themes_[i].name == name) {
-      current_theme_index_ = i;
+      currentThemeIndex_ = i;
       persistSelection();
-      return;
+      return true;
     }
   }
+  return false;
 }
 
 void ThemeManager::loadPersistedSelection() {
-  const auto preferences = loadUserPreferences();
-  if (!preferences.theme_name.has_value()) {
-    return;
-  }
-  const std::string &wanted = *preferences.theme_name;
-  for (size_t i = 0; i < themes_.size(); ++i) {
-    if (themes_[i].name == wanted) {
-      current_theme_index_ = i;
+  const auto selected = loadSelectedThemeName();
+  if (!selected.has_value()) return;
+  for (std::size_t i = 0; i < themes_.size(); ++i) {
+    if (themes_[i].name == *selected) {
+      currentThemeIndex_ = i;
       return;
     }
   }
 }
 
 void ThemeManager::persistSelection() const {
-  if (themes_.empty() || current_theme_index_ >= themes_.size()) {
-    return;
-  }
-  UserPreferences preferences;
-  preferences.theme_name = themes_[current_theme_index_].name;
-  saveUserPreferences(preferences);
-}
-
-const Theme &ThemeManager::getCurrentTheme() const {
-  return themes_[current_theme_index_];
-}
-
-std::vector<std::string> ThemeManager::getThemeNames() const {
-  std::vector<std::string> names;
-  for (const auto &t : themes_) {
-    names.push_back(t.name);
-  }
-  return names;
+  persistSelectedThemeName(themes_[currentThemeIndex_].name);
 }
 
 } // namespace firmius::tui

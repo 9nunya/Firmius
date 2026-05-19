@@ -1,5 +1,5 @@
+#include "App.hpp"
 #include "CliOptions.hpp"
-#include "TuiRunner.hpp"
 #include "agents/hooks/HookRegistry.hpp"
 #include "agents/hooks/HookState.hpp"
 #include "daemon/DaemonClient.hpp"
@@ -180,8 +180,7 @@ int runDaemonSmokeCli(int argc, char **argv) {
 
   if (threadId.empty()) {
     const auto created = client.createThread(
-        firmius::daemon::ThreadsCreateRequest{cwd, "lead", "",
-                                              firmius::shared::ThreadPermissionMode::Request});
+        firmius::daemon::ThreadsCreateRequest{cwd, "lead", ""});
     threadId = created.thread.threadId;
     std::cout << "thread created " << threadId << "\n";
   } else {
@@ -262,16 +261,25 @@ int main(int argc, char **argv) {
     return 0;
   }
 
-  firmius::tui::TuiLaunchOptions options;
-  options.debuggingMode = cliOptions.debuggingMode;
-  options.continueLast = cliOptions.continueLast;
-  options.initialPrompt = cliOptions.initialPrompt;
-  options.initialCwd = cliOptions.initialCwd;
-  options.quitWhenIdle = cliOptions.quitWhenIdle;
-  options.permissionMode = cliOptions.permissionMode;
+  firmius::tui::AppOptions options;
   options.threadId = cliOptions.threadId;
+  options.cwd = cliOptions.initialCwd;
+  options.continueSession = cliOptions.continueLast;
 
-  firmius::tui::runTui(options);
+  // The new TUI does not yet honor every legacy CLI flag. Surface a notice
+  // so users know what was ignored instead of silently dropping them.
+  auto warnIgnored = [](const char *flag) {
+    std::cerr << "firmius: note: --" << flag
+              << " is not yet supported by the new TUI; ignoring.\n";
+  };
+  if (!cliOptions.initialPrompt.empty()) warnIgnored("prompt");
+  if (cliOptions.quitWhenIdle) warnIgnored("quit-when-idle");
+  if (cliOptions.debuggingMode) warnIgnored("i-am-debugging");
+  if (cliOptions.permissionMode !=
+      firmius::shared::ThreadPermissionMode::Request) {
+    warnIgnored("permission-mode");
+  }
 
-  return 0;
+  firmius::tui::App app(std::move(options));
+  return app.run();
 }

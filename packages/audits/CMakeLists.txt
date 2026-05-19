@@ -38,8 +38,6 @@ target_sources(firmius_audits PRIVATE
     src/audits/EmbeddingAudit.cpp
     src/audits/WorkingMemoryAudit.cpp
     src/audits/WorkingMemoryLiveAudit.cpp
-    src/audits/TuiRuntimeStressAudit.cpp
-    src/audits/WelcomeChatRefreshAudit.cpp
     src/MigrationCli.cpp
 )
 target_sources(firmius_audits PUBLIC
@@ -80,8 +78,6 @@ target_sources(firmius_audits PUBLIC
     include/audits/EmbeddingAudit.hpp
     include/audits/WorkingMemoryAudit.hpp
     include/audits/WorkingMemoryLiveAudit.hpp
-    include/audits/TuiRuntimeStressAudit.hpp
-    include/audits/WelcomeChatRefreshAudit.hpp
 )
 
 target_include_directories(firmius_audits PUBLIC
@@ -96,14 +92,9 @@ target_link_libraries(firmius_audits PUBLIC
     firmius::server
 )
 
-target_link_libraries(firmius_audits PRIVATE
-    firmius::tui
-)
-
 target_include_directories(firmius_audits PRIVATE
   ${rapidjson_SOURCE_DIR}/include
   ${CMAKE_SOURCE_DIR}/packages/server/include
-# firmius::tui removed: audits should not depend on TUI to keep firmius_audit buildable
 )
 
 add_executable(firmius_shutdown_hang_repro)

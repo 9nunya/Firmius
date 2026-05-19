@@ -1,134 +1,126 @@
-add_library(firmius_tui)
+add_library(firmius_tui STATIC)
 add_library(firmius::tui ALIAS firmius_tui)
 
 target_sources(firmius_tui PRIVATE
-    src/TUIState.cpp
-    src/TuiAsync.cpp
-    src/TuiSnapshots.cpp
-    src/TUIHotkeys.cpp
-    src/ActivePlanState.cpp
-    src/QuotaPresenter.cpp
-    src/StreamStateManager.cpp
-    src/NotificationManager.cpp
+    src/App.cpp
+    src/DaemonSession.cpp
+    src/AppState.cpp
+    src/EventRouter.cpp
+    src/ActionDispatcher.cpp
+    src/Terminal.cpp
+    src/AnsiParser.cpp
+    src/GlintRenderer.cpp
     src/ThemeManager.cpp
-    src/UserPreferences.cpp
-    src/commands/CommandManager.cpp
-    src/commands/NewCommand.cpp
-    src/commands/ThreadsCommand.cpp
-    src/commands/ModelCommand.cpp
-    src/commands/UndoCommand.cpp
-    src/commands/CompactCommand.cpp
-    src/commands/ConfigCommand.cpp
-    src/commands/ModeCommand.cpp
-    src/commands/ConnectCommand.cpp
-    src/commands/McpCommand.cpp
-    src/commands/BenchmarksCommand.cpp
-    src/commands/QuotasCommand.cpp
-    src/commands/AccountsCommand.cpp
-    src/commands/QuitCommand.cpp
-    src/commands/RouterCommand.cpp
-    src/commands/ProvidersCommand.cpp
-    src/commands/PurposesCommand.cpp
-    src/commands/SkinCommand.cpp
-    src/commands/EditHistoryCommand.cpp
-    src/commands/HistoryCommand.cpp
-    src/commands/HooksCommand.cpp
-    src/commands/UndoRedoCommands.cpp
-    src/commands/WorkflowsCommand.cpp
-    src/modals/ModalRegistry.cpp
-    src/modals/CommandPaletteModal.cpp
-    src/modals/KeybindingEditorModal.cpp
-    src/modals/ThreadPickerModal.cpp
-    src/modals/ThreadLockedModal.cpp
-    src/modals/ModelPickerModal.cpp
-    src/modals/ConfigDisplayModal.cpp
-    src/modals/RouterModal.cpp
-    src/modals/ProvidersModal.cpp
-    src/modals/PurposesModal.cpp
-    src/modals/HooksModal.cpp
-    src/modals/McpModal.cpp
-    src/modals/PermissionPromptModal.cpp
-    src/modals/OAuthWizardModal.cpp
-    src/modals/APIKeyWizardModal.cpp
-    src/modals/ConfirmationModal.cpp
-    src/modals/QuotasModal.cpp
-    src/modals/AccountsModal.cpp
-    src/components/ChatWindow.cpp
-    src/components/ChatHistoryBuilder.cpp
-    src/components/ChatMeasurementSignature.cpp
-    src/components/ChatTranscriptPolicy.cpp
-    src/components/ChatViewportModel.cpp
-    src/components/ChatCopySelection.cpp
-    src/components/TranscriptGrouping.cpp
-    src/components/ErrorDisplay.cpp
-    src/components/DiffRenderer.cpp
-    src/components/ToolPresentationBlock.cpp
-    src/components/ToolBlock.cpp
-    src/components/FileEditDiff.cpp
-    src/components/LogWindow.cpp
-    src/components/Markdown.cpp
-    src/components/ScrollableBox.cpp
-    src/components/TitleBar.cpp
-    src/components/StatusBar.cpp
-    src/components/ContextLane.cpp
-    src/components/AgentStrip.cpp
-    src/components/PlanLane.cpp
-    src/components/TodoLane.cpp
-    src/components/InputBar.cpp
-    src/components/GlintEffect.cpp
-    src/components/HelpOverlay.cpp
-    src/components/WelcomeScreen.cpp
-    src/components/ANSIParser.cpp
-    src/components/SyntaxHighlighter.cpp
-    src/tools/ArtifactToolPresentation.cpp
-    src/tools/FileToolPresentation.cpp
-    src/tools/ProcessToolPresentation.cpp
-    src/tools/SubagentToolPresentation.cpp
-    src/tools/PythonToolPresentation.cpp
-    src/tools/WebSearchToolPresentation.cpp
-    src/tools/McpToolPresentation.cpp
-    src/tools/ModeSwitchToolPresentation.cpp
-    src/tools/ToolPresentation.cpp
-    src/tools/SearchToolPresentation.cpp
-    src/tools/SemanticToolPresentation.cpp
-    src/tools/GenericToolPresentation.cpp
-    src/utils/ReferenceAutocomplete.cpp
-    src/utils/ClaudexActivity.cpp
-    src/utils/ModeCycle.cpp
-    src/utils/Clipboard.cpp
-    src/utils/TranscriptExpansion.cpp
-    src/TuiRunner.cpp
-    src/FatalSignalHandler.cpp
-    src/components/LiveStatusRow.cpp
+    src/StatusBar.cpp
+    src/AgentTabBar.cpp
+    src/InputBar.cpp
+    src/BottomBar.cpp
+    src/KeybindRegistry.cpp
+    src/Layout.cpp
+    src/CommandManager.cpp
+    src/WorkflowCommand.cpp
+    src/MenuList.cpp
+    src/InfoOverlay.cpp
+    src/AccountsOverlay.cpp
+    src/ConnectOverlay.cpp
+    src/RewindOverlay.cpp
+    src/RedoOverlay.cpp
+    src/RouterOverlay.cpp
+    src/PurposesOverlay.cpp
+    src/PermissionPromptOverlay.cpp
+    src/PermissionsOverlay.cpp
+    src/Clipboard.cpp
+    src/NotificationCenter.cpp
+    src/NotificationStrip.cpp
+    # Items
+    src/items/SimpleItems.cpp
+    src/items/StreamingItems.cpp
+    src/items/ToolCallItem.cpp
+    # Utilities
+    src/DiffRenderer.cpp
+    src/AnsiOutputParser.cpp
+    src/SyntaxHighlighter.cpp
+    # Presenter system
+    src/tools/ToolPresenterRegistry.cpp
+    src/tools/ProcessPresenter.cpp
+    src/tools/DelegatePresenter.cpp
+    src/tools/EditPresenter.cpp
+    src/tools/ReadPresenter.cpp
+    src/tools/ListPresenter.cpp
+    src/tools/GrepPresenter.cpp
+    src/tools/GlobPresenter.cpp
+    src/tools/ArtifactsPresenter.cpp
+    src/tools/WebPresenter.cpp
+    src/tools/LspPresenter.cpp
+    src/tools/FleetPresenter.cpp
+    src/tools/TodoPresenter.cpp
+    src/tools/ModeSwitchPresenter.cpp
+    src/tools/SkillPresenter.cpp
+    src/tools/McpPresenter.cpp
+    src/tools/GenericPresenter.cpp
 )
 
-target_include_directories(firmius_tui PUBLIC include)
-target_include_directories(firmius_tui PRIVATE src)
+target_include_directories(firmius_tui PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+)
+
+target_link_libraries(firmius_tui PUBLIC
+    firmius::server
+    firmius::shared
+)
 
 target_link_libraries(firmius_tui PRIVATE
-    firmius::core
-    ftxui::screen
-    ftxui::dom
-    ftxui::component
     tree_sitter_all
 )
 
-# Include rapidjson headers
-target_include_directories(firmius_tui PRIVATE
-    ${rapidjson_SOURCE_DIR}/include
-    ${ftxui_SOURCE_DIR}/include
-)
+target_compile_features(firmius_tui PUBLIC cxx_std_20)
 
-# Same compiler warnings as rest of project
-target_compile_options(firmius_tui PRIVATE
-    -Wall -Wextra -Werror
-)
-
-if(APPLE)
-    set_source_files_properties(src/utils/Clipboard.cpp PROPERTIES
-        LANGUAGE OBJCXX
-    )
-    target_link_libraries(firmius_tui PRIVATE
-        "-framework AppKit"
-    )
+if((CMAKE_CXX_COMPILER_ID STREQUAL "GNU") OR (CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND NOT MSVC))
+    target_compile_options(firmius_tui PRIVATE -Wall -Wextra -Werror -Wno-error=maybe-uninitialized)
+elseif(MSVC)
+    target_compile_options(firmius_tui PRIVATE /W4 /WX)
 endif()
+
+# Test target
+add_executable(firmius_tui_tests)
+target_sources(firmius_tui_tests PRIVATE
+    tests/AppStateTest.cpp
+    tests/AccountsOverlayTest.cpp
+    tests/EventRouterTest.cpp
+    tests/KeybindRegistryTest.cpp
+    tests/MenuListTest.cpp
+    tests/TranscriptRendererTest.cpp
+    tests/AnsiParserTest.cpp
+    tests/TranscriptItemTest.cpp
+    tests/ToolPresenterRegistryTest.cpp
+    tests/DiffRendererTest.cpp
+    tests/AnsiOutputParserTest.cpp
+    tests/ProcessPresenterTest.cpp
+    tests/DelegatePresenterTest.cpp
+    tests/EditPresenterTest.cpp
+    tests/ReadPresenterTest.cpp
+    tests/ListPresenterTest.cpp
+    tests/GrepPresenterTest.cpp
+    tests/GlobPresenterTest.cpp
+    tests/ArtifactsPresenterTest.cpp
+    tests/WebPresenterTest.cpp
+    tests/LspPresenterTest.cpp
+    tests/FleetPresenterTest.cpp
+    tests/MiscPresenterTest.cpp
+)
+
+target_link_libraries(firmius_tui_tests PRIVATE
+    firmius::tui
+    GTest::gtest_main
+)
+
+target_compile_features(firmius_tui_tests PRIVATE cxx_std_20)
+
+if((CMAKE_CXX_COMPILER_ID STREQUAL "GNU") OR (CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND NOT MSVC))
+    target_compile_options(firmius_tui_tests PRIVATE -Wall -Wextra -Werror -Wno-error=maybe-uninitialized)
+elseif(MSVC)
+    target_compile_options(firmius_tui_tests PRIVATE /W4 /WX)
+endif()
+
+add_test(NAME firmius_tui_tests COMMAND firmius_tui_tests)
