@@ -1,23 +1,15 @@
 #include "mcp/McpStdioSession.hpp"
 
+#include "utils/JsonUtil.hpp"
 #include "utils/StringUtil.hpp"
 
 #include <chrono>
 #include <rapidjson/error/en.h>
-#include <rapidjson/stringbuffer.h>
-#include <rapidjson/writer.h>
 #include <iostream>
 #include <stdexcept>
 
 namespace firmius::core::mcp {
 namespace {
-
-std::string jsonToString(const rapidjson::Value &value) {
-  rapidjson::StringBuffer buffer;
-  rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
-  value.Accept(writer);
-  return std::string(buffer.GetString());
-}
 
 rapidjson::Document parseJsonOrThrow(const std::string &jsonText,
                                      const std::string &context) {
@@ -66,7 +58,7 @@ rapidjson::Document McpStdioSession::sendRequest(const int id,
   copiedParams.CopyFrom(params, a);
   request.AddMember("params", copiedParams, a);
 
-  const std::string body = jsonToString(request);
+  const std::string body = firmius::shared::toJsonString(request);
   // Standard MCP stdio transport uses newline-delimited JSON ONLY.
   // Headers like Content-Length are for HTTP/LSP and confuse standard MCP servers.
   const std::string framed = body + "\n";
@@ -87,7 +79,7 @@ void McpStdioSession::sendNotification(const std::string &method,
   copiedParams.CopyFrom(params, a);
   request.AddMember("params", copiedParams, a);
 
-  const std::string body = jsonToString(request);
+  const std::string body = firmius::shared::toJsonString(request);
   // Standard MCP stdio transport uses newline-delimited JSON ONLY.
   const std::string framed = body + "\n";
   process_.write(framed);

@@ -7,6 +7,7 @@ target_sources(firmius_shared PRIVATE
     src/Panic.cpp
     src/utils/JSONSchema.cpp
     src/utils/JSONSchemaFromJson.cpp
+    src/utils/JsonUtil.cpp
     src/utils/StringUtil.cpp
     src/utils/HistoryMetrics.cpp
     src/utils/FSUtil.cpp
@@ -105,3 +106,4 @@ if(WIN32)
     WINVER=0x0A00
   )
 endif()
+

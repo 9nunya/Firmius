@@ -50,6 +50,7 @@
 #include "tools/WebTool.hpp"
 #include "lsp/LspServerManager.hpp"
 #include "utils/HistoryMetrics.hpp"
+#include "utils/JsonUtil.hpp"
 #include "utils/StringUtil.hpp"
 #include "utils/Hashline.hpp"
 #include <Panic.hpp>
@@ -118,13 +119,6 @@ std::string joinStoredLines(const std::vector<std::string> &lines) {
     out << lines[i];
   }
   return out.str();
-}
-
-std::string rapidJsonToString(const rapidjson::Document &d) {
-  rapidjson::StringBuffer buffer;
-  rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
-  d.Accept(writer);
-  return buffer.GetString();
 }
 
 std::vector<std::string> parseStringArrayMember(const rapidjson::Value &value,
@@ -1836,7 +1830,7 @@ Engine::undoEditBatch(const std::string &agentId, const std::string &editBatchId
           .count());
   action.resultStatus = eligibility.resultStatus;
 
-  action.resultJson = rapidJsonToString(shared::toJson(eligibility));
+  action.resultJson = firmius::shared::toJsonString(shared::toJson(eligibility));
   if (eligibility.undoable) {
     const auto detail = tm.getEditBatch(threadId, editBatchId);
     for (auto it = detail.files.rbegin(); it != detail.files.rend(); ++it) {

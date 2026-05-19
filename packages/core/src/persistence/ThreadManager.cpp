@@ -2,6 +2,7 @@
 
 #include "AgentRegistry.hpp"
 #include "Serialization.hpp"
+#include "utils/JsonUtil.hpp"
 #include "utils/PlatformPaths.hpp"
 #include "utils/StringUtil.hpp"
 
@@ -60,13 +61,6 @@ uint64_t nowEpochMs() {
 
 std::string dbPathForBase(const std::string& basePath) {
     return (std::filesystem::path(basePath) / "firmius_threads.db").string();
-}
-
-std::string rapidJsonToString(const rapidjson::Document& d) {
-    rapidjson::StringBuffer buffer;
-    rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
-    d.Accept(writer);
-    return buffer.GetString();
 }
 
 rapidjson::Document parseJson(const std::string& text,
@@ -606,7 +600,7 @@ void persistAgentTurnMessagesV2(sqlite3* db, sqlite3_int64 turnRowId,
                                           ? std::string(partJson["type"].GetString())
                                           : std::string();
                     bindText(stmt, 3, type);
-                    bindText(stmt, 4, rapidJsonToString(partJson));
+                    bindText(stmt, 4, firmius::shared::toJsonString(partJson));
                 },
                 "Failed to write normalized message part");
             partOrdinal++;
@@ -658,11 +652,11 @@ void migrateLegacyToV2(sqlite3* db) {
                         bindText(stmt, 11, permissionMode);
                         sqlite3_bind_int64(stmt, 12, static_cast<sqlite3_int64>(metadata.createdAt));
                         sqlite3_bind_int64(stmt, 13, static_cast<sqlite3_int64>(metadata.lastActiveAt));
-                        bindText(stmt, 14, rapidJsonToString(hostOptionsJson));
+                        bindText(stmt, 14, firmius::shared::toJsonString(hostOptionsJson));
                         if (metadataJson.HasMember("lastRetryableRequest") && !metadataJson["lastRetryableRequest"].IsNull()) {
                             rapidjson::Document retryDoc;
                             retryDoc.CopyFrom(metadataJson["lastRetryableRequest"], retryDoc.GetAllocator());
-                            bindText(stmt, 15, rapidJsonToString(retryDoc));
+                            bindText(stmt, 15, firmius::shared::toJsonString(retryDoc));
                         } else {
                             sqlite3_bind_null(stmt, 15);
                         }
@@ -1218,12 +1212,12 @@ std::string ThreadManager::createThread(const ThreadMetadata& metadata) {
             bindText(stmt, 11, permissionMode);
             sqlite3_bind_int64(stmt, 12, static_cast<sqlite3_int64>(persisted.createdAt));
             sqlite3_bind_int64(stmt, 13, static_cast<sqlite3_int64>(persisted.lastActiveAt));
-            bindText(stmt, 14, rapidJsonToString(hostOptionsJson));
+            bindText(stmt, 14, firmius::shared::toJsonString(hostOptionsJson));
             if (metadataJson.HasMember("lastRetryableRequest") &&
                 !metadataJson["lastRetryableRequest"].IsNull()) {
                 rapidjson::Document retryDoc;
                 retryDoc.CopyFrom(metadataJson["lastRetryableRequest"], retryDoc.GetAllocator());
-                bindText(stmt, 15, rapidJsonToString(retryDoc));
+                bindText(stmt, 15, firmius::shared::toJsonString(retryDoc));
             } else {
                 sqlite3_bind_null(stmt, 15);
             }
@@ -1527,12 +1521,12 @@ void ThreadManager::updateMetadata(const std::string& threadId,
             bindText(stmt, 10, permissionMode);
             sqlite3_bind_int64(stmt, 11, static_cast<sqlite3_int64>(persisted.createdAt));
             sqlite3_bind_int64(stmt, 12, static_cast<sqlite3_int64>(persisted.lastActiveAt));
-            bindText(stmt, 13, rapidJsonToString(hostOptionsJson));
+            bindText(stmt, 13, firmius::shared::toJsonString(hostOptionsJson));
             if (metadataJson.HasMember("lastRetryableRequest") &&
                 !metadataJson["lastRetryableRequest"].IsNull()) {
                 rapidjson::Document retryDoc;
                 retryDoc.CopyFrom(metadataJson["lastRetryableRequest"], retryDoc.GetAllocator());
-                bindText(stmt, 14, rapidJsonToString(retryDoc));
+                bindText(stmt, 14, firmius::shared::toJsonString(retryDoc));
             } else {
                 sqlite3_bind_null(stmt, 14);
             }
@@ -1803,7 +1797,7 @@ void ThreadManager::writeAgentLiveState(const std::string& threadId,
                    "Failed to prepare write live state statement");
     bindText(stmt.get(), 1, threadId);
     bindText(stmt.get(), 2, agentId);
-    bindText(stmt.get(), 3, rapidJsonToString(liveStateToJson(persisted)));
+    bindText(stmt.get(), 3, firmius::shared::toJsonString(liveStateToJson(persisted)));
     if (sqlite3_step(stmt.get()) != SQLITE_DONE) {
         throwSqliteError(conn->db, "Failed to write live state");
     }
@@ -1925,7 +1919,7 @@ void ThreadManager::writeFleetState(const std::string& threadId,
     d.AddMember("locks", locks, a);
 
     writeThreadStateField(conn->db, threadId, "fleet_state_json",
-                          rapidJsonToString(d));
+                          firmius::shared::toJsonString(d));
 }
 
 FleetState ThreadManager::mutateFleetState(
@@ -1982,7 +1976,7 @@ void ThreadManager::appendCompactionSnapshot(
     bindText(stmt.get(), 1, threadId);
     bindText(stmt.get(), 2, agentId);
     bindText(stmt.get(), 3, snapshot.compactionId);
-    bindText(stmt.get(), 4, rapidJsonToString(doc));
+    bindText(stmt.get(), 4, firmius::shared::toJsonString(doc));
     if (sqlite3_step(stmt.get()) != SQLITE_DONE) {
         throwSqliteError(conn->db, "Failed to append compaction snapshot");
     }
@@ -2324,7 +2318,7 @@ void ThreadManager::writeEditBatch(
                 bindText(stmt, 9, summary.requestMode);
                 sqlite3_bind_int64(stmt, 10, static_cast<sqlite3_int64>(summary.createdAt));
                 bindText(stmt, 11, shared::editBatchStatusToString(summary.status));
-                bindText(stmt, 12, rapidJsonToString(shared::toJson(summary)));
+                bindText(stmt, 12, firmius::shared::toJsonString(shared::toJson(summary)));
                 bindOptionalText(stmt, 13, summary.undoActionBatchId);
             },
             "Failed to write edit batch");
@@ -2348,7 +2342,7 @@ void ThreadManager::writeEditBatch(
                     bindText(stmt, 4, file.filePath);
                     sqlite3_bind_int(stmt, 5, file.ordinalInBatch);
                     bindText(stmt, 6, shared::editFileMutationStatusToString(file.status));
-                    bindText(stmt, 7, rapidJsonToString(shared::toJson(file)));
+                    bindText(stmt, 7, firmius::shared::toJsonString(shared::toJson(file)));
                 },
                 "Failed to write edit file mutation");
         }
@@ -2459,7 +2453,7 @@ void ThreadManager::updateEditFileMutationStatus(
                  "UPDATE edit_file_mutations_v1 SET status=?, mutation_json=? WHERE thread_id=? AND file_mutation_id=?;",
                  [&](sqlite3_stmt* updateStmt) {
                      bindText(updateStmt, 1, shared::editFileMutationStatusToString(status));
-                     bindText(updateStmt, 2, rapidJsonToString(shared::toJson(mutation)));
+                     bindText(updateStmt, 2, firmius::shared::toJsonString(shared::toJson(mutation)));
                      bindText(updateStmt, 3, threadId);
                      bindText(updateStmt, 4, fileMutationId);
                  },
@@ -2570,7 +2564,7 @@ void ThreadManager::writeTranscriptUndoAction(
                          sqlite3_bind_int64(stmt, 6, static_cast<sqlite3_int64>(action.createdAt));
                          sqlite3_bind_int(stmt, 7, action.redoAvailable ? 1 : 0);
                          bindText(stmt, 8, action.reason);
-                         bindText(stmt, 9, rapidJsonToString(shared::toJson(action)));
+                         bindText(stmt, 9, firmius::shared::toJsonString(shared::toJson(action)));
                      },
                      "Failed to write transcript undo action");
         execPrepared(conn->db,
@@ -2587,7 +2581,7 @@ void ThreadManager::writeTranscriptUndoAction(
                              bindText(stmt, 1, threadId);
                              bindText(stmt, 2, action.undoActionId);
                              sqlite3_bind_int(stmt, 3, payload.ordinal);
-                             bindText(stmt, 4, rapidJsonToString(shared::toJson(payload)));
+                             bindText(stmt, 4, firmius::shared::toJsonString(shared::toJson(payload)));
                          },
                          "Failed to write transcript redo payload");
         }
@@ -2662,7 +2656,7 @@ void ThreadManager::markTranscriptUndoRedoAvailability(
                  "UPDATE transcript_undo_actions_v1 SET redo_available=?, action_json=? WHERE thread_id=? AND undo_action_id=?;",
                  [&](sqlite3_stmt* stmt) {
                      sqlite3_bind_int(stmt, 1, available ? 1 : 0);
-                     bindText(stmt, 2, rapidJsonToString(shared::toJson(*existing)));
+                     bindText(stmt, 2, firmius::shared::toJsonString(shared::toJson(*existing)));
                      bindText(stmt, 3, threadId);
                      bindText(stmt, 4, undoActionId);
                  },

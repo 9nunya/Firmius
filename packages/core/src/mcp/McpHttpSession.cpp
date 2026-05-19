@@ -1,23 +1,15 @@
 #include "mcp/McpHttpSession.hpp"
 
 #include "utils/GCPHttpClient.hpp"
+#include "utils/JsonUtil.hpp"
 
 #include <rapidjson/error/en.h>
-#include <rapidjson/stringbuffer.h>
-#include <rapidjson/writer.h>
 
 #include <algorithm>
 #include <stdexcept>
 
 namespace firmius::core::mcp {
 namespace {
-
-std::string jsonToString(const rapidjson::Value &value) {
-  rapidjson::StringBuffer buffer;
-  rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
-  value.Accept(writer);
-  return std::string(buffer.GetString());
-}
 
 rapidjson::Document parseJsonOrThrow(const std::string &jsonText,
                                      const std::string &context) {
@@ -86,7 +78,7 @@ rapidjson::Document McpHttpSession::sendJsonRpc(const rapidjson::Document &reque
     throw std::runtime_error("Interrupted");
   }
 
-  const std::string requestBody = jsonToString(request);
+  const std::string requestBody = firmius::shared::toJsonString(request);
   const McpHttpResponse response = sender_(config_, requestBody, timeoutMs);
 
   if (response.error.size() > 0) {
