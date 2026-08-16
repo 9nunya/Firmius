@@ -362,9 +362,10 @@ impl Model {
     }
 
     fn run_command(&mut self, line: &str) -> Action {
+        use command::Command;
         match command::parse(line) {
-            command::Command::Quit => Action::Quit,
-            command::Command::Help => {
+            Ok(Command::Quit) => Action::Quit,
+            Ok(Command::Help) => {
                 let help = command::help_text();
                 self.transcripts
                     .entry(self.primary_id.clone())
@@ -372,8 +373,16 @@ impl Model {
                     .push(Item::Note(help));
                 Action::Continue
             }
-            command::Command::Unknown(name) => {
-                self.flash(&format!("unknown command: {name}"));
+            Ok(other) => {
+                if self.busy && !command::busy_ok(&other) {
+                    self.flash("busy — try again after the turn");
+                } else {
+                    self.flash(&format!("not wired yet: {}", other.name()));
+                }
+                Action::Continue
+            }
+            Err(e) => {
+                self.flash(&e.to_string());
                 Action::Continue
             }
         }

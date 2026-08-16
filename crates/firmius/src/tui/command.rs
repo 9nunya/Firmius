@@ -1,22 +1,381 @@
-//! Slash commands. First pass: parse + metadata only, `/quit`, `/exit`,
-//! `/help`. The full typed command set (model, effort, rewind, resume, ...)
-//! replaces the internals; `parse` and `Command` are the pinned surface.
+//! Slash commands: a typed `Command` enum, a whitespace-tolerant parser,
+//! and a static metadata table that is the single source of truth for
+//! help text and busy-gating (and completion, later). `/exit` is an
+//! alias for `/quit`; every other command gets exactly one [`table`] row.
 
+/// A parsed slash command. Aliases fold into their canonical variant.
+#[derive(Debug, Clone, PartialEq)]
 pub enum Command {
+    /// Leave the TUI; the session is saved on the way out (`/exit` too).
     Quit,
+    /// Print [`help_text`] into the transcript as a note.
     Help,
-    Unknown(String),
+    /// Show session, agent, and turn status.
+    Status,
+    /// Save the session now.
+    Save,
+    /// List the agents in this session.
+    Agents,
+    /// Rewind the transcript; defaults to one turn when no count is given.
+    Rewind { turns: usize },
+    /// Clear the transcript view.
+    Clear,
+    /// Switch the primary model.
+    Model { id: String },
+    /// Set the reasoning effort.
+    Effort { name: String },
+    /// Resume a saved session; the latest one when no id is given.
+    Resume { id: Option<String> },
 }
 
-pub fn parse(line: &str) -> Command {
-    let name = line.trim().split_whitespace().next().unwrap_or("");
-    match name {
-        "/quit" | "/exit" => Command::Quit,
-        "/help" => Command::Help,
-        other => Command::Unknown(other.to_string()),
+impl Command {
+    /// Canonical slash name; aliases report their canonical form.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Command::Quit => "/quit",
+            Command::Help => "/help",
+            Command::Status => "/status",
+            Command::Save => "/save",
+            Command::Agents => "/agents",
+            Command::Rewind { .. } => "/rewind",
+            Command::Clear => "/clear",
+            Command::Model { .. } => "/model",
+            Command::Effort { .. } => "/effort",
+            Command::Resume { .. } => "/resume",
+        }
     }
 }
 
+/// Why a composer line failed to parse.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CmdError {
+    /// No such command, e.g. `/foo`. Holds the offending token.
+    Unknown(String),
+    /// A required argument is missing, e.g. `"model id"`.
+    MissingArg(&'static str),
+    /// An argument is malformed or surplus, e.g. rewind `"abc"`.
+    BadArg(String),
+}
+
+impl std::fmt::Display for CmdError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CmdError::Unknown(name) => write!(f, "unknown command: {name}"),
+            CmdError::MissingArg(what) => write!(f, "missing argument: {what}"),
+            CmdError::BadArg(tok) => write!(f, "bad argument: {tok}"),
+        }
+    }
+}
+
+/// Metadata for one command: the single source of truth for help text,
+/// busy-gating, and (later) completion.
+pub struct CommandInfo {
+    /// Canonical slash name, e.g. `"/rewind"`.
+    pub name: &'static str,
+    /// Argument synopsis shown beside the name, e.g. `"[turns]"`.
+    pub args: &'static str,
+    /// One-line blurb for the help text.
+    pub help: &'static str,
+    /// Whether the command may run while the primary agent is busy.
+    pub busy_ok: bool,
+}
+
+/// One row per [`Command`] variant, aliases folded into their canonical
+/// command. Tests police that this stays honest with the enum.
+pub fn table() -> &'static [CommandInfo] {
+    &[
+        CommandInfo {
+            name: "/quit",
+            args: "",
+            help: "leave (session is saved); /exit is an alias",
+            busy_ok: false,
+        },
+        CommandInfo {
+            name: "/help",
+            args: "",
+            help: "print this list",
+            busy_ok: true,
+        },
+        CommandInfo {
+            name: "/status",
+            args: "",
+            help: "show session, agents, and turn status",
+            busy_ok: true,
+        },
+        CommandInfo {
+            name: "/save",
+            args: "",
+            help: "save the session now",
+            busy_ok: false,
+        },
+        CommandInfo {
+            name: "/agents",
+            args: "",
+            help: "list the agents in this session",
+            busy_ok: true,
+        },
+        CommandInfo {
+            name: "/rewind",
+            args: "[turns]",
+            help: "rewind the transcript (default 1 turn)",
+            busy_ok: false,
+        },
+        CommandInfo {
+            name: "/clear",
+            args: "",
+            help: "clear the transcript view",
+            busy_ok: false,
+        },
+        CommandInfo {
+            name: "/model",
+            args: "<id>",
+            help: "switch the primary model",
+            busy_ok: false,
+        },
+        CommandInfo {
+            name: "/effort",
+            args: "<name>",
+            help: "set the reasoning effort",
+            busy_ok: false,
+        },
+        CommandInfo {
+            name: "/resume",
+            args: "[id]",
+            help: "resume a saved session (latest if no id)",
+            busy_ok: false,
+        },
+    ]
+}
+
+/// Reject surplus tokens; the first offender names the error.
+fn no_extra(rest: &[&str]) -> Result<(), CmdError> {
+    match rest.first() {
+        Some(extra) => Err(CmdError::BadArg((*extra).to_string())),
+        None => Ok(()),
+    }
+}
+
+/// Parse one composer line into a [`Command`]. Tokens are split on any
+/// whitespace run; the first token names the command, required arguments
+/// are positional, and surplus tokens are rejected.
+pub fn parse(line: &str) -> Result<Command, CmdError> {
+    let toks: Vec<&str> = line.split_whitespace().collect();
+    let Some((head, rest)) = toks.split_first() else {
+        return Err(CmdError::Unknown(String::new()));
+    };
+    match *head {
+        "/quit" | "/exit" => no_extra(rest).map(|()| Command::Quit),
+        "/help" => no_extra(rest).map(|()| Command::Help),
+        "/status" => no_extra(rest).map(|()| Command::Status),
+        "/save" => no_extra(rest).map(|()| Command::Save),
+        "/agents" => no_extra(rest).map(|()| Command::Agents),
+        "/clear" => no_extra(rest).map(|()| Command::Clear),
+        "/rewind" => {
+            let (turns, rest) = match rest.split_first() {
+                None => (1, rest),
+                Some((tok, rest)) => match tok.parse::<usize>() {
+                    Ok(n) if n > 0 => (n, rest),
+                    _ => return Err(CmdError::BadArg((*tok).to_string())),
+                },
+            };
+            no_extra(rest).map(|()| Command::Rewind { turns })
+        }
+        "/model" => {
+            let Some((id, rest)) = rest.split_first() else {
+                return Err(CmdError::MissingArg("model id"));
+            };
+            no_extra(rest).map(|()| Command::Model { id: (*id).to_string() })
+        }
+        "/effort" => {
+            let Some((name, rest)) = rest.split_first() else {
+                return Err(CmdError::MissingArg("effort name"));
+            };
+            no_extra(rest).map(|()| Command::Effort { name: (*name).to_string() })
+        }
+        "/resume" => match rest.split_first() {
+            None => Ok(Command::Resume { id: None }),
+            Some((id, rest)) => {
+                no_extra(rest).map(|()| Command::Resume { id: Some((*id).to_string()) })
+            }
+        },
+        other => Err(CmdError::Unknown(other.to_string())),
+    }
+}
+
+/// Whether `cmd` may run while the primary agent is busy; derived from
+/// [`table`] so the metadata and the enum stay honest together.
+pub fn busy_ok(cmd: &Command) -> bool {
+    table()
+        .iter()
+        .find(|info| info.name == cmd.name())
+        .is_some_and(|info| info.busy_ok)
+}
+
+/// Help text generated from [`table`]: left column is name plus args,
+/// right column the blurb, aligned to the widest left entry. Never
+/// hand-maintain this; edit the table instead.
 pub fn help_text() -> String {
-    "/quit, /exit — leave (session is saved)\n/help — this list".to_string()
+    let lefts: Vec<String> = table()
+        .iter()
+        .map(|info| {
+            if info.args.is_empty() {
+                info.name.to_string()
+            } else {
+                format!("{} {}", info.name, info.args)
+            }
+        })
+        .collect();
+    let width = lefts.iter().map(String::len).max().unwrap_or(0);
+    table()
+        .iter()
+        .zip(&lefts)
+        .map(|(info, left)| format!("{left:<width$}  {}", info.help))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quit_and_exit_are_aliases() {
+        assert_eq!(parse("/quit"), Ok(Command::Quit));
+        assert_eq!(parse("/exit"), Ok(Command::Quit));
+    }
+
+    #[test]
+    fn bare_commands_parse() {
+        assert_eq!(parse("/help"), Ok(Command::Help));
+        assert_eq!(parse("/status"), Ok(Command::Status));
+        assert_eq!(parse("/save"), Ok(Command::Save));
+        assert_eq!(parse("/agents"), Ok(Command::Agents));
+        assert_eq!(parse("/clear"), Ok(Command::Clear));
+    }
+
+    #[test]
+    fn rewind_defaults_to_one_turn() {
+        assert_eq!(parse("/rewind"), Ok(Command::Rewind { turns: 1 }));
+    }
+
+    #[test]
+    fn rewind_parses_an_explicit_count() {
+        assert_eq!(parse("/rewind 3"), Ok(Command::Rewind { turns: 3 }));
+    }
+
+    #[test]
+    fn model_takes_an_id() {
+        assert_eq!(
+            parse("/model sonnet-4"),
+            Ok(Command::Model { id: "sonnet-4".to_string() }),
+        );
+    }
+
+    #[test]
+    fn effort_takes_a_name() {
+        assert_eq!(
+            parse("/effort high"),
+            Ok(Command::Effort { name: "high".to_string() }),
+        );
+    }
+
+    #[test]
+    fn resume_bare_and_with_id() {
+        assert_eq!(parse("/resume"), Ok(Command::Resume { id: None }));
+        assert_eq!(
+            parse("/resume sess_123"),
+            Ok(Command::Resume { id: Some("sess_123".to_string()) }),
+        );
+    }
+
+    #[test]
+    fn whitespace_is_tolerated() {
+        assert_eq!(parse("  /rewind \t 5  "), Ok(Command::Rewind { turns: 5 }));
+        assert_eq!(parse("   /help   "), Ok(Command::Help));
+    }
+
+    #[test]
+    fn unknown_command_is_reported() {
+        assert_eq!(parse("/foo"), Err(CmdError::Unknown("/foo".to_string())));
+    }
+
+    #[test]
+    fn empty_line_is_unknown() {
+        assert_eq!(parse(""), Err(CmdError::Unknown(String::new())));
+        assert_eq!(parse("   "), Err(CmdError::Unknown(String::new())));
+    }
+
+    #[test]
+    fn missing_required_args_are_reported() {
+        assert_eq!(parse("/model"), Err(CmdError::MissingArg("model id")));
+        assert_eq!(parse("/effort"), Err(CmdError::MissingArg("effort name")));
+    }
+
+    #[test]
+    fn rewind_rejects_zero_and_non_numeric() {
+        assert_eq!(parse("/rewind 0"), Err(CmdError::BadArg("0".to_string())));
+        assert_eq!(parse("/rewind abc"), Err(CmdError::BadArg("abc".to_string())));
+        assert_eq!(parse("/rewind -2"), Err(CmdError::BadArg("-2".to_string())));
+    }
+
+    #[test]
+    fn extra_args_are_rejected_with_the_offender() {
+        assert_eq!(parse("/quit now"), Err(CmdError::BadArg("now".to_string())));
+        assert_eq!(parse("/help please"), Err(CmdError::BadArg("please".to_string())));
+        assert_eq!(parse("/rewind 2 3"), Err(CmdError::BadArg("3".to_string())));
+        assert_eq!(parse("/model a b"), Err(CmdError::BadArg("b".to_string())));
+        assert_eq!(parse("/resume a b"), Err(CmdError::BadArg("b".to_string())));
+    }
+
+    #[test]
+    fn error_display_messages() {
+        assert_eq!(
+            CmdError::Unknown("/foo".to_string()).to_string(),
+            "unknown command: /foo",
+        );
+        assert_eq!(
+            CmdError::MissingArg("model id").to_string(),
+            "missing argument: model id",
+        );
+        assert_eq!(CmdError::BadArg("abc".to_string()).to_string(), "bad argument: abc");
+    }
+
+    #[test]
+    fn table_has_one_row_per_command() {
+        // One row per Command variant; /exit folds into /quit.
+        assert_eq!(table().len(), 10);
+        let mut names: Vec<&str> = table().iter().map(|info| info.name).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), table().len(), "table rows must be unique");
+    }
+
+    #[test]
+    fn help_text_lists_every_command() {
+        let help = help_text();
+        for info in table() {
+            assert!(help.contains(info.name), "help is missing {}", info.name);
+        }
+    }
+
+    #[test]
+    fn busy_ok_matches_the_table() {
+        let cases = [
+            (Command::Quit, false),
+            (Command::Help, true),
+            (Command::Status, true),
+            (Command::Save, false),
+            (Command::Agents, true),
+            (Command::Rewind { turns: 1 }, false),
+            (Command::Clear, false),
+            (Command::Model { id: "m".to_string() }, false),
+            (Command::Effort { name: "e".to_string() }, false),
+            (Command::Resume { id: None }, false),
+        ];
+        for (cmd, want) in &cases {
+            assert_eq!(busy_ok(cmd), *want, "busy_ok for {}", cmd.name());
+        }
+        // Every variant is covered exactly once, one case per table row.
+        assert_eq!(cases.len(), table().len());
+    }
 }
