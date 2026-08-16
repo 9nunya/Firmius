@@ -19,9 +19,11 @@ pub use persistence::{
 };
 pub use providers::{
     AnthropicProvider, OpenAiProvider, Provider, ProviderError, ProviderEvent, ProviderSchema,
-    manager::ProviderManager, schema::ApiType,
+manager::ProviderManager, schema::ApiType,
 };
-pub use session::{AgentNode, Agents, Session};
+pub use session::{
+    AgentNode, Agents, DelegateStatus, Session, SessionEvent, SESSION_EVENT_CAPACITY,
+};
 pub use tools::{
     Tool, ToolContext, ToolError, ToolRegistry, TypedTool, register_bash_tool,
     register_delegate_tool, register_edit_tool, register_glob_tool, register_grep_tool,

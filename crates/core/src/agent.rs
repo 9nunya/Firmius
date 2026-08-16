@@ -8,6 +8,7 @@ use crate::types::{
 use futures::StreamExt;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock, Weak};
+use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -38,6 +39,8 @@ pub enum AgentError {
     Cancelled(String),
     #[error("hit max turns ({0}) without stopping")]
     MaxTurns(u32),
+    #[error("agent is busy: a turn is running (or a mutation was attempted mid-turn)")]
+    Busy,
 }
 
 // ---------------------------------------------------------------------------
@@ -109,13 +112,18 @@ impl StopPolicy for DefaultStopPolicy {
 
 /// A reusable ReAct agent: prompt it repeatedly, it keeps a running trajectory,
 /// manages the tool-call loop, and stops per its `StopPolicy`.
-pub struct Agent {
+    pub struct Agent {
     pub id: String,
     pub session_id: String,
     state: Arc<RwLock<AgentState>>,
-    provider: Arc<dyn Provider>,
+    /// Interior-mutable so reconfiguration (`set_provider`) can swap backends
+    /// between turns without rebuilding the agent. Always kept in agreement
+    /// with `config.provider_id` — change both via `set_provider` only.
+    provider: RwLock<Arc<dyn Provider>>,
     tools: Arc<ToolRegistry>,
-    config: AgentConfig,
+    /// Interior-mutable between turns via `update_config`/`set_provider`;
+    /// both refuse to run while `busy` is held (i.e. mid-turn).
+    config: RwLock<AgentConfig>,
     stop_policy: Arc<dyn StopPolicy>,
     /// This agent's OS boundary. One per agent, so a background process
     /// spawned via `bash` in one turn is still pollable/waitable in the next.
@@ -126,6 +134,12 @@ pub struct Agent {
     /// construction via `attach_session` once the caller has wrapped the
     /// `Session` in `Arc<tokio::sync::Mutex<_>>`.
     session_handle: RwLock<Option<Weak<tokio::sync::Mutex<crate::session::Session>>>>,
+    /// Session event bus this agent tees every emitted `AgentEvent` into.
+    /// `None` for agents that live outside a session (e.g. unit tests).
+    bus: RwLock<Option<broadcast::Sender<crate::session::SessionEvent>>>,
+    /// Held for the entire duration of `prompt()`. Serializes turns on this
+    /// agent, and lets between-turn mutators refuse to run mid-turn.
+    busy: tokio::sync::Mutex<()>,
 }
 
 /// Streamed observation of what the agent is doing, for a UI/CLI to render.
@@ -168,12 +182,14 @@ impl Agent {
             id: Uuid::new_v4().to_string(),
             session_id: session_id.into(),
             state: Arc::new(RwLock::new(state)),
-            provider,
+            provider: RwLock::new(provider),
             tools,
-            config,
+            config: RwLock::new(config),
             stop_policy: Arc::new(DefaultStopPolicy),
             host: Arc::new(LocalHost::new()),
             session_handle: RwLock::new(None),
+            bus: RwLock::new(None),
+            busy: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -181,7 +197,14 @@ impl Agent {
     /// `Session::spawn_subagent` (e.g. the `delegate` tool). Idempotent;
     /// call again to re-attach after a resume.
     pub fn attach_session(&self, session: Arc<tokio::sync::Mutex<crate::session::Session>>) {
-        *self.session_handle.write().unwrap() = Some(Arc::downgrade(&session));
+    *self.session_handle.write().unwrap() = Some(Arc::downgrade(&session));
+    }
+
+    /// Attach the session event bus: every event this agent emits is tee'd
+    /// into it alongside the per-prompt observer. Wired by `Session`;
+    /// idempotent.
+    pub fn attach_bus(&self, tx: broadcast::Sender<crate::session::SessionEvent>) {
+        *self.bus.write().unwrap() = Some(tx);
     }
 
     /// Use a custom `Host` instead of the default `LocalHost` (e.g. a
@@ -232,22 +255,85 @@ impl Agent {
         self.state.clone()
     }
 
-    /// This agent's configuration (model, provider id, effort, etc).
-    /// Read-only: build a new `Agent` to change it.
-    pub fn config(&self) -> &AgentConfig {
-        &self.config
+    /// Snapshot of this agent's configuration (model, provider id, effort…).
+    /// To change it between turns, use `update_config` / `set_provider`.
+    pub fn config(&self) -> AgentConfig {
+        self.config.read().unwrap().clone()
     }
 
     /// This agent's provider handle — reused as-is when spawning a subagent
     /// via the `delegate` tool (same account/base_url/api_key already
     /// resolved, no need to re-resolve through a `ProviderManager`).
     pub fn provider(&self) -> Arc<dyn Provider> {
-        self.provider.clone()
+        self.provider.read().unwrap().clone()
     }
 
     /// This agent's tool registry — reused as-is when spawning a subagent.
     pub fn tools(&self) -> Arc<ToolRegistry> {
         self.tools.clone()
+    }
+
+    // ------------------------------------------------------------------
+    // Between-turn mutation — guarded by `busy`
+    // ------------------------------------------------------------------
+
+    /// Apply a mutation to this agent's config between turns. Refuses while a
+    /// turn is running (`AgentError::Busy`). Safe because every mutable field
+    /// is re-read into `ProviderRequest` on each generation.
+    pub fn update_config(&self, f: impl FnOnce(&mut AgentConfig)) -> Result<(), AgentError> {
+        let _guard = self.busy.try_lock().map_err(|_| AgentError::Busy)?;
+        f(&mut self.config.write().unwrap());
+        Ok(())
+    }
+
+    /// Swap provider handle and `config.provider_id` atomically — the two
+    /// must always agree, so they change in one guarded operation.
+    pub fn set_provider(
+        &self,
+        provider_id: impl Into<String>,
+        provider: Arc<dyn Provider>,
+    ) -> Result<(), AgentError> {
+        let _guard = self.busy.try_lock().map_err(|_| AgentError::Busy)?;
+        self.config.write().unwrap().provider_id = provider_id.into();
+        *self.provider.write().unwrap() = provider;
+        Ok(())
+    }
+
+    /// Indexes of user messages — the only legal cut points for `rewind`,
+    /// since `validate_context` glues each tool-result message to the
+    /// assistant message preceding it.
+    fn user_turn_boundaries(history: &Context) -> Vec<usize> {
+        history
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.role == MessageRole::User)
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Rewind the trajectory by `turns` complete user turns, cutting at a
+    /// user-message boundary so tool call/result pairing is never broken.
+    /// A count beyond available history clamps to right after the leading
+    /// system messages (which is what powers `/clear`). Returns the number
+    /// of messages removed. Refuses mid-turn.
+    pub fn rewind(&self, turns: usize) -> Result<usize, AgentError> {
+        if turns == 0 {
+            return Ok(0);
+        }
+        let _guard = self.busy.try_lock().map_err(|_| AgentError::Busy)?;
+        let mut s = self.state.write().unwrap();
+        let cuts = Self::user_turn_boundaries(&s.history);
+        let at = match cuts.iter().rev().nth(turns - 1) {
+            Some(&i) => i,
+            None => s
+                .history
+                .iter()
+                .position(|m| m.role != MessageRole::System)
+                .unwrap_or(s.history.len()),
+        };
+        let removed = s.history.len() - at;
+        s.history.truncate(at);
+        Ok(removed)
     }
 
     /// Run the loop until the stop policy fires, returning the final text.
@@ -256,17 +342,37 @@ impl Agent {
         &self,
         user_input: impl Into<String>,
         cancellation: CancellationToken,
-        mut observer: impl FnMut(AgentEvent),
+    mut observer: impl FnMut(AgentEvent),
     ) -> Result<String, AgentError> {
+        // Serialize turns on this agent; this same guard is what the
+        // between-turn mutators check before touching config or history.
+        let _turn_guard = self.busy.try_lock().map_err(|_| AgentError::Busy)?;
+
         self.state
             .write()
             .unwrap()
             .history
             .push(Message::text(MessageRole::User, user_input.into()));
 
+        // Config can't change while we hold `busy`, so one snapshot is valid
+        // for every iteration of the loop.
+        let config = self.config.read().unwrap().clone();
+        let bus = self.bus.read().unwrap().clone();
+        // Tee every event into the session bus (when attached) and the
+        // caller's observer.
+        let mut emit = |event: AgentEvent| {
+            if let Some(tx) = &bus {
+                let _ = tx.send(crate::session::SessionEvent {
+                    agent_id: self.id.clone(),
+                    event: event.clone(),
+                });
+            }
+            observer(event);
+        };
+
         let mut final_text = String::new();
 
-        for _turn in 0..self.config.max_turns {
+        for _turn in 0..config.max_turns {
             if cancellation.is_cancelled() {
                 return Err(AgentError::Cancelled(final_text));
             }
@@ -276,25 +382,23 @@ impl Agent {
             }
 
             let request = ProviderRequest {
-                model: self.config.model.clone(),
+                model: config.model.clone(),
                 messages: self.state.read().unwrap().history.clone(),
                 tools: self.tools.definitions(),
-                temperature: self.config.temperature,
-                max_tokens: self.config.max_tokens,
-                reasoning_effort: self
-                    .config
+                temperature: config.temperature,
+                max_tokens: config.max_tokens,
+                reasoning_effort: config
                     .effort
                     .as_ref()
                     .and_then(|e| e.reasoning_effort.clone()),
-                thinking_budget_tokens: self
-                    .config
+                thinking_budget_tokens: config
                     .effort
                     .as_ref()
                     .and_then(|e| e.thinking_budget_tokens),
             };
 
             let (assistant, reason, turn_text, turn_usage) = self
-                .run_generation(request, &cancellation, &mut observer)
+                .run_generation(request, &cancellation, &mut emit)
                 .await?;
             {
                 let mut s = self.state.write().unwrap();
@@ -302,7 +406,7 @@ impl Agent {
                 s.history.push(assistant.clone());
             }
             final_text = turn_text;
-            observer(AgentEvent::TurnFinished);
+            emit(AgentEvent::TurnFinished);
 
             if self.stop_policy.should_stop(&assistant, reason) {
                 return Ok(final_text);
@@ -325,13 +429,13 @@ impl Agent {
                 if cancellation.is_cancelled() {
                     return Err(AgentError::Cancelled(final_text));
                 }
-                observer(AgentEvent::ToolCallStarted {
+                emit(AgentEvent::ToolCallStarted {
                     name: name.clone(),
                     args: args.clone(),
                 });
                 let parsed = serde_json::from_str(&args).unwrap_or(serde_json::Value::Null);
                 let ctx = ToolContext {
-                    workdir: self.config.workdir.clone(),
+                    workdir: config.workdir.clone(),
                     cancellation: cancellation.clone(),
                     agent_id: self.id.clone(),
                     session_id: self.session_id.clone(),
@@ -348,7 +452,7 @@ impl Agent {
                     Ok(output) => (output, true),
                     Err(e) => (e.to_string(), false),
                 };
-                observer(AgentEvent::ToolResult {
+                emit(AgentEvent::ToolResult {
                     name,
                     ok,
                     content: content.clone(),
@@ -363,10 +467,10 @@ impl Agent {
                 .write()
                 .unwrap()
                 .history
-                .push(Message::tool_results(results));
+            .push(Message::tool_results(results));
         }
 
-        Err(AgentError::MaxTurns(self.config.max_turns))
+        Err(AgentError::MaxTurns(config.max_turns))
     }
 
     /// Consume one provider stream into a single assistant message.
@@ -377,7 +481,9 @@ impl Agent {
         cancellation: &CancellationToken,
         observer: &mut impl FnMut(AgentEvent),
     ) -> Result<(Message, StopReason, String, Usage), AgentError> {
-        let mut stream = self.provider.stream(request).await?;
+        // Snapshot the provider handle first; never hold the lock across await.
+        let provider = self.provider.read().unwrap().clone();
+        let mut stream = provider.stream(request).await?;
 
         let mut text = String::new();
         let mut thinking = String::new();
@@ -457,5 +563,108 @@ fn build_assistant_message(
     Message {
         role: MessageRole::Assistant,
         content,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Emits nothing: enough to build an `Agent` for state-only tests
+    /// (rewind, config mutation) without a real backend.
+    struct DummyProvider;
+
+    #[async_trait::async_trait]
+    impl Provider for DummyProvider {
+        fn id(&self) -> &str {
+            "dummy"
+        }
+        async fn stream(
+            &self,
+            _request: ProviderRequest,
+        ) -> Result<
+            futures::stream::BoxStream<'static, Result<ProviderEvent, ProviderError>>,
+            ProviderError,
+        > {
+            Ok(futures::stream::empty().boxed())
+        }
+    }
+
+    fn agent_with_history(history: Context) -> Agent {
+        let config = AgentConfig {
+            provider_id: "dummy".into(),
+            model: "dummy-model".into(),
+            ..Default::default()
+        };
+        Agent::new(
+            Arc::new(DummyProvider),
+            Arc::new(ToolRegistry::default()),
+            config,
+            "test-session",
+        )
+        .with_history(history)
+    }
+
+    /// [system, user, assistant(+tool call), tool result, user, assistant]
+    fn two_turn_history() -> Context {
+        vec![
+            Message::text(MessageRole::System, "sys"),
+            Message::text(MessageRole::User, "one"),
+            Message {
+                role: MessageRole::Assistant,
+                content: vec![
+                    MessagePart::Text("ans".into()),
+                    MessagePart::ToolCall {
+                        id: "c1".into(),
+                        name: "bash".into(),
+                        args: "{}".into(),
+                    },
+                ],
+            },
+            Message::tool_results([MessagePart::ToolResult {
+                id: "c1".into(),
+                content: "ok".into(),
+                ok: true,
+            }]),
+            Message::text(MessageRole::User, "two"),
+            Message::text(MessageRole::Assistant, "final"),
+        ]
+    }
+
+    #[test]
+    fn rewind_cuts_at_user_boundary() {
+        let agent = agent_with_history(two_turn_history());
+        let removed = agent.rewind(1).unwrap();
+        assert_eq!(removed, 2);
+        let history = agent.history();
+        assert_eq!(history.len(), 4);
+        assert!(matches!(history.last().unwrap().role, MessageRole::Tool));
+        assert!(validate_context(&history).is_ok());
+    }
+
+    #[test]
+    fn rewind_clamps_to_system_prefix() {
+        let agent = agent_with_history(two_turn_history());
+        let removed = agent.rewind(99).unwrap();
+        assert_eq!(removed, 5);
+        let history = agent.history();
+        assert_eq!(history.len(), 1);
+        assert!(matches!(history[0].role, MessageRole::System));
+    }
+
+    #[test]
+    fn rewind_zero_is_a_noop() {
+        let agent = agent_with_history(two_turn_history());
+        assert_eq!(agent.rewind(0).unwrap(), 0);
+        assert_eq!(agent.history().len(), 6);
+    }
+
+    #[test]
+    fn update_config_mutates_between_turns() {
+        let agent = agent_with_history(Vec::new());
+        agent
+            .update_config(|c| c.model = "other-model".into())
+            .unwrap();
+        assert_eq!(agent.config().model, "other-model");
     }
 }

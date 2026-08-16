@@ -2,12 +2,12 @@ use chrono::{DateTime, Utc};
 use indexmap::IndexMap;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::broadcast;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-use crate::agent::Agent;
-use crate::agent::AgentError;
+use crate::agent::{Agent, AgentError, AgentEvent};
 use crate::persistence::{self, AgentNodeRecord, AgentRecord, SessionRecord};
 use crate::providers::manager::ProviderManager;
 use crate::tools::ToolRegistry;
@@ -28,6 +28,23 @@ pub struct AgentNode {
 }
 
 // ---------------------------------------------------------------------------
+// Event bus
+// ---------------------------------------------------------------------------
+
+/// Capacity of the session event bus. Receivers that fall behind get
+/// `RecvError::Lagged` and should re-derive state from the relevant agent's
+/// `history()` — cheap, and the same path used to render resumed sessions.
+pub const SESSION_EVENT_CAPACITY: usize = 4096;
+
+/// One agent's event, tagged so a single channel can carry a whole session's
+/// activity to any number of subscribers (TUI, loggers, replay tools).
+#[derive(Debug, Clone)]
+pub struct SessionEvent {
+    pub agent_id: String,
+    pub event: AgentEvent,
+}
+
+// ---------------------------------------------------------------------------
 // Session
 // ---------------------------------------------------------------------------
 
@@ -41,6 +58,14 @@ pub type Agents = IndexMap<String, Arc<Agent>>;
 pub struct DelegateHandle {
     pub agent_id: String,
     pub join: JoinHandle<Result<String, AgentError>>,
+}
+
+/// Read-only status of a backgrounded delegate, for UIs (counts, trees).
+#[derive(Debug, Clone)]
+pub struct DelegateStatus {
+    pub delegate_id: String,
+    pub agent_id: String,
+    pub finished: bool,
 }
 
 pub struct Session {
@@ -61,6 +86,10 @@ pub struct Session {
     /// spawned OS process can (see `Host`) — on resume, in-flight delegates
     /// are simply gone; their agent's history up to that point still is.
     delegates: AsyncMutex<HashMap<String, DelegateHandle>>,
+    /// Broadcast bus carrying every agent's events (see `SessionEvent`).
+    /// Agents are wired into it by `bind_self` / `spawn_agent` /
+    /// `spawn_subagent`; `prompt()` tees into it automatically.
+    events_tx: broadcast::Sender<SessionEvent>,
 }
 
 impl Default for Session {
@@ -70,7 +99,8 @@ impl Default for Session {
 }
 
 impl Session {
-    pub fn new() -> Self {
+pub fn new() -> Self {
+        let (events_tx, _) = broadcast::channel(SESSION_EVENT_CAPACITY);
         Session {
             agents: Agents::new(),
             hierarchy: HashMap::new(),
@@ -79,6 +109,7 @@ impl Session {
             created_at: Utc::now(),
             self_handle: None,
             delegates: AsyncMutex::new(HashMap::new()),
+            events_tx,
         }
     }
 
@@ -89,19 +120,34 @@ impl Session {
     /// let session = Arc::new(tokio::sync::Mutex::new(Session::new()));
     /// session.lock().await.bind_self(&session);
     /// ```
-    pub fn bind_self(&mut self, handle: &Arc<tokio::sync::Mutex<Session>>) {
+pub fn bind_self(&mut self, handle: &Arc<tokio::sync::Mutex<Session>>) {
         self.self_handle = Some(Arc::downgrade(handle));
         for agent in self.agents.values() {
             agent.attach_session(handle.clone());
+            agent.attach_bus(self.events_tx.clone());
         }
     }
 
-    fn attach_self_handle(&self, agent: &Agent) {
+fn attach_self_handle(&self, agent: &Agent) {
+        agent.attach_bus(self.events_tx.clone());
         if let Some(weak) = &self.self_handle
             && let Some(strong) = weak.upgrade()
         {
             agent.attach_session(strong);
         }
+    }
+
+    /// Subscribe to every event from every agent in this session. Late
+    /// subscribers are fine: render existing state from agent histories
+    /// first, then consume live events from the receiver.
+    pub fn subscribe(&self) -> broadcast::Receiver<SessionEvent> {
+        self.events_tx.subscribe()
+    }
+
+    /// The bus sender, for wiring agents spawned outside the usual
+    /// `spawn_agent`/`spawn_subagent` paths.
+    pub fn event_sender(&self) -> broadcast::Sender<SessionEvent> {
+        self.events_tx.clone()
     }
 
     /// Create a top-level agent bound to this session (no parent).
@@ -173,7 +219,22 @@ impl Session {
     pub async fn poll_delegate(&self, delegate_id: &str) -> Option<(String, bool)> {
         let delegates = self.delegates.lock().await;
         let handle = delegates.get(delegate_id)?;
-        Some((handle.agent_id.clone(), handle.join.is_finished()))
+Some((handle.agent_id.clone(), handle.join.is_finished()))
+    }
+
+    /// Read-only snapshot of every backgrounded delegate still tracked
+    /// (running, or finished but not yet collected via `wait`). For UIs:
+    /// background-agent counts, agent trees, delegate panes.
+    pub async fn active_delegates(&self) -> Vec<DelegateStatus> {
+        let delegates = self.delegates.lock().await;
+        delegates
+            .iter()
+            .map(|(id, h)| DelegateStatus {
+                delegate_id: id.clone(),
+                agent_id: h.agent_id.clone(),
+                finished: h.join.is_finished(),
+            })
+            .collect()
     }
 
     /// Block until a backgrounded delegate finishes, removing it from
@@ -214,7 +275,7 @@ impl Session {
         mgr: &ProviderManager,
         tools: Arc<ToolRegistry>,
     ) -> Self {
-        let mut session = Session {
+let mut session = Session {
             id: record.id,
             title: record.title,
             created_at: record.created_at,
@@ -222,6 +283,10 @@ impl Session {
             hierarchy: HashMap::new(),
             self_handle: None,
             delegates: AsyncMutex::new(HashMap::new()),
+            events_tx: {
+                let (tx, _) = broadcast::channel(SESSION_EVENT_CAPACITY);
+                tx
+            },
         };
 
         for ar in record.agents {

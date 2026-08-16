@@ -223,8 +223,9 @@ async fn spawn(
     let mut session = session.lock().await;
     let parent = session
         .agent(parent_id)
-        .ok_or_else(|| ToolError::Failed("calling agent not found in its own session".into()))?;
-    let config = build_subagent_config(args, parent.config());
+.ok_or_else(|| ToolError::Failed("calling agent not found in its own session".into()))?;
+    let parent_config = parent.config();
+    let config = build_subagent_config(args, &parent_config);
     Ok(session.spawn_subagent(
         parent_id,
         None,
