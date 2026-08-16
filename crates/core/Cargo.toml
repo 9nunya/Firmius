@@ -1,0 +1,27 @@
+[package]
+name = "firmius-core"
+version = "0.0.1"
+edition = "2024"
+
+[dependencies]
+dirs.workspace = true
+async-stream.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+reqwest.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+regex.workspace = true
+globset.workspace = true
+indexmap.workspace = true
+chrono.workspace = true
+uuid = { version = "1.24.1", features = ["v4", "v7", "v8", "serde"] }
+portable-pty = "0.9"
+ignore = "0.4"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

@@ -1,9 +1,0 @@
-CompileFlags:
-  Add:
-    - -Wno-error
-    - -Wno-deprecated-declarations
-    - -Wno-class-memaccess
-
-Index:
-  Background: Build
-  StandardLibrary: Yes
