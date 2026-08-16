@@ -1,5 +1,28 @@
 //! Input composer: segment-based so pasted blocks stay atomic (Claude Code
-//! style). Contract is pinned; internals are a first pass to be hardened.
+//! style).
+//!
+//! ## Model
+//! `segments` is the source of truth; the cursor is a logical position:
+//! `(segment index, char offset)`. `segments.len()` means "at the end".
+//! Right after a paste block at index i, the cursor is canonicalized to
+//! `(i + 1, 0)`.
+//!
+//! ## Display
+//! `lines()` renders each segment — `Text` verbatim, `Paste` as its
+//! `[Pasted text #N +L lines]` placeholder — joined by newlines. While
+//! rendering, the row layout is cached (`rows_cache`) so the paste-free
+//! movement methods (`up`/`down`/`home`/`end`) can be line-aware without
+//! access to the paste store. The cache is refreshed by every `lines()` /
+//! `cursor_pos()` call, i.e. every frame, before the next key is handled.
+//!
+//! ## Invariants
+//! - Cursor offsets always sit on char boundaries (multibyte-safe).
+//! - Placeholders are atomic: movement hops over them, deletion removes
+//!   them whole, the cursor never lands inside one.
+//! - `cursor_pos()` agrees with `lines()` by construction — both derive
+//!   from the same row layout.
+
+use std::cell::RefCell;
 
 pub const PASTE_BLOCK_THRESHOLD: usize = 120;
 
@@ -10,13 +33,23 @@ pub enum Segment {
     Paste(usize),
 }
 
+/// One display row: which segment it belongs to, the char offset within
+/// that segment's text where the row starts, and the row's text.
+#[derive(Debug, Clone)]
+struct Row {
+    seg: usize,
+    off: usize,
+    text: String,
+    paste: bool,
+}
+
 #[derive(Debug, Default)]
 pub struct Composer {
     segments: Vec<Segment>,
-    /// (segment index, char offset within). `segments.len()` means "at end".
-    /// A cursor right after a paste block at index i is canonicalized to
-    /// (i + 1, 0).
+    /// (segment index, char offset within); `segments.len()` = at end.
     cursor: (usize, usize),
+    /// Row layout from the last `lines()`/`cursor_pos()` render.
+    rows_cache: RefCell<Vec<Row>>,
 }
 
 fn byte_at(s: &str, char_off: usize) -> usize {
@@ -40,6 +73,10 @@ impl Composer {
             .iter()
             .all(|s| matches!(s, Segment::Text(t) if t.trim().is_empty()))
     }
+
+    // ------------------------------------------------------------------
+    // Editing
+    // ------------------------------------------------------------------
 
     pub fn insert_char(&mut self, c: char) {
         let (i, off) = self.cursor;
@@ -71,13 +108,31 @@ impl Composer {
         self.insert_char('\n');
     }
 
-    /// Insert a paste-block placeholder; the real content lives in the paste
-    /// store under `id` (1-based).
+    /// Insert a paste-block placeholder at the cursor; the real content
+    /// lives in the paste store under `id` (1-based). Splits a text
+    /// segment if the cursor sits inside one.
     pub fn insert_paste_block(&mut self, id: usize) {
-        let (i, _) = self.cursor;
-        let at = i.min(self.segments.len());
-        self.segments.insert(at, Segment::Paste(id));
-        self.cursor = (at + 1, 0);
+        let (i, off) = self.cursor;
+    let splits = matches!(self.segments.get(i), Some(Segment::Text(t)) if off > 0 && off < char_count(t));
+        if splits {
+            if let Some(Segment::Text(t)) = self.segments.get_mut(i) {
+                let tail = t.split_off(byte_at(t, off));
+                self.segments.insert(i + 1, Segment::Paste(id));
+                self.segments.insert(i + 2, Segment::Text(tail));
+                self.cursor = (i + 2, 0);
+            }
+        } else {
+            // A cursor at the END of a text segment inserts after it.
+            let at_end_of_text =
+                matches!(self.segments.get(i), Some(Segment::Text(t)) if off == char_count(t));
+            let at = if at_end_of_text {
+                i + 1
+            } else {
+                i.min(self.segments.len())
+            };
+            self.segments.insert(at, Segment::Paste(id));
+            self.cursor = (at + 1, 0);
+        }
     }
 
     pub fn backspace(&mut self) {
@@ -90,7 +145,9 @@ impl Composer {
             t.replace_range(start..end, "");
             if t.is_empty() {
                 self.segments.remove(i);
-                self.cursor = (i.min(self.segments.len()), 0);
+                let at = i.min(self.segments.len());
+                self.cursor = (at, 0);
+                self.merge_around(at);
             } else {
                 self.cursor = (i, off - 1);
             }
@@ -106,6 +163,7 @@ impl Composer {
                         if t.is_empty() {
                             self.segments.remove(i - 1);
                             self.cursor = (i - 1, 0);
+                            self.merge_around(i - 1);
                         } else {
                             self.cursor = (i - 1, n - 1);
                         }
@@ -115,6 +173,7 @@ impl Composer {
                     // Atomic: the whole block goes.
                     self.segments.remove(i - 1);
                     self.cursor = (i - 1, 0);
+                    self.merge_around(i - 1);
                 }
             }
         }
@@ -129,15 +188,60 @@ impl Composer {
                 t.replace_range(start..end, "");
                 if t.is_empty() {
                     self.segments.remove(i);
+                    self.merge_around(i);
                 }
             }
             Some(Segment::Paste(_)) => {
                 self.segments.remove(i);
                 self.cursor = (i.min(self.segments.len()), 0);
+                self.merge_around(i.min(self.segments.len()));
             }
-            _ => {}
+            _ => {
+                // Cursor at the very end of a text segment: deleting the
+                // boundary merges with the next segment (or eats a paste).
+                let (i, off) = self.cursor;
+                let at_end = matches!(self.segments.get(i), Some(Segment::Text(t)) if off == char_count(t));
+                if at_end && i + 1 < self.segments.len() {
+                    if matches!(self.segments[i + 1], Segment::Paste(_)) {
+                        self.segments.remove(i + 1);
+                    }
+                    self.merge_around(i + 1);
+                }
+            }
         }
     }
+
+    /// After a segment removal at/around `idx`, join Text neighbors so a
+    /// removed boundary (separator or paste block) doesn't strand two text
+    /// halves. Leaves the cursor at the join point.
+    fn merge_around(&mut self, idx: usize) {
+        if idx == 0 || idx >= self.segments.len() {
+            return;
+        }
+        let both_text = matches!(
+            (self.segments.get(idx - 1), self.segments.get(idx)),
+            (Some(Segment::Text(_)), Some(Segment::Text(_)))
+        );
+        if !both_text {
+            return;
+        }
+        if let Some(Segment::Text(b)) = self.segments.get(idx) {
+            let b = b.clone();
+            let join;
+            if let Some(Segment::Text(a)) = self.segments.get_mut(idx - 1) {
+                join = char_count(a);
+                a.push_str(&b);
+            } else {
+                return;
+            }
+            self.segments.remove(idx);
+            self.cursor = (idx - 1, join);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Movement
+    // ------------------------------------------------------------------
 
     pub fn left(&mut self) {
         let (i, off) = self.cursor;
@@ -156,6 +260,7 @@ impl Composer {
             _ => {
                 if i > 0 {
                     self.cursor = match &self.segments[i - 1] {
+                        // Hop the whole paste block; or land at text end.
                         Segment::Text(t) => (i - 1, char_count(t)),
                         Segment::Paste(_) => (i - 1, 0),
                     };
@@ -171,24 +276,63 @@ impl Composer {
         }
         match &self.segments[i] {
             Segment::Text(t) if off < char_count(t) => self.cursor = (i, off + 1),
+            // Hop the whole paste block; or step into the next segment.
             _ => self.cursor = (i + 1, 0),
         }
     }
 
-    // Line-aware vertical movement and line jumps: to be hardened.
-    pub fn up(&mut self) {}
-    pub fn down(&mut self) {}
+    pub fn up(&mut self) {
+        self.vertical(-1);
+    }
+
+    pub fn down(&mut self) {
+        self.vertical(1);
+    }
+
+    fn vertical(&mut self, dir: i32) {
+        let rows = self.rows_cache.borrow().clone();
+        if rows.is_empty() {
+            return;
+        }
+        let (ri, col) = self.locate_cursor(&rows);
+        let target = ri as i32 + dir;
+        if target < 0 || target >= rows.len() as i32 {
+            return;
+        }
+        self.move_to_row(&rows[target as usize], col);
+    }
+
     pub fn home(&mut self) {
-        let (i, _) = self.cursor;
-        if i < self.segments.len() {
-            self.cursor = (i, 0);
+        let rows = self.rows_cache.borrow().clone();
+        if rows.is_empty() {
+            return;
+        }
+        let (ri, _) = self.locate_cursor(&rows);
+        self.move_to_row(&rows[ri], 0);
+    }
+
+    pub fn end(&mut self) {
+        let rows = self.rows_cache.borrow().clone();
+        if rows.is_empty() {
+            return;
+        }
+        let (ri, _) = self.locate_cursor(&rows);
+        let row = &rows[ri];
+        if row.paste {
+            self.cursor = (row.seg + 1, 0);
+        } else {
+            self.cursor = (row.seg, row.off + char_count(&row.text));
         }
     }
-    pub fn end(&mut self) {
-        let (i, _) = self.cursor;
-        if let Some(Segment::Text(t)) = self.segments.get(i) {
-            self.cursor = (i, char_count(t));
+
+    fn move_to_row(&mut self, row: &Row, col: usize) {
+        if row.paste {
+            // Landing on a paste row: sit before it; the block is atomic.
+            self.cursor = (row.seg, 0);
+            return;
         }
+        let off = col.min(char_count(&row.text));
+        self.cursor = (row.seg, row.off + off);
     }
 
     pub fn clear(&mut self) {
@@ -196,24 +340,16 @@ impl Composer {
         self.cursor = (0, 0);
     }
 
+    // ------------------------------------------------------------------
+    // Display & submission
+    // ------------------------------------------------------------------
+
     /// Display lines: text as-is, paste blocks as their placeholder label.
+    /// Refreshes the row cache used by the line-aware movement methods.
     pub fn lines(&self, pastes: &[String]) -> Vec<String> {
-        if self.segments.is_empty() {
-            return vec![String::new()];
-        }
-        let joined: Vec<String> = self
-            .segments
-            .iter()
-            .map(|s| match s {
-                Segment::Text(t) => t.clone(),
-                Segment::Paste(id) => {
-                    let content = pastes.get(id - 1).map(String::as_str).unwrap_or("");
-                    let n = content.lines().count();
-                    format!("[Pasted text #{id} +{n} lines]")
-                }
-            })
-            .collect();
-        joined.join("\n").split('\n').map(str::to_string).collect()
+        let rows = self.build_rows(pastes);
+        *self.rows_cache.borrow_mut() = rows.clone();
+        rows.into_iter().map(|r| r.text).collect()
     }
 
     /// Submit: expand paste blocks back to their stored content. Returns
@@ -236,39 +372,251 @@ impl Composer {
     }
 
     /// Cursor position in display coordinates, for the terminal cursor.
+    /// Agrees with `lines()` — both derive from the same row layout.
     pub fn cursor_pos(&self, pastes: &[String]) -> (usize, usize) {
-        let (ci, off) = self.cursor;
-        let mut chars = 0usize;
-        for (idx, seg) in self.segments.iter().enumerate() {
-            if idx == ci {
-                break;
-            }
-            chars += match seg {
-                Segment::Text(t) => char_count(t),
-                Segment::Paste(id) => {
-                    let content = pastes.get(id - 1).map(String::as_str).unwrap_or("");
-                    let n = content.lines().count();
-                    format!("[Pasted text #{id} +{n} lines]").chars().count()
+        let rows = self.build_rows(pastes);
+        *self.rows_cache.borrow_mut() = rows.clone();
+        self.locate_cursor(&rows)
+    }
+
+    fn placeholder(id: usize, pastes: &[String]) -> String {
+        let content = pastes.get(id - 1).map(String::as_str).unwrap_or("");
+        let n = content.lines().count();
+        format!("[Pasted text #{id} +{n} lines]")
+    }
+
+    fn build_rows(&self, pastes: &[String]) -> Vec<Row> {
+        if self.segments.is_empty() {
+            return vec![Row { seg: 0, off: 0, text: String::new(), paste: false }];
+        }
+        let mut rows = Vec::new();
+        for (i, seg) in self.segments.iter().enumerate() {
+            match seg {
+                Segment::Text(t) => {
+                    let mut off = 0;
+                    for line in t.split('\n') {
+                        rows.push(Row { seg: i, off, text: line.to_string(), paste: false });
+                        off += char_count(line) + 1;
+                    }
                 }
-            } + 1; // segment separator newline
+                Segment::Paste(id) => rows.push(Row {
+                    seg: i,
+                    off: 0,
+                    text: Self::placeholder(*id, pastes),
+                    paste: true,
+                }),
+            }
         }
-        if let Some(Segment::Text(t)) = self.segments.get(ci) {
-            chars += off.min(char_count(t));
-        }
-        let display = self.lines(pastes).join("\n");
-        let mut row = 0;
-        let mut col = 0;
-        for (i, c) in display.chars().enumerate() {
-            if i >= chars {
+        rows
+    }
+
+    /// Map the logical cursor onto (row, col) of the given row layout.
+    fn locate_cursor(&self, rows: &[Row]) -> (usize, usize) {
+        let (ci, off) = self.cursor;
+        for (ri, row) in rows.iter().enumerate() {
+            if row.seg > ci {
                 break;
             }
-            if c == '\n' {
-                row += 1;
-                col = 0;
-            } else {
-                col += 1;
+            if row.seg == ci {
+                if row.paste {
+                    return (ri, 0);
+                }
+                if off <= row.off + char_count(&row.text) {
+                    return (ri, off.saturating_sub(row.off));
+                }
             }
         }
-        (row, col)
+        // Cursor at the very end, or between rows of one segment: clamp.
+        rows.last()
+            .map(|r| (rows.len() - 1, char_count(&r.text)))
+            .unwrap_or((0, 0))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn store() -> Vec<String> {
+        vec!["line one\nline two\nline three".to_string(), "short paste".to_string()]
+    }
+
+    #[test]
+    fn typing_and_backspace_with_multibyte_chars() {
+        let mut c = Composer::new();
+        c.insert_str("héllo 🚀");
+        c.backspace();
+        let out = c.take(&[]).unwrap();
+        assert_eq!(out, "héllo ");
+    }
+
+    #[test]
+    fn paste_block_renders_placeholder_line() {
+        let mut c = Composer::new();
+        let pastes = store();
+        c.insert_str("before");
+        c.insert_paste_block(1);
+        c.insert_str("after");
+        let lines = c.lines(&pastes);
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], "before");
+        assert!(lines[1].starts_with("[Pasted text #1 +3 lines]"));
+        assert_eq!(lines[2], "after");
+    }
+
+    #[test]
+    fn backspace_after_block_removes_whole_block() {
+        let mut c = Composer::new();
+        let pastes = store();
+        c.insert_paste_block(1);
+        c.backspace();
+        assert!(c.lines(&pastes)[0].is_empty());
+        assert!(c.is_empty());
+    }
+
+    #[test]
+    fn delete_before_block_removes_whole_block() {
+        let mut c = Composer::new();
+        let pastes = store();
+        c.insert_paste_block(1);
+        c.home_refresh(&pastes);
+        c.delete();
+        assert!(c.is_empty());
+    }
+
+    #[test]
+    fn left_right_hop_over_block() {
+        let mut c = Composer::new();
+        let pastes = store();
+        c.insert_str("ab");
+        c.insert_paste_block(1);
+        c.insert_str("cd");
+        // Cursor after "cd". Walk left: 'd', 'c', hop the whole block,
+        // land at the end of "ab", then one step into it.
+        for _ in 0..5 {
+            c.left();
+        }
+        let (row, col) = c.cursor_pos(&pastes);
+        assert_eq!((row, col), (0, 1));
+        // Walk right: to end of "ab", before the block, then hop it.
+        for _ in 0..3 {
+            c.right();
+        }
+        let (row, col) = c.cursor_pos(&pastes);
+        assert_eq!((row, col), (2, 0));
+    }
+
+    #[test]
+    fn take_expands_pastes_and_clears() {
+        let mut c = Composer::new();
+        let pastes = store();
+        c.insert_str("pre\n");
+        c.insert_paste_block(1);
+        c.insert_str("\npost");
+        let out = c.take(&pastes).unwrap();
+        assert!(out.starts_with("pre\n"));
+        assert!(out.contains("line one\nline two\nline three"));
+        assert!(out.ends_with("post"));
+        assert!(c.is_empty());
+        assert!(c.take(&pastes).is_none());
+    }
+
+    #[test]
+    fn whitespace_only_is_none() {
+        let mut c = Composer::new();
+        c.insert_str("   \n  ");
+        assert!(c.take(&[]).is_none());
+    }
+
+    #[test]
+    fn vertical_movement_and_home_end_across_lines() {
+        let mut c = Composer::new();
+        let pastes = store();
+        c.insert_str("first line\nsecond line");
+        c.lines(&pastes); // refresh layout cache
+        c.home();
+        let (row, col) = c.cursor_pos(&pastes);
+        assert_eq!((row, col), (1, 0));
+        c.up();
+        let (row, col) = c.cursor_pos(&pastes);
+        assert_eq!((row, col), (0, 0));
+        c.end();
+        let (row, col) = c.cursor_pos(&pastes);
+        assert_eq!((row, col), (0, "first line".chars().count()));
+        c.down();
+        let (row, col) = c.cursor_pos(&pastes);
+        assert_eq!((row, col), (1, "second line".chars().count().min("first line".chars().count())));
+    }
+
+    #[test]
+    fn cursor_pos_agrees_with_lines_after_mixed_ops() {
+        let mut c = Composer::new();
+        let pastes = store();
+        c.insert_str("hello world");
+        c.left(); // cursor between 'l' and 'd' of "world"
+        let lines = c.lines(&pastes);
+        let (row, col) = c.cursor_pos(&pastes);
+        let line_chars: Vec<char> = lines[row].chars().collect();
+        assert!(col <= line_chars.len());
+        assert_eq!(line_chars[col], 'd');
+    }
+
+    #[test]
+    fn no_panic_edge_cases() {
+        let mut c = Composer::new();
+        c.backspace();
+        c.delete();
+        c.left();
+        c.right();
+        c.up();
+        c.down();
+        c.home();
+        c.end();
+        assert!(c.is_empty());
+        assert_eq!(c.cursor_pos(&[]), (0, 0));
+        assert_eq!(c.lines(&[]), vec!["".to_string()]);
+    }
+
+    #[test]
+    fn backspacing_separator_merges_text_segments() {
+        let mut c = Composer::new();
+        let pastes = store();
+        c.insert_str("head");
+        c.insert_paste_block(1);
+    c.insert_str("tail");
+        // Cursor is at end of "tail": left through 'l','i','a','t' (4),
+        // hop the whole block (1), land at end of "head" (1).
+        for _ in 0..6 {
+            c.left();
+        }
+        c.delete(); // eats the paste, merges texts
+        let lines = c.lines(&pastes);
+        assert_eq!(lines, vec!["headtail".to_string()]);
+    }
+
+    #[test]
+    fn insert_paste_block_splits_text_segment() {
+        let mut c = Composer::new();
+        let pastes = store();
+        c.insert_str("abcdef");
+        c.left();
+        c.left();
+        c.left(); // cursor between "abc" and "def"
+        c.insert_paste_block(2);
+        let lines = c.lines(&pastes);
+        assert_eq!(lines[0], "abc");
+        assert!(lines[1].starts_with("[Pasted text #2"));
+        assert_eq!(lines[2], "def");
+        let out = c.take(&pastes).unwrap();
+        assert_eq!(out, "abc\nshort paste\ndef");
+    }
+}
+
+#[cfg(test)]
+impl Composer {
+    /// Test helper: refresh the layout cache then move to the start.
+    fn home_refresh(&mut self, pastes: &[String]) {
+        self.lines(pastes);
+        self.cursor = (0, 0);
     }
 }
