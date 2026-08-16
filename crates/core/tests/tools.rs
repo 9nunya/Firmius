@@ -12,6 +12,7 @@ fn ctx(workdir: std::path::PathBuf) -> ToolContext {
     ToolContext {
         workdir,
         cancellation: CancellationToken::new(),
+        tool_call_id: "test-call".into(),
         agent_id: "test-agent".into(),
         session_id: "test-session".into(),
         state: Arc::new(std::sync::RwLock::new(AgentState::default())),

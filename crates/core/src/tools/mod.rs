@@ -30,6 +30,9 @@ pub use read::register_read_tool;
 pub struct ToolContext {
     pub workdir: PathBuf,
     pub cancellation: CancellationToken,
+    /// Id of the tool call currently executing — lets tools that spawn
+    /// agents (e.g. `delegate`) record exactly which call created them.
+    pub tool_call_id: String,
     /// Which agent invoked this tool.
     pub agent_id: String,
     /// Which session the agent belongs to.

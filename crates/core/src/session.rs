@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use indexmap::IndexMap;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio::sync::Mutex as AsyncMutex;
@@ -86,6 +86,11 @@ pub struct Session {
     /// spawned OS process can (see `Host`) — on resume, in-flight delegates
     /// are simply gone; their agent's history up to that point still is.
     delegates: AsyncMutex<HashMap<String, DelegateHandle>>,
+    /// Ids already collected via `take_delegate`/`wait` — tombstones so a
+    /// finished-and-gone delegate is distinguishable from one that never
+    /// existed. Not persisted: like the delegates themselves, this is
+    /// process-lifetime state.
+    collected: AsyncMutex<HashSet<String>>,
     /// Broadcast bus carrying every agent's events (see `SessionEvent`).
     /// Agents are wired into it by `bind_self` / `spawn_agent` /
     /// `spawn_subagent`; `prompt()` tees into it automatically.
@@ -100,7 +105,7 @@ impl Default for Session {
 
 impl Session {
 pub fn new() -> Self {
-        let (events_tx, _) = broadcast::channel(SESSION_EVENT_CAPACITY);
+    let (events_tx, _) = broadcast::channel(SESSION_EVENT_CAPACITY);
         Session {
             agents: Agents::new(),
             hierarchy: HashMap::new(),
@@ -109,6 +114,7 @@ pub fn new() -> Self {
             created_at: Utc::now(),
             self_handle: None,
             delegates: AsyncMutex::new(HashMap::new()),
+            collected: AsyncMutex::new(HashSet::new()),
             events_tx,
         }
     }
@@ -253,11 +259,21 @@ Some((handle.agent_id.clone(), handle.join.is_finished()))
     /// awaiting the task, avoiding a deadlock when the delegate itself calls
     /// a session-aware tool.
     pub async fn take_delegate(&self, delegate_id: &str) -> Result<DelegateHandle, String> {
-        self.delegates
-            .lock()
-            .await
-            .remove(delegate_id)
-            .ok_or_else(|| format!("unknown delegate_id: {delegate_id}"))
+        let removed = self.delegates.lock().await.remove(delegate_id);
+        if let Some(handle) = removed {
+            self.collected.lock().await.insert(delegate_id.to_string());
+            return Ok(handle);
+        }
+        if self.collected.lock().await.contains(delegate_id) {
+            return Err(format!("delegate already collected: {delegate_id}"));
+        }
+        Err(format!("unknown delegate_id: {delegate_id}"))
+    }
+
+    /// Whether a delegate id was already collected via `wait`/`take` —
+    /// lets callers distinguish "finished and gone" from "never existed".
+    pub async fn was_delegate_collected(&self, delegate_id: &str) -> bool {
+        self.collected.lock().await.contains(delegate_id)
     }
 
     // ------------------------------------------------------------------
@@ -283,6 +299,7 @@ let mut session = Session {
             hierarchy: HashMap::new(),
             self_handle: None,
             delegates: AsyncMutex::new(HashMap::new()),
+            collected: AsyncMutex::new(HashSet::new()),
             events_tx: {
                 let (tx, _) = broadcast::channel(SESSION_EVENT_CAPACITY);
                 tx
@@ -310,8 +327,12 @@ let mut session = Session {
                 max_turns: ar.max_turns,
                 workdir: ar.workdir,
             };
+            // Heal trajectories interrupted mid-tool before they become
+            // promptable again (providers reject dangling tool calls).
+            let mut history = ar.history;
+            crate::types::repair_dangling_tool_calls(&mut history);
             let agent = Agent::new(provider, tools.clone(), config, session.id.clone())
-                .with_history(ar.history);
+                .with_history(history);
             // Preserve the original agent id so the hierarchy map (keyed on
             // it) still lines up, and so any external references (e.g. a
             // saved delegate_id) remain valid across resume.

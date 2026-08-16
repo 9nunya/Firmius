@@ -18,6 +18,7 @@ use crate::types::ModelInfo;
 /// mgr.load().unwrap();
 /// let provider = mgr.build("my-openai").unwrap();
 /// ```
+#[derive(Clone)]
 pub struct ProviderManager {
     schemas: HashMap<String, ProviderSchema>,
     auth: AuthStore,
@@ -148,6 +149,34 @@ impl ProviderManager {
     /// Look up model info for a specific provider + model.
     pub fn model_info_for(&self, provider_id: &str, model_id: &str) -> Option<&ModelInfo> {
         self.schema(provider_id)?.model(model_id)
+    }
+
+    /// All statically configured model ids for a provider, in schema order.
+    /// Dynamic providers may return an empty list until their models are
+    /// fetched, so callers should treat this as completion metadata rather
+    /// than an exhaustive discovery API.
+    pub fn model_ids(&self, provider_id: &str) -> Vec<String> {
+        self.schema(provider_id)
+            .map(|schema| schema.models.iter().map(|model| model.id.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    /// All statically configured `(provider_id, model_id)` choices. This is
+    /// intended for model pickers that need to show the provider alongside a
+    /// model name.
+    pub fn model_choices(&self) -> Vec<(String, String)> {
+        let mut choices = self
+            .schemas
+            .values()
+            .flat_map(|schema| {
+                schema
+                    .models
+                    .iter()
+                    .map(|model| (schema.id.clone(), model.id.clone()))
+            })
+            .collect::<Vec<_>>();
+        choices.sort();
+        choices
     }
 
     /// Get the current input token usage for a model (helpful for

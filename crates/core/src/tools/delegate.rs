@@ -151,12 +151,18 @@ Requires prompt for run/spawn, delegate_id for poll/wait.",
                     Mode::Poll => {
                         let delegate_id = require(&args.delegate_id, "delegate_id")?;
                         let session = session.lock().await;
-                        let (agent_id, finished) =
-                            session.poll_delegate(delegate_id).await.ok_or_else(|| {
-                                ToolError::Failed(format!(
-                                    "unknown or already-collected delegate_id: {delegate_id}"
-                                ))
-                            })?;
+                        let Some((agent_id, finished)) =
+                            session.poll_delegate(delegate_id).await
+                        else {
+                            let detail = if session.was_delegate_collected(delegate_id).await {
+                                "delegate already collected"
+                            } else {
+                                "unknown delegate_id"
+                            };
+                            return Err(ToolError::Failed(format!(
+                                "{detail}: {delegate_id}"
+                            )));
+                        };
                         let transcript = session
                             .agent(&agent_id)
                             .map(|a| last_assistant_text(&a))
@@ -183,7 +189,8 @@ Requires prompt for run/spawn, delegate_id for poll/wait.",
 
                     Mode::Run => {
                         let prompt = require(&args.prompt, "prompt")?.clone();
-                        let agent = spawn(&session, &ctx.agent_id, &args).await?;
+                        let agent =
+                            spawn(&session, &ctx.agent_id, &ctx.tool_call_id, &args).await?;
                         agent
                             .prompt(prompt, ctx.cancellation.clone(), |_| {})
                             .await
@@ -192,7 +199,8 @@ Requires prompt for run/spawn, delegate_id for poll/wait.",
 
                     Mode::Spawn => {
                         let prompt = require(&args.prompt, "prompt")?.clone();
-                        let agent = spawn(&session, &ctx.agent_id, &args).await?;
+                        let agent =
+                            spawn(&session, &ctx.agent_id, &ctx.tool_call_id, &args).await?;
                         let cancellation = ctx.cancellation.clone();
                         let agent_for_task = agent.clone();
                         let join = tokio::spawn(async move {
@@ -218,6 +226,7 @@ Requires prompt for run/spawn, delegate_id for poll/wait.",
 async fn spawn(
     session: &std::sync::Arc<tokio::sync::Mutex<crate::session::Session>>,
     parent_id: &str,
+    tool_call_id: &str,
     args: &DelegateArgs,
 ) -> Result<std::sync::Arc<Agent>, ToolError> {
     let mut session = session.lock().await;
@@ -228,7 +237,7 @@ async fn spawn(
     let config = build_subagent_config(args, &parent_config);
     Ok(session.spawn_subagent(
         parent_id,
-        None,
+        Some(tool_call_id.to_string()),
         parent.provider(),
         parent.tools(),
         config,

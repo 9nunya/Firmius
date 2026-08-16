@@ -6,9 +6,11 @@ use std::sync::Arc;
 
 use firmius_core::{
     register_delegate_tool, AgentConfig, AgentEvent, Message, MessagePart, MessageRole,
-    Provider, ProviderError, ProviderEvent, ProviderRequest, Session, SessionEvent, StopReason,
-    ToolRegistry, validate_context,
+    ApiType, Provider, ProviderError, ProviderEvent, ProviderManager, ProviderRequest,
+    ProviderSchema, Session, SessionEvent, StopReason, ToolRegistry, load_session_record,
+    validate_context,
 };
+use firmius_core::persistence::session_path;
 use futures::StreamExt;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -120,9 +122,8 @@ async fn delegate_spawn_lifecycle_over_bus() {
         .expect("parent turn should succeed");
     assert_eq!(final_text, "done");
 
-    // One backgrounded delegate is tracked; hierarchy recorded — but the
-    // provenance field is dead: ToolContext carries no tool-call id, so
-    // spawned_via_tool_call_id is always None.
+    // One backgrounded delegate is tracked; hierarchy recorded with full
+    // provenance — the delegate tool passes its own tool-call id through.
     let delegates = session.lock().await.active_delegates().await;
     assert_eq!(delegates.len(), 1);
     let delegate_id = delegates[0].delegate_id.clone();
@@ -132,7 +133,7 @@ async fn delegate_spawn_lifecycle_over_bus() {
         let s = session.lock().await;
         let node = &s.hierarchy[&subagent_id];
         assert_eq!(node.parent_id.as_deref(), Some(parent_id.as_str()));
-        assert!(node.spawned_via_tool_call_id.is_none());
+        assert_eq!(node.spawned_via_tool_call_id.as_deref(), Some("call_1"));
     }
 
     // Collect the result the way the delegate tool does: take the handle
@@ -172,7 +173,7 @@ async fn delegate_spawn_lifecycle_over_bus() {
 }
 
 #[tokio::test]
-async fn double_wait_is_indistinguishable_from_never_existing() {
+async fn collected_and_unknown_delegate_errors_are_distinct() {
     let (session, parent) = scripted_session().await;
     parent
         .prompt("kick it off", CancellationToken::new(), |_| {})
@@ -192,9 +193,9 @@ async fn double_wait_is_indistinguishable_from_never_existing() {
         .wait_delegate("00000000-0000-0000-0000-000000000000")
         .await
         .unwrap_err();
-    // Same error kind for both: "already collected" and "never existed"
-    // cannot be told apart.
-    assert!(again.starts_with("unknown delegate_id:"));
+    // Distinct errors: a collected id is not the same as one that never
+    // existed.
+    assert!(again.starts_with("delegate already collected:"));
     assert!(never.starts_with("unknown delegate_id:"));
 }
 
@@ -218,4 +219,93 @@ fn dangling_tool_calls_pass_validation() {
         },
     ];
     assert!(validate_context(&ctx).is_ok());
+}
+
+#[test]
+fn session_save_and_resume_preserves_agents_history_and_hierarchy() {
+    let provider: Arc<dyn Provider> = Arc::new(ScriptedProvider);
+    let tools = Arc::new(ToolRegistry::default());
+    let mut session = Session::new();
+
+    let parent = session.spawn_agent(
+        provider.clone(),
+        tools.clone(),
+        AgentConfig {
+            provider_id: "scripted".into(),
+            model: "parent-model".into(),
+            ..Default::default()
+        },
+    );
+    let child = session.spawn_subagent(
+        &parent.id,
+        Some("call_1".into()),
+        provider,
+        tools.clone(),
+        AgentConfig {
+            provider_id: "scripted".into(),
+            model: "child-model".into(),
+            ..Default::default()
+        },
+    );
+
+    parent.state_handle().write().unwrap().history = vec![
+        Message::text(MessageRole::System, "system"),
+        Message::text(
+            MessageRole::User,
+            "This is a deliberately long first request that should be truncated when the session title is derived from it.",
+        ),
+    ];
+    child.state_handle().write().unwrap().history = vec![Message::text(
+        MessageRole::User,
+        "child request",
+    )];
+
+    let session_id = session.id.clone();
+    session.save().expect("session should save");
+    let path = session_path(&session_id);
+    let record = load_session_record(&session_id).expect("saved record should load");
+
+    assert_eq!(record.id, session_id);
+    assert_eq!(record.agents.len(), 2);
+    assert!(record.title.as_ref().is_some_and(|title| title.ends_with('…')));
+    assert!(record
+        .title
+        .as_ref()
+        .is_some_and(|title| title.chars().count() == 61));
+    assert_eq!(record.hierarchy[&parent.id].parent_id, None);
+    assert_eq!(record.hierarchy[&child.id].parent_id.as_deref(), Some(parent.id.as_str()));
+    assert_eq!(
+        record.hierarchy[&child.id].spawned_via_tool_call_id.as_deref(),
+        Some("call_1")
+    );
+
+    let mut manager = ProviderManager::new();
+    manager.register_schema(ProviderSchema {
+        id: "scripted".into(),
+        api_type: ApiType::OpenAI,
+        base_url: Some("http://127.0.0.1:1".into()),
+        api_key_env: None,
+        models: vec![],
+    });
+    manager.set_api_key("scripted", "test-key");
+    let resumed = Session::from_record(record, &manager, tools);
+
+    assert_eq!(resumed.id, session_id);
+    assert_eq!(resumed.title, session.title);
+    assert_eq!(resumed.agents.len(), 2);
+    assert_eq!(resumed.agent(&parent.id).unwrap().config().model, "parent-model");
+    assert_eq!(
+        resumed.agent(&parent.id).unwrap().history()[1],
+        Message::text(
+            MessageRole::User,
+            "This is a deliberately long first request that should be truncated when the session title is derived from it.",
+        )
+    );
+    assert_eq!(resumed.hierarchy[&child.id].parent_id.as_deref(), Some(parent.id.as_str()));
+    assert_eq!(
+        resumed.hierarchy[&child.id].spawned_via_tool_call_id.as_deref(),
+        Some("call_1")
+    );
+
+    let _ = std::fs::remove_file(path);
 }

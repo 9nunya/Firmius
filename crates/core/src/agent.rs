@@ -2,8 +2,8 @@ use crate::host::{Host, LocalHost};
 use crate::providers::{Provider, ProviderError, ProviderEvent};
 use crate::tools::{ToolContext, ToolRegistry};
 use crate::types::{
-    validate_context, Context, EffortMode, Message, MessagePart, MessageRole, ProviderRequest,
-    StopReason, Usage,
+    repair_dangling_tool_calls, validate_context, Context, EffortMode, Message, MessagePart,
+    MessageRole, ProviderRequest, StopReason, Usage,
 };
 use futures::StreamExt;
 use std::path::PathBuf;
@@ -348,6 +348,13 @@ impl Agent {
         // between-turn mutators check before touching config or history.
         let _turn_guard = self.busy.try_lock().map_err(|_| AgentError::Busy)?;
 
+        // Heal interruptions: a previous turn cancelled or crashed mid-tool
+        // may have left calls without results, which providers refuse.
+        {
+            let mut s = self.state.write().unwrap();
+            repair_dangling_tool_calls(&mut s.history);
+        }
+
         self.state
             .write()
             .unwrap()
@@ -437,6 +444,7 @@ impl Agent {
                 let ctx = ToolContext {
                     workdir: config.workdir.clone(),
                     cancellation: cancellation.clone(),
+                    tool_call_id: call_id.clone(),
                     agent_id: self.id.clone(),
                     session_id: self.session_id.clone(),
                     state: self.state.clone(),
