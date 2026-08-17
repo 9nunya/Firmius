@@ -1,6 +1,7 @@
 //! The TUI proper: terminal lifecycle, the event loop, and async side
 //! effects (prompt tasks, session saves, background-count refreshes).
 
+pub mod clipboard;
 pub mod command;
 pub mod composer;
 pub mod event;
@@ -196,6 +197,14 @@ async fn handle_event(
     let action = match modal_action {
         Some(action) => action,
         None => match ev {
+            AppEvent::Term(TermEvent::Key(k))
+                if k.kind != KeyEventKind::Release
+                    && k.code == KeyCode::Char('v')
+                    && k.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                handle_clipboard_paste(model);
+                Action::Continue
+            }
             ev @ AppEvent::BusLagged(n) => {
                 model.flash(&format!("bus lagged ({n} events) — rebuilding"));
                 model.update(ev)
@@ -316,7 +325,7 @@ async fn handle_event(
         }
         Action::Submit {
             agent_id,
-            text,
+            message,
             token,
         } => {
             bridge_model_session(model, session, tx).await;
@@ -338,7 +347,7 @@ async fn handle_event(
             // completed successfully. Subscribe before spawning the prompt.
             let tx2 = tx.clone();
             tokio::spawn(async move {
-                let res = agent.prompt(text, token, |_| {}).await;
+                let res = agent.prompt_message(message, token, |_| {}).await;
                 let _ = tx2.send(AppEvent::TurnDone(
                     res.map(|_| ()).map_err(|e| e.to_string()),
                 ));
@@ -348,6 +357,31 @@ async fn handle_event(
         Action::Continue => {}
     }
     Action::Continue
+}
+
+fn handle_clipboard_paste(model: &mut Model) {
+    match clipboard::read_clipboard_paste() {
+        Ok(clipboard::ClipboardPaste::Text(text)) => {
+            if text.chars().count() > composer::PASTE_BLOCK_THRESHOLD {
+                model.pastes.push(clipboard::into_stored_paste(
+                    clipboard::ClipboardPaste::Text(text),
+                ));
+                model.composer.insert_paste_block(model.pastes.len());
+            } else {
+                model.composer.insert_str(&text);
+            }
+            model.refresh_completion();
+        }
+        Ok(clipboard::ClipboardPaste::Image(image)) => {
+            model.pastes.push(clipboard::into_stored_paste(
+                clipboard::ClipboardPaste::Image(image),
+            ));
+            model.composer.insert_paste_block(model.pastes.len());
+            model.refresh_completion();
+            model.flash("pasted image from clipboard");
+        }
+        Err(error) => model.flash(&format!("paste failed: {error}")),
+    }
 }
 
 async fn bridge_model_session(

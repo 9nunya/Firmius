@@ -450,7 +450,7 @@ mod tests {
     #[test]
     fn table_has_one_row_per_command() {
         // One row per Command variant; /exit folds into /quit.
-        assert_eq!(table().len(), 13);
+        assert_eq!(table().len(), 14);
         let mut names: Vec<&str> = table().iter().map(|info| info.name).collect();
         names.sort_unstable();
         names.dedup();

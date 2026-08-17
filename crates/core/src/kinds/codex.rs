@@ -7,7 +7,7 @@ use crate::providers::schema::{ApiType, ProviderSchema};
 use crate::quota::{
     QuotaAuth, QuotaCapability, QuotaDescriptor, QuotaError, QuotaMeter, QuotaSnapshot, QuotaSource,
 };
-use crate::types::ModelInfo;
+use crate::types::{ModelCapability, ModelInfo};
 use crate::wizard::{Outcome, SetupWizard, Step, WizardError};
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -41,6 +41,7 @@ fn models() -> Vec<ModelInfo> {
         model("codex-auto-review", 272_000, 128_000),
     ];
     for info in &mut models {
+        info.capabilities.insert(ModelCapability::Image);
         info.effort_modes = match info.id.as_str() {
             "gpt-5.6-sol" | "gpt-5.6-terra" => {
                 effort_modes(&["low", "medium", "high", "xhigh", "max", "ultra"])

@@ -11,15 +11,15 @@ use crossterm::event::{
 };
 use firmius_core::{
     AccountRecord, Agent, AgentConfig, AgentError, AgentEvent, Context, EffortMode, FirmiusConfig,
-    MessagePart, MessageRole, PersonaManager, PersonaUse, ProviderManager, Session, SessionEvent,
-    ToolRegistry, UserSettings, list_sessions,
+    Message, MessagePart, MessageRole, ModelCapability, PersonaManager, PersonaUse,
+    ProviderManager, Session, SessionEvent, ToolRegistry, UserSettings, list_sessions,
 };
 use ratatui::text::Line;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use super::command;
-use super::composer::{Composer, PASTE_BLOCK_THRESHOLD};
+use super::composer::{Composer, ComposerSubmission, PASTE_BLOCK_THRESHOLD, StoredPaste};
 use super::event::AppEvent;
 use super::modal::ModalSurface;
 
@@ -103,6 +103,22 @@ fn effort_from_name(name: &str) -> EffortMode {
         thinking_budget_tokens: None,
         reasoning_effort: Some(name.to_string()),
     }
+}
+
+fn summarize_user_message(message: &Message) -> Option<String> {
+    let text = message
+        .content
+        .iter()
+        .filter_map(|part| match part {
+            MessagePart::Text(t) => Some(t.clone()),
+            MessagePart::Image(_) => Some("[image]".to_string()),
+            MessagePart::Thinking { .. }
+            | MessagePart::ToolCall { .. }
+            | MessagePart::ToolResult { .. } => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    (!text.is_empty()).then_some(text)
 }
 
 /// Fold one live agent event into a transcript.
@@ -286,16 +302,7 @@ pub fn items_from_history(history: &Context) -> Vec<Item> {
         match msg.role {
             MessageRole::System => {}
             MessageRole::User => {
-                let text: String = msg
-                    .content
-                    .iter()
-                    .filter_map(|p| match p {
-                        MessagePart::Text(t) => Some(t.as_str()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                if !text.is_empty() {
+                if let Some(text) = summarize_user_message(msg) {
                     items.push(Item::User(text));
                 }
             }
@@ -381,7 +388,7 @@ pub enum Action {
     /// (already stored in `Model.cancel` for Esc).
     Submit {
         agent_id: String,
-        text: String,
+        message: Message,
         token: CancellationToken,
     },
     /// Bus lagged: transcripts must be re-derived from histories (async).
@@ -433,7 +440,7 @@ pub struct Model {
     pub roster: Vec<(String, String)>,
     pub composer: Composer,
     /// Paste store; composer segments reference these by 1-based id.
-    pub pastes: Vec<String>,
+    pub pastes: Vec<StoredPaste>,
     pub busy: bool,
     pub active_agent_id: Option<String>,
     pub turn_started: Option<Instant>,
@@ -1197,7 +1204,7 @@ impl Model {
                 }
                 TermEvent::Paste(text) => {
                     if text.chars().count() > PASTE_BLOCK_THRESHOLD {
-                        self.pastes.push(text);
+                        self.pastes.push(StoredPaste::Text(text));
                         self.composer.insert_paste_block(self.pastes.len());
                     } else {
                         self.composer.insert_str(&text);
@@ -1342,34 +1349,66 @@ impl Model {
     }
 
     fn submit(&mut self) -> Action {
+        let Some(submission) = self.composer.submission(&self.pastes) else {
+            return Action::Continue;
+        };
         if self.busy {
-            let Some(text) = self.composer.take(&self.pastes) else {
-                return Action::Continue;
-            };
-            if text.starts_with('/') {
-                self.flash("commands wait until the turn finishes");
-            } else {
-                if let Some(agent) = self.agents.get(&self.focused_id) {
-                    agent.submit(text);
+            match submission {
+                ComposerSubmission::Text(text) if text.starts_with('/') => {
+                    self.flash("commands wait until the turn finishes");
+                }
+                ComposerSubmission::Text(text) => {
+                    self.composer.clear();
+                    if let Some(agent) = self.agents.get(&self.focused_id) {
+                        agent.submit(text);
+                    }
+                }
+                ComposerSubmission::Message(message) => {
+                    self.composer.clear();
+                    if let Some(agent) = self.agents.get(&self.focused_id) {
+                        agent.submit_message(message);
+                    }
                 }
             }
             return Action::Continue;
         }
-        let Some(text) = self.composer.take(&self.pastes) else {
-            return Action::Continue;
-        };
-        if text.starts_with('/') {
-            return self.run_command(&text);
+        if let ComposerSubmission::Text(text) = &submission
+            && text.starts_with('/')
+        {
+            self.composer.clear();
+            return self.run_command(text);
         }
         if let Err(e) = self.ensure_started() {
             self.flash(&e);
             return Action::Continue;
         }
+        let message = match submission {
+            ComposerSubmission::Text(text) => Message::text(MessageRole::User, text),
+            ComposerSubmission::Message(message) => message,
+        };
+        let has_image = message
+            .content
+            .iter()
+            .any(|part| matches!(part, MessagePart::Image(_)));
+        if has_image {
+            let (provider_id, model_id, _) = self.focused_model_status();
+            if !self.manager.lock().unwrap().model_supports(
+                &provider_id,
+                &model_id,
+                ModelCapability::Image,
+            ) {
+                self.flash("current model does not support image inputs");
+                return Action::Continue;
+            }
+        }
+        self.composer.clear();
         let agent_id = self.focused_id.clone();
-        self.transcripts
-            .entry(agent_id.clone())
-            .or_default()
-            .push(Item::User(text.clone()));
+        if let Some(summary) = summarize_user_message(&message) {
+            self.transcripts
+                .entry(agent_id.clone())
+                .or_default()
+                .push(Item::User(summary));
+        }
         self.clear_render_cache();
         self.busy = true;
         self.active_agent_id = Some(agent_id.clone());
@@ -1379,7 +1418,7 @@ impl Model {
         self.cancel = Some(token.clone());
         Action::Submit {
             agent_id,
-            text,
+            message,
             token,
         }
     }
@@ -1637,12 +1676,13 @@ mod tests {
         Action, CompletionItem, CompletionState, Item, Model, ToolState, Viewport, fold_event,
         fuzzy_score,
     };
-    use crate::tui::composer::Composer;
+    use crate::tui::composer::{Composer, ComposerSubmission, PastedImage, StoredPaste};
     use crate::tui::event::AppEvent;
     use crossterm::event::{Event as TermEvent, KeyCode, KeyEvent, KeyModifiers};
     use firmius_core::{
         AccountRecord, Agent, AgentConfig, AgentEvent, ApiType, CodexKind, EffortMode,
-        FirmiusConfig, PersonaManager, ProviderManager, ProviderSchema, ToolRegistry, UserSettings,
+        FirmiusConfig, Message, MessagePart, MessageRole, ModelCapabilities, ModelCapability,
+        ModelInfo, PersonaManager, ProviderManager, ProviderSchema, ToolRegistry, UserSettings,
     };
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -1669,7 +1709,29 @@ mod tests {
             api_type: ApiType::OpenAI,
             base_url: Some("http://localhost".into()),
             api_key_env: None,
-            models: Vec::new(),
+            models: vec![
+                ModelInfo {
+                    id: "text-only".into(),
+                    context_window: 128_000,
+                    max_output_tokens: Some(8_192),
+                    capabilities: ModelCapabilities::from([
+                        ModelCapability::Text,
+                        ModelCapability::ToolUse,
+                    ]),
+                    effort_modes: Vec::new(),
+                },
+                ModelInfo {
+                    id: "vision".into(),
+                    context_window: 128_000,
+                    max_output_tokens: Some(8_192),
+                    capabilities: ModelCapabilities::from([
+                        ModelCapability::Text,
+                        ModelCapability::Image,
+                        ModelCapability::ToolUse,
+                    ]),
+                    effort_modes: Vec::new(),
+                },
+            ],
         });
         manager.set_api_key("test-provider", "test-key");
         manager
@@ -2496,5 +2558,80 @@ mod tests {
             KeyModifiers::CONTROL,
         ))));
         assert_eq!(model.focused_id, "parent");
+    }
+
+    #[test]
+    fn image_submission_is_blocked_when_model_lacks_image_capability() {
+        let mut model = Model::new(
+            None,
+            None,
+            "test-provider".into(),
+            Arc::new(std::sync::Mutex::new(test_provider_manager())),
+            "text-only".into(),
+            Arc::new(ToolRegistry::default()),
+            Arc::new(PersonaManager::default()),
+            Arc::new(std::sync::Mutex::new(UserSettings::default())),
+            Arc::new(std::sync::Mutex::new(FirmiusConfig::default())),
+        );
+        model.composer.insert_paste_block(1);
+        model.pastes.push(StoredPaste::Image(PastedImage {
+            media_type: "image/png".into(),
+            data_base64: "Zm9v".into(),
+            width: 2,
+            height: 3,
+            bytes: 16,
+        }));
+
+        assert!(matches!(model.submit(), Action::Continue));
+        assert!(
+            model
+                .note
+                .as_ref()
+                .is_some_and(|(note, _)| note.contains("does not support image inputs"))
+        );
+        assert!(matches!(
+            model.composer.submission(&model.pastes),
+            Some(ComposerSubmission::Message(_))
+        ));
+    }
+
+    #[test]
+    fn image_submission_returns_message_action_for_image_capable_model() {
+        let mut model = Model::new(
+            None,
+            None,
+            "test-provider".into(),
+            Arc::new(std::sync::Mutex::new(test_provider_manager())),
+            "vision".into(),
+            Arc::new(ToolRegistry::default()),
+            Arc::new(PersonaManager::default()),
+            Arc::new(std::sync::Mutex::new(UserSettings::default())),
+            Arc::new(std::sync::Mutex::new(FirmiusConfig::default())),
+        );
+        model.composer.insert_str("look");
+        model.pastes.push(StoredPaste::Image(PastedImage {
+            media_type: "image/png".into(),
+            data_base64: "Zm9v".into(),
+            width: 2,
+            height: 3,
+            bytes: 16,
+        }));
+        model.composer.insert_paste_block(1);
+
+        let action = model.submit();
+        let Action::Submit { message, .. } = action else {
+            panic!("expected submit action")
+        };
+        assert_eq!(message.role, MessageRole::User);
+        assert_eq!(
+            message,
+            Message::with_parts(
+                MessageRole::User,
+                [
+                    MessagePart::Text("look".into()),
+                    MessagePart::Image(firmius_core::ImagePart::from_base64("image/png", "Zm9v")),
+                ],
+            )
+        );
     }
 }

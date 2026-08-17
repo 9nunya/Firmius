@@ -1,3 +1,4 @@
+use crate::FirmiusConfig;
 use crate::host::{Host, LocalHost};
 use crate::persona::{PersonaError, PersonaManager};
 use crate::providers::{Provider, ProviderError, ProviderEvent, manager::ProviderManager};
@@ -7,7 +8,6 @@ use crate::types::{
     Context, EffortMode, Message, MessagePart, MessageRole, ProviderRequest, StopReason, Usage,
     repair_dangling_tool_calls, validate_context,
 };
-use crate::FirmiusConfig;
 use futures::StreamExt;
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
@@ -164,7 +164,7 @@ pub struct Agent {
     /// User messages submitted while this agent is busy. The queue is owned by
     /// the agent so submissions never race with trajectory mutation and are
     /// retained when a turn is cancelled.
-    mailbox: std::sync::Mutex<VecDeque<String>>,
+    mailbox: std::sync::Mutex<VecDeque<Message>>,
 }
 
 /// Streamed observation of what the agent is doing, for a UI/CLI to render.
@@ -383,17 +383,26 @@ impl Agent {
     /// provider turn. Submissions are always accepted, including during
     /// cancellation, so callers can retry or resume the queued work.
     pub fn submit(&self, message: impl Into<String>) {
-        self.mailbox.lock().unwrap().push_back(message.into());
+        self.submit_message(Message::text(MessageRole::User, message.into()));
+    }
+
+    pub fn submit_message(&self, message: Message) {
+        self.mailbox.lock().unwrap().push_back(message);
     }
 
     /// Snapshot pending user messages for presentation by interactive clients.
     pub fn pending_messages(&self) -> Vec<String> {
-        self.mailbox.lock().unwrap().iter().cloned().collect()
+        self.mailbox
+            .lock()
+            .unwrap()
+            .iter()
+            .map(render_user_message)
+            .collect()
     }
 
     /// Atomically remove all currently pending messages. Messages submitted
     /// after the lock is released remain queued for the following turn.
-    fn drain_mailbox(&self) -> Vec<String> {
+    fn drain_mailbox(&self) -> Vec<Message> {
         self.mailbox.lock().unwrap().drain(..).collect()
     }
 
@@ -563,6 +572,20 @@ impl Agent {
         &self,
         user_input: impl Into<String>,
         cancellation: CancellationToken,
+        observer: impl FnMut(AgentEvent),
+    ) -> Result<String, AgentError> {
+        self.prompt_message(
+            Message::text(MessageRole::User, user_input.into()),
+            cancellation,
+            observer,
+        )
+        .await
+    }
+
+    pub async fn prompt_message(
+        &self,
+        user_message: Message,
+        cancellation: CancellationToken,
         mut observer: impl FnMut(AgentEvent),
     ) -> Result<String, AgentError> {
         // Serialize turns on this agent; this same guard is what the
@@ -585,7 +608,7 @@ impl Agent {
         if cancellation.is_cancelled() {
             return Err(AgentError::Cancelled(String::new()));
         }
-        self.submit(user_input);
+        self.submit_message(user_message);
         let mut initial_submission = true;
 
         // Config can't change while we hold `busy`, so the snapshot above is
@@ -616,12 +639,11 @@ impl Agent {
                 let mut state = self.state.write().unwrap();
                 let injected = pending.len().saturating_sub(initial_submission as usize);
                 for (index, message) in pending.into_iter().enumerate() {
+                    let rendered = render_user_message(&message);
                     if !initial_submission || index < injected {
-                        emit(AgentEvent::UserMessage(message.clone()));
+                        emit(AgentEvent::UserMessage(rendered));
                     }
-                    state
-                        .history
-                        .push(Message::text(MessageRole::User, message));
+                    state.history.push(message);
                 }
                 initial_submission = false;
             }
@@ -666,10 +688,8 @@ impl Agent {
                 if !pending.is_empty() {
                     let mut state = self.state.write().unwrap();
                     for message in pending {
-                        emit(AgentEvent::UserMessage(message.clone()));
-                        state
-                            .history
-                            .push(Message::text(MessageRole::User, message));
+                        emit(AgentEvent::UserMessage(render_user_message(&message)));
+                        state.history.push(message);
                     }
                     continue;
                 }
@@ -774,15 +794,16 @@ impl Agent {
                 result = current_provider.stream(request.clone()) => result,
             } {
                 Ok(stream) => stream,
-                Err(error) => match self.retry_on_failure(
-                    &mut controller,
-                    &mut current_provider,
-                    &mut current_provider_id,
-                    error,
-                    cancellation,
-                    observer,
-                )
-                .await?
+                Err(error) => match self
+                    .retry_on_failure(
+                        &mut controller,
+                        &mut current_provider,
+                        &mut current_provider_id,
+                        error,
+                        cancellation,
+                        observer,
+                    )
+                    .await?
                 {
                     RetryLoop::Continue => continue 'attempt,
                     RetryLoop::Stop(error) => return Err(AgentError::Provider(error)),
@@ -944,6 +965,21 @@ impl Agent {
     }
 }
 
+fn render_user_message(message: &Message) -> String {
+    message
+        .content
+        .iter()
+        .filter_map(|part| match part {
+            MessagePart::Text(text) => Some(text.clone()),
+            MessagePart::Image(_) => Some("[image]".to_string()),
+            MessagePart::Thinking { .. }
+            | MessagePart::ToolCall { .. }
+            | MessagePart::ToolResult { .. } => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 struct RetryRuntime {
     config: crate::config::RetryConfig,
     accounts: Vec<String>,
@@ -1102,9 +1138,7 @@ mod tests {
                 });
             }
             Ok(futures::stream::iter([
-                Ok(ProviderEvent::TextDelta {
-                    delta: "ok".into(),
-                }),
+                Ok(ProviderEvent::TextDelta { delta: "ok".into() }),
                 Ok(ProviderEvent::Done {
                     reason: StopReason::Stop,
                 }),
@@ -1439,7 +1473,14 @@ mod tests {
         let result = runtime.block_on(agent.prompt("ignored", cancellation, |_| {}));
         assert!(matches!(result, Err(AgentError::Cancelled(_))));
         assert_eq!(agent.mailbox_len(), 3);
-        assert_eq!(agent.drain_mailbox(), ["first", "second", "third"]);
+        assert_eq!(
+            agent.drain_mailbox(),
+            vec![
+                Message::text(MessageRole::User, "first"),
+                Message::text(MessageRole::User, "second"),
+                Message::text(MessageRole::User, "third"),
+            ]
+        );
     }
 
     #[tokio::test]
@@ -1519,8 +1560,10 @@ mod tests {
                 ..
             } if account_id == "flaky"
         )));
-        assert!(events
-            .iter()
-            .any(|event| matches!(event, AgentEvent::Text(text) if text == "ok")));
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::Text(text) if text == "ok"))
+        );
     }
 }

@@ -15,3 +15,6 @@ crossterm = "0.29.0"
 tui-markdown = "0.3.9"
 unicode-width = "0.2"
 syntect = "5"
+base64.workspace = true
+arboard = "3.6"
+image = { version = "0.25", default-features = false, features = ["png"] }

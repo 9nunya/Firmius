@@ -7,7 +7,7 @@ use crate::providers::{AnthropicProvider, TokenSupplier};
 use crate::quota::{
     QuotaAuth, QuotaCapability, QuotaDescriptor, QuotaError, QuotaMeter, QuotaSnapshot, QuotaSource,
 };
-use crate::types::ModelInfo;
+use crate::types::{ModelCapability, ModelInfo};
 use crate::wizard::{Outcome, SetupWizard, Step, WizardError};
 use crate::{Provider, ProviderError};
 use async_trait::async_trait;
@@ -42,6 +42,7 @@ fn models() -> Vec<ModelInfo> {
         model("claude-fable-5", 1_000_000, 64_000),
     ];
     for info in &mut models {
+        info.capabilities.insert(ModelCapability::Image);
         info.effort_modes = effort_modes(&["low", "medium", "high", "xhigh", "max"]);
     }
     models

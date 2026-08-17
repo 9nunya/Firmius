@@ -19,7 +19,7 @@ use ratatui::widgets::{Block, BorderType, Paragraph};
 use std::process::Command as ProcessCommand;
 use std::sync::Arc;
 
-use super::composer::Composer;
+use super::composer::{Composer, ComposerSubmission};
 use super::model::Action;
 use super::present;
 use super::settings::{Field, FieldValue, SettingsSection};
@@ -272,7 +272,10 @@ impl ModalSurface for WizardModal {
                     self.submit(value).await
                 }
                 Step::Prompt { .. } => {
-                    let text = self.input.take(&[]).unwrap_or_default();
+                    let text = match self.input.take_submission(&[]) {
+                        Some(ComposerSubmission::Text(text)) => text,
+                        Some(ComposerSubmission::Message(_)) | None => String::new(),
+                    };
                     self.submit(text).await
                 }
                 Step::OpenUrl { .. } => {
@@ -1562,7 +1565,12 @@ mod tests {
         let shared = Arc::new(std::sync::Mutex::new(
             FirmiusConfig::load_from_path(&path).unwrap(),
         ));
-        let baseline = shared.lock().unwrap().retry.default.max_attempts_per_account;
+        let baseline = shared
+            .lock()
+            .unwrap()
+            .retry
+            .default
+            .max_attempts_per_account;
 
         let sections: Vec<Box<dyn SettingsSection>> = vec![
             Box::new(RetrySection::new(vec!["anthropic".to_string()])),
@@ -1580,12 +1588,20 @@ mod tests {
 
         // Auto-save: the shared handle sees the new value immediately, with no
         // explicit save keystroke.
-        let published = shared.lock().unwrap().retry.default.max_attempts_per_account;
+        let published = shared
+            .lock()
+            .unwrap()
+            .retry
+            .default
+            .max_attempts_per_account;
         assert_eq!(published, baseline + 1);
 
         // And it is durable: reloading from disk shows the same value.
         let reloaded = FirmiusConfig::load_from_path(&path).unwrap();
-        assert_eq!(reloaded.retry.default.max_attempts_per_account, baseline + 1);
+        assert_eq!(
+            reloaded.retry.default.max_attempts_per_account,
+            baseline + 1
+        );
 
         // Tab switches to the General section and edits a different config group.
         assert!(matches!(
@@ -1597,10 +1613,7 @@ mod tests {
         // ("Show thinking") and flip it.
         modal.key(key(KeyCode::Down)).await;
         modal.key(key(KeyCode::Right)).await;
-        assert_eq!(
-            shared.lock().unwrap().general.show_thinking,
-            !show_thinking
-        );
+        assert_eq!(shared.lock().unwrap().general.show_thinking, !show_thinking);
 
         assert!(matches!(
             modal.key(key(KeyCode::Esc)).await,

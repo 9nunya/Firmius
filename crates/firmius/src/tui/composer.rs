@@ -23,9 +23,32 @@
 //!   from the same row layout.
 
 use std::cell::RefCell;
+
+use firmius_core::{ImagePart, Message, MessagePart, MessageRole};
 use unicode_width::UnicodeWidthChar;
 
 pub const PASTE_BLOCK_THRESHOLD: usize = 120;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PastedImage {
+    pub media_type: String,
+    pub data_base64: String,
+    pub width: usize,
+    pub height: usize,
+    pub bytes: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StoredPaste {
+    Text(String),
+    Image(PastedImage),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ComposerSubmission {
+    Text(String),
+    Message(Message),
+}
 
 #[derive(Debug, Clone)]
 pub enum Segment {
@@ -344,15 +367,12 @@ impl Composer {
 
     /// Expand the current composer contents without clearing it. Paste blocks
     /// are replaced by their stored text, matching what submission sends.
-    pub fn text(&self, pastes: &[String]) -> String {
+    pub fn text(&self, pastes: &[StoredPaste]) -> String {
         self.segments
             .iter()
             .map(|segment| match segment {
                 Segment::Text(text) => text.clone(),
-                Segment::Paste(id) => pastes
-                    .get(id.saturating_sub(1))
-                    .cloned()
-                    .unwrap_or_default(),
+                Segment::Paste(id) => Self::display_text(*id, pastes),
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -371,55 +391,112 @@ impl Composer {
 
     /// Display lines: text as-is, paste blocks as their placeholder label.
     /// Refreshes the row cache used by the line-aware movement methods.
-    pub fn lines(&self, pastes: &[String]) -> Vec<String> {
+    pub fn lines(&self, pastes: &[StoredPaste]) -> Vec<String> {
         self.lines_with_width(pastes, usize::MAX)
     }
 
     /// Display lines wrapped to the available terminal width.
-    pub fn lines_with_width(&self, pastes: &[String], width: usize) -> Vec<String> {
+    pub fn lines_with_width(&self, pastes: &[StoredPaste], width: usize) -> Vec<String> {
         let rows = self.build_rows(pastes, width);
         *self.rows_cache.borrow_mut() = rows.clone();
         rows.into_iter().map(|r| r.text).collect()
     }
 
-    /// Submit: expand paste blocks back to their stored content. Returns
-    /// `None` when there's nothing but whitespace. Clears the composer.
-    pub fn take(&mut self, pastes: &[String]) -> Option<String> {
+    pub fn submission(&self, pastes: &[StoredPaste]) -> Option<ComposerSubmission> {
         if self.is_empty() {
             return None;
         }
-        let parts: Vec<String> = self
-            .segments
-            .iter()
-            .map(|s| match s {
-                Segment::Text(t) => t.clone(),
-                Segment::Paste(id) => pastes.get(id - 1).cloned().unwrap_or_default(),
-            })
-            .filter(|p| !p.is_empty())
-            .collect();
+
+        let mut plain_parts = Vec::new();
+        let mut message_parts = Vec::new();
+        let mut saw_image = false;
+        for segment in &self.segments {
+            match segment {
+                Segment::Text(text) if !text.is_empty() => {
+                    plain_parts.push(text.clone());
+                    message_parts.push(MessagePart::Text(text.clone()));
+                }
+                Segment::Text(_) => {}
+                Segment::Paste(id) => match pastes.get(id.saturating_sub(1)) {
+                    Some(StoredPaste::Text(text)) if !text.is_empty() => {
+                        plain_parts.push(text.clone());
+                        message_parts.push(MessagePart::Text(text.clone()));
+                    }
+                    Some(StoredPaste::Image(image)) => {
+                        saw_image = true;
+                        message_parts.push(MessagePart::Image(ImagePart::from_base64(
+                            image.media_type.clone(),
+                            image.data_base64.clone(),
+                        )));
+                    }
+                    _ => {}
+                },
+            }
+        }
+
+        if !saw_image {
+            let text = plain_parts.join("\n");
+            if text.trim().is_empty() {
+                return None;
+            }
+            return Some(ComposerSubmission::Text(text));
+        }
+
+        if message_parts.is_empty() {
+            return None;
+        }
+        Some(ComposerSubmission::Message(Message::with_parts(
+            MessageRole::User,
+            message_parts,
+        )))
+    }
+
+    /// Submit: expand paste blocks back to their stored content. Returns
+    /// `None` when there's nothing but whitespace. Clears the composer.
+    pub fn take_submission(&mut self, pastes: &[StoredPaste]) -> Option<ComposerSubmission> {
+        let submission = self.submission(pastes)?;
         self.clear();
-        Some(parts.join("\n"))
+        Some(submission)
     }
 
     /// Cursor position in display coordinates, for the terminal cursor.
     /// Agrees with `lines()` — both derive from the same row layout.
-    pub fn cursor_pos(&self, pastes: &[String]) -> (usize, usize) {
+    pub fn cursor_pos(&self, pastes: &[StoredPaste]) -> (usize, usize) {
         self.cursor_pos_with_width(pastes, usize::MAX)
     }
 
-    pub fn cursor_pos_with_width(&self, pastes: &[String], width: usize) -> (usize, usize) {
+    pub fn cursor_pos_with_width(&self, pastes: &[StoredPaste], width: usize) -> (usize, usize) {
         let rows = self.build_rows(pastes, width);
         *self.rows_cache.borrow_mut() = rows.clone();
         self.locate_cursor(&rows)
     }
 
-    fn placeholder(id: usize, pastes: &[String]) -> String {
-        let content = pastes.get(id - 1).map(String::as_str).unwrap_or("");
-        let n = content.lines().count();
-        format!("[Pasted text #{id} +{n} lines]")
+    fn display_text(id: usize, pastes: &[StoredPaste]) -> String {
+        match pastes.get(id.saturating_sub(1)) {
+            Some(StoredPaste::Text(text)) => text.clone(),
+            Some(StoredPaste::Image(image)) => format!(
+                "[Pasted image #{id} {}x{} {}]",
+                image.width, image.height, image.media_type
+            ),
+            None => String::new(),
+        }
     }
 
-    fn build_rows(&self, pastes: &[String], width: usize) -> Vec<Row> {
+    fn placeholder(id: usize, pastes: &[StoredPaste]) -> String {
+        match pastes.get(id.saturating_sub(1)) {
+            Some(StoredPaste::Text(content)) => {
+                let n = content.lines().count();
+                format!("[Pasted text #{id} +{n} lines]")
+            }
+            Some(StoredPaste::Image(image)) => format!(
+                "[Pasted image #{id} {}x{} {} · {} bytes]",
+                image.width, image.height, image.media_type, image.bytes
+            ),
+            None => format!("[Missing paste #{id}]"),
+        }
+    }
+
+    fn build_rows(&self, pastes: &[StoredPaste], width: usize) -> Vec<Row> {
         if self.segments.is_empty() {
             return vec![Row {
                 seg: 0,
@@ -509,7 +586,7 @@ fn wrap_line(line: &str, width: usize) -> Vec<String> {
 #[cfg(test)]
 impl Composer {
     /// Test helper: refresh the layout cache then move to the start.
-    fn home_refresh(&mut self, pastes: &[String]) {
+    fn home_refresh(&mut self, pastes: &[StoredPaste]) {
         self.lines(pastes);
         self.cursor = (0, 0);
     }
@@ -519,10 +596,17 @@ impl Composer {
 mod tests {
     use super::*;
 
-    fn store() -> Vec<String> {
+    fn store() -> Vec<StoredPaste> {
         vec![
-            "line one\nline two\nline three".to_string(),
-            "short paste".to_string(),
+            StoredPaste::Text("line one\nline two\nline three".to_string()),
+            StoredPaste::Text("short paste".to_string()),
+            StoredPaste::Image(PastedImage {
+                media_type: "image/png".to_string(),
+                data_base64: "Zm9v".to_string(),
+                width: 2,
+                height: 3,
+                bytes: 16,
+            }),
         ]
     }
 
@@ -531,8 +615,8 @@ mod tests {
         let mut c = Composer::new();
         c.insert_str("héllo 🚀");
         c.backspace();
-        let out = c.take(&[]).unwrap();
-        assert_eq!(out, "héllo ");
+        let out = c.take_submission(&[]).unwrap();
+        assert_eq!(out, ComposerSubmission::Text("héllo ".into()));
     }
 
     #[test]
@@ -598,19 +682,22 @@ mod tests {
         c.insert_str("pre\n");
         c.insert_paste_block(1);
         c.insert_str("\npost");
-        let out = c.take(&pastes).unwrap();
+        let out = c.take_submission(&pastes).unwrap();
+        let ComposerSubmission::Text(out) = out else {
+            panic!("expected text submission")
+        };
         assert!(out.starts_with("pre\n"));
         assert!(out.contains("line one\nline two\nline three"));
         assert!(out.ends_with("post"));
         assert!(c.is_empty());
-        assert!(c.take(&pastes).is_none());
+        assert!(c.take_submission(&pastes).is_none());
     }
 
     #[test]
     fn whitespace_only_is_none() {
         let mut c = Composer::new();
         c.insert_str("   \n  ");
-        assert!(c.take(&[]).is_none());
+        assert!(c.take_submission(&[]).is_none());
     }
 
     #[test]
@@ -701,8 +788,11 @@ mod tests {
         assert_eq!(lines[0], "abc");
         assert!(lines[1].starts_with("[Pasted text #2"));
         assert_eq!(lines[2], "def");
-        let out = c.take(&pastes).unwrap();
-        assert_eq!(out, "abc\nshort paste\ndef");
+        let out = c.take_submission(&pastes).unwrap();
+        assert_eq!(
+            out,
+            ComposerSubmission::Text("abc\nshort paste\ndef".into())
+        );
     }
 
     #[test]
@@ -711,5 +801,22 @@ mod tests {
         c.insert_str("abcdefgh");
         assert_eq!(c.lines_with_width(&[], 3), ["abc", "def", "gh"]);
         assert_eq!(c.cursor_pos_with_width(&[], 3), (2, 2));
+    }
+
+    #[test]
+    fn image_paste_renders_image_placeholder_and_submits_message_parts() {
+        let mut c = Composer::new();
+        let pastes = store();
+        c.insert_str("describe this");
+        c.insert_paste_block(3);
+        let lines = c.lines(&pastes);
+        assert!(lines[1].contains("Pasted image #3"));
+        let submission = c.take_submission(&pastes).unwrap();
+        let ComposerSubmission::Message(message) = submission else {
+            panic!("expected message submission")
+        };
+        assert_eq!(message.role, MessageRole::User);
+        assert!(matches!(message.content[0], MessagePart::Text(ref t) if t == "describe this"));
+        assert!(matches!(message.content[1], MessagePart::Image(_)));
     }
 }
